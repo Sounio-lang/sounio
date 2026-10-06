@@ -819,13 +819,57 @@ fn refine_static_env_gather(env: RefineStaticEnv, target_var: Name) -> (bool, Re
 //   1 = StaticProved   — proved without Z3
 //   2 = StaticViolated — definitely violated (compile-time error)
 
-fn refine_static_result_unknown() -> i64 { 0 }
+pub fn refine_static_result_unknown() -> i64 { 0 }
 pub fn refine_static_result_proved() -> i64 { 1 }
-fn refine_static_result_violated() -> i64 { 2 }
+pub fn refine_static_result_violated() -> i64 { 2 }
+
+// Is this predicate one the static checker can actually EVALUATE?
+//
+// A leaf is evaluable when its operator is one of the six comparisons. A
+// conjunction or disjunction is evaluable when both of its children exist and
+// are themselves evaluable. Anything else -- most importantly a predicate the
+// builder could not represent, which arrives with op = none -- is not.
+//
+// This exists because the literal checks below used to be BINARY: predicate
+// holds, or predicate is violated. A predicate that could not be evaluated at
+// all took the second branch, so `pred_check_cmp_int` falling through to
+// `false` on an unrecognised operator was reported to the user as a PROVEN
+// VIOLATION. Measured: `{ n: i32 | n * 2 < 200 }` is rejected for the argument
+// 42, and for 1, and for 500 -- every value, because the coefficient on `n`
+// has no place in RefinementPred and the whole predicate degrades to op=none.
+// tests/run-pass/refinement_nested_arithmetic is that, and it fails on the
+// committed baseline too.
+//
+// Absence of proof reported as proof of absence is the exact error this
+// language exists to prevent, sitting in its own refinement checker. The
+// three-state vocabulary was already here -- StaticUnknown is documented
+// directly above and used by refine_static_check_var -- and only the literal
+// path ignored it.
+pub fn pred_is_evaluable(pred: RefinementPred) -> bool with Mut, Panic, Div {
+    if pred.op == refinement_op_and() || pred.op == refinement_op_or() {
+        let left_ok = match pred.left {
+            Some(l) => pred_is_evaluable(*l)
+            None => false
+        }
+        if !left_ok { return false }
+        match pred.right {
+            Some(r) => pred_is_evaluable(*r)
+            None => false
+        }
+    } else {
+        pred.op == refinement_op_gt() || pred.op == refinement_op_gt_eq()
+        || pred.op == refinement_op_lt() || pred.op == refinement_op_lt_eq()
+        || pred.op == refinement_op_eq() || pred.op == refinement_op_neq()
+    }
+}
 
 // Check whether a known integer literal `val` satisfies `pred`.
-// Returns StaticProved or StaticViolated.
+// Returns StaticProved, StaticViolated, or StaticUnknown -- the last when the
+// predicate is not one this checker can evaluate.
 pub fn refine_static_check_int_literal(pred: RefinementPred, val: i64) -> i64 with Mut, Panic, Div {
+    if !pred_is_evaluable(pred) {
+        return refine_static_result_unknown()
+    }
     if pred_check_int(pred, val) {
         refine_static_result_proved()
     } else {
@@ -834,7 +878,11 @@ pub fn refine_static_check_int_literal(pred: RefinementPred, val: i64) -> i64 wi
 }
 
 // Check whether a known float literal `val` satisfies `pred`.
+// Returns StaticProved, StaticViolated, or StaticUnknown.
 pub fn refine_static_check_float_literal(pred: RefinementPred, val: f64) -> i64 with Mut, Panic, Div {
+    if !pred_is_evaluable(pred) {
+        return refine_static_result_unknown()
+    }
     if pred_check_float(pred, val) {
         refine_static_result_proved()
     } else {

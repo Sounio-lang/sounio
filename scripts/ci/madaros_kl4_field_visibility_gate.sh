@@ -34,6 +34,27 @@ impl Capsule {
         self.hidden
     }
 }
+
+// Exercise same-module privacy outside an impl, in an imported module.
+// This covers literals, reads, writes and access through an immutable ref.
+pub fn local_roundtrip() -> i64 with Mut {
+    var c = Capsule { visible: 1, hidden: 2 }
+    c.hidden = 7
+    read_local(&c) + c.hidden
+}
+
+fn read_local(c: &Capsule) -> i64 {
+    c.hidden
+}
+SIO
+
+cat >"$WORK/same-module.sio" <<'SIO'
+use kl4_gate_lib::{local_roundtrip}
+fn main() -> i32 with IO, Mut {
+    if local_roundtrip() != 14 { return 1 }
+    println("KL4_SAME_MODULE_FIELDS_OK")
+    0
+}
 SIO
 
 cat >"$WORK/read.sio" <<'SIO'
@@ -83,6 +104,24 @@ expect_e259() {
   }
   echo "PASS $label=E259"
 }
+
+SAME_LOG="$WORK/same-module.log"
+MADAROS_RAW_BIN="$RAW" "$SOUC" check "$WORK/same-module.sio" >"$SAME_LOG" 2>&1 || {
+  cat "$SAME_LOG"
+  echo "FAIL: same-module private fields rejected" >&2
+  exit 1
+}
+MADAROS_RAW_BIN="$RAW" "$SOUC" run "$WORK/same-module.sio" >"$SAME_LOG" 2>&1 || {
+  cat "$SAME_LOG"
+  echo "FAIL: same-module private field runtime" >&2
+  exit 1
+}
+grep -Fxq 'KL4_SAME_MODULE_FIELDS_OK' "$SAME_LOG" || {
+  cat "$SAME_LOG"
+  echo "FAIL: same-module witness lacked exact sentinel" >&2
+  exit 1
+}
+echo "PASS same-module-literal-read-store-ref=KL4_SAME_MODULE_FIELDS_OK"
 
 expect_e259 read "$WORK/read.sio"
 expect_e259 store "$WORK/store.sio"

@@ -321,6 +321,22 @@ pub struct Checker {
     pub enforce_visibility: bool,
     pub current_return_type: TypeEntry,
     pub current_impl_type: TypeEntry,
+    // Type parameters of the declaration whose types are being lowered right
+    // now. Consulted by the unit branch of checker_lower_named_type_mut so a
+    // generic parameter is never mistaken for a unit of measure: `K` is both
+    // the conventional second generic name and the SI symbol for kelvin, and
+    // `struct Map<K, V>` broke the moment units were wired up.
+    pub current_type_params: TypeParamBuf,
+    // Spans already warned with W046, so one declaration produces one notice.
+    // Without this the warning fires once per LOWERING of the type, and a
+    // refined parameter is lowered while collecting the signature and again
+    // while checking the body -- measured at three identical W046 for a single
+    // declaration. A diagnostic that repeats trains its reader to skip it.
+    // Overflow past 64 distinct spans means later ones may repeat; that is a
+    // capacity limit, stated, not a silent cap.
+    pub w046_files: [i64; 64],
+    pub w046_starts: [i64; 64],
+    pub w046_count: i64,
     pub current_effects: [i64; 8],
     pub current_effect_count: i64,
     // Which function is being checked. current_module was already tracked (it is
@@ -1356,6 +1372,10 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         enforce_visibility: true,
         current_return_type: ty_unit(),
         current_impl_type: ty_error(),
+        w046_files: [0 - 1; 64],
+        w046_starts: [0 - 1; 64],
+        w046_count: 0,
+        current_type_params: empty_type_param_buf(),
         current_effects: [0; 8],
         current_effect_count: 0,
         current_fn_name: empty_name(),
@@ -1408,6 +1428,11 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
 }
 
 pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
+    // Fresh per Checker instance -- every entry point that allocates one
+    // (check_modules_verdict_boot4_with_visibility et al.) calls this once
+    // before its own collect-items pass, so this is the correct, single
+    // reset point for CHECKER_USE_MODULE_HASH (see its own comment).
+    checker_use_module_reset()
     (*raw).env = type_env_new()
     (*raw).borrows = borrow_env_new()
     (*raw).units = register_builtin_units(unit_registry_new())
@@ -1632,7 +1657,7 @@ fn checker_note_type_error_mut(c: *mut Checker) with Mut {
 // Emit a fallback diagnostic when had_error was recorded without printing.
 // Boot4/modular path uses checker_check_items_inplace which notes errors via
 // checker_note_type_error_mut without emitting; this closes the silent gap.
-fn checker_flush_unemitted_type_errors_mut(c: *mut Checker) with Mut, IO {
+pub fn checker_flush_unemitted_type_errors_mut(c: *mut Checker) with Mut, IO {
     if (*c).had_error && !(*c).diag_emitted {
         print("error[E000]: type checking failed\n")
         (*c).diag_emitted = true
@@ -1700,7 +1725,41 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
         ty_wide_int(name_wide_int_bits(name), (name.buf[0] as i64) == 105)
     } else if name_is_dsep_proof(name) {
         ty_dsep_proof()
+    } else if checker_name_is_type_param_in_scope(c, name) {
+        // A generic parameter shadows a unit of measure. Without this, wiring
+        // units up turned `struct Map<K, V>` into a struct whose first field
+        // is an f64 in kelvin -- K is the SI symbol for kelvin as well as the
+        // conventional second generic name, and the unit branch below fired
+        // first. Measured: tests/run-pass/generic_struct_instantiate.sio went
+        // from passing to "expected f64, found i64", the single regression in
+        // a 1928-fixture sweep.
+        ty_named(name)
     } else {
+        // ONE registry lookup, bound to a local, mirroring the by-value spine.
+        let uidx = checker_unit_index_for(c, name)
+        if uidx >= 0 {
+        // UNITS OF MEASURE, ported here 2026-09-09 from the by-value spine
+        // (lower_named_type), which has had this branch all along.
+        //
+        // This function is the *mut transcription, and it is the one the
+        // modular compiler actually calls. Without this branch a declared
+        // unit name fell through to env.lookup and then to ty_named, so
+        // `unit dosage;` followed by `let x: dosage = 42.0` compared a
+        // TyNamed annotation against an f64 initialiser and reported
+        // "expected dosage, found f64". Everything downstream of that --
+        // the unit registry, unit_dim_mul/unit_dim_div, the add/sub
+        // matching rule in check_binary_units, the conversion-compatibility
+        // check in check_cast_expr -- was live code reachable only through
+        // the by-value spine, and therefore dead on the default engine.
+        //
+        // Measured before the fix: 11 of the 14 unit fixtures in
+        // tests/run-pass/ failed to type-check on Madaros and all 14 passed
+        // on lean_single; the 3 that passed do not use a unit type in a
+        // binding (units.sio says in its own header "full units not yet
+        // implemented"). Confirmed by instrumenting a source build: neither
+        // collect_unit_decl nor the by-value units branch was ever reached.
+        ty_with_unit(ty_f64(), uidx)
+        } else {
         let bound_ty = (*c).env.lookup(name)
         // A type-position name resolves against the VALUE environment first so
         // that type aliases and ontology bindings win. But `use m::{S}` binds
@@ -1731,6 +1790,7 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
             bound_ty
         } else {
             ty_named(name)
+        }
         }
     }
 }
@@ -1844,6 +1904,24 @@ fn invariant_framed_named_type(rank: i64, frame: Name, inner_ty: TypeEntry) -> T
 
 fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_args: Option<Box<TypeExprList> >, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let name = checker_copy_string_list_to_name(path.segments)
+    // KL-13b: `f64<m/s>` / `f64<mol/cm3>` — UnitExpr in the single type argument.
+    if name_is_f64(name) {
+        match type_args {
+            Some(args) => {
+                match (*args).tail {
+                    None => {
+                        let dim = checker_unit_dim_from_type_expr((*c).units, (*args).head)
+                        return checker_ty_from_unit_dim(c, dim)
+                    }
+                    Some(_) => {
+                        checker_note_type_error_mut(c)
+                        return ty_error()
+                    }
+                }
+            }
+            None => return ty_f64()
+        }
+    }
     // ZD surgical family. The *mut match on TypeExprKind maps every
     // discriminant onto TypeNamed, so ExactlyPrivate<T> arrives here as a
     // name + type_args, the same way Seq and Hyper already do. Interrogate
@@ -2474,7 +2552,7 @@ fn checker_refinement_pred_from_info(ri: RefinementInfo) -> RefinementPred with 
     }
 }
 
-fn checker_lower_refinement_type_mut(c: *mut Checker, opt: Option<Box<RefinementInfo> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+fn checker_lower_refinement_type_mut(c: *mut Checker, opt: Option<Box<RefinementInfo> >, decl_span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(info) => {
             let ri = *info
@@ -2482,13 +2560,82 @@ fn checker_lower_refinement_type_mut(c: *mut Checker, opt: Option<Box<Refinement
                 Some(bte) => {
                     let base_ty = checker_lower_type_expr_mut(c, *bte)
                     if ri.pred_op > 0 {
+                        // The author is told at the DECLARATION whenever any
+                        // part of the predicate is unrepresentable, not only when
+                        // ALL of it is. A conjunction whose first operator parses
+                        // and whose second does not -- `n > 0 && n * 2 < 200` --
+                        // registers here and used to reach the author only as a
+                        // W040 at each CALL SITE, which is the wrong audience: a
+                        // caller cannot rewrite someone else's predicate.
+                        //
+                        // Measured before this: f(0) violating n > 0 and f(500)
+                        // violating n * 2 < 200 both produced W040 and neither
+                        // produced E042, so the conjunction is declined WHOLE and
+                        // is not silently enforcing only its representable half.
+                        // Conservative, and worth saying out loud at the source.
                         let pred = checker_refinement_pred_from_info(ri)
                         let rt = RefinementType { base_type: base_ty, var_name: ri.var_name, predicate: pred }
                         let synth_name = make_refinement_synth_name((*c).refinements.count)
                         (*c).refinements = refinement_table_add((*c).refinements, synth_name, rt)
                         let ref_idx = (*c).refinements.count - 1
+                        if !pred_is_evaluable(pred) {
+                            var seen2 = false
+                            var wj: i64 = 0
+                            while wj < (*c).w046_count && wj < 64 {
+                                if (*c).w046_files[wj as usize] == decl_span.file_id
+                                && (*c).w046_starts[wj as usize] == decl_span.start {
+                                    seen2 = true
+                                }
+                                wj = wj + 1
+                            }
+                            if !seen2 {
+                                if (*c).w046_count < 64 {
+                                    (*c).w046_files[(*c).w046_count as usize] = decl_span.file_id
+                                    (*c).w046_starts[(*c).w046_count as usize] = decl_span.start
+                                    (*c).w046_count = (*c).w046_count + 1
+                                }
+                                checker_report_warning_at_mut(c, decl_span, 46, 0, 0, 0)
+                            }
+                        }
                         ty_with_refinement(base_ty, ref_idx)
                     } else {
+                        // THE PREDICATE WAS NOT UNDERSTOOD, AND SAYING SO IS
+                        // WHY THIS BRANCH EXISTS.
+                        //
+                        // pred_op = 0 means the parser met an operator it does
+                        // not represent -- `{ n: i32 | n * 2 < 200 }`, where the
+                        // coefficient on n has no place in RefinementPred. Until
+                        // the parser default was corrected this arrived as
+                        // pred_op = 5, an invented `n == 0` that rejected every
+                        // argument but zero. Correcting it removed the false
+                        // rejection and left SILENCE: the type came back with no
+                        // refinement, nothing was checked, and nobody was told.
+                        // A check that does nothing quietly is the failure mode
+                        // this branch spent its length chasing, so it does not
+                        // get to be the resting state of a fix for it.
+                        //
+                        // The notice belongs at the DECLARATION. The author
+                        // wrote the predicate; a caller cannot do anything about
+                        // it. RefinementInfo carries no span of its own, so the
+                        // enclosing TypeExpr passes one in.
+                        // One notice per declaration, not one per lowering.
+                        var seen = false
+                        var wi: i64 = 0
+                        while wi < (*c).w046_count && wi < 64 {
+                            if (*c).w046_files[wi as usize] == decl_span.file_id
+                            && (*c).w046_starts[wi as usize] == decl_span.start {
+                                seen = true
+                            }
+                            wi = wi + 1
+                        }
+                        if !seen {
+                            if (*c).w046_count < 64 {
+                                (*c).w046_files[(*c).w046_count as usize] = decl_span.file_id
+                                (*c).w046_starts[(*c).w046_count as usize] = decl_span.start
+                                (*c).w046_count = (*c).w046_count + 1
+                            }
+                            checker_report_warning_at_mut(c, decl_span, 46, 0, 0, 0)
+                        }
                         base_ty
                     }
                 }
@@ -2836,10 +2983,10 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
         TypeExprKind::TypeFn => checker_lower_fn_type_expr_mut(c, te)
         TypeExprKind::TypeArray => checker_lower_array_type_mut(c, te.inner, te.array_size)
         TypeExprKind::TypeTuple => checker_lower_tuple_type_mut(c, te.type_args)
-        TypeExprKind::TypeReference => checker_lower_ref_type_mut(c, te.inner)
-        TypeExprKind::TypeRefMut => checker_lower_ref_mut_type_mut(c, te.inner)
+        TypeExprKind::TypeReference => checker_lower_unit_or_ref_type_mut(c, te, false)
+        TypeExprKind::TypeRefMut => checker_lower_unit_or_ref_type_mut(c, te, true)
         TypeExprKind::TypeRawPtr => checker_lower_raw_ptr_type_mut(c, te.inner, te.array_size)
-        TypeExprKind::TypeRefinement => checker_lower_refinement_type_mut(c, te.refinement_info)
+        TypeExprKind::TypeRefinement => checker_lower_refinement_type_mut(c, te.refinement_info, te.span)
         _ => {
             checker_note_type_error_mut(c)
             ty_error()
@@ -2848,6 +2995,75 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
 
     checker_exit_type_expr_mut(c)
     lowered
+}
+
+fn checker_unit_path_first_name(path: AstPath) -> Name {
+    Name {
+        buf: path.segments.head_buf,
+        len: path.segments.head_len,
+    }
+}
+
+// Lower a derived-unit TypeExpr (`m / s`, `mol/cm3`) as encoded by parse_unit_item /
+// parse_named_type: TypeReference = divide, TypeRefMut = multiply, with the left
+// factor in type_args.head and the right in inner.
+fn checker_unit_dim_from_type_expr(reg: UnitRegistry, ty: TypeExpr) -> UnitDim with Mut, Panic, Div, Alloc {
+    let base_name = checker_unit_path_first_name(ty.path)
+    let base_idx = reg.find(base_name)
+    var base_dim = unit_dim_dimensionless()
+    if base_idx >= 0 {
+        base_dim = reg.get_dim(base_idx)
+    }
+    match ty.type_args {
+        Some(args) => {
+            base_dim = checker_unit_dim_from_type_expr(reg, (*args).head)
+        }
+        None => {}
+    }
+    if ty.kind == TypeExprKind::TypeReference {
+        match ty.inner {
+            Some(inner) => unit_dim_div(base_dim, checker_unit_dim_from_type_expr(reg, *inner)),
+            None => base_dim
+        }
+    } else if ty.kind == TypeExprKind::TypeRefMut {
+        match ty.inner {
+            Some(inner) => unit_dim_mul(base_dim, checker_unit_dim_from_type_expr(reg, *inner)),
+            None => base_dim
+        }
+    } else {
+        base_dim
+    }
+}
+
+fn checker_ty_from_unit_dim(c: *mut Checker, dim: UnitDim) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if unit_dim_is_dimensionless(dim) {
+        return ty_f64()
+    }
+    let found = (*c).units.find_by_dim(dim)
+    if found >= 0 {
+        return ty_with_unit(ty_f64(), found)
+    }
+    let anon = Name { buf: [0; 384], len: 0 }
+    (*c).units = (*c).units.register(anon, dim)
+    ty_with_unit(ty_f64(), (*c).units.count - 1)
+}
+
+fn checker_lower_unit_or_ref_type_mut(c: *mut Checker, te: TypeExpr, is_mut_ref: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // KL-13b: TypeReference/TypeRefMut with type_args encode unit ÷/× (see parse_unit_item).
+    // Without type_args they remain &T / &!T.
+    match te.type_args {
+        Some(_) => {
+            let dim = checker_unit_dim_from_type_expr((*c).units, te)
+            checker_ty_from_unit_dim(c, dim)
+        }
+        None => {
+            if is_mut_ref {
+                checker_lower_ref_mut_type_mut(c, te.inner)
+            } else {
+                checker_lower_ref_type_mut(c, te.inner)
+            }
+        }
+    }
 }
 
 pub fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
@@ -4425,6 +4641,324 @@ fn checker_path_first_two_eq(path: AstPath, first: string, second: string) -> bo
     }
 }
 
+// ============================================================
+// Known `use`-declared module segments (review comment 4089110672 /
+// finding A). Mirrors lower.sio's LOWER_USE_MODULE_HASH: the lowerer
+// already refuses to strip a qualifier that isn't a real registered module,
+// but until this registry existed the checker had no equivalent, so
+// `mod::f(..)` bound direct_sig_id to ANY free fn named `f` in the whole
+// program regardless of whether `mod` was ever really `use`d -- accepting
+// `bogus::real_pub_fn(..)` at typecheck while the lowerer (which DOES
+// validate the qualifier) fell through to its legacy mangled-stub path and
+// emitted a body-less `bogus_real_pub_fn` call (SIGILL). Flat-scalar-buffer
+// storage, same reasoning as the lowerer's sibling registry (a `[Name; N]`
+// struct-array global was observed to be corrupted by this compiler's own
+// codegen).
+// Review comment 4090966164 (round 6, finding A): this registry used to be
+// ONE GLOBAL set, membership meaning "some module, somewhere in this whole
+// compilation, imported this segment" rather than "the module CURRENTLY
+// being checked imported this segment". A module could therefore call
+// through a qualifier that only a DIFFERENT, unrelated module had `use`d --
+// module B `use`s `dep_chain_leaf`, and module A (which never `use`s it at
+// all) could still call `dep_chain_leaf::leaf_add(..)` and have it accepted,
+// since the segment was globally known. Independent segments from unrelated
+// imports across different modules could likewise recombine into paths that
+// were never actually declared anywhere. Fixed by keying every entry with
+// the registering module's id (CHECKER_USE_MODULE_MODULE_ID, parallel to
+// HASH/LEN/BUF) and requiring an exact module-id match at lookup, not just a
+// name match -- `checker_use_module_known` now takes the caller's
+// `(*c).current_module_id` and only matches entries THAT SAME module
+// registered. current_module_id is already tracked correctly across both
+// the collect pass (Pass 1) and the check pass (Pass 2) in
+// check_modules_verdict_boot4_with_visibility (self-hosted/check/mod.sio),
+// so no new module-identity plumbing was needed -- just applying the id
+// that already existed.
+let CHECKER_USE_MODULE_SEG_MAX: i64 = 384
+var CHECKER_USE_MODULE_COUNT: i64 = 0
+var CHECKER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
+var CHECKER_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
+var CHECKER_USE_MODULE_MODULE_ID: [i64; 1024] = [0 - 1; 1024]
+var CHECKER_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
+// Review comment 4089532579 (round 3, finding A): silently dropping an entry
+// past capacity here fails OPEN, not closed. A `souc check`-only caller never
+// runs the lowerer's own overflow refusal (IR_LOWER_HARD_ERROR), so once this
+// registry fills, a later real module's qualified calls fall back to
+// checker_path_qualifier_all_modules_known returning false -- direct_sig_id
+// stays negative, only W044 (a warning) fires, and `check` can report success
+// on a call whose argument/effect/visibility checks never ran.
+//
+// Review comment 4089849683 (round 4): this flag and its
+// OVERFLOW_REPORTED sibling below are process-global, and checker_init_in_place
+// (the only caller of checker_use_module_reset -- once per fresh Checker/
+// compile) used to reset only CHECKER_USE_MODULE_COUNT, not these. So a
+// process that runs a SECOND, separate compile after an earlier one already
+// overflowed inherited both flags already set: OVERFLOWED already true is
+// harmless on its own, but OVERFLOW_REPORTED already true made
+// checker_report_use_module_overflow_inplace return before ever touching
+// the new Checker's had_error, so the second compile's overflow silently
+// stopped short of failing loudly -- the same class of bug as round 1
+// finding D (a registry surviving past the compile boundary it belongs to,
+// just failing OPEN here instead of losing data). Both are now reset
+// alongside the count in checker_use_module_reset, so every fresh
+// Checker/compile starts with clean overflow-tracking state, not just an
+// empty module table.
+var CHECKER_USE_MODULE_OVERFLOWED: bool = false
+// Guards checker_report_use_module_overflow_inplace to at most one diagnostic
+// per COMPILE (re-printing at every subsequent `use` item once the registry
+// is already full within the SAME compile would just be noise) -- reset
+// alongside CHECKER_USE_MODULE_OVERFLOWED, not durable past it. A plain
+// global, not a Checker field, so no struct-literal construction site of
+// Checker needs updating.
+var CHECKER_USE_MODULE_OVERFLOW_REPORTED: bool = false
+
+fn checker_use_module_reset() with Mut {
+    CHECKER_USE_MODULE_COUNT = 0
+    CHECKER_USE_MODULE_OVERFLOWED = false
+    CHECKER_USE_MODULE_OVERFLOW_REPORTED = false
+}
+
+fn checker_use_module_known(module_id: i64, n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 || n.len > CHECKER_USE_MODULE_SEG_MAX {
+        return false
+    }
+    let h = ast_name_hash(n)
+    var i: i64 = 0
+    while i < CHECKER_USE_MODULE_COUNT {
+        if CHECKER_USE_MODULE_MODULE_ID[i as usize] == module_id && CHECKER_USE_MODULE_HASH[i as usize] == h && CHECKER_USE_MODULE_LEN[i as usize] == n.len {
+            let base = i * CHECKER_USE_MODULE_SEG_MAX
+            var eq = true
+            var j: i64 = 0
+            while j < n.len {
+                if CHECKER_USE_MODULE_BUF[(base + j) as usize] != n.buf[j as usize] {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn checker_use_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
+    if n.len <= 0 || n.len > CHECKER_USE_MODULE_SEG_MAX {
+        return
+    }
+    // Uppercase-first-byte segments are never modules (Type/Enum names).
+    let c0 = (n.buf[0] as i64) & 255
+    if c0 >= 65 && c0 <= 90 {
+        return
+    }
+    if checker_use_module_known(module_id, n) {
+        return
+    }
+    if CHECKER_USE_MODULE_COUNT >= 1024 {
+        CHECKER_USE_MODULE_OVERFLOWED = true
+        return
+    }
+    let idx = CHECKER_USE_MODULE_COUNT
+    CHECKER_USE_MODULE_MODULE_ID[idx as usize] = module_id
+    CHECKER_USE_MODULE_HASH[idx as usize] = ast_name_hash(n)
+    let base = idx * CHECKER_USE_MODULE_SEG_MAX
+    var ci: i64 = 0
+    while ci < n.len {
+        CHECKER_USE_MODULE_BUF[(base + ci) as usize] = n.buf[ci as usize]
+        ci = ci + 1
+    }
+    CHECKER_USE_MODULE_LEN[idx as usize] = n.len
+    CHECKER_USE_MODULE_COUNT = idx + 1
+}
+
+// Segment k of a path, by recursion (mirrors lower.sio's lower_string_list_nth_name).
+fn checker_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic, Div {
+    if k <= 0 {
+        return Name { buf: sl.head_buf, len: sl.head_len }
+    }
+    match sl.tail {
+        Some(rest) => checker_string_list_nth_name(*rest, k - 1),
+        None => empty_name(),
+    }
+}
+
+// Records every SUFFIX of a `use` path (the full path, and every shorter
+// suffix ending at the same terminal -- e.g. for `use a::b::c;`: "a::b::c",
+// "b::c", "c"), scoped to `module_id` (the registering module -- round 6
+// finding A), as a POSITIVE-EVIDENCE candidate qualifier string. Suffixes,
+// not individual segments (round 8, comment 4096338764): recording each
+// segment independently let unrelated imports' segments be recombined into
+// a qualifier that was never actually imported together -- see
+// ast_path_range_name's own comment for the exact bug. Registering complete
+// suffix TEXT still supports both call forms a single `use a::b;` allows
+// (`b::f()` via the "b" suffix, `a::b::f()` via the "a::b" suffix) without
+// accepting `a::(something else)::f()`.
+//
+// This cannot exclude a path-form NAMED import's terminal
+// (`use a::b::specific_fn;`) here: the AST gives no way to tell that shape
+// apart from a genuine whole-module import (`use a::b;`) where the last
+// segment really is the module -- both are `use_glob=false, use_items=None,
+// seg_count>=2`, syntactically identical.
+//
+// Copilot review (PR #2515), comment 4114124500: lower_named_item_terminal_
+// known below answers "named item" for a TYPE import (`use pkg::mod::Type;`)
+// exactly the same as a function/value one, but a type import still needs
+// its combined suffix registered for `mod::Type::method()` to typecheck --
+// unlike a function/value import, which is only ever called bare. Fixed at
+// the SOURCE (module_frontend.sio's resolve_import_file_path and its raw-
+// scanner sibling, both call sites of lower_named_item_terminal_note):
+// load the confirmed parent file and skip the note entirely when the
+// terminal segment is actually a struct/enum there, so this registry never
+// contains a real type import's terminal in the first place, and the
+// blanket skip below is now correct for the only shape it still applies to.
+//
+// Round 9 (review comment 4098353722, and the collision it reopened): an
+// earlier version of this comment said registering the terminal regardless
+// was fine because checker_path_qualifier_all_modules_known separately
+// excludes it via lower_named_item_terminal_known -- but that registry is
+// keyed by the FULL `use` path text (module_frontend.sio's real
+// file-resolution outcome), while a call can legitimately use just the BARE
+// terminal as its qualifier (`f::g()`, not only `a::b::f::g()`), so that
+// separate check could never see the bare form to exclude it. Registering
+// the bare terminal there too was tried and reverted: it collided with an
+// UNRELATED module elsewhere in the same compilation whose own bare-terminal
+// qualifier happens to share the same text (round 7's own dep_chain/
+// named_item_module_collision fixture exists specifically to catch this).
+// Fixed at the SOURCE instead: skip suffix registration for this `use` path
+// ENTIRELY when the full path is already known to resolve as a named item,
+// not a module (lower_named_item_terminal_known -- populated before this
+// runs, per its own comment). A named-item import brings its target into
+// scope as a bare, unqualified name (`use a::b::f;` then calling `f(..)`,
+// never `f::something(..)`), so it was never a legitimate module-qualifier
+// candidate at all; not registering any of its suffixes here removes the
+// false module-shaped entry instead of trying to filter it back out later,
+// so a genuinely unrelated real module's own identical-text suffix is never
+// put at risk.
+fn checker_use_module_note_path(module_id: i64, path: AstPath) with Mut, Panic, Div {
+    if lower_named_item_terminal_known(ast_path_range_name(path, 0, path.seg_count - 1)) {
+        return
+    }
+    var s: i64 = 0
+    while s < path.seg_count {
+        checker_use_module_note(module_id, ast_path_range_name(path, s, path.seg_count - 1))
+        s = s + 1
+    }
+}
+
+// Round 14 (review comment 4105262460): a BRACE import (`use a::b::{Type};`)
+// only ever runs `path` ("a::b") through checker_use_module_note_path above
+// -- the braced names themselves (`Type`) are a separate ImportItemList, so
+// the combined suffix "b::Type" (what round 13's associated-fn check,
+// directly below this function, requires for `b::Type::method()` to
+// typecheck) was never registered, even though `use a::b::{Type};` legitimately
+// brings `Type` into scope reachable exactly that way. That silently reset a
+// VALID resolved call's signature back to -1 whenever the receiver type came
+// from a brace import specifically (glob and path-form imports of the type
+// were unaffected, since the type's OWN `use` path already IS the combined
+// suffix there). Register "<suffix>::<braced name>" for every suffix of
+// `path`, for every name in the braced list, mirroring
+// checker_use_module_note_path's own suffix loop but anchored on the item
+// name instead of `path`'s own last segment.
+//
+// Round 15 (review comment 4106649041): the first version of this function
+// registered a combined suffix for EVERY braced item unconditionally --
+// `lower_named_item_terminal_known` only carries evidence for FULL path-form
+// imports (`use a::b::f;`, populated from module_frontend.sio's real file
+// resolution against the WHOLE path), so querying it with just the bare
+// braced NAME (`f` alone, no path) never matches and never excludes
+// anything. `use a::b::{f};` where `f` is a FUNCTION (not a type) therefore
+// still registered "b::f" as a trusted qualifier suffix, so a bogus
+// `b::f::g()` could pass round 13's combined-suffix gate for any real
+// top-level `g` -- exactly the qualifier-evidence-from-a-non-module class
+// this whole registry exists to exclude, just reached through braces
+// instead of a bare path. There is no cross-module struct/enum table
+// available yet at `use`-collection time to authoritatively ask "is `f` a
+// type", so this uses the SAME convention checker_use_module_note already
+// relies on one line below (uppercase-first-byte = type/struct/enum,
+// lowercase-first-byte = module/fn/value, per this codebase's own PascalCase
+// vs snake_case naming rule): only an UPPERCASE braced name -- a type this
+// combined-suffix check is actually for -- gets registered; a lowercase
+// (function/value) braced import contributes no qualifier evidence at all.
+//
+// PR #2515 review (comment 4108677463): this heuristic is known-unsound for
+// a LOWERCASE-named struct/enum imported by brace (`use a::b::{wrap_}`, see
+// tests/run-pass/madaros_lowercase_struct_generic_assoc_call.sio for a
+// same-file, non-`use` demonstration that a lowercase struct like `wrap_`
+// is legal Sounio) -- such an import contributes no combined-suffix
+// evidence, so `b::wrap_::make()` cannot pass the round-13 combined-suffix
+// gate below on that path alone. Left as-is rather than rushed: fixing it
+// needs real cross-module struct/enum evidence at `use`-collection time,
+// which (per the paragraph above, still accurate) does not exist yet --
+// same class of accepted residual gap as the named-item-terminal
+// resolution-context gap documented in parser/ast.sio's
+// AST_NAMED_ITEM_TERMINAL_COUNT comment, and this file's own round-5/6
+// history is a direct precedent for how a rushed heuristic fix in exactly
+// this area upgrades a narrow miss into a broader false-positive/negative
+// regression. Not exercised by any test today (the PR's own `wrap_` test is
+// single-file, with no brace import of it), so no test currently fails.
+fn checker_use_module_note_braced_items(module_id: i64, path: AstPath, items: Option<Box<ImportItemList> >) with Mut, Panic, Div {
+    if path.seg_count <= 0 {
+        return
+    }
+    var cursor = items
+    while true {
+        match cursor {
+            Some(node) => {
+                let item_name = (*node).head
+                let c0 = if item_name.len > 0 { (item_name.buf[0] as i64) & 255 } else { 0 }
+                if c0 >= 65 && c0 <= 90 && !lower_named_item_terminal_known(item_name) {
+                    var s: i64 = 0
+                    while s < path.seg_count {
+                        let prefix = ast_path_range_name(path, s, path.seg_count - 1)
+                        checker_use_module_note(module_id, ast_name_join_sep(prefix, item_name))
+                        s = s + 1
+                    }
+                }
+                cursor = (*node).tail
+            }
+            None => break
+        }
+    }
+}
+
+// The COMPLETE qualifier (every segment of `path` except the last, joined as
+// one string) must exactly match a known `use`-declared suffix path OF THE
+// MODULE CURRENTLY BEING CHECKED (`(*c).current_module_id`, round 6 finding A
+// -- previously this checked global registry membership, so a module could
+// call through a qualifier only a DIFFERENT module had `use`d), and no
+// accumulated prefix of it may be authoritatively known to be a named item's
+// terminal (round 6 finding C -- see lower_named_item_terminal_known's own
+// comment for why this replaced round 5's unsound "does this name also
+// resolve as some unrelated top-level function" heuristic, which wrongly
+// rejected a real module qualifier that happened to share a name with an
+// unrelated function elsewhere in the program). Fewer than 2 segments means
+// there is no qualifier to validate.
+//
+// Round 8 (comment 4096338764): this used to check each qualifier segment
+// INDEPENDENTLY against the per-module registry, so a module with both
+// `use math::dd64;` and `use testmod::tc_c;` accepted the bogus recombined
+// qualifier `math::tc_c` (`math` and `tc_c` were each independently
+// "known", even though "math::tc_c" together was never imported). The
+// registry now stores complete suffix TEXT (see checker_use_module_note_path
+// and ast_path_range_name's own comments), so this checks the qualifier as
+// ONE joined string against ONE registered suffix, which cannot be
+// satisfied by mixing segments from two unrelated imports.
+fn checker_path_qualifier_all_modules_known(c: *mut Checker, path: AstPath) -> bool with Mut, Panic, Div, Alloc, IO {
+    if path.seg_count < 2 {
+        return false
+    }
+    var k: i64 = 0
+    while k < path.seg_count - 1 {
+        if lower_named_item_terminal_known(ast_path_prefix_name(path, k)) {
+            return false
+        }
+        k = k + 1
+    }
+    let qualifier = ast_path_range_name(path, 0, path.seg_count - 2)
+    checker_use_module_known((*c).current_module_id, qualifier)
+}
+
 fn checker_collect_known_module_backing_imports_inplace(c: *mut Checker, path: AstPath) with Mut, Panic, Div {
     // The boot4/raw checker currently type-checks modules with a shared symbol
     // table but without a full import namespace. Keep the stopgap narrow:
@@ -4445,7 +4979,7 @@ fn checker_collect_known_module_backing_imports_inplace(c: *mut Checker, path: A
     }
 }
 
-fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc {
+fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
     checker_collect_import_item_list_inplace(c, item.use_items)
     // Path-form named import `use module::symbol` (no braces, no glob): the
     // parser leaves the symbol as the last path segment with use_items=None.
@@ -4460,6 +4994,36 @@ fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic
         }
     }
     checker_collect_known_module_backing_imports_inplace(c, item.use_path)
+    checker_use_module_note_path((*c).current_module_id, item.use_path)
+    checker_use_module_note_braced_items((*c).current_module_id, item.use_path, item.use_items)
+    if CHECKER_USE_MODULE_OVERFLOWED {
+        checker_report_use_module_overflow_inplace(c, item.span)
+    }
+}
+
+// Review comment 4089532579 (round 3, finding A): propagate
+// CHECKER_USE_MODULE_OVERFLOWED as a hard checker error instead of letting it
+// only degrade later W044 handling silently. Reported at most once per
+// module-registration site that observes it (CHECKER_USE_MODULE_OVERFLOWED
+// itself stays set/durable, matching the lowerer's own overflow flag, so a
+// later reset within the same compile cannot un-flag an already-broken
+// registry -- but re-printing the same diagnostic at every subsequent `use`
+// item once the registry is already full would just be noise).
+fn checker_report_use_module_overflow_inplace(c: *mut Checker, span: Span) with Mut, IO, Panic, Div, Alloc {
+    if CHECKER_USE_MODULE_OVERFLOW_REPORTED {
+        return
+    }
+    CHECKER_USE_MODULE_OVERFLOW_REPORTED = true
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    print("error[E-USE-MOD-CAP] at ")
+    print_int(span.start)
+    print("..")
+    print_int(span.end)
+    print(": module-qualified-call registry is full (1024 distinct lowercase `use` segments)\n")
+    print("   = note: later module-qualified calls cannot be fully checked (argument/effect/")
+    print("visibility checks are skipped, only an unresolved-path warning fires) -- refusing")
+    print(" rather than silently under-checking the rest of this compile\n")
 }
 
 fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Div {
@@ -4655,7 +5219,13 @@ fn checker_collect_struct_def_inplace(c: *mut Checker, name: Name, opt: Option<B
     match opt {
         Some(sd) => {
             let tp_result = collect_type_params((*sd).type_params)
+            // In scope for the field types below: a generic parameter must win
+            // over a same-named unit. Saved and restored rather than cleared,
+            // so a nested lowering cannot lose an outer declaration's params.
+            let saved_tp = (*c).current_type_params
+            (*c).current_type_params = tp_result
             let fc = checker_collect_field_defs_mut(c, (*sd).fields)
+            (*c).current_type_params = saved_tp
             if struct_field_list_has_direct_self_ref(fc.fields, name) {
                 checker_report_error_at_inplace(c, (*sd).span, 216, 0, 0, 0)
             }
@@ -4834,6 +5404,663 @@ fn checker_collect_policy_def_inplace(c: *mut Checker, name: Name, opt: Option<B
     }
 }
 
+// One place that touches the unit registry, for a measured reason.
+//
+// UnitRegistry holds `entries: [UnitEntry; 32]` and every UnitEntry embeds a
+// Name with `buf: [0; 384]`, so the whole registry is about 12.5 KB and it is
+// passed BY VALUE -- `fn find(self, ...)` copies all of it. The by-value
+// checker spine calls find exactly once per type name and binds the result;
+// a first version of the *mut port here called it twice in the same
+// expression (once in the guard, once in the body) and the extra copy was
+// enough to segfault the compiler on six of the unit fixtures, turning clean
+// diagnostics into SIGSEGV. The build already warns about oversized stack
+// frames elsewhere in this tree, so this is not a surprising failure mode --
+// it is the same one, reached from a new place.
+fn checker_name_is_type_param_in_scope(c: *mut Checker, name: Name) -> bool with Mut, Panic, Div, Alloc {
+    var i: i64 = 0
+    while i < (*c).current_type_params.count && i < 8 {
+        if name_eq((*c).current_type_params.names[i as usize], name) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn checker_unit_index_for(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    (*c).units.find(name)
+}
+
+
+// Decode the derived-unit expression the parser already stores, into a real
+// SI dimension vector.
+//
+// `unit ua = mol / s;` has always been parsed: parse_unit_item walks the
+// `= <type> (('/'|'*') <type>)*` tail and stores the result in the item's
+// type_alias_ty slot, encoding `/` as TypeExprKind::TypeReference and `*` as
+// TypeExprKind::TypeRefMut, with the left operand in type_args.head and the
+// right in inner. Nothing ever read it back: collect_unit_decl registered
+// unit_dim_dimensionless() for every user unit, with the comment "For now,
+// user-defined units get a generic dimension".
+//
+// The consequence was that units were IDENTITIES, not dimensions. `mol/s`
+// and `mol/m` were distinguishable only because they are different names;
+// `mol/s` divided by `mol` produced an unnamed f64 rather than `1/s`; and
+// unit_dim_mul / unit_dim_div / unit_dim_compatible -- all present, all
+// correct, all carrying the seven SI exponents and a rational scale factor --
+// could never fire on anything a user declared, because every user dimension
+// was the zero vector.
+//
+// An unknown name resolves to dimensionless rather than to an error, which
+// keeps `unit dosage;` (no derived expression at all) working exactly as
+// before: a fresh brand with no dimensional content.
+fn unit_dim_from_type_expr(reg: UnitRegistry, te: TypeExpr, depth: i64) -> UnitDim with Mut, Panic, Div, Alloc {
+    if depth > 16 {
+        return unit_dim_dimensionless()
+    }
+    if te.kind == TypeExprKind::TypeNamed {
+        let nm = checker_copy_string_list_to_name(te.path.segments)
+        let idx = reg.find(nm)
+        if idx >= 0 {
+            return reg.get_dim(idx)
+        }
+        return unit_dim_dimensionless()
+    }
+    // TypeReference is the parser's marker for '/', TypeRefMut for '*'.
+    if te.kind == TypeExprKind::TypeReference || te.kind == TypeExprKind::TypeRefMut {
+        var lhs = unit_dim_dimensionless()
+        match te.type_args {
+            Some(args) => { lhs = unit_dim_from_type_expr(reg, (*args).head, depth + 1) }
+            None => {}
+        }
+        var rhs = unit_dim_dimensionless()
+        match te.inner {
+            Some(bx) => { rhs = unit_dim_from_type_expr(reg, *bx, depth + 1) }
+            None => {}
+        }
+        if te.kind == TypeExprKind::TypeReference {
+            return unit_dim_div(lhs, rhs)
+        }
+        return unit_dim_mul(lhs, rhs)
+    }
+    unit_dim_dimensionless()
+}
+
+// A bare `unit K;` that re-declares a name already in the registry (a
+// builtin such as `mol`, or a Madaros unit alias) keeps that entry's
+// dimension instead of resetting it to the zero vector.
+fn unit_dim_for_decl(reg: UnitRegistry, name: Name, conv: Option<Box<TypeExpr> >) -> UnitDim with Mut, Panic, Div, Alloc {
+    match conv {
+        Some(te) => unit_dim_from_type_expr(reg, *te, 0)
+        None => {
+            let existing = reg.find(name)
+            if existing >= 0 {
+                reg.get_dim(existing)
+            } else {
+                unit_dim_dimensionless()
+            }
+        }
+    }
+}
+
+// ============================================================================
+// ONTOLOGY, *mut transcription -- structural layer AND axiom kernel
+// ============================================================================
+//
+// Until 2026-09-09 ItemOntology had no arm in checker_collect_item_inplace, so
+// on the default engine an `ontology { class ... }` declaration was collected
+// by nobody. Every ontology type carried ontology_id = -1, every boundary
+// check early-returned, and 40 of the 42 ontology fixtures passed BECAUSE the
+// subsystem was inert. Fourth instance of the two-spine divergence that
+// scripts/ci/checker_spine_parity_gate.sh now guards.
+//
+// A first attempt wired only the structural layer and took those fixtures from
+// 40 passing to 11: ontology_inference_query_subclass reads the KERNEL, which
+// only the axiom layer populates, so every subsumption query answered false and
+// `fn accept(d: Drug)` rejected a declared Rapamycin subclass. Reaching the
+// kernel through a by-value bridge was tried too and segfaulted 40 of 42 -- the
+// Checker is ~8 MB and copying it onto the stack is fatal with no recursion
+// required. ItemOntology is all-or-nothing, so both layers are transcribed
+// here.
+
+// The by-value ontology_role_decl_count takes `self` and never reads a field --
+// it uses it only to recurse, copying ~8 MB per list element for nothing. Free
+// function here.
+fn ontology_role_decl_count_free(roles: Option<Box<OntologyRoleDeclList> >, target: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
+    match roles {
+        None => 0
+        Some(list) => {
+            let count_here = if name_eq((*list).head.name, target) { 1 } else { 0 }
+            count_here + ontology_role_decl_count_free((*list).tail, target)
+        }
+    }
+}
+
+fn checker_collect_ontology_kernel_add_axiom_inplace(c: *mut Checker, span: Span, axiom: OntologyAxiom) with Mut, Panic, Div, Alloc, IO {
+    if ontology_kernel_can_add_axiom((*c).ontology_kernel) {
+        (*c).ontology_kernel = ontology_kernel_add_axiom((*c).ontology_kernel, axiom)
+    } else {
+        checker_report_error_at_inplace(c, span, 160, 0, 0, 0)
+    }
+}
+
+fn checker_collect_ontology_kernel_classes_inplace(c: *mut Checker, classes: Option<Box<OntologyClassDeclList> >, ont_name: Name) with Mut, Panic, Div, Alloc, IO {
+    // TWO PASSES, and the second one is not an optimisation -- it is the whole
+    // reason subsumption works. parse_ontology_def builds this list by
+    // PREPENDING, so it arrives in reverse source order: a program written
+    //
+    //     class Drug
+    //     class Rapamycin subclass_of Drug
+    //
+    // reaches this walk as Rapamycin first. The single-pass form resolved
+    // `Drug` against a kernel that did not hold it yet, `sc_idx` came back -1,
+    // and the subclass_of axiom was dropped in silence -- every later query
+    // answered false and every ontology fixture died on E152. Measured with an
+    // instrumented build: the program above produced kaxioms=0, and the same
+    // two declarations written in the other order produced kaxioms=1. Register
+    // every class first, resolve superclasses second, and the walk stops caring
+    // about order in either direction.
+    //
+    // The by-value spine (collect_ontology_kernel_classes) still carries the
+    // one-pass form and therefore still carries this bug. It is inert under
+    // Madaros, which is why the defect survived: see the note in
+    // scripts/ci/checker_spine_parity.frozen.
+    var cursor = classes
+    while true {
+        match cursor {
+            Some(list) => {
+                let decl = (*list).head
+                if ontology_kernel_can_add_class((*c).ontology_kernel) {
+                    let pair = ontology_kernel_add_class((*c).ontology_kernel, decl.name, ont_name)
+                    (*c).ontology_kernel = pair.0
+                }
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+
+    var link_cursor = classes
+    while true {
+        match link_cursor {
+            Some(link_list) => {
+                let link_decl = (*link_list).head
+                let class_idx = ontology_kernel_find_class((*c).ontology_kernel, link_decl.name)
+                if class_idx >= 0 {
+                    var i: i64 = 0
+                    while i < link_decl.superclass_count && i < 8 {
+                        let sc_name = link_decl.superclass_names[i as usize]
+                        let sc_idx = ontology_kernel_find_class((*c).ontology_kernel, sc_name)
+                        if sc_idx >= 0 {
+                            checker_collect_ontology_kernel_add_axiom_inplace(c, link_decl.span, OntologyAxiom {
+                                axiom_type: owl_subclass_of(),
+                                subject_idx: class_idx,
+                                object_idx: sc_idx,
+                                refinement_ref_id: -1,
+                                property_name: empty_name(),
+                                is_property_axiom: false,
+                            })
+                        }
+                        i = i + 1
+                    }
+                }
+                link_cursor = (*link_list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_collect_ontology_kernel_property_axioms_from_legacy_inplace(c: *mut Checker, ont_name: Name) with Mut, Panic, Div, Alloc, IO {
+    var i: i64 = 0
+    while i < (*c).ontologies.count {
+        let cls = (*c).ontologies.entries[i as usize]
+        if cls.is_valid && name_eq(cls.ontology_name, ont_name) {
+            var j: i64 = 0
+            while j < cls.property_count {
+                let ref_id = cls.property_ref_ids[j as usize]
+                if ref_id >= 0 && ref_id < 128 {
+                    checker_collect_ontology_kernel_add_axiom_inplace(c, Span { file_id: 0, start: 0, end: 0 }, OntologyAxiom {
+                        axiom_type: owl_data_property_constraint(),
+                        subject_idx: i,
+                        object_idx: -1,
+                        refinement_ref_id: ref_id,
+                        property_name: cls.property_names[j as usize],
+                        is_property_axiom: false,
+                    })
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn checker_collect_ontology_kernel_disjoints_inplace(c: *mut Checker, disjoints: Option<Box<OntologyDisjointDeclList> >) with Mut, Panic, Div, Alloc, IO {
+    // Iterative list walk, not recursion. A generated ontology carries up
+    // to 64 class declarations, and each frame of this walk is large enough
+    // that the recursive form smashed the default 8 MiB stack at 19 classes
+    // (measured against madaros-k2: 18 OK, 19 SEGV, and both pass under
+    // `ulimit -s 524288`). Same cursor idiom as
+    // checker_collect_import_item_list_inplace above.
+    var cursor = disjoints
+    while true {
+        match cursor {
+            Some(list) => {
+                let decl = (*list).head
+                let a_idx = ontology_kernel_find_class((*c).ontology_kernel, decl.name_a)
+                let b_idx = ontology_kernel_find_class((*c).ontology_kernel, decl.name_b)
+                if a_idx >= 0 && b_idx >= 0 {
+                    checker_collect_ontology_kernel_add_axiom_inplace(c, decl.span, OntologyAxiom {
+                        axiom_type: owl_disjoint_classes(),
+                        subject_idx: a_idx,
+                        object_idx: b_idx,
+                        refinement_ref_id: -1,
+                        property_name: empty_name(),
+                        is_property_axiom: false,
+                    })
+                }
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_collect_ontology_roles_inplace(c: *mut Checker, roles: Option<Box<OntologyRoleDeclList> >) with Mut, Panic, Div, Alloc, IO {
+    match roles {
+        None => {}
+        Some(list) => {
+            let decl = (*list).head
+            let duplicate_in_tail = ontology_role_decl_count_free((*list).tail, decl.name) > 0
+            let already_registered = ontology_kernel_find_property((*c).ontology_kernel, decl.name) >= 0
+
+            if !already_registered && ontology_kernel_can_add_property((*c).ontology_kernel) {
+                let pair = ontology_kernel_add_property((*c).ontology_kernel, decl.name)
+                (*c).ontology_kernel = pair.0
+            }
+
+            if already_registered || decl.duplicate_modifier_bits != 0 {
+                checker_report_error_at_inplace(c, decl.span, 159, 0, 0, 0)
+            }
+
+            checker_collect_ontology_roles_inplace(c, (*list).tail)
+
+            if already_registered || duplicate_in_tail || decl.duplicate_modifier_bits != 0 {
+                return
+            }
+
+            let prop_idx = ontology_kernel_find_property((*c).ontology_kernel, decl.name)
+            if prop_idx >= 0 {
+                if decl.has_domain {
+                    let domain_idx = ontology_kernel_find_class((*c).ontology_kernel, decl.domain_name)
+                    if domain_idx >= 0 {
+                        checker_collect_ontology_kernel_add_axiom_inplace(c, decl.span, OntologyAxiom {
+                            axiom_type: owl_object_property_domain(),
+                            subject_idx: prop_idx,
+                            object_idx: domain_idx,
+                            refinement_ref_id: -1,
+                            property_name: empty_name(),
+                            is_property_axiom: true,
+                        })
+                    } else {
+                        checker_report_error_at_inplace(c, decl.span, 156, 0, 0, 0)
+                    }
+                }
+
+                if decl.has_range {
+                    let range_idx = ontology_kernel_find_class((*c).ontology_kernel, decl.range_name)
+                    if range_idx >= 0 {
+                        checker_collect_ontology_kernel_add_axiom_inplace(c, decl.span, OntologyAxiom {
+                            axiom_type: owl_object_property_range(),
+                            subject_idx: prop_idx,
+                            object_idx: range_idx,
+                            refinement_ref_id: -1,
+                            property_name: empty_name(),
+                            is_property_axiom: true,
+                        })
+                    } else {
+                        checker_report_error_at_inplace(c, decl.span, 157, 0, 0, 0)
+                    }
+                }
+
+                if decl.has_inverse {
+                    let inverse_idx = ontology_kernel_find_property((*c).ontology_kernel, decl.inverse_name)
+                    if inverse_idx >= 0 {
+                        checker_collect_ontology_kernel_add_axiom_inplace(c, decl.span, OntologyAxiom {
+                            axiom_type: owl_inverse_object_properties(),
+                            subject_idx: prop_idx,
+                            object_idx: inverse_idx,
+                            refinement_ref_id: -1,
+                            property_name: empty_name(),
+                            is_property_axiom: true,
+                        })
+                    } else {
+                        checker_report_error_at_inplace(c, decl.span, 158, 0, 0, 0)
+                    }
+                }
+
+                if decl.is_transitive {
+                    checker_collect_ontology_kernel_add_axiom_inplace(c, decl.span, OntologyAxiom {
+                        axiom_type: owl_transitive_property(),
+                        subject_idx: prop_idx,
+                        object_idx: -1,
+                        refinement_ref_id: -1,
+                        property_name: empty_name(),
+                        is_property_axiom: true,
+                    })
+                }
+                if decl.is_symmetric {
+                    checker_collect_ontology_kernel_add_axiom_inplace(c, decl.span, OntologyAxiom {
+                        axiom_type: owl_symmetric_property(),
+                        subject_idx: prop_idx,
+                        object_idx: -1,
+                        refinement_ref_id: -1,
+                        property_name: empty_name(),
+                        is_property_axiom: true,
+                    })
+                }
+                if decl.is_functional {
+                    checker_collect_ontology_kernel_add_axiom_inplace(c, decl.span, OntologyAxiom {
+                        axiom_type: owl_functional_property(),
+                        subject_idx: prop_idx,
+                        object_idx: -1,
+                        refinement_ref_id: -1,
+                        property_name: empty_name(),
+                        is_property_axiom: true,
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn checker_ontology_inference_collect_kernel_inplace(c: *mut Checker, classes: Option<Box<OntologyClassDeclList> >, disjoints: Option<Box<OntologyDisjointDeclList> >, roles: Option<Box<OntologyRoleDeclList> >, ont_name: Name) with Mut, Panic, Div, Alloc, IO {
+    checker_collect_ontology_kernel_classes_inplace(c, classes, ont_name)
+    checker_collect_ontology_kernel_property_axioms_from_legacy_inplace(c, ont_name)
+    checker_collect_ontology_kernel_disjoints_inplace(c, disjoints)
+    checker_collect_ontology_roles_inplace(c, roles)
+    (*c).ontology_kernel = ontology_kernel_materialize((*c).ontology_kernel)
+    (*c).ontology_kernel.profile = ontology_kernel_check_profile((*c).ontology_kernel)
+}
+
+fn checker_validate_ontology_kernel_inverse_consistency_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    var i: i64 = 0
+    while i < (*c).ontology_kernel.properties.count {
+        let prop_info = (*c).ontology_kernel.properties.entries[i as usize]
+        let inverse_idx = prop_info.inverse_property_idx
+        if inverse_idx >= 0 && inverse_idx < (*c).ontology_kernel.properties.count {
+            let inverse_info = (*c).ontology_kernel.properties.entries[inverse_idx as usize]
+            if inverse_info.inverse_property_idx != i {
+                checker_report_error_at_inplace(c, Span { file_id: 0, start: 0, end: 0 }, 159, 0, 0, 0)
+            }
+            if prop_info.domain_class_idx >= 0 && inverse_info.range_class_idx >= 0 && prop_info.domain_class_idx != inverse_info.range_class_idx {
+                checker_report_error_at_inplace(c, Span { file_id: 0, start: 0, end: 0 }, 159, 0, 0, 0)
+            }
+            if prop_info.range_class_idx >= 0 && inverse_info.domain_class_idx >= 0 && prop_info.range_class_idx != inverse_info.domain_class_idx {
+                checker_report_error_at_inplace(c, Span { file_id: 0, start: 0, end: 0 }, 159, 0, 0, 0)
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn checker_validate_ontology_kernel_strengthening_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    var child_idx: i64 = 0
+    while child_idx < (*c).ontology_kernel.classes.count {
+        let child_property_count = (*c).ontology_kernel.materialized.class_property_counts[child_idx as usize]
+        if child_property_count > 0 {
+            var ancestor_idx: i64 = 0
+            while ancestor_idx < (*c).ontology_kernel.classes.count {
+                if child_idx != ancestor_idx && ontology_kernel_is_subclass((*c).ontology_kernel, child_idx, ancestor_idx) {
+                    let ancestor_property_count = (*c).ontology_kernel.materialized.class_property_counts[ancestor_idx as usize]
+                    var ci: i64 = 0
+                    while ci < child_property_count {
+                        let child_axiom_idx = (*c).ontology_kernel.materialized.class_property_axioms[(child_idx * 8 + ci) as usize]
+                        if child_axiom_idx >= 0 && child_axiom_idx < (*c).ontology_kernel.axioms.count {
+                            let child_axiom = (*c).ontology_kernel.axioms.axioms[child_axiom_idx as usize]
+                            var pi: i64 = 0
+                            while pi < ancestor_property_count {
+                                let ancestor_axiom_idx = (*c).ontology_kernel.materialized.class_property_axioms[(ancestor_idx * 8 + pi) as usize]
+                                if ancestor_axiom_idx >= 0 && ancestor_axiom_idx < (*c).ontology_kernel.axioms.count {
+                                    let ancestor_axiom = (*c).ontology_kernel.axioms.axioms[ancestor_axiom_idx as usize]
+                                    if name_eq(child_axiom.property_name, ancestor_axiom.property_name) {
+                                        let child_ref_id = child_axiom.refinement_ref_id
+                                        let ancestor_ref_id = ancestor_axiom.refinement_ref_id
+                                        if child_ref_id >= 0 && child_ref_id < 128 && ancestor_ref_id >= 0 && ancestor_ref_id < 128 {
+                                            let child_pred = (*c).refinements.entries[child_ref_id as usize].predicate
+                                            let ancestor_pred = (*c).refinements.entries[ancestor_ref_id as usize].predicate
+                                            if !pred_implies(child_pred, ancestor_pred) {
+                                                checker_report_warning_at_mut(c, Span { file_id: 0, start: 0, end: 0 }, 41, 0, 0, 0)
+                                            }
+                                        }
+                                    }
+                                }
+                                pi = pi + 1
+                            }
+                        }
+                        ci = ci + 1
+                    }
+                }
+                ancestor_idx = ancestor_idx + 1
+            }
+        }
+        child_idx = child_idx + 1
+    }
+}
+
+fn checker_collect_ontology_classes_inplace(c: *mut Checker, classes: Option<Box<OntologyClassDeclList> >, ont_name: Name) with Mut, Panic, Div, Alloc, IO {
+    // Iterative list walk, not recursion. A generated ontology carries up
+    // to 64 class declarations, and each frame of this walk is large enough
+    // that the recursive form smashed the default 8 MiB stack at 19 classes
+    // (measured against madaros-k2: 18 OK, 19 SEGV, and both pass under
+    // `ulimit -s 524288`). Same cursor idiom as
+    // checker_collect_import_item_list_inplace above.
+    var cursor = classes
+    while true {
+        match cursor {
+            Some(list) => {
+                let decl = (*list).head
+                let idx = (*c).ontologies.count
+                if idx >= 64 {
+                    checker_report_error_at_inplace(c, decl.span, 153, 0, 0, 0)
+                    return
+                }
+
+                var info = empty_ontology_class_info()
+                info.name = decl.name
+                info.ontology_name = ont_name
+                info.class_index = idx
+                info.is_valid = true
+
+
+                var i: i64 = 0
+                while i < decl.property_count && i < 8 {
+                    let prop = decl.properties[i as usize]
+                    info.property_names[info.property_count as usize] = prop.name
+                    if prop.pred_op > 0 {
+                        let pred = RefinementPred {
+                            op: prop.pred_op,
+                            var_name: prop.name,
+                            rhs_int: prop.pred_rhs_int,
+                            rhs_float: prop.pred_rhs_float,
+                            is_float: prop.is_float,
+                            left: None,
+                            right: None,
+                        }
+                        let base_ty = if prop.is_float { ty_f64() } else { ty_i64() }
+                        let rt = RefinementType {
+                            base_type: base_ty,
+                            var_name: prop.name,
+                            predicate: pred,
+                        }
+                        let synth_name = make_refinement_synth_name((*c).refinements.count)
+                        (*c).refinements = refinement_table_add((*c).refinements, synth_name, rt)
+                        info.property_ref_ids[info.property_count as usize] = (*c).refinements.count - 1
+                    }
+                    if prop.is_float { info.has_float_property = true }
+                    info.property_count = info.property_count + 1
+                    i = i + 1
+                }
+
+                (*c).ontologies.entries[idx as usize] = info
+                (*c).ontologies.count = idx + 1
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+
+    // Second pass: resolve superclass names now that every class in this
+    // ontology has an index. Same reason as in
+    // checker_collect_ontology_kernel_classes_inplace -- the declaration list
+    // arrives in reverse source order, so a one-pass resolve silently loses
+    // every `subclass_of` whose parent is declared above it in the file, and
+    // ontology_table_compute_closure then has nothing to close over.
+    var link_cursor = classes
+    while true {
+        match link_cursor {
+            Some(link_list) => {
+                let link_decl = (*link_list).head
+                let link_idx = ontology_table_find((*c).ontologies, link_decl.name)
+                if link_idx >= 0 {
+                    // Whole-entry read-modify-write, never per-field through the
+                    // pointer -- issue #1471, same as the disjoint walk below.
+                    var entry = (*c).ontologies.entries[link_idx as usize]
+                    var j: i64 = 0
+                    while j < link_decl.superclass_count && j < 8 {
+                        let sc_name = link_decl.superclass_names[j as usize]
+                        let sc_idx = ontology_table_find((*c).ontologies, sc_name)
+                        if sc_idx >= 0 && entry.superclass_count < 8 {
+                            entry.superclass_indices[entry.superclass_count as usize] = sc_idx
+                            entry.superclass_count = entry.superclass_count + 1
+                        }
+                        j = j + 1
+                    }
+                    (*c).ontologies.entries[link_idx as usize] = entry
+                }
+                link_cursor = (*link_list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_collect_ontology_disjoints_inplace(c: *mut Checker, disjoints: Option<Box<OntologyDisjointDeclList> >) with Mut, Panic, Div, Alloc, IO {
+    // Iterative list walk, not recursion. A generated ontology carries up
+    // to 64 class declarations, and each frame of this walk is large enough
+    // that the recursive form smashed the default 8 MiB stack at 19 classes
+    // (measured against madaros-k2: 18 OK, 19 SEGV, and both pass under
+    // `ulimit -s 524288`). Same cursor idiom as
+    // checker_collect_import_item_list_inplace above.
+    var cursor = disjoints
+    while true {
+        match cursor {
+            Some(list) => {
+                let decl = (*list).head
+                let a_idx = ontology_table_find((*c).ontologies, decl.name_a)
+                let b_idx = ontology_table_find((*c).ontologies, decl.name_b)
+                if a_idx >= 0 && b_idx >= 0 {
+                    // READ-MODIFY-WRITE THE WHOLE ENTRY, not per-field through the
+                    // pointer. `(*c).ontologies.entries[i].disjoint_indices[j] = x`
+                    // is the struct-array field-mutation shape this tree already
+                    // documents as broken -- stdlib/chemistry/catalysis.sio's
+                    // header records that sequential per-field mutation across
+                    // struct-array indices aliases every write to one slot, and
+                    // the fix there was one whole-struct literal per index.
+                    // Through a *mut it does not merely alias: it segfaults.
+                    // Measured -- two classes plus one `disjoint` was enough,
+                    // while three classes without one were fine.
+                    var ea = (*c).ontologies.entries[a_idx as usize]
+                    if ea.disjoint_count < 8 {
+                        ea.disjoint_indices[ea.disjoint_count as usize] = b_idx
+                        ea.disjoint_count = ea.disjoint_count + 1
+                        (*c).ontologies.entries[a_idx as usize] = ea
+                    }
+                    var eb = (*c).ontologies.entries[b_idx as usize]
+                    if eb.disjoint_count < 8 {
+                        eb.disjoint_indices[eb.disjoint_count as usize] = a_idx
+                        eb.disjoint_count = eb.disjoint_count + 1
+                        (*c).ontologies.entries[b_idx as usize] = eb
+                    }
+                }
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+// Bind every valid class name into the type environment as an ontology-tagged
+// named type. Without this a class cannot be used as a type at all.
+fn checker_ontology_class_is_numeric(c: *mut Checker, idx: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+    // A class is represented by a number when it, or anything it inherits from,
+    // declares an f64 property. Inheritance matters: in
+    // tests/run-pass/ontology_axiom_conjunction, mTORi declares nothing and gets
+    // its representation from Compound. This runs after
+    // ontology_table_compute_closure, so all_ancestor_indices is populated.
+    let entry = (*c).ontologies.entries[idx as usize]
+    if entry.has_float_property { return true }
+    var a: i64 = 0
+    while a < entry.all_ancestor_count && a < 64 {
+        let anc = entry.all_ancestor_indices[a as usize]
+        if anc >= 0 && anc < (*c).ontologies.count {
+            if (*c).ontologies.entries[anc as usize].has_float_property { return true }
+        }
+        a = a + 1
+    }
+    false
+}
+
+fn checker_ontology_bind_named_types_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    var i: i64 = 0
+    while i < (*c).ontologies.count {
+        if (*c).ontologies.entries[i as usize].is_valid {
+            let cls_name = (*c).ontologies.entries[i as usize].name
+            // A class carrying an f64 property IS that f64, tagged with the
+            // class. Binding it to an opaque ty_named instead is what made
+            // `let drug: mTORi = 1.2` an E001, made every operator on an
+            // ontology value an E004 -- measured on all three of `H2 + CO2`,
+            // `H2 + H2` and `H2 + 1` -- and so made the
+            // ontology-across-an-operator rule unreachable: not one of the 32
+            // ontology fixtures contains a single arithmetic operation, because
+            // none was expressible. Classes with no numeric property keep the
+            // opaque representation; `0 as Rapamycin` in
+            // tests/run-pass/ontology_type_bridge depends on it.
+            let base = if checker_ontology_class_is_numeric(c, i) { ty_f64() } else { ty_named(cls_name) }
+            let ty = ty_with_ontology(base, i)
+            (*c).env = (*c).env.bind(cls_name, ty, false)
+        }
+        i = i + 1
+    }
+}
+
+fn checker_collect_ontology_def_inplace(c: *mut Checker, opt: Option<Box<OntologyDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        None => {}
+        Some(odef) => {
+            let ont_name = (*odef).name
+            checker_collect_ontology_classes_inplace(c, (*odef).classes, ont_name)
+            checker_collect_ontology_disjoints_inplace(c, (*odef).disjoints)
+            (*c).ontologies = ontology_table_compute_closure((*c).ontologies)
+            checker_ontology_inference_collect_kernel_inplace(c, (*odef).classes, (*odef).disjoints, (*odef).roles, ont_name)
+            checker_validate_ontology_kernel_inverse_consistency_inplace(c)
+            checker_validate_ontology_kernel_strengthening_inplace(c)
+            checker_ontology_bind_named_types_inplace(c)
+        }
+    }
+}
+
+fn checker_collect_unit_decl_inplace(c: *mut Checker, name: Name, conv: Option<Box<TypeExpr> >) with Mut, Panic, Div, Alloc, IO {
+    // *mut transcription of Checker::collect_unit_decl. Registers a
+    // user-declared unit of measure so that a type annotation naming it
+    // lowers to ty_with_unit(ty_f64(), idx) instead of an opaque ty_named --
+    // and now with the REAL dimension decoded from the `= mol / s` tail the
+    // parser has always stored, instead of the zero vector.
+    let dim = unit_dim_for_decl((*c).units, name, conv)
+    (*c).units = (*c).units.register(name, dim)
+}
+
 fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
     // Dispatch via explicit `if item.kind == ItemKind::X`, NOT `match item.kind`: bin/souc
     // miscompiles a `match <enum-field>` inside a *mut fn (discriminant-0 → wildcard;
@@ -4861,6 +6088,30 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
         checker_collect_impl_item_bridge(c, item.impl_def)
     } else if item.kind == ItemKind::ItemTypeAlias {
         checker_collect_type_alias_inplace(c, item.name, item.type_alias_ty)
+    } else if item.kind == ItemKind::ItemUnit {
+        // Until 2026-09-09 this arm did not exist, and every `unit X;`
+        // declaration was INERT in the Madaros checker -- exactly the shape
+        // of the ItemAlgebra bug recorded a week earlier a few lines below.
+        // The by-value collect pass has had `ItemUnit => collect_unit_decl`
+        // all along; this *mut transcription, which is the one the modular
+        // compiler runs, did not, so a user-declared unit never reached the
+        // registry and every annotation naming it fell through to ty_named.
+        //
+        // Measured by instrumenting a source build: a print placed inside
+        // collect_unit_decl never fired on tests/run-pass/unit_decl_keyword.sio.
+        // Only the SI names seeded by register_builtin_units were ever
+        // present, which is why the two fixtures using `mg`/`kg` behaved and
+        // the ones declaring their own unit did not.
+        //
+        // The module-item parser also emits ItemUnit (with an empty name)
+        // for `module a::b`, so the guard on a non-empty name is load-bearing
+        // and not defensive: without it every module declaration would
+        // register an anonymous unit.
+        if !name_is_empty(item.name) {
+            checker_collect_unit_decl_inplace(c, item.name, item.type_alias_ty)
+        }
+    } else if item.kind == ItemKind::ItemOntology {
+        checker_collect_ontology_def_inplace(c, item.ontology_def)
     } else if item.kind == ItemKind::ItemModels {
         checker_collect_models_def_inplace(c, item.name, item.models_def)
     } else if item.kind == ItemKind::ItemPolicy {
@@ -4971,6 +6222,30 @@ fn checker_collect_type_alias_inplace(c: *mut Checker, name: Name, ty_opt: Optio
                                 let pred = checker_refinement_pred_from_info(ri)
                                 let rt = RefinementType { base_type: base_ty, var_name: ri.var_name, predicate: pred }
                                 (*c).refinements = refinement_table_add((*c).refinements, name, rt)
+                                // BIND THE ALIAS NAME, which this arm never did.
+                                // Registering the refinement in the table made it
+                                // findable by name but left the NAME itself
+                                // unbound, so `type Positive = { x: i64 | x > 0 }`
+                                // followed by `let p: Positive = 42` resolved
+                                // Positive to an opaque ty_named and reported
+                                // `expected Positive, found i64`. Measured: that
+                                // is tests/run-pass/refinement_satisfied and
+                                // refinement_float_bound failing on the committed
+                                // baseline too, and it is what kept
+                                // ontology_axiom_conjunction at E009 -- the
+                                // argument was a tagged f64 and the parameter a
+                                // named type, so the refinement boundary that
+                                // would have discharged the obligation was never
+                                // reached.
+                                //
+                                // A refinement type IS its base type carrying a
+                                // predicate, exactly as an ontology class with an
+                                // f64 property IS that f64 carrying a species.
+                                // Both were opaque for the same reason.
+                                let rid = refinement_table_find((*c).refinements, name)
+                                if rid >= 0 {
+                                    (*c).env = (*c).env.bind(name, ty_with_refinement(base_ty, rid), false)
+                                }
                             }
                             None => {}
                         }
@@ -4999,6 +6274,28 @@ fn checker_collect_type_alias_inplace(c: *mut Checker, name: Name, ty_opt: Optio
         }
         None => {}
     }
+}
+
+// Copilot review (PR #2515), comment 4110379088: check_items_verdict_boot4_with_module_map
+// (check/mod.sio) must collect each specialized-merged item with its own
+// current_module_id stamped first (see that function's own comment), so it
+// cannot call checker_collect_items_inplace once over the whole list --
+// but that function also re-runs checker_collect_runtime_builtins_inplace
+// AND reassigns ontology_items on every call, so invoking it once PER ITEM
+// re-scans the growing, already-populated environment for ~30 builtin
+// binds on every one of the compiler's own 13k+ items -- O(items^2) work
+// that is pure waste, since the builtins never change mid-collection and
+// ontology_items is unconditionally restored to the full list right after
+// that loop anyway. These two wrappers let that call site collect ONE
+// item's declarations without either side effect: initialize builtins
+// once before the loop, then collect each item directly through this
+// wrapper instead of round-tripping through checker_collect_items_inplace.
+pub fn checker_collect_runtime_builtins_once_mut(c: *mut Checker) with Mut, Panic, Div {
+    checker_collect_runtime_builtins_inplace(c)
+}
+
+pub fn checker_collect_item_only_mut(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
+    checker_collect_item_inplace(c, item)
 }
 
 pub fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
@@ -6385,15 +7682,299 @@ fn checker_check_binary_op_types_inplace(c: *mut Checker, span: Span, op: Binary
     }
 }
 
+// Read one dimension out of the registry inside a leaf frame.
+//
+// `(*c).units` is a by-value field and UnitRegistry is about 12.5 KB
+// (32 entries, each embedding a Name with a 384-byte buffer), so every
+// method call on it materialises a copy. Doing that inside a deep,
+// recursive expression-checking frame is what a small leaf function like
+// this one avoids.
+// Brand a result with a derived dimension. A dimensionless outcome -- which
+// is what mg/mg genuinely is -- drops the brand entirely; anything else is
+// interned so the dimension survives into the next operation.
+// The dimension of a possibly-unbranded operand. An index below zero is a
+// plain number, which is dimensionless with unit scale -- not "no answer".
+fn checker_dim_of(c: *mut Checker, uid: i64) -> UnitDim with Mut, Panic, Div, Alloc {
+    if uid < 0 {
+        return unit_dim_dimensionless()
+    }
+    checker_unit_dim_at(c, uid)
+}
+
+// May these two operands be added, subtracted or compared?
+//
+// The test is on DIMENSION AND SCALE, not on the registry index. Comparing
+// indices was wrong in both directions. It rejected `dosage + 1.0` where
+// `unit dosage;` is a brand with no dimension at all -- the diagnostic read
+// "left unit: dimensionless, right unit: (dimensionless)", which is an
+// error message arguing with itself. And it would have accepted nothing it
+// should not, only because every other case happened to coincide.
+//
+// Scale is part of the test and deliberately so: mg and kg are both mass^1
+// and adding them is still wrong, because 200 mg + 1 kg is not 201 of
+// anything. unit_dim_compatible checks the seven exponents; the scale
+// numerator and denominator are checked here beside it.
+fn checker_units_addable(c: *mut Checker, lu: i64, ru: i64) -> bool with Mut, Panic, Div, Alloc {
+    let ld = checker_dim_of(c, lu)
+    let rd = checker_dim_of(c, ru)
+    if !unit_dim_compatible(ld, rd) {
+        return false
+    }
+    ld.scale_num == rd.scale_num && ld.scale_den == rd.scale_den
+}
+
+fn checker_brand_with_dim(c: *mut Checker, result: TypeEntry, d: UnitDim) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if unit_dim_is_dimensionless(d) {
+        return ty_with_unit(result, 0 - 1)
+    }
+    let pair = unit_registry_intern_dim((*c).units, d)
+    (*c).units = pair.0
+    ty_with_unit(result, pair.1)
+}
+
+fn checker_unit_dim_at(c: *mut Checker, idx: i64) -> UnitDim with Mut, Panic, Div, Alloc {
+    (*c).units.get_dim(idx)
+}
+
+// *mut transcription of Checker::report_unit_mismatch, printing the same
+// diagnostic without round-tripping a whole Checker by value.
+fn checker_report_unit_mismatch_inplace(c: *mut Checker, span: Span, left_uid: i64, right_uid: i64) with Mut, Panic, Div, Alloc, IO {
+    (*c).had_error = true
+    (*c).error_count = (*c).error_count + 1
+    print("error[E041]: unit mismatch in arithmetic operation\n")
+    print("  left unit: ")
+    if left_uid >= 0 {
+        print_unit_dim(checker_unit_dim_at(c, left_uid))
+    } else {
+        print("(dimensionless)")
+    }
+    print("\n  right unit: ")
+    if right_uid >= 0 {
+        print_unit_dim(checker_unit_dim_at(c, right_uid))
+    } else {
+        print("(dimensionless)")
+    }
+    print("\n")
+}
+
+// A REAL *mut transcription of check_binary_units, replacing a bridge that
+// could not survive being reached.
+//
+// The previous body read:
+//
+//     if lu < 0 && ru < 0 { return result }
+//     let pair = (*c).check_binary_units(span, op, left, right, result)
+//     checker_store_from_value(c, pair.0)
+//
+// which dereferences the Checker and calls the by-value method -- copying
+// the entire Checker onto the stack (172 fields, among them a TypeEnv, a
+// BorrowEnv, a 12.5 KB UnitRegistry and a RefinementTable), receiving
+// another full copy back, and storing it. Inside the expression checker
+// that is fatal, and it segfaults.
+//
+// It never fired. On the modular engine every unit_id was -1, because the
+// units branch was missing from checker_lower_named_type_mut and the
+// ItemUnit arm was missing from checker_collect_item_inplace, so the guard
+// on the first line returned before the bridge could run. The moment those
+// two ports made unit_id real, this line was reached for the first time and
+// took the compiler down with it -- a latent crash that was unreachable
+// precisely because the feature it serves was dead.
+//
+// The whole point of the *mut spine is to not copy the Checker. Bridging
+// back to the by-value spine from inside it defeats that, so this is
+// transcribed properly instead.
+// Ontology across an operator: the third layer, after units of measure.
+//
+// Until the ontology kernel was wired, a class tag was checked at ONE place
+// only -- the call-argument boundary -- and evaporated through every
+// arithmetic operation. Measured, executed, on lean_single where the
+// subsystem does work:
+//
+//     let a: H2  = 1.0
+//     let b: CO2 = 2.0
+//     let mixed  = a + b        -> accepted in silence
+//     needs_h2(mixed)           -> accepted; the SUM PASSES AS H2
+//
+// Two classes declared disjoint were added together and the result re-entered
+// the type system as one of them. The ontology carries subclass inference and
+// disjointness and none of it reached the operator.
+//
+// THE RULE, and why each case is what it is.
+//
+//   Neither side tagged            no-op, and this early-out is load-bearing:
+//                                  it keeps the whole layer off the hot path
+//                                  for every ordinary arithmetic expression.
+//
+//   Same class, or one a subclass  keep the tag. Amounts of the same substance
+//   of the other                   add; a subclass amount added to a superclass
+//                                  amount is an amount of the superclass, so the
+//                                  result carries the MORE GENERAL tag.
+//
+//   Disjoint classes               E261. This is the case the probe above got
+//                                  wrong, and it is the whole point.
+//
+//   Unrelated classes              E262. Not provably combinable. Reported
+//                                  rather than assumed, on the same reasoning
+//                                  the call boundary already uses for E152.
+//
+//   One side untagged (a scalar)   keep the tag, for + - * /. A bare number
+//                                  scaling or offsetting an amount of H2 is
+//                                  still an amount of H2. This differs
+//                                  DELIBERATELY from the unit rule, where
+//                                  `mg + 1.0` is an error: a dimension is a
+//                                  claim about what the number measures, while
+//                                  a species tag is a claim about what it is
+//                                  made of, and a dimensionless literal has no
+//                                  dimension but is not made of nothing.
+//
+//   Division of two tagged values  drops the tag. H2/H2 and H2/CO2 are both
+//                                  ratios, and a ratio is not an amount of a
+//                                  substance. Same shape as the unit rule where
+//                                  mg/mg cancels to dimensionless.
+//
+// Comparisons follow the add/sub rule: comparing amounts of disjoint species
+// is the same category error as adding them.
+//
+// NOTE ON INDICES. TypeEntry.ontology_id is an OntologyTable index and the
+// queries below take KERNEL indices. They coincide because both tables are
+// filled by the same walk over the same declaration list, and
+// check_call_arg_ontology_boundary already depends on that same coincidence.
+//
+// NOT A TRANSCRIPTION. The by-value spine has no equivalent of this layer --
+// the evaporation above was measured ON that spine. So this is the first rule
+// that exists in the *mut spine and not the by-value one, which is the
+// opposite direction from everything checker_spine_parity.frozen tracks, and
+// the gate is silent about it by construction.
+fn checker_ontology_relation(c: *mut Checker, lo: i64, ro: i64) -> i64 with Mut, Panic, Div, Alloc, IO {
+    // 0 = same, or left subsumes right (left keeps); 1 = right subsumes left;
+    // 2 = disjoint; 3 = unrelated.
+    //
+    // These are the free kernel queries, NOT (*c).ontology_inference_query_*.
+    // Those are by-value `impl Checker` methods, and reaching them from here
+    // would copy the ~8 MB Checker on every binary operator in the program.
+    // The kernel itself is small enough to pass by value, which is exactly
+    // what the by-value methods do internally.
+    if lo == ro { return 0 }
+    if ontology_kernel_is_subclass((*c).ontology_kernel, lo, ro) { return 1 }
+    if ontology_kernel_is_subclass((*c).ontology_kernel, ro, lo) { return 0 }
+    if ontology_kernel_is_disjoint((*c).ontology_kernel, lo, ro) { return 2 }
+    3
+}
+
+fn checker_finish_binary_ontology_inplace(c: *mut Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let lo = left.ontology_id
+    let ro = right.ontology_id
+    if lo < 0 && ro < 0 {
+        return result
+    }
+    match op {
+        BinaryOp::OpDiv => {
+            if lo >= 0 && ro >= 0 {
+                return ty_with_ontology(result, 0 - 1)
+            }
+            let uid = if lo >= 0 { lo } else { ro }
+            return ty_with_ontology(result, uid)
+        }
+        BinaryOp::OpAdd => {}
+        BinaryOp::OpSub => {}
+        BinaryOp::OpMul => {}
+        BinaryOp::OpEq => {}
+        BinaryOp::OpNe => {}
+        BinaryOp::OpLt => {}
+        BinaryOp::OpLe => {}
+        BinaryOp::OpGt => {}
+        BinaryOp::OpGe => {}
+        _ => { return result }
+    }
+    if lo < 0 || ro < 0 {
+        let uid = if lo >= 0 { lo } else { ro }
+        return ty_with_ontology(result, uid)
+    }
+    let rel = checker_ontology_relation(c, lo, ro)
+    if rel == 0 { return ty_with_ontology(result, lo) }
+    if rel == 1 { return ty_with_ontology(result, ro) }
+    if rel == 2 {
+        checker_report_error_at_inplace(c, span, 261, 0, 0, 0)
+        return result
+    }
+    checker_report_error_at_inplace(c, span, 262, 0, 0, 0)
+    result
+}
+
+// Units first, then ontology on the type units produced. Two orthogonal tags
+// on the same TypeEntry: a dimension and a species. Each layer reads the
+// operand types, never the other layer's verdict.
+fn checker_finish_binary_inplace(c: *mut Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let with_units = checker_finish_binary_units_inplace(c, span, op, left, right, result)
+    checker_finish_binary_ontology_inplace(c, span, op, left, right, with_units)
+}
+
 fn checker_finish_binary_units_inplace(c: *mut Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let lu = left.unit_id
     let ru = right.unit_id
     if lu < 0 && ru < 0 {
         return result
     }
-    let pair = (*c).check_binary_units(span, op, left, right, result)
-    checker_store_from_value(c, pair.0)
-    pair.1
+    match op {
+        // Addition and subtraction require the SAME unit, not merely the
+        // same dimension: adding mg to kg is a scale error, and the scale
+        // factor lives in the registry rather than in the exponent vector.
+        BinaryOp::OpAdd => {
+            if !checker_units_addable(c, lu, ru) {
+                checker_report_unit_mismatch_inplace(c, span, lu, ru)
+                result
+            } else {
+                let uid = if lu >= 0 { lu } else { ru }
+                ty_with_unit(result, uid)
+            }
+        }
+        BinaryOp::OpSub => {
+            if !checker_units_addable(c, lu, ru) {
+                checker_report_unit_mismatch_inplace(c, span, lu, ru)
+                result
+            } else {
+                let uid = if lu >= 0 { lu } else { ru }
+                ty_with_unit(result, uid)
+            }
+        }
+        // Multiplication and division COMBINE dimensions, and the combined
+        // dimension is interned so it can be carried.
+        //
+        // The subtlety that made a first version of this wrong: `result`
+        // comes from binary_result_type, which returns the LEFT operand's
+        // type -- unit_id included. Passing it through unchanged therefore
+        // left `mg / mg` branded as mass^1 instead of cancelling, and left
+        // `mg * mg` branded mass^1 instead of mass^2. Every branch below
+        // sets the brand explicitly rather than inheriting it.
+        BinaryOp::OpMul => {
+            if lu >= 0 && ru >= 0 {
+                let d = unit_dim_mul(checker_unit_dim_at(c, lu), checker_unit_dim_at(c, ru))
+                checker_brand_with_dim(c, result, d)
+            } else {
+                let uid = if lu >= 0 { lu } else { ru }
+                ty_with_unit(result, uid)
+            }
+        }
+        BinaryOp::OpDiv => {
+            if lu >= 0 && ru >= 0 {
+                let d = unit_dim_div(checker_unit_dim_at(c, lu), checker_unit_dim_at(c, ru))
+                checker_brand_with_dim(c, result, d)
+            } else if lu >= 0 {
+                ty_with_unit(result, lu)
+            } else {
+                // scalar / unit -- the inverse dimension
+                let d = unit_dim_div(unit_dim_dimensionless(), checker_unit_dim_at(c, ru))
+                checker_brand_with_dim(c, result, d)
+            }
+        }
+        BinaryOp::OpEq => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        BinaryOp::OpNe => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        BinaryOp::OpLt => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        BinaryOp::OpLe => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        BinaryOp::OpGt => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        BinaryOp::OpGe => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        _ => result
+    }
 }
 
 // R6 Correlated, second (unconditional) exemption: `k1 + k2` for two DIFFERENT
@@ -6534,7 +8115,22 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     // generic identity check rejects `a + b` between two different claims over
     // the same f64 before the unwrap ever runs.
     let either_cond_indep = left_ty.kind == TypeKind::TyCondIndep || right_ty.kind == TypeKind::TyCondIndep
-    if !both_hyper && !either_cond_indep && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !types_compatible(left_ty, right_ty) {
+    // Units are the THIRD case of the exemption the two lines above already
+    // make twice, and for the identical reason: this generic identity check
+    // runs BEFORE binary_result_type, so a rule that says "two branded f64
+    // must carry the same brand" rejects `distance / time` -- metres over
+    // seconds -- as "these types cannot be combined with this operator",
+    // before any unit logic can look at it. Dividing unlike units is the
+    // point of having units.
+    //
+    // compat_numeric_ignoring_units answers the question this check should
+    // be asking -- are these the same KIND of number -- and leaves unit
+    // policy to checker_finish_binary_units_inplace, which knows that
+    // addition needs one dimension and one scale while division needs
+    // neither. Found by instrumenting a source build: the site fifteen lines
+    // below reported ignunits=1 and reskind=1 (not an error) for exactly the
+    // operand pair this line was rejecting.
+    if !both_hyper && !either_cond_indep && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !compat_numeric_ignoring_units(left_ty, right_ty) {
         let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
             || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
         let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
@@ -6611,7 +8207,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         if correlated_same_slot_add {
             knowledge_result.knowledge_epsilon = epsilon_combine_correlated(left_ty.knowledge_epsilon, right_ty.knowledge_epsilon)
         }
-        let final_result = checker_finish_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_result)
+        let final_result = checker_finish_binary_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_result)
         if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
             let final_inner = if final_result.kind == TypeKind::TyKnowledge {
                 knowledge_inner(final_result)
@@ -6629,7 +8225,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         let hr = check_hyper_binary(*c, e.span, e.bin_op, left_ty, right_ty)
         checker_store_from_value(c, hr.0)
         let typed_result = hr.1
-        let final_result = checker_finish_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, typed_result)
+        let final_result = checker_finish_binary_inplace(c, e.span, e.bin_op, left_ty, right_ty, typed_result)
         if e.bin_op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
             let rh = (*c).record_hyper_expr(e.span, final_result.algebra_kind, 1, false)
             checker_store_from_value(c, rh)
@@ -6668,7 +8264,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             checker_report_error_at_inplace(c, e.span, 57, 0, 0, 0)
         }
     }
-    checker_finish_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, result)
+    checker_finish_binary_inplace(c, e.span, e.bin_op, left_ty, right_ty, result)
 }
 
 fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -8598,6 +10194,47 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
                 primitive_exact = true
             }
         }
+        // A BRANDED primitive is not exact. A unit dimension and an ontology
+        // class both ride on TyF64, so `fn f(x: mg)` called with a `second`,
+        // and `fn f(x: H2)` called with a `CO2`, are TyF64-vs-TyF64 and took
+        // this fast path -- which skips ALL FIVE boundary checks below, the
+        // only place those brands are ever compared.
+        //
+        // This was invisible until the brands reached this engine. While
+        // `unit` was inert here, `mg` and `second` were unresolved named
+        // types and the mismatch fell out as E001/E009; waking the unit
+        // system turned both into TyF64 and the call-argument dimension
+        // check silently stopped running. Measured: needs_mg(t: second) is
+        // rejected by bin/madaros-linux-x86_64 and was ACCEPTED after the
+        // units commit. Same shape killed the ontology boundary the moment a
+        // class with an f64 property became an f64.
+        // Read the brand fields DIRECTLY off the two types already in scope: no
+        // new local, no call, nothing added to this frame. The loop this sits in
+        // is the one whose comment reads "no Checker locals -- ~12MB+ held across
+        // this fn's nested-call recursion". Four TypeEntry locals here took
+        // graphics_quality_band_smoke from 4 SIGSEGVs in 12 runs to 12 in 12;
+        // moving them into leaf helpers only got it back to 8 in 12, because the
+        // call still materialised two TypeEntry copies in THIS frame.
+        //
+        // Reading the outer type rather than call_ref_inner_or_self is exact
+        // here: primitive_exact is only true when both kinds are the SAME
+        // primitive, and a reference is never TyF64, so there is no inner to
+        // unwrap on this path.
+        if primitive_exact
+        // refinement_id joins unit_id and ontology_id here, and the reason it
+        // was not here from the start is recorded in e0b5b70722: it had the same
+        // shape and was left out for want of its own measurement. The
+        // measurement arrived. Binding a refinement alias to its base type made
+        // `type NeedsHalf = { v: f64 | v > 0.5 }` resolve to TyF64, so
+        // assert_potent(0.1) became TyF64-against-TyF64, took this fast path, and
+        // skipped the refinement boundary that rejects it -- a call the committed
+        // baseline REFUSES with E009 and this build accepted. Three fixtures
+        // turned green vacuously in the process.
+        && (arg_ty.unit_id >= 0 || param_info.ty.unit_id >= 0
+         || arg_ty.ontology_id >= 0 || param_info.ty.ontology_id >= 0
+         || arg_ty.refinement_id >= 0 || param_info.ty.refinement_id >= 0) {
+            primitive_exact = false
+        }
         let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
         // KL-13: primitive kind match still enforces unit brands on f64/i64.
         if has_param_info && primitive_exact && (arg_ty.kind == TypeKind::TyF64 || arg_ty.kind == TypeKind::TyI64) {
@@ -9222,6 +10859,26 @@ fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut
         if sig.defining_module_id == (*c).current_module_id {
             return true
         }
+        // Copilot review (PR #2515): a real, valid module-id mismatch is
+        // authoritative and must not fall through to the path-based check
+        // below. check_items_verdict_boot4_with_module_map (self-hosted/
+        // check/mod.sio) stamps current_module_id correctly per specialized
+        // item but never updates current_module (the PATH), which stays
+        // empty_path() for every item on that path -- so falling through
+        // here let ast_path_eq(empty, empty) grant private access across
+        // genuinely different modules whenever BOTH ids were known but
+        // different. -1/-2 are the "owner unknown"/"not found" sentinels
+        // (see check_mod_item_module_owner's own comment in mod.sio and
+        // spec_item_module_lookup's SPEC_ITEM_MODULE_NOT_FOUND) -- only
+        // fall through to the path check when either id is unresolved,
+        // preserving existing behaviour for paths that never populate
+        // *_module_id at all. Depends on spec_make_fn_item propagating the
+        // template's real visibility (see its own comment) -- before that
+        // fix, a pub generic function's monomorphized clone read back as
+        // PRIVATE and this branch produced a spurious E175.
+        if sig.defining_module_id >= 0 && (*c).current_module_id >= 0 {
+            return false
+        }
     }
     visibility_allows_access(
         sig.visibility,
@@ -9246,6 +10903,14 @@ fn checker_struct_visible_inplace(c: *mut Checker, struct_idx: i64) -> bool with
         if (*(*c).structs).entries[struct_idx as usize].defining_module_id == (*c).current_module_id {
             return true
         }
+        // Copilot review (PR #2515): see checker_fn_sig_visible_inplace's
+        // own comment -- a real, valid module-id mismatch is authoritative
+        // and must not fall through to a path check that reads empty on
+        // the module_map/specialized path. Depends on spec_make_struct_item
+        // propagating the template's real visibility (see its own comment).
+        if (*(*c).structs).entries[struct_idx as usize].defining_module_id >= 0 && (*c).current_module_id >= 0 {
+            return false
+        }
     }
     visibility_allows_access(
         (*(*c).structs).entries[struct_idx as usize].visibility,
@@ -9263,6 +10928,25 @@ fn checker_field_visible_inplace(c: *mut Checker, struct_idx: i64, field_name: N
     let impl_ty = (*c).current_impl_type
     if impl_ty.kind == TypeKind::TyNamed && name_eq(impl_ty.name, si.name) {
         return true
+    }
+    // Match the module-ID fast path used for functions, structs and enums.
+    // Keep path comparison for callers that only supply module paths.
+    if si.defining_module_id == (*c).current_module_id {
+        return true
+    }
+    // Copilot review (PR #2515), comment 4109848820: this now matches
+    // checker_fn_sig_visible_inplace/checker_struct_visible_inplace/
+    // checker_enum_visible_inplace's identical rule -- a real, valid
+    // module-id mismatch is authoritative and must not fall through to a
+    // path check that reads empty on the module_map/specialized path.
+    // tests/run-pass/{gen_dep_summary_min,madaros_module_qualified_generic_call}.sio
+    // used to read GBig<F>'s `c`/`bits` fields as non-pub, relying on
+    // exactly the bypass this whole review is closing; both fields are
+    // now `pub` (stdlib/testmod/gen_big.sio) so this tightening does not
+    // regress them. Depends on spec_make_struct_item propagating the
+    // template's real visibility (see its own comment).
+    if si.defining_module_id >= 0 && (*c).current_module_id >= 0 {
+        return false
     }
     visibility_allows_access(
         visibility_private(),
@@ -9286,6 +10970,19 @@ fn checker_enum_visible_inplace(c: *mut Checker, enum_idx: i64) -> bool with Mut
     if vis_kind == VISIBILITY_PRIVATE {
         if (*(*c).enums).entries[enum_idx as usize].defining_module_id == (*c).current_module_id {
             return true
+        }
+        // Copilot review (PR #2515): see checker_fn_sig_visible_inplace's
+        // own comment -- a real, valid module-id mismatch is authoritative
+        // and must not fall through to a path check that reads empty on
+        // the module_map/specialized path. Unlike structs, generic enums
+        // are never monomorphized/cloned by the specializer (there is no
+        // spec_make_enum_item / spec_get_or_create_enum_instance) -- an
+        // enum reaching this check on the specialized path is always its
+        // ORIGINAL template item, already correctly registered by
+        // spec_item_module_collect under its own name, so this needs no
+        // analogous module-attribution fix at the specializer level.
+        if (*(*c).enums).entries[enum_idx as usize].defining_module_id >= 0 && (*c).current_module_id >= 0 {
+            return false
         }
     }
     visibility_allows_access(
@@ -9492,11 +11189,107 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             if (*callee_expr).kind == ExprKind::ExprIdent {
                 direct_sig_id = checker_fn_sigs_find_inplace(c, (*callee_expr).name)
             } else if (*callee_expr).kind == ExprKind::ExprPath && (*callee_expr).path.seg_count >= 2 {
-                let path_type_name = checker_copy_string_list_to_name((*callee_expr).path.segments)
+                let path_type_name = checker_copy_string_list_penultimate_to_name((*callee_expr).path.segments)
                 let path_method_name = checker_copy_string_list_tail_to_name((*callee_expr).path.segments)
+                // Copilot review (PR #2515), round-3 comment 4113834074: a
+                // globally-known lowercase struct/enum can share its name
+                // with a module the CALLER actually `use`d (e.g. `use m;`
+                // alongside an unrelated, elsewhere-declared `struct m`) --
+                // `fn_sig_table_find_method_semantic` below has no per-import
+                // provenance and would happily bind `m::f()` to the struct's
+                // unrelated method even though the caller's own qualifier
+                // namespace names a real module. checker_use_module_known
+                // already answers "did THIS module actually `use` a module
+                // by this name" (round 3 of an earlier finding, comment
+                // 4089110672) -- consult that FIRST, before the semantic
+                // type-method lookup touches any global table, so a
+                // genuinely-imported module qualifier is never shadowed by
+                // an unrelated same-named type. This does not (and cannot
+                // alone) resolve which SPECIFIC module a qualifier targets
+                // when two real modules share a suffix -- see the
+                // checker_use_module_known call further below (comment
+                // 4110379040) for that separate, still-open architectural
+                // gap.
+                let path_type_name_is_used_module = checker_use_module_known((*c).current_module_id, path_type_name)
                 // Prefer semantic match (kind+name) then name-only self_type_name.
                 let recv_ty = ty_named(path_type_name)
-                direct_sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, recv_ty, path_method_name)
+                let colliding_semantic_sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, recv_ty, path_method_name)
+                // Copilot review (PR #2515), comment 4114680413: preferring
+                // the caller's `use`d-module evidence here makes --check
+                // accept this call, but the LOWERER (self-hosted/ir/
+                // lower.sio's callee_path_module_stripped_name) still
+                // resolves the method through the global, no-provenance
+                // LOWER_IMPL_METHOD_HASH and can select the unrelated
+                // struct/enum's method body instead -- confirmed directly
+                // (tests/multimodule/module_qualifier_type_collision/basic
+                // segfaults at runtime once native-compiled). A checker
+                // pass that the compiler then crashes on is worse than a
+                // checker refusal: --check OK must mean "this will run",
+                // not "this typechecks under an asymmetric guess neither
+                // side of the compiler can fully honor." Closing this for
+                // real needs the same shared "qualifier -> target-module-
+                // id" resolution table this PR already documents as a
+                // genuine architectural gap (comment 4110379040 and
+                // others) -- not something to rush here. Until that
+                // exists, fail closed: when the qualifier is BOTH a real
+                // `use`d module AND collides with an unrelated struct/enum
+                // that actually defines this same method name, refuse the
+                // call outright instead of silently picking a side. This
+                // does not affect the common case (a used module with no
+                // colliding same-named type+method), which every other
+                // fixture in this PR (af_mod::AfNum::quad,
+                // pkg_mod::Widget::make) already compiles and runs.
+                if path_type_name_is_used_module && colliding_semantic_sig_id >= 0 {
+                    checker_report_error_at_inplace(c, e.span, 263, 0, 0, 0)
+                }
+                direct_sig_id = if path_type_name_is_used_module {
+                    -1
+                } else {
+                    colliding_semantic_sig_id
+                }
+                // Round 10 (review comment 4099548863): for a path LONGER than
+                // 2 segments (e.g. `bogus::AfNum::quad(..)`), the match above
+                // only ever looks at the PENULTIMATE segment ("AfNum") to find
+                // the type -- everything before it ("bogus") was never
+                // validated. A real `AfNum::quad` match set direct_sig_id >= 0,
+                // which skips the qualifier-validation block below entirely
+                // (it is gated on direct_sig_id < 0), so an unimported leading
+                // module segment was silently accepted while the lowerer,
+                // which cannot strip an unregistered "bogus" prefix, targeted
+                // the wrong mangled stub -- the same check-success/body-less-
+                // stub mismatch this whole qualifier-validation machinery
+                // exists to prevent.
+                //
+                // Round 13 (review comment 4103152006): that first fix only
+                // checked the prefix BEFORE the type name was itself a known
+                // module suffix -- it never checked that the prefix and the
+                // TYPE NAME TOGETHER form one real, actually-`use`d path. Two
+                // separately legitimate imports (`use testmod::tc_c;` and
+                // `use af_mod::AfNum;`, say) each register their own real
+                // suffixes ("tc_c", "AfNum", ...), so `tc_c::AfNum::quad()`
+                // passed: "tc_c" alone was a known suffix, and the semantic
+                // method lookup found a real `AfNum::quad` globally, by name,
+                // with no check that `AfNum` is actually reachable AS "tc_c::
+                // AfNum" specifically. fn_sig_table_find_method_semantic has
+                // no per-import provenance to check that against directly,
+                // but checker_use_module_known already does, for exactly this
+                // shape: check the qualifier INCLUDING the type name as ONE
+                // combined suffix ("tc_c::AfNum", not just "tc_c" alone)
+                // against the current module's registered `use`-suffixes --
+                // the same exact-full-qualifier-match principle the
+                // qualified-free-fn path already relies on (round 8). This
+                // combined text can only be a registered suffix if `AfNum`
+                // was genuinely imported reachable through THAT prefix (e.g.
+                // `use tc_c::AfNum;`, or `use some::tc_c::AfNum;`, which
+                // registers "some::tc_c::AfNum" and "tc_c::AfNum" as
+                // suffixes) -- two independently-real but unrelated imports
+                // sharing no such combined suffix correctly fail to match.
+                if direct_sig_id >= 0 && (*callee_expr).path.seg_count > 2 {
+                    let assoc_qualifier = ast_path_range_name((*callee_expr).path, 0, (*callee_expr).path.seg_count - 2)
+                    if !checker_use_module_known((*c).current_module_id, assoc_qualifier) {
+                        direct_sig_id = -1
+                    }
+                }
                 // W044. The fallthrough documented just above is also what lets an
                 // associated-function call whose target resolves to NOTHING be accepted
                 // silently, evaluating to 0 and propagating that 0 as a pointer. The plain
@@ -9522,10 +11315,84 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 // already 0 today. Promoting to an error requires deciding what they should
                 // be, which is stdlib semantics work, not a checker change.
                 if direct_sig_id < 0 {
-                    if struct_table_find((*c).structs, path_type_name) < 0 {
-                        if enum_table_find((*c).enums, path_type_name) < 0 {
-                            if checker_fn_sigs_find_inplace(c, path_method_name) < 0 {
+                    // path_type_name_is_used_module short-circuits these two
+                    // lookups: when the qualifier is a module the CALLER
+                    // actually `use`d, treat this as a module-qualified
+                    // free-fn call regardless of whether an UNRELATED
+                    // same-named struct/enum also exists globally -- see
+                    // this arm's own comment above (round-3 comment
+                    // 4113834074) for why the caller's own import namespace
+                    // must win over a global type-table hit here.
+                    if path_type_name_is_used_module || struct_table_find((*c).structs, path_type_name) < 0 {
+                        if path_type_name_is_used_module || enum_table_find((*c).enums, path_type_name) < 0 {
+                            // `path_type_name` is not a known struct/enum, so this
+                            // is plausibly a module-qualified free-fn call
+                            // (`mod::f(..)`, `a::mod::f(..)`) rather than
+                            // `Type::method`. `path_method_name` is always the
+                            // true terminal segment regardless of path length
+                            // (checker_copy_string_list_tail_to_name), so this
+                            // also covers the >2-segment case correctly.
+                            //
+                            // Bind direct_sig_id to the found free-fn signature
+                            // (not just check its existence) so the call falls
+                            // into the `direct_sig_id >= 0` block below and gets
+                            // full treatment: visibility, argument checking,
+                            // generics, and effects -- exactly like a bare
+                            // `f(..)` call. Previously this only suppressed
+                            // W044, leaving direct_sig_id at -1 so `mod::f(..)`
+                            // with the wrong argument types, or a call to a
+                            // private `mod::private_fn()`, compiled unchecked.
+                            //
+                            // The terminal name resolving to SOME free fn
+                            // signature is not enough on its own (review
+                            // comment 4089110672 / finding A): that lookup is
+                            // by bare name across the WHOLE program, so
+                            // `bogus_module::pubf(..)` bound a real `pubf`'s
+                            // signature here even though `bogus_module` was
+                            // never `use`d anywhere -- typechecking clean while
+                            // the lowerer, which DOES validate the qualifier
+                            // against its own module registry, fell through to
+                            // its legacy mangled-stub path and emitted a
+                            // body-less `bogus_module_pubf` call (SIGILL).
+                            // checker_path_qualifier_all_modules_known
+                            // confirms every segment before the terminal name
+                            // is a real `use`-declared module (the SAME
+                            // positive-evidence check the lowerer's
+                            // LOWER_USE_MODULE_HASH performs) before trusting
+                            // the bare-name match.
+                            // Copilot review (PR #2515), comment 4110379040: this
+                            // combines two independent whole-program facts --
+                            // "qualifier is SOME known use import" and "SOME
+                            // global fn named path_method_name exists" -- without
+                            // ever checking that the specific fn found is the one
+                            // the qualifier's target module actually declares. With
+                            // both `use testmod::tc_c;` and `use testmod::
+                            // dep_chain_leaf;` imported, `tc_c::leaf_add(..)` binds
+                            // to `dep_chain_leaf::leaf_add` if a same-named
+                            // `leaf_add` exists there. checker_use_module_known's
+                            // registry only proves a qualifier text was `use`d by
+                            // the current module (round 3, comment 4089110672); it
+                            // was never extended to resolve a qualifier to its
+                            // target module id (there is no "declaring module's
+                            // qualifier segment -> target module id" table anywhere
+                            // in this checker, nor in specializer.sio's identical
+                            // gap at spec_call_expr_callee_name or ir/lower.sio's
+                            // at callee_path_module_stripped_name). Closing this
+                            // for real needs that resolution table built once at
+                            // import time and threaded through all three call
+                            // sites and both multi-module loading pipelines
+                            // (module_loader.sio and module_frontend.sio) -- a
+                            // genuine architectural addition out of scope for this
+                            // round, left as a known, accepted gap rather than a
+                            // partial fix risking a new regression in an already
+                            // heavily-revised area (see this PR's specializer.sio/
+                            // parser/ast.sio module-provenance comments for the
+                            // same scoping judgment on a related finding).
+                            let free_fn_sig_id = checker_fn_sigs_find_inplace(c, path_method_name)
+                            if free_fn_sig_id < 0 || !checker_path_qualifier_all_modules_known(c, (*callee_expr).path) {
                                 checker_report_warning_at_mut(c, e.span, 44, 0, 0, 0)
+                            } else {
+                                direct_sig_id = free_fn_sig_id
                             }
                         }
                     }
@@ -9559,7 +11426,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // implement. This is the live arm -- a plain ident callee resolves via
         // direct_sig_id and returns below, never reaching the TyFn fallback.
         var refused_unimplemented = false
-        if direct_sig.is_extern && !name_is_native_backend_builtin(direct_sig.name) {
+        if direct_sig.is_extern && !name_is_native_backend_builtin(direct_sig.name) && !name_is_dynlink_extern(direct_sig.name) {
             checker_report_error_at_inplace(c, e.span, 250, 0, 0, 0)
             refused_unimplemented = true
         }
@@ -9671,7 +11538,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // bodyless instead of giving it a ffi_<name> forwarding body, because
         // a wrapper body carries is_extern false and this arm never fires.
         var refused_unimplemented = false
-        if sig.is_extern && !name_is_native_backend_builtin(sig.name) {
+        if sig.is_extern && !name_is_native_backend_builtin(sig.name) && !name_is_dynlink_extern(sig.name) {
             checker_report_error_at_inplace(c, e.span, 250, 0, 0, 0)
             refused_unimplemented = true
         }
@@ -10160,9 +12027,25 @@ fn checker_check_call_arg_refinement_boundary_inplace(c: *mut Checker, arg_expr:
         let result = refine_static_check_int_literal(expected_ref.predicate, arg_expr.int_val)
         if result == refine_static_result_proved() {
             (*c).refine_static_proved = (*c).refine_static_proved + 1
-        } else {
+        } else if result == refine_static_result_violated() {
             (*c).refine_violations = (*c).refine_violations + 1
             checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
+        } else {
+            // StaticUnknown. The predicate is not one this checker can
+            // evaluate -- see pred_is_evaluable. Reporting that as a
+            // violation is a claim of proof nobody made, and it is what
+            // rejected `{ n: i32 | n * 2 < 200 }` for the argument 42, and
+            // for 1, and for 500: the coefficient on n has no place in
+            // RefinementPred, so the predicate degrades to op=none and the
+            // binary check called that a violation.
+            //
+            // It now takes the same epistemic fallback an unprovable
+            // obligation already takes: W040, the call compiles, the
+            // warning is the notice. Reported through the *mut reporter
+            // rather than the by-value bridge, so this adds no new entry
+            // to scripts/ci/checker_spine_bridges.frozen.
+            (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
+            checker_report_warning_at_mut(c, call_span, 40, 0, 0, 0)
         }
         return
     }
@@ -10170,9 +12053,25 @@ fn checker_check_call_arg_refinement_boundary_inplace(c: *mut Checker, arg_expr:
         let result = refine_static_check_float_literal(expected_ref.predicate, arg_expr.float_val)
         if result == refine_static_result_proved() {
             (*c).refine_static_proved = (*c).refine_static_proved + 1
-        } else {
+        } else if result == refine_static_result_violated() {
             (*c).refine_violations = (*c).refine_violations + 1
             checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
+        } else {
+            // StaticUnknown. The predicate is not one this checker can
+            // evaluate -- see pred_is_evaluable. Reporting that as a
+            // violation is a claim of proof nobody made, and it is what
+            // rejected `{ n: i32 | n * 2 < 200 }` for the argument 42, and
+            // for 1, and for 500: the coefficient on n has no place in
+            // RefinementPred, so the predicate degrades to op=none and the
+            // binary check called that a violation.
+            //
+            // It now takes the same epistemic fallback an unprovable
+            // obligation already takes: W040, the call compiles, the
+            // warning is the notice. Reported through the *mut reporter
+            // rather than the by-value bridge, so this adds no new entry
+            // to scripts/ci/checker_spine_bridges.frozen.
+            (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
+            checker_report_warning_at_mut(c, call_span, 40, 0, 0, 0)
         }
         return
     }
@@ -10196,9 +12095,26 @@ fn checker_check_call_arg_refinement_boundary_inplace(c: *mut Checker, arg_expr:
             if result == refine_static_result_proved() {
                 (*c).refine_static_proved = (*c).refine_static_proved + 1
                 return
-            } else {
+            } else if result == refine_static_result_violated() {
                 (*c).refine_violations = (*c).refine_violations + 1
                 checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
+                return
+            } else {
+                // StaticUnknown. The predicate is not one this checker can
+                // evaluate -- see pred_is_evaluable. Reporting that as a
+                // violation is a claim of proof nobody made, and it is what
+                // rejected `{ n: i32 | n * 2 < 200 }` for the argument 42, and
+                // for 1, and for 500: the coefficient on n has no place in
+                // RefinementPred, so the predicate degrades to op=none and the
+                // binary check called that a violation.
+                //
+                // It now takes the same epistemic fallback an unprovable
+                // obligation already takes: W040, the call compiles, the
+                // warning is the notice. Reported through the *mut reporter
+                // rather than the by-value bridge, so this adds no new entry
+                // to scripts/ci/checker_spine_bridges.frozen.
+                (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
+                checker_report_warning_at_mut(c, call_span, 40, 0, 0, 0)
                 return
             }
         }
@@ -10380,7 +12296,16 @@ fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_ty: TypeEnt
     if expected_unit < 0 || provided_unit < 0 {
         return
     }
-    if expected_unit != provided_unit {
+    // Compare DIMENSIONS, not registry indices. A quantity derived by
+    // arithmetic -- `distance / time` in
+    // tests/run-pass/unit_derived_binding_keeps_value -- is branded with an
+    // anonymous interned entry, while `unit velocity = m / s` has its own
+    // named entry. Identical dimension, different index, and an index
+    // comparison rejects it while printing the SAME dimension on both
+    // lines of the diagnostic, which is how this surfaced. Same
+    // addability test the binary operator uses, so the two agree by
+    // construction.
+    if !checker_units_addable(c, provided_unit, expected_unit) {
         let t = (*c).report_unit_call_mismatch(call_span, provided_unit, expected_unit)
         checker_store_from_value(c, t)
         return
@@ -10714,17 +12639,49 @@ fn checker_check_refinement_literal_inplace(c: *mut Checker, span: Span, ty: Typ
         let result = refine_static_check_int_literal(rt.predicate, (*c).last_literal_int)
         if result == refine_static_result_proved() {
             (*c).refine_static_proved = (*c).refine_static_proved + 1
-        } else {
+        } else if result == refine_static_result_violated() {
             (*c).refine_violations = (*c).refine_violations + 1
             checker_report_error_at_inplace(c, span, 42, 0, 0, 0)
+        } else {
+            // StaticUnknown. The predicate is not one this checker can
+            // evaluate -- see pred_is_evaluable. Reporting that as a
+            // violation is a claim of proof nobody made, and it is what
+            // rejected `{ n: i32 | n * 2 < 200 }` for the argument 42, and
+            // for 1, and for 500: the coefficient on n has no place in
+            // RefinementPred, so the predicate degrades to op=none and the
+            // binary check called that a violation.
+            //
+            // It now takes the same epistemic fallback an unprovable
+            // obligation already takes: W040, the call compiles, the
+            // warning is the notice. Reported through the *mut reporter
+            // rather than the by-value bridge, so this adds no new entry
+            // to scripts/ci/checker_spine_bridges.frozen.
+            (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
+            checker_report_warning_at_mut(c, span, 40, 0, 0, 0)
         }
     } else if (*c).last_literal_kind == 2 {
         let result = refine_static_check_float_literal(rt.predicate, (*c).last_literal_float)
         if result == refine_static_result_proved() {
             (*c).refine_static_proved = (*c).refine_static_proved + 1
-        } else {
+        } else if result == refine_static_result_violated() {
             (*c).refine_violations = (*c).refine_violations + 1
             checker_report_error_at_inplace(c, span, 42, 0, 0, 0)
+        } else {
+            // StaticUnknown. The predicate is not one this checker can
+            // evaluate -- see pred_is_evaluable. Reporting that as a
+            // violation is a claim of proof nobody made, and it is what
+            // rejected `{ n: i32 | n * 2 < 200 }` for the argument 42, and
+            // for 1, and for 500: the coefficient on n has no place in
+            // RefinementPred, so the predicate degrades to op=none and the
+            // binary check called that a violation.
+            //
+            // It now takes the same epistemic fallback an unprovable
+            // obligation already takes: W040, the call compiles, the
+            // warning is the notice. Reported through the *mut reporter
+            // rather than the by-value bridge, so this adds no new entry
+            // to scripts/ci/checker_spine_bridges.frozen.
+            (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
+            checker_report_warning_at_mut(c, span, 40, 0, 0, 0)
         }
     }
     (*c).last_literal_kind = 0
@@ -15507,8 +17464,11 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 254 { print("is not a node of the declared causal graph") }
     else if code == 255 { print("is not d-separated from the other variable given the stated conditioning set: an active path remains open") }
     else if code == 256 { print("`d_separated` needs a declared causal graph and exactly two variable names, with an optional `| Z`") }
+    else if code == 261 { print("ontology classes are disjoint and cannot be combined by this operator") }
+    else if code == 262 { print("ontology classes are unrelated: no subsumption between them, so the operator cannot say what the result is an amount of") }
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
+    else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
     else { print("unknown error") }
 }
 
@@ -15616,7 +17576,7 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("   |\n   = help: drop other borrows before acquiring an exclusive borrow (`&!x`)\n")
     }
     else if code == 39 {
-        print("   |\n   = help: linear values can only be used once; clone the value if needed\n")
+        print("   |\n   = help: a linear value can be used exactly once; pass it on instead of reusing it, or restructure so each use gets its own value\n")
     }
     else if code == 40 {
         print("   |\n   = help: consume the linear value by using it in a function call or assignment\n")
@@ -15845,6 +17805,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("\n   =       (then the reported variance overstates, which is safe); `/` refuses")
         print("\n   =       any shared source, because its dropped term also depends on the sign")
         print("\n   =       of the product of the operand values, which is not tracked.\n")
+    }
+    else if code == 263 {
+        print("   |\n   = help: rename the struct/enum, the method, or the module import so the qualifier is no longer ambiguous\n")
     }
     else {
         // No help available for unknown errors
@@ -16192,6 +18155,12 @@ fn print_warning_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 43 {
         print("boolean equality on uncertain value: exact == ignores uncertainty\n")
         print("   = help: use ep_eq_prob + ep_decide (epistemic::uncertain_eq) or claim exactness")
+    }
+    else if code == 46 {
+        print("refinement predicate could not be represented and is NOT being checked\n")
+        print("   = note: this checker represents `<var> <cmp> <literal>` and conjunctions of those\n")
+        print("   = note: arithmetic on the bound variable, such as `n * 2 < 200`, has no representation\n")
+        print("   = help: the declared base type still applies; no obligation from this predicate is enforced\n")
     }
     else if code == 45 {
         print("public function performs an effect its signature does not declare\n")
@@ -16692,6 +18661,26 @@ fn name_is_unimplemented_native_math(n: Name) -> bool with Mut, Panic, Div, Allo
     if name_eq(n, make_name("tanh")) { return true }
     if name_eq(n, make_name("asin")) { return true }
     if name_eq(n, make_name("acos")) { return true }
+    false
+}
+
+// KL-14b/c/d: externs resolved via DT_NEEDED + GOT (not ffi_* / native builtins).
+// Kept out of name_is_native_backend_builtin so extern_builtin_mirror_gate
+// stays a two-list truth; E250 sites consult this separately.
+fn name_is_dynlink_extern(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if name_eq(n, make_name("kl14b_add")) { return true }
+    if name_eq(n, make_name("kl14c_add")) { return true }
+    if name_eq(n, make_name("kl14c_mul")) { return true }
+    if name_eq(n, make_name("kl14c_neg")) { return true }
+    if name_eq(n, make_name("kl14d_a")) { return true }
+    if name_eq(n, make_name("kl14d_b")) { return true }
+    if name_eq(n, make_name("ZSTD_compress")) { return true }
+    if name_eq(n, make_name("ZSTD_decompress")) { return true }
+    if name_eq(n, make_name("ZSTD_isError")) { return true }
+    if name_eq(n, make_name("dlopen")) { return true }
+    if name_eq(n, make_name("dlsym")) { return true }
+    if name_eq(n, make_name("dlclose")) { return true }
+    if name_eq(n, make_name("dlerror")) { return true }
     false
 }
 
@@ -17503,7 +19492,39 @@ fn checker_onto_name_subclass_walk(items: Option<Box<ItemList> >, child_name: Na
     false
 }
 
+// LEAF HELPERS, and the leaf part is the point. Both of these hold TypeEntry
+// locals, and their callers are the call-argument loop, whose own comment reads
+// "no Checker locals -- ~12MB+ held across this fn's nested-call recursion ->
+// the stack overflow". Four TypeEntry locals were added to that frame directly
+// and turned eight intermittent SIGSEGVs into certain ones (graphics_quality_*
+// went from 1-6 of 12 to 12 of 12) and made test_lie crash 7 of 12 where it had
+// never crashed at all. Every one of them passes under `ulimit -s 524288`.
+// Keeping the locals down here costs one call and leaves that frame as it was.
+// -1 = not a pair of unit-branded f64s, so the caller should fall through to the
+// ordinary compatibility path; 0 = branded and dimensions disagree; 1 = branded
+// and dimensions agree.
+fn checker_call_arg_unit_verdict(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry) -> i64 with Mut, Panic, Div, Alloc {
+    let a = call_ref_inner_or_self(arg_ty)
+    let p = call_ref_inner_or_self(param_ty)
+    if a.kind != TypeKind::TyF64 || p.kind != TypeKind::TyF64 { return 0 - 1 }
+    if a.unit_id < 0 || p.unit_id < 0 { return 0 - 1 }
+    if checker_units_addable(c, a.unit_id, p.unit_id) { return 1 }
+    0
+}
+
 fn checker_call_arg_types_compatible_inplace(c: *mut Checker, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    // Two branded f64s are compatible when their DIMENSIONS agree, not when
+    // their registry indices do. types_compatible in compat.sio can only
+    // compare `a.unit_id == b.unit_id` -- that module deliberately imports
+    // nothing, so it cannot reach the registry -- and an arithmetic-derived
+    // quantity gets an anonymous entry that never equals the named one it
+    // matches. The dedicated unit boundary owns this question and answers
+    // it by dimension; this keeps the two from disagreeing and emitting a
+    // spurious E009 alongside a correct verdict.
+    let unit_verdict = checker_call_arg_unit_verdict(c, arg_ty, param_ty)
+    if unit_verdict >= 0 {
+        return unit_verdict == 1
+    }
     if checker_types_compatible_inplace(c, arg_ty, param_ty) {
         return true
     }
@@ -17768,6 +19789,27 @@ fn checker_copy_string_list_to_name(seg: StringList) -> Name with Mut, Panic, Di
 fn checker_copy_string_list_tail_to_name(seg: StringList) -> Name with Mut, Panic, Div, Alloc {
     match seg.tail {
         Some(rest) => checker_copy_string_list_tail_to_name(*rest)
+        None => checker_copy_string_list_to_name(seg)
+    }
+}
+
+// Segment immediately BEFORE the last one: for `Type::method` that is `Type`
+// (same as checker_copy_string_list_to_name's segment-0 result, so 2-segment
+// paths are unchanged); for a module-qualified associated call like
+// `mod::Type::method` or `a::mod::Type::method`, segment-0 is a MODULE, not
+// the receiver type, so the old always-take-segment-0 behaviour resolved
+// `recv_ty` to a bogus `ty_named("mod")` and fn_sig_table_find_method_semantic
+// could never find the real method. The segment right before the final
+// method name is always the true receiver type, regardless of how many
+// leading module segments precede it.
+fn checker_copy_string_list_penultimate_to_name(seg: StringList) -> Name with Mut, Panic, Div, Alloc {
+    match seg.tail {
+        Some(rest) => {
+            match (*rest).tail {
+                Some(_) => checker_copy_string_list_penultimate_to_name(*rest)
+                None => checker_copy_string_list_to_name(seg)
+            }
+        }
         None => checker_copy_string_list_to_name(seg)
     }
 }
@@ -18883,8 +20925,46 @@ impl Checker {
             TypeExprKind::TypeNever => (c, ty_never())
             TypeExprKind::TypeInfer => (c, ty_unknown())
             TypeExprKind::TypeSelfUpper => (c, c.current_impl_type)
-            TypeExprKind::TypeReference => c.lower_ref_type(te.inner)
-            TypeExprKind::TypeRefMut => c.lower_ref_mut_type(te.inner)
+            TypeExprKind::TypeReference => {
+                match te.type_args {
+                    Some(_) => {
+                        let dim = checker_unit_dim_from_type_expr(c.units, te)
+                        var c2 = c
+                        let found = c2.units.find_by_dim(dim)
+                        if found >= 0 {
+                            (c2, ty_with_unit(ty_f64(), found))
+                        } else if unit_dim_is_dimensionless(dim) {
+                            (c2, ty_f64())
+                        } else {
+                            let anon = Name { buf: [0; 384], len: 0 }
+                            c2.units = c2.units.register(anon, dim)
+                            let uid = c2.units.count - 1
+                            (c2, ty_with_unit(ty_f64(), uid))
+                        }
+                    }
+                    None => c.lower_ref_type(te.inner)
+                }
+            }
+            TypeExprKind::TypeRefMut => {
+                match te.type_args {
+                    Some(_) => {
+                        let dim = checker_unit_dim_from_type_expr(c.units, te)
+                        var c2 = c
+                        let found = c2.units.find_by_dim(dim)
+                        if found >= 0 {
+                            (c2, ty_with_unit(ty_f64(), found))
+                        } else if unit_dim_is_dimensionless(dim) {
+                            (c2, ty_f64())
+                        } else {
+                            let anon = Name { buf: [0; 384], len: 0 }
+                            c2.units = c2.units.register(anon, dim)
+                            let uid = c2.units.count - 1
+                            (c2, ty_with_unit(ty_f64(), uid))
+                        }
+                    }
+                    None => c.lower_ref_mut_type(te.inner)
+                }
+            }
             TypeExprKind::TypeRawPtr => c.lower_raw_ptr_type(te.inner, te.array_size)
             TypeExprKind::TypeArray => c.lower_array_type(te.inner, te.array_size)
             TypeExprKind::TypeTuple => c.lower_tuple_type(te.type_args)
@@ -20122,7 +22202,7 @@ impl Checker {
             ItemKind::ItemValidation => self.collect_validation_def(item.name, item.validation_def)
             ItemKind::ItemAudit => self.collect_audit_def(item.name, item.audit_def)
             ItemKind::ItemUse => self
-            ItemKind::ItemUnit => self.collect_unit_decl(item.name)
+            ItemKind::ItemUnit => self.collect_unit_decl(item.name, item.type_alias_ty)
             ItemKind::ItemEffect => self.collect_item_effect(item.effect_def)
             ItemKind::ItemSession => self  // Session protocol registered in collect pass (no-op for now)
             ItemKind::ItemTrait => self.collect_trait_def(item.name, item.trait_def)
@@ -20314,11 +22394,15 @@ impl Checker {
         }
     }
 
-    fn collect_unit_decl(self, name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_unit_decl(self, name: Name, conv: Option<Box<TypeExpr> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         var c = self
-        // Register user-defined unit as a mass-like dimension (f64 base)
-        // For now, user-defined units get a generic dimension
-        c.units = c.units.register(name, unit_dim_dimensionless())
+        // The dimension is DECODED from the declaration's own `= mol / s`
+        // tail. It used to be discarded -- "For now, user-defined units get
+        // a generic dimension" -- which made every user unit the zero
+        // vector, so mol/s and mol/m differed only by name and unit_dim_mul
+        // and unit_dim_div could never fire on anything a user wrote.
+        let dim = unit_dim_for_decl(c.units, name, conv)
+        c.units = c.units.register(name, dim)
         c
     }
 
@@ -23049,7 +25133,7 @@ impl Checker {
             if result == refine_static_result_proved() {
                 // Statically proved: no runtime assertion needed.
                 c.refine_static_proved = c.refine_static_proved + 1
-            } else {
+            } else if result == refine_static_result_violated() {
                 // Definitely violated at compile time.
                 c.refine_violations = c.refine_violations + 1
                 c = c.report_error_at(span, 42, 0, 0, 0)
@@ -23059,7 +25143,7 @@ impl Checker {
             let result = refine_static_check_float_literal(rt.predicate, c.last_literal_float)
             if result == refine_static_result_proved() {
                 c.refine_static_proved = c.refine_static_proved + 1
-            } else {
+            } else if result == refine_static_result_violated() {
                 c.refine_violations = c.refine_violations + 1
                 c = c.report_error_at(span, 42, 0, 0, 0)
             }
@@ -23660,15 +25744,22 @@ impl Checker {
             // Multiplication: combine unit dimensions
             BinaryOp::OpMul => {
                 if lu >= 0 && ru >= 0 {
-                    // Both have units — product gets combined dimensions
                     let ld = c.units.get_dim(lu)
                     let rd = c.units.get_dim(ru)
                     let prod = unit_dim_mul(ld, rd)
-                    // For now, result is f64 with no named unit (product unit)
-                    // A future pass could register the product unit
-                    (c, result)
+                    let uid = c.units.find_by_dim(prod)
+                    if uid >= 0 {
+                        (c, ty_with_unit(result, uid))
+                    } else if unit_dim_is_dimensionless(prod) {
+                        // binary_result_type returns the LEFT operand's type,
+                        // brand included; a product that cancels must drop it.
+                        (c, ty_with_unit(result, 0 - 1))
+                    } else {
+                        let anon = Name { buf: [0; 384], len: 0 }
+                        c.units = c.units.register(anon, prod)
+                        (c, ty_with_unit(result, c.units.count - 1))
+                    }
                 } else {
-                    // One side has units, other is scalar — keep the unit
                     let uid = if lu >= 0 { lu } else { ru }
                     (c, ty_with_unit(result, uid))
                 }
@@ -23680,17 +25771,22 @@ impl Checker {
                     let rd = c.units.get_dim(ru)
                     let quot = unit_dim_div(ld, rd)
                     if unit_dim_is_dimensionless(quot) {
-                        // Units cancel out — result is dimensionless
-                        (c, result)
+                        // Units cancel: drop the brand binary_result_type
+                        // inherited from the left operand.
+                        (c, ty_with_unit(result, 0 - 1))
                     } else {
-                        // Quotient has dimensions — result is f64 (unnamed unit)
-                        (c, result)
+                        let uid = c.units.find_by_dim(quot)
+                        if uid >= 0 {
+                            (c, ty_with_unit(result, uid))
+                        } else {
+                            let anon = Name { buf: [0; 384], len: 0 }
+                            c.units = c.units.register(anon, quot)
+                            (c, ty_with_unit(result, c.units.count - 1))
+                        }
                     }
                 } else if lu >= 0 {
-                    // numerator has units, denominator is scalar — keep unit
                     (c, ty_with_unit(result, lu))
                 } else {
-                    // numerator is scalar, denominator has units — inverse unit
                     (c, result)
                 }
             }
@@ -23877,7 +25973,7 @@ impl Checker {
                 if field_ty.kind == TypeKind::TyError && !field_exists {
                     c = c.report_no_field(e.span, e.name, base_ty)
                 } else if field_exists && c.enforce_visibility && !field_info_list_is_pub(si.fields, e.name) {
-                    let same_module = visibility_allows_access(visibility_private(), si.defining_module, c.current_module, c.crate_root)
+                    let same_module = si.defining_module_id == c.current_module_id || visibility_allows_access(visibility_private(), si.defining_module, c.current_module, c.crate_root)
                     let own_impl = c.current_impl_type.kind == TypeKind::TyNamed
                         && name_eq(c.current_impl_type.name, si.name)
                     if !same_module && !own_impl {
@@ -23986,9 +26082,16 @@ impl Checker {
                 (c, inner_ty)
             }
         } else if base_ty.kind == TypeKind::TyTuple {
-            // Tuple field access by index (e.g. t.0, t.1)
-            // The field name contains the index as ascii digits
-            let idx = (e.name.buf[0] as i64) - 48
+            // Tuple field access by index (e.g. t.0, t.1, t.15). Read every
+            // digit: one character made `t.15` resolve as index 1.
+            var idx: i64 = 0
+            var di: i64 = 0
+            while di < e.name.len && di < 8 {
+                let ch = (e.name.buf[di as usize] as i64) - 48
+                if ch < 0 || ch > 9 { break }
+                idx = idx * 10 + ch
+                di = di + 1
+            }
             let tuple_count = type_entry_list_count(base_ty.tuple_elems)
             if idx >= tuple_count {
                 c = c.report_error_at(e.span, 47, 0, 0, 0)
@@ -24008,7 +26111,7 @@ impl Checker {
                     if field_ty.kind == TypeKind::TyError && !field_exists {
                         c = c.report_no_field(e.span, e.name, base_ty)
                     } else if field_exists && c.enforce_visibility && !field_info_list_is_pub(si.fields, e.name) {
-                        let same_module = visibility_allows_access(visibility_private(), si.defining_module, c.current_module, c.crate_root)
+                        let same_module = si.defining_module_id == c.current_module_id || visibility_allows_access(visibility_private(), si.defining_module, c.current_module, c.crate_root)
                         let own_impl = c.current_impl_type.kind == TypeKind::TyNamed
                             && name_eq(c.current_impl_type.name, si.name)
                         if !same_module && !own_impl {
@@ -24688,7 +26791,7 @@ impl Checker {
             // on the in-place arm above, and the fixture that pins it,
             // tests/run-pass/ffi_declared_never_called_is_legal.sio.
             var refused_unimplemented = false
-            if sig.is_extern && !name_is_native_backend_builtin(sig.name) {
+            if sig.is_extern && !name_is_native_backend_builtin(sig.name) && !name_is_dynlink_extern(sig.name) {
                 c = c.report_error_at(e.span, 250, 0, 0, 0)
                 refused_unimplemented = true
             }
@@ -26741,7 +28844,7 @@ impl Checker {
             let result = refine_static_check_int_literal(expected_ref.predicate, arg_expr.int_val)
             if result == refine_static_result_proved() {
                 c.refine_static_proved = c.refine_static_proved + 1
-            } else {
+            } else if result == refine_static_result_violated() {
                 c.refine_violations = c.refine_violations + 1
                 c = c.report_error_at(call_span, 42, 0, 0, 0)
             }
@@ -26751,7 +28854,7 @@ impl Checker {
             let result = refine_static_check_float_literal(expected_ref.predicate, arg_expr.float_val)
             if result == refine_static_result_proved() {
                 c.refine_static_proved = c.refine_static_proved + 1
-            } else {
+            } else if result == refine_static_result_violated() {
                 c.refine_violations = c.refine_violations + 1
                 c = c.report_error_at(call_span, 42, 0, 0, 0)
             }
@@ -26777,7 +28880,7 @@ impl Checker {
                 if result == refine_static_result_proved() {
                     c.refine_static_proved = c.refine_static_proved + 1
                     return c
-                } else {
+                } else if result == refine_static_result_violated() {
                     c.refine_violations = c.refine_violations + 1
                     return c.report_error_at(call_span, 42, 0, 0, 0)
                 }
@@ -26944,7 +29047,14 @@ impl Checker {
         if provided_ty.unit_id >= 0 && expected_ty.unit_id < 0 {
             return self.report_unit_call_mismatch(call_span, provided_ty.unit_id, expected_ty.unit_id)
         }
+        // KL-13b: distinct unit_ids with the same dimension vector are compatible
+        // (e.g. `m/s` quotient flowing into `velocity`).
         if expected_ty.unit_id >= 0 && provided_ty.unit_id >= 0 && expected_ty.unit_id != provided_ty.unit_id {
+            let ed = self.units.get_dim(expected_ty.unit_id)
+            let pd = self.units.get_dim(provided_ty.unit_id)
+            if unit_dim_compatible(ed, pd) {
+                return self
+            }
             return self.report_unit_call_mismatch(call_span, provided_ty.unit_id, expected_ty.unit_id)
         }
         self
@@ -27538,7 +29648,7 @@ impl Checker {
             Some(list) => {
                 var c = self
                 if c.enforce_visibility && !field_info_list_is_pub(si.fields, (*list).head.name) {
-                    let same_module = visibility_allows_access(visibility_private(), si.defining_module, c.current_module, c.crate_root)
+                    let same_module = si.defining_module_id == c.current_module_id || visibility_allows_access(visibility_private(), si.defining_module, c.current_module, c.crate_root)
                     let own_impl = c.current_impl_type.kind == TypeKind::TyNamed
                         && name_eq(c.current_impl_type.name, si.name)
                     if !same_module && !own_impl {

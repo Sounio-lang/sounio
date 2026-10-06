@@ -784,3 +784,16 @@ lean_lib «SounioZDChi» where
 -- Sounio-lean import — see file header for the dependency rationale.
 @[default_target]
 lean_lib «SounioCatalysisKinetics» where
+
+-- Surface microkinetics: site conservation as an iff, the dissociative
+-- (hydrogen) isotherm without square roots, and the proof that the
+-- dual-site Langmuir-Hinshelwood closed form IS the mechanism's
+-- quasi-equilibrium limit. Backs stdlib/chemistry/surface.sio.
+@[default_target]
+lean_lib «SounioSurfaceKinetics» where
+
+@[default_target]
+lean_lib «SounioPireusMultiProbePartitionV14» where
+
+@[default_target]
+lean_lib «SounioPireusMultiProbePartitionV14AxiomAudit» where

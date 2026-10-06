@@ -204,5 +204,5 @@ Try modifying the examples:
 
 For questions or issues:
 - GitHub: https://github.com/anthropics/sounio
-- Documentation: docs/LLM_PROGRAMMING_GUIDE.md
+- Documentation: docs/guide/LLM_PROGRAMMING_GUIDE.md
 - Syntax reference: docs/MINIMUM_VIABLE_SOUNIO.md

@@ -1,38 +1,52 @@
-//@ check-only
 // tests/stdlib/chemistry/test_catalysis_stdlib.sio
 //
-// Driver for stdlib/chemistry/catalysis.sio, matching this directory's own
-// established convention (test_kinetics_core.sio is check-only too, for the
-// same underlying reason: importing the full chemistry module graph through
-// bin/souc run currently fails at the native "thin-link" stage, independent
-// of anything this file or catalysis.sio does -- kinetics.sio itself, already
-// merged and trusted, exhibits the same limitation, confirmed by trying to
-// `souc run` it directly during this module's development).
+// Rate-law and invariant driver for stdlib/chemistry/catalysis.sio.
 //
-// check-only is not a downgrade from real verification here, it's an honest
-// statement of what this compiler build can currently confirm for a file
-// this shape. Every function below WAS actually executed and verified during
-// development -- not merely type-checked -- via isolated single-function and
-// paired-function extractions run directly through `bin/souc run` (bisecting
-// around the thin-link limitation rather than working through it, since it
-// is a compiler defect, not something a stdlib module can route around
-// while keeping its public API intact). That is where four real, verified
-// compiler bugs were found and are now documented at their exact trigger
-// point in catalysis.sio itself (pow()'s broken second argument, struct-array
-// field-mutation aliasing, array-in-tuple/struct return corruption, and
-// tuple-destructured bindings corrupting on reuse), plus one standing,
-// undocumented-workaround limitation: a function taking a `&![T;N]` mutable-
-// array-reference parameter (simulate_catalytic_cycle) breaks the native
-// thin-link stage when called from anything other than main() -- confirmed
-// by isolated repro (works called directly from a bare main(), reproducing
-// the Koka oracle's TON/TOF/final-state numbers exactly; fails wrapped in
-// one intermediate function, which is what test_turnover_bookkeeping is).
-// catalysis.sio's own header has the complete list with reproduction detail
-// for each.
+// THIS FILE USED TO BE `//@ check-only`. It is not any more, and the reason
+// is worth stating precisely, because the old header's explanation was
+// measured against the wrong compiler.
+//
+// The old header said importing the chemistry module graph "through bin/souc
+// run currently fails at the native thin-link stage", and that a function
+// taking a `&![T;N]` mutable-array-reference parameter (simulate_catalytic_
+// cycle) "breaks the native thin-link stage when called from anything other
+// than main()". Both statements were true of the lean_single engine, which is
+// what `bin/souc` resolved to at the time that header was written.
+//
+// Measured 2026-09-09 against Madaros v0.80.0 (bin/madaros-linux-x86_64,
+// md5 92f2c566, the committed gate-receipted ELF, receipt
+// artifacts/self-hosted/madaros.gate-receipt, source_commit 67caef4b74):
+// the thin-link limitation DOES NOT EXIST on this engine. catalysis.sio
+// compiles to a single 131 KB native ELF, and every one of the ten tests --
+// test_turnover_bookkeeping, the `&![f64;16]` caller, included -- runs and
+// passes. Nothing in catalysis.sio was changed to achieve this.
+//
+// What bounded this file was a different, measured limit, and it split the
+// suite across two drivers. Madaros's generated runtime is a bump allocator
+// over a 2 GiB arena that never reclaims (self-hosted/native/
+// codegen_x86_linux.sio, "Its arena never refills"). MatNM carries
+// `data: [f64; 4096]` -- 32 KiB per value -- and catalysis.sio's derivative
+// allocated about twenty of them per call (matnm_new + 16 matnm_set +
+// matnm_mul + the by-value `nu`), four calls per RK4 step: ~2.7 MiB per step,
+// ~800 steps of simulate_mechanistic_crn per process. Bisected: 750 steps
+// ran, 850 exhausted the arena; eight tests fit in one binary, ten did not.
+//
+// Measured 2026-09-15, same committed ELF (sha256 31a15e31, receipt
+// source_commit 70fa39522f): with the stoichiometry read once into a stack
+// [f64; 256] and nothing allocated inside the step loop, all ten tests below
+// run in this one binary, while the unmodified tree still fails the same ten
+// with `madaros: arena full`. test_catalysis_turnover_stdlib.sio, which held
+// the two turnover tests, is removed. The cost driver was the 32 KiB matrix
+// in the derivative, not the integrator.
 //
 // Independent, executed, non-Sounio cross-checks live in
-// stdlib/chemistry/oracles/ (C++23, Koka) and formal/lean4/ (Lean4) -- see
-// catalysis.sio's own header for what each one covers and how it was run.
+// stdlib/chemistry/oracles/ (C++23, Koka) and formal/lean4/ -- see
+// catalysis.sio's own header for what each one covers.
+//
+// test_turnover_bookkeeping is the specific test the lean_single engine could
+// not link at all -- the `&![f64;16]` caller that catalysis.sio's own header
+// records as a standing limitation. On Madaros v0.80.0 it links, runs, and
+// passes.
 
 use chemistry::catalysis::*
 
@@ -58,5 +72,5 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         return 0
     }
     print("CATALYSIS_STDLIB: ") print(fail) println(" failures")
-    1
+    fail
 }

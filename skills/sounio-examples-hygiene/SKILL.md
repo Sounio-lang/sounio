@@ -20,11 +20,11 @@ description: "Keep `examples/` compiling and aligned with the compiler; use when
 - Use `var` and `&!` and explicit `with` effects.
 
 4) Keep docs in sync if you changed visible semantics
-- Update `docs/MV_CORE_CHECKLIST.md` and `docs/LLM_PROGRAMMING_GUIDE.md` when behavior shifts.
+- Update `docs/implementation/MV_CORE_CHECKLIST.md` and `docs/guide/LLM_PROGRAMMING_GUIDE.md` when behavior shifts.
 
 ## References
-- `docs/MV_CORE_CHECKLIST.md`
-- `docs/LLM_PROGRAMMING_GUIDE.md`
+- `docs/implementation/MV_CORE_CHECKLIST.md`
+- `docs/guide/LLM_PROGRAMMING_GUIDE.md`
 - `.claude/commands/sounio-check.md`
 - `.claude/commands/sounio-syntax.md`
 

@@ -19,18 +19,18 @@ Values below are sourced from machine-generated artifacts, not aspirational spec
 - Science gate source: `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
 - Hyper gate source: `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
 - GPU attest gate source: `artifacts/omega/gpu_runtime_attest_gate.v1.json`
-- Snapshot date: **2026-03-02**
+- Snapshot date: **2026-03-02** (E2E/gate rows); inventory rows measured from tracked files at `main` HEAD on **2026-09-19**
 
 ## Reliability Snapshot
 
 | Metric | Value |
 |---|---:|
-| `sio_files` | 599 |
-| `disabled_files` | 120 |
-| `stub_mod_files` | 43 |
-| `active_module_entrypoints` | 91 |
-| `hyper_active_files` | 17 |
-| `hyper_disabled_files` | 6 |
+| `sio_files` | 1672 |
+| `disabled_files` | 0 |
+| `stub_mod_files` | 0 |
+| `active_module_entrypoints` | 178 |
+| `hyper_active_files` | 56 |
+| `hyper_disabled_files` | 0 |
 | `hyper_stub_mod_files` | 0 |
 | E2E `pass` | 71 |
 | E2E `fail` | 0 |
