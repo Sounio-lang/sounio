@@ -77,7 +77,7 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     print(total)
     println("")
     assert(total == 36)
-    0
+    return 0
 }
 ```
 
