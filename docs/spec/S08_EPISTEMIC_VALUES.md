@@ -240,7 +240,7 @@ before it can say which shape does.
 
 `docs/spec/LANGUAGE_SPECIFICATION.md:402` documents a sixth-and-different one —
 `struct Knowledge<T>` with `confidence: BetaConfidence` — and it is **not
-fictional**: `examples/alphageozero_final.sio:83` declares exactly that, and
+fictional**: `examples/_attic/alphageozero_final.sio:83` declares exactly that, and
 `BetaConfidence` is declared in three files. It appears in **zero** files under
 `self-hosted/`, so the compiler has never heard of it. The same document's
 `Knowledge::exact` (:422) has **one** call site tree-wide, and `ep_exact` — which
