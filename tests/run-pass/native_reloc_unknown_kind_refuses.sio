@@ -4,21 +4,34 @@
 // apply_relocations_into (self-hosted/native/codegen_x86_linux.sio) patches
 // kind codes 1-4. Any other kind used to fall through the chain silently: the
 // rel32 site stayed at its placeholder and the ELF was still written, so the
-// program jumped through garbage at run time. It must now latch
-// reloc_overflow (every writer refuses with rc=20) and count the site in
-// NC_RELOC_UNKNOWN_KIND_COUNT.
+// program jumped through garbage at run time. Now an unknown kind is recorded
+// in NC_RELOC_UNKNOWN_KIND_COUNT/FIRST, which both native writers check before
+// writing (rc=20), and reloc_overflow is latched.
 //
-// No emitter produces an unknown kind, so no user program can reach the
-// refusal; the self-test constructs the relocation directly. It also checks a
-// control: a KNOWN kind on a site its shape check rejects is unchanged
-// behaviour (no refusal), and compiler_new clears the counter.
-use native::codegen_x86_linux::{native_v2_reloc_unknown_kind_selftest}
+// No emitter produces an unknown kind, so no user program reaches the
+// refusal. This pins the two pieces apply_relocations_into calls: the
+// known-kind predicate and the recorder. The full path through a
+// NativeCompiler is self-test T70r (native_v2_reloc_unknown_kind_selftest);
+// it cannot run from a user program on current main because compiler_new()
+// itself SIGSEGVs outside the compiler binary.
+use native::codegen_x86_linux::{native_v2_reloc_kind_is_known, nc_reloc_note_unknown_kind}
+use native::frame::{NC_RELOC_UNKNOWN_KIND_COUNT, NC_RELOC_UNKNOWN_KIND_FIRST}
 
 fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
-    if native_v2_reloc_unknown_kind_selftest() {
-        println("RELOC_UNKNOWN_KIND_REFUSES_OK")
-        return 0
+    var k: i64 = 1
+    while k <= 4 {
+        if !native_v2_reloc_kind_is_known(k) { println("FAIL known kind refused"); return 1 }
+        k = k + 1
     }
-    println("RELOC_UNKNOWN_KIND_REFUSES_FAIL")
-    1
+    if native_v2_reloc_kind_is_known(0) { println("FAIL kind 0 known"); return 2 }
+    if native_v2_reloc_kind_is_known(5) { println("FAIL kind 5 known"); return 3 }
+    if native_v2_reloc_kind_is_known(0 - 1) { println("FAIL kind -1 known"); return 4 }
+
+    if NC_RELOC_UNKNOWN_KIND_COUNT != 0 { println("FAIL counter not zero at start"); return 5 }
+    nc_reloc_note_unknown_kind(9)
+    nc_reloc_note_unknown_kind(7)
+    if NC_RELOC_UNKNOWN_KIND_COUNT != 2 { println("FAIL count"); return 6 }
+    if NC_RELOC_UNKNOWN_KIND_FIRST != 9 { println("FAIL first kind"); return 7 }
+    println("RELOC_UNKNOWN_KIND_REFUSES_OK")
+    0
 }
