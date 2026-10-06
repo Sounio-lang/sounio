@@ -40,6 +40,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
+| KL-18 | `Hyper<…>` CPU values: Madaros fail-closed; lean_single prints a wrong value (seed) | both |
 
 ## Ledger
 
@@ -221,6 +222,27 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 - Channel-at-`.value` semantics (`MEAS_KNOW_IDX`,
   `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
   see the history snapshot for the KAS-1 rationale.
+
+### KL-18 — `Hyper<Algebra, T>` values on the CPU path (P0.8.2)
+
+- Engine: both. There is no CPU value lowering for `Hyper<Octonion, f64>`
+  (or any `Hyper<…>`); the only implemented CPU octonion product is
+  `algebra::octonion::oct_mul` over `[f64; 8]` (Fano convention, e1·e2 = e3).
+  Reference: `(2 + e1)(3 + e2) = [6, 3, 2, 1, 0, 0, 0, 0]`, which `oct_mul`
+  returns on both engines.
+- **Madaros — fail-closed.** `[..] as Hyper<…>` is refused in CPU lowering
+  ("Hyper<...> values ... are not implemented on the native CPU path"). Before
+  the refusal (measured 2026-10-06 on the shipped ELF): `.e1` of the cast
+  printed `0.000000`, `a + b` segfaulted, `a * b` failed in the backend with
+  rc 12. Pin: `tests/compile-fail/hyper_octonion_mul_cpu_refused.sio`.
+  The `--backend gpu` path lowers `Hyper<…>` through HLIR and is unaffected.
+- **lean_single — OPEN, silent wrong value.** The engine does not know the
+  type: `println(([2.0, 1.0, 0.0, ..] as Hyper<Octonion, f64>) * ..)` prints
+  `8843176242182119936` and exits 0; routing the product back through
+  `as [f64; 8]` segfaults (rc 139). Closing it requires a lean_single source
+  change and a seed refresh (`scripts/dev/refresh_lean_seed.sh`), which is a
+  founder-run step. Until then: do not use `Hyper<…>` values under
+  `SOUNIO_SOUC_ENGINE=lean_single`.
 
 ## Registry-governed, not rungs
 
