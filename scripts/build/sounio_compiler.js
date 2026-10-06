@@ -74,8 +74,9 @@ function checkSource(src) {
       });
     }
 
-    // IO effect check: print without `with IO` in function signature
-    if (/\bprint\s*\(/.test(line)) {
+    // IO effect check: print/println without `with IO` in function signature
+    const printCall = line.match(/\bprint(?:ln)?\s*\(/);
+    if (printCall) {
       // Walk back to find the nearest fn declaration
       let hasWith = false;
       for (let j = i; j >= 0; j--) {
@@ -87,9 +88,9 @@ function checkSource(src) {
       if (!hasWith) {
         diagnostics.push({
           severity: 'warning',
-          message: 'Call to `print` requires `with IO` on the enclosing function',
+          message: 'Call to `print`/`println` requires `with IO` on the enclosing function',
           line: lineNo,
-          column: line.indexOf('print(') + 1,
+          column: printCall.index + 1,
         });
       }
     }

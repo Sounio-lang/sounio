@@ -46,7 +46,7 @@ class WebsiteInputsTest(unittest.TestCase):
                 return '100644 blob ' + 'b' * 40 + '\t' + command[-1]
             if operation == 'show':
                 return ('proof:' + command[-1].split(':', 1)[1]).encode()
-            self.fail('Unexpected Git operation: ' + operation)
+            raise AssertionError('Unexpected Git operation: ' + operation)
         with patch.object(inputs.subprocess, 'check_output', side_effect=git):
             receipt = inputs.export(self.root, 'HEAD', target)
         return target, receipt
