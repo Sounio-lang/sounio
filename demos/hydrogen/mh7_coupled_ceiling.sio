@@ -1,0 +1,286 @@
+// demos/hydrogen/mh7_coupled_ceiling.sio
+//
+// Seven-stage metal-hydride hydrogen compressor of Gkanas, Christodoulou,
+// Tzamalis, Stamatakis, Chroneos, Deligiannis, Karagiorgis & Stubos,
+// Renewable Energy 147 (2020) 164-178, DOI 10.1016/j.renene.2019.08.104
+// -- the THERMODYNAMIC CEILING of the cascade, derived from the paper's
+// MEASURED Table 3 with ZERO fitted parameters.
+//
+// Why this file exists. mh7_reliability.sio reproduces the paper's
+// compression ratios (18.7 at 80 C, 41.5 at 120 C) with a ratio chain whose
+// lumped efficiency and swing exponent are SOLVED from those two ratios. That
+// is a fit, and fed the measured Table 3 the same ratio chain returns 6640x,
+// not 18.7x. The model FORM is wrong: a cascade is not the product of free
+// per-stage van 't Hoff ratios. Stage i desorbs at T_hot into stage i+1
+// absorbing at T_cold through an interconnector (the paper's eq. 12); gas
+// moves while P_des,i(T_hot) > P_abs,i+1(T_cold). Under flat plateaus every
+// coupling either is feasible or is not, and the delivered pressure is
+// bounded by ONE number: the desorption plateau of the LAST stage at T_hot.
+//
+// What this file claims, and what it does not:
+//   CLAIMS  (a) the ceiling P_des,7(T_hot) for the six cases of Table 4,
+//               from Table 3 only;
+//           (b) every one of the six couplings is thermodynamically
+//               feasible in every case, with the driving force
+//               ln(P_des,i(T_hot)/P_abs,i+1(T_cold)) of each;
+//           (c) two orderings of the paper's COMSOL output that the ceiling
+//               and the driving force predict without fitting -- delivered
+//               pressure rises with the ceiling, cycle time falls as the
+//               bottleneck driving force rises.
+//   DOES NOT CLAIM the delivered pressure itself. The paper's COMSOL output
+//           sits at 67-80 % of the ceiling; the gap is the kinetic,
+//           plateau-slope and finite-time part (eqs. 9-11), whose constants
+//           C_a, C_d, E_a, E_d, sigma_s, sigma_0 and Y the paper does NOT
+//           publish numerically. Those are the slots this file leaves open.
+//
+// Reference pressure: 1 bar (the paper states every pressure in bar).
+// Gas constant: CODATA 2018 exact, 8.314462618 J/(mol K).
+// All tables transcribed in demos/hydrogen/data/gkanas2020_seven_stage.md.
+//
+// Cross-check: an independent C++23 implementation written from the same
+// protocol (demos/hydrogen/tools/mh7_ceiling_crosscheck.cpp) prints the same
+// ceilings to 4 decimals; the pins below are its values.
+//
+// Run:  bin/souc run demos/hydrogen/mh7_coupled_ceiling.sio
+// Ends: MH7_COUPLED_CEILING_OK
+
+extern "C" { fn exp(x: f64) -> f64; fn log(x: f64) -> f64; }
+
+fn rgas() -> f64 { 8.314462618 }
+
+// ---- Table 3, measured (J/mol H2 and J/(mol H2 K)) -------------------------
+fn h_abs(i: i64) -> f64 {
+    if i == 0 { 25242.0 } else if i == 1 { 21466.0 } else if i == 2 { 20354.0 }
+    else if i == 3 { 19991.0 } else if i == 4 { 18198.0 } else if i == 5 { 16232.0 }
+    else { 14702.0 }
+}
+fn s_abs(i: i64) -> f64 {
+    if i == 0 { 104.6 } else if i == 1 { 94.7 } else if i == 2 { 101.1 }
+    else if i == 3 { 100.2 } else if i == 4 { 98.12 } else if i == 5 { 98.05 }
+    else { 98.1 }
+}
+fn h_des(i: i64) -> f64 {
+    if i == 0 { 28195.0 } else if i == 1 { 26133.0 } else if i == 2 { 24823.0 }
+    else if i == 3 { 20252.0 } else if i == 4 { 19856.0 } else if i == 5 { 19125.0 }
+    else { 18916.0 }
+}
+fn s_des(i: i64) -> f64 {
+    if i == 0 { 106.8 } else if i == 1 { 107.1 } else if i == 2 { 108.7 }
+    else if i == 3 { 100.8 } else if i == 4 { 101.4 } else if i == 5 { 101.5 }
+    else { 106.2 }
+}
+
+// ---- Table 4, the paper's COMSOL output (initial pressure 20 bar) ----------
+fn case_thot(c: i64) -> f64 {
+    if c == 0 { 353.15 } else if c == 1 { 363.15 } else if c == 2 { 373.15 }
+    else if c == 3 { 378.15 } else if c == 4 { 383.15 } else { 393.15 }
+}
+fn case_pfinal(c: i64) -> f64 {
+    if c == 0 { 374.0 } else if c == 1 { 483.2 } else if c == 2 { 606.4 }
+    else if c == 3 { 682.0 } else if c == 4 { 742.0 } else { 830.0 }
+}
+fn case_tcycle(c: i64) -> f64 {
+    if c == 0 { 6625.0 } else if c == 1 { 5760.0 } else if c == 2 { 5090.0 }
+    else if c == 3 { 4720.0 } else if c == 4 { 4530.0 } else { 3760.0 }
+}
+fn t_cold() -> f64 { 283.15 }      // 10 C absorption, every case
+fn p_supply() -> f64 { 20.0 }
+
+// van 't Hoff plateau, flat-plateau limit of the paper's eq. 11
+fn plateau(h: f64, s: f64, t: f64) -> f64 with Div {
+    exp(s / rgas() - h / (rgas() * t))
+}
+fn p_abs(i: i64, t: f64) -> f64 with Div { plateau(h_abs(i), s_abs(i), t) }
+fn p_des(i: i64, t: f64) -> f64 with Div { plateau(h_des(i), s_des(i), t) }
+
+// driving force of coupling i -> i+1 (eq. 9 is linear in this log)
+fn drive(i: i64, th: f64) -> f64 with Div {
+    log(p_des(i, th) / p_abs(i + 1, t_cold()))
+}
+
+fn absf(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn p2(x: f64) with IO, Mut, Div {
+    // fixed 2-decimal print without relying on locale/format support
+    var v = x
+    if v < 0.0 { print("-"); v = 0.0 - v }
+    let whole = v as i64
+    var frac = ((v - (whole as f64)) * 100.0 + 0.5) as i64
+    var w = whole
+    if frac >= 100 { frac = frac - 100; w = w + 1 }
+    print(w)
+    print(".")
+    if frac < 10 { print("0") }
+    print(frac)
+}
+
+fn p3(x: f64) with IO, Mut, Div {
+    var v = x
+    if v < 0.0 { print("-"); v = 0.0 - v }
+    let whole = v as i64
+    var frac = ((v - (whole as f64)) * 1000.0 + 0.5) as i64
+    var w = whole
+    if frac >= 1000 { frac = frac - 1000; w = w + 1 }
+    print(w)
+    print(".")
+    if frac < 100 { print("0") }
+    if frac < 10 { print("0") }
+    print(frac)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+
+    println("MH7 coupled cascade: thermodynamic ceiling from measured Table 3")
+    println("Gkanas et al., Renew. Energy 147 (2020) 164-178 -- zero fitted parameters")
+    println("")
+
+    // ---------------------------------------------------------------- A
+    println("A. Per-stage plateaus (bar), flat-plateau van 't Hoff, P0 = 1 bar")
+    println("   stage   P_abs(10 C)   P_des(80 C)   P_des(120 C)")
+    var i = 0
+    while i < 7 {
+        print("   S"); print(i + 1); print("      ")
+        p2(p_abs(i, t_cold())); print("        ")
+        p2(p_des(i, 353.15)); print("        ")
+        p2(p_des(i, 393.15)); println("")
+        i = i + 1
+    }
+    print("   S1 absorbs from the 20 bar supply at 10 C: plateau ")
+    p2(p_abs(0, t_cold())); println(" bar < 20 bar, feasible")
+    if p_abs(0, t_cold()) >= p_supply() { fails = fails + 1 }
+    println("")
+
+    // ---------------------------------------------------------------- B
+    println("B. Couplings: driving force ln(P_des,i(T_hot) / P_abs,i+1(10 C))")
+    println("   case  T_hot   S1>S2   S2>S3   S3>S4   S4>S5   S5>S6   S6>S7   min")
+    var c = 0
+    var bottleneck_always_s6s7 = true
+    while c < 6 {
+        let th = case_thot(c)
+        print("   "); print(c + 1); print("     ")
+        print((th - 273.15 + 0.5) as i64); print(" C   ")
+        var k = 0
+        var dmin = 1000.0
+        var kmin = 0
+        while k < 6 {
+            let d = drive(k, th)
+            if d <= 0.0 { fails = fails + 1 }      // every coupling must be feasible
+            if d < dmin { dmin = d; kmin = k }
+            p3(d); print("   ")
+            k = k + 1
+        }
+        p3(dmin); println("")
+        if kmin != 5 { bottleneck_always_s6s7 = false }
+        c = c + 1
+    }
+    if bottleneck_always_s6s7 {
+        println("   Every coupling is feasible in every case; the bottleneck is S6 -> S7 in all six.")
+    } else {
+        println("   Every coupling is feasible; the bottleneck moves between cases.")
+    }
+    println("")
+
+    // ---------------------------------------------------------------- C
+    println("C. Ceiling P_des,7(T_hot) vs the paper's COMSOL delivered pressure")
+    println("   case  ceiling(bar)  paper(bar)  paper/ceiling  ratio-chain product")
+    c = 0
+    var conc_p = 0
+    var conc_t = 0
+    var pairs = 0
+    while c < 6 {
+        let th = case_thot(c)
+        let ceil = p_des(6, th)
+        var prod = 1.0
+        var j = 0
+        while j < 7 { prod = prod * p_des(j, th) / p_abs(j, t_cold()); j = j + 1 }
+        print("   "); print(c + 1); print("     ")
+        p2(ceil); print("       ")
+        p2(case_pfinal(c)); print("      ")
+        p3(case_pfinal(c) / ceil); print("          ")
+        print((prod + 0.5) as i64); println("")
+        if case_pfinal(c) >= ceil { fails = fails + 1 }   // COMSOL must sit below the ceiling
+        var d = c + 1
+        while d < 6 {
+            pairs = pairs + 1
+            let dc = p_des(6, case_thot(d)) - ceil
+            let dp = case_pfinal(d) - case_pfinal(c)
+            if dc * dp > 0.0 { conc_p = conc_p + 1 }
+            // cycle time vs bottleneck drive: higher drive, shorter cycle
+            let dd = drive(5, case_thot(d)) - drive(5, th)
+            let dt = case_tcycle(d) - case_tcycle(c)
+            if dd * dt < 0.0 { conc_t = conc_t + 1 }
+            d = d + 1
+        }
+        c = c + 1
+    }
+    print("   delivered pressure ordered by the ceiling:      ")
+    print(conc_p); print(" / "); print(pairs); println(" concordant pairs")
+    print("   cycle time ordered by the S6>S7 driving force:  ")
+    print(conc_t); print(" / "); print(pairs); println(" concordant pairs (shorter as drive rises)")
+    if conc_p != pairs { fails = fails + 1 }
+    if conc_t != pairs { fails = fails + 1 }
+    println("   The ratio-chain product is what a model of independent stages predicts;")
+    println("   it overshoots the paper by 2.5 to 4.6 orders of magnitude. The cascade is set by")
+    println("   its last stage. Note paper/ceiling is NOT monotone (0.798 at 110 C, 0.767 at 120 C):")
+    println("   the ceiling orders the cases, it does not predict the kinetic gap.")
+    println("")
+
+    // ---------------------------------------------------------------- D
+    println("D. An open question for the authors (not a claim)")
+    println("   The text reports 180 bar (80 C) and 365 bar (120 C) at the third coupling.")
+    println("   Coupling 1 is S1 -> S2 by the paper's own Step 3, so the third is S3 -> S4.")
+    println("   Flat-plateau brackets [P_abs,i+1(10 C), P_des,i(T_hot)] that admit each value:")
+    var q = 0
+    while q < 2 {
+        let th = if q == 0 { 353.15 } else { 393.15 }
+        let pv = if q == 0 { 180.0 } else { 365.0 }
+        print("   "); print((pv + 0.5) as i64); print(" bar @ "); print((th - 273.15 + 0.5) as i64); print(" C:")
+        var k = 0
+        while k < 6 {
+            if pv > p_abs(k + 1, t_cold()) && pv < p_des(k, th) {
+                print("  S"); print(k + 1); print(">S"); print(k + 2)
+            }
+            k = k + 1
+        }
+        println("")
+        q = q + 1
+    }
+    print("   S3 desorbs at "); p2(p_des(2, 353.15));
+    println(" bar at 80 C, below 180 bar: either the figure counts couplings differently,")
+    println("   or the S3 plateau slope is large. Only the authors' sigma_s, sigma_0 and Y settle it.")
+    println("")
+
+    // ---------------------------------------------------------------- E
+    println("E. Why the van 't Hoff covariance matters (the next data request)")
+    let shift = 1000.0          // 1 kJ/mol on Delta H(des), S7
+    let indep = exp(shift / (rgas() * 353.15))
+    print("   A +-1 kJ/mol Delta H(des) at fixed Delta S moves the 80 C ceiling by a factor ")
+    p3(indep); println("")
+    // Enthalpy-entropy compensation: a van 't Hoff fit pins ln P at the centre
+    // of its isotherm range. Pivot T_m = 333.15 K is ILLUSTRATIVE (the paper
+    // states >= 3 isotherms, not their temperatures).
+    let tm = 333.15
+    let comp = exp(shift / rgas() * absf(1.0 / tm - 1.0 / 353.15))
+    print("   The same shift, compensated at an illustrative 60 C pivot, moves it by ")
+    p3(comp); println("")
+    println("   Independent intervals on Delta H and Delta S overstate the ceiling's")
+    println("   uncertainty by an order of magnitude in log space. The covariance of each")
+    println("   van 't Hoff fit is the single number per stage that would close this.")
+    println("")
+
+    // ---------------------------------------------------------------- pins
+    // Independent C++23 cross-check values (tools/mh7_ceiling_crosscheck.cpp)
+    let pin80 = 561.5489
+    let pin120 = 1081.5450
+    if absf(p_des(6, 353.15) - pin80) > 1.0e-3 { fails = fails + 1; println("PIN FAIL 80 C") }
+    if absf(p_des(6, 393.15) - pin120) > 1.0e-3 { fails = fails + 1; println("PIN FAIL 120 C") }
+
+    if fails == 0 {
+        println("MH7_COUPLED_CEILING_OK")
+        0
+    } else {
+        print("FAILURES: "); println(fails)
+        1
+    }
+}
