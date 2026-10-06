@@ -16,16 +16,16 @@
 //
 // This module provides:
 //   - Linear Qubit type (cannot be cloned)
-//   - Standard quantum gates (H, X, Y, Z, S, T, CNOT, CZ, SWAP)
+//   - Standard quantum gates (H, X, Y, Z, S, T, Rx, Ry, Rz, CNOT, CZ, SWAP, Toffoli)
 //   - Measurement (consumes qubit, returns classical bit): `measure_qubit`
 //     (not `measure`, which is the builtin Knowledge constructor and would
 //     shadow a user function of that name -- error E008 on Madaros)
 //   - Classical statevector simulation (cap QUANTUM_MAX_QUBITS = 10)
 //   - Bell pair, GHZ3, and teleportation primitives
 //
-// This is not a quantum computer. Rx/Ry/Rz live on Statevector in
-// epistemic_vqe.sio; they are not duplicated here. VQE modules remain
-// capped at 4 qubits.
+// This is not a quantum computer. Rx/Ry/Rz on linear Qubit use the same
+// matrices as epistemic_vqe's Statevector; the two simulators stay separate.
+// VQE modules remain capped at 4 qubits.
 
 // =============================================================================
 // Simulator cap — 10 qubits = 1024 amplitudes
@@ -46,6 +46,48 @@ fn sqrt_sim(x: f64) -> f64 with Mut, Div, Panic {
     var i = 0
     while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
     y
+}
+
+fn lin_pi() -> f64 {
+    3.141592653589793
+}
+
+fn lin_wrap(x: f64) -> f64 with Mut, Div, Panic {
+    let pi = lin_pi()
+    var y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
+    y
+}
+
+fn lin_sin(x: f64) -> f64 with Mut, Div, Panic {
+    let y = lin_wrap(x)
+    let x2 = y * y
+    var sum = y
+    var term = y
+    var k = 1
+    while k < 15 {
+        let a = 2.0 * (k as f64)
+        term = term * (0.0 - x2) / (a * (a + 1.0))
+        sum = sum + term
+        k = k + 1
+    }
+    sum
+}
+
+fn lin_cos(x: f64) -> f64 with Mut, Div, Panic {
+    let y = lin_wrap(x)
+    let x2 = y * y
+    var sum = 1.0
+    var term = 1.0
+    var k = 1
+    while k < 15 {
+        let a = 2.0 * (k as f64)
+        term = term * (0.0 - x2) / ((a - 1.0) * a)
+        sum = sum + term
+        k = k + 1
+    }
+    sum
 }
 
 // =============================================================================
@@ -246,6 +288,82 @@ pub fn t_gate(q: Qubit, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {
     Qubit { state_id: qid }
 }
 
+// Rx(θ) = exp(-i θ X / 2). Same matrix as epistemic_vqe::sv_apply_rx.
+pub fn rx(q: Qubit, qs: &!QuantumState, theta: f64) -> Qubit with Mut, Div, Panic {
+    let qid = q.state_id
+    let target = qid as i32
+    let c = lin_cos(theta / 2.0)
+    let s = lin_sin(theta / 2.0)
+    let stride = 1 << target
+    var i = 0
+    while i < qs.n_amplitudes {
+        let bit = (i >> target) & 1
+        if bit == 0 {
+            let j = i | stride
+            let r0 = qs.real[i]
+            let i0 = qs.imag[i]
+            let r1 = qs.real[j]
+            let i1 = qs.imag[j]
+            qs.real[i] = c * r0 + s * i1
+            qs.imag[i] = c * i0 - s * r1
+            qs.real[j] = c * r1 + s * i0
+            qs.imag[j] = c * i1 - s * r0
+        }
+        i = i + 1
+    }
+    Qubit { state_id: qid }
+}
+
+// Ry(θ) = exp(-i θ Y / 2) = [[c, -s], [s, c]]
+pub fn ry(q: Qubit, qs: &!QuantumState, theta: f64) -> Qubit with Mut, Div, Panic {
+    let qid = q.state_id
+    let target = qid as i32
+    let c = lin_cos(theta / 2.0)
+    let s = lin_sin(theta / 2.0)
+    let stride = 1 << target
+    var i = 0
+    while i < qs.n_amplitudes {
+        let bit = (i >> target) & 1
+        if bit == 0 {
+            let j = i | stride
+            let r0 = qs.real[i]
+            let i0 = qs.imag[i]
+            let r1 = qs.real[j]
+            let i1 = qs.imag[j]
+            qs.real[i] = c * r0 - s * r1
+            qs.imag[i] = c * i0 - s * i1
+            qs.real[j] = s * r0 + c * r1
+            qs.imag[j] = s * i0 + c * i1
+        }
+        i = i + 1
+    }
+    Qubit { state_id: qid }
+}
+
+// Rz(θ) = exp(-i θ Z / 2) = diag(e^{-i θ/2}, e^{i θ/2})
+pub fn rz(q: Qubit, qs: &!QuantumState, theta: f64) -> Qubit with Mut, Div, Panic {
+    let qid = q.state_id
+    let target = qid as i32
+    let c = lin_cos(theta / 2.0)
+    let s = lin_sin(theta / 2.0)
+    var i = 0
+    while i < qs.n_amplitudes {
+        let bit = (i >> target) & 1
+        let r = qs.real[i]
+        let im = qs.imag[i]
+        if bit == 0 {
+            qs.real[i] = c * r + s * im
+            qs.imag[i] = c * im - s * r
+        }
+        if bit == 1 {
+            qs.real[i] = c * r - s * im
+            qs.imag[i] = c * im + s * r
+        }
+        i = i + 1
+    }
+    Qubit { state_id: qid }
+}
+
 // =============================================================================
 // Two-Qubit Gates
 // =============================================================================
@@ -352,6 +470,44 @@ pub fn swap(q1: Qubit, q2: Qubit, qs: &!QuantumState) -> QubitPair with Mut, Div
     QubitPair {
         first: Qubit { state_id: id1 },
         second: Qubit { state_id: id2 },
+    }
+}
+
+// Toffoli (CCNOT): flip target iff both controls are |1⟩.
+pub fn ccnot(c1: Qubit, c2: Qubit, target: Qubit, qs: &!QuantumState) -> QubitTriple with Mut, Div, Panic {
+    let id1 = c1.state_id
+    let id2 = c2.state_id
+    let idt = target.state_id
+    let a = id1 as i32
+    let b = id2 as i32
+    let t = idt as i32
+    let t_stride = 1 << t
+
+    var i = 0
+    while i < qs.n_amplitudes {
+        let a_bit = (i >> a) & 1
+        let b_bit = (i >> b) & 1
+        let t_bit = (i >> t) & 1
+        if a_bit == 1 {
+            if b_bit == 1 {
+                if t_bit == 0 {
+                    let j = i | t_stride
+                    let tmp_r = qs.real[i]
+                    let tmp_i = qs.imag[i]
+                    qs.real[i] = qs.real[j]
+                    qs.imag[i] = qs.imag[j]
+                    qs.real[j] = tmp_r
+                    qs.imag[j] = tmp_i
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    QubitTriple {
+        first: Qubit { state_id: id1 },
+        second: Qubit { state_id: id2 },
+        third: Qubit { state_id: idt },
     }
 }
 
