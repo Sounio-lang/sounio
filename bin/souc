@@ -293,7 +293,26 @@ case "${SOUNIO_SOUC_ENGINE:-madaros}" in
       run)
         _ls_src="${2:-}"
         _ls_tmp="$(mktemp /tmp/souc-lean-run-XXXXXX)"
-        "$LEAN_SINGLE" "$_ls_src" "$_ls_tmp" >/dev/null 2>&1
+        _ls_log="$(mktemp /tmp/souc-lean-run-log-XXXXXX)"
+        # The compile chatter (source:/tokens:/epistemic: lines) stays quiet on
+        # success, but a failed compile must say why: this used to discard both
+        # streams and exec whatever was left, so 123 of 359 swept programs
+        # exited 1 with zero bytes of output (P0.6, 2026-10-05).
+        # `|| _ls_rc=$?`, not a bare call: under `set -e` a failed compile
+        # would end this script before the diagnostics below are printed.
+        _ls_rc=0
+        "$LEAN_SINGLE" "$_ls_src" "$_ls_tmp" >"$_ls_log" 2>&1 || _ls_rc=$?
+        if [[ $_ls_rc -ne 0 || ! -s "$_ls_tmp" ]]; then
+          if grep -qE '^(error|warning)' "$_ls_log"; then
+            grep -E -A4 '^(error|warning)' "$_ls_log" >&2
+          else
+            tail -n 40 "$_ls_log" >&2
+          fi
+          echo "souc: lean_single failed to compile $_ls_src (rc=$_ls_rc); nothing was run" >&2
+          rm -f "$_ls_tmp" "$_ls_log"
+          exit $(( _ls_rc == 0 ? 1 : _ls_rc ))
+        fi
+        rm -f "$_ls_log"
         chmod +x "$_ls_tmp"
         exec "$_ls_tmp" "${@:3}"
         ;;

@@ -177,7 +177,7 @@ run_test() {
   output=$("$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
   if [[ $exit_code -ne 0 ]]; then
     local excerpt
-    excerpt="$(echo "$output" | head -6)"
+    excerpt="$(head -6 <<< "$output")"
     FAIL=$((FAIL + 1))
     ERRORS="${ERRORS}\n  FAIL  $relpath (check exited $exit_code)"
     record_result "fail" "$relpath" "check" "check-failed" "" "" "$exit_code" "$excerpt"
@@ -214,7 +214,7 @@ run_test() {
   fi
   if [[ $exit_code -ne 0 ]]; then
     local excerpt
-    excerpt="$(echo "$output" | head -6)"
+    excerpt="$(head -6 <<< "$output")"
     FAIL=$((FAIL + 1))
     local reason="run-failed"
     if [[ $exit_code -eq 124 ]]; then
@@ -231,7 +231,7 @@ run_test() {
 
   local pattern
   for pattern in "${expect_stdout[@]}"; do
-    if ! echo "$output" | grep -qF "$pattern"; then
+    if ! grep -qF -- "$pattern" <<< "$output"; then
       FAIL=$((FAIL + 1))
       ERRORS="${ERRORS}\n  FAIL  $relpath (missing stdout: $pattern)"
       record_result "fail" "$relpath" "stdout" "missing-stdout" "" "" "0" "missing: $pattern"

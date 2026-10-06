@@ -45,6 +45,21 @@ bash scripts/run_sio_test_suite.sh
 bash scripts/run_sio_test_suite.sh vancomycin --verbose
 ```
 
+### Generated snapshots: do not commit them in your PR
+
+`docs/governance/topic-registry.v1.json`, `docs/governance/DOCS_AUTHORITY_MATRIX.md`
+and `datasets/sounio-code-examples/{train,validation}.jsonl,manifest.json` are
+functions of the whole tree. Committing them from feature PRs made any two PRs
+conflict, so CI's *Generated snapshot guard* refuses them in every PR except a
+`snapshot/refresh-*` branch. The docs checkers validate against the registry
+rebuilt in memory, so a stale snapshot hides nothing.
+
+- `node scripts/docs/sync_governance_metadata.mjs` updates the metadata headers in
+  your documents (commit those) and leaves the snapshot alone.
+- To refresh the snapshot, open a PR from `snapshot/refresh-<date>` that runs
+  `node scripts/docs/sync_governance_metadata.mjs --snapshot` and
+  `python3 scripts/dev/export_hf_dataset.py`.
+
 ### Local Git Setup (one-time)
 
 Some tracked files are generated — notably the `docs/governance/` metadata
@@ -90,11 +105,9 @@ Sounio is **NOT Rust**. The compiler will reject common Rust syntax. Follow thes
 2. **Mutability**: Use `var` for mutable bindings, never `let mut`.
 3. **Exclusive References**: Use `&!` for exclusive references, never `&mut`.
 4. **No Rust Macros**: Use `println("text")` and `assert(cond)` instead of macro syntax.
-5. **No Unary Minus**: Write `0 - x` instead of `-x` for negation.
-6. **Bit Shifts**: Shift operands must be explicitly typed as `u8` (e.g., `x >> 4u8`).
-7. **No Closure Literals**: Closure syntax like `|x| x + 1` does not exist. Use named function references.
-8. **Explicit Self**: All struct method implementations must declare `self` explicitly as `self: &Type` or `self: &!Type`.
-9. **Algebraic Effects System**: All functions with side effects must declare them using the `with` keyword:
+5. **No Closure Literals**: Closure syntax like `|x| x + 1` does not exist. Use named function references.
+6. **Explicit Self**: All struct method implementations must declare `self` explicitly as `self: &Type` or `self: &!Type`.
+7. **Algebraic Effects System**: All functions with side effects must declare them using the `with` keyword:
    - `IO`: printing, file access, terminal operations
    - `Mut`: exclusive reference mutation or reassignment
    - `Div`: mathematical division or modulo operations
@@ -125,7 +138,7 @@ Before submitting any Pull Request:
 - Type-check your Sounio files with `./bin/souc check file.sio`
 - Compile and run your Sounio files with `./bin/souc run file.sio`
 - Ensure all automated checks pass: `bash scripts/run_sio_test_suite.sh`
-- Ensure documentation registry is aligned: `node scripts/docs/check_docs_registry.mjs` (sync with `node scripts/docs/sync_governance_metadata.mjs` if needed)
+- Ensure documentation registry is aligned: `node scripts/docs/check_docs_registry.mjs` (sync document headers with `node scripts/docs/sync_governance_metadata.mjs` if needed; do not commit the regenerated snapshot)
 
 The repository's default compiler surface is `bin/souc` as the official entrypoint (Madaros by default).
 
@@ -163,19 +176,6 @@ The Sounio standard library (`stdlib/`) is organized by domain and is the core s
 | `stdlib/math/` | Special functions, fractional calculus, autograd, and linear algebra. |
 | `stdlib/gpu/` | PTX and GPU-accelerated computing backends. |
 | `stdlib/ontology/` | Semantic ontology stores, subclass relations, and clinical terminologies (LOINC/SNOMED). |
-
----
-
-## Mandatory LLM-Offload Policy
-
-Sounio enforces a pre-commit peer review audit by external AI engines on math, clinical, and external-facing artifacts. If your changes touch any of the following, you **must** run `bin/llm-offload` before committing and append the audit evidence to `.claude/llm_offload_log.md`:
-
-- **Math claims** (PK formulas, GUM derivations, Lean statements):
-  `bin/llm-offload -t math-review -i <file>` (default fan-out: Grok 4.7 + Kimi K3 via LLM Gateway, plus zai/local)
-- **Clinical pathway code** (`stdlib/clinical/*`, Vancomycin tests):
-  `bin/llm-offload -t review -p deepseek -i <file>`
-- **External publications or papers** (`docs/papers/*`):
-  `bin/llm-offload --raw <draft> deepseek xai gemini`
 
 ---
 
