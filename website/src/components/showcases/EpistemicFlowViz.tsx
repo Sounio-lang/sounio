@@ -27,7 +27,7 @@ const CHAIN: ChainStep[] = [
     sublabel: 'source value + uncertainty bound',
     color: 'rgba(99,102,241,0.15)',
     textColor: '#a5b4fc',
-    borderColor: '#6366f1',
+    borderColor: '#60A5FA',
   },
   {
     id: 'knowledge',

@@ -8,17 +8,17 @@ const ANNOTATIONS: Record<string, Ann> = {
   'Knowledge<mg>': {
     title: 'Epistemic type',
     body: 'A generic wrapper that carries a value, a confidence ε ∈ [0,1], and a provenance tag. GUM rules propagate ε automatically through every arithmetic operation — you never lose track of how uncertain your data is.',
-    color: 'var(--color-accent-gold)',
+    color: 'var(--color-accent-gold-text)',
   },
   'ε=0.99': {
     title: 'Confidence scalar',
     body: 'Epistemic confidence following ISO GUM (Guide to the Expression of Uncertainty in Measurement). ε = 1.0 is perfect certainty; ε = 0.0 is total ignorance. The compiler tracks this through every calculation.',
-    color: 'var(--color-accent-gold)',
+    color: 'var(--color-accent-gold-text)',
   },
   'prov="iv_bolus_ref"': {
     title: 'Provenance tag',
     body: 'A compile-time string identifying the measurement origin. In a safety-critical pipeline, you can always trace any output back to its raw inputs — sensor ID, instrument, protocol, timestamp.',
-    color: 'var(--color-accent-teal)',
+    color: 'var(--color-accent-teal-text)',
   },
   'where c.ε >= 0.85': {
     title: 'Compile-time confidence gate',
@@ -33,17 +33,17 @@ const ANNOTATIONS: Record<string, Ann> = {
   'algebra Octonion': {
     title: 'First-class algebra declaration',
     body: 'Declares a named algebraic structure with its laws. The compiler uses these laws to constrain the e-graph optimizer — only rewrites that respect the declared laws are ever applied.',
-    color: 'var(--color-accent-gold)',
+    color: 'var(--color-accent-gold-text)',
   },
   'non_commutative': {
     title: 'Commutativity law',
     body: 'Tells the optimizer that e₁·e₂ ≠ e₂·e₁ — argument order cannot be swapped. This prevents incorrect vectorization or code motion across non-commutative products like quaternion or octonion multiplication.',
-    color: 'var(--color-accent-teal)',
+    color: 'var(--color-accent-teal-text)',
   },
   'fano_selective': {
     title: 'Fano-plane constraint',
     body: 'Restricts reassociation to the 175 associative triples. The 168 triples lying on Fano lines are non-associative and the optimizer never reorders them. The first compiler with rewrite rules constrained by projective plane geometry.',
-    color: 'var(--color-accent-gold)',
+    color: 'var(--color-accent-gold-text)',
   },
   'linear struct': {
     title: 'Linear type',
@@ -53,7 +53,7 @@ const ANNOTATIONS: Record<string, Ann> = {
   'fd: i32': {
     title: 'File descriptor field',
     body: 'A raw integer wrapped in a linear struct. The linearity guarantee means the OS resource is always released — even across error paths, without try/finally or RAII destructors.',
-    color: 'var(--color-accent-teal)',
+    color: 'var(--color-accent-teal-text)',
   },
 };
 
@@ -161,7 +161,7 @@ export default function AnnotatedCode() {
               className={`glass rounded-2xl p-5 grid gap-3 transition-all duration-200 ${
                 ann ? 'opacity-100' : 'opacity-40'
               }`}
-              style={{ borderLeft: ann ? `3px solid ${ann.color}` : '3px solid rgba(255,255,255,0.1)' }}
+              style={{ boxShadow: ann ? `inset 0 0 0 1px ${ann.color}55` : undefined }}
             >
               {ann ? (
                 <>

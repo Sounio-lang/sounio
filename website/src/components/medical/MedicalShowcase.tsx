@@ -45,7 +45,7 @@ export default function MedicalShowcase() {
 
   return (
     <div className="w-full max-w-7xl mx-auto p-6 flex flex-col gap-8">
-      <div className="flex flex-col gap-2 border-l-4 border-[var(--color-accent-blue)] pl-6">
+      <div className="flex flex-col gap-2 ">
         <h2 className="text-3xl font-bold text-white tracking-tight">Clinical Verification Engine</h2>
         <p className="text-gray-400 max-w-3xl leading-relaxed">
           Sounio guarantees patient safety by lifting biological uncertainty into the type system. Rather than 

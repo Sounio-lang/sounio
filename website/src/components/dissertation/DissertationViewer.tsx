@@ -392,7 +392,7 @@ export default function DissertationViewer() {
             title="Export the current frame as a PNG suitable for committee handouts"
             className="absolute top-4 right-4 bg-black/55 hover:bg-black/70 text-white text-xs px-3 py-1.5 rounded border border-white/15"
           >
-            📸 Snapshot PNG
+            Snapshot PNG
           </button>
 
           {/* Bottom-of-canvas narration overlay during tours */}

@@ -174,15 +174,15 @@ export default function OmeZarrSection() {
             {status === 'done' && meta && (
               <div className="grid grid-cols-3 gap-4 text-xs font-mono text-center">
                 <div>
-                  <div className="text-[var(--color-accent-gold)] font-semibold">{meta.shape.slice(-2).join('×')}</div>
+                  <div className="text-[var(--color-accent-gold-text)] font-semibold">{meta.shape.slice(-2).join('×')}</div>
                   <div className="text-[var(--color-text-tertiary)]">slice px</div>
                 </div>
                 <div>
-                  <div className="text-[var(--color-accent-gold)] font-semibold">{meta.ms}ms</div>
+                  <div className="text-[var(--color-accent-gold-text)] font-semibold">{meta.ms}ms</div>
                   <div className="text-[var(--color-text-tertiary)]">stream time</div>
                 </div>
                 <div>
-                  <div className="text-[var(--color-accent-teal)] font-semibold">ε=0.97</div>
+                  <div className="text-[var(--color-accent-teal-text)] font-semibold">ε=0.97</div>
                   <div className="text-[var(--color-text-tertiary)]">epistemic conf.</div>
                 </div>
               </div>
@@ -212,7 +212,7 @@ export default function OmeZarrSection() {
                 <div className="w-3 h-3 rounded-full bg-[#febc2e]" />
                 <div className="w-3 h-3 rounded-full bg-[#28c840]" />
               </div>
-              <span className="flex-1 text-center text-[var(--color-accent-gold)] text-sm font-mono">
+              <span className="flex-1 text-center text-[var(--color-accent-gold-text)] text-sm font-mono">
                 microscopy.sio
               </span>
             </div>

@@ -84,10 +84,10 @@ const ACTS: ActData[] = [
 ];
 
 const THEMES: Record<ActId, ActTheme> = {
-  1: { bg: '#080b10', accent: '#c0392b', border: 'rgba(192, 57, 43, 0.28)', numeralColor: 'rgba(192, 57, 43, 0.4)' },
-  2: { bg: '#050d1a', accent: '#5dade2', border: 'rgba(93, 173, 226, 0.22)', numeralColor: 'rgba(93, 173, 226, 0.35)' },
-  3: { bg: '#0c0902', accent: '#c8a436', border: 'rgba(200, 164, 54, 0.28)', numeralColor: 'rgba(200, 164, 54, 0.4)' },
-  4: { bg: '#071320', accent: '#2ec27e', border: 'rgba(46, 194, 126, 0.28)', numeralColor: 'rgba(46, 194, 126, 0.4)' },
+  1: { bg: '#05080E', accent: '#FF8596', border: 'rgba(255, 133, 150, 0.30)', numeralColor: 'rgba(255, 133, 150, 0.85)' },
+  2: { bg: '#05080E', accent: '#38BDF8', border: 'rgba(56, 189, 248, 0.28)', numeralColor: 'rgba(56, 189, 248, 0.85)' },
+  3: { bg: '#05080E', accent: '#D6B35A', border: 'rgba(214, 179, 90, 0.30)', numeralColor: 'rgba(214, 179, 90, 0.85)' },
+  4: { bg: '#05080E', accent: '#00E5C0', border: 'rgba(0, 229, 192, 0.28)', numeralColor: 'rgba(0, 229, 192, 0.85)' },
 };
 
 function usePrefersReducedMotion(): boolean {
@@ -214,6 +214,7 @@ function ActSection({ act, isReduced }: { act: ActData; isReduced: boolean }) {
         <div className="vision-act-text-inner">
           <span
             className="vision-numeral"
+            aria-hidden="true"
             style={{ color: theme.numeralColor }}
           >
             {act.numeral}

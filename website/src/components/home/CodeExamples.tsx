@@ -438,7 +438,7 @@ export default function CodeExamples({ locale = 'en' }: CodeExamplesProps) {
                 <div className="w-3 h-3 rounded-full bg-[#febc2e]"></div>
                 <div className="w-3 h-3 rounded-full bg-[#28c840]"></div>
               </div>
-              <span className="flex-1 text-center text-[var(--color-accent-gold)] text-sm font-mono">
+              <span className="flex-1 text-center text-[var(--color-accent-gold-text)] text-sm font-mono">
                 example.sio
               </span>
             </div>

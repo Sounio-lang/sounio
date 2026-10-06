@@ -198,7 +198,7 @@ export default function OctonionFanoViz() {
           <div className="glass glass-specular rounded-2xl p-6 flex flex-col items-center gap-4" ref={containerRef}>
             {/* Counter */}
             <div className="text-center">
-              <div className="text-[clamp(3rem,8vw,5rem)] font-extrabold text-[var(--color-accent-gold)] leading-none tabular-nums">
+              <div className="text-[clamp(3rem,8vw,5rem)] font-extrabold text-[var(--color-accent-gold-text)] leading-none tabular-nums">
                 {counter}
               </div>
               <div className="text-sm text-[var(--color-text-secondary)] mt-1">
@@ -307,7 +307,7 @@ export default function OctonionFanoViz() {
                 <div className="w-3 h-3 rounded-full bg-[#febc2e]" />
                 <div className="w-3 h-3 rounded-full bg-[#28c840]" />
               </div>
-              <span className="flex-1 text-center text-[var(--color-accent-gold)] text-sm font-mono">
+              <span className="flex-1 text-center text-[var(--color-accent-gold-text)] text-sm font-mono">
                 theorem_168.sio
               </span>
             </div>

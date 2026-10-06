@@ -162,7 +162,7 @@ if ${p.resultLabel.toLowerCase().replace(/[^a-z]/g, '_')}.\u03B5 >= ${threshold.
                       className="w-20 bg-[rgba(0,0,0,0.3)] border border-[var(--glass-border)] rounded-lg px-3 py-2 text-[var(--color-text-primary)] text-sm font-mono focus:border-[var(--color-accent-gold)]/60 focus:outline-none" />
                   </div>
                 </div>
-                <span className="text-xs text-[var(--color-accent-teal)] mt-1 block font-mono">prov: {p.a.prov}</span>
+                <span className="text-xs text-[var(--color-accent-teal-text)] mt-1 block font-mono">prov: {p.a.prov}</span>
               </div>
 
               <div>
@@ -176,7 +176,7 @@ if ${p.resultLabel.toLowerCase().replace(/[^a-z]/g, '_')}.\u03B5 >= ${threshold.
                       className="w-20 bg-[rgba(0,0,0,0.3)] border border-[var(--glass-border)] rounded-lg px-3 py-2 text-[var(--color-text-primary)] text-sm font-mono focus:border-[var(--color-accent-gold)]/60 focus:outline-none" />
                   </div>
                 </div>
-                <span className="text-xs text-[var(--color-accent-teal)] mt-1 block font-mono">prov: {p.b.prov}</span>
+                <span className="text-xs text-[var(--color-accent-teal-text)] mt-1 block font-mono">prov: {p.b.prov}</span>
               </div>
 
               <div className="mt-2">
@@ -196,7 +196,7 @@ if ${p.resultLabel.toLowerCase().replace(/[^a-z]/g, '_')}.\u03B5 >= ${threshold.
 
           {/* Arrow */}
           <div className="hidden lg:flex items-center justify-center pt-16">
-            <svg className="w-10 h-10 text-[var(--color-accent-gold)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+            <svg className="w-10 h-10 text-[var(--color-accent-gold-text)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
             </svg>
           </div>
@@ -221,7 +221,7 @@ if ${p.resultLabel.toLowerCase().replace(/[^a-z]/g, '_')}.\u03B5 >= ${threshold.
                   </div>
                   <div>
                     <span className="text-[var(--color-text-tertiary)]">prov: </span>
-                    <span className="text-[var(--color-accent-teal)]">{p.a.prov} \u00D7 {p.b.prov}</span>
+                    <span className="text-[var(--color-accent-teal-text)]">{p.a.prov} \u00D7 {p.b.prov}</span>
                   </div>
                 </div>
               </div>

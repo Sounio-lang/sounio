@@ -89,7 +89,7 @@ export function OntologyAutocomplete() {
                       setIsOpen(false);
                     }}
                   >
-                    <div className="mt-0.5 w-6 h-6 rounded bg-[var(--color-accent-teal)]/10 text-[var(--color-accent-teal)] flex items-center justify-center shrink-0">
+                    <div className="mt-0.5 w-6 h-6 rounded bg-[var(--color-accent-teal)]/10 text-[var(--color-accent-teal-text)] flex items-center justify-center shrink-0">
                       <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
                       </svg>
@@ -122,7 +122,7 @@ export function OntologyAutocomplete() {
           <div className="flex justify-between items-start mb-3">
             <div>
               <div className="flex items-center gap-2 mb-1">
-                <span className="text-xs font-mono px-2 py-0.5 rounded bg-[var(--color-accent-teal)]/20 text-[var(--color-accent-teal)] border border-[var(--color-accent-teal)]/30">
+                <span className="text-xs font-mono px-2 py-0.5 rounded bg-[var(--color-accent-teal)]/20 text-[var(--color-accent-teal-text)] border border-[var(--color-accent-teal)]/30">
                   {selectedTerm.database}
                 </span>
                 <span className="text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">
@@ -157,7 +157,7 @@ export function OntologyAutocomplete() {
                   </svg>
                 </Fragment>
               ))}
-              <div className="text-xs px-2 py-1 rounded bg-[var(--color-accent-teal)]/10 text-[var(--color-accent-teal)] border border-[var(--color-accent-teal)]/20 font-medium">
+              <div className="text-xs px-2 py-1 rounded bg-[var(--color-accent-teal)]/10 text-[var(--color-accent-teal-text)] border border-[var(--color-accent-teal)]/20 font-medium">
                 {selectedTerm.name}
               </div>
             </div>

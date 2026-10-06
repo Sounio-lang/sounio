@@ -254,7 +254,7 @@ export default function SeizureAssociatorTimeline() {
                   <div className="text-xs font-mono text-[var(--color-text-tertiary)] mb-1.5">
                     {row.patient}
                     {activePatient === row.patient && (
-                      <span className="ml-2 text-[var(--color-accent-gold)]">— selected</span>
+                      <span className="ml-2 text-[var(--color-accent-gold-text)]">— selected</span>
                     )}
                   </div>
                   <div className="flex gap-1 h-6 cursor-pointer"

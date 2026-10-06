@@ -36,7 +36,7 @@ export default function TerminalOutput({ title, html }: TerminalOutputProps) {
         .terminal-title {
           flex: 1;
           text-align: center;
-          color: rgba(255, 255, 255, 0.5);
+          color: rgba(255, 255, 255, 0.66);
           font-size: 0.75rem;
           margin-right: 52px;
         }
@@ -50,13 +50,18 @@ export default function TerminalOutput({ title, html }: TerminalOutputProps) {
         }
         .terminal-body pre {
           margin: 0;
+          padding: 0;
+          border: 0;
+          border-radius: 0;
+          background: transparent;
+          color: inherit;
           white-space: pre;
           font-family: inherit;
         }
         .c-red { color: #ff6b6b; }
         .c-green { color: #4ecdc4; }
         .c-yellow { color: #ffd93d; }
-        .c-blue { color: #6c5ce7; }
+        .c-blue { color: #60A5FA; }
         .c-magenta { color: #fd79a8; }
         .c-cyan { color: #74b9ff; }
         .c-white { color: #ffffff; }

@@ -245,8 +245,8 @@ export default function PBPKRapamycinChart() {
                       : '0.990'}
                   </span>
                 </div>
-                <div><span className="text-[var(--color-accent-gold)]">blood</span><span className="text-[var(--color-text-secondary)]"> = {ROWS[hovered].blood_value.toExponential(3)} ± {ROWS[hovered].blood_uncertainty.toExponential(2)}</span></div>
-                <div><span className="text-[var(--color-accent-teal)]">brain</span><span className="text-[var(--color-text-secondary)]"> = {ROWS[hovered].brain_value.toExponential(3)} ± {ROWS[hovered].brain_uncertainty.toExponential(2)}</span></div>
+                <div><span className="text-[var(--color-accent-gold-text)]">blood</span><span className="text-[var(--color-text-secondary)]"> = {ROWS[hovered].blood_value.toExponential(3)} ± {ROWS[hovered].blood_uncertainty.toExponential(2)}</span></div>
+                <div><span className="text-[var(--color-accent-teal-text)]">brain</span><span className="text-[var(--color-text-secondary)]"> = {ROWS[hovered].brain_value.toExponential(3)} ± {ROWS[hovered].brain_uncertainty.toExponential(2)}</span></div>
               </div>
             )}
           </div>
@@ -259,7 +259,7 @@ export default function PBPKRapamycinChart() {
                 <div className="w-3 h-3 rounded-full bg-[#febc2e]" />
                 <div className="w-3 h-3 rounded-full bg-[#28c840]" />
               </div>
-              <span className="flex-1 text-center text-[var(--color-accent-gold)] text-sm font-mono">
+              <span className="flex-1 text-center text-[var(--color-accent-gold-text)] text-sm font-mono">
                 pbpk_rapamycin.sio
               </span>
             </div>
@@ -269,15 +269,15 @@ export default function PBPKRapamycinChart() {
             <div className="px-6 py-4 bg-[#0d1117] border-t border-[var(--glass-border)]">
               <div className="grid grid-cols-2 gap-3 text-xs font-mono">
                 <div>
-                  <div className="text-[var(--color-accent-gold)] font-semibold">CL/F = 12.4 L/h</div>
+                  <div className="text-[var(--color-accent-gold-text)] font-semibold">CL/F = 12.4 L/h</div>
                   <div className="text-[var(--color-text-tertiary)]">Ferron et al. 1997</div>
                 </div>
                 <div>
-                  <div className="text-[var(--color-accent-teal)] font-semibold">t½ = 62 ± 16h</div>
+                  <div className="text-[var(--color-accent-teal-text)] font-semibold">t½ = 62 ± 16h</div>
                   <div className="text-[var(--color-text-tertiary)]">Kahan et al. 2001</div>
                 </div>
                 <div>
-                  <div className="text-[var(--color-accent-gold)] font-semibold">14 compartments</div>
+                  <div className="text-[var(--color-accent-gold-text)] font-semibold">14 compartments</div>
                   <div className="text-[var(--color-text-tertiary)]">Darwin PBPK model</div>
                 </div>
                 <div>

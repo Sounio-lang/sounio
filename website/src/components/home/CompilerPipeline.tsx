@@ -11,7 +11,7 @@ const STAGES = [
     id: 'source',
     label: 'Source',
     sub: '.sio file',
-    color: 'var(--color-accent-gold)',
+    color: 'var(--color-accent-gold-text)',
     icon: '{ }',
     desc: 'UTF-8 text with Sounio syntax. Units, effects, Knowledge<T>, algebra declarations, linear types — all in one file.',
     example: 'let dose: Knowledge<mg> = …',
@@ -20,7 +20,7 @@ const STAGES = [
     id: 'lexer',
     label: 'Lexer',
     sub: 'tokenizer',
-    color: 'var(--color-accent-teal)',
+    color: 'var(--color-accent-teal-text)',
     icon: 'T',
     desc: 'Hand-written tokenizer. Produces a flat token stream with byte-offset spans. Unicode-aware; Greek letters (ε, α, Ω) are valid identifiers.',
     example: 'Knowledge · < · mg · > · = · …',
@@ -29,7 +29,7 @@ const STAGES = [
     id: 'parser',
     label: 'Parser',
     sub: 'recursive descent',
-    color: 'var(--color-accent-gold)',
+    color: 'var(--color-accent-gold-text)',
     icon: '⊢',
     desc: 'Recursive-descent parser with no backtracking. Produces a typed AST with full source locations for every node — used by the error reporter and LSP.',
     example: 'LetDecl { name, ty: KnowledgeTy, …}',
@@ -47,7 +47,7 @@ const STAGES = [
     id: 'hir',
     label: 'HIR',
     sub: 'high-level IR',
-    color: 'var(--color-accent-teal)',
+    color: 'var(--color-accent-teal-text)',
     icon: '◇',
     desc: 'Desugared, monomorphised IR. Epistemic metadata (ε, provenance) is still structurally attached. This is where trait resolution and algebra law-binding happens.',
     example: 'HirCall { callee, args, ε_bound: 0.85 }',
@@ -65,8 +65,8 @@ const STAGES = [
     id: 'codegen',
     label: 'Codegen',
     sub: 'x86-64',
-    color: 'var(--color-accent-gold)',
-    icon: '⚙',
+    color: 'var(--color-accent-gold-text)',
+    icon: '⊕',
     desc: 'Register allocation + instruction selection targeting x86-64 System V ABI via the self-hosted native backend. No LLVM required for the default bin/souc workflow.',
     example: 'mov rax, [rsp+8]  ; load Knowledge value',
   },
@@ -194,7 +194,7 @@ export default function CompilerPipeline() {
           <div className="lg:sticky lg:top-[5rem] h-fit">
             <div
               className="glass glass-specular rounded-2xl p-6 grid gap-4 transition-all duration-300"
-              style={{ borderLeft: `3px solid ${activeStage.color}` }}
+              style={{ boxShadow: `inset 0 0 0 1px ${activeStage.color}55` }}
             >
               <div>
                 <div

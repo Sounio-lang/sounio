@@ -176,7 +176,7 @@ export default function SounioPlayground() {
           {/* Output panel */}
           <div className="rounded-2xl overflow-hidden border border-[var(--color-accent-gold)]/20">
             <div className="flex items-center gap-2 px-4 py-3 bg-[rgba(201,169,110,0.05)] border-b border-[var(--color-accent-gold)]/20">
-              <span className="flex-1 text-center text-[var(--color-accent-gold)] text-sm font-mono">
+              <span className="flex-1 text-center text-[var(--color-accent-gold-text)] text-sm font-mono">
                 output
               </span>
               {result && (

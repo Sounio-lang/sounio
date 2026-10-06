@@ -8,6 +8,7 @@ import sitemap from '@astrojs/sitemap';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import githubDarkTheme from '@shikijs/themes/github-dark';
+import githubLightTheme from '@shikijs/themes/github-light';
 
 // Real Shiki grammar for Sounio (`sio` code fences). Previously ```sio blocks
 // were relabeled as ```rust before highlighting (see git history of
@@ -39,14 +40,38 @@ const sounioTokenColors = JSON.parse(
 // the site's light/dark/system theme contract instead of being pinned dark
 // (previously Shiki's inline style always won over the `pre {}` rule in
 // global.css, so every code block ignored the light-mode toggle).
-const sounioSiteTheme = {
-  ...githubDarkTheme,
+// DS v2: two themes (github-light / github-dark bases) so non-sio fences
+// keep >= 4.5:1 in both modes; Shiki emits --shiki-light / --shiki-dark per
+// token and global.css picks one from the site theme. Comments are rebound
+// to the DS syntax-comment token in both, and sio tokens are var() refs.
+const commentRule = {
+  scope: ['comment', 'punctuation.definition.comment', 'string.comment'],
+  settings: { foreground: 'var(--color-syn-comment)', fontStyle: 'italic' },
+};
+/**
+ * @param {any} base
+ * @param {string} name
+ */
+const withSounio = (base, name) => ({
+  ...base,
+  name,
   colors: {
-    ...githubDarkTheme.colors,
+    ...base.colors,
     'editor.background': 'var(--color-code-bg)',
     'editor.foreground': 'var(--color-text-primary)',
   },
-  tokenColors: [...(githubDarkTheme.tokenColors ?? []), ...sounioTokenColors],
+  tokenColors: [...(base.tokenColors ?? []), commentRule, ...sounioTokenColors],
+});
+// github-light's red/orange/green keywords sit just under 4.5:1 on the DS
+// light code surface; darken them to their accessible siblings.
+/** @type {Record<string, string>} */
+const darken = { '#d73a49': '#B31D28', '#e36209': '#B54409', '#22863a': '#176F2C' };
+const githubLightAccessible = JSON.parse(
+  JSON.stringify(githubLightTheme).replace(/#(d73a49|e36209|22863a)/gi, (/** @type {string} */ m) => darken[m.toLowerCase()] ?? m)
+);
+const sounioThemes = {
+  light: withSounio(githubLightAccessible, 'sounio-light'),
+  dark: withSounio(githubDarkTheme, 'sounio-dark'),
 };
 
 // https://astro.build/config
@@ -72,7 +97,8 @@ export default defineConfig({
     mdx({
       syntaxHighlight: 'shiki',
       shikiConfig: {
-        theme: sounioSiteTheme,
+        themes: sounioThemes,
+        defaultColor: false,
         langs: [sounioGrammar],
       },
     }),
@@ -81,7 +107,8 @@ export default defineConfig({
   markdown: {
     syntaxHighlight: 'shiki',
     shikiConfig: {
-      theme: sounioSiteTheme,
+      themes: sounioThemes,
+      defaultColor: false,
       langs: [sounioGrammar],
     },
   },

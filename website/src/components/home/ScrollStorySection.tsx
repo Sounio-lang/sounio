@@ -89,7 +89,7 @@ fn analyze(dose: Knowledge<mg>) -> Validated<mg>
         {/* Segment 2 */}
         <motion.div className="absolute text-center max-w-4xl px-6 pointer-events-none" style={{ opacity: textOpacity2 }}>
           <h2 className="text-[clamp(2.5rem,5vw,5rem)] font-extrabold tracking-tighter mb-6 leading-[1.1]">
-            {segments[1].heading} <span className="text-transparent bg-clip-text bg-gradient-to-r from-[var(--color-accent-teal)] to-blue-400">{segments[1].headingHighlight}</span>
+            {segments[1].heading} <span className="text-[var(--color-accent-teal-text)]">{segments[1].headingHighlight}</span>
           </h2>
           <p className="text-[clamp(1.1rem,2vw,1.5rem)] text-white/60 font-light mx-auto max-w-[40ch]">
             {segments[1].body}

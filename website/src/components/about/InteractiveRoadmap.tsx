@@ -53,7 +53,7 @@ export default function InteractiveRoadmap() {
           } else if (isInProgress) {
             colorClass = 'bg-[var(--color-accent-gold)] border-[var(--color-accent-gold)]';
             pulseClass = 'motion-safe:animate-pulse';
-            textClass = 'text-[var(--color-accent-gold)]';
+            textClass = 'text-[var(--color-accent-gold-text)]';
           } else if (isPlanned) {
             colorClass = 'bg-gray-300 border-gray-400 opacity-50';
             textClass = 'text-gray-400';
