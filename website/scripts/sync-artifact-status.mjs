@@ -53,9 +53,17 @@ function pick(obj, ...keys) {
   return undefined;
 }
 
+// Language release: the README version badge (shields.io escapes "-" as "--").
 function parseReadmeVersion(readme) {
-  const m = readme?.match(/version-1\.0\.0--beta\.(\d+)/);
-  return m ? `1.0.0-beta.${m[1]}` : null;
+  const m = readme?.match(/badge\/version-((?:[^-]|--)+)-/);
+  return m ? m[1].replace(/--/g, "-") : null;
+}
+
+// Compiler build: the string `bin/souc --version` prints, read from the source
+// that produces it (self-hosted/compiler/main.sio), e.g. "Madaros v0.80.0".
+function parseCompilerBuild(mainSio) {
+  const m = mainSio?.match(/println\("(Madaros v[0-9.]+) -- the Sounio self-hosted compiler"\)/);
+  return m?.[1] ?? null;
 }
 
 function parseReadmeFullSuite(readme) {
@@ -80,7 +88,7 @@ function parseBootstrapFromChangelog(changelog) {
 function countStage0Lines() {
   const stage0 = readText("bootstrap/stage0.c");
   if (!stage0) return null;
-  return stage0.split("\n").length;
+  return stage0.split("\n").length - (stage0.endsWith("\n") ? 1 : 0); // matches `wc -l`
 }
 
 // ---------------------------------------------------------------------------
@@ -101,8 +109,11 @@ const changelog = readText("CHANGELOG.md");
 const soucScript = readText("bin/souc");
 
 const readmeVersion = parseReadmeVersion(readme);
+// Do not fall back to the launcher string recorded inside old stdlib artifacts
+// (it carried the retired 1.0.0-beta scheme); the compiler build is what
+// `./bin/souc --version` prints.
 const wrapperVersion =
-  reliability?.science_pipeline?.runtime_souc_version ??
+  parseCompilerBuild(readText("self-hosted/compiler/main.sio")) ??
   parseWrapperVersion(soucScript) ??
   "unknown";
 const fullSuite = parseReadmeFullSuite(readme);
@@ -123,8 +134,11 @@ const generatedAt = new Date().toISOString();
 // Build normalized status object
 // ---------------------------------------------------------------------------
 
+// The committed stdlib result (generated 2026-05-12) predates module-privacy
+// enforcement; on 2026-10-05 (main=99d078eb) 40 stdlib programs fail with
+// E175/E259. No pass count is published until the figure is re-measured.
 const reliabilityReason = reliability
-  ? `${stdlibGatePass}/${stdlibGateTotal} stdlib reliability tests pass, ${stdlibGateSkip} skipped`
+  ? `Being re-measured: the committed result (${reliability?.generated_at_utc?.slice(0, 10) ?? "undated"}) predates module-privacy enforcement, so no pass count is published`
   : "artifact missing";
 
 const status = {
@@ -144,7 +158,7 @@ const status = {
     },
     defaultWorkflow: {
       launcher: "bin/souc",
-      backend: "self-hosted native ELF/Mach-O",
+      backend: "self-hosted native x86-64 ELF (Linux only)",
       summary:
         "The public onboarding path is the checked self-hosted launcher. It type-checks and compiles to host binaries — no Rust/Cargo build step required for the default workflow.",
     },
@@ -203,11 +217,11 @@ const status = {
         {
           title: "Native codegen",
           detail:
-            "Linux x86-64 ELF plus checked macOS artifact lanes via bin/souc; PE/COFF backend exists for cross-compile",
+            "Linux x86-64 static ELF only (TOUR.md section 6); no macOS, Windows or AArch64 target ships",
         },
         {
           title: "Core stdlib gate",
-          detail: `${stdlibGatePass} / ${stdlibGateTotal} stdlib reliability tests pass (${reliability?.generated_at_utc?.slice(0, 10) ?? "artifact date unknown"})`,
+          detail: reliabilityReason,
         },
         {
           title: "Optimizer",
@@ -261,16 +275,16 @@ const status = {
           detail: "Local ontology work exists; 15M-term federated query not implemented",
         },
         {
-          title: "GPU CLI entry point",
-          detail: "PTX/GPU codegen exists in-tree; no complete default CLI path (gpu/lib.sio stub)",
+          title: "General GPU backend",
+          detail: "`souc build --backend gpu` emits PTX for a skeleton of named kernel patterns (empty bodies), not a general GPU backend (TOUR.md section 6)",
         },
         {
-          title: "Windows pre-built binary",
-          detail: "PE/COFF backend is production-grade; no checked .exe shipped in this checkout",
+          title: "Windows, macOS and AArch64",
+          detail: "Not targeted: the compiler emits Linux x86-64 static ELF only",
         },
         {
-          title: "AArch64 native-v2 parity",
-          detail: "Apple Silicon support uses checked Mach-O artifact lane; native-v2 aarch64 still preview-grade",
+          title: "WASM backend",
+          detail: "Blocked draft (#2237); not shipped",
         },
         {
           title: "Checked launcher REPL",
@@ -288,7 +302,7 @@ const status = {
       artifact: "docs/compiler/KNOWN_LIMITATIONS.md",
     },
     nativeBackend: {
-      label: "Native Backend (ELF/Mach-O/PE)",
+      label: "Native Backend (x86-64 ELF)",
       level: pick(nativeBackend, "selftest_passed") ? "verified" : "unknown",
       reason: nativeBackend
         ? `selftest_passed=${nativeBackend.selftest_passed}, scalar_smoke_present=${nativeBackend.scalar_smoke_present}, fail_closed=${nativeBackend.fail_closed}`
@@ -304,16 +318,10 @@ const status = {
       artifact: "artifacts/omega/selfhost_verification_report.v1.json",
     },
     cranelift: {
-      label: "Cranelift JIT (optional profile)",
-      level: "beta",
-      reason: `Optional omega/JIT profile — not the default bin/souc onboarding path. Stdlib gate: ${reliabilityReason}`,
-      artifact: "artifacts/stdlib/stdlib_reliability_status.v1.json",
-    },
-    llvm: {
-      label: "LLVM Backend",
-      level: "verified",
-      reason: "Production per KNOWN_LIMITATIONS.md; wired via `--backend llvm`",
-      artifact: "docs/compiler/KNOWN_LIMITATIONS.md",
+      label: "Cranelift JIT (retired)",
+      level: "stub",
+      reason: "No longer shipped since 2.1.0 (CHANGELOG.md). Madaros native x86-64 is the only shipped engine.",
+      artifact: "CHANGELOG.md",
     },
     lsp: {
       label: "LSP Server",
@@ -344,8 +352,8 @@ const status = {
   stdlib: {
     reliability: {
       label: "Core Standard Library",
-      level: artifactToLevel(pick(reliability, "status_summary")),
-      totals: pick(reliability, "totals") ?? {},
+      level: "unknown",
+      totals: {},
       reason: reliabilityReason,
       artifact: "artifacts/stdlib/stdlib_reliability_status.v1.json",
     },
@@ -516,5 +524,5 @@ console.log(`  - compiler entries: ${Object.keys(status.compiler).length}`);
 console.log(`  - stdlib entries: ${Object.keys(status.stdlib).length}`);
 console.log(`  - checked artifact: ${wrapperVersion}`);
 console.log(`  - readme badge: ${readmeVersion ?? "n/a"}`);
-console.log(`  - stdlib gate: ${stdlibGatePass}/${stdlibGateTotal}`);
+console.log(`  - stdlib gate: re-measuring (committed artifact ${reliability?.generated_at_utc?.slice(0, 10) ?? "missing"} not published)`);
 console.log(`  - generatedAt: ${generatedAt}`);
