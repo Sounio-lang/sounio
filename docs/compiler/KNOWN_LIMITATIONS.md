@@ -40,8 +40,9 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
-| KL-17 | enum variants with payloads (`Circle(f64)`, `Rect { w: f64 }`): no runtime representation | both |
-| KL-18 | user fns named like compiler builtins: `pub` residual on Madaros; seed hijacks or rejects | both |
+| KL-20 | enum variants with payloads (`Circle(f64)`, `Rect { w: f64 }`): no runtime representation | both |
+| KL-21 | user fns named like compiler builtins: `pub` residual on Madaros; seed hijacks or rejects | both |
+| KL-18 | `Hyper<…>` CPU values: Madaros fail-closed; lean_single prints a wrong value (seed) | both |
 
 ## Ledger
 
@@ -224,7 +225,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
   see the history snapshot for the KAS-1 rationale.
 
-### KL-17 — enum payload variants (P1.3)
+### KL-20 — enum payload variants (P1.3)
 
 - Engine: `both`. Repro (measured 2026-10-06, `origin/main` `fa695abaa`):
 
@@ -276,7 +277,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   unchanged: Madaros lowers `Option<i64>` as a nullable word, so `Some(0)`
   is indistinguishable from `None`.
 
-### KL-18 — user functions named like compiler builtins (P1.4)
+### KL-21 — user functions named like compiler builtins (P1.4)
 
 - Engine: `both`. The checker (`checker_check_call_expr_inplace`) and the
   lowerer (`lower_call_expr_ref` → `call_expr_uses_special_a_ref` / `_b_ref`)
@@ -318,6 +319,26 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 - Pins: `tests/run-pass/user_fn_shadows_builtin_measure.sio`,
   `tests/run-pass/user_fn_shadows_builtin_names.sio`,
   `tests/compile-fail/builtin_shadow_local_binding_refused.sio`.
+### KL-18 — `Hyper<Algebra, T>` values on the CPU path (P0.8.2)
+
+- Engine: both. There is no CPU value lowering for `Hyper<Octonion, f64>`
+  (or any `Hyper<…>`); the only implemented CPU octonion product is
+  `algebra::octonion::oct_mul` over `[f64; 8]` (Fano convention, e1·e2 = e3).
+  Reference: `(2 + e1)(3 + e2) = [6, 3, 2, 1, 0, 0, 0, 0]`, which `oct_mul`
+  returns on both engines.
+- **Madaros — fail-closed.** `[..] as Hyper<…>` is refused in CPU lowering
+  ("Hyper<...> values ... are not implemented on the native CPU path"). Before
+  the refusal (measured 2026-10-06 on the shipped ELF): `.e1` of the cast
+  printed `0.000000`, `a + b` segfaulted, `a * b` failed in the backend with
+  rc 12. Pin: `tests/compile-fail/hyper_octonion_mul_cpu_refused.sio`.
+  The `--backend gpu` path lowers `Hyper<…>` through HLIR and is unaffected.
+- **lean_single — OPEN, silent wrong value.** The engine does not know the
+  type: `println(([2.0, 1.0, 0.0, ..] as Hyper<Octonion, f64>) * ..)` prints
+  `8843176242182119936` and exits 0; routing the product back through
+  `as [f64; 8]` segfaults (rc 139). Closing it requires a lean_single source
+  change and a seed refresh (`scripts/dev/refresh_lean_seed.sh`), which is a
+  founder-run step. Until then: do not use `Hyper<…>` values under
+  `SOUNIO_SOUC_ENGINE=lean_single`.
 
 ## Registry-governed, not rungs
 

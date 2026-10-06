@@ -111,7 +111,7 @@ touches the dissertation surface and its cost must precede its ruling.
 **Footprint.** Four files, thirteen constructions, **two reads**. The four files
 each carry an identical copy-pasted three-constructor preamble (`label: 0`,
 `label: 1`, `label: 2`); twelve of the thirteen constructions are inside those
-helpers. The only reads are `examples/epistemic_quantum_vqe.sio:247-248`, two
+helpers. The only reads are `examples/epistemic_qubit_toy_vqe.sio:249-250`, two
 equality comparisons. **`darwin_epistemic_pbpk.sio` — the dissertation surface —
 never reads `.label` at all.** There, the tag is write-only metadata.
 
@@ -240,7 +240,7 @@ before it can say which shape does.
 
 `docs/spec/LANGUAGE_SPECIFICATION.md:402` documents a sixth-and-different one —
 `struct Knowledge<T>` with `confidence: BetaConfidence` — and it is **not
-fictional**: `examples/alphageozero_final.sio:83` declares exactly that, and
+fictional**: `examples/_attic/alphageozero_final.sio:83` declares exactly that, and
 `BetaConfidence` is declared in three files. It appears in **zero** files under
 `self-hosted/`, so the compiler has never heard of it. The same document's
 `Knowledge::exact` (:422) has **one** call site tree-wide, and `ep_exact` — which
