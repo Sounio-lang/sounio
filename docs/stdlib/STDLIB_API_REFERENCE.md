@@ -14,7 +14,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.stdlib.stdlib-
 This reference lists all public functions (`pub fn`) in the Sounio standard library,
 organized by module. Generated from source on the date shown below.
 
-**Generated**: 2026-09-26
+**Generated**: 2026-09-27
 **Source**: `stdlib/**/*.sio`
 
 ---
@@ -1410,7 +1410,7 @@ organized by module. Generated from source on the date shown below.
 
 ## darwin_pbpk (`stdlib/darwin_pbpk/`)
 
-**443 public functions** across 121 files
+**485 public functions** across 121 files
 
 - `pub fn absorption_state_zero() -> AbsorptionState {` — *darwin_pbpk/absorption.sio*
 - `pub fn absorption_state_with_dose(dose_mg: f64) -> AbsorptionState {` — *darwin_pbpk/absorption.sio*
@@ -1792,8 +1792,9 @@ organized by module. Generated from source on the date shown below.
 - `pub fn oral_bbb_run(` — *darwin_pbpk/scenarios/oral_rapamycin_bbb.sio*
 - `pub fn oral_bbb_print_csv(trace: OralBBBTrace) with IO, Mut, Panic, Div {` — *darwin_pbpk/scenarios/oral_rapamycin_bbb.sio*
 - `pub fn rapamycin_qd_regimen(n_days: i32) -> DosingRegimen {` — *darwin_pbpk/scenarios/steady_state_runner.sio*
-- `pub fn run_oral_multidose(` — *darwin_pbpk/scenarios/steady_state_runner.sio*
+- `pub fn run_oral_multidose_cfg(` — *darwin_pbpk/scenarios/steady_state_runner.sio*
 - `pub fn ssr_print_report(r: SteadyStateReport) with IO, Mut, Panic, Div {` — *darwin_pbpk/scenarios/steady_state_runner.sio*
+- `pub fn run_oral_multidose(` — *darwin_pbpk/scenarios/steady_state_runner.sio*
 - `pub fn vfx_odv_parent_ratio(scen: VenlafaxineXrScenario) -> f64 with Mut, Div, Panic {` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
 - `pub fn vfx_integrate_to(` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
 - `pub fn raw_observation_table_new() -> RawObservationTable with Mut {` — *darwin_pbpk/schema/observation.sio*
@@ -1834,6 +1835,47 @@ organized by module. Generated from source on the date shown below.
 - `pub fn qe_eps_ctot() -> f64    { return 0.90 }  // dose/assay` — *darwin_pbpk/tmdd/qe_approximation.sio*
 - `pub fn qe_eps_kd() -> f64      { return 0.70 }  // in-vitro binding` — *darwin_pbpk/tmdd/qe_approximation.sio*
 - `pub fn qe_eps_rtotal() -> f64  { return 0.50 }  // target density in vivo (weakest)` — *darwin_pbpk/tmdd/qe_approximation.sio*
+- `pub fn tsit5_c2() -> f64 { return 0.161 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_c3() -> f64 { return 0.327 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_c4() -> f64 { return 0.9 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_c5() -> f64 { return 0.9800255409045097 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_c6() -> f64 { return 1.0 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_c7() -> f64 { return 1.0 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a21() -> f64 { return 0.161 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a31() -> f64 { return 0.0 - 0.008480655492356989 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a32() -> f64 { return 0.335480655492357 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a41() -> f64 { return 2.8971530571054935 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a42() -> f64 { return 0.0 - 6.359448489975075 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a43() -> f64 { return 4.3622954328695815 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a51() -> f64 { return 5.325864828439257 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a52() -> f64 { return 0.0 - 11.748883564062828 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a53() -> f64 { return 7.4955393428898365 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a54() -> f64 { return 0.0 - 0.09249506636175525 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a61() -> f64 { return 5.86145544294642 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a62() -> f64 { return 0.0 - 12.92096931784711 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a63() -> f64 { return 8.159367898576159 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a64() -> f64 { return 0.0 - 0.071584973281401 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a65() -> f64 { return 0.0 - 0.028269050394068383 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a71() -> f64 { return 0.09646076681806523 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a72() -> f64 { return 0.01 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a73() -> f64 { return 0.4798896504144996 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a74() -> f64 { return 1.379008574103742 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a75() -> f64 { return 0.0 - 3.290069515436081 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_a76() -> f64 { return 2.324710524099774 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_b1() -> f64 { return 0.09646076681806523 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_b2() -> f64 { return 0.01 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_b3() -> f64 { return 0.4798896504144996 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_b4() -> f64 { return 1.379008574103742 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_b5() -> f64 { return 0.0 - 3.290069515436081 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_b6() -> f64 { return 2.324710524099774 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_b7() -> f64 { return 0.0 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_e1() -> f64 { return 0.00178001105222577714 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_e2() -> f64 { return 0.0008164344596567469 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_e3() -> f64 { return 0.0 - 0.007880878010261995 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_e4() -> f64 { return 0.1447110071732629 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_e5() -> f64 { return 0.0 - 0.5823571654525552 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_e6() -> f64 { return 0.45808210592918697 }` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn tsit5_e7() -> f64 { return 0.0 - 0.01515151515151515 }` — *darwin_pbpk/tsit5_pbpk14.sio*
 - `pub fn abs_f64(x: f64) -> f64 {` — *darwin_pbpk/tsit5_pbpk14.sio*
 - `pub fn max_f64(a: f64, b: f64) -> f64 {` — *darwin_pbpk/tsit5_pbpk14.sio*
 - `pub fn min_f64(a: f64, b: f64) -> f64 {` — *darwin_pbpk/tsit5_pbpk14.sio*
@@ -14994,5 +15036,5 @@ organized by module. Generated from source on the date shown below.
 ## Summary
 
 - **124** modules with public APIs
-- **14103** total public functions
+- **14145** total public functions
 - Generated from `stdlib/` source files

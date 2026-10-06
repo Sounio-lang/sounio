@@ -56,6 +56,9 @@ pub struct RegAllocState {
     pub hint_count: i64,
     // Bookkeeping for per-preg free-until position
     pub free_until: [i64; 64],    // free_until[preg] = earliest position preg is free
+    // Call positions: intervals spanning a call must spill (caller-saved regs)
+    pub call_positions: [i64; 512],
+    pub call_count: i64,
 }
 
 // Spill summary returned after allocation.
@@ -91,6 +94,8 @@ pub fn regalloc_new() -> RegAllocState {
         hints: [empty_reg_hint(); 256],
         hint_count: 0,
         free_until: [0; 64],
+        call_positions: [0; 512],
+        call_count: 0,
     }
 }
 
@@ -250,6 +255,25 @@ pub fn regalloc_spill_at(
 // Coalescing hints
 // ============================================================================
 
+pub fn regalloc_record_call(state: RegAllocState, pos: i64) -> RegAllocState with Mut, Panic {
+    var s = state
+    if s.call_count < 512 {
+        s.call_positions[s.call_count as usize] = pos
+        s.call_count = s.call_count + 1
+    }
+    s
+}
+pub fn regalloc_interval_spans_call(state: RegAllocState, start: i64, end: i64) -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < state.call_count {
+        let cp = state.call_positions[i as usize]
+        if cp > start && cp < end {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
 pub fn regalloc_add_hint(
     state: RegAllocState, vreg: i64, preferred_preg: i64
 ) -> RegAllocState with Mut, Panic, Div {
@@ -328,6 +352,15 @@ pub fn regalloc_linear_scan(state: RegAllocState, num_regs: i64) -> RegAllocStat
         }
         active_count = new_count
 
+        // 3a5. If interval spans a call, force spill (caller-saved regs clobbered)
+        let interval_spans_call = regalloc_interval_spans_call(s, s.intervals[i as usize].start, s.intervals[i as usize].end)
+        if interval_spans_call {
+            s.intervals[i as usize].assigned_preg = RA_SPILLED
+            s.intervals[i as usize].spill_slot = s.spill_count
+            s.spill_count = s.spill_count + 1
+            i = i + 1
+            continue
+        }
         // 3b. Try hinted register first
         let hint_preg = regalloc_try_hint(s, active, active_count, i)
         if hint_preg >= 0 {
@@ -535,6 +568,7 @@ pub fn liveness_compute_intervals(
     instrs: [RaSimpleInstr; 4096], instr_count: i64
 ) -> RegAllocState with Mut, Panic, Div {
     var map = liveness_map_new()
+    var state = regalloc_new()
     var pos: i64 = 0
     while pos < instr_count {
         let instr = instrs[pos as usize]
@@ -549,9 +583,22 @@ pub fn liveness_compute_intervals(
         if instr.src2 >= 0 {
             map = liveness_use_point(map, instr.src2, pos)
         }
+        // Detect calls: RaSimpleInstr with dst=-1, src1=-1, src2=-1 is a call
+        // (the MIR_OP_CALL instruction has no dst/src in the simple encoding)
+        if instr.dst == 0 - 3 { 
+            state = regalloc_record_call(state, pos)
+        }
         pos = pos + 1
     }
-    liveness_build_intervals(map)
+    var result = liveness_build_intervals(map)
+    // Copy call positions to result
+    result.call_count = state.call_count
+    var ci: i64 = 0
+    while ci < state.call_count {
+        result.call_positions[ci as usize] = state.call_positions[ci as usize]
+        ci = ci + 1
+    }
+    result
 }
 
 // ============================================================================

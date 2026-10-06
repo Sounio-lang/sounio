@@ -11,7 +11,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation
 
 ## Purpose
 
-`scripts/dev/selfhost-check.sh` runs the Stage0/Stage1 smoke checks in one command and prints machine-readable gate lines:
+> **Retired 2026-10-06 (P1.7).** `selfhost-check.sh` and `golden-update.sh` drive the Cargo-era compiler (`cargo build -p souc`, `rustc`, `souc sysroot install`, `souc compile --emit hlir`), none of which exists any more. They are kept in `scripts/archive/` for the record; the steps below no longer run.
+
+`scripts/archive/selfhost-check.sh` runs the Stage0/Stage1 smoke checks in one command and prints machine-readable gate lines:
 
 - `PASS [stage] ...`
 - `WARN [stage] ...`
@@ -31,16 +33,16 @@ Artifacts and logs are written to `/tmp/sounio-selfhost-check` by default.
 
 ```bash
 cd ~/work/sounio
-bash scripts/dev/selfhost-check.sh
+bash scripts/archive/selfhost-check.sh
 ```
 
 Useful overrides:
 
 ```bash
-FILE=examples/minimal.sio bash scripts/dev/selfhost-check.sh
-SOUNIO_SELFHOST_STRICT=1 bash scripts/dev/selfhost-check.sh
-SOUNIO_SYSROOT_HOME=/tmp/sounio-sysroots-stage0 bash scripts/dev/selfhost-check.sh
-WORK_DIR=/tmp/sounio-check-alt bash scripts/dev/selfhost-check.sh
+FILE=examples/minimal.sio bash scripts/archive/selfhost-check.sh
+SOUNIO_SELFHOST_STRICT=1 bash scripts/archive/selfhost-check.sh
+SOUNIO_SYSROOT_HOME=/tmp/sounio-sysroots-stage0 bash scripts/archive/selfhost-check.sh
+WORK_DIR=/tmp/sounio-check-alt bash scripts/archive/selfhost-check.sh
 ```
 
 Strict mode behavior:
@@ -50,15 +52,15 @@ Strict mode behavior:
 
 ## Golden Promotion
 
-Use `scripts/dev/golden-update.sh` to update `tests/golden/minimal.hlir.golden.txt` with backup:
+Use `scripts/archive/golden-update.sh` to update `tests/golden/minimal.hlir.golden.txt` with backup:
 
 ```bash
 cd ~/work/sounio
-bash scripts/dev/golden-update.sh
+bash scripts/archive/golden-update.sh
 ```
 
 Optional overrides:
 
 ```bash
-FILE=examples/minimal.sio GOLDEN_FILE=tests/golden/minimal.hlir.golden.txt bash scripts/dev/golden-update.sh
+FILE=examples/minimal.sio GOLDEN_FILE=tests/golden/minimal.hlir.golden.txt bash scripts/archive/golden-update.sh
 ```

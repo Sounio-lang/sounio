@@ -61,6 +61,7 @@ use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_ma
 use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_to_ir_summary_with_epistemic}
 use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref, lower_monolithic_public_probe_trace_set}
 use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
+use ir::lower::{lower_rgn_backend_opt_in}
 use ir::lower::{lower_program_function_body_from_summary_with_epistemic}
 use ir::lower::{lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect, lower_fn_tuple_f64_array_mask}
 use ir::normalize::*
@@ -5702,11 +5703,11 @@ fn compiler_main_native_byte_u8(b: i8) -> i64 {
     if x < 0 { x + 256 } else { x }
 }
 
-fn compiler_main_native_code_eq(a: CodeBuffer, b: CodeBuffer) -> bool with Mut {
+fn compiler_main_native_code_eq(a: CodeBuffer, b: CodeBuffer) -> bool with Mut, Panic, Div {
     if a.len != b.len { return false }
     var i: i64 = 0
     while i < a.len {
-        if compiler_main_native_byte_u8(a.bytes[i as usize]) != compiler_main_native_byte_u8(b.bytes[i as usize]) {
+        if compiler_main_native_byte_u8(code_buffer_read_i8(a, i)) != compiler_main_native_byte_u8(code_buffer_read_i8(b, i)) {
             return false
         }
         i = i + 1
@@ -5716,14 +5717,14 @@ fn compiler_main_native_code_eq(a: CodeBuffer, b: CodeBuffer) -> bool with Mut {
 
 fn compiler_main_native_find_pattern4(
     buf: CodeBuffer, b0: i64, b1: i64, b2: i64, b3: i64
-) -> i64 with Mut {
+) -> i64 with Mut, Panic, Div {
     if buf.len < 4 { return -1 }
     var i: i64 = 0
     while i <= buf.len - 4 {
-        if compiler_main_native_byte_u8(buf.bytes[i as usize]) == b0 &&
-           compiler_main_native_byte_u8(buf.bytes[(i + 1) as usize]) == b1 &&
-           compiler_main_native_byte_u8(buf.bytes[(i + 2) as usize]) == b2 &&
-           compiler_main_native_byte_u8(buf.bytes[(i + 3) as usize]) == b3 {
+        if compiler_main_native_byte_u8(code_buffer_read_i8(buf, i)) == b0 &&
+           compiler_main_native_byte_u8(code_buffer_read_i8(buf, (i + 1))) == b1 &&
+           compiler_main_native_byte_u8(code_buffer_read_i8(buf, (i + 2))) == b2 &&
+           compiler_main_native_byte_u8(code_buffer_read_i8(buf, (i + 3))) == b3 {
             return i
         }
         i = i + 1
@@ -6110,11 +6111,10 @@ fn compiler_main_test_prof_counter_reloc_recorded() -> bool with Mut, Panic, Div
     let instr = ir_prof_counter(3)
     lower_instr(&!nc, instr)
     if nc.relocs.count != 1 { return false }
-    let reloc = nc.relocs.entries[0]
     // kind_code must be 3 (.data RIP-relative)
-    if reloc.kind.kind_code != 3 { return false }
+    if NC_RELOC_KIND[0] != 3 { return false }
     // target_index must account for the RuntimeContext global slot in .data.
-    if reloc.target.target_index != runtime_context_global_slot_size() + (3 * 8) { return false }
+    if NC_RELOC_TARGET[0] != runtime_context_global_slot_size() + (3 * 8) { return false }
     true
 }
 
@@ -6123,7 +6123,7 @@ fn compiler_main_test_prof_dump_emitted() -> bool with Alloc, Mut, Panic, Div {
     var nc = compiler_new()
     // Simulate: 1 prof counter with fn_name "test" at .rodata offset 0
     nc.prof_counter_count = 1
-    nc.prof_counter_names[0] = 0
+    NC_PROF_COUNTER_NAMES[0] = 0
     // Create minimal module with 1 prof counter entry
     var module = ir_empty_module()
     module.prof_counter_count = 1
@@ -6145,7 +6145,7 @@ fn compiler_main_test_prof_dump_emitted() -> bool with Alloc, Mut, Panic, Div {
 fn compiler_main_test_prof_dump_writes_stderr() -> bool with Alloc, Mut, Panic, Div {
     var nc = compiler_new()
     nc.prof_counter_count = 1
-    nc.prof_counter_names[0] = 0
+    NC_PROF_COUNTER_NAMES[0] = 0
     var module = ir_empty_module()
     module.prof_counter_count = 1
     var pc_info = ir_empty_prof_counter_info()
@@ -6160,9 +6160,8 @@ fn compiler_main_test_prof_dump_writes_stderr() -> bool with Alloc, Mut, Panic, 
     var has_data = false
     var ri: i64 = 0
     while ri < nc.relocs.count {
-        let r = nc.relocs.entries[ri as usize]
-        if r.kind.kind_code == 2 { has_rodata = true }
-        if r.kind.kind_code == 3 { has_data = true }
+        if NC_RELOC_KIND[ri as usize] == 2 { has_rodata = true }
+        if NC_RELOC_KIND[ri as usize] == 3 { has_data = true }
         ri = ri + 1
     }
     if !has_rodata { return false }
@@ -6681,10 +6680,10 @@ fn compiler_main_test_multipreg_prologue_bytes() -> bool with Mut, Panic, Div {
 fn compiler_main_test_multipreg_prologue_prefix() -> bool with Mut, Panic, Div {
     var buf = code_buffer_new()
     buf = emit_prologue(buf, 0)
-    if buf.bytes[0 as usize] != 0x41 as i8 { return false }
-    if buf.bytes[1 as usize] != 0x57 as i8 { return false }  // push r15
-    if buf.bytes[2 as usize] != 0x41 as i8 { return false }
-    if buf.bytes[3 as usize] != 0x56 as i8 { return false }  // push r14
+    if code_buffer_read_i8(buf, 0) != 0x41 as i8 { return false }
+    if code_buffer_read_i8(buf, 1) != 0x57 as i8 { return false }  // push r15
+    if code_buffer_read_i8(buf, 2) != 0x41 as i8 { return false }
+    if code_buffer_read_i8(buf, 3) != 0x56 as i8 { return false }  // push r14
     true
 }
 
@@ -6694,7 +6693,7 @@ fn compiler_main_test_multipreg_epilogue_bytes() -> bool with Mut, Panic, Div {
     buf = emit_epilogue(buf)
     // mov_rsp_rbp(3)+pop_rbp(1)+pop_r12(2)+pop_r13(2)+pop_r14(2)+pop_r15(2)+ret(1) = 13
     if buf.len != 13 { return false }
-    if buf.bytes[12 as usize] != 0xC3 as i8 { return false }
+    if code_buffer_read_i8(buf, 12) != 0xC3 as i8 { return false }
     true
 }
 
@@ -6835,10 +6834,10 @@ fn compiler_main_test_disp8_load_bytes() -> bool with Mut, Panic, Div {
     var buf = code_buffer_new()
     buf = emit_load_rbp_disp8_rax(buf, -8)
     if buf.len != 4 { return false }
-    if buf.bytes[0 as usize] != 0x48 as i8 { return false }
-    if buf.bytes[1 as usize] != 0x8b as i8 { return false }
-    if buf.bytes[2 as usize] != 0x45 as i8 { return false }
-    if buf.bytes[3 as usize] != 0xf8 as i8 { return false }  // low8(-8) = 0xF8
+    if code_buffer_read_i8(buf, 0) != 0x48 as i8 { return false }
+    if code_buffer_read_i8(buf, 1) != 0x8b as i8 { return false }
+    if code_buffer_read_i8(buf, 2) != 0x45 as i8 { return false }
+    if code_buffer_read_i8(buf, 3) != 0xf8 as i8 { return false }  // low8(-8) = 0xF8
     true
 }
 
@@ -6847,10 +6846,10 @@ fn compiler_main_test_disp8_store_bytes() -> bool with Mut, Panic, Div {
     var buf = code_buffer_new()
     buf = emit_store_rax_rbp_disp8(buf, -16)
     if buf.len != 4 { return false }
-    if buf.bytes[0 as usize] != 0x48 as i8 { return false }
-    if buf.bytes[1 as usize] != 0x89 as i8 { return false }
-    if buf.bytes[2 as usize] != 0x45 as i8 { return false }
-    if buf.bytes[3 as usize] != 0xf0 as i8 { return false }  // low8(-16) = 0xF0
+    if code_buffer_read_i8(buf, 0) != 0x48 as i8 { return false }
+    if code_buffer_read_i8(buf, 1) != 0x89 as i8 { return false }
+    if code_buffer_read_i8(buf, 2) != 0x45 as i8 { return false }
+    if code_buffer_read_i8(buf, 3) != 0xf0 as i8 { return false }  // low8(-16) = 0xF0
     true
 }
 
@@ -6981,8 +6980,8 @@ fn compiler_main_test_frame_trim_empty() -> bool with Mut, Panic, Div {
 // T63: nc_min_frame_size returns 0 when all vregs preg-allocated
 fn compiler_main_test_frame_trim_all_preg() -> bool with Mut, Panic, Div {
     var nc = compiler_new()
-    nc.vreg_to_preg[0 as usize] = 15   // r15
-    nc.vreg_to_preg[1 as usize] = 14   // r14
+    NC_VREG_TO_PREG[0 as usize] = 15   // r15
+    NC_VREG_TO_PREG[1 as usize] = 14   // r14
     var func = ir_empty_function()
     func.reg_count = 2
     nc_min_frame_size(nc, func) == 0
@@ -6991,7 +6990,7 @@ fn compiler_main_test_frame_trim_all_preg() -> bool with Mut, Panic, Div {
 // T64: nc_min_frame_size returns 16 for 1 spilled vreg at index 0 (align16(8)=16)
 fn compiler_main_test_frame_trim_one_spill() -> bool with Mut, Panic, Div {
     var nc = compiler_new()
-    nc.vreg_to_preg[0 as usize] = -1   // RA_SPILLED
+    NC_VREG_TO_PREG[0 as usize] = -1   // RA_SPILLED
     var func = ir_empty_function()
     func.reg_count = 1
     nc_min_frame_size(nc, func) == 16
@@ -7000,10 +6999,10 @@ fn compiler_main_test_frame_trim_one_spill() -> bool with Mut, Panic, Div {
 // T65: nc_min_frame_size returns 32 when highest stack vreg is index 3
 fn compiler_main_test_frame_trim_vreg3_stack() -> bool with Mut, Panic, Div {
     var nc = compiler_new()
-    nc.vreg_to_preg[0 as usize] = 15   // preg-alloc
-    nc.vreg_to_preg[1 as usize] = 14   // preg-alloc
-    nc.vreg_to_preg[2 as usize] = 13   // preg-alloc
-    nc.vreg_to_preg[3 as usize] = -1   // RA_SPILLED (highest stack vreg)
+    NC_VREG_TO_PREG[0 as usize] = 15   // preg-alloc
+    NC_VREG_TO_PREG[1 as usize] = 14   // preg-alloc
+    NC_VREG_TO_PREG[2 as usize] = 13   // preg-alloc
+    NC_VREG_TO_PREG[3 as usize] = -1   // RA_SPILLED (highest stack vreg)
     var func = ir_empty_function()
     func.reg_count = 4
     nc_min_frame_size(nc, func) == 32
@@ -7012,9 +7011,9 @@ fn compiler_main_test_frame_trim_vreg3_stack() -> bool with Mut, Panic, Div {
 // T66: nc_min_frame_size returns 16 when middle vreg is spilled, higher is preg-alloc
 fn compiler_main_test_frame_trim_middle_spill() -> bool with Mut, Panic, Div {
     var nc = compiler_new()
-    nc.vreg_to_preg[0 as usize] = 15   // preg-alloc
-    nc.vreg_to_preg[1 as usize] = -1   // RA_SPILLED
-    nc.vreg_to_preg[2 as usize] = 14   // preg-alloc (higher index, no slot needed)
+    NC_VREG_TO_PREG[0 as usize] = 15   // preg-alloc
+    NC_VREG_TO_PREG[1 as usize] = -1   // RA_SPILLED
+    NC_VREG_TO_PREG[2 as usize] = 14   // preg-alloc (higher index, no slot needed)
     var func = ir_empty_function()
     func.reg_count = 3
     nc_min_frame_size(nc, func) == 16
@@ -7023,10 +7022,10 @@ fn compiler_main_test_frame_trim_middle_spill() -> bool with Mut, Panic, Div {
 // T67: nc_min_frame_size returns 0 for 4 preg-alloc vregs (all 4 callee-saved registers used)
 fn compiler_main_test_frame_trim_four_preg() -> bool with Mut, Panic, Div {
     var nc = compiler_new()
-    nc.vreg_to_preg[0 as usize] = 15   // r15
-    nc.vreg_to_preg[1 as usize] = 14   // r14
-    nc.vreg_to_preg[2 as usize] = 13   // r13
-    nc.vreg_to_preg[3 as usize] = 12   // r12
+    NC_VREG_TO_PREG[0 as usize] = 15   // r15
+    NC_VREG_TO_PREG[1 as usize] = 14   // r14
+    NC_VREG_TO_PREG[2 as usize] = 13   // r13
+    NC_VREG_TO_PREG[3 as usize] = 12   // r12
     var func = ir_empty_function()
     func.reg_count = 4
     nc_min_frame_size(nc, func) == 0
@@ -7035,11 +7034,11 @@ fn compiler_main_test_frame_trim_four_preg() -> bool with Mut, Panic, Div {
 // T68: nc_min_frame_size returns 48 for spilled vreg at index 4 (align16(40)=48)
 fn compiler_main_test_frame_trim_vreg4_spill() -> bool with Mut, Panic, Div {
     var nc = compiler_new()
-    nc.vreg_to_preg[0 as usize] = 15
-    nc.vreg_to_preg[1 as usize] = 14
-    nc.vreg_to_preg[2 as usize] = 13
-    nc.vreg_to_preg[3 as usize] = 12
-    nc.vreg_to_preg[4 as usize] = -1   // RA_SPILLED
+    NC_VREG_TO_PREG[0 as usize] = 15
+    NC_VREG_TO_PREG[1 as usize] = 14
+    NC_VREG_TO_PREG[2 as usize] = 13
+    NC_VREG_TO_PREG[3 as usize] = 12
+    NC_VREG_TO_PREG[4 as usize] = -1   // RA_SPILLED
     var func = ir_empty_function()
     func.reg_count = 5
     nc_min_frame_size(nc, func) == 48
@@ -7048,8 +7047,8 @@ fn compiler_main_test_frame_trim_vreg4_spill() -> bool with Mut, Panic, Div {
 // T69: nc_min_frame_size handles param vreg (preg=-2 RA_UNASSIGNED) as needing stack slot
 fn compiler_main_test_frame_trim_param_vreg() -> bool with Mut, Panic, Div {
     var nc = compiler_new()
-    nc.vreg_to_preg[0 as usize] = -2   // RA_UNASSIGNED (param)
-    nc.vreg_to_preg[1 as usize] = 15   // preg-alloc
+    NC_VREG_TO_PREG[0 as usize] = -2   // RA_UNASSIGNED (param)
+    NC_VREG_TO_PREG[1 as usize] = 15   // preg-alloc
     var func = ir_empty_function()
     func.reg_count = 2
     if nc_min_frame_size(nc, func) != 16 { return false }
@@ -7063,12 +7062,13 @@ fn compiler_main_test_frame_trim_param_vreg() -> bool with Mut, Panic, Div {
 }
 
 // T70: used allocatable preg mask tracks only r12-r15 assignments
-fn compiler_main_test_native_vreg_rejection_paths() -> bool with Mut, Panic, Div, Alloc {
+fn compiler_main_test_native_vreg_rejection_paths() -> bool with IO, Mut, Panic, Div, Alloc {
     var oversized = ir_empty_function()
     oversized.reg_count = IR_MAX_VREGS + 1
     var machine = machine_function_new()
     var core_nc = compiler_new()
-    compile_ir_function_v2_into(&! core_nc, &oversized, &machine, 0)
+    // An oversized body is refused: false, plus the overflow record.
+    if compile_ir_function_v2_into(&! core_nc, &oversized, &machine, 0) { return false }
     if !core_nc.ir_vreg_overflow { return false }
     if core_nc.ir_vreg_overflow_needed != IR_MAX_VREGS + 1 { return false }
     if core_nc.ir_vreg_overflow_limit != IR_MAX_VREGS { return false }
@@ -7081,7 +7081,7 @@ fn compiler_main_test_native_vreg_rejection_paths() -> bool with Mut, Panic, Div
     legacy_nc.ir_vreg_overflow_limit == NC_MAX_VREGS
 }
 
-fn compiler_main_test_ir_vreg_boundary_contract() -> bool with Mut, Panic, Div, Alloc {
+fn compiler_main_test_ir_vreg_boundary_contract() -> bool with IO, Mut, Panic, Div, Alloc {
     if !ir_reg_count_is_valid(IR_MAX_VREGS - 1) { return false }
     if !ir_reg_count_is_valid(IR_MAX_VREGS) { return false }
     if ir_reg_count_is_valid(IR_MAX_VREGS + 1) { return false }
@@ -7091,12 +7091,12 @@ fn compiler_main_test_ir_vreg_boundary_contract() -> bool with Mut, Panic, Div, 
     compiler_main_test_native_vreg_rejection_paths()
 }
 
-fn compiler_main_test_used_allocatable_preg_mask() -> bool with Mut, Panic, Div, Alloc {
+fn compiler_main_test_used_allocatable_preg_mask() -> bool with IO, Mut, Panic, Div, Alloc {
     var nc = compiler_new()
-    nc.vreg_to_preg[0 as usize] = 15
-    nc.vreg_to_preg[1 as usize] = 12
-    nc.vreg_to_preg[2 as usize] = -1
-    nc.vreg_to_preg[3 as usize] = 0
+    NC_VREG_TO_PREG[0 as usize] = 15
+    NC_VREG_TO_PREG[1 as usize] = 12
+    NC_VREG_TO_PREG[2 as usize] = -1
+    NC_VREG_TO_PREG[3 as usize] = 0
     if nc_used_allocatable_preg_mask(nc, 4) != (X86_ALLOCATABLE_R12_MASK() | X86_ALLOCATABLE_R15_MASK()) { return false }
     if nc_used_allocatable_preg_mask(nc, NC_MAX_VREGS + 1) != (X86_ALLOCATABLE_R12_MASK() | X86_ALLOCATABLE_R15_MASK()) { return false }
     compiler_main_test_ir_vreg_boundary_contract()
@@ -8189,11 +8189,11 @@ fn compiler_main_test_native_v2_frame_uses_allocated_callee_saved_only() -> bool
     let prologue = emit_prologue_with_preg_mask(code_buffer_new(), 0, preg_mask)
     let epilogue = emit_epilogue_with_preg_mask(code_buffer_new(), preg_mask)
     if prologue.len != 8 { return false }
-    if prologue.bytes[0 as usize] != (0x41 as i8) || prologue.bytes[1 as usize] != (0x57 as i8) { return false }
-    if prologue.bytes[2 as usize] != (0x41 as i8) || prologue.bytes[3 as usize] != (0x55 as i8) { return false }
+    if code_buffer_read_i8(prologue, 0) != (0x41 as i8) || code_buffer_read_i8(prologue, 1) != (0x57 as i8) { return false }
+    if code_buffer_read_i8(prologue, 2) != (0x41 as i8) || code_buffer_read_i8(prologue, 3) != (0x55 as i8) { return false }
     if epilogue.len != 9 { return false }
-    if epilogue.bytes[4 as usize] != (0x41 as i8) || epilogue.bytes[5 as usize] != (0x5D as i8) { return false }
-    if epilogue.bytes[6 as usize] != (0x41 as i8) || epilogue.bytes[7 as usize] != (0x5F as i8) { return false }
+    if code_buffer_read_i8(epilogue, 4) != (0x41 as i8) || code_buffer_read_i8(epilogue, 5) != (0x5D as i8) { return false }
+    if code_buffer_read_i8(epilogue, 6) != (0x41 as i8) || code_buffer_read_i8(epilogue, 7) != (0x5F as i8) { return false }
     true
 }
 
@@ -8303,13 +8303,13 @@ fn compiler_main_test_native_v2_runtime_metadata_shape() -> bool with Mut, Panic
     let err = compile_module_v2_mut(&! nc, &module)
     if !str_eq(err, "") { return false }
     if nc.stack_map_record_count < 3 { return false }
-    if nc.stack_map_fn_indices[0 as usize] != 0 { return false }
-    if nc.stack_map_kinds[0 as usize] != NATIVE_V2_SAFEPOINT_RET() { return false }
-    if nc.stack_map_code_offsets[0 as usize] < 0 { return false }
+    if NC_STACK_MAP_FN_INDICES[0 as usize] != 0 { return false }
+    if NC_STACK_MAP_KINDS[0 as usize] != NATIVE_V2_SAFEPOINT_RET() { return false }
+    if NC_STACK_MAP_CODE_OFFSETS[0 as usize] < 0 { return false }
     var saw_call = false
     var i: i64 = 0
     while i < nc.stack_map_record_count {
-        if nc.stack_map_kinds[i as usize] == NATIVE_V2_SAFEPOINT_CALL() {
+        if NC_STACK_MAP_KINDS[i as usize] == NATIVE_V2_SAFEPOINT_CALL() {
             saw_call = true
         }
         i = i + 1
@@ -8346,26 +8346,26 @@ fn compiler_main_test_native_v2_root_map_metadata_shape() -> bool with Mut, Pani
     let err = compile_module_v2_mut(&! nc, &module)
     if !str_eq(err, "") { return false }
     if nc.stack_map_record_count < 3 { return false }
-    if nc.stack_map_root_temp_counts[0 as usize] != nc.stack_map_temp_counts[0 as usize] { return false }
-    if nc.stack_map_root_spill_counts[0 as usize] != nc.stack_map_spill_counts[0 as usize] { return false }
-    if nc.stack_map_callee_saved_root_masks[0 as usize] != 0 { return false }
-    if nc.stack_map_root_kind_masks[0 as usize] != native_v2_stack_map_root_kind_mixed() { return false }
-    if nc.stack_map_deopt_ids[0 as usize] != 0 { return false }
-    if nc.stack_map_tier_ids[0 as usize] != native_v2_stack_map_tier_baseline() { return false }
-    if nc.stack_map_osr_eligibility[0 as usize] != native_v2_stack_map_osr_ineligible() { return false }
+    if NC_STACK_MAP_ROOT_TEMP_COUNTS[0 as usize] != NC_STACK_MAP_TEMP_COUNTS[0 as usize] { return false }
+    if NC_STACK_MAP_ROOT_SPILL_COUNTS[0 as usize] != NC_STACK_MAP_SPILL_COUNTS[0 as usize] { return false }
+    if NC_STACK_MAP_CALLEE_SAVED_ROOT_MASKS[0 as usize] != 0 { return false }
+    if NC_STACK_MAP_ROOT_KIND_MASKS[0 as usize] != native_v2_stack_map_root_kind_mixed() { return false }
+    if NC_STACK_MAP_DEOPT_IDS[0 as usize] != 0 { return false }
+    if NC_STACK_MAP_TIER_IDS[0 as usize] != native_v2_stack_map_tier_baseline() { return false }
+    if NC_STACK_MAP_OSR_ELIGIBILITY[0 as usize] != native_v2_stack_map_osr_ineligible() { return false }
     var saw_call = false
     var i: i64 = 0
     while i < nc.stack_map_record_count {
-        if nc.stack_map_root_temp_counts[i as usize] != nc.stack_map_temp_counts[i as usize] { return false }
-        if nc.stack_map_root_spill_counts[i as usize] != nc.stack_map_spill_counts[i as usize] { return false }
-        if nc.stack_map_deopt_ids[i as usize] != i { return false }
-        if nc.stack_map_tier_ids[i as usize] != native_v2_stack_map_tier_baseline() { return false }
-        if nc.stack_map_root_kind_masks[i as usize] != native_v2_stack_map_root_kind_mixed() { return false }
-        if nc.stack_map_kinds[i as usize] == NATIVE_V2_SAFEPOINT_CALL() {
+        if NC_STACK_MAP_ROOT_TEMP_COUNTS[i as usize] != NC_STACK_MAP_TEMP_COUNTS[i as usize] { return false }
+        if NC_STACK_MAP_ROOT_SPILL_COUNTS[i as usize] != NC_STACK_MAP_SPILL_COUNTS[i as usize] { return false }
+        if NC_STACK_MAP_DEOPT_IDS[i as usize] != i { return false }
+        if NC_STACK_MAP_TIER_IDS[i as usize] != native_v2_stack_map_tier_baseline() { return false }
+        if NC_STACK_MAP_ROOT_KIND_MASKS[i as usize] != native_v2_stack_map_root_kind_mixed() { return false }
+        if NC_STACK_MAP_KINDS[i as usize] == NATIVE_V2_SAFEPOINT_CALL() {
             saw_call = true
-            if nc.stack_map_osr_eligibility[i as usize] != native_v2_stack_map_osr_eligible() { return false }
+            if NC_STACK_MAP_OSR_ELIGIBILITY[i as usize] != native_v2_stack_map_osr_eligible() { return false }
         } else {
-            if nc.stack_map_osr_eligibility[i as usize] != native_v2_stack_map_osr_ineligible() { return false }
+            if NC_STACK_MAP_OSR_ELIGIBILITY[i as usize] != native_v2_stack_map_osr_ineligible() { return false }
         }
         i = i + 1
     }
@@ -8381,9 +8381,9 @@ fn compiler_main_test_native_v2_stack_map_decoder_root_fields() -> bool with Mut
     if !blob.valid { return false }
     if blob.version != native_v2_stack_map_version() { return false }
     if blob.record_count != nc.stack_map_record_count { return false }
-    if blob.records[0].root_temp_count != nc.stack_map_root_temp_counts[0 as usize] { return false }
-    if blob.records[0].root_spill_count != nc.stack_map_root_spill_counts[0 as usize] { return false }
-    if blob.records[0].callee_saved_root_mask != nc.stack_map_callee_saved_root_masks[0 as usize] { return false }
+    if blob.records[0].root_temp_count != NC_STACK_MAP_ROOT_TEMP_COUNTS[0 as usize] { return false }
+    if blob.records[0].root_spill_count != NC_STACK_MAP_ROOT_SPILL_COUNTS[0 as usize] { return false }
+    if blob.records[0].callee_saved_root_mask != NC_STACK_MAP_CALLEE_SAVED_ROOT_MASKS[0 as usize] { return false }
     if blob.records[0].root_kind_mask != native_v2_stack_map_root_kind_mixed() { return false }
     var saw_call = false
     var i: i64 = 0
@@ -8486,20 +8486,20 @@ fn compiler_main_test_native_v2_runtime_metadata_large_blob() -> bool with Mut, 
 
     var i: i64 = 0
     while i < 256 {
-        nc.stack_map_fn_indices[i as usize] = i
-        nc.stack_map_kinds[i as usize] = NATIVE_V2_SAFEPOINT_CALL()
-        nc.stack_map_machine_instr_indices[i as usize] = i * 2
-        nc.stack_map_code_offsets[i as usize] = i * 16
-        nc.stack_map_frame_sizes[i as usize] = 64
-        nc.stack_map_temp_counts[i as usize] = i + 1
-        nc.stack_map_spill_counts[i as usize] = 3
-        nc.stack_map_root_temp_counts[i as usize] = i + 1
-        nc.stack_map_root_spill_counts[i as usize] = 3
-        nc.stack_map_callee_saved_root_masks[i as usize] = 0
-        nc.stack_map_root_kind_masks[i as usize] = native_v2_stack_map_root_kind_mixed()
-        nc.stack_map_deopt_ids[i as usize] = i
-        nc.stack_map_tier_ids[i as usize] = native_v2_stack_map_tier_baseline()
-        nc.stack_map_osr_eligibility[i as usize] = native_v2_stack_map_osr_eligible()
+        NC_STACK_MAP_FN_INDICES[i as usize] = i
+        NC_STACK_MAP_KINDS[i as usize] = NATIVE_V2_SAFEPOINT_CALL()
+        NC_STACK_MAP_MACHINE_INSTR_INDICES[i as usize] = i * 2
+        NC_STACK_MAP_CODE_OFFSETS[i as usize] = i * 16
+        NC_STACK_MAP_FRAME_SIZES[i as usize] = 64
+        NC_STACK_MAP_TEMP_COUNTS[i as usize] = i + 1
+        NC_STACK_MAP_SPILL_COUNTS[i as usize] = 3
+        NC_STACK_MAP_ROOT_TEMP_COUNTS[i as usize] = i + 1
+        NC_STACK_MAP_ROOT_SPILL_COUNTS[i as usize] = 3
+        NC_STACK_MAP_CALLEE_SAVED_ROOT_MASKS[i as usize] = 0
+        NC_STACK_MAP_ROOT_KIND_MASKS[i as usize] = native_v2_stack_map_root_kind_mixed()
+        NC_STACK_MAP_DEOPT_IDS[i as usize] = i
+        NC_STACK_MAP_TIER_IDS[i as usize] = native_v2_stack_map_tier_baseline()
+        NC_STACK_MAP_OSR_ELIGIBILITY[i as usize] = native_v2_stack_map_osr_eligible()
         i = i + 1
     }
 
@@ -9805,6 +9805,19 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
     print(" len=")
     print_int(stream_pair.1.len)
     print("\n")
+    // SOUNIO_PROBE_STREAMING_OUT=<path>: also write the streaming ELF, so a
+    // gate can RUN what this lane emits instead of trusting ok=true
+    // (scripts/ci/madaros_region_reclaim_streaming_gate.sh).
+    let stream_out = read_env("SOUNIO_PROBE_STREAMING_OUT")
+    if str_len(stream_out) > 0 && stream_pair.0 && stream_pair.1.ok {
+        if write_file(stream_out, stream_pair.1.bytes, stream_pair.1.len) < 0 {
+            print("probe_native_streaming: write_failed\n")
+        } else {
+            print("probe_native_streaming: wrote=")
+            print(stream_out)
+            print("\n")
+        }
+    }
 }
 
 // --probe-filtered-body-lower <file.sio>: Copilot review (PR #2516), finding
@@ -13039,10 +13052,10 @@ fn compiler_main_test_sqrtsd_encoding() -> bool with Mut, Panic, Div {
     var buf = code_buffer_new()
     buf = emit_sqrtsd_xmm0_xmm0(buf)
     buf.len == 4
-        && buf.bytes[0] == (0xF2 as i8)
-        && buf.bytes[1] == (0x0F as i8)
-        && buf.bytes[2] == (0x51 as i8)
-        && buf.bytes[3] == (0xC0 as i8)
+        && code_buffer_read_i8(buf, 0) == (0xF2 as i8)
+        && code_buffer_read_i8(buf, 1) == (0x0F as i8)
+        && code_buffer_read_i8(buf, 2) == (0x51 as i8)
+        && code_buffer_read_i8(buf, 3) == (0xC0 as i8)
 }
 
 // T402: name_is_print_f64 recognizes "print_f64" and rejects non-matches
@@ -29372,6 +29385,9 @@ fn run_gpu_compile_pipeline(
 // ============================================================================
 
 fn main() with IO, Mut, Panic, Div, Alloc {
+    // Madaros compiles through native/codegen_x86_linux.sio, the only backend
+    // that implements the region-reclamation runtime (ir/lower.sio).
+    lower_rgn_backend_opt_in()
     let args = get_args()
 
     // Check for --serve BEFORE printing banner (stdout is binary protocol)
