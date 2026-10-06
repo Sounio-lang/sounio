@@ -65,6 +65,19 @@ var NC_V2_CURRENT_FN_INDEX: i64 = -1
 // region can ever be open at run time and no barrier is emitted).
 var NC_RGN_BARRIER_FN: i64 = -1
 var NC_RGN_MARK_ALL_FN: i64 = -1
+// The module's __rgn_barrier slot whether or not a region can open (-1 when it
+// has none). Lowering emits explicit __rgn_barrier(w, t) calls (the cast escape
+// hook, the exit escape scan); the core emitter inlines them: the full barrier
+// when NC_RGN_BARRIER_FN is bound, nothing when no region can ever be open.
+var NC_RGN_BARRIER_SLOT: i64 = -1
+// Mutation hook for the region-barrier witnesses: SOUNIO_RGN_BARRIER_SABOTAGE
+// names ONE store path whose region barrier is left out, so a CI gate can show
+// that each witness fails without its barrier (a witness that passes either
+// way proves nothing). 0 = none. 1 field, 2 index, 3 storeptr, 4 global,
+// 5 call (explicit __rgn_barrier: cast hook, exit scan), 6 seqpush, 7 seqset,
+// 8 rawwrite (write_i64/write_f64), 9 syscall (syscall6 mark-all),
+// 10 extern (dynlink stub mark-all). Never set outside that gate.
+var NC_RGN_SABOTAGE: i64 = 0
 // Cached SOUNIO_WIDE_MUL_SABOTAGE. i64 (0/1) rather than bool: module-global
 // bool init is not exercised elsewhere in this backend. Refreshed from the
 // IO compile entry so nc_wide_mul_into does not take IO — its emit-loop
@@ -2987,6 +3000,22 @@ fn nc_emit_bt_rax_imm8(nc: &! NativeCompiler, bit_pos: i64) with Mut, Panic, Div
     nc_emit_byte(nc, low8(bit_pos))
 }
 
+fn nc_refresh_rgn_sabotage() with IO, Mut, Panic, Div {
+    let v = read_env("SOUNIO_RGN_BARRIER_SABOTAGE")
+    NC_RGN_SABOTAGE = 0
+    if str_len(v) == 0 { return }
+    if str_eq(v, "field") { NC_RGN_SABOTAGE = 1 }
+    if str_eq(v, "index") { NC_RGN_SABOTAGE = 2 }
+    if str_eq(v, "storeptr") { NC_RGN_SABOTAGE = 3 }
+    if str_eq(v, "global") { NC_RGN_SABOTAGE = 4 }
+    if str_eq(v, "call") { NC_RGN_SABOTAGE = 5 }
+    if str_eq(v, "seqpush") { NC_RGN_SABOTAGE = 6 }
+    if str_eq(v, "seqset") { NC_RGN_SABOTAGE = 7 }
+    if str_eq(v, "rawwrite") { NC_RGN_SABOTAGE = 8 }
+    if str_eq(v, "syscall") { NC_RGN_SABOTAGE = 9 }
+    if str_eq(v, "extern") { NC_RGN_SABOTAGE = 10 }
+}
+
 fn nc_refresh_wide_mul_sabotage() with IO, Mut, Panic, Div {
     if str_eq(read_env("SOUNIO_WIDE_MUL_SABOTAGE"), "1") {
         NC_WIDE_MUL_SABOTAGE = 1
@@ -5253,18 +5282,65 @@ fn rgn_emit_call_fn(nc: &! NativeCompiler, fn_index: i64) with Mut, Panic, Div {
 }
 
 // Bind the two runtime entry points codegen calls on its own, by name, before
-// compiling a module.
+// compiling a module -- but only when some function in the module can actually
+// open a region, i.e. contains a call to __rgn_enter. Lowering reserves the
+// __rgn_* slots before any body is lowered (summary consumers freeze the
+// function-id table first), so the slots' presence says nothing about whether
+// a region can open: a main-only program, or one whose every candidate was
+// judged not worth a region (its enter call replaced by `tok = 0`), keeps the
+// slots but no enter call. Then no region can ever be open at run time, so no
+// barrier, no extern/syscall mark-all, and no switch to the core emitter is
+// needed; the store paths compile exactly as without region reclamation.
 fn nc_rgn_bind_module_fns(module: &IrModule) with Mut, Panic, Div {
     NC_RGN_BARRIER_FN = 0 - 1
     NC_RGN_MARK_ALL_FN = 0 - 1
+    NC_RGN_BARRIER_SLOT = 0 - 1
+    var barrier_fn: i64 = 0 - 1
+    var mark_all_fn: i64 = 0 - 1
+    // Slot indices named __rgn_enter (a multi-module merge may keep one per
+    // module). More than eight means "treat any call as an enter".
+    var enter_ids: [i64; 8] = [0 - 1; 8]
+    var enter_count: i64 = 0
     var fi: i64 = 0
     while fi < (*module).fn_count {
         let fname = ir_fn_get(&(*module), fi as usize).name
         let id = native_v2_region_builtin_id(fname)
-        if id == 68 { NC_RGN_BARRIER_FN = fi }
-        if id == 69 { NC_RGN_MARK_ALL_FN = fi }
+        if id == 68 { barrier_fn = fi }
+        if id == 69 { mark_all_fn = fi }
+        if id == 60 {
+            if enter_count < 8 { enter_ids[enter_count as usize] = fi }
+            enter_count = enter_count + 1
+        }
         fi = fi + 1
     }
+    NC_RGN_BARRIER_SLOT = barrier_fn
+    if barrier_fn < 0 || mark_all_fn < 0 || enter_count == 0 { return }
+    var opens_region = false
+    fi = 0
+    while fi < (*module).fn_count && !opens_region {
+        let func = ir_fn_get(&(*module), fi as usize)
+        var ii: i64 = 0
+        while ii < func.instr_count && !opens_region {
+            let slot = ir_region_slot_r(func.region, ii)
+            if (IR_A_OP[slot as usize] as IrOpcode) == IrOpcode::IrCall {
+                let target = IR_A_FN_ID[slot as usize]
+                if enter_count > 8 {
+                    opens_region = true
+                } else {
+                    var k: i64 = 0
+                    while k < enter_count {
+                        if enter_ids[k as usize] == target { opens_region = true }
+                        k = k + 1
+                    }
+                }
+            }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+    if !opens_region { return }
+    NC_RGN_BARRIER_FN = barrier_fn
+    NC_RGN_MARK_ALL_FN = mark_all_fn
 }
 
 // Before an IR store of the word in `value_vreg` into the object named by the
@@ -7532,6 +7608,11 @@ pub fn compile_module_streaming_begin_into(nc: &! NativeCompiler, module: &IrMod
 }
 
 pub fn compile_module_streaming_begin_count_into(nc: &! NativeCompiler, fn_count: i64) with Mut, Panic, Div, Alloc {
+    // No module to scan for region entry points: compile without region hooks
+    // rather than inherit a previous module's binding.
+    NC_RGN_BARRIER_FN = 0 - 1
+    NC_RGN_MARK_ALL_FN = 0 - 1
+    NC_RGN_BARRIER_SLOT = 0 - 1
     (*nc).fn_count = fn_count
     (*nc).runtime_context_slot_offset = 0
     let runtime_slot_size = runtime_context_global_slot_size()
@@ -9111,15 +9192,38 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     c
 }
 
-pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, machine_func: &MachineFunction, fn_index: i64) with IO, Mut, Panic, Div, Alloc {
-    // The MIR emitter does not yet carry region store-barrier pseudos. When a
-    // module has region runtime hooks, compile the original IR through the
-    // core emitter, which owns the complete field/index/global barrier logic.
-    // The opt-out path publishes no region stubs and therefore retains the
-    // existing MIR pipeline unchanged.
-    if NC_RGN_BARRIER_FN >= 0 {
-        let _region_core_ok = compile_ir_function_v2_from_ir_into(nc, func, fn_index)
-        return
+// Whether `func` has an IR store that compile_ir_function_v2_core_ir_into
+// guards with a region barrier (nc_rgn_emit_store_barrier): a field, index,
+// raw-pointer or global store. Builtin bodies (Seq push/set, write_offset64,
+// syscall6) and extern stubs carry their own barrier / mark-all and are
+// emitted identically on both paths.
+fn nc_rgn_fn_has_barrier_store(func: &IrFunction) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*func).instr_count {
+        let op = IR_A_OP[(ir_region_slot_r((*func).region, i)) as usize] as IrOpcode
+        if op == IrOpcode::IrFieldSet || op == IrOpcode::IrIndexSet || op == IrOpcode::IrStorePtr || op == IrOpcode::IrStoreGlobal {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Returns false when the function could not be emitted; the caller must refuse
+// the module (an incomplete body/offset must never reach an ELF).
+pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, machine_func: &MachineFunction, fn_index: i64) -> bool with IO, Mut, Panic, Div, Alloc {
+    // The MIR emitter does not carry region store-barrier pseudos. In a module
+    // where some function can open a region (nc_rgn_bind_module_fns), a
+    // function with a barrier-guarded store is compiled from its IR through the
+    // core emitter, which owns the field/index/raw-pointer/global barriers --
+    // every function may run inside some caller's region, so this is not
+    // limited to the functions that open one. Functions without such a store
+    // need no barrier and keep the MIR register allocator. A module where no
+    // region can open (opt-out, main-only, nothing worth a region) binds no
+    // hooks and keeps the MIR pipeline for every function. The whole-module
+    // path (compile_native_v2_preview_to_file) always uses the core emitter.
+    if NC_RGN_BARRIER_FN >= 0 && nc_rgn_fn_has_barrier_store(func) {
+        return compile_ir_function_v2_from_ir_into(nc, func, fn_index)
     }
     // Streaming callers also see intentionally bodyless builtin/extern stubs.
     if !ir_reg_count_is_valid((*func).reg_count) || ((*func).instr_count != 0 && !ir_function_regs_are_valid(func)) {
@@ -9131,7 +9235,7 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
             (*nc).ir_validation_failed = true
             (*nc).ir_validation_reg_count = (*func).reg_count
         }
-        return
+        return false
     }
     reset_function_state_mut(nc)
 
@@ -9145,12 +9249,12 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
         // whole-module compilation. Returning here without a body left region
         // builtin ids 60..69 as zero-length unresolved call targets.
         native_v2_emit_builtin_by_id_into(nc, builtin_id)
-        return
+        return true
     }
-    if native_v2_try_emit_dynlink_stub_into(nc, (*func).name) { return }
+    if native_v2_try_emit_dynlink_stub_into(nc, (*func).name) { return true }
     if native_v2_empty_stub_would_fabricate(func) {
         nc_emit_unimplemented_extern_trap_into(nc)
-        return
+        return true
     }
 
     (*nc).current_strategy = (*func).compile_strategy
@@ -9168,6 +9272,7 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
     (*nc).code = emit_epilogue_with_preg_mask((*nc).code, preg_mask)
     patch_return_jumps_mut(nc, epilogue_offset)
     patch_label_forwards_mut(nc)
+    true
 }
 
 fn nc_core_load_temp_to_rax(nc: &! NativeCompiler, temp: i64) with Mut, Panic, Div {
@@ -11102,7 +11207,26 @@ pub fn native_v2_core_emit_rdx_to_temp_into(nc: &! NativeCompiler, dst: i64) wit
     }
 }
 
+// Fault injection for the fail-closed contract of compile_ir_function_v2_into
+// and its callers: SOUNIO_NV2_CORE_REFUSE_FN=<fn name> makes the core emitter
+// refuse that function exactly as it refuses an opcode it cannot emit
+// (scripts/ci/madaros_region_reclaim_streaming_gate.sh). 0 = not read yet,
+// 1 = unset, 2 = set (re-read per body; test-only path).
+var NC_CORE_REFUSE_STATE: i64 = 0
+
+fn nc_core_refuse_injected(func: &IrFunction) -> bool with IO, Mut, Panic, Div, Alloc {
+    if NC_CORE_REFUSE_STATE == 1 { return false }
+    let want = read_env("SOUNIO_NV2_CORE_REFUSE_FN")
+    if str_len(want) == 0 {
+        NC_CORE_REFUSE_STATE = 1
+        return false
+    }
+    NC_CORE_REFUSE_STATE = 2
+    str_eq(want, str_from_bytes((*func).name.buf, (*func).name.len))
+}
+
 pub fn compile_ir_function_v2_from_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with IO, Mut, Panic, Div, Alloc {
+    nc_refresh_rgn_sabotage()
     // BSS globals occupy IrFunction slots so global-address instructions can
     // refer to stable module indices, but they have no executable body.
     // Compiling their empty slots as ordinary functions reads non-function
@@ -11187,6 +11311,7 @@ pub fn compile_ir_function_v2_from_ir_into(nc: &! NativeCompiler, func: &IrFunct
         nc_emit_unimplemented_extern_trap_into(nc)
         return true
     }
+    if nc_core_refuse_injected(func) { return false }
     compile_ir_function_v2_core_ir_into(nc, func, fn_index)
 }
 
