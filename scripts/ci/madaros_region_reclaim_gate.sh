@@ -161,14 +161,18 @@ for m in "${MUTATIONS[@]}"; do
 done
 
 # ---------------------------------------------------------------- 4 opt-out
-src="$RP/madaros_region_reclaim_loop.sio"
+# The ELF carries no symbol table, so compare code: with the opt-out the
+# region runtime, barriers and epilogues are absent and the program still
+# runs (it then needs no reclamation to pass at this size). Measured on PR
+# #2737: opt-out ELFs are byte-for-byte the size of origin/main's.
+src="$RP/madaros_region_reclaim_result.sio"
 SOUNIO_NO_REGION_RECLAIM=1 default_build "$src" "$WORK/optout.elf" >"$WORK/optout.log" 2>&1 \
   || { tail -n 30 "$WORK/optout.log" >&2; fail "opt-out compile failed"; }
-if grep -a -q "__rgn_enter" "$WORK/optout.elf"; then
-  fail "SOUNIO_NO_REGION_RECLAIM=1 still emitted region runtime symbols"
-fi
-default_build "$src" "$WORK/default.loop.elf" >"$WORK/default.loop.log" 2>&1 \
-  || { tail -n 30 "$WORK/default.loop.log" >&2; fail "default loop compile failed"; }
-grep -a -q "__rgn_enter" "$WORK/default.loop.elf" || echo "$TAG note: symbol names not present in ELF; opt-out check is vacuous"
-echo "$TAG PASS: opt-out emits no region runtime"
+default_build "$src" "$WORK/default.result.elf" >"$WORK/default.result.log" 2>&1 \
+  || { tail -n 30 "$WORK/default.result.log" >&2; fail "default compile failed"; }
+optout_size="$(stat -c %s "$WORK/optout.elf")"; default_size="$(stat -c %s "$WORK/default.result.elf")"
+[[ "$optout_size" -lt "$default_size" ]] || fail "opt-out ELF ($optout_size B) not smaller than default ($default_size B): region code still emitted?"
+rc="$(run_elf "$WORK/optout.elf" "$WORK/optout.out")"
+[[ "$rc" == 0 ]] || fail "opt-out build exited $rc"
+echo "$TAG PASS: opt-out emits no region code ($optout_size B < $default_size B)"
 echo "$TAG PASS"
