@@ -389,10 +389,12 @@ fi
 # whose return type is a TypeFn chain MORE than one layer deep before
 # reaching `[f64; N]` cannot be represented by LOWER_FN_ARR_CHAIN's
 # exactly-one-layer shape and must be refused outright, independent of the
-# cap above. Also added by this PR with no fixture. The prepass that raises
-# this walks every top-level fn's declared return type unconditionally (the
-# same one gen_chain_fns above exercises), so merely DECLARING the two-layer
-# function is enough to trip it -- main's body does not need to call it.
+# cap above. Also added by this PR with no fixture. Integration note: on main
+# the collector runs over the DCE-filtered item list (dead items are dropped
+# before preregistration), so a two-layer function that is only DECLARED never
+# reaches the prepass -- and cannot be miscompiled either. The witness therefore
+# CALLS it through the chain (`let mid = deep_outer(); let f = mid(); ...`),
+# the shape the refusal exists for.
 CHAIN_DEPTH_DIR="$WORK/arr-chain-depth"
 mkdir -p "$CHAIN_DEPTH_DIR"
 cat > "$CHAIN_DEPTH_DIR/main.sio" <<'SOUNIO'
@@ -411,7 +413,14 @@ fn deep_outer() -> fn() -> fn() -> [f64; 2] {
 }
 
 fn main() -> i32 with IO, Mut, Panic {
-    0
+    let mid = deep_outer()
+    let f = mid()
+    let a = f()
+    let d: f64 = a[0] * 2.0
+    if d == 3.0 {
+        return 0
+    }
+    1
 }
 SOUNIO
 CHAIN_DEPTH_OUT="$CHAIN_DEPTH_DIR/main.elf"
