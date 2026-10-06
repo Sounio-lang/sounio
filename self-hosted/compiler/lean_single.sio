@@ -4322,6 +4322,20 @@ fn type_name_kind(ns: i64, ne: i64) -> i64 with Panic, Mut {
     return 0
 }
 
+// #2817: which initializer-less declarations are zero-initialized. Kinds per
+// type_name_kind: 1 integer, 2 float (also unit-dimensioned f64), 4 bool. For
+// anything else (string, enum, f128, struct-element arrays) zero is not a
+// valid value, so the declaration is refused rather than bound to garbage.
+fn lean_uninit_scalar_ok(decl_ty: i64) -> bool {
+    return decl_ty == 1 || decl_ty == 2 || decl_ty == 4
+}
+
+fn lean_uninit_arr_elem_ok(decl_ty_hash: i64, arr_esiz: i64) -> bool with Div, Mut {
+    if arr_esiz == 1 { return true }
+    let et = arr_hash_elem_ty(decl_ty_hash)
+    return et == 1 || et == 2 || et == 4
+}
+
 fn type_is_struct_like(ty: i64, ty_hash: i64) -> bool with Panic, Mut {
     if ty == 6 { return true }
     if ty == 0 && ty_hash != 0 {
@@ -26181,6 +26195,17 @@ fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
     emit_store_to_pointer_offset_x86(addr_slot, pending_off, target_ty, target_hash)
 }
 
+// The zero is in rax / x0; describe it the way compile_or() would describe the
+// literal 0 (or 0.0), so the binding code and literal refinement checks that
+// follow see the value the variable actually holds.
+fn lean_uninit_set_zero_expr(decl_ty: i64, decl_ty_hash: i64) with Mut {
+    EXPR_TY = decl_ty
+    EXPR_TY_HASH = decl_ty_hash
+    EXPR_IS_F64 = if decl_ty == 2 { 1 } else { 0 }
+    LAST_IS_LITERAL = 1
+    LAST_LITERAL_VAL = 0
+}
+
 fn compile_stmt() with IO, Mut, Panic, Div {
     let k = TK[EP as usize]
     LAST_STMT_HAS_VALUE = 0
@@ -26531,6 +26556,41 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 em32(0 - (base + nslots - 1) * 8)
             }
             emit_store_var(ptr_slot)
+        } else if has_eq == 0 && is_arr == 1 && arr_len > 0 {
+            // `var a: [T; N]` with no initializer (#2817): zero-fill, exactly the
+            // allocation `[0; N]` gets above. This used to fall through to the
+            // final else, whose compile_or() took the NEXT statement as the
+            // initializer -- or, after a `;`, nothing, leaving a garbage array
+            // pointer that SIGSEGV'd on the first element access.
+            if !lean_uninit_arr_elem_ok(decl_ty_hash, arr_esiz) {
+                tc_error_hard(EP - 1, "array declared without an initializer: only integer, float and bool elements are zero-initialized; write `= [V; N]`")
+                return
+            }
+            var nslots = arr_len
+            if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
+            let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
+            if ptr_slot < 0 { return }
+            let arr_vi = VAR_COUNT - 1
+            VAR_TY[arr_vi as usize] = 8
+            VAR_TY_HASH[arr_vi as usize] = decl_ty_hash
+            VAR_MUT[arr_vi as usize] = decl_is_mut
+            let base = ptr_slot - nslots
+            if LAST_LOCAL_BSS_SPILL != 0 {
+                em(0x48); em(0xbf); em64(LAST_LOCAL_BSS_ADDR)
+            } else {
+                em(0x48); em(0x8d); em(0xbd)  // lea rdi, [rbp + disp32]  (lowest array addr)
+                em32(0 - (base + nslots - 1) * 8)
+            }
+            em(0x48); em(0x31); em(0xc0)   // xor rax, rax
+            em(0xb9); em32(nslots)         // mov ecx, nslots
+            em(0xf3); em(0x48); em(0xab)  // rep stosq
+            if LAST_LOCAL_BSS_SPILL != 0 {
+                em(0x48); em(0xb8); em64(LAST_LOCAL_BSS_ADDR)
+            } else {
+                em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp + disp32]
+                em32(0 - (base + nslots - 1) * 8)
+            }
+            emit_store_var(ptr_slot)
         } else if has_eq == 0 && (decl_ty != 0 || decl_ty_hash != 0) && type_is_struct_like(decl_ty, decl_ty_hash) {
             // var x: StructType  (no initializer) — zero-initialize struct slots
             bind_struct_local_zeroinit_x86(ns, ne, decl_ty_hash)
@@ -26544,7 +26604,18 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut
             }
         } else {
-            compile_or()
+            if has_eq == 0 {
+                // `var x: T` with no initializer (#2817): bind zero. Used to be
+                // compile_or(), which consumed the next statement as the value.
+                if !lean_uninit_scalar_ok(decl_ty) {
+                    tc_error_hard(EP - 1, "declaration without an initializer: only integer, float and bool types are zero-initialized; add `= value`")
+                    return
+                }
+                em(0x48); em(0x31); em(0xc0)  // xor rax, rax  (0 and 0.0 alike)
+                lean_uninit_set_zero_expr(decl_ty, decl_ty_hash)
+            } else {
+                compile_or()
+            }
             if decl_ty == 13 && (EXPR_TY == 2 || EXPR_IS_F64 == 1) {
                 emit_widen_f64_to_f128_x86()
             }
@@ -41556,6 +41627,32 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 emit_lea_var_a64(base + nslots - 1)
             }
             emit_store_var_a64(ptr_slot)
+        } else if has_eq == 0 && is_arr == 1 && arr_len > 0 {
+            // `var a: [T; N]` with no initializer (#2817) -- mirror of the x86 twin.
+            if !lean_uninit_arr_elem_ok(decl_ty_hash, arr_esiz) {
+                tc_error_hard(EP - 1, "array declared without an initializer: only integer, float and bool elements are zero-initialized; write `= [V; N]`")
+                return
+            }
+            var nslots = arr_len
+            if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
+            let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
+            if ptr_slot < 0 { return }
+            let arr_vi = VAR_COUNT - 1
+            VAR_TY[arr_vi as usize] = 8
+            VAR_TY_HASH[arr_vi as usize] = decl_ty_hash
+            VAR_MUT[arr_vi as usize] = decl_is_mut
+            let base = ptr_slot - nslots
+            if LAST_LOCAL_BSS_SPILL != 0 {
+                emit_image_addr_reg_a64(11, LAST_LOCAL_BSS_ADDR)
+                emit_zero_words_x11_a64(nslots)
+                emit_image_addr_a64(LAST_LOCAL_BSS_ADDR)
+            } else {
+                emit_lea_var_a64(base + nslots - 1)
+                em32(0xAA0003EB)  // mov x11, x0
+                emit_zero_words_x11_a64(nslots)
+                emit_lea_var_a64(base + nslots - 1)
+            }
+            emit_store_var_a64(ptr_slot)
         } else if has_eq == 0 && (decl_ty != 0 || decl_ty_hash != 0) && type_is_struct_like(decl_ty, decl_ty_hash) {
             // `var x: StructT` with no initializer — register + zero-fill (mirror
             // of the x86 twin, compile_stmt :~22226). Without this the a64 pass
@@ -41571,7 +41668,17 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut
             }
         } else {
-            compile_or_a64()
+            if has_eq == 0 {
+                // `var x: T` with no initializer (#2817) -- mirror of the x86 twin.
+                if !lean_uninit_scalar_ok(decl_ty) {
+                    tc_error_hard(EP - 1, "declaration without an initializer: only integer, float and bool types are zero-initialized; add `= value`")
+                    return
+                }
+                em32(0xD2800000)  // movz x0, #0  (0 and 0.0 alike)
+                lean_uninit_set_zero_expr(decl_ty, decl_ty_hash)
+            } else {
+                compile_or_a64()
+            }
             if (decl_ty != 0 || decl_ty_hash != 0) && ty_eq(decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH) == false {
                 if type_has_knowledge(decl_ty, decl_ty_hash) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                     tc_epistemic_boundary(EP)
