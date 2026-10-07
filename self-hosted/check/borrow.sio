@@ -27,6 +27,7 @@ pub struct BorrowEntry {
     pub shared_count: i64,   // Number of active shared borrows
     pub is_linear: bool,     // Whether this is a linear type variable
     pub consumed: bool,      // Whether a linear variable has been consumed
+    pub is_affine: bool,     // #1263: affine -- consumed at most once, never required
     pub scope_depth: i64,    // Scope where this entry was created
     pub provenance: i64,     // escape provenance: 0=first-class (param/global/safe), 1=local (frame-bound ref)
 }
@@ -38,6 +39,7 @@ fn empty_borrow_entry() -> BorrowEntry {
         shared_count: 0,
         is_linear: false,
         consumed: false,
+        is_affine: false,
         scope_depth: 0,
         provenance: 0,
     }
@@ -121,10 +123,24 @@ impl BorrowEnv {
                 shared_count: 0,
                 is_linear: is_linear,
                 consumed: false,
+                is_affine: false,
                 scope_depth: env.scope_depth,
                 provenance: 0,
             }
             env.count = env.count + 1
+        }
+        env
+    }
+
+    // #1263: mark the most recent binding of `name` as affine. Affine values are
+    // tracked like linear ones for the second-use check (consume_linear -> E039)
+    // but are exempt from the must-consume check (E040) and the branch merge.
+    fn mark_affine(self, name: Name) -> BorrowEnv with Mut, Panic, Div {
+        var env = self
+        let idx = env.find(name)
+        if idx >= 0 {
+            env.entries[idx].is_linear = true
+            env.entries[idx].is_affine = true
         }
         env
     }
@@ -217,7 +233,8 @@ impl BorrowEnv {
             return (env, 0)
         }
         if entry.consumed {
-            // Double consumption of linear value
+            // Double consumption: E039 for linear, E268 for affine (#1263)
+            if entry.is_affine { return (env, 268) }
             return (env, 39)
         }
         env.entries[idx].consumed = true
@@ -236,7 +253,7 @@ impl BorrowEnv {
         }
         var i = scope_start
         while i < env.count {
-            if env.entries[i].is_linear && !env.entries[i].consumed {
+            if env.entries[i].is_linear && !env.entries[i].is_affine && !env.entries[i].consumed {
                 unconsumed = unconsumed + 1
             }
             i = i + 1
