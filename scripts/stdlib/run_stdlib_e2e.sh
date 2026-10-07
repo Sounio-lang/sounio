@@ -129,9 +129,13 @@ run_test() {
   local expect_stdout=()
 
   while IFS= read -r line; do
-    if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//\  && ! "$line" =~ ^[[:space:]]*$ ]]; then
+    if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//([[:space:]]|$) && ! "$line" =~ ^[[:space:]]*$ ]]; then
       break
     fi
+    # Only a line that starts with `//@ ` is an annotation; the =~ checks
+    # below match by substring, so prose such as "NOT `//@ check-only`" in a
+    # header comment would otherwise count as one.
+    [[ "$line" =~ ^[[:space:]]*//@\  ]] || continue
 
     if [[ "$line" =~ "//@ run-pass" ]]; then
       is_run_pass=true
@@ -177,7 +181,7 @@ run_test() {
   output=$("$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
   if [[ $exit_code -ne 0 ]]; then
     local excerpt
-    excerpt="$(echo "$output" | head -6)"
+    excerpt="$(head -6 <<< "$output")"
     FAIL=$((FAIL + 1))
     ERRORS="${ERRORS}\n  FAIL  $relpath (check exited $exit_code)"
     record_result "fail" "$relpath" "check" "check-failed" "" "" "$exit_code" "$excerpt"
@@ -214,7 +218,7 @@ run_test() {
   fi
   if [[ $exit_code -ne 0 ]]; then
     local excerpt
-    excerpt="$(echo "$output" | head -6)"
+    excerpt="$(head -6 <<< "$output")"
     FAIL=$((FAIL + 1))
     local reason="run-failed"
     if [[ $exit_code -eq 124 ]]; then
@@ -231,7 +235,7 @@ run_test() {
 
   local pattern
   for pattern in "${expect_stdout[@]}"; do
-    if ! echo "$output" | grep -qF "$pattern"; then
+    if ! grep -qF -- "$pattern" <<< "$output"; then
       FAIL=$((FAIL + 1))
       ERRORS="${ERRORS}\n  FAIL  $relpath (missing stdout: $pattern)"
       record_result "fail" "$relpath" "stdout" "missing-stdout" "" "" "0" "missing: $pattern"

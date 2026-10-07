@@ -40,6 +40,9 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
+| KL-20 | enum variants with payloads (`Circle(f64)`, `Rect { w: f64 }`): no runtime representation | both |
+| KL-21 | user fns named like compiler builtins: `pub` residual on Madaros; seed hijacks or rejects | both |
+| KL-18 | `Hyper<…>` CPU values: Madaros fail-closed; lean_single prints a wrong value (seed) | both |
 
 ## Ledger
 
@@ -221,6 +224,121 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 - Channel-at-`.value` semantics (`MEAS_KNOW_IDX`,
   `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
   see the history snapshot for the KAS-1 rationale.
+
+### KL-20 — enum payload variants (P1.3)
+
+- Engine: `both`. Repro (measured 2026-10-06, `origin/main` `fa695abaa`):
+
+  ```sounio
+  enum Shape { Circle(f64), Rect(f64, f64) }
+  fn area(s: Shape) -> f64 {
+      match s { Shape::Circle(r) => 3.0 * r * r, Shape::Rect(w, h) => w * h }
+  }
+  fn main() with IO { println(area(Shape::Circle(2.0))) }
+  ```
+
+  | engine | before | after (this branch) |
+  |---|---|---|
+  | Madaros (shipped ELF and built from `main`) | `parse error: expected token at line 1:20 expected=132 actual=-8894744987059046268` (raw token ids) | **E264** at each construction and each payload pattern |
+  | lean_single (seed, unchanged) | declaration accepted; ``error[E200]: undefined identifier `r` `` in the arm; constructing `Shape::Rect(3, 4)` is `E006 arity mismatch ... expected 1 got 2` | same |
+
+- **Struct variants were a silent miscompile on Madaros.** `enum Shape {
+  Circle { r: i64 }, Rect { w: i64, h: i64 }, Empty }` built and ran:
+  `area(Shape::Rect { w: 3, h: 4 })` returned `0`, and a tag-only match put
+  both `Circle` and `Rect` values on no arm (result `0`); only the unit
+  variant `Empty` was right. Cause: `ir/lower.sio` represents every enum
+  value as a bare discriminant (`lower_match_arm_ref` compares the scrutinee
+  to the variant index, binds no sub-pattern, and skips `PatStruct` arms
+  outright, "Unsupported pattern — skip"). This branch refuses it with
+  **E264** (construction in struct-literal or call form, payload
+  sub-patterns, struct patterns over a user enum). Declaring a payload
+  variant is still accepted (`tests/selfhost/native_runtime/
+  enum_payload_then_plain_match_42.sio` declares one and matches only unit
+  variants), and tuple variants now parse (fields `_0`.._7) so the refusal
+  can name the construction site.
+- Not done here, and why: closing this needs a heap representation for
+  payload-bearing enums (tag word + fields), lowering at every construction
+  site and every match arm, per-binding float/struct metadata in the lowerer
+  (`LowerLocalStack.scalar_kind` etc.), payload field typing in the checker
+  (sub-patterns are bound to the enum type itself today, `checker_bind_
+  pattern_inplace`), a refusal of `==` on such enums, and the same on
+  lean_single. That is a feature across parser, checker and the 28k-line
+  lowerer, not a focused change.
+- Workaround: a payload-free tag enum plus a struct (`struct Shape { kind:
+  ShapeKind, a: f64, b: f64 }`), or `Option<T>` for one optional value.
+- Pins: `tests/compile-fail/enum_payload_tuple_variant_refused.sio`,
+  `enum_payload_struct_variant_refused.sio`, `enum_payload_pattern_refused.sio`.
+- `if let` (`tests/run-pass/if_let_pattern.sio`, previously E006/E137 on
+  Madaros because the parser dropped the pattern) is **CLOSED** on this
+  branch: it desugars to `match`, like `while let`. Pin:
+  `tests/run-pass/if_let_desugar_forms.sio`. Found on the way: a bare `None`
+  pattern parsed as a *binding*, so `match v { None => a, Some(x) => b }`
+  took the `None` arm for `Some(42)`; fixed in the same branch. Residual,
+  unchanged: Madaros lowers `Option<i64>` as a nullable word, so `Some(0)`
+  is indistinguishable from `None`.
+
+### KL-21 — user functions named like compiler builtins (P1.4)
+
+- Engine: `both`. The checker (`checker_check_call_expr_inplace`) and the
+  lowerer (`lower_call_expr_ref` → `call_expr_uses_special_a_ref` / `_b_ref`)
+  recognise builtins by the bare identifier before any user signature.
+  Measured 2026-10-06 with `fn NAME(x: i64) -> i64 { x + 1000 }` and
+  `NAME(5)` for 65 names (one program per name):
+  - **Madaros, shipped and built from `main`: 43 of 65 wrong.** Rejected at
+    the call site: `measure`, `acknowledge`, `uncertainty_of`,
+    `require_confidence` (E008); `Knowledge`, `print_int`, `print_char`,
+    `seq_len`, `seq_set`, `second_order_mean`, `gpu_barrier` (E001);
+    `variance_of`-family, `correlate`, `seq_new`/`seq_push`/`seq_get` (E010);
+    `assert` (E174); the decision/transition builtins (E058–E133). Silently
+    wrong: user `print` and `println` were replaced by the builtin. The
+    reported `fn measure(...) -> i32` gives `E001 expected i32, found
+    Knowledge<i64>` at the binding (E008 when returned).
+  - **After this branch: 64 of 65 call the user function.** A module's own
+    private fn shadows the builtin in that module: after parsing,
+    `builtin_shadow_apply_items` (`compiler/private_fn_identity.sio`) renames
+    it and every reference in the module to `<name>__user`. When the rewrite
+    cannot be proven (a local, parameter or pattern spelled the same; a bare
+    value use in a match-arm body or struct-literal field) the compile stops
+    with ``error[builtin_shadow]: ... `measure` is a builtin; rename your
+    function.`` Off switch: `SOUNIO_DISABLE_BUILTIN_SHADOW=1`.
+  - **Residual (OPEN), Madaros:** `pub fn` with a builtin name is not
+    renamed (importers spell it), so the builtin still wins at bare-name call
+    sites; `f128_from_limbs` / `f128_to_lo` / `f128_to_hi` are deliberately
+    excluded because `stdlib/math/softfloat_f128.sio` defines them as the
+    implementation the intercept stands for (a user one fails to build).
+    The renamed spelling `<name>__user` appears in diagnostics.
+  - **Residual (OPEN), lean_single (seed, not changed — a fix needs a seed
+    refresh):** 26 of 65 wrong. Silently wrong value (builtin ran, printed
+    the argument `5` or `0`): `abs`, `f64_to_bits`, `lift_knowledge`,
+    `prove_robust`, `validate_manifest`, `gpu_thread_id_x`, `slice_len`.
+    Rejected: `print_int`, `print_char`, `print_f64`, `get_arg`, `str_eq`,
+    `seq_new`, `seq_push`, `variance_of`, `sensitivity_of`, `gpu_barrier`
+    (E001), `hessian_of`, `seq_set` (E200), `seq_len` (P0003); no output:
+    `seq_count`, `seq_get`, `str_len`; failed to compile: `acknowledge`,
+    `require_confidence`, `f128_to_lo`.
+- Pins: `tests/run-pass/user_fn_shadows_builtin_measure.sio`,
+  `tests/run-pass/user_fn_shadows_builtin_names.sio`,
+  `tests/compile-fail/builtin_shadow_local_binding_refused.sio`.
+### KL-18 — `Hyper<Algebra, T>` values on the CPU path (P0.8.2)
+
+- Engine: both. There is no CPU value lowering for `Hyper<Octonion, f64>`
+  (or any `Hyper<…>`); the only implemented CPU octonion product is
+  `algebra::octonion::oct_mul` over `[f64; 8]` (Fano convention, e1·e2 = e3).
+  Reference: `(2 + e1)(3 + e2) = [6, 3, 2, 1, 0, 0, 0, 0]`, which `oct_mul`
+  returns on both engines.
+- **Madaros — fail-closed.** `[..] as Hyper<…>` is refused in CPU lowering
+  ("Hyper<...> values ... are not implemented on the native CPU path"). Before
+  the refusal (measured 2026-10-06 on the shipped ELF): `.e1` of the cast
+  printed `0.000000`, `a + b` segfaulted, `a * b` failed in the backend with
+  rc 12. Pin: `tests/compile-fail/hyper_octonion_mul_cpu_refused.sio`.
+  The `--backend gpu` path lowers `Hyper<…>` through HLIR and is unaffected.
+- **lean_single — OPEN, silent wrong value.** The engine does not know the
+  type: `println(([2.0, 1.0, 0.0, ..] as Hyper<Octonion, f64>) * ..)` prints
+  `8843176242182119936` and exits 0; routing the product back through
+  `as [f64; 8]` segfaults (rc 139). Closing it requires a lean_single source
+  change and a seed refresh (`scripts/dev/refresh_lean_seed.sh`), which is a
+  founder-run step. Until then: do not use `Hyper<…>` values under
+  `SOUNIO_SOUC_ENGINE=lean_single`.
 
 ## Registry-governed, not rungs
 

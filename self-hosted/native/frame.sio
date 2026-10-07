@@ -107,7 +107,7 @@ pub fn nc_used_allocatable_preg_mask(nc: NativeCompiler, reg_count: i64) -> i64 
     var v: i64 = 0
     // vreg_to_preg has NC_MAX_VREGS entries. Higher vregs are stack-only.
     while v < reg_count && v < NC_MAX_VREGS {
-        mask = mask | x86_allocatable_mask_for_reg(nc.vreg_to_preg[v as usize])
+        mask = mask | x86_allocatable_mask_for_reg(NC_VREG_TO_PREG[v as usize])
         v = v + 1
     }
     mask
@@ -288,6 +288,34 @@ pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 2097152] = [0; 2097152]
 // scripts/ci/native_capacity_tiers_gate.sh.
 pub fn nc_flat_reloc_capacity() -> i64 { 2097152 }
 
+// A relocation whose kind_code apply_relocations_into does not know (anything
+// but 1 call, 2 rodata, 3 data, 4 fn-address) used to fall through the kind
+// chain and leave its rel32 site unpatched: the ELF wrote, and the program
+// jumped through the placeholder at run time. It now latches reloc_overflow
+// (so every writer that already refuses on rc=20 refuses here too) and counts
+// here so the refusal names the real cause instead of "raise capacity".
+// compiler_new resets both.
+pub var NC_RELOC_UNKNOWN_KIND_COUNT: i64 = 0
+pub var NC_RELOC_UNKNOWN_KIND_FIRST: i64 = 0
+
+// The kinds apply_relocations_into (codegen_x86_linux.sio) can patch: 1 call
+// rel32, 2 .rodata RIP-disp, 3 .data RIP-disp, 4 function-address RIP-disp.
+// Kept here, not in codegen_x86_linux.sio, so a test can pin the predicate and
+// the recorder by importing native::frame alone instead of the whole x86
+// backend (whose import closure takes longer to compile than a run-pass budget).
+pub fn native_v2_reloc_kind_is_known(kind_code: i64) -> bool {
+    kind_code >= 1 && kind_code <= 4
+}
+
+// Records an unknown-kind relocation. The writers refuse (rc=20) whenever
+// NC_RELOC_UNKNOWN_KIND_COUNT > 0, independently of reloc_overflow.
+pub fn nc_reloc_note_unknown_kind(kind_code: i64) with Mut {
+    if NC_RELOC_UNKNOWN_KIND_COUNT == 0 {
+        NC_RELOC_UNKNOWN_KIND_FIRST = kind_code
+    }
+    NC_RELOC_UNKNOWN_KIND_COUNT = NC_RELOC_UNKNOWN_KIND_COUNT + 1
+}
+
 // Flat .rodata payload storage (string literals et al). Moved off the
 // NativeCompiler struct for the same reason as NC_FLAT_RELOC_* above:
 // keeping it in the struct capped .rodata at 8192 bytes (struct-copy cost
@@ -319,6 +347,40 @@ pub fn nc_flat_data_capacity() -> i64 { 262144 }
 // ============================================================================
 // Compiler state
 // ============================================================================
+// Function index -> code offset. BSS, not a field of NativeCompiler.
+// compiler_new fills every slot with -1 (unset). 0 would be a real offset.
+pub var NC_FN_OFFSETS: [i64; 16384] = [0; 16384]
+
+
+// Indexed arrays that used to live in NativeCompiler. Element stores at
+// large struct offsets SIGSEGV in the seed compiler (the label_offsets
+// loop in compiler_new was enough). BSS, one live compile. compiler_new
+// resets them. Not safe for two simultaneously live NativeCompilers.
+pub var NC_RETURN_JUMPS: [i64; 16] = [0; 16]
+pub var NC_LABEL_OFFSETS: [i64; 256] = [0; 256]
+pub var NC_LABEL_PATCH_CODE_OFFSETS: [i64; 256] = [0; 256]
+pub var NC_LABEL_PATCH_LABEL_IDS: [i64; 256] = [0; 256]
+pub var NC_IS_FLOAT_REG: [i64; 2048] = [0; 2048]
+pub var NC_REG_TYPE: [i64; 2048] = [0; 2048]
+pub var NC_FIELD_FLOAT_BASE_REGS: [i64; 256] = [0; 256]
+pub var NC_FIELD_FLOAT_INDICES: [i64; 256] = [0; 256]
+pub var NC_PROF_COUNTER_NAMES: [i64; 256] = [0; 256]
+pub var NC_STACK_MAP_FN_INDICES: [i64; 256] = [0; 256]
+pub var NC_STACK_MAP_KINDS: [i64; 256] = [0; 256]
+pub var NC_STACK_MAP_MACHINE_INSTR_INDICES: [i64; 256] = [0; 256]
+pub var NC_STACK_MAP_CODE_OFFSETS: [i64; 256] = [0; 256]
+pub var NC_STACK_MAP_FRAME_SIZES: [i64; 256] = [0; 256]
+pub var NC_STACK_MAP_TEMP_COUNTS: [i64; 256] = [0; 256]
+pub var NC_STACK_MAP_SPILL_COUNTS: [i64; 256] = [0; 256]
+pub var NC_STACK_MAP_ROOT_TEMP_COUNTS: [i64; 256] = [0; 256]
+pub var NC_STACK_MAP_ROOT_SPILL_COUNTS: [i64; 256] = [0; 256]
+pub var NC_STACK_MAP_CALLEE_SAVED_ROOT_MASKS: [i64; 256] = [0; 256]
+pub var NC_STACK_MAP_ROOT_KIND_MASKS: [i64; 256] = [0; 256]
+pub var NC_STACK_MAP_DEOPT_IDS: [i64; 256] = [0; 256]
+pub var NC_STACK_MAP_TIER_IDS: [i64; 256] = [0; 256]
+pub var NC_STACK_MAP_OSR_ELIGIBILITY: [i64; 256] = [0; 256]
+pub var NC_VREG_TO_PREG: [i64; 2048] = [0; 2048]
+pub var NC_VREG_SPILL_SLOTS: [i64; 2048] = [0; 2048]
 
 pub struct NativeCompiler {
     pub code: CodeBuffer,
@@ -381,18 +443,23 @@ pub struct NativeCompiler {
     pub data: StringTable,              // Writable .data section (profiling counters)
     pub symbols: SymbolData,            // Function name symbol table for .symtab/.strtab
 
-    // Module-level: function layout
-    pub fn_offsets: [i64; 16384],        // function index -> code buffer offset
+    // Module-level: function layout.
+    // fn_offsets used to be [i64; 16384] inline (128 KiB). By-value copies
+    // of that array — including native_compiler_set_fn_offset, which copied
+    // the whole array out and back because &! element stores at large
+    // offsets miscompile — sat inside the same frame as SymbolData and
+    // RelocationTable. That is the compiler_new SIGSEGV. The offsets now
+    // live in NC_FN_OFFSETS. fn_count stays here.
     pub fn_count: i64,
 
     // Per-function: return jump patching
-    pub return_jumps: [i64; 16],        // positions of jmp rel32 operands
+
     pub return_jump_count: i64,
 
     // Per-function: label tracking for branches
-    pub label_offsets: [i64; 256],      // label_id -> code offset (-1 = undefined)
-    pub label_patch_code_offsets: [i64; 256],  // patch position (rel32 operand offset)
-    pub label_patch_label_ids: [i64; 256],     // which label to resolve
+
+
+
     pub label_patch_count: i64,
 
     // Per-function: frame info
@@ -402,15 +469,15 @@ pub struct NativeCompiler {
     pub entry_offset: i64,
 
     // Per-function: float register tracking (vreg index -> 1 if f64, 0 if i64)
-    pub is_float_reg: [i64; 2048],
+
     // Per-function: path-sound register float typing computed by a fixpoint over
     // the IR (nc_compute_float_types). Lattice: 0 UNKNOWN, 1 FLOAT, 2 INT, 3
     // CONFLICT. A register is 1 (FLOAT) only if EVERY definition reaching it is
     // float — so the codegen binop override may treat it as float without the
     // path-insensitivity hazard of the linear is_float_reg scan.
-    pub reg_type: [i64; 2048],
-    pub field_float_base_regs: [i64; 256],
-    pub field_float_indices: [i64; 256],
+
+
+
     pub field_float_count: i64,
 
     // Per-function: compile strategy (Sprint 38)
@@ -419,7 +486,7 @@ pub struct NativeCompiler {
     pub current_strategy: i64,
 
     // Sprint 46: profiling counter metadata for exit-time dump
-    pub prof_counter_names: [i64; 256],     // .rodata offset for each counter's fn name
+
     pub prof_counter_count: i64,           // number of profiling counters
     pub prof_dump_fn_index: i64,           // fn_offsets index for __prof_dump function
 
@@ -439,25 +506,25 @@ pub struct NativeCompiler {
     pub stack_map_record_count: i64,
     pub safepoint_count: i64,
     pub deopt_point_count: i64,
-    pub stack_map_fn_indices: [i64; 256],
-    pub stack_map_kinds: [i64; 256],
-    pub stack_map_machine_instr_indices: [i64; 256],
-    pub stack_map_code_offsets: [i64; 256],
-    pub stack_map_frame_sizes: [i64; 256],
-    pub stack_map_temp_counts: [i64; 256],
-    pub stack_map_spill_counts: [i64; 256],
-    pub stack_map_root_temp_counts: [i64; 256],
-    pub stack_map_root_spill_counts: [i64; 256],
-    pub stack_map_callee_saved_root_masks: [i64; 256],
-    pub stack_map_root_kind_masks: [i64; 256],
-    pub stack_map_deopt_ids: [i64; 256],
-    pub stack_map_tier_ids: [i64; 256],
-    pub stack_map_osr_eligibility: [i64; 256],
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     // Sprint 52: register allocation — vreg → physical register mapping
     // RA_UNASSIGNED(-2) = not processed, RA_SPILLED(-1) = on stack, >=0 = x86 reg number
-    pub vreg_to_preg: [i64; 2048],
-    pub vreg_spill_slots: [i64; 2048],      // spill slot index when vreg_to_preg[v] == -1
+
+
 
     // Native-v2 Machine IR frame metadata
     pub current_machine_base_slots: i64,
@@ -559,6 +626,8 @@ pub fn compiler_new() -> NativeCompiler with Mut {
     out.rodata_overflow_bytes_attempted = 0
     out.reloc_overflow = false
     out.reloc_overflow_count_attempted = 0
+    NC_RELOC_UNKNOWN_KIND_COUNT = 0
+    NC_RELOC_UNKNOWN_KIND_FIRST = 0
     out.label_overflow = false
     NC_V2_LABEL_OVERFLOW_FN = -1
     out.relocs = reloc_table_new()
@@ -593,16 +662,32 @@ pub fn compiler_new() -> NativeCompiler with Mut {
     out.extern_relocs = extern_reloc_table_new()
     out.target_os_id = 0
     out.bss_total_size = 0
+    out.field_float_count = 0
+    // Do not call reset_function_state_mut here: it is Panic+Div and
+    // compiler_new's signature is Mut only. Same stores, inlined.
     var i: i64 = 0
     while i < 256 {
-        out.fn_offsets[i as usize] = -1
-        out.label_offsets[i as usize] = -1
+        NC_LABEL_OFFSETS[i as usize] = -1
+        NC_LABEL_PATCH_CODE_OFFSETS[i as usize] = 0
+        NC_LABEL_PATCH_LABEL_IDS[i as usize] = -1
+        NC_FIELD_FLOAT_BASE_REGS[i as usize] = -1
+        NC_FIELD_FLOAT_INDICES[i as usize] = -1
+        if i < 16 {
+            NC_RETURN_JUMPS[i as usize] = 0
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < 16384 {
+        NC_FN_OFFSETS[i as usize] = -1
         i = i + 1
     }
     i = 0
     while i < NC_MAX_VREGS {
-        out.vreg_to_preg[i as usize] = -2
-        out.vreg_spill_slots[i as usize] = -1
+        NC_VREG_TO_PREG[i as usize] = -2
+        NC_VREG_SPILL_SLOTS[i as usize] = -1
+        NC_IS_FLOAT_REG[i as usize] = 0
+        NC_REG_TYPE[i as usize] = 0
         i = i + 1
     }
     nc_reg_class_reset()
@@ -617,29 +702,35 @@ pub fn reset_function_state_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
     (*nc).return_jump_count = 0
     var i = 0
     while i < 256 {
-        (*nc).label_offsets[i as usize] = -1
+        NC_LABEL_OFFSETS[i as usize] = -1
+        NC_LABEL_PATCH_CODE_OFFSETS[i as usize] = 0
+        NC_LABEL_PATCH_LABEL_IDS[i as usize] = -1
+        if i < 16 {
+            NC_RETURN_JUMPS[i as usize] = 0
+        }
         i = i + 1
     }
     (*nc).label_patch_count = 0
     (*nc).current_frame_size = 0
     var j = 0
     while j < NC_MAX_VREGS {
-        (*nc).is_float_reg[j as usize] = 0
+        NC_IS_FLOAT_REG[j as usize] = 0
+        NC_REG_TYPE[j as usize] = 0
         j = j + 1
     }
     nc_reg_class_reset()
     (*nc).field_float_count = 0
     var fj = 0
     while fj < 256 {
-        (*nc).field_float_base_regs[fj as usize] = -1
-        (*nc).field_float_indices[fj as usize] = -1
+        NC_FIELD_FLOAT_BASE_REGS[fj as usize] = -1
+        NC_FIELD_FLOAT_INDICES[fj as usize] = -1
         fj = fj + 1
     }
     (*nc).current_strategy = 0
     var ra = 0
     while ra < NC_MAX_VREGS {
-        (*nc).vreg_to_preg[ra as usize] = -2
-        (*nc).vreg_spill_slots[ra as usize] = -1
+        NC_VREG_TO_PREG[ra as usize] = -2
+        NC_VREG_SPILL_SLOTS[ra as usize] = -1
         ra = ra + 1
     }
     (*nc).current_machine_base_slots = 0
@@ -696,7 +787,7 @@ pub fn record_return_jump_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
     let jmp_pos = (*nc).code.len
     (*nc).code = emit_jmp_rel32((*nc).code)
     if (*nc).return_jump_count < 16 {
-        (*nc).return_jumps[(*nc).return_jump_count as usize] = jmp_pos + 1
+        NC_RETURN_JUMPS[(*nc).return_jump_count as usize] = jmp_pos + 1
         (*nc).return_jump_count = (*nc).return_jump_count + 1
     }
 }
@@ -710,7 +801,7 @@ pub fn patch_return_jumps(nc: NativeCompiler, epilogue_offset: i64) -> NativeCom
 pub fn patch_return_jumps_mut(nc: &! NativeCompiler, epilogue_offset: i64) with Mut, Panic, Div {
     var i = 0
     while i < (*nc).return_jump_count && i < 16 {
-        let imm_offset = (*nc).return_jumps[i as usize]
+        let imm_offset = NC_RETURN_JUMPS[i as usize]
         if imm_offset > 0 && imm_offset + 4 <= (*nc).code.len
             && NC_BIG_CODE[(imm_offset - 1) as usize] == (0xe9 as i8) {
             let next_ip = imm_offset + 4
@@ -732,7 +823,7 @@ pub fn record_label(nc: NativeCompiler, label_id: i64) -> NativeCompiler with Mu
 
 pub fn record_label_mut(nc: &! NativeCompiler, label_id: i64) with Mut, Panic {
     if label_id >= 0 && label_id < 256 {
-        (*nc).label_offsets[label_id as usize] = (*nc).code.len
+        NC_LABEL_OFFSETS[label_id as usize] = (*nc).code.len
     }
 }
 
@@ -745,8 +836,8 @@ pub fn record_label_patch(nc: NativeCompiler, label_id: i64, rel32_offset: i64) 
 pub fn record_label_patch_mut(nc: &! NativeCompiler, label_id: i64, rel32_offset: i64) with Mut, Panic {
     let idx = (*nc).label_patch_count
     if idx < 256 {
-        (*nc).label_patch_code_offsets[idx as usize] = rel32_offset
-        (*nc).label_patch_label_ids[idx as usize] = label_id
+        NC_LABEL_PATCH_CODE_OFFSETS[idx as usize] = rel32_offset
+        NC_LABEL_PATCH_LABEL_IDS[idx as usize] = label_id
         (*nc).label_patch_count = idx + 1
     }
 }

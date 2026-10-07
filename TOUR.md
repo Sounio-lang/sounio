@@ -7,11 +7,13 @@ document; every timing and result was measured on 2026-10-04 at `main`
 
 ```bash
 bash scripts/tour.sh            # sections 1-3, about 1 minute
-bash scripts/tour.sh --full     # adds the slow simulations and the compiler rebuild, about 4 minutes
-bash scripts/tour.sh --full --lean   # adds the Lean 4 proofs (needs elan; toolchains are pinned per lakefile)
+bash scripts/tour.sh --full     # adds the slow simulations and the compiler rebuild: 16 claims, about 4 minutes
+bash scripts/tour.sh --full --lean   # adds the 4 Lean 4 checks of section 5: all 20 claims (needs elan; toolchains are pinned per lakefile)
 ```
 
-Last full run: **passed 20, failed 0, 4 min 13 s.**
+Last run with `--full --lean`: **passed 20, failed 0, 4 min 13 s.** `--full` alone
+prints `passed 16`; the other four claims are the Lean checks, which run only with
+`--lean`.
 
 Section 6 lists what does **not** work, with issue numbers. Read it before
 drawing conclusions from sections 1–5.
@@ -24,7 +26,9 @@ A self-hosted compiler for a language whose values can carry their own
 uncertainty (`Knowledge<T>`, propagated to first order by the GUM rules),
 their physical units, and declared effects (`IO`, `Mut`, `Div`, `Panic`, `GPU`,
 …). It compiles to static x86-64 ELF. The compiler is written in Sounio and
-bootstraps from a C seed (`bootstrap/stage0.c`) to a fixed point. Two engines
+rebuilds itself to a fixed point starting from the committed prebuilt compiler
+(`bin/souc-linux-x86_64`, section 4). The original C seed, `bootstrap/stage0.c`,
+is not on that path; `scripts/ci/bootstrap_chain_gate.sh` exercises it. Two engines
 share the front end: **Madaros**, the modular default behind `bin/souc`, and
 **lean_single**, the bootstrap seed, selected with `SOUNIO_SOUC_ENGINE=lean_single`.
 Where they differ, this page says which one ran.
@@ -99,7 +103,7 @@ Each result has an independent oracle outside the language:
 ## 4. Self-hosting
 
 ```bash
-make build      # stage0 JIT -> gen1 -> gen2 -> gen3; checks gen2 == gen3
+make build      # prebuilt bin/souc-linux-x86_64 -> gen1 -> gen2 -> gen3; checks gen2 == gen3
 ```
 
 32 s on `main`, `FIXED POINT OK (4b6b478d…)`. A fixed point is what makes a
@@ -123,7 +127,14 @@ only the ones it cites.
 | **`where` refinements** | `souc run` accepts `Knowledge<T where {…}>` and **does not enforce it** on either engine. Enforcement today is a source-to-source script | [#2753](https://github.com/Sounio-lang/sounio/issues/2753) |
 | **engine divergence** | with the lowering fix of #2750, three chemistry tests that pass on lean_single fail at run time on Madaros (illegal instruction, wrong result, arena exhaustion), and so does the UHS demo | `demos/hydrogen/README.md` |
 | **GPU** | `souc build --backend gpu` emits valid PTX, but only for kernels with **empty bodies**: no arithmetic, no memory access. It is an emission skeleton, not a backend | `examples/kernel_vec_add.sio` |
+| **WASM** | there is no WASM backend on main: `souc build f.sio --backend wasm` exits 2 with `unsupported backend: wasm`. The draft backend emits modules that `WebAssembly.validate` rejects, because every call loses its arguments | [#2237](https://github.com/Sounio-lang/sounio/pull/2237) (draft) |
+| **enum payload variants** | `enum Shape { Circle(f64), Rect(f64, f64) }` cannot be used on either engine. Madaros refuses construction and payload patterns with E264 (struct-variant payloads used to build and silently read 0); lean_single accepts the declaration and fails at the match bindings (E200). Payload-free enums, `Option` and `if let` work | KL-20, `docs/compiler/KNOWN_LIMITATIONS.md` |
 | **first-order uncertainty across calls** | first-order variance channels do not cross user function calls | KL-11, `docs/compiler/KNOWN_LIMITATIONS.md` |
+| **variance channel, lean_single shim** (measured 2026-10-06) | `scripts/ci/souc-seq-leansingle.sh` runs `bin/souc-linux-x86_64`, a 2026-06-16 snapshot. It drops the Knowledge variance at `.value`, so `variance_of` returns 0: `rapamycin_rk4_budget` and `rapamycin_epistemic_adaptive` refuse with `EPISTEMIC_FABRICATION`, and `rapamycin_iso_budget` printed `var=0` and still passed until P0.5. It also returns wrong non-zero values in `gum_fo_imported_div_variance` (0.1 vs 0.045) and `madaros_gum_fo_interproc` (0.0025 vs 0.01). Madaros and the current seed `bin/souc-lean-single-x86_64` keep the channel | `docs/dissertation/pbpk_claim_truth_table.md` (suite gate: engine per test) |
+| **variance through struct fields, lean_single** | both lean_single ELFs return variance 0 for a `Knowledge` read back through a struct field, a constructor `let`, or a field-returning call. Madaros keeps it. Witnesses: `gum_fo_field_chain_variance`, `madaros_gum_fo_{struct_field,deep_field,nested_field,field_call,impure_ctor,nonpure_ctor,let_ctor}`. On lean_single each prints its own `*_FAIL` marker **and exits 0** | `tests/run-pass/` (those files) |
+| **variance through `if`, lean_single** | `madaros_gum_fo_div_if`: the `if` branch gives variance 0 (Madaros 0.0325), and the quotient's variance is 0.0025 where 0.000401 is expected. Exits 0 with `MADAROS_GUM_FO_DIV_IF_FAIL` | `tests/run-pass/madaros_gum_fo_div_if.sio` |
+| **correlated first-order, lean_single** | repeated use of one input is treated as independent. `gum_correlated` gives var(h·h) = 0.000613, where Madaros gives 0.001225 = 4h²σ². The seed's `rapamycin_iso_budget` path (a) is about 0.55× Budget64, where Madaros agrees to 0.2 % | `tests/run-pass/gum_correlated.sio` |
+| **one-hop struct-field variance, both engines** | `madaros_wide_struct_variance_field`: one_hop = two_hop = 0 on Madaros as well as on lean_single (direct = 0.09) | `tests/run-pass/madaros_wide_struct_variance_field.sio` |
 | **performance** | not benchmarked on this page. The one same-algorithm comparison measured during this tour's preparation was dominated by the model code, not the compiler, so no number is given | — |
 | **platform** | Linux x86-64 only. The binaries are static ELF and do not run on macOS | — |
 

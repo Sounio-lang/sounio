@@ -53,9 +53,17 @@ function pick(obj, ...keys) {
   return undefined;
 }
 
+// Language release: the README version badge (shields.io escapes "-" as "--").
 function parseReadmeVersion(readme) {
-  const m = readme?.match(/version-1\.0\.0--beta\.(\d+)/);
-  return m ? `1.0.0-beta.${m[1]}` : null;
+  const m = readme?.match(/badge\/version-((?:[^-]|--)+)-/);
+  return m ? m[1].replace(/--/g, "-") : null;
+}
+
+// Compiler build: the string `bin/souc --version` prints, read from the source
+// that produces it (self-hosted/compiler/main.sio), e.g. "Madaros v0.80.0".
+function parseCompilerBuild(mainSio) {
+  const m = mainSio?.match(/println\("(Madaros v[0-9.]+) -- the Sounio self-hosted compiler"\)/);
+  return m?.[1] ?? null;
 }
 
 function parseReadmeFullSuite(readme) {
@@ -80,7 +88,7 @@ function parseBootstrapFromChangelog(changelog) {
 function countStage0Lines() {
   const stage0 = readText("bootstrap/stage0.c");
   if (!stage0) return null;
-  return stage0.split("\n").length;
+  return stage0.split("\n").length - (stage0.endsWith("\n") ? 1 : 0); // matches `wc -l`
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +96,12 @@ function countStage0Lines() {
 // ---------------------------------------------------------------------------
 
 const reliability = loadJson("artifacts/stdlib/stdlib_reliability_status.v1.json");
+// The published stdlib pass figure comes from the end-to-end result written by
+// `bash scripts/stdlib/run_stdlib_e2e.sh`. The reliability-status artifact
+// (2026-05-12) predates module-privacy enforcement and is only used for the
+// file inventory below, never for a pass count.
+const STDLIB_E2E_ARTIFACT = "artifacts/stdlib/stdlib_e2e_result.v1.json";
+const stdlibE2e = loadJson(STDLIB_E2E_ARTIFACT);
 const science = loadJson("artifacts/stdlib/stdlib_science_pipeline_status.v1.json");
 const hyper = loadJson("artifacts/stdlib/stdlib_hyper_execution_status.v1.json");
 const nativeBackend = loadJson("artifacts/omega/native_backend_v2_gate.v1.json");
@@ -101,17 +115,23 @@ const changelog = readText("CHANGELOG.md");
 const soucScript = readText("bin/souc");
 
 const readmeVersion = parseReadmeVersion(readme);
+// Do not fall back to the launcher string recorded inside old stdlib artifacts
+// (it carried the retired 1.0.0-beta scheme); the compiler build is what
+// `./bin/souc --version` prints.
 const wrapperVersion =
-  reliability?.science_pipeline?.runtime_souc_version ??
+  parseCompilerBuild(readText("self-hosted/compiler/main.sio")) ??
   parseWrapperVersion(soucScript) ??
   "unknown";
 const fullSuite = parseReadmeFullSuite(readme);
 const bootstrapRecorded = parseBootstrapFromChangelog(changelog);
 const stage0Lines = countStage0Lines();
 
-const stdlibGatePass = reliability?.totals?.pass ?? 0;
-const stdlibGateTotal = reliability?.totals?.total ?? 0;
-const stdlibGateSkip = reliability?.totals?.skip ?? 0;
+const stdlibGatePass = stdlibE2e?.totals?.pass ?? 0;
+const stdlibGateFail = stdlibE2e?.totals?.fail ?? 0;
+const stdlibGateTotal = stdlibE2e?.totals?.total ?? 0;
+const stdlibGateSkip = stdlibE2e?.totals?.skip ?? 0;
+const stdlibE2eDate = stdlibE2e?.generated_at_utc?.slice(0, 10) ?? "undated";
+const stdlibE2eCommand = stdlibE2e?.command ?? "bash scripts/stdlib/run_stdlib_e2e.sh";
 const stdlibInventoryFiles = reliability?.inventory?.sio_files ?? null;
 const selfHostedFiles = selfhost?.self_hosted_source?.total_files ?? null;
 const selfHostedLines = selfhost?.self_hosted_source?.total_lines ?? null;
@@ -123,8 +143,10 @@ const generatedAt = new Date().toISOString();
 // Build normalized status object
 // ---------------------------------------------------------------------------
 
-const reliabilityReason = reliability
-  ? `${stdlibGatePass}/${stdlibGateTotal} stdlib reliability tests pass, ${stdlibGateSkip} skipped`
+// Stated exactly as measured: pass, fail and skip out of the total, with the
+// measurement date and the command that produced it.
+const reliabilityReason = stdlibE2e
+  ? `Stdlib end-to-end: ${stdlibGatePass} of ${stdlibGateTotal} test programs pass (${stdlibGateFail} fail, ${stdlibGateSkip} skipped), measured ${stdlibE2eDate} with \`${stdlibE2eCommand}\`; result in \`${STDLIB_E2E_ARTIFACT}\``
   : "artifact missing";
 
 const status = {
@@ -144,7 +166,7 @@ const status = {
     },
     defaultWorkflow: {
       launcher: "bin/souc",
-      backend: "self-hosted native ELF/Mach-O",
+      backend: "self-hosted native x86-64 ELF (Linux only)",
       summary:
         "The public onboarding path is the checked self-hosted launcher. It type-checks and compiles to host binaries — no Rust/Cargo build step required for the default workflow.",
     },
@@ -163,11 +185,11 @@ const status = {
     metrics: {
       stdlibReliabilityGate: {
         pass: stdlibGatePass,
-        fail: reliability?.totals?.fail ?? 0,
+        fail: stdlibGateFail,
         skip: stdlibGateSkip,
         total: stdlibGateTotal,
-        label: "Stdlib reliability gate",
-        artifact: "artifacts/stdlib/stdlib_reliability_status.v1.json",
+        label: "Stdlib end-to-end",
+        artifact: STDLIB_E2E_ARTIFACT,
       },
       fullTestSuite: fullSuite
         ? {
@@ -203,11 +225,7 @@ const status = {
         {
           title: "Native codegen",
           detail:
-            "Linux x86-64 ELF plus checked macOS artifact lanes via bin/souc; PE/COFF backend exists for cross-compile",
-        },
-        {
-          title: "Core stdlib gate",
-          detail: `${stdlibGatePass} / ${stdlibGateTotal} stdlib reliability tests pass (${reliability?.generated_at_utc?.slice(0, 10) ?? "artifact date unknown"})`,
+            "Linux x86-64 static ELF only (TOUR.md section 6); no macOS, Windows or AArch64 target ships",
         },
         {
           title: "Optimizer",
@@ -225,6 +243,11 @@ const status = {
         },
       ],
       scaffolding: [
+        {
+          // 196 of 533 passing is not "works": listed with the partial lanes.
+          title: "Stdlib end-to-end tests",
+          detail: reliabilityReason,
+        },
         {
           title: "Theorem prover",
           detail: "Large arena and data structures; full inference logic not complete",
@@ -261,16 +284,16 @@ const status = {
           detail: "Local ontology work exists; 15M-term federated query not implemented",
         },
         {
-          title: "GPU CLI entry point",
-          detail: "PTX/GPU codegen exists in-tree; no complete default CLI path (gpu/lib.sio stub)",
+          title: "General GPU backend",
+          detail: "`souc build --backend gpu` emits PTX for a skeleton of named kernel patterns (empty bodies), not a general GPU backend (TOUR.md section 6)",
         },
         {
-          title: "Windows pre-built binary",
-          detail: "PE/COFF backend is production-grade; no checked .exe shipped in this checkout",
+          title: "Windows, macOS and AArch64",
+          detail: "Not targeted: the compiler emits Linux x86-64 static ELF only",
         },
         {
-          title: "AArch64 native-v2 parity",
-          detail: "Apple Silicon support uses checked Mach-O artifact lane; native-v2 aarch64 still preview-grade",
+          title: "WASM backend",
+          detail: "Blocked draft (#2237); not shipped",
         },
         {
           title: "Checked launcher REPL",
@@ -288,7 +311,7 @@ const status = {
       artifact: "docs/compiler/KNOWN_LIMITATIONS.md",
     },
     nativeBackend: {
-      label: "Native Backend (ELF/Mach-O/PE)",
+      label: "Native Backend (x86-64 ELF)",
       level: pick(nativeBackend, "selftest_passed") ? "verified" : "unknown",
       reason: nativeBackend
         ? `selftest_passed=${nativeBackend.selftest_passed}, scalar_smoke_present=${nativeBackend.scalar_smoke_present}, fail_closed=${nativeBackend.fail_closed}`
@@ -304,16 +327,10 @@ const status = {
       artifact: "artifacts/omega/selfhost_verification_report.v1.json",
     },
     cranelift: {
-      label: "Cranelift JIT (optional profile)",
-      level: "beta",
-      reason: `Optional omega/JIT profile — not the default bin/souc onboarding path. Stdlib gate: ${reliabilityReason}`,
-      artifact: "artifacts/stdlib/stdlib_reliability_status.v1.json",
-    },
-    llvm: {
-      label: "LLVM Backend",
-      level: "verified",
-      reason: "Production per KNOWN_LIMITATIONS.md; wired via `--backend llvm`",
-      artifact: "docs/compiler/KNOWN_LIMITATIONS.md",
+      label: "Cranelift JIT (retired)",
+      level: "stub",
+      reason: "No longer shipped since 2.1.0 (CHANGELOG.md). Madaros native x86-64 is the only shipped engine.",
+      artifact: "CHANGELOG.md",
     },
     lsp: {
       label: "LSP Server",
@@ -344,10 +361,12 @@ const status = {
   stdlib: {
     reliability: {
       label: "Core Standard Library",
-      level: artifactToLevel(pick(reliability, "status_summary")),
-      totals: pick(reliability, "totals") ?? {},
+      level: "unknown",
+      totals: stdlibE2e
+        ? { pass: stdlibGatePass, fail: stdlibGateFail, skip: stdlibGateSkip, total: stdlibGateTotal }
+        : {},
       reason: reliabilityReason,
-      artifact: "artifacts/stdlib/stdlib_reliability_status.v1.json",
+      artifact: STDLIB_E2E_ARTIFACT,
     },
     scienceLanes: {
       label: "Scientific Pipelines",
@@ -516,5 +535,5 @@ console.log(`  - compiler entries: ${Object.keys(status.compiler).length}`);
 console.log(`  - stdlib entries: ${Object.keys(status.stdlib).length}`);
 console.log(`  - checked artifact: ${wrapperVersion}`);
 console.log(`  - readme badge: ${readmeVersion ?? "n/a"}`);
-console.log(`  - stdlib gate: ${stdlibGatePass}/${stdlibGateTotal}`);
+console.log(`  - stdlib e2e: ${stdlibGatePass}/${stdlibGateTotal} pass (${stdlibGateFail} fail, ${stdlibGateSkip} skip), ${stdlibE2eDate}`);
 console.log(`  - generatedAt: ${generatedAt}`);

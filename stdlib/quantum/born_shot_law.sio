@@ -1,0 +1,676 @@
+// stdlib/quantum/born_shot_law.sio
+//
+// One shot of a Born bit has variance μ(1−μ), with μ = E[P]. The width Var(P)
+// cancels out of that number for any mixture of Bernoullis. The width comes
+// back as the covariance of two shots that share the same P.
+//
+// μ and Var(P) are quadrature of the linear Ry circuit against a Gaussian
+// angle, 16-point Gauss–Hermite. They are not a pasted derivative.
+// Cov of two shots that share P is set to that Var(P). Cov of two shots with
+// independent angles is the computed zero. A joint that was not formed stays
+// an empty channel.
+
+use quantum::born_channel::{BandChannel, band_filled, band_variance}
+
+use quantum::epistemic_linear::{elin_ry_prob_one}
+
+use quantum::linear::{
+    quantum_state_new,
+    qubit_alloc,
+    ry,
+    hadamard,
+    pauli_x,
+    bell_pair,
+    cnot,
+    cz,
+    measure_qubit,
+    amp_prob,
+    quantum_state_info,
+    QuantumState,
+    Qubit,
+    QubitPair,
+}
+
+pub struct MixtureLaw {
+    pub mu: f64,
+    pub var_p: f64,
+    pub mean_conditional: f64,
+    pub var_shot: f64,
+    pub rebuilt: f64,
+}
+
+// Three explicit probabilities. The cancellation is arithmetic:
+// E[P(1−P)] + Var(P) = μ(1−μ).
+pub fn mixture_of_three(p1: f64, p2: f64, p3: f64) -> MixtureLaw {
+    let mu = (p1 + p2 + p3) / 3.0
+    let m2 = (p1 * p1 + p2 * p2 + p3 * p3) / 3.0
+    let var_p = m2 - mu * mu
+    let mean_conditional = (p1 * (1.0 - p1) + p2 * (1.0 - p2) + p3 * (1.0 - p3)) / 3.0
+    let var_shot = mu * (1.0 - mu)
+    MixtureLaw {
+        mu: mu,
+        var_p: var_p,
+        mean_conditional: mean_conditional,
+        var_shot: var_shot,
+        rebuilt: mean_conditional + var_p,
+    }
+}
+
+fn gh_x(i: i64) -> f64 with Panic {
+    if i == 0 { return 0.0 - 4.688738939305818 }
+    if i == 1 { return 0.0 - 3.869447904860122 }
+    if i == 2 { return 0.0 - 3.176999161979956 }
+    if i == 3 { return 0.0 - 2.546202157847481 }
+    if i == 4 { return 0.0 - 1.951787990916254 }
+    if i == 5 { return 0.0 - 1.380258539198880 }
+    if i == 6 { return 0.0 - 0.822951449144655 }
+    if i == 7 { return 0.0 - 0.273481046138153 }
+    if i == 8 { return 0.273481046138152 }
+    if i == 9 { return 0.822951449144656 }
+    if i == 10 { return 1.380258539198880 }
+    if i == 11 { return 1.951787990916254 }
+    if i == 12 { return 2.546202157847481 }
+    if i == 13 { return 3.176999161979958 }
+    if i == 14 { return 3.869447904860121 }
+    if i == 15 { return 4.688738939305818 }
+    panic("Gauss-Hermite index")
+    0.0
+}
+
+fn gh_w(i: i64) -> f64 with Panic {
+    if i == 0 { return 1.4978147231589182e-10 }
+    if i == 1 { return 1.3094732162872020e-7 }
+    if i == 2 { return 1.5300032162487001e-5 }
+    if i == 3 { return 5.259849265739330e-4 }
+    if i == 4 { return 7.266937601184715e-3 }
+    if i == 5 { return 4.7284752354014185e-2 }
+    if i == 6 { return 1.5833837275094928e-1 }
+    if i == 7 { return 2.8656852123801324e-1 }
+    if i == 8 { return 2.8656852123801252e-1 }
+    if i == 9 { return 1.5833837275094995e-1 }
+    if i == 10 { return 4.7284752354014255e-2 }
+    if i == 11 { return 7.266937601184788e-3 }
+    if i == 12 { return 5.259849265739254e-4 }
+    if i == 13 { return 1.5300032162487923e-5 }
+    if i == 14 { return 1.3094732162879045e-7 }
+    if i == 15 { return 1.4978147231189134e-10 }
+    panic("Gauss-Hermite index")
+    0.0
+}
+
+fn filled_number(v: f64) -> BandChannel {
+    BandChannel {
+        filled: 1,
+        has_split: 0,
+        variance: v,
+        u_first: 1000000.0,
+        u_second: 1000000.0,
+    }
+}
+
+fn empty_channel() -> BandChannel {
+    BandChannel {
+        filled: 0,
+        has_split: 0,
+        variance: 1000000.0,
+        u_first: 1000000.0,
+        u_second: 1000000.0,
+    }
+}
+
+pub struct ShotLaw {
+    pub mu: f64,
+    pub mean_conditional: f64,
+    pub rebuilt: f64,
+    pub width: BandChannel,
+    pub one_shot: BandChannel,
+    pub cov_shared: BandChannel,
+    pub cov_apart: BandChannel,
+    pub cov_unformed: BandChannel,
+}
+
+// Gaussian angle of std σ around theta. P is Prob(|1⟩) after Ry on |0⟩.
+pub fn ry_shot_law(theta: f64, sigma: f64) -> ShotLaw with Mut, Div, Panic {
+    let scale = sigma * 1.4142135623730951
+    var mu = 0.0
+    var m2 = 0.0
+    var i = 0
+    while i < 16 {
+        let p = elin_ry_prob_one(theta + scale * gh_x(i))
+        let w = gh_w(i)
+        mu = mu + w * p
+        m2 = m2 + w * p * p
+        i = i + 1
+    }
+    var var_p = m2 - mu * mu
+    if var_p < 0.0 {
+        var_p = 0.0
+    }
+    let mean_conditional = mu - m2
+    let var_shot = mu * (1.0 - mu)
+    ShotLaw {
+        mu: mu,
+        mean_conditional: mean_conditional,
+        rebuilt: mean_conditional + var_p,
+        width: filled_number(var_p),
+        one_shot: filled_number(var_shot),
+        cov_shared: filled_number(var_p),
+        cov_apart: filled_number(0.0),
+        cov_unformed: empty_channel(),
+    }
+}
+
+pub struct BitJoint {
+    pub p0: f64,
+    pub p1: f64,
+    pub pboth: f64,
+}
+
+fn read_joint(qs_prob0: f64, qs_prob1: f64, qs_prob2: f64, qs_prob3: f64) -> BitJoint {
+    BitJoint {
+        p0: qs_prob1 + qs_prob3,
+        p1: qs_prob2 + qs_prob3,
+        pboth: qs_prob3,
+    }
+}
+
+fn product_joint(alpha: f64) -> BitJoint with Mut, Div, Panic {
+    var qs = quantum_state_new()
+    let q0 = ry(qubit_alloc(&!qs), &!qs, alpha)
+    let q1 = ry(qubit_alloc(&!qs), &!qs, alpha)
+    let joint = read_joint(amp_prob(&qs, 0), amp_prob(&qs, 1), amp_prob(&qs, 2), amp_prob(&qs, 3))
+    let _a = measure_qubit(q0, &!qs, 0.0)
+    let _b = measure_qubit(q1, &!qs, 0.0)
+    joint
+}
+
+fn cnot_joint(alpha: f64) -> BitJoint with Mut, Div, Panic {
+    var qs = quantum_state_new()
+    let q0 = ry(qubit_alloc(&!qs), &!qs, alpha)
+    let q1 = ry(qubit_alloc(&!qs), &!qs, alpha)
+    let pair: QubitPair = cnot(q0, q1, &!qs)
+    let joint = read_joint(amp_prob(&qs, 0), amp_prob(&qs, 1), amp_prob(&qs, 2), amp_prob(&qs, 3))
+    let _a = measure_qubit(pair.first, &!qs, 0.0)
+    let _b = measure_qubit(pair.second, &!qs, 0.0)
+    joint
+}
+
+fn cz_joint(alpha: f64) -> BitJoint with Mut, Div, Panic {
+    var qs = quantum_state_new()
+    let q0 = ry(qubit_alloc(&!qs), &!qs, alpha)
+    let q1 = ry(qubit_alloc(&!qs), &!qs, alpha)
+    let pair: QubitPair = cz(q0, q1, &!qs)
+    let joint = read_joint(amp_prob(&qs, 0), amp_prob(&qs, 1), amp_prob(&qs, 2), amp_prob(&qs, 3))
+    let _a = measure_qubit(pair.first, &!qs, 0.0)
+    let _b = measure_qubit(pair.second, &!qs, 0.0)
+    joint
+}
+
+fn pick_joint(alpha: f64, entangled: i64) -> BitJoint with Mut, Div, Panic {
+    if entangled == 1 {
+        return cnot_joint(alpha)
+    }
+    if entangled == 2 {
+        return cz_joint(alpha)
+    }
+    return product_joint(alpha)
+}
+
+pub struct WireCov {
+    pub mu0: f64,
+    pub mu1: f64,
+    pub second: f64,
+    pub cov: f64,
+    pub given_angle: f64,
+    pub across_angles: f64,
+}
+
+fn quad_joint(theta: f64, sigma: f64, entangled: i64) -> WireCov with Mut, Div, Panic {
+    let scale = sigma * 1.4142135623730951
+    var m0 = 0.0
+    var m1 = 0.0
+    var mb = 0.0
+    var m_given = 0.0
+    var m_means = 0.0
+    var i = 0
+    while i < 16 {
+        let alpha = theta + scale * gh_x(i)
+        let joint = pick_joint(alpha, entangled)
+        let w = gh_w(i)
+        let cond = joint.pboth - joint.p0 * joint.p1
+        m0 = m0 + w * joint.p0
+        m1 = m1 + w * joint.p1
+        mb = mb + w * joint.pboth
+        m_given = m_given + w * cond
+        m_means = m_means + w * joint.p0 * joint.p1
+        i = i + 1
+    }
+    WireCov {
+        mu0: m0,
+        mu1: m1,
+        second: mb,
+        cov: mb - m0 * m1,
+        given_angle: m_given,
+        across_angles: m_means - m0 * m1,
+    }
+}
+
+// Two wires, same Gaussian angle, no entangling gate. Cov of the two bits is Var(P).
+pub fn ry_product_cov(theta: f64, sigma: f64) -> WireCov with Mut, Div, Panic {
+    quad_joint(theta, sigma, 0)
+}
+
+// Same angle, then CNOT. given_angle is E[Cov | angle]. across_angles is the
+// covariance of the two conditional means. At θ = π/2 both pieces read 0.
+// At θ = π the conditional piece is negative and carries almost all of cov.
+pub fn ry_cnot_cov(theta: f64, sigma: f64) -> WireCov with Mut, Div, Panic {
+    quad_joint(theta, sigma, 1)
+}
+
+// Same angle, then CZ. The phase on |11⟩ leaves the bit probabilities, and
+// therefore the covariance, equal to the product state.
+pub fn ry_cz_cov(theta: f64, sigma: f64) -> WireCov with Mut, Div, Panic {
+    quad_joint(theta, sigma, 2)
+}
+
+pub struct TargetRead {
+    pub var_target: f64,
+    pub residual: f64,
+    pub removed: f64,
+    pub q_if_zero: f64,
+    pub q_if_one: f64,
+}
+
+pub struct AngleShape {
+    pub mu: f64,
+    pub var_p: f64,
+    pub third: f64,
+    pub fourth: f64,
+}
+
+fn shape_from_moments(m1: f64, m2: f64, m3: f64, m4: f64) -> AngleShape {
+    AngleShape {
+        mu: m1,
+        var_p: m2 - m1 * m1,
+        third: m3 - 3.0 * m1 * m2 + 2.0 * m1 * m1 * m1,
+        fourth: m4 - 4.0 * m1 * m3 + 6.0 * m1 * m1 * m2 - 3.0 * m1 * m1 * m1 * m1,
+    }
+}
+
+// Central moments of P = Prob(|1⟩) under a Gaussian angle. third is the
+// connected triple of three shots that share P. fourth is the part of
+// E[P^4] that is not fixed by μ and Var(P).
+pub fn ry_gaussian_shape(theta: f64, sigma: f64) -> AngleShape with Mut, Div, Panic {
+    let scale = sigma * 1.4142135623730951
+    var m1 = 0.0
+    var m2 = 0.0
+    var m3 = 0.0
+    var m4 = 0.0
+    var i = 0
+    while i < 16 {
+        let p = elin_ry_prob_one(theta + scale * gh_x(i))
+        let w = gh_w(i)
+        let p2 = p * p
+        m1 = m1 + w * p
+        m2 = m2 + w * p2
+        m3 = m3 + w * p2 * p
+        m4 = m4 + w * p2 * p2
+        i = i + 1
+    }
+    shape_from_moments(m1, m2, m3, m4)
+}
+
+fn two_point_shape(theta: f64, half: f64) -> AngleShape with Mut, Div, Panic {
+    let p1 = elin_ry_prob_one(theta + half)
+    let p2 = elin_ry_prob_one(theta - half)
+    let m1 = (p1 + p2) / 2.0
+    let m2 = (p1 * p1 + p2 * p2) / 2.0
+    let m3 = (p1 * p1 * p1 + p2 * p2 * p2) / 2.0
+    let m4 = (p1 * p1 * p1 * p1 + p2 * p2 * p2 * p2) / 2.0
+    shape_from_moments(m1, m2, m3, m4)
+}
+
+fn match_half(theta: f64, target_var: f64) -> f64 with Mut, Div, Panic {
+    var lo = 0.0
+    var hi = 1.0
+    var n = 0
+    while n < 48 {
+        let mid = (lo + hi) / 2.0
+        let shape = two_point_shape(theta, mid)
+        if shape.var_p < target_var {
+            lo = mid
+        } else {
+            hi = mid
+        }
+        n = n + 1
+    }
+    return (lo + hi) / 2.0
+}
+
+// Two angles, ±half, weights 1/2. half is chosen so Var(P) equals target_var.
+// The pair then matches a Gaussian of the same width. The fourth moment does not.
+pub fn ry_two_point_matched(theta: f64, target_var: f64) -> AngleShape with Mut, Div, Panic {
+    two_point_shape(theta, match_half(theta, target_var))
+}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+pub struct RecordSplit {
+    pub mean_c_g: f64,
+    pub var_c_g: f64,
+    pub mean_c_two: f64,
+    pub var_c_two: f64,
+    pub tv3: f64,
+    pub tv4: f64,
+    pub parity3: f64,
+    pub parity4_g: f64,
+    pub parity4_two: f64,
+    pub parity6_g: f64,
+    pub parity6_two: f64,
+}
+
+// Gaussian against a two-point angle matched on Var(P).
+// mean_c is E[P(1−P)]. var_c is Var(P(1−P)), which equals E[Z^4] − v².
+// tv3 and tv4 are total-variation distances of the shot-count laws.
+// For a symmetric angle the pgf of n shots depends on E[Z^4] only when n ≥ 4,
+// and the four-count laws differ by δ(s−1)^4, so the distance is 8|δ|.
+// parity4 is E[(1−2P)^4] = E[(−1)^K] for four shots. It equals 16 E[Z^4].
+// The difference of the two parities is 16δ, and half of that is tv4.
+// parity3 is the three-shot character, zero by symmetry.
+// parity6 is E[(1−2P)^6]. Degree 4 cannot see it.
+pub fn ry_record_split(theta: f64, sigma: f64, target_var: f64) -> RecordSplit with Mut, Div, Panic {
+    let scale = sigma * 1.4142135623730951
+    var g0 = 0.0
+    var g1 = 0.0
+    var g2 = 0.0
+    var g3 = 0.0
+    var g4 = 0.0
+    var h0 = 0.0
+    var h1 = 0.0
+    var h2 = 0.0
+    var h3 = 0.0
+    var c1 = 0.0
+    var c2 = 0.0
+    var y3 = 0.0
+    var y4 = 0.0
+    var y6 = 0.0
+    var i = 0
+    while i < 16 {
+        let p = elin_ry_prob_one(theta + scale * gh_x(i))
+        let w = gh_w(i)
+        let q = 1.0 - p
+        let q2 = q * q
+        let p2 = p * p
+        let c = p * q
+        g0 = g0 + w * q2 * q2
+        g1 = g1 + w * 4.0 * p * q2 * q
+        g2 = g2 + w * 6.0 * p2 * q2
+        g3 = g3 + w * 4.0 * p2 * p * q
+        g4 = g4 + w * p2 * p2
+        h0 = h0 + w * q2 * q
+        h1 = h1 + w * 3.0 * p * q2
+        h2 = h2 + w * 3.0 * p2 * q
+        h3 = h3 + w * p2 * p
+        c1 = c1 + w * c
+        c2 = c2 + w * c * c
+        let m = 1.0 - 2.0 * p
+        let m2 = m * m
+        y3 = y3 + w * m2 * m
+        y4 = y4 + w * m2 * m2
+        y6 = y6 + w * m2 * m2 * m2
+        i = i + 1
+    }
+    let half = match_half(theta, target_var)
+    let p_hi = elin_ry_prob_one(theta + half)
+    let p_lo = elin_ry_prob_one(theta - half)
+    var t0 = 0.0
+    var t1 = 0.0
+    var t2 = 0.0
+    var t3 = 0.0
+    var t4 = 0.0
+    var u0 = 0.0
+    var u1 = 0.0
+    var u2 = 0.0
+    var u3 = 0.0
+    var d1 = 0.0
+    var d2 = 0.0
+    var z4 = 0.0
+    var z6 = 0.0
+    var j = 0
+    while j < 2 {
+        let p = if j == 0 { p_hi } else { p_lo }
+        let q = 1.0 - p
+        let q2 = q * q
+        let p2 = p * p
+        let c = p * q
+        t0 = t0 + 0.5 * q2 * q2
+        t1 = t1 + 0.5 * 4.0 * p * q2 * q
+        t2 = t2 + 0.5 * 6.0 * p2 * q2
+        t3 = t3 + 0.5 * 4.0 * p2 * p * q
+        t4 = t4 + 0.5 * p2 * p2
+        u0 = u0 + 0.5 * q2 * q
+        u1 = u1 + 0.5 * 3.0 * p * q2
+        u2 = u2 + 0.5 * 3.0 * p2 * q
+        u3 = u3 + 0.5 * p2 * p
+        d1 = d1 + 0.5 * c
+        d2 = d2 + 0.5 * c * c
+        let m = 1.0 - 2.0 * p
+        let m2 = m * m
+        z4 = z4 + 0.5 * m2 * m2
+        z6 = z6 + 0.5 * m2 * m2 * m2
+        j = j + 1
+    }
+    let tv4 = 0.5 * (abs_f(g0 - t0) + abs_f(g1 - t1) + abs_f(g2 - t2) + abs_f(g3 - t3) + abs_f(g4 - t4))
+    let tv3 = 0.5 * (abs_f(h0 - u0) + abs_f(h1 - u1) + abs_f(h2 - u2) + abs_f(h3 - u3))
+    RecordSplit {
+        mean_c_g: c1,
+        var_c_g: c2 - c1 * c1,
+        mean_c_two: d1,
+        var_c_two: d2 - d1 * d1,
+        tv3: tv3,
+        tv4: tv4,
+        parity3: y3,
+        parity4_g: y4,
+        parity4_two: z4,
+        parity6_g: y6,
+        parity6_two: z6,
+    }
+}
+
+// What a measurement of the control removes from the target's variance.
+// For any two-bit joint, removed = cov² / Var(control). residual stays.
+pub fn target_read(w: WireCov) -> TargetRead {
+    let q1 = w.second / w.mu0
+    let q0 = (w.mu1 - w.second) / (1.0 - w.mu0)
+    let mean_sq = (1.0 - w.mu0) * q0 * q0 + w.mu0 * q1 * q1
+    let removed = mean_sq - w.mu1 * w.mu1
+    let residual = (1.0 - w.mu0) * q0 * (1.0 - q0) + w.mu0 * q1 * (1.0 - q1)
+    TargetRead {
+        var_target: w.mu1 * (1.0 - w.mu1),
+        residual: residual,
+        removed: removed,
+        q_if_zero: q0,
+        q_if_one: q1,
+    }
+}
+
+fn fourth_character(p: f64) -> f64 {
+    let m = 1.0 - 2.0 * p
+    let m2 = m * m
+    m2 * m2
+}
+
+pub struct ParityBound {
+    pub lo: f64,
+    pub gaussian: f64,
+    pub hi: f64,
+    pub fraction: f64,
+}
+
+// Classical interval for four-shot parity when one shared angle is symmetric
+// and E[Z²] = target_var. U = Z² lies in [0, 1/4], so
+// 16 v² ≤ E[(1−2P)⁴] ≤ 4v. The ends are Ry circuits: ±half, and the mixture
+// of 0, θ, and 2θ. The Gaussian sits near the floor.
+pub fn ry_parity_bound(theta: f64, sigma: f64, target_var: f64) -> ParityBound with Mut, Div, Panic {
+    let half = match_half(theta, target_var)
+    let lo = 0.5 * fourth_character(elin_ry_prob_one(theta + half)) + 0.5 * fourth_character(elin_ry_prob_one(theta - half))
+    let scale = sigma * 1.4142135623730951
+    var mid = 0.0
+    var i = 0
+    while i < 16 {
+        let p = elin_ry_prob_one(theta + scale * gh_x(i))
+        mid = mid + gh_w(i) * fourth_character(p)
+        i = i + 1
+    }
+    let w = 4.0 * target_var
+    let hi = 0.5 * w * fourth_character(elin_ry_prob_one(0.0)) + (1.0 - w) * fourth_character(elin_ry_prob_one(theta)) + 0.5 * w * fourth_character(elin_ry_prob_one(theta + theta))
+    ParityBound {
+        lo: lo,
+        gaussian: mid,
+        hi: hi,
+        fraction: (mid - lo) / (hi - lo),
+    }
+}
+
+fn z_string(qs: &QuantumState) -> f64 with Mut, Div, Panic {
+    let n = quantum_state_info(qs).n_amplitudes
+    var s = 0.0
+    var i = 0
+    while i < n {
+        var x = i
+        var neg = 0
+        while x > 0 {
+            if (x & 1) == 1 {
+                neg = 1 - neg
+            }
+            x = x >> 1
+        }
+        let sign = if neg == 1 { -1.0 } else { 1.0 }
+        s = s + sign * amp_prob(qs, i)
+        i = i + 1
+    }
+    s
+}
+
+fn marginal_bit0(qs: &QuantumState) -> f64 with Mut, Div, Panic {
+    let n = quantum_state_info(qs).n_amplitudes
+    var s = 0.0
+    var i = 0
+    while i < n {
+        if (i & 1) == 1 {
+            s = s + amp_prob(qs, i)
+        }
+        i = i + 1
+    }
+    s
+}
+
+pub struct StateParity {
+    pub parity: f64,
+    pub marginal: f64,
+}
+
+fn consume4(a: Qubit, b: Qubit, c: Qubit, d: Qubit, qs: &!QuantumState) with Mut, Div, Panic {
+    let _a = measure_qubit(a, qs, 0.0)
+    let _b = measure_qubit(b, qs, 0.0)
+    let _c = measure_qubit(c, qs, 0.0)
+    let _d = measure_qubit(d, qs, 0.0)
+}
+
+// Four product Ry wires. ⟨Z⊗Z⊗Z⊗Z⟩ = (1−2P)⁴.
+pub fn ry4_product_parity(theta: f64) -> StateParity with Mut, Div, Panic {
+    var qs = quantum_state_new()
+    let q0 = ry(qubit_alloc(&!qs), &!qs, theta)
+    let q1 = ry(qubit_alloc(&!qs), &!qs, theta)
+    let q2 = ry(qubit_alloc(&!qs), &!qs, theta)
+    let q3 = ry(qubit_alloc(&!qs), &!qs, theta)
+    let read = StateParity { parity: z_string(&qs), marginal: marginal_bit0(&qs) }
+    consume4(q0, q1, q2, q3, &!qs)
+    read
+}
+
+// |0000⟩ + |1111⟩. Marginal of each wire is 1/2, so the classical bound
+// at v = 0 is 0. The parity operator reads 1.
+pub fn ghz4_parity() -> StateParity with Mut, Div, Panic {
+    var qs = quantum_state_new()
+    let h0 = hadamard(qubit_alloc(&!qs), &!qs)
+    let p1 = cnot(h0, qubit_alloc(&!qs), &!qs)
+    let p2 = cnot(p1.second, qubit_alloc(&!qs), &!qs)
+    let p3 = cnot(p2.second, qubit_alloc(&!qs), &!qs)
+    let read = StateParity { parity: z_string(&qs), marginal: marginal_bit0(&qs) }
+    consume4(p1.first, p2.first, p3.first, p3.second, &!qs)
+    read
+}
+
+fn zz_of(q0: Qubit, q1: Qubit, alpha: f64, beta: f64, qs: &!QuantumState) -> f64 with Mut, Div, Panic {
+    let r0 = ry(q0, qs, alpha)
+    let r1 = ry(q1, qs, beta)
+    let z = z_string(qs)
+    let _a = measure_qubit(r0, qs, 0.0)
+    let _b = measure_qubit(r1, qs, 0.0)
+    z
+}
+
+fn basis_zz(flip0: i64, flip1: i64, alpha: f64, beta: f64) -> f64 with Mut, Div, Panic {
+    var qs = quantum_state_new()
+    let q0 = qubit_alloc(&!qs)
+    let q1 = qubit_alloc(&!qs)
+    let a = if flip0 == 1 { pauli_x(q0, &!qs) } else { q0 }
+    let b = if flip1 == 1 { pauli_x(q1, &!qs) } else { q1 }
+    zz_of(a, b, alpha, beta, &!qs)
+}
+
+fn bell_zz(alpha: f64, beta: f64) -> f64 with Mut, Div, Panic {
+    var qs = quantum_state_new()
+    let pair = bell_pair(qubit_alloc(&!qs), qubit_alloc(&!qs), &!qs)
+    zz_of(pair.first, pair.second, alpha, beta, &!qs)
+}
+
+fn chsh(which: i64, pi: f64) -> f64 with Mut, Div, Panic {
+    let a = pi / 4.0
+    let h = pi / 2.0
+    let e0 = if which == 4 { bell_zz(0.0, a) } else { basis_zz(which / 2, which - 2 * (which / 2), 0.0, a) }
+    let e1 = if which == 4 { bell_zz(0.0, 0.0 - a) } else { basis_zz(which / 2, which - 2 * (which / 2), 0.0, 0.0 - a) }
+    let e2 = if which == 4 { bell_zz(h, a) } else { basis_zz(which / 2, which - 2 * (which / 2), h, a) }
+    let e3 = if which == 4 { bell_zz(h, 0.0 - a) } else { basis_zz(which / 2, which - 2 * (which / 2), h, 0.0 - a) }
+    e0 + e1 + e2 - e3
+}
+
+pub struct ChshExit {
+    pub zz_copy: f64,
+    pub xx_copy: f64,
+    pub zz_bell: f64,
+    pub xx_bell: f64,
+    pub chsh_bell: f64,
+    pub chsh_00: f64,
+    pub chsh_01: f64,
+    pub chsh_10: f64,
+    pub chsh_11: f64,
+}
+
+// The Z string of a copied bit and of a Bell pair both read 1.
+// After both wires are turned by π/2 the copy reads 0 and the pair reads 1.
+// CHSH on the pair is 2√2. On each computational-basis state it is ±√2.
+pub fn ry_chsh_exit(pi: f64) -> ChshExit with Mut, Div, Panic {
+    let h = pi / 2.0
+    let zz00 = basis_zz(0, 0, 0.0, 0.0)
+    let zz11 = basis_zz(1, 1, 0.0, 0.0)
+    let xx00 = basis_zz(0, 0, h, h)
+    let xx11 = basis_zz(1, 1, h, h)
+    ChshExit {
+        zz_copy: 0.5 * zz00 + 0.5 * zz11,
+        xx_copy: 0.5 * xx00 + 0.5 * xx11,
+        zz_bell: bell_zz(0.0, 0.0),
+        xx_bell: bell_zz(h, h),
+        chsh_bell: chsh(4, pi),
+        chsh_00: chsh(0, pi),
+        chsh_01: chsh(1, pi),
+        chsh_10: chsh(2, pi),
+        chsh_11: chsh(3, pi),
+    }
+}

@@ -6,11 +6,15 @@ Phase 8 establishes machine-checked proofs of correctness for the two
 highest-leverage invariant classes in the Sounio compiler:
 
 1. **ELF64 linker** (`ElfLinker.lean`) — section layout, symbol containment,
-   and relocation validity for the object-file writer in
-   `crates/souc/src/backend/native/elf.rs`.
+   and relocation validity, modelling the object-file writer in
+   `self-hosted/native/elf.sio`.
 2. **Bidirectional type checker** (`TypeChecker.lean`) — subtype reflexivity,
-   transitivity, epistemic-type covariance, and effect-safety for the checker
-   in `crates/souc/src/check/mod.rs`.
+   transitivity, epistemic-type covariance, and effect-safety, modelling the
+   checker in `self-hosted/check/` (`check.sio`, `infer.sio`, `effects.sio`).
+
+Both are models written by hand in Lean. They are not extracted from, or
+mechanically linked to, the `.sio` sources they describe. (The Rust paths this
+file used to cite no longer exist; the compiler is the self-hosted Sounio tree.)
 
 ## Targets and Invariants
 
@@ -49,8 +53,47 @@ cd formal/
 lake build
 ```
 
-All theorems are fully proved — zero `sorry` in both Phase 8 root files and the
-`lean4/` mechanization.  `lake build` succeeds with no warnings.
+### What "proved" means here
+
+Measured 2026-10-05 over the 308 tracked `.lean` files under `formal/` (excluding
+`formal/lake/packages/`), with comments and string literals stripped before
+matching:
+
+| Count | Value |
+|---|---:|
+| `sorry` in code | 0 |
+| `axiom` declarations | 61, in 10 files |
+| `native_decide` uses | 741, in 110 files |
+
+The 61 axioms are in `Epistemic.lean` (20), `OctonionAlgebra.lean` (15),
+`HessianAD.lean` (6), `lean4/SounioIEEE754Spec.lean` (6),
+`SecondOrderGUM.lean` (4), `lean4/SounioFloatInstance.lean` (4),
+`TypeCheckerSoundness.lean` (3), `NonAssocHessian.lean` (1),
+`lean4/SounioErdos90UnitSpectrum.lean` (1) and
+`lean4/SounioImpossibilityChain.lean` (1). A theorem that depends on one of
+them is proved relative to that axiom; `#print axioms <name>` shows which.
+`native_decide` trusts the compiled evaluator (it adds `Lean.ofReduceBool` to
+the trusted base) rather than the kernel alone.
+
+To re-count: `scripts/dev/gen_axiom_inventory.sh` regenerates
+[`AXIOM_INVENTORY.md`](AXIOM_INVENTORY.md) (every axiom by file, name and line;
+`native_decide` per file). It walks `git ls-files`, strips `--` and `/- -/`
+comments and string literals, then counts `\bsorry\b`, declarations matching
+`^\s*axiom\s`, and `\bnative_decide\b` (`grep` over the raw files over-counts,
+because many files state in their doc comments that they use no `sorry` or no
+axioms). CI checks the inventory is current. The two `AxiomReport.lean` files
+added since (one per Lake package) declare no axioms; CI runs them to print
+`#print axioms` for the headline theorems (`scripts/ci/lean_axiom_report.sh`).
+
+**EL+ closure.** `OntologyELPlusClosureComplete.lean` proves (`subBPlusC_iff`)
+that, for concepts in the TBox's finite universe (`conceptUniv t`), the
+boolean saturation oracle answers *true* if and only if the subsumption is
+derivable in the derivation calculus `Der` defined in Lean
+(`subBPlusC t C D = true ↔ Der t C D`). Completeness is with respect to `Der`;
+the canonical model is a device inside the proof, not a separately stated
+EL+ semantics that the theorem is about. `stdlib/ontology/elplus.sio` is a hand-written
+mirror of the saturation, not extracted code: the link between the proof and
+the executable is by construction and by test, not by proof (TOUR.md section 2).
 
 ## Proof Strategy
 

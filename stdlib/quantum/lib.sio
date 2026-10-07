@@ -3,20 +3,76 @@
 // The no-cloning theorem enforced at compile time via linear types:
 // a Qubit must be consumed exactly once. Includes VQE simulation
 // with GUM-compliant uncertainty propagation through gate angles.
+// Classical statevector simulation; not a quantum computer.
 //
 // Submodules:
-//   linear        — Linear Qubit type, quantum gates (H, X, Z, S, T, CNOT), measurement, Bell pairs
+//   linear        — Linear Qubit type, gates (H, X, Y, Z, S, T, Rx, Ry, Rz,
+//                   CNOT, CZ, SWAP, Toffoli), measure_qubit, Bell, GHZ3, teleport;
+//                   simulator cap 10 qubits
 //   vqe           — Variational Quantum Eigensolver with Pauli Hamiltonians and ansatz circuits
 //   epistemic_vqe — VQE with gate-angle uncertainty propagation (statevector simulation)
+//   epistemic_linear — parameter-shift GUM on linear Ry; angle is Epistemic (variance survives the call)
+//   born_channel — Born probability with a preparation channel and a shot channel;
+//                   an empty channel has no numeric read
+//   born_shot_law — one shot has variance mu(1-mu); the angle width is the
+//                   covariance of two shots that shared the angle
 
-// linear — types: Qubit (linear), QuantumState, QubitPair, MeasurementResult, StateInfo
+// linear — types: Qubit (linear), QuantumState, QubitPair, QubitTriple,
+//   MeasurementResult, TeleportResult, StateInfo
+// Constants: QUANTUM_MAX_QUBITS = 10, QUANTUM_MAX_AMPLITUDES = 1024
+//   (11th qubit_alloc panics)
 // Key fns: quantum_state_new, qubit_alloc,
-//   hadamard, pauli_x, pauli_z, s_gate, t_gate, cnot,
-//   measure, bell_pair, quantum_state_info
+//   hadamard, pauli_x, pauli_y, pauli_z, s_gate, t_gate, rx, ry, rz,
+//   cnot, cz, swap, ccnot,
+//   measure_qubit (not `measure`: that name is the builtin Knowledge constructor),
+//   bell_pair, ghz3, teleport, quantum_state_info,
+//   amp_real, amp_imag, amp_prob
+// Rx/Ry/Rz also exist on Statevector in epistemic_vqe; the simulators are not unified.
 
-// vqe — types: PauliOp, PauliString, Hamiltonian, Circuit, HardwareEfficient, UCCSD, VQEResult
-// Key fns: h2_hamiltonian, lih_hamiltonian, beh2_hamiltonian
+// vqe — types: PauliString, Hamiltonian, Gate, Circuit, CircuitState, CircuitVQEResult
+// Key fns: pauli_string, hamiltonian_new, hamiltonian_add, h2_pauli_hamiltonian,
+//   hamiltonian_expectation, hamiltonian_ground_energy (exact, Jacobi),
+//   hardware_efficient, circuit_run, vqe_minimize (Rotosolve); <= 4 qubits
 
-// epistemic_vqe — types: Statevector, EpistemicStatevector, VQEResult
+// epistemic_vqe — types: Statevector, VQEResult, GumBand, McBand
 // Key fns: sv_zero, sv_apply_rx, sv_apply_ry, sv_apply_rz, sv_apply_h, sv_apply_cx,
-//   vqe_optimize, vqe_epistemic, h2_hamiltonian
+//   h2_hamiltonian, h2_exact_ground_energy, vqe_optimize (Rotosolve),
+//   vqe_gradient / vqe_hessian (parameter shift), vqe_gum2 (second-order GUM),
+//   vqe_mc_band (Monte Carlo), vqe_epistemic
+//
+// Limits: linear statevector <= 10 qubits; VQE modules <= 4 qubits; no noise
+// model, no shot noise, no hardware backend. Demo and cross-check: demos/quantum/.
+
+// epistemic_linear — parameter-shift GUM on linear Ry
+// Key fns: elin_ry_prob_one, elin_ry_dprob, elin_ry_d2prob, elin_ry_gum,
+//   elin_ry_teleport_prob_one, elin_ry_teleport_dprob
+// elin_ry_gum takes Epistemic. Variance is a struct field and survives a call.
+// Builtin Knowledge drops its uncertainty on a function argument; deposit it
+// into Epistemic in the constructing function.
+// At theta = pi the first-order band is zero. Teleport leaves P and dP unchanged.
+
+// born_channel — Born probability whose channels are filled or empty.
+// Key fns: born_prepared, born_one_shot, born_pair_one_angle, born_pair_two_angles,
+//   pair_var_sum, band_variance, band_u_first
+// band_variance panics when the channel is empty. At theta = pi the angle
+// channel is filled and u_first is 0. One shared Epistemic fills the covariance.
+// Two Epistemics with the same numbers leave it empty. An empty covariance is
+// not added as 0.
+
+// born_shot_law — law of one Born bit and of a shared pair.
+// Key fns: mixture_of_three, ry_shot_law
+// ry_shot_law quadratures linear Ry against a Gaussian angle.
+// one_shot reads mu(1-mu). width and cov_shared read Var(P).
+// cov_apart is the computed zero. cov_unformed is empty.
+// ry_product_cov: two wires, same angle, no CNOT; cov is Var(P).
+// ry_cnot_cov: same angle then CNOT; at pi/2 the bit cov is the computed zero.
+// given_angle is E[Cov | angle]. across_angles is Cov of the conditional means.
+// At the pole the conditional piece dominates and is negative.
+// target_read: variance removed by measuring the control, cov^2/Var(control).
+// ry_cz_cov matches the product. CNOT at the pole is the large removal.
+// ry_gaussian_shape: third and fourth central moments of P.
+// ry_two_point_matched: same Var(P), fourth moment splits. At pi/2 the third is zero.
+// ry_record_split: Var(P(1-P)); three-shot records agree; four-shot total variation is 8|delta|.
+// parity4 is E[(1-2P)^4] = E[(-1)^K] = 16 E[Z^4]. Half the gap is the four-shot total variation.
+// ry_parity_bound: classical interval [16 v^2, 4v]. ghz4_parity reads 1 with marginal 1/2.
+// ry_chsh_exit: a copied bit matches the Bell Z correlator and dies in X. CHSH is 2*sqrt(2) against +/- sqrt(2).

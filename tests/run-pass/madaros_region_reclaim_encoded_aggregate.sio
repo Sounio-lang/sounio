@@ -1,0 +1,56 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: REGION_RECLAIM_ENCODED_AGGREGATE_OK
+//@ description: floating struct and array result slots preserve encoded young handles
+
+struct P { a: i64, b: i64, c: i64 }
+struct W { encoded: f64 }
+struct A { xs: [f64; 2] }
+struct N { inner: W, tag: bool }
+
+fn make_w() -> W with Mut {
+    let p = P { a: 71, b: 72, c: 73 }
+    W { encoded: bits_to_f64(p as i64) }
+}
+
+fn make_a() -> A with Mut {
+    let p = P { a: 81, b: 82, c: 83 }
+    var xs: [f64; 2] = [0.0; 2]
+    xs[1] = bits_to_f64(p as i64)
+    A { xs: xs }
+}
+
+fn make_n() -> N with Mut {
+    N { inner: make_w(), tag: true }
+}
+
+fn churn() -> i64 with Mut {
+    var i: i64 = 0
+    var n: i64 = 0
+    while i < 10000 {
+        let p = P { a: 99, b: 99, c: 99 }
+        n = n + p.a
+        i = i + 1
+    }
+    n
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    var failed: i32 = 0
+    let w = make_w()
+    let churn1 = churn()
+    let recovered1 = f64_to_bits(w.encoded) as P
+    if recovered1.a != 71 || recovered1.b != 72 || recovered1.c != 73 { failed = 1 }
+    let a = make_a()
+    let churn2 = churn()
+    let recovered2 = f64_to_bits(a.xs[1]) as P
+    if recovered2.a != 81 || recovered2.b != 82 || recovered2.c != 83 { failed = 2 }
+    let nested = make_n()
+    let churn3 = churn()
+    let recovered3 = f64_to_bits(nested.inner.encoded) as P
+    if recovered3.a != 71 || recovered3.b != 72 || recovered3.c != 73 || !nested.tag { failed = 3 }
+    if churn1 != 990000 || churn2 != 990000 || churn3 != 990000 { return 4 }
+    if failed != 0 { return failed }
+    println("REGION_RECLAIM_ENCODED_AGGREGATE_OK")
+    0
+}

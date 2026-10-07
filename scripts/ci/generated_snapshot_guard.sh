@@ -15,6 +15,7 @@
 #   git checkout -b snapshot/refresh-$(date +%F) origin/main
 #   node scripts/docs/sync_governance_metadata.mjs --snapshot
 #   python3 scripts/dev/export_hf_dataset.py
+#   bash docs/training/finetune/prepare_corpus.sh
 #
 # A head branch named snapshot/refresh-* is the only one allowed through.
 #
@@ -26,7 +27,7 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR" || exit 9
 
-SNAPSHOT_PATTERN='^(docs/governance/topic-registry\.v1\.json|docs/governance/DOCS_AUTHORITY_MATRIX\.md|datasets/sounio-code-examples/(train|validation)\.jsonl|datasets/sounio-code-examples/manifest\.json|artifacts/gates/witness_declares_its_sabotage\.json|\.claude/llm_offload_log\.md)$'
+SNAPSHOT_PATTERN='^(docs/governance/topic-registry\.v1\.json|docs/governance/DOCS_AUTHORITY_MATRIX\.md|datasets/sounio-code-examples/(train|validation)\.jsonl|datasets/sounio-code-examples/manifest\.json|docs/training/finetune/sounio_corpus\.txt|artifacts/gates/witness_declares_its_sabotage\.json|\.claude/llm_offload_log\.md)$'
 
 base="${SOUNIO_GUARD_BASE:-}"
 head_ref="${SOUNIO_GUARD_HEAD_REF:-}"
