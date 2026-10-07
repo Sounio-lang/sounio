@@ -8522,7 +8522,14 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
             // one decrement and leave ns_branch_depth permanently elevated.
             let else_ty = checker_check_expr_inplace(c, *else_e)
             (*c).refine_cond_env = saved_cond_env
-            if !checker_types_compatible_inplace(c, then_ty, else_ty) {
+            // #830: an unsuffixed float literal arm adopts a narrower float type
+            // from the sibling arm (`if c { x_f32 } else { 0.0 }`), mirroring
+            // checker_narrow_float_literal_operand_ty on the binary-op path.
+            let then_lit_f = checker_block_tail_float_literal_expr(e.block)
+            let else_lit_f = checker_else_arm_float_literal_expr(e.else_expr)
+            let then_join_ty = checker_if_arm_float_literal_join_ty(then_ty, then_lit_f, else_ty)
+            let else_join_ty = checker_if_arm_float_literal_join_ty(else_ty, else_lit_f, then_ty)
+            if !checker_types_compatible_inplace(c, then_join_ty, else_join_ty) {
                 checker_report_mismatch_inplace(c, e.span, 7, then_ty, else_ty)
             }
             checker_merge_if_branches_inplace(c)
@@ -8534,7 +8541,7 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
             // the incoming known IDs; top if either incoming is top".
             // SOUNIO_NS_SABOTAGE_JOIN=1 skips the union, reproducing the
             // pre-fix "one branch" bug as the per-rule negative control.
-            var joined = then_ty
+            var joined = then_join_ty
             if then_ty.kind == TypeKind::TyKnowledge && else_ty.kind == TypeKind::TyKnowledge {
                 if !checker_ns_sabotage_join() {
                     joined.noise_set_id = ns_union(&!(*(*c).ns_table), then_ty.noise_set_id, else_ty.noise_set_id)
@@ -20805,6 +20812,84 @@ fn checker_expected_accepts_float_literal(e: Expr, actual_ty: TypeEntry, expecte
         return true
     }
     checker_float_literal_magnitude(e) <= 3.4028235e38
+}
+
+// #830 helpers: the float literal (if any) that is the value of an `if` arm.
+// Returns Some(literal expr) when the arm's tail is an unsuffixed float literal
+// (optionally negated); the literal itself is needed for the f32 range guard.
+fn checker_block_tail_float_literal_expr(opt: Option<Box<Block>>) -> Option<Expr> with Mut {
+    match opt {
+        Some(blk) => {
+            var sl = (*blk).stmts
+            var tail_stmt: Option<Box<Stmt>> = None
+            while true {
+                match sl {
+                    Some(list) => {
+                        match (*list).tail {
+                            Some(rest) => { sl = Some(rest) }
+                            _ => {
+                                tail_stmt = Some(Box::new((*list).head))
+                                break
+                            }
+                        }
+                    }
+                    _ => break
+                }
+            }
+            match tail_stmt {
+                Some(s) => {
+                    if (*s).kind == StmtKind::StmtExpr {
+                        match (*s).expr {
+                            Some(expr_box) => {
+                                let te = *expr_box
+                                if checker_expr_is_float_literal_like(te) {
+                                    return Some(te)
+                                }
+                                return None
+                            }
+                            None => return None
+                        }
+                    }
+                    None
+                }
+                None => None,
+            }
+        }
+        None => None,
+    }
+}
+
+fn checker_else_arm_float_literal_expr(opt: Option<Box<Expr>>) -> Option<Expr> with Mut {
+    match opt {
+        Some(ee) => {
+            let ex = *ee
+            if ex.kind == ExprKind::ExprBlock {
+                return checker_block_tail_float_literal_expr(ex.block)
+            }
+            if checker_expr_is_float_literal_like(ex) {
+                return Some(ex)
+            }
+            None
+        }
+        None => None,
+    }
+}
+
+// The arm type to use at the join: an f64-typed float-literal arm takes the
+// sibling's narrower float type when the literal fits it (f32 range guard from
+// checker_expected_accepts_float_literal). Everything else is unchanged.
+fn checker_if_arm_float_literal_join_ty(arm_ty: TypeEntry, arm_lit: Option<Expr>, peer_ty: TypeEntry) -> TypeEntry {
+    match arm_lit {
+        Some(lit) => {
+            if arm_ty.kind != TypeKind::TyF64 { return arm_ty }
+            if !is_float_type(peer_ty) || peer_ty.kind == TypeKind::TyF64 { return arm_ty }
+            if checker_expected_accepts_float_literal(lit, arm_ty, peer_ty) {
+                return peer_ty
+            }
+            arm_ty
+        }
+        None => arm_ty,
+    }
 }
 
 fn checker_array_sizes_compatible(actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool {
