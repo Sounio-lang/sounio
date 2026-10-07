@@ -7870,10 +7870,52 @@ fn apply_relocations_into(nc: &! NativeCompiler, rodata_file_offset: i64, data_f
                 let disp32_fn = fn_off - (patch_offset + 4)
                 nc_patch_u32_le(nc, patch_offset, disp32_fn)
             }
+        } else if !native_v2_reloc_kind_is_known(kind_code) {
+            // Unknown kind: the site cannot be patched, and an unpatched rel32
+            // is a jump to garbage at run time. Refuse to emit (rc=20). A KNOWN
+            // kind whose site shape check fails is left as before.
+            nc_reloc_note_unknown_kind(kind_code)
+            (*nc).reloc_overflow = true
         }
 
         i = i + 1
     }
+}
+
+// native_v2_reloc_kind_is_known / nc_reloc_note_unknown_kind live in
+// native/frame.sio beside the counters they maintain.
+
+fn nc_reloc_selftest_code(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // call rel32 placeholder (E8 00 00 00 00) followed by padding.
+    nc_emit_byte(nc, 0xe8)
+    nc_emit_byte(nc, 0); nc_emit_byte(nc, 0); nc_emit_byte(nc, 0); nc_emit_byte(nc, 0)
+    nc_emit_byte(nc, 0x90); nc_emit_byte(nc, 0x90); nc_emit_byte(nc, 0x90)
+}
+
+// Self-test for the unknown-kind refusal. No user program reaches it (every
+// emitter passes a kind in 1..4), so the relocation is constructed directly.
+// Fails if the refusal is removed: the unknown kind would leave both the flag
+// and the counter untouched.
+pub fn native_v2_reloc_unknown_kind_selftest() -> bool with Mut, Panic, Div {
+    var bad = compiler_new()
+    nc_reloc_selftest_code(&! bad)
+    nc_add_flat_reloc(&! bad, 1, 9, 0, 0)
+    apply_relocations_into(&! bad, 8192, 0)
+    if !bad.reloc_overflow { return false }
+    if NC_RELOC_UNKNOWN_KIND_COUNT != 1 { return false }
+    if NC_RELOC_UNKNOWN_KIND_FIRST != 9 { return false }
+    // The site stays at its placeholder: nothing was patched.
+    if NC_BIG_CODE[1 as usize] != (0 as i8) { return false }
+
+    // Control: a known kind on a site it does not match is unchanged
+    // behaviour (no refusal), and compiler_new clears the counter.
+    var ok = compiler_new()
+    if NC_RELOC_UNKNOWN_KIND_COUNT != 0 { return false }
+    nc_reloc_selftest_code(&! ok)
+    nc_add_flat_reloc(&! ok, 1, 2, 0, 0)
+    apply_relocations_into(&! ok, 8192, 0)
+    if ok.reloc_overflow { return false }
+    NC_RELOC_UNKNOWN_KIND_COUNT == 0
 }
 
 pub fn compile_module_streaming_finish_main_into(nc: &! NativeCompiler, main_fn_index: i64) with Mut, Panic, Div, Alloc {
@@ -13745,6 +13787,22 @@ fn native_v2_file_emit_phdr(pos: i64, p_type: i64, flags: i64, offset: i64, vadd
 }
 
 fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler, entry_offset: i64, base_addr: i64) -> i32 with IO, Mut, Panic, Div {
+    // Common writer: refuse unpatched relocation sites here too, so a caller
+    // that goes straight from apply_relocations_into to this writer (the sret
+    // witness route) cannot emit them. compile_native_v2_preview_to_file
+    // already refused with the same rc before reaching this point.
+    if NC_RELOC_UNKNOWN_KIND_COUNT > 0 {
+        print("Error: native relocation of unknown kind ")
+        print_int(NC_RELOC_UNKNOWN_KIND_FIRST)
+        print(" at ")
+        print_int(NC_RELOC_UNKNOWN_KIND_COUNT)
+        print(" site(s) -- refusing to emit an ELF with unpatched sites\n")
+        return 20
+    }
+    if (*nc).reloc_overflow {
+        print("Error: native relocation table overflow -- refusing to emit an ELF with unpatched sites\n")
+        return 20
+    }
     let text_offset: i64 = 4096
     let code_len = (*nc).code.len
     let rodata_len = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
@@ -14322,6 +14380,14 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     // unpatched call/rodata sites. Distinct rc from the code-buffer overflow
     // above so callers can tell the two tiers apart. reloc_overflow_count_attempted
     // is a true count (see frame.sio), not an estimate.
+    if NC_RELOC_UNKNOWN_KIND_COUNT > 0 {
+        print("Error: native relocation of unknown kind ")
+        print_int(NC_RELOC_UNKNOWN_KIND_FIRST)
+        print(" at ")
+        print_int(NC_RELOC_UNKNOWN_KIND_COUNT)
+        print(" site(s) -- refusing to emit an ELF with unpatched sites\n")
+        return 20
+    }
     if nc.reloc_overflow {
         print("Error: native relocation table overflow -- relocs_needed=")
         print_int(nc.reloc_overflow_count_attempted)
@@ -14553,6 +14619,14 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
     if (*nc).code_overflow {
         print("Error: native code buffer overflow (raise nc_code_capacity_bytes)\n")
         return 19
+    }
+    if NC_RELOC_UNKNOWN_KIND_COUNT > 0 {
+        print("Error: native relocation of unknown kind ")
+        print_int(NC_RELOC_UNKNOWN_KIND_FIRST)
+        print(" at ")
+        print_int(NC_RELOC_UNKNOWN_KIND_COUNT)
+        print(" site(s) -- refusing to emit an ELF with unpatched sites\n")
+        return 20
     }
     if (*nc).reloc_overflow {
         print("Error: native relocation table overflow (raise nc_flat_reloc_capacity)\n")

@@ -288,6 +288,34 @@ pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 2097152] = [0; 2097152]
 // scripts/ci/native_capacity_tiers_gate.sh.
 pub fn nc_flat_reloc_capacity() -> i64 { 2097152 }
 
+// A relocation whose kind_code apply_relocations_into does not know (anything
+// but 1 call, 2 rodata, 3 data, 4 fn-address) used to fall through the kind
+// chain and leave its rel32 site unpatched: the ELF wrote, and the program
+// jumped through the placeholder at run time. It now latches reloc_overflow
+// (so every writer that already refuses on rc=20 refuses here too) and counts
+// here so the refusal names the real cause instead of "raise capacity".
+// compiler_new resets both.
+pub var NC_RELOC_UNKNOWN_KIND_COUNT: i64 = 0
+pub var NC_RELOC_UNKNOWN_KIND_FIRST: i64 = 0
+
+// The kinds apply_relocations_into (codegen_x86_linux.sio) can patch: 1 call
+// rel32, 2 .rodata RIP-disp, 3 .data RIP-disp, 4 function-address RIP-disp.
+// Kept here, not in codegen_x86_linux.sio, so a test can pin the predicate and
+// the recorder by importing native::frame alone instead of the whole x86
+// backend (whose import closure takes longer to compile than a run-pass budget).
+pub fn native_v2_reloc_kind_is_known(kind_code: i64) -> bool {
+    kind_code >= 1 && kind_code <= 4
+}
+
+// Records an unknown-kind relocation. The writers refuse (rc=20) whenever
+// NC_RELOC_UNKNOWN_KIND_COUNT > 0, independently of reloc_overflow.
+pub fn nc_reloc_note_unknown_kind(kind_code: i64) with Mut {
+    if NC_RELOC_UNKNOWN_KIND_COUNT == 0 {
+        NC_RELOC_UNKNOWN_KIND_FIRST = kind_code
+    }
+    NC_RELOC_UNKNOWN_KIND_COUNT = NC_RELOC_UNKNOWN_KIND_COUNT + 1
+}
+
 // Flat .rodata payload storage (string literals et al). Moved off the
 // NativeCompiler struct for the same reason as NC_FLAT_RELOC_* above:
 // keeping it in the struct capped .rodata at 8192 bytes (struct-copy cost
@@ -598,6 +626,8 @@ pub fn compiler_new() -> NativeCompiler with Mut {
     out.rodata_overflow_bytes_attempted = 0
     out.reloc_overflow = false
     out.reloc_overflow_count_attempted = 0
+    NC_RELOC_UNKNOWN_KIND_COUNT = 0
+    NC_RELOC_UNKNOWN_KIND_FIRST = 0
     out.label_overflow = false
     NC_V2_LABEL_OVERFLOW_FN = -1
     out.relocs = reloc_table_new()
