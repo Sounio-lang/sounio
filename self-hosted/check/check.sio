@@ -9504,6 +9504,30 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             let ei = enum_table_get((*c).enums, enum_idx)
             if variant_info_list_has(ei.variants, variant_name) {
                 let vfields = variant_info_list_find_fields(ei.variants, variant_name)
+                // E264 (fail-closed): the lowerer represents every enum value as a bare
+                // discriminant (ir/lower.sio lower_match_arm_ref), so a struct-variant payload
+                // was silently dropped -- measured: `Shape::Rect { w: 3, h: 4 }` matched as
+                // tag 0 and every payload read as 0. Refuse the construction until a payload
+                // representation exists. Field inits are still checked for nested diagnostics.
+                if field_info_list_count(vfields) > 0 {
+                    checker_report_error_at_inplace(c, e.span, 264, 0, 0, 0)
+                    let call_start_borrows_ev = (*c).borrows
+                    var cur_ev264 = e.fields
+                    var done_ev264 = false
+                    while !done_ev264 {
+                        match cur_ev264 {
+                            Some(list) => {
+                                let _init_ty264 = checker_check_expr_inplace(c, (*list).head.value)
+                                cur_ev264 = (*list).tail
+                            }
+                            None => {
+                                done_ev264 = true
+                            }
+                        }
+                    }
+                    (*c).borrows = call_start_borrows_ev
+                    return ty_named(struct_name)
+                }
                 // Count check first (E046), mirroring the non-generic struct branch:
                 // report and still yield ty_named so the variant type is known downstream.
                 let ev_init_count = struct_field_list_count(e.fields)
@@ -11617,6 +11641,10 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
             checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            // E264 (fail-closed): a tuple-variant payload has no lowering -- the lowerer
+            // emits the bare discriminant and drops every argument. Refuse it rather than
+            // typing the call as the enum and miscompiling.
+            checker_report_error_at_inplace(c, e.span, 264, 0, 0, 0)
             return ty_named(ei.name)
         }
         checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
@@ -12470,6 +12498,22 @@ fn pattern_list_count(opt: Option<Box<PatternList> >) -> i64 with Mut, Panic, Di
     }
 }
 
+// A named, inner-less scrutinee type that is a user-declared enum (not a struct, not
+// Option/Box, which carry their payload type in .inner).
+fn checker_scrut_is_user_enum_inplace(c: *mut Checker, scrut_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    if scrut_ty.kind != TypeKind::TyNamed {
+        return false
+    }
+    match scrut_ty.inner {
+        Some(_) => { return false }
+        None => {}
+    }
+    if struct_table_find((*c).structs, scrut_ty.name) >= 0 {
+        return false
+    }
+    enum_table_find((*c).enums, scrut_ty.name) >= 0
+}
+
 fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
     if pat.kind == PatternKind::PatBinding {
         (*c).env = (*c).env.bind(pat.name, scrut_ty, pat.is_mut)
@@ -12477,6 +12521,12 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
         let lin = checker_is_linear_type_inplace(c, scrut_ty)
         (*c).borrows = (*c).borrows.track(pat.name, lin)
     } else if pat.kind == PatternKind::PatEnum {
+        // E264 (fail-closed): a payload sub-pattern on a USER enum (`Shape::Circle(r)`)
+        // has no lowering -- lower_match_arm_ref compares the bare discriminant and never
+        // binds the sub-patterns. Option/Box scrutinees carry .inner and are unaffected.
+        if checker_scrut_is_user_enum_inplace(c, scrut_ty) && pattern_list_count(pat.sub_patterns) > 0 {
+            checker_report_error_at_inplace(c, pat.span, 264, 0, 0, 0)
+        }
         // Single-payload variant (e.g. Some(x) on Option<T>/Box<T>): the scrutinee
         // carries the payload type in .inner (Box/Option lowering). Bind the payload
         // sub-pattern to that inner type so (*x) / (*x).field type correctly. Fall
@@ -12487,6 +12537,12 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
             None => checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
         }
     } else if pat.kind == PatternKind::PatStruct {
+        // E264 (fail-closed): `Shape::Rect { w, h }` on a user enum -- the lowerer skips
+        // struct patterns outright ("Unsupported pattern -- skip"), so the arm could never
+        // match and its bindings would never be set.
+        if checker_scrut_is_user_enum_inplace(c, scrut_ty) {
+            checker_report_error_at_inplace(c, pat.span, 264, 0, 0, 0)
+        }
         checker_bind_struct_pat_fields_inplace(c, pat.pat_fields, scrut_ty)
     } else if pat.kind == PatternKind::PatTuple {
         // E213: tuple-destructure arity must match the scrutinee tuple's element
@@ -17497,6 +17553,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 262 { print("ontology classes are unrelated: no subsumption between them, so the operator cannot say what the result is an amount of") }
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
+    else if code == 264 { print("enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
     else { print("unknown error") }
 }
@@ -17808,6 +17865,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 248 {
         print("   |\n   = help: wait for explicit from_bits/conversion operations; no f64 cast is a valid f128/f256 implementation\n")
+    }
+    else if code == 264 {
+        print("   |\n   = help: carry the payload in a struct next to a payload-free enum tag, e.g. `struct Shape { kind: ShapeKind, a: f64, b: f64 }`; or use Option<T> for a single optional value\n")
     }
     else if code == 249 {
         print("   |\n   = help: V0-A exposes binary128/binary256 descriptors internally but rejects every source-level use before IR\n")
@@ -18155,6 +18215,9 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 248 {
         print("   = note: V0-A defines format identity only and intentionally emits no wide value or lowering\n")
+    }
+    else if code == 264 {
+        print("   = note: payload-free enums (`enum Color { Red, Green }`) are supported; see docs/compiler/KNOWN_LIMITATIONS.md (KL-20)\n")
     }
     else if code == 249 {
         print("   = note: no literal, field, alias, binding, signature, conversion, ABI, or native carrier is implemented\n")
