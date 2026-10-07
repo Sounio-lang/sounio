@@ -112,6 +112,17 @@ if [[ -z "$MADAROS" ]]; then
   exit 0
 fi
 require_executable "$MADAROS"
+# The self-test overflows the default stack: at 8 MiB and at the 16 MiB GitHub
+# runners give, it dies around T60, before T70r; at 512 MiB it reaches T110.
+# Same soft limit scripts/ci/madaros_changed_tests_gate.sh sets for Madaros.
+stack_kb="${SOUNIO_NATIVE_RELOC_UNKNOWN_KIND_STACK_KB:-524288}"
+stack_soft="$(ulimit -S -s 2>/dev/null || true)"
+require_nonempty "$stack_soft" "could not read the soft stack limit"
+if [[ "$stack_soft" != "unlimited" ]] && (( stack_soft < stack_kb )); then
+  ulimit -S -s "$stack_kb" 2>/dev/null \
+    || gate_fail "could not raise the soft stack limit to ${stack_kb} KiB (hard=$(ulimit -H -s 2>/dev/null || echo unavailable)); T70r is not reachable below it"
+fi
+echo "stack soft_before_kb=$stack_soft soft_after_kb=$(ulimit -S -s)"
 madaros_rc=0
 timeout 120 "$MADAROS" --self-test >"$TMP/selftest.log" 2>&1 || madaros_rc=$?
 require_nonempty_file "$TMP/selftest.log" "self-test log is empty (rc=$madaros_rc): the instrument produced no evidence"
