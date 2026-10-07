@@ -396,7 +396,7 @@ files, 78.4% accepted by `souc check`
   `fn main() with IO` even when `main` only calls a `with IO` user function.
   (2) Madaros checks a closure body against an empty effect row: it neither
   inherits the enclosing function's effects nor honours `|x| -> T with IO`, so a
-  closure that prints, or calls a `with IO` function, is E035 even inside
+  closure that prints, or calls a `with IO` function, is rejected (E035, or E009 once the closure carries IO into a HOF parameter typed without effects) even inside
   `main with IO`. After #2760 this includes the builtins above;
   `tests/run-pass/closure_effect_transparent_hof.sio` carries `known-failure`
   for it.
