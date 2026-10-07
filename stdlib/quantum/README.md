@@ -59,6 +59,9 @@ tape_counts draws N shots from those replay probabilities.
 tape_judge accepts that record inside 4 standard deviations, and refuses it if a zero-probability outcome appears.
 tape_read fills the same record from a shot list, one line per shot.
 tape_write renders the record back to that list, and tape_check judges the list against the tape.
+tape_face reads each wire marginal and the Z correlator from the shot list alone.
+tape_bell_x is the same list after Ry(pi/2) on both wires. The pair keeps correlator 1. The copied bit, half |00> and half |11>, reads 0.
+tape_pair reads both lists and keeps the source only when both correlators clear 1/2.
 
 Demo, independent C++ cross-check and the full list of limits:
 [`demos/quantum/`](../../demos/quantum/README.md).
