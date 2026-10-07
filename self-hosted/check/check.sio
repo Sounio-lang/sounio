@@ -8751,6 +8751,67 @@ fn checker_check_array_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 // through a reference root (`r.y` with `r: &S` / `&!S`) keeps the old
 // reborrow behaviour (empty name = untracked). Other places fall back to
 // unary_operand_name (ident, index -> root).
+// #1581: field-path borrows, done in place on (*c).borrows (by-value BorrowEnv
+// method round-trips of a 4096-slot struct are a known crash shape here; see
+// the comment above checker_branch_enter_inplace). A borrow of `s.y` is
+// tracked under the path name "s.y". Two names overlap when one is a prefix
+// of the other at a `.` boundary (`s`/`s.y`, `s.y`/`s.y.z`) or they are equal;
+// disjoint fields (`s.x`/`s.y`) do not. Returns 0, 37 (shared vs exclusive)
+// or 38 (exclusive vs any).
+fn checker_place_borrow_conflict_inplace(c: *mut Checker, name: Name, want_excl: bool, self_idx: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+    var i: i64 = 0
+    while i < (*c).borrows.count {
+        if i != self_idx && (*c).borrows.entries[i].state != 0 {
+            if borrow_paths_overlap((*c).borrows.entries[i].name, name) {
+                if want_excl || (*c).borrows.entries[i].state == 2 { return true }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn checker_take_borrow_inplace(c: *mut Checker, name: Name, want_excl: bool) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let is_path = borrow_name_is_path(name)
+    if !is_path {
+        // Whole variable: the existing rules, plus "no field of it is borrowed
+        // incompatibly".
+        let idx = (*c).borrows.find(name)
+        if idx >= 0 && checker_place_borrow_conflict_inplace(c, name, want_excl, idx) {
+            if want_excl { return 38 }
+            return 37
+        }
+        if want_excl {
+            let r = (*c).borrows.try_exclusive_borrow(name)
+            (*c).borrows = r.0
+            return r.1
+        }
+        let r2 = (*c).borrows.try_shared_borrow(name)
+        (*c).borrows = r2.0
+        return r2.1
+    }
+    if (*c).borrows.find(borrow_path_root(name)) < 0 { return 0 }
+    var idx = (*c).borrows.find(name)
+    if checker_place_borrow_conflict_inplace(c, name, want_excl, idx) {
+        if want_excl { return 38 }
+        return 37
+    }
+    if idx < 0 {
+        if (*c).borrows.count >= 128 { return 0 }
+        (*c).borrows = (*c).borrows.track(name, false)
+        idx = (*c).borrows.count - 1
+    }
+    var e = (*c).borrows.entries[idx as usize]
+    if want_excl {
+        e.state = 2
+    } else {
+        e.state = 1
+        e.shared_count = e.shared_count + 1
+    }
+    (*c).borrows.entries[idx as usize] = e
+    0
+}
+
 fn checker_borrow_place_name(c: *mut Checker, opt: Option<Box<Expr> >) -> Name with Mut, Panic, Div, Alloc, IO {
     let ptr = expr_opt_get(opt)
     if ptr == 0 as *mut Expr { return empty_type_name() }
@@ -8766,13 +8827,12 @@ fn checker_borrow_place_name(c: *mut Checker, opt: Option<Box<Expr> >) -> Name w
     if place.kind != ExprKind::ExprFieldAccess {
         return unary_operand_name(opt)
     }
-    // Collect the field chain down to an ident root.
-    var fields: [Name; 8] = [Name { buf: [0; 384], len: 0 }; 8]
-    var nf: i64 = 0
+    // Find the ident root and the chain depth (no local array of Names: a
+    // 3 KB [Name; 8] local is a known stack hazard on this spine).
+    var depth: i64 = 0
     var cur = place
-    while cur.kind == ExprKind::ExprFieldAccess && nf < 8 {
-        fields[nf as usize] = cur.name
-        nf = nf + 1
+    while cur.kind == ExprKind::ExprFieldAccess && depth < 8 {
+        depth = depth + 1
         let b = expr_opt_get(cur.left)
         if b == 0 as *mut Expr { return empty_type_name() }
         cur = *b
@@ -8784,20 +8844,34 @@ fn checker_borrow_place_name(c: *mut Checker, opt: Option<Box<Expr> >) -> Name w
         || root_ty.kind == TypeKind::TyRawPtr {
         return empty_type_name()
     }
+    // Emit "root.f1.f2": for hop k (outermost = depth-1) descend k levels.
     var out = cur.name
-    var k = nf - 1
+    var k = depth - 1
     while k >= 0 {
-        let f = fields[k as usize]
-        if out.len + 1 + f.len > 384 { return cur.name }
-        out.buf[out.len as usize] = 46 as i8
+        var node = place
         var j: i64 = 0
-        while j < f.len {
-            out.buf[(out.len + 1 + j) as usize] = f.buf[j as usize]
+        while j < k {
+            let nb = expr_opt_get(node.left)
+            if nb == 0 as *mut Expr { return empty_type_name() }
+            node = *nb
             j = j + 1
         }
-        out.len = out.len + 1 + f.len
+        out = borrow_name_append_field(out, node.name)
         k = k - 1
     }
+    out
+}
+
+fn borrow_name_append_field(base: Name, field: Name) -> Name with Mut, Panic, Div {
+    if base.len + 1 + field.len > 384 { return base }
+    var out = base
+    out.buf[out.len as usize] = 46 as i8
+    var i: i64 = 0
+    while i < field.len {
+        out.buf[(out.len + 1 + i) as usize] = field.buf[i as usize]
+        i = i + 1
+    }
+    out.len = out.len + 1 + field.len
     out
 }
 
@@ -8817,18 +8891,9 @@ fn checker_check_unary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
         let borrow_name = checker_borrow_place_name(c, e.left)
         if borrow_name.len > 0 {
-            if e.un_op == UnaryOp::OpRef {
-                let borrow_result = (*c).borrows.try_shared_borrow(borrow_name)
-                (*c).borrows = borrow_result.0
-                if borrow_result.1 != 0 {
-                    checker_report_error_at_inplace(c, e.span, borrow_result.1, 0, 0, 0)
-                }
-            } else {
-                let borrow_result = (*c).borrows.try_exclusive_borrow(borrow_name)
-                (*c).borrows = borrow_result.0
-                if borrow_result.1 != 0 {
-                    checker_report_error_at_inplace(c, e.span, borrow_result.1, 0, 0, 0)
-                }
+            let code = checker_take_borrow_inplace(c, borrow_name, e.un_op == UnaryOp::OpRefMut)
+            if code != 0 {
+                checker_report_error_at_inplace(c, e.span, code, 0, 0, 0)
             }
         }
     }

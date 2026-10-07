@@ -68,7 +68,7 @@ pub struct BorrowEnv {
 }
 
 // #1581 field-path helpers (path names are "root.f1.f2").
-fn borrow_name_is_path(n: Name) -> bool with Mut, Panic, Div {
+pub fn borrow_name_is_path(n: Name) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < n.len {
         if n.buf[i as usize] == 46 as i8 { return true }
@@ -77,7 +77,7 @@ fn borrow_name_is_path(n: Name) -> bool with Mut, Panic, Div {
     false
 }
 
-fn borrow_path_root(n: Name) -> Name with Mut, Panic, Div {
+pub fn borrow_path_root(n: Name) -> Name with Mut, Panic, Div {
     var r = Name { buf: [0; 384], len: 0 }
     var i: i64 = 0
     while i < n.len && n.buf[i as usize] != 46 as i8 {
@@ -90,7 +90,7 @@ fn borrow_path_root(n: Name) -> Name with Mut, Panic, Div {
 
 // `a` and `b` name the same storage or one contains the other: equal, or one
 // is a prefix of the other ending exactly at a `.`.
-fn borrow_paths_overlap(a: Name, b: Name) -> bool with Mut, Panic, Div {
+pub fn borrow_paths_overlap(a: Name, b: Name) -> bool with Mut, Panic, Div {
     var short = a
     var long = b
     if a.len > b.len {
@@ -206,64 +206,9 @@ impl BorrowEnv {
         env
     }
 
-    // #1581: field-path borrows. A borrow of `s.y` (or `s.y.z`, `s.arr[i]` ->
-    // `s.arr`) is tracked under the PATH name "s.y". Two paths conflict when
-    // they share the root and one is a prefix of the other at a `.` boundary
-    // (`s.y` vs `s.y`, `s.y` vs `s.y.z`, `s` vs `s.y`); disjoint fields
-    // (`s.x` vs `s.y`) do not. Returns true when any tracked entry other than
-    // `self_idx` overlaps `name` with a state that `want_excl` cannot coexist
-    // with (exclusive: any active borrow; shared: an exclusive one).
-    fn path_conflict(self, name: Name, want_excl: bool, self_idx: i64) -> bool with Mut, Panic, Div {
-        var i: i64 = 0
-        while i < self.count {
-            if i != self_idx && self.entries[i].state != 0 {
-                if borrow_paths_overlap(self.entries[i].name, name) {
-                    if want_excl || self.entries[i].state == 2 { return true }
-                }
-            }
-            i = i + 1
-        }
-        false
-    }
-
-    // Record a borrow of a field path; the root must be a tracked binding
-    // (an untracked root -- a global, an import -- stays untracked, as before).
-    fn try_path_borrow(self, name: Name, want_excl: bool) -> (BorrowEnv, i64) with Mut, Panic, Div {
-        var env = self
-        let root = borrow_path_root(name)
-        if env.find(root) < 0 { return (env, 0) }
-        var idx = env.find(name)
-        if env.path_conflict(name, want_excl, idx) {
-            if want_excl { return (env, 38) }
-            return (env, 37)
-        }
-        if idx < 0 {
-            if env.count >= 128 { return (env, 0) }
-            env.entries[env.count] = BorrowEntry {
-                name: name,
-                state: 0,
-                shared_count: 0,
-                is_linear: false,
-                consumed: false,
-                scope_depth: env.scope_depth,
-                provenance: 0,
-            }
-            idx = env.count
-            env.count = env.count + 1
-        }
-        if want_excl {
-            env.entries[idx].state = 2
-        } else {
-            env.entries[idx].state = 1
-            env.entries[idx].shared_count = env.entries[idx].shared_count + 1
-        }
-        (env, 0)
-    }
-
     // Try to take a shared borrow (&x)
     // Returns (updated env, error_code) where error_code 0 = ok, 37 = conflict
     fn try_shared_borrow(self, name: Name) -> (BorrowEnv, i64) with Mut, Panic, Div {
-        if borrow_name_is_path(name) { return self.try_path_borrow(name, false) }
         var env = self
         let idx = env.find(name)
         if idx < 0 {
@@ -275,8 +220,6 @@ impl BorrowEnv {
             // Cannot take shared borrow while exclusive borrow is active
             return (env, 37)
         }
-        // #1581: nor while a field of it is exclusively borrowed.
-        if env.path_conflict(name, false, idx) { return (env, 37) }
         // Increment shared borrow count
         env.entries[idx].state = 1
         env.entries[idx].shared_count = entry.shared_count + 1
@@ -286,7 +229,6 @@ impl BorrowEnv {
     // Try to take an exclusive borrow (&!x)
     // Returns (updated env, error_code) where error_code 0 = ok, 38 = conflict
     fn try_exclusive_borrow(self, name: Name) -> (BorrowEnv, i64) with Mut, Panic, Div {
-        if borrow_name_is_path(name) { return self.try_path_borrow(name, true) }
         var env = self
         let idx = env.find(name)
         if idx < 0 {
@@ -297,8 +239,6 @@ impl BorrowEnv {
             // Cannot take exclusive borrow while any borrow is active
             return (env, 38)
         }
-        // #1581: nor while any field of it is borrowed.
-        if env.path_conflict(name, true, idx) { return (env, 38) }
         env.entries[idx].state = 2
         (env, 0)
     }
