@@ -15,7 +15,7 @@ Production: **https://www.souniolang.org**
 
 ## Deploy paths
 
-Git-triggered deployments are **off**: the repository-root `vercel.json` and `website/vercel.json` set `git.deploymentEnabled: false` and `github.silent: true`, and both Vercel projects (`sounio`, `sounio-next`) have preview deployments disabled and an ignored build step of `exit 0`. Pushing to `main`, merging a PR or pushing a branch deploys nothing and posts nothing. This keeps Vercel builds out of the PR loop, where every push used to build the whole repository.
+Git-triggered deployments are **off**: the repository-root `vercel.json` and `website/vercel.json` set `git.deploymentEnabled: false`, and both Vercel projects (`sounio`, `sounio-next`) have preview deployments disabled and an ignored build step of `exit 0`. Pushing to `main`, merging a PR or pushing a branch deploys nothing, so Vercel has no deployment to comment on. Pull-request comments themselves are a dashboard setting (Project Settings → Git → Pull Request Comments; `github.silent` in `vercel.json` is deprecated and not used here). This keeps Vercel builds out of the PR loop, where every push used to build the whole repository.
 
 Verify locally before any deploy:
 
