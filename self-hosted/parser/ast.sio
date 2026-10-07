@@ -1838,7 +1838,134 @@ pub fn lower_named_item_terminal_note(n: Name) with Mut, Panic, Div {
     AST_NAMED_ITEM_TERMINAL_COUNT = idx + 1
 }
 
+// #2355: module-level initializers that cannot be folded into BSS fill words
+// (a struct literal, a call, any expression the parse-time folder refuses) are
+// evaluated at run time, once, at `main`'s entry -- what lean_single has always
+// done (emit_global_inits_x86). Before this table the expression was discarded
+// and the global stayed BSS zero: a struct-typed global is a HANDLE slot, so
+// every field read or write then dereferenced handle 0 (SIGSEGV), and a scalar
+// such as `let D: f64 = sqrt(4.0)` silently read 0.0.
+//
+// Entries hold the parser's own Box<Expr> as a raw address (the AST arena is
+// never reclaimed before lowering; module_frontend's __arena_reset window opens
+// after parsing). Keyed like GLOBAL_VAR_INIT_* by name hash, tagged with the
+// recording module's serial. Overflow is recorded, never silent: lowering
+// refuses the compile (ir/lower.sio lowerer_emit_deferred_global_inits_mut).
+pub var GLOBAL_DEFERRED_INIT_HASHES: [i64; 16384] = [0; 16384]
+pub var GLOBAL_DEFERRED_INIT_PTRS: [i64; 16384] = [0; 16384]
+pub var GLOBAL_DEFERRED_INIT_MODS: [i64; 16384] = [0; 16384]
+pub var GLOBAL_DEFERRED_INIT_COUNT: i64 = 0
+pub var GLOBAL_DEFERRED_INIT_OVERFLOW: i64 = 0
+
+pub fn ast_record_global_deferred_init(name: Name, init: Box<Expr>) with Mut, Div {
+    let p = init as *mut Expr
+    let h = ast_name_hash(name)
+    // A module parsed twice in one compile (preflight, then the lowering load)
+    // replaces its own entry instead of queueing the initializer a second time.
+    var k: i64 = 0
+    while k < GLOBAL_DEFERRED_INIT_COUNT {
+        if GLOBAL_DEFERRED_INIT_HASHES[k as usize] == h && GLOBAL_DEFERRED_INIT_MODS[k as usize] == GLOBAL_VAR_INIT_CUR_MOD {
+            GLOBAL_DEFERRED_INIT_PTRS[k as usize] = p as i64
+            return
+        }
+        k = k + 1
+    }
+    if GLOBAL_DEFERRED_INIT_COUNT >= 16384 {
+        GLOBAL_DEFERRED_INIT_OVERFLOW = 1
+        return
+    }
+    GLOBAL_DEFERRED_INIT_HASHES[GLOBAL_DEFERRED_INIT_COUNT as usize] = h
+    GLOBAL_DEFERRED_INIT_PTRS[GLOBAL_DEFERRED_INIT_COUNT as usize] = p as i64
+    GLOBAL_DEFERRED_INIT_MODS[GLOBAL_DEFERRED_INIT_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
+    GLOBAL_DEFERRED_INIT_COUNT = GLOBAL_DEFERRED_INIT_COUNT + 1
+}
+
+pub fn ast_global_deferred_init_count() -> i64 { GLOBAL_DEFERRED_INIT_COUNT }
+pub fn ast_global_deferred_init_overflowed() -> bool { GLOBAL_DEFERRED_INIT_OVERFLOW != 0 }
+pub fn ast_global_deferred_init_hash(i: i64) -> i64 with Panic {
+    if i < 0 || i >= GLOBAL_DEFERRED_INIT_COUNT { return 0 }
+    GLOBAL_DEFERRED_INIT_HASHES[i as usize]
+}
+pub fn ast_global_deferred_init_ptr(i: i64) -> i64 with Panic {
+    if i < 0 || i >= GLOBAL_DEFERRED_INIT_COUNT { return 0 }
+    GLOBAL_DEFERRED_INIT_PTRS[i as usize]
+}
+pub fn ast_global_deferred_init_mod(i: i64) -> i64 with Panic {
+    if i < 0 || i >= GLOBAL_DEFERRED_INIT_COUNT { return 0 - 1 }
+    GLOBAL_DEFERRED_INIT_MODS[i as usize]
+}
+
+// #2355: the declared struct type of each module-level `let`/`var`/`const`
+// whose annotation names a type (`var G: S`), as (global-name hash, type-name
+// hash). Lowering kept no per-global struct type, so `G.values[i]` on
+// `var G: S` could not tell which layout `values` belongs to: an f64-array
+// element came back as raw integer bits, and with two structs sharing a field
+// name the slot index was guessed. Only capitalised TypeNamed annotations are
+// recorded -- scalars and arrays never need it and would only lengthen the
+// lowering-time scan. A global name recorded with two different type names
+// (two modules) is marked ambiguous (type hash -1) and resolves to nothing,
+// i.e. the old behaviour, rather than to a guess.
+pub var GLOBAL_DECL_TYPE_HASHES: [i64; 4096] = [0; 4096]
+pub var GLOBAL_DECL_TYPE_TYPES: [i64; 4096] = [0; 4096]
+pub var GLOBAL_DECL_TYPE_COUNT: i64 = 0
+pub var GLOBAL_DECL_TYPE_OVERFLOW: i64 = 0
+
+pub fn ast_record_global_decl_type(name: Name, ty: &Option<Box<TypeExpr>>) with Mut, Panic, Div {
+    match *ty {
+        Some(t) => {
+            if (*t).kind != TypeExprKind::TypeNamed { return }
+            if (*t).path.seg_count <= 0 { return }
+            let tn = ast_path_prefix_name((*t).path, 0)
+            if tn.len <= 0 { return }
+            let c0 = tn.buf[0] as i64
+            if c0 < 65 || c0 > 90 { return }
+            let h = ast_name_hash(name)
+            let th = ast_name_hash(tn)
+            var k: i64 = 0
+            while k < GLOBAL_DECL_TYPE_COUNT {
+                if GLOBAL_DECL_TYPE_HASHES[k as usize] == h {
+                    if GLOBAL_DECL_TYPE_TYPES[k as usize] != th {
+                        GLOBAL_DECL_TYPE_TYPES[k as usize] = 0 - 1
+                    }
+                    return
+                }
+                k = k + 1
+            }
+            if GLOBAL_DECL_TYPE_COUNT >= 4096 {
+                GLOBAL_DECL_TYPE_OVERFLOW = 1
+                return
+            }
+            GLOBAL_DECL_TYPE_HASHES[GLOBAL_DECL_TYPE_COUNT as usize] = h
+            GLOBAL_DECL_TYPE_TYPES[GLOBAL_DECL_TYPE_COUNT as usize] = th
+            GLOBAL_DECL_TYPE_COUNT = GLOBAL_DECL_TYPE_COUNT + 1
+        }
+        None => {}
+    }
+}
+
+pub fn ast_global_decl_type_count() -> i64 { GLOBAL_DECL_TYPE_COUNT }
+
+// Type-name hash recorded for global `name`, or 0 (none / ambiguous).
+pub fn ast_global_decl_type_hash_of(name: Name) -> i64 with Div {
+    if GLOBAL_DECL_TYPE_COUNT <= 0 { return 0 }
+    let h = ast_name_hash(name)
+    var k: i64 = 0
+    while k < GLOBAL_DECL_TYPE_COUNT {
+        if GLOBAL_DECL_TYPE_HASHES[k as usize] == h {
+            let th = GLOBAL_DECL_TYPE_TYPES[k as usize]
+            if th < 0 { return 0 }
+            return th
+        }
+        k = k + 1
+    }
+    0
+}
+
 pub fn ast_reset_global_var_inits() with Mut {
+    GLOBAL_DECL_TYPE_COUNT = 0
+    GLOBAL_DECL_TYPE_OVERFLOW = 0
+    GLOBAL_DEFERRED_INIT_COUNT = 0
+    GLOBAL_DEFERRED_INIT_OVERFLOW = 0
     GLOBAL_VAR_INIT_COUNT = 0
     GLOBAL_VAR_INIT_CUR_MOD = 0
     GLOBAL_VAR_INIT_EVAL_MOD = 0
