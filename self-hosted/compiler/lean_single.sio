@@ -26262,7 +26262,7 @@ fn lean_uninit_set_zero_expr(decl_ty: i64, decl_ty_hash: i64) with Mut {
 // locals and globals are not affected. Any shape this scan does not model
 // returns false (fail open: the dedicated store handlers keep their own checks).
 // Returns the token to report at, or -1.
-fn lhs_shared_ref_store_tok(p0: i64) -> i64 with Panic, Mut, Div {
+fn lhs_shared_ref_store_tok_inner(p0: i64) -> i64 with Panic, Mut, Div {
     var p = p0
     var name_tok: i64 = 0 - 1
     var explicit_deref: i64 = 0
@@ -26353,6 +26353,39 @@ fn lhs_shared_ref_store_tok(p0: i64) -> i64 with Panic, Mut, Div {
         }
     }
     return 0 - 1
+}
+
+// The place scan above reports the first shared-ref hop it meets; only trust
+// it when the statement really is `place = expr`, i.e. the hops starting at p0
+// run up to a top-level `=` (TK 16). An expression statement such as the tail
+// `a.id == b.id` reaches `==` (a different token) and is not a store.
+fn lhs_is_assignment_place(p0: i64) -> bool with Panic, Mut {
+    var p = p0
+    if TK[p as usize] == 6 && TK[(p + 1) as usize] == 19 && TK[(p + 3) as usize] == 7 { p = p + 4 }
+    else if TK[p as usize] == 19 { p = p + 2; return TK[p as usize] == 16 }
+    else { p = p + 1 }
+    var guard: i64 = 0
+    while p < TC && guard < 64 {
+        guard = guard + 1
+        let k = TK[p as usize]
+        if k == 16 { return true }
+        if k == 50 && (TK[(p + 1) as usize] == 3 || TK[(p + 1) as usize] == 79) { p = p + 2 }
+        else if k == 41 {
+            var depth: i64 = 1
+            p = p + 1
+            while p < TC && depth > 0 {
+                if TK[p as usize] == 41 { depth = depth + 1 }
+                if TK[p as usize] == 42 { depth = depth - 1 }
+                p = p + 1
+            }
+        } else { return false }
+    }
+    return false
+}
+
+fn lhs_shared_ref_store_tok(p0: i64) -> i64 with Panic, Mut, Div {
+    if lhs_is_assignment_place(p0) == false { return 0 - 1 }
+    return lhs_shared_ref_store_tok_inner(p0)
 }
 
 fn tc_shared_ref_store(tok: i64) -> i64 with IO, Mut, Panic {
