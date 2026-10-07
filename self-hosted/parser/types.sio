@@ -345,10 +345,16 @@ impl Parser {
             // from casts like `x as f64 / 100.0` (self-parse of pkg/lock.sio).
             var p_unit = p2
             if type_path_allows_unit_chain(path) {
+                // #2388: `m^2` -- a power on the head factor.
+                if parser_peek(p_unit) == TokenKind::Caret {
+                    let pow_pair = p_unit.parse_unit_pow_suffix(unit_ty, start)
+                    p_unit = pow_pair.0
+                    unit_ty = pow_pair.1
+                }
                 while parser_peek(p_unit) == TokenKind::Slash || parser_peek(p_unit) == TokenKind::Star {
                     let op = parser_peek(p_unit)
                     p_unit = p_unit.advance()
-                    let rhs_pair = p_unit.parse_named_type_atom()
+                    let rhs_pair = p_unit.parse_unit_factor()
                     p_unit = rhs_pair.0
                     let rhs_ty = rhs_pair.1
                     let unit_kind = if op == TokenKind::Slash {
@@ -375,6 +381,65 @@ impl Parser {
             }
             (p_unit, unit_ty)
         }
+    }
+
+    // #2388: one factor of a derived unit annotation: a unit name, or a
+    // parenthesised unit expression `(mol*K)`, either one optionally raised to a
+    // positive integer power `^n`. Encoded like the rest of the chain
+    // (TypeReference = divide, TypeRefMut = multiply), so the dimension lowering
+    // in check.sio needs no change: `A^3` is `A*A*A`.
+    fn parse_unit_factor(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self
+        var factor = dummy_type_expr()
+        if parser_peek(p) == TokenKind::LParen {
+            p = p.advance()
+            let first_pair = p.parse_unit_factor()
+            p = first_pair.0
+            factor = first_pair.1
+            while parser_peek(p) == TokenKind::Slash || parser_peek(p) == TokenKind::Star {
+                let op = parser_peek(p)
+                p = p.advance()
+                let rhs_pair = p.parse_unit_factor()
+                p = rhs_pair.0
+                factor = unit_chain_node(op == TokenKind::Slash, factor, rhs_pair.1, p.span_from(start))
+            }
+            p = p.expect(TokenKind::RParen)
+        } else {
+            let atom_pair = p.parse_named_type_atom()
+            p = atom_pair.0
+            factor = atom_pair.1
+        }
+        if parser_peek(p) == TokenKind::Caret {
+            let pow_pair = p.parse_unit_pow_suffix(factor, start)
+            p = pow_pair.0
+            factor = pow_pair.1
+        }
+        (p, factor)
+    }
+
+    // `^n` after a unit factor, n a positive integer literal (1..8). Anything else
+    // is a parse error rather than a silently dimensionless unit.
+    fn parse_unit_pow_suffix(self, base: TypeExpr, start: Span) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        var p = self.advance()  // skip ^
+        if parser_peek(p) != TokenKind::IntLit {
+            p = p.expect(TokenKind::IntLit)
+            return (p, base)
+        }
+        let n = p.current_int_value()
+        p = p.advance()
+        if n < 1 || n > 8 {
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            return (p, base)
+        }
+        var acc = base
+        var k: i64 = 1
+        while k < n {
+            acc = unit_chain_node(false, acc, base, p.span_from(start))
+            k = k + 1
+        }
+        (p, acc)
     }
 
     // Named type without trailing `/` `*` unit-expr chains (used as RHS of those chains).
@@ -1739,6 +1804,22 @@ impl Parser {
 
 // Primitive type names must not absorb a following `/` or `*` as a unit chain:
 // expression casts write `x as f64 / 100.0`, and the `/` belongs to the expr.
+// #2388: a binary node of a derived-unit chain (`/` -> TypeReference,
+// `*` -> TypeRefMut, left operand in type_args.head, right in inner).
+fn unit_chain_node(is_div: bool, lhs: TypeExpr, rhs: TypeExpr, span: Span) -> TypeExpr {
+    TypeExpr {
+        kind: if is_div { TypeExprKind::TypeReference } else { TypeExprKind::TypeRefMut },
+        span: span,
+        path: empty_path(),
+        type_args: Some(Box::new(TypeExprList { head: lhs, tail: None })),
+        inner: Some(Box::new(rhs)),
+        array_size: None,
+        effects: None,
+        knowledge_info: None,
+        refinement_info: None,
+    }
+}
+
 fn type_path_allows_unit_chain(path: AstPath) -> bool {
     if path.seg_count != 1 {
         return false
