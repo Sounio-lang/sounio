@@ -1,0 +1,247 @@
+//@ run-pass
+// One shot depends only on μ. The width Var(P) is the covariance of two shots
+// that shared the angle. An independent pair carries the computed zero.
+// A joint that was not formed stays empty.
+
+use quantum::born_channel::{band_filled, band_variance}
+
+use quantum::born_shot_law::{
+    mixture_of_three,
+    ry_shot_law,
+    ry_product_cov,
+    ry_cnot_cov,
+    ry_cz_cov,
+    target_read,
+    ry_gaussian_shape,
+    ry_two_point_matched,
+    ry_record_split,
+    ry_parity_bound,
+    ry4_product_parity,
+    ghz4_parity,
+    ry_chsh_exit,
+    MixtureLaw,
+    ShotLaw,
+    WireCov,
+    TargetRead,
+    AngleShape,
+    RecordSplit,
+    ParityBound,
+    StateParity,
+    ChshExit,
+}
+
+fn near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
+}
+
+fn check(name: string, ok: bool) -> i32 with IO {
+    if ok {
+        print(name)
+        print(": PASS\n")
+        return 0
+    }
+    print(name)
+    print(": FAIL\n")
+    return 1
+}
+
+fn exp_neg(x: f64) -> f64 with Mut, Div {
+    var term = 1.0
+    var sum = 1.0
+    var k = 1.0
+    while k < 24.0 {
+        term = term * (0.0 - x) / k
+        sum = sum + term
+        k = k + 1.0
+    }
+    sum
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    var fail = 0
+    let pi = 3.141592653589793
+
+    let mix: MixtureLaw = mixture_of_three(0.2, 0.5, 0.8)
+    fail = fail + check("T1_mu", near(mix.mu, 0.5, 0.000000000001))
+    fail = fail + check("T1_cancel", near(mix.rebuilt, mix.var_shot, 0.000000000001))
+    fail = fail + check("T1_shot", near(mix.var_shot, 0.25, 0.000000000001))
+    fail = fail + check("T1_width_separate", mix.var_p > 0.0)
+
+    let mid: ShotLaw = ry_shot_law(pi / 2.0, 0.01)
+    let s2 = 0.0001
+    let width_exact = (1.0 - exp_neg(2.0 * s2)) / 8.0
+    fail = fail + check("T2_mu", near(mid.mu, 0.5, 0.00000001))
+    fail = fail + check("T2_one_shot", near(band_variance(mid.one_shot), 0.25, 0.00000001))
+    fail = fail + check("T2_width", near(band_variance(mid.width), width_exact, 0.0000000001))
+    fail = fail + check("T2_rebuilt", near(mid.rebuilt, band_variance(mid.one_shot), 0.000000000001))
+    fail = fail + check("T2_cov_shared", near(band_variance(mid.cov_shared), band_variance(mid.width), 0.000000000001))
+    fail = fail + check("T2_cov_apart_filled", band_filled(mid.cov_apart) == 1)
+    fail = fail + check("T2_cov_apart_zero", near(band_variance(mid.cov_apart), 0.0, 0.000000000001))
+    fail = fail + check("T2_cov_unformed", band_filled(mid.cov_unformed) == 0)
+    fail = fail + check("T2_width_not_shot", band_variance(mid.width) < 0.001)
+
+    let pole: ShotLaw = ry_shot_law(pi, 0.1)
+    let sig2 = 0.01
+    let mu_exact = (1.0 + exp_neg(sig2 / 2.0)) / 2.0
+    let shot_exact = mu_exact * (1.0 - mu_exact)
+    let vp_exact = (1.0 + exp_neg(2.0 * sig2)) / 8.0 - exp_neg(sig2) / 4.0
+    fail = fail + check("T3_mu", near(pole.mu, mu_exact, 0.0000001))
+    fail = fail + check("T3_one_shot", near(band_variance(pole.one_shot), shot_exact, 0.0000001))
+    fail = fail + check("T3_width", near(band_variance(pole.width), vp_exact, 0.0000001))
+    fail = fail + check("T3_shot_sees_bias", band_variance(pole.one_shot) > 0.002)
+    fail = fail + check("T3_width_smaller", band_variance(pole.width) < 0.0001)
+    fail = fail + check("T3_cov_shared", near(band_variance(pole.cov_shared), band_variance(pole.width), 0.000000000001))
+    fail = fail + check("T3_cov_apart_zero", near(band_variance(pole.cov_apart), 0.0, 0.000000000001))
+    fail = fail + check("T3_unformed", band_filled(pole.cov_unformed) == 0)
+
+    let prod: WireCov = ry_product_cov(pi / 2.0, 0.01)
+    let ent: WireCov = ry_cnot_cov(pi / 2.0, 0.01)
+    fail = fail + check("T4_product_mu", near(prod.mu0, 0.5, 0.00000001))
+    fail = fail + check("T4_product_cov", near(prod.cov, width_exact, 0.0000000001))
+    fail = fail + check("T4_cnot_mu0", near(ent.mu0, 0.5, 0.00000001))
+    fail = fail + check("T4_cnot_cov", near(ent.cov, 0.0, 0.0000000001))
+    fail = fail + check("T4_cnot_mu1", near(ent.mu1, 0.5 - 2.0 * width_exact, 0.0000000001))
+    fail = fail + check("T4_product_given", near(prod.given_angle, 0.0, 0.000000000001))
+    fail = fail + check("T4_product_across", near(prod.across_angles, width_exact, 0.0000000001))
+    fail = fail + check("T4_cnot_given", near(ent.given_angle, 0.0, 0.000000001))
+    fail = fail + check("T4_cnot_across", near(ent.across_angles, 0.0, 0.000000001))
+    fail = fail + check("T4_split", near(ent.given_angle + ent.across_angles, ent.cov, 0.000000000001))
+
+    let prod_pole: WireCov = ry_product_cov(pi, 0.1)
+    let ent_pole: WireCov = ry_cnot_cov(pi, 0.1)
+    let e_half = exp_neg(sig2 / 2.0)
+    let e_nine = exp_neg(9.0 * sig2 / 2.0)
+    let cond_exact = (0.0 - e_half + e_nine) / 16.0
+    let cnot_exact = (0.0 - e_half) * (1.0 - exp_neg(2.0 * sig2)) / 8.0
+    let across_exact = cnot_exact - cond_exact
+    fail = fail + check("T5_product_given", near(prod_pole.given_angle, 0.0, 0.000000000001))
+    fail = fail + check("T5_product_across", near(prod_pole.across_angles, vp_exact, 0.0000001))
+    fail = fail + check("T5_cnot_cov", near(ent_pole.cov, cnot_exact, 0.0000001))
+    fail = fail + check("T5_cnot_given", near(ent_pole.given_angle, cond_exact, 0.0000001))
+    fail = fail + check("T5_cnot_across", near(ent_pole.across_angles, across_exact, 0.0000001))
+    fail = fail + check("T5_split", near(ent_pole.given_angle + ent_pole.across_angles, ent_pole.cov, 0.000000000001))
+    fail = fail + check("T5_given_dominates", ent_pole.given_angle < -0.002)
+    fail = fail + check("T5_sign", ent_pole.cov < 0.0)
+
+    let rprod: TargetRead = target_read(prod)
+    let rent: TargetRead = target_read(ent)
+    let rent_pole: TargetRead = target_read(ent_pole)
+    let var_c_exact = (1.0 - exp_neg(sig2)) / 4.0
+    let removed_pole = cnot_exact * cnot_exact / var_c_exact
+    fail = fail + check("T6_prod_sum", near(rprod.residual + rprod.removed, rprod.var_target, 0.000000000001))
+    fail = fail + check("T6_prod_binary", near(rprod.removed, prod.cov * prod.cov / (prod.mu0 * (1.0 - prod.mu0)), 0.000000000001))
+    fail = fail + check("T6_prod_closed", near(rprod.removed, 4.0 * width_exact * width_exact, 0.000000000001))
+    fail = fail + check("T6_prod_shot", near(rprod.var_target, 0.25, 0.00000001))
+    fail = fail + check("T6_prod_tiny", rprod.removed < 0.00000001)
+    fail = fail + check("T6_cnot_removed", near(rent.removed, 0.0, 0.000000000001))
+    fail = fail + check("T6_cnot_stays", near(rent.residual, rent.var_target, 0.000000000001))
+    fail = fail + check("T6_pole_sum", near(rent_pole.residual + rent_pole.removed, rent_pole.var_target, 0.000000000001))
+    fail = fail + check("T6_pole_binary", near(rent_pole.removed, ent_pole.cov * ent_pole.cov / (ent_pole.mu0 * (1.0 - ent_pole.mu0)), 0.000000000001))
+    fail = fail + check("T6_pole_closed", near(rent_pole.removed, removed_pole, 0.000001))
+    fail = fail + check("T6_pole_big", rent_pole.removed > 0.002)
+
+    let cz_mid: WireCov = ry_cz_cov(pi / 2.0, 0.01)
+    let cz_pole: WireCov = ry_cz_cov(pi, 0.1)
+    let rcz: TargetRead = target_read(cz_mid)
+    fail = fail + check("T7_cz_cov", near(cz_mid.cov, prod.cov, 0.000000000001))
+    fail = fail + check("T7_cz_second", near(cz_mid.second, prod.second, 0.000000000001))
+    fail = fail + check("T7_cz_pole", near(cz_pole.cov, prod_pole.cov, 0.000000000001))
+    fail = fail + check("T7_cz_removed", near(rcz.removed, rprod.removed, 0.000000000001))
+    fail = fail + check("T7_cz_not_cnot", cz_pole.cov > 0.0)
+
+    let ratio = band_variance(pole.one_shot) / band_variance(pole.width)
+    let ratio_exact = 2.0 / (1.0 - exp_neg(sig2))
+    fail = fail + check("T8_ratio", near(ratio, ratio_exact, 0.01))
+    fail = fail + check("T8_above_leading", ratio > 200.5)
+
+    let g_mid: AngleShape = ry_gaussian_shape(pi / 2.0, 0.01)
+    let two_mid: AngleShape = ry_two_point_matched(pi / 2.0, width_exact)
+    let esin4 = 3.0 / 8.0 - 0.5 * exp_neg(2.0 * s2) + 0.125 * exp_neg(8.0 * s2)
+    let kurt_g = esin4 / 16.0
+    let kurt_two = width_exact * width_exact
+    fail = fail + check("T9_mu", near(g_mid.mu, 0.5, 0.00000001))
+    fail = fail + check("T9_var_g", near(g_mid.var_p, width_exact, 0.0000000001))
+    fail = fail + check("T9_var_match", near(two_mid.var_p, g_mid.var_p, 0.0000000001))
+    fail = fail + check("T9_third_g", near(g_mid.third, 0.0, 0.0000000001))
+    fail = fail + check("T9_third_two", near(two_mid.third, 0.0, 0.0000000001))
+    fail = fail + check("T9_fourth_g", near(g_mid.fourth, kurt_g, 0.000000000001))
+    fail = fail + check("T9_fourth_two", near(two_mid.fourth, kurt_two, 0.000000000001))
+    fail = fail + check("T9_split", g_mid.fourth > 2.5 * two_mid.fourth)
+
+    let g_pole: AngleShape = ry_gaussian_shape(pi, 0.1)
+    let ec2 = (1.0 + exp_neg(2.0 * sig2)) / 2.0
+    let ec3 = (3.0 * e_half + e_nine) / 4.0
+    let third_exact = (ec3 - 3.0 * e_half * ec2 + 2.0 * e_half * e_half * e_half) / 8.0
+    fail = fail + check("T9_pole_third", near(g_pole.third, third_exact, 0.000000001))
+    fail = fail + check("T9_pole_skew", g_pole.third < 0.0)
+
+    let rec: RecordSplit = ry_record_split(pi / 2.0, 0.01, width_exact)
+    let e4 = exp_neg(4.0 * s2)
+    let e8 = exp_neg(8.0 * s2)
+    let var_c_exact = ((1.0 + e8) / 2.0 - e4) / 64.0
+    let mean_c_exact = 0.25 - width_exact
+    let gap = g_mid.fourth - g_mid.var_p * g_mid.var_p
+    fail = fail + check("T10_mean", near(rec.mean_c_g, mean_c_exact, 0.000000000001))
+    fail = fail + check("T10_var_g", near(rec.var_c_g, var_c_exact, 0.000000000001))
+    fail = fail + check("T10_var_two", near(rec.var_c_two, 0.0, 0.00000000000001))
+    fail = fail + check("T10_identity", near(rec.var_c_g, gap, 0.000000000001))
+    fail = fail + check("T10_tv3", near(rec.tv3, 0.0, 0.0000000001))
+    fail = fail + check("T10_tv4", near(rec.tv4, 8.0 * (rec.var_c_g - rec.var_c_two), 0.000000000001))
+    fail = fail + check("T10_tv4_closed", near(rec.tv4, 8.0 * var_c_exact, 0.000000000001))
+    fail = fail + check("T10_three_blind", rec.tv3 < 0.0000000001)
+    fail = fail + check("T10_four_sees", rec.tv4 > 0.000000001)
+
+    let e18 = exp_neg(18.0 * s2)
+    let cos2 = exp_neg(2.0 * s2)
+    let cos4 = exp_neg(8.0 * s2)
+    let sin6 = (1.0 - 3.0 * cos2 + 3.0 * ((1.0 + cos4) / 2.0) - (3.0 * cos2 + e18) / 4.0) / 8.0
+    let parity_gap = rec.parity4_g - rec.parity4_two
+    fail = fail + check("T11_parity3", near(rec.parity3, 0.0, 0.0000000001))
+    fail = fail + check("T11_parity4_g", near(rec.parity4_g, 16.0 * g_mid.fourth, 0.000000000001))
+    fail = fail + check("T11_parity4_two", near(rec.parity4_two, 16.0 * kurt_two, 0.000000000001))
+    fail = fail + check("T11_gap", near(parity_gap, 16.0 * rec.var_c_g, 0.000000000001))
+    fail = fail + check("T11_half_is_tv", near(parity_gap / 2.0, rec.tv4, 0.000000000001))
+    fail = fail + check("T11_parity6_g", near(rec.parity6_g, sin6, 0.00000000000001))
+    fail = fail + check("T11_parity6_two", near(rec.parity6_two, 64.0 * kurt_two * width_exact, 0.00000000000001))
+    fail = fail + check("T11_six_smaller", rec.parity6_g * 100.0 < parity_gap)
+
+    let bound: ParityBound = ry_parity_bound(pi / 2.0, 0.01, width_exact)
+    let var_max = width_exact / 4.0 - width_exact * width_exact
+    let frac_exact = var_c_exact / var_max
+    fail = fail + check("T12_lo", near(bound.lo, 16.0 * kurt_two, 0.000000000001))
+    fail = fail + check("T12_hi", near(bound.hi, 4.0 * width_exact, 0.000000000001))
+    fail = fail + check("T12_gauss", near(bound.gaussian, rec.parity4_g, 0.000000000001))
+    fail = fail + check("T12_inside", bound.gaussian > bound.lo)
+    fail = fail + check("T12_below", bound.gaussian < bound.hi)
+    fail = fail + check("T12_fraction", near(bound.fraction, frac_exact, 0.0000001))
+    fail = fail + check("T12_near_floor", bound.fraction < 0.001)
+
+    let prod4: StateParity = ry4_product_parity(pi / 2.0)
+    let ghz: StateParity = ghz4_parity()
+    fail = fail + check("T12_product", near(prod4.parity, 0.0, 0.000000000001))
+    fail = fail + check("T12_product_margin", near(prod4.marginal, 0.5, 0.000000000001))
+    fail = fail + check("T12_ghz", near(ghz.parity, 1.0, 0.000000000001))
+    fail = fail + check("T12_ghz_margin", near(ghz.marginal, 0.5, 0.000000000001))
+    fail = fail + check("T12_outside", ghz.parity > bound.hi)
+
+    let root2 = 1.4142135623730951
+    let exit: ChshExit = ry_chsh_exit(pi)
+    fail = fail + check("T13_zz_copy", near(exit.zz_copy, 1.0, 0.000000001))
+    fail = fail + check("T13_xx_copy", near(exit.xx_copy, 0.0, 0.000000001))
+    fail = fail + check("T13_zz_bell", near(exit.zz_bell, 1.0, 0.000000001))
+    fail = fail + check("T13_xx_bell", near(exit.xx_bell, 1.0, 0.000000001))
+    fail = fail + check("T13_chsh_bell", near(exit.chsh_bell, 2.0 * root2, 0.000000001))
+    fail = fail + check("T13_chsh_00", near(exit.chsh_00, root2, 0.000000001))
+    fail = fail + check("T13_chsh_11", near(exit.chsh_11, root2, 0.000000001))
+    fail = fail + check("T13_chsh_01", near(exit.chsh_01, 0.0 - root2, 0.000000001))
+    fail = fail + check("T13_chsh_10", near(exit.chsh_10, 0.0 - root2, 0.000000001))
+    fail = fail + check("T13_bell_leaves", exit.chsh_bell > 2.0)
+    fail = fail + check("T13_record_stays", exit.chsh_00 < 2.0)
+
+    if fail == 0 {
+        print("ALL_PASS\n")
+    }
+    return fail
+}

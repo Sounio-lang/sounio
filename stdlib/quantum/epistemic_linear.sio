@@ -1,0 +1,138 @@
+// stdlib/quantum/epistemic_linear.sio
+//
+// GUM on the linear-qubit simulator.
+//
+// The angle is an Epistemic. Its variance is a struct field, so it survives
+// a function call. Builtin Knowledge<f64> does not: its uncertainty is a
+// side channel, and uncertainty_of returns 0 after the value is passed to
+// another function. Deposit the band into Epistemic in the function that
+// built the Knowledge, then pass that.
+//
+// The sensitivity is not a closed form pasted in: it is the parameter-shift
+// rule evaluated by running ry on a fresh statevector.
+//
+//   Ry(θ)|0⟩,  P = Prob(|1⟩) = sin²(θ/2)
+//   ∂P/∂θ     = (P(θ+π/2) − P(θ−π/2)) / 2     exact for exp(−i θ Y / 2)
+//   ∂²P/∂θ²   = (P(θ+π) − P(θ)) / 2            = (1/2) cos θ
+//
+// One Gaussian angle, same expansion as vqe_gum2:
+//   u₁² = (∂P)² σ²
+//   u₂² = (1/2) (∂²P)² σ⁴
+//   bias = (1/2) (∂²P) σ²
+//
+// At θ = π the first derivative vanishes, so the first-order band is zero
+// and the second-order term is the whole uncertainty. Teleportation of
+// Ry(θ)|0⟩ leaves both P and ∂P unchanged: the band is transported.
+
+use epistemic::knowledge::{Epistemic}
+
+use quantum::linear::{
+    quantum_state_new,
+    qubit_alloc,
+    ry,
+    teleport,
+    measure_qubit,
+    amp_prob,
+    TeleportResult,
+}
+
+fn elin_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var scale = 1.0
+    while m > 4.0 {
+        m = m / 4.0
+        scale = scale * 2.0
+    }
+    while m < 0.25 {
+        m = m * 4.0
+        scale = scale / 2.0
+    }
+    var y = 1.0
+    var i = 0
+    while i < 8 {
+        y = 0.5 * (y + m / y)
+        i = i + 1
+    }
+    y * scale
+}
+
+fn elin_pi() -> f64 { 3.141592653589793 }
+
+// Prob(|1⟩) after Ry(θ) on a fresh |0⟩. The qubit is consumed.
+pub fn elin_ry_prob_one(theta: f64) -> f64 with Mut, Div, Panic {
+    var qs = quantum_state_new()
+    let q = ry(qubit_alloc(&!qs), &!qs, theta)
+    let p = amp_prob(&qs, 1)
+    let _gone = measure_qubit(q, &!qs, 0.5)
+    p
+}
+
+// Same preparation, then teleport onto the third qubit. Prob of that bit.
+pub fn elin_ry_teleport_prob_one(theta: f64) -> f64 with Mut, Div, Panic {
+    var qs = quantum_state_new()
+    let msg = ry(qubit_alloc(&!qs), &!qs, theta)
+    let alice = qubit_alloc(&!qs)
+    let bob = qubit_alloc(&!qs)
+    let TeleportResult { qubit, m1, m2 } = teleport(msg, alice, bob, &!qs, 0.0, 0.0)
+    var p = 0.0
+    var i = 0
+    while i < 8 {
+        let bit = (i >> 2) & 1
+        if bit == 1 {
+            p = p + amp_prob(&qs, i)
+        }
+        i = i + 1
+    }
+    let _gone = measure_qubit(qubit, &!qs, 0.0)
+    p
+}
+
+pub fn elin_ry_dprob(theta: f64) -> f64 with Mut, Div, Panic {
+    let s = elin_pi() / 2.0
+    let pp = elin_ry_prob_one(theta + s)
+    let pm = elin_ry_prob_one(theta - s)
+    (pp - pm) / 2.0
+}
+
+pub fn elin_ry_teleport_dprob(theta: f64) -> f64 with Mut, Div, Panic {
+    let s = elin_pi() / 2.0
+    let pp = elin_ry_teleport_prob_one(theta + s)
+    let pm = elin_ry_teleport_prob_one(theta - s)
+    (pp - pm) / 2.0
+}
+
+pub fn elin_ry_d2prob(theta: f64) -> f64 with Mut, Div, Panic {
+    let pi = elin_pi()
+    (elin_ry_prob_one(theta + pi) - elin_ry_prob_one(theta)) / 2.0
+}
+
+pub struct LinearGum {
+    pub prob: f64,
+    pub d1: f64,
+    pub d2: f64,
+    pub u_first: f64,
+    pub u_second: f64,
+    pub u_total: f64,
+    pub bias: f64,
+}
+
+pub fn elin_ry_gum(angle: Epistemic) -> LinearGum with Mut, Div, Panic {
+    let theta = angle.val
+    let sigma = elin_sqrt(angle.variance)
+    let p = elin_ry_prob_one(theta)
+    let d1 = elin_ry_dprob(theta)
+    let d2 = elin_ry_d2prob(theta)
+    let s2 = sigma * sigma
+    let u1sq = d1 * d1 * s2
+    let u2sq = 0.5 * d2 * d2 * s2 * s2
+    LinearGum {
+        prob: p,
+        d1: d1,
+        d2: d2,
+        u_first: elin_sqrt(u1sq),
+        u_second: elin_sqrt(u2sq),
+        u_total: elin_sqrt(u1sq + u2sq),
+        bias: 0.5 * d2 * s2,
+    }
+}

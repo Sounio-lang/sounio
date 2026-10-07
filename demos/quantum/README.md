@@ -52,9 +52,11 @@ The program ends with `H2_VQE_CROSSCHECK_OK`.
 
 ## Limits
 
-- **At most 4 qubits, exact statevector simulation.** `epistemic_vqe` stores
-  16 amplitudes, and so does `stdlib/quantum/vqe.sio`, the general version with
-  Pauli sums and gate lists. Neither uses tensor networks or sampling.
+- **Linear `Qubit` simulation: at most 10 qubits.** `stdlib/quantum/linear.sio`
+  stores 1024 amplitudes; the 11th `qubit_alloc` panics.
+- **VQE modules: at most 4 qubits.** `epistemic_vqe` stores 16 amplitudes, and
+  so does `stdlib/quantum/vqe.sio`, the general version with Pauli sums and
+  gate lists. Neither uses tensor networks or sampling.
 - **No noise model.** The only uncertainty is Gaussian error on the gate
   angles, and its propagation is validated by Monte Carlo. There is no
   decoherence, readout error or depolarisation.
