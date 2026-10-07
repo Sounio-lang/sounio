@@ -63,6 +63,8 @@ tape_face reads each wire marginal and the Z correlator from the shot list alone
 tape_bell_x is the same list after Ry(pi/2) on both wires. The pair keeps correlator 1. The copied bit, half |00> and half |11>, reads 0.
 tape_pair reads both lists and keeps the source only when both correlators clear 1/2.
 tape_pair_shots posts both programs. tape_witness reads the two returned lists and returns the same verdict.
+tape_device_job is one document: both OpenQASM programs, the shot count, and the cut 0.5. tape_device_return scores the lists a machine sent back. tape_device_oracle scores the statevector and marks that record as the oracle.
+demos/quantum/tools/device_run.cpp executes that OpenQASM. tape_device_return scores the shot lists it writes back.
 
 Demo, independent C++ cross-check and the full list of limits:
 [`demos/quantum/`](../../demos/quantum/README.md).
