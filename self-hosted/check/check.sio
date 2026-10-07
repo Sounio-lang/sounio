@@ -12990,9 +12990,82 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
 }
 
 // *mut assign-mutability (E003) — transcription of check_assign_mutability (14176).
+// #888: the static type of an assignment PLACE, recomputed from the environment
+// and the struct table without re-checking (and so without re-reporting) any
+// sub-expression. Returns ty_unknown() for any shape it does not model, which
+// makes the shared-reference walk below fail open on it (no false reject).
+fn checker_place_static_type(c: *mut Checker, place: Expr, depth: i64) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if depth > 16 { return ty_unknown() }
+    if place.kind == ExprKind::ExprIdent {
+        if !(*c).env.has_binding(place.name) { return ty_unknown() }
+        return (*c).env.lookup(place.name)
+    }
+    let base_ptr = expr_opt_get(place.left)
+    if base_ptr == 0 as *mut Expr { return ty_unknown() }
+    let base_ty = checker_place_static_type(c, *base_ptr, depth + 1)
+    if place.kind == ExprKind::ExprUnary && place.un_op == UnaryOp::OpDeref {
+        return checker_place_deref_type(base_ty)
+    }
+    if place.kind == ExprKind::ExprFieldAccess {
+        let sty = checker_place_deref_type(base_ty)
+        if sty.kind != TypeKind::TyNamed { return ty_unknown() }
+        let sidx = struct_table_find((*c).structs, sty.name)
+        if sidx < 0 { return ty_unknown() }
+        let si = struct_table_get((*c).structs, sidx)
+        if !field_info_list_has(si.fields, place.name) { return ty_unknown() }
+        return field_info_list_find(si.fields, place.name)
+    }
+    if place.kind == ExprKind::ExprIndex {
+        let aty = checker_place_deref_type(base_ty)
+        if aty.kind == TypeKind::TyArray || aty.kind == TypeKind::TySlice || aty.kind == TypeKind::TySliceMut {
+            match aty.inner {
+                Some(el) => { return *el }
+                None => { return ty_unknown() }
+            }
+        }
+        return ty_unknown()
+    }
+    ty_unknown()
+}
+
+// One auto-deref step: `&T` / `&!T` -> T, anything else unchanged.
+fn checker_place_deref_type(ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if ty.kind == TypeKind::TyRef || ty.kind == TypeKind::TyRefMut {
+        match ty.inner {
+            Some(inner) => { return *inner }
+            None => { return ty_unknown() }
+        }
+    }
+    ty
+}
+
+// #888: does storing into `place` write THROUGH a shared reference? Walks the
+// place towards its root; every hop that dereferences (explicit `*p`, or the
+// auto-deref of `p.f` / `p[i]`) a value whose static type is a shared `&T` /
+// `&[T]` makes the store a write through shared data, which both engines used
+// to accept ("assume mutable for now"). Exclusive `&!T`, raw pointers, by-value
+// locals and globals are unaffected. Unknown shapes return false (fail open).
+fn checker_place_writes_through_shared_ref(c: *mut Checker, place: Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+    if depth > 16 { return false }
+    if place.kind == ExprKind::ExprFieldAccess || place.kind == ExprKind::ExprIndex
+        || (place.kind == ExprKind::ExprUnary && place.un_op == UnaryOp::OpDeref) {
+        let base_ptr = expr_opt_get(place.left)
+        if base_ptr == 0 as *mut Expr { return false }
+        let base_ty = checker_place_static_type(c, *base_ptr, depth + 1)
+        if base_ty.kind == TypeKind::TyRef || base_ty.kind == TypeKind::TySlice {
+            return true
+        }
+        return checker_place_writes_through_shared_ref(c, *base_ptr, depth + 1)
+    }
+    false
+}
+
 fn checker_check_assign_mutability_inplace(c: *mut Checker, opt: Option<Box<Expr> >, span: Span) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(e) => {
+            if (*e).kind != ExprKind::ExprIdent && checker_place_writes_through_shared_ref(c, *e, 0) {
+                checker_report_error_at_inplace(c, span, 267, 0, 0, 0)
+            }
             if (*e).kind == ExprKind::ExprIdent {
                 // E003 only for a name that IS bound (a local) and is immutable (a `let`).
                 // Module-level globals are not bound into env, so an unbound name is NOT a
@@ -17554,6 +17627,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
     else if code == 264 { print("enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped") }
+    else if code == 267 { print("cannot assign through a shared reference: the place is reached through `&T`, which is read-only") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
     else { print("unknown error") }
 }
@@ -17894,6 +17968,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("\n   =       (then the reported variance overstates, which is safe); `/` refuses")
         print("\n   =       any shared source, because its dropped term also depends on the sign")
         print("\n   =       of the product of the operand values, which is not tracked.\n")
+    }
+    else if code == 267 {
+        print("   |\n   = help: take the parameter or binding as an exclusive reference `&!T` (and pass `&!x` at the call site) to modify it\n")
     }
     else if code == 263 {
         print("   |\n   = help: rename the struct/enum, the method, or the module import so the qualifier is no longer ambiguous\n")
