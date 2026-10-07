@@ -15,36 +15,36 @@ Production: **https://www.souniolang.org**
 
 ## Deploy paths
 
-### 1. Vercel Git integration (preferred)
+Git-triggered deployments are **off**: the repository-root `vercel.json` and `website/vercel.json` set `git.deploymentEnabled: false` and `github.silent: true`, and both Vercel projects (`sounio`, `sounio-next`) have preview deployments disabled and an ignored build step of `exit 0`. Pushing to `main`, merging a PR or pushing a branch deploys nothing and posts nothing. This keeps Vercel builds out of the PR loop, where every push used to build the whole repository.
 
-Push to `main` (or merge a PR). The Vercel project linked to this repo runs `npm run build` inside `website/` and publishes `dist/`.
+Verify locally before any deploy:
 
-Verify locally before push:
+```bash
+cd website
+npm ci
+npm run check:quality
+npm run build
+```
+
+### 1. GitHub Actions (`vercel-website.yml`, authoritative)
+
+- **Production:** push a `website-v*` tag (e.g. `website-v2026.10.07`) on the commit to publish, or run the workflow by hand with target `production`:
+  `gh workflow run vercel-website.yml -f target=production`
+- **Preview:** `gh workflow run vercel-website.yml -f target=preview`
+
+The workflow runs `npm run check:quality`, then `vercel build` and `vercel deploy --prebuilt` against the `sounio` project. It needs the repository secret **`VERCEL_TOKEN`** and fails without it.
+
+### 2. Manual CLI (emergency)
 
 ```bash
 cd website
 npm ci
 npm run build
+npx vercel build --prod
+npx vercel deploy --prebuilt --prod
 ```
 
-### 2. GitHub Actions (`vercel-website.yml`)
-
-Workflow exists but requires repository secret **`VERCEL_TOKEN`**. Without it, the workflow fails — this does **not** block Git-integration deploys.
-
-### 3. Manual CLI (emergency)
-
-```bash
-cd website
-npm ci
-npm run build
-npx vercel deploy --prebuilt
-```
-
-Requires Vercel CLI auth and project linkage.
-
-## Release tags
-
-Optional website-only tags: `website-v*` (e.g. `website-v2026.05.26`). Tagging is informational; production still tracks `main` via Git integration unless you configure otherwise.
+Requires Vercel CLI auth and project linkage (`vercel link` to `sounio`).
 
 ## Pre-deploy checklist
 
@@ -55,7 +55,7 @@ Optional website-only tags: `website-v*` (e.g. `website-v2026.05.26`). Tagging i
 
 ## Rollback
 
-Revert the offending commit on `main` and let Vercel redeploy, or use the Vercel dashboard to promote a previous deployment.
+Reverting a commit on `main` does **not** redeploy. Either promote the previous production deployment (Vercel dashboard → Deployments → Promote, or `npx vercel rollback <deployment-url>`), or check out the last good commit, tag it `website-v<date>-rollback` and push the tag so the workflow redeploys it.
 
 ## Common failure: stale static output
 
