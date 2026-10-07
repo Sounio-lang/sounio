@@ -26,6 +26,27 @@ var IMP_LOADED_LENS: [i64; 2048] = [0; 2048]
 var IMP_PATHS_USED: i64 = 0
 var IMP_COUNT: i64 = 0
 var IMPORT_RESOLUTION_FAILED: i64 = 0
+// #2773 module-local name resolution: one record per top-of-line `use` that
+// resolve_imports processes, in scan order (main file first, then each loaded
+// module in load order). LMR_USE_MOD = the module the `use` is written in
+// (0 = main file, k = the k-th loaded module), LMR_USE_TGT = the module it
+// resolved to, -1 if it did not load. lmr_resolve() pairs them back up with
+// the token stream by ordinal within each module.
+var LMR_USE_MOD: [i64; 16384] = [0; 16384]
+var LMR_USE_TGT: [i64; 16384] = [0; 16384]
+var LMR_USE_LINE: [i64; 16384] = [0; 16384]
+var LMR_USE_COUNT: i64 = 0
+var LMR_USE_OVERFLOW: i64 = 0
+// SRC offset where the extern stubs and native prelude start (set by
+// strip_extern_blocks). Tokens at or past it belong to no module.
+var LMR_PRELUDE_SRC_START: i64 = -1
+var LMR_DEF_COUNT: i64 = 0
+var LMR_C_COUNT: i64 = 0
+var LMR_MOD_USE_N: i64 = 0
+var LMR_MOD_COUNT: i64 = 0
+var LMR_RENAMED: i64 = 0
+var LMR_FAILED: i64 = 0
+var LMR_RW_COUNT: i64 = 0
 var BASE_DIR: [i8; 512] = [0; 512]
 var BASE_DIR_LEN: i64 = 0
 var CLI_SHOW_AST: i64 = 0
@@ -36126,6 +36147,12 @@ fn compile_knowledge_paren_a64() with IO, Mut, Panic, Div {
 
 // ─── ARM64 expression compiler ───
 fn compile_primary_a64() with IO, Mut, Panic, Div {
+    // Mirror of compile_primary: `ident!(..)` / `a::b!(..)` is E043 on both
+    // targets. aarch64 never ran this check, so a Rust macro fell through to
+    // E200 (undefined identifier) there -- pinned as rule drift for
+    // parser_rust_macro and, once #2773 removed a spurious duplicate-fn warning
+    // that used to be the first line of its log, parser_rust_macro_path_qualified.
+    if tc_reject_rust_macro_at(EP) { }
     LAST_EXPR_IS_CLOSURE = 0
     LAST_EXPR_IS_LINEAR = 0
     LAST_EXPR_VAR_IDX = -1
@@ -44467,6 +44494,632 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     return 0
 }
 
+// ─── #2773: module-local name resolution for same-named functions ───
+//
+// The function table (FN_NS/FN_NE, fn_find) is keyed by bare name and
+// first-registered wins, so when two loaded modules each define `pub fn
+// energy`, EVERY call to `energy()` -- including the second module's call to
+// its own function -- bound to the first-loaded body: the #2773 repro printed
+// 3.0 instead of -14.5, compiled clean, no diagnostic.
+//
+// lmr_resolve() runs once on the token stream, straight after lex_all(),
+// before any pass registers a function. It mirrors the Madaros rules in
+// self-hosted/compiler/private_fn_identity.sio (pub phase):
+//   * For a free fn name N defined at top level in two or more modules, the
+//     first-loaded definer d1 keeps the name (the body every reference bound
+//     to before, so nothing that was right changes). Every other definer dk
+//     has its definition, and its own references, renamed to `N__m<dk>`.
+//   * Every other module X resolves N through its OWN `use` items: its own
+//     definition beats an explicit import (`use p::{N}` / `use p::N`), which
+//     beats a glob (`use p::*`). X's references are rewritten to the chosen
+//     definer's spelling. Module-qualified `q::N(` resolves through the `use`
+//     whose last path segment is q.
+//   * Refused with error[module_name_resolution] instead of binding silently:
+//     N imported by name from two different definers; N from globs of two
+//     definers neither of which is d1 (when one is d1, the old binding stands
+//     with a warning, as on Madaros).
+// A module that imports N from no definer keeps the first-loaded binding, as
+// before (same residual as Madaros, KL-17).
+//
+// Renaming is done by appending the new spelling to SRC and pointing the
+// token's TS/TE at it; nothing else in the token stream moves.
+//
+// Locals: only a token that can be a function reference is rewritten -- an
+// identifier followed by `(` that is not a method (`.N(`) and not a
+// declaration name, or a bare identifier in a module that declares no local,
+// parameter or binder spelled N (so `let N = N()` keeps its local).
+
+var LMR_TOK_MOD: [i64; 2097152] = [0; 2097152]
+// Top-level free fn definitions: name token, module.
+var LMR_DEF_TOK: [i64; 65536] = [0; 65536]
+var LMR_DEF_MOD: [i64; 65536] = [0; 65536]
+var LMR_DEF_PUB: [i64; 65536] = [0; 65536]
+// Collision names: representative def index, first definer d1.
+var LMR_C_DEF: [i64; 4096] = [0; 4096]
+var LMR_C_D1: [i64; 4096] = [0; 4096]
+// Per-module scratch: the target module of the module's k-th `use`.
+var LMR_MOD_USE_TGT: [i64; 1024] = [0; 1024]
+var LMR_MOD_USE_TOK: [i64; 1024] = [0; 1024]
+// Rewrites are collected first and applied at the end: the name comparisons
+// above read token spellings, so renaming in place would hide later matches.
+var LMR_RW_TOK: [i64; 262144] = [0; 262144]
+var LMR_RW_MOD: [i64; 262144] = [0; 262144]
+
+fn lmr_tok_name_eq(a: i64, b: i64) -> bool with Panic, Mut {
+    return name_eq(TS[a as usize], TE[a as usize], TS[b as usize], TE[b as usize])
+}
+
+// Does module m define (top level, free fn) the name of token t? Returns the
+// def index or -1.
+fn lmr_mod_defines(m: i64, t: i64) -> i64 with Panic, Mut {
+    var i: i64 = 0
+    while i < LMR_DEF_COUNT {
+        if LMR_DEF_MOD[i as usize] == m && lmr_tok_name_eq(LMR_DEF_TOK[i as usize], t) { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+// Does module m export (plain `pub`) a top-level free fn named like token t?
+// Only those can be imported by `use`; a private fn is visible in its own
+// module only.
+fn lmr_mod_exports(m: i64, t: i64) -> bool with Panic, Mut {
+    let i = lmr_mod_defines(m, t)
+    if i < 0 { return false }
+    return LMR_DEF_PUB[i as usize] == 1
+}
+
+fn lmr_collision_of(t: i64) -> i64 with Panic, Mut {
+    var c: i64 = 0
+    while c < LMR_C_COUNT {
+        if lmr_tok_name_eq(LMR_DEF_TOK[LMR_C_DEF[c as usize] as usize], t) { return c }
+        c = c + 1
+    }
+    return -1
+}
+
+// SRC offset of a fresh spelling `<name of t>__m<d>`; its end is SRC_LEN.
+fn lmr_append_mangled(t: i64, d: i64) -> i64 with Mut, Panic, Div {
+    let start = SRC_LEN
+    var i: i64 = TS[t as usize]
+    while i < TE[t as usize] && SRC_LEN < SRC_CAP - 32 {
+        SRC[SRC_LEN as usize] = SRC[i as usize]
+        SRC_LEN = SRC_LEN + 1
+        i = i + 1
+    }
+    append_src_lit("__m")
+    // decimal digits of d, most significant first (d < 1024: at most 4)
+    var div: i64 = 1
+    while div * 10 <= d { div = div * 10 }
+    while div > 0 && SRC_LEN < SRC_CAP - 1 {
+        let digit = (d / div) % 10
+        SRC[SRC_LEN as usize] = (48 + digit) as i8
+        SRC_LEN = SRC_LEN + 1
+        div = div / 10
+    }
+    if SRC_LEN >= SRC_CAP - 32 { SRC_OVERFLOW = 1 }
+    return start
+}
+
+fn lmr_print_tok(t: i64) with IO, Mut, Panic {
+    var i: i64 = TS[t as usize]
+    while i < TE[t as usize] {
+        print_char(SRC[i as usize] as i64)
+        i = i + 1
+    }
+}
+
+// The path of loaded module m (m >= 1), from its \x01<path>\x02 marker.
+fn lmr_print_mod(m: i64) with IO, Mut, Panic {
+    print("#")
+    print_int(m)
+    if m == 0 { print(" (main file)"); return }
+    var t: i64 = 0
+    var seen: i64 = 0
+    while t < TC {
+        if TK[t as usize] == 77 {
+            seen = seen + 1
+            if seen == m {
+                // TS of the marker token is just past \x02; walk back to \x01.
+                var e: i64 = TS[t as usize] - 1
+                var b: i64 = e - 1
+                while b > 0 && SRC[b as usize] as i64 != 1 { b = b - 1 }
+                print(" (")
+                var k: i64 = b + 1
+                while k < e {
+                    print_char(SRC[k as usize] as i64)
+                    k = k + 1
+                }
+                print(")")
+                return
+            }
+        }
+        t = t + 1
+    }
+}
+
+// Is token t the start of a top-level `use` line of its module? (`use` lexes
+// as an ordinary identifier.)
+fn lmr_is_use_tok(t: i64) -> bool with Panic, Mut {
+    if TK[t as usize] != 3 { return false }
+    if !src_match(TS[t as usize], TE[t as usize] - TS[t as usize], "use") { return false }
+    if TS[t as usize] > 0 && SRC[(TS[t as usize] - 1) as usize] as i64 != 10 && SRC[(TS[t as usize] - 1) as usize] as i64 != 2 { return false }
+    return true
+}
+
+// Last token of the use item starting at t (exclusive end).
+fn lmr_use_end(t: i64) -> i64 with Panic, Mut {
+    var q: i64 = t + 1
+    let line = TL[t as usize]
+    while q < TC && TL[q as usize] == line && TK[q as usize] != 27 && TK[q as usize] != 77 && TK[q as usize] != 0 { q = q + 1 }
+    return q
+}
+
+// Within the use item [t, e): does it name token n explicitly (in a `{...}`
+// list, or as the last path segment of a non-glob, non-brace import)?
+fn lmr_use_names(t: i64, e: i64, n: i64) -> bool with Panic, Mut {
+    var q: i64 = t + 1
+    var in_brace: i64 = 0
+    var has_brace: i64 = 0
+    var has_glob: i64 = 0
+    while q < e {
+        if TK[q as usize] == 8 { in_brace = 1; has_brace = 1 }
+        if TK[q as usize] == 9 { in_brace = 0 }
+        if TK[q as usize] == 19 { has_glob = 1 }
+        if in_brace == 1 && TK[q as usize] == 3 && lmr_tok_name_eq(q, n) {
+            // `{ N as alias }` still imports N
+            return true
+        }
+        q = q + 1
+    }
+    if has_brace == 1 || has_glob == 1 { return false }
+    // path form: last identifier before an optional `as`
+    var last: i64 = -1
+    q = t + 1
+    while q < e {
+        if TK[q as usize] == 37 { q = e; continue }
+        if TK[q as usize] == 3 { last = q }
+        q = q + 1
+    }
+    if last >= 0 && lmr_tok_name_eq(last, n) { return true }
+    return false
+}
+
+fn lmr_use_is_glob(t: i64, e: i64) -> bool with Panic, Mut {
+    var q: i64 = t + 1
+    while q < e {
+        if TK[q as usize] == 19 { return true }
+        q = q + 1
+    }
+    return false
+}
+
+// Which definer does module x mean by collision name c? -1: no import (keep
+// the old binding), -2: refused (diagnostic printed).
+fn lmr_resolve_in_module(x: i64, c: i64) -> i64 with IO, Mut, Panic {
+    let n = LMR_DEF_TOK[LMR_C_DEF[c as usize] as usize]
+    if lmr_mod_defines(x, n) >= 0 { return x }
+    let d1 = LMR_C_D1[c as usize]
+    var explicit: i64 = -1
+    var glob1: i64 = -1
+    var glob2: i64 = -1
+    var glob_has_d1: i64 = 0
+    var k: i64 = 0
+    while k < LMR_MOD_USE_N {
+        let tgt = LMR_MOD_USE_TGT[k as usize]
+        let ut = LMR_MOD_USE_TOK[k as usize]
+        if tgt >= 0 && ut >= 0 && lmr_mod_exports(tgt, n) {
+            let ue = lmr_use_end(ut)
+            if lmr_use_names(ut, ue, n) {
+                if explicit >= 0 && explicit != tgt {
+                    print("error[module_name_resolution]: `")
+                    lmr_print_tok(n)
+                    print("` in module ")
+                    lmr_print_mod(x)
+                    print("\n  is imported by name from two modules that each define it:\n  ")
+                    lmr_print_mod(explicit)
+                    print(" and ")
+                    lmr_print_mod(tgt)
+                    print(".\n  Import it from one of them only.\n")
+                    return -2
+                }
+                explicit = tgt
+            } else if lmr_use_is_glob(ut, ue) {
+                if tgt == d1 { glob_has_d1 = 1 }
+                if glob1 < 0 {
+                    glob1 = tgt
+                } else if glob1 != tgt && glob2 < 0 {
+                    glob2 = tgt
+                }
+            }
+        }
+        k = k + 1
+    }
+    if explicit >= 0 { return explicit }
+    if glob1 < 0 { return -1 }
+    if glob2 < 0 { return glob1 }
+    if glob_has_d1 == 1 {
+        print("warning[module_name_resolution]: `")
+        lmr_print_tok(n)
+        print("` in module ")
+        lmr_print_mod(x)
+        print(" comes from more than one\n  glob import; binding to ")
+        lmr_print_mod(d1)
+        print(" (first loaded, the previous binding).\n  Import it by name to choose.\n")
+        return d1
+    }
+    print("error[module_name_resolution]: `")
+    lmr_print_tok(n)
+    print("` in module ")
+    lmr_print_mod(x)
+    print("\n  comes from glob imports of two modules that each define it:\n  ")
+    lmr_print_mod(glob1)
+    print(" and ")
+    lmr_print_mod(glob2)
+    print(".\n  Import it by name (use path::{name}) from one of them.\n")
+    return -2
+}
+
+// Does module x declare something local spelled like token n (let/var/for
+// binder, `name:` parameter, closure parameter)? Then a bare (non-call)
+// occurrence is left alone.
+fn lmr_mod_has_local(x: i64, n: i64, mstart: i64, mend: i64) -> bool with Panic, Mut {
+    var q: i64 = mstart
+    while q < mend {
+        if TK[q as usize] == 3 && lmr_tok_name_eq(q, n) && q > 0 {
+            let pk = TK[(q - 1) as usize]
+            if pk == 11 || pk == 12 || pk == 54 || pk == 45 { return true }
+            if q + 1 < TC && TK[(q + 1) as usize] == 43 && pk != 1 { return true }
+            if pk == 3 && src_match(TS[(q - 1) as usize], TE[(q - 1) as usize] - TS[(q - 1) as usize], "mut") { return true }
+        }
+        q = q + 1
+    }
+    return false
+}
+
+fn lmr_rewrite_tok(t: i64, d: i64, d1: i64) with IO, Mut, Panic, Div {
+    if d == d1 { return }
+    if LMR_RW_COUNT >= 262144 {
+        if LMR_FAILED == 0 {
+            print("error[module_name_resolution]: more than 262144 references to same-named functions;\n")
+            print("  cannot rebind them, so compilation stops here rather than bind a call\n")
+            print("  to another module's function.\n")
+        }
+        LMR_FAILED = 1
+        return
+    }
+    LMR_RW_TOK[LMR_RW_COUNT as usize] = t
+    LMR_RW_MOD[LMR_RW_COUNT as usize] = d
+    LMR_RW_COUNT = LMR_RW_COUNT + 1
+}
+
+// Is token t one of the recorded top-level free fn definition names?
+fn lmr_is_def_tok(t: i64) -> bool with Panic, Mut {
+    var i: i64 = 0
+    while i < LMR_DEF_COUNT {
+        if LMR_DEF_TOK[i as usize] == t { return true }
+        i = i + 1
+    }
+    return false
+}
+
+fn lmr_arrow_follows_on_line(t: i64) -> bool with Panic, Mut {
+    var q: i64 = t + 1
+    while q < TC && TL[q as usize] == TL[t as usize] && TK[q as usize] != 77 && TK[q as usize] != 0 {
+        if TK[q as usize] == 52 { return true }
+        q = q + 1
+    }
+    return false
+}
+
+// Is token t on a top-level `use` line (an import-list entry)?
+fn lmr_is_use_line_tok(t: i64) -> bool with Panic, Mut {
+    var q: i64 = t
+    while q > 0 && TL[(q - 1) as usize] == TL[t as usize] && TK[(q - 1) as usize] != 77 && TK[(q - 1) as usize] != 27 { q = q - 1 }
+    return lmr_is_use_tok(q)
+}
+
+// #2773 struct half. Struct layouts are keyed by bare name (st_find), so two
+// loaded modules defining `struct NrRes` differently were ONE type: the
+// second module's literal used the first module's layout and read 0.0. As on
+// Madaros (module_struct_identity_check), a same-named struct with a
+// DIFFERENT definition is refused; identical copies stay accepted.
+// "Same definition" is compared token by token over the generic parameter
+// list and the body, ignoring field `pub` markers, plus linear/affine.
+// One past the last token of the struct declaration whose name token is n:
+// a `{ ... }` body, or a tuple/unit form ending at `;` or at the end of the
+// declaration's line.
+fn lmr_struct_decl_end(n: i64) -> i64 with Panic, Mut {
+    var q: i64 = n + 1
+    var d: i64 = 0
+    let line = TL[n as usize]
+    while q < TC {
+        let k = TK[q as usize]
+        if k == 0 || k == 77 { return q }
+        if k == 8 || k == 6 || k == 41 { d = d + 1 }
+        if k == 9 || k == 7 || k == 42 {
+            d = d - 1
+            if d == 0 && k == 9 { return q + 1 }
+        }
+        if d == 0 && k == 27 { return q }
+        if d == 0 && TL[q as usize] != line { return q }
+        q = q + 1
+    }
+    return TC
+}
+
+fn lmr_struct_def_eq(na: i64, nb: i64) -> bool with Panic, Mut {
+    // linear/affine prefix (the token before `struct`)
+    var la: i64 = 0
+    var lb: i64 = 0
+    if na >= 2 && (TK[(na - 2) as usize] == 62 || TK[(na - 2) as usize] == 73) { la = TK[(na - 2) as usize] }
+    if nb >= 2 && (TK[(nb - 2) as usize] == 62 || TK[(nb - 2) as usize] == 73) { lb = TK[(nb - 2) as usize] }
+    if la != lb { return false }
+    let ea = lmr_struct_decl_end(na)
+    let eb = lmr_struct_decl_end(nb)
+    var a: i64 = na + 1
+    var b: i64 = nb + 1
+    while true {
+        while a < ea && TK[a as usize] == 49 { a = a + 1 }
+        while b < eb && TK[b as usize] == 49 { b = b + 1 }
+        if a >= ea || b >= eb { return a >= ea && b >= eb }
+        if TK[a as usize] != TK[b as usize] { return false }
+        if TK[a as usize] == 3 && !lmr_tok_name_eq(a, b) { return false }
+        if TK[a as usize] == 4 && TV[a as usize] != TV[b as usize] { return false }
+        a = a + 1
+        b = b + 1
+    }
+    return false
+}
+
+fn lmr_struct_identity() with IO, Mut, Panic {
+    if IMP_COUNT == 0 { return }
+    // name tokens of top-level struct declarations, with their module
+    var s_tok: [i64; 8192] = [0; 8192]
+    var s_cnt: i64 = 0
+    var depth: i64 = 0
+    var t: i64 = 0
+    while t < TC {
+        let k = TK[t as usize]
+        if k == 77 { depth = 0 }
+        if k == 8 { depth = depth + 1 }
+        if k == 9 && depth > 0 { depth = depth - 1 }
+        if k == 46 && depth == 0 && t + 1 < TC && TK[(t + 1) as usize] == 3 && LMR_TOK_MOD[t as usize] >= 0 {
+            if s_cnt < 8192 {
+                s_tok[s_cnt as usize] = t + 1
+                s_cnt = s_cnt + 1
+            }
+        }
+        t = t + 1
+    }
+    var i: i64 = 0
+    while i < s_cnt {
+        let ti = s_tok[i as usize]
+        var j: i64 = 0
+        var done: i64 = 0
+        while j < i && done == 0 {
+            let tj = s_tok[j as usize]
+            if lmr_tok_name_eq(ti, tj) {
+                done = 1
+                if LMR_TOK_MOD[ti as usize] != LMR_TOK_MOD[tj as usize] && !lmr_struct_def_eq(tj, ti) {
+                    print("error[module_struct_identity]: struct `")
+                    lmr_print_tok(ti)
+                    print("` is defined differently in module ")
+                    lmr_print_mod(LMR_TOK_MOD[tj as usize])
+                    print("\n  and in module ")
+                    lmr_print_mod(LMR_TOK_MOD[ti as usize])
+                    print(".\n  Struct names are not module-qualified yet, so both would be\n")
+                    print("  compiled as ONE type. Rename one of them.\n")
+                    LMR_FAILED = 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn lmr_resolve() with IO, Mut, Panic, Div {
+    if IMP_COUNT == 0 { return }
+    // 1. module of every token
+    var m: i64 = 0
+    var t: i64 = 0
+    while t < TC {
+        if TK[t as usize] == 77 { m = m + 1 }
+        if LMR_PRELUDE_SRC_START >= 0 && TS[t as usize] >= LMR_PRELUDE_SRC_START && TK[t as usize] != 0 {
+            LMR_TOK_MOD[t as usize] = -1
+        } else {
+            LMR_TOK_MOD[t as usize] = m
+        }
+        t = t + 1
+    }
+    LMR_MOD_COUNT = m + 1
+    lmr_struct_identity()
+    // 2. top-level free fn definitions (not in impl/trait blocks, not generic)
+    LMR_DEF_COUNT = 0
+    var depth: i64 = 0
+    var block_depth_skip: i64 = -1
+    t = 0
+    while t < TC {
+        let k = TK[t as usize]
+        if k == 77 { depth = 0; block_depth_skip = -1 }
+        if depth == 0 && (k == 75 || k == 76) { block_depth_skip = 0 }
+        if k == 8 { depth = depth + 1 }
+        if k == 9 {
+            if depth > 0 { depth = depth - 1 }
+            if depth == 0 { block_depth_skip = -1 }
+        }
+        if k == 1 && depth == 0 && block_depth_skip < 0 && t + 1 < TC && TK[(t + 1) as usize] == 3 && LMR_TOK_MOD[t as usize] >= 0 {
+            let generic = t + 4 < TC && TK[(t + 2) as usize] == 23 && TK[(t + 4) as usize] == 24
+            if !generic && LMR_DEF_COUNT < 65536 {
+                LMR_DEF_TOK[LMR_DEF_COUNT as usize] = t + 1
+                LMR_DEF_MOD[LMR_DEF_COUNT as usize] = LMR_TOK_MOD[t as usize]
+                LMR_DEF_PUB[LMR_DEF_COUNT as usize] = 0
+                if t > 0 && TK[(t - 1) as usize] == 49 { LMR_DEF_PUB[LMR_DEF_COUNT as usize] = 1 }
+                LMR_DEF_COUNT = LMR_DEF_COUNT + 1
+            }
+        }
+        t = t + 1
+    }
+    // 3. collision names: defined in two or more modules
+    LMR_C_COUNT = 0
+    var i: i64 = 0
+    while i < LMR_DEF_COUNT {
+        let ti = LMR_DEF_TOK[i as usize]
+        if lmr_collision_of(ti) < 0 {
+            var j: i64 = i + 1
+            var other: i64 = 0
+            while j < LMR_DEF_COUNT && other == 0 {
+                if LMR_DEF_MOD[j as usize] != LMR_DEF_MOD[i as usize] && lmr_tok_name_eq(LMR_DEF_TOK[j as usize], ti) { other = 1 }
+                j = j + 1
+            }
+            if other == 1 && LMR_C_COUNT < 4096 {
+                var d1 = LMR_DEF_MOD[i as usize]
+                j = i + 1
+                while j < LMR_DEF_COUNT {
+                    if lmr_tok_name_eq(LMR_DEF_TOK[j as usize], ti) && LMR_DEF_MOD[j as usize] < d1 { d1 = LMR_DEF_MOD[j as usize] }
+                    j = j + 1
+                }
+                LMR_C_DEF[LMR_C_COUNT as usize] = i
+                LMR_C_D1[LMR_C_COUNT as usize] = d1
+                LMR_C_COUNT = LMR_C_COUNT + 1
+            } else if other == 1 {
+                print("error[module_name_resolution]: more than 4096 function names are defined in several modules;\n")
+                print("  cannot tell same-named functions apart, so compilation stops\n")
+                print("  here rather than bind a call to another module's function.\n")
+                LMR_FAILED = 1
+                return
+            }
+        }
+        i = i + 1
+    }
+    if LMR_C_COUNT == 0 { return }
+    if LMR_USE_OVERFLOW != 0 {
+        print("error[module_name_resolution]: more than 16384 `use` items; cannot resolve same-named functions\n")
+        LMR_FAILED = 1
+        return
+    }
+    // 4. per module: resolve each collision name, then rewrite its tokens.
+    var mstart: i64 = 0
+    var x: i64 = 0
+    while x < LMR_MOD_COUNT {
+        var mend: i64 = mstart
+        while mend < TC && TK[mend as usize] != 77 && TK[mend as usize] != 0 && LMR_TOK_MOD[mend as usize] == x { mend = mend + 1 }
+        // this module's uses, in order, paired with the records resolve_imports kept
+        LMR_MOD_USE_N = 0
+        var ri: i64 = 0
+        while ri < LMR_USE_COUNT {
+            if LMR_USE_MOD[ri as usize] == x && LMR_MOD_USE_N < 1024 {
+                LMR_MOD_USE_TGT[LMR_MOD_USE_N as usize] = LMR_USE_TGT[ri as usize]
+                LMR_MOD_USE_TOK[LMR_MOD_USE_N as usize] = -1
+                // the token of the `use` on that line of this module
+                var q: i64 = mstart
+                while q < mend {
+                    if lmr_is_use_tok(q) && TL[q as usize] == LMR_USE_LINE[ri as usize] {
+                        LMR_MOD_USE_TOK[LMR_MOD_USE_N as usize] = q
+                        q = mend
+                    }
+                    q = q + 1
+                }
+                LMR_MOD_USE_N = LMR_MOD_USE_N + 1
+            }
+            ri = ri + 1
+        }
+        var c: i64 = 0
+        while c < LMR_C_COUNT {
+            let n = LMR_DEF_TOK[LMR_C_DEF[c as usize] as usize]
+            let d1 = LMR_C_D1[c as usize]
+            let target = lmr_resolve_in_module(x, c)
+            if target == -2 { LMR_FAILED = 1 }
+            let has_local = lmr_mod_has_local(x, n, mstart, mend)
+            var q: i64 = mstart
+            while q < mend {
+                if TK[q as usize] == 3 && lmr_tok_name_eq(q, n) {
+                    var prev: i64 = 0
+                    if q > 0 { prev = TK[(q - 1) as usize] }
+                    var next: i64 = 0
+                    if q + 1 < TC { next = TK[(q + 1) as usize] }
+                    if prev == 1 {
+                        // a definition: only a non-first definer is renamed
+                        if lmr_is_def_tok(q) && x != d1 {
+                            lmr_rewrite_tok(q, x, d1)
+                            LMR_RENAMED = LMR_RENAMED + 1
+                        }
+                    } else if prev == 51 && q >= 2 && TK[(q - 2) as usize] == 3 {
+                        // q::N(...) -- resolve the qualifier through this module's uses
+                        if next == 6 {
+                            var qt: i64 = -1
+                            var k2: i64 = 0
+                            while k2 < LMR_MOD_USE_N {
+                                let ut = LMR_MOD_USE_TOK[k2 as usize]
+                                if ut >= 0 {
+                                    let ue = lmr_use_end(ut)
+                                    var last: i64 = -1
+                                    var r: i64 = ut + 1
+                                    while r < ue {
+                                        if TK[r as usize] == 8 || TK[r as usize] == 19 || TK[r as usize] == 37 { r = ue; continue }
+                                        if TK[r as usize] == 3 { last = r }
+                                        r = r + 1
+                                    }
+                                    if last >= 0 && lmr_tok_name_eq(last, q - 2) {
+                                        let tg = LMR_MOD_USE_TGT[k2 as usize]
+                                        if tg >= 0 && lmr_mod_exports(tg, n) {
+                                            if qt >= 0 && qt != tg {
+                                                print("error[module_name_resolution]: a module-qualified call in module ")
+                                                lmr_print_mod(x)
+                                                print("\n  names a qualifier that resolves to two modules defining `")
+                                                lmr_print_tok(n)
+                                                print("`.\n")
+                                                LMR_FAILED = 1
+                                            }
+                                            qt = tg
+                                        }
+                                    }
+                                }
+                                k2 = k2 + 1
+                            }
+                            if qt >= 0 { lmr_rewrite_tok(q, qt, d1) }
+                        }
+                    } else if prev == 50 {
+                        // method call / field access: not a free fn reference
+                    } else if lmr_is_use_line_tok(q) {
+                        // an import list entry: the binding is decided above
+                    } else if target >= 0 {
+                        if next == 6 {
+                            lmr_rewrite_tok(q, target, d1)
+                        } else if next != 43 && prev != 11 && prev != 12 && prev != 54 && prev != 45 && !has_local && !lmr_arrow_follows_on_line(q) {
+                            // a bare fn value (passed or stored). Not a declared
+                            // local anywhere in the module, and not a match-arm
+                            // binder (a `=>` later on the same line).
+                            lmr_rewrite_tok(q, target, d1)
+                        }
+                    }
+                }
+                q = q + 1
+            }
+            c = c + 1
+        }
+        mstart = mend
+        if mstart < TC && TK[mstart as usize] == 77 { mstart = mstart + 1 }
+        x = x + 1
+    }
+    // 5. apply
+    var w: i64 = 0
+    while w < LMR_RW_COUNT {
+        let rt = LMR_RW_TOK[w as usize]
+        let st = lmr_append_mangled(rt, LMR_RW_MOD[w as usize])
+        TS[rt as usize] = st
+        TE[rt as usize] = SRC_LEN
+        w = w + 1
+    }
+    if LMR_RENAMED > 0 {
+        print("module_name_resolution: renamed ")
+        print_int(LMR_RENAMED)
+        print(" same-named fn definition(s) apart\n")
+    }
+}
+
+
 // ─── Import resolver ───
 // Hash IMP_PATH[0..len] for dedup
 fn imp_path_hash(len: i64) -> i64 with Panic, Mut {
@@ -45036,12 +45689,16 @@ fn append_native_prelude() with Mut, Panic, Div {
 // Resolve and load use statements from SRC[0..SRC_LEN]
 fn resolve_imports() with IO, Mut, Panic, Div {
     var pos: i64 = 0
+    var lmr_cur_mod: i64 = 0
+    var lmr_line: i64 = 1
     while pos < SRC_LEN {
         if sb(pos) == 1 {
             var marker_s: i64 = pos + 1
             var marker_e: i64 = marker_s
             while marker_e < SRC_LEN && sb(marker_e) != 2 { marker_e = marker_e + 1 }
             if marker_e < SRC_LEN {
+                lmr_cur_mod = lmr_cur_mod + 1
+                lmr_line = 1
                 set_base_dir_from_src_path(marker_s, marker_e)
                 pos = marker_e + 1
                 continue
@@ -45050,6 +45707,17 @@ fn resolve_imports() with IO, Mut, Panic, Div {
         // Check for "use " at line start (117=u, 115=s, 101=e, 32=space)
         if pos + 4 < SRC_LEN && sb(pos) == 117 && sb(pos+1) == 115 && sb(pos+2) == 101 && sb(pos+3) == 32 {
             pos = pos + 4  // skip "use "
+            // #2773: this use's record; its target is filled in below once known.
+            var lmr_rec: i64 = -1
+            if LMR_USE_COUNT < 16384 {
+                lmr_rec = LMR_USE_COUNT
+                LMR_USE_MOD[lmr_rec as usize] = lmr_cur_mod
+                LMR_USE_LINE[lmr_rec as usize] = lmr_line
+                LMR_USE_TGT[lmr_rec as usize] = -1
+                LMR_USE_COUNT = LMR_USE_COUNT + 1
+            } else {
+                LMR_USE_OVERFLOW = 1
+            }
             // Extract module path until newline, semicolon, or ::*
             var path_start: i64 = pos
             var path_end: i64 = pos
@@ -45569,7 +46237,10 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                             if IMP_LOADED_PATHS[(off + mi) as usize] != IMP_PATH[mi as usize] { match_ok = 0 }
                             mi = mi + 1
                         }
-                        if match_ok == 1 { already = 1 }
+                        if match_ok == 1 {
+                            already = 1
+                            if lmr_rec >= 0 { LMR_USE_TGT[lmr_rec as usize] = di + 1 }
+                        }
                     }
                     di = di + 1
                 }
@@ -45627,6 +46298,7 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                                 ri = ri + 1
                             }
                             IMP_PATHS_USED = IMP_PATHS_USED + fp_len
+                            if lmr_rec >= 0 { LMR_USE_TGT[lmr_rec as usize] = IMP_COUNT + 1 }
                             IMP_COUNT = IMP_COUNT + 1
                             print("import: ")
                             print_imp_path()
@@ -45640,7 +46312,10 @@ fn resolve_imports() with IO, Mut, Panic, Div {
         }
         // Advance to next line
         while pos < SRC_LEN && sb(pos) != 10 { pos = pos + 1 }
-        if pos < SRC_LEN { pos = pos + 1 }
+        if pos < SRC_LEN {
+            pos = pos + 1
+            lmr_line = lmr_line + 1
+        }
     }
 }
 
@@ -46092,6 +46767,7 @@ fn strip_extern_blocks() with IO, Mut, Panic, Div {
         r = r + 1
     }
     SRC_LEN = w
+    LMR_PRELUDE_SRC_START = SRC_LEN
     // Phase 3: Append Sounio stubs for each parsed extern "C" function.
     // Stubs are appended to SRC here; append_native_prelude appends __native_* helpers after us.
     // We call append_extern_c_stubs() which generates the correct stub for each extern fn.
@@ -46242,6 +46918,14 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     // Collect `causal graph` blocks and remove them from the token stream before
     // any pass runs, so an independence claim can be discharged regardless of
     // whether the graph is declared above or below it.
+    // #2773: bind each module's calls to its own same-named functions (and
+    // refuse differing same-named structs) before any pass reads a name.
+    lmr_resolve()
+    if LMR_FAILED != 0 { return 1 }
+    if SRC_OVERFLOW != 0 {
+        print("error: source too large after module-local renaming\n")
+        return 1
+    }
     cg_collect()
     dsep_lower()
     dsep_witness_gate()

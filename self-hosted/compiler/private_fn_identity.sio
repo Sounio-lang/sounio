@@ -96,11 +96,64 @@
 // (`var`/`const` items are BSS slots keyed by name) and same-named types
 // (struct_layouts / enum_variants are name-keyed too). See
 // docs/audit/MADAROS_PRIVATE_FN_IDENTITY_2026-09-21.md.
+//
+// ---------------------------------------------------------------------------
+// PUB PHASE (#2773): same-named PUBLIC fns.
+// ---------------------------------------------------------------------------
+// Two modules that each define a plain `pub fn energy` collided exactly like
+// two private ones did: one IR slot, first-loaded body wins. A module B whose
+// own code called its own `energy()` silently ran module A's body whenever the
+// main file had imported A's `energy` (A loaded first). Measured: expected
+// -14.5, printed 3.0, on both engines.
+//
+// A pub name cannot simply be renamed in its own module: importers spell it.
+// So this phase renames it AND rewires every importer, before the private
+// phase runs:
+//
+//   pub fn N defined (real fn, plain `pub`) in modules d1 < d2 < ... (load order)
+//     -> d1 keeps the bare name N (it is the body every unresolved reference
+//        bound to before, so nothing that was not provably wrong changes);
+//     -> every other definer dk renames its definition, and every reference
+//        to N inside dk, to N__m<dk>   (a module's own definition wins);
+//     -> in every OTHER module X that refers to N, the reference is resolved
+//        through X's OWN `use` items, Rust-style:
+//          an explicit import (`use p::{N}` or path-form `use p::N`) of a
+//          definer beats a glob (`use p::*`) of a definer;
+//          two explicit imports of different definers -> REFUSED;
+//          two globs of different definers -> REFUSED, unless one of them is
+//          d1 (then d1, the pre-existing binding, with a warning);
+//          resolved to dk (k >= 2) -> X's references and the import entry
+//          itself become N__m<dk>;
+//          resolved to d1, or not imported from any definer at all -> left
+//          bare (unchanged behaviour).
+//     -> a module-qualified reference `q::N` is resolved through the `use` in
+//        X that names module q, and gets the same treatment.
+//
+// The `use` item -> loaded-module map is handed in by module_frontend
+// (pfi_use_map_*), computed with the SAME resolver its BFS loader used, so
+// "which module did X import" is answered by file identity, not by spelling.
+// Without a map (no multi-module entry point noted one) the phase is skipped.
+//
+// Locals ARE scoped in this phase (unlike the private one, which refuses on
+// any same-spelled binder): a reference inside the scope of a let/var, fn or
+// closure parameter, `for` variable or match-pattern binder of the same
+// spelling means the local and is left alone. A bare value use in a slot that
+// cannot be rewritten in place (match-arm body, struct-literal field value)
+// still REFUSES, as do a taken generated name and capacity exhaustion.
+//
+// Same-named STRUCTS are not renamed (types are name-keyed in far more tables
+// than fns are); module_struct_identity_check REFUSES a program whose loaded
+// modules define one struct name with two different definitions, instead of
+// letting the checker merge them (false E046/E012) or the lowering pick one
+// layout for both. Identical copies are still accepted.
+//
+// lean_single (self-hosted/compiler/lean_single.sio) is NOT changed by this
+// and still binds first-loaded; see docs/compiler/KNOWN_LIMITATIONS.md.
 
 use parser::ast::*
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
-use ir::ir::{ir_mangle_method_name}
+use ir::ir::{ir_mangle_method_name, ir_path_last_name}
 
 let PFI_SLOTS: i64 = 65536
 let PFI_T_MAX: i64 = 512
@@ -154,6 +207,64 @@ var BSH_OFF_CHECKED: i64 = 0
 
 var PFI_OFF: i64 = 0
 var PFI_OFF_CHECKED: i64 = 0
+
+// Per-entry rewrite target (the module whose definition the name means) and
+// whether the entry renames THIS module's own definition. The private phase
+// always uses (PFI_CUR_MOD, 1).
+var PFI_T_TGT: [i64; 512]
+var PFI_T_DEF: [i64; 512]
+
+// 0 = private phase, 1 = pub phase (#2773).
+var PFI_PHASE: i64 = 0
+
+// Pub-phase lexical scope: table indices of entries currently shadowed by a
+// local binder of the same spelling. Only ever pushed in the pub phase.
+let PFI_SC_MAX: i64 = 4096
+var PFI_SC_IDX: [i64; 4096]
+var PFI_SC_DEPTH: i64 = 0
+var PFI_SC_OVERFLOW: i64 = 0
+
+// `use` item -> loaded module index, per module, in item order. Filled by
+// module_frontend (pfi_use_map_*) right before private_fn_identity_apply.
+let PFI_UM_MAX: i64 = 32768
+var PFI_UM_TGT: [i64; 32768]
+var PFI_UM_NAMED: [i64; 32768]
+var PFI_UM_START: [i64; 256]
+var PFI_UM_LEN: [i64; 256]
+var PFI_UM_COUNT: i64 = 0
+var PFI_UM_VALID: i64 = 0
+var PFI_UM_OVERFLOW: i64 = 0
+
+// Pub-collision names: plain-pub real fns defined in >= 2 loaded modules.
+// D1 = the lowest-index definer (keeps the bare name). DEFBY[k*256+j] = 1 when
+// module j defines name k as a plain-pub real fn.
+let PFI_PC_MAX: i64 = 512
+var PFI_PC_BUF: [i8; 196608]
+var PFI_PC_LEN: [i64; 512]
+var PFI_PC_HASH: [i64; 512]
+var PFI_PC_D1: [i64; 512]
+var PFI_PC_DEFBY: [i8; 131072]
+var PFI_PC_COUNT: i64 = 0
+
+// Per-module qualifier table (pub phase): every resolved `use` of the module
+// being processed, as the full joined path text and its last segment, with the
+// module it resolves to. QR pairs (pub-collision name, qualifier entry) whose
+// target defines that name.
+let PFI_Q_MAX: i64 = 512
+var PFI_Q_FULL: [i8; 196608]
+var PFI_Q_FULL_LEN: [i64; 512]
+var PFI_Q_LAST: [i8; 196608]
+var PFI_Q_LAST_LEN: [i64; 512]
+var PFI_Q_TGT: [i64; 512]
+var PFI_Q_COUNT: i64 = 0
+let PFI_QR_MAX: i64 = 4096
+var PFI_QR_PC: [i64; 4096]
+var PFI_QR_Q: [i64; 4096]
+var PFI_QR_COUNT: i64 = 0
+var PFI_QUAL_AMBIG: i64 = 0
+
+var PFI_PUB_RENAMED: i64 = 0
+var PFI_PUB_REWIRED_MODS: i64 = 0
 
 fn pfi_disabled() -> bool with IO, Mut, Panic, Div {
     if PFI_OFF_CHECKED == 0 {
@@ -209,6 +320,53 @@ fn pfi_fn_def_ptr(opt: Option<Box<FnDef> >) -> *mut FnDef with Mut, Panic, Div, 
         Some(f) => f as *mut FnDef
         None => 0 as *mut FnDef
     }
+}
+
+fn pfi_sl_ptr(opt: Option<Box<StringList> >) -> *mut StringList with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(l) => l as *mut StringList
+        None => 0 as *mut StringList
+    }
+}
+
+fn pfi_sl_next(node: *mut StringList) -> *mut StringList with Mut, Panic, Div {
+    match (*node).tail {
+        Some(n) => n as *mut StringList
+        None => 0 as *mut StringList
+    }
+}
+
+fn pfi_importlist_ptr(opt: Option<Box<ImportItemList> >) -> *mut ImportItemList with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(l) => l as *mut ImportItemList
+        None => 0 as *mut ImportItemList
+    }
+}
+
+fn pfi_importlist_next(node: *mut ImportItemList) -> *mut ImportItemList with Mut, Panic, Div {
+    match (*node).tail {
+        Some(n) => n as *mut ImportItemList
+        None => 0 as *mut ImportItemList
+    }
+}
+
+// Overwrite the LAST segment of a multi-segment path whose first tail node is
+// `first_tail` (the head segment is never the last one here). 1-level stores
+// through a node pointer only.
+fn pfi_sl_set_last(first_tail: *mut StringList, m: Name) with Mut, Panic, Div {
+    if first_tail == 0 as *mut StringList { return }
+    var node = first_tail
+    var going = true
+    while going {
+        let next = pfi_sl_next(node)
+        if next == 0 as *mut StringList {
+            going = false
+        } else {
+            node = next
+        }
+    }
+    (*node).head_buf = m.buf
+    (*node).head_len = m.len
 }
 
 // ---------------------------------------------------------------------------
@@ -462,7 +620,7 @@ fn pfi_table_find_generated_name(n: Name) -> i64 with Mut, Panic, Div, Alloc {
     if n.len <= 0 { return 0 - 1 }
     var i: i64 = 0
     while i < PFI_T_COUNT {
-        let gen = pfi_mangle(pfi_table_name(i), PFI_CUR_MOD)
+        let gen = pfi_mangle(pfi_table_name(i), PFI_T_TGT[i as usize])
         if gen.len > 0 && name_eq(gen, n) { return i }
         i = i + 1
     }
@@ -480,6 +638,8 @@ fn pfi_table_add(programs: &! [Program; 256], count: i64, n: Name, mod_idx: i64,
     PFI_T_LEN[idx as usize] = n.len
     PFI_T_UNSAFE[idx as usize] = 0
     PFI_T_REASON[idx as usize] = 0
+    PFI_T_TGT[idx as usize] = mod_idx
+    PFI_T_DEF[idx as usize] = 1
     let base = idx * 384
     var k: i64 = 0
     while k < n.len {
@@ -546,6 +706,375 @@ fn pfi_build_table(programs: &! [Program; 256], count: i64, items: Option<Box<It
     }
 }
 
+// Pub phase: add `n` -> `n__m<tgt>` to this module's table. is_def = 1 when the
+// entry renames this module's OWN plain-pub definition (tgt == PFI_CUR_MOD).
+fn pfi_table_add_pub(n: Name, tgt: i64, is_def: i64) with Mut, Panic, Div, Alloc {
+    if pfi_table_find_name(n) >= 0 { return }
+    if PFI_T_COUNT >= PFI_T_MAX {
+        PFI_T_OVERFLOW = 1
+        return
+    }
+    let idx = PFI_T_COUNT
+    PFI_T_HASH[idx as usize] = ast_name_hash(n)
+    PFI_T_LEN[idx as usize] = n.len
+    PFI_T_UNSAFE[idx as usize] = 0
+    PFI_T_REASON[idx as usize] = 0
+    PFI_T_TGT[idx as usize] = tgt
+    PFI_T_DEF[idx as usize] = is_def
+    let base = idx * 384
+    var k: i64 = 0
+    while k < n.len {
+        PFI_T_BUF[(base + k) as usize] = n.buf[k as usize]
+        k = k + 1
+    }
+    PFI_T_COUNT = idx + 1
+}
+
+// ---------------------------------------------------------------------------
+// Pub-phase lexical scope
+// ---------------------------------------------------------------------------
+
+fn pfi_scope_bind(n: Name) with Mut, Panic, Div {
+    if PFI_PHASE != 1 { return }
+    let idx = pfi_table_find_name(n)
+    if idx < 0 { return }
+    if PFI_SC_DEPTH >= PFI_SC_MAX {
+        PFI_SC_OVERFLOW = 1
+        return
+    }
+    PFI_SC_IDX[PFI_SC_DEPTH as usize] = idx
+    PFI_SC_DEPTH = PFI_SC_DEPTH + 1
+}
+
+fn pfi_scope_shadowed(idx: i64) -> bool with Mut, Panic, Div {
+    if PFI_PHASE != 1 { return false }
+    var i: i64 = 0
+    while i < PFI_SC_DEPTH {
+        if PFI_SC_IDX[i as usize] == idx { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn pfi_pattern_bind(p: Pattern) with Mut, Panic, Div, Alloc {
+    if PFI_PHASE != 1 { return }
+    if p.kind == PatternKind::PatBinding {
+        pfi_scope_bind(p.name)
+    }
+    var sub = p.sub_patterns
+    var sgo = true
+    while sgo {
+        match sub {
+            None => { sgo = false }
+            Some(l) => {
+                pfi_pattern_bind((*l).head)
+                sub = (*l).tail
+            }
+        }
+    }
+    var pf = p.pat_fields
+    var fgo = true
+    while fgo {
+        match pf {
+            None => { fgo = false }
+            Some(l) => {
+                pfi_pattern_bind((*l).head.pattern)
+                pf = (*l).tail
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pub phase: the `use` map (filled by module_frontend) and the collision list
+// ---------------------------------------------------------------------------
+
+// Start a fresh map. Called once per compile by module_frontend, then one
+// pfi_use_map_module_begin per loaded module followed by one
+// pfi_use_map_note per `use` item of that module, in item order.
+pub fn pfi_use_map_reset() with Mut {
+    PFI_UM_COUNT = 0
+    PFI_UM_VALID = 1
+    PFI_UM_OVERFLOW = 0
+    var i: i64 = 0
+    while i < 256 {
+        PFI_UM_START[i as usize] = 0
+        PFI_UM_LEN[i as usize] = 0
+        i = i + 1
+    }
+}
+
+pub fn pfi_use_map_module_begin(mod_idx: i64) with Mut, Panic {
+    if mod_idx < 0 || mod_idx >= 256 { return }
+    PFI_UM_START[mod_idx as usize] = PFI_UM_COUNT
+    PFI_UM_LEN[mod_idx as usize] = 0
+}
+
+// tgt = loaded-module index the `use` resolves to (-1 when it resolves to no
+// loaded module); named = the path-form `use a::b::f` resolved to a/b.sio.
+pub fn pfi_use_map_note(mod_idx: i64, tgt: i64, named: bool) with Mut, Panic {
+    if mod_idx < 0 || mod_idx >= 256 { return }
+    if PFI_UM_COUNT >= PFI_UM_MAX {
+        PFI_UM_OVERFLOW = 1
+        return
+    }
+    PFI_UM_TGT[PFI_UM_COUNT as usize] = tgt
+    PFI_UM_NAMED[PFI_UM_COUNT as usize] = if named { 1 } else { 0 }
+    PFI_UM_COUNT = PFI_UM_COUNT + 1
+    PFI_UM_LEN[mod_idx as usize] = PFI_UM_LEN[mod_idx as usize] + 1
+}
+
+fn pfi_use_target(mod_idx: i64, ord: i64) -> i64 with Mut, Panic {
+    if mod_idx < 0 || mod_idx >= 256 { return 0 - 1 }
+    if ord < 0 || ord >= PFI_UM_LEN[mod_idx as usize] { return 0 - 1 }
+    PFI_UM_TGT[(PFI_UM_START[mod_idx as usize] + ord) as usize]
+}
+
+fn pfi_use_named(mod_idx: i64, ord: i64) -> bool with Mut, Panic {
+    if mod_idx < 0 || mod_idx >= 256 { return false }
+    if ord < 0 || ord >= PFI_UM_LEN[mod_idx as usize] { return false }
+    PFI_UM_NAMED[(PFI_UM_START[mod_idx as usize] + ord) as usize] == 1
+}
+
+fn pfi_bytes_eq_name(buf_kind: i64, idx: i64, len: i64, n: Name) -> bool with Mut, Panic, Div {
+    if len != n.len { return false }
+    let base = idx * 384
+    var k: i64 = 0
+    while k < len {
+        var b: i8 = 0 as i8
+        if buf_kind == 0 {
+            b = PFI_PC_BUF[(base + k) as usize]
+        } else if buf_kind == 1 {
+            b = PFI_Q_FULL[(base + k) as usize]
+        } else {
+            b = PFI_Q_LAST[(base + k) as usize]
+        }
+        if b != n.buf[k as usize] { return false }
+        k = k + 1
+    }
+    true
+}
+
+fn pfi_pc_find(n: Name) -> i64 with Mut, Panic, Div {
+    if PFI_PC_COUNT <= 0 || n.len <= 0 { return 0 - 1 }
+    let h = ast_name_hash(n)
+    var i: i64 = 0
+    while i < PFI_PC_COUNT {
+        if PFI_PC_HASH[i as usize] == h && PFI_PC_LEN[i as usize] == n.len {
+            if pfi_bytes_eq_name(0, i, n.len, n) { return i }
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn pfi_pc_name(k: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 384], len: PFI_PC_LEN[k as usize] }
+    let base = k * 384
+    var i: i64 = 0
+    while i < n.len {
+        n.buf[i as usize] = PFI_PC_BUF[(base + i) as usize]
+        i = i + 1
+    }
+    n
+}
+
+fn pfi_pc_defines(k: i64, mod_idx: i64) -> bool with Mut, Panic {
+    if k < 0 || mod_idx < 0 || mod_idx >= 256 { return false }
+    PFI_PC_DEFBY[(k * 256 + mod_idx) as usize] == (1 as i8)
+}
+
+// A top-level plain-`pub` real fn named `n` in this item list (exact).
+fn pfi_items_define_pub_real(items: Option<Box<ItemList> >, n: Name) -> bool with Mut, Panic, Div {
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if pfi_item_real_fn((*list).head) && (*list).head.visibility.kind == 1 {
+                    if name_eq((*list).head.name, n) { return true }
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    false
+}
+
+// Record `n` (first seen as a plain-pub real fn of module d1, the lowest index
+// that defines it, because modules are scanned in load order) with the set of
+// its plain-pub real definers. Returns false on capacity exhaustion.
+fn pfi_pc_add(programs: &! [Program; 256], count: i64, n: Name, d1: i64) -> bool with Mut, Panic, Div, Alloc {
+    if PFI_PC_COUNT >= PFI_PC_MAX { return false }
+    if n.len <= 0 || n.len > 384 { return false }
+    let k = PFI_PC_COUNT
+    PFI_PC_HASH[k as usize] = ast_name_hash(n)
+    PFI_PC_LEN[k as usize] = n.len
+    PFI_PC_D1[k as usize] = d1
+    let base = k * 384
+    var i: i64 = 0
+    while i < n.len {
+        PFI_PC_BUF[(base + i) as usize] = n.buf[i as usize]
+        i = i + 1
+    }
+    var j: i64 = 0
+    while j < 256 {
+        PFI_PC_DEFBY[(k * 256 + j) as usize] = 0 as i8
+        j = j + 1
+    }
+    j = 0
+    while j < count && j < 256 {
+        var prog = (*programs)[j as usize]
+        if pfi_items_define_pub_real(prog.items, n) {
+            PFI_PC_DEFBY[(k * 256 + j) as usize] = 1 as i8
+        }
+        j = j + 1
+    }
+    PFI_PC_COUNT = k + 1
+    true
+}
+
+// Does any module other than `not_mod` define `n` as a plain-pub real fn?
+fn pfi_pub_defined_elsewhere(programs: &! [Program; 256], count: i64, not_mod: i64, n: Name) -> bool with Mut, Panic, Div {
+    var j: i64 = 0
+    while j < count && j < 256 {
+        if j != not_mod {
+            var prog = (*programs)[j as usize]
+            if pfi_items_define_pub_real(prog.items, n) { return true }
+        }
+        j = j + 1
+    }
+    false
+}
+
+fn pfi_pc_collect(programs: &! [Program; 256], count: i64) -> bool with Mut, Panic, Div, Alloc {
+    PFI_PC_COUNT = 0
+    var d: i64 = 0
+    while d < count && d < 256 {
+        var prog = (*programs)[d as usize]
+        var cur = prog.items
+        var going = true
+        while going {
+            match cur {
+                None => { going = false }
+                Some(list) => {
+                    if pfi_item_real_fn((*list).head) && (*list).head.visibility.kind == 1 {
+                        if pfi_census_mods(ast_name_hash((*list).head.name)) >= 2 {
+                            if pfi_pc_find((*list).head.name) < 0 {
+                                if pfi_pub_defined_elsewhere(programs, count, d, (*list).head.name) {
+                                    if !pfi_pc_add(programs, count, (*list).head.name, d) {
+                                        return false
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    cur = (*list).tail
+                }
+            }
+        }
+        d = d + 1
+    }
+    true
+}
+
+// Is `n` one of the names in this `use` item's braced list?
+fn pfi_import_list_has(opt: Option<Box<ImportItemList> >, n: Name) -> bool with Mut, Panic, Div {
+    var cur = opt
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(l) => {
+                if name_eq((*l).head, n) { return true }
+                cur = (*l).tail
+            }
+        }
+    }
+    false
+}
+
+// The qualifier table of module `mod_idx`: every `use` that resolves to a
+// loaded module and is not a path-form named-item import.
+fn pfi_build_qual_table(items: Option<Box<ItemList> >, mod_idx: i64) -> bool with Mut, Panic, Div, Alloc {
+    PFI_Q_COUNT = 0
+    var ord: i64 = 0
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if (*list).head.kind == ItemKind::ItemUse {
+                    let tgt = pfi_use_target(mod_idx, ord)
+                    if tgt >= 0 && !pfi_use_named(mod_idx, ord) && (*list).head.use_path.seg_count >= 1 {
+                        if PFI_Q_COUNT >= PFI_Q_MAX { return false }
+                        let full = ast_path_range_name((*list).head.use_path, 0, (*list).head.use_path.seg_count - 1)
+                        let last = ir_path_last_name((*list).head.use_path)
+                        if full.len > 0 && last.len > 0 {
+                            let q = PFI_Q_COUNT
+                            let base = q * 384
+                            var i: i64 = 0
+                            while i < full.len {
+                                PFI_Q_FULL[(base + i) as usize] = full.buf[i as usize]
+                                i = i + 1
+                            }
+                            PFI_Q_FULL_LEN[q as usize] = full.len
+                            i = 0
+                            while i < last.len {
+                                PFI_Q_LAST[(base + i) as usize] = last.buf[i as usize]
+                                i = i + 1
+                            }
+                            PFI_Q_LAST_LEN[q as usize] = last.len
+                            PFI_Q_TGT[q as usize] = tgt
+                            PFI_Q_COUNT = q + 1
+                        }
+                    }
+                    ord = ord + 1
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    true
+}
+
+// The module a qualified reference `q::N` means, through this module's qualifier
+// table; -1 when q names no `use` of a definer of N. Two different matching
+// definers set PFI_QUAL_AMBIG (refused after the walk).
+fn pfi_qual_target(path: AstPath) -> i64 with Mut, Panic, Div, Alloc {
+    if PFI_QR_COUNT <= 0 || path.seg_count < 2 { return 0 - 1 }
+    let last = ir_path_last_name(path)
+    let k = pfi_pc_find(last)
+    if k < 0 { return 0 - 1 }
+    let q = ast_path_range_name(path, 0, path.seg_count - 2)
+    if q.len <= 0 { return 0 - 1 }
+    var found: i64 = 0 - 1
+    var r: i64 = 0
+    while r < PFI_QR_COUNT {
+        if PFI_QR_PC[r as usize] == k {
+            let qi = PFI_QR_Q[r as usize]
+            var hit = pfi_bytes_eq_name(1, qi, PFI_Q_FULL_LEN[qi as usize], q)
+            if !hit && path.seg_count == 2 {
+                hit = pfi_bytes_eq_name(2, qi, PFI_Q_LAST_LEN[qi as usize], q)
+            }
+            if hit {
+                let t = PFI_Q_TGT[qi as usize]
+                if found >= 0 && found != t {
+                    PFI_QUAL_AMBIG = 1
+                    return 0 - 1
+                }
+                found = t
+            }
+        }
+        r = r + 1
+    }
+    if found < 0 { return 0 - 1 }
+    if found == PFI_PC_D1[k as usize] { return 0 - 1 }
+    found
+}
+
 // Remember the unrenamable entries of this module's table until every module has
 // been processed. Returns false when the record is full.
 fn pfi_record_skipped(mod_idx: i64) -> bool with Mut, Panic, Div {
@@ -605,7 +1134,11 @@ fn pfi_note_unsafe_name(n: Name) with Mut, Panic, Div {
 // the rename would silently redirect the call, or checker's env-first lookup
 // would report it as the wrong kind of value.
 fn pfi_note_binder(n: Name) with Mut, Panic, Div, Alloc {
-    pfi_note_unsafe_name(n)
+    // Pub phase: a same-spelled binder is SCOPED (pfi_scope_bind), not a reason
+    // to refuse; only the generated-name clash below still is.
+    if PFI_PHASE != 1 {
+        pfi_note_unsafe_name(n)
+    }
     let gi = pfi_table_find_generated_name(n)
     if gi >= 0 {
         if PFI_T_UNSAFE[gi as usize] == 0 {
@@ -615,16 +1148,25 @@ fn pfi_note_binder(n: Name) with Mut, Panic, Div, Alloc {
     }
 }
 
-// The identifier is a bare Ident / single-segment Path.
+fn pfi_note_unsafe_unless_shadowed(n: Name) with Mut, Panic, Div {
+    let idx = pfi_table_find_name(n)
+    if idx < 0 { return }
+    if pfi_scope_shadowed(idx) { return }
+    pfi_note_unsafe_name(n)
+}
+
+// The identifier is a bare Ident / single-segment Path. In the pub phase a
+// reference to a local of the same spelling is not a use of the fn.
 fn pfi_note_embedded_value(e: Expr) with Mut, Panic, Div {
     if e.kind == ExprKind::ExprIdent {
-        pfi_note_unsafe_name(e.name)
+        pfi_note_unsafe_unless_shadowed(e.name)
     } else if e.kind == ExprKind::ExprPath {
         if e.path.seg_count == 1 {
-            pfi_note_unsafe_name(Name { buf: e.path.segments.head_buf, len: e.path.segments.head_len })
+            pfi_note_unsafe_unless_shadowed(Name { buf: e.path.segments.head_buf, len: e.path.segments.head_len })
         }
     }
 }
+
 
 fn pfi_pattern(p: Pattern) with Mut, Panic, Div, Alloc {
     if p.kind == PatternKind::PatBinding {
@@ -658,25 +1200,45 @@ fn pfi_pattern(p: Pattern) with Mut, Panic, Div, Alloc {
 // MODE 1 helpers: the in-place rewrites
 // ---------------------------------------------------------------------------
 
-// Rename a Box'd Expr node if it is a bare reference to a table name.
+// May the reference to table entry `idx` be rewritten here? Not when it is
+// unsafe, nor (pub phase) inside the scope of a same-spelled local.
+fn pfi_entry_rewritable(idx: i64) -> bool with Mut, Panic, Div {
+    if idx < 0 { return false }
+    if PFI_T_UNSAFE[idx as usize] != 0 { return false }
+    if pfi_scope_shadowed(idx) { return false }
+    true
+}
+
+// Rename a Box'd Expr node if it is a bare reference to a table name, or (pub
+// phase) a module-qualified reference `q::N` whose qualifier names a `use` of a
+// non-first definer of N.
 fn pfi_rename_expr_node(p: *mut Expr) with Mut, Panic, Div, Alloc {
     if (*p).kind == ExprKind::ExprIdent {
         let idx = pfi_table_find_name((*p).name)
-        if idx >= 0 && PFI_T_UNSAFE[idx as usize] == 0 {
-            let m = pfi_mangle((*p).name, PFI_CUR_MOD)
+        if pfi_entry_rewritable(idx) {
+            let m = pfi_mangle((*p).name, PFI_T_TGT[idx as usize])
             if m.len > 0 { (*p).name = m }
         }
     } else if (*p).kind == ExprKind::ExprPath && (*p).path.seg_count == 1 {
         let single = Name { buf: (*p).path.segments.head_buf, len: (*p).path.segments.head_len }
         let idx = pfi_table_find_name(single)
-        if idx >= 0 && PFI_T_UNSAFE[idx as usize] == 0 {
-            let m = pfi_mangle(single, PFI_CUR_MOD)
+        if pfi_entry_rewritable(idx) {
+            let m = pfi_mangle(single, PFI_T_TGT[idx as usize])
             if m.len > 0 {
                 (*p).path = AstPath {
                     segments: StringList { head_buf: m.buf, head_len: m.len, tail: None },
                     seg_count: 1,
                 }
                 (*p).name = m
+            }
+        }
+    } else if PFI_PHASE == 1 && (*p).kind == ExprKind::ExprPath && (*p).path.seg_count >= 2 {
+        let t = pfi_qual_target((*p).path)
+        if t >= 0 {
+            let m = pfi_mangle(ir_path_last_name((*p).path), t)
+            if m.len > 0 {
+                let sp = pfi_sl_ptr((*p).path.segments.tail)
+                pfi_sl_set_last(sp, m)
             }
         }
     }
@@ -687,15 +1249,15 @@ fn pfi_rename_expr_node(p: *mut Expr) with Mut, Panic, Div, Alloc {
 fn pfi_rename_args_head(node: *mut ExprList) with Mut, Panic, Div, Alloc {
     if (*node).head.kind == ExprKind::ExprIdent {
         let idx = pfi_table_find_name((*node).head.name)
-        if idx >= 0 && PFI_T_UNSAFE[idx as usize] == 0 {
-            let m = pfi_mangle((*node).head.name, PFI_CUR_MOD)
+        if pfi_entry_rewritable(idx) {
+            let m = pfi_mangle((*node).head.name, PFI_T_TGT[idx as usize])
             if m.len > 0 { (*node).head.name = m }
         }
     } else if (*node).head.kind == ExprKind::ExprPath && (*node).head.path.seg_count == 1 {
         let single = Name { buf: (*node).head.path.segments.head_buf, len: (*node).head.path.segments.head_len }
         let idx = pfi_table_find_name(single)
-        if idx >= 0 && PFI_T_UNSAFE[idx as usize] == 0 {
-            let m = pfi_mangle(single, PFI_CUR_MOD)
+        if pfi_entry_rewritable(idx) {
+            let m = pfi_mangle(single, PFI_T_TGT[idx as usize])
             if m.len > 0 {
                 (*node).head.path = AstPath {
                     segments: StringList { head_buf: m.buf, head_len: m.len, tail: None },
@@ -704,17 +1266,33 @@ fn pfi_rename_args_head(node: *mut ExprList) with Mut, Panic, Div, Alloc {
                 (*node).head.name = m
             }
         }
+    } else if PFI_PHASE == 1 && (*node).head.kind == ExprKind::ExprPath && (*node).head.path.seg_count >= 2 {
+        let t = pfi_qual_target((*node).head.path)
+        if t >= 0 {
+            let m = pfi_mangle(ir_path_last_name((*node).head.path), t)
+            if m.len > 0 {
+                let sp = pfi_sl_ptr((*node).head.path.segments.tail)
+                pfi_sl_set_last(sp, m)
+            }
+        }
     }
 }
 
-// The definition: Item.name and FnDef.name.
+// The definition: Item.name and FnDef.name. Private phase: private real fns.
+// Pub phase: this module's own plain-pub real fn whose entry renames it.
 fn pfi_rename_item_def(node: *mut ItemList) with Mut, Panic, Div, Alloc {
     if (*node).head.kind != ItemKind::ItemFn { return }
-    if (*node).head.visibility.kind != 0 { return }
+    if PFI_PHASE == 1 {
+        if (*node).head.visibility.kind != 1 { return }
+    } else {
+        if (*node).head.visibility.kind != 0 { return }
+    }
     if !pfi_item_real_fn((*node).head) { return }
     let idx = pfi_table_find_name((*node).head.name)
     if idx < 0 { return }
     if PFI_T_UNSAFE[idx as usize] != 0 { return }
+    if PFI_T_DEF[idx as usize] != 1 { return }
+    if PFI_T_TGT[idx as usize] != PFI_CUR_MOD { return }
     let m = pfi_mangle((*node).head.name, PFI_CUR_MOD)
     if m.len <= 0 { return }
     (*node).head.name = m
@@ -723,6 +1301,41 @@ fn pfi_rename_item_def(node: *mut ItemList) with Mut, Panic, Div, Alloc {
         (*fdp).name = m
     }
     PFI_RENAMED_TOTAL = PFI_RENAMED_TOTAL + 1
+    if PFI_PHASE == 1 {
+        PFI_PUB_RENAMED = PFI_PUB_RENAMED + 1
+    }
+}
+
+// Pub phase: the `use` item itself. A braced entry `N` (or the last segment of a
+// path-form `use p::N`) whose `use` resolves to the module this table rewires N
+// to becomes N__m<that module>, so the import names what the module now exports.
+fn pfi_rewrite_use(node: *mut ItemList, ord: i64) with Mut, Panic, Div, Alloc {
+    let tgt = pfi_use_target(PFI_CUR_MOD, ord)
+    if tgt < 0 { return }
+    if (*node).head.use_glob { return }
+    var ip = pfi_importlist_ptr((*node).head.use_items)
+    if ip != 0 as *mut ImportItemList {
+        while ip != 0 as *mut ImportItemList {
+            let idx = pfi_table_find_name((*ip).head)
+            if idx >= 0 && PFI_T_UNSAFE[idx as usize] == 0 && PFI_T_DEF[idx as usize] == 0 && PFI_T_TGT[idx as usize] == tgt {
+                let m = pfi_mangle((*ip).head, tgt)
+                if m.len > 0 { (*ip).head = m }
+            }
+            ip = pfi_importlist_next(ip)
+        }
+        return
+    }
+    if pfi_use_named(PFI_CUR_MOD, ord) && (*node).head.use_path.seg_count >= 2 {
+        let last = ir_path_last_name((*node).head.use_path)
+        let idx2 = pfi_table_find_name(last)
+        if idx2 >= 0 && PFI_T_UNSAFE[idx2 as usize] == 0 && PFI_T_DEF[idx2 as usize] == 0 && PFI_T_TGT[idx2 as usize] == tgt {
+            let m2 = pfi_mangle(last, tgt)
+            if m2.len > 0 {
+                let sp = pfi_sl_ptr((*node).head.use_path.segments.tail)
+                pfi_sl_set_last(sp, m2)
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -757,6 +1370,9 @@ fn pfi_arms(opt: Option<Box<MatchArmList> >) with IO, Mut, Panic, Div, Alloc {
         match cur {
             None => { going = false }
             Some(list) => {
+                // Pub phase: the arm's pattern binders scope over its guard and body.
+                let mark = PFI_SC_DEPTH
+                pfi_pattern_bind((*list).head.pattern)
                 if PFI_MODE == 0 {
                     pfi_pattern((*list).head.pattern)
                     // The arm body is stored by value in the list node: a bare
@@ -765,6 +1381,7 @@ fn pfi_arms(opt: Option<Box<MatchArmList> >) with IO, Mut, Panic, Div, Alloc {
                 }
                 pfi_child((*list).head.guard)
                 pfi_expr((*list).head.body)
+                PFI_SC_DEPTH = mark
                 cur = (*list).tail
             }
         }
@@ -830,6 +1447,9 @@ fn pfi_transition_steps(opt: Option<Box<TransitionStepDefList> >) with IO, Mut, 
 }
 
 fn pfi_block(b: Block) with IO, Mut, Panic, Div, Alloc {
+    // Pub phase: a let/var binder scopes over the REST of its block, not over
+    // its own initializer (`let energy = energy()` calls the fn).
+    let mark = PFI_SC_DEPTH
     var cur = b.stmts
     var going = true
     while going {
@@ -843,10 +1463,14 @@ fn pfi_block(b: Block) with IO, Mut, Panic, Div, Alloc {
                 }
                 pfi_child((*list).head.expr)
                 pfi_child((*list).head.target)
+                if (*list).head.kind == StmtKind::StmtLet || (*list).head.kind == StmtKind::StmtVar {
+                    pfi_scope_bind((*list).head.name)
+                }
                 cur = (*list).tail
             }
         }
     }
+    PFI_SC_DEPTH = mark
 }
 
 fn pfi_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
@@ -867,7 +1491,26 @@ fn pfi_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
             }
         }
     }
+    // Pub phase scoping: a closure's params scope over its body; a `for`
+    // variable over the loop body but not over the iterated expression (left).
+    let mark = PFI_SC_DEPTH
+    if e.kind == ExprKind::ExprClosure {
+        var bp = e.closure_params
+        var bgo = true
+        while bgo {
+            match bp {
+                None => { bgo = false }
+                Some(bl) => {
+                    pfi_scope_bind((*bl).head.name)
+                    bp = (*bl).tail
+                }
+            }
+        }
+    }
     pfi_child(e.left)
+    if e.kind == ExprKind::ExprForIn {
+        pfi_scope_bind(e.name)
+    }
     pfi_child(e.right)
     pfi_child(e.else_expr)
     pfi_child(e.closure_body)
@@ -882,26 +1525,30 @@ fn pfi_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
     pfi_args(e.args)
     pfi_arms(e.arms)
     pfi_fields(e.fields)
+    PFI_SC_DEPTH = mark
 }
 
 fn pfi_fn_def(opt: Option<Box<FnDef> >) with IO, Mut, Panic, Div, Alloc {
     match opt {
         None => {}
         Some(fd) => {
-            if PFI_MODE == 0 {
-                var pc = (*fd).params
-                var pgo = true
-                while pgo {
-                    match pc {
-                        None => { pgo = false }
-                        Some(pl) => {
+            let mark = PFI_SC_DEPTH
+            var pc = (*fd).params
+            var pgo = true
+            while pgo {
+                match pc {
+                    None => { pgo = false }
+                    Some(pl) => {
+                        if PFI_MODE == 0 {
                             pfi_note_binder((*pl).head.name)
-                            pc = (*pl).tail
                         }
+                        pfi_scope_bind((*pl).head.name)
+                        pc = (*pl).tail
                     }
                 }
             }
             pfi_block((*fd).body)
+            PFI_SC_DEPTH = mark
         }
     }
 }
@@ -926,9 +1573,15 @@ fn pfi_method_bodies(methods: Option<Box<ItemList> >) with IO, Mut, Panic, Div, 
 
 fn pfi_items(items: Option<Box<ItemList> >) with IO, Mut, Panic, Div, Alloc {
     var node = pfi_itemlist_ptr(items)
+    var use_ord: i64 = 0
     while node != 0 as *mut ItemList {
         let kind = (*node).head.kind
-        if kind == ItemKind::ItemFn {
+        if kind == ItemKind::ItemUse {
+            if PFI_PHASE == 1 && PFI_MODE == 1 {
+                pfi_rewrite_use(node, use_ord)
+            }
+            use_ord = use_ord + 1
+        } else if kind == ItemKind::ItemFn {
             if PFI_MODE == 1 {
                 pfi_rename_item_def(node)
             }
@@ -1018,6 +1671,264 @@ fn pfi_error_unresolved(slot: i64, other_mod: i64) with IO, Mut, Panic, Div, All
 }
 
 // ---------------------------------------------------------------------------
+// Pub phase driver (#2773)
+// ---------------------------------------------------------------------------
+
+fn pfi_print_module(programs: &! [Program; 256], idx: i64) with IO, Mut, Panic, Div {
+    print("#")
+    print_int(idx)
+    if idx >= 0 && idx < 256 {
+        var prog = (*programs)[idx as usize]
+        var buf: [i8; 384] = prog.module_path.segments.head_buf
+        print(" (")
+        print(str_from_bytes(buf, prog.module_path.segments.head_len))
+        print(")")
+    }
+}
+
+fn pfi_pub_err_head(programs: &! [Program; 256], n: Name, x: i64) with IO, Mut, Panic, Div {
+    print("error[module_name_resolution]: `")
+    pfi_print_name(n)
+    print("` in module ")
+    pfi_print_module(programs, x)
+    print("\n")
+}
+
+// Which definer does module x's unqualified `n` (pub-collision name k) mean,
+// through x's own `use` items? -1 = x imports it from no definer (left bare);
+// -2 = REFUSED (diagnostic printed).
+fn pfi_resolve_import(programs: &! [Program; 256], items: Option<Box<ItemList> >, x: i64, k: i64, n: Name) -> i64 with IO, Mut, Panic, Div, Alloc {
+    var explicit: i64 = 0 - 1
+    var glob1: i64 = 0 - 1
+    var glob2: i64 = 0 - 1
+    var glob_has_d1 = false
+    let d1 = PFI_PC_D1[k as usize]
+    var ord: i64 = 0
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if (*list).head.kind == ItemKind::ItemUse {
+                    let t = pfi_use_target(x, ord)
+                    if t >= 0 && pfi_pc_defines(k, t) {
+                        var is_explicit = false
+                        var is_glob = false
+                        if (*list).head.use_glob {
+                            is_glob = true
+                        } else if pfi_import_list_has((*list).head.use_items, n) {
+                            is_explicit = true
+                        } else if pfi_use_named(x, ord) {
+                            if name_eq(ir_path_last_name((*list).head.use_path), n) {
+                                is_explicit = true
+                            }
+                        }
+                        if is_explicit {
+                            if explicit >= 0 && explicit != t {
+                                pfi_pub_err_head(programs, n, x)
+                                print("  is imported by name from two modules that each define it:\n  ")
+                                pfi_print_module(programs, explicit)
+                                print(" and ")
+                                pfi_print_module(programs, t)
+                                print(".\n  Import it from one of them only.\n")
+                                return 0 - 2
+                            }
+                            explicit = t
+                        } else if is_glob {
+                            if t == d1 { glob_has_d1 = true }
+                            if glob1 < 0 {
+                                glob1 = t
+                            } else if glob1 != t && glob2 < 0 {
+                                glob2 = t
+                            }
+                        }
+                    }
+                    ord = ord + 1
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    if explicit >= 0 { return explicit }
+    if glob1 < 0 { return 0 - 1 }
+    if glob2 < 0 { return glob1 }
+    if glob_has_d1 {
+        print("warning[module_name_resolution]: `")
+        pfi_print_name(n)
+        print("` in module ")
+        pfi_print_module(programs, x)
+        print(" comes from more than one\n  glob import; binding to ")
+        pfi_print_module(programs, d1)
+        print(" (first loaded, the previous binding).\n  Import it by name to choose.\n")
+        return d1
+    }
+    pfi_pub_err_head(programs, n, x)
+    print("  comes from glob imports of two modules that each define it:\n  ")
+    pfi_print_module(programs, glob1)
+    print(" and ")
+    pfi_print_module(programs, glob2)
+    print(".\n  Import it by name (use path::{name}) from one of them.\n")
+    0 - 2
+}
+
+fn pfi_pub_capacity(what: string) with IO, Mut, Panic, Div {
+    print("error[module_name_resolution]: ")
+    print(what)
+    print("\n")
+    print("  cannot tell same-named pub functions apart, so compilation stops\n")
+    print("  here rather than bind a call to another module's function.\n")
+}
+
+// One module of the pub phase: build its table (own definitions to rename,
+// imported names to rewire, qualifier pairs), scan it (MODE 0), refuse what
+// cannot be rewritten, rewrite it (MODE 1).
+fn pfi_pub_module(programs: &! [Program; 256], count: i64, x: i64) -> bool with IO, Mut, Panic, Div, Alloc {
+    var prog = (*programs)[x as usize]
+    PFI_CUR_MOD = x
+    PFI_T_COUNT = 0
+    PFI_T_OVERFLOW = 0
+    PFI_QR_COUNT = 0
+    PFI_QUAL_AMBIG = 0
+    PFI_SC_DEPTH = 0
+    PFI_SC_OVERFLOW = 0
+    if !pfi_build_qual_table(prog.items, x) {
+        pfi_pub_capacity("more than 512 resolved `use` items in one module")
+        return false
+    }
+    var k: i64 = 0
+    while k < PFI_PC_COUNT {
+        let n = pfi_pc_name(k)
+        let d1 = PFI_PC_D1[k as usize]
+        if pfi_pc_defines(k, x) {
+            if x != d1 {
+                let m = pfi_mangle(n, x)
+                if m.len <= 0 || pfi_defined_elsewhere(programs, count, 0 - 1, m) >= 0 {
+                    pfi_pub_err_head(programs, n, x)
+                    print("  must be renamed apart from the same-named pub fn of ")
+                    pfi_print_module(programs, d1)
+                    print(",\n  but the name it would get (`")
+                    if m.len > 0 { pfi_print_name(m) } else { print("<too long>") }
+                    print("`) is already a symbol, or does not fit.\n")
+                    return false
+                }
+                pfi_table_add_pub(n, x, 1)
+            }
+        } else if !pfi_items_define_name(prog.items, n) {
+            let t = pfi_resolve_import(programs, prog.items, x, k, n)
+            if t == 0 - 2 { return false }
+            if t >= 0 && t != d1 {
+                pfi_table_add_pub(n, t, 0)
+            }
+        }
+        var qi: i64 = 0
+        while qi < PFI_Q_COUNT {
+            if pfi_pc_defines(k, PFI_Q_TGT[qi as usize]) {
+                if PFI_QR_COUNT >= PFI_QR_MAX {
+                    pfi_pub_capacity("more than 4096 qualified-name candidates in one module")
+                    return false
+                }
+                PFI_QR_PC[PFI_QR_COUNT as usize] = k
+                PFI_QR_Q[PFI_QR_COUNT as usize] = qi
+                PFI_QR_COUNT = PFI_QR_COUNT + 1
+            }
+            qi = qi + 1
+        }
+        k = k + 1
+    }
+    if PFI_T_OVERFLOW != 0 {
+        pfi_pub_capacity("more than 512 same-named pub fns to rebind in one module")
+        return false
+    }
+    if PFI_T_COUNT == 0 && PFI_QR_COUNT == 0 { return true }
+
+    PFI_MODE = 0
+    pfi_items(prog.items)
+    PFI_SC_DEPTH = 0
+    var bad = false
+    var i: i64 = 0
+    while i < PFI_T_COUNT {
+        if PFI_T_UNSAFE[i as usize] != 0 {
+            let n2 = pfi_table_name(i)
+            let tgt = PFI_T_TGT[i as usize]
+            pfi_pub_err_head(programs, n2, x)
+            print("  means the pub fn of ")
+            pfi_print_module(programs, tgt)
+            print(", which must be renamed to `")
+            let g = pfi_mangle(n2, tgt)
+            if g.len > 0 { pfi_print_name(g) } else { print("<too long>") }
+            print("`,\n")
+            if PFI_T_REASON[i as usize] == PFI_R_GEN_SHADOWED {
+                print("  but that name is already a local, parameter or pattern binding here.\n")
+            } else {
+                print("  but it is used as a value in a match arm or struct-literal field,\n")
+                print("  which cannot be rewritten in place.\n")
+            }
+            print("  Rename one of the same-named functions.\n")
+            bad = true
+        }
+        i = i + 1
+    }
+    if bad { return false }
+
+    PFI_MODE = 1
+    pfi_items(prog.items)
+    PFI_MODE = 0
+    PFI_SC_DEPTH = 0
+    if PFI_SC_OVERFLOW != 0 {
+        pfi_pub_capacity("more than 4096 nested same-spelled local bindings")
+        return false
+    }
+    if PFI_QUAL_AMBIG != 0 {
+        print("error[module_name_resolution]: a module-qualified call in module ")
+        pfi_print_module(programs, x)
+        print("\n  names a qualifier that two of its `use` items resolve to different\n")
+        print("  modules defining that function. Qualify it with the full module path.\n")
+        return false
+    }
+    if PFI_T_COUNT > 0 || PFI_QR_COUNT > 0 {
+        PFI_PUB_REWIRED_MODS = PFI_PUB_REWIRED_MODS + 1
+    }
+    true
+}
+
+fn pfi_pub_phase(programs: &! [Program; 256], count: i64) -> bool with IO, Mut, Panic, Div, Alloc {
+    PFI_PUB_RENAMED = 0
+    PFI_PUB_REWIRED_MODS = 0
+    if !pfi_pc_collect(programs, count) {
+        pfi_pub_capacity("more than 512 same-named pub fns")
+        return false
+    }
+    if PFI_PC_COUNT == 0 { return true }
+    if PFI_UM_OVERFLOW != 0 {
+        pfi_pub_capacity("the `use` map is full (32768 items)")
+        return false
+    }
+    PFI_PHASE = 1
+    var x: i64 = 0
+    while x < count && x < 256 {
+        if !pfi_pub_module(programs, count, x) {
+            PFI_PHASE = 0
+            PFI_MODE = 0
+            PFI_T_COUNT = 0
+            return false
+        }
+        x = x + 1
+    }
+    PFI_PHASE = 0
+    PFI_T_COUNT = 0
+    PFI_QR_COUNT = 0
+    if PFI_PUB_RENAMED > 0 {
+        print("module_name_resolution: renamed ")
+        print_int(PFI_PUB_RENAMED)
+        print(" same-named pub fn definition(s); references rebound in ")
+        print_int(PFI_PUB_REWIRED_MODS)
+        print(" module(s)\n")
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -1030,8 +1941,14 @@ fn pfi_error_unresolved(slot: i64, other_mod: i64) with IO, Mut, Panic, Div, All
 //                    stop compiling -- continuing would emit an executable in which
 //                    two functions share one body.
 pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
-    if count < 2 { return 0 }
-    if pfi_disabled() { return 0 - 1 }
+    if count < 2 {
+        PFI_UM_VALID = 0
+        return 0
+    }
+    if pfi_disabled() {
+        PFI_UM_VALID = 0
+        return 0 - 1
+    }
 
     var z: i64 = 0
     while z < PFI_SLOTS {
@@ -1058,7 +1975,25 @@ pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64
         }
         i = i + 1
     }
-    if PFI_DUP_ANY == 0 { return 0 }
+    if PFI_DUP_ANY == 0 {
+        PFI_UM_VALID = 0
+        return 0
+    }
+
+    // #2773: same-named plain-pub fns first (renames + importer rewiring), then
+    // the private phase below over the programs as the pub phase left them.
+    // Without a `use` map (no multi-module entry point noted one for this
+    // compile) the pub phase cannot resolve importers and is skipped.
+    var pub_total: i64 = 0
+    if PFI_UM_VALID == 1 {
+        PFI_UM_VALID = 0
+        if !pfi_pub_phase(programs, count) {
+            return 0 - 2
+        }
+        pub_total = PFI_RENAMED_TOTAL
+        PFI_RENAMED_TOTAL = 0
+    }
+    PFI_PHASE = 0
 
     i = 0
     while i < count && i < 256 {
@@ -1118,7 +2053,295 @@ pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64
         print_int(PFI_LEFT_TOTAL)
         print(" fn(s) unrenamed; no collision remains\n")
     }
-    PFI_RENAMED_TOTAL
+    PFI_RENAMED_TOTAL + pub_total
+}
+
+// ---------------------------------------------------------------------------
+// Same-named structs across modules (#2773)
+// ---------------------------------------------------------------------------
+//
+// Struct layouts and the checker's struct table are keyed by the bare name, so
+// two loaded modules that each define `struct Res` with DIFFERENT fields are
+// merged: the checker rejects the second module's correct code (false E046 /
+// E012), or, when the field names happen to agree, one layout is used for both.
+// Renaming types apart is not done here; this check REFUSES such a program with
+// a diagnostic naming both modules. Structurally identical copies (same field
+// names and field types, same linear/affine flags, same type-parameter count)
+// stay accepted, because merging them is harmless.
+
+let PFI_ST_SLOTS: i64 = 16384
+var PFI_ST_KEY: [i64; 16384]
+var PFI_ST_MOD: [i64; 16384]
+var PFI_ST_LEN: [i64; 16384]
+var PFI_ST_BUF: [i8; 6291456]
+
+fn pfi_sl_eq(a: StringList, b: StringList) -> bool with Mut, Panic, Div {
+    if a.head_len != b.head_len { return false }
+    var i: i64 = 0
+    while i < a.head_len {
+        if a.head_buf[i as usize] != b.head_buf[i as usize] { return false }
+        i = i + 1
+    }
+    match a.tail {
+        None => {
+            match b.tail {
+                None => true
+                Some(rb0) => false
+            }
+        }
+        Some(ra) => {
+            match b.tail {
+                None => false
+                Some(rb) => pfi_sl_eq(*ra, *rb)
+            }
+        }
+    }
+}
+
+fn pfi_array_size_eq(a: Option<Box<Expr> >, b: Option<Box<Expr> >) -> bool with Mut, Panic, Div {
+    match a {
+        None => {
+            match b {
+                None => true
+                Some(eb0) => false
+            }
+        }
+        Some(ea) => {
+            match b {
+                None => false
+                Some(eb) => {
+                    if (*ea).kind != (*eb).kind { return false }
+                    if (*ea).kind == ExprKind::ExprIntLit { return (*ea).int_val == (*eb).int_val }
+                    if (*ea).kind == ExprKind::ExprIdent { return name_eq((*ea).name, (*eb).name) }
+                    true
+                }
+            }
+        }
+    }
+}
+
+fn pfi_type_eq(a: TypeExpr, b: TypeExpr) -> bool with Mut, Panic, Div {
+    if a.kind != b.kind { return false }
+    if a.path.seg_count != b.path.seg_count { return false }
+    if a.path.seg_count > 0 {
+        if !pfi_sl_eq(a.path.segments, b.path.segments) { return false }
+    }
+    if !pfi_array_size_eq(a.array_size, b.array_size) { return false }
+    match a.inner {
+        None => {
+            match b.inner {
+                None => {}
+                Some(ib0) => { return false }
+            }
+        }
+        Some(ia) => {
+            match b.inner {
+                None => { return false }
+                Some(ib) => {
+                    if !pfi_type_eq(*ia, *ib) { return false }
+                }
+            }
+        }
+    }
+    var la = a.type_args
+    var lb = b.type_args
+    var going = true
+    while going {
+        match la {
+            None => {
+                match lb {
+                    None => { going = false }
+                    Some(x0) => { return false }
+                }
+            }
+            Some(na) => {
+                match lb {
+                    None => { return false }
+                    Some(nb) => {
+                        if !pfi_type_eq((*na).head, (*nb).head) { return false }
+                        la = (*na).tail
+                        lb = (*nb).tail
+                    }
+                }
+            }
+        }
+    }
+    let ka = match a.knowledge_info { None => false, Some(k1) => true }
+    let kb = match b.knowledge_info { None => false, Some(k2) => true }
+    if ka != kb { return false }
+    let ra = match a.refinement_info { None => false, Some(r1) => true }
+    let rb = match b.refinement_info { None => false, Some(r2) => true }
+    ra == rb
+}
+
+fn pfi_type_param_count(opt: Option<Box<TypeParamDefList> >) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var cur = opt
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(l) => {
+                n = n + 1
+                cur = (*l).tail
+            }
+        }
+    }
+    n
+}
+
+fn pfi_struct_def_eq(a: Box<StructDef>, b: Box<StructDef>) -> bool with Mut, Panic, Div {
+    if (*a).is_linear != (*b).is_linear { return false }
+    if (*a).is_affine != (*b).is_affine { return false }
+    if pfi_type_param_count((*a).type_params) != pfi_type_param_count((*b).type_params) { return false }
+    var fa = (*a).fields
+    var fb = (*b).fields
+    var going = true
+    while going {
+        match fa {
+            None => {
+                match fb {
+                    None => { going = false }
+                    Some(y0) => { return false }
+                }
+            }
+            Some(na) => {
+                match fb {
+                    None => { return false }
+                    Some(nb) => {
+                        if !name_eq((*na).head.name, (*nb).head.name) { return false }
+                        if !pfi_type_eq((*na).head.ty, (*nb).head.ty) { return false }
+                        fa = (*na).tail
+                        fb = (*nb).tail
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+fn pfi_st_slot_eq(slot: i64, n: Name) -> bool with Mut, Panic, Div {
+    if PFI_ST_LEN[slot as usize] != n.len { return false }
+    let base = slot * 384
+    var k: i64 = 0
+    while k < n.len {
+        if PFI_ST_BUF[(base + k) as usize] != n.buf[k as usize] { return false }
+        k = k + 1
+    }
+    true
+}
+
+// The struct definition named `n` among these items, if any.
+fn pfi_find_struct_def(items: Option<Box<ItemList> >, n: Name) -> Option<Box<StructDef> > with Mut, Panic, Div {
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if (*list).head.kind == ItemKind::ItemStruct && name_eq((*list).head.name, n) {
+                    match (*list).head.struct_def {
+                        Some(sd) => { return Some(sd) }
+                        None => {}
+                    }
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    None
+}
+
+// Returns false (diagnostic printed) when two loaded modules define one struct
+// name with different definitions. Capacity exhaustion only warns: this check
+// adds a refusal, it does not gate anything that compiled before it existed.
+pub fn module_struct_identity_check(programs: &! [Program; 256], count: i64) -> bool with IO, Mut, Panic, Div, Alloc {
+    if count < 2 { return true }
+    if pfi_disabled() { return true }
+    var z: i64 = 0
+    while z < PFI_ST_SLOTS {
+        PFI_ST_KEY[z as usize] = 0
+        z = z + 1
+    }
+    var ok = true
+    var used: i64 = 0
+    var i: i64 = 0
+    while i < count && i < 256 {
+        var prog = (*programs)[i as usize]
+        var cur = prog.items
+        var going = true
+        while going {
+            match cur {
+                None => { going = false }
+                Some(list) => {
+                    if (*list).head.kind == ItemKind::ItemStruct && !name_is_empty((*list).head.name) && (*list).head.name.len <= 384 {
+                        match (*list).head.struct_def {
+                            None => {}
+                            Some(sd) => {
+                                let n = (*list).head.name
+                                let h = ast_name_hash(n)
+                                var slot = pfi_slot_of(h) % PFI_ST_SLOTS
+                                var probes: i64 = 0
+                                var placed = false
+                                while !placed && probes < PFI_ST_SLOTS {
+                                    let key = PFI_ST_KEY[slot as usize]
+                                    if key == 0 {
+                                        if used >= PFI_ST_SLOTS - 1 {
+                                            placed = true
+                                        } else {
+                                            PFI_ST_KEY[slot as usize] = h + 1
+                                            PFI_ST_MOD[slot as usize] = i
+                                            PFI_ST_LEN[slot as usize] = n.len
+                                            let base = slot * 384
+                                            var k: i64 = 0
+                                            while k < n.len {
+                                                PFI_ST_BUF[(base + k) as usize] = n.buf[k as usize]
+                                                k = k + 1
+                                            }
+                                            used = used + 1
+                                            placed = true
+                                        }
+                                    } else if key == h + 1 && pfi_st_slot_eq(slot, n) {
+                                        let first = PFI_ST_MOD[slot as usize]
+                                        if first != i {
+                                            var fprog = (*programs)[first as usize]
+                                            match pfi_find_struct_def(fprog.items, n) {
+                                                None => {}
+                                                Some(fsd) => {
+                                                    if !pfi_struct_def_eq(fsd, sd) {
+                                                        print("error[module_struct_identity]: struct `")
+                                                        pfi_print_name(n)
+                                                        print("` is defined differently in module ")
+                                                        pfi_print_module(programs, first)
+                                                        print("\n  and in module ")
+                                                        pfi_print_module(programs, i)
+                                                        print(".\n  Struct names are not module-qualified yet, so both would be\n")
+                                                        print("  compiled as ONE type. Rename one of them.\n")
+                                                        ok = false
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        placed = true
+                                    } else {
+                                        slot = (slot + 1) % PFI_ST_SLOTS
+                                        probes = probes + 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    cur = (*list).tail
+                }
+            }
+        }
+        i = i + 1
+    }
+    if used >= PFI_ST_SLOTS - 1 {
+        print("warning[module_struct_identity]: more than 16383 structs; same-named struct check incomplete\n")
+    }
+    ok
 }
 
 // ---------------------------------------------------------------------------
