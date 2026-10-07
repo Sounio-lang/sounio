@@ -13,9 +13,11 @@
 # leave that test green. This gate closes the gap in two halves:
 #
 #   static  the branch exists inside apply_relocations_into (calls the recorder
-#           and latches reloc_overflow), and BOTH writers --
-#           compile_native_v2_preview_to_file and
-#           compile_native_finalize_and_write_ref -- check
+#           and latches reloc_overflow), and every writer --
+#           compile_native_v2_preview_to_file,
+#           compile_native_finalize_and_write_ref and the common
+#           native_v2_write_min_elf64_to_file (which the sret witness route
+#           calls directly after apply_relocations_into) -- check
 #           NC_RELOC_UNKNOWN_KIND_COUNT, name the site count, and return 20
 #           before they write anything.
 #   live    self-test T70r (native_v2_reloc_unknown_kind_selftest) in a Madaros
@@ -84,13 +86,13 @@ grep -Eq 'kind_code >= 1 && kind_code <= 4' "$TMP/pred" \
 echo "PASS  static:native_v2_reloc_kind_is_known accepts exactly 1..4"
 
 writers=0
-for w in compile_native_v2_preview_to_file compile_native_finalize_and_write_ref; do
+for w in compile_native_v2_preview_to_file compile_native_finalize_and_write_ref native_v2_write_min_elf64_to_file; do
   fn_body "$SRC" "$w" >"$TMP/$w"
   require_nonempty_file "$TMP/$w" "writer $w not found in $SRC"
   # The refusal block must come before the first byte is written, print both the
   # first unknown kind and the site count, and return 20.
   awk '
-    /native_v2_write_min_elf64_to_file|nc_elf_put_u8\(/ && !done { wrote = 1 }
+    NR > 1 && /native_v2_write_min_elf64_to_file\(output_path|nc_elf_put_u8\(|write_file\(/ && !done { wrote = 1 }
     /if NC_RELOC_UNKNOWN_KIND_COUNT > 0 \{/ && !wrote { blk = 1; next }
     blk && /print_int\(NC_RELOC_UNKNOWN_KIND_FIRST\)/ { first = 1 }
     blk && /print_int\(NC_RELOC_UNKNOWN_KIND_COUNT\)/ { count = 1 }
@@ -102,7 +104,7 @@ for w in compile_native_v2_preview_to_file compile_native_finalize_and_write_ref
   echo "PASS  static:$w refuses before writing, naming kind and site count"
   writers=$((writers + 1))
 done
-require_min_count "$writers" 2 "writers checked"
+require_min_count "$writers" 3 "writers checked"
 
 echo "--- live ---"
 MADAROS="${SOUNIO_NATIVE_RELOC_UNKNOWN_KIND_MADAROS:-}"
