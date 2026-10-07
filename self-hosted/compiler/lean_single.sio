@@ -23617,6 +23617,83 @@ fn tuple_destructure_from_ptr_a64(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
     }
 }
 
+// E265: refuse a struct pattern lean_single cannot lower, instead of emitting a
+// binary with unbound or mis-bound locals. The parser used to treat every ident
+// inside `{ }` as a field name, so `P { first: a }` never bound `a` (E200 later,
+// or a silent wrong value when `a` resolved to an outer local -- exit 139 on
+// PR #2802) and `P { first: second, second: first }` compiled clean, unswapped.
+fn struct_pat_refuse(tok: i64, msg: string) with IO, Mut, Panic {
+    print("error[E265]: unsupported struct pattern: ")
+    print(msg)
+    print(" at ")
+    print_src_loc_for_tok(tok)
+    print(" (bundle line ")
+    print_int(TL[tok as usize])
+    print(")\n")
+    tc_mark_failed()
+}
+
+// Token index just past the `}` closing the struct pattern opened at open_tok.
+fn struct_pat_skip(open_tok: i64) -> i64 with Panic, Mut {
+    var p = open_tok
+    var depth: i64 = 0
+    while p < TC && TK[p as usize] != 0 {
+        if TK[p as usize] == 8 { depth = depth + 1 }
+        if TK[p as usize] == 9 {
+            depth = depth - 1
+            if depth == 0 { return p + 1 }
+        }
+        p = p + 1
+    }
+    return p
+}
+
+// Validate a struct pattern `{ ... }` (pat_start = token index of '{').
+// Accepted elements: `field`, `field: name`, `field: _`, `..`. Every named field
+// must exist on the struct. Returns false (after an E265) on anything else.
+fn struct_pat_check(pat_start: i64, si: i64) -> bool with IO, Mut, Panic, Div {
+    var ok: i64 = 1
+    var pp = pat_start + 1
+    while TK[pp as usize] != 9 && TK[pp as usize] != 0 {
+        let tk = TK[pp as usize]
+        if tk == 28 || tk == 63 { pp = pp + 1; continue }
+        if tk != 3 {
+            struct_pat_refuse(pp, "lean_single binds only `field`, `field: name`, `field: _` and `..`")
+            return false
+        }
+        let fns = TS[pp as usize]
+        let fne = TE[pp as usize]
+        let ftok = pp
+        pp = pp + 1
+        var shorthand_wild: i64 = 0
+        if TK[pp as usize] == 43 {
+            pp = pp + 1
+            if TK[pp as usize] != 3 || (TK[(pp + 1) as usize] != 28 && TK[(pp + 1) as usize] != 9) {
+                struct_pat_refuse(pp, "nested or literal sub-pattern is not supported by lean_single; bind the field to a name and match on it separately")
+                return false
+            }
+            pp = pp + 1
+        } else if TK[pp as usize] != 28 && TK[pp as usize] != 9 {
+            struct_pat_refuse(pp, "lean_single binds only `field`, `field: name`, `field: _` and `..`")
+            return false
+        } else if fne - fns == 1 && sb(fns) == 95 {
+            shorthand_wild = 1
+        }
+        if shorthand_wild == 0 {
+            ST_QUERY_NS = fns
+            ST_QUERY_NE = fne
+            let off = st_field_offset(si, gl_name_hash(fns, fne))
+            ST_QUERY_NS = -1
+            ST_QUERY_NE = -1
+            if off < 0 {
+                struct_pat_refuse(ftok, "unknown field")
+                ok = 0
+            }
+        }
+    }
+    return ok == 1
+}
+
 // Struct pattern destructuring: let Point { x, y } = expr  (x86-64)
 // pat_start = token index of '{'; si = struct table index; ptr_slot = saved struct pointer
 fn struct_destructure_x86(pat_start: i64, si: i64, ptr_slot: i64) with IO, Mut, Panic, Div {
@@ -23624,18 +23701,27 @@ fn struct_destructure_x86(pat_start: i64, si: i64, ptr_slot: i64) with IO, Mut, 
         tc_error_hard(pat_start, "private struct field access")
         return
     }
+    if struct_pat_check(pat_start, si) == false { return }
     var pp = pat_start + 1
     while TK[pp as usize] != 9 && TK[pp as usize] != 0 {
-        if TK[pp as usize] == 28 { pp = pp + 1; continue }
+        // `,` and `..` (shape already validated by struct_pat_check)
         if TK[pp as usize] != 3 { pp = pp + 1; continue }
-        let pns = TS[pp as usize]
-        let pne = TE[pp as usize]
-        let fh = gl_name_hash(pns, pne)
+        let fns = TS[pp as usize]
+        let fne = TE[pp as usize]
+        let fh = gl_name_hash(fns, fne)
         pp = pp + 1
+        // `field: name` binds `name`; shorthand `field` binds `field`.
+        var pns = fns
+        var pne = fne
+        if TK[pp as usize] == 43 {
+            pns = TS[(pp + 1) as usize]
+            pne = TE[(pp + 1) as usize]
+            pp = pp + 2
+        }
         let is_wild = if pne - pns == 1 && sb(pns) == 95 { 1 } else { 0 }
         if is_wild == 1 { continue }
-        ST_QUERY_NS = pns
-        ST_QUERY_NE = pne
+        ST_QUERY_NS = fns
+        ST_QUERY_NE = fne
         let off = st_field_offset(si, fh)
         if off < 0 { tc_error(pp - 1, "unknown struct field in pattern"); continue }
         let fty = st_field_ty(si, fh)
@@ -23663,18 +23749,27 @@ fn struct_destructure_a64(pat_start: i64, si: i64, ptr_slot: i64) with IO, Mut, 
         tc_error_hard(pat_start, "private struct field access")
         return
     }
+    if struct_pat_check(pat_start, si) == false { return }
     var pp = pat_start + 1
     while TK[pp as usize] != 9 && TK[pp as usize] != 0 {
-        if TK[pp as usize] == 28 { pp = pp + 1; continue }
+        // `,` and `..` (shape already validated by struct_pat_check)
         if TK[pp as usize] != 3 { pp = pp + 1; continue }
-        let pns = TS[pp as usize]
-        let pne = TE[pp as usize]
-        let fh = gl_name_hash(pns, pne)
+        let fns = TS[pp as usize]
+        let fne = TE[pp as usize]
+        let fh = gl_name_hash(fns, fne)
         pp = pp + 1
+        // `field: name` binds `name`; shorthand `field` binds `field`.
+        var pns = fns
+        var pne = fne
+        if TK[pp as usize] == 43 {
+            pns = TS[(pp + 1) as usize]
+            pne = TE[(pp + 1) as usize]
+            pp = pp + 2
+        }
         let is_wild = if pne - pns == 1 && sb(pns) == 95 { 1 } else { 0 }
         if is_wild == 1 { continue }
-        ST_QUERY_NS = pns
-        ST_QUERY_NE = pne
+        ST_QUERY_NS = fns
+        ST_QUERY_NE = fne
         let off = st_field_offset(si, fh)
         if off < 0 { tc_error(pp - 1, "unknown struct field in pattern"); continue }
         let fty = st_field_ty(si, fh)
@@ -28468,6 +28563,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             var has_binding: i64 = 0
             var is_tuple_pattern: i64 = 0
             var tpat_count: i64 = 0
+            // `Struct { field, field: name, .. } =>` — irrefutable, bound like a var arm.
+            var spat_si: i64 = -1
+            var spat_start: i64 = 0
             let arm_tk = TK[EP as usize]
             // Some(v) pattern — tag=1, bind inner value
             if arm_tk == 57 {
@@ -28528,6 +28626,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     let vh = gl_name_hash(TS[EP as usize], TE[EP as usize])
                     EP = EP + 1
                     disc = en_variant_value(eh, vh)
+                } else if TK[(EP + 1) as usize] == 8 && st_find(gl_name_hash(pns, pne)) >= 0 {
+                    is_var_bind = 1
+                    spat_si = st_find(gl_name_hash(pns, pne))
+                    spat_start = EP + 1
+                    EP = struct_pat_skip(EP + 1)
                 } else {
                     // Variable binding pattern: `v =>` or `v if cond =>`
                     is_var_bind = 1; bind_ns = pns; bind_ne = pne; EP = EP + 1
@@ -28785,23 +28888,27 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             }
             // Variable binding pattern (with optional guard)
             if is_or_pattern == 0 && is_var_bind == 1 {
-                // Bind scrutinee to the variable name
-                emit_load_var(match_slot)
-                let vb_slot = var_add(bind_ns, bind_ne)
-                if vb_slot >= 0 {
-                    emit_store_var(vb_slot)
-                    // Propagate scrutinee type to bound variable
-                    if VAR_COUNT > 0 {
-                        let vbi = VAR_COUNT - 1
-                        VAR_TY[vbi as usize] = match_scrut_ty
-                        VAR_TY_HASH[vbi as usize] = match_scrut_hash
-                        // β⁹ GTT week-7 follow-up: bound var inherits scrutinee's
-                        // channel topology.  Without this, arm bodies that reference
-                        // the bound variable load VAR_CH_SET[bslot] = 0 (stale) and
-                        // lose the scrutinee's topology inside the arm.  Upper-bound
-                        // sound: bound ≤ scrutinee by construction (var binding is
-                        // just an alias over the scrutinee's runtime value).
-                        VAR_CH_SET[vbi as usize] = match_scrut_ch_set
+                if spat_si >= 0 {
+                    struct_destructure_x86(spat_start, spat_si, match_slot)
+                } else {
+                    // Bind scrutinee to the variable name
+                    emit_load_var(match_slot)
+                    let vb_slot = var_add(bind_ns, bind_ne)
+                    if vb_slot >= 0 {
+                        emit_store_var(vb_slot)
+                        // Propagate scrutinee type to bound variable
+                        if VAR_COUNT > 0 {
+                            let vbi = VAR_COUNT - 1
+                            VAR_TY[vbi as usize] = match_scrut_ty
+                            VAR_TY_HASH[vbi as usize] = match_scrut_hash
+                            // β⁹ GTT week-7 follow-up: bound var inherits scrutinee's
+                            // channel topology.  Without this, arm bodies that reference
+                            // the bound variable load VAR_CH_SET[bslot] = 0 (stale) and
+                            // lose the scrutinee's topology inside the arm.  Upper-bound
+                            // sound: bound ≤ scrutinee by construction (var binding is
+                            // just an alias over the scrutinee's runtime value).
+                            VAR_CH_SET[vbi as usize] = match_scrut_ch_set
+                        }
                     }
                 }
                 // Optional guard: `if condition`
@@ -43211,6 +43318,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             var disc: i64 = -1
             var arm_is_tagged: i64 = 0
             var bind_ns: i64 = 0; var bind_ne: i64 = 0; var has_binding: i64 = 0
+            var spat_si: i64 = -1; var spat_start: i64 = 0
             let arm_tk = TK[EP as usize]
             if arm_tk == 57 { EP = EP + 1; disc = 1; arm_is_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; bind_ns = TS[EP as usize]; bind_ne = TE[EP as usize]; has_binding = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
             if arm_tk == 58 { EP = EP + 1; disc = 0; arm_is_tagged = 1 }
@@ -43220,6 +43328,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 let pns = TS[EP as usize]; let pne = TE[EP as usize]
                 if pne - pns == 1 && sb(pns) == 95 { is_wildcard = 1; EP = EP + 1 }
                 else if TK[(EP + 1) as usize] == 51 { let eh = gl_name_hash(pns, pne); EP = EP + 2; let vh = gl_name_hash(TS[EP as usize], TE[EP as usize]); EP = EP + 1; disc = en_variant_value(eh, vh) }
+                else if TK[(EP + 1) as usize] == 8 && st_find(gl_name_hash(pns, pne)) >= 0 { is_var_bind = 1; spat_si = st_find(gl_name_hash(pns, pne)); spat_start = EP + 1; EP = struct_pat_skip(EP + 1) }
                 else { is_var_bind = 1; bind_ns = pns; bind_ne = pne; EP = EP + 1 }
             }
             if arm_tk == 4 { disc = TV[EP as usize]; EP = EP + 1 }
@@ -43352,16 +43461,20 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             }
             // Variable binding pattern (with optional guard) — ARM64
             if is_or_pattern_a64 == 0 && is_var_bind == 1 {
-                emit_load_var_a64(match_slot)
-                let vb_slot_a64 = var_add(bind_ns, bind_ne)
-                if vb_slot_a64 >= 0 {
-                    emit_store_var_a64(vb_slot_a64)
-                    if VAR_COUNT > 0 {
-                        let vbi = VAR_COUNT - 1
-                        VAR_TY[vbi as usize] = match_scrut_ty_a
-                        VAR_TY_HASH[vbi as usize] = match_scrut_hash_a
-                        // β⁹ GTT week-7 follow-up (a64): bound var inherits scrutinee topology.
-                        VAR_CH_SET[vbi as usize] = match_scrut_ch_set_a
+                if spat_si >= 0 {
+                    struct_destructure_a64(spat_start, spat_si, match_slot)
+                } else {
+                    emit_load_var_a64(match_slot)
+                    let vb_slot_a64 = var_add(bind_ns, bind_ne)
+                    if vb_slot_a64 >= 0 {
+                        emit_store_var_a64(vb_slot_a64)
+                        if VAR_COUNT > 0 {
+                            let vbi = VAR_COUNT - 1
+                            VAR_TY[vbi as usize] = match_scrut_ty_a
+                            VAR_TY_HASH[vbi as usize] = match_scrut_hash_a
+                            // β⁹ GTT week-7 follow-up (a64): bound var inherits scrutinee topology.
+                            VAR_CH_SET[vbi as usize] = match_scrut_ch_set_a
+                        }
                     }
                 }
                 var vb_has_guard_a64: i64 = 0

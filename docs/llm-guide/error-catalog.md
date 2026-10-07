@@ -502,3 +502,4 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E261 | type-checker/ontology | error | ontology classes are disjoint and cannot be combined by this operator (e.g. an amount of H2 added to an amount of CO2) | — |
 | E262 | type-checker/ontology | error | ontology classes are unrelated: no subsumption between them, so the operator cannot say what the result is an amount of | — |
 | E263 | type-checker/modules | error | qualified call is ambiguous: the qualifier names a `use`d module but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs | — |
+| E265 | type-checker/pattern (lean_single) | error | unsupported struct pattern: lean_single binds only `field`, `field: name`, `field: _` and `..` (nested/literal sub-patterns are refused) and every named field must exist; refuses rather than emitting unbound or mis-bound locals | — |
