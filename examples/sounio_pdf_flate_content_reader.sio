@@ -1,0 +1,140 @@
+//@ run-pass
+//!
+//! First Sounio semantic-authority witness for resolving and inflating page
+//! content streams in Apple's pinned Metal feature-table PDF.
+
+use document::pdf_flatedecode::{
+    sounio_pdf_flate_import,
+    sounio_pdf_expected_sha256,
+    sounio_pdf_expected_inventory,
+    sounio_pdf_negative_digest,
+    sounio_pdf_negative_header,
+    sounio_pdf_negative_duplicate_xref,
+    sounio_pdf_negative_page_cycle,
+    sounio_pdf_negative_page_count,
+    sounio_pdf_negative_filter_conflict,
+    sounio_pdf_negative_stream_capacity,
+    sounio_pdf_negative_inflate_propagation,
+    SOUNIO_PDF_OK,
+}
+
+fn yes(value: bool) -> i64 { if value { 1 } else { 0 } }
+
+fn print_hex_word(word: i64) with IO, Mut {
+    var shift: i64 = 28
+    while shift >= 0 {
+        let nibble = (word >> shift) & 15
+        if nibble < 10 { print_char(48 + nibble) }
+        else { print_char(87 + nibble) }
+        shift = shift - 4
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    if arg_count() != 1 {
+        print("usage: sounio_pdf_flate_content_reader <Metal-Feature-Set-Tables.pdf>\n")
+        return 2
+    }
+    let inv = sounio_pdf_flate_import(get_arg(0))
+    var failures: i64 = 0
+    let expected_ok = sounio_pdf_expected_inventory(&inv)
+    let structure_ok = expected_ok && inv.error == SOUNIO_PDF_OK && inv.digest_match &&
+        inv.header_match && inv.eof_match && inv.pages > 0 &&
+        inv.pages == inv.root_declared_pages &&
+        inv.content_streams == inv.pages && inv.page_tree_nodes > 0 &&
+        inv.redundant_filter_entries == inv.content_streams &&
+        inv.omitted_stream_endobj == inv.content_streams &&
+        inv.xref_objects > inv.pages && inv.declared_objects > inv.xref_objects &&
+        inv.direct_flate_streams >= inv.content_streams &&
+        inv.nonselected_flate_streams ==
+            inv.direct_flate_streams - inv.content_streams &&
+        inv.selected_compressed_bytes > 0 && inv.selected_decoded_bytes > 0 &&
+        inv.inflate_blocks >= inv.content_streams
+    if !structure_ok { failures = failures + 1 }
+
+    let neg_digest = sounio_pdf_negative_digest()
+    let neg_header = sounio_pdf_negative_header()
+    let neg_duplicate = sounio_pdf_negative_duplicate_xref()
+    let neg_cycle = sounio_pdf_negative_page_cycle()
+    let neg_count = sounio_pdf_negative_page_count()
+    let neg_filter = sounio_pdf_negative_filter_conflict()
+    let neg_capacity = sounio_pdf_negative_stream_capacity()
+    let neg_inflate = sounio_pdf_negative_inflate_propagation()
+    if !neg_digest || !neg_header || !neg_duplicate || !neg_cycle ||
+        !neg_count || !neg_filter || !neg_capacity || !neg_inflate {
+        failures = failures + 1
+    }
+
+    print("SOUNIO_AUTHORITY schema=sounio-pdf-flate-content.v0 role=SEMANTIC_AUTHORITY\n")
+    print("PDF_CORPUS source=Metal-Feature-Set-Tables.pdf bytes=")
+    print_int(inv.total_bytes)
+    print(" error="); print_int(inv.error)
+    print(" sha256="); print(sounio_pdf_expected_sha256())
+    print(" digest_match="); print_int(yes(inv.digest_match)); print("\n")
+    print("PDF_ENVELOPE version_1_3="); print_int(yes(inv.header_match))
+    print(" eof="); print_int(yes(inv.eof_match))
+    print(" startxref="); print_int(inv.xref_offset); print("\n")
+    print("PDF_XREF in_use="); print_int(inv.xref_objects)
+    print(" declared_size="); print_int(inv.declared_objects)
+    print(" root="); print_int(inv.root_object)
+    print(" root_generation="); print_int(inv.root_generation); print("\n")
+    print("PDF_PAGE_TREE root="); print_int(inv.pages_root_object)
+    print(" nodes="); print_int(inv.page_tree_nodes)
+    print(" declared_pages="); print_int(inv.root_declared_pages)
+    print(" pages="); print_int(inv.pages); print("\n")
+    print("PDF_FLATE direct_streams="); print_int(inv.direct_flate_streams)
+    print(" selected_contents="); print_int(inv.content_streams)
+    print(" redundant_filter_entries=")
+    print_int(inv.redundant_filter_entries)
+    print(" omitted_stream_endobj="); print_int(inv.omitted_stream_endobj)
+    print(" nonselected="); print_int(inv.nonselected_flate_streams)
+    print(" oversized_nonselected=")
+    print_int(inv.oversized_nonselected_flate_streams)
+    print(" largest_length="); print_int(inv.largest_direct_flate_length); print("\n")
+    print("PDF_CONTENT_TOTAL compressed_bytes=")
+    print_int(inv.selected_compressed_bytes)
+    print(" decoded_bytes="); print_int(inv.selected_decoded_bytes)
+    print(" blocks="); print_int(inv.inflate_blocks)
+    print(" stored="); print_int(inv.inflate_stored_blocks)
+    print(" fixed="); print_int(inv.inflate_fixed_blocks)
+    print(" dynamic="); print_int(inv.inflate_dynamic_blocks)
+    print(" literals="); print_int(inv.inflate_literals)
+    print(" copies="); print_int(inv.inflate_copies)
+    print(" max_distance="); print_int(inv.max_distance); print("\n")
+
+    var page: i64 = 0
+    while page < inv.pages {
+        print("PDF_CONTENT index="); print_int(page)
+        print(" page_object="); print_int(inv.page_objects[page as usize])
+        print(" content_object="); print_int(inv.content_objects[page as usize])
+        print(" compressed="); print_int(inv.compressed_lengths[page as usize])
+        print(" decoded="); print_int(inv.decoded_lengths[page as usize])
+        print(" sha256=")
+        var word: i64 = 0
+        while word < 8 {
+            print_hex_word(inv.content_digest_words[(page * 8 + word) as usize])
+            word = word + 1
+        }
+        print("\n")
+        page = page + 1
+    }
+    print("PDF_CONTENT_AGGREGATE length_prefixed_sha256=")
+    var word: i64 = 0
+    while word < 8 {
+        print_hex_word(inv.aggregate_digest_words[word as usize])
+        word = word + 1
+    }
+    print("\n")
+    print("PDF_NEGATIVE digest="); print_int(yes(neg_digest))
+    print(" header="); print_int(yes(neg_header))
+    print(" duplicate_xref="); print_int(yes(neg_duplicate))
+    print(" page_cycle="); print_int(yes(neg_cycle))
+    print(" page_count="); print_int(yes(neg_count))
+    print(" filter_conflict="); print_int(yes(neg_filter))
+    print(" stream_capacity="); print_int(yes(neg_capacity))
+    print(" inflate_propagation="); print_int(yes(neg_inflate)); print("\n")
+    print("PDF_EXPECTED inventory="); print_int(yes(expected_ok)); print("\n")
+    print("PDF_BOUNDARY content_bytes_only=1 text_operators=0 font_mapping=0 apple_feature_semantics=0 hardware_observations=0 lowering_claims=0\n")
+    print("PDF_SUMMARY failures="); print_int(failures); print("\n")
+    if failures == 0 { 0 } else { 1 }
+}
