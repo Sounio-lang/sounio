@@ -1005,6 +1005,43 @@ fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
     }
 }
 
+// #2355: fold the initializer into BSS fill words when the parse-time folder
+// can; otherwise keep the expression for run-time evaluation at `main`'s entry
+// (ast_record_global_deferred_init). Before, an unfoldable initializer -- every
+// struct literal, every call -- was dropped here and the global read as zero.
+//
+// Only a one-word slot is deferred: no annotation, or a plain named type. A
+// fixed-array global holds its elements inline in BSS and a multi-limb global
+// (i128/u128/i256/u256/f128/f256) holds several words, so one run-time store
+// would be wrong for both; they keep the old zero fill.
+fn items_global_init_deferrable(ty: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *ty {
+        Some(t) => {
+            if (*t).kind != TypeExprKind::TypeNamed { return false }
+            let tn = ast_path_prefix_name((*t).path, 0)
+            if name_eq(tn, make_name("i128")) || name_eq(tn, make_name("u128")) { return false }
+            if name_eq(tn, make_name("i256")) || name_eq(tn, make_name("u256")) { return false }
+            if name_eq(tn, make_name("f128")) || name_eq(tn, make_name("f256")) { return false }
+            true
+        }
+        None => true,
+    }
+}
+
+// An initializer the folder refused only because a name it reads is defined in
+// two or more other modules (GLOBAL_VAR_INIT_AMBIG_COUNT, warned by the parse
+// driver as "left zero") is not deferred either: evaluated by bare name at run
+// time it could read the wrong module's definition.
+fn items_record_global_init_or_defer(name: Name, init: Box<Expr>, deferrable: bool) with Mut, Panic, Div {
+    let before = ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD)
+    let ambig_before = GLOBAL_VAR_INIT_AMBIG_COUNT
+    items_record_global_int_init(name, &(*init))
+    if deferrable && ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD) == before
+        && GLOBAL_VAR_INIT_AMBIG_COUNT == ambig_before {
+        ast_record_global_deferred_init(name, init)
+    }
+}
+
 fn items_reverse_item_list_loop(
     current: Option<Box<ItemList>>,
     acc: Option<Box<ItemList>>,
@@ -1552,11 +1589,12 @@ impl Parser {
         let ty_pair = p.parse_optional_type()
         p = ty_pair.0
         let global_ty: Option<Box<TypeExpr>> = ty_pair.1
+        ast_record_global_decl_type(name, &global_ty)
 
         p = p.expect(TokenKind::Eq)
         p = p.parse_expr()
         let init_let_box = parser_take_expr_box()
-        items_record_global_int_init(name, &(*init_let_box))
+        items_record_global_init_or_defer(name, init_let_box, items_global_init_deferrable(&global_ty))
         if parser_peek(p) == TokenKind::Semi {
             p = p.advance()
         }
@@ -1608,12 +1646,13 @@ impl Parser {
         let ty_pair = p.parse_optional_type()
         p = ty_pair.0
         let global_ty: Option<Box<TypeExpr>> = ty_pair.1
+        ast_record_global_decl_type(name, &global_ty)
 
         if parser_peek(p) == TokenKind::Eq {
             p = p.advance()
             p = p.parse_expr()
             let init_var_box = parser_take_expr_box()
-            items_record_global_int_init(name, &(*init_var_box))
+            items_record_global_init_or_defer(name, init_var_box, items_global_init_deferrable(&global_ty))
         }
         if parser_peek(p) == TokenKind::Semi {
             p = p.advance()
