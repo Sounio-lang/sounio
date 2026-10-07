@@ -1078,6 +1078,16 @@ inferred fact, not an independent obligation.
 > scoped in
 > `docs/audit/MUT_EFFECT_ENFORCEMENT_DISPATCH_2026-07-27.md`; the seed is
 > deliberately left frozen (see `docs/compiler/KNOWN_LIMITATIONS.md`).
+>
+> **Update (#2834).** `lean_single` now implements the escape rule: a store to a
+> function-local `var` (scalar, struct field, array element, field array) needs
+> no `Mut`; a store whose root is a global, a reference or raw pointer, an
+> unsized `[T]` view, or that sits inside a closure body still requires it
+> (`local_store_needs_mut` / `field_array_store_needs_mut` in
+> `self-hosted/compiler/lean_single.sio`). Fixtures:
+> `tests/run-pass/local_var_mutation_needs_no_mut_issue_2834.sio`,
+> `tests/compile-fail/excl_ref_write_still_requires_mut_issue_2834.sio`,
+> `tests/compile-fail/global_write_still_requires_mut_issue_2834.sio`.
 
 ### 7.3 Effect Annotations
 
