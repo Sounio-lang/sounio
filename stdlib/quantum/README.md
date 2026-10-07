@@ -56,6 +56,9 @@ With both moves at once the pair reads sqrt(2)*(cos(eta)+cos(eta+epsilon)). The 
 Ry(phi) then CNOT keeps ZZ at 1 and sets XX to sin phi. The usual angles read sqrt(2)*(1+sin phi) and stay below 2 until sin phi = sqrt(2)-1. Bob angles with tan beta = sin phi read 2*sqrt(1+sin(phi)^2) and pass 2 for every phi other than 0.
 qasm_tape records a circuit that has not run. tape_replay checks it on the linear statevector. tape_qasm emits OpenQASM 3.0, including stdgates.inc, for a submitter outside the language.
 tape_counts draws N shots from those replay probabilities.
+tape_judge accepts that record inside 4 standard deviations, and refuses it if a zero-probability outcome appears.
+tape_read fills the same record from a shot list, one line per shot.
+tape_write renders the record back to that list, and tape_check judges the list against the tape.
 
 Demo, independent C++ cross-check and the full list of limits:
 [`demos/quantum/`](../../demos/quantum/README.md).

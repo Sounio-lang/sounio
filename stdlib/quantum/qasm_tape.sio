@@ -270,6 +270,133 @@ pub fn tape_counts(t: Tape, shots: i64, seed: i64) -> ShotCounts with Mut, Div, 
     ShotCounts { n00: n00, n01: n01, n10: n10, n11: n11 }
 }
 
+pub struct CountVerdict {
+    pub accept: i64,
+    pub forbidden: i64,
+    pub z_max: f64,
+}
+
+fn sqrt_pos(x: f64) -> f64 with Div {
+    var y = 1.0
+    var n = 0
+    while n < 16 {
+        y = 0.5 * (y + x / y)
+        n = n + 1
+    }
+    y
+}
+
+fn cell_forbidden(n: i64, p: f64) -> i64 {
+    if p < 0.000000000001 {
+        if n != 0 { return 1 }
+    }
+    0
+}
+
+fn cell_z(n: i64, p: f64, shots: i64) -> f64 with Div {
+    if p < 0.000000000001 { return 0.0 }
+    if p > 0.999999999999 { return 0.0 }
+    let mean = (shots as f64) * p
+    let width = sqrt_pos((shots as f64) * p * (1.0 - p))
+    let d = (n as f64) - mean
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad / width
+}
+
+fn worse(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+// Four standard deviations. A zero-probability outcome that appears is refused
+// on its own: that cell has no width to hide in.
+pub fn tape_judge(probs: BasisProb, counts: ShotCounts) -> CountVerdict with Div {
+    let shots = counts.n00 + counts.n01 + counts.n10 + counts.n11
+    let f = cell_forbidden(counts.n00, probs.p00) + cell_forbidden(counts.n01, probs.p01) + cell_forbidden(counts.n10, probs.p10) + cell_forbidden(counts.n11, probs.p11)
+    let z = worse(
+        worse(cell_z(counts.n00, probs.p00, shots), cell_z(counts.n01, probs.p01, shots)),
+        worse(cell_z(counts.n10, probs.p10, shots), cell_z(counts.n11, probs.p11, shots)),
+    )
+    let accept = if f == 0 {
+        if z < 4.0 { 1 } else { 0 }
+    } else {
+        0
+    }
+    CountVerdict { accept: accept, forbidden: f, z_max: z }
+}
+
+fn shot_zeros() -> ShotCounts {
+    ShotCounts { n00: 0, n01: 0, n10: 0, n11: 0 }
+}
+
+// One line per shot, "00" or "11" or the other two basis words.
+// This is the text a submitter would leave. The draws are not ours.
+pub fn tape_read(text: string) -> ShotCounts with Mut, Panic, Div {
+    var i: i64 = 0
+    let n = str_len(text)
+    var c00: i64 = 0
+    var c01: i64 = 0
+    var c10: i64 = 0
+    var c11: i64 = 0
+    while i < n {
+        let nl = str_slice(text, i, i + 1)
+        if str_eq(nl, "\n") {
+            i = i + 1
+        } else {
+            if i + 2 > n {
+                panic("shot line")
+                return shot_zeros()
+            }
+            let pair = str_slice(text, i, i + 2)
+            if str_eq(pair, "00") {
+                c00 = c00 + 1
+            } else {
+                if str_eq(pair, "01") {
+                    c01 = c01 + 1
+                } else {
+                    if str_eq(pair, "10") {
+                        c10 = c10 + 1
+                    } else {
+                        if str_eq(pair, "11") {
+                            c11 = c11 + 1
+                        } else {
+                            panic("shot word")
+                            return shot_zeros()
+                        }
+                    }
+                }
+            }
+            i = i + 2
+        }
+    }
+    ShotCounts { n00: c00, n01: c01, n10: c10, n11: c11 }
+}
+
+fn repeat_line(word: string, n: i64) -> string with Mut, Panic, Div {
+    var s = ""
+    var i: i64 = 0
+    while i < n {
+        s = str_concat(s, str_concat(word, "\n"))
+        i = i + 1
+    }
+    s
+}
+
+// The shot list a submitter would write. Order is by basis word, not by time.
+pub fn tape_write(counts: ShotCounts) -> string with Mut, Panic, Div {
+    var s = repeat_line("00", counts.n00)
+    s = str_concat(s, repeat_line("01", counts.n01))
+    s = str_concat(s, repeat_line("10", counts.n10))
+    s = str_concat(s, repeat_line("11", counts.n11))
+    s
+}
+
+// The tape supplies the probabilities. The text supplies the shots.
+pub fn tape_check(t: Tape, text: string) -> CountVerdict with Mut, Div, Panic {
+    let probs = tape_replay_2(t)
+    let counts = tape_read(text)
+    tape_judge(probs, counts)
+}
+
 fn step1(q0: Qubit, kind: i32, angle: f64, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {
     if kind == 9 {
         ry(q0, qs, angle)
