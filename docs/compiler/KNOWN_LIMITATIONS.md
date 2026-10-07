@@ -391,12 +391,20 @@ files, 78.4% accepted by `souc check`
   `print_f64`, `read_i64`, `write_i64`, `read_f64`, `write_f64` -- lean_single
   does not check them either, so they are a shared gap, not a divergence.
   `print_int` is guarded by Madaros only.
-- **Two E035 divergences from lean_single remain, both older than #2760.**
-  (1) lean_single grants `main` every basic effect; Madaros requires
-  `fn main() with IO` even when `main` only calls a `with IO` user function.
-  (2) Madaros checks a closure body against an empty effect row: it neither
-  inherits the enclosing function's effects nor honours `|x| -> T with IO`, so a
-  closure that prints, or calls a `with IO` function, is rejected (E035, or E009 once the closure carries IO into a HOF parameter typed without effects) even inside
-  `main with IO`. After #2760 this includes the builtins above;
-  `tests/run-pass/closure_effect_transparent_hof.sio` carries `known-failure`
-  for it.
+- **Two divergences from lean_single remain in how effects are checked.**
+  (1) lean_single grants `main` every basic effect (predates #2760); Madaros
+  requires `fn main() with IO` even when `main` only calls a `with IO` user
+  function.
+  (2) A closure's effects are inferred, not declared: the closure body widens its
+  own effect set and publishes it on the closure's signature, so nothing is
+  reported inside the body. The effect then surfaces where the closure is used.
+  Called directly, it is charged to the enclosing function (a closure that
+  `println`s, called from a function without `IO`, is E035 on that function).
+  Passed as an argument to a function-typed parameter that carries no effects, an
+  effectful closure does not fit the parameter's empty effect row and is E009
+  ("argument type does not match parameter") at the call. Before #2760 a closure
+  that only used a builtin had an empty row, so that same call was accepted; the
+  builtins listed above now travel through the closure like any other effect.
+  `tests/run-pass/closure_effect_transparent_hof.sio` is that case (its intent is
+  that an unannotated HOF parameter is effect-polymorphic) and carries
+  `known-failure`.
