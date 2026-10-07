@@ -4308,7 +4308,25 @@ fn nc_alloc_diag_append_decimal_into(nc: &! NativeCompiler, value: i64) with Mut
     }
 }
 
+// write(2, rodata + rodata_offset, write_len)
+fn nc_core_emit_alloc_failure_write_into(nc: &! NativeCompiler, rodata_offset: i64, write_len: i64) with Mut, Panic, Div {
+    let lea_pos = (*nc).code.len
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    nc_add_rodata_reloc(nc, lea_pos + 3, rodata_offset)
+    nc_emit_mov_reg_reg(nc, 6, 0)
+    nc_emit_mov_rdi_imm(nc, 2)
+    nc_emit_mov_reg_imm(nc, 2, write_len)
+    nc_emit_mov_rax_imm(nc, 1)
+    nc_emit_syscall(nc)
+}
+
 fn nc_core_emit_alloc_failure_diagnostic_into(nc: &! NativeCompiler, fail_code: i64, request_bytes: i64) with Mut, Panic, Div {
+    // #2836: one copy of each distinct message per program; see NC_ALLOC_DIAG_*.
+    let slot = nc_alloc_diag_find_slot(fail_code, request_bytes)
+    if slot >= 0 && NC_ALLOC_DIAG_CODE[slot as usize] == fail_code {
+        nc_core_emit_alloc_failure_write_into(nc, NC_ALLOC_DIAG_OFF[slot as usize], NC_ALLOC_DIAG_LEN[slot as usize])
+        return
+    }
     let rodata_offset = native_v2_rodata_len_into(nc)
     // Keep this byte-oriented: String lowering in this failure path is not yet
     // reliable enough to use while reporting a runtime allocation exhaustion.
@@ -4373,14 +4391,13 @@ fn nc_core_emit_alloc_failure_diagnostic_into(nc: &! NativeCompiler, fail_code: 
     }
 
     let write_len = native_v2_rodata_len_into(nc) - rodata_offset
-    let lea_pos = (*nc).code.len
-    nc_emit_lea_rax_rip_disp32(nc, 0)
-    nc_add_rodata_reloc(nc, lea_pos + 3, rodata_offset)
-    nc_emit_mov_reg_reg(nc, 6, 0)
-    nc_emit_mov_rdi_imm(nc, 2)
-    nc_emit_mov_reg_imm(nc, 2, write_len)
-    nc_emit_mov_rax_imm(nc, 1)
-    nc_emit_syscall(nc)
+    if slot >= 0 {
+        NC_ALLOC_DIAG_CODE[slot as usize] = fail_code
+        NC_ALLOC_DIAG_REQ[slot as usize] = request_bytes
+        NC_ALLOC_DIAG_OFF[slot as usize] = rodata_offset
+        NC_ALLOC_DIAG_LEN[slot as usize] = write_len
+    }
+    nc_core_emit_alloc_failure_write_into(nc, rodata_offset, write_len)
 }
 
 // __sounio_seq_push(handle, value) -> unit. Seq reuses the aggregate object

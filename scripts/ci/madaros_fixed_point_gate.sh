@@ -224,7 +224,7 @@ else
   MERGED="$(grep -oE 'Merged IR: *[0-9]+' "$WORK/gen2.log" | grep -oE '[0-9]+' | tail -1)"
   INTO_ACC_DONE="$(grep -oE 'into_acc_done[[:space:]]+[0-9]+' "$WORK/gen2.log" | grep -oE '[0-9]+' | tail -1)"
   INTO_ACC_DONE="${INTO_ACC_DONE:-0}"
-  FIRST_GEN2_FAILURE="$(grep -m1 -E 'println-poison|IR lowering failed|ir_[a-z_]+_failed|error\[E[0-9]+\]|Error: native code buffer overflow|Error: native relocation table overflow|Failed to write native binary|multimodule native thin-link compilation failed' "$WORK/gen2.log" || true)"
+  FIRST_GEN2_FAILURE="$(grep -m1 -E 'println-poison|IR lowering failed|ir_[a-z_]+_failed|error\[E[0-9]+\]|Error: native code buffer overflow|Error: native relocation table overflow|Error: native rodata buffer overflow|Failed to write native binary|multimodule native thin-link compilation failed' "$WORK/gen2.log" || true)"
   GEN2_FAILURE_CONTEXT="$(grep -E 'first flagged in preseed stage|unresolved identifiers|lowering-error record|lowering errors:|raised at lower\.sio lines:|cause:' "$WORK/gen2.log" | head -8 || true)"
   echo "           rc=$GEN2_RC merged_ir_functions=${MERGED:-<none>}"
   echo "           into_acc_done=$INTO_ACC_DONE minimum=$MIN_INTO_ACC_DONE"

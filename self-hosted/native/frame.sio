@@ -298,6 +298,40 @@ pub fn nc_flat_reloc_capacity() -> i64 { 2097152 }
 pub var NC_RELOC_UNKNOWN_KIND_COUNT: i64 = 0
 pub var NC_RELOC_UNKNOWN_KIND_FIRST: i64 = 0
 
+// Allocation-failure diagnostic dedup (#2836). The text written when the
+// generated program exhausts its arena or handle table depends only on
+// (fail_code, request_bytes), and every allocation site used to append its own
+// ~700-byte copy to .rodata: self-hosted/compiler/main.sio needed 23,676,227
+// bytes against the 2 MiB NC_BIG_RODATA and gen2 refused with rc=23. Each
+// distinct message is now appended once per compiled program and every site
+// that needs it points at that copy. Open addressing over 4096 slots;
+// NC_ALLOC_DIAG_CODE[i] == 0 marks a free slot (fail codes are 181/182).
+// compiler_new resets the table.
+pub var NC_ALLOC_DIAG_CODE: [i64; 4096] = [0; 4096]
+pub var NC_ALLOC_DIAG_REQ: [i64; 4096] = [0; 4096]
+pub var NC_ALLOC_DIAG_OFF: [i64; 4096] = [0; 4096]
+pub var NC_ALLOC_DIAG_LEN: [i64; 4096] = [0; 4096]
+
+pub fn nc_alloc_diag_slot_capacity() -> i64 { 4096 }
+
+// Slot holding (fail_code, request_bytes), or the free slot where it belongs,
+// or -1 when the table is full and the key is absent.
+pub fn nc_alloc_diag_find_slot(fail_code: i64, request_bytes: i64) -> i64 with Div {
+    let cap = nc_alloc_diag_slot_capacity()
+    var h = (request_bytes * 31 + fail_code) % cap
+    if h < 0 { h = h + cap }
+    var probes: i64 = 0
+    while probes < cap {
+        let c = NC_ALLOC_DIAG_CODE[h as usize]
+        if c == 0 { return h }
+        if c == fail_code && NC_ALLOC_DIAG_REQ[h as usize] == request_bytes { return h }
+        h = h + 1
+        if h == cap { h = 0 }
+        probes = probes + 1
+    }
+    -1
+}
+
 // The kinds apply_relocations_into (codegen_x86_linux.sio) can patch: 1 call
 // rel32, 2 .rodata RIP-disp, 3 .data RIP-disp, 4 function-address RIP-disp.
 // Kept here, not in codegen_x86_linux.sio, so a test can pin the predicate and
@@ -628,6 +662,11 @@ pub fn compiler_new() -> NativeCompiler with Mut {
     out.reloc_overflow_count_attempted = 0
     NC_RELOC_UNKNOWN_KIND_COUNT = 0
     NC_RELOC_UNKNOWN_KIND_FIRST = 0
+    var ad: i64 = 0
+    while ad < 4096 {
+        NC_ALLOC_DIAG_CODE[ad as usize] = 0
+        ad = ad + 1
+    }
     out.label_overflow = false
     NC_V2_LABEL_OVERFLOW_FN = -1
     out.relocs = reloc_table_new()
