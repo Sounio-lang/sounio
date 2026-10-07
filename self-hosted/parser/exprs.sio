@@ -847,14 +847,7 @@ impl Parser {
         var p = self.advance()  // skip 'if'
         var cond_box: Box<Expr> = Box::new(error_expr(start))
         if parser_peek(p) == TokenKind::Let {
-            p = p.advance()
-            let pat_pair = p.parse_pattern()
-            p = pat_pair.0
-            p = p.expect(TokenKind::Eq)
-            p.no_struct_lit = true
-            p = p.parse_expr()
-            cond_box = parser_take_expr_box()
-            p.no_struct_lit = false
+            return p.parse_if_let_expr(start)
         } else {
             // Restrict struct literals in condition to avoid { ambiguity
             p.no_struct_lit = true
@@ -892,6 +885,91 @@ impl Parser {
         e.block = Some(Box::new(then_block))
         e.else_expr = else_opt
         parser_store_expr_box(Box::new(e))
+        p
+    }
+
+    // `if let PAT = SCRUT { THEN } [else ELSE]` desugars to
+    //     match SCRUT { PAT => { THEN }, _ => ELSE-or-{} }
+    // the same way parse_while_let_expr desugars `while let`. The previous
+    // parse consumed PAT and then DROPPED it, leaving SCRUT as a plain `if`
+    // condition: every `if let Some(x) = opt` became E006 (condition is not
+    // bool) and every use of `x` in THEN became E137 (unbound identifier).
+    fn parse_if_let_expr(self, start: Span) -> Parser with Mut, IO, Panic, Div, Alloc {
+        var p = self.advance()  // skip 'let'
+        let pat_pair = p.parse_pattern()
+        p = pat_pair.0
+        let success_pattern = pat_pair.1
+        p = p.expect(TokenKind::Eq)
+
+        p.no_struct_lit = true
+        p = p.parse_expr()
+        let scrutinee_box = parser_take_expr_box()
+        p.no_struct_lit = false
+
+        let then_pair = p.parse_block()
+        p = then_pair.0
+        let then_block = then_pair.1
+
+        var else_body = mk_expr(ExprKind::ExprBlock, then_block.span)
+        var has_else = false
+        if parser_peek(p) == TokenKind::Else {
+            p = p.advance()  // skip 'else'
+            has_else = true
+            if parser_peek(p) == TokenKind::If {
+                // else if / else if let -- recursively parses and stores to LAST_EXPR
+                p = p.parse_if_expr()
+                let else_if_box = parser_take_expr_box()
+                else_body = *else_if_box
+            } else {
+                let else_pair = p.parse_block()
+                p = else_pair.0
+                let else_block = else_pair.1
+                else_body = mk_expr(ExprKind::ExprBlock, else_block.span)
+                else_body.block = Some(Box::new(else_block))
+            }
+        }
+
+        let span = p.span_from(start)
+        if !has_else {
+            // No else: the fall-through arm is an empty block (unit).
+            else_body = mk_expr(ExprKind::ExprBlock, span)
+            else_body.block = Some(Box::new(Block { stmts: None, span: span }))
+        }
+
+        var then_expr = mk_expr(ExprKind::ExprBlock, then_block.span)
+        then_expr.block = Some(Box::new(then_block))
+        let success_arm = MatchArm {
+            pattern: success_pattern,
+            guard: None,
+            body: then_expr,
+            span: then_block.span,
+        }
+
+        let wildcard_pattern = Pattern {
+            kind: PatternKind::PatWildcard,
+            span: span,
+            name: empty_name(),
+            int_val: 0,
+            path: empty_path(),
+            sub_patterns: None,
+            pat_fields: None,
+            is_mut: false,
+        }
+        let else_arm = MatchArm {
+            pattern: wildcard_pattern,
+            guard: None,
+            body: else_body,
+            span: span,
+        }
+
+        let arms = MatchArmList {
+            head: success_arm,
+            tail: Some(Box::new(MatchArmList { head: else_arm, tail: None })),
+        }
+        var match_expr = mk_expr(ExprKind::ExprMatch, span)
+        match_expr.left = Some(scrutinee_box)
+        match_expr.arms = Some(Box::new(arms))
+        parser_store_expr_box(Box::new(match_expr))
         p
     }
 

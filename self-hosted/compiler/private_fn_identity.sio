@@ -146,6 +146,12 @@ var PFI_RENAMED_TOTAL: i64 = 0
 var PFI_MODULES_TOUCHED: i64 = 0
 var PFI_LEFT_TOTAL: i64 = 0
 
+// 1 while builtin_shadow_apply_items runs: pfi_mangle then spells the
+// generated name `<name>__user` instead of `<name>__m<module>`.
+var PFI_MANGLE_USER: i64 = 0
+var BSH_OFF: i64 = 0
+var BSH_OFF_CHECKED: i64 = 0
+
 var PFI_OFF: i64 = 0
 var PFI_OFF_CHECKED: i64 = 0
 
@@ -400,7 +406,11 @@ fn pfi_mangle(n: Name, mod_idx: i64) -> Name with Mut, Panic, Div, Alloc {
     let view = str_from_bytes(buf, n.len)
     // str_from_bytes borrows a scratch buffer; copy before anything reuses it.
     let base = str_concat(view, "")
-    let suffix = str_concat("__m", io_trace_i64_string(mod_idx))
+    var suffix = str_concat("__m", io_trace_i64_string(mod_idx))
+    if PFI_MANGLE_USER == 1 {
+        // builtin_shadow_apply_items: `measure` -> `measure__user`.
+        suffix = str_concat("__user", "")
+    }
     make_name(str_concat(base, suffix))
 }
 
@@ -1109,4 +1119,206 @@ pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64
         print(" fn(s) unrenamed; no collision remains\n")
     }
     PFI_RENAMED_TOTAL
+}
+
+// ---------------------------------------------------------------------------
+// Builtin shadowing (P1.4)
+// ---------------------------------------------------------------------------
+//
+// THE DEFECT. The checker (check.sio checker_check_call_expr_inplace) and the
+// lowerer (ir/lower.sio lower_call_expr_ref -> call_expr_uses_special_a_ref /
+// _b_ref) recognise a set of compiler builtins -- measure, acknowledge,
+// variance_of, seq_new, print_int, assert, ... -- by the BARE IDENTIFIER at the
+// call site, before any user signature is consulted. A user `fn measure(x: i64)
+// -> i64` was therefore never called: the checker typed `measure(21)` as the
+// epistemic builtin (`E001 expected i32, found Knowledge<i64>`) and the lowerer
+// would have emitted the builtin. Measured on the shipped Madaros for 65 names;
+// see docs/compiler/KNOWN_LIMITATIONS.md (KL-21).
+//
+// THE FIX. A module's own PRIVATE definition shadows the builtin inside that
+// module. Right after a module is parsed (load_module_file), every private real
+// fn whose name is an intercepted builtin is renamed to `<name>__user`, together
+// with every reference to it in that module, reusing the private_fn_identity
+// walkers (same in-place rewrite, same refusal rules). Neither the checker nor
+// the lowerer then sees the builtin spelling, so the user function is called.
+// Other modules are untouched: a private fn is not visible to them, and they keep
+// the builtin.
+//
+// REFUSED (fail closed, error[builtin_shadow]): the same shapes
+// private_fn_identity cannot prove -- a local, parameter or pattern spelled like
+// the fn, or a bare value use in a match-arm body / struct-literal field -- and a
+// generated name that already exists. The message says to rename the function.
+//
+// NOT COVERED: `pub fn measure` keeps today's behaviour (the builtin wins at
+// bare-name call sites). Renaming an exported fn would break importers that
+// spell it. Documented in KNOWN_LIMITATIONS.
+//
+// OFF SWITCH: SOUNIO_DISABLE_BUILTIN_SHADOW=1.
+
+fn bsh_disabled() -> bool with IO, Mut, Panic, Div {
+    if BSH_OFF_CHECKED == 0 {
+        BSH_OFF_CHECKED = 1
+        if str_eq(read_env("SOUNIO_DISABLE_BUILTIN_SHADOW"), "1") {
+            BSH_OFF = 1
+        }
+    }
+    BSH_OFF == 1
+}
+
+// Names the checker or the lowerer intercept by bare identifier ahead of user
+// signatures. f128_from_limbs / f128_to_lo / f128_to_hi are deliberately absent:
+// stdlib/math/softfloat_f128.sio defines them as the implementation the
+// intercept stands for.
+fn bsh_name_is_intercepted_builtin(n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 { return false }
+    if name_eq(n, make_name("measure")) { return true }
+    if name_eq(n, make_name("acknowledge")) { return true }
+    if name_eq(n, make_name("Knowledge")) { return true }
+    if name_eq(n, make_name("require_confidence")) { return true }
+    if name_eq(n, make_name("variance_of")) { return true }
+    if name_eq(n, make_name("uncertainty_of")) { return true }
+    if name_eq(n, make_name("sensitivity_of")) { return true }
+    if name_eq(n, make_name("hessian_of")) { return true }
+    if name_eq(n, make_name("correlate")) { return true }
+    if name_eq(n, make_name("second_order_mean")) { return true }
+    if name_eq(n, make_name("lift_knowledge")) { return true }
+    if name_eq(n, make_name("slice_len")) { return true }
+    if name_eq(n, make_name("assert")) { return true }
+    if name_eq(n, make_name("print")) { return true }
+    if name_eq(n, make_name("print_int")) { return true }
+    if name_eq(n, make_name("print_char")) { return true }
+    if name_eq(n, make_name("println")) { return true }
+    if name_eq(n, make_name("syscall6")) { return true }
+    if name_eq(n, make_name("seq_new")) { return true }
+    if name_eq(n, make_name("seq_push")) { return true }
+    if name_eq(n, make_name("seq_get")) { return true }
+    if name_eq(n, make_name("seq_set")) { return true }
+    if name_eq(n, make_name("seq_len")) { return true }
+    if name_eq(n, make_name("seq_count")) { return true }
+    if name_eq(n, make_name("prove_robust")) { return true }
+    if name_eq(n, make_name("validate_manifest")) { return true }
+    if name_eq(n, make_name("admit_action")) { return true }
+    if name_eq(n, make_name("defer_action")) { return true }
+    if name_eq(n, make_name("deferral_reason")) { return true }
+    if name_eq(n, make_name("plan_acquisition")) { return true }
+    if name_eq(n, make_name("acquisition_reason")) { return true }
+    if name_eq(n, make_name("plan_recourse")) { return true }
+    if name_eq(n, make_name("recourse_reason")) { return true }
+    if name_eq(n, make_name("propose_alternatives")) { return true }
+    if name_eq(n, make_name("commit_alternative")) { return true }
+    if name_eq(n, make_name("alternative_count")) { return true }
+    if name_eq(n, make_name("alternative_option")) { return true }
+    if name_eq(n, make_name("alternative_reason")) { return true }
+    if name_eq(n, make_name("transition_reason")) { return true }
+    if name_eq(n, make_name("transition_step_count")) { return true }
+    if name_eq(n, make_name("observe_transition")) { return true }
+    if name_eq(n, make_name("rollback_transition")) { return true }
+    if name_eq(n, make_name("gpu_thread_id_x")) { return true }
+    if name_eq(n, make_name("gpu_thread_id_y")) { return true }
+    if name_eq(n, make_name("gpu_thread_id_z")) { return true }
+    if name_eq(n, make_name("gpu_block_id_x")) { return true }
+    if name_eq(n, make_name("gpu_block_id_y")) { return true }
+    if name_eq(n, make_name("gpu_block_id_z")) { return true }
+    if name_eq(n, make_name("gpu_block_dim_x")) { return true }
+    if name_eq(n, make_name("gpu_block_dim_y")) { return true }
+    if name_eq(n, make_name("gpu_block_dim_z")) { return true }
+    if name_eq(n, make_name("gpu_barrier")) { return true }
+    if name_eq(n, make_name("gpu_barrier_sync")) { return true }
+    if name_eq(n, make_name("gpu_sync_threads")) { return true }
+    false
+}
+
+fn bsh_error_unrenamable(n: Name) with IO, Mut, Panic, Div, Alloc {
+    print("error[builtin_shadow]: fn `")
+    pfi_print_name(n)
+    print("` has the name of a compiler builtin, and this\n")
+    print("  module cannot be rewritten to call it instead of the builtin:\n")
+    let why = PFI_T_REASON[pfi_table_find_name(n) as usize]
+    if why == PFI_R_NAME {
+        print("  the name it would be given (`")
+        let gen = pfi_mangle(n, PFI_CUR_MOD)
+        if gen.len > 0 { pfi_print_name(gen) } else { print("<too long>") }
+        print("`) is already defined.\n")
+    } else if why == PFI_R_GEN_SHADOWED {
+        print("  the name it would be given is already a local, parameter or pattern.\n")
+    } else {
+        print("  a local, parameter or pattern uses that name, or the fn is used as a\n")
+        print("  value in a match arm or struct-literal field.\n")
+    }
+    print("  `")
+    pfi_print_name(n)
+    print("` is a builtin; rename your function.\n")
+}
+
+// Rename this module's private builtin-named fns (see the section header).
+// Returns n >= 0 renamed, -1 switched off, -2 REFUSED (diagnostic printed).
+pub fn builtin_shadow_apply_items(items: Option<Box<ItemList> >) -> i64 with IO, Mut, Panic, Div, Alloc {
+    if bsh_disabled() { return 0 - 1 }
+    PFI_T_COUNT = 0
+    PFI_T_OVERFLOW = 0
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if pfi_item_real_fn((*list).head) && (*list).head.visibility.kind == 0 {
+                    if bsh_name_is_intercepted_builtin((*list).head.name) {
+                        if pfi_table_find_name((*list).head.name) < 0 && PFI_T_COUNT < PFI_T_MAX {
+                            let n = (*list).head.name
+                            let idx = PFI_T_COUNT
+                            PFI_T_HASH[idx as usize] = ast_name_hash(n)
+                            PFI_T_LEN[idx as usize] = n.len
+                            PFI_T_UNSAFE[idx as usize] = 0
+                            PFI_T_REASON[idx as usize] = 0
+                            var k: i64 = 0
+                            while k < n.len {
+                                PFI_T_BUF[(idx * 384 + k) as usize] = n.buf[k as usize]
+                                k = k + 1
+                            }
+                            PFI_T_COUNT = idx + 1
+                        }
+                    }
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    if PFI_T_COUNT == 0 { return 0 }
+
+    PFI_MANGLE_USER = 1
+    PFI_CUR_MOD = 0
+    // The generated name must not already be a symbol of this module.
+    var g: i64 = 0
+    while g < PFI_T_COUNT {
+        let gen = pfi_mangle(pfi_table_name(g), 0)
+        if gen.len <= 0 || pfi_items_define_name(items, gen) {
+            PFI_T_UNSAFE[g as usize] = 1
+            PFI_T_REASON[g as usize] = PFI_R_NAME
+        }
+        g = g + 1
+    }
+    PFI_MODE = 0
+    pfi_items(items)
+    var refused = false
+    var u: i64 = 0
+    while u < PFI_T_COUNT {
+        if PFI_T_UNSAFE[u as usize] != 0 {
+            bsh_error_unrenamable(pfi_table_name(u))
+            refused = true
+        }
+        u = u + 1
+    }
+    if refused {
+        PFI_MANGLE_USER = 0
+        PFI_T_COUNT = 0
+        return 0 - 2
+    }
+    let before = PFI_RENAMED_TOTAL
+    PFI_MODE = 1
+    pfi_items(items)
+    PFI_MODE = 0
+    PFI_MANGLE_USER = 0
+    PFI_T_COUNT = 0
+    PFI_RENAMED_TOTAL - before
 }

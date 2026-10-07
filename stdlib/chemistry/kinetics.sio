@@ -307,23 +307,81 @@ pub fn gri_mech_rates(t_k: f64, m_conc: f64) -> [f64; 5] with Mut, Div, Panic {
 }
 
 // RK4 with GRI-Mech k(T) at 1 atm (inline loop: rk4_step rhs signature cannot carry T).
+//
+// ALLOCATION-FREE STEP LOOP (2026-10-06, ledger D06). This loop used to call
+// big_dc_dt four times per RK4 step, and each call rebuilt the 6x5 stoichiometry
+// (matnm_new + 17 by-value matnm_set) plus a 5x1 rates MatNM (matnm_new + 5
+// matnm_set) and a matnm_mul result: ~25 MatNM values of 32 800 bytes per call,
+// ~100 per step, ~6.5 GB over the 2000 steps of test_big_crn_gri. Madaros's
+// generated runtime bump-allocates every by-value aggregate from a fixed ~2 GiB
+// arena that is never reclaimed, so tests/stdlib/chemistry/test_kinetics_gri_mech.sio
+// stopped at `madaros: arena full (allocation of 32800 bytes)` (exit 181) while
+// lean_single passed. Same cure as simulate_general_epistemic (P0.4) and
+// chemistry::catalysis (2026-09-15): big_stoich_matrix() is built ONCE and read
+// into a stack [f64; 30] (nuf[s * 5 + r]), and the per-step rates and stage
+// derivatives are written through hoisted &![f64; N] buffers.
+//
+// The arithmetic is the old one, operation for operation: the rates are
+// big_crn_rate's products in the same association, and dc[i] accumulates from
+// 0.0 over p = 0..4 in ascending p, exactly as matnm_mul did on the 6x5 * 5x1
+// product. Outputs are bit-identical to the MatNM version under lean_single.
+
+fn big_nu_flat_into(nu: MatNM, out: &![f64; 30]) with Mut, Div, Panic {
+    var s: i64 = 0
+    while s < 6 {
+        var r: i64 = 0
+        while r < 5 {
+            out[s * 5 + r] = matnm_get(nu, s, r)
+            r = r + 1
+        }
+        s = s + 1
+    }
+}
+
+fn big_dc_into(c: &[f64; 6], ks: &[f64; 5], nuf: &[f64; 30], rates: &![f64; 5],
+               out: &![f64; 6]) with Mut, Div, Panic {
+    rates[0] = ks[0] * c[0] * c[1]
+    rates[1] = ks[1] * c[3] * c[4]
+    rates[2] = ks[2] * c[2] * c[4]
+    rates[3] = ks[3] * c[2] * c[2]
+    rates[4] = ks[4] * c[0] * c[2]
+    var i: i64 = 0
+    while i < 6 {
+        var sum = 0.0
+        var p: i64 = 0
+        while p < 5 {
+            sum = sum + nuf[i * 5 + p] * rates[p]
+            p = p + 1
+        }
+        out[i] = sum
+        i = i + 1
+    }
+}
+
 pub fn simulate_big_crn_gri(init: &[f64; 6], t_k: f64, dt: f64, steps: i64) -> [f64; 6] with Mut, Div, Panic {
     let m_conc = 101325.0 / (8.31446261815324 * t_k) * 1.0e-6;
     let ks = gri_mech_rates(t_k, m_conc);
+    var nuf: [f64; 30] = [0.0; 30]
+    big_nu_flat_into(big_stoich_matrix(), &! nuf)
+    var rs: [f64; 5] = [0.0; 5]
+    var k1: [f64; 6] = [0.0; 6]
+    var k2: [f64; 6] = [0.0; 6]
+    var k3: [f64; 6] = [0.0; 6]
+    var k4: [f64; 6] = [0.0; 6]
     var y: [f64; 6] = [init[0], init[1], init[2], init[3], init[4], init[5]];
     var yt: [f64; 6] = [0.0; 6];
     var s: i64 = 0;
     while s < steps {
-        let k1 = big_dc_dt(&y, &ks);
+        big_dc_into(&y, &ks, &nuf, &! rs, &! k1)
         var i: i64 = 0;
         while i < 6 { yt[i] = y[i] + 0.5 * dt * k1[i]; i = i + 1; }
-        let k2 = big_dc_dt(&yt, &ks);
+        big_dc_into(&yt, &ks, &nuf, &! rs, &! k2)
         i = 0;
         while i < 6 { yt[i] = y[i] + 0.5 * dt * k2[i]; i = i + 1; }
-        let k3 = big_dc_dt(&yt, &ks);
+        big_dc_into(&yt, &ks, &nuf, &! rs, &! k3)
         i = 0;
         while i < 6 { yt[i] = y[i] + dt * k3[i]; i = i + 1; }
-        let k4 = big_dc_dt(&yt, &ks);
+        big_dc_into(&yt, &ks, &nuf, &! rs, &! k4)
         i = 0;
         while i < 6 { y[i] = y[i] + (dt / 6.0) * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]); i = i + 1; }
         s = s + 1;
@@ -1701,86 +1759,223 @@ pub fn pbpk_to_quantity(val: f64, unc: f64) -> f64 {
 // - Self-consistent epistemic ensembles for structural unc (plausible CRN sets).
 
 // Epistemic general CRN with EState (Sounio native GUM, not bolted-on)
-// Numeric Jacobian of the general mass-action RHS w.r.t. concentrations
-// (central differences; respects the user-supplied stoichiometry nu)
-fn general_jacobian(c: &[f64; 8], ks: &[f64; 8], nu: MatNM, nsp: i64, nrxn: i64, eps: f64) -> MatNM with Mut, Div, Panic {
-    var j = matnm_new(nsp, nsp);
-    var s: i64 = 0;
-    while s < nsp {
-        var cp: [f64; 8] = [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]; cp[s] = cp[s] + eps;
-        var cm: [f64; 8] = [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]; cm[s] = cm[s] - eps;
-        let rp = compute_rates_general(&cp, ks, nu, nrxn);
-        let rm = compute_rates_general(&cm, ks, nu, nrxn);
-        let dcp = general_dc(nu, &rp, nsp);
-        let dcm = general_dc(nu, &rm, nsp);
-        var i: i64 = 0;
-        while i < nsp {
-            j = matnm_set(j, i, s, (dcp[i] - dcm[i]) / (2.0 * eps));
-            i = i + 1;
+//
+// ALLOCATION-FREE STEP LOOP (2026-10-06, P0.4). This simulator used to go
+// through MatNM: general_dc built an 8x1 MatNM (matnm_new + 8 matnm_set +
+// matnm_mul) per call, and the numeric Jacobian built an nsp x nsp MatNM with
+// one matnm_set per entry plus 2*nsp general_dc calls -- roughly two hundred
+// 32 KiB MatNM values per RK4 step. Madaros's generated runtime bump-allocates
+// every one of them from a fixed 2 GiB arena that is never reclaimed, so
+// demos/hydrogen/uhs_brine_calcite.sio and site_screening.sio stopped at
+// `madaros: arena full` (exit 181) a few hundred steps in, while lean_single
+// ran them to the end. Same wall, same cure as chemistry::catalysis
+// (2026-09-15): read `nu` ONCE into a stack [f64; 64] (nuf[s * 8 + r]) and
+// write every per-step quantity through hoisted `&![f64; N]` buffers.
+//
+// The arithmetic is the old one, operation for operation: rates multiply
+// ks[r] by c[s]^order over s = 0..7 in ascending s; dc[i] accumulates from
+// 0.0 over p < nu.cols in ascending p, exactly as matnm_mul did (rates past
+// column 8 were always zero, and nu.rows bounds the rows matnm_mul filled);
+// the Jacobian is the same central difference with eps = 1e-6; the variance
+// update sums J_ik^2 v_k then (nu_ir rate1_r dt)^2 uk_r^2 in the same order.
+// Outputs are byte-identical to the MatNM version (checked on both hydrogen
+// demos under lean_single, which ran the old code to completion).
+
+fn general_nu_flat_into(nu: MatNM, out: &![f64; 64]) with Mut, Div, Panic {
+    var s: i64 = 0
+    while s < 8 {
+        var r: i64 = 0
+        while r < 8 {
+            out[s * 8 + r] = matnm_get(nu, s, r)
+            r = r + 1
         }
-        s = s + 1;
+        s = s + 1
     }
-    j
 }
 
-// Per-step variance propagation for the general network (first-order GUM):
-//   v+_i = sum_k J_ik^2 v_k  +  sum_r (nu_ir * rate1_r * dt)^2 * uk_r^2
-// where rate1_r is reaction r's rate with k_r = 1 (sensitivity of dc_i to k_r).
-fn propagate_general_unc(c: &[f64; 8], varc: &[f64; 8], ks: &[f64; 8], uks: &[f64; 8], nu: MatNM, nsp: i64, nrxn: i64, dt: f64) -> [f64; 8] with Mut, Div, Panic {
-    let j = general_jacobian(c, ks, nu, nsp, nrxn, 1e-6);
-    let ks1: [f64; 8] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
-    let rate1 = compute_rates_general(c, &ks1, nu, nrxn);
-    var newv: [f64; 8] = [0.0; 8];
-    var i: i64 = 0;
-    while i < nsp {
-        var sumv = 0.0;
-        var k: i64 = 0;
-        while k < nsp {
-            let jik = matnm_get(j, i, k);
-            sumv = sumv + jik * jik * varc[k];
-            k = k + 1;
+fn general_rates_into(c: &[f64; 8], ks: &[f64; 8], nuf: &[f64; 64], nrxn: i64,
+                      out: &![f64; 8]) with Mut, Div, Panic {
+    var r: i64 = 0
+    while r < nrxn {
+        var rate = ks[r]
+        var s: i64 = 0
+        while s < 8 {
+            let coeff = nuf[s * 8 + r]
+            if coeff < 0.0 {
+                let ord = (0.0 - coeff) as i64
+                var p = 1.0
+                var o: i64 = 0
+                while o < ord {
+                    p = p * c[s]
+                    o = o + 1
+                }
+                rate = rate * p
+            }
+            s = s + 1
         }
-        var sumk = 0.0;
-        var r: i64 = 0;
-        while r < nrxn {
-            let sens = matnm_get(nu, i, r) * rate1[r] * dt;
-            sumk = sumk + sens * sens * uks[r] * uks[r];
-            r = r + 1;
-        }
-        newv[i] = sumv + sumk;
-        i = i + 1;
+        out[r] = rate
+        r = r + 1
     }
-    newv
+}
+
+fn general_dc_into(nuf: &[f64; 64], nrows: i64, ncols: i64, rates: &[f64; 8], nsp: i64,
+                   out: &![f64; 8]) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < nsp {
+        var sum = 0.0
+        if i < nrows {
+            var p: i64 = 0
+            while p < ncols {
+                sum = sum + nuf[i * 8 + p] * rates[p]
+                p = p + 1
+            }
+        }
+        out[i] = sum
+        i = i + 1
+    }
 }
 
 pub fn simulate_general_epistemic(initv: &[f64; 8], inits: &[f64; 8], ks: &[f64; 8], uks: &[f64; 8], nu: MatNM, nsp: i64, nrxn: i64, dt: f64, steps: i64) -> ([f64; 8], [f64; 8]) with Mut, Div, Panic {
     // REAL general epistemic sim: values by general mass-action RK4 and variances by
     // per-step delta method, both on the user-supplied stoichiometry (no proxy system).
-    var y: [f64; 8] = [initv[0], initv[1], initv[2], initv[3], initv[4], initv[5], initv[6], initv[7]];
-    var v: [f64; 8] = [0.0; 8];
-    var i: i64 = 0; while i < nsp { v[i] = inits[i] * inits[i]; i = i + 1; }
-    var t = 0.0; var s = 0;
-    while s < steps {
-        let r1 = compute_rates_general(&y, ks, nu, nrxn);
-        let k1 = general_dc(nu, &r1, nsp);
-        var y2: [f64; 8] = [0.0; 8]; var ii: i64 = 0; while ii < nsp { y2[ii] = y[ii] + 0.5*dt*k1[ii]; ii=ii+1; }
-        let r2 = compute_rates_general(&y2, ks, nu, nrxn);
-        let k2 = general_dc(nu, &r2, nsp);
-        var y3: [f64; 8] = [0.0; 8]; ii=0; while ii < nsp { y3[ii] = y[ii] + 0.5*dt*k2[ii]; ii=ii+1; }
-        let r3 = compute_rates_general(&y3, ks, nu, nrxn);
-        let k3 = general_dc(nu, &r3, nsp);
-        var y4: [f64; 8] = [0.0; 8]; ii=0; while ii < nsp { y4[ii] = y[ii] + dt*k3[ii]; ii=ii+1; }
-        let r4 = compute_rates_general(&y4, ks, nu, nrxn);
-        let k4 = general_dc(nu, &r4, nsp);
-        ii = 0; while ii < nsp {
-            y[ii] = y[ii] + (dt/6.0) * (k1[ii] + 2.0*k2[ii] + 2.0*k3[ii] + k4[ii]);
-            ii = ii + 1;
-        }
-        v = propagate_general_unc(&y, &v, ks, uks, nu, nsp, nrxn, dt);
-        t = t + dt; s = s + 1;
+    var nuf: [f64; 64] = [0.0; 64]
+    general_nu_flat_into(nu, &! nuf)
+    var nrows = nu.rows
+    if nrows > 8 { nrows = 8 }
+    var ncols = nu.cols
+    if ncols > 8 { ncols = 8 }
+    let eps = 1e-6
+
+    var y: [f64; 8] = [0.0; 8]
+    var v: [f64; 8] = [0.0; 8]
+    var yt: [f64; 8] = [0.0; 8]
+    var rs: [f64; 8] = [0.0; 8]
+    var k1: [f64; 8] = [0.0; 8]
+    var k2: [f64; 8] = [0.0; 8]
+    var k3: [f64; 8] = [0.0; 8]
+    var k4: [f64; 8] = [0.0; 8]
+    var dcp: [f64; 8] = [0.0; 8]
+    var dcm: [f64; 8] = [0.0; 8]
+    var rate1: [f64; 8] = [0.0; 8]
+    var newv: [f64; 8] = [0.0; 8]
+    var jf: [f64; 64] = [0.0; 64]
+    var ks1: [f64; 8] = [0.0; 8]
+    var i: i64 = 0
+    while i < 8 { y[i] = initv[i]; ks1[i] = 1.0; i = i + 1 }
+    i = 0
+    while i < nsp { v[i] = inits[i] * inits[i]; i = i + 1 }
+
+    // VALUE-ONLY FAST PATH, exact. When every k-uncertainty is zero and the
+    // variance vector is zero, the update below yields
+    //   v+_i = sum_k J_ik^2 * 0  +  sum_r sens^2 * 0 * 0  =  +0.0
+    // for every finite J and sens, so the Jacobian (2*nsp of the 4 + 2*nsp + 1
+    // rate evaluations per step) changes nothing and is skipped. It is skipped
+    // only under bounds that PROVE J and sens finite (inf * 0 would be NaN):
+    // |y_s| <= 1e10, |ks_r| <= 1e30, mass-action orders <= 4, |nu| <= 1e3 and
+    // |dt| <= 1e3 give |rate| <= 1e70, |J| <= ~1e81, J^2 <= ~1e162. A NaN fails
+    // every comparison and takes the full path. The corner/p-box runs of
+    // demos/hydrogen (uks = 0, initial sigmas 0) spend most of their time here.
+    var skip_ok = true
+    if dt > 1000.0 || dt < 0.0 - 1000.0 { skip_ok = false }
+    if !(dt == dt) { skip_ok = false }
+    var gr: i64 = 0
+    while gr < nrxn {
+        if uks[gr] != 0.0 { skip_ok = false }
+        if !(ks[gr] <= 1.0e30 && ks[gr] >= 0.0 - 1.0e30) { skip_ok = false }
+        gr = gr + 1
     }
-    var ov: [f64; 8] = [0.0; 8];
-    var ou: [f64; 8] = [0.0; 8];
+    var gq: i64 = 0
+    while gq < 64 {
+        if !(nuf[gq] <= 1000.0 && nuf[gq] >= 0.0 - 1000.0) { skip_ok = false }
+        if nuf[gq] <= 0.0 - 5.0 { skip_ok = false }
+        gq = gq + 1
+    }
+
+    var s: i64 = 0
+    while s < steps {
+        var ii: i64 = 0
+        general_rates_into(&y, ks, &nuf, nrxn, &! rs)
+        general_dc_into(&nuf, nrows, ncols, &rs, nsp, &! k1)
+        ii = 0; while ii < 8 { yt[ii] = 0.0; ii = ii + 1 }
+        ii = 0; while ii < nsp { yt[ii] = y[ii] + 0.5*dt*k1[ii]; ii = ii + 1 }
+        general_rates_into(&yt, ks, &nuf, nrxn, &! rs)
+        general_dc_into(&nuf, nrows, ncols, &rs, nsp, &! k2)
+        ii = 0; while ii < nsp { yt[ii] = y[ii] + 0.5*dt*k2[ii]; ii = ii + 1 }
+        general_rates_into(&yt, ks, &nuf, nrxn, &! rs)
+        general_dc_into(&nuf, nrows, ncols, &rs, nsp, &! k3)
+        ii = 0; while ii < nsp { yt[ii] = y[ii] + dt*k3[ii]; ii = ii + 1 }
+        general_rates_into(&yt, ks, &nuf, nrxn, &! rs)
+        general_dc_into(&nuf, nrows, ncols, &rs, nsp, &! k4)
+        ii = 0
+        while ii < nsp {
+            y[ii] = y[ii] + (dt/6.0) * (k1[ii] + 2.0*k2[ii] + 2.0*k3[ii] + k4[ii])
+            ii = ii + 1
+        }
+
+        var skip_var = skip_ok
+        if skip_var {
+            ii = 0
+            while ii < 8 {
+                if !(y[ii] <= 1.0e10 && y[ii] >= 0.0 - 1.0e10) { skip_var = false }
+                if ii < nsp && v[ii] != 0.0 { skip_var = false }
+                ii = ii + 1
+            }
+        }
+
+        if !skip_var {
+        // Numeric Jacobian of the general mass-action RHS w.r.t. concentrations
+        // (central differences; respects the user-supplied stoichiometry nu).
+        var jc: i64 = 0
+        while jc < nsp {
+            ii = 0; while ii < 8 { yt[ii] = y[ii]; ii = ii + 1 }
+            yt[jc] = yt[jc] + eps
+            general_rates_into(&yt, ks, &nuf, nrxn, &! rs)
+            general_dc_into(&nuf, nrows, ncols, &rs, nsp, &! dcp)
+            ii = 0; while ii < 8 { yt[ii] = y[ii]; ii = ii + 1 }
+            yt[jc] = yt[jc] - eps
+            general_rates_into(&yt, ks, &nuf, nrxn, &! rs)
+            general_dc_into(&nuf, nrows, ncols, &rs, nsp, &! dcm)
+            ii = 0
+            while ii < nsp {
+                jf[ii * 8 + jc] = (dcp[ii] - dcm[ii]) / (2.0 * eps)
+                ii = ii + 1
+            }
+            jc = jc + 1
+        }
+
+        // Per-step variance propagation for the general network (first-order GUM):
+        //   v+_i = sum_k J_ik^2 v_k  +  sum_r (nu_ir * rate1_r * dt)^2 * uk_r^2
+        // where rate1_r is reaction r's rate with k_r = 1 (sensitivity of dc_i to k_r).
+        general_rates_into(&y, &ks1, &nuf, nrxn, &! rate1)
+        ii = 0
+        while ii < nsp {
+            var sumv = 0.0
+            var k: i64 = 0
+            while k < nsp {
+                let jik = jf[ii * 8 + k]
+                sumv = sumv + jik * jik * v[k]
+                k = k + 1
+            }
+            var sumk = 0.0
+            var r: i64 = 0
+            while r < nrxn {
+                let sens = nuf[ii * 8 + r] * rate1[r] * dt
+                sumk = sumk + sens * sens * uks[r] * uks[r]
+                r = r + 1
+            }
+            newv[ii] = sumv + sumk
+            ii = ii + 1
+        }
+        ii = 0
+        while ii < 8 {
+            if ii < nsp { v[ii] = newv[ii] } else { v[ii] = 0.0 }
+            ii = ii + 1
+        }
+        }
+        s = s + 1
+    }
+    var ov: [f64; 8] = [0.0; 8]
+    var ou: [f64; 8] = [0.0; 8]
     i = 0; while i < nsp {
         ov[i] = y[i];
         ou[i] = sqrt_approx(v[i]);
