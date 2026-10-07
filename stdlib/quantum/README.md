@@ -55,6 +55,7 @@ Under that same party offset the copied bit is exactly half the pair, and the an
 With both moves at once the pair reads sqrt(2)*(cos(eta)+cos(eta+epsilon)). The factor 2 is epsilon = 0. At Bob's offset pi/4 and Alice's split pi/2 both read 2, and past that point the copy is larger while the pair is below 2.
 Ry(phi) then CNOT keeps ZZ at 1 and sets XX to sin phi. The usual angles read sqrt(2)*(1+sin phi) and stay below 2 until sin phi = sqrt(2)-1. Bob angles with tan beta = sin phi read 2*sqrt(1+sin(phi)^2) and pass 2 for every phi other than 0.
 qasm_tape records a circuit that has not run. tape_replay checks it on the linear statevector. tape_qasm emits OpenQASM 3.0, including stdgates.inc, for a submitter outside the language.
+tape_counts draws N shots from those replay probabilities.
 
 Demo, independent C++ cross-check and the full list of limits:
 [`demos/quantum/`](../../demos/quantum/README.md).
