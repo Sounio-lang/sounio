@@ -4326,6 +4326,9 @@ fn type_name_kind(ns: i64, ne: i64) -> i64 with Panic, Mut {
 // type_name_kind: 1 integer, 2 float (also unit-dimensioned f64), 4 bool. For
 // anything else (string, enum, f128, struct-element arrays) zero is not a
 // valid value, so the declaration is refused rather than bound to garbage.
+// `[u8; N]` is also accepted, by its spelling: type_name_kind leaves u8 at kind
+// 0 (scan_type calls it an integer). It gets the same 8-byte-slot allocation
+// `[u8; N] = [0; N]` gets, zero-filled.
 fn lean_uninit_scalar_ok(decl_ty: i64) -> bool {
     return decl_ty == 1 || decl_ty == 2 || decl_ty == 4
 }
@@ -26413,6 +26416,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         var is_arr: i64 = 0
         var arr_len: i64 = 0
         var arr_len_lit: i64 = 0  // `[T; N]` spelled N (vs `[T]`, which also leaves arr_len 0)
+        var arr_elem_u8: i64 = 0  // type_name_kind has no `u8` (scan_type does); see lean_uninit_arr_elem_ok
         var arr_esiz: i64 = 8
         var decl_is_f64: i64 = -1
         var decl_ty: i64 = 0
@@ -26443,6 +26447,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     arr_elem_ty = type_name_kind(etns, etne)
                     if arr_elem_ty == 6 || arr_elem_ty == 7 { arr_elem_hash = gl_name_hash(etns, etne) }
                     if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
+                    if src_match(etns, etne - etns, "u8") { arr_elem_u8 = 1 }
                     EP = EP + 1  // skip element type
                 }
                 if TK[EP as usize] == 27 { EP = EP + 1 }  // skip ;
@@ -26480,7 +26485,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         // Skip = sign; detect type-annotated decl without initializer
         var has_eq: i64 = 0
         if TK[EP as usize] == 16 { EP = EP + 1; has_eq = 1 }
-        if is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
+        // `has_eq == 1`: without `=`, a `[V; N]` here is the NEXT statement, not
+        // this declaration's initializer (#2817).
+        if has_eq == 1 && is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
             // Local array with repeat initializer [V; N]: splat V into every slot.
             // (Previously V was SKIPPED and the slots were always zero-filled — the
             //  [V;N] non-zero-splat miscompile. We now mirror the already-correct
@@ -26612,7 +26619,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             // final else, whose compile_or() took the NEXT statement as the
             // initializer -- or, after a `;`, nothing, leaving a garbage array
             // pointer that SIGSEGV'd on the first element access.
-            if !lean_uninit_arr_elem_ok(decl_ty_hash, arr_esiz) {
+            if arr_elem_u8 == 0 && !lean_uninit_arr_elem_ok(decl_ty_hash, arr_esiz) {
                 tc_error_hard(EP - 1, "array declared without an initializer: only integer, float and bool elements are zero-initialized; write `= [V; N]`")
                 return
             }
@@ -41525,6 +41532,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         var is_arr: i64 = 0
         var arr_len: i64 = 0
         var arr_len_lit: i64 = 0  // `[T; N]` spelled N (vs `[T]`, which also leaves arr_len 0)
+        var arr_elem_u8: i64 = 0  // type_name_kind has no `u8` (scan_type does); see lean_uninit_arr_elem_ok
         var arr_esiz: i64 = 8
         var decl_is_f64: i64 = -1
         var decl_ty: i64 = 0
@@ -41553,6 +41561,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     arr_elem_ty = type_name_kind(etns, etne)
                     if arr_elem_ty == 6 || arr_elem_ty == 7 { arr_elem_hash = gl_name_hash(etns, etne) }
                     if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
+                    if src_match(etns, etne - etns, "u8") { arr_elem_u8 = 1 }
                     EP = EP + 1
                 }
                 if TK[EP as usize] == 27 { EP = EP + 1 }
@@ -41589,7 +41598,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         }
         var has_eq: i64 = 0
         if TK[EP as usize] == 16 { EP = EP + 1; has_eq = 1 }
-        if is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
+        // `has_eq == 1`: without `=`, a `[V; N]` here is the NEXT statement, not
+        // this declaration's initializer (#2817).
+        if has_eq == 1 && is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
             EP = EP + 1
             let a64_val_ep = EP
             while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
@@ -41695,7 +41706,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             emit_store_var_a64(ptr_slot)
         } else if has_eq == 0 && is_arr == 1 && arr_len_lit == 1 && arr_len >= 0 {
             // `var a: [T; N]` with no initializer (#2817) -- mirror of the x86 twin.
-            if !lean_uninit_arr_elem_ok(decl_ty_hash, arr_esiz) {
+            if arr_elem_u8 == 0 && !lean_uninit_arr_elem_ok(decl_ty_hash, arr_esiz) {
                 tc_error_hard(EP - 1, "array declared without an initializer: only integer, float and bool elements are zero-initialized; write `= [V; N]`")
                 return
             }
