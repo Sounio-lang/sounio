@@ -2048,6 +2048,20 @@ fn unit_call_arg_mismatch(param_hash: i64, expr_unit: i64, expr_dim: i64) -> boo
     return true
 }
 
+// #2751: a let annotated with a unit must receive a value of that unit's
+// dimension. ty_eq cannot see it: a product or quotient (`a_m * b_s`) carries
+// no unit-named type hash, only EXPR_UNIT_DIM, so `let x: m/s = a_m * b_s` and
+// `let y: kg = d_m / t_s` used to bind silently. A dimensionless value
+// (literal, `as f64` cast) still initialises a unit binding, as before.
+fn lean_let_unit_dim_mismatch(decl_hash: i64, expr_unit: i64, expr_dim: i64) -> bool with Panic, Mut, Div {
+    if decl_hash == 0 { return false }
+    let decl_dim = type_hash_unit_dim(decl_hash)
+    if decl_dim == 0 { return false }
+    if expr_dim == 0 { return false }
+    if expr_unit == decl_hash { return false }
+    return expr_dim != decl_dim
+}
+
 fn expr_set_unit_from_type(ty: i64, ty_hash: i64) with Panic, Mut, Div {
     EXPR_UNIT = 0
     EXPR_UNIT_DIM = 0
@@ -4655,6 +4669,18 @@ fn tc_error_hard(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
         PENDING_PRIV_SI = 0 - 1
     }
     print(" at ")
+    print_src_loc_for_tok(tok)
+    print(" (bundle line ")
+    print_int(TL[tok as usize])
+    print(")\n")
+    tc_mark_failed()
+    return 0
+}
+
+// #2751: the wording follows Madaros' E001 for the same refusal ("this binding
+// expects a different type"), so one fixture pattern pins both engines.
+fn tc_let_unit_mismatch(tok: i64) -> i64 with IO, Mut, Panic {
+    print("error[E001]: unit mismatch in let binding: this binding expects a different type (the value's dimension differs from the declared unit) at ")
     print_src_loc_for_tok(tok)
     print(" (bundle line ")
     print_int(TL[tok as usize])
@@ -26687,6 +26713,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     tc_decl_init_mismatch(EP - 1, decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH)
                 }
             }
+            if lean_let_unit_dim_mismatch(decl_ty_hash, EXPR_UNIT, EXPR_UNIT_DIM) {
+                tc_let_unit_mismatch(EP - 1)
+            }
             // Observation boundary: Unobserved<T> assigned to non-Unobserved binding
             if ty_is_unobserved(EXPR_TY) && !ty_is_unobserved(decl_ty) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                 tc_observe_boundary(EP - 1, "cannot assign Unobserved<T> to non-Unobserved binding")
@@ -41763,6 +41792,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 } else {
                     tc_decl_init_mismatch(EP - 1, decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH)
                 }
+            }
+            if lean_let_unit_dim_mismatch(decl_ty_hash, EXPR_UNIT, EXPR_UNIT_DIM) {
+                tc_let_unit_mismatch(EP - 1)
             }
                 // Observation boundary: Unobserved<T> assigned to a non-Unobserved
                 // binding (mirror of compile_stmt).
