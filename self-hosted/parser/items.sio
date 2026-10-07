@@ -1006,9 +1006,9 @@ fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
 }
 
 // #2355: fold the initializer into BSS fill words when the parse-time folder
-// can; otherwise keep the expression for run-time evaluation at `main`'s entry
-// (ast_record_global_deferred_init). Before, an unfoldable initializer -- every
-// struct literal, every call -- was dropped here and the global read as zero.
+// can; otherwise keep a closed expression for run-time evaluation at `main`'s
+// entry (ast_record_global_deferred_init). Before, every struct literal was
+// dropped here and the global's handle slot read as 0.
 //
 // Only a one-word slot is deferred: no annotation, or a plain named type. A
 // fixed-array global holds its elements inline in BSS and a multi-limb global
@@ -1028,16 +1028,74 @@ fn items_global_init_deferrable(ty: &Option<Box<TypeExpr>>) -> bool with Mut, Pa
     }
 }
 
-// An initializer the folder refused only because a name it reads is defined in
-// two or more other modules (GLOBAL_VAR_INIT_AMBIG_COUNT, warned by the parse
-// driver as "left zero") is not deferred either: evaluated by bare name at run
-// time it could read the wrong module's definition.
+// Only a CLOSED initializer is deferred: one that names nothing -- literals,
+// struct / array / tuple literals, and unary, binary and cast operators over
+// those. The deferred expression is lowered at `main`'s entry, i.e. outside the
+// module that wrote it, where a bare callee or global name would resolve
+// against the merged program instead of the defining module (a private
+// `helper` would bind another module's `pub fn helper`; see
+// scripts/ci/madaros_global_init_identity_gate.sh, case `shadow`). An
+// initializer that names a fn or global keeps the previous behaviour.
+fn items_expr_is_closed(e: &Expr) -> bool with Mut, Panic, Div {
+    let k = (*e).kind
+    if k == ExprKind::ExprIntLit || k == ExprKind::ExprFloatLit || k == ExprKind::ExprBoolTrue
+        || k == ExprKind::ExprBoolFalse || k == ExprKind::ExprCharLit || k == ExprKind::ExprStringLit {
+        return true
+    }
+    if k == ExprKind::ExprUnary || k == ExprKind::ExprCast {
+        return items_opt_expr_is_closed(&(*e).left)
+    }
+    if k == ExprKind::ExprBinary {
+        return items_opt_expr_is_closed(&(*e).left) && items_opt_expr_is_closed(&(*e).right)
+    }
+    if k == ExprKind::ExprStructLit {
+        var cur = &(*e).fields
+        while true {
+            match *cur {
+                Some(fl) => {
+                    if !items_expr_is_closed(&(*fl).head.value) { return false }
+                    cur = &(*fl).tail
+                }
+                None => { break }
+            }
+        }
+        return true
+    }
+    if k == ExprKind::ExprArrayLit || k == ExprKind::ExprTupleLit {
+        match (*e).left {
+            Some(rv) => {
+                if !items_expr_is_closed(&(*rv)) { return false }
+                return items_opt_expr_is_closed(&(*e).right)
+            }
+            None => {}
+        }
+        var cur = &(*e).args
+        while true {
+            match *cur {
+                Some(al) => {
+                    if !items_expr_is_closed(&(*al).head) { return false }
+                    cur = &(*al).tail
+                }
+                None => { break }
+            }
+        }
+        return true
+    }
+    false
+}
+
+fn items_opt_expr_is_closed(opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(x) => items_expr_is_closed(&(*x)),
+        None => true,
+    }
+}
+
 fn items_record_global_init_or_defer(name: Name, init: Box<Expr>, deferrable: bool) with Mut, Panic, Div {
     let before = ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD)
-    let ambig_before = GLOBAL_VAR_INIT_AMBIG_COUNT
     items_record_global_int_init(name, &(*init))
     if deferrable && ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD) == before
-        && GLOBAL_VAR_INIT_AMBIG_COUNT == ambig_before {
+        && items_expr_is_closed(&(*init)) {
         ast_record_global_deferred_init(name, init)
     }
 }
