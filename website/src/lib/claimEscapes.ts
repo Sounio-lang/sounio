@@ -46,7 +46,7 @@ export function escapeSelfHostedLines(): string {
   return claimEscape({
     id: 'self-hosted-source-lines',
     class: 'inventory',
-    reason: 'Compiler LOC from the May sync. Not a gate outcome or remasure.',
+    reason: 'Line count of self-hosted/*.sio, counted at sync time. Inventory, not a gate outcome.',
     text: formatLines(publicContract.metrics.selfHostedSourceLines),
   });
 }
@@ -56,7 +56,7 @@ export function escapeSelfHostedFiles(): string {
   return claimEscape({
     id: 'self-hosted-source-files',
     class: 'inventory',
-    reason: 'Self-hosted file count from the May sync. Inventory, not a green.',
+    reason: 'File count of self-hosted/*.sio, counted at sync time. Inventory, not a green.',
     text: n == null ? 'inventory pending' : String(n),
   });
 }

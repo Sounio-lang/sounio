@@ -9,7 +9,7 @@
  * Run from the website/ directory:
  *   node scripts/sync-artifact-status.mjs
  */
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -133,8 +133,27 @@ const stdlibGateSkip = stdlibE2e?.totals?.skip ?? 0;
 const stdlibE2eDate = stdlibE2e?.generated_at_utc?.slice(0, 10) ?? "undated";
 const stdlibE2eCommand = stdlibE2e?.command ?? "bash scripts/stdlib/run_stdlib_e2e.sh";
 const stdlibInventoryFiles = reliability?.inventory?.sio_files ?? null;
-const selfHostedFiles = selfhost?.self_hosted_source?.total_files ?? null;
-const selfHostedLines = selfhost?.self_hosted_source?.total_lines ?? null;
+// Live inventory of self-hosted/*.sio at sync time (the omega report is from 2026-02-28).
+function countSio(dir) {
+  let files = 0, lines = 0;
+  if (!existsSync(dir)) return null;
+  for (const name of readdirSync(dir)) {
+    const full = join(dir, name);
+    const st = statSync(full);
+    if (st.isDirectory()) {
+      const sub = countSio(full);
+      if (sub) { files += sub.files; lines += sub.lines; }
+    } else if (name.endsWith(".sio")) {
+      files += 1;
+      const text = readFileSync(full, "utf8");
+      lines += text.split("\n").length - 1; // newline count, as `wc -l`
+    }
+  }
+  return { files, lines };
+}
+const selfHostedInventory = countSio(join(REPO_ROOT, "self-hosted"));
+const selfHostedFiles = selfHostedInventory?.files ?? selfhost?.self_hosted_source?.total_files ?? null;
+const selfHostedLines = selfHostedInventory?.lines ?? selfhost?.self_hosted_source?.total_lines ?? null;
 const cycleParity = selfhost?.cycle_gate?.parity ?? null;
 
 const generatedAt = new Date().toISOString();
@@ -210,13 +229,12 @@ const status = {
         {
           title: "Epistemic core",
           detail:
-            "Knowledge[T] with GUM propagation, provenance tracking, and compile-time confidence gates (vancomycin fixtures)",
+            "Knowledge[T] with GUM propagation and compile-time confidence bounds (vancomycin ε ≥ 0.82 refused on Madaros); first-order variance does not yet cross user calls (KL-11)",
         },
         {
           title: "Self-hosted compiler",
-          detail: cycleParity
-            ? `Fixed-point verified (cycle parity=${cycleParity}); ${selfHostedFiles ?? "?"} self-hosted source files`
-            : "Lexer, parser, checker, and native codegen in self-hosted/",
+          detail:
+            "lean_single seed reaches a CI-checked fixed point (gen2 = gen3); Madaros, the default engine, does not reach its own yet",
         },
         {
           title: "Algebra",
@@ -226,10 +244,6 @@ const status = {
           title: "Native codegen",
           detail:
             "Linux x86-64 static ELF only (TOUR.md section 6); no macOS, Windows or AArch64 target ships",
-        },
-        {
-          title: "Optimizer",
-          detail: "1,000+ e-graph rewrite rules with FAIL=0 in optimizer tests",
         },
         {
           title: "Language server",
@@ -243,6 +257,10 @@ const status = {
         },
       ],
       scaffolding: [
+        {
+          title: "Optimizer",
+          detail: "e-graph rewriter in self-hosted/ir/egraph.sio is unit-tested but not wired into the default pipeline",
+        },
         {
           // 196 of 533 passing is not "works": listed with the partial lanes.
           title: "Stdlib end-to-end tests",
@@ -319,12 +337,13 @@ const status = {
       artifact: "artifacts/omega/native_backend_v2_gate.v1.json",
     },
     selfHosted: {
-      label: "Self-Hosted Compiler (default path)",
-      level: pick(selfhost, "cycle_gate", "parity") ? "verified" : "beta",
-      reason: selfhost
-        ? `${selfHostedFiles ?? "?"} files, ${selfHostedLines ?? "?"} lines, cycle parity=${selfhost.cycle_gate?.parity}`
-        : "artifact missing",
-      artifact: "artifacts/omega/selfhost_verification_report.v1.json",
+      label: "Self-Hosted Compiler",
+      // The omega report (2026-02-28) compares a bytecode cache, not ELFs; the live
+      // fixed point is the lean_single `make build` chain gated in CI.
+      level: "verified",
+      reason:
+        "lean_single seed: gen2 = gen3 byte-identical (make build; CI step 'Canonical lean_single fixed point'). Madaros (default) has no fixed point yet (scripts/ci/madaros_fixed_point_gate.sh).",
+      artifact: "Makefile · .github/workflows/ci.yml",
     },
     cranelift: {
       label: "Cranelift JIT (retired)",
