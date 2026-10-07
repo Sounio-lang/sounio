@@ -8745,6 +8745,62 @@ fn checker_check_array_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 // transcription of check_slice_borrow_expr so its sub-expressions also route through the
 // spine. unary_result_type / slice_borrow_result_type / unary_operand_name are pure helpers
 // (TypeEntry/Name in, TypeEntry/Name out — no Checker copy), so they are called directly.
+// #1581: the borrow-tracking name of `&place` / `&!place`. A field chain on a
+// by-value root (`s.y`, `s.y.z`, `s.arr[i]` -> `s.arr`) is tracked as the path
+// "s.y" so disjoint fields do not conflict and the same field does; a chain
+// through a reference root (`r.y` with `r: &S` / `&!S`) keeps the old
+// reborrow behaviour (empty name = untracked). Other places fall back to
+// unary_operand_name (ident, index -> root).
+fn checker_borrow_place_name(c: *mut Checker, opt: Option<Box<Expr> >) -> Name with Mut, Panic, Div, Alloc, IO {
+    let ptr = expr_opt_get(opt)
+    if ptr == 0 as *mut Expr { return empty_type_name() }
+    var place = *ptr
+    // `s.arr[i]` borrows (a part of) `s.arr`.
+    var guard: i64 = 0
+    while place.kind == ExprKind::ExprIndex && guard < 16 {
+        let b = expr_opt_get(place.left)
+        if b == 0 as *mut Expr { return empty_type_name() }
+        place = *b
+        guard = guard + 1
+    }
+    if place.kind != ExprKind::ExprFieldAccess {
+        return unary_operand_name(opt)
+    }
+    // Collect the field chain down to an ident root.
+    var fields: [Name; 8] = [Name { buf: [0; 384], len: 0 }; 8]
+    var nf: i64 = 0
+    var cur = place
+    while cur.kind == ExprKind::ExprFieldAccess && nf < 8 {
+        fields[nf as usize] = cur.name
+        nf = nf + 1
+        let b = expr_opt_get(cur.left)
+        if b == 0 as *mut Expr { return empty_type_name() }
+        cur = *b
+    }
+    if cur.kind != ExprKind::ExprIdent { return empty_type_name() }
+    if !(*c).env.has_binding(cur.name) { return empty_type_name() }
+    let root_ty = (*c).env.lookup(cur.name)
+    if root_ty.kind == TypeKind::TyRef || root_ty.kind == TypeKind::TyRefMut
+        || root_ty.kind == TypeKind::TyRawPtr {
+        return empty_type_name()
+    }
+    var out = cur.name
+    var k = nf - 1
+    while k >= 0 {
+        let f = fields[k as usize]
+        if out.len + 1 + f.len > 384 { return cur.name }
+        out.buf[out.len as usize] = 46 as i8
+        var j: i64 = 0
+        while j < f.len {
+            out.buf[(out.len + 1 + j) as usize] = f.buf[j as usize]
+            j = j + 1
+        }
+        out.len = out.len + 1 + f.len
+        k = k - 1
+    }
+    out
+}
+
 fn checker_check_unary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // Half-open slice borrow: &arr[a..b] / &!arr[a..b]
     if (e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut) && expr_is_half_open_range(e.left) {
@@ -8759,7 +8815,7 @@ fn checker_check_unary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     }
     // Borrow checking for &x / &!x on a named variable.
     if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
-        let borrow_name = unary_operand_name(e.left)
+        let borrow_name = checker_borrow_place_name(c, e.left)
         if borrow_name.len > 0 {
             if e.un_op == UnaryOp::OpRef {
                 let borrow_result = (*c).borrows.try_shared_borrow(borrow_name)
@@ -12036,7 +12092,7 @@ fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effe
 
                 if arg_expr.kind == ExprKind::ExprUnary &&
                    (arg_expr.un_op == UnaryOp::OpRef || arg_expr.un_op == UnaryOp::OpRefMut) {
-                    let borrow_name = unary_operand_name(arg_expr.left)
+                    let borrow_name = checker_borrow_place_name(c, arg_expr.left)
                     if !name_is_empty(borrow_name) {
                         // Unconditionally release call-site borrows after call returns
                         (*c).borrows = (*c).borrows.release_borrow(borrow_name)

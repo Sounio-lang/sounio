@@ -323,6 +323,17 @@ var VAR_BORROW_EXCL: [i64; 2048] = [0; 2048]   // exclusive borrow active for th
 var CALL_ARG_BORROW_VI:   [i64; 32] = [-1; 32]  // var index borrowed in current call's args
 var CALL_ARG_BORROW_EXCL: [i64; 32] = [0; 32]   // 1=exclusive, 0=shared
 var CALL_ARG_BORROW_N:    i64 = 0               // count of borrows recorded this call
+// #1581: field-path borrows `&s.f(.g)*` on a by-value local. Each entry is
+// (var index, field-chain hashes, depth, exclusive). Paths conflict when they
+// share the variable and one field chain is a prefix of the other; disjoint
+// fields do not. Whole-variable borrows still use VAR_BORROW_COUNT/EXCL and
+// conflict with every path of that variable.
+var PB_VI:    [i64; 64] = [-1; 64]
+var PB_H:     [i64; 256] = [0; 256]   // 4 field hashes per entry
+var PB_DEPTH: [i64; 64] = [0; 64]
+var PB_EXCL:  [i64; 64] = [0; 64]
+var PB_N:     i64 = 0
+var CALL_ARG_PB_BASE: i64 = 0
 var IN_CALL_ARGS:         i64 = 0               // 1 when compiling a call arg list
 // Per local variable: use count (for linear/affine checking)
 var VAR_USED: [i64; 2048] = [0; 2048]
@@ -12556,6 +12567,73 @@ fn tuple_borrow_elem_resolve(tup_hash: i64, tup_idx: i64) with Panic, Div, Mut {
     }
 }
 
+// #1581: field-path borrow helpers. `p` is the token of the first `.` after the
+// root ident; reads up to 4 `.field` hops (deeper chains use their 4-hop prefix,
+// which is conservative: it can only report a conflict, never hide one).
+fn pb_chain_depth(p0: i64) -> i64 with Panic, Mut {
+    var p = p0
+    var d: i64 = 0
+    while TK[p as usize] == 50 && TK[(p + 1) as usize] == 3 && d < 4 {
+        d = d + 1
+        p = p + 2
+    }
+    return d
+}
+
+fn pb_overlaps(k: i64, vi: i64, p0: i64, depth: i64) -> bool with Panic, Mut {
+    if PB_VI[k as usize] != vi { return false }
+    var m = depth
+    if PB_DEPTH[k as usize] < m { m = PB_DEPTH[k as usize] }
+    var i: i64 = 0
+    while i < m {
+        let t = p0 + 1 + i * 2
+        if PB_H[(k * 4 + i) as usize] != gl_name_hash(TS[t as usize], TE[t as usize]) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Check and record a field-path borrow. Returns 0 ok, 1 conflict.
+fn pb_borrow(vi: i64, p0: i64, want_mut: i64) -> i64 with Panic, Mut {
+    let depth = pb_chain_depth(p0)
+    if depth == 0 { return 0 }
+    // A whole-variable borrow covers every field.
+    if VAR_BORROW_EXCL[vi as usize] > 0 { return 1 }
+    if want_mut != 0 && VAR_BORROW_COUNT[vi as usize] > 0 { return 1 }
+    var k: i64 = 0
+    while k < PB_N {
+        if pb_overlaps(k, vi, p0, depth) {
+            if want_mut != 0 || PB_EXCL[k as usize] != 0 { return 1 }
+        }
+        k = k + 1
+    }
+    if PB_N < 64 {
+        PB_VI[PB_N as usize] = vi
+        PB_DEPTH[PB_N as usize] = depth
+        PB_EXCL[PB_N as usize] = want_mut
+        var i: i64 = 0
+        while i < depth {
+            let t = p0 + 1 + i * 2
+            PB_H[(PB_N * 4 + i) as usize] = gl_name_hash(TS[t as usize], TE[t as usize])
+            i = i + 1
+        }
+        PB_N = PB_N + 1
+    }
+    return 0
+}
+
+// A whole-variable borrow conflicts with any recorded path of the variable.
+fn pb_var_conflict(vi: i64, want_mut: i64) -> bool with Panic, Mut {
+    var k: i64 = 0
+    while k < PB_N {
+        if PB_VI[k as usize] == vi {
+            if want_mut != 0 || PB_EXCL[k as usize] != 0 { return true }
+        }
+        k = k + 1
+    }
+    return false
+}
+
 fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
     EP = EP + 1
     var want_mut: i64 = 0
@@ -12861,8 +12939,21 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
         // The exclusivity is already guaranteed by the existing reference — do not apply
         // borrow conflict checks or tracking (disjoint field reborrows are always safe).
         let bvi_is_ref = VAR_TY[bvi as usize] == 10
+        // #1581: inside a call's argument list, `&s.f` / `&!s.f` on a by-value
+        // root is tracked by FIELD PATH: disjoint fields coexist, the same field
+        // (or a prefix of it) conflicts. Released with the call's other borrows.
+        let path_borrow = bvi_is_ref == false && IN_CALL_ARGS != 0 && TK[EP as usize] == 50 && pb_chain_depth(EP) > 0
+        if path_borrow {
+            if pb_borrow(bvi, EP, want_mut) != 0 {
+                if want_mut != 0 { tc_linear_violation(borrow_tok, "cannot borrow as mutable because it is also borrowed as shared") }
+                else { tc_linear_violation(borrow_tok, "cannot borrow as shared because it is also borrowed as mutable") }
+            }
+        }
         // Borrow conflict detection: exclusive borrows conflict with any other borrow.
-        if bvi_is_ref == false {
+        if bvi_is_ref == false && path_borrow == false {
+        if IN_CALL_ARGS != 0 && pb_var_conflict(bvi, want_mut) {
+            tc_linear_violation(borrow_tok, "cannot borrow the whole value while one of its fields is borrowed")
+        }
         if want_mut != 0 {
             if VAR_BORROW_COUNT[bvi as usize] > 0 {
                 tc_linear_violation(borrow_tok, "cannot borrow as mutable because it is also borrowed as shared")
@@ -18108,6 +18199,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             // Save prev_borrow_n so nested calls don't clobber our borrow records.
             let prev_in_call_args = IN_CALL_ARGS
             let prev_borrow_n = CALL_ARG_BORROW_N
+            let prev_pb_n = PB_N
             IN_CALL_ARGS = 1
             B5_ARG_VCOUNT = 0
             B9_ARG_CH_COUNT = 0
@@ -18226,6 +18318,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             // Restore call-arg tracking state and release call-site borrows
             IN_CALL_ARGS = prev_in_call_args
             release_call_arg_borrows(prev_borrow_n)
+            PB_N = prev_pb_n
             if fi >= 0 {
                 if FN_ARITY[fi as usize] != argc { tc_wrong_arity_hard(call_tok, FN_ARITY[fi as usize], argc) }
                 let callee_eff = FN_EFFECTS[fi as usize] & 1023  // mask out visibility bits
@@ -37015,7 +37108,18 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             // Reborrow through a reference is always safe: exclusivity is already
             // guaranteed by the existing reference.
             let bvi_a_is_ref = VAR_TY[bvi_a as usize] == 10
-            if bvi_a_is_ref == false {
+            // #1581 (mirror of compile_borrow_primary_x86): field-path borrows.
+            let path_borrow_a = bvi_a_is_ref == false && IN_CALL_ARGS != 0 && TK[EP as usize] == 50 && pb_chain_depth(EP) > 0
+            if path_borrow_a {
+                if pb_borrow(bvi_a, EP, want_mut) != 0 {
+                    if want_mut != 0 { tc_linear_violation(borrow_tok, "cannot borrow as mutable because it is also borrowed as shared") }
+                    else { tc_linear_violation(borrow_tok, "cannot borrow as shared because it is also borrowed as mutable") }
+                }
+            }
+            if bvi_a_is_ref == false && path_borrow_a == false {
+                if IN_CALL_ARGS != 0 && pb_var_conflict(bvi_a, want_mut) {
+                    tc_linear_violation(borrow_tok, "cannot borrow the whole value while one of its fields is borrowed")
+                }
                 if want_mut != 0 {
                     if VAR_BORROW_COUNT[bvi_a as usize] > 0 {
                         tc_linear_violation(borrow_tok, "cannot borrow as mutable because it is also borrowed as shared")
@@ -38887,6 +38991,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 // do not clobber our records.
                 let prev_in_call_args_a = IN_CALL_ARGS
                 let prev_borrow_n_a = CALL_ARG_BORROW_N
+                let prev_pb_n_a = PB_N
                 IN_CALL_ARGS = 1
             var abi_argc: i64 = 0
             B5_ARG_VCOUNT = 0
@@ -38979,6 +39084,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             // this argument list (mirror of compile_primary).
             IN_CALL_ARGS = prev_in_call_args_a
             release_call_arg_borrows(prev_borrow_n_a)
+            PB_N = prev_pb_n_a
             if fi >= 0 {
                 // Hard, as the x86 general-call site is: a call whose argument
                 // count does not match the resolved definition is a genuine
