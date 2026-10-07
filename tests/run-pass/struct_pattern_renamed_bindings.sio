@@ -1,0 +1,72 @@
+//@ run-pass
+// struct_pattern_renamed_bindings
+//
+// lean_single used to understand only the shorthand struct pattern. In
+// `let P { first: a, second: b } = p` it treated every identifier inside the
+// braces as a field name, so `a`/`b` were never bound: E200 at the use site
+// when they were fresh names, and a silently wrong value when they resolved to
+// something else in scope (PR #2802 shipped a binary that exited 139). The
+// swap below compiled cleanly and bound the fields unswapped.
+//
+// Covers `field: name`, `field: _`, `..`, mixed shorthand, f64 and struct-typed
+// fields, in `let` and in `match` (with and without a guard).
+
+struct QubitPair { first: i64, second: i64 }
+struct Inner { v: i64 }
+struct Sample { n: i64, w: f64, inner: Inner }
+
+fn classify(s: Sample) -> i64 with IO, Panic {
+    match s {
+        Sample { n: count, w: weight, inner: box_ } if weight > 2.0 => count * 1000 + box_.v,
+        Sample { n: count, .. } => count,
+    }
+}
+
+fn main() -> i32 with IO, Panic {
+    let pair = QubitPair { first: 7, second: 11 }
+
+    let QubitPair { first: a, second: b } = pair
+    assert(a == 7)
+    assert(b == 11)
+
+    // Binder names that are also field names: must bind by position in the
+    // pattern, not by the binder's own name.
+    let QubitPair { first: second, second: first } = pair
+    assert(first == 11)
+    assert(second == 7)
+
+    // Mixed shorthand / renamed, out of declaration order, wildcard, rest.
+    let QubitPair { second: s, first } = pair
+    assert(s == 11)
+    assert(first == 7)
+    let QubitPair { first: _, second: only } = pair
+    assert(only == 11)
+    let QubitPair { second: tail, .. } = pair
+    assert(tail == 11)
+
+    let hi = Sample { n: 3, w: 2.5, inner: Inner { v: 42 } }
+    let lo = Sample { n: 9, w: 1.5, inner: Inner { v: 1 } }
+    let Sample { w: ww, inner: inn, n: _ } = hi
+    assert(ww > 2.4)
+    assert(ww < 2.6)
+    assert(inn.v == 42)
+
+    assert(classify(hi) == 3042)
+    assert(classify(lo) == 9)
+
+    let r = match pair {
+        QubitPair { first: x, second: y } => x * 100 + y,
+    }
+    assert(r == 711)
+    let r2 = match pair {
+        QubitPair { first, second } => first * 100 + second,
+    }
+    assert(r2 == 711)
+    let nested = match hi {
+        Sample { inner: i2, .. } => match i2 { Inner { v: vv } => vv + 1, },
+    }
+    assert(nested == 43)
+
+    print("struct_pattern_renamed_bindings: PASS\n")
+    0
+}
