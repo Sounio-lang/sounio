@@ -307,8 +307,9 @@ pub fn native_v2_reloc_kind_is_known(kind_code: i64) -> bool {
     kind_code >= 1 && kind_code <= 4
 }
 
-// Records an unknown-kind relocation. The writers refuse (rc=20) whenever
-// NC_RELOC_UNKNOWN_KIND_COUNT > 0, independently of reloc_overflow.
+// Records an unknown-kind relocation. native_reloc_refuse_if_invalid (below,
+// after NativeCompiler) refuses (rc=20) whenever NC_RELOC_UNKNOWN_KIND_COUNT > 0,
+// independently of reloc_overflow, and every writer of a relocated image calls it.
 pub fn nc_reloc_note_unknown_kind(kind_code: i64) with Mut {
     if NC_RELOC_UNKNOWN_KIND_COUNT == 0 {
         NC_RELOC_UNKNOWN_KIND_FIRST = kind_code
@@ -692,6 +693,39 @@ pub fn compiler_new() -> NativeCompiler with Mut {
     }
     nc_reg_class_reset()
     out
+}
+
+// THE relocation refusal point. Every function that writes an image patched by
+// apply_relocations_into (codegen_x86_linux.sio) calls this immediately before
+// its first write and returns the rc it gives when that rc is nonzero:
+//   20  a relocation of unknown kind was met (NC_RELOC_UNKNOWN_KIND_COUNT > 0,
+//       its site is still the rel32 placeholder), or
+//   20  the flat relocation table overflowed (reloc_overflow, entries dropped).
+//   0   nothing to refuse.
+// It used to be three copies (the preview route, the common v2 writer and the
+// legacy NATIVE_ELF_BUF writer) with a fixed list of writers pinned by the gate,
+// and the sret witness route reached a write without passing any of them (fixed
+// in #2803 by a fourth copy). scripts/ci/native_reloc_unknown_kind_gate.sh now
+// derives the routes from the callers of apply_relocations_into and fails if
+// any of them reaches a write without passing through here.
+pub fn native_reloc_refuse_if_invalid(nc: &NativeCompiler) -> i32 with IO {
+    if NC_RELOC_UNKNOWN_KIND_COUNT > 0 {
+        print("Error: native relocation of unknown kind ")
+        print_int(NC_RELOC_UNKNOWN_KIND_FIRST)
+        print(" at ")
+        print_int(NC_RELOC_UNKNOWN_KIND_COUNT)
+        print(" site(s) -- refusing to emit an ELF with unpatched sites\n")
+        return 20
+    }
+    if (*nc).reloc_overflow {
+        print("Error: native relocation table overflow -- relocs_needed=")
+        print_int((*nc).reloc_overflow_count_attempted)
+        print(" capacity=")
+        print_int(nc_flat_reloc_capacity())
+        print(" (raise nc_flat_reloc_capacity)\n")
+        return 20
+    }
+    0
 }
 
 pub fn codegen_new() -> NativeCompiler with Mut {

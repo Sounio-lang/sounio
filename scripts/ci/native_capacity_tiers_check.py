@@ -182,11 +182,18 @@ def main():
     rc19 = r"if nc\.code_overflow \%s(?:.|\n)*?return 19\s*\n\s*\%s" % (LB, RB)
     # rc20 loosened the same way and for the same reason (2026-09-02):
     # reloc_overflow_count_attempted is now reported before returning.
-    rc20 = r"if nc\.reloc_overflow \%s(?:.|\n)*?return 20\s*\n\s*\%s" % (LB, RB)
+    # 2026-10-07: the rc20 refusal lives in ONE place, native_reloc_refuse_if_invalid
+    # (native/frame.sio); the preview route and both writers call it
+    # (every route is checked by scripts/ci/native_reloc_unknown_kind_gate.sh).
+    rc20 = r"if \(\*nc\)\.reloc_overflow \%s(?:.|\n)*?return 20\s*\n\s*\%s" % (LB, RB)
     if not re.search(rc19, cgx):
         fail("rc19_code_overflow_check_missing")
-    if not re.search(rc20, cgx):
+    helper = only(r"^pub fn native_reloc_refuse_if_invalid\((?:.|\n)*?^\%s$" % RB,
+                  frame, "native_reloc_refuse_if_invalid", re.MULTILINE).group(0)
+    if not re.search(rc20, helper):
         fail("rc20_reloc_overflow_check_missing")
+    if not re.search(r"native_reloc_refuse_if_invalid\(&nc\)", cgx):
+        fail("preview_route_skips_reloc_refusal")
 
     # -- label overflow is fail-closed with its own distinct rc=22 ---------
     if not re.search(r"pub label_overflow: bool,", frame):
@@ -228,10 +235,10 @@ def main():
     legacy = only(r"^fn compile_native_finalize_and_write_ref\((?:.|\n)*?^\%s$" % RB,
                   cgx, "compile_native_finalize_and_write_ref", re.MULTILINE).group(0)
     needles = [(r"\(\*nc\)\.code_overflow", "legacy_ignores_code_overflow"),
-               (r"\(\*nc\)\.reloc_overflow", "legacy_ignores_reloc_overflow"),
+               (r"native_reloc_refuse_if_invalid\(nc\)", "legacy_ignores_reloc_overflow"),
                (r"NATIVE_ELF_OVERFLOW != 0", "legacy_ignores_elf_overflow"),
                (r"return 19", "legacy_missing_rc19"),
-               (r"return 20", "legacy_missing_rc20"),
+               (r"return legacy_reloc_rc", "legacy_missing_rc20"),
                (r"return 21", "legacy_missing_rc21"),
                (r"\(\*nc\)\.label_overflow", "legacy_ignores_label_overflow"),
                (r"return 22", "legacy_missing_rc22")]
