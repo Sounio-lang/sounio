@@ -12456,11 +12456,31 @@ fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 // reverse order. Faithful to the by-value original's scope discipline (env.push_scope /
 // borrows.push_scope / push_const_scope on entry; pop_const_scope / borrows.pop_scope /
 // env.pop_scope on exit, in that exact order). The body is checked via the *mut spine.
+// #2377: is `name`, as a bare match-arm pattern, a module-level `let`/`const`
+// (a value pattern) rather than a fresh binding? Only when no local of that
+// name is in scope: a local (scope_depth >= 1) shadows the constant, as in an
+// expression. Must agree with lower_match_arm_ref and lean_single.
+fn checker_pattern_names_global_const_inplace(c: *mut Checker, name: Name) -> bool with Mut, Panic, Div {
+    if !ast_is_global_const_name(name) { return false }
+    var i = (*c).env.count - 1
+    while i >= 0 {
+        if name_eq((*c).env.bindings[i as usize].name, name) {
+            return (*c).env.bindings[i as usize].scope_depth == 0
+        }
+        i = i - 1
+    }
+    false
+}
+
 fn checker_check_match_arm_inplace(c: *mut Checker, arm: MatchArm, scrut_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     (*c).env = (*c).env.push_scope()
     (*c).borrows = (*c).borrows.push_scope()
     checker_push_const_scope_inplace(c)
-    checker_bind_pattern_inplace(c, arm.pattern, scrut_ty)
+    if arm.pattern.kind == PatternKind::PatBinding && checker_pattern_names_global_const_inplace(c, arm.pattern.name) {
+        // #2377: value pattern -- binds nothing; the arm compares against the constant.
+    } else {
+        checker_bind_pattern_inplace(c, arm.pattern, scrut_ty)
+    }
     // Type-check the `if <cond>` guard (if any) with the pattern variables in scope.
     match arm.guard {
         Some(g) => {
@@ -29370,7 +29390,22 @@ impl Checker {
         c.env = c.env.push_scope()
         c.borrows = c.borrows.push_scope()
         c = c.push_const_scope()
-        c = c.bind_pattern(arm.pattern, scrut_ty)
+        // #2377: a module-level let/const named by a bare arm is a value pattern.
+        var arm_is_const_value = false
+        if arm.pattern.kind == PatternKind::PatBinding && ast_is_global_const_name(arm.pattern.name) {
+            var bi = c.env.count - 1
+            var found = false
+            while bi >= 0 && !found {
+                if name_eq(c.env.bindings[bi as usize].name, arm.pattern.name) {
+                    found = true
+                    arm_is_const_value = c.env.bindings[bi as usize].scope_depth == 0
+                }
+                bi = bi - 1
+            }
+        }
+        if !arm_is_const_value {
+            c = c.bind_pattern(arm.pattern, scrut_ty)
+        }
         let pair = c.check_expr(arm.body)
         c = pair.0
         let body_ty = pair.1

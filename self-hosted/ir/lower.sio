@@ -22059,6 +22059,16 @@ impl Lowerer {
         self.lower_array_elems_ref(base_reg, &elems, idx)
     }
 
+    // #2377: a bare match-arm identifier is a value pattern when it names a
+    // module-level `let`/`const` and no local of that name is in scope (a
+    // global copied into the locals table counts as the global). Must agree
+    // with checker_pattern_names_global_const_inplace and lean_single.
+    fn pattern_names_global_const_ref(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        if !ast_is_global_const_name(name) { return false }
+        if self.lookup_local(name) >= 0 && !self.lookup_local_is_global(name) { return false }
+        true
+    }
+
     // Lower match arms as a linear if/else chain
     fn lower_match_arms_ref(self, scrut: i64, res: i64, l_end: i64, arms: &Option<Box<MatchArmList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
@@ -22105,6 +22115,57 @@ impl Lowerer {
             let pair = lo.lower_expr_ref(&arm.body)
             lo = pair.0
             let body_reg = pair.1
+            lo = lo.emit(ir_copy(res, body_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_skip))
+            lo
+        } else if pat.kind == PatternKind::PatBinding && self.pattern_names_global_const_ref(pat.name) {
+            // #2377: `A => ..` where A is a module-level `let`/`const` (and no local
+            // A is in scope) is a VALUE pattern: compare, do not bind. Binding it
+            // made the first such arm a catch-all -- `match 2 { A => 10, B => 20,
+            // _ => 30 }` returned 10 for every input.
+            let pair_l = self.fresh_label()
+            var lo = pair_l.0
+            let l_skip = pair_l.1
+            let cexpr = Expr {
+                kind: ExprKind::ExprIdent,
+                span: pat.span,
+                int_val: 0,
+                float_val: 0.0,
+                f128_lit_lo: 0,
+                f128_lit_hi: 0,
+                f128_lit_exact: false,
+                name: pat.name,
+                path: empty_path(),
+                bin_op: BinaryOp::OpAdd,
+                un_op: UnaryOp::OpNeg,
+                left: None,
+                right: None,
+                block: None,
+                else_expr: None,
+                args: None,
+                arms: None,
+                fields: None,
+                cast_type: None,
+                handler_block: None,
+                closure_params: None,
+                closure_return: None,
+                closure_effects: None,
+                closure_body: None,
+                type_args: None,
+            }
+            let pair_c = lo.lower_expr_ref(&cexpr)
+            lo = pair_c.0
+            let const_reg = pair_c.1
+            let pair_cmp = lo.fresh_reg()
+            lo = pair_cmp.0
+            let cmp_reg = pair_cmp.1
+            lo = lo.emit(ir_binop(cmp_reg, scrut, BinaryOp::OpEq, const_reg))
+            lo = lo.emit(ir_branch_false(cmp_reg, l_skip))
+            lo = lo.lower_arm_guard(&arm.guard, l_skip)
+            let pair_b = lo.lower_expr_ref(&arm.body)
+            lo = pair_b.0
+            let body_reg = pair_b.1
             lo = lo.emit(ir_copy(res, body_reg))
             lo = lo.emit(ir_jump(l_end))
             lo = lo.emit(ir_label(l_skip))
