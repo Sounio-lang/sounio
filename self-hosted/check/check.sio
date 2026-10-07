@@ -11123,6 +11123,41 @@ fn env_name_is_shadowed(env: &TypeEnv, name: Name) -> bool with Mut, Panic, Div 
     false
 }
 
+// True when `name` resolves to the implicit builtin at this call site: no user
+// function signature of that name (the lookup the call itself uses, which skips a
+// foreign module's private `extern "C"` stub) and no live user binding with a known
+// type. Every fast path that recognises a builtin BY NAME (assert, println,
+// print_int, print_char, syscall6, ...) must be gated on this, otherwise a
+// parameter or local that shadows the name is handled as the builtin and its own
+// effect row is never checked (#2760 review).
+fn builtin_name_is_unshadowed(sigs: *mut FnSigTable, module_id: i64, env: &TypeEnv, name: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if fn_sig_table_find_prefer_module(sigs, name, module_id) >= 0 {
+        return false
+    }
+    !env_name_is_shadowed(env, name)
+}
+
+// A call whose callee is a bare identifier that is the unshadowed implicit builtin.
+fn call_is_unshadowed_builtin(sigs: *mut FnSigTable, module_id: i64, env: &TypeEnv, e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    match e.left {
+        Some(callee) => {
+            if (*callee).kind != ExprKind::ExprIdent {
+                return false
+            }
+            builtin_name_is_unshadowed(sigs, module_id, env, (*callee).name)
+        }
+        None => false
+    }
+}
+
+// Builtins whose name keeps meaning "the builtin" for the lowerer, and which owe an
+// effect: the table above plus print_int / print_char (own arms on both spines).
+fn name_is_effectful_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if builtin_call_effect_id(n) >= 0 { return true }
+    if name_eq(n, make_name("print_int")) { return true }
+    name_eq(n, make_name("print_char"))
+}
+
 // The effect a call owes because its callee is an implicit builtin, or -1.
 //
 // Shared by the in-place spine (checker_check_call_expr_inplace) and the
@@ -11141,10 +11176,7 @@ fn builtin_call_effect_for_call(sigs: *mut FnSigTable, module_id: i64, env: &Typ
             if bid < 0 {
                 return 0 - 1
             }
-            if fn_sig_table_find_prefer_module(sigs, (*callee).name, module_id) >= 0 {
-                return 0 - 1
-            }
-            if env_name_is_shadowed(env, (*callee).name) {
+            if !builtin_name_is_unshadowed(sigs, module_id, env, (*callee).name) {
                 return 0 - 1
             }
             bid
@@ -11256,16 +11288,16 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     if call_expr_is_builtin_slice_len(e.left) {
         return checker_check_slice_len_expr_inplace(c, e)
     }
-    if call_expr_is_builtin_assert(e.left) {
+    if call_expr_is_builtin_assert(e.left) && call_is_unshadowed_builtin((*c).fn_sigs, (*c).current_module_id, &(*c).env, e) {
         return checker_check_assert_expr_inplace(c, e)
     }
-    if call_expr_is_builtin_print_int(e.left) {
+    if call_expr_is_builtin_print_int(e.left) && call_is_unshadowed_builtin((*c).fn_sigs, (*c).current_module_id, &(*c).env, e) {
         return checker_check_print_i64_expr_inplace(c, e)
     }
-    if call_expr_is_builtin_print_char(e.left) {
+    if call_expr_is_builtin_print_char(e.left) && call_is_unshadowed_builtin((*c).fn_sigs, (*c).current_module_id, &(*c).env, e) {
         return checker_check_print_i64_expr_inplace(c, e)
     }
-    if call_expr_is_builtin_println(e.left) {
+    if call_expr_is_builtin_println(e.left) && call_is_unshadowed_builtin((*c).fn_sigs, (*c).current_module_id, &(*c).env, e) {
         let first_arg = expr_list_head(e.args)
         let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
         if checker_type_is_unobserved_like(arg_ty) {
@@ -11306,7 +11338,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     // No user-declared signature exists; without this arm the callee ident
     // falls through to the unbound-identifier check (E137). Codegen emits the
     // SysV->kernel register shuffle (rcx->r10, nr->rax) as a named builtin.
-    if call_expr_is_syscall6(e.left) {
+    if call_expr_is_syscall6(e.left) && call_is_unshadowed_builtin((*c).fn_sigs, (*c).current_module_id, &(*c).env, e) {
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         var effects_io: [i64; 8] = [0; 8]
         effects_io[0] = 0  // IO (effects.sio: 0=IO)
@@ -12970,6 +13002,29 @@ fn checker_check_binding_init_expr_inplace(c: *mut Checker, opt: Option<Box<Expr
 
 // *mut transcription of check_let_stmt (12208). No inline by-value Checker call:
 // every helper is *mut or an isolated leaf, so the hot frame stays KB-scale.
+// #2760 review: `let print: fn(string) -> i64 with Div = print` re-binds the builtin
+// under its own name. The lowerer still treats every later `print(..)` as the
+// builtin, so the annotation must not turn the binding into a "genuine user
+// function" whose (possibly smaller) effect row replaces the builtin's. An alias of
+// an effectful builtin under its own name therefore keeps the builtin's unknown type
+// and its effect requirement. A binding under a DIFFERENT name is not a call the
+// lowerer resolves as the builtin, and a typed parameter is a real user value; both
+// are unaffected.
+fn checker_builtin_alias_bind_ty(c: *mut Checker, s: Stmt, bind_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match s.expr {
+        Some(init_expr) => {
+            if (*init_expr).kind == ExprKind::ExprIdent
+                && name_eq((*init_expr).name, s.name)
+                && name_is_effectful_builtin(s.name)
+                && builtin_name_is_unshadowed((*c).fn_sigs, (*c).current_module_id, &(*c).env, s.name) {
+                return ty_unknown()
+            }
+        }
+        None => {}
+    }
+    bind_ty
+}
+
 fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     (*c).last_literal_kind = 0  // reset before checking init expr
     let ann_ty = checker_lower_opt_type_inplace(c, s.ty)
@@ -13030,6 +13085,7 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         }
     }
     // Validate refinement predicate on literal initializers
+    bind_ty = checker_builtin_alias_bind_ty(c, s, bind_ty)
     checker_check_refinement_literal_inplace(c, s.span, bind_ty)
     let const_pair = checker_eval_const_int_opt_expr_mut(c, s.expr)
     let cur_env = (*c).env
@@ -13096,6 +13152,7 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             }
         }
     }
+    bind_ty = checker_builtin_alias_bind_ty(c, s, bind_ty)
     checker_check_refinement_literal_inplace(c, s.span, bind_ty)
     let const_pair = checker_eval_const_int_opt_expr_mut(c, s.expr)
     (*c).env = (*c).env.bind(s.name, bind_ty, true)
@@ -26983,10 +27040,10 @@ impl Checker {
         if call_expr_is_box_new(e.left) {
             return self.check_box_new_expr(e)
         }
-        if call_expr_is_builtin_print_int(e.left) {
+        if call_expr_is_builtin_print_int(e.left) && call_is_unshadowed_builtin(self.fn_sigs, self.current_module_id, &self.env, e) {
             return self.check_print_i64_builtin_expr(e)
         }
-        if call_expr_is_builtin_print_char(e.left) {
+        if call_expr_is_builtin_print_char(e.left) && call_is_unshadowed_builtin(self.fn_sigs, self.current_module_id, &self.env, e) {
             return self.check_print_i64_builtin_expr(e)
         }
         // Only the implicit builtin: a shadowed `println` (a user value) must reach the normal
