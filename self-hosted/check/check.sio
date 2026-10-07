@@ -11097,23 +11097,70 @@ fn builtin_call_effect_id(n: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
     0 - 1
 }
 
-// Applies builtin_call_effect_id to a call whose callee is a bare identifier
-// naming a builtin that no user signature shadows (lean_single's
-// `fn_find(ns, ne) < 0`). Arity is not checked here: a wrong-arity call is
-// diagnosed elsewhere and still owes the effect.
-fn checker_check_builtin_call_effect_inplace(c: *mut Checker, e: Expr) with Mut, Panic, Div, Alloc, IO {
+// True when `name` is bound in the type environment by something other than the
+// implicit builtin: a parameter, a `let`, a loop variable. The builtin is bound
+// ONCE by checker_collect_runtime_builtins_inplace with ty_unknown (and
+// bind_import_unknown dedups), so a second binding of the same name, or a single
+// binding that carries a real type, is a user binding that shadows it. Scopes
+// are popped by truncating `count`, so this only sees bindings that are live at
+// the call. The callee is then the user's value, whose own effect row the
+// indirect-call path checks; attributing the builtin's effect to it would be a
+// false positive.
+fn env_name_is_shadowed(env: &TypeEnv, name: Name) -> bool with Mut, Panic, Div {
+    var n: i64 = 0
+    var innermost_has_type = false
+    var i = env.count - 1
+    while i >= 0 {
+        if name_eq(env.bindings[i as usize].name, name) {
+            if n == 0 {
+                innermost_has_type = env.bindings[i as usize].ty.kind != TypeKind::TyUnknown
+            }
+            n = n + 1
+        }
+        i = i - 1
+    }
+    n > 1 || (n == 1 && innermost_has_type)
+}
+
+// The effect a call owes because its callee is an implicit builtin, or -1.
+//
+// Shared by the in-place spine (checker_check_call_expr_inplace) and the
+// by-value spine (Checker::check_call_expr, which is how a `loop` body is
+// checked). Two spines, one decision: if they disagreed, a builtin would owe its
+// effect in a `while` body and not in a `loop` body. The signature lookup is the
+// one the call itself uses (prefer_module, which skips a foreign module's
+// private `extern "C"` stub) so a stub in another module cannot hide the builtin.
+fn builtin_call_effect_for_call(sigs: *mut FnSigTable, module_id: i64, env: &TypeEnv, e: Expr) -> i64 with Mut, Panic, Div, Alloc, IO {
     match e.left {
         Some(callee) => {
             if (*callee).kind != ExprKind::ExprIdent {
-                return
+                return 0 - 1
             }
             let bid = builtin_call_effect_id((*callee).name)
             if bid < 0 {
-                return
+                return 0 - 1
             }
-            if fn_sig_table_find((*c).fn_sigs, (*callee).name) >= 0 {
-                return
+            if fn_sig_table_find_prefer_module(sigs, (*callee).name, module_id) >= 0 {
+                return 0 - 1
             }
+            if env_name_is_shadowed(env, (*callee).name) {
+                return 0 - 1
+            }
+            bid
+        }
+        None => 0 - 1
+    }
+}
+
+// Applies builtin_call_effect_for_call to a call. Arity is not checked here: a
+// wrong-arity call is diagnosed elsewhere and still owes the effect.
+fn checker_check_builtin_call_effect_inplace(c: *mut Checker, e: Expr) with Mut, Panic, Div, Alloc, IO {
+    let bid = builtin_call_effect_for_call((*c).fn_sigs, (*c).current_module_id, &(*c).env, e)
+    if bid < 0 {
+        return
+    }
+    match e.left {
+        Some(callee) => {
             var effs: [i64; 8] = [0; 8]
             effs[0] = bid
             checker_check_callee_effects_named_inplace(c, e.span, effs, 1, (*callee).name)
@@ -17277,6 +17324,36 @@ impl Checker {
         }
         let missing_pair = find_missing_effects(callee_effects, callee_effect_count, self.current_effects, self.current_effect_count)
         self.report_effect_error(span, missing_pair.0, missing_pair.1)
+    }
+
+    // As check_callee_effects, but names the callee in the diagnostic
+    // ("required by `println`"), matching checker_check_callee_effects_named_inplace.
+    fn check_callee_effects_named(self, span: Span, callee_effects: [i64; 8], callee_effect_count: i64, source: Name) -> Checker with Mut, IO, Panic, Div, Alloc {
+        if callee_effect_count == 0 {
+            return self
+        }
+        if effects_subset(callee_effects, callee_effect_count, self.current_effects, self.current_effect_count) {
+            return self
+        }
+        let missing_pair = find_missing_effects(callee_effects, callee_effect_count, self.current_effects, self.current_effect_count)
+        self.report_effect_error_from(span, missing_pair.0, missing_pair.1, source)
+    }
+
+    // #2760: effect owed by an implicit builtin call on the by-value spine. Same
+    // decision as checker_check_builtin_call_effect_inplace (builtin_call_effect_for_call).
+    fn check_builtin_call_effect(self, e: Expr) -> Checker with Mut, IO, Panic, Div, Alloc {
+        let bid = builtin_call_effect_for_call(self.fn_sigs, self.current_module_id, &self.env, e)
+        if bid < 0 {
+            return self
+        }
+        match e.left {
+            Some(callee) => {
+                var effs: [i64; 8] = [0; 8]
+                effs[0] = bid
+                self.check_callee_effects_named(e.span, effs, 1, (*callee).name)
+            }
+            None => self
+        }
     }
 
     // --------------------------------------------------------
@@ -26750,7 +26827,20 @@ impl Checker {
         (c, box_ty)
     }
 
+    // #2760: a call whose callee is an implicit builtin owes that builtin's effect.
+    // This is the by-value spine: a `loop` body is checked through here (the
+    // in-place spine, checker_check_call_expr_inplace, never sees it), so the
+    // decision has to be made on both. The body below is unchanged.
     fn check_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match e.right {
+            Some(_) => return self.check_index_expr(e)
+            None => {}
+        }
+        let c_eff = self.check_builtin_call_effect(e)
+        c_eff.check_call_expr_body(e)
+    }
+
+    fn check_call_expr_body(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         // Safety guard: ExprIndex nodes (e.right=Some) are occasionally dispatched here
         // due to a VM-level kind mismatch. ExprCall never sets e.right; ExprIndex always does.
         match e.right {
@@ -26862,9 +26952,7 @@ impl Checker {
                 if !has_effect_id(c_println.current_effects, c_println.current_effect_count, 13) {
                     c_println = c_println.report_unobserved_print(e.span)
                 }
-                var effects_unobserved: [i64; 8] = [0; 8]
-                effects_unobserved[0] = 0
-                c_println = c_println.check_callee_effects(e.span, effects_unobserved, 1)
+                // The IO this println owes is reported by check_call_expr (#2760), once.
                 return (c_println, ty_unit())
             }
         }
