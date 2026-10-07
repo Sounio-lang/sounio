@@ -4322,6 +4322,23 @@ fn type_name_kind(ns: i64, ne: i64) -> i64 with Panic, Mut {
     return 0
 }
 
+// #2817: which initializer-less declarations are zero-initialized. Kinds per
+// type_name_kind: 1 integer, 2 float (also unit-dimensioned f64), 4 bool. For
+// anything else (string, enum, f128, struct-element arrays) zero is not a
+// valid value, so the declaration is refused rather than bound to garbage.
+// `[u8; N]` is also accepted, by its spelling: type_name_kind leaves u8 at kind
+// 0 (scan_type calls it an integer). It gets the same 8-byte-slot allocation
+// `[u8; N] = [0; N]` gets, zero-filled.
+fn lean_uninit_scalar_ok(decl_ty: i64) -> bool {
+    return decl_ty == 1 || decl_ty == 2 || decl_ty == 4
+}
+
+fn lean_uninit_arr_elem_ok(decl_ty_hash: i64, arr_esiz: i64) -> bool with Div, Mut {
+    if arr_esiz == 1 { return true }
+    let et = arr_hash_elem_ty(decl_ty_hash)
+    return et == 1 || et == 2 || et == 4
+}
+
 fn type_is_struct_like(ty: i64, ty_hash: i64) -> bool with Panic, Mut {
     if ty == 6 { return true }
     if ty == 0 && ty_hash != 0 {
@@ -26181,6 +26198,61 @@ fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
     emit_store_to_pointer_offset_x86(addr_slot, pending_off, target_ty, target_hash)
 }
 
+// The zero is in rax / x0; describe it the way compile_or() would describe the
+// literal 0 (or 0.0), so the binding code and literal refinement checks that
+// follow see the value the variable actually holds.
+//
+// Start from the same clean slate compile_primary / compile_primary_a64 give a
+// fresh primary: otherwise the previous expression's unit + dimension,
+// variance/sensitivity shadows, channel set and closure/linear/affine flags
+// leak into this binding, and an f64 refinement is checked against a STALE
+// literal (or not at all) instead of the 0.0 the variable actually holds.
+fn lean_uninit_set_zero_expr(decl_ty: i64, decl_ty_hash: i64) with Mut {
+    LAST_EXPR_IS_CLOSURE = 0
+    LAST_EXPR_IS_LINEAR = 0
+    LAST_EXPR_IS_AFFINE = 0
+    LAST_EXPR_VAR_IDX = -1
+    EXPR_CH_SET = 0
+    EXPR_PARAM_USED = 0
+    EXPR_UNIT = 0
+    EXPR_UNIT_DIM = 0
+    EXPR_VSHADOW = -1
+    EXPR_SSHADOW = -1
+    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+    EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
+    EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
+    EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
+    EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
+    EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
+    EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
+    EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
+    EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
+    EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
+    EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
+    EXPR_HSHADOW_77 = -1
+    EXPR_TY = decl_ty
+    EXPR_TY_HASH = decl_ty_hash
+    LAST_IS_LITERAL = 0
+    LAST_IS_LITERAL_F64 = 0
+    if decl_ty == 2 {
+        // Exactly what compile_primary records for the literal `0.0`.
+        EXPR_IS_F64 = 1
+        LAST_IS_LITERAL_F64 = 1
+        LAST_F64_LIT_TOK = EP - 1
+        LAST_F64_LIT_CL = CL
+        LAST_LITERAL_F64_INT = 0
+        LAST_LITERAL_F64_FRAC = 0
+        LAST_LITERAL_F64_DENOM = 1
+    } else {
+        EXPR_IS_F64 = 0
+        if decl_ty == 1 {
+            // ... and for the integer literal `0`.
+            LAST_IS_LITERAL = 1
+            LAST_LITERAL_VAL = 0
+        }
+    }
+}
+
 fn compile_stmt() with IO, Mut, Panic, Div {
     let k = TK[EP as usize]
     LAST_STMT_HAS_VALUE = 0
@@ -26269,6 +26341,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             let ne = TE[EP as usize]
             if src_match(ns, ne - ns, "mut") {
                 tc_rust_let_mut(EP)
+                // Recover past `mut` so the rest binds as `let x = ...`. Without
+                // this, `mut` was taken as the binding name and `x = 0` became
+                // an initializer-less declaration (refused since #2817).
+                EP = EP + 1
             }
         }
         if TK[EP as usize] == 6 {
@@ -26339,6 +26415,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         // Check for : type annotation
         var is_arr: i64 = 0
         var arr_len: i64 = 0
+        var arr_len_lit: i64 = 0  // `[T; N]` spelled N (vs `[T]`, which also leaves arr_len 0)
+        var arr_elem_u8: i64 = 0  // type_name_kind has no `u8` (scan_type does); see lean_uninit_arr_elem_ok
         var arr_esiz: i64 = 8
         var decl_is_f64: i64 = -1
         var decl_ty: i64 = 0
@@ -26369,9 +26447,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     arr_elem_ty = type_name_kind(etns, etne)
                     if arr_elem_ty == 6 || arr_elem_ty == 7 { arr_elem_hash = gl_name_hash(etns, etne) }
                     if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
+                    if src_match(etns, etne - etns, "u8") { arr_elem_u8 = 1 }
                     EP = EP + 1  // skip element type
                 }
                 if TK[EP as usize] == 27 { EP = EP + 1 }  // skip ;
+                if TK[EP as usize] == 4 { arr_len_lit = 1 }
                 arr_len = TV[EP as usize]
                 EP = EP + 1  // skip N
                 if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
@@ -26405,7 +26485,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         // Skip = sign; detect type-annotated decl without initializer
         var has_eq: i64 = 0
         if TK[EP as usize] == 16 { EP = EP + 1; has_eq = 1 }
-        if is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
+        // `has_eq == 1`: without `=`, a `[V; N]` here is the NEXT statement, not
+        // this declaration's initializer (#2817).
+        if has_eq == 1 && is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
             // Local array with repeat initializer [V; N]: splat V into every slot.
             // (Previously V was SKIPPED and the slots were always zero-filled — the
             //  [V;N] non-zero-splat miscompile. We now mirror the already-correct
@@ -26531,6 +26613,45 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 em32(0 - (base + nslots - 1) * 8)
             }
             emit_store_var(ptr_slot)
+        } else if has_eq == 0 && is_arr == 1 && arr_len_lit == 1 && arr_len >= 0 {
+            // `var a: [T; N]` with no initializer (#2817): zero-fill, exactly the
+            // allocation `[0; N]` gets above. This used to fall through to the
+            // final else, whose compile_or() took the NEXT statement as the
+            // initializer -- or, after a `;`, nothing, leaving a garbage array
+            // pointer that SIGSEGV'd on the first element access.
+            if arr_elem_u8 == 0 && !lean_uninit_arr_elem_ok(decl_ty_hash, arr_esiz) {
+                tc_error_hard(EP - 1, "array declared without an initializer: only integer, float and bool elements are zero-initialized; write `= [V; N]`")
+                return
+            }
+            var nslots = arr_len
+            if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
+            let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
+            if ptr_slot < 0 { return }
+            let arr_vi = VAR_COUNT - 1
+            VAR_TY[arr_vi as usize] = 8
+            VAR_TY_HASH[arr_vi as usize] = decl_ty_hash
+            VAR_MUT[arr_vi as usize] = decl_is_mut
+            let base = ptr_slot - nslots
+            // `[T; 0]` owns no slots: point it at its own pointer slot -- a valid
+            // frame address that no element access can reach (rep stosq with
+            // rcx = 0 writes nothing).
+            let lo_slot = if nslots > 0 { base + nslots - 1 } else { ptr_slot }
+            if LAST_LOCAL_BSS_SPILL != 0 {
+                em(0x48); em(0xbf); em64(LAST_LOCAL_BSS_ADDR)
+            } else {
+                em(0x48); em(0x8d); em(0xbd)  // lea rdi, [rbp + disp32]  (lowest array addr)
+                em32(0 - lo_slot * 8)
+            }
+            em(0x48); em(0x31); em(0xc0)   // xor rax, rax
+            em(0xb9); em32(nslots)         // mov ecx, nslots
+            em(0xf3); em(0x48); em(0xab)  // rep stosq
+            if LAST_LOCAL_BSS_SPILL != 0 {
+                em(0x48); em(0xb8); em64(LAST_LOCAL_BSS_ADDR)
+            } else {
+                em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp + disp32]
+                em32(0 - lo_slot * 8)
+            }
+            emit_store_var(ptr_slot)
         } else if has_eq == 0 && (decl_ty != 0 || decl_ty_hash != 0) && type_is_struct_like(decl_ty, decl_ty_hash) {
             // var x: StructType  (no initializer) — zero-initialize struct slots
             bind_struct_local_zeroinit_x86(ns, ne, decl_ty_hash)
@@ -26544,7 +26665,18 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut
             }
         } else {
-            compile_or()
+            if has_eq == 0 {
+                // `var x: T` with no initializer (#2817): bind zero. Used to be
+                // compile_or(), which consumed the next statement as the value.
+                if !lean_uninit_scalar_ok(decl_ty) {
+                    tc_error_hard(EP - 1, "declaration without an initializer: only integer, float and bool types are zero-initialized; add `= value`")
+                    return
+                }
+                em(0x48); em(0x31); em(0xc0)  // xor rax, rax  (0 and 0.0 alike)
+                lean_uninit_set_zero_expr(decl_ty, decl_ty_hash)
+            } else {
+                compile_or()
+            }
             if decl_ty == 13 && (EXPR_TY == 2 || EXPR_IS_F64 == 1) {
                 emit_widen_f64_to_f128_x86()
             }
@@ -41322,6 +41454,16 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // let/var
     if k == 11 || k == 12 {
         EP = EP + 1
+        // Strike 2: Reject 'let mut' Rust syntax -- mirror of the x86 twin
+        // (compile_stmt), including its recovery past `mut`.
+        if k == 11 && TK[EP as usize] == 3 {
+            let lm_ns = TS[EP as usize]
+            let lm_ne = TE[EP as usize]
+            if src_match(lm_ns, lm_ne - lm_ns, "mut") {
+                tc_rust_let_mut(EP)
+                EP = EP + 1
+            }
+        }
         if TK[EP as usize] == 6 {
             let pat_start = EP
             var pat_p = EP
@@ -41389,6 +41531,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         EP = EP + 1
         var is_arr: i64 = 0
         var arr_len: i64 = 0
+        var arr_len_lit: i64 = 0  // `[T; N]` spelled N (vs `[T]`, which also leaves arr_len 0)
+        var arr_elem_u8: i64 = 0  // type_name_kind has no `u8` (scan_type does); see lean_uninit_arr_elem_ok
         var arr_esiz: i64 = 8
         var decl_is_f64: i64 = -1
         var decl_ty: i64 = 0
@@ -41417,9 +41561,11 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     arr_elem_ty = type_name_kind(etns, etne)
                     if arr_elem_ty == 6 || arr_elem_ty == 7 { arr_elem_hash = gl_name_hash(etns, etne) }
                     if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
+                    if src_match(etns, etne - etns, "u8") { arr_elem_u8 = 1 }
                     EP = EP + 1
                 }
                 if TK[EP as usize] == 27 { EP = EP + 1 }
+                if TK[EP as usize] == 4 { arr_len_lit = 1 }
                 arr_len = TV[EP as usize]; EP = EP + 1
                 if TK[EP as usize] == 42 { EP = EP + 1 }
                 is_arr = 1
@@ -41452,7 +41598,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         }
         var has_eq: i64 = 0
         if TK[EP as usize] == 16 { EP = EP + 1; has_eq = 1 }
-        if is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
+        // `has_eq == 1`: without `=`, a `[V; N]` here is the NEXT statement, not
+        // this declaration's initializer (#2817).
+        if has_eq == 1 && is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
             EP = EP + 1
             let a64_val_ep = EP
             while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
@@ -41556,6 +41704,33 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 emit_lea_var_a64(base + nslots - 1)
             }
             emit_store_var_a64(ptr_slot)
+        } else if has_eq == 0 && is_arr == 1 && arr_len_lit == 1 && arr_len >= 0 {
+            // `var a: [T; N]` with no initializer (#2817) -- mirror of the x86 twin.
+            if arr_elem_u8 == 0 && !lean_uninit_arr_elem_ok(decl_ty_hash, arr_esiz) {
+                tc_error_hard(EP - 1, "array declared without an initializer: only integer, float and bool elements are zero-initialized; write `= [V; N]`")
+                return
+            }
+            var nslots = arr_len
+            if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
+            let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
+            if ptr_slot < 0 { return }
+            let arr_vi = VAR_COUNT - 1
+            VAR_TY[arr_vi as usize] = 8
+            VAR_TY_HASH[arr_vi as usize] = decl_ty_hash
+            VAR_MUT[arr_vi as usize] = decl_is_mut
+            let base = ptr_slot - nslots
+            let lo_slot = if nslots > 0 { base + nslots - 1 } else { ptr_slot }  // `[T; 0]`: see x86 twin
+            if LAST_LOCAL_BSS_SPILL != 0 {
+                emit_image_addr_reg_a64(11, LAST_LOCAL_BSS_ADDR)
+                emit_zero_words_x11_a64(nslots)
+                emit_image_addr_a64(LAST_LOCAL_BSS_ADDR)
+            } else {
+                emit_lea_var_a64(lo_slot)
+                em32(0xAA0003EB)  // mov x11, x0
+                emit_zero_words_x11_a64(nslots)
+                emit_lea_var_a64(lo_slot)
+            }
+            emit_store_var_a64(ptr_slot)
         } else if has_eq == 0 && (decl_ty != 0 || decl_ty_hash != 0) && type_is_struct_like(decl_ty, decl_ty_hash) {
             // `var x: StructT` with no initializer — register + zero-fill (mirror
             // of the x86 twin, compile_stmt :~22226). Without this the a64 pass
@@ -41571,7 +41746,17 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut
             }
         } else {
-            compile_or_a64()
+            if has_eq == 0 {
+                // `var x: T` with no initializer (#2817) -- mirror of the x86 twin.
+                if !lean_uninit_scalar_ok(decl_ty) {
+                    tc_error_hard(EP - 1, "declaration without an initializer: only integer, float and bool types are zero-initialized; add `= value`")
+                    return
+                }
+                em32(0xD2800000)  // movz x0, #0  (0 and 0.0 alike)
+                lean_uninit_set_zero_expr(decl_ty, decl_ty_hash)
+            } else {
+                compile_or_a64()
+            }
             if (decl_ty != 0 || decl_ty_hash != 0) && ty_eq(decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH) == false {
                 if type_has_knowledge(decl_ty, decl_ty_hash) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                     tc_epistemic_boundary(EP)
