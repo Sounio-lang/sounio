@@ -11074,13 +11074,16 @@ fn checker_reject_invalid_implicit_native_builtin_arity_inplace(c: *mut Checker,
 //               write_file write_bytes append_file
 //   Panic  (3): assert panic
 //   Alloc  (2): malloc heap_alloc heap_realloc heap_free
-// Deliberately absent: print_int / print_char / syscall6 (already carry IO via
-// their own arms below), and print_f64 / read_i64 / write_i64 / read_f64 /
-// write_f64, which lean_single does not guard either -- see the table in #2760.
+// Deliberately absent: print_int / print_char (both spines have their own arm that
+// enforces IO), and print_f64 / read_i64 / write_i64 / read_f64 / write_f64, which
+// lean_single does not guard either -- see the table in #2760. syscall6 IS here: only
+// the in-place spine has an arm for it (the in-place hook skips it), so a syscall6 in a
+// `loop` body, which is checked by-value, would otherwise owe nothing.
 // Effect ids are effects.sio's: 0=IO 2=Alloc 3=Panic.
 fn builtin_call_effect_id(n: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
     if name_eq(n, make_name("print")) { return 0 }
     if name_eq(n, make_name("println")) { return 0 }
+    if name_eq(n, make_name("syscall6")) { return 0 }
     if name_eq(n, make_name("read_byte")) { return 0 }
     if name_eq(n, make_name("read_line")) { return 0 }
     if name_eq(n, make_name("read_file")) { return 0 }
@@ -11155,6 +11158,12 @@ fn builtin_call_effect_for_call(sigs: *mut FnSigTable, module_id: i64, env: &Typ
 // Applies builtin_call_effect_for_call to a call. Arity is not checked here: a
 // wrong-arity call is diagnosed elsewhere and still owes the effect.
 fn checker_check_builtin_call_effect_inplace(c: *mut Checker, e: Expr) with Mut, Panic, Div, Alloc, IO {
+    // syscall6 has its own arm in checker_check_call_expr_inplace that enforces IO and
+    // types the call; the by-value spine has none, so it is in the shared table and
+    // skipped here to avoid reporting it twice.
+    if call_expr_is_syscall6(e.left) {
+        return
+    }
     let bid = builtin_call_effect_for_call((*c).fn_sigs, (*c).current_module_id, &(*c).env, e)
     if bid < 0 {
         return
@@ -17350,6 +17359,29 @@ impl Checker {
             Some(callee) => {
                 var effs: [i64; 8] = [0; 8]
                 effs[0] = bid
+                if effects_subset(effs, 1, self.current_effects, self.current_effect_count) {
+                    return self
+                }
+                // Same policy as checker_check_callee_effects_named_inplace: inside a
+                // closure body the missing effect is ACCUMULATED (and published on the
+                // closure's signature by the closure checker), and under
+                // SOUNIO_EFFECT_INFER a named function widens its own signature. Only
+                // an ordinary function with inference off reports E035. Without this a
+                // closure whose body holds a `loop { println(..) }` was rejected while
+                // the same closure without the `loop` inferred IO.
+                if self.in_closure_body || checker_effect_inference_enabled() {
+                    var c = self
+                    let merged = merge_effects(c.current_effects, c.current_effect_count, effs, 1)
+                    c.current_effects = merged.0
+                    c.current_effect_count = merged.1
+                    if !c.in_closure_body && c.current_sig_id >= 0 {
+                        let owner = fn_sig_table_get(c.fn_sigs, c.current_sig_id)
+                        if name_eq(owner.name, c.current_sig_name) {
+                            let _widened = fn_sig_table_widen_effects(c.fn_sigs, c.current_sig_id, effs, 1)
+                        }
+                    }
+                    return c
+                }
                 self.check_callee_effects_named(e.span, effs, 1, (*callee).name)
             }
             None => self
