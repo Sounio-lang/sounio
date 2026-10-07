@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# W044 — associated-function call on a type that does not exist.
+# E266 (was W044 until #1568) — qualified call whose target resolves to no definition.
 #
 # Madaros rejects an undefined plain call (`nao_existe(3)` -> error[E137]) but accepted ANY
 # path-form `Tipo::metodo(...)` whose target resolved to nothing, silently, evaluating it to 0.
@@ -85,7 +85,8 @@ printf '[madaros-unknown-assoc-fn] souc=%s\n' "$SOUC_BIN"
 
 fail=0
 
-# want=warn expects at least one W044; want=quiet expects none.
+# want=refuse expects error[E266] (formerly warning W044, promoted by #1568); want=quiet
+# expects neither W044 nor any error.
 #
 # ANTI-VACUITY. A `want=quiet` case passes on w044=0, and a compiler that crashed, failed to
 # build the program, or bailed early ALSO yields w044=0. Three of the five cases here are quiet,
@@ -99,6 +100,24 @@ run_case() {
   local log="$OUT_DIR/$label.log"
   local rc=0
   "$SOUC_BIN" --check "$src" >"$log" 2>&1 || rc=$?
+  # #1568: an unresolved qualified call is now an ERROR (E266), not warning W044.
+  # want=refuse expects a non-zero exit carrying error[E266] and no W044.
+  if [[ "$want" == "refuse" ]]; then
+    if [[ "$rc" -eq 0 ]]; then
+      echo "[madaros-unknown-assoc-fn] FAIL($label): --check accepted an unresolved qualified call (expected error[E266])" >&2
+      tail -n 8 "$log" >&2 || true
+      fail=1
+      return
+    fi
+    if ! grep -q 'error\[E266\]' "$log"; then
+      echo "[madaros-unknown-assoc-fn] FAIL($label): --check refused, but not with E266" >&2
+      grep -n 'error\[' "$log" | head -n 5 >&2 || true
+      fail=1
+      return
+    fi
+    printf '[madaros-unknown-assoc-fn] PASS(%s) want=refuse E266\n' "$label"
+    return
+  fi
   if [[ "$rc" -ne 0 ]]; then
     echo "[madaros-unknown-assoc-fn] FAIL($label): --check exited $rc; the case never typechecked, so its W044 count is meaningless" >&2
     tail -n 15 "$log" >&2 || true
@@ -135,7 +154,7 @@ fn main() with IO, Mut, Panic, Div {
     println(" INVENTED")
 }
 SIO
-run_case invented warn "$OUT_DIR/invented.sio"
+run_case invented refuse "$OUT_DIR/invented.sio"
 
 # Positive: the shape that is live in stdlib/epistemic — Vec::new() into a struct field, while no
 # Vec type exists in the tree. This already evaluates to 0 today; the warning makes it visible.
@@ -151,7 +170,22 @@ fn main() with IO, Mut, Panic, Div {
     println(" VECFIELD")
 }
 SIO
-run_case vec_field warn "$OUT_DIR/vec_field.sio"
+run_case vec_field refuse "$OUT_DIR/vec_field.sio"
+
+# Positive (#1568): a fully-qualified free-fn call whose module was never `use`d.
+# Before: W044 + check OK, then the binary trapped (SIGILL) on a body-less stub.
+cat >"$OUT_DIR/unused_module_path.sio" <<'SIO'
+var XS: [f64; 16384] = [0.0; 16384]
+
+fn main() with IO, Mut, Panic, Div {
+    XS[0] = 1.0
+    XS[1] = 2.0
+    let v: f64 = epistemic::sobol_indices::variance(XS, 2)
+    print_f64(v)
+    println(" UNUSED_MODULE_PATH")
+}
+SIO
+run_case unused_module_path refuse "$OUT_DIR/unused_module_path.sio"
 
 # Negative: Box::new is a real builtin and returns before the check. A warning here would fire on
 # 817 in-tree call sites.
@@ -217,4 +251,4 @@ if [[ "$fail" -ne 0 ]]; then
   exit 1
 fi
 
-echo "[madaros-unknown-assoc-fn] PASS: unknown receivers warn; Box::new, known types and imported free fns stay quiet"
+echo "[madaros-unknown-assoc-fn] PASS: unknown receivers are refused (E266); Box::new, known types and imported free fns stay quiet"
