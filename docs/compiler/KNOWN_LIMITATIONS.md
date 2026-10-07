@@ -43,7 +43,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-20 | enum variants with payloads (`Circle(f64)`, `Rect { w: f64 }`): no runtime representation | both |
 | KL-21 | user fns named like compiler builtins: `pub` residual on Madaros; seed hijacks or rejects | both |
 | KL-18 | `Hyper<…>` CPU values: Madaros fail-closed; lean_single prints a wrong value (seed) | both |
-| KL-17 | #2773 same-named items across modules: seed binds first-loaded; Madaros refuses differing structs instead of keeping them apart | lean_single (fns, structs); madaros (types) |
+| KL-17 | #2773 same-named items across modules: fns resolved per module on both engines; differing same-named structs refused instead of kept apart | both (types) |
 
 ## Ledger
 
@@ -371,11 +371,20 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   import it from any definer keeps the first-loaded binding (unchanged); a
   re-export (`pub use`) is not followed; restricted-public (`pub(crate)` …)
   collisions are refused as before.
-- **lean_single (seed) — OPEN.** `self-hosted/compiler/lean_single.sio`
-  still binds every same-named fn to the first-loaded module's body (the #2773
-  repro prints `3.0`), and for same-named structs it may run with the wrong
-  layout. Changing the seed needs the seed-refresh procedure (KL-9 last
-  bullet). The pins above are `//@ requires: madaros`. Pin for the seed: none.
+- **lean_single — CLOSED for the same shapes (#2773).** `lmr_resolve` in
+  `self-hosted/compiler/lean_single.sio` runs on the token stream right after
+  lexing and applies the same rules: a free fn defined at top level in two or
+  more modules keeps its name in the first-loaded definer and is renamed
+  `N__m<k>` in every other definer k; each module's references bind through
+  its own definition, then its explicit `use` imports, then its globs (only
+  `pub` definers count as import sources); two explicit imports of different
+  definers, or globs of two non-first definers, are refused with
+  `error[module_name_resolution]`; `q::N(..)` resolves through the `use` whose
+  last segment is `q`. `lmr_struct_identity` refuses same-named structs with
+  different definitions (`error[module_struct_identity]`). The pins above now
+  run on both engines. Same residuals as Madaros (no import from any definer
+  keeps the first-loaded binding; `pub use` is not followed); a bare fn value
+  is rebound only in a module that declares no local of that name.
 
 ## Registry-governed, not rungs
 
