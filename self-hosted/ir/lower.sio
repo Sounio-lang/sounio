@@ -1958,6 +1958,9 @@ var LOWER_MONOLITHIC_PUBLIC_PROBE_TRACE: bool = false
 // this instead of a call to a name that binds to nothing (which left its dst vreg
 // unwritten, i.e. reading 0). See lowerer_lower_fn_mut and the ExprCall lowering.
 var LOWER_KERNEL_TID_REG: i64 = 0 - 1
+// #2766: the scrutinee of the match being lowered is a reference local, so a
+// struct-pattern arm reads its fields through the reference (field_get label 1).
+var LOWER_MATCH_SCRUT_IS_REF: bool = false
 
 // Label of the lane-increment block while a `kernel fn` body is lowered; -1
 // outside a kernel. `return` inside a kernel ends THAT LANE, not the launch —
@@ -22237,10 +22240,118 @@ impl Lowerer {
             lo = lo.emit(ir_jump(l_end))
             lo = lo.emit(ir_label(l_skip))
             lo
+        } else if pat.kind == PatternKind::PatStruct {
+            // #2766: `S { a, b: y, c: _ } => body` on a struct scrutinee is
+            // irrefutable: bind each field from the scrutinee and run the arm.
+            // This arm used to fall to "unsupported -- skip", so the match produced
+            // the 0 the end label loads (0.000000 for an f64 body) with check: OK.
+            var lo = self.bind_struct_pattern_fields(scrut, ir_path_first_name(pat.path), &pat.pat_fields)
+            if lo.had_error { return lo }
+            let pair_l = lo.fresh_label()
+            lo = pair_l.0
+            let l_skip = pair_l.1
+            lo = lo.lower_arm_guard(&arm.guard, l_skip)
+            let pair_b = lo.lower_expr_ref(&arm.body)
+            lo = pair_b.0
+            let body_reg = pair_b.1
+            lo = lo.emit(ir_copy(res, body_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_skip))
+            lo
         } else {
             // Unsupported pattern — skip
             self
         }
+    }
+
+    // Refuse a struct pattern Madaros cannot lower (fail-closed, #2766): an
+    // unregistered struct name, an unknown field, or a field sub-pattern other
+    // than a binding or `_` (nested struct, literal, enum).
+    fn refuse_struct_pattern(self, why: string) -> Lowerer with Mut, Panic, Div, IO {
+        print("error: Madaros cannot lower this struct pattern (")
+        print(why)
+        print("); only `field`, `field: name` and `field: _` over a struct are supported -- bind the field and match on it instead (fail-closed, #2766)\n")
+        var lo = self
+        lowerer_mark_hard_error(&! lo)
+        lo
+    }
+
+    fn bind_struct_pattern_fields(self, scrut: i64, struct_name: Name, fields: &Option<Box<PatFieldList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        if lower_struct_layout_index_of(&(*self.struct_layouts), struct_name) < 0 {
+            return self.refuse_struct_pattern("pattern does not name a struct")
+        }
+        var lo = self
+        var cur = fields
+        while true {
+            match *cur {
+                Some(list) => {
+                    let fname = (*list).head.name
+                    let sub = &(*list).head.pattern
+                    if (*sub).kind == PatternKind::PatWildcard {
+                        // nothing to bind
+                    } else if (*sub).kind == PatternKind::PatBinding {
+                        if !lo.struct_has_field(struct_name, fname) {
+                            return lo.refuse_struct_pattern("unknown field")
+                        }
+                        let fidx = lo.field_idx_from_name(struct_name, fname)
+                        let is_float = lo.field_is_float_for_struct(struct_name, fname)
+                        let pair_d = lo.fresh_reg()
+                        lo = pair_d.0
+                        let dst = pair_d.1
+                        var instr = ir_field_get(dst, scrut, fidx, fname)
+                        if LOWER_MATCH_SCRUT_IS_REF { instr.label_id = 1 }
+                        if is_float { instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG }
+                        lo = lo.emit(instr)
+                        if is_float { lo = lo.emit(ir_mark_float_reg(dst)) }
+                        lo = lo.bind_local((*sub).name, dst, (*sub).is_mut)
+                        if is_float {
+                            lo = lo.bind_local_scalar_kind((*sub).name, 2)
+                        } else if lo.field_is_integer_scalar_for_struct(struct_name, fname) {
+                            lo = lo.bind_local_scalar_kind((*sub).name, 1)
+                        }
+                        if lo.field_array_elem_is_float_for_struct(struct_name, fname) {
+                            lo = lo.bind_local_array_elem_float((*sub).name)
+                        }
+                        let ftype = lo.field_named_type_for_struct(struct_name, fname)
+                        if ftype.len > 0 && (ir_name_is_box(ftype) || lower_struct_layout_index_of(&(*lo.struct_layouts), ftype) >= 0) {
+                            lo = lo.bind_local_struct_type((*sub).name, ftype, false)
+                        }
+                    } else {
+                        return lo.refuse_struct_pattern("nested or literal field sub-pattern")
+                    }
+                    cur = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        lo
+    }
+
+    fn struct_has_field(self, type_name: Name, field_name: Name) -> bool with Mut, Panic, Div {
+        let si = lower_struct_layout_index_of(&(*self.struct_layouts), type_name)
+        if si < 0 { return false }
+        var fi: i64 = 0
+        while fi < (*self.struct_layouts).entries[si as usize].field_count {
+            if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                return true
+            }
+            fi = fi + 1
+        }
+        false
+    }
+
+    // is_float == 3 marks an integer/bool scalar field (register_struct_fields).
+    fn field_is_integer_scalar_for_struct(self, type_name: Name, field_name: Name) -> bool with Mut, Panic, Div {
+        let si = lower_struct_layout_index_of(&(*self.struct_layouts), type_name)
+        if si < 0 { return false }
+        var fi: i64 = 0
+        while fi < (*self.struct_layouts).entries[si as usize].field_count {
+            if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 3
+            }
+            fi = fi + 1
+        }
+        false
     }
 
     fn lower_match_arm(self, scrut: i64, res: i64, l_end: i64, arm: MatchArm) -> Lowerer with Mut, Panic, Div, Alloc, IO {
@@ -26186,16 +26297,23 @@ impl Lowerer {
     }
 
     fn lower_match_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let scrut_is_ref = match e.left {
+            Some(se) => (*se).kind == ExprKind::ExprIdent && self.lookup_local_is_ref((*se).name),
+            None => false,
+        }
         let pair_scrut = self.lower_opt_expr_ref(&e.left)
         var lo = pair_scrut.0
         let scrut = pair_scrut.1
+        let saved_scrut_is_ref = LOWER_MATCH_SCRUT_IS_REF
         let pair_res = lo.fresh_reg()
         lo = pair_res.0
         let res = pair_res.1
         let pair_end = lo.fresh_label()
         lo = pair_end.0
         let l_end = pair_end.1
+        LOWER_MATCH_SCRUT_IS_REF = scrut_is_ref
         lo = lo.lower_match_arms_ref(scrut, res, l_end, &e.arms)
+        LOWER_MATCH_SCRUT_IS_REF = saved_scrut_is_ref
         lo = lo.emit(ir_load_imm(res, 0))
         lo = lo.emit(ir_label(l_end))
         (lo, res)

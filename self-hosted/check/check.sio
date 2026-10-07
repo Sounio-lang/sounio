@@ -12386,6 +12386,18 @@ fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, ar
 
 
 
+// #2766: the parser desugars a destructuring `let S { a, b } = q` (and a tuple
+// `let (a, b) = t`) into `let __tupN = q` followed by one `let a = __tupN.a` per
+// field. The source `q` is consumed exactly once, by the first statement; the
+// per-field reads of the compiler temp are not uses of a linear value, they are
+// that single move split by field. Tracking the temp as linear reported the
+// second field read as E039 (and, with a field skipped, E040), rejecting a
+// correct single use. The temp is therefore tracked as non-linear.
+fn checker_name_is_destructure_temp(n: Name) -> bool {
+    n.len > 5 && n.buf[0] == 95 as i8 && n.buf[1] == 95 as i8 && n.buf[2] == 116 as i8
+        && n.buf[3] == 117 as i8 && n.buf[4] == 112 as i8
+}
+
 // *mut ExprIdent leaf — transcription of the by-value ExprIdent arm (13856). env lookup +
 // linear-consume in place; returns only the TypeEntry (no 164KB self SRET — the by-value
 // arm's `(c2, ident_ty)` return was the last bridge before crash in 165 deeply-nested cases).
@@ -12919,7 +12931,7 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         checker_const_int_bind_unknown_inplace(c, s.name)
     }
     // Track variable for borrow checking (linear if struct is declared linear)
-    let lin = checker_is_linear_type_inplace(c, bind_ty)
+    let lin = checker_is_linear_type_inplace(c, bind_ty) && !checker_name_is_destructure_temp(s.name)
     (*c).borrows = (*c).borrows.track(s.name, lin)
     // Propagate escape provenance: `let r = &x` taints r LOCAL; `let r = &self.f` keeps it first-class.
     (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
@@ -12983,7 +12995,7 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     } else {
         checker_const_int_bind_unknown_inplace(c, s.name)
     }
-    let lin = checker_is_linear_type_inplace(c, bind_ty)
+    let lin = checker_is_linear_type_inplace(c, bind_ty) && !checker_name_is_destructure_temp(s.name)
     (*c).borrows = (*c).borrows.track(s.name, lin)
     (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
     ty_unit()
@@ -25149,7 +25161,7 @@ impl Checker {
             c = c.const_int_bind_unknown(s.name)
         }
         // Track variable for borrow checking (linear if struct is declared linear)
-        let lin = c.is_linear_type(bind_ty)
+        let lin = c.is_linear_type(bind_ty) && !checker_name_is_destructure_temp(s.name)
         c.borrows = c.borrows.track(s.name, lin)
         (c, ty_unit())
     }
@@ -25212,7 +25224,7 @@ impl Checker {
             c = c.const_int_bind_unknown(s.name)
         }
         // Track variable for borrow checking (linear if struct is declared linear)
-        let lin = c.is_linear_type(bind_ty)
+        let lin = c.is_linear_type(bind_ty) && !checker_name_is_destructure_temp(s.name)
         c.borrows = c.borrows.track(s.name, lin)
         (c, ty_unit())
     }
