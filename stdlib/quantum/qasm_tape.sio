@@ -1,0 +1,321 @@
+// stdlib/quantum/qasm_tape.sio
+//
+// A tape is a circuit that has not run. Gates append an operation and return
+// the tape. tape_replay_* runs that list on the linear statevector, which is
+// the oracle. tape_qasm renders OpenQASM 3.0 for a submitter that lives
+// outside this module: Sounio does not open a socket. The submitter posts
+// tape_shots(...).program and returns counts. The first accepted device run
+// is tape_bell, 1000 shots, near half on 00 and 11.
+//
+// This is not the VQE Circuit. That one has no measurement and its own
+// statevector, capped at 4 qubits.
+
+use quantum::linear::{
+    quantum_state_new,
+    qubit_alloc,
+    hadamard,
+    ry,
+    cnot,
+    measure_qubit,
+    amp_prob,
+    Qubit,
+    QubitPair,
+    QuantumState,
+}
+
+fn op_h() -> i32 { 1 }
+fn op_ry() -> i32 { 9 }
+fn op_cx() -> i32 { 11 }
+fn op_measure() -> i32 { 15 }
+
+pub struct Tape {
+    pub n_qubits: i32,
+    pub n_ops: i32,
+    pub n_meas: i32,
+    pub kind: [i32; 64],
+    pub q0: [i32; 64],
+    pub q1: [i32; 64],
+    pub angle: [f64; 64],
+}
+
+pub struct BasisProb {
+    pub p00: f64,
+    pub p01: f64,
+    pub p10: f64,
+    pub p11: f64,
+}
+
+pub struct ShotRequest {
+    pub shots: i64,
+    pub program: string,
+}
+
+pub fn tape_new(n_qubits: i32) -> Tape {
+    Tape {
+        n_qubits: n_qubits,
+        n_ops: 0,
+        n_meas: 0,
+        kind: [0; 64],
+        q0: [0; 64],
+        q1: [0; 64],
+        angle: [0.0; 64],
+    }
+}
+
+fn tape_push(t: Tape, kind: i32, a: i32, b: i32, angle: f64) -> Tape with Mut, Div, Panic {
+    if t.n_ops >= 64 {
+        panic("tape full")
+        return t
+    }
+    var out = t
+    let k = t.n_ops
+    out.kind[k] = kind
+    out.q0[k] = a
+    out.q1[k] = b
+    out.angle[k] = angle
+    out.n_ops = k + 1
+    if kind == 15 {
+        out.n_meas = t.n_meas + 1
+    }
+    out
+}
+
+fn wire_ok(t: Tape, q: i32) -> i32 {
+    if q < 0 { return 0 }
+    if q >= t.n_qubits { return 0 }
+    1
+}
+
+pub fn tape_h(t: Tape, q: i32) -> Tape with Mut, Div, Panic {
+    if wire_ok(t, q) == 0 {
+        panic("tape wire")
+        return t
+    }
+    tape_push(t, op_h(), q, 0, 0.0)
+}
+
+pub fn tape_ry(t: Tape, q: i32, angle: f64) -> Tape with Mut, Div, Panic {
+    if wire_ok(t, q) == 0 {
+        panic("tape wire")
+        return t
+    }
+    tape_push(t, op_ry(), q, 0, angle)
+}
+
+pub fn tape_cx(t: Tape, control: i32, target: i32) -> Tape with Mut, Div, Panic {
+    if wire_ok(t, control) == 0 {
+        panic("tape wire")
+        return t
+    }
+    if wire_ok(t, target) == 0 {
+        panic("tape wire")
+        return t
+    }
+    tape_push(t, op_cx(), control, target, 0.0)
+}
+
+pub fn tape_measure(t: Tape, q: i32) -> Tape with Mut, Div, Panic {
+    if wire_ok(t, q) == 0 {
+        panic("tape wire")
+        return t
+    }
+    tape_push(t, op_measure(), q, 0, 0.0)
+}
+
+pub fn tape_bell() -> Tape with Mut, Div, Panic {
+    var t = tape_new(2)
+    t = tape_h(t, 0)
+    t = tape_cx(t, 0, 1)
+    t = tape_measure(t, 0)
+    t = tape_measure(t, 1)
+    t
+}
+
+pub fn tape_idle() -> Tape with Mut, Div, Panic {
+    var t = tape_new(2)
+    t = tape_measure(t, 0)
+    t = tape_measure(t, 1)
+    t
+}
+
+pub fn tape_ry_flip(angle: f64) -> Tape with Mut, Div, Panic {
+    var t = tape_new(1)
+    t = tape_ry(t, 0, angle)
+    t = tape_measure(t, 0)
+    t
+}
+
+fn tape_i64(n: i64) -> string with Mut, Panic, Div {
+    if n == 0 { return "0" }
+    var neg = n < 0
+    var m: i64 = n
+    if neg { m = 0 - n }
+    var result = ""
+    while m > 0 {
+        let d = m % 10
+        result = str_concat(str_slice("0123456789", d, d + 1), result)
+        m = m / 10
+    }
+    if neg { result = str_concat("-", result) }
+    result
+}
+
+// Twelve digits after the point, truncated. The tape keeps the f64;
+// this is only the text a submitter ships.
+pub fn tape_dec(x: f64) -> string with Mut, Panic, Div {
+    var neg = x < 0.0
+    var ax: f64 = x
+    if neg { ax = 0.0 - x }
+    let int_part = ax as i64
+    let frac = ax - (int_part as f64)
+    var frac_i = (frac * 1000000000000.0) as i64
+    if frac_i < 0 { frac_i = 0 }
+    var frac_str = ""
+    var f = frac_i
+    var i = 0
+    while i < 12 {
+        let d = f % 10
+        frac_str = str_concat(str_slice("0123456789", d, d + 1), frac_str)
+        f = f / 10
+        i = i + 1
+    }
+    var result = str_concat(tape_i64(int_part), ".")
+    result = str_concat(result, frac_str)
+    if neg { result = str_concat("-", result) }
+    result
+}
+
+fn qasm_line(kind: i32, a: i32, b: i32, angle: f64, meas_at: i32) -> string with Mut, Panic, Div {
+    let qa = tape_i64(a as i64)
+    if kind == 1 {
+        return str_concat("h q[", str_concat(qa, "];\n"))
+    }
+    if kind == 9 {
+        return str_concat("ry(", str_concat(tape_dec(angle), str_concat(") q[", str_concat(qa, "];\n"))))
+    }
+    if kind == 11 {
+        let qb = tape_i64(b as i64)
+        return str_concat("cx q[", str_concat(qa, str_concat("], q[", str_concat(qb, "];\n"))))
+    }
+    if kind == 15 {
+        let cm = tape_i64(meas_at as i64)
+        return str_concat("c[", str_concat(cm, str_concat("] = measure q[", str_concat(qa, "];\n"))))
+    }
+    ""
+}
+
+pub fn tape_qasm(t: Tape) -> string with Mut, Panic, Div {
+    var s = str_concat("OPENQASM 3.0;\ninclude \"stdgates.inc\";\nqubit[", tape_i64(t.n_qubits as i64))
+    s = str_concat(s, "] q;\nbit[")
+    s = str_concat(s, tape_i64(t.n_meas as i64))
+    s = str_concat(s, "] c;\n")
+    var i: i32 = 0
+    var m: i32 = 0
+    while i < t.n_ops {
+        let kind = t.kind[i]
+        s = str_concat(s, qasm_line(kind, t.q0[i], t.q1[i], t.angle[i], m))
+        if kind == 15 { m = m + 1 }
+        i = i + 1
+    }
+    s
+}
+
+pub fn tape_shots(t: Tape, shots: i64) -> ShotRequest with Mut, Panic, Div {
+    ShotRequest { shots: shots, program: tape_qasm(t) }
+}
+
+fn step1(q0: Qubit, kind: i32, angle: f64, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {
+    if kind == 9 {
+        ry(q0, qs, angle)
+    } else {
+        if kind == 1 {
+            hadamard(q0, qs)
+        } else {
+            q0
+        }
+    }
+}
+
+fn step2(q0: Qubit, q1: Qubit, kind: i32, a: i32, angle: f64, qs: &!QuantumState) -> QubitPair with Mut, Div, Panic {
+    if kind == 1 {
+        if a == 0 {
+            let h = hadamard(q0, qs)
+            QubitPair { first: h, second: q1 }
+        } else {
+            let h = hadamard(q1, qs)
+            QubitPair { first: q0, second: h }
+        }
+    } else {
+        if kind == 9 {
+            if a == 0 {
+                let r = ry(q0, qs, angle)
+                QubitPair { first: r, second: q1 }
+            } else {
+                let r = ry(q1, qs, angle)
+                QubitPair { first: q0, second: r }
+            }
+        } else {
+            if kind == 11 {
+                if a == 0 {
+                    cnot(q0, q1, qs)
+                } else {
+                    let p = cnot(q1, q0, qs)
+                    QubitPair { first: p.second, second: p.first }
+                }
+            } else {
+                QubitPair { first: q0, second: q1 }
+            }
+        }
+    }
+}
+
+fn walk1(q0: Qubit, t: &Tape, i: i32, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {
+    if i >= t.n_ops {
+        q0
+    } else {
+        let nq = step1(q0, t.kind[i], t.angle[i], qs)
+        walk1(nq, t, i + 1, qs)
+    }
+}
+
+fn walk2(q0: Qubit, q1: Qubit, t: &Tape, i: i32, qs: &!QuantumState) -> QubitPair with Mut, Div, Panic {
+    if i >= t.n_ops {
+        QubitPair { first: q0, second: q1 }
+    } else {
+        let p = step2(q0, q1, t.kind[i], t.q0[i], t.angle[i], qs)
+        walk2(p.first, p.second, t, i + 1, qs)
+    }
+}
+
+pub fn tape_replay_1(t: Tape) -> f64 with Mut, Div, Panic {
+    if t.n_qubits != 1 {
+        panic("tape replay wants 1 qubit")
+        return 0.0
+    }
+    var qs = quantum_state_new()
+    let q0 = qubit_alloc(&!qs)
+    let qf = walk1(q0, &t, 0, &!qs)
+    let p = amp_prob(&qs, 1)
+    let _m = measure_qubit(qf, &!qs, 0.0)
+    p
+}
+
+pub fn tape_replay_2(t: Tape) -> BasisProb with Mut, Div, Panic {
+    if t.n_qubits != 2 {
+        panic("tape replay wants 2 qubits")
+        return BasisProb { p00: 0.0, p01: 0.0, p10: 0.0, p11: 0.0 }
+    }
+    var qs = quantum_state_new()
+    let q0 = qubit_alloc(&!qs)
+    let q1 = qubit_alloc(&!qs)
+    let done = walk2(q0, q1, &t, 0, &!qs)
+    let read = BasisProb {
+        p00: amp_prob(&qs, 0),
+        p01: amp_prob(&qs, 1),
+        p10: amp_prob(&qs, 2),
+        p11: amp_prob(&qs, 3),
+    }
+    let _a = measure_qubit(done.first, &!qs, 0.0)
+    let _b = measure_qubit(done.second, &!qs, 0.0)
+    read
+}
