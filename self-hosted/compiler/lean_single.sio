@@ -28725,6 +28725,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             if arm_tk != 57 && arm_tk != 58 && arm_tk != 59 && arm_tk != 60 && arm_tk != 3 && arm_tk != 4 && arm_tk != 6 { EP = EP + 1 }
             // Phase 1.4: Or-pattern detection (A | B | C => body)
             var is_or_pattern: i64 = 0
+            // `v | w => ..` (an or-pattern whose first alternative is a binding):
+            // there is no lowering for it, and leaving the `|` in the token stream
+            // made this loop spin forever. Refuse it.
+            if is_var_bind == 1 && TK[EP as usize] == 45 {
+                tc_error_hard(EP, "an or-pattern whose alternatives bind variables is not supported by this engine")
+                while TK[EP as usize] != 52 && TK[EP as usize] != 9 && TK[EP as usize] != 0 { EP = EP + 1 }
+            }
             if is_var_bind == 0 && TK[EP as usize] == 45 {
                 is_or_pattern = 1
                 // Store first alternative
@@ -28983,9 +28990,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH }
                     else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error(EP - 1, "match arm type does not match other arms") }
                 } else { match_all_value = 0 }
+                // A binding arm is taken: jump to the end of the match like every
+                // other arm. Only the guarded form used to jump; an unguarded
+                // `v => ..` that was not the last arm fell through into the next
+                // arms, so `match x { v => v + 100, _ => 7 }` returned 7.
+                em(0xe9); match_ends[arm_count as usize] = CL; em32(0)
+                arm_count = arm_count + 1
                 if vb_has_guard == 1 {
-                    em(0xe9); match_ends[arm_count as usize] = CL; em32(0)
-                    arm_count = arm_count + 1
                     patch32(vb_guard_skip, CL)
                 }
             }
@@ -43434,6 +43445,10 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             if arm_tk != 57 && arm_tk != 58 && arm_tk != 59 && arm_tk != 60 && arm_tk != 3 && arm_tk != 4 { EP = EP + 1 }
             // Phase 1.4: Or-pattern detection (A | B | C => body) — ARM64
             var is_or_pattern_a64: i64 = 0
+            if is_var_bind == 1 && TK[EP as usize] == 45 {
+                tc_error_hard(EP, "an or-pattern whose alternatives bind variables is not supported by this engine")
+                while TK[EP as usize] != 52 && TK[EP as usize] != 9 && TK[EP as usize] != 0 { EP = EP + 1 }
+            }
             if is_var_bind == 0 && TK[EP as usize] == 45 {
                 is_or_pattern_a64 = 1
                 OR_ALT_DISC[0 as usize] = disc
@@ -43596,9 +43611,10 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH }
                     else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error(EP - 1, "match arm type does not match other arms") }
                 } else { match_all_value = 0 }
+                // See the x86-64 twin: an unguarded binding arm must also jump out.
+                match_ends[arm_count as usize] = CL; em32(0x14000000)
+                arm_count = arm_count + 1
                 if vb_has_guard_a64 == 1 {
-                    match_ends[arm_count as usize] = CL; em32(0x14000000)
-                    arm_count = arm_count + 1
                     patch_branch_a64(vb_guard_skip_a64, CL)
                 }
             }

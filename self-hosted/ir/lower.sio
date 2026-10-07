@@ -8096,6 +8096,38 @@ fn lower_lookup_box_inner_layout(locals: Box<LowerLocalStack>, scope_depth: i64,
     0 - 1
 }
 
+// #2377: an identifier expression naming `name`, so a const pattern can lower
+// the constant through the ordinary identifier path (global load).
+fn lower_ident_expr_for_name(name: Name, span: Span) -> Expr {
+    Expr {
+        kind: ExprKind::ExprIdent,
+        span: span,
+        int_val: 0,
+        float_val: 0.0,
+        f128_lit_lo: 0,
+        f128_lit_hi: 0,
+        f128_lit_exact: false,
+        name: name,
+        path: empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+        cast_type: None,
+        handler_block: None,
+        closure_params: None,
+        closure_return: None,
+        closure_effects: None,
+        closure_body: None,
+        type_args: None,
+    }
+}
+
 fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
     // Knowledge<T> is TypeKnowledge, not TypeNamed. Without this stamp the
     // parameter binder records an empty struct type, lookup_local_variance_reg
@@ -22069,6 +22101,53 @@ impl Lowerer {
         true
     }
 
+    // #2377: lower one alternative of an or-pattern as `scrut == value ->
+    // l_hit`. Handles the binding-free alternatives an integer/enum scrutinee
+    // can have: an integer literal, true/false, a unit enum variant, and a
+    // module-level const/let. Returns false (and emits nothing) for anything
+    // else, so the caller refuses the arm instead of guessing.
+    fn lower_or_alt_test_ref(self, scrut: i64, alt: &Pattern, l_hit: i64) -> (Lowerer, bool) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var val_reg: i64 = 0 - 1
+        if (*alt).kind == PatternKind::PatIntLit {
+            let pr = lo.fresh_reg()
+            lo = pr.0
+            val_reg = pr.1
+            lo = lo.emit(ir_load_imm(val_reg, (*alt).int_val))
+        } else if (*alt).kind == PatternKind::PatBoolTrue || (*alt).kind == PatternKind::PatBoolFalse {
+            let pr = lo.fresh_reg()
+            lo = pr.0
+            val_reg = pr.1
+            lo = lo.emit(ir_load_imm(val_reg, if (*alt).kind == PatternKind::PatBoolTrue { 1 } else { 0 }))
+        } else if (*alt).kind == PatternKind::PatEnum {
+            match (*alt).sub_patterns {
+                Some(_) => return (self, false),
+                None => {}
+            }
+            let vname = ir_path_last_name((*alt).path)
+            if ir_name_is_some(vname) || ir_name_is_none(vname) { return (self, false) }
+            let disc = lo.lookup_variant_discriminant_by_path(ir_path_qualifier_name((*alt).path), vname)
+            if disc < 0 { return (self, false) }
+            let pr = lo.fresh_reg()
+            lo = pr.0
+            val_reg = pr.1
+            lo = lo.emit(ir_load_imm(val_reg, disc))
+        } else if (*alt).kind == PatternKind::PatBinding && lo.pattern_names_global_const_ref((*alt).name) {
+            let cexpr = lower_ident_expr_for_name((*alt).name, (*alt).span)
+            let pc = lo.lower_expr_ref(&cexpr)
+            lo = pc.0
+            val_reg = pc.1
+        } else {
+            return (self, false)
+        }
+        let pcmp = lo.fresh_reg()
+        lo = pcmp.0
+        let cmp_reg = pcmp.1
+        lo = lo.emit(ir_binop(cmp_reg, scrut, BinaryOp::OpEq, val_reg))
+        lo = lo.emit(ir_branch_true(cmp_reg, l_hit))
+        (lo, true)
+    }
+
     // Lower match arms as a linear if/else chain
     fn lower_match_arms_ref(self, scrut: i64, res: i64, l_end: i64, arms: &Option<Box<MatchArmList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
@@ -22127,33 +22206,7 @@ impl Lowerer {
             let pair_l = self.fresh_label()
             var lo = pair_l.0
             let l_skip = pair_l.1
-            let cexpr = Expr {
-                kind: ExprKind::ExprIdent,
-                span: pat.span,
-                int_val: 0,
-                float_val: 0.0,
-                f128_lit_lo: 0,
-                f128_lit_hi: 0,
-                f128_lit_exact: false,
-                name: pat.name,
-                path: empty_path(),
-                bin_op: BinaryOp::OpAdd,
-                un_op: UnaryOp::OpNeg,
-                left: None,
-                right: None,
-                block: None,
-                else_expr: None,
-                args: None,
-                arms: None,
-                fields: None,
-                cast_type: None,
-                handler_block: None,
-                closure_params: None,
-                closure_return: None,
-                closure_effects: None,
-                closure_body: None,
-                type_args: None,
-            }
+            let cexpr = lower_ident_expr_for_name(pat.name, pat.span)
             let pair_c = lo.lower_expr_ref(&cexpr)
             lo = pair_c.0
             let const_reg = pair_c.1
@@ -22290,6 +22343,45 @@ impl Lowerer {
             var lo = pair_l.0
             let l_skip = pair_l.1
             lo = lo.emit(ir_branch_true(scrut, l_skip))
+            lo = lo.lower_arm_guard(&arm.guard, l_skip)
+            let pair_b = lo.lower_expr_ref(&arm.body)
+            lo = pair_b.0
+            let body_reg = pair_b.1
+            lo = lo.emit(ir_copy(res, body_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_skip))
+            lo
+        } else if pat.kind == PatternKind::PatOr {
+            // #2377: `A | B | 3 => ..` -- test each alternative, any hit enters
+            // the arm. Before, an or-pattern fell to "Unsupported pattern --
+            // skip" below and the arm silently never matched.
+            let pair_h = self.fresh_label()
+            var lo = pair_h.0
+            let l_hit = pair_h.1
+            let pair_s = lo.fresh_label()
+            lo = pair_s.0
+            let l_skip = pair_s.1
+            var cur = &pat.sub_patterns
+            var supported = true
+            while supported {
+                match *cur {
+                    Some(alts) => {
+                        let pt = lo.lower_or_alt_test_ref(scrut, &(*alts).head, l_hit)
+                        lo = pt.0
+                        supported = pt.1
+                        cur = &(*alts).tail
+                    }
+                    None => break
+                }
+            }
+            if !supported {
+                print("error: Madaros cannot lower this or-pattern alternative (supported: integer/bool literals, unit enum variants, module-level constants; no bindings). Refused rather than skipping the arm.\n")
+                var lo_refuse = self
+                lowerer_mark_hard_error(&! lo_refuse)
+                return lo_refuse
+            }
+            lo = lo.emit(ir_jump(l_skip))
+            lo = lo.emit(ir_label(l_hit))
             lo = lo.lower_arm_guard(&arm.guard, l_skip)
             let pair_b = lo.lower_expr_ref(&arm.body)
             lo = pair_b.0
