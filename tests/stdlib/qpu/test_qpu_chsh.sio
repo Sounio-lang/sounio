@@ -10,6 +10,8 @@ use qpu::chsh::{
     qpu_basis_job,
     qpu_shift_job,
     qpu_partial_job,
+    qpu_party_shots,
+    PartyMean,
 }
 
 use quantum::qasm_tape::{
@@ -30,6 +32,7 @@ use quantum::qasm_tape::{
 
 use quantum::born_shot_law::{
     ry_chsh_exit,
+    ry_chsh_party_noise,
 }
 
 fn has_word(hay: string, needle: string) -> bool with Mut, Panic, Div {
@@ -420,6 +423,62 @@ fn rz_ok(pi: f64) -> bool with Mut, Div, Panic {
 // 854/73/73/0 -> zz = (854 - 146) / 1000 = 0.708.
 // 73/854/0/73 -> zz = (146 - 854) / 1000 = -0.708.
 // S = 0.708 + 0.708 + 0.708 - (-0.708) = 2.832, keep = 1.
+
+fn exp_neg(x: f64) -> f64 with Mut, Div {
+    var term = 1.0
+    var sum = 1.0
+    var k = 1.0
+    while k < 24.0 {
+        term = term * (0.0 - x) / k
+        sum = sum + term
+        k = k + 1.0
+    }
+    sum
+}
+
+fn sqrt_pos(x: f64) -> f64 with Mut, Div {
+    var y = 1.0
+    var n = 0
+    while n < 16 {
+        y = 0.5 * (y + x / y)
+        n = n + 1
+    }
+    y
+}
+
+// sigma^2 such that e^{-sigma^2} = 1/sqrt(2). The cut is not a pasted constant.
+fn death_var(root2: f64) -> f64 with Mut, Div {
+    var lo = 0.0
+    var hi = 1.0
+    var n = 0
+    let target = 1.0 / root2
+    while n < 40 {
+        let mid = (lo + hi) / 2.0
+        if exp_neg(mid) > target {
+            lo = mid
+        } else {
+            hi = mid
+        }
+        n = n + 1
+    }
+    (lo + hi) / 2.0
+}
+
+fn party_ok(pi: f64) -> bool with Mut, Div, Panic {
+    let root2 = sqrt_pos(2.0)
+    let death = sqrt_pos(death_var(root2))
+    let oracle = ry_chsh_party_noise(death, pi)
+    let got: PartyMean = qpu_party_shots(death, pi, 1000)
+    if near(oracle, 2.0, 0.000001) {
+        if near(got.s, oracle, 0.08) {
+            if got.s > 2.0 {
+                if got.keep == 1 { return true }
+            }
+        }
+    }
+    false
+}
+
 fn file_ok() -> bool with Div {
     let even = ShotCounts { n00: 500, n01: 0, n10: 0, n11: 500 }
     let pos = ShotCounts { n00: 854, n01: 73, n10: 73, n11: 0 }
@@ -450,6 +509,7 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     fail = fail + check("Q_partial", partial_ok(pi))
     fail = fail + check("Q_shots", shots_ok(pi))
     fail = fail + check("Q_rz", rz_ok(pi))
+    fail = fail + check("Q_party", party_ok(pi))
     fail = fail + check("Q_file", file_ok())
     if fail == 0 {
         print("ALL_PASS\n")
