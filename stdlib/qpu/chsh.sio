@@ -1,0 +1,164 @@
+// stdlib/qpu/chsh.sio
+//
+// QPU shot track. One document, four OpenQASM programs, one CHSH scalar.
+// Term order is always (a0,b0), (a0,b1), (a1,b0), (a1,b1).
+//
+// sounio-device 2
+// shots <N>
+// cut 2
+// noise 0
+// source sampler
+// sign +
+// <qasm of term 0>
+// sign +
+// <qasm of term 1>
+// sign +
+// <qasm of term 2>
+// sign -
+// <qasm of term 3>
+// end
+//
+// The noise line is the token 0. This module does not sample a noise rate.
+// S = e0 + e1 + e2 - e3. qpu_keep is 1 only when S > 2.
+// Angles follow ry_chsh_exit, ry_chsh_both, and ry_partial_chsh.
+
+use quantum::qasm_tape::{
+    tape_new,
+    tape_h,
+    tape_ry,
+    tape_cx,
+    tape_measure,
+    tape_qasm,
+    tape_face,
+    ShotCounts,
+    Tape,
+}
+
+pub fn qpu_s(e0: f64, e1: f64, e2: f64, e3: f64) -> f64 {
+    e0 + e1 + e2 - e3
+}
+
+pub fn qpu_keep(s: f64) -> i64 {
+    if s > 2.0 { return 1 }
+    0
+}
+
+// tape_face already returns 0 when N is 0.
+pub fn qpu_corr(c: ShotCounts) -> f64 with Div {
+    let n = c.n00 + c.n01 + c.n10 + c.n11
+    if n == 0 { return 0.0 }
+    tape_face(c).zz
+}
+
+fn qpu_i64(n: i64) -> string with Mut, Panic, Div {
+    if n == 0 { return "0" }
+    var neg = n < 0
+    var m: i64 = n
+    if neg { m = 0 - n }
+    var result = ""
+    while m > 0 {
+        let d = m % 10
+        result = str_concat(str_slice("0123456789", d, d + 1), result)
+        m = m / 10
+    }
+    if neg { result = str_concat("-", result) }
+    result
+}
+
+fn bell_term(a: f64, b: f64) -> Tape with Mut, Div, Panic {
+    var t = tape_new(2)
+    t = tape_h(t, 0)
+    t = tape_cx(t, 0, 1)
+    t = tape_ry(t, 0, a)
+    t = tape_ry(t, 1, b)
+    t = tape_measure(t, 0)
+    t = tape_measure(t, 1)
+    t
+}
+
+fn basis_term(turn: f64, flip0: i32, flip1: i32, a: f64, b: f64) -> Tape with Mut, Div, Panic {
+    var t = tape_new(2)
+    if flip0 == 1 {
+        t = tape_ry(t, 0, turn)
+    }
+    if flip1 == 1 {
+        t = tape_ry(t, 1, turn)
+    }
+    t = tape_ry(t, 0, a)
+    t = tape_ry(t, 1, b)
+    t = tape_measure(t, 0)
+    t = tape_measure(t, 1)
+    t
+}
+
+fn partial_term(phi: f64, a: f64, b: f64) -> Tape with Mut, Div, Panic {
+    var t = tape_new(2)
+    t = tape_ry(t, 0, phi)
+    t = tape_cx(t, 0, 1)
+    t = tape_ry(t, 0, a)
+    t = tape_ry(t, 1, b)
+    t = tape_measure(t, 0)
+    t = tape_measure(t, 1)
+    t
+}
+
+fn four_job(p0: string, p1: string, p2: string, p3: string, shots: i64) -> string with Mut, Panic, Div {
+    var s = str_concat("sounio-device 2\nshots ", qpu_i64(shots))
+    s = str_concat(s, "\ncut 2\nnoise 0\nsource sampler\nsign +\n")
+    s = str_concat(s, p0)
+    s = str_concat(s, "sign +\n")
+    s = str_concat(s, p1)
+    s = str_concat(s, "sign +\n")
+    s = str_concat(s, p2)
+    s = str_concat(s, "sign -\n")
+    s = str_concat(s, p3)
+    s = str_concat(s, "end\n")
+    s
+}
+
+pub fn qpu_bell_job(pi: f64, shots: i64) -> string with Mut, Div, Panic {
+    let a0 = 0.0
+    let a1 = pi / 2.0
+    let b0 = pi / 4.0
+    let b1 = 0.0 - pi / 4.0
+    let p0 = tape_qasm(bell_term(a0, b0))
+    let p1 = tape_qasm(bell_term(a0, b1))
+    let p2 = tape_qasm(bell_term(a1, b0))
+    let p3 = tape_qasm(bell_term(a1, b1))
+    four_job(p0, p1, p2, p3, shots)
+}
+
+pub fn qpu_basis_job(pi: f64, flip0: i32, flip1: i32, shots: i64) -> string with Mut, Div, Panic {
+    let a0 = 0.0
+    let a1 = pi / 2.0
+    let b0 = pi / 4.0
+    let b1 = 0.0 - pi / 4.0
+    let p0 = tape_qasm(basis_term(pi, flip0, flip1, a0, b0))
+    let p1 = tape_qasm(basis_term(pi, flip0, flip1, a0, b1))
+    let p2 = tape_qasm(basis_term(pi, flip0, flip1, a1, b0))
+    let p3 = tape_qasm(basis_term(pi, flip0, flip1, a1, b1))
+    four_job(p0, p1, p2, p3, shots)
+}
+
+pub fn qpu_shift_job(delta_a: f64, delta_b: f64, epsilon: f64, pi: f64, shots: i64) -> string with Mut, Div, Panic {
+    let a0 = delta_a
+    let a1 = pi / 2.0 + delta_a + epsilon
+    let b0 = pi / 4.0 + delta_b
+    let b1 = 0.0 - pi / 4.0 + delta_b
+    let p0 = tape_qasm(bell_term(a0, b0))
+    let p1 = tape_qasm(bell_term(a0, b1))
+    let p2 = tape_qasm(bell_term(a1, b0))
+    let p3 = tape_qasm(bell_term(a1, b1))
+    four_job(p0, p1, p2, p3, shots)
+}
+
+pub fn qpu_partial_job(phi: f64, beta: f64, pi: f64, shots: i64) -> string with Mut, Div, Panic {
+    let a0 = 0.0
+    let a1 = pi / 2.0
+    let b1 = 0.0 - beta
+    let p0 = tape_qasm(partial_term(phi, a0, beta))
+    let p1 = tape_qasm(partial_term(phi, a0, b1))
+    let p2 = tape_qasm(partial_term(phi, a1, beta))
+    let p3 = tape_qasm(partial_term(phi, a1, b1))
+    four_job(p0, p1, p2, p3, shots)
+}

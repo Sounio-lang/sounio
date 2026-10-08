@@ -1,0 +1,458 @@
+//@ run-pass
+// QPU shot track. Replay on the linear tape is the probability oracle.
+// Counts are either tape_counts or hand-built ShotCounts. Noise is not sampled.
+
+use qpu::chsh::{
+    qpu_s,
+    qpu_keep,
+    qpu_corr,
+    qpu_bell_job,
+    qpu_basis_job,
+    qpu_shift_job,
+    qpu_partial_job,
+}
+
+use quantum::qasm_tape::{
+    tape_new,
+    tape_h,
+    tape_cx,
+    tape_ry,
+    tape_rz,
+    tape_measure,
+    tape_qasm,
+    tape_replay_1,
+    tape_replay_2,
+    tape_counts,
+    ShotCounts,
+    BasisProb,
+    Tape,
+}
+
+use quantum::born_shot_law::{
+    ry_chsh_exit,
+}
+
+fn has_word(hay: string, needle: string) -> bool with Mut, Panic, Div {
+    let n = str_len(hay)
+    let m = str_len(needle)
+    if m == 0 { return true }
+    if n < m { return false }
+    var i: i64 = 0
+    let last = n - m
+    while i <= last {
+        let piece = str_slice(hay, i, i + m)
+        if str_eq(piece, needle) { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
+}
+
+fn check(name: string, ok: bool) -> i32 with IO {
+    if ok {
+        print(name)
+        print(": PASS\n")
+        return 0
+    }
+    print(name)
+    print(": FAIL\n")
+    return 1
+}
+
+fn cos_series(x: f64) -> f64 with Mut, Div {
+    var term = 1.0
+    var sum = 1.0
+    var k = 1.0
+    while k < 16.0 {
+        term = term * (0.0 - x) * x / ((2.0 * k - 1.0) * (2.0 * k))
+        sum = sum + term
+        k = k + 1.0
+    }
+    sum
+}
+
+fn sin_series(x: f64) -> f64 with Mut, Div {
+    var term = x
+    var sum = x
+    var k = 1.0
+    while k < 16.0 {
+        term = term * (0.0 - x) * x / ((2.0 * k) * (2.0 * k + 1.0))
+        sum = sum + term
+        k = k + 1.0
+    }
+    sum
+}
+
+// cos(epsilon) = sqrt(2) - 1 on (0, pi/2), 48 bisections.
+fn eps_of(pi: f64) -> f64 with Mut, Div {
+    var lo = 0.0
+    var hi = pi / 2.0
+    let target = 1.4142135623730951 - 1.0
+    var n = 0
+    while n < 48 {
+        let mid = (lo + hi) / 2.0
+        if cos_series(mid) > target {
+            lo = mid
+        } else {
+            hi = mid
+        }
+        n = n + 1
+    }
+    (lo + hi) / 2.0
+}
+
+// sin(beta) - sin(phi) * cos(beta) = 0 on (0, pi/2), 48 bisections.
+fn beta_of(phi: f64, pi: f64) -> f64 with Mut, Div {
+    var lo = 0.0
+    var hi = pi / 2.0
+    let sphi = sin_series(phi)
+    var n = 0
+    while n < 48 {
+        let mid = (lo + hi) / 2.0
+        let gap = sin_series(mid) - sphi * cos_series(mid)
+        if gap < 0.0 {
+            lo = mid
+        } else {
+            hi = mid
+        }
+        n = n + 1
+    }
+    (lo + hi) / 2.0
+}
+
+fn corr_p(p: BasisProb) -> f64 {
+    p.p00 + p.p11 - p.p01 - p.p10
+}
+
+fn bell_at(a: f64, b: f64) -> Tape with Mut, Div, Panic {
+    var t = tape_new(2)
+    t = tape_h(t, 0)
+    t = tape_cx(t, 0, 1)
+    t = tape_ry(t, 0, a)
+    t = tape_ry(t, 1, b)
+    t = tape_measure(t, 0)
+    t = tape_measure(t, 1)
+    t
+}
+
+fn basis_at(turn: f64, flip0: i32, flip1: i32, a: f64, b: f64) -> Tape with Mut, Div, Panic {
+    var t = tape_new(2)
+    if flip0 == 1 {
+        t = tape_ry(t, 0, turn)
+    }
+    if flip1 == 1 {
+        t = tape_ry(t, 1, turn)
+    }
+    t = tape_ry(t, 0, a)
+    t = tape_ry(t, 1, b)
+    t = tape_measure(t, 0)
+    t = tape_measure(t, 1)
+    t
+}
+
+fn part_at(phi: f64, a: f64, b: f64) -> Tape with Mut, Div, Panic {
+    var t = tape_new(2)
+    t = tape_ry(t, 0, phi)
+    t = tape_cx(t, 0, 1)
+    t = tape_ry(t, 0, a)
+    t = tape_ry(t, 1, b)
+    t = tape_measure(t, 0)
+    t = tape_measure(t, 1)
+    t
+}
+
+fn rz_only(angle: f64) -> Tape with Mut, Div, Panic {
+    var t = tape_new(1)
+    t = tape_rz(t, 0, angle)
+    t
+}
+
+fn ry_only(angle: f64) -> Tape with Mut, Div, Panic {
+    var t = tape_new(1)
+    t = tape_ry(t, 0, angle)
+    t
+}
+
+fn hzh(angle: f64) -> Tape with Mut, Div, Panic {
+    var t = tape_new(1)
+    t = tape_h(t, 0)
+    t = tape_rz(t, 0, angle)
+    t = tape_h(t, 0)
+    t
+}
+
+fn pair_at(a0: f64, a1: f64, b0: f64, b1: f64) -> f64 with Mut, Div, Panic {
+    let e0 = corr_p(tape_replay_2(bell_at(a0, b0)))
+    let e1 = corr_p(tape_replay_2(bell_at(a0, b1)))
+    let e2 = corr_p(tape_replay_2(bell_at(a1, b0)))
+    let e3 = corr_p(tape_replay_2(bell_at(a1, b1)))
+    qpu_s(e0, e1, e2, e3)
+}
+
+fn mix_e(turn: f64, a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    let z00 = corr_p(tape_replay_2(basis_at(turn, 0, 0, a, b)))
+    let z11 = corr_p(tape_replay_2(basis_at(turn, 1, 1, a, b)))
+    0.5 * z00 + 0.5 * z11
+}
+
+fn copy_at(turn: f64, a0: f64, a1: f64, b0: f64, b1: f64) -> f64 with Mut, Div, Panic {
+    let e0 = mix_e(turn, a0, b0)
+    let e1 = mix_e(turn, a0, b1)
+    let e2 = mix_e(turn, a1, b0)
+    let e3 = mix_e(turn, a1, b1)
+    qpu_s(e0, e1, e2, e3)
+}
+
+fn part_s(phi: f64, bob: f64, pi: f64) -> f64 with Mut, Div, Panic {
+    let a0 = 0.0
+    let a1 = pi / 2.0
+    let bneg = 0.0 - bob
+    let e0 = corr_p(tape_replay_2(part_at(phi, a0, bob)))
+    let e1 = corr_p(tape_replay_2(part_at(phi, a0, bneg)))
+    let e2 = corr_p(tape_replay_2(part_at(phi, a1, bob)))
+    let e3 = corr_p(tape_replay_2(part_at(phi, a1, bneg)))
+    qpu_s(e0, e1, e2, e3)
+}
+
+// qpu_s(1,1,1,1) = 2. Four raw +0.708 give 1.416, so the Tsirelson
+// point passes the fourth correlator already negative: -0.708.
+fn s_bound() -> bool {
+    let s2 = qpu_s(1.0, 1.0, 1.0, 1.0)
+    let s_hi = qpu_s(0.708, 0.708, 0.708, 0.0 - 0.708)
+    let s_lo = qpu_s(0.3535, 0.3535, 0.3535, 0.3535)
+    let s_pos = qpu_s(0.708, 0.708, 0.708, 0.708)
+    if near(s2, 2.0, 0.000000000001) {
+        if qpu_keep(s2) == 0 {
+            if s_hi > 2.0 {
+                if qpu_keep(s_hi) == 1 {
+                    if s_lo < 2.0 {
+                        if s_pos < 2.0 {
+                            return true
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn head_ok(pi: f64) -> bool with Mut, Div, Panic {
+    let job = qpu_bell_job(pi, 1000)
+    let prefix = "sounio-device 2\nshots 1000\ncut 2\nnoise 0\nsource sampler\nsign +\n"
+    let n = str_len(prefix)
+    let head = str_slice(job, 0, n)
+    if str_eq(head, prefix) {
+        if has_word(job, "sign -\n") {
+            if has_word(job, "end\n") {
+                return true
+            }
+        }
+    }
+    false
+}
+
+fn bell_ok(pi: f64) -> bool with Mut, Div, Panic {
+    let a0 = 0.0
+    let a1 = pi / 2.0
+    let b0 = pi / 4.0
+    let b1 = 0.0 - pi / 4.0
+    let s = pair_at(a0, a1, b0, b1)
+    let oracle = ry_chsh_exit(pi)
+    if near(s, oracle.chsh_bell, 0.000001) {
+        if qpu_keep(s) == 1 { return true }
+    }
+    false
+}
+
+fn copy_ok(pi: f64) -> bool with Mut, Div, Panic {
+    let a0 = 0.0
+    let a1 = pi / 2.0
+    let b0 = pi / 4.0
+    let b1 = 0.0 - pi / 4.0
+    let s = copy_at(pi, a0, a1, b0, b1)
+    let job0 = qpu_basis_job(pi, 0, 0, 1000)
+    let job1 = qpu_basis_job(pi, 1, 1, 1000)
+    if near(s, 1.4142135623730951, 0.000001) {
+        if qpu_keep(s) == 0 {
+            if str_len(job0) > 0 {
+                if str_len(job1) > 0 { return true }
+            }
+        }
+    }
+    false
+}
+
+fn shift_ok(pi: f64) -> bool with Mut, Div, Panic {
+    let da = pi / 4.0
+    let db = 0.0
+    let eps = 0.0
+    let a0 = da
+    let a1 = pi / 2.0 + da + eps
+    let b0 = pi / 4.0 + db
+    let b1 = 0.0 - pi / 4.0 + db
+    let job = qpu_shift_job(da, db, eps, pi, 1000)
+    let s = pair_at(a0, a1, b0, b1)
+    if str_len(job) > 0 {
+        if near(s, 2.0, 0.000001) {
+            if qpu_keep(s) == 0 { return true }
+        }
+    }
+    false
+}
+
+fn split_ok(pi: f64) -> bool with Mut, Div, Panic {
+    let eps = eps_of(pi)
+    let a0 = 0.0
+    let a1 = pi / 2.0 + eps
+    let b0 = pi / 4.0
+    let b1 = 0.0 - pi / 4.0
+    let pair = pair_at(a0, a1, b0, b1)
+    let copy = copy_at(pi, a0, a1, b0, b1)
+    if near(pair, 2.0, 0.00001) {
+        if near(copy, 1.4142135623730951, 0.00001) { return true }
+    }
+    false
+}
+
+// At epsilon = crossing + 0.2 the pair is below 2 and still above the copy.
+// The copy stays at sqrt(2). The two readings meet only at epsilon = pi/2.
+fn past_ok(pi: f64) -> bool with Mut, Div, Panic {
+    let eps = eps_of(pi) + 0.2
+    let a0 = 0.0
+    let a1 = pi / 2.0 + eps
+    let b0 = pi / 4.0
+    let b1 = 0.0 - pi / 4.0
+    let pair = pair_at(a0, a1, b0, b1)
+    let copy = copy_at(pi, a0, a1, b0, b1)
+    if pair < 2.0 {
+        if near(copy, 1.4142135623730951, 0.00001) {
+            if pair > copy { return true }
+        }
+    }
+    false
+}
+
+
+// Joint mode: delta_b = pi/4 and epsilon = pi/2, both read 2.
+// 0.2 past that point the copy is larger and the pair is below 2.
+fn joint_ok(pi: f64) -> bool with Mut, Div, Panic {
+    let da = 0.0
+    let db = pi / 4.0
+    let meet = pi / 2.0
+    let a0 = da
+    let a1m = pi / 2.0 + da + meet
+    let b0 = pi / 4.0 + db
+    let b1 = 0.0 - pi / 4.0 + db
+    let pair_m = pair_at(a0, a1m, b0, b1)
+    let copy_m = copy_at(pi, a0, a1m, b0, b1)
+    let past = meet + 0.2
+    let a1p = pi / 2.0 + da + past
+    let pair_p = pair_at(a0, a1p, b0, b1)
+    let copy_p = copy_at(pi, a0, a1p, b0, b1)
+    let job = qpu_shift_job(da, db, past, pi, 1000)
+    if near(pair_m, 2.0, 0.00001) {
+        if near(copy_m, 2.0, 0.00001) {
+            if pair_p < 2.0 {
+                if copy_p > pair_p {
+                    if str_len(job) > 0 { return true }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn partial_ok(pi: f64) -> bool with Mut, Div, Panic {
+    let phi = 0.2
+    let beta = beta_of(phi, pi)
+    let fixed = part_s(phi, pi / 4.0, pi)
+    let tilted = part_s(phi, beta, pi)
+    let zz = corr_p(tape_replay_2(part_at(phi, 0.0, 0.0)))
+    let job = qpu_partial_job(phi, beta, pi, 1000)
+    if fixed < 2.0 {
+        if tilted > 2.0 {
+            if near(zz, 1.0, 0.000001) {
+                if str_len(job) > 0 { return true }
+            }
+        }
+    }
+    false
+}
+
+fn shots_ok(pi: f64) -> bool with Mut, Div, Panic {
+    let a0 = 0.0
+    let a1 = pi / 2.0
+    let b0 = pi / 4.0
+    let b1 = 0.0 - pi / 4.0
+    let e0 = qpu_corr(tape_counts(bell_at(a0, b0), 1000, 1))
+    let e1 = qpu_corr(tape_counts(bell_at(a0, b1), 1000, 2))
+    let e2 = qpu_corr(tape_counts(bell_at(a1, b0), 1000, 3))
+    let e3 = qpu_corr(tape_counts(bell_at(a1, b1), 1000, 4))
+    let s = qpu_s(e0, e1, e2, e3)
+    if near(s, 2.8284271247461903, 0.15) {
+        if qpu_keep(s) == 1 { return true }
+    }
+    false
+}
+
+fn rz_ok(pi: f64) -> bool with Mut, Div, Panic {
+    let text = tape_qasm(rz_only(pi))
+    let p_ry = tape_replay_1(ry_only(pi))
+    let p_z = tape_replay_1(rz_only(pi))
+    let p_h = tape_replay_1(hzh(pi))
+    if has_word(text, "rz(") {
+        if near(p_ry, 1.0, 0.000001) {
+            if near(p_z, 0.0, 0.000001) {
+                if near(p_h, 1.0, 0.000001) { return true }
+            }
+        }
+    }
+    false
+}
+
+// 500/0/0/500 -> zz = 1, S = 2, keep = 0.
+// 854/73/73/0 -> zz = (854 - 146) / 1000 = 0.708.
+// 73/854/0/73 -> zz = (146 - 854) / 1000 = -0.708.
+// S = 0.708 + 0.708 + 0.708 - (-0.708) = 2.832, keep = 1.
+fn file_ok() -> bool with Div {
+    let even = ShotCounts { n00: 500, n01: 0, n10: 0, n11: 500 }
+    let pos = ShotCounts { n00: 854, n01: 73, n10: 73, n11: 0 }
+    let neg = ShotCounts { n00: 73, n01: 854, n10: 0, n11: 73 }
+    let s_even = qpu_s(qpu_corr(even), qpu_corr(even), qpu_corr(even), qpu_corr(even))
+    let s_hi = qpu_s(qpu_corr(pos), qpu_corr(pos), qpu_corr(pos), qpu_corr(neg))
+    if near(s_even, 2.0, 0.000000000001) {
+        if qpu_keep(s_even) == 0 {
+            if s_hi > 2.0 {
+                if qpu_keep(s_hi) == 1 { return true }
+            }
+        }
+    }
+    false
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    var fail = 0
+    let pi = 3.141592653589793
+    fail = fail + check("Q_s_bound", s_bound())
+    fail = fail + check("Q_job_head", head_ok(pi))
+    fail = fail + check("Q_bell_oracle", bell_ok(pi))
+    fail = fail + check("Q_copy_oracle", copy_ok(pi))
+    fail = fail + check("Q_shift_cross", shift_ok(pi))
+    fail = fail + check("Q_split", split_ok(pi))
+    fail = fail + check("Q_past", past_ok(pi))
+    fail = fail + check("Q_joint", joint_ok(pi))
+    fail = fail + check("Q_partial", partial_ok(pi))
+    fail = fail + check("Q_shots", shots_ok(pi))
+    fail = fail + check("Q_rz", rz_ok(pi))
+    fail = fail + check("Q_file", file_ok())
+    if fail == 0 {
+        print("ALL_PASS\n")
+    }
+    return fail
+}
