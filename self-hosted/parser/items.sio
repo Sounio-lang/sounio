@@ -4,7 +4,7 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, pt_read_start, pt_read_end, parser_peek_ahead, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box, parser_name_at}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, pt_read_start, pt_read_end, pt_read_int_value, parser_peek_ahead, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box, parser_name_at}
 use parser::types::*
 use parser::exprs::*
 use parser::stmts::*
@@ -86,6 +86,44 @@ pub fn items_gvi_prescan_defs(p: Parser, token_count: i64) with Mut, Panic, Div 
             }
             if j < token_count && pt_read_kind(j) == TokenKind::Ident {
                 ast_gvi_def_add(ast_name_hash(parser_name_at(p, j)))
+            }
+        }
+        i = i + 1
+    }
+}
+
+// #1495: record the module's top-level integer constants usable as an array
+// length (see AST_ALEN_CONST_* in ast.sio). Shape: `const|let NAME [: TYPE] =
+// [-]INT` at brace depth 0. A negative or non-literal initializer is not
+// recorded, so such a name is left as it was (and refused downstream).
+pub fn items_prescan_array_len_consts(p: Parser, token_count: i64) with Mut, Panic, Div {
+    ast_alen_const_reset()
+    var depth: i64 = 0
+    var i: i64 = 0
+    while i < token_count {
+        let k = pt_read_kind(i)
+        if k == TokenKind::LBrace {
+            depth = depth + 1
+        } else if k == TokenKind::RBrace {
+            if depth > 0 {
+                depth = depth - 1
+            }
+        } else if depth == 0 && (k == TokenKind::Let || k == TokenKind::Const) && i + 1 < token_count && pt_read_kind(i + 1) == TokenKind::Ident {
+            let name_idx = i + 1
+            var j = i + 2
+            if j < token_count && pt_read_kind(j) == TokenKind::Colon {
+                j = j + 1
+                while j < token_count && pt_read_kind(j) != TokenKind::Eq && pt_read_kind(j) != TokenKind::Newline && pt_read_kind(j) != TokenKind::Semi {
+                    j = j + 1
+                }
+            }
+            if j + 1 < token_count && pt_read_kind(j) == TokenKind::Eq && pt_read_kind(j + 1) == TokenKind::IntLit {
+                let after = j + 2
+                let ak = pt_read_kind(after)
+                if after >= token_count || ak == TokenKind::Newline || ak == TokenKind::Semi || ak == TokenKind::RBrace || ak == TokenKind::Eof
+                    || ak == TokenKind::Let || ak == TokenKind::Const || ak == TokenKind::Fn || ak == TokenKind::Var || ak == TokenKind::Struct || ak == TokenKind::Pub {
+                    ast_alen_const_add(ast_name_hash(parser_name_at(p, name_idx)), pt_read_int_value(j + 1))
+                }
             }
         }
         i = i + 1

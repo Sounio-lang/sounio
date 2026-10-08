@@ -5791,37 +5791,6 @@ fn stmt_is_deref_field_store(p0: i64) -> bool with Panic, Mut {
     return TK[(p0 + 6) as usize] == 16
 }
 
-// (*name).field.field = expr  — two-level nested field store through a *mut/ref.
-// Tokens: ( * name ) . field . field =  →  6 19 3 7 50 3 50 3 16
-// Without this, the two-field LHS fell to the generic assignment path, which
-// materialised the intermediate INLINE struct field as a value-copy, wrote into
-// the copy, and discarded it (reads back as 0) — the nested-*mut-write bug.
-fn stmt_is_deref_field_field_store(p0: i64) -> bool with Panic, Mut {
-    if TK[p0 as usize] != 6 { return false }
-    if TK[(p0 + 1) as usize] != 19 { return false }
-    if TK[(p0 + 2) as usize] != 3 { return false }
-    if TK[(p0 + 3) as usize] != 7 { return false }
-    if TK[(p0 + 4) as usize] != 50 { return false }
-    if TK[(p0 + 5) as usize] != 3 { return false }
-    if TK[(p0 + 6) as usize] != 50 { return false }
-    if TK[(p0 + 7) as usize] != 3 { return false }
-    return TK[(p0 + 8) as usize] == 16
-}
-
-// (*name).field.field[idx] = expr  — two-level nested ARRAY-field store.
-// Tokens: ( * name ) . field . field [ … ] =  →  6 19 3 7 50 3 50 3 41 …
-fn stmt_is_deref_field_field_array_store(p0: i64) -> bool with Panic, Mut {
-    if TK[p0 as usize] != 6 { return false }
-    if TK[(p0 + 1) as usize] != 19 { return false }
-    if TK[(p0 + 2) as usize] != 3 { return false }
-    if TK[(p0 + 3) as usize] != 7 { return false }
-    if TK[(p0 + 4) as usize] != 50 { return false }
-    if TK[(p0 + 5) as usize] != 3 { return false }
-    if TK[(p0 + 6) as usize] != 50 { return false }
-    if TK[(p0 + 7) as usize] != 3 { return false }
-    return TK[(p0 + 8) as usize] == 41
-}
-
 // (*name).field[idx] = expr  — explicit-deref store into a struct's ARRAY field.
 // Tokens: ( * name ) . field [ ... ] =  →  6 19 3 7 50 3 41 ... 42 16
 // lean_single had detectors for (*p)[i]=, (*p)=, and (*p).f= but NOT this one, so
@@ -7888,6 +7857,28 @@ fn cfold_expr_at(p: i64) -> i64 with Panic, Mut, Div {
     CF_OK = 1
     let v = cfold_bor()
     return v
+}
+
+// #1495: a named integer constant as an array length -- `[T; N]` in a type and
+// `[V; N]` in a repeat initializer. Every array path reads the length as
+// TV[tok] of an integer-literal token, so after scan_all_consts has folded the
+// constants, a `; NAME ]` whose NAME is an integer constant is rewritten in
+// place to that literal. Locals happened to work (the decl path re-read the
+// value); a struct FIELD `arr: [bool; N]` got length 0, so its literal was
+// rejected with "missing field". The pattern cannot occur outside an array
+// length: a `;` statement separator is never followed by `NAME ]`.
+fn fold_named_const_array_lengths() with Panic, Mut {
+    var p: i64 = 0
+    while p + 2 < TC {
+        if TK[p as usize] == 27 && TK[(p + 1) as usize] == 3 && TK[(p + 2) as usize] == 42 {
+            let q = p + 1
+            if const_find_val(TS[q as usize], TE[q as usize]) != 0 && CONST_TYPE[CONST_FOUND_IDX as usize] == 1 && CONST_FOUND_VAL >= 0 {
+                TK[q as usize] = 4
+                TV[q as usize] = CONST_FOUND_VAL
+            }
+        }
+        p = p + 1
+    }
 }
 
 fn scan_all_consts() with IO, Panic, Mut, Div {
@@ -31947,6 +31938,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     // Pass 0a: register structs, constants, and skip algebra/study declarations
     ST_COUNT = 0
     scan_all_consts()
+    fold_named_const_array_lengths()
     var pass0a_depth: i64 = 0
     while p < TC {
         // Track brace depth to only process top-level declarations
