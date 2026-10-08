@@ -3049,13 +3049,21 @@ fn checker_ty_from_unit_dim(c: *mut Checker, dim: UnitDim) -> TypeEntry with Mut
     if unit_dim_is_dimensionless(dim) {
         return ty_f64()
     }
+    // #2752: intern by dimension AND scale, exactly like arithmetic results
+    // (checker_brand_with_dim). find_by_dim compares exponents only and
+    // returned the FIRST same-dimension entry -- for `mol/cm3` that is
+    // `mmol_L` (mol/m^3 at another scale) -- so the annotation and the value
+    // `n / v` it was given carried different scales and the binding was E001.
+    let pair = unit_registry_intern_dim((*c).units, dim)
+    (*c).units = pair.0
+    if pair.1 >= 0 {
+        return ty_with_unit(ty_f64(), pair.1)
+    }
     let found = (*c).units.find_by_dim(dim)
     if found >= 0 {
         return ty_with_unit(ty_f64(), found)
     }
-    let anon = Name { buf: [0; 384], len: 0 }
-    (*c).units = (*c).units.register(anon, dim)
-    ty_with_unit(ty_f64(), (*c).units.count - 1)
+    ty_f64()
 }
 
 fn checker_lower_unit_or_ref_type_mut(c: *mut Checker, te: TypeExpr, is_mut_ref: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -12867,9 +12875,21 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         let ann_enum = ann_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, ann_ty.name) >= 0
         let enum_int_ok = (init_enum && is_numeric_type(ann_ty)) || (is_numeric_type(init_ty) && ann_enum)
         var init_context_ok = false
+        // #2752: a unit-branded f64 binding is decided by DIMENSION, exactly as
+        // the call boundary does (checker_call_arg_unit_verdict). The structural
+        // test compares registry unit ids, and an arithmetic-derived quantity
+        // (`distance / elapsed`) gets an anonymous entry that never equals the
+        // named unit it matches (`velocity`), so `let v: velocity = d / t`
+        // failed with E001 while passing the same value to a `velocity`
+        // parameter checked clean. A dimension MISMATCH still fails here.
+        let let_unit_verdict = checker_call_arg_unit_verdict(c, init_ty, ann_ty)
         match s.expr {
             Some(init_expr) => {
-                init_context_ok = checker_contextual_expr_compatible(*init_expr, init_ty, ann_ty)
+                if let_unit_verdict >= 0 {
+                    init_context_ok = let_unit_verdict == 1
+                } else {
+                    init_context_ok = checker_contextual_expr_compatible(*init_expr, init_ty, ann_ty)
+                }
             }
             None => {
                 init_context_ok = checker_types_compatible_inplace(c, init_ty, ann_ty)
@@ -12940,9 +12960,21 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             && init_ty.kind == TypeKind::TyI64
             && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
         var init_context_ok = false
+        // #2752: a unit-branded f64 binding is decided by DIMENSION, exactly as
+        // the call boundary does (checker_call_arg_unit_verdict). The structural
+        // test compares registry unit ids, and an arithmetic-derived quantity
+        // (`distance / elapsed`) gets an anonymous entry that never equals the
+        // named unit it matches (`velocity`), so `let v: velocity = d / t`
+        // failed with E001 while passing the same value to a `velocity`
+        // parameter checked clean. A dimension MISMATCH still fails here.
+        let let_unit_verdict = checker_call_arg_unit_verdict(c, init_ty, ann_ty)
         match s.expr {
             Some(init_expr) => {
-                init_context_ok = checker_contextual_expr_compatible(*init_expr, init_ty, ann_ty)
+                if let_unit_verdict >= 0 {
+                    init_context_ok = let_unit_verdict == 1
+                } else {
+                    init_context_ok = checker_contextual_expr_compatible(*init_expr, init_ty, ann_ty)
+                }
             }
             None => {
                 init_context_ok = checker_types_compatible_inplace(c, init_ty, ann_ty)
@@ -13062,9 +13094,16 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
             }
         }
     } else {
+        // #2752: unit-branded f64 assignment is decided by dimension, as in the
+        // let and call paths (checker_call_arg_unit_verdict).
+        let assign_unit_verdict = checker_call_arg_unit_verdict(c, val_ty, target_ty)
         match s.expr {
             Some(val_expr) => {
-                if !checker_contextual_expr_compatible(*val_expr, val_ty, target_ty) {
+                if assign_unit_verdict >= 0 {
+                    if assign_unit_verdict != 1 {
+                        checker_report_mismatch_inplace(c, s.span, 2, target_ty, val_ty)
+                    }
+                } else if !checker_contextual_expr_compatible(*val_expr, val_ty, target_ty) {
                     checker_report_mismatch_inplace(c, s.span, 2, target_ty, val_ty)
                 }
             }

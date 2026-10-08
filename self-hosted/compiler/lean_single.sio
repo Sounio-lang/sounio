@@ -364,6 +364,8 @@ var SCAN_TY_ALEN: i64 = 0
 var SCAN_TY_NEXT: i64 = 0
 var SCAN_UNIT_EXPR_DIM: i64 = 0
 var SCAN_UNIT_EXPR_NEXT: i64 = 0
+var SCAN_UNIT_FACTOR_DIM: i64 = 0
+var SCAN_UNIT_FACTOR_NEXT: i64 = 0
 var RESOLVE_TY: i64 = 0
 var RESOLVE_TY_HASH: i64 = 0
 var LEX_ERROR_LINE: i64 = 0
@@ -6169,60 +6171,83 @@ fn stmt_is_array_elem_field_store(p0: i64) -> bool with Panic, Mut {
     return TK[p as usize] == 16
 }
 
-fn scan_unit_type_expr(p0: i64, close_tk: i64) with IO, Panic, Mut, Div {
+// #2388: one factor of a unit expression -- `name`, `(expr)`, either raised to
+// `^n` (n an integer literal 1..8). Sets SCAN_UNIT_FACTOR_DIM / _NEXT; NEXT < 0
+// on a malformed factor (already reported).
+
+fn scan_unit_factor(p0: i64, depth: i64) with IO, Panic, Mut, Div {
     var p = p0
     var dim: i64 = 0
-    var saw_unit: i64 = 0
-    var expect_unit: i64 = 1
-    var op: i64 = 19
-    while p < TC && TK[p as usize] != close_tk && TK[p as usize] != 39 && TK[p as usize] != 0
-        && TK[p as usize] != 16 && TK[p as usize] != 28 && TK[p as usize] != 7
-        && TK[p as usize] != 8 && TK[p as usize] != 27 && TK[p as usize] != 24
-        && TK[p as usize] != 42 {
-        if expect_unit != 0 {
-            if TK[p as usize] != 3 {
-                tc_error_hard(p, "malformed f64<UnitExpr> annotation")
-                SCAN_UNIT_EXPR_DIM = 0
-                SCAN_UNIT_EXPR_NEXT = 0 - 1
-                return
-            }
-            let uh = gl_name_hash(TS[p as usize], TE[p as usize])
-            if !unit_is_registered_h(uh) {
-                tc_error_hard(p, "unknown unit in f64<UnitExpr> annotation")
-                SCAN_UNIT_EXPR_DIM = 0
-                SCAN_UNIT_EXPR_NEXT = 0 - 1
-                return
-            }
-            let ud = unit_lookup_dim(uh)
-            if saw_unit == 0 {
-                dim = ud
-            } else {
-                if op == 19 { dim = dim_add(dim, ud) }
-                else { dim = dim_sub(dim, ud) }
-            }
-            saw_unit = 1
-            expect_unit = 0
-            p = p + 1
-        } else {
-            if TK[p as usize] != 19 && TK[p as usize] != 20 {
-                tc_error_hard(p, "malformed f64<UnitExpr> annotation")
-                SCAN_UNIT_EXPR_DIM = 0
-                SCAN_UNIT_EXPR_NEXT = 0 - 1
-                return
-            }
-            op = TK[p as usize]
-            expect_unit = 1
-            p = p + 1
-        }
-    }
-    if saw_unit == 0 || expect_unit != 0 {
+    if depth > 8 {
         tc_error_hard(p, "malformed f64<UnitExpr> annotation")
-        SCAN_UNIT_EXPR_DIM = 0
-        SCAN_UNIT_EXPR_NEXT = 0 - 1
+        SCAN_UNIT_FACTOR_NEXT = 0 - 1
         return
+    }
+    if TK[p as usize] == 6 {
+        scan_unit_chain(p + 1, depth + 1)
+        if SCAN_UNIT_EXPR_NEXT < 0 { SCAN_UNIT_FACTOR_NEXT = 0 - 1; return }
+        p = SCAN_UNIT_EXPR_NEXT
+        if TK[p as usize] != 7 {
+            tc_error_hard(p, "malformed f64<UnitExpr> annotation")
+            SCAN_UNIT_FACTOR_NEXT = 0 - 1
+            return
+        }
+        dim = SCAN_UNIT_EXPR_DIM
+        p = p + 1
+    } else if TK[p as usize] == 3 {
+        let uh = gl_name_hash(TS[p as usize], TE[p as usize])
+        if !unit_is_registered_h(uh) {
+            tc_error_hard(p, "unknown unit in f64<UnitExpr> annotation")
+            SCAN_UNIT_FACTOR_NEXT = 0 - 1
+            return
+        }
+        dim = unit_lookup_dim(uh)
+        p = p + 1
+    } else {
+        tc_error_hard(p, "malformed f64<UnitExpr> annotation")
+        SCAN_UNIT_FACTOR_NEXT = 0 - 1
+        return
+    }
+    if TK[p as usize] == 56 {
+        let n = TV[(p + 1) as usize]
+        if TK[(p + 1) as usize] != 4 || n < 1 || n > 8 {
+            tc_error_hard(p, "unit power must be an integer literal 1..8")
+            SCAN_UNIT_FACTOR_NEXT = 0 - 1
+            return
+        }
+        let base = dim
+        var k: i64 = 1
+        while k < n { dim = dim_add(dim, base); k = k + 1 }
+        p = p + 2
+    }
+    SCAN_UNIT_FACTOR_DIM = dim
+    SCAN_UNIT_FACTOR_NEXT = p
+}
+
+// factor (('*'|'/') factor)* -- left-associative, so `cal/mol/K` is (cal/mol)/K
+// and `cal/(mol*K)` is cal/(mol*K). Stops at the first token that is not an
+// operator after a factor.
+fn scan_unit_chain(p0: i64, depth: i64) with IO, Panic, Mut, Div {
+    scan_unit_factor(p0, depth)
+    if SCAN_UNIT_FACTOR_NEXT < 0 { SCAN_UNIT_EXPR_DIM = 0; SCAN_UNIT_EXPR_NEXT = 0 - 1; return }
+    var dim = SCAN_UNIT_FACTOR_DIM
+    var p = SCAN_UNIT_FACTOR_NEXT
+    while TK[p as usize] == 19 || TK[p as usize] == 20 {
+        let op = TK[p as usize]
+        scan_unit_factor(p + 1, depth)
+        if SCAN_UNIT_FACTOR_NEXT < 0 { SCAN_UNIT_EXPR_DIM = 0; SCAN_UNIT_EXPR_NEXT = 0 - 1; return }
+        if op == 19 { dim = dim_add(dim, SCAN_UNIT_FACTOR_DIM) }
+        else { dim = dim_sub(dim, SCAN_UNIT_FACTOR_DIM) }
+        p = SCAN_UNIT_FACTOR_NEXT
     }
     SCAN_UNIT_EXPR_DIM = dim
     SCAN_UNIT_EXPR_NEXT = p
+}
+
+fn scan_unit_type_expr(p0: i64, close_tk: i64) with IO, Panic, Mut, Div {
+    // close_tk is kept for the callers' shape; the chain grammar stops by itself
+    // at the first token that cannot continue it (`>`, `=`, `,`, `)` ...).
+    scan_unit_chain(p0, 0)
 }
 
 fn skip_type_meta_item(p0: i64, close_tk: i64) -> i64 with Panic, Mut {
@@ -7310,7 +7335,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
         // primitive `f64`/`f32` keywords, or casts like `x as f64 / 100.0`
         // steal the slash into a fake UnitExpr (pkg/lock.sio self-parse).
         if unit_is_registered_h(SCAN_TY_HASH)
-            && (TK[p as usize] == 19 || TK[p as usize] == 20) {
+            && (TK[p as usize] == 19 || TK[p as usize] == 20 || TK[p as usize] == 56) {
             scan_unit_type_expr(p - 1, 16)
             if SCAN_UNIT_EXPR_NEXT >= 0 {
                 SCAN_TY = 2
@@ -18960,7 +18985,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
             // Track unit for dimension checking at + and -
             if vi >= 0 { EXPR_UNIT = VAR_UNIT[vi as usize] } else { EXPR_UNIT = 0 }
-            EXPR_UNIT_DIM = unit_lookup_dim(EXPR_UNIT)
+            // type_hash_unit_dim, not unit_lookup_dim: an annotation such as
+            // `cm^3` or `mol/cm3` stores an anonymous unit TYPE hash (#2388),
+            // which the named-unit table cannot resolve.
+            EXPR_UNIT_DIM = type_hash_unit_dim(EXPR_UNIT)
             // A variable holding a derived quantity carries a dimension with no
             // name, which unit_lookup_dim cannot recover from a zero hash. Named
             // units keep the value computed on the line above; this fills in only
@@ -26686,6 +26714,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 } else {
                     tc_decl_init_mismatch(EP - 1, decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH)
                 }
+            } else if decl_ty == 2 && decl_ty_hash != 0 && has_eq != 0 && type_hash_unit_dim(decl_ty_hash) != 0
+                && EXPR_UNIT_DIM != 0 && EXPR_UNIT_DIM != type_hash_unit_dim(decl_ty_hash) {
+                // #2752: a derived-dimension initializer (`d * t`, dim m*s) bound
+                // to a unit annotation of another dimension (`velocity`, m/s).
+                // ty_eq above cannot see it: an anonymous derived quantity is a
+                // plain f64 at the type level. Madaros refuses it (E001).
+                tc_linear_violation(EP - 1, "unit mismatch in let binding")
             }
             // Observation boundary: Unobserved<T> assigned to non-Unobserved binding
             if ty_is_unobserved(EXPR_TY) && !ty_is_unobserved(decl_ty) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
@@ -39620,7 +39655,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             // ident-load site). The a64 pass read no brand off a local at all,
             // so only globals ever carried one.
             if vi >= 0 { EXPR_UNIT = VAR_UNIT[vi as usize] } else { EXPR_UNIT = 0 }
-            EXPR_UNIT_DIM = unit_lookup_dim(EXPR_UNIT)
+            // type_hash_unit_dim, not unit_lookup_dim: an annotation such as
+            // `cm^3` or `mol/cm3` stores an anonymous unit TYPE hash (#2388),
+            // which the named-unit table cannot resolve.
+            EXPR_UNIT_DIM = type_hash_unit_dim(EXPR_UNIT)
             // A derived quantity carries a dimension with no name, which
             // unit_lookup_dim cannot recover from a zero hash.
             if vi >= 0 && EXPR_UNIT == 0 && VAR_UNIT_DIM[vi as usize] != 0 {
@@ -41763,6 +41801,13 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 } else {
                     tc_decl_init_mismatch(EP - 1, decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH)
                 }
+            } else if decl_ty == 2 && decl_ty_hash != 0 && has_eq != 0 && type_hash_unit_dim(decl_ty_hash) != 0
+                && EXPR_UNIT_DIM != 0 && EXPR_UNIT_DIM != type_hash_unit_dim(decl_ty_hash) {
+                // #2752: a derived-dimension initializer (`d * t`, dim m*s) bound
+                // to a unit annotation of another dimension (`velocity`, m/s).
+                // ty_eq above cannot see it: an anonymous derived quantity is a
+                // plain f64 at the type level. Madaros refuses it (E001).
+                tc_linear_violation(EP - 1, "unit mismatch in let binding")
             }
                 // Observation boundary: Unobserved<T> assigned to a non-Unobserved
                 // binding (mirror of compile_stmt).

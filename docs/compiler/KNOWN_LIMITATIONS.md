@@ -125,8 +125,19 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 - **Derived annotations — CLOSED (KL-13b).** Bare `mol/cm3` / `cal/mol`
   parse as unit type expressions (TypeReference=/ TypeRefMut=* encoding,
   same as `parse_unit_item`). `f64<m/s>` accepts the same chain inside
-  generics. Pins:
+  generics. Powers and parenthesised groups (`m^2`, `mol/cm^3`,
+  `cal/(mol*K)`) parse on both engines (#2388). The annotation is decided by
+  DIMENSION at let/var/assignment as at call boundaries (#2752): before that
+  fix the `mol/cm3` pin below was red on Madaros (E001 "expected f64, found
+  f64"), so this entry's CLOSED was true only of lean_single. That pin is
+  still red on Madaros for a separate reason: it compares the branded value
+  with a bare literal (`c > 0.0`), and Madaros refuses every
+  unit-vs-bare-literal comparison (E041, also for a plain `let c: mol`)
+  while lean_single accepts it. Whether a bare literal is dimensionless or
+  adopts the other operand's unit is an open language ruling. Pins:
   `tests/run-pass/unit_derived_annotation_mol_per_cm3.sio`,
+  `tests/run-pass/unit_derived_let_binding_issue_2752.sio`,
+  `tests/run-pass/unit_derived_power_and_parens_issue_2388.sio`,
   `tests/compile-fail/unit_derived_annotation_refuse_add.sio`,
   `scripts/ci/language_gap_ratchet_gate.sh`.
 - Audit: `docs/audit/DIMENSIONAL_TYPING_GAP_2026-09-02.md`.
