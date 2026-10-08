@@ -4975,6 +4975,145 @@ fn try_apply_return_refinement(tok: i64) with IO, Mut, Panic, Div {
 // scripts/ci/ontology_cli_smoke_gate.sh and
 // scripts/ci/lean_single_pub_use_reexport_gate.sh. Older logs still say
 // "unknown", so widening beats replacing.
+// ── `pub use` re-exports (#842) ─────────────────────────────────────────────
+// resolve_imports now follows `pub use P::{a, b}` the way it follows `use`. A
+// module loaded ONLY through a `pub use` inside an imported facade exposes to the
+// main file just the names that facade lists: a call from the main file to any
+// other function defined in that module is refused as an undefined identifier,
+// so forwarding is selective (tests/compiler/pub_use_reexport). A plain `use` of
+// the same module, a glob, a multi-line or renaming list, or a `pub use` in the
+// main file lifts the restriction (named imports are not selective in this
+// engine otherwise).
+var PUBUSE_R_COUNT: i64 = 0
+var PUBUSE_R_OFF: [i64; 256] = [0; 256]
+var PUBUSE_R_LEN: [i64; 256] = [0; 256]
+var PUBUSE_R_ACTIVE: [i64; 256] = [0; 256]
+var PUBUSE_R_PATHS: [i8; 65536] = [0; 65536]
+var PUBUSE_R_PATHS_USED: i64 = 0
+var PUBUSE_N_COUNT: i64 = 0
+var PUBUSE_N_R: [i64; 4096] = [0; 4096]
+var PUBUSE_N_H: [i64; 4096] = [0; 4096]
+
+fn pubuse_find_path(fp_len: i64) -> i64 with Panic, Mut {
+    var r: i64 = 0
+    while r < PUBUSE_R_COUNT {
+        if PUBUSE_R_LEN[r as usize] == fp_len {
+            let off = PUBUSE_R_OFF[r as usize]
+            var same: i64 = 1
+            var k: i64 = 0
+            while k < fp_len && same == 1 {
+                if PUBUSE_R_PATHS[(off + k) as usize] != IMP_PATH[k as usize] { same = 0 }
+                k = k + 1
+            }
+            if same == 1 { return r }
+        }
+        r = r + 1
+    }
+    return -1
+}
+
+fn pubuse_is_ident_byte(c: i64) -> bool {
+    return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95
+}
+
+// 1 when the braced list SRC[bs..be) is a plain comma-separated list of names.
+fn pubuse_list_is_simple(bs: i64, be: i64) -> i64 with Panic, Mut {
+    if be <= bs { return 0 }
+    var i: i64 = bs
+    while i < be {
+        let c = sb(i)
+        if pubuse_is_ident_byte(c) {
+            var j: i64 = i
+            while j < be && pubuse_is_ident_byte(sb(j)) { j = j + 1 }
+            if j - i == 2 && sb(i) == 97 && sb(i + 1) == 115 { return 0 }  // `as`
+            if j - i == 4 && sb(i) == 115 && sb(i + 1) == 101 && sb(i + 2) == 108 && sb(i + 3) == 102 { return 0 }  // `self`
+            i = j
+        } else if c == 44 || c == 32 || c == 9 {
+            i = i + 1
+        } else {
+            return 0
+        }
+    }
+    return 1
+}
+
+// Called once per resolved `use` line, with IMP_PATH[0..fp_len) the file it named.
+fn pubuse_note_import(fp_len: i64, was_loaded: i64, restrict: i64, bs: i64, be: i64) with Mut, Panic {
+    var r = pubuse_find_path(fp_len)
+    if restrict == 0 {
+        if r >= 0 { PUBUSE_R_ACTIVE[r as usize] = 0 }
+        return
+    }
+    if r < 0 {
+        // Already loaded through a plain `use`: it stays fully visible.
+        if was_loaded != 0 { return }
+        if PUBUSE_R_COUNT >= 256 || PUBUSE_R_PATHS_USED + fp_len > 65536 { return }
+        r = PUBUSE_R_COUNT
+        PUBUSE_R_OFF[r as usize] = PUBUSE_R_PATHS_USED
+        PUBUSE_R_LEN[r as usize] = fp_len
+        PUBUSE_R_ACTIVE[r as usize] = 1
+        var k: i64 = 0
+        while k < fp_len {
+            PUBUSE_R_PATHS[(PUBUSE_R_PATHS_USED + k) as usize] = IMP_PATH[k as usize]
+            k = k + 1
+        }
+        PUBUSE_R_PATHS_USED = PUBUSE_R_PATHS_USED + fp_len
+        PUBUSE_R_COUNT = PUBUSE_R_COUNT + 1
+    }
+    var i: i64 = bs
+    while i < be {
+        if pubuse_is_ident_byte(sb(i)) {
+            var j: i64 = i
+            while j < be && pubuse_is_ident_byte(sb(j)) { j = j + 1 }
+            if PUBUSE_N_COUNT < 4096 {
+                PUBUSE_N_R[PUBUSE_N_COUNT as usize] = r
+                PUBUSE_N_H[PUBUSE_N_COUNT as usize] = gl_name_hash(i, j)
+                PUBUSE_N_COUNT = PUBUSE_N_COUNT + 1
+            }
+            i = j
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+// True when the main file may not call function `fi`: it is defined in a module
+// that was loaded only through a `pub use` list that does not name it.
+fn pubuse_call_refused(fi: i64) -> bool with Panic, Mut {
+    if PUBUSE_R_COUNT == 0 { return false }
+    let pos = TS[FN_NAME_TOK[fi as usize] as usize]
+    var me: i64 = pos
+    while me >= 0 && sb(me) != 2 { me = me - 1 }
+    if me < 0 { return false }
+    var ms: i64 = me - 1
+    while ms >= 0 && sb(ms) != 1 { ms = ms - 1 }
+    if ms < 0 { return false }
+    let plen = me - ms - 1
+    var r: i64 = 0
+    while r < PUBUSE_R_COUNT {
+        if PUBUSE_R_ACTIVE[r as usize] == 1 && PUBUSE_R_LEN[r as usize] == plen {
+            let off = PUBUSE_R_OFF[r as usize]
+            var same: i64 = 1
+            var k: i64 = 0
+            while k < plen && same == 1 {
+                if PUBUSE_R_PATHS[(off + k) as usize] as i64 & 0xFF != sb(ms + 1 + k) { same = 0 }
+                k = k + 1
+            }
+            if same == 1 {
+                let h = gl_name_hash(FN_NS[fi as usize], FN_NE[fi as usize])
+                var n: i64 = 0
+                while n < PUBUSE_N_COUNT {
+                    if PUBUSE_N_R[n as usize] == r && PUBUSE_N_H[n as usize] == h { return false }
+                    n = n + 1
+                }
+                return true
+            }
+        }
+        r = r + 1
+    }
+    return false
+}
+
 fn tc_undefined_var(tok: i64) -> i64 with IO, Mut, Panic {
     print("error[E200]: undefined identifier `")
     var uv_i: i64 = TS[tok as usize]
@@ -18232,6 +18371,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let caller_eff = FN_EFFECTS[CURRENT_FN as usize] & 1023
                 let callee_is_import = (FN_EFFECTS[fi as usize] & 2048) != 0
                 let caller_is_import = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
+                if callee_is_import && !caller_is_import && pubuse_call_refused(fi) {
+                    tc_undefined_var(call_tok)
+                }
                 if bitset_is_subset(callee_eff, caller_eff) == false && !(callee_is_import && caller_is_import) {
                     tc_effect_call_violation(call_tok, callee_eff, caller_eff)
                 }
@@ -38993,6 +39135,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
                 let a64_callee_imp = (FN_EFFECTS[fi as usize] & 2048) != 0
                 let a64_caller_imp = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
+                if a64_callee_imp && !a64_caller_imp && pubuse_call_refused(fi) {
+                    tc_undefined_var(call_tok)
+                }
                 if bitset_is_subset(callee_eff, caller_eff) == false && !(a64_callee_imp && a64_caller_imp) { tc_effect_call_violation(call_tok, callee_eff, caller_eff) }
                 // The three effects carried above the & 1023 mask are checked
                 // individually on the x86 path and were absent here, so a call
@@ -45047,6 +45192,15 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 continue
             }
         }
+        // `pub use ` at line start is followed exactly like `use ` (#842).
+        var line_pub_use: i64 = 0
+        let line_in_import = pos >= MAIN_SRC_END && MAIN_SRC_END > 0
+        if pos + 8 < SRC_LEN && sb(pos) == 112 && sb(pos+1) == 117 && sb(pos+2) == 98 && sb(pos+3) == 32 && sb(pos+4) == 117 && sb(pos+5) == 115 && sb(pos+6) == 101 && sb(pos+7) == 32 {
+            line_pub_use = 1
+            pos = pos + 4  // skip "pub "
+        }
+        var brace_s: i64 = -1
+        var brace_e: i64 = -1
         // Check for "use " at line start (117=u, 115=s, 101=e, 32=space)
         if pos + 4 < SRC_LEN && sb(pos) == 117 && sb(pos+1) == 115 && sb(pos+2) == 101 && sb(pos+3) == 32 {
             pos = pos + 4  // skip "use "
@@ -45071,9 +45225,14 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                     }
                     if pos + 2 < SRC_LEN && sb(pos+2) == 123 {
                         path_end = pos
+                        let list_s = pos + 3
                         // Skip ::{...} until }
                         while pos < SRC_LEN && sb(pos) != 125 && sb(pos) != 10 { pos = pos + 1 }
-                        if pos < SRC_LEN && sb(pos) == 125 { pos = pos + 1 }
+                        if pos < SRC_LEN && sb(pos) == 125 {
+                            brace_s = list_s
+                            brace_e = pos
+                            pos = pos + 1
+                        }
                         is_named_import = 0
                         break
                     }
@@ -45636,6 +45795,9 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                         }
                     }
                 }
+                var pu_restrict: i64 = 0
+                if line_pub_use == 1 && line_in_import && brace_s >= 0 && pubuse_list_is_simple(brace_s, brace_e) == 1 { pu_restrict = 1 }
+                pubuse_note_import(fp_len, already, pu_restrict, brace_s, brace_e)
             }
         }
         // Advance to next line
