@@ -4308,6 +4308,54 @@ fn nc_alloc_diag_append_decimal_into(nc: &! NativeCompiler, value: i64) with Mut
     }
 }
 
+fn nc_core_emit_write_stderr_rodata_into(nc: &! NativeCompiler, rodata_offset: i64, write_len: i64) with Mut, Panic, Div {
+    let lea_pos = (*nc).code.len
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    nc_add_rodata_reloc(nc, lea_pos + 3, rodata_offset)
+    nc_emit_mov_reg_reg(nc, 6, 0)
+    nc_emit_mov_rdi_imm(nc, 2)
+    nc_emit_mov_reg_imm(nc, 2, write_len)
+    nc_emit_mov_rax_imm(nc, 1)
+    nc_emit_syscall(nc)
+}
+
+// The long explanation is interned once per NativeCompiler (offsets start at
+// -1). Repeating it at every allocation site is what overflowed the 2 MiB
+// flat rodata buffer on the Madaros self-compile after #2793 (#2836, rc=23).
+fn nc_core_intern_alloc_fail_explain_into(nc: &! NativeCompiler, fail_code: i64) with Mut, Panic, Div {
+    if fail_code == 181 {
+        if (*nc).alloc_fail_arena_explain_off >= 0 {
+            return
+        }
+        let off = native_v2_rodata_len_into(nc)
+        nc_alloc_diag_append_ascii_into(nc, "  the generated program's runtime heap is one fixed ~2 GiB bump arena that is\n")
+        nc_alloc_diag_append_ascii_into(nc, "  never reclaimed: every aggregate value created or copied by value (struct\n")
+        nc_alloc_diag_append_ascii_into(nc, "  literal, by-value array/struct argument or return, x = matnm_set(x, ...))\n")
+        nc_alloc_diag_append_ascii_into(nc, "  takes fresh arena space for the life of the process. A loop that does so\n")
+        nc_alloc_diag_append_ascii_into(nc, "  per iteration exhausts it. Fix: hoist buffers out of the loop and write\n")
+        nc_alloc_diag_append_ascii_into(nc, "  through &! references (see stdlib/chemistry/catalysis.sio and\n")
+        nc_alloc_diag_append_ascii_into(nc, "  simulate_general_epistemic in stdlib/chemistry/kinetics.sio).\n")
+        (*nc).alloc_fail_arena_explain_off = off
+        (*nc).alloc_fail_arena_explain_len = native_v2_rodata_len_into(nc) - off
+        return
+    }
+    if (*nc).alloc_fail_handles_explain_off >= 0 {
+        return
+    }
+    let off = native_v2_rodata_len_into(nc)
+    // Print the handle-table size from the accessor, not a decimal literal:
+    // native_capacity_tiers_check.py counts every 4194304 in this file as the
+    // ELF load address 0x400000 and requires exactly six argument-form hits.
+    nc_alloc_diag_append_ascii_into(nc, "  the generated program's handle table (")
+    nc_alloc_diag_append_decimal_into(nc, native_v2_handle_table_capacity_default())
+    nc_alloc_diag_append_ascii_into(nc, " managed objects, never\n")
+    nc_alloc_diag_append_ascii_into(nc, "  reclaimed) is exhausted: every aggregate over 16 bytes created or copied\n")
+    nc_alloc_diag_append_ascii_into(nc, "  by value takes a handle for the life of the process. Fix: hoist buffers\n")
+    nc_alloc_diag_append_ascii_into(nc, "  out of the loop and write through &! references.\n")
+    (*nc).alloc_fail_handles_explain_off = off
+    (*nc).alloc_fail_handles_explain_len = native_v2_rodata_len_into(nc) - off
+}
+
 fn nc_core_emit_alloc_failure_diagnostic_into(nc: &! NativeCompiler, fail_code: i64, request_bytes: i64) with Mut, Panic, Div {
     let rodata_offset = native_v2_rodata_len_into(nc)
     // Keep this byte-oriented: String lowering in this failure path is not yet
@@ -4343,44 +4391,25 @@ fn nc_core_emit_alloc_failure_diagnostic_into(nc: &! NativeCompiler, fail_code: 
     native_v2_rodata_append_byte_into(nc, 108) // l
     // P0.4 (2026-10-06): never a bare "arena full". The first line keeps the
     // historical prefix (CI gates and audits grep "madaros: arena full" /
-    // "madaros: handles full"); the rest names the limit, the size of the
-    // allocation that did not fit (fixed per site at compile time, so it
-    // identifies the construct: 32800 bytes is a 4096-f64 MatNM value), and
-    // the fix. The bytes are plain ASCII appended at compile time; the emitted
-    // failure path is still a single write(2) of a rodata constant.
+    // "madaros: handles full") and names the allocation that did not fit
+    // (fixed per site: 32800 bytes is a 4096-f64 MatNM value). The long
+    // explanation is interned once (#2836) and written after this line, so
+    // stderr still names the limit and the &! fix.
     if request_bytes > 0 {
         nc_alloc_diag_append_ascii_into(nc, " (allocation of ")
         nc_alloc_diag_append_decimal_into(nc, request_bytes)
-        nc_alloc_diag_append_ascii_into(nc, " bytes)")
+        nc_alloc_diag_append_ascii_into(nc, " bytes)\n")
     } else {
-        nc_alloc_diag_append_ascii_into(nc, " (growing a Seq by push)")
+        nc_alloc_diag_append_ascii_into(nc, " (growing a Seq by push)\n")
     }
-    if fail_code == 181 {
-        nc_alloc_diag_append_ascii_into(nc, "\n")
-        nc_alloc_diag_append_ascii_into(nc, "  the generated program's runtime heap is one fixed ~2 GiB bump arena that is\n")
-        nc_alloc_diag_append_ascii_into(nc, "  never reclaimed: every aggregate value created or copied by value (struct\n")
-        nc_alloc_diag_append_ascii_into(nc, "  literal, by-value array/struct argument or return, x = matnm_set(x, ...))\n")
-        nc_alloc_diag_append_ascii_into(nc, "  takes fresh arena space for the life of the process. A loop that does so\n")
-        nc_alloc_diag_append_ascii_into(nc, "  per iteration exhausts it. Fix: hoist buffers out of the loop and write\n")
-        nc_alloc_diag_append_ascii_into(nc, "  through &! references (see stdlib/chemistry/catalysis.sio and\n")
-        nc_alloc_diag_append_ascii_into(nc, "  simulate_general_epistemic in stdlib/chemistry/kinetics.sio).\n")
-    } else {
-        nc_alloc_diag_append_ascii_into(nc, "\n")
-        nc_alloc_diag_append_ascii_into(nc, "  the generated program's handle table (4194304 managed objects, never\n")
-        nc_alloc_diag_append_ascii_into(nc, "  reclaimed) is exhausted: every aggregate over 16 bytes created or copied\n")
-        nc_alloc_diag_append_ascii_into(nc, "  by value takes a handle for the life of the process. Fix: hoist buffers\n")
-        nc_alloc_diag_append_ascii_into(nc, "  out of the loop and write through &! references.\n")
-    }
-
     let write_len = native_v2_rodata_len_into(nc) - rodata_offset
-    let lea_pos = (*nc).code.len
-    nc_emit_lea_rax_rip_disp32(nc, 0)
-    nc_add_rodata_reloc(nc, lea_pos + 3, rodata_offset)
-    nc_emit_mov_reg_reg(nc, 6, 0)
-    nc_emit_mov_rdi_imm(nc, 2)
-    nc_emit_mov_reg_imm(nc, 2, write_len)
-    nc_emit_mov_rax_imm(nc, 1)
-    nc_emit_syscall(nc)
+    nc_core_emit_write_stderr_rodata_into(nc, rodata_offset, write_len)
+    nc_core_intern_alloc_fail_explain_into(nc, fail_code)
+    if fail_code == 181 {
+        nc_core_emit_write_stderr_rodata_into(nc, (*nc).alloc_fail_arena_explain_off, (*nc).alloc_fail_arena_explain_len)
+    } else {
+        nc_core_emit_write_stderr_rodata_into(nc, (*nc).alloc_fail_handles_explain_off, (*nc).alloc_fail_handles_explain_len)
+    }
 }
 
 // __sounio_seq_push(handle, value) -> unit. Seq reuses the aggregate object
