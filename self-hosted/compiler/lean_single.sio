@@ -997,6 +997,13 @@ fn st_total_size(si: i64) -> i64 with Panic, Div, Mut {
 
 // Global variable table: flat array, 4 fields per entry [hash, offset, esiz, alen]
 var GL: [i64; 4096] = [0; 4096]
+// Global arrays of STRUCT elements (#1655) use the same pointer-per-slot layout
+// as local struct arrays: GL[..+2] (esiz) is 8 and each slot holds a pointer into
+// a BSS backing block reserved beside it. GL_AGG_NSL is the element's qword count
+// (0 = not such an array), GL_AGG_BLK the backing block's BSS offset. The slots
+// are wired to the block at main's entry (emit_global_agg_slots_x86/_a64).
+var GL_AGG_NSL: [i64; 2048] = [0; 2048]
+var GL_AGG_BLK: [i64; 2048] = [0; 2048]
 var GL_COUNT: i64 = 0
 var GL_BSS_SIZE: i64 = 0
 
@@ -9618,7 +9625,46 @@ fn bind_struct_local_zeroinit_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Pani
 // (e.g. `var PI: f64 = 3.14159`, `var TUNE: i64 = 42`).
 // Array globals with repeat syntax `[V; N]` fall through to BSS zero (V must be 0
 // for correctness; other values are not yet supported).
+// #1655: point every slot of a global struct array at its element in the BSS
+// backing block (slot i -> block + i*stride). Runs once at main's entry, before
+// the initializers, so a declaration without an initializer (`var G: [S; N]`)
+// also reads back zeroed elements rather than null pointers.
+fn emit_global_agg_slots_x86() with Mut, Panic, Div {
+    var gi: i64 = 0
+    while gi < GL_COUNT {
+        let nsl = GL_AGG_NSL[gi as usize]
+        let alen = GL[(gi * 4 + 3) as usize]
+        if nsl > 0 && alen > 0 {
+            em(0x48); em(0xbf); em64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize])  // mov rdi, slots
+            em(0x48); em(0xbe); em64(GL_BSS_BASE + GL_AGG_BLK[gi as usize])    // mov rsi, block
+            em(0x48); em(0xb9); em64(alen)                                     // mov rcx, alen
+            em(0x48); em(0x89); em(0x37)                                       // loop: mov [rdi], rsi
+            em(0x48); em(0x83); em(0xc7); em(8)                                // add rdi, 8
+            em(0x48); em(0x81); em(0xc6); em32(nsl * 8)                        // add rsi, stride
+            em(0x48); em(0xff); em(0xc9)                                       // dec rcx
+            em(0x75); em(0xed)                                                 // jnz loop (-19)
+        }
+        gi = gi + 1
+    }
+}
+
+// #1655: `[V; N]` for a global struct array -- copy the struct V (pointer in
+// rax) into each of the N elements of the backing block.
+fn emit_global_agg_repeat_fill_x86(gi: i64) with Mut, Panic, Div {
+    let nsl = GL_AGG_NSL[gi as usize]
+    let alen = GL[(gi * 4 + 3) as usize]
+    em(0x49); em(0x89); em(0xc0)                                   // mov r8, rax (src)
+    em(0x48); em(0xbf); em64(GL_BSS_BASE + GL_AGG_BLK[gi as usize]) // mov rdi, block
+    em(0x49); em(0xb9); em64(alen)                                 // mov r9, alen
+    em(0x4c); em(0x89); em(0xc6)                                   // loop: mov rsi, r8
+    em(0xb9); em32(nsl)                                            // mov ecx, nslots
+    em(0xf3); em(0x48); em(0xa5)                                   // rep movsq (rdi += stride)
+    em(0x49); em(0xff); em(0xc9)                                   // dec r9
+    em(0x75); em(0xf0)                                             // jnz loop (-16)
+}
+
 fn emit_global_inits_x86() with IO, Mut, Panic, Div {
+    emit_global_agg_slots_x86()
     var p: i64 = 0
     var depth: i64 = 0
     while p < TC {
@@ -9686,7 +9732,12 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
                             // Excess elements are compiled (so a bad one still
                             // diagnoses) but not stored: the slot does not exist.
                             if l_idx < l_alen {
-                                if l_esiz == 1 {
+                                if GL_AGG_NSL[gi_arr as usize] > 0 {
+                                    // struct element (#1655): copy into its block element
+                                    em(0x48); em(0x89); em(0xc2)   // mov rdx, rax (src)
+                                    emit_load_abs_addr_to_rax_x86(GL_BSS_BASE + GL_AGG_BLK[gi_arr as usize] + l_idx * GL_AGG_NSL[gi_arr as usize] * 8)
+                                    emit_copy_agg_to_ptr_x86(6, arr_hash_elem_hash(GL_TY_HASH[gi_arr as usize]))
+                                } else if l_esiz == 1 {
                                     em(0x48); em(0x89); em(0xc1)   // mov rcx, rax
                                     emit_load_abs_addr_to_rax_x86(l_base + l_idx)
                                     em(0x88); em(0x08)             // mov [rax], cl
@@ -9713,7 +9764,9 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
                         let base = GL_BSS_BASE + GL[(gi_arr * 4 + 1) as usize]
                         let esiz = GL[(gi_arr * 4 + 2) as usize]
                         let alen = GL[(gi_arr * 4 + 3) as usize]
-                        if alen > 0 {
+                        if GL_AGG_NSL[gi_arr as usize] > 0 {
+                            emit_global_agg_repeat_fill_x86(gi_arr)
+                        } else if alen > 0 {
                             em(0x48); em(0xbf); em64(base)         // mov rdi, base
                             em(0x48); em(0xb9); em64(alen)         // mov rcx, alen
                             if esiz == 1 {
@@ -9756,7 +9809,45 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
     }
 }
 
+// a64 twin of emit_global_agg_slots_x86 (#1655).
+fn emit_global_agg_slots_a64() with Mut, Panic, Div {
+    var gi: i64 = 0
+    while gi < GL_COUNT {
+        let nsl = GL_AGG_NSL[gi as usize]
+        let alen = GL[(gi * 4 + 3) as usize]
+        if nsl > 0 && alen > 0 {
+            emit_image_addr_reg_a64(9, GL_BSS_BASE + GL[(gi * 4 + 1) as usize])  // x9 = slots
+            emit_image_addr_reg_a64(10, GL_BSS_BASE + GL_AGG_BLK[gi as usize])   // x10 = block
+            emit_imm64_reg_a64(11, nsl * 8)                                      // x11 = stride
+            emit_imm64_reg_a64(12, alen)                                         // x12 = count
+            let loop_off = CL
+            em32(0xF800852A)  // str x10, [x9], #8
+            em32(0x8B0B014A)  // add x10, x10, x11
+            em32(0xF100058C)  // subs x12, x12, #1
+            let br_off = CL
+            em32(0x54000001 | ((((loop_off - br_off) / 4) & 0x7FFFF) << 5))  // b.ne loop
+        }
+        gi = gi + 1
+    }
+}
+
+// a64 twin of emit_global_agg_repeat_fill_x86 (#1655): V's pointer is in x0.
+fn emit_global_agg_repeat_fill_a64(gi: i64) with Mut, Panic, Div {
+    let nsl = GL_AGG_NSL[gi as usize]
+    let alen = GL[(gi * 4 + 3) as usize]
+    em32(0xAA0003EF)                                              // mov x15, x0 (src)
+    emit_image_addr_reg_a64(11, GL_BSS_BASE + GL_AGG_BLK[gi as usize])  // x11 = block
+    emit_imm64_reg_a64(14, alen)                                  // x14 = count
+    let outer = CL
+    em32(0xAA0F03EA)                                              // mov x10, x15
+    emit_copy_words_x10_x11_a64(nsl)                              // x11 += stride
+    em32(0xF10005CE)                                              // subs x14, x14, #1
+    let br_off = CL
+    em32(0x54000001 | ((((outer - br_off) / 4) & 0x7FFFF) << 5))  // b.ne outer
+}
+
 fn emit_global_inits_a64() with IO, Mut, Panic, Div {
+    emit_global_agg_slots_a64()
     var p: i64 = 0
     var depth: i64 = 0
     while p < TC {
@@ -9810,7 +9901,11 @@ fn emit_global_inits_a64() with IO, Mut, Panic, Div {
                             compile_or_a64()                   // element value in x0
                             p = EP
                             if l_idx < l_alen {
-                                if l_esiz == 1 {
+                                if GL_AGG_NSL[gi_arr as usize] > 0 {
+                                    em32(0xAA0003EA)               // mov x10, x0 (src)
+                                    emit_image_addr_a64(GL_BSS_BASE + GL_AGG_BLK[gi_arr as usize] + l_idx * GL_AGG_NSL[gi_arr as usize] * 8)
+                                    emit_copy_agg_to_ptr_a64(6, arr_hash_elem_hash(GL_TY_HASH[gi_arr as usize]))
+                                } else if l_esiz == 1 {
                                     emit_image_addr_reg_a64(9, l_base + l_idx)
                                     em32(0x39000120)           // strb w0, [x9]
                                 } else {
@@ -9835,7 +9930,9 @@ fn emit_global_inits_a64() with IO, Mut, Panic, Div {
                         let base = GL_BSS_BASE + GL[(gi_arr * 4 + 1) as usize]
                         let esiz = GL[(gi_arr * 4 + 2) as usize]
                         let alen = GL[(gi_arr * 4 + 3) as usize]
-                        if alen > 0 {
+                        if GL_AGG_NSL[gi_arr as usize] > 0 {
+                            emit_global_agg_repeat_fill_a64(gi_arr)
+                        } else if alen > 0 {
                             em32(0xAA0003E2)                   // mov x2, x0 (save value)
                             emit_image_addr_a64(base)           // x0 = base
                             if esiz == 1 {
@@ -13236,9 +13333,16 @@ fn compile_primary() with IO, Mut, Panic, Div {
             let arr_hash = arr_ty_hash_for_elem_type(rep_count, 8, elem_ty, elem_hash)
             if elem_ty == 6 {
                 // Struct element: each element occupies struct_nslots qwords
+                // The array itself is pointer-per-slot (arr_hash has esiz 8, as
+                // every struct-element array does): rep_count frame slots, slot
+                // base+rep_count-1-i holding element i's pointer into the block
+                // below. It used to reserve and address rep_count*s_nslots slots
+                // (the INLINE size), so the returned base pointed s_nslots-1
+                // slots past element 0 and every access to a > 1-qword element
+                // read a stray frame word as a pointer (#2190).
                 let s_nslots = struct_like_nslots(elem_hash)
-                let total_slots = rep_count * s_nslots
-                if total_slots > 0 {
+                let total_slots = rep_count
+                if rep_count > 0 && s_nslots > 0 {
                     let base = NEXT_SLOT
                     NEXT_SLOT = NEXT_SLOT + total_slots
                     let end_ep = EP
@@ -32527,7 +32631,16 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     if elem_ty == 6 || elem_ty == 7 { elem_hash = gl_name_hash(etns, etne) }
                     var esiz: i64 = 8
                     if src_match(etns, etne - etns, "i8") { esiz = 1 }
-                    if elem_ty == 6 || elem_ty == 7 { esiz = struct_like_nslots(elem_hash) * 8 }
+                    // A struct element is stored pointer-per-slot, exactly like a
+                    // local `[S; N]` (#1655): 8-byte slots here, element storage in
+                    // a backing block. This used to reserve the elements INLINE
+                    // (esiz = nslots*8) while every store, field-store and init
+                    // path treated the slots as pointers, so `G[i] = S{..}` was a
+                    // silent no-op and reads returned frame addresses. An enum
+                    // element (no struct layout) is a scalar discriminant; it used
+                    // to get esiz 0, i.e. no storage at all, aliasing the next global.
+                    var agg_nsl: i64 = 0
+                    if elem_ty == 6 { agg_nsl = struct_like_nslots(elem_hash) }
                     p = p + 1
                     // Skip ;
                     if TK[p as usize] == 27 { p = p + 1 }
@@ -32540,6 +32653,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     if gix >= 0 {
                         GL_TY[gix as usize] = 8
                         GL_TY_HASH[gix as usize] = arr_ty_hash_for_elem_type(alen, esiz, elem_ty, elem_hash)
+                        GL_AGG_NSL[gix as usize] = 0
+                        if agg_nsl > 0 && alen > 0 {
+                            GL_AGG_NSL[gix as usize] = agg_nsl
+                            GL_AGG_BLK[gix as usize] = bss_alloc_aligned(alen * agg_nsl * 8)
+                        }
                     }
                 } else {
                     // Scalar: i64, i32, bool, string
