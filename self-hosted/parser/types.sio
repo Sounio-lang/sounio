@@ -46,6 +46,16 @@ fn report_unknown_knowledge_component(mut_p: Parser, span: Span) -> Parser with 
     p
 }
 
+// lean_single indexes only `.0` / `.1` of a tuple (`tb_idx > 1`). A 3-tuple
+// `(Parser, i64, bool)` printed "tuple index out of bounds" on `.2`; a nested
+// pair `(Parser, (i64, bool))` then printed "unknown field access" on `.1.0`.
+// A named struct keeps the same data inside the two-element index the seed
+// implements. See #2431.
+struct EffectPayload {
+    value: i64,
+    present: bool,
+}
+
 impl Parser {
     // ============================================================
     // Type expression entry point
@@ -977,8 +987,8 @@ impl Parser {
         p = p.advance()  // skip effect name
         let fpay = p.parse_effect_payload()
         p = fpay.0
-        first.payload = fpay.1
-        first.has_payload = fpay.2
+        first.payload = fpay.1.value
+        first.has_payload = fpay.1.present
 
         var rev_list = EffectList { head: first, tail: None }
 
@@ -995,8 +1005,8 @@ impl Parser {
             p = p.advance()  // skip effect name
             let npay = p.parse_effect_payload()
             p = npay.0
-            e.payload = npay.1
-            e.has_payload = npay.2
+            e.payload = npay.1.value
+            e.has_payload = npay.1.present
             rev_list = EffectList { head: e, tail: Some(Box::new(rev_list)) }
         }
 
@@ -1008,11 +1018,11 @@ impl Parser {
     // does not yet model; what is new is that a single integer literal is now
     // RETAINED. It used to be counted and thrown away, which made Epistemic(950)
     // and Epistemic(400) the same effect.
-    fn parse_effect_payload(self) -> (Parser, i64, bool) with Mut, IO, Panic, Div, Alloc {
+    fn parse_effect_payload(self) -> (Parser, EffectPayload) with Mut, IO, Panic, Div, Alloc {
         var p = self
         var value: i64 = 0
         if parser_peek(p) != TokenKind::LParen {
-            return (p, value, false)
+            return (p, EffectPayload { value: value, present: false })
         }
         if parser_peek_ahead(p, 1) == TokenKind::IntLit && parser_peek_ahead(p, 2) == TokenKind::RParen {
             p = p.advance()
@@ -1020,7 +1030,7 @@ impl Parser {
             value = tok.int_value
             p = p.advance()
             p = p.advance()
-            return (p, value, true)
+            return (p, EffectPayload { value: value, present: true })
         }
         if parser_peek_ahead(p, 1) == TokenKind::Minus {
             p.had_error = true
@@ -1040,14 +1050,14 @@ impl Parser {
                 depth = depth - 1
                 p = p.advance()
                 if depth == 0 {
-                    return (p, value, false)
+                    return (p, EffectPayload { value: value, present: false })
                 }
             } else {
                 p = p.advance()
             }
         }
 
-        (p, value, false)
+        (p, EffectPayload { value: value, present: false })
     }
 
     // ============================================================

@@ -10160,10 +10160,9 @@ fn emit_print(tok: i64) with IO, Mut, Panic, Div {
             // SQW is [i64; 256]; this function packs 8 decoded bytes per
             // slot, so qi (not slen) is the real bound -- overflow here
             // needs a ~2048-byte literal, unlike the 256-byte cap in the
-            // unpacked decoders (compile_primary/emit_print_a64). Same
-            // silent-corruption class those guard against: without this,
-            // SQW[qi] would write past index 255 into FN_NS, the next
-            // global declared after SQW.
+            // unpacked `let s = "..."` decoders (compile_primary /
+            // compile_primary_a64). emit_print_a64 uses this same pack.
+            // Without this, SQW[qi] would write past index 255 into FN_NS.
             tc_error_hard(tok, "string literal exceeds maximum of 2048 bytes")
             TYPECHECK_FAILED = 1
             slen = 0
@@ -34743,17 +34742,18 @@ fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
                 si = si + 2
             }
         } else { si = si + 1 }
-        if slen >= 256 {
-            // Same corruption class the call-argument decoders guard
-            // against (SQW is [i64; 256]): without this, a >=256-byte
-            // print("...") literal on arm64 would write past SQW[255]
-            // into FN_NS, the next global declared after SQW.
-            tc_error_hard(tok, "string literal exceeds maximum of 256 bytes")
+        // Pack 8 decoded bytes per SQW slot, matching emit_print (x86).
+        // The unpacked `slen >= 256` cap was the #2431 Family A drift:
+        // x86 accepts print() literals up to 2048 bytes; a64 rejected at 256.
+        let qi = slen / 8
+        if qi >= 256 {
+            tc_error_hard(tok, "string literal exceeds maximum of 2048 bytes")
             TYPECHECK_FAILED = 1
             slen = 0
             break
         } else {
-            SQW[slen as usize] = byte
+            let bi = slen - qi * 8
+            SQW[qi as usize] = SQW[qi as usize] | (byte << (bi * 8))
             slen = slen + 1
         }
     }
@@ -34763,11 +34763,14 @@ fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
     let b_off = 1 + pad_len / 4
     em32(0x14000000 | (b_off & 0x3FFFFFF))
     let str_start = CL
-    // Emit string bytes
+    // Emit string bytes (unpack the 8-bytes-per-slot encoding)
     var bi: i64 = 0
     while bi < pad_len {
-        if bi < slen { em(SQW[bi as usize] & 0xFF) }
-        else { em(0) }
+        if bi < slen {
+            let qi2 = bi / 8
+            let bj = bi - qi2 * 8
+            em((SQW[qi2 as usize] >> (bj * 8)) & 0xFF)
+        } else { em(0) }
         bi = bi + 1
     }
     // skip: adr x1, -(pad_len) — point back at string data
