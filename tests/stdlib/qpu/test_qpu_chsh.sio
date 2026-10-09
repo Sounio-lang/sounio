@@ -11,7 +11,11 @@ use qpu::chsh::{
     qpu_shift_job,
     qpu_partial_job,
     qpu_party_shots,
+    qpu_copy_shots,
+    qpu_anti_shots,
+    qpu_block_read,
     PartyMean,
+    BlockRead,
 }
 
 use quantum::qasm_tape::{
@@ -33,6 +37,8 @@ use quantum::qasm_tape::{
 use quantum::born_shot_law::{
     ry_chsh_exit,
     ry_chsh_party_noise,
+    ry_chsh_copy_noise,
+    ry_chsh_anti_noise,
 }
 
 fn has_word(hay: string, needle: string) -> bool with Mut, Panic, Div {
@@ -464,15 +470,119 @@ fn death_var(root2: f64) -> f64 with Mut, Div {
     (lo + hi) / 2.0
 }
 
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// The fence of 3 accepted one block. These four blocks are the expectation.
+// At 1000 shots the mean sits inside 2 empirical standard errors, and block 0
+// is still the far one. At 4000 shots the mean has fallen by more than half
+// and sits inside 2 of both the empirical width and the shot-noise formula.
+fn blocks_ok(death: f64, pi: f64, oracle_anti: f64, pair_s: f64, anti_s: f64) -> bool with Mut, Div, Panic {
+    let b: BlockRead = qpu_block_read(death, pi, 1000)
+    let b4: BlockRead = qpu_block_read(death, pi, 4000)
+    let idm = (b.g0 + b.g1 + b.g2 + b.g3) / 4.0
+    let am = (b.a0 + b.a1 + b.a2 + b.a3) / 4.0
+    let id4 = (b4.g0 + b4.g1 + b4.g2 + b4.g3) / 4.0
+    let a4m = (b4.a0 + b4.a1 + b4.a2 + b4.a3) / 4.0
+    let idad = abs_f(idm)
+    let aad = abs_f(am - oracle_anti)
+    let id4ad = abs_f(id4)
+    let a4ad = abs_f(a4m - oracle_anti)
+    let g0ad = abs_f(b.g0)
+    if near(b.a0, anti_s, 0.000000001) {
+        if near(b.g0, pair_s + 2.0 * anti_s, 0.000000001) {
+            if idad < 2.0 * b.id_se {
+                if aad < 2.0 * b.anti_se {
+                    if g0ad > abs_f(b.g1) {
+                        if g0ad > abs_f(b.g2) {
+                            if g0ad > abs_f(b.g3) {
+                                if id4ad < idad / 2.0 {
+                                    if id4ad < 2.0 * b4.id_se {
+                                        if id4ad < 2.0 * b4.id_plug {
+                                            if a4ad < aad / 2.0 {
+                                                if a4ad < 2.0 * b4.anti_se { return true }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 fn party_ok(pi: f64) -> bool with Mut, Div, Panic {
     let root2 = sqrt_pos(2.0)
     let death = sqrt_pos(death_var(root2))
     let oracle = ry_chsh_party_noise(death, pi)
+    let copy_oracle = ry_chsh_copy_noise(death, pi)
     let got: PartyMean = qpu_party_shots(death, pi, 1000)
+    let cp: PartyMean = qpu_copy_shots(death, pi, 1000)
+    let gap = got.s - oracle
+    let raw = cp.s - copy_oracle
+    let cad = if raw < 0.0 { 0.0 - raw } else { raw }
+    let split = got.s - cp.s
+    let se2 = got.se * got.se + cp.se * cp.se
+    let anti_oracle = ry_chsh_anti_noise(death, pi)
+    let an: PartyMean = qpu_anti_shots(death, pi, 1000)
+    let a4: PartyMean = qpu_anti_shots(death, pi, 4000)
+    let agap = an.s - anti_oracle
+    let aad = if agap < 0.0 { 0.0 - agap } else { agap }
+    let g4 = a4.s - anti_oracle
+    let a4ad = if g4 < 0.0 { 0.0 - g4 } else { g4 }
+    let twice = got.s - 2.0 * cp.s
+    let tad = if twice < 0.0 { 0.0 - twice } else { twice }
+    let se_t = sqrt_pos(got.se * got.se + 4.0 * cp.se * cp.se)
     if near(oracle, 2.0, 0.000001) {
-        if near(got.s, oracle, 0.08) {
-            if got.s > 2.0 {
-                if got.keep == 1 { return true }
+        if near(copy_oracle, 1.0, 0.000001) {
+            if near(2.0 * copy_oracle, oracle, 0.000001) {
+                if got.se > 0.015 {
+                    if got.se < 0.030 {
+                        if gap > 0.0 {
+                            if gap < 2.0 * got.se {
+                                if got.keep == 1 {
+                                    if cp.se > 0.012 {
+                                        if cp.se < 0.028 {
+                                            if cad < 2.0 * cp.se {
+                                                if cp.s < 2.0 {
+                                                    if cp.keep == 0 {
+                                                        if split > 4.0 * sqrt_pos(se2) {
+                                                            if near(anti_oracle, 0.0 - 1.0, 0.000001) {
+                                                                if near(oracle + 2.0 * anti_oracle, 0.0 - 0.0, 0.000001) {
+                                                                    if an.se > 0.018 {
+                                                                        if an.se < 0.035 {
+                                                                            if an.keep == 0 {
+                                                                                if tad < 2.0 * se_t {
+                                                                                    if near(2.0 * a4.se, an.se, 0.001) {
+                                                                                        if a4ad < aad {
+                                                                                            if a4.keep == 0 {
+                                                                                                if blocks_ok(death, pi, anti_oracle, got.s, an.s) { return true }
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

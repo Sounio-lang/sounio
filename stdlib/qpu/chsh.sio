@@ -31,6 +31,7 @@ use quantum::qasm_tape::{
     tape_qasm,
     tape_face,
     tape_counts,
+    shot_add,
     ShotCounts,
     Tape,
 }
@@ -171,31 +172,259 @@ pub fn qpu_partial_job(phi: f64, beta: f64, pi: f64, shots: i64) -> string with 
 
 // One offset per party, eta = 2 sigma x_i, the same nodes as ry_chsh_party_noise.
 // Each node is four shot lists. The sum is the weighted mean of those sixteen S.
+// se is the standard error of that sum: each list is N independent ±1 shots,
+// Var(correlator) = (1 - e^2) / N, and the nodes are independent.
 pub struct PartyMean {
     pub s: f64,
+    pub se: f64,
     pub keep: i64,
 }
 
-fn shot_s_at(eta: f64, pi: f64, shots: i64, seed: i64) -> f64 with Mut, Div, Panic {
+struct NodeShot {
+    s: f64,
+    v: f64,
+}
+
+fn corr_var(c: ShotCounts) -> f64 with Div {
+    let n = c.n00 + c.n01 + c.n10 + c.n11
+    if n == 0 { return 0.0 }
+    let e = qpu_corr(c)
+    let one = 1.0 - e * e
+    one / (n as f64)
+}
+
+fn party_sqrt(x: f64) -> f64 with Mut, Div {
+    var y = 1.0
+    var n = 0
+    while n < 16 {
+        y = 0.5 * (y + x / y)
+        n = n + 1
+    }
+    y
+}
+
+fn shot_node(eta: f64, pi: f64, shots: i64, seed: i64) -> NodeShot with Mut, Div, Panic {
     let a0 = eta
     let a1 = pi / 2.0 + eta
     let b0 = pi / 4.0
     let b1 = 0.0 - pi / 4.0
-    let e0 = qpu_corr(tape_counts(bell_term(a0, b0), shots, seed))
-    let e1 = qpu_corr(tape_counts(bell_term(a0, b1), shots, seed + 1))
-    let e2 = qpu_corr(tape_counts(bell_term(a1, b0), shots, seed + 2))
-    let e3 = qpu_corr(tape_counts(bell_term(a1, b1), shots, seed + 3))
-    qpu_s(e0, e1, e2, e3)
+    let c0 = tape_counts(bell_term(a0, b0), shots, seed)
+    let c1 = tape_counts(bell_term(a0, b1), shots, seed + 1)
+    let c2 = tape_counts(bell_term(a1, b0), shots, seed + 2)
+    let c3 = tape_counts(bell_term(a1, b1), shots, seed + 3)
+    let e0 = qpu_corr(c0)
+    let e1 = qpu_corr(c1)
+    let e2 = qpu_corr(c2)
+    let e3 = qpu_corr(c3)
+    NodeShot {
+        s: qpu_s(e0, e1, e2, e3),
+        v: corr_var(c0) + corr_var(c1) + corr_var(c2) + corr_var(c3),
+    }
 }
 
-pub fn qpu_party_shots(sigma: f64, pi: f64, shots: i64) -> PartyMean with Mut, Div, Panic {
+pub fn qpu_party_shots_from(sigma: f64, pi: f64, shots: i64, seed0: i64) -> PartyMean with Mut, Div, Panic {
     var m = 0.0
+    var vv = 0.0
     var i: i64 = 0
     while i < 16 {
         let eta = 2.0 * sigma * ry_gh_x(i)
-        let s = shot_s_at(eta, pi, shots, 1 + 4 * i)
-        m = m + ry_gh_w(i) * s
+        let node = shot_node(eta, pi, shots, seed0 + 4 * i)
+        let w = ry_gh_w(i)
+        m = m + w * node.s
+        vv = vv + w * w * node.v
         i = i + 1
     }
-    PartyMean { s: m, keep: qpu_keep(m) }
+    PartyMean { s: m, se: party_sqrt(vv), keep: qpu_keep(m) }
 }
+
+pub fn qpu_party_shots(sigma: f64, pi: f64, shots: i64) -> PartyMean with Mut, Div, Panic {
+    qpu_party_shots_from(sigma, pi, shots, 1)
+}
+
+// Equal counts from |00> and |11>. The pooled correlator is their average.
+// The width is the stratified one, (v00 + v11) / 4, not the iid mixture.
+struct MixShot {
+    e: f64,
+    v: f64,
+}
+
+fn mix_setting(a: f64, b: f64, turn: f64, shots: i64, seed: i64) -> MixShot with Mut, Div, Panic {
+    let even = tape_counts(basis_term(turn, 0, 0, a, b), shots, seed)
+    let odd = tape_counts(basis_term(turn, 1, 1, a, b), shots, seed + 1)
+    let pooled = shot_add(even, odd)
+    let ve = corr_var(even)
+    let vo = corr_var(odd)
+    MixShot { e: qpu_corr(pooled), v: ve / 4.0 + vo / 4.0 }
+}
+
+fn shot_copy_node(eta: f64, pi: f64, shots: i64, seed: i64) -> NodeShot with Mut, Div, Panic {
+    let a0 = eta
+    let a1 = pi / 2.0 + eta
+    let b0 = pi / 4.0
+    let b1 = 0.0 - pi / 4.0
+    let m0 = mix_setting(a0, b0, pi, shots, seed)
+    let m1 = mix_setting(a0, b1, pi, shots, seed + 2)
+    let m2 = mix_setting(a1, b0, pi, shots, seed + 4)
+    let m3 = mix_setting(a1, b1, pi, shots, seed + 6)
+    NodeShot {
+        s: qpu_s(m0.e, m1.e, m2.e, m3.e),
+        v: m0.v + m1.v + m2.v + m3.v,
+    }
+}
+
+pub fn qpu_copy_shots(sigma: f64, pi: f64, shots: i64) -> PartyMean with Mut, Div, Panic {
+    var m = 0.0
+    var vv = 0.0
+    var i: i64 = 0
+    while i < 16 {
+        let eta = 2.0 * sigma * ry_gh_x(i)
+        let node = shot_copy_node(eta, pi, shots, 65 + 8 * i)
+        let w = ry_gh_w(i)
+        m = m + w * node.s
+        vv = vv + w * w * node.v
+        i = i + 1
+    }
+    PartyMean { s: m, se: party_sqrt(vv), keep: qpu_keep(m) }
+}
+
+// |01>, the single product state in ry_chsh_party.anti. One list per setting.
+fn shot_anti_node(eta: f64, pi: f64, shots: i64, seed: i64) -> NodeShot with Mut, Div, Panic {
+    let a0 = eta
+    let a1 = pi / 2.0 + eta
+    let b0 = pi / 4.0
+    let b1 = 0.0 - pi / 4.0
+    let c0 = tape_counts(basis_term(pi, 0, 1, a0, b0), shots, seed)
+    let c1 = tape_counts(basis_term(pi, 0, 1, a0, b1), shots, seed + 1)
+    let c2 = tape_counts(basis_term(pi, 0, 1, a1, b0), shots, seed + 2)
+    let c3 = tape_counts(basis_term(pi, 0, 1, a1, b1), shots, seed + 3)
+    let e0 = qpu_corr(c0)
+    let e1 = qpu_corr(c1)
+    let e2 = qpu_corr(c2)
+    let e3 = qpu_corr(c3)
+    NodeShot {
+        s: qpu_s(e0, e1, e2, e3),
+        v: corr_var(c0) + corr_var(c1) + corr_var(c2) + corr_var(c3),
+    }
+}
+
+pub fn qpu_anti_shots_from(sigma: f64, pi: f64, shots: i64, seed0: i64) -> PartyMean with Mut, Div, Panic {
+    var m = 0.0
+    var vv = 0.0
+    var i: i64 = 0
+    while i < 16 {
+        let eta = 2.0 * sigma * ry_gh_x(i)
+        let node = shot_anti_node(eta, pi, shots, seed0 + 4 * i)
+        let w = ry_gh_w(i)
+        m = m + w * node.s
+        vv = vv + w * w * node.v
+        i = i + 1
+    }
+    PartyMean { s: m, se: party_sqrt(vv), keep: qpu_keep(m) }
+}
+
+pub fn qpu_anti_shots(sigma: f64, pi: f64, shots: i64) -> PartyMean with Mut, Div, Panic {
+    qpu_anti_shots_from(sigma, pi, shots, 201)
+}
+
+// Four seed blocks, stride 8000. Block 0 is the stream already scored.
+// pair + 2 anti has expectation 0. One block can sit between 2 and 3
+// standard errors. The mean of the four is what has to sit inside 2.
+// se is the empirical standard error of that mean. plug is the same
+// width from Var(correlator) = (1 - e^2) / N, averaged across blocks.
+pub struct BlockRead {
+    pub g0: f64,
+    pub g1: f64,
+    pub g2: f64,
+    pub g3: f64,
+    pub a0: f64,
+    pub a1: f64,
+    pub a2: f64,
+    pub a3: f64,
+    pub id_se: f64,
+    pub id_plug: f64,
+    pub anti_se: f64,
+    pub anti_plug: f64,
+}
+
+fn gap_se(g0: f64, g1: f64, g2: f64, g3: f64) -> f64 with Mut, Div {
+    let m = (g0 + g1 + g2 + g3) / 4.0
+    let d0 = g0 - m
+    let d1 = g1 - m
+    let d2 = g2 - m
+    let d3 = g3 - m
+    let v = (d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3) / 3.0
+    party_sqrt(v / 4.0)
+}
+
+fn plug_se(v0: f64, v1: f64, v2: f64, v3: f64) -> f64 with Mut, Div {
+    party_sqrt((v0 + v1 + v2 + v3) / 16.0)
+}
+
+pub fn qpu_block_read(sigma: f64, pi: f64, shots: i64) -> BlockRead with Mut, Div, Panic {
+    var r: i64 = 0
+    var g0 = 0.0
+    var g1 = 0.0
+    var g2 = 0.0
+    var g3 = 0.0
+    var v0 = 0.0
+    var v1 = 0.0
+    var v2 = 0.0
+    var v3 = 0.0
+    var a0 = 0.0
+    var a1 = 0.0
+    var a2 = 0.0
+    var a3 = 0.0
+    var u0 = 0.0
+    var u1 = 0.0
+    var u2 = 0.0
+    var u3 = 0.0
+    while r < 4 {
+        let step = 8000 * r
+        let pair = qpu_party_shots_from(sigma, pi, shots, 1 + step)
+        let anti = qpu_anti_shots_from(sigma, pi, shots, 201 + step)
+        let g = pair.s + 2.0 * anti.s
+        let v = pair.se * pair.se + 4.0 * anti.se * anti.se
+        let u = anti.se * anti.se
+        if r == 0 {
+            g0 = g
+            v0 = v
+            a0 = anti.s
+            u0 = u
+        } else {
+            if r == 1 {
+                g1 = g
+                v1 = v
+                a1 = anti.s
+                u1 = u
+            } else {
+                if r == 2 {
+                    g2 = g
+                    v2 = v
+                    a2 = anti.s
+                    u2 = u
+                } else {
+                    g3 = g
+                    v3 = v
+                    a3 = anti.s
+                    u3 = u
+                }
+            }
+        }
+        r = r + 1
+    }
+    BlockRead {
+        g0: g0,
+        g1: g1,
+        g2: g2,
+        g3: g3,
+        a0: a0,
+        a1: a1,
+        a2: a2,
+        a3: a3,
+        id_se: gap_se(g0, g1, g2, g3),
+        id_plug: plug_se(v0, v1, v2, v3),
+        anti_se: gap_se(a0, a1, a2, a3),
+        anti_plug: plug_se(u0, u1, u2, u3),
+    }
+}
+
