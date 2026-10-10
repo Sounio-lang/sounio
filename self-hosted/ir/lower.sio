@@ -6236,6 +6236,64 @@ fn lowerer_rgn_body_worth_region(lo: &! Lowerer, first: i64, end: i64) -> bool w
     allocs >= 2 || (allocs >= 1 && jumps >= 1)
 }
 
+// #2355: evaluate, at `main`'s entry, every closed module-level initializer
+// the parser could not fold into BSS fill words (parser/ast.sio
+// ast_record_global_deferred_init; parser/items.sio items_expr_is_closed) --
+// above all struct literals, which used to be dropped, leaving a struct
+// global's handle slot at 0 so that any field access dereferenced handle 0.
+// lean_single has always evaluated global initializers at main's entry
+// (emit_global_inits_x86). Slots are
+// visited in BSS order, which is declaration order, so an initializer may read
+// a global declared above it. A name declared in several modules shares one
+// BSS slot (lowerer_preseed_external_bss_globals_mut dedups by name); the
+// first module's initializer wins, as for the folded words
+// (ast_global_var_init_count).
+fn lowerer_emit_deferred_global_inits_mut(lo: &! Lowerer) with Mut, Panic, Div, Alloc, IO {
+    let total = ast_global_deferred_init_count()
+    if ast_global_deferred_init_overflowed() {
+        print("error: more than 16384 module-level initializers need run-time evaluation; the rest would be left zero, so the compile is refused (#2355)\n")
+        lowerer_mark_hard_error(lo)
+        return
+    }
+    if total <= 0 && ast_global_decl_type_count() <= 0 { return }
+    var fi: i64 = 0
+    while fi < (*(*lo).module).fn_count {
+        let slot = ir_fn_get(&(*(*lo).module), fi)
+        if slot.compile_strategy == IR_STRATEGY_BSS_GLOBAL && slot.name.len > 0 {
+            let h = ast_name_hash(slot.name)
+            var k: i64 = 0
+            var found: i64 = 0 - 1
+            while k < total && found < 0 {
+                if ast_global_deferred_init_hash(k) == h {
+                    found = k
+                }
+                k = k + 1
+            }
+            if found >= 0 {
+                let p = ast_global_deferred_init_ptr(found) as *mut Expr
+                if p != (0 as *mut Expr) {
+                    let pair = (*lo).lower_expr_ref(&(*p))
+                    (*lo) = pair.0
+                    (*lo) = (*lo).emit(ir_store_global(pair.1, slot.param_count, slot.name))
+                }
+            } else if slot.returns_float != 1 {
+                // `var G: S` with no initializer: give it a zeroed struct, as
+                // `var s: S` gets for a local (#2667-repeat), instead of handle 0.
+                let st = (*lo).global_struct_type_name(slot.name)
+                if st.len > 0 {
+                    let slots = (*lo).struct_layout_slot_count(st)
+                    if slots > 0 {
+                        let dst = lowerer_fresh_reg_mut(lo)
+                        (*lo) = (*lo).emit(ir_alloc(dst, (*lo).aggregate_storage_bytes(slots)))
+                        (*lo) = (*lo).emit(ir_store_global(dst, slot.param_count, slot.name))
+                    }
+                }
+            }
+        }
+        fi = fi + 1
+    }
+}
+
 fn lowerer_lower_fn_item_mut(
     lo: &! Lowerer,
     name: Name,
@@ -6525,6 +6583,9 @@ lower_rss_mark("before_block")
     var rgn_type = ir_empty_name()
     var rgn_enter_idx: i64 = 0 - 1
     var rgn_tok: i64 = 0 - 1
+    if lowerer_name_is_main(name) && !fd.is_kernel && !fd.is_extern {
+        lowerer_emit_deferred_global_inits_mut(lo)
+    }
     var result_reg = lowerer_try_canonical_hello_block_mut(lo, &fd.body)
     if result_reg == IR_INVALID_REG {
         if lower_rgn_enabled() && (*(*lo).module).fn_count <= IR_MAX_FUNCS - 10
@@ -10018,7 +10079,16 @@ impl Lowerer {
     // scalars (`[Struct; N]`), Box, Knowledge, reference locals and BSS globals
     // keep the handle.
     fn emit_ident_aggregate_value_copy(self, name: Name, reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        if self.lookup_local(name) < 0 { return (self, reg) }
+        if self.lookup_local(name) < 0 {
+            // #2355: `x = G` / `G2 = G` from a struct-typed module global copies
+            // too, as lean_single does; storing the handle aliased the global.
+            let global_st = self.global_struct_type_name(name)
+            if global_st.len <= 0 { return (self, reg) }
+            if !self.struct_local_is_value_copyable(name, global_st) { return (self, reg) }
+            let global_slots = self.struct_layout_slot_count(global_st)
+            if global_slots <= 0 { return (self, reg) }
+            return self.emit_struct_value_copy_budgeted(reg, global_st, global_slots)
+        }
         if self.lookup_local_is_global(name) { return (self, reg) }
         let arr_len = self.lookup_local_fixed_array_len(name)
         if arr_len >= 0 {
@@ -10051,6 +10121,14 @@ impl Lowerer {
     //               straight at the epistemic gates.
     //   is_ref    — `&T` / `&!T` locals: aliasing is what a reference MEANS.
     //   is_global — BSS-backed globals use their own addressing.
+    // Struct type of an identifier used as a value: the local's, else (#2355)
+    // the declared type of a struct-typed module global.
+    fn ident_value_struct_type(self, name: Name) -> Name with Mut, Panic, Div, Alloc {
+        let local_st = self.lookup_local_struct_type(name)
+        if local_st.len > 0 { return local_st }
+        self.global_struct_type_name(name)
+    }
+
     fn struct_local_is_value_copyable(self, name: Name, type_name: Name) -> bool with Mut, Panic, Div, Alloc {
         if type_name.len <= 0 { return false }
         if ir_name_is_box(type_name) { return false }
@@ -15605,7 +15683,7 @@ impl Lowerer {
         match *base_opt {
             Some(base_expr) => {
                 if (*base_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*base_expr).name)
+                    let type_name = self.ident_value_struct_type((*base_expr).name)
                     return self.field_is_pointer_for_struct(type_name, field_name)
                 }
                 false
@@ -15645,7 +15723,7 @@ impl Lowerer {
         match *base_opt {
             Some(base_expr) => {
                 if (*base_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*base_expr).name)
+                    let type_name = self.ident_value_struct_type((*base_expr).name)
                     return self.field_is_box_for_struct(type_name, field_name)
                 }
                 false
@@ -15843,9 +15921,45 @@ impl Lowerer {
     // Receiver layout for a field access. Array indexing preserves the element
     // layout, including an array reached through another field access such as
     // `candidates[0].buffers[0]`.
+    // #2355: declared struct type of a module-level global, for a name that is
+    // NOT a local (a local of the same name shadows it). Globals are never bound
+    // as locals, so lookup_local_struct_type answered empty for `G` in `G.f`, and
+    // every field classifier fell back to "unknown owner": an `[f64; N]` field's
+    // element was read as raw integer bits (`G.values[1] - 1.0` -> 4.6e18 or a
+    // crash), and the slot index was guessed by field name across all structs.
+    fn global_struct_type_name(self, name: Name) -> Name with Mut, Panic, Div, Alloc {
+        let th = ast_global_decl_type_hash_of(name)
+        if th == 0 { return ir_empty_name() }
+        if self.lookup_local(name) >= 0 { return ir_empty_name() }
+        let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, name)
+        if fn_id < 0 || fn_id >= self.module.fn_count { return ir_empty_name() }
+        if ir_fn_get(&(*self.module), fn_id).compile_strategy != IR_STRATEGY_BSS_GLOBAL { return ir_empty_name() }
+        // Exactly one registered layout must carry that name hash; two distinct
+        // names on one hash resolve to nothing rather than to a guess.
+        var found = ir_empty_name()
+        var hits: i64 = 0
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            let tn = (*self.struct_layouts).entries[si as usize].type_name
+            if ast_name_hash(tn) == th {
+                if hits == 0 {
+                    found = tn
+                    hits = 1
+                } else if !ir_name_eq(found, tn) {
+                    hits = hits + 1
+                }
+            }
+            si = si + 1
+        }
+        if hits != 1 { return ir_empty_name() }
+        found
+    }
+
     fn expr_receiver_struct_type_ref(self, expr: &Expr) -> Name with Mut, Panic, Div, Alloc {
         if (*expr).kind == ExprKind::ExprIdent {
-            return self.lookup_local_struct_type((*expr).name)
+            let local_st = self.lookup_local_struct_type((*expr).name)
+            if local_st.len > 0 { return local_st }
+            return self.global_struct_type_name((*expr).name)
         }
         // Copilot review (PR #2516), round 11: this resolver had no arm for
         // ExprStructLit/ExprIf/ExprMatch/ExprBlock owners, so
@@ -19801,7 +19915,7 @@ impl Lowerer {
                         let array_copy_pair = lo.emit_fixed_array_value_copy(reg, fixed_array_len, rhs_array_elem_is_float)
                         lo = array_copy_pair.0
                         bind_reg = array_copy_pair.1
-                    } else if fixed_array_len < 0 && lo.struct_local_is_value_copyable((*rhs_ident).name, lo.lookup_local_struct_type((*rhs_ident).name)) && lo.struct_layout_slot_count(lo.lookup_local_struct_type((*rhs_ident).name)) > 0 {
+                    } else if fixed_array_len < 0 && lo.struct_local_is_value_copyable((*rhs_ident).name, lo.ident_value_struct_type((*rhs_ident).name)) && lo.struct_layout_slot_count(lo.ident_value_struct_type((*rhs_ident).name)) > 0 {
                         // #1475: a struct handle is a POINTER to arena storage, so the
                         // ir_copy below copies the HANDLE and `var p2 = p1` aliases —
                         // `p2.x = 99` was observable through `p1.x`, silently, exit 0.
@@ -19826,7 +19940,7 @@ impl Lowerer {
                         // how a new miscompile class gets born. Those fields keep the
                         // shared handle and are reported as still broken, consistent with
                         // the #1475 carve-out for `[Struct;N]` LOCALS.
-                        let st_name = lo.lookup_local_struct_type((*rhs_ident).name)
+                        let st_name = lo.ident_value_struct_type((*rhs_ident).name)
                         let slot_count = lo.struct_layout_slot_count(st_name)
                         let struct_copy_pair = lo.emit_struct_value_copy_budgeted(reg, st_name, slot_count)
                         lo = struct_copy_pair.0
@@ -20707,6 +20821,12 @@ impl Lowerer {
                     let src_st = lo.lookup_local_struct_type((*expr_box).name)
                     if src_st.len > 0 {
                         lo = lo.bind_local_struct_type(s.name, src_st, lo.lookup_local_struct_type_is_array_elem((*expr_box).name))
+                    } else {
+                        // #2355: `let c = G` on a struct-typed module global.
+                        let global_st = lo.global_struct_type_name((*expr_box).name)
+                        if global_st.len > 0 {
+                            lo = lo.bind_local_struct_type(s.name, global_st, false)
+                        }
                     }
                     let src_elem_layout = lo.lookup_local_tuple0_array_elem_layout((*expr_box).name)
                     if src_elem_layout >= 0 {
@@ -25601,6 +25721,11 @@ impl Lowerer {
                     let struct_type = self.lookup_local_struct_type((*recv).name)
                     if struct_type.len > 0 {
                         return struct_type
+                    }
+                    // #2355: `G.method()` on a struct-typed module global.
+                    let global_type = self.global_struct_type_name((*recv).name)
+                    if global_type.len > 0 {
+                        return global_type
                     }
                     // Primitive impl methods are registered under their builtin
                     // type names (`i64_er_add`), not under the bare method name.
