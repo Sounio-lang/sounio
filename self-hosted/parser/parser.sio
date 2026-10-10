@@ -980,10 +980,58 @@ fn parser_token_is_box(idx: i64) -> bool with Panic {
         && CURSOR_SOURCE[(s + 2) as usize] == 120 as i8
 }
 
+// Mirror parse_use_item / parse_type_path's finite import prefix. The flat
+// lexer discards newlines, so scanning until Newline/Semi leaks a glob or
+// path import into the next item's Box annotation. An explicit Box is only
+// the terminal path segment or a name in the selective import list; glob
+// imports do not name a Box. No `as` import aliases exist in this grammar.
+fn parser_prescan_next_non_newline(idx: i64, token_count: i64) -> i64 with Mut, Panic, Div {
+    var i = idx
+    while i < token_count && i < 2097152 && pt_read_kind(i) == TokenKind::Newline {
+        i = i + 1
+    }
+    i
+}
+
+fn parser_prescan_import_box(idx: i64, token_count: i64) -> bool with Mut, Panic, Div {
+    var i = parser_prescan_next_non_newline(idx, token_count)
+    if i >= token_count || i >= 2097152 { return false }
+    let first = pt_read_kind(i)
+    if first != TokenKind::Ident && !tk_is_keyword(first) { return false }
+    var terminal_box = parser_token_is_box(i)
+    i = parser_prescan_next_non_newline(i + 1, token_count)
+    while i < token_count && i < 2097152 && pt_read_kind(i) == TokenKind::ColonColon {
+        i = parser_prescan_next_non_newline(i + 1, token_count)
+        if i >= token_count || i >= 2097152 { return false }
+        let k = pt_read_kind(i)
+        if k == TokenKind::Star { return false }
+        if k == TokenKind::LBrace {
+            i = parser_prescan_next_non_newline(i + 1, token_count)
+            var imports_box = false
+            while i < token_count && i < 2097152 {
+                let item_kind = pt_read_kind(i)
+                if item_kind == TokenKind::RBrace { return imports_box }
+                if item_kind != TokenKind::Ident && !tk_is_keyword(item_kind) { return false }
+                if parser_token_is_box(i) { imports_box = true }
+                i = parser_prescan_next_non_newline(i + 1, token_count)
+                if i >= token_count || i >= 2097152 { return false }
+                let after_item = pt_read_kind(i)
+                if after_item == TokenKind::RBrace { return imports_box }
+                if after_item != TokenKind::Comma { return false }
+                i = parser_prescan_next_non_newline(i + 1, token_count)
+            }
+            return false
+        }
+        if k != TokenKind::Ident && !tk_is_keyword(k) { return false }
+        terminal_box = parser_token_is_box(i)
+        i = parser_prescan_next_non_newline(i + 1, token_count)
+    }
+    terminal_box
+}
+
 pub fn parser_prescan_user_box(token_count: i64) with Mut, Panic, Div {
     PARSER_USER_BOX = 0
     var depth: i64 = 0
-    var in_use = false
     var i: i64 = 0
     while i < token_count && i < 2097152 {
         let k = pt_read_kind(i)
@@ -992,14 +1040,11 @@ pub fn parser_prescan_user_box(token_count: i64) with Mut, Panic, Div {
         } else if k == TokenKind::RBrace {
             if depth > 0 { depth = depth - 1 }
         } else if k == TokenKind::Use && depth == 0 {
-            in_use = true
-        } else if k == TokenKind::Semi || k == TokenKind::Newline {
-            if depth == 0 { in_use = false }
-        } else if k == TokenKind::Ident && parser_token_is_box(i) {
-            if in_use {
+            if parser_prescan_import_box(i + 1, token_count) {
                 PARSER_USER_BOX = 1
                 return
             }
+        } else if k == TokenKind::Ident && parser_token_is_box(i) {
             if depth == 0 && i > 0 {
                 var j = i - 1
                 while j > 0 && pt_read_kind(j) == TokenKind::Newline { j = j - 1 }
@@ -1010,7 +1055,6 @@ pub fn parser_prescan_user_box(token_count: i64) with Mut, Panic, Div {
                 }
             }
         }
-        if in_use && depth == 0 && k == TokenKind::RBrace { in_use = false }
         i = i + 1
     }
 }
