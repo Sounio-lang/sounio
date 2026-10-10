@@ -5648,6 +5648,24 @@ fn lower_type_expr_is_rgn_numeric(te: &TypeExpr) -> bool with Mut, Panic, Div {
     lower_type_expr_is_f64(te) || lower_type_expr_is_integer(te) || lower_type_expr_is_bool(te)
 }
 
+// #2830: stamp is_unsigned_int on a parameter bound through lowerer_bind_local_mut
+// (which zeroes it). The other parameter binder, Lowerer::lower_fn_params_ref,
+// already stamps it (#2339); this one -- the path lowerer_lower_fn_item_mut
+// actually takes -- did not, so `a >> k`, `a / k` and `a > b` on a `u64`
+// parameter stayed signed while the same code on a `let a: u64` local did not.
+fn lowerer_mark_local_unsigned_int_mut(lo: &! Lowerer, name: Name) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).is_unsigned_int).values[i as usize] = 1
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
 fn lowerer_mark_local_wide_bits_mut(
     lo: &! Lowerer,
     name: Name,
@@ -5973,6 +5991,9 @@ fn lowerer_lower_fn_params_mut(
                 }
 
                 lowerer_bind_local_mut(lo, (*list).head.name, param_value_reg, (*list).head.is_self_mut)
+                if lower_type_expr_is_unsigned_int(&(*list).head.ty) {
+                    lowerer_mark_local_unsigned_int_mut(lo, (*list).head.name)
+                }
                 let param_tuple_float_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                 let param_tuple_arr_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                 lowerer_mark_local_tuple_masks_mut(lo, (*list).head.name, param_tuple_float_mask, param_tuple_arr_mask)
@@ -24892,6 +24913,14 @@ impl Lowerer {
         let both_typed_unsigned_p = lhs_unsigned_p && rhs_unsigned_p
         let literal_pair_with_unsigned_p =
             (lhs_is_intlit_p && rhs_unsigned_p) || (rhs_is_intlit_p && lhs_unsigned_p)
+        // #2830: a right shift's result signedness is the LEFT operand's alone;
+        // the amount's type does not matter. `fn shr(a: u64, k: i64) { a >> k }`
+        // must be logical. (The guard above is about the opposite shape -- a
+        // signed left operand with an unsigned amount, `(0-8) >> sh`, which
+        // stays arithmetic, and still does: this only looks at the left side.)
+        if e.bin_op == BinaryOp::OpShr && lhs_unsigned_p {
+            final_op = BinaryOp::OpUShr
+        }
         if both_typed_unsigned_p || literal_pair_with_unsigned_p {
             if e.bin_op == BinaryOp::OpDiv {
                 final_op = BinaryOp::OpUDiv
@@ -24899,6 +24928,30 @@ impl Lowerer {
                 final_op = BinaryOp::OpURem
             } else if e.bin_op == BinaryOp::OpShr {
                 final_op = BinaryOp::OpUShr
+            }
+            // #2830: unsigned < <= > >=. BinaryOp has no unsigned compares and every
+            // backend emits setl/setg (signed), so `a > 1` was false for a u64 with
+            // bit 63 set. Flipping bit 63 of both operands maps unsigned order onto
+            // signed order exactly (x <u y  <=>  (x ^ MIN) <s (y ^ MIN)), so the
+            // existing signed compare gives the unsigned answer on every backend
+            // and through const_prop, with no new opcode. == and != need nothing.
+            if !lhs_expr_is_float && !rhs_expr_is_float
+                && (e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
+                    || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe) {
+                let pb = lo3.fresh_reg()
+                var lo_u = pb.0
+                let bias_reg = pb.1
+                lo_u = lo_u.emit(ir_load_imm(bias_reg, (0 - 9223372036854775807) - 1))
+                let pl = lo_u.fresh_reg()
+                lo_u = pl.0
+                let lhs_b = pl.1
+                lo_u = lo_u.emit(ir_binop(lhs_b, lhs, BinaryOp::OpBitXor, bias_reg))
+                let pr = lo_u.fresh_reg()
+                lo_u = pr.0
+                let rhs_b = pr.1
+                lo_u = lo_u.emit(ir_binop(rhs_b, rhs, BinaryOp::OpBitXor, bias_reg))
+                lo_u = lo_u.emit(ir_binop(dst, lhs_b, e.bin_op, rhs_b))
+                return (lo_u, dst)
             }
         }
         let lo4 = lo3.emit(ir_binop_typed(dst, lhs, final_op, rhs, lhs_expr_is_float, rhs_expr_is_float))
