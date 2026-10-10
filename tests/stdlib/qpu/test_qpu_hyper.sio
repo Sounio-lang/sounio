@@ -1,0 +1,175 @@
+//@ run-pass
+// Hypercomplex witness.
+// H_ij_k  oct_mul(i, j) = k
+// H_fano  associator norm of (e1, e2, e4) is large; of (i, j, k) is zero
+// H_u     U(i) U(j) = U(k), U(1) = I, |det U(i)| = 1
+// H_zero  sed_mul of the known zero-divisor pair has norm zero
+// H_amp   (U_i U_j) U_k and U_i (U_j U_k) agree entrywise
+// The amplitude associator is matrix multiplication. No statevector.
+
+use math::octonion::{Octonion, oct, oct_mul}
+use qpu::hyper::{
+    C64,
+    U2,
+    qpu_assoc_norm,
+    qpu_quat_u,
+    qpu_u_mul,
+    qpu_zero_divisor_norm,
+}
+
+fn abs1(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn max2(p: f64, q: f64) -> f64 {
+    if p > q { p } else { q }
+}
+
+fn all3(x: bool, y: bool, z: bool) -> bool {
+    if x {
+        if y { z } else { false }
+    } else {
+        false
+    }
+}
+
+fn oct_span(p: Octonion, q: Octonion) -> f64 {
+    let d0 = abs1(p.a - q.a)
+    let d1 = abs1(p.b - q.b)
+    let d2 = abs1(p.c - q.c)
+    let d3 = abs1(p.d - q.d)
+    let d4 = abs1(p.e - q.e)
+    let d5 = abs1(p.f - q.f)
+    let d6 = abs1(p.g - q.g)
+    let d7 = abs1(p.h - q.h)
+    let m0 = max2(d0, d1)
+    let m1 = max2(d2, d3)
+    let m2 = max2(d4, d5)
+    let m3 = max2(d6, d7)
+    max2(max2(m0, m1), max2(m2, m3))
+}
+
+fn c_span(p: C64, q: C64) -> f64 {
+    max2(abs1(p.re - q.re), abs1(p.im - q.im))
+}
+
+fn u_span(p: U2, q: U2) -> f64 {
+    let s0 = c_span(p.a, q.a)
+    let s1 = c_span(p.b, q.b)
+    let s2 = c_span(p.c, q.c)
+    let s3 = c_span(p.d, q.d)
+    max2(max2(s0, s1), max2(s2, s3))
+}
+
+fn t_mul(p: C64, q: C64) -> C64 {
+    C64 {
+        re: p.re * q.re - p.im * q.im,
+        im: p.re * q.im + p.im * q.re,
+    }
+}
+
+fn t_det(u: U2) -> C64 {
+    let ad = t_mul(u.a, u.d)
+    let bc = t_mul(u.b, u.c)
+    C64 { re: ad.re - bc.re, im: ad.im - bc.im }
+}
+
+fn hypot2(re: f64, im: f64) -> f64 with Mut, Div {
+    let sq = re * re + im * im
+    if sq <= 0.0 { return 0.0 }
+    var guess = sq
+    var step = 0
+    while step < 24 {
+        guess = 0.5 * (guess + sq / guess)
+        step = step + 1
+    }
+    guess
+}
+
+fn u_eye() -> U2 {
+    U2 {
+        a: C64 { re: 1.0, im: 0.0 },
+        b: C64 { re: 0.0, im: 0.0 },
+        c: C64 { re: 0.0, im: 0.0 },
+        d: C64 { re: 1.0, im: 0.0 },
+    }
+}
+
+fn check(name: string, ok: bool) -> i32 with IO {
+    if ok {
+        print(name)
+        print(": PASS\n")
+        return 0
+    }
+    print(name)
+    print(": FAIL\n")
+    return 1
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    var fail = 0
+    let tol12 = 0.000000000001
+    let tol9 = 0.000000001
+
+    // Basis: index 1 = i, 2 = j, 3 = k, 4 = l.
+    let e1 = oct(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    let e2 = oct(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    let e3 = oct(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+    let e4 = oct(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+
+    let ij = oct_mul(e1, e2)
+    fail = fail + check("H_ij_k", oct_span(ij, e3) < tol12)
+
+    let n_fano = qpu_assoc_norm(e1, e2, e4)
+    let n_quat = qpu_assoc_norm(e1, e2, e3)
+    let fano_big = n_fano > 0.5
+    let quat_small = n_quat < tol9
+    fail = fail + check("H_fano", if fano_big { quat_small } else { false })
+
+    let ui = qpu_quat_u(0.0, 1.0, 0.0, 0.0)
+    let uj = qpu_quat_u(0.0, 0.0, 1.0, 0.0)
+    let uk = qpu_quat_u(0.0, 0.0, 0.0, 1.0)
+    let u1 = qpu_quat_u(1.0, 0.0, 0.0, 0.0)
+    let ij_gate = qpu_u_mul(ui, uj)
+    let gate_ok = u_span(ij_gate, uk) < tol12
+    let id_ok = u_span(u1, u_eye()) < tol12
+    let det_i = t_det(ui)
+    let det_mod = hypot2(det_i.re, det_i.im)
+    let det_ok = abs1(det_mod - 1.0) < tol12
+    fail = fail + check("H_u", all3(gate_ok, id_ok, det_ok))
+
+    let n_zero = qpu_zero_divisor_norm()
+    fail = fail + check("H_zero", n_zero < tol9)
+
+    let left_alg = oct_mul(ij, e3)
+    let right_alg = oct_mul(e1, oct_mul(e2, e3))
+    let u_left = qpu_quat_u(left_alg.a, left_alg.b, left_alg.c, left_alg.d)
+    let u_right = qpu_quat_u(right_alg.a, right_alg.b, right_alg.c, right_alg.d)
+    let jk_gate = qpu_u_mul(uj, uk)
+    let amp_l = qpu_u_mul(ij_gate, uk)
+    let amp_r = qpu_u_mul(ui, jk_gate)
+    let amp_gap = u_span(amp_l, amp_r)
+    let img_gap = u_span(u_left, u_right)
+    let amp_ok = amp_gap < tol9
+    let img_ok = img_gap < tol9
+    fail = fail + check("H_amp", if amp_ok { img_ok } else { false })
+
+    print("ASSOC_E124 ")
+    print_f64(n_fano)
+    print("\n")
+    print("ASSOC_IJK ")
+    print_f64(n_quat)
+    print("\n")
+    print("ZERO_DIV ")
+    print_f64(n_zero)
+    print("\n")
+    print("AMP_DIFF ")
+    print_f64(amp_gap)
+    print("\n")
+
+    if fail == 0 {
+        print("ALL_PASS\n")
+        return 0
+    }
+    return 1
+}
