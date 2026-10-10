@@ -7,9 +7,11 @@ WORKDIR /home/sounio
 RUN apt-get update && apt-get install -y \
     python3.12 \
     python3.12-dev \
+    python3.12-venv \
     python3-pip \
     git \
     curl \
+    jq \
     wget \
     vim \
     build-essential \
@@ -18,32 +20,30 @@ RUN apt-get update && apt-get install -y \
 # Create sounio user (optional, for non-root execution)
 RUN useradd -m -s /bin/bash sounio || true
 
-# Copy souc binary to /usr/local/bin/
-COPY bin/souc /usr/local/bin/souc
-RUN chmod +x /usr/local/bin/souc
-
-# Copy stdlib to /opt/sounio/stdlib/
-COPY stdlib /opt/sounio/stdlib
-
-# Set environment variables
-ENV SOUNIO_STDLIB_PATH=/opt/sounio/stdlib
-ENV SOUC=/usr/local/bin/souc
+# Preview compiler distribution supports Linux x86_64.
+RUN test "$(uname -m)" = x86_64
+ENV SOUC=/opt/sounio/bin/souc
 ENV PYTHONUNBUFFERED=1
 
-# Install Jupyter Lab
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir jupyter-lab jupyterlab ipykernel
+# Install published, checksum-pinned Python/Jupyter wheels into an owned venv.
+# The fetcher needs only the release catalog, not either in-tree package.
+COPY ecosystem/external-releases.json /opt/sounio-consumer/ecosystem/external-releases.json
+COPY scripts/ci/fetch_external_ecosystem.py /opt/sounio-consumer/scripts/ci/fetch_external_ecosystem.py
+RUN python3.12 /opt/sounio-consumer/scripts/ci/fetch_external_ecosystem.py /tmp/sounio-compiler --suffix .tar.gz && \
+    mkdir -p /opt/sounio && \
+    tar -xzf /tmp/sounio-compiler/madaros-distribution.tar.gz --strip-components=1 -C /opt/sounio && \
+    python3.12 /opt/sounio/verify-distribution.py --verify /opt/sounio && \
+    rm -rf /tmp/sounio-compiler
+ENV PATH="/opt/sounio/bin:${PATH}"
 
-# Install sounio-py (pure Python, from local path)
-COPY ecosystem/sounio-py /tmp/sounio-py
-RUN cd /tmp/sounio-py && pip install --no-cache-dir -e . && rm -rf /tmp/sounio-py
-
-# Install sounio-jupyter (from local path)
-COPY ecosystem/sounio-jupyter /tmp/sounio-jupyter
-RUN cd /tmp/sounio-jupyter && pip install --no-cache-dir -e . && rm -rf /tmp/sounio-jupyter
+RUN python3.12 -m venv /opt/sounio-python && \
+    python3.12 /opt/sounio-consumer/scripts/ci/fetch_external_ecosystem.py /tmp/sounio-wheels --suffix .whl && \
+    /opt/sounio-python/bin/python -m pip install --no-cache-dir jupyterlab /tmp/sounio-wheels/*.whl && \
+    rm -rf /tmp/sounio-wheels
+ENV PATH="/opt/sounio-python/bin:${PATH}"
 
 # Install jupyter kernel spec for sounio
-RUN python3.12 -m sounio_kernel.install
+RUN python -c "import json, sys; from pathlib import Path; from sounio_kernel import kernelspec; p = Path(sys.prefix) / 'share/jupyter/kernels/sounio'; p.mkdir(parents=True, exist_ok=True); (p / 'kernel.json').write_text(json.dumps(kernelspec()))"
 
 # Copy drug-discovery examples
 COPY ecosystem/drug-discovery/examples /home/sounio/examples

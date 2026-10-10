@@ -3,11 +3,7 @@
 # Allow root to run Jupyter
 c.ServerApp.allow_root = True
 
-# Set authentication token
-c.ServerApp.token = 'sounio'
-
-# Disable password
-c.ServerApp.password = ''
+# Keep Jupyter's generated authentication token. Never ship a shared token.
 
 # Set default kernel
 c.ServerApp.default_kernel_name = 'sounio'

@@ -1,0 +1,61 @@
+name: Publish tested ecosystem image
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ecosystem-image-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/sounio-lang/sounio-jupyter
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Identify this publication
+        run: echo "IMAGE_TAG=$IMAGE:sha-$GITHUB_SHA-run-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Build pinned consumer image
+        run: |
+          docker build -f ecosystem/docker/Dockerfile -t "$IMAGE_TAG" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" .
+      - name: Validate installed distribution
+        run: |
+          docker run --rm "$IMAGE_TAG" python /opt/sounio/verify-distribution.py --verify /opt/sounio
+          docker run --rm "$IMAGE_TAG" python -c "from sounio import SounioExecutor; r = SounioExecutor().run_code('fn main() with IO { print_int(42) }'); assert r.ok and '42' in r.stdout, r"
+          docker run --rm -v "$PWD/ecosystem/docker/test_installed_kernel.py:/tmp/test_installed_kernel.py:ro" "$IMAGE_TAG" python /tmp/test_installed_kernel.py
+      - name: Authenticate to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Push tested image and verify registry digest
+        run: |
+          set -euo pipefail
+          tested_id=$(docker image inspect "$IMAGE_TAG" --format '{{.Id}}')
+          docker push "$IMAGE_TAG"
+          reference=$(docker image inspect "$IMAGE_TAG" --format '{{index .RepoDigests 0}}')
+          case "$reference" in "$IMAGE"@sha256:*) ;; *) echo 'Missing expected registry digest' >&2; exit 1 ;; esac
+          docker pull "$reference"
+          test "$(docker image inspect "$reference" --format '{{.Id}}')" = "$tested_id"
+          docker run --rm -v "$PWD/ecosystem/docker/test_installed_kernel.py:/tmp/test_installed_kernel.py:ro" "$reference" python /tmp/test_installed_kernel.py
+          jq -n --arg image "$reference" --arg tag "$IMAGE_TAG" --arg revision "$GITHUB_SHA" \
+            --arg run "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --slurpfile releases ecosystem/external-releases.json \
+            '{image:$image,tag:$tag,consumer_revision:$revision,run:$run,external_releases:$releases[0],validation:"installed compiler and real Jupyter kernel passed; digest pull matches tested image"}' > image-receipt.json
+          printf 'Published and verified: `%s`\n' "$reference" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ecosystem-image-receipt
+          path: image-receipt.json
+          if-no-files-found: error
+      - name: Logout
+        if: always()
+        run: docker logout ghcr.io
