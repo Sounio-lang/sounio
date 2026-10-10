@@ -689,6 +689,11 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print(" virtual registers but IR_MAX_VREGS is ")
         print_int(IR_LOWER_HARD_ERROR_LIMIT)
         print("\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 7 {
+        print("  cause: function `")
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
+        print("` passes a capturing closure where its captured values cannot be\n")
+        print("         supplied; the capture would read as 0, so it is refused (#1542).\n")
     } else if IR_LOWER_HARD_ERROR_REASON == 6 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
@@ -1233,7 +1238,12 @@ var LOWER_FN_TUPLE_ARR_SLOT: [i64; 32768] = [-1; 32768]
 // not once per module, since fo_preregister_program_items_multipass calls the
 // collector once per loaded module and must keep accumulating within one
 // compilation.
+var LOWER_HOF_TRANSPARENT_HASH: [i64; 4096] = [0; 4096]
+var LOWER_HOF_TRANSPARENT_LEN: [i64; 4096] = [0; 4096]
+var LOWER_HOF_TRANSPARENT_COUNT: i64 = 0
+
 pub fn lower_fn_tuple_arr_reset() with Mut {
+    LOWER_HOF_TRANSPARENT_COUNT = 0
     LOWER_FN_TUPLE_ARR_COUNT = 0
     // Clear the open-addressing index too, not just the dense count: a stale
     // LOWER_FN_TUPLE_ARR_SLOT entry points at a dense index that a later
@@ -6704,6 +6714,103 @@ fn lowerer_lower_impl_methods_mut(
 // Nested helper expand needs callees already in FO_XFER. Source order may put
 // callers first — one pass leaves them without FO; re-register until nested
 // expands see leaf helpers. Does not lift the >2-param skip.
+// #1542: functions whose body is exactly `f(p1, .., pn)` where f is the first
+// parameter and p1..pn the remaining parameters in order. A capturing closure
+// passed to such a function is called directly with its captures prepended
+// (lower_hof_captured_closure_*_call). Decided from the AST during
+// preregistration, before any body is lowered: the IR-side check
+// (lower_function_is_transparent_hof) only sees a callee whose body has
+// already been lowered and flushed, and lowering inserts parameter copies, so
+// it never matched and every capture read as 0.
+
+fn lower_hof_transparent_known(n: Name) -> bool with Mut, Panic, Div {
+    let h = fo_name_hash(n)
+    var i: i64 = 0
+    while i < LOWER_HOF_TRANSPARENT_COUNT {
+        if LOWER_HOF_TRANSPARENT_HASH[i as usize] == h && LOWER_HOF_TRANSPARENT_LEN[i as usize] == n.len { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn lower_fn_def_is_transparent_hof_ast(fd: &FnDef) -> bool with Mut, Panic, Div {
+    var stmt_expr: Option<Box<Expr>> = None
+    match (*fd).body.stmts {
+        Some(sl) => {
+            match (*sl).tail {
+                Some(_) => { return false }
+                None => {}
+            }
+            if (*sl).head.kind != StmtKind::StmtExpr { return false }
+            stmt_expr = (*sl).head.expr
+        }
+        None => { return false }
+    }
+    var call_ptr = 0 as *mut Expr
+    match stmt_expr {
+        Some(eb) => {
+            if (*eb).kind == ExprKind::ExprReturn {
+                match (*eb).left {
+                    Some(inner) => { call_ptr = inner as *mut Expr }
+                    None => { return false }
+                }
+            } else {
+                call_ptr = eb as *mut Expr
+            }
+        }
+        None => { return false }
+    }
+    if (*call_ptr).kind != ExprKind::ExprCall { return false }
+    let first = match (*fd).params {
+        Some(pl) => pl,
+        None => { return false }
+    }
+    if (*first).head.ty.kind != TypeExprKind::TypeFn { return false }
+    match (*call_ptr).left {
+        Some(callee) => {
+            if (*callee).kind != ExprKind::ExprIdent { return false }
+            if !ir_name_eq((*callee).name, (*first).head.name) { return false }
+        }
+        None => { return false }
+    }
+    var pcur = (*first).tail
+    var acur = (*call_ptr).args
+    var nparams: i64 = 0
+    while true {
+        match pcur {
+            Some(pn) => {
+                match acur {
+                    Some(an) => {
+                        if (*an).head.kind != ExprKind::ExprIdent { return false }
+                        if !ir_name_eq((*an).head.name, (*pn).head.name) { return false }
+                        acur = (*an).tail
+                    }
+                    None => { return false }
+                }
+                pcur = (*pn).tail
+                nparams = nparams + 1
+            }
+            None => {
+                match acur {
+                    Some(_) => { return false }
+                    None => {}
+                }
+                break
+            }
+        }
+    }
+    nparams >= 1
+}
+
+fn lower_hof_transparent_note(name: Name, fd: &FnDef) with Mut, Panic, Div {
+    if lower_hof_transparent_known(name) { return }
+    if !lower_fn_def_is_transparent_hof_ast(fd) { return }
+    if LOWER_HOF_TRANSPARENT_COUNT >= 4096 { return }
+    LOWER_HOF_TRANSPARENT_HASH[LOWER_HOF_TRANSPARENT_COUNT as usize] = fo_name_hash(name)
+    LOWER_HOF_TRANSPARENT_LEN[LOWER_HOF_TRANSPARENT_COUNT as usize] = name.len
+    LOWER_HOF_TRANSPARENT_COUNT = LOWER_HOF_TRANSPARENT_COUNT + 1
+}
+
 fn lowerer_fo_preregister_pure_fns_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>
@@ -6717,6 +6824,7 @@ fn lowerer_fo_preregister_pure_fns_mut(
                     let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
                     match *fn_def_opt_ref {
                         Some(fd) => {
+                            lower_hof_transparent_note(head.name, &(*fd))
                             let lo_x = (*lo).fo_register_pure_fn_transfer(head.name, &(*fd))
                             (*lo) = lo_x
                         }
@@ -21474,26 +21582,77 @@ impl Lowerer {
         }
     }
 
+    // Parameter index whose value `reg` holds in `func`, following IrCopy chains
+    // recorded in `alias_regs`/`alias_params` (#1542: the body copies a parameter
+    // into a fresh register before using it -- `r4 = copy r0; call_indirect r4`
+    // -- so comparing against param_regs alone never matched and every HOF was
+    // classified as opaque). -1 when `reg` is not a parameter value.
+    fn hof_param_index_of(self, func: &IrFunction, reg: i64, alias_regs: &[i64; 64], alias_params: &[i64; 64], alias_count: i64) -> i64 with Mut, Panic, Div {
+        var p: i64 = 0
+        while p < (*func).param_count && p < 64 {
+            if (*func).param_regs[p as usize] == reg { return p }
+            p = p + 1
+        }
+        var a: i64 = 0
+        while a < alias_count {
+            if (*alias_regs)[a as usize] == reg { return (*alias_params)[a as usize] }
+            a = a + 1
+        }
+        0 - 1
+    }
+
     fn lower_function_is_transparent_hof(self, fn_id: i64) -> bool with Mut, Panic, Div, Alloc {
         if fn_id < 0 || fn_id >= (*self.module).fn_count { return false }
         let func = ir_fn_get(&(*self.module), fn_id as usize)
+        if lower_hof_transparent_known(func.name) { return true }
         if func.param_count < 2 { return false }
+        var alias_regs: [i64; 64] = [0; 64]
+        var alias_params: [i64; 64] = [0; 64]
+        var alias_count: i64 = 0
         var call_count: i64 = 0
         var call_dst: i64 = IR_INVALID_REG
+        // Copies of the call result: region reclamation returns through
+        // `ret = copy call_dst; __rgn_exit_scalar(tok, ret); return ret`.
+        var ret_alias: [i64; 8] = [0 - 1; 8]
+        var ret_alias_count: i64 = 0
         var saw_return = false
         var i: i64 = 0
         while i < func.instr_count {
             let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
-            if instr.op == IrOpcode::IrCallIndirect {
+            var copies_result = false
+            if instr.op == IrOpcode::IrCopy && call_dst != IR_INVALID_REG {
+                if instr.src1 == call_dst { copies_result = true }
+                var ra: i64 = 0
+                while ra < ret_alias_count {
+                    if ret_alias[ra as usize] == instr.src1 { copies_result = true }
+                    ra = ra + 1
+                }
+            }
+            if copies_result {
+                if ret_alias_count >= 8 { return false }
+                ret_alias[ret_alias_count as usize] = instr.dst
+                ret_alias_count = ret_alias_count + 1
+            } else if instr.op == IrOpcode::IrCopy {
+                let pi = self.hof_param_index_of(&func, instr.src1, &alias_regs, &alias_params, alias_count)
+                if pi >= 0 {
+                    if alias_count >= 64 { return false }
+                    alias_regs[alias_count as usize] = instr.dst
+                    alias_params[alias_count as usize] = pi
+                    alias_count = alias_count + 1
+                } else if self.hof_param_index_of(&func, instr.dst, &alias_regs, &alias_params, alias_count) >= 0 {
+                    // a parameter register is overwritten: no longer transparent
+                    return false
+                }
+            } else if instr.op == IrOpcode::IrCallIndirect {
                 call_count = call_count + 1
-                if instr.src1 != func.param_regs[0] { return false }
+                if self.hof_param_index_of(&func, instr.src1, &alias_regs, &alias_params, alias_count) != 0 { return false }
                 if instr.arg_count != func.param_count - 1 { return false }
                 var cur = instr.call_args
                 var pidx: i64 = 1
                 while pidx < func.param_count {
                     match cur {
                         Some(arg_node) => {
-                            if (*arg_node).head != func.param_regs[pidx as usize] { return false }
+                            if self.hof_param_index_of(&func, (*arg_node).head, &alias_regs, &alias_params, alias_count) != pidx { return false }
                             cur = (*arg_node).tail
                         }
                         _ => return false,
@@ -21506,8 +21665,13 @@ impl Lowerer {
                 }
                 call_dst = instr.dst
             } else if instr.op == IrOpcode::IrReturn {
-                if instr.src1 == call_dst {
+                if instr.src1 == call_dst && call_dst != IR_INVALID_REG {
                     saw_return = true
+                }
+                var rb: i64 = 0
+                while rb < ret_alias_count {
+                    if ret_alias[rb as usize] == instr.src1 { saw_return = true }
+                    rb = rb + 1
                 }
             }
             i = i + 1
@@ -21548,7 +21712,10 @@ impl Lowerer {
                 let pair_dst = lo.fresh_reg()
                 let lo_dst = pair_dst.0
                 let dst = pair_dst.1
-                let lo_call = lo_dst.emit(ir_call(dst, closure_fn_id, callee_name, arglist, total))
+                // The call targets the closure, not the HOF: an IrCall carrying the HOF's
+                // name is re-bound to the HOF by name when calls are patched
+                // (#1542: apply1 was called with the captured value as `f`, SIGSEGV).
+                let lo_call = lo_dst.emit(ir_call(dst, closure_fn_id, ir_empty_name(), arglist, total))
                 (lo_call, dst)
             }
             _ => {
@@ -21602,7 +21769,10 @@ impl Lowerer {
                 let pair_dst = lo.fresh_reg()
                 let lo_dst = pair_dst.0
                 let dst = pair_dst.1
-                let lo_call = lo_dst.emit(ir_call(dst, closure_fn_id, callee_name, arglist, total))
+                // The call targets the closure, not the HOF: an IrCall carrying the HOF's
+                // name is re-bound to the HOF by name when calls are patched
+                // (#1542: apply1 was called with the captured value as `f`, SIGSEGV).
+                let lo_call = lo_dst.emit(ir_call(dst, closure_fn_id, ir_empty_name(), arglist, total))
                 (lo_call, dst)
             }
             _ => {
@@ -27566,6 +27736,26 @@ impl Lowerer {
         var captures = empty_capture_list()
         if saved_allow_direct_capture {
             captures = lo.scan_captures_opt(&e.closure_body, &e.closure_params, captures)
+        } else {
+            // #1542: the capture would be read as 0 here -- the silent wrong value
+            // (`apply2(|x, y| x * y + bias, 5, 6)` gave 30, not 130). Refuse.
+            var escaping = empty_capture_list()
+            escaping = lo.scan_captures_opt(&e.closure_body, &e.closure_params, escaping)
+            if escaping.count > 0 {
+                print("error: a capturing closure is passed where Madaros cannot supply its captured values (a fn value, or a higher-order function that is not a single direct `f(args)` forward); the capture would read as 0 -- pass the captured value as a parameter or bind the closure and call it directly (fail-closed, #1542)\n")
+                // Hard error: report_fatal_lowering_error alone does not stop the
+                // build (the module is replaced and an ELF with a ud2 stub is
+                // still written), which is how this refusal used to pass rc=0.
+                var loe = lo
+                if IR_LOWER_HARD_ERROR_REASON == 0 {
+                    IR_LOWER_HARD_ERROR_REASON = 7
+                    IR_LOWER_HARD_ERROR_NEEDED = 0
+                    IR_LOWER_HARD_ERROR_LIMIT = 0
+                    ir_copy_name_to_flat(&(*saved_func).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+                }
+                lowerer_mark_hard_error(&! loe)
+                return loe.emit_unit()
+            }
         }
         if captures.count > 0 {
             if !lo.allow_direct_capturing_closure_literal {
