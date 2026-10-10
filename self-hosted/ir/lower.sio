@@ -487,6 +487,10 @@ var IR_LOWER_HARD_ERROR_REASON: i64 = 0
 var IR_LOWER_ERROR_FIRST_FN_BUF: [i8; 128]
 var IR_LOWER_ERROR_FIRST_FN_LEN: i64 = 0
 var IR_LOWER_ERROR_TOTAL: i64 = 0
+// Compile-scope latch for every lowering diagnostic. It survives per-module
+// Lowerer resets and is cleared only at top-level compile entry.
+var IR_LOWER_COMPILE_ERROR_LATCH: bool = false
+var IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE: bool = false
 // WHICH PRESEED STAGE first turned had_error true, and for the two that loop,
 // on which module index. The counters above proved the flag goes true without
 // any `had_error = true` in this file firing, so the write happens inside one
@@ -563,6 +567,9 @@ pub fn lower_note_unresolved(n: Name) with Mut {
 }
 
 pub fn lower_note_error(site: i64, n: Name) with Mut {
+    if IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE {
+        IR_LOWER_COMPILE_ERROR_LATCH = true
+    }
     IR_LOWER_ERROR_TOTAL = IR_LOWER_ERROR_TOTAL + 1
     if IR_LOWER_ERROR_TOTAL <= 64 {
         IR_LOWER_ERR_SITES[(IR_LOWER_ERROR_TOTAL - 1) as usize] = site
@@ -573,7 +580,7 @@ pub fn lower_note_error(site: i64, n: Name) with Mut {
 }
 var IR_LOWER_HARD_ERROR_LIMIT: i64 = 0
 
-pub fn lower_hard_error_pending() -> bool { IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
+pub fn lower_hard_error_pending() -> bool { (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
 
 // Print what the flag knows, or say plainly that it knows nothing — never
 // silence. Called by the consumers that used to print a bare "ir_summary_failed".
@@ -640,6 +647,7 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         }
         print("\n")
     }
+    if IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH { print("  cause: lowering reported an error in this compilation; refusing binary publication ") }
     if LOWER_USE_MODULE_OVERFLOWED {
         print("  cause: more than 1024 distinct lowercase `use` path segments in this\n")
         print("         compilation; the module-qualified-call registry (LOWER_USE_MODULE_HASH)\n")
@@ -716,6 +724,14 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
     }
 }
 
+pub fn lower_compile_error_scope_begin() with Mut {
+    IR_LOWER_COMPILE_ERROR_LATCH = false
+    IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE = true
+}
+
+pub fn lower_compile_error_scope_end() with Mut {
+    IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE = false
+}
 pub fn lower_hard_error_reset() with Mut {
     IR_LOWER_HARD_ERROR = 0
     IR_LOWER_HARD_ERROR_NEEDED = 0
@@ -743,7 +759,7 @@ pub fn lower_hard_error_reset() with Mut {
 // successful IR by any of the many IrLowerResult/IrLowerBoxResult
 // construction sites that gate on THIS helper rather than polling the
 // separate pending flag directly.
-pub fn lower_had_error_with_hard(v: bool) -> bool { v || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
+pub fn lower_had_error_with_hard(v: bool) -> bool { v || (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
 fn lower_ok_without_hard(v: bool) -> bool { !lower_had_error_with_hard(v) }
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
@@ -2735,6 +2751,7 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
         func.param_count = ir_fn_get(&(*summary.module), i as usize).param_count
         func.compile_strategy = sm_strat
         func.returns_float = ir_fn_get(&(*summary.module), i as usize).returns_float
+        func.return_kn_value_float = ir_fn_get(&(*summary.module), i as usize).return_kn_value_float
         func.return_fixed_array_len = ir_fn_get(&(*summary.module), i as usize).return_fixed_array_len
         func.return_struct_name = ir_fn_get(&(*summary.module), i as usize).return_struct_name
         func.prof_counter_id = ir_fn_get(&(*summary.module), i as usize).prof_counter_id
@@ -3112,6 +3129,7 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                         var fn_slot_sig = ir_fn_get(&(*module_box_sig), fn_id_sig as usize)
                                         fn_slot_sig.compile_strategy = strategy_sig
                                         fn_slot_sig.returns_float = lower_opt_return_float_code(&(*fd).return_type)
+                                        fn_slot_sig.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                         fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                         fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
                                         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
@@ -3518,6 +3536,7 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
         func.param_count = ir_fn_get(&summary.module, i as usize).param_count
         func.compile_strategy = ir_fn_get(&summary.module, i as usize).compile_strategy
         func.returns_float = ir_fn_get(&summary.module, i as usize).returns_float
+        func.return_kn_value_float = ir_fn_get(&summary.module, i as usize).return_kn_value_float
         func.return_fixed_array_len = ir_fn_get(&summary.module, i as usize).return_fixed_array_len
         func.return_struct_name = ir_fn_get(&summary.module, i as usize).return_struct_name
         func.prof_counter_id = ir_fn_get(&summary.module, i as usize).prof_counter_id
@@ -3729,6 +3748,7 @@ fn lowerer_preseed_fn_signature_mut(
     var fn_slot = ir_fn_get(&(*module_box), fn_id as usize)
     fn_slot.compile_strategy = strategy
     fn_slot.returns_float = lower_opt_return_float_code(return_type)
+    fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
@@ -4657,6 +4677,7 @@ fn lowerer_preseed_one_item_mut(
                         var fn_slot_sig = ir_fn_get(&(*module_box_sig), fn_id_sig as usize)
                         fn_slot_sig.compile_strategy = strategy_sig
                         fn_slot_sig.returns_float = lower_opt_return_float_code(&(*fd).return_type)
+                        fn_slot_sig.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                         fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                         fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
                         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
@@ -4842,6 +4863,7 @@ fn ir_fast_summary_preseed_fn_signature(
     var fn_slot = ir_fn_get(&module_value, fn_id as usize)
     fn_slot.compile_strategy = strategy
     fn_slot.returns_float = lower_opt_return_float_code(return_type)
+    fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
@@ -4974,6 +4996,7 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     var fn_slot = ir_fn_get(&module_value, fn_id as usize)
     fn_slot.compile_strategy = strategy
     fn_slot.returns_float = lower_opt_return_float_code(return_type)
+    fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
@@ -5296,6 +5319,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 var fn_slot = ir_fn_get(&module, fn_id as usize)
                                 fn_slot.compile_strategy = strategy
                                 fn_slot.returns_float = lower_opt_return_float_code(&(*fd).return_type)
+                                fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                 fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                 fn_slot.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
                                 fn_slot.param_count = ir_param_list_count_ref(&(*fd).params)
@@ -5393,6 +5417,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                         var fn_slot = ir_fn_get(&module, fn_id as usize)
                                                         fn_slot.compile_strategy = strategy
                                                         fn_slot.returns_float = lower_opt_return_float_code(&(*fd).return_type)
+                                                        fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                                         fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                                         fn_slot.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
                                                         fn_slot.param_count = ir_param_list_count_ref(&(*fd).params)
@@ -6351,6 +6376,7 @@ fn lowerer_lower_fn_item_mut(
         (*reused).name = preserved.name
         (*reused).compile_strategy = preserved.compile_strategy
         (*reused).returns_float = preserved.returns_float
+        (*reused).return_kn_value_float = preserved.return_kn_value_float
         (*reused).return_fixed_array_len = preserved.return_fixed_array_len
         (*reused).return_struct_name = preserved.return_struct_name
         (*reused).first_param_is_ref = preserved.first_param_is_ref
@@ -6416,6 +6442,7 @@ fn lowerer_lower_fn_item_mut(
         (*strategy_func_box).compile_strategy = strategy
     }
     (*strategy_func_box).returns_float = lower_opt_return_float_code(&fd.return_type)
+    (*strategy_func_box).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
     (*strategy_func_box).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
     (*strategy_func_box).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
     (*strategy_func_box).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
@@ -8121,7 +8148,18 @@ fn lower_type_expr_knowledge_value_float(ty: &TypeExpr) -> i64 with Mut, Panic, 
         Some(ki) => {
             if lower_type_expr_is_f64(&(*(*ki).inner_type)) { return 1 }
             if lower_type_expr_is_integer(&(*(*ki).inner_type)) { return 0 }
-            0 - 1
+            2
+        }
+        None => 2,
+    }
+}
+
+fn lower_opt_type_knowledge_value_float(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(ty) => {
+            if (*ty).kind != TypeExprKind::TypeKnowledge { return 0 - 1 }
+            let payload = lower_type_expr_knowledge_value_float(&(*ty))
+            if payload >= 0 { payload } else { 2 }
         }
         None => 0 - 1,
     }
@@ -9225,6 +9263,7 @@ impl Lowerer {
             (*reused).name = ir_fn_get(&(*lo.module), fn_id as usize).name
             (*reused).compile_strategy = ir_fn_get(&(*lo.module), fn_id as usize).compile_strategy
             (*reused).returns_float = ir_fn_get(&(*lo.module), fn_id as usize).returns_float
+            (*reused).return_kn_value_float = ir_fn_get(&(*lo.module), fn_id as usize).return_kn_value_float
             (*reused).return_fixed_array_len = ir_fn_get(&(*lo.module), fn_id as usize).return_fixed_array_len
             (*reused).return_struct_name = ir_fn_get(&(*lo.module), fn_id as usize).return_struct_name
             (*reused).first_param_is_ref = ir_fn_get(&(*lo.module), fn_id as usize).first_param_is_ref
@@ -14972,6 +15011,29 @@ impl Lowerer {
         }
     }
 
+    fn expr_call_return_knowledge_value_float_ref(self, expr: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*expr).kind == ExprKind::ExprCall {
+            let fn_id = self.expr_call_callee_fn_id_ref(expr)
+            if fn_id >= 0 && fn_id < self.module.fn_count {
+                return ir_fn_get(&(*self.module), fn_id as usize).return_kn_value_float
+            }
+            return 0 - 1
+        }
+        if (*expr).kind == ExprKind::ExprMethodCall {
+            let recv_type = self.lower_method_recv_type(&(*expr).left)
+            let call_name = if recv_type.len > 0 {
+                ir_mangle_method_name(recv_type, (*expr).name)
+            } else {
+                (*expr).name
+            }
+            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, call_name)
+            if fn_id >= 0 && fn_id < self.module.fn_count {
+                return ir_fn_get(&(*self.module), fn_id as usize).return_kn_value_float
+            }
+        }
+        0 - 1
+    }
+
     fn expr_call_return_struct_name_ref(self, expr: &Expr) -> Name with Mut, Panic, Div, Alloc {
         if (*expr).kind != ExprKind::ExprCall { return ir_empty_name() }
         match (*expr).left {
@@ -15699,11 +15761,14 @@ impl Lowerer {
         }
     }
 
-    // #2504: kn_value_float of the local a `.value` read is based on, -1 when
-    // the base is not a plain local or its Knowledge<T> kind is unknown.
+    // #2504: `-1` is non-Knowledge/unresolved, 0 integer, 1 float, 2 unsupported,
+    // and -2 is legacy SOIR v5 Knowledge with missing return metadata.
     fn field_base_kn_value_float_ref(self, base_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(be) => {
+                if ((*be).kind == ExprKind::ExprCall || (*be).kind == ExprKind::ExprMethodCall) {
+                    return self.expr_call_return_knowledge_value_float_ref(&(*be))
+                }
                 if (*be).kind == ExprKind::ExprIdent {
                     var i = (*self.locals).count - 1
                     while i >= 0 {
@@ -15725,6 +15790,7 @@ impl Lowerer {
             let kn = self.field_base_kn_value_float_ref(base_opt)
             if kn == 0 { return false }
             if kn == 1 { return true }
+            if kn == 2 || kn == -2 { return false }
         }
         match *base_opt {
             Some(base_expr) => {
@@ -16672,6 +16738,7 @@ impl Lowerer {
                 let kn = self.field_base_kn_value_float_ref(&(*e).left)
                 if kn == 0 { return false }
                 if kn == 1 { return true }
+                if kn == 2 || kn == -2 { return false }
             }
             if self.field_is_float_for_base_ref(&(*e).left, (*e).name) || self.field_is_float_by_name_simple((*e).name) {
                 return true
@@ -17317,8 +17384,10 @@ impl Lowerer {
             // V0-E.5.5: an f128 field reads as a wide-float handle.
             if self.lower_field_is_f128_ref(&(*e).left, (*e).name) { return 5 }
             // #2504: `.value` of a Knowledge<integer> local is an integer word.
-            if ir_name_eq((*e).name, make_name("value")) && self.field_base_kn_value_float_ref(&(*e).left) == 0 {
-                return 1
+            if ir_name_eq((*e).name, make_name("value")) {
+                let kn = self.field_base_kn_value_float_ref(&(*e).left)
+                if kn == 0 { return 1 }
+                if kn == 2 || kn == -2 { return 0 }
             }
             if self.field_is_int_for_base_ref(&(*e).left, (*e).name) || self.field_is_int_by_name_simple((*e).name) {
                 return 1
@@ -17919,6 +17988,7 @@ impl Lowerer {
         func.name = name
         func.compile_strategy = strategy
         func.returns_float = lower_opt_return_float_code(return_type)
+        func.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
         func.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
         func.return_struct_name = lower_opt_type_return_layout_name(return_type)
         func.param_count = ir_param_list_count_ref(params)
@@ -18618,6 +18688,7 @@ impl Lowerer {
             (*reused).name = ir_fn_get(&(*lo.module), fn_id as usize).name
             (*reused).compile_strategy = ir_fn_get(&(*lo.module), fn_id as usize).compile_strategy
             (*reused).returns_float = ir_fn_get(&(*lo.module), fn_id as usize).returns_float
+            (*reused).return_kn_value_float = ir_fn_get(&(*lo.module), fn_id as usize).return_kn_value_float
             (*reused).return_fixed_array_len = ir_fn_get(&(*lo.module), fn_id as usize).return_fixed_array_len
             (*reused).return_struct_name = ir_fn_get(&(*lo.module), fn_id as usize).return_struct_name
             (*reused).first_param_is_ref = ir_fn_get(&(*lo.module), fn_id as usize).first_param_is_ref
@@ -18668,6 +18739,7 @@ impl Lowerer {
             (*lo.current_func).compile_strategy = strategy
         }
         (*lo.current_func).returns_float = lower_opt_return_float_code(&fd.return_type)
+        (*lo.current_func).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
@@ -18818,6 +18890,7 @@ impl Lowerer {
             (*reused).name = ir_fn_get(&(*lo.module), fn_id as usize).name
             (*reused).compile_strategy = ir_fn_get(&(*lo.module), fn_id as usize).compile_strategy
             (*reused).returns_float = ir_fn_get(&(*lo.module), fn_id as usize).returns_float
+            (*reused).return_kn_value_float = ir_fn_get(&(*lo.module), fn_id as usize).return_kn_value_float
             (*reused).return_fixed_array_len = ir_fn_get(&(*lo.module), fn_id as usize).return_fixed_array_len
             (*reused).return_struct_name = ir_fn_get(&(*lo.module), fn_id as usize).return_struct_name
             (*reused).first_param_is_ref = ir_fn_get(&(*lo.module), fn_id as usize).first_param_is_ref
@@ -18855,6 +18928,7 @@ impl Lowerer {
             (*lo.current_func).compile_strategy = strategy
         }
         (*lo.current_func).returns_float = lower_opt_return_float_code(&fd.return_type)
+        (*lo.current_func).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
@@ -20488,6 +20562,30 @@ impl Lowerer {
                 }
             }
             _ => {}
+        }
+        // Inferred locals keep Knowledge<T> call-return payload metadata. The
+        // distinct 2 tag means the wrapper is Knowledge but T is unsupported;
+        // `.value` use fails closed with a diagnostic.
+        match s.ty {
+            Some(_) => {},
+            None => {
+                match s.expr {
+                    Some(rhs) => {
+                        if (*rhs).kind == ExprKind::ExprCall || (*rhs).kind == ExprKind::ExprMethodCall {
+                            let kn_return = lo.expr_call_return_knowledge_value_float_ref(&(*rhs))
+                            if kn_return >= 0 {
+                                lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
+                                lowerer_bind_kn_value_float_mut(&! lo, s.name, kn_return)
+                            } else if kn_return == -2 {
+                                // Preserve legacy unknown through the local so `.value` fails closed,
+                                // without claiming the historical return was necessarily Knowledge.
+                                lowerer_bind_kn_value_float_mut(&! lo, s.name, -2)
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
         }
         if lower_opt_type_is_seq(&s.ty) {
             lo = lo.bind_local_struct_type(s.name, make_name("Seq"), false)
@@ -25120,6 +25218,13 @@ impl Lowerer {
         // version changed nothing measurable.
         var lo1 = lo1_pre
         var base = base_pre
+        if ir_name_eq(e.name, make_name("value")) {
+            let kn_marker = lo1.field_base_kn_value_float_ref(&e.left)
+            if kn_marker == 2 || kn_marker == -2 {
+                let lo_error = lo1.report_error_at(25400)
+                return (lo_error, IR_INVALID_REG)
+            }
+        }
         let base_field_is_ptr = match e.left {
             Some(base_expr_ref) => {
                 if (*base_expr_ref).kind == ExprKind::ExprFieldAccess {
@@ -25193,6 +25298,7 @@ impl Lowerer {
             let kn0 = lo1.field_base_kn_value_float_ref(&e.left)
             if kn0 == 0 { field_is_float = false }
             if kn0 == 1 { field_is_float = true }
+            if kn0 == 2 || kn0 == -2 { field_is_float = false }
         }
         match e.left {
             Some(be) => {
