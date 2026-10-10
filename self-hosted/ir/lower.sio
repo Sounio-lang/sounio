@@ -19999,6 +19999,11 @@ impl Lowerer {
                 || lower_name_is_integer_type(pointee_name)
                 || lower_name_is_bool_type(pointee_name) {
                 lo = lo.bind_local_struct_type(s.name, pointee_name, false)
+            } else if pointee_name.len > 0 && !ir_name_is_box(pointee_name)
+                && lower_struct_layout_index_of(&(*lo.struct_layouts), pointee_name) >= 0 {
+                // #1702: `let r: &!S = ...` names a registered struct pointee; record
+                // it as a `r: &!S` parameter does, so `(*r).f` resolves against S.
+                lo = lo.bind_local_struct_type(s.name, pointee_name, false)
             }
         }
         if fixed_array_len >= 0 {
@@ -20718,6 +20723,24 @@ impl Lowerer {
                     let src_elem_wide = lo.lookup_local_array_elem_wide_bits((*expr_box).name)
                     if src_elem_wide > 0 {
                         lo = lo.bind_local_array_elem_wide_bits(s.name, src_elem_wide)
+                    }
+                } else if (*expr_box).kind == ExprKind::ExprUnary
+                    && ((*expr_box).un_op == UnaryOp::OpRef || (*expr_box).un_op == UnaryOp::OpRefMut) {
+                    // #1702: `let r = &x` / `let r = &!x` keeps the referent's layout,
+                    // as a `p: &!S` parameter does (lower_param_struct_type_name).
+                    // Without it `(*r).f` had no owner type, field_idx_for_base_ref
+                    // fell to the cross-struct by-name scan, and with two structs
+                    // sharing a field name the store wrote the other struct's slot.
+                    match (*expr_box).left {
+                        Some(ref_operand) => {
+                            if (*ref_operand).kind == ExprKind::ExprIdent && !ir_name_eq((*ref_operand).name, s.name) {
+                                let referent_st = lo.lookup_local_struct_type((*ref_operand).name)
+                                if referent_st.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), referent_st) >= 0 {
+                                    lo = lo.bind_local_struct_type(s.name, referent_st, false)
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
