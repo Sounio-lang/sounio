@@ -2254,12 +2254,24 @@ fn em32(v: i64) with Mut { em(v & 0xFF); em((v >> 8) & 0xFF); em((v >> 16) & 0xF
 fn em64(v: i64) with Mut { em32(v & 0xFFFFFFFF); em32((v >> 32) & 0xFFFFFFFF) }
 
 // macOS Mach-O: lean_single bakes absolute BSS addresses into code, so __DATA
-// sits at a fixed VA. The old 16 MiB gap fitted lean_single (~8 MiB TEXT) but
-// lean.sio aarch64-macos is ~32 MiB; overlapping RX/RW segments is a kernel
-// SIGKILL on exec (Apple Self-Host typecheck). Match the Linux 256 MiB BSS
-// gap and refuse to emit if TEXT would still reach DATA.
-fn macos_text_data_gap() -> i64 { 268435456 }
+// sits at a fixed VA. Constraints:
+//   1. __TEXT must not reach __DATA (lean.sio a64 TEXT is ~32 MiB; 16 MiB
+//      overlapped and was a kernel SIGKILL).
+//   2. The image must stay out of xnu's arm64 dyld shared region
+//      [0x180000000, 0x280000000). DATA at TEXT+256 MiB plus lean.sio's
+//      ~1.7 GiB BSS ended 34 MiB below 0x180000000; PIE slide then made
+//      dyld fail to map the cache (Abort trap 6 / libSystem not loaded)
+//      on the second --check. Place DATA at 0x300000000, above that window.
+fn macos_text_data_gap() -> i64 { 8589934592 }
 fn macos_data_vmaddr() -> i64 { 4294967296 + macos_text_data_gap() }
+fn macos_dyld_shared_lo() -> i64 { 6442450944 }
+fn macos_dyld_shared_hi() -> i64 { 10737418240 }
+fn macos_range_hits_dyld_shared(vm: i64, size: i64) -> bool {
+    if vm < macos_dyld_shared_hi() && vm + size > macos_dyld_shared_lo() {
+        return true
+    }
+    false
+}
 
 fn emit_load_abs_addr_to_rax_x86(addr: i64) with Mut {
     em(0x48); em(0xb8); em64(addr)
@@ -32695,8 +32707,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     GL_BSS_SIZE = GL_BSS_SIZE + 1048576  // 1MB scratch for aggregate (struct/array) returns
     // Add 16 to BSS_BASE so globals start at BSS+16, but argc/argv at BSS+0.
     // The lean_single Mach-O path bakes absolute BSS addresses into emitted code,
-    // so macOS needs a fixed gap between __TEXT and __DATA that is larger than
-    // any TEXT we emit (lean.sio aarch64-macos is ~32 MiB; 16 MiB overlapped).
+    // so macOS needs a fixed __DATA VA above both max TEXT and the dyld shared
+    // region (see macos_data_vmaddr).
     if TARGET_OS == 2 {
         GL_BSS_BASE = macos_data_vmaddr() + 16
     } else {
@@ -34545,7 +34557,7 @@ fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
 
 // ─── Mach-O x86_64 writer ───
 // Builds a macOS Mach-O 64-bit executable.
-// Layout: __PAGEZERO(0..4GB) + __TEXT(4GB.., code) + __DATA(4GB+256MB, BSS)
+// Layout: __PAGEZERO(0..4GB) + __TEXT(4GB.., code) + __DATA(12GB, BSS)
 fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
     let vm_base: i64 = 4294967296       // 0x100000000
     let page_size: i64 = 4096
@@ -34577,6 +34589,15 @@ fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
         print_int(text_vm + text_seg_vmsize)
         print(" data_vm=")
         print_int(data_vm)
+        print(") — refuse emit\n")
+        return 1
+    }
+    let data_seg_vmsize = ((GL_BSS_SIZE + page_size - 1) / page_size) * page_size
+    if macos_range_hits_dyld_shared(data_vm, data_seg_vmsize) {
+        print("error: macho __DATA overlaps dyld shared region (data_vm=")
+        print_int(data_vm)
+        print(" data_end=")
+        print_int(data_vm + data_seg_vmsize)
         print(") — refuse emit\n")
         return 1
     }
@@ -44357,6 +44378,14 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
         print_int(text_vm + text_seg_vmsize)
         print(" data_vm=")
         print_int(data_vm)
+        print(") — refuse emit\n")
+        return 1
+    }
+    if macos_range_hits_dyld_shared(data_vm, data_seg_vmsize + page_size) {
+        print("error: macho __DATA overlaps dyld shared region (data_vm=")
+        print_int(data_vm)
+        print(" data_end=")
+        print_int(data_vm + data_seg_vmsize)
         print(") — refuse emit\n")
         return 1
     }
