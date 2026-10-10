@@ -99,6 +99,12 @@ struct LowerLocalStack {
     box_inner_layout: Box<LowerLocalI64Slots>,
     // 1 when local/param is fn(...) -> f64 (or f32); drives IrCallIndirect float markers.
     fn_ptr_ret_float: Box<LowerLocalI64Slots>,
+    // #2787: for a local/param declared `Option<T>`, the scalar_kind (1 int/bool,
+    // 2 f64/f32, 3 string, 5 f128/f256) a `Some(x)` binding of its payload gets;
+    // 0 = not an Option, or T is not a scalar the lowerer can name. -1 marks the
+    // BINDING of an Option payload whose kind was unknown (see
+    // lower_option_payload_pattern), so an f64 operand next to it fails closed.
+    opt_payload_kind: Box<LowerLocalI64Slots>,
     count: i64,
 }
 
@@ -160,6 +166,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         closure_fn_id: lowerer_box_local_i64_slots(-1),
         box_inner_layout: lowerer_box_local_i64_slots(-1),
         fn_ptr_ret_float: lowerer_box_local_i64_slots(0),
+        opt_payload_kind: lowerer_box_local_i64_slots(0),
         count: 0,
     }
 }
@@ -689,6 +696,17 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print(" virtual registers but IR_MAX_VREGS is ")
         print_int(IR_LOWER_HARD_ERROR_LIMIT)
         print("\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 7 {
+        print("  cause: function `")
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
+        print("` matches `Some(..)` with a sub-pattern Madaros cannot test (#2787);\n")
+        print("         lowering it would match every Some value, so it is refused.\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 8 {
+        print("  cause: function `")
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
+        print("` uses a `Some(x)` payload of unknown type as an operand next to an f64\n")
+        print("         (#2787); lowering it would compute on the IEEE-754 bit pattern as an\n")
+        print("         integer, so it is refused (match on a local declared `Option<f64>`).\n")
     } else if IR_LOWER_HARD_ERROR_REASON == 6 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
@@ -5497,6 +5515,9 @@ fn lowerer_bind_local_mut(
         // function's Box param leaks into an unrelated local rebound at the
         // same slot and turns its plain field access into a phantom Box deref.
         (*(*locals_box).box_inner_layout).values[idx as usize] = 0 - 1
+        // #2787: same slot-reuse hazard; a stale Option payload kind would type
+        // an unrelated local's `Some(x)` binding.
+        (*(*locals_box).opt_payload_kind).values[idx as usize] = 0
         (*locals_box).count = idx + 1
         (*lo).locals = locals_box
     } else {
@@ -5636,6 +5657,26 @@ fn lowerer_rgn_mark_local_numeric_mut(lo: &! Lowerer, name: Name) with Mut, Allo
                 LOWER_RGN_NUM_SLOT_EPOCH[i as usize] = LOWER_RGN_NUM_EPOCH
                 LOWER_RGN_NUM_SLOT_REG[i as usize] = (*(*locals_box).regs).values[i as usize]
             }
+            return
+        }
+        i = i - 1
+    }
+}
+
+// #2787: record the Option payload scalar kind of a local/param (see the
+// opt_payload_kind field). Single-level Box store, like the scalar-kind marker
+// above, for the same by-value-aggregate-store reason.
+fn lowerer_mark_local_opt_payload_kind_mut(
+    lo: &! Lowerer,
+    name: Name,
+    kind: i64
+) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).opt_payload_kind).values[i as usize] = kind
+            (*lo).locals = locals_box
             return
         }
         i = i - 1
@@ -6032,6 +6073,11 @@ fn lowerer_lower_fn_params_mut(
                 }
                 if lower_type_expr_is_ref_like(&(*list).head.ty) {
                     lowerer_mark_local_ref_mut(lo, (*list).head.name)
+                }
+                // #2787: `a: Option<f64>` -> a `Some(x)` binding of a gets kind 2.
+                let param_opk = lower_type_expr_option_payload_kind_in(&(*list).head.ty, &(*(*lo).struct_layouts))
+                if param_opk != 0 {
+                    lowerer_mark_local_opt_payload_kind_mut(lo, (*list).head.name, param_opk)
                 }
                 if lower_type_expr_is_box(&(*list).head.ty) {
                     let bl = lower_struct_layout_index_of(&(*(*lo).struct_layouts), lower_box_inner_type_name(&(*list).head.ty))
@@ -8062,6 +8108,69 @@ fn lower_type_expr_is_box(ty: &TypeExpr) -> bool with Mut, Panic, Div {
         return false
     }
     ir_name_eq(ir_path_first_name((*ty).path), make_name("Box"))
+}
+
+// #2787: scalar kind of the payload of an `Option<T>` type expression, in the
+// scalar_kind vocabulary: 1 integer/bool, 2 f64/f32, 3 string, 5 f128/f256.
+// 0 when the type is not an Option or T is anything else (struct, Box, ...).
+fn lower_type_expr_option_payload_kind(ty: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeNamed {
+        return 0
+    }
+    if !ir_name_eq(ir_path_first_name((*ty).path), make_name("Option")) {
+        return 0
+    }
+    match (*ty).type_args {
+        Some(list) => {
+            if lower_type_expr_is_wide_float(&(*list).head) { return 5 }
+            if lower_type_expr_is_f64(&(*list).head) { return 2 }
+            if lower_type_expr_is_integer(&(*list).head) { return 1 }
+            if lower_type_expr_is_bool(&(*list).head) { return 1 }
+            if lower_type_expr_is_string(&(*list).head) { return 3 }
+            0
+        }
+        None => 0,
+    }
+}
+
+// #2787: an Option payload that is a user struct is recorded as this base plus
+// the struct's layout index (< 1024), so its `Some(p)` binding gets that struct
+// type instead of the Box marking (which made `p.x` fault). Disjoint from the
+// scalar kinds above.
+fn lower_opt_payload_struct_base() -> i64 { 1024 }
+
+// Payload kind of `Option<T>` including user structs, given the layout table.
+fn lower_type_expr_option_payload_kind_in(ty: &TypeExpr, layouts: &StructLayoutTable) -> i64 with Mut, Panic, Div {
+    let k = lower_type_expr_option_payload_kind(ty)
+    if k != 0 {
+        return k
+    }
+    if (*ty).kind != TypeExprKind::TypeNamed {
+        return 0
+    }
+    if !ir_name_eq(ir_path_first_name((*ty).path), make_name("Option")) {
+        return 0
+    }
+    match (*ty).type_args {
+        Some(list) => {
+            if (*list).head.kind != TypeExprKind::TypeNamed {
+                return 0
+            }
+            let li = lower_struct_layout_index_of(layouts, ir_path_first_name((*list).head.path))
+            if li >= 0 {
+                return lower_opt_payload_struct_base() + li
+            }
+            0
+        }
+        None => 0,
+    }
+}
+
+fn lower_opt_type_option_payload_kind_in(opt: &Option<Box<TypeExpr>>, layouts: &StructLayoutTable) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_option_payload_kind_in(&(*te), layouts),
+        None => 0,
+    }
 }
 
 fn lower_box_inner_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
@@ -10726,6 +10835,7 @@ impl Lowerer {
                 // Explicit -1: slot reuse across functions — see lowerer_bind_local_mut.
                 (*(*stk).box_inner_layout).values[idx as usize] = 0 - 1
                 (*(*stk).fn_ptr_ret_float).values[idx as usize] = 0
+                (*(*stk).opt_payload_kind).values[idx as usize] = 0
                 (*stk).count = idx + 1
             lo.locals = stk
         } else {
@@ -11227,6 +11337,54 @@ impl Lowerer {
             i = i - 1
         }
         0
+    }
+
+    fn bind_local_opt_payload_kind(self, name: Name, kind: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = lo.locals
+        var i = (*stk).count - 1
+        while i >= 0 {
+            if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
+                (*(*stk).opt_payload_kind).values[i as usize] = kind
+                lo.locals = stk
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn lookup_local_opt_payload_kind(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).opt_payload_kind).values[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    fn opt_expr_is_untyped_option_payload_ref(self, e_opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *e_opt {
+            Some(e) => (*e).kind == ExprKind::ExprIdent && self.lookup_local_opt_payload_kind((*e).name) < 0,
+            None => false,
+        }
+    }
+
+    // #2787: Option payload kind of a match scrutinee, when the lowerer can name it:
+    // a local or parameter declared `Option<T>` (or copied from one). 0 otherwise.
+    fn opt_expr_option_payload_kind_ref(self, e_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *e_opt {
+            Some(e) => {
+                if (*e).kind == ExprKind::ExprIdent {
+                    let k = self.lookup_local_opt_payload_kind((*e).name)
+                    if k > 0 { return k }
+                }
+                0
+            }
+            None => 0,
+        }
     }
 
     fn lookup_local_fn_ptr_ret_float(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
@@ -18354,6 +18512,9 @@ impl Lowerer {
                                 LOWER_RGN_NUM_SLOT_EPOCH[idx as usize] = 0
                             }
                         }
+                        // #2787: `a: Option<f64>` -> a `Some(x)` binding of a gets kind 2.
+                        // Written unconditionally: this path bypasses bind_local's reset.
+                        (*(*locals).opt_payload_kind).values[idx as usize] = lower_type_expr_option_payload_kind_in(&(*list).head.ty, &(*lo.struct_layouts))
                         (*locals).count = idx + 1
                     } else {
                         lo = lo.report_error_at(10813)
@@ -20319,6 +20480,17 @@ impl Lowerer {
                 _ => {}
             }
         }
+        // #2787: `let a: Option<f64> = ..` (or `let b = a` from such a local) records
+        // the payload kind a later `Some(x)` binding of it receives.
+        let let_opk = lower_opt_type_option_payload_kind_in(&s.ty, &(*lo.struct_layouts))
+        if let_opk != 0 {
+            lo = lo.bind_local_opt_payload_kind(s.name, let_opk)
+        } else {
+            let let_opk_copy = lo.opt_expr_option_payload_kind_ref(&s.expr)
+            if let_opk_copy > 0 {
+                lo = lo.bind_local_opt_payload_kind(s.name, let_opk_copy)
+            }
+        }
         match s.expr {
             Some(expr_box_var) => {
                 if lo.lookup_local_variance_reg(s.name) >= 0 {
@@ -22060,13 +22232,15 @@ impl Lowerer {
     }
 
     // Lower match arms as a linear if/else chain
-    fn lower_match_arms_ref(self, scrut: i64, res: i64, l_end: i64, arms: &Option<Box<MatchArmList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    // `opk` is the scrutinee's Option payload kind (opt_expr_option_payload_kind_ref),
+    // 0 when unknown or when the scrutinee is not an Option.
+    fn lower_match_arms_ref(self, scrut: i64, res: i64, l_end: i64, arms: &Option<Box<MatchArmList>>, opk: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var current = arms
         while true {
             match *current {
                 Some(list) => {
-                    lo = lo.lower_match_arm_ref(scrut, res, l_end, &(*list).head)
+                    lo = lo.lower_match_arm_ref(scrut, res, l_end, &(*list).head, opk)
                     current = &(*list).tail
                 }
                 _ => break
@@ -22076,7 +22250,7 @@ impl Lowerer {
     }
 
     fn lower_match_arms(self, scrut: i64, res: i64, l_end: i64, arms: Option<Box<MatchArmList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        self.lower_match_arms_ref(scrut, res, l_end, &arms)
+        self.lower_match_arms_ref(scrut, res, l_end, &arms, 0)
     }
 
     // Lower a single match arm: test pattern, conditionally execute body
@@ -22093,7 +22267,7 @@ impl Lowerer {
         }
     }
 
-    fn lower_match_arm_ref(self, scrut: i64, res: i64, l_end: i64, arm: &MatchArm) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn lower_match_arm_ref(self, scrut: i64, res: i64, l_end: i64, arm: &MatchArm, opk: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         let pat = &arm.pattern
         if pat.kind == PatternKind::PatWildcard {
             // Wildcard matches the pattern unconditionally; an `if` guard can still reject it,
@@ -22125,18 +22299,20 @@ impl Lowerer {
             lo
         } else if pat.kind == PatternKind::PatEnum {
             let variant_name = ir_path_last_name(pat.path)
-            // Check for Some/None (Option<Box<T>> as nullable pointer)
+            // Option<T> (#2787): None is 0 and Some(v) is a one-word heap cell holding v
+            // (lower_option_some_cell), for EVERY payload type. The discriminant is the
+            // word itself and never the payload, so Some(0), Some(0.0) and Some(false)
+            // are not None. (Before, Some(v) was v itself and `None` meant `== 0`.)
             let is_some = ir_name_is_some(variant_name)
             let is_none = ir_name_is_none(variant_name)
             if is_some {
-                // Some(x): test scrutinee != 0, bind inner x = scrutinee
+                // Some(p): test scrutinee != 0, load the payload, match p against it.
                 let pair_l = self.fresh_label()
                 var lo = pair_l.0
                 let l_skip = pair_l.1
                 // Branch if scrutinee == 0 (skip this arm)
                 lo = lo.emit(ir_branch_false(scrut, l_skip))
-                // Bind the inner pattern (first sub_pattern) to scrutinee value
-                lo = lo.bind_match_sub_pattern(scrut, pat.sub_patterns)
+                lo = lo.lower_option_payload_pattern(scrut, &pat.sub_patterns, l_skip, opk)
                 lo = lo.lower_arm_guard(&arm.guard, l_skip)
                 let pair_b = lo.lower_expr_ref(&arm.body)
                 lo = pair_b.0
@@ -22244,10 +22420,10 @@ impl Lowerer {
     }
 
     fn lower_match_arm(self, scrut: i64, res: i64, l_end: i64, arm: MatchArm) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        self.lower_match_arm_ref(scrut, res, l_end, &arm)
+        self.lower_match_arm_ref(scrut, res, l_end, &arm, 0)
     }
 
-    // Lower Some(x) — just evaluate the first argument (identity)
+    // Evaluate the first call argument (no longer used for Some(x); see lower_option_some_cell)
     fn lower_expr_args_first(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(list) => self.lower_expr_ref(&(*list).head),
@@ -23246,29 +23422,140 @@ impl Lowerer {
         self.emit_i64_const(self.module.epistemic.transition_plans[plan_id as usize].step_count)
     }
 
-    // Bind the first sub-pattern of a Some(x) match to the scrutinee value
-    fn bind_match_sub_pattern(self, scrut: i64, pats: Option<Box<PatternList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        match pats {
+    // #2787: `Some(v)` -> a fresh one-word heap cell holding v (the same 8-byte
+    // allocation Box::new makes). None stays 0, and a cell is never 0, so the
+    // discriminant test in lower_match_arm_ref no longer looks at the payload:
+    // Some(0) / Some(0.0) / Some(false) used to BE 0 and matched the None arm.
+    // Uniform for every payload type on purpose -- the lowerer cannot type a
+    // match scrutinee in general, so construction and match must agree without
+    // asking it (an Option<Box<T>> payload is one more indirection now).
+    fn lower_option_some_cell(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *args {
             Some(list) => {
-                let inner = (*list).head
-                if inner.kind == PatternKind::PatBinding {
-                    var lo = self.bind_local(inner.name, scrut, inner.is_mut)
-                    // The payload of `Some(nx)` on an Option<Box<T>> is a Box handle, so mark
-                    // the bound variable as a Box: `*nx` then lowers to the box-handle deref
-                    // (IrFieldGet 0) instead of raw-dereferencing the handle (which crashed —
-                    // the recursive-data root). Safe for non-Box payloads: marking only
-                    // changes how `*nx` lowers, and deref/field-access of a non-Box payload
-                    // (e.g. Option<i64>) is not valid code anyway.
-                    lo = lo.bind_local_struct_type(inner.name, make_name("Box"), false)
-                    lo
-                } else if inner.kind == PatternKind::PatWildcard {
-                    // _ inside Some(_) — no binding needed
-                    self
-                } else {
-                    self
+                let pair_v = self.lower_expr_ref(&(*list).head)
+                var lo = pair_v.0
+                let val_reg = pair_v.1
+                if val_reg < 0 {
+                    return (lo, val_reg)
                 }
+                let pair_dst = lo.fresh_reg()
+                lo = pair_dst.0
+                let cell_reg = pair_dst.1
+                lo = lo.emit(ir_alloc(cell_reg, 8))
+                lo = lo.emit(ir_field_set(cell_reg, 0, val_reg, ir_empty_name()))
+                (lo, cell_reg)
             }
-            _ => self,
+            _ => self.emit_unit(),
+        }
+    }
+
+    fn lower_option_pattern_refused(self, what: string) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        print("error: Madaros cannot lower the pattern inside `Some(..)` here: ")
+        print(what)
+        print(" (supported: a binding, `_`, an integer or bool literal, `None`, `Some(..)`, or a unit enum variant). Refused rather than matching every Some value.\n")
+        var lo = self
+        if IR_LOWER_HARD_ERROR_REASON == 0 {
+            IR_LOWER_HARD_ERROR_REASON = 7
+            IR_LOWER_HARD_ERROR_NEEDED = 0
+            IR_LOWER_HARD_ERROR_LIMIT = 0
+            ir_copy_name_to_flat(&(*self.current_func).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+        }
+        lowerer_mark_hard_error(&! lo)
+        lo
+    }
+
+    // #2787: match the sub-pattern of `Some(..)` against the payload of the
+    // non-zero Option cell `cell`, branching to l_skip on a mismatch. `opk` is
+    // the payload's scalar kind when the scrutinee's declared type names it.
+    // Anything this cannot test is refused, never treated as a catch-all (the
+    // old code ignored a `Some(0)` literal sub-pattern and matched every Some).
+    fn lower_option_payload_pattern(self, cell: i64, pats: &Option<Box<PatternList>>, l_skip: i64, opk: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match *pats {
+            Some(list) => {
+                match (*list).tail {
+                    Some(_) => return self.lower_option_pattern_refused("more than one sub-pattern"),
+                    None => {}
+                }
+                let inner = &(*list).head
+                if (*inner).kind == PatternKind::PatWildcard {
+                    return self
+                }
+                let pair_p = self.fresh_reg()
+                var lo = pair_p.0
+                let payload = pair_p.1
+                lo = lo.emit(ir_field_get(payload, cell, 0, ir_empty_name()))
+                if opk == 2 {
+                    lo = lo.emit(ir_mark_float_reg(payload))
+                }
+                if (*inner).kind == PatternKind::PatBinding {
+                    lo = lo.bind_local((*inner).name, payload, (*inner).is_mut)
+                    if opk >= lower_opt_payload_struct_base() {
+                        let li = opk - lower_opt_payload_struct_base()
+                        let sname = (*lo.struct_layouts).entries[li as usize].type_name
+                        lo = lo.bind_local_struct_type((*inner).name, sname, false)
+                    } else if opk > 0 {
+                        lo = lo.bind_local_scalar_kind((*inner).name, opk)
+                    } else {
+                        // Payload type unknown here. An Option<Box<T>> payload is a Box
+                        // handle, so `*nx` must lower to the box-handle deref (IrFieldGet 0)
+                        // -- the recursive-data root. Harmless for other payloads (deref of
+                        // a non-Box payload does not type-check). -1 makes an f64 operand
+                        // next to it fail closed instead of computing on IEEE bits.
+                        lo = lo.bind_local_struct_type((*inner).name, make_name("Box"), false)
+                        lo = lo.bind_local_opt_payload_kind((*inner).name, 0 - 1)
+                    }
+                    return lo
+                }
+                if (*inner).kind == PatternKind::PatIntLit {
+                    if opk == 2 || opk == 3 || opk == 5 || opk >= lower_opt_payload_struct_base() {
+                        return lo.lower_option_pattern_refused("an integer literal against a non-integer payload")
+                    }
+                    let pair_k = lo.fresh_reg()
+                    lo = pair_k.0
+                    let lit_reg = pair_k.1
+                    lo = lo.emit(ir_load_imm(lit_reg, (*inner).int_val))
+                    let pair_c = lo.fresh_reg()
+                    lo = pair_c.0
+                    let cmp_reg = pair_c.1
+                    lo = lo.emit(ir_binop(cmp_reg, payload, BinaryOp::OpEq, lit_reg))
+                    return lo.emit(ir_branch_false(cmp_reg, l_skip))
+                }
+                if (*inner).kind == PatternKind::PatBoolTrue {
+                    return lo.emit(ir_branch_false(payload, l_skip))
+                }
+                if (*inner).kind == PatternKind::PatBoolFalse {
+                    return lo.emit(ir_branch_true(payload, l_skip))
+                }
+                if (*inner).kind == PatternKind::PatEnum {
+                    let vname = ir_path_last_name((*inner).path)
+                    if ir_name_is_none(vname) {
+                        return lo.emit(ir_branch_true(payload, l_skip))
+                    }
+                    if ir_name_is_some(vname) {
+                        lo = lo.emit(ir_branch_false(payload, l_skip))
+                        return lo.lower_option_payload_pattern(payload, &(*inner).sub_patterns, l_skip, 0)
+                    }
+                    match (*inner).sub_patterns {
+                        Some(_) => return lo.lower_option_pattern_refused("an enum variant with a payload"),
+                        None => {}
+                    }
+                    let disc = lo.lookup_variant_discriminant_by_path(ir_path_qualifier_name((*inner).path), vname)
+                    if disc < 0 {
+                        return lo.lower_option_pattern_refused("an enum variant the lowerer cannot resolve")
+                    }
+                    let pair_d = lo.fresh_reg()
+                    lo = pair_d.0
+                    let disc_reg = pair_d.1
+                    lo = lo.emit(ir_load_imm(disc_reg, disc))
+                    let pair_e = lo.fresh_reg()
+                    lo = pair_e.0
+                    let eq_reg = pair_e.1
+                    lo = lo.emit(ir_binop(eq_reg, payload, BinaryOp::OpEq, disc_reg))
+                    return lo.emit(ir_branch_false(eq_reg, l_skip))
+                }
+                lo.lower_option_pattern_refused("this pattern kind")
+            }
+            None => self,
         }
     }
 
@@ -23636,7 +23923,7 @@ impl Lowerer {
             None => ir_empty_name(),
         }
         if ir_name_is_some(callee_name) {
-            return self.lower_expr_args_first(&e.args)
+            return self.lower_option_some_cell(&e.args)
         }
         // Box::new must be detected from the callee PATH's first segment, not from
         // callee_name. expr_to_callee_name_ref (:10839-10847) mangles a two-segment path into
@@ -24556,6 +24843,24 @@ impl Lowerer {
             }
             lowerer_mark_hard_error(&! lo_deref_refuse)
             return (lo_deref_refuse, 0)
+        }
+        // #2787: same refusal for a `Some(x)` payload binding whose type the lowerer
+        // could not name (scrutinee not a local/param declared `Option<T>`): its
+        // register holds the payload's bits as an integer word.
+        let lhs_untyped_payload = self.opt_expr_is_untyped_option_payload_ref(&e.left)
+        let rhs_untyped_payload = self.opt_expr_is_untyped_option_payload_ref(&e.right)
+        if (lhs_untyped_payload && self.opt_expr_result_is_float_ref(&e.right))
+            || (rhs_untyped_payload && self.opt_expr_result_is_float_ref(&e.left)) {
+            print("error: Madaros cannot type a `Some(x)` payload used as an f64 operand: the matched value is not a local or parameter declared `Option<f64>`; bind it first, e.g. `let o: Option<f64> = expr` and match on `o` (fail-closed; no integer arithmetic on IEEE-754 bits)\n")
+            var lo_payload_refuse = self
+            if IR_LOWER_HARD_ERROR_REASON == 0 {
+                IR_LOWER_HARD_ERROR_REASON = 8
+                IR_LOWER_HARD_ERROR_NEEDED = 0
+                IR_LOWER_HARD_ERROR_LIMIT = 0
+                ir_copy_name_to_flat(&(*self.current_func).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+            }
+            lowerer_mark_hard_error(&! lo_payload_refuse)
+            return (lo_payload_refuse, 0)
         }
         let wide_bits = self.expr_wide_bits_ref(e)
         let lhs_expr_is_float = self.opt_expr_result_is_float_ref(&e.left)
@@ -26195,7 +26500,8 @@ impl Lowerer {
         let pair_end = lo.fresh_label()
         lo = pair_end.0
         let l_end = pair_end.1
-        lo = lo.lower_match_arms_ref(scrut, res, l_end, &e.arms)
+        let scrut_opk = lo.opt_expr_option_payload_kind_ref(&e.left)
+        lo = lo.lower_match_arms_ref(scrut, res, l_end, &e.arms, scrut_opk)
         lo = lo.emit(ir_load_imm(res, 0))
         lo = lo.emit(ir_label(l_end))
         (lo, res)

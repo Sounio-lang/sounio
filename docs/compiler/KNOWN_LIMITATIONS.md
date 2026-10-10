@@ -43,6 +43,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-20 | enum variants with payloads (`Circle(f64)`, `Rect { w: f64 }`): no runtime representation | both |
 | KL-21 | user fns named like compiler builtins: `pub` residual on Madaros; seed hijacks or rejects | both |
 | KL-18 | `Hyper<…>` CPU values: Madaros fail-closed; lean_single prints a wrong value (seed) | both |
+| KL-19 | `Option<T>` payloads: Madaros discriminant CLOSED (#2787); untyped payload refusals; lean_single f64 payload / literal sub-patterns | both |
 
 ## Ledger
 
@@ -273,9 +274,8 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   branch: it desugars to `match`, like `while let`. Pin:
   `tests/run-pass/if_let_desugar_forms.sio`. Found on the way: a bare `None`
   pattern parsed as a *binding*, so `match v { None => a, Some(x) => b }`
-  took the `None` arm for `Some(42)`; fixed in the same branch. Residual,
-  unchanged: Madaros lowers `Option<i64>` as a nullable word, so `Some(0)`
-  is indistinguishable from `None`.
+  took the `None` arm for `Some(42)`; fixed in the same branch. The
+  `Some(0)`-is-`None` residual is closed by #2787 (see KL-19).
 
 ### KL-21 — user functions named like compiler builtins (P1.4)
 
@@ -339,6 +339,32 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   change and a seed refresh (`scripts/dev/refresh_lean_seed.sh`), which is a
   founder-run step. Until then: do not use `Hyper<…>` values under
   `SOUNIO_SOUC_ENGINE=lean_single`.
+
+### KL-19 — `Option<T>` payloads (#2787)
+
+- Engine: `both`, different residuals. **Madaros, CLOSED for the
+  discriminant (#2787):** `Some(v)` is a one-word heap cell holding `v` for
+  every payload type and `None` is 0, so `Some(0)`, `Some(0.0)` and
+  `Some(false)` are not `None`; a bare `None` pattern is the variant, not a
+  binding. Pins: `tests/run-pass/option_scalar_match_issue2787.sio`,
+  `option_payload_kinds_2787.sio`, `option_iflet_whilelet_2787.sio`.
+- Madaros residual (OPEN, fail-closed). The `Some(x)` binding is typed only
+  when the matched value is a local or parameter declared `Option<T>` (or a
+  `let` copy of one). Matching a call or field result directly leaves `x`
+  untyped: an f64 operand next to it is refused (lowering hard error 8,
+  pin `tests/compile-fail/madaros_option_payload_untyped_f64_refused.sio`)
+  and `println(x)` is refused as an unresolved scalar kind. Workaround:
+  `let o: Option<f64> = f()` and match on `o`. Sub-patterns other than a
+  binding, `_`, an int/bool literal, `None`, nested `Some` or a unit enum
+  variant are refused (hard error 7, pin
+  `tests/compile-fail/madaros_option_subpattern_unsupported_refused.sio`).
+  `Option::Some(v)` is refused at native emission (`empty_stub_ud2`). `==`
+  between two Options compares cells, not payloads; `x == None` is correct.
+- lean_single residual (OPEN, needs a seed refresh). Measured 2026-10-06 on
+  `option_payload_kinds_2787.sio`: a non-zero `Option<f64>` payload reads
+  back as `nan`, and literal sub-patterns are ignored (`Some(0) =>` matches
+  every `Some`). Integer, bool and struct payloads, arm order, `if let` and
+  `while let` are correct on lean_single.
 
 ## Registry-governed, not rungs
 
