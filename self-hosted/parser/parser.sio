@@ -911,6 +911,73 @@ pub fn pt_read_kind_code(idx: i64) -> i64 with Panic {
     }
 }
 
+// #2828: a module that declares its own `struct Box` / `enum Box` (or imports
+// one by name, `use m::{Box}`) refers to THAT type everywhere it spells `Box`;
+// the definition shadows the builtin Box<T>. Lowering recognises the builtin by
+// the bare name (ir_name_is_box, ~28 sites), so a user struct called Box had
+// its first field dereferenced as a heap pointer (SIGSEGV, or a silent wrong
+// value). Rather than teach every one of those sites about scope, the parser
+// gives the user type a distinct spelling, `Box__user`, in the module where it
+// is in scope -- the same move builtin_shadow_apply_items makes for a user fn
+// named like a builtin (KL-21). Set per parse by parser_prescan_user_box.
+var PARSER_USER_BOX: i64 = 0
+
+fn parser_token_is_box(idx: i64) -> bool with Panic {
+    if PT_END[idx as usize] - PT_START[idx as usize] != 3 { return false }
+    let s = PT_START[idx as usize]
+    CURSOR_SOURCE[s as usize] == 66 as i8 && CURSOR_SOURCE[(s + 1) as usize] == 111 as i8
+        && CURSOR_SOURCE[(s + 2) as usize] == 120 as i8
+}
+
+pub fn parser_prescan_user_box(token_count: i64) with Mut, Panic, Div {
+    PARSER_USER_BOX = 0
+    var depth: i64 = 0
+    var in_use = false
+    var i: i64 = 0
+    while i < token_count && i < 2097152 {
+        let k = pt_read_kind(i)
+        if k == TokenKind::LBrace {
+            depth = depth + 1
+        } else if k == TokenKind::RBrace {
+            if depth > 0 { depth = depth - 1 }
+        } else if k == TokenKind::Use && depth == 0 {
+            in_use = true
+        } else if k == TokenKind::Semi || k == TokenKind::Newline {
+            if depth == 0 { in_use = false }
+        } else if k == TokenKind::Ident && parser_token_is_box(i) {
+            if in_use {
+                PARSER_USER_BOX = 1
+                return
+            }
+            if depth == 0 && i > 0 {
+                var j = i - 1
+                while j > 0 && pt_read_kind(j) == TokenKind::Newline { j = j - 1 }
+                let pk = pt_read_kind(j)
+                if pk == TokenKind::Struct || pk == TokenKind::Enum {
+                    PARSER_USER_BOX = 1
+                    return
+                }
+            }
+        }
+        if in_use && depth == 0 && k == TokenKind::RBrace { in_use = false }
+        i = i + 1
+    }
+}
+
+fn parser_user_box_rename(name: Name) -> Name with Mut, Panic, Div {
+    if PARSER_USER_BOX == 0 || name.len != 3 { return name }
+    if name.buf[0] != 66 as i8 || name.buf[1] != 111 as i8 || name.buf[2] != 120 as i8 { return name }
+    var out = name
+    out.buf[3] = 95 as i8
+    out.buf[4] = 95 as i8
+    out.buf[5] = 117 as i8
+    out.buf[6] = 115 as i8
+    out.buf[7] = 101 as i8
+    out.buf[8] = 114 as i8
+    out.len = 9
+    out
+}
+
 // The Name of an arbitrary token, for two-word contextual keywords where the
 // second word must be inspected before committing. current_name only reads the
 // CURRENT token, and a lookahead that has to advance first cannot back out.
@@ -929,7 +996,7 @@ pub fn parser_name_at(p: Parser, idx: i64) -> Name with Mut, Panic, Div {
         name.buf[i as usize] = CURSOR_SOURCE[(s + i) as usize]
         i = i + 1
     }
-    name
+    parser_user_box_rename(name)
 }
 
 pub fn pt_read_start(idx: i64) -> i64 with Panic {
@@ -1919,7 +1986,7 @@ impl Parser {
                 name.buf[i as usize] = CURSOR_SOURCE[(s + i) as usize]
                 i = i + 1
             }
-            name
+            parser_user_box_rename(name)
         } else {
             Name { buf: [0; 384], len: 0 }
         }
