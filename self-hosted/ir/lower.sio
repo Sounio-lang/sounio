@@ -4444,6 +4444,8 @@ fn lower_type_expr_elem_or_box_inner_name(te: &TypeExpr) -> Name with Mut, Panic
     if lower_type_expr_is_box(te) {
         return lower_box_inner_type_name(te)
     }
+    let option_inner = lower_option_box_inner_type_name(te)
+    if option_inner.len > 0 { return option_inner }
     // Seq<T> fields need the same owning element layout as Seq<T> locals.
     // Otherwise row.bindings[i].variable_id can borrow QueryTerm's offset
     // for the same field name instead of Binding's own offset.
@@ -6072,8 +6074,8 @@ fn lowerer_lower_fn_params_mut(
                 if lower_type_expr_is_ref_like(&(*list).head.ty) {
                     lowerer_mark_local_ref_mut(lo, (*list).head.name)
                 }
-                if lower_type_expr_is_box(&(*list).head.ty) {
-                    let bl = lower_struct_layout_index_of(&(*(*lo).struct_layouts), lower_box_inner_type_name(&(*list).head.ty))
+                if lower_box_or_option_inner_type_name(&(*list).head.ty).len > 0 {
+                    let bl = lower_struct_layout_index_of(&(*(*lo).struct_layouts), lower_box_or_option_inner_type_name(&(*list).head.ty))
                     lowerer_bind_local_box_inner_mut(lo, (*list).head.name, bl)
                     if str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
                         print("boxtrace: WRITE-A ")
@@ -8112,6 +8114,38 @@ fn lower_box_inner_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
     }
 }
 
+// Preserve T for the payload binding of Option<Box<T>>. The Option itself
+// remains an Option; this metadata is transferred only to its Some binder.
+fn lower_option_box_inner_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut {
+        return match (*ty).inner { Some(inner) => lower_option_box_inner_type_name(&(*inner)), None => ir_empty_name(), }
+    }
+    if (*ty).kind != TypeExprKind::TypeNamed || !ir_name_eq(ir_path_first_name((*ty).path), make_name("Option")) { return ir_empty_name() }
+    match (*ty).type_args {
+        Some(arg) => {
+            if lower_type_expr_is_box(&(*arg).head) { return lower_box_inner_type_name(&(*arg).head) }
+            ir_empty_name()
+        }
+        None => ir_empty_name(),
+    }
+}
+
+fn lower_box_or_option_inner_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
+    if lower_type_expr_is_box(ty) { return lower_box_inner_type_name(ty) }
+    lower_option_box_inner_type_name(ty)
+}
+
+fn lower_lookup_box_layout_for_reg(locals: Box<LowerLocalStack>, depth: i64, reg: i64) -> i64 with Mut, Panic, Div {
+    var i = (*locals).count - 1
+    while i >= 0 {
+        if (*(*locals).depths).values[i as usize] <= depth && (*(*locals).regs).values[i as usize] == reg {
+            return (*(*locals).box_inner_layout).values[i as usize]
+        }
+        i = i - 1
+    }
+    0 - 1
+}
+
 fn lower_struct_layout_index_of(table: &StructLayoutTable, type_name: Name) -> i64 with Mut, Panic, Div {
     if type_name.len <= 0 { return 0 - 1 }
     var si: i64 = 0
@@ -8126,6 +8160,21 @@ fn lower_struct_layout_index_of(table: &StructLayoutTable, type_name: Name) -> i
 // is harmless (a written-but-never-read array changes nothing), while every earlier attempt read it
 // back through a by-value `self` method — which copies the whole ~struct Lowerer — at the
 // field-access site, the hottest path in the lowerer. That read is what broke four builds.
+// Read Option payload metadata without copying the Lowerer receiver.
+fn lower_option_payload_for_local(locals: Box<LowerLocalStack>, depth: i64, name: Name) -> i64 with Mut, Panic, Div {
+    var i = (*locals).count - 1
+    while i >= 0 {
+        if (*(*locals).depths).values[i as usize] <= depth && ir_name_eq((*(*locals).names).values[i as usize], name) {
+            if ir_name_eq((*(*locals).struct_types).values[i as usize], make_name("Option")) {
+                return (*(*locals).box_inner_layout).values[i as usize]
+            }
+            return 0 - 1
+        }
+        i = i - 1
+    }
+    return 0 - 1
+}
+
 fn lower_lookup_box_inner_layout(locals: Box<LowerLocalStack>, scope_depth: i64, name: Name) -> i64 with Mut, Panic, Div {
     var i = (*locals).count - 1
     while i >= 0 {
@@ -11027,12 +11076,12 @@ impl Lowerer {
     fn bind_local_box_inner_layout(self, name: Name, layout_idx: i64) -> Lowerer with Mut, Alloc, Panic, Div {
         if layout_idx < 0 { return self }
         var lo = self
-        var stk = *lo.locals
-        var i = stk.count - 1
+        var stk = lo.locals
+        var i = (*stk).count - 1
         while i >= 0 {
-            if (*stk.depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*stk.names).values[i as usize], name) {
-                (*stk.box_inner_layout).values[i as usize] = layout_idx
-                lo.locals = Box::new(stk)
+            if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
+                (*(*stk).box_inner_layout).values[i as usize] = layout_idx
+                lo.locals = stk
                 return lo
             }
             i = i - 1
@@ -15578,6 +15627,28 @@ impl Lowerer {
         ir_empty_name()
     }
 
+    fn field_option_box_inner_type_for_struct(self, type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
+        if type_name.len <= 0 { return ir_empty_name() }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    let field = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
+                    if ir_name_eq(ir_name_at(field.name_id), field_name) {
+                        if ir_name_eq(ir_name_at(field.named_type_name_id), make_name("Option")) {
+                            return ir_name_at(field.elem_type_name_id)
+                        }
+                        return ir_empty_name()
+                    }
+                    fi = fi + 1
+                }
+            }
+            si = si + 1
+        }
+        ir_empty_name()
+    }
+
     fn field_named_type_for_struct(self, type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
         if type_name.len <= 0 { return ir_empty_name() }
         var si: i64 = 0
@@ -15751,11 +15822,8 @@ impl Lowerer {
     fn field_is_box_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
-                if (*base_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*base_expr).name)
-                    return self.field_is_box_for_struct(type_name, field_name)
-                }
-                false
+                let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
+                return self.field_is_box_for_struct(type_name, field_name)
             }
             _ => false,
         }
@@ -15951,7 +16019,8 @@ impl Lowerer {
                         // a Box answer would be a new claim where the answer used
                         // to be empty. Keep it empty: this reader's behaviour is
                         // unchanged by the widening, deliberately.
-                        if ir_name_is_box(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id)) {
+                        if ir_name_is_box(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id))
+                            || ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id), make_name("Option")) {
                             return ir_empty_name()
                         }
                         return ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].elem_type_name_id)
@@ -16145,6 +16214,16 @@ impl Lowerer {
                             return ir_empty_name()
                         }
                         return ost
+                    }
+                    if (*operand).kind == ExprKind::ExprFieldAccess {
+                        match (*operand).left {
+                            Some(owner) => {
+                                let owner_type = self.expr_receiver_struct_type_ref(&(*owner))
+                                let inner = self.field_box_inner_type_for_struct(owner_type, (*operand).name)
+                                if inner.len > 0 { return inner }
+                            }
+                            None => {}
+                        }
                     }
                     return self.expr_receiver_struct_type_ref(&(*operand))
                 }
@@ -18472,7 +18551,7 @@ impl Lowerer {
                         // not leak into this param.
                         (*(*locals).tuple_float_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).tuple_arr_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
-                        (*(*locals).box_inner_layout).values[idx as usize] = if lower_type_expr_is_box(&(*list).head.ty) { lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_inner_type_name(&(*list).head.ty)) } else { 0 - 1 }
+                        (*(*locals).box_inner_layout).values[idx as usize] = lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_or_option_inner_type_name(&(*list).head.ty))
                         if lower_type_expr_is_box(&(*list).head.ty) && str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
                             print("boxtrace: WRITE-B ")
                             print(str_from_bytes((*list).head.name.buf, (*list).head.name.len))
@@ -19787,6 +19866,39 @@ impl Lowerer {
     }
 
     fn lower_let_stmt_after_expr_ref(self, s: &Stmt, is_mut: bool, reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Capture before bind_local: a same-name alias replaces the metadata slot.
+        var option_payload_layout: i64 = 0 - 1
+        var has_option_payload = false
+        match s.expr {
+            Some(rhs) => {
+                if (*rhs).kind == ExprKind::ExprIdent {
+                    option_payload_layout = lower_lookup_box_inner_layout(self.locals, self.scope_depth, (*rhs).name)
+                    has_option_payload = option_payload_layout >= 0
+                } else if (*rhs).kind == ExprKind::ExprFieldAccess {
+                    match (*rhs).left {
+                        Some(owner) => {
+                            let owner_type = self.expr_receiver_struct_type_ref(&(*owner))
+                            let inner = self.field_option_box_inner_type_for_struct(owner_type, (*rhs).name)
+                            if inner.len > 0 {
+                                option_payload_layout = lower_struct_layout_index_of(&(*self.struct_layouts), inner)
+                                has_option_payload = option_payload_layout >= 0
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            None => {}
+        }
+        if str_eq(read_env("SOUNIO_OPTION_TRACE"), "1") {
+            print("optiontrace: capture name=")
+            print(str_from_bytes(s.name.buf, s.name.len))
+            print(" layout=")
+            print_int(option_payload_layout)
+            print(" valid=")
+            print_int(if has_option_payload { 1 } else { 0 })
+            print("\n")
+        }
         var lo = self
         // Captured BEFORE bind_local(s.name, ...) below rebinds `s.name` to a
         // fresh (non-ref) slot. Same-name shadowing (`let a = a`) means a
@@ -20008,6 +20120,9 @@ impl Lowerer {
             _ => {}
         }
         lo = lo.bind_local(s.name, bind_reg, is_mut)
+        if has_option_payload {
+            lo = lo.bind_local_box_inner_layout(s.name, option_payload_layout)
+        }
         // #1502: record which slots of a tuple-typed local are f64.
         //
         // Copilot review (PR #2516), comment 4114931502: this binding used
@@ -20065,7 +20180,20 @@ impl Lowerer {
             }
             _ => {}
         }
-        lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, rhs_ident_is_ref)
+        let final_pair = lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, rhs_ident_is_ref)
+        if !has_option_payload { return final_pair }
+        var final_lo = final_pair.0
+        if has_option_payload {
+            final_lo = final_lo.bind_local_box_inner_layout(s.name, option_payload_layout)
+        }
+        if str_eq(read_env("SOUNIO_OPTION_TRACE"), "1") {
+            print("optiontrace: final name=")
+            print(str_from_bytes(s.name.buf, s.name.len))
+            print(" layout=")
+            print_int(lower_lookup_box_inner_layout(final_lo.locals, final_lo.scope_depth, s.name))
+            print("\n")
+        }
+        (final_lo, final_pair.1)
     }
 
     fn lower_let_stmt_finalize_ref(
@@ -20079,6 +20207,16 @@ impl Lowerer {
         rhs_ident_is_ref: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        match s.ty {
+            Some(ty) => {
+                let option_inner = lower_option_box_inner_type_name(&(*ty))
+                if option_inner.len > 0 {
+                    lo = lo.bind_local_struct_type(s.name, make_name("Option"), false)
+                    lo = lo.bind_local_box_inner_layout(s.name, lower_struct_layout_index_of(&(*lo.struct_layouts), option_inner))
+                }
+            }
+            None => {}
+        }
         // Ref-typed locals (annotated &T / &!T, or RHS is & / &! expr) must be marked
         // is_ref so IndexGet/Set use the ref_array path. Params already get this from
         // their type; let/var bindings previously did not — so `var p = &!GG; p[i]=v`
@@ -20912,6 +21050,13 @@ impl Lowerer {
                                 }
                             }
                         }
+                    }
+                } else if (*expr_box).kind == ExprKind::ExprUnary && (*expr_box).un_op == UnaryOp::OpDeref {
+                    // A Box dereference yields T, including a Box field reached
+                    // through a dereferenced owner. Preserve T for later fields.
+                    let value_type = lo.expr_receiver_struct_type_ref(&(*expr_box))
+                    if value_type.len > 0 && !ir_name_is_box(value_type) {
+                        lo = lo.bind_local_struct_type(s.name, value_type, false)
                     }
                 } else if (*expr_box).kind == ExprKind::ExprIdent {
                     // `let b = nx`: propagate the source variable's struct type (e.g. a Box
@@ -22272,13 +22417,13 @@ impl Lowerer {
     }
 
     // Lower match arms as a linear if/else chain
-    fn lower_match_arms_ref(self, scrut: i64, res: i64, l_end: i64, arms: &Option<Box<MatchArmList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn lower_match_arms_ref(self, scrut: i64, res: i64, l_end: i64, arms: &Option<Box<MatchArmList>>, payload_layout: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var current = arms
         while true {
             match *current {
                 Some(list) => {
-                    lo = lo.lower_match_arm_ref(scrut, res, l_end, &(*list).head)
+                    lo = lo.lower_match_arm_ref(scrut, res, l_end, &(*list).head, payload_layout)
                     current = &(*list).tail
                 }
                 _ => break
@@ -22288,7 +22433,7 @@ impl Lowerer {
     }
 
     fn lower_match_arms(self, scrut: i64, res: i64, l_end: i64, arms: Option<Box<MatchArmList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        self.lower_match_arms_ref(scrut, res, l_end, &arms)
+        self.lower_match_arms_ref(scrut, res, l_end, &arms, 0 - 1)
     }
 
     // Lower a single match arm: test pattern, conditionally execute body
@@ -22305,7 +22450,7 @@ impl Lowerer {
         }
     }
 
-    fn lower_match_arm_ref(self, scrut: i64, res: i64, l_end: i64, arm: &MatchArm) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn lower_match_arm_ref(self, scrut: i64, res: i64, l_end: i64, arm: &MatchArm, payload_layout: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         let pat = &arm.pattern
         if pat.kind == PatternKind::PatWildcard {
             // Wildcard matches the pattern unconditionally; an `if` guard can still reject it,
@@ -22348,7 +22493,7 @@ impl Lowerer {
                 // Branch if scrutinee == 0 (skip this arm)
                 lo = lo.emit(ir_branch_false(scrut, l_skip))
                 // Bind the inner pattern (first sub_pattern) to scrutinee value
-                lo = lo.bind_match_sub_pattern(scrut, pat.sub_patterns)
+                lo = lo.bind_match_sub_pattern(scrut, pat.sub_patterns, payload_layout)
                 lo = lo.lower_arm_guard(&arm.guard, l_skip)
                 let pair_b = lo.lower_expr_ref(&arm.body)
                 lo = pair_b.0
@@ -22456,7 +22601,7 @@ impl Lowerer {
     }
 
     fn lower_match_arm(self, scrut: i64, res: i64, l_end: i64, arm: MatchArm) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        self.lower_match_arm_ref(scrut, res, l_end, &arm)
+        self.lower_match_arm_ref(scrut, res, l_end, &arm, 0 - 1)
     }
 
     // Lower Some(x) — just evaluate the first argument (identity)
@@ -23459,11 +23604,16 @@ impl Lowerer {
     }
 
     // Bind the first sub-pattern of a Some(x) match to the scrutinee value
-    fn bind_match_sub_pattern(self, scrut: i64, pats: Option<Box<PatternList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn bind_match_sub_pattern(self, scrut: i64, pats: Option<Box<PatternList>>, known_payload_layout: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         match pats {
             Some(list) => {
                 let inner = (*list).head
                 if inner.kind == PatternKind::PatBinding {
+                    let payload_layout = if known_payload_layout >= 0 {
+                        known_payload_layout
+                    } else {
+                        lower_lookup_box_layout_for_reg(self.locals, self.scope_depth, scrut)
+                    }
                     var lo = self.bind_local(inner.name, scrut, inner.is_mut)
                     // The payload of `Some(nx)` on an Option<Box<T>> is a Box handle, so mark
                     // the bound variable as a Box: `*nx` then lowers to the box-handle deref
@@ -23472,6 +23622,7 @@ impl Lowerer {
                     // changes how `*nx` lowers, and deref/field-access of a non-Box payload
                     // (e.g. Option<i64>) is not valid code anyway.
                     lo = lo.bind_local_struct_type(inner.name, make_name("Box"), false)
+                    lo = lo.bind_local_box_inner_layout(inner.name, payload_layout)
                     lo
                 } else if inner.kind == PatternKind::PatWildcard {
                     // _ inside Some(_) — no binding needed
@@ -26412,6 +26563,22 @@ impl Lowerer {
     }
 
     fn lower_match_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var payload_layout: i64 = 0 - 1
+        match (*e).left {
+            Some(scrut_expr) => { if (*scrut_expr).kind == ExprKind::ExprIdent {
+                    payload_layout = lower_option_payload_for_local(self.locals, self.scope_depth, (*scrut_expr).name)
+                } else if (*scrut_expr).kind == ExprKind::ExprFieldAccess {
+                    match (*scrut_expr).left {
+                        Some(owner) => {
+                            let owner_type = self.expr_receiver_struct_type_ref(&(*owner))
+                            let inner = self.field_option_box_inner_type_for_struct(owner_type, (*scrut_expr).name)
+                            if inner.len > 0 { payload_layout = lower_struct_layout_index_of(&(*self.struct_layouts), inner) }
+                        }
+                        None => {}
+                    }
+                } }
+            None => {}
+        }
         let pair_scrut = self.lower_opt_expr_ref(&e.left)
         var lo = pair_scrut.0
         let scrut = pair_scrut.1
@@ -26421,7 +26588,7 @@ impl Lowerer {
         let pair_end = lo.fresh_label()
         lo = pair_end.0
         let l_end = pair_end.1
-        lo = lo.lower_match_arms_ref(scrut, res, l_end, &e.arms)
+        lo = lo.lower_match_arms_ref(scrut, res, l_end, &e.arms, payload_layout)
         lo = lo.emit(ir_load_imm(res, 0))
         lo = lo.emit(ir_label(l_end))
         (lo, res)
