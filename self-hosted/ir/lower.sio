@@ -1190,6 +1190,35 @@ pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>, module_id: i64) 
 // the integer path -- the exact corruption this whole side table exists to
 // prevent -- so truncation had to be replaced with a table that cannot
 // overflow before IR_MAX_FUNCS does, rather than with a loud failure.
+// Native source-lowering return payloads, keyed by exact interned function
+// name. Keep the declared IR return name unchanged; this is not SOIR metadata.
+var LOWER_OPTION_BOX_RETURN_INNER: [i64; 65537] = [0; 65537]
+
+fn lower_record_option_box_return(name: Name, rt: &Option<Box<TypeExpr>>) with Mut, Panic, Div {
+    let nid = ir_intern_name(name)
+    if nid <= 0 || nid > 65536 { return }
+    var inner_id: i64 = 0
+    match *rt {
+        Some(ty) => {
+            if (*ty).kind == TypeExprKind::TypeNamed {
+                let inner = lower_option_box_inner_type_name(&(*ty))
+                if inner.len > 0 { inner_id = ir_intern_name(inner) }
+            }
+        }
+        None => {}
+    }
+    LOWER_OPTION_BOX_RETURN_INNER[nid as usize] = inner_id
+}
+
+fn lower_option_box_return_layout(module: Box<IrModule>, table: &StructLayoutTable, fn_id: i64) -> i64 with Mut, Panic, Div {
+    if fn_id < 0 || fn_id >= (*module).fn_count { return 0 - 1 }
+    let nid = ir_intern_name(ir_fn_get(&(*module), fn_id).name)
+    if nid <= 0 || nid > 65536 { return 0 - 1 }
+    let inner_id = LOWER_OPTION_BOX_RETURN_INNER[nid as usize]
+    if inner_id <= 0 { return 0 - 1 }
+    return lower_struct_layout_index_of(table, ir_name_at(inner_id))
+}
+
 var LOWER_FN_TUPLE_ARR_COUNT: i64 = 0
 // `h` (from fo_name_hash below) selects the open-addressed bucket only --
 // see LOWER_FN_TUPLE_ARR_NAME_ID's own comment for the exact-identity check
@@ -1257,6 +1286,11 @@ var LOWER_FN_TUPLE_ARR_SLOT: [i64; 32768] = [-1; 32768]
 // collector once per loaded module and must keep accumulating within one
 // compilation.
 pub fn lower_fn_tuple_arr_reset() with Mut {
+    var oi: i64 = 0
+    while oi < 65537 {
+        LOWER_OPTION_BOX_RETURN_INNER[oi as usize] = 0
+        oi = oi + 1
+    }
     LOWER_FN_TUPLE_ARR_COUNT = 0
     // Clear the open-addressing index too, not just the dense count: a stale
     // LOWER_FN_TUPLE_ARR_SLOT entry points at a dense index that a later
@@ -3132,6 +3166,7 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                         fn_slot_sig.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                         fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                         fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+                                        lower_record_option_box_return(fn_slot_sig.name, &(*fd).return_type)
                                         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
                                         fn_slot_sig.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
                                         fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
@@ -3751,6 +3786,7 @@ fn lowerer_preseed_fn_signature_mut(
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
+    lower_record_option_box_return(fn_slot.name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
@@ -4682,6 +4718,7 @@ fn lowerer_preseed_one_item_mut(
                         fn_slot_sig.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                         fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                         fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+                        lower_record_option_box_return(fn_slot_sig.name, &(*fd).return_type)
                         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
                         fn_slot_sig.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
                         fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
@@ -4868,6 +4905,7 @@ fn ir_fast_summary_preseed_fn_signature(
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
+    lower_record_option_box_return(fn_slot.name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
@@ -5001,6 +5039,7 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
+    lower_record_option_box_return(fn_slot.name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
@@ -5324,6 +5363,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                 fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                 fn_slot.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+                                lower_record_option_box_return(fn_slot.name, &(*fd).return_type)
                                 fn_slot.param_count = ir_param_list_count_ref(&(*fd).params)
                                 fn_slot.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
                                 fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
@@ -5422,6 +5462,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                         fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                                         fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                                         fn_slot.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+                                                        lower_record_option_box_return(fn_slot.name, &(*fd).return_type)
                                                         fn_slot.param_count = ir_param_list_count_ref(&(*fd).params)
                                                         fn_slot.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
                                                         fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
@@ -6447,6 +6488,7 @@ fn lowerer_lower_fn_item_mut(
     (*strategy_func_box).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
     (*strategy_func_box).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
     (*strategy_func_box).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
+    lower_record_option_box_return((*strategy_func_box).name, &fd.return_type)
     (*strategy_func_box).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
     (*strategy_func_box).f128_param_mask = lower_f128_param_mask_of(&fd.params)
     (*lo).current_func = strategy_func_box
@@ -18070,6 +18112,7 @@ impl Lowerer {
         func.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
         func.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
         func.return_struct_name = lower_opt_type_return_layout_name(return_type)
+        lower_record_option_box_return(func.name, return_type)
         func.param_count = ir_param_list_count_ref(params)
         func.f128_param_mask = lower_f128_param_mask_of(params)
         func.first_param_is_ref = lower_fn_first_param_is_ref(params)
@@ -18821,6 +18864,7 @@ impl Lowerer {
         (*lo.current_func).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
+        lower_record_option_box_return((*lo.current_func).name, &fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
         // Sprint 44: allocate profiling counter for instrumented functions
@@ -19010,6 +19054,7 @@ impl Lowerer {
         (*lo.current_func).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
+        lower_record_option_box_return((*lo.current_func).name, &fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
         if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -19873,6 +19918,10 @@ impl Lowerer {
             Some(rhs) => {
                 if (*rhs).kind == ExprKind::ExprIdent {
                     option_payload_layout = lower_lookup_box_inner_layout(self.locals, self.scope_depth, (*rhs).name)
+                    has_option_payload = option_payload_layout >= 0
+                } else if (*rhs).kind == ExprKind::ExprCall || (*rhs).kind == ExprKind::ExprMethodCall {
+                    let fid = self.expr_method_fn_id(&(*rhs))
+                    option_payload_layout = lower_option_box_return_layout(self.module, &(*self.struct_layouts), fid)
                     has_option_payload = option_payload_layout >= 0
                 } else if (*rhs).kind == ExprKind::ExprFieldAccess {
                     match (*rhs).left {
@@ -26567,6 +26616,18 @@ impl Lowerer {
         match (*e).left {
             Some(scrut_expr) => { if (*scrut_expr).kind == ExprKind::ExprIdent {
                     payload_layout = lower_option_payload_for_local(self.locals, self.scope_depth, (*scrut_expr).name)
+                } else if (*scrut_expr).kind == ExprKind::ExprUnary && (*scrut_expr).un_op == UnaryOp::OpDeref {
+                    match (*scrut_expr).left {
+                        Some(source) => {
+                            if (*source).kind == ExprKind::ExprIdent {
+                                payload_layout = lower_option_payload_for_local(self.locals, self.scope_depth, (*source).name)
+                            }
+                        }
+                        None => {}
+                    }
+                } else if (*scrut_expr).kind == ExprKind::ExprCall || (*scrut_expr).kind == ExprKind::ExprMethodCall {
+                    let fid = self.expr_method_fn_id(&(*scrut_expr))
+                    payload_layout = lower_option_box_return_layout(self.module, &(*self.struct_layouts), fid)
                 } else if (*scrut_expr).kind == ExprKind::ExprFieldAccess {
                     match (*scrut_expr).left {
                         Some(owner) => {
