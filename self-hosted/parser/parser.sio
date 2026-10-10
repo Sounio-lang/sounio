@@ -5,6 +5,7 @@ module parser::parser
 use parser::ast::*
 use lexer::token::*
 use lexer::cursor::*
+use lexer::tables::{keyword_lookup}
 
 // Keep token storage out of Parser state so Parser method calls don't
 // repeatedly copy a 65k token array by value.
@@ -485,6 +486,39 @@ fn token_kind_from_flat_code(kind: i64) -> TokenKind {
 
 // Read token kind from parallel scalar code array. Avoid reading PT_KIND for
 // high-valued variants because the boot4 global enum array corrupts them.
+// #1472: copy a source span into keyword_lookup's buffer shape and ask the one
+// keyword table in lexer/tables.sio.
+fn pt_keyword_lookup_span(start: i64, len: i64) -> TokenKind with Mut, Panic {
+    var text: [i8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < len && i < 256 {
+        text[i as usize] = CURSOR_SOURCE[(start + i) as usize]
+        i = i + 1
+    }
+    keyword_lookup(text, len)
+}
+
+// The lowercase item-introducing keyword family. Every member is also a
+// contextual identifier (tk_is_contextual_ident) except `contest`, which the
+// expression parser handles directly, and `audit`, which is the `expr audit Name`
+// attachment operator as well as an item.
+fn tk_is_item_keyword_lower(k: TokenKind) -> bool {
+    k == TokenKind::ModelsLower
+        || k == TokenKind::PolicyLower
+        || k == TokenKind::ContestLower
+        || k == TokenKind::AuditLower
+        || k == TokenKind::ValidationLower
+        || k == TokenKind::AcquisitionPolicyLower
+        || k == TokenKind::RecoursePolicyLower
+        || k == TokenKind::MonitoringPolicyLower
+        || k == TokenKind::TransitionPolicyLower
+        || k == TokenKind::TransitionProtocolLower
+        || k == TokenKind::AlternativePolicyLower
+        || k == TokenKind::AlternativeFrontierLower
+        || k == TokenKind::DecisionPolicyLower
+        || k == TokenKind::DeferralPolicyLower
+}
+
 pub fn pt_read_kind(idx: i64) -> TokenKind with Mut, Panic, Div {
     if idx >= 0 && idx < 2097152 {
         let code = PT_KIND_CODE[idx as usize]
@@ -797,12 +831,6 @@ pub fn pt_read_kind(idx: i64) -> TokenKind with Mut, Panic, Div {
             if a == (97 as i8) && b == (102 as i8) && c == (102 as i8) && d == (105 as i8) && e == (110 as i8) && f == (101 as i8) {
                 return TokenKind::Affine
             }
-            if a == (109 as i8) && b == (111 as i8) && c == (100 as i8) && d == (101 as i8) && e == (108 as i8) && f == (115 as i8) {
-                return TokenKind::ModelsLower
-            }
-            if a == (112 as i8) && b == (111 as i8) && c == (108 as i8) && d == (105 as i8) && e == (99 as i8) && f == (121 as i8) {
-                return TokenKind::PolicyLower
-            }
         }
         if len == 7 {
             let a = CURSOR_SOURCE[start as usize]
@@ -824,9 +852,6 @@ pub fn pt_read_kind(idx: i64) -> TokenKind with Mut, Panic, Div {
             }
             if a == (67 as i8) && b == (111 as i8) && c == (110 as i8) && d == (116 as i8) && e == (101 as i8) && f == (115 as i8) && g == (116 as i8) {
                 return TokenKind::Contest
-            }
-            if a == (99 as i8) && b == (111 as i8) && c == (110 as i8) && d == (116 as i8) && e == (101 as i8) && f == (115 as i8) && g == (116 as i8) {
-                return TokenKind::ContestLower
             }
         }
         if len == 8 {
@@ -880,6 +905,18 @@ pub fn pt_read_kind(idx: i64) -> TokenKind with Mut, Panic, Div {
             if (ch0 >= (97 as i8) && ch0 <= (122 as i8)) ||
                (ch0 >= (65 as i8) && ch0 <= (90 as i8)) ||
                ch0 == (95 as i8) {
+                // #1472: the lowercase item keywords (`models`, `policy`, `contest`,
+                // `audit`, `validation`, `*_policy`, `transition_protocol`,
+                // `alternative_frontier`) come from the ONE keyword table,
+                // lexer/tables.sio:keyword_lookup, instead of a second inlined copy
+                // that had drifted (it knew only models/policy/contest, so the
+                // `audit` / `validation` / `acquisition_policy` item forms were
+                // unparseable on this path). They stay contextual identifiers
+                // everywhere else (lexer/token.sio:tk_is_contextual_ident).
+                if ch0 >= (97 as i8) && ch0 <= (122 as i8) && len <= 24 {
+                    let kw = pt_keyword_lookup_span(start, len)
+                    if tk_is_item_keyword_lower(kw) { return kw }
+                }
                 return TokenKind::Ident
             }
         }
@@ -901,6 +938,20 @@ pub fn pt_read_kind(idx: i64) -> TokenKind with Mut, Panic, Div {
     } else {
         TokenKind::Eof
     }
+}
+
+// #1472: contextual keyword test against the ONE keyword table. Inside an item
+// body (`require`, `route`, `objective`, `strategy`, `step`, `max_steps`,
+// `rollback_route`) the word is a keyword; everywhere else it is a name, so
+// pt_read_kind keeps returning Ident for it. This asks keyword_lookup about the
+// token's text instead of relying on a second, drifting table.
+pub fn parser_at_kw(p: Parser, kind: TokenKind) -> bool with Mut, Panic, Div {
+    if parser_peek(p) == kind { return true }
+    if p.pending_gt > 0 || p.pos < 0 || p.pos >= p.token_count { return false }
+    let start = PT_START[p.pos as usize]
+    let len = PT_END[p.pos as usize] - start
+    if len <= 0 || len > 24 { return false }
+    pt_keyword_lookup_span(start, len) == kind
 }
 
 pub fn pt_read_kind_code(idx: i64) -> i64 with Panic {
