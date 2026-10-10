@@ -31,6 +31,7 @@ use quantum::qasm_tape::{
     tape_qasm,
     tape_face,
     tape_counts,
+    tape_replay_2,
     shot_add,
     ShotCounts,
     Tape,
@@ -285,6 +286,106 @@ pub fn qpu_copy_shots(sigma: f64, pi: f64, shots: i64) -> PartyMean with Mut, Di
         i = i + 1
     }
     PartyMean { s: m, se: party_sqrt(vv), keep: qpu_keep(m) }
+}
+
+// Knuth MMIX LCG, period 2^64. The 31-bit stream reuses its cycle once a
+// block walks a few hundred million shots, and the sixteen blocks then
+// scatter wider than the shot-noise formula. This one is only for that rung.
+fn wide_counts(t: Tape, shots: i64, seed: i64) -> ShotCounts with Mut, Div, Panic {
+    let p = tape_replay_2(t)
+    var n00: i64 = 0
+    var n01: i64 = 0
+    var n10: i64 = 0
+    var n11: i64 = 0
+    var s = seed
+    if s == 0 { s = 1 }
+    var k: i64 = 0
+    let scale = 4294967296.0
+    while k < shots {
+        s = s * 6364136223846793005 + 1442695040888963407
+        let u = (((s >> 32) & 4294967295) as f64) / scale
+        let b01 = p.p00 + p.p01
+        let b10 = b01 + p.p10
+        if u < p.p00 {
+            n00 = n00 + 1
+        } else {
+            if u < b01 {
+                n01 = n01 + 1
+            } else {
+                if u < b10 {
+                    n10 = n10 + 1
+                } else {
+                    n11 = n11 + 1
+                }
+            }
+        }
+        k = k + 1
+    }
+    ShotCounts { n00: n00, n01: n01, n10: n10, n11: n11 }
+}
+
+fn mix_wide(a: f64, b: f64, turn: f64, shots: i64, seed: i64) -> MixShot with Mut, Div, Panic {
+    let even = wide_counts(basis_term(turn, 0, 0, a, b), shots, seed)
+    let odd = wide_counts(basis_term(turn, 1, 1, a, b), shots, seed + 1)
+    let pooled = shot_add(even, odd)
+    let ve = corr_var(even)
+    let vo = corr_var(odd)
+    MixShot { e: qpu_corr(pooled), v: ve / 4.0 + vo / 4.0 }
+}
+
+// One setting of ry_chsh_both. The pair is the Bell tape. The copy is the
+// equal mixture of |00> and |11>, same angles. se is the shot-noise width.
+pub struct BothShot {
+    pub pair: f64,
+    pub pair_se: f64,
+    pub copy: f64,
+    pub copy_se: f64,
+}
+
+pub fn qpu_both_from(delta_a: f64, delta_b: f64, epsilon: f64, pi: f64, shots: i64, seed0: i64) -> BothShot with Mut, Div, Panic {
+    let a0 = delta_a
+    let a1 = pi / 2.0 + delta_a + epsilon
+    let b0 = pi / 4.0 + delta_b
+    let b1 = 0.0 - pi / 4.0 + delta_b
+    let c0 = tape_counts(bell_term(a0, b0), shots, seed0)
+    let c1 = tape_counts(bell_term(a0, b1), shots, seed0 + 1)
+    let c2 = tape_counts(bell_term(a1, b0), shots, seed0 + 2)
+    let c3 = tape_counts(bell_term(a1, b1), shots, seed0 + 3)
+    let m0 = mix_setting(a0, b0, pi, shots, seed0 + 16)
+    let m1 = mix_setting(a0, b1, pi, shots, seed0 + 18)
+    let m2 = mix_setting(a1, b0, pi, shots, seed0 + 20)
+    let m3 = mix_setting(a1, b1, pi, shots, seed0 + 22)
+    let pv = corr_var(c0) + corr_var(c1) + corr_var(c2) + corr_var(c3)
+    let cv = m0.v + m1.v + m2.v + m3.v
+    BothShot {
+        pair: qpu_s(qpu_corr(c0), qpu_corr(c1), qpu_corr(c2), qpu_corr(c3)),
+        pair_se: party_sqrt(pv),
+        copy: qpu_s(m0.e, m1.e, m2.e, m3.e),
+        copy_se: party_sqrt(cv),
+    }
+}
+
+pub fn qpu_both_wide(delta_a: f64, delta_b: f64, epsilon: f64, pi: f64, shots: i64, seed0: i64) -> BothShot with Mut, Div, Panic {
+    let a0 = delta_a
+    let a1 = pi / 2.0 + delta_a + epsilon
+    let b0 = pi / 4.0 + delta_b
+    let b1 = 0.0 - pi / 4.0 + delta_b
+    let c0 = wide_counts(bell_term(a0, b0), shots, seed0)
+    let c1 = wide_counts(bell_term(a0, b1), shots, seed0 + 1)
+    let c2 = wide_counts(bell_term(a1, b0), shots, seed0 + 2)
+    let c3 = wide_counts(bell_term(a1, b1), shots, seed0 + 3)
+    let m0 = mix_wide(a0, b0, pi, shots, seed0 + 16)
+    let m1 = mix_wide(a0, b1, pi, shots, seed0 + 18)
+    let m2 = mix_wide(a1, b0, pi, shots, seed0 + 20)
+    let m3 = mix_wide(a1, b1, pi, shots, seed0 + 22)
+    let pv = corr_var(c0) + corr_var(c1) + corr_var(c2) + corr_var(c3)
+    let cv = m0.v + m1.v + m2.v + m3.v
+    BothShot {
+        pair: qpu_s(qpu_corr(c0), qpu_corr(c1), qpu_corr(c2), qpu_corr(c3)),
+        pair_se: party_sqrt(pv),
+        copy: qpu_s(m0.e, m1.e, m2.e, m3.e),
+        copy_se: party_sqrt(cv),
+    }
 }
 
 // |01>, the single product state in ry_chsh_party.anti. One list per setting.
