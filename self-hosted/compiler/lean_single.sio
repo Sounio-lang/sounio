@@ -2253,6 +2253,14 @@ fn em(b: i64) with Mut { if CL >= 268435456 { if CD_OVF == 0 { CD_OVF_FN = CURRE
 fn em32(v: i64) with Mut { em(v & 0xFF); em((v >> 8) & 0xFF); em((v >> 16) & 0xFF); em((v >> 24) & 0xFF) }
 fn em64(v: i64) with Mut { em32(v & 0xFFFFFFFF); em32((v >> 32) & 0xFFFFFFFF) }
 
+// macOS Mach-O: lean_single bakes absolute BSS addresses into code, so __DATA
+// sits at a fixed VA. The old 16 MiB gap fitted lean_single (~8 MiB TEXT) but
+// lean.sio aarch64-macos is ~32 MiB; overlapping RX/RW segments is a kernel
+// SIGKILL on exec (Apple Self-Host typecheck). Match the Linux 256 MiB BSS
+// gap and refuse to emit if TEXT would still reach DATA.
+fn macos_text_data_gap() -> i64 { 268435456 }
+fn macos_data_vmaddr() -> i64 { 4294967296 + macos_text_data_gap() }
+
 fn emit_load_abs_addr_to_rax_x86(addr: i64) with Mut {
     em(0x48); em(0xb8); em64(addr)
 }
@@ -32687,9 +32695,10 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     GL_BSS_SIZE = GL_BSS_SIZE + 1048576  // 1MB scratch for aggregate (struct/array) returns
     // Add 16 to BSS_BASE so globals start at BSS+16, but argc/argv at BSS+0.
     // The lean_single Mach-O path bakes absolute BSS addresses into emitted code,
-    // so macOS needs a generous fixed gap between __TEXT and __DATA.
+    // so macOS needs a fixed gap between __TEXT and __DATA that is larger than
+    // any TEXT we emit (lean.sio aarch64-macos is ~32 MiB; 16 MiB overlapped).
     if TARGET_OS == 2 {
-        GL_BSS_BASE = 0x101000000 + 16    // macOS: __DATA segment at 0x101000000
+        GL_BSS_BASE = macos_data_vmaddr() + 16
     } else {
         GL_BSS_BASE = 0x10000000 + 16     // Linux/Windows: BSS at 0x10000000 (256MB, never overlaps code)
     }
@@ -34536,12 +34545,12 @@ fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
 
 // ─── Mach-O x86_64 writer ───
 // Builds a macOS Mach-O 64-bit executable.
-// Layout: __PAGEZERO(0..4GB) + __TEXT(4GB.., code) + __DATA(4GB+16MB, BSS)
+// Layout: __PAGEZERO(0..4GB) + __TEXT(4GB.., code) + __DATA(4GB+256MB, BSS)
 fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
     let vm_base: i64 = 4294967296       // 0x100000000
     let page_size: i64 = 4096
     let text_vm = vm_base               // __TEXT vmaddr
-    let data_vm = vm_base + 16777216    // __DATA vmaddr (BSS)
+    let data_vm = macos_data_vmaddr()   // __DATA vmaddr (BSS)
     let macos_build_ver: i64 = 720896   // 11.0.0
 
     // Mach-O header: 32 bytes
@@ -34563,6 +34572,14 @@ fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
     let text_file_size = ((CL + page_size - 1) / page_size) * page_size
     let total_file_size = text_file_off + text_file_size
     let text_seg_vmsize = text_file_off + text_file_size  // covers headers + code
+    if text_vm + text_seg_vmsize > data_vm {
+        print("error: macho __TEXT overlaps __DATA (text_end=")
+        print_int(text_vm + text_seg_vmsize)
+        print(" data_vm=")
+        print_int(data_vm)
+        print(") — refuse emit\n")
+        return 1
+    }
 
     print("macho_build: code="); print_int(CL); print(" text_off="); print_int(text_file_off); print("\n")
 
@@ -44307,7 +44324,7 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     let vm_base: i64 = 4294967296
     let page_size: i64 = 16384
     let text_vm = vm_base
-    let data_vm = vm_base + 16777216
+    let data_vm = macos_data_vmaddr()
     let macos_build_ver: i64 = 720896   // 11.0.0
     let hdr_size = 32
     let lc_pagezero_size = 72
@@ -44335,6 +44352,14 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     let linkedit_filesize = linkedit_fixups_size + linkedit_exports_size
     let total_file_size = text_seg_filesize + linkedit_filesize
     let text_seg_vmsize = text_seg_filesize
+    if text_vm + text_seg_vmsize > data_vm {
+        print("error: macho __TEXT overlaps __DATA (text_end=")
+        print_int(text_vm + text_seg_vmsize)
+        print(" data_vm=")
+        print_int(data_vm)
+        print(") — refuse emit\n")
+        return 1
+    }
     let linkedit_vm = data_vm + data_seg_vmsize
     let linkedit_symtab_off = linkedit_fileoff + linkedit_filesize
     let linkedit_stroff = linkedit_symtab_off
@@ -46287,16 +46312,15 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     if cr != 0 { return cr }
     if TARGET_ARCH == 1 {
         if TARGET_OS == 2 {
-            write_macho_arm64(out)
+            return write_macho_arm64(out)
         } else {
-            write_elf_arm64(out)
+            return write_elf_arm64(out)
         }
     } else if TARGET_OS == 3 {
-        write_pe(out)
+        return write_pe(out)
     } else if TARGET_OS == 2 {
-        write_macho_x86(out)
+        return write_macho_x86(out)
     } else {
-        write_elf(out)
+        return write_elf(out)
     }
-    return 0
 }
