@@ -2217,6 +2217,10 @@ var FRAME_PATCH_COUNT: i64 = 0
 var FRAME_PATCH_OFF: [i64; 65536] = [0; 65536]
 var A64_FRAME_PATCH_COUNT: i64 = 0
 var A64_FRAME_PATCH_OFF: [i64; 65536] = [0; 65536]
+// Count of patched B.cond / CBZ / CBNZ whose displacement does not fit
+// signed imm19 (±1 MiB). Silent wrap used to miscompile huge functions
+// (compile_primary's `ident(` then-body) when the a64 host targeted x86.
+var A64_COND_BRANCH_OOR: i64 = 0
 var A64_FRAME_PATCH_RD: [i64; 65536] = [0; 65536]
 var FN_FRAME_SIZE: [i64; 65536] = [0; 65536]
 var LAST_EXPR_IS_CLOSURE: i64 = 0
@@ -3393,11 +3397,34 @@ fn patch_branch_a64(off: i64, target: i64) with Mut, Panic {
     let top = (insn >> 24) & 0xFF
     if top == 0x14 || top == 0x94 || top == 0x17 || top == 0x97 {
         // B or BL: 26-bit offset in bits [25:0]
+        if rel > 33554431 || rel < 0 - 33554432 {
+            A64_COND_BRANCH_OOR = A64_COND_BRANCH_OOR + 1
+        }
         em32_at(off, (insn & 0xFC000000) | (rel & 0x3FFFFFF))
     } else {
-        // B.cond / CBZ / CBNZ: 19-bit offset in bits [23:5]
+        // B.cond / CBZ / CBNZ: 19-bit signed offset in bits [23:5]
+        if rel > 262143 || rel < 0 - 262144 {
+            A64_COND_BRANCH_OOR = A64_COND_BRANCH_OOR + 1
+        }
         em32_at(off, (insn & 0xFF00001F) | ((rel & 0x7FFFF) << 5))
     }
+}
+
+// CBZ x0, far_target — invert to CBNZ over a 26-bit B so a then-body
+// larger than ±1 MiB (compile_primary's call-handling if) does not wrap.
+fn emit_cbz_x0_far_a64() -> i64 with Mut {
+    em32(0xB5000040)  // cbnz x0, +8
+    let b_off = CL
+    em32(0x14000000)  // b placeholder
+    return b_off
+}
+
+// B.ne far_target — invert to B.eq over a 26-bit B.
+fn emit_bne_far_a64() -> i64 with Mut {
+    em32(0x54000040)  // b.eq +8
+    let b_off = CL
+    em32(0x14000000)  // b placeholder
+    return b_off
 }
 
 fn patch_adr_a64(off: i64, target: i64, rd: i64) with Mut, Panic {
@@ -42874,8 +42901,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     // mov x1, disc
                     em32(0xD2800001 | ((il_disc & 0xFFFF) << 5))
                     em32(0xEB010000)   // subs x0, x0, x1 (cmp)
-                    il_cbz_off = CL
-                    em32(0x54000001)   // b.ne placeholder
+                    il_cbz_off = emit_bne_far_a64()
                     if il_has_binding == 1 {
                         emit_load_var_a64(il_slot)
                         em32(0xF9400400)   // ldr x0, [x0, #8]
@@ -42948,8 +42974,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         // (mirror of x86 compile_stmt).
         let if_cond_ch_set_a = EXPR_CH_SET
         if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(EP - 1, "if condition must be bool") }
-        let cbz_off = CL
-        em32(0xB4000000)
+        let cbz_off = emit_cbz_x0_far_a64()
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
         LAST_STMT_TY_HASH = 0
@@ -43237,8 +43262,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     em32(0xF9400000)   // ldr x0, [x0]  (load tag at offset 0)
                     em32(0xD2800001 | ((wl_disc & 0xFFFF) << 5))  // mov x1, disc
                     em32(0xEB010000)   // subs x0, x0, x1 (cmp)
-                    wl_cbz_off = CL
-                    em32(0x54000001)   // b.ne placeholder
+                    wl_cbz_off = emit_bne_far_a64()
                     if wl_has_binding == 1 {
                         emit_load_var_a64(wl_slot)
                         em32(0xF9400400)   // ldr x0, [x0, #8]
@@ -43281,8 +43305,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         // β⁹ GTT loop fixed-point: snapshot VAR_CH_SET before the loop runs
         gtt_loop_snapshot()
         compile_or_a64()
-        let cbz_off = CL
-        em32(0xB4000000)
+        let cbz_off = emit_cbz_x0_far_a64()
         if TK[EP as usize] == 8 { EP = EP + 1 }
         while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
         if TK[EP as usize] == 9 { EP = EP + 1 }
@@ -43350,7 +43373,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         emit_load_var_a64(iter_slot); emit_push_a64()
         emit_load_var_a64(end_slot); emit_pop_x1_a64()
         em32(0xEB00003F); em32(0x9A9FA7E0)
-        let cbz_off = CL; em32(0xB4000000)
+        let cbz_off = emit_cbz_x0_far_a64()
         if TK[EP as usize] == 8 { EP = EP + 1 }
         while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
         if TK[EP as usize] == 9 { EP = EP + 1 }
@@ -43742,6 +43765,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
     CL = 0
     PATCH_COUNT = 0
     A64_FRAME_PATCH_COUNT = 0
+    A64_COND_BRANCH_OOR = 0
     print("arm64: re-emitting pass 2\n")
     // ARM64 Pass 2: compile each function
     var p: i64 = 0
@@ -44240,6 +44264,11 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
     }
     print("arm64_compile: fns="); print_int(FN_COUNT); print(" code="); print_int(CL)
     print(" main=fn"); print_int(main_fn); print(" patches="); print_int(PATCH_COUNT); print("\n")
+    if A64_COND_BRANCH_OOR != 0 {
+        print("error: a64 cond-branch out of signed imm19 range ("); print_int(A64_COND_BRANCH_OOR); print(" sites) — refuse wrap\n")
+        tc_mark_failed()
+        return 1
+    }
     0
 }
 
