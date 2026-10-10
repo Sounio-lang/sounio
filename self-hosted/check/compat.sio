@@ -281,13 +281,62 @@ pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div
         return a.fn_sig_id == b.fn_sig_id
     }
 
-    // Knowledge types: inner type must be compatible + operator-aware epsilon
-    // subsumption. An unspecified requirement accepts any well-formed wrapper.
+    // Knowledge types: inner type must be compatible + operator-aware epsilon,
+    // validity, and provenance subsumption. An unspecified requirement accepts
+    // any well-formed wrapper.
+    //
+    // CONTAINER RECURSION. types_compatible_inner (used for TyArray/TyRef/
+    // TyRefMut/TyRawPtr/TySlice/TySliceMut element comparison, just above) and
+    // tuple_types_compatible/TyModel (below) both recurse back into THIS
+    // function for their elements -- so this branch is the single dispatch
+    // point every composite type funnels through when one of its elements/
+    // fields is a Knowledge<T>. Before this fix, only epsilon was checked
+    // here (validity and provenance were silently skipped for ANY Knowledge
+    // reached through a container), so `[Knowledge<T,Valid(10),Derived>]`
+    // satisfied an annotation of `[Knowledge<T,Valid(30),Measured>]` -- the
+    // same top-level-only guard existed everywhere let/return/assign/call
+    // fixes were added at each site, because those sites' authoritative
+    // checks only fire when the OUTER type is directly epistemic. Checking
+    // validity/provenance HERE, at the recursive root, closes that gap for
+    // every container nesting depth (arrays of arrays of Knowledge, tuples
+    // of structs of Knowledge, etc.) in one place, instead of needing yet
+    // another site-specific patch for every new container kind.
+    //
+    // SCOPE NOT COVERED HERE (documented, not silently missed): the ontology
+    // SUBCLASS-WALK part of full four-axis subsumption (checker_knowledge_
+    // subsumes) needs a *mut Checker's ontology_items table, which this
+    // module deliberately has no access to (compat.sio is import-free by
+    // design). A Knowledge<Child> nested inside a container therefore still
+    // does not covariantly satisfy a Knowledge<Parent> container element
+    // here -- only an EXACT inner-type match does (types_compatible_inner
+    // requires strict pairwise compatibility). That is more conservative
+    // (rejects a legitimate covariant container), never less sound (never
+    // accepts an invalid one), so it is not the same class of bug as the one
+    // being fixed. Symmetric JOIN sites (if/else, match arms, array-literal
+    // elements) of COMPOSITE types containing Knowledge<T> also remain
+    // exposed to the same directional-vs-symmetric tension compat_epsilon_
+    // subsumes already had before this PR (subsumption is inherently
+    // directional; this function is nominally symmetric) -- the top-level
+    // join fixes from earlier rounds added an explicit mutual-subsumption
+    // check specifically because of that tension, but only when the JOINED
+    // type is directly epistemic, not when Knowledge<T> is nested inside a
+    // container at the join. Both residual gaps are narrower and pre-existing
+    // in shape (the epsilon asymmetry already had them); closing them fully
+    // would mean threading Checker/ontology_items into this import-free
+    // module, a larger architectural change out of scope for this fix.
     if a.kind == TypeKind::TyKnowledge && b.kind == TypeKind::TyKnowledge {
         if !types_compatible_inner(a.inner, b.inner) {
             return false
         }
-        return compat_epsilon_subsumes(a, b)
+        if !compat_epsilon_subsumes(a, b) {
+            return false
+        }
+        let ameta = knowledge_meta_from_ty(a)
+        let bmeta = knowledge_meta_from_ty(b)
+        if !validity_subsumes(knowledge_meta_validity(ameta), knowledge_meta_validity(bmeta)) {
+            return false
+        }
+        return provenance_subsumes(knowledge_meta_provenance(ameta), knowledge_meta_provenance(bmeta))
     }
 
     if a.kind == TypeKind::TyModel && b.kind == TypeKind::TyModel {
