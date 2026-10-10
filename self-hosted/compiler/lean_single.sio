@@ -2254,15 +2254,18 @@ fn em32(v: i64) with Mut { em(v & 0xFF); em((v >> 8) & 0xFF); em((v >> 16) & 0xF
 fn em64(v: i64) with Mut { em32(v & 0xFFFFFFFF); em32((v >> 32) & 0xFFFFFFFF) }
 
 // macOS Mach-O: lean_single bakes absolute BSS addresses into code, so __DATA
-// sits at a fixed VA. Constraints:
+// sits at a fixed VA and the image must load with slide=0 (no MH_PIE).
+// Constraints:
 //   1. __TEXT must not reach __DATA (lean.sio a64 TEXT is ~32 MiB; 16 MiB
 //      overlapped and was a kernel SIGKILL).
 //   2. The image must stay out of xnu's arm64 dyld shared region
-//      [0x180000000, 0x280000000). DATA at TEXT+256 MiB plus lean.sio's
-//      ~1.7 GiB BSS ended 34 MiB below 0x180000000; PIE slide then made
-//      dyld fail to map the cache (Abort trap 6 / libSystem not loaded)
-//      on the second --check. Place DATA at 0x300000000, above that window.
-fn macos_text_data_gap() -> i64 { 8589934592 }
+//      [0x180000000, 0x280000000).
+// Putting DATA at 0x300000000 (above the shared region) while leaving MH_PIE
+// on made dyld slide/relocate the image; the baked 0x300000000 immediates
+// then SIGBUS'd (Apple compile proof, all 4 files, exit 138). Keep DATA at
+// TEXT+256 MiB (preferred VA that already ran on macos-15) and emit without
+// PIE so every exec uses those addresses.
+fn macos_text_data_gap() -> i64 { 268435456 }
 fn macos_data_vmaddr() -> i64 { 4294967296 + macos_text_data_gap() }
 fn macos_dyld_shared_lo() -> i64 { 6442450944 }
 fn macos_dyld_shared_hi() -> i64 { 10737418240 }
@@ -34557,7 +34560,7 @@ fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
 
 // ─── Mach-O x86_64 writer ───
 // Builds a macOS Mach-O 64-bit executable.
-// Layout: __PAGEZERO(0..4GB) + __TEXT(4GB.., code) + __DATA(12GB, BSS)
+// Layout: __PAGEZERO(0..4GB) + __TEXT(4GB.., code) + __DATA(4GB+256MB, BSS)
 fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
     let vm_base: i64 = 4294967296       // 0x100000000
     let page_size: i64 = 4096
@@ -44397,7 +44400,7 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     while i < 1048576 { ELF[i as usize] = 0; i = i + 1 }
     // Header
     elf_w32(0, 0xFEEDFACF); elf_w32(4, 0x0100000C); elf_w32(8, 0)
-    elf_w32(12, 2); elf_w32(16, ncmds); elf_w32(20, sizeofcmds); elf_w32(24, 0x00200085)
+    elf_w32(12, 2); elf_w32(16, ncmds); elf_w32(20, sizeofcmds); elf_w32(24, 0x00000085)
     // __PAGEZERO
     var off = hdr_size
     elf_w32(off, 25); elf_w32(off+4, lc_pagezero_size)
