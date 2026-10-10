@@ -15,6 +15,10 @@
 #   //@ expect-stdout-contains: X — stdout must contain X (run-pass only)
 #   //@ error-pattern: X      — stderr/stdout must contain X (compile-fail only)
 #   //@ known-failure: REASON — documented accepted failure
+#   //@ xfail-expect: TEXT    — the known failure's output must contain TEXT
+#                               (repeatable; enforced in every mode)
+#   //@ xfail-exit: N         — the known failure's souc exit code must be N
+#                               (124 = timeout); mismatch is a fresh FAIL
 #   //@ skip-if: CONDITION    — conditional skip (e.g., skip-if: no-gpu)
 #   //@ requires: FEATURE     — feature dependency (gpu|llvm|madaros|lean_single|slow)
 #   //@ flaky                 — known flaky test
@@ -333,6 +337,14 @@ run_test() {
     local requires=""
     local known_reason=""
     local unknown_expect=""
+    # //@ xfail-expect: / //@ xfail-exit: pin HOW a //@ known-failure fails,
+    # in every mode (filtered or not, manifest loaded or not). See the
+    # enforcement block after the run for the contract.
+    local -a xfail_expect=()
+    local xfail_exit=""
+    local xfail_error=""
+    local raw_exit=""
+    local inline_known_failure=false
     
     # Parse annotations
     while IFS= read -r line; do
@@ -373,8 +385,26 @@ run_test() {
             *"//@ typecheck-fail"*) is_typecheck_fail=true ;;
             *"//@ ignore"*) is_ignored=true ;;
             *"//@ check-only"*) is_check_only=true ;;
+            *"//@ xfail-expect:"*)
+                if [[ "$line" =~ xfail-expect:[[:space:]]*(.*[^[:space:]])[[:space:]]*$ ]]; then
+                    xfail_expect+=("${BASH_REMATCH[1]%$'\r'}")
+                else
+                    xfail_error="${xfail_error:-empty //@ xfail-expect: pattern}"
+                fi
+                ;;
+            *"//@ xfail-exit:"*)
+                # A process status is 0-255. Anything else could never match,
+                # so it would read as a pin while pinning nothing: refuse it.
+                # Canonicalised (base 10, no leading zeros) for the comparison.
+                if [[ "$line" =~ xfail-exit:[[:space:]]*([0-9]{1,3})[[:space:]]*$ ]] && ((10#${BASH_REMATCH[1]} <= 255)); then
+                    xfail_exit="$((10#${BASH_REMATCH[1]}))"
+                else
+                    xfail_error="${xfail_error:-//@ xfail-exit: needs one exit code in 0-255}"
+                fi
+                ;;
             *"//@ known-failure"*) 
                 is_known_failure=true
+                inline_known_failure=true
                 if [[ "$line" =~ known-failure:[[:space:]]*(.+) ]]; then
                     known_reason="${BASH_REMATCH[1]}"
                 fi
@@ -418,6 +448,17 @@ run_test() {
 
     if [[ -n "$unknown_expect" ]]; then
         echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"relfile\":\"$rel_file\",\"time\":0,\"output\":\"unknown annotation: $unknown_expect (expected: expect-stdout|expect-stdout-contains)\",\"idx\":$idx}" > "$output_file"
+        return
+    fi
+
+    # An xfail pin is a claim about a declared known failure. Malformed, or
+    # stranded on a test that declares no known failure, it would pin nothing,
+    # so refuse it instead of letting it read as protection.
+    if [[ -z "$xfail_error" ]] && ! $inline_known_failure && { ((${#xfail_expect[@]} > 0)) || [[ -n "$xfail_exit" ]]; }; then
+        xfail_error="//@ xfail-expect/xfail-exit without an inline //@ known-failure"
+    fi
+    if [[ -n "$xfail_error" ]]; then
+        echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"relfile\":\"$rel_file\",\"time\":0,\"output\":\"bad xfail pin: $xfail_error\",\"idx\":$idx}" > "$output_file"
         return
     fi
     
@@ -545,6 +586,7 @@ run_test() {
     if $is_run_pass || $is_check_only; then
         if $is_check_only; then
             output=$(timeout "$timeout_val" "$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
+            raw_exit=$exit_code
             if [[ $exit_code -eq 124 ]]; then
                 test_output="check timed out after ${timeout_val}s"
             elif [[ $exit_code -ne 0 ]]; then
@@ -552,6 +594,7 @@ run_test() {
             fi
         else
             output=$(timeout "$timeout_val" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
+            raw_exit=$exit_code
             if [[ $exit_code -eq 124 ]]; then
                 test_output="run timed out after ${timeout_val}s"
             elif [[ $exit_code -ne 0 ]]; then
@@ -607,6 +650,7 @@ run_test() {
         local check_error_patterns=false
         tmp_out="$(mktemp /tmp/sounio-cf-XXXXXX.elf)"
         output=$(timeout "$timeout_val" "$SOUC_BIN" compile "$file" -o "$tmp_out" 2>&1) || compile_exit_code=$?
+        raw_exit=$compile_exit_code
         rm -f "$tmp_out"
 
         if [[ $compile_exit_code -eq 124 ]]; then
@@ -662,6 +706,7 @@ run_test() {
         done < <(head -n 20 "$file")
 
         output=$(timeout "$timeout_val" "$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
+        raw_exit=$exit_code
         if [[ $exit_code -eq 124 ]]; then
             test_output="check timed out after ${timeout_val}s"
         elif [[ $exit_code -eq 0 ]]; then
@@ -697,6 +742,41 @@ run_test() {
         if [[ -n "$expected_reason" ]] && ! grep -qF -- "$expected_reason" <<<"$test_output"; then
             is_known_failure=false
             test_output="known-failure reason mismatch: expected '$expected_reason', got: $test_output"
+        fi
+    fi
+
+    # Inline xfail pins (//@ xfail-expect: TEXT, repeatable; //@ xfail-exit: N).
+    # Unlike the manifest pin above, these are read from the test itself and
+    # enforced in every mode, including --filter runs where the manifest is not
+    # loaded. A declared known failure counts as xfail only if it fails THE
+    # DECLARED WAY: the raw exit code of the souc invocation equals N (124 = the
+    # harness timeout) and every TEXT occurs in the full compiler/program output.
+    # Only for a timeout (raw exit 124, when souc printed nothing final) is the
+    # harness verdict searched too; otherwise a pin could match text the harness
+    # wrote itself ("run exited 139", "missing stdout: ..."). A crash, a
+    # different exit code or a different failure message is a fresh FAIL; a
+    # pass is still XPAS.
+    if $is_known_failure && [[ $exit_code -ne 0 ]] && { ((${#xfail_expect[@]} > 0)) || [[ -n "$xfail_exit" ]]; }; then
+        local xfail_mismatch=""
+        if [[ -n "$xfail_exit" && "$raw_exit" != "$xfail_exit" ]]; then
+            xfail_mismatch="exit ${raw_exit:-none}, expected $xfail_exit"
+        fi
+        if [[ -z "$xfail_mismatch" ]]; then
+            local xfail_haystack="$output"
+            if [[ "$raw_exit" == "124" ]]; then
+                xfail_haystack="$output"$'\n'"$test_output"
+            fi
+            local xfail_pat
+            for xfail_pat in "${xfail_expect[@]}"; do
+                if ! grep -qF -- "$xfail_pat" <<<"$xfail_haystack"; then
+                    xfail_mismatch="missing '$xfail_pat'"
+                    break
+                fi
+            done
+        fi
+        if [[ -n "$xfail_mismatch" ]]; then
+            is_known_failure=false
+            test_output="known-failure expectation mismatch ($xfail_mismatch), got: $test_output"
         fi
     fi
 
