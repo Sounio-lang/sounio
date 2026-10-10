@@ -2253,19 +2253,17 @@ fn em(b: i64) with Mut { if CL >= 268435456 { if CD_OVF == 0 { CD_OVF_FN = CURRE
 fn em32(v: i64) with Mut { em(v & 0xFF); em((v >> 8) & 0xFF); em((v >> 16) & 0xFF); em((v >> 24) & 0xFF) }
 fn em64(v: i64) with Mut { em32(v & 0xFFFFFFFF); em32((v >> 32) & 0xFFFFFFFF) }
 
-// macOS Mach-O: lean_single bakes absolute BSS addresses into code, so __DATA
-// sits at a fixed VA and the image must load with slide=0 (no MH_PIE).
-// Constraints:
-//   1. __TEXT must not reach __DATA (lean.sio a64 TEXT is ~32 MiB; 16 MiB
-//      overlapped and was a kernel SIGKILL).
-//   2. The image must stay out of xnu's arm64 dyld shared region
-//      [0x180000000, 0x280000000).
-// Putting DATA at 0x300000000 (above the shared region) while leaving MH_PIE
-// on made dyld slide/relocate the image; the baked 0x300000000 immediates
-// then SIGBUS'd (Apple compile proof, all 4 files, exit 138). Keep DATA at
-// TEXT+256 MiB (preferred VA that already ran on macos-15) and emit without
-// PIE so every exec uses those addresses.
-fn macos_text_data_gap() -> i64 { 268435456 }
+// macOS Mach-O: a64 BSS addresses are ADRP/ADD from the text PC
+// (emit_image_addr_reg_a64), so they survive PIE slide only if __DATA is
+// within ±4 GiB of __TEXT. Constraints:
+//   1. __TEXT must not reach __DATA (16 MiB overlapped; kernel SIGKILL).
+//   2. |DATA-TEXT| must fit ADRP (0x300000000 was +8 GiB and SIGBUS'd).
+//   3. The image must stay out of xnu's arm64 dyld shared region
+//      [0x180000000, 0x280000000). TEXT+256 MiB plus lean.sio's ~1.7 GiB
+//      BSS ended 34 MiB below 0x180000000 and the second --check aborted
+//      mapping the dyld cache. TEXT+128 MiB leaves ~164 MiB of slack.
+//   4. arm64 macOS requires MH_PIE; dropping it was kernel SIGKILL (exit 137).
+fn macos_text_data_gap() -> i64 { 134217728 }
 fn macos_data_vmaddr() -> i64 { 4294967296 + macos_text_data_gap() }
 fn macos_dyld_shared_lo() -> i64 { 6442450944 }
 fn macos_dyld_shared_hi() -> i64 { 10737418240 }
@@ -3329,6 +3327,13 @@ fn emit_image_addr_reg_a64(rd: i64, v: i64) with Mut {
         let pc_page = (pc >> 12) << 12
         let target_page = (v >> 12) << 12
         let page_delta = (target_page - pc_page) >> 12
+        // ADRP signed 21-bit page imm is ±4 GiB. Truncating it (the 8 GiB
+        // TEXT→DATA gap) produced a wrap and SIGBUS on macos-15.
+        if page_delta > 1048575 || page_delta < (0 - 1048576) {
+            A64_COND_BRANCH_OOR = A64_COND_BRANCH_OOR + 1
+            emit_imm64_reg_a64(rd, v)
+            return
+        }
         let immlo = page_delta & 3
         let immhi = (page_delta >> 2) & 0x7FFFF
         em32(0x90000000 | ((immlo & 3) << 29) | ((immhi & 0x7FFFF) << 5) | rd)
@@ -32709,9 +32714,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     RET_AGG_BSS_OFF = GL_BSS_SIZE
     GL_BSS_SIZE = GL_BSS_SIZE + 1048576  // 1MB scratch for aggregate (struct/array) returns
     // Add 16 to BSS_BASE so globals start at BSS+16, but argc/argv at BSS+0.
-    // The lean_single Mach-O path bakes absolute BSS addresses into emitted code,
-    // so macOS needs a fixed __DATA VA (see macos_data_vmaddr) and a non-PIE
-    // Mach-O so dyld does not slide those immediates.
+    // a64 uses ADRP/ADD (emit_image_addr_reg_a64) so a PIE slide is fine
+    // as long as __DATA stays within ±4 GiB of __TEXT. x86 still bakes
+    // absolute immediates; write_macho_x86 stays non-PIE.
+    // macos_data_vmaddr() is the preferred __DATA VA (below the dyld
+    // shared region; see macos_text_data_gap).
     if TARGET_OS == 2 {
         GL_BSS_BASE = macos_data_vmaddr() + 16
     } else {
@@ -44400,7 +44407,7 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     while i < 1048576 { ELF[i as usize] = 0; i = i + 1 }
     // Header
     elf_w32(0, 0xFEEDFACF); elf_w32(4, 0x0100000C); elf_w32(8, 0)
-    elf_w32(12, 2); elf_w32(16, ncmds); elf_w32(20, sizeofcmds); elf_w32(24, 0x00000085)
+    elf_w32(12, 2); elf_w32(16, ncmds); elf_w32(20, sizeofcmds); elf_w32(24, 0x00200085)
     // __PAGEZERO
     var off = hdr_size
     elf_w32(off, 25); elf_w32(off+4, lc_pagezero_size)
