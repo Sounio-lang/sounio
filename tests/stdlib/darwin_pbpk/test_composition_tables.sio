@@ -1,0 +1,175 @@
+//@ run-pass
+//@ expect-stdout-contains: RR_TABLE_AUDIT_OK
+//@ timeout: 120
+
+// Cross-table audit of the two tissue-composition tables in the tree, run over
+// both as they actually sit there:
+//   A = core/rodgers_rowland.sio  rr_fw_e / rr_fw_i / rr_fn_l / rr_fn_ph
+//       (the accessors rr_neutral calls)
+//   B = core/tissue_composition.sio  tc_f_ew / tc_f_iw / tc_f_nl / tc_f_np
+//
+// Both are attributed to Rodgers & Rowland (2006), and at most one of them can
+// be. This gate does not decide which -- that needs the paper, and R&R's own
+// table is RAT (PMID 16639716 / 15858854; MeSH Animals + Rats, not Humans),
+// which rules out "R&R Table 1, human" as an answer altogether. What it does is
+// recompute every figure the rodgers_rowland.sio header quotes about the
+// conflict, so that a silent edit to either table breaks CI.
+//
+// It replaces an exploratory PYTHON script in a scratchpad that an earlier
+// revision of that header cited: a reference to a file not in the repository,
+// and Python in the science path besides (CLAUDE.md principle 4). The finding
+// was raised in review by copilot-pull-request-reviewer.
+//
+// Reproduce with:
+//   bash scripts/dev/run_sio_test_suite_v2.sh --filter composition_tables
+//
+// C1 Every fraction of both tables lies in [0, 1].
+// C2 Table A leaves non-negative protein volume in 13 of 14 organs; the single
+//    violation is ADIPOSE at 1.0070 (0.70% over), which assigns adipose
+//    negative protein volume on the fraction that dominates every Kp the module
+//    predicts.
+// C3 Table B is feasible 14/14, and its five fractions sum to exactly 1 in all
+//    14 organs -- which is why that module's own "mass balance" test cannot
+//    fail: f_protein there IS 1 minus the other four.
+// C4 The disagreement is confined to lipid. Identical values: waters 10/14,
+//    f_nl 2/14, f_np 1/14. These are exact integer pins, no tolerance.
+// C5 The lipid fractions differ in BOTH directions -- min B/A below 0.14, max
+//    above 2.7 -- so this is not a unit or scaling difference between two
+//    versions of one table. They are two different tables.
+// C6 What the choice is worth: with one formula and two tables, Kpu_B/Kpu_A is
+//    smallest at LUNG and largest at MUSCLE, spanning more than a factor of 5
+//    across organs, and the per-organ ratio is the same at P = 1e7 and P = 1e4
+//    to better than 0.01 -- the lipid term dominates in both regimes, so the
+//    divergence does not wash out for an in-domain drug. Exact magnitudes are
+//    printed rather than bracketed by a chosen tolerance.
+
+use darwin_pbpk::core::rodgers_rowland::{rr_fw_e, rr_fw_i, rr_fn_l, rr_fn_ph}
+use darwin_pbpk::core::tissue_composition::{tc_f_ew, tc_f_iw, tc_f_nl, tc_f_np, tc_f_protein}
+
+fn ct_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// Exact integral powers of ten by repeated multiplication: 10^0..10^22 are all
+// exactly representable in binary64, so no series is involved here.
+fn ct_pow10i(n: i32) -> f64 with Mut {
+    var p = 1.0
+    var i = 0
+    while i < n {
+        p = p * 10.0
+        i = i + 1
+    }
+    p
+}
+
+fn ct_in_unit(x: f64) -> bool { x >= 0.0 && x <= 1.0 }
+
+fn ct_sum_a(i: i32) -> f64 { rr_fw_e(i) + rr_fw_i(i) + rr_fn_l(i) + rr_fn_ph(i) }
+fn ct_sum_b(i: i32) -> f64 { tc_f_ew(i) + tc_f_iw(i) + tc_f_nl(i) + tc_f_np(i) }
+
+// Kpu under the module's own neutral formula; fu cancels in the B/A ratio.
+fn ct_kpu_a(i: i32, p: f64) -> f64 { rr_fw_e(i) + rr_fw_i(i) + p * (rr_fn_l(i) + 0.3 * rr_fn_ph(i)) }
+fn ct_kpu_b(i: i32, p: f64) -> f64 { tc_f_ew(i) + tc_f_iw(i) + p * (tc_f_nl(i) + 0.3 * tc_f_np(i)) }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+
+    // C1
+    var unit_ok = 0
+    var i = 0
+    while i < 14 {
+        let a = ct_in_unit(rr_fw_e(i)) && ct_in_unit(rr_fw_i(i)) && ct_in_unit(rr_fn_l(i)) && ct_in_unit(rr_fn_ph(i))
+        let b = ct_in_unit(tc_f_ew(i)) && ct_in_unit(tc_f_iw(i)) && ct_in_unit(tc_f_nl(i)) && ct_in_unit(tc_f_np(i)) && ct_in_unit(tc_f_protein(i))
+        if a && b { unit_ok = unit_ok + 1 }
+        i = i + 1
+    }
+    print("C1 fractions in [0,1], both tables : ") print(unit_ok) println("/14")
+    let c1 = unit_ok == 14
+
+    // C2 / C3
+    var feas_a = 0
+    var feas_b = 0
+    var sum1_b = 0
+    var j = 0
+    while j < 14 {
+        if ct_sum_a(j) <= 1.0 { feas_a = feas_a + 1 }
+        if ct_sum_b(j) <= 1.0 { feas_b = feas_b + 1 }
+        if ct_abs(ct_sum_b(j) + tc_f_protein(j) - 1.0) <= 1.0e-12 { sum1_b = sum1_b + 1 }
+        j = j + 1
+    }
+    print("C2 table A feasible                : ") print(feas_a) print("/14   adipose sum = ") println(ct_sum_a(7))
+    print("C3 table B feasible                : ") print(feas_b) print("/14   adipose sum = ") println(ct_sum_b(7))
+    print("C3 table B sums to exactly 1       : ") print(sum1_b) println("/14 (by construction: f_protein = 1 - rest)")
+    let c2 = feas_a == 13 && ct_sum_a(7) > 1.0
+    let c3 = feas_b == 14 && sum1_b == 14
+
+    // C4
+    var same_w = 0
+    var same_nl = 0
+    var same_np = 0
+    var k = 0
+    while k < 14 {
+        if rr_fw_e(k) == tc_f_ew(k) && rr_fw_i(k) == tc_f_iw(k) { same_w = same_w + 1 }
+        if rr_fn_l(k) == tc_f_nl(k) { same_nl = same_nl + 1 }
+        if rr_fn_ph(k) == tc_f_np(k) { same_np = same_np + 1 }
+        k = k + 1
+    }
+    print("C4 identical waters                : ") print(same_w) println("/14")
+    print("C4 identical f_nl                  : ") print(same_nl) println("/14")
+    print("C4 identical f_np                  : ") print(same_np) println("/14")
+    let c4 = same_w == 10 && same_nl == 2 && same_np == 1
+
+    // C5
+    var lo_lip = 1.0e30
+    var hi_lip = 0.0
+    var m = 0
+    while m < 14 {
+        let rn = tc_f_nl(m) / rr_fn_l(m)
+        let rp = tc_f_np(m) / rr_fn_ph(m)
+        if rn < lo_lip { lo_lip = rn }
+        if rn > hi_lip { hi_lip = rn }
+        if rp < lo_lip { lo_lip = rp }
+        if rp > hi_lip { hi_lip = rp }
+        m = m + 1
+    }
+    print("C5 lipid B/A ratio                 : ") print(lo_lip) print(" .. ") println(hi_lip)
+    let c5 = lo_lip < 0.14 && hi_lip > 2.7
+
+    // C6
+    let p7 = ct_pow10i(7)
+    let p4 = ct_pow10i(4)
+    var lo7 = 1.0e30
+    var hi7 = 0.0
+    var lo_org = 0
+    var hi_org = 0
+    var drift = 0.0
+    var n = 0
+    while n < 14 {
+        let r7 = ct_kpu_b(n, p7) / ct_kpu_a(n, p7)
+        let r4 = ct_kpu_b(n, p4) / ct_kpu_a(n, p4)
+        if r7 < lo7 { lo7 = r7
+            lo_org = n }
+        if r7 > hi7 { hi7 = r7
+            hi_org = n }
+        let d = ct_abs(r7 - r4)
+        if d > drift { drift = d }
+        n = n + 1
+    }
+    print("C6 Kpu_B/Kpu_A at P=1e7            : ") print(lo7) print(" (organ ") print(lo_org) print(") .. ") print(hi7) print(" (organ ") print(hi_org) println(")")
+    print("C6 spread across organs            : ") println(hi7 / lo7)
+    print("C6 max |ratio(1e7) - ratio(1e4)|   : ") println(drift)
+    // organ 5 = lung, organ 6 = muscle
+    let c6 = lo_org == 5 && hi_org == 6 && hi7 / lo7 > 5.0 && drift < 0.01
+
+    if c1 { println("C1 PASS") } else { println("C1 FAIL"); fails = fails + 1 }
+    if c2 { println("C2 PASS") } else { println("C2 FAIL"); fails = fails + 1 }
+    if c3 { println("C3 PASS") } else { println("C3 FAIL"); fails = fails + 1 }
+    if c4 { println("C4 PASS") } else { println("C4 FAIL"); fails = fails + 1 }
+    if c5 { println("C5 PASS") } else { println("C5 FAIL"); fails = fails + 1 }
+    if c6 { println("C6 PASS") } else { println("C6 FAIL"); fails = fails + 1 }
+
+    if fails == 0 {
+        println("RR_TABLE_AUDIT_OK")
+        return 0
+    }
+    println("RR_TABLE_AUDIT_FAIL")
+    return 1
+}
