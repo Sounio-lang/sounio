@@ -11743,7 +11743,12 @@ fn native_v2_emit_sret_witness_make_into(nc: &! NativeCompiler) -> bool with Mut
     true
 }
 
-pub fn compile_native_v2_sret_witness_to_file(output_path: string, plain_call: bool) -> i32 with IO, Mut, Panic, Div, Alloc {
+// inject_reloc_kind != 0 adds one relocation of that kind before
+// apply_relocations_into runs. It is the test seam for the relocation refusal:
+// no emitter produces an unknown kind, so without it no route can be driven into
+// the refusal (scripts/ci/native_reloc_sret_refusal_check.sh, via
+// --native-v2-emit-sret-unknown-reloc). Production passes 0.
+fn native_v2_sret_witness_to_file_impl(output_path: string, plain_call: bool, inject_reloc_kind: i64) -> i32 with IO, Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     compile_module_streaming_begin_count_into(&! nc, 2)
 
@@ -11760,8 +11765,19 @@ pub fn compile_native_v2_sret_witness_to_file(output_path: string, plain_call: b
     let reloc_rodata_off = align_page(text_file_offset + nc.code.len)
     let reloc_eff_rodata = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
     let reloc_data_off = align_page(reloc_rodata_off + reloc_eff_rodata)
+    if inject_reloc_kind != 0 {
+        nc_add_flat_reloc(&! nc, 1, inject_reloc_kind, 0, 0)
+    }
     apply_relocations_into(&! nc, reloc_rodata_off, reloc_data_off)
     native_v2_write_min_elf64_to_file(output_path, &! nc, nc.entry_offset, 4194304)
+}
+
+pub fn compile_native_v2_sret_witness_to_file(output_path: string, plain_call: bool) -> i32 with IO, Mut, Panic, Div, Alloc {
+    native_v2_sret_witness_to_file_impl(output_path, plain_call, 0)
+}
+
+pub fn compile_native_v2_sret_witness_inject_reloc_kind_to_file(output_path: string, inject_reloc_kind: i64) -> i32 with IO, Mut, Panic, Div, Alloc {
+    native_v2_sret_witness_to_file_impl(output_path, false, inject_reloc_kind)
 }
 
 // Map MachineOperand to a scheduler register ID for dependency tracking.
@@ -13854,22 +13870,11 @@ fn native_v2_file_emit_phdr(pos: i64, p_type: i64, flags: i64, offset: i64, vadd
 }
 
 fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler, entry_offset: i64, base_addr: i64) -> i32 with IO, Mut, Panic, Div {
-    // Common writer: refuse unpatched relocation sites here too, so a caller
-    // that goes straight from apply_relocations_into to this writer (the sret
-    // witness route) cannot emit them. compile_native_v2_preview_to_file
-    // already refused with the same rc before reaching this point.
-    if NC_RELOC_UNKNOWN_KIND_COUNT > 0 {
-        print("Error: native relocation of unknown kind ")
-        print_int(NC_RELOC_UNKNOWN_KIND_FIRST)
-        print(" at ")
-        print_int(NC_RELOC_UNKNOWN_KIND_COUNT)
-        print(" site(s) -- refusing to emit an ELF with unpatched sites\n")
-        return 20
-    }
-    if (*nc).reloc_overflow {
-        print("Error: native relocation table overflow -- refusing to emit an ELF with unpatched sites\n")
-        return 20
-    }
+    // Common writer: every caller reaches it with an image patched by
+    // apply_relocations_into, so refuse unpatched relocation sites here, before
+    // the first byte is written (native_reloc_refuse_if_invalid, native/frame.sio).
+    let reloc_rc = native_reloc_refuse_if_invalid(nc)
+    if reloc_rc != 0 { return reloc_rc }
     let text_offset: i64 = 4096
     let code_len = (*nc).code.len
     let rodata_len = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
@@ -14447,22 +14452,11 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     // unpatched call/rodata sites. Distinct rc from the code-buffer overflow
     // above so callers can tell the two tiers apart. reloc_overflow_count_attempted
     // is a true count (see frame.sio), not an estimate.
-    if NC_RELOC_UNKNOWN_KIND_COUNT > 0 {
-        print("Error: native relocation of unknown kind ")
-        print_int(NC_RELOC_UNKNOWN_KIND_FIRST)
-        print(" at ")
-        print_int(NC_RELOC_UNKNOWN_KIND_COUNT)
-        print(" site(s) -- refusing to emit an ELF with unpatched sites\n")
-        return 20
-    }
-    if nc.reloc_overflow {
-        print("Error: native relocation table overflow -- relocs_needed=")
-        print_int(nc.reloc_overflow_count_attempted)
-        print(" capacity=")
-        print_int(nc_flat_reloc_capacity())
-        print(" (raise nc_flat_reloc_capacity)\n")
-        return 20
-    }
+    // Unknown relocation kind or overflowed flat table: the single refusal
+    // point (native/frame.sio). Called here, not only inside the writer, so
+    // rc 20 keeps its place in this route's order (after 19, before 21..23).
+    let preview_reloc_rc = native_reloc_refuse_if_invalid(&nc)
+    if preview_reloc_rc != 0 { return preview_reloc_rc }
     // The OTHER relocation table. nc_add_flat_reloc guards the flat table above;
     // reloc.sio's RelocationTable is a separate structure with its own four add_*
     // functions, and until 2026-08-23 they dropped silently past 256 against a
@@ -14687,18 +14681,8 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
         print("Error: native code buffer overflow (raise nc_code_capacity_bytes)\n")
         return 19
     }
-    if NC_RELOC_UNKNOWN_KIND_COUNT > 0 {
-        print("Error: native relocation of unknown kind ")
-        print_int(NC_RELOC_UNKNOWN_KIND_FIRST)
-        print(" at ")
-        print_int(NC_RELOC_UNKNOWN_KIND_COUNT)
-        print(" site(s) -- refusing to emit an ELF with unpatched sites\n")
-        return 20
-    }
-    if (*nc).reloc_overflow {
-        print("Error: native relocation table overflow (raise nc_flat_reloc_capacity)\n")
-        return 20
-    }
+    let legacy_reloc_rc = native_reloc_refuse_if_invalid(nc)
+    if legacy_reloc_rc != 0 { return legacy_reloc_rc }
     if (*nc).label_overflow {
         print("Error: native label table overflow in fn #")
         print_int(NC_V2_LABEL_OVERFLOW_FN)
