@@ -2207,6 +2207,7 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
                     let tmpl_fields = field_info_list_clone(&tmpl.fields)
                     let tmpl_tp_buf = TypeParamBuf { names: tmpl.type_param_names, count: tmpl.type_param_count }
                     let tmpl_is_linear = tmpl.is_linear
+                    let tmpl_is_affine = tmpl.is_affine
                     let tmpl_visibility_kind = tmpl.visibility_kind
                     let tmpl_defining_module_id = tmpl.defining_module_id
                     let tmpl_visibility = tmpl.visibility
@@ -2222,6 +2223,7 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
                         fields: mono_fields.0,
                         field_count: mono_fields.1,
                         is_linear: tmpl_is_linear,
+                        is_affine: tmpl_is_affine,
                         type_param_count: 0,
                         type_param_names: [Name { buf: [0; 384], len: 0 }; 8],
                         is_generic_template: false,
@@ -4123,11 +4125,23 @@ fn checker_const_int_bind_unknown_inplace(c: *mut Checker, name: Name) with Mut,
     checker_const_int_bind_raw_inplace(c, name, 0, 0)
 }
 
+fn checker_is_affine_type_inplace(c: *mut Checker, ty: TypeEntry) -> bool with Mut, Panic, Div {
+    if ty.kind == TypeKind::TyNamed {
+        let idx = struct_table_find((*c).structs, ty.name)
+        if idx >= 0 {
+            return (*(*c).structs).entries[idx].is_affine
+        }
+    }
+    false
+}
+
+// Linear OR affine: both are consumed by a by-value use and refuse a second
+// one (E039). Only linear values must be consumed (E040).
 fn checker_is_linear_type_inplace(c: *mut Checker, ty: TypeEntry) -> bool with Mut, Panic, Div {
     if ty.kind == TypeKind::TyNamed {
         let idx = struct_table_find((*c).structs, ty.name)
         if idx >= 0 {
-            return (*(*c).structs).entries[idx].is_linear
+            return (*(*c).structs).entries[idx].is_linear || (*(*c).structs).entries[idx].is_affine
         }
     }
     if ty.kind == TypeKind::TyFn && ty.fn_sig_id >= 0 {
@@ -5244,6 +5258,7 @@ fn checker_collect_struct_def_inplace(c: *mut Checker, name: Name, opt: Option<B
                 fields: fc.fields,
                 field_count: fc.count,
                 is_linear: (*sd).is_linear,
+                is_affine: (*sd).is_affine,
                 type_param_count: tp_result.count,
                 type_param_names: tp_result.names,
                 is_generic_template: tp_result.count > 0,
@@ -6899,12 +6914,14 @@ fn checker_bind_fn_param_inplace(c: *mut Checker, p: Param) with Mut, Panic, Div
         checker_const_int_bind_unknown_inplace(c, p.name)
         let self_linear = checker_is_linear_type_inplace(c, (*c).current_impl_type)
         (*c).borrows = (*c).borrows.track(p.name, self_linear)
+        if self_linear && checker_is_affine_type_inplace(c, (*c).current_impl_type) { (*c).borrows = (*c).borrows.mark_affine(p.name) }
     } else {
         let param_ty = checker_lower_type_expr_mut(c, p.ty)
         (*c).env = (*c).env.bind(p.name, param_ty, false)
         checker_const_int_bind_unknown_inplace(c, p.name)
         let lin = checker_is_linear_type_inplace(c, param_ty)
         (*c).borrows = (*c).borrows.track(p.name, lin)
+        if lin && checker_is_affine_type_inplace(c, param_ty) { (*c).borrows = (*c).borrows.mark_affine(p.name) }
     }
 }
 
@@ -8362,7 +8379,7 @@ fn checker_merge_if_branches_inplace(c: *mut Checker) with Mut, Panic, Div, Allo
     var mismatch: i64 = 0
     var i: i64 = 0
     while i < (*c).borrows.count {
-        if (*c).borrows.entries[i].is_linear && !(*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d] {
+        if (*c).borrows.entries[i].is_linear && !(*c).borrows.entries[i].is_affine && !(*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d] {
             let then_consumed = (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d + 1]
             let else_consumed = (*c).borrows.entries[i].consumed
             var be_merge = (*c).borrows.entries[i as usize]
@@ -8751,7 +8768,16 @@ fn checker_check_unary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         return checker_check_slice_borrow_expr_inplace(c, e)
     }
     // Operand via the *mut spine (faithful to self.check_opt_expr(e.left)).
+    // #1263: borrowing (`&x`, `&!x`) does not move `x`, so a linear/affine
+    // operand is not consumed here -- `inspect(&p)` followed by `spend(p)` is
+    // one use, not two (lean_single already agrees). The borrow itself is
+    // still tracked below.
+    let is_borrow_op = e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut
+    if is_borrow_op { (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1 }
     let operand_ty = checker_check_opt_expr_inplace(c, e.left)
+    if is_borrow_op && (*c).suppress_linear_consume_depth > 0 {
+        (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
+    }
     // Op-typing (pure helper).
     let result = unary_result_type(e.un_op, operand_ty)
     if result.kind == TypeKind::TyError && !is_error_or_unknown(operand_ty) {
@@ -9296,6 +9322,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                     let si_type_param_count = si.type_param_count
                     let si_type_param_names = si.type_param_names
                     let si_is_linear = si.is_linear
+                    let si_is_affine = si.is_affine
                     let si_visibility_kind = si.visibility_kind
                     let si_defining_module_id = si.defining_module_id
                     let si_visibility = si.visibility
@@ -9312,6 +9339,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                             fields: mono_fields.0,
                             field_count: mono_fields.1,
                             is_linear: si_is_linear,
+                            is_affine: si_is_affine,
                             type_param_count: 0,
                             type_param_names: [Name { buf: [0; 384], len: 0 }; 8],
                             is_generic_template: false,
@@ -9623,6 +9651,7 @@ fn checker_bind_closure_param_inplace(c: *mut Checker, p: ClosureParam) with Mut
     checker_const_int_bind_unknown_inplace(c, p.name)
     let lin = checker_is_linear_type_inplace(c, param_ty)
     (*c).borrows = (*c).borrows.track(p.name, lin)
+    if lin && checker_is_affine_type_inplace(c, param_ty) { (*c).borrows = (*c).borrows.mark_affine(p.name) }
 }
 
 fn checker_bind_closure_params_inplace(c: *mut Checker, opt: Option<Box<ClosureParamList> >) with Mut, Panic, Div, Alloc, IO {
@@ -10176,7 +10205,7 @@ fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_inf
             let consume_result = (*c).borrows.consume_linear(arg_expr.name)
             (*c).borrows = consume_result.0
             if consume_result.1 != 0 {
-                checker_report_error_at_inplace(c, call_span, 39, 0, 0, 0)
+                checker_report_error_at_inplace(c, call_span, consume_result.1, 0, 0, 0)
             }
         }
     }
@@ -10304,7 +10333,7 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
                 let consume_result = (*c).borrows.consume_linear(arg_expr.name)
                 (*c).borrows = consume_result.0
                 if consume_result.1 != 0 {
-                    checker_report_error_at_inplace(c, call_span, 39, 0, 0, 0)
+                    checker_report_error_at_inplace(c, call_span, consume_result.1, 0, 0, 0)
                 }
             }
         }
@@ -12520,6 +12549,7 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
         checker_const_int_bind_unknown_inplace(c, pat.name)
         let lin = checker_is_linear_type_inplace(c, scrut_ty)
         (*c).borrows = (*c).borrows.track(pat.name, lin)
+        if lin && checker_is_affine_type_inplace(c, scrut_ty) { (*c).borrows = (*c).borrows.mark_affine(pat.name) }
     } else if pat.kind == PatternKind::PatEnum {
         // E264 (fail-closed): a payload sub-pattern on a USER enum (`Shape::Circle(r)`)
         // has no lowering -- lower_match_arm_ref compares the bare discriminant and never
@@ -12921,6 +12951,7 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     // Track variable for borrow checking (linear if struct is declared linear)
     let lin = checker_is_linear_type_inplace(c, bind_ty)
     (*c).borrows = (*c).borrows.track(s.name, lin)
+    if lin && checker_is_affine_type_inplace(c, bind_ty) { (*c).borrows = (*c).borrows.mark_affine(s.name) }
     // Propagate escape provenance: `let r = &x` taints r LOCAL; `let r = &self.f` keeps it first-class.
     (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
     ty_unit()
@@ -12985,6 +13016,7 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     }
     let lin = checker_is_linear_type_inplace(c, bind_ty)
     (*c).borrows = (*c).borrows.track(s.name, lin)
+    if lin && checker_is_affine_type_inplace(c, bind_ty) { (*c).borrows = (*c).borrows.mark_affine(s.name) }
     (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
     ty_unit()
 }
@@ -17554,6 +17586,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
     else if code == 264 { print("enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped") }
+    else if code == 268 { print("affine value used more than once") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
     else { print("unknown error") }
 }
@@ -17894,6 +17927,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("\n   =       (then the reported variance overstates, which is safe); `/` refuses")
         print("\n   =       any shared source, because its dropped term also depends on the sign")
         print("\n   =       of the product of the operand values, which is not tracked.\n")
+    }
+    else if code == 268 {
+        print("   |\n   = help: an affine value may be used at most once (it need not be used at all); pass it on instead of reusing it\n")
     }
     else if code == 263 {
         print("   |\n   = help: rename the struct/enum, the method, or the module import so the qualifier is no longer ambiguous\n")
@@ -21305,6 +21341,7 @@ impl Checker {
                         let tmpl_fields = field_info_list_clone(&tmpl.fields)
                         let tmpl_tp_buf = TypeParamBuf { names: tmpl.type_param_names, count: tmpl.type_param_count }
                         let tmpl_is_linear = tmpl.is_linear
+                        let tmpl_is_affine = tmpl.is_affine
                         let tmpl_visibility_kind = tmpl.visibility_kind
                         let tmpl_defining_module_id = tmpl.defining_module_id
                         let tmpl_visibility = tmpl.visibility
@@ -21325,6 +21362,7 @@ impl Checker {
                                 fields: mono_fields.0,
                                 field_count: mono_fields.1,
                                 is_linear: tmpl_is_linear,
+                                is_affine: tmpl_is_affine,
                             type_param_count: 0,
                             type_param_names: [Name { buf: [0; 384], len: 0 }; 8],
                             is_generic_template: false,
@@ -23791,6 +23829,7 @@ impl Checker {
                     fields: fields,
                     field_count: field_count,
                     is_linear: (*sd).is_linear,
+                is_affine: (*sd).is_affine,
                     type_param_count: tp_count,
                     type_param_names: tp_names,
                     is_generic_template: is_generic,
@@ -29697,6 +29736,7 @@ impl Checker {
                 let tmpl_fields = field_info_list_clone(&tmpl.fields)
                 let tmpl_tp_buf = TypeParamBuf { names: tmpl.type_param_names, count: tmpl.type_param_count }
                 let tmpl_is_linear = tmpl.is_linear
+                let tmpl_is_affine = tmpl.is_affine
                 let tmpl_visibility_kind = tmpl.visibility_kind
                 let tmpl_defining_module_id = tmpl.defining_module_id
                 let tmpl_visibility = tmpl.visibility
@@ -29715,6 +29755,7 @@ impl Checker {
                         fields: mono_fields.0,
                         field_count: mono_fields.1,
                         is_linear: tmpl_is_linear,
+                        is_affine: tmpl_is_affine,
                     type_param_count: 0,
                     type_param_names: [Name { buf: [0; 384], len: 0 }; 8],
                     is_generic_template: false,
