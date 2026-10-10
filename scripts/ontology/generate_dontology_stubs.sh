@@ -114,7 +114,7 @@ write_positive_witness() {
         printf 'fn accept_%s_parent(x: %s) -> i32 {\n' "$stem" "$parent"
         printf '    1\n'
         printf '}\n\n'
-        printf 'fn main() -> i32 {\n'
+        printf 'fn main() -> i32 with IO {\n'
         printf '    let x: %s = make_%s_child()\n' "$child" "$stem"
         printf '    accept_%s_parent(x)\n' "$stem"
         if [[ -n "$const_name" ]]; then
