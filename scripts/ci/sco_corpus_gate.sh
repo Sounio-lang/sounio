@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SCO corpus gate (Step II) — exact runtime sentinels (V3 remains an ordinary effect smoke).
+# SCO corpus gate (Step II) — exact runtime sentinels and an attributed V3 observation refusal.
 # See docs/research/sco_corpus_2026-08-01.md and
 # docs/research/scientific_compilation_obligation_2026-08-01.md.
 #
@@ -81,6 +81,72 @@ run_item "V2_algebra" \
 run_item "V3_observe" \
   "examples/sco_corpus/v3_observe/v3_main.sio" \
   "$OUT/expected/v3.txt"
+
+# The negative keeps imports, payload and expression identical; only the
+# callee's Observe declaration is absent. Any unrelated failure is insufficient.
+: >"$OUT/V3_negative.status"
+negative="examples/sco_corpus/v3_observe/v3_without_observe.sio"
+for mode in check compile; do
+  rc=0
+  rm -f "$OUT/V3_negative.elf"
+  if [[ "$mode" == check ]]; then
+    timeout 180 "$SOUC" check "$negative" >"$OUT/V3_negative.$mode.log" 2>&1 || rc=$?
+  else
+    timeout 180 "$SOUC" compile "$negative" -o "$OUT/V3_negative.elf" >"$OUT/V3_negative.$mode.log" 2>&1 || rc=$?
+  fi
+  printf '%s_rc=%s\n' "$mode" "$rc" >>"$OUT/V3_negative.status"
+  if [[ "$rc" != 1 ]] || ! grep -q 'error\[E036\]' "$OUT/V3_negative.$mode.log"; then
+    echo "FAIL: V3 negative lacks attributed observation refusal ($mode rc=$rc)"
+    fail=1
+  elif [[ -s "$OUT/V3_negative.elf" ]]; then
+    echo "FAIL: V3 refusal left an executable output"
+    fail=1
+  else
+    echo "PASS: V3 $mode observation refusal E036"
+  fi
+done
+
+# Bounded observer regression matrix: exact statuses, diagnostic IDs and stdout.
+for spec in identity:PASS scalar_control:PASS cast_without_observe:E036 compare_without_observe:E036 implicit_return:E008 wrong_carrier:E036 nested_cast:E036 nested_compare:E004 arithmetic:E036; do
+  name="${spec%%:*}"
+  expected="${spec#*:}"
+  file="examples/sco_corpus/v3_observe/observer-regressions/$name.sio"
+  : >"$OUT/observer_$name.status"
+  for mode in check compile; do
+    rc=0
+    rm -f "$OUT/observer_$name.elf"
+    if [[ "$mode" == check ]]; then
+      timeout 180 "$SOUC" check "$file" >"$OUT/observer_$name.$mode.log" 2>&1 || rc=$?
+    else
+      timeout 180 "$SOUC" compile "$file" -o "$OUT/observer_$name.elf" >"$OUT/observer_$name.$mode.log" 2>&1 || rc=$?
+    fi
+    printf '%s_rc=%s\n' "$mode" "$rc" >>"$OUT/observer_$name.status"
+    if [[ "$expected" == PASS ]]; then
+      if [[ "$rc" != 0 ]]; then echo "FAIL: observer $name $mode rc=$rc"; fail=1; fi
+    elif [[ "$rc" != 1 ]] || ! grep -q "error\[$expected\]" "$OUT/observer_$name.$mode.log" || [[ -s "$OUT/observer_$name.elf" ]]; then
+      echo "FAIL: observer $name $mode lacks $expected refusal (rc=$rc)"
+      fail=1
+    else
+      echo "PASS: observer $name $mode $expected refusal"
+    fi
+  done
+  if [[ "$expected" == PASS ]]; then
+    if [[ ! -s "$OUT/observer_$name.elf" ]]; then
+      echo "FAIL: observer $name missing fresh ELF"; fail=1
+    else
+      chmod +x "$OUT/observer_$name.elf"
+      rc=0
+      timeout 30 "$OUT/observer_$name.elf" >"$OUT/observer_$name.stdout" 2>"$OUT/observer_$name.stderr" || rc=$?
+      printf 'run_rc=%s\n' "$rc" >>"$OUT/observer_$name.status"
+      printf '7\n' >"$OUT/observer_$name.expected"
+      if [[ "$rc" != 0 ]] || ! cmp "$OUT/observer_$name.expected" "$OUT/observer_$name.stdout"; then
+        echo "FAIL: observer $name exact runtime"; fail=1
+      else
+        echo "PASS: observer $name exact runtime"
+      fi
+    fi
+  fi
+done
 
 if [[ "$fail" -ne 0 ]]; then
   echo "SCO_CORPUS_GATE_FAIL"
