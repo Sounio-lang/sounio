@@ -30,6 +30,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 # Content-addressed cache for both stages (scripts/dev/madaros-cache.sh).
+# Its locked build captures stdout+stderr, rejects undeclared-local E200 even
+# at rc=0, and accepts hits only with an artifact-bound clean diagnostic receipt.
 # shellcheck source=../dev/madaros-cache.sh
 source "$ROOT_DIR/scripts/dev/madaros-cache.sh"
 
