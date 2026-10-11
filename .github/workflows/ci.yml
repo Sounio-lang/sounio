@@ -24,6 +24,7 @@ jobs:
   impact:
     name: Impact
     runs-on: ubuntu-24.04
+    timeout-minutes: 10  # #2443: measured max 4.0 min over the same window
     outputs:
       docs: ${{ steps.classify.outputs.docs }}
       website: ${{ steps.classify.outputs.website }}
@@ -55,6 +56,11 @@ jobs:
     name: Contracts
     needs: impact
     runs-on: ubuntu-24.04
+    # Bounded (#2443). 63 successful runs of this job, 2026-10-06T15:44Z..
+    # 2026-10-07T05:11Z (Actions API): median 27.6 min, max 31.0 min. 45 is
+    # ~1.5x the observed maximum; without it a single stalled step of the 124
+    # here could hold a runner for GitHub's 6-hour default.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -154,6 +160,10 @@ jobs:
       # count so it cannot grow. It measures direct invocation, not coverage.
       - name: Gate workflow reference ratchet
         run: bash scripts/ci/gate_workflow_reference_ratchet.sh
+      # Every job here carries timeout-minutes (#2443): an unbounded job inherits
+      # GitHub's 6-hour default, so one stalled step holds a runner that long.
+      - name: Workflow job timeout gate
+        run: bash scripts/ci/workflow_job_timeout_gate.sh
       # §6: parameter-position function types that declare no effects. Frozen at
       # the measured 216 so the count cannot grow while the one-system-or-two
       # decision is open.
@@ -238,6 +248,13 @@ jobs:
       # had gone dormant that way (#2287, #2290); this stops the next one.
       - name: Test annotation coverage
         run: bash scripts/ci/test_annotation_coverage_gate.sh
+      # A bare //@ known-failure accepts ANY nonzero result -- a later crash or a
+      # different wrong answer is absorbed as the audited failure. The harness
+      # now enforces //@ xfail-expect / //@ xfail-exit pins in every mode; this
+      # self-tests that against a stub compiler and keeps the unpinned set
+      # shrink-only; the initial inventory is documented in its baseline.
+      - name: Known-failure pins
+        run: bash scripts/ci/known_failure_pin_gate.sh
       # Static pin of Knowledge annotation parser coverage (declared vs
       # reachable vs E241). Dynamic probes need a source-built Madaros —
       # that clock is the Witness live-refuse step, not this one.
@@ -413,6 +430,8 @@ jobs:
         run: bash scripts/ci/sounio_coord_selftest.sh
       - name: Portable compiler build lock self-test
         run: python3 scripts/ci/souc_build_lock_selftest.py
+      - name: Madaros seed diagnostic cache self-test
+        run: bash scripts/ci/madaros_seed_diagnostic_cache_gate.sh
       - name: CI watch receipt self-test
         run: python3 scripts/ci/ci_watch_receipt_selftest.py
       - name: Madaros changed-test selector self-test
@@ -983,6 +1002,53 @@ jobs:
         run: echo "reached=true" >> "$GITHUB_OUTPUT"
       - name: Build Madaros once and run current-source f64 lowering gates
         run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
+      - name: Scientific scalar regressions on the source-built Madaros
+        timeout-minutes: 10
+        run: |
+          bash scripts/ci/madaros_scientific_scalar_regression_gate.sh \
+            /tmp/sounio-madaros-current-source-f64-lowering/madaros \
+            /tmp/sounio-madaros-current-source-f64-lowering/scientific-scalar
+      # Reuses the source-built Madaros above; compiles the native driver
+      # program once, then checks its threshold matrix. No second Madaros build.
+      # Driver compile is bounded at 15 min and the matrix at 10 min; the step
+      # has 26 min including receipt I/O. Existing job and uploader stay intact.
+      # The driver build reached about 24 GiB RSS in Slurm; PR runners have
+      # about 16 GiB RAM. Run this real gate on the existing reviewed DARWIN
+      # route (48 GiB limit); PR runs skip it, without changing runner policy.
+      - name: Knowledge runtime thresholds on the source-built native driver
+        if: runner.environment == 'self-hosted'
+        timeout-minutes: 26
+        env:
+          MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: |
+          set -euo pipefail
+          resolver_dir="$PWD/scripts/lib"
+          source "$resolver_dir/resolve_madaros.sh"
+          sounio_require_madaros
+          export SOUNIO_STDLIB_PATH="$PWD/stdlib"
+          gate_dir="$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR/knowledge-runtime-threshold"
+          mkdir -p "$gate_dir"
+          git rev-parse HEAD > "$gate_dir/source-commit.txt"
+          git ls-files -z self-hosted stdlib tests/frontend/threshold-matrix | xargs -0 sha256sum > "$gate_dir/source.sha256"
+          sha256sum "$MADAROS_BIN" > "$gate_dir/madaros.sha256"
+          driver="$gate_dir/driver"
+          rm -f "$driver"
+          ulimit -S -s 65536
+          build_rc=0
+          timeout 900 "$MADAROS_BIN" self-hosted/compiler/native_compile_driver.sio -o "$driver" > "$gate_dir/driver-build.log" 2>&1 || build_rc=$?
+          printf 'driver_build_rc=%s\n' "$build_rc" > "$gate_dir/phases.txt"
+          cat "$gate_dir/driver-build.log"
+          [[ "$build_rc" == 0 && -s "$driver" ]] || exit 1
+          chmod +x "$driver"
+          sha256sum -c "$gate_dir/source.sha256" > "$gate_dir/source-verify.log"
+          sha256sum -c "$gate_dir/madaros.sha256" > "$gate_dir/madaros-verify.log"
+          driver_sha=$(sha256sum "$driver" | cut -d ' ' -f1)
+          printf '%s  %s\n' "$driver_sha" "$driver" > "$gate_dir/driver.sha256"
+          gate_rc=0
+          timeout 600 bash scripts/ci/knowledge_runtime_threshold_contract_gate.sh "$driver" "$gate_dir/source.sha256" "$driver_sha" > "$gate_dir/matrix.log" 2>&1 || gate_rc=$?
+          cat "$gate_dir/matrix.log"
+          printf 'threshold_matrix_rc=%s\n' "$gate_rc" >> "$gate_dir/phases.txt"
+          exit "$gate_rc"
       - name: Madaros IR function table stays heap-backed
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
@@ -1277,6 +1343,8 @@ jobs:
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           SOUNIO_TEST_JOBS: 4
         run: bash scripts/ci/madaros_changed_tests_gate.sh
+      - name: Verify committed Fano kernel binary
+        run: python3 scripts/ci/fano_bin_gate.py
       - name: Epistemic e-graph reassociation gate
         env:
           SOUNIO_EPISTEMIC_EGRAPH_MADAROS: /tmp/sounio-madaros-current-source-f64-lowering/madaros
@@ -1828,6 +1896,7 @@ jobs:
     needs: impact
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.sio == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10  # #2443: measured max 2.1 min over the same window
     steps:
       - uses: actions/checkout@v4
       - name: Materialize the committed Madaros prebuilt
@@ -1884,6 +1953,10 @@ jobs:
       # is skipped is the 390-gate class. Written before the step is scored.
       - name: V2 invKraw-mg consumer (V1 mutant must fail first)
         run: bash scripts/ci/epistemic_measure_correspondence_gate.sh --lean-consume-invkraw-mg
+      - name: Build root octonion formal package
+        run: |
+          cd formal
+          lake build OctonionAlgebra
       - name: Build all default-target proof modules
         run: |
           cd formal/lean4
@@ -1933,6 +2006,7 @@ jobs:
     needs: impact
     if: needs.impact.outputs.website == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10  # #2443: measured max 1.7 min over the same window
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -1972,6 +2046,7 @@ jobs:
     needs: madaros-current-source-deref-f64
     if: always() && (github.event_name == 'push' || github.event_name == 'schedule') && (needs.madaros-current-source-deref-f64.outputs.rung_outcome == 'failure' || (needs.madaros-current-source-deref-f64.result == 'failure' && needs.madaros-current-source-deref-f64.outputs.compiler_reached == 'true'))
     runs-on: ubuntu-24.04
+    timeout-minutes: 5  # #2443: measured max 0.1 min over the same window
     permissions:
       issues: write
     steps:
@@ -2017,6 +2092,7 @@ jobs:
       - r6-corpus-sweep
       - slow-lane
     runs-on: ubuntu-24.04
+    timeout-minutes: 10  # #2443: measured max 1.5 min over the same window
     steps:
       - uses: actions/checkout@v4
       - name: Evaluate selected jobs

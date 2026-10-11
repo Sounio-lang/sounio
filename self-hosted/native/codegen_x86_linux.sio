@@ -14,7 +14,7 @@ use native::aarch64::*
 use native::macho::*
 use native::reloc::*
 use native::frame::*
-use native::lower_ir::{lower_instr, nc_run_regalloc, nc_min_frame_size, emit_binop_code, emit_float_binop_code, emit_evex_pd_rm_disp32, emit_xor_convolution_s, lower_ir_set_ieee_f64_sabotage}
+use native::lower_ir::{lower_instr, nc_run_regalloc, nc_min_frame_size, emit_binop_code, emit_float_binop_code, emit_evex_pd_rm_disp32, emit_xor_convolution_s, emit_fano_inline, lower_ir_set_ieee_f64_sabotage}
 use native::machine_ir::*
 use native::peephole::{ph_run_on_func}
 use native::regalloc::*
@@ -4308,71 +4308,7 @@ fn nc_alloc_diag_append_decimal_into(nc: &! NativeCompiler, value: i64) with Mut
     }
 }
 
-fn nc_core_emit_alloc_failure_diagnostic_into(nc: &! NativeCompiler, fail_code: i64, request_bytes: i64) with Mut, Panic, Div {
-    let rodata_offset = native_v2_rodata_len_into(nc)
-    // Keep this byte-oriented: String lowering in this failure path is not yet
-    // reliable enough to use while reporting a runtime allocation exhaustion.
-    native_v2_rodata_append_byte_into(nc, 109) // m
-    native_v2_rodata_append_byte_into(nc, 97)  // a
-    native_v2_rodata_append_byte_into(nc, 100) // d
-    native_v2_rodata_append_byte_into(nc, 97)  // a
-    native_v2_rodata_append_byte_into(nc, 114) // r
-    native_v2_rodata_append_byte_into(nc, 111) // o
-    native_v2_rodata_append_byte_into(nc, 115) // s
-    native_v2_rodata_append_byte_into(nc, 58)  // :
-    native_v2_rodata_append_byte_into(nc, 32)  // space
-    if fail_code == 181 {
-        native_v2_rodata_append_byte_into(nc, 97)  // a
-        native_v2_rodata_append_byte_into(nc, 114) // r
-        native_v2_rodata_append_byte_into(nc, 101) // e
-        native_v2_rodata_append_byte_into(nc, 110) // n
-        native_v2_rodata_append_byte_into(nc, 97)  // a
-    } else {
-        native_v2_rodata_append_byte_into(nc, 104) // h
-        native_v2_rodata_append_byte_into(nc, 97)  // a
-        native_v2_rodata_append_byte_into(nc, 110) // n
-        native_v2_rodata_append_byte_into(nc, 100) // d
-        native_v2_rodata_append_byte_into(nc, 108) // l
-        native_v2_rodata_append_byte_into(nc, 101) // e
-        native_v2_rodata_append_byte_into(nc, 115) // s
-    }
-    native_v2_rodata_append_byte_into(nc, 32)  // space
-    native_v2_rodata_append_byte_into(nc, 102) // f
-    native_v2_rodata_append_byte_into(nc, 117) // u
-    native_v2_rodata_append_byte_into(nc, 108) // l
-    native_v2_rodata_append_byte_into(nc, 108) // l
-    // P0.4 (2026-10-06): never a bare "arena full". The first line keeps the
-    // historical prefix (CI gates and audits grep "madaros: arena full" /
-    // "madaros: handles full"); the rest names the limit, the size of the
-    // allocation that did not fit (fixed per site at compile time, so it
-    // identifies the construct: 32800 bytes is a 4096-f64 MatNM value), and
-    // the fix. The bytes are plain ASCII appended at compile time; the emitted
-    // failure path is still a single write(2) of a rodata constant.
-    if request_bytes > 0 {
-        nc_alloc_diag_append_ascii_into(nc, " (allocation of ")
-        nc_alloc_diag_append_decimal_into(nc, request_bytes)
-        nc_alloc_diag_append_ascii_into(nc, " bytes)")
-    } else {
-        nc_alloc_diag_append_ascii_into(nc, " (growing a Seq by push)")
-    }
-    if fail_code == 181 {
-        nc_alloc_diag_append_ascii_into(nc, "\n")
-        nc_alloc_diag_append_ascii_into(nc, "  the generated program's runtime heap is one fixed ~2 GiB bump arena that is\n")
-        nc_alloc_diag_append_ascii_into(nc, "  never reclaimed: every aggregate value created or copied by value (struct\n")
-        nc_alloc_diag_append_ascii_into(nc, "  literal, by-value array/struct argument or return, x = matnm_set(x, ...))\n")
-        nc_alloc_diag_append_ascii_into(nc, "  takes fresh arena space for the life of the process. A loop that does so\n")
-        nc_alloc_diag_append_ascii_into(nc, "  per iteration exhausts it. Fix: hoist buffers out of the loop and write\n")
-        nc_alloc_diag_append_ascii_into(nc, "  through &! references (see stdlib/chemistry/catalysis.sio and\n")
-        nc_alloc_diag_append_ascii_into(nc, "  simulate_general_epistemic in stdlib/chemistry/kinetics.sio).\n")
-    } else {
-        nc_alloc_diag_append_ascii_into(nc, "\n")
-        nc_alloc_diag_append_ascii_into(nc, "  the generated program's handle table (4194304 managed objects, never\n")
-        nc_alloc_diag_append_ascii_into(nc, "  reclaimed) is exhausted: every aggregate over 16 bytes created or copied\n")
-        nc_alloc_diag_append_ascii_into(nc, "  by value takes a handle for the life of the process. Fix: hoist buffers\n")
-        nc_alloc_diag_append_ascii_into(nc, "  out of the loop and write through &! references.\n")
-    }
-
-    let write_len = native_v2_rodata_len_into(nc) - rodata_offset
+fn nc_core_emit_write_stderr_rodata_into(nc: &! NativeCompiler, rodata_offset: i64, write_len: i64) with Mut, Panic, Div {
     let lea_pos = (*nc).code.len
     nc_emit_lea_rax_rip_disp32(nc, 0)
     nc_add_rodata_reloc(nc, lea_pos + 3, rodata_offset)
@@ -4381,6 +4317,137 @@ fn nc_core_emit_alloc_failure_diagnostic_into(nc: &! NativeCompiler, fail_code: 
     nc_emit_mov_reg_imm(nc, 2, write_len)
     nc_emit_mov_rax_imm(nc, 1)
     nc_emit_syscall(nc)
+}
+
+// The long explanation is interned once per NativeCompiler (offsets start at
+// -1). Repeating it at every allocation site is what overflowed the 2 MiB
+// flat rodata buffer on the Madaros self-compile after #2793 (#2836, rc=23).
+fn nc_core_intern_alloc_fail_explain_into(nc: &! NativeCompiler, fail_code: i64) with Mut, Panic, Div {
+    if fail_code == 181 {
+        if (*nc).alloc_fail_arena_explain_off >= 0 {
+            return
+        }
+        let off = native_v2_rodata_len_into(nc)
+        nc_alloc_diag_append_ascii_into(nc, "  the generated program's runtime heap is one fixed ~2 GiB bump arena that is\n")
+        nc_alloc_diag_append_ascii_into(nc, "  never reclaimed: every aggregate value created or copied by value (struct\n")
+        nc_alloc_diag_append_ascii_into(nc, "  literal, by-value array/struct argument or return, x = matnm_set(x, ...))\n")
+        nc_alloc_diag_append_ascii_into(nc, "  takes fresh arena space for the life of the process. A loop that does so\n")
+        nc_alloc_diag_append_ascii_into(nc, "  per iteration exhausts it. Fix: hoist buffers out of the loop and write\n")
+        nc_alloc_diag_append_ascii_into(nc, "  through &! references (see stdlib/chemistry/catalysis.sio and\n")
+        nc_alloc_diag_append_ascii_into(nc, "  simulate_general_epistemic in stdlib/chemistry/kinetics.sio).\n")
+        (*nc).alloc_fail_arena_explain_off = off
+        (*nc).alloc_fail_arena_explain_len = native_v2_rodata_len_into(nc) - off
+        return
+    }
+    if (*nc).alloc_fail_handles_explain_off >= 0 {
+        return
+    }
+    let off = native_v2_rodata_len_into(nc)
+    // Print the handle-table size from the accessor, not a decimal literal:
+    // native_capacity_tiers_check.py counts every 4194304 in this file as the
+    // ELF load address 0x400000 and requires exactly six argument-form hits.
+    nc_alloc_diag_append_ascii_into(nc, "  the generated program's handle table (")
+    nc_alloc_diag_append_decimal_into(nc, native_v2_handle_table_capacity_default())
+    nc_alloc_diag_append_ascii_into(nc, " managed objects, never\n")
+    nc_alloc_diag_append_ascii_into(nc, "  reclaimed) is exhausted: every aggregate over 16 bytes created or copied\n")
+    nc_alloc_diag_append_ascii_into(nc, "  by value takes a handle for the life of the process. Fix: hoist buffers\n")
+    nc_alloc_diag_append_ascii_into(nc, "  out of the loop and write through &! references.\n")
+    (*nc).alloc_fail_handles_explain_off = off
+    (*nc).alloc_fail_handles_explain_len = native_v2_rodata_len_into(nc) - off
+}
+
+fn nc_core_intern_alloc_fail_prefix_into(nc: &! NativeCompiler, fail_code: i64) with Mut, Panic, Div {
+    if fail_code == 181 {
+        if NC_ALLOC_FAIL_ARENA_PREFIX_OFF >= 0 {
+            return
+        }
+        let off = native_v2_rodata_len_into(nc)
+        nc_alloc_diag_append_ascii_into(nc, "madaros: arena full (allocation of ")
+        NC_ALLOC_FAIL_ARENA_PREFIX_OFF = off
+        NC_ALLOC_FAIL_ARENA_PREFIX_LEN = native_v2_rodata_len_into(nc) - off
+        return
+    }
+    if NC_ALLOC_FAIL_HANDLES_PREFIX_OFF >= 0 {
+        return
+    }
+    let off = native_v2_rodata_len_into(nc)
+    nc_alloc_diag_append_ascii_into(nc, "madaros: handles full (allocation of ")
+    NC_ALLOC_FAIL_HANDLES_PREFIX_OFF = off
+    NC_ALLOC_FAIL_HANDLES_PREFIX_LEN = native_v2_rodata_len_into(nc) - off
+}
+
+fn nc_core_intern_alloc_fail_bytes_suffix_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    if NC_ALLOC_FAIL_BYTES_SUFFIX_OFF >= 0 {
+        return
+    }
+    let off = native_v2_rodata_len_into(nc)
+    nc_alloc_diag_append_ascii_into(nc, " bytes)\n")
+    NC_ALLOC_FAIL_BYTES_SUFFIX_OFF = off
+    NC_ALLOC_FAIL_BYTES_SUFFIX_LEN = native_v2_rodata_len_into(nc) - off
+}
+
+fn nc_core_intern_alloc_fail_seq_line_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    if NC_ALLOC_FAIL_SEQ_LINE_OFF >= 0 {
+        return
+    }
+    let off = native_v2_rodata_len_into(nc)
+    nc_alloc_diag_append_ascii_into(nc, "madaros: arena full (growing a Seq by push)\n")
+    NC_ALLOC_FAIL_SEQ_LINE_OFF = off
+    NC_ALLOC_FAIL_SEQ_LINE_LEN = native_v2_rodata_len_into(nc) - off
+}
+
+// Digits of request_bytes, interned once per distinct size this compilation.
+// Leaves NC_ALLOC_FAIL_DEC_LAST_OFF/LEN for the caller to write.
+fn nc_core_intern_alloc_fail_decimal_into(nc: &! NativeCompiler, request_bytes: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < NC_ALLOC_FAIL_DEC_N {
+        if NC_ALLOC_FAIL_DEC_BYTES[i as usize] == request_bytes {
+            NC_ALLOC_FAIL_DEC_LAST_OFF = NC_ALLOC_FAIL_DEC_OFF[i as usize]
+            NC_ALLOC_FAIL_DEC_LAST_LEN = NC_ALLOC_FAIL_DEC_LEN[i as usize]
+            return
+        }
+        i = i + 1
+    }
+    let off = native_v2_rodata_len_into(nc)
+    nc_alloc_diag_append_decimal_into(nc, request_bytes)
+    let len = native_v2_rodata_len_into(nc) - off
+    NC_ALLOC_FAIL_DEC_LAST_OFF = off
+    NC_ALLOC_FAIL_DEC_LAST_LEN = len
+    if NC_ALLOC_FAIL_DEC_N < NC_ALLOC_FAIL_DEC_CAP {
+        let slot = NC_ALLOC_FAIL_DEC_N
+        NC_ALLOC_FAIL_DEC_BYTES[slot as usize] = request_bytes
+        NC_ALLOC_FAIL_DEC_OFF[slot as usize] = off
+        NC_ALLOC_FAIL_DEC_LEN[slot as usize] = len
+        NC_ALLOC_FAIL_DEC_N = slot + 1
+    }
+}
+
+fn nc_core_emit_alloc_failure_diagnostic_into(nc: &! NativeCompiler, fail_code: i64, request_bytes: i64) with Mut, Panic, Div {
+    // P0.4 first line + #2836/#2866 intern. Main after #2866 still needed
+    // 2657135 B of flat rodata (cap 2097152) because every allocation site
+    // appended its own short line. Prefix, digits and suffix are interned;
+    // stderr is the same concatenation of write(2)s.
+    if request_bytes > 0 {
+        nc_core_intern_alloc_fail_prefix_into(nc, fail_code)
+        nc_core_intern_alloc_fail_decimal_into(nc, request_bytes)
+        nc_core_intern_alloc_fail_bytes_suffix_into(nc)
+        if fail_code == 181 {
+            nc_core_emit_write_stderr_rodata_into(nc, NC_ALLOC_FAIL_ARENA_PREFIX_OFF, NC_ALLOC_FAIL_ARENA_PREFIX_LEN)
+        } else {
+            nc_core_emit_write_stderr_rodata_into(nc, NC_ALLOC_FAIL_HANDLES_PREFIX_OFF, NC_ALLOC_FAIL_HANDLES_PREFIX_LEN)
+        }
+        nc_core_emit_write_stderr_rodata_into(nc, NC_ALLOC_FAIL_DEC_LAST_OFF, NC_ALLOC_FAIL_DEC_LAST_LEN)
+        nc_core_emit_write_stderr_rodata_into(nc, NC_ALLOC_FAIL_BYTES_SUFFIX_OFF, NC_ALLOC_FAIL_BYTES_SUFFIX_LEN)
+    } else {
+        nc_core_intern_alloc_fail_seq_line_into(nc)
+        nc_core_emit_write_stderr_rodata_into(nc, NC_ALLOC_FAIL_SEQ_LINE_OFF, NC_ALLOC_FAIL_SEQ_LINE_LEN)
+    }
+    nc_core_intern_alloc_fail_explain_into(nc, fail_code)
+    if fail_code == 181 {
+        nc_core_emit_write_stderr_rodata_into(nc, (*nc).alloc_fail_arena_explain_off, (*nc).alloc_fail_arena_explain_len)
+    } else {
+        nc_core_emit_write_stderr_rodata_into(nc, (*nc).alloc_fail_handles_explain_off, (*nc).alloc_fail_handles_explain_len)
+    }
 }
 
 // __sounio_seq_push(handle, value) -> unit. Seq reuses the aggregate object
@@ -10403,6 +10470,355 @@ fn pireus_native_emit_xor_convolution_s_ptr3(nc: &! NativeCompiler, dst_ptr: i64
     }
 }
 
+// Materialize single-ZMM Fano octonion multiplication at the native-v2 boundary.
+// 21 pre-loaded constants (7 broadcast, 7 Fano permutations, 7 sign masks)
+// Single-ZMM: 31 instructions, 186 bytes on AVX-512.
+fn pireus_native_emit_hyper_mul_o_fano_ptr3(nc: &! NativeCompiler, dst_ptr: i64, lhs_ptr: i64, rhs_ptr: i64) with IO, Mut, Panic, Div {
+    pireus_native_rodata_align64(nc)
+    let fano_table_offset = (*nc).flat_rodata_len
+
+    // Broadcast indices: [j]*8 for j in 1..7
+    var j: i64 = 1
+    while j <= 7 {
+        var lane: i64 = 0
+        while lane < 8 {
+            pireus_native_rodata_append_i64(nc, j)
+            lane = lane + 1
+        }
+        j = j + 1
+    }
+
+    // Permutation vectors FANO_PERM_1..7
+    // PERM 1: 1, 0, 3, 2, 5, 4, 7, 6
+    pireus_native_rodata_append_i64(nc, 1); pireus_native_rodata_append_i64(nc, 0)
+    pireus_native_rodata_append_i64(nc, 3); pireus_native_rodata_append_i64(nc, 2)
+    pireus_native_rodata_append_i64(nc, 5); pireus_native_rodata_append_i64(nc, 4)
+    pireus_native_rodata_append_i64(nc, 7); pireus_native_rodata_append_i64(nc, 6)
+
+    // PERM 2: 2, 3, 0, 1, 6, 7, 4, 5
+    pireus_native_rodata_append_i64(nc, 2); pireus_native_rodata_append_i64(nc, 3)
+    pireus_native_rodata_append_i64(nc, 0); pireus_native_rodata_append_i64(nc, 1)
+    pireus_native_rodata_append_i64(nc, 6); pireus_native_rodata_append_i64(nc, 7)
+    pireus_native_rodata_append_i64(nc, 4); pireus_native_rodata_append_i64(nc, 5)
+
+    // PERM 3: 3, 2, 1, 0, 7, 6, 5, 4
+    pireus_native_rodata_append_i64(nc, 3); pireus_native_rodata_append_i64(nc, 2)
+    pireus_native_rodata_append_i64(nc, 1); pireus_native_rodata_append_i64(nc, 0)
+    pireus_native_rodata_append_i64(nc, 7); pireus_native_rodata_append_i64(nc, 6)
+    pireus_native_rodata_append_i64(nc, 5); pireus_native_rodata_append_i64(nc, 4)
+
+    // PERM 4: 4, 5, 6, 7, 0, 1, 2, 3
+    pireus_native_rodata_append_i64(nc, 4); pireus_native_rodata_append_i64(nc, 5)
+    pireus_native_rodata_append_i64(nc, 6); pireus_native_rodata_append_i64(nc, 7)
+    pireus_native_rodata_append_i64(nc, 0); pireus_native_rodata_append_i64(nc, 1)
+    pireus_native_rodata_append_i64(nc, 2); pireus_native_rodata_append_i64(nc, 3)
+
+    // PERM 5: 5, 4, 7, 6, 1, 0, 3, 2
+    pireus_native_rodata_append_i64(nc, 5); pireus_native_rodata_append_i64(nc, 4)
+    pireus_native_rodata_append_i64(nc, 7); pireus_native_rodata_append_i64(nc, 6)
+    pireus_native_rodata_append_i64(nc, 1); pireus_native_rodata_append_i64(nc, 0)
+    pireus_native_rodata_append_i64(nc, 3); pireus_native_rodata_append_i64(nc, 2)
+
+    // PERM 6: 6, 7, 4, 5, 2, 3, 0, 1
+    pireus_native_rodata_append_i64(nc, 6); pireus_native_rodata_append_i64(nc, 7)
+    pireus_native_rodata_append_i64(nc, 4); pireus_native_rodata_append_i64(nc, 5)
+    pireus_native_rodata_append_i64(nc, 2); pireus_native_rodata_append_i64(nc, 3)
+    pireus_native_rodata_append_i64(nc, 0); pireus_native_rodata_append_i64(nc, 1)
+
+    // PERM 7: 7, 6, 5, 4, 3, 2, 1, 0
+    pireus_native_rodata_append_i64(nc, 7); pireus_native_rodata_append_i64(nc, 6)
+    pireus_native_rodata_append_i64(nc, 5); pireus_native_rodata_append_i64(nc, 4)
+    pireus_native_rodata_append_i64(nc, 3); pireus_native_rodata_append_i64(nc, 2)
+    pireus_native_rodata_append_i64(nc, 1); pireus_native_rodata_append_i64(nc, 0)
+
+    // Sign flip masks (bit 63 set = 0x8000000000000000)
+    let s_neg: i64 = 0 - 9223372036854775807 - 1
+    let s_pos: i64 = 0
+
+    // SIGN 1: neg={0,3,5,6}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+
+    // SIGN 2: neg={0,1,6,7}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+
+    // SIGN 3: neg={0,2,5,7}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+
+    // SIGN 4: neg={0,1,2,3}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+
+    // SIGN 5: neg={0,2,4,6}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+
+    // SIGN 6: neg={0,3,4,7}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+
+    // SIGN 7: neg={0,1,4,5}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+
+    // Load operand addresses into SysV GPRs: rdi=7 (lhs), rsi=6 (rhs), rdx=2 (dst)
+    nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(lhs_ptr))
+    nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(rhs_ptr))
+    nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(dst_ptr))
+
+    // Vector loads: zmm0 = a [rdi], zmm1 = b [rsi]
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 0, 0, 7, 0, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 1, 0, 6, 0, 2)
+
+    // Pre-load 21 Fano control constants from .rodata into zmm11..zmm31
+    let fano_lea = (*nc).code.len
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    nc_add_rodata_reloc(nc, fano_lea + 3, fano_table_offset)
+
+    var k: i64 = 0
+    while k < 21 {
+        (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x6f, 11 + k, 0, 0, k * 64, 2)
+        k = k + 1
+    }
+
+    // Emit 31-instruction EVEX Fano multiplication kernel:
+    // a in zmm0, b in zmm1, accum in zmm2, scratch t_bj=zmm3, t_aj=zmm4, ctrl_base=11
+    // FMA precision note: emit_fano_inline uses VFMADD231PD throughout.
+    // For integer basis products (the committed oracle vectors) this is
+    // bit-exact. For general non-integer f64 inputs, the fused rounding
+    // may differ from separate VMULPD+VADDPD by up to1 ULP.
+    // ADR 012 requires hyper_fma to default off; the non-FMA kernel
+    // (emit_fano_inline_nofma, 38 instructions, 228 bytes) will be
+    // wired as the default path once the precision-flag plumbing is ready.
+    (*nc).code = emit_fano_inline((*nc).code, 0, 1, 2, 3, 4, 11)
+
+    // Store result: [rdx] = zmm2
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x11, 2, 0, 2, 0, 2)
+
+    // VZEROUPPER: C5 F8 77
+    nc_emit_byte(nc, 0xc5)
+    nc_emit_byte(nc, 0xf8)
+    nc_emit_byte(nc, 0x77)
+
+    if str_eq(read_env("SOUNIO_PIREUS_OPERATOR_TRACE"), "1") {
+        print("PIREUS_NATIVE_EMIT opcode=IrHyperMulO candidate=fano_single_zmm fano_kernel_bytes=186 inline_total_bytes=199 abi=ptr3\n")
+    }
+}
+
+// Materialize 16D sedenion Cayley-Dickson multiplication at the native-v2 boundary.
+// 22 pre-loaded constants (7 broadcast, 7 Fano permutations, 7 sign masks, 1 conj mask)
+// Pipeline: 4 Fano products + 2 sign conjugations + 1 sub + 1 add = 128 instructions, 768 bytes on AVX-512.
+fn pireus_native_emit_hyper_mul_s_cd_ptr3(nc: &! NativeCompiler, dst_ptr: i64, lhs_ptr: i64, rhs_ptr: i64) with IO, Mut, Panic, Div {
+    pireus_native_rodata_align64(nc)
+    let fano_table_offset = (*nc).flat_rodata_len
+
+    // Broadcast indices: [j]*8 for j in 1..7
+    var j: i64 = 1
+    while j <= 7 {
+        var lane: i64 = 0
+        while lane < 8 {
+            pireus_native_rodata_append_i64(nc, j)
+            lane = lane + 1
+        }
+        j = j + 1
+    }
+
+    // Permutation vectors FANO_PERM_1..7
+    // PERM 1: 1, 0, 3, 2, 5, 4, 7, 6
+    pireus_native_rodata_append_i64(nc, 1); pireus_native_rodata_append_i64(nc, 0)
+    pireus_native_rodata_append_i64(nc, 3); pireus_native_rodata_append_i64(nc, 2)
+    pireus_native_rodata_append_i64(nc, 5); pireus_native_rodata_append_i64(nc, 4)
+    pireus_native_rodata_append_i64(nc, 7); pireus_native_rodata_append_i64(nc, 6)
+
+    // PERM 2: 2, 3, 0, 1, 6, 7, 4, 5
+    pireus_native_rodata_append_i64(nc, 2); pireus_native_rodata_append_i64(nc, 3)
+    pireus_native_rodata_append_i64(nc, 0); pireus_native_rodata_append_i64(nc, 1)
+    pireus_native_rodata_append_i64(nc, 6); pireus_native_rodata_append_i64(nc, 7)
+    pireus_native_rodata_append_i64(nc, 4); pireus_native_rodata_append_i64(nc, 5)
+
+    // PERM 3: 3, 2, 1, 0, 7, 6, 5, 4
+    pireus_native_rodata_append_i64(nc, 3); pireus_native_rodata_append_i64(nc, 2)
+    pireus_native_rodata_append_i64(nc, 1); pireus_native_rodata_append_i64(nc, 0)
+    pireus_native_rodata_append_i64(nc, 7); pireus_native_rodata_append_i64(nc, 6)
+    pireus_native_rodata_append_i64(nc, 5); pireus_native_rodata_append_i64(nc, 4)
+
+    // PERM 4: 4, 5, 6, 7, 0, 1, 2, 3
+    pireus_native_rodata_append_i64(nc, 4); pireus_native_rodata_append_i64(nc, 5)
+    pireus_native_rodata_append_i64(nc, 6); pireus_native_rodata_append_i64(nc, 7)
+    pireus_native_rodata_append_i64(nc, 0); pireus_native_rodata_append_i64(nc, 1)
+    pireus_native_rodata_append_i64(nc, 2); pireus_native_rodata_append_i64(nc, 3)
+
+    // PERM 5: 5, 4, 7, 6, 1, 0, 3, 2
+    pireus_native_rodata_append_i64(nc, 5); pireus_native_rodata_append_i64(nc, 4)
+    pireus_native_rodata_append_i64(nc, 7); pireus_native_rodata_append_i64(nc, 6)
+    pireus_native_rodata_append_i64(nc, 1); pireus_native_rodata_append_i64(nc, 0)
+    pireus_native_rodata_append_i64(nc, 3); pireus_native_rodata_append_i64(nc, 2)
+
+    // PERM 6: 6, 7, 4, 5, 2, 3, 0, 1
+    pireus_native_rodata_append_i64(nc, 6); pireus_native_rodata_append_i64(nc, 7)
+    pireus_native_rodata_append_i64(nc, 4); pireus_native_rodata_append_i64(nc, 5)
+    pireus_native_rodata_append_i64(nc, 2); pireus_native_rodata_append_i64(nc, 3)
+    pireus_native_rodata_append_i64(nc, 0); pireus_native_rodata_append_i64(nc, 1)
+
+    // PERM 7: 7, 6, 5, 4, 3, 2, 1, 0
+    pireus_native_rodata_append_i64(nc, 7); pireus_native_rodata_append_i64(nc, 6)
+    pireus_native_rodata_append_i64(nc, 5); pireus_native_rodata_append_i64(nc, 4)
+    pireus_native_rodata_append_i64(nc, 3); pireus_native_rodata_append_i64(nc, 2)
+    pireus_native_rodata_append_i64(nc, 1); pireus_native_rodata_append_i64(nc, 0)
+
+    // Sign flip masks (bit 63 set = 0x8000000000000000)
+    let s_neg: i64 = 0 - 9223372036854775807 - 1
+    let s_pos: i64 = 0
+
+    // SIGN 1: neg={0,3,5,6}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+
+    // SIGN 2: neg={0,1,6,7}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+
+    // SIGN 3: neg={0,2,5,7}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+
+    // SIGN 4: neg={0,1,2,3}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+
+    // SIGN 5: neg={0,2,4,6}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+
+    // SIGN 6: neg={0,3,4,7}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+
+    // SIGN 7: neg={0,1,4,5}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+
+    // SIGN CONJ (lane 0 = positive 0, lanes 1-7 = negative 0x8000000000000000)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+
+    // Load operand addresses into SysV GPRs: rdi=7 (lhs), rsi=6 (rhs), rdx=2 (dst)
+    nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(lhs_ptr))
+    nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(rhs_ptr))
+    nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(dst_ptr))
+
+    // Vector loads:
+    // lhs: zmm0 = alpha_a [rdi], zmm1 = beta_b [rdi + 64]
+    // rhs: zmm2 = alpha_c [rsi], zmm3 = beta_d [rsi + 64]
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 0, 0, 7, 0, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 1, 0, 7, 64, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 2, 0, 6, 0, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 3, 0, 6, 64, 2)
+
+    // Pre-load 21 Fano control constants + 1 conj sign mask into zmm10..zmm31
+    let fano_lea = (*nc).code.len
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    nc_add_rodata_reloc(nc, fano_lea + 3, fano_table_offset)
+
+    var k: i64 = 0
+    while k < 22 {
+        (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x6f, 10 + k, 0, 0, k * 64, 2)
+        k = k + 1
+    }
+
+    // Register mapping for EVEX Sedenion Cayley-Dickson multiplication:
+    // Operands:
+    //   alpha_a = zmm0
+    //   beta_b  = zmm1
+    //   alpha_c = zmm2
+    //   beta_d  = zmm3
+    // Scratch & accumulator:
+    //   t_bj      = zmm4   (Fano scratch only)
+    //   t_aj      = zmm5   (Fano scratch only; must not hold live conj)
+    //   p1_accum  = zmm6
+    //   p2_accum  = zmm7
+    //   conj_tmp  = zmm9   (live conj(d)/conj(c); distinct from t_aj)
+    // Output:
+    //   dst_lo    = zmm8 (alpha)
+    //   dst_hi    = zmm9 (beta; written after conj_tmp is done)
+    // Constants:
+    //   ctrl_base = 10 (zmm10..zmm30)
+    //   conj_sign = 31 (zmm31)
+    //
+    // IMPORTANT: emit_fano_inline clobbers t_aj every column while rereading za/zb.
+    // Therefore za/zb must never alias t_bj/t_aj. conj results live in zmm9.
+
+    // Step 1: p1 = a * c
+    (*nc).code = emit_fano_inline((*nc).code, 0, 2, 6, 4, 5, 10)
+
+    // Step 2: conj_d = conj(d) = VXORPD(beta_d, conj_sign) in conj_tmp (zmm9)
+    (*nc).code = emit_evex_pd_rr_full((*nc).code, 1, 0x57, 9, 3, 31, 2, 0, 0)
+
+    // Step 3: p2 = conj(d) * b
+    (*nc).code = emit_fano_inline((*nc).code, 9, 1, 7, 4, 5, 10)
+
+    // Step 4: dst_lo = p1 - p2 (zmm8 = zmm6 - zmm7)
+    (*nc).code = emit_evex_pd_rr_full((*nc).code, 1, 0x5C, 8, 6, 7, 2, 0, 0)
+
+    // Step 5: p3 = d * a (reuse p1_accum zmm6)
+    (*nc).code = emit_fano_inline((*nc).code, 3, 0, 6, 4, 5, 10)
+
+    // Step 6: conj_c = conj(c) = VXORPD(alpha_c, conj_sign) in conj_tmp (zmm9)
+    (*nc).code = emit_evex_pd_rr_full((*nc).code, 1, 0x57, 9, 2, 31, 2, 0, 0)
+
+    // Step 7: p4 = b * conj(c) (reuse p2_accum zmm7)
+    (*nc).code = emit_fano_inline((*nc).code, 1, 9, 7, 4, 5, 10)
+
+    // Step 8: dst_hi = p3 + p4 (zmm9 = zmm6 + zmm7)
+    (*nc).code = emit_evex_pd_rr_full((*nc).code, 1, 0x58, 9, 6, 7, 2, 0, 0)
+
+    // Store 128-byte result to destination pointer:
+    // [rdx] = dst_lo (zmm8), [rdx + 64] = dst_hi (zmm9)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x11, 8, 0, 2, 0, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x11, 9, 0, 2, 64, 2)
+
+    // VZEROUPPER: C5 F8 77
+    nc_emit_byte(nc, 0xc5)
+    nc_emit_byte(nc, 0xf8)
+    nc_emit_byte(nc, 0x77)
+
+    if str_eq(read_env("SOUNIO_PIREUS_OPERATOR_TRACE"), "1") {
+        print("PIREUS_NATIVE_EMIT opcode=IrHyperMulS candidate=cayley_dickson_sedenion kernel_bytes=768 abi=ptr3\n")
+    }
+}
+
 fn nc_collect_high_float_markers(func: &IrFunction) with Mut, Panic, Div {
     var i: i64 = 0
     while i < (*func).instr_count && i < IR_MAX_INSTRS {
@@ -10840,6 +11256,24 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 return false
             }
             pireus_native_emit_xor_convolution_s_ptr3(
+                nc,
+                IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
+                IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize],
+                IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
+            )
+        } else if instr_op == IrOpcode::IrHyperMulO {
+            // ADR 012 capability gate: AVX-512 required for Fano kernel.
+            // The native-v2 path is only reachable on AVX-512 hosts by construction.
+            // TODO: read actual CPUID mask from runtime context when the
+            // capability-field plumbing is complete.
+            pireus_native_emit_hyper_mul_o_fano_ptr3(
+                nc,
+                IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
+                IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize],
+                IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
+            )
+        } else if instr_op == IrOpcode::IrHyperMulS {
+            pireus_native_emit_hyper_mul_s_cd_ptr3(
                 nc,
                 IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
                 IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize],
