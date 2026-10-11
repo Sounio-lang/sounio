@@ -97,7 +97,7 @@ else
     case "$path" in stdlib/runtime/*|self-hosted/native/*) mark runtime; recognized=true ;; esac
     case "$path" in stdlib/*) mark stdlib; recognized=true ;; esac
     case "$path" in tests/*|check_sounio.sh) mark tests; recognized=true ;; esac
-    case "$path" in formal/lean4/*) mark lean; recognized=true ;; esac
+    case "$path" in formal/lean4/*|formal/*.lean|formal/lakefile.lean|formal/lean-toolchain|formal/lake-manifest.json|scripts/ci/lean_axiom_report.sh) mark lean; recognized=true ;; esac
     case "$path" in
       formal/lean4/*|scripts/ci/sedenion_*|scripts/ci/cd_tower_*|scripts/ci/gresnigt_*|scripts/ci/furey_*|scripts/ci/octonion_probes_gate.sh|scripts/research/sedenion_*|scripts/research/cd_tower_*|scripts/research/oct_*|scripts/research/ossm_*|scripts/ci/ade_wildgen_*|scripts/research/ade_wildgen_*)
         mark math

@@ -2217,6 +2217,10 @@ var FRAME_PATCH_COUNT: i64 = 0
 var FRAME_PATCH_OFF: [i64; 65536] = [0; 65536]
 var A64_FRAME_PATCH_COUNT: i64 = 0
 var A64_FRAME_PATCH_OFF: [i64; 65536] = [0; 65536]
+// Count of patched B.cond / CBZ / CBNZ whose displacement does not fit
+// signed imm19 (±1 MiB). Silent wrap used to miscompile huge functions
+// (compile_primary's `ident(` then-body) when the a64 host targeted x86.
+var A64_COND_BRANCH_OOR: i64 = 0
 var A64_FRAME_PATCH_RD: [i64; 65536] = [0; 65536]
 var FN_FRAME_SIZE: [i64; 65536] = [0; 65536]
 var LAST_EXPR_IS_CLOSURE: i64 = 0
@@ -2248,6 +2252,27 @@ fn sb(i: i64) -> i64 with Panic, Mut { if i >= 0 && i < SRC_LEN { return SRC[i a
 fn em(b: i64) with Mut { if CL >= 268435456 { if CD_OVF == 0 { CD_OVF_FN = CURRENT_FN; CD_OVF_CL = CL } CD_OVF = 1; return } CD[CL as usize] = b as i8; CL = CL + 1 }
 fn em32(v: i64) with Mut { em(v & 0xFF); em((v >> 8) & 0xFF); em((v >> 16) & 0xFF); em((v >> 24) & 0xFF) }
 fn em64(v: i64) with Mut { em32(v & 0xFFFFFFFF); em32((v >> 32) & 0xFFFFFFFF) }
+
+// macOS Mach-O: a64 BSS addresses are ADRP/ADD from the text PC
+// (emit_image_addr_reg_a64), so they survive PIE slide only if __DATA is
+// within ±4 GiB of __TEXT. Constraints:
+//   1. __TEXT must not reach __DATA (16 MiB overlapped; kernel SIGKILL).
+//   2. |DATA-TEXT| must fit ADRP (0x300000000 was +8 GiB and SIGBUS'd).
+//   3. The image must stay out of xnu's arm64 dyld shared region
+//      [0x180000000, 0x280000000). TEXT+256 MiB plus lean.sio's ~1.7 GiB
+//      BSS ended 34 MiB below 0x180000000 and the second --check aborted
+//      mapping the dyld cache. TEXT+128 MiB leaves ~164 MiB of slack.
+//   4. arm64 macOS requires MH_PIE; dropping it was kernel SIGKILL (exit 137).
+fn macos_text_data_gap() -> i64 { 134217728 }
+fn macos_data_vmaddr() -> i64 { 4294967296 + macos_text_data_gap() }
+fn macos_dyld_shared_lo() -> i64 { 6442450944 }
+fn macos_dyld_shared_hi() -> i64 { 10737418240 }
+fn macos_range_hits_dyld_shared(vm: i64, size: i64) -> bool {
+    if vm < macos_dyld_shared_hi() && vm + size > macos_dyld_shared_lo() {
+        return true
+    }
+    false
+}
 
 fn emit_load_abs_addr_to_rax_x86(addr: i64) with Mut {
     em(0x48); em(0xb8); em64(addr)
@@ -3302,6 +3327,13 @@ fn emit_image_addr_reg_a64(rd: i64, v: i64) with Mut {
         let pc_page = (pc >> 12) << 12
         let target_page = (v >> 12) << 12
         let page_delta = (target_page - pc_page) >> 12
+        // ADRP signed 21-bit page imm is ±4 GiB. Truncating it (the 8 GiB
+        // TEXT→DATA gap) produced a wrap and SIGBUS on macos-15.
+        if page_delta > 1048575 || page_delta < (0 - 1048576) {
+            A64_COND_BRANCH_OOR = A64_COND_BRANCH_OOR + 1
+            emit_imm64_reg_a64(rd, v)
+            return
+        }
         let immlo = page_delta & 3
         let immhi = (page_delta >> 2) & 0x7FFFF
         em32(0x90000000 | ((immlo & 3) << 29) | ((immhi & 0x7FFFF) << 5) | rd)
@@ -3393,11 +3425,34 @@ fn patch_branch_a64(off: i64, target: i64) with Mut, Panic {
     let top = (insn >> 24) & 0xFF
     if top == 0x14 || top == 0x94 || top == 0x17 || top == 0x97 {
         // B or BL: 26-bit offset in bits [25:0]
+        if rel > 33554431 || rel < 0 - 33554432 {
+            A64_COND_BRANCH_OOR = A64_COND_BRANCH_OOR + 1
+        }
         em32_at(off, (insn & 0xFC000000) | (rel & 0x3FFFFFF))
     } else {
-        // B.cond / CBZ / CBNZ: 19-bit offset in bits [23:5]
+        // B.cond / CBZ / CBNZ: 19-bit signed offset in bits [23:5]
+        if rel > 262143 || rel < 0 - 262144 {
+            A64_COND_BRANCH_OOR = A64_COND_BRANCH_OOR + 1
+        }
         em32_at(off, (insn & 0xFF00001F) | ((rel & 0x7FFFF) << 5))
     }
+}
+
+// CBZ x0, far_target — invert to CBNZ over a 26-bit B so a then-body
+// larger than ±1 MiB (compile_primary's call-handling if) does not wrap.
+fn emit_cbz_x0_far_a64() -> i64 with Mut {
+    em32(0xB5000040)  // cbnz x0, +8
+    let b_off = CL
+    em32(0x14000000)  // b placeholder
+    return b_off
+}
+
+// B.ne far_target — invert to B.eq over a 26-bit B.
+fn emit_bne_far_a64() -> i64 with Mut {
+    em32(0x54000040)  // b.eq +8
+    let b_off = CL
+    em32(0x14000000)  // b placeholder
+    return b_off
 }
 
 fn patch_adr_a64(off: i64, target: i64, rd: i64) with Mut, Panic {
@@ -4320,6 +4375,23 @@ fn type_name_kind(ns: i64, ne: i64) -> i64 with Panic, Mut {
     if st_find(h) >= 0 { return 6 }
     if en_find(h) >= 0 { return 7 }
     return 0
+}
+
+// #2817: which initializer-less declarations are zero-initialized. Kinds per
+// type_name_kind: 1 integer, 2 float (also unit-dimensioned f64), 4 bool. For
+// anything else (string, enum, f128, struct-element arrays) zero is not a
+// valid value, so the declaration is refused rather than bound to garbage.
+// `[u8; N]` is also accepted, by its spelling: type_name_kind leaves u8 at kind
+// 0 (scan_type calls it an integer). It gets the same 8-byte-slot allocation
+// `[u8; N] = [0; N]` gets, zero-filled.
+fn lean_uninit_scalar_ok(decl_ty: i64) -> bool {
+    return decl_ty == 1 || decl_ty == 2 || decl_ty == 4
+}
+
+fn lean_uninit_arr_elem_ok(decl_ty_hash: i64, arr_esiz: i64) -> bool with Div, Mut {
+    if arr_esiz == 1 { return true }
+    let et = arr_hash_elem_ty(decl_ty_hash)
+    return et == 1 || et == 2 || et == 4
 }
 
 fn type_is_struct_like(ty: i64, ty_hash: i64) -> bool with Panic, Mut {
@@ -10143,10 +10215,9 @@ fn emit_print(tok: i64) with IO, Mut, Panic, Div {
             // SQW is [i64; 256]; this function packs 8 decoded bytes per
             // slot, so qi (not slen) is the real bound -- overflow here
             // needs a ~2048-byte literal, unlike the 256-byte cap in the
-            // unpacked decoders (compile_primary/emit_print_a64). Same
-            // silent-corruption class those guard against: without this,
-            // SQW[qi] would write past index 255 into FN_NS, the next
-            // global declared after SQW.
+            // unpacked `let s = "..."` decoders (compile_primary /
+            // compile_primary_a64). emit_print_a64 uses this same pack.
+            // Without this, SQW[qi] would write past index 255 into FN_NS.
             tc_error_hard(tok, "string literal exceeds maximum of 2048 bytes")
             TYPECHECK_FAILED = 1
             slen = 0
@@ -26181,6 +26252,61 @@ fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
     emit_store_to_pointer_offset_x86(addr_slot, pending_off, target_ty, target_hash)
 }
 
+// The zero is in rax / x0; describe it the way compile_or() would describe the
+// literal 0 (or 0.0), so the binding code and literal refinement checks that
+// follow see the value the variable actually holds.
+//
+// Start from the same clean slate compile_primary / compile_primary_a64 give a
+// fresh primary: otherwise the previous expression's unit + dimension,
+// variance/sensitivity shadows, channel set and closure/linear/affine flags
+// leak into this binding, and an f64 refinement is checked against a STALE
+// literal (or not at all) instead of the 0.0 the variable actually holds.
+fn lean_uninit_set_zero_expr(decl_ty: i64, decl_ty_hash: i64) with Mut {
+    LAST_EXPR_IS_CLOSURE = 0
+    LAST_EXPR_IS_LINEAR = 0
+    LAST_EXPR_IS_AFFINE = 0
+    LAST_EXPR_VAR_IDX = -1
+    EXPR_CH_SET = 0
+    EXPR_PARAM_USED = 0
+    EXPR_UNIT = 0
+    EXPR_UNIT_DIM = 0
+    EXPR_VSHADOW = -1
+    EXPR_SSHADOW = -1
+    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+    EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
+    EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
+    EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
+    EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
+    EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
+    EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
+    EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
+    EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
+    EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
+    EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
+    EXPR_HSHADOW_77 = -1
+    EXPR_TY = decl_ty
+    EXPR_TY_HASH = decl_ty_hash
+    LAST_IS_LITERAL = 0
+    LAST_IS_LITERAL_F64 = 0
+    if decl_ty == 2 {
+        // Exactly what compile_primary records for the literal `0.0`.
+        EXPR_IS_F64 = 1
+        LAST_IS_LITERAL_F64 = 1
+        LAST_F64_LIT_TOK = EP - 1
+        LAST_F64_LIT_CL = CL
+        LAST_LITERAL_F64_INT = 0
+        LAST_LITERAL_F64_FRAC = 0
+        LAST_LITERAL_F64_DENOM = 1
+    } else {
+        EXPR_IS_F64 = 0
+        if decl_ty == 1 {
+            // ... and for the integer literal `0`.
+            LAST_IS_LITERAL = 1
+            LAST_LITERAL_VAL = 0
+        }
+    }
+}
+
 fn compile_stmt() with IO, Mut, Panic, Div {
     let k = TK[EP as usize]
     LAST_STMT_HAS_VALUE = 0
@@ -26269,6 +26395,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             let ne = TE[EP as usize]
             if src_match(ns, ne - ns, "mut") {
                 tc_rust_let_mut(EP)
+                // Recover past `mut` so the rest binds as `let x = ...`. Without
+                // this, `mut` was taken as the binding name and `x = 0` became
+                // an initializer-less declaration (refused since #2817).
+                EP = EP + 1
             }
         }
         if TK[EP as usize] == 6 {
@@ -26339,6 +26469,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         // Check for : type annotation
         var is_arr: i64 = 0
         var arr_len: i64 = 0
+        var arr_len_lit: i64 = 0  // `[T; N]` spelled N (vs `[T]`, which also leaves arr_len 0)
+        var arr_elem_u8: i64 = 0  // type_name_kind has no `u8` (scan_type does); see lean_uninit_arr_elem_ok
         var arr_esiz: i64 = 8
         var decl_is_f64: i64 = -1
         var decl_ty: i64 = 0
@@ -26369,9 +26501,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     arr_elem_ty = type_name_kind(etns, etne)
                     if arr_elem_ty == 6 || arr_elem_ty == 7 { arr_elem_hash = gl_name_hash(etns, etne) }
                     if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
+                    if src_match(etns, etne - etns, "u8") { arr_elem_u8 = 1 }
                     EP = EP + 1  // skip element type
                 }
                 if TK[EP as usize] == 27 { EP = EP + 1 }  // skip ;
+                if TK[EP as usize] == 4 { arr_len_lit = 1 }
                 arr_len = TV[EP as usize]
                 EP = EP + 1  // skip N
                 if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
@@ -26405,7 +26539,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         // Skip = sign; detect type-annotated decl without initializer
         var has_eq: i64 = 0
         if TK[EP as usize] == 16 { EP = EP + 1; has_eq = 1 }
-        if is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
+        // `has_eq == 1`: without `=`, a `[V; N]` here is the NEXT statement, not
+        // this declaration's initializer (#2817).
+        if has_eq == 1 && is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
             // Local array with repeat initializer [V; N]: splat V into every slot.
             // (Previously V was SKIPPED and the slots were always zero-filled — the
             //  [V;N] non-zero-splat miscompile. We now mirror the already-correct
@@ -26531,6 +26667,45 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 em32(0 - (base + nslots - 1) * 8)
             }
             emit_store_var(ptr_slot)
+        } else if has_eq == 0 && is_arr == 1 && arr_len_lit == 1 && arr_len >= 0 {
+            // `var a: [T; N]` with no initializer (#2817): zero-fill, exactly the
+            // allocation `[0; N]` gets above. This used to fall through to the
+            // final else, whose compile_or() took the NEXT statement as the
+            // initializer -- or, after a `;`, nothing, leaving a garbage array
+            // pointer that SIGSEGV'd on the first element access.
+            if arr_elem_u8 == 0 && !lean_uninit_arr_elem_ok(decl_ty_hash, arr_esiz) {
+                tc_error_hard(EP - 1, "array declared without an initializer: only integer, float and bool elements are zero-initialized; write `= [V; N]`")
+                return
+            }
+            var nslots = arr_len
+            if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
+            let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
+            if ptr_slot < 0 { return }
+            let arr_vi = VAR_COUNT - 1
+            VAR_TY[arr_vi as usize] = 8
+            VAR_TY_HASH[arr_vi as usize] = decl_ty_hash
+            VAR_MUT[arr_vi as usize] = decl_is_mut
+            let base = ptr_slot - nslots
+            // `[T; 0]` owns no slots: point it at its own pointer slot -- a valid
+            // frame address that no element access can reach (rep stosq with
+            // rcx = 0 writes nothing).
+            let lo_slot = if nslots > 0 { base + nslots - 1 } else { ptr_slot }
+            if LAST_LOCAL_BSS_SPILL != 0 {
+                em(0x48); em(0xbf); em64(LAST_LOCAL_BSS_ADDR)
+            } else {
+                em(0x48); em(0x8d); em(0xbd)  // lea rdi, [rbp + disp32]  (lowest array addr)
+                em32(0 - lo_slot * 8)
+            }
+            em(0x48); em(0x31); em(0xc0)   // xor rax, rax
+            em(0xb9); em32(nslots)         // mov ecx, nslots
+            em(0xf3); em(0x48); em(0xab)  // rep stosq
+            if LAST_LOCAL_BSS_SPILL != 0 {
+                em(0x48); em(0xb8); em64(LAST_LOCAL_BSS_ADDR)
+            } else {
+                em(0x48); em(0x8d); em(0x85)  // lea rax, [rbp + disp32]
+                em32(0 - lo_slot * 8)
+            }
+            emit_store_var(ptr_slot)
         } else if has_eq == 0 && (decl_ty != 0 || decl_ty_hash != 0) && type_is_struct_like(decl_ty, decl_ty_hash) {
             // var x: StructType  (no initializer) — zero-initialize struct slots
             bind_struct_local_zeroinit_x86(ns, ne, decl_ty_hash)
@@ -26544,7 +26719,18 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut
             }
         } else {
-            compile_or()
+            if has_eq == 0 {
+                // `var x: T` with no initializer (#2817): bind zero. Used to be
+                // compile_or(), which consumed the next statement as the value.
+                if !lean_uninit_scalar_ok(decl_ty) {
+                    tc_error_hard(EP - 1, "declaration without an initializer: only integer, float and bool types are zero-initialized; add `= value`")
+                    return
+                }
+                em(0x48); em(0x31); em(0xc0)  // xor rax, rax  (0 and 0.0 alike)
+                lean_uninit_set_zero_expr(decl_ty, decl_ty_hash)
+            } else {
+                compile_or()
+            }
             if decl_ty == 13 && (EXPR_TY == 2 || EXPR_IS_F64 == 1) {
                 emit_widen_f64_to_f128_x86()
             }
@@ -32528,10 +32714,13 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     RET_AGG_BSS_OFF = GL_BSS_SIZE
     GL_BSS_SIZE = GL_BSS_SIZE + 1048576  // 1MB scratch for aggregate (struct/array) returns
     // Add 16 to BSS_BASE so globals start at BSS+16, but argc/argv at BSS+0.
-    // The lean_single Mach-O path bakes absolute BSS addresses into emitted code,
-    // so macOS needs a generous fixed gap between __TEXT and __DATA.
+    // a64 uses ADRP/ADD (emit_image_addr_reg_a64) so a PIE slide is fine
+    // as long as __DATA stays within ±4 GiB of __TEXT. x86 still bakes
+    // absolute immediates; write_macho_x86 stays non-PIE.
+    // macos_data_vmaddr() is the preferred __DATA VA (below the dyld
+    // shared region; see macos_text_data_gap).
     if TARGET_OS == 2 {
-        GL_BSS_BASE = 0x101000000 + 16    // macOS: __DATA segment at 0x101000000
+        GL_BSS_BASE = macos_data_vmaddr() + 16
     } else {
         GL_BSS_BASE = 0x10000000 + 16     // Linux/Windows: BSS at 0x10000000 (256MB, never overlaps code)
     }
@@ -34378,12 +34567,12 @@ fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
 
 // ─── Mach-O x86_64 writer ───
 // Builds a macOS Mach-O 64-bit executable.
-// Layout: __PAGEZERO(0..4GB) + __TEXT(4GB.., code) + __DATA(4GB+16MB, BSS)
+// Layout: __PAGEZERO(0..4GB) + __TEXT(4GB.., code) + __DATA(4GB+256MB, BSS)
 fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
     let vm_base: i64 = 4294967296       // 0x100000000
     let page_size: i64 = 4096
     let text_vm = vm_base               // __TEXT vmaddr
-    let data_vm = vm_base + 16777216    // __DATA vmaddr (BSS)
+    let data_vm = macos_data_vmaddr()   // __DATA vmaddr (BSS)
     let macos_build_ver: i64 = 720896   // 11.0.0
 
     // Mach-O header: 32 bytes
@@ -34405,6 +34594,23 @@ fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
     let text_file_size = ((CL + page_size - 1) / page_size) * page_size
     let total_file_size = text_file_off + text_file_size
     let text_seg_vmsize = text_file_off + text_file_size  // covers headers + code
+    if text_vm + text_seg_vmsize > data_vm {
+        print("error: macho __TEXT overlaps __DATA (text_end=")
+        print_int(text_vm + text_seg_vmsize)
+        print(" data_vm=")
+        print_int(data_vm)
+        print(") — refuse emit\n")
+        return 1
+    }
+    let data_seg_vmsize = ((GL_BSS_SIZE + page_size - 1) / page_size) * page_size
+    if macos_range_hits_dyld_shared(data_vm, data_seg_vmsize) {
+        print("error: macho __DATA overlaps dyld shared region (data_vm=")
+        print_int(data_vm)
+        print(" data_end=")
+        print_int(data_vm + data_seg_vmsize)
+        print(") — refuse emit\n")
+        return 1
+    }
 
     print("macho_build: code="); print_int(CL); print(" text_off="); print_int(text_file_off); print("\n")
 
@@ -34611,17 +34817,18 @@ fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
                 si = si + 2
             }
         } else { si = si + 1 }
-        if slen >= 256 {
-            // Same corruption class the call-argument decoders guard
-            // against (SQW is [i64; 256]): without this, a >=256-byte
-            // print("...") literal on arm64 would write past SQW[255]
-            // into FN_NS, the next global declared after SQW.
-            tc_error_hard(tok, "string literal exceeds maximum of 256 bytes")
+        // Pack 8 decoded bytes per SQW slot, matching emit_print (x86).
+        // The unpacked `slen >= 256` cap was the #2431 Family A drift:
+        // x86 accepts print() literals up to 2048 bytes; a64 rejected at 256.
+        let qi = slen / 8
+        if qi >= 256 {
+            tc_error_hard(tok, "string literal exceeds maximum of 2048 bytes")
             TYPECHECK_FAILED = 1
             slen = 0
             break
         } else {
-            SQW[slen as usize] = byte
+            let bi = slen - qi * 8
+            SQW[qi as usize] = SQW[qi as usize] | (byte << (bi * 8))
             slen = slen + 1
         }
     }
@@ -34631,11 +34838,14 @@ fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
     let b_off = 1 + pad_len / 4
     em32(0x14000000 | (b_off & 0x3FFFFFF))
     let str_start = CL
-    // Emit string bytes
+    // Emit string bytes (unpack the 8-bytes-per-slot encoding)
     var bi: i64 = 0
     while bi < pad_len {
-        if bi < slen { em(SQW[bi as usize] & 0xFF) }
-        else { em(0) }
+        if bi < slen {
+            let qi2 = bi / 8
+            let bj = bi - qi2 * 8
+            em((SQW[qi2 as usize] >> (bj * 8)) & 0xFF)
+        } else { em(0) }
         bi = bi + 1
     }
     // skip: adr x1, -(pad_len) — point back at string data
@@ -41322,6 +41532,16 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // let/var
     if k == 11 || k == 12 {
         EP = EP + 1
+        // Strike 2: Reject 'let mut' Rust syntax -- mirror of the x86 twin
+        // (compile_stmt), including its recovery past `mut`.
+        if k == 11 && TK[EP as usize] == 3 {
+            let lm_ns = TS[EP as usize]
+            let lm_ne = TE[EP as usize]
+            if src_match(lm_ns, lm_ne - lm_ns, "mut") {
+                tc_rust_let_mut(EP)
+                EP = EP + 1
+            }
+        }
         if TK[EP as usize] == 6 {
             let pat_start = EP
             var pat_p = EP
@@ -41389,6 +41609,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         EP = EP + 1
         var is_arr: i64 = 0
         var arr_len: i64 = 0
+        var arr_len_lit: i64 = 0  // `[T; N]` spelled N (vs `[T]`, which also leaves arr_len 0)
+        var arr_elem_u8: i64 = 0  // type_name_kind has no `u8` (scan_type does); see lean_uninit_arr_elem_ok
         var arr_esiz: i64 = 8
         var decl_is_f64: i64 = -1
         var decl_ty: i64 = 0
@@ -41417,9 +41639,11 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     arr_elem_ty = type_name_kind(etns, etne)
                     if arr_elem_ty == 6 || arr_elem_ty == 7 { arr_elem_hash = gl_name_hash(etns, etne) }
                     if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
+                    if src_match(etns, etne - etns, "u8") { arr_elem_u8 = 1 }
                     EP = EP + 1
                 }
                 if TK[EP as usize] == 27 { EP = EP + 1 }
+                if TK[EP as usize] == 4 { arr_len_lit = 1 }
                 arr_len = TV[EP as usize]; EP = EP + 1
                 if TK[EP as usize] == 42 { EP = EP + 1 }
                 is_arr = 1
@@ -41452,7 +41676,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         }
         var has_eq: i64 = 0
         if TK[EP as usize] == 16 { EP = EP + 1; has_eq = 1 }
-        if is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
+        // `has_eq == 1`: without `=`, a `[V; N]` here is the NEXT statement, not
+        // this declaration's initializer (#2817).
+        if has_eq == 1 && is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
             EP = EP + 1
             let a64_val_ep = EP
             while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
@@ -41556,6 +41782,33 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 emit_lea_var_a64(base + nslots - 1)
             }
             emit_store_var_a64(ptr_slot)
+        } else if has_eq == 0 && is_arr == 1 && arr_len_lit == 1 && arr_len >= 0 {
+            // `var a: [T; N]` with no initializer (#2817) -- mirror of the x86 twin.
+            if arr_elem_u8 == 0 && !lean_uninit_arr_elem_ok(decl_ty_hash, arr_esiz) {
+                tc_error_hard(EP - 1, "array declared without an initializer: only integer, float and bool elements are zero-initialized; write `= [V; N]`")
+                return
+            }
+            var nslots = arr_len
+            if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
+            let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
+            if ptr_slot < 0 { return }
+            let arr_vi = VAR_COUNT - 1
+            VAR_TY[arr_vi as usize] = 8
+            VAR_TY_HASH[arr_vi as usize] = decl_ty_hash
+            VAR_MUT[arr_vi as usize] = decl_is_mut
+            let base = ptr_slot - nslots
+            let lo_slot = if nslots > 0 { base + nslots - 1 } else { ptr_slot }  // `[T; 0]`: see x86 twin
+            if LAST_LOCAL_BSS_SPILL != 0 {
+                emit_image_addr_reg_a64(11, LAST_LOCAL_BSS_ADDR)
+                emit_zero_words_x11_a64(nslots)
+                emit_image_addr_a64(LAST_LOCAL_BSS_ADDR)
+            } else {
+                emit_lea_var_a64(lo_slot)
+                em32(0xAA0003EB)  // mov x11, x0
+                emit_zero_words_x11_a64(nslots)
+                emit_lea_var_a64(lo_slot)
+            }
+            emit_store_var_a64(ptr_slot)
         } else if has_eq == 0 && (decl_ty != 0 || decl_ty_hash != 0) && type_is_struct_like(decl_ty, decl_ty_hash) {
             // `var x: StructT` with no initializer — register + zero-fill (mirror
             // of the x86 twin, compile_stmt :~22226). Without this the a64 pass
@@ -41571,7 +41824,17 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut
             }
         } else {
-            compile_or_a64()
+            if has_eq == 0 {
+                // `var x: T` with no initializer (#2817) -- mirror of the x86 twin.
+                if !lean_uninit_scalar_ok(decl_ty) {
+                    tc_error_hard(EP - 1, "declaration without an initializer: only integer, float and bool types are zero-initialized; add `= value`")
+                    return
+                }
+                em32(0xD2800000)  // movz x0, #0  (0 and 0.0 alike)
+                lean_uninit_set_zero_expr(decl_ty, decl_ty_hash)
+            } else {
+                compile_or_a64()
+            }
             if (decl_ty != 0 || decl_ty_hash != 0) && ty_eq(decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH) == false {
                 if type_has_knowledge(decl_ty, decl_ty_hash) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                     tc_epistemic_boundary(EP)
@@ -42686,8 +42949,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     // mov x1, disc
                     em32(0xD2800001 | ((il_disc & 0xFFFF) << 5))
                     em32(0xEB010000)   // subs x0, x0, x1 (cmp)
-                    il_cbz_off = CL
-                    em32(0x54000001)   // b.ne placeholder
+                    il_cbz_off = emit_bne_far_a64()
                     if il_has_binding == 1 {
                         emit_load_var_a64(il_slot)
                         em32(0xF9400400)   // ldr x0, [x0, #8]
@@ -42760,8 +43022,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         // (mirror of x86 compile_stmt).
         let if_cond_ch_set_a = EXPR_CH_SET
         if EXPR_TY != 0 && EXPR_TY != 4 { tc_error(EP - 1, "if condition must be bool") }
-        let cbz_off = CL
-        em32(0xB4000000)
+        let cbz_off = emit_cbz_x0_far_a64()
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
         LAST_STMT_TY_HASH = 0
@@ -43049,8 +43310,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     em32(0xF9400000)   // ldr x0, [x0]  (load tag at offset 0)
                     em32(0xD2800001 | ((wl_disc & 0xFFFF) << 5))  // mov x1, disc
                     em32(0xEB010000)   // subs x0, x0, x1 (cmp)
-                    wl_cbz_off = CL
-                    em32(0x54000001)   // b.ne placeholder
+                    wl_cbz_off = emit_bne_far_a64()
                     if wl_has_binding == 1 {
                         emit_load_var_a64(wl_slot)
                         em32(0xF9400400)   // ldr x0, [x0, #8]
@@ -43093,8 +43353,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         // β⁹ GTT loop fixed-point: snapshot VAR_CH_SET before the loop runs
         gtt_loop_snapshot()
         compile_or_a64()
-        let cbz_off = CL
-        em32(0xB4000000)
+        let cbz_off = emit_cbz_x0_far_a64()
         if TK[EP as usize] == 8 { EP = EP + 1 }
         while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
         if TK[EP as usize] == 9 { EP = EP + 1 }
@@ -43162,7 +43421,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         emit_load_var_a64(iter_slot); emit_push_a64()
         emit_load_var_a64(end_slot); emit_pop_x1_a64()
         em32(0xEB00003F); em32(0x9A9FA7E0)
-        let cbz_off = CL; em32(0xB4000000)
+        let cbz_off = emit_cbz_x0_far_a64()
         if TK[EP as usize] == 8 { EP = EP + 1 }
         while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
         if TK[EP as usize] == 9 { EP = EP + 1 }
@@ -43554,6 +43813,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
     CL = 0
     PATCH_COUNT = 0
     A64_FRAME_PATCH_COUNT = 0
+    A64_COND_BRANCH_OOR = 0
     print("arm64: re-emitting pass 2\n")
     // ARM64 Pass 2: compile each function
     var p: i64 = 0
@@ -44052,6 +44312,11 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
     }
     print("arm64_compile: fns="); print_int(FN_COUNT); print(" code="); print_int(CL)
     print(" main=fn"); print_int(main_fn); print(" patches="); print_int(PATCH_COUNT); print("\n")
+    if A64_COND_BRANCH_OOR != 0 {
+        print("error: a64 cond-branch out of signed imm19 range ("); print_int(A64_COND_BRANCH_OOR); print(" sites) — refuse wrap\n")
+        tc_mark_failed()
+        return 1
+    }
     0
 }
 
@@ -44090,7 +44355,7 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     let vm_base: i64 = 4294967296
     let page_size: i64 = 16384
     let text_vm = vm_base
-    let data_vm = vm_base + 16777216
+    let data_vm = macos_data_vmaddr()
     let macos_build_ver: i64 = 720896   // 11.0.0
     let hdr_size = 32
     let lc_pagezero_size = 72
@@ -44118,6 +44383,22 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
     let linkedit_filesize = linkedit_fixups_size + linkedit_exports_size
     let total_file_size = text_seg_filesize + linkedit_filesize
     let text_seg_vmsize = text_seg_filesize
+    if text_vm + text_seg_vmsize > data_vm {
+        print("error: macho __TEXT overlaps __DATA (text_end=")
+        print_int(text_vm + text_seg_vmsize)
+        print(" data_vm=")
+        print_int(data_vm)
+        print(") — refuse emit\n")
+        return 1
+    }
+    if macos_range_hits_dyld_shared(data_vm, data_seg_vmsize + page_size) {
+        print("error: macho __DATA overlaps dyld shared region (data_vm=")
+        print_int(data_vm)
+        print(" data_end=")
+        print_int(data_vm + data_seg_vmsize)
+        print(") — refuse emit\n")
+        return 1
+    }
     let linkedit_vm = data_vm + data_seg_vmsize
     let linkedit_symtab_off = linkedit_fileoff + linkedit_filesize
     let linkedit_stroff = linkedit_symtab_off
@@ -46070,16 +46351,15 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     if cr != 0 { return cr }
     if TARGET_ARCH == 1 {
         if TARGET_OS == 2 {
-            write_macho_arm64(out)
+            return write_macho_arm64(out)
         } else {
-            write_elf_arm64(out)
+            return write_elf_arm64(out)
         }
     } else if TARGET_OS == 3 {
-        write_pe(out)
+        return write_pe(out)
     } else if TARGET_OS == 2 {
-        write_macho_x86(out)
+        return write_macho_x86(out)
     } else {
-        write_elf(out)
+        return write_elf(out)
     }
-    return 0
 }

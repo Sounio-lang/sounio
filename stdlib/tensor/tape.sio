@@ -388,12 +388,15 @@ pub fn tape_tensor_sum(tape: &!TensorTape, a: i32, axis: Option<usize>, keepdims
     var av = tape_tensor_view(tape, a, false)
     var has_axis = false
     var axis_value: usize = 0 as usize
+    // Arm order is deliberate: on Madaros a leading bare `None =>` arm matches
+    // every value (#2787), so `Some` must come first. `Some(0)` is still
+    // mis-dispatched there until #2787 is fixed in the compiler.
     match axis {
-        None => {},
         Some(ax) => {
             has_axis = true
             axis_value = ax
         },
+        None => {},
     }
     let out_value = tensor_sum(&av, axis, keepdims)
     let req = tape.requires_grad[a as usize]
@@ -409,13 +412,14 @@ pub fn tape_tensor_mean(tape: &!TensorTape, a: i32, axis: Option<usize>, keepdim
     var has_axis = false
     var axis_value: usize = 0 as usize
     var denom = av.shape.len as f64
+    // `Some` first: see the note in tape_tensor_sum (#2787).
     match axis {
-        None => {},
         Some(ax) => {
             has_axis = true
             axis_value = ax
             denom = av.shape.dims[ax] as f64
         },
+        None => {},
     }
     let out_value = tensor_mean(&av, axis, keepdims)
     let req = tape.requires_grad[a as usize]
@@ -803,26 +807,41 @@ fn backward_sub(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Div {
     }
 }
 
+// Each output element i reads/writes the operand element it was broadcast from,
+// so a broadcast operand such as a (1,n) scale receives the sum over the
+// broadcast rows. An operand with the output's length is indexed by i directly.
+fn tape_mul_operand_offset(out_shape: TensorShape, in_shape: TensorShape, i: usize) -> usize with Mut, Panic, Div {
+    if in_shape.len == out_shape.len { return i }
+    tape_broadcast_source_offset(out_shape, in_shape, i)
+}
+
 fn backward_mul(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Div {
     let out = tape.node_out[idx]
     let a = tape.node_a[idx]
     let b = tape.node_b[idx]
-    let out_len = tape_node_saved_shape(tape, idx).len
+    let out_shape = tape_node_saved_shape(tape, idx)
+    let out_len = out_shape.len
+    let a_shape = tape_value_shape(tape, a)
+    let b_shape = tape_value_shape(tape, b)
     if tape.requires_grad[a as usize] {
         var i: usize = 0 as usize
         while i < out_len {
-            let cur = read_f64(tape.grad_data[a as usize], i as i64)
-            let inc = read_f64(tape.grad_data[out as usize], i as i64) * read_f64(tape.value_data[b as usize], i as i64)
-            write_f64(tape.grad_data[a as usize], i as i64, cur + inc)
+            let ai = tape_mul_operand_offset(out_shape, a_shape, i)
+            let bi = tape_mul_operand_offset(out_shape, b_shape, i)
+            let cur = read_f64(tape.grad_data[a as usize], ai as i64)
+            let inc = read_f64(tape.grad_data[out as usize], i as i64) * read_f64(tape.value_data[b as usize], bi as i64)
+            write_f64(tape.grad_data[a as usize], ai as i64, cur + inc)
             i = i + 1 as usize
         }
     }
     if tape.requires_grad[b as usize] {
         var i: usize = 0 as usize
         while i < out_len {
-            let cur = read_f64(tape.grad_data[b as usize], i as i64)
-            let inc = read_f64(tape.grad_data[out as usize], i as i64) * read_f64(tape.value_data[a as usize], i as i64)
-            write_f64(tape.grad_data[b as usize], i as i64, cur + inc)
+            let ai = tape_mul_operand_offset(out_shape, a_shape, i)
+            let bi = tape_mul_operand_offset(out_shape, b_shape, i)
+            let cur = read_f64(tape.grad_data[b as usize], bi as i64)
+            let inc = read_f64(tape.grad_data[out as usize], i as i64) * read_f64(tape.value_data[a as usize], ai as i64)
+            write_f64(tape.grad_data[b as usize], bi as i64, cur + inc)
             i = i + 1 as usize
         }
     }

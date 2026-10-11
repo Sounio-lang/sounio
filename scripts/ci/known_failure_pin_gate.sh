@@ -188,7 +188,7 @@ STUB
     echo "selftest FAILED: header reader read past a bare // line" >&2
     return 1
   fi
-  echo "known_failure_pin_gate: selftest OK (17 harness cases x 2 modes, header rule)"
+  echo "known_failure_pin_gate: selftest OK (16 harness cases x 2 modes, header rule)"
 }
 
 selftest

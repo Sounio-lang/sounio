@@ -1,0 +1,89 @@
+//@ run-pass
+// GUM through linear Ry, coefficients taken from the circuit, not from a
+// pasted derivative. At θ = π the first-order band dies. Teleport keeps it.
+
+use epistemic::knowledge::{ep_new, Epistemic}
+
+use quantum::epistemic_linear::{
+    elin_ry_prob_one,
+    elin_ry_teleport_prob_one,
+    elin_ry_dprob,
+    elin_ry_teleport_dprob,
+    elin_ry_d2prob,
+    elin_ry_gum,
+    LinearGum,
+}
+
+fn near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
+}
+
+fn check(name: string, ok: bool) -> i32 with IO {
+    if ok {
+        print(name)
+        print(": PASS\n")
+        return 0
+    }
+    print(name)
+    print(": FAIL\n")
+    return 1
+}
+
+fn hop(angle: Epistemic) -> LinearGum with Mut, Div, Panic {
+    elin_ry_gum(angle)
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO, Epistemic {
+    var fail = 0
+    let pi = 3.141592653589793
+    let tol = 0.000000001
+
+    fail = fail + check("T1_p_0", near(elin_ry_prob_one(0.0), 0.0, tol))
+    fail = fail + check("T2_p_pi", near(elin_ry_prob_one(pi), 1.0, tol))
+    fail = fail + check("T3_p_half", near(elin_ry_prob_one(pi / 2.0), 0.5, tol))
+
+    // ∂P/∂θ = (1/2) sin θ. At π/2 that is 1/2; at π it is 0.
+    fail = fail + check("T4_d1_half", near(elin_ry_dprob(pi / 2.0), 0.5, tol))
+    fail = fail + check("T5_d1_pi", near(elin_ry_dprob(pi), 0.0, tol))
+
+    // ∂²P/∂θ² = (1/2) cos θ.
+    fail = fail + check("T6_d2_pi", near(elin_ry_d2prob(pi), 0.0 - 0.5, tol))
+    fail = fail + check("T7_d2_0", near(elin_ry_d2prob(0.0), 0.5, tol))
+
+    // Off the pole: first order dominates. u = 0.01, |∂P| = 1/2, u₁ = 0.005, u₂ = 0.
+    let k_mid: Knowledge<f64> = measure(pi / 2.0, uncertainty: 0.01)
+    let sig_mid = uncertainty_of(k_mid)
+    let g_mid: LinearGum = hop(ep_new(k_mid.value, sig_mid * sig_mid, 900))
+    fail = fail + check("T8_mid_u1", near(g_mid.u_first, 0.005, tol))
+    fail = fail + check("T8_mid_u2", near(g_mid.u_second, 0.0, tol))
+    fail = fail + check("T8_mid_p", near(g_mid.prob, 0.5, tol))
+
+    // On the pole: u₁ = 0, bias = −σ²/4, u₂ = σ² / (2√2).
+    // σ = 0.1 → σ² = 0.01, bias = −0.0025, u₂ = sqrt(1.25e-5).
+    let k_pole: Knowledge<f64> = measure(pi, uncertainty: 0.1)
+    let sig_pole = uncertainty_of(k_pole)
+    let g_pole: LinearGum = hop(ep_new(k_pole.value, sig_pole * sig_pole, 900))
+    fail = fail + check("T9_pole_u1", near(g_pole.u_first, 0.0, tol))
+    fail = fail + check("T9_pole_bias", near(g_pole.bias, 0.0 - 0.0025, tol))
+    fail = fail + check("T9_pole_u2", near(g_pole.u_second, 0.00353553390593, 0.00000001))
+    fail = fail + check("T9_pole_u_is_u2", near(g_pole.u_total, g_pole.u_second, tol))
+
+    // Larger σ still grows the second-order band at the pole.
+    let k_wide: Knowledge<f64> = measure(pi, uncertainty: 0.2)
+    let sig_wide = uncertainty_of(k_wide)
+    let g_wide: LinearGum = hop(ep_new(k_wide.value, sig_wide * sig_wide, 900))
+    fail = fail + check("T10_pole_monotone", g_wide.u_total > g_pole.u_total)
+
+    // Teleport transports P and ∂P.
+    let th = 0.3
+    fail = fail + check("T11_teleport_p", near(elin_ry_teleport_prob_one(th), elin_ry_prob_one(th), tol))
+    fail = fail + check("T12_teleport_d1", near(elin_ry_teleport_dprob(th), elin_ry_dprob(th), tol))
+
+    if fail == 0 {
+        print("ALL_PASS\n")
+        return 0
+    }
+    return 1
+}

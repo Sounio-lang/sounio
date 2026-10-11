@@ -8,7 +8,7 @@
 # rewritten 2026-07-27 against current source: the archived version checked
 # for test IDs (T1148-T1153, total=1153) and an invocation
 # (`$SOUC run main.sio -- --self-test`) that no longer match current source
-# (current main.sio self-test total is 1156; the flag is `--self-test`, not
+# (current main.sio self-test total is 1162; the flag is `--self-test`, not
 # `run ... -- --self-test`).
 #
 # Measured 2026-07-27, verified with a Madaros built fresh from current
@@ -96,7 +96,7 @@ cg "main:T143e_fn"                "fn compiler_main_test_eg_q_scalar_leaves_reas
 cg "main:T143f_fn"                "fn compiler_main_test_eg_q_unknown_leaves_block" "$M"
 cg "main:T143g_fn"                "fn compiler_main_test_eg_q_union_support_blocks" "$M"
 cg "main:T143h_fn"                "fn compiler_main_test_eg_q_mask_algebra" "$M"
-cg "main:total_1161"              "let total: i64 = 1161" "$M"
+cg "main:total_1162"              "let total: i64 = 1162" "$M"
 
 echo ""
 echo "--- Live check: main.sio self-tests, T143b/c/d (three axes) + T143e/f/g/h (Q certificate) (requires a Madaros built from current source) ---"

@@ -2,7 +2,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, PerspectiveCamera } from '@react-three/drei';
 import type { WebGLRenderer } from 'three';
-import { Compartments } from './Compartments';
+import { Compartments } from './CompartmentMeshes';
 import { BloodFlowEdges } from './BloodFlowEdges';
 import { Stent } from './Stent';
 import { SCDepot } from './SCDepot';

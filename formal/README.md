@@ -75,10 +75,15 @@ them is proved relative to that axiom; `#print axioms <name>` shows which.
 `native_decide` trusts the compiled evaluator (it adds `Lean.ofReduceBool` to
 the trusted base) rather than the kernel alone.
 
-To re-count: a `git ls-files '*.lean'` walk that strips `--` and `/- -/`
-comments, then counts `\bsorry\b`, declarations matching `^\s*axiom\s`, and
-`\bnative_decide\b` (`grep` over the raw files over-counts, because many files
-state in their doc comments that they use no `sorry` or no axioms).
+To re-count: `scripts/dev/gen_axiom_inventory.sh` regenerates
+[`AXIOM_INVENTORY.md`](AXIOM_INVENTORY.md) (every axiom by file, name and line;
+`native_decide` per file). It walks `git ls-files`, strips `--` and `/- -/`
+comments and string literals, then counts `\bsorry\b`, declarations matching
+`^\s*axiom\s`, and `\bnative_decide\b` (`grep` over the raw files over-counts,
+because many files state in their doc comments that they use no `sorry` or no
+axioms). CI checks the inventory is current. The two `AxiomReport.lean` files
+added since (one per Lake package) declare no axioms; CI runs them to print
+`#print axioms` for the headline theorems (`scripts/ci/lean_axiom_report.sh`).
 
 **EL+ closure.** `OntologyELPlusClosureComplete.lean` proves (`subBPlusC_iff`)
 that, for concepts in the TBox's finite universe (`conceptUniv t`), the

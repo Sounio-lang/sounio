@@ -662,15 +662,17 @@ export function degenerateParams(base, { eps = 1e-3, psScale = 1e4 } = {}) {
 // so the two engines agree to f64.
 //
 // Sources: Gohel 2008 (matrix n=0.65/k=0.199), Wang 2022 (F_XR=0.45, ka=0.63),
-// Klamerus 1999 (CL_parent 100, CL_form 43, CL_odv 28 L/h), Kirchheiner 2006
-// (ODV/parent Css PM 0.25 / NM 3.45 / UM 10.3 → CYP2D6 formation scaling).
+// Lessard 1999 (oral/apparent CL_parent 100, CL_form 43 L/h), CL_odv 28 L/h
+// (Wyeth label). ODV/parent Css PM 0.25 / IM 1.16 / NM 3.45 / UM 10.3 →
+// CYP2D6 formation scaling: UNSOURCED (previously mis-cited as Kirchheiner
+// 2006; see stdlib/darwin_pbpk/pgx/cyp2d6_venlafaxine.sio header).
 // ════════════════════════════════════════════════════════════════════════════
 
 export const VFX_MATRIX_GOHEL2008 = Object.freeze({ totalDose: 75.0, k: 0.199, n: 0.65 });
 export const VFX_F_ORAL_XR = 0.45;
 export const VFX_KA_ABS    = 0.63;
 export const VFX_CL_FORM_ODV_NM = 43.0;   // L/h, CYP2D6 formation at NM (parity reference)
-export const VFX_CL_PARENT_CENTRAL = 57.0; // L/h = CL_oral(100) - CL_form(43), Klamerus 1999
+export const VFX_CL_PARENT_CENTRAL = 57.0; // L/h = CL_oral(100) - CL_form(43), Lessard 1999 (oral/apparent)
 export const VFX_CL_ODV_CENTRAL    = 28.0; // L/h, Wyeth label
 
 export const VFX_KP_PARENT = Object.freeze([1.00, 4.20, 3.50, 1.20, 2.00, 2.80, 1.80, 1.20, 2.40, 1.50, 0.80, 2.00, 1.60, 0.90]);
@@ -678,7 +680,7 @@ export const VFX_PS_PARENT = Object.freeze([0.0, 900.0, 600.0, 120.0, 200.0, 800
 export const VFX_KP_ODV    = Object.freeze([1.00, 3.50, 3.00, 1.00, 1.60, 2.20, 1.40, 0.90, 2.00, 1.20, 0.70, 1.60, 1.30, 0.70]);
 export const VFX_PS_ODV    = Object.freeze([0.0, 700.0, 450.0, 90.0, 150.0, 6000.0, 200.0, 60.0, 400.0, 80.0, 30.0, 100.0, 70.0, 50.0]);
 
-// CYP2D6 formation scale relative to NM (Kirchheiner 2006 ratios / 3.45). NM=1.0.
+// CYP2D6 formation scale relative to NM (UNSOURCED ratios / 3.45). NM=1.0.
 export const VFX_CL_FORM_SCALE = Object.freeze({ 0: 0.25 / 3.45, 1: 1.16 / 3.45, 2: 1.0, 3: 10.3 / 3.45 });
 
 // ─── Matrix transcendentals — verbatim ports of stdlib/math/pure.sio ─────────

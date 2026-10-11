@@ -24,6 +24,7 @@ jobs:
   impact:
     name: Impact
     runs-on: ubuntu-24.04
+    timeout-minutes: 10  # #2443: measured max 4.0 min over the same window
     outputs:
       docs: ${{ steps.classify.outputs.docs }}
       website: ${{ steps.classify.outputs.website }}
@@ -55,6 +56,11 @@ jobs:
     name: Contracts
     needs: impact
     runs-on: ubuntu-24.04
+    # Bounded (#2443). 63 successful runs of this job, 2026-10-06T15:44Z..
+    # 2026-10-07T05:11Z (Actions API): median 27.6 min, max 31.0 min. 45 is
+    # ~1.5x the observed maximum; without it a single stalled step of the 124
+    # here could hold a runner for GitHub's 6-hour default.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -88,6 +94,16 @@ jobs:
         run: bash scripts/ci/pireus_admission_engine_gate.sh
       - name: Pireus Walsh twist channel spectrum gate
         run: bash scripts/ci/pireus_walsh_twist_channel_spectrum_gate.sh
+      # The typed f64x16 XOR-convolution operator is selected from checker
+      # metadata, not from a callee name: renamed/poisoned sources, Metal and
+      # PTX artifacts, and the compound-shape refusals (~90 s).
+      - name: Pireus typed XOR GPU lowering gate
+        run: bash scripts/ci/pireus_typed_xor_gpu_gate.sh
+      # Pireus material tests read their evidence and tamper fixtures from argv
+      # (tests/stdlib/hardware/*.sio.args). The run-pass harness has no argv
+      # channel and only type-checks them; this compiles and runs them (~50 s).
+      - name: Pireus argv-driven material tests run with their arguments
+        run: bash scripts/ci/pireus_argv_tests_gate.sh
       # A number this repo states about itself must equal the number the tree
       # yields. Seeded from a 2026-08-27 backlog sweep where nearly every rebased
       # PR asserted a figure that was true when written and false by then --
@@ -108,6 +124,15 @@ jobs:
       # Epistemic is a plain struct, not Knowledge<T>.
       - name: GUM rules carry their covariance term
         run: bash scripts/ci/ep_gum_covariance_gate.sh
+      # The run-pass harness cannot observe a panic, so the PBPK28 driver's
+      # refusals (unregistered slots, invalid doses, overflowing loads) are
+      # probed here, with an exact panic status. Once per engine: the
+      # full-suite job runs lean_single but cannot see these refusals, so a
+      # lean_single-only regression would otherwise merge (PR #2695 review).
+      - name: PBPK28 driver refusals (Madaros)
+        run: bash scripts/ci/pbpk28_refusal_gate.sh
+      - name: PBPK28 driver refusals (lean_single)
+        run: SOUNIO_SOUC_ENGINE=lean_single bash scripts/ci/pbpk28_refusal_gate.sh
       - name: Measured-claim gate fails when it should
         run: bash scripts/ci/measured_claim_gate_selftest.sh
       # One name, one definition per scope. #2341 removed one of two identical
@@ -135,6 +160,10 @@ jobs:
       # count so it cannot grow. It measures direct invocation, not coverage.
       - name: Gate workflow reference ratchet
         run: bash scripts/ci/gate_workflow_reference_ratchet.sh
+      # Every job here carries timeout-minutes (#2443): an unbounded job inherits
+      # GitHub's 6-hour default, so one stalled step holds a runner that long.
+      - name: Workflow job timeout gate
+        run: bash scripts/ci/workflow_job_timeout_gate.sh
       # §6: parameter-position function types that declare no effects. Frozen at
       # the measured 216 so the count cannot grow while the one-system-or-two
       # decision is open.
@@ -401,6 +430,8 @@ jobs:
         run: bash scripts/ci/sounio_coord_selftest.sh
       - name: Portable compiler build lock self-test
         run: python3 scripts/ci/souc_build_lock_selftest.py
+      - name: Madaros seed diagnostic cache self-test
+        run: bash scripts/ci/madaros_seed_diagnostic_cache_gate.sh
       - name: CI watch receipt self-test
         run: python3 scripts/ci/ci_watch_receipt_selftest.py
       - name: Madaros changed-test selector self-test
@@ -630,6 +661,13 @@ jobs:
         run: bash scripts/ci/souc_launcher_portability_gate.sh
       - name: lean_single run surfaces compile diagnostics
         run: bash scripts/ci/souc_lean_run_diagnostics_gate.sh
+      # The committed AVX-512 Fano octonion kernel must be byte-identical to what
+      # native::lower_ir::lower_hyper_mul_o_fano emits from current source, and
+      # runs on silicon when the runner has AVX-512F (skips, saying so, when not).
+      - name: Fano kernel bytes come from the compiler's lowering
+        run: bash scripts/ci/fano_kernel_provenance_gate.sh
+      - name: Fano kernel provenance gate rejects a one-bit mutation
+        run: bash scripts/ci/fano_kernel_provenance_gate.sh --selftest
       - name: Output-path invariants
         run: bash scripts/dev/check_outpath_invariant.sh
       - name: Output-path leading-dash guard
@@ -858,6 +896,10 @@ jobs:
     needs: impact
     outputs:
       rung_outcome: ${{ steps.rung.outcome }}
+      # 'true' once the compiler build step has started. A job that fails
+      # before it (Set up job, action download, toolchain/cache setup) has
+      # measured nothing about the compiler; see fixed-point-regression-alert.
+      compiler_reached: ${{ steps.compiler-reached.outputs.reached }}
     # `stdlib` is here for a measured reason: 7 files in main.sio's own import
     # closure live under stdlib/compiler/ontology/ and classify as stdlib, not
     # compiler. A PR that makes stdlib/compiler/ontology/store.sio unparseable
@@ -955,8 +997,58 @@ jobs:
           sudo mkswap /mnt/swapfile-gen2
           sudo swapon /mnt/swapfile-gen2
           echo "--- after"; free -m; swapon --show
+      - name: Mark that the compiler build was reached
+        id: compiler-reached
+        run: echo "reached=true" >> "$GITHUB_OUTPUT"
       - name: Build Madaros once and run current-source f64 lowering gates
         run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
+      - name: Scientific scalar regressions on the source-built Madaros
+        timeout-minutes: 10
+        run: |
+          bash scripts/ci/madaros_scientific_scalar_regression_gate.sh \
+            /tmp/sounio-madaros-current-source-f64-lowering/madaros \
+            /tmp/sounio-madaros-current-source-f64-lowering/scientific-scalar
+      # Reuses the source-built Madaros above; compiles the native driver
+      # program once, then checks its threshold matrix. No second Madaros build.
+      # Driver compile is bounded at 15 min and the matrix at 10 min; the step
+      # has 26 min including receipt I/O. Existing job and uploader stay intact.
+      # The driver build reached about 24 GiB RSS in Slurm; PR runners have
+      # about 16 GiB RAM. Run this real gate on the existing reviewed DARWIN
+      # route (48 GiB limit); PR runs skip it, without changing runner policy.
+      - name: Knowledge runtime thresholds on the source-built native driver
+        if: runner.environment == 'self-hosted'
+        timeout-minutes: 26
+        env:
+          MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: |
+          set -euo pipefail
+          resolver_dir="$PWD/scripts/lib"
+          source "$resolver_dir/resolve_madaros.sh"
+          sounio_require_madaros
+          export SOUNIO_STDLIB_PATH="$PWD/stdlib"
+          gate_dir="$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR/knowledge-runtime-threshold"
+          mkdir -p "$gate_dir"
+          git rev-parse HEAD > "$gate_dir/source-commit.txt"
+          git ls-files -z self-hosted stdlib tests/frontend/threshold-matrix | xargs -0 sha256sum > "$gate_dir/source.sha256"
+          sha256sum "$MADAROS_BIN" > "$gate_dir/madaros.sha256"
+          driver="$gate_dir/driver"
+          rm -f "$driver"
+          ulimit -S -s 65536
+          build_rc=0
+          timeout 900 "$MADAROS_BIN" self-hosted/compiler/native_compile_driver.sio -o "$driver" > "$gate_dir/driver-build.log" 2>&1 || build_rc=$?
+          printf 'driver_build_rc=%s\n' "$build_rc" > "$gate_dir/phases.txt"
+          cat "$gate_dir/driver-build.log"
+          [[ "$build_rc" == 0 && -s "$driver" ]] || exit 1
+          chmod +x "$driver"
+          sha256sum -c "$gate_dir/source.sha256" > "$gate_dir/source-verify.log"
+          sha256sum -c "$gate_dir/madaros.sha256" > "$gate_dir/madaros-verify.log"
+          driver_sha=$(sha256sum "$driver" | cut -d ' ' -f1)
+          printf '%s  %s\n' "$driver_sha" "$driver" > "$gate_dir/driver.sha256"
+          gate_rc=0
+          timeout 600 bash scripts/ci/knowledge_runtime_threshold_contract_gate.sh "$driver" "$gate_dir/source.sha256" "$driver_sha" > "$gate_dir/matrix.log" 2>&1 || gate_rc=$?
+          cat "$gate_dir/matrix.log"
+          printf 'threshold_matrix_rc=%s\n' "$gate_rc" >> "$gate_dir/phases.txt"
+          exit "$gate_rc"
       - name: Madaros IR function table stays heap-backed
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
@@ -989,6 +1081,15 @@ jobs:
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_private_fn_identity_gate.sh
+      # The parser folds pure-fn calls in global initialisers through a side table
+      # keyed by the BARE name that accumulates across modules, so `var G = helper()`
+      # in a module with its own private `helper` folded the FIRST module's body --
+      # a table private_fn_identity cannot reach (it renames after parsing). Every
+      # word now carries its module. Reuses the ELF built above.
+      - name: Same-named definitions keep separate global-initialiser folds across modules
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_global_init_identity_gate.sh
       # Copilot review (PR #2515), comment 4110379104: this gate's fixtures
       # (private fn/struct/enum/field, plain and specialized-generic) guard
       # the specialized multi-module visibility fixes on this branch, but no
@@ -1041,10 +1142,25 @@ jobs:
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_thinlink_tuple_arr_import_gate.sh
+      # PR #2737 (region reclamation): the streaming lane compiles and RUNS the
+      # region witnesses, both lanes fail closed on a refused function, each
+      # store-path barrier is shown load-bearing by removing it, and the
+      # SOUNIO_NO_REGION_RECLAIM=1 opt-out emits no region runtime.
+      - name: Region reclamation witnesses (streaming, fail-closed, barrier mutation, opt-out)
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_region_reclaim_gate.sh
       - name: KL-3 specializer caps and method turbofish fail closed
         env:
           SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_kl3_specializer_gate.sh
+      # P0.4: the runtime arena wall must stay fail-closed and explained
+      # (allocation size, the 2 GiB limit, the &!-reference fix). The message is
+      # emitted by this PR's codegen, so it runs against the current-source ELF.
+      - name: Runtime arena-full diagnostic names size, limit and fix
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/arena_full_diagnostic_gate.sh
       # The reference-receiver fix above shipped without a lowering-level
       # counterpart: `&Seq<T>` method calls started resolving and silently read
       # one indirection level off. This guards the load that closes it.
@@ -1231,6 +1347,14 @@ jobs:
         env:
           SOUNIO_EPISTEMIC_EGRAPH_MADAROS: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/epistemic_egraph_rewrite_gate.sh
+      # Unknown relocation kinds refuse to emit (rc 20). No user program reaches
+      # that path, so the run-pass test can only pin the predicate/recorder; this
+      # pins the arm in apply_relocations_into and both writers' refusal
+      # statically, and runs self-test T70r live. Reuses the ELF built above.
+      - name: Native unknown relocation kind refuses to emit
+        env:
+          SOUNIO_NATIVE_RELOC_UNKNOWN_KIND_MADAROS: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/native_reloc_unknown_kind_gate.sh
       # W044: `Tipo::metodo(...)` whose target resolves to nothing typechecked
       # silently and evaluated to 0. Five cases, two warn and three quiet --
       # the quiet ones are the point, because the failure mode of this check is
@@ -1770,6 +1894,7 @@ jobs:
     needs: impact
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.sio == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10  # #2443: measured max 2.1 min over the same window
     steps:
       - uses: actions/checkout@v4
       - name: Materialize the committed Madaros prebuilt
@@ -1859,12 +1984,23 @@ jobs:
           EOF
           lake env lean /tmp/axiom_check.lean 2>&1 | grep -v "propext\|Classical\|Quot" \
             | grep "axioms" && echo "unexpected axioms" && exit 1 || echo "✓ No unexpected axioms"
+      # The real `#print axioms` list for the headline theorems that
+      # formal/AXIOM_INVENTORY.md refers to (the inventory generator does not
+      # run Lean). Builds the formal/ package modules too: before this step no
+      # CI job compiled OntologyELPlusClosureComplete, ElfLinker or TypeChecker.
+      - name: Axiom report for headline theorems
+        run: bash scripts/ci/lean_axiom_report.sh
+      # The counts in formal/AXIOM_INVENTORY.md are generated from source;
+      # a PR that adds an axiom or a native_decide must regenerate it.
+      - name: Axiom inventory is current
+        run: bash scripts/dev/gen_axiom_inventory.sh --check
 
   website:
     name: Website
     needs: impact
     if: needs.impact.outputs.website == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10  # #2443: measured max 1.7 min over the same window
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -1889,16 +2025,22 @@ jobs:
   # is given. "Required gate skipped" had been traded for "required gate not
   # counted".
   # The self-compile rung runs post-merge only (see its step). When it goes red
-  # on main -- or the job fails before reaching it -- open (or bump) one issue so
-  # the regression is visible without anyone watching the Actions tab.
+  # on main -- or the job fails after reaching the compiler build, e.g. the
+  # build itself or a gate before the rung breaks, so the rung never ran --
+  # open (or bump) one issue so the regression is visible without anyone
+  # watching the Actions tab. A job that fails BEFORE the build step (Set up
+  # job, action download, toolchain/cache setup; run 36848177901 opened #2742
+  # that way) has measured nothing about the compiler: it still fails the
+  # normal CI decision, but it is not reported as a self-compile regression.
   # `cancelled` is deliberately NOT an alert: the concurrency group cancels a
   # superseded main run whenever the next merge lands, and the newer run
   # carries the verdict.
   fixed-point-regression-alert:
     name: Fixed-point regression alert
     needs: madaros-current-source-deref-f64
-    if: always() && (github.event_name == 'push' || github.event_name == 'schedule') && (needs.madaros-current-source-deref-f64.outputs.rung_outcome == 'failure' || needs.madaros-current-source-deref-f64.result == 'failure')
+    if: always() && (github.event_name == 'push' || github.event_name == 'schedule') && (needs.madaros-current-source-deref-f64.outputs.rung_outcome == 'failure' || (needs.madaros-current-source-deref-f64.result == 'failure' && needs.madaros-current-source-deref-f64.outputs.compiler_reached == 'true'))
     runs-on: ubuntu-24.04
+    timeout-minutes: 5  # #2443: measured max 0.1 min over the same window
     permissions:
       issues: write
     steps:
@@ -1944,6 +2086,7 @@ jobs:
       - r6-corpus-sweep
       - slow-lane
     runs-on: ubuntu-24.04
+    timeout-minutes: 10  # #2443: measured max 1.5 min over the same window
     steps:
       - uses: actions/checkout@v4
       - name: Evaluate selected jobs
