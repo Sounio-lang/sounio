@@ -60,5 +60,5 @@ if [[ "$fail" -ne 0 ]]; then
 fi
 
 echo "SCO_ETAU_INSTALL_GATE_OK"
-echo "NOTE: for runtime discharge under a rebuilt Madaros, run scripts/ci/sco_step4_runtime_gate.sh"
+echo "NOTE: for runtime and strategy-selection coverage under a rebuilt Madaros, run scripts/ci/sco_step4_runtime_gate.sh"
 exit 0

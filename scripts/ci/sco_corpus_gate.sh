@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SCO corpus gate (Step II) — exact sentinels for V1–V3 adversarial programs.
+# SCO corpus gate (Step II) — exact runtime sentinels (V3 remains an ordinary effect smoke).
 # See docs/research/sco_corpus_2026-08-01.md and
 # docs/research/scientific_compilation_obligation_2026-08-01.md.
 #
@@ -13,8 +13,8 @@ cd "$ROOT"
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT/stdlib}"
 SOUC="${SOUC:-$ROOT/bin/souc}"
 
-OUT="$(mktemp -d)"
-trap 'rm -rf "$OUT"' EXIT
+OUT="${SCO_OUTPUT_DIR:-$ROOT/artifacts/sco}/corpus"
+mkdir -p "$OUT"
 fail=0
 
 run_item() {
@@ -25,7 +25,10 @@ run_item() {
   echo "== SCO $name =="
   echo "driver: $driver"
 
-  if ! "$SOUC" compile "$driver" -o "$OUT/${name}.elf" >"$OUT/${name}.compile.out" 2>"$OUT/${name}.compile.err"; then
+  local compile_rc=0 run_rc=0
+  timeout 180 "$SOUC" compile "$driver" -o "$OUT/${name}.elf" >"$OUT/${name}.compile.out" 2>"$OUT/${name}.compile.err" || compile_rc=$?
+  printf 'compile_rc=%s\n' "$compile_rc" >"$OUT/${name}.status"
+  if [[ "$compile_rc" != 0 ]]; then
     echo "FAIL: compile"
     tail -20 "$OUT/${name}.compile.err" || true
     fail=1
@@ -35,21 +38,22 @@ run_item() {
   # Madaros may emit a non-executable ELF mode; force +x before run.
   chmod +x "$OUT/${name}.elf" 2>/dev/null || true
 
-  if ! "$OUT/${name}.elf" >"$OUT/${name}.stdout" 2>"$OUT/${name}.stderr"; then
+  timeout 30 "$OUT/${name}.elf" >"$OUT/${name}.stdout" 2>"$OUT/${name}.stderr" || run_rc=$?
+  printf 'run_rc=%s\n' "$run_rc" >>"$OUT/${name}.status"
+  if [[ "$run_rc" != 0 ]]; then
     echo "FAIL: run (non-zero exit)"
     cat "$OUT/${name}.stderr" || true
     fail=1
     return
   fi
 
-  # Normalise: strip CR, trailing spaces; keep exact lines
-  tr -d '\r' <"$OUT/${name}.stdout" | sed 's/[[:space:]]*$//' >"$OUT/${name}.got"
-  if ! diff -u "$expected_file" "$OUT/${name}.got"; then
+  # No stdout normalization: the fixture promises exact bytes.
+  if ! cmp "$expected_file" "$OUT/${name}.stdout"; then
     echo "FAIL: sentinel mismatch"
     echo "--- expected ---"
     cat "$expected_file"
     echo "--- got ---"
-    cat "$OUT/${name}.got"
+    cat "$OUT/${name}.stdout"
     fail=1
     return
   fi

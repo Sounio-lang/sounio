@@ -14,6 +14,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.scien
 
 # Scientific Compilation Obligation (SCO)
 
+> Reconciliation boundary (2026-10-12): this is a historical research proposal, not a theorem or a certificate that SCO is satisfied. V1/V2 are exact runtime sentinels; the present V3 uses ordinary integer payloads and an effect declaration, so it does not test an Unobserved barrier or the required negative type check. A labeled enforce/ablation strategy change is strategy-selection coverage only; scientific non-vacuity requires an observable entitlement failure or legality fault and remains pending. Historical “discharged” wording below does not supersede these limits. No Python research exemption exists under ADR009.
+
+
 **Status:** research definition (Step I) — not an implementation claim  
 **Date:** 2026-08-01  
 **Branch / worktree:** `research/novel-compiler-20260801` @ `/tmp/sounio-novel-compiler-research`  

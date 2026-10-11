@@ -14,7 +14,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.sco-s
 
 # SCO Step IV — Runtime discharge path
 
-**Status:** **discharged on this worktree** — `SCO_STEP4_RUNTIME_GATE_OK` (2026-08-02)  
+> Reconciliation boundary (2026-10-12): this is a historical research proposal, not a theorem or a certificate that SCO is satisfied. V1/V2 are exact runtime sentinels; the present V3 uses ordinary integer payloads and an effect declaration, so it does not test an Unobserved barrier or the required negative type check. A labeled enforce/ablation strategy change is strategy-selection coverage only; scientific non-vacuity requires an observable entitlement failure or legality fault and remains pending. Historical “discharged” wording below does not supersede these limits. No Python research exemption exists under ADR009.
+
+
+**Historical status (superseded by the reconciliation boundary above):** **discharged on this worktree** — `SCO_STEP4_RUNTIME_GATE_OK` (2026-08-02)
 **Date:** 2026-08-02  
 **Depends on:** Step I–III  
 **Runtime ELF:** `artifacts/self-hosted/madaros-sco` (~101 MB, rebuilt from this branch’s `lower.sio`)  
@@ -36,7 +39,7 @@ Step IV puts that install into a **running Madaros binary** and keeps:
 
 ```bash
 cd /tmp/sounio-novel-compiler-research
-scripts/dev/souc-build-lock.sh bash scripts/ci/build_modular_madaros.sh \
+bash scripts/ci/build_modular_madaros.sh \
   artifacts/self-hosted/madaros-sco
 ```
 
@@ -65,13 +68,13 @@ compile the same `with NonAssoc` unit twice (enforce vs ablation) and confirm st
 | Check | Command / evidence |
 |-------|-------------------|
 | Install still gated | `sco_etau_install_gate.sh` |
-| Rebuild produced ELF | `artifacts/self-hosted/madaros-sco` executable, mtime ≥ `lower.sio` |
+| Rebuild produced ELF | `artifacts/self-hosted/madaros-sco` executable, source-tree and ELF SHA256 receipt verified |
 | Corpus under rebuilt SOUC | `SCO_CORPUS_GATE_OK` with `SOUC=.../madaros-sco` |
 | Ablation marker | grep `SCO_ETAU_ABLATION_ENV` |
 
 ---
 
-## 5. Strategy non-vacuity probe (discharged)
+## 5. Historical strategy probe (selection coverage; non-vacuity pending)
 
 ```bash
 bash scripts/ci/sco_strategy_probe_gate.sh
