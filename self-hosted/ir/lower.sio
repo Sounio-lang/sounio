@@ -587,7 +587,7 @@ pub fn lower_note_error(site: i64, n: Name) with Mut {
 }
 var IR_LOWER_HARD_ERROR_LIMIT: i64 = 0
 
-pub fn lower_hard_error_pending() -> bool { (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
+pub fn lower_hard_error_pending() -> bool { (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || LOWER_UNIT_FLOAT_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
 
 // Print what the flag knows, or say plainly that it knows nothing — never
 // silence. Called by the consumers that used to print a bare "ir_summary_failed".
@@ -662,6 +662,9 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print("         falls back to the mangled `mod_f` stub this gate exists to prevent,\n")
         print("         silently -- reported here because the transient hard-error state may\n")
         print("         have been reset by a later module's lowerer_new().\n")
+    }
+    if LOWER_UNIT_FLOAT_OVERFLOWED {
+        print("  cause: unit nominal-representation registry exceeded its bound or cannot establish an unambiguous scalar type; refusing binary publication (#2874)\n")
     }
     if LOWER_IMPL_METHOD_OVERFLOWED {
         print("  cause: more than 4096 distinct mangled impl-method names in this compilation;\n")
@@ -777,7 +780,7 @@ pub fn lower_hard_error_reset() with Mut {
 // successful IR by any of the many IrLowerResult/IrLowerBoxResult
 // construction sites that gate on THIS helper rather than polling the
 // separate pending flag directly.
-pub fn lower_had_error_with_hard(v: bool) -> bool { v || (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
+pub fn lower_had_error_with_hard(v: bool) -> bool { v || (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || LOWER_UNIT_FLOAT_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
 fn lower_ok_without_hard(v: bool) -> bool { !lower_had_error_with_hard(v) }
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
@@ -924,6 +927,68 @@ fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
 // lowered -- see lower_use_modules_collect's own comment) is unchanged;
 // only the id each entry is stamped with, and the id required at lookup,
 // are new.
+// #2874: checker unit declarations have an f64 nominal representation.
+// Preserve that fact at the lowering boundary rather than treating their
+// named parameters as integer words. Identity is exact bytes plus module id;
+// a unit declared by one dependency must not reclassify another module's type.
+// Flat scalar buffers avoid the existing large-struct global-array limitation.
+var LOWER_UNIT_FLOAT_COUNT: i64 = 0
+var LOWER_UNIT_FLOAT_MODULE_ID: [i64; 512] = [0 - 1; 512]
+var LOWER_UNIT_FLOAT_LEN: [i64; 512] = [0; 512]
+var LOWER_UNIT_FLOAT_BUF: [i8; 196608] = [0; 196608]
+var LOWER_UNIT_FLOAT_OVERFLOWED: bool = false
+
+fn lower_unit_float_name_known(n: Name, module_id: i64) -> bool with Mut, Panic, Div {
+    if n.len <= 0 || n.len > 384 || module_id < 0 { return false }
+    var i: i64 = 0
+    while i < LOWER_UNIT_FLOAT_COUNT {
+        if LOWER_UNIT_FLOAT_MODULE_ID[i as usize] == module_id && LOWER_UNIT_FLOAT_LEN[i as usize] == n.len {
+            var same = true
+            var j: i64 = 0
+            while j < n.len {
+                if LOWER_UNIT_FLOAT_BUF[(i * 384 + j) as usize] != n.buf[j as usize] { same = false }
+                j = j + 1
+            }
+            if same { return true }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn lower_unit_float_note(n: Name, module_id: i64) with Mut, Panic, Div {
+    if n.len <= 0 { return }
+    if n.len > 384 || module_id < 0 {
+        LOWER_UNIT_FLOAT_OVERFLOWED = true
+        return
+    }
+    if lower_unit_float_name_known(n, module_id) { return }
+    if LOWER_UNIT_FLOAT_COUNT >= 512 {
+        LOWER_UNIT_FLOAT_OVERFLOWED = true
+        return
+    }
+    let idx = LOWER_UNIT_FLOAT_COUNT
+    LOWER_UNIT_FLOAT_MODULE_ID[idx as usize] = module_id
+    LOWER_UNIT_FLOAT_LEN[idx as usize] = n.len
+    var j: i64 = 0
+    while j < n.len {
+        LOWER_UNIT_FLOAT_BUF[(idx * 384 + j) as usize] = n.buf[j as usize]
+        j = j + 1
+    }
+    LOWER_UNIT_FLOAT_COUNT = idx + 1
+}
+
+fn lower_unit_float_type_known(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeNamed { return false }
+    // A namespace prefix is not a declared local unit type.
+    if (*te).path.seg_count != 1 { return false }
+    if !lower_unit_float_name_known(ir_path_first_name((*te).path), lower_effective_current_module_id()) { return false }
+    match (*te).type_args {
+        Some(_) => { LOWER_UNIT_FLOAT_OVERFLOWED = true; false }
+        None => true,
+    }
+}
+
 var LOWER_USE_MODULE_COUNT: i64 = 0
 var LOWER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
 var LOWER_USE_MODULE_MODULE_ID: [i64; 1024] = [0 - 1; 1024]
@@ -992,6 +1057,8 @@ pub fn lower_set_skip_use_recollect_for_merged(skip: bool) with Mut {
 var LOWER_USE_MODULE_OVERFLOWED: bool = false
 
 pub fn lower_use_module_reset() with Mut {
+    LOWER_UNIT_FLOAT_COUNT = 0
+    LOWER_UNIT_FLOAT_OVERFLOWED = false
     LOWER_USE_MODULE_COUNT = 0
     LOWER_USE_MODULE_OVERFLOWED = false
     LOWER_IMPL_METHOD_COUNT = 0
@@ -1123,6 +1190,9 @@ pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>, module_id: i64) 
         match *current {
             Some(list) => {
                 let item_ref = &(*list).head
+                if item_ref.kind == ItemKind::ItemUnit {
+                    lower_unit_float_note(item_ref.name, module_id)
+                }
                 if item_ref.kind == ItemKind::ItemUse {
                     // Records every SUFFIX of the `use` path (the full path,
                     // and every shorter suffix ending at the same terminal --
@@ -6920,6 +6990,8 @@ pub fn fo_preregister_program_items_multipass(
     items: &Option<Box<ItemList>>,
     module_id: i64
 ) with Mut, Panic, Div, Alloc, IO {
+    let previous_module_id = LOWER_CURRENT_MODULE_ID
+    lower_set_current_module_id(module_id)
     // Same every-module-before-body-lowering timing that module-qualified
     // calls need: see LOWER_USE_MODULE_HASH. module_id is the caller's own
     // loop index over the loaded module array (0 for a single-module
@@ -6938,6 +7010,7 @@ pub fn fo_preregister_program_items_multipass(
     // not LOWER_FN_TUPLE_ARR_* -- and is not redundant with anything below.)
     var lo = lowerer_new()
     lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
+    lower_set_current_module_id(previous_module_id)
 }
 
 fn lowerer_lower_program_items_mut(
@@ -7060,6 +7133,7 @@ fn lower_cast_type_is_i64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, D
 
 fn lower_type_expr_is_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeNamed { return false }
+    if lower_unit_float_type_known(te) { return true }
     let seg = (*te).path.segments
     if seg.head_len != 3 { return false }
     if seg.head_buf[0] as i64 != 102 { return false }   // f
@@ -23276,10 +23350,40 @@ impl Lowerer {
         (lo9, dst_reg)
     }
 
+    // A direct variance intrinsic has not evaluated its argument yet.
+    // Read the actual returned Knowledge object, once, and only when the
+    // existing return registry proves this layout. Keep this out of the
+    // general variance walker: that walker can follow an already evaluated
+    // nominal expression and must not duplicate an effectful factory call.
+    fn lower_direct_knowledge_call_variance_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if (*e).kind == ExprKind::ExprFieldAccess && ir_name_eq((*e).name, make_name("value")) {
+            match (*e).left {
+                Some(base) => {
+                    if (*base).kind == ExprKind::ExprCall || (*base).kind == ExprKind::ExprMethodCall {
+                        return self.lower_direct_knowledge_call_variance_ref(&(*base))
+                    }
+                }
+                None => {}
+            }
+            return (self, 0 - 1)
+        }
+        if (*e).kind != ExprKind::ExprCall && (*e).kind != ExprKind::ExprMethodCall { return (self, 0 - 1) }
+        if self.expr_call_return_knowledge_value_float_ref(e) < 0 { return (self, 0 - 1) }
+        let base_pair = self.lower_expr_ref(e)
+        var lo = base_pair.0
+        let vr = lo.fresh_reg()
+        lo = vr.0
+        lo = lo.emit(ir_field_get(vr.1, base_pair.1, 1, make_name("variance")))
+        lo = lo.emit(ir_mark_float_reg(vr.1))
+        lo = lo.so_clear_expr_hess().fo_seed_from_variance(vr.1, 0 - 1)
+        (lo, vr.1)
+    }
+
     fn lower_variance_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(list) => {
-                let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                let direct_pair = self.lower_direct_knowledge_call_variance_ref(&(*list).head)
+                let pair_v = if direct_pair.1 >= 0 { direct_pair } else { direct_pair.0.lower_expr_variance_ref(&(*list).head) }
                 var lo = pair_v.0
                 if pair_v.1 >= 0 {
                     // Return a COPY, not the reg itself. For a mutable local that
@@ -28852,6 +28956,7 @@ pub fn lower_program_to_ir_summary_box_with_externs_ref(
     // and corrupted arg_list_get's bounds check, crashing gen2 --version via
     // str_eq dereferencing garbage. Struct/enum metadata registration should
     // not depend on DCE readiness -- run it unconditionally.
+    lower_set_current_module_id(self_index)
     lowerer_preseed_program_metadata_owned_mut(&! lo, (*prog).items)
     var i: i64 = 0
     while i < program_count {
@@ -28864,6 +28969,7 @@ pub fn lower_program_to_ir_summary_box_with_externs_ref(
             // table at lower.sio:1927. Returns the input unchanged unless a
             // complete mark set is ready.
             let ext_items = spec_dce_filter_with_global_marks(ext_prog.items)
+            lower_set_current_module_id(i)
             lowerer_preseed_external_struct_items_mut(&! lo, &ext_items)
             lower_note_stage(1, i, lo.had_error)
         }
@@ -28872,6 +28978,7 @@ pub fn lower_program_to_ir_summary_box_with_externs_ref(
     // Own items first so seed BSS layout is: [own globals | dep1 | dep2 | ...],
     // matching multi-mod merge order (seed, then deps 1..n).
     let own_items = spec_dce_filter_with_global_marks((*prog).items)
+    lower_set_current_module_id(self_index)
     lowerer_preseed_program_items_mut(&! lo, &own_items, ir_empty_name())
     lower_note_stage(2, self_index, lo.had_error)
     // Wave13 bare cross-mod f64 Ident: only the seed module needs external BSS
@@ -28882,11 +28989,13 @@ pub fn lower_program_to_ir_summary_box_with_externs_ref(
         while di < program_count {
             let dep_prog = (*programs)[di as usize]
             let dep_items = spec_dce_filter_with_global_marks(dep_prog.items)
+            lower_set_current_module_id(di)
             lowerer_preseed_external_bss_globals_mut(&! lo, &dep_items)
             lower_note_stage(3, di, lo.had_error)
             di = di + 1
         }
     }
+    lower_set_current_module_id(self_index)
     let error_count = lo.error_count
     let had_error = lo.had_error
     // Same residual as with_epistemic_ref: skip empty IrProgramSummary densify.
@@ -29219,11 +29328,15 @@ pub fn lower_dep_program_items_into_acc_with_externs(
             // become a deletion here -- the same contract the other three call
             // sites in this file rely on.
             let ext_items = spec_dce_filter_with_global_marks(ext_prog.items)
+            // Unit nominal representations belong to this declaration module,
+            // including return and struct-field metadata installed by preseed.
+            lower_set_current_module_id(i)
             // DEDUP: do not re-zero seed main / previously-filled dep methods.
             lowerer_preseed_external_items_into_acc_mut(&! lo, &ext_items)
         }
         i = i + 1
     }
+    lower_set_current_module_id(self_index)
     lowerer_preseed_dep_items_into_acc_mut(&! lo, items, ir_empty_name())
     // DEDUP body lower: skip main + existing bodies; fill stubs and new names.
     // self_index is this dependency module's own loaded-program index (the
