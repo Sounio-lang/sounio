@@ -323,6 +323,17 @@ var VAR_BORROW_EXCL: [i64; 2048] = [0; 2048]   // exclusive borrow active for th
 var CALL_ARG_BORROW_VI:   [i64; 32] = [-1; 32]  // var index borrowed in current call's args
 var CALL_ARG_BORROW_EXCL: [i64; 32] = [0; 32]   // 1=exclusive, 0=shared
 var CALL_ARG_BORROW_N:    i64 = 0               // count of borrows recorded this call
+// #1581: field-path borrows `&s.f(.g)*` on a by-value local. Each entry is
+// (var index, field-chain hashes, depth, exclusive). Paths conflict when they
+// share the variable and one field chain is a prefix of the other; disjoint
+// fields do not. Whole-variable borrows still use VAR_BORROW_COUNT/EXCL and
+// conflict with every path of that variable.
+var PB_VI:    [i64; 64] = [-1; 64]
+var PB_H:     [i64; 256] = [0; 256]   // 4 field hashes per entry
+var PB_DEPTH: [i64; 64] = [0; 64]
+var PB_EXCL:  [i64; 64] = [0; 64]
+var PB_N:     i64 = 0
+var CALL_ARG_PB_BASE: i64 = 0
 var IN_CALL_ARGS:         i64 = 0               // 1 when compiling a call arg list
 // Per local variable: use count (for linear/affine checking)
 var VAR_USED: [i64; 2048] = [0; 2048]
@@ -364,6 +375,8 @@ var SCAN_TY_ALEN: i64 = 0
 var SCAN_TY_NEXT: i64 = 0
 var SCAN_UNIT_EXPR_DIM: i64 = 0
 var SCAN_UNIT_EXPR_NEXT: i64 = 0
+var SCAN_UNIT_FACTOR_DIM: i64 = 0
+var SCAN_UNIT_FACTOR_NEXT: i64 = 0
 var RESOLVE_TY: i64 = 0
 var RESOLVE_TY_HASH: i64 = 0
 var LEX_ERROR_LINE: i64 = 0
@@ -2046,6 +2059,20 @@ fn unit_call_arg_mismatch(param_hash: i64, expr_unit: i64, expr_dim: i64) -> boo
     if expr_unit == param_hash { return false }
     if expr_dim != 0 && expr_dim == param_dim { return false }
     return true
+}
+
+// #2751: a let annotated with a unit must receive a value of that unit's
+// dimension. ty_eq cannot see it: a product or quotient (`a_m * b_s`) carries
+// no unit-named type hash, only EXPR_UNIT_DIM, so `let x: m/s = a_m * b_s` and
+// `let y: kg = d_m / t_s` used to bind silently. A dimensionless value
+// (literal, `as f64` cast) still initialises a unit binding, as before.
+fn lean_let_unit_dim_mismatch(decl_hash: i64, expr_unit: i64, expr_dim: i64) -> bool with Panic, Mut, Div {
+    if decl_hash == 0 { return false }
+    let decl_dim = type_hash_unit_dim(decl_hash)
+    if decl_dim == 0 { return false }
+    if expr_dim == 0 { return false }
+    if expr_unit == decl_hash { return false }
+    return expr_dim != decl_dim
 }
 
 fn expr_set_unit_from_type(ty: i64, ty_hash: i64) with Panic, Mut, Div {
@@ -4718,6 +4745,18 @@ fn tc_error_hard(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     return 0
 }
 
+// #2751: the wording follows Madaros' E001 for the same refusal ("this binding
+// expects a different type"), so one fixture pattern pins both engines.
+fn tc_let_unit_mismatch(tok: i64) -> i64 with IO, Mut, Panic {
+    print("error[E001]: unit mismatch in let binding: this binding expects a different type (the value's dimension differs from the declared unit) at ")
+    print_src_loc_for_tok(tok)
+    print(" (bundle line ")
+    print_int(TL[tok as usize])
+    print(")\n")
+    tc_mark_failed()
+    return 0
+}
+
 fn tc_decl_init_mismatch(tok: i64, decl_ty: i64, decl_hash: i64, expr_ty: i64, expr_hash: i64) -> i64 with IO, Mut, Panic, Div {
     print("error[E001]: Type mismatch — expected ")
     print_type_label(decl_ty, decl_hash)
@@ -6224,60 +6263,83 @@ fn stmt_is_array_elem_field_store(p0: i64) -> bool with Panic, Mut {
     return TK[p as usize] == 16
 }
 
-fn scan_unit_type_expr(p0: i64, close_tk: i64) with IO, Panic, Mut, Div {
+// #2388: one factor of a unit expression -- `name`, `(expr)`, either raised to
+// `^n` (n an integer literal 1..8). Sets SCAN_UNIT_FACTOR_DIM / _NEXT; NEXT < 0
+// on a malformed factor (already reported).
+
+fn scan_unit_factor(p0: i64, depth: i64) with IO, Panic, Mut, Div {
     var p = p0
     var dim: i64 = 0
-    var saw_unit: i64 = 0
-    var expect_unit: i64 = 1
-    var op: i64 = 19
-    while p < TC && TK[p as usize] != close_tk && TK[p as usize] != 39 && TK[p as usize] != 0
-        && TK[p as usize] != 16 && TK[p as usize] != 28 && TK[p as usize] != 7
-        && TK[p as usize] != 8 && TK[p as usize] != 27 && TK[p as usize] != 24
-        && TK[p as usize] != 42 {
-        if expect_unit != 0 {
-            if TK[p as usize] != 3 {
-                tc_error_hard(p, "malformed f64<UnitExpr> annotation")
-                SCAN_UNIT_EXPR_DIM = 0
-                SCAN_UNIT_EXPR_NEXT = 0 - 1
-                return
-            }
-            let uh = gl_name_hash(TS[p as usize], TE[p as usize])
-            if !unit_is_registered_h(uh) {
-                tc_error_hard(p, "unknown unit in f64<UnitExpr> annotation")
-                SCAN_UNIT_EXPR_DIM = 0
-                SCAN_UNIT_EXPR_NEXT = 0 - 1
-                return
-            }
-            let ud = unit_lookup_dim(uh)
-            if saw_unit == 0 {
-                dim = ud
-            } else {
-                if op == 19 { dim = dim_add(dim, ud) }
-                else { dim = dim_sub(dim, ud) }
-            }
-            saw_unit = 1
-            expect_unit = 0
-            p = p + 1
-        } else {
-            if TK[p as usize] != 19 && TK[p as usize] != 20 {
-                tc_error_hard(p, "malformed f64<UnitExpr> annotation")
-                SCAN_UNIT_EXPR_DIM = 0
-                SCAN_UNIT_EXPR_NEXT = 0 - 1
-                return
-            }
-            op = TK[p as usize]
-            expect_unit = 1
-            p = p + 1
-        }
-    }
-    if saw_unit == 0 || expect_unit != 0 {
+    if depth > 8 {
         tc_error_hard(p, "malformed f64<UnitExpr> annotation")
-        SCAN_UNIT_EXPR_DIM = 0
-        SCAN_UNIT_EXPR_NEXT = 0 - 1
+        SCAN_UNIT_FACTOR_NEXT = 0 - 1
         return
+    }
+    if TK[p as usize] == 6 {
+        scan_unit_chain(p + 1, depth + 1)
+        if SCAN_UNIT_EXPR_NEXT < 0 { SCAN_UNIT_FACTOR_NEXT = 0 - 1; return }
+        p = SCAN_UNIT_EXPR_NEXT
+        if TK[p as usize] != 7 {
+            tc_error_hard(p, "malformed f64<UnitExpr> annotation")
+            SCAN_UNIT_FACTOR_NEXT = 0 - 1
+            return
+        }
+        dim = SCAN_UNIT_EXPR_DIM
+        p = p + 1
+    } else if TK[p as usize] == 3 {
+        let uh = gl_name_hash(TS[p as usize], TE[p as usize])
+        if !unit_is_registered_h(uh) {
+            tc_error_hard(p, "unknown unit in f64<UnitExpr> annotation")
+            SCAN_UNIT_FACTOR_NEXT = 0 - 1
+            return
+        }
+        dim = unit_lookup_dim(uh)
+        p = p + 1
+    } else {
+        tc_error_hard(p, "malformed f64<UnitExpr> annotation")
+        SCAN_UNIT_FACTOR_NEXT = 0 - 1
+        return
+    }
+    if TK[p as usize] == 56 {
+        let n = TV[(p + 1) as usize]
+        if TK[(p + 1) as usize] != 4 || n < 1 || n > 8 {
+            tc_error_hard(p, "unit power must be an integer literal 1..8")
+            SCAN_UNIT_FACTOR_NEXT = 0 - 1
+            return
+        }
+        let base = dim
+        var k: i64 = 1
+        while k < n { dim = dim_add(dim, base); k = k + 1 }
+        p = p + 2
+    }
+    SCAN_UNIT_FACTOR_DIM = dim
+    SCAN_UNIT_FACTOR_NEXT = p
+}
+
+// factor (('*'|'/') factor)* -- left-associative, so `cal/mol/K` is (cal/mol)/K
+// and `cal/(mol*K)` is cal/(mol*K). Stops at the first token that is not an
+// operator after a factor.
+fn scan_unit_chain(p0: i64, depth: i64) with IO, Panic, Mut, Div {
+    scan_unit_factor(p0, depth)
+    if SCAN_UNIT_FACTOR_NEXT < 0 { SCAN_UNIT_EXPR_DIM = 0; SCAN_UNIT_EXPR_NEXT = 0 - 1; return }
+    var dim = SCAN_UNIT_FACTOR_DIM
+    var p = SCAN_UNIT_FACTOR_NEXT
+    while TK[p as usize] == 19 || TK[p as usize] == 20 {
+        let op = TK[p as usize]
+        scan_unit_factor(p + 1, depth)
+        if SCAN_UNIT_FACTOR_NEXT < 0 { SCAN_UNIT_EXPR_DIM = 0; SCAN_UNIT_EXPR_NEXT = 0 - 1; return }
+        if op == 19 { dim = dim_add(dim, SCAN_UNIT_FACTOR_DIM) }
+        else { dim = dim_sub(dim, SCAN_UNIT_FACTOR_DIM) }
+        p = SCAN_UNIT_FACTOR_NEXT
     }
     SCAN_UNIT_EXPR_DIM = dim
     SCAN_UNIT_EXPR_NEXT = p
+}
+
+fn scan_unit_type_expr(p0: i64, close_tk: i64) with IO, Panic, Mut, Div {
+    // close_tk is kept for the callers' shape; the chain grammar stops by itself
+    // at the first token that cannot continue it (`>`, `=`, `,`, `)` ...).
+    scan_unit_chain(p0, 0)
 }
 
 fn skip_type_meta_item(p0: i64, close_tk: i64) -> i64 with Panic, Mut {
@@ -7365,7 +7427,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
         // primitive `f64`/`f32` keywords, or casts like `x as f64 / 100.0`
         // steal the slash into a fake UnitExpr (pkg/lock.sio self-parse).
         if unit_is_registered_h(SCAN_TY_HASH)
-            && (TK[p as usize] == 19 || TK[p as usize] == 20) {
+            && (TK[p as usize] == 19 || TK[p as usize] == 20 || TK[p as usize] == 56) {
             scan_unit_type_expr(p - 1, 16)
             if SCAN_UNIT_EXPR_NEXT >= 0 {
                 SCAN_TY = 2
@@ -12610,6 +12672,73 @@ fn tuple_borrow_elem_resolve(tup_hash: i64, tup_idx: i64) with Panic, Div, Mut {
     }
 }
 
+// #1581: field-path borrow helpers. `p` is the token of the first `.` after the
+// root ident; reads up to 4 `.field` hops (deeper chains use their 4-hop prefix,
+// which is conservative: it can only report a conflict, never hide one).
+fn pb_chain_depth(p0: i64) -> i64 with Panic, Mut {
+    var p = p0
+    var d: i64 = 0
+    while TK[p as usize] == 50 && TK[(p + 1) as usize] == 3 && d < 4 {
+        d = d + 1
+        p = p + 2
+    }
+    return d
+}
+
+fn pb_overlaps(k: i64, vi: i64, p0: i64, depth: i64) -> bool with Panic, Mut {
+    if PB_VI[k as usize] != vi { return false }
+    var m = depth
+    if PB_DEPTH[k as usize] < m { m = PB_DEPTH[k as usize] }
+    var i: i64 = 0
+    while i < m {
+        let t = p0 + 1 + i * 2
+        if PB_H[(k * 4 + i) as usize] != gl_name_hash(TS[t as usize], TE[t as usize]) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Check and record a field-path borrow. Returns 0 ok, 1 conflict.
+fn pb_borrow(vi: i64, p0: i64, want_mut: i64) -> i64 with Panic, Mut {
+    let depth = pb_chain_depth(p0)
+    if depth == 0 { return 0 }
+    // A whole-variable borrow covers every field.
+    if VAR_BORROW_EXCL[vi as usize] > 0 { return 1 }
+    if want_mut != 0 && VAR_BORROW_COUNT[vi as usize] > 0 { return 1 }
+    var k: i64 = 0
+    while k < PB_N {
+        if pb_overlaps(k, vi, p0, depth) {
+            if want_mut != 0 || PB_EXCL[k as usize] != 0 { return 1 }
+        }
+        k = k + 1
+    }
+    if PB_N < 64 {
+        PB_VI[PB_N as usize] = vi
+        PB_DEPTH[PB_N as usize] = depth
+        PB_EXCL[PB_N as usize] = want_mut
+        var i: i64 = 0
+        while i < depth {
+            let t = p0 + 1 + i * 2
+            PB_H[(PB_N * 4 + i) as usize] = gl_name_hash(TS[t as usize], TE[t as usize])
+            i = i + 1
+        }
+        PB_N = PB_N + 1
+    }
+    return 0
+}
+
+// A whole-variable borrow conflicts with any recorded path of the variable.
+fn pb_var_conflict(vi: i64, want_mut: i64) -> bool with Panic, Mut {
+    var k: i64 = 0
+    while k < PB_N {
+        if PB_VI[k as usize] == vi {
+            if want_mut != 0 || PB_EXCL[k as usize] != 0 { return true }
+        }
+        k = k + 1
+    }
+    return false
+}
+
 fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
     EP = EP + 1
     var want_mut: i64 = 0
@@ -12915,8 +13044,21 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
         // The exclusivity is already guaranteed by the existing reference — do not apply
         // borrow conflict checks or tracking (disjoint field reborrows are always safe).
         let bvi_is_ref = VAR_TY[bvi as usize] == 10
+        // #1581: inside a call's argument list, `&s.f` / `&!s.f` on a by-value
+        // root is tracked by FIELD PATH: disjoint fields coexist, the same field
+        // (or a prefix of it) conflicts. Released with the call's other borrows.
+        let path_borrow = bvi_is_ref == false && IN_CALL_ARGS != 0 && TK[EP as usize] == 50 && pb_chain_depth(EP) > 0
+        if path_borrow {
+            if pb_borrow(bvi, EP, want_mut) != 0 {
+                if want_mut != 0 { tc_linear_violation(borrow_tok, "cannot borrow as mutable because it is also borrowed as shared") }
+                else { tc_linear_violation(borrow_tok, "cannot borrow as shared because it is also borrowed as mutable") }
+            }
+        }
         // Borrow conflict detection: exclusive borrows conflict with any other borrow.
-        if bvi_is_ref == false {
+        if bvi_is_ref == false && path_borrow == false {
+        if IN_CALL_ARGS != 0 && pb_var_conflict(bvi, want_mut) {
+            tc_linear_violation(borrow_tok, "cannot borrow the whole value while one of its fields is borrowed")
+        }
         if want_mut != 0 {
             if VAR_BORROW_COUNT[bvi as usize] > 0 {
                 tc_linear_violation(borrow_tok, "cannot borrow as mutable because it is also borrowed as shared")
@@ -18162,6 +18304,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             // Save prev_borrow_n so nested calls don't clobber our borrow records.
             let prev_in_call_args = IN_CALL_ARGS
             let prev_borrow_n = CALL_ARG_BORROW_N
+            let prev_pb_n = PB_N
             IN_CALL_ARGS = 1
             B5_ARG_VCOUNT = 0
             B9_ARG_CH_COUNT = 0
@@ -18280,6 +18423,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             // Restore call-arg tracking state and release call-site borrows
             IN_CALL_ARGS = prev_in_call_args
             release_call_arg_borrows(prev_borrow_n)
+            PB_N = prev_pb_n
             if fi >= 0 {
                 if FN_ARITY[fi as usize] != argc { tc_wrong_arity_hard(call_tok, FN_ARITY[fi as usize], argc) }
                 let callee_eff = FN_EFFECTS[fi as usize] & 1023  // mask out visibility bits
@@ -19014,7 +19158,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
             // Track unit for dimension checking at + and -
             if vi >= 0 { EXPR_UNIT = VAR_UNIT[vi as usize] } else { EXPR_UNIT = 0 }
-            EXPR_UNIT_DIM = unit_lookup_dim(EXPR_UNIT)
+            // type_hash_unit_dim, not unit_lookup_dim: an annotation such as
+            // `cm^3` or `mol/cm3` stores an anonymous unit TYPE hash (#2388),
+            // which the named-unit table cannot resolve.
+            EXPR_UNIT_DIM = type_hash_unit_dim(EXPR_UNIT)
             // A variable holding a derived quantity carries a dimension with no
             // name, which unit_lookup_dim cannot recover from a zero hash. Named
             // units keep the value computed on the line above; this fills in only
@@ -26740,6 +26887,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 } else {
                     tc_decl_init_mismatch(EP - 1, decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH)
                 }
+            }
+            if lean_let_unit_dim_mismatch(decl_ty_hash, EXPR_UNIT, EXPR_UNIT_DIM) {
+                tc_let_unit_mismatch(EP - 1)
             }
             // Observation boundary: Unobserved<T> assigned to non-Unobserved binding
             if ty_is_unobserved(EXPR_TY) && !ty_is_unobserved(decl_ty) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
@@ -37093,7 +37243,18 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             // Reborrow through a reference is always safe: exclusivity is already
             // guaranteed by the existing reference.
             let bvi_a_is_ref = VAR_TY[bvi_a as usize] == 10
-            if bvi_a_is_ref == false {
+            // #1581 (mirror of compile_borrow_primary_x86): field-path borrows.
+            let path_borrow_a = bvi_a_is_ref == false && IN_CALL_ARGS != 0 && TK[EP as usize] == 50 && pb_chain_depth(EP) > 0
+            if path_borrow_a {
+                if pb_borrow(bvi_a, EP, want_mut) != 0 {
+                    if want_mut != 0 { tc_linear_violation(borrow_tok, "cannot borrow as mutable because it is also borrowed as shared") }
+                    else { tc_linear_violation(borrow_tok, "cannot borrow as shared because it is also borrowed as mutable") }
+                }
+            }
+            if bvi_a_is_ref == false && path_borrow_a == false {
+                if IN_CALL_ARGS != 0 && pb_var_conflict(bvi_a, want_mut) {
+                    tc_linear_violation(borrow_tok, "cannot borrow the whole value while one of its fields is borrowed")
+                }
                 if want_mut != 0 {
                     if VAR_BORROW_COUNT[bvi_a as usize] > 0 {
                         tc_linear_violation(borrow_tok, "cannot borrow as mutable because it is also borrowed as shared")
@@ -38965,6 +39126,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 // do not clobber our records.
                 let prev_in_call_args_a = IN_CALL_ARGS
                 let prev_borrow_n_a = CALL_ARG_BORROW_N
+                let prev_pb_n_a = PB_N
                 IN_CALL_ARGS = 1
             var abi_argc: i64 = 0
             B5_ARG_VCOUNT = 0
@@ -39057,6 +39219,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             // this argument list (mirror of compile_primary).
             IN_CALL_ARGS = prev_in_call_args_a
             release_call_arg_borrows(prev_borrow_n_a)
+            PB_N = prev_pb_n_a
             if fi >= 0 {
                 // Hard, as the x86 general-call site is: a call whose argument
                 // count does not match the resolved definition is a genuine
@@ -39698,7 +39861,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             // ident-load site). The a64 pass read no brand off a local at all,
             // so only globals ever carried one.
             if vi >= 0 { EXPR_UNIT = VAR_UNIT[vi as usize] } else { EXPR_UNIT = 0 }
-            EXPR_UNIT_DIM = unit_lookup_dim(EXPR_UNIT)
+            // type_hash_unit_dim, not unit_lookup_dim: an annotation such as
+            // `cm^3` or `mol/cm3` stores an anonymous unit TYPE hash (#2388),
+            // which the named-unit table cannot resolve.
+            EXPR_UNIT_DIM = type_hash_unit_dim(EXPR_UNIT)
             // A derived quantity carries a dimension with no name, which
             // unit_lookup_dim cannot recover from a zero hash.
             if vi >= 0 && EXPR_UNIT == 0 && VAR_UNIT_DIM[vi as usize] != 0 {
@@ -41841,6 +42007,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 } else {
                     tc_decl_init_mismatch(EP - 1, decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH)
                 }
+            }
+            if lean_let_unit_dim_mismatch(decl_ty_hash, EXPR_UNIT, EXPR_UNIT_DIM) {
+                tc_let_unit_mismatch(EP - 1)
             }
                 // Observation boundary: Unobserved<T> assigned to a non-Unobserved
                 // binding (mirror of compile_stmt).
