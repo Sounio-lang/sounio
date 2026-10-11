@@ -50,6 +50,21 @@ That fourth-moment gap is Var(P(1-P)). For a symmetric angle it cannot move the 
 That distance is half the gap in four-shot parity. E[(1-2P)^4] equals E[(-1)^K] and equals 16 E[Z^4]. Three-shot parity is the computed zero. Six-shot parity is E[sin^6], about 1.5e-11, and the degree-4 instrument does not read it.
 For a symmetric shared angle, U=Z^2 stays in [0, 1/4], so the four-shot parity stays in [16 v^2, 4v]. At sigma 0.01 the Gaussian uses a fraction 0.000200 of that interval. Four product Ry(pi/2) wires read parity 0. GHZ on four wires has the same marginal 1/2 and parity 1, outside the interval.
 That Z parity is also what a copied computational bit does. ry_chsh_exit turns both wires: the copy then reads 0 in X while the Bell pair reads 1 in Z and in X. CHSH on the pair is 2*sqrt(2). On each computational-basis state it is plus or minus sqrt(2).
+With one offset per party the whole CHSH number is 2*sqrt(2)*cos(delta_a-delta_b) at every realization. A shared offset leaves it at 2*sqrt(2). Independent Gaussian offsets of variance sigma^2 have mean 2*sqrt(2)*exp(-sigma^2), which the circuit reads as 2 at sigma = sqrt(ln 2 / 2).
+Under that same party offset the copied bit is exactly half the pair, and the anticorrelated basis state is minus half. A split between one party's two settings leaves the copy at sqrt(2) and moves only the pair, as sqrt(2)*(1+cos epsilon).
+With both moves at once the pair reads sqrt(2)*(cos(eta)+cos(eta+epsilon)). The factor 2 is epsilon = 0. At Bob's offset pi/4 and Alice's split pi/2 both read 2, and past that point the copy is larger while the pair is below 2.
+Ry(phi) then CNOT keeps ZZ at 1 and sets XX to sin phi. The usual angles read sqrt(2)*(1+sin phi) and stay below 2 until sin phi = sqrt(2)-1. Bob angles with tan beta = sin phi read 2*sqrt(1+sin(phi)^2) and pass 2 for every phi other than 0.
+qasm_tape records a circuit that has not run. tape_replay checks it on the linear statevector. tape_qasm emits OpenQASM 3.0, including stdgates.inc, for a submitter outside the language.
+tape_counts draws N shots from those replay probabilities.
+tape_judge accepts that record inside 4 standard deviations, and refuses it if a zero-probability outcome appears.
+tape_read fills the same record from a shot list, one line per shot.
+tape_write renders the record back to that list, and tape_check judges the list against the tape.
+tape_face reads each wire marginal and the Z correlator from the shot list alone.
+tape_bell_x is the same list after Ry(pi/2) on both wires. The pair keeps correlator 1. The copied bit, half |00> and half |11>, reads 0.
+tape_pair reads both lists and keeps the source only when both correlators clear 1/2.
+tape_pair_shots posts both programs. tape_witness reads the two returned lists and returns the same verdict.
+tape_device_job is one document: both OpenQASM programs, the shot count, and the cut 0.5. tape_device_return scores the lists a machine sent back. tape_device_oracle scores the statevector and marks that record as the oracle.
+demos/quantum/tools/device_run.cpp executes that OpenQASM. tape_device_return scores the shot lists it writes back.
 
 Demo, independent C++ cross-check and the full list of limits:
 [`demos/quantum/`](../../demos/quantum/README.md).
