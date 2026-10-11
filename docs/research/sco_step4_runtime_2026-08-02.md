@@ -18,19 +18,19 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.sco-s
 
 
 **Historical status (superseded by the reconciliation boundary above):** **discharged on this worktree** — `SCO_STEP4_RUNTIME_GATE_OK` (2026-08-02)
-**Date:** 2026-08-02  
-**Depends on:** Step I–III  
-**Runtime ELF:** `artifacts/self-hosted/madaros-sco` (~101 MB, rebuilt from this branch’s `lower.sio`)  
+**Date:** 2026-08-02\
+**Depends on:** Step I–III\
+**Runtime ELF:** `artifacts/self-hosted/madaros-sco` (~101 MB, rebuilt from this branch’s `lower.sio`)\
 
 ---
 
 ## 1. Goal
 
-Step III installed \(E(\tau)\) in **source** (`lower.sio`).  
+Step III installed \(E(\tau)\) in **source** (`lower.sio`).\
 Step IV puts that install into a **running Madaros binary** and keeps:
 
-1. SCO corpus green under the **rebuilt** compiler.  
-2. Ablation switch `SOUNIO_SCO_ABLATION=1` present in source (skips scientific strategy elevation).  
+1. SCO corpus green under the **rebuilt** compiler.\
+2. Ablation switch `SOUNIO_SCO_ABLATION=1` present in source (skips scientific strategy elevation).\
 3. Explicit honesty: without rebuild, Step III cannot claim runtime.
 
 ---
@@ -58,7 +58,7 @@ Gate helper: `scripts/ci/sco_step4_runtime_gate.sh`
 
 Source marker: `SCO_ETAU_ABLATION_ENV` in `self-hosted/ir/lower.sio`.
 
-**Measured non-vacuity after rebuild:**  
+**Measured non-vacuity after rebuild:**\
 compile the same `with NonAssoc` unit twice (enforce vs ablation) and confirm strategy differs *or* that ablation is at least wired (trace/probe). Full IR dump probe is optional; corpus must stay green under enforce.
 
 ---
@@ -83,14 +83,14 @@ bash scripts/ci/sco_strategy_probe_gate.sh
 # ablation: SCO_STRATEGY=0  (STANDARD)
 ```
 
-Probe unit: `examples/sco_corpus/strategy_probe/probe_nonassoc.sio`  
+Probe unit: `examples/sco_corpus/strategy_probe/probe_nonassoc.sio`\
 Requires compile (not check-only) + rebuilt Madaros with `SCO_ETAU_STRATEGY_TRACE`.
 
 ## 6. Still open (not this step)
 
-- Lean lemma for non-contraction.  
-- mfi multi-module scientific peels.  
-- Full EqSat activation (2a).  
+- Lean lemma for non-contraction.\
+- mfi multi-module scientific peels.\
+- Full EqSat activation (2a).\
 - First-class CLI flag for strategy dump (today: env `SOUNIO_SCO_STRATEGY_TRACE=1`).
 
 End of Step IV note.

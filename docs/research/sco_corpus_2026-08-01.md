@@ -17,17 +17,17 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.sco-c
 > Reconciliation boundary (2026-10-12): this is a historical research proposal, not a theorem or a certificate that SCO is satisfied. V1/V2 are exact runtime sentinels; the present V3 uses ordinary integer payloads and an effect declaration, so it does not test an Unobserved barrier or the required negative type check. A labeled enforce/ablation strategy change is strategy-selection coverage only; scientific non-vacuity requires an observable entitlement failure or legality fault and remains pending. Historical “discharged” wording below does not supersede these limits. No Python research exemption exists under ADR009.
 
 
-**Status:** adversarial corpus specification + runnable drivers  
-**Date:** 2026-08-01  
-**Depends on:** [`scientific_compilation_obligation_2026-08-01.md`](./scientific_compilation_obligation_2026-08-01.md) (Step I)  
-**Root:** `examples/sco_corpus/`  
+**Status:** adversarial corpus specification + runnable drivers\
+**Date:** 2026-08-01\
+**Depends on:** [`scientific_compilation_obligation_2026-08-01.md`](./scientific_compilation_obligation_2026-08-01.md) (Step I)\
+**Root:** `examples/sco_corpus/`\
 **Gate:** `scripts/ci/sco_corpus_gate.sh`
 
 ---
 
 ## 1. Purpose
 
-Step I defined SCO, \(\mathsf{Obs}\), \(\preceq\), \(E(\tau)\), and violation shapes V1–V3.  
+Step I defined SCO, \(\mathsf{Obs}\), \(\preceq\), \(E(\tau)\), and violation shapes V1–V3.\
 Step II **builds programs that try to make the compiler lose** under the SCO adversary:
 
 - multi-module native default path;
@@ -41,22 +41,22 @@ This is not a regression dump of unrelated tests. Every file exists to force one
 
 ## 2. Design rules
 
-1. **One violation class per item** (V1, V2, or V3).  
-2. **Sentinel is an integer** printed on its own line (or a fixed multi-line block listed below).  
-3. **Entitlement** is stated in this document; the gate only checks the printed sentinel.  
-4. **Imports required** — monorepo single-file versions are not SCO items (adversary clause: split modules).  
-5. **Default engine** — gate uses `./bin/souc` as users do; no alternate-engine escape hatch.  
+1. **One violation class per item** (V1, V2, or V3).\
+2. **Sentinel is an integer** printed on its own line (or a fixed multi-line block listed below).\
+3. **Entitlement** is stated in this document; the gate only checks the printed sentinel.\
+4. **Imports required** — monorepo single-file versions are not SCO items (adversary clause: split modules).\
+5. **Default engine** — gate uses `./bin/souc` as users do; no alternate-engine escape hatch.\
 6. **Pass today ≠ SCO discharged.** Green means the *current* default path happens to meet the sentinel. SCO itself still requires Step III theory respect + Step I clause 6 non-vacuity.
 
 ---
 
 ## 3. Items
 
-### V1 — Silent coverage collapse  
-**Path:** `examples/sco_corpus/v1_coverage/`  
-**Files:** `v1_leaf.sio` (imported), `v1_main.sio` (driver)  
-**Scientific entitlement \(O\):** finite-dof Type-A-dominant budget → Student-\(t\) coverage, not normal 1.96.  
-**Sink:** print \(k_{95} \times 1000\) as `i64`.  
+### V1 — Silent coverage collapse\
+**Path:** `examples/sco_corpus/v1_coverage/`\
+**Files:** `v1_leaf.sio` (imported), `v1_main.sio` (driver)\
+**Scientific entitlement \(O\):** finite-dof Type-A-dominant budget → Student-\(t\) coverage, not normal 1.96.\
+**Sink:** print \(k_{95} \times 1000\) as `i64`.\
 **Sentinel (exact):**
 
 ```text
@@ -75,10 +75,10 @@ This is not a regression dump of unrelated tests. Every file exists to force one
 
 ---
 
-### V2 — Illegal algebraic reassociation  
-**Path:** `examples/sco_corpus/v2_algebra/`  
-**Files:** `v2_leaf.sio`, `v2_main.sio`  
-**Scientific entitlement \(O\):** non-associative product variance class under domain algebra — Fano triple vs non-Fano triple must remain **distinct** after multi-module native.  
+### V2 — Illegal algebraic reassociation\
+**Path:** `examples/sco_corpus/v2_algebra/`\
+**Files:** `v2_leaf.sio`, `v2_main.sio`\
+**Scientific entitlement \(O\):** non-associative product variance class under domain algebra — Fano triple vs non-Fano triple must remain **distinct** after multi-module native.\
 **Sink:** two integer lines, micro-unit scaling \(10^6\):
 
 ```text
@@ -86,17 +86,17 @@ This is not a regression dump of unrelated tests. Every file exists to force one
 4250000
 ```
 
-**Meaning:** Fano-augmented variance class `0.25` vs non-Fano `4.25` (κ=1, base σ²=0.25).  
+**Meaning:** Fano-augmented variance class `0.25` vs non-Fano `4.25` (κ=1, base σ²=0.25).\
 **SCO fail modes:** equalised lines, swapped classes, or a single collapsed value after optimisations that pretend floats are associative — **V2 adversary wins**.
 
 **Ablation hook (Step III):** with \(E(\tau)\) disabled, illegal reassoc may merge classes; SCO requires that default-path \(E\) prevents that *and* that ablation changes the witness (non-vacuity).
 
 ---
 
-### V3 — Erased observation barrier  
-**Path:** `examples/sco_corpus/v3_observe/`  
-**Files:** `v3_leaf.sio`, `v3_main.sio`  
-**Scientific entitlement \(O\):** payload originates behind an observation barrier on the import path; the designated sink may print the scientific payload class only after a discharge step whose effect row includes `Observe`.  
+### V3 — Erased observation barrier\
+**Path:** `examples/sco_corpus/v3_observe/`\
+**Files:** `v3_leaf.sio`, `v3_main.sio`\
+**Scientific entitlement \(O\):** payload originates behind an observation barrier on the import path; the designated sink may print the scientific payload class only after a discharge step whose effect row includes `Observe`.\
 **Sink protocol (two lines):**
 
 ```text
@@ -128,19 +128,19 @@ bash scripts/ci/sco_corpus_gate.sh
 
 Environment:
 
-- `SOUNIO_STDLIB_PATH` set to repo `stdlib/`  
+- `SOUNIO_STDLIB_PATH` set to repo `stdlib/`\
 - cwd = repo root (worktree root)
 
 ---
 
 ## 5. What green does *not* claim
 
-- That \(E(\tau)\) is installed on the mid-end (Step III).  
-- That non-vacuity (SCO clause 6) holds.  
-- That separate-compilation theorems exist (Step V).  
+- That \(E(\tau)\) is installed on the mid-end (Step III).\
+- That non-vacuity (SCO clause 6) holds.\
+- That separate-compilation theorems exist (Step V).\
 - That every scientific program is safe — only these three adversarial shapes.
 
-Green = **the corpus is live and the current default path does not already lose V1–V3 on these programs.**  
+Green = **the corpus is live and the current default path does not already lose V1–V3 on these programs.**\
 That is the floor for building SCO, not the ceiling.
 
 ---
@@ -149,10 +149,10 @@ That is the floor for building SCO, not the ceiling.
 
 New items must:
 
-1. name a violation class (Vn) or a new class defined in an SCO note revision;  
-2. state \(\mathsf{Obs}\) components under test;  
-3. give exact sentinels;  
-4. be multi-module;  
+1. name a violation class (Vn) or a new class defined in an SCO note revision;\
+2. state \(\mathsf{Obs}\) components under test;\
+3. give exact sentinels;\
+4. be multi-module;\
 5. land under `examples/sco_corpus/` with a gate stanza.
 
 Do not add “smoke” programs that do not attack \(\preceq\) or \(E(\tau)\).
@@ -163,14 +163,14 @@ Do not add “smoke” programs that do not attack \(\preceq\) or \(E(\tau)\).
 
 Step II is complete when:
 
-1. This document exists.  
-2. V1–V3 drivers exist under `examples/sco_corpus/`.  
-3. `scripts/ci/sco_corpus_gate.sh` encodes the sentinels above.  
+1. This document exists.\
+2. V1–V3 drivers exist under `examples/sco_corpus/`.\
+3. `scripts/ci/sco_corpus_gate.sh` encodes the sentinels above.\
 4. A human can run the gate and interpret red/green against SCO — without re-reading Step I for sentinel values.
 
 ## 8. Forward link (Step III)
 
-\(E(\tau)\) install at lower + combined gate:  
+\(E(\tau)\) install at lower + combined gate:\
 [`sco_etau_2026-08-02.md`](./sco_etau_2026-08-02.md) · `scripts/ci/sco_etau_install_gate.sh`
 
 End of Step II specification.
