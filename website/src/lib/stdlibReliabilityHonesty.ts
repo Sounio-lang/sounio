@@ -1,7 +1,7 @@
 /**
- * U1 — stdlib reliability 251/251. May 2026. Never in CI.
+ * U1 — stdlib reliability 251/251. May 2026. Never in CI. public-claims: historical
  *
- * Homepage 251/251 is the twin of the June 6/6. The committed
+ * Homepage 251/251 is the twin of the June 6/6. The committed public-claims: historical
  * artifact is 2026-05-12. `npm run sync:artifacts` on 2026-08-17
  * copied it into artifactStatus.ts. That is not a remasure.
  * The script lives at scripts/stdlib_reliability_gate.sh →
@@ -9,7 +9,7 @@
  * .github/. It is outside the cursor-2 468-gate census. Nobody
  * chose this. There was nowhere to notice.
  *
- * The JSON names `bin/souc` 1.0.0-beta.5 on the science-pipeline
+ * The JSON names `bin/souc` 1.0.0-beta.5 on the science-pipeline public-claims: historical
  * arm. That is a launcher, not Madaros or lean_single. Do not
  * invent an engine.
  *
@@ -39,7 +39,7 @@ export const STDLIB_RELIABILITY: MeasurementClaim = {
 /** Sync timestamp and launcher name are not print conditions. */
 export const STDLIB_RELIABILITY_META = {
   syncAt: '2026-08-17T02:17:14.465Z',
-  namedLauncher: 'bin/souc 1.0.0-beta.5',
+  namedLauncher: 'bin/souc 1.0.0-beta.5', // public-claims: historical
 };
 
 export function reliabilityPartsClose(c: MeasurementClaim): boolean {
@@ -79,7 +79,7 @@ export function reliabilityShortRefusal(): string {
 
 /**
  * True when copy would leak the bound counts (the generated
- * honestStatus line "251 / 251 stdlib reliability tests pass").
+ * honestStatus line "251 / 251 stdlib reliability tests pass"). public-claims: historical
  */
 export function copyLeaksReliabilityNumeral(text: string): boolean {
   const { pass, total } = STDLIB_RELIABILITY.parts;

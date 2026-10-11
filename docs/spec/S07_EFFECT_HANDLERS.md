@@ -174,6 +174,6 @@ implements, the corpus exercises a third, and §7.3 has already measured that
 
 - Do not describe Sounio as having algebraic effect handlers. The surface exists
   and reaches no backend.
-- Do not cite `examples/effects.sio` or `examples/effects/*.sio` as evidence
+- Do not cite `examples/_attic/effects.sio` or `examples/effects/*.sio` as evidence
   that handlers run. That a file uses the syntax says only that the syntax
   parses.

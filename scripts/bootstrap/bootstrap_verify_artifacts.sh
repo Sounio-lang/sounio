@@ -8,7 +8,7 @@ _SOUC_GUARD_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/souc_verb_
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/target/release/souc}"
+SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/bin/souc}"
 BUNDLE_DIR="${BUNDLE_DIR:-bootstrap}"
 
 usage() {

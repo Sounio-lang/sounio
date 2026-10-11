@@ -73,7 +73,7 @@ fn main() -> i32 with IO, Mut, Panic, Div {
         println("Error: division by zero")
     }
 
-    0
+    return 0
 }
 ```
 
