@@ -1,7 +1,5 @@
 import json
-import os
 from pathlib import Path
-import sys
 import tempfile
 from jupyter_client import KernelManager
 from sounio.kernel_client import KernelConnection
