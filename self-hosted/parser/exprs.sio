@@ -10,7 +10,7 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_ahead_is_p_ident, parser_ahead_is_hex_frac_p_ident, parser_assign_op_code, parser_advance, parser_prev_token_end, mk_expr, error_expr, dummy_type_expr, parser_store_expr_box, parser_take_expr_box, f64_hex_literal_from_source}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_ahead_is_p_ident, parser_ahead_is_hex_frac_p_ident, parser_ahead_fused_exp_ident, parser_assign_op_code, parser_advance, parser_prev_token_end, mk_expr, error_expr, dummy_type_expr, parser_store_expr_box, parser_take_expr_box, f64_hex_literal_from_source}
 use parser::f128_literal::*
 use parser::types::*
 use parser::stmts::*
@@ -385,11 +385,16 @@ impl Parser {
         p
     }
 
-    // Consume HexLit [ . frac | FloatLit | Ident(hex+p) ] p? [+|-] IntLit [suffix] as FloatLit.
+    // Consume HexLit [ . frac | FloatLit | Ident(hex+p) ] p? [+|-] IntLit [suffix] as FloatLit,
+    // or, unsigned, HexLit [ . frac | FloatLit ] Ident(hex*p<digits>[suffix]).
     // Magnitude is a V0-B placeholder (limb identity is V0-D).
     fn parse_c99_hex_float_literal(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // HexLit mantissa
+        // An unsigned exponent arrives inside the Ident (`p0`, `fp10`), digits
+        // and any glued suffix included; nothing after that Ident belongs to
+        // the literal (`0x1p0 + 2.0` must not swallow `+ 2`).
+        var exp_fused = false
         if parser_peek(p) == TokenKind::Dot {
             p = parser_advance(p)
             let frac = parser_peek(p)
@@ -397,29 +402,33 @@ impl Parser {
                 p = parser_advance(p)
             } else if frac == TokenKind::Ident {
                 // Either hex-frac+p fused, or hex-frac then separate p.
+                exp_fused = parser_ahead_fused_exp_ident(p, 0, 1)
                 p = parser_advance(p)
             }
         } else if parser_peek(p) == TokenKind::FloatLit {
             p = parser_advance(p)
         }
-        if parser_peek(p) == TokenKind::Ident {
+        if !exp_fused && parser_peek(p) == TokenKind::Ident {
+            exp_fused = parser_ahead_fused_exp_ident(p, 0, 0)
             p = parser_advance(p)  // p / P (when not fused into frac Ident)
         }
-        let sign_or_exp = parser_peek(p)
-        if sign_or_exp == TokenKind::Plus || sign_or_exp == TokenKind::Minus {
-            p = parser_advance(p)
-        }
-        if parser_peek(p) == TokenKind::IntLit {
-            p = parser_advance(p)
-        }
-        // Optional numeric suffix tokenised as Ident (f128 / f256). V0-E.5.10:
-        // only when GLUED to the exponent digits — an identifier on the next
-        // line (`0x1.8p+0\n    print(...)`) was swallowed as a suffix, turning
-        // the following `(` into a call on the literal (E017).
-        if parser_peek(p) == TokenKind::Ident {
-            let sfx_span = p.current_span()
-            if sfx_span.start == parser_prev_token_end(p) {
+        if !exp_fused {
+            let sign_or_exp = parser_peek(p)
+            if sign_or_exp == TokenKind::Plus || sign_or_exp == TokenKind::Minus {
                 p = parser_advance(p)
+            }
+            if parser_peek(p) == TokenKind::IntLit {
+                p = parser_advance(p)
+            }
+            // Optional numeric suffix tokenised as Ident (f128 / f256). V0-E.5.10:
+            // only when GLUED to the exponent digits — an identifier on the next
+            // line (`0x1.8p+0\n    print(...)`) was swallowed as a suffix, turning
+            // the following `(` into a call on the literal (E017).
+            if parser_peek(p) == TokenKind::Ident {
+                let sfx_span = p.current_span()
+                if sfx_span.start == parser_prev_token_end(p) {
+                    p = parser_advance(p)
+                }
             }
         }
         let span = p.span_from(start)
