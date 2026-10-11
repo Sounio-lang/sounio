@@ -99,6 +99,32 @@ expect_rc 1 "$TMP/unknown.log" run_list "$TMP/list_unknown.txt"
 grep -Fq "unknown annotation: expect-stdout-not-a-thing" "$TMP/unknown.log" \
     || fail "unknown expect-* key was not rejected"
 
+# --- 3b. A bare `//` must not end the header ---
+# It used to: every annotation after a `//` paragraph break was silently
+# dropped (madaros_uninit_struct_local.sio et al., measured 2026-10-06). A
+# garbage marker placed there must now be read, and so go red.
+awk '
+    NR==1 { print; print "//"; print "//@ expect-stdout-contains: THIS_MARKER_IS_GARBAGE"; next }
+    { print }
+' "$HELLO" > "$TMP/bare_comment.sio"
+printf '%s\n' "$TMP/bare_comment.sio" > "$TMP/list_bare_comment.txt"
+expect_rc 1 "$TMP/bare_comment.log" run_list "$TMP/list_bare_comment.txt"
+grep -Fq "missing stdout contains: THIS_MARKER_IS_GARBAGE" "$TMP/bare_comment.log" \
+    || fail "annotation after a bare // was not read"
+
+# --- 3c. Prose that mentions an annotation is not that annotation ---
+# The mode/requires arms match by substring. Before they were limited to lines
+# starting with `//@ `, "The engine-forcing //@ ignore is removed" in a header
+# comment silently ignored ffi_system_exec.sio. The fixture must still PASS.
+awk '
+    NR==1 { print; print "// The engine-forcing //@ ignore is removed; no `//@ requires: gpu` either."; next }
+    { print }
+' "$HELLO" > "$TMP/prose_mention.sio"
+printf '%s\n' "$TMP/prose_mention.sio" > "$TMP/list_prose_mention.txt"
+expect_rc 0 "$TMP/prose_mention.log" run_list "$TMP/list_prose_mention.txt"
+grep -Fq "PASS  prose_mention.sio" "$TMP/prose_mention.log" \
+    || fail "an annotation mentioned in header prose was applied"
+
 # --- 4/5/6. Known-failure manifest reason pin (path|substring) ---
 # A deterministic, non-timing-dependent failure: fixed exit code, fixed marker.
 # Never listed under tests/, so the ordinary suite (which globs tests/run-pass/*.sio

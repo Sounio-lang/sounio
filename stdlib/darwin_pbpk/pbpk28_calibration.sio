@@ -1,0 +1,193 @@
+// stdlib/darwin_pbpk/pbpk28_calibration.sio — closed-form calibration of the
+// PBPK28 hepatic / gut-wall sinks from clinical control-arm quantities.
+//
+// Every function here inverts an exact steady-state identity of the
+// pbpk28_hepatic kernel (portal routing on, sinks k = fu·CLint/Kp on the
+// interstitial layer), so a calibrated profile reproduces its targets in the
+// dynamic model to round-off (gates: tests/run-pass/darwin_pbpk28_calibration_gates.sio).
+// All quantities are BLOOD-based (the kernel's concentrations are blood):
+// convert plasma clearances with CL_b = CL_p / (B:P) before calling.
+//
+// Liver (extended clearance model, the V2 identity of the kernel):
+//     X_L  = fu·CLint·PS/(PS + fu·CLint)      (PS -> inf: well-stirred)
+//     CL_H = Q_L·X_L/(Q_L + X_L),  F_H = Q_L/(Q_L + X_L)
+// Inverse from a hepatic blood clearance CL_H < Q_L:
+//     X_L = Q_L·CL_H/(Q_L - CL_H),  fu·CLint = X_L·PS/(PS - X_L)   (X_L < PS)
+//
+// Gut wall — first-pass ASYMMETRY. Absorbed drug enters gut tissue (where the
+// enzyme is) directly; drug arriving in arterial blood has to cross PS_g.
+// With k_g = fu_g·CLint_g/Kp_g, u = PS_g/Kp_g, q = Q_gut:
+//     a     = u/(u + k_g)                       (absorbed fraction leaving tissue)
+//     X_g   = PS_g·k_g/(u + k_g)
+//     F_G   = a·q/(q + X_g)                     (escape of the absorbed dose)
+//     E_sys = X_g/(q + X_g)                     (extraction of arterial drug per pass)
+// Inverse from (F_G, E_sys) with F_G < 1 - E_sys:
+//     X_g = q·E_sys/(1 - E_sys),  a = F_G/(1 - E_sys),
+//     PS_g = X_g/(1 - a),         fu_g·CLint_g = PS_g·(1 - a)/a
+// The two targets are distinct measurements for midazolam (Paine 1996, Clin
+// Pharmacol Ther 60:14: 0.43 ± 0.18 of the absorbed dose vs 0.08 ± 0.11 of
+// arterial drug per passage). Setting PS_g large instead would extract
+// systemic drug as strongly as absorbed drug.
+//
+// Static-limit corollary (used to explain, not to fit): under an inhibition
+// factor f on k_g with PS_g fixed, the gut AUC-ratio contribution depends on
+// the calibrated (F_G, E_sys) and f only.
+
+use darwin_pbpk::core::pbpk28_params::*
+use eisa::format::{is_finite_f64}
+
+// a·b/d for positive a, b, d, where b/d is the well-scaled factor (>= 1 for
+// the liver inverse, bounded by 2^53 for the gut one). When the product a·b
+// is a normal finite double this is fl(fl(a·b)/d), bit for bit the form these
+// inverses always used. Otherwise that product has underflowed or overflowed
+// although the result may be representable, and the ratio is taken first:
+// a·(b/d). PR #2695 review: CL_H = 5e-201, Q_L = 1e-200, PS = 2e-200 passed
+// every domain check, Q_L·CL_H underflowed to 0 and the liver inverse returned
+// 0 instead of 2e-200; CL_H = 5e153, Q_L = 1e154, PS = 2e154 returned +Inf
+// (and panicked) instead of 2e154. Always taking the ratio first would move
+// ordinary results as well: measured over 1920 liver cases, 1112 changed, by
+// up to 161 ulp where PS - X_L cancels. The fallback changes nothing that
+// did not already underflow or overflow.
+fn p28c_mul_div(a: f64, b: f64, d: f64) -> f64 with Div {
+    let prod = a * b
+    if is_finite_f64(prod) && prod >= 2.2250738585072014e-308 { return prod / d }
+    return a * (b / d)
+}
+
+// fu·CLint (L/h) of the liver sink that gives hepatic blood clearance cl_h
+// (L/h) with total liver blood flow q_l and liver PS ps_l.
+// Every domain test is written as a NEGATED predicate, `!(ok)`, not as its
+// complement: each IEEE comparison against NaN is false, so `if x >= ps_l` lets
+// a NaN through and the function returns NaN instead of enforcing its domain.
+// Positivity alone still admits +Inf (Inf > 0 is true), and an infinite PS or
+// flow reaches Inf/Inf below, so every input must also be finite.
+pub fn p28c_liver_fuclint(cl_h: f64, q_l: f64, ps_l: f64) -> f64 with Div, Panic {
+    if !(is_finite_f64(q_l) && q_l > 0.0) { panic("pbpk28_calibration: need a finite Q_L > 0") }
+    if !(is_finite_f64(ps_l) && ps_l > 0.0) { panic("pbpk28_calibration: need a finite liver PS > 0") }
+    if !(is_finite_f64(cl_h) && cl_h > 0.0 && cl_h < q_l) { panic("pbpk28_calibration: need a finite 0 < CL_H < Q_L") }
+    // Both products go through p28c_mul_div, whose fallback factors,
+    // Q_L/(Q_L - CL_H) and PS/(PS - X_L), lie between 1 and about 2^53, so
+    // neither leaves the range unless its result does.
+    let x = p28c_mul_div(cl_h, q_l, q_l - cl_h)
+    if !(x < ps_l) { panic("pbpk28_calibration: CL_H not reachable with this liver PS (X_L >= PS)") }
+    // The result itself can still overflow when X_L is within a few ulps of
+    // PS (the ratio PS/(PS - X_L) reaches 2^52 or so) and X_L is large. It is
+    // checked rather than returned as a calibrated value.
+    let fuclint = p28c_mul_div(x, ps_l, ps_l - x)
+    if !is_finite_f64(fuclint) { panic("pbpk28_calibration: liver fu*CLint overflows (inputs out of physiological range)") }
+    // fu*CLint >= X_L > 0 mathematically, and each p28c_mul_div fallback factor
+    // is >= 1, so for a positive CL_H neither should round to 0. Checked all the
+    // same, as in the gut inverse: a zero result is never a calibrated sink.
+    if !(x > 0.0 && fuclint > 0.0) { panic("pbpk28_calibration: liver fu*CLint underflows to 0 (inputs out of physiological range)") }
+    return fuclint
+}
+
+// a·b/(a + b) for a, b >= 0 (the "parallel" combination both liver forward
+// maps are built from). The textbook form is used whenever a·b is a normal
+// finite double and a + b is finite, so ordinary results are bit-identical to
+// it; otherwise it is n/(1 + n/m) with m = max(a, b), n = min(a, b), which
+// cannot overflow (n/m <= 1) and does not lose a representable result to an
+// underflowed product. PR #2695 review: the inverse now returns
+// fu·CLint = 2e154 for CL_H = 5e153, Q_L = 1e154, PS = 2e154, but
+// fuclint·PS = 4e308 overflowed to +Inf and the forward map returned
+// Inf/Inf = NaN instead of 5e153.
+fn p28c_parallel(a: f64, b: f64) -> f64 with Div {
+    let prod = a * b
+    let sum = a + b
+    if is_finite_f64(prod) && prod >= 2.2250738585072014e-308 && is_finite_f64(sum) { return prod / sum }
+    let m = if a > b { a } else { b }
+    let n = if a > b { b } else { a }
+    if m == 0.0 { return 0.0 }
+    return n / (1.0 + n / m)
+}
+
+// Forward map (for checks): hepatic blood clearance from fu·CLint.
+pub fn p28c_liver_clh(fuclint: f64, q_l: f64, ps_l: f64) -> f64 with Div {
+    let x = p28c_parallel(fuclint, ps_l)
+    return p28c_parallel(q_l, x)
+}
+
+// F_H = Q_L/(Q_L + X_L); when Q_L + X_L overflows, 1/(1 + X_L/Q_L).
+pub fn p28c_liver_fh(fuclint: f64, q_l: f64, ps_l: f64) -> f64 with Div {
+    let x = p28c_parallel(fuclint, ps_l)
+    let sum = q_l + x
+    if is_finite_f64(sum) { return q_l / sum }
+    return 1.0 / (1.0 + x / q_l)
+}
+
+// Gut-wall inverse: returns (PS_g, fu_g·CLint_g) in L/h for the target
+// first-pass escape f_g of the absorbed dose and per-pass extraction e_sys of
+// arterial drug, with gut blood flow q_g.
+pub fn p28c_gut_asymmetric(f_g: f64, e_sys: f64, q_g: f64) -> (f64, f64) with Div, Panic {
+    // Without this, q_g = 0 returns (0, 0) -- a gut wall with no permeability
+    // and no enzyme, which silently reproduces neither target -- and q_g < 0
+    // returns negative PS and clearance. q_g = +Inf passes `q_g > 0` and turns
+    // x into Inf, so the flow must also be finite; the two fractions need no
+    // separate finiteness test because their range tests bound them in (0, 1).
+    if !(is_finite_f64(q_g) && q_g > 0.0) { panic("pbpk28_calibration: need a finite Q_gut > 0") }
+    if !(e_sys > 0.0 && e_sys < 1.0) { panic("pbpk28_calibration: need 0 < E_sys < 1") }
+    if !(f_g > 0.0 && f_g < 1.0 - e_sys) { panic("pbpk28_calibration: need 0 < F_G < 1 - E_sys") }
+    // Through p28c_mul_div, as in the liver inverse: its fallback factor
+    // E_sys/(1 - E_sys) lies in (E_sys, 2^53], so the product leaves the range
+    // only with its result (or for a subnormal E_sys).
+    let x = p28c_mul_div(q_g, e_sys, 1.0 - e_sys)
+    let a = f_g / (1.0 - e_sys)
+    let ps = x / (1.0 - a)
+    let clint = ps * (1.0 - a) / a
+    // Finite, in-domain inputs can still overflow: Q_gut = 1e308,
+    // E_sys = 0.9, F_G = 0.01 give X_g = 9e308 = +Inf, and PS and CLint follow.
+    // Every derived value must be finite before it is returned.
+    if !(is_finite_f64(x) && is_finite_f64(ps) && is_finite_f64(clint)) { panic("pbpk28_calibration: gut-wall inverse overflows (inputs out of physiological range)") }
+    // They can also underflow. For inputs in this domain X_g, PS_g and
+    // fu_g*CLint_g are all mathematically > 0, but Q_gut = E_sys = 5e-324 with
+    // F_G = 0.5 give X_g = 2.5e-647, which rounds to 0, and (0, 0) reproduces
+    // neither target (PR #2695 review). A zero here is an unrepresentable
+    // inverse, not a calibrated gut wall, so it is refused like an overflow.
+    if !(x > 0.0 && ps > 0.0 && clint > 0.0) { panic("pbpk28_calibration: gut-wall inverse underflows to 0 (inputs out of physiological range)") }
+    return (ps, clint)
+}
+
+// Forward maps (for checks and for the static-limit explanation).
+// a/(a + b) for a, b >= 0, a + b > 0; 1/(1 + b/a) when a + b overflows.
+fn p28c_share(a: f64, b: f64) -> f64 with Div {
+    let sum = a + b
+    if is_finite_f64(sum) { return a / sum }
+    return 1.0 / (1.0 + b / a)
+}
+
+// The gut wall's escape fraction a = u/(u + k) and conductance
+// X_g = PS_g·k/(u + k), with u = PS_g/K_p and k = fu_g·CLint_g/K_p. K_p cancels
+// in both (a = PS_g/(PS_g + fu·CLint), X_g = PS_g ∥ fu·CLint), but the K_p form
+// is kept, bit-identical, whenever its intermediates are finite. Otherwise the
+// cancelled forms are used through p28c_share / p28c_parallel. PR #2695 review:
+// p28c_gut_asymmetric(0.25, 0.5, 8e307) returns PS_g = fu·CLint_g = 1.6e308,
+// for which u + k and PS_g·k overflow and both forward maps returned NaN.
+fn p28c_gut_a_x(fuclint_g: f64, ps_g: f64, kp_g: f64) -> (f64, f64) with Div {
+    let u = ps_g / kp_g
+    let k = fuclint_g / kp_g
+    let uk = u + k
+    let pk = ps_g * k
+    // "Ordinary" also requires the product and the sum to be normal: with
+    // fu·CLint = PS = 1e-200 and K_p = 1, PS·k = 1e-400 rounds to 0 and the
+    // K_p form returned X_g = 0 instead of 5e-201 (PR #2695 review).
+    let normal = 2.2250738585072014e-308
+    if is_finite_f64(uk) && is_finite_f64(pk) && is_finite_f64(u) && is_finite_f64(k) && pk >= normal && uk >= normal {
+        return (u / uk, pk / uk)
+    }
+    return (p28c_share(ps_g, fuclint_g), p28c_parallel(ps_g, fuclint_g))
+}
+
+pub fn p28c_gut_fg(fuclint_g: f64, ps_g: f64, kp_g: f64, q_g: f64) -> f64 with Div {
+    let (a, x) = p28c_gut_a_x(fuclint_g, ps_g, kp_g)
+    let sum = q_g + x
+    // Through p28c_mul_div: a*Q_g can underflow while F_G is representable
+    // (fu*CLint = 1, PS = Q = 1e-200, K_p = 1: a = X = 1e-200, a*Q = 0,
+    // F_G = 5e-201; PR #2695 review). Bit-identical when a*Q is normal.
+    if is_finite_f64(sum) { return p28c_mul_div(a, q_g, sum) }
+    return a * p28c_share(q_g, x)
+}
+
+pub fn p28c_gut_esys(fuclint_g: f64, ps_g: f64, kp_g: f64, q_g: f64) -> f64 with Div {
+    let (a, x) = p28c_gut_a_x(fuclint_g, ps_g, kp_g)
+    return p28c_share(x, q_g)
+}

@@ -65,7 +65,7 @@ handlers-as-proof-carrying-interpreters — multi-shot / abortive / non-tail-res
    `parse_block`/`parse_stmt` (`parser/stmts.sio:166`, `:254`), which accepts only `StmtLet`/`StmtVar`/expr-
    statements. The **only** clause shape that parses today is a **let-bound closure**:
    `let <op> = |<params>| { <body> }` → `Stmt{StmtLet, name:<op>, expr:Some(ExprClosure)}`.
-   The `op(params) => body` syntax in `examples/effects.sio` is **commented-out aspirational, NOT implemented** —
+   The `op(params) => body` syntax in `examples/_attic/effects.sio` is **commented-out aspirational, NOT implemented** —
    do not treat it as working.
 2. **Callee shape.** `perform Epistemic.add(x,y)` drops `perform` at parse and becomes a **single**
    `ExprMethodCall{name:"add", left:Some(ExprIdent{"Epistemic"}), args:[x,y]}` — **not** the curried double-call
@@ -151,7 +151,7 @@ handlers-as-proof-carrying-interpreters — multi-shot / abortive / non-tail-res
 - `self-hosted/check/effects.sio` — read-only (`Epistemic=8`).
 - `examples/effect_uncertainty_smoke.sio` (new, P0), `examples/effect_uncertainty_gum_vs_mc.sio` (new, P1).
 - Read-only: `parser/exprs.sio`, `parser/stmts.sio`, `stdlib/epistemic/knowledge.sio`,
-  `stdlib/epistemic/montecarlo.sio`, `examples/effects.sio` (aspirational syntax — do not mistake for working).
+  `stdlib/epistemic/montecarlo.sio`, `examples/_attic/effects.sio` (aspirational syntax — do not mistake for working).
 
 ### Single most important next action
 **Resolve §0 branch-lock (which tree has the GPU precedent), then implement + `souc check`-verify EDIT 2

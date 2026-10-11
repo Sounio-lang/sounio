@@ -189,7 +189,7 @@ Diverse Double-Compilation*. PhD dissertation, George Mason University.
 Before any tagged release of Sounio, the following command **must exit 0**:
 
 ```bash
-bash scripts/dev/diverse_double_compile_check.sh
+bash scripts/archive/diverse_double_compile_check.sh
 ```
 
 This builds `souc` under two independent host toolchains:
@@ -225,13 +225,13 @@ compiler could have silently modified the Sounio code.
 
 ```bash
 # Full check (two cargo builds, ~5–10 min):
-bash scripts/dev/diverse_double_compile_check.sh
+bash scripts/archive/diverse_double_compile_check.sh
 
 # Skip rebuild if binaries already exist:
-bash scripts/dev/diverse_double_compile_check.sh --skip-build
+bash scripts/archive/diverse_double_compile_check.sh --skip-build
 
 # Use a custom reference program:
-bash scripts/dev/diverse_double_compile_check.sh --ref-program path/to/program.sio
+bash scripts/archive/diverse_double_compile_check.sh --ref-program path/to/program.sio
 
 # Rust integration test (requires pre-built DDC binaries):
 cargo test -p souc --test ddc_check -- --include-ignored

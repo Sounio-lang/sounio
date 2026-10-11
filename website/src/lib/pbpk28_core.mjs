@@ -656,20 +656,23 @@ export function degenerateParams(base, { eps = 1e-3, psScale = 1e4 } = {}) {
 // Sounio side, tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio,
 // runs that stdlib scenario itself rather than a copy, so a change to the
 // scenario that is not mirrored here fails the gate.
-// The matrix transcendentals (merLnUnit/merExp/merPow) and absorption (merExpNeg)
-// are PORTED VERBATIM from the Sounio stdlib (release/matrix_er.sio, scenarios/
-// venlafaxine_xr.sio) — NOT Math.pow/Math.exp — so the two engines agree to f64.
+// The matrix transcendentals (pureLn/pureExp/pureSqrt → merPow) and absorption
+// (merExpNeg) are PORTED VERBATIM from the Sounio stdlib (math/pure.sio via
+// release/matrix_er.sio, scenarios/venlafaxine_xr.sio) — NOT Math.pow/Math.exp —
+// so the two engines agree to f64.
 //
 // Sources: Gohel 2008 (matrix n=0.65/k=0.199), Wang 2022 (F_XR=0.45, ka=0.63),
-// Klamerus 1999 (CL_parent 100, CL_form 43, CL_odv 28 L/h), Kirchheiner 2006
-// (ODV/parent Css PM 0.25 / NM 3.45 / UM 10.3 → CYP2D6 formation scaling).
+// Lessard 1999 (oral/apparent CL_parent 100, CL_form 43 L/h), CL_odv 28 L/h
+// (Wyeth label). ODV/parent Css PM 0.25 / IM 1.16 / NM 3.45 / UM 10.3 →
+// CYP2D6 formation scaling: UNSOURCED (previously mis-cited as Kirchheiner
+// 2006; see stdlib/darwin_pbpk/pgx/cyp2d6_venlafaxine.sio header).
 // ════════════════════════════════════════════════════════════════════════════
 
 export const VFX_MATRIX_GOHEL2008 = Object.freeze({ totalDose: 75.0, k: 0.199, n: 0.65 });
 export const VFX_F_ORAL_XR = 0.45;
 export const VFX_KA_ABS    = 0.63;
 export const VFX_CL_FORM_ODV_NM = 43.0;   // L/h, CYP2D6 formation at NM (parity reference)
-export const VFX_CL_PARENT_CENTRAL = 57.0; // L/h = CL_oral(100) - CL_form(43), Klamerus 1999
+export const VFX_CL_PARENT_CENTRAL = 57.0; // L/h = CL_oral(100) - CL_form(43), Lessard 1999 (oral/apparent)
 export const VFX_CL_ODV_CENTRAL    = 28.0; // L/h, Wyeth label
 
 export const VFX_KP_PARENT = Object.freeze([1.00, 4.20, 3.50, 1.20, 2.00, 2.80, 1.80, 1.20, 2.40, 1.50, 0.80, 2.00, 1.60, 0.90]);
@@ -677,30 +680,65 @@ export const VFX_PS_PARENT = Object.freeze([0.0, 900.0, 600.0, 120.0, 200.0, 800
 export const VFX_KP_ODV    = Object.freeze([1.00, 3.50, 3.00, 1.00, 1.60, 2.20, 1.40, 0.90, 2.00, 1.20, 0.70, 1.60, 1.30, 0.70]);
 export const VFX_PS_ODV    = Object.freeze([0.0, 700.0, 450.0, 90.0, 150.0, 6000.0, 200.0, 60.0, 400.0, 80.0, 30.0, 100.0, 70.0, 50.0]);
 
-// CYP2D6 formation scale relative to NM (Kirchheiner 2006 ratios / 3.45). NM=1.0.
+// CYP2D6 formation scale relative to NM (UNSOURCED ratios / 3.45). NM=1.0.
 export const VFX_CL_FORM_SCALE = Object.freeze({ 0: 0.25 / 3.45, 1: 1.16 / 3.45, 2: 1.0, 3: 10.3 / 3.45 });
 
-// ─── Matrix transcendentals — verbatim ports of release/matrix_er.sio ────────
-function merLnUnit(x) {                       // ln(x) for x in (0,2], artanh series
-  if (x <= 0.0) return -1.0e6;
-  const y = (x - 1.0) / (x + 1.0);
-  const y2 = y * y;
-  let term = y, sum = term;
-  for (let k = 1; k < 20; k++) { term = term * y2; sum = sum + term / (2.0 * k + 1.0); }
-  return 2.0 * sum;
+// ─── Matrix transcendentals — verbatim ports of stdlib/math/pure.sio ─────────
+// release/matrix_er.sio calls math::pure::{ln, exp, sqrt}; these are line-for-line
+// ports (`as i32` -> Math.trunc), bit-identical to Madaros on the K-P grid
+// (docs/audit/repro/matrix_er_kp_bits_probe.{sio,mjs}).
+const PURE_LN2 = 0.6931471805599453;
+function pureLn(x) {                          // ln: reduce to m in [0.5, 2), artanh series
+  if (x <= 0.0) return -1.0e30;
+  if (x === 1.0) return 0.0;
+  let m = x, e = 0;
+  while (m >= 2.0) { m = m / 2.0; e = e + 1; }
+  while (m < 0.5) { m = m * 2.0; e = e - 1; }
+  const t = (m - 1.0) / (m + 1.0), t2 = t * t;
+  let sum = t, term = t;
+  for (let k = 1; k < 30; k++) { term = term * t2; sum = sum + term / (2 * k + 1); }
+  return 2.0 * sum + e * PURE_LN2;
 }
-function merExp(x) {                          // exp via (1+x/1024)^1024
-  let r = 1.0 + x / 1024.0;
-  for (let i = 0; i < 10; i++) r = r * r;
-  return r;
+function pureExp(x) {                         // exp: 2^k · Taylor(r), r = x − k·ln2
+  if (x > 500.0) return 1.0e200;
+  if (x < -500.0) return 0.0;
+  const kf = x / PURE_LN2;
+  const k = kf >= 0.0 ? Math.trunc(kf) : Math.trunc(kf) - 1;
+  const r = x - k * PURE_LN2;
+  let sum = 1.0, term = 1.0;
+  for (let n = 1; n < 25; n++) { term = term * r / n; sum = sum + term; }
+  let res = sum;
+  if (k >= 0) { for (let i = 0; i < k; i++) res = res * 2.0; }
+  else { for (let i = 0; i < -k; i++) res = res / 2.0; }
+  return res;
 }
-function merPow(t, n) {                        // t^n via exp(n·ln t), t>0
+function pureSqrt(x) {                        // sqrt: scale x < 1 up by 4^k into [1, 4) (x >= 1 is not scaled), 20 Newton steps
+  if (x <= 0.0) return 0.0;
+  let v = x, s = 1.0;
+  while (v < 1.0) { v = v * 4.0; s = s * 2.0; }
+  let y = v;
+  for (let i = 0; i < 20; i++) y = 0.5 * (y + v / y);
+  return y / s;
+}
+function merPow(t, n) {                        // t^n, mirrors matrix_er.sio mer_pow
   if (t <= 0.0) return 0.0;
+  if (t !== t) return t;                        // NaN t or n propagates, as matrix_er.sio
+  if (n !== n) return n;
+  if (t === Infinity) {                         // +inf^n limit, before pureLn's halving loop (never ends on +inf)
+    if (n > 0.0) return t;
+    if (n < 0.0) return 0.0;
+    return 1.0;
+  }
   if (Math.abs(n - 1.0) < 1.0e-12) return t;
-  if (Math.abs(n - 0.5) < 1.0e-12) return Math.sqrt(t);
-  let lnT = 0.0;
-  if (t > 0.0) lnT = (t > 2.0) ? (0.6931471805599453 + merLnUnit(t / 2.0)) : merLnUnit(t);
-  return merExp(n * lnT);
+  if (Math.abs(n - 0.5) < 1.0e-12) {            // as matrix_er.sio: exact 4^k scaling down, then pureSqrt
+    let v = t, s = 1.0;
+    while (v >= 4.0) { v = v / 4.0; s = s * 2.0; }
+    return pureSqrt(v) * s;
+  }
+  const x = n * pureLn(t);                      // non-finite x: as matrix_er.sio (t = 1, n = ±inf -> 1)
+  if (x !== x) return 1.0;
+  if (!Number.isFinite(x)) return x > 0.0 ? x : 0.0;
+  return pureExp(x);
 }
 // exp(x) for x<0 — port of scenarios/venlafaxine_xr.sio mer_exp_neg, same
 // operations in the same order: halve x until |x| <= 0.5 (m halvings), sum the

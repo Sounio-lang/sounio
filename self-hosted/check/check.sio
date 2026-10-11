@@ -353,6 +353,13 @@ pub struct Checker {
     // than a wrong effect set. -1 disables the write outright.
     pub current_sig_id: i64,
     pub current_sig_name: Name,
+    // True while checking a CLOSURE body. In that scope effects are INFERRED
+    // (spec §7.2.1, "concrete-authoritative Callee EOIO items") rather than
+    // treated as an E035 obligation: the closure has no FnSig to look up yet,
+    // and the inferred set is captured by checker_check_closure_expr_inplace
+    // and published onto the closure's FnSig. A named fn body does NOT set this,
+    // so its missing effects still fail E035 (effect_missing and friends).
+    pub in_closure_body: bool,
     pub multitest_count: i64,
     pub multitest_corrected: bool,
     pub last_literal_int: i64,
@@ -1384,6 +1391,7 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         // function's effects.
         current_sig_id: 0 - 1,
         current_sig_name: empty_name(),
+        in_closure_body: false,
         multitest_count: 0,
         multitest_corrected: false,
         last_literal_int: 0,
@@ -1499,6 +1507,7 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).current_effect_count = 0
     (*raw).current_sig_id = 0 - 1
     (*raw).current_sig_name = empty_name()
+    (*raw).in_closure_body = false
     (*raw).multitest_count = 0
     (*raw).multitest_corrected = false
     (*raw).last_literal_int = 0
@@ -1610,6 +1619,7 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).current_effect_count = src.current_effect_count
     (*dst).current_sig_id = src.current_sig_id
     (*dst).current_sig_name = src.current_sig_name
+    (*dst).in_closure_body = src.in_closure_body
     (*dst).multitest_count = src.multitest_count
     (*dst).multitest_corrected = src.multitest_corrected
     (*dst).last_literal_int = src.last_literal_int
@@ -3039,13 +3049,21 @@ fn checker_ty_from_unit_dim(c: *mut Checker, dim: UnitDim) -> TypeEntry with Mut
     if unit_dim_is_dimensionless(dim) {
         return ty_f64()
     }
+    // #2752: intern by dimension AND scale, exactly like arithmetic results
+    // (checker_brand_with_dim). find_by_dim compares exponents only and
+    // returned the FIRST same-dimension entry -- for `mol/cm3` that is
+    // `mmol_L` (mol/m^3 at another scale) -- so the annotation and the value
+    // `n / v` it was given carried different scales and the binding was E001.
+    let pair = unit_registry_intern_dim((*c).units, dim)
+    (*c).units = pair.0
+    if pair.1 >= 0 {
+        return ty_with_unit(ty_f64(), pair.1)
+    }
     let found = (*c).units.find_by_dim(dim)
     if found >= 0 {
         return ty_with_unit(ty_f64(), found)
     }
-    let anon = Name { buf: [0; 384], len: 0 }
-    (*c).units = (*c).units.register(anon, dim)
-    ty_with_unit(ty_f64(), (*c).units.count - 1)
+    ty_f64()
 }
 
 fn checker_lower_unit_or_ref_type_mut(c: *mut Checker, te: TypeExpr, is_mut_ref: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -7397,6 +7415,8 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_if_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprWhile {
         result = checker_check_while_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprLoop {
+        result = checker_check_loop_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprBlock {
         result = checker_check_block_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprArrayLit {
@@ -8604,6 +8624,23 @@ fn checker_check_while_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     ty_unit()
 }
 
+// *mut ExprLoop handler: faithful to check_loop_expr, with its body checked
+// through the inplace spine. `while let` desugars to a loop containing a
+// match; the by-value bridge copied Checker again inside that match/body.
+// Keep the original depth guard, borrow release, body check and unit result.
+// Unlike the existing inplace while handler, this does not add NS widening.
+fn checker_check_loop_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if (*c).loop_depth >= MAX_LOOP_DEPTH {
+        checker_report_error_at_inplace(c, e.span, 62, (*c).loop_depth, MAX_LOOP_DEPTH, 0)
+        return ty_error()
+    }
+    (*c).loop_depth = (*c).loop_depth + 1
+    (*c).borrows = (*c).borrows.release_exclusive_borrows()
+    let _body_ty = checker_check_opt_block_inplace(c, e.block)
+    (*c).loop_depth = (*c).loop_depth - 1
+    ty_unit()
+}
+
 // *mut transcription of check_for_in_expr (18227). It had NO in-place case (unlike ExprWhile),
 // so a `for` loop fell to the by-value bridge → 8MB Checker copy, then the loop BODY checked by
 // value → a body containing a CALL re-copied the Checker per sub-expr → stack smash (the
@@ -8735,6 +8772,138 @@ fn checker_check_array_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 // transcription of check_slice_borrow_expr so its sub-expressions also route through the
 // spine. unary_result_type / slice_borrow_result_type / unary_operand_name are pure helpers
 // (TypeEntry/Name in, TypeEntry/Name out — no Checker copy), so they are called directly.
+// #1581: the borrow-tracking name of `&place` / `&!place`. A field chain on a
+// by-value root (`s.y`, `s.y.z`, `s.arr[i]` -> `s.arr`) is tracked as the path
+// "s.y" so disjoint fields do not conflict and the same field does; a chain
+// through a reference root (`r.y` with `r: &S` / `&!S`) keeps the old
+// reborrow behaviour (empty name = untracked). Other places fall back to
+// unary_operand_name (ident, index -> root).
+// #1581: field-path borrows, done in place on (*c).borrows (by-value BorrowEnv
+// method round-trips of a 4096-slot struct are a known crash shape here; see
+// the comment above checker_branch_enter_inplace). A borrow of `s.y` is
+// tracked under the path name "s.y". Two names overlap when one is a prefix
+// of the other at a `.` boundary (`s`/`s.y`, `s.y`/`s.y.z`) or they are equal;
+// disjoint fields (`s.x`/`s.y`) do not. Returns 0, 37 (shared vs exclusive)
+// or 38 (exclusive vs any).
+fn checker_place_borrow_conflict_inplace(c: *mut Checker, name: Name, want_excl: bool, self_idx: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+    var i: i64 = 0
+    while i < (*c).borrows.count {
+        if i != self_idx && (*c).borrows.entries[i].state != 0 {
+            if borrow_paths_overlap((*c).borrows.entries[i].name, name) {
+                if want_excl || (*c).borrows.entries[i].state == 2 { return true }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn checker_take_borrow_inplace(c: *mut Checker, name: Name, want_excl: bool) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let is_path = borrow_name_is_path(name)
+    if !is_path {
+        // Whole variable: the existing rules, plus "no field of it is borrowed
+        // incompatibly".
+        let idx = (*c).borrows.find(name)
+        if idx >= 0 && checker_place_borrow_conflict_inplace(c, name, want_excl, idx) {
+            if want_excl { return 38 }
+            return 37
+        }
+        if want_excl {
+            let r = (*c).borrows.try_exclusive_borrow(name)
+            (*c).borrows = r.0
+            return r.1
+        }
+        let r2 = (*c).borrows.try_shared_borrow(name)
+        (*c).borrows = r2.0
+        return r2.1
+    }
+    if (*c).borrows.find(borrow_path_root(name)) < 0 { return 0 }
+    var idx = (*c).borrows.find(name)
+    // The path's own entry counts too (`&s.y` then `&!s.y`): pass -1 so no
+    // entry is skipped.
+    if checker_place_borrow_conflict_inplace(c, name, want_excl, 0 - 1) {
+        if want_excl { return 38 }
+        return 37
+    }
+    if idx < 0 {
+        if (*c).borrows.count >= 128 { return 0 }
+        (*c).borrows = (*c).borrows.track(name, false)
+        idx = (*c).borrows.count - 1
+    }
+    var e = (*c).borrows.entries[idx as usize]
+    if want_excl {
+        e.state = 2
+    } else {
+        e.state = 1
+        e.shared_count = e.shared_count + 1
+    }
+    (*c).borrows.entries[idx as usize] = e
+    0
+}
+
+fn checker_borrow_place_name(c: *mut Checker, opt: Option<Box<Expr> >) -> Name with Mut, Panic, Div, Alloc, IO {
+    let ptr = expr_opt_get(opt)
+    if ptr == 0 as *mut Expr { return empty_type_name() }
+    var place = *ptr
+    // `s.arr[i]` borrows (a part of) `s.arr`.
+    var guard: i64 = 0
+    while place.kind == ExprKind::ExprIndex && guard < 16 {
+        let b = expr_opt_get(place.left)
+        if b == 0 as *mut Expr { return empty_type_name() }
+        place = *b
+        guard = guard + 1
+    }
+    if place.kind != ExprKind::ExprFieldAccess {
+        return unary_operand_name(opt)
+    }
+    // Find the ident root and the chain depth (no local array of Names: a
+    // 3 KB [Name; 8] local is a known stack hazard on this spine).
+    var depth: i64 = 0
+    var cur = place
+    while cur.kind == ExprKind::ExprFieldAccess && depth < 8 {
+        depth = depth + 1
+        let b = expr_opt_get(cur.left)
+        if b == 0 as *mut Expr { return empty_type_name() }
+        cur = *b
+    }
+    if cur.kind != ExprKind::ExprIdent { return empty_type_name() }
+    if !(*c).env.has_binding(cur.name) { return empty_type_name() }
+    let root_ty = (*c).env.lookup(cur.name)
+    if root_ty.kind == TypeKind::TyRef || root_ty.kind == TypeKind::TyRefMut
+        || root_ty.kind == TypeKind::TyRawPtr {
+        return empty_type_name()
+    }
+    // Emit "root.f1.f2": for hop k (outermost = depth-1) descend k levels.
+    var out = cur.name
+    var k = depth - 1
+    while k >= 0 {
+        var node = place
+        var j: i64 = 0
+        while j < k {
+            let nb = expr_opt_get(node.left)
+            if nb == 0 as *mut Expr { return empty_type_name() }
+            node = *nb
+            j = j + 1
+        }
+        out = borrow_name_append_field(out, node.name)
+        k = k - 1
+    }
+    out
+}
+
+fn borrow_name_append_field(base: Name, field: Name) -> Name with Mut, Panic, Div {
+    if base.len + 1 + field.len > 384 { return base }
+    var out = base
+    out.buf[out.len as usize] = 46 as i8
+    var i: i64 = 0
+    while i < field.len {
+        out.buf[(out.len + 1 + i) as usize] = field.buf[i as usize]
+        i = i + 1
+    }
+    out.len = out.len + 1 + field.len
+    out
+}
+
 fn checker_check_unary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // Half-open slice borrow: &arr[a..b] / &!arr[a..b]
     if (e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut) && expr_is_half_open_range(e.left) {
@@ -8749,20 +8918,11 @@ fn checker_check_unary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     }
     // Borrow checking for &x / &!x on a named variable.
     if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
-        let borrow_name = unary_operand_name(e.left)
+        let borrow_name = checker_borrow_place_name(c, e.left)
         if borrow_name.len > 0 {
-            if e.un_op == UnaryOp::OpRef {
-                let borrow_result = (*c).borrows.try_shared_borrow(borrow_name)
-                (*c).borrows = borrow_result.0
-                if borrow_result.1 != 0 {
-                    checker_report_error_at_inplace(c, e.span, borrow_result.1, 0, 0, 0)
-                }
-            } else {
-                let borrow_result = (*c).borrows.try_exclusive_borrow(borrow_name)
-                (*c).borrows = borrow_result.0
-                if borrow_result.1 != 0 {
-                    checker_report_error_at_inplace(c, e.span, borrow_result.1, 0, 0, 0)
-                }
+            let code = checker_take_borrow_inplace(c, borrow_name, e.un_op == UnaryOp::OpRefMut)
+            if code != 0 {
+                checker_report_error_at_inplace(c, e.span, code, 0, 0, 0)
             }
         }
     }
@@ -9494,6 +9654,30 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             let ei = enum_table_get((*c).enums, enum_idx)
             if variant_info_list_has(ei.variants, variant_name) {
                 let vfields = variant_info_list_find_fields(ei.variants, variant_name)
+                // E264 (fail-closed): the lowerer represents every enum value as a bare
+                // discriminant (ir/lower.sio lower_match_arm_ref), so a struct-variant payload
+                // was silently dropped -- measured: `Shape::Rect { w: 3, h: 4 }` matched as
+                // tag 0 and every payload read as 0. Refuse the construction until a payload
+                // representation exists. Field inits are still checked for nested diagnostics.
+                if field_info_list_count(vfields) > 0 {
+                    checker_report_error_at_inplace(c, e.span, 264, 0, 0, 0)
+                    let call_start_borrows_ev = (*c).borrows
+                    var cur_ev264 = e.fields
+                    var done_ev264 = false
+                    while !done_ev264 {
+                        match cur_ev264 {
+                            Some(list) => {
+                                let _init_ty264 = checker_check_expr_inplace(c, (*list).head.value)
+                                cur_ev264 = (*list).tail
+                            }
+                            None => {
+                                done_ev264 = true
+                            }
+                        }
+                    }
+                    (*c).borrows = call_start_borrows_ev
+                    return ty_named(struct_name)
+                }
                 // Count check first (E046), mirroring the non-generic struct branch:
                 // report and still yield ty_named so the variant type is known downstream.
                 let ev_init_count = struct_field_list_count(e.fields)
@@ -9634,7 +9818,14 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     }
 
     // THE FIX: body checked in place (was the by-value c.check_opt_expr recursion).
+    // Effects inside a closure BODY are inferred (§7.2.1): raise the flag so
+    // check_callee_effects widens current_effects instead of firing E035. The
+    // widened set is captured into inferred_effects below and published onto the
+    // closure's FnSig. A named fn body never sets this, so E035 stays in force there.
+    let saved_in_closure = (*c).in_closure_body
+    (*c).in_closure_body = true
     let body_ty = checker_check_opt_expr_inplace(c, e.closure_body)
+    (*c).in_closure_body = saved_in_closure
 
     let inferred_ret_ty = if ret_ty.kind == TypeKind::TyUnknown {
         body_ty
@@ -11600,6 +11791,10 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
             checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            // E264 (fail-closed): a tuple-variant payload has no lowering -- the lowerer
+            // emits the bare discriminant and drops every argument. Refuse it rather than
+            // typing the call as the enum and miscompiling.
+            checker_report_error_at_inplace(c, e.span, 264, 0, 0, 0)
             return ty_named(ei.name)
         }
         checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
@@ -11884,6 +12079,18 @@ fn checker_check_callee_effects_named_inplace(c: *mut Checker, span: Span, calle
         return
     }
     let missing_pair = find_missing_effects(callee_effects, callee_effect_count, (*c).current_effects, (*c).current_effect_count)
+    // Closure-body inference (§7.2.1): a closure has no FnSig to look up yet, so
+    // a missing callee effect is ACCUMULATED into current_effects (which
+    // checker_check_closure_expr_inplace later publishes onto the closure's own
+    // FnSig) rather than reported as E035. No write-back here — the closure body
+    // operates with current_sig_id still pointing at the ENCLOSING named fn, so a
+    // write-back would widen the wrong signature. This is the scoped form of the
+    // SOUNIO_EFFECT_INFER experiment: inference is on by construction for closures,
+    // while named fns keep their explicit-declaration E035 (effect_missing &c.).
+    if (*c).in_closure_body {
+        checker_widen_current_effects_inplace(c, missing_pair.0, missing_pair.1)
+        return
+    }
     if checker_effect_inference_enabled() {
         checker_widen_current_effects_inplace(c, missing_pair.0, missing_pair.1)
         // STEP 2: publish the inferred set into this function's own signature, so that ITS callers
@@ -11979,7 +12186,7 @@ fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effe
 
                 if arg_expr.kind == ExprKind::ExprUnary &&
                    (arg_expr.un_op == UnaryOp::OpRef || arg_expr.un_op == UnaryOp::OpRefMut) {
-                    let borrow_name = unary_operand_name(arg_expr.left)
+                    let borrow_name = checker_borrow_place_name(c, arg_expr.left)
                     if !name_is_empty(borrow_name) {
                         // Unconditionally release call-site borrows after call returns
                         (*c).borrows = (*c).borrows.release_borrow(borrow_name)
@@ -12441,6 +12648,22 @@ fn pattern_list_count(opt: Option<Box<PatternList> >) -> i64 with Mut, Panic, Di
     }
 }
 
+// A named, inner-less scrutinee type that is a user-declared enum (not a struct, not
+// Option/Box, which carry their payload type in .inner).
+fn checker_scrut_is_user_enum_inplace(c: *mut Checker, scrut_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    if scrut_ty.kind != TypeKind::TyNamed {
+        return false
+    }
+    match scrut_ty.inner {
+        Some(_) => { return false }
+        None => {}
+    }
+    if struct_table_find((*c).structs, scrut_ty.name) >= 0 {
+        return false
+    }
+    enum_table_find((*c).enums, scrut_ty.name) >= 0
+}
+
 fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
     if pat.kind == PatternKind::PatBinding {
         (*c).env = (*c).env.bind(pat.name, scrut_ty, pat.is_mut)
@@ -12448,6 +12671,12 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
         let lin = checker_is_linear_type_inplace(c, scrut_ty)
         (*c).borrows = (*c).borrows.track(pat.name, lin)
     } else if pat.kind == PatternKind::PatEnum {
+        // E264 (fail-closed): a payload sub-pattern on a USER enum (`Shape::Circle(r)`)
+        // has no lowering -- lower_match_arm_ref compares the bare discriminant and never
+        // binds the sub-patterns. Option/Box scrutinees carry .inner and are unaffected.
+        if checker_scrut_is_user_enum_inplace(c, scrut_ty) && pattern_list_count(pat.sub_patterns) > 0 {
+            checker_report_error_at_inplace(c, pat.span, 264, 0, 0, 0)
+        }
         // Single-payload variant (e.g. Some(x) on Option<T>/Box<T>): the scrutinee
         // carries the payload type in .inner (Box/Option lowering). Bind the payload
         // sub-pattern to that inner type so (*x) / (*x).field type correctly. Fall
@@ -12458,6 +12687,12 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
             None => checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
         }
     } else if pat.kind == PatternKind::PatStruct {
+        // E264 (fail-closed): `Shape::Rect { w, h }` on a user enum -- the lowerer skips
+        // struct patterns outright ("Unsupported pattern -- skip"), so the arm could never
+        // match and its bindings would never be set.
+        if checker_scrut_is_user_enum_inplace(c, scrut_ty) {
+            checker_report_error_at_inplace(c, pat.span, 264, 0, 0, 0)
+        }
         checker_bind_struct_pat_fields_inplace(c, pat.pat_fields, scrut_ty)
     } else if pat.kind == PatternKind::PatTuple {
         // E213: tuple-destructure arity must match the scrutinee tuple's element
@@ -12782,9 +13017,21 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         let ann_enum = ann_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, ann_ty.name) >= 0
         let enum_int_ok = (init_enum && is_numeric_type(ann_ty)) || (is_numeric_type(init_ty) && ann_enum)
         var init_context_ok = false
+        // #2752: a unit-branded f64 binding is decided by DIMENSION, exactly as
+        // the call boundary does (checker_call_arg_unit_verdict). The structural
+        // test compares registry unit ids, and an arithmetic-derived quantity
+        // (`distance / elapsed`) gets an anonymous entry that never equals the
+        // named unit it matches (`velocity`), so `let v: velocity = d / t`
+        // failed with E001 while passing the same value to a `velocity`
+        // parameter checked clean. A dimension MISMATCH still fails here.
+        let let_unit_verdict = checker_call_arg_unit_verdict(c, init_ty, ann_ty)
         match s.expr {
             Some(init_expr) => {
-                init_context_ok = checker_contextual_expr_compatible(*init_expr, init_ty, ann_ty)
+                if let_unit_verdict >= 0 {
+                    init_context_ok = let_unit_verdict == 1
+                } else {
+                    init_context_ok = checker_contextual_expr_compatible(*init_expr, init_ty, ann_ty)
+                }
             }
             None => {
                 init_context_ok = checker_types_compatible_inplace(c, init_ty, ann_ty)
@@ -12855,9 +13102,21 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             && init_ty.kind == TypeKind::TyI64
             && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
         var init_context_ok = false
+        // #2752: a unit-branded f64 binding is decided by DIMENSION, exactly as
+        // the call boundary does (checker_call_arg_unit_verdict). The structural
+        // test compares registry unit ids, and an arithmetic-derived quantity
+        // (`distance / elapsed`) gets an anonymous entry that never equals the
+        // named unit it matches (`velocity`), so `let v: velocity = d / t`
+        // failed with E001 while passing the same value to a `velocity`
+        // parameter checked clean. A dimension MISMATCH still fails here.
+        let let_unit_verdict = checker_call_arg_unit_verdict(c, init_ty, ann_ty)
         match s.expr {
             Some(init_expr) => {
-                init_context_ok = checker_contextual_expr_compatible(*init_expr, init_ty, ann_ty)
+                if let_unit_verdict >= 0 {
+                    init_context_ok = let_unit_verdict == 1
+                } else {
+                    init_context_ok = checker_contextual_expr_compatible(*init_expr, init_ty, ann_ty)
+                }
             }
             None => {
                 init_context_ok = checker_types_compatible_inplace(c, init_ty, ann_ty)
@@ -12977,9 +13236,16 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
             }
         }
     } else {
+        // #2752: unit-branded f64 assignment is decided by dimension, as in the
+        // let and call paths (checker_call_arg_unit_verdict).
+        let assign_unit_verdict = checker_call_arg_unit_verdict(c, val_ty, target_ty)
         match s.expr {
             Some(val_expr) => {
-                if !checker_contextual_expr_compatible(*val_expr, val_ty, target_ty) {
+                if assign_unit_verdict >= 0 {
+                    if assign_unit_verdict != 1 {
+                        checker_report_mismatch_inplace(c, s.span, 2, target_ty, val_ty)
+                    }
+                } else if !checker_contextual_expr_compatible(*val_expr, val_ty, target_ty) {
                     checker_report_mismatch_inplace(c, s.span, 2, target_ty, val_ty)
                 }
             }
@@ -17468,6 +17734,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 262 { print("ontology classes are unrelated: no subsumption between them, so the operator cannot say what the result is an amount of") }
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
+    else if code == 264 { print("enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
     else { print("unknown error") }
 }
@@ -17576,7 +17843,7 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("   |\n   = help: drop other borrows before acquiring an exclusive borrow (`&!x`)\n")
     }
     else if code == 39 {
-        print("   |\n   = help: linear values can only be used once; clone the value if needed\n")
+        print("   |\n   = help: a linear value can be used exactly once; pass it on instead of reusing it, or restructure so each use gets its own value\n")
     }
     else if code == 40 {
         print("   |\n   = help: consume the linear value by using it in a function call or assignment\n")
@@ -17779,6 +18046,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 248 {
         print("   |\n   = help: wait for explicit from_bits/conversion operations; no f64 cast is a valid f128/f256 implementation\n")
+    }
+    else if code == 264 {
+        print("   |\n   = help: carry the payload in a struct next to a payload-free enum tag, e.g. `struct Shape { kind: ShapeKind, a: f64, b: f64 }`; or use Option<T> for a single optional value\n")
     }
     else if code == 249 {
         print("   |\n   = help: V0-A exposes binary128/binary256 descriptors internally but rejects every source-level use before IR\n")
@@ -18126,6 +18396,9 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 248 {
         print("   = note: V0-A defines format identity only and intentionally emits no wide value or lowering\n")
+    }
+    else if code == 264 {
+        print("   = note: payload-free enums (`enum Color { Red, Green }`) are supported; see docs/compiler/KNOWN_LIMITATIONS.md (KL-20)\n")
     }
     else if code == 249 {
         print("   = note: no literal, field, alias, binding, signature, conversion, ABI, or native carrier is implemented\n")
@@ -18753,6 +19026,7 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq(n, make_name("__sounio_seq_push")) { return true } // id 51
     if name_eq(n, make_name("__sounio_seq_get")) { return true }  // id 52
     if name_eq(n, make_name("__sounio_seq_set")) { return true }  // id 53
+    if name_eq(n, make_name("__sounio_seq_push_scalar")) { return true } // id 70
     // read_byte/arena_mark/arena_reset/panic/untracked_counter (ids 55-59) are
     // NOT mirrored here on purpose. Each is already bound
     // checker_bind_import_unknown_inplace, arity-unchecked; adding it here too
@@ -18818,6 +19092,7 @@ fn native_backend_builtin_arity_is_valid(n: Name, argc: i64) -> bool with Mut, P
             || name_eq(n, make_name("require_confidence"))
             || name_eq(n, make_name("pow"))
             || name_eq(n, make_name("__sounio_seq_push"))
+            || name_eq(n, make_name("__sounio_seq_push_scalar"))
             || name_eq(n, make_name("__sounio_seq_get"))
     }
     if argc == 3 {
@@ -20431,9 +20706,17 @@ fn slice_param_accepts_array_ref(arg_ty: TypeEntry, param_ty: TypeEntry) -> bool
             if (*arg_inner).kind != TypeKind::TyArray {
                 return false
             }
-            match ((*arg_inner).inner, param_ty.inner) {
-                (Some(arg_elem), Some(param_elem)) => types_compatible(*arg_elem, *param_elem),
-                _ => false
+            // Nested Option match — `match ((*).inner, param_ty.inner)` is
+            // E218 on lean_single a64 (tuple of Options). Same meaning; both
+            // backends accept the nested form. See #2431 / imports.sio.
+            match (*arg_inner).inner {
+                Some(arg_elem) => {
+                    match param_ty.inner {
+                        Some(param_elem) => types_compatible(*arg_elem, *param_elem),
+                        None => false
+                    }
+                }
+                None => false
             }
         }
         None => false

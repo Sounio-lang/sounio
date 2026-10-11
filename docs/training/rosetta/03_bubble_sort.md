@@ -61,7 +61,7 @@ fn main() -> i32 with IO, Mut, Panic, Div {
         i = i + 1
     }
     println("")
-    0
+    return 0
 }
 ```
 

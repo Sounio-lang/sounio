@@ -267,7 +267,8 @@ fn ffi_marshal_op_new() -> FfiMarshalOp {
 
 fn ffi_library_new() -> FfiLibrary {
     FfiLibrary {
-        name_hash: 0,
+        lib_identity_buf: [0; 256],
+        identity_len: 0,
         symbol_count: 0,
         symbols: [0; 256],
     }
@@ -575,8 +576,7 @@ fn ffi_make_decl(
     lib_hash: i64
 ) -> FfiFuncDecl {
     FfiFuncDecl {
-        lib_identity_buf: lib_identity_buf,
-        identity_len: identity_len,
+        name_hash: name_hash,
         param_types: param_types,
         param_count: param_count,
         return_type: return_type,
@@ -596,8 +596,7 @@ fn ffi_make_variadic_decl(
     lib_hash: i64
 ) -> FfiFuncDecl {
     FfiFuncDecl {
-        lib_identity_buf: lib_identity_buf,
-        identity_len: identity_len,
+        name_hash: name_hash,
         param_types: param_types,
         param_count: param_count,
         return_type: return_type,
@@ -1015,11 +1014,42 @@ fn ffi_lib_add_symbol(lib: FfiLibrary, sym_hash: i64) -> FfiLibrary with Mut, Pa
     l
 }
 
+// Canonical identity for a hash-addressed library: the hash as 8 LE bytes.
+// Decls still speak lib_name_hash (FNV); the library itself carries byte
+// identity. These two bridge the two views.
+fn ffi_identity_from_hash(h: i64) -> [i8; 256] with Mut, Panic {
+    var buf: [i8; 256] = [0; 256]
+    buf[0 as usize] = (h & 0xFF) as i8
+    buf[1 as usize] = ((h >> 8) & 0xFF) as i8
+    buf[2 as usize] = ((h >> 16) & 0xFF) as i8
+    buf[3 as usize] = ((h >> 24) & 0xFF) as i8
+    buf[4 as usize] = ((h >> 32) & 0xFF) as i8
+    buf[5 as usize] = ((h >> 40) & 0xFF) as i8
+    buf[6 as usize] = ((h >> 48) & 0xFF) as i8
+    buf[7 as usize] = ((h >> 56) & 0xFF) as i8
+    buf
+}
+
+// Read the 8-byte LE identity back as the hash it encodes.
+fn ffi_identity_hash(lib: FfiLibrary) -> i64 with Mut, Panic {
+    if lib.identity_len != 8 { return 0 - 1 }
+    let b = lib.lib_identity_buf
+    let b0 = (b[0 as usize] as i64) & 0xFF
+    let b1 = (b[1 as usize] as i64) & 0xFF
+    let b2 = (b[2 as usize] as i64) & 0xFF
+    let b3 = (b[3 as usize] as i64) & 0xFF
+    let b4 = (b[4 as usize] as i64) & 0xFF
+    let b5 = (b[5 as usize] as i64) & 0xFF
+    let b6 = (b[6 as usize] as i64) & 0xFF
+    let b7 = (b[7 as usize] as i64) & 0xFF
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+}
+
 // Find a library by name hash. Returns index or -1.
 pub fn ffi_find_library(ctx: FfiContext, name_hash: i64) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < ctx.lib_count {
-        if ctx.libs[i as usize].name_hash == name_hash {
+        if ffi_identity_hash(ctx.libs[i as usize]) == name_hash {
             return i
         }
         i = i + 1
@@ -1696,13 +1726,13 @@ fn test_ffi_string_from_c() -> bool with Mut, Panic, Div {
 // ---------- T23: Library registration ----------
 fn test_ffi_register_library() -> bool with Mut, Panic, Div {
     var ctx = ffi_context_new()
-    var lib = ffi_make_library(42)
+    var lib = ffi_make_library(ffi_identity_from_hash(42), 8)
     lib = ffi_lib_add_symbol(lib, 100)
     lib = ffi_lib_add_symbol(lib, 200)
     lib = ffi_lib_add_symbol(lib, 300)
     ctx = ffi_register_library(ctx, lib)
     if ctx.lib_count != 1 { return false }
-    if ctx.libs[0 as usize].name_hash != 42 { return false }
+    if ffi_identity_hash(ctx.libs[0 as usize]) != 42 { return false }
     if ctx.libs[0 as usize].symbol_count != 3 { return false }
     true
 }
@@ -1710,9 +1740,9 @@ fn test_ffi_register_library() -> bool with Mut, Panic, Div {
 // ---------- T24: Library lookup ----------
 fn test_ffi_find_library() -> bool with Mut, Panic, Div {
     var ctx = ffi_context_new()
-    let lib1 = ffi_make_library(10)
-    let lib2 = ffi_make_library(20)
-    let lib3 = ffi_make_library(30)
+    let lib1 = ffi_make_library(ffi_identity_from_hash(10), 8)
+    let lib2 = ffi_make_library(ffi_identity_from_hash(20), 8)
+    let lib3 = ffi_make_library(ffi_identity_from_hash(30), 8)
     ctx = ffi_register_library(ctx, lib1)
     ctx = ffi_register_library(ctx, lib2)
     ctx = ffi_register_library(ctx, lib3)
@@ -1724,7 +1754,7 @@ fn test_ffi_find_library() -> bool with Mut, Panic, Div {
 // ---------- T25: Symbol resolution ----------
 fn test_ffi_symbol_resolution() -> bool with Mut, Panic, Div {
     var ctx = ffi_context_new()
-    var lib = ffi_make_library(50)
+    var lib = ffi_make_library(ffi_identity_from_hash(50), 8)
     lib = ffi_lib_add_symbol(lib, 500)
     lib = ffi_lib_add_symbol(lib, 600)
     lib = ffi_lib_add_symbol(lib, 700)
@@ -1743,7 +1773,7 @@ fn test_ffi_symbol_resolution() -> bool with Mut, Panic, Div {
 // ---------- T26: Symbol exists check ----------
 fn test_ffi_symbol_exists() -> bool with Mut, Panic, Div {
     var ctx = ffi_context_new()
-    var lib = ffi_make_library(60)
+    var lib = ffi_make_library(ffi_identity_from_hash(60), 8)
     lib = ffi_lib_add_symbol(lib, 800)
     ctx = ffi_register_library(ctx, lib)
     if !ffi_symbol_exists(ctx, 800) { return false }

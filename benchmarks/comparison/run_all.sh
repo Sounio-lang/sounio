@@ -5,7 +5,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SOUC="$ROOT_DIR/target/release/souc"
+SOUC="${SOUC:-$ROOT_DIR/bin/souc}"
+export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
 # Colors
 RED='\033[0;31m'
@@ -21,17 +22,9 @@ skip_msg() { echo -e "  ${RED}[SKIP]${NC} $1 not found"; }
 # Check tools
 has_julia() { command -v julia &>/dev/null; }
 has_python() { command -v python3 &>/dev/null; }
-has_souc() { [ -f "$SOUC" ]; }
+has_souc() { [ -x "$SOUC" ]; }
 
 FILTER="${1:-all}"
-
-# Build Sounio if needed
-if [[ "$FILTER" == "all" || "$FILTER" == "--sounio-only" ]]; then
-    if ! has_souc; then
-        echo "Building souc (release)..."
-        (cd "$ROOT_DIR" && cargo build -p souc --release --bin souc 2>/dev/null)
-    fi
-fi
 
 run_sounio() {
     local sio_file="$1"

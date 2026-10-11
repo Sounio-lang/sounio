@@ -1,0 +1,40 @@
+//@ run-pass
+//@ requires: madaros
+//@ timeout: 120
+//@ expect-stdout: SS_ENDPOINTS_OK
+//@ description: Steady-state runner endpoints on full-Vd rapamycin 2 mg q24h x 14: dose_of_ss is 1-based, auc_tau_ss equals that row of the per-dose AUC_tau table, and t_to_90pct_h is the end of the first interval whose AUC_tau reaches 90% of the last interval's AUC_tau
+// Regression for two steady-state runner endpoints (PR #2698), on a regimen
+// that reaches steady state (full-Vd rapamycin, 2 mg q24h x 14):
+// - dose_of_ss is 1-based, so auc_tau_ss is exactly the AUC_tau of that
+//   row of the per-dose table (it used to be 0-based, one row off);
+// - t_to_90pct_h is the end of the first interval whose AUC_tau reaches 90%
+//   of the last interval's AUC_tau. It used to be 2*tau for every drug.
+// Both checks restate the definitions; no fitted values.
+
+use darwin_pbpk::absorption::{rapamycin_absorption_params}
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params}
+use darwin_pbpk::drugs::rapamycin::{rapamycin_fullvd_params}
+use darwin_pbpk::scenarios::steady_state_runner::*
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let r = run_oral_multidose(rapamycin_fullvd_params(), bbb_rapamycin_params(),
+                               rapamycin_absorption_params(), rapamycin_qd_regimen(14), 0.02)
+    if r.success == false { return 1 }
+    if r.reached_ss == false { return 2 }
+    if r.dose_of_ss < 1 || r.dose_of_ss > r.n_doses_run { return 3 }
+    if r.auc_tau_ss != r.auc_tau_per_dose[(r.dose_of_ss - 1) as usize] { return 4 }
+
+    let tau = 24.0
+    // Bounds are written positively so a NaN (every comparison false) fails.
+    if (r.t_to_90pct_h >= tau) == false { return 5 }
+    let n90 = (r.t_to_90pct_h / tau) as i32
+    if (n90 as f64) * tau != r.t_to_90pct_h { return 6 }
+    let plateau = r.auc_tau_per_dose[(r.n_doses_run - 1) as usize]
+    if (r.auc_tau_per_dose[(n90 - 1) as usize] >= 0.9 * plateau) == false { return 7 }
+    if n90 > 1 {
+        if (r.auc_tau_per_dose[(n90 - 2) as usize] < 0.9 * plateau) == false { return 8 }
+    }
+
+    println("SS_ENDPOINTS_OK")
+    0
+}
