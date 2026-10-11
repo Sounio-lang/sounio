@@ -10765,25 +10765,29 @@ fn pireus_native_emit_hyper_mul_s_cd_ptr3(nc: &! NativeCompiler, dst_ptr: i64, l
     //   alpha_c = zmm2
     //   beta_d  = zmm3
     // Scratch & accumulator:
-    //   t_bj      = zmm4
-    //   t_aj      = zmm5
+    //   t_bj      = zmm4   (Fano scratch only)
+    //   t_aj      = zmm5   (Fano scratch only; must not hold live conj)
     //   p1_accum  = zmm6
     //   p2_accum  = zmm7
+    //   conj_tmp  = zmm9   (live conj(d)/conj(c); distinct from t_aj)
     // Output:
     //   dst_lo    = zmm8 (alpha)
-    //   dst_hi    = zmm9 (beta)
+    //   dst_hi    = zmm9 (beta; written after conj_tmp is done)
     // Constants:
     //   ctrl_base = 10 (zmm10..zmm30)
     //   conj_sign = 31 (zmm31)
+    //
+    // IMPORTANT: emit_fano_inline clobbers t_aj every column while rereading za/zb.
+    // Therefore za/zb must never alias t_bj/t_aj. conj results live in zmm9.
 
     // Step 1: p1 = a * c
     (*nc).code = emit_fano_inline((*nc).code, 0, 2, 6, 4, 5, 10)
 
-    // Step 2: conj_d = conj(d) = VXORPD(beta_d, conj_sign) in t_aj (zmm5)
-    (*nc).code = emit_evex_pd_rr_full((*nc).code, 1, 0x57, 5, 3, 31, 2, 0, 0)
+    // Step 2: conj_d = conj(d) = VXORPD(beta_d, conj_sign) in conj_tmp (zmm9)
+    (*nc).code = emit_evex_pd_rr_full((*nc).code, 1, 0x57, 9, 3, 31, 2, 0, 0)
 
     // Step 3: p2 = conj(d) * b
-    (*nc).code = emit_fano_inline((*nc).code, 5, 1, 7, 4, 5, 10)
+    (*nc).code = emit_fano_inline((*nc).code, 9, 1, 7, 4, 5, 10)
 
     // Step 4: dst_lo = p1 - p2 (zmm8 = zmm6 - zmm7)
     (*nc).code = emit_evex_pd_rr_full((*nc).code, 1, 0x5C, 8, 6, 7, 2, 0, 0)
@@ -10791,11 +10795,11 @@ fn pireus_native_emit_hyper_mul_s_cd_ptr3(nc: &! NativeCompiler, dst_ptr: i64, l
     // Step 5: p3 = d * a (reuse p1_accum zmm6)
     (*nc).code = emit_fano_inline((*nc).code, 3, 0, 6, 4, 5, 10)
 
-    // Step 6: conj_c = conj(c) = VXORPD(alpha_c, conj_sign) in t_aj (zmm5)
-    (*nc).code = emit_evex_pd_rr_full((*nc).code, 1, 0x57, 5, 2, 31, 2, 0, 0)
+    // Step 6: conj_c = conj(c) = VXORPD(alpha_c, conj_sign) in conj_tmp (zmm9)
+    (*nc).code = emit_evex_pd_rr_full((*nc).code, 1, 0x57, 9, 2, 31, 2, 0, 0)
 
     // Step 7: p4 = b * conj(c) (reuse p2_accum zmm7)
-    (*nc).code = emit_fano_inline((*nc).code, 1, 5, 7, 4, 5, 10)
+    (*nc).code = emit_fano_inline((*nc).code, 1, 9, 7, 4, 5, 10)
 
     // Step 8: dst_hi = p3 + p4 (zmm9 = zmm6 + zmm7)
     (*nc).code = emit_evex_pd_rr_full((*nc).code, 1, 0x58, 9, 6, 7, 2, 0, 0)

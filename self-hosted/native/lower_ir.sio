@@ -1950,19 +1950,23 @@ pub fn emit_fano_inline(buf: CodeBuffer, za: i64, zb_in: i64, accum: i64,
 //   src1   = ZMM alpha_a (e0-e7)     src1+1 = ZMM beta_b  (e8-e15)
 //   src2   = ZMM alpha_c (e0-e7)     src2+1 = ZMM beta_d  (e8-e15)
 //   dst    = ZMM result alpha        dst+1  = ZMM result beta
-//   dst+2  = t_bj (Fano scratch: broadcast b[j])
-//   dst+4  = t_aj (Fano scratch: permuted+signed a column j)
+//   dst+2  = t_bj (Fano scratch only: broadcast/perm of b[j])
+//   dst+3  = conj_tmp (live conj(d)/conj(c); NEVER alias t_aj)
+//   dst+4  = t_aj (Fano scratch only: permuted+signed a column j)
 //   dst+6  = p1_accum / p3_accum (Fano result: a*c then d*a)
 //   dst+8  = p2_accum / p4_accum (Fano result: conj(d)*b then b*conj(c))
 //   conj_sign_zmm = (label_id >> 8) & 0xF  — ZMM with lane 0 = 0x0, lanes 1-7 = 0x8000...
 //
+// IMPORTANT: emit_fano_inline clobbers t_aj every column while rereading za/zb.
+// Therefore conj(d)/conj(c) must live in conj_tmp, not t_aj.
+//
 // Steps:
 //   1. p1 = fano(alpha_a, alpha_c)          →  a*c  in dst+6
-//   2. conj_d = VXORPD(beta_d, conj_sign)  →  conj(d) in dst+4 (reuses t_aj temporarily)
+//   2. conj_d = VXORPD(beta_d, conj_sign)  →  conj(d) in dst+3
 //   3. p2 = fano(conj_d, beta_b)           →  conj(d)*b in dst+8
 //   4. dst = VSUBPD(p1, p2)                →  ac - conj(d)*b  (result alpha)
 //   5. p3 = fano(beta_d, alpha_a)           →  d*a in dst+6 (reuse)
-//   6. conj_c = VXORPD(alpha_c, conj_sign) →  conj(c) in dst+4 (reuse)
+//   6. conj_c = VXORPD(alpha_c, conj_sign) →  conj(c) in dst+3
 //   7. p4 = fano(beta_b, conj_c)           →  b*conj(c) in dst+8 (reuse)
 //   8. dst+1 = VADDPD(p3, p4)             →  da + b*conj(c)  (result beta)
 //
@@ -1983,28 +1987,26 @@ pub fn lower_hyper_mul_s(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic,
     let beta_d     = instr.src2 + 1
     let dst_lo     = instr.dst
     let dst_hi     = instr.dst + 1
-    // Scratch
+    // Scratch — t_bj/t_aj are Fano-only; conj_tmp holds live conjugates
     let t_bj       = instr.dst + 2
+    let conj_tmp   = instr.dst + 3
     let t_aj       = instr.dst + 4
     let p1_accum   = instr.dst + 6
     let p2_accum   = instr.dst + 8
     // Step 1: p1 = fano(alpha_a, alpha_c) → a*c
     c.code = emit_fano_inline(c.code, alpha_a, alpha_c, p1_accum, t_bj, t_aj, ctrl_base)
     // Step 2: conj_d = VXORPD(beta_d, conj_sign) → conjugate d (negate lanes 1-7)
-    //   Store in t_aj temporarily (will be overwritten by step 3's Fano)
-    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, beta_d, conj_sign, vl, 0, 0)
-    let conj_d = t_aj
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, conj_tmp, beta_d, conj_sign, vl, 0, 0)
     // Step 3: p2 = fano(conj_d, beta_b) → conj(d)*b
-    c.code = emit_fano_inline(c.code, conj_d, beta_b, p2_accum, t_bj, t_aj, ctrl_base)
+    c.code = emit_fano_inline(c.code, conj_tmp, beta_b, p2_accum, t_bj, t_aj, ctrl_base)
     // Step 4: dst_lo = p1 - p2  (with masking)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x5C, dst_lo, p1_accum, p2_accum, vl, mask_k, zb)
     // Step 5: p3 = fano(beta_d, alpha_a) → d*a  (reuse p1_accum)
     c.code = emit_fano_inline(c.code, beta_d, alpha_a, p1_accum, t_bj, t_aj, ctrl_base)
     // Step 6: conj_c = VXORPD(alpha_c, conj_sign) → conjugate c
-    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, alpha_c, conj_sign, vl, 0, 0)
-    let conj_c = t_aj
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, conj_tmp, alpha_c, conj_sign, vl, 0, 0)
     // Step 7: p4 = fano(beta_b, conj_c) → b*conj(c)  (reuse p2_accum)
-    c.code = emit_fano_inline(c.code, beta_b, conj_c, p2_accum, t_bj, t_aj, ctrl_base)
+    c.code = emit_fano_inline(c.code, beta_b, conj_tmp, p2_accum, t_bj, t_aj, ctrl_base)
     // Step 8: dst_hi = p3 + p4  (with masking)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_hi, p1_accum, p2_accum, vl, mask_k, zb)
     (*nc) = c
