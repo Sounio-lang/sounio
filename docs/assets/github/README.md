@@ -17,3 +17,5 @@ original assets and typography. No fonts are added to this directory.
 Capability text was reconciled with main571848 on 2026-10-11. Domain links
 were checked against the Git tree. Domain inventory is not a claim that all
 examples or all library modules were freshly executed.
+
+Responsive presentation exports: desktop PNG 1280 × 640; mobile PNG 390 × 360. Browser renders checked at 320px and 390px widths and desktop 1280px on 2026-10-11. Mobile omits motto and route text and keeps the official Pappou artwork. HTML picture chooses the mobile composition below 640px. No artwork content was regenerated.

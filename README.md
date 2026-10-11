@@ -7,15 +7,18 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 -->
 
-![Sounio — scientific meaning, control through compilation](docs/assets/github/github-cover.png)
+<picture>
+  <source media="(max-width: 640px)" srcset="docs/assets/github/github-cover-mobile.png">
+  <img src="docs/assets/github/github-cover.png" alt="Sounio — scientific meaning, control through compilation" width="1280">
+</picture>
 
 # Sounio
 
-**An epistemic systems language for scientific computing, with control through compilation.**
+**Scientific computing with explicit uncertainty, units and effects — powered by a self-hosted compiler.**
 
-Sounio brings measurement uncertainty, physical units and effects into the language, and implements a self-hosted compiler alongside those scientific abstractions. This repository contains the language implementation, the self-hosted compiler, the standard library, scientific examples and verification work.
+Sounio is an epistemic systems language created by **Demetrios Chiuratto Agourakis**. Its scientific abstractions and compiler are developed together: measurements carry uncertainty, quantities carry dimensions, and computations declare effects. Explore the language, the compiler and a scientific library spanning eight research domains below.
 
-[Website](https://www.souniolang.org/) · [Language](https://www.souniolang.org/language) · [Compiler](https://www.souniolang.org/compiler) · [Get started](https://www.souniolang.org/learn/getting-started)
+[Explore the science](#a-scientific-library-across-disciplines) · [Explore the compiler](#architecture) · [Start here](#get-started)
 
 ## Science expressed in the program
 
@@ -54,7 +57,7 @@ The compiler lives in this repository alongside the language. Follow the impleme
 
 ## Get started
 
-Use the repository's `bin/souc` launcher. Before running examples, inspect the selected artifact and follow the installation guide for your host.
+The default `bin/souc` route selects Madaros; its committed prebuilt compiler is Linux x86-64. Native macOS/AArch64 compile, runtime and type-check acceptance is recorded separately in [#2873](https://github.com/Sounio-lang/sounio/pull/2873), and does not imply a matching host-native compiler is distributed by this launcher. Inspect the selected artifact before running examples.
 
 ```sh
 git clone https://github.com/Sounio-lang/sounio.git
@@ -65,7 +68,7 @@ export SOUNIO_STDLIB_PATH="$PWD/stdlib"
 ./bin/souc check examples/hello.sio
 ```
 
-See the [installation guide](https://www.souniolang.org/learn/getting-started) and [launcher](https://github.com/Sounio-lang/sounio/blob/main/bin/souc) for host requirements.
+For setup and route details, read [INSTALL.md](INSTALL.md), [Madaros status](docs/MADAROS_STATUS.md) and the [launcher](bin/souc). Historical setup notes can describe different artifacts; the selected compiler, host and source revision determine the route.
 
 ## Read the evidence
 
