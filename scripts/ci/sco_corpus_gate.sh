@@ -26,6 +26,7 @@ run_item() {
   echo "driver: $driver"
 
   local compile_rc=0 run_rc=0
+  rm -f "$OUT/${name}.elf"
   timeout 180 "$SOUC" compile "$driver" -o "$OUT/${name}.elf" >"$OUT/${name}.compile.out" 2>"$OUT/${name}.compile.err" || compile_rc=$?
   printf 'compile_rc=%s\n' "$compile_rc" >"$OUT/${name}.status"
   if [[ "$compile_rc" != 0 ]]; then
@@ -34,6 +35,8 @@ run_item() {
     fail=1
     return
   fi
+
+  [[ -s "$OUT/${name}.elf" ]] || { echo "FAIL: compile produced no fresh ELF"; fail=1; return; }
 
   # Madaros may emit a non-executable ELF mode; force +x before run.
   chmod +x "$OUT/${name}.elf" 2>/dev/null || true

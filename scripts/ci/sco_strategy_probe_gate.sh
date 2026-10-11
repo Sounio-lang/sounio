@@ -19,11 +19,13 @@ for mode in enforce ablation; do
   ablation=0; expected=2
   if [[ "$mode" == ablation ]]; then ablation=1; expected=0; fi
   compile_rc=0
+  rm -f "$OUT/$mode.elf"
   timeout 180 env SOUNIO_SCO_ABLATION="$ablation" SOUNIO_SCO_STRATEGY_TRACE=1 \
     "$MADAROS" compile examples/sco_corpus/strategy_probe/probe_nonassoc.sio \
     -o "$OUT/$mode.elf" >"$OUT/$mode.compile.log" 2>&1 || compile_rc=$?
   printf 'compile_rc=%s\n' "$compile_rc" >"$OUT/$mode.status"
   [[ "$compile_rc" == 0 ]] || { echo "FAIL: $mode compile ($compile_rc)"; exit 1; }
+  [[ -s "$OUT/$mode.elf" ]] || { echo "FAIL: $mode compile produced no fresh ELF"; exit 1; }
   grep '^SCO_STRATEGY function=sco_probe_leaf strategy=' "$OUT/$mode.compile.log" \
     >"$OUT/$mode.probe-trace" || { echo "FAIL: missing named final probe strategy ($mode)"; exit 1; }
   # Every emitted assignment for this exact probe must match; unrelated functions cannot satisfy it.
