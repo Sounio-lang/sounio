@@ -80,6 +80,7 @@ See [`tools/mcp/examples/claude_code_usage.md`](tools/mcp/examples/claude_code_u
 
 - **Measure before claiming.** Any quantitative statement about this repository must be backed by a command the operator can re-run. Never write "the codebase is small/incomplete/legacy" based on prior probability.
 - **Compilation is the test of existence.** A `.sio` file's status is `./bin/souc check <file>` plus the presence of a caller. Running `./bin/souc run` on a library file and reporting it broken is a category error: most files in `stdlib/` and `examples/` are libraries, not executables.
+- **Fix, don't file.** A defect found during a task is fixed in that task, with a test that fails before the fix and passes after it. Opening an issue instead is allowed only when (1) the fix needs a maintainer decision (language semantics, public API, a choice between legitimate alternatives), (2) the fix clearly exceeds the task's scope, or (3) the agent cannot write to the repository that holds the defect. Such an issue states which of the three applies, localises the cause to file and function, and ships the discriminating test (a minimal program with the expected and actual output). An issue that only describes a symptom, or that reports something the agent could have fixed, is not filed. Before filing, search the open issues for the same defect and add to that one instead.
 
 ---
 
