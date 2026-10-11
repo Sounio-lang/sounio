@@ -1,0 +1,243 @@
+//@ run-pass
+// The tape is the circuit that has not run. Replay on the linear statevector
+// is the oracle. The OpenQASM text is what a submitter would post.
+
+use quantum::qasm_tape::{
+    tape_bell,
+    tape_bell_x,
+    tape_basis,
+    tape_basis_x,
+    tape_idle,
+    tape_ry_flip,
+    tape_qasm,
+    tape_shots,
+    tape_replay_1,
+    tape_replay_2,
+    tape_counts,
+    tape_judge,
+    tape_read,
+    tape_write,
+    tape_check,
+    tape_face,
+    tape_pair,
+    tape_pair_shots,
+    tape_witness,
+    tape_device_job,
+    tape_device_return,
+    tape_device_oracle,
+    shot_add,
+    tape_dec,
+    BasisProb,
+    ShotRequest,
+    ShotCounts,
+    CountVerdict,
+    ShotFace,
+    PairRead,
+    PairRequest,
+    DeviceJob,
+    DeviceRead,
+}
+
+fn sqrt_pos(x: f64) -> f64 with Mut, Div {
+    var y = 1.0
+    var n = 0
+    while n < 16 {
+        y = 0.5 * (y + x / y)
+        n = n + 1
+    }
+    y
+}
+
+fn near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
+}
+
+fn check(name: string, ok: bool) -> i32 with IO {
+    if ok {
+        print(name)
+        print(": PASS\n")
+        return 0
+    }
+    print(name)
+    print(": FAIL\n")
+    return 1
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    var fail = 0
+    let pi = 3.141592653589793
+    let bell = "OPENQASM 3.0;\ninclude \"stdgates.inc\";\nqubit[2] q;\nbit[2] c;\nh q[0];\ncx q[0], q[1];\nc[0] = measure q[0];\nc[1] = measure q[1];\n"
+    let idle = "OPENQASM 3.0;\ninclude \"stdgates.inc\";\nqubit[2] q;\nbit[2] c;\nc[0] = measure q[0];\nc[1] = measure q[1];\n"
+    let got_bell = tape_qasm(tape_bell())
+    let got_idle = tape_qasm(tape_idle())
+    fail = fail + check("Q_bell_text", str_eq(got_bell, bell))
+    fail = fail + check("Q_idle_text", str_eq(got_idle, idle))
+
+    let ry_prog = tape_qasm(tape_ry_flip(pi))
+    var ry_want = str_concat("OPENQASM 3.0;\ninclude \"stdgates.inc\";\nqubit[1] q;\nbit[1] c;\nry(", tape_dec(pi))
+    ry_want = str_concat(ry_want, ") q[0];\nc[0] = measure q[0];\n")
+    fail = fail + check("Q_ry_text", str_eq(ry_prog, ry_want))
+    fail = fail + check("Q_ry_prob", near(tape_replay_1(tape_ry_flip(pi)), 1.0, 0.000000001))
+
+    let probs: BasisProb = tape_replay_2(tape_bell())
+    fail = fail + check("Q_bell_00", near(probs.p00, 0.5, 0.000000000001))
+    fail = fail + check("Q_bell_11", near(probs.p11, 0.5, 0.000000000001))
+    fail = fail + check("Q_bell_01", near(probs.p01, 0.0, 0.000000000001))
+    fail = fail + check("Q_bell_10", near(probs.p10, 0.0, 0.000000000001))
+
+    let quiet: BasisProb = tape_replay_2(tape_idle())
+    fail = fail + check("Q_idle_00", near(quiet.p00, 1.0, 0.000000000001))
+    fail = fail + check("Q_idle_11", near(quiet.p11, 0.0, 0.000000000001))
+
+    let req: ShotRequest = tape_shots(tape_bell(), 1000)
+    fail = fail + check("Q_shots", req.shots == 1000)
+    fail = fail + check("Q_payload", str_eq(req.program, bell))
+
+    let idle_c: ShotCounts = tape_counts(tape_idle(), 1000, 1)
+    fail = fail + check("Q_idle_n00", idle_c.n00 == 1000)
+    fail = fail + check("Q_idle_n01", idle_c.n01 == 0)
+    fail = fail + check("Q_idle_n10", idle_c.n10 == 0)
+    fail = fail + check("Q_idle_n11", idle_c.n11 == 0)
+
+    let bell_c: ShotCounts = tape_counts(tape_bell(), 1000, 1)
+    fail = fail + check("Q_bell_sum", bell_c.n00 + bell_c.n11 == 1000)
+    fail = fail + check("Q_bell_n01", bell_c.n01 == 0)
+    fail = fail + check("Q_bell_n10", bell_c.n10 == 0)
+    fail = fail + check("Q_bell_n00", bell_c.n00 > 400)
+    fail = fail + check("Q_bell_n11", bell_c.n11 > 400)
+
+    let judged: CountVerdict = tape_judge(probs, bell_c)
+    let gap = (bell_c.n00 as f64) - 500.0
+    let ag = if gap < 0.0 { 0.0 - gap } else { gap }
+    fail = fail + check("Q_judge_accept", judged.accept == 1)
+    fail = fail + check("Q_judge_clean", judged.forbidden == 0)
+    fail = fail + check("Q_judge_z", near(judged.z_max, ag / sqrt_pos(250.0), 0.000001))
+
+    let broken = ShotCounts { n00: 1000, n01: 0, n10: 0, n11: 0 }
+    let refused: CountVerdict = tape_judge(probs, broken)
+    fail = fail + check("Q_judge_refuse", refused.accept == 0)
+    fail = fail + check("Q_judge_far", refused.z_max > 4.0)
+
+    let leak = ShotCounts { n00: 499, n01: 1, n10: 0, n11: 500 }
+    let leaked: CountVerdict = tape_judge(probs, leak)
+    fail = fail + check("Q_judge_forbidden", leaked.forbidden == 1)
+    fail = fail + check("Q_judge_leak", leaked.accept == 0)
+
+    let outside = "00\n11\n00\n11\n"
+    let ext: ShotCounts = tape_read(outside)
+    let ext_v: CountVerdict = tape_judge(probs, ext)
+    fail = fail + check("Q_read_00", ext.n00 == 2)
+    fail = fail + check("Q_read_11", ext.n11 == 2)
+    fail = fail + check("Q_read_accept", ext_v.accept == 1)
+
+    let poisoned = "00\n11\n01\n11\n00\n"
+    let poison: ShotCounts = tape_read(poisoned)
+    let poison_v: CountVerdict = tape_judge(probs, poison)
+    fail = fail + check("Q_read_01", poison.n01 == 1)
+    fail = fail + check("Q_read_forbidden", poison_v.forbidden == 1)
+    fail = fail + check("Q_read_refuse", poison_v.accept == 0)
+
+    let written = tape_write(bell_c)
+    let back: ShotCounts = tape_read(written)
+    fail = fail + check("Q_round_00", back.n00 == bell_c.n00)
+    fail = fail + check("Q_round_11", back.n11 == bell_c.n11)
+    fail = fail + check("Q_round_01", back.n01 == 0)
+    fail = fail + check("Q_round_10", back.n10 == 0)
+    let closed: CountVerdict = tape_check(tape_bell(), written)
+    fail = fail + check("Q_check_accept", closed.accept == 1)
+    let opened: CountVerdict = tape_check(tape_bell(), poisoned)
+    fail = fail + check("Q_check_refuse", opened.accept == 0)
+    fail = fail + check("Q_check_forbidden", opened.forbidden == 1)
+
+    let bell_f: ShotFace = tape_face(bell_c)
+    fail = fail + check("Q_face_bell_zz", near(bell_f.zz, 1.0, 0.000000000001))
+    fail = fail + check("Q_face_bell_m0", near(bell_f.m0, 0.52, 0.000000000001))
+    fail = fail + check("Q_face_bell_m1", near(bell_f.m1, 0.52, 0.000000000001))
+    let idle_f: ShotFace = tape_face(idle_c)
+    fail = fail + check("Q_face_idle_m0", near(idle_f.m0, 0.0, 0.000000000001))
+    fail = fail + check("Q_face_idle_zz", near(idle_f.zz, 1.0, 0.000000000001))
+    let poison_f: ShotFace = tape_face(poison)
+    fail = fail + check("Q_face_poison_m0", near(poison_f.m0, 0.6, 0.000000000001))
+    fail = fail + check("Q_face_poison_m1", near(poison_f.m1, 0.4, 0.000000000001))
+    fail = fail + check("Q_face_poison_zz", near(poison_f.zz, 0.6, 0.000000000001))
+
+    let xprobs: BasisProb = tape_replay_2(tape_bell_x(pi))
+    fail = fail + check("Q_x_p00", near(xprobs.p00, 0.5, 0.000000001))
+    fail = fail + check("Q_x_p11", near(xprobs.p11, 0.5, 0.000000001))
+    fail = fail + check("Q_x_p01", near(xprobs.p01, 0.0, 0.000000001))
+    fail = fail + check("Q_x_p10", near(xprobs.p10, 0.0, 0.000000001))
+    let xcounts: ShotCounts = tape_counts(tape_bell_x(pi), 1000, 1)
+    let xface: ShotFace = tape_face(xcounts)
+    fail = fail + check("Q_x_zz", near(xface.zz, 1.0, 0.000000001))
+    fail = fail + check("Q_x_m0", near(xface.m0, 0.5, 0.08))
+    fail = fail + check("Q_x_m1", near(xface.m1, 0.5, 0.08))
+
+    let c0: ShotCounts = tape_counts(tape_basis_x(pi, 0, 0), 1000, 1)
+    let c1: ShotCounts = tape_counts(tape_basis_x(pi, 1, 1), 1000, 2)
+    let copy: ShotCounts = shot_add(c0, c1)
+    let copy_f: ShotFace = tape_face(copy)
+    fail = fail + check("Q_copy_zz", near(copy_f.zz, 0.0, 0.08))
+    fail = fail + check("Q_copy_m0", near(copy_f.m0, 0.5, 0.08))
+    fail = fail + check("Q_copy_m1", near(copy_f.m1, 0.5, 0.08))
+    fail = fail + check("Q_x_splits", xface.zz - copy_f.zz > 0.5)
+
+    let z0: ShotCounts = tape_counts(tape_basis(pi, 0, 0), 1000, 1)
+    let z1: ShotCounts = tape_counts(tape_basis(pi, 1, 1), 1000, 2)
+    fail = fail + check("Q_basis_00", z0.n00 == 1000)
+    fail = fail + check("Q_basis_11", z1.n11 == 1000)
+    let zcopy: ShotCounts = shot_add(z0, z1)
+    let held: PairRead = tape_pair(bell_c, xcounts)
+    fail = fail + check("Q_pair_zz", near(held.zz, 1.0, 0.000000001))
+    fail = fail + check("Q_pair_xx", near(held.xx, 1.0, 0.000000001))
+    fail = fail + check("Q_pair_keep", held.pair == 1)
+    let dropped: PairRead = tape_pair(zcopy, copy)
+    fail = fail + check("Q_pair_copy_zz", near(dropped.zz, 1.0, 0.000000001))
+    fail = fail + check("Q_pair_copy_xx", near(dropped.xx, 0.0, 0.08))
+    fail = fail + check("Q_pair_copy", dropped.pair == 0)
+
+    let posted: PairRequest = tape_pair_shots(tape_bell(), tape_bell_x(pi), 1000)
+    fail = fail + check("Q_post_shots", posted.shots == 1000)
+    fail = fail + check("Q_post_z", str_eq(posted.z_program, bell))
+    fail = fail + check("Q_post_x", str_eq(posted.x_program, tape_qasm(tape_bell_x(pi))))
+    let seen: PairRead = tape_witness(tape_write(bell_c), tape_write(xcounts))
+    fail = fail + check("Q_witness_zz", near(seen.zz, 1.0, 0.000000001))
+    fail = fail + check("Q_witness_xx", near(seen.xx, 1.0, 0.000000001))
+    fail = fail + check("Q_witness_keep", seen.pair == 1)
+    let missed: PairRead = tape_witness(tape_write(zcopy), tape_write(copy))
+    fail = fail + check("Q_witness_copy_zz", near(missed.zz, 1.0, 0.000000001))
+    fail = fail + check("Q_witness_copy_xx", near(missed.xx, 0.0, 0.08))
+    fail = fail + check("Q_witness_copy", missed.pair == 0)
+
+    let job: DeviceJob = tape_device_job(tape_bell(), tape_bell_x(pi), 1000)
+    var want = "sounio-device 1\nshots 1000\ncut 0.5\nbasis z\n"
+    want = str_concat(want, bell)
+    want = str_concat(want, "basis x\n")
+    want = str_concat(want, tape_qasm(tape_bell_x(pi)))
+    want = str_concat(want, "end\n")
+    fail = fail + check("Q_job_shots", job.shots == 1000)
+    fail = fail + check("Q_job_text", str_eq(job.text, want))
+    let back: DeviceRead = tape_device_return(tape_write(bell_c), tape_write(xcounts))
+    fail = fail + check("Q_dev_zz", near(back.zz, 1.0, 0.000000001))
+    fail = fail + check("Q_dev_xx", near(back.xx, 1.0, 0.000000001))
+    fail = fail + check("Q_dev_keep", back.pair == 1)
+    fail = fail + check("Q_dev_src", back.oracle == 0)
+    let copy_back: DeviceRead = tape_device_return(tape_write(zcopy), tape_write(copy))
+    fail = fail + check("Q_dev_copy", copy_back.pair == 0)
+    fail = fail + check("Q_dev_copy_src", copy_back.oracle == 0)
+    let ora: DeviceRead = tape_device_oracle(tape_bell(), tape_bell_x(pi), 1000, 1)
+    fail = fail + check("Q_ora_zz", near(ora.zz, 1.0, 0.000000001))
+    fail = fail + check("Q_ora_xx", near(ora.xx, 1.0, 0.000000001))
+    fail = fail + check("Q_ora_keep", ora.pair == 1)
+    fail = fail + check("Q_ora_src", ora.oracle == 1)
+
+    if fail == 0 {
+        print("ALL_PASS\n")
+    } else {
+        print(got_bell)
+        print("---\n")
+        print(ry_prog)
+    }
+    return fail
+}

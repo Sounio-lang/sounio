@@ -1,0 +1,689 @@
+// stdlib/quantum/qasm_tape.sio
+//
+// A tape is a circuit that has not run. Gates append an operation and return
+// the tape. tape_replay_* runs that list on the linear statevector, which is
+// the oracle. tape_qasm renders OpenQASM 3.0 for a submitter that lives
+// outside this module: Sounio does not open a socket. The submitter posts
+// tape_shots(...).program and returns counts. The first accepted device run
+// is tape_bell, 1000 shots, near half on 00 and 11.
+//
+// This is not the VQE Circuit. That one has no measurement and its own
+// statevector, capped at 4 qubits.
+
+use quantum::linear::{
+    quantum_state_new,
+    qubit_alloc,
+    hadamard,
+    ry,
+    rz,
+    cnot,
+    measure_qubit,
+    amp_prob,
+    Qubit,
+    QubitPair,
+    QuantumState,
+}
+
+fn op_h() -> i32 { 1 }
+fn op_ry() -> i32 { 9 }
+fn op_rz() -> i32 { 10 }
+fn op_cx() -> i32 { 11 }
+fn op_measure() -> i32 { 15 }
+
+pub struct Tape {
+    pub n_qubits: i32,
+    pub n_ops: i32,
+    pub n_meas: i32,
+    pub kind: [i32; 64],
+    pub q0: [i32; 64],
+    pub q1: [i32; 64],
+    pub angle: [f64; 64],
+}
+
+pub struct BasisProb {
+    pub p00: f64,
+    pub p01: f64,
+    pub p10: f64,
+    pub p11: f64,
+}
+
+pub struct ShotRequest {
+    pub shots: i64,
+    pub program: string,
+}
+
+pub fn tape_new(n_qubits: i32) -> Tape {
+    Tape {
+        n_qubits: n_qubits,
+        n_ops: 0,
+        n_meas: 0,
+        kind: [0; 64],
+        q0: [0; 64],
+        q1: [0; 64],
+        angle: [0.0; 64],
+    }
+}
+
+fn tape_push(t: Tape, kind: i32, a: i32, b: i32, angle: f64) -> Tape with Mut, Div, Panic {
+    if t.n_ops >= 64 {
+        panic("tape full")
+        return t
+    }
+    var out = t
+    let k = t.n_ops
+    out.kind[k] = kind
+    out.q0[k] = a
+    out.q1[k] = b
+    out.angle[k] = angle
+    out.n_ops = k + 1
+    if kind == 15 {
+        out.n_meas = t.n_meas + 1
+    }
+    out
+}
+
+fn wire_ok(t: Tape, q: i32) -> i32 {
+    if q < 0 { return 0 }
+    if q >= t.n_qubits { return 0 }
+    1
+}
+
+pub fn tape_h(t: Tape, q: i32) -> Tape with Mut, Div, Panic {
+    if wire_ok(t, q) == 0 {
+        panic("tape wire")
+        return t
+    }
+    tape_push(t, op_h(), q, 0, 0.0)
+}
+
+pub fn tape_ry(t: Tape, q: i32, angle: f64) -> Tape with Mut, Div, Panic {
+    if wire_ok(t, q) == 0 {
+        panic("tape wire")
+        return t
+    }
+    tape_push(t, op_ry(), q, 0, angle)
+}
+
+// Rz(theta). Opcode 10. Replay calls quantum::linear rz.
+pub fn tape_rz(t: Tape, q: i32, angle: f64) -> Tape with Mut, Div, Panic {
+    if wire_ok(t, q) == 0 {
+        panic("tape wire")
+        return t
+    }
+    tape_push(t, op_rz(), q, 0, angle)
+}
+
+pub fn tape_cx(t: Tape, control: i32, target: i32) -> Tape with Mut, Div, Panic {
+    if wire_ok(t, control) == 0 {
+        panic("tape wire")
+        return t
+    }
+    if wire_ok(t, target) == 0 {
+        panic("tape wire")
+        return t
+    }
+    tape_push(t, op_cx(), control, target, 0.0)
+}
+
+pub fn tape_measure(t: Tape, q: i32) -> Tape with Mut, Div, Panic {
+    if wire_ok(t, q) == 0 {
+        panic("tape wire")
+        return t
+    }
+    tape_push(t, op_measure(), q, 0, 0.0)
+}
+
+pub fn tape_bell() -> Tape with Mut, Div, Panic {
+    var t = tape_new(2)
+    t = tape_h(t, 0)
+    t = tape_cx(t, 0, 1)
+    t = tape_measure(t, 0)
+    t = tape_measure(t, 1)
+    t
+}
+
+// Bell pair, then Ry(π/2) on both wires, so the measured correlator is ⟨XX⟩.
+pub fn tape_bell_x(pi: f64) -> Tape with Mut, Div, Panic {
+    var t = tape_new(2)
+    let h = pi / 2.0
+    t = tape_h(t, 0)
+    t = tape_cx(t, 0, 1)
+    t = tape_ry(t, 0, h)
+    t = tape_ry(t, 1, h)
+    t = tape_measure(t, 0)
+    t = tape_measure(t, 1)
+    t
+}
+
+// A computational-basis state, then the same Ry(π/2). flip 1 prepares |1⟩.
+pub fn tape_basis_x(pi: f64, flip0: i32, flip1: i32) -> Tape with Mut, Div, Panic {
+    var t = tape_new(2)
+    let h = pi / 2.0
+    if flip0 == 1 {
+        t = tape_ry(t, 0, pi)
+    }
+    if flip1 == 1 {
+        t = tape_ry(t, 1, pi)
+    }
+    t = tape_ry(t, 0, h)
+    t = tape_ry(t, 1, h)
+    t = tape_measure(t, 0)
+    t = tape_measure(t, 1)
+    t
+}
+
+// Computational basis, measured as written. flip 1 prepares |1⟩.
+pub fn tape_basis(pi: f64, flip0: i32, flip1: i32) -> Tape with Mut, Div, Panic {
+    var t = tape_new(2)
+    if flip0 == 1 {
+        t = tape_ry(t, 0, pi)
+    }
+    if flip1 == 1 {
+        t = tape_ry(t, 1, pi)
+    }
+    t = tape_measure(t, 0)
+    t = tape_measure(t, 1)
+    t
+}
+
+pub fn tape_idle() -> Tape with Mut, Div, Panic {
+    var t = tape_new(2)
+    t = tape_measure(t, 0)
+    t = tape_measure(t, 1)
+    t
+}
+
+pub fn tape_ry_flip(angle: f64) -> Tape with Mut, Div, Panic {
+    var t = tape_new(1)
+    t = tape_ry(t, 0, angle)
+    t = tape_measure(t, 0)
+    t
+}
+
+fn tape_i64(n: i64) -> string with Mut, Panic, Div {
+    if n == 0 { return "0" }
+    var neg = n < 0
+    var m: i64 = n
+    if neg { m = 0 - n }
+    var result = ""
+    while m > 0 {
+        let d = m % 10
+        result = str_concat(str_slice("0123456789", d, d + 1), result)
+        m = m / 10
+    }
+    if neg { result = str_concat("-", result) }
+    result
+}
+
+// Twelve digits after the point, truncated. The tape keeps the f64;
+// this is only the text a submitter ships.
+pub fn tape_dec(x: f64) -> string with Mut, Panic, Div {
+    var neg = x < 0.0
+    var ax: f64 = x
+    if neg { ax = 0.0 - x }
+    let int_part = ax as i64
+    let frac = ax - (int_part as f64)
+    var frac_i = (frac * 1000000000000.0) as i64
+    if frac_i < 0 { frac_i = 0 }
+    var frac_str = ""
+    var f = frac_i
+    var i = 0
+    while i < 12 {
+        let d = f % 10
+        frac_str = str_concat(str_slice("0123456789", d, d + 1), frac_str)
+        f = f / 10
+        i = i + 1
+    }
+    var result = str_concat(tape_i64(int_part), ".")
+    result = str_concat(result, frac_str)
+    if neg { result = str_concat("-", result) }
+    result
+}
+
+fn qasm_line(kind: i32, a: i32, b: i32, angle: f64, meas_at: i32) -> string with Mut, Panic, Div {
+    let qa = tape_i64(a as i64)
+    var line = ""
+    if kind == 1 {
+        line = str_concat("h q[", qa)
+        line = str_concat(line, "];\n")
+        return line
+    }
+    if kind == 9 {
+        line = str_concat("ry(", tape_dec(angle))
+        line = str_concat(line, ") q[")
+        line = str_concat(line, qa)
+        line = str_concat(line, "];\n")
+        return line
+    }
+    if kind == 10 {
+        line = str_concat("rz(", tape_dec(angle))
+        line = str_concat(line, ") q[")
+        line = str_concat(line, qa)
+        line = str_concat(line, "];\n")
+        return line
+    }
+    if kind == 11 {
+        let qb = tape_i64(b as i64)
+        line = str_concat("cx q[", qa)
+        line = str_concat(line, "], q[")
+        line = str_concat(line, qb)
+        line = str_concat(line, "];\n")
+        return line
+    }
+    if kind == 15 {
+        let cm = tape_i64(meas_at as i64)
+        line = str_concat("c[", cm)
+        line = str_concat(line, "] = measure q[")
+        line = str_concat(line, qa)
+        line = str_concat(line, "];\n")
+        return line
+    }
+    ""
+}
+
+pub fn tape_qasm(t: Tape) -> string with Mut, Panic, Div {
+    var s = str_concat("OPENQASM 3.0;\ninclude \"stdgates.inc\";\nqubit[", tape_i64(t.n_qubits as i64))
+    s = str_concat(s, "] q;\nbit[")
+    s = str_concat(s, tape_i64(t.n_meas as i64))
+    s = str_concat(s, "] c;\n")
+    var i: i32 = 0
+    var m: i32 = 0
+    while i < t.n_ops {
+        let kind = t.kind[i]
+        s = str_concat(s, qasm_line(kind, t.q0[i], t.q1[i], t.angle[i], m))
+        if kind == 15 { m = m + 1 }
+        i = i + 1
+    }
+    s
+}
+
+pub fn tape_shots(t: Tape, shots: i64) -> ShotRequest with Mut, Panic, Div {
+    ShotRequest { shots: shots, program: tape_qasm(t) }
+}
+
+pub struct PairRequest {
+    pub shots: i64,
+    pub z_program: string,
+    pub x_program: string,
+}
+
+// The two programs a submitter posts, and the shot count for each.
+pub fn tape_pair_shots(z: Tape, x: Tape, shots: i64) -> PairRequest with Mut, Panic, Div {
+    PairRequest { shots: shots, z_program: tape_qasm(z), x_program: tape_qasm(x) }
+}
+
+pub struct ShotCounts {
+    pub n00: i64,
+    pub n01: i64,
+    pub n10: i64,
+    pub n11: i64,
+}
+
+fn lcg_next(s: i64) -> i64 {
+    let n = (1103515245 * s + 12345) % 2147483648
+    if n < 0 { 0 - n } else { n }
+}
+
+// N independent draws from the replay probabilities. This is the count
+// record a device would return. The probabilities are computed once.
+pub fn tape_counts(t: Tape, shots: i64, seed: i64) -> ShotCounts with Mut, Div, Panic {
+    let p = tape_replay_2(t)
+    var n00: i64 = 0
+    var n01: i64 = 0
+    var n10: i64 = 0
+    var n11: i64 = 0
+    var s = seed
+    if s == 0 { s = 1 }
+    var k: i64 = 0
+    while k < shots {
+        s = lcg_next(s)
+        let u = (s as f64) / 2147483648.0
+        let b01 = p.p00 + p.p01
+        let b10 = b01 + p.p10
+        if u < p.p00 {
+            n00 = n00 + 1
+        } else {
+            if u < b01 {
+                n01 = n01 + 1
+            } else {
+                if u < b10 {
+                    n10 = n10 + 1
+                } else {
+                    n11 = n11 + 1
+                }
+            }
+        }
+        k = k + 1
+    }
+    ShotCounts { n00: n00, n01: n01, n10: n10, n11: n11 }
+}
+
+pub struct CountVerdict {
+    pub accept: i64,
+    pub forbidden: i64,
+    pub z_max: f64,
+}
+
+fn sqrt_pos(x: f64) -> f64 with Div {
+    var y = 1.0
+    var n = 0
+    while n < 16 {
+        y = 0.5 * (y + x / y)
+        n = n + 1
+    }
+    y
+}
+
+fn cell_forbidden(n: i64, p: f64) -> i64 {
+    if p < 0.000000000001 {
+        if n != 0 { return 1 }
+    }
+    0
+}
+
+fn cell_z(n: i64, p: f64, shots: i64) -> f64 with Div {
+    if p < 0.000000000001 { return 0.0 }
+    if p > 0.999999999999 { return 0.0 }
+    let mean = (shots as f64) * p
+    let width = sqrt_pos((shots as f64) * p * (1.0 - p))
+    let d = (n as f64) - mean
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad / width
+}
+
+fn worse(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+// Four standard deviations. A zero-probability outcome that appears is refused
+// on its own: that cell has no width to hide in.
+pub fn tape_judge(probs: BasisProb, counts: ShotCounts) -> CountVerdict with Div {
+    let shots = counts.n00 + counts.n01 + counts.n10 + counts.n11
+    let f = cell_forbidden(counts.n00, probs.p00) + cell_forbidden(counts.n01, probs.p01) + cell_forbidden(counts.n10, probs.p10) + cell_forbidden(counts.n11, probs.p11)
+    let z = worse(
+        worse(cell_z(counts.n00, probs.p00, shots), cell_z(counts.n01, probs.p01, shots)),
+        worse(cell_z(counts.n10, probs.p10, shots), cell_z(counts.n11, probs.p11, shots)),
+    )
+    let accept = if f == 0 {
+        if z < 4.0 { 1 } else { 0 }
+    } else {
+        0
+    }
+    CountVerdict { accept: accept, forbidden: f, z_max: z }
+}
+
+fn shot_zeros() -> ShotCounts {
+    ShotCounts { n00: 0, n01: 0, n10: 0, n11: 0 }
+}
+
+// One line per shot, "00" or "11" or the other two basis words.
+// This is the text a submitter would leave. The draws are not ours.
+pub fn tape_read(text: string) -> ShotCounts with Mut, Panic, Div {
+    var i: i64 = 0
+    let n = str_len(text)
+    var c00: i64 = 0
+    var c01: i64 = 0
+    var c10: i64 = 0
+    var c11: i64 = 0
+    while i < n {
+        let nl = str_slice(text, i, i + 1)
+        if str_eq(nl, "\n") {
+            i = i + 1
+        } else {
+            if i + 2 > n {
+                panic("shot line")
+                return shot_zeros()
+            }
+            let pair = str_slice(text, i, i + 2)
+            if str_eq(pair, "00") {
+                c00 = c00 + 1
+            } else {
+                if str_eq(pair, "01") {
+                    c01 = c01 + 1
+                } else {
+                    if str_eq(pair, "10") {
+                        c10 = c10 + 1
+                    } else {
+                        if str_eq(pair, "11") {
+                            c11 = c11 + 1
+                        } else {
+                            panic("shot word")
+                            return shot_zeros()
+                        }
+                    }
+                }
+            }
+            i = i + 2
+        }
+    }
+    ShotCounts { n00: c00, n01: c01, n10: c10, n11: c11 }
+}
+
+fn repeat_line(word: string, n: i64) -> string with Mut, Panic, Div {
+    let nl = str_concat(word, "\n")
+    var s = ""
+    var i: i64 = 0
+    while i < n {
+        s = str_concat(s, nl)
+        i = i + 1
+    }
+    s
+}
+
+// The shot list a submitter would write. Order is by basis word, not by time.
+pub fn tape_write(counts: ShotCounts) -> string with Mut, Panic, Div {
+    var s = repeat_line("00", counts.n00)
+    s = str_concat(s, repeat_line("01", counts.n01))
+    s = str_concat(s, repeat_line("10", counts.n10))
+    s = str_concat(s, repeat_line("11", counts.n11))
+    s
+}
+
+// The tape supplies the probabilities. The text supplies the shots.
+pub fn tape_check(t: Tape, text: string) -> CountVerdict with Mut, Div, Panic {
+    let probs = tape_replay_2(t)
+    let counts = tape_read(text)
+    tape_judge(probs, counts)
+}
+
+pub struct ShotFace {
+    pub m0: f64,
+    pub m1: f64,
+    pub zz: f64,
+}
+
+// Read off the shot list alone. m0 is the rate of the first wire, m1 of the
+// second. zz is the Z correlator (n00 + n11 - n01 - n10) / N.
+pub fn shot_add(a: ShotCounts, b: ShotCounts) -> ShotCounts {
+    ShotCounts {
+        n00: a.n00 + b.n00,
+        n01: a.n01 + b.n01,
+        n10: a.n10 + b.n10,
+        n11: a.n11 + b.n11,
+    }
+}
+
+pub fn tape_face(counts: ShotCounts) -> ShotFace with Div {
+    let shots = counts.n00 + counts.n01 + counts.n10 + counts.n11
+    if shots == 0 {
+        return ShotFace { m0: 0.0, m1: 0.0, zz: 0.0 }
+    }
+    let n = shots as f64
+    ShotFace {
+        m0: ((counts.n01 + counts.n11) as f64) / n,
+        m1: ((counts.n10 + counts.n11) as f64) / n,
+        zz: ((counts.n00 + counts.n11 - counts.n01 - counts.n10) as f64) / n,
+    }
+}
+
+pub struct PairRead {
+    pub zz: f64,
+    pub xx: f64,
+    pub pair: i64,
+}
+
+// Both lists of one source. pair is 1 only when each correlator clears 1/2.
+pub fn tape_pair(z_counts: ShotCounts, x_counts: ShotCounts) -> PairRead with Div {
+    let zf = tape_face(z_counts)
+    let xf = tape_face(x_counts)
+    var keep: i64 = 0
+    if zf.zz > 0.5 {
+        if xf.zz > 0.5 {
+            keep = 1
+        }
+    }
+    PairRead { zz: zf.zz, xx: xf.zz, pair: keep }
+}
+
+// The two texts a device would return. Same verdict as tape_pair.
+pub fn tape_witness(z_text: string, x_text: string) -> PairRead with Mut, Div, Panic {
+    tape_pair(tape_read(z_text), tape_read(x_text))
+}
+
+pub struct DeviceJob {
+    pub shots: i64,
+    pub text: string,
+}
+
+pub struct DeviceRead {
+    pub zz: f64,
+    pub xx: f64,
+    pub pair: i64,
+    pub oracle: i64,
+}
+
+// One document a machine can run: both programs, the shot count, the cut.
+pub fn tape_device_job(z: Tape, x: Tape, shots: i64) -> DeviceJob with Mut, Panic, Div {
+    let req = tape_pair_shots(z, x, shots)
+    var s = str_concat("sounio-device 1\nshots ", tape_i64(shots))
+    s = str_concat(s, "\ncut 0.5\nbasis z\n")
+    s = str_concat(s, req.z_program)
+    s = str_concat(s, "basis x\n")
+    s = str_concat(s, req.x_program)
+    s = str_concat(s, "end\n")
+    DeviceJob { shots: req.shots, text: s }
+}
+
+// Lists a machine returned. oracle is 0.
+pub fn tape_device_return(z_text: string, x_text: string) -> DeviceRead with Mut, Div, Panic {
+    let r = tape_witness(z_text, x_text)
+    DeviceRead { zz: r.zz, xx: r.xx, pair: r.pair, oracle: 0 }
+}
+
+// The statevector stands in, and the record says so. oracle is 1.
+pub fn tape_device_oracle(z: Tape, x: Tape, shots: i64, seed: i64) -> DeviceRead with Mut, Div, Panic {
+    let zc = tape_counts(z, shots, seed)
+    let xc = tape_counts(x, shots, seed + 1)
+    let r = tape_pair(zc, xc)
+    DeviceRead { zz: r.zz, xx: r.xx, pair: r.pair, oracle: 1 }
+}
+
+fn step1(q0: Qubit, kind: i32, angle: f64, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {
+    if kind == 9 {
+        ry(q0, qs, angle)
+    } else {
+        if kind == 10 {
+            rz(q0, qs, angle)
+        } else {
+            if kind == 1 {
+                hadamard(q0, qs)
+            } else {
+                q0
+            }
+        }
+    }
+}
+
+fn step2(q0: Qubit, q1: Qubit, kind: i32, a: i32, angle: f64, qs: &!QuantumState) -> QubitPair with Mut, Div, Panic {
+    if kind == 1 {
+        if a == 0 {
+            let h = hadamard(q0, qs)
+            QubitPair { first: h, second: q1 }
+        } else {
+            let h = hadamard(q1, qs)
+            QubitPair { first: q0, second: h }
+        }
+    } else {
+        if kind == 9 {
+            if a == 0 {
+                let r = ry(q0, qs, angle)
+                QubitPair { first: r, second: q1 }
+            } else {
+                let r = ry(q1, qs, angle)
+                QubitPair { first: q0, second: r }
+            }
+        } else {
+            if kind == 10 {
+                if a == 0 {
+                    let z = rz(q0, qs, angle)
+                    QubitPair { first: z, second: q1 }
+                } else {
+                    let z = rz(q1, qs, angle)
+                    QubitPair { first: q0, second: z }
+                }
+            } else {
+                if kind == 11 {
+                    if a == 0 {
+                        cnot(q0, q1, qs)
+                    } else {
+                        let p = cnot(q1, q0, qs)
+                        QubitPair { first: p.second, second: p.first }
+                    }
+                } else {
+                    QubitPair { first: q0, second: q1 }
+                }
+            }
+        }
+    }
+}
+
+fn walk1(q0: Qubit, t: &Tape, i: i32, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {
+    if i >= t.n_ops {
+        q0
+    } else {
+        let nq = step1(q0, t.kind[i], t.angle[i], qs)
+        walk1(nq, t, i + 1, qs)
+    }
+}
+
+fn walk2(q0: Qubit, q1: Qubit, t: &Tape, i: i32, qs: &!QuantumState) -> QubitPair with Mut, Div, Panic {
+    if i >= t.n_ops {
+        QubitPair { first: q0, second: q1 }
+    } else {
+        let p = step2(q0, q1, t.kind[i], t.q0[i], t.angle[i], qs)
+        walk2(p.first, p.second, t, i + 1, qs)
+    }
+}
+
+pub fn tape_replay_1(t: Tape) -> f64 with Mut, Div, Panic {
+    if t.n_qubits != 1 {
+        panic("tape replay wants 1 qubit")
+        return 0.0
+    }
+    var qs = quantum_state_new()
+    let q0 = qubit_alloc(&!qs)
+    let qf = walk1(q0, &t, 0, &!qs)
+    let p = amp_prob(&qs, 1)
+    let _m = measure_qubit(qf, &!qs, 0.0)
+    p
+}
+
+pub fn tape_replay_2(t: Tape) -> BasisProb with Mut, Div, Panic {
+    if t.n_qubits != 2 {
+        panic("tape replay wants 2 qubits")
+        return BasisProb { p00: 0.0, p01: 0.0, p10: 0.0, p11: 0.0 }
+    }
+    var qs = quantum_state_new()
+    let q0 = qubit_alloc(&!qs)
+    let q1 = qubit_alloc(&!qs)
+    let done = walk2(q0, q1, &t, 0, &!qs)
+    let read = BasisProb {
+        p00: amp_prob(&qs, 0),
+        p01: amp_prob(&qs, 1),
+        p10: amp_prob(&qs, 2),
+        p11: amp_prob(&qs, 3),
+    }
+    let _a = measure_qubit(done.first, &!qs, 0.0)
+    let _b = measure_qubit(done.second, &!qs, 0.0)
+    read
+}
