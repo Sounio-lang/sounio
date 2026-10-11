@@ -72,7 +72,7 @@ Not every \(\tau\) uses every component. Unused components are \(\bot\) and are 
 
 **Reading:** \(\mathsf{Obs}\) is *what the scientist is entitled to read back*. It is not the full type theory of the language.
 
-### 2.3 Observable preorder \(\preceq\)
+### 2.3 Source-anchored observable acceptance relation \(\preceq\)
 
 Let \(O, O'\) be observable packages of the same shape (same components present).\
 Define
@@ -95,6 +95,8 @@ Concretely, for present components:
 | \(\omega\) | observation barriers are not erased (barred stays barred; fixed stays fixed) |
 
 **Silent improvement of confidence** (smaller \(u\), larger effective trust, more rewrite freedom) without a typed justification is a **violation**, not a win.
+
+**Composition boundary:** this is a comparison against a fixed source entitlement, not a proved preorder for arbitrary intermediate reports. A nonzero ULP tolerance is not necessarily transitive; pairwise acceptance must not be composed into a preservation theorem. Preorder reasoning requires a separately justified reflexive and transitive exactness convention. Presence mismatches lie outside the same-shape domain and must be refused rather than silently ignored. Typed refinement permission belongs to the scientific type and ambient policy; its preservation through transformations is an additional proof obligation. Rewrite permission is ordered by set inclusion in that context, so an output context cannot silently admit rewrites excluded by the source context. No Lean proof or general compiler certificate is asserted here.
 
 ### 2.4 Theory of equivalence \(E(\tau)\)
 
