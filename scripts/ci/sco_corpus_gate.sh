@@ -107,7 +107,7 @@ for mode in check compile; do
 done
 
 # Bounded observer regression matrix: exact statuses, diagnostic IDs and stdout.
-for spec in identity:PASS scalar_control:PASS cast_without_observe:E036 compare_without_observe:E036 implicit_return:E008 wrong_carrier:E036 nested_cast:E036 nested_compare:E004 arithmetic:E036; do
+for spec in identity:PASS scalar_control:PASS cast_without_observe:E036 compare_without_observe:E036 implicit_return:E008 wrong_carrier:E036 nested_cast:E036 nested_compare:E004 arithmetic:E036 unknown_compare:E004 unknown_return:E008 inferred_binding:PASS inferred_binding_without_observe:E036 unknown_inner_refinement:E036; do
   name="${spec%%:*}"
   expected="${spec#*:}"
   file="examples/sco_corpus/v3_observe/observer-regressions/$name.sio"

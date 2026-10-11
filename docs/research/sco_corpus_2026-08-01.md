@@ -14,7 +14,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.sco-c
 
 # SCO Corpus (Step II)
 
-> Reconciliation boundary (2026-10-12): this is a historical research proposal, not a theorem or a certificate that SCO is satisfied. V1/V2 are exact runtime sentinels; the present V3 uses ordinary integer payloads and an effect declaration, so it does not test an Unobserved barrier or the required negative type check. A labeled enforce/ablation strategy change is strategy-selection coverage only; scientific non-vacuity requires an observable entitlement failure or legality fault and remains pending. Historical “discharged” wording below does not supersede these limits. No Python research exemption exists under ADR009.
+> Reconciliation boundary (2026-10-12): this is a historical research proposal, not a theorem or a certificate that SCO is satisfied. V1/V2 are exact runtime sentinels. The bounded V3 now uses an imported `Unobserved<i64>` payload: source `aef6c07081514e3dc1d8adaf2716a9f0df60fcdb`, Foundry job13624, fresh Madaros SHA256 `aeaf8126524ed0362f7bfaaea86980792f139c321c674a5fef9b5da9ba12c65c` passed exact stdout `1`/`7001` and the matching missing-Observe negative in both check and compile with E036. This is native i64 coverage, not generic or floating Unobserved certification; later source changes require their own validation. A labeled enforce/ablation strategy change is strategy-selection coverage only; scientific non-vacuity requires an observable entitlement failure or legality fault and remains pending. Historical “discharged” wording below does not supersede these limits. No Python research exemption exists under ADR009.
 
 
 **Status:** adversarial corpus specification + runnable drivers\
