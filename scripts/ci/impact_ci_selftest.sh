@@ -33,6 +33,24 @@ compiler="$(classify_pr self-hosted/compiler/main.sio)"
 expect "$compiler" compiler true
 expect "$compiler" sio true
 
+# Exact SCO fixture boundary selects source-built gates, without widening every example.
+sco="$(classify_pr examples/sco_corpus/v3_observe/v3_main.sio)"
+expect "$sco" tests true
+expect "$sco" sio true
+expect "$sco" compiler false
+expect "$sco" full false
+sco_expected="$(classify_pr examples/sco_corpus/v3_observe/expected.txt)"
+expect "$sco_expected" tests true
+expect "$sco_expected" sio false
+expect "$sco_expected" full false
+ordinary_example="$(classify_pr examples/hello.sio)"
+expect "$ordinary_example" tests false
+expect "$ordinary_example" sio true
+expect "$ordinary_example" full false
+mq_sco="$(CI_EVENT_NAME=merge_group "$CLASSIFIER" examples/sco_corpus/strategy_probe/probe_nonassoc.sio)"
+expect "$mq_sco" tests true
+expect "$mq_sco" full false
+
 unknown="$(classify_pr newly-introduced/build.graph)"
 expect "$unknown" full true
 expect "$unknown" compiler true
@@ -87,6 +105,12 @@ root_commit="$(cd "$ROOT_DIR" && git rev-list --max-parents=0 HEAD | tail -1)"
 live="$(cd "$ROOT_DIR" && CI_EVENT_NAME=pull_request \
       CI_BASE_SHA="$root_commit" CI_HEAD_SHA=HEAD "$CLASSIFIER")"
 expect "$live" full true
+
+# Optional shell-only boundary leaves the default evaluator tests intact.
+if [[ "${1:-}" == "--classifier-only" ]]; then
+  echo "impact-ci-selftest: classifier controls PASS"
+  exit 0
+fi
 
 # Derive one needs-fixture from another by replacing a job's result.
 #
