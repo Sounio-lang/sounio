@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.native-compile-gates-scale-contract-20261010
+authority: repo_only
+audience: users
+last_validated: 2026-10-10
+validated_by: Codex metadata review; audit provenance 15e8184ef3 (2026-10-10)
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.native-compile-gates-scale-contract-20261010
+-->
+
 # Runtime threshold contract: verified result and remaining backend failure
 
 The candidate is isolated in `/workspace/.tmp/compiler-gates-20261010`, based on published main `45f53364c6f66a4fdcfd1788e2abbd93b70a4106`. No push or merge occurred, and no lower/IR/serialize file was edited.
