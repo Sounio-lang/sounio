@@ -126,6 +126,25 @@ impl Parser {
                 break
             }
 
+            // #2249: `!` and `~` are prefix operators only. After an operand they
+            // have no meaning, so `x ! y`, `x ~ y` and the spaced `x! (y)` are
+            // refused here rather than handed to token_to_binop, whose fallback
+            // used to read them as `x + y`. At the start of a line (any spacing)
+            // the operator begins a new statement, as on lean_single.
+            if op_kind == TokenKind::Bang || op_kind == TokenKind::Tilde {
+                if p.had_newline_before() { break }
+                p.had_error = true
+                p.error_count = p.error_count + 1
+                if p.error_count <= 20 {
+                    if op_kind == TokenKind::Bang {
+                        print("error: `!` is not a binary operator: `a ! b` has no meaning (prefix `!x` is logical not; for inequality write `!=`)\n")
+                    } else {
+                        print("error: `~` is not a binary operator: `a ~ b` has no meaning (prefix `~x` is bitwise not; for xor write `^`)\n")
+                    }
+                }
+                break
+            }
+
             let prec = tk_precedence(op_kind)
 
             // Stop if current operator has lower or equal precedence
@@ -175,6 +194,17 @@ impl Parser {
 
             // Standard binary operator
             if prec == 0 { break }
+
+            // #2249: fail closed on a token that has a precedence but no binary
+            // operator, instead of token_to_binop's old silent OpAdd fallback.
+            if !token_is_binop(op_kind) {
+                p.had_error = true
+                p.error_count = p.error_count + 1
+                if p.error_count <= 20 {
+                    print("error: unexpected token in binary operator position (no binary operator for it)\n")
+                }
+                break
+            }
 
             let bin_op = token_to_binop(op_kind)
             p = p.advance()
@@ -1911,7 +1941,37 @@ fn token_to_binop(kind: TokenKind) -> BinaryOp {
         TokenKind::PlusPlus => BinaryOp::OpConcat,
         TokenKind::DotDot => BinaryOp::OpRange,
         TokenKind::DotDotEq => BinaryOp::OpRangeInclusive,
+        // Unreachable from parse_expr_bp, which refuses any token that
+        // token_is_binop rejects (#2249); there is no meaningful default.
         _ => BinaryOp::OpAdd,
+    }
+}
+
+// #2249: the tokens token_to_binop maps. Keep the two in sync.
+fn token_is_binop(kind: TokenKind) -> bool {
+    match kind {
+        TokenKind::Plus => true,
+        TokenKind::Minus => true,
+        TokenKind::Star => true,
+        TokenKind::Slash => true,
+        TokenKind::Percent => true,
+        TokenKind::EqEq => true,
+        TokenKind::BangEq => true,
+        TokenKind::Lt => true,
+        TokenKind::LtEq => true,
+        TokenKind::Gt => true,
+        TokenKind::GtEq => true,
+        TokenKind::AmpAmp => true,
+        TokenKind::PipePipe => true,
+        TokenKind::Amp => true,
+        TokenKind::Pipe => true,
+        TokenKind::Caret => true,
+        TokenKind::Shl => true,
+        TokenKind::Shr => true,
+        TokenKind::PlusPlus => true,
+        TokenKind::DotDot => true,
+        TokenKind::DotDotEq => true,
+        _ => false,
     }
 }
 
