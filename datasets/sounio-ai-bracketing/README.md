@@ -9,7 +9,7 @@ gold standard; treating it as one would be overclaiming.
 ((u₁ u₂) u₃) vs (u₁ (u₂ u₃)) — changes the interpreted meaning, for humans
 and for LLMs. This is the measurement instrument for the non-associative
 conversational-semantics hypothesis
-(`agent_logs/nonassoc_semantics_audit_2026-08-07.md`): the associator
+(`artifacts/agent-logs/nonassoc_semantics_audit_2026-08-07.md`): the associator
 [u₁,u₂,u₃] = μ(μ(u₁,u₂),u₃) − μ(u₁,μ(u₂,u₃)) is hypothesised to carry
 semantic content. Each item is a minimal triple whose two bracketings yield
 two *distinct, describable* readings.
