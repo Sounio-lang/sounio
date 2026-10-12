@@ -9461,6 +9461,9 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     var cursor = e.arms
     var result_ty = ty_unit()
     var seen_first = false
+    // #830: every arm so far is an unsuffixed float literal, and each fits f32.
+    var result_all_lit = true
+    var lits_fit_f32 = true
     // env-φ (round 3): one enter covers the WHOLE match (all arms are
     // mutually exclusive branches of one construct, exactly like if/else's
     // single enter above) -- balanced by the single
@@ -9470,7 +9473,33 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         match cursor {
             Some(list) => {
                 let arm = (*list).head
-                let arm_ty = checker_check_match_arm_inplace(c, arm, scrut_ty)
+                let arm_ty_raw = checker_check_match_arm_inplace(c, arm, scrut_ty)
+                // #830: an arm whose value is an unsuffixed float literal adopts a
+                // narrower float type from its sibling arms, as at the if/else join.
+                // A literal arm after an f32 arm narrows here; f32 arriving after
+                // only literal arms retypes the running result below.
+                let arm_lit_f = checker_else_arm_float_literal_expr(Some(Box::new(arm.body)))
+                var arm_is_lit = false
+                match arm_lit_f {
+                    Some(lit) => {
+                        arm_is_lit = true
+                        if !checker_expected_accepts_float_literal(lit, arm_ty_raw, ty_f32()) {
+                            lits_fit_f32 = false
+                        }
+                    }
+                    None => {}
+                }
+                var arm_ty = arm_ty_raw
+                if seen_first {
+                    arm_ty = checker_if_arm_float_literal_join_ty(arm_ty_raw, arm_lit_f, result_ty)
+                    if result_all_lit && !arm_is_lit && arm_ty_raw.kind == TypeKind::TyF32
+                        && result_ty.kind == TypeKind::TyF64 && lits_fit_f32 {
+                        result_ty = arm_ty_raw
+                    }
+                }
+                if !arm_is_lit {
+                    result_all_lit = false
+                }
                 if !seen_first {
                     // First arm: its body type becomes the expected/result type.
                     result_ty = arm_ty
