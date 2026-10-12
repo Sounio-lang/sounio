@@ -21,7 +21,7 @@ on only one engine, it says so.
 
 | # | Step | Engine | What it shows | What it does not claim |
 |---|---|---|---|---|
-| 1 | `demo_incerteza.sio` | Madaros | First-order GUM propagation through `+` and `*`: perimeter σ = 0.223607, area σ = 0.707107 (checkable by hand). Output is in Portuguese. | Not second-order; correlated inputs are not shown here. |
+| 1 | `demos/intro/demo_incerteza.sio` | Madaros | First-order GUM propagation through `+` and `*`: perimeter σ = 0.223607, area σ = 0.707107 (checkable by hand). Output is in Portuguese. | Not second-order; correlated inputs are not shown here. |
 | 2a–c | `demos/quantum/no_cloning_*.sio` | Madaros | A qubit as a `linear struct`: one use compiles and runs (positive control); two uses → `E039`; never consumed → `E040`. Refused at compile time, before any run. | A type-system analogue of no-cloning/no-deleting, not a quantum simulator. Destructuring a linear struct currently gives false E039/E040 on Madaros (#2766), so the demo reads a single array field. |
 | 3 | `demos/hydrogen/mh7_coupled_ceiling.sio` | Madaros | Thermodynamic ceiling of the seven-stage metal-hydride compressor from measured van 't Hoff data (Gkanas et al. 2020); the bottleneck is S6→S7 in all six cases; 15/15 concordant pairs. | A ceiling orders the cases; it does not predict the kinetic gap to the COMSOL delivered pressure. |
 | 3x | `demos/hydrogen/tools/mh7_ceiling_crosscheck.cpp` | g++ -std=c++23 | Independent C++ implementation written from the protocol; all six ceilings agree with Sounio's to its printed precision (≤ 0.005 bar). | Sounio prints two decimals, so agreement is shown to two decimals, not four. |
