@@ -8,6 +8,9 @@ import {
   buildGovernedTopicRegistry,
   formatAcceptanceReportStub,
   isRealValidationDate,
+  LEGACY_PLACEHOLDER_DATE,
+  UNVALIDATED_BY,
+  UNVALIDATED_DATE,
   metadataFieldsForTopic,
   parseFrontmatter,
   parseRepoMetadata,
@@ -22,6 +25,12 @@ function compareRegistry(expected, actual) {
 }
 
 function fail(errors) {
+  if (placeholderPaths.length > 0) {
+    console.log(`Notice: ${placeholderPaths.length} governed documents still carry the retired ${LEGACY_PLACEHOLDER_DATE} placeholder, which records no validation (#1240): ${placeholderPaths.slice(0, 5).join(', ')}`);
+  }
+  if (unvalidatedCount > 0) {
+    console.log(`Notice: ${unvalidatedCount} governed documents carry no validation record (last_validated: ${UNVALIDATED_DATE}).`);
+  }
   if (errors.length === 0) {
     console.log('Docs registry check passed.');
     return;
@@ -140,15 +149,34 @@ function metadataMismatch(expectedFields, actualFields, context, errors) {
 // meaningful for the pair -- it still rejects a malformed or blanked record --
 // without rejecting the true values the old constant-equality enforcement used
 // to fail on (the defect the self-falsifying lineage recorded as R22/R23).
+//
+// The one other accepted shape is the explicit no-record marker
+// (`unvalidated` / `none`, #1240). The retired 2026-03-07 placeholder is
+// shaped like a record and is not one; the generator no longer writes it and
+// the checker counts the documents that still carry it (the generated
+// DOCS_AUTHORITY_MATRIX.md snapshot until its next refresh).
+let unvalidatedCount = 0;
+const placeholderPaths = [];
+
 function provenanceFormatErrors(actualFields, context, errors) {
   if (!actualFields) {
     return;
   }
   const date = String(actualFields.last_validated ?? '').trim();
+  const validator = String(actualFields.validated_by ?? '').trim();
+  if (date === UNVALIDATED_DATE) {
+    unvalidatedCount += 1;
+    if (validator !== UNVALIDATED_BY) {
+      errors.push(`${context} metadata mismatch for validated_by: an unvalidated document names no validator, expected "${UNVALIDATED_BY}", got "${validator}"`);
+    }
+    return;
+  }
+  if (date === LEGACY_PLACEHOLDER_DATE) {
+    placeholderPaths.push(context);
+  }
   if (!isRealValidationDate(date)) {
     errors.push(`${context} metadata mismatch for last_validated: expected a YYYY-MM-DD date, got "${date}"`);
   }
-  const validator = String(actualFields.validated_by ?? '').trim();
   if (!validator) {
     errors.push(`${context} metadata mismatch for validated_by: expected a non-empty validator, got ""`);
   }

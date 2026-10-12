@@ -244,8 +244,8 @@ async function main() {
     const restamped = await readFile(headerlessPath, 'utf8');
     assert(restamped.startsWith('<!-- docs:meta\n'), 'a genuinely headerless doc was not given a header');
     assert(
-      restamped.includes('last_validated: 2026-03-07'),
-      'a headerless doc was not stamped with the default provenance placeholder'
+      restamped.includes('last_validated: unvalidated') && restamped.includes('validated_by: none'),
+      'a headerless doc was not marked unvalidated (#1240: no invented date, no invented validator)'
     );
     const headerlessCheck = await runNode(registryCheckScript, headerlessDir);
     assert(headerlessCheck.ok, `Checker rejected a freshly stamped headerless doc:\n${headerlessCheck.stderr || headerlessCheck.stdout}`);
@@ -281,13 +281,45 @@ async function main() {
     assert(impossibleSync.ok, `Impossible-date sync failed:\n${impossibleSync.stderr || impossibleSync.stdout}`);
     const impossibleAfterSync = await readFile(impossiblePath, 'utf8');
     assert(
-      impossibleAfterSync.includes('last_validated: 2026-03-07'),
-      'the sync PRESERVED an impossible date instead of falling back to the default'
+      impossibleAfterSync.includes('last_validated: unvalidated'),
+      'the sync PRESERVED an impossible date instead of falling back to the unvalidated marker'
     );
     const impossibleCheckAfterSync = await runNode(registryCheckScript, impossibleDir);
     assert(
       impossibleCheckAfterSync.ok,
       `Checker rejected the fallback-stamped doc:\n${impossibleCheckAfterSync.stderr || impossibleCheckAfterSync.stdout}`
+    );
+
+    // #1240: the retired generator placeholder (2026-03-07, older than the
+    // repository) is shaped like a record and is not one. The generator never
+    // writes it any more; the checker reports every document that still
+    // carries it, and a sync does not invent a record in its place.
+    const legacyDir = await cloneFixture(baseDir, 'legacy-placeholder');
+    cleanupPaths.push(legacyDir);
+    const legacyPath = path.join(legacyDir, 'docs/features/GPU_RUNTIME.md');
+    const legacyContent = (await readFile(legacyPath, 'utf8'))
+      .replace(/^last_validated: .*$/m, 'last_validated: 2026-03-07')
+      .replace(/^validated_by: .*$/m, 'validated_by: A1');
+    await writeFile(legacyPath, legacyContent, 'utf8');
+    const legacyCheck = await runNode(registryCheckScript, legacyDir);
+    assert(
+      legacyCheck.stdout.includes('still carry the retired 2026-03-07 placeholder')
+        && legacyCheck.stdout.includes('docs/features/GPU_RUNTIME.md'),
+      `checker did not report the retired placeholder:\n${legacyCheck.stdout}`
+    );
+
+    // An unvalidated document names no validator.
+    const unvalByDir = await cloneFixture(baseDir, 'unvalidated-with-validator');
+    cleanupPaths.push(unvalByDir);
+    const unvalByPath = path.join(unvalByDir, 'docs/features/GPU_RUNTIME.md');
+    const unvalByContent = (await readFile(unvalByPath, 'utf8'))
+      .replace(/^last_validated: .*$/m, 'last_validated: unvalidated')
+      .replace(/^validated_by: .*$/m, 'validated_by: claude');
+    await writeFile(unvalByPath, unvalByContent, 'utf8');
+    await expectFailure(
+      await runNode(registryCheckScript, unvalByDir),
+      'an unvalidated document names no validator',
+      'unvalidated marker with a validator rejection'
     );
 
     // 2026-08-18 corpus-race regression: DOCS_ACCEPTANCE_REPORT.md used to
