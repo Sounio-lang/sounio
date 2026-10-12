@@ -9478,20 +9478,22 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                 // narrower float type from its sibling arms, as at the if/else join.
                 // A literal arm after an f32 arm narrows here; f32 arriving after
                 // only literal arms retypes the running result below.
-                let arm_lit_f = checker_else_arm_float_literal_expr(Some(Box::new(arm.body)))
-                var arm_is_lit = false
-                match arm_lit_f {
-                    Some(lit) => {
-                        arm_is_lit = true
-                        if !checker_expected_accepts_float_literal(lit, arm_ty_raw, ty_f32()) {
-                            lits_fit_f32 = false
-                        }
-                    }
-                    None => {}
+                // Literal-ness and magnitude as scalars (-1.0 = the arm's value
+                // is not a float literal). Measured: handing the arm's literal
+                // Expr back through Box/Option let `_ => 1e300` pass the f32
+                // range guard (cause not traced), so only the number leaves the
+                // helper.
+                let arm_lit_mag = checker_arm_body_float_literal_magnitude(arm.body)
+                let arm_is_lit = arm_lit_mag >= 0.0
+                if arm_is_lit && arm_lit_mag > 3.4028235e38 {
+                    lits_fit_f32 = false
                 }
                 var arm_ty = arm_ty_raw
                 if seen_first {
-                    arm_ty = checker_if_arm_float_literal_join_ty(arm_ty_raw, arm_lit_f, result_ty)
+                    if arm_is_lit && arm_ty_raw.kind == TypeKind::TyF64 && result_ty.kind == TypeKind::TyF32
+                        && arm_lit_mag <= 3.4028235e38 {
+                        arm_ty = result_ty
+                    }
                     if result_all_lit && !arm_is_lit && arm_ty_raw.kind == TypeKind::TyF32
                         && result_ty.kind == TypeKind::TyF64 && lits_fit_f32 {
                         result_ty = arm_ty_raw
@@ -21551,6 +21553,23 @@ fn checker_block_tail_float_literal_expr(opt: Option<Box<Block>>) -> Option<Expr
         }
         None => None,
     }
+}
+
+// #830 match arms: the magnitude of the unsuffixed float literal that is the
+// arm's value (the body itself, or the tail of a `{ ... }` body); -1.0 when the
+// value is not a float literal.
+fn checker_arm_body_float_literal_magnitude(ex: Expr) -> f64 with Mut {
+    if ex.kind == ExprKind::ExprBlock {
+        if !checker_block_tail_is_float_literal_like(ex.block) { return 0.0 - 1.0 }
+        match checker_block_tail_float_literal_expr(ex.block) {
+            Some(te) => { return checker_float_literal_magnitude(te) }
+            None => { return 0.0 - 1.0 }
+        }
+    }
+    if checker_expr_is_float_literal_like(ex) {
+        return checker_float_literal_magnitude(ex)
+    }
+    0.0 - 1.0
 }
 
 fn checker_else_arm_float_literal_expr(opt: Option<Box<Expr>>) -> Option<Expr> with Mut {
