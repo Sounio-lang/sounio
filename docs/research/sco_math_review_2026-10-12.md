@@ -1,4 +1,18 @@
-### 2026-10-12 — SCO math-review, PR #2628 (proposed entry for owner review)
+<!-- docs:meta
+topic_id: repo.docs.research.sco-math-review-2026-10-12
+authority: historical
+audience: researchers
+last_validated: 2026-10-12
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.sco-math-review-2026-10-12
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
+# SCO mathematical review record — 2026-10-12
 
 - Reviewed pin: `dfe4db44da3ac96b3c736c4d3464bd71d403f139`.
 - Literal source: `docs/research/scientific_compilation_obligation_2026-08-01.md`; SHA256 `d7798b3be3228d8e49bff51a19a760e392f09c543c1cf7d75678203fa016b3c4`.
@@ -12,3 +26,11 @@
 - Disposition at review completion: reviews recorded; definition remains a historical proposal; no preservation theorem or compiler certificate. Root/author disposition and any later V3 or semantic witness validation must be logged separately against their actual pin. No automatic thread resolution or acceptance is implied by obtaining two responses.
 - Judgment receipt: `outputs/PR2628-M1-Independent-Review-Receipt-20261012.md`.
 
+
+## Accepted disposition and provenance boundary
+
+The definition now uses a source-anchored acceptance relation and explicitly limits composition of ULP-tolerance comparisons. This addresses the documented mathematical objection without asserting a Lean proof or a compiler certificate. The two external responses use distinct model families through the same DevPass gateway; backend weights or independent transport infrastructure were not verified.
+
+This is a retrospective reconciliation record. It does not claim that the reviews occurred before the original PR creation. Later checker/runtime changes have separate source pins and execution receipts; the mathematical reviewers did not certify those changes. Scientific non-vacuity remains open after a bounded numerical probe produced equal enforce and ablation results.
+
+The generated `.claude/llm_offload_log.md` is retained locally, untracked, under the repository snapshot policy. This governed document is the durable review record in this PR. No generated-snapshot guard was weakened.
