@@ -2858,6 +2858,9 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
     (*module_box).string_count = 0
     (*module_box).prof_counter_count = (*summary.module).prof_counter_count
     (*module_box).bss_total_size = (*summary.module).bss_total_size
+    let summary_module = summary.module
+    (*module_box).export_names = (*summary_module).export_names
+    (*module_box).export_count = (*summary_module).export_count
 
     var i: i64 = 0
     while i < (*summary.module).prof_counter_count && i < 64 {
@@ -3645,6 +3648,8 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
     (*module_box).string_count = 0
     (*module_box).prof_counter_count = summary.module.prof_counter_count
     (*module_box).bss_total_size = summary.module.bss_total_size
+    (*module_box).export_names = summary.module.export_names
+    (*module_box).export_count = summary.module.export_count
 
     var i: i64 = 0
     while i < summary.module.prof_counter_count && i < 64 {
@@ -5005,6 +5010,26 @@ fn lowerer_preseed_program_items_mut(
     }
 }
 
+// Match the full item preseed's declaration authority. A public top-level
+// function is strategy7; a kernel is strategy6. Method visibility does not
+// create a top-level export (the existing full impl-method lane does not do so).
+fn ir_fast_summary_declared_strategy(inferred: i64, is_kernel: bool, is_exported: bool) -> i64 {
+    if is_kernel { 6 } else if is_exported { 7 } else { inferred }
+}
+
+fn ir_fast_summary_record_export(module: &! IrModule, name: Name) with Mut, Panic, Div {
+    let count = (*module).export_count
+    var i: i64 = 0
+    while i < count && i < 64 {
+        if ir_name_eq((*module).export_names[i as usize], name) { return }
+        i = i + 1
+    }
+    if count >= 0 && count < 64 {
+        (*module).export_names[count as usize] = name
+        (*module).export_count = count + 1
+    }
+}
+
 fn ir_fast_summary_find_or_add_fn_id(module: &! IrModule, name: Name) -> i64 with Mut, Panic, Div, Alloc {
     var module_value = (*module)
     var i: i64 = 0
@@ -5034,7 +5059,9 @@ fn ir_fast_summary_preseed_fn_signature(
     name: Name,
     params: &Option<Box<ParamList>>,
     return_type: &Option<Box<TypeExpr>>,
-    effects: &Option<Box<EffectList>>
+    effects: &Option<Box<EffectList>>,
+    is_kernel: bool,
+    is_exported: bool
 ) with Mut, Panic, Div, Alloc, IO {
     let fn_id = ir_fast_summary_find_or_add_fn_id(module, name)
     if fn_id < 0 {
@@ -5043,7 +5070,7 @@ fn ir_fast_summary_preseed_fn_signature(
     var module_value = (*module)
     let strategy = lowerer_compute_strategy_from_ast_ref(return_type, effects)
     var fn_slot = ir_fn_get(&module_value, fn_id as usize)
-    fn_slot.compile_strategy = strategy
+    fn_slot.compile_strategy = ir_fast_summary_declared_strategy(strategy, is_kernel, is_exported)
     fn_slot.returns_float = lower_opt_return_float_code(return_type)
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
@@ -5068,6 +5095,7 @@ fn ir_fast_summary_preseed_fn_signature(
         }
     }
     ir_fn_set(&! module_value, fn_id as usize, fn_slot)
+    if is_exported && !is_kernel { ir_fast_summary_record_export(&! module_value, name) }
     (*module) = module_value
 }
 
@@ -5088,7 +5116,7 @@ fn ir_fast_summary_preseed_impl_methods(
                         let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
                         match *fn_def_opt_ref {
                             Some(fd) => {
-                                ir_fast_summary_preseed_fn_signature(module, mangled, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                                ir_fast_summary_preseed_fn_signature(module, mangled, &(*fd).params, &(*fd).return_type, &(*fd).effects, (*fd).is_kernel, false)
                             }
                             _ => {}
                         }
@@ -5118,7 +5146,7 @@ fn ir_fast_summary_preseed_items(
                         let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
                         match *fn_def_opt_ref {
                             Some(fd) => {
-                                ir_fast_summary_preseed_fn_signature(module, name, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                                ir_fast_summary_preseed_fn_signature(module, name, &(*fd).params, &(*fd).return_type, &(*fd).effects, (*fd).is_kernel, visibility_to_bool(head.visibility))
                             }
                             _ => {}
                         }
@@ -5167,7 +5195,9 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     name: Name,
     params: &Option<Box<ParamList>>,
     return_type: &Option<Box<TypeExpr>>,
-    effects: &Option<Box<EffectList>>
+    effects: &Option<Box<EffectList>>,
+    is_kernel: bool,
+    is_exported: bool
 ) -> IrModule with Mut, Panic, Div, Alloc, IO {
     let pair = ir_fast_summary_find_or_add_fn_id_owned(module, name)
     var module_value = pair.0
@@ -5177,7 +5207,7 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     }
     let strategy = lowerer_compute_strategy_from_ast_ref(return_type, effects)
     var fn_slot = ir_fn_get(&module_value, fn_id as usize)
-    fn_slot.compile_strategy = strategy
+    fn_slot.compile_strategy = ir_fast_summary_declared_strategy(strategy, is_kernel, is_exported)
     fn_slot.returns_float = lower_opt_return_float_code(return_type)
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
@@ -5202,6 +5232,7 @@ fn ir_fast_summary_preseed_fn_signature_owned(
         }
     }
     ir_fn_set(&! module_value, fn_id as usize, fn_slot)
+    if is_exported && !is_kernel { ir_fast_summary_record_export(&! module_value, name) }
     module_value
 }
 
@@ -5221,7 +5252,7 @@ fn ir_fast_summary_preseed_impl_methods_owned(
                 if !ir_name_eq(mangled, skip_name) {
                     match item.fn_def {
                         Some(fd) => {
-                            module_value = ir_fast_summary_preseed_fn_signature_owned(module_value, mangled, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                            module_value = ir_fast_summary_preseed_fn_signature_owned(module_value, mangled, &(*fd).params, &(*fd).return_type, &(*fd).effects, (*fd).is_kernel, false)
                         }
                         _ => {}
                     }
@@ -5249,7 +5280,7 @@ fn ir_fast_summary_preseed_items_owned(
                 if !ir_name_eq(name, skip_name) {
                     match item.fn_def {
                         Some(fd) => {
-                            module_value = ir_fast_summary_preseed_fn_signature_owned(module_value, name, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                            module_value = ir_fast_summary_preseed_fn_signature_owned(module_value, name, &(*fd).params, &(*fd).return_type, &(*fd).effects, (*fd).is_kernel, visibility_to_bool(item.visibility))
                         }
                         _ => {}
                     }
@@ -5375,7 +5406,7 @@ fn ir_fast_summary_preseed_impl_methods_seed_owned(
                 if !ir_name_eq(mangled, skip_name) {
                     match item.fn_def {
                         Some(fd) => {
-                            seed_value.module = ir_fast_summary_preseed_fn_signature_owned(seed_value.module, mangled, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                            seed_value.module = ir_fast_summary_preseed_fn_signature_owned(seed_value.module, mangled, &(*fd).params, &(*fd).return_type, &(*fd).effects, (*fd).is_kernel, false)
                         }
                         _ => {}
                     }
@@ -5403,7 +5434,7 @@ fn ir_fast_summary_preseed_items_seed_owned(
                 if !ir_name_eq(name, skip_name) {
                     match item.fn_def {
                         Some(fd) => {
-                            seed_value.module = ir_fast_summary_preseed_fn_signature_owned(seed_value.module, name, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                            seed_value.module = ir_fast_summary_preseed_fn_signature_owned(seed_value.module, name, &(*fd).params, &(*fd).return_type, &(*fd).effects, (*fd).is_kernel, visibility_to_bool(item.visibility))
                                 }
                                 _ => {
                                     var bss_mod = seed_value.module
@@ -5501,7 +5532,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                             if fn_id >= 0 {
                                 let strategy = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
                                 var fn_slot = ir_fn_get(&module, fn_id as usize)
-                                fn_slot.compile_strategy = strategy
+                                fn_slot.compile_strategy = ir_fast_summary_declared_strategy(strategy, (*fd).is_kernel, visibility_to_bool(item.visibility))
                                 fn_slot.returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                 fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                 fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
@@ -5524,6 +5555,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                     }
                                 }
                                 ir_fn_set(&! module, fn_id as usize, fn_slot)
+                                if visibility_to_bool(item.visibility) && !(*fd).is_kernel { ir_fast_summary_record_export(&! module, name) }
                             }
                         }
                         _ => {
@@ -5600,7 +5632,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                     if fn_id >= 0 {
                                                         let strategy = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
                                                         var fn_slot = ir_fn_get(&module, fn_id as usize)
-                                                        fn_slot.compile_strategy = strategy
+                                                        fn_slot.compile_strategy = ir_fast_summary_declared_strategy(strategy, (*fd).is_kernel, false)
                                                         fn_slot.returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                                         fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                                         fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
