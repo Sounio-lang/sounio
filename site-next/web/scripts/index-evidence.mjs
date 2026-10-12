@@ -41,20 +41,10 @@ function classify(status) {
   return v ? { kind: 'gate', level: v } : { kind: 'record', level: null };
 }
 
-// Intervalo de Wilson 95%.
-//
-// Todo portão que reporta passed/total é uma proporção estimada de uma amostra
-// finita. "Todos passaram" com n=1 sustenta [0.207, 1.000] — quase nada. O site
-// desenha esse intervalo porque é o que a amostra realmente diz, e porque um
-// valor nesta linguagem é uma banda, não um ponto.
-function wilson(k, n, z = 1.96) {
-  if (!(n > 0)) return null;
-  const p = k / n;
-  const d = 1 + (z * z) / n;
-  const c = (p + (z * z) / (2 * n)) / d;
-  const h = (z / d) * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n));
-  const lo = Math.max(0, c - h), hi = Math.min(1, c + h);
-  return { passed: k, total: n, point: p, lo, hi, width: hi - lo };
+// Deterministic test inventory: report counts, not a sampling confidence interval.
+function passFraction(k, n) {
+  if (!Number.isSafeInteger(k) || !Number.isSafeInteger(n) || n <= 0 || k < 0 || k > n) return null;
+  return { passed: k, total: n };
 }
 
 // O território é o primeiro segmento do id, com uma normalização: as pastas
@@ -100,7 +90,7 @@ for (const f of files) {
 
   const { kind, level } = classify(rawStatus);
   const prop = (typeof metrics.passed === 'number' && typeof metrics.total === 'number')
-    ? wilson(metrics.passed, metrics.total) : null;
+    ? passFraction(metrics.passed, metrics.total) : null;
 
   entries.push({
     id,
@@ -128,7 +118,6 @@ const byTerritory = entries.reduce((a, e) => ((a[e.territory] = (a[e.territory] 
 const metricCount = entries.reduce((n, e) => n + Object.keys(e.metrics).length, 0);
 const withProp = entries.filter(e => e.proportion);
 const allPass = withProp.filter(e => e.proportion.passed === e.proportion.total);
-const widths = withProp.map(e => e.proportion.width).sort((a, b) => a - b);
 
 mkdirSync(dirname(OUT), { recursive: true });
 writeFileSync(OUT,
@@ -147,9 +136,6 @@ export const EVIDENCE_STATS = ${JSON.stringify({
   proportions: {
     count: withProp.length,
     allPass: allPass.length,
-    widest: widths.length ? widths[widths.length - 1] : 0,
-    median: widths.length ? widths[Math.floor(widths.length / 2)] : 0,
-    narrowest: widths.length ? widths[0] : 0,
   },
 }, null, 1)} as const;
 `);

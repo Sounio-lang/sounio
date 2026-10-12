@@ -3,14 +3,10 @@ import Foundation
 /// Portão declara veredito; registro traz medição e procedência.
 public enum Kind: String, Sendable { case gate, record }
 
-/// O que uma amostra finita sustenta, a 95% (Wilson).
+/// Deterministic passed/total inventory; no sampling confidence interval.
 public struct Proportion: Sendable {
     public let passed: Int
     public let total: Int
-    public let point: Double
-    public let lo: Double
-    public let hi: Double
-    public var width: Double { hi - lo }
 }
 
 public struct Artifact: Sendable {
@@ -65,7 +61,7 @@ public struct Evidence: Sendable {
             }
 
             let (kind, level) = Self.classify(status)
-            let prop = Self.wilson(metrics["passed"], metrics["total"])
+            let prop = Self.passFraction(metrics["passed"], metrics["total"])
             out[id] = Artifact(id: id, kind: kind, proportion: prop, territory: Self.territory(id),
                                status: status, level: level,
                                reason: reason, generatedAt: generatedAt, metrics: metrics)
@@ -96,16 +92,10 @@ public struct Evidence: Sendable {
         return String(cString: n.objCType) == "c" ? nil : n.doubleValue
     }
 
-    /// Intervalo de Wilson 95%. "Todos passaram" com n=1 sustenta
-    /// [0.207, 1.000] — quase nada. É o que a amostra realmente diz.
-    private static func wilson(_ k: Double?, _ n: Double?, z: Double = 1.96) -> Proportion? {
-        guard let k, let n, n > 0 else { return nil }
-        let p = k / n
-        let d = 1 + z * z / n
-        let c = (p + z * z / (2 * n)) / d
-        let h = z / d * (p * (1 - p) / n + z * z / (4 * n * n)).squareRoot()
-        return Proportion(passed: Int(k), total: Int(n), point: p,
-                          lo: max(0, c - h), hi: min(1, c + h))
+    /// Plain inventory; deterministic checks are not a sampling experiment.
+    private static func passFraction(_ k: Double?, _ n: Double?) -> Proportion? {
+        guard let k, let n, n > 0, n <= 9007199254740991, k >= 0, k <= n, k.rounded() == k, n.rounded() == n else { return nil }
+        return Proportion(passed: Int(k), total: Int(n))
     }
 
     /// Duas espécies, não uma com metade quebrada.
@@ -166,32 +156,23 @@ public struct Evidence: Sendable {
     public struct Stats: Sendable {
         public let artifacts: Int, metrics: Int, gates: Int, records: Int, refused: Int
         public let proportions: Int, allPass: Int
-        public let widest: Double, narrowest: Double
     }
 
     public var stats: Stats {
         var metrics = 0, gates = 0, records = 0, refused = 0
-        var widths: [Double] = [], allPass = 0
+        var proportions = 0, allPass = 0
         for a in artifacts.values {
             metrics += a.metrics.count
             if a.kind == .gate { gates += 1 } else { records += 1 }
             if a.level == .refused { refused += 1 }
             if let p = a.proportion {
-                widths.append(p.width)
+                proportions += 1
                 if p.passed == p.total { allPass += 1 }
             }
         }
-        widths.sort()
         return Stats(artifacts: artifacts.count, metrics: metrics, gates: gates,
                      records: records, refused: refused,
-                     proportions: widths.count, allPass: allPass,
-                     widest: widths.last ?? 0, narrowest: widths.first ?? 0)
+                     proportions: proportions, allPass: allPass)
     }
 
-    /// 0 = a amostra restringe · 1 = a amostra mal restringe.
-    public func tension(_ p: Proportion) -> Double {
-        let s = stats
-        let span = s.widest - s.narrowest
-        return span > 0 ? (p.width - s.narrowest) / span : 0
-    }
 }

@@ -7,6 +7,7 @@
  * `site/dose_scene.v1`. Nenhum número desta cena é escolhido aqui.
  */
 export interface Scene {
+  readings: Record<string, Reading>;
   weight: number; perKg: number; perKgVar: number;
   windowLo: number; windowHi: number; z: number;
   axisLo: number; axisHi: number; tickStep: number;
@@ -24,22 +25,15 @@ export interface Reading {
  * É a mesma fórmula que o exemplo escreve por extenso.
  */
 export function propagate(s: Scene, weightSd: number): Reading {
-  const variance = s.perKg * s.perKg * weightSd * weightSd
-                 + s.weight * s.weight * s.perKgVar;
-  const sd = Math.sqrt(variance);
-  const mean = s.weight * s.perKg;
-  const lo = mean - s.z * sd;
-  const hi = mean + s.z * sd;
-  return { mean, sd, lo, hi, variance, outside: lo < s.windowLo || hi > s.windowHi };
+  const key = weightSd.toFixed(1);
+  if (Number(key) !== weightSd) throw new RangeError("Slider value is not on the recorded one-decimal grid");
+  const r = s.readings[key];
+  if (!r) throw new Error("No C++23 source-linked reading for slider key " + key);
+  return r;
 }
 
 /** Como a balança seria descrita numa enfermaria, dado o σ. */
-export function scaleKind(sd: number): string {
-  if (sd <= 0.8) return 'calibrated clinical scale';
-  if (sd <= 2.5) return 'ward scale';
-  if (sd <= 4.5) return 'old scale, patient in clothes';
-  return 'eyeballed from the chart';
-}
+export function scaleKind(_sd: number): string { return "illustrative measurement uncertainty"; }
 
 /** Posição de uma dose no eixo desenhado, em porcento. Layout, não afirmação. */
 export function pos(s: Scene, mg: number): number {

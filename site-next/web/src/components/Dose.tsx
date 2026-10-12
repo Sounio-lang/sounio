@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { claim } from '../evidence/claim';
+import { claim, EVIDENCE } from '../evidence/claim';
 import { propagate, scaleKind, pos, ticks, f1, type Scene } from '../dose';
 import './dose.css';
 
@@ -8,7 +8,15 @@ export const DOSE = 'site/dose_scene.v1';
 
 const v = (m: string) => claim(DOSE, m).value;
 
+const readings = Object.fromEntries(Object.keys(EVIDENCE[DOSE].metrics)
+  .filter(key => key.startsWith('readings.') && key.endsWith('.mean'))
+  .map(key => {
+    const sliderKey = key.slice('readings.'.length, -'.mean'.length);
+    const field = (name: string) => v('readings.' + sliderKey + '.' + name);
+    return [sliderKey, { mean:field('mean'), sd:field('sd'), lo:field('lo'), hi:field('hi'), variance:field('variance'), outside:field('outside') !== 0 }];
+  }));
 const scene: Scene = {
+  readings,
   weight: v('weight'), perKg: v('per_kg'), perKgVar: v('per_kg_var'),
   windowLo: v('window_lo'), windowHi: v('window_hi'), z: v('z'),
   axisLo: v('axis_lo'), axisHi: v('axis_hi'), tickStep: v('tick_step'),
@@ -134,7 +142,7 @@ export function DoseRig() {
               {r.outside
                 ? <>The interval [{f1(r.lo)}, {f1(r.hi)}] leaves the window. The
                     bound is checked against the interval, so there is no longer
-                    a safe dose to assert.</>
+                    an admissible interval in this illustration.</>
                 : <>Interval [{f1(r.lo)}, {f1(r.hi)}] — inside the window</>}
             </div>
           </div>

@@ -27,9 +27,9 @@ export function Home() {
 
       {/* 2. O GESTO — o argumento inteiro num movimento do dedo. */}
       <section className="band">
-        <p className="kicker">the therapeutic window</p>
+        <p className="kicker">an illustrative window</p>
         <h2>
-          The dose is safe between <Claim of={DOSE} metric="window_lo" /> and{' '}
+          The illustrative bound spans <Claim of={DOSE} metric="window_lo" /> and{' '}
           <Claim of={DOSE} metric="window_hi" /> mg.
         </h2>
         <p className="lede lede-lg">
@@ -60,9 +60,7 @@ export function Home() {
         <H2Scene />
 
         <p className="lede">
-          Three implementations, measured under a factor four in step size. Two of
-          them were written independently of each other; they agree, and they are
-          both wrong in the same way.
+          Recorded C++ and Sounio results under the same step refinement. These source-linked measurements are historical; this scene does not rerun either chemistry solver.
         </p>
 
         <H2Contrast />
@@ -100,7 +98,7 @@ export function Home() {
 
       {/* 4. E NÃO É PROTÓTIPO — o tamanho entra aqui, depois do motivo. */}
       <section className="band">
-        <h2>And it is not a prototype.</h2>
+        <h2>A compiler written in its own language.</h2>
         <p className="lede">
           The compiler that enforces the above is written in Sounio and compiles
           itself: <b><Claim of={CORPUS} metric="compiler.lines" /> lines</b> of it,

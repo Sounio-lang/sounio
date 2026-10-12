@@ -6,14 +6,10 @@ export type Level = 'verified' | 'unbounded' | 'refused';
 /** Portão declara veredito; registro traz medição e procedência. */
 export type Kind = 'gate' | 'record';
 
-/** O que uma amostra finita sustenta, a 95%. */
+/** Plain passed/total inventory; no sampling confidence claim. */
 export interface Proportion {
   passed: number;
   total: number;
-  point: number;
-  lo: number;
-  hi: number;
-  width: number;
 }
 
 export interface Artifact {

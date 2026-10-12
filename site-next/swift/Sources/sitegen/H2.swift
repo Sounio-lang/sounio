@@ -26,7 +26,7 @@ enum H2 {
     /// Largura relativa em cada passo, com dt = 4e-9 valendo 1.
     static func widths(_ ev: Evidence, side: String, species s: String) throws -> [String: Double] {
         func v(_ m: String) throws -> Double { try ev.claim(id, metric: "\(side).\(s).\(m)").value }
-        return ["dt4": 1, "dt2": 1 / (try v("half1")), "dt1": 1 / (try v("quarter"))]
+        return ["dt4": try v("dt4"), "dt2": try v("dt2"), "dt1": try v("dt1")]
     }
 
     static func f3(_ v: Double) -> String { String(format: "%.3f", v) }
@@ -77,7 +77,7 @@ enum H2 {
             <div class="steps" role="group" aria-label="Integration step">\(buttons)</div>
           </div>
           <div class="sweep-legend">
-            <span data-side="quadrature">per-step quadrature</span>
+            <span data-side="quadrature">recorded C++ quadrature</span>
             <span data-side="native">Sounio, coherent propagation</span>
           </div>
           <ul class="sp">\(rows)</ul>
@@ -89,10 +89,9 @@ enum H2 {
         """
     }
 
-    /// O contraste em três implementações independentes, sob um fator quatro no passo.
+    /// O contraste em duas referências canônicas registradas, sob um fator quatro no passo.
     static func contrast(_ ev: Evidence) throws -> String {
         let rows: [(String, String, String)] = [
-            ("replica", "Python replica", "per-step independent quadrature"),
             ("cpp", "C++ cross-check", "same formula, independently written from the published protocol rather than translated"),
             ("native", "Sounio native", "coherent sensitivity propagation"),
         ]

@@ -89,7 +89,15 @@ function num(el: HTMLElement, k: string): number {
 }
 
 function mountRig(host: HTMLElement) {
+  const rawReadings = JSON.parse(host.dataset.readings ?? 'null');
+  if (!rawReadings || typeof rawReadings !== 'object') throw new Error('Missing C++23 dose readings');
+  const readings: Record<string, import('../dose').Reading> = {};
+  for (const [key, value] of Object.entries(rawReadings)) {
+    const r = value as Record<string, number>;
+    readings[key] = { mean:r.mean, sd:r.sd, lo:r.lo, hi:r.hi, variance:r.variance, outside:r.outside !== 0 };
+  }
   const scene: Scene = {
+    readings,
     weight: num(host, 'weight'), perKg: num(host, 'perKg'),
     perKgVar: num(host, 'perKgVar'),
     windowLo: num(host, 'windowLo'), windowHi: num(host, 'windowHi'),
@@ -123,7 +131,7 @@ function mountRig(host: HTMLElement) {
     vv!.textContent = r.outside ? 'REFUSED' : `${f1(r.mean)} ± ${f1(r.sd)} mg`;
     vw!.textContent = r.outside
       ? `The interval [${f1(r.lo)}, ${f1(r.hi)}] leaves the window. The bound is `
-        + `checked against the interval, so there is no longer a safe dose to assert.`
+        + `checked against the interval, so there is no longer an admissible interval in this illustration.`
       : `Interval [${f1(r.lo)}, ${f1(r.hi)}] — inside the window`;
   }
 

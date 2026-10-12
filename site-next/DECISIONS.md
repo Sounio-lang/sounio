@@ -1,3 +1,7 @@
+# Current ADR009 reconciliation
+
+Scientific arithmetic is moving to source-linked C++23 artifacts. Deterministic test counts are shown as passed/total; they do not receive sampling confidence intervals. The former Wilson presentation below is superseded. Dose and H2 views retain their visual system while consuming precomputed scientific readings.
+
 # Site v2 — decisões
 
 Registro do que vale hoje, do que foi derrubado, e por quê.

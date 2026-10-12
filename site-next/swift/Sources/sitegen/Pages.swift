@@ -47,19 +47,11 @@ enum Pages {
     static func interval(_ ev: Evidence, _ a: Artifact, showId: Bool = true) -> String {
         guard let p = a.proportion else { return "" }
         let failed = a.level == .refused
-        let t = String(format: "%.4f", ev.tension(p))
-        let lo = String(format: "%.4f", p.lo * 100)
-        let w = String(format: "%.4f", max(p.width * 100, 0.35))
-        let pt = String(format: "%.4f", p.point * 100)
         let id = showId ? "<span class=\"iv-id\">\(Design.esc(a.id))</span>" : ""
         return """
-        <div class="iv"\(failed ? " data-fail" : "") style="--t:\(t)">
+        <div class="iv"\(failed ? " data-fail" : "")>
           <span class="iv-n">\(p.passed)<i>/</i>\(p.total)</span>
-          <span class="iv-track">
-            <span class="iv-band" style="left:\(lo)%;width:\(w)%"></span>
-            <span class="iv-point" style="left:\(pt)%"></span>
-          </span>
-          <span class="iv-text">[\(String(format: "%.3f", p.lo)), \(String(format: "%.3f", p.hi))]</span>
+          <span class="iv-text">checks passed</span>
           \(id)
         </div>
         """
@@ -90,8 +82,8 @@ enum Pages {
 
           <!-- 2. O GESTO — o argumento inteiro num movimento do dedo. -->
           <section class="band">
-            <p class="kicker">the therapeutic window</p>
-            <h2>The dose is safe between \(chip(try ev.claim(D, metric: "window_lo"))) and \(chip(try ev.claim(D, metric: "window_hi"))) mg.</h2>
+            <p class="kicker">an illustrative window</p>
+            <h2>The illustrative bound spans \(chip(try ev.claim(D, metric: "window_lo"))) and \(chip(try ev.claim(D, metric: "window_hi"))) mg.</h2>
             \(para([
                 .claim(try ev.claim(D, metric: "dose")),
                 .text(try Prose(" sits dead centre. It looks like the safest possible answer — and it will keep looking that way no matter how bad the scale is, because a point estimate has nowhere to move. Drag the scale's precision and watch what does. The window is a bound your program declares; what changes is that Sounio checks it against the interval instead of against the point.")),
@@ -111,7 +103,7 @@ enum Pages {
                 .text(try Prose(" reactions — and reported a 1-σ band on the radicals. Halve the step and the band shrinks by about √2. Halve it again and it shrinks again. Nothing about the chemistry changed.")),
             ], cls: "lede lede-lg"))
             \(try H2.sweep(ev))
-            \(try p("Three implementations, measured under a factor four in step size. Two of them were written independently of each other; they agree, and they are both wrong in the same way."))
+            \(try p("Recorded C++ and Sounio results under the same step refinement. These source-linked measurements are historical; this scene does not rerun either chemistry solver."))
             \(try H2.contrast(ev))
             \(para([
                 .text(try Prose("The per-step form adds an independent uncertainty at every step, when successive steps share the same rate parameters and are not independent. Quadrature over dependent terms emits a bound tighter than the truth — which is the one direction of error this language treats as a lie rather than an approximation.")),
@@ -142,7 +134,7 @@ enum Pages {
 
           <!-- 4. E NÃO É PROTÓTIPO — o tamanho entra depois do motivo. -->
           <section class="band">
-            <h2>And it is not a prototype.</h2>
+            <h2>A compiler written in its own language.</h2>
             \(para([
                 .text(try Prose("The compiler that enforces the above is written in Sounio and compiles itself: ")),
                 .claim(try ev.claim(C, metric: "compiler.lines")),
@@ -253,14 +245,12 @@ enum Pages {
             ]))
             \(readout([
                 (String(s.gates), "gates"), (String(s.records), "records"),
-                (String(s.refused), "refusals"), (String(s.proportions), "with an interval"),
-                (String(format: "%.3f", s.widest), "widest interval"),
-                (String(format: "%.3f", s.narrowest), "narrowest"),
+                (String(s.refused), "refusals"), (String(s.proportions), "with pass counts"),
             ]))
             <div class="controls">
               <div data-island="proof-filter" data-target=".territories"></div>
               \(para([
-                  .text(try Prose("Grouped by territory. Within each, refusals first. Where a gate reports passed over total, its Wilson 95% interval is drawn. All ")),
+                  .text(try Prose("Grouped by territory. Within each, refusals first. Where a gate reports passed over total, its deterministic pass fraction is shown. All ")),
                   .strong(String(s.artifacts)),
                   .text(try Prose(" rows are in this HTML — the filter only hides them.")),
               ], cls: "note"))
@@ -372,7 +362,7 @@ enum Pages {
 
           <section class="band">
             <h2>The example on the front page understated its own uncertainty</h2>
-            \(try p("The clinical scene that opens this site is not a mock-up. Its numbers are extracted at build time from the flagship demonstration of GUM uncertainty propagation in this repository.", cls: "lede lede-lg"))
+            \(try p("The opening scene is a pedagogical illustration. Its displayed readings are calculated in C++23 from a source-linked artifact for the repository’s GUM uncertainty propagation example; they are not clinical validation.", cls: "lede lede-lg"))
             \(para([
                 .text(try Prose("Its header documents the expected output as σ = ")),
                 .claim(try ev.claim(Dose.id, metric: "documented_sd")),
@@ -428,7 +418,7 @@ enum Pages {
                 \(para([
                     .text(try Prose("Every claim stops at a level, E0 through E5, stated rather than implied. Stopping at E4 is not a failure. Saying you reached E5 when you stopped at E4 is. Across the corpus ")),
                     .strong(String(s.allPass)),
-                    .text(try Prose(" gates report all-pass, and not one of them reaches certainty.")),
+                    .text(try Prose(" gates report all-pass, these are deterministic test counts, not statistical confidence estimates.")),
                 ]))
               </div>
             </div>

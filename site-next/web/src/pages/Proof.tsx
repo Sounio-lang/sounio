@@ -94,9 +94,7 @@ export function Proof() {
           <div><b>{EVIDENCE_STATS.byKind.gate}</b><span>gates</span></div>
           <div><b>{EVIDENCE_STATS.byKind.record}</b><span>records</span></div>
           <div><b>{EVIDENCE_STATS.byLevel.refused}</b><span>refusals</span></div>
-          <div><b>{P.count}</b><span>with an interval</span></div>
-          <div><b>{P.widest.toFixed(3)}</b><span>widest interval</span></div>
-          <div><b>{P.narrowest.toFixed(3)}</b><span>narrowest</span></div>
+          <div><b>{P.count}</b><span>with pass counts</span></div>
         </div>
 
         <div className="controls">
@@ -110,7 +108,7 @@ export function Proof() {
           </div>
           <p className="note" style={{ margin: 0 }}>
             Grouped by territory. Within each, refusals first. Where a gate reports
-            passed/total, its Wilson 95% interval is drawn.
+            passed/total, its deterministic pass fraction is shown.
           </p>
         </div>
       </section>

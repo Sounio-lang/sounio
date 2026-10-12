@@ -13,6 +13,9 @@ const ratios = (side: 'quadrature' | 'native', s: string): Ratios => ({
   half1: claim(H2, `${side}.${s}.half1`).value,
   half2: claim(H2, `${side}.${s}.half2`).value,
   quarter: claim(H2, `${side}.${s}.quarter`).value,
+  dt4: claim(H2, `${side}.${s}.dt4`).value,
+  dt2: claim(H2, `${side}.${s}.dt2`).value,
+  dt1: claim(H2, `${side}.${s}.dt1`).value,
 });
 
 // espécies cuja banda não acumula: dominada pela incerteza da condição inicial
@@ -44,7 +47,7 @@ export function H2Scene() {
         </div>
 
         <div className="sweep-legend">
-          <span data-side="quadrature">per-step quadrature</span>
+          <span data-side="quadrature">recorded C++ quadrature</span>
           <span data-side="native">Sounio, coherent propagation</span>
         </div>
 
@@ -92,10 +95,9 @@ export function H2Scene() {
   );
 }
 
-/** O contraste em três implementações independentes, sob um fator quatro no passo. */
+/** O contraste em duas referências canônicas registradas, sob um fator quatro no passo. */
 export function H2Contrast() {
   const rows = [
-    { k: 'replica', name: 'Python replica', note: 'per-step independent quadrature' },
     { k: 'cpp', name: 'C++ cross-check', note: 'same formula, independently written from the published protocol rather than translated' },
     { k: 'native', name: 'Sounio native', note: 'coherent sensitivity propagation' },
   ];

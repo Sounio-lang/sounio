@@ -9,7 +9,7 @@
  * da quadratura. Normalizar cada implementação ao seu próprio ponto de partida
  * mantém os dois lados como medições.
  */
-export interface Ratios { half1: number; half2: number; quarter: number }
+export interface Ratios { half1: number; half2: number; quarter: number; dt4: number; dt2: number; dt1: number }
 
 /** Os três passos medidos. Não há continuum: a interação para onde a medição parou. */
 export const STEPS = [
@@ -22,7 +22,7 @@ export type StepKey = (typeof STEPS)[number]['key'];
 
 /** Largura relativa da banda em cada passo, com dt = 4e-9 valendo 1. */
 export function widths(r: Ratios): Record<StepKey, number> {
-  return { dt4: 1, dt2: 1 / r.half1, dt1: 1 / r.quarter };
+  return { dt4: r.dt4, dt2: r.dt2, dt1: r.dt1 };
 }
 
 export const f3 = (v: number) => v.toFixed(3);

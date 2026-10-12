@@ -116,8 +116,8 @@ export function Honesty() {
       <section className="band">
         <h2>The example on the front page understated its own uncertainty</h2>
         <p className="lede lede-lg">
-          The clinical scene that opens this site is not a mock-up. Its numbers are
-          extracted at build time from{' '}
+          The opening scene is a pedagogical illustration. Its displayed readings
+          are calculated in C++23 from the source-linked artifact for{' '}
           <b>examples/real_world/01_dose_uncertainty.sio</b>, the flagship
           demonstration of GUM uncertainty propagation in this repository.
         </p>
@@ -183,7 +183,7 @@ export function Honesty() {
             <p className="lede">
               Every claim stops at a level, E0 through E5, stated rather than implied.
               Stopping at E4 is not a failure. Saying you reached E5 when you stopped at E4 is.
-              Across the corpus, <b>{P.allPass}</b> gates report all-pass, and not one of them reaches certainty.
+              Across the corpus, <b>{P.allPass}</b> gates report all-pass, these are deterministic test counts, not statistical confidence estimates.
             </p>
           </div>
         </div>
