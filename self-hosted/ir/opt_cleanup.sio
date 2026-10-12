@@ -10127,6 +10127,31 @@ fn ocp_mfi_center_exact_float(integer: i64) -> bool {
     (value as i64) == integer
 }
 
+// Metadata domain only: zero, or finite normal magnitudes in [2^-30, 2^55).
+// Every admitted nonzero center is an integer with |center|<=2^54; every
+// admitted nonzero uncertainty is >=1e-9 and <=2. Smaller values cannot pass
+// the existing exact nanoscale roundtrip. Other IEEE encodings remain unknown.
+fn ocp_mfi_center_decode_literal_bits(bits: i64) -> (bool, f64) with Mut, Div {
+    let sign = (bits >> 63) & 1
+    let exponent = (bits >> 52) & 2047
+    let fraction = bits & 4503599627370495
+    if exponent == 0 && fraction == 0 {
+        return (true, if sign == 1 { (0.0 - 1.0) * 0.0 } else { 0.0 })
+    }
+    if exponent < 993 || exponent > 1077 { return (false, 0.0) }
+    // fraction fits exactly in binary64; division by 2^52 and adding the
+    // implicit bit construct a representable 53-bit significand exactly.
+    var value = 1.0 + (fraction as f64) / 4503599627370496.0
+    let power = exponent - 1023
+    var i: i64 = 0
+    if power >= 0 {
+        while i < power { value = value * 2.0; i = i + 1 }
+    } else {
+        while i < (0 - power) { value = value * 0.5; i = i + 1 }
+    }
+    (true, if sign == 1 { 0.0 - value } else { value })
+}
+
 fn ocp_mfi_center_rss(lhs: i64, rhs: i64) -> (bool, i64) {
     if lhs < 0 || rhs < 0 || lhs > 2000000000 || rhs > 2000000000 { return (false, 0) }
     let result = eg_isqrt(lhs * lhs + rhs * rhs)
@@ -10348,8 +10373,11 @@ fn ocp_mfi_integral_center_pass(module: &! IrModule, fi: i64) with Mut, Div, Pan
                 let definition_slot = ir_region_slot_r(region, definition)
                 if (IR_A_OP[definition_slot as usize] as IrOpcode) == IrOpcode::IrLoadImm
                     && IR_A_DST[definition_slot as usize] == dst {
-                    literal[dst as usize] = true
-                    literal_value[dst as usize] = bits_to_f64(IR_A_IMM_I64[definition_slot as usize])
+                    let decoded = ocp_mfi_center_decode_literal_bits(IR_A_IMM_I64[definition_slot as usize])
+                    if decoded.0 {
+                        literal[dst as usize] = true
+                        literal_value[dst as usize] = decoded.1
+                    }
                 }
             }
         }
