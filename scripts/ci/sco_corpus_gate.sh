@@ -7,9 +7,9 @@
 # corpus sentinels. It does NOT discharge full SCO (needs Step III E(τ)
 # and non-vacuity).
 set -euo pipefail
-
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
+source "$ROOT/scripts/ci/sco_stack_contract.sh"
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT/stdlib}"
 SOUC="${SOUC:-$ROOT/bin/souc}"
 

@@ -3,6 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
+source "$ROOT/scripts/ci/sco_stack_contract.sh"
 MADAROS="${SCO_MADAROS:-$ROOT/artifacts/self-hosted/madaros-sco}"
 OUT="${SCO_OUTPUT_DIR:-$ROOT/artifacts/sco}/strategy"
 mkdir -p "$OUT"
