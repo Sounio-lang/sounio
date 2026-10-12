@@ -39,9 +39,9 @@ Where they differ, this page says which one ran.
 
 | claim | program | time |
 |---|---|---|
-| uncertainty propagates analytically by the GUM, at compile-time-known cost | `demo_incerteza.sio` | 3 s |
-| derived units (`unit velocity = m / s;`) type-check; `m + s` is rejected | `demo_unidades.sio` (lean_single) | <1 s |
-| a `Knowledge<Patient where { age >= 18 }>` built with age 13 aborts before the next line runs | `demo_portas_rejeicao.sio`, via `scripts/ontology/expand_knowledge_runtime_guards.sh` | 3 s |
+| uncertainty propagates analytically by the GUM, at compile-time-known cost | `demos/intro/demo_incerteza.sio` | 3 s |
+| derived units (`unit velocity = m / s;`) type-check; `m + s` is rejected | `demos/intro/demo_unidades.sio` (lean_single) | <1 s |
+| a `Knowledge<Patient where { age >= 18 }>` built with age 13 aborts before the next line runs | `demos/intro/demo_portas_rejeicao.sio`, via `scripts/ontology/expand_knowledge_runtime_guards.sh` | 3 s |
 
 The last two come with caveats that matter (section 6, #2751–#2753).
 
