@@ -993,6 +993,52 @@ fn lower_unit_float_type_known(te: &TypeExpr) -> bool with Mut, Panic, Div {
     }
 }
 
+// #2504: the `.value` kind (lower_type_expr_knowledge_value_float: 1 float,
+// 0 integer, 2 unknown payload) of a struct field declared `Knowledge<T>`,
+// keyed by interned (struct name, field name). Read by
+// field_base_kn_value_float_ref for an `s.k.value` base. Two registrations of
+// the same key with different kinds (two same-named structs in different
+// modules) collapse to -1, the caller's "unknown" answer, rather than letting
+// the last one win.
+var LOWER_KN_FIELD_COUNT: i64 = 0
+var LOWER_KN_FIELD_TYPE: [i64; 2048] = [0; 2048]
+var LOWER_KN_FIELD_NAME: [i64; 2048] = [0; 2048]
+var LOWER_KN_FIELD_KIND: [i64; 2048] = [0; 2048]
+
+fn lower_kn_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeKnowledge { return }
+    let kind = lower_type_expr_knowledge_value_float(ty)
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_KN_FIELD_COUNT {
+        if LOWER_KN_FIELD_TYPE[i as usize] == tid && LOWER_KN_FIELD_NAME[i as usize] == fid {
+            if LOWER_KN_FIELD_KIND[i as usize] != kind { LOWER_KN_FIELD_KIND[i as usize] = 0 - 1 }
+            return
+        }
+        i = i + 1
+    }
+    if LOWER_KN_FIELD_COUNT >= 2048 { return }
+    LOWER_KN_FIELD_TYPE[LOWER_KN_FIELD_COUNT as usize] = tid
+    LOWER_KN_FIELD_NAME[LOWER_KN_FIELD_COUNT as usize] = fid
+    LOWER_KN_FIELD_KIND[LOWER_KN_FIELD_COUNT as usize] = kind
+    LOWER_KN_FIELD_COUNT = LOWER_KN_FIELD_COUNT + 1
+}
+
+fn lower_kn_field_kind(type_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
+    if type_name.len <= 0 { return 0 - 1 }
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_KN_FIELD_COUNT {
+        if LOWER_KN_FIELD_TYPE[i as usize] == tid && LOWER_KN_FIELD_NAME[i as usize] == fid {
+            return LOWER_KN_FIELD_KIND[i as usize]
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
 var LOWER_USE_MODULE_COUNT: i64 = 0
 var LOWER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
 var LOWER_USE_MODULE_MODULE_ID: [i64; 1024] = [0 - 1; 1024]
@@ -4167,6 +4213,7 @@ fn lowerer_preseed_external_struct_items_mut(
                                 while keep_going && fc < 128 {
                                     match fcur {
                                         Some(flist) => {
+                                            lower_kn_field_note(head_owned.name, (*flist).head.name, &(*flist).head.ty)
                                             entry.fields[fc as usize] = StructFieldEntry {
                                                 name_id: ir_intern_name((*flist).head.name),
                                                 index: fc,
@@ -4360,6 +4407,7 @@ fn lowerer_preseed_external_items_into_acc_mut(
                                 while keep_going && fc < 128 {
                                     match fcur {
                                         Some(flist) => {
+                                            lower_kn_field_note(head_owned.name, (*flist).head.name, &(*flist).head.ty)
                                             entry.fields[fc as usize] = StructFieldEntry {
                                                 name_id: ir_intern_name((*flist).head.name),
                                                 index: fc,
@@ -4448,6 +4496,7 @@ fn lowerer_register_struct_fields_direct_mut(
     while keep_going && fc < 128 {
         match *fcur {
             Some(flist) => {
+                lower_kn_field_note(type_name, (*flist).head.name, &(*flist).head.ty)
                 entry.fields[fc as usize] = StructFieldEntry {
                     name_id: ir_intern_name((*flist).head.name),
                     index: fc,
@@ -4510,6 +4559,7 @@ fn lowerer_register_struct_fields_mut(
                 }
                 let fc = (*(*lo).struct_layouts).entries[layout_idx as usize].field_count
                 if fc < 128 {
+                    lower_kn_field_note(type_name, (*list).head.name, &(*list).head.ty)
                     (*(*lo).struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
                         name_id: ir_intern_name((*list).head.name),
                         index: field_idx,
@@ -5477,6 +5527,7 @@ fn ir_fast_summary_register_struct_fields_owned(
                 // the lean_single by-value-aggregate miscompile, so the field never lands
                 // and field-index resolution later falls back to a name hash (OOB access).
                 // Build in a local entry, then assign it back once (single level).
+                lower_kn_field_note(type_name, (*list).head.name, &(*list).head.ty)
                 var lay_entry = table_value.entries[layout_idx as usize]
                 lay_entry.fields[fc as usize] = StructFieldEntry {
                     name_id: ir_intern_name((*list).head.name),
@@ -16887,6 +16938,17 @@ impl Lowerer {
                             return (*(*self.locals).kn_value_float).values[i as usize]
                         }
                         i = i - 1
+                    }
+                }
+                // #2504: `s.k.value` where the struct field `k` is declared
+                // `Knowledge<T>`: the field's declared T decides, not the f64 default.
+                if (*be).kind == ExprKind::ExprFieldAccess {
+                    match (*be).left {
+                        Some(owner) => {
+                            let owner_ty = self.expr_receiver_struct_type_ref(&(*owner))
+                            return lower_kn_field_kind(owner_ty, (*be).name)
+                        }
+                        _ => {}
                     }
                 }
             }
