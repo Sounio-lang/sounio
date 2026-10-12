@@ -235,6 +235,7 @@ theorem oct_scale_add (n : Int) (x y : Oct) :
     octScale n (octAdd x y) = octAdd (octScale n x) (octScale n y) := by
   ext <;> simp [octScale, octAdd, Int.mul_add]
 
+
 -- ---------------------------------------------------------------------------
 -- §11. Identity element
 -- ---------------------------------------------------------------------------
