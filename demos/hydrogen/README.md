@@ -16,6 +16,7 @@ bin/souc run demos/hydrogen/sofc_hydride_optimum.sio                   # compres
 bin/souc run demos/hydrogen/sofc_mh_coupling.sio                        # Yiotis/Stubos heat balance on the seven-stage machine
 bin/souc run demos/hydrogen/sofc_mh_design.sio                          # longest cascade whose heat the cell can cover
 bin/souc run demos/hydrogen/sofc_mh_frontier.sio                        # voltage and temperature that maximise autonomous delivery pressure
+bin/souc run demos/hydrogen/sofc_species_covariance.sio                # H2/H2O Knowledge keeps species, validity, and GUM variance across the cell
 bin/souc run demos/hydrogen/mh7_reliability.sio                         # 7-stage HRS reliability (fitted surrogate, see below)
 bin/souc run demos/hydrogen/trieres_chain.sio                           # TRIERES valley: dispensed EUR/kg p-box
 bin/souc run demos/hydrogen/valley_chain_epistemic.sio                  # composed twin: subsurface -> compressor -> dispenser

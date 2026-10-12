@@ -1,0 +1,158 @@
+// demos/hydrogen/sofc_species_covariance.sio
+//
+// Covariance on the cell, on two axes.
+//
+// Ontology. D2 is a subclass of H2, so a deuterium batch is accepted at an
+// anode that asks for hydrogen. O2 is disjoint; the commented call does not
+// compile.
+//
+// Validity. The anode requires a batch still valid on 2026-12-31. A
+// deuterium certificate dated 2027-06-30 covers that date and is accepted.
+// A certificate that expired on 2026-06-01 does not.
+//
+// Confidence. The anode requires epsilon < 0.05. The batch is epsilon < 0.01,
+// which is tighter, so it passes. epsilon < 0.50 does not, even though the
+// species and the date would.
+//
+// Provenance. A second gate requires Measured. measure() is Measured, so the
+// deuterium batch passes. Computed does not: a trusted gate does not accept
+// an untrusted source, and being a subclass of hydrogen does not repair that.
+//
+// The reaction returns the water. Knowledge<H2O> carries the cell's window
+// and the same confidence bound. Burning deuterium does not produce an
+// untyped mole count. 210.826 mol at 0.65 V is the frontier point, 26.444 MJ.
+//
+// Amount. moles_of returns that mole count from Knowledge<H2>. The species
+// stays on the parameter. variance_of at the caller is the GUM variance of
+// the amount, and it survives the scale into megajoules. water_out does the
+// same for Knowledge<H2O>. A silent zero there is the function boundary
+// dropping slot 1.
+
+ontology Fuel {
+    class Substance { property amount: f64 where amount >= 0.0 }
+    class H2 subclass_of Substance
+    class D2 subclass_of H2
+    class O2 subclass_of Substance
+    class H2O subclass_of Substance
+    disjoint H2, O2
+    disjoint H2, H2O
+    disjoint O2, H2O
+}
+
+var FARADAY: f64 = 96485.3321
+var E_CELL: f64 = 0.65
+var N_MOL: f64 = 210.826
+var U_MOL: f64 = 2.10826
+
+fn anode(h: Knowledge[H2, ValidUntil("2026-12-31"), epsilon < 0.05, Derived]) -> Knowledge[H2O, ValidUntil("2026-12-31"), epsilon < 0.05, Derived] with Mut, Div, Epistemic {
+    let n: f64 = h.value
+    let w: H2O = n
+    Knowledge {
+        value: w,
+        epsilon: 0.01,
+        validity: "2027-06-30",
+        provenance: "cell"
+    }
+}
+
+fn electricity(w: Knowledge[H2O, ValidUntil("2026-12-31"), epsilon < 0.05, Derived]) -> f64 with Mut, Div, Epistemic {
+    let n: f64 = w.value
+    n * 2.0 * FARADAY * E_CELL / 1.0e6
+}
+
+fn anode_measured(h: Knowledge[H2, Measured]) -> f64 with Mut, Div, Epistemic {
+    let n: f64 = h.value
+    n * 2.0 * FARADAY * E_CELL / 1.0e6
+}
+
+fn water_out(w: Knowledge<H2O>) -> f64 with Mut, Div, Epistemic {
+    let n: f64 = w.value
+    n
+}
+
+fn moles_of(h: Knowledge<H2>) -> f64 with Mut, Div, Epistemic {
+    let n: f64 = h.value
+    n
+}
+
+fn approx(actual: f64, expected: f64, tol: f64) -> bool {
+    let d = actual - expected
+    if d < 0.0 { return (0.0 - d) < tol }
+    d < tol
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    println("DEUTERIUM AT THE ANODE, VALID THROUGH THE CELL WINDOW")
+    println("D2 until 2027-06-30, epsilon < 0.01, Derived.")
+    println("Anode wants H2 until 2026-12-31, epsilon < 0.05, Derived.")
+    println("")
+
+    let tagged: D2 = N_MOL
+    let feed: Knowledge[D2, ValidUntil("2027-06-30"), epsilon < 0.01, Derived] = Knowledge {
+        value: tagged,
+        epsilon: 0.01,
+        validity: "2027-06-30",
+        provenance: "sieverts"
+    }
+    let produced = anode(feed)
+    let mj = electricity(produced)
+    let n_from_cell: f64 = produced.value
+    let scale = 2.0 * FARADAY * E_CELL / 1.0e6
+    let expect_mj = N_MOL * scale
+
+    let batch: Knowledge[D2, Measured] = measure(tagged, uncertainty: U_MOL)
+    let mj_measured = anode_measured(batch)
+    let var_fn = variance_of(mj_measured)
+    let u_mol = uncertainty_of(batch)
+    let u_mj = u_mol * scale
+
+    let water_tagged: H2O = N_MOL
+    let water: Knowledge<H2O> = measure(water_tagged, uncertainty: U_MOL)
+    let n_water = water_out(water)
+    let var_water = variance_of(n_water)
+    let expect_var_water = U_MOL * U_MOL
+
+    let n_moles = moles_of(batch)
+    let mj_moles = n_moles * scale
+    let var_mj = variance_of(mj_moles)
+    let expect_var = u_mj * u_mj
+
+    print("electricity MJ ")
+    print_f64(mj)
+    print("\nwater from the cell, mol ")
+    print_f64(n_from_cell)
+    print("\nmeasured electricity MJ ")
+    print_f64(mj_measured)
+    print("\nuncertainty MJ ")
+    print_f64(u_mj)
+    print("\nvariance of the water, mol^2 ")
+    print_f64(var_water)
+    print("\nvariance of the electricity, MJ^2 ")
+    print_f64(var_mj)
+    print("\nvariance through the cell function, MJ^2 ")
+    print_f64(var_fn)
+    print("\n")
+
+    if approx(mj, expect_mj, 0.01) && approx(n_from_cell, N_MOL, 0.01) && approx(mj_measured, expect_mj, 0.01) && approx(u_mol, U_MOL, 0.0001) && approx(n_water, N_MOL, 0.01) && approx(n_moles, N_MOL, 0.01) && approx(mj_moles, expect_mj, 0.01) && approx(var_water, expect_var_water, 0.0001) && approx(var_mj, expect_var, 0.00001) && approx(var_fn, expect_var, 0.00001) && var_mj > 0.05 && var_fn > 0.05 {
+        println("COVARIANCE_OK")
+        return 0
+    }
+    println("COVARIANCE_FAIL")
+    1
+}
+
+// Both of these are refused. Uncomment one at a time.
+//
+// Oxygen is not hydrogen:
+//   let air: Knowledge[O2, ValidUntil("2027-06-30"), Derived] = Knowledge {
+//       value: N_MOL as O2, epsilon: 0.99,
+//       validity: "2027-06-30", provenance: "air"
+//   }
+//   anode(air)
+//
+// A certificate that lapses before the cell's window:
+//   let stale: Knowledge[D2, ValidUntil("2026-06-01"), Derived] = Knowledge {
+//       value: N_MOL as D2, epsilon: 0.99,
+//       validity: "2026-06-01", provenance: "old-batch"
+//   }
+//   anode(stale)
