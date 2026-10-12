@@ -1,0 +1,75 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: H2O_CELL_YIELD_OK
+// The cell yield is a Knowledge<H2O>. Its value is the electrical product
+// of the measured batch and the measured voltage. The variance of that
+// field is the product rule, and a caller correlation is in the same slot.
+
+ontology Fuel {
+    class Substance { property amount: f64 where amount >= 0.0 }
+    class H2 subclass_of Substance
+    class H2O subclass_of Substance
+    disjoint H2, H2O
+}
+
+var FARADAY: f64 = 96485.3321
+var N_MOL: f64 = 210.826
+var U_MOL: f64 = 2.10826
+var E_CELL: f64 = 0.65
+var U_VOLT: f64 = 0.01
+
+fn cell_water(h: Knowledge<H2>, e: Knowledge<f64>) -> Knowledge[H2O, ValidUntil("2026-12-31"), epsilon < 0.05, Derived] with Epistemic, Mut, Div {
+    let n: f64 = h.value
+    let volts: f64 = e.value
+    let mj: f64 = n * 2.0 * FARADAY * volts / 1.0e6
+    Knowledge {
+        value: mj,
+        epsilon: 0.01,
+        validity: "2027-06-30",
+        provenance: "cell"
+    }
+}
+
+fn near(actual: f64, expected: f64, tol: f64) -> bool {
+    let d = actual - expected
+    if d < 0.0 { return (0.0 - d) < tol }
+    d < tol
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    let tagged: H2 = N_MOL
+    let batch: Knowledge<H2> = measure(tagged, uncertainty: U_MOL)
+    let e_now: f64 = E_CELL
+    let volts: Knowledge<f64> = measure(e_now, uncertainty: U_VOLT)
+    let yielded = cell_water(batch, volts)
+    let mj: f64 = yielded.value
+    let var_on_water = variance_of(yielded.value)
+    let c_ne = 2.0 * FARADAY / 1.0e6
+    let expect_mj = N_MOL * c_ne * E_CELL
+    let term_n = (c_ne * E_CELL) * (c_ne * E_CELL) * (U_MOL * U_MOL)
+    let term_v = (c_ne * N_MOL) * (c_ne * N_MOL) * (U_VOLT * U_VOLT)
+    let expect_both = term_n + term_v
+
+    let n_c: f64 = batch.value
+    let v_c: f64 = volts.value
+    let _rho = correlate(n_c, v_c, 1.0)
+    let yielded_rho = cell_water(batch, volts)
+    let var_rho = variance_of(yielded_rho.value)
+    let cross = 2.0 * (c_ne * E_CELL) * (c_ne * N_MOL) * U_MOL * U_VOLT
+    let expect_rho = expect_both + cross
+
+    print("mj ")
+    print_f64(mj)
+    print(" var ")
+    print_f64(var_on_water)
+    print(" rho ")
+    print_f64(var_rho)
+    print("\n")
+
+    if near(mj, expect_mj, 0.001) && near(var_on_water, expect_both, 0.0001) && near(var_rho, expect_rho, 0.0001) && var_rho > var_on_water {
+        println("H2O_CELL_YIELD_OK")
+        return 0
+    }
+    println("H2O_CELL_YIELD_FAIL")
+    1
+}
