@@ -1,0 +1,188 @@
+// demos/hydrogen/sofc_mh_frontier.sio
+//
+// Beyond the one-stage machine. sofc_mh_design.sio fixed the cell at 0.70 V
+// and the hot side at 80 C, and only stage 1 fitted. Here the cell voltage
+// and the desorption temperature both move. Sensible heat scales with the
+// temperature swing: Table 5 at 80 C and at 120 C are in the ratio of the
+// swings (70 K and 110 K). Enthalpies stay the Table 3 values, which already
+// reproduced the latent column.
+//
+// For each voltage and each temperature, the longest prefix of the cascade
+// that still fits is kept, and its delivery pressure is the desorption
+// plateau of its last stage. The run reports the hottest, highest-pressure
+// machine that closes at a voltage a cell can actually use.
+
+unit mol;
+
+ontology Fuel {
+    class Substance { property amount: f64 where amount >= 0.0 }
+    class H2 subclass_of Substance
+    class O2 subclass_of Substance
+    class H2O subclass_of Substance
+    disjoint H2, O2
+    disjoint H2, H2O
+    disjoint O2, H2O
+}
+
+var R_GAS: f64 = 8.314462618
+var FARADAY: f64 = 96485.3321
+var DH_RXN: f64 = 0.0 - 241826.0
+var H2_KG: f64 = 0.425
+var M_H2: f64 = 0.00201588
+var T_COLD: f64 = 283.15
+var SENSIBLE_80_MJ: f64 = 71.76
+
+var BEST_P: f64 = 0.0
+var BEST_E: f64 = 0.0
+var BEST_T: f64 = 0.0
+var BEST_N: i64 = 0
+var USE_P: f64 = 0.0
+var USE_E: f64 = 0.0
+var USE_T: f64 = 0.0
+var USE_N: i64 = 0
+
+fn dh_abs(stage: i64) -> f64 {
+    if stage == 0 { 25242.0 } else if stage == 1 { 21466.0 } else if stage == 2 { 20354.0 }
+    else if stage == 3 { 19991.0 } else if stage == 4 { 18198.0 } else if stage == 5 { 16232.0 }
+    else { 14702.0 }
+}
+fn dh_des(stage: i64) -> f64 {
+    if stage == 0 { 28195.0 } else if stage == 1 { 26133.0 } else if stage == 2 { 24823.0 }
+    else if stage == 3 { 20252.0 } else if stage == 4 { 19856.0 } else if stage == 5 { 19125.0 }
+    else { 18916.0 }
+}
+fn ds_des(stage: i64) -> f64 {
+    if stage == 0 { 106.8 } else if stage == 1 { 107.1 } else if stage == 2 { 108.7 }
+    else if stage == 3 { 100.8 } else if stage == 4 { 101.4 } else if stage == 5 { 101.5 }
+    else { 106.2 }
+}
+
+fn water_from(h2: H2, o2: O2) -> H2O with Mut, Div, Panic {
+    let from_h: f64 = h2
+    let from_o: f64 = o2 * 2.0
+    let w: f64 = if from_h < from_o { from_h } else { from_o }
+    let out: H2O = w
+    out
+}
+
+fn q_cell(e_op: f64) -> f64 with Mut, Div, Panic {
+    (0.0 - DH_RXN) - 2.0 * FARADAY * e_op
+}
+
+fn p_des(stage: i64, t_k: f64) -> f64 with Mut, Div, Panic {
+    exp(ds_des(stage) / R_GAS - dh_des(stage) / (R_GAS * t_k))
+}
+
+fn print_fix2(x: f64) with IO, Mut, Div, Panic {
+    var v = x
+    var neg = false
+    if v < 0.0 { neg = true  v = 0.0 - v }
+    let scaled = v * 100.0
+    var n = scaled as i64
+    let frac = scaled - (n as f64)
+    if frac >= 0.5 { n = n + 1 }
+    let whole = n / 100
+    let cent = n - whole * 100
+    if neg { print("-") }
+    print(whole) print(".")
+    if cent < 10 { print("0") }
+    print(cent)
+}
+
+// Longest prefix at this voltage and hot temperature. Writes nothing.
+// Returns the stage count. Delivery pressure lands in BEST_P temporarily
+// through the out-parameters P_OUT and N_OUT.
+var P_OUT: f64 = 0.0
+var N_OUT: i64 = 0
+
+fn cascade(e_op: f64, t_c: f64, sens_per: f64) with Mut, Div, Panic {
+    let t_k = t_c + 273.15
+    let qc = q_cell(e_op)
+    var cum = 0.0
+    var kept: i64 = 0
+    var p = 0.0
+    var i: i64 = 0
+    while i < 7 {
+        let cost = dh_abs(i) + dh_des(i) + sens_per
+        if cum + cost <= qc {
+            cum = cum + cost
+            kept = i + 1
+            p = p_des(i, t_k)
+        } else {
+            i = 7
+        }
+        i = i + 1
+    }
+    P_OUT = p
+    N_OUT = kept
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("FRONTIER: voltage, temperature, cascade length, delivery pressure")
+    println("Heat must fit what the cell rejects when it burns the same hydrogen.")
+    println("")
+
+    let n_mol = H2_KG / M_H2
+    let h2: H2 = n_mol
+    let o2: O2 = n_mol
+    let water = water_from(h2, o2)
+    let n_w: f64 = water
+    if n_w + 0.01 < n_mol {
+        println("STOICHIOMETRY_FAIL")
+        return 1
+    }
+
+    let sens80 = (SENSIBLE_80_MJ * 1.0e6 / n_mol) / 7.0
+    println("E (V)   T (C)   stages   P_des (bar)   electricity (MJ)")
+
+    var ie: i64 = 0
+    while ie <= 6 {
+        let e = 0.50 + (ie as f64) * 0.05
+        var line_p = 0.0
+        var line_t = 0.0
+        var line_n: i64 = 0
+        var it: i64 = 0
+        while it <= 24 {
+            let t_c = 40.0 + (it as f64) * 5.0
+            let dt = (t_c + 273.15) - T_COLD
+            let sens = sens80 * dt / 70.0
+            cascade(e, t_c, sens)
+            if N_OUT > 0 && P_OUT > line_p {
+                line_p = P_OUT
+                line_t = t_c
+                line_n = N_OUT
+            }
+            if N_OUT > 0 && P_OUT > BEST_P {
+                BEST_P = P_OUT
+                BEST_E = e
+                BEST_T = t_c
+                BEST_N = N_OUT
+            }
+            if e >= 0.65 && N_OUT > 0 && P_OUT > USE_P {
+                USE_P = P_OUT
+                USE_E = e
+                USE_T = t_c
+                USE_N = N_OUT
+            }
+            it = it + 1
+        }
+        let elec = n_mol * 2.0 * FARADAY * e / 1.0e6
+        print("  ") print_fix2(e)
+        print("   ") print_fix2(line_t)
+        print("   ") print(line_n)
+        print("   ") print_fix2(line_p)
+        print("   ") print_fix2(elec)
+        println("")
+        ie = ie + 1
+    }
+
+    println("")
+    print("highest pressure on the sweep: ") print_fix2(BEST_P)
+    print(" bar, ") print(BEST_N) print(" stage(s), ")
+    print_fix2(BEST_T) print(" C, cell ") print_fix2(BEST_E) println(" V")
+    print("highest pressure at or above 0.65 V: ") print_fix2(USE_P)
+    print(" bar, ") print(USE_N) print(" stage(s), ")
+    print_fix2(USE_T) print(" C, cell ") print_fix2(USE_E) println(" V")
+    println("FRONTIER_OK")
+    0
+}
