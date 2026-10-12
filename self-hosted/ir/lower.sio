@@ -982,11 +982,60 @@ fn lower_unit_float_note(n: Name, module_id: i64) with Mut, Panic, Div {
     LOWER_UNIT_FLOAT_COUNT = idx + 1
 }
 
+// #2874 residual: the checker's BUILT-IN units (check/units.sio
+// register_builtin_units, plus mL/L) are f64 quantities too, but only `unit`
+// declarations reached the registry above, so `fn f(x: kg)` lowered `x` as an
+// integer word and read the f64 argument's bits (2.5 -> 4612811918334230528).
+fn lower_builtin_unit_name(n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 || n.len > 6 { return false }
+    ir_name_eq(n, make_name("mg")) || ir_name_eq(n, make_name("g")) || ir_name_eq(n, make_name("kg"))
+        || ir_name_eq(n, make_name("m")) || ir_name_eq(n, make_name("km")) || ir_name_eq(n, make_name("cm"))
+        || ir_name_eq(n, make_name("mm")) || ir_name_eq(n, make_name("s")) || ir_name_eq(n, make_name("ms"))
+        || ir_name_eq(n, make_name("min")) || ir_name_eq(n, make_name("h")) || ir_name_eq(n, make_name("K"))
+        || ir_name_eq(n, make_name("mol")) || ir_name_eq(n, make_name("cm3")) || ir_name_eq(n, make_name("cal"))
+        || ir_name_eq(n, make_name("mg_dL")) || ir_name_eq(n, make_name("mmol_L")) || ir_name_eq(n, make_name("U_L"))
+        || ir_name_eq(n, make_name("mm_h")) || ir_name_eq(n, make_name("mL")) || ir_name_eq(n, make_name("L"))
+}
+
+// A module that declares its own struct/enum/type/unit under a built-in unit's
+// name (`struct K { .. }`) means that declaration, not the unit: such names are
+// recorded here per module and excluded from the built-in rule.
+var LOWER_UNIT_SHADOW_COUNT: i64 = 0
+var LOWER_UNIT_SHADOW_MODULE_ID: [i64; 256] = [0 - 1; 256]
+var LOWER_UNIT_SHADOW_NAME_ID: [i64; 256] = [0; 256]
+var LOWER_UNIT_SHADOW_OVERFLOWED: bool = false
+
+fn lower_unit_shadow_note(n: Name, module_id: i64) with Mut, Panic, Div {
+    if !lower_builtin_unit_name(n) { return }
+    if LOWER_UNIT_SHADOW_COUNT >= 256 {
+        LOWER_UNIT_SHADOW_OVERFLOWED = true
+        return
+    }
+    LOWER_UNIT_SHADOW_MODULE_ID[LOWER_UNIT_SHADOW_COUNT as usize] = module_id
+    LOWER_UNIT_SHADOW_NAME_ID[LOWER_UNIT_SHADOW_COUNT as usize] = ir_intern_name(n)
+    LOWER_UNIT_SHADOW_COUNT = LOWER_UNIT_SHADOW_COUNT + 1
+}
+
+fn lower_unit_shadowed(n: Name, module_id: i64) -> bool with Mut, Panic, Div {
+    // Overflow: be conservative and treat every built-in name as shadowed.
+    if LOWER_UNIT_SHADOW_OVERFLOWED { return true }
+    let id = ir_intern_name(n)
+    var i: i64 = 0
+    while i < LOWER_UNIT_SHADOW_COUNT {
+        if LOWER_UNIT_SHADOW_MODULE_ID[i as usize] == module_id && LOWER_UNIT_SHADOW_NAME_ID[i as usize] == id { return true }
+        i = i + 1
+    }
+    false
+}
+
 fn lower_unit_float_type_known(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeNamed { return false }
     // A namespace prefix is not a declared local unit type.
     if (*te).path.seg_count != 1 { return false }
-    if !lower_unit_float_name_known(ir_path_first_name((*te).path), lower_effective_current_module_id()) { return false }
+    let unit_name = ir_path_first_name((*te).path)
+    let module_id = lower_effective_current_module_id()
+    let builtin = lower_builtin_unit_name(unit_name) && !lower_unit_shadowed(unit_name, module_id)
+    if !builtin && !lower_unit_float_name_known(unit_name, module_id) { return false }
     match (*te).type_args {
         Some(_) => { LOWER_UNIT_FLOAT_OVERFLOWED = true; false }
         None => true,
@@ -1196,6 +1245,32 @@ pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>, module_id: i64) 
                 let item_ref = &(*list).head
                 if item_ref.kind == ItemKind::ItemUnit {
                     lower_unit_float_note(item_ref.name, module_id)
+                }
+                if item_ref.kind == ItemKind::ItemStruct || item_ref.kind == ItemKind::ItemEnum
+                    || item_ref.kind == ItemKind::ItemTypeAlias {
+                    lower_unit_shadow_note(item_ref.name, module_id)
+                }
+                // A struct's generic parameter (`struct Map<K, V>`) is a type
+                // variable, not kelvin: the checker shadows units with in-scope
+                // type parameters (checker_name_is_type_param_in_scope), so do
+                // the same, module-wide.
+                if item_ref.kind == ItemKind::ItemStruct {
+                    match item_ref.struct_def {
+                        Some(sd) => {
+                            var tp = &(*sd).type_params
+                            var more = true
+                            while more {
+                                match *tp {
+                                    Some(tl) => {
+                                        lower_unit_shadow_note((*tl).head.name, module_id)
+                                        tp = &(*tl).tail
+                                    }
+                                    None => { more = false }
+                                }
+                            }
+                        }
+                        None => {}
+                    }
                 }
                 if item_ref.kind == ItemKind::ItemUse {
                     // Records every SUFFIX of the `use` path (the full path,
