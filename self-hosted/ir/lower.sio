@@ -13020,7 +13020,27 @@ impl Lowerer {
     // a parameter, so without this the binary arm below matches nothing and the
     // field stays unregistered.
     fn fo_ctor_param_index_thru_lets(self, blk: &Block, e: &Expr, p0: Name, p1: Name, nparams: i64, depth: i64) -> i64 with Mut, Panic, Div, Alloc, IO {
-        if depth > 8 || (*e).kind != ExprKind::ExprIdent {
+        if depth > 8 {
+            return 0 - 1
+        }
+        // A Knowledge result field can be initialized from `p.value`, or from
+        // a let-bound alias such as `let f = p.value`. The constructor transfer
+        // vocabulary operates on parameter indices, so peel the value field and
+        // recover the Knowledge parameter that owns it. This is deliberately
+        // restricted to `.value`; `.variance` and metadata are not payloads.
+        if (*e).kind == ExprKind::ExprFieldAccess && ir_name_eq((*e).name, make_name("value")) {
+            match (*e).left {
+                Some(base) => {
+                    if (*base).kind == ExprKind::ExprIdent {
+                        if nparams >= 1 && ir_name_eq((*base).name, p0) { return 0 }
+                        if nparams >= 2 && ir_name_eq((*base).name, p1) { return 1 }
+                    }
+                }
+                _ => {}
+            }
+            return 0 - 1
+        }
+        if (*e).kind != ExprKind::ExprIdent {
             return 0 - 1
         }
         if nparams >= 1 && ir_name_eq((*e).name, p0) {
@@ -13052,9 +13072,80 @@ impl Lowerer {
         0 - 1
     }
 
+    // Param index only when the expression is that parameter's `.value`,
+    // through lets and casts. A bare parameter is not an amount.
+    fn fo_ctor_amount_index_thru_lets(self, blk: &Block, e: &Expr, p0: Name, p1: Name, nparams: i64, depth: i64) -> i64 with Mut, Panic, Div, Alloc, IO {
+        if depth > 8 {
+            return 0 - 1
+        }
+        if (*e).kind == ExprKind::ExprCast || (*e).kind == ExprKind::ExprReturn {
+            match (*e).left {
+                Some(inner) => {
+                    return self.fo_ctor_amount_index_thru_lets(blk, &(*inner), p0, p1, nparams, depth + 1)
+                }
+                _ => { return 0 - 1 }
+            }
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess && ir_name_eq((*e).name, make_name("value")) {
+            match (*e).left {
+                Some(base) => {
+                    if (*base).kind == ExprKind::ExprIdent {
+                        if nparams >= 1 && ir_name_eq((*base).name, p0) { return 0 }
+                        if nparams >= 2 && ir_name_eq((*base).name, p1) { return 1 }
+                    }
+                    return self.fo_ctor_amount_index_thru_lets(blk, &(*base), p0, p1, nparams, depth + 1)
+                }
+                _ => { return 0 - 1 }
+            }
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            var current = &(*blk).stmts
+            while true {
+                match *current {
+                    Some(list) => {
+                        let stmt_ref = &(*list).head
+                        if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
+                            if ir_name_eq(stmt_ref.name, (*e).name) {
+                                match stmt_ref.expr {
+                                    Some(rhs) => {
+                                        return self.fo_ctor_amount_index_thru_lets(blk, &(*rhs), p0, p1, nparams, depth + 1)
+                                    }
+                                    _ => { return 0 - 1 }
+                                }
+                            }
+                        }
+                        current = &(*list).tail
+                    }
+                    _ => break
+                }
+            }
+        }
+        0 - 1
+    }
+
     fn fo_ctor_classify_leaf(self, fn_hash: i64, path: i64, field0: i64, blk: &Block, e: &Expr, p0: Name, p1: Name, nparams: i64, depth: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         if depth > 8 {
+            return lo
+        }
+        if (*e).kind == ExprKind::ExprCast || (*e).kind == ExprKind::ExprReturn {
+            match (*e).left {
+                Some(inner) => {
+                    return lo.fo_ctor_classify_leaf(fn_hash, path, field0, blk, &(*inner), p0, p1, nparams, depth + 1)
+                }
+                _ => { return lo }
+            }
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess && ir_name_eq((*e).name, make_name("value")) {
+            let amt = lo.fo_ctor_amount_index_thru_lets(blk, e, p0, p1, nparams, 0)
+            if amt == 0 {
+                fo_ctor_global_set(fn_hash, path, 10, 0.0, field0)
+                return lo
+            }
+            if amt == 1 {
+                fo_ctor_global_set(fn_hash, path, 10, 1.0, field0)
+                return lo
+            }
             return lo
         }
         if (*e).kind == ExprKind::ExprIdent {
@@ -13102,6 +13193,12 @@ impl Lowerer {
                             let ll = lo.fo_expr_as_lit(&(*le))
                             let rl = lo.fo_expr_as_lit(&(*re))
                             if (*e).bin_op == BinaryOp::OpMul {
+                                let la = lo.fo_ctor_amount_index_thru_lets(blk, &(*le), p0, p1, nparams, 0)
+                                let ra = lo.fo_ctor_amount_index_thru_lets(blk, &(*re), p0, p1, nparams, 0)
+                                if la >= 0 && ra >= 0 && la != ra {
+                                    fo_ctor_global_set(fn_hash, path, 12, 1.0, field0)
+                                    return lo
+                                }
                                 if ll.0 && ri == 0 { fo_ctor_global_set(fn_hash, path, 2, ll.1, field0); return lo }
                                 if rl.0 && li == 0 { fo_ctor_global_set(fn_hash, path, 2, rl.1, field0); return lo }
                                 if nparams >= 2 && ((li == 0 && ri == 1) || (li == 1 && ri == 0)) {
@@ -15312,6 +15409,14 @@ impl Lowerer {
                 match (*e).left {
                     Some(base_expr) => {
                         if (*base_expr).kind == ExprKind::ExprIdent {
+                            let base_reg = self.lookup_local((*base_expr).name)
+                            if base_reg >= 0 {
+                                let carried = self.lookup_variance_for_field(base_reg, 0)
+                                if carried >= 0 {
+                                    let lo_c = self.so_clear_expr_hess().fo_seed_from_variance(carried, 0 - 1)
+                                    return (lo_c, carried)
+                                }
+                            }
                             let kn_pair = self.lower_knowledge_variance_for_ident((*base_expr).name)
                             if kn_pair.1 >= 0 {
                                 // Seed/reuse FO channel for this Knowledge seed.
@@ -23906,6 +24011,10 @@ impl Lowerer {
     // nominal expression and must not duplicate an effectful factory call.
     fn lower_direct_knowledge_call_variance_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if (*e).kind == ExprKind::ExprFieldAccess && ir_name_eq((*e).name, make_name("value")) {
+            let carried = self.fo_ctor_chain_apply(e)
+            if carried.1 >= 0 {
+                return carried
+            }
             match (*e).left {
                 Some(base) => {
                     if (*base).kind == ExprKind::ExprCall || (*base).kind == ExprKind::ExprMethodCall {
@@ -28287,6 +28396,37 @@ impl Lowerer {
         (lo, reg)
     }
 
+
+    fn lower_knowledge_literal_variance(self, dst: i64, fields: &Option<Box<StructFieldList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var current = fields
+        while true {
+            match *current {
+                Some(list) => {
+                    if ir_name_eq((*list).head.name, make_name("value")) {
+                        let fv = self.lower_expr_variance_ref(&(*list).head.value)
+                        var lo = fv.0
+                        if fv.1 >= 0 {
+                            lo = lo.emit(ir_mark_float_reg(fv.1))
+                            lo = lo.emit(ir_field_set(dst, 1, fv.1, make_name("variance")))
+                            lo = lo.bind_variance_for_base_reg(dst, fv.1)
+                            lo.pending_variance_reg = fv.1
+                            lo = lo.fo_seed_from_variance(fv.1, 0 - 1)
+                            var mk: i64 = 0
+                            while mk < 32 {
+                                lo.fo_pending_sens[mk as usize] = lo.fo_expr_sens[mk as usize]
+                                mk = mk + 1
+                            }
+                        }
+                        return lo
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        self
+    }
+
     fn lower_struct_literal_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
@@ -28299,6 +28439,9 @@ impl Lowerer {
         lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(count_struct_fields_ref(&e.fields))))
         lo = lo.ensure_struct_literal_layout_ref(ir_path_first_name(e.path), &e.fields)
         lo = lo.lower_struct_fields_ref(dst, ir_path_first_name(e.path), &e.fields, 0)
+        if ir_name_eq(ir_path_first_name(e.path), make_name("Knowledge")) {
+            lo = lo.lower_knowledge_literal_variance(dst, &e.fields)
+        }
         (lo, dst)
     }
 
