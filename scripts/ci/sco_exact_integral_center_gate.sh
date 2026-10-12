@@ -51,7 +51,7 @@ for mode in default optimized; do
 done
 mkdir -p "$OUT/matrix"
 printf 'case\tcompile_rc\trun_rc\tapplication\n' >"$OUT/matrix.tsv"
-for case in default off enforce ablation ordinary fractional nan alias multiuse two_unc exported; do
+for case in default off enforce ablation ordinary fractional nan alias multiuse two_unc exported pubfn global; do
  flags=(-O); policy=1; ablation=0; expected=0
  [[ $case != default ]] || { flags=(); policy=0; }
  [[ $case != off ]] || policy=0
@@ -67,13 +67,45 @@ for case in default off enforce ablation ordinary fractional nan alias multiuse 
  printf '%s\t%s\t%s\t%s\n' "$case" "$rc" "$rr" "$actual" >>"$OUT/matrix.tsv"
  [[ $rc == 0 && $rr == 0 ]] || { echo "FAIL: runtime $case"; exit 1; }
  if [[ $expected == 1 ]]; then [[ $actual == APPLIED ]] || exit 1; else [[ $actual == NOT_APPLIED ]] || exit 1; fi
- if [[ $case == default || $case == off || $case == ablation || $case == enforce || $case == exported ]]; then
+ if [[ $case == default || $case == off || $case == ablation || $case == enforce || $case == exported || $case == pubfn ]]; then
   value=0; [[ $case != enforce ]] || value=1
   printf '%s.000000\n' "$value" >"$OUT/matrix/$case.expected"
   cmp "$OUT/matrix/$case.expected" "$OUT/matrix/$case.stdout" >"$OUT/matrix/$case.cmp.log" 2>&1
  fi
- if [[ $case == exported ]]; then grep -qx 'SCO_STRATEGY function=exact_integral_center strategy=7' "$OUT/matrix/$case.compile.log"; fi
+ if [[ $case == exported || $case == pubfn ]]; then grep -qx 'SCO_STRATEGY function=exact_integral_center strategy=7' "$OUT/matrix/$case.compile.log"; fi
 done
+printf '8\n' > "$OUT/matrix/global.expected"
+cmp "$OUT/matrix/global.expected" "$OUT/matrix/global.stdout"
+# Same-source existing controls and retained authoritative boundaries.
+printf 'case\tcompile_rc\trun_rc\n' > "$OUT/boundary-controls.tsv"
+for n in global_scalar_init_still_works global_array_repeat_init retained; do
+ input="$ROOT/tests/run-pass/$n.sio"
+ [[ $n != retained ]] || input="$FIX/retained.sio"
+ cr=0; rr=not_run
+ timeout 180 env SOUNIO_RESEARCH_EXACT_INTEGRAL_CENTER=1 SOUNIO_SCO_STRATEGY_TRACE=1 "$MADAROS" compile "$input" -O -o "$OUT/matrix/$n.elf" >"$OUT/matrix/$n.compile.log" 2>&1 || cr=$?
+ if [[ $cr == 0 && -s "$OUT/matrix/$n.elf" ]]; then chmod +x "$OUT/matrix/$n.elf"; rr=0; timeout 30 "$OUT/matrix/$n.elf" >"$OUT/matrix/$n.stdout" 2>"$OUT/matrix/$n.stderr" || rr=$?; fi
+ printf '%s\t%s\t%s\n' "$n" "$cr" "$rr" >> "$OUT/boundary-controls.tsv"
+ [[ $cr == 0 && $rr == 0 ]] || failed=1
+ if [[ $n == retained ]]; then
+  for pair in 'private_boundary 2' 'public_boundary 7' 'kernel_priority 6'; do read -r fn st <<<"$pair"; grep -qx "SCO_STRATEGY function=$fn strategy=$st" "$OUT/matrix/$n.compile.log" || failed=1; done
+  printf '1.000000\n0.000000\n' > "$OUT/matrix/$n.expected"
+ elif [[ $n == global_scalar_init_still_works ]]; then printf '42\nSCALAR_OK\n' > "$OUT/matrix/$n.expected"
+ else printf '42 42 sum=84\n7 9\nCT_OK\n' > "$OUT/matrix/$n.expected"; fi
+ cmp "$OUT/matrix/$n.expected" "$OUT/matrix/$n.stdout" > "$OUT/matrix/$n.cmp.log" 2>&1 || failed=1
+done
+# Bounded entitlement witness: explicit research center agrees with independent
+# exact-integer C++23 reference; strategy ablation restores source-order center0.
+grep -qx 'fixed_exact_center=1' "$OUT/center-oracle.stdout"
+grep -qx 'fixed_source_left=0' "$OUT/center-oracle.stdout"
+grep -qx 'fixed_alternative_right=1' "$OUT/center-oracle.stdout"
+printf '1.000000\n' > "$OUT/entitled.expected"
+printf '0.000000\n' > "$OUT/ablated.expected"
+cmp "$OUT/entitled.expected" "$OUT/matrix/enforce.stdout"
+cmp "$OUT/ablated.expected" "$OUT/matrix/ablation.stdout"
+if cmp -s "$OUT/matrix/enforce.stdout" "$OUT/matrix/ablation.stdout"; then echo 'FAIL: vacuous exact-center entitlement witness'; exit 1; fi
+printf 'explicit_exact_integral_center\tenforce_entitled=1\tablated_entitled=0\n' > "$OUT/nonvacuity.tsv"
+[[ ${failed:-0} == 0 ]] || { echo 'FAIL: durable boundary controls'; exit 1; }
+
 # Compare unset policy with explicit OFF in both codegen modes; same current ELF.
 for mode in default optimized; do
  flags=(); [[ $mode == default ]] || flags=(-O)
