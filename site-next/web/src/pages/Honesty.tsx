@@ -117,7 +117,7 @@ export function Honesty() {
         <h2>The example on the front page understated its own uncertainty</h2>
         <p className="lede lede-lg">
           The opening scene is a pedagogical illustration. Its displayed readings
-          are calculated in C++23 from the source-linked artifact for{' '}
+          are calculated in C++ from the source-linked artifact for{' '}
           <b>examples/real_world/01_dose_uncertainty.sio</b>, the flagship
           demonstration of GUM uncertainty propagation in this repository.
         </p>

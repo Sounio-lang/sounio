@@ -362,7 +362,7 @@ enum Pages {
 
           <section class="band">
             <h2>The example on the front page understated its own uncertainty</h2>
-            \(try p("The opening scene is a pedagogical illustration. Its displayed readings are calculated in C++23 from a source-linked artifact for the repository’s GUM uncertainty propagation example; they are not clinical validation.", cls: "lede lede-lg"))
+            \(try p("The opening scene is a pedagogical illustration. Its displayed readings are calculated in C++ from a source-linked artifact for the repository’s GUM uncertainty propagation example; they are not clinical validation.", cls: "lede lede-lg"))
             \(para([
                 .text(try Prose("Its header documents the expected output as σ = ")),
                 .claim(try ev.claim(Dose.id, metric: "documented_sd")),
