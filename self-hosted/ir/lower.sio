@@ -784,6 +784,10 @@ pub fn lower_had_error_with_hard(v: bool) -> bool { v || (IR_LOWER_COMPILE_ERROR
 fn lower_ok_without_hard(v: bool) -> bool { !lower_had_error_with_hard(v) }
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
+// f64 globals whose initializer is a float word. A scale transfer folds them.
+var FO_GF64_COUNT: i64 = 0
+var FO_GF64_HASH: [i64; 64] = [0; 64]
+var FO_GF64_VAL: [f64; 64] = [0.0; 64]
 var FO_XFER_LIT: [f64; 64] = [0.0; 64]
 var FO_XFER_HASH: [i64; 64] = [0; 64]
 
@@ -1772,13 +1776,116 @@ pub fn fo_ctor_global_reset() with Mut {
 
 pub fn fo_xfer_global_reset() with Mut {
     FO_XFER_COUNT = 0
+    FO_GF64_COUNT = 0
     var i: i64 = 0
     while i < 64 {
         FO_XFER_KIND[i as usize] = 0
         FO_XFER_LIT[i as usize] = 0.0
         FO_XFER_HASH[i as usize] = 0
         FO_XFER_FWD_HASH[i as usize] = 0
+        FO_GF64_HASH[i as usize] = 0
+        FO_GF64_VAL[i as usize] = 0.0
         i = i + 1
+    }
+}
+
+
+fn fo_ieee_bits_to_f64(bits: i64) -> f64 with Mut, Panic, Div {
+    if (bits & 0x7FFFFFFFFFFFFFFF) == 0 { return 0.0 }
+    let sign_bit = (bits >> 63) & 1
+    let raw_exp = (bits >> 52) & 0x7FF
+    let frac_bits = bits & 0xFFFFFFFFFFFFF
+    if raw_exp == 0x7FF { return 0.0 }
+    var mantissa: f64 = 0.0
+    var bit_val: f64 = 0.5
+    var i: i64 = 51
+    while i >= 0 {
+        if ((frac_bits >> i) & 1) == 1 {
+            mantissa = mantissa + bit_val
+        }
+        bit_val = bit_val / 2.0
+        i = i - 1
+    }
+    var result: f64 = 0.0
+    if raw_exp == 0 {
+        result = mantissa
+        var e: i64 = 0
+        while e < 1022 {
+            result = result / 2.0
+            e = e + 1
+        }
+    } else {
+        result = 1.0 + mantissa
+        let exp = raw_exp - 1023
+        if exp > 0 {
+            var e: i64 = 0
+            while e < exp {
+                result = result * 2.0
+                e = e + 1
+            }
+        } else if exp < 0 {
+            let neg_exp = 0 - exp
+            var e: i64 = 0
+            while e < neg_exp {
+                result = result / 2.0
+                e = e + 1
+            }
+        }
+    }
+    if sign_bit == 1 { result = 0.0 - result }
+    result
+}
+
+fn fo_gf64_lookup(name: Name) -> (bool, f64) with Mut, Panic, Div {
+    let h = fo_name_hash(name)
+    var i: i64 = 0
+    while i < FO_GF64_COUNT {
+        if FO_GF64_HASH[i as usize] == h {
+            return (true, FO_GF64_VAL[i as usize])
+        }
+        i = i + 1
+    }
+    (false, 0.0)
+}
+
+// Module-level `var FARADAY: f64 = 96485.3321` is an ItemFn with no body.
+// The initializer word is the IEEE bits. Kind 2 needs one f64, so the
+// product `n * FARADAY * E_CELL` is folded here, before the functions that
+// mention those names are classified.
+fn fo_gf64_collect(items: &Option<Box<ItemList>>) with Mut, Panic, Div {
+    FO_GF64_COUNT = 0
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                if head.kind == ItemKind::ItemFn {
+                    match head.fn_def {
+                        Some(_) => {}
+                        _ => {
+                            match head.type_alias_ty {
+                                Some(ty) => {
+                                    if lower_type_expr_is_f64(&(*ty)) {
+                                        if ast_global_str_init_present(head.name) == 0 && ast_global_var_init_count(head.name) == 1 {
+                                            if FO_GF64_COUNT < 64 {
+                                                let word = ast_global_var_init_nth(head.name, 0)
+                                                let idx = FO_GF64_COUNT
+                                                FO_GF64_HASH[idx as usize] = fo_name_hash(head.name)
+                                                FO_GF64_VAL[idx as usize] = fo_ieee_bits_to_f64(word)
+                                                FO_GF64_COUNT = idx + 1
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
     }
 }
 
@@ -6998,6 +7105,7 @@ fn lowerer_fo_preregister_pure_fns_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
+    fo_gf64_collect(items)
     var current = items
     while true {
         match *current {
@@ -8511,7 +8619,11 @@ fn lower_type_expr_knowledge_value_float(ty: &TypeExpr) -> i64 with Mut, Panic, 
         Some(ki) => {
             if lower_type_expr_is_f64(&(*(*ki).inner_type)) { return 1 }
             if lower_type_expr_is_integer(&(*(*ki).inner_type)) { return 0 }
-            2
+            // A nominal brand (H2, H2O, a unit) is not spelled f64, and it is
+            // not an integer either, but the checker accepts `h.value` on a
+            // Knowledge<H2> param as float -- the amount is the carrier.
+            // Marker 2 would refuse that field get, hard-failing every read.
+            1
         }
         None => 2,
     }
@@ -13204,6 +13316,249 @@ impl Lowerer {
         lo
     }
 
+    // Coefficient of a scale: literals and f64 globals. A Knowledge amount
+    // is not a coefficient. Zero in the divisor stays unregistered.
+    fn fo_coeff_of(
+        self,
+        blk: &Block,
+        e: &Expr,
+        depth: i64
+    ) -> (bool, f64) with Mut, Panic, Div, Alloc, IO {
+        if depth > 8 {
+            return (false, 0.0)
+        }
+        if (*e).kind == ExprKind::ExprCast || (*e).kind == ExprKind::ExprReturn {
+            match (*e).left {
+                Some(inner) => {
+                    return self.fo_coeff_of(blk, &(*inner), depth + 1)
+                }
+                _ => { return (false, 0.0) }
+            }
+        }
+        if (*e).kind == ExprKind::ExprFloatLit {
+            return (true, (*e).float_val)
+        }
+        if (*e).kind == ExprKind::ExprIntLit {
+            return (true, (*e).int_val as f64)
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            var current = &(*blk).stmts
+            while true {
+                match *current {
+                    Some(list) => {
+                        let stmt_ref = &(*list).head
+                        if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
+                            if ir_name_eq(stmt_ref.name, (*e).name) {
+                                match stmt_ref.expr {
+                                    Some(rhs) => {
+                                        return self.fo_coeff_of(blk, &(*rhs), depth + 1)
+                                    }
+                                    _ => { return (false, 0.0) }
+                                }
+                            }
+                        }
+                        current = &(*list).tail
+                    }
+                    _ => break
+                }
+            }
+            return fo_gf64_lookup((*e).name)
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            match (*e).left {
+                Some(le) => {
+                    match (*e).right {
+                        Some(re) => {
+                            let lc = self.fo_coeff_of(blk, &(*le), depth + 1)
+                            let rc = self.fo_coeff_of(blk, &(*re), depth + 1)
+                            if lc.0 && rc.0 && (*e).bin_op == BinaryOp::OpMul {
+                                return (true, lc.1 * rc.1)
+                            }
+                            if lc.0 && rc.0 && (*e).bin_op == BinaryOp::OpDiv && rc.1 != 0.0 {
+                                return (true, lc.1 / rc.1)
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        (false, 0.0)
+    }
+
+    // Param index of `p.value`, seeing through one chain of lets. -1 otherwise.
+    fn fo_value_leaf(
+        self,
+        blk: &Block,
+        e: &Expr,
+        p0: Name,
+        p1: Name,
+        nparams: i64,
+        depth: i64
+    ) -> i64 with Mut, Panic, Div, Alloc, IO {
+        if depth > 8 {
+            return 0 - 1
+        }
+        if (*e).kind == ExprKind::ExprCast || (*e).kind == ExprKind::ExprReturn {
+            match (*e).left {
+                Some(inner) => {
+                    return self.fo_value_leaf(blk, &(*inner), p0, p1, nparams, depth + 1)
+                }
+                _ => { return 0 - 1 }
+            }
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            var current = &(*blk).stmts
+            while true {
+                match *current {
+                    Some(list) => {
+                        let stmt_ref = &(*list).head
+                        if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
+                            if ir_name_eq(stmt_ref.name, (*e).name) {
+                                match stmt_ref.expr {
+                                    Some(rhs) => {
+                                        return self.fo_value_leaf(blk, &(*rhs), p0, p1, nparams, depth + 1)
+                                    }
+                                    _ => { return 0 - 1 }
+                                }
+                            }
+                        }
+                        current = &(*list).tail
+                    }
+                    _ => break
+                }
+            }
+            return 0 - 1
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess && ir_name_eq((*e).name, make_name("value")) {
+            match (*e).left {
+                Some(base) => {
+                    if (*base).kind == ExprKind::ExprIdent {
+                        if nparams >= 1 && ir_name_eq((*base).name, p0) {
+                            return 0
+                        }
+                        if nparams >= 2 && ir_name_eq((*base).name, p1) {
+                            return 1
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        0 - 1
+    }
+
+    // (param index, scale) for `p.value * c * FARADAY / d`. A bare `p.value`
+    // returns -1 so kind 10 is left alone. The value in a denominator stays
+    // unregistered: that derivative is not a constant scale.
+    fn fo_scaled_knowledge(
+        self,
+        blk: &Block,
+        e: &Expr,
+        p0: Name,
+        p1: Name,
+        nparams: i64,
+        depth: i64
+    ) -> (i64, f64) with Mut, Panic, Div, Alloc, IO {
+        if depth > 8 {
+            return (0 - 1, 0.0)
+        }
+        if (*e).kind == ExprKind::ExprCast || (*e).kind == ExprKind::ExprReturn {
+            match (*e).left {
+                Some(inner) => {
+                    return self.fo_scaled_knowledge(blk, &(*inner), p0, p1, nparams, depth + 1)
+                }
+                _ => { return (0 - 1, 0.0) }
+            }
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            var current = &(*blk).stmts
+            while true {
+                match *current {
+                    Some(list) => {
+                        let stmt_ref = &(*list).head
+                        if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
+                            if ir_name_eq(stmt_ref.name, (*e).name) {
+                                match stmt_ref.expr {
+                                    Some(rhs) => {
+                                        return self.fo_scaled_knowledge(blk, &(*rhs), p0, p1, nparams, depth + 1)
+                                    }
+                                    _ => { return (0 - 1, 0.0) }
+                                }
+                            }
+                        }
+                        current = &(*list).tail
+                    }
+                    _ => break
+                }
+            }
+            return (0 - 1, 0.0)
+        }
+        if (*e).kind == ExprKind::ExprBinary && ((*e).bin_op == BinaryOp::OpMul || (*e).bin_op == BinaryOp::OpDiv) {
+            match (*e).left {
+                Some(le) => {
+                    match (*e).right {
+                        Some(re) => {
+                            let right_c = self.fo_coeff_of(blk, &(*re), 0)
+                            if right_c.0 && ( (*e).bin_op == BinaryOp::OpMul || right_c.1 != 0.0 ) {
+                                let left_s = self.fo_scaled_knowledge(blk, &(*le), p0, p1, nparams, depth + 1)
+                                if left_s.0 >= 0 {
+                                    if (*e).bin_op == BinaryOp::OpMul {
+                                        return (left_s.0, left_s.1 * right_c.1)
+                                    }
+                                    return (left_s.0, left_s.1 / right_c.1)
+                                }
+                                let leaf = self.fo_value_leaf(blk, &(*le), p0, p1, nparams, 0)
+                                if leaf >= 0 {
+                                    if (*e).bin_op == BinaryOp::OpMul {
+                                        return (leaf, right_c.1)
+                                    }
+                                    return (leaf, 1.0 / right_c.1)
+                                }
+                            }
+                            if (*e).bin_op == BinaryOp::OpMul {
+                                let left_c = self.fo_coeff_of(blk, &(*le), 0)
+                                if left_c.0 {
+                                    let right_s = self.fo_scaled_knowledge(blk, &(*re), p0, p1, nparams, depth + 1)
+                                    if right_s.0 >= 0 {
+                                        return (right_s.0, right_s.1 * left_c.1)
+                                    }
+                                    let leaf_r = self.fo_value_leaf(blk, &(*re), p0, p1, nparams, 0)
+                                    if leaf_r >= 0 {
+                                        return (leaf_r, left_c.1)
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        (0 - 1, 0.0)
+    }
+
+    fn fo_try_scale_transfer(
+        self,
+        name: Name,
+        e: &Expr,
+        blk: &Block,
+        p0: Name,
+        p1: Name,
+        nparams: i64
+    ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let scaled = self.fo_scaled_knowledge(blk, e, p0, p1, nparams, 0)
+        if scaled.0 == 0 {
+            return self.fo_xfer_set(name, 2, scaled.1, ir_empty_name())
+        }
+        if scaled.0 == 1 {
+            return self.fo_xfer_set(name, 11, scaled.1, ir_empty_name())
+        }
+        self
+    }
+
     fn fo_classify_block_transfer(
         self,
         name: Name,
@@ -13261,6 +13616,10 @@ impl Lowerer {
                                 } else {
                                     lo = lo.fo_classify_expr_transfer(name, e_ref, p0, p1, nparams)
                                 }
+                                // `let n = p.value; n * c * FARADAY / d` — the
+                                // amount is scaled inside the function. Kind 10
+                                // stays in place when this is only the amount.
+                                lo = lo.fo_try_scale_transfer(name, e_ref, blk, p0, p1, nparams)
                             }
                             _ => {}
                         }
@@ -13291,6 +13650,15 @@ impl Lowerer {
                 _ => { return lo }
             }
         }
+        // `as f64` around `p.value` is still the amount. Classify the inner.
+        if (*e).kind == ExprKind::ExprCast {
+            match (*e).left {
+                Some(inner) => {
+                    return lo.fo_classify_expr_transfer(name, &(*inner), p0, p1, nparams)
+                }
+                _ => { return lo }
+            }
+        }
         // id: parameter identity. FO_XFER_LIT carries WHICH parameter the body
         // returns -- 0 or 1. That slot is unused for kind 1 and reads back 0.0 on
         // every pre-existing entry, so an old kind-1 entry keeps meaning "returns
@@ -13305,6 +13673,28 @@ impl Lowerer {
             }
             if nparams >= 2 && ir_name_eq((*e).name, p1) {
                 return lo.fo_xfer_set(name, 1, 1.0, ir_empty_name())
+            }
+            return lo
+        }
+        // Kind 10: `return p.value`, including `let n = p.value; n`.
+        // Var(amount) is slot 1 of that Knowledge parameter. Kind 1 would be
+        // wrong here: kind 1 means the result IS the parameter, and a field
+        // chain re-roots onto it. The amount is the numeric payload.
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            if ir_name_eq((*e).name, make_name("value")) {
+                match (*e).left {
+                    Some(base) => {
+                        if (*base).kind == ExprKind::ExprIdent {
+                            if nparams >= 1 && ir_name_eq((*base).name, p0) {
+                                return lo.fo_xfer_set(name, 10, 0.0, ir_empty_name())
+                            }
+                            if nparams >= 2 && ir_name_eq((*base).name, p1) {
+                                return lo.fo_xfer_set(name, 10, 1.0, ir_empty_name())
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
             return lo
         }
@@ -13779,8 +14169,14 @@ impl Lowerer {
         // defined on arg0.
         var lo = self
         var subj: i64 = 0
-        if kind == 1 {
+        // Kind 10 carries the same parameter index as kind 1 (FO_XFER_LIT).
+        if kind == 1 || kind == 10 {
             if kind_lit >= 0.5 && kind_lit < 1.5 { subj = 1 }
+        }
+        // Kind 11 is kind 2 on the second parameter. The lit is the scale,
+        // so it must not be read as a parameter index.
+        if kind == 11 {
+            subj = 1
         }
         let p0 = lo.fo_lower_nth_arg_variance(args, subj)
         lo = p0.0
@@ -13794,7 +14190,8 @@ impl Lowerer {
         // Snapshot the argument's Hessian alongside its sensitivity: the kind-6
         // chain rule below needs H(g) before the call overwrites so_expr_hess.
         let h0 = lo.so_snapshot_expr_hess()
-        if kind == 1 {
+        // Kind 10 copies that variance and stops. It does not re-root fields.
+        if kind == 1 || kind == 10 {
             lo = lo.fo_restore_expr_sens(s0)
             if v0 >= 0 {
                 return (lo, v0)
@@ -13804,12 +14201,14 @@ impl Lowerer {
             }
             return (lo.fo_clear_expr_sens(), -1)
         }
-        if kind == 2 {
+        if kind == 2 || kind == 11 {
             let lit = kind_lit
             let c_pair = lo.emit_f64_const(lit)
             lo = c_pair.0
             var sL: [i64; 32] = [-1; 32]
-            let aval = lo.fo_lower_nth_arg_value(args, 0)
+            var argi: i64 = 0
+            if kind == 11 { argi = 1 }
+            let aval = lo.fo_lower_nth_arg_value(args, argi)
             lo = aval.0
             lo = lo.fo_combine_sens_mul(sL, s0, c_pair.1, aval.1)
             return lo.fo_emit_var_from_sens()

@@ -32,10 +32,10 @@ row() {  # row <label> <engine: mad|lean> <expected sentinel> <file> [timeout]
 }
 
 echo "== 1. The epistemic core =="
-row "GUM uncertainty propagation"            mad  "Sucesso! Incerteza propagada" demo_incerteza.sio
-row "units: m/s derived and checked"         lean "Velocidade calculada" demo_unidades.sio
+row "GUM uncertainty propagation"            mad  "Sucesso! Incerteza propagada" demos/intro/demo_incerteza.sio
+row "units: m/s derived and checked"         lean "Velocidade calculada" demos/intro/demo_unidades.sio
 # The guard fires only after the source-to-source expansion (issue #2753).
-if bash scripts/ontology/expand_knowledge_runtime_guards.sh demo_portas_rejeicao.sio /tmp/tour_guard.sio >/dev/null 2>&1; then
+if bash scripts/ontology/expand_knowledge_runtime_guards.sh demos/intro/demo_portas_rejeicao.sio /tmp/tour_guard.sio >/dev/null 2>&1; then
   if timeout 120 bin/souc run /tmp/tour_guard.sio >/tmp/tour_guard.out 2>&1; then
     printf '  FAIL %-46s        guard did not fire (rc=0)\n' "Knowledge<T where ..> guard rejects age 13"; fail=$((fail + 1))
   elif grep -q "Este print" /tmp/tour_guard.out; then
