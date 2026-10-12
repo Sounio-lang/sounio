@@ -1,10 +1,7 @@
 /**
- * A propagação GUM da cena da dose — uma única cópia.
- *
- * O componente React e a ilha estática desenham coisas diferentes, mas não
- * podem calcular coisas diferentes. Aqui mora só a FÓRMULA; todos os
- * parâmetros (peso, diretriz, janela, z) chegam de fora, lidos do artefato
- * `site/dose_scene.v1`. Nenhum número desta cena é escolhido aqui.
+ * Consulta das leituras GUM calculadas pelo produtor C++23.
+ * React e a ilha estática consomem o mesmo artefato source-linked.
+ * Esta camada recusa chaves ausentes; não recalcula propagação científica.
  */
 export interface Scene {
   readings: Record<string, Reading>;
