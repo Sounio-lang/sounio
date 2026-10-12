@@ -10134,6 +10134,87 @@ fn ocp_mfi_center_rss(lhs: i64, rhs: i64) -> (bool, i64) {
     (true, result)
 }
 
+// Bounded Linux-native scalar region envelope. Ownership markers identify the
+// compiler producer; spelling alone grants no permission for an arbitrary call.
+struct OcpCenterFrame {
+    ok: bool,
+    owned: bool,
+    first: i64,
+    end: i64,
+    token: i64,
+    ret: i64,
+}
+
+fn ocp_center_owned_call(module: &IrModule, slot: i64, name: Name, flag: i64, argc: i64) -> bool with Mut, Div, Panic {
+    if slot < 0 || slot >= ir_instr_arena_capacity() { return false }
+    if (IR_A_OP[slot as usize] as IrOpcode) != IrOpcode::IrCall
+        || IR_A_IMM_FLAGS[slot as usize] != flag
+        || IR_A_ARG_COUNT[slot as usize] != argc { return false }
+    let target = IR_A_FN_ID[slot as usize]
+    if target < 0 || target >= (*module).fn_count { return false }
+    if ir_fn_get(module, target).instr_count != 0 { return false }
+    if !ir_name_eq(ir_function_name_at(module, target), name)
+        || !ir_name_eq(ir_name_at(IR_A_NAME_ID[slot as usize]), name) { return false }
+    if argc == 0 {
+        return IR_A_SRC1[slot as usize] == IR_INVALID_REG
+            && IR_A_SRC2[slot as usize] == IR_INVALID_REG
+            && IR_A_ARG_BASE[slot as usize] == 0
+    }
+    if argc != 2 { return false }
+    let base = IR_A_ARG_BASE[slot as usize]
+    let length = IR_ARG_POOL_LEN
+    if length < 2 || length > ir_arg_pool_capacity() || base < 0 || base > length - 2 { return false }
+    IR_ARG_POOL[base as usize] == IR_A_SRC1[slot as usize]
+        && IR_ARG_POOL[(base + 1) as usize] == IR_A_SRC2[slot as usize]
+}
+
+fn ocp_center_frame(module: &IrModule, fi: i64, count: i64, regs: i64) -> OcpCenterFrame with Mut, Div, Panic {
+    var frame = OcpCenterFrame { ok: false, owned: false, first: 0, end: count, token: -1, ret: -1 }
+    if fi < 0 || fi >= (*module).fn_count || count <= 0 || regs <= 0 || regs > 256 { return frame }
+    let region = ir_fn_get(module, fi).region
+    if ir_region_status(&region) != IR_ARENA_OK || ir_region_is_sealed(&region)
+        || count != ir_fn_get(module, fi).instr_count
+        || count > ir_region_len(&region) || count > ir_region_cap(&region) { return frame }
+    let entry = ir_region_slot_r(region, 0)
+    if (IR_A_OP[entry as usize] as IrOpcode) != IrOpcode::IrCall {
+        frame.ok = true
+        return frame
+    }
+    if count < 8 || !ocp_center_owned_call(module, entry, make_name("__rgn_enter"), IR_RGN_FRAME_ENTER_FLAG, 0) { return frame }
+    let marker = ir_region_slot_r(region, 1)
+    if (IR_A_OP[marker as usize] as IrOpcode) != IrOpcode::IrNop
+        || IR_A_IMM_FLAGS[marker as usize] != IR_FLOAT_REG_MARKER_FLAG { return frame }
+    let token = IR_A_DST[entry as usize]
+    let ret = IR_A_DST[marker as usize]
+    if token < 0 || token >= regs || ret < 0 || ret >= regs || token == ret { return frame }
+    let return_copy = ir_region_slot_r(region, count - 6)
+    let exit_label = ir_region_slot_r(region, count - 5)
+    let branch = ir_region_slot_r(region, count - 4)
+    let exit_call = ir_region_slot_r(region, count - 3)
+    let plain_label = ir_region_slot_r(region, count - 2)
+    let result = ir_region_slot_r(region, count - 1)
+    if (IR_A_OP[return_copy as usize] as IrOpcode) != IrOpcode::IrCopy || IR_A_DST[return_copy as usize] != ret { return frame }
+    if (IR_A_OP[exit_label as usize] as IrOpcode) != IrOpcode::IrLabel
+        || (IR_A_OP[plain_label as usize] as IrOpcode) != IrOpcode::IrLabel
+        || (IR_A_OP[branch as usize] as IrOpcode) != IrOpcode::IrBranchFalse { return frame }
+    let exit_id = IR_A_LABEL_ID[exit_label as usize]
+    let plain_id = IR_A_LABEL_ID[plain_label as usize]
+    if exit_id < 0 || exit_id >= IR_MAX_INSTRS || plain_id < 0 || plain_id >= IR_MAX_INSTRS || exit_id == plain_id
+        || IR_A_LABEL_ID[branch as usize] != plain_id || IR_A_SRC1[branch as usize] != token
+        || IR_A_SRC2[branch as usize] != IR_INVALID_REG { return frame }
+    if !ocp_center_owned_call(module, exit_call, make_name("__rgn_exit_scalar"), IR_RGN_FRAME_SCALAR_EXIT_FLAG, 2)
+        || IR_A_SRC1[exit_call as usize] != token || IR_A_SRC2[exit_call as usize] != ret { return frame }
+    if (IR_A_OP[result as usize] as IrOpcode) != IrOpcode::IrReturn
+        || IR_A_SRC1[result as usize] != ret || IR_A_SRC2[result as usize] != IR_INVALID_REG { return frame }
+    frame.ok = true
+    frame.owned = true
+    frame.first = 2
+    frame.end = count - 6
+    frame.token = token
+    frame.ret = ret
+    frame
+}
+
 // Only scalar field projections through the established MFI accessor. Never
 // pass an IrFunction to a legacy cleanup/synthesis routine or clone its arena.
 fn ocp_mfi_integral_center_pass(module: &! IrModule, fi: i64) with Mut, Div, Panic {
@@ -10153,6 +10234,8 @@ fn ocp_mfi_integral_center_pass(module: &! IrModule, fi: i64) with Mut, Div, Pan
         if other != fi && ir_fn_get(&(*module), other as usize).region.slot == region.slot { return }
         other = other + 1
     }
+    let frame = ocp_center_frame(&(*module), fi, count, regs)
+    if !frame.ok { return }
     var def_at: [i64; 256] = [-1; 256]
     var uses: [i64; 256] = [0; 256]
     var observed: [bool; 256] = [false; 256]
@@ -10167,25 +10250,39 @@ fn ocp_mfi_integral_center_pass(module: &! IrModule, fi: i64) with Mut, Div, Pan
             && op != IrOpcode::IrCopy && op != IrOpcode::IrBinOp
             && op != IrOpcode::IrUnaryOp && op != IrOpcode::IrAlloc
             && op != IrOpcode::IrFieldSet && op != IrOpcode::IrFieldGet
-            && op != IrOpcode::IrNop && op != IrOpcode::IrReturn { return }
+            && op != IrOpcode::IrNop && op != IrOpcode::IrReturn
+            && op != IrOpcode::IrCall && op != IrOpcode::IrLabel
+            && op != IrOpcode::IrBranchFalse { return }
+        if op == IrOpcode::IrCall {
+            if !frame.owned || (i != 0 && i != count - 3) { return }
+        }
+        if op == IrOpcode::IrLabel {
+            if !frame.owned || (i != count - 5 && i != count - 2) { return }
+        }
+        if op == IrOpcode::IrBranchFalse {
+            if !frame.owned || i != count - 4 { return }
+        }
+        if frame.owned && op == IrOpcode::IrReturn && i != count - 1 { return }
         if returned && op != IrOpcode::IrNop { return }
         let s1 = IR_A_SRC1[slot as usize]
         let s2 = IR_A_SRC2[slot as usize]
         let reads1 = op == IrOpcode::IrCopy || op == IrOpcode::IrBinOp
             || op == IrOpcode::IrUnaryOp || op == IrOpcode::IrFieldSet
             || op == IrOpcode::IrFieldGet || op == IrOpcode::IrReturn
+            || op == IrOpcode::IrBranchFalse || (op == IrOpcode::IrCall && i == count - 3)
         let reads2 = op == IrOpcode::IrBinOp || op == IrOpcode::IrFieldSet
+            || (op == IrOpcode::IrCall && i == count - 3)
         if reads1 {
-            if s1 < 0 || s1 >= 256 || def_at[s1 as usize] < 0 { return }
+            if s1 < 0 || s1 >= regs || def_at[s1 as usize] < 0 { return }
             uses[s1 as usize] = uses[s1 as usize] + 1
         }
         if reads2 {
-            if s2 < 0 || s2 >= 256 || def_at[s2 as usize] < 0 { return }
+            if s2 < 0 || s2 >= regs || def_at[s2 as usize] < 0 { return }
             uses[s2 as usize] = uses[s2 as usize] + 1
         }
         let dst = IR_A_DST[slot as usize]
         if ocp_has_dst(op) {
-            if dst < 0 || dst >= 256 || def_at[dst as usize] >= 0 { return }
+            if dst < 0 || dst >= regs || def_at[dst as usize] >= 0 { return }
             def_at[dst as usize] = i
         }
         if op == IrOpcode::IrReturn {
@@ -10314,7 +10411,7 @@ fn ocp_mfi_integral_center_pass(module: &! IrModule, fi: i64) with Mut, Div, Pan
                 payload_unc[dst as usize] = propagated.1
             }
             let inner_index = def_at[s1 as usize]
-            if observed[dst as usize] && propagated.0 && inner_index >= 0 && inner_index < i
+            if observed[dst as usize] && propagated.0 && inner_index >= frame.first && inner_index < i && i < frame.end
                 && uses[s1 as usize] == 1 && payload_origin[s2 as usize] >= 0 {
                 let inner_slot = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, inner_index)
                 let a = IR_A_SRC1[inner_slot as usize]
@@ -10371,6 +10468,10 @@ fn ocp_mfi_integral_center_pass(module: &! IrModule, fi: i64) with Mut, Div, Pan
     if ir_region_status(&region) != IR_ARENA_OK || ir_region_is_sealed(&region) { return }
     if ir_fn_get(&(*module), fi as usize).instr_count != count { return }
     if ir_fn_get(&(*module), fi as usize).region.slot != region.slot { return }
+    let final_frame = ocp_center_frame(&(*module), fi, count, regs)
+    if !final_frame.ok || final_frame.owned != frame.owned
+        || final_frame.first != frame.first || final_frame.end != frame.end
+        || final_frame.token != frame.token || final_frame.ret != frame.ret { return }
     let inner_read = ir_region_slot_r(region, pending_inner)
     let outer_read = ir_region_slot_r(region, pending_outer)
     // Revalidate the selected original window immediately before obtaining write slots.
