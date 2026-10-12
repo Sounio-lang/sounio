@@ -10099,11 +10099,308 @@ fn ocp_skip(bit: i64) -> bool with Div {
     (OCP_SKIP_MASK / bit) % 2 == 1
 }
 
+// Explicit research ambient policy; IEEE source association remains default.
+pub var OCP_RESEARCH_EXACT_INTEGRAL_CENTER: i64 = 0
+pub var OCP_RESEARCH_EXACT_CENTER_APPLICATIONS: i64 = 0
+pub var OCP_RESEARCH_EXACT_CENTER_LAST_FUNCTION: i64 = -1
+
+// Bounded scientific policy candidate: nominal integral centers only. This is
+// NOT generic IEEE reassociation or an accuracy consequence of RSS metadata.
+fn ocp_mfi_center_checked_add(lhs: i64, rhs: i64) -> (bool, i64) {
+    let hi: i64 = 9223372036854775807
+    let lo: i64 = (0 - 9223372036854775807) - 1
+    if rhs > 0 && lhs > hi - rhs { return (false, 0) }
+    if rhs < 0 && lhs < lo - rhs { return (false, 0) }
+    (true, lhs + rhs)
+}
+
+fn ocp_mfi_center_integral_literal(value: f64) -> bool {
+    if value != value || value < -18014398509481984.0 || value > 18014398509481984.0 { return false }
+    let integer = value as i64
+    (integer as f64) == value
+}
+
+fn ocp_mfi_center_exact_float(integer: i64) -> bool {
+    // Refuse conversion outside the three-term literal domain even for future callers.
+    if integer < -54043195528445952 || integer > 54043195528445952 { return false }
+    let value = integer as f64
+    (value as i64) == integer
+}
+
+fn ocp_mfi_center_rss(lhs: i64, rhs: i64) -> (bool, i64) {
+    if lhs < 0 || rhs < 0 || lhs > 2000000000 || rhs > 2000000000 { return (false, 0) }
+    let result = eg_isqrt(lhs * lhs + rhs * rhs)
+    if result > 2000000000 { return (false, 0) }
+    (true, result)
+}
+
+// Only scalar field projections through the established MFI accessor. Never
+// pass an IrFunction to a legacy cleanup/synthesis routine or clone its arena.
+fn ocp_mfi_integral_center_pass(module: &! IrModule, fi: i64) with Mut, Div, Panic {
+    if OCP_RESEARCH_EXACT_INTEGRAL_CENTER != 1 { return }
+    if fi < 0 || fi >= (*module).fn_count { return }
+    // The explicit research option grants the bounded contract. Strategy2 only
+    // narrows its carrier; strategy/Observe alone grant no new permission.
+    if ir_fn_get(&(*module), fi as usize).compile_strategy != IR_STRATEGY_PRECISION_PRESERVING { return }
+    let count = ir_fn_get(&(*module), fi as usize).instr_count
+    let regs = ir_fn_get(&(*module), fi as usize).reg_count
+    if count <= 0 || regs <= 0 || regs > 256 { return }
+    let region = ir_fn_get(&(*module), fi as usize).region
+    if ir_region_status(&region) != IR_ARENA_OK || ir_region_is_sealed(&region) { return }
+    if count > ir_region_len(&region) || count > ir_region_cap(&region) { return }
+    var other: i64 = 0
+    while other < (*module).fn_count {
+        if other != fi && ir_fn_get(&(*module), other as usize).region.slot == region.slot { return }
+        other = other + 1
+    }
+    var def_at: [i64; 256] = [-1; 256]
+    var uses: [i64; 256] = [0; 256]
+    var observed: [bool; 256] = [false; 256]
+    var i: i64 = 0
+    var returned = false
+    // Single straight block, scalar definitions only. Refuse unknown effects,
+    // calls, wide/heap/index aliases and any redefinition before metadata work.
+    while i < count {
+        let slot = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, i)
+        let op = IR_A_OP[slot as usize] as IrOpcode
+        if op != IrOpcode::IrLoadImm && op != IrOpcode::IrLoadFloat
+            && op != IrOpcode::IrCopy && op != IrOpcode::IrBinOp
+            && op != IrOpcode::IrUnaryOp && op != IrOpcode::IrAlloc
+            && op != IrOpcode::IrFieldSet && op != IrOpcode::IrFieldGet
+            && op != IrOpcode::IrNop && op != IrOpcode::IrReturn { return }
+        if returned && op != IrOpcode::IrNop { return }
+        let s1 = IR_A_SRC1[slot as usize]
+        let s2 = IR_A_SRC2[slot as usize]
+        let reads1 = op == IrOpcode::IrCopy || op == IrOpcode::IrBinOp
+            || op == IrOpcode::IrUnaryOp || op == IrOpcode::IrFieldSet
+            || op == IrOpcode::IrFieldGet || op == IrOpcode::IrReturn
+        let reads2 = op == IrOpcode::IrBinOp || op == IrOpcode::IrFieldSet
+        if reads1 {
+            if s1 < 0 || s1 >= 256 || def_at[s1 as usize] < 0 { return }
+            uses[s1 as usize] = uses[s1 as usize] + 1
+        }
+        if reads2 {
+            if s2 < 0 || s2 >= 256 || def_at[s2 as usize] < 0 { return }
+            uses[s2 as usize] = uses[s2 as usize] + 1
+        }
+        let dst = IR_A_DST[slot as usize]
+        if ocp_has_dst(op) {
+            if dst < 0 || dst >= 256 || def_at[dst as usize] >= 0 { return }
+            def_at[dst as usize] = i
+        }
+        if op == IrOpcode::IrReturn {
+            observed[s1 as usize] = true
+            returned = true
+        }
+        i = i + 1
+    }
+    var back = count - 1
+    while back >= 0 {
+        let slot = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, back)
+        let op = IR_A_OP[slot as usize] as IrOpcode
+        let dst = IR_A_DST[slot as usize]
+        if dst >= 0 && dst < 256 && observed[dst as usize] {
+            // Require the nominal center itself at return, not a downstream
+            // comparison or conversion whose entitlement was not selected.
+            if op == IrOpcode::IrCopy {
+                let s1 = IR_A_SRC1[slot as usize]
+                if s1 >= 0 && s1 < 256 { observed[s1 as usize] = true }
+            }
+        }
+        back = back - 1
+    }
+    var literal: [bool; 256] = [false; 256]
+    var literal_value: [f64; 256] = [0.0; 256]
+    var wrapper: [i64; 256] = [-1; 256]
+    var stage: [i64; 256] = [0; 256]
+    var center: [f64; 256] = [0.0; 256]
+    var uncertainty: [i64; 256] = [0; 256]
+    var squared_known: [bool; 256] = [false; 256]
+    var squared_unc: [i64; 256] = [0; 256]
+    var payload_known: [bool; 256] = [false; 256]
+    var payload_origin: [i64; 256] = [-1; 256]
+    var payload_value: [f64; 256] = [0.0; 256]
+    var payload_unc: [i64; 256] = [0; 256]
+    var pending_inner: i64 = -1
+    var pending_outer: i64 = -1
+    var pending_a: i64 = -1
+    var pending_b: i64 = -1
+    var pending_c: i64 = -1
+    var pending_middle: i64 = -1
+    i = 0
+    while i < count {
+        let slot = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, i)
+        let op = IR_A_OP[slot as usize] as IrOpcode
+        let dst = IR_A_DST[slot as usize]
+        let s1 = IR_A_SRC1[slot as usize]
+        let s2 = IR_A_SRC2[slot as usize]
+        let d_ok = dst >= 0 && dst < 256
+        let a_ok = s1 >= 0 && s1 < 256
+        let b_ok = s2 >= 0 && s2 < 256
+        if op == IrOpcode::IrLoadFloat && d_ok {
+            literal[dst as usize] = true
+            literal_value[dst as usize] = IR_A_IMM_F64[slot as usize]
+        }
+        if op == IrOpcode::IrUnaryOp && d_ok && a_ok
+            && (IR_A_UN_OP[slot as usize] as UnaryOp) == UnaryOp::OpNeg
+            && literal[s1 as usize] {
+            literal[dst as usize] = true
+            literal_value[dst as usize] = 0.0 - literal_value[s1 as usize]
+        }
+        if op == IrOpcode::IrAlloc && d_ok
+            && IR_A_IMM_FLAGS[slot as usize] == IR_MEASURE_CONSTRUCTOR_FLAG {
+            wrapper[dst as usize] = dst
+        }
+        if op == IrOpcode::IrCopy && d_ok && a_ok {
+            literal[dst as usize] = literal[s1 as usize]
+            literal_value[dst as usize] = literal_value[s1 as usize]
+            wrapper[dst as usize] = wrapper[s1 as usize]
+            payload_known[dst as usize] = payload_known[s1 as usize]
+            payload_origin[dst as usize] = payload_origin[s1 as usize]
+            payload_value[dst as usize] = payload_value[s1 as usize]
+            payload_unc[dst as usize] = payload_unc[s1 as usize]
+        }
+        if op == IrOpcode::IrBinOp && d_ok && a_ok && b_ok
+            && (IR_A_BIN_OP[slot as usize] as BinaryOp) == BinaryOp::OpMul
+            && s1 == s2 && literal[s1 as usize] {
+            let u = literal_value[s1 as usize]
+            if u == u && u >= 0.0 && u <= 2.0 {
+                let quantized = eg_quantize_unc(u)
+                if ((quantized as f64) / 1000000000.0) == u {
+                    squared_known[dst as usize] = true
+                    squared_unc[dst as usize] = quantized
+                }
+            }
+        }
+        if op == IrOpcode::IrFieldSet {
+            if !a_ok || !b_ok || wrapper[s1 as usize] != s1 { return }
+            let field = IR_A_FIELD_IDX[slot as usize]
+            let name = ir_name_at(IR_A_NAME_ID[slot as usize])
+            if field == 0 && stage[s1 as usize] == 0
+                && ir_name_eq(name, make_name("value"))
+                && literal[s2 as usize] && ocp_mfi_center_integral_literal(literal_value[s2 as usize]) {
+                center[s1 as usize] = literal_value[s2 as usize]
+                stage[s1 as usize] = 1
+            } else if field == 1 && stage[s1 as usize] == 1
+                && ir_name_eq(name, make_name("variance")) && squared_known[s2 as usize] {
+                uncertainty[s1 as usize] = squared_unc[s2 as usize]
+                stage[s1 as usize] = 2
+            } else if field == 2 && stage[s1 as usize] == 2
+                && ir_name_eq(name, make_name("confidence"))
+                && literal[s2 as usize] && literal_value[s2 as usize] == 1.0 {
+                stage[s1 as usize] = 3
+            } else { return }
+        }
+        if op == IrOpcode::IrFieldGet && d_ok && a_ok {
+            let origin = wrapper[s1 as usize]
+            if origin >= 0 && origin < 256 && stage[origin as usize] == 3
+                && IR_A_FIELD_IDX[slot as usize] == 0
+                && ir_name_eq(ir_name_at(IR_A_NAME_ID[slot as usize]), make_name("value")) {
+                payload_known[dst as usize] = true
+                payload_origin[dst as usize] = origin
+                payload_value[dst as usize] = center[origin as usize]
+                payload_unc[dst as usize] = uncertainty[origin as usize]
+            }
+        }
+        if op == IrOpcode::IrBinOp && d_ok && a_ok && b_ok
+            && (IR_A_BIN_OP[slot as usize] as BinaryOp) == BinaryOp::OpAdd
+            && payload_known[s1 as usize] && payload_known[s2 as usize]
+            && ((IR_A_IMM_FLAGS[slot as usize] / 2) % 2) == 1
+            && ((IR_A_IMM_FLAGS[slot as usize] / 4) % 2) == 1 {
+            let propagated = ocp_mfi_center_rss(payload_unc[s1 as usize], payload_unc[s2 as usize])
+            if propagated.0 {
+                payload_known[dst as usize] = true
+                payload_value[dst as usize] = payload_value[s1 as usize] + payload_value[s2 as usize]
+                payload_unc[dst as usize] = propagated.1
+            }
+            let inner_index = def_at[s1 as usize]
+            if observed[dst as usize] && propagated.0 && inner_index >= 0 && inner_index < i
+                && uses[s1 as usize] == 1 && payload_origin[s2 as usize] >= 0 {
+                let inner_slot = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, inner_index)
+                let a = IR_A_SRC1[inner_slot as usize]
+                let b = IR_A_SRC2[inner_slot as usize]
+                if (IR_A_OP[inner_slot as usize] as IrOpcode) == IrOpcode::IrBinOp
+                    && (IR_A_BIN_OP[inner_slot as usize] as BinaryOp) == BinaryOp::OpAdd
+                    && ((IR_A_IMM_FLAGS[inner_slot as usize] / 2) % 2) == 1
+                    && ((IR_A_IMM_FLAGS[inner_slot as usize] / 4) % 2) == 1
+                    && a >= 0 && a < 256 && b >= 0 && b < 256
+                    && a != b && a != s2 && b != s2
+                    && def_at[a as usize] < inner_index && def_at[b as usize] < inner_index
+                    && def_at[s2 as usize] < inner_index
+                    && payload_known[a as usize] && payload_known[b as usize]
+                    && payload_origin[a as usize] >= 0 && payload_origin[b as usize] >= 0
+                    && payload_origin[a as usize] != payload_origin[b as usize]
+                    && payload_origin[a as usize] != payload_origin[s2 as usize]
+                    && payload_origin[b as usize] != payload_origin[s2 as usize] {
+                    let ai = payload_value[a as usize] as i64
+                    let bi = payload_value[b as usize] as i64
+                    let ci = payload_value[s2 as usize] as i64
+                    let ab = ocp_mfi_center_checked_add(ai, bi)
+                    let bc = ocp_mfi_center_checked_add(bi, ci)
+                    if ab.0 && bc.0 {
+                        let exact = ocp_mfi_center_checked_add(ab.1, ci)
+                        let nonzero = (if payload_unc[a as usize] > 0 { 1 } else { 0 })
+                            + (if payload_unc[b as usize] > 0 { 1 } else { 0 })
+                            + (if payload_unc[s2 as usize] > 0 { 1 } else { 0 })
+                        let new_inner_unc = ocp_mfi_center_rss(payload_unc[b as usize], payload_unc[s2 as usize])
+                        if exact.0 && nonzero <= 1 && new_inner_unc.0
+                            && ocp_mfi_center_exact_float(bc.1) && ocp_mfi_center_exact_float(exact.1) {
+                            let new_unc = ocp_mfi_center_rss(payload_unc[a as usize], new_inner_unc.1)
+                            if new_unc.0 && new_unc.1 <= propagated.1
+                                && payload_value[dst as usize] != (exact.1 as f64) {
+                                // Defer mutation until all later field/alias metadata
+                                // is validated. Never reuse analysis after a write.
+                                if pending_inner < 0 {
+                                    pending_inner = inner_index
+                                    pending_outer = i
+                                    pending_a = a
+                                    pending_b = b
+                                    pending_c = s2
+                                    pending_middle = s1
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if pending_inner < 0 { return }
+    if ir_region_status(&region) != IR_ARENA_OK || ir_region_is_sealed(&region) { return }
+    if ir_fn_get(&(*module), fi as usize).instr_count != count { return }
+    if ir_fn_get(&(*module), fi as usize).region.slot != region.slot { return }
+    let inner_read = ir_region_slot_r(region, pending_inner)
+    let outer_read = ir_region_slot_r(region, pending_outer)
+    // Revalidate the selected original window immediately before obtaining write slots.
+    if (IR_A_OP[inner_read as usize] as IrOpcode) != IrOpcode::IrBinOp
+        || (IR_A_OP[outer_read as usize] as IrOpcode) != IrOpcode::IrBinOp
+        || (IR_A_BIN_OP[inner_read as usize] as BinaryOp) != BinaryOp::OpAdd
+        || (IR_A_BIN_OP[outer_read as usize] as BinaryOp) != BinaryOp::OpAdd
+        || IR_A_DST[inner_read as usize] != pending_middle
+        || IR_A_SRC1[inner_read as usize] != pending_a
+        || IR_A_SRC2[inner_read as usize] != pending_b
+        || IR_A_SRC1[outer_read as usize] != pending_middle
+        || IR_A_SRC2[outer_read as usize] != pending_c { return }
+    let inner_write = ir_region_slot_w(region, pending_inner)
+    let outer_write = ir_region_slot_w(region, pending_outer)
+    if inner_write != inner_read || outer_write != outer_read { return }
+    // Only these four scalar operand fields change. No growth, moves, flags,
+    // names, ownership transfer, new registers or instruction/count changes.
+    IR_A_SRC1[inner_write as usize] = pending_b
+    IR_A_SRC2[inner_write as usize] = pending_c
+    IR_A_SRC1[outer_write as usize] = pending_a
+    IR_A_SRC2[outer_write as usize] = pending_middle
+    OCP_RESEARCH_EXACT_CENTER_APPLICATIONS = OCP_RESEARCH_EXACT_CENTER_APPLICATIONS + 1
+    OCP_RESEARCH_EXACT_CENTER_LAST_FUNCTION = fi
+}
+
 fn opt_cleanup_function_mfi(module: &! IrModule, fi: i64) with Alloc, Mut, Div, Panic {
     let ic = ir_fn_get(&(*module), fi as usize).instr_count
     if ic <= 0 {
         return
     }
+    ocp_mfi_integral_center_pass(module, fi)
     if !ocp_skip(1)    { ocp_mfi_dedup_imm(module, fi) }
     if !ocp_skip(2)    { ocp_mfi_const_fold(module, fi) }
     if !ocp_skip(4)    { ocp_mfi_copy_prop(module, fi) }
