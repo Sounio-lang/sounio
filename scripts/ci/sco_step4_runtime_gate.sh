@@ -26,4 +26,5 @@ grep -qx "source_sha256=$before" "$receipt" || { echo 'FAIL: source mismatch; re
 grep -qx "elf_sha256=$(sha256sum "$MADAROS" | cut -d' ' -f1)" "$receipt" || { echo 'FAIL: ELF mismatch'; exit 1; }
 SOUC="$MADAROS" bash scripts/ci/sco_corpus_gate.sh
 SCO_MADAROS="$MADAROS" bash scripts/ci/sco_strategy_probe_gate.sh
+SCO_MADAROS="$MADAROS" bash scripts/ci/sco_egraph_metadata_gate.sh
 echo 'SCO_STEP4_RUNTIME_GATE_OK'
