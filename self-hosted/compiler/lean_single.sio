@@ -9332,6 +9332,269 @@ fn emit_f128_ensure_libgcc_x86() with Mut, Panic, Div {
     patch32(already, CL)
 }
 
+// ─── Correctly rounded decimal float literals (#2826, #1644) ───
+// lean_single used to lower a float literal at RUN time: cvtsi2sd(int) +
+// frac/denom, then one mulsd/divsd by 10.0 per exponent step. Every step
+// rounds, so 1.0e-300 came out 13 ulps off and the #1626 corpus
+// (tests/run-pass/float_literal_correctly_rounded.sio) failed 5 rows.
+// The literal is now converted once, at compile time, by the same algorithm
+// Madaros uses (self-hosted/parser/parser.sio parser_parse_float_token:
+// exact fast windows, then Clinger's AlgorithmM on a base-2^31 bignum,
+// pfl_slow), and the bits are emitted as an immediate. A token whose source
+// text does not reproduce its lexed int/frac/denom (a synthesised token)
+// keeps the old runtime sequence: flc_tok_bits sets FLC_OK = 0.
+var FLC_N: [i64; 64] = [0; 64]
+var FLC_NL: i64 = 0
+var FLC_D: [i64; 64] = [0; 64]
+var FLC_DL: i64 = 0
+var FLC_OK: i64 = 0
+
+fn flc_set(is_num: i64, v: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 64 {
+        if is_num == 1 { FLC_N[i as usize] = 0 } else { FLC_D[i as usize] = 0 }
+        i = i + 1
+    }
+    var x: i64 = v
+    var n: i64 = 0
+    while x > 0 {
+        if is_num == 1 { FLC_N[n as usize] = x % 2147483648 } else { FLC_D[n as usize] = x % 2147483648 }
+        x = x / 2147483648
+        n = n + 1
+    }
+    if is_num == 1 { FLC_NL = n } else { FLC_DL = n }
+}
+
+fn flc_mul_small(is_num: i64, m: i64) with Mut, Panic, Div {
+    var len: i64 = FLC_DL
+    if is_num == 1 { len = FLC_NL }
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < len {
+        var cur: i64 = FLC_D[i as usize]
+        if is_num == 1 { cur = FLC_N[i as usize] }
+        let prod = cur * m + carry
+        if is_num == 1 { FLC_N[i as usize] = prod % 2147483648 } else { FLC_D[i as usize] = prod % 2147483648 }
+        carry = prod / 2147483648
+        i = i + 1
+    }
+    while carry > 0 && len < 64 {
+        if is_num == 1 { FLC_N[len as usize] = carry % 2147483648 } else { FLC_D[len as usize] = carry % 2147483648 }
+        carry = carry / 2147483648
+        len = len + 1
+    }
+    if is_num == 1 { FLC_NL = len } else { FLC_DL = len }
+}
+
+fn flc_bits(is_num: i64) -> i64 with Mut, Panic, Div {
+    var len: i64 = FLC_DL
+    if is_num == 1 { len = FLC_NL }
+    if len == 0 { return 0 }
+    var t: i64 = FLC_D[(len - 1) as usize]
+    if is_num == 1 { t = FLC_N[(len - 1) as usize] }
+    var b: i64 = 0
+    while t > 0 { b = b + 1; t = t / 2 }
+    return (len - 1) * 31 + b
+}
+
+fn flc_cmp() -> i64 with Mut, Panic, Div {
+    if FLC_NL != FLC_DL {
+        if FLC_NL > FLC_DL { return 1 }
+        return 0 - 1
+    }
+    var i: i64 = FLC_NL - 1
+    while i >= 0 {
+        let a = FLC_N[i as usize]
+        let b = FLC_D[i as usize]
+        if a != b {
+            if a > b { return 1 }
+            return 0 - 1
+        }
+        i = i - 1
+    }
+    return 0
+}
+
+// FLC_N -= FLC_D, assuming FLC_N >= FLC_D
+fn flc_sub() with Mut, Panic, Div {
+    var borrow: i64 = 0
+    var i: i64 = 0
+    while i < FLC_NL {
+        var d: i64 = FLC_N[i as usize] - borrow
+        if i < FLC_DL { d = d - FLC_D[i as usize] }
+        if d < 0 { d = d + 2147483648; borrow = 1 } else { borrow = 0 }
+        FLC_N[i as usize] = d
+        i = i + 1
+    }
+    while FLC_NL > 0 && FLC_N[(FLC_NL - 1) as usize] == 0 { FLC_NL = FLC_NL - 1 }
+}
+
+fn flc_shl(is_num: i64, k: i64) with Mut, Panic, Div {
+    var j: i64 = 0
+    while j < k {
+        flc_mul_small(is_num, 2)
+        j = j + 1
+    }
+}
+
+// x * 2^k exactly, in two halves (see parser.sio pfl_scale2).
+fn flc_scale2(x: f64, k: i64) -> f64 with Mut, Panic, Div {
+    var v: f64 = x
+    let a = k / 2
+    let b = k - a
+    var n: i64 = a
+    while n > 0 { v = v * 2.0; n = n - 1 }
+    while n < 0 { v = v / 2.0; n = n + 1 }
+    n = b
+    while n > 0 { v = v * 2.0; n = n - 1 }
+    while n < 0 { v = v / 2.0; n = n + 1 }
+    return v
+}
+
+// sig * 10^dexp, correctly rounded (Clinger AlgorithmM; parser.sio pfl_slow).
+fn flc_slow(sig: i64, dexp: i64) -> f64 with Mut, Panic, Div {
+    flc_set(1, sig)
+    flc_set(0, 1)
+    var k: i64 = 0
+    if dexp > 0 {
+        while k < dexp { flc_mul_small(1, 10); k = k + 1 }
+    } else {
+        while k < 0 - dexp { flc_mul_small(0, 10); k = k + 1 }
+    }
+    var e: i64 = 0
+    let diff = flc_bits(1) - flc_bits(0)
+    if diff > 0 { flc_shl(0, diff); e = e + diff }
+    if diff < 0 { flc_shl(1, 0 - diff); e = e + diff }
+    if flc_cmp() < 0 { flc_shl(1, 1); e = e - 1 }
+    var want: i64 = 53
+    if e < 0 - 1022 { want = e + 1075 }
+    // want == 0 is e == -1075: the value is in [2^-1075, 2^-1074). No
+    // significand bit is kept, but it is at least half the smallest subnormal,
+    // so it is rounded, not flushed: above the half it rounds up to 2^-1074,
+    // exactly the half is a tie and rounds to even (0). Same rule as the
+    // Madaros fix for #2769 (PR #2862).
+    if want == 0 {
+        flc_sub()
+        if FLC_NL == 0 { return 0.0 }
+        return flc_scale2(1.0, 0 - 1074)
+    }
+    if want < 1 { return 0.0 }
+    if want > 53 { want = 53 }
+    var q: i64 = 1
+    flc_sub()
+    var i: i64 = 1
+    while i < want {
+        flc_shl(1, 1)
+        q = q * 2
+        if flc_cmp() >= 0 { flc_sub(); q = q + 1 }
+        i = i + 1
+    }
+    flc_shl(1, 1)
+    var round_up: i64 = 0
+    if flc_cmp() >= 0 {
+        flc_sub()
+        if FLC_NL != 0 { round_up = 1 }
+        else { if q % 2 == 1 { round_up = 1 } }
+    }
+    if round_up == 1 { q = q + 1 }
+    var qmax: i64 = 1
+    var z: i64 = 0
+    while z < want { qmax = qmax * 2; z = z + 1 }
+    if q >= qmax { q = q / 2; e = e + 1 }
+    return flc_scale2(q as f64, e - (want - 1))
+}
+
+// Exact 10^k for 0 <= k <= 22, by multiplication (each product is exact).
+fn flc_pow10_exact(k: i64) -> f64 with Mut, Panic, Div {
+    var n: i64 = k
+    if n > 22 { n = 22 }
+    if n < 0 { n = 0 }
+    var v: f64 = 1.0
+    while n > 0 { v = v * 10.0; n = n - 1 }
+    return v
+}
+
+// Correctly rounded binary64 bits of float-literal token `tok`, from its
+// source text SRC[TS..TE). Sets FLC_OK = 1 on success. FLC_OK = 0 when the
+// text does not re-lex to the token's own TV/TF/TD (the caller then keeps the
+// runtime sequence).
+fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
+    FLC_OK = 0
+    var i: i64 = TS[tok as usize]
+    let end = TE[tok as usize]
+    if i < 0 || end > SRC_LEN || i >= end { return 0 }
+    if sb(i) < 48 || sb(i) > 57 { return 0 }
+    if i + 1 < end && sb(i) == 48 && (sb(i + 1) == 120 || sb(i + 1) == 88) { return 0 }
+    // Re-lex exactly like the lexer (int part v, 18-digit frac/denom with the
+    // leading-zero rule) so the token can be checked against its own payload.
+    var v: i64 = 0
+    var frac: i64 = 0
+    var denom: i64 = 1
+    var frac_digits: i64 = 0
+    // Correctly rounded significand: up to 18 significant digits, then
+    // dropped digits only move the decimal exponent (parser.sio does the same).
+    var sig: i64 = 0
+    var dexp: i64 = 0
+    while i < end && sb(i) >= 48 && sb(i) <= 57 {
+        let d = sb(i) - 48
+        v = v * 10 + d
+        if sig < 922337203685477580 { sig = sig * 10 + d } else { dexp = dexp + 1 }
+        i = i + 1
+    }
+    if i < end && sb(i) == 46 {
+        i = i + 1
+        let int_zero = v == 0
+        var seen_nonzero: i64 = 0
+        while i < end && sb(i) >= 48 && sb(i) <= 57 {
+            let d = sb(i) - 48
+            if int_zero && seen_nonzero == 0 && d == 0 {
+                // leading fractional zero: no frac/denom digit
+            } else {
+                seen_nonzero = 1
+                if frac_digits < 18 {
+                    frac = frac * 10 + d
+                    denom = denom * 10
+                    frac_digits = frac_digits + 1
+                }
+            }
+            if sig < 922337203685477580 { sig = sig * 10 + d; dexp = dexp - 1 }
+            i = i + 1
+        }
+    }
+    if v != TV[tok as usize] || frac != TF[tok as usize] || denom != TD[tok as usize] { return 0 }
+    if i < end && (sb(i) == 101 || sb(i) == 69) {
+        i = i + 1
+        var esign: i64 = 1
+        if i < end && sb(i) == 43 { i = i + 1 }
+        else if i < end && sb(i) == 45 { esign = 0 - 1; i = i + 1 }
+        var ev: i64 = 0
+        while i < end && sb(i) >= 48 && sb(i) <= 57 {
+            if ev < 100000 { ev = ev * 10 + sb(i) - 48 }
+            i = i + 1
+        }
+        dexp = dexp + esign * ev
+    }
+    FLC_OK = 1
+    if sig == 0 { return 0 }
+    if dexp > 400 { dexp = 400 }
+    if dexp < 0 - 400 { dexp = 0 - 400 }
+    let sf = sig as f64
+    if sig <= 9007199254740992 {
+        if dexp >= 0 && dexp <= 22 { return f64_to_bits(sf * flc_pow10_exact(dexp)) }
+        if dexp < 0 && dexp >= 0 - 22 { return f64_to_bits(sf / flc_pow10_exact(0 - dexp)) }
+        if dexp > 22 {
+            var s2: f64 = sf
+            var e2: i64 = dexp
+            while e2 > 22 && s2 <= 900719925474099.0 {
+                s2 = s2 * 10.0
+                e2 = e2 - 1
+            }
+            if e2 <= 22 { return f64_to_bits(s2 * flc_pow10_exact(e2)) }
+        }
+    }
+    return f64_to_bits(flc_slow(sig, dexp))
+}
+
 // A float literal lowers through binary64 (cvtsi2sd/divsd/mulsd). Widening that
 // to binary128 is only the literal's value when the decimal is a binary64 value
 // the lowering reproduces exactly: |int| < 2^53, fraction dyadic, and an exponent
@@ -13353,7 +13616,15 @@ fn compile_primary() with IO, Mut, Panic, Div {
         // Store exponent info in globals to avoid extra locals shifting compile_primary's frame
         if TX[EP as usize] >= 0 { FL_SCI_SCRATCH = TX[EP as usize]; FL_SCI_NEG = 0 }
         else { FL_SCI_SCRATCH = 0 - TX[EP as usize]; FL_SCI_NEG = 1 }
+        let fl_bits = flc_tok_bits(EP)
         EP = EP + 1
+        if FLC_OK == 1 {
+            // #2826/#1644: compile-time correctly rounded bits; xmm0 mirrors rax
+            // as the runtime sequence left it.
+            em(0x48); em(0xb8); em64(fl_bits)
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)  // movq xmm0, rax
+            FL_SCI_SCRATCH = 0
+        } else {
         // mov rax, int_part; cvtsi2sd xmm0, rax
         em(0x48); em(0xb8); em64(fl_int)
         em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)
@@ -13385,6 +13656,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         // movq rax, xmm0 — store f64 bits in rax
         em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+        }
         EXPR_IS_F64 = 1
         EXPR_TY = 2
         // PR-7: track f64 literal for compile-time predicate checking
@@ -19259,6 +19531,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                                 fl_sci = 0 - TX[CONST_TOK_IDX[ci as usize] as usize]
                                 fl_sci_neg = 1
                             }
+                            let cfl_bits = flc_tok_bits(CONST_TOK_IDX[ci as usize])
+                            if FLC_OK == 1 {
+                                // #2826/#1644: correctly rounded at compile time.
+                                em(0x48); em(0xb8); em64(cfl_bits)
+                            } else {
                             em(0x48); em(0xb8); em64(fl_int)
                             em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)
                             if fl_frac > 0 {
@@ -19285,6 +19562,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                                 }
                             }
                             em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+                            }
                             // The sign the literal token could not carry. Same
                             // instruction the unary-minus path uses on f64.
                             if CONST_NEG[ci as usize] != 0 {
@@ -36420,7 +36698,14 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         let fl_denom = TD[EP as usize]
         if TX[EP as usize] >= 0 { FL_SCI_SCRATCH = TX[EP as usize]; FL_SCI_NEG = 0 }
         else { FL_SCI_SCRATCH = 0 - TX[EP as usize]; FL_SCI_NEG = 1 }
+        let fl_bits = flc_tok_bits(EP)
         EP = EP + 1
+        if FLC_OK == 1 {
+            // #2826/#1644: compile-time correctly rounded bits (x0), d0 mirrors it.
+            emit_imm64_a64(fl_bits)
+            em32(0x9E670000)  // fmov d0, x0
+            FL_SCI_SCRATCH = 0
+        } else {
         emit_imm64_a64(fl_int)
         em32(0x9E620000)  // scvtf d0, x0
         if fl_frac > 0 {
@@ -36448,6 +36733,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             }
         }
         em32(0x9E660000)  // fmov x0, d0
+        }
         EXPR_IS_F64 = 1
         EXPR_TY = 2
         // PR-7: track the f64 literal for compile-time predicate checking.
@@ -39949,6 +40235,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         let ci = CONST_FOUND_IDX
                         if CONST_TYPE[ci as usize] == 2 && CONST_TOK_IDX[ci as usize] >= 0 {
                             let ct = CONST_TOK_IDX[ci as usize]
+                            let cfl_bits_a = flc_tok_bits(ct)
+                            if FLC_OK == 1 {
+                                // #2826/#1644: correctly rounded at compile time.
+                                emit_imm64_a64(cfl_bits_a)
+                                em32(0x9E670000)  // fmov d0, x0
+                            } else {
                             emit_imm64_a64(TV[ct as usize])
                             em32(0x9E620000)  // scvtf d0, x0
                             if TF[ct as usize] > 0 {
@@ -39969,6 +40261,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                                 } else {
                                     while FL_SCI_SCRATCH > 0 { em32(0x1E611800); FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1 }  // fdiv d0, d0, d1
                                 }
+                            }
                             }
                             // Same sign fix as the x86 site, in the FP register
                             // where a64 already has the value: fneg d0, d0 is
