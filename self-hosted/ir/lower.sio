@@ -13451,6 +13451,96 @@ impl Lowerer {
         (0 - 1, 0.0)
     }
 
+    // (12, coefficient) when the body is amount(p0) * amount(p1) times a
+    // certain scale. One amount stays on the single-scale path. A third
+    // uncertain leaf stays unregistered.
+    fn fo_amount_product(
+        self,
+        blk: &Block,
+        e: &Expr,
+        p0: Name,
+        p1: Name,
+        nparams: i64,
+        depth: i64
+    ) -> (i64, f64) with Mut, Panic, Div, Alloc, IO {
+        if depth > 8 {
+            return (0 - 1, 0.0)
+        }
+        if (*e).kind == ExprKind::ExprCast || (*e).kind == ExprKind::ExprReturn {
+            match (*e).left {
+                Some(inner) => {
+                    return self.fo_amount_product(blk, &(*inner), p0, p1, nparams, depth + 1)
+                }
+                _ => { return (0 - 1, 0.0) }
+            }
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            var current = &(*blk).stmts
+            while true {
+                match *current {
+                    Some(list) => {
+                        let stmt_ref = &(*list).head
+                        if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
+                            if ir_name_eq(stmt_ref.name, (*e).name) {
+                                match stmt_ref.expr {
+                                    Some(rhs) => {
+                                        return self.fo_amount_product(blk, &(*rhs), p0, p1, nparams, depth + 1)
+                                    }
+                                    _ => { return (0 - 1, 0.0) }
+                                }
+                            }
+                        }
+                        current = &(*list).tail
+                    }
+                    _ => break
+                }
+            }
+            return (0 - 1, 0.0)
+        }
+        if (*e).kind == ExprKind::ExprBinary && ((*e).bin_op == BinaryOp::OpMul || (*e).bin_op == BinaryOp::OpDiv) {
+            match (*e).left {
+                Some(le) => {
+                    match (*e).right {
+                        Some(re) => {
+                            let right_c = self.fo_coeff_of(blk, &(*re), 0)
+                            if right_c.0 && ((*e).bin_op == BinaryOp::OpMul || right_c.1 != 0.0) {
+                                let left_p = self.fo_amount_product(blk, &(*le), p0, p1, nparams, depth + 1)
+                                if left_p.0 == 12 {
+                                    if (*e).bin_op == BinaryOp::OpMul {
+                                        return (12, left_p.1 * right_c.1)
+                                    }
+                                    return (12, left_p.1 / right_c.1)
+                                }
+                            }
+                            if (*e).bin_op == BinaryOp::OpMul {
+                                let leaf_l = self.fo_value_leaf(blk, &(*le), p0, p1, nparams, 0)
+                                let leaf_r = self.fo_value_leaf(blk, &(*re), p0, p1, nparams, 0)
+                                if leaf_l >= 0 && leaf_r >= 0 && leaf_l != leaf_r {
+                                    return (12, 1.0)
+                                }
+                                if leaf_r >= 0 {
+                                    let left_s = self.fo_scaled_knowledge(blk, &(*le), p0, p1, nparams, depth + 1)
+                                    if left_s.0 >= 0 && left_s.0 != leaf_r {
+                                        return (12, left_s.1)
+                                    }
+                                }
+                                if leaf_l >= 0 {
+                                    let right_s = self.fo_scaled_knowledge(blk, &(*re), p0, p1, nparams, depth + 1)
+                                    if right_s.0 >= 0 && right_s.0 != leaf_l {
+                                        return (12, right_s.1)
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        (0 - 1, 0.0)
+    }
+
     fn fo_try_scale_transfer(
         self,
         name: Name,
@@ -13460,6 +13550,10 @@ impl Lowerer {
         p1: Name,
         nparams: i64
     ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let prod = self.fo_amount_product(blk, e, p0, p1, nparams, 0)
+        if prod.0 == 12 {
+            return self.fo_xfer_set(name, 12, prod.1, ir_empty_name())
+        }
         let scaled = self.fo_scaled_knowledge(blk, e, p0, p1, nparams, 0)
         if scaled.0 == 0 {
             return self.fo_xfer_set(name, 2, scaled.1, ir_empty_name())
@@ -13712,6 +13806,42 @@ impl Lowerer {
             }
         }
         (self.fo_clear_expr_sens(), -1)
+    }
+
+    // Numeric amount of argument n: field 0 of a Knowledge object.
+    fn fo_nth_knowledge_amount(
+        self,
+        args: &Option<Box<ExprList>>,
+        n: i64
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var acur = args
+        var ai: i64 = 0
+        while true {
+            match *acur {
+                Some(al) => {
+                    if ai == n {
+                        let basep = self.lower_expr_ref(&(*al).head)
+                        var lo = basep.0
+                        let base = basep.1
+                        if base < 0 {
+                            return (lo, 0 - 1)
+                        }
+                        let dp = lo.fresh_reg()
+                        lo = dp.0
+                        let dst = dp.1
+                        var instr = ir_field_get(dst, base, 0, make_name("value"))
+                        instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                        lo = lo.emit(instr)
+                        lo = lo.emit(ir_mark_float_reg(dst))
+                        return (lo, dst)
+                    }
+                    ai = ai + 1
+                    acur = &(*al).tail
+                }
+                _ => break
+            }
+        }
+        self.emit_f64_const(0.0)
     }
 
     fn fo_lower_nth_arg_value(
@@ -14417,6 +14547,26 @@ impl Lowerer {
             let aval1 = lo.fo_lower_nth_arg_value(args, 1)
             lo = aval1.0
             lo = lo.fo_combine_sens_mul(s0, s1, val0, aval1.1)
+            return lo.fo_emit_var_from_sens()
+        }
+        // Kind 12: f = c * amount(p0) * amount(p1). The amounts are field 0.
+        // The variances were seeded above from field 1. c is FO_XFER_LIT.
+        if kind == 12 {
+            let am0 = lo.fo_nth_knowledge_amount(args, 0)
+            lo = am0.0
+            let q0 = am0.1
+            let am1 = lo.fo_nth_knowledge_amount(args, 1)
+            lo = am1.0
+            let q1 = am1.1
+            if q0 < 0 || q1 < 0 {
+                return (lo.fo_clear_expr_sens(), -1)
+            }
+            lo = lo.fo_combine_sens_mul(s0, s1, q0, q1)
+            let snap12 = lo.fo_snapshot_expr_sens()
+            let c12 = lo.emit_f64_const(kind_lit)
+            lo = c12.0
+            var sL12: [i64; 32] = [-1; 32]
+            lo = lo.fo_combine_sens_mul(sL12, snap12, c12.1, c12.1)
             return lo.fo_emit_var_from_sens()
         }
         // kind 7: `f(a, b) = a / b`. Mirrors kind 4 exactly, except the combiner is
