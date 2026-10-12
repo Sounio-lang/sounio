@@ -327,7 +327,7 @@ let accuracy_gain = result.gum_vs_mc_error / result.pce_vs_mc_error
    → Integration with Gaussian processes
 
 3. **October 2024**: "New PCE Method for Aleatory and Epistemic Uncertainties"
-   → Two-channel uncertainty (aligns with Sounio's Knowledge<T>)
+   → Two-channel uncertainty (aligns with Sounio's Epistemic type)
 
 4. **May 2024**: "Physics-Constrained PCE for Scientific ML"
    → Domain knowledge integration
@@ -375,10 +375,12 @@ let accuracy_gain = result.gum_vs_mc_error / result.pce_vs_mc_error
 
 While this PCE implementation is **complete and standalone**, future integration could include:
 
-1. **Knowledge<T> Integration**:
+1. **Epistemic Integration**:
    ```sio
-   fn propagate_pce<T>(k: Knowledge<T>, f: PCEBuilder) -> Knowledge<T>
+   use epistemic::knowledge::{Epistemic}
+   fn propagate_pce(k: Epistemic, order: i64) -> Epistemic
    ```
+   `Knowledge<T>` is not on the checked surface; the shipped type is `Epistemic { val, variance, confidence }` from `stdlib/epistemic/knowledge.sio`.
 
 2. **Auto-Detection**: Choose GUM vs PCE based on nonlinearity
 
@@ -459,4 +461,4 @@ This PCE implementation is **production-ready** and provides:
 
 It fills the **critical gap** identified in the Q1 literature review where Sounio had only GUM (first-order) and Monte Carlo but lacked efficient nonlinear uncertainty propagation with built-in sensitivity analysis.
 
-**Next Steps**: Integrate with Knowledge<T> type system and ODE/PDE models in stdlib.
+**Next Steps**: Integrate with the `Epistemic` type (`stdlib/epistemic/knowledge.sio`) and ODE/PDE models in stdlib.

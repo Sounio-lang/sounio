@@ -1,0 +1,398 @@
+// examples/kmc/kmc_gillespie_1d.sio
+//
+// M4a: A STOCHASTIC KMC ENGINE, VALIDATED AGAINST THE EXACT CME NUMBERS THIS
+//      DIRECTORY ALREADY HAS.
+//
+// Everything in this directory so far has been exact: modular linear solves,
+// closed-form Boltzmann sums, transfer matrices. Actual catalysis modelling
+// is done with stochastic KMC, on lattices far past anything exactly
+// solvable. This file builds that engine and spends its entire length
+// earning the right to trust it -- because the next file uses it in 2D,
+// where there is no exact answer to check against.
+//
+// THE COMPARISON IS ONLY MEANINGFUL IF THREE THINGS HOLD.
+//
+// 1. SAME GENERATOR, NOT A SIMILAR ONE. The rates below are transcribed to
+//    match cme_lateral_crt.sio exactly: adsorption on any empty nearest-
+//    neighbour pair at rate 1; desorption of an occupied pair at rate
+//    3 * 2^delta, delta = 1 + (occupied outer neighbours), delta in {1,2,3}.
+//    A KMC run against an exact number from a DIFFERENT generator measures
+//    nothing but the difference between the two transcriptions.
+//
+// 2. AN ERROR BAR. A stochastic number compared to an exact number without
+//    a stated uncertainty is not a comparison -- any disagreement can be
+//    waved off as "statistics" and any agreement claimed as confirmation.
+//    The coverage here is reported as mean +- standard error over 20
+//    independent batch means, and the gate is |kmc - exact| < 3 SE, which
+//    can fail.
+//
+// 3. THE ERROR BAR MUST BE SMALL ENOUGH TO DISCRIMINATE. A test that cannot
+//    reject the wrong answer is not a test, so the gate also requires the
+//    exact value to sit more than 3 SE from mean field (0.246686) -- the
+//    alternative this whole directory exists to measure against.
+//
+//    The distance to the N -> infinity limit (0.288033) is PRINTED but is
+//    deliberately NOT a gate, and the reason matters. At N=9 the exact
+//    value is 0.287876, which differs from the limit by 0.000157: the odd
+//    branch has essentially converged by nine sites, exactly as
+//    cme_lateral_reachable_thermolimit.sio's eigenvalue argument predicts
+//    (odd rings converge exponentially, even rings as ~1/N). Demanding that
+//    a stochastic run separate those two numbers would demand resolving a
+//    gap the physics says is nearly absent -- roughly 1200x more sampling
+//    to confirm a difference already known exactly. The first version of
+//    this file did gate on it, and reported N=9 as a vacuous test; that was
+//    the gate being wrong, not the run. The number is kept as a
+//    measurement, and at odd N its smallness is a corroboration rather than
+//    a failure.
+//
+// 4. THE ERROR BAR ITSELF IS A CLAIM, SO IT IS ALSO CHECKED. Batch means
+//    only give an honest SE if the batches are near-independent; correlated
+//    batches silently shrink it and make every "within 3 SE" verdict
+//    generous. PART B reruns one lattice under five independent seeds and
+//    compares the observed scatter of those five answers to the SE the
+//    method claims. If the claimed SE were badly optimistic, the scatter
+//    would exceed it.
+//
+// TIME AVERAGING WITHOUT SAMPLING EXPONENTIALS. Coverage here is a
+// time-average, and the holding time in a state with total rate R is
+// Exp(R) with mean 1/R. Rather than drawing that exponential (which needs a
+// logarithm and a second random number per step, both of which can be got
+// wrong), each visited state is weighted by its EXPECTED residence time:
+//
+//     <theta> = sum_visits (occ/R) / sum_visits (1/R)
+//
+// This is exact, not an approximation: the jump chain's stationary law is
+// nu(s) ~ pi(s) R(s), so E_nu[A/R] / E_nu[1/R] = sum_s pi(s) A(s), the
+// time-average. It removes a dependency and a failure mode at no cost in
+// correctness.
+//
+// THE RNG IS WRITTEN HERE RATHER THAN IMPORTED. stdlib/random/rng.sio's
+// splitmix64 truncates its two 64-bit mixing constants to 32 bits
+// ("simplified multiplication for interpreter"), which is not the published
+// generator and has not been tested as a replacement for it. This file uses
+// a full-period 64-bit LCG (Knuth/PCG multiplier, wrapping i64 multiply,
+// verified to wrap rather than trap) and reads only its HIGH bits -- the low
+// bits of any LCG are notoriously non-random, and event selection here
+// consumes exactly the bits it is handed.
+//
+// AND A DYNAMICAL TEST OF THE Q INVARIANT. cme_lateral_reachable_thermolimit
+// proved combinatorially that Q = occ_even - occ_odd is pinned at 0 on
+// even-length rings and unconstrained on odd ones (an odd cycle is not
+// bipartite: the wraparound bond joins two same-parity sites, and a dimer
+// landing there shifts Q by 2). Both halves are predictions about an actual
+// trajectory, and both are checked here by recomputing Q from the lattice at
+// every single step: max|Q| must be exactly 0 for even N, and strictly
+// positive for odd N. The second is as much a prediction as the first, and
+// a run where Q stayed 0 at N=9 would refute the argument just as loudly as
+// one where it moved at N=10.
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn abs_i(x: i64) -> i64 { if x < 0 { 0 - x } else { x } }
+
+fn sqrt_newton(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i: i64 = 0
+    while i < 80 { g = 0.5 * (g + x / g)  i = i + 1 }
+    g
+}
+
+fn next_site(i: i64, n: i64) -> i64 { if i + 1 == n { 0 } else { i + 1 } }
+fn prev_site(i: i64, n: i64) -> i64 { if i == 0 { n - 1 } else { i - 1 } }
+
+// --- RNG: 64-bit LCG, high bits only ---------------------------------------
+
+fn rng_step(s: i64) -> i64 { s * 6364136223846793005 + 1442695040888963407 }
+
+// Bits 32..61 of the state, as a uniform on [0,1). The sign bit is masked
+// off rather than shifted away, so no arithmetic-shift sign extension can
+// leak in; the low 32 bits are discarded rather than used.
+fn rng_unit(s: i64) -> f64 with Div, Panic {
+    let u: i64 = s & 4611686018427387903
+    let hi: i64 = u / 4294967296
+    (hi as f64) / 1073741824.0
+}
+
+// --- the model, transcribed to match cme_lateral_crt.sio --------------------
+
+fn pow2f(d: i64) -> f64 with Mut {
+    var p: f64 = 1.0
+    var i: i64 = 0
+    while i < d { p = p * 2.0  i = i + 1 }
+    p
+}
+
+fn charge_q_arr(occ: &[i64; 64], n: i64) -> i64 with Mut, Div, Panic {
+    var q: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if occ[i as usize] == 1 {
+            if i - (i / 2) * 2 == 0 { q = q + 1 } else { q = q - 1 }
+        }
+        i = i + 1
+    }
+    q
+}
+
+// out[0] mean coverage, out[1] standard error, out[2] max|Q| seen,
+// out[3] 1.0 if the incremental occupancy count still matches a fresh
+// recount at the end (bookkeeping check), out[4] 1.0 if the total rate was
+// positive at every step.
+fn kmc_run(n: i64, seed0: i64, n_burn: i64, n_batch: i64, batch_len: i64,
+           out: &![f64; 8]) with Mut, Div, Panic {
+    var occ: [i64; 64] = [0; 64]
+    var cum: [f64; 64] = [0.0; 64]
+    var bmeans: [f64; 64] = [0.0; 64]
+
+    var s: i64 = seed0
+    var occ_count: i64 = 0
+    var max_q: i64 = 0
+    var rate_ok = true
+
+    var batch: i64 = 0 - 1
+    var num: f64 = 0.0
+    var den: f64 = 0.0
+    var step_in_batch: i64 = 0
+
+    let total_steps = n_burn + n_batch * batch_len
+    var step: i64 = 0
+    while step < total_steps {
+        // --- build the event table for the current state ---
+        var total: f64 = 0.0
+        var b: i64 = 0
+        while b < n {
+            let j = next_site(b, n)
+            var r: f64 = 0.0
+            if occ[b as usize] == 0 && occ[j as usize] == 0 { r = 1.0 }
+            if occ[b as usize] == 1 && occ[j as usize] == 1 {
+                var d: i64 = 1
+                if occ[prev_site(b, n) as usize] == 1 { d = d + 1 }
+                if occ[next_site(j, n) as usize] == 1 { d = d + 1 }
+                r = 3.0 * pow2f(d)
+            }
+            total = total + r
+            cum[b as usize] = total
+            b = b + 1
+        }
+        if total <= 0.0 {
+            // An absorbing state: every bond mixed. Only strictly alternating
+            // occupancy does that, which needs Q = +-N/2, so it is
+            // unreachable from the clean surface -- checked, not assumed.
+            rate_ok = false
+            step = total_steps
+        } else {
+            // --- accumulate BEFORE jumping: the weight is this state's
+            // expected residence time ---
+            if step >= n_burn {
+                let inv: f64 = 1.0 / total
+                num = num + (occ_count as f64) * inv
+                den = den + inv
+                step_in_batch = step_in_batch + 1
+                if step_in_batch == 1 { batch = batch + 1 }
+                if step_in_batch == batch_len {
+                    bmeans[batch as usize] = num / den / (n as f64)
+                    num = 0.0
+                    den = 0.0
+                    step_in_batch = 0
+                }
+            }
+
+            // --- select and execute one event ---
+            s = rng_step(s)
+            let u: f64 = rng_unit(s) * total
+            var pick: i64 = 0
+            while pick < n && cum[pick as usize] <= u { pick = pick + 1 }
+            if pick >= n { pick = n - 1 }
+            let j2 = next_site(pick, n)
+            if occ[pick as usize] == 0 {
+                occ[pick as usize] = 1
+                occ[j2 as usize] = 1
+                occ_count = occ_count + 2
+            } else {
+                occ[pick as usize] = 0
+                occ[j2 as usize] = 0
+                occ_count = occ_count - 2
+            }
+
+            let q: i64 = charge_q_arr(&occ, n)
+            if abs_i(q) > max_q { max_q = abs_i(q) }
+
+            step = step + 1
+        }
+    }
+
+    // batch statistics
+    var mean: f64 = 0.0
+    var i2: i64 = 0
+    while i2 < n_batch { mean = mean + bmeans[i2 as usize]  i2 = i2 + 1 }
+    mean = mean / (n_batch as f64)
+
+    var ss: f64 = 0.0
+    var i3: i64 = 0
+    while i3 < n_batch {
+        let d: f64 = bmeans[i3 as usize] - mean
+        ss = ss + d * d
+        i3 = i3 + 1
+    }
+    let se = sqrt_newton(ss / ((n_batch as f64) * ((n_batch as f64) - 1.0)))
+
+    // bookkeeping check: the incrementally maintained occupancy must still
+    // agree with a fresh count of the lattice
+    var recount: i64 = 0
+    var i4: i64 = 0
+    while i4 < n { recount = recount + occ[i4 as usize]  i4 = i4 + 1 }
+
+    out[0] = mean
+    out[1] = se
+    out[2] = max_q as f64
+    if recount == occ_count { out[3] = 1.0 } else { out[3] = 0.0 }
+    if rate_ok { out[4] = 1.0 } else { out[4] = 0.0 }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("STOCHASTIC KMC vs THE EXACT CME, SAME GENERATOR, WITH ERROR BARS")
+    println("H2 + 2* <-> 2H* on a ring, k_ads=1, k_des=3*2^delta, nn repulsion w=1/2")
+    println("")
+
+    let n_burn: i64 = 100000
+    let n_batch: i64 = 20
+    let batch_len: i64 = 100000
+    print("burn-in ") print(n_burn)
+    print(" steps, then ") print(n_batch)
+    print(" batches of ") print(batch_len) println(" steps")
+    println("")
+
+    let mf: f64 = 0.246686
+    let inf: f64 = 0.288033
+
+    var ns: [i64; 3] = [8, 9, 10]
+    var exact: [f64; 3] = [0.256793, 0.287876, 0.263568]
+    var out: [f64; 8] = [0.0; 8]
+
+    var all_ok = true
+    var i: i64 = 0
+    while i < 3 {
+        let n: i64 = ns[i as usize]
+        let ex: f64 = exact[i as usize]
+        let seed: i64 = 88172645463325252 + n * 7919
+
+        kmc_run(n, seed, n_burn, n_batch, batch_len, &! out)
+
+        let kmc: f64 = out[0]
+        let se: f64 = out[1]
+        let maxq: f64 = out[2]
+        let book_ok = out[3] > 0.5
+        let rate_ok = out[4] > 0.5
+
+        print("-- N=") print(n)
+        print("  seed=") print(seed) println(" --")
+        print("   KMC theta   = ") print_f64(kmc)
+        print("  +- ") print_f64(se) println("  (SE over 20 batch means)")
+        print("   exact theta = ") print_f64(ex)
+        print("   |kmc-exact| = ") print_f64(abs_f(kmc - ex))
+        print("  = ") print_f64(abs_f(kmc - ex) / se) println(" SE")
+
+        // discrimination against mean field: gated
+        print("   distance to mean field (") print_f64(mf) print("): ")
+        print_f64(abs_f(kmc - mf) / se) println(" SE")
+        // distance to the thermodynamic limit: reported, not gated
+        print("   distance to N->inf limit (") print_f64(inf) print("): ")
+        print_f64(abs_f(kmc - inf) / se) print(" SE")
+        let is_even_n = n - (n / 2) * 2 == 0
+        if is_even_n { println("   (even ring: still far, as expected)") }
+        else { println("   (odd ring: already converged, as predicted)") }
+
+        let agrees = abs_f(kmc - ex) < 3.0 * se
+        let sharp = abs_f(ex - mf) > 3.0 * se
+        print("   within 3 SE of exact: ")
+        if agrees { print("yes") } else { print("NO") }
+        print("   |   error bar sharp enough to reject mean field: ")
+        if sharp { println("yes") } else { println("NO -- test is vacuous") }
+
+        // the Q invariant, measured along the trajectory
+        let is_even = n - (n / 2) * 2 == 0
+        print("   max|Q| over the trajectory = ") print_f64(maxq)
+        if is_even {
+            print("   (even ring, predicted 0): ")
+            if maxq == 0.0 { println("holds") } else { println("REFUTED") }
+        } else {
+            print("   (odd ring, predicted > 0): ")
+            if maxq > 0.0 { println("holds") } else { println("REFUTED") }
+        }
+
+        var q_ok = true
+        if is_even { q_ok = maxq == 0.0 } else { q_ok = maxq > 0.0 }
+        if !agrees || !sharp || !q_ok || !book_ok || !rate_ok { all_ok = false }
+        if !book_ok { println("   BOOKKEEPING FAILED: incremental occupancy drifted from a recount") }
+        if !rate_ok { println("   TOTAL RATE HIT ZERO: the chain reached an absorbing state") }
+        println("")
+
+        i = i + 1
+    }
+
+    // --- PART B: is the claimed error bar honest? ---------------------------
+    //
+    // Batch means understate the SE when batches are correlated. Five
+    // independent seeds give five answers whose scatter should be comparable
+    // to the SE each run claims for itself. Shorter runs here (the ratio is
+    // what matters, and it is self-consistent as long as the claimed SE
+    // comes from the same runs).
+    println("-- PART B: five independent seeds at N=10, scatter vs claimed SE --")
+    let nb: i64 = 10
+    let bl: i64 = 50000
+    var seed_means: [f64; 8] = [0.0; 8]
+    var se_sum: f64 = 0.0
+    var k: i64 = 0
+    while k < 5 {
+        let sd: i64 = 1000003 + k * 7717
+        kmc_run(10, sd, 50000, nb, bl, &! out)
+        let m: f64 = out[0]
+        let e: f64 = out[1]
+        seed_means[k as usize] = m
+        se_sum = se_sum + e
+        print("   seed ") print(sd)
+        print("   theta = ") print_f64(m)
+        print("  +- ") print_f64(e) println("")
+        k = k + 1
+    }
+    let se_claimed = se_sum / 5.0
+
+    var sm: f64 = 0.0
+    var k2: i64 = 0
+    while k2 < 5 { sm = sm + seed_means[k2 as usize]  k2 = k2 + 1 }
+    sm = sm / 5.0
+    var sq: f64 = 0.0
+    var k3: i64 = 0
+    while k3 < 5 {
+        let d2: f64 = seed_means[k3 as usize] - sm
+        sq = sq + d2 * d2
+        k3 = k3 + 1
+    }
+    let observed_sd = sqrt_newton(sq / 4.0)
+
+    print("   mean claimed SE (within-run, batch means) = ") print_f64(se_claimed) println("")
+    print("   observed SD across the five seeds         = ") print_f64(observed_sd) println("")
+    let ratio = observed_sd / se_claimed
+    print("   ratio observed/claimed = ") print_f64(ratio) println("")
+    // Five samples estimate a spread poorly (a chi distribution on 4 dof
+    // carries roughly 35% relative uncertainty), so this bound is
+    // deliberately loose: it can catch an error bar that is wrong by a
+    // factor, not one that is wrong by 20%.
+    let bar_ok = ratio > 0.3 && ratio < 3.0
+    if bar_ok {
+        println("   claimed error bar is consistent with the seed-to-seed scatter")
+    } else {
+        println("   CLAIMED ERROR BAR IS NOT CONSISTENT with the seed scatter --")
+        println("   every '3 SE' verdict above is suspect")
+    }
+    if !bar_ok { all_ok = false }
+    println("")
+
+    if all_ok {
+        println("M4A_KMC_1D_VALIDATED_OK")
+    } else {
+        println("M4A_KMC_1D_VALIDATED_FAILED")
+    }
+    0
+}

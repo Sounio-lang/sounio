@@ -83,7 +83,7 @@ Work items:
   - training demo if/when autodiff integration is real and verifiable
 
 Deliverables:
-- `scripts/paper/reproduce_octonion_preprint.sh` (tests + benches)
+- `scripts/archive/reproduce_octonion_preprint.sh` (tests + benches)
 - `scripts/selfhost/selfhost_zero_fallback_gate.sh` + `scripts/ci/selfhost_driver_output_gate.sh` (self-host maturity gates)
 - Manuscript appendix that names the scripts, commit/tag, and outputs
 

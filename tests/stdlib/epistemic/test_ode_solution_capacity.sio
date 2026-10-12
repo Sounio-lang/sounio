@@ -1,0 +1,168 @@
+//@ run-pass
+//@ timeout: 120
+// tests/stdlib/epistemic/test_ode_solution_capacity.sio
+//
+// ODESolution keeps values/variances in 4096 slots strided by n_dims and times in
+// 1024 slots, so it holds min(1024, 4096 / n_dims) time points. Once full, the last
+// slot is overwritten on every further step, so slot n_steps - 1 must always be the
+// FINAL state, and no earlier slot may be touched.
+//
+// The 72-step regression in test_chem_network_ode_sys5 stays far below capacity and
+// never executes the overwrite branch. This test records past capacity on both sides
+// of the `min`:
+//
+//   A. n_dims = 1  -> capacity 1024 (the 1024-point `times` limit binds).
+//                     Exponential decay has a closed form, so the final slot is
+//                     checked against exact y and exact GUM variance.
+//   B. n_dims = 14 -> capacity 292  (the 4096 / n_dims limit binds).
+//                     No closed form. Every compartment is seeded non-zero so all 14
+//                     channels evolve (the default IV dose leaves 13 of them at 0, which
+//                     would make a comparison vacuous). The final slot of an overflowing
+//                     run (dt) is compared with the final state of a run at 2 dt that fits
+//                     in storage: both are RK4 of the same smooth system over the same
+//                     horizon, so they agree to O(dt^4), while a stale or mis-strided slot
+//                     would not. The slot before the last is compared the same way.
+
+use epistemic::ode::*
+
+fn absf(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn expn(x: f64) -> f64 with Mut, Div, Panic {
+    // exp(-x), x >= 0, halving and squaring
+    var y = x
+    var k = 0
+    while y > 0.5 {
+        y = y / 2.0
+        k = k + 1
+    }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 30 {
+        term = 0.0 - term * y / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    while k > 0 {
+        sum = sum * sum
+        k = k - 1
+    }
+    sum
+}
+
+fn rel(a: f64, b: f64) -> f64 with Div { absf(a - b) / absf(b) }
+
+// finite: false for NaN and +-inf
+fn finite(x: f64) -> bool { (x - x) == 0.0 }
+
+// all 14 compartments non-zero and distinct, so every channel moves
+fn seeded_14() -> EState with Mut, Div, Panic {
+    var s = estate_new(14)
+    var d = 0
+    while d < 14 {
+        estate_set(&!s, d, 1.0 + 0.5 * (d as f64), 0.01 * (1.0 + (d as f64)))
+        d = d + 1
+    }
+    s
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fail: i32 = 0
+
+    // ---- A. n_dims = 1, 1501 recorded points into 1024 slots -------------------------
+    let y0 = 1.0
+    let u0 = 0.1
+    let kk = 0.1
+    let uk = 0.01
+    let dt = 0.001
+    let nsteps = 1500
+    let t_end = dt * (nsteps as f64)
+
+    var init = estate_new(1)
+    estate_set(&!init, 0, y0, u0 * u0)
+    var p = ode_params_new()
+    ode_params_set(&!p, 0, kk, uk * uk)
+    let sol = solve_ode(ode_system_exp_decay(), init, p, 0.0, t_end, solver_options_fixed(dt, nsteps))
+
+    if sol.n_steps != 1024 { fail = fail + 1; println("FAIL A: n_steps is not capped at 1024") }
+    let last = sol.n_steps - 1
+
+    // final slot = state at t_end, not at the 1024th recorded time (t = 1.023)
+    let e_end = expn(kk * t_end)
+    let y_end = y0 * e_end
+    let v_end = e_end * e_end * u0 * u0 + (y0 * t_end * e_end) * (y0 * t_end * e_end) * uk * uk
+    let y_last = solution_get_value(&sol, last, 0)
+    let v_last = solution_get_variance(&sol, last, 0)
+    print("A final slot: y=") print(y_last) print(" exact=") print(y_end) println("")
+    if !(rel(y_last, y_end) <= 1.0e-9) { fail = fail + 1; println("FAIL A: final slot value is not the final state") }
+    if !(rel(v_last, v_end) <= 1.0e-5) { fail = fail + 1; println("FAIL A: final slot variance is not the final variance") }
+
+    // the slot before it is the untouched state at t = 1022 dt
+    let e_prev = expn(kk * dt * 1022.0)
+    let y_prev = solution_get_value(&sol, last - 1, 0)
+    if !(rel(y_prev, y0 * e_prev) <= 1.0e-9) { fail = fail + 1; println("FAIL A: slot n_steps-2 was clobbered") }
+    // slot 0 is still the initial state
+    if !(absf(solution_get_value(&sol, 0, 0) - y0) <= 1.0e-15) { fail = fail + 1; println("FAIL A: slot 0 was clobbered") }
+    if sol.covariance_mode != 1 { fail = fail + 1; println("FAIL A: covariance_mode") }
+    // reaching t_end while the storage is full is still a COMPLETED solve
+    if sol.status != 0 { fail = fail + 1; println("FAIL A: status of a completed solve") }
+    if !(absf(sol.t_final - t_end) <= 1.0e-9) { fail = fail + 1; println("FAIL A: t_final") }
+    // max_steps smaller than the horizon needs: truncated, and it says so
+    let cut = solve_ode(ode_system_exp_decay(), init, p, 0.0, t_end, solver_options_fixed(dt, 100))
+    if cut.status != 1 { fail = fail + 1; println("FAIL A: max_steps exhaustion must report status 1") }
+    if !(cut.t_final < t_end - 1.0) { fail = fail + 1; println("FAIL A: truncated t_final") }
+
+    // ---- B. n_dims = 14, 401 recorded points into 292 slots --------------------------
+    // horizon 0.02 h: the 14-comp rates are O(100)/h, so states are still O(1) here
+    let t_b = 0.02
+    let sol_a = solve_ode(ode_system_pbpk_14(), seeded_14(), pbpk_14_default_params(),
+                          0.0, t_b, solver_options_fixed(0.00005, 400))
+    let sol_b = solve_ode(ode_system_pbpk_14(), seeded_14(), pbpk_14_default_params(),
+                          0.0, t_b, solver_options_fixed(0.0001, 200))
+    print("B n_steps: overflow run=") print(sol_a.n_steps) print(" reference run=") print(sol_b.n_steps) println("")
+    if sol_a.n_steps != 292 { fail = fail + 1; println("FAIL B: n_steps is not capped at 4096 / 14 = 292") }
+    if sol_b.n_steps != 201 { fail = fail + 1; println("FAIL B: reference run should fit in storage") }
+
+    let la = sol_a.n_steps - 1
+    let lb = sol_b.n_steps - 1
+    var worst = 0.0
+    var worst_var = 0.0
+    var worst_prev = 0.0
+    var n_moved = 0
+    var nonfinite = 0
+    var d = 0
+    while d < 14 {
+        let a = solution_get_value(&sol_a, la, d)
+        let b = solution_get_value(&sol_b, lb, d)
+        let r = absf(a - b) / absf(b)
+        if r > worst { worst = r }
+        let va = solution_get_variance(&sol_a, la, d)
+        let vb = solution_get_variance(&sol_b, lb, d)
+        let rv = absf(va - vb) / absf(vb)
+        if rv > worst_var { worst_var = rv }
+        // slot 290 of the overflow run holds t = 290 * 5e-5 = 0.0145, the reference's step 145
+        let ap = solution_get_value(&sol_a, la - 1, d)
+        let bp = solution_get_value(&sol_b, 145, d)
+        let rp = absf(ap - bp) / absf(bp)
+        if rp > worst_prev { worst_prev = rp }
+        // `ratio > worst` is false for NaN, so a corrupted (NaN) slot would leave `worst` untouched and
+        // the assertions below would still pass: count non-finite ratios and reject them explicitly
+        if !finite(r) || !finite(rv) || !finite(rp) { nonfinite = nonfinite + 1 }
+        // non-vacuity: the channel must have moved away from its seed value
+        let seed = 1.0 + 0.5 * (d as f64)
+        if absf(b - seed) > 1.0e-3 { n_moved = n_moved + 1 }
+        d = d + 1
+    }
+    print("B worst relative state difference (final slot)=") print(worst) println("")
+    print("B worst relative state difference (slot n_steps-2)=") print(worst_prev) println("")
+    print("B worst relative variance difference=") print(worst_var) println("")
+    print("B channels that moved from their seed=") print(n_moved) println("")
+    if nonfinite > 0 { fail = fail + 1; println("FAIL B: a compared slot is NaN/inf (the maxima below would silently ignore it)") }
+    if n_moved != 14 { fail = fail + 1; println("FAIL B: comparison would be vacuous, not every channel evolved") }
+    if !(worst <= 1.0e-6) { fail = fail + 1; println("FAIL B: final slot state differs from the reference final state") }
+    if !(worst_prev <= 1.0e-6) { fail = fail + 1; println("FAIL B: slot n_steps-2 was clobbered") }
+    if !(worst_var <= 1.0e-4) { fail = fail + 1; println("FAIL B: final slot variance differs from the reference final variance") }
+
+    if fail == 0 { println("ODE SOLUTION CAPACITY PASS") }
+    fail
+}

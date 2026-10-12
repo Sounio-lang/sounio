@@ -1,5 +1,7 @@
 # Inventário de Arquivos .disabled na Standard Library
 
+> **NOTA (medida 2026-09-19): documento histórico.** A população atual de arquivos `.sio.disabled` em `stdlib/` é **0** (medido via `git ls-files` no HEAD de `main`). As entradas descritas abaixo (março de 2026) não existem mais; o conteúdo permanece apenas como linhagem.
+
 **Data:** 2026-03-17
 **Total inicial:** 106 arquivos .disabled
 **Após limpeza:** 95 arquivos .disabled

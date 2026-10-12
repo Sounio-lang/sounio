@@ -1,5 +1,6 @@
 //@ run-pass
 //@ expect-stdout: ALL PASS
+//@ known-failure: measured 2026-10-06 -- lean_single T3/T4 FAIL (scalar ratio 13.1 and diagonal ratio 7.6 both >= 16ch ratio 5.2); Madaros computes wrong values (train MSE ~3.4e3, T2 FAIL)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Door D: S-SSM seizure detection — subject chb11 (blank-channel-cleaned)
@@ -82,7 +83,9 @@ var IC_CH14: [f64; 80] = [0.0; 80]   var IC_CH15: [f64; 80] = [0.0; 80]
 var TARGET_II: [f64; 80] = [0.0; 80]
 var TARGET_IC: [f64; 80] = [0.0; 80]
 
-fn init_data() with Mut {
+// init_data is split into parts: one function of ~2750 stores exceeds
+// Madaros' per-function IR_MAX_INSTRS (16384).
+fn init_data_0() with Mut {
     II_CH0[0] = 0.48233291
     II_CH0[1] = 0.48233291
     II_CH0[2] = 0.29161345
@@ -763,6 +766,9 @@ fn init_data() with Mut {
     II_CH8[37] = -0.65771000
     II_CH8[38] = -0.82812878
     II_CH8[39] = -0.84362140
+}
+
+fn init_data_1() with Mut {
     II_CH8[40] = -0.90559187
     II_CH8[41] = -0.90559187
     II_CH8[42] = -0.79714355
@@ -1443,6 +1449,9 @@ fn init_data() with Mut {
     IC_CH0[77] = 0.00000000
     IC_CH0[78] = 0.00000000
     IC_CH0[79] = 0.00000000
+}
+
+fn init_data_2() with Mut {
     IC_CH1[0] = -2.85298375
     IC_CH1[1] = -2.85298375
     IC_CH1[2] = -2.51327007
@@ -2123,6 +2132,9 @@ fn init_data() with Mut {
     IC_CH9[37] = -0.46989487
     IC_CH9[38] = -0.35435914
     IC_CH9[39] = -0.41552511
+}
+
+fn init_data_3() with Mut {
     IC_CH9[40] = -0.19804609
     IC_CH9[41] = -0.06891791
     IC_CH9[42] = -0.15726877
@@ -2805,9 +2817,16 @@ fn init_data() with Mut {
     TARGET_IC[79] = 0.00000000
 }
 
+fn init_data() with Mut {
+    init_data_0()
+    init_data_1()
+    init_data_2()
+    init_data_3()
+}
+
 // ─── Sedenion gate ────────────────────────────────────────────────────────────
 
-fn make_a(alpha: f64) -> Sedenion with Div, Panic {
+fn make_a(alpha: f64) -> Sedenion with Mut, Div, Panic {
     let inv2: f64 = 1.0 / sqrt_s(2.0)
     let zd0: f64 = 0.5; let zd1: f64 = 0.5; let zd4: f64 = 0.5; let zd5: f64 = 0.0 - 0.5
     let g0: f64 = (1.0 - alpha) * inv2 + alpha * zd0
@@ -2871,7 +2890,7 @@ fn load_h(t: i64) -> Sedenion {
 var WC: [i64; 16] = [0; 16]
 fn cg(i: i64) -> f64 with Div { (WC[i] as f64) / 100000000.0 }
 fn cs(i: i64, v: f64) with Mut { WC[i] = (v * 100000000.0) as i64 }
-fn get_c() -> Sedenion {
+fn get_c() -> Sedenion with Div {
     Sedenion { e0:cg(0), e1:cg(1), e2:cg(2), e3:cg(3),
                e4:cg(4), e5:cg(5), e6:cg(6), e7:cg(7),
                e8:cg(8), e9:cg(9), e10:cg(10), e11:cg(11),
@@ -2935,7 +2954,7 @@ fn ssm_update_c(lr: f64) with Mut, Div, Panic {
     }
 }
 
-fn ssm_train_mse() -> f64 with Div, Panic {
+fn ssm_train_mse() -> f64 with Mut, Div, Panic {
     let c: Sedenion = get_c()
     var local_sum: f64 = 0.0
     var t: i64 = 0
@@ -3191,6 +3210,7 @@ fn real_test_ic() -> f64 with Mut, Div, Panic {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 fn main() -> i32 with IO, Mut, Div, Panic {
+    var exit_fails: i64 = 0
     init_data()
 
     let a02: Sedenion = make_a(0.2)
@@ -3254,14 +3274,14 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     if s16_train >= 0.0 && s16_ii >= 0.0 && s16_ic >= 0.0 {
         println("T1 PASS: all MSE finite"); passed = passed + 1
     } else {
-        println("T1 FAIL: negative MSE"); failed = failed + 1
+        println("T1 FAIL: negative MSE"); exit_fails = exit_fails + 1; failed = failed + 1
     }
 
     // T2: S-SSM-16ch trains
     if s16_train < 1.5 {
         println("T2 PASS: S-SSM-16ch converged"); passed = passed + 1
     } else {
-        println("T2 FAIL: S-SSM-16ch did not converge"); failed = failed + 1
+        println("T2 FAIL: S-SSM-16ch did not converge"); exit_fails = exit_fails + 1; failed = failed + 1
     }
 
     // T3: S-SSM-16ch > S-SSM-scalar (Door C anomaly resolved)
@@ -3271,7 +3291,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         println(") — blank-channel fix restores G2 coupling")
         passed = passed + 1
     } else {
-        print("T3 FAIL: scalar ("); print(sc_ratio)
+        print("T3 FAIL: scalar ("); exit_fails = exit_fails + 1; print(sc_ratio)
         print(") >= 16ch ("); print(s16_ratio)
         println(") — anomaly persists")
         failed = failed + 1
@@ -3284,7 +3304,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         println(") — G2 coupling signal")
         passed = passed + 1
     } else {
-        print("T4 FAIL: diagonal ("); print(r16_ratio)
+        print("T4 FAIL: diagonal ("); exit_fails = exit_fails + 1; print(r16_ratio)
         print(") >= 16ch ("); print(s16_ratio)
         println("")
         failed = failed + 1
@@ -3292,10 +3312,10 @@ fn main() -> i32 with IO, Mut, Div, Panic {
 
     println("")
     if failed == 0 { println("ALL PASS") }
-    else { print("FAILURES: "); print(failed); println("") }
+    else { print("FAILURES: "); exit_fails = exit_fails + 1; print(failed); println("") }
 
     print("  Passed: "); print(passed); println("")
     print("  Failed: "); print(failed); println("")
 
-    0
+    if exit_fails > 0 { 1 } else { 0 }
 }

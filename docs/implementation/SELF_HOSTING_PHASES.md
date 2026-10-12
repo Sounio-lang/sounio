@@ -43,7 +43,7 @@ This section recorded a cutover contract that was bundle/state driven:
 > `scripts/omega/omega_prepare_policy_smoke.sh`,
 > `scripts/omega/omega_policy_status.sh`,
 > `scripts/bootstrap/omega_canonical_policy_sign.sh`,
-> `scripts/dev/diverse_double_compile_check.sh`) is dead for the same reason.
+> `scripts/archive/diverse_double_compile_check.sh`) is dead for the same reason.
 > The bootstrap chain that is actually exercised today is
 > `scripts/ci/bootstrap_chain_gate.sh`, which drives `bootstrap/stage0.c` ->
 > `bootstrap/boot1.sio` directly without any `souc` subcommand, alongside

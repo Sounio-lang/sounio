@@ -2,8 +2,8 @@
 topic_id: repo.docs.design.native-graphics-library
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: 2026-09-22
+validated_by: Claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.design.native-graphics-library
 -->
 
@@ -236,7 +236,7 @@ use plot::epistemic::{epistemic_time_series, ConfidenceBandStyle};
 let series = EpistemicTimeSeries { ... }; // com Knowledge ou Epistemic values
 
 epistemic_time_series(
-    &mut ctx,
+    &!ctx,
     &series,
     EpistemicPlotConfig {
         show_confidence_decay: true,
@@ -290,11 +290,11 @@ use plot::raster::RasterTarget;
 use image::png;
 
 fn main() with IO, Mut {
-    let mut target = RasterTarget::new(1200, 800);
+    var target = RasterTarget::new(1200, 800);
     
     let data = ...; // Knowledge ou f64 + uncertainty
     
-    epistemic::time_series(&mut target, &data, EpistemicConfig { ... });
+    epistemic::time_series(&!target, &data, EpistemicConfig { ... });
     
     let png = target.finish().to_png();   // ou via FFI por enquanto
     // salvar png

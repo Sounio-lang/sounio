@@ -1,0 +1,90 @@
+// The steady_state_runner plasma loop, verbatim in structure (operator-split
+// absorption bolus + adaptive Tsit5 + 16-checkpoint trapezoid), with the
+// tolerance exposed. BBB is dropped: it is one-way coupled and does not feed
+// the plasma AUC/C_max. Instance: rapamycin_fullvd_params, 14 doses, rtol 1e-6,
+// atol 1e-10 (= tight_ode_config). Reproduces the demo ratio 1.228366 on Madaros.
+// 1-ulp sensitivity: set rtol = 0.000001 * (1.0 + 2.220446049250313e-16).
+// Tighter rtol (1e-8 and below) exhausts the Madaros handle table (rc=182).
+
+use darwin_pbpk::absorption::*
+use darwin_pbpk::drugs::rapamycin::{rapamycin_fullvd_params}
+use darwin_pbpk::tsit5_pbpk14::*
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let sys_prm = rapamycin_fullvd_params()
+    let abs_prm = rapamycin_absorption_params()
+    let n_doses: i32 = 14
+    let base = tight_ode_config()
+    let rtol = 0.000001
+    let atol = 0.0000000001
+    let dt_max = 0.5
+    let fu = 0.08
+    var sys_st = pbpk_state_zero()
+    var abs_st = absorption_state_zero()
+    var auc_first: f64 = 0.0
+    var cmax_first: f64 = 0.0
+    var auc_last: f64 = 0.0
+    var cmax_last: f64 = 0.0
+    var total_steps: i64 = 0
+    var total_rej: i64 = 0
+    var dose_i: i32 = 0
+    while dose_i < n_doses {
+        abs_st.a_gut = abs_st.a_gut + 2.0
+        var t: f64 = 0.0
+        var dt_sys = base.dt_init
+        var auc: f64 = 0.0
+        var cmax: f64 = sys_st.blood
+        var point_i: i32 = 1
+        var t_prev_cp: f64 = 0.0
+        while point_i < 16 {
+            let target = (point_i as f64) * 24.0 / 15.0
+            let c_prev = sys_st.blood
+            while t < target {
+                let dt_use = if t + dt_sys > target { target - t } else { dt_sys }
+                let released_before = abs_st.released_cum
+                let abs_next = absorption_step(abs_st, t, dt_use, abs_prm)
+                let rel_mg = abs_next.released_cum - released_before
+                var st_in = sys_st
+                if rel_mg > 0.0 {
+                    st_in.blood = st_in.blood + absorption_mass_to_blood_delta(rel_mg, sys_prm.v_blood)
+                }
+                let result = tsit5_step_pbpk(st_in, t, dt_use, sys_prm)
+                let err_norm = compute_error_norm_14(result.err, st_in, result.state_new, rtol, atol)
+                if err_norm <= 1.0 {
+                    sys_st = result.state_new
+                    abs_st = abs_next
+                    t = t + dt_use
+                    total_steps = total_steps + 1
+                } else {
+                    total_rej = total_rej + 1
+                }
+                dt_sys = optimal_step_14(dt_use, err_norm, base.safety, base.max_growth, base.min_shrink)
+                if dt_sys < base.dt_min { dt_sys = base.dt_min }
+                if dt_sys > dt_max { dt_sys = dt_max }
+            }
+            let c_now = sys_st.blood
+            auc = auc + 0.5 * (target - t_prev_cp) * (c_prev + c_now)
+            t_prev_cp = target
+            if c_now > cmax { cmax = c_now }
+            point_i = point_i + 1
+        }
+        let auc_u = fu * auc
+        if dose_i == 0 {
+            auc_first = auc_u
+            cmax_first = cmax
+        }
+        print("dose "); print_int((dose_i + 1) as i64)
+        print(" cmax_e6="); print_f64(cmax * 1000000.0)
+        print(" ctrough_e6="); print_f64(sys_st.blood * 1000000.0)
+        print(" auc16_e6="); print_f64(auc_u * 1000000.0)
+        println("")
+        auc_last = auc_u
+        cmax_last = cmax
+        abs_st.released_cum = 0.0
+        dose_i = dose_i + 1
+    }
+    print("RATIO auc16_last/first_e6 = "); print_f64(auc_last / auc_first * 1000000.0); println("")
+    print("RATIO cmax_last/first_e6 = "); print_f64(cmax_last / cmax_first * 1000000.0); println("")
+    print("steps="); print_int(total_steps); print(" rejects="); print_int(total_rej); println("")
+    0
+}

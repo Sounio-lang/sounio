@@ -30,11 +30,11 @@
 #
 # Merge Conflicts and Derived Artefacts (#2391)
 # ---------------------------------------------
-# artifacts/gates/witness_declares_its_sabotage.json is a derived artefact.
-# When concurrent branches add witnesses, the cardinality and corpus digest
-# will conflict on merge. NEVER resolve the conflict by picking HEAD or main:
-# always re-derive via:
-#   SOUNIO_WITNESS_SABOTAGE_CENSUS_ONLY=1 bash scripts/ci/witness_declares_its_sabotage_gate.sh
+# artifacts/gates/witness_declares_its_sabotage.json is a derived artefact and
+# is not committed. measured_claim_gate.sh regenerates it in census-only mode
+# before comparing the witness_census_* rows against the tree, so a pull
+# request that adds a witness changes nothing a human has to resolve. Do not
+# commit the file: its total and corpus digest are functions of the tree.
 #
 # Usage:
 #   SOUNIO_WITNESS_SABOTAGE_MADAROS=/path/to/madaros   # required

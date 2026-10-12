@@ -41,7 +41,7 @@ This comprehensive guide enables LLMs to correctly generate Sounio code. Sounio 
 
 For what the compiler accepts today:
 - `docs/guide/MINIMUM_VIABLE_SOUNIO.md` — What actually works
-- `compiler/docs/KNOWN_LIMITATIONS.md` — What is not implemented
+- `docs/compiler/KNOWN_LIMITATIONS.md` — What is not implemented
 - `tests/run-pass/` — Compilable syntax patterns
 
 If you are generating `.sio` code, prefer the working subset above.
@@ -1665,8 +1665,8 @@ use std::onn::training::{
 }
 
 fn training_loop() {
-    let mut state = create_training_state()
-    let mut scheduler = create_lr_scheduler(
+    var state = create_training_state()
+    var scheduler = create_lr_scheduler(
         initial_lr: 0.001,
         schedule_type: 1,  // 0=const, 1=linear decay, 2=exp, 3=cosine
         total_steps: 1000,
@@ -1965,8 +1965,6 @@ fn foo() -> i32 {
 
 // Type annotations: use same syntax
 let x: i32 = 5         // OK
-let x = 5<i32>         // OK (type suffix syntax)
-let x = 5.0<f64>       // OK for floats with units
 
 // Effect annotation: use 'with' keyword
 fn foo() -> i32 with IO { }   // Sounio style

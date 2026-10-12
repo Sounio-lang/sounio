@@ -12,8 +12,6 @@ It is **NOT** Rust, Julia, or ML. Own syntax, semantics, philosophy.
 | `&mut x` | `&!x` | `&!T` = exclusive reference |
 | `assert!(cond)` | `assert(cond)` | No Rust macros |
 | `println!("hi")` | `println("hi")` | No Rust macros |
-| `-42` | `0 - 42` | No unary minus operator |
-| `x >> 4` | `x >> 4u8` | Shift operand must be `u8` |
 | `\|x\| x + 1` | named fn ref: `let f = add_one` | No closure literals |
 | `#[test]` / `#[derive]` | `//@ run-pass` | No attributes |
 | `Vec<T>` / `&[T]` | `[T; N]` fixed-size only | No dynamic arrays or slices |

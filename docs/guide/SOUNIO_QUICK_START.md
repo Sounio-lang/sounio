@@ -51,16 +51,16 @@ var counter: i32 = 0
 increment(&!counter)
 ```
 
-### 4. No Unary Minus
+### 4. Unary Minus Works
 ```sio
-let neg = 0 - 42       // ✅ correct
-// let neg = -42        // ❌ WRONG
+let neg = -42          // ✅ works on literals, variables and arguments
+let flipped = -x       // ✅ no `0 - x` workaround needed
 ```
 
-### 5. Bit Shifts Use u8
+### 5. Bit Shifts Take a Plain Integer
 ```sio
-let shifted = byte >> 4u8     // ✅ correct
-// let shifted = byte >> 4    // ❌ WRONG
+let shifted = byte >> 4     // ✅ plain integer amount
+let masked = byte & 15
 ```
 
 ### 6. No Rust Macros
@@ -204,10 +204,8 @@ fill(&! buf)
 2. `&!` not `&mut`, `var` not `let mut`
 3. Effects declared (`with IO, Mut, Div, Panic`)
 4. No Rust macros — `assert()` not `assert!()`, `println()` not `println!()`
-5. No unary minus — `0 - x`
-6. Bit shifts use `u8` — `x >> 4u8`
-7. Array index cast — `arr[i as usize]`
-8. Named fn refs, not closure literals
+5. Array index cast — `arr[i as usize]`
+6. Named fn refs, not closure literals
 
 ## Real Sounio to Study
 

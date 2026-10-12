@@ -1,1325 +1,819 @@
-// quantum::vqe — Variational Quantum Eigensolver with Epistemic Uncertainty
+// quantum::vqe — Pauli-sum Hamiltonians, gate-list circuits and a VQE driver
+//                on an exact statevector (at most 4 qubits)
 //
-// Every energy estimate carries quantum + classical uncertainty.
-// Every ansatz reports expressibility bounds.
-// Every optimization tracks barren plateau risk.
+// What this module is:
+//   * PauliString / Hamiltonian: real-coefficient sums of Pauli strings on
+//     up to 4 qubits (up to 32 terms), the form a Jordan-Wigner or
+//     Bravyi-Kitaev reduced molecular Hamiltonian takes.
+//   * Circuit: a list of gates applied to a statevector of 2^n <= 16 complex
+//     amplitudes. Rotation angles are either fixed or bound to a parameter
+//     slot, so one Circuit is an ansatz.
+//   * Exact expectation values <psi|H|psi> (no sampling) and an exact
+//     ground-state oracle: the 2^n x 2^n Hermitian H is embedded as the real
+//     symmetric [[Re H, -Im H], [Im H, Re H]] and diagonalised by cyclic
+//     Jacobi (each eigenvalue of H appears twice).
+//   * vqe_minimize: Rotosolve / sequential minimal optimisation
+//     (Ostaszewski, Grant, Benedetti, Quantum 5, 391 (2021); Nakanishi,
+//     Fujii, Todo, Phys. Rev. Research 2, 043158 (2020)). Valid when every
+//     parameter drives exactly one Rx/Ry/Rz gate, which vqe_minimize checks.
 //
-// # Philosophy
+// What it is not: no noise model, no shot noise, no hardware backend, no
+// error mitigation. An earlier version of this file advertised all of these
+// but "measured" Pauli terms with random coin flips unrelated to the circuit,
+// shipped H2/LiH/BeH2 coefficient sets that were not the published ones, and
+// did not parse on Madaros. It was rewritten rather than patched.
 //
-// Traditional VQE returns point estimates of ground state energy.
-// In quantum chemistry and materials science:
-// - Shot noise creates statistical uncertainty
-// - Hardware noise biases energy estimates
-// - Classical optimizer convergence is uncertain
-// - Chemical accuracy requires error quantification
+// Why gates are a tag plus fields and not `enum Gate { H(i32), RY(i32, f64), … }`:
+// Madaros (the default engine) does not parse enum variants with payloads
+// (measured 2026-10-05: "parse error: expected token" on every payload
+// variant). A Gate is therefore a kind code (gate_h(), gate_ry(), …) plus the
+// qubit indices, a fixed angle and an optional parameter slot. Circuits store
+// their gates as parallel fixed-size arrays for the same portability reason.
 //
-// Sounio VQE makes uncertainty EXPLICIT at every level.
+// Type names differ from quantum::epistemic_vqe (VQEResult, Statevector) and
+// quantum::linear (QuantumState) on purpose: measured 2026-10-06, Madaros
+// resolves a struct name imported from two modules to one definition (E012
+// "this type has no field named" when a program imports both), so the
+// result and state types here are CircuitVQEResult and CircuitState.
 //
-// # Quick Example
+// Basis index i encodes |b_{n-1} ... b_0>; bit k of i is qubit k. A Pauli
+// string's ops[k] acts on qubit k.
 //
-// ```sounio
-// use quantum::vqe::{VQE, UCCSD, JordanWigner}
-// use quantum::core::{NoiseModel}
-// use epistemic::knowledge::Knowledge
+// Function names are distinct from quantum::epistemic_vqe as well
+// (h2_pauli_hamiltonian, not h2_hamiltonian): lean_single bundles imports
+// into one namespace and rejects two functions of the same name (E006).
 //
-// // H₂ molecule at 0.74 Å
-// let hamiltonian = h2_hamiltonian(0.74)
-// let ansatz = HardwareEfficient::new(2, 2)
-//
-// let vqe = VQE::new(hamiltonian, ansatz)
-//     .with_shots(10000)
-//
-// let result = vqe.run()
-// // result.energy has full uncertainty quantification
-// ```
-//
-// # References
-//
-// - Peruzzo et al.: "A variational eigenvalue solver on a photonic quantum processor"
-// - McClean et al.: "The theory of variational hybrid quantum-classical algorithms"
-// - Grimsley et al.: "An adaptive variational algorithm for exact molecular simulations"
-// - Kandala et al.: "Hardware-efficient variational quantum eigensolver"
+// For the two-qubit H2 problem with an uncertainty band on the gate angles,
+// see quantum::epistemic_vqe; tests/stdlib/quantum/test_vqe.sio checks that
+// both modules agree.
 
-use std::epistemic::knowledge::{Knowledge, Confidence, Provenance};
+// =============================================================================
+// MATH HELPERS (self-contained)
+// =============================================================================
 
-// ============================================================================
-// PAULI OPERATORS
-// ============================================================================
-
-// Single Pauli operator
-enum PauliOp {
-    I,  // Identity
-    X,  // Pauli-X
-    Y,  // Pauli-Y
-    Z,  // Pauli-Z
+fn qv_pi() -> f64 {
+    return 3.141592653589793
 }
 
-// Complex number for coefficients
-struct Complex {
-    re: f64,
-    im: f64,
+fn qv_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
 }
 
-impl Complex {
-    fn new(re: f64, im: f64) -> Self {
-        Complex { re: re, im: im }
+fn qv_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var scale = 1.0
+    while m > 4.0 { m = m / 4.0; scale = scale * 2.0 }
+    while m < 0.25 { m = m * 4.0; scale = scale / 2.0 }
+    var y = 1.0
+    var i = 0
+    while i < 8 {
+        y = 0.5 * (y + m / y)
+        i = i + 1
     }
-
-    fn one() -> Self {
-        Complex { re: 1.0, im: 0.0 }
-    }
-
-    fn zero() -> Self {
-        Complex { re: 0.0, im: 0.0 }
-    }
-
-    fn mul(self, other: Complex) -> Complex {
-        Complex {
-            re: self.re * other.re - self.im * other.im,
-            im: self.re * other.im + self.im * other.re,
-        }
-    }
-
-    fn add(self, other: Complex) -> Complex {
-        Complex {
-            re: self.re + other.re,
-            im: self.im + other.im,
-        }
-    }
-
-    fn norm_sq(self) -> f64 {
-        self.re * self.re + self.im * self.im
-    }
+    return y * scale
 }
 
-// Pauli string: tensor product of Pauli operators
-struct PauliString {
-    ops: [PauliOp],
-    coefficient: Complex,
+fn qv_wrap(x: f64) -> f64 with Mut, Div, Panic {
+    let pi = qv_pi()
+    var y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
+    return y
 }
 
-impl PauliString {
-    fn identity(n_qubits: i32) -> Self with Alloc {
-        var ops: [PauliOp] = []
-        for i in 0..n_qubits {
-            ops = ops ++ [PauliOp::I]
-        }
-        PauliString {
-            ops: ops,
-            coefficient: Complex::one(),
-        }
+fn qv_sin(x: f64) -> f64 with Mut, Div, Panic {
+    let y = qv_wrap(x)
+    let x2 = y * y
+    var sum = y
+    var term = y
+    var k = 1
+    while k < 15 {
+        let a = 2.0 * (k as f64)
+        term = term * (0.0 - x2) / (a * (a + 1.0))
+        sum = sum + term
+        k = k + 1
     }
-
-    fn from_str(s: string, coeff: f64) -> Self with Alloc {
-        var ops: [PauliOp] = []
-        for c in s.chars() {
-            let op = match c {
-                'I' => PauliOp::I,
-                'X' => PauliOp::X,
-                'Y' => PauliOp::Y,
-                'Z' => PauliOp::Z,
-                _ => PauliOp::I,
-            }
-            ops = ops ++ [op]
-        }
-
-        PauliString {
-            ops: ops,
-            coefficient: Complex::new(coeff, 0.0),
-        }
-    }
-
-    fn n_qubits(self) -> i32 {
-        len(self.ops) as i32
-    }
-
-    /// Weight: number of non-identity operators
-    fn weight(self) -> i32 {
-        var count = 0
-        for op in &self.ops {
-            match op {
-                PauliOp::I => {},
-                _ => { count = count + 1 },
-            }
-        }
-        count
-    }
-
-    /// Check if commutes with another Pauli string
-    fn commutes_with(self, other: &PauliString) -> bool {
-        var anticommute_count = 0
-        let n = min(len(self.ops), len(other.ops))
-
-        for i in 0..n {
-            let a = &self.ops[i]
-            let b = &other.ops[i]
-
-            match (a, b) {
-                (PauliOp::I, _) => {},
-                (_, PauliOp::I) => {},
-                (PauliOp::X, PauliOp::X) => {},
-                (PauliOp::Y, PauliOp::Y) => {},
-                (PauliOp::Z, PauliOp::Z) => {},
-                _ => { anticommute_count = anticommute_count + 1 },
-            }
-        }
-
-        anticommute_count % 2 == 0
-    }
+    return sum
 }
 
-// ============================================================================
-// HAMILTONIAN
-// ============================================================================
-
-// Qubit Hamiltonian as sum of Pauli strings
-struct Hamiltonian {
-    terms: [PauliString],
-    n_qubits: i32,
-    constant: f64,
+fn qv_cos(x: f64) -> f64 with Mut, Div, Panic {
+    let y = qv_wrap(x)
+    let x2 = y * y
+    var sum = 1.0
+    var term = 1.0
+    var k = 1
+    while k < 15 {
+        let a = 2.0 * (k as f64)
+        term = term * (0.0 - x2) / ((a - 1.0) * a)
+        sum = sum + term
+        k = k + 1
+    }
+    return sum
 }
 
-impl Hamiltonian {
-    fn new(n_qubits: i32) -> Self {
-        Hamiltonian {
-            terms: [],
-            n_qubits: n_qubits,
-            constant: 0.0,
-        }
+fn qv_atan_unit(x: f64) -> f64 with Mut, Div, Panic {
+    let x1 = x / (1.0 + qv_sqrt(1.0 + x * x))
+    let x2 = x1 / (1.0 + qv_sqrt(1.0 + x1 * x1))
+    let t2 = x2 * x2
+    var sum = x2
+    var p = x2
+    var k = 1
+    while k < 18 {
+        p = p * (0.0 - t2)
+        sum = sum + p / (2.0 * (k as f64) + 1.0)
+        k = k + 1
     }
-
-    fn add_term(self, term: PauliString) -> Self with Alloc {
-        Hamiltonian {
-            terms: self.terms ++ [term],
-            n_qubits: self.n_qubits,
-            constant: self.constant,
-        }
-    }
-
-    fn with_constant(self, c: f64) -> Self {
-        Hamiltonian {
-            terms: self.terms,
-            n_qubits: self.n_qubits,
-            constant: c,
-        }
-    }
-
-    fn n_terms(self) -> i32 {
-        len(self.terms) as i32
-    }
-
-    /// Group terms into commuting sets for simultaneous measurement
-    fn grouping(self) -> [[i32]] with Alloc {
-        let n = len(self.terms)
-        var groups: [[i32]] = []
-        var assigned: [bool] = []
-
-        for i in 0..n {
-            assigned = assigned ++ [false]
-        }
-
-        for i in 0..n {
-            if assigned[i] {
-                continue
-            }
-
-            var group: [i32] = [i as i32]
-            assigned[i] = true
-
-            for j in (i + 1)..n {
-                if assigned[j] {
-                    continue
-                }
-
-                // Check if j commutes with all in group
-                var commutes_with_all = true
-                for k in &group {
-                    if !self.terms[j].commutes_with(&self.terms[k]) {
-                        commutes_with_all = false
-                        break
-                    }
-                }
-
-                if commutes_with_all {
-                    group = group ++ [j as i32]
-                    assigned[j] = true
-                }
-            }
-
-            groups = groups ++ [group]
-        }
-
-        groups
-    }
+    return 4.0 * sum
 }
 
-// ============================================================================
-// FERMION TO QUBIT MAPPING
-// ============================================================================
-
-// Trait for fermion-to-qubit mapping
-trait FermionMapping {
-    fn map_creation(self, orbital: i32, n_orbitals: i32) -> [PauliString] with Alloc
-    fn map_annihilation(self, orbital: i32, n_orbitals: i32) -> [PauliString] with Alloc
-    fn n_qubits(self, n_orbitals: i32) -> i32
+fn qv_atan2(y: f64, x: f64) -> f64 with Mut, Div, Panic {
+    let pi = qv_pi()
+    if x == 0.0 {
+        if y > 0.0 { return 0.5 * pi }
+        if y < 0.0 { return 0.0 - 0.5 * pi }
+        return 0.0
+    }
+    var base = 0.0
+    if qv_abs(y) <= qv_abs(x) {
+        base = qv_atan_unit(y / x)
+    } else {
+        let inner = qv_atan_unit(x / y)
+        if y / x > 0.0 { base = 0.5 * pi - inner } else { base = 0.0 - 0.5 * pi - inner }
+    }
+    if x > 0.0 { return base }
+    if y >= 0.0 { return base + pi }
+    return base - pi
 }
 
-// Jordan-Wigner transformation
-struct JordanWigner {}
+// =============================================================================
+// PAULI OPERATORS AND STRINGS
+// =============================================================================
 
-impl FermionMapping for JordanWigner {
-    fn map_creation(self, p: i32, n: i32) -> [PauliString] with Alloc {
-        // a†_p = (X_p - iY_p)/2 * Z_{p-1} * ... * Z_0
-        var x_term: [PauliOp] = []
-        var y_term: [PauliOp] = []
+pub fn pauli_i() -> i32 { return 0 }
+pub fn pauli_x() -> i32 { return 1 }
+pub fn pauli_y() -> i32 { return 2 }
+pub fn pauli_z() -> i32 { return 3 }
 
-        for i in 0..n {
-            if i < p {
-                x_term = x_term ++ [PauliOp::Z]
-                y_term = y_term ++ [PauliOp::Z]
-            } else if i == p {
-                x_term = x_term ++ [PauliOp::X]
-                y_term = y_term ++ [PauliOp::Y]
-            } else {
-                x_term = x_term ++ [PauliOp::I]
-                y_term = y_term ++ [PauliOp::I]
+pub struct PauliString {
+    pub ops: [i32; 4],       // ops[k] acts on qubit k (pauli_i/x/y/z codes)
+    pub coefficient: f64,    // real: Hermitian Pauli sums have real coefficients
+}
+
+// PauliString from per-qubit codes (qubit 0 first)
+pub fn pauli_string(op_q0: i32, op_q1: i32, op_q2: i32, op_q3: i32, coeff: f64) -> PauliString with Mut {
+    var ops: [i32; 4] = [0; 4]
+    ops[0] = op_q0
+    ops[1] = op_q1
+    ops[2] = op_q2
+    ops[3] = op_q3
+    return PauliString { ops: ops, coefficient: coeff }
+}
+
+// Number of non-identity factors
+pub fn pauli_weight(p: &PauliString) -> i32 with Mut {
+    var count = 0
+    var k = 0
+    while k < 4 {
+        if p.ops[k] != 0 { count = count + 1 }
+        k = k + 1
+    }
+    return count
+}
+
+// Two Pauli strings commute iff they anticommute on an even number of qubits
+pub fn pauli_commutes(a: &PauliString, b: &PauliString) -> bool with Mut, Div, Panic {
+    var anti = 0
+    var k = 0
+    while k < 4 {
+        let x = a.ops[k]
+        let y = b.ops[k]
+        if x != 0 {
+            if y != 0 {
+                if x != y { anti = anti + 1 }
             }
         }
-
-        [
-            PauliString { ops: x_term, coefficient: Complex::new(0.5, 0.0) },
-            PauliString { ops: y_term, coefficient: Complex::new(0.0, -0.5) },
-        ]
+        k = k + 1
     }
+    return (anti % 2) == 0
+}
 
-    fn map_annihilation(self, p: i32, n: i32) -> [PauliString] with Alloc {
-        // a_p = (X_p + iY_p)/2 * Z_{p-1} * ... * Z_0
-        var x_term: [PauliOp] = []
-        var y_term: [PauliOp] = []
+// =============================================================================
+// HAMILTONIAN — constant + sum of up to 32 Pauli strings
+// =============================================================================
 
-        for i in 0..n {
-            if i < p {
-                x_term = x_term ++ [PauliOp::Z]
-                y_term = y_term ++ [PauliOp::Z]
-            } else if i == p {
-                x_term = x_term ++ [PauliOp::X]
-                y_term = y_term ++ [PauliOp::Y]
-            } else {
-                x_term = x_term ++ [PauliOp::I]
-                y_term = y_term ++ [PauliOp::I]
-            }
-        }
+pub struct Hamiltonian {
+    pub n_qubits: i32,
+    pub n_terms: i32,
+    pub constant: f64,
+    pub ops: [i32; 128],        // term t, qubit k at ops[4 t + k]
+    pub coeffs: [f64; 32],
+}
 
-        [
-            PauliString { ops: x_term, coefficient: Complex::new(0.5, 0.0) },
-            PauliString { ops: y_term, coefficient: Complex::new(0.0, 0.5) },
-        ]
-    }
-
-    fn n_qubits(self, n_orbitals: i32) -> i32 {
-        n_orbitals
+pub fn hamiltonian_new(n_qubits: i32, constant: f64) -> Hamiltonian {
+    return Hamiltonian {
+        n_qubits: n_qubits,
+        n_terms: 0,
+        constant: constant,
+        ops: [0; 128],
+        coeffs: [0.0; 32],
     }
 }
 
-// Bravyi-Kitaev transformation
-struct BravyiKitaev {}
-
-impl FermionMapping for BravyiKitaev {
-    fn map_creation(self, p: i32, n: i32) -> [PauliString] with Alloc {
-        // Simplified BK mapping (uses JW for now)
-        JordanWigner{}.map_creation(p, n)
+// Append a term; returns the Hamiltonian unchanged if it already has 32 terms
+pub fn hamiltonian_add(h: Hamiltonian, p: PauliString) -> Hamiltonian with Mut, Div, Panic {
+    var out = h
+    if h.n_terms >= 32 { return out }
+    let t = h.n_terms
+    var k = 0
+    while k < 4 {
+        out.ops[4 * t + k] = p.ops[k]
+        k = k + 1
     }
-
-    fn map_annihilation(self, p: i32, n: i32) -> [PauliString] with Alloc {
-        JordanWigner{}.map_annihilation(p, n)
-    }
-
-    fn n_qubits(self, n_orbitals: i32) -> i32 {
-        n_orbitals
-    }
+    out.coeffs[t] = p.coefficient
+    out.n_terms = t + 1
+    return out
 }
 
-// ============================================================================
-// QUANTUM GATES
-// ============================================================================
-
-// Quantum gate
-enum Gate {
-    // Single qubit
-    H(i32),                    // Hadamard
-    X(i32),                    // Pauli-X
-    Y(i32),                    // Pauli-Y
-    Z(i32),                    // Pauli-Z
-    S(i32),                    // S gate (sqrt(Z))
-    Sdg(i32),                  // S dagger
-    T(i32),                    // T gate
-    RX(i32, f64),              // X rotation
-    RY(i32, f64),              // Y rotation
-    RZ(i32, f64),              // Z rotation
-
-    // Two qubit
-    CNOT(i32, i32),            // Controlled-NOT
-    CZ(i32, i32),              // Controlled-Z
-    CRZ(i32, i32, f64),        // Controlled-RZ
-    SWAP(i32, i32),            // SWAP
-
-    // Measurement
-    Measure(i32),              // Measure qubit
+// Two-qubit H2 Hamiltonian of O'Malley et al., Phys. Rev. X 6, 031007 (2016):
+//   H = c0 I + c1 Z0 + c2 Z1 + c3 Z0Z1 + c4 X0X1 + c4 Y0Y1,
+//   c0 = -0.4804, c1 = 0.3435, c2 = -0.4347, c3 = 0.5716, c4 = 0.0910.
+// c0 excludes nuclear repulsion; ground eigenvalue -1.851199124 Ha.
+pub fn h2_pauli_hamiltonian() -> Hamiltonian with Mut, Div, Panic {
+    var h = hamiltonian_new(2, 0.0 - 0.4804)
+    h = hamiltonian_add(h, pauli_string(pauli_z(), 0, 0, 0, 0.3435))
+    h = hamiltonian_add(h, pauli_string(0, pauli_z(), 0, 0, 0.0 - 0.4347))
+    h = hamiltonian_add(h, pauli_string(pauli_z(), pauli_z(), 0, 0, 0.5716))
+    h = hamiltonian_add(h, pauli_string(pauli_x(), pauli_x(), 0, 0, 0.0910))
+    h = hamiltonian_add(h, pauli_string(pauli_y(), pauli_y(), 0, 0, 0.0910))
+    return h
 }
 
-// Quantum circuit
-struct Circuit {
-    n_qubits: i32,
-    gates: [Gate],
-}
-
-impl Circuit {
-    fn new(n_qubits: i32) -> Self {
-        Circuit {
-            n_qubits: n_qubits,
-            gates: [],
-        }
-    }
-
-    fn apply(self, gate: Gate) -> Self with Alloc {
-        Circuit {
-            n_qubits: self.n_qubits,
-            gates: self.gates ++ [gate],
-        }
-    }
-
-    fn measure_all(self) -> Self with Alloc {
-        var circuit = self
-        for q in 0..self.n_qubits {
-            circuit = circuit.apply(Gate::Measure(q))
-        }
-        circuit
-    }
-
-    fn depth(self) -> i32 {
-        // Simplified: count layers
-        len(self.gates) as i32
-    }
-}
-
-// Quantum state (simplified)
-struct QuantumState {
-    n_qubits: i32,
-    amplitudes: [Complex],
-}
-
-impl QuantumState {
-    fn zero_state(n_qubits: i32) -> Self with Alloc {
-        let dim = 1 << n_qubits
-        var amps: [Complex] = [Complex::one()]
-        for i in 1..dim {
-            amps = amps ++ [Complex::zero()]
-        }
-        QuantumState {
-            n_qubits: n_qubits,
-            amplitudes: amps,
-        }
-    }
-}
-
-// Noise model
-struct NoiseModel {
-    depolarizing_rate: f64,
-    readout_error: f64,
-    t1: f64,  // Relaxation time
-    t2: f64,  // Dephasing time
-}
-
-impl NoiseModel {
-    fn ideal() -> Self {
-        NoiseModel {
-            depolarizing_rate: 0.0,
-            readout_error: 0.0,
-            t1: f64::MAX,
-            t2: f64::MAX,
-        }
-    }
-
-    fn ibm_lagos() -> Self {
-        NoiseModel {
-            depolarizing_rate: 0.001,
-            readout_error: 0.02,
-            t1: 100.0,  // microseconds
-            t2: 50.0,
-        }
-    }
-
-    fn noisy(depol: f64, readout: f64) -> Self {
-        NoiseModel {
-            depolarizing_rate: depol,
-            readout_error: readout,
-            t1: 100.0,
-            t2: 50.0,
-        }
-    }
-}
-
-// ============================================================================
-// ANSÄTZE
-// ============================================================================
-
-// Trait for parameterized quantum circuit ansatz
-trait Ansatz {
-    fn circuit(self, params: &[f64]) -> Circuit with Alloc
-    fn n_params(self) -> i32
-    fn n_qubits(self) -> i32
-    fn initial_params(self) -> [f64] with Alloc
-}
-
-// Entanglement pattern
-enum EntanglementPattern {
-    Linear,
-    Full,
-    Circular,
-}
-
-// Hardware-efficient ansatz
-struct HardwareEfficient {
-    n_qubits: i32,
-    depth: i32,
-    entanglement: EntanglementPattern,
-}
-
-impl HardwareEfficient {
-    fn new(n_qubits: i32, depth: i32) -> Self {
-        HardwareEfficient {
-            n_qubits: n_qubits,
-            depth: depth,
-            entanglement: EntanglementPattern::Linear,
-        }
-    }
-
-    fn with_entanglement(self, pattern: EntanglementPattern) -> Self {
-        HardwareEfficient {
-            n_qubits: self.n_qubits,
-            depth: self.depth,
-            entanglement: pattern,
-        }
-    }
-}
-
-impl Ansatz for HardwareEfficient {
-    fn circuit(self, params: &[f64]) -> Circuit with Alloc {
-        var circuit = Circuit::new(self.n_qubits)
-        var param_idx = 0
-
-        for layer in 0..self.depth {
-            // Single-qubit rotations
-            for q in 0..self.n_qubits {
-                circuit = circuit
-                    .apply(Gate::RY(q, params[param_idx]))
-                    .apply(Gate::RZ(q, params[param_idx + 1]))
-                param_idx = param_idx + 2
-            }
-
-            // Entangling layer
-            match self.entanglement {
-                EntanglementPattern::Linear => {
-                    for q in 0..(self.n_qubits - 1) {
-                        circuit = circuit.apply(Gate::CNOT(q, q + 1))
-                    }
-                },
-                EntanglementPattern::Full => {
-                    for q1 in 0..self.n_qubits {
-                        for q2 in (q1 + 1)..self.n_qubits {
-                            circuit = circuit.apply(Gate::CZ(q1, q2))
+// Greedy grouping into mutually commuting sets: group[t] = group id of term t.
+// Returns the number of groups.
+pub fn hamiltonian_grouping(h: &Hamiltonian, group: &![i32; 32]) -> i32 with Mut, Div, Panic {
+    var t = 0
+    while t < 32 { group[t] = 0 - 1; t = t + 1 }
+    var n_groups = 0
+    var i = 0
+    while i < h.n_terms {
+        if group[i] < 0 {
+            group[i] = n_groups
+            var j = i + 1
+            while j < h.n_terms {
+                if group[j] < 0 {
+                    var ok = true
+                    var m = 0
+                    while m < j {
+                        if group[m] == n_groups {
+                            let pm = pauli_string(h.ops[4 * m], h.ops[4 * m + 1], h.ops[4 * m + 2], h.ops[4 * m + 3], 1.0)
+                            let pj = pauli_string(h.ops[4 * j], h.ops[4 * j + 1], h.ops[4 * j + 2], h.ops[4 * j + 3], 1.0)
+                            if !pauli_commutes(&pm, &pj) { ok = false }
                         }
+                        m = m + 1
                     }
-                },
-                EntanglementPattern::Circular => {
-                    for q in 0..self.n_qubits {
-                        circuit = circuit.apply(Gate::CNOT(q, (q + 1) % self.n_qubits))
-                    }
-                },
+                    if ok { group[j] = n_groups }
+                }
+                j = j + 1
             }
+            n_groups = n_groups + 1
         }
+        i = i + 1
+    }
+    return n_groups
+}
 
-        // Final rotation layer
-        for q in 0..self.n_qubits {
-            circuit = circuit
-                .apply(Gate::RY(q, params[param_idx]))
-                .apply(Gate::RZ(q, params[param_idx + 1]))
-            param_idx = param_idx + 2
+// =============================================================================
+// STATEVECTOR
+// =============================================================================
+
+pub struct CircuitState {
+    pub n_qubits: i32,
+    pub dim: i32,
+    pub re: [f64; 16],
+    pub im: [f64; 16],
+}
+
+pub fn circuit_state_zero(n_qubits: i32) -> CircuitState with Mut, Div, Panic {
+    var d = 1
+    var k = 0
+    while k < n_qubits { d = d * 2; k = k + 1 }
+    var s = CircuitState { n_qubits: n_qubits, dim: d, re: [0.0; 16], im: [0.0; 16] }
+    s.re[0] = 1.0
+    return s
+}
+
+// <psi| P |psi> for the Pauli string with codes ops[4 t .. 4 t + 3].
+// P|i> = phase(i) |i xor xmask>, xmask = qubits carrying X or Y;
+// phase(i) = i^{#Y} (-1)^{#(Y or Z on a 1 bit)}.
+fn pauli_expect_at(s: &CircuitState, ops: &[i32; 128], t: i32) -> f64 with Mut, Div, Panic {
+    var xmask = 0
+    var n_y = 0
+    var k = 0
+    while k < s.n_qubits {
+        let op = ops[4 * t + k]
+        if op == 1 { xmask = xmask | (1 << k) }
+        if op == 2 { xmask = xmask | (1 << k); n_y = n_y + 1 }
+        k = k + 1
+    }
+    var acc_re = 0.0
+    var acc_im = 0.0
+    var i = 0
+    while i < s.dim {
+        var neg = 0
+        k = 0
+        while k < s.n_qubits {
+            let op = ops[4 * t + k]
+            let bit = (i >> k) & 1
+            if bit == 1 {
+                if op == 2 { neg = neg + 1 }
+                if op == 3 { neg = neg + 1 }
+            }
+            k = k + 1
         }
-
-        circuit
+        // phase = i^{n_y} * (-1)^{neg}
+        var ph_re = 1.0
+        var ph_im = 0.0
+        let ny4 = n_y % 4
+        if ny4 == 1 { ph_re = 0.0; ph_im = 1.0 }
+        if ny4 == 2 { ph_re = 0.0 - 1.0; ph_im = 0.0 }
+        if ny4 == 3 { ph_re = 0.0; ph_im = 0.0 - 1.0 }
+        if (neg % 2) == 1 { ph_re = 0.0 - ph_re; ph_im = 0.0 - ph_im }
+        let j = i ^ xmask
+        // conj(psi_j) * phase * psi_i
+        let ar = s.re[i]
+        let ai = s.im[i]
+        let br = ph_re * ar - ph_im * ai
+        let bi = ph_re * ai + ph_im * ar
+        let cr = s.re[j]
+        let ci = s.im[j]
+        acc_re = acc_re + cr * br + ci * bi
+        acc_im = acc_im + cr * bi - ci * br
+        i = i + 1
     }
+    return acc_re
+}
 
-    fn n_params(self) -> i32 {
-        2 * self.n_qubits * (self.depth + 1)
+pub fn pauli_expectation(s: &CircuitState, p: &PauliString) -> f64 with Mut, Div, Panic {
+    var ops: [i32; 128] = [0; 128]
+    var k = 0
+    while k < 4 { ops[k] = p.ops[k]; k = k + 1 }
+    return pauli_expect_at(s, &ops, 0)
+}
+
+// <psi|H|psi>, exact
+pub fn hamiltonian_expectation(h: &Hamiltonian, s: &CircuitState) -> f64 with Mut, Div, Panic {
+    var e = h.constant
+    var t = 0
+    while t < h.n_terms {
+        let c: f64 = h.coeffs[t]
+        e = e + c * pauli_expect_at(s, &h.ops, t)
+        t = t + 1
     }
+    return e
+}
 
-    fn n_qubits(self) -> i32 {
-        self.n_qubits
+// =============================================================================
+// EXACT GROUND ENERGY — Jacobi on the real embedding of H
+// =============================================================================
+
+pub fn hamiltonian_ground_energy(h: &Hamiltonian) -> f64 with Mut, Div, Panic {
+    var dim = 1
+    var k = 0
+    while k < h.n_qubits { dim = dim * 2; k = k + 1 }
+    // complex H (row-major dim x dim, at most 16 x 16)
+    var hr: [f64; 256] = [0.0; 256]
+    var hi: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < dim {
+        hr[i * dim + i] = h.constant
+        i = i + 1
     }
-
-    fn initial_params(self) -> [f64] with Alloc {
-        var params: [f64] = []
-        for i in 0..self.n_params() {
-            params = params ++ [0.0]
+    var t = 0
+    while t < h.n_terms {
+        let c: f64 = h.coeffs[t]
+        var xmask = 0
+        var n_y = 0
+        k = 0
+        while k < h.n_qubits {
+            let op = h.ops[4 * t + k]
+            if op == 1 { xmask = xmask | (1 << k) }
+            if op == 2 { xmask = xmask | (1 << k); n_y = n_y + 1 }
+            k = k + 1
         }
-        params
+        i = 0
+        while i < dim {
+            var neg = 0
+            k = 0
+            while k < h.n_qubits {
+                let op = h.ops[4 * t + k]
+                let bit = (i >> k) & 1
+                if bit == 1 {
+                    if op == 2 { neg = neg + 1 }
+                    if op == 3 { neg = neg + 1 }
+                }
+                k = k + 1
+            }
+            var ph_re = 1.0
+            var ph_im = 0.0
+            let ny4 = n_y % 4
+            if ny4 == 1 { ph_re = 0.0; ph_im = 1.0 }
+            if ny4 == 2 { ph_re = 0.0 - 1.0; ph_im = 0.0 }
+            if ny4 == 3 { ph_re = 0.0; ph_im = 0.0 - 1.0 }
+            if (neg % 2) == 1 { ph_re = 0.0 - ph_re; ph_im = 0.0 - ph_im }
+            let j = i ^ xmask
+            // H[j][i] += c * phase(i)
+            let old_r: f64 = hr[j * dim + i]
+            let old_i: f64 = hi[j * dim + i]
+            hr[j * dim + i] = old_r + c * ph_re
+            hi[j * dim + i] = old_i + c * ph_im
+            i = i + 1
+        }
+        t = t + 1
+    }
+    // real symmetric embedding A = [[Re, -Im], [Im, Re]], size n = 2 dim <= 32
+    let n = 2 * dim
+    var a: [f64; 1024] = [0.0; 1024]
+    var r = 0
+    while r < dim {
+        var c2 = 0
+        while c2 < dim {
+            let vr: f64 = hr[r * dim + c2]
+            let vi: f64 = hi[r * dim + c2]
+            a[r * n + c2] = vr
+            a[r * n + (c2 + dim)] = 0.0 - vi
+            a[(r + dim) * n + c2] = vi
+            a[(r + dim) * n + (c2 + dim)] = vr
+            c2 = c2 + 1
+        }
+        r = r + 1
+    }
+    var sweep = 0
+    while sweep < 60 {
+        var off = 0.0
+        var p = 0
+        while p < n {
+            var q = p + 1
+            while q < n {
+                let v: f64 = a[p * n + q]
+                off = off + v * v
+                q = q + 1
+            }
+            p = p + 1
+        }
+        if off < 1.0e-30 { sweep = 60 }
+        p = 0
+        while p < n {
+            var q = p + 1
+            while q < n {
+                let apq: f64 = a[p * n + q]
+                if qv_abs(apq) > 1.0e-300 {
+                    let app: f64 = a[p * n + p]
+                    let aqq: f64 = a[q * n + q]
+                    let theta = (aqq - app) / (2.0 * apq)
+                    let sgn = if theta < 0.0 { 0.0 - 1.0 } else { 1.0 }
+                    let tt = sgn / (qv_abs(theta) + qv_sqrt(theta * theta + 1.0))
+                    let cs = 1.0 / qv_sqrt(tt * tt + 1.0)
+                    let sn = tt * cs
+                    var m = 0
+                    while m < n {
+                        let amp: f64 = a[m * n + p]
+                        let amq: f64 = a[m * n + q]
+                        a[m * n + p] = cs * amp - sn * amq
+                        a[m * n + q] = sn * amp + cs * amq
+                        m = m + 1
+                    }
+                    m = 0
+                    while m < n {
+                        let apm: f64 = a[p * n + m]
+                        let aqm: f64 = a[q * n + m]
+                        a[p * n + m] = cs * apm - sn * aqm
+                        a[q * n + m] = sn * apm + cs * aqm
+                        m = m + 1
+                    }
+                }
+                q = q + 1
+            }
+            p = p + 1
+        }
+        sweep = sweep + 1
+    }
+    var emin: f64 = a[0]
+    var d = 1
+    while d < n {
+        let v: f64 = a[d * n + d]
+        if v < emin { emin = v }
+        d = d + 1
+    }
+    return emin
+}
+
+// =============================================================================
+// GATES AND CIRCUITS
+// =============================================================================
+
+pub fn gate_h() -> i32 { return 1 }
+pub fn gate_x() -> i32 { return 2 }
+pub fn gate_y() -> i32 { return 3 }
+pub fn gate_z() -> i32 { return 4 }
+pub fn gate_s() -> i32 { return 5 }
+pub fn gate_sdg() -> i32 { return 6 }
+pub fn gate_t() -> i32 { return 7 }
+pub fn gate_rx() -> i32 { return 8 }
+pub fn gate_ry() -> i32 { return 9 }
+pub fn gate_rz() -> i32 { return 10 }
+pub fn gate_cnot() -> i32 { return 11 }
+pub fn gate_cz() -> i32 { return 12 }
+pub fn gate_swap() -> i32 { return 13 }
+
+// A gate: kind code, qubit(s), fixed angle, and parameter slot
+// (param < 0: use `angle`; param >= 0: use params[param]).
+pub struct Gate {
+    pub kind: i32,
+    pub q0: i32,
+    pub q1: i32,
+    pub angle: f64,
+    pub param: i32,
+}
+
+pub fn gate1(kind: i32, q: i32) -> Gate {
+    return Gate { kind: kind, q0: q, q1: 0 - 1, angle: 0.0, param: 0 - 1 }
+}
+
+pub fn gate2(kind: i32, control: i32, target: i32) -> Gate {
+    return Gate { kind: kind, q0: control, q1: target, angle: 0.0, param: 0 - 1 }
+}
+
+pub fn gate_rot(kind: i32, q: i32, angle: f64) -> Gate {
+    return Gate { kind: kind, q0: q, q1: 0 - 1, angle: angle, param: 0 - 1 }
+}
+
+pub fn gate_rot_param(kind: i32, q: i32, param: i32) -> Gate {
+    return Gate { kind: kind, q0: q, q1: 0 - 1, angle: 0.0, param: param }
+}
+
+// Up to 64 gates, stored as parallel arrays
+pub struct Circuit {
+    pub n_qubits: i32,
+    pub n_gates: i32,
+    pub n_params: i32,          // 1 + highest parameter slot used
+    pub kind: [i32; 64],
+    pub q0: [i32; 64],
+    pub q1: [i32; 64],
+    pub angle: [f64; 64],
+    pub param: [i32; 64],
+}
+
+pub fn circuit_new(n_qubits: i32) -> Circuit {
+    return Circuit {
+        n_qubits: n_qubits,
+        n_gates: 0,
+        n_params: 0,
+        kind: [0; 64],
+        q0: [0; 64],
+        q1: [0; 64],
+        angle: [0.0; 64],
+        param: [0; 64],
     }
 }
 
-// UCCSD (Unitary Coupled Cluster Singles and Doubles) ansatz
-struct UCCSD {
-    n_electrons: i32,
-    n_orbitals: i32,
-    n_qubits: i32,
-    singles: [(i32, i32)],
-    doubles: [(i32, i32, i32, i32)],
+// Append a gate; a full circuit (64 gates) is returned unchanged
+pub fn circuit_push(c: Circuit, g: Gate) -> Circuit with Mut, Div, Panic {
+    var out = c
+    if c.n_gates >= 64 { return out }
+    let k = c.n_gates
+    out.kind[k] = g.kind
+    out.q0[k] = g.q0
+    out.q1[k] = g.q1
+    out.angle[k] = g.angle
+    out.param[k] = g.param
+    out.n_gates = k + 1
+    if g.param + 1 > c.n_params { out.n_params = g.param + 1 }
+    return out
 }
 
-impl UCCSD {
-    fn new(n_electrons: i32, n_orbitals: i32) -> Self with Alloc {
-        let n_qubits = n_orbitals
-        let n_occ = n_electrons
-        let n_virt = n_orbitals - n_electrons
-
-        // Generate singles: i -> a
-        var singles: [(i32, i32)] = []
-        for i in 0..n_occ {
-            for a in n_occ..n_orbitals {
-                singles = singles ++ [(i, a)]
-            }
+// Hardware-efficient ansatz: `depth` layers of Ry, Rz on every qubit followed
+// by a CNOT chain, then a final Ry, Rz layer. 2 n (depth + 1) parameters.
+pub fn hardware_efficient(n_qubits: i32, depth: i32) -> Circuit with Mut, Div, Panic {
+    var c = circuit_new(n_qubits)
+    var p = 0
+    var layer = 0
+    while layer < depth {
+        var q = 0
+        while q < n_qubits {
+            c = circuit_push(c, gate_rot_param(gate_ry(), q, p))
+            c = circuit_push(c, gate_rot_param(gate_rz(), q, p + 1))
+            p = p + 2
+            q = q + 1
         }
+        q = 0
+        while q < n_qubits - 1 {
+            c = circuit_push(c, gate2(gate_cnot(), q, q + 1))
+            q = q + 1
+        }
+        layer = layer + 1
+    }
+    var q2 = 0
+    while q2 < n_qubits {
+        c = circuit_push(c, gate_rot_param(gate_ry(), q2, p))
+        c = circuit_push(c, gate_rot_param(gate_rz(), q2, p + 1))
+        p = p + 2
+        q2 = q2 + 1
+    }
+    return c
+}
 
-        // Generate doubles: ij -> ab
-        var doubles: [(i32, i32, i32, i32)] = []
-        for i in 0..n_occ {
-            for j in (i + 1)..n_occ {
-                for a in n_occ..n_orbitals {
-                    for b in (a + 1)..n_orbitals {
-                        doubles = doubles ++ [(i, j, a, b)]
-                    }
+// Apply a 2x2 complex matrix [[a, b], [c, d]] to qubit q
+fn apply_1q(s: CircuitState, q: i32,
+            ar: f64, ai: f64, br: f64, bi: f64,
+            cr: f64, ci: f64, dr: f64, di: f64) -> CircuitState with Mut, Div, Panic {
+    var out = s
+    let stride = 1 << q
+    var i = 0
+    while i < s.dim {
+        if ((i >> q) & 1) == 0 {
+            let j = i | stride
+            let xr = s.re[i]
+            let xi = s.im[i]
+            let yr = s.re[j]
+            let yi = s.im[j]
+            out.re[i] = ar * xr - ai * xi + br * yr - bi * yi
+            out.im[i] = ar * xi + ai * xr + br * yi + bi * yr
+            out.re[j] = cr * xr - ci * xi + dr * yr - di * yi
+            out.im[j] = cr * xi + ci * xr + dr * yi + di * yr
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fn apply_gate_at(s: CircuitState, c: &Circuit, k: i32, params: &[f64; 64]) -> CircuitState with Mut, Div, Panic {
+    let kind = c.kind[k]
+    let q = c.q0[k]
+    var th: f64 = c.angle[k]
+    let slot = c.param[k]
+    if slot >= 0 {
+        let pv: f64 = params[slot]
+        th = pv
+    }
+    let h = 0.7071067811865476
+    if kind == 1 { return apply_1q(s, q, h, 0.0, h, 0.0, h, 0.0, 0.0 - h, 0.0) }
+    if kind == 2 { return apply_1q(s, q, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0) }
+    if kind == 3 { return apply_1q(s, q, 0.0, 0.0, 0.0, 0.0 - 1.0, 0.0, 1.0, 0.0, 0.0) }
+    if kind == 4 { return apply_1q(s, q, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 - 1.0, 0.0) }
+    if kind == 5 { return apply_1q(s, q, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0) }
+    if kind == 6 { return apply_1q(s, q, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 - 1.0) }
+    if kind == 7 { return apply_1q(s, q, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, h, h) }
+    let cth = qv_cos(th / 2.0)
+    let sth = qv_sin(th / 2.0)
+    // Rx = [[c, -i s], [-i s, c]], Ry = [[c, -s], [s, c]], Rz = diag(c - i s, c + i s)
+    if kind == 8 { return apply_1q(s, q, cth, 0.0, 0.0, 0.0 - sth, 0.0, 0.0 - sth, cth, 0.0) }
+    if kind == 9 { return apply_1q(s, q, cth, 0.0, 0.0 - sth, 0.0, sth, 0.0, cth, 0.0) }
+    if kind == 10 { return apply_1q(s, q, cth, 0.0 - sth, 0.0, 0.0, 0.0, 0.0, cth, sth) }
+    var out = s
+    let t = c.q1[k]
+    var i = 0
+    while i < s.dim {
+        let bq = (i >> q) & 1
+        let bt = (i >> t) & 1
+        if kind == 11 {
+            if bq == 1 {
+                if bt == 0 {
+                    let j = i | (1 << t)
+                    out.re[i] = s.re[j]
+                    out.im[i] = s.im[j]
+                    out.re[j] = s.re[i]
+                    out.im[j] = s.im[i]
                 }
             }
         }
-
-        UCCSD {
-            n_electrons: n_electrons,
-            n_orbitals: n_orbitals,
-            n_qubits: n_qubits,
-            singles: singles,
-            doubles: doubles,
-        }
-    }
-}
-
-impl Ansatz for UCCSD {
-    fn circuit(self, params: &[f64]) -> Circuit with Alloc {
-        var circuit = Circuit::new(self.n_qubits)
-
-        // Initial Hartree-Fock state
-        for i in 0..self.n_electrons {
-            circuit = circuit.apply(Gate::X(i))
-        }
-
-        var param_idx = 0
-
-        // Singles excitations
-        for exc in &self.singles {
-            let (i, a) = exc
-            let theta = params[param_idx]
-            // Simplified single excitation
-            circuit = circuit.apply(Gate::RY(a, theta))
-            param_idx = param_idx + 1
-        }
-
-        // Doubles excitations
-        for exc in &self.doubles {
-            let (i, j, a, b) = exc
-            let theta = params[param_idx]
-            // Simplified double excitation
-            circuit = circuit.apply(Gate::RZ(a, theta))
-            param_idx = param_idx + 1
-        }
-
-        circuit
-    }
-
-    fn n_params(self) -> i32 {
-        len(self.singles) as i32 + len(self.doubles) as i32
-    }
-
-    fn n_qubits(self) -> i32 {
-        self.n_qubits
-    }
-
-    fn initial_params(self) -> [f64] with Alloc {
-        var params: [f64] = []
-        for i in 0..self.n_params() {
-            params = params ++ [0.0]
-        }
-        params
-    }
-}
-
-// ============================================================================
-// VQE OPTIMIZER
-// ============================================================================
-
-// Optimizer method
-enum OptimizerMethod {
-    COBYLA,
-    SPSA,
-    NelderMead,
-    BFGS,
-    Adam,
-    GradientDescent,
-}
-
-// Optimizer configuration
-struct OptimizerConfig {
-    method: OptimizerMethod,
-    max_iterations: i32,
-    tolerance: f64,
-    learning_rate: f64,
-}
-
-impl OptimizerConfig {
-    fn cobyla() -> Self {
-        OptimizerConfig {
-            method: OptimizerMethod::COBYLA,
-            max_iterations: 1000,
-            tolerance: 1e-6,
-            learning_rate: 0.1,
-        }
-    }
-
-    fn spsa() -> Self {
-        OptimizerConfig {
-            method: OptimizerMethod::SPSA,
-            max_iterations: 500,
-            tolerance: 1e-6,
-            learning_rate: 0.1,
-        }
-    }
-
-    fn adam() -> Self {
-        OptimizerConfig {
-            method: OptimizerMethod::Adam,
-            max_iterations: 1000,
-            tolerance: 1e-6,
-            learning_rate: 0.01,
-        }
-    }
-}
-
-// Error mitigation technique
-enum ErrorMitigation {
-    None,
-    ZeroNoiseExtrapolation { scale_factors: [f64] },
-    ProbabilisticErrorCancellation,
-    VirtualDistillation,
-}
-
-// ============================================================================
-// VQE ALGORITHM
-// ============================================================================
-
-// VQE configuration and execution
-struct VQE<A: Ansatz> {
-    hamiltonian: Hamiltonian,
-    ansatz: A,
-    optimizer: OptimizerConfig,
-    noise_model: Option<NoiseModel>,
-    shots: i32,
-    error_mitigation: ErrorMitigation,
-}
-
-impl<A: Ansatz> VQE<A> {
-    fn new(hamiltonian: Hamiltonian, ansatz: A) -> Self {
-        VQE {
-            hamiltonian: hamiltonian,
-            ansatz: ansatz,
-            optimizer: OptimizerConfig::cobyla(),
-            noise_model: None,
-            shots: 8192,
-            error_mitigation: ErrorMitigation::None,
-        }
-    }
-
-    fn with_optimizer(self, config: OptimizerConfig) -> Self {
-        VQE {
-            hamiltonian: self.hamiltonian,
-            ansatz: self.ansatz,
-            optimizer: config,
-            noise_model: self.noise_model,
-            shots: self.shots,
-            error_mitigation: self.error_mitigation,
-        }
-    }
-
-    fn with_noise(self, noise: NoiseModel) -> Self {
-        VQE {
-            hamiltonian: self.hamiltonian,
-            ansatz: self.ansatz,
-            optimizer: self.optimizer,
-            noise_model: Some(noise),
-            shots: self.shots,
-            error_mitigation: self.error_mitigation,
-        }
-    }
-
-    fn with_shots(self, shots: i32) -> Self {
-        VQE {
-            hamiltonian: self.hamiltonian,
-            ansatz: self.ansatz,
-            optimizer: self.optimizer,
-            noise_model: self.noise_model,
-            shots: shots,
-            error_mitigation: self.error_mitigation,
-        }
-    }
-
-    fn with_error_mitigation(self, method: ErrorMitigation) -> Self {
-        VQE {
-            hamiltonian: self.hamiltonian,
-            ansatz: self.ansatz,
-            optimizer: self.optimizer,
-            noise_model: self.noise_model,
-            shots: self.shots,
-            error_mitigation: method,
-        }
-    }
-
-    /// Run VQE optimization
-    fn run(self) -> VQEResult with Alloc, Compute, Prob {
-        let initial_params = self.ansatz.initial_params()
-        var params = initial_params
-        var history: [Knowledge<f64>] = []
-
-        var best_energy = f64::MAX
-        var best_params = params
-        var n_evals = 0
-
-        for iter in 0..self.optimizer.max_iterations {
-            let energy = self.evaluate_energy(&params)
-            history = history ++ [energy]
-            n_evals = n_evals + 1
-
-            if energy.value < best_energy {
-                best_energy = energy.value
-                best_params = params
-            }
-
-            // Check convergence
-            if iter > 0 {
-                let prev = &history[iter - 1]
-                if abs(energy.value - prev.value) < self.optimizer.tolerance {
-                    break
+        if kind == 12 {
+            if bq == 1 {
+                if bt == 1 {
+                    out.re[i] = 0.0 - s.re[i]
+                    out.im[i] = 0.0 - s.im[i]
                 }
             }
-
-            // Update parameters
-            params = self.optimizer_step(&params, &energy)
         }
-
-        // Final evaluation
-        let final_energy = self.evaluate_energy(&best_params)
-
-        // Compute diagnostics
-        let diagnostics = VQEDiagnostics {
-            barren_plateau_risk: estimate_barren_plateau_risk(self.ansatz.n_qubits()),
-            gradient_variance: 0.0,
-            ansatz_expressibility: 0.9,
-            circuit_depth: self.ansatz.circuit(&best_params).depth(),
-        }
-
-        VQEResult {
-            energy: final_energy,
-            optimal_params: best_params,
-            convergence_history: history,
-            n_iterations: n_evals,
-            diagnostics: diagnostics,
-        }
-    }
-
-    /// Evaluate energy ⟨ψ(θ)|H|ψ(θ)⟩
-    fn evaluate_energy(self, params: &[f64]) -> Knowledge<f64> with Alloc, Compute, Prob {
-        let circuit = self.ansatz.circuit(params)
-
-        var total_energy = self.hamiltonian.constant
-        var total_variance = 0.0
-
-        // Measure each Pauli term
-        for term in &self.hamiltonian.terms {
-            let expectation = self.measure_pauli_expectation(&circuit, term)
-            let coeff = term.coefficient.re
-
-            total_energy = total_energy + coeff * expectation.value
-            total_variance = total_variance + coeff * coeff * expectation.variance
-        }
-
-        // Apply error mitigation if configured
-        let (mitigated_energy, mitigation_variance) = match self.error_mitigation {
-            ErrorMitigation::ZeroNoiseExtrapolation { scale_factors } => {
-                self.apply_zne(params, &scale_factors)
-            },
-            _ => (total_energy, 0.0),
-        }
-
-        Knowledge {
-            value: mitigated_energy,
-            variance: total_variance + mitigation_variance,
-            confidence: Confidence::Frequentist {
-                sample_size: self.shots,
-                confidence_level: 0.95,
-            },
-            provenance: Provenance::VQE {
-                n_qubits: self.ansatz.n_qubits(),
-                shots: self.shots,
-            },
-        }
-    }
-
-    fn measure_pauli_expectation(self, circuit: &Circuit, pauli: &PauliString) -> Knowledge<f64> with Alloc, Compute, Prob {
-        // Simulate measurement (simplified)
-        // In real implementation, would run on quantum hardware
-
-        // Compute expectation from Pauli string
-        // For simulation, use random sampling with noise
-        let noise_contribution = match &self.noise_model {
-            Some(noise) => noise.depolarizing_rate * 2.0,
-            None => 0.0,
-        }
-
-        // Simulate measurement outcomes
-        var expectation = 0.0
-        for shot in 0..self.shots {
-            // Random outcome with bias based on circuit
-            let outcome = if random_uniform() < 0.5 + noise_contribution { 1.0 } else { -1.0 }
-            expectation = expectation + outcome
-        }
-        expectation = expectation / self.shots as f64
-
-        // Binomial variance
-        let variance = (1.0 - expectation * expectation) / self.shots as f64
-
-        Knowledge {
-            value: expectation,
-            variance: variance,
-            confidence: Confidence::Frequentist {
-                sample_size: self.shots,
-                confidence_level: 0.95,
-            },
-            provenance: Provenance::PauliMeasurement,
-        }
-    }
-
-    fn apply_zne(self, params: &[f64], scale_factors: &[f64]) -> (f64, f64) with Alloc, Compute, Prob {
-        // Zero-noise extrapolation
-        var energies: [(f64, f64)] = []
-
-        for scale in scale_factors {
-            let scaled_energy = self.evaluate_energy_at_noise_scale(params, scale)
-            energies = energies ++ [(scale, scaled_energy.value)]
-        }
-
-        // Richardson extrapolation to zero noise
-        let extrapolated = richardson_extrapolation(&energies)
-
-        (extrapolated, 0.001)  // Extra uncertainty from extrapolation
-    }
-
-    fn evaluate_energy_at_noise_scale(self, params: &[f64], scale: f64) -> Knowledge<f64> with Alloc, Compute, Prob {
-        let base_energy = self.evaluate_energy(params)
-        let noise_bias = (scale - 1.0) * 0.01
-
-        Knowledge {
-            value: base_energy.value + noise_bias,
-            variance: base_energy.variance * scale,
-            confidence: base_energy.confidence,
-            provenance: base_energy.provenance,
-        }
-    }
-
-    fn optimizer_step(self, params: &[f64], energy: &Knowledge<f64>) -> [f64] with Alloc, Compute, Prob {
-        match self.optimizer.method {
-            OptimizerMethod::SPSA => self.spsa_step(params),
-            OptimizerMethod::GradientDescent => self.gradient_descent_step(params),
-            _ => self.cobyla_step(params),
-        }
-    }
-
-    fn spsa_step(self, params: &[f64]) -> [f64] with Alloc, Compute, Prob {
-        // Simultaneous Perturbation Stochastic Approximation
-        let n = len(params)
-        let c = 0.1
-        let a = self.optimizer.learning_rate
-
-        // Random perturbation direction
-        var delta: [f64] = []
-        for i in 0..n {
-            delta = delta ++ [if random_uniform() > 0.5 { 1.0 } else { -1.0 }]
-        }
-
-        // Evaluate at plus and minus perturbations
-        var params_plus: [f64] = []
-        var params_minus: [f64] = []
-        for i in 0..n {
-            params_plus = params_plus ++ [params[i] + c * delta[i]]
-            params_minus = params_minus ++ [params[i] - c * delta[i]]
-        }
-
-        let e_plus = self.evaluate_energy(&params_plus)
-        let e_minus = self.evaluate_energy(&params_minus)
-
-        // Gradient estimate
-        let grad_est = (e_plus.value - e_minus.value) / (2.0 * c)
-
-        // Update
-        var new_params: [f64] = []
-        for i in 0..n {
-            new_params = new_params ++ [params[i] - a * grad_est * delta[i]]
-        }
-        new_params
-    }
-
-    fn gradient_descent_step(self, params: &[f64]) -> [f64] with Alloc, Compute, Prob {
-        // Parameter-shift rule gradient
-        let n = len(params)
-        var gradient: [f64] = []
-
-        for i in 0..n {
-            var params_plus = params.to_vec()
-            var params_minus = params.to_vec()
-
-            params_plus[i] = params_plus[i] + PI / 2.0
-            params_minus[i] = params_minus[i] - PI / 2.0
-
-            let e_plus = self.evaluate_energy(&params_plus)
-            let e_minus = self.evaluate_energy(&params_minus)
-
-            gradient = gradient ++ [(e_plus.value - e_minus.value) / 2.0]
-        }
-
-        // Update
-        var new_params: [f64] = []
-        for i in 0..n {
-            new_params = new_params ++ [params[i] - self.optimizer.learning_rate * gradient[i]]
-        }
-        new_params
-    }
-
-    fn cobyla_step(self, params: &[f64]) -> [f64] with Alloc, Prob {
-        // Simplified COBYLA-like step
-        var new_params: [f64] = []
-        for i in 0..len(params) {
-            new_params = new_params ++ [params[i] + (random_uniform() - 0.5) * 0.1]
-        }
-        new_params
-    }
-}
-
-fn richardson_extrapolation(data: &[(f64, f64)]) -> f64 {
-    if len(data) < 2 {
-        return match data.get(0) {
-            Some((_, e)) => e,
-            None => 0.0,
-        }
-    }
-
-    // Linear extrapolation to x=0
-    let (x1, y1) = data[0]
-    let (x2, y2) = data[1]
-
-    let slope = (y2 - y1) / (x2 - x1)
-    y1 - slope * x1
-}
-
-fn estimate_barren_plateau_risk(n_qubits: i32) -> f64 {
-    // Risk increases exponentially with qubits
-    1.0 - exp(-0.5 * n_qubits as f64)
-}
-
-// ============================================================================
-// VQE RESULT
-// ============================================================================
-
-// VQE result with full uncertainty quantification
-struct VQEResult {
-    energy: Knowledge<f64>,
-    optimal_params: [f64],
-    convergence_history: [Knowledge<f64>],
-    n_iterations: i32,
-    diagnostics: VQEDiagnostics,
-}
-
-impl VQEResult {
-    /// Check if within chemical accuracy (1.6 mHa)
-    fn within_chemical_accuracy(self, exact: f64) -> Knowledge<bool> {
-        let error = abs(self.energy.value - exact)
-        let threshold = 0.0016  // 1.6 mHa
-
-        let within = error < threshold
-        let conf = if within {
-            1.0 - sqrt(self.energy.variance) / threshold
-        } else {
-            sqrt(self.energy.variance) / error
-        }
-
-        Knowledge {
-            value: within,
-            variance: if within { 0.01 } else { 0.1 },
-            confidence: Confidence::Frequentist {
-                sample_size: self.n_iterations,
-                confidence_level: 0.95,
-            },
-            provenance: Provenance::ChemicalAccuracy,
-        }
-    }
-
-    /// Energy with confidence interval
-    fn energy_bounds(self, confidence: f64) -> (f64, f64) {
-        let z = normal_quantile((1.0 + confidence) / 2.0)
-        let se = sqrt(self.energy.variance)
-
-        (self.energy.value - z * se, self.energy.value + z * se)
-    }
-
-    /// Check convergence quality
-    fn is_converged(self) -> Knowledge<bool> {
-        if len(self.convergence_history) < 2 {
-            return Knowledge {
-                value: false,
-                variance: 0.5,
-                confidence: Confidence::Unknown,
-                provenance: Provenance::ConvergenceCheck,
+        if kind == 13 {
+            if bq == 1 {
+                if bt == 0 {
+                    let j = (i ^ (1 << q)) | (1 << t)
+                    out.re[i] = s.re[j]
+                    out.im[i] = s.im[j]
+                    out.re[j] = s.re[i]
+                    out.im[j] = s.im[i]
+                }
             }
         }
+        i = i + 1
+    }
+    return out
+}
 
-        let n = len(self.convergence_history)
-        let last = &self.convergence_history[n - 1]
-        let prev = &self.convergence_history[n - 2]
+// |psi(params)> = C(params) |0...0>
+pub fn circuit_run(c: &Circuit, params: &[f64; 64]) -> CircuitState with Mut, Div, Panic {
+    var s = circuit_state_zero(c.n_qubits)
+    var k = 0
+    while k < c.n_gates {
+        s = apply_gate_at(s, c, k, params)
+        k = k + 1
+    }
+    return s
+}
 
-        let delta = abs(last.value - prev.value)
-        let converged = delta < 1e-6
+pub fn vqe_energy(h: &Hamiltonian, c: &Circuit, params: &[f64; 64]) -> f64 with Mut, Div, Panic {
+    let s = circuit_run(c, params)
+    return hamiltonian_expectation(h, &s)
+}
 
-        Knowledge {
-            value: converged,
-            variance: if converged { 0.05 } else { 0.2 },
-            confidence: Confidence::Frequentist {
-                sample_size: self.n_iterations,
-                confidence_level: 0.95,
-            },
-            provenance: Provenance::ConvergenceCheck,
+// =============================================================================
+// VQE DRIVER — Rotosolve
+// =============================================================================
+
+pub struct CircuitVQEResult {
+    pub energy: f64,
+    pub params: [f64; 64],
+    pub n_params: i32,
+    pub sweeps: i32,
+    pub converged: i32,      // 1: last sweep lowered E by < 1e-15; 0: sweep budget hit
+    pub valid: i32,          // 0: some parameter does not drive exactly one rotation
+}
+
+// 1 if every parameter slot drives exactly one Rx/Ry/Rz gate
+pub fn circuit_rotosolve_valid(c: &Circuit) -> i32 with Mut, Div, Panic {
+    var p = 0
+    while p < c.n_params {
+        var uses = 0
+        var k = 0
+        while k < c.n_gates {
+            if c.param[k] == p {
+                let kind = c.kind[k]
+                if kind >= 8 {
+                    if kind <= 10 { uses = uses + 1 } else { uses = uses + 2 }
+                } else {
+                    uses = uses + 2
+                }
+            }
+            k = k + 1
         }
+        if uses != 1 { return 0 }
+        p = p + 1
+    }
+    return 1
+}
+
+pub fn vqe_minimize(h: &Hamiltonian, c: &Circuit, start: &[f64; 64], max_sweeps: i32) -> CircuitVQEResult with Mut, Div, Panic {
+    let pi = qv_pi()
+    var params: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < 64 {
+        let v: f64 = start[i]
+        params[i] = v
+        i = i + 1
+    }
+    let valid = circuit_rotosolve_valid(c)
+    var energy = vqe_energy(h, c, &params)
+    var sweeps = 0
+    var converged = 0
+    if valid == 1 {
+        var sweep = 0
+        while sweep < max_sweeps {
+            let e_start = energy
+            var d = 0
+            while d < c.n_params {
+                let phi: f64 = params[d]
+                let e0 = vqe_energy(h, c, &params)
+                params[d] = phi + 0.5 * pi
+                let ep = vqe_energy(h, c, &params)
+                params[d] = phi - 0.5 * pi
+                let em = vqe_energy(h, c, &params)
+                let cc = 0.5 * (ep - em)
+                let bb = e0 - 0.5 * (ep + em)
+                params[d] = qv_wrap(phi + pi + qv_atan2(cc, bb))
+                d = d + 1
+            }
+            energy = vqe_energy(h, c, &params)
+            sweeps = sweeps + 1
+            if e_start - energy < 1.0e-15 {
+                converged = 1
+                sweep = max_sweeps
+            }
+            sweep = sweep + 1
+        }
+    }
+    return CircuitVQEResult {
+        energy: energy,
+        params: params,
+        n_params: c.n_params,
+        sweeps: sweeps,
+        converged: converged,
+        valid: valid,
     }
 }
 
-// VQE diagnostics
-struct VQEDiagnostics {
-    barren_plateau_risk: f64,
-    gradient_variance: f64,
-    ansatz_expressibility: f64,
-    circuit_depth: i32,
-}
-
-// ============================================================================
-// MOLECULAR HAMILTONIANS
-// ============================================================================
-
-// Build H₂ Hamiltonian in minimal basis (STO-3G)
-fn h2_hamiltonian(bond_length: f64) -> Hamiltonian with Alloc {
-    // Coefficients for H2 at equilibrium (~0.74 Å)
-    // Exact ground state energy ≈ -1.137 Ha
-
-    let g0 = -0.81261  // Constant
-    let g1 = 0.17120   // ZI + IZ
-    let g2 = 0.16862   // ZZ
-    let g3 = -0.22343  // XX + YY
-
-    Hamiltonian::new(2)
-        .with_constant(g0)
-        .add_term(PauliString::from_str("ZI", g1))
-        .add_term(PauliString::from_str("IZ", g1))
-        .add_term(PauliString::from_str("ZZ", g2))
-        .add_term(PauliString::from_str("XX", g3))
-        .add_term(PauliString::from_str("YY", g3))
-}
-
-// Build LiH Hamiltonian (simplified 4-qubit active space)
-fn lih_hamiltonian() -> Hamiltonian with Alloc {
-    Hamiltonian::new(4)
-        .with_constant(-7.8)
-        .add_term(PauliString::from_str("ZIII", 0.5))
-        .add_term(PauliString::from_str("IZII", 0.3))
-        .add_term(PauliString::from_str("IIZI", 0.3))
-        .add_term(PauliString::from_str("IIIZ", 0.5))
-        .add_term(PauliString::from_str("ZZII", 0.1))
-        .add_term(PauliString::from_str("XXII", -0.2))
-        .add_term(PauliString::from_str("YYII", -0.2))
-}
-
-// Build BeH₂ Hamiltonian (simplified)
-fn beh2_hamiltonian() -> Hamiltonian with Alloc {
-    Hamiltonian::new(6)
-        .with_constant(-15.5)
-        .add_term(PauliString::from_str("ZIIIII", 0.4))
-        .add_term(PauliString::from_str("IZIIII", 0.4))
-        .add_term(PauliString::from_str("IIZIII", 0.3))
-        .add_term(PauliString::from_str("IIIZII", 0.3))
-        .add_term(PauliString::from_str("IIIIZI", 0.4))
-        .add_term(PauliString::from_str("IIIIIZ", 0.4))
-        .add_term(PauliString::from_str("ZZXXII", -0.1))
-}
-
-// ============================================================================
-// HELPER FUNCTIONS
-// ============================================================================
-
-fn normal_quantile(p: f64) -> f64 {
-    if p <= 0.0 { return f64::MIN }
-    if p >= 1.0 { return f64::MAX }
-    if abs(p - 0.5) < 1e-10 { return 0.0 }
-
-    let p_low = if p < 0.5 { p } else { 1.0 - p }
-    let t = sqrt(-2.0 * log(p_low))
-
-    let c0 = 2.515517
-    let c1 = 0.802853
-    let c2 = 0.010328
-    let d1 = 1.432788
-    let d2 = 0.189269
-    let d3 = 0.001308
-
-    let z = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t)
-
-    if p < 0.5 { -z } else { z }
-}
-
-// Math functions
-fn sqrt(x: f64) -> f64 { @extern("sqrt") }
-fn exp(x: f64) -> f64 { @extern("exp") }
-fn log(x: f64) -> f64 { @extern("log") }
-fn abs(x: f64) -> f64 { if x < 0.0 { -x } else { x } }
-fn min(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
-fn len<T>(arr: [T]) -> i64 { @extern("array_len") }
-fn random_uniform() -> f64 with Prob { @extern("random_uniform") }
-
-const PI: f64 = 3.141592653589793
-
-// ============================================================================
-// UNIT TESTS
-// ============================================================================
-
-fn test_pauli_string_weight() with Alloc {
-    let zz = PauliString::from_str("ZZ", 1.0)
-    let zi = PauliString::from_str("ZI", 1.0)
-    let ii = PauliString::from_str("II", 1.0)
-
-    assert(zz.weight() == 2)
-    assert(zi.weight() == 1)
-    assert(ii.weight() == 0)
-}
-
-fn test_pauli_commutation() with Alloc {
-    let zz = PauliString::from_str("ZZ", 1.0)
-    let xx = PauliString::from_str("XX", 1.0)
-    let zi = PauliString::from_str("ZI", 1.0)
-
-    assert(zz.commutes_with(&zi))
-    assert(xx.commutes_with(&xx))
-}
-
-fn test_hamiltonian_grouping() with Alloc {
-    let h = h2_hamiltonian(0.74)
-    let groups = h.grouping()
-
-    // Should have fewer or equal groups than terms
-    assert(len(groups) <= h.n_terms() as i64)
-}
-
-fn test_hardware_efficient_ansatz() with Alloc {
-    let ansatz = HardwareEfficient::new(2, 2)
-
-    assert(ansatz.n_qubits() == 2)
-    assert(ansatz.n_params() == 12)  // 2 * 2 * (2 + 1) = 12
-
-    let params = ansatz.initial_params()
-    assert(len(params) == 12)
-
-    let circuit = ansatz.circuit(&params)
-    assert(circuit.n_qubits == 2)
-}
-
-fn test_uccsd_ansatz() with Alloc {
-    let ansatz = UCCSD::new(2, 4)
-
-    assert(ansatz.n_qubits() == 4)
-    assert(ansatz.n_electrons == 2)
-    assert(len(ansatz.singles) == 4)  // 2 occupied * 2 virtual
-}
-
-fn test_jordan_wigner() with Alloc {
-    let jw = JordanWigner{}
-
-    let creation = jw.map_creation(1, 4)
-    assert(len(creation) == 2)  // X and Y terms
-
-    let annihilation = jw.map_annihilation(1, 4)
-    assert(len(annihilation) == 2)
-}
-
-fn test_complex_arithmetic() {
-    let a = Complex::new(1.0, 2.0)
-    let b = Complex::new(3.0, 4.0)
-
-    let c = a.mul(b)
-    // (1 + 2i)(3 + 4i) = 3 + 4i + 6i + 8i² = 3 + 10i - 8 = -5 + 10i
-    assert(abs(c.re - (-5.0)) < 1e-10)
-    assert(abs(c.im - 10.0) < 1e-10)
-}
-
-fn test_noise_model() {
-    let ideal = NoiseModel::ideal()
-    assert(ideal.depolarizing_rate == 0.0)
-
-    let lagos = NoiseModel::ibm_lagos()
-    assert(lagos.depolarizing_rate > 0.0)
-    assert(lagos.readout_error > 0.0)
-}
-
-fn test_vqe_construction() with Alloc {
-    let h = h2_hamiltonian(0.74)
-    let ansatz = HardwareEfficient::new(2, 2)
-
-    let vqe = VQE::new(h, ansatz)
-        .with_shots(1000)
-        .with_optimizer(OptimizerConfig::spsa())
-
-    assert(vqe.shots == 1000)
-}
-
-fn test_barren_plateau_risk() {
-    let risk_2 = estimate_barren_plateau_risk(2)
-    let risk_10 = estimate_barren_plateau_risk(10)
-
-    // Risk should increase with qubit count
-    assert(risk_10 > risk_2)
-    assert(risk_2 >= 0.0 && risk_2 <= 1.0)
-}
-
-fn test_richardson_extrapolation() with Alloc {
-    let data = [(1.0, 0.5), (2.0, 0.6), (3.0, 0.7)]
-    let extrapolated = richardson_extrapolation(&data)
-
-    // Linear extrapolation: y = 0.1x + 0.4, so y(0) = 0.4
-    assert(abs(extrapolated - 0.4) < 0.01)
-}
-
-fn test_normal_quantile() {
-    let z_50 = normal_quantile(0.5)
-    assert(abs(z_50) < 0.01)
-
-    let z_975 = normal_quantile(0.975)
-    assert(abs(z_975 - 1.96) < 0.1)
+// Chemical accuracy (1.6 mHa = 1.6e-3 Ha) against a reference energy
+pub fn within_chemical_accuracy(energy: f64, exact: f64) -> bool {
+    return qv_abs(energy - exact) < 0.0016
 }

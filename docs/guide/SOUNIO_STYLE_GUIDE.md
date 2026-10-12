@@ -249,8 +249,8 @@ c = increment(c)
 
 ### Bit Operations
 ```sio
-let high = (b >> 4u8) & 15u8    // shift amount MUST be u8
-let low = b & 15u8
+let high = (b >> 4) & 15
+let low = b & 15
 ```
 
 ## 9. FFI
@@ -287,11 +287,9 @@ Annotations: `//@ run-pass`, `//@ compile-fail`, `//@ error-pattern: <text>`, `/
 2. `&!` not `&mut`, `var` not `let mut`
 3. Effects: `with IO, Mut, Div, Panic` as needed
 4. No Rust macros: `assert()` not `assert!()`, `println()` not `println!()`
-5. No unary minus: `0 - x`
-6. Bit shifts: `u8` operand (`x >> 4u8`)
-7. Array index cast: `arr[i as usize]`
-8. Named fn refs, not closure literals
-9. Bare `&![T;N]`: use `(*arr)[i]` or struct wrapper
+5. Array index cast: `arr[i as usize]`
+6. Named fn refs, not closure literals
+7. Bare `&![T;N]`: use `(*arr)[i]` or struct wrapper
 
 ## 12. Real Code to Study
 

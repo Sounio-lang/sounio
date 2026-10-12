@@ -1,0 +1,233 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: STRUCT_REASSIGN_STORE_NO_ALIAS_OK
+// Regression gate: whole-aggregate ASSIGNMENT and STORE copy by value.
+// Dispatch: docs/audit/MADAROS_STRUCT_REASSIGN_ARRAY_ALIAS_DISPATCH_2026-09-26.md
+//
+// #1475/#1479 made `let y = x` copy a struct, array fields included. Assignment
+// kept storing the source HANDLE: after `z = x` or `*dst = x`, the destination
+// and `x` were one object, and a later in-place write through either name was
+// visible through the other -- check clean, exit 0, wrong number. lean_single
+// copies in every form below.
+//
+// The four forms from the report are tags 1-4, with the store done by a callee
+// (`*dst = src`) exactly as reported. Tags 5-12 pin what the dispatch measured
+// beyond them: the alias is the whole handle, so a scalar-only struct is hit
+// too (5-6); it runs in both directions (7-8); it survives a loop back-edge,
+// the saved-Runge-Kutta-stage shape (9); nested struct fields (10); plain
+// fixed-array reassignment (11); and a field store from a local (12).
+//
+// GATED TO MADAROS for the same reason as aggregate_nested_field_deep_copy.sio:
+// lean_single inlines aggregate fields and never had the defect, so this file
+// pins the Madaros handle representation, not a cross-engine contract.
+//
+// NOT ASSERTED -- sources that are not a bare identifier (`v = *p`,
+// `let v = *p`, `v = o.inner`, `let a = o.arr`) still alias on Madaros. They
+// are measured in the dispatch and left for a separate change: they need the
+// static type of an arbitrary place expression, which the ident path does not.
+
+struct S {
+    a: [f64; 14],
+}
+
+struct P {
+    u: f64,
+    v: i64,
+}
+
+struct In {
+    q: i64,
+}
+
+struct O {
+    inner: In,
+    arr: [i64; 3],
+    k: i64,
+}
+
+fn bump(s: &!S) with Mut {
+    (*s).a[0] = (*s).a[0] + 1.0
+}
+
+fn store(dst: &!S, src: S) with Mut {
+    *dst = src
+}
+
+fn store_elem(dst: &!S, src: S) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < 14 {
+        (*dst).a[i] = src.a[i]
+        i = i + 1
+    }
+}
+
+fn store_p(dst: &!P, src: P) with Mut {
+    *dst = src
+}
+
+fn store_o(dst: &!O, src: O) with Mut {
+    *dst = src
+}
+
+fn chk_f(tag: i64, got: f64, want: f64) -> i64 with IO {
+    if got != want {
+        print("BAD ")
+        print(tag)
+        print("\n")
+        return 1
+    }
+    0
+}
+
+fn chk_i(tag: i64, got: i64, want: i64) -> i64 with IO {
+    if got != want {
+        print("BAD ")
+        print(tag)
+        print("\n")
+        return 1
+    }
+    0
+}
+
+fn uses_array() with Mut, Panic {
+    var a: [P] = [P { u: 0.0, v: 0 }]
+    a[0].v = 1
+}
+fn takes_struct(src: P) -> i64 with IO, Mut, Panic {
+    uses_array()
+    var dst = P { u: 0.0, v: 0 }
+    dst = src
+    var bad: i64 = 0
+    bad = bad + chk_i(16, dst.v, 4)
+    bad
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var bad: i64 = 0
+
+    // 1-4: the reported shape. Every copy is taken while x.a[0] == 1.0.
+    var x = S { a: [1.0; 14] }
+    var z = S { a: [0.0; 14] }
+    var w = S { a: [0.0; 14] }
+    var e = S { a: [0.0; 14] }
+    let y = x
+    z = x
+    store(&!w, x)
+    store_elem(&!e, x)
+    bump(&!x)
+    bad = bad + chk_f(1, y.a[0], 1.0)
+    bad = bad + chk_f(2, z.a[0], 1.0)
+    bad = bad + chk_f(3, w.a[0], 1.0)
+    bad = bad + chk_f(4, e.a[0], 1.0)
+    bad = bad + chk_f(13, x.a[0], 2.0)
+
+    // 5-6: no array field at all.
+    var px = P { u: 1.0, v: 7 }
+    var pz = P { u: 0.0, v: 0 }
+    var pw = P { u: 0.0, v: 0 }
+    pz = px
+    store_p(&!pw, px)
+    px.u = 5.0
+    px.v = 99
+    bad = bad + chk_f(5, pz.u, 1.0)
+    bad = bad + chk_i(5, pz.v, 7)
+    bad = bad + chk_f(6, pw.u, 1.0)
+    bad = bad + chk_i(6, pw.v, 7)
+
+    // 7-8: writing the COPY must not reach the source.
+    var ox = O { inner: In { q: 1 }, arr: [1, 1, 1], k: 1 }
+    var oz = O { inner: In { q: 0 }, arr: [0, 0, 0], k: 0 }
+    var ow = O { inner: In { q: 0 }, arr: [0, 0, 0], k: 0 }
+    oz = ox
+    oz.arr[2] = 3
+    oz.k = 3
+    bad = bad + chk_i(7, ox.arr[2], 1)
+    bad = bad + chk_i(7, ox.k, 1)
+    store_o(&!ow, ox)
+    ow.arr[1] = 4
+    ow.inner.q = 4
+    bad = bad + chk_i(8, ox.arr[1], 1)
+    bad = bad + chk_i(8, ox.inner.q, 1)
+
+    // 9: the saved-stage shape. xg must hold the state from the START of the
+    // last iteration (arr[2] == 2), not the state after its update (3).
+    var xs = O { inner: In { q: 1 }, arr: [1, 1, 1], k: 1 }
+    var xg = O { inner: In { q: 0 }, arr: [0, 0, 0], k: 0 }
+    var n: i64 = 0
+    while n < 2 {
+        xg = xs
+        xs.arr[2] = xs.arr[2] + 1
+        n = n + 1
+    }
+    bad = bad + chk_i(9, xg.arr[2], 2)
+    bad = bad + chk_i(9, xs.arr[2], 3)
+
+    // 10: a nested struct field of a reassigned copy.
+    var ny = O { inner: In { q: 0 }, arr: [0, 0, 0], k: 0 }
+    ny = xs
+    xs.inner.q = 7
+    bad = bad + chk_i(10, ny.inner.q, 1)
+
+    // 11: fixed-array reassignment.
+    var fa = [1, 1, 1]
+    var fb = [0, 0, 0]
+    fb = fa
+    fa[0] = 9
+    bad = bad + chk_i(11, fb[0], 1)
+
+    // 12: storing a local into a field.
+    var holder = O { inner: In { q: 0 }, arr: [0, 0, 0], k: 0 }
+    var i1 = In { q: 1 }
+    var c3 = [1, 1, 1]
+    holder.inner = i1
+    holder.arr = c3
+    i1.q = 9
+    c3[1] = 9
+    bad = bad + chk_i(12, holder.inner.q, 1)
+    bad = bad + chk_i(12, holder.arr[1], 1)
+
+    // 13: self-assignment must not allocate. Handles are never reclaimed and
+    // the table caps at 4194304, so `s = s` inside a loop would exit 182 if it
+    // copied. It also must not change the value.
+    var i: i64 = 0
+    while i < 1000 {
+        z = z
+        i = i + 1
+    }
+    bad = bad + chk_f(13, z.a[0], 1.0)
+    // 14: an array of structs is NOT copied. Each element is itself a
+    // handle, and the word copy would only copy the handle, so `d = s` still
+    // aliases. Pinned here so a later change that starts copying struct
+    // elements has a witness that flips, and so this PR does not claim it.
+    var s = [P { u: 1.0, v: 4 }, P { u: 1.0, v: 4 }, P { u: 1.0, v: 4 }]
+    var d = [P { u: 0.0, v: 0 }, P { u: 0.0, v: 0 }, P { u: 0.0, v: 0 }]
+    d = s
+    s[1].v = 9
+    bad = bad + chk_i(14, d[1].v, 9)
+    // 15: storing into an array slot. The copy runs for every target shape,
+    // so items[i] = src must be a copy too.
+    var items = [P { u: 0.0, v: 0 }, P { u: 0.0, v: 0 }, P { u: 0.0, v: 0 }]
+    var srcp = P { u: 1.0, v: 4 }
+    items[1] = srcp
+    srcp.v = 9
+    bad = bad + chk_i(15, items[1].v, 4)
+    // 16: a struct parameter assigned after a function that used an array.
+    // The parameter slot is reused, and the array bit must not survive.
+    bad = bad + takes_struct(P { u: 1.0, v: 4 })
+    // 17: the array arrives through tuple destructuring. `let (items, _) = pair`
+    // binds items from the tuple slot, whose recorded type is the element
+    // type. Assigning it must not copy the array as one struct.
+    let pair = ([P { u: 1.0, v: 4 }, P { u: 1.0, v: 4 }], 0)
+    let (items, _) = pair
+    // The hop through `alias` is the path the bit has to survive: the
+    // projection sets it, and `let alias = items` has to copy it.
+    let alias = items
+    var dst2 = [P { u: 0.0, v: 0 }, P { u: 0.0, v: 0 }]
+    dst2 = alias
+    bad = bad + chk_i(17, dst2[0].v, 4)
+    bad = bad + chk_i(17, dst2[1].v, 4)
+    if bad == 0 {
+        println("STRUCT_REASSIGN_STORE_NO_ALIAS_OK")
+    }
+    0
+}

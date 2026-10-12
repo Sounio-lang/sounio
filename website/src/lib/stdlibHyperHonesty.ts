@@ -1,7 +1,7 @@
 /**
  * U3 — stdlib hyper lanes 7/7. May 2026. Never in CI.
  *
- * Same morning as the 251/251 reliability JSON (15:35 vs 15:38).
+ * Same morning as the 251/251 reliability JSON (15:35 vs 15:38). public-claims: historical
  * `scripts/stdlib/stdlib_hyper_execution_gate.sh` is not under
  * scripts/ci/ and is not named in .github/. Zero workflow matches.
  * The JSON names no Madaros and no lean_single. Do not invent an

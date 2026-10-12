@@ -4,10 +4,10 @@
 
 Machine-checks, in core Lean 4 over exact rationals (no Mathlib, no
 `sorry`), the rational spine of `demos/hydrogen/vanthoff_gate.sio`:
-the calcite-scaling case of the failure mode reported by Stamatakis et
+the calcite-scaling case of the failure mode reported by Ghaedi et
 al. (GHG: Sci. & Technol. 2025 — PHREEQC defaults + van't Hoff
-extrapolation producing misleading CH4/calcite results; Geoenergy Sci.
-Eng. 2026 — calcite scaling by coupled THC modeling).
+extrapolation producing misleading CH4/calcite results; Ghaedi et al.,
+Geoenergy Sci. Eng. 2026 — calcite scaling by coupled THC modeling).
 
 Working in pK units makes the whole spine rational:
 

@@ -128,37 +128,24 @@ print(name)
 
 ## 5. NÚMEROS NEGATIVOS E MENOS UNÁRIO
 
-### Exemplo de Erro
+O menos unário funciona com literais, variáveis e argumentos; não é preciso o contorno `0 - x`.
+
 ```sio
-// [INCORRETO] - O operador menos unário não existe na gramática de Sounio
 let neg = -42
 let result = -x
-```
-
-### Correção
-```sio
-// [CORRETO]
-let neg = 0 - 42
-let result = 0 - x
-let value = a - (0 - b)  // Equivalente a a + b
+let value = a - (-b)  // Equivalente a a + b
 ```
 
 ---
 
-## 6. DESLOCAMENTO DE BITS REQUER OPERANDO u8
+## 6. DESLOCAMENTO DE BITS USA UM INTEIRO COMUM
 
-### Exemplo de Erro
-```sio
-// [INCORRETO] - O operando de deslocamento (shift amount) precisa ser estritamente u8
-let shifted = byte >> 4       // ERRO: 4 é inferido como i32!
-```
+A quantidade de deslocamento é um literal inteiro comum ou uma variável de qualquer tipo inteiro; não é preciso sufixo `u8` nem conversão.
 
-### Correção
 ```sio
-// [CORRETO]
-let shifted = byte >> 4u8
-let masked = byte & 15u8
-let high = (byte >> 4u8) & 15u8
+let shifted = byte >> 4
+let masked = byte & 15
+let high = (byte >> 4) & 15
 ```
 
 ---
@@ -338,8 +325,8 @@ println("Hello, World!")
 
 // Para strings mutáveis em buffers: use arrays fixas de bytes
 var greeting: [i8; 64] = [0; 64]
-greeting[0] = 72i8   // 'H'
-greeting[1] = 101i8  // 'e'
+greeting[0] = 72   // 'H'
+greeting[1] = 101  // 'e'
 ```
 
 ---
@@ -378,8 +365,6 @@ extern "C" {
 - [ ] Usou-se `var` para variáveis reatribuíveis em vez de `let mut`.
 - [ ] Todos os efeitos colaterais foram declarados (ex: `with Mut, Div, Panic, IO`).
 - [ ] Nenhuma macro de Rust foi utilizada (`assert` em vez de `assert!`, `println` em vez de `println!`).
-- [ ] Menos unário foi substituído por `0 - x` (ex: `0 - 42` em vez de `-42`).
-- [ ] Deslocamento de bits usa operando `u8` (ex: `x >> 4u8`).
 - [ ] Tamanhos das arrays coincidem perfeitamente na inicialização (ex: `[u8; 256] = [0; 256]`).
 - [ ] Conversões de tipo na indexação de arrays são explícitas (ex: `arr[i as usize]`).
 - [ ] Referências de função nomeadas foram usadas no lugar de lambdas/closures literais.

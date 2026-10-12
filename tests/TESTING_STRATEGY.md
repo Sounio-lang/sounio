@@ -1,5 +1,13 @@
 # Sounio Testing Strategy
 
+> **Canonical epistemic API.** Examples below use `epistemic::knowledge`
+> (`ep_measured`, `ep_add`, `ep_val`, `ep_std`, `ep_confidence`), anchored by
+> `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio`. Confidence is
+> an `i64` on the 0..1000 scale, and `ep_add` takes the minimum of the inputs'
+> confidence and decays it by 99/100 (clamped to 0..1000) — it does not preserve
+> it. The legacy `epistemic_std` / `add_epistemic` names and
+> `.value` / `.uncertainty` fields are not the checked surface.
+
 ## Philosophy
 
 **Test-Driven Development via Specification:**
@@ -16,24 +24,62 @@
 **Template:**
 ```sio
 // tests/unit/epistemic/add_test.sio
-fn test_add_epistemic_basic() -> bool {
-    // Setup
-    let a = epistemic_std(10.0, 0.5, 0.95)
-    let b = epistemic_std(20.0, 0.3, 0.90)
-    
+use epistemic::knowledge::{ep_measured, ep_add, ep_val, ep_variance, ep_confidence}
+
+fn test_ep_add_basic() -> bool {
+    // Setup: ep_measured(val, std_dev) stores variance = std_dev^2,
+    // confidence = 900.
+    let a = ep_measured(10.0, 0.5)
+    let b = ep_measured(20.0, 0.3)
+
     // Execute
-    let result = add_epistemic(a, b)
-    
-    // Verify
-    let value_ok = abs(result.value - 30.0) < 0.0001
-    let uncertainty_ok = abs(result.uncertainty - 0.583) < 0.001
-    let confidence_ok = result.confidence < 0.90  // Should decrease
-    
-    return value_ok && uncertainty_ok && confidence_ok
+    let result = ep_add(&a, &b)
+
+    // Verify: value adds, variances add, confidence is min(a,b) * 99/100.
+    // Use the pure ep_variance accessor (not the effectful ep_std) so this
+    // registered test fits the pure fn() -> bool registry slot.
+    let value_ok = abs(ep_val(&result) - 30.0) < 0.0001
+    let variance_ok = abs(ep_variance(&result) - 0.34) < 0.001
+    let confidence_ok = ep_confidence(&result) == 891
+
+    return value_ok && variance_ok && confidence_ok
 }
 
-fn test_add_epistemic_edge_cases() -> bool {
-    // Test zero, negative, large numbers, etc.
+fn test_ep_add_edge_cases() -> bool {
+    // Edge case 1: a zero-valued, zero-uncertainty operand adds nothing to the
+    // value (only the other operand's contribution) and leaves the variance at
+    // the other operand's; confidence still decays to min * 99/100 (891).
+    let a = ep_measured(0.0, 0.0)
+    let b = ep_measured(5.0, 2.0)
+    let z = ep_add(&a, &b)
+    let zero_ok = abs(ep_val(&z) - 5.0) < 0.0001 &&
+                  abs(ep_variance(&z) - 4.0) < 0.001 &&
+                  ep_confidence(&z) == 891
+
+    // Edge case 2: negative operands still ADD (never subtract); variances add.
+    let c = ep_measured(-10.0, 1.0)
+    let d = ep_measured(3.0, 0.0)
+    let n = ep_add(&c, &d)
+    let neg_ok = abs(ep_val(&n) - (-7.0)) < 0.0001 &&
+                 abs(ep_variance(&n) - 1.0) < 0.001
+
+    // Edge case 3: large-magnitude operands preserve value additivity within
+    // f64 range; variances still add.
+    let e = ep_measured(1.0e15, 1.0)
+    let f = ep_measured(1.0e15, 1.0)
+    let g = ep_add(&e, &f)
+    let large_ok = abs(ep_val(&g) - 2.0e15) < 1.0e9 &&
+                   abs(ep_variance(&g) - 2.0) < 0.001
+
+    // Edge case 4: equal operands are commutation-independent; confidence still
+    // decays to min * 99/100 (891), not preserved.
+    let h = ep_measured(7.0, 0.2)
+    let i = ep_measured(7.0, 0.2)
+    let same = ep_add(&h, &i)
+    let equal_ok = abs(ep_val(&same) - 14.0) < 0.0001 &&
+                   ep_confidence(&same) == 891
+
+    return zero_ok && neg_ok && large_ok && equal_ok
 }
 ```
 
@@ -68,28 +114,22 @@ fn test_compile_hello_world() -> bool {
 **Template:**
 ```sio
 // tests/property/epistemic_properties.sio
-fn prop_add_commutative() -> bool {
-    // For all epistemic values a, b:
-    // add_epistemic(a, b) ≈ add_epistemic(b, a)
-    
-    let a = random_epistemic()
-    let b = random_epistemic()
-    
-    let ab = add_epistemic(a, b)
-    let ba = add_epistemic(b, a)
-    
-    return abs(ab.value - ba.value) < 0.0001
+use epistemic::knowledge::{Epistemic, ep_add, ep_val, ep_variance}
+
+fn prop_add_commutative(a: Epistemic, b: Epistemic) -> bool {
+    // ep_add(a, b) ≈ ep_add(b, a)
+    let ab = ep_add(&a, &b)
+    let ba = ep_add(&b, &a)
+
+    return abs(ep_val(&ab) - ep_val(&ba)) < 0.0001
 }
 
-fn prop_uncertainty_grows() -> bool {
-    // Adding increases uncertainty
-    let a = random_epistemic()
-    let b = random_epistemic()
-    
-    let sum = add_epistemic(a, b)
-    
-    return sum.uncertainty >= a.uncertainty && 
-           sum.uncertainty >= b.uncertainty
+fn prop_variance_grows(a: Epistemic, b: Epistemic) -> bool {
+    // Uncorrelated addition adds variances, so uncertainty never shrinks.
+    let sum = ep_add(&a, &b)
+
+    return ep_variance(&sum) >= ep_variance(&a) &&
+           ep_variance(&sum) >= ep_variance(&b)
 }
 ```
 
@@ -99,18 +139,20 @@ fn prop_uncertainty_grows() -> bool {
 **Template:**
 ```sio
 // tests/performance/epistemic_operations.sio
-fn benchmark_add_epistemic() -> f64 {
+use epistemic::knowledge::{ep_measured, ep_add}
+
+fn benchmark_ep_add() -> f64 {
     let iterations = 1000000
     let start = current_time()
-    
+
     var i = 0
     while i < iterations {
-        let a = epistemic_std(10.0, 0.5, 0.95)
-        let b = epistemic_std(20.0, 0.3, 0.90)
-        let _ = add_epistemic(a, b)
+        let a = ep_measured(10.0, 0.5)
+        let b = ep_measured(20.0, 0.3)
+        let _ = ep_add(&a, &b)
         i = i + 1
     }
-    
+
     let end = current_time()
     return (end - start) / iterations  // seconds per operation
 }
@@ -210,24 +252,25 @@ Expected behavior:
 Generate test code in Sounio.
 ```
 
-### Example: Testing `add_epistemic`
+### Example: Testing `ep_add`
 
 **Prompt:**
 ```
-Generate comprehensive tests for add_epistemic function.
+Generate comprehensive tests for ep_add.
 
-Function signature: fn add_epistemic(a: Epistemic<f64>, b: Epistemic<f64>) -> Epistemic<f64>
+Function signature: fn ep_add(a: &Epistemic, b: &Epistemic) -> Epistemic
+(stdlib/epistemic/knowledge.sio; Epistemic is { val: f64, variance: f64, confidence: i64 })
 
 Requirements:
 1. Test normal cases: positive numbers, negative numbers, zero
 2. Test edge cases: very large numbers, very small numbers, equal values
 3. Test error conditions: NaN, infinity (if applicable)
-4. Verify properties: commutativity, uncertainty growth, confidence decrease
+4. Verify properties: commutativity, variance growth, confidence decays to min * 99/100
 
 Expected behavior:
-- Result value = a.value + b.value
-- Result uncertainty = sqrt(a.uncertainty² + b.uncertainty²)
-- Result confidence = min(a.confidence, b.confidence) * 0.99
+- ep_val(&result) = ep_val(&a) + ep_val(&b)
+- ep_variance(&result) = ep_variance(&a) + ep_variance(&b)
+- ep_confidence(&result) = min(ep_confidence(&a), ep_confidence(&b)) * 99 / 100 (clamped to 0..1000)
 
 Generate test code in Sounio.
 ```
@@ -244,8 +287,8 @@ struct TestCase {
 }
 
 let all_tests: [TestCase] = [
-    TestCase { name: "add_epistemic_basic", function: test_add_epistemic_basic, category: "unit/epistemic" },
-    TestCase { name: "add_epistemic_edge", function: test_add_epistemic_edge_cases, category: "unit/epistemic" },
+    TestCase { name: "ep_add_basic", function: test_ep_add_basic, category: "unit/epistemic" },
+    TestCase { name: "ep_add_edge", function: test_ep_add_edge_cases, category: "unit/epistemic" },
     // ...
 ]
 ```
@@ -311,19 +354,46 @@ fn record_coverage(file: string, line: i64, function: string) {
 
 ### Pattern 1: Table-Driven Tests
 ```sio
-fn test_add_epistemic_table() -> bool {
-    let cases = [
-        (epistemic_std(1.0, 0.1, 0.95), epistemic_std(2.0, 0.2, 0.90), 3.0, 0.224, 0.89),
-        (epistemic_std(0.0, 0.0, 1.0), epistemic_std(5.0, 0.5, 0.95), 5.0, 0.5, 0.94),
-        // ...
+use epistemic::knowledge::{Epistemic, ep_measured, ep_certain, ep_add, ep_val, ep_std, ep_confidence}
+
+struct AddCase {
+    name: string,
+    a: Epistemic,
+    b: Epistemic,
+    exp_val: f64,
+    exp_std: f64,
+    exp_conf: i64,
+}
+
+fn test_ep_add_table() -> bool with Mut, Div, Panic {
+    // ep_measured stores confidence 900; ep_certain stores 1000.
+    // ep_add takes min(a,b).confidence * 99 / 100 (clamped to 0..1000).
+    let cases: [AddCase; 2] = [
+        AddCase {
+            name: "measured+measured",
+            a: ep_measured(1.0, 0.1),
+            b: ep_measured(2.0, 0.2),
+            exp_val: 3.0,
+            exp_std: 0.224,
+            exp_conf: 891,
+        },
+        AddCase {
+            name: "certain+measured",
+            a: ep_certain(0.0),
+            b: ep_measured(5.0, 0.5),
+            exp_val: 5.0,
+            exp_std: 0.5,
+            exp_conf: 891,
+        },
     ]
-    
-    for (a, b, expected_value, expected_uncertainty, expected_confidence) in cases {
-        let result = add_epistemic(a, b)
-        if !verify_result(result, expected_value, expected_uncertainty, expected_confidence) {
-            return false
-        }
+
+    for c in cases {
+        let r = ep_add(&c.a, &c.b)
+        if abs(ep_val(&r) - c.exp_val) >= 0.0001 { return false }
+        if abs(ep_std(&r) - c.exp_std) >= 0.001 { return false }
+        if ep_confidence(&r) != c.exp_conf { return false }
     }
+
     return true
 }
 ```

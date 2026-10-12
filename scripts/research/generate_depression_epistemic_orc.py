@@ -25,7 +25,7 @@ GROUPS = ["minimum", "mild", "moderate", "severe"]
 
 
 def neg(x):
-    """Sounio has no unary minus — emit (0.0 - v) for negatives."""
+    """Emit negatives as (0.0 - v)."""
     return f"(0.0 - {abs(x):.6f})" if x < 0 else f"{x:.6f}"
 
 

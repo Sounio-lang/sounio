@@ -1,98 +1,93 @@
 # Epistemic Examples
 
-## 1. GUMUncertainty Builder Pattern
+## 1. GUM Uncertainty Components
 
 ```sio
-use epistemic::gum::GUMUncertainty;
+use epistemic::gum::{
+    gum_type_a, gum_type_b, gum_type_b_uniform, gum_type_b_triangular,
+    gum_with_sensitivity, gum_combine2, gum_std_u, gum_dof, gum_u95,
+}
 
-pub fn main() {
-    // Type A: from statistical data (n observations)
-    let u_a = GUMUncertainty::type_a(0.1, 10)  // std_dev=0.1, n=10
-        .with_sensitivity(2.0);
-    
+pub fn main() with Mut, Div, Panic {
+    // Type A: from n observations (u = std_dev / sqrt(n), nu = n - 1)
+    let u_a = gum_with_sensitivity(gum_type_a(0.1, 10), 2.0)
+
     // Type B: from a priori knowledge
-    let u_b = GUMUncertainty::type_b(0.05)
-        .with_sensitivity(1.0);
-    
-    // Type B from uniform distribution: u = a/sqrt(3)
-    let u_uniform = GUMUncertainty::type_b_uniform(0.1);
-    
-    // Type B from triangular distribution: u = a/sqrt(6)
-    let u_tri = GUMUncertainty::type_b_triangular(0.1);
+    let u_b = gum_with_sensitivity(gum_type_b(0.05), 1.0)
+
+    // Type B from a uniform distribution: u = half_width / sqrt(3)
+    let u_uniform = gum_type_b_uniform(0.1)
+
+    // Type B from a triangular distribution: u = half_width / sqrt(6)
+    let u_tri = gum_type_b_triangular(0.1)
+
+    // Combine and read the budget
+    let combined = gum_combine2(1.0, u_a, u_b)
+    let uc = gum_std_u(combined)    // combined standard uncertainty
+    let v_eff = gum_dof(combined)   // effective degrees of freedom
+    let expanded = gum_u95(combined) // expanded uncertainty at 95%
 }
 ```
 
-## 2. Uncertainty Propagation with Knowledge
+Anchor: `tests/stdlib/epistemic/test_gum_stdlib.sio`.
+
+## 2. Uncertainty Propagation with Epistemic
 
 ```sio
-use epistemic::knowledge::Knowledge;
+use epistemic::knowledge::{ep_measured, ep_div, ep_val}
 
-pub fn main() with Div {
-    // Measured values with uncertainty
-    let dose = Knowledge::measured(500.0, 25.0, "scale_A");
-    let volume = Knowledge::measured(10.0, 0.1, "pipette_B");
-    
-    // Arithmetic propagates variance automatically
-    let concentration = dose / volume;
-    
-    // concentration.value ≈ 50.0
-    // concentration.variance propagated via GUM
-    assert(concentration.value > 49.0 && concentration.value < 51.0);
+pub fn main() with Div, Panic {
+    // Measured values: (val, std_dev). Variance is stored as std_dev^2.
+    let dose = ep_measured(500.0, 25.0)
+    let volume = ep_measured(10.0, 0.1)
+
+    // Division propagates variance by the GUM delta method.
+    let concentration = ep_div(&dose, &volume)
+
+    let v = ep_val(&concentration)
+    assert(v > 49.0 && v < 51.0)
 }
 ```
+
+Anchor: `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio`.
 
 ## 3. Confidence Degradation
 
 ```sio
-use epistemic::knowledge::{Knowledge, BetaConfidence};
+use epistemic::knowledge::{ep_measured, ep_certain, ep_add, ep_confidence}
 
-pub fn main() {
-    // High confidence measurement
-    let high_conf = BetaConfidence::certain();  // alpha=1, beta=0
-    
-    // Degrade by 5%
-    let degraded = high_conf.degrade(0.05);
-    
-    // Mean confidence decreases
-    assert(degraded.mean() < high_conf.mean());
+pub fn main() with Panic {
+    // ep_certain stores confidence 1000; ep_measured stores 900.
+    let exact = ep_certain(10.0)
+    let noisy = ep_measured(2.0, 0.05)
+
+    // Combination applies operation-specific decay to the lower input
+    // confidence: ep_add/ep_sub multiply by 99/100, ep_mul by 98/100,
+    // ep_div by 97/100. It never increases.
+    let result = ep_add(&exact, &noisy)
+    assert(ep_confidence(&result) <= ep_confidence(&exact))
+    assert(ep_confidence(&result) == 891)
 }
 ```
 
-## 4. Provenance Tracking
+`BetaConfidence::certain()` and `.degrade()` are not on the checked surface. The beta-posterior type is the separate `EpistemicBeta` in `stdlib/epistemic/beta_confidence.sio` (`eb_new`, `eb_mean`), anchored by `tests/run-pass/beta_confidence_rule.sio`.
+
+## 4. Reading a Result
 
 ```sio
-use epistemic::knowledge::Knowledge;
+use epistemic::knowledge::{ep_measured, ep_div, ep_val, ep_std}
 
-pub fn main() with Div {
-    let a = Knowledge::measured(10.0, 0.1, "sensor_A");
-    let b = Knowledge::measured(2.0, 0.05, "sensor_B");
-    
-    let result = a / b;
-    
-    // Provenance tracks computation history
-    assert(result.provenance.source != "");
+pub fn main() with Mut, Div, Panic {
+    let a = ep_measured(10.0, 0.1)
+    let b = ep_measured(2.0, 0.05)
+
+    let result = ep_div(&a, &b)
+    let v = ep_val(&result)
+    let s = ep_std(&result)
 }
 ```
 
-## 5. GUM Result with Coverage Factor
-
-```sio
-use epistemic::gum::{GUMUncertainty, GUMResult};
-
-pub fn main() {
-    let u1 = GUMUncertainty::type_a(0.1, 10);
-    let u2 = GUMUncertainty::type_b(0.05);
-    
-    // Combine uncertainties
-    let combined = u1.combine(&u2);
-    
-    // Get effective degrees of freedom
-    let v_eff = combined.degrees_of_freedom;
-    
-    // Expanded uncertainty with k=2 (≈95% CI)
-    let expanded = combined.std_uncertainty * 2.0;
-}
-```
+`Epistemic` has no `provenance` field. Shared-source covariance tracking lives in `stdlib/epistemic/affine.sio` (anchor: `tests/run-pass/affine_shared_source_add.sio`). Provenance bookkeeping is in `stdlib/epistemic/prov.sio`.
 
 ---
 

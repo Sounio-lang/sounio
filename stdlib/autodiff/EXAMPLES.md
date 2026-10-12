@@ -1,12 +1,21 @@
 # Autodiff Examples
 
+> **Private implementation shape.** In `stdlib/autodiff/tape.sio`, `Tape`,
+> `new_tape`, `tape_new_var`, `tape_mul`, `tape_add`, and `backward` are all
+> private (`struct`/`fn`, not `pub`), so they are **not** part of the checked
+> public surface. `EpistemicDual::new` and `Knowledge::measured` likewise do
+> not exist — `stdlib/autodiff/epistemic_dual.sio` builds values with
+> `edual_new(val, dot, unc, unc_dot)` and `edual_mul`. The blocks below are the
+> intended shape only, not an importable API. The working form is in
+> `stdlib/autodiff/TAPE_IMPLEMENTATION.md`.
+
 ## 1. Tape-Based Reverse-Mode AD
 
 ```sio
 use autodiff::tape::Tape;
 
 pub fn main() with Mut, Div, Panic {
-    let mut tape = Tape::new();
+    var tape = Tape::new();
     
     // Push variable: x = 2
     let x = tape.push_var(2.0);
@@ -84,7 +93,7 @@ pub fn main() with Mut, Div, Panic {
 use autodiff::tape::Tape;
 
 pub fn main() with Mut, Div, Panic {
-    let mut tape = Tape::new();
+    var tape = Tape::new();
     
     let x = tape.push_var(1.0);
     

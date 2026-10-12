@@ -533,5 +533,5 @@ Results: 6/6 test suites passed
 
 ### Sounio Language
 - [Epistemic Types Paper](../../paper/sounio-epistemic-types.tex)
-- [Programming Guide](../../docs/LLM_PROGRAMMING_GUIDE.md)
+- [Programming Guide](../../docs/guide/LLM_PROGRAMMING_GUIDE.md)
 - [Statistics Plan](../../../.claude/plans/shimmying-tickling-mist.md)

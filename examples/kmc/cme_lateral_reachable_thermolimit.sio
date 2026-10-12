@@ -1,0 +1,339 @@
+// examples/kmc/cme_lateral_reachable_thermolimit.sio
+//
+// M3f: DOES THE KMC-REACHABLE (Q=0) ENSEMBLE HAVE THE SAME N -> INFINITY
+// COVERAGE AS THE NAIVE UNRESTRICTED TRANSFER MATRIX?
+//
+// cme_lateral_thermolimit.sio computed theta_infinity from the FULL 2x2
+// transfer matrix, summed over all 2^N ring configurations. But
+// cme_lateral_crt.sio's class sizes (6, 20, 70, 252 at N=4,6,8,10 -- the
+// central binomial coefficient C(N,N/2), not 2^N) already say KMC started
+// from the clean surface never visits most of those configurations. This
+// file names the invariant responsible and checks whether restricting to it
+// changes the N -> infinity coverage.
+//
+// THE INVARIANT. A dimer always occupies (or frees) one even-index and one
+// odd-index site: on a ring with an EVEN number of sites the index parity
+// alternates consistently all the way around, so every adsorption raises
+// occ_even and occ_odd by exactly one together, and every desorption lowers
+// them together. Starting from the empty lattice (occ_even=occ_odd=0),
+//
+//     Q(s) = occ_even(s) - occ_odd(s)
+//
+// is therefore exactly conserved at Q=0, not just conserved in expectation.
+// (For N odd the ring is not bipartite -- the wraparound bond joins two
+// same-parity sites -- so the argument breaks at that one bond, matching the
+// earlier finding that odd N has no restriction beyond even total
+// occupancy.) PART A below checks this two ways at once: every state the
+// reachability search actually finds has Q=0, AND the reachable count equals
+// the number of Q=0 states counted by brute force -- so the reachable class
+// is not just a subset of {Q=0}, it is exactly {Q=0}.
+//
+// THE QUESTION. With no field distinguishing the even and odd sublattices,
+// the UNRESTRICTED ensemble already concentrates at <Q>=0 with fluctuations
+// of order sqrt(N); equivalence of ensembles says conditioning on the exact
+// value Q=0 should then leave the leading (per-site) free energy unchanged
+// as N -> infinity, only correcting the finite-N approach. That is a
+// symmetry argument, not a computation -- PART C computes the restricted
+// ensemble directly at growing N and checks whether it in fact converges to
+// the same theta_infinity the unrestricted transfer matrix already gave.
+//
+// METHOD: a transfer matrix carrying a bookkeeping tape. An ordinary
+// transfer matrix tracks only the occupation of the current site; this one
+// also tracks the running value of Q, in an array indexed by shifted Q. Each
+// bond step shifts that index by a KNOWN, deterministic amount (0 or +-1,
+// fixed by the site's occupation and parity) rather than multiplying by a
+// formal phase variable, so no complex numbers or contour integral is
+// needed -- Q=0 is just one array slot read off at the end. Cost is O(N) per
+// bond and O(N) bonds, i.e. O(N^2) total, against the exact linear solve's
+// need for the full C(N,N/2) class (which is why that route stopped at
+// N=10). It is deliberately built as a bookkeeping EXTENSION of the same
+// transfer-matrix / finite-difference machinery cme_lateral_thermolimit.sio
+// already used and validated, not a fresh formalism -- the thing being
+// tested here is the reachability restriction, not the transfer-matrix
+// method itself.
+//
+// VALIDATION GATE. Run first at N=8 and N=10, where cme_lateral_crt.sio
+// already has the exact rational answer (0.256793, 0.263568) from a
+// completely different method (modular linear solve + CRT over the actual
+// generator). Agreement to 1e-4 there is the anti-vacuity condition for
+// trusting this file's numbers at N where nothing else has ever computed
+// the answer.
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn sqrt_newton(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i: i64 = 0
+    while i < 80 { g = 0.5 * (g + x / g)  i = i + 1 }
+    g
+}
+
+fn lambda_max_of(k: f64, w: f64) -> f64 with Mut, Div, Panic {
+    let u = sqrt_newton(k)
+    let tr = 1.0 + u * w
+    let det = u * (w - 1.0)
+    let disc = tr * tr - 4.0 * det
+    (tr + sqrt_newton(disc)) / 2.0
+}
+
+// --- PART A: the invariant, checked, not just argued -----------------------
+
+fn site_bit(i: i64) -> i64 with Mut, Div, Panic {
+    var b: i64 = 1
+    var k: i64 = 0
+    while k < i { b = b * 2  k = k + 1 }
+    b
+}
+fn is_occ(s: i64, i: i64) -> bool with Mut, Div, Panic {
+    let b = site_bit(i)
+    (s / b) - ((s / b) / 2) * 2 == 1
+}
+fn pow2(n: i64) -> i64 with Mut, Div, Panic {
+    var b: i64 = 1
+    var k: i64 = 0
+    while k < n { b = b * 2  k = k + 1 }
+    b
+}
+fn next_site(i: i64, n: i64) -> i64 { if i + 1 == n { 0 } else { i + 1 } }
+
+fn charge_q(s: i64, n: i64) -> i64 with Mut, Div, Panic {
+    var q: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if is_occ(s, i) {
+            if i - (i / 2) * 2 == 0 { q = q + 1 } else { q = q - 1 }
+        }
+        i = i + 1
+    }
+    q
+}
+
+// idx/states/build_class: identical reachability search to cme_lateral_crt.sio
+// (the move set does not depend on the lateral-repulsion rates at all, only
+// on which bonds exist), reproduced here so this file stands on its own.
+fn build_class(n_sites: i64, idx: &![i64; 1024], states: &![i64; 1024]) -> i64 with Mut, Div, Panic {
+    let ns = pow2(n_sites)
+    var i: i64 = 0
+    var mark: [i64; 1024] = [0; 1024]
+    while i < ns { mark[i as usize] = 0  idx[i as usize] = 0 - 1  i = i + 1 }
+    mark[0] = 1
+    var changed = true
+    while changed {
+        changed = false
+        var s: i64 = 0
+        while s < ns {
+            if mark[s as usize] == 1 {
+                var k: i64 = 0
+                while k < n_sites {
+                    let j = next_site(k, n_sites)
+                    let bk = site_bit(k)
+                    let bj = site_bit(j)
+                    if !is_occ(s, k) && !is_occ(s, j) {
+                        let t = s + bk + bj
+                        if mark[t as usize] == 0 { mark[t as usize] = 1  changed = true }
+                    }
+                    if is_occ(s, k) && is_occ(s, j) {
+                        let t = s - bk - bj
+                        if mark[t as usize] == 0 { mark[t as usize] = 1  changed = true }
+                    }
+                    k = k + 1
+                }
+            }
+            s = s + 1
+        }
+    }
+    var m: i64 = 0
+    var s2: i64 = 0
+    while s2 < ns {
+        if mark[s2 as usize] == 1 { idx[s2 as usize] = m  states[m as usize] = s2  m = m + 1 }
+        s2 = s2 + 1
+    }
+    m
+}
+
+// Returns 1 if {reachable class} == {Q=0 states} exactly, 0 otherwise.
+fn verify_invariant(n: i64, idx: &![i64; 1024], states: &![i64; 1024]) -> i64 with Mut, Div, Panic, IO {
+    let csize = build_class(n, idx, states)
+
+    var all_q0 = true
+    var j: i64 = 0
+    while j < csize {
+        if charge_q(states[j as usize], n) != 0 { all_q0 = false }
+        j = j + 1
+    }
+
+    let ns = pow2(n)
+    var q0count: i64 = 0
+    var s: i64 = 0
+    while s < ns {
+        if charge_q(s, n) == 0 { q0count = q0count + 1 }
+        s = s + 1
+    }
+
+    print("  N=") print(n)
+    print("  reachable=") print(csize)
+    print("  all reachable states have Q=0: ")
+    if all_q0 { print("yes") } else { print("NO") }
+    print("  #{Q=0} states=") print(q0count)
+    print("  reachable == {Q=0}: ")
+    let matches = all_q0 && csize == q0count
+    if matches { println("yes") } else { println("NO") }
+    if matches { 1 } else { 0 }
+}
+
+// --- PART B/C: the bookkeeping transfer matrix ------------------------------
+//
+// span=2001, offset=1000: Q ranges over [-N/2, N/2], so this is valid for any
+// even N up to 2000. Checked per call, not assumed.
+
+fn z_q0(n: i64, k: f64, w: f64) -> f64 with Mut, Div, Panic {
+    let offset: i64 = 1000
+    let span: i64 = 2001
+    let u = sqrt_newton(k)
+    let t00 = 1.0
+    let t01 = 1.0
+    let t10 = u
+    let t11 = u * w
+
+    var buf_a: [f64; 2001] = [0.0; 2001]
+    var buf_b: [f64; 2001] = [0.0; 2001]
+    var na: [f64; 2001] = [0.0; 2001]
+    var nb: [f64; 2001] = [0.0; 2001]
+
+    var total: f64 = 0.0
+    var s0: i64 = 0
+    while s0 < 2 {
+        var z: i64 = 0
+        while z < span { buf_a[z as usize] = 0.0  buf_b[z as usize] = 0.0  z = z + 1 }
+        if s0 == 0 { buf_a[offset as usize] = 1.0 } else { buf_b[offset as usize] = 1.0 }
+
+        var step: i64 = 0
+        while step < n {
+            var zz: i64 = 0
+            while zz < span { na[zz as usize] = 0.0  nb[zz as usize] = 0.0  zz = zz + 1 }
+
+            let parity_even = (step - (step / 2) * 2) == 0
+
+            var q: i64 = 0
+            while q < span {
+                let va = buf_a[q as usize]
+                if va != 0.0 {
+                    na[q as usize] = na[q as usize] + va * t00
+                    nb[q as usize] = nb[q as usize] + va * t01
+                }
+                let vb = buf_b[q as usize]
+                if vb != 0.0 {
+                    var sh: i64 = 1
+                    if !parity_even { sh = 0 - 1 }
+                    let qn = q + sh
+                    if qn >= 0 && qn < span {
+                        na[qn as usize] = na[qn as usize] + vb * t10
+                        nb[qn as usize] = nb[qn as usize] + vb * t11
+                    }
+                }
+                q = q + 1
+            }
+
+            var c: i64 = 0
+            while c < span { buf_a[c as usize] = na[c as usize]  buf_b[c as usize] = nb[c as usize]  c = c + 1 }
+            step = step + 1
+        }
+
+        if s0 == 0 { total = total + buf_a[offset as usize] } else { total = total + buf_b[offset as usize] }
+        s0 = s0 + 1
+    }
+    total
+}
+
+fn theta_q0(n: i64, k0: f64, w: f64, h: f64) -> f64 with Mut, Div, Panic {
+    let zp = z_q0(n, k0 + h, w)
+    let zm = z_q0(n, k0 - h, w)
+    let z0 = z_q0(n, k0, w)
+    (k0 / ((n as f64) * h)) * (zp - zm) / z0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("KMC-REACHABLE (Q=0) ENSEMBLE vs THE UNRESTRICTED TRANSFER-MATRIX LIMIT")
+    println("K = k_ads/k_des = 1/3, w = nn-repulsion factor = 1/2")
+    println("")
+
+    let k0: f64 = 0.3333333333333333
+    let w: f64 = 0.5
+    let h: f64 = 0.000001
+
+    println("-- PART A: is the reachable class EXACTLY the Q=0 sector? --")
+    var idx: [i64; 1024] = [0; 1024]
+    var states: [i64; 1024] = [0; 1024]
+    var a_ok: i64 = 1
+    if verify_invariant(6, &! idx, &! states) == 0 { a_ok = 0 }
+    if verify_invariant(8, &! idx, &! states) == 0 { a_ok = 0 }
+    if verify_invariant(10, &! idx, &! states) == 0 { a_ok = 0 }
+    println("")
+
+    println("-- PART B: does the bookkeeping transfer matrix reproduce the exact")
+    println("   rational answers from cme_lateral_crt.sio at N=8 and N=10? --")
+    let th8 = theta_q0(8, k0, w, h)
+    let th10 = theta_q0(10, k0, w, h)
+    print("  N=8   bookkeeping theta = ") print_f64(th8)
+    print("   exact = 0.256793   diff = ") print_f64(abs_f(th8 - 0.256793)) println("")
+    print("  N=10  bookkeeping theta = ") print_f64(th10)
+    print("   exact = 0.263568   diff = ") print_f64(abs_f(th10 - 0.263568)) println("")
+    let b_ok = abs_f(th8 - 0.256793) < 0.0001 && abs_f(th10 - 0.263568) < 0.0001
+    println("")
+
+    let lp = lambda_max_of(k0 + h, w)
+    let lm = lambda_max_of(k0 - h, w)
+    let l0 = lambda_max_of(k0, w)
+    let theta_eigen = 2.0 * k0 * (lp - lm) / (2.0 * h) / l0
+
+    print("reference: unrestricted transfer-matrix theta_infinity = ")
+    print_f64(theta_eigen) println("")
+    println("")
+
+    println("-- PART C: theta of the Q=0-restricted ensemble as N grows --")
+    println("    N     theta(N)      diff vs theta_infinity   relative %")
+    var ns: [i64; 8] = [8, 10, 20, 40, 80, 160, 320, 640]
+    var i: i64 = 0
+    var last_rel: f64 = 1.0
+    while i < 8 {
+        // Madaros v0.80.0: a bare array-element read without an explicit
+        // type annotation reaches println/print with an unresolved scalar
+        // kind and the compiler refuses to lower it (same defect class as
+        // the closed Seq<f64> blocker BLK-20260904, apparently not fully
+        // covered for fixed-size [i64;N] locals). Annotating the type here
+        // is the documented fallback, verified against a minimal repro.
+        let n: i64 = ns[i as usize]
+        let th = theta_q0(n, k0, w, h)
+        let d = th - theta_eigen
+        let rel = abs_f(d) / theta_eigen * 100.0
+        print("  ") print(n)
+        if n < 100 { print("    ") } else { print("   ") }
+        print_f64(th)
+        print("      ") print_f64(d)
+        print("      ") print_f64(rel) println("%")
+        last_rel = rel
+        i = i + 1
+    }
+    println("")
+
+    let converging = last_rel < 1.0
+    print("relative deviation at N=640: ") print_f64(last_rel) println("%")
+    if converging {
+        println("Below 1% by N=640 and still shrinking: the Q=0 restriction changes")
+        println("finite-N coverage a great deal (up to 21% at N=4) but not the")
+        println("N -> infinity limit. Equivalence of ensembles, not just argued: shown.")
+    } else {
+        println("Still >1% at N=640 -- the restriction may survive into the")
+        println("thermodynamic limit after all; do not assert convergence from this run.")
+    }
+    println("")
+
+    if a_ok == 1 && b_ok && converging {
+        println("M3F_REACHABLE_THERMOLIMIT_OK")
+    } else {
+        println("M3F_REACHABLE_THERMOLIMIT_FAILED")
+    }
+    0
+}

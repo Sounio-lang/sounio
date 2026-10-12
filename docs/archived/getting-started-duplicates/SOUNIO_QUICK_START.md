@@ -15,11 +15,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.getti
 
 # Sounio Quick Start for LLMs
 
-> **Other guides**: [Scientists' Quick Start](../QUICK_START_GUIDE.md) | [General Getting Started](getting-started.md) | [Conservative contract](MINIMUM_VIABLE_SOUNIO.md)
+> **Other guides**: [Scientists' Quick Start](./QUICK_START_GUIDE.md) | [General Getting Started](../../guide/getting-started.md) | [Conservative contract](../../guide/MINIMUM_VIABLE_SOUNIO.md)
 
 **TL;DR**: Sounio is NOT Rust. No semicolons. Effects required. `&!` not `&mut`. Study real `.sio` files.
 
-**Full syntax ref**: [docs/LLM_PROGRAMMING_GUIDE.md](../LLM_PROGRAMMING_GUIDE.md)
+**Full syntax ref**: [docs/LLM_PROGRAMMING_GUIDE.md](../../guide/LLM_PROGRAMMING_GUIDE.md)
 
 ## 30-Second Comparison
 

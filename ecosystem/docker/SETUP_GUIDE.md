@@ -205,7 +205,7 @@ ecosystem/docker/
 ## Support Resources
 
 - **Language Guide:** `docs/MINIMUM_VIABLE_SOUNIO.md`
-- **Syntax Reference:** `docs/LLM_PROGRAMMING_GUIDE.md`
+- **Syntax Reference:** `docs/guide/LLM_PROGRAMMING_GUIDE.md`
 - **Project README:** `ecosystem/README.md`
 - **Drug-Discovery:** `ecosystem/drug-discovery/`
 

@@ -19,7 +19,6 @@ Owned-Files:
 - scripts/dev/dgx_spark_public_gpu_gate.sh
 - self-hosted/gpu/gpu_knowledge_vec4_pack_unpack_harness.sio
 - self-hosted/gpu/gpu_knowledge_vec4_pack_unpack_stage_probe.sio
-- docs/handoff/gpu_knowledge_vecmat_swarm_plan.md
 - artifacts/gpu/knowledge_vecmat_evidence_audit/*
 - artifacts/gpu/dgx_spark_public_gpu_package/*
 - artifacts/gpu/dgx_spark_public_gpu_gate.v1.json

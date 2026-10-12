@@ -128,37 +128,24 @@ print(name)
 
 ## 5. NEGATIVE NUMBERS & UNARY MINUS
 
-### The Mistake
+Unary minus works on literals, variables and arguments; no `0 - x` workaround is needed.
+
 ```sio
-// ❌ WRONG - unary minus doesn't exist
 let neg = -42
 let result = -x
-```
-
-### The Fix
-```sio
-// ✅ CORRECT
-let neg = 0 - 42
-let result = 0 - x
-let value = a - (0 - b)  // = a + b
+let value = a - (-b)  // = a + b
 ```
 
 ---
 
-## 6. BIT SHIFT REQUIRES u8 OPERAND
+## 6. BIT SHIFTS TAKE A PLAIN INTEGER AMOUNT
 
-### The Mistake
-```sio
-// ❌ WRONG - shift amount must be u8
-let shifted = byte >> 4       // ERROR: 4 is i32!
-```
+The shift amount is a plain integer literal or a variable of any integer type; no `u8` suffix or cast is needed.
 
-### The Fix
 ```sio
-// ✅ CORRECT
-let shifted = byte >> 4u8
-let masked = byte & 15u8
-let high = (byte >> 4u8) & 15u8
+let shifted = byte >> 4
+let masked = byte & 15
+let high = (byte >> 4) & 15
 ```
 
 ---
@@ -339,8 +326,8 @@ println("Hello, World!")
 
 // For mutable string data: fixed-size byte arrays
 var greeting: [i8; 64] = [0; 64]
-greeting[0] = 72i8   // 'H'
-greeting[1] = 101i8  // 'e'
+greeting[0] = 72   // 'H'
+greeting[1] = 101  // 'e'
 ```
 
 ---
@@ -378,8 +365,6 @@ extern "C" {
 - [ ] `&!` not `&mut`, `var` not `let mut`
 - [ ] All effects declared (`with Mut, Div, Panic, IO`)
 - [ ] No Rust macros — `assert()` not `assert!()`, `println()` not `println!()`
-- [ ] No unary minus — use `0 - x`
-- [ ] Bit shifts use `u8` — `x >> 4u8`
 - [ ] Array sizes match — `[u8; 256] = [0; 256]`
 - [ ] Type casts explicit — `i as usize`
 - [ ] Named fn refs, not closure literals

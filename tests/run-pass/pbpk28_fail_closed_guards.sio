@@ -1,0 +1,119 @@
+//@ run-pass
+//@ expect-stdout-contains: PBPK28_FAIL_CLOSED_GUARDS_PASS
+
+// Fail-closed guards around the PBPK28 θ-method runs (PR #2696 review).
+//
+//   1. pbpk28_bolus_run_mut refuses dt <= 0 and NaN dt. It already did so
+//      before the guard (via its step cap and non-finite check); the guard
+//      only makes the refusal immediate. Pinned so it stays that way.
+//   2. ep28_mass_gate refuses the same. Before the guard, ep28_simulate_dt had
+//      no step cap: dt = 0 never finished (measured: lean_single, killed
+//      after 596 s).
+//   2b. Both refuse an invalid horizon: t_end <= 0 or NaN skipped the loop
+//      and reported a zero-step run as a success; ep28 also refuses an
+//      infinite t_end, which it could never reach.
+//   2c. ep28_mass_gate refuses a positive dt too small to finish (1e-20 over
+//      168 h exceeds its step budget; without it t + dt == t loops forever).
+//   2d. Both refuse dt = +inf, which passes `dt > 0` and would otherwise be
+//      clipped into one full-horizon step.
+//   3. hessian_pbpk28_auc fails the whole budget when any stencil solve is
+//      rejected. The rejected solve's AUC is 0.0, which used to enter the
+//      difference quotients as if it were a measurement. Witness: a kp_brain
+//      prior wide enough that the -h stencil point is a negative partition
+//      coefficient (kp 0.10, sd 20 -> h = 0.2 -> kp = -0.10), while the base
+//      point stays valid. Before the guard this budget reported success
+//      (measured: lean_single, "rejected stencil fails the budget: FAIL").
+//
+//   4. extract_pbpk28_derivatives (M5) fails its budget the same way: the
+//      same wide kp_brain prior puts its ±h / ±2h stencil points at negative
+//      Kp. Before the guard it returned success with those solves read as
+//      AUC = 0.
+
+// The controls (same four parameters, published prior) must still succeed,
+// so the guards in 3 and 4 are not simply rejecting everything.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::theta_pbpk28::*
+use darwin_pbpk::epistemic_pbpk28::{ep28_rapamycin_params, ep28_rapamycin_priors, ep28_mass_gate}
+use darwin_pbpk::epistemic_pbpk28_hessian::{hessian_pbpk28_auc}
+use darwin_pbpk::cumulants::{extract_pbpk28_derivatives}
+
+fn verdict(tag: string, ok: bool) -> i32 with IO {
+    print(tag)
+    if ok {
+        println(": PASS")
+        return 0
+    }
+    println(": FAIL")
+    return 1
+}
+
+fn bolus_ok_t(dt: f64, t_end: f64) -> bool with Mut, Div {
+    let rapa = ep28_rapamycin_params()
+    var st = pbpk28_state_zero()
+    var led = pbpk28_ledger_zero()
+    return pbpk28_bolus_run_mut(rapa, 5.0, dt, t_end, 5000, &!st, &!led)
+}
+
+fn bolus_ok(dt: f64) -> bool with Mut, Div {
+    return bolus_ok_t(dt, 168.0)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    let rapa = ep28_rapamycin_params()
+    let zero = 0.0
+    let nan = zero / zero
+    let one = 1.0
+    let inf = one / zero
+    var failed: i32 = 0
+
+    println("pbpk28_bolus_run_mut")
+    failed = failed + verdict("  dt = 0.1 accepted", bolus_ok(0.1))
+    failed = failed + verdict("  dt = 0 refused", !bolus_ok(0.0))
+    failed = failed + verdict("  dt = -0.1 refused", !bolus_ok(0.0 - 0.1))
+    failed = failed + verdict("  dt = NaN refused", !bolus_ok(nan))
+    failed = failed + verdict("  dt = inf refused", !bolus_ok(inf))
+    failed = failed + verdict("  t_end = 0 refused", !bolus_ok_t(0.1, 0.0))
+    failed = failed + verdict("  t_end = -1 refused", !bolus_ok_t(0.1, 0.0 - 1.0))
+    failed = failed + verdict("  t_end = NaN refused", !bolus_ok_t(0.1, nan))
+
+    println("ep28_mass_gate")
+    failed = failed + verdict("  dt = 0 refused", !ep28_mass_gate(0.0, rapa, 5.0, 168.0))
+    failed = failed + verdict("  dt = NaN refused", !ep28_mass_gate(nan, rapa, 5.0, 168.0))
+    failed = failed + verdict("  dt = inf refused", !ep28_mass_gate(inf, rapa, 5.0, 168.0))
+    failed = failed + verdict("  t_end = 0 refused", !ep28_mass_gate(0.05, rapa, 5.0, 0.0))
+    failed = failed + verdict("  t_end = -1 refused", !ep28_mass_gate(0.05, rapa, 5.0, 0.0 - 1.0))
+    failed = failed + verdict("  t_end = NaN refused", !ep28_mass_gate(0.05, rapa, 5.0, nan))
+    failed = failed + verdict("  t_end = inf refused", !ep28_mass_gate(0.05, rapa, 5.0, inf))
+    failed = failed + verdict("  dt = 1e-20 refused (step budget)", !ep28_mass_gate(1.0e-20, rapa, 5.0, 168.0))
+
+    // The budget cases test the fail-closed path, not values: a 24 h horizon
+    // (240 steps at the budgets' dt = 0.1 h instead of 1680) keeps the ~100
+    // stencil solves inside the full suite's 30 s per-test limit on CI.
+    let t_short = 24.0
+    println("hessian_pbpk28_auc (first 4 parameters, t_end = 24 h)")
+    var pr = ep28_rapamycin_priors()
+    pr.n = 4
+    let ctrl = hessian_pbpk28_auc(rapa, pr, 5.0, t_short)
+    failed = failed + verdict("  published prior succeeds", ctrl.success)
+
+    var wide = ep28_rapamycin_priors()
+    wide.n = 4
+    wide.kn[3] = Knowledge { value: 0.10, variance: 400.0, epsilon: 0.63, provenance: "test_wide_kp_brain" }
+    let bad = hessian_pbpk28_auc(rapa, wide, 5.0, t_short)
+    failed = failed + verdict("  rejected stencil fails the budget", !bad.success)
+
+    println("extract_pbpk28_derivatives (first 4 parameters, t_end = 24 h)")
+    let dctrl = extract_pbpk28_derivatives(rapa, pr, 5.0, t_short)
+    failed = failed + verdict("  published prior succeeds", dctrl.success)
+    let dbad = extract_pbpk28_derivatives(rapa, wide, 5.0, t_short)
+    failed = failed + verdict("  rejected stencil fails the derivatives", !dbad.success)
+
+    if failed == 0 {
+        println("PBPK28_FAIL_CLOSED_GUARDS_PASS")
+    } else {
+        print("failed=")
+        println(failed)
+    }
+    return failed
+}

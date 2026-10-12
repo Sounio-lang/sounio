@@ -66,4 +66,4 @@ Native backend: `AST -> ir/lower.sio -> IrModule -> native/codegen.sio -> x86-64
 
 ## Claude Memory
 
-Backed up to `.claude-memory-backup/`. Restore to `~/.claude/projects/<hash>/memory/` on devPOD.
+Backed up to `.claude-memory-backup/` (removed from this repository on 2026-10-04 and kept privately). Restore to `~/.claude/projects/<hash>/memory/` on devPOD.

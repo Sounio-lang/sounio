@@ -1,0 +1,71 @@
+//@ run-pass
+//@ timeout: 60
+// tests/stdlib/chemistry/test_kin_sigma_small_variance.sio
+//
+// kin_sigma (new in this PR, feeding both checked chemistry simulators) reports the
+// standard uncertainty as sqrt_approx(variance). sqrt_approx runs a fixed 20 Newton
+// iterations starting from y0 = x itself: away from x = 1, each iteration roughly
+// HALVES y until y ~ sqrt(x), so for a small enough x, 20 halvings never get there.
+// Measured: x = 1e-20 (sqrt = 1e-10) came out ~9500x too large before this was fixed
+// by normalizing x = m * 4^k, m in [1, 4), so Newton always starts within a factor of
+// 4 of 1 regardless of k.
+//
+// A zero-rate network (ks = 0) never reacts, so its covariance never evolves: the
+// reported sigma for species A is sqrt_approx of EXACTLY the input variance, letting
+// this test probe sqrt_approx's accuracy directly through the public checked API
+// (kin_sigma and sqrt_approx are both private) rather than needing exact propagated
+// numbers.
+//
+// The normalization loop itself has a termination hazard: x = +inf divided by 4
+// stays +inf, so `while m >= 4.0 { m = m / 4.0 }` never exits on it. Reachable through
+// existing public callers -- crn_result_to_audit squares caller-provided finite values,
+// so epistemic_part = 1e308 overflows `total` to +inf before it reaches sqrt_approx.
+// sqrt_approx now returns non-finite input as-is, before the normalization loop.
+
+use chemistry::kinetics::*
+
+fn abs_t(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fail: i32 = 0
+    let iv: [f64; 4] = [1.0, 0.0, 0.0, 0.0]
+    let ks: [f64; 3] = [0.0, 0.0, 0.0]
+    let uks: [f64; 3] = [0.0, 0.0, 0.0]
+
+    // Spans power-of-4 boundaries (4.0 and 3.999/4.001) and 300 orders of magnitude,
+    // down to the edge of f64's normal range.
+    let vars: [f64; 12] = [1.0, 4.0, 16.0, 3.999, 4.001, 1.0e-20, 1.0e-40, 1.0e-100, 1.0e-200, 1.0e-300, 1.0e6, 1.0e-6]
+    var worst = 0.0
+    var i = 0
+    while i < 12 {
+        var ivar: [f64; 4] = [vars[i], 0.0, 0.0, 0.0]
+        let (status, ov, ou) = simulate_chem_network_checked(&iv, &ivar, &ks, &uks, 0.1, 3)
+        if status != 0 { fail = fail + 1; println("FAIL: zero-rate network must complete") }
+        // ou[0] must be A square root of vars[i]: check by squaring back, not by comparing
+        // to a precomputed sqrt(vars[i]) literal, which would just duplicate sqrt_approx's
+        // own arithmetic.
+        let back = ou[0] * ou[0]
+        let rel = abs_t(back / vars[i] - 1.0)
+        print("var=") print(vars[i]) print(" sigma=") print(ou[0]) print(" rel_err=") println(rel)
+        if rel > worst { worst = rel }
+        i = i + 1
+    }
+    print("worst relative error=") println(worst)
+    // 20 Newton iterations on an argument in [1, 4) converge far tighter than this; the
+    // bound only needs to rule out the ~9500x (1e-20) / ~1e43x (1e-100) failure mode.
+    if !(worst <= 1.0e-6) { fail = fail + 1; println("FAIL: sqrt_approx is not accurate across the tested range") }
+
+    // ---- +inf must not hang the normalization loop -------------------------------------------
+    // The //@ timeout above is the actual control here: a regression would time out, not fail an
+    // assertion. Reproduces the reviewer-cited reachability path exactly: crn_result_to_audit
+    // squares its epistemic/intrinsic/structural parts, so a large enough finite input overflows
+    // `total` to +inf before sqrt_approx ever sees it.
+    let audit = crn_result_to_audit(1.0, 0.1, 1.0e308, 0.0, 0.0, 1, 0)
+    print("crn_result_to_audit with an overflowing part: gum_uc=") println(audit.gum_uc)
+    // sqrt(+inf) = +inf: `x > 0.0` is false for both NaN and a laundered 0, so this also catches
+    // a regression that turns the hang into a silently-wrong finite/zero answer instead.
+    if !(audit.gum_uc > 1.0e300) { fail = fail + 1; println("FAIL: sqrt_approx(+inf) did not report +inf") }
+
+    if fail == 0 { println("KIN SIGMA SMALL VARIANCE PASS") }
+    fail
+}

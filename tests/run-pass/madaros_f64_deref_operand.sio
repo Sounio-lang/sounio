@@ -1,0 +1,131 @@
+//@ run-pass
+//@ description: an f64 dereference used as an arithmetic or comparison operand computes on the value, not on its IEEE-754 bit pattern
+//@ expect-stdout: add_shared 3.500000
+//@ expect-stdout: sub_shared 1.500000
+//@ expect-stdout: mul_shared 5.000000
+//@ expect-stdout: div_shared 1.250000
+//@ expect-stdout: add_mut 3.500000
+//@ expect-stdout: mul_mut 5.000000
+//@ expect-stdout: radd 3.500000
+//@ expect-stdout: rsub 7.500000
+//@ expect-stdout: rdiv 4.000000
+//@ expect-stdout: both 6.500000
+//@ expect-stdout: neg 2.500000
+//@ expect-stdout: let_untyped 3.500000
+//@ expect-stdout: lt_true ok
+//@ expect-stdout: lt_false ok
+//@ expect-stdout: le_true ok
+//@ expect-stdout: eq_true ok
+//@ expect-stdout: eq_false ok
+//@ expect-stdout: rgt_true ok
+//@ expect-stdout: bump_expr 2.000000
+//@ expect-stdout: bump_swap 2.000000
+//@ expect-stdout: bump_loop 5.000000
+//@ expect-stdout: local_ref 3.500000
+//@ expect-stdout: local_ref_untyped 10.000000
+//@ expect-stdout: local_ref_mut 5.000000
+//@ expect-stdout: int_deref 2
+//@ expect-stdout: F64_DEREF_OPERAND_PASS
+
+// Regression: Madaros classified `*p` (p: &f64 / &!f64) as an INTEGER operand,
+// so `*p + v` with *p = 2.5 printed 4612811918334230528.0 (the bits of 2.5,
+// cvtsi2sd-converted), `*p * 2.0` printed 2^63, `*p < 3.0` was false, and
+// `*acc = *acc + v` stored the bits of 1.0 plus one. `let cur: f64 = *p` and
+// returning `*p` were correct; lean_single was correct everywhere. Every line
+// below is checked against hand-computed truth, and the program must agree
+// byte-for-byte with lean_single (scripts/ci/engine_parity_gate.sh). The
+// compound form `*acc += v` is Madaros-only (lean_single refuses `+=`, E260)
+// and lives in madaros_f64_deref_compound_assign.sio.
+//
+//   SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tests/run-pass/madaros_f64_deref_operand.sio
+
+fn add_shared(p: &f64, v: f64) -> f64 { *p + v }
+fn sub_shared(p: &f64, v: f64) -> f64 { *p - v }
+fn mul_shared(p: &f64, v: f64) -> f64 { *p * v }
+fn div_shared(p: &f64, v: f64) -> f64 { *p / v }
+fn add_mut(p: &!f64, v: f64) -> f64 { *p + v }
+fn mul_mut(p: &!f64, v: f64) -> f64 { *p * v }
+fn radd(p: &f64, v: f64) -> f64 { v + *p }
+fn rsub(p: &f64, v: f64) -> f64 { v - *p }
+fn rdiv(p: &f64, v: f64) -> f64 { v / *p }
+fn both(p: &f64, q: &f64) -> f64 { *p + *q }
+fn neg(p: &f64) -> f64 { -*p + 5.0 }
+fn let_untyped(p: &f64) -> f64 {
+    let y = *p
+    y + 1.0
+}
+fn lt(p: &f64, v: f64) -> bool { *p < v }
+fn le(p: &f64, v: f64) -> bool { *p <= v }
+fn eq(p: &f64, v: f64) -> bool { *p == v }
+fn rgt(p: &!f64, v: f64) -> bool { v > *p }
+
+fn bump_expr(acc: &!f64, v: f64) with Mut {
+    *acc = *acc + v
+}
+fn bump_swap(acc: &!f64, v: f64) with Mut {
+    *acc = v + *acc
+}
+fn bump_i(acc: &!i64, v: i64) with Mut {
+    *acc = *acc + v
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails: i64 = 0
+    var x: f64 = 2.5
+    var four: f64 = 4.0
+
+    print("add_shared ") print_f64(add_shared(&x, 1.0)) println("")
+    print("sub_shared ") print_f64(sub_shared(&x, 1.0)) println("")
+    print("mul_shared ") print_f64(mul_shared(&x, 2.0)) println("")
+    print("div_shared ") print_f64(div_shared(&x, 2.0)) println("")
+    print("add_mut ") print_f64(add_mut(&!x, 1.0)) println("")
+    print("mul_mut ") print_f64(mul_mut(&!x, 2.0)) println("")
+    print("radd ") print_f64(radd(&x, 1.0)) println("")
+    print("rsub ") print_f64(rsub(&x, 10.0)) println("")
+    print("rdiv ") print_f64(rdiv(&x, 10.0)) println("")
+    print("both ") print_f64(both(&x, &four)) println("")
+    print("neg ") print_f64(neg(&x)) println("")
+    print("let_untyped ") print_f64(let_untyped(&x)) println("")
+
+    if lt(&x, 3.0) { println("lt_true ok") } else { println("lt_true WRONG") fails = fails + 1 }
+    if lt(&x, 2.0) { println("lt_false WRONG") fails = fails + 1 } else { println("lt_false ok") }
+    if le(&x, 2.5) { println("le_true ok") } else { println("le_true WRONG") fails = fails + 1 }
+    if eq(&x, 2.5) { println("eq_true ok") } else { println("eq_true WRONG") fails = fails + 1 }
+    if eq(&x, 2.0) { println("eq_false WRONG") fails = fails + 1 } else { println("eq_false ok") }
+    if rgt(&!x, 3.0) { println("rgt_true ok") } else { println("rgt_true WRONG") fails = fails + 1 }
+
+    var a: f64 = 1.0
+    bump_expr(&!a, 1.0)
+    print("bump_expr ") print_f64(a) println("")
+    var b: f64 = 1.0
+    bump_swap(&!b, 1.0)
+    print("bump_swap ") print_f64(b) println("")
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < 10 {
+        bump_expr(&!s, 0.5)
+        i = i + 1
+    }
+    print("bump_loop ") print_f64(s) println("")
+
+    let r: &f64 = &x
+    print("local_ref ") print_f64(*r + 1.0) println("")
+    let r2 = &x
+    print("local_ref_untyped ") print_f64(*r2 * 4.0) println("")
+    var m: f64 = 2.5
+    let rm: &!f64 = &!m
+    *rm = *rm * 2.0
+    print("local_ref_mut ") print_f64(m) println("")
+
+    var d: i64 = 1
+    bump_i(&!d, 1)
+    print("int_deref ") print_int(d) println("")
+
+    if a != 2.0 { fails = fails + 1 }
+    if b != 2.0 { fails = fails + 1 }
+    if s != 5.0 { fails = fails + 1 }
+    if m != 5.0 { fails = fails + 1 }
+    if add_shared(&x, 1.0) != 3.5 { fails = fails + 1 }
+    if fails == 0 { println("F64_DEREF_OPERAND_PASS") } else { println("F64_DEREF_OPERAND_FAIL") }
+    0
+}

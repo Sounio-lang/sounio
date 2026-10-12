@@ -3,9 +3,9 @@
 ## Canonical docs (start here)
 
 - `CLAUDE.md` (repo “non-negotiables”, Sounio vs Rust)
-- `docs/LLM_PROGRAMMING_GUIDE.md` (examples and idioms)
-- `compiler/docs/KNOWN_LIMITATIONS.md` (what is not implemented)
-- `docs/MV_CORE_CHECKLIST.md` (definition of “real” core)
+- `docs/guide/LLM_PROGRAMMING_GUIDE.md` (examples and idioms)
+- `docs/compiler/KNOWN_LIMITATIONS.md` (what is not implemented)
+- `docs/implementation/MV_CORE_CHECKLIST.md` (definition of “real” core)
 - `docs/spec/LANGUAGE_SPECIFICATION.md` (draft spec; may be ahead of implementation)
 
 ## Canonical “truth” for syntax

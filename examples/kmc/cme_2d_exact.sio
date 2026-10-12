@@ -1,0 +1,669 @@
+// examples/kmc/cme_2d_exact.sio
+//
+// M4b: THE SAME MODEL ON A 2D PERIODIC LATTICE, EXACTLY, ON THE LARGEST
+//      LATTICES THAT STILL FIT.
+//
+// Every exact result in this directory so far lives on a 1D ring, and 1D was
+// the wrong place to look for mean field to fail: with no phase transition
+// available, the mean-field error settled to a constant (-14.35%) rather
+// than growing. Real surfaces are 2D, where the coordination number is 4
+// instead of 2 and correlations have somewhere to go. This file builds the
+// exact 2D reference that the 2D KMC study is then checked against.
+//
+// THREE THINGS HAVE TO BE RIGHT BEFORE ANY NUMBER HERE MEANS ANYTHING, and
+// each gets its own check rather than an argument.
+//
+// A. THE LATTICE. Everything downstream is a function of which sites are
+//    neighbours, and a wrong neighbour list produces plausible numbers
+//    rather than obvious garbage -- the most dangerous kind of error here.
+//    So the occupied-bond count is computed TWICE by structurally different
+//    routes: once by walking the bond list (each site's right and down
+//    bonds, index arithmetic), once by testing every unordered pair of
+//    sites against a coordinate adjacency predicate (same row and columns
+//    adjacent mod L2, or same column and rows adjacent mod L1). These share
+//    no code path. They are compared on every state of the smaller lattice.
+//    Also checked: every site has exactly 4 neighbours, and both dimensions
+//    are at least 3 -- at L=2 a periodic direction joins the same two sites
+//    twice and the whole bond-counting notion degenerates.
+//
+// B. THE STATIONARY DISTRIBUTION. The closed form pi(s) ~ K^(occ/2) *
+//    w^(pairs) was verified against a modular linear solve in 1D, but in 2D
+//    a dimer has SIX outer neighbours rather than two, and a mis-transcribed
+//    neighbour count is exactly the error that would survive into a
+//    published coverage. The check used here is sharper and cheaper than
+//    re-running a linear solve: detailed balance on a single bond requires
+//
+//        pi(s) / pi(s + dimer) = k_des / k_ads = 3 * 2^delta
+//
+//    and the closed form gives that ratio as K^-1 * w^-(delta_pairs), where
+//    delta_pairs is the ACTUAL change in the occupied-bond count. So the
+//    entire correctness of the closed form in 2D reduces to an exact
+//    INTEGER identity, with no probabilities and no floating point in it:
+//
+//        delta computed by the rate function  ==  pairs(after) - pairs(before)
+//
+//    checked on every reachable state and every adsorbable bond. Detailed
+//    balance on every edge, plus irreducibility on the class (which the
+//    reachability search establishes by construction), is a proof that the
+//    closed form is the stationary distribution -- not evidence for it.
+//
+// C. THE REACHABLE CLASS. The 1D finding was that KMC from a clean surface
+//    conserves Q = occ_even - occ_odd exactly on bipartite rings, and not at
+//    all on odd ones. A periodic L1 x L2 lattice is bipartite exactly when
+//    BOTH dimensions are even, with the checkerboard parity (r+c) mod 2
+//    playing the role of the site index parity. That predicts: 4x4 (both
+//    even) has reachable class = {Q=0}, size C(16,8) = 12870; 3x4 (one odd)
+//    has no Q restriction and reachable class = every even-occupancy state,
+//    2^11 = 2048. Both predictions are measured, not assumed.
+//
+// PRECISION. The coverage is computed exactly, by the two-prime CRT and
+// rational reconstruction machinery proven in cme_lateral_crt.sio, AND
+// independently in f64 as a cross-check. When reconstruction fails the file
+// says so rather than reporting the nearest fraction it happened to find --
+// the failure mode that cost this series two rounds.
+
+fn abs_i(x: i64) -> i64 { if x < 0 { 0 - x } else { x } }
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn gcd_pos(a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    var x = abs_i(a)
+    var y = abs_i(b)
+    while y != 0 {
+        let t = x - (x / y) * y
+        x = y
+        y = t
+    }
+    if x == 0 { 1 } else { x }
+}
+
+fn is_prime(n: i64) -> bool with Mut, Div, Panic {
+    if n < 2 { return false }
+    if n - (n / 2) * 2 == 0 { return n == 2 }
+    var d: i64 = 3
+    while d * d <= n {
+        if n - (n / d) * d == 0 { return false }
+        d = d + 2
+    }
+    true
+}
+
+fn mod_norm(a: i64, p: i64) -> i64 with Mut, Div, Panic {
+    var x = a - (a / p) * p
+    if x < 0 { x = x + p }
+    x
+}
+fn mod_add(a: i64, b: i64, p: i64) -> i64 with Mut, Div, Panic { mod_norm(a + b, p) }
+fn mod_sub(a: i64, b: i64, p: i64) -> i64 with Mut, Div, Panic { mod_norm(a - b, p) }
+fn mod_mul(a: i64, b: i64, p: i64) -> i64 with Mut, Div, Panic { mod_norm(a * b, p) }
+
+fn mod_inv(a: i64, p: i64) -> i64 with Mut, Div, Panic {
+    var r0 = mod_norm(a, p)
+    var r1 = p
+    var s0: i64 = 1
+    var s1: i64 = 0
+    while r1 != 0 {
+        let q = r0 / r1
+        let r2 = r0 - q * r1
+        let s2 = s0 - q * s1
+        r0 = r1
+        r1 = r2
+        s0 = s1
+        s1 = s2
+    }
+    mod_norm(s0, p)
+}
+
+fn ipow_mod(base: i64, e: i64, p: i64) -> i64 with Mut, Div, Panic {
+    var b = mod_norm(base, p)
+    var acc: i64 = 1
+    var i: i64 = 0
+    while i < e { acc = mod_mul(acc, b, p)  i = i + 1 }
+    acc
+}
+
+fn crt_combine(r1: i64, p1: i64, r2: i64, p2: i64, inv_p1_mod_p2: i64) -> i64 with Mut, Div, Panic {
+    let diff = mod_sub(r2, mod_norm(r1, p2), p2)
+    let t = mod_mul(diff, inv_p1_mod_p2, p2)
+    r1 + p1 * t
+}
+
+fn rat_reconstruct(r: i64, m: i64, bound: i64, out: &![i64; 2]) with Mut, Div, Panic {
+    var r0 = m
+    var r1 = mod_norm(r, m)
+    var t0: i64 = 0
+    var t1: i64 = 1
+    while r1 > bound {
+        if r1 == 0 { out[0] = 0  out[1] = 0  return }
+        let q = r0 / r1
+        let r2 = r0 - q * r1
+        let t2 = t0 - q * t1
+        r0 = r1
+        r1 = r2
+        t0 = t1
+        t1 = t2
+    }
+    let den = abs_i(t1)
+    if den == 0 || den > bound { out[0] = 0  out[1] = 0  return }
+    var num = r1
+    if t1 < 0 { num = 0 - num }
+    out[0] = num
+    out[1] = den
+}
+
+// --- geometry ---------------------------------------------------------------
+
+fn pow2(n: i64) -> i64 with Mut, Div, Panic {
+    var b: i64 = 1
+    var k: i64 = 0
+    while k < n { b = b * 2  k = k + 1 }
+    b
+}
+
+// occ[i] = bit i of s, unpacked once per state so nothing below pays a
+// per-bit cost inside a loop.
+fn unpack(s: i64, n: i64, occ: &![i64; 32]) with Mut, Div, Panic {
+    var v = s
+    var i: i64 = 0
+    while i < n {
+        occ[i as usize] = v - (v / 2) * 2
+        v = v / 2
+        i = i + 1
+    }
+}
+
+fn nb_right(i: i64, l1: i64, l2: i64) -> i64 with Mut, Div, Panic {
+    let r = i / l2
+    let c = i - r * l2
+    let c2 = if c + 1 == l2 { 0 } else { c + 1 }
+    r * l2 + c2
+}
+fn nb_down(i: i64, l1: i64, l2: i64) -> i64 with Mut, Div, Panic {
+    let r = i / l2
+    let c = i - r * l2
+    let r2 = if r + 1 == l1 { 0 } else { r + 1 }
+    r2 * l2 + c
+}
+fn nb_left(i: i64, l1: i64, l2: i64) -> i64 with Mut, Div, Panic {
+    let r = i / l2
+    let c = i - r * l2
+    let c2 = if c == 0 { l2 - 1 } else { c - 1 }
+    r * l2 + c2
+}
+fn nb_up(i: i64, l1: i64, l2: i64) -> i64 with Mut, Div, Panic {
+    let r = i / l2
+    let c = i - r * l2
+    let r2 = if r == 0 { l1 - 1 } else { r - 1 }
+    r2 * l2 + c
+}
+
+// route 1: walk the bond list (each site's right and down bond, once each)
+fn pairs_by_bonds(occ: &[i64; 32], l1: i64, l2: i64) -> i64 with Mut, Div, Panic {
+    let n = l1 * l2
+    var c: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if occ[i as usize] == 1 {
+            if occ[nb_right(i, l1, l2) as usize] == 1 { c = c + 1 }
+            if occ[nb_down(i, l1, l2) as usize] == 1 { c = c + 1 }
+        }
+        i = i + 1
+    }
+    c
+}
+
+// route 2: every unordered pair of sites against a coordinate adjacency
+// predicate -- no index arithmetic shared with route 1
+fn adjacent_coord(i: i64, j: i64, l1: i64, l2: i64) -> bool with Mut, Div, Panic {
+    let ri = i / l2
+    let ci = i - ri * l2
+    let rj = j / l2
+    let cj = j - rj * l2
+    if ri == rj {
+        let d = abs_i(ci - cj)
+        if d == 1 { return true }
+        if d == l2 - 1 { return true }
+    }
+    if ci == cj {
+        let d2 = abs_i(ri - rj)
+        if d2 == 1 { return true }
+        if d2 == l1 - 1 { return true }
+    }
+    false
+}
+fn pairs_by_coord(occ: &[i64; 32], l1: i64, l2: i64) -> i64 with Mut, Div, Panic {
+    let n = l1 * l2
+    var c: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        var j = i + 1
+        while j < n {
+            if occ[i as usize] == 1 && occ[j as usize] == 1 {
+                if adjacent_coord(i, j, l1, l2) { c = c + 1 }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    c
+}
+
+fn occ_count(occ: &[i64; 32], n: i64) -> i64 with Mut, Div, Panic {
+    var c: i64 = 0
+    var i: i64 = 0
+    while i < n { c = c + occ[i as usize]  i = i + 1 }
+    c
+}
+
+// checkerboard charge: Q = sum sigma_i * (-1)^(r+c)
+fn charge_q(occ: &[i64; 32], l1: i64, l2: i64) -> i64 with Mut, Div, Panic {
+    let n = l1 * l2
+    var q: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if occ[i as usize] == 1 {
+            let r = i / l2
+            let c = i - r * l2
+            let par = (r + c) - ((r + c) / 2) * 2
+            if par == 0 { q = q + 1 } else { q = q - 1 }
+        }
+        i = i + 1
+    }
+    q
+}
+
+// delta as the RATE function computes it: 1 for the dimer's own bond, plus
+// each occupied outer neighbour of either end. Evaluated on the state
+// without the dimer.
+fn delta_local(occ: &[i64; 32], a: i64, b: i64, l1: i64, l2: i64) -> i64 with Mut, Div, Panic {
+    var d: i64 = 1
+    var k: i64 = 0
+    while k < 4 {
+        var na: i64 = 0
+        if k == 0 { na = nb_right(a, l1, l2) }
+        if k == 1 { na = nb_down(a, l1, l2) }
+        if k == 2 { na = nb_left(a, l1, l2) }
+        if k == 3 { na = nb_up(a, l1, l2) }
+        if na != b { if occ[na as usize] == 1 { d = d + 1 } }
+        k = k + 1
+    }
+    var k2: i64 = 0
+    while k2 < 4 {
+        var nb2: i64 = 0
+        if k2 == 0 { nb2 = nb_right(b, l1, l2) }
+        if k2 == 1 { nb2 = nb_down(b, l1, l2) }
+        if k2 == 2 { nb2 = nb_left(b, l1, l2) }
+        if k2 == 3 { nb2 = nb_up(b, l1, l2) }
+        if nb2 != a { if occ[nb2 as usize] == 1 { d = d + 1 } }
+        k2 = k2 + 1
+    }
+    d
+}
+
+// --- reachability -----------------------------------------------------------
+
+fn build_class(l1: i64, l2: i64, idx: &![i64; 65536], states: &![i64; 16384],
+               mark: &![i64; 65536]) -> i64 with Mut, Div, Panic {
+    let n = l1 * l2
+    let ns = pow2(n)
+    var occ: [i64; 32] = [0; 32]
+    var i: i64 = 0
+    while i < ns { mark[i as usize] = 0  idx[i as usize] = 0 - 1  i = i + 1 }
+    mark[0] = 1
+    var changed = true
+    while changed {
+        changed = false
+        var s: i64 = 0
+        while s < ns {
+            if mark[s as usize] == 1 {
+                unpack(s, n, &! occ)
+                var k: i64 = 0
+                while k < n {
+                    var e: i64 = 0
+                    while e < 2 {
+                        var j: i64 = 0
+                        if e == 0 { j = nb_right(k, l1, l2) } else { j = nb_down(k, l1, l2) }
+                        let bk = pow2(k)
+                        let bj = pow2(j)
+                        if occ[k as usize] == 0 && occ[j as usize] == 0 {
+                            let t = s + bk + bj
+                            if mark[t as usize] == 0 { mark[t as usize] = 1  changed = true }
+                        }
+                        if occ[k as usize] == 1 && occ[j as usize] == 1 {
+                            let t = s - bk - bj
+                            if mark[t as usize] == 0 { mark[t as usize] = 1  changed = true }
+                        }
+                        e = e + 1
+                    }
+                    k = k + 1
+                }
+            }
+            s = s + 1
+        }
+    }
+    var m: i64 = 0
+    var s2: i64 = 0
+    while s2 < ns {
+        if mark[s2 as usize] == 1 { idx[s2 as usize] = m  states[m as usize] = s2  m = m + 1 }
+        s2 = s2 + 1
+    }
+    m
+}
+
+// --- exact coverage from the closed form ------------------------------------
+
+// THE SCALED-INTEGER ROUTE, which is what 2D actually needs.
+//
+// Rational reconstruction was the wrong tool here and this file measured
+// that rather than assuming it: at 4x4 it returned 59364653/2829871400, a
+// perfectly plausible fraction that is simply wrong, and only the
+// independent f64 route exposed it. The reason is structural. The guard
+// 2*bound^2 < modulus guarantees the reconstructed pair is UNIQUE if one
+// exists within the bound; it cannot detect that the true fraction lies
+// OUTSIDE the bound, in which case the algorithm happily returns some other
+// pair satisfying the same congruence. In 2D the true denominators carry
+// 2^(2n) * 3^(n/2) -- about 2.8e13 at 4x4 -- against a bound of 5e8, so the
+// answer was never in range. Covering it would need a modulus above
+// 2*(2.8e13)^2 = 1.6e27, far outside i64.
+//
+// But no reconstruction is needed at all. Every weight is
+// 3^(-occ/2) * 2^(-pairs), so scaling every term by 3^(n/2) * 2^(2n) -- the
+// common denominator, since occ <= n and pairs <= 2n -- turns both sums into
+// exact INTEGERS, and the coverage is the exact fraction M/(Z*n) with a
+// single gcd. The only risk left is i64 overflow in those sums, and that is
+// checked rather than bounded by argument: the same two sums are computed
+// independently in modular arithmetic, and an overflowed i64 sum will not
+// agree with its residue mod two different primes except by a coincidence
+// of order 1e-18.
+fn ipow_i64(base: i64, e: i64) -> i64 with Mut {
+    var acc: i64 = 1
+    var i: i64 = 0
+    while i < e { acc = acc * base  i = i + 1 }
+    acc
+}
+
+// out[0] = Z (scaled integer), out[1] = M = sum w*occ (scaled integer)
+fn closed_form_scaled_int(l1: i64, l2: i64, csize: i64, states: &[i64; 16384],
+                          out: &![i64; 4]) with Mut, Div, Panic {
+    let n = l1 * l2
+    let pairs_max = 2 * n
+    var occ: [i64; 32] = [0; 32]
+    var z: i64 = 0
+    var m: i64 = 0
+    var si: i64 = 0
+    while si < csize {
+        unpack(states[si as usize], n, &! occ)
+        let oc = occ_count(&occ, n)
+        let pr = pairs_by_bonds(&occ, l1, l2)
+        let w = ipow_i64(3, (n - oc) / 2) * ipow_i64(2, pairs_max - pr)
+        z = z + w
+        m = m + w * oc
+        si = si + 1
+    }
+    out[0] = z
+    out[1] = m
+}
+
+// the same two sums, mod p -- the overflow detector for the route above
+fn closed_form_scaled_mod(l1: i64, l2: i64, p: i64, csize: i64,
+                          states: &[i64; 16384], out: &![i64; 4]) with Mut, Div, Panic {
+    let n = l1 * l2
+    let pairs_max = 2 * n
+    var occ: [i64; 32] = [0; 32]
+    var z: i64 = 0
+    var m: i64 = 0
+    var si: i64 = 0
+    while si < csize {
+        unpack(states[si as usize], n, &! occ)
+        let oc = occ_count(&occ, n)
+        let pr = pairs_by_bonds(&occ, l1, l2)
+        let w = mod_mul(ipow_mod(3, (n - oc) / 2, p), ipow_mod(2, pairs_max - pr, p), p)
+        z = mod_add(z, w, p)
+        m = mod_add(m, mod_mul(w, oc, p), p)
+        si = si + 1
+    }
+    out[0] = z
+    out[1] = m
+}
+
+fn closed_form_theta_f64(l1: i64, l2: i64, csize: i64,
+                         states: &[i64; 16384]) -> f64 with Mut, Div, Panic {
+    let n = l1 * l2
+    var occ: [i64; 32] = [0; 32]
+    var z: f64 = 0.0
+    var m: f64 = 0.0
+    var si: i64 = 0
+    while si < csize {
+        unpack(states[si as usize], n, &! occ)
+        let oc = occ_count(&occ, n)
+        let pr = pairs_by_bonds(&occ, l1, l2)
+        var w: f64 = 1.0
+        var a: i64 = 0
+        while a < oc / 2 { w = w / 3.0  a = a + 1 }
+        var b: i64 = 0
+        while b < pr { w = w / 2.0  b = b + 1 }
+        z = z + w
+        m = m + w * (oc as f64)
+        si = si + 1
+    }
+    m / z / (n as f64)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("DISSOCIATIVE ADSORPTION WITH LATERAL REPULSION ON A 2D PERIODIC LATTICE")
+    println("k_ads=1, k_des=3*2^delta, nn repulsion w=1/2, coordination number 4")
+    println("")
+
+    let p1: i64 = 1000000007
+    let p2: i64 = 998244353
+    let ok1 = is_prime(p1)
+    let ok2 = is_prime(p2)
+    print("p1, p2 verified prime at run time: ")
+    if ok1 && ok2 { println("yes") } else { println("NO -- refusing") }
+    if !ok1 || !ok2 { return 1 }
+    let modulus = p1 * p2
+    let bound: i64 = 500000000
+    let fits = 2 * bound * bound < modulus
+    print("2*bound^2 < modulus: ")
+    if fits { println("yes") } else { println("NO -- refusing") }
+    if !fits { return 1 }
+    let inv_p1_mod_p2 = mod_inv(mod_norm(p1, p2), p2)
+    println("")
+
+    // 2D mean field: adsorption (1-th)^2 balances desorption
+    // th^2 * 3 * 2 * (1+th)^6 -- six outer neighbours, not two. The same
+    // derivation at two outer neighbours reproduces the 1D equation
+    // 6*th^2*(1+th)^2 already used in this directory, which is the check
+    // that the generalisation is the right one.
+    var lo: f64 = 0.0
+    var hi: f64 = 1.0
+    var bi: i64 = 0
+    while bi < 200 {
+        let mid = 0.5 * (lo + hi)
+        let lhs = (1.0 - mid) * (1.0 - mid)
+        let t2 = (1.0 + mid) * (1.0 + mid)
+        let t6 = t2 * t2 * t2
+        let rhs = 6.0 * mid * mid * t6
+        if lhs > rhs { lo = mid } else { hi = mid }
+        bi = bi + 1
+    }
+    let mf2d = 0.5 * (lo + hi)
+    print("2D mean-field coverage (Bragg-Williams, z=4): ") print_f64(mf2d) println("")
+    println("")
+
+    var idx: [i64; 65536] = [0; 65536]
+    var mark: [i64; 65536] = [0; 65536]
+    var states: [i64; 16384] = [0; 16384]
+    var occ: [i64; 32] = [0; 32]
+    var occ2: [i64; 32] = [0; 32]
+
+    var l1s: [i64; 2] = [3, 4]
+    var l2s: [i64; 2] = [4, 4]
+    var all_ok = true
+
+    var g: i64 = 0
+    while g < 2 {
+        let l1: i64 = l1s[g as usize]
+        let l2: i64 = l2s[g as usize]
+        let n = l1 * l2
+        print("========== lattice ") print(l1) print(" x ") print(l2)
+        print("  (") print(n) println(" sites, periodic both ways) ==========")
+
+        if l1 < 3 || l2 < 3 {
+            println("  REFUSING: a periodic dimension below 3 joins two sites twice")
+            all_ok = false
+            g = g + 1
+        } else {
+
+        // --- A: geometry, two independent bond counts ---
+        let ns = pow2(n)
+        var geom_ok = true
+        var deg_ok = true
+        var sA: i64 = 0
+        while sA < ns {
+            unpack(sA, n, &! occ)
+            if pairs_by_bonds(&occ, l1, l2) != pairs_by_coord(&occ, l1, l2) { geom_ok = false }
+            sA = sA + 1
+        }
+        // every site has exactly 4 distinct neighbours
+        var v: i64 = 0
+        while v < n {
+            let a1 = nb_right(v, l1, l2)
+            let a2 = nb_down(v, l1, l2)
+            let a3 = nb_left(v, l1, l2)
+            let a4 = nb_up(v, l1, l2)
+            if a1 == a2 || a1 == a3 || a1 == a4 || a2 == a3 || a2 == a4 || a3 == a4 { deg_ok = false }
+            if a1 == v || a2 == v || a3 == v || a4 == v { deg_ok = false }
+            v = v + 1
+        }
+        print("  A. bond count agrees between the two routes on all ") print(ns)
+        print(" states: ")
+        if geom_ok { println("yes") } else { println("NO -- geometry is wrong") }
+        print("     every site has 4 distinct neighbours: ")
+        if deg_ok { println("yes") } else { println("NO") }
+        if !geom_ok || !deg_ok { all_ok = false }
+
+        // --- reachable class ---
+        let csize = build_class(l1, l2, &! idx, &! states, &! mark)
+
+        // --- B: detailed balance as an exact integer identity ---
+        var db_ok = true
+        var db_checked: i64 = 0
+        var si: i64 = 0
+        while si < csize {
+            let s: i64 = states[si as usize]
+            unpack(s, n, &! occ)
+            let pr_before = pairs_by_bonds(&occ, l1, l2)
+            var k: i64 = 0
+            while k < n {
+                var e: i64 = 0
+                while e < 2 {
+                    var j: i64 = 0
+                    if e == 0 { j = nb_right(k, l1, l2) } else { j = nb_down(k, l1, l2) }
+                    if occ[k as usize] == 0 && occ[j as usize] == 0 {
+                        let d = delta_local(&occ, k, j, l1, l2)
+                        let t = s + pow2(k) + pow2(j)
+                        unpack(t, n, &! occ2)
+                        let pr_after = pairs_by_bonds(&occ2, l1, l2)
+                        if pr_after - pr_before != d { db_ok = false }
+                        db_checked = db_checked + 1
+                    }
+                    e = e + 1
+                }
+                k = k + 1
+            }
+            si = si + 1
+        }
+        print("  B. detailed balance, delta == change in bond count, on ")
+        print(db_checked) print(" adsorption edges: ")
+        if db_ok { println("holds exactly") } else { println("FAILS -- closed form is not stationary here") }
+        if !db_ok { all_ok = false }
+
+        // --- C: reachable class structure ---
+        var all_q0 = true
+        var sj: i64 = 0
+        while sj < csize {
+            unpack(states[sj as usize], n, &! occ)
+            if charge_q(&occ, l1, l2) != 0 { all_q0 = false }
+            sj = sj + 1
+        }
+        var q0count: i64 = 0
+        var even_count: i64 = 0
+        var sk: i64 = 0
+        while sk < ns {
+            unpack(sk, n, &! occ)
+            if charge_q(&occ, l1, l2) == 0 { q0count = q0count + 1 }
+            let oc = occ_count(&occ, n)
+            if oc - (oc / 2) * 2 == 0 { even_count = even_count + 1 }
+            sk = sk + 1
+        }
+        let bipartite = (l1 - (l1 / 2) * 2 == 0) && (l2 - (l2 / 2) * 2 == 0)
+        print("  C. reachable class size = ") print(csize)
+        print("   |{Q=0}| = ") print(q0count)
+        print("   |{even occ}| = ") print(even_count) println("")
+        print("     bipartite (both dimensions even): ")
+        if bipartite { println("yes -- predict class == {Q=0}") }
+        else { println("no -- predict no Q restriction") }
+        var struct_ok = true
+        if bipartite {
+            print("     every reachable state has Q=0: ")
+            if all_q0 { print("yes") } else { print("NO") }
+            print("   |   class == {Q=0}: ")
+            if all_q0 && csize == q0count { println("yes") } else { println("NO") }
+            struct_ok = all_q0 && csize == q0count
+        } else {
+            print("     class == {even occupancy}: ")
+            if csize == even_count { println("yes") } else { println("NO") }
+            struct_ok = csize == even_count
+        }
+        if !struct_ok { all_ok = false }
+
+        // --- D: exact coverage, scaled-integer route, overflow-checked ---
+        var zm: [i64; 4] = [0; 4]
+        closed_form_scaled_int(l1, l2, csize, &states, &! zm)
+        let z_int: i64 = zm[0]
+        let m_int: i64 = zm[1]
+
+        var zm1: [i64; 4] = [0; 4]
+        var zm2: [i64; 4] = [0; 4]
+        closed_form_scaled_mod(l1, l2, p1, csize, &states, &! zm1)
+        closed_form_scaled_mod(l1, l2, p2, csize, &states, &! zm2)
+        let no_overflow =
+            mod_norm(z_int, p1) == zm1[0] && mod_norm(m_int, p1) == zm1[1] &&
+            mod_norm(z_int, p2) == zm2[0] && mod_norm(m_int, p2) == zm2[1]
+
+        let th_f64 = closed_form_theta_f64(l1, l2, csize, &states)
+
+        print("  D. scaled-integer sums: Z=") print(z_int)
+        print("  M=") print(m_int) println("")
+        print("     i64 sums agree with both modular residues (no overflow): ")
+        if no_overflow { println("yes") } else { println("NO -- the i64 sums overflowed") }
+
+        if no_overflow {
+            var tn: i64 = m_int
+            var td: i64 = z_int * n
+            let gg = gcd_pos(tn, td)
+            if gg != 0 { tn = tn / gg  td = td / gg }
+            let th_exact = (tn as f64) / (td as f64)
+            print("     exact coverage = ") print(tn) print("/") print(td)
+            print(" = ") print_f64(th_exact) println("")
+            print("     f64 cross-check = ") print_f64(th_f64)
+            print("   diff = ") print_f64(abs_f(th_exact - th_f64)) println("")
+            if abs_f(th_exact - th_f64) > 0.000001 {
+                println("     ROUTES DISAGREE")
+                all_ok = false
+            }
+            print("     mean field = ") print_f64(mf2d)
+            print("   mean-field error = ")
+            print_f64((mf2d - th_exact) / th_exact * 100.0) println("%")
+        } else {
+            println("     not reporting a coverage from an overflowed sum")
+            all_ok = false
+        }
+        println("")
+        g = g + 1
+        }
+    }
+
+    if all_ok { println("M4B_CME_2D_EXACT_OK") } else { println("M4B_CME_2D_EXACT_FAILED") }
+    0
+}

@@ -1,0 +1,399 @@
+// examples/kmc/cme_dissociative_exact.sio
+//
+// M3c: WHAT MEAN-FIELD GETS WRONG FOR DISSOCIATIVE ADSORPTION, EXACTLY.
+//
+// Mean-field microkinetics writes the rate of H2 + 2* -> 2H* as proportional
+// to theta_star squared: the probability that a given neighbouring pair of
+// sites is both vacant is taken to be the product of two independent vacancy
+// probabilities. Vacancies on a lattice are not independent -- a dimer
+// deposits two adjacent particles at once and removes two at once, which
+// correlates occupancy at exactly the range the rate law integrates over.
+//
+// The deep-research sweep over the KMC literature found no surviving claim
+// putting a number on that error for dissociative adsorption. This file
+// computes one exactly.
+//
+// WHY AN EXACT ANSWER IS AVAILABLE AT ALL. Each adsorption at a bond has one
+// matching desorption at the same bond, so the chain satisfies detailed
+// balance and on a communicating class the stationary distribution is
+// pi(s) proportional to K^(n_occ(s)/2) with K = k_ads/k_des. Occupancy on a
+// reachable state is always even, so that exponent is an integer and the whole
+// distribution is RATIONAL. The modular solve and the closed form are
+// therefore two independent routes to the same exact object, and they are
+// compared as rational equality rather than as floats within a tolerance.
+//
+// WHICH CLASS, AND WHY THIS ONE. The generator is reducible: the previous
+// milestone measured 20 reachable states out of 64 at N=6, with parity
+// conserved and a further invariant beyond parity -- isolated particles can
+// be neither created nor destroyed, so configurations whose occupied sites or
+// whose holes form a distance-two pair are unreachable. The class solved here
+// is the one reachable from the EMPTY lattice, which is the physically
+// relevant one: a reactor starts from a clean surface.
+//
+// A sampled KMC run would explore this same class and report a time average
+// from it. What it could not report is that the class exists, that 12 of the
+// 32 even-parity configurations are dynamically forbidden, or that a second
+// stationary distribution sits on the states it never visits.
+
+use math::rational::*
+
+fn abs_i(x: i64) -> i64 { if x < 0 { 0 - x } else { x } }
+
+fn is_prime(n: i64) -> bool with Mut, Div, Panic {
+    if n < 2 { return false }
+    if n - (n / 2) * 2 == 0 { return n == 2 }
+    var d: i64 = 3
+    while d * d <= n {
+        if n - (n / d) * d == 0 { return false }
+        d = d + 2
+    }
+    true
+}
+
+fn mod_norm(a: i64, p: i64) -> i64 with Mut, Div, Panic {
+    var x = a - (a / p) * p
+    if x < 0 { x = x + p }
+    x
+}
+fn mod_add(a: i64, b: i64, p: i64) -> i64 with Mut, Div, Panic { mod_norm(a + b, p) }
+fn mod_sub(a: i64, b: i64, p: i64) -> i64 with Mut, Div, Panic { mod_norm(a - b, p) }
+fn mod_mul(a: i64, b: i64, p: i64) -> i64 with Mut, Div, Panic { mod_norm(a * b, p) }
+
+fn mod_inv(a: i64, p: i64) -> i64 with Mut, Div, Panic {
+    var r0 = mod_norm(a, p)
+    var r1 = p
+    var s0: i64 = 1
+    var s1: i64 = 0
+    while r1 != 0 {
+        let q = r0 / r1
+        let r2 = r0 - q * r1
+        let s2 = s0 - q * s1
+        r0 = r1  r1 = r2  s0 = s1  s1 = s2
+    }
+    mod_norm(s0, p)
+}
+
+fn rat_reconstruct(r: i64, m: i64, bound: i64, out: &![i64; 2]) with Mut, Div, Panic {
+    var r0 = m
+    var r1 = mod_norm(r, m)
+    var t0: i64 = 0
+    var t1: i64 = 1
+    while r1 > bound {
+        if r1 == 0 { out[0] = 0  out[1] = 0  return }
+        let q = r0 / r1
+        let r2 = r0 - q * r1
+        let t2 = t0 - q * t1
+        r0 = r1  r1 = r2  t0 = t1  t1 = t2
+    }
+    let den = abs_i(t1)
+    if den == 0 || den > bound { out[0] = 0  out[1] = 0  return }
+    var num = r1
+    if t1 < 0 { num = 0 - num }
+    out[0] = num
+    out[1] = den
+}
+
+fn site_bit(i: i64) -> i64 with Mut, Div, Panic {
+    var b: i64 = 1
+    var k: i64 = 0
+    while k < i { b = b * 2  k = k + 1 }
+    b
+}
+fn is_occ(s: i64, i: i64) -> bool with Mut, Div, Panic {
+    let b = site_bit(i)
+    (s / b) - ((s / b) / 2) * 2 == 1
+}
+fn popcount_n(s: i64, n: i64) -> i64 with Mut, Div, Panic {
+    var c: i64 = 0
+    var i: i64 = 0
+    while i < n { if is_occ(s, i) { c = c + 1 }  i = i + 1 }
+    c
+}
+fn pow2(n: i64) -> i64 with Mut, Div, Panic {
+    var b: i64 = 1
+    var k: i64 = 0
+    while k < n { b = b * 2  k = k + 1 }
+    b
+}
+fn next_site(i: i64, n: i64) -> i64 { if i + 1 == n { 0 } else { i + 1 } }
+
+fn gcd_pos(a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    var x = abs_i(a)
+    var y = abs_i(b)
+    while y != 0 { let t = x - (x / y) * y  x = y  y = t }
+    if x == 0 { 1 } else { x }
+}
+
+// Accumulating a sum of rationals by multiplying denominators overflows:
+// twenty terms at N=6 produced 726354766/9 and a coverage of 8e7, which the
+// closed-form cross-check flagged rather than let through. The least common
+// multiple keeps the common denominator at the size the answer actually
+// needs instead of the product of every term seen.
+fn lcm_pos(a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    if a == 0 || b == 0 { return 0 }
+    let g = gcd_pos(a, b)
+    (a / g) * b
+}
+
+// acc <- acc + (n/d) * k, over a least-common denominator.
+fn rat_acc(acc: &![i64; 2], n: i64, d: i64, k: i64) with Mut, Div, Panic {
+    if d == 0 { return }
+    let l = lcm_pos(acc[1], d)
+    let left = acc[0] * (l / acc[1])
+    let right = n * k * (l / d)
+    var nn = left + right
+    var dd = l
+    let g = gcd_pos(nn, dd)
+    if g != 0 { nn = nn / g  dd = dd / g }
+    acc[0] = nn
+    acc[1] = dd
+}
+
+fn ipow(b: i64, e: i64) -> i64 with Mut, Div, Panic {
+    var acc: i64 = 1
+    var i: i64 = 0
+    while i < e { acc = acc * b  i = i + 1 }
+    acc
+}
+
+// idx[s] = compact index of state s within the reachable class, or -1.
+// states[j] = the state at compact index j. Returns the class size.
+fn build_class(n_sites: i64, idx: &![i64; 64], states: &![i64; 64]) -> i64 with Mut, Div, Panic {
+    let ns = pow2(n_sites)
+    var mark: [i64; 64] = [0; 64]
+    var i: i64 = 0
+    while i < ns { mark[i as usize] = 0  idx[i as usize] = 0 - 1  i = i + 1 }
+    mark[0] = 1
+    var changed = true
+    while changed {
+        changed = false
+        var s: i64 = 0
+        while s < ns {
+            if mark[s as usize] == 1 {
+                var k: i64 = 0
+                while k < n_sites {
+                    let j = next_site(k, n_sites)
+                    let bk = site_bit(k)
+                    let bj = site_bit(j)
+                    if !is_occ(s, k) && !is_occ(s, j) {
+                        let t = s + bk + bj
+                        if mark[t as usize] == 0 { mark[t as usize] = 1  changed = true }
+                    }
+                    if is_occ(s, k) && is_occ(s, j) {
+                        let t = s - bk - bj
+                        if mark[t as usize] == 0 { mark[t as usize] = 1  changed = true }
+                    }
+                    k = k + 1
+                }
+            }
+            s = s + 1
+        }
+    }
+    var m: i64 = 0
+    var s2: i64 = 0
+    while s2 < ns {
+        if mark[s2 as usize] == 1 {
+            idx[s2 as usize] = m
+            states[m as usize] = s2
+            m = m + 1
+        }
+        s2 = s2 + 1
+    }
+    m
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("DISSOCIATIVE ADSORPTION: EXACT LATTICE COVERAGE vs MEAN FIELD")
+    println("H2 + 2* <-> 2H* on adjacent bonds of a ring, k_ads = 1, k_des = 3")
+    println("")
+
+    let p: i64 = 2147483647
+    if !is_prime(p) { println("modulus not prime -- refusing"); return 1 }
+
+    println("  N  class  exact coverage    as decimal   mean-field   over-estimate")
+
+    var n: i64 = 4
+    while n <= 6 {
+        var idx: [i64; 64] = [0; 64]
+        var states: [i64; 64] = [0; 64]
+        let m = build_class(n, &! idx, &! states)
+
+        // Q restricted to the class, transposed, mod p, last row normalised.
+        let w = m + 1
+        var a: [i64; 4160] = [0; 4160]
+        var jj: i64 = 0
+        while jj < m {
+            let s = states[jj as usize]
+            var k: i64 = 0
+            while k < n {
+                let j2 = next_site(k, n)
+                let bk = site_bit(k)
+                let bj = site_bit(j2)
+                if !is_occ(s, k) && !is_occ(s, j2) {
+                    let t = idx[(s + bk + bj) as usize]
+                    a[(t * w + jj) as usize] = mod_add(a[(t * w + jj) as usize], 1, p)
+                    a[(jj * w + jj) as usize] = mod_sub(a[(jj * w + jj) as usize], 1, p)
+                }
+                if is_occ(s, k) && is_occ(s, j2) {
+                    let t = idx[(s - bk - bj) as usize]
+                    a[(t * w + jj) as usize] = mod_add(a[(t * w + jj) as usize], 3, p)
+                    a[(jj * w + jj) as usize] = mod_sub(a[(jj * w + jj) as usize], 3, p)
+                }
+                k = k + 1
+            }
+            jj = jj + 1
+        }
+        var c0: i64 = 0
+        while c0 < m { a[((m - 1) * w + c0) as usize] = 1  c0 = c0 + 1 }
+        a[((m - 1) * w + m) as usize] = 1
+
+        var ok = true
+        var col: i64 = 0
+        while col < m {
+            var piv: i64 = 0 - 1
+            var r1 = col
+            while r1 < m {
+                if piv < 0 { if a[(r1 * w + col) as usize] != 0 { piv = r1 } }
+                r1 = r1 + 1
+            }
+            if piv < 0 { ok = false  col = m }
+            else {
+                if piv != col {
+                    var sc: i64 = 0
+                    while sc < w {
+                        let tmp = a[(col * w + sc) as usize]
+                        a[(col * w + sc) as usize] = a[(piv * w + sc) as usize]
+                        a[(piv * w + sc) as usize] = tmp
+                        sc = sc + 1
+                    }
+                }
+                let inv = mod_inv(a[(col * w + col) as usize], p)
+                var sc2 = col
+                while sc2 < w { a[(col * w + sc2) as usize] = mod_mul(a[(col * w + sc2) as usize], inv, p)  sc2 = sc2 + 1 }
+                var r2: i64 = 0
+                while r2 < m {
+                    if r2 != col {
+                        let f = a[(r2 * w + col) as usize]
+                        if f != 0 {
+                            var c3 = col
+                            while c3 < w {
+                                let sub = mod_mul(f, a[(col * w + c3) as usize], p)
+                                a[(r2 * w + c3) as usize] = mod_sub(a[(r2 * w + c3) as usize], sub, p)
+                                c3 = c3 + 1
+                            }
+                        }
+                    }
+                    r2 = r2 + 1
+                }
+                col = col + 1
+            }
+        }
+
+        if !ok {
+            print("  ") print(n) println("  class solve SINGULAR -- unexpected on a communicating class")
+            n = n + 1
+        } else {
+            // Reconstruct and accumulate the exact mean occupancy as a rational.
+            // THE BOUND IS A PROPERTY OF THE MODULUS, NOT OF THE PROBLEM.
+            //
+            // Rational reconstruction recovers n/d uniquely only when
+            // 2*bound^2 < p. This was set from the problem instead -- 4^n
+            // squared -- which at N=6 is 1.7e7 against a modulus of 2.1e9,
+            // wrong by five orders of magnitude. N=4 and N=5 were ALSO over
+            // the limit and returned the right answer anyway, by luck.
+            // The closed-form cross-check is the only reason that luck was
+            // ever noticed: it flagged N=6 as disagreeing while the two
+            // smaller cases sailed through.
+            //
+            // 2 * 32000^2 = 2.048e9 < 2147483647. A true fraction larger
+            // than this bound makes rat_reconstruct return den = 0, which
+            // is checked below rather than papered over.
+            let bound: i64 = 32000
+            var cov: [i64; 2] = [0, 1]
+            var pair: [i64; 2] = [0; 2]
+            var rec_ok = true
+            var t2: i64 = 0
+            while t2 < m {
+                rat_reconstruct(a[(t2 * w + m) as usize], p, bound, &! pair)
+                if pair[1] == 0 { rec_ok = false }
+                else {
+                    let occ = popcount_n(states[t2 as usize], n)
+                    // cov += pi * occ
+                    rat_acc(&! cov, pair[0], pair[1], occ)
+                }
+                t2 = t2 + 1
+            }
+
+            // Independent check: detailed balance gives pi ~ K^(occ/2) with
+            // K = 1/3, so the same coverage follows from a closed form.
+            var zn: i64 = 0
+            var zd: i64 = 1
+            var mn: i64 = 0
+            var md: i64 = 1
+            var t3: i64 = 0
+            while t3 < m {
+                let occ = popcount_n(states[t3 as usize], n)
+                let wgt_d = ipow(3, occ / 2)
+                let nz = zn * wgt_d + zd
+                let dz = zd * wgt_d
+                let gz = gcd_pos(nz, dz)
+                zn = nz / gz
+                zd = dz / gz
+                let nm = mn * wgt_d + md * occ
+                let dm = md * wgt_d
+                let gm = gcd_pos(nm, dm)
+                mn = nm / gm
+                md = dm / gm
+                t3 = t3 + 1
+            }
+            // closed-form mean occupancy = (mn/md) / (zn/zd)
+            let cf_n = mn * zd
+            let cf_d = md * zn
+            let gcf = gcd_pos(cf_n, cf_d)
+            let cfn = cf_n / gcf
+            let cfd = cf_d / gcf
+
+            let cov_n = cov[0]
+            let cov_d = cov[1]
+            let agree = cov_n * cfd == cfn * cov_d
+
+            // coverage = mean occupancy / N
+            let th_n = cov_n
+            let th_d = cov_d * n
+            let gth = gcd_pos(th_n, th_d)
+            let tn = th_n / gth
+            let td = th_d / gth
+            let theta = (tn as f64) / (td as f64)
+
+            // mean field: k_ads (1-th)^2 = k_des th^2  ->  th = 1/(1+sqrt(3))
+            var root: f64 = 1.7320508075688772
+            let mf = 1.0 / (1.0 + root)
+
+            print("  ") print(n)
+            print("  ") print(m)
+            if m < 10 { print("     ") } else { print("    ") }
+            print(tn) print("/") print(td)
+            var pad: i64 = 0
+            while pad < 10 { print(" ")  pad = pad + 1 }
+            print_f64(theta)
+            print("   ") print_f64(mf)
+            print("   ")
+            print_f64((mf - theta) / theta * 100.0)
+            print("%")
+            if !rec_ok { print("   [RECONSTRUCTION FAILED]") }
+            if !agree { print("   [CLOSED FORM DISAGREES]") } else { print("   [closed form agrees]") }
+            println("")
+            n = n + 1
+        }
+    }
+
+    println("")
+    println("Mean field assumes a neighbouring pair is vacant with probability")
+    println("theta_star squared. A dimer deposits and removes two adjacent")
+    println("particles at once, so vacancies are correlated at exactly the range")
+    println("the rate law integrates over, and the assumption fails in the")
+    println("direction shown: it OVER-estimates coverage.")
+    println("")
+    println("M3C_DISSOCIATIVE_OK")
+    0
+}

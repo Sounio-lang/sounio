@@ -94,28 +94,14 @@ touches the remote:
 > index. If anything is already staged when a merge finishes, it refuses and
 > leaves the regenerated tree uncommitted rather than folding that work in.
 
-The offload-policy check (`.claude/AGENT_OFFLOAD_POLICY.md`) is **chained into
-the same `pre-commit`** as of 2026-07-30 — git runs exactly one `pre-commit`, so
-a second check means chaining, not a second file. Both checks run even when the
-first fails, because they are unrelated and stopping at the first would send you
-round the commit loop once per problem.
-
-Do **not** use `scripts/dev/check_offload_policy.sh --install`: it writes to
-`.git/hooks/pre-commit`, which `core.hooksPath` overrides. That is how it spent
-weeks appearing installed without ever running.
-
-> **This one refuses commits you have been making freely.** `docs/papers/**`,
-> `docs/dissertation/**`, `stdlib/clinical/**`, the listed `stdlib/epistemic`
-> modules and `formal/lean4/Sounio*.lean` now require a same-day row in
-> `.claude/llm_offload_log.md` whose Target column names the file. Measured on
-> the day it was installed: editing `docs/papers/witness_based_compilation_2026-07-28.md`
-> is refused until such a row exists. That is the policy working as written, and
-> the log shows the workflow is already in daily use — but it changes what a
-> plain `git commit` does on a paper.
->
-> Bypasses, worst to best: `SOUNIO_SKIP_OFFLOAD_HOOK=1`, `git commit
-> --no-verify`, or a `WAIVED` row in the log with the reason. Prefer the WAIVED
-> row: it leaves a record, which is the entire point of the policy.
+The offload-policy check that was chained into this `pre-commit` from
+2026-07-30 is **no longer part of this repository** (removed 2026-10-03): the
+policy, its hook script and its audit log moved out of `main` together with the
+other agent-development files. The `pre-commit` now runs only the docs-registry
+check, so commits to `docs/papers/**`, `docs/dissertation/**`,
+`stdlib/clinical/**`, the listed `stdlib/epistemic` modules and
+`formal/lean4/Sounio*.lean` are **no longer refused** for lacking a same-day
+audit row.
 
 Fresh clones activate hooks with `git config core.hooksPath .githooks`.
 

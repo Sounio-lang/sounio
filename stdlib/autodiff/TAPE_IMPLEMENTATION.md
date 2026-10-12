@@ -275,7 +275,7 @@ All gradients computed via exact chain rule (no approximations).
 ### Example 1: Simple Gradient
 
 ```sio
-let mut tape = new_tape()
+var tape = new_tape()
 tape = tape_new_var(tape, 3.0)
 let x = tape_last_var(tape)
 tape = tape_mul(tape, x, x)  // y = x²
@@ -288,7 +288,7 @@ let grad = get_grad(tape, x)  // ∂y/∂x = 2x = 6
 ### Example 2: Multi-Input Function
 
 ```sio
-let mut tape = new_tape()
+var tape = new_tape()
 tape = tape_new_var(tape, 2.0)
 let x = tape_last_var(tape)
 tape = tape_new_var(tape, 3.0)
@@ -305,7 +305,7 @@ let dy = get_grad(tape, y)     // ∂z/∂y = x = 2
 
 ```sio
 // σ(w·x + b) with w=0.5, x=2, b=0.1
-let mut tape = new_tape()
+var tape = new_tape()
 tape = tape_new_var(tape, 0.5)
 let w = tape_last_var(tape)
 tape = tape_new_var(tape, 2.0)
@@ -332,7 +332,7 @@ let db = get_grad(tape, b)  // Gradient w.r.t. bias
 ```sio
 // f(x) = sin(x²) at x=2
 // df/dx = 2x·cos(x²)
-let mut tape = new_tape()
+var tape = new_tape()
 tape = tape_new_var(tape, 2.0)
 let x = tape_last_var(tape)
 tape = tape_mul(tape, x, x)

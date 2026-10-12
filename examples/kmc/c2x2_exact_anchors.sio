@@ -1,0 +1,509 @@
+// examples/kmc/c2x2_exact_anchors.sio
+//
+// M5a: EXACT ANCHORS FOR THE c(2x2) ORDER-DISORDER STUDY.
+//
+// kmc_gillespie_2d.sio measured the mean-field error at w=1/2, where the
+// lattice gas never orders and mean field is off by a converged -20.5%. The
+// place mean field should fail QUALITATIVELY -- predicting a phase that does
+// not exist -- is the order-disorder transition into the c(2x2) checkerboard,
+// which needs much stronger repulsion. This file builds the exact references
+// that study is judged against, before any simulation is run.
+//
+// THE MAPPING THAT MAKES AN EXACT ANSWER EXIST. The stationary weight is
+// pi(s) ~ K^(occ/2) * w^(pairs). Take w = 1/q. On the square lattice each
+// site sits in four bonds, so the particle-hole map sigma -> 1-sigma sends
+// pairs -> pairs + 2N - 4*occ, and the weight is invariant exactly when
+//
+//     K = w^-4 = q^4                                   (the symmetric point)
+//
+// where coverage is 1/2 by symmetry. Writing sigma = (1+s)/2 turns
+// w^pairs into an antiferromagnetic Ising coupling with no field:
+//
+//     beta*J = ln(q)/4
+//
+// and a gauge flip on one sublattice turns that into Onsager's ferromagnet,
+// with <s_i s_j>_AF = -<s_i s_j>_FM and the staggered magnetisation equal to
+// Yang's spontaneous magnetisation. So along K = q^4:
+//
+//     pair density  = pairs/(2N) = (1 - c_Onsager(beta*J)) / 4
+//     |staggered m| = 2|Q|/N      = M_Yang(beta*J)
+//     ordered iff beta*J > ln(1+sqrt2)/2, i.e. q > (1+sqrt2)^2 = 5.8284
+//
+// Mean field with two sublattices orders at 4*beta*J = 1, i.e. q > e =
+// 2.7183. Between those two values of q, mean field predicts a checkerboard
+// that the exact solution says is not there. That window, q = 3, 4, 5, is
+// the qualitative failure the study targets.
+//
+// EVERYTHING IS WRITTEN IN x = e^(2 beta J) = sqrt(q), which makes
+// sinh(2K), cosh(2K), tanh(K) and e^(-8K) algebraic in x: no exponential
+// or logarithm is needed for the exact quantities at all. Only the mean-
+// field self-consistency tanh(4Km) = m needs exp and ln, and those are
+// checked on their own.
+//
+// THE EXACT FORMULAS ARE CHECKED, not transcribed on trust -- a sign or a
+// factor of two in Onsager's energy is exactly the error that would make a
+// simulation look wrong when it is right, or right when it is wrong:
+//   - at the critical point <ss> = sqrt(2)/2 exactly;
+//   - at high temperature <ss> = t + 2t^3 + 4t^5 + O(t^7), t = tanh(K);
+//   - at low temperature <ss> = 1 - 4e^(-8K) - 12e^(-12K) and
+//     M = 1 - 2e^(-8K) - 8e^(-12K), derived by counting isolated flipped
+//     spins and adjacent flipped pairs, independent of Onsager and Yang.
+//     The first version of this file checked only the leading term; the
+//     residuals it printed matched the next order to within 6e-6, so the
+//     checks were tightened to that order rather than left loose.
+//
+// AND THE FINITE-LATTICE TRUTH FOR THE SIMULATION TO BE VALIDATED AGAINST.
+// Onsager is an infinite-lattice answer; a KMC engine is validated against
+// an exact finite answer on the same lattice. On 4x4 (65,536 states) this
+// file enumerates both dynamics:
+//   - dimer moves only: reachable class, verified by search, is {Q=0};
+//   - dimer moves plus Metropolis hops: reachable class, verified by search,
+//     is every even-occupancy state.
+// Both have their stationarity verified as exact integer identities -- for
+// a dimer, delta == change in bond count; for a hop, (occupied neighbours of
+// the target) - (occupied neighbours of the source) == change in bond
+// count -- and both must give coverage exactly 1/2 at K = q^4, which is an
+// independent test of the weights, because it holds only if K and w are
+// wired together correctly.
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn abs_i(x: i64) -> i64 { if x < 0 { 0 - x } else { x } }
+
+fn sqrt_newton(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i: i64 = 0
+    while i < 200 { g = 0.5 * (g + x / g)  i = i + 1 }
+    g
+}
+
+fn exp_f(x: f64) -> f64 with Mut, Div, Panic {
+    var y = x
+    var k: i64 = 0
+    while abs_f(y) > 0.5 { y = y / 2.0  k = k + 1 }
+    var sum: f64 = 1.0
+    var term: f64 = 1.0
+    var i: i64 = 1
+    while i < 30 { term = term * y / (i as f64)  sum = sum + term  i = i + 1 }
+    while k > 0 { sum = sum * sum  k = k - 1 }
+    sum
+}
+
+fn ln_f(a: f64) -> f64 with Mut, Div, Panic {
+    var y: f64 = 0.0
+    var i: i64 = 0
+    while i < 100 {
+        let e = exp_f(y)
+        y = y + 2.0 * (a - e) / (a + e)
+        i = i + 1
+    }
+    y
+}
+
+fn tanh_f(x: f64) -> f64 with Mut, Div, Panic {
+    let e2 = exp_f(2.0 * x)
+    (e2 - 1.0) / (e2 + 1.0)
+}
+
+fn agm(a0: f64, b0: f64) -> f64 with Mut, Div, Panic {
+    var a = a0
+    var b = b0
+    var i: i64 = 0
+    while i < 60 {
+        let an = 0.5 * (a + b)
+        let bn = sqrt_newton(a * b)
+        a = an
+        b = bn
+        i = i + 1
+    }
+    a
+}
+
+// complete elliptic integral of the first kind, modulus k
+fn ellip_k(k: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    let kp2 = 1.0 - k * k
+    pi / (2.0 * agm(1.0, sqrt_newton(kp2)))
+}
+
+// Onsager nearest-neighbour correlation of the square-lattice ferromagnet,
+// in x = e^(2K):  <ss> = coth(2K) [1 + (2/pi)(2 tanh^2(2K) - 1) K(k)] / 2,
+// k = 2 sinh(2K) / cosh^2(2K).
+fn onsager_nn(x: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    let sh = (x - 1.0 / x) / 2.0
+    let ch = (x + 1.0 / x) / 2.0
+    let th = sh / ch
+    let cth = ch / sh
+    let kk = 2.0 * sh / (ch * ch)
+    let coef = 2.0 * th * th - 1.0
+    var brk: f64 = 1.0
+    // At the critical point coef is exactly 0 and K(k) diverges; the product
+    // is 0, and evaluating it in floating point would be inf * 1e-16.
+    if abs_f(coef) > 0.000000000001 { brk = 1.0 + (2.0 / pi) * coef * ellip_k(kk) }
+    cth * brk / 2.0
+}
+
+// Yang's spontaneous magnetisation, in x = e^(2K)
+fn yang_m(x: f64) -> f64 with Mut, Div, Panic {
+    let sh = (x - 1.0 / x) / 2.0
+    if sh <= 1.0 { return 0.0 }
+    let s4 = sh * sh * sh * sh
+    let y = 1.0 - 1.0 / s4
+    sqrt_newton(sqrt_newton(sqrt_newton(y)))
+}
+
+// Two-sublattice Bragg-Williams: m = tanh(4 K m), nonzero root when 4K > 1.
+fn mf_m(kj: f64) -> f64 with Mut, Div, Panic {
+    if 4.0 * kj <= 1.0 { return 0.0 }
+    var lo: f64 = 0.000000001
+    var hi: f64 = 1.0
+    var i: i64 = 0
+    while i < 200 {
+        let mid = 0.5 * (lo + hi)
+        if tanh_f(4.0 * kj * mid) - mid > 0.0 { lo = mid } else { hi = mid }
+        i = i + 1
+    }
+    0.5 * (lo + hi)
+}
+
+// --- 4x4 lattice --------------------------------------------------------------
+
+fn pow2(n: i64) -> i64 with Mut, Div, Panic {
+    var b: i64 = 1
+    var k: i64 = 0
+    while k < n { b = b * 2  k = k + 1 }
+    b
+}
+
+fn nb_k(i: i64, k: i64, l: i64) -> i64 with Mut, Div, Panic {
+    let r = i / l
+    let c = i - r * l
+    if k == 0 { let c2 = if c + 1 == l { 0 } else { c + 1 }  return r * l + c2 }
+    if k == 1 { let r2 = if r + 1 == l { 0 } else { r + 1 }  return r2 * l + c }
+    if k == 2 { let c3 = if c == 0 { l - 1 } else { c - 1 }  return r * l + c3 }
+    let r3 = if r == 0 { l - 1 } else { r - 1 }
+    r3 * l + c
+}
+
+fn unpack(s: i64, n: i64, occ: &![i64; 32]) with Mut, Div, Panic {
+    var v = s
+    var i: i64 = 0
+    while i < n { occ[i as usize] = v - (v / 2) * 2  v = v / 2  i = i + 1 }
+}
+
+fn pairs_of(occ: &[i64; 32], l: i64) -> i64 with Mut, Div, Panic {
+    let n = l * l
+    var c: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if occ[i as usize] == 1 {
+            if occ[nb_k(i, 0, l) as usize] == 1 { c = c + 1 }
+            if occ[nb_k(i, 1, l) as usize] == 1 { c = c + 1 }
+        }
+        i = i + 1
+    }
+    c
+}
+
+// occupied neighbours of x, not counting y
+fn occ_nbrs_except(occ: &[i64; 32], x: i64, y: i64, l: i64) -> i64 with Mut, Div, Panic {
+    var c: i64 = 0
+    var k: i64 = 0
+    while k < 4 {
+        let z = nb_k(x, k, l)
+        if z != y { if occ[z as usize] == 1 { c = c + 1 } }
+        k = k + 1
+    }
+    c
+}
+
+fn bfs(l: i64, hops: bool, mark: &![i64; 65536]) -> i64 with Mut, Div, Panic {
+    let n = l * l
+    let ns = pow2(n)
+    var occ: [i64; 32] = [0; 32]
+    var i: i64 = 0
+    while i < ns { mark[i as usize] = 0  i = i + 1 }
+    mark[0] = 1
+    var changed = true
+    while changed {
+        changed = false
+        var s: i64 = 0
+        while s < ns {
+            if mark[s as usize] == 1 {
+                unpack(s, n, &! occ)
+                var a: i64 = 0
+                while a < n {
+                    var e: i64 = 0
+                    while e < 2 {
+                        let b = nb_k(a, e, l)
+                        let sa = occ[a as usize]
+                        let sb = occ[b as usize]
+                        var t: i64 = 0 - 1
+                        if sa == 0 && sb == 0 { t = s + pow2(a) + pow2(b) }
+                        if sa == 1 && sb == 1 { t = s - pow2(a) - pow2(b) }
+                        if hops && sa == 1 && sb == 0 { t = s - pow2(a) + pow2(b) }
+                        if hops && sa == 0 && sb == 1 { t = s + pow2(a) - pow2(b) }
+                        if t >= 0 { if mark[t as usize] == 0 { mark[t as usize] = 1  changed = true } }
+                        e = e + 1
+                    }
+                    a = a + 1
+                }
+            }
+            s = s + 1
+        }
+    }
+    var m: i64 = 0
+    var s2: i64 = 0
+    while s2 < ns { m = m + mark[s2 as usize]  s2 = s2 + 1 }
+    m
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("EXACT ANCHORS FOR THE c(2x2) STUDY: symmetric point K = q^4, w = 1/q")
+    println("lattice gas <-> zero-field Ising antiferromagnet, beta*J = ln(q)/4")
+    println("")
+    var all_ok = true
+
+    // --- numerical primitives ------------------------------------------------
+    let e1 = exp_f(1.0)
+    let l50 = ln_f(50.0)
+    let prim_ok = abs_f(e1 - 2.718281828459045) < 0.000000000001 &&
+                  abs_f(exp_f(l50) - 50.0) < 0.000000001 &&
+                  abs_f(exp_f(3.0) * exp_f(0.0 - 3.0) - 1.0) < 0.000000000001
+    print("exp/ln primitives: ")
+    if prim_ok { println("ok") } else { println("FAILED") }
+    if !prim_ok { all_ok = false }
+
+    // --- Onsager and Yang, against limits derived independently of them ----
+    println("")
+    println("-- exact formulas, checked against independent limits --")
+    let xc = 1.0 + sqrt_newton(2.0)
+    let c_crit = onsager_nn(xc)
+    print("  critical point:  <ss> = ") print_f64(c_crit)
+    print("   sqrt(2)/2 = ") print_f64(sqrt_newton(2.0) / 2.0)
+    let ck1 = abs_f(c_crit - sqrt_newton(2.0) / 2.0) < 0.000000001
+    if ck1 { println("   ok") } else { println("   FAILED") }
+
+    let xh = sqrt_newton(1.4)
+    let th = (xh - 1.0) / (xh + 1.0)
+    let c_hi = onsager_nn(xh)
+    let t5 = th * th * th * th * th
+    let series_hi = th + 2.0 * th * th * th + 4.0 * t5
+    print("  high T (q=1.4):  <ss> = ") print_f64(c_hi)
+    print("   t + 2t^3 + 4t^5 = ") print_f64(series_hi)
+    let ck2 = abs_f(c_hi - series_hi) < 0.000002
+    if ck2 { println("   ok (to 2e-6; next term 12t^7 ~ 4e-7)") } else { println("   FAILED") }
+
+    let xl = sqrt_newton(50.0)
+    // Low-temperature expansion from counting flipped clusters directly:
+    // -beta f = 2K + e^-8K (single flips) + 2e^-12K (adjacent pairs) + ...,
+    // so <ss> = 1 - 4e^-8K - 12e^-12K and M = 1 - 2e^-8K - 8e^-12K. With
+    // x = e^2K, e^-8K = x^-4 and e^-12K = x^-6.
+    let x4 = xl * xl * xl * xl
+    let x6 = x4 * xl * xl
+    let c_lo = onsager_nn(xl)
+    let lt_c = 1.0 - 4.0 / x4 - 12.0 / x6
+    print("  low T (q=50):    <ss> = ") print_f64(c_lo)
+    print("   1 - 4e^-8K - 12e^-12K = ") print_f64(lt_c)
+    let ck3 = abs_f(c_lo - lt_c) < 0.00002
+    if ck3 { println("   ok (to 2e-5)") } else { println("   FAILED") }
+
+    let m_lo = yang_m(xl)
+    let lt_m = 1.0 - 2.0 / x4 - 8.0 / x6
+    print("  low T (q=50):    M = ") print_f64(m_lo)
+    print("   1 - 2e^-8K - 8e^-12K = ") print_f64(lt_m)
+    let ck4 = abs_f(m_lo - lt_m) < 0.00002
+    if ck4 { println("   ok (to 2e-5)") } else { println("   FAILED") }
+
+    let m_c = yang_m(xc)
+    print("  critical point:  M = ") print_f64(m_c)
+    let ck5 = m_c < 0.05
+    if ck5 { println("   ok (vanishes, as (T_c - T)^(1/8))") } else { println("   FAILED") }
+
+    let kj8 = ln_f(8.0) / 4.0
+    let m8 = mf_m(kj8)
+    let resid = abs_f(tanh_f(4.0 * kj8 * m8) - m8)
+    print("  mean field q=8:  m = ") print_f64(m8)
+    print("   |tanh(4Km) - m| = ") print_f64(resid)
+    let ck6 = resid < 0.0000000001 && m8 > 0.5 && mf_m(ln_f(2.0) / 4.0) == 0.0
+    if ck6 { println("   ok") } else { println("   FAILED") }
+    if !(ck1 && ck2 && ck3 && ck4 && ck5 && ck6) { all_ok = false }
+
+    print("  exact transition q_c = (1+sqrt2)^2 = ") print_f64(xc * xc)
+    print("   mean-field transition q = e = ") print_f64(e1) println("")
+
+    // --- infinite-lattice predictions along the symmetric line -------------
+    println("")
+    println("-- infinite lattice, along K = q^4 --")
+    println("   q    beta*J    exact phase   exact pair dens   Yang |M|    MF |m|     MF pair dens")
+    var qs: [i64; 7] = [2, 3, 4, 5, 6, 8, 10]
+    var iq: i64 = 0
+    while iq < 7 {
+        let q: i64 = qs[iq as usize]
+        let qf = q as f64
+        let x = sqrt_newton(qf)
+        let kj = ln_f(qf) / 4.0
+        let pex = (1.0 - onsager_nn(x)) / 4.0
+        let my = yang_m(x)
+        let mm = mf_m(kj)
+        print("   ") print(q)
+        if q < 10 { print(" ") }
+        print("   ") print_f64(kj)
+        if my > 0.0 { print("   ordered     ") } else { print("   disordered  ") }
+        print("   ") print_f64(pex)
+        print("         ") print_f64(my)
+        print("   ") print_f64(mm)
+        print("   ") print_f64((1.0 - mm * mm) / 4.0)
+        if my == 0.0 && mm > 0.0 { println("   <- MF orders, exact does not") } else { println("") }
+        iq = iq + 1
+    }
+
+    // --- exact 4x4, both dynamics -------------------------------------------
+    println("")
+    println("-- exact 4x4 enumeration, the finite-lattice truth for the KMC engine --")
+    let l: i64 = 4
+    let n = l * l
+    let ns = pow2(n)
+    var markd: [i64; 65536] = [0; 65536]
+    var markh: [i64; 65536] = [0; 65536]
+    let csd = bfs(l, false, &! markd)
+    let csh = bfs(l, true, &! markh)
+
+    var occ: [i64; 32] = [0; 32]
+    var occ2: [i64; 32] = [0; 32]
+    var class_d_ok = true
+    var class_h_ok = true
+    var db_ok = true
+    var db_count: i64 = 0
+    var s: i64 = 0
+    while s < ns {
+        unpack(s, n, &! occ)
+        var oc: i64 = 0
+        var qq: i64 = 0
+        var i: i64 = 0
+        while i < n {
+            if occ[i as usize] == 1 {
+                oc = oc + 1
+                let r = i / l
+                let c = i - r * l
+                if (r + c) - ((r + c) / 2) * 2 == 0 { qq = qq + 1 } else { qq = qq - 1 }
+            }
+            i = i + 1
+        }
+        let md: i64 = markd[s as usize]
+        let mh: i64 = markh[s as usize]
+        if (md == 1) != (qq == 0) { class_d_ok = false }
+        if (mh == 1) != (oc - (oc / 2) * 2 == 0) { class_h_ok = false }
+
+        if mh == 1 {
+            let pb = pairs_of(&occ, l)
+            var a: i64 = 0
+            while a < n {
+                var e: i64 = 0
+                while e < 2 {
+                    let b = nb_k(a, e, l)
+                    let na = occ_nbrs_except(&occ, a, b, l)
+                    let nb = occ_nbrs_except(&occ, b, a, l)
+                    if occ[a as usize] == 0 && occ[b as usize] == 0 {
+                        unpack(s + pow2(a) + pow2(b), n, &! occ2)
+                        if pairs_of(&occ2, l) - pb != 1 + na + nb { db_ok = false }
+                        db_count = db_count + 1
+                    }
+                    if occ[a as usize] == 1 && occ[b as usize] == 0 {
+                        unpack(s - pow2(a) + pow2(b), n, &! occ2)
+                        if pairs_of(&occ2, l) - pb != nb - na { db_ok = false }
+                        db_count = db_count + 1
+                    }
+                    if occ[a as usize] == 0 && occ[b as usize] == 1 {
+                        unpack(s + pow2(a) - pow2(b), n, &! occ2)
+                        if pairs_of(&occ2, l) - pb != na - nb { db_ok = false }
+                        db_count = db_count + 1
+                    }
+                    e = e + 1
+                }
+                a = a + 1
+            }
+        }
+        s = s + 1
+    }
+    print("  dimer-only reachable class = ") print(csd)
+    print("   == {Q=0}: ")
+    if class_d_ok { println("yes") } else { println("NO") }
+    print("  with hops reachable class  = ") print(csh)
+    print("   == {even occupancy}: ")
+    if class_h_ok { println("yes") } else { println("NO") }
+    print("  stationarity identities (dimer adsorption and both hop directions) on ")
+    print(db_count) print(" edges: ")
+    if db_ok { println("exact") } else { println("FAIL") }
+    if !class_d_ok || !class_h_ok || !db_ok { all_ok = false }
+
+    println("")
+    println("   q   dynamics     theta          pair density   <|M|>")
+    var vq: [i64; 2] = [3, 8]
+    var iv: i64 = 0
+    while iv < 2 {
+        let q: i64 = vq[iv as usize]
+        let qf = q as f64
+        var qp: [f64; 129] = [0.0; 129]
+        qp[64] = 1.0
+        var ep: i64 = 1
+        while ep <= 64 {
+            qp[(64 + ep) as usize] = qp[(63 + ep) as usize] * qf
+            qp[(64 - ep) as usize] = qp[(65 - ep) as usize] / qf
+            ep = ep + 1
+        }
+        var md2: i64 = 0
+        while md2 < 2 {
+            var z: f64 = 0.0
+            var ath: f64 = 0.0
+            var ap: f64 = 0.0
+            var am: f64 = 0.0
+            var s3: i64 = 0
+            while s3 < ns {
+                var inclass = false
+                if md2 == 0 { inclass = markd[s3 as usize] == 1 } else { inclass = markh[s3 as usize] == 1 }
+                if inclass {
+                    unpack(s3, n, &! occ)
+                    var oc3: i64 = 0
+                    var q3: i64 = 0
+                    var i3: i64 = 0
+                    while i3 < n {
+                        if occ[i3 as usize] == 1 {
+                            oc3 = oc3 + 1
+                            let r = i3 / l
+                            let c = i3 - r * l
+                            if (r + c) - ((r + c) / 2) * 2 == 0 { q3 = q3 + 1 } else { q3 = q3 - 1 }
+                        }
+                        i3 = i3 + 1
+                    }
+                    let pr = pairs_of(&occ, l)
+                    let wgt = qp[(64 + 2 * oc3 - pr) as usize]
+                    z = z + wgt
+                    ath = ath + wgt * (oc3 as f64) / (n as f64)
+                    ap = ap + wgt * (pr as f64) / (2.0 * (n as f64))
+                    am = am + wgt * (abs_i(q3) as f64) * 2.0 / (n as f64)
+                }
+                s3 = s3 + 1
+            }
+            let theta = ath / z
+            let pd = ap / z
+            let mabs = am / z
+            print("   ") print(q)
+            if md2 == 0 { print("   dimer only   ") } else { print("   with hops    ") }
+            print_f64(theta) print("   ") print_f64(pd) print("   ") print_f64(mabs)
+            let half_ok = abs_f(theta - 0.5) < 0.000000000001
+            var m_ok = true
+            if md2 == 0 { m_ok = mabs == 0.0 }
+            if half_ok && m_ok { println("   theta = 1/2 exactly: ok") } else { println("   FAILED") }
+            if !half_ok || !m_ok { all_ok = false }
+            md2 = md2 + 1
+        }
+        iv = iv + 1
+    }
+    println("")
+
+    if all_ok { println("M5A_C2X2_ANCHORS_OK") } else { println("M5A_C2X2_ANCHORS_FAILED") }
+    0
+}

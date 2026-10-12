@@ -346,16 +346,11 @@ kernel fn vec_add(a: &[f64], b: &[f64], out: &![f64], n: i32) {
 Source: `tests/run-pass/vancomycin_propagation.sio`
 
 ```sio
-struct KnowledgeF64 {
-    value: f64,
-    uncertainty: f64,
-    confidence: f64,
-}
-
-fn gum_mul(a: KnowledgeF64, b: KnowledgeF64) -> KnowledgeF64 {
-    let val = a.value * b.value
-    let unc = val * (((a.uncertainty / a.value) * (a.uncertainty / a.value)) + ((b.uncertainty / b.value) * (b.uncertainty / b.uncertainty))) * 0.5
-    KnowledgeF64 { value: val, uncertainty: unc, confidence: 0.0 }
+// Canonical epistemic value type — stdlib/epistemic/knowledge.sio:
+//   Epistemic { val: f64, variance: f64, confidence: i64 }
+fn gum_mul(a: Epistemic, b: Epistemic) -> Epistemic {
+    // GUM uncorrelated delta method; read the std-dev with ep_std(&r).
+    ep_mul(&a, &b)
 }
 ```
 

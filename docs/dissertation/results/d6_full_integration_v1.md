@@ -171,7 +171,7 @@ Results:
 - `D5_CAPUTO_TENSOR_PASS`: PASS
 - PBPK suite: PASS, `50/50`
 - PBPK28 MC cross-validation: PASS
-- rel_Hess: `0.175405`
+- rel_Hess: `0.175405` (superseded 2026-09-26: this was measured through the floored PBPK28 kernel; on the mass-conserving kernel rel_Hess = 0.018801, see `m6_prior_update_v2.md`)
 
 ## Gate
 

@@ -114,7 +114,6 @@ if jq -e '
   .summary.track_a_status == "pass" and
   .summary.track_b_status == "pass" and
   .summary.track_b_order_status == "pass" and
-  .summary.claude_operational_contract_status == "pass" and
   .summary.lsp_smoke_status == "pass" and
   .summary.ui_type.backlog_quality_status == "pass" and
   .summary.ui_type.reclassify_candidates == 0

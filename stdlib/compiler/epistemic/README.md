@@ -93,7 +93,7 @@ During LLM-assisted code generation (Session 3, 2026-02-05), we discovered:
 
 - CLAUDE.md - Sounio syntax reference
 - stdlib/epistemic/knowledge.sio - Runtime Knowledge<T> type
-- docs/LLM_PROGRAMMING_GUIDE.md - Language syntax guide
+- docs/guide/LLM_PROGRAMMING_GUIDE.md - Language syntax guide
 - .claude/memory/MEMORY.md - Session notes
 
 ## Integration Plan

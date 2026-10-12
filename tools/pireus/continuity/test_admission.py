@@ -83,6 +83,16 @@ def main():
   # emit_lowering_ptx encodes the Cayley-Dickson signs and takes no phase.
   # Materialising a twisted operator through it would emit the wrong kernel
   # silently, under a green receipt, so the engine must refuse outright.
-  check("materialize-kind2","MATERIALIZE_KIND",changes=dict(kind=2,phase=1128),mode="ptx")
+  # emit_lowering_ptx encodes the bilinear phase twist into the table.
+  # For kind=2 it emits the exact twisted operator kernel in PTX.
+  # Verify that materialisation of phase 1128 succeeds and encodes the twisted signs.
+  cb=raw(context)
+  p=proposal|{"context":hashlib.sha256(cb).hexdigest(), "kind":2, "phase":1128}
+  (root/"context.json").write_bytes(cb)
+  (root/"proposal.json").write_bytes(raw(p))
+  argv=[args.engine,str(root/"context.json"),str(root/"proposal.json"),"ptx"]
+  run=subprocess.run(argv,capture_output=True,text=True,timeout=30)
+  assert run.returncode==0, (run.returncode, run.stdout, run.stderr)
+  assert "pireus_signs[16] = {0,38505,4080" in run.stdout, run.stdout
  print("PIREUS_EXTERNAL_ADMISSION_GATE_PASS",flush=True)
 if __name__=="__main__":main()

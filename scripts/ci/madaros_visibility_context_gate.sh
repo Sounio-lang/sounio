@@ -180,12 +180,59 @@ fi
 expect_private_rejection private-fn \
   "$ROOT_DIR/tests/multimodule/visibility_fn_private_main.sio" E175 \
   'function is private in its defining module'
+# Copilot review (PR #2515): tests/multimodule/visibility_fn_private_specialized_generic_*.sio
+# (added earlier in this same review) was never wired into any CI gate --
+# the standard suite only enumerates top-level tests/run-pass and
+# tests/compile-fail fixtures, so this multimodule pair never actually ran.
+# It exercises a DIFFERENT code path than private-fn above: instantiating
+# a generic (identity::<i64>) forces check_items_verdict_boot4_with_module_map
+# (self-hosted/check/mod.sio), the specialized checking path, instead of
+# the ordinary check_modules_verdict_boot4_with_visibility -- the fix this
+# round of the review is actually about only applies on that specialized
+# path, so private-fn's own passing here would not have caught a
+# regression back to the empty-path bypass this fixture targets.
+expect_private_rejection private-fn-specialized-generic \
+  "$ROOT_DIR/tests/multimodule/visibility_fn_private_specialized_generic_main.sio" E175 \
+  'function is private in its defining module'
 expect_private_rejection private-struct \
   "$ROOT_DIR/tests/multimodule/visibility_struct_private_main.sio" E176 \
+  'struct constructor is private in its defining module'
+# Copilot review (PR #2515), comment 4109697757: spec_get_or_create_struct_instance
+# (self-hosted/check/specializer.sio) never registered a monomorphized
+# generic struct clone's mangled symbol under its template's owner module
+# (unlike spec_finish_fn_item's equivalent registration for synthesized
+# FUNCTION symbols), so a PRIVATE generic struct's clone got the
+# not-found sentinel for its defining_module_id and
+# checker_struct_visible_inplace fell back to comparing two empty
+# AstPaths on the specialized checking path -- silently granting
+# cross-module construction. Same rationale as private-fn-specialized-generic
+# above, for structs instead of functions.
+expect_private_rejection private-struct-specialized-generic \
+  "$ROOT_DIR/tests/multimodule/visibility_struct_private_specialized_generic_main.sio" E176 \
   'struct constructor is private in its defining module'
 expect_private_rejection private-enum \
   "$ROOT_DIR/tests/multimodule/visibility_enum_private_main.sio" E177 \
   'enum constructor is private in its defining module'
+# Copilot review (PR #2515), comment 4109793910: checker_enum_visible_inplace
+# had no authoritative resolved-module-id denial (unlike the sibling fix
+# already applied to functions and structs above), so a PRIVATE enum's own
+# constructor stayed accessible cross-module on the specialized checking
+# path. Unlike structs, generic enums are never monomorphized/cloned by
+# the specializer, so this needed no analogous module-attribution fix at
+# the specializer level -- just the same deny-on-mismatch rule. Same
+# rationale as private-fn/struct-specialized-generic above, for enums.
+expect_private_rejection private-enum-specialized-generic \
+  "$ROOT_DIR/tests/multimodule/visibility_enum_private_specialized_generic_main.sio" E177 \
+  'enum constructor is private in its defining module'
+# Copilot review (PR #2515), comment 4109848820: checker_field_visible_inplace
+# now denies a real module-id mismatch too, matching the fn/struct/enum
+# siblings above -- the established fixture that used to rely on the
+# empty-path bypass (madaros_module_qualified_generic_call.sio) had its
+# GBig<F> fields made pub instead, closing the access-control hole rather
+# than continuing to codify it.
+expect_private_rejection private-field-specialized-generic \
+  "$ROOT_DIR/tests/multimodule/visibility_field_private_specialized_generic_main.sio" E259 \
+  'struct field is private in its defining module'
 
 echo "[madaros-visibility-context] receipt issue=854 context_state=$single_state runtime_state=$runtime_state single_e175=$([[ "$single_state" == baseline ]] && echo 1 || echo 0) matrix_e175=$([[ "$matrix_state" == baseline ]] && echo 18 || echo 0) true_private_fn=E175 true_private_struct=E176 true_private_enum=E177"
 
