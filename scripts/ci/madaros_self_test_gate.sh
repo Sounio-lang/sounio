@@ -17,6 +17,7 @@
 #   T93, T94  LICM fixtures allocate their own IR region.
 #   T187 runtime context size 248 (998e230b7).
 #   T227, T229  write_file returns the byte count, not 0.
+#   T452-T455  x & ~x / x | ~x fold again: the const-fold blocks run in one scan.
 #
 # The suite writes its scratch files under /tmp and removes them, so the run no
 # longer depends on, or rewrites, the directory it starts in. It still runs from
@@ -53,11 +54,11 @@ summary="$(grep -E '^compiler/main tests: [0-9]+/[0-9]+ passed' "$WORK/out" || t
 echo "$TAG: run finished: $summary (rc=$rc)"
 [[ -z "$(find "$WORK/tree" -type f | head -1)" ]] || fail "--self-test wrote into its working directory"
 
-for t in T69 T57 T61 T70 T84 T85 T93 T94 T156 T187 T227 T229; do
+for t in T69 T57 T61 T70 T84 T85 T93 T94 T156 T187 T227 T229 T452 T453 T454 T455; do
   if ! grep -qE "^  $t OK" "$WORK/out"; then
     grep -E "^  (FAIL: )?$t( |$)" "$WORK/out" >&2 || true
     fail "pinned self-test $t did not pass"
   fi
 done
-echo "$TAG: PASS 12 pinned self-tests"
+echo "$TAG: PASS 16 pinned self-tests"
 echo "MADAROS_SELF_TEST_GATE_OK"
