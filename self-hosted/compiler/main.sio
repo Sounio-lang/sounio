@@ -65,6 +65,7 @@ use ir::lower::{lower_rgn_backend_opt_in}
 use ir::lower::{lower_program_function_body_from_summary_with_epistemic}
 use ir::lower::{lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect, lower_fn_tuple_f64_array_mask}
 use ir::normalize::*
+use ir::serialize::{serialize_ir_module_ref, deserialize_ir_module_ref}
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
 use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
 use ir::profile::*
@@ -1455,7 +1456,7 @@ fn compiler_check_ok_message() -> string {
 }
 
 fn compiler_ir_dump_summary(bytes: i64, functions: i64, strings: i64) -> string with Mut, Panic, Div {
-    return "ir-dump: SOIR v2 binary, " + int_to_string(bytes) +
+    return "ir-dump: SOIR v6 binary, " + int_to_string(bytes) +
         " bytes, " + int_to_string(functions) +
         " functions, " + int_to_string(strings) + " strings"
 }
@@ -1668,575 +1669,56 @@ fn compiler_preflight_ir_load(path: string) -> CompilerIrLoadResult with IO, Mut
     return compiler_ir_load_result_ok(*ir_result.module)
 }
 
-fn compiler_ir_buffers_equal(buf_a: [i8; 131072], len_a: i64, buf_b: [i8; 131072], len_b: i64) -> bool with Mut {
-    if len_a != len_b {
-        return false
-    }
-    var i: i64 = 0
-    while i < len_a {
-        if buf_a[i] != buf_b[i] {
-            return false
-        }
-        i = i + 1
-    }
-    return true
-}
-
-fn compiler_ir_epistemic_empty(ep: IrEpistemicSection) -> bool {
-    ep.model_family_count == 0 &&
-    ep.policy_count == 0 &&
-    ep.validation_count == 0 &&
-    ep.mechanistic_report_count == 0 &&
-    ep.posterior_weights_count == 0 &&
-    ep.counterexample_count == 0 &&
-    ep.audit_count == 0 &&
-    ep.contest_count == 0 &&
-    ep.contest_witness_count == 0 &&
-    ep.robust_proof_count == 0 &&
-    ep.validated_manifest_count == 0 &&
-    ep.decision_policy_count == 0 &&
-    ep.decision_certificate_count == 0 &&
-    ep.deferral_policy_count == 0 &&
-    ep.deferred_certificate_count == 0 &&
-    ep.deferred_reason_witness_count == 0 &&
-    ep.acquisition_policy_count == 0 &&
-    ep.acquisition_plan_count == 0 &&
-    ep.acquisition_reason_witness_count == 0 &&
-    ep.recourse_policy_count == 0 &&
-    ep.recourse_plan_count == 0 &&
-    ep.recourse_reason_witness_count == 0 &&
-    ep.alternative_policy_count == 0 &&
-    ep.alternative_frontier_count == 0 &&
-    ep.alternative_candidate_count == 0 &&
-    ep.alternative_set_count == 0 &&
-    ep.alternative_reason_witness_count == 0 &&
-    ep.transition_policy_count == 0 &&
-    ep.transition_protocol_count == 0 &&
-    ep.transition_step_count == 0 &&
-    ep.transition_plan_count == 0 &&
-    ep.transition_reason_witness_count == 0 &&
-    ep.monitoring_policy_count == 0 &&
-    ep.observed_transition_count == 0 &&
-    ep.rollback_certificate_count == 0
-}
-
-fn compiler_ir_function_serialized_size(func: IrFunction) -> i64 {
-    696 + (func.instr_count * 232)
-}
-
-fn compiler_ir_module_serialized_size(module: IrModule) -> i64 with Mut, Panic, Div {
-    if !compiler_ir_epistemic_empty(module.epistemic) {
-        return 0 - 1
-    }
-
-    var total: i64 = 8 + 8 + 8 + 280
-    total = total + (module.string_count * 136)
-    var i: i64 = 0
-    while i < module.fn_count {
-        total = total + compiler_ir_function_serialized_size(ir_fn_get(&module, i as usize))
-        i = i + 1
-    }
-    total
-}
-
-fn compiler_ir_ser_write_i8(buf: &![i8; 131072], pos: i64, val: i8) -> i64 with Mut, Panic {
-    if pos >= 0 && pos < 131072 {
-        (*buf)[pos as usize] = val
-    }
-    pos + 1
-}
-
-fn compiler_ir_ser_write_i64(buf: &![i8; 131072], pos: i64, val: i64) -> i64 with Mut, Panic, Div {
-    var p = pos
-    p = compiler_ir_ser_write_i8(buf, p, (val & 255) as i8)
-    p = compiler_ir_ser_write_i8(buf, p, ((val >> 8) & 255) as i8)
-    p = compiler_ir_ser_write_i8(buf, p, ((val >> 16) & 255) as i8)
-    p = compiler_ir_ser_write_i8(buf, p, ((val >> 24) & 255) as i8)
-    p = compiler_ir_ser_write_i8(buf, p, ((val >> 32) & 255) as i8)
-    p = compiler_ir_ser_write_i8(buf, p, ((val >> 40) & 255) as i8)
-    p = compiler_ir_ser_write_i8(buf, p, ((val >> 48) & 255) as i8)
-    p = compiler_ir_ser_write_i8(buf, p, ((val >> 56) & 255) as i8)
-    p
-}
-
-fn compiler_ir_ser_write_padding(buf: &![i8; 131072], pos: i64, count: i64) -> i64 with Mut, Panic, Div {
-    var p = pos
-    var i: i64 = 0
-    while i < count {
-        p = compiler_ir_ser_write_i8(buf, p, 0 as i8)
-        i = i + 1
-    }
-    p
-}
-
-fn compiler_ir_ser_write_f64(buf: &![i8; 131072], pos: i64, val: f64) -> i64 with Mut, Panic, Div {
-    compiler_ir_ser_write_i64(buf, pos, f64_to_bits(val))
-}
-
-fn compiler_ir_ser_write_name(buf: &![i8; 131072], pos: i64, n: Name) -> i64 with Mut, Panic, Div {
-    var p = compiler_ir_ser_write_i64(buf, pos, n.len)
-    var i: i64 = 0
-    while i < 128 {
-        p = compiler_ir_ser_write_i8(buf, p, n.buf[i as usize])
-        i = i + 1
-    }
-    p
-}
-
-fn compiler_ir_ser_opcode_tag(op: IrOpcode) -> i64 {
-    match op {
-        IrOpcode::IrLoadImm => 0,
-        IrOpcode::IrLoadFloat => 1,
-        IrOpcode::IrLoadBool => 2,
-        IrOpcode::IrLoadString => 3,
-        IrOpcode::IrCopy => 4,
-        IrOpcode::IrBinOp => 5,
-        IrOpcode::IrUnaryOp => 6,
-        IrOpcode::IrCall => 7,
-        IrOpcode::IrReturn => 8,
-        IrOpcode::IrJump => 9,
-        IrOpcode::IrBranchTrue => 10,
-        IrOpcode::IrBranchFalse => 11,
-        IrOpcode::IrFieldGet => 12,
-        IrOpcode::IrFieldSet => 13,
-        IrOpcode::IrIndexGet => 14,
-        IrOpcode::IrIndexSet => 15,
-        IrOpcode::IrAlloc => 16,
-        IrOpcode::IrLabel => 17,
-        IrOpcode::IrNop => 18,
-        IrOpcode::IrPhi => 19,
-        IrOpcode::IrContest => 20,
-        IrOpcode::IrProveRobust => 21,
-        IrOpcode::IrValidated => 22,
-        IrOpcode::IrLiftKnowledge => 23,
-        IrOpcode::IrMeasure => 24,
-        IrOpcode::IrAdmitAction => 25,
-        IrOpcode::IrDeferAction => 26,
-        IrOpcode::IrPlanAcquisition => 27,
-        IrOpcode::IrPlanRecourse => 28,
-        IrOpcode::IrProposeAlternatives => 29,
-        IrOpcode::IrCommitAlternative => 30,
-        IrOpcode::IrObserveTransition => 31,
-        IrOpcode::IrRollbackTransition => 32,
-        IrOpcode::IrDebugGuard => 33,
-        IrOpcode::IrProfCounter => 34,
-        IrOpcode::IrHandleBegin => 35,
-        IrOpcode::IrHandleEnd => 36,
-        IrOpcode::IrCallSret => 37,
-        IrOpcode::IrReturnSret => 38,
-        _ => -1,
-    }
-}
-
-fn compiler_ir_ser_binary_op_tag(op: BinaryOp) -> i64 {
-    match op {
-        BinaryOp::OpAdd => 0,
-        BinaryOp::OpSub => 1,
-        BinaryOp::OpMul => 2,
-        BinaryOp::OpDiv => 3,
-        BinaryOp::OpRem => 4,
-        BinaryOp::OpEq => 5,
-        BinaryOp::OpNe => 6,
-        BinaryOp::OpLt => 7,
-        BinaryOp::OpLe => 8,
-        BinaryOp::OpGt => 9,
-        BinaryOp::OpGe => 10,
-        BinaryOp::OpAnd => 11,
-        BinaryOp::OpOr => 12,
-        BinaryOp::OpBitAnd => 13,
-        BinaryOp::OpBitOr => 14,
-        BinaryOp::OpBitXor => 15,
-        BinaryOp::OpShl => 16,
-        BinaryOp::OpShr => 17,
-        BinaryOp::OpConcat => 18,
-        BinaryOp::OpRange => 19,
-        BinaryOp::OpRangeInclusive => 20,
-        // Findings 11 (#2084): unsigned counterparts. The new tag numbers
-        // (21/22/23) MUST match the read_binary_op switch in this file and
-        // serialize.sio. The numbers are bumped past the prior last (20).
-        BinaryOp::OpUDiv => 21,
-        BinaryOp::OpURem => 22,
-        BinaryOp::OpUShr => 23,
-    }
-}
-
-fn compiler_ir_ser_unary_op_tag(op: UnaryOp) -> i64 {
-    match op {
-        UnaryOp::OpNeg => 0,
-        UnaryOp::OpNot => 1,
-        UnaryOp::OpRef => 2,
-        UnaryOp::OpRefMut => 3,
-        UnaryOp::OpDeref => 4,
-        UnaryOp::OpBitNot => 5,
-    }
-}
-
-fn compiler_ir_ser_write_instr(buf: &![i8; 131072], pos: i64, instr: IrInstr) -> i64 with Mut, Panic, Div {
-    var p = pos
-    p = compiler_ir_ser_write_i8(buf, p, compiler_ir_ser_opcode_tag(instr.op) as i8)
-    p = compiler_ir_ser_write_padding(buf, p, 7)
-    p = compiler_ir_ser_write_i64(buf, p, instr.dst)
-    p = compiler_ir_ser_write_i64(buf, p, instr.src1)
-    p = compiler_ir_ser_write_i64(buf, p, instr.src2)
-    p = compiler_ir_ser_write_i64(buf, p, instr.imm_i64)
-    p = compiler_ir_ser_write_f64(buf, p, instr.imm_f64)
-    p = compiler_ir_ser_write_i64(buf, p, instr.label_id)
-    p = compiler_ir_ser_write_i64(buf, p, instr.fn_id)
-    p = compiler_ir_ser_write_i64(buf, p, instr.field_idx)
-    p = compiler_ir_ser_write_i8(buf, p, compiler_ir_ser_binary_op_tag(instr.bin_op) as i8)
-    p = compiler_ir_ser_write_padding(buf, p, 7)
-    p = compiler_ir_ser_write_i8(buf, p, compiler_ir_ser_unary_op_tag(instr.un_op) as i8)
-    p = compiler_ir_ser_write_padding(buf, p, 7)
-    p = compiler_ir_ser_write_name(buf, p, ir_name_at(instr.name_id))
-    p = compiler_ir_ser_write_i64(buf, p, instr.arg_count)
-    p
-}
-
-fn compiler_ir_ser_write_function(buf: &![i8; 131072], pos: i64, func: IrFunction) -> i64 with Mut, Panic, Div {
-    var p = pos
-    p = compiler_ir_ser_write_name(buf, p, func.name)
-    p = compiler_ir_ser_write_i64(buf, p, func.instr_count)
-    p = compiler_ir_ser_write_i64(buf, p, func.reg_count)
-    p = compiler_ir_ser_write_i64(buf, p, func.label_count)
-    p = compiler_ir_ser_write_i64(buf, p, func.param_count)
-
-    var i: i64 = 0
-    while i < 64 {
-        p = compiler_ir_ser_write_i64(buf, p, func.param_regs[i as usize])
-        i = i + 1
-    }
-
-    p = compiler_ir_ser_write_i64(buf, p, func.compile_strategy)
-    p = compiler_ir_ser_write_i64(buf, p, func.prof_counter_id)
-
-    var j: i64 = 0
-    while j < func.instr_count {
-        p = compiler_ir_ser_write_instr(buf, p, ir_arena_load(ir_region_slot_r(func.region, (j))))
-        j = j + 1
-    }
-    p
-}
-
-fn compiler_ir_serialize_non_ep_module(module: IrModule, out_buf: &![i8; 131072]) -> i64 with Mut, Panic, Div {
-    var pos: i64 = 0
-
-    (*out_buf)[0] = 83 as i8
-    (*out_buf)[1] = 79 as i8
-    (*out_buf)[2] = 73 as i8
-    (*out_buf)[3] = 82 as i8
-    (*out_buf)[4] = 2 as i8
-    (*out_buf)[5] = 0 as i8
-    (*out_buf)[6] = 0 as i8
-    (*out_buf)[7] = 0 as i8
-    pos = 8
-
-    pos = compiler_ir_ser_write_i64(out_buf, pos, module.fn_count)
-    var i: i64 = 0
-    while i < module.fn_count {
-        pos = compiler_ir_ser_write_function(out_buf, pos, ir_fn_get(&module, i as usize))
-        i = i + 1
-    }
-
-    pos = compiler_ir_ser_write_i64(out_buf, pos, module.string_count)
-    i = 0
-    while i < module.string_count {
-        pos = compiler_ir_ser_write_name(out_buf, pos, module.string_table[i as usize])
-        i = i + 1
-    }
-
-    i = 0
-    while i < 35 {
-        pos = compiler_ir_ser_write_i64(out_buf, pos, 0)
-        i = i + 1
-    }
-
-    pos
-}
-
-fn compiler_ir_read_i64_at(buf: &![i8; 131072], pos: i64) -> i64 with Mut, Panic, Div {
-    let raw0: i64 = (*buf)[(pos + 0) as usize] as i64
-    let raw1: i64 = (*buf)[(pos + 1) as usize] as i64
-    let raw2: i64 = (*buf)[(pos + 2) as usize] as i64
-    let raw3: i64 = (*buf)[(pos + 3) as usize] as i64
-    let raw4: i64 = (*buf)[(pos + 4) as usize] as i64
-    let raw5: i64 = (*buf)[(pos + 5) as usize] as i64
-    let raw6: i64 = (*buf)[(pos + 6) as usize] as i64
-    let raw7: i64 = (*buf)[(pos + 7) as usize] as i64
-    let b0 = raw0 & 255
-    let b1 = raw1 & 255
-    let b2 = raw2 & 255
-    let b3 = raw3 & 255
-    let b4 = raw4 & 255
-    let b5 = raw5 & 255
-    let b6 = raw6 & 255
-    let b7 = raw7 & 255
-    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
-}
-
-// #1161: what this SOIR v2 encoding cannot carry. The writer above emits, per
-// function, only name (128 bytes), instr/reg/label/param counts, param_regs,
-// compile_strategy and prof_counter_id; per instruction, 13 fields with the
-// opcode as a 0..38 tag (-1 for every other opcode), no call-argument
-// identities and no imm_flags; per module, the string table and 35 zero
-// words. Before #1161 --ir-roundtrip byte-copied that buffer and compared the
-// copy with itself, so it printed OK for programs with globals or extern
-// calls whose state the encoding had dropped. This returns "" only when every
-// field the encoding does NOT write holds its default; otherwise the reason.
-fn compiler_ir_v2_name_reason(what: string, n: Name) -> string with Mut, Panic, Div {
-    if n.len < 0 || n.len > 128 { return what + ": name longer than 128 bytes" }
-    ""
-}
-
-fn compiler_ir_v2_unrepresentable(module: &IrModule) -> string with Mut, Panic, Div, Alloc {
-    if !compiler_ir_epistemic_empty((*module).epistemic) { return "epistemic section" }
+// #1161: --ir-dump and --ir-roundtrip run the real SOIR writer and reader,
+// ir/serialize.sio (SOIR v6), and no longer a second writer kept here. That
+// writer took its 128 KiB image by value at every call and doubled this binary
+// when imported; it now takes the image by reference.
+//
+// What SOIR v6 does not carry is refused BY NAME before anything is written,
+// so neither mode can claim a round trip over a lossy image. The fields below
+// are absent from serialize_ir_function / serialize_ir_module_ref, and the
+// reader hard-codes them (deserialize_ir_function: returns_float 0,
+// return_struct_name empty, return_fixed_array_len -1, bss_size 0,
+// first_param_is_ref 0, f128_param_mask 0).
+fn compiler_soir_unrepresentable(module: &IrModule) -> string with Mut, Panic, Div, Alloc {
     if (*module).bss_total_size != 0 { return "module BSS globals (bss_total_size)" }
     if (*module).export_count != 0 { return "module export table" }
-    if (*module).prof_counter_count != 0 { return "module profiling counters" }
-    if (*module).algebras.count != 0 { return "module algebra table" }
-    if (*module).ontologies.count != 0 || (*module).ontologies.property_count != 0 || (*module).ontologies.parameter_link_count != 0 {
-        return "module ontology table"
+    if (*module).prof_counter_count != 0 { return "profiling counters" }
+    if (*module).ontologies.count != 0 || (*module).ontologies.property_count != 0
+        || (*module).ontologies.parameter_link_count != 0 {
+        return "ontology table"
     }
     var si: i64 = 0
     while si < (*module).string_count {
-        let sr = compiler_ir_v2_name_reason("string table entry", (*module).string_table[si as usize])
-        if str_len(sr) > 0 { return sr }
+        let sn = (*module).string_table[si as usize]
+        if sn.len < 0 || sn.len > 128 { return "string table entry: name longer than 128 bytes" }
         si = si + 1
     }
-    var fi: i64 = 0
-    while fi < (*module).fn_count {
-        let f = ir_fn_get(module, fi as usize)
+    var i: i64 = 0
+    while i < (*module).fn_count {
+        let f = ir_fn_get(module, i)
+        if f.name.len < 0 || f.name.len > 128 { return "fn name longer than 128 bytes" }
         let nm = str_from_bytes(f.name.buf, f.name.len)
-        let fr = compiler_ir_v2_name_reason("fn `" + nm + "`", f.name)
-        if str_len(fr) > 0 { return fr }
-        if f.compile_strategy == 99 || f.bss_size != 0 { return "BSS global `" + nm + "`" }
+        if f.compile_strategy == 99 { return "BSS global `" + nm + "`" }
         if f.returns_float != 0 { return "fn `" + nm + "`: returns_float (f64 return)" }
-        if f.return_kn_value_float != 0 - 1 { return "fn `" + nm + "`: return_kn_value_float" }
         if f.return_struct_name.len != 0 { return "fn `" + nm + "`: return_struct_name (named return type)" }
         if f.return_fixed_array_len != 0 - 1 { return "fn `" + nm + "`: return_fixed_array_len" }
-        if f.hyper_algebra_kind != 0 - 1 { return "fn `" + nm + "`: hyper_algebra_kind" }
-        if f.is_sret != 0 || f.sret_dest_reg != 0 - 1 { return "fn `" + nm + "`: sret ABI" }
+        if f.bss_size != 0 { return "fn `" + nm + "`: bss_size (BSS global)" }
         if f.first_param_is_ref != 0 { return "fn `" + nm + "`: first_param_is_ref" }
         if f.f128_param_mask != 0 { return "fn `" + nm + "`: f128_param_mask" }
-        var w: i64 = 0
-        while w < 64 {
-            if f.float_reg_bits[w as usize] != 0 {
-                return "fn `" + nm + "`: float register classes (" + int_to_string(ir_function_count_float_bits(&f)) + " vregs marked f64; word " + int_to_string(w) + " = " + int_to_string(f.float_reg_bits[w as usize]) + ")"
-            }
-            w = w + 1
-        }
-        var k: i64 = 0
-        while k < f.instr_count {
-            let ins = ir_arena_load(ir_region_slot_r(f.region, k))
-            if compiler_ir_ser_opcode_tag(ins.op) < 0 { return "fn `" + nm + "`: an opcode outside the 39 SOIR v2 tags" }
-            if ins.imm_flags != 0 { return "fn `" + nm + "`: instruction imm_flags" }
-            let is_call = ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallExtern || ins.op == IrOpcode::IrCallIndirect || ins.op == IrOpcode::IrCallSret
-            if is_call && ins.arg_count > 0 { return "fn `" + nm + "`: call argument registers" }
-            let ir = compiler_ir_v2_name_reason("fn `" + nm + "` instruction", ir_name_at(ins.name_id))
-            if str_len(ir) > 0 { return ir }
-            k = k + 1
-        }
-        fi = fi + 1
+        i = i + 1
     }
     ""
 }
 
-// Decode the v2 bytes and compare every encoded field with the module it came
-// from: the actual round trip (bytes -> values == source values). Returns ""
-// or the first mismatch.
-fn compiler_ir_v2_read_name_eq(buf: &![i8; 131072], pos: i64, n: Name) -> bool with Mut, Panic, Div {
-    if compiler_ir_read_i64_at(buf, pos) != n.len { return false }
+// First offset where two images differ in [0, len), or -1.
+fn compiler_soir_first_difference(a: &![i8; 131072], b: &![i8; 131072], len: i64) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
-    while i < 128 {
-        if (*buf)[(pos + 8 + i) as usize] != n.buf[i as usize] { return false }
+    while i < len {
+        if (*a)[i] != (*b)[i] { return i }
         i = i + 1
     }
-    true
-}
-
-fn compiler_ir_v2_verify(buf: &![i8; 131072], len: i64, module: &IrModule) -> string with Mut, Panic, Div, Alloc {
-    if len < 16 || len > 131072 { return "encoded size outside the 131072-byte buffer" }
-    if (*buf)[0] != (83 as i8) || (*buf)[1] != (79 as i8) || (*buf)[2] != (73 as i8) || (*buf)[3] != (82 as i8) { return "magic" }
-    var p: i64 = 8
-    if compiler_ir_read_i64_at(buf, p) != (*module).fn_count { return "fn_count" }
-    p = p + 8
-    var fi: i64 = 0
-    while fi < (*module).fn_count {
-        let f = ir_fn_get(module, fi as usize)
-        if p + 136 + 32 + 512 + 16 > len { return "truncated function header" }
-        if !compiler_ir_v2_read_name_eq(buf, p, f.name) { return "function name" }
-        p = p + 136
-        if compiler_ir_read_i64_at(buf, p) != f.instr_count { return "instr_count" }
-        if compiler_ir_read_i64_at(buf, p + 8) != f.reg_count { return "reg_count" }
-        if compiler_ir_read_i64_at(buf, p + 16) != f.label_count { return "label_count" }
-        if compiler_ir_read_i64_at(buf, p + 24) != f.param_count { return "param_count" }
-        p = p + 32
-        var r: i64 = 0
-        while r < 64 {
-            if compiler_ir_read_i64_at(buf, p) != f.param_regs[r as usize] { return "param_regs" }
-            p = p + 8
-            r = r + 1
-        }
-        if compiler_ir_read_i64_at(buf, p) != f.compile_strategy { return "compile_strategy" }
-        if compiler_ir_read_i64_at(buf, p + 8) != f.prof_counter_id { return "prof_counter_id" }
-        p = p + 16
-        var k: i64 = 0
-        while k < f.instr_count {
-            if p + 232 > len { return "truncated instruction" }
-            let ins = ir_arena_load(ir_region_slot_r(f.region, k))
-            if ((*buf)[p as usize] as i64) != compiler_ir_ser_opcode_tag(ins.op) { return "opcode" }
-            p = p + 8
-            if compiler_ir_read_i64_at(buf, p) != ins.dst { return "dst" }
-            if compiler_ir_read_i64_at(buf, p + 8) != ins.src1 { return "src1" }
-            if compiler_ir_read_i64_at(buf, p + 16) != ins.src2 { return "src2" }
-            if compiler_ir_read_i64_at(buf, p + 24) != ins.imm_i64 { return "imm_i64" }
-            if compiler_ir_read_i64_at(buf, p + 32) != f64_to_bits(ins.imm_f64) { return "imm_f64" }
-            if compiler_ir_read_i64_at(buf, p + 40) != ins.label_id { return "label_id" }
-            if compiler_ir_read_i64_at(buf, p + 48) != ins.fn_id { return "fn_id" }
-            if compiler_ir_read_i64_at(buf, p + 56) != ins.field_idx { return "field_idx" }
-            p = p + 64
-            if ((*buf)[p as usize] as i64) != compiler_ir_ser_binary_op_tag(ins.bin_op) { return "bin_op" }
-            p = p + 8
-            if ((*buf)[p as usize] as i64) != compiler_ir_ser_unary_op_tag(ins.un_op) { return "un_op" }
-            p = p + 8
-            if !compiler_ir_v2_read_name_eq(buf, p, ir_name_at(ins.name_id)) { return "instruction name" }
-            p = p + 136
-            if compiler_ir_read_i64_at(buf, p) != ins.arg_count { return "arg_count" }
-            p = p + 8
-            k = k + 1
-        }
-        fi = fi + 1
-    }
-    if p + 8 > len { return "truncated string table" }
-    if compiler_ir_read_i64_at(buf, p) != (*module).string_count { return "string_count" }
-    p = p + 8
-    var si: i64 = 0
-    while si < (*module).string_count {
-        if !compiler_ir_v2_read_name_eq(buf, p, (*module).string_table[si as usize]) { return "string table entry" }
-        p = p + 136
-        si = si + 1
-    }
-    p = p + 280
-    if p != len { return "trailing or missing bytes" }
-    ""
-}
-
-struct CompilerIrCopyProgress {
-    src_pos: i64,
-    dst_pos: i64,
-}
-
-fn compiler_ir_copy_progress(src_pos: i64, dst_pos: i64) -> CompilerIrCopyProgress {
-    CompilerIrCopyProgress { src_pos: src_pos, dst_pos: dst_pos }
-}
-
-pub struct CompilerIrRoundtripResult {
-    pub ok: bool,
-    pub out_len: i64,
-    pub fn_count: i64,
-    pub string_count: i64,
-}
-
-fn compiler_ir_roundtrip_result(ok: bool, out_len: i64, fn_count: i64, string_count: i64) -> CompilerIrRoundtripResult {
-    CompilerIrRoundtripResult { ok: ok, out_len: out_len, fn_count: fn_count, string_count: string_count }
-}
-
-fn compiler_ir_copy_bytes(in_buf: &![i8; 131072], in_pos: i64, out_buf: &![i8; 131072], out_pos: i64, count: i64) -> CompilerIrCopyProgress with Mut, Panic, Div {
-    var src = in_pos
-    var dst = out_pos
-    var i: i64 = 0
-    while i < count {
-        if src >= 0 && src < 131072 && dst >= 0 && dst < 131072 {
-            let byte = (*in_buf)[src as usize]
-            (*out_buf)[dst as usize] = byte
-        }
-        src = src + 1
-        dst = dst + 1
-        i = i + 1
-    }
-    compiler_ir_copy_progress(src, dst)
-}
-
-fn compiler_ir_roundtrip_non_ep_buffer(in_buf: &![i8; 131072], len: i64, out_buf: &![i8; 131072]) -> CompilerIrRoundtripResult with Mut, Panic, Div {
-    if len < 24 + 280 {
-        return compiler_ir_roundtrip_result(false, 0, 0, 0)
-    }
-    if (*in_buf)[0] != (83 as i8) || (*in_buf)[1] != (79 as i8) || (*in_buf)[2] != (73 as i8) || (*in_buf)[3] != (82 as i8) {
-        return compiler_ir_roundtrip_result(false, 0, 0, 0)
-    }
-    let soir_version = (*in_buf)[4]
-    let legacy_fn_header_bytes: i64 = if soir_version >= 3 { 704 } else { 696 }
-    let instr_bytes_each: i64 = if soir_version >= 5 { 240 } else { 232 }
-
-    var in_pos: i64 = 0
-    var out_pos: i64 = 0
-    let header_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, 8)
-    in_pos = header_copy.src_pos
-    out_pos = header_copy.dst_pos
-
-    if in_pos + 8 > len {
-        return compiler_ir_roundtrip_result(false, 0, 0, 0)
-    }
-    let fn_count = compiler_ir_read_i64_at(in_buf, in_pos)
-    let fn_count_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, 8)
-    in_pos = fn_count_copy.src_pos
-    out_pos = fn_count_copy.dst_pos
-
-    var i: i64 = 0
-    while i < fn_count {
-        var fn_header_bytes = legacy_fn_header_bytes
-        if soir_version >= 5 {
-            let reg_count = compiler_ir_read_i64_at(in_buf, in_pos + 144)
-            var float_word_count = (reg_count + 31) / 32
-            if float_word_count < 0 { float_word_count = 0 }
-            if float_word_count > 64 { float_word_count = 64 }
-            // SOIR v5 extends the v3 header with is_sret, sret_dest_reg, and
-            // float_word_count before the variable float-bit words.
-            fn_header_bytes = fn_header_bytes + 24 + float_word_count * 8
-        }
-        if in_pos + fn_header_bytes > len {
-            return compiler_ir_roundtrip_result(false, 0, fn_count, 0)
-        }
-        let instr_count = compiler_ir_read_i64_at(in_buf, in_pos + 136)
-        if instr_count < 0 {
-            return compiler_ir_roundtrip_result(false, 0, fn_count, 0)
-        }
-        let fn_header_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, fn_header_bytes)
-        in_pos = fn_header_copy.src_pos
-        out_pos = fn_header_copy.dst_pos
-        let instr_bytes = instr_count * instr_bytes_each
-        if instr_bytes < 0 || in_pos + instr_bytes > len {
-            return compiler_ir_roundtrip_result(false, 0, fn_count, 0)
-        }
-        let instr_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, instr_bytes)
-        in_pos = instr_copy.src_pos
-        out_pos = instr_copy.dst_pos
-        i = i + 1
-    }
-
-    if in_pos + 8 > len {
-        return compiler_ir_roundtrip_result(false, 0, fn_count, 0)
-    }
-    let string_count = compiler_ir_read_i64_at(in_buf, in_pos)
-    let string_count_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, 8)
-    in_pos = string_count_copy.src_pos
-    out_pos = string_count_copy.dst_pos
-
-    let string_bytes = string_count * 136
-    if string_bytes < 0 || in_pos + string_bytes + 280 > len {
-        return compiler_ir_roundtrip_result(false, 0, fn_count, string_count)
-    }
-    let strings_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, string_bytes)
-    in_pos = strings_copy.src_pos
-    out_pos = strings_copy.dst_pos
-
-    let ep_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, 280)
-    in_pos = ep_copy.src_pos
-    out_pos = ep_copy.dst_pos
-
-    if out_pos != len {
-        return compiler_ir_roundtrip_result(false, out_pos, fn_count, string_count)
-    }
-    compiler_ir_roundtrip_result(true, out_pos, fn_count, string_count)
+    0 - 1
 }
 
 // ── Equivalence Theory: auto-emit Lean obligations from a compile ────────────
@@ -2563,23 +2045,21 @@ fn run_ir_dump_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Al
         panic("ir-dump failed")
     }
 
-    // #1161: refuse what the encoding cannot carry instead of dumping a lossy image.
-    let module = ir_result.module
-    let reason = compiler_ir_v2_unrepresentable(&module)
+    // #1161: the real SOIR writer (ir/serialize.sio); refuse what it cannot carry.
+    let reason = compiler_soir_unrepresentable(&ir_result.module)
     if str_len(reason) > 0 {
-        println("error: ir-dump: SOIR v2 cannot represent " + reason + " -- refusing (nothing written)")
+        println("error: ir-dump: SOIR v6 cannot represent " + reason + " -- refusing (nothing written)")
         panic("ir-dump failed")
     }
-    let serialized_len = compiler_ir_module_serialized_size(ir_result.module)
-    if serialized_len <= 0 || serialized_len > 131072 {
-        println("error: ir-dump: SOIR v2 image would need " + int_to_string(serialized_len) + " bytes, more than the 131072-byte buffer -- refusing")
+    var image: [i8; 131072] = [0; 131072]
+    var image_len: i64 = 0
+    serialize_ir_module_ref(&ir_result.module, &! image, &! image_len)
+    if image_len <= 0 {
+        println("error: ir-dump: the SOIR v6 writer refused this module (a field over its limits, or an image over 131072 bytes) -- refusing (nothing written)")
         panic("ir-dump failed")
     }
-
-    var serialized_buf: [i8; 131072] = [0; 131072]
-    compiler_ir_serialize_non_ep_module(ir_result.module, &! serialized_buf)
     print("ir-dump: bytes=")
-    print_int(serialized_len)
+    print_int(image_len)
     print(" functions=")
     print_int(ir_result.module.fn_count)
     print(" strings=")
@@ -2599,41 +2079,52 @@ fn run_ir_roundtrip_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Di
         panic("ir-roundtrip failed")
     }
 
-    // #1161: preflight, then a real round trip -- decode the bytes and compare
-    // every encoded field with the source module (the old check compared a
-    // byte copy of the buffer with the buffer).
-    let module = ir_result.module
-    let reason = compiler_ir_v2_unrepresentable(&module)
+    // #1161: a real round trip through ir/serialize.sio. Encode the module
+    // (image A), decode a second encoding of it, encode the decoded module
+    // again (image B), and require B == A byte for byte: every field SOIR
+    // carries survived the decode. What SOIR does not carry is refused first.
+    let reason = compiler_soir_unrepresentable(&ir_result.module)
     if str_len(reason) > 0 {
-        println("error: ir-roundtrip: SOIR v2 cannot represent " + reason + " -- refusing (no round trip claimed)")
+        println("error: ir-roundtrip: SOIR v6 cannot represent " + reason + " -- refusing (no round trip claimed)")
         panic("ir-roundtrip failed")
     }
-    let pair_a_len = compiler_ir_module_serialized_size(ir_result.module)
-    if pair_a_len <= 0 || pair_a_len > 131072 {
-        println("error: ir-roundtrip: SOIR v2 image would need " + int_to_string(pair_a_len) + " bytes, more than the 131072-byte buffer -- refusing")
+    var image_a: [i8; 131072] = [0; 131072]
+    var len_a: i64 = 0
+    serialize_ir_module_ref(&ir_result.module, &! image_a, &! len_a)
+    if len_a <= 0 {
+        println("error: ir-roundtrip: the SOIR v6 writer refused this module (a field over its limits, or an image over 131072 bytes) -- refusing (no round trip claimed)")
         panic("ir-roundtrip failed")
     }
-    var pair_a_buf: [i8; 131072] = [0; 131072]
-    let written = compiler_ir_serialize_non_ep_module(ir_result.module, &! pair_a_buf)
-    if written != pair_a_len {
-        println("error: ir roundtrip length mismatch (wrote " + int_to_string(written) + ", expected " + int_to_string(pair_a_len) + ")")
+    var image_in: [i8; 131072] = [0; 131072]
+    var len_in: i64 = 0
+    serialize_ir_module_ref(&ir_result.module, &! image_in, &! len_in)
+    if len_in != len_a || compiler_soir_first_difference(&! image_a, &! image_in, len_a) >= 0 {
+        println("error: ir-roundtrip: two encodings of the same module differ -- refusing")
         panic("ir-roundtrip failed")
     }
     // Mutation hook for scripts/ci/madaros_ir_roundtrip_gate.sh: flip the low
-    // byte of the first instruction's dst (header 16 + function header 136 +
-    // counts 32 + param_regs 512 + strategy/prof 16 + opcode slot 8 = 720).
-    // The decode must notice; a verifier that cannot fail proves nothing.
-    if str_eq(read_env("SOUNIO_SABOTAGE_IR_ROUNDTRIP"), "1") && pair_a_len > 728 {
-        let flipped = ((pair_a_buf[720] as i64) ^ 1) & 255
-        pair_a_buf[720] = flipped as i8
+    // bit of the first byte of the first function's name (header 8 + function
+    // count 8 + name length 8 = offset 24) in the image that is decoded. The
+    // round trip must notice; a verifier that cannot fail proves nothing.
+    if str_eq(read_env("SOUNIO_SABOTAGE_IR_ROUNDTRIP"), "1") && len_a > 24 {
+        let flipped = ((image_in[24] as i64) ^ 1) & 255
+        image_in[24] = flipped as i8
     }
-    let mismatch = compiler_ir_v2_verify(&! pair_a_buf, pair_a_len, &module)
-    if str_len(mismatch) > 0 {
-        println("error: ir roundtrip: decoded " + mismatch + " differs from the source module")
+    let restored = deserialize_ir_module_ref(&image_in, len_in)
+    if restored.fn_count != ir_result.module.fn_count || restored.string_count != ir_result.module.string_count {
+        println("error: ir roundtrip: the decode refused the image or lost entries (functions " + int_to_string(restored.fn_count) + " of " + int_to_string(ir_result.module.fn_count) + ", strings " + int_to_string(restored.string_count) + " of " + int_to_string(ir_result.module.string_count) + ")")
+        panic("ir-roundtrip failed")
+    }
+    var image_b: [i8; 131072] = [0; 131072]
+    var len_b: i64 = 0
+    serialize_ir_module_ref(&restored, &! image_b, &! len_b)
+    let diff_at = compiler_soir_first_difference(&! image_a, &! image_b, len_a)
+    if len_b != len_a || diff_at >= 0 {
+        println("error: ir roundtrip: the decoded module re-encodes differently (length " + int_to_string(len_b) + " vs " + int_to_string(len_a) + ", first differing byte " + int_to_string(diff_at) + ")")
         panic("ir-roundtrip failed")
     }
 
-    println(compiler_ir_roundtrip_summary(pair_a_len, ir_result.module.fn_count))
+    println(compiler_ir_roundtrip_summary(len_a, ir_result.module.fn_count))
 }
 
 fn run_native_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
@@ -6748,7 +6239,7 @@ fn compiler_main_test_mode_source_arg() -> bool with Mut, Panic, Div {
 
 fn compiler_main_test_cli_summary_messages() -> bool with Mut, Panic, Div {
     compiler_check_ok_message() == "check: OK" &&
-    compiler_ir_dump_summary(128, 7, 2) == "ir-dump: SOIR v2 binary, 128 bytes, 7 functions, 2 strings" &&
+    compiler_ir_dump_summary(128, 7, 2) == "ir-dump: SOIR v6 binary, 128 bytes, 7 functions, 2 strings" &&
     compiler_ir_roundtrip_summary(256, 11) == "ir-roundtrip: OK bytes=256 functions=11" &&
     compiler_native_compile_summary("a.out") == "Native compilation successful: output=a.out"
 }
