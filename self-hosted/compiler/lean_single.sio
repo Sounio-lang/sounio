@@ -45299,6 +45299,40 @@ fn append_native_prelude() with Mut, Panic, Div {
 }
 
 // Resolve and load use statements from SRC[0..SRC_LEN]
+// #2831: the importing module's ANCESTOR directories, closest first (at most 8),
+// as Madaros does (module_frontend_resolve_import_relpath). lean_single tried
+// only the importing module's own directory and then fell back to
+// self-hosted/, stdlib/ and the CWD, so `main.sio -> sub/b.sio -> use a`
+// with `a.sio` next to main.sio resolved only when run from that directory.
+// Writes `<ancestor>/<raw>` into IMP_PATH and returns its length for the first
+// ancestor where that file exists, else -1. Stops, like Madaros, at a parent
+// that is empty or "." (a relative base never walks above where it started).
+fn imp_try_ancestor_dirs(raw_len: i64) -> i64 with IO, Mut, Panic {
+    var anc_len: i64 = BASE_DIR_LEN
+    var depth: i64 = 0
+    while depth < 8 {
+        var cut: i64 = -1
+        var k: i64 = 0
+        while k < anc_len {
+            if BASE_DIR[k as usize] == 47 { cut = k }
+            k = k + 1
+        }
+        if cut <= 0 { return -1 }
+        anc_len = cut
+        if anc_len + 1 + raw_len >= 4095 { return -1 }
+        k = 0
+        while k < anc_len { IMP_PATH[k as usize] = BASE_DIR[k as usize]; k = k + 1 }
+        IMP_PATH[anc_len as usize] = 47
+        k = 0
+        while k < raw_len { IMP_PATH[(anc_len + 1 + k) as usize] = IMP_RAW_PATH[k as usize]; k = k + 1 }
+        let fl = anc_len + 1 + raw_len
+        IMP_PATH[fl as usize] = 0
+        if file_size(IMP_PATH) > 0 { return fl }
+        depth = depth + 1
+    }
+    return -1
+}
+
 fn resolve_imports() with IO, Mut, Panic, Div {
     var pos: i64 = 0
     while pos < SRC_LEN {
@@ -45522,6 +45556,18 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                     }
                     fp_len = mfp
                     IMP_PATH[fp_len as usize] = 0
+                }
+            }
+            // #2831: the importing module's ancestor directories, closest first,
+            // right after its own directory and before stdlib/, self-hosted/ and
+            // the CWD -- Madaros's order (module_frontend_resolve_import_relpath).
+            if early_loaded == 0 && copy_len <= 0 && needs_base_dir == 1 {
+                let anc_fp = imp_try_ancestor_dirs(raw_len)
+                if anc_fp > 0 {
+                    fp_len = anc_fp
+                    raw = read_file(IMP_PATH)
+                    copy_len = str_len(raw)
+                    fsz = file_size(IMP_PATH)
                 }
             }
             if copy_len <= 0 && needs_base_dir == 1 {
@@ -45773,6 +45819,16 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                         raw = read_file(IMP_PATH)
                         copy_len = str_len(raw)
                         fsz = file_size(IMP_PATH)
+                    }
+                    // #2831: ancestors of the importing module, closest first, as above.
+                    if copy_len <= 0 && needs_base_dir == 1 {
+                        let bc_anc = imp_try_ancestor_dirs(bc_len)
+                        if bc_anc > 0 {
+                            fp_len = bc_anc
+                            raw = read_file(IMP_PATH)
+                            copy_len = str_len(raw)
+                            fsz = file_size(IMP_PATH)
+                        }
                     }
                     if copy_len <= 0 {
                         IMP_PATH[0 as usize] = 115; IMP_PATH[1 as usize] = 116; IMP_PATH[2 as usize] = 100
