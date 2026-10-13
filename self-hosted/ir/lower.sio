@@ -2182,6 +2182,16 @@ pub struct LowerExprArgsResult {
     pub count: i64,
 }
 
+// Address of `(*raw).field[i]` inside a heap_alloc payload. The base is the
+// payload pointer, not the word loaded from the field: that word is 0 on a
+// fresh chunk, and label_id 0 then resolves handle 0.
+struct RawMutIndexAddr {
+    lowerer: Lowerer,
+    base_reg: i64,
+    idx_reg: i64,
+    label_id: i64,
+}
+
 struct IrFastSummaryOwnedSeed {
     module: IrModule,
     enum_variants: EnumVariantTable,
@@ -2267,6 +2277,17 @@ var LOWER_RGN_NUM_SLOT_REG: [i64; 4096] = [0; 4096]
 var LOWER_RGN_CHECKED: i64 = 0
 var LOWER_RGN_ON: i64 = 0
 var LOWER_RGN_BACKEND_OK: i64 = 0
+
+// Inline `[T; N]` lengths for heap_alloc payloads. StructFieldEntry carries
+// the same number, but a two-level read of that trailing field comes back 0
+// (the layout-store miscompile). This table is what raw_payload_word_offset
+// trusts: field index -> element count, so a later field does not land on
+// slots[1].
+var LOWER_RAW_ARR_COUNT: i64 = 0
+var LOWER_RAW_ARR_TYPE_ID: [i64; 4096] = [0; 4096]
+var LOWER_RAW_ARR_FIELD_IDX: [i64; 4096] = [0; 4096]
+var LOWER_RAW_ARR_LEN: [i64; 4096] = [0; 4096]
+var LOWER_RAW_ARR_PACKED_BYTE: [i64; 4096] = [0; 4096]
 
 // Region reclamation needs the __rgn_* runtime, the store barriers and the
 // escape hooks, which only native/codegen_x86_linux.sio implements. A driver
@@ -4181,6 +4202,7 @@ fn lowerer_preseed_external_struct_items_mut(
                                                 word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
                                                 named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*flist).head.ty)),
                                                 decl_word_scalar: if lower_type_expr_is_word_scalar(&(*flist).head.ty) { 1 } else { 0 },
+                                                fixed_array_len: lower_raw_arr_note(head_owned.name, fc, lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*flist).head.ty)),
                                             }
                                             fc = fc + 1
                                             fcur = (*flist).tail
@@ -4368,6 +4390,7 @@ fn lowerer_preseed_external_items_into_acc_mut(
                                                 word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
                                                 named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*flist).head.ty)),
                                                 decl_word_scalar: if lower_type_expr_is_word_scalar(&(*flist).head.ty) { 1 } else { 0 },
+                                                fixed_array_len: lower_raw_arr_note(head_owned.name, fc, lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*flist).head.ty)),
                                             }
                                             fc = fc + 1
                                             fcur = (*flist).tail
@@ -4461,6 +4484,7 @@ fn lowerer_register_struct_fields_direct_mut(
                     word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
                     named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*flist).head.ty)),
                     decl_word_scalar: if lower_type_expr_is_word_scalar(&(*flist).head.ty) { 1 } else { 0 },
+                    fixed_array_len: lower_raw_arr_note(type_name, fc, lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*flist).head.ty)),
                 }
                 fc = fc + 1
                 fcur = &(*flist).tail
@@ -4519,6 +4543,7 @@ fn lowerer_register_struct_fields_mut(
                         word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*list).head.ty),
                         named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*list).head.ty)),
                         decl_word_scalar: if lower_type_expr_is_word_scalar(&(*list).head.ty) { 1 } else { 0 },
+                        fixed_array_len: lower_raw_arr_note(type_name, field_idx, lower_type_expr_elem_or_box_inner_name(&(*list).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*list).head.ty)),
                     }
                     (*(*lo).struct_layouts).entries[layout_idx as usize].field_count = fc + 1
                 } else {
@@ -4608,6 +4633,68 @@ fn lower_typeexpr_byte_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Div, Mut
         }
         _ => { return 8 }
     }
+}
+
+fn lower_type_expr_fixed_array_len_or_zero(te: &TypeExpr) -> i64 {
+    let n = lower_type_expr_fixed_array_len_ref(te)
+    if n <= 0 { return 0 }
+    n
+}
+
+fn lower_raw_arr_note(type_name: Name, field_index: i64, elem_name: Name, n: i64) -> i64 with Mut, Panic, Div {
+    if n <= 0 { return 0 }
+    if LOWER_RAW_ARR_COUNT >= 4096 { return n }
+    let i = LOWER_RAW_ARR_COUNT
+    LOWER_RAW_ARR_TYPE_ID[i as usize] = ir_intern_name(type_name)
+    LOWER_RAW_ARR_FIELD_IDX[i as usize] = field_index
+    LOWER_RAW_ARR_LEN[i as usize] = n
+    if ir_name_is_packed_byte(elem_name) {
+        LOWER_RAW_ARR_PACKED_BYTE[i as usize] = 1
+    } else {
+        LOWER_RAW_ARR_PACKED_BYTE[i as usize] = 0
+    }
+    LOWER_RAW_ARR_COUNT = i + 1
+    n
+}
+
+fn lower_raw_arr_len_for(type_name: Name, field_index: i64) -> i64 with Mut, Panic, Div {
+    if type_name.len <= 0 { return 0 }
+    let type_id = ir_intern_name(type_name)
+    var i: i64 = 0
+    while i < LOWER_RAW_ARR_COUNT {
+        if LOWER_RAW_ARR_TYPE_ID[i as usize] == type_id && LOWER_RAW_ARR_FIELD_IDX[i as usize] == field_index {
+            return LOWER_RAW_ARR_LEN[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn lower_raw_arr_is_packed_byte(type_name: Name, field_index: i64) -> bool with Mut, Panic, Div {
+    if type_name.len <= 0 { return false }
+    let type_id = ir_intern_name(type_name)
+    var i: i64 = 0
+    while i < LOWER_RAW_ARR_COUNT {
+        if LOWER_RAW_ARR_TYPE_ID[i as usize] == type_id && LOWER_RAW_ARR_FIELD_IDX[i as usize] == field_index {
+            return LOWER_RAW_ARR_PACKED_BYTE[i as usize] == 1
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn ir_name_is_packed_byte(n: Name) -> bool with Panic, Div {
+    if n.len == 2 {
+        let first = n.buf[0] as i64
+        let second = n.buf[1] as i64
+        return (first == 105 || first == 117) && second == 56
+    }
+    if n.len == 4 {
+        let is_bool = n.buf[0] == 98 as i8 && n.buf[1] == 111 as i8 && n.buf[2] == 111 as i8 && n.buf[3] == 108 as i8
+        let is_char = n.buf[0] == 99 as i8 && n.buf[1] == 104 as i8 && n.buf[2] == 97 as i8 && n.buf[3] == 114 as i8
+        return is_bool || is_char
+    }
+    false
 }
 
 fn lower_type_expr_fixed_array_len_ref(ty: &TypeExpr) -> i64 {
@@ -5487,6 +5574,7 @@ fn ir_fast_summary_register_struct_fields_owned(
                     word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*list).head.ty),
                     named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*list).head.ty)),
                     decl_word_scalar: if lower_type_expr_is_word_scalar(&(*list).head.ty) { 1 } else { 0 },
+                    fixed_array_len: lower_raw_arr_note(type_name, idx, lower_type_expr_elem_or_box_inner_name(&(*list).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*list).head.ty)),
                 }
                 lay_entry.field_count = fc + 1
                 table_value.entries[layout_idx as usize] = lay_entry
@@ -18650,6 +18738,7 @@ impl Lowerer {
                             // is_float here is a guess about the value expression,
                             // so nothing may rely on this entry naming a scalar.
                             decl_word_scalar: 0,
+                            fixed_array_len: 0,
                         }
                         lay_entry.field_count = fc + 1
                         (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
@@ -18789,6 +18878,7 @@ impl Lowerer {
                             word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*list).head.ty),
                             named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*list).head.ty)),
                             decl_word_scalar: if lower_type_expr_is_word_scalar(&(*list).head.ty) { 1 } else { 0 },
+                            fixed_array_len: lower_raw_arr_note(type_name, field_idx, lower_type_expr_elem_or_box_inner_name(&(*list).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*list).head.ty)),
                         }
                         lay_entry.field_count = fc + 1
                         (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
@@ -22474,17 +22564,30 @@ impl Lowerer {
                         let base_opt: Option<Box<Expr>> = (*target_expr).left
                         match base_opt {
                             Some(base_expr) => {
+                                let raw_mut_deref = lo.expr_is_raw_mut_deref_ref(&(*base_expr))
                                 let base_is_ref = if (*base_expr).kind == ExprKind::ExprIdent {
                                     lo.lookup_local_is_ref((*base_expr).name)
                                 } else {
                                     false
                                 }
                                 let fidx = lo.field_idx_for_base_ref(&(*target_expr).left, (*target_expr).name)
-                                let pair_base = lo.lower_expr_ref(&(*base_expr))
+                                let field_word = if raw_mut_deref {
+                                    lo.raw_payload_word_offset(&(*target_expr).left, (*target_expr).name, fidx)
+                                } else {
+                                    fidx
+                                }
+                                let pair_base = if raw_mut_deref {
+                                    lo.lower_opt_expr_ref(&(*base_expr).left)
+                                } else {
+                                    lo.lower_expr_ref(&(*base_expr))
+                                }
                                 lo = pair_base.0
                                 let base_reg = pair_base.1
-                                var set_instr = ir_field_set(base_reg, fidx, rhs, (*target_expr).name)
-                                if base_is_ref {
+                                var set_instr = ir_field_set(base_reg, field_word, rhs, (*target_expr).name)
+                                if raw_mut_deref {
+                                    // Payload address, not a handle slot. See expr_is_raw_mut_deref_ref.
+                                    set_instr.label_id = 2
+                                } else if base_is_ref {
                                     set_instr.label_id = 1
                                 }
                                 lo = lo.emit(set_instr)
@@ -22493,6 +22596,25 @@ impl Lowerer {
                             _ => (lo.report_error_at(12033), rhs),
                         }
                 } else if (*target_expr).kind == ExprKind::ExprIndex {
+                        let raw_field_index = match (*target_expr).left {
+                            Some(field_base) => lo.expr_is_raw_mut_field_access_ref(&(*field_base)),
+                            None => false,
+                        }
+                        if raw_field_index {
+                            match (*target_expr).left {
+                                Some(field_expr) => {
+                                    let pair_raw_idx = lo.lower_opt_expr_ref(&(*target_expr).right)
+                                    lo = pair_raw_idx.0
+                                    let prepared = lo.prepare_raw_mut_field_index(&(*field_expr), pair_raw_idx.1)
+                                    lo = prepared.lowerer
+                                    var raw_index_set = ir_index_set(prepared.base_reg, prepared.idx_reg, rhs)
+                                    raw_index_set.label_id = prepared.label_id
+                                    lo = lo.emit(raw_index_set)
+                                    return (lo, rhs)
+                                }
+                                None => {}
+                            }
+                        }
                         let target_base_is_seq = ir_name_eq(
                             lo.lower_method_recv_type(&(*target_expr).left),
                             make_name("Seq"),
@@ -26591,6 +26713,190 @@ impl Lowerer {
         }
     }
 
+    // `*mut T` from heap_alloc is the payload address. `&T` is the address of a
+    // slot that holds that address, and Box is a handle. A scalar OpDeref of the
+    // raw pointer loads word 0 (zero on a fresh allocation) and the following
+    // field store resolves handle 0 — gen3 SIGSEGV in checker_init_in_place,
+    // store at address 0x20. Field access through that deref must use the
+    // pointer itself (label_id 2: no handle resolve, no object header).
+    fn expr_is_raw_mut_deref_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind != ExprKind::ExprUnary { return false }
+        if (*e).un_op != UnaryOp::OpDeref { return false }
+        match (*e).left {
+            Some(operand) => {
+                if (*operand).kind != ExprKind::ExprIdent { return false }
+                if self.lookup_local_is_ref((*operand).name) { return false }
+                if ir_name_is_box(self.lookup_local_struct_type((*operand).name)) { return false }
+                true
+            }
+            None => false,
+        }
+    }
+
+    // `(*ident).field` — the index base is not an ident, so the ident-only
+    // label classifier in lower_index_expr_ref / lower_assign_stmt_ref never
+    // sees the raw pointer.
+    fn expr_is_raw_mut_field_access_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind != ExprKind::ExprFieldAccess { return false }
+        match (*e).left {
+            Some(base) => self.expr_is_raw_mut_deref_ref(&(*base)),
+            None => false,
+        }
+    }
+
+    fn field_entry_raw_slots(self, fixed_len: i64, word_scalar_len: i64, elem_name: Name) -> i64 with Mut, Panic, Div {
+        let _lo = self
+        var n = fixed_len
+        if word_scalar_len > n { n = word_scalar_len }
+        if n <= 0 { return 1 }
+        if ir_name_is_packed_byte(elem_name) {
+            return (n + 7) / 8
+        }
+        n
+    }
+
+    // Word offset of a field inside a heap_alloc payload. Preceding `[T; N]`
+    // fields occupy N words (or ceil(N/8) for packed bytes), not one handle.
+    fn raw_payload_word_offset(self, base_opt: &Option<Box<Expr>>, field_name: Name, fallback: i64) -> i64 with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base_expr) => {
+                let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
+                if type_name.len <= 0 { return fallback }
+                var si: i64 = 0
+                while si < (*self.struct_layouts).count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                        let fc = (*self.struct_layouts).entries[si as usize].field_count
+                        var target = fallback
+                        var found = false
+                        var fi: i64 = 0
+                        while fi < fc && fi < 128 {
+                            if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                                target = (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
+                                found = true
+                            }
+                            fi = fi + 1
+                        }
+                        if !found { return fallback }
+                        var off: i64 = 0
+                        var want: i64 = 0
+                        while want < target && want < 128 {
+                            var fj: i64 = 0
+                            var counted = false
+                            while fj < fc && fj < 128 && !counted {
+                                // Copy the field entry out first. A two-level
+                                // `.fields[j].fixed_array_len` read is the same
+                                // shape the layout writers already refuse to store.
+                                let field = (*self.struct_layouts).entries[si as usize].fields[fj as usize]
+                                if field.index == want {
+                                    let elem = ir_name_at(field.elem_type_name_id)
+                                    let noted = lower_raw_arr_len_for(type_name, want)
+                                    var n = field.fixed_array_len
+                                    if field.word_scalar_array_len > n { n = field.word_scalar_array_len }
+                                    if noted > n { n = noted }
+                                    off = off + self.field_entry_raw_slots(n, 0, elem)
+                                    counted = true
+                                }
+                                fj = fj + 1
+                            }
+                            if !counted { off = off + 1 }
+                            want = want + 1
+                        }
+                        return off
+                    }
+                    si = si + 1
+                }
+                fallback
+            }
+            None => fallback,
+        }
+    }
+
+    fn raw_payload_field_is_byte(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base_expr) => {
+                let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
+                if type_name.len <= 0 { return false }
+                var si: i64 = 0
+                while si < (*self.struct_layouts).count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                        let fc = (*self.struct_layouts).entries[si as usize].field_count
+                        var fi: i64 = 0
+                        while fi < fc && fi < 128 {
+                            if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                                let n = (*self.struct_layouts).entries[si as usize].fields[fi as usize].fixed_array_len
+                                let elem = ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].elem_type_name_id)
+                                return n > 0 && ir_name_is_packed_byte(elem)
+                            }
+                            fi = fi + 1
+                        }
+                        return false
+                    }
+                    si = si + 1
+                }
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn raw_payload_field_is_signed_byte(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        if !self.raw_payload_field_is_byte(base_opt, field_name) { return false }
+        match *base_opt {
+            Some(base_expr) => {
+                let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
+                if type_name.len <= 0 { return false }
+                var si: i64 = 0
+                while si < (*self.struct_layouts).count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                        let fc = (*self.struct_layouts).entries[si as usize].field_count
+                        var fi: i64 = 0
+                        while fi < fc && fi < 128 {
+                            if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                                let elem = ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].elem_type_name_id)
+                                return elem.len == 2 && elem.buf[0] == 105 as i8 && elem.buf[1] == 56 as i8
+                            }
+                            fi = fi + 1
+                        }
+                        return false
+                    }
+                    si = si + 1
+                }
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn emit_add_imm(self, reg: i64, imm: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if imm == 0 { return (self, reg) }
+        let pair_imm = self.emit_i64_const(imm)
+        var lo = pair_imm.0
+        let pair_sum = lo.fresh_reg()
+        lo = pair_sum.0
+        lo = lo.emit(ir_binop(pair_sum.1, reg, BinaryOp::OpAdd, pair_imm.1))
+        (lo, pair_sum.1)
+    }
+
+    // `(*raw).field[i]`: index the payload at field_offset + i. Do not load
+    // word 0 and resolve it as a GC handle — heap_alloc leaves that word 0.
+    fn prepare_raw_mut_field_index(self, field_expr: &Expr, elem_idx: i64) -> RawMutIndexAddr with Mut, Panic, Div, Alloc, IO {
+        let fidx = self.field_idx_for_base_ref(&(*field_expr).left, (*field_expr).name)
+        let word_off = self.raw_payload_word_offset(&(*field_expr).left, (*field_expr).name, fidx)
+        let packed_byte = self.raw_payload_field_is_byte(&(*field_expr).left, (*field_expr).name)
+        let ptr_pair = match (*field_expr).left {
+            Some(deref_expr) => self.lower_opt_expr_ref(&(*deref_expr).left),
+            None => self.emit_i64_const(0),
+        }
+        var lo = ptr_pair.0
+        let ptr = ptr_pair.1
+        if packed_byte {
+            let added = lo.emit_add_imm(elem_idx, word_off * 8)
+            return RawMutIndexAddr { lowerer: added.0, base_reg: ptr, idx_reg: added.1, label_id: 3 }
+        }
+        let added = lo.emit_add_imm(elem_idx, word_off)
+        RawMutIndexAddr { lowerer: added.0, base_reg: ptr, idx_reg: added.1, label_id: 2 }
+    }
+
     fn lower_field_access_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if self.expr_is_gpu_thread_id_x_ref(e) {
             let pair_t = self.fresh_reg()
@@ -26612,7 +26918,18 @@ impl Lowerer {
             lo_t = lo_t.emit(ir_load_imm(dst_t, 0))
             return (lo_t, dst_t)
         }
-        let pair_b = self.lower_opt_expr_ref(&e.left)
+        let raw_mut_deref = match e.left {
+            Some(base_expr_raw) => self.expr_is_raw_mut_deref_ref(&(*base_expr_raw)),
+            None => false,
+        }
+        let pair_b = if raw_mut_deref {
+            match e.left {
+                Some(deref_expr) => self.lower_opt_expr_ref(&(*deref_expr).left),
+                None => self.lower_opt_expr_ref(&e.left),
+            }
+        } else {
+            self.lower_opt_expr_ref(&e.left)
+        }
         let lo1_pre = pair_b.0
         let base_pre = pair_b.1
         // AUTO-DEREF THROUGH A POINTER-TYPED FIELD.
@@ -26786,8 +27103,11 @@ impl Lowerer {
         let pair_d = lo1.fresh_reg()
         let lo2 = pair_d.0
         let dst = pair_d.1
-        var instr = ir_field_get(dst, base, fidx, e.name)
-        if base_is_ref {
+        let field_word = if raw_mut_deref { lo1.raw_payload_word_offset(&e.left, e.name, fidx) } else { fidx }
+        var instr = ir_field_get(dst, base, field_word, e.name)
+        if raw_mut_deref {
+            instr.label_id = 2
+        } else if base_is_ref {
             instr.label_id = 1
         }
         if field_is_float || field_array_elem_is_float {
@@ -26827,6 +27147,38 @@ impl Lowerer {
     }
 
     fn lower_index_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let raw_field_index = match e.left {
+            Some(field_base) => self.expr_is_raw_mut_field_access_ref(&(*field_base)),
+            None => false,
+        }
+        if raw_field_index {
+            match e.left {
+                Some(field_expr) => {
+                    let index_elem_is_float_raw = self.index_base_elem_is_float_ref(&e.left)
+                    let signed_byte = self.raw_payload_field_is_signed_byte(&(*field_expr).left, (*field_expr).name)
+                    let pair_i_raw = self.lower_opt_expr_ref(&e.right)
+                    let prepared = pair_i_raw.0.prepare_raw_mut_field_index(&(*field_expr), pair_i_raw.1)
+                    var lo_raw = prepared.lowerer
+                    let pair_d_raw = lo_raw.fresh_reg()
+                    lo_raw = pair_d_raw.0
+                    let dst_raw = pair_d_raw.1
+                    var raw_get = ir_index_get(dst_raw, prepared.base_reg, prepared.idx_reg)
+                    raw_get.label_id = prepared.label_id
+                    if prepared.label_id == 3 && signed_byte {
+                        raw_get.label_id = 4
+                    }
+                    if index_elem_is_float_raw {
+                        raw_get.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                    }
+                    lo_raw = lo_raw.emit(raw_get)
+                    if index_elem_is_float_raw {
+                        lo_raw = lo_raw.emit(ir_mark_float_reg(dst_raw))
+                    }
+                    return (lo_raw, dst_raw)
+                }
+                None => {}
+            }
+        }
         let index_elem_is_float_pre = self.index_base_elem_is_float_ref(&e.left)
         let base_is_seq = ir_name_eq(self.lower_method_recv_type(&e.left), make_name("Seq"))
         // Detect packed-string bases BEFORE consuming self (string lit, scalar_kind
