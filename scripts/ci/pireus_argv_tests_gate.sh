@@ -12,8 +12,10 @@
 #
 # Selection is by sidecar, not by a list in this script: every
 # test_pireus_*.sio with a .args file is run unless its header declares
-# //@ known-failure (those need vendor material that is not in the repo; see
-# #2820). A sidecar naming a file that does not exist is a failure, not a skip.
+# //@ known-failure, or declares //@ requires: vendor-material and a path its
+# sidecar names (vendor material the repository cannot carry) is absent -- that
+# skip names the missing path (#2820). Otherwise a sidecar naming a file that
+# does not exist is a failure, not a skip.
 #
 # Positive control first: the same ELF run with NO arguments must fail. If it
 # passes, the test does not read its argv and this gate would measure nothing.
@@ -38,6 +40,20 @@ for args in tests/stdlib/hardware/test_pireus_*.sio.args; do
   if head -n 20 "$src" | grep -qE '^//@ *known-failure'; then
     printf 'PIREUS_ARGV_SKIP %s (declares //@ known-failure)\n' "$tag"
     continue
+  fi
+  # `//@ requires: vendor-material`: the sidecar names third-party material the
+  # repository cannot carry (vendor PDFs, datafiles). Skip, naming the missing
+  # path, when it is absent; run as usual when every path is present (#2820).
+  if head -n 20 "$src" | grep -qE '^//@ *requires: *vendor-material'; then
+    vm_missing=""
+    while IFS= read -r a || [[ -n "$a" ]]; do
+      [[ -z "$a" ]] && continue
+      if [[ ! -e "$a" ]]; then vm_missing="$a"; break; fi
+    done < "$args"
+    if [[ -n "$vm_missing" ]]; then
+      printf 'PIREUS_ARGV_SKIP %s (requires: vendor-material, not in the repo: %s)\n' "$tag" "$vm_missing"
+      continue
+    fi
   fi
   selected=$((selected + 1))
   argv=()
