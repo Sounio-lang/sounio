@@ -18,6 +18,13 @@
 #   T187 runtime context size 248 (998e230b7).
 #   T227, T229  write_file returns the byte count, not 0.
 #   T452-T455  x & ~x / x | ~x fold again: the const-fold blocks run in one scan.
+#   T24  layout_reorder_functions permutes by cycles (the function table is shared).
+#   T98-T100  only unsigned x / 2^n, x % 2^n are strength-reduced.
+#   T318, T322  LICM inserts the hoisted load before the loop label.
+#   T373, T374  Block AH runs (it was nested inside the OpMul branch).
+#   T685  signed (x*3)/4 keeps its division.
+#   T692-T694, T704-T706, T735  Blocks CG/CI patch the constant feeding the inner op.
+#   T1048  ~x ^ ~y -> x ^ y records the rewritten XOR operands (Block EK chain).
 #
 # The suite writes its scratch files under /tmp and removes them, so the run no
 # longer depends on, or rewrites, the directory it starts in. It still runs from
@@ -54,11 +61,11 @@ summary="$(grep -E '^compiler/main tests: [0-9]+/[0-9]+ passed' "$WORK/out" || t
 echo "$TAG: run finished: $summary (rc=$rc)"
 [[ -z "$(find "$WORK/tree" -type f | head -1)" ]] || fail "--self-test wrote into its working directory"
 
-for t in T69 T57 T61 T70 T84 T85 T93 T94 T156 T187 T227 T229 T452 T453 T454 T455; do
+for t in T69 T57 T61 T70 T84 T85 T93 T94 T156 T187 T227 T229 T452 T453 T454 T455 T24 T98 T99 T100 T318 T322 T373 T374 T685 T692 T693 T694 T704 T705 T706 T735 T1048; do
   if ! grep -qE "^  $t OK" "$WORK/out"; then
     grep -E "^  (FAIL: )?$t( |$)" "$WORK/out" >&2 || true
     fail "pinned self-test $t did not pass"
   fi
 done
-echo "$TAG: PASS 16 pinned self-tests"
+echo "$TAG: PASS 33 pinned self-tests"
 echo "MADAROS_SELF_TEST_GATE_OK"

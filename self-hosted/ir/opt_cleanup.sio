@@ -716,6 +716,59 @@ fn ocp_rebracket_source_use_count(func: &IrFunction, reg: i64) -> i64 with Mut, 
     count
 }
 
+// Number of instructions that define `reg`. Non-SSA IR may redefine a register;
+// the in-place constant patches below are only sound for single definitions.
+fn ocp_reg_def_count(func: &IrFunction, reg: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < func.instr_count {
+        let op = (IR_A_OP[(ir_region_slot_r(func.region, (i))) as usize] as IrOpcode)
+        if op != IrOpcode::IrNop && op != IrOpcode::IrLabel && IR_A_DST[(ir_region_slot_r(func.region, (i))) as usize] == reg {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// True when the IrLoadImm defining `creg` can be rewritten in place: `creg` is
+// defined once and read by exactly one instruction (the one being rewritten).
+// A constant register shared with another reader would change that reader too.
+fn ocp_const_patch_ok(func: &IrFunction, creg: i64) -> bool with Mut, Div, Panic {
+    if creg < 0 || creg >= 256 { return false }
+    ocp_reg_def_count(func, creg) == 1 && ocp_rebracket_source_use_count(func, creg) == 1
+}
+
+// Blocks CG/CH/CI/CJ (#1680) turn `(x OP C) +/- x` into `x * K` by rewriting the
+// load of C, the constant register that feeds the inner mul/shift, into K, and
+// pointing the outer instruction at that register. Returns the index of that
+// load when the rewrite is sound, else -1. Sound means: the constant register
+// is defined once, by an IrLoadImm, and used only by the inner instruction;
+// the inner result is defined once and used only by the outer instruction (so
+// the inner instruction, which now computes x OP K, is dead); and the base x is
+// not redefined. Every use encoding in the function must be modeled.
+fn ocp_patchable_inner_const(
+    func: &IrFunction,
+    creg: i64,
+    inner: i64,
+    base: i64,
+) -> i64 with Mut, Div, Panic {
+    if creg < 0 || creg >= 256 || inner < 0 || inner >= 256 { return -1 }
+    if ocp_reg_def_count(func, creg) != 1 || ocp_reg_def_count(func, inner) != 1 { return -1 }
+    if ocp_reg_def_count(func, base) > 1 { return -1 }
+    if ocp_rebracket_source_use_count(func, creg) != 1 { return -1 }
+    if ocp_rebracket_source_use_count(func, inner) != 1 { return -1 }
+    var i: i64 = 0
+    while i < func.instr_count {
+        let op = (IR_A_OP[(ir_region_slot_r(func.region, (i))) as usize] as IrOpcode)
+        if op == IrOpcode::IrLoadImm && IR_A_DST[(ir_region_slot_r(func.region, (i))) as usize] == creg {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
 fn ocp_rebracket_flow_certificates_equal(
     a: OcpExactBitwiseFlowUseCertificate,
     b: OcpExactBitwiseFlowUseCertificate,
@@ -2035,6 +2088,8 @@ fn ocp_const_fold_scan(
     var mul_valid:   [bool; 256] = [false; 256]
     var mul_var_src: [i64;  256] = [-1;    256]
     var mul_const_v: [i64;  256] = [0;     256]
+    // #1680: the register holding C in a tracked r = x * C (-1 = unknown).
+    var mul_const_reg: [i64; 256] = [-1;    256]
     // Sprint 89 Block P: Add-sub/sub-add cancellation — track r = x +/- C.
     // (x + C) - C → x  ;  (x - C) + C → x.
     // SOTA: LLVM InstCombineAddSub.cpp; Muchnick §12.2.
@@ -2098,6 +2153,8 @@ fn ocp_const_fold_scan(
     var bk_shl_valid: [bool; 256] = [false; 256]
     var bk_shl_src:   [i64;  256] = [-1;    256]
     var bk_shl_amt:   [i64;  256] = [0;     256]
+    // #1680: the register holding the amount of a tracked r = x << A.
+    var bk_shl_creg:  [i64;  256] = [-1;    256]
     var bk_shr_valid: [bool; 256] = [false; 256]
     var bk_shr_src:   [i64;  256] = [-1;    256]
     var bk_shr_amt:   [i64;  256] = [0;     256]
@@ -2239,131 +2296,136 @@ fn ocp_const_fold_scan(
                             mul_valid[instr.dst as usize]   = true
                             mul_var_src[instr.dst as usize] = s1
                             mul_const_v[instr.dst as usize] = v2
+                            mul_const_reg[instr.dst as usize] = s2
                         }
                         if s1_known && v1 != 0 && !s2_known {
                             mul_valid[instr.dst as usize]   = true
                             mul_var_src[instr.dst as usize] = s2
                             mul_const_v[instr.dst as usize] = v1
+                            mul_const_reg[instr.dst as usize] = s1
                         }
                     }
-                    // Sprint 89 Block P: Track r = x + C (commutative).
-                    if instr.bin_op == BinaryOp::OpAdd && instr.dst >= 0 && instr.dst < 256 {
-                        if s2_known && !s1_known && s1 >= 0 && s1 < 256 {
-                            as_valid[instr.dst as usize]   = true
-                            as_var_src[instr.dst as usize] = s1
-                            as_const_v[instr.dst as usize] = v2
-                            as_is_add[instr.dst as usize]  = true
-                        }
-                        if s1_known && !s2_known && s2 >= 0 && s2 < 256 {
-                            as_valid[instr.dst as usize]   = true
-                            as_var_src[instr.dst as usize] = s2
-                            as_const_v[instr.dst as usize] = v1
-                            as_is_add[instr.dst as usize]  = true
-                        }
+                }
+                // #1680: Block P tracking/folds and Block AH below were nested inside the
+                // `bin_op == OpMul` branch above, so their OpAdd/OpSub tests could never
+                // hold: none of them ever ran. They now sit beside it.
+                // Sprint 89 Block P: Track r = x + C (commutative).
+                if instr.bin_op == BinaryOp::OpAdd && instr.dst >= 0 && instr.dst < 256 {
+                    if s2_known && !s1_known && s1 >= 0 && s1 < 256 {
+                        as_valid[instr.dst as usize]   = true
+                        as_var_src[instr.dst as usize] = s1
+                        as_const_v[instr.dst as usize] = v2
+                        as_is_add[instr.dst as usize]  = true
                     }
-                    // Sprint 89 Block P: Track r = x - C.
-                    if instr.bin_op == BinaryOp::OpSub && instr.dst >= 0 && instr.dst < 256 {
-                        if s2_known && !s1_known && s1 >= 0 && s1 < 256 {
-                            as_valid[instr.dst as usize]   = true
-                            as_var_src[instr.dst as usize] = s1
-                            as_const_v[instr.dst as usize] = v2
-                            as_is_add[instr.dst as usize]  = false
-                        }
+                    if s1_known && !s2_known && s2 >= 0 && s2 < 256 {
+                        as_valid[instr.dst as usize]   = true
+                        as_var_src[instr.dst as usize] = s2
+                        as_const_v[instr.dst as usize] = v1
+                        as_is_add[instr.dst as usize]  = true
                     }
-                    // Sprint 89 Block P fold: (x + C) - C → IrCopy(x).
-                    if instr.bin_op == BinaryOp::OpSub && s2_known && !s1_known
-                            && s1 >= 0 && s1 < 256 && as_valid[s1 as usize]
-                            && as_is_add[s1 as usize] && as_const_v[s1 as usize] == v2 {
-                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_copy(instr.dst, as_var_src[s1 as usize]))
-                        if instr.dst >= 0 && instr.dst < 256 {
-                            as_valid[instr.dst as usize] = false
-                        }
+                }
+                // Sprint 89 Block P: Track r = x - C.
+                if instr.bin_op == BinaryOp::OpSub && instr.dst >= 0 && instr.dst < 256 {
+                    if s2_known && !s1_known && s1 >= 0 && s1 < 256 {
+                        as_valid[instr.dst as usize]   = true
+                        as_var_src[instr.dst as usize] = s1
+                        as_const_v[instr.dst as usize] = v2
+                        as_is_add[instr.dst as usize]  = false
                     }
-                    // Sprint 89 Block P fold: (x - C) + C → IrCopy(x).
-                    if instr.bin_op == BinaryOp::OpAdd && s2_known && !s1_known
-                            && s1 >= 0 && s1 < 256 && as_valid[s1 as usize]
-                            && !as_is_add[s1 as usize] && as_const_v[s1 as usize] == v2 {
-                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_copy(instr.dst, as_var_src[s1 as usize]))
-                        if instr.dst >= 0 && instr.dst < 256 {
-                            as_valid[instr.dst as usize] = false
-                        }
+                }
+                // Sprint 89 Block P fold: (x + C) - C → IrCopy(x).
+                if instr.bin_op == BinaryOp::OpSub && s2_known && !s1_known
+                        && s1 >= 0 && s1 < 256 && as_valid[s1 as usize]
+                        && as_is_add[s1 as usize] && as_const_v[s1 as usize] == v2 {
+                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_copy(instr.dst, as_var_src[s1 as usize]))
+                    if instr.dst >= 0 && instr.dst < 256 {
+                        as_valid[instr.dst as usize] = false
                     }
-                    // Sprint 111 Block AH: Add/sub chain constant merging (unequal C).
-                    // (x - C1) - C2 → x - (C1+C2)
-                    // (x - C1) + C2 → x +/- |C2-C1|  (net offset)
-                    // (x + C1) - C2 → x +/- |C1-C2|  (net offset)
-                    // SOTA: LLVM InstCombineAddSub.cpp; Click PLDI 1995 §4.
-                    if s2_known && !s1_known && s1 >= 0 && s1 < 256 && as_valid[s1 as usize]
-                            && as_const_v[s1 as usize] != v2 {
-                        let ah_base = as_var_src[s1 as usize]
-                        let ah_c1   = as_const_v[s1 as usize]
-                        let ah_was_add = as_is_add[s1 as usize]
-                        let ah_c2_def = def_at[s2 as usize]
-                        if ah_c2_def >= 0 {
-                            // (x - C1) - C2 → x - (C1 + C2)
-                            if !ah_was_add && instr.bin_op == BinaryOp::OpSub {
-                                let ah_merged = ah_c1 + v2
-                                ir_arena_store(ir_region_slot_w(result.region, (ah_c2_def)), ir_load_imm(s2, ah_merged))
-                                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(instr.dst, ah_base, BinaryOp::OpSub, s2))
-                                const_val[s2 as usize] = ah_merged
-                                if instr.dst >= 0 && instr.dst < 256 {
-                                    as_valid[instr.dst as usize]   = true
-                                    as_var_src[instr.dst as usize] = ah_base
-                                    as_const_v[instr.dst as usize] = ah_merged
-                                    as_is_add[instr.dst as usize]  = false
-                                }
+                }
+                // Sprint 89 Block P fold: (x - C) + C → IrCopy(x).
+                if instr.bin_op == BinaryOp::OpAdd && s2_known && !s1_known
+                        && s1 >= 0 && s1 < 256 && as_valid[s1 as usize]
+                        && !as_is_add[s1 as usize] && as_const_v[s1 as usize] == v2 {
+                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_copy(instr.dst, as_var_src[s1 as usize]))
+                    if instr.dst >= 0 && instr.dst < 256 {
+                        as_valid[instr.dst as usize] = false
+                    }
+                }
+                // Sprint 111 Block AH: Add/sub chain constant merging (unequal C).
+                // (x - C1) - C2 → x - (C1+C2)
+                // (x - C1) + C2 → x +/- |C2-C1|  (net offset)
+                // (x + C1) - C2 → x +/- |C1-C2|  (net offset)
+                // SOTA: LLVM InstCombineAddSub.cpp; Click PLDI 1995 §4.
+                if s2_known && !s1_known && s1 >= 0 && s1 < 256 && as_valid[s1 as usize]
+                        && as_const_v[s1 as usize] != v2 {
+                    let ah_base = as_var_src[s1 as usize]
+                    let ah_c1   = as_const_v[s1 as usize]
+                    let ah_was_add = as_is_add[s1 as usize]
+                    let ah_c2_def = def_at[s2 as usize]
+                    if ah_c2_def >= 0 {
+                        // (x - C1) - C2 → x - (C1 + C2)
+                        if !ah_was_add && instr.bin_op == BinaryOp::OpSub {
+                            let ah_merged = ah_c1 + v2
+                            ir_arena_store(ir_region_slot_w(result.region, (ah_c2_def)), ir_load_imm(s2, ah_merged))
+                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(instr.dst, ah_base, BinaryOp::OpSub, s2))
+                            const_val[s2 as usize] = ah_merged
+                            if instr.dst >= 0 && instr.dst < 256 {
+                                as_valid[instr.dst as usize]   = true
+                                as_var_src[instr.dst as usize] = ah_base
+                                as_const_v[instr.dst as usize] = ah_merged
+                                as_is_add[instr.dst as usize]  = false
                             }
-                            // (x - C1) + C2, C2 > C1 → x + (C2 - C1)
-                            if !ah_was_add && instr.bin_op == BinaryOp::OpAdd && v2 > ah_c1 {
-                                let ah_net = v2 - ah_c1
-                                ir_arena_store(ir_region_slot_w(result.region, (ah_c2_def)), ir_load_imm(s2, ah_net))
-                                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(instr.dst, ah_base, BinaryOp::OpAdd, s2))
-                                const_val[s2 as usize] = ah_net
-                                if instr.dst >= 0 && instr.dst < 256 {
-                                    as_valid[instr.dst as usize]   = true
-                                    as_var_src[instr.dst as usize] = ah_base
-                                    as_const_v[instr.dst as usize] = ah_net
-                                    as_is_add[instr.dst as usize]  = true
-                                }
+                        }
+                        // (x - C1) + C2, C2 > C1 → x + (C2 - C1)
+                        if !ah_was_add && instr.bin_op == BinaryOp::OpAdd && v2 > ah_c1 {
+                            let ah_net = v2 - ah_c1
+                            ir_arena_store(ir_region_slot_w(result.region, (ah_c2_def)), ir_load_imm(s2, ah_net))
+                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(instr.dst, ah_base, BinaryOp::OpAdd, s2))
+                            const_val[s2 as usize] = ah_net
+                            if instr.dst >= 0 && instr.dst < 256 {
+                                as_valid[instr.dst as usize]   = true
+                                as_var_src[instr.dst as usize] = ah_base
+                                as_const_v[instr.dst as usize] = ah_net
+                                as_is_add[instr.dst as usize]  = true
                             }
-                            // (x - C1) + C2, C2 < C1 → x - (C1 - C2)
-                            if !ah_was_add && instr.bin_op == BinaryOp::OpAdd && v2 < ah_c1 {
-                                let ah_net = ah_c1 - v2
-                                ir_arena_store(ir_region_slot_w(result.region, (ah_c2_def)), ir_load_imm(s2, ah_net))
-                                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(instr.dst, ah_base, BinaryOp::OpSub, s2))
-                                const_val[s2 as usize] = ah_net
-                                if instr.dst >= 0 && instr.dst < 256 {
-                                    as_valid[instr.dst as usize]   = true
-                                    as_var_src[instr.dst as usize] = ah_base
-                                    as_const_v[instr.dst as usize] = ah_net
-                                    as_is_add[instr.dst as usize]  = false
-                                }
+                        }
+                        // (x - C1) + C2, C2 < C1 → x - (C1 - C2)
+                        if !ah_was_add && instr.bin_op == BinaryOp::OpAdd && v2 < ah_c1 {
+                            let ah_net = ah_c1 - v2
+                            ir_arena_store(ir_region_slot_w(result.region, (ah_c2_def)), ir_load_imm(s2, ah_net))
+                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(instr.dst, ah_base, BinaryOp::OpSub, s2))
+                            const_val[s2 as usize] = ah_net
+                            if instr.dst >= 0 && instr.dst < 256 {
+                                as_valid[instr.dst as usize]   = true
+                                as_var_src[instr.dst as usize] = ah_base
+                                as_const_v[instr.dst as usize] = ah_net
+                                as_is_add[instr.dst as usize]  = false
                             }
-                            // (x + C1) - C2, C2 > C1 → x - (C2 - C1)
-                            if ah_was_add && instr.bin_op == BinaryOp::OpSub && v2 > ah_c1 {
-                                let ah_net = v2 - ah_c1
-                                ir_arena_store(ir_region_slot_w(result.region, (ah_c2_def)), ir_load_imm(s2, ah_net))
-                                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(instr.dst, ah_base, BinaryOp::OpSub, s2))
-                                const_val[s2 as usize] = ah_net
-                                if instr.dst >= 0 && instr.dst < 256 {
-                                    as_valid[instr.dst as usize]   = true
-                                    as_var_src[instr.dst as usize] = ah_base
-                                    as_const_v[instr.dst as usize] = ah_net
-                                    as_is_add[instr.dst as usize]  = false
-                                }
+                        }
+                        // (x + C1) - C2, C2 > C1 → x - (C2 - C1)
+                        if ah_was_add && instr.bin_op == BinaryOp::OpSub && v2 > ah_c1 {
+                            let ah_net = v2 - ah_c1
+                            ir_arena_store(ir_region_slot_w(result.region, (ah_c2_def)), ir_load_imm(s2, ah_net))
+                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(instr.dst, ah_base, BinaryOp::OpSub, s2))
+                            const_val[s2 as usize] = ah_net
+                            if instr.dst >= 0 && instr.dst < 256 {
+                                as_valid[instr.dst as usize]   = true
+                                as_var_src[instr.dst as usize] = ah_base
+                                as_const_v[instr.dst as usize] = ah_net
+                                as_is_add[instr.dst as usize]  = false
                             }
-                            // (x + C1) - C2, C2 < C1 → x + (C1 - C2)
-                            if ah_was_add && instr.bin_op == BinaryOp::OpSub && v2 < ah_c1 {
-                                let ah_net = ah_c1 - v2
-                                ir_arena_store(ir_region_slot_w(result.region, (ah_c2_def)), ir_load_imm(s2, ah_net))
-                                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(instr.dst, ah_base, BinaryOp::OpAdd, s2))
-                                const_val[s2 as usize] = ah_net
-                                if instr.dst >= 0 && instr.dst < 256 {
-                                    as_valid[instr.dst as usize]   = true
-                                    as_var_src[instr.dst as usize] = ah_base
-                                    as_const_v[instr.dst as usize] = ah_net
-                                    as_is_add[instr.dst as usize]  = true
-                                }
+                        }
+                        // (x + C1) - C2, C2 < C1 → x + (C1 - C2)
+                        if ah_was_add && instr.bin_op == BinaryOp::OpSub && v2 < ah_c1 {
+                            let ah_net = ah_c1 - v2
+                            ir_arena_store(ir_region_slot_w(result.region, (ah_c2_def)), ir_load_imm(s2, ah_net))
+                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(instr.dst, ah_base, BinaryOp::OpAdd, s2))
+                            const_val[s2 as usize] = ah_net
+                            if instr.dst >= 0 && instr.dst < 256 {
+                                as_valid[instr.dst as usize]   = true
+                                as_var_src[instr.dst as usize] = ah_base
+                                as_const_v[instr.dst as usize] = ah_net
+                                as_is_add[instr.dst as usize]  = true
                             }
                         }
                     }
@@ -2911,6 +2973,13 @@ fn ocp_const_fold_scan(
                         }
                     } else {
                         ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(ar_instr.dst, as_base1, BinaryOp::OpBitXor, as_base2))
+                        // #1680: record the rewritten operands, as Block EN does, so a
+                        // later x | (x ^ y) (Block EK) sees x ^ y and not ~x ^ ~y.
+                        if ar_instr.dst >= 0 && ar_instr.dst < 256 {
+                            as_xor_rr_valid[ar_instr.dst as usize] = true
+                            as_xor_rr_lhs[ar_instr.dst as usize] = as_base1
+                            as_xor_rr_rhs[ar_instr.dst as usize] = as_base2
+                        }
                     }
                 }
             }
@@ -3313,6 +3382,7 @@ fn ocp_const_fold_scan(
                         }
                         if bk_instr.dst >= 0 && bk_instr.dst < 256 {
                             bk_shl_valid[bk_instr.dst as usize] = true
+                            bk_shl_creg[bk_instr.dst as usize]  = bk_s2
                             bk_shl_src[bk_instr.dst as usize]   = bk_shl_src[bk_s1 as usize]
                             bk_shl_amt[bk_instr.dst as usize]   = bk_ab
                         }
@@ -3353,6 +3423,7 @@ fn ocp_const_fold_scan(
                     bk_shl_valid[bk_t.dst as usize] = true
                     bk_shl_src[bk_t.dst as usize]   = bk_ts1
                     bk_shl_amt[bk_t.dst as usize]   = const_val[bk_ts2 as usize]
+                    bk_shl_creg[bk_t.dst as usize]  = bk_ts2
                 }
             }
             if bk_t.bin_op == BinaryOp::OpShr && bk_ts2_ok && is_const[bk_ts2 as usize] {
@@ -3815,6 +3886,7 @@ fn ocp_const_fold_scan(
                         const_val[ce_s2 as usize] = ce_merged
                         if ce_instr.dst >= 0 && ce_instr.dst < 256 {
                             mul_valid[ce_instr.dst as usize]   = true
+                            mul_const_reg[ce_instr.dst as usize] = -1
                             mul_var_src[ce_instr.dst as usize] = mul_var_src[ce_s1 as usize]
                             mul_const_v[ce_instr.dst as usize] = ce_merged
                         }
@@ -3833,6 +3905,7 @@ fn ocp_const_fold_scan(
                         const_val[ce_s1 as usize] = ce_merged
                         if ce_instr.dst >= 0 && ce_instr.dst < 256 {
                             mul_valid[ce_instr.dst as usize]   = true
+                            mul_const_reg[ce_instr.dst as usize] = -1
                             mul_var_src[ce_instr.dst as usize] = mul_var_src[ce_s2 as usize]
                             mul_const_v[ce_instr.dst as usize] = ce_merged
                         }
@@ -3854,32 +3927,38 @@ fn ocp_const_fold_scan(
                 if cg_s1_ok && mul_valid[cg_s1 as usize]
                         && mul_var_src[cg_s1 as usize] == cg_s2 {
                     let cg_merged = mul_const_v[cg_s1 as usize] + 1
-                    let cg_def = def_at[cg_s1 as usize]
+                    let cg_creg1 = mul_const_reg[cg_s1 as usize]
+                    let cg_def = ocp_patchable_inner_const(&result, cg_creg1, cg_s1, cg_s2)
                     if cg_def >= 0 {
-                        ir_arena_store(ir_region_slot_w(result.region, (cg_def)), ir_load_imm(cg_s1, cg_merged))
-                        const_val[cg_s1 as usize] = cg_merged
-                    }
-                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cg_instr.dst, cg_s2, BinaryOp::OpMul, cg_s1))
-                    if cg_instr.dst >= 0 && cg_instr.dst < 256 {
-                        mul_valid[cg_instr.dst as usize]   = true
-                        mul_var_src[cg_instr.dst as usize] = cg_s2
-                        mul_const_v[cg_instr.dst as usize] = cg_merged
+                        ir_arena_store(ir_region_slot_w(result.region, (cg_def)), ir_load_imm(cg_creg1, cg_merged))
+                        is_const[cg_creg1 as usize] = true
+                        const_val[cg_creg1 as usize] = cg_merged
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cg_instr.dst, cg_s2, BinaryOp::OpMul, cg_creg1))
+                        if cg_instr.dst >= 0 && cg_instr.dst < 256 {
+                            mul_valid[cg_instr.dst as usize]   = true
+                            mul_var_src[cg_instr.dst as usize] = cg_s2
+                            mul_const_v[cg_instr.dst as usize] = cg_merged
+                            mul_const_reg[cg_instr.dst as usize] = cg_creg1
+                        }
                     }
                 }
                 // x + (x*C) → x*(C+1): s2=mul-const, s1==base of s2
                 if cg_s2_ok && mul_valid[cg_s2 as usize]
                         && mul_var_src[cg_s2 as usize] == cg_s1 {
                     let cg_merged = mul_const_v[cg_s2 as usize] + 1
-                    let cg_def = def_at[cg_s2 as usize]
+                    let cg_creg2 = mul_const_reg[cg_s2 as usize]
+                    let cg_def = ocp_patchable_inner_const(&result, cg_creg2, cg_s2, cg_s1)
                     if cg_def >= 0 {
-                        ir_arena_store(ir_region_slot_w(result.region, (cg_def)), ir_load_imm(cg_s2, cg_merged))
-                        const_val[cg_s2 as usize] = cg_merged
-                    }
-                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cg_instr.dst, cg_s1, BinaryOp::OpMul, cg_s2))
-                    if cg_instr.dst >= 0 && cg_instr.dst < 256 {
-                        mul_valid[cg_instr.dst as usize]   = true
-                        mul_var_src[cg_instr.dst as usize] = cg_s1
-                        mul_const_v[cg_instr.dst as usize] = cg_merged
+                        ir_arena_store(ir_region_slot_w(result.region, (cg_def)), ir_load_imm(cg_creg2, cg_merged))
+                        is_const[cg_creg2 as usize] = true
+                        const_val[cg_creg2 as usize] = cg_merged
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cg_instr.dst, cg_s1, BinaryOp::OpMul, cg_creg2))
+                        if cg_instr.dst >= 0 && cg_instr.dst < 256 {
+                            mul_valid[cg_instr.dst as usize]   = true
+                            mul_var_src[cg_instr.dst as usize] = cg_s1
+                            mul_const_v[cg_instr.dst as usize] = cg_merged
+                            mul_const_reg[cg_instr.dst as usize] = cg_creg2
+                        }
                     }
                 }
             }
@@ -3899,32 +3978,38 @@ fn ocp_const_fold_scan(
                 if ch_s1_ok && mul_valid[ch_s1 as usize]
                         && mul_var_src[ch_s1 as usize] == ch_s2 {
                     let ch_merged = mul_const_v[ch_s1 as usize] - 1
-                    let ch_def = def_at[ch_s1 as usize]
+                    let ch_creg1 = mul_const_reg[ch_s1 as usize]
+                    let ch_def = ocp_patchable_inner_const(&result, ch_creg1, ch_s1, ch_s2)
                     if ch_def >= 0 {
-                        ir_arena_store(ir_region_slot_w(result.region, (ch_def)), ir_load_imm(ch_s1, ch_merged))
-                        const_val[ch_s1 as usize] = ch_merged
-                    }
-                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(ch_instr.dst, ch_s2, BinaryOp::OpMul, ch_s1))
-                    if ch_instr.dst >= 0 && ch_instr.dst < 256 {
-                        mul_valid[ch_instr.dst as usize]   = true
-                        mul_var_src[ch_instr.dst as usize] = ch_s2
-                        mul_const_v[ch_instr.dst as usize] = ch_merged
+                        ir_arena_store(ir_region_slot_w(result.region, (ch_def)), ir_load_imm(ch_creg1, ch_merged))
+                        is_const[ch_creg1 as usize] = true
+                        const_val[ch_creg1 as usize] = ch_merged
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(ch_instr.dst, ch_s2, BinaryOp::OpMul, ch_creg1))
+                        if ch_instr.dst >= 0 && ch_instr.dst < 256 {
+                            mul_valid[ch_instr.dst as usize]   = true
+                            mul_var_src[ch_instr.dst as usize] = ch_s2
+                            mul_const_v[ch_instr.dst as usize] = ch_merged
+                            mul_const_reg[ch_instr.dst as usize] = ch_creg1
+                        }
                     }
                 }
                 // x - (x*C) → x*(1-C): s2=mul-const, s1==base of s2
                 if ch_s2_ok && mul_valid[ch_s2 as usize]
                         && mul_var_src[ch_s2 as usize] == ch_s1 {
                     let ch_merged = 1 - mul_const_v[ch_s2 as usize]
-                    let ch_def = def_at[ch_s2 as usize]
+                    let ch_creg2 = mul_const_reg[ch_s2 as usize]
+                    let ch_def = ocp_patchable_inner_const(&result, ch_creg2, ch_s2, ch_s1)
                     if ch_def >= 0 {
-                        ir_arena_store(ir_region_slot_w(result.region, (ch_def)), ir_load_imm(ch_s2, ch_merged))
-                        const_val[ch_s2 as usize] = ch_merged
-                    }
-                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(ch_instr.dst, ch_s1, BinaryOp::OpMul, ch_s2))
-                    if ch_instr.dst >= 0 && ch_instr.dst < 256 {
-                        mul_valid[ch_instr.dst as usize]   = true
-                        mul_var_src[ch_instr.dst as usize] = ch_s1
-                        mul_const_v[ch_instr.dst as usize] = ch_merged
+                        ir_arena_store(ir_region_slot_w(result.region, (ch_def)), ir_load_imm(ch_creg2, ch_merged))
+                        is_const[ch_creg2 as usize] = true
+                        const_val[ch_creg2 as usize] = ch_merged
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(ch_instr.dst, ch_s1, BinaryOp::OpMul, ch_creg2))
+                        if ch_instr.dst >= 0 && ch_instr.dst < 256 {
+                            mul_valid[ch_instr.dst as usize]   = true
+                            mul_var_src[ch_instr.dst as usize] = ch_s1
+                            mul_const_v[ch_instr.dst as usize] = ch_merged
+                            mul_const_reg[ch_instr.dst as usize] = ch_creg2
+                        }
                     }
                 }
             }
@@ -3947,16 +4032,19 @@ fn ocp_const_fold_scan(
                     if ci_amt >= 0 && ci_amt < 63 {
                         let ci_pow2 = 1 << (ci_amt as i32)
                         let ci_merged = ci_pow2 + 1
-                        let ci_def = def_at[ci_s1 as usize]
+                        let ci_creg1 = bk_shl_creg[ci_s1 as usize]
+                        let ci_def = ocp_patchable_inner_const(&result, ci_creg1, ci_s1, ci_s2)
                         if ci_def >= 0 {
-                            ir_arena_store(ir_region_slot_w(result.region, (ci_def)), ir_load_imm(ci_s1, ci_merged as i64))
-                            const_val[ci_s1 as usize] = ci_merged as i64
-                        }
-                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(ci_instr.dst, ci_s2, BinaryOp::OpMul, ci_s1))
-                        if ci_instr.dst >= 0 && ci_instr.dst < 256 {
-                            mul_valid[ci_instr.dst as usize]   = true
-                            mul_var_src[ci_instr.dst as usize] = ci_s2
-                            mul_const_v[ci_instr.dst as usize] = ci_merged as i64
+                            ir_arena_store(ir_region_slot_w(result.region, (ci_def)), ir_load_imm(ci_creg1, ci_merged as i64))
+                            is_const[ci_creg1 as usize] = true
+                            const_val[ci_creg1 as usize] = ci_merged as i64
+                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(ci_instr.dst, ci_s2, BinaryOp::OpMul, ci_creg1))
+                            if ci_instr.dst >= 0 && ci_instr.dst < 256 {
+                                mul_valid[ci_instr.dst as usize]   = true
+                                mul_var_src[ci_instr.dst as usize] = ci_s2
+                                mul_const_v[ci_instr.dst as usize] = ci_merged as i64
+                                mul_const_reg[ci_instr.dst as usize] = ci_creg1
+                            }
                         }
                     }
                 }
@@ -3967,16 +4055,19 @@ fn ocp_const_fold_scan(
                     if ci_amt >= 0 && ci_amt < 63 {
                         let ci_pow2 = 1 << (ci_amt as i32)
                         let ci_merged = ci_pow2 + 1
-                        let ci_def = def_at[ci_s2 as usize]
+                        let ci_creg2 = bk_shl_creg[ci_s2 as usize]
+                        let ci_def = ocp_patchable_inner_const(&result, ci_creg2, ci_s2, ci_s1)
                         if ci_def >= 0 {
-                            ir_arena_store(ir_region_slot_w(result.region, (ci_def)), ir_load_imm(ci_s2, ci_merged as i64))
-                            const_val[ci_s2 as usize] = ci_merged as i64
-                        }
-                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(ci_instr.dst, ci_s1, BinaryOp::OpMul, ci_s2))
-                        if ci_instr.dst >= 0 && ci_instr.dst < 256 {
-                            mul_valid[ci_instr.dst as usize]   = true
-                            mul_var_src[ci_instr.dst as usize] = ci_s1
-                            mul_const_v[ci_instr.dst as usize] = ci_merged as i64
+                            ir_arena_store(ir_region_slot_w(result.region, (ci_def)), ir_load_imm(ci_creg2, ci_merged as i64))
+                            is_const[ci_creg2 as usize] = true
+                            const_val[ci_creg2 as usize] = ci_merged as i64
+                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(ci_instr.dst, ci_s1, BinaryOp::OpMul, ci_creg2))
+                            if ci_instr.dst >= 0 && ci_instr.dst < 256 {
+                                mul_valid[ci_instr.dst as usize]   = true
+                                mul_var_src[ci_instr.dst as usize] = ci_s1
+                                mul_const_v[ci_instr.dst as usize] = ci_merged as i64
+                                mul_const_reg[ci_instr.dst as usize] = ci_creg2
+                            }
                         }
                     }
                 }
@@ -4001,16 +4092,19 @@ fn ocp_const_fold_scan(
                     if cj_amt >= 0 && cj_amt < 63 {
                         let cj_pow2 = 1 << (cj_amt as i32)
                         let cj_merged = cj_pow2 - 1
-                        let cj_def = def_at[cj_s1 as usize]
+                        let cj_creg1 = bk_shl_creg[cj_s1 as usize]
+                        let cj_def = ocp_patchable_inner_const(&result, cj_creg1, cj_s1, cj_s2)
                         if cj_def >= 0 {
-                            ir_arena_store(ir_region_slot_w(result.region, (cj_def)), ir_load_imm(cj_s1, cj_merged as i64))
-                            const_val[cj_s1 as usize] = cj_merged as i64
-                        }
-                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cj_instr.dst, cj_s2, BinaryOp::OpMul, cj_s1))
-                        if cj_instr.dst >= 0 && cj_instr.dst < 256 {
-                            mul_valid[cj_instr.dst as usize]   = true
-                            mul_var_src[cj_instr.dst as usize] = cj_s2
-                            mul_const_v[cj_instr.dst as usize] = cj_merged as i64
+                            ir_arena_store(ir_region_slot_w(result.region, (cj_def)), ir_load_imm(cj_creg1, cj_merged as i64))
+                            is_const[cj_creg1 as usize] = true
+                            const_val[cj_creg1 as usize] = cj_merged as i64
+                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cj_instr.dst, cj_s2, BinaryOp::OpMul, cj_creg1))
+                            if cj_instr.dst >= 0 && cj_instr.dst < 256 {
+                                mul_valid[cj_instr.dst as usize]   = true
+                                mul_var_src[cj_instr.dst as usize] = cj_s2
+                                mul_const_v[cj_instr.dst as usize] = cj_merged as i64
+                                mul_const_reg[cj_instr.dst as usize] = cj_creg1
+                            }
                         }
                     }
                 }
@@ -4021,16 +4115,19 @@ fn ocp_const_fold_scan(
                     if cj_amt >= 0 && cj_amt < 63 {
                         let cj_pow2 = 1 << (cj_amt as i32)
                         let cj_merged = 1 - cj_pow2
-                        let cj_def = def_at[cj_s2 as usize]
+                        let cj_creg2 = bk_shl_creg[cj_s2 as usize]
+                        let cj_def = ocp_patchable_inner_const(&result, cj_creg2, cj_s2, cj_s1)
                         if cj_def >= 0 {
-                            ir_arena_store(ir_region_slot_w(result.region, (cj_def)), ir_load_imm(cj_s2, cj_merged as i64))
-                            const_val[cj_s2 as usize] = cj_merged as i64
-                        }
-                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cj_instr.dst, cj_s1, BinaryOp::OpMul, cj_s2))
-                        if cj_instr.dst >= 0 && cj_instr.dst < 256 {
-                            mul_valid[cj_instr.dst as usize]   = true
-                            mul_var_src[cj_instr.dst as usize] = cj_s1
-                            mul_const_v[cj_instr.dst as usize] = cj_merged as i64
+                            ir_arena_store(ir_region_slot_w(result.region, (cj_def)), ir_load_imm(cj_creg2, cj_merged as i64))
+                            is_const[cj_creg2 as usize] = true
+                            const_val[cj_creg2 as usize] = cj_merged as i64
+                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cj_instr.dst, cj_s1, BinaryOp::OpMul, cj_creg2))
+                            if cj_instr.dst >= 0 && cj_instr.dst < 256 {
+                                mul_valid[cj_instr.dst as usize]   = true
+                                mul_var_src[cj_instr.dst as usize] = cj_s1
+                                mul_const_v[cj_instr.dst as usize] = cj_merged as i64
+                                mul_const_reg[cj_instr.dst as usize] = cj_creg2
+                            }
                         }
                     }
                 }
@@ -4130,16 +4227,21 @@ fn ocp_const_fold_scan(
                     && mul_var_src[cs_s1 as usize] == mul_var_src[cs_s2 as usize] {
                 let cs_x = mul_var_src[cs_s1 as usize]
                 let cs_merged = mul_const_v[cs_s1 as usize] + mul_const_v[cs_s2 as usize]
-                let cs_def = def_at[cs_s1 as usize]
+                // #1680: patch the constant feeding the inner multiply (as Blocks CG/CI do), not
+                // def_at[] of the inner RESULT; that rewrote dst = x * (x OP C1).
+                let cs_creg = mul_const_reg[cs_s1 as usize]
+                let cs_def = ocp_patchable_inner_const(&result, cs_creg, cs_s1, cs_x)
                 if cs_def >= 0 {
-                    ir_arena_store(ir_region_slot_w(result.region, (cs_def)), ir_load_imm(cs_s1, cs_merged))
-                    const_val[cs_s1 as usize] = cs_merged
-                }
-                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cs_instr.dst, cs_x, BinaryOp::OpMul, cs_s1))
-                if cs_instr.dst >= 0 && cs_instr.dst < 256 {
-                    mul_valid[cs_instr.dst as usize]   = true
-                    mul_var_src[cs_instr.dst as usize] = cs_x
-                    mul_const_v[cs_instr.dst as usize] = cs_merged
+                    ir_arena_store(ir_region_slot_w(result.region, (cs_def)), ir_load_imm(cs_creg, cs_merged))
+                    is_const[cs_creg as usize] = true
+                    const_val[cs_creg as usize] = cs_merged
+                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cs_instr.dst, cs_x, BinaryOp::OpMul, cs_creg))
+                    if cs_instr.dst >= 0 && cs_instr.dst < 256 {
+                        mul_valid[cs_instr.dst as usize]   = true
+                        mul_const_reg[cs_instr.dst as usize] = cs_creg
+                        mul_var_src[cs_instr.dst as usize] = cs_x
+                        mul_const_v[cs_instr.dst as usize] = cs_merged
+                    }
                 }
             }
         }
@@ -4157,16 +4259,21 @@ fn ocp_const_fold_scan(
                     && mul_var_src[ct_s1 as usize] == mul_var_src[ct_s2 as usize] {
                 let ct_x = mul_var_src[ct_s1 as usize]
                 let ct_merged = mul_const_v[ct_s1 as usize] - mul_const_v[ct_s2 as usize]
-                let ct_def = def_at[ct_s1 as usize]
+                // #1680: patch the constant feeding the inner multiply (as Blocks CG/CI do), not
+                // def_at[] of the inner RESULT; that rewrote dst = x * (x OP C1).
+                let ct_creg = mul_const_reg[ct_s1 as usize]
+                let ct_def = ocp_patchable_inner_const(&result, ct_creg, ct_s1, ct_x)
                 if ct_def >= 0 {
-                    ir_arena_store(ir_region_slot_w(result.region, (ct_def)), ir_load_imm(ct_s1, ct_merged))
-                    const_val[ct_s1 as usize] = ct_merged
-                }
-                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(ct_instr.dst, ct_x, BinaryOp::OpMul, ct_s1))
-                if ct_instr.dst >= 0 && ct_instr.dst < 256 {
-                    mul_valid[ct_instr.dst as usize]   = true
-                    mul_var_src[ct_instr.dst as usize] = ct_x
-                    mul_const_v[ct_instr.dst as usize] = ct_merged
+                    ir_arena_store(ir_region_slot_w(result.region, (ct_def)), ir_load_imm(ct_creg, ct_merged))
+                    is_const[ct_creg as usize] = true
+                    const_val[ct_creg as usize] = ct_merged
+                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(ct_instr.dst, ct_x, BinaryOp::OpMul, ct_creg))
+                    if ct_instr.dst >= 0 && ct_instr.dst < 256 {
+                        mul_valid[ct_instr.dst as usize]   = true
+                        mul_const_reg[ct_instr.dst as usize] = ct_creg
+                        mul_var_src[ct_instr.dst as usize] = ct_x
+                        mul_const_v[ct_instr.dst as usize] = ct_merged
+                    }
                 }
             }
         }
@@ -4188,16 +4295,21 @@ fn ocp_const_fold_scan(
                 let cu_b = bk_shl_amt[cu_s2 as usize]
                 if cu_a >= 0 && cu_a < 63 && cu_b >= 0 && cu_b < 63 {
                     let cu_merged = (1 << (cu_a as i32)) + (1 << (cu_b as i32))
-                    let cu_def = def_at[cu_s1 as usize]
+                    // #1680: patch the constant feeding the inner shift (as Blocks CG/CI do), not
+                    // def_at[] of the inner RESULT; that rewrote dst = x * (x OP C1).
+                    let cu_creg = bk_shl_creg[cu_s1 as usize]
+                    let cu_def = ocp_patchable_inner_const(&result, cu_creg, cu_s1, cu_x)
                     if cu_def >= 0 {
-                        ir_arena_store(ir_region_slot_w(result.region, (cu_def)), ir_load_imm(cu_s1, cu_merged as i64))
-                        const_val[cu_s1 as usize] = cu_merged as i64
-                    }
-                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cu_instr.dst, cu_x, BinaryOp::OpMul, cu_s1))
-                    if cu_instr.dst >= 0 && cu_instr.dst < 256 {
-                        mul_valid[cu_instr.dst as usize]   = true
-                        mul_var_src[cu_instr.dst as usize] = cu_x
-                        mul_const_v[cu_instr.dst as usize] = cu_merged as i64
+                        ir_arena_store(ir_region_slot_w(result.region, (cu_def)), ir_load_imm(cu_creg, cu_merged as i64))
+                        is_const[cu_creg as usize] = true
+                        const_val[cu_creg as usize] = cu_merged as i64
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cu_instr.dst, cu_x, BinaryOp::OpMul, cu_creg))
+                        if cu_instr.dst >= 0 && cu_instr.dst < 256 {
+                            mul_valid[cu_instr.dst as usize]   = true
+                            mul_const_reg[cu_instr.dst as usize] = cu_creg
+                            mul_var_src[cu_instr.dst as usize] = cu_x
+                            mul_const_v[cu_instr.dst as usize] = cu_merged as i64
+                        }
                     }
                 }
             }
@@ -4219,16 +4331,21 @@ fn ocp_const_fold_scan(
                 let cv_b = bk_shl_amt[cv_s2 as usize]
                 if cv_a >= 0 && cv_a < 63 && cv_b >= 0 && cv_b < 63 {
                     let cv_merged = (1 << (cv_a as i32)) - (1 << (cv_b as i32))
-                    let cv_def = def_at[cv_s1 as usize]
+                    // #1680: patch the constant feeding the inner shift (as Blocks CG/CI do), not
+                    // def_at[] of the inner RESULT; that rewrote dst = x * (x OP C1).
+                    let cv_creg = bk_shl_creg[cv_s1 as usize]
+                    let cv_def = ocp_patchable_inner_const(&result, cv_creg, cv_s1, cv_x)
                     if cv_def >= 0 {
-                        ir_arena_store(ir_region_slot_w(result.region, (cv_def)), ir_load_imm(cv_s1, cv_merged as i64))
-                        const_val[cv_s1 as usize] = cv_merged as i64
-                    }
-                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cv_instr.dst, cv_x, BinaryOp::OpMul, cv_s1))
-                    if cv_instr.dst >= 0 && cv_instr.dst < 256 {
-                        mul_valid[cv_instr.dst as usize]   = true
-                        mul_var_src[cv_instr.dst as usize] = cv_x
-                        mul_const_v[cv_instr.dst as usize] = cv_merged as i64
+                        ir_arena_store(ir_region_slot_w(result.region, (cv_def)), ir_load_imm(cv_creg, cv_merged as i64))
+                        is_const[cv_creg as usize] = true
+                        const_val[cv_creg as usize] = cv_merged as i64
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cv_instr.dst, cv_x, BinaryOp::OpMul, cv_creg))
+                        if cv_instr.dst >= 0 && cv_instr.dst < 256 {
+                            mul_valid[cv_instr.dst as usize]   = true
+                            mul_const_reg[cv_instr.dst as usize] = cv_creg
+                            mul_var_src[cv_instr.dst as usize] = cv_x
+                            mul_const_v[cv_instr.dst as usize] = cv_merged as i64
+                        }
                     }
                 }
             }
@@ -6389,6 +6506,7 @@ fn ocp_const_fold_scan(
                     // Safest: just mark mul_valid for downstream passes.
                     if cn_s1 >= 0 && cn_s1 < 256 {
                         mul_valid[cn_instr.dst as usize]   = true
+                        mul_const_reg[cn_instr.dst as usize] = -1
                         mul_var_src[cn_instr.dst as usize] = cn_s1
                         mul_const_v[cn_instr.dst as usize] = 2
                     }
@@ -7436,8 +7554,9 @@ fn ocp_const_fold_scan(
         // Re-reads the current instruction so previous blocks' rewrites are respected.
         // Patches both the IrBinOp and the preceding IrLoadImm (via def_at) in place.
         //   x * 2^n → x << n  (OpMul → OpShl, constant patched to log2)
-        //   x / 2^n → x >> n  (OpDiv → OpShr, constant patched to log2)
-        //   x % 2^n → x & (2^n-1)  (OpRem → OpBitAnd, constant patched to mask)
+        //   x / 2^n → x >> n  (OpUDiv → OpUShr, constant patched to log2)
+        //   x % 2^n → x & (2^n-1)  (OpURem → OpBitAnd, constant patched to mask)
+        //   (unsigned only: see below)
         if ocp_is_binop((IR_A_OP[(ir_region_slot_r(result.region, (i))) as usize] as IrOpcode)) {
             let cur = ir_arena_load(ir_region_slot_r(result.region, (i)))
             let s2 = cur.src2
@@ -7445,7 +7564,9 @@ fn ocp_const_fold_scan(
             let s2_ok = s2 >= 0 && s2 < 256
             if s2_ok && is_const[s2 as usize] {
                 let v2 = const_val[s2 as usize]
-                let def_idx = def_at[s2 as usize]
+                // #1680: the patch below rewrites the constant's own load, so it
+                // is only sound when this instruction is that load's only reader.
+                let def_idx = if ocp_const_patch_ok(&result, s2) { def_at[s2 as usize] } else { -1 }
                 if def_idx >= 0 && ocp_is_power_of_two(v2) {
                     if cur.bin_op == BinaryOp::OpMul && !preserve_mul_chain {
                         let shift = ocp_log2(v2)
@@ -7453,13 +7574,17 @@ fn ocp_const_fold_scan(
                         ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cur.dst, s1, BinaryOp::OpShl, s2))
                         const_val[s2 as usize] = shift
                     }
-                    if cur.bin_op == BinaryOp::OpDiv {
+                    // #1680: only the UNSIGNED forms. OpDiv/OpRem are signed and
+                    // truncate toward zero (idiv); `>>` is arithmetic and floors,
+                    // so -7 / 2 = -3 but -7 >> 1 = -4, and -7 % 4 = -3 but
+                    // -7 & 3 = 1. Unsigned division is exactly a logical shift.
+                    if cur.bin_op == BinaryOp::OpUDiv {
                         let shift = ocp_log2(v2)
                         ir_arena_store(ir_region_slot_w(result.region, (def_idx)), ir_load_imm(s2, shift))
-                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cur.dst, s1, BinaryOp::OpShr, s2))
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cur.dst, s1, BinaryOp::OpUShr, s2))
                         const_val[s2 as usize] = shift
                     }
-                    if cur.bin_op == BinaryOp::OpRem {
+                    if cur.bin_op == BinaryOp::OpURem {
                         let mask = v2 - 1
                         ir_arena_store(ir_region_slot_w(result.region, (def_idx)), ir_load_imm(s2, mask))
                         ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cur.dst, s1, BinaryOp::OpBitAnd, s2))
@@ -8316,7 +8441,7 @@ struct OptCleanupResult {
 // with IrCopy(dst, prior_reg). Reduces register pressure; downstream copy
 // propagation in ocp_const_fold eliminates the redundant load.
 // SOTA: Cooper & Torczon §8.4 LVN; Click PLDI 1995 §2 value numbering.
-fn ocp_dedup_imm(func: IrFunction) -> IrFunction with Mut, Div, Panic {
+pub(crate) fn ocp_dedup_imm(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = ir_function_clone(&func)
     var seen_const: [bool; 256] = [false; 256]
     var seen_val:   [i64;  256] = [0;     256]
@@ -8617,6 +8742,43 @@ pub(crate) fn ocp_mul3_sr(func: IrFunction) -> IrFunction with Mut, Div, Panic {
 // instructions whose dst is not written elsewhere in the loop body.
 // Only hoists IrLoadImm (safe: no side effects, no data dependencies).
 // SOTA: Muchnick §13.2; Cooper & Torczon §10.3.
+//
+// #1680: the hoist used to SWAP the load with the instruction just before the
+// loop label, which moved that preheader instruction into the loop body (and
+// ran it on every iteration). The load is now inserted just before the label
+// and the label..load range shifts down by one slot. It is hoisted only when
+// that is unobservable: no read of its register in the loop before the load,
+// no label or control transfer between the loop label and the load (so the
+// load runs on the first iteration before any exit), and the loop label is
+// entered from above only by fallthrough (no earlier jump targets it).
+fn ocp_licm_is_control(op: IrOpcode) -> bool {
+    op == IrOpcode::IrLabel || op == IrOpcode::IrJump || op == IrOpcode::IrBranchTrue
+        || op == IrOpcode::IrBranchFalse || op == IrOpcode::IrReturn
+}
+
+fn ocp_licm_can_hoist(func: &IrFunction, lp: i64, j: i64, back: i64, dst: i64, label_id: i64) -> bool with Mut, Div, Panic {
+    var k: i64 = lp + 1
+    while k < back {
+        let ki = ir_arena_load(ir_region_slot_r(func.region, (k)))
+        if k != j && ki.dst == dst && ki.op != IrOpcode::IrNop { return false }
+        if k < j {
+            if ki.src1 == dst || ki.src2 == dst { return false }
+            if ocp_licm_is_control(ki.op) { return false }
+        }
+        k = k + 1
+    }
+    k = 0
+    while k < lp {
+        let ki = ir_arena_load(ir_region_slot_r(func.region, (k)))
+        if (ki.op == IrOpcode::IrJump || ki.op == IrOpcode::IrBranchTrue || ki.op == IrOpcode::IrBranchFalse)
+            && ki.label_id == label_id {
+            return false
+        }
+        k = k + 1
+    }
+    true
+}
+
 pub(crate) fn ocp_licm(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = ir_function_clone(&func)
     // Pass 1: record label positions
@@ -8637,35 +8799,21 @@ pub(crate) fn ocp_licm(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             let lp = label_pos[instr.label_id as usize]
             if lp >= 0 && lp < i {
                 // Back-edge: loop from lp to i
-                // Scan loop body for hoistable IrLoadImm
                 var j: i64 = lp + 1
                 while j < i {
                     let li = ir_arena_load(ir_region_slot_r(result.region, (j)))
-                    if li.op == IrOpcode::IrLoadImm && li.dst >= 0 && li.dst < 256 {
-                        // Check dst not written elsewhere in loop
-                        var written_elsewhere: bool = false
-                        var k: i64 = lp + 1
-                        while k < i {
-                            if k != j {
-                                let ki = ir_arena_load(ir_region_slot_r(result.region, (k)))
-                                if ki.dst == li.dst && ki.op != IrOpcode::IrNop {
-                                    written_elsewhere = true
-                                    k = i  // break
-                                }
-                            }
-                            k = k + 1
+                    if li.op == IrOpcode::IrLoadImm && li.dst >= 0 && li.dst < 256
+                        && ocp_licm_can_hoist(&result, lp, j, i, li.dst, instr.label_id) {
+                        // Insert the load before the label: slots lp..j-1 move
+                        // down one, the load lands at lp.
+                        var k: i64 = j
+                        while k > lp {
+                            ir_arena_copy_slot(ir_region_slot_w(result.region, (k)), ir_region_slot_r(result.region, ((k - 1))))
+                            k = k - 1
                         }
-                        if !written_elsewhere {
-                            // Hoist: swap with loop header position
-                            // Place the IrLoadImm just before the label
-                            if lp > 0 {
-                                // A pure exchange of slots j and lp-1. Written as
-                                // two stores the second would take its arguments
-                                // from a slot the first already overwrote.
-                                ir_arena_swap_slots(ir_region_slot_w(result.region, ((lp - 1))), ir_region_slot_w(result.region, (j)))
-                                j = i  // break after first hoist per loop
-                            }
-                        }
+                        ir_arena_store(ir_region_slot_w(result.region, (lp)), li)
+                        label_pos[instr.label_id as usize] = lp + 1
+                        j = i  // one hoist per loop
                     }
                     j = j + 1
                 }

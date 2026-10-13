@@ -8936,33 +8936,39 @@ fn compiler_main_test_ocp_sr_mul_by_8() -> bool with Mut, Div, Panic {
 
 // T98: x / 2 (unsigned) → IrBinOp(OpUShr, x, r) where r's IrLoadImm is patched to 1
 fn compiler_main_test_ocp_sr_div_by_2() -> bool with Mut, Div, Panic {
+    // #1680: strength reduction to a shift/mask is exact for UNSIGNED division
+    // only; signed OpDiv/OpRem truncate toward zero and are left alone.
     var instrs = cp_empty_instrs()
     instrs[0] = ir_load_imm(1, 2)
-    instrs[1] = ir_binop(2, 0, BinaryOp::OpDiv, 1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpUDiv, 1)
     let func = cp_make_test_func(instrs, 2)
     let result = ocp_const_fold(func)
-    if (IR_A_BIN_OP[(ir_region_slot_r(result.region, (1))) as usize] as BinaryOp) != BinaryOp::OpShr { return false }
+    if (IR_A_BIN_OP[(ir_region_slot_r(result.region, (1))) as usize] as BinaryOp) != BinaryOp::OpUShr { return false }
     if IR_A_IMM_I64[(ir_region_slot_r(result.region, (0))) as usize] != 1 { return false }
     true
 }
 
 // T99: x / 4 (unsigned) → IrBinOp(OpUShr, x, r) where r's IrLoadImm is patched to 2
 fn compiler_main_test_ocp_sr_div_by_4() -> bool with Mut, Div, Panic {
+    // #1680: strength reduction to a shift/mask is exact for UNSIGNED division
+    // only; signed OpDiv/OpRem truncate toward zero and are left alone.
     var instrs = cp_empty_instrs()
     instrs[0] = ir_load_imm(1, 4)
-    instrs[1] = ir_binop(2, 0, BinaryOp::OpDiv, 1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpUDiv, 1)
     let func = cp_make_test_func(instrs, 2)
     let result = ocp_const_fold(func)
-    if (IR_A_BIN_OP[(ir_region_slot_r(result.region, (1))) as usize] as BinaryOp) != BinaryOp::OpShr { return false }
+    if (IR_A_BIN_OP[(ir_region_slot_r(result.region, (1))) as usize] as BinaryOp) != BinaryOp::OpUShr { return false }
     if IR_A_IMM_I64[(ir_region_slot_r(result.region, (0))) as usize] != 2 { return false }
     true
 }
 
 // T100: x % 4 (unsigned) → IrBinOp(OpBitAnd, x, r) where r's IrLoadImm is patched to 3
 fn compiler_main_test_ocp_sr_rem_by_4() -> bool with Mut, Div, Panic {
+    // #1680: strength reduction to a shift/mask is exact for UNSIGNED division
+    // only; signed OpDiv/OpRem truncate toward zero and are left alone.
     var instrs = cp_empty_instrs()
     instrs[0] = ir_load_imm(1, 4)
-    instrs[1] = ir_binop(2, 0, BinaryOp::OpRem, 1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpURem, 1)
     let func = cp_make_test_func(instrs, 2)
     let result = ocp_const_fold(func)
     if (IR_A_BIN_OP[(ir_region_slot_r(result.region, (1))) as usize] as BinaryOp) != BinaryOp::OpBitAnd { return false }
@@ -16892,7 +16898,10 @@ fn compiler_main_test_ce_no_fold_div_chain() -> bool with Mut, Div, Panic {
     instrs[2 as usize] = ir_load_imm(3, 4)
     instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpDiv, 3)  // r4 = (r0*3)/4 → no CE
     let func = cp_make_test_func(instrs, 4)
-    let opt = opt_cleanup_function(func)
+    // #1680: observes ocp_const_fold, where this fold lives. This IR never uses the
+    // folded register, so opt_cleanup_function (DCE + NOP compaction) removes it.
+    // #1680: signed x / 4 is not strength-reduced to x >> 2 (wrong for x < 0).
+    let opt = ocp_const_fold(func)
     (IR_A_OP[(ir_region_slot_r(opt.region, (3))) as usize] as IrOpcode) == IrOpcode::IrBinOp
         && (IR_A_BIN_OP[(ir_region_slot_r(opt.region, (3))) as usize] as BinaryOp) == BinaryOp::OpDiv
 }
@@ -16981,7 +16990,10 @@ fn compiler_main_test_cg_mul_add_basic() -> bool with Mut, Div, Panic {
     instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpMul, 1)  // r2 = r0 * 3
     instrs[2 as usize] = ir_binop(3, 2, BinaryOp::OpAdd, 0)  // r3 = (r0*3) + r0 → r0*4
     let func = cp_make_test_func(instrs, 3)
-    let opt = opt_cleanup_function(func)
+    // #1680: observes ocp_const_fold, where this fold lives. This IR never uses the
+    // folded register, so opt_cleanup_function (DCE + NOP compaction) removes it.
+    // #1680: Blocks CG/CI used to patch def_at[] of the mul/shift RESULT; see opt_cleanup.
+    let opt = ocp_const_fold(func)
     (IR_A_OP[(ir_region_slot_r(opt.region, (2))) as usize] as IrOpcode) == IrOpcode::IrBinOp
         && (IR_A_BIN_OP[(ir_region_slot_r(opt.region, (2))) as usize] as BinaryOp) == BinaryOp::OpMul
         && IR_A_IMM_I64[(ir_region_slot_r(opt.region, (0))) as usize] == 4
@@ -16994,7 +17006,10 @@ fn compiler_main_test_cg_mul_add_comm() -> bool with Mut, Div, Panic {
     instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpMul, 1)  // r2 = r0 * 5
     instrs[2 as usize] = ir_binop(3, 0, BinaryOp::OpAdd, 2)  // r3 = r0 + (r0*5) → r0*6
     let func = cp_make_test_func(instrs, 3)
-    let opt = opt_cleanup_function(func)
+    // #1680: observes ocp_const_fold, where this fold lives. This IR never uses the
+    // folded register, so opt_cleanup_function (DCE + NOP compaction) removes it.
+    // #1680: Blocks CG/CI used to patch def_at[] of the mul/shift RESULT; see opt_cleanup.
+    let opt = ocp_const_fold(func)
     (IR_A_OP[(ir_region_slot_r(opt.region, (2))) as usize] as IrOpcode) == IrOpcode::IrBinOp
         && (IR_A_BIN_OP[(ir_region_slot_r(opt.region, (2))) as usize] as BinaryOp) == BinaryOp::OpMul
         && IR_A_IMM_I64[(ir_region_slot_r(opt.region, (0))) as usize] == 6
@@ -17007,7 +17022,10 @@ fn compiler_main_test_cg_mul_add_large() -> bool with Mut, Div, Panic {
     instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpMul, 1)  // r2 = r0 * 99
     instrs[2 as usize] = ir_binop(3, 2, BinaryOp::OpAdd, 0)  // r3 = (r0*99) + r0 → r0*100
     let func = cp_make_test_func(instrs, 3)
-    let opt = opt_cleanup_function(func)
+    // #1680: observes ocp_const_fold, where this fold lives. This IR never uses the
+    // folded register, so opt_cleanup_function (DCE + NOP compaction) removes it.
+    // #1680: Blocks CG/CI used to patch def_at[] of the mul/shift RESULT; see opt_cleanup.
+    let opt = ocp_const_fold(func)
     (IR_A_OP[(ir_region_slot_r(opt.region, (2))) as usize] as IrOpcode) == IrOpcode::IrBinOp
         && (IR_A_BIN_OP[(ir_region_slot_r(opt.region, (2))) as usize] as BinaryOp) == BinaryOp::OpMul
         && IR_A_IMM_I64[(ir_region_slot_r(opt.region, (0))) as usize] == 100
@@ -17130,7 +17148,10 @@ fn compiler_main_test_ci_shl_add_basic() -> bool with Mut, Div, Panic {
     instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpShl, 1)  // r2 = r0 << 1
     instrs[2 as usize] = ir_binop(3, 2, BinaryOp::OpAdd, 0)  // r3 = (r0<<1)+r0 → r0*3
     let func = cp_make_test_func(instrs, 3)
-    let opt = opt_cleanup_function(func)
+    // #1680: observes ocp_const_fold, where this fold lives. This IR never uses the
+    // folded register, so opt_cleanup_function (DCE + NOP compaction) removes it.
+    // #1680: Blocks CG/CI used to patch def_at[] of the mul/shift RESULT; see opt_cleanup.
+    let opt = ocp_const_fold(func)
     (IR_A_OP[(ir_region_slot_r(opt.region, (2))) as usize] as IrOpcode) == IrOpcode::IrBinOp
         && (IR_A_BIN_OP[(ir_region_slot_r(opt.region, (2))) as usize] as BinaryOp) == BinaryOp::OpMul
         && IR_A_IMM_I64[(ir_region_slot_r(opt.region, (0))) as usize] == 3
@@ -17143,7 +17164,10 @@ fn compiler_main_test_ci_shl_add_comm() -> bool with Mut, Div, Panic {
     instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpShl, 1)  // r2 = r0 << 2
     instrs[2 as usize] = ir_binop(3, 0, BinaryOp::OpAdd, 2)  // r3 = r0+(r0<<2) → r0*5
     let func = cp_make_test_func(instrs, 3)
-    let opt = opt_cleanup_function(func)
+    // #1680: observes ocp_const_fold, where this fold lives. This IR never uses the
+    // folded register, so opt_cleanup_function (DCE + NOP compaction) removes it.
+    // #1680: Blocks CG/CI used to patch def_at[] of the mul/shift RESULT; see opt_cleanup.
+    let opt = ocp_const_fold(func)
     (IR_A_OP[(ir_region_slot_r(opt.region, (2))) as usize] as IrOpcode) == IrOpcode::IrBinOp
         && (IR_A_BIN_OP[(ir_region_slot_r(opt.region, (2))) as usize] as BinaryOp) == BinaryOp::OpMul
         && IR_A_IMM_I64[(ir_region_slot_r(opt.region, (0))) as usize] == 5
@@ -17156,7 +17180,10 @@ fn compiler_main_test_ci_shl_add_large() -> bool with Mut, Div, Panic {
     instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpShl, 1)  // r2 = r0 << 3
     instrs[2 as usize] = ir_binop(3, 2, BinaryOp::OpAdd, 0)  // r3 = (r0<<3)+r0 → r0*9
     let func = cp_make_test_func(instrs, 3)
-    let opt = opt_cleanup_function(func)
+    // #1680: observes ocp_const_fold, where this fold lives. This IR never uses the
+    // folded register, so opt_cleanup_function (DCE + NOP compaction) removes it.
+    // #1680: Blocks CG/CI used to patch def_at[] of the mul/shift RESULT; see opt_cleanup.
+    let opt = ocp_const_fold(func)
     (IR_A_OP[(ir_region_slot_r(opt.region, (2))) as usize] as IrOpcode) == IrOpcode::IrBinOp
         && (IR_A_BIN_OP[(ir_region_slot_r(opt.region, (2))) as usize] as BinaryOp) == BinaryOp::OpMul
         && IR_A_IMM_I64[(ir_region_slot_r(opt.region, (0))) as usize] == 9
@@ -17523,8 +17550,16 @@ fn compiler_main_test_cn_add_self_chain_cg() -> bool with Mut, Div, Panic {
     instrs[0 as usize] = ir_binop(1, 0, BinaryOp::OpAdd, 0)      // r1 = r0+r0 (tracked as r0*2)
     instrs[1 as usize] = ir_binop(2, 1, BinaryOp::OpAdd, 0)      // r2 = (r0*2)+r0 → CG → r0*3
     let func = cp_make_test_func(instrs, 2)
-    let opt = opt_cleanup_function(func)
-    (IR_A_BIN_OP[(ir_region_slot_r(opt.region, (1))) as usize] as BinaryOp) == BinaryOp::OpMul
+    // #1680: observes ocp_const_fold, where this fold lives. This IR never uses the
+    // folded register, so opt_cleanup_function (DCE + NOP compaction) removes it.
+    let opt = ocp_const_fold(func)
+    // #1680: CG needs a register holding the merged multiplier (3); r1 = r0 + r0
+    // has none, so the add stays. The old rewrite r2 = r0 * r1 computed
+    // r0 * (r0 + r0) = 2 * r0 * r0 and only "passed" because just the opcode was
+    // checked.
+    (IR_A_BIN_OP[(ir_region_slot_r(opt.region, (1))) as usize] as BinaryOp) == BinaryOp::OpAdd
+        && IR_A_SRC1[(ir_region_slot_r(opt.region, (1))) as usize] == 1
+        && IR_A_SRC2[(ir_region_slot_r(opt.region, (1))) as usize] == 0
 }
 fn compiler_main_test_cn_add_self_val() -> bool with Mut, Div, Panic {
     var instrs: [IrInstr; 1024] = cp_empty_instrs()
@@ -21630,12 +21665,15 @@ fn compiler_main_test_en_dbl_comp_xor_chain() -> bool with Mut, Div, Panic {
     // r2=~r0, r3=~r1, r4=r2^r3 → xor-rr valid for downstream use
     // e.g. Block EK: r4|(r0^r1) → r4|(r0^r1) is just OR since r4=r0^r1
     var instrs: [IrInstr; 1024] = cp_empty_instrs()
-    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
-    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 1)
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpBitNot, 0)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpBitNot, 1)
     instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
     instrs[3 as usize] = ir_binop(5, 0, BinaryOp::OpBitOr, 4)
     let func = cp_make_test_func(instrs, 4)
-    let opt = opt_cleanup_function(func)
+    // #1680: observes ocp_const_fold, where this fold lives. This IR never uses the
+    // folded register, so opt_cleanup_function (DCE + NOP compaction) removes it.
+    // #1680: `~x` is UnaryOp::OpBitNot; OpNot has been logical NOT since #2486.
+    let opt = ocp_const_fold(func)
     // Block EN: r4 = r0^r1; then r5=r0|r4 → Block EK: r0|(r0^r1)→r0|r1
     (IR_A_OP[(ir_region_slot_r(opt.region, (3))) as usize] as IrOpcode) == IrOpcode::IrBinOp
         && (IR_A_BIN_OP[(ir_region_slot_r(opt.region, (3))) as usize] as BinaryOp) == BinaryOp::OpBitOr
@@ -26899,7 +26937,7 @@ fn compiler_main_self_tests_part_07(passed_in: i64) -> i64 with IO, Mut, Panic, 
         println("  T734 OK: Sprint 178 Block CN: r0+r0 tracked")
     } else { compiler_main_selftest_fail("  FAIL: T734") }
     if compiler_main_test_cn_add_self_chain_cg() { passed = passed + 1
-        println("  T735 OK: Sprint 178 Block CN: (r0+r0)+r0 → r0*3 via CG chain")
+        println("  T735 OK: Sprint 178 Block CN: (r0+r0)+r0 stays an add (no register holds 3)")
     } else { compiler_main_selftest_fail("  FAIL: T735") }
     if compiler_main_test_cn_add_self_val() { passed = passed + 1
         println("  T736 OK: Sprint 178 Block CN: r1+r1 tracked")
