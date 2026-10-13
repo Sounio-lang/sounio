@@ -4188,6 +4188,12 @@ fn lowerer_preseed_external_struct_items_mut(
                                 while keep_going && fc < 128 {
                                     match fcur {
                                         Some(flist) => {
+                                            // A call inside the StructFieldEntry literal is dropped
+                                            // with the store. The side table is what tag's word
+                                            // offset reads; without this, [i64; 4] counts as 1 word
+                                            // and the next field overwrites slots[1].
+                                            let noted_len = lower_raw_arr_note(head_owned.name, fc, lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*flist).head.ty))
+                                            let word_len = lower_type_expr_word_scalar_array_len(&(*flist).head.ty)
                                             entry.fields[fc as usize] = StructFieldEntry {
                                                 name_id: ir_intern_name((*flist).head.name),
                                                 index: fc,
@@ -4199,10 +4205,10 @@ fn lowerer_preseed_external_struct_items_mut(
                                                 // ir_fast_summary_register_struct_fields_owned.
                                                 is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else if lower_type_expr_is_bool(&(*flist).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*flist).head.ty) { 4 } else { 0 },
                                                 elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty)),
-                                                word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
+                                                word_scalar_array_len: word_len,
                                                 named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*flist).head.ty)),
                                                 decl_word_scalar: if lower_type_expr_is_word_scalar(&(*flist).head.ty) { 1 } else { 0 },
-                                                fixed_array_len: lower_raw_arr_note(head_owned.name, fc, lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*flist).head.ty)),
+                                                fixed_array_len: noted_len,
                                             }
                                             fc = fc + 1
                                             fcur = (*flist).tail
@@ -4382,15 +4388,17 @@ fn lowerer_preseed_external_items_into_acc_mut(
                                 while keep_going && fc < 128 {
                                     match fcur {
                                         Some(flist) => {
+                                            let noted_len = lower_raw_arr_note(head_owned.name, fc, lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*flist).head.ty))
+                                            let word_len = lower_type_expr_word_scalar_array_len(&(*flist).head.ty)
                                             entry.fields[fc as usize] = StructFieldEntry {
                                                 name_id: ir_intern_name((*flist).head.name),
                                                 index: fc,
                                                 is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else if lower_type_expr_is_bool(&(*flist).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*flist).head.ty) { 4 } else { 0 },
                                                 elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty)),
-                                                word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
+                                                word_scalar_array_len: word_len,
                                                 named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*flist).head.ty)),
                                                 decl_word_scalar: if lower_type_expr_is_word_scalar(&(*flist).head.ty) { 1 } else { 0 },
-                                                fixed_array_len: lower_raw_arr_note(head_owned.name, fc, lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*flist).head.ty)),
+                                                fixed_array_len: noted_len,
                                             }
                                             fc = fc + 1
                                             fcur = (*flist).tail
@@ -4471,6 +4479,10 @@ fn lowerer_register_struct_fields_direct_mut(
     while keep_going && fc < 128 {
         match *fcur {
             Some(flist) => {
+                // Statement, not a field initializer: a call buried in the
+                // by-value StructFieldEntry literal is dropped with the store.
+                let noted_len = lower_raw_arr_note(type_name, fc, lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*flist).head.ty))
+                if noted_len < 0 { keep_going = false }
                 entry.fields[fc as usize] = StructFieldEntry {
                     name_id: ir_intern_name((*flist).head.name),
                     index: fc,
@@ -4484,7 +4496,7 @@ fn lowerer_register_struct_fields_direct_mut(
                     word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
                     named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*flist).head.ty)),
                     decl_word_scalar: if lower_type_expr_is_word_scalar(&(*flist).head.ty) { 1 } else { 0 },
-                    fixed_array_len: lower_raw_arr_note(type_name, fc, lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*flist).head.ty)),
+                    fixed_array_len: noted_len,
                 }
                 fc = fc + 1
                 fcur = &(*flist).tail
@@ -4534,16 +4546,18 @@ fn lowerer_register_struct_fields_mut(
                 }
                 let fc = (*(*lo).struct_layouts).entries[layout_idx as usize].field_count
                 if fc < 128 {
+                    let noted_len = lower_raw_arr_note(type_name, field_idx, lower_type_expr_elem_or_box_inner_name(&(*list).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*list).head.ty))
+                    let word_len = lower_type_expr_word_scalar_array_len(&(*list).head.ty)
                     (*(*lo).struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
                         name_id: ir_intern_name((*list).head.name),
                         index: field_idx,
                         // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
                         is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_bool(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
                         elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*list).head.ty)),
-                        word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*list).head.ty),
+                        word_scalar_array_len: word_len,
                         named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*list).head.ty)),
                         decl_word_scalar: if lower_type_expr_is_word_scalar(&(*list).head.ty) { 1 } else { 0 },
-                        fixed_array_len: lower_raw_arr_note(type_name, field_idx, lower_type_expr_elem_or_box_inner_name(&(*list).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*list).head.ty)),
+                        fixed_array_len: noted_len,
                     }
                     (*(*lo).struct_layouts).entries[layout_idx as usize].field_count = fc + 1
                 } else {
@@ -5565,16 +5579,18 @@ fn ir_fast_summary_register_struct_fields_owned(
                 // and field-index resolution later falls back to a name hash (OOB access).
                 // Build in a local entry, then assign it back once (single level).
                 var lay_entry = table_value.entries[layout_idx as usize]
+                let noted_len = lower_raw_arr_note(type_name, idx, lower_type_expr_elem_or_box_inner_name(&(*list).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*list).head.ty))
+                let word_len = lower_type_expr_word_scalar_array_len(&(*list).head.ty)
                 lay_entry.fields[fc as usize] = StructFieldEntry {
                     name_id: ir_intern_name((*list).head.name),
                     index: idx,
                     // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
                     is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_bool(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
                     elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*list).head.ty)),
-                    word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*list).head.ty),
+                    word_scalar_array_len: word_len,
                     named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*list).head.ty)),
                     decl_word_scalar: if lower_type_expr_is_word_scalar(&(*list).head.ty) { 1 } else { 0 },
-                    fixed_array_len: lower_raw_arr_note(type_name, idx, lower_type_expr_elem_or_box_inner_name(&(*list).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*list).head.ty)),
+                    fixed_array_len: noted_len,
                 }
                 lay_entry.field_count = fc + 1
                 table_value.entries[layout_idx as usize] = lay_entry
@@ -18858,6 +18874,10 @@ impl Lowerer {
                     if fc < 128 {
                         // Single-level idiom: the two-level `(*box).entries[i].fields[fc] = …`
                         // store is dropped by the lean_single by-value-aggregate miscompile.
+                        // The note call must also stay outside the literal, or [T; N]
+                        // never reaches the side table and the next field lands on word 1.
+                        let noted_len = lower_raw_arr_note(type_name, field_idx, lower_type_expr_elem_or_box_inner_name(&(*list).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*list).head.ty))
+                        let word_len = lower_type_expr_word_scalar_array_len(&(*list).head.ty)
                         var lay_entry = (*lo.struct_layouts).entries[layout_idx as usize]
                         lay_entry.fields[fc as usize] = StructFieldEntry {
                             name_id: ir_intern_name((*list).head.name),
@@ -18875,10 +18895,10 @@ impl Lowerer {
                             // dispatch), so this is inert for float/array/store paths.
                             is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_bool(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
                             elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*list).head.ty)),
-                            word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*list).head.ty),
+                            word_scalar_array_len: word_len,
                             named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*list).head.ty)),
                             decl_word_scalar: if lower_type_expr_is_word_scalar(&(*list).head.ty) { 1 } else { 0 },
-                            fixed_array_len: lower_raw_arr_note(type_name, field_idx, lower_type_expr_elem_or_box_inner_name(&(*list).head.ty), lower_type_expr_fixed_array_len_or_zero(&(*list).head.ty)),
+                            fixed_array_len: noted_len,
                         }
                         lay_entry.field_count = fc + 1
                         (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
@@ -21426,6 +21446,38 @@ impl Lowerer {
                 lo = lo.bind_local_struct_type(s.name, pointee_name, false)
             }
         }
+        // `let p = heap_alloc(n) as *mut Buf` has no annotation. A parameter
+        // `p: *mut Buf` already records Buf; this local did not, so `(*p).tag`
+        // fell back to the field index and overwrote slots[1].
+        var raw_pointee = ir_empty_name()
+        match s.ty {
+            Some(ann) => {
+                if (*ann).kind == TypeExprKind::TypeRawPtr {
+                    raw_pointee = lower_opt_type_named_name(&(*ann).inner)
+                }
+            }
+            None => {}
+        }
+        if raw_pointee.len <= 0 {
+            match s.expr {
+                Some(rhs_raw) => {
+                    if (*rhs_raw).kind == ExprKind::ExprCast {
+                        match (*rhs_raw).cast_type {
+                            Some(ct) => {
+                                if (*ct).kind == TypeExprKind::TypeRawPtr {
+                                    raw_pointee = lower_opt_type_named_name(&(*ct).inner)
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        if raw_pointee.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), raw_pointee) >= 0 {
+            lo = lo.bind_local_struct_type(s.name, raw_pointee, false)
+        }
         if fixed_array_len >= 0 {
             lo = lo.bind_local_fixed_array_len(s.name, fixed_array_len)
         }
@@ -21926,6 +21978,20 @@ impl Lowerer {
             Some(expr_box) => {
                 if (*expr_box).kind == ExprKind::ExprStructLit {
                     lo = lo.bind_local_struct_type(s.name, ir_path_first_name((*expr_box).path), false)
+                } else if (*expr_box).kind == ExprKind::ExprCast {
+                    // `let p = heap_alloc(n) as *mut Buf`. The parameter form
+                    // `p: *mut Buf` already records Buf; a cast does not, so
+                    // `(*p).tag` in the same function falls back to field index
+                    // and lands inside a preceding `[T; N]`.
+                    match (*expr_box).cast_type {
+                        Some(cty) => {
+                            let pointee = lower_param_struct_type_name(&(*cty))
+                            if pointee.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), pointee) >= 0 {
+                                lo = lo.bind_local_struct_type(s.name, pointee, false)
+                            }
+                        }
+                        None => {}
+                    }
                 } else if (*expr_box).kind == ExprKind::ExprCall {
                     let callee_opt_struct_ref = &(*expr_box).left
                     let callee_struct_name = match *callee_opt_struct_ref {
@@ -26757,7 +26823,7 @@ impl Lowerer {
 
     // Word offset of a field inside a heap_alloc payload. Preceding `[T; N]`
     // fields occupy N words (or ceil(N/8) for packed bytes), not one handle.
-    fn raw_payload_word_offset(self, base_opt: &Option<Box<Expr>>, field_name: Name, fallback: i64) -> i64 with Mut, Panic, Div, Alloc {
+    fn raw_payload_word_offset(self, base_opt: &Option<Box<Expr>>, field_name: Name, fallback: i64) -> i64 with Mut, Panic, Div, Alloc, IO {
         match *base_opt {
             Some(base_expr) => {
                 let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
@@ -26790,6 +26856,17 @@ impl Lowerer {
                                 if field.index == want {
                                     let elem = ir_name_at(field.elem_type_name_id)
                                     let noted = lower_raw_arr_len_for(type_name, want)
+                                    if str_eq(read_env("SOUNIO_RAW_ARR_TRACE"), "1") {
+                                        print("RAW_OFF noted=")
+                                        print_int(noted)
+                                        print(" want=")
+                                        print_int(want)
+                                        print(" count=")
+                                        print_int(LOWER_RAW_ARR_COUNT)
+                                        print(" ty=")
+                                        print(str_from_bytes(type_name.buf, type_name.len))
+                                        print("\n")
+                                    }
                                     var n = field.fixed_array_len
                                     if field.word_scalar_array_len > n { n = field.word_scalar_array_len }
                                     if noted > n { n = noted }
