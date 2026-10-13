@@ -830,7 +830,9 @@ fn st_field_index_by_tok(si: i64, tok: i64) -> i64 with Mut, Panic {
     return 0 - 1
 }
 
-fn st_private_access_denied(si: i64, access_tok: i64) -> bool with IO, Mut, Panic {
+// The rule alone, with no diagnostic: true when `access_tok` may not use struct
+// `si` here. st_private_access_denied wraps it and reports.
+fn st_private_access_blocked(si: i64, access_tok: i64) -> bool with Mut, Panic {
     if si < 0 { return false }
     if ST_DECL_NE[si as usize] <= ST_DECL_NS[si as usize] { return false }
     if access_tok < 0 || access_tok >= TC { return false }
@@ -855,6 +857,19 @@ fn st_private_access_denied(si: i64, access_tok: i64) -> bool with IO, Mut, Pani
             if any_priv == 0 { return false }
         }
     }
+    return true
+}
+
+// A `pub struct` with a private field is a guess of last resort for the
+// field-name searches below, which pick the receiver's struct when its type is
+// unknown: another struct may have the same field name and allow the read.
+fn st_field_guess_blocked(si: i64, access_tok: i64) -> bool with Mut, Panic {
+    if ST_PUBLIC[si as usize] == 0 { return false }
+    return st_private_access_blocked(si, access_tok)
+}
+
+fn st_private_access_denied(si: i64, access_tok: i64) -> bool with IO, Mut, Panic {
+    if !st_private_access_blocked(si, access_tok) { return false }
     // Same code and wording as Madaros (E259), so one fixture pins both engines;
     // the caller's own `error: private struct ...` line follows.
     print("error[E259]: struct field is private in its defining module\n")
@@ -20696,12 +20711,23 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     found = 1
                 }
             }
+            // #1386: the receiver's type is unknown here, so its struct is GUESSED
+            // from the field name. Pass 0 passes over a `pub struct` whose field
+            // is private at this site (another struct may own a readable field of
+            // that name, e.g. Epistemic.variance vs knightian PBox.variance);
+            // pass 1 takes any candidate, so a read that only a private field can
+            // satisfy is still refused.
+            var guess_pass: i64 = 0
+            while guess_pass < 2 && found == 0 {
             var si: i64 = 0
             while si < ST_COUNT && found == 0 {
                 ST_QUERY_NS = fns
                 ST_QUERY_NE = fne
                 let off = st_field_offset(si, fh)
-                if off >= 0 {
+                if off >= 0 && guess_pass == 0 && st_field_guess_blocked(si, method_tok) {
+                    ST_QUERY_NS = -1
+                    ST_QUERY_NE = -1
+                } else if off >= 0 {
                     if st_private_access_denied(si, method_tok) {
                         ST_QUERY_NS = -1
                         ST_QUERY_NE = -1
@@ -20736,6 +20762,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     found = 1
                 }
                 si = si + 1
+            }
+            guess_pass = guess_pass + 1
             }
             if found == 0 {
                 if TK[EP as usize] == 6 {
@@ -40786,12 +40814,23 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     found = 1
                 }
             }
+            // #1386: the receiver's type is unknown here, so its struct is GUESSED
+            // from the field name. Pass 0 passes over a `pub struct` whose field
+            // is private at this site (another struct may own a readable field of
+            // that name, e.g. Epistemic.variance vs knightian PBox.variance);
+            // pass 1 takes any candidate, so a read that only a private field can
+            // satisfy is still refused.
+            var guess_pass: i64 = 0
+            while guess_pass < 2 && found == 0 {
             var si: i64 = 0
             while si < ST_COUNT && found == 0 {
                 ST_QUERY_NS = fns
                 ST_QUERY_NE = fne
                 let off = st_field_offset(si, fh)
-                if off >= 0 {
+                if off >= 0 && guess_pass == 0 && st_field_guess_blocked(si, method_tok) {
+                    ST_QUERY_NS = -1
+                    ST_QUERY_NE = -1
+                } else if off >= 0 {
                     if st_private_access_denied(si, method_tok) {
                         ST_QUERY_NS = -1
                         ST_QUERY_NE = -1
@@ -40817,6 +40856,8 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     found = 1
                 }
                 si = si + 1
+            }
+            guess_pass = guess_pass + 1
             }
             if found == 0 {
                 if TK[EP as usize] == 6 {
