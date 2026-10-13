@@ -581,6 +581,38 @@ var KM_CACHE_COUNT: i64 = 0
 // it is orthogonal to the noise-symbol domain: E230 and the source cap live in
 // the modular compiler (self-hosted/check/), which lean_single does not import.
 var CHANNEL_INPUT_VAR_SLOT: [i64; 8] = [-1; 8]
+// #2776: first-order channels 8..31 (EXTRA channels, first order only; the
+// Hessian keeps its 8). Not hand-unrolled like 0-7: they live in arrays and
+// every site handles them in a loop. Before them, a function with a 9th
+// measured input gave that input all-zero sensitivities, so `a - b` of two such
+// inputs read variance 0 and `a * a * a` lost the self-correlation (0.2 for an
+// analytic 9 a^4 var(a) = 0.36). EXPR_SX[j] / VAR_SX[vi * 24 + j] are the
+// sensitivity slots of channel 8 + j, CHVAR_SX[j] its sigma^2 slot. Operand
+// snapshots are taken into SX_ARENA (reset per function); an arena overflow
+// just loses the extra channels of that operand.
+var EXPR_SX: [i64; 24] = [-1; 24]
+var VAR_SX: [i64; 49152] = [-1; 49152]
+var CHVAR_SX: [i64; 24] = [-1; 24]
+var SX_ARENA: [i64; 1048576] = [-1; 1048576]
+var SX_TOP: i64 = 0
+var KM_CACHE_SXJ: [i64; 32] = [-1; 32]
+var KM_CACHE_SXS: [i64; 32] = [-1; 32]
+var B16_SX: [i64; 384] = [-1; 384]
+var B16_ARG_SX_BSS_OFF: i64 = 0
+var B16_RET_SX_BSS_OFF: i64 = 0
+var SX_CHVAR_BSS_OFF: i64 = 0
+// Channels 8..31 cross direct calls of user functions (argument and return
+// sensitivities, the caller's channel variances) only when the program asks
+// for an uncertainty and has nine or more `measure(` sites: no other program
+// can reach channel 8, and every other ELF stays byte-identical.
+var SX_XCALL: i64 = 0
+// #2776: per-call snapshot of every argument's shadows (variance, channels
+// 0-7, H[0,0], channels 8..31: 34 words per argument, 16 arguments), stacked
+// so a call nested in a LATER argument -- `add(b, dbl(a))` -- cannot overwrite
+// the B5/B16 entries of the earlier ones. Before, var(add(b, dbl(a))) read
+// var(a) + 4 var(a) = 0.0125 for an analytic var(b) + 4 var(a) = 0.05.
+var CALL_SH: [i64; 65536] = [-1; 65536]
+var CALL_SH_TOP: i64 = 0
 // β⁶ multi-channel sensitivity: shadow buffers for channels 1-3 (∂y/∂xₖ)
 var EXPR_SSHADOW_1:  i64 = -1
 var VAR_SSHADOW_1:   [i64; 2048] = [-1; 2048]
@@ -633,6 +665,75 @@ var EXPR_HSHADOW_57: i64 = -1; var VAR_HSHADOW_57: [i64; 2048] = [-1; 2048]
 var EXPR_HSHADOW_66: i64 = -1; var VAR_HSHADOW_66: [i64; 2048] = [-1; 2048]
 var EXPR_HSHADOW_67: i64 = -1; var VAR_HSHADOW_67: [i64; 2048] = [-1; 2048]
 var EXPR_HSHADOW_77: i64 = -1; var VAR_HSHADOW_77: [i64; 2048] = [-1; 2048]
+
+// ─── #2776: first-order shadows of aggregate FIELDS ───
+// VAR_VSHADOW/VAR_SSHADOW_* describe a whole local, so a struct literal, a
+// struct-valued `let`, a field hop and a struct-returning call all lost the
+// variance of their f64 fields: variance_of(a.x) on `let a = A { x: k.value }`
+// read 0. Here every aggregate VALUE the compiler can name gets a "region" key
+// r: a frame aggregate uses the stack slot of its offset-0 word (its words sit
+// at slots r, r-1, ...), anything else (a call result, a parameter, a BSS
+// spill) a virtual key from fsh_virt_region(). The f64 word w of the region
+// keeps its shadows in the table FSH_* under key r - w. A struct copy copies
+// the entries, a field hop subtracts the field's word offset, and calls move
+// them through the BSS blocks FSH_ARG / FSH_RET in the order of
+// fsh_collect_words(). EXPR_AGG0 names the region of the expression just
+// compiled; it is trusted only when EXPR_AGG0_END equals EP, i.e. when the
+// producer was the whole expression (an `if`, a call argument or a parenthesis
+// in between moves EP and makes it stale). Gated on FSH_ACTIVE (the program
+// calls variance_of / sensitivity_of / hessian_of / uncertainty_of).
+var FSH_ACTIVE: i64 = 0
+var FSH_GEN_CUR: i64 = 1
+var FSH_GEN_NEXT: i64 = 2
+var FSH_KEY: [i64; 16384] = [0; 16384]
+var FSH_GEN: [i64; 16384] = [0; 16384]
+var FSH_V:   [i64; 16384] = [-1; 16384]
+var FSH_S0:  [i64; 16384] = [-1; 16384]
+var FSH_S1:  [i64; 16384] = [-1; 16384]
+var FSH_S2:  [i64; 16384] = [-1; 16384]
+var FSH_S3:  [i64; 16384] = [-1; 16384]
+var FSH_S4:  [i64; 16384] = [-1; 16384]
+var FSH_S5:  [i64; 16384] = [-1; 16384]
+var FSH_S6:  [i64; 16384] = [-1; 16384]
+var FSH_S7:  [i64; 16384] = [-1; 16384]
+// Channels 8..31 of each entry (24 words per entry), and the extra-channel
+// slots the next fsh_put stores (it resets them to -1 afterwards).
+var FSH_X:   [i64; 393216] = [-1; 393216]
+var FSH_PUT_SX: [i64; 24] = [-1; 24]
+var EXPR_AGG0: i64 = -1
+var EXPR_AGG0_END: i64 = -1
+var VAR_AGG0: [i64; 2048] = [-1; 2048]
+// LOOP_DEPTH at each local's declaration (#2827, see fsh_emit_fresh_channel_x86).
+var VAR_DECL_LOOP: [i64; 2048] = [0; 2048]
+var VAR_AGG0_GEN: [i64; 2048] = [0; 2048]
+var FSH_VIRT_NEXT: i64 = 0
+var FSH_BIND_SRC: i64 = -1
+var FSH_WORDS: [i64; 512] = [0; 512]
+var FSH_WORDS_N: i64 = 0
+var FSH_RET_BSS_OFF: i64 = 0
+var FSH_ARG_BSS_OFF: i64 = 0
+var FSH_ARG_REGION: [i64; 16] = [-1; 16]
+var FSH_ARG_HASH: [i64; 16] = [0; 16]
+var LAST_STMT_AGG0: i64 = -1
+var LAST_STMT_AGG0_END: i64 = -1
+// Words carried per call: FSH_RET holds one struct (256 words), FSH_ARG every
+// struct argument of one call in parameter order (512 words); 9 channels each
+// (variance, then first-order sensitivities 0-7).
+var FSH_RET_WORDS: i64 = 256
+var FSH_ARG_WORDS: i64 = 512
+// Each block ends with a TAG word: the writer stores the index of the function
+// the block is meant for, the reader loads the words only when the tag is its
+// own (callee: CURRENT_FN; caller: the callee it just called) and then clears
+// it. A call through a path that does not write the block (an indirect call,
+// say) therefore reads zeros, never another call's shadows.
+var FSH_PEND_SLOT: [i64; 16896] = [0; 16896]
+var FSH_PEND_ADDR: [i64; 16896] = [0; 16896]
+var FSH_PEND_N: i64 = 0
+// sigma^2 of the caller's first-order channels 0-7, so a callee can form the
+// covariance of two values that depend on the same caller input
+// (`fn top(x) { mid(x) * mid(x) }` read 2.0, the independent-operand answer,
+// instead of 4.0). Same untagged discipline as B16_ARG.
+var FSH_CHVAR_BSS_OFF: i64 = 0
 
 // ════════════════════════════════════════════════════════════════════
 // Gradient Topology Types (GTT) — Phase β⁹
@@ -8762,6 +8863,7 @@ fn local_meta_add(
     VAR_USED[idx as usize] = used
     VAR_TY[idx as usize] = ty
     VAR_TY_HASH[idx as usize] = ty_hash
+    VAR_DECL_LOOP[idx as usize] = LOOP_DEPTH
     // KL-16b: fresh locals must not inherit shadow slots from a prior
     // function that reused the same VAR_* index after VAR_COUNT reset.
     VAR_VSHADOW[idx as usize] = -1
@@ -8773,6 +8875,7 @@ fn local_meta_add(
     VAR_SSHADOW_5[idx as usize] = -1
     VAR_SSHADOW_6[idx as usize] = -1
     VAR_SSHADOW_7[idx as usize] = -1
+    sx_clear_var(idx)
     VAR_HSHADOW_00[idx as usize] = -1; VAR_HSHADOW_01[idx as usize] = -1
     VAR_HSHADOW_02[idx as usize] = -1; VAR_HSHADOW_03[idx as usize] = -1
     VAR_HSHADOW_11[idx as usize] = -1; VAR_HSHADOW_12[idx as usize] = -1
@@ -9626,6 +9729,359 @@ fn copy_array_into_local_slot_x86(slot: i64, ty_hash: i64) with Mut, Panic, Div 
     em(0x48); em(0x89); em(0xc8)  // mov rax, rcx
 }
 
+// ─── #2776 field-shadow table (see the FSH_* declarations) ───
+fn fsh_index_start(key: i64) -> i64 with Div, Mut {
+    var h = key % 16381
+    if h < 0 { h = h + 16381 }
+    h
+}
+
+// Index of `key`'s entry in this function's generation, or -1.
+fn fsh_find(key: i64) -> i64 with Mut, Panic, Div {
+    if key == -1 { return -1 }
+    var idx = fsh_index_start(key)
+    var probe: i64 = 0
+    while probe < 64 {
+        if FSH_GEN[idx as usize] != FSH_GEN_CUR { return -1 }
+        if FSH_KEY[idx as usize] == key { return idx }
+        idx = (idx + 1) % 16384
+        probe = probe + 1
+    }
+    -1
+}
+
+fn fsh_put(key: i64, v: i64, s0: i64, s1: i64, s2: i64, s3: i64, s4: i64, s5: i64, s6: i64, s7: i64) with Mut, Panic, Div {
+    if key != -1 {
+        var idx = fsh_index_start(key)
+        var probe: i64 = 0
+        while probe < 64 {
+            if FSH_GEN[idx as usize] != FSH_GEN_CUR || FSH_KEY[idx as usize] == key {
+                FSH_GEN[idx as usize] = FSH_GEN_CUR
+                FSH_KEY[idx as usize] = key
+                FSH_V[idx as usize] = v
+                FSH_S0[idx as usize] = s0; FSH_S1[idx as usize] = s1; FSH_S2[idx as usize] = s2; FSH_S3[idx as usize] = s3
+                FSH_S4[idx as usize] = s4; FSH_S5[idx as usize] = s5; FSH_S6[idx as usize] = s6; FSH_S7[idx as usize] = s7
+                var j: i64 = 0
+                while j < 24 { FSH_X[(idx * 24 + j) as usize] = FSH_PUT_SX[j as usize]; j = j + 1 }
+                probe = 64
+            } else {
+                idx = (idx + 1) % 16384
+                probe = probe + 1
+            }
+        }
+    }
+    var r: i64 = 0
+    while r < 24 { FSH_PUT_SX[r as usize] = -1; r = r + 1 }
+}
+
+// Channel words carried per f64 field across a call: variance + channels 0-7,
+// and channels 8..31 when they can cross calls at all (SX_XCALL).
+fn fsh_nch() -> i64 with Mut {
+    if SX_XCALL != 0 { return 33 }
+    9
+}
+
+fn fsh_del(key: i64) with Mut, Panic, Div {
+    let idx = fsh_find(key)
+    if idx >= 0 {
+        FSH_V[idx as usize] = -1
+        FSH_S0[idx as usize] = -1; FSH_S1[idx as usize] = -1; FSH_S2[idx as usize] = -1; FSH_S3[idx as usize] = -1
+        FSH_S4[idx as usize] = -1; FSH_S5[idx as usize] = -1; FSH_S6[idx as usize] = -1; FSH_S7[idx as usize] = -1
+        var j: i64 = 0
+        while j < 24 { FSH_X[(idx * 24 + j) as usize] = -1; j = j + 1 }
+    }
+}
+
+// The region of the expression just compiled, if its producer was the whole
+// expression (see EXPR_AGG0_END).
+fn fsh_expr_agg() -> i64 with Mut {
+    if FSH_ACTIVE == 0 { return -1 }
+    if EXPR_AGG0 != -1 && EXPR_AGG0_END == EP { return EXPR_AGG0 }
+    -1
+}
+
+fn fsh_stamp(region: i64) with Mut {
+    EXPR_AGG0 = region
+    EXPR_AGG0_END = EP
+}
+
+fn fsh_virt_region() -> i64 with Mut {
+    FSH_VIRT_NEXT = FSH_VIRT_NEXT + 1
+    0 - 1000000 - FSH_VIRT_NEXT * 4096
+}
+
+fn fsh_copy_region(dst0: i64, src0: i64, nwords: i64) with Mut, Panic, Div {
+    if dst0 == -1 { return }
+    var w: i64 = 0
+    while w < nwords {
+        let si = fsh_find(src0 - w)
+        if src0 != -1 && si >= 0 {
+            var j: i64 = 0
+            while j < 24 { FSH_PUT_SX[j as usize] = FSH_X[(si * 24 + j) as usize]; j = j + 1 }
+            fsh_put(dst0 - w, FSH_V[si as usize], FSH_S0[si as usize], FSH_S1[si as usize], FSH_S2[si as usize], FSH_S3[si as usize],
+                FSH_S4[si as usize], FSH_S5[si as usize], FSH_S6[si as usize], FSH_S7[si as usize])
+        } else {
+            fsh_del(dst0 - w)
+        }
+        w = w + 1
+    }
+}
+
+// Record the current expression's shadows as the field word at `key`.
+fn fsh_set_from_expr(key: i64) with Mut, Panic, Div {
+    var j: i64 = 0
+    while j < 24 { FSH_PUT_SX[j as usize] = EXPR_SX[j as usize]; j = j + 1 }
+    fsh_put(key, EXPR_VSHADOW, EXPR_SSHADOW, EXPR_SSHADOW_1, EXPR_SSHADOW_2, EXPR_SSHADOW_3,
+        EXPR_SSHADOW_4, EXPR_SSHADOW_5, EXPR_SSHADOW_6, EXPR_SSHADOW_7)
+}
+
+fn fsh_clear_expr_hessian() with Mut {
+    EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
+    EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
+    EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
+    EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
+    EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
+    EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
+    EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
+    EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
+    EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
+    EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
+    EXPR_HSHADOW_77 = -1
+}
+
+// The f64 field word at `key` becomes the current expression's shadows (all -1
+// when nothing was recorded: the field is exact as far as the compiler knows).
+fn fsh_load_to_expr(key: i64) with Mut, Panic, Div {
+    let idx = fsh_find(key)
+    if idx >= 0 {
+        EXPR_VSHADOW = FSH_V[idx as usize]
+        EXPR_SSHADOW = FSH_S0[idx as usize]
+        EXPR_SSHADOW_1 = FSH_S1[idx as usize]; EXPR_SSHADOW_2 = FSH_S2[idx as usize]; EXPR_SSHADOW_3 = FSH_S3[idx as usize]
+        EXPR_SSHADOW_4 = FSH_S4[idx as usize]; EXPR_SSHADOW_5 = FSH_S5[idx as usize]; EXPR_SSHADOW_6 = FSH_S6[idx as usize]
+        EXPR_SSHADOW_7 = FSH_S7[idx as usize]
+        var j: i64 = 0
+        while j < 24 { EXPR_SX[j as usize] = FSH_X[(idx * 24 + j) as usize]; j = j + 1 }
+    } else {
+        EXPR_VSHADOW = -1
+        EXPR_SSHADOW = -1
+        EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1
+        EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
+    }
+    fsh_clear_expr_hessian()
+}
+
+fn fsh_type_is_plain_struct(ty: i64, ty_hash: i64) -> bool with Panic, Mut {
+    if knowledge_hash_is(ty_hash) { return false }
+    if ty == 6 { return st_find(ty_hash) >= 0 }
+    if ty == 0 && ty_hash != 0 { return st_find(ty_hash) >= 0 }
+    false
+}
+
+// The struct a parameter/argument type names: T itself, or the T of &T / &!T.
+fn fsh_param_struct_hash(ty: i64, ty_hash: i64) -> i64 with Panic, Mut, Div {
+    if fsh_type_is_plain_struct(ty, ty_hash) { return ty_hash }
+    if ty == 10 {
+        let ih = ref_hash_inner_hash(ty_hash)
+        if st_find(ih) >= 0 && knowledge_hash_is(ih) == false { return ih }
+    }
+    0
+}
+
+fn fsh_collect_words_rec(ty_hash: i64, base: i64, depth: i64) with Mut, Panic, Div {
+    if depth > 8 { return }
+    let si = st_find(ty_hash)
+    if si < 0 { return }
+    let fc = ST[(si * 130 + 1) as usize]
+    var fi: i64 = 0
+    var off: i64 = 0
+    while fi < fc {
+        let fty = ST_FTY[(si * 128 + fi) as usize]
+        let fhh = ST_FHASH[(si * 128 + fi) as usize]
+        if fty == 2 {
+            if FSH_WORDS_N < 512 {
+                FSH_WORDS[FSH_WORDS_N as usize] = base + off
+                FSH_WORDS_N = FSH_WORDS_N + 1
+            }
+        } else if fsh_type_is_plain_struct(fty, fhh) {
+            fsh_collect_words_rec(fhh, base + off, depth + 1)
+        }
+        off = off + st_field_slots_idx(si, fi)
+        fi = fi + 1
+    }
+}
+
+// The word offsets of every f64 field of struct `ty_hash`, nested structs
+// included, in declaration order, into FSH_WORDS[0..FSH_WORDS_N).
+fn fsh_collect_words(ty_hash: i64) with Mut, Panic, Div {
+    FSH_WORDS_N = 0
+    fsh_collect_words_rec(ty_hash, 0, 0)
+}
+
+fn fsh_chan_slot(idx: i64, c: i64) -> i64 with Mut {
+    if idx < 0 { return -1 }
+    if c == 0 { return FSH_V[idx as usize] }
+    if c == 1 { return FSH_S0[idx as usize] }
+    if c == 2 { return FSH_S1[idx as usize] }
+    if c == 3 { return FSH_S2[idx as usize] }
+    if c == 4 { return FSH_S3[idx as usize] }
+    if c == 5 { return FSH_S4[idx as usize] }
+    if c == 6 { return FSH_S5[idx as usize] }
+    if c == 7 { return FSH_S6[idx as usize] }
+    if c == 8 { return FSH_S7[idx as usize] }
+    FSH_X[(idx * 24 + c - 9) as usize]
+}
+
+// x86: write the f64-field shadows of `region` (struct `ty_hash`) into a BSS
+// block, words j0.. of channel stride `stride`. Unknown fields write 0, so a
+// reader never sees a previous call's values. Clobbers rax and rcx. Returns the
+// number of words written.
+fn fsh_emit_region_to_bss_x86(region: i64, ty_hash: i64, bss_off: i64, stride: i64, j0: i64) -> i64 with Mut, Panic, Div {
+    fsh_collect_words(ty_hash)
+    var i: i64 = 0
+    while i < FSH_WORDS_N && j0 + i < stride {
+        var idx: i64 = -1
+        if region != -1 { idx = fsh_find(region - FSH_WORDS[i as usize]) }
+        var c: i64 = 0
+        while c < fsh_nch() {
+            let sl = fsh_chan_slot(idx, c)
+            if sl >= 0 { emit_load_var(sl) } else { emit_imm64(0) }
+            emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + bss_off + (c * stride + j0 + i) * 8)
+            c = c + 1
+        }
+        i = i + 1
+    }
+    i
+}
+
+// x86: the reverse -- read a BSS block into fresh shadow slots of `region`.
+// Clobbers rax. Returns the number of words read.
+fn fsh_emit_bss_to_region_x86(region: i64, ty_hash: i64, bss_off: i64, stride: i64, j0: i64) -> i64 with Mut, Panic, Div {
+    fsh_collect_words(ty_hash)
+    var i: i64 = 0
+    while i < FSH_WORDS_N && j0 + i < stride {
+        var sl: [i64; 33] = [-1; 33]
+        var c: i64 = 0
+        while c < fsh_nch() {
+            emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + bss_off + (c * stride + j0 + i) * 8)
+            let ns = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(ns)
+            sl[c as usize] = ns
+            c = c + 1
+        }
+        var xj: i64 = 0
+        while xj < 24 { FSH_PUT_SX[xj as usize] = sl[(9 + xj) as usize]; xj = xj + 1 }
+        fsh_put(region - FSH_WORDS[i as usize], sl[0], sl[1], sl[2], sl[3], sl[4], sl[5], sl[6], sl[7], sl[8])
+        i = i + 1
+    }
+    i
+}
+
+// x86: the caller's channel variances into FSH_CHVAR. Clobbers rax, rcx.
+fn fsh_emit_chvar_store_x86() with Mut {
+    var k: i64 = 0
+    while k < 8 {
+        let iv = CHANNEL_INPUT_VAR_SLOT[k as usize]
+        if iv >= 0 { emit_load_var(iv) } else { emit_imm64(0) }
+        emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + FSH_CHVAR_BSS_OFF + k * 8)
+        k = k + 1
+    }
+}
+
+// #2827: a Knowledge local declared inside a loop is a NEW measurement on every
+// iteration, yet its first-order channel is a compile-time index, the same one
+// each time. A loop-carried `var acc` declared outside that loop keeps (in its
+// fixed sensitivity slot) the previous iteration's dependence on that channel,
+// so `acc = acc + k.value * w` treated every iteration's k as one quantity:
+// var(acc) = 619.444 for three studies whose analytic GUM value is
+// sum w_i^2 u_i^2 = 169.444. When the channel is seeded -- once per iteration --
+// such a var's sensitivity on it is zeroed: its variance slot keeps every past
+// contribution, and the new k is independent of them. x86; clobbers rax.
+fn fsh_emit_fresh_channel_x86(k_vi: i64, ch: i64) with Mut, Panic {
+    if k_vi < 0 || ch < 0 || ch > 31 { return }
+    let kd = VAR_DECL_LOOP[k_vi as usize]
+    if kd <= 0 { return }
+    var vi: i64 = 0
+    while vi < VAR_COUNT {
+        if VAR_MUT[vi as usize] == 1 && VAR_DECL_LOOP[vi as usize] < kd {
+            var sl: i64 = -1
+            if ch == 0 { sl = VAR_SSHADOW[vi as usize] }
+            if ch == 1 { sl = VAR_SSHADOW_1[vi as usize] }
+            if ch == 2 { sl = VAR_SSHADOW_2[vi as usize] }
+            if ch == 3 { sl = VAR_SSHADOW_3[vi as usize] }
+            if ch == 4 { sl = VAR_SSHADOW_4[vi as usize] }
+            if ch == 5 { sl = VAR_SSHADOW_5[vi as usize] }
+            if ch == 6 { sl = VAR_SSHADOW_6[vi as usize] }
+            if ch == 7 { sl = VAR_SSHADOW_7[vi as usize] }
+            if ch >= 8 && vi < 2048 { sl = VAR_SX[(vi * 24 + ch - 8) as usize] }
+            if sl >= 0 {
+                emit_imm64(0)
+                emit_store_var(sl)
+            }
+        }
+        vi = vi + 1
+    }
+}
+
+fn fsh_ret_tag_off() -> i64 with Mut { FSH_RET_BSS_OFF + fsh_nch() * FSH_RET_WORDS * 8 }
+fn fsh_arg_tag_off() -> i64 with Mut { FSH_ARG_BSS_OFF + fsh_nch() * FSH_ARG_WORDS * 8 }
+
+// x86: store `value` into the BSS tag word at `tag_off`. Clobbers rax, rcx.
+fn fsh_emit_set_tag_x86(tag_off: i64, value: i64) with Mut {
+    emit_imm64(value)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + tag_off)
+}
+
+// Reader, part 1: give `region`'s f64 words zero-initialised shadow slots and
+// queue a load from the BSS block for each (emitted by fsh_emit_pend_load_x86).
+// Clobbers rax. Returns the number of words.
+fn fsh_pend_region_x86(region: i64, ty_hash: i64, bss_off: i64, stride: i64, j0: i64) -> i64 with Mut, Panic, Div {
+    fsh_collect_words(ty_hash)
+    var i: i64 = 0
+    while i < FSH_WORDS_N && j0 + i < stride {
+        var sl: [i64; 33] = [-1; 33]
+        var c: i64 = 0
+        while c < fsh_nch() {
+            let ns = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_imm64(0)
+            emit_store_var(ns)
+            sl[c as usize] = ns
+            if FSH_PEND_N < 16896 {
+                FSH_PEND_SLOT[FSH_PEND_N as usize] = ns
+                FSH_PEND_ADDR[FSH_PEND_N as usize] = GL_BSS_BASE + bss_off + (c * stride + j0 + i) * 8
+                FSH_PEND_N = FSH_PEND_N + 1
+            }
+            c = c + 1
+        }
+        var xj: i64 = 0
+        while xj < 24 { FSH_PUT_SX[xj as usize] = sl[(9 + xj) as usize]; xj = xj + 1 }
+        fsh_put(region - FSH_WORDS[i as usize], sl[0], sl[1], sl[2], sl[3], sl[4], sl[5], sl[6], sl[7], sl[8])
+        i = i + 1
+    }
+    i
+}
+
+// Reader, part 2: if the tag names `expect`, load every queued word and clear
+// the tag. Clobbers rax, rcx.
+fn fsh_emit_pend_load_x86(tag_off: i64, expect: i64) with Mut, Panic, Div {
+    if FSH_PEND_N <= 0 { return }
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + tag_off)
+    em(0x48); em(0x3d); em32(expect)       // cmp rax, imm32
+    em(0x0f); em(0x85)                     // jne skip
+    let skip_patch = CL
+    em32(0)
+    var k: i64 = 0
+    while k < FSH_PEND_N {
+        emit_load_abs_qword_to_rax_x86(FSH_PEND_ADDR[k as usize])
+        emit_store_var(FSH_PEND_SLOT[k as usize])
+        k = k + 1
+    }
+    fsh_emit_set_tag_x86(tag_off, -1)
+    patch32(skip_patch, CL)
+    FSH_PEND_N = 0
+}
+
 fn bind_struct_local_from_rax_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic, Div {
     let si = st_find(ty_hash)
     if si < 0 && knowledge_hash_is(ty_hash) == false {
@@ -9661,6 +10117,17 @@ fn bind_struct_local_from_rax_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Pani
         return
     }
     VAR_AFFINE[(VAR_COUNT - 1) as usize] = affine_flag
+    // #2776: the new local is a copy of the source aggregate, so it gets a copy
+    // of the source's field shadows (FSH_BIND_SRC, set by the caller from the
+    // initialiser's region; -1 clears them).
+    if FSH_ACTIVE != 0 && knowledge_hash_is(ty_hash) == false {
+        var region: i64 = base + nslots - 1
+        if spill { region = fsh_virt_region() }
+        fsh_copy_region(region, FSH_BIND_SRC, nslots)
+        VAR_AGG0[(VAR_COUNT - 1) as usize] = region
+        VAR_AGG0_GEN[(VAR_COUNT - 1) as usize] = FSH_GEN_CUR
+    }
+    FSH_BIND_SRC = -1
     // Copy struct data to local slots and store LEA pointer
     if spill {
         em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
@@ -10402,6 +10869,694 @@ fn emit_f64_div_from_rcx_rax_x86() with Mut {
     em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
 }
 
+// ─── #2776 extra first-order channels (see EXPR_SX) ───
+fn sx_clear() with Mut {
+    var j: i64 = 0
+    while j < 24 { EXPR_SX[j as usize] = -1; j = j + 1 }
+}
+
+fn sx_any() -> bool with Mut {
+    var j: i64 = 0
+    while j < 24 {
+        if EXPR_SX[j as usize] >= 0 { return true }
+        j = j + 1
+    }
+    false
+}
+
+// Snapshot EXPR_SX into the arena; returns its base, or -1 when full.
+fn sx_snap() -> i64 with Mut {
+    if SX_TOP + 24 > 1048576 { return -1 }
+    let base = SX_TOP
+    var j: i64 = 0
+    while j < 24 { SX_ARENA[(base + j) as usize] = EXPR_SX[j as usize]; j = j + 1 }
+    SX_TOP = SX_TOP + 24
+    base
+}
+
+fn sx_at(base: i64, j: i64) -> i64 with Mut {
+    if base < 0 { return -1 }
+    SX_ARENA[(base + j) as usize]
+}
+
+fn sx_any_at(base: i64) -> bool with Mut {
+    if base < 0 { return false }
+    var j: i64 = 0
+    while j < 24 {
+        if SX_ARENA[(base + j) as usize] >= 0 { return true }
+        j = j + 1
+    }
+    false
+}
+
+fn sx_restore(base: i64) with Mut {
+    var j: i64 = 0
+    while j < 24 { EXPR_SX[j as usize] = sx_at(base, j); j = j + 1 }
+}
+
+fn sx_load_var(vi: i64) with Mut {
+    var j: i64 = 0
+    while j < 24 {
+        if vi >= 0 && vi < 2048 { EXPR_SX[j as usize] = VAR_SX[(vi * 24 + j) as usize] } else { EXPR_SX[j as usize] = -1 }
+        j = j + 1
+    }
+}
+
+fn sx_store_var(vi: i64) with Mut {
+    if vi < 0 || vi >= 2048 { return }
+    var j: i64 = 0
+    while j < 24 { VAR_SX[(vi * 24 + j) as usize] = EXPR_SX[j as usize]; j = j + 1 }
+}
+
+fn sx_clear_var(vi: i64) with Mut {
+    if vi < 0 || vi >= 2048 { return }
+    var j: i64 = 0
+    while j < 24 { VAR_SX[(vi * 24 + j) as usize] = -1; j = j + 1 }
+}
+
+// x86: EXPR_SX[j] = ls ± rs per channel (op 17 add, 18 sub). Clobbers rax, rcx.
+// #2776: channels 8..31 across a direct user call (SX_XCALL only). The
+// caller stores each f64 argument's 24 sensitivities and its own channel
+// variances; the callee seeds its parameters and CHVAR_SX from them; every
+// f64 return path stores the 24 result sensitivities, which the caller loads.
+fn sx_emit_call_args_store_x86(nargs: i64) with Mut {
+    var a: i64 = 0
+    while a < nargs && a < 16 {
+        var j: i64 = 0
+        while j < 24 {
+            let s = B16_SX[(a * 24 + j) as usize]
+            if s >= 0 { emit_load_var(s) } else { emit_imm64(0) }
+            emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_ARG_SX_BSS_OFF + (a * 24 + j) * 8)
+            j = j + 1
+        }
+        a = a + 1
+    }
+    var k: i64 = 0
+    while k < 24 {
+        let iv = CHVAR_SX[k as usize]
+        if iv >= 0 { emit_load_var(iv) } else { emit_imm64(0) }
+        emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + SX_CHVAR_BSS_OFF + k * 8)
+        k = k + 1
+    }
+}
+
+fn sx_emit_param_load_x86(vi: i64) with Mut {
+    var j: i64 = 0
+    while j < 24 {
+        emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_ARG_SX_BSS_OFF + (vi * 24 + j) * 8)
+        let s = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var(s)
+        VAR_SX[(vi * 24 + j) as usize] = s
+        j = j + 1
+    }
+}
+
+fn sx_emit_chvar_load_x86() with Mut {
+    var k: i64 = 0
+    while k < 24 {
+        emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + SX_CHVAR_BSS_OFF + k * 8)
+        let s = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var(s)
+        CHVAR_SX[k as usize] = s
+        k = k + 1
+    }
+}
+
+// Clobbers rax, rcx; the caller saves the return value around it.
+fn sx_emit_ret_store_x86() with Mut {
+    var j: i64 = 0
+    while j < 24 {
+        let s = EXPR_SX[j as usize]
+        if s >= 0 { emit_load_var(s) } else { emit_imm64(0) }
+        emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_RET_SX_BSS_OFF + j * 8)
+        j = j + 1
+    }
+}
+
+fn sx_emit_ret_load_x86() with Mut {
+    var j: i64 = 0
+    while j < 24 {
+        emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_RET_SX_BSS_OFF + j * 8)
+        let s = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var(s)
+        EXPR_SX[j as usize] = s
+        j = j + 1
+    }
+}
+
+// #2776: per-local metadata a closure body overwrites. A closure reuses local
+// indices 0.. for its own parameters and captures, and the outer locals got
+// back their names, slots and types afterwards -- but not their uncertainty
+// shadows, so `variance_of(x)` read 0 for any x declared before a closure
+// literal. Saved on a stack (nested closures) and restored field by field.
+var CL_SH_ARENA: [i64; 1048576] = [0; 1048576]
+var CL_SH_TOP: i64 = 0
+
+fn var_shadow_nf() -> i64 { 50 + 24 }
+
+fn var_shadow_get(f: i64, vi: i64) -> i64 with Mut {
+    if f == 0 { return VAR_VSHADOW[vi as usize] }
+    if f == 1 { return VAR_SSHADOW[vi as usize] }
+    if f == 2 { return VAR_SSHADOW_1[vi as usize] }
+    if f == 3 { return VAR_SSHADOW_2[vi as usize] }
+    if f == 4 { return VAR_SSHADOW_3[vi as usize] }
+    if f == 5 { return VAR_SSHADOW_4[vi as usize] }
+    if f == 6 { return VAR_SSHADOW_5[vi as usize] }
+    if f == 7 { return VAR_SSHADOW_6[vi as usize] }
+    if f == 8 { return VAR_SSHADOW_7[vi as usize] }
+    if f == 9 { return VAR_HSHADOW_00[vi as usize] }
+    if f == 10 { return VAR_HSHADOW_01[vi as usize] }
+    if f == 11 { return VAR_HSHADOW_02[vi as usize] }
+    if f == 12 { return VAR_HSHADOW_03[vi as usize] }
+    if f == 13 { return VAR_HSHADOW_11[vi as usize] }
+    if f == 14 { return VAR_HSHADOW_12[vi as usize] }
+    if f == 15 { return VAR_HSHADOW_13[vi as usize] }
+    if f == 16 { return VAR_HSHADOW_22[vi as usize] }
+    if f == 17 { return VAR_HSHADOW_23[vi as usize] }
+    if f == 18 { return VAR_HSHADOW_33[vi as usize] }
+    if f == 19 { return VAR_HSHADOW_04[vi as usize] }
+    if f == 20 { return VAR_HSHADOW_05[vi as usize] }
+    if f == 21 { return VAR_HSHADOW_06[vi as usize] }
+    if f == 22 { return VAR_HSHADOW_07[vi as usize] }
+    if f == 23 { return VAR_HSHADOW_14[vi as usize] }
+    if f == 24 { return VAR_HSHADOW_15[vi as usize] }
+    if f == 25 { return VAR_HSHADOW_16[vi as usize] }
+    if f == 26 { return VAR_HSHADOW_17[vi as usize] }
+    if f == 27 { return VAR_HSHADOW_24[vi as usize] }
+    if f == 28 { return VAR_HSHADOW_25[vi as usize] }
+    if f == 29 { return VAR_HSHADOW_26[vi as usize] }
+    if f == 30 { return VAR_HSHADOW_27[vi as usize] }
+    if f == 31 { return VAR_HSHADOW_34[vi as usize] }
+    if f == 32 { return VAR_HSHADOW_35[vi as usize] }
+    if f == 33 { return VAR_HSHADOW_36[vi as usize] }
+    if f == 34 { return VAR_HSHADOW_37[vi as usize] }
+    if f == 35 { return VAR_HSHADOW_44[vi as usize] }
+    if f == 36 { return VAR_HSHADOW_45[vi as usize] }
+    if f == 37 { return VAR_HSHADOW_46[vi as usize] }
+    if f == 38 { return VAR_HSHADOW_47[vi as usize] }
+    if f == 39 { return VAR_HSHADOW_55[vi as usize] }
+    if f == 40 { return VAR_HSHADOW_56[vi as usize] }
+    if f == 41 { return VAR_HSHADOW_57[vi as usize] }
+    if f == 42 { return VAR_HSHADOW_66[vi as usize] }
+    if f == 43 { return VAR_HSHADOW_67[vi as usize] }
+    if f == 44 { return VAR_HSHADOW_77[vi as usize] }
+    if f == 45 { return VAR_AGG0[vi as usize] }
+    if f == 46 { return VAR_AGG0_GEN[vi as usize] }
+    if f == 47 { return VAR_DECL_LOOP[vi as usize] }
+    if f == 48 { return VAR_CH_SET[vi as usize] }
+    if f == 49 { return VAR_PARAM_USED[vi as usize] }
+    VAR_SX[(vi * 24 + f - 50) as usize]
+}
+
+fn var_shadow_set(f: i64, vi: i64, v: i64) with Mut {
+    if f == 0 { VAR_VSHADOW[vi as usize] = v; return }
+    if f == 1 { VAR_SSHADOW[vi as usize] = v; return }
+    if f == 2 { VAR_SSHADOW_1[vi as usize] = v; return }
+    if f == 3 { VAR_SSHADOW_2[vi as usize] = v; return }
+    if f == 4 { VAR_SSHADOW_3[vi as usize] = v; return }
+    if f == 5 { VAR_SSHADOW_4[vi as usize] = v; return }
+    if f == 6 { VAR_SSHADOW_5[vi as usize] = v; return }
+    if f == 7 { VAR_SSHADOW_6[vi as usize] = v; return }
+    if f == 8 { VAR_SSHADOW_7[vi as usize] = v; return }
+    if f == 9 { VAR_HSHADOW_00[vi as usize] = v; return }
+    if f == 10 { VAR_HSHADOW_01[vi as usize] = v; return }
+    if f == 11 { VAR_HSHADOW_02[vi as usize] = v; return }
+    if f == 12 { VAR_HSHADOW_03[vi as usize] = v; return }
+    if f == 13 { VAR_HSHADOW_11[vi as usize] = v; return }
+    if f == 14 { VAR_HSHADOW_12[vi as usize] = v; return }
+    if f == 15 { VAR_HSHADOW_13[vi as usize] = v; return }
+    if f == 16 { VAR_HSHADOW_22[vi as usize] = v; return }
+    if f == 17 { VAR_HSHADOW_23[vi as usize] = v; return }
+    if f == 18 { VAR_HSHADOW_33[vi as usize] = v; return }
+    if f == 19 { VAR_HSHADOW_04[vi as usize] = v; return }
+    if f == 20 { VAR_HSHADOW_05[vi as usize] = v; return }
+    if f == 21 { VAR_HSHADOW_06[vi as usize] = v; return }
+    if f == 22 { VAR_HSHADOW_07[vi as usize] = v; return }
+    if f == 23 { VAR_HSHADOW_14[vi as usize] = v; return }
+    if f == 24 { VAR_HSHADOW_15[vi as usize] = v; return }
+    if f == 25 { VAR_HSHADOW_16[vi as usize] = v; return }
+    if f == 26 { VAR_HSHADOW_17[vi as usize] = v; return }
+    if f == 27 { VAR_HSHADOW_24[vi as usize] = v; return }
+    if f == 28 { VAR_HSHADOW_25[vi as usize] = v; return }
+    if f == 29 { VAR_HSHADOW_26[vi as usize] = v; return }
+    if f == 30 { VAR_HSHADOW_27[vi as usize] = v; return }
+    if f == 31 { VAR_HSHADOW_34[vi as usize] = v; return }
+    if f == 32 { VAR_HSHADOW_35[vi as usize] = v; return }
+    if f == 33 { VAR_HSHADOW_36[vi as usize] = v; return }
+    if f == 34 { VAR_HSHADOW_37[vi as usize] = v; return }
+    if f == 35 { VAR_HSHADOW_44[vi as usize] = v; return }
+    if f == 36 { VAR_HSHADOW_45[vi as usize] = v; return }
+    if f == 37 { VAR_HSHADOW_46[vi as usize] = v; return }
+    if f == 38 { VAR_HSHADOW_47[vi as usize] = v; return }
+    if f == 39 { VAR_HSHADOW_55[vi as usize] = v; return }
+    if f == 40 { VAR_HSHADOW_56[vi as usize] = v; return }
+    if f == 41 { VAR_HSHADOW_57[vi as usize] = v; return }
+    if f == 42 { VAR_HSHADOW_66[vi as usize] = v; return }
+    if f == 43 { VAR_HSHADOW_67[vi as usize] = v; return }
+    if f == 44 { VAR_HSHADOW_77[vi as usize] = v; return }
+    if f == 45 { VAR_AGG0[vi as usize] = v; return }
+    if f == 46 { VAR_AGG0_GEN[vi as usize] = v; return }
+    if f == 47 { VAR_DECL_LOOP[vi as usize] = v; return }
+    if f == 48 { VAR_CH_SET[vi as usize] = v; return }
+    if f == 49 { VAR_PARAM_USED[vi as usize] = v; return }
+    VAR_SX[(vi * 24 + f - 50) as usize] = v
+}
+
+// Save locals 0..n; returns the arena base, or -1 when it does not fit.
+fn cl_shadow_save(n: i64) -> i64 with Mut {
+    let nf = var_shadow_nf()
+    let base = CL_SH_TOP
+    if n <= 0 || n > 2048 || base + n * nf > 1048576 { return -1 }
+    var vi: i64 = 0
+    while vi < n {
+        var f: i64 = 0
+        while f < nf { CL_SH_ARENA[(base + vi * nf + f) as usize] = var_shadow_get(f, vi); f = f + 1 }
+        vi = vi + 1
+    }
+    CL_SH_TOP = base + n * nf
+    base
+}
+
+fn cl_shadow_restore(base: i64, n: i64) with Mut {
+    if base < 0 { return }
+    let nf = var_shadow_nf()
+    var vi: i64 = 0
+    while vi < n {
+        var f: i64 = 0
+        while f < nf { var_shadow_set(f, vi, CL_SH_ARENA[(base + vi * nf + f) as usize]); f = f + 1 }
+        vi = vi + 1
+    }
+    CL_SH_TOP = base
+}
+
+// Closure prologue (FSH_ACTIVE): parameters 0..n-1 are VAR 0..n-1.
+fn cl_emit_param_shadows_x86(n: i64) with Mut {
+    var vi: i64 = 0
+    while vi < n && vi < 16 {
+        if VAR_IS_F64[vi as usize] == 1 {
+            var c: i64 = 0
+            while c < 10 {
+                var off = B5_ARG_VSHADOW_BSS_OFF
+                if c == 1 { off = B16_ARG_SSHADOW_BSS_OFF }
+                if c == 2 { off = B16_ARG_SSHADOW_1_BSS_OFF }
+                if c == 3 { off = B16_ARG_SSHADOW_2_BSS_OFF }
+                if c == 4 { off = B16_ARG_SSHADOW_3_BSS_OFF }
+                if c == 5 { off = B16_ARG_SSHADOW_4_BSS_OFF }
+                if c == 6 { off = B16_ARG_SSHADOW_5_BSS_OFF }
+                if c == 7 { off = B16_ARG_SSHADOW_6_BSS_OFF }
+                if c == 8 { off = B16_ARG_SSHADOW_7_BSS_OFF }
+                if c == 9 { off = B16_ARG_HSHADOW_00_BSS_OFF }
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + off + vi * 8)
+                let sl = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(sl)
+                if c == 0 { VAR_VSHADOW[vi as usize] = sl }
+                if c == 1 { VAR_SSHADOW[vi as usize] = sl }
+                if c == 2 { VAR_SSHADOW_1[vi as usize] = sl }
+                if c == 3 { VAR_SSHADOW_2[vi as usize] = sl }
+                if c == 4 { VAR_SSHADOW_3[vi as usize] = sl }
+                if c == 5 { VAR_SSHADOW_4[vi as usize] = sl }
+                if c == 6 { VAR_SSHADOW_5[vi as usize] = sl }
+                if c == 7 { VAR_SSHADOW_6[vi as usize] = sl }
+                if c == 8 { VAR_SSHADOW_7[vi as usize] = sl }
+                if c == 9 { VAR_HSHADOW_00[vi as usize] = sl }
+                c = c + 1
+            }
+            if SX_XCALL != 0 { sx_emit_param_load_x86(vi) }
+        }
+        vi = vi + 1
+    }
+    var k: i64 = 0
+    while k < 8 {
+        emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + FSH_CHVAR_BSS_OFF + k * 8)
+        let cs = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var(cs)
+        CHANNEL_INPUT_VAR_SLOT[k as usize] = cs
+        k = k + 1
+    }
+    if SX_XCALL != 0 { sx_emit_chvar_load_x86() }
+}
+
+// Shadow slot of local `vi`, channel word c (0 variance, 1..8 sens 0-7, 9 H00).
+fn cl_var_shadow_word(vi: i64, c: i64) -> i64 with Mut {
+    if c == 0 { return VAR_VSHADOW[vi as usize] }
+    if c == 1 { return VAR_SSHADOW[vi as usize] }
+    if c == 2 { return VAR_SSHADOW_1[vi as usize] }
+    if c == 3 { return VAR_SSHADOW_2[vi as usize] }
+    if c == 4 { return VAR_SSHADOW_3[vi as usize] }
+    if c == 5 { return VAR_SSHADOW_4[vi as usize] }
+    if c == 6 { return VAR_SSHADOW_5[vi as usize] }
+    if c == 7 { return VAR_SSHADOW_6[vi as usize] }
+    if c == 8 { return VAR_SSHADOW_7[vi as usize] }
+    VAR_HSHADOW_00[vi as usize]
+}
+
+// Closure creation, heap env at slot `heap_slot`: the captured locals' shadows
+// (enclosing frame) after the captures. Clobbers rax, rcx.
+fn cl_emit_capture_shadows_store_x86(heap_slot: i64, ncap: i64) with Mut {
+    var i: i64 = 0
+    while i < ncap {
+        let ovi = CL_CAP_OUTER_VI[i as usize]
+        var c: i64 = 0
+        while c < 10 {
+            var sl: i64 = -1
+            if ovi >= 0 && ovi < VAR_COUNT && VAR_IS_F64[ovi as usize] == 1 { sl = cl_var_shadow_word(ovi, c) }
+            if sl >= 0 { emit_load_var(sl) } else { emit_imm64(0) }
+            em(0x48); em(0x8b); em(0x8d); em32(0 - heap_slot * 8)           // rcx = heap_ptr
+            em(0x48); em(0x89); em(0x81); em32((1 + ncap + i * 10 + c) * 8)  // [rcx+off] = rax
+            c = c + 1
+        }
+        i = i + 1
+    }
+}
+
+// Closure body: the captures' shadows from the env (slot 1 holds env_ptr).
+fn cl_emit_capture_shadows_load_x86(ncap: i64) with Mut {
+    var i: i64 = 0
+    while i < ncap {
+        let cvi = CL_CAP_VI[i as usize]
+        if cvi >= 0 && VAR_IS_F64[cvi as usize] == 1 {
+            var c: i64 = 0
+            while c < 10 {
+                emit_load_var(1)
+                em(0x48); em(0x8b); em(0x80); em32((1 + ncap + i * 10 + c) * 8)  // mov rax, [rax+off]
+                let sl = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(sl)
+                if c == 0 { VAR_VSHADOW[cvi as usize] = sl }
+                if c == 1 { VAR_SSHADOW[cvi as usize] = sl }
+                if c == 2 { VAR_SSHADOW_1[cvi as usize] = sl }
+                if c == 3 { VAR_SSHADOW_2[cvi as usize] = sl }
+                if c == 4 { VAR_SSHADOW_3[cvi as usize] = sl }
+                if c == 5 { VAR_SSHADOW_4[cvi as usize] = sl }
+                if c == 6 { VAR_SSHADOW_5[cvi as usize] = sl }
+                if c == 7 { VAR_SSHADOW_6[cvi as usize] = sl }
+                if c == 8 { VAR_SSHADOW_7[cvi as usize] = sl }
+                if c == 9 { VAR_HSHADOW_00[cvi as usize] = sl }
+                c = c + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Closure tail value (FSH_ACTIVE): its shadows into the RET blocks. Keeps rax.
+fn cl_emit_ret_shadows_x86() with Mut {
+    em(0x50)
+    if EXPR_VSHADOW >= 0 { emit_load_var(EXPR_VSHADOW) } else { emit_imm64(0) }
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B5_RET_VSHADOW_BSS_OFF)
+    var c: i64 = 0
+    while c < 9 {
+        var sl = EXPR_HSHADOW_00
+        var off = B16_RET_HSHADOW_00_BSS_OFF
+        if c == 0 { sl = EXPR_SSHADOW; off = B16_RET_SSHADOW_BSS_OFF }
+        if c == 1 { sl = EXPR_SSHADOW_1; off = B16_RET_SSHADOW_1_BSS_OFF }
+        if c == 2 { sl = EXPR_SSHADOW_2; off = B16_RET_SSHADOW_2_BSS_OFF }
+        if c == 3 { sl = EXPR_SSHADOW_3; off = B16_RET_SSHADOW_3_BSS_OFF }
+        if c == 4 { sl = EXPR_SSHADOW_4; off = B16_RET_SSHADOW_4_BSS_OFF }
+        if c == 5 { sl = EXPR_SSHADOW_5; off = B16_RET_SSHADOW_5_BSS_OFF }
+        if c == 6 { sl = EXPR_SSHADOW_6; off = B16_RET_SSHADOW_6_BSS_OFF }
+        if c == 7 { sl = EXPR_SSHADOW_7; off = B16_RET_SSHADOW_7_BSS_OFF }
+        if sl >= 0 { emit_load_var(sl) } else { emit_imm64(0) }
+        emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + off)
+        c = c + 1
+    }
+    if SX_XCALL != 0 { sx_emit_ret_store_x86() }
+    em(0x58)
+}
+
+// #2776: argument shadows of a call through a function value or closure (the
+// call site, FSH_ACTIVE, f64 result). Clobbers rax, rcx. B5_RET starts as a
+// NaN sentinel so a callee that writes no return shadows is recognisable.
+fn ind_emit_args_store_x86() with Mut {
+    var a: i64 = 0
+    while a < B5_ARG_VCOUNT && a < 16 {
+        let v = B5_VSHADOW[a as usize]
+        if v >= 0 { emit_load_var(v) } else { emit_imm64(0) }
+        emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B5_ARG_VSHADOW_BSS_OFF + a * 8)
+        var c: i64 = 0
+        while c < 9 {
+            var sl = B16_HSHADOW_00[a as usize]
+            var off = B16_ARG_HSHADOW_00_BSS_OFF
+            if c == 0 { sl = B16_SSHADOW[a as usize]; off = B16_ARG_SSHADOW_BSS_OFF }
+            if c == 1 { sl = B16_SSHADOW_1[a as usize]; off = B16_ARG_SSHADOW_1_BSS_OFF }
+            if c == 2 { sl = B16_SSHADOW_2[a as usize]; off = B16_ARG_SSHADOW_2_BSS_OFF }
+            if c == 3 { sl = B16_SSHADOW_3[a as usize]; off = B16_ARG_SSHADOW_3_BSS_OFF }
+            if c == 4 { sl = B16_SSHADOW_4[a as usize]; off = B16_ARG_SSHADOW_4_BSS_OFF }
+            if c == 5 { sl = B16_SSHADOW_5[a as usize]; off = B16_ARG_SSHADOW_5_BSS_OFF }
+            if c == 6 { sl = B16_SSHADOW_6[a as usize]; off = B16_ARG_SSHADOW_6_BSS_OFF }
+            if c == 7 { sl = B16_SSHADOW_7[a as usize]; off = B16_ARG_SSHADOW_7_BSS_OFF }
+            if sl >= 0 { emit_load_var(sl) } else { emit_imm64(0) }
+            emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + off + a * 8)
+            c = c + 1
+        }
+        a = a + 1
+    }
+    fsh_emit_chvar_store_x86()
+    if SX_XCALL != 0 { sx_emit_call_args_store_x86(B5_ARG_VCOUNT) }
+    emit_imm64(9221120237041090560)   // quiet NaN bits: "callee wrote nothing"
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B5_RET_VSHADOW_BSS_OFF)
+}
+
+// The return shadows of that call; rax (the f64 result) is kept. A callee that
+// left the sentinel (an extern, say) falls back to the sum of the argument
+// variances, with no first-order channels.
+fn ind_emit_ret_load_x86() with Mut {
+    em(0x50)
+    let sum = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_imm64(0)
+    emit_store_var(sum)
+    var a: i64 = 0
+    while a < B5_ARG_VCOUNT && a < 16 {
+        let v = B5_VSHADOW[a as usize]
+        if v >= 0 {
+            emit_load_var(sum)
+            em(0x50)
+            emit_load_var(v)
+            em(0x59)
+            emit_f64_add_from_rcx_rax_x86()
+            emit_store_var(sum)
+        }
+        a = a + 1
+    }
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B5_RET_VSHADOW_BSS_OFF)
+    emit_store_var(out)
+    em(0x48); em(0xb9); em64(9221120237041090560)   // mov rcx, sentinel
+    em(0x48); em(0x39); em(0xc8)                     // cmp rax, rcx
+    em(0x75)                                         // jne keep
+    let keep_patch = CL
+    em(0x00)
+    emit_load_var(sum)
+    emit_store_var(out)
+    CD[keep_patch as usize] = (CL - keep_patch - 1) as i8
+    EXPR_VSHADOW = out
+    fsh_clear_expr_hessian()
+    var c: i64 = 0
+    while c < 9 {
+        var off = B16_RET_HSHADOW_00_BSS_OFF
+        if c == 0 { off = B16_RET_SSHADOW_BSS_OFF }
+        if c == 1 { off = B16_RET_SSHADOW_1_BSS_OFF }
+        if c == 2 { off = B16_RET_SSHADOW_2_BSS_OFF }
+        if c == 3 { off = B16_RET_SSHADOW_3_BSS_OFF }
+        if c == 4 { off = B16_RET_SSHADOW_4_BSS_OFF }
+        if c == 5 { off = B16_RET_SSHADOW_5_BSS_OFF }
+        if c == 6 { off = B16_RET_SSHADOW_6_BSS_OFF }
+        if c == 7 { off = B16_RET_SSHADOW_7_BSS_OFF }
+        emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + off)
+        let sl = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var(sl)
+        if c == 0 { EXPR_SSHADOW = sl }
+        if c == 1 { EXPR_SSHADOW_1 = sl }
+        if c == 2 { EXPR_SSHADOW_2 = sl }
+        if c == 3 { EXPR_SSHADOW_3 = sl }
+        if c == 4 { EXPR_SSHADOW_4 = sl }
+        if c == 5 { EXPR_SSHADOW_5 = sl }
+        if c == 6 { EXPR_SSHADOW_6 = sl }
+        if c == 7 { EXPR_SSHADOW_7 = sl }
+        if c == 8 { EXPR_HSHADOW_00 = sl }
+        c = c + 1
+    }
+    if SX_XCALL != 0 { sx_emit_ret_load_x86() } else { sx_clear() }
+    em(0x58)
+}
+
+fn sx_emit_addsub_x86(lsx: i64, rsx: i64, op: i64) with Mut {
+    sx_clear()
+    var j: i64 = 0
+    while j < 24 {
+        let ls = sx_at(lsx, j)
+        let rs = sx_at(rsx, j)
+        if ls >= 0 || rs >= 0 {
+            let res = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            if ls >= 0 { emit_load_var(ls) } else { emit_imm64(0) }
+            em(0x50)
+            if rs >= 0 { emit_load_var(rs) } else { emit_imm64(0) }
+            em(0x59)
+            if op == 17 { emit_f64_add_from_rcx_rax_x86() } else { emit_f64_sub_from_rcx_rax_x86() }
+            emit_store_var(res)
+            EXPR_SX[j as usize] = res
+        }
+        j = j + 1
+    }
+}
+
+// x86: product rule, EXPR_SX[j] = L·rs + R·ls. Clobbers rax, rcx.
+fn sx_emit_mul_x86(lsx: i64, rsx: i64, lval: i64, rval: i64) with Mut {
+    sx_clear()
+    var j: i64 = 0
+    while j < 24 {
+        let ls = sx_at(lsx, j)
+        let rs = sx_at(rsx, j)
+        if ls >= 0 || rs >= 0 {
+            let res = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            if lval >= 0 { emit_load_var(lval) } else { emit_imm64(0) }
+            em(0x50)
+            if rs >= 0 { emit_load_var(rs) } else { emit_imm64(0) }
+            em(0x59); emit_f64_mul_from_rcx_rax_x86()
+            em(0x50)
+            if rval >= 0 { emit_load_var(rval) } else { emit_imm64(0) }
+            em(0x50)
+            if ls >= 0 { emit_load_var(ls) } else { emit_imm64(0) }
+            em(0x59); emit_f64_mul_from_rcx_rax_x86()
+            em(0x59); emit_f64_add_from_rcx_rax_x86()
+            emit_store_var(res)
+            EXPR_SX[j as usize] = res
+        }
+        j = j + 1
+    }
+}
+
+// x86: quotient rule, EXPR_SX[j] = (ls·R − L·rs) / R². Clobbers rax, rcx.
+fn sx_emit_div_x86(lsx: i64, rsx: i64, lval: i64, rval: i64) with Mut {
+    sx_clear()
+    var j: i64 = 0
+    while j < 24 {
+        let ls = sx_at(lsx, j)
+        let rs = sx_at(rsx, j)
+        if ls >= 0 || rs >= 0 {
+            let res = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            // rax = ls·R
+            if ls >= 0 { emit_load_var(ls) } else { emit_imm64(0) }
+            em(0x50)
+            if rval >= 0 { emit_load_var(rval) } else { emit_imm64(0) }
+            em(0x59); emit_f64_mul_from_rcx_rax_x86()
+            em(0x50)
+            // rax = L·rs
+            if lval >= 0 { emit_load_var(lval) } else { emit_imm64(0) }
+            em(0x50)
+            if rs >= 0 { emit_load_var(rs) } else { emit_imm64(0) }
+            em(0x59); emit_f64_mul_from_rcx_rax_x86()
+            // rcx = ls·R, rax = L·rs: rax = rcx − rax
+            em(0x59); emit_f64_sub_from_rcx_rax_x86()
+            em(0x50)
+            // rax = R·R
+            if rval >= 0 { emit_load_var(rval) } else { emit_imm64(0) }
+            em(0x50)
+            if rval >= 0 { emit_load_var(rval) } else { emit_imm64(0) }
+            em(0x59); emit_f64_mul_from_rcx_rax_x86()
+            // rcx = numerator, rax = R²: rax = rcx / rax
+            em(0x59); emit_f64_div_from_rcx_rax_x86()
+            emit_store_var(res)
+            EXPR_SX[j as usize] = res
+        }
+        j = j + 1
+    }
+}
+
+// x86: chain rule for a unary f, EXPR_SX[j] = f'(x)·s_j, given the snapshot of
+// the argument's channels and the slot holding f'(x). Clobbers rax, rcx.
+fn sx_emit_scale_x86(asx: i64, dslot: i64) with Mut {
+    sx_clear()
+    var j: i64 = 0
+    while j < 24 {
+        let s = sx_at(asx, j)
+        if s >= 0 {
+            let res = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_load_var(s)
+            em(0x50)
+            if dslot >= 0 { emit_load_var(dslot) } else { emit_imm64(0) }
+            em(0x59); emit_f64_mul_from_rcx_rax_x86()
+            emit_store_var(res)
+            EXPR_SX[j as usize] = res
+        }
+        j = j + 1
+    }
+}
+
+// x86: EXPR_SX[j] = fa·a_j + fb·b_j for a two-argument f (pow, atan2), given
+// the snapshots of both arguments' channels and the slots of ∂f/∂a, ∂f/∂b.
+fn sx_emit_lincomb_x86(asx: i64, bsx: i64, fa: i64, fb: i64) with Mut {
+    sx_clear()
+    var j: i64 = 0
+    while j < 24 {
+        let sa = sx_at(asx, j)
+        let sb = sx_at(bsx, j)
+        if sa >= 0 || sb >= 0 {
+            let res = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_load_var(fa); em(0x50)
+            if sa >= 0 { emit_load_var(sa) } else { emit_imm64(0) }
+            em(0x59); emit_f64_mul_from_rcx_rax_x86(); em(0x50)
+            emit_load_var(fb); em(0x50)
+            if sb >= 0 { emit_load_var(sb) } else { emit_imm64(0) }
+            em(0x59); emit_f64_mul_from_rcx_rax_x86()
+            em(0x59); emit_f64_add_from_rcx_rax_x86()
+            emit_store_var(res)
+            EXPR_SX[j as usize] = res
+        }
+        j = j + 1
+    }
+}
+
+// x86: acc += Σ_j f(ls_j, rs_j)·σ²_j over the extra channels, where f is
+// ls·rs (mode 0, covariance), (ls − rs)² (mode 1, variance of a difference) or
+// ls² with rs ignored (mode 2, variance). Clobbers rax, rcx.
+fn sx_emit_accum_x86(acc_slot: i64, lsx: i64, rsx: i64, mode: i64) with Mut {
+    var j: i64 = 0
+    while j < 24 {
+        let iv = CHVAR_SX[j as usize]
+        let ls = sx_at(lsx, j)
+        let rs = sx_at(rsx, j)
+        var live = false
+        if mode == 0 { live = ls >= 0 && rs >= 0 }
+        if mode == 1 { live = ls >= 0 || rs >= 0 }
+        if mode == 2 { live = ls >= 0 }
+        if iv >= 0 && live {
+            if mode == 0 {
+                emit_load_var(ls); em(0x50); emit_load_var(rs); em(0x59); emit_f64_mul_from_rcx_rax_x86()
+            } else if mode == 1 {
+                if ls >= 0 { emit_load_var(ls) } else { emit_imm64(0) }
+                em(0x50)
+                if rs >= 0 { emit_load_var(rs) } else { emit_imm64(0) }
+                em(0x59); emit_f64_sub_from_rcx_rax_x86()
+                em(0x50); em(0x59); emit_f64_mul_from_rcx_rax_x86()
+            } else {
+                emit_load_var(ls); em(0x50); em(0x59); emit_f64_mul_from_rcx_rax_x86()
+            }
+            em(0x50)
+            emit_load_var(iv)
+            em(0x59); emit_f64_mul_from_rcx_rax_x86()
+            em(0x50)
+            emit_load_var(acc_slot)
+            em(0x59); emit_f64_add_from_rcx_rax_x86()
+            emit_store_var(acc_slot)
+        }
+        j = j + 1
+    }
+}
+
 // β¹⁰ — FO GUM Var(L−R) = Σ_k (sL_k − sR_k)² · σ²_k into a new stack slot.
 // Cancels identical product paths (a·b − a·b → 0) that slot-identity cannot see.
 fn emit_fo_channel_contrib_sub_x86(acc_slot: i64, ls: i64, rs: i64, ch: i64) with Mut {
@@ -10465,7 +11620,8 @@ fn emit_fo_channel_cov_x86(acc_slot: i64, ls: i64, rs: i64, ch: i64) with Mut {
 fn emit_fo_cov_slot_x86(
     lv: i64, rv: i64,
     ls0: i64, ls1: i64, ls2: i64, ls3: i64, ls4: i64, ls5: i64, ls6: i64, ls7: i64,
-    rs0: i64, rs1: i64, rs2: i64, rs3: i64, rs4: i64, rs5: i64, rs6: i64, rs7: i64
+    rs0: i64, rs1: i64, rs2: i64, rs3: i64, rs4: i64, rs5: i64, rs6: i64, rs7: i64,
+    lsx: i64, rsx: i64
 ) -> i64 with Mut {
     let cov = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
@@ -10484,6 +11640,7 @@ fn emit_fo_cov_slot_x86(
     emit_fo_channel_cov_x86(cov, ls5, rs5, 5)
     emit_fo_channel_cov_x86(cov, ls6, rs6, 6)
     emit_fo_channel_cov_x86(cov, ls7, rs7, 7)
+    sx_emit_accum_x86(cov, lsx, rsx, 0)
     return cov
 }
 
@@ -10491,9 +11648,10 @@ fn emit_fo_cov_slot_x86(
 fn emit_var_add_correlated_x86(
     lv: i64, rv: i64,
     ls0: i64, ls1: i64, ls2: i64, ls3: i64, ls4: i64, ls5: i64, ls6: i64, ls7: i64,
-    rs0: i64, rs1: i64, rs2: i64, rs3: i64, rs4: i64, rs5: i64, rs6: i64, rs7: i64
+    rs0: i64, rs1: i64, rs2: i64, rs3: i64, rs4: i64, rs5: i64, rs6: i64, rs7: i64,
+    lsx: i64, rsx: i64
 ) -> i64 with Mut {
-    let cov = emit_fo_cov_slot_x86(lv, rv, ls0, ls1, ls2, ls3, ls4, ls5, ls6, ls7, rs0, rs1, rs2, rs3, rs4, rs5, rs6, rs7)
+    let cov = emit_fo_cov_slot_x86(lv, rv, ls0, ls1, ls2, ls3, ls4, ls5, ls6, ls7, rs0, rs1, rs2, rs3, rs4, rs5, rs6, rs7, lsx, rsx)
     let out = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
     // out = cov + cov
@@ -10522,9 +11680,10 @@ fn emit_var_add_correlated_x86(
 fn emit_var_mul_cov_term_x86(
     var_slot: i64, lval: i64, rval: i64, lvar: i64, rvar: i64,
     ls0: i64, ls1: i64, ls2: i64, ls3: i64, ls4: i64, ls5: i64, ls6: i64, ls7: i64,
-    rs0: i64, rs1: i64, rs2: i64, rs3: i64, rs4: i64, rs5: i64, rs6: i64, rs7: i64
+    rs0: i64, rs1: i64, rs2: i64, rs3: i64, rs4: i64, rs5: i64, rs6: i64, rs7: i64,
+    lsx: i64, rsx: i64
 ) -> i64 with Mut {
-    let cov = emit_fo_cov_slot_x86(lvar, rvar, ls0, ls1, ls2, ls3, ls4, ls5, ls6, ls7, rs0, rs1, rs2, rs3, rs4, rs5, rs6, rs7)
+    let cov = emit_fo_cov_slot_x86(lvar, rvar, ls0, ls1, ls2, ls3, ls4, ls5, ls6, ls7, rs0, rs1, rs2, rs3, rs4, rs5, rs6, rs7, lsx, rsx)
     let out = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
     // rax = L·R
@@ -10558,9 +11717,10 @@ fn emit_var_mul_cov_term_x86(
 fn emit_var_div_x86(
     lv: i64, rv: i64, lval: i64, rval: i64,
     ls0: i64, ls1: i64, ls2: i64, ls3: i64, ls4: i64, ls5: i64, ls6: i64, ls7: i64,
-    rs0: i64, rs1: i64, rs2: i64, rs3: i64, rs4: i64, rs5: i64, rs6: i64, rs7: i64
+    rs0: i64, rs1: i64, rs2: i64, rs3: i64, rs4: i64, rs5: i64, rs6: i64, rs7: i64,
+    lsx: i64, rsx: i64
 ) -> i64 with Mut {
-    let cov = emit_fo_cov_slot_x86(lv, rv, ls0, ls1, ls2, ls3, ls4, ls5, ls6, ls7, rs0, rs1, rs2, rs3, rs4, rs5, rs6, rs7)
+    let cov = emit_fo_cov_slot_x86(lv, rv, ls0, ls1, ls2, ls3, ls4, ls5, ls6, ls7, rs0, rs1, rs2, rs3, rs4, rs5, rs6, rs7, lsx, rsx)
     let q = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
     emit_load_var(lval)
@@ -10627,7 +11787,8 @@ fn emit_var_div_x86(
 
 fn emit_fo_var_from_sens_diff_sub_x86(
     ls0: i64, ls1: i64, ls2: i64, ls3: i64, ls4: i64, ls5: i64, ls6: i64, ls7: i64,
-    rs0: i64, rs1: i64, rs2: i64, rs3: i64, rs4: i64, rs5: i64, rs6: i64, rs7: i64
+    rs0: i64, rs1: i64, rs2: i64, rs3: i64, rs4: i64, rs5: i64, rs6: i64, rs7: i64,
+    lsx: i64, rsx: i64
 ) -> i64 with Mut {
     let out = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
@@ -10641,6 +11802,7 @@ fn emit_fo_var_from_sens_diff_sub_x86(
     emit_fo_channel_contrib_sub_x86(out, ls5, rs5, 5)
     emit_fo_channel_contrib_sub_x86(out, ls6, rs6, 6)
     emit_fo_channel_contrib_sub_x86(out, ls7, rs7, 7)
+    sx_emit_accum_x86(out, lsx, rsx, 1)
     return out
 }
 
@@ -10667,7 +11829,8 @@ fn emit_fo_channel_contrib_sq_x86(acc_slot: i64, s_slot: i64, ch: i64) with Mut 
 }
 
 fn emit_fo_var_from_sens_x86(
-    s0: i64, s1: i64, s2: i64, s3: i64, s4: i64, s5: i64, s6: i64, s7: i64
+    s0: i64, s1: i64, s2: i64, s3: i64, s4: i64, s5: i64, s6: i64, s7: i64,
+    sx: i64
 ) -> i64 with Mut {
     let out = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
@@ -10681,6 +11844,7 @@ fn emit_fo_var_from_sens_x86(
     emit_fo_channel_contrib_sq_x86(out, s5, 5)
     emit_fo_channel_contrib_sq_x86(out, s6, 6)
     emit_fo_channel_contrib_sq_x86(out, s7, 7)
+    sx_emit_accum_x86(out, sx, -1, 2)
     return out
 }
 
@@ -12180,6 +13344,10 @@ var CL_SAVE_TH: [i64; 2048] = [0; 2048]
 // Capture tracking for closures
 var CL_CAP_SLOT: [i64; 2048] = [0; 2048]
 var CL_CAP_COUNT: i64 = 0
+// #2776: each capture's local index in the enclosing function and in the
+// closure body (for carrying a captured f64's uncertainty shadows in the env).
+var CL_CAP_OUTER_VI: [i64; 2048] = [0; 2048]
+var CL_CAP_VI: [i64; 2048] = [0; 2048]
 // Loop stack for continue/break (max 16 nested loops)
 var LOOP_TOP: [i64; 16] = [0; 16]
 var LOOP_END_PATCH: [i64; 16] = [0; 16]
@@ -12211,7 +13379,7 @@ var BUILTIN_SLOT_CNT: i64 = 0
 fn expr_clear_derivative_shadows() with Mut {
     EXPR_VSHADOW = -1
     EXPR_SSHADOW = -1
-    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
     EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
     EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
     EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -13306,6 +14474,11 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
         }
         var inner_ty = VAR_TY[bvi as usize]
         var inner_hash = VAR_TY_HASH[bvi as usize]
+        // #2776: `&p` / `&p.inner` names p's field-shadow region (shifted by the
+        // field's word offset), so a by-reference struct argument carries its
+        // fields' variance like a by-value one. twice_ref(&p) read 0.
+        var fsh_breg: i64 = -1
+        if FSH_ACTIVE != 0 && VAR_AGG0_GEN[bvi as usize] == FSH_GEN_CUR { fsh_breg = VAR_AGG0[bvi as usize] }
         if TK[EP as usize] == 50 && inner_ty == 10 && type_is_pointer_like(inner_ty, inner_hash) {
             inner_ty = ptr_hash_inner_ty(inner_hash)
             inner_hash = ptr_hash_inner_hash(inner_hash)
@@ -13347,6 +14520,7 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                     inner_hash = 0
                 } else {
                     if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
+                    if fsh_breg != -1 { fsh_breg = fsh_breg - off / 8 }
                     inner_ty = st_field_ty(si, fh)
                     inner_hash = st_field_hash(si, fh)
                 ST_QUERY_NS = -1
@@ -13385,6 +14559,7 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
         EXPR_TY = 10
         if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(inner_ty, inner_hash, 1) }
         else { EXPR_TY_HASH = ref_hash_make(inner_ty, inner_hash, 0) }
+        if fsh_breg != -1 && fsh_type_is_plain_struct(inner_ty, inner_hash) { fsh_stamp(fsh_breg) }
     } else {
         let rgi = gl_find(rns, rne)
         if rgi >= 0 {
@@ -13530,7 +14705,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     LAST_IS_LITERAL_F64 = 0
     EXPR_VSHADOW = -1
     EXPR_SSHADOW = -1
-    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
     EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
     EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
     EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -13758,6 +14933,21 @@ fn compile_primary() with IO, Mut, Panic, Div {
         CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] = 0
         // Save outer function state
         let save_vc = VAR_COUNT
+        // #2776: the outer locals' uncertainty shadows, and the per-function
+        // channel/field-shadow state that names OUTER frame slots (a closure
+        // body has its own frame).
+        let cl_sh_base = cl_shadow_save(save_vc)
+        var cl_save_chv: [i64; 8] = [-1; 8]
+        var cl_save_sxv: [i64; 24] = [-1; 24]
+        var cl_ci0: i64 = 0
+        while cl_ci0 < 8 { cl_save_chv[cl_ci0 as usize] = CHANNEL_INPUT_VAR_SLOT[cl_ci0 as usize]; CHANNEL_INPUT_VAR_SLOT[cl_ci0 as usize] = -1; cl_ci0 = cl_ci0 + 1 }
+        cl_ci0 = 0
+        while cl_ci0 < 24 { cl_save_sxv[cl_ci0 as usize] = CHVAR_SX[cl_ci0 as usize]; CHVAR_SX[cl_ci0 as usize] = -1; cl_ci0 = cl_ci0 + 1 }
+        let cl_save_km = KM_CACHE_COUNT
+        KM_CACHE_COUNT = 0
+        let cl_save_gen = FSH_GEN_CUR
+        FSH_GEN_CUR = FSH_GEN_NEXT
+        FSH_GEN_NEXT = FSH_GEN_NEXT + 1
         let save_ns2 = NEXT_SLOT
         let save_ld = LOOP_DEPTH
         let save_bc = BREAK_COUNT
@@ -13887,6 +15077,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     VAR_TY_HASH[cap_vi as usize] = CL_SAVE_TH[ci as usize]
                     if CL_CAP_COUNT < local_cap() {
                         CL_CAP_SLOT[CL_CAP_COUNT as usize] = outer_slot
+                        CL_CAP_OUTER_VI[CL_CAP_COUNT as usize] = ci
+                        CL_CAP_VI[CL_CAP_COUNT as usize] = cap_vi
                         CL_CAP_COUNT = CL_CAP_COUNT + 1
                     } else {
                         note_limit_error(1)
@@ -13930,13 +15122,23 @@ fn compile_primary() with IO, Mut, Panic, Div {
             emit_store_var(2 + nparams + capi)  // store in capture's local slot
             capi = capi + 1
         }
+        // #2776: f64 parameters take the caller's argument shadows, and the
+        // closure the caller's channel variances, exactly like a function
+        // prologue (the call site writes them for a closure call too).
+        if FSH_ACTIVE != 0 {
+            cl_emit_param_shadows_x86(nparams)
+            cl_emit_capture_shadows_load_x86(CL_CAP_COUNT)
+        }
         // Compile body
+        LAST_STMT_HAS_VALUE = 0
         if TK[EP as usize] == 8 {
             EP = EP + 1
             while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
             if TK[EP as usize] == 9 { EP = EP + 1 }
+            if FSH_ACTIVE != 0 && LAST_STMT_HAS_VALUE == 1 && EXPR_IS_F64 == 1 { cl_emit_ret_shadows_x86() }
         } else {
             compile_or()
+            if FSH_ACTIVE != 0 && EXPR_IS_F64 == 1 { cl_emit_ret_shadows_x86() }
         }
         // Epilogue
         if CL > 0 && CD[(CL - 1) as usize] != 0xc3 as i8 {
@@ -13955,6 +15157,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
         let saved_cap_count = CL_CAP_COUNT
         // Restore outer function state
         VAR_COUNT = save_vc
+        cl_shadow_restore(cl_sh_base, save_vc)
+        var cl_ci1: i64 = 0
+        while cl_ci1 < 8 { CHANNEL_INPUT_VAR_SLOT[cl_ci1 as usize] = cl_save_chv[cl_ci1 as usize]; cl_ci1 = cl_ci1 + 1 }
+        cl_ci1 = 0
+        while cl_ci1 < 24 { CHVAR_SX[cl_ci1 as usize] = cl_save_sxv[cl_ci1 as usize]; cl_ci1 = cl_ci1 + 1 }
+        KM_CACHE_COUNT = cl_save_km
+        FSH_GEN_CUR = cl_save_gen
         NEXT_SLOT = save_ns2
         LOOP_DEPTH = save_ld
         BREAK_COUNT = save_bc
@@ -13983,7 +15192,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
         // --- Build closure struct ---
         // Zero-capture: stack-allocate (fn_ptr only, no env needed).
         // With captures: heap-allocate via mmap so env survives the creating frame.
-        let struct_size = 1 + saved_cap_count
+        var struct_size = 1 + saved_cap_count
+        // #2776: under FSH_ACTIVE the env also carries each capture's shadows
+        // (variance, sensitivities 0-7, H[0,0]) after the captures.
+        if FSH_ACTIVE != 0 { struct_size = struct_size + saved_cap_count * 10 }
         if saved_cap_count == 0 {
             let struct_base = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + struct_size
@@ -14011,6 +15223,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 em(0x48); em(0x89); em(0x81); em32((capj + 1) * 8)  // [rcx+(i+1)*8] = rax
                 capj = capj + 1
             }
+            if FSH_ACTIVE != 0 { cl_emit_capture_shadows_store_x86(heap_slot, saved_cap_count) }
             emit_load_var(heap_slot)                    // rax = heap_ptr (return value)
         }
         // Build FNSIG with inferred/explicit effects for this closure
@@ -14109,8 +15322,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
     }
     // Parenthesized expression or tuple literal
     if k == 6 {
+        let paren_open = EP
         EP = EP + 1
         compile_or()
+        // #1706/#2776: LAST_EXPR_VAR_IDX names the LAST identifier compiled, so
+        // after `(kA * kB)` it named kB and `(kA * kB).value` reused kB's cached
+        // variance (0.04 for an analytic 0.25). Only `(ident)` keeps it.
+        if !(EP == paren_open + 2 && TK[(paren_open + 1) as usize] == 3) { LAST_EXPR_VAR_IDX = -1 }
         if TK[EP as usize] == 28 {
             // Tuple literal: (expr1, expr2, ..., exprN).
             // Layout requirement: .0 at lowest address (highest slot), .1 above, etc.
@@ -15356,6 +16574,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 }
                 if b4_vshadow >= 0 {
                     emit_load_var(b4_vshadow)
+                } else if knowledge_hash_is(EXPR_TY_HASH) {
+                    // #2827: `variance_of(k)` on a Knowledge value (a local
+                    // returned by `mk(..)`, say) read 0; its variance is the
+                    // Knowledge's own field at +8.
+                    em(0x48); em(0x8b); em(0x40); em(8)
                 } else {
                     emit_imm64(0)
                 }
@@ -15370,7 +16593,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 // Returns the forward-mode AD sensitivity ∂x/∂input_k via the β⁶ shadow buffers.
                 EP = EP + 1  // skip (
                 EXPR_SSHADOW = -1
-                EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                 var b4s_arg_vi: i64 = -1
                 if TK[EP as usize] == 3 && TK[(EP + 1) as usize] == 28 {
                     b4s_arg_vi = var_find_idx(TS[EP as usize], TE[EP as usize])
@@ -15386,6 +16609,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let b4s_saved_s5 = EXPR_SSHADOW_5
                 let b4s_saved_s6 = EXPR_SSHADOW_6
                 let b4s_saved_s7 = EXPR_SSHADOW_7
+                let b4s_saved_sx = sx_snap()
                 if TK[EP as usize] == 28 { EP = EP + 1 }
                 // Read channel index k before compile_or advances EP
                 var b4s_k: i64 = 0
@@ -15422,6 +16646,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     if b4s_saved_s6 >= 0 { emit_load_var(b4s_saved_s6) } else { emit_imm64(0) }
                 } else if b4s_k == 7 {
                     if b4s_saved_s7 >= 0 { emit_load_var(b4s_saved_s7) } else { emit_imm64(0) }
+                } else if b4s_k >= 8 && b4s_k < 32 {
+                    // #2776: an extra channel. A named variable's own slots win,
+                    // as for channels 1-3 above.
+                    var b4s_x = sx_at(b4s_saved_sx, b4s_k - 8)
+                    if b4s_arg_vi >= 0 && b4s_arg_vi < 2048 && VAR_SX[(b4s_arg_vi * 24 + b4s_k - 8) as usize] >= 0 {
+                        b4s_x = VAR_SX[(b4s_arg_vi * 24 + b4s_k - 8) as usize]
+                    }
+                    if b4s_x >= 0 { emit_load_var(b4s_x) } else { emit_imm64(0) }
                 } else {
                     if b4s_sshadow >= 0 { emit_load_var(b4s_sshadow) } else { emit_imm64(0) }
                 }
@@ -15430,14 +16662,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
-                EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                 return
             }
             if src_match(ns, ne - ns, "hessian_of") {
                 // hessian_of(x: f64, j: i64, k: i64) -> f64
                 // Returns ∂²x/∂input_j∂input_k via the β⁷ second-order shadow channels (j≤k by convention).
                 EP = EP + 1  // skip (
-                EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                 EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
                 EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
                 EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -15623,7 +16855,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = 2
                 EXPR_TY_HASH = 0
                 EXPR_VSHADOW = -1
-                EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                 EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
                 EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
                 EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -16341,6 +17573,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let a2_y_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var(a2_y_slot)
                 let a2_sy0 = EXPR_SSHADOW; let a2_sy1 = EXPR_SSHADOW_1; let a2_sy2 = EXPR_SSHADOW_2; let a2_sy3 = EXPR_SSHADOW_3
                 let a2_sy4 = EXPR_SSHADOW_4; let a2_sy5 = EXPR_SSHADOW_5; let a2_sy6 = EXPR_SSHADOW_6; let a2_sy7 = EXPR_SSHADOW_7
+                let a2_syx = sx_snap()
                 let a2_hy00 = EXPR_HSHADOW_00; let a2_hy01 = EXPR_HSHADOW_01; let a2_hy02 = EXPR_HSHADOW_02; let a2_hy03 = EXPR_HSHADOW_03
                 let a2_hy11 = EXPR_HSHADOW_11; let a2_hy12 = EXPR_HSHADOW_12; let a2_hy13 = EXPR_HSHADOW_13
                 let a2_hy22 = EXPR_HSHADOW_22; let a2_hy23 = EXPR_HSHADOW_23; let a2_hy33 = EXPR_HSHADOW_33
@@ -16359,6 +17592,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let a2_x_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var(a2_x_slot)
                 let a2_sx0 = EXPR_SSHADOW; let a2_sx1 = EXPR_SSHADOW_1; let a2_sx2 = EXPR_SSHADOW_2; let a2_sx3 = EXPR_SSHADOW_3
                 let a2_sx4 = EXPR_SSHADOW_4; let a2_sx5 = EXPR_SSHADOW_5; let a2_sx6 = EXPR_SSHADOW_6; let a2_sx7 = EXPR_SSHADOW_7
+                let a2_sxx = sx_snap()
                 let a2_hx00 = EXPR_HSHADOW_00; let a2_hx01 = EXPR_HSHADOW_01; let a2_hx02 = EXPR_HSHADOW_02; let a2_hx03 = EXPR_HSHADOW_03
                 let a2_hx11 = EXPR_HSHADOW_11; let a2_hx12 = EXPR_HSHADOW_12; let a2_hx13 = EXPR_HSHADOW_13
                 let a2_hx22 = EXPR_HSHADOW_22; let a2_hx23 = EXPR_HSHADOW_23; let a2_hx33 = EXPR_HSHADOW_33
@@ -16378,7 +17612,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let a2_fi = fn_find_lit("__native_atan2_f64")
                 if a2_fi >= 0 { emit_direct_fn_call_x86(a2_fi, 2) } else { tc_error(name_tok, "missing atan2 native"); emit_drop_call_args_x86(2); em(0x31); em(0xc0) }
                 EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
-                EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                 EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
                 EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
                 EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -16389,7 +17623,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
                 EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
                 EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1; EXPR_HSHADOW_77 = -1
-                if a2_sy0 >= 0 || a2_sy1 >= 0 || a2_sy2 >= 0 || a2_sy3 >= 0 || a2_sy4 >= 0 || a2_sy5 >= 0 || a2_sy6 >= 0 || a2_sy7 >= 0 || a2_sx0 >= 0 || a2_sx1 >= 0 || a2_sx2 >= 0 || a2_sx3 >= 0 || a2_sx4 >= 0 || a2_sx5 >= 0 || a2_sx6 >= 0 || a2_sx7 >= 0 || a2_hy00 >= 0 || a2_hx00 >= 0 || a2_hy11 >= 0 || a2_hx11 >= 0 || a2_hy22 >= 0 || a2_hx22 >= 0 || a2_hy33 >= 0 || a2_hx33 >= 0 || a2_hy44 >= 0 || a2_hx44 >= 0 || a2_hy55 >= 0 || a2_hx55 >= 0 || a2_hy66 >= 0 || a2_hx66 >= 0 || a2_hy77 >= 0 || a2_hx77 >= 0 {
+                if sx_any_at(a2_syx) || sx_any_at(a2_sxx) || a2_sy0 >= 0 || a2_sy1 >= 0 || a2_sy2 >= 0 || a2_sy3 >= 0 || a2_sy4 >= 0 || a2_sy5 >= 0 || a2_sy6 >= 0 || a2_sy7 >= 0 || a2_sx0 >= 0 || a2_sx1 >= 0 || a2_sx2 >= 0 || a2_sx3 >= 0 || a2_sx4 >= 0 || a2_sx5 >= 0 || a2_sx6 >= 0 || a2_sx7 >= 0 || a2_hy00 >= 0 || a2_hx00 >= 0 || a2_hy11 >= 0 || a2_hx11 >= 0 || a2_hy22 >= 0 || a2_hx22 >= 0 || a2_hy33 >= 0 || a2_hx33 >= 0 || a2_hy44 >= 0 || a2_hx44 >= 0 || a2_hy55 >= 0 || a2_hx55 >= 0 || a2_hy66 >= 0 || a2_hx66 >= 0 || a2_hy77 >= 0 || a2_hx77 >= 0 {
                     let a2_r2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                     emit_load_var(a2_x_slot); em(0x50); emit_load_var(a2_x_slot); em(0x59); emit_f64_mul_from_rcx_rax_x86(); em(0x50)
                     emit_load_var(a2_y_slot); em(0x50); emit_load_var(a2_y_slot); em(0x59); emit_f64_mul_from_rcx_rax_x86()
@@ -16465,6 +17699,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         if a2_sx7 >= 0 { emit_load_var(a2_sx7) } else { emit_imm64(0) }
                         em(0x59); emit_f64_mul_from_rcx_rax_x86(); em(0x59); emit_f64_add_from_rcx_rax_x86()
                         emit_store_var(a2_sr7); EXPR_SSHADOW_7 = a2_sr7 }
+                    if sx_any_at(a2_syx) || sx_any_at(a2_sxx) { sx_emit_lincomb_x86(a2_syx, a2_sxx, a2_fa_slot, a2_fb_slot) }
                     // Hessian pairs: H_jk = faa*sy_j*sy_k + fbb*sx_j*sx_k + fab*(sy_j*sx_k+sy_k*sx_j) + fa*hy_jk + fb*hx_jk
                     // Helper macro pattern: compute all 5 terms and sum; j=row, k=col (j<=k)
                     if a2_hy00 >= 0 || a2_hx00 >= 0 || a2_sy0 >= 0 || a2_sx0 >= 0 { let a2_hr00 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
@@ -16935,6 +18170,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let pw_x_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var(pw_x_slot)
                 let pw_sx0 = EXPR_SSHADOW; let pw_sx1 = EXPR_SSHADOW_1; let pw_sx2 = EXPR_SSHADOW_2; let pw_sx3 = EXPR_SSHADOW_3
                 let pw_sx4 = EXPR_SSHADOW_4; let pw_sx5 = EXPR_SSHADOW_5; let pw_sx6 = EXPR_SSHADOW_6; let pw_sx7 = EXPR_SSHADOW_7
+                let pw_sxx = sx_snap()
                 let pw_hx00 = EXPR_HSHADOW_00; let pw_hx01 = EXPR_HSHADOW_01; let pw_hx02 = EXPR_HSHADOW_02; let pw_hx03 = EXPR_HSHADOW_03
                 let pw_hx11 = EXPR_HSHADOW_11; let pw_hx12 = EXPR_HSHADOW_12; let pw_hx13 = EXPR_HSHADOW_13
                 let pw_hx22 = EXPR_HSHADOW_22; let pw_hx23 = EXPR_HSHADOW_23; let pw_hx33 = EXPR_HSHADOW_33
@@ -16953,6 +18189,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let pw_y_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var(pw_y_slot)
                 let pw_sy0 = EXPR_SSHADOW; let pw_sy1 = EXPR_SSHADOW_1; let pw_sy2 = EXPR_SSHADOW_2; let pw_sy3 = EXPR_SSHADOW_3
                 let pw_sy4 = EXPR_SSHADOW_4; let pw_sy5 = EXPR_SSHADOW_5; let pw_sy6 = EXPR_SSHADOW_6; let pw_sy7 = EXPR_SSHADOW_7
+                let pw_syx = sx_snap()
                 let pw_hy00 = EXPR_HSHADOW_00; let pw_hy01 = EXPR_HSHADOW_01; let pw_hy02 = EXPR_HSHADOW_02; let pw_hy03 = EXPR_HSHADOW_03
                 let pw_hy11 = EXPR_HSHADOW_11; let pw_hy12 = EXPR_HSHADOW_12; let pw_hy13 = EXPR_HSHADOW_13
                 let pw_hy22 = EXPR_HSHADOW_22; let pw_hy23 = EXPR_HSHADOW_23; let pw_hy33 = EXPR_HSHADOW_33
@@ -16979,7 +18216,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if pw_exp_fi >= 0 { emit_direct_fn_call_x86(pw_exp_fi, 1) } else { em(0x31); em(0xc0) }
                 let pw_res_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var(pw_res_slot)
                 EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
-                EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                 EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
                 EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
                 EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -16990,7 +18227,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
                 EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
                 EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1; EXPR_HSHADOW_77 = -1
-                if pw_sx0 >= 0 || pw_sx1 >= 0 || pw_sx2 >= 0 || pw_sx3 >= 0 || pw_sx4 >= 0 || pw_sx5 >= 0 || pw_sx6 >= 0 || pw_sx7 >= 0 || pw_sy0 >= 0 || pw_sy1 >= 0 || pw_sy2 >= 0 || pw_sy3 >= 0 || pw_sy4 >= 0 || pw_sy5 >= 0 || pw_sy6 >= 0 || pw_sy7 >= 0 || pw_hx00 >= 0 || pw_hy00 >= 0 || pw_hx11 >= 0 || pw_hy11 >= 0 || pw_hx22 >= 0 || pw_hy22 >= 0 || pw_hx33 >= 0 || pw_hy33 >= 0 || pw_hx44 >= 0 || pw_hy44 >= 0 || pw_hx55 >= 0 || pw_hy55 >= 0 || pw_hx66 >= 0 || pw_hy66 >= 0 || pw_hx77 >= 0 || pw_hy77 >= 0 {
+                if sx_any_at(pw_sxx) || sx_any_at(pw_syx) || pw_sx0 >= 0 || pw_sx1 >= 0 || pw_sx2 >= 0 || pw_sx3 >= 0 || pw_sx4 >= 0 || pw_sx5 >= 0 || pw_sx6 >= 0 || pw_sx7 >= 0 || pw_sy0 >= 0 || pw_sy1 >= 0 || pw_sy2 >= 0 || pw_sy3 >= 0 || pw_sy4 >= 0 || pw_sy5 >= 0 || pw_sy6 >= 0 || pw_sy7 >= 0 || pw_hx00 >= 0 || pw_hy00 >= 0 || pw_hx11 >= 0 || pw_hy11 >= 0 || pw_hx22 >= 0 || pw_hy22 >= 0 || pw_hx33 >= 0 || pw_hy33 >= 0 || pw_hx44 >= 0 || pw_hy44 >= 0 || pw_hx55 >= 0 || pw_hy55 >= 0 || pw_hx66 >= 0 || pw_hy66 >= 0 || pw_hx77 >= 0 || pw_hy77 >= 0 {
                     // fa = ∂/∂x = y * x^(y-1) = result * y / x
                     let pw_fa_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                     emit_load_var(pw_res_slot); em(0x50); emit_load_var(pw_y_slot)
@@ -17072,6 +18309,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         if pw_sy7 >= 0 { emit_load_var(pw_sy7) } else { emit_imm64(0) }
                         em(0x59); emit_f64_mul_from_rcx_rax_x86(); em(0x59); emit_f64_add_from_rcx_rax_x86()
                         emit_store_var(pw_sr7); EXPR_SSHADOW_7 = pw_sr7 }
+                    if sx_any_at(pw_sxx) || sx_any_at(pw_syx) { sx_emit_lincomb_x86(pw_sxx, pw_syx, pw_fa_slot, pw_fb_slot) }
                     // Hessian pairs: H_jk = faa*sx_j*sx_k + fbb*sy_j*sy_k + fab*(sx_j*sy_k+sx_k*sy_j) + fa*hx_jk + fb*hy_jk
                     if pw_hx00 >= 0 || pw_hy00 >= 0 || pw_sx0 >= 0 || pw_sy0 >= 0 { let pw_hr00 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                         emit_load_var(pw_faa_slot); em(0x50); if pw_sx0 >= 0 { emit_load_var(pw_sx0) } else { emit_imm64(0) }; em(0x59); emit_f64_mul_from_rcx_rax_x86(); em(0x50)
@@ -17470,6 +18708,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     let math_s5 = EXPR_SSHADOW_5
                     let math_s6 = EXPR_SSHADOW_6
                     let math_s7 = EXPR_SSHADOW_7
+                    let math_sx = sx_snap()
                     let math_h00 = EXPR_HSHADOW_00; let math_h01 = EXPR_HSHADOW_01
                     let math_h02 = EXPR_HSHADOW_02; let math_h03 = EXPR_HSHADOW_03
                     let math_h11 = EXPR_HSHADOW_11; let math_h12 = EXPR_HSHADOW_12
@@ -17483,7 +18722,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     let math_h55 = EXPR_HSHADOW_55; let math_h56 = EXPR_HSHADOW_56; let math_h57 = EXPR_HSHADOW_57
                     let math_h66 = EXPR_HSHADOW_66; let math_h67 = EXPR_HSHADOW_67; let math_h77 = EXPR_HSHADOW_77
                     var math_arg_slot: i64 = -1
-                    if math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
+                    if sx_any_at(math_sx) || math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
                         math_arg_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                         emit_store_var(math_arg_slot)
                     }
@@ -17505,7 +18744,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         em(0x31); em(0xc0)
                     }
                     // β⁶/β⁷: chain rule — compute f'(arg) and f''(arg), propagate all shadow channels
-                    EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                    EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                     EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
                     EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
                     EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -17517,7 +18756,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
     EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
     EXPR_HSHADOW_77 = -1
-                    if math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
+                    if sx_any_at(math_sx) || math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
                         var math_res_slot: i64 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                         emit_store_var(math_res_slot)
                         // Compute f'(arg) into math_deriv_slot
@@ -17672,6 +18911,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
                             emit_store_var(msr7)
                             EXPR_SSHADOW_7 = msr7
                         }
+                        // #2776: extra channels, same chain rule.
+                        if sx_any_at(math_sx) { sx_emit_scale_x86(math_sx, math_deriv_slot) }
                         // β⁷: second-order chain rule: H_jk(f(g)) = f''(g)*s_j(g)*s_k(g) + f'(g)*H_jk(g)
                         if math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h02 >= 0 || math_h03 >= 0 || math_h12 >= 0 || math_h13 >= 0 || math_h22 >= 0 || math_h23 >= 0 || math_h33 >= 0 || math_h04 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 || (math_s0 >= 0 && math_s0 >= 0) || (math_s0 >= 0 && math_s1 >= 0) || (math_s1 >= 0 && math_s1 >= 0) || (math_s0 >= 0 && math_s2 >= 0) || (math_s2 >= 0 && math_s2 >= 0) || (math_s3 >= 0) || (math_s4 >= 0) || (math_s5 >= 0) || (math_s6 >= 0) || (math_s7 >= 0) {
                             var math_deriv2_slot: i64 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
@@ -18521,6 +19762,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
             EP = EP + 1
             var argc: i64 = 0
             var abi_argc: i64 = 0
+            // #2776: each struct argument's field-shadow region and struct type
+            // (locals, not globals: an argument may itself contain a call).
+            var fsh_cr: [i64; 16] = [-1; 16]
+            var fsh_ch: [i64; 16] = [0; 16]
             // Mark that we're inside a call arg list so borrows taken here are tracked.
             // Save prev_borrow_n so nested calls don't clobber our borrow records.
             let prev_in_call_args = IN_CALL_ARGS
@@ -18529,8 +19774,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
             IN_CALL_ARGS = 1
             B5_ARG_VCOUNT = 0
             B9_ARG_CH_COUNT = 0
+            let csh_base = CALL_SH_TOP
+            let csh_ok = csh_base + 544 <= 65536
+            if csh_ok { CALL_SH_TOP = csh_base + 544 }
             while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                 compile_or()
+                if argc < 16 { fsh_cr[argc as usize] = fsh_expr_agg() }
+                if csh_ok && argc < 16 { call_sh_capture(csh_base + argc * 34) }
                 // β⁵: capture variance shadow for this argument
                 if argc < 16 { B5_VSHADOW[argc as usize] = EXPR_VSHADOW }
                 B5_ARG_VCOUNT = argc + 1
@@ -18545,6 +19795,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     B16_SSHADOW_6[argc as usize] = EXPR_SSHADOW_6
                     B16_SSHADOW_7[argc as usize] = EXPR_SSHADOW_7
                     B16_HSHADOW_00[argc as usize] = EXPR_HSHADOW_00
+                }
+                if SX_XCALL != 0 && argc < 16 {
+                    var sxa: i64 = 0
+                    while sxa < 24 { B16_SX[(argc * 24 + sxa) as usize] = EXPR_SX[sxa as usize]; sxa = sxa + 1 }
                 }
                 // β⁹ GTT: capture this argument's channel topology before the
                 // next arg's compile_or() overwrites EXPR_CH_SET.
@@ -18562,6 +19816,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     SCAN_TY = 0
                     SCAN_TY_HASH = 0
                 }
+                if FSH_ACTIVE != 0 && fi >= 0 && argc < 16 { fsh_ch[argc as usize] = fsh_param_struct_hash(SCAN_TY, SCAN_TY_HASH) }
                 if (SCAN_TY == 0 || SCAN_TY == 2) && unit_call_arg_mismatch(SCAN_TY_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
                     tc_linear_violation(call_tok, "unit mismatch in call argument")
                 }
@@ -18641,6 +19896,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 28 { EP = EP + 1 }
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }
+            if csh_ok {
+                var csh_i: i64 = 0
+                while csh_i < argc && csh_i < 16 { call_sh_restore(csh_base + csh_i * 34, csh_i); csh_i = csh_i + 1 }
+                B5_ARG_VCOUNT = argc
+                CALL_SH_TOP = csh_base
+            }
             // Restore call-arg tracking state and release call-site borrows
             IN_CALL_ARGS = prev_in_call_args
             release_call_arg_borrows(prev_borrow_n)
@@ -18773,6 +20034,22 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_ARG_HSHADOW_00_BSS_OFF + b16_pvi * 8)
                         b16_pvi = b16_pvi + 1
                     }
+                    // #2776: the struct arguments' field shadows, in parameter order.
+                    if FSH_ACTIVE != 0 {
+                        var fsh_j: i64 = 0
+                        var fsh_any = false
+                        var fsh_ai: i64 = 0
+                        while fsh_ai < argc && fsh_ai < 16 {
+                            if fsh_ch[fsh_ai as usize] != 0 {
+                                fsh_j = fsh_j + fsh_emit_region_to_bss_x86(fsh_cr[fsh_ai as usize], fsh_ch[fsh_ai as usize], FSH_ARG_BSS_OFF, FSH_ARG_WORDS, fsh_j)
+                                fsh_any = true
+                            }
+                            fsh_ai = fsh_ai + 1
+                        }
+                        if fsh_any { fsh_emit_set_tag_x86(fsh_arg_tag_off(), fi) }
+                        fsh_emit_chvar_store_x86()
+                    }
+                    if SX_XCALL != 0 { sx_emit_call_args_store_x86(B5_ARG_VCOUNT) }
                     em(0x59)
                     emit_direct_fn_call_x86(fi, abi_argc)
                 }
@@ -18780,6 +20057,16 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                // #2776: a struct result's field shadows, from the callee's FSH_RET.
+                var fsh_ret_region: i64 = -1
+                if FSH_ACTIVE != 0 && fsh_type_is_plain_struct(EXPR_TY, EXPR_TY_HASH) {
+                    fsh_ret_region = fsh_virt_region()
+                    em(0x50)  // push rax (result pointer)
+                    FSH_PEND_N = 0
+                    let fsh_nw = fsh_pend_region_x86(fsh_ret_region, EXPR_TY_HASH, FSH_RET_BSS_OFF, FSH_RET_WORDS, 0)
+                    if fsh_nw > 0 { fsh_emit_pend_load_x86(fsh_ret_tag_off(), fi) }
+                    em(0x58)  // pop rax
+                }
                 // β⁹ GTT: union of argument channel sets becomes the return
                 // value's topology. Conservative upper bound; matches the
                 // atan2/pow builtin discipline. Runs before β⁵ so EXPR_CH_SET
@@ -18868,7 +20155,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         }
                         b5_i = b5_i + 1
                     }
-                    if b5_sum_slot >= 0 {
+                    // #2776: under FSH_ACTIVE every return path writes the callee's
+                    // variance (0 when the value carries none), so the exact value
+                    // is used as is. The argument-variance sum stood in for a 0
+                    // that used to mean "the callee lost it", and made
+                    // `clamp_pos(x)` with x < 0 (which returns the exact 0.0) read
+                    // var(x).
+                    if b5_sum_slot >= 0 && FSH_ACTIVE == 0 {
                         // Emit: if exact != 0, use exact; else use sum
                         emit_load_var(b5_exact_slot)
                         em(0x48); em(0x85); em(0xc0)  // test rax, rax
@@ -18925,6 +20218,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     let b16_sret7 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                     emit_store_var(b16_sret7)
                     EXPR_SSHADOW_7 = b16_sret7
+                    // #2776: channels 8..31 of the result (zero slots for a
+                    // callee that does not touch them).
+                    if SX_XCALL != 0 { sx_emit_ret_load_x86() } else { sx_clear() }
                     emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
                     let b16_hret = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                     emit_store_var(b16_hret)
@@ -18942,12 +20238,24 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     // Restore f64 result
                     emit_load_var(b5_res)
                 }
+                if fsh_ret_region != -1 { fsh_stamp(fsh_ret_region) }
             } else {
                 if call_vslot >= 0 {
                     if call_sig <= 0 {
                         tc_error_hard(call_tok, "value is not callable")
                     }
                     if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
+                    // #2776: hand the argument shadows over and read the
+                    // result's back, as a direct call does; before, the result
+                    // kept the LAST ARGUMENT's shadows.
+                    // An unannotated closure (`|y: f64| 2.0 * y`) has return
+                    // type 0; its body still writes f64 return shadows.
+                    let ind_shadow = FSH_ACTIVE != 0 && call_sig > 0 && (FNSIG_RET_TY[call_sig as usize] == 2 || (FNSIG_RET_TY[call_sig as usize] == 0 && call_is_closure == 1))
+                    if ind_shadow {
+                        em(0x51)
+                        ind_emit_args_store_x86()
+                        em(0x59)
+                    }
                     if call_is_closure == 1 {
                         emit_setup_closure_call_args_x86(argc)
                         emit_prepare_stack_call_args_x86(argc, 5)
@@ -18973,6 +20281,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     } else {
                         emit_indirect_fn_call_x86(call_vslot, abi_argc, FNSIG_RET_TY[call_sig as usize], FNSIG_RET_HASH[call_sig as usize])
                     }
+                    if ind_shadow { ind_emit_ret_load_x86() }
                     if call_sig > 0 {
                         EXPR_TY = FNSIG_RET_TY[call_sig as usize]
                         EXPR_TY_HASH = FNSIG_RET_HASH[call_sig as usize]
@@ -19095,6 +20404,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                                 if fty == 0 && knowledge_hash_is(fhash) && ty_eq(0, fhash, EXPR_TY, EXPR_TY_HASH) == false {
                                     tc_linear_violation(field_tok, "field initializer type does not match Knowledge field type")
                                 }
+                                // #2776: the field's shadows, keyed by its word in this literal.
+                                if FSH_ACTIVE != 0 {
+                                    if fty == 2 {
+                                        fsh_set_from_expr(dst_start)
+                                    } else if fsh_type_is_plain_struct(fty, fhash) {
+                                        fsh_copy_region(dst_start, fsh_expr_agg(), struct_like_nslots(fhash))
+                                    }
+                                }
                                 copy_agg_into_struct_slots_x86(dst_start, fty, fhash)
                             }
                         } else {
@@ -19122,6 +20439,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 em(0x48); em(0x8d); em(0x85)
                 em32(0 - (base_slot + total_slots - 1) * 8)
                 EXPR_IS_F64 = 0
+                // #2776: this literal's region is its own frame slots.
+                if FSH_ACTIVE != 0 { fsh_stamp(base_slot + total_slots - 1) }
                 // Convert Knowledge struct literal to epistemic Knowledge type
                 if sh == knowledge_struct_hash() {
                     EXPR_TY = 0
@@ -19320,6 +20639,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_SSHADOW_5 = VAR_SSHADOW_5[vi as usize]
                 EXPR_SSHADOW_6 = VAR_SSHADOW_6[vi as usize]
                 EXPR_SSHADOW_7 = VAR_SSHADOW_7[vi as usize]
+                sx_load_var(vi)
                 EXPR_HSHADOW_00 = VAR_HSHADOW_00[vi as usize]
                 EXPR_HSHADOW_01 = VAR_HSHADOW_01[vi as usize]
                 EXPR_HSHADOW_02 = VAR_HSHADOW_02[vi as usize]
@@ -19359,10 +20679,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 // β⁹ GTT: restore the variable's channel topology on load.
                 EXPR_CH_SET = VAR_CH_SET[vi as usize]
                 EXPR_PARAM_USED = VAR_PARAM_USED[vi as usize]
+                // #2776: an aggregate local names its field-shadow region.
+                if FSH_ACTIVE != 0 && VAR_AGG0_GEN[vi as usize] == FSH_GEN_CUR && VAR_AGG0[vi as usize] != -1 {
+                    fsh_stamp(VAR_AGG0[vi as usize])
+                }
             } else {
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
-                EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                 EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
                 EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
                 EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -19743,6 +21067,9 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             continue
         }
         if TK[EP as usize] == 50 {
+            // #2776: the field-shadow region of the base, before EP moves.
+            let fsh_base = fsh_expr_agg()
+            var fsh_field_region: i64 = -1
             EP = EP + 1  // skip '.'
             let method_tok = EP
             let fns = TS[EP as usize]
@@ -20060,7 +21387,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         EXPR_TY_HASH = 0
                     }
                     // β⁶/β⁷: reset shadows, then propagate via chain rule if receiver had shadows
-                    EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                    EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                     EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
                     EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
                     EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -20470,9 +21797,47 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         materialize_aggregate_expr_x86()
                     }
                     em(0x50)  // push self
+                    // #2776: a method call carried no uncertainty across the
+                    // call at all -- no argument variance or sensitivities into
+                    // the callee (its prologue read whatever the previous plain
+                    // call had left in B5_ARG/B16_ARG), no return variance back
+                    // (the caller kept the last argument's shadows), and no
+                    // field shadows of the receiver. Capture them per argument
+                    // in locals (an argument may itself contain a call), write
+                    // them below once every argument is on the stack.
+                    var m_sh: [i64; 160] = [-1; 160]
+                    var m_cr: [i64; 16] = [-1; 16]
+                    var m_ch: [i64; 16] = [0; 16]
+                    if FSH_ACTIVE != 0 {
+                        m_cr[0] = fsh_base
+                        m_ch[0] = fsh_param_struct_hash(SCAN_TY, SCAN_TY_HASH)
+                    }
                     var margc: i64 = 1
+                    // #2776: channels 8..31 of each argument, stacked like a
+                    // plain call's (CALL_SH); the receiver's words stay -1.
+                    let m_csb = CALL_SH_TOP
+                    let m_csok = SX_XCALL != 0 && m_csb + 544 <= 65536
+                    if m_csok {
+                        CALL_SH_TOP = m_csb + 544
+                        var m_ci: i64 = 0
+                        while m_ci < 34 { CALL_SH[(m_csb + m_ci) as usize] = -1; m_ci = m_ci + 1 }
+                    }
                     while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                         compile_or()
+                        if m_csok && margc < 16 { call_sh_capture(m_csb + margc * 34) }
+                        if margc < 16 {
+                            if FSH_ACTIVE != 0 { m_cr[margc as usize] = fsh_expr_agg() }
+                            m_sh[margc as usize] = EXPR_VSHADOW
+                            m_sh[(16 + margc) as usize] = EXPR_SSHADOW
+                            m_sh[(32 + margc) as usize] = EXPR_SSHADOW_1
+                            m_sh[(48 + margc) as usize] = EXPR_SSHADOW_2
+                            m_sh[(64 + margc) as usize] = EXPR_SSHADOW_3
+                            m_sh[(80 + margc) as usize] = EXPR_SSHADOW_4
+                            m_sh[(96 + margc) as usize] = EXPR_SSHADOW_5
+                            m_sh[(112 + margc) as usize] = EXPR_SSHADOW_6
+                            m_sh[(128 + margc) as usize] = EXPR_SSHADOW_7
+                            m_sh[(144 + margc) as usize] = EXPR_HSHADOW_00
+                        }
                         if EXPR_TY == 13 { tc_error_hard(EP - 1, "f128 method arguments are not implemented") }
                         materialize_aggregate_expr_x86()
                         em(0x50)
@@ -20481,6 +21846,67 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     }
                     if TK[EP as usize] == 7 { EP = EP + 1 }
                     if FN_ARITY[mfi as usize] != margc { tc_wrong_arity(method_tok, FN_ARITY[mfi as usize], margc) }
+                    // #2776: argument shadows into the callee's BSS blocks, indexed
+                    // by parameter position (the receiver is position 0). Every
+                    // argument is on the stack here, so rax/rcx are free.
+                    if FSH_ACTIVE != 0 {
+                        var m_ai: i64 = 1
+                        while m_ai < margc && m_ai < 16 {
+                            scan_fnsig_param_type(FN_SIG[mfi as usize], m_ai)
+                            m_ch[m_ai as usize] = fsh_param_struct_hash(SCAN_TY, SCAN_TY_HASH)
+                            m_ai = m_ai + 1
+                        }
+                        var m_pi: i64 = 0
+                        while m_pi < margc && m_pi < 16 {
+                            let m_v = m_sh[m_pi as usize]
+                            if m_v >= 0 { emit_load_var(m_v) } else { emit_imm64(0) }
+                            emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B5_ARG_VSHADOW_BSS_OFF + m_pi * 8)
+                            if B16_ACTIVE == 1 {
+                                var m_c: i64 = 0
+                                while m_c < 9 {
+                                    let m_s = m_sh[((m_c + 1) * 16 + m_pi) as usize]
+                                    if m_s >= 0 { emit_load_var(m_s) } else { emit_imm64(0) }
+                                    var m_off = B16_ARG_SSHADOW_BSS_OFF
+                                    if m_c == 1 { m_off = B16_ARG_SSHADOW_1_BSS_OFF }
+                                    if m_c == 2 { m_off = B16_ARG_SSHADOW_2_BSS_OFF }
+                                    if m_c == 3 { m_off = B16_ARG_SSHADOW_3_BSS_OFF }
+                                    if m_c == 4 { m_off = B16_ARG_SSHADOW_4_BSS_OFF }
+                                    if m_c == 5 { m_off = B16_ARG_SSHADOW_5_BSS_OFF }
+                                    if m_c == 6 { m_off = B16_ARG_SSHADOW_6_BSS_OFF }
+                                    if m_c == 7 { m_off = B16_ARG_SSHADOW_7_BSS_OFF }
+                                    if m_c == 8 { m_off = B16_ARG_HSHADOW_00_BSS_OFF }
+                                    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + m_off + m_pi * 8)
+                                    m_c = m_c + 1
+                                }
+                            }
+                            m_pi = m_pi + 1
+                        }
+                        var m_j: i64 = 0
+                        var m_any = false
+                        var m_si: i64 = 0
+                        while m_si < margc && m_si < 16 {
+                            if m_ch[m_si as usize] != 0 {
+                                m_j = m_j + fsh_emit_region_to_bss_x86(m_cr[m_si as usize], m_ch[m_si as usize], FSH_ARG_BSS_OFF, FSH_ARG_WORDS, m_j)
+                                m_any = true
+                            }
+                            m_si = m_si + 1
+                        }
+                        if m_any { fsh_emit_set_tag_x86(fsh_arg_tag_off(), mfi) }
+                        fsh_emit_chvar_store_x86()
+                    }
+                    if m_csok {
+                        var m_xi: i64 = 0
+                        while m_xi < margc && m_xi < 16 {
+                            var m_xj: i64 = 0
+                            while m_xj < 24 {
+                                B16_SX[(m_xi * 24 + m_xj) as usize] = CALL_SH[(m_csb + m_xi * 34 + 10 + m_xj) as usize]
+                                m_xj = m_xj + 1
+                            }
+                            m_xi = m_xi + 1
+                        }
+                        sx_emit_call_args_store_x86(margc)
+                        CALL_SH_TOP = m_csb
+                    }
                     // Check if method returns aggregate (needs SRET)
                     let method_ret_slots = ret_agg_nslots(FN_RET_TY[mfi as usize], FN_RET_HASH[mfi as usize])
                     if method_ret_slots > 0 {
@@ -20516,6 +21942,60 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
                     expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                    // #2776: the method's return shadows (what the callee's
+                    // return wrote), instead of the last argument's.
+                    if FSH_ACTIVE != 0 {
+                        fsh_clear_expr_hessian()
+                        EXPR_VSHADOW = -1
+                        EXPR_SSHADOW = -1
+                        EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1
+                        EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
+                        if EXPR_IS_F64 == 1 {
+                            em(0x50)
+                            emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B5_RET_VSHADOW_BSS_OFF)
+                            let m_rv = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                            emit_store_var(m_rv)
+                            EXPR_VSHADOW = m_rv
+                            if B16_ACTIVE == 1 {
+                                var m_rc: i64 = 0
+                                while m_rc < 9 {
+                                    var m_roff = B16_RET_SSHADOW_BSS_OFF
+                                    if m_rc == 1 { m_roff = B16_RET_SSHADOW_1_BSS_OFF }
+                                    if m_rc == 2 { m_roff = B16_RET_SSHADOW_2_BSS_OFF }
+                                    if m_rc == 3 { m_roff = B16_RET_SSHADOW_3_BSS_OFF }
+                                    if m_rc == 4 { m_roff = B16_RET_SSHADOW_4_BSS_OFF }
+                                    if m_rc == 5 { m_roff = B16_RET_SSHADOW_5_BSS_OFF }
+                                    if m_rc == 6 { m_roff = B16_RET_SSHADOW_6_BSS_OFF }
+                                    if m_rc == 7 { m_roff = B16_RET_SSHADOW_7_BSS_OFF }
+                                    if m_rc == 8 { m_roff = B16_RET_HSHADOW_00_BSS_OFF }
+                                    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + m_roff)
+                                    let m_rs = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                                    emit_store_var(m_rs)
+                                    if m_rc == 0 { EXPR_SSHADOW = m_rs }
+                                    if m_rc == 1 { EXPR_SSHADOW_1 = m_rs }
+                                    if m_rc == 2 { EXPR_SSHADOW_2 = m_rs }
+                                    if m_rc == 3 { EXPR_SSHADOW_3 = m_rs }
+                                    if m_rc == 4 { EXPR_SSHADOW_4 = m_rs }
+                                    if m_rc == 5 { EXPR_SSHADOW_5 = m_rs }
+                                    if m_rc == 6 { EXPR_SSHADOW_6 = m_rs }
+                                    if m_rc == 7 { EXPR_SSHADOW_7 = m_rs }
+                                    if m_rc == 8 { EXPR_HSHADOW_00 = m_rs }
+                                    m_rc = m_rc + 1
+                                }
+                            }
+                            if SX_XCALL != 0 { sx_emit_ret_load_x86() }
+                            em(0x58)
+                        } else if fsh_type_is_plain_struct(EXPR_TY, EXPR_TY_HASH) {
+                            let m_rr = fsh_virt_region()
+                            em(0x50)
+                            FSH_PEND_N = 0
+                            let m_nw = fsh_pend_region_x86(m_rr, EXPR_TY_HASH, FSH_RET_BSS_OFF, FSH_RET_WORDS, 0)
+                            if m_nw > 0 { fsh_emit_pend_load_x86(fsh_ret_tag_off(), mfi) }
+                            em(0x58)
+                            fsh_field_region = m_rr
+                        }
+                    }
+                    if fsh_field_region != -1 { fsh_stamp(fsh_field_region) }
                     continue
                 }
             }
@@ -20674,6 +22154,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     var b4_sseed_5: i64 = -1
                     var b4_sseed_6: i64 = -1
                     var b4_sseed_7: i64 = -1
+                    var b4_sxj: i64 = -1
+                    var b4_sxs: i64 = -1
                     var km_cached: i64 = 0
                     if LAST_EXPR_VAR_IDX >= 0 {
                         var ci: i64 = 0
@@ -20688,6 +22170,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                                 b4_sseed_5 = KM_CACHE_SS_5[ci as usize]
                                 b4_sseed_6 = KM_CACHE_SS_6[ci as usize]
                                 b4_sseed_7 = KM_CACHE_SS_7[ci as usize]
+                                b4_sxj = KM_CACHE_SXJ[ci as usize]
+                                b4_sxs = KM_CACHE_SXS[ci as usize]
                                 km_cached = 1
                                 ci = KM_CACHE_COUNT
                             }
@@ -20707,6 +22191,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         if MEAS_KNOW_IDX >= 0 && MEAS_KNOW_IDX < 8 {
                             CHANNEL_INPUT_VAR_SLOT[MEAS_KNOW_IDX as usize] = b4_vseed
                         }
+                        fsh_emit_fresh_channel_x86(LAST_EXPR_VAR_IDX, MEAS_KNOW_IDX)
                         em(0x58)                               // pop rax (restore ptr)
                         em(0x48); em(0x8b); em(0x00)          // mov rax, [rax]   (.value)
                         // Save .value before sensitivity seed (emit_imm64 overwrites rax)
@@ -20746,6 +22231,22 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         NEXT_SLOT = NEXT_SLOT + 1
                         if MEAS_KNOW_IDX == 7 { emit_imm64(4607182418800017408) } else { emit_imm64(0) }
                         emit_store_var(b4_sseed_7)
+                        // #2776: inputs 9..32 seed an extra channel (EXPR_SX).
+                        if MEAS_KNOW_IDX >= 8 && MEAS_KNOW_IDX < 32 {
+                            b4_sxj = MEAS_KNOW_IDX - 8
+                            b4_sxs = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            emit_imm64(4607182418800017408)
+                            emit_store_var(b4_sxs)
+                            CHVAR_SX[b4_sxj as usize] = b4_vseed
+                        }
+                        if MEAS_KNOW_IDX >= 32 {
+                            // Past the last channel: no sensitivity at all, rather
+                            // than eight zero ones that claim the value depends on
+                            // nothing (they made `a - b` of two such inputs read 0).
+                            b4_sseed = -1; b4_sseed_1 = -1; b4_sseed_2 = -1; b4_sseed_3 = -1
+                            b4_sseed_4 = -1; b4_sseed_5 = -1; b4_sseed_6 = -1; b4_sseed_7 = -1
+                        }
                         MEAS_KNOW_IDX = MEAS_KNOW_IDX + 1
                         // Restore .value (emit_imm64 overwrote rax)
                         emit_load_var(b4_valsave)
@@ -20761,6 +22262,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                             KM_CACHE_SS_5[KM_CACHE_COUNT as usize] = b4_sseed_5
                             KM_CACHE_SS_6[KM_CACHE_COUNT as usize] = b4_sseed_6
                             KM_CACHE_SS_7[KM_CACHE_COUNT as usize] = b4_sseed_7
+                            KM_CACHE_SXJ[KM_CACHE_COUNT as usize] = b4_sxj
+                            KM_CACHE_SXS[KM_CACHE_COUNT as usize] = b4_sxs
                             KM_CACHE_COUNT = KM_CACHE_COUNT + 1
                         }
                     }
@@ -20773,6 +22276,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EXPR_SSHADOW_5 = b4_sseed_5
                     EXPR_SSHADOW_6 = b4_sseed_6
                     EXPR_SSHADOW_7 = b4_sseed_7
+                    sx_clear()
+                    if b4_sxj >= 0 { EXPR_SX[b4_sxj as usize] = b4_sxs }
                     // KL-16b: .value is a first-order seed. Clear Hessian on the
                     // EXPR so a prior function's VAR_HSHADOW_* at the same local
                     // index cannot leak through the Knowledge load (H[4,5]=1+f).
@@ -20836,6 +22341,15 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                             expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                         ST_QUERY_NS = -1
                         ST_QUERY_NE = -1
+                            // #2776: an f64 field reads its recorded shadows; a
+                            // struct-valued field is a sub-region of the base.
+                            if FSH_ACTIVE != 0 {
+                                if EXPR_TY == 2 {
+                                    if fsh_base != -1 { fsh_load_to_expr(fsh_base - off / 8) } else { fsh_load_to_expr(-1) }
+                                } else if fsh_base != -1 && fsh_type_is_plain_struct(EXPR_TY, EXPR_TY_HASH) {
+                                    fsh_field_region = fsh_base - off / 8
+                                }
+                            }
                             if EXPR_TY == 12 {
                                 em(0x50)
                                 if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
@@ -20915,6 +22429,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 em(0x31); em(0xc0)
             }
             if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+            if fsh_field_region != -1 { fsh_stamp(fsh_field_region) }
             continue
         }
         more = 0
@@ -20967,6 +22482,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let left_sshadow_5 = EXPR_SSHADOW_5
         let left_sshadow_6 = EXPR_SSHADOW_6
         let left_sshadow_7 = EXPR_SSHADOW_7
+        let left_sx = sx_snap()
         // GTT: capture LHS channel topology before right operand compiles (which resets EXPR_CH_SET).
         let left_ch_set = EXPR_CH_SET
         let left_param_used = EXPR_PARAM_USED
@@ -20998,7 +22514,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         }
         EXPR_VSHADOW = -1
         EXPR_SSHADOW = -1
-        EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+        EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
         EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
         EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
         EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -21054,6 +22570,8 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let right_sshadow_5 = EXPR_SSHADOW_5
         let right_sshadow_6 = EXPR_SSHADOW_6
         let right_sshadow_7 = EXPR_SSHADOW_7
+        let right_sx = sx_snap()
+        let fsh_sx_live = sx_any_at(left_sx) || sx_any_at(right_sx)
         // GTT: capture RHS channel topology before the big EXPR_* reset below.
         let right_ch_set = EXPR_CH_SET
         let right_param_used = EXPR_PARAM_USED
@@ -21226,7 +22744,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         // IMPORTANT: save the arithmetic result first — shadow computation overwrites rax
         EXPR_VSHADOW = -1
         EXPR_SSHADOW = -1
-        EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+        EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
         EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
         EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
         EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -21243,7 +22761,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         // #2776: the Hessian branches overwrite rax too; save whenever one runs.
         var b4_any_hm: i64 = 0
         if left_hsh_00 >= 0 || right_hsh_00 >= 0 || left_hsh_01 >= 0 || right_hsh_01 >= 0 || left_hsh_02 >= 0 || right_hsh_02 >= 0 || left_hsh_03 >= 0 || right_hsh_03 >= 0 || left_hsh_11 >= 0 || right_hsh_11 >= 0 || left_hsh_12 >= 0 || right_hsh_12 >= 0 || left_hsh_13 >= 0 || right_hsh_13 >= 0 || left_hsh_22 >= 0 || right_hsh_22 >= 0 || left_hsh_23 >= 0 || right_hsh_23 >= 0 || left_hsh_33 >= 0 || right_hsh_33 >= 0 || left_hsh_04 >= 0 || right_hsh_04 >= 0 || left_hsh_05 >= 0 || right_hsh_05 >= 0 || left_hsh_06 >= 0 || right_hsh_06 >= 0 || left_hsh_07 >= 0 || right_hsh_07 >= 0 || left_hsh_14 >= 0 || right_hsh_14 >= 0 || left_hsh_15 >= 0 || right_hsh_15 >= 0 || left_hsh_16 >= 0 || right_hsh_16 >= 0 || left_hsh_17 >= 0 || right_hsh_17 >= 0 || left_hsh_24 >= 0 || right_hsh_24 >= 0 || left_hsh_25 >= 0 || right_hsh_25 >= 0 || left_hsh_26 >= 0 || right_hsh_26 >= 0 || left_hsh_27 >= 0 || right_hsh_27 >= 0 || left_hsh_34 >= 0 || right_hsh_34 >= 0 || left_hsh_35 >= 0 || right_hsh_35 >= 0 || left_hsh_36 >= 0 || right_hsh_36 >= 0 || left_hsh_37 >= 0 || right_hsh_37 >= 0 || left_hsh_44 >= 0 || right_hsh_44 >= 0 || left_hsh_45 >= 0 || right_hsh_45 >= 0 || left_hsh_46 >= 0 || right_hsh_46 >= 0 || left_hsh_47 >= 0 || right_hsh_47 >= 0 || left_hsh_55 >= 0 || right_hsh_55 >= 0 || left_hsh_56 >= 0 || right_hsh_56 >= 0 || left_hsh_57 >= 0 || right_hsh_57 >= 0 || left_hsh_66 >= 0 || right_hsh_66 >= 0 || left_hsh_67 >= 0 || right_hsh_67 >= 0 || left_hsh_77 >= 0 || right_hsh_77 >= 0 { b4_any_hm = 1 }
-        if left_f64 == 1 && op == 19 && (b4_any_hm == 1 || (left_vshadow >= 0 || right_vshadow >= 0) || (left_sshadow >= 0 || right_sshadow >= 0) || (left_sshadow_1 >= 0 || right_sshadow_1 >= 0) || (left_sshadow_2 >= 0 || right_sshadow_2 >= 0) || (left_sshadow_3 >= 0 || right_sshadow_3 >= 0) || (left_sshadow_4 >= 0 || right_sshadow_4 >= 0) || (left_sshadow_5 >= 0 || right_sshadow_5 >= 0) || (left_sshadow_6 >= 0 || right_sshadow_6 >= 0) || (left_sshadow_7 >= 0 || right_sshadow_7 >= 0)) {
+        if left_f64 == 1 && op == 19 && (fsh_sx_live || b4_any_hm == 1 || (left_vshadow >= 0 || right_vshadow >= 0) || (left_sshadow >= 0 || right_sshadow >= 0) || (left_sshadow_1 >= 0 || right_sshadow_1 >= 0) || (left_sshadow_2 >= 0 || right_sshadow_2 >= 0) || (left_sshadow_3 >= 0 || right_sshadow_3 >= 0) || (left_sshadow_4 >= 0 || right_sshadow_4 >= 0) || (left_sshadow_5 >= 0 || right_sshadow_5 >= 0) || (left_sshadow_6 >= 0 || right_sshadow_6 >= 0) || (left_sshadow_7 >= 0 || right_sshadow_7 >= 0)) {
             b4_result_slot_m = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var(b4_result_slot_m)
         }
@@ -21278,7 +22796,8 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
                     left_sshadow, left_sshadow_1, left_sshadow_2, left_sshadow_3,
                     left_sshadow_4, left_sshadow_5, left_sshadow_6, left_sshadow_7,
                     right_sshadow, right_sshadow_1, right_sshadow_2, right_sshadow_3,
-                    right_sshadow_4, right_sshadow_5, right_sshadow_6, right_sshadow_7
+                    right_sshadow_4, right_sshadow_5, right_sshadow_6, right_sshadow_7,
+                    left_sx, right_sx
                 )
             }
         }
@@ -21406,6 +22925,10 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
             emit_store_var(b4s7_res)
             EXPR_SSHADOW_7 = b4s7_res
         }
+        // #2776: extra channels 8..31, same product rule.
+        if left_f64 == 1 && op == 19 && fsh_sx_live {
+            sx_emit_mul_x86(left_sx, right_sx, b4_lval_slot, b4_rval_slot)
+        }
         // β¹¹: rebuild Var from FO sensitivities after product sens is complete.
         // KL-16c: do NOT overwrite when GUM product variance already ran.
         // Interproc FO prologue always seeds VAR_SSHADOW (slot ≥ 0 even when
@@ -21414,10 +22937,11 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         // var(a*b)=a²·var(b)+b²·var(a) with Σ s_k² (e.g. scale(a,2) → 4
         // instead of 16). Keep FO-rebuild only when no GUM vshadow was live.
         if left_f64 == 1 && op == 19 {
-            if (EXPR_SSHADOW >= 0 || EXPR_SSHADOW_1 >= 0 || EXPR_SSHADOW_2 >= 0 || EXPR_SSHADOW_3 >= 0 || EXPR_SSHADOW_4 >= 0 || EXPR_SSHADOW_5 >= 0 || EXPR_SSHADOW_6 >= 0 || EXPR_SSHADOW_7 >= 0) && (left_vshadow < 0 && right_vshadow < 0) {
+            if (EXPR_SSHADOW >= 0 || EXPR_SSHADOW_1 >= 0 || EXPR_SSHADOW_2 >= 0 || EXPR_SSHADOW_3 >= 0 || EXPR_SSHADOW_4 >= 0 || EXPR_SSHADOW_5 >= 0 || EXPR_SSHADOW_6 >= 0 || EXPR_SSHADOW_7 >= 0 || sx_any()) && (left_vshadow < 0 && right_vshadow < 0) {
                 EXPR_VSHADOW = emit_fo_var_from_sens_x86(
                     EXPR_SSHADOW, EXPR_SSHADOW_1, EXPR_SSHADOW_2, EXPR_SSHADOW_3,
-                    EXPR_SSHADOW_4, EXPR_SSHADOW_5, EXPR_SSHADOW_6, EXPR_SSHADOW_7
+                    EXPR_SSHADOW_4, EXPR_SSHADOW_5, EXPR_SSHADOW_6, EXPR_SSHADOW_7,
+                    sx_snap()
                 )
             }
         }
@@ -22035,7 +23559,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
             emit_store_var(b4h77_res); EXPR_HSHADOW_77 = b4h77_res
         }
         // β⁶: forward-mode AD through / — quotient rule: ∂(a/b)/∂k = (sens_k(a)·b − a·sens_k(b)) / b²
-        if left_f64 == 1 && op == 20 && (b4_any_hm == 1 || (left_vshadow >= 0 || right_vshadow >= 0) || (left_sshadow >= 0 || right_sshadow >= 0) || (left_sshadow_1 >= 0 || right_sshadow_1 >= 0) || (left_sshadow_2 >= 0 || right_sshadow_2 >= 0) || (left_sshadow_3 >= 0 || right_sshadow_3 >= 0) || (left_sshadow_4 >= 0 || right_sshadow_4 >= 0) || (left_sshadow_5 >= 0 || right_sshadow_5 >= 0) || (left_sshadow_6 >= 0 || right_sshadow_6 >= 0) || (left_sshadow_7 >= 0 || right_sshadow_7 >= 0)) {
+        if left_f64 == 1 && op == 20 && (fsh_sx_live || b4_any_hm == 1 || (left_vshadow >= 0 || right_vshadow >= 0) || (left_sshadow >= 0 || right_sshadow >= 0) || (left_sshadow_1 >= 0 || right_sshadow_1 >= 0) || (left_sshadow_2 >= 0 || right_sshadow_2 >= 0) || (left_sshadow_3 >= 0 || right_sshadow_3 >= 0) || (left_sshadow_4 >= 0 || right_sshadow_4 >= 0) || (left_sshadow_5 >= 0 || right_sshadow_5 >= 0) || (left_sshadow_6 >= 0 || right_sshadow_6 >= 0) || (left_sshadow_7 >= 0 || right_sshadow_7 >= 0)) {
             b4_result_slot_d = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var(b4_result_slot_d)
         }
@@ -22045,7 +23569,8 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
                 left_sshadow, left_sshadow_1, left_sshadow_2, left_sshadow_3,
                 left_sshadow_4, left_sshadow_5, left_sshadow_6, left_sshadow_7,
                 right_sshadow, right_sshadow_1, right_sshadow_2, right_sshadow_3,
-                right_sshadow_4, right_sshadow_5, right_sshadow_6, right_sshadow_7
+                right_sshadow_4, right_sshadow_5, right_sshadow_6, right_sshadow_7,
+                left_sx, right_sx
             )
         }
         if left_f64 == 1 && op == 20 && (left_sshadow >= 0 || right_sshadow >= 0) {
@@ -22215,6 +23740,10 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
             em(0x59); emit_f64_div_from_rcx_rax_x86()
             emit_store_var(b4sd7_res)
             EXPR_SSHADOW_7 = b4sd7_res
+        }
+        // #2776: extra channels 8..31, same quotient rule.
+        if left_f64 == 1 && op == 20 && fsh_sx_live {
+            sx_emit_div_x86(left_sx, right_sx, b4_lval_slot, b4_rval_slot)
         }
         // β⁷: Hessian through / — H_jk(a/b) = [H_jk(a)*b − a*H_jk(b) − s_j(a)*s_k(b) − s_k(a)*s_j(b)] / b² + 2a·s_j(b)·s_k(b)/b³
         // For each pair, uses b4_lval_slot=a, b4_rval_slot=b, left/right_hsh_jk, left/right_sshadow_{j,k}
@@ -22631,6 +24160,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
         let left_sshadow_a_5 = EXPR_SSHADOW_5
         let left_sshadow_a_6 = EXPR_SSHADOW_6
         let left_sshadow_a_7 = EXPR_SSHADOW_7
+        let left_sx_a = sx_snap()
         let left_ha_00 = EXPR_HSHADOW_00; let left_ha_01 = EXPR_HSHADOW_01
         let left_ha_02 = EXPR_HSHADOW_02; let left_ha_03 = EXPR_HSHADOW_03
         let left_ha_11 = EXPR_HSHADOW_11; let left_ha_12 = EXPR_HSHADOW_12
@@ -22655,7 +24185,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
         let left_param_used_a = EXPR_PARAM_USED
         EXPR_VSHADOW = -1
         EXPR_SSHADOW = -1
-        EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+        EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
         EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
         EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
         EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -22711,6 +24241,8 @@ fn compile_additive() with IO, Mut, Panic, Div {
         let right_sshadow_a_5 = EXPR_SSHADOW_5
         let right_sshadow_a_6 = EXPR_SSHADOW_6
         let right_sshadow_a_7 = EXPR_SSHADOW_7
+        let right_sx_a = sx_snap()
+        let fsh_sx_live_a = sx_any_at(left_sx_a) || sx_any_at(right_sx_a)
         let right_ha_00 = EXPR_HSHADOW_00; let right_ha_01 = EXPR_HSHADOW_01
         let right_ha_02 = EXPR_HSHADOW_02; let right_ha_03 = EXPR_HSHADOW_03
         let right_ha_11 = EXPR_HSHADOW_11; let right_ha_12 = EXPR_HSHADOW_12
@@ -22801,7 +24333,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
                     // Save result first — shadow computation overwrites rax
                     EXPR_VSHADOW = -1
                     EXPR_SSHADOW = -1
-                    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                     EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
                     EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
                     EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -22821,7 +24353,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
                     // back the last Hessian temp instead of the sum.
                     var b4_any_ha: i64 = 0
                     if left_ha_00 >= 0 || right_ha_00 >= 0 || left_ha_01 >= 0 || right_ha_01 >= 0 || left_ha_02 >= 0 || right_ha_02 >= 0 || left_ha_03 >= 0 || right_ha_03 >= 0 || left_ha_11 >= 0 || right_ha_11 >= 0 || left_ha_12 >= 0 || right_ha_12 >= 0 || left_ha_13 >= 0 || right_ha_13 >= 0 || left_ha_22 >= 0 || right_ha_22 >= 0 || left_ha_23 >= 0 || right_ha_23 >= 0 || left_ha_33 >= 0 || right_ha_33 >= 0 || left_ha_04 >= 0 || right_ha_04 >= 0 || left_ha_05 >= 0 || right_ha_05 >= 0 || left_ha_06 >= 0 || right_ha_06 >= 0 || left_ha_07 >= 0 || right_ha_07 >= 0 || left_ha_14 >= 0 || right_ha_14 >= 0 || left_ha_15 >= 0 || right_ha_15 >= 0 || left_ha_16 >= 0 || right_ha_16 >= 0 || left_ha_17 >= 0 || right_ha_17 >= 0 || left_ha_24 >= 0 || right_ha_24 >= 0 || left_ha_25 >= 0 || right_ha_25 >= 0 || left_ha_26 >= 0 || right_ha_26 >= 0 || left_ha_27 >= 0 || right_ha_27 >= 0 || left_ha_34 >= 0 || right_ha_34 >= 0 || left_ha_35 >= 0 || right_ha_35 >= 0 || left_ha_36 >= 0 || right_ha_36 >= 0 || left_ha_37 >= 0 || right_ha_37 >= 0 || left_ha_44 >= 0 || right_ha_44 >= 0 || left_ha_45 >= 0 || right_ha_45 >= 0 || left_ha_46 >= 0 || right_ha_46 >= 0 || left_ha_47 >= 0 || right_ha_47 >= 0 || left_ha_55 >= 0 || right_ha_55 >= 0 || left_ha_56 >= 0 || right_ha_56 >= 0 || left_ha_57 >= 0 || right_ha_57 >= 0 || left_ha_66 >= 0 || right_ha_66 >= 0 || left_ha_67 >= 0 || right_ha_67 >= 0 || left_ha_77 >= 0 || right_ha_77 >= 0 { b4_any_ha = 1 }
-                    if (left_vshadow_a >= 0 || right_vshadow_a >= 0) || (left_sshadow_a >= 0 || right_sshadow_a >= 0) || (left_sshadow_a_1 >= 0 || right_sshadow_a_1 >= 0) || (left_sshadow_a_2 >= 0 || right_sshadow_a_2 >= 0) || (left_sshadow_a_3 >= 0 || right_sshadow_a_3 >= 0) || (left_sshadow_a_4 >= 0 || right_sshadow_a_4 >= 0) || (left_sshadow_a_5 >= 0 || right_sshadow_a_5 >= 0) || (left_sshadow_a_6 >= 0 || right_sshadow_a_6 >= 0) || (left_sshadow_a_7 >= 0 || right_sshadow_a_7 >= 0) || b4_any_ha == 1 {
+                    if fsh_sx_live_a || (left_vshadow_a >= 0 || right_vshadow_a >= 0) || (left_sshadow_a >= 0 || right_sshadow_a >= 0) || (left_sshadow_a_1 >= 0 || right_sshadow_a_1 >= 0) || (left_sshadow_a_2 >= 0 || right_sshadow_a_2 >= 0) || (left_sshadow_a_3 >= 0 || right_sshadow_a_3 >= 0) || (left_sshadow_a_4 >= 0 || right_sshadow_a_4 >= 0) || (left_sshadow_a_5 >= 0 || right_sshadow_a_5 >= 0) || (left_sshadow_a_6 >= 0 || right_sshadow_a_6 >= 0) || (left_sshadow_a_7 >= 0 || right_sshadow_a_7 >= 0) || b4_any_ha == 1 {
                         b4_result_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                         emit_store_var(b4_result_slot_a)
                     }
@@ -22853,14 +24385,16 @@ fn compile_additive() with IO, Mut, Panic, Div {
                                     left_sshadow_a, left_sshadow_a_1, left_sshadow_a_2, left_sshadow_a_3,
                                     left_sshadow_a_4, left_sshadow_a_5, left_sshadow_a_6, left_sshadow_a_7,
                                     right_sshadow_a, right_sshadow_a_1, right_sshadow_a_2, right_sshadow_a_3,
-                                    right_sshadow_a_4, right_sshadow_a_5, right_sshadow_a_6, right_sshadow_a_7
+                                    right_sshadow_a_4, right_sshadow_a_5, right_sshadow_a_6, right_sshadow_a_7,
+                                    left_sx_a, right_sx_a
                                 )
-                            } else if use_fo == 1 {
+                            } else if use_fo == 1 || (op == 18 && fsh_sx_live_a) {
                                 EXPR_VSHADOW = emit_fo_var_from_sens_diff_sub_x86(
                                     left_sshadow_a, left_sshadow_a_1, left_sshadow_a_2, left_sshadow_a_3,
                                     left_sshadow_a_4, left_sshadow_a_5, left_sshadow_a_6, left_sshadow_a_7,
                                     right_sshadow_a, right_sshadow_a_1, right_sshadow_a_2, right_sshadow_a_3,
-                                    right_sshadow_a_4, right_sshadow_a_5, right_sshadow_a_6, right_sshadow_a_7
+                                    right_sshadow_a_4, right_sshadow_a_5, right_sshadow_a_6, right_sshadow_a_7,
+                                    left_sx_a, right_sx_a
                                 )
                             } else {
                                 let b4va_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
@@ -22962,6 +24496,10 @@ fn compile_additive() with IO, Mut, Panic, Div {
                         else { emit_f64_sub_from_rcx_rax_x86() }
                         emit_store_var(b4sa7_res)
                         EXPR_SSHADOW_7 = b4sa7_res
+                    }
+                    // #2776: extra channels 8..31.
+                    if fsh_sx_live_a {
+                        sx_emit_addsub_x86(left_sx_a, right_sx_a, op)
                     }
                     // β⁷: H_jk(a±b) = H_jk(a) ± H_jk(b)
                     if left_ha_00 >= 0 || right_ha_00 >= 0 {
@@ -23228,7 +24766,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
                     EXPR_TY = 1
                     EXPR_VSHADOW = -1
                     EXPR_SSHADOW = -1
-                    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                     EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
                     EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
                     EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -26678,7 +28216,7 @@ fn lean_uninit_set_zero_expr(decl_ty: i64, decl_ty_hash: i64) with Mut {
     EXPR_UNIT_DIM = 0
     EXPR_VSHADOW = -1
     EXPR_SSHADOW = -1
-    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
     EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
     EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
     EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -27188,6 +28726,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 var bind_hash = EXPR_TY_HASH
                 if decl_ty != 0 || decl_ty_hash != 0 { bind_hash = decl_ty_hash }
                 let before_vc = VAR_COUNT
+                FSH_BIND_SRC = fsh_expr_agg()
                 bind_struct_local_from_rax_x86(ns, ne, bind_hash)
                 if VAR_COUNT > before_vc {
                     let svix = VAR_COUNT - 1
@@ -27434,7 +28973,21 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     VAR_SSHADOW_6[vix as usize] = fs6
                     VAR_SSHADOW_7[vix as usize] = fs7
                     VAR_HSHADOW_00[vix as usize] = fh
+                    // #2776: fixed slots for the extra channels too.
+                    if FSH_ACTIVE != 0 && vix < 2048 {
+                        var fsx: i64 = 0
+                        while fsx < 24 {
+                            let fxs = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                            if EXPR_SX[fsx as usize] >= 0 { emit_load_var(EXPR_SX[fsx as usize]) } else { emit_imm64(0) }
+                            emit_store_var(fxs)
+                            VAR_SX[(vix * 24 + fsx) as usize] = fxs
+                            fsx = fsx + 1
+                        }
+                    } else {
+                        sx_clear_var(vix)
+                    }
                 } else {
+                    sx_store_var(vix)
                     VAR_VSHADOW[vix as usize] = EXPR_VSHADOW
                     VAR_SSHADOW[vix as usize] = EXPR_SSHADOW
                     VAR_SSHADOW_1[vix as usize] = EXPR_SSHADOW_1
@@ -27487,7 +29040,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 VAR_PARAM_USED[vix as usize] = EXPR_PARAM_USED
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
-                EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                 EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
                 EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
                 EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -27704,7 +29257,20 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                             EXPR_HSHADOW_00
                         )
                     }
+                    // #2776: and the extra channels' fixed slots.
+                    if ty_vi < 2048 {
+                        var dsx: i64 = 0
+                        while dsx < 24 {
+                            let dxs = VAR_SX[(ty_vi * 24 + dsx) as usize]
+                            if dxs >= 0 {
+                                if EXPR_SX[dsx as usize] >= 0 { emit_load_var(EXPR_SX[dsx as usize]) } else { emit_imm64(0) }
+                                emit_store_var(dxs)
+                            }
+                            dsx = dsx + 1
+                        }
+                    }
                 } else {
+                    sx_store_var(ty_vi)
                     VAR_VSHADOW[ty_vi as usize] = EXPR_VSHADOW
                     VAR_SSHADOW[ty_vi as usize] = EXPR_SSHADOW
                     VAR_SSHADOW_1[ty_vi as usize] = EXPR_SSHADOW_1
@@ -27715,7 +29281,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 VAR_CH_SET[ty_vi as usize] = EXPR_CH_SET
                 VAR_PARAM_USED[ty_vi as usize] = EXPR_PARAM_USED
             }
-            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
             // Update closure flag on reassignment
             if EXPR_TY == 9 { LAST_EXPR_IS_CLOSURE = 1 }
             var vi: i64 = VAR_COUNT - 1
@@ -28048,8 +29614,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // return expr
     if k == 2 {
         EP = EP + 1
+        var fsh_ret_src: i64 = -1
         if TK[EP as usize] != 9 {
             compile_or()
+            fsh_ret_src = fsh_expr_agg()
         }
         else {
             em(0x31); em(0xc0)
@@ -28131,7 +29699,15 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_RET_SSHADOW_7_BSS_OFF)
             if EXPR_HSHADOW_00 >= 0 { emit_load_var(EXPR_HSHADOW_00) } else { emit_imm64(0) }
             emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
+            if SX_XCALL != 0 { sx_emit_ret_store_x86() }
             em(0x58)  // pop rax (restore return value)
+        }
+        // #2776: a struct return value's field shadows, for the caller.
+        if FSH_ACTIVE != 0 && fsh_type_is_plain_struct(CURRENT_RET_TY, CURRENT_RET_HASH) {
+            em(0x50)
+            let fsh_rn = fsh_emit_region_to_bss_x86(fsh_ret_src, CURRENT_RET_HASH, FSH_RET_BSS_OFF, FSH_RET_WORDS, 0)
+            if fsh_rn > 0 { fsh_emit_set_tag_x86(fsh_ret_tag_off(), CURRENT_FN) }
+            em(0x58)
         }
         em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
         if CURRENT_SRET_SLOT > 0 {
@@ -28402,6 +29978,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         let then_s5 = EXPR_SSHADOW_5
         let then_s6 = EXPR_SSHADOW_6
         let then_s7 = EXPR_SSHADOW_7
+        let then_sx = sx_snap()
         let then_h00 = EXPR_HSHADOW_00
         // #2776: the GUM variance joins too (it used to take the ELSE arm's slot
         // only, so `if true { a * b } else { a + b }` read an else-arm slot that
@@ -28425,6 +30002,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             var merge_s7: i64 = -1
             var merge_h00: i64 = -1
             var merge_v: i64 = -1
+            var merge_sx: i64 = -1
             var do_shadow_merge: i64 = 0
             if then_has_value == 1 && then_ty == 2 {
                 do_shadow_merge = 1
@@ -28444,6 +30022,16 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 )
                 em(0x50)  // push rax (the arm's value)
                 emit_spill_shadow_slot(merge_v, then_v)
+                // #2776: the extra channels join through their own slots.
+                if FSH_ACTIVE != 0 {
+                    merge_sx = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 24
+                    var msx: i64 = 0
+                    while msx < 24 {
+                        emit_spill_shadow_slot(merge_sx + msx, sx_at(then_sx, msx))
+                        msx = msx + 1
+                    }
+                }
                 em(0x58)  // pop rax
             }
             em(0xe9)
@@ -28484,6 +30072,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             let else_s5 = EXPR_SSHADOW_5
             let else_s6 = EXPR_SSHADOW_6
             let else_s7 = EXPR_SSHADOW_7
+            let else_sx = sx_snap()
             let else_h00 = EXPR_HSHADOW_00
             let else_v = EXPR_VSHADOW
             // Linear branch asymmetry check: compare then vs else VAR_USED
@@ -28520,6 +30109,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 )
                 em(0x50)
                 emit_spill_shadow_slot(merge_v, else_v)
+                if merge_sx >= 0 {
+                    var esx: i64 = 0
+                    while esx < 24 {
+                        emit_spill_shadow_slot(merge_sx + esx, sx_at(else_sx, esx))
+                        esx = esx + 1
+                    }
+                }
                 em(0x58)
             }
             patch32(jmp_off, CL)
@@ -28549,6 +30145,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     EXPR_SSHADOW_5 = merge_s5
                     EXPR_SSHADOW_6 = merge_s6
                     EXPR_SSHADOW_7 = merge_s7
+                    sx_clear()
+                    if merge_sx >= 0 {
+                        var jsx: i64 = 0
+                        while jsx < 24 { EXPR_SX[jsx as usize] = merge_sx + jsx; jsx = jsx + 1 }
+                    }
                     EXPR_HSHADOW_00 = merge_h00
                     EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
                     EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
@@ -28564,7 +30165,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 } else {
                     EXPR_SSHADOW = -1
                     EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
-                    EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                    EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                     EXPR_HSHADOW_00 = -1
                 }
             } else {
@@ -29605,6 +31206,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     LAST_STMT_HAS_VALUE = 1
     LAST_STMT_TY = EXPR_TY
     LAST_STMT_TY_HASH = EXPR_TY_HASH
+    // #2776: a tail expression's aggregate region, for the function's return.
+    LAST_STMT_AGG0 = fsh_expr_agg()
+    LAST_STMT_AGG0_END = EP
 }
 
 // ─── Epistemic Type System: Core Functions ───
@@ -32311,6 +33915,76 @@ fn src_scan_contains(kw: string) -> bool with Panic, Mut {
 }
 
 
+// #2776: does the program ask for an uncertainty (a CALL, not a mention in a
+// comment or a string)? Gates the per-field shadow machinery.
+fn fsh_scan_active() -> bool with Panic, Mut {
+    var p: i64 = 0
+    while p + 1 < TC {
+        if TK[p as usize] == 3 && TK[(p + 1) as usize] == 6 {
+            let a = TS[p as usize]
+            let l = TE[p as usize] - a
+            if src_match(a, l, "variance_of") || src_match(a, l, "sensitivity_of")
+                || src_match(a, l, "hessian_of") || src_match(a, l, "uncertainty_of") {
+                return true
+            }
+        }
+        p = p + 1
+    }
+    false
+}
+
+// #2776: nine or more `measure(` call sites anywhere in the program.
+fn sx_scan_many_measures() -> bool with Panic, Mut {
+    var p: i64 = 0
+    var n: i64 = 0
+    while p + 1 < TC {
+        if TK[p as usize] == 3 && TK[(p + 1) as usize] == 6 {
+            let a = TS[p as usize]
+            if src_match(a, TE[p as usize] - a, "measure") {
+                n = n + 1
+                if n >= 9 { return true }
+            }
+        }
+        p = p + 1
+    }
+    false
+}
+
+fn call_sh_capture(b: i64) with Mut {
+    CALL_SH[b as usize] = EXPR_VSHADOW
+    CALL_SH[(b + 1) as usize] = EXPR_SSHADOW
+    CALL_SH[(b + 2) as usize] = EXPR_SSHADOW_1
+    CALL_SH[(b + 3) as usize] = EXPR_SSHADOW_2
+    CALL_SH[(b + 4) as usize] = EXPR_SSHADOW_3
+    CALL_SH[(b + 5) as usize] = EXPR_SSHADOW_4
+    CALL_SH[(b + 6) as usize] = EXPR_SSHADOW_5
+    CALL_SH[(b + 7) as usize] = EXPR_SSHADOW_6
+    CALL_SH[(b + 8) as usize] = EXPR_SSHADOW_7
+    CALL_SH[(b + 9) as usize] = EXPR_HSHADOW_00
+    var j: i64 = 0
+    while j < 24 { CALL_SH[(b + 10 + j) as usize] = EXPR_SX[j as usize]; j = j + 1 }
+}
+
+// Put argument `a`'s snapshot back into the B5/B16 globals the call site reads.
+fn call_sh_restore(b: i64, a: i64) with Mut {
+    B5_VSHADOW[a as usize] = CALL_SH[b as usize]
+    if B16_ACTIVE == 1 {
+        B16_SSHADOW[a as usize] = CALL_SH[(b + 1) as usize]
+        B16_SSHADOW_1[a as usize] = CALL_SH[(b + 2) as usize]
+        B16_SSHADOW_2[a as usize] = CALL_SH[(b + 3) as usize]
+        B16_SSHADOW_3[a as usize] = CALL_SH[(b + 4) as usize]
+        B16_SSHADOW_4[a as usize] = CALL_SH[(b + 5) as usize]
+        B16_SSHADOW_5[a as usize] = CALL_SH[(b + 6) as usize]
+        B16_SSHADOW_6[a as usize] = CALL_SH[(b + 7) as usize]
+        B16_SSHADOW_7[a as usize] = CALL_SH[(b + 8) as usize]
+        B16_HSHADOW_00[a as usize] = CALL_SH[(b + 9) as usize]
+    }
+    if SX_XCALL != 0 {
+        var j: i64 = 0
+        while j < 24 { B16_SX[(a * 24 + j) as usize] = CALL_SH[(b + 10 + j) as usize]; j = j + 1 }
+    }
+}
+
 fn compile_all() -> i64 with IO, Mut, Panic, Div {
     CL = 0
     POOL_ALLOC_ROUTINE_CL = 0 - 1
@@ -32342,7 +34016,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     // directly. Trait blocks (kw 75) are skipped entirely — they have no
     // concrete target to rewrite to, and bodyless trait methods must keep
     // `Self` unresolved (there is nothing else to check it against there).
-    B16_ACTIVE = if src_scan_contains("sensitivity_of") || src_scan_contains("hessian_of") { 1 } else { 0 }
+    FSH_ACTIVE = if fsh_scan_active() { 1 } else { 0 }
+    SX_XCALL = if FSH_ACTIVE != 0 && sx_scan_many_measures() { 1 } else { 0 }
+    // #2776: variance_of needs the first-order channels across calls too --
+    // without them `mid(x) * mid(x)` multiplied two values the caller could not
+    // tell were the same quantity, and lost the correlation (var 2.0, not 4.0).
+    B16_ACTIVE = if src_scan_contains("sensitivity_of") || src_scan_contains("hessian_of") || FSH_ACTIVE != 0 { 1 } else { 0 }
     var selfrw_p: i64 = 0
     while selfrw_p < TC {
         if TK[selfrw_p as usize] == 75 {
@@ -33096,6 +34775,17 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     B16_ARG_SSHADOW_6_BSS_OFF = bss_alloc_aligned(128)
     B16_ARG_SSHADOW_7_BSS_OFF = bss_alloc_aligned(128)
     B16_ARG_HSHADOW_00_BSS_OFF = bss_alloc_aligned(128)
+    // #2776: field shadows across calls (9 channels x words, see FSH_*).
+    if FSH_ACTIVE != 0 {
+        FSH_RET_BSS_OFF = bss_alloc_aligned(fsh_nch() * FSH_RET_WORDS * 8 + 8)
+        FSH_ARG_BSS_OFF = bss_alloc_aligned(fsh_nch() * FSH_ARG_WORDS * 8 + 8)
+        FSH_CHVAR_BSS_OFF = bss_alloc_aligned(64)
+    }
+    if SX_XCALL != 0 {
+        B16_ARG_SX_BSS_OFF = bss_alloc_aligned(16 * 24 * 8)
+        B16_RET_SX_BSS_OFF = bss_alloc_aligned(24 * 8)
+        SX_CHVAR_BSS_OFF = bss_alloc_aligned(24 * 8)
+    }
     AST_ARENA_BASE_BSS_OFF = bss_alloc_aligned(8)
     AST_ARENA_CURSOR_BSS_OFF = bss_alloc_aligned(8)
     AST_ARENA_LIMIT_BSS_OFF = bss_alloc_aligned(8)
@@ -33949,7 +35639,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         // β⁴/β⁶/β⁷: reset shadow state for new function scope
         EXPR_VSHADOW = -1
         EXPR_SSHADOW = -1
-        EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+        EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
         EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
         EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
         EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -33964,6 +35654,14 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         MEAS_CALL_IDX = 0
         MEAS_KNOW_IDX = 0
         KM_CACHE_COUNT = 0
+        // #2776: a fresh field-shadow table per function.
+        FSH_GEN_CUR = FSH_GEN_NEXT
+        FSH_GEN_NEXT = FSH_GEN_NEXT + 1
+        FSH_VIRT_NEXT = 0
+        EXPR_AGG0 = -1
+        SX_TOP = 0
+        var sxr: i64 = 0
+        while sxr < 24 { CHVAR_SX[sxr as usize] = -1; sxr = sxr + 1 }
         CHANNEL_INPUT_VAR_SLOT[0] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[1] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[2] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[3] = 0 - 1
         CHANNEL_INPUT_VAR_SLOT[4] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[5] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[6] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[7] = 0 - 1
 
@@ -34170,8 +35868,37 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_ARG_HSHADOW_00_BSS_OFF + param_vi * 8)
                 emit_store_var(phs)
                 VAR_HSHADOW_00[param_vi as usize] = phs
+                if SX_XCALL != 0 { sx_emit_param_load_x86(param_vi) }
             }
             param_vi = param_vi + 1
+        }
+        if SX_XCALL != 0 { sx_emit_chvar_load_x86() }
+        // #2776: struct parameters (by value or by reference) take their field
+        // shadows from the caller's FSH_ARG block, in parameter order.
+        if FSH_ACTIVE != 0 {
+            FSH_PEND_N = 0
+            var fsh_pj: i64 = 0
+            var fsh_pvi: i64 = 0
+            while fsh_pvi < VAR_COUNT && fsh_pvi < 16 {
+                let fsh_ph = fsh_param_struct_hash(VAR_TY[fsh_pvi as usize], VAR_TY_HASH[fsh_pvi as usize])
+                if fsh_ph != 0 {
+                    let fsh_rg = fsh_virt_region()
+                    fsh_pj = fsh_pj + fsh_pend_region_x86(fsh_rg, fsh_ph, FSH_ARG_BSS_OFF, FSH_ARG_WORDS, fsh_pj)
+                    VAR_AGG0[fsh_pvi as usize] = fsh_rg
+                    VAR_AGG0_GEN[fsh_pvi as usize] = FSH_GEN_CUR
+                }
+                fsh_pvi = fsh_pvi + 1
+            }
+            fsh_emit_pend_load_x86(fsh_arg_tag_off(), fn_idx)
+            var fsh_ck: i64 = 0
+            while fsh_ck < 8 {
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + FSH_CHVAR_BSS_OFF + fsh_ck * 8)
+                let fsh_cs = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(fsh_cs)
+                CHANNEL_INPUT_VAR_SLOT[fsh_ck as usize] = fsh_cs
+                fsh_ck = fsh_ck + 1
+            }
         }
 
         // β⁹ GTT week-4: seed VAR_PARAM_USED for parameters so subsequent
@@ -34356,6 +36083,18 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_RET_SSHADOW_7_BSS_OFF)
                 if EXPR_HSHADOW_00 >= 0 { emit_load_var(EXPR_HSHADOW_00) } else { emit_imm64(0) }
                 emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
+                if SX_XCALL != 0 { sx_emit_ret_store_x86() }
+                em(0x58)
+            }
+            // #2776: an expression-bodied struct return (`fn mk(..) -> P { P { .. } }`).
+            // The tail statement's region counts only if that statement ended
+            // exactly where the body did (an `if`/`match` tail does not).
+            if FSH_ACTIVE != 0 && LAST_STMT_HAS_VALUE == 1 && fsh_type_is_plain_struct(CURRENT_RET_TY, CURRENT_RET_HASH) {
+                var fsh_tail_src: i64 = -1
+                if LAST_STMT_AGG0_END == EP { fsh_tail_src = LAST_STMT_AGG0 }
+                em(0x50)
+                let fsh_tn = fsh_emit_region_to_bss_x86(fsh_tail_src, CURRENT_RET_HASH, FSH_RET_BSS_OFF, FSH_RET_WORDS, 0)
+                if fsh_tn > 0 { fsh_emit_set_tag_x86(fsh_ret_tag_off(), CURRENT_FN) }
                 em(0x58)
             }
             em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
@@ -36645,7 +38384,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
     EXPR_PARAM_USED = 0
     EXPR_VSHADOW = -1
     EXPR_SSHADOW = -1
-    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
     EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
     EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
     EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -38273,7 +40012,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             if src_match(ns, ne - ns, "sensitivity_of") {
                 EP = EP + 1
                 EXPR_SSHADOW = -1
-                EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                 var b4as_arg_vi: i64 = -1
                 if TK[EP as usize] == 3 && TK[(EP + 1) as usize] == 28 {
                     b4as_arg_vi = var_find_idx(TS[EP as usize], TE[EP as usize])
@@ -38327,7 +40066,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     if b4as_sshadow >= 0 { emit_load_var_a64(b4as_sshadow) } else { emit_imm64_a64(0) }
                 }
                 EXPR_IS_F64 = 1; EXPR_TY = 2; EXPR_TY_HASH = 0
-                EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                 return
             }
             if src_match(ns, ne - ns, "hessian_of") {
@@ -38340,7 +40079,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 // hessian_of(x: f64, j: i64, k: i64) -> f64
                 // Returns ∂²x/∂input_j∂input_k via the β⁷ second-order shadow channels (j≤k by convention).
                 EP = EP + 1  // skip (
-                EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                 EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
                 EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
                 EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -38526,7 +40265,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = 2
                 EXPR_TY_HASH = 0
                 EXPR_VSHADOW = -1
-                EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                 EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
                 EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
                 EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -40121,7 +41860,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             } else {
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
-                EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                 EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
                 EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
                 EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -41103,7 +42842,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_lval_slot)
         }
-        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
         emit_push_a64()
         compile_postfix_a64()
         let right_ty = EXPR_TY
@@ -41219,7 +42958,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         else { EXPR_UNIT = 0; EXPR_UNIT_DIM = 0 }
         // β⁴: GUM variance propagation through *
         // Save result first — shadow computation overwrites x0
-        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
         var b4am_result_slot: i64 = -1
         var b7_any_m: i64 = 0
         var b7q_m: i64 = 0
@@ -41673,7 +43412,7 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
             B7_TOP = B7_TOP + B7_FRAME
         }
         b7_save_a64(b7_l_a)
-        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
         emit_push_a64()
         compile_multiplicative_a64()
         let right_ty = EXPR_TY
@@ -41760,7 +43499,7 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
             EXPR_IS_F64 = 1
             // β⁴: GUM variance: var(a±b) = var(a) + var(b)
             // Save result first — shadow computation overwrites x0
-            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
             var b4aa_result_slot: i64 = -1
             // #2776: the frame loops below emit code for channels 4-7 and every
             // Hessian pair too, and each overwrites x0: save whenever any runs.
@@ -41809,7 +43548,7 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
                 if op == 17 { LAST_LITERAL_VAL = left_literal_val_a + LAST_LITERAL_VAL }
                 if op == 18 { LAST_LITERAL_VAL = left_literal_val_a - LAST_LITERAL_VAL }
             } else { LAST_IS_LITERAL = 0 }
-            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
         }
         B7_TOP = b7_prev_a
         // β⁹ GTT: channel topology of a + b, a - b is the union of operand
@@ -42572,7 +44311,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 VAR_PARAM_USED[vix as usize] = EXPR_PARAM_USED
                 EXPR_VSHADOW = -1
                 EXPR_SSHADOW = -1
-                EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                 EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
                 EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
                 EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -42775,7 +44514,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 VAR_CH_SET[ty_vi as usize] = EXPR_CH_SET
                 VAR_PARAM_USED[ty_vi as usize] = EXPR_PARAM_USED
             }
-            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+            EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
             if EXPR_TY == 9 { LAST_EXPR_IS_CLOSURE = 1 }
             var vi: i64 = VAR_COUNT - 1
             while vi >= 0 {
@@ -43659,7 +45398,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 } else {
                     EXPR_SSHADOW = -1
                     EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
-                    EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                    EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
                     EXPR_HSHADOW_00 = -1
                 }
             } else {
@@ -44306,7 +46045,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         if CURRENT_RET_TY == 13 { tc_f128_a64_refused(FN_NAME_TOK[fn_idx as usize]) }
         VAR_COUNT = 0; NEXT_SLOT = 1; BREAK_COUNT = 0; LAST_STMT_HAS_VALUE = 0
         // β⁴/β⁶/β⁷: reset shadow state for new function scope (a64)
-        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; MEAS_CALL_IDX = 0; MEAS_KNOW_IDX = 0; KM_CACHE_COUNT = 0
+        EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear(); MEAS_CALL_IDX = 0; MEAS_KNOW_IDX = 0; KM_CACHE_COUNT = 0
         CHANNEL_INPUT_VAR_SLOT[0] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[1] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[2] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[3] = 0 - 1
         CHANNEL_INPUT_VAR_SLOT[4] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[5] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[6] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[7] = 0 - 1
         EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1; EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1; EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
