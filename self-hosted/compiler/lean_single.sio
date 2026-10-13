@@ -1271,6 +1271,13 @@ fn st_total_size(si: i64) -> i64 with Panic, Div, Mut {
 // past the end and the compiler died with SIGSEGV before E008 could refuse
 // (#2421). Keep this at 4 * global_cap().
 var GL: [i64; 8192] = [0; 8192]
+// Global arrays of STRUCT elements (#1655) use the same pointer-per-slot layout
+// as local struct arrays: GL[..+2] (esiz) is 8 and each slot holds a pointer into
+// a BSS backing block reserved beside it. GL_AGG_NSL is the element's qword count
+// (0 = not such an array), GL_AGG_BLK the backing block's BSS offset. The slots
+// are wired to the block at main's entry (emit_global_agg_slots_x86/_a64).
+var GL_AGG_NSL: [i64; 2048] = [0; 2048]
+var GL_AGG_BLK: [i64; 2048] = [0; 2048]
 var GL_COUNT: i64 = 0
 var GL_BSS_SIZE: i64 = 0
 
@@ -6243,10 +6250,37 @@ fn stmt_is_deref_array_store(p0: i64) -> bool with Panic, Mut {
     return TK[p as usize] == 16
 }
 
+// `*name = expr` (tokens 19 3 16) or the parenthesised `(*name) = expr` (6 19 3 7 16).
+// Both spell the same whole-pointee store. Only the unparenthesised form used to be
+// recognised: `(*name) = expr` matched no store predicate (the `( * name )` ones all
+// require a `.field` or `[idx]` tail), fell through to the expression-statement path and
+// emitted NO store at all, silently and with rc=0. 262 statements in self-hosted/ use the
+// parenthesised spelling (e.g. ir/serialize.sio `(*out_len) = pos`).
+fn stmt_is_paren_deref_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 6 { return false }
+    if TK[(p0 + 1) as usize] != 19 { return false }
+    if TK[(p0 + 2) as usize] != 3 { return false }
+    if TK[(p0 + 3) as usize] != 7 { return false }
+    return TK[(p0 + 4) as usize] == 16
+}
+
 fn stmt_is_deref_store(p0: i64) -> bool with Panic, Mut {
+    if stmt_is_paren_deref_store(p0) { return true }
     if TK[p0 as usize] != 19 { return false }
     if TK[(p0 + 1) as usize] != 3 { return false }
     return TK[(p0 + 2) as usize] == 16
+}
+
+// Token index of the pointer name in a statement accepted by stmt_is_deref_store.
+fn deref_store_name_tok(p0: i64) -> i64 with Panic, Mut {
+    if stmt_is_paren_deref_store(p0) { return p0 + 2 }
+    return p0 + 1
+}
+
+// Token index of the `=` in a statement accepted by stmt_is_deref_store.
+fn deref_store_eq_tok(p0: i64) -> i64 with Panic, Mut {
+    if stmt_is_paren_deref_store(p0) { return p0 + 4 }
+    return p0 + 2
 }
 
 fn stmt_is_deref_field_store(p0: i64) -> bool with Panic, Mut {
@@ -10557,7 +10591,46 @@ fn bind_struct_local_zeroinit_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Pani
 // (e.g. `var PI: f64 = 3.14159`, `var TUNE: i64 = 42`).
 // Array globals with repeat syntax `[V; N]` fall through to BSS zero (V must be 0
 // for correctness; other values are not yet supported).
+// #1655: point every slot of a global struct array at its element in the BSS
+// backing block (slot i -> block + i*stride). Runs once at main's entry, before
+// the initializers, so a declaration without an initializer (`var G: [S; N]`)
+// also reads back zeroed elements rather than null pointers.
+fn emit_global_agg_slots_x86() with Mut, Panic, Div {
+    var gi: i64 = 0
+    while gi < GL_COUNT {
+        let nsl = GL_AGG_NSL[gi as usize]
+        let alen = GL[(gi * 4 + 3) as usize]
+        if nsl > 0 && alen > 0 {
+            em(0x48); em(0xbf); em64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize])  // mov rdi, slots
+            em(0x48); em(0xbe); em64(GL_BSS_BASE + GL_AGG_BLK[gi as usize])    // mov rsi, block
+            em(0x48); em(0xb9); em64(alen)                                     // mov rcx, alen
+            em(0x48); em(0x89); em(0x37)                                       // loop: mov [rdi], rsi
+            em(0x48); em(0x83); em(0xc7); em(8)                                // add rdi, 8
+            em(0x48); em(0x81); em(0xc6); em32(nsl * 8)                        // add rsi, stride
+            em(0x48); em(0xff); em(0xc9)                                       // dec rcx
+            em(0x75); em(0xed)                                                 // jnz loop (-19)
+        }
+        gi = gi + 1
+    }
+}
+
+// #1655: `[V; N]` for a global struct array -- copy the struct V (pointer in
+// rax) into each of the N elements of the backing block.
+fn emit_global_agg_repeat_fill_x86(gi: i64) with Mut, Panic, Div {
+    let nsl = GL_AGG_NSL[gi as usize]
+    let alen = GL[(gi * 4 + 3) as usize]
+    em(0x49); em(0x89); em(0xc0)                                   // mov r8, rax (src)
+    em(0x48); em(0xbf); em64(GL_BSS_BASE + GL_AGG_BLK[gi as usize]) // mov rdi, block
+    em(0x49); em(0xb9); em64(alen)                                 // mov r9, alen
+    em(0x4c); em(0x89); em(0xc6)                                   // loop: mov rsi, r8
+    em(0xb9); em32(nsl)                                            // mov ecx, nslots
+    em(0xf3); em(0x48); em(0xa5)                                   // rep movsq (rdi += stride)
+    em(0x49); em(0xff); em(0xc9)                                   // dec r9
+    em(0x75); em(0xf0)                                             // jnz loop (-16)
+}
+
 fn emit_global_inits_x86() with IO, Mut, Panic, Div {
+    emit_global_agg_slots_x86()
     var p: i64 = 0
     var depth: i64 = 0
     while p < TC {
@@ -10625,7 +10698,12 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
                             // Excess elements are compiled (so a bad one still
                             // diagnoses) but not stored: the slot does not exist.
                             if l_idx < l_alen {
-                                if l_esiz == 1 {
+                                if GL_AGG_NSL[gi_arr as usize] > 0 {
+                                    // struct element (#1655): copy into its block element
+                                    em(0x48); em(0x89); em(0xc2)   // mov rdx, rax (src)
+                                    emit_load_abs_addr_to_rax_x86(GL_BSS_BASE + GL_AGG_BLK[gi_arr as usize] + l_idx * GL_AGG_NSL[gi_arr as usize] * 8)
+                                    emit_copy_agg_to_ptr_x86(6, arr_hash_elem_hash(GL_TY_HASH[gi_arr as usize]))
+                                } else if l_esiz == 1 {
                                     em(0x48); em(0x89); em(0xc1)   // mov rcx, rax
                                     emit_load_abs_addr_to_rax_x86(l_base + l_idx)
                                     em(0x88); em(0x08)             // mov [rax], cl
@@ -10652,7 +10730,9 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
                         let base = GL_BSS_BASE + GL[(gi_arr * 4 + 1) as usize]
                         let esiz = GL[(gi_arr * 4 + 2) as usize]
                         let alen = GL[(gi_arr * 4 + 3) as usize]
-                        if alen > 0 {
+                        if GL_AGG_NSL[gi_arr as usize] > 0 {
+                            emit_global_agg_repeat_fill_x86(gi_arr)
+                        } else if alen > 0 {
                             em(0x48); em(0xbf); em64(base)         // mov rdi, base
                             em(0x48); em(0xb9); em64(alen)         // mov rcx, alen
                             if esiz == 1 {
@@ -10695,7 +10775,45 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
     }
 }
 
+// a64 twin of emit_global_agg_slots_x86 (#1655).
+fn emit_global_agg_slots_a64() with Mut, Panic, Div {
+    var gi: i64 = 0
+    while gi < GL_COUNT {
+        let nsl = GL_AGG_NSL[gi as usize]
+        let alen = GL[(gi * 4 + 3) as usize]
+        if nsl > 0 && alen > 0 {
+            emit_image_addr_reg_a64(9, GL_BSS_BASE + GL[(gi * 4 + 1) as usize])  // x9 = slots
+            emit_image_addr_reg_a64(10, GL_BSS_BASE + GL_AGG_BLK[gi as usize])   // x10 = block
+            emit_imm64_reg_a64(11, nsl * 8)                                      // x11 = stride
+            emit_imm64_reg_a64(12, alen)                                         // x12 = count
+            let loop_off = CL
+            em32(0xF800852A)  // str x10, [x9], #8
+            em32(0x8B0B014A)  // add x10, x10, x11
+            em32(0xF100058C)  // subs x12, x12, #1
+            let br_off = CL
+            em32(0x54000001 | ((((loop_off - br_off) / 4) & 0x7FFFF) << 5))  // b.ne loop
+        }
+        gi = gi + 1
+    }
+}
+
+// a64 twin of emit_global_agg_repeat_fill_x86 (#1655): V's pointer is in x0.
+fn emit_global_agg_repeat_fill_a64(gi: i64) with Mut, Panic, Div {
+    let nsl = GL_AGG_NSL[gi as usize]
+    let alen = GL[(gi * 4 + 3) as usize]
+    em32(0xAA0003EF)                                              // mov x15, x0 (src)
+    emit_image_addr_reg_a64(11, GL_BSS_BASE + GL_AGG_BLK[gi as usize])  // x11 = block
+    emit_imm64_reg_a64(14, alen)                                  // x14 = count
+    let outer = CL
+    em32(0xAA0F03EA)                                              // mov x10, x15
+    emit_copy_words_x10_x11_a64(nsl)                              // x11 += stride
+    em32(0xF10005CE)                                              // subs x14, x14, #1
+    let br_off = CL
+    em32(0x54000001 | ((((outer - br_off) / 4) & 0x7FFFF) << 5))  // b.ne outer
+}
+
 fn emit_global_inits_a64() with IO, Mut, Panic, Div {
+    emit_global_agg_slots_a64()
     var p: i64 = 0
     var depth: i64 = 0
     while p < TC {
@@ -10749,7 +10867,11 @@ fn emit_global_inits_a64() with IO, Mut, Panic, Div {
                             compile_or_a64()                   // element value in x0
                             p = EP
                             if l_idx < l_alen {
-                                if l_esiz == 1 {
+                                if GL_AGG_NSL[gi_arr as usize] > 0 {
+                                    em32(0xAA0003EA)               // mov x10, x0 (src)
+                                    emit_image_addr_a64(GL_BSS_BASE + GL_AGG_BLK[gi_arr as usize] + l_idx * GL_AGG_NSL[gi_arr as usize] * 8)
+                                    emit_copy_agg_to_ptr_a64(6, arr_hash_elem_hash(GL_TY_HASH[gi_arr as usize]))
+                                } else if l_esiz == 1 {
                                     emit_image_addr_reg_a64(9, l_base + l_idx)
                                     em32(0x39000120)           // strb w0, [x9]
                                 } else {
@@ -10774,7 +10896,9 @@ fn emit_global_inits_a64() with IO, Mut, Panic, Div {
                         let base = GL_BSS_BASE + GL[(gi_arr * 4 + 1) as usize]
                         let esiz = GL[(gi_arr * 4 + 2) as usize]
                         let alen = GL[(gi_arr * 4 + 3) as usize]
-                        if alen > 0 {
+                        if GL_AGG_NSL[gi_arr as usize] > 0 {
+                            emit_global_agg_repeat_fill_a64(gi_arr)
+                        } else if alen > 0 {
                             em32(0xAA0003E2)                   // mov x2, x0 (save value)
                             emit_image_addr_a64(base)           // x0 = base
                             if esiz == 1 {
@@ -12987,6 +13111,25 @@ fn emit_str_concat_slots_a64(slot_a: i64, slot_b: i64) with Mut, Panic, Div {
     emit_load_var_a64(slot_res)                       // return res
 }
 
+// arm64 twin of emit_str_from_bytes_slots_x86.
+fn emit_str_from_bytes_slots_a64(slot_buf: i64, slot_len: i64) with Mut, Panic, Div {
+    let slot_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var_a64(slot_len)
+    em32(0xF100001F)   // cmp x0, #0
+    em32(0x9A9FA000)   // csel x0, x0, xzr, ge  (len < 0 -> 0)
+    emit_store_var_a64(slot_len)
+    emit_load_var_a64(slot_len)
+    em32(0x91000400)   // add x0, x0, #1
+    emit_heap_alloc_a64()
+    emit_store_var_a64(slot_res)
+    emit_load_var_a64(slot_len); em32(0xAA0003E2)   // x2 = len
+    emit_load_var_a64(slot_buf); em32(0xAA0003E1)   // x1 = buf
+    emit_load_var_a64(slot_res)                      // x0 = res (dst)
+    emit_memcpy_a64()
+    em32(0x3900001F)   // strb wzr, [x0]  (NUL terminator)
+    emit_load_var_a64(slot_res)
+}
+
 // arm64 twin of emit_str_slice_range_slots_x86: substring s[start..end], ptr in x0.
 fn emit_str_slice_range_slots_a64(slot_s: i64, slot_start: i64, slot_end: i64) with Mut, Panic, Div {
     let slot_len = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
@@ -13424,6 +13567,36 @@ fn emit_str_concat_slots_x86(slot_a: i64, slot_b: i64) with Mut, Panic, Div {
     em(0x48); em(0x89); em(0xc6)            // mov rsi, rax
     em(0xf3); em(0xa4)                      // rep movsb
 
+    em(0xc6); em(0x07); em(0x00)            // mov byte [rdi], 0
+    emit_load_var(slot_res)
+}
+
+// str_from_bytes(buf, len): copy len bytes of buf into a fresh NUL-terminated
+// string (#1680). Returning the buffer's own address made the string dangle as
+// soon as a stack buffer's frame was reused: io_trace_i64_string returns
+// str_from_bytes(out, n) over a local [i8; 64], and the Madaros contract JSON
+// came out as `"stack_map_records":,`. Madaros already copies; this is parity.
+// A negative len copies nothing.
+fn emit_str_from_bytes_slots_x86(slot_buf: i64, slot_len: i64) with Mut, Panic, Div {
+    let slot_res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var(slot_len)
+    em(0x48); em(0x85); em(0xc0)            // test rax, rax
+    em(0x7d); em(0x02)                      // jge +2
+    em(0x31); em(0xc0)                      // xor eax, eax (len < 0 -> 0)
+    emit_store_var(slot_len)
+    emit_load_var(slot_len)
+    em(0x48); em(0x83); em(0xc0); em(1)     // add rax, 1
+    emit_pool_alloc_rax_x86()
+    emit_store_var(slot_res)
+    em(0xfc)                                // cld
+    emit_load_var(slot_len)
+    em(0x48); em(0x89); em(0xc1)            // mov rcx, rax
+    emit_load_var(slot_buf)
+    em(0x48); em(0x89); em(0xc6)            // mov rsi, rax
+    emit_load_var(slot_res)
+    em(0x48); em(0x89); em(0xc7)            // mov rdi, rax
+    em(0xf3); em(0xa4)                      // rep movsb
     em(0xc6); em(0x07); em(0x00)            // mov byte [rdi], 0
     emit_load_var(slot_res)
 }
@@ -15227,9 +15400,16 @@ fn compile_primary() with IO, Mut, Panic, Div {
             let arr_hash = arr_ty_hash_for_elem_type(rep_count, 8, elem_ty, elem_hash)
             if elem_ty == 6 {
                 // Struct element: each element occupies struct_nslots qwords
+                // The array itself is pointer-per-slot (arr_hash has esiz 8, as
+                // every struct-element array does): rep_count frame slots, slot
+                // base+rep_count-1-i holding element i's pointer into the block
+                // below. It used to reserve and address rep_count*s_nslots slots
+                // (the INLINE size), so the returned base pointed s_nslots-1
+                // slots past element 0 and every access to a > 1-qword element
+                // read a stray frame word as a pointer (#2190).
                 let s_nslots = struct_like_nslots(elem_hash)
-                let total_slots = rep_count * s_nslots
-                if total_slots > 0 {
+                let total_slots = rep_count
+                if rep_count > 0 && s_nslots > 0 {
                     let base = NEXT_SLOT
                     NEXT_SLOT = NEXT_SLOT + total_slots
                     let end_ep = EP
@@ -17955,14 +18135,19 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 return
             }
             // str_from_bytes(buf: [i8; N], len: i64) -> string
-            // Returns the address of the byte buffer as a string pointer.
+            // Copies len bytes into a fresh NUL-terminated string (#1680).
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "str_from_bytes") {
                 EP = EP + 1
-                compile_or()  // buf arg → rax (address of byte array on stack)
-                em(0x50)      // push rax (save buf address)
+                compile_or()  // buf arg → rax (address of the byte array)
+                let sfb_buf = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(sfb_buf)
                 if TK[EP as usize] == 28 { EP = EP + 1 }
-                compile_or()  // len arg → rax (integer, consumed for type-check only)
-                em(0x58)      // pop rax (restore buf address as the result)
+                compile_or()  // len arg → rax
+                let sfb_len = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(sfb_len)
+                emit_str_from_bytes_slots_x86(sfb_buf, sfb_len)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 EXPR_IS_F64 = 0
                 EXPR_TY = 3
@@ -30086,13 +30271,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     }
     // *PTR = expr
     if stmt_is_deref_store(EP) {
-        let name_tok = EP + 1
+        let name_tok = deref_store_name_tok(EP)
         if current_fn_allows_mutation() == false {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
-        let ns = TS[(EP + 1) as usize]
-        let ne = TE[(EP + 1) as usize]
-        EP = EP + 2
+        let ns = TS[name_tok as usize]
+        let ne = TE[name_tok as usize]
+        EP = deref_store_eq_tok(EP)
         if TK[EP as usize] == 16 { EP = EP + 1 }
         compile_or()
         let rhs_ty = EXPR_TY
@@ -35366,7 +35551,16 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     if elem_ty == 6 || elem_ty == 7 { elem_hash = gl_name_hash(etns, etne) }
                     var esiz: i64 = 8
                     if src_match(etns, etne - etns, "i8") { esiz = 1 }
-                    if elem_ty == 6 || elem_ty == 7 { esiz = struct_like_nslots(elem_hash) * 8 }
+                    // A struct element is stored pointer-per-slot, exactly like a
+                    // local `[S; N]` (#1655): 8-byte slots here, element storage in
+                    // a backing block. This used to reserve the elements INLINE
+                    // (esiz = nslots*8) while every store, field-store and init
+                    // path treated the slots as pointers, so `G[i] = S{..}` was a
+                    // silent no-op and reads returned frame addresses. An enum
+                    // element (no struct layout) is a scalar discriminant; it used
+                    // to get esiz 0, i.e. no storage at all, aliasing the next global.
+                    var agg_nsl: i64 = 0
+                    if elem_ty == 6 { agg_nsl = struct_like_nslots(elem_hash) }
                     p = p + 1
                     // Skip ;
                     if TK[p as usize] == 27 { p = p + 1 }
@@ -35379,6 +35573,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     if gix >= 0 {
                         GL_TY[gix as usize] = 8
                         GL_TY_HASH[gix as usize] = arr_ty_hash_for_elem_type(alen, esiz, elem_ty, elem_hash)
+                        GL_AGG_NSL[gix as usize] = 0
+                        if agg_nsl > 0 && alen > 0 {
+                            GL_AGG_NSL[gix as usize] = agg_nsl
+                            GL_AGG_BLK[gix as usize] = bss_alloc_aligned(alen * agg_nsl * 8)
+                        }
                     }
                 } else {
                     // Scalar: i64, i32, bool, string
@@ -41256,15 +41455,17 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 return
             }
             // str_from_bytes(buf: [i8; N], len: i64) -> string — parity with the x86-64
-            // twin (~13358): returns the byte-buffer address as a string pointer; the
-            // len arg is compiled for type-check only and discarded.
+            // twin: copies len bytes into a fresh NUL-terminated string (#1680).
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "str_from_bytes") {
                 EP = EP + 1
                 compile_or_a64()   // buf -> x0 (address of byte array)
-                emit_push_a64()    // save buf address
+                let sfb_buf = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(sfb_buf)
                 if TK[EP as usize] == 28 { EP = EP + 1 }
-                compile_or_a64()   // len -> x0 (discarded)
-                emit_pop_x0_a64()  // restore buf address as the result
+                compile_or_a64()   // len -> x0
+                let sfb_len = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(sfb_len)
+                emit_str_from_bytes_slots_a64(sfb_buf, sfb_len)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 EXPR_IS_F64 = 0
                 EXPR_TY = 3
@@ -45482,13 +45683,13 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     }
     // *PTR = expr
     if stmt_is_deref_store(EP) {
-        let name_tok = EP + 1
+        let name_tok = deref_store_name_tok(EP)
         if current_fn_allows_mutation() == false {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
-        let ns = TS[(EP + 1) as usize]
-        let ne = TE[(EP + 1) as usize]
-        EP = EP + 2
+        let ns = TS[name_tok as usize]
+        let ne = TE[name_tok as usize]
+        EP = deref_store_eq_tok(EP)
         if TK[EP as usize] == 16 { EP = EP + 1 }
         compile_or_a64()
         let rhs_ty = EXPR_TY
