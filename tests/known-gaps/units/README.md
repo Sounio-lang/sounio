@@ -12,5 +12,5 @@ directory of known gaps should not hold a gap that is shut.
 |---|---|---|---|
 | `direct_unit_mismatch_is_caught.sio` | both | fail | control: `mol + K` is rejected |
 | ~~`derived_unit_dropped_by_inference.sio`~~ | both | **fail** (was pass) | CLOSED 2026-09-05 — moved to `tests/compile-fail/unit_quotient_keeps_dimension.sio` |
-| ~~`unit_lost_at_call_boundary.sio`~~ | both | fail | CLOSED (#2388) — the call-boundary refusal is pinned by `tests/compile-fail/unit_derived_parens_dimension_mismatch_issue_2388.sio` and its `_madaros_` twin; the file is gone from this directory |
+| ~~`unit_lost_at_call_boundary.sio`~~ | both | fail | CLOSED — moved to `tests/compile-fail/unit_lost_at_call_boundary.sio` |
 | ~~`derived_unit_annotation_unparsed.sio`~~ | both | parses | CLOSED (#2388) — `^n` and parentheses parse; covered by `tests/run-pass/unit_derived_power_and_parens_issue_2388.sio`, and `mL`/`L` by `tests/run-pass/unit_volume_mL_L_issue_2388.sio`; the file is gone from this directory |
