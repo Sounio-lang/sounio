@@ -48,6 +48,7 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 | [D-29](#d-29) | Seed macOS ARM64 com recibo de proveniência | #821 |
 | [D-30](#d-30) | Raízes precisas para o GC de handles | #1491 |
 | [D-31](#d-31) | Reborrow por parâmetro `&!` pode aliasar? | #1581 (resíduo) |
+| [D-32](#d-32) | `spawn {}` / `.await` / `async fn` no Madaros | #2604 (resíduo) |
 
 ---
 
@@ -360,3 +361,13 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 - **Recomendação:** (a): (b) deixa um alias mutável aceito por `check`, o mesmo tipo de furo de #888.
 - **Teste discriminante:** `fn step(y: &![f64; 4]) with Mut { sub(&(*y), &!(*y)) }` (e `sub(&s.y, &!s.y)` com `s: &!St`) recusado com E037/E038 nos dois engines; hoje Madaros e `lean_single` aceitam e imprimem `4.000000`.
 - **Causa localizada:** a composição de empréstimos por campo/lugar de `self-hosted/check/borrow.sio` (commit `4f2a392ca`) não normaliza `&(*p)` para o lugar de `p`; o `lean_single` tem a mesma lacuna em `lean_single.sio`.
+
+<a id="d-32"></a>
+## D-32 — `spawn {}`, `.await` e `async fn` no Madaros
+
+- **Origem:** #2604 (a metade "Madaros não faz type-check do próprio driver" está corrigida em `15e8184ef`; este é o resíduo).
+- **Pergunta:** o Madaros deve implementar `spawn { ... }`, o postfix `.await` e `async fn`, ou o recurso fica só no `lean_single` até haver decisão sobre o runtime assíncrono?
+- **Opções:** (a) implementar no Madaros (AST + parser + checker de efeito `Async` + lowering); (b) manter recusa fail-closed, com mensagem própria no lugar de E012, e escopar `tests/run-pass/async_spawn.sio` com `//@ requires: lean_single`; (c) retirar o recurso da linguagem.
+- **Recomendação:** (b) agora (a recusa já é fail-closed, mas o E012 "this type has no field named" engana: aponta um campo inexistente em vez do recurso ausente), (a) quando o modelo de execução de `Async` for decidido.
+- **Teste discriminante:** `tests/run-pass/async_spawn.sio` imprime `spawn_basic: PASS` e `spawn_multiple: PASS` no Madaros (opção a), ou o Madaros o recusa com uma mensagem que nomeia `spawn`/`.await` (opção b). Hoje: Madaros `error[E012] … this type has no field named` (×8), `lean_single` `PASS`/`PASS`.
+- **Causa localizada:** `self-hosted/parser/exprs.sio` não tem nó de AST para `await` nem para `spawn` (`grep -n 'await' self-hosted/parser/exprs.sio` não encontra nada), então `.await` é lido como acesso a campo e o checker de `self-hosted/check/` levanta E012.
