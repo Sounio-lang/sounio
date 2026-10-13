@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
-# #1680: `madaros --self-test` must run to its summary line, and the self-tests
-# pinned below must pass.
+# #1680: `madaros --self-test` must run to its summary line, and the self-tests pinned
+# below must pass. The remaining failures are listed in the #1680 PR stack.
 #
 # Before #1680 the run died with SIGSEGV right after T110: const_prop's
 # cp_empty_instrs() returns `[ir_nop(); 1024]`, and lean_single (which compiles
 # Madaros) returned the wrong base for a struct repeat literal in expression
 # position (fixed in #2847), so cp_make_test_func dereferenced a null element.
-# On main (deede5c87) no test past T110 runs.
 #
-# Pinned tests (each was failing on main and is fixed by the change named):
-#   T69  nc_min_frame_size: a stack-only vreg below NC_MAX_VREGS no longer
-#        shrinks the frame sized for vregs above the table (native/lower_ir.sio).
+# Each pinned self-test below failed before the change named next to it.
+#   T69  nc_min_frame_size keeps the frame sized for high vregs (#2937).
+#   T57  runtime context reports tracing_gc = false (d9dab3b11), as the test now expects.
+#   T61  contract JSON is written under /tmp, so it no longer needs ./artifacts/omega.
+#   T70  the legacy vreg fixture has a body, so it reaches the NC_MAX_VREGS refusal.
+#   T84  prologue checked before the epilogue reuses the global code buffer.
+#   T85, T156  contract GC flags expected false; JSON numbers present (#2948).
+#   T93, T94  LICM fixtures allocate their own IR region.
+#   T187 runtime context size 248 (998e230b7).
+#   T227, T229  write_file returns the byte count, not 0.
 #
-# The remaining self-test failures are listed in the #1680 PR; most are
-# expectations written before later optimizer passes changed the canonical
-# output (e.g. T221 now gets `x << 3` where it expects `x * 8`). They are
-# reported, not hidden: this gate does not accept a pass count, it requires the
-# run to finish and the pinned tests to pass.
-#
-# The run writes artifacts/omega/*.selftest.bin relative to its working
-# directory, so it runs from a scratch directory seeded with a copy of them,
-# never in the checkout.
+# The suite writes its scratch files under /tmp and removes them, so the run no
+# longer depends on, or rewrites, the directory it starts in. It still runs from
+# a scratch directory so that a regression in that respect cannot dirty a checkout.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -33,8 +33,7 @@ RAW="$(cd "$(dirname "$RAW")" && pwd)/$(basename "$RAW")"
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT/stdlib}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/sounio-self-test.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
-mkdir -p "$WORK/tree/artifacts"
-cp -r "$ROOT/artifacts/omega" "$WORK/tree/artifacts/" 2>/dev/null || true
+mkdir -p "$WORK/tree"
 
 rc=0
 (
@@ -47,17 +46,18 @@ rc=0
 # crash or hang, which is what #1680 was.
 if [[ $rc -ne 0 && $rc -ne 1 ]]; then
   tail -n 20 "$WORK/out" >&2
-  fail "--self-test died with rc=$rc before finishing (last test: $(grep -E '^  (T[0-9]+ OK|FAIL)' "$WORK/out" | tail -1))"
+  fail "--self-test died with rc=$rc before finishing (last test: $(grep -E '^  (T[0-9a-z]+ OK|FAIL)' "$WORK/out" | tail -1))"
 fi
 summary="$(grep -E '^compiler/main tests: [0-9]+/[0-9]+ passed' "$WORK/out" || true)"
 [[ -n "$summary" ]] || { tail -n 20 "$WORK/out" >&2; fail "--self-test printed no summary line (rc=$rc)"; }
 echo "$TAG: run finished: $summary (rc=$rc)"
+[[ -z "$(find "$WORK/tree" -type f | head -1)" ]] || fail "--self-test wrote into its working directory"
 
-for t in T69; do
+for t in T69 T57 T61 T70 T84 T85 T93 T94 T156 T187 T227 T229; do
   if ! grep -qE "^  $t OK" "$WORK/out"; then
     grep -E "^  (FAIL: )?$t( |$)" "$WORK/out" >&2 || true
     fail "pinned self-test $t did not pass"
   fi
-  echo "$TAG: PASS pinned $t"
 done
+echo "$TAG: PASS 12 pinned self-tests"
 echo "MADAROS_SELF_TEST_GATE_OK"
