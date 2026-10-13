@@ -28403,6 +28403,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         let then_s6 = EXPR_SSHADOW_6
         let then_s7 = EXPR_SSHADOW_7
         let then_h00 = EXPR_HSHADOW_00
+        // #2776: the GUM variance joins too (it used to take the ELSE arm's slot
+        // only, so `if true { a * b } else { a + b }` read an else-arm slot that
+        // never ran: 0).
+        let then_v = EXPR_VSHADOW
         if TK[EP as usize] == 9 { EP = EP + 1 }
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
@@ -28420,6 +28424,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             var merge_s6: i64 = -1
             var merge_s7: i64 = -1
             var merge_h00: i64 = -1
+            var merge_v: i64 = -1
             var do_shadow_merge: i64 = 0
             if then_has_value == 1 && then_ty == 2 {
                 do_shadow_merge = 1
@@ -28432,10 +28437,14 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 merge_s6 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                 merge_s7 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                 merge_h00 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_v = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                 emit_kl16e_spill_fo_h00(
                     merge_s0, merge_s1, merge_s2, merge_s3, merge_s4, merge_s5, merge_s6, merge_s7, merge_h00,
                     then_s0, then_s1, then_s2, then_s3, then_s4, then_s5, then_s6, then_s7, then_h00
                 )
+                em(0x50)  // push rax (the arm's value)
+                emit_spill_shadow_slot(merge_v, then_v)
+                em(0x58)  // pop rax
             }
             em(0xe9)
             let jmp_off = CL; em32(0)
@@ -28476,6 +28485,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             let else_s6 = EXPR_SSHADOW_6
             let else_s7 = EXPR_SSHADOW_7
             let else_h00 = EXPR_HSHADOW_00
+            let else_v = EXPR_VSHADOW
             // Linear branch asymmetry check: compare then vs else VAR_USED
             var lchk: i64 = 0
             while lchk < VAR_COUNT {
@@ -28508,6 +28518,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     merge_s0, merge_s1, merge_s2, merge_s3, merge_s4, merge_s5, merge_s6, merge_s7, merge_h00,
                     else_s0, else_s1, else_s2, else_s3, else_s4, else_s5, else_s6, else_s7, else_h00
                 )
+                em(0x50)
+                emit_spill_shadow_slot(merge_v, else_v)
+                em(0x58)
             }
             patch32(jmp_off, CL)
             if then_has_value == 1 && else_has_value == 1 && then_ty != 5 && else_ty != 5 {
@@ -28527,6 +28540,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 // KL-16e: point EXPR FO/H00 at join slots. Other H pairs stay
                 // OPEN through if (multi-pair if-merge not in this rung).
                 if do_shadow_merge == 1 {
+                    if then_v >= 0 || else_v >= 0 { EXPR_VSHADOW = merge_v } else { EXPR_VSHADOW = -1 }
                     EXPR_SSHADOW = merge_s0
                     EXPR_SSHADOW_1 = merge_s1
                     EXPR_SSHADOW_2 = merge_s2
@@ -43494,6 +43508,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         let then_s6_a = EXPR_SSHADOW_6
         let then_s7_a = EXPR_SSHADOW_7
         let then_h00_a = EXPR_HSHADOW_00
+        let then_v_a = EXPR_VSHADOW  // #2776: variance joins too (mirror of x86)
         if TK[EP as usize] == 9 { EP = EP + 1 }
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
@@ -43510,6 +43525,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             var merge_s6_a: i64 = -1
             var merge_s7_a: i64 = -1
             var merge_h00_a: i64 = -1
+            var merge_v_a: i64 = -1
             var do_shadow_merge_a: i64 = 0
             if then_has_value == 1 && then_ty == 2 {
                 do_shadow_merge_a = 1
@@ -43522,10 +43538,14 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 merge_s6_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                 merge_s7_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                 merge_h00_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_v_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                 emit_kl16e_spill_fo_h00_a64(
                     merge_s0_a, merge_s1_a, merge_s2_a, merge_s3_a, merge_s4_a, merge_s5_a, merge_s6_a, merge_s7_a, merge_h00_a,
                     then_s0_a, then_s1_a, then_s2_a, then_s3_a, then_s4_a, then_s5_a, then_s6_a, then_s7_a, then_h00_a
                 )
+                emit_push_a64()
+                emit_spill_shadow_slot_a64(merge_v_a, then_v_a)
+                emit_pop_x0_a64()
             }
             let b_end_off = CL
             em32(0x14000000)
@@ -43562,6 +43582,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             let else_s6_a = EXPR_SSHADOW_6
             let else_s7_a = EXPR_SSHADOW_7
             let else_h00_a = EXPR_HSHADOW_00
+            let else_v_a = EXPR_VSHADOW
             // Linear branch asymmetry check + merge (mirror of x86 compile_stmt).
             // Without this the a64 pass counted a linear value consumed in BOTH
             // arms as two uses and reported "used more than once" on a program
@@ -43594,6 +43615,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     merge_s0_a, merge_s1_a, merge_s2_a, merge_s3_a, merge_s4_a, merge_s5_a, merge_s6_a, merge_s7_a, merge_h00_a,
                     else_s0_a, else_s1_a, else_s2_a, else_s3_a, else_s4_a, else_s5_a, else_s6_a, else_s7_a, else_h00_a
                 )
+                emit_push_a64()
+                emit_spill_shadow_slot_a64(merge_v_a, else_v_a)
+                emit_pop_x0_a64()
             }
             patch_branch_a64(b_end_off, CL)
             if then_has_value == 1 && else_has_value == 1 && then_ty != 5 && else_ty != 5 {
@@ -43611,6 +43635,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 // `Sc ∪ (S1 ∪ S2)` in formal/GradientTopology.lean §3.
                 EXPR_CH_SET = if_cond_ch_set_a | if_then_ch_set_a | if_else_ch_set_a
                 if do_shadow_merge_a == 1 {
+                    if then_v_a >= 0 || else_v_a >= 0 { EXPR_VSHADOW = merge_v_a } else { EXPR_VSHADOW = -1 }
                     EXPR_SSHADOW = merge_s0_a
                     EXPR_SSHADOW_1 = merge_s1_a
                     EXPR_SSHADOW_2 = merge_s2_a
