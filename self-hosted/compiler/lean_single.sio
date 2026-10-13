@@ -2010,6 +2010,117 @@ fn unit_is_user_declared_h(h: i64) -> bool with Panic, Mut, Div {
     return false
 }
 
+// #2874 residual: the checker's BUILT-IN unit names are f64 quantity types as
+// well, exactly the list Madaros uses (self-hosted/ir/lower.sio
+// lower_builtin_unit_name, mirroring check/units.sio register_builtin_units
+// plus mL/L). Before this, `fn f(x: kg)` scanned `kg` as an unknown type, so
+// the parameter was an integer slot and the f64 argument's bits were read as
+// an integer (2.5 -> 4.612812e18). The rest of the preloaded SI table stays
+// unit-only, as before.
+fn unit_builtin_type_name_h(h: i64) -> bool with Panic, Mut {
+    if h == 0 { return false }
+    h == str_lit_hash("mg") || h == str_lit_hash("g") || h == str_lit_hash("kg")
+        || h == str_lit_hash("m") || h == str_lit_hash("km") || h == str_lit_hash("cm")
+        || h == str_lit_hash("mm") || h == str_lit_hash("s") || h == str_lit_hash("ms")
+        || h == str_lit_hash("min") || h == str_lit_hash("h") || h == str_lit_hash("K")
+        || h == str_lit_hash("mol") || h == str_lit_hash("cm3") || h == str_lit_hash("cal")
+        || h == str_lit_hash("mg_dL") || h == str_lit_hash("mmol_L") || h == str_lit_hash("U_L")
+        || h == str_lit_hash("mm_h") || h == str_lit_hash("mL") || h == str_lit_hash("L")
+}
+
+// A source file that declares a struct/enum/type alias under a built-in unit's
+// name, or uses it as a struct generic parameter (`struct Map<K, V>`), means
+// that declaration or type variable there, not the unit (the same per-module
+// exclusion Madaros applies). Each entry covers the token range of one source
+// file (files are separated by TK==77 markers).
+var UNIT_SHADOW_COUNT: i64 = 0
+var UNIT_SHADOW_HASH: [i64; 256] = [0; 256]
+var UNIT_SHADOW_LO: [i64; 256] = [0; 256]
+var UNIT_SHADOW_HI: [i64; 256] = [0; 256]
+var UNIT_SHADOW_OVERFLOWED: i64 = 0
+var UNIT_SHADOW_SCAN_TC: i64 = 0
+
+fn unit_shadow_note(h: i64, lo: i64) with Mut, Panic {
+    if unit_builtin_type_name_h(h) == false { return }
+    if UNIT_SHADOW_COUNT >= 256 { UNIT_SHADOW_OVERFLOWED = 1  return }
+    UNIT_SHADOW_HASH[UNIT_SHADOW_COUNT as usize] = h
+    UNIT_SHADOW_LO[UNIT_SHADOW_COUNT as usize] = lo
+    UNIT_SHADOW_HI[UNIT_SHADOW_COUNT as usize] = -1
+    UNIT_SHADOW_COUNT = UNIT_SHADOW_COUNT + 1
+}
+
+fn unit_shadow_close(hi: i64) with Mut, Panic {
+    var i: i64 = 0
+    while i < UNIT_SHADOW_COUNT {
+        if UNIT_SHADOW_HI[i as usize] < 0 { UNIT_SHADOW_HI[i as usize] = hi }
+        i = i + 1
+    }
+}
+
+// Record the shadowing declarations of every source file. Runs once, before
+// any scan_type call.
+fn unit_shadow_scan() with Mut, Panic, Div {
+    UNIT_SHADOW_COUNT = 0
+    UNIT_SHADOW_OVERFLOWED = 0
+    UNIT_SHADOW_SCAN_TC = TC
+    var lo: i64 = 0
+    var p: i64 = 0
+    while p < TC {
+        let k = TK[p as usize]
+        if k == 77 {
+            unit_shadow_close(p)
+            lo = p
+        }
+        if (k == 46 || k == 47 || k == 61) && p + 1 < TC && TK[(p + 1) as usize] == 3 {
+            unit_shadow_note(gl_name_hash(TS[(p + 1) as usize], TE[(p + 1) as usize]), lo)
+            // struct NAME < A, B > : each depth-1 list entry is a type variable
+            if k == 46 && p + 2 < TC && TK[(p + 2) as usize] == 23 {
+                var q: i64 = p + 3
+                var depth: i64 = 1
+                var expect_name: i64 = 1
+                while q < TC && depth > 0 {
+                    let qk = TK[q as usize]
+                    if qk == 23 { depth = depth + 1 }
+                    if qk == 24 { depth = depth - 1 }
+                    if depth == 1 && qk == 3 && expect_name == 1 {
+                        unit_shadow_note(gl_name_hash(TS[q as usize], TE[q as usize]), lo)
+                    }
+                    if depth == 1 && qk == 28 { expect_name = 1 } else { expect_name = 0 }
+                    q = q + 1
+                }
+            }
+        }
+        p = p + 1
+    }
+    unit_shadow_close(TC)
+}
+
+fn unit_shadowed_at_h(h: i64, pos: i64) -> bool with Mut, Panic {
+    if UNIT_SHADOW_OVERFLOWED == 1 { return true }
+    var i: i64 = 0
+    while i < UNIT_SHADOW_COUNT {
+        if UNIT_SHADOW_HASH[i as usize] == h {
+            // A token appended after the scan (monomorphised copies) has no
+            // file of its own: any shadowing declaration of the name counts.
+            if pos < 0 || pos >= UNIT_SHADOW_SCAN_TC { return true }
+            if pos >= UNIT_SHADOW_LO[i as usize] && pos < UNIT_SHADOW_HI[i as usize] { return true }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Does the name h, written at token pos, name a unit-carrying f64 type?
+fn unit_type_name_at_h(h: i64, pos: i64) -> bool with Mut, Panic, Div {
+    if unit_is_user_declared_h(h) { return true }
+    unit_builtin_type_name_h(h) && unit_shadowed_at_h(h, pos) == false
+}
+
+// Unit brand of a value already typed f64 (globals): user or built-in name.
+fn unit_type_brand_h(h: i64) -> bool with Mut, Panic, Div {
+    unit_is_user_declared_h(h) || unit_builtin_type_name_h(h)
+}
+
 fn unit_is_registered_h(h: i64) -> bool with Panic, Mut, Div {
     if h == 0 { return false }
     var idx: i64 = h % 2048
@@ -6982,6 +7093,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
         }
         let ns = TS[p as usize]
         let ne = TE[p as usize]
+        let type_name_pos = p
         var saw_generic: i64 = 0
         if name_is_wide_float_spelling(ns, ne) {
             tc_wide_float_refused(p)
@@ -7099,7 +7211,10 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                                                             // Only USER-declared units become types — preloaded SI symbols like
                                                             // `K` must remain usable as generic type parameters (`Map<K, V>`).
                                                             // Bare `mol/cm3` annotations still chain via unit_is_registered_h below.
-                                                            if unit_is_user_declared_h(h) {
+                                                            // #2874: the checker's built-in unit names (kg, mg, m, K, ...)
+                                                            // are f64 types too, unless this file declares or binds the
+                                                            // name itself (unit_type_name_at_h).
+                                                            if unit_type_name_at_h(h, type_name_pos) {
                                                                 SCAN_TY = 2
                                                                 SCAN_TY_HASH = h
                                                             } else {
@@ -19197,7 +19312,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 // the VAR_UNIT site above. Without this a module-level `var EA: kJ_per_mol`
                 // held the right VALUE after the G12 fix but arrived at a call site with no
                 // unit, so a correctly-typed argument was rejected as a mismatch.
-                if GL_TY[gi as usize] == 2 && unit_is_user_declared_h(GL_TY_HASH[gi as usize]) {
+                if GL_TY[gi as usize] == 2 && unit_type_brand_h(GL_TY_HASH[gi as usize]) {
                     EXPR_UNIT = GL_TY_HASH[gi as usize]
                     EXPR_UNIT_DIM = unit_lookup_dim(EXPR_UNIT)
                 }
@@ -32056,6 +32171,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
     // Gen 19: preload unit dimension table (SI, CGS, Imperial, Astronomical, Pharma, Atomic)
     init_unit_table()
+    // #2874: per-file declarations that shadow a built-in unit type name.
+    unit_shadow_scan()
 
     // C4: Pass 0 (token rewrite) — resolve `Self` inside impl blocks.
     // scan_type() has no "Self" case (it only understands a single bare
@@ -39902,7 +40019,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = GL_TY_HASH[gi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 // G12b: carry the unit brand on a global read -- see the other site.
-                if EXPR_TY == 2 && unit_is_user_declared_h(EXPR_TY_HASH) {
+                if EXPR_TY == 2 && unit_type_brand_h(EXPR_TY_HASH) {
                     EXPR_UNIT = EXPR_TY_HASH
                     EXPR_UNIT_DIM = unit_lookup_dim(EXPR_UNIT)
                 }
