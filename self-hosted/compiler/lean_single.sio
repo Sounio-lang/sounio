@@ -1140,6 +1140,8 @@ var RTMMAP_COUNT_BSS_OFF: i64 = 0
 var RTMMAP_BYTES_BSS_OFF: i64 = 0
 // Cached 16 MiB read_file scratch buffer (lazy mmap, reused every call).
 var READFILE_SCRATCH_BSS_OFF: i64 = 0
+// Capacity in bytes of the cached read_file scratch (mapping is cap+1). #2832.
+var READFILE_CAP_BSS_OFF: i64 = 0
 var ARENA_REFILL_COUNT_BSS_OFF: i64 = 0
 var ARENA_REFILL_BYTES_BSS_OFF: i64 = 0
 var ARENA_UNMAP_COUNT_BSS_OFF: i64 = 0
@@ -11854,7 +11856,7 @@ fn emit_read_file() with Mut, Panic, Div {
     em(0x48); em(0x31); em(0xf6)  // xor rsi, rsi (O_RDONLY)
     em(0xb8); em32(2); em(0x0f); em(0x05)  // open -> fd in rax
     em(0x50)  // push fd                                  stack=[fd]
-    // scratch = [READFILE_SCRATCH]; lazy mmap on first use
+    // scratch = [READFILE_SCRATCH]; lazy mmap on first use (cap 16 MiB)
     emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + READFILE_SCRATCH_BSS_OFF)
     em(0x48); em(0x85); em(0xc0)  // test rax, rax
     em(0x0f); em(0x85); let rf_have = CL; em32(0)  // jnz have_scratch
@@ -11868,19 +11870,49 @@ fn emit_read_file() with Mut, Panic, Div {
     em(0x48); em(0x3d); em32(0 - 4096)  // cmp rax, -4096
     em(0x0f); em(0x87); let rf_abort = CL; em32(0)  // ja abort (MAP_FAILED)
     emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + READFILE_SCRATCH_BSS_OFF)  // cache (rax preserved)
+    em(0xb8); em32(0x1000000)  // eax=16MB (cap)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + READFILE_CAP_BSS_OFF)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + READFILE_SCRATCH_BSS_OFF)
     patch32(rf_have, CL)
     em(0x50)  // push scratch                             stack=[fd, scratch]
-    // read(fd, scratch, 16MB)
-    em(0x48); em(0x89); em(0xc6)  // mov rsi, rax (scratch)
-    em(0x48); em(0x8b); em(0x7c); em(0x24); em(0x08)  // mov rdi, [rsp+8] (fd)
-    em(0xba); em32(0x1000000)  // edx=16MB
-    em(0xb8); em32(0); em(0x0f); em(0x05)  // read -> bytes in rax
-    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (bytes read)
-    em(0x48); em(0x85); em(0xc9)  // test rcx, rcx
-    em(0x79); em(0x02)  // jns read_ok
-    em(0x31); em(0xc9)  // xor ecx, ecx (read error -> len 0)
-    // close(fd) -- preserve len across the syscall
-    em(0x51)  // push rcx (len)                           stack=[fd, scratch, len]
+    em(0x31); em(0xc0)  // xor eax, eax
+    em(0x50)  // push len=0                               stack=[fd, scratch, len]
+    // #2832: read until EOF. A single read(fd, scratch, 16 MiB) silently truncated
+    // every file larger than the scratch (and any short read). Loop
+    // read(fd, scratch+len, cap-len); when the scratch is full, double it with
+    // mremap(MREMAP_MAYMOVE) and continue. Every value lives on the stack: the
+    // syscalls clobber rcx/r11.
+    let rf_loop = CL
+    em(0x48); em(0x8b); em(0x74); em(0x24); em(0x08)  // mov rsi, [rsp+8] (scratch)
+    em(0x48); em(0x03); em(0x34); em(0x24)  // add rsi, [rsp] (+len)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + READFILE_CAP_BSS_OFF)
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (cap)
+    em(0x48); em(0x2b); em(0x14); em(0x24)  // sub rdx, [rsp] (cap-len)
+    em(0x48); em(0x8b); em(0x7c); em(0x24); em(0x10)  // mov rdi, [rsp+16] (fd)
+    em(0x31); em(0xc0); em(0x0f); em(0x05)  // read -> n in rax
+    em(0x48); em(0x85); em(0xc0)  // test rax, rax
+    em(0x0f); em(0x8e); let rf_eof = CL; em32(0)  // jle eof (0 = EOF, <0 = error: keep what was read)
+    em(0x48); em(0x01); em(0x04); em(0x24)  // add [rsp], rax (len += n)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + READFILE_CAP_BSS_OFF)
+    em(0x48); em(0x39); em(0x04); em(0x24)  // cmp [rsp], rax (len - cap)
+    em(0x0f); em(0x82); em32(rf_loop - (CL + 4))  // jb loop (room left)
+    // scratch full: mremap(scratch, cap+1, 2*cap+1, MREMAP_MAYMOVE)
+    em(0x48); em(0x89); em(0xc6)  // mov rsi, rax (cap)
+    em(0x48); em(0x83); em(0xc6); em(1)  // add rsi, 1
+    em(0x48); em(0x8d); em(0x54); em(0x00); em(1)  // lea rdx, [rax+rax+1]
+    em(0x48); em(0x8b); em(0x7c); em(0x24); em(0x08)  // mov rdi, [rsp+8] (scratch)
+    em(0x41); em(0xba); em32(1)  // r10d = MREMAP_MAYMOVE
+    em(0xb8); em32(25); em(0x0f); em(0x05)  // mremap -> new scratch in rax
+    em(0x48); em(0x3d); em32(0 - 4096)  // cmp rax, -4096
+    em(0x0f); em(0x87); let rf_abort2 = CL; em32(0)  // ja abort
+    em(0x48); em(0x89); em(0x44); em(0x24); em(0x08)  // mov [rsp+8], rax (scratch)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + READFILE_SCRATCH_BSS_OFF)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + READFILE_CAP_BSS_OFF)
+    em(0x48); em(0x01); em(0xc0)  // add rax, rax (cap *= 2)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + READFILE_CAP_BSS_OFF)
+    em(0xe9); em32(rf_loop - (CL + 4))  // jmp loop
+    patch32(rf_eof, CL)
+    // close(fd) -- len stays on the stack across the syscall
     em(0x48); em(0x8b); em(0x7c); em(0x24); em(0x10)  // mov rdi, [rsp+16] (fd)
     em(0xb8); em32(3); em(0x0f); em(0x05)  // close
     em(0x59)  // pop rcx (len)                            stack=[fd, scratch]
@@ -11903,6 +11935,7 @@ fn emit_read_file() with Mut, Panic, Div {
     em(0x48); em(0x83); em(0xc4); em(0x10)  // add rsp, 16 (discard scratch, fd)
     em(0xe9); let rf_done = CL; em32(0)  // jmp done
     patch32(rf_abort, CL)
+    patch32(rf_abort2, CL)
     em(0xbf); em32(42)  // mov edi, 42 (distinct OOM exit code, mirrors arena)
     em(0xb8); em32(60)  // mov eax, 60 (SYS_exit)
     em(0x0f); em(0x05)  // syscall
@@ -33130,6 +33163,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     RTMMAP_COUNT_BSS_OFF = bss_alloc_aligned(8)
     RTMMAP_BYTES_BSS_OFF = bss_alloc_aligned(8)
     READFILE_SCRATCH_BSS_OFF = bss_alloc_aligned(8)
+    READFILE_CAP_BSS_OFF = bss_alloc_aligned(8)
     ARENA_REFILL_COUNT_BSS_OFF = bss_alloc_aligned(8)
     ARENA_REFILL_BYTES_BSS_OFF = bss_alloc_aligned(8)
     ARENA_UNMAP_COUNT_BSS_OFF = bss_alloc_aligned(8)
@@ -35833,39 +35867,98 @@ fn emit_read_file_a64() with Mut, Panic {
         em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8)  // x8 = 222 (mmap)
     }
     emit_syscall_a64()
-    // x0 = buf. Push it.
+    // x0 = buf. Push it, then len = 0.       stack: [len sp+0, buf sp+16, fd sp+32]
     emit_push_a64()
-    // read(fd, buf, 4MB): x0=fd, x1=buf, x2=len
-    em32(0xAA0003E1)  // mov x1, x0 (buf)
-    em32(0xF9400000 | ((16/8) << 10) | (31 << 5) | 0)  // ldr x0, [sp, #16] (fd)
+    em32(0xD2800000)  // movz x0, #0
+    emit_push_a64()
+    // #2832: a single read() returned whatever the first syscall delivered and
+    // silently dropped the rest of any file larger than the buffer (or any short
+    // read). Loop until EOF or the 4 MiB buffer is full; if it is full and one more
+    // byte can be read, the file does not fit: refuse (stderr message, exit 1)
+    // instead of returning a truncated string. (x86 grows its scratch with mremap;
+    // macOS has no mremap, so this target stays fixed-size and fail-closed.)
+    let rf_loop = CL
+    em32(0xF9400000 | ((16/8) << 10) | (31 << 5) | 1)  // ldr x1, [sp, #16] (buf)
+    em32(0xF9400000 | ((0/8) << 10) | (31 << 5) | 9)   // ldr x9, [sp, #0] (len)
+    em32(0x8B090021)  // add x1, x1, x9
     emit_imm64_reg_a64(2, 0x400000)  // x2 = 4MB
+    em32(0xCB090042)  // sub x2, x2, x9
+    em32(0xF9400000 | ((32/8) << 10) | (31 << 5) | 0)  // ldr x0, [sp, #32] (fd)
     if TARGET_OS == 2 {
         emit_imm64_reg_a64(16, 3)
     } else {
         em32(0xD2800000 | ((63 & 0xFFFF) << 5) | 8)  // x8 = 63 (read)
     }
     emit_syscall_a64()
-    em32(0xAA0003E2)  // mov x2, x0 (bytes read)
-    em32(0xF100005F)  // cmp x2, #0
-    let read_ok_patch = CL
-    em32(0x5400000A)  // b.ge read_ok
-    em32(0xD2800002)  // movz x2, #0
-    let read_ok_target = CL
-    patch_branch_a64(read_ok_patch, read_ok_target)
-    em32(0xF9400000 | ((0/8) << 10) | (31 << 5) | 1)  // ldr x1, [sp, #0] (buf)
-    em32(0x8B020021)  // add x1, x1, x2
+    em32(0xF100001F)  // cmp x0, #0
+    let rf_eof1 = CL
+    em32(0x5400000D)  // b.le eof
+    em32(0xF9400000 | ((0/8) << 10) | (31 << 5) | 9)   // ldr x9, [sp, #0]
+    em32(0x8B000129)  // add x9, x9, x0
+    em32(0xF90003E9)  // str x9, [sp, #0]
+    emit_imm64_reg_a64(10, 0x400000)  // x10 = 4MB
+    em32(0xEB0A013F)  // cmp x9, x10
+    let rf_back = CL
+    em32(0x54000003)  // b.lo loop
+    patch_branch_a64(rf_back, rf_loop)
+    // Buffer full: probe one byte into the spare byte at buf+4MB.
+    em32(0xF9400000 | ((16/8) << 10) | (31 << 5) | 1)  // ldr x1, [sp, #16]
+    em32(0x8B090021)  // add x1, x1, x9
+    em32(0xD2800022)  // movz x2, #1
+    em32(0xF9400000 | ((32/8) << 10) | (31 << 5) | 0)  // ldr x0, [sp, #32] (fd)
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 3)
+    } else {
+        em32(0xD2800000 | ((63 & 0xFFFF) << 5) | 8)
+    }
+    emit_syscall_a64()
+    em32(0xF100001F)  // cmp x0, #0
+    let rf_eof2 = CL
+    em32(0x5400000D)  // b.le eof
+    // Too large: write(2, msg, len); exit(1).
+    let rf_skip = CL
+    em32(0x14000000)  // b over message
+    let rf_msg = CL
+    let msg = "error: read_file: file larger than 4 MiB is not supported on this target\n"
+    let msg_len = str_len(msg)
+    var mi: i64 = 0
+    while mi < msg_len { em(str_char_at(msg, mi)); mi = mi + 1 }
+    while (CL % 4) != 0 { em(0) }
+    patch_branch_a64(rf_skip, CL)
+    let rf_adr = CL
+    em32(0)
+    patch_adr_a64(rf_adr, rf_msg, 1)  // adr x1, msg
+    em32(0xD2800040)  // movz x0, #2 (stderr)
+    emit_imm64_reg_a64(2, msg_len)
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 4)
+    } else {
+        em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)  // x8 = 64 (write)
+    }
+    emit_syscall_a64()
+    em32(0xD2800020)  // movz x0, #1
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 1)
+    } else {
+        em32(0xD2800000 | ((93 & 0xFFFF) << 5) | 8)  // x8 = 93 (exit)
+    }
+    emit_syscall_a64()
+    // eof: NUL-terminate at buf+len, close(fd), return buf.
+    patch_branch_a64(rf_eof1, CL)
+    patch_branch_a64(rf_eof2, CL)
+    em32(0xF9400000 | ((16/8) << 10) | (31 << 5) | 1)  // ldr x1, [sp, #16] (buf)
+    em32(0xF9400000 | ((0/8) << 10) | (31 << 5) | 9)   // ldr x9, [sp, #0] (len)
+    em32(0x8B090021)  // add x1, x1, x9
     em32(0x3900003F)  // strb wzr, [x1]
-    // close(fd)
-    em32(0xF9400000 | ((16/8) << 10) | (31 << 5) | 0)  // ldr x0, [sp, #16]
+    em32(0xF9400000 | ((32/8) << 10) | (31 << 5) | 0)  // ldr x0, [sp, #32] (fd)
     if TARGET_OS == 2 {
         emit_imm64_reg_a64(16, 6)
     } else {
-        em32(0xD2800000 | ((57 & 0xFFFF) << 5) | 8)
+        em32(0xD2800000 | ((57 & 0xFFFF) << 5) | 8)  // close
     }
     emit_syscall_a64()
-    // Return buf
-    em32(0xF84107E0)  // ldr x0, [sp], #16 (pop buf)
-    em32(0x91000000 | (16 << 10) | (31 << 5) | 31)  // add sp, sp, #16 (discard fd)
+    em32(0xF9400000 | ((16/8) << 10) | (31 << 5) | 0)  // ldr x0, [sp, #16] (buf)
+    em32(0x91000000 | (48 << 10) | (31 << 5) | 31)  // add sp, sp, #48
 }
 
 // ─── ARM64 write_file ───
