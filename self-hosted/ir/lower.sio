@@ -12801,6 +12801,40 @@ impl Lowerer {
         lo
     }
 
+    // #2827: move the expression's sensitivity on the channel whose σ² register IS
+    // `slot` (a local's loop-carried variance slot, about to be overwritten by an
+    // assignment) onto a fresh channel whose σ² is a copy of the slot's current
+    // value. The slot's own channel stays registered, so later reads of the local
+    // still seed from the updated slot. When the channel table is full, or the
+    // second-order tables are live (they index channels positionally), the
+    // expression's sens is dropped instead: later uses then fall back to the
+    // local's slot variance, which is correct for an independent use.
+    fn fo_detach_self_channel(self, slot: i64) -> Lowerer with Mut, Panic, Div, IO {
+        var lo = self
+        if slot < 0 { return lo }
+        var k: i64 = 0
+        while k < lo.fo_nchan && k < 32 {
+            if lo.fo_sigma2[k as usize] == slot && lo.fo_expr_sens[k as usize] >= 0 {
+                if lo.so_enabled || lo.fo_nchan >= 32 {
+                    return lo.fo_clear_expr_sens().so_clear_expr_hess()
+                }
+                let snap_pair = lo.fresh_reg()
+                lo = snap_pair.0
+                let snap = snap_pair.1
+                lo = lo.emit(ir_copy(snap, slot))
+                lo = lo.emit(ir_mark_float_reg(snap))
+                let ch = lo.fo_nchan
+                lo.fo_sigma2[ch as usize] = snap
+                FO_SIGMA_REG[ch as usize] = 0 - 1
+                lo.fo_nchan = ch + 1
+                lo.fo_expr_sens[ch as usize] = lo.fo_expr_sens[k as usize]
+                lo.fo_expr_sens[k as usize] = 0 - 1
+            }
+            k = k + 1
+        }
+        lo
+    }
+
     fn fo_snapshot_expr_sens(self) -> [i64; 32] with Mut {
         var snap: [i64; 32] = [-1; 32]
         var k: i64 = 0
@@ -22705,6 +22739,15 @@ impl Lowerer {
                                 // path, which is no worse than before.
                                 let vslot = lo.lookup_local_variance_reg((*target_expr).name)
                                 if vslot >= 0 {
+                                    // #2827: the RHS may read this very local through a
+                                    // channel seeded from its slot (`acc = acc + k.value`
+                                    // with no sens rows for `acc`). The copy below
+                                    // overwrites that slot, so the channel would then stand
+                                    // for the NEW variance, and every later use of the
+                                    // rebound sens counts the update twice (after a loop,
+                                    // var(acc / 2) read (0.0725 + 0.0225) / 4, not 0.0725 / 4).
+                                    // Freeze the old value in its own channel first.
+                                    lo = lo.fo_detach_self_channel(vslot)
                                     if vslot != rhs_variance {
                                         lo = lo.emit(ir_copy(vslot, rhs_variance))
                                     }
