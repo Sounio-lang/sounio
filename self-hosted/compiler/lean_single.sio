@@ -5876,10 +5876,37 @@ fn stmt_is_deref_array_store(p0: i64) -> bool with Panic, Mut {
     return TK[p as usize] == 16
 }
 
+// `*name = expr` (tokens 19 3 16) or the parenthesised `(*name) = expr` (6 19 3 7 16).
+// Both spell the same whole-pointee store. Only the unparenthesised form used to be
+// recognised: `(*name) = expr` matched no store predicate (the `( * name )` ones all
+// require a `.field` or `[idx]` tail), fell through to the expression-statement path and
+// emitted NO store at all, silently and with rc=0. 262 statements in self-hosted/ use the
+// parenthesised spelling (e.g. ir/serialize.sio `(*out_len) = pos`).
+fn stmt_is_paren_deref_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 6 { return false }
+    if TK[(p0 + 1) as usize] != 19 { return false }
+    if TK[(p0 + 2) as usize] != 3 { return false }
+    if TK[(p0 + 3) as usize] != 7 { return false }
+    return TK[(p0 + 4) as usize] == 16
+}
+
 fn stmt_is_deref_store(p0: i64) -> bool with Panic, Mut {
+    if stmt_is_paren_deref_store(p0) { return true }
     if TK[p0 as usize] != 19 { return false }
     if TK[(p0 + 1) as usize] != 3 { return false }
     return TK[(p0 + 2) as usize] == 16
+}
+
+// Token index of the pointer name in a statement accepted by stmt_is_deref_store.
+fn deref_store_name_tok(p0: i64) -> i64 with Panic, Mut {
+    if stmt_is_paren_deref_store(p0) { return p0 + 2 }
+    return p0 + 1
+}
+
+// Token index of the `=` in a statement accepted by stmt_is_deref_store.
+fn deref_store_eq_tok(p0: i64) -> i64 with Panic, Mut {
+    if stmt_is_paren_deref_store(p0) { return p0 + 4 }
+    return p0 + 2
 }
 
 fn stmt_is_deref_field_store(p0: i64) -> bool with Panic, Mut {
@@ -27739,13 +27766,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     }
     // *PTR = expr
     if stmt_is_deref_store(EP) {
-        let name_tok = EP + 1
+        let name_tok = deref_store_name_tok(EP)
         if current_fn_allows_mutation() == false {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
-        let ns = TS[(EP + 1) as usize]
-        let ne = TE[(EP + 1) as usize]
-        EP = EP + 2
+        let ns = TS[name_tok as usize]
+        let ne = TE[name_tok as usize]
+        EP = deref_store_eq_tok(EP)
         if TK[EP as usize] == 16 { EP = EP + 1 }
         compile_or()
         let rhs_ty = EXPR_TY
@@ -42743,13 +42770,13 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     }
     // *PTR = expr
     if stmt_is_deref_store(EP) {
-        let name_tok = EP + 1
+        let name_tok = deref_store_name_tok(EP)
         if current_fn_allows_mutation() == false {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
-        let ns = TS[(EP + 1) as usize]
-        let ne = TE[(EP + 1) as usize]
-        EP = EP + 2
+        let ns = TS[name_tok as usize]
+        let ne = TE[name_tok as usize]
+        EP = deref_store_eq_tok(EP)
         if TK[EP as usize] == 16 { EP = EP + 1 }
         compile_or_a64()
         let rhs_ty = EXPR_TY
