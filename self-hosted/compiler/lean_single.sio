@@ -173,6 +173,13 @@ var ST_FNE: [i64; 131072] = [0; 131072]
 // Per-struct module visibility. A non-pub struct may be constructed and have
 // fields inspected only from the source file where it was declared.
 var ST_PUBLIC: [i64; 2048] = [0; 2048]
+// Per-field visibility (#1386): 1 when a field of a `pub struct` was declared
+// without `pub`. Such a field may be read, written, initialised in a struct
+// literal or bound by a struct pattern only in the defining file or inside an
+// impl of that struct -- Madaros's E259 rule (check.sio
+// checker_field_visible_inplace). 0 (the default) = public, so structs that
+// are registered without a field list (algebra bases, traits) stay open.
+var ST_FPRIV: [i64; 131072] = [0; 131072]
 var ST_DECL_NS: [i64; 2048] = [0; 2048]
 var ST_DECL_NE: [i64; 2048] = [0; 2048]
 // Query bounds for struct field lookup collision resolution
@@ -800,12 +807,57 @@ fn src_same_file_pos(a: i64, b: i64) -> bool with Panic, Mut {
     return src_file_marker_start(a) == src_file_marker_start(b)
 }
 
+// Index of the field of struct `si` whose name is the text of token `tok`, else -1.
+fn st_field_index_by_tok(si: i64, tok: i64) -> i64 with Mut, Panic {
+    let ns = TS[tok as usize]
+    let ne = TE[tok as usize]
+    let fc = ST[(si * 130 + 1) as usize]
+    var fi: i64 = 0
+    while fi < fc && fi < 128 {
+        let fs = ST_FNS[(si * 128 + fi) as usize]
+        let fe = ST_FNE[(si * 128 + fi) as usize]
+        if fe - fs == ne - ns && fe > fs {
+            var k: i64 = 0
+            var same: i64 = 1
+            while k < ne - ns {
+                if SRC[(fs + k) as usize] != SRC[(ns + k) as usize] { same = 0 }
+                k = k + 1
+            }
+            if same == 1 { return fi }
+        }
+        fi = fi + 1
+    }
+    return 0 - 1
+}
+
 fn st_private_access_denied(si: i64, access_tok: i64) -> bool with IO, Mut, Panic {
     if si < 0 { return false }
-    if ST_PUBLIC[si as usize] != 0 { return false }
     if ST_DECL_NE[si as usize] <= ST_DECL_NS[si as usize] { return false }
     if access_tok < 0 || access_tok >= TC { return false }
     if src_same_file_pos(TS[access_tok as usize], ST_DECL_NS[si as usize]) { return false }
+    if ST_PUBLIC[si as usize] != 0 {
+        // #1386: a `pub struct` still hides its non-`pub` fields from other
+        // modules (Madaros E259). Methods of the struct's own impl may use them.
+        if CURRENT_FN >= 0 && CURRENT_FN < 65536 && FN_RECV_HASH[CURRENT_FN as usize] == ST[(si * 130) as usize] { return false }
+        let fi = st_field_index_by_tok(si, access_tok)
+        if fi >= 0 {
+            if ST_FPRIV[(si * 128 + fi) as usize] == 0 { return false }
+        } else {
+            // A struct literal or struct pattern names every field: denied when
+            // any field is private.
+            let fc = ST[(si * 130 + 1) as usize]
+            var any_priv: i64 = 0
+            var k: i64 = 0
+            while k < fc && k < 128 {
+                if ST_FPRIV[(si * 128 + k) as usize] != 0 { any_priv = 1 }
+                k = k + 1
+            }
+            if any_priv == 0 { return false }
+        }
+    }
+    // Same code and wording as Madaros (E259), so one fixture pins both engines;
+    // the caller's own `error: private struct ...` line follows.
+    print("error[E259]: struct field is private in its defining module\n")
     PENDING_PRIV_SI = si
     return true
 }
@@ -31874,8 +31926,10 @@ fn mono_pass() with IO, Mut, Panic, Div {
         while p < TC {
             if TK[p as usize] == 46 || TK[p as usize] == 49 || TK[p as usize] == 62 || TK[p as usize] == 73 {
                 var ris_public: i64 = 0
-                if TK[p as usize] == 49 { ris_public = 1 }
-                if TK[p as usize] == 49 || TK[p as usize] == 62 || TK[p as usize] == 73 { p = p + 1 }
+                while TK[p as usize] == 49 || TK[p as usize] == 62 || TK[p as usize] == 73 {
+                    if TK[p as usize] == 49 { ris_public = 1 }
+                    p = p + 1
+                }
                 if TK[p as usize] == 46 {
                     p = p + 1
                     let rsn_ns = TS[p as usize]
@@ -31893,13 +31947,17 @@ fn mono_pass() with IO, Mut, Panic, Div {
                         if TK[p as usize] == 23 { p = p + 1; while TK[p as usize] != 9 && TK[p as usize] != 0 { p = p + 1 }; if TK[p as usize] == 9 { p = p + 1 }; ST[(rbase + 1) as usize] = 0; ST_COUNT = ST_COUNT + 1; continue }
                         if TK[p as usize] == 8 { p = p + 1 }
                         var rfc: i64 = 0
+                        var rfield_pub: i64 = 0
                         while TK[p as usize] != 9 && TK[p as usize] != 0 {
+                            if TK[p as usize] == 49 { rfield_pub = 1; p = p + 1; continue }
                             if TK[p as usize] == 3 {
                                 let rfh = gl_name_hash(TS[p as usize], TE[p as usize])
                                 let rffi = rfc
                                 ST[(rbase + 2 + rfc) as usize] = rfh
                                 ST_FNS[(rsi * 128 + rffi) as usize] = TS[p as usize]
                                 ST_FNE[(rsi * 128 + rffi) as usize] = TE[p as usize]
+                                if rffi < 128 { ST_FPRIV[(rsi * 128 + rffi) as usize] = 1 - rfield_pub }
+                                rfield_pub = 0
                                 p = p + 1
                                 if TK[p as usize] == 43 {
                                     p = p + 1
@@ -32504,10 +32562,15 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             var is_linear_decl: i64 = 0
             var is_affine_decl: i64 = 0
             var is_pub_decl: i64 = 0
-            if TK[p as usize] == 49 { is_pub_decl = 1 }
-            if TK[p as usize] == 62 { is_linear_decl = 1 }
-            if TK[p as usize] == 73 { is_affine_decl = 1 }
-            if TK[p as usize] == 49 || TK[p as usize] == 62 || TK[p as usize] == 73 { p = p + 1 }
+            // Every prefix, in any order: `pub linear struct` used to skip only
+            // `pub`, so the struct was registered later, from `linear`, as
+            // non-public, and `pub affine/linear` lost the pub (#1386).
+            while TK[p as usize] == 49 || TK[p as usize] == 62 || TK[p as usize] == 73 {
+                if TK[p as usize] == 49 { is_pub_decl = 1 }
+                if TK[p as usize] == 62 { is_linear_decl = 1 }
+                if TK[p as usize] == 73 { is_affine_decl = 1 }
+                p = p + 1
+            }
             if TK[p as usize] == 46 {
                 p = p + 1  // skip 'struct'
                 let sn_ns = TS[p as usize]
@@ -32528,13 +32591,17 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 ST_DECL_NE[si as usize] = sn_ne
                 if TK[p as usize] == 8 { p = p + 1 }  // skip {
                 var fc: i64 = 0
+                var field_pub: i64 = 0
                 while TK[p as usize] != 9 && TK[p as usize] != 0 {
+                    if TK[p as usize] == 49 { field_pub = 1; p = p + 1; continue }
                     if TK[p as usize] == 3 {
                         let fh = gl_name_hash(TS[p as usize], TE[p as usize])
                         let ffi = fc
                         ST[(base + 2 + fc) as usize] = fh
                         ST_FNS[(si * 128 + ffi) as usize] = TS[p as usize]
                         ST_FNE[(si * 128 + ffi) as usize] = TE[p as usize]
+                        if ffi < 128 { ST_FPRIV[(si * 128 + ffi) as usize] = 1 - field_pub }
+                        field_pub = 0
                         p = p + 1
                         // Skip : type
                         if TK[p as usize] == 43 {
