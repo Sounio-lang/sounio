@@ -20,6 +20,9 @@
 #
 # Values measured with a Madaros built from this branch (#2661).
 #
+# The dump cases at the end show the knob flipping the recorded owner of
+# `helper` in the table itself (SOUNIO_DUMP_GLOBAL_INIT_TABLE=1).
+#
 # Engine: Madaros (bin/souc's default). The table is a Madaros parser
 # structure; lean_single has no equivalent.
 set -euo pipefail
@@ -112,5 +115,54 @@ run_case multi.scope_off.excl_off  "$WORK/multi/main.sio" "1" "1" 42
 run_case control.excl_on           "$WORK/control.sio" ""  ""  42
 run_case control.excl_off          "$WORK/control.sio" ""  "1" 42
 run_case control.both_off          "$WORK/control.sio" "1" "1" 42
+
+# #2661 attribution dump: SOUNIO_DUMP_GLOBAL_INIT_TABLE=1 prints every word the
+# parser records in the constant-fold table, with its name and the kind of
+# definition that recorded it (parser/ast.sio ast_gvi_dump_note). The knob must
+# flip WHICH definition owns the bare name `helper`: the free fn (42) by
+# default, the impl method (7) with SOUNIO_DISABLE_GLOBAL_INIT_IMPL_EXCLUSION=1,
+# and G follows. The dump is printed by the compiler, so it is read from the
+# combined compile output, not from the program's stdout.
+dump_case() {
+  local label="$1" excl_off="$2" rc
+  shift 2
+  set +e
+  (cd "$WORK" && env -u SOUNIO_DISABLE_GLOBAL_INIT_MODULE_SCOPE -u SOUNIO_DISABLE_GLOBAL_INIT_IMPL_EXCLUSION \
+      SOUNIO_DUMP_GLOBAL_INIT_TABLE=1 ${excl_off:+SOUNIO_DISABLE_GLOBAL_INIT_IMPL_EXCLUSION=1} \
+      timeout 900 "$ROOT_DIR/bin/souc" run "$WORK/single.sio") >"$WORK/$label.dump" 2>&1
+  rc=$?
+  set -e
+  [[ $rc -eq 0 ]] || { tail -n 20 "$WORK/$label.dump" >&2; fail "$label: rc=$rc"; }
+  local want
+  for want in "$@"; do
+    case "$want" in
+      !*) if grep -qF -- "${want#!}" "$WORK/$label.dump"; then
+            grep -F '[gvi-dump]' "$WORK/$label.dump" >&2 || true
+            fail "$label: dump has '${want#!}'"
+          fi ;;
+      *)  if ! grep -qF -- "$want" "$WORK/$label.dump"; then
+            grep -F '[gvi-dump]' "$WORK/$label.dump" >&2 || true
+            fail "$label: dump lacks '$want'"
+          fi ;;
+    esac
+  done
+  echo "$TAG PASS $label -> $(grep -F 'name=helper' "$WORK/$label.dump" | sed 's/.*origin=//' | tr '\n' ' ')"
+}
+
+dump_case dump.excl_on  "" \
+  "origin=fn name=helper word=42" "origin=global name=G word=42" "!origin=impl-method"
+dump_case dump.excl_off "1" \
+  "origin=impl-method name=helper word=7" "origin=global name=G word=7" "!origin=fn name=helper"
+
+# Off by default: no dump line without the variable (combined output).
+set +e
+(cd "$WORK" && env -u SOUNIO_DUMP_GLOBAL_INIT_TABLE timeout 900 "$ROOT_DIR/bin/souc" run "$WORK/single.sio") >"$WORK/nodump.out" 2>&1
+nodump_rc=$?
+set -e
+[[ $nodump_rc -eq 0 ]] || { tail -n 20 "$WORK/nodump.out" >&2; fail "nodump: rc=$nodump_rc"; }
+if grep -qF '[gvi-dump]' "$WORK/nodump.out"; then
+  fail "dump printed without SOUNIO_DUMP_GLOBAL_INIT_TABLE"
+fi
+echo "$TAG PASS nodump -> no [gvi-dump] line"
 
 echo "$TAG PASS"
