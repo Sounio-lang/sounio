@@ -9006,6 +9006,50 @@ fn lower_expr_is_f64_array_literal_ref(e: &Expr) -> bool with Mut, Panic, Div {
     }
 }
 
+// #2354: scalar kind of a generic struct field, PER INSTANCE. `struct Pair<T>
+// { first: T }` registers one layout for every instantiation, so the field's
+// declared type says nothing about `Pair { first: 10 }` vs `Pair { first: 1.5 }`
+// -- println(p.first) was refused ("unresolved scalar kind"), and once any
+// literal stored a float the shared layout called every instance's field f64.
+// A `let` bound to a struct literal records each type-variable field's kind
+// (1 int, 2 f64, 3 string) here, keyed by the function, the local's register
+// and the field; field reads through that local consult it first.
+var LOWER_GFK_COUNT: i64 = 0
+var LOWER_GFK_FN: [i64; 1024] = [0; 1024]
+var LOWER_GFK_REG: [i64; 1024] = [0; 1024]
+var LOWER_GFK_FIELD: [i64; 1024] = [0; 1024]
+var LOWER_GFK_KIND: [i64; 1024] = [0; 1024]
+
+fn lower_gfk_note(fn_key: i64, reg: i64, field_key: i64, kind: i64) with Mut, Panic {
+    var i: i64 = 0
+    while i < LOWER_GFK_COUNT {
+        if LOWER_GFK_FN[i as usize] == fn_key && LOWER_GFK_REG[i as usize] == reg && LOWER_GFK_FIELD[i as usize] == field_key {
+            LOWER_GFK_KIND[i as usize] = kind
+            return
+        }
+        i = i + 1
+    }
+    // Full: forget the oldest half rather than refuse; a missing entry only
+    // means the old (layout-based) classification is used for that read.
+    if LOWER_GFK_COUNT >= 1024 { LOWER_GFK_COUNT = 0 }
+    LOWER_GFK_FN[LOWER_GFK_COUNT as usize] = fn_key
+    LOWER_GFK_REG[LOWER_GFK_COUNT as usize] = reg
+    LOWER_GFK_FIELD[LOWER_GFK_COUNT as usize] = field_key
+    LOWER_GFK_KIND[LOWER_GFK_COUNT as usize] = kind
+    LOWER_GFK_COUNT = LOWER_GFK_COUNT + 1
+}
+
+fn lower_gfk_lookup(fn_key: i64, reg: i64, field_key: i64) -> i64 with Mut, Panic {
+    var i: i64 = LOWER_GFK_COUNT - 1
+    while i >= 0 {
+        if LOWER_GFK_FN[i as usize] == fn_key && LOWER_GFK_REG[i as usize] == reg && LOWER_GFK_FIELD[i as usize] == field_key {
+            return LOWER_GFK_KIND[i as usize]
+        }
+        i = i - 1
+    }
+    0
+}
+
 fn lower_struct_field_float_kind_ref(e: &Expr) -> i64 with Mut, Panic, Div {
     if lower_expr_is_f64_array_literal_ref(e) { return 2 }
     // Comparisons and boolean connectives yield bool (i64 0/1), never an f64
@@ -16691,6 +16735,84 @@ impl Lowerer {
         ir_empty_name()
     }
 
+    // #2354: is this field's declared type a struct TYPE VARIABLE (`first: T`)?
+    // Declared word scalars, f64 arrays, pointer and integer markers, strings and
+    // registered structs are not.
+    fn field_decl_is_type_variable_for_struct(self, type_name: Name, field_name: Name) -> bool with Mut, Panic, Div {
+        if type_name.len <= 0 { return false }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    let fe = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
+                    if ir_name_eq(ir_name_at(fe.name_id), field_name) {
+                        if fe.decl_word_scalar != 0 { return false }
+                        if fe.is_float == 2 || fe.is_float == 3 || fe.is_float == 4 { return false }
+                        if fe.word_scalar_array_len > 0 || fe.elem_type_name_id != 0 { return false }
+                        let nt = ir_name_at(fe.named_type_name_id)
+                        if nt.len <= 0 { return false }
+                        if lower_name_is_string_type(nt) || lower_name_is_integer_type(nt)
+                            || lower_name_is_bool_type(nt) || lower_name_is_f64_scalar_type(nt)
+                            || lower_name_is_wide_float_type(nt) || ir_name_is_box(nt) {
+                            return false
+                        }
+                        return lower_struct_layout_index_of(&(*self.struct_layouts), nt) < 0
+                    }
+                    fi = fi + 1
+                }
+                return false
+            }
+            si = si + 1
+        }
+        false
+    }
+
+    fn gfk_fn_key(self) -> i64 with Mut, Panic, Div {
+        ir_intern_name((*self.current_func).name)
+    }
+
+    // #2354: the recorded per-instance kind of `base.field` (0 = none).
+    fn field_instance_kind_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base_expr) => {
+                if (*base_expr).kind != ExprKind::ExprIdent { return 0 }
+                let reg = self.lookup_local((*base_expr).name)
+                if reg < 0 { return 0 }
+                let st = self.lookup_local_struct_type((*base_expr).name)
+                if !self.field_decl_is_type_variable_for_struct(st, field_name) { return 0 }
+                lower_gfk_lookup(self.gfk_fn_key(), reg, ir_intern_name(field_name))
+            }
+            _ => 0,
+        }
+    }
+
+    // #2354: `let p = S { f: v, .. }` -- note v's scalar kind for each
+    // type-variable field f of S, against p's register.
+    fn note_struct_literal_instance_kinds_ref(self, local_name: Name, lit: &Expr) -> Lowerer with Mut, Panic, Div, Alloc {
+        let lo = self
+        if (*lit).kind != ExprKind::ExprStructLit { return lo }
+        let st = ir_path_first_name((*lit).path)
+        let reg = lo.lookup_local(local_name)
+        if reg < 0 || st.len <= 0 { return lo }
+        var cur = &(*lit).fields
+        while true {
+            match *cur {
+                Some(list) => {
+                    if lo.field_decl_is_type_variable_for_struct(st, (*list).head.name) {
+                        let k = lo.expr_result_scalar_kind_ref(&(*list).head.value)
+                        if k == 1 || k == 2 || k == 3 {
+                            lower_gfk_note(lo.gfk_fn_key(), reg, ir_intern_name((*list).head.name), k)
+                        }
+                    }
+                    cur = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        lo
+    }
+
     fn field_named_type_for_struct(self, type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
         if type_name.len <= 0 { return ir_empty_name() }
         var si: i64 = 0
@@ -17831,6 +17953,9 @@ impl Lowerer {
             return false
         }
         if (*e).kind == ExprKind::ExprFieldAccess {
+            // #2354: per-instance kind of a generic field, before the shared layout.
+            let gfk_f = self.field_instance_kind_for_base_ref(&(*e).left, (*e).name)
+            if gfk_f != 0 { return gfk_f == 2 }
             // #1502: a tuple slot (`s.1`) is NOT a named struct field -- both lookups
             // below resolve by name against struct_layouts, so "1" matched nothing and
             // an f64 slot was misclassified as integer. Consult the tuple mask first.
@@ -18502,6 +18627,9 @@ impl Lowerer {
             }
         }
         if (*e).kind == ExprKind::ExprFieldAccess {
+            // #2354: a generic field read through a literal-bound local.
+            let gfk = self.field_instance_kind_for_base_ref(&(*e).left, (*e).name)
+            if gfk != 0 { return gfk }
             // V0-E.5.5: an f128 field reads as a wide-float handle.
             if self.lower_field_is_f128_ref(&(*e).left, (*e).name) { return 5 }
             // #2504: `.value` of a Knowledge<integer> local is an integer word.
@@ -21241,6 +21369,13 @@ impl Lowerer {
         rhs_ident_is_ref: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        // #2354: record the per-instance kinds of a generic struct literal's fields.
+        match s.expr {
+            Some(init_gfk) => {
+                lo = lo.note_struct_literal_instance_kinds_ref(s.name, &(*init_gfk))
+            }
+            None => {}
+        }
         match s.ty {
             Some(ty) => {
                 let option_inner = lower_option_box_inner_type_name(&(*ty))
@@ -26711,6 +26846,9 @@ impl Lowerer {
         // Tuple desugar: let __tup = f(); let a = __tup.0 — float-element base
         // means .0/.1 are f64 even without a struct layout entry.
         var field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name) || lo1.field_is_float_by_name_simple(e.name)
+        // #2354: a generic field's kind is per instance (see LOWER_GFK_*).
+        let gfk_read = lo1.field_instance_kind_for_base_ref(&e.left, e.name)
+        if gfk_read != 0 { field_is_float = gfk_read == 2 }
         // #2504: see field_base_kn_value_float_ref.
         if ir_name_eq(e.name, make_name("value")) {
             let kn0 = lo1.field_base_kn_value_float_ref(&e.left)
