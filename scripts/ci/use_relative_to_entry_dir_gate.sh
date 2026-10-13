@@ -42,7 +42,7 @@ run_case() {
   local engine="$1" tree="$2" want="$3" out rc
   set +e
   if [[ "$engine" == lean_single ]]; then
-    out="$(cd "$WORK/elsewhere" && "$ROOT_DIR/bin/souc-lean-single-x86_64" "$WORK/$tree/main.sio" "$WORK/$tree.$engine.elf" >"$WORK/$tree.$engine.log" 2>&1 && "$WORK/$tree.$engine.elf")"
+    out="$(cd "$WORK/elsewhere" && "$ROOT_DIR/bin/souc-lean-single-x86_64" "$WORK/$tree/main.sio" "$WORK/$tree.$engine.elf" >"$WORK/$tree.$engine.log" 2>&1 && chmod +x "$WORK/$tree.$engine.elf" && "$WORK/$tree.$engine.elf")"
   else
     out="$(cd "$WORK/elsewhere" && timeout 600 "$ROOT_DIR/bin/souc" run "$WORK/$tree/main.sio" 2>"$WORK/$tree.$engine.log" | tail -n 1)"
   fi
