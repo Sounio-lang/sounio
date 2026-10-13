@@ -1991,44 +1991,30 @@ fn ocp_const_fold_with_audit(
     func: IrFunction,
     exact_bitwise_audit: &! OcpExactBitwiseRebracketPassAudit,
 ) -> IrFunction with Mut, Div, Panic {
-    // Split below the gen N-1 bootstrap compiler's hard cap of 1024 local
-    // variables per function. NOTE on the cap: the bootstrap counts EVERY let/var
-    // DECLARATION, including mid-line ones after a semicolon (`let a = x; let b = y`
-    // is two locals) — not just line-starting lets. Counted that way the original
-    // single interleaved loop declared ~1170 locals, and even the round-1 partition
-    // left pass_a at 1170 (still over cap). Round 2 therefore splits pass_a itself
-    // into pass_a1 + pass_a2, so every function in this file has a TRUE let/var
-    // token count well under the cap (verify with an awk per-fn gsub over the
-    // pattern `(^|[^A-Za-z_])(let|var)[[:space:]]`).
+    // One scan over the instructions runs every const-fold block (#1680).
     //
-    // The passes run in order a1 -> a2 -> b; each later pass sees the earlier
-    // passes' rewrites. Each pass independently re-derives its tracking state
-    // (is_const/const_val/def_at and its own trackers) from the current
-    // instruction stream via its replicated IrLoadImm / IrLoadBool maintenance
-    // blocks. It is SAFE to separate blocks that share a tracking array ACROSS
-    // passes: each pass re-derives its own state, so a separated pattern simply
-    // fires on a later optimizer-fixpoint iteration instead of the same one. The
-    // ONLY semantic delta versus the single interleaved loop is fold-strength per
-    // iteration; folding is conservative (every fold is guarded by a *_valid /
-    // is_* flag that defaults false), so a pattern whose tracking state is not
-    // re-derived in the current pass simply does not fire — it never fires
-    // wrongly. Correctness is unaffected and the outer fixpoint recovers it.
+    // In June 2026 this loop was split into pass_a1 -> pass_a2 -> pass_b to stay
+    // under a 1024-locals cap of the bootstrap of that time. The split assumed
+    // each pass "re-derives its own tracking state", but a tracker is only
+    // derived where its maintenance block lives: is_bnot was set only in pass_a2,
+    // so every pass_a1 block reading it (x & ~x -> 0, x | ~x -> -1, ...) could
+    // never fire, and the outer pipeline has no const-fold fixpoint to recover
+    // it. lean_single, which compiles this file, now allows 2048 locals per
+    // function; the merged scan declares about 1370 (count with an awk gsub of
+    // `(^|[^A-Za-z_])(let|var)[[:space:]]` over the function).
     //
-    // a1 and a2 each carry the full tracking-array preamble verbatim (a superset
-    // of what their blocks need, never a missing decl) plus the IrLoadImm /
-    // IrLoadBool maintenance. The known co-located scalar dependency
-    // (preserve_mul_chain written by the associative-chain block and read by the
-    // Sprint 68 strength-reduction block) lives entirely in pass_b and is NOT
-    // touched here. Local verification of the cap: strip the `use` lines and feed
-    // the file to the bootstrap; it must report zero "too many local" errors.
+    // Block order inside an iteration is the old pass order (a1, a2, b). The
+    // a2 and b parts re-read slot i (instr2 / instr3) because earlier blocks
+    // may have rewritten it, which is what the separate passes saw.
     var result = func
-    result = ocp_const_fold_pass_a1(result)
-    result = ocp_const_fold_pass_a2(result)
-    result = ocp_const_fold_pass_b(result, exact_bitwise_audit)
+    result = ocp_const_fold_scan(result, exact_bitwise_audit)
     return result
 }
 
-fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
+fn ocp_const_fold_scan(
+    func: IrFunction,
+    exact_bitwise_audit: &! OcpExactBitwiseRebracketPassAudit,
+) -> IrFunction with Mut, Div, Panic {
     var result = ir_function_clone(&func)
     var is_const: [bool; 256] = [false; 256]
     var const_val: [i64; 256] = [0; 256]
@@ -2040,6 +2026,10 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var is_bnot:  [bool; 256] = [false; 256]
     var bnot_src: [i64;  256] = [-1;    256]
     var bnot_op:  [UnaryOp; 256] = [UnaryOp::OpNeg; 256]
+    // Logical NOT is tracked separately: its truth-table semantics must never
+    // enter the integer complement rewrites that consume is_bnot/bnot_src.
+    var is_lnot:  [bool; 256] = [false; 256]
+    var lnot_src: [i64;  256] = [-1;    256]
     // Sprint 88 Block O: Mul-div cancellation — track r = x * C (partial-const mul).
     // (x * C) / C → x.  SOTA: LLVM InstCombineMulDivRem.cpp; Cooper & Torczon §9.
     var mul_valid:   [bool; 256] = [false; 256]
@@ -2059,8 +2049,8 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var sh_var_src: [i64;  256] = [-1;    256]
     var sh_amount:  [i64;  256] = [0;     256]
     var sh_is_left: [bool; 256] = [false; 256]
-    // Sprint 108 Block AE: track r = x & C for non-rebracketing identities.
-    // Exact constant-chain rebracketing is owned exclusively by Block L.
+    // Sprint 108 Block AE: And-mask fold — track r = x & C.
+    // (x & C1) & C2 → x & (C1 & C2).  SOTA: LLVM InstCombineAndOrXor.cpp.
     var and_valid:     [bool; 256] = [false; 256]
     var and_var_src:   [i64;  256] = [-1;    256]
     var and_const_val: [i64;  256] = [0;     256]
@@ -2117,6 +2107,43 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var bm_xor_src:   [i64;  256] = [-1;    256]
     var bm_xor_cval:  [i64;  256] = [0;     256]
 
+    // Sprint 84 Block L: Associative chain tracking.
+    // has_ra[r]=true means r = (ra_base[r] assoc_op ra_const_val[r]).
+    var has_ra:       [bool; 256] = [false; 256]
+    var ra_base:      [i64;  256] = [-1;   256]
+    var ra_const_val: [i64;  256] = [0;    256]
+    var ra_op:        [i64;  256] = [0;    256]
+    var ra_def_idx:   [i64;  256] = [-1;   256]
+    // Sprint 86 Block M: Negation tracking for double-neg and neg-arithmetic.
+    // Sprint 101 Block Y: Boolean simplification — track comparison results.
+    // is_cmp_result[r]=true means r was produced by a comparison (OpEq/OpNe/etc).
+    // cmp_orig_src[r] = the first operand of the comparison.
+    // cmp_op_code[r] = 1 for OpEq, 2 for OpNe, 3 for other comparisons.
+    var is_cmp_result: [bool; 256] = [false; 256]
+    var cmp_orig_src:  [i64;  256] = [-1;    256]
+    var cmp_op_code:   [i64;  256] = [0;     256]
+
+    // Sprint 157 Block BS: Consecutive subtract-constant fold — (x - C1) - C2 → x - (C1+C2).
+    // Mirrors Block BG (OR-chain) and Block BM (XOR-chain) for subtraction.
+    // SOTA: LLVM InstCombineAddSub; Cooper & Torczon §8.2; associative arithmetic.
+    var bs_sub_valid: [bool; 256] = [false; 256]
+    var bs_sub_src:   [i64;  256] = [-1;    256]
+    var bs_sub_cval:  [i64;  256] = [0;     256]
+
+    // Sprint 158 Block BT: Consecutive add-constant fold — (x + C1) + C2 → x + (C1+C2).
+    // Symmetric to Block BS (sub-chain) for addition. Reuses same merge pattern.
+    // SOTA: LLVM InstCombineAddSub.cpp; additive associativity; Cooper & Torczon §8.2.
+    var bt_add_valid: [bool; 256] = [false; 256]
+    var bt_add_src:   [i64;  256] = [-1;    256]
+    var bt_add_cval:  [i64;  256] = [0;     256]
+
+    // Avoid rediscovering an unsupported whole-function use model for every
+    // bitwise candidate. Explicit control operands are modeled here; the flow
+    // certificate separately proves either one region or a dominated forward
+    // CFG path for each candidate.
+    // The transaction repeats both checks against live IR before mutation.
+    let exact_bitwise_use_model_ok = ocp_rebracket_function_has_complete_use_model(&result)
+
     var i: i64 = 0
     while i < result.instr_count {
         let instr = ir_arena_load(ir_region_slot_r(result.region, (i)))
@@ -2127,6 +2154,7 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             is_neg[d] = false
             is_bnot[d] = false
             bnot_op[d] = UnaryOp::OpNeg
+            is_lnot[d] = false
             mul_valid[d] = false
             as_valid[d] = false
             sh_valid[d] = false
@@ -2141,6 +2169,11 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             bk_shl_valid[d] = false
             bk_shr_valid[d] = false
             bm_xor_valid[d] = false
+            has_ra[d] = false
+            ra_def_idx[d] = -1
+            is_cmp_result[d] = false
+            bs_sub_valid[d] = false
+            bt_add_valid[d] = false
         }
         // Track IrLoadImm: register dst becomes a known constant
         if ocp_is_load_imm(instr.op) {
@@ -4921,152 +4954,9 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                 }
             }
         }
-        i = i + 1
-    }
-    return result
-}
-
-fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
-    var result = ir_function_clone(&func)
-    var is_const: [bool; 256] = [false; 256]
-    var const_val: [i64; 256] = [0; 256]
-    var def_at: [i64; 256] = [-1; 256]
-    // Sprint 86 Block M: Negation tracking for double-neg and neg-arithmetic.
-    var is_neg:  [bool; 256] = [false; 256]
-    var neg_src: [i64;  256] = [-1;    256]
-    // Sprint 112 Block AI: Bitwise NOT via XOR(-1) tracking.
-    var is_bnot:  [bool; 256] = [false; 256]
-    var bnot_src: [i64;  256] = [-1;    256]
-    var bnot_op:  [UnaryOp; 256] = [UnaryOp::OpNeg; 256]
-    // Logical NOT is tracked separately: its truth-table semantics must never
-    // enter the integer complement rewrites that consume is_bnot/bnot_src.
-    var is_lnot:  [bool; 256] = [false; 256]
-    var lnot_src: [i64;  256] = [-1;    256]
-    // Sprint 88 Block O: Mul-div cancellation — track r = x * C (partial-const mul).
-    // (x * C) / C → x.  SOTA: LLVM InstCombineMulDivRem.cpp; Cooper & Torczon §9.
-    var mul_valid:   [bool; 256] = [false; 256]
-    var mul_var_src: [i64;  256] = [-1;    256]
-    var mul_const_v: [i64;  256] = [0;     256]
-    // Sprint 89 Block P: Add-sub/sub-add cancellation — track r = x +/- C.
-    // (x + C) - C → x  ;  (x - C) + C → x.
-    // SOTA: LLVM InstCombineAddSub.cpp; Muchnick §12.2.
-    var as_valid:   [bool; 256] = [false; 256]
-    var as_var_src: [i64;  256] = [-1;    256]
-    var as_const_v: [i64;  256] = [0;     256]
-    var as_is_add:  [bool; 256] = [false; 256]
-    // Sprint 96 Block T: Shift-chain combining — track r = x << C or r = x >> C.
-    // (x << C1) << C2 → x << (C1+C2)  ;  (x >> C1) >> C2 → x >> (C1+C2).
-    // SOTA: Bernstein SODA 1986; LLVM InstCombineShifts.cpp.
-    var sh_valid:   [bool; 256] = [false; 256]
-    var sh_var_src: [i64;  256] = [-1;    256]
-    var sh_amount:  [i64;  256] = [0;     256]
-    var sh_is_left: [bool; 256] = [false; 256]
-    // Sprint 108 Block AE: And-mask fold — track r = x & C.
-    // (x & C1) & C2 → x & (C1 & C2).  SOTA: LLVM InstCombineAndOrXor.cpp.
-    var and_valid:     [bool; 256] = [false; 256]
-    var and_var_src:   [i64;  256] = [-1;    256]
-    var and_const_val: [i64;  256] = [0;     256]
-    // Sprint 115 Block AL: Sub-tracking for neg reversal.
-    // al_is_sub[r]=true means r = al_sub_lhs[r] - al_sub_rhs[r].
-    // neg(a - b) -> b - a  ;  0 - (a - b) -> b - a.
-    // SOTA: LLVM InstCombineAddSub.cpp; Cooper & Torczon §8.4.
-    var al_is_sub:  [bool; 256] = [false; 256]
-    var al_sub_lhs: [i64;  256] = [-1;    256]
-    var al_sub_rhs: [i64;  256] = [-1;    256]
-    // Sprint 116 Block AM: OR-mask tracking for superset elimination.
-    // (x | C1) | C2 where (C1 | C2) == C1 → IrCopy(src1).
-    // SOTA: LLVM InstCombineAndOrXor.cpp.
-    var am_or_valid:     [bool; 256] = [false; 256]
-    var am_or_var_src:   [i64;  256] = [-1;    256]
-    var am_or_const_val: [i64;  256] = [0;     256]
-    // Sprint 127 Block AO: Register-register AND/OR tracking for absorption.
-    // Huntington 1904 absorption axiom: a | (a & b) = a, a & (a | b) = a.
-    // SOTA: LLVM InstCombineAndOrXor.cpp; Hacker's Delight §2-1.
-    var ao_and_rr_valid: [bool; 256] = [false; 256]
-    var ao_and_rr_lhs:   [i64;  256] = [-1;    256]
-    var ao_and_rr_rhs:   [i64;  256] = [-1;    256]
-    var ao_or_rr_valid:  [bool; 256] = [false; 256]
-    var ao_or_rr_lhs:    [i64;  256] = [-1;    256]
-    var ao_or_rr_rhs:    [i64;  256] = [-1;    256]
-    // Sprint 129 Block AQ: Register-register add/mul tracking for inverse cancellation.
-    // (a + b) - b → a, (a * b) / b → a.
-    // SOTA: LLVM InstCombine algebraic identity; group-theoretic inverse.
-    var aq_add_rr_valid: [bool; 256] = [false; 256]
-    var aq_add_rr_lhs:   [i64;  256] = [-1;    256]
-    var aq_add_rr_rhs:   [i64;  256] = [-1;    256]
-    var aq_mul_rr_valid: [bool; 256] = [false; 256]
-    var aq_mul_rr_lhs:   [i64;  256] = [-1;    256]
-    var aq_mul_rr_rhs:   [i64;  256] = [-1;    256]
-    // Sprint 131 Block AS: Register-register XOR tracking for self-inverse cancellation.
-    // (a ^ b) ^ b → a, (a ^ b) ^ a → b.
-    // SOTA: LLVM InstCombineAndOrXor; GF(2) field: XOR is its own inverse.
-    var as_xor_rr_valid: [bool; 256] = [false; 256]
-    var as_xor_rr_lhs:   [i64;  256] = [-1;    256]
-    var as_xor_rr_rhs:   [i64;  256] = [-1;    256]
-    // Sprint 149 Block BK: Consecutive same-direction shift folding.
-    // (x << A) << B → x << (A+B), (x >> A) >> B → x >> (A+B).
-    // Track when a register is the result of a shift by a known constant.
-    // SOTA: LLVM InstCombineShifts.cpp FoldShiftByConstant; Cooper & Torczon §8.1.
-    var bk_shl_valid: [bool; 256] = [false; 256]
-    var bk_shl_src:   [i64;  256] = [-1;    256]
-    var bk_shl_amt:   [i64;  256] = [0;     256]
-    var bk_shr_valid: [bool; 256] = [false; 256]
-    var bk_shr_src:   [i64;  256] = [-1;    256]
-    var bk_shr_amt:   [i64;  256] = [0;     256]
-    // Sprint 151 Block BM: XOR constant-chain fold — (x ^ C1) ^ C2 → x ^ (C1^C2).
-    // Mirrors Block BG (OR) and Block AE (AND) for the XOR operator.
-    // SOTA: LLVM InstCombineAndOrXor; GF(2) field associativity; Hacker's Delight §2-3.
-    var bm_xor_valid: [bool; 256] = [false; 256]
-    var bm_xor_src:   [i64;  256] = [-1;    256]
-    var bm_xor_cval:  [i64;  256] = [0;     256]
-
-    var i: i64 = 0
-    while i < result.instr_count {
-        let instr = ir_arena_load(ir_region_slot_r(result.region, (i)))
-        var preserve_mul_chain = false
-        if instr.dst >= 0 && instr.dst < 256 {
-            let d = instr.dst as usize
-            is_const[d] = false
-            is_neg[d] = false
-            is_bnot[d] = false
-            bnot_op[d] = UnaryOp::OpNeg
-            is_lnot[d] = false
-            mul_valid[d] = false
-            as_valid[d] = false
-            sh_valid[d] = false
-            and_valid[d] = false
-            al_is_sub[d] = false
-            am_or_valid[d] = false
-            ao_and_rr_valid[d] = false
-            ao_or_rr_valid[d] = false
-            aq_add_rr_valid[d] = false
-            aq_mul_rr_valid[d] = false
-            as_xor_rr_valid[d] = false
-            bk_shl_valid[d] = false
-            bk_shr_valid[d] = false
-            bm_xor_valid[d] = false
-        }
-        // Track IrLoadImm: register dst becomes a known constant
-        if ocp_is_load_imm(instr.op) {
-            if instr.dst >= 0 && instr.dst < 256 {
-                is_const[instr.dst as usize] = true
-                const_val[instr.dst as usize] = instr.imm_i64
-                def_at[instr.dst as usize] = i
-            }
-        }
-        // Sprint 83 Block K: IrLoadBool constant tracking.
-        // IrLoadBool stores true→1, false→0 in imm_i64. Tracking booleans in the
-        // constant lattice enables downstream Block F branch folding, Block E
-        // comparison folding, and SCCP on boolean-valued registers.
-        // SOTA: Click "Value Numbering" PLDI 1995 §2 — all value-producing
-        // instructions participate in the constant lattice.
-        if instr.op == IrOpcode::IrLoadBool {
-            if instr.dst >= 0 && instr.dst < 256 {
-                is_const[instr.dst as usize] = true
-                const_val[instr.dst as usize] = instr.imm_i64
-                def_at[instr.dst as usize] = i
-            }
-        }
+        // The second half of the loop body (formerly pass_a2) re-reads the
+        // instruction: the blocks above may have rewritten slot i.
+        let instr2 = ir_arena_load(ir_region_slot_r(result.region, (i)))
         // Sprint 208 Block DR: De Morgan NOT-AND — ~(~x & ~y) → x | y.
         // Proof: De Morgan's theorem: ~(A & B) = ~A | ~B. With A=~x,B=~y: ~(~x&~y)=~~x|~~y=x|y. QED.
         // Zero new arrays: uses is_bnot/bnot_src (Block AI/BJ) + ao_and_rr_valid/lhs/rhs (Block AO).
@@ -6575,78 +6465,78 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
         // OpNeg, logical OpNot, and integer OpBitNot are foldable.
         // (Wegman & Zadeck TOPLAS 1991 §4: constant folding completeness
         //  requires all operator families — unary included.)
-        if instr.op == IrOpcode::IrUnaryOp {
-            let us = instr.src1
+        if instr2.op == IrOpcode::IrUnaryOp {
+            let us = instr2.src1
             let us_ok = us >= 0 && us < 256
             // Fold: -(const) → IrLoadImm(-const). Integers only: a float constant
             // is an IrLoadImm of its bit pattern, and `0 - bits` is not f64
             // negation (at bits 0 it yields +0.0 where -0.0 is right).
-            if us_ok && is_const[us as usize] && instr.un_op == UnaryOp::OpNeg
+            if us_ok && is_const[us as usize] && instr2.un_op == UnaryOp::OpNeg
                     && !ocp_rebracket_has_float_marker_before(&result, us, i) {
                 let neg_val = 0 - const_val[us as usize]
-                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_load_imm(instr.dst, neg_val))
-                if instr.dst >= 0 && instr.dst < 256 {
-                    is_const[instr.dst as usize] = true
-                    const_val[instr.dst as usize] = neg_val
-                    def_at[instr.dst as usize] = i
+                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_load_imm(instr2.dst, neg_val))
+                if instr2.dst >= 0 && instr2.dst < 256 {
+                    is_const[instr2.dst as usize] = true
+                    const_val[instr2.dst as usize] = neg_val
+                    def_at[instr2.dst as usize] = i
                 }
             }
             // Fold logical NOT: zero becomes one; every non-zero value becomes zero.
-            if us_ok && is_const[us as usize] && instr.un_op == UnaryOp::OpNot {
+            if us_ok && is_const[us as usize] && instr2.un_op == UnaryOp::OpNot {
                 let not_val = if const_val[us as usize] == 0 { 1 } else { 0 }
-                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_load_imm(instr.dst, not_val))
-                if instr.dst >= 0 && instr.dst < 256 {
-                    is_const[instr.dst as usize] = true
-                    const_val[instr.dst as usize] = not_val
-                    def_at[instr.dst as usize] = i
+                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_load_imm(instr2.dst, not_val))
+                if instr2.dst >= 0 && instr2.dst < 256 {
+                    is_const[instr2.dst as usize] = true
+                    const_val[instr2.dst as usize] = not_val
+                    def_at[instr2.dst as usize] = i
                 }
             }
             // Fold integer bitwise NOT.
-            if us_ok && is_const[us as usize] && instr.un_op == UnaryOp::OpBitNot {
+            if us_ok && is_const[us as usize] && instr2.un_op == UnaryOp::OpBitNot {
                 let not_val = const_val[us as usize] ^ (0 - 1)
-                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_load_imm(instr.dst, not_val))
-                if instr.dst >= 0 && instr.dst < 256 {
-                    is_const[instr.dst as usize] = true
-                    const_val[instr.dst as usize] = not_val
-                    def_at[instr.dst as usize] = i
+                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_load_imm(instr2.dst, not_val))
+                if instr2.dst >= 0 && instr2.dst < 256 {
+                    is_const[instr2.dst as usize] = true
+                    const_val[instr2.dst as usize] = not_val
+                    def_at[instr2.dst as usize] = i
                 }
             }
             // Double NOT cancellation is valid only for two identical operators.
             // SOTA: LLVM InstCombineAndOrXor; Boolean double negation law; Hacker's Delight §2-2.
             if us_ok
-                && ((instr.un_op == UnaryOp::OpBitNot && is_bnot[us as usize]
+                && ((instr2.un_op == UnaryOp::OpBitNot && is_bnot[us as usize]
                         && bnot_op[us as usize] == UnaryOp::OpBitNot)
-                    || (instr.un_op == UnaryOp::OpNot && is_lnot[us as usize])) {
-                let bj_inner = if instr.un_op == UnaryOp::OpNot {
+                    || (instr2.un_op == UnaryOp::OpNot && is_lnot[us as usize])) {
+                let bj_inner = if instr2.un_op == UnaryOp::OpNot {
                     lnot_src[us as usize]
                 } else {
                     bnot_src[us as usize]
                 }
-                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_copy(instr.dst, bj_inner))
-                if instr.dst >= 0 && instr.dst < 256 {
+                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_copy(instr2.dst, bj_inner))
+                if instr2.dst >= 0 && instr2.dst < 256 {
                     if bj_inner >= 0 && bj_inner < 256 && is_const[bj_inner as usize] {
-                        is_const[instr.dst as usize] = true
-                        const_val[instr.dst as usize] = const_val[bj_inner as usize]
+                        is_const[instr2.dst as usize] = true
+                        const_val[instr2.dst as usize] = const_val[bj_inner as usize]
                     }
                 }
             }
         }
-        if instr.op == IrOpcode::IrUnaryOp && instr.un_op == UnaryOp::OpBitNot {
-            if instr.dst >= 0 && instr.dst < 256 {
-                is_bnot[instr.dst as usize]  = true
-                bnot_src[instr.dst as usize] = instr.src1
-                bnot_op[instr.dst as usize] = UnaryOp::OpBitNot
+        if instr2.op == IrOpcode::IrUnaryOp && instr2.un_op == UnaryOp::OpBitNot {
+            if instr2.dst >= 0 && instr2.dst < 256 {
+                is_bnot[instr2.dst as usize]  = true
+                bnot_src[instr2.dst as usize] = instr2.src1
+                bnot_op[instr2.dst as usize] = UnaryOp::OpBitNot
             }
-        } else if instr.op == IrOpcode::IrUnaryOp && instr.un_op == UnaryOp::OpNot {
-            if instr.dst >= 0 && instr.dst < 256 {
-                is_lnot[instr.dst as usize] = true
-                lnot_src[instr.dst as usize] = instr.src1
+        } else if instr2.op == IrOpcode::IrUnaryOp && instr2.un_op == UnaryOp::OpNot {
+            if instr2.dst >= 0 && instr2.dst < 256 {
+                is_lnot[instr2.dst as usize] = true
+                lnot_src[instr2.dst as usize] = instr2.src1
             }
         }
 
         // Sprint 115 Block AL: Subtract tracking — populate.
         // Record when a register is produced by OpSub for downstream neg-reversal.
-        if ocp_is_binop(instr.op) && instr.bin_op == BinaryOp::OpSub {
+        if ocp_is_binop(instr2.op) && instr2.bin_op == BinaryOp::OpSub {
             let al_instr = ir_arena_load(ir_region_slot_r(result.region, (i)))
             if al_instr.dst >= 0 && al_instr.dst < 256 {
                 al_is_sub[al_instr.dst as usize]  = true
@@ -6798,151 +6688,67 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                 }
             }
         }
-        i = i + 1
-    }
-    return result
-}
-
-fn ocp_const_fold_pass_b(
-    func: IrFunction,
-    exact_bitwise_audit: &! OcpExactBitwiseRebracketPassAudit,
-) -> IrFunction with Mut, Div, Panic {
-    var result = ir_function_clone(&func)
-    var is_const: [bool; 256] = [false; 256]
-    var const_val: [i64; 256] = [0; 256]
-    var def_at: [i64; 256] = [-1; 256]
-    // Sprint 84 Block L: Associative chain tracking.
-    // has_ra[r]=true means r = (ra_base[r] assoc_op ra_const_val[r]).
-    var has_ra:       [bool; 256] = [false; 256]
-    var ra_base:      [i64;  256] = [-1;   256]
-    var ra_const_val: [i64;  256] = [0;    256]
-    var ra_op:        [i64;  256] = [0;    256]
-    var ra_def_idx:   [i64;  256] = [-1;   256]
-    // Sprint 86 Block M: Negation tracking for double-neg and neg-arithmetic.
-    var is_neg:  [bool; 256] = [false; 256]
-    var neg_src: [i64;  256] = [-1;    256]
-    // Sprint 101 Block Y: Boolean simplification — track comparison results.
-    // is_cmp_result[r]=true means r was produced by a comparison (OpEq/OpNe/etc).
-    // cmp_orig_src[r] = the first operand of the comparison.
-    // cmp_op_code[r] = 1 for OpEq, 2 for OpNe, 3 for other comparisons.
-    var is_cmp_result: [bool; 256] = [false; 256]
-    var cmp_orig_src:  [i64;  256] = [-1;    256]
-    var cmp_op_code:   [i64;  256] = [0;     256]
-
-    // Sprint 157 Block BS: Consecutive subtract-constant fold — (x - C1) - C2 → x - (C1+C2).
-    // Mirrors Block BG (OR-chain) and Block BM (XOR-chain) for subtraction.
-    // SOTA: LLVM InstCombineAddSub; Cooper & Torczon §8.2; associative arithmetic.
-    var bs_sub_valid: [bool; 256] = [false; 256]
-    var bs_sub_src:   [i64;  256] = [-1;    256]
-    var bs_sub_cval:  [i64;  256] = [0;     256]
-
-    // Sprint 158 Block BT: Consecutive add-constant fold — (x + C1) + C2 → x + (C1+C2).
-    // Symmetric to Block BS (sub-chain) for addition. Reuses same merge pattern.
-    // SOTA: LLVM InstCombineAddSub.cpp; additive associativity; Cooper & Torczon §8.2.
-    var bt_add_valid: [bool; 256] = [false; 256]
-    var bt_add_src:   [i64;  256] = [-1;    256]
-    var bt_add_cval:  [i64;  256] = [0;     256]
-
-    // Avoid rediscovering an unsupported whole-function use model for every
-    // bitwise candidate. Explicit control operands are modeled here; the flow
-    // certificate separately proves either one region or a dominated forward
-    // CFG path for each candidate.
-    // The transaction repeats both checks against live IR before mutation.
-    let exact_bitwise_use_model_ok = ocp_rebracket_function_has_complete_use_model(&result)
-
-    var i: i64 = 0
-    while i < result.instr_count {
-        let instr = ir_arena_load(ir_region_slot_r(result.region, (i)))
-        var preserve_mul_chain = false
-        if instr.dst >= 0 && instr.dst < 256 {
-            let d = instr.dst as usize
-            is_const[d] = false
-            has_ra[d] = false
-            ra_def_idx[d] = -1
-            is_neg[d] = false
-            is_cmp_result[d] = false
-            bs_sub_valid[d] = false
-            bt_add_valid[d] = false
-        }
-        // Track IrLoadImm: register dst becomes a known constant
-        if ocp_is_load_imm(instr.op) {
-            if instr.dst >= 0 && instr.dst < 256 {
-                is_const[instr.dst as usize] = true
-                const_val[instr.dst as usize] = instr.imm_i64
-                def_at[instr.dst as usize] = i
-            }
-        }
-        // Sprint 83 Block K: IrLoadBool constant tracking.
-        // IrLoadBool stores true→1, false→0 in imm_i64. Tracking booleans in the
-        // constant lattice enables downstream Block F branch folding, Block E
-        // comparison folding, and SCCP on boolean-valued registers.
-        // SOTA: Click "Value Numbering" PLDI 1995 §2 — all value-producing
-        // instructions participate in the constant lattice.
-        if instr.op == IrOpcode::IrLoadBool {
-            if instr.dst >= 0 && instr.dst < 256 {
-                is_const[instr.dst as usize] = true
-                const_val[instr.dst as usize] = instr.imm_i64
-                def_at[instr.dst as usize] = i
-            }
-        }
+        // The last part of the loop body (formerly pass_b) re-reads the
+        // instruction: the blocks above may have rewritten slot i.
+        let instr3 = ir_arena_load(ir_region_slot_r(result.region, (i)))
         // Fold IrBinOp with two known integer constants
-        if ocp_is_binop(instr.op) {
-            let s1 = instr.src1
-            let s2 = instr.src2
+        if ocp_is_binop(instr3.op) {
+            let s1 = instr3.src1
+            let s2 = instr3.src2
             if s1 >= 0 && s1 < 256 && s2 >= 0 && s2 < 256 {
                 if is_const[s1 as usize] && is_const[s2 as usize] {
                     let v1 = const_val[s1 as usize]
                     let v2 = const_val[s2 as usize]
                     var fold_val: i64 = 0
                     var did_fold = false
-                    if instr.bin_op == BinaryOp::OpAdd {
+                    if instr3.bin_op == BinaryOp::OpAdd {
                         fold_val = v1 + v2
                         did_fold = true
                     }
-                    if instr.bin_op == BinaryOp::OpSub {
+                    if instr3.bin_op == BinaryOp::OpSub {
                         fold_val = v1 - v2
                         did_fold = true
                     }
-                    if instr.bin_op == BinaryOp::OpMul {
+                    if instr3.bin_op == BinaryOp::OpMul {
                         fold_val = v1 * v2
                         did_fold = true
                     }
-                    if instr.bin_op == BinaryOp::OpDiv && v2 != 0 {
+                    if instr3.bin_op == BinaryOp::OpDiv && v2 != 0 {
                         fold_val = v1 / v2
                         did_fold = true
                     }
-                    if instr.bin_op == BinaryOp::OpRem && v2 != 0 {
+                    if instr3.bin_op == BinaryOp::OpRem && v2 != 0 {
                         fold_val = v1 % v2
                         did_fold = true
                     }
                     // Sprint 81 Block I: Bitwise + shift both-constant folding.
                     // (Cooper & Torczon "Engineering a Compiler" §9.2: constant folding
                     //  is complete only when ALL operators are handled uniformly.)
-                    if instr.bin_op == BinaryOp::OpBitAnd {
+                    if instr3.bin_op == BinaryOp::OpBitAnd {
                         fold_val = v1 & v2
                         did_fold = true
                     }
-                    if instr.bin_op == BinaryOp::OpBitOr {
+                    if instr3.bin_op == BinaryOp::OpBitOr {
                         fold_val = v1 | v2
                         did_fold = true
                     }
-                    if instr.bin_op == BinaryOp::OpBitXor {
+                    if instr3.bin_op == BinaryOp::OpBitXor {
                         fold_val = v1 ^ v2
                         did_fold = true
                     }
-                    if instr.bin_op == BinaryOp::OpShl && v2 >= 0 && v2 < 64 {
+                    if instr3.bin_op == BinaryOp::OpShl && v2 >= 0 && v2 < 64 {
                         fold_val = v1 << v2
                         did_fold = true
                     }
-                    if instr.bin_op == BinaryOp::OpShr && v2 >= 0 && v2 < 64 {
+                    if instr3.bin_op == BinaryOp::OpShr && v2 >= 0 && v2 < 64 {
                         fold_val = v1 >> v2
                         did_fold = true
                     }
                     if did_fold {
-                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_load_imm(instr.dst, fold_val))
-                        if instr.dst >= 0 && instr.dst < 256 {
-                            is_const[instr.dst as usize] = true
-                            const_val[instr.dst as usize] = fold_val
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), ir_load_imm(instr3.dst, fold_val))
+                        if instr3.dst >= 0 && instr3.dst < 256 {
+                            is_const[instr3.dst as usize] = true
+                            const_val[instr3.dst as usize] = fold_val
                         }
                     }
                 }
@@ -7056,7 +6862,7 @@ fn ocp_const_fold_pass_b(
         }
         // Sprint 157 Block BS: Subtract tracking — populate bs_sub arrays.
         // Record when dst = src - C (src minus constant) for downstream folding.
-        if ocp_is_binop(instr.op) && instr.bin_op == BinaryOp::OpSub {
+        if ocp_is_binop(instr3.op) && instr3.bin_op == BinaryOp::OpSub {
             let bs_t = ir_arena_load(ir_region_slot_r(result.region, (i)))
             let bs_ts1 = bs_t.src1; let bs_ts2 = bs_t.src2
             let bs_ts1_ok = bs_ts1 >= 0 && bs_ts1 < 256; let bs_ts2_ok = bs_ts2 >= 0 && bs_ts2 < 256
@@ -7120,7 +6926,7 @@ fn ocp_const_fold_pass_b(
         }
         // Sprint 158 Block BT: Add tracking — populate bt_add arrays.
         // Record when dst = src + C (src plus constant) for downstream folding.
-        if ocp_is_binop(instr.op) && instr.bin_op == BinaryOp::OpAdd {
+        if ocp_is_binop(instr3.op) && instr3.bin_op == BinaryOp::OpAdd {
             let bt_t = ir_arena_load(ir_region_slot_r(result.region, (i)))
             let bt_ts1 = bt_t.src1; let bt_ts2 = bt_t.src2
             let bt_ts1_ok = bt_ts1 >= 0 && bt_ts1 < 256; let bt_ts2_ok = bt_ts2 >= 0 && bt_ts2 < 256
@@ -7311,8 +7117,8 @@ fn ocp_const_fold_pass_b(
         // Zero new arrays: uses bs_sub_valid/bs_sub_src/bs_sub_cval (Block BS)
         //   and bt_add_valid/bt_add_src/bt_add_cval (Block BT).
         // SOTA: LLVM InstCombineAddSub; associative constant folding for add/sub.
-        if instr.op == IrOpcode::IrBinOp && instr.bin_op == BinaryOp::OpAdd {
-            let cs_instr = instr
+        if instr3.op == IrOpcode::IrBinOp && instr3.bin_op == BinaryOp::OpAdd {
+            let cs_instr = instr3
             let cs_s1 = cs_instr.src1
             let cs_s2 = cs_instr.src2
             let cs_s1_ok = cs_s1 >= 0 && cs_s1 < 256
@@ -7382,8 +7188,8 @@ fn ocp_const_fold_pass_b(
                 }
             }
             // (x+C1)-C2 → x+(C1-C2): handles add-sub chain
-            if instr.op == IrOpcode::IrBinOp && instr.bin_op == BinaryOp::OpSub {
-                let cs_instr = instr
+            if instr3.op == IrOpcode::IrBinOp && instr3.bin_op == BinaryOp::OpSub {
+                let cs_instr = instr3
                 let cs_s1 = cs_instr.src1
                 let cs_s2 = cs_instr.src2
                 let cs_s1_ok = cs_s1 >= 0 && cs_s1 < 256
@@ -7423,10 +7229,10 @@ fn ocp_const_fold_pass_b(
         }
         // Sprint 86 Block M: Negation tracking — populate.
         // Record when a register is produced by OpNeg for double-neg detection.
-        if instr.op == IrOpcode::IrUnaryOp && instr.un_op == UnaryOp::OpNeg {
-            if instr.dst >= 0 && instr.dst < 256 {
-                is_neg[instr.dst as usize]  = true
-                neg_src[instr.dst as usize] = instr.src1
+        if instr3.op == IrOpcode::IrUnaryOp && instr3.un_op == UnaryOp::OpNeg {
+            if instr3.dst >= 0 && instr3.dst < 256 {
+                is_neg[instr3.dst as usize]  = true
+                neg_src[instr3.dst as usize] = instr3.src1
             }
         }
         // Sprint 86 Block M: Negation arithmetic fold.
@@ -7434,22 +7240,22 @@ fn ocp_const_fold_pass_b(
         // neg(neg(x)) → IrCopy(x)
         // SOTA: LLVM InstCombine; Cooper & Torczon §9 — negation is an algebraic
         //       inverse; propagating it eliminates redundant sign inversions.
-        if ocp_is_binop(instr.op) {
-            let mn_s1 = instr.src1
-            let mn_s2 = instr.src2
+        if ocp_is_binop(instr3.op) {
+            let mn_s1 = instr3.src1
+            let mn_s2 = instr3.src2
             let mn_s1_ok = mn_s1 >= 0 && mn_s1 < 256
             let mn_s2_ok = mn_s2 >= 0 && mn_s2 < 256
             let mn_s2_k = mn_s2_ok && is_const[mn_s2 as usize]
             let mn_s1_k = mn_s1_ok && is_const[mn_s1 as usize]
             // x * (-1) → 0 - x  ;  x / (-1) → 0 - x
-            if instr.bin_op == BinaryOp::OpMul || instr.bin_op == BinaryOp::OpDiv {
+            if instr3.bin_op == BinaryOp::OpMul || instr3.bin_op == BinaryOp::OpDiv {
                 if mn_s2_k && const_val[mn_s2 as usize] == -1 && !mn_s1_k {
                     let c_def = def_at[mn_s2 as usize]
                     if c_def >= 0 {
                         ir_arena_store(ir_region_slot_w(result.region, (c_def)), ir_load_imm(mn_s2, 0))
                         const_val[mn_s2 as usize] = 0
                     }
-                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(instr.dst, mn_s2, BinaryOp::OpSub, mn_s1))
+                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(instr3.dst, mn_s2, BinaryOp::OpSub, mn_s1))
                 }
                 // (-1) * x → 0 - x  (commutative flip: s1 is const -1, s2 is var)
                 if mn_s1_k && const_val[mn_s1 as usize] == -1 && !mn_s2_k {
@@ -7458,16 +7264,16 @@ fn ocp_const_fold_pass_b(
                         ir_arena_store(ir_region_slot_w(result.region, (c_def)), ir_load_imm(mn_s1, 0))
                         const_val[mn_s1 as usize] = 0
                     }
-                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(instr.dst, mn_s1, BinaryOp::OpSub, mn_s2))
+                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(instr3.dst, mn_s1, BinaryOp::OpSub, mn_s2))
                 }
             }
             // x % (-1) → IrLoadImm(0)  (remainder by -1 is always 0)
-            if instr.bin_op == BinaryOp::OpRem {
+            if instr3.bin_op == BinaryOp::OpRem {
                 if mn_s2_k && const_val[mn_s2 as usize] == -1 {
-                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_load_imm(instr.dst, 0))
-                    if instr.dst >= 0 && instr.dst < 256 {
-                        is_const[instr.dst as usize] = true
-                        const_val[instr.dst as usize] = 0
+                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_load_imm(instr3.dst, 0))
+                    if instr3.dst >= 0 && instr3.dst < 256 {
+                        is_const[instr3.dst as usize] = true
+                        const_val[instr3.dst as usize] = 0
                     }
                 }
             }
@@ -7597,7 +7403,7 @@ fn ocp_const_fold_pass_b(
                     }
                 }
             }
-            // Sub-pass 2: record has_ra for the (possibly rewritten) current instr.
+            // Sub-pass 2: record has_ra for the (possibly rewritten) current instr3.
             let la_rec = ir_arena_load(ir_region_slot_r(result.region, (i)))
             let la_rec_s1 = la_rec.src1
             let la_rec_s2 = la_rec.src2
@@ -9680,7 +9486,7 @@ fn ocp_mfi_dce_once(module: &! IrModule, fi: i64) -> i64 with Mut, Div, Panic {
 }
 
 // Core integer const-fold via module+fi peels (no by-value IrFunction).
-// Subset of ocp_const_fold_pass_b both-const arithmetic/bitwise/compare plus
+// Subset of ocp_const_fold_scan both-const arithmetic/bitwise/compare plus
 // partial-constant identity/annihilation. Heavy chain rewrites (Block L/M/…)
 // stay on the by-value self-test spine.
 fn ocp_mfi_const_fold(module: &! IrModule, fi: i64) with Mut, Div, Panic {
