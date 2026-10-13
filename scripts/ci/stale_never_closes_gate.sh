@@ -31,6 +31,13 @@ for f in .github/workflows/*.yml .github/workflows/*.yaml; do
         fail=1
     fi
 done
+# Emptiness guard: with no actions/stale step there is nothing to measure, and a
+# gate that passes on nothing is not a gate. If the workflow is deleted on
+# purpose, delete this gate with it.
+if [[ "$found" -lt 1 ]]; then
+    echo "FAIL: nothing to measure: no workflow uses actions/stale (found_stale_step=$found)" >&2
+    fail=1
+fi
 if [[ "$fail" == 0 ]]; then
     echo "PASS stale automation never closes (found_stale_step=$found)"
     echo "STALE_NEVER_CLOSES_GATE_OK"
