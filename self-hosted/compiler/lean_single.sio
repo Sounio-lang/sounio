@@ -9029,6 +9029,24 @@ fn local_store_needs_mut(name_tok: i64) -> bool with Panic, Mut, Div {
     return store_root_is_frame_local(name_tok) == false
 }
 
+// `x = v` rebinds the local `x` itself. Even when `x` holds a reference or a
+// raw pointer, the store goes to x's own frame slot and the caller sees no
+// change: a write THROUGH x is `*x = v` / `x.f = v`, handled by the deref and
+// field stores. So a rebind needs Mut only for a global, inside a closure body
+// (captures), or for an unsized `[T]` view, whose whole-array assignment copies
+// into the storage it views. Found by #1494: `current = &(*list).tail` in
+// module_frontend.sio's list walkers (only `with Alloc`) was E035.
+fn local_rebind_needs_mut(name_tok: i64) -> bool with Panic, Mut, Div {
+    if current_fn_allows_mutation() { return false }
+    if CL_DEPTH > 0 { return true }
+    let lvi = var_find_idx(TS[name_tok as usize], TE[name_tok as usize])
+    if lvi < 0 { return true }
+    let ty = VAR_TY[lvi as usize]
+    let th = VAR_TY_HASH[lvi as usize]
+    if ty == 8 && VAR_ALEN[lvi as usize] <= 0 && arr_hash_alen(th) <= 0 { return true }
+    return false
+}
+
 fn var_find_ty(ns: i64, ne: i64) -> i64 with Panic, Mut {
     var i: i64 = VAR_COUNT - 1
     while i >= 0 {
@@ -27421,7 +27439,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // x = expr (local or global scalar assignment)
     if (k == 3 || k == 79) && TK[(EP + 1) as usize] == 16 {
         let name_tok = EP
-        if local_store_needs_mut(name_tok) {
+        if local_rebind_needs_mut(name_tok) {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[EP as usize]
@@ -42458,7 +42476,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // x = expr
     if k == 3 && TK[(EP + 1) as usize] == 16 {
         let name_tok = EP
-        if local_store_needs_mut(name_tok) {
+        if local_rebind_needs_mut(name_tok) {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[EP as usize]; let ne = TE[EP as usize]
