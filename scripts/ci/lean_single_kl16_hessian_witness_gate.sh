@@ -74,9 +74,10 @@ run_witness of \
   tests/run-pass/epistemic_hessian_of.sio \
   $'1.000000\n2.000000\n10.000000'
 
+# #2507: the witness labels and asserts its values now (and adds x = 0.5).
 run_witness transcendentals \
   tests/run-pass/epistemic_hessian_transcendentals.sio \
-  $'-0.500000\n0.000000\n0.500000\n0.000000\n1.000000\n0.000000'
+  $'h_atan=-0.500000\nh_tan0=0.000000\nh_xatan=0.500000\nh_tanh0=0.000000\nh_asin=1.000000\nh_acos0=0.000000\nh_atan5=-0.640000\nh_tan5=1.418689\nh_tanh5=-0.726862\nh_asin5=0.769800\nh_acos5=-0.769800\nEPISTEMIC_HESSIAN_TRANSCENDENTALS_PASS'
 
 run_witness eight_inputs \
   tests/run-pass/epistemic_hessian_8inputs.sio \

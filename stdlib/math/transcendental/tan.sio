@@ -1,0 +1,88 @@
+// Implicit import target for a bare `tan(x)` under Madaros (#2507).
+//
+// Range reduction uses compensated pieces of pi/2. A single rounded
+// k*pio2_1t is insufficient near a pole: tan(-479424.3176972952) had
+// relative error 1.90e-14. Keep a high/low remainder and refine again
+// under deep cancellation. The supported range remains unchanged;
+// this is not a Payne-Hanek implementation for arbitrarily large x.
+//
+// The reduction constants and compensation follow fdlibm e_rem_pio2.c:
+// https://www.netlib.org/fdlibm/e_rem_pio2.c
+// Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+// Developed at SunSoft, a Sun Microsystems, Inc. business.
+// Permission to use, copy, modify, and distribute this
+// software is freely granted, provided that this notice
+// is preserved.
+//
+// sin/cos on the reduced interval use the existing eleven-level series.
+// Correct both by the retained remainder tail before forming tan.
+// No effect row: see kernel.sio.
+fn transcendental_tan_sin_series(y: f64) -> f64 {
+    let y2 = y * y
+    var s: f64 = 0.0
+    var k: i64 = 11
+    while k >= 1 {
+        s = y2 / (((2 * k) * (2 * k + 1)) as f64) * (1.0 - s)
+        k = k - 1
+    }
+    y * (1.0 - s)
+}
+
+fn transcendental_tan_cos_series(y: f64) -> f64 {
+    let y2 = y * y
+    var s: f64 = 0.0
+    var k: i64 = 11
+    while k >= 1 {
+        s = y2 / (((2 * k - 1) * (2 * k)) as f64) * (1.0 - s)
+        k = k - 1
+    }
+    1.0 - s
+}
+
+pub fn tan(x: f64) -> f64 {
+    let nan_probe = x - x
+    if nan_probe != nan_probe { return nan_probe }
+    // Adding a +0 remainder tail to sin(-0) would erase the sign.
+    if x == 0.0 { return x }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    if ax > 1647099.3291652855 {
+        return (x - x) / (x - x)
+    }
+    var y = x
+    var tail: f64 = 0.0
+    var odd = false
+    if ax > 0.7853981633974483 {
+        let pio2_1 = 1.57079632673412561417
+        let pio2_2 = 0.0000000000607710050630396597660
+        let pio2_2t = 2.02226624879595063154e-21
+        let pio2_3 = 2.02226624871116645580e-21
+        let pio2_3t = 8.47842766036889956997e-32
+        let invpio2 = 0.636619772367581382433
+        var q = x * invpio2
+        if q < 0.0 { q = q - 0.5 } else { q = q + 0.5 }
+        let kf = (q as i64) as f64
+        let first = x - kf * pio2_1
+        var w = kf * pio2_2
+        var r = first - w
+        w = kf * pio2_2t - ((first - r) - w)
+        y = r - w
+        let ay = if y < 0.0 { 0.0 - y } else { y }
+        // More than 49 bits cancelled: use the third 33-bit piece and tail.
+        if ay < ax * 1.7763568394002505e-15 {
+            let t = r
+            w = kf * pio2_3
+            r = t - w
+            w = kf * pio2_3t - ((t - r) - w)
+            y = r - w
+        }
+        tail = (r - y) - w
+        let half = kf * 0.5
+        if half != ((half as i64) as f64) { odd = true }
+    }
+    let sh = transcendental_tan_sin_series(y)
+    let ch = transcendental_tan_cos_series(y)
+    let s = sh + tail * ch
+    let c = ch - tail * sh
+    if odd { return 0.0 - c / s }
+    s / c
+}
