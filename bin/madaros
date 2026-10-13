@@ -23,6 +23,8 @@
 #   MADAROS_STACK_KB       — soft stack limit (default 524288 = 512 MiB). Measured
 #                            floor 2026-08-13: minimal ok at 16 MiB+, helper at 32 MiB+.
 #                            Set 0 for unlimited. See MADAROS_HARDENING_PLAN_2026-08-12.md.
+#                            If the hard limit forbids it, compile commands refuse
+#                            with rc 75 (#2813); a smaller value is the opt-in to try.
 #   MADAROS_VMEM_LIMIT_KB  — virtual-memory guard (default 32 GiB)
 #   MADAROS_NATIVE_COMPILE_TIMEOUT_SECONDS — native compile deadline, 1..600
 #                            seconds (default 300); does not change GPU/check deadlines.
@@ -140,12 +142,41 @@ SCIENCE_BOUNDARY_ARGS=()
 # lowering path fails through 384 MiB and passes at 448 MiB; reserve 512 MiB.
 # Named reservation replaces blanket unlimited until IR-arena root fix lands.
 # MADAROS_STACK_KB=0 restores unlimited.
+#
+# #2813: the reservation used to be best-effort (`|| true`). Under a hard stack
+# limit below it (e.g. `ulimit -Hs 8192`) the raw compiler then ran with the
+# 8 MiB default and SIGSEGV'd (rc=139) compiling large programs -- an
+# undiagnosed crash. Now every compiler invocation first checks that the soft
+# limit actually reached MADAROS_STACK_KB and refuses (rc=75, EX_TEMPFAIL)
+# with the limits in the message otherwise. MADAROS_STACK_KB=<smaller KiB> is
+# the explicit opt-in for running with less (small programs fit in 8 MiB).
+# --version, info and help never need the stack and are not gated.
 MADAROS_STACK_KB="${MADAROS_STACK_KB:-524288}"
 if [[ "$MADAROS_STACK_KB" == "0" ]]; then
   ulimit -s unlimited 2>/dev/null || true
 else
   ulimit -s "$MADAROS_STACK_KB" 2>/dev/null || true
 fi
+
+_require_compiler_stack() {
+  local soft hard want
+  soft="$(ulimit -S -s)"
+  hard="$(ulimit -H -s)"
+  if [[ "$MADAROS_STACK_KB" == "0" ]]; then
+    want="unlimited"
+    [[ "$soft" == "unlimited" ]] && return 0
+  else
+    want="$MADAROS_STACK_KB"
+    [[ "$soft" == "unlimited" ]] && return 0
+    if [[ "$soft" =~ ^[0-9]+$ && "$want" =~ ^[0-9]+$ ]] && (( soft >= want )); then
+      return 0
+    fi
+  fi
+  echo "error: madaros: cannot reserve the compiler stack: need ${want} KiB, soft limit is ${soft} KiB (hard limit ${hard} KiB)" >&2
+  echo "  The compiler recurses deeply on large programs and would crash (SIGSEGV) with less." >&2
+  echo "  Raise the hard limit (ulimit -Hs ${want}, or unlimited), or set MADAROS_STACK_KB=${soft} to try with the current stack." >&2
+  exit 75
+}
 
 usage() {
   cat <<USAGE
@@ -788,6 +819,7 @@ case "$1" in
     info
     ;;
   check)
+    _require_compiler_stack
     shift
     candidate="${1:-}"
     if ! src="$(resolve_source_or_project "$candidate")"; then
@@ -808,6 +840,7 @@ case "$1" in
       usage
       exit 0
     fi
+    _require_compiler_stack
     candidate="${1:-}"
     if [[ -n "$candidate" && "$candidate" != -* ]]; then
       shift
@@ -828,6 +861,7 @@ case "$1" in
     _build_source "$src" "$@"
     ;;
   run)
+    _require_compiler_stack
     shift
     candidate="${1:-}"
     if ! src="$(resolve_source_or_project "$candidate")"; then
@@ -840,6 +874,7 @@ case "$1" in
     _run_source "$src" "$@"
     ;;
   pkg)
+    _require_compiler_stack
     shift
     pkg_subcommand="${1:-}"
     if [[ "$pkg_subcommand" == "build" && "$SCIENCE_BOUNDARY_MODE" != "strict" ]] && _args_have_release_bundle "$@"; then
@@ -892,6 +927,7 @@ case "$1" in
     usage
     ;;
   *)
+    _require_compiler_stack
     if [[ "$1" == "--check" && $# -ge 2 ]]; then
       if ! _science_check_preflight "$2"; then
         exit 1
