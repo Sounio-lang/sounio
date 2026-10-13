@@ -199,6 +199,42 @@ else
   printf 'ok    %-24s E218\n' "primary_diag"
 fi
 
+# --- sounio_capture_rc: the status survives `set -e` and is not collapsed -----
+for want in 0 1 124 139; do
+  checks=$((checks + 1))
+  sounio_capture_rc got_rc "$TMP_DIR/cap_$want.log" -- bash -c "echo out; exit $want"
+  if [[ "$got_rc" != "$want" ]] || ! grep -qx out "$TMP_DIR/cap_$want.log"; then
+    printf 'FAIL  %-24s want=%s got=%s\n' "capture_rc_$want" "$want" "$got_rc" >&2
+    fails=$((fails + 1))
+  else
+    printf 'ok    %-24s %s\n' "capture_rc_$want" "$got_rc"
+  fi
+done
+
+# --- sounio_expect_failed_exit: a runtime refusal, not a crash ---------------
+# failed_exit_is LABEL EXPECT(yes|no) RC LOGTEXT [MARKER]
+failed_exit_is() {
+  local label="$1" expect="$2" rc="$3" logtext="$4" marker="${5:-}"
+  local log="$TMP_DIR/$label.log" got="no"
+  checks=$((checks + 1))
+  printf '%s\n' "$logtext" > "$log"
+  if sounio_expect_failed_exit "$rc" "$log" "$marker"; then got="yes"; fi
+  if [[ "$got" != "$expect" ]]; then
+    printf 'FAIL  %-24s failed_exit want=%s got=%s (class=%s)\n' "$label" "$expect" "$got" "$SOUNIO_CC_CLASS" >&2
+    fails=$((fails + 1))
+  else
+    printf 'ok    %-24s failed_exit=%s\n' "$label" "$got"
+  fi
+}
+failed_exit_is fe_marker_rc1      yes   1 'probe=rejected'                       'probe=rejected'
+failed_exit_is fe_no_marker       no    1 'probe=accepted'                       'probe=rejected'
+failed_exit_is fe_rc0             no    0 'probe=rejected'                       'probe=rejected'
+failed_exit_is fe_segv_marker     no  139 'probe=rejected'                       'probe=rejected'
+failed_exit_is fe_timeout_marker  no  124 'probe=rejected'                       'probe=rejected'
+failed_exit_is fe_oom_marker      no  137 'probe=rejected'                       'probe=rejected'
+failed_exit_is fe_masked_crash    no    1 'probe=rejected
+Segmentation fault (core dumped)'                                                 'probe=rejected'
+
 echo "checks=$checks failures=$fails"
 if [[ "$fails" -ne 0 ]]; then
   echo "CLASSIFY_COMPILE_SELFTEST=FAIL ($fails of $checks)" >&2
