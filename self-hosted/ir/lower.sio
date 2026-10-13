@@ -132,12 +132,23 @@ struct LowerLocalStack {
 struct LowerFoBindTable {
     names: [Name; 128],
     sens: [i64; 4096],
+    // #2827: per-row residual-variance slot of a loop-carried (`var`) local, or
+    // -1. A mutable local's sens rows exist only for the channels that existed
+    // when it was declared; the residual holds the part of its variance carried
+    // by every OTHER channel (a measure() inside a loop body seeds a channel that
+    // stands for a fresh, independent quantity on each iteration, so it can never
+    // be a row). Reads seed a channel from it, assignments rewrite it.
+    resid: [i64; 128],
+    // #2827: the loop depth at which the row's local was declared.
+    depth: [i64; 128],
 }
 
 fn empty_lower_fo_bind_table() -> LowerFoBindTable {
     LowerFoBindTable {
         names: [ir_empty_name(); 128],
         sens: [-1; 4096],
+        resid: [-1; 128],
+        depth: [0; 128],
     }
 }
 
@@ -828,6 +839,12 @@ var FO_CTOR_FIELD0: [i64; 256] = [0; 256]
 // this follows it -- consistent with this compiler's known limits on large
 // aggregates.
 var FO_SIGMA_REG: [i64; 32] = [-1; 32]
+// #2827: the loop depth at which each first-order channel was created. A
+// channel created inside a loop that a local was declared outside of is a new
+// quantity on every iteration (a measure() in the body), so that local never
+// carries a sensitivity row for it; one created at or above the local's depth
+// is the same quantity on every iteration and gets a row.
+var FO_CH_DEPTH: [i64; 32] = [0; 32]
 
 var FO_COV_RHO: [f64; 64] = [0.0; 64]
 
@@ -11951,6 +11968,8 @@ impl Lowerer {
         let idx = lo.fo_bind_count
         var fb0 = lo.fo_bind
         (*fb0).names[idx as usize] = name
+        (*fb0).resid[idx as usize] = 0 - 1
+        (*fb0).depth[idx as usize] = lo.loop_depth
         var c: i64 = 0
         while c < 32 {
             (*fb0).sens[(idx * 32 + c) as usize] = 0 - 1
@@ -11965,7 +11984,7 @@ impl Lowerer {
     // Bounded by fo_nchan rather than 32: channels are seeded by measure(), which
     // in practice precedes the locals that accumulate through them, and allocating
     // all 32 would cost register pressure in every program that touches f64.
-    fn fo_alloc_sens_slots_for_local(self, name: Name) -> Lowerer with Mut, Panic, Div, IO {
+    fn fo_alloc_sens_slots_for_local(self, name: Name) -> Lowerer with Mut, Panic, Div, IO, Alloc {
         var lo = self
         if lo.fo_nchan <= 0 {
             return lo
@@ -11992,6 +12011,115 @@ impl Lowerer {
             lo.fo_bind = fb1
             k = k + 1
         }
+        // #2827: the residual slot. When the initialiser carried sens, every one
+        // of its channels exists now and got a row above, so nothing is left over.
+        // When it carried a variance but no sens (an opaque call result, say), all
+        // of that variance is residual: rows of zeros alone would make every later
+        // read of the local drop it.
+        var had_sens = false
+        var hk: i64 = 0
+        while hk < 32 {
+            if lo.fo_expr_sens[hk as usize] >= 0 { had_sens = true }
+            hk = hk + 1
+        }
+        let rz = lo.emit_f64_const(0.0)
+        lo = rz.0
+        if !had_sens {
+            let v_now = lo.lookup_local_variance_reg(name)
+            if v_now >= 0 {
+                lo = lo.emit(ir_copy(rz.1, v_now))
+            }
+        }
+        var fbr = lo.fo_bind
+        (*fbr).resid[row as usize] = rz.1
+        lo.fo_bind = fbr
+        lo
+    }
+
+    // #2827: the residual-variance slot of `name`'s bind row, or -1.
+    fn fo_local_resid_slot(self, name: Name) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.fo_bind_count {
+            if ir_name_eq((*self.fo_bind).names[i as usize], name) {
+                return (*self.fo_bind).resid[i as usize]
+            }
+            i = i + 1
+        }
+        0 - 1
+    }
+
+    // #2827: before a loop's first iteration, give every loop-carried local
+    // (a row with a residual slot) a zero-initialised sensitivity slot for each
+    // existing channel it has none for and that is not a per-iteration channel
+    // of a loop the local sits outside of. The slots are emitted here, outside
+    // the loop, so the body's reads and assignments see the same registers on
+    // every iteration: `var acc = 0.0; let m = k.value; while .. { acc = acc +
+    // 0.5 * m }` gives var(acc) = (4 * 0.5)^2 var(m) = 0.04 (the same m every
+    // time), where folding m into the residual counted it as independent (0.01).
+    fn fo_extend_rows_for_loop(self) -> Lowerer with Mut, Panic, Div, IO {
+        var lo = self
+        var r: i64 = 0
+        while r < lo.fo_bind_count {
+            let rs = (*lo.fo_bind).resid[r as usize]
+            let rd = (*lo.fo_bind).depth[r as usize]
+            if rs >= 0 && rd <= lo.loop_depth {
+                var k: i64 = 0
+                while k < lo.fo_nchan && k < 32 {
+                    if (*lo.fo_bind).sens[(r * 32 + k) as usize] < 0 && lo.fo_sigma2[k as usize] >= 0 && FO_CH_DEPTH[k as usize] <= rd {
+                        let z = lo.emit_f64_const(0.0)
+                        lo = z.0
+                        var fbe = lo.fo_bind
+                        (*fbe).sens[(r * 32 + k) as usize] = z.1
+                        lo.fo_bind = fbe
+                    }
+                    k = k + 1
+                }
+            }
+            r = r + 1
+        }
+        lo
+    }
+
+    // #2827: add sensitivity 1.0 on the channel whose sigma^2 register is
+    // `variance_reg`, KEEPING the expression's other channels (fo_seed_from_variance
+    // replaces them). Used to put a local's residual variance next to its rows.
+    fn fo_add_channel_for_variance(self, variance_reg: i64) -> Lowerer with Mut, Panic, Div, IO {
+        var lo = self
+        if variance_reg < 0 {
+            return lo
+        }
+        var ch: i64 = 0 - 1
+        var k: i64 = 0
+        while k < lo.fo_nchan {
+            if lo.fo_sigma2[k as usize] == variance_reg {
+                ch = k
+                k = lo.fo_nchan
+            } else {
+                k = k + 1
+            }
+        }
+        if ch < 0 {
+            if lo.fo_nchan >= 32 {
+                return lo
+            }
+            ch = lo.fo_nchan
+            lo.fo_sigma2[ch as usize] = variance_reg
+            FO_SIGMA_REG[ch as usize] = 0 - 1
+            FO_CH_DEPTH[ch as usize] = lo.loop_depth
+            lo.fo_nchan = ch + 1
+        }
+        let one = lo.emit_f64_const(1.0)
+        lo = one.0
+        let prev = lo.fo_expr_sens[ch as usize]
+        if prev >= 0 {
+            let sp = lo.fresh_reg()
+            lo = sp.0
+            lo = lo.emit(ir_binop_typed(sp.1, prev, BinaryOp::OpAdd, one.1, true, true))
+            lo = lo.emit(ir_mark_float_reg(sp.1))
+            lo.fo_expr_sens[ch as usize] = sp.1
+        } else {
+            lo.fo_expr_sens[ch as usize] = one.1
+        }
         lo
     }
 
@@ -12015,6 +12143,54 @@ impl Lowerer {
         if row < 0 {
             return (lo, false)
         }
+        // #2827: a channel the expression carries but this row has no slot for
+        // (one seeded after the declaration -- a measure() inside the loop body,
+        // or this local's own residual channel) used to be dropped, so a later
+        // read lost every earlier iteration's contribution: after an unrelated
+        // earlier loop gave `acc` rows, var(acc) kept only the last iteration
+        // (44.444 = 1/0.15^2 instead of 169.444). Its s^2 sigma^2 now goes to the
+        // residual slot. All terms are formed before the slot is written, since
+        // the residual channel's own sigma^2 register IS that slot.
+        let resid = (*lo.fo_bind).resid[row as usize]
+        let rdepth = (*lo.fo_bind).depth[row as usize]
+        var dropped: i64 = 0 - 1
+        if resid >= 0 {
+            var dk: i64 = 0
+            while dk < 32 {
+                let dslot = (*lo.fo_bind).sens[(row * 32 + dk) as usize]
+                let dsrc = lo.fo_expr_sens[dk as usize]
+                let dsig = lo.fo_sigma2[dk as usize]
+                if dslot < 0 && dsrc >= 0 && dsig >= 0 && lo.loop_depth == rdepth && FO_CH_DEPTH[dk as usize] <= rdepth {
+                    // Straight-line code at the local's own depth, on a channel
+                    // that is not a per-iteration one: the local simply gains a
+                    // row for it (no read of it can precede this one at run time).
+                    let z = lo.emit_f64_const(0.0)
+                    lo = z.0
+                    var fbx = lo.fo_bind
+                    (*fbx).sens[(row * 32 + dk) as usize] = z.1
+                    lo.fo_bind = fbx
+                } else if dslot < 0 && dsrc >= 0 && dsig >= 0 {
+                    let q_p = lo.fresh_reg()
+                    lo = q_p.0
+                    lo = lo.emit(ir_binop_typed(q_p.1, dsrc, BinaryOp::OpMul, dsrc, true, true))
+                    lo = lo.emit(ir_mark_float_reg(q_p.1))
+                    let t_p = lo.fresh_reg()
+                    lo = t_p.0
+                    lo = lo.emit(ir_binop_typed(t_p.1, q_p.1, BinaryOp::OpMul, dsig, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t_p.1))
+                    if dropped < 0 {
+                        dropped = t_p.1
+                    } else {
+                        let a_p = lo.fresh_reg()
+                        lo = a_p.0
+                        lo = lo.emit(ir_binop_typed(a_p.1, dropped, BinaryOp::OpAdd, t_p.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(a_p.1))
+                        dropped = a_p.1
+                    }
+                }
+                dk = dk + 1
+            }
+        }
         var any: bool = false
         var k: i64 = 0
         while k < 32 {
@@ -12033,6 +12209,15 @@ impl Lowerer {
                 }
             }
             k = k + 1
+        }
+        if resid >= 0 {
+            if dropped >= 0 {
+                lo = lo.emit(ir_copy(resid, dropped))
+            } else {
+                let rz = lo.emit_f64_const(0.0)
+                lo = rz.0
+                lo = lo.emit(ir_copy(resid, rz.1))
+            }
         }
         (lo, any)
     }
@@ -12586,6 +12771,7 @@ impl Lowerer {
         let ch = lo.fo_nchan
         lo.fo_sigma2[ch as usize] = variance_reg
         FO_SIGMA_REG[ch as usize] = sigma_reg
+        FO_CH_DEPTH[ch as usize] = lo.loop_depth
         lo.fo_nchan = ch + 1
         lo = lo.fo_clear_expr_sens()
         let one = lo.emit_f64_const(1.0)
@@ -12619,6 +12805,7 @@ impl Lowerer {
                 let ch = lo.fo_nchan
                 lo.fo_sigma2[ch as usize] = snap
                 FO_SIGMA_REG[ch as usize] = 0 - 1
+                FO_CH_DEPTH[ch as usize] = lo.loop_depth
                 lo.fo_nchan = ch + 1
                 lo.fo_expr_sens[ch as usize] = lo.fo_expr_sens[k as usize]
                 lo.fo_expr_sens[k as usize] = 0 - 1
@@ -12734,6 +12921,8 @@ impl Lowerer {
         let idx = lo.fo_bind_count
         var fb3 = lo.fo_bind
         (*fb3).names[idx as usize] = name
+        (*fb3).resid[idx as usize] = 0 - 1
+        (*fb3).depth[idx as usize] = lo.loop_depth
         lo.fo_bind = fb3
         var k2: i64 = 0
         while k2 < 32 {
@@ -15533,6 +15722,13 @@ impl Lowerer {
                 var lo = self.fo_load_local_sens((*e).name).so_load_local_hess((*e).name)
                 if !lo.fo_expr_has_sens() {
                     lo = lo.so_clear_expr_hess().fo_seed_from_variance(local_v, 0 - 1)
+                } else {
+                    // #2827: rows cover only the channels that existed at the
+                    // declaration; the rest of the variance is the residual.
+                    let resid_v = lo.fo_local_resid_slot((*e).name)
+                    if resid_v >= 0 {
+                        lo = lo.fo_add_channel_for_variance(resid_v)
+                    }
                 }
                 return (lo, local_v)
             }
@@ -21497,6 +21693,13 @@ impl Lowerer {
                 _ => {}
             }
         }
+        // #2827: the variance re-lowering just above walks the RHS again, and a
+        // `k.value` inside it (`let z = k.value * 2.0`) sets the pending
+        // variance/sensitivities a second time. Nothing in this statement
+        // consumes them, so the NEXT `let` did: `var acc: f64 = 0.0` right after
+        // that line read var(acc) = var(k) = 0.09 and sensitivity 1 to k.
+        lo.pending_variance_reg = 0 - 1
+        lo = lo.fo_clear_pending_sens()
         // #1535: a MUTABLE local needs PRIVATE uncertainty slots so a later
         // assignment can copy into them and the value survives a loop back-edge.
         //
@@ -27925,7 +28128,7 @@ impl Lowerer {
         let lo2 = pair_l_end.0
         let l_end = pair_l_end.1
 
-        var lo = lo2.emit(ir_label(l_top))
+        var lo = lo2.fo_extend_rows_for_loop().emit(ir_label(l_top))
         let pair_cond = lo.lower_opt_expr_ref(&e.left)
         lo = pair_cond.0
         let cond = pair_cond.1
@@ -27953,7 +28156,7 @@ impl Lowerer {
         let lo2 = pair_l_end.0
         let l_end = pair_l_end.1
 
-        var lo = lo2.emit(ir_label(l_top))
+        var lo = lo2.fo_extend_rows_for_loop().emit(ir_label(l_top))
         lo = lo.push_loop_labels(l_top, l_end)
         let loop_block_opt: Option<Box<Block>> = e.block
         match loop_block_opt {
@@ -28023,7 +28226,7 @@ impl Lowerer {
                 lo = pair_end_lbl.0
                 let l_end = pair_end_lbl.1
 
-                lo = lo.emit(ir_label(l_top))
+                lo = lo.fo_extend_rows_for_loop().emit(ir_label(l_top))
                 let cmp_op = if (*iter_box).bin_op == BinaryOp::OpRangeInclusive { BinaryOp::OpLe } else { BinaryOp::OpLt }
                 let pair_cond = lo.fresh_reg()
                 lo = pair_cond.0
@@ -28108,7 +28311,7 @@ impl Lowerer {
         lo = pair_end_lbl.0
         let l_end = pair_end_lbl.1
 
-        lo = lo.emit(ir_label(l_top))
+        lo = lo.fo_extend_rows_for_loop().emit(ir_label(l_top))
         let pair_cond = lo.fresh_reg()
         lo = pair_cond.0
         let cond = pair_cond.1
