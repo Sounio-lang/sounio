@@ -220,8 +220,27 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `EXPR_*` no longer alias the variable). Pin:
   `tests/run-pass/kl16f_loop_accum.sio`,
   `scripts/ci/lean_single_kl16f_loop_accum_gate.sh`.
+- **KL-16g — CLOSED (seed, x86, #2776 part 2).** First-order variance
+  through struct fields (literal, nested, rebind, alias), struct-returning
+  calls, by-value and by-reference struct parameters, methods, constructor
+  lets and a returned `Knowledge` value: a field-shadow table keyed by the
+  struct's region carries each f64 field's variance and sensitivities and
+  crosses calls in tagged BSS blocks. Channels 8..31 give the 9th..32nd
+  measured input of a function its own first-order channel; when the
+  program asks for an uncertainty and has nine or more `measure(` sites
+  (`SX_XCALL`) they also cross direct calls, method calls and struct fields.
+  A call nested in a later argument no longer overwrites the earlier
+  arguments' shadows, and a closure literal no longer wipes the shadows of
+  the locals declared before it. Pin: `tests/run-pass/gum_fo_struct_fields_channels_2776.sio`
+  (analytic values: `tests/oracles/gum_fo_struct_fields_channels_2776.cpp`).
 - **Residual (OPEN).** HSHADOW multi-pair interproc; HSHADOW pairs other
-  than `[0,0]` through if/else; a64 `atan2`/`pow` AD.
+  than `[0,0]` through if/else; a64 `atan2`/`pow` AD. Calls through a
+  function value or a closure carry shadows like direct calls (since #2776
+  part 2; they used to keep the LAST ARGUMENT's), and a closure's env carries
+  each captured f64's variance and channels 0-7 (not channels 8..31).
+  Calls with more than 16
+  arguments carry shadows for the first 16. The #2776 part 2 work is x86
+  only; the a64 mirror is unchanged.
 - Channel-at-`.value` semantics (`MEAS_KNOW_IDX`,
   `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
   see the history snapshot for the KAS-1 rationale.
