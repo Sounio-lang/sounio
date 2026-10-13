@@ -205,6 +205,12 @@ for path in "${selected[@]}"; do
     fi
     echo "MADAROS_CHANGED_TESTS_DYNLINK system=libzstd.so.1"
   fi
+  if [[ "$path" == "tests/run-pass/sysv_alignment_thunk_witness.sio" ]]; then
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14d_align.so" \
+      "$ROOT_DIR/tests/fixtures/kl14d/lib_align.c"
+    export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "MADAROS_CHANGED_TESTS_DYNLINK probe=$work_dir/libkl14d_align.so"
+  fi
   if [[ "$path" == "tests/run-pass/kl14d_dlopen.sio" ]]; then
     gcc -shared -fPIC -O0 -o "$work_dir/libkl14d_dl.so" \
       "$ROOT_DIR/tests/fixtures/kl14d/lib_dl.c"

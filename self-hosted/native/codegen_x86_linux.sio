@@ -85,6 +85,10 @@ var NC_RGN_SABOTAGE: i64 = 0
 var NC_WIDE_MUL_SABOTAGE: i64 = 0
 // Cached SOUNIO_SABOTAGE_IEEE_F64_SPECIAL (#2389 / KL-2 witness hook).
 var NC_IEEE_F64_SABOTAGE: i64 = 0
+// Cached SOUNIO_SABOTAGE_DYNLINK_THUNK_CALLRET (#2537 witness hook): 1 emits
+// the pre-41fae115e dynlink stub `call [rip+GOT]; ret`, which enters the
+// callee with rsp%16 == 0 instead of 8. Never set outside the witness gates.
+var NC_DYNLINK_THUNK_SABOTAGE: i64 = 0
 
 fn nc_note_label_overflow(nc: &! NativeCompiler) with Mut, Panic {
     (*nc).label_overflow = true
@@ -1873,6 +1877,7 @@ fn name_is_dynlink_extern(n: Name) -> bool with Mut, Panic, Div {
     if name_eq(n, make_name("kl14c_neg")) { return true }
     if name_eq(n, make_name("kl14d_a")) { return true }
     if name_eq(n, make_name("kl14d_b")) { return true }
+    if name_eq(n, make_name("kl14d_align_probe")) { return true }
     if name_eq(n, make_name("ZSTD_compress")) { return true }
     if name_eq(n, make_name("ZSTD_decompress")) { return true }
     if name_eq(n, make_name("ZSTD_isError")) { return true }
@@ -1914,6 +1919,9 @@ fn native_v2_dynlink_lib_id_for_name(sym_buf: [i8; 384], sym_len: i64) -> i64 wi
     if native_v2_name_buf_eq(sym_buf, sym_len, n_da.buf, n_da.len) { return 3 }
     let n_db = make_name("kl14d_b")
     if native_v2_name_buf_eq(sym_buf, sym_len, n_db.buf, n_db.len) { return 4 }
+    // #2537 SysV callee-alignment witness (tests/fixtures/kl14d/lib_align.c).
+    let n_al = make_name("kl14d_align_probe")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_al.buf, n_al.len) { return 7 }
     let n_zc = make_name("ZSTD_compress")
     if native_v2_name_buf_eq(sym_buf, sym_len, n_zc.buf, n_zc.len) { return 5 }
     let n_zd = make_name("ZSTD_decompress")
@@ -1945,6 +1953,7 @@ fn native_v2_dynlink_soname_for_lib_id(lib_id: i64) -> string {
     if lib_id == 4 { return "libkl14d_b.so" }
     if lib_id == 5 { return "libzstd.so.1" }
     if lib_id == 6 { return "libdl.so.2" }
+    if lib_id == 7 { return "libkl14d_align.so" }
     "libkl14b_probe.so"
 }
 
@@ -2074,7 +2083,16 @@ fn emit_dynlink_got_stub_into(nc: &! NativeCompiler, name: Name) with Mut, Panic
         nc_emit_byte(nc, 0x58)  // pop rax
     }
     let disp_off = (*nc).code.len + 2
-    nc_emit_jmp_mem_rip_disp32_into(nc, 0)
+    if NC_DYNLINK_THUNK_SABOTAGE == 1 {
+        // Witness mutation only: ff 15 <disp32> call qword [rip+disp32]; ret.
+        // Same disp32 position, so the GOT relocation is unchanged.
+        nc_emit_byte(nc, 0xff)
+        nc_emit_byte(nc, 0x15)
+        nc_emit_u32_le(nc, 0)
+        nc_emit_byte(nc, 0xc3)
+    } else {
+        nc_emit_jmp_mem_rip_disp32_into(nc, 0)
+    }
     add_extern_reloc(&! (*nc).extern_relocs, disp_off, name.buf, name.len)
 }
 
@@ -3001,6 +3019,7 @@ fn nc_emit_bt_rax_imm8(nc: &! NativeCompiler, bit_pos: i64) with Mut, Panic, Div
 }
 
 fn nc_refresh_rgn_sabotage() with IO, Mut, Panic, Div {
+    NC_DYNLINK_THUNK_SABOTAGE = if str_eq(read_env("SOUNIO_SABOTAGE_DYNLINK_THUNK_CALLRET"), "1") { 1 } else { 0 }
     let v = read_env("SOUNIO_RGN_BARRIER_SABOTAGE")
     NC_RGN_SABOTAGE = 0
     if str_len(v) == 0 { return }
