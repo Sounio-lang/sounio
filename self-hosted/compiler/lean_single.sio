@@ -1158,12 +1158,6 @@ fn token_capacity() -> i64 { return 2097152 }
 
 fn note_limit_error(kind: i64) with Mut {
     if LIMIT_ERROR_KIND == 0 { LIMIT_ERROR_KIND = kind }
-    // Import-tolerant: errors in imported functions should not block ELF emission
-    if MAIN_SRC_END > 0 && CURRENT_FN >= 0 && CURRENT_FN < 65536 {
-        if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 {
-            return  // imported function error — don't set TYPECHECK_FAILED
-        }
-    }
     TYPECHECK_FAILED = 1
 }
 
@@ -4655,14 +4649,8 @@ fn print_src_loc_for_tok(tok: i64) with IO, Mut, Panic {
     print_int(local_line)
 }
 
-// Guard: errors in imported module functions should NOT block ELF emission.
 fn tc_mark_failed() with Mut {
     TC_FN_ERR_COUNT = TC_FN_ERR_COUNT + 1
-    if MAIN_SRC_END > 0 && CURRENT_FN >= 0 && CURRENT_FN < 65536 {
-        if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 {
-            return
-        }
-    }
     TYPECHECK_FAILED = 1
 }
 
@@ -5461,21 +5449,28 @@ fn bitset_clear(bits: i64, clear_mask: i64) -> i64 {
 }
 
 fn tc_effect_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with IO, Mut, Panic {
-    // Skip effect violations for functions from imported modules — already validated
-    if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 { return 0 }
     tc_mark_failed()
     print("error[E035]: effect not declared in function signature at line ")
     print_int(TL[tok as usize])
+    // #1494: name the file -- an imported module's error is fatal now, and a
+    // bare line number does not say which module it is in.
+    print(" (")
+    print_src_loc_for_tok(tok)
+    print(")")
     print("\n")
     return 0
 }
 
 // Call-site version — callee requires effects caller doesn't have.
 fn tc_effect_call_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with IO, Mut, Panic {
-    if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 { return 0 }
     tc_mark_failed()
     print("error[E035]: effect not declared in function signature at line ")
     print_int(TL[tok as usize])
+    // #1494: name the file -- an imported module's error is fatal now, and a
+    // bare line number does not say which module it is in.
+    print(" (")
+    print_src_loc_for_tok(tok)
+    print(")")
     print("\n")
     return 0
 }
@@ -18473,7 +18468,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let caller_eff = FN_EFFECTS[CURRENT_FN as usize] & 1023
                 let callee_is_import = (FN_EFFECTS[fi as usize] & 2048) != 0
                 let caller_is_import = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
-                if bitset_is_subset(callee_eff, caller_eff) == false && !(callee_is_import && caller_is_import) {
+                // #1494: an effect missing in an imported function is an error
+                // like any other (it used to be skipped when caller and callee
+                // were both imported).
+                if bitset_is_subset(callee_eff, caller_eff) == false {
                     tc_effect_call_violation(call_tok, callee_eff, caller_eff)
                 }
                 // Approx effect check (bit 18) — above & 1023 mask
@@ -23313,9 +23311,8 @@ fn compile_gpu_launch_stmt_x86() with IO, Mut, Panic, Div {
         if FN_ARITY[fi as usize] != argc { tc_wrong_arity(call_tok, FN_ARITY[fi as usize], argc) }
         let callee_eff = FN_EFFECTS[fi as usize]
         let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
-        let gpu_callee_imp = (FN_EFFECTS[fi as usize] & 2048) != 0
-        let gpu_caller_imp = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
-        if bitset_is_subset(callee_eff, caller_eff) == false && !(gpu_callee_imp && gpu_caller_imp) {
+        // #1494: no import exemption (see compile_primary).
+        if bitset_is_subset(callee_eff, caller_eff) == false {
             tc_effect_call_violation(call_tok, callee_eff, caller_eff)
         }
         emit_kernel_dispatch_x86(fi, abi_argc)
@@ -39299,9 +39296,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 // like they "require" effects the caller lacks -> false effect errors.
                 let callee_eff = FN_EFFECTS[fi as usize] & 1023
                 let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
-                let a64_callee_imp = (FN_EFFECTS[fi as usize] & 2048) != 0
-                let a64_caller_imp = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
-                if bitset_is_subset(callee_eff, caller_eff) == false && !(a64_callee_imp && a64_caller_imp) { tc_effect_call_violation(call_tok, callee_eff, caller_eff) }
+                // #1494: no import exemption (parity with compile_primary).
+                if bitset_is_subset(callee_eff, caller_eff) == false { tc_effect_call_violation(call_tok, callee_eff, caller_eff) }
                 // The three effects carried above the & 1023 mask are checked
                 // individually on the x86 path and were absent here, so a call
                 // needing Approx, Causal or NaturalityG2 from a caller that does
