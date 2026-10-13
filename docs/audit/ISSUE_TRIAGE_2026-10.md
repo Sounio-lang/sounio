@@ -88,7 +88,7 @@ Regras da campanha: nenhuma issue nova; uma issue só fecha com prova (correçã
 | # | título | aberta em | disp. | dono | estado | prova / PR e CI no head |
 |---|---|---|---|---|---|---|
 | [#1535](https://github.com/Sounio-lang/sounio/issues/1535) | [epistemic] lean_single divides correlated variance by the number of uses; both engines lose it i… | 2026-07-27 | c | — | fechada | [prova](https://github.com/Sounio-lang/sounio/issues/2776#issuecomment-6134139531) |
-| [#1706](https://github.com/Sounio-lang/sounio/issues/1706) | 14 madaros_gum_fo_* tests assert a PASS marker neither engine produces (one segfaults) | 2026-08-10 | decisão | E | aberta (decisão D-23, a fechar com o link) | [#2945](https://github.com/Sounio-lang/sounio/pull/2945) `00bbfae62` (parcial) CI verde<br>[#2933](https://github.com/Sounio-lang/sounio/pull/2933) `f2a9b6cad` (parcial) CI em execução |
+| [#1706](https://github.com/Sounio-lang/sounio/issues/1706) | 14 madaros_gum_fo_* tests assert a PASS marker neither engine produces (one segfaults) | 2026-08-10 | decisão | E | aberta (decisão D-23, a fechar com o link) | [#2945](https://github.com/Sounio-lang/sounio/pull/2945) `00bbfae62` (parcial) CI verde<br>[#2933](https://github.com/Sounio-lang/sounio/pull/2933) `f2a9b6cad` (parcial) CI verde |
 | [#2504](https://github.com/Sounio-lang/sounio/issues/2504) | Madaros: Knowledge<i64> from measure(42, uncertainty: ...) has .value != 42 with no diagnostic (f… | 2026-09-14 | a | M | PR aberto | [#2860](https://github.com/Sounio-lang/sounio/pull/2860) `c4d52b99d` (fecha) CI verde |
 | [#2776](https://github.com/Sounio-lang/sounio/issues/2776) | lean_single loses first-order variance through struct fields, constructor lets, field-returning c… | 2026-10-06 | a | E | PR aberto | [#2941](https://github.com/Sounio-lang/sounio/pull/2941) `0b579dc48` (fecha) CI verde<br>[#2917](https://github.com/Sounio-lang/sounio/pull/2917) `340a7f902` (parcial) CI verde |
 | [#2778](https://github.com/Sounio-lang/sounio/issues/2778) | madaros_wide_struct_variance_field: variance through a wide-struct field is 0 on both shipped eng… | 2026-10-06 | c | — | fechada | [prova](https://github.com/Sounio-lang/sounio/issues/2776#issuecomment-6134139531) |
@@ -146,7 +146,7 @@ Regras da campanha: nenhuma issue nova; uma issue só fecha com prova (correçã
 | # | título | aberta em | disp. | dono | estado | prova / PR e CI no head |
 |---|---|---|---|---|---|---|
 | [#1240](https://github.com/Sounio-lang/sounio/issues/1240) | [docs] repair stale routes and validation date in governance metadata generator | 2026-07-19 | a | S | PR aberto | [#2902](https://github.com/Sounio-lang/sounio/pull/2902) `18a17c99e` (fecha) CI verde |
-| [#1680](https://github.com/Sounio-lang/sounio/issues/1680) | madaros --self-test segfaults at test 24 of 1162 — 97.7% of the compiler's own suite has never ru… | 2026-08-06 | a | #2937) | PR aberto | [#2953](https://github.com/Sounio-lang/sounio/pull/2953) `a54fc3e9f` (fecha) CI verde<br>[#2952](https://github.com/Sounio-lang/sounio/pull/2952) `d88e843e8` (parcial) CI verde<br>[#2951](https://github.com/Sounio-lang/sounio/pull/2951) `da6c0f826` (parcial) CI verde<br>[#2950](https://github.com/Sounio-lang/sounio/pull/2950) `587f15ca2` (parcial) CI verde<br>[#2949](https://github.com/Sounio-lang/sounio/pull/2949) `3297e4fcb` (fecha) CI verde<br>[#2948](https://github.com/Sounio-lang/sounio/pull/2948) `e373c7122` (parcial) CI verde<br>[#2937](https://github.com/Sounio-lang/sounio/pull/2937) `cea4eb532` (parcial) CI vermelho |
+| [#1680](https://github.com/Sounio-lang/sounio/issues/1680) | madaros --self-test segfaults at test 24 of 1162 — 97.7% of the compiler's own suite has never ru… | 2026-08-06 | a | #2937) | PR aberto | [#2953](https://github.com/Sounio-lang/sounio/pull/2953) `a54fc3e9f` (fecha) CI verde<br>[#2952](https://github.com/Sounio-lang/sounio/pull/2952) `d88e843e8` (parcial) CI verde<br>[#2951](https://github.com/Sounio-lang/sounio/pull/2951) `da6c0f826` (parcial) CI verde<br>[#2950](https://github.com/Sounio-lang/sounio/pull/2950) `587f15ca2` (parcial) CI verde<br>[#2949](https://github.com/Sounio-lang/sounio/pull/2949) `3297e4fcb` (fecha) CI verde<br>[#2948](https://github.com/Sounio-lang/sounio/pull/2948) `e373c7122` (parcial) CI verde<br>[#2937](https://github.com/Sounio-lang/sounio/pull/2937) `42f78d84c` (parcial) CI verde |
 | [#2219](https://github.com/Sounio-lang/sounio/issues/2219) | scripts/ci/souc-native-wrapper.sh: raw-mode-detection typo + missing stack ulimit break Full Test… | 2026-08-28 | b | — | fechada | [prova](https://github.com/Sounio-lang/sounio/issues/2219#issuecomment-6134123492) |
 | [#2240](https://github.com/Sounio-lang/sounio/issues/2240) | Madaros Current-Source f64 Lowering job's 35-minute timeout is too tight for large merges (800+ c… | 2026-08-28 | b | — | fechada | [prova](https://github.com/Sounio-lang/sounio/issues/2240#issuecomment-6134124020) |
 | [#2241](https://github.com/Sounio-lang/sounio/issues/2241) | The re-keyed compile-fail assertions are lean_single-specific; pointing the suite at Madaros woul… | 2026-08-28 | decisão | — | fechada → decisão D-11 | [comentário](https://github.com/Sounio-lang/sounio/issues/2241#issuecomment-6151733573) |
@@ -167,8 +167,8 @@ Regras da campanha: nenhuma issue nova; uma issue só fecha com prova (correçã
 
 | # | título | aberta em | disp. | dono | estado | prova / PR e CI no head |
 |---|---|---|---|---|---|---|
-| [#2533](https://github.com/Sounio-lang/sounio/issues/2533) | [ffi] native_v2_dynlink_unique_lib_count saturates at 4; writer overflow check is dead code | 2026-09-16 | a | N | PR aberto | [#2910](https://github.com/Sounio-lang/sounio/pull/2910) `103408277` (fecha) CI verde |
-| [#2534](https://github.com/Sounio-lang/sounio/issues/2534) | [ffi] dynstr fixed at 256 bytes — needs bounds check or dynamic sizing before KL-14d2 | 2026-09-16 | a | N | PR aberto | [#2910](https://github.com/Sounio-lang/sounio/pull/2910) `103408277` (fecha) CI verde |
+| [#2533](https://github.com/Sounio-lang/sounio/issues/2533) | [ffi] native_v2_dynlink_unique_lib_count saturates at 4; writer overflow check is dead code | 2026-09-16 | a | N | PR aberto | [#2910](https://github.com/Sounio-lang/sounio/pull/2910) `1d9f4597f` (fecha) CI em execução |
+| [#2534](https://github.com/Sounio-lang/sounio/issues/2534) | [ffi] dynstr fixed at 256 bytes — needs bounds check or dynamic sizing before KL-14d2 | 2026-09-16 | a | N | PR aberto | [#2910](https://github.com/Sounio-lang/sounio/pull/2910) `1d9f4597f` (fecha) CI em execução |
 | [#2535](https://github.com/Sounio-lang/sounio/issues/2535) | [design] Promote LibraryId from hard-coded table to first-class FFI entity (ExternSymbol) | 2026-09-16 | decisão | — | fechada → decisão D-04 | [comentário](https://github.com/Sounio-lang/sounio/issues/2535#issuecomment-6151727723) |
 | [#2536](https://github.com/Sounio-lang/sounio/issues/2536) | [design] Decide symbol-interposition semantics for LibraryId (provenance vs binding ownership) | 2026-09-16 | decisão | — | fechada → decisão D-05 | [comentário](https://github.com/Sounio-lang/sounio/issues/2536#issuecomment-6151728432) |
 | [#2537](https://github.com/Sounio-lang/sounio/issues/2537) | [test] Missing witness for SysV callee alignment in dynlink thunk (post-41fae115e) | 2026-09-16 | — | N | fechada (pelo mantenedor ou por merge) |  |
@@ -206,7 +206,7 @@ Regras da campanha: nenhuma issue nova; uma issue só fecha com prova (correçã
 |---|---|---|---|
 | [#2874](https://github.com/Sounio-lang/sounio/issues/2874) | [FIX IMEDIATO] Madaros distribuído: parâmetros com unidades derivadas | PR aberto | [#2939](https://github.com/Sounio-lang/sounio/pull/2939) `09c5e60c6` (fecha) CI verde<br>[#2924](https://github.com/Sounio-lang/sounio/pull/2924) `764ca3929` (parcial) CI verde<br>[#2905](https://github.com/Sounio-lang/sounio/pull/2905) `7b44e27de` (parcial) CI verde |
 | [#2881](https://github.com/Sounio-lang/sounio/issues/2881) | Madaros self-compile gate red on main | fechada pelo mantenedor (duplicada por #2896) | — |
-| [#2896](https://github.com/Sounio-lang/sounio/issues/2896) | Madaros self-compile gate red on main | PR aberto | [#2954](https://github.com/Sounio-lang/sounio/pull/2954) `a983a97fa` (fecha) CI em execução; o rascunho #2886 traz a mesma correção |
+| [#2896](https://github.com/Sounio-lang/sounio/issues/2896) | Madaros self-compile gate red on main | PR aberto | [#2954](https://github.com/Sounio-lang/sounio/pull/2954) `a983a97fa` (fecha) CI verde; o rascunho #2886 traz a mesma correção |
 
 ## Resumo
 
@@ -238,7 +238,7 @@ Regras da campanha: nenhuma issue nova; uma issue só fecha com prova (correçã
 | [#2863](https://github.com/Sounio-lang/sounio/pull/2863) | `fcd2f3e0f` | não | Fixes #2377 | verde (neutral=1,skipped=8,success=26) |  |
 | [#2864](https://github.com/Sounio-lang/sounio/pull/2864) | `ae2f4d9fe` | não | Fixes #1542 | verde (neutral=1,skipped=12,success=24) |  |
 | [#2886](https://github.com/Sounio-lang/sounio/pull/2886) | `ea39efec8` | sim | Refs #2881 | verde (skipped=6,success=25) |  |
-| [#2892](https://github.com/Sounio-lang/sounio/pull/2892) | `52271ac6b` | não |  | em execução (in_progress=2,neutral=1,skipped=4,success=19) | head 52271ac6b corrige o GATE_VACUITY_GATE_FAIL do head anterior (42e4f553d). Enquanto não for mesclado, o bot de stale continua fechando issues |
+| [#2892](https://github.com/Sounio-lang/sounio/pull/2892) | `52271ac6b` | não |  | verde (neutral=1,skipped=5,success=22) | head 52271ac6b corrige o GATE_VACUITY_GATE_FAIL do head anterior (42e4f553d). Enquanto não for mesclado, o bot de stale continua fechando issues |
 | [#2894](https://github.com/Sounio-lang/sounio/pull/2894) | `f872280ba` | não | Refs #2218 | verde (neutral=1,skipped=5,success=22) | testemunhas de defeitos já corrigidos em `main` (#2218, #2658, #2684, #1577) |
 | [#2895](https://github.com/Sounio-lang/sounio/pull/2895) | `4b4a91ef0` | não | Fixes #2814 | verde (neutral=1,skipped=5,success=22) |  |
 | [#2897](https://github.com/Sounio-lang/sounio/pull/2897) | `28aa69a28` | não | Fixes #2830 | verde (neutral=1,skipped=8,success=25) |  |
@@ -253,7 +253,7 @@ Regras da campanha: nenhuma issue nova; uma issue só fecha com prova (correçã
 | [#2907](https://github.com/Sounio-lang/sounio/pull/2907) | `ad40615b9` | não | Fixes #2388 | verde (neutral=1,skipped=9,success=21) |  |
 | [#2908](https://github.com/Sounio-lang/sounio/pull/2908) | `e320d97ac` | não | Refs #2354 | verde (neutral=1,skipped=7,success=24) |  |
 | [#2909](https://github.com/Sounio-lang/sounio/pull/2909) | `04b0a4a26` | não | Refs #2827 | verde (neutral=1,skipped=11,success=22) |  |
-| [#2910](https://github.com/Sounio-lang/sounio/pull/2910) | `103408277` | não | Fixes #2533, Fixes #2534 | verde (neutral=1,skipped=5,success=22) |  |
+| [#2910](https://github.com/Sounio-lang/sounio/pull/2910) | `1d9f4597f` | não | Fixes #2533, Fixes #2534 | em execução (in_progress=1,neutral=1,skipped=5,success=20) |  |
 | [#2911](https://github.com/Sounio-lang/sounio/pull/2911) | `c27b895c4` | não | Fixes #2798 | verde (neutral=1,skipped=10,success=26) |  |
 | [#2912](https://github.com/Sounio-lang/sounio/pull/2912) | `5df8e880b` | não | Fixes #2835 | verde (neutral=1,skipped=9,success=18) |  |
 | [#2913](https://github.com/Sounio-lang/sounio/pull/2913) | `489884004` | não | Fixes #2421 | verde (neutral=1,skipped=10,success=26) |  |
@@ -273,11 +273,11 @@ Regras da campanha: nenhuma issue nova; uma issue só fecha com prova (correçã
 | [#2928](https://github.com/Sounio-lang/sounio/pull/2928) | `6329d0bfd` | não | Fixes #1646 | verde (neutral=1,skipped=7,success=23) |  |
 | [#2930](https://github.com/Sounio-lang/sounio/pull/2930) | `715132aef` | não | Fixes #2422, Fixes #2429 | verde (neutral=1,skipped=6,success=24) |  |
 | [#2932](https://github.com/Sounio-lang/sounio/pull/2932) | `b6fd1cfdb` | não | Fixes #2789 | verde (neutral=1,skipped=5,success=22) |  |
-| [#2933](https://github.com/Sounio-lang/sounio/pull/2933) | `f2a9b6cad` | não | Refs #1706 | em execução (in_progress=3,neutral=1,skipped=6,success=17) | head f2a9b6cad corrige o XPAS de `fo_call_boundary_neg` e encolhe o baseline de known-failure (os dois vermelhos do head anterior ddc3538f5) |
+| [#2933](https://github.com/Sounio-lang/sounio/pull/2933) | `f2a9b6cad` | não | Refs #1706 | verde (neutral=1,skipped=7,success=21) | head f2a9b6cad corrige o XPAS de `fo_call_boundary_neg` e encolhe o baseline de known-failure (os dois vermelhos do head anterior ddc3538f5) |
 | [#2934](https://github.com/Sounio-lang/sounio/pull/2934) | `1cce450b7` | não | Refs #2661 | verde (neutral=1,skipped=8,success=25) |  |
 | [#2935](https://github.com/Sounio-lang/sounio/pull/2935) | `1e13b735c` | não | Refs #2820 | verde (neutral=1,skipped=9,success=18) |  |
 | [#2936](https://github.com/Sounio-lang/sounio/pull/2936) | `3557dd07c` | não | Refs #1161 | verde (neutral=1,skipped=5,success=22) |  |
-| [#2937](https://github.com/Sounio-lang/sounio/pull/2937) | `cea4eb532` | não | Refs #1680 | vermelho (failure=2,neutral=1,skipped=5,success=20) | vermelho só no passo self-test (rc=139), esperado até #2847 ser mesclado: o PR depende dele para a correção do crash |
+| [#2937](https://github.com/Sounio-lang/sounio/pull/2937) | `42f78d84c` | não | Refs #1680 | verde (neutral=1,skipped=8,success=25) | head 42f78d84c carrega o commit de #2847 (`1e2c9ece1`) e um refresh de seed, para ficar verde sozinho; quem mesclar depois refaz o seed |
 | [#2938](https://github.com/Sounio-lang/sounio/pull/2938) | `f3a0b831a` | não | Fixes #2354 | verde (neutral=1,skipped=5,success=23) | empilhado sobre #2908 (E270) |
 | [#2939](https://github.com/Sounio-lang/sounio/pull/2939) | `09c5e60c6` | não | Fixes #2874 | verde (neutral=1,skipped=6,success=24) |  |
 | [#2940](https://github.com/Sounio-lang/sounio/pull/2940) | `89b291244` | não | Fixes #2827 | verde (neutral=1,skipped=7,success=20) |  |
@@ -294,7 +294,7 @@ Regras da campanha: nenhuma issue nova; uma issue só fecha com prova (correçã
 | [#2951](https://github.com/Sounio-lang/sounio/pull/2951) | `da6c0f826` | não | Refs #1680 | verde (neutral=1,skipped=6,success=24) |  |
 | [#2952](https://github.com/Sounio-lang/sounio/pull/2952) | `d88e843e8` | não | Refs #1680 | verde (neutral=1,skipped=6,success=24) |  |
 | [#2953](https://github.com/Sounio-lang/sounio/pull/2953) | `a54fc3e9f` | não | Fixes #1680 | verde (neutral=1,skipped=8,success=25) |  |
-| [#2954](https://github.com/Sounio-lang/sounio/pull/2954) | `a983a97fa` | não | Fixes #2896 | em execução (in_progress=2,neutral=1,skipped=5,success=20) | fecha #2896; o rascunho #2886 traz a mesma correção (mais um workflow e um check de opcodes) |
+| [#2954](https://github.com/Sounio-lang/sounio/pull/2954) | `a983a97fa` | não | Fixes #2896 | verde (neutral=1,skipped=6,success=23) | fecha #2896; o rascunho #2886 traz a mesma correção (mais um workflow e um check de opcodes) |
 
 ## Não concluído
 
@@ -302,7 +302,7 @@ Regras da campanha: nenhuma issue nova; uma issue só fecha com prova (correçã
 - **#1156** precisa de um nó com ≥16 GB: o composto grande do parser passa de 4,5 GB de RSS só compilando, e o host da campanha tem 7 GB. Comando: `souc run G4/i1156_driver.sio` com o Madaros de `main`; critério: passar de `lower_array: seed_begin`. O PR #2931 (mesclado, `Refs`) removeu o frame de 671 MB por valor e o SIGSEGV de execução da API de tokens.
 - **#1706** continua aberta por causa de `madaros_gum_fo_knowledge_ops`, bloqueado por E245 (PENDING D-23); 13 dos 14 testes passam com os PRs #2933 e #2945.
 - **#2820** (guarda-chuva): ficam quatro testes Pireus ainda falhando no Madaros (`quotient`, `lowering`, `orbit`, `novelty_feedback` com arena cheia), `material_engine_admission` que precisa do prebuilt atualizado, exemplos com mais de 1200 s, `pdf_text_projection` com segfault do compilador e `inflate` com segfault no `lean_single`. Os PRs #2944, #2946 e #2947 tratam as classes de miscompile e de material de vendor.
+- **#1680**: o crash do `--self-test` está corrigido no PR #2937 (que agora carrega o commit de lean_single de #2847); com ele o `--self-test` roda até o fim (613/1162 testes passam; os demais são defeitos separados que os PRs #2948–#2953 tratam em parte). A issue só fecha com o merge desses PRs.
 - **#2425, #2779, #2834** têm PR só parcial: #2925 (16 dos 18 gates de refusal), #2849/#2846 (as duas metades de `effect_test_harness`), #2845 (a metade `Mut`; a metade `IO` duplica #2760, cujo PR #2762 é rascunho).
-- **#1680**: o crash do `--self-test` depende de #2847 (lean_single, array repeat-init de struct); com ele a contagem passa de 24/1162 para 613/1162 testes passando; o PR #2937 continua vermelho no gate novo até lá.
 - **Gate de CI vermelho por motivo estranho à campanha**: PRs antigos do mantenedor (por exemplo #2775, #2724, #2704, #2703, #2686, #2681, #2663, #2660, #2655) já estavam vermelhos antes e não são da campanha.
 
