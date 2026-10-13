@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# #1680: `madaros --self-test` must run to its summary line, and the self-tests pinned
-# below must pass. The remaining failures are listed in the #1680 PR stack.
+# #1680: `madaros --self-test` must run to its summary line, every self-test must pass
+# (rc 0 and an N/N summary), and the pinned self-tests below are named for the record.
 #
 # Before #1680 the run died with SIGSEGV right after T110: const_prop's
 # cp_empty_instrs() returns `[ir_nop(); 1024]`, and lean_single (which compiles
@@ -68,4 +68,12 @@ for t in T69 T57 T61 T70 T84 T85 T93 T94 T156 T187 T227 T229 T452 T453 T454 T455
   fi
 done
 echo "$TAG: PASS 33 pinned self-tests"
+if grep -qE '^  FAIL' "$WORK/out"; then
+  grep -E '^  FAIL' "$WORK/out" >&2
+  fail "self-tests failed"
+fi
+[[ $rc -eq 0 ]] || fail "--self-test exited rc=$rc without a FAIL line"
+read -r got want < <(sed -E 's#^compiler/main tests: ([0-9]+)/([0-9]+) passed.*#\1 \2#' <<<"$summary")
+[[ "$got" == "$want" && "$want" -gt 0 ]] || fail "summary is not N/N: $summary"
+echo "$TAG: PASS all $want self-tests"
 echo "MADAROS_SELF_TEST_GATE_OK"
