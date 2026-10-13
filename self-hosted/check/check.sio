@@ -2295,6 +2295,21 @@ fn checker_check_validwhile_predicate_inplace(c: *mut Checker, validity_opt: Opt
     }
 }
 
+// #2753 (E269): no engine enforces a `Knowledge<T where { ... }>` predicate yet
+// (the runtime guard exists only as the scripts/ontology expander), so a program
+// carrying one used to run with the predicate silently ignored. Refuse it.
+fn checker_refuse_knowledge_where_mut(c: *mut Checker, opt: Option<Box<KnowledgeTypeInfo> >, span: Span) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(info_box) => {
+            match (*info_box).proof_constraints {
+                Some(_) => checker_report_error_at_inplace(c, span, 269, 0, 0, 0),
+                None => {}
+            }
+        }
+        None => {}
+    }
+}
+
 fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTypeInfo> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(info_box) => {
@@ -2987,7 +3002,10 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
         TypeExprKind::TypeNever => ty_never()
         TypeExprKind::TypeInfer => ty_unknown()
         TypeExprKind::TypeSelfUpper => (*c).current_impl_type
-        TypeExprKind::TypeKnowledge => checker_lower_knowledge_type_mut(c, te.knowledge_info)
+        TypeExprKind::TypeKnowledge => {
+            checker_refuse_knowledge_where_mut(c, te.knowledge_info, te.span)
+            checker_lower_knowledge_type_mut(c, te.knowledge_info)
+        }
         TypeExprKind::TypeModel => checker_lower_model_type_mut(c, te.type_args, te.span)
         TypeExprKind::TypePolicy => {
             let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
@@ -18193,6 +18211,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
     else if code == 264 { print("enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped") }
     else if code == 267 { print("cannot assign through a shared reference: the place is reached through `&T`, which is read-only") }
+    else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
     else { print("unknown error") }
 }
@@ -18504,6 +18523,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 248 {
         print("   |\n   = help: wait for explicit from_bits/conversion operations; no f64 cast is a valid f128/f256 implementation\n")
+    }
+    else if code == 269 {
+        print("   |\n   = help: drop the `where { ... }` and check the predicate explicitly (`if !(k.value.age >= 18) { panic(...) }`), or run the source through scripts/ontology/expand_knowledge_runtime_guards.sh, which inserts that check\n")
     }
     else if code == 264 {
         print("   |\n   = help: carry the payload in a struct next to a payload-free enum tag, e.g. `struct Shape { kind: ShapeKind, a: f64, b: f64 }`; or use Option<T> for a single optional value\n")
