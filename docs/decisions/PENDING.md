@@ -47,6 +47,7 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 | [D-28](#d-28) | Operadores infixos `!` e `~` (aplicado provisoriamente no PR #2921) | #2249 |
 | [D-29](#d-29) | Seed macOS ARM64 com recibo de proveniência | #821 |
 | [D-30](#d-30) | Raízes precisas para o GC de handles | #1491 |
+| [D-31](#d-31) | Reborrow por parâmetro `&!` pode aliasar? | #1581 (resíduo) |
 
 ---
 
@@ -349,3 +350,13 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 - **Recomendação:** (A) se houver carga real com > 2^22 handles vivos; senão (B), documentado.
 - **Teste discriminante:** um programa que mantém > 2^22 handles vivos em retornos que escapam termina sem "handles full" (rc=182). A sonda `docs/handoff/repros/handle_table_182_per_construction_madaros.sio` já passa; esta ainda precisa ser escrita.
 - **Causa localizada:** `self-hosted/native/codegen_x86_linux.sio:247` (`precise_stack_maps: false`), `:3559` (`native_v2_emit_gc_empty_frame_reset`, só chamada no legado `native/codegen.sio:3993,4013`); `native/gc.sio:39-41,63`.
+
+<a id="d-31"></a>
+## D-31 — Reborrow por parâmetro `&!` pode aliasar?
+
+- **Origem:** #1581 (a divergência de engines da issue está corrigida; este é o resíduo que as duas engines compartilham).
+- **Pergunta:** `sub(&(*y), &!(*y))` com `y: &![f64; 4]` (um empréstimo compartilhado e um exclusivo do mesmo lugar, via reborrow, na mesma chamada) deve ser recusado como `sub(&y, &!y)` é?
+- **Opções:** (a) sim: o reborrow `&(*p)`/`&!(*p)` conta como empréstimo do lugar subjacente nos dois engines (E037/E038); (b) não: reborrows são livres e a responsabilidade é do chamador.
+- **Recomendação:** (a): (b) deixa um alias mutável aceito por `check`, o mesmo tipo de furo de #888.
+- **Teste discriminante:** `fn step(y: &![f64; 4]) with Mut { sub(&(*y), &!(*y)) }` (e `sub(&s.y, &!s.y)` com `s: &!St`) recusado com E037/E038 nos dois engines; hoje Madaros e `lean_single` aceitam e imprimem `4.000000`.
+- **Causa localizada:** a composição de empréstimos por campo/lugar de `self-hosted/check/borrow.sio` (commit `4f2a392ca`) não normaliza `&(*p)` para o lugar de `p`; o `lean_single` tem a mesma lacuna em `lean_single.sio`.
