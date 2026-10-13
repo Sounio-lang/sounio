@@ -380,3 +380,31 @@ files, 78.4% accepted by `souc check`
 - Measure with the compiler and stdlib pinned together (`SOUNIO_MADAROS_BIN`
   inside one tree; `SOUNIO_STDLIB_PATH` changes verdicts on its own). Full
   numbers and caveats: history snapshot, section "Reading a rejection".
+- **Builtin effects (#2760).** Madaros now attributes the effect row of the
+  implicit builtins the way lean_single does: `IO` for `print`, `println`,
+  `read_byte`, `read_line`, `read_file`, `file_size`, `write_file`,
+  `write_bytes`, `append_file` (`print_int`, `print_char` and `syscall6` already
+  did); `Panic` for `assert` and `panic`; `Alloc` for `malloc`, `heap_alloc`,
+  `heap_realloc` and `heap_free`. A caller that does not declare the effect is
+  rejected with E035 on both engines. A user function with the same name as a
+  builtin keeps its own signature. Still unguarded on **both** engines:
+  `print_f64`, `read_i64`, `write_i64`, `read_f64`, `write_f64` -- lean_single
+  does not check them either, so they are a shared gap, not a divergence.
+  `print_int` is guarded by Madaros only.
+- **Two divergences from lean_single remain in how effects are checked.**
+  (1) lean_single grants `main` every basic effect (predates #2760); Madaros
+  requires `fn main() with IO` even when `main` only calls a `with IO` user
+  function.
+  (2) A closure's effects are inferred, not declared: the closure body widens its
+  own effect set and publishes it on the closure's signature, so nothing is
+  reported inside the body. The effect then surfaces where the closure is used.
+  Called directly, it is charged to the enclosing function (a closure that
+  `println`s, called from a function without `IO`, is E035 on that function).
+  Passed as an argument to a function-typed parameter that carries no effects, an
+  effectful closure does not fit the parameter's empty effect row and is E009
+  ("argument type does not match parameter") at the call. Before #2760 a closure
+  that only used a builtin had an empty row, so that same call was accepted; the
+  builtins listed above now travel through the closure like any other effect.
+  `tests/run-pass/closure_effect_transparent_hof.sio` is that case (its intent is
+  that an unannotated HOF parameter is effect-polymorphic) and carries
+  `known-failure`.
