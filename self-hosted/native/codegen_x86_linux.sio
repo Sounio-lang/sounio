@@ -1897,8 +1897,20 @@ fn native_v2_name_buf_eq(a_buf: [i8; 384], a_len: i64, b_buf: [i8; 384], b_len: 
     true
 }
 
-fn native_v2_dynlink_max_symbols() -> i64 { 8 }
-fn native_v2_dynlink_max_libs() -> i64 { 4 }
+// Dynlink tier caps (#2533). The lib cap must be at least the number of
+// distinct libraries native_v2_dynlink_lib_id_for_name can name, or a valid
+// program loses a DT_NEEDED entry. Both are refused with a diagnostic when
+// exceeded (native_v2_write_min_elf64_to_file), never truncated.
+fn native_v2_dynlink_max_symbols() -> i64 { 64 }
+fn native_v2_dynlink_max_libs() -> i64 { 16 }
+// Lib ids are small table indices; 0 = not dynlink.
+fn native_v2_dynlink_max_lib_id() -> i64 { 63 }
+
+// Set by native_v2_build_elf_image_into when a dynstr write would cross the
+// size the writer reserved for it (#2534). The writer then refuses the ELF.
+// i64 (0/1), not bool: module-global bool init is not exercised in this
+// backend (see NC_WIDE_MUL_SABOTAGE).
+var NC_DYNSTR_OVERFLOW: i64 = 0
 
 // Stable lib id for a dynlink symbol name. 0 = unknown / not dynlink.
 fn native_v2_dynlink_lib_id_for_name(sym_buf: [i8; 384], sym_len: i64) -> i64 with Mut, Panic, Div {
@@ -1989,28 +2001,56 @@ fn native_v2_dynlink_unique_count(nc: &NativeCompiler) -> i64 {
 }
 
 // Unique DT_NEEDED lib count (order = first appearance of a lib via symbols).
+// Exact, never saturated: before #2533 it stopped at the cap (4), so the cap
+// check in the writer could not fire and a 5-library program silently lost
+// its 5th DT_NEEDED entry (rc=0 build, then "undefined symbol" at load).
 fn native_v2_dynlink_unique_lib_count(nc: &NativeCompiler) -> i64 with Mut, Panic, Div {
-    var libs: [i64; 4] = [0; 4]
+    var seen: [bool; 64] = [false; 64]
     var n: i64 = 0
     var i: i64 = 0
     while i < (*nc).extern_relocs.count {
         let er = (*nc).extern_relocs.entries[i as usize]
         let lid = native_v2_dynlink_lib_id_for_name(er.sym_buf, er.sym_len)
-        if lid > 0 {
-            var seen = false
-            var j: i64 = 0
-            while j < n {
-                if libs[j as usize] == lid { seen = true }
-                j = j + 1
-            }
-            if !seen && n < native_v2_dynlink_max_libs() {
-                libs[n as usize] = lid
+        if lid > 0 && lid <= native_v2_dynlink_max_lib_id() {
+            if !seen[lid as usize] {
+                seen[lid as usize] = true
                 n = n + 1
             }
         }
         i = i + 1
     }
     n
+}
+
+// Exact .dynstr size (#2534): leading NUL + each unique soname + NUL + each
+// unique symbol name + NUL, in the order native_v2_build_elf_image_into
+// writes them. Replaces the fixed 256-byte reservation.
+fn native_v2_dynlink_dynstr_need(nc: &NativeCompiler) -> i64 with Mut, Panic, Div {
+    var need: i64 = 1
+    var seen: [bool; 64] = [false; 64]
+    var i: i64 = 0
+    while i < (*nc).extern_relocs.count {
+        let er = (*nc).extern_relocs.entries[i as usize]
+        let lid = native_v2_dynlink_lib_id_for_name(er.sym_buf, er.sym_len)
+        if lid > 0 && lid <= native_v2_dynlink_max_lib_id() {
+            if !seen[lid as usize] {
+                seen[lid as usize] = true
+                need = need + str_len(native_v2_dynlink_soname_for_lib_id(lid)) + 1
+            }
+        }
+        var dup = false
+        var j: i64 = 0
+        while j < i {
+            let prev = (*nc).extern_relocs.entries[j as usize]
+            if native_v2_name_buf_eq(er.sym_buf, er.sym_len, prev.sym_buf, prev.sym_len) {
+                dup = true
+            }
+            j = j + 1
+        }
+        if !dup { need = need + er.sym_len + 1 }
+        i = i + 1
+    }
+    need
 }
 
 // 1-based dynsym index for this reloc name; 0 if missing.
@@ -14249,11 +14289,26 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     let dyn_base: i64 = data_len
     let n_syms = native_v2_dynlink_unique_count(nc)
     let n_libs = native_v2_dynlink_unique_lib_count(nc)
-    if needs_dyn && (n_syms <= 0 || n_syms > native_v2_dynlink_max_symbols()) { return 22 }
-    if needs_dyn && (n_libs <= 0 || n_libs > native_v2_dynlink_max_libs()) { return 23 }
+    // Distinct rcs (25..27): 22/23 are the label/rodata refusals of the caller.
+    if needs_dyn && (n_syms <= 0 || n_syms > native_v2_dynlink_max_symbols()) {
+        print("Error: native dynlink: ")
+        print_int(n_syms)
+        print(" distinct dynamic symbols, emitter cap is ")
+        print_int(native_v2_dynlink_max_symbols())
+        print(" -- refusing to emit an ELF (raise native_v2_dynlink_max_symbols)\n")
+        return 25
+    }
+    if needs_dyn && (n_libs <= 0 || n_libs > native_v2_dynlink_max_libs()) {
+        print("Error: native dynlink: ")
+        print_int(n_libs)
+        print(" distinct DT_NEEDED libraries, emitter cap is ")
+        print_int(native_v2_dynlink_max_libs())
+        print(" -- refusing to emit an ELF that would drop one (raise native_v2_dynlink_max_libs)\n")
+        return 26
+    }
     let dynstr_rel: i64 = dyn_base + 0
-    // Cap covers up to 4 sonames + 8 symbol names (KL-14d).
-    let dynstr_len: i64 = 256
+    // Exact need (#2534), not a fixed 256-byte reservation.
+    let dynstr_len: i64 = if needs_dyn { native_v2_dynlink_dynstr_need(nc) } else { 0 }
     let dynsym_rel: i64 = native_v2_align8(dynstr_rel + dynstr_len)
     let dynsym_entsize: i64 = 24
     let dynsym_count: i64 = if needs_dyn { n_syms + 1 } else { 0 }
@@ -14307,7 +14362,14 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
         zi = zi + 1
     }
 
+    NC_DYNSTR_OVERFLOW = 0
     native_v2_build_elf_image_into(nc, base_addr, entry_offset, text_offset, code_len, rodata_offset, rodata_len, rodata_vaddr, text_vaddr, data_offset, data_len, data_vaddr, phnum, needs_dyn, interp_off, interp_len, dynstr_rel, dynstr_len, dynsym_rel, dynsym_entsize, dynsym_count, hash_rel, rela_rel, rela_entsize, rela_count, got_rel, got_size, dynamic_rel, dynamic_entsize, dynamic_count, data_payload)
+    if NC_DYNSTR_OVERFLOW != 0 {
+        print("Error: native dynlink: .dynstr writes exceed the ")
+        print_int(dynstr_len)
+        print(" bytes reserved for it -- refusing to emit an ELF with overlapping dynamic tables\n")
+        return 27
+    }
 
     if NC_BIG_ELF[0 as usize] != (0x7f as i8) { return 14 }
     if NC_BIG_ELF[1 as usize] != (0x45 as i8) { return 15 }
@@ -14434,8 +14496,8 @@ fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_o
         var str_cursor: i64 = 1
 
         // Collect unique lib ids in first-appearance order; write sonames into dynstr.
-        var lib_ids: [i64; 4] = [0; 4]
-        var lib_str_off: [i64; 4] = [0; 4]
+        var lib_ids: [i64; 16] = [0; 16]
+        var lib_str_off: [i64; 16] = [0; 16]
         var n_libs_w: i64 = 0
         var ri_lib: i64 = 0
         while ri_lib < (*nc).extern_relocs.count {
@@ -14452,9 +14514,17 @@ fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_o
                     lib_ids[n_libs_w as usize] = lid
                     lib_str_off[n_libs_w as usize] = str_cursor
                     let soname = native_v2_dynlink_soname_for_lib_id(lid)
-                    native_v2_elf_write_cstr(dynstr_off + str_cursor, soname)
+                    if str_cursor + str_len(soname) + 1 > dynstr_len {
+                        NC_DYNSTR_OVERFLOW = 1
+                    } else {
+                        native_v2_elf_write_cstr(dynstr_off + str_cursor, soname)
+                    }
                     str_cursor = str_cursor + str_len(soname) + 1
                     n_libs_w = n_libs_w + 1
+                } else if !seen {
+                    // The writer refused n_libs > cap before calling us; a
+                    // lib dropped here would be a silent missing DT_NEEDED.
+                    NC_DYNSTR_OVERFLOW = 1
                 }
             }
             ri_lib = ri_lib + 1
@@ -14478,14 +14548,15 @@ fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_o
             if !seen {
                 uniq_i = uniq_i + 1
                 let name_off = str_cursor
+                if str_cursor + er.sym_len + 1 > dynstr_len { NC_DYNSTR_OVERFLOW = 1 }
                 var bi: i64 = 0
-                while bi < er.sym_len {
+                while bi < er.sym_len && str_cursor + bi < dynstr_len {
                     if (dynstr_off + str_cursor + bi) < nc_elf_capacity_bytes() {
                         NC_BIG_ELF[(dynstr_off + str_cursor + bi) as usize] = er.sym_buf[bi as usize]
                     }
                     bi = bi + 1
                 }
-                if (dynstr_off + str_cursor + er.sym_len) < nc_elf_capacity_bytes() {
+                if (dynstr_off + str_cursor + er.sym_len) < nc_elf_capacity_bytes() && str_cursor + er.sym_len < dynstr_len {
                     NC_BIG_ELF[(dynstr_off + str_cursor + er.sym_len) as usize] = 0 as i8
                 }
                 str_cursor = str_cursor + er.sym_len + 1
