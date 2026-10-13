@@ -367,6 +367,15 @@ var LAST_LITERAL_VAL: i64 = 0
 var VAR_LIT_DATA: [i64; 4096] = [0; 4096]
 var VAR_TY: [i64; 2048] = [0; 2048]
 var VAR_TY_HASH: [i64; 2048] = [0; 2048]
+// #2830: 1 when the local/param was annotated u8/u16/u32/u64/usize. lean_single maps
+// every integer width to type code 1, so signedness lives in this side table.
+var VAR_UNSIGNED: [i64; 2048] = [0; 2048]
+// #2830: the expression just compiled is an unsigned integer. Valid only while
+// CL == EXPR_UNSIGNED_CL: any code emitted after the producing operand (a call, an
+// index, a field load, ...) makes the flag stale, so leftovers from a nested
+// sub-expression can never leak into an enclosing operand.
+var EXPR_UNSIGNED: i64 = 0
+var EXPR_UNSIGNED_CL: i64 = -1
 var GL_TY: [i64; 2048] = [0; 2048]
 var GL_TY_HASH: [i64; 2048] = [0; 2048]
 var FN_RET_TY: [i64; 65536] = [0; 65536]
@@ -8757,6 +8766,47 @@ fn skip_study_decl(p0: i64) -> i64 with IO, Mut, Panic {
     p
 }
 
+// ── #2830: unsigned-integer operand tracking ────────────────────────────────
+// Same rule as Madaros (ir/lower.sio expr_is_unsigned_int_ref): an operand is
+// unsigned when it is an `as u8/u16/u32/u64/usize` cast, a local or parameter
+// annotated with one of those types, or a binary expression whose LEFT operand is
+// unsigned. Literals, calls, fields, indexing and unary results are signed.
+fn tok_is_unsigned_int_name(t: i64) -> i64 with Panic, Mut {
+    if t < 0 || t >= TC { return 0 }
+    if TK[t as usize] != 3 { return 0 }
+    let ns = TS[t as usize]
+    let l = TE[t as usize] - ns
+    if src_match(ns, l, "u8") || src_match(ns, l, "u16") || src_match(ns, l, "u32") { return 1 }
+    if src_match(ns, l, "u64") || src_match(ns, l, "usize") { return 1 }
+    return 0
+}
+
+fn expr_mark_unsigned(u: i64) with Mut {
+    EXPR_UNSIGNED = u
+    EXPR_UNSIGNED_CL = CL
+}
+
+fn expr_unsigned_now() -> i64 with Mut {
+    if EXPR_UNSIGNED == 1 && EXPR_UNSIGNED_CL == CL { return 1 }
+    return 0
+}
+
+// A bare integer literal operand spans exactly one int token.
+fn operand_is_int_literal(start: i64, end: i64) -> i64 with Panic, Mut {
+    if end != start + 1 { return 0 }
+    if TK[start as usize] == 4 { return 1 }
+    return 0
+}
+
+// Unsigned semantics for / % < > <= >=: both operands typed unsigned, or one typed
+// unsigned and the other a bare integer literal (Madaros lower_binary_expr_ref).
+fn binop_pair_unsigned(lu: i64, llit: i64, ru: i64, rlit: i64) -> i64 {
+    if lu == 1 && ru == 1 { return 1 }
+    if lu == 1 && rlit == 1 { return 1 }
+    if ru == 1 && llit == 1 { return 1 }
+    return 0
+}
+
 fn local_meta_add(
     ns: i64,
     ne: i64,
@@ -8797,6 +8847,7 @@ fn local_meta_add(
     VAR_USED[idx as usize] = used
     VAR_TY[idx as usize] = ty
     VAR_TY_HASH[idx as usize] = ty_hash
+    VAR_UNSIGNED[idx as usize] = 0
     // KL-16b: fresh locals must not inherit shadow slots from a prior
     // function that reused the same VAR_* index after VAR_COUNT reset.
     VAR_VSHADOW[idx as usize] = -1
@@ -13622,6 +13673,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         EP = EP + 1
                         scan_type(EP)
                         if pslot >= 0 {
+                            VAR_UNSIGNED[(VAR_COUNT - 1) as usize] = tok_is_unsigned_int_name(EP)
                             VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                             VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                             if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
@@ -19102,6 +19154,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
             EXPR_IS_F64 = var_find_is_f64(ns, ne)
             if vi >= 0 {
+                expr_mark_unsigned(VAR_UNSIGNED[vi as usize])
                 EXPR_TY = VAR_TY[vi as usize]
                 EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
                 if VAR_ALEN[vi as usize] > 0 { LAST_ALEN = VAR_ALEN[vi as usize] }
@@ -19432,6 +19485,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             EXPR_TY_HASH = cast_hash
             expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
             if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+            expr_mark_unsigned(tok_is_unsigned_int_name(tp))
             EP = SCAN_TY_NEXT
             continue
         }
@@ -20736,6 +20790,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
 }
 
 fn compile_multiplicative() with IO, Mut, Panic, Div {
+    var mul_lstart: i64 = EP
     compile_postfix()
     var lhs_end_line: i64 = TL[(EP - 1) as usize]
     while TK[EP as usize] == 19 || TK[EP as usize] == 20 || TK[EP as usize] == 29 {
@@ -20751,6 +20806,11 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 19 && TL[EP as usize] > lhs_end_line { return }
         let op_tok = EP
         let op = TK[EP as usize]
+        // #2830: unsigned `/` `%` when both operands are typed unsigned (or one is
+        // unsigned and the other a bare integer literal).
+        let mul_left_uns = expr_unsigned_now()
+        let mul_left_lit = if mul_lstart >= 0 { operand_is_int_literal(mul_lstart, op_tok) } else { 0 }
+        mul_lstart = -1
         EP = EP + 1
         let rhs_start = EP
         var rhs_const_known: i64 = 0
@@ -20849,6 +20909,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         }
         emit_push()
         compile_postfix()
+        let mul_unsigned = binop_pair_unsigned(mul_left_uns, mul_left_lit, expr_unsigned_now(), operand_is_int_literal(rhs_start, EP))
         if (op == 20 || op == 29) && rhs_const_known != 0 && rhs_const_val == 0 {
             if op == 20 { tc_error_hard(op_tok, "division by zero") }
             else { tc_error_hard(op_tok, "modulo by zero") }
@@ -21026,8 +21087,13 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         } else {
             em(0x48); em(0x87); em(0xc1)  // xchg rax, rcx — rax=lhs, rcx=rhs
             if op == 19 { em(0x48); em(0x0f); em(0xaf); em(0xc1) }  // imul rax, rcx
-            if op == 20 { em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9) }  // cqo; idiv rcx
-            if op == 29 { em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9); em(0x48); em(0x89); em(0xd0) }  // cqo; idiv rcx; mov rax, rdx
+            if mul_unsigned == 1 {
+                if op == 20 { em(0x48); em(0x31); em(0xd2); em(0x48); em(0xf7); em(0xf1) }  // xor rdx, rdx; div rcx
+                if op == 29 { em(0x48); em(0x31); em(0xd2); em(0x48); em(0xf7); em(0xf1); em(0x48); em(0x89); em(0xd0) }  // xor rdx, rdx; div rcx; mov rax, rdx
+            } else {
+                if op == 20 { em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9) }  // cqo; idiv rcx
+                if op == 29 { em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9); em(0x48); em(0x89); em(0xd0) }  // cqo; idiv rcx; mov rax, rdx
+            }
             EXPR_TY = 1
         }
         EXPR_TY_HASH = 0
@@ -22338,6 +22404,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         EXPR_CH_SET = left_ch_set | right_ch_set
         EXPR_PARAM_USED = left_param_used | right_param_used
         lhs_end_line = TL[(EP - 1) as usize]
+        expr_mark_unsigned(mul_left_uns)
     }
 }
 
@@ -22346,6 +22413,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
     while TK[EP as usize] == 17 || TK[EP as usize] == 18 || TK[EP as usize] == 74 {
         let op_tok = EP
         let op = TK[EP as usize]
+        let add_left_uns = expr_unsigned_now()
         EP = EP + 1
         // Array/string concatenation: ++ operator
         if op == 74 {
@@ -23023,6 +23091,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
         // β⁹ GTT: channel topology of a + b, a - b is the union of operand topologies.
         EXPR_CH_SET = left_ch_set_a | right_ch_set_a
         EXPR_PARAM_USED = left_param_used_a | right_param_used_a
+        expr_mark_unsigned(add_left_uns)
     }
 }
 
@@ -23354,6 +23423,9 @@ fn compile_shift() with IO, Mut, Panic, Div {
     while TK[EP as usize] == 39 || TK[EP as usize] == 40 {
         let op_tok = EP
         let op = TK[EP as usize]
+        // #2830: `>>` is a logical shift when the shifted value is unsigned,
+        // whatever the shift amount's type.
+        let left_uns = expr_unsigned_now()
         EP = EP + 1
         let left_ty = EXPR_TY
         emit_push()
@@ -23365,9 +23437,11 @@ fn compile_shift() with IO, Mut, Panic, Div {
         em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (shift amount in cl)
         em(0x58)  // pop rax (lhs)
         if op == 40 { em(0x48); em(0xd3); em(0xe0) }  // shl rax, cl
-        if op == 39 { em(0x48); em(0xd3); em(0xf8) }  // sar rax, cl
+        if op == 39 && left_uns == 1 { em(0x48); em(0xd3); em(0xe8) }  // shr rax, cl
+        if op == 39 && left_uns == 0 { em(0x48); em(0xd3); em(0xf8) }  // sar rax, cl
         EXPR_TY = 1
         EXPR_TY_HASH = 0
+        expr_mark_unsigned(left_uns)
     }
 }
 
@@ -23377,12 +23451,14 @@ fn compile_bitand() with IO, Mut, Panic, Div {
     while TK[EP as usize] == 44 {
         let op_tok = EP
         let left_ty = EXPR_TY
+        let left_uns = expr_unsigned_now()
         EP = EP + 1; emit_push(); compile_shift()
         if left_ty != 0 && left_ty != 1 { tc_error_hard(op_tok, "bitwise and requires integer operands") }
         if EXPR_TY != 0 && EXPR_TY != 1 { tc_error_hard(op_tok, "bitwise and requires integer operands") }
         em(0x59); em(0x48); em(0x21); em(0xc8)  // pop rcx; and rax, rcx
         EXPR_TY = 1
         EXPR_TY_HASH = 0
+        expr_mark_unsigned(left_uns)
     }
 }
 
@@ -23392,12 +23468,14 @@ fn compile_bitxor() with IO, Mut, Panic, Div {
     while TK[EP as usize] == 56 {
         let op_tok = EP
         let left_ty = EXPR_TY
+        let left_uns = expr_unsigned_now()
         EP = EP + 1; emit_push(); compile_bitand()
         if left_ty != 0 && left_ty != 1 { tc_error_hard(op_tok, "bitwise xor requires integer operands") }
         if EXPR_TY != 0 && EXPR_TY != 1 { tc_error_hard(op_tok, "bitwise xor requires integer operands") }
         em(0x59); em(0x48); em(0x31); em(0xc8)  // pop rcx; xor rax, rcx
         EXPR_TY = 1
         EXPR_TY_HASH = 0
+        expr_mark_unsigned(left_uns)
     }
 }
 
@@ -23407,20 +23485,25 @@ fn compile_bitor() with IO, Mut, Panic, Div {
     while TK[EP as usize] == 45 {
         let op_tok = EP
         let left_ty = EXPR_TY
+        let left_uns = expr_unsigned_now()
         EP = EP + 1; emit_push(); compile_bitxor()
         if left_ty != 0 && left_ty != 1 { tc_error_hard(op_tok, "bitwise or requires integer operands") }
         if EXPR_TY != 0 && EXPR_TY != 1 { tc_error_hard(op_tok, "bitwise or requires integer operands") }
         em(0x59); em(0x48); em(0x09); em(0xc8)  // pop rcx; or rax, rcx
         EXPR_TY = 1
         EXPR_TY_HASH = 0
+        expr_mark_unsigned(left_uns)
     }
 }
 
 fn compile_comparison() with IO, Mut, Panic, Div {
+    let cmp_lstart = EP
     compile_bitor()
     let op = TK[EP as usize]
     if op == 21 || op == 22 || op == 23 || op == 24 || op == 25 || op == 26 {
         let op_tok = EP
+        let cmp_left_uns = expr_unsigned_now()
+        let cmp_left_lit = operand_is_int_literal(cmp_lstart, EP)
         let left_raw_f64 = EXPR_IS_F64
         let left_raw_ty = EXPR_TY
         let left_raw_hash = EXPR_TY_HASH
@@ -23442,7 +23525,9 @@ fn compile_comparison() with IO, Mut, Panic, Div {
             return
         }
         emit_push()
+        let cmp_rstart = EP
         compile_bitor()
+        let cmp_unsigned = binop_pair_unsigned(cmp_left_uns, cmp_left_lit, expr_unsigned_now(), operand_is_int_literal(cmp_rstart, EP))
         let right_raw_ty = EXPR_TY
         let right_raw_hash = EXPR_TY_HASH
         comparison_require_observe(op_tok, left_raw_ty, right_raw_ty)
@@ -23501,10 +23586,17 @@ fn compile_comparison() with IO, Mut, Panic, Div {
             em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
             if op == 21 { em(0x0f); em(0x94); em(0xc0) }  // sete al
             if op == 22 { em(0x0f); em(0x95); em(0xc0) }  // setne al
-            if op == 23 { em(0x0f); em(0x9c); em(0xc0) }  // setl al
-            if op == 24 { em(0x0f); em(0x9f); em(0xc0) }  // setg al
-            if op == 25 { em(0x0f); em(0x9e); em(0xc0) }  // setle al
-            if op == 26 { em(0x0f); em(0x9d); em(0xc0) }  // setge al
+            if cmp_unsigned == 1 {
+                if op == 23 { em(0x0f); em(0x92); em(0xc0) }  // setb al
+                if op == 24 { em(0x0f); em(0x97); em(0xc0) }  // seta al
+                if op == 25 { em(0x0f); em(0x96); em(0xc0) }  // setbe al
+                if op == 26 { em(0x0f); em(0x93); em(0xc0) }  // setae al
+            } else {
+                if op == 23 { em(0x0f); em(0x9c); em(0xc0) }  // setl al
+                if op == 24 { em(0x0f); em(0x9f); em(0xc0) }  // setg al
+                if op == 25 { em(0x0f); em(0x9e); em(0xc0) }  // setle al
+                if op == 26 { em(0x0f); em(0x9d); em(0xc0) }  // setge al
+            }
         }
         em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
         EXPR_IS_F64 = 0
@@ -26807,6 +26899,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         var decl_is_f64: i64 = -1
         var decl_ty: i64 = 0
         var decl_ty_hash: i64 = 0
+        var decl_unsigned: i64 = 0
         let decl_is_mut: i64 = if k == 12 { 1 } else { 0 }
         if TK[EP as usize] == 43 {
             EP = EP + 1  // skip :
@@ -26847,6 +26940,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 decl_is_f64 = 0
             } else {
                 scan_type(EP)
+                decl_unsigned = tok_is_unsigned_int_name(EP)
                 decl_ty = SCAN_TY
                 decl_ty_hash = SCAN_TY_HASH
                 if knowledge_hash_invalid(decl_ty_hash) {
@@ -27293,6 +27387,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
                 else if decl_is_f64 == 0 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0 }
                 else { VAR_IS_F64[(VAR_COUNT - 1) as usize] = EXPR_IS_F64 }
+                VAR_UNSIGNED[vix as usize] = decl_unsigned
                 if decl_ty != 0 || decl_ty_hash != 0 {
                     VAR_TY[vix as usize] = decl_ty
                     VAR_TY_HASH[vix as usize] = decl_ty_hash
@@ -33937,6 +34032,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     p = p + 1  // skip :
                     scan_type(p)
                     if pslot >= 0 {
+                        VAR_UNSIGNED[(VAR_COUNT - 1) as usize] = tok_is_unsigned_int_name(p)
                         VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                         VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                         // A unit-typed parameter carries its brand, exactly as a
@@ -36795,6 +36891,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         EP = EP + 1
                         scan_type(EP)
                         if pslot_a >= 0 {
+                            VAR_UNSIGNED[(VAR_COUNT - 1) as usize] = tok_is_unsigned_int_name(EP)
                             VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                             VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                             if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
@@ -39983,6 +40080,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             }
             EXPR_IS_F64 = var_find_is_f64(ns, ne)
             if vi >= 0 {
+                expr_mark_unsigned(VAR_UNSIGNED[vi as usize])
                 EXPR_TY = VAR_TY[vi as usize]
                 EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
                 if VAR_ALEN[vi as usize] > 0 { LAST_ALEN = VAR_ALEN[vi as usize] }
@@ -40259,6 +40357,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             // enters the unit world (mirror of the x86 cast site).
             expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
             if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+            expr_mark_unsigned(tok_is_unsigned_int_name(tp))
             EP = SCAN_TY_NEXT
             continue
         }
@@ -40977,6 +41076,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
 
 // ─── ARM64 multiplicative ───
 fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
+    var mul_lstart: i64 = EP
     compile_postfix_a64()
     var lhs_end_line: i64 = TL[(EP - 1) as usize]
     while TK[EP as usize] == 19 || TK[EP as usize] == 20 || TK[EP as usize] == 29 {
@@ -40987,6 +41087,11 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 19 && TL[EP as usize] > lhs_end_line { return }
         let op_tok = EP
         let op = TK[EP as usize]
+        // #2830: unsigned `/` `%` when both operands are typed unsigned (or one is
+        // unsigned and the other a bare integer literal).
+        let mul_left_uns = expr_unsigned_now()
+        let mul_left_lit = if mul_lstart >= 0 { operand_is_int_literal(mul_lstart, op_tok) } else { 0 }
+        mul_lstart = -1
         EP = EP + 1
         let rhs_start = EP
         var rhs_const_known: i64 = 0
@@ -41036,6 +41141,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
         emit_push_a64()
         compile_postfix_a64()
+        let mul_unsigned = binop_pair_unsigned(mul_left_uns, mul_left_lit, expr_unsigned_now(), operand_is_int_literal(rhs_start, EP))
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
         // Gen 19: capture unit dim of the RHS before it is overwritten.
@@ -41106,10 +41212,18 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             EXPR_TY = 2
         } else {
             if op == 19 { em32(0x9B007C20) }  // mul x0, x1, x0
-            if op == 20 { em32(0x9AC00C20) }  // sdiv x0, x1, x0
-            if op == 29 {
-                em32(0x9AC00C00 | (0 << 16) | (1 << 5) | 9)
-                em32(0x9B008000 | (0 << 16) | (1 << 10) | (9 << 5) | 0)
+            if mul_unsigned == 1 {
+                if op == 20 { em32(0x9AC00820) }  // udiv x0, x1, x0
+                if op == 29 {
+                    em32(0x9AC00800 | (0 << 16) | (1 << 5) | 9)  // udiv x9, x1, x0
+                    em32(0x9B008000 | (0 << 16) | (1 << 10) | (9 << 5) | 0)
+                }
+            } else {
+                if op == 20 { em32(0x9AC00C20) }  // sdiv x0, x1, x0
+                if op == 29 {
+                    em32(0x9AC00C00 | (0 << 16) | (1 << 5) | 9)
+                    em32(0x9B008000 | (0 << 16) | (1 << 10) | (9 << 5) | 0)
+                }
             }
             EXPR_TY = 1
         }
@@ -41221,6 +41335,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         EXPR_CH_SET = left_ch_set_m | right_ch_set_m
         EXPR_PARAM_USED = left_param_used_m | right_param_used_m
         lhs_end_line = TL[(EP - 1) as usize]
+        expr_mark_unsigned(mul_left_uns)
     }
 }
 
@@ -41572,6 +41687,7 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
     while TK[EP as usize] == 17 || TK[EP as usize] == 18 {
         let op_tok = EP
         let op = TK[EP as usize]
+        let add_left_uns = expr_unsigned_now()
         EP = EP + 1
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
@@ -41738,6 +41854,7 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         // Knowledge branches above `continue` before reaching here.
         EXPR_CH_SET = left_ch_set_a | right_ch_set_a
         EXPR_PARAM_USED = left_param_used_a | right_param_used_a
+        expr_mark_unsigned(add_left_uns)
     }
 }
 
@@ -41746,12 +41863,15 @@ fn compile_shift_a64() with IO, Mut, Panic, Div {
     compile_additive_a64()
     while TK[EP as usize] == 39 || TK[EP as usize] == 40 {
         let op = TK[EP as usize]
+        let left_uns = expr_unsigned_now()
         EP = EP + 1
         emit_push_a64()
         compile_additive_a64()
         emit_pop_x1_a64()
         if op == 40 { em32(0x9AC02020) }
-        if op == 39 { em32(0x9AC02820) }
+        if op == 39 && left_uns == 1 { em32(0x9AC02420) }  // lsrv x0, x1, x0
+        if op == 39 && left_uns == 0 { em32(0x9AC02820) }  // asrv x0, x1, x0
+        expr_mark_unsigned(left_uns)
     }
 }
 
@@ -41759,9 +41879,11 @@ fn compile_shift_a64() with IO, Mut, Panic, Div {
 fn compile_bitand_a64() with IO, Mut, Panic, Div {
     compile_shift_a64()
     while TK[EP as usize] == 44 {
+        let left_uns = expr_unsigned_now()
         EP = EP + 1; emit_push_a64(); compile_shift_a64()
         emit_pop_x1_a64()
         em32(0x8A010000)
+        expr_mark_unsigned(left_uns)
     }
 }
 
@@ -41769,9 +41891,11 @@ fn compile_bitand_a64() with IO, Mut, Panic, Div {
 fn compile_bitxor_a64() with IO, Mut, Panic, Div {
     compile_bitand_a64()
     while TK[EP as usize] == 56 {
+        let left_uns = expr_unsigned_now()
         EP = EP + 1; emit_push_a64(); compile_bitand_a64()
         emit_pop_x1_a64()
         em32(0xCA010000)
+        expr_mark_unsigned(left_uns)
     }
 }
 
@@ -41779,24 +41903,31 @@ fn compile_bitxor_a64() with IO, Mut, Panic, Div {
 fn compile_bitor_a64() with IO, Mut, Panic, Div {
     compile_bitxor_a64()
     while TK[EP as usize] == 45 {
+        let left_uns = expr_unsigned_now()
         EP = EP + 1; emit_push_a64(); compile_bitxor_a64()
         emit_pop_x1_a64()
         em32(0xAA010000)
+        expr_mark_unsigned(left_uns)
     }
 }
 
 // ─── ARM64 comparison ───
 fn compile_comparison_a64() with IO, Mut, Panic, Div {
+    let cmp_lstart = EP
     compile_bitor_a64()
     let op = TK[EP as usize]
     if op == 21 || op == 22 || op == 23 || op == 24 || op == 25 || op == 26 {
         let op_tok = EP
+        let cmp_left_uns = expr_unsigned_now()
+        let cmp_left_lit = operand_is_int_literal(cmp_lstart, EP)
         let left_raw_f64 = EXPR_IS_F64
         let left_raw_ty = EXPR_TY
         let left_raw_hash = EXPR_TY_HASH
         EP = EP + 1
         emit_push_a64()
+        let cmp_rstart = EP
         compile_bitor_a64()
+        let cmp_unsigned = binop_pair_unsigned(cmp_left_uns, cmp_left_lit, expr_unsigned_now(), operand_is_int_literal(cmp_rstart, EP))
         let right_raw_ty = EXPR_TY
         let right_raw_hash = EXPR_TY_HASH
         comparison_require_observe(op_tok, left_raw_ty, right_raw_ty)
@@ -41855,10 +41986,17 @@ fn compile_comparison_a64() with IO, Mut, Panic, Div {
             em32(0xEB00003F)
             if op == 21 { em32(0x9A9F17E0) }
             if op == 22 { em32(0x9A9F07E0) }
-            if op == 23 { em32(0x9A9FA7E0) }
-            if op == 24 { em32(0x9A9FD7E0) }  // cset x0, gt
-            if op == 25 { em32(0x9A9FC7E0) }  // cset x0, le
-            if op == 26 { em32(0x9A9FB7E0) }
+            if cmp_unsigned == 1 {
+                if op == 23 { em32(0x9A9F27E0) }  // cset x0, lo
+                if op == 24 { em32(0x9A9F97E0) }  // cset x0, hi
+                if op == 25 { em32(0x9A9F87E0) }  // cset x0, ls
+                if op == 26 { em32(0x9A9F37E0) }  // cset x0, hs
+            } else {
+                if op == 23 { em32(0x9A9FA7E0) }
+                if op == 24 { em32(0x9A9FD7E0) }  // cset x0, gt
+                if op == 25 { em32(0x9A9FC7E0) }  // cset x0, le
+                if op == 26 { em32(0x9A9FB7E0) }
+            }
         }
         EXPR_IS_F64 = 0
         EXPR_TY = 4
@@ -41995,6 +42133,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         var decl_is_f64: i64 = -1
         var decl_ty: i64 = 0
         var decl_ty_hash: i64 = 0
+        var decl_unsigned: i64 = 0
         let decl_is_mut: i64 = if k == 12 { 1 } else { 0 }
         if TK[EP as usize] == 43 {
             EP = EP + 1
@@ -42032,6 +42171,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 decl_is_f64 = 0
             } else {
                 scan_type(EP)
+                decl_unsigned = tok_is_unsigned_int_name(EP)
                 decl_ty = SCAN_TY
                 decl_ty_hash = SCAN_TY_HASH
                 if decl_ty == 13 { tc_f128_a64_refused(EP) }
@@ -42278,6 +42418,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
                 else if decl_is_f64 == 0 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0 }
                 else { VAR_IS_F64[(VAR_COUNT - 1) as usize] = EXPR_IS_F64 }
+                VAR_UNSIGNED[vix as usize] = decl_unsigned
                 if decl_ty != 0 || decl_ty_hash != 0 {
                     VAR_TY[vix as usize] = decl_ty
                     VAR_TY_HASH[vix as usize] = decl_ty_hash
@@ -44285,6 +44426,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                     p = p + 1
                     scan_type(p)
                     if pslot >= 0 {
+                        VAR_UNSIGNED[(VAR_COUNT - 1) as usize] = tok_is_unsigned_int_name(p)
                         VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                         VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                         // A unit-typed parameter carries its brand, exactly as the
