@@ -12048,6 +12048,22 @@ var CL_SAVE_MUT: [i64; 2048] = [0; 2048]
 var CL_SAVE_UNIT: [i64; 2048] = [0; 2048]
 var CL_SAVE_LINEAR: [i64; 2048] = [0; 2048]
 var CL_SAVE_USED: [i64; 2048] = [0; 2048]
+// Linear-use snapshots for nested `if` / `if let` (#1386): level d occupies
+// [d*2048, d*2048 + 2048). Deeper than 16 levels shares the last level.
+var LIN_SNAP_DEPTH: i64 = 0
+var LIN_SNAP_USED: [i64; 32768] = [0; 32768]
+var LIN_SNAP_MUT: [i64; 32768] = [0; 32768]
+
+fn lin_snap_push() -> i64 with Mut {
+    var d = LIN_SNAP_DEPTH
+    if d > 15 { d = 15 }
+    LIN_SNAP_DEPTH = LIN_SNAP_DEPTH + 1
+    return d * 2048
+}
+
+fn lin_snap_pop() with Mut {
+    if LIN_SNAP_DEPTH > 0 { LIN_SNAP_DEPTH = LIN_SNAP_DEPTH - 1 }
+}
 var CL_SAVE_TY: [i64; 2048] = [0; 2048]
 var CL_SAVE_TH: [i64; 2048] = [0; 2048]
 // Capture tracking for closures
@@ -28136,11 +28152,16 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     il_je_off = CL; em32(0)
                 }
             }
+            // #1386: the pre-branch snapshot lives on a per-nesting-level stack. One
+            // shared CL_SAVE_* array was overwritten by an `if` nested in the then-branch,
+            // so `if k { if a { eat(q) } else { eat(q) } } else { eat(q) }` read as two uses.
+            let lin_base = lin_snap_push()
+            let lin_vc0 = VAR_COUNT  // variables declared inside a branch have no pre-branch state
             // Snapshot VAR_USED + VAR_MOVED for linear tracking
             var il_snap: i64 = 0
             while il_snap < VAR_COUNT {
-                CL_SAVE_USED[il_snap as usize] = VAR_USED[il_snap as usize]
-                CL_SAVE_MUT[il_snap as usize] = VAR_MOVED[il_snap as usize]
+                LIN_SNAP_USED[(lin_base + il_snap) as usize] = VAR_USED[il_snap as usize]
+                LIN_SNAP_MUT[(lin_base + il_snap) as usize] = VAR_MOVED[il_snap as usize]
                 il_snap = il_snap + 1
             }
             // Compile then-body
@@ -28161,9 +28182,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 var il_lthen: i64 = 0
                 while il_lthen < VAR_COUNT {
                     let tused = VAR_USED[il_lthen as usize]; let tmov = VAR_MOVED[il_lthen as usize]
-                    VAR_USED[il_lthen as usize] = CL_SAVE_USED[il_lthen as usize]
-                    VAR_MOVED[il_lthen as usize] = CL_SAVE_MUT[il_lthen as usize]
-                    CL_SAVE_USED[il_lthen as usize] = tused; CL_SAVE_MUT[il_lthen as usize] = tmov
+                    VAR_USED[il_lthen as usize] = if il_lthen < lin_vc0 { LIN_SNAP_USED[(lin_base + il_lthen) as usize] } else { 0 }
+                    VAR_MOVED[il_lthen as usize] = if il_lthen < lin_vc0 { LIN_SNAP_MUT[(lin_base + il_lthen) as usize] } else { 0 }
+                    LIN_SNAP_USED[(lin_base + il_lthen) as usize] = tused; LIN_SNAP_MUT[(lin_base + il_lthen) as usize] = tmov
                     il_lthen = il_lthen + 1
                 }
                 if TK[EP as usize] == 13 { compile_stmt() }
@@ -28185,6 +28206,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 if il_je_off > 0 { patch32(il_je_off, CL) }
                 LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
             }
+            lin_snap_pop()
             return
         }
         // ── end if let ──
@@ -28200,11 +28222,16 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
         LAST_STMT_TY_HASH = 0
+        // #1386: the pre-branch snapshot lives on a per-nesting-level stack. One
+        // shared CL_SAVE_* array was overwritten by an `if` nested in the then-branch,
+        // so `if k { if a { eat(q) } else { eat(q) } } else { eat(q) }` read as two uses.
+        let lin_base = lin_snap_push()
+        let lin_vc0 = VAR_COUNT  // variables declared inside a branch have no pre-branch state
         // Snapshot VAR_USED + VAR_MOVED for linear branch tracking
         var lsnap: i64 = 0
         while lsnap < VAR_COUNT {
-            CL_SAVE_USED[lsnap as usize] = VAR_USED[lsnap as usize]
-            CL_SAVE_MUT[lsnap as usize] = VAR_MOVED[lsnap as usize]
+            LIN_SNAP_USED[(lin_base + lsnap) as usize] = VAR_USED[lsnap as usize]
+            LIN_SNAP_MUT[(lin_base + lsnap) as usize] = VAR_MOVED[lsnap as usize]
             lsnap = lsnap + 1
         }
         if TK[EP as usize] == 8 { EP = EP + 1 }
@@ -28262,14 +28289,15 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             let jmp_off = CL; em32(0)
             patch32(je_off, CL)
             // Save then-branch state, restore pre-branch snapshot for else
+            let lin_vc_then = VAR_COUNT  // then-branch locals; an else-branch local has no then state
             var lthen: i64 = 0
             while lthen < VAR_COUNT {
                 let then_used = VAR_USED[lthen as usize]
                 let then_moved = VAR_MOVED[lthen as usize]
-                VAR_USED[lthen as usize] = CL_SAVE_USED[lthen as usize]
-                VAR_MOVED[lthen as usize] = CL_SAVE_MUT[lthen as usize]
-                CL_SAVE_USED[lthen as usize] = then_used
-                CL_SAVE_MUT[lthen as usize] = then_moved
+                VAR_USED[lthen as usize] = if lthen < lin_vc0 { LIN_SNAP_USED[(lin_base + lthen) as usize] } else { 0 }
+                VAR_MOVED[lthen as usize] = if lthen < lin_vc0 { LIN_SNAP_MUT[(lin_base + lthen) as usize] } else { 0 }
+                LIN_SNAP_USED[(lin_base + lthen) as usize] = then_used
+                LIN_SNAP_MUT[(lin_base + lthen) as usize] = then_moved
                 lthen = lthen + 1
             }
             // else if: recurse into compile_stmt which handles 'if'
@@ -28301,20 +28329,22 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             var lchk: i64 = 0
             while lchk < VAR_COUNT {
                 if VAR_LINEAR[lchk as usize] == 1 {
-                    let then_u = CL_SAVE_USED[lchk as usize]
+                    let then_u = if lchk < lin_vc_then { LIN_SNAP_USED[(lin_base + lchk) as usize] } else { 0 }
                     let else_u = VAR_USED[lchk as usize]
-                    if then_u > 0 && else_u == 0 {
-                        tc_linear_violation(if_tok, "linear value consumed in then-branch but not else-branch")
-                    }
-                    if then_u == 0 && else_u > 0 {
-                        tc_linear_violation(if_tok, "linear value consumed in else-branch but not then-branch")
+                    if lchk < lin_vc0 {
+                        if then_u > 0 && else_u == 0 {
+                            tc_linear_violation(if_tok, "linear value consumed in then-branch but not else-branch")
+                        }
+                        if then_u == 0 && else_u > 0 {
+                            tc_linear_violation(if_tok, "linear value consumed in else-branch but not then-branch")
+                        }
                     }
                     // Merge: take the max so the function-end check sees "consumed"
                     if then_u > else_u { VAR_USED[lchk as usize] = then_u }
                 }
                 // Merge VAR_MOVED: only for linear/affine structs
                 if VAR_LINEAR[lchk as usize] == 1 || VAR_AFFINE[lchk as usize] == 1 {
-                    if CL_SAVE_MUT[lchk as usize] == 1 || VAR_MOVED[lchk as usize] == 1 {
+                    if (lchk < lin_vc_then && LIN_SNAP_MUT[(lin_base + lchk) as usize] == 1) || VAR_MOVED[lchk as usize] == 1 {
                         VAR_MOVED[lchk as usize] = 1
                     }
                 }
@@ -28384,7 +28414,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             var lne: i64 = 0
             while lne < VAR_COUNT {
                 if VAR_LINEAR[lne as usize] == 1 {
-                    if VAR_USED[lne as usize] > 0 && CL_SAVE_USED[lne as usize] == 0 {
+                    if lne < lin_vc0 && VAR_USED[lne as usize] > 0 && LIN_SNAP_USED[(lin_base + lne) as usize] == 0 {
                         tc_linear_violation(if_tok, "linear value consumed in if-branch with no else — not consumed on all paths")
                     }
                 }
@@ -28403,6 +28433,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             LAST_STMT_TY = 0
             LAST_STMT_TY_HASH = 0
         }
+        lin_snap_pop()
         return
     }
 
@@ -43244,10 +43275,15 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     }
                 }
             }
+            // #1386: the pre-branch snapshot lives on a per-nesting-level stack. One
+            // shared CL_SAVE_* array was overwritten by an `if` nested in the then-branch,
+            // so `if k { if a { eat(q) } else { eat(q) } } else { eat(q) }` read as two uses.
+            let lin_base = lin_snap_push()
+            let lin_vc0 = VAR_COUNT  // variables declared inside a branch have no pre-branch state
             var il_snap: i64 = 0
             while il_snap < VAR_COUNT {
-                CL_SAVE_USED[il_snap as usize] = VAR_USED[il_snap as usize]
-                CL_SAVE_MUT[il_snap as usize] = VAR_MOVED[il_snap as usize]
+                LIN_SNAP_USED[(lin_base + il_snap) as usize] = VAR_USED[il_snap as usize]
+                LIN_SNAP_MUT[(lin_base + il_snap) as usize] = VAR_MOVED[il_snap as usize]
                 il_snap = il_snap + 1
             }
             LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
@@ -43264,9 +43300,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 var il_lt: i64 = 0
                 while il_lt < VAR_COUNT {
                     let tu = VAR_USED[il_lt as usize]; let tm = VAR_MOVED[il_lt as usize]
-                    VAR_USED[il_lt as usize] = CL_SAVE_USED[il_lt as usize]
-                    VAR_MOVED[il_lt as usize] = CL_SAVE_MUT[il_lt as usize]
-                    CL_SAVE_USED[il_lt as usize] = tu; CL_SAVE_MUT[il_lt as usize] = tm
+                    VAR_USED[il_lt as usize] = if il_lt < lin_vc0 { LIN_SNAP_USED[(lin_base + il_lt) as usize] } else { 0 }
+                    VAR_MOVED[il_lt as usize] = if il_lt < lin_vc0 { LIN_SNAP_MUT[(lin_base + il_lt) as usize] } else { 0 }
+                    LIN_SNAP_USED[(lin_base + il_lt) as usize] = tu; LIN_SNAP_MUT[(lin_base + il_lt) as usize] = tm
                     il_lt = il_lt + 1
                 }
                 if TK[EP as usize] == 13 { compile_stmt_a64() }
@@ -43290,6 +43326,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 em32(0xD503201F)  // nop
                 LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
             }
+            lin_snap_pop()
             return
         }
         // ── end if let (AArch64) ──
@@ -43303,12 +43340,17 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
         LAST_STMT_TY_HASH = 0
+        // #1386: the pre-branch snapshot lives on a per-nesting-level stack. One
+        // shared CL_SAVE_* array was overwritten by an `if` nested in the then-branch,
+        // so `if k { if a { eat(q) } else { eat(q) } } else { eat(q) }` read as two uses.
+        let lin_base = lin_snap_push()
+        let lin_vc0 = VAR_COUNT  // variables declared inside a branch have no pre-branch state
         // Snapshot VAR_USED + VAR_MOVED for linear branch tracking
         // (mirror of x86 compile_stmt).
         var lsnap_a: i64 = 0
         while lsnap_a < VAR_COUNT {
-            CL_SAVE_USED[lsnap_a as usize] = VAR_USED[lsnap_a as usize]
-            CL_SAVE_MUT[lsnap_a as usize] = VAR_MOVED[lsnap_a as usize]
+            LIN_SNAP_USED[(lin_base + lsnap_a) as usize] = VAR_USED[lsnap_a as usize]
+            LIN_SNAP_MUT[(lin_base + lsnap_a) as usize] = VAR_MOVED[lsnap_a as usize]
             lsnap_a = lsnap_a + 1
         }
         if TK[EP as usize] == 8 { EP = EP + 1 }
@@ -43366,14 +43408,15 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             patch_branch_a64(cbz_off, CL)
             // Save then-branch state, restore pre-branch snapshot for else
             // (mirror of x86 compile_stmt).
+            let lin_vc_then = VAR_COUNT  // then-branch locals; an else-branch local has no then state
             var lthen_a: i64 = 0
             while lthen_a < VAR_COUNT {
                 let then_used_a = VAR_USED[lthen_a as usize]
                 let then_moved_a = VAR_MOVED[lthen_a as usize]
-                VAR_USED[lthen_a as usize] = CL_SAVE_USED[lthen_a as usize]
-                VAR_MOVED[lthen_a as usize] = CL_SAVE_MUT[lthen_a as usize]
-                CL_SAVE_USED[lthen_a as usize] = then_used_a
-                CL_SAVE_MUT[lthen_a as usize] = then_moved_a
+                VAR_USED[lthen_a as usize] = if lthen_a < lin_vc0 { LIN_SNAP_USED[(lin_base + lthen_a) as usize] } else { 0 }
+                VAR_MOVED[lthen_a as usize] = if lthen_a < lin_vc0 { LIN_SNAP_MUT[(lin_base + lthen_a) as usize] } else { 0 }
+                LIN_SNAP_USED[(lin_base + lthen_a) as usize] = then_used_a
+                LIN_SNAP_MUT[(lin_base + lthen_a) as usize] = then_moved_a
                 lthen_a = lthen_a + 1
             }
             if TK[EP as usize] == 13 { compile_stmt_a64() }
@@ -43403,18 +43446,20 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             var lchk_a: i64 = 0
             while lchk_a < VAR_COUNT {
                 if VAR_LINEAR[lchk_a as usize] == 1 {
-                    let then_u_a = CL_SAVE_USED[lchk_a as usize]
+                    let then_u_a = if lchk_a < lin_vc_then { LIN_SNAP_USED[(lin_base + lchk_a) as usize] } else { 0 }
                     let else_u_a = VAR_USED[lchk_a as usize]
-                    if then_u_a > 0 && else_u_a == 0 {
-                        tc_linear_violation(if_tok_a, "linear value consumed in then-branch but not else-branch")
-                    }
-                    if then_u_a == 0 && else_u_a > 0 {
-                        tc_linear_violation(if_tok_a, "linear value consumed in else-branch but not then-branch")
+                    if lchk_a < lin_vc0 {
+                        if then_u_a > 0 && else_u_a == 0 {
+                            tc_linear_violation(if_tok_a, "linear value consumed in then-branch but not else-branch")
+                        }
+                        if then_u_a == 0 && else_u_a > 0 {
+                            tc_linear_violation(if_tok_a, "linear value consumed in else-branch but not then-branch")
+                        }
                     }
                     if then_u_a > else_u_a { VAR_USED[lchk_a as usize] = then_u_a }
                 }
                 if VAR_LINEAR[lchk_a as usize] == 1 || VAR_AFFINE[lchk_a as usize] == 1 {
-                    if CL_SAVE_MUT[lchk_a as usize] == 1 || VAR_MOVED[lchk_a as usize] == 1 {
+                    if (lchk_a < lin_vc_then && LIN_SNAP_MUT[(lin_base + lchk_a) as usize] == 1) || VAR_MOVED[lchk_a as usize] == 1 {
                         VAR_MOVED[lchk_a as usize] = 1
                     }
                 }
@@ -43481,7 +43526,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             var lne_a: i64 = 0
             while lne_a < VAR_COUNT {
                 if VAR_LINEAR[lne_a as usize] == 1 {
-                    if VAR_USED[lne_a as usize] > 0 && CL_SAVE_USED[lne_a as usize] == 0 {
+                    if lne_a < lin_vc0 && VAR_USED[lne_a as usize] > 0 && LIN_SNAP_USED[(lin_base + lne_a) as usize] == 0 {
                         tc_linear_violation(if_tok_a, "linear value consumed in if-branch with no else — not consumed on all paths")
                     }
                 }
@@ -43497,6 +43542,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             LAST_STMT_TY = 0
             LAST_STMT_TY_HASH = 0
         }
+        lin_snap_pop()
         return
     }
     // while
