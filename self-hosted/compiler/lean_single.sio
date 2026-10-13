@@ -11398,6 +11398,25 @@ fn emit_str_concat_slots_a64(slot_a: i64, slot_b: i64) with Mut, Panic, Div {
     emit_load_var_a64(slot_res)                       // return res
 }
 
+// arm64 twin of emit_str_from_bytes_slots_x86.
+fn emit_str_from_bytes_slots_a64(slot_buf: i64, slot_len: i64) with Mut, Panic, Div {
+    let slot_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var_a64(slot_len)
+    em32(0xF100001F)   // cmp x0, #0
+    em32(0x9A9FA000)   // csel x0, x0, xzr, ge  (len < 0 -> 0)
+    emit_store_var_a64(slot_len)
+    emit_load_var_a64(slot_len)
+    em32(0x91000400)   // add x0, x0, #1
+    emit_heap_alloc_a64()
+    emit_store_var_a64(slot_res)
+    emit_load_var_a64(slot_len); em32(0xAA0003E2)   // x2 = len
+    emit_load_var_a64(slot_buf); em32(0xAA0003E1)   // x1 = buf
+    emit_load_var_a64(slot_res)                      // x0 = res (dst)
+    emit_memcpy_a64()
+    em32(0x3900001F)   // strb wzr, [x0]  (NUL terminator)
+    emit_load_var_a64(slot_res)
+}
+
 // arm64 twin of emit_str_slice_range_slots_x86: substring s[start..end], ptr in x0.
 fn emit_str_slice_range_slots_a64(slot_s: i64, slot_start: i64, slot_end: i64) with Mut, Panic, Div {
     let slot_len = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
@@ -11835,6 +11854,36 @@ fn emit_str_concat_slots_x86(slot_a: i64, slot_b: i64) with Mut, Panic, Div {
     em(0x48); em(0x89); em(0xc6)            // mov rsi, rax
     em(0xf3); em(0xa4)                      // rep movsb
 
+    em(0xc6); em(0x07); em(0x00)            // mov byte [rdi], 0
+    emit_load_var(slot_res)
+}
+
+// str_from_bytes(buf, len): copy len bytes of buf into a fresh NUL-terminated
+// string (#1680). Returning the buffer's own address made the string dangle as
+// soon as a stack buffer's frame was reused: io_trace_i64_string returns
+// str_from_bytes(out, n) over a local [i8; 64], and the Madaros contract JSON
+// came out as `"stack_map_records":,`. Madaros already copies; this is parity.
+// A negative len copies nothing.
+fn emit_str_from_bytes_slots_x86(slot_buf: i64, slot_len: i64) with Mut, Panic, Div {
+    let slot_res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var(slot_len)
+    em(0x48); em(0x85); em(0xc0)            // test rax, rax
+    em(0x7d); em(0x02)                      // jge +2
+    em(0x31); em(0xc0)                      // xor eax, eax (len < 0 -> 0)
+    emit_store_var(slot_len)
+    emit_load_var(slot_len)
+    em(0x48); em(0x83); em(0xc0); em(1)     // add rax, 1
+    emit_pool_alloc_rax_x86()
+    emit_store_var(slot_res)
+    em(0xfc)                                // cld
+    emit_load_var(slot_len)
+    em(0x48); em(0x89); em(0xc1)            // mov rcx, rax
+    emit_load_var(slot_buf)
+    em(0x48); em(0x89); em(0xc6)            // mov rsi, rax
+    emit_load_var(slot_res)
+    em(0x48); em(0x89); em(0xc7)            // mov rdi, rax
+    em(0xf3); em(0xa4)                      // rep movsb
     em(0xc6); em(0x07); em(0x00)            // mov byte [rdi], 0
     emit_load_var(slot_res)
 }
@@ -16230,14 +16279,19 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 return
             }
             // str_from_bytes(buf: [i8; N], len: i64) -> string
-            // Returns the address of the byte buffer as a string pointer.
+            // Copies len bytes into a fresh NUL-terminated string (#1680).
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "str_from_bytes") {
                 EP = EP + 1
-                compile_or()  // buf arg → rax (address of byte array on stack)
-                em(0x50)      // push rax (save buf address)
+                compile_or()  // buf arg → rax (address of the byte array)
+                let sfb_buf = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(sfb_buf)
                 if TK[EP as usize] == 28 { EP = EP + 1 }
-                compile_or()  // len arg → rax (integer, consumed for type-check only)
-                em(0x58)      // pop rax (restore buf address as the result)
+                compile_or()  // len arg → rax
+                let sfb_len = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(sfb_len)
+                emit_str_from_bytes_slots_x86(sfb_buf, sfb_len)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 EXPR_IS_F64 = 0
                 EXPR_TY = 3
@@ -38632,15 +38686,17 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 return
             }
             // str_from_bytes(buf: [i8; N], len: i64) -> string — parity with the x86-64
-            // twin (~13358): returns the byte-buffer address as a string pointer; the
-            // len arg is compiled for type-check only and discarded.
+            // twin: copies len bytes into a fresh NUL-terminated string (#1680).
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "str_from_bytes") {
                 EP = EP + 1
                 compile_or_a64()   // buf -> x0 (address of byte array)
-                emit_push_a64()    // save buf address
+                let sfb_buf = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(sfb_buf)
                 if TK[EP as usize] == 28 { EP = EP + 1 }
-                compile_or_a64()   // len -> x0 (discarded)
-                emit_pop_x0_a64()  // restore buf address as the result
+                compile_or_a64()   // len -> x0
+                let sfb_len = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(sfb_len)
+                emit_str_from_bytes_slots_a64(sfb_buf, sfb_len)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 EXPR_IS_F64 = 0
                 EXPR_TY = 3
