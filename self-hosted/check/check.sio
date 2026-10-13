@@ -1914,6 +1914,31 @@ fn invariant_framed_named_type(rank: i64, frame: Name, inner_ty: TypeEntry) -> T
 
 fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_args: Option<Box<TypeExprList> >, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let name = checker_copy_string_list_to_name(path.segments)
+    // Mirror the owned type-lowering spine: preserve the observation wrapper
+    // and exactly one inner type, rather than falling through to bare TyNamed.
+    if name_matches_str10(name, 85, 110, 111, 98, 115, 101, 114, 118, 101, 100) {
+        match type_args {
+            Some(args) => {
+                match (*args).tail {
+                    Some(_) => {
+                        checker_report_error_at_inplace(c, span, 72, 0, 0, 0)
+                        return ty_error()
+                    }
+                    None => {}
+                }
+                let inner_ty = checker_lower_type_expr_mut(c, (*args).head)
+                var te = ty_error()
+                te.kind = TypeKind::TyUnobserved
+                te.name = name
+                te.inner = Some(Box::new(inner_ty))
+                return te
+            }
+            None => {
+                checker_report_error_at_inplace(c, span, 72, 0, 0, 0)
+                return ty_error()
+            }
+        }
+    }
     // KL-13b: `f64<m/s>` / `f64<mol/cm3>` — UnitExpr in the single type argument.
     if name_is_f64(name) {
         match type_args {
@@ -8157,11 +8182,23 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
             || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
             || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
-        if is_cmp {
-            if !has_effect_id((*c).current_effects, (*c).current_effect_count, 13) {
-                checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
-            }
+        let observe = has_effect_id((*c).current_effects, (*c).current_effect_count, 13)
+        if !is_cmp || !observe {
+            checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
+            return ty_error()
         }
+        if is_error_or_unknown(left_ty) || is_error_or_unknown(right_ty) {
+            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
+            return ty_error()
+        }
+        let l = if left_ty.kind == TypeKind::TyUnobserved { ty_i64() } else { left_ty }
+        let r = if right_ty.kind == TypeKind::TyUnobserved { ty_i64() } else { right_ty }
+        if !checker_unobserved_cast_allowed(left_ty, l, observe) || !checker_unobserved_cast_allowed(right_ty, r, observe) {
+            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
+            return ty_error()
+        }
+        checker_check_binary_op_types_inplace(c, e.span, e.bin_op, l, r)
+        return ty_bool()
     }
     checker_check_binary_op_types_inplace(c, e.span, e.bin_op, left_ty, right_ty)
     // Feature B: Invariant<T,G> comparability gate. Two invariant observables may be
@@ -12801,6 +12838,27 @@ fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     ident_ty
 }
 
+// Unobserved casts are explicit type-state boundaries, never general compatibility.
+// The initial native carrier is i64; other/nested carriers fail closed here.
+fn checker_unobserved_cast_allowed(src: TypeEntry, dst: TypeEntry, observe: bool) -> bool with Mut, Panic, Div, Alloc {
+    if src.kind == TypeKind::TyUnobserved {
+        if dst.kind == TypeKind::TyUnobserved { return types_compatible(src, dst) }
+        if !observe || dst.kind != TypeKind::TyI64 { return false }
+        match src.inner {
+            Some(inner) => { return (*inner).kind == TypeKind::TyI64 && types_compatible(*inner, dst) }
+            None => { return false }
+        }
+    }
+    if dst.kind == TypeKind::TyUnobserved {
+        if src.kind != TypeKind::TyI64 { return false }
+        match dst.inner {
+            Some(inner) => { return (*inner).kind == TypeKind::TyI64 && types_compatible(src, *inner) }
+            None => { return false }
+        }
+    }
+    true
+}
+
 // *mut ExprCast — transcription of check_cast_expr: operand via the spine, target type via
 // the *mut type-lowering, epistemic + unit-dimension checks in place.
 fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -12808,6 +12866,11 @@ fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     match e.cast_type {
         Some(ty) => {
             let target_ty = checker_lower_type_expr_mut(c, *ty)
+            if (src_ty.kind == TypeKind::TyUnobserved || target_ty.kind == TypeKind::TyUnobserved)
+                && !checker_unobserved_cast_allowed(src_ty, target_ty, has_effect_id((*c).current_effects, (*c).current_effect_count, 13)) {
+                checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
+                return ty_error()
+            }
             if is_wide_float_type(src_ty) || is_wide_float_type(target_ty) {
                 checker_report_error_at_inplace(c, e.span, 248, 0, 0, 0)
                 return ty_error()
@@ -26243,17 +26306,28 @@ impl Checker {
         c = corr_pair.0
         let correlated_same_slot_add = corr_pair.1
 
-        // Observer semantics: comparing Unobserved<T> requires with Observe
+        // Mirror the in-place explicit observer boundary; never recursively unwrap.
         if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
             let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
                 || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
                 || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
-            if is_cmp {
-                let observe_id: i64 = 13
-                if !has_effect_id(c.current_effects, c.current_effect_count, observe_id) {
-                    c = c.report_error_at(e.span, 36, 0, 0, 0)
-                }
+            let observe = has_effect_id(c.current_effects, c.current_effect_count, 13)
+            if !is_cmp || !observe {
+                c = c.report_error_at(e.span, 36, 0, 0, 0)
+                return (c, ty_error())
             }
+            if is_error_or_unknown(left_ty) || is_error_or_unknown(right_ty) {
+                c = c.report_mismatch(e.span, 4, left_ty, right_ty)
+                return (c, ty_error())
+            }
+            let l = if left_ty.kind == TypeKind::TyUnobserved { ty_i64() } else { left_ty }
+            let r = if right_ty.kind == TypeKind::TyUnobserved { ty_i64() } else { right_ty }
+            if !checker_unobserved_cast_allowed(left_ty, l, observe) || !checker_unobserved_cast_allowed(right_ty, r, observe) {
+                c = c.report_mismatch(e.span, 4, left_ty, right_ty)
+                return (c, ty_error())
+            }
+            c = c.check_binary_op_types(e.span, e.bin_op, l, r)
+            return (c, ty_bool())
         }
 
         // Validate binary operator type constraints
@@ -30696,6 +30770,11 @@ impl Checker {
                 let ty_pair = c.lower_type_expr(*ty)
                 c = ty_pair.0
                 let target_ty = ty_pair.1
+                if (src_ty.kind == TypeKind::TyUnobserved || target_ty.kind == TypeKind::TyUnobserved)
+                    && !checker_unobserved_cast_allowed(src_ty, target_ty, has_effect_id(c.current_effects, c.current_effect_count, 13)) {
+                    c = c.report_error_at(e.span, 36, 0, 0, 0)
+                    return (c, ty_error())
+                }
                 if is_wide_float_type(src_ty) || is_wide_float_type(target_ty) {
                     c = c.report_error_at(e.span, 248, 0, 0, 0)
                     return (c, ty_error())

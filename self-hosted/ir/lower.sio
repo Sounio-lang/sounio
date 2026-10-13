@@ -2965,6 +2965,9 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
     (*module_box).string_count = 0
     (*module_box).prof_counter_count = (*summary.module).prof_counter_count
     (*module_box).bss_total_size = (*summary.module).bss_total_size
+    let summary_module = summary.module
+    (*module_box).export_names = (*summary_module).export_names
+    (*module_box).export_count = (*summary_module).export_count
 
     var i: i64 = 0
     while i < (*summary.module).prof_counter_count && i < 64 {
@@ -3397,7 +3400,7 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                             if slot_k.region.slot < 0 { ir_function_alloc_region(&! slot_k) }
                                             ir_fn_set(&! (*mbox_k), fn_id_ps as usize, slot_k)
                                             (*lo).module = mbox_k
-                                        } else if visibility_to_bool(head.visibility) {
+                                        } else if head.visibility.kind != VISIBILITY_PRIVATE {
                                             var mbox_e = (*lo).module
                                             var slot_e = ir_fn_get(&(*mbox_e), fn_id_ps as usize)
                                             slot_e.compile_strategy = 7
@@ -3752,6 +3755,8 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
     (*module_box).string_count = 0
     (*module_box).prof_counter_count = summary.module.prof_counter_count
     (*module_box).bss_total_size = summary.module.bss_total_size
+    (*module_box).export_names = summary.module.export_names
+    (*module_box).export_count = summary.module.export_count
 
     var i: i64 = 0
     while i < summary.module.prof_counter_count && i < 64 {
@@ -3861,37 +3866,92 @@ fn lowerer_effect_list_has_name_ref(effects: &Option<Box<EffectList>>, target: s
     false
 }
 
+// SCO Step III — theory-carrying strategy selection.
+// Scientific effect sets install E(τ) by elevating compile_strategy to
+// PRECISION_PRESERVING so mid-end passes that key on strategy (epistemic
+// e-graph, chaotic refusal) see domain theory rather than STANDARD floats.
+// See docs/research/sco_etau_2026-08-02.md.
+// Marker: SCO_ETAU_INSTALL_V1
+fn lowerer_sco_scientific_effects_ref(effects: &Option<Box<EffectList>>) -> bool with Mut, Panic, Div {
+    if lowerer_effect_list_has_name_ref(effects, "NonAssoc") {
+        return true
+    }
+    if lowerer_effect_list_has_name_ref(effects, "Epistemic") {
+        return true
+    }
+    if lowerer_effect_list_has_name_ref(effects, "Observe") {
+        return true
+    }
+    false
+}
+
+// Marker: SCO_ETAU_STRATEGY_TRACE
+fn lowerer_sco_strategy_trace(name: Name, s: i64) with Mut, Panic, Div, IO {
+    // Optional runtime probe (Step IV non-vacuity). Same env/diag pattern as other lower paths.
+    if str_eq(read_env("SOUNIO_SCO_STRATEGY_TRACE"), "1") {
+        print("SCO_STRATEGY function=")
+        print(str_from_bytes(name.buf, name.len))
+        print(" strategy=")
+        print_int(s)
+        print("\n")
+    }
+}
+
 fn lowerer_compute_strategy_from_ast_ref(
     return_type: &Option<Box<TypeExpr>>,
     effects: &Option<Box<EffectList>>
-) -> i64 with Mut, Panic, Div {
+) -> i64 with Mut, Panic, Div, IO {
+    var strategy: i64 = IR_STRATEGY_STANDARD
     if lowerer_effect_list_has_name_ref(effects, "GPU") {
-        return IR_STRATEGY_GPU_KERNEL
+        strategy = IR_STRATEGY_GPU_KERNEL
+
+        return strategy
     }
     if lowerer_effect_list_has_name_ref(effects, "Prob") {
-        return IR_STRATEGY_PROBABILISTIC
+        strategy = IR_STRATEGY_PROBABILISTIC
+
+        return strategy
     }
     // A-layer-2: a `with Chaotic` function integrates a chaotic vector field, so the
     // e-graph must refuse float reassociation on it (dominates the return-type strategy).
     if lowerer_effect_list_has_name_ref(effects, "Chaotic") {
-        return IR_STRATEGY_PRECISION_PRESERVING_CHAOTIC
+        strategy = IR_STRATEGY_PRECISION_PRESERVING_CHAOTIC
+
+        return strategy
+    }
+
+    // SCO Step III–IV: NonAssoc / Epistemic / Observe carry E(τ) → precision-preserving.
+    // Ablation: SOUNIO_SCO_ABLATION=1 skips elevation (non-vacuity / adversarial off-switch).
+    // Marker: SCO_ETAU_ELEVATE_SCIENTIFIC_EFFECTS
+    // Marker: SCO_ETAU_ABLATION_ENV
+    // Environment-backed ablation is IO; callers propagate that effect explicitly.
+    if !str_eq(read_env("SOUNIO_SCO_ABLATION"), "1") {
+        if lowerer_sco_scientific_effects_ref(effects) {
+            strategy = IR_STRATEGY_PRECISION_PRESERVING
+
+            return strategy
+        }
     }
 
     match *return_type {
         Some(type_node) => {
             let rk = (*type_node).kind
             if rk == TypeExprKind::TypeValidated {
-                IR_STRATEGY_AGGRESSIVE
+                strategy = IR_STRATEGY_AGGRESSIVE
             } else if rk == TypeExprKind::TypeKnowledge {
-                IR_STRATEGY_PRECISION_PRESERVING
+                strategy = IR_STRATEGY_PRECISION_PRESERVING
             } else if rk == TypeExprKind::TypeContest || rk == TypeExprKind::TypeRobust {
-                IR_STRATEGY_INSTRUMENTED
+                strategy = IR_STRATEGY_INSTRUMENTED
             } else {
-                IR_STRATEGY_STANDARD
+                strategy = IR_STRATEGY_STANDARD
             }
         }
-        None => IR_STRATEGY_STANDARD,
+        None => {
+            strategy = IR_STRATEGY_STANDARD
+        }
     }
+
+    strategy
 }
 
 fn lowerer_find_or_add_fn_id_mut(lo: &! Lowerer, name: Name) -> i64 with Mut, Panic, Div, Alloc {
@@ -4901,8 +4961,8 @@ fn lowerer_preseed_one_item_mut(
     let name = head.name
     if kind == ItemKind::ItemFn {
         if !ir_name_eq(name, *skip_name) {
-            match head.fn_def {
-                Some(fd) => {
+            let fd = item_fn_def_ptr(head)
+            if fd != (0 as *mut FnDef) {
                     let fn_id_sig = lowerer_find_or_add_fn_id_mut(lo, name)
                     if fn_id_sig >= 0 {
                         let strategy_sig = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
@@ -4948,7 +5008,8 @@ fn lowerer_preseed_one_item_mut(
                             slot_k.compile_strategy = 6
                             ir_fn_set(&! (*mbox_k), fn_id_ps as usize, slot_k)
                             (*lo).module = mbox_k }
-                        } else if visibility_to_bool(head.visibility) {
+                        }
+                        if !(*fd).is_kernel && head.visibility.kind != VISIBILITY_PRIVATE {
                             { var mbox_e = (*lo).module
                             var slot_e = ir_fn_get(&(*mbox_e), fn_id_ps as usize)
                             slot_e.compile_strategy = 7
@@ -4961,8 +5022,8 @@ fn lowerer_preseed_one_item_mut(
                             }
                         }
                     }
-                }
-                None => {
+            }
+            if fd == (0 as *mut FnDef) {
                     let bss_fn_id = lowerer_find_or_add_fn_id_mut(lo, name)
                     if bss_fn_id >= 0 {
                         lowerer_record_global_type_mut(lo, bss_fn_id, &head.type_alias_ty)
@@ -4981,7 +5042,6 @@ fn lowerer_preseed_one_item_mut(
                         (*mbox2).bss_total_size = bss_off + aligned_size
                         (*lo).module = mbox2
                     }
-                }
             }
         }
     } else if kind == ItemKind::ItemImpl {
@@ -5057,6 +5117,26 @@ fn lowerer_preseed_program_items_mut(
     }
 }
 
+// Match the full item preseed's declaration authority. A public top-level
+// function is strategy7; a kernel is strategy6. Method visibility does not
+// create a top-level export (the existing full impl-method lane does not do so).
+fn ir_fast_summary_declared_strategy(inferred: i64, is_kernel: bool, is_exported: bool) -> i64 {
+    if is_kernel { 6 } else if is_exported { 7 } else { inferred }
+}
+
+fn ir_fast_summary_record_export(module: &! IrModule, name: Name) with Mut, Panic, Div {
+    let count = (*module).export_count
+    var i: i64 = 0
+    while i < count && i < 64 {
+        if ir_name_eq((*module).export_names[i as usize], name) { return }
+        i = i + 1
+    }
+    if count >= 0 && count < 64 {
+        (*module).export_names[count as usize] = name
+        (*module).export_count = count + 1
+    }
+}
+
 fn ir_fast_summary_find_or_add_fn_id(module: &! IrModule, name: Name) -> i64 with Mut, Panic, Div, Alloc {
     var module_value = (*module)
     var i: i64 = 0
@@ -5086,8 +5166,10 @@ fn ir_fast_summary_preseed_fn_signature(
     name: Name,
     params: &Option<Box<ParamList>>,
     return_type: &Option<Box<TypeExpr>>,
-    effects: &Option<Box<EffectList>>
-) with Mut, Panic, Div, Alloc {
+    effects: &Option<Box<EffectList>>,
+    is_kernel: bool,
+    is_exported: bool
+) with Mut, Panic, Div, Alloc, IO {
     let fn_id = ir_fast_summary_find_or_add_fn_id(module, name)
     if fn_id < 0 {
         return
@@ -5095,7 +5177,7 @@ fn ir_fast_summary_preseed_fn_signature(
     var module_value = (*module)
     let strategy = lowerer_compute_strategy_from_ast_ref(return_type, effects)
     var fn_slot = ir_fn_get(&module_value, fn_id as usize)
-    fn_slot.compile_strategy = strategy
+    fn_slot.compile_strategy = ir_fast_summary_declared_strategy(strategy, is_kernel, is_exported)
     fn_slot.returns_float = lower_opt_return_float_code(return_type)
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
@@ -5120,6 +5202,7 @@ fn ir_fast_summary_preseed_fn_signature(
         }
     }
     ir_fn_set(&! module_value, fn_id as usize, fn_slot)
+    if is_exported && !is_kernel { ir_fast_summary_record_export(&! module_value, name) }
     (*module) = module_value
 }
 
@@ -5128,7 +5211,7 @@ fn ir_fast_summary_preseed_impl_methods(
     type_name: Name,
     methods: &Option<Box<ItemList>>,
     skip_name: Name
-) with Mut, Panic, Div, Alloc {
+) with Mut, Panic, Div, Alloc, IO {
     var current = methods
     while true {
         match *current {
@@ -5140,7 +5223,7 @@ fn ir_fast_summary_preseed_impl_methods(
                         let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
                         match *fn_def_opt_ref {
                             Some(fd) => {
-                                ir_fast_summary_preseed_fn_signature(module, mangled, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                                ir_fast_summary_preseed_fn_signature(module, mangled, &(*fd).params, &(*fd).return_type, &(*fd).effects, (*fd).is_kernel, false)
                             }
                             _ => {}
                         }
@@ -5157,7 +5240,7 @@ fn ir_fast_summary_preseed_items(
     module: &! IrModule,
     items: &Option<Box<ItemList>>,
     skip_name: Name
-) with Mut, Panic, Div, Alloc {
+) with Mut, Panic, Div, Alloc, IO {
     var current = items
     while true {
         match *current {
@@ -5170,7 +5253,7 @@ fn ir_fast_summary_preseed_items(
                         let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
                         match *fn_def_opt_ref {
                             Some(fd) => {
-                                ir_fast_summary_preseed_fn_signature(module, name, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                                ir_fast_summary_preseed_fn_signature(module, name, &(*fd).params, &(*fd).return_type, &(*fd).effects, (*fd).is_kernel, visibility_to_bool(head.visibility))
                             }
                             _ => {}
                         }
@@ -5219,8 +5302,10 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     name: Name,
     params: &Option<Box<ParamList>>,
     return_type: &Option<Box<TypeExpr>>,
-    effects: &Option<Box<EffectList>>
-) -> IrModule with Mut, Panic, Div, Alloc {
+    effects: &Option<Box<EffectList>>,
+    is_kernel: bool,
+    is_exported: bool
+) -> IrModule with Mut, Panic, Div, Alloc, IO {
     let pair = ir_fast_summary_find_or_add_fn_id_owned(module, name)
     var module_value = pair.0
     let fn_id = pair.1
@@ -5229,7 +5314,7 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     }
     let strategy = lowerer_compute_strategy_from_ast_ref(return_type, effects)
     var fn_slot = ir_fn_get(&module_value, fn_id as usize)
-    fn_slot.compile_strategy = strategy
+    fn_slot.compile_strategy = ir_fast_summary_declared_strategy(strategy, is_kernel, is_exported)
     fn_slot.returns_float = lower_opt_return_float_code(return_type)
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
@@ -5254,6 +5339,7 @@ fn ir_fast_summary_preseed_fn_signature_owned(
         }
     }
     ir_fn_set(&! module_value, fn_id as usize, fn_slot)
+    if is_exported && !is_kernel { ir_fast_summary_record_export(&! module_value, name) }
     module_value
 }
 
@@ -5262,7 +5348,7 @@ fn ir_fast_summary_preseed_impl_methods_owned(
     type_name: Name,
     methods: Option<Box<ItemList>>,
     skip_name: Name
-) -> IrModule with Mut, Panic, Div, Alloc {
+) -> IrModule with Mut, Panic, Div, Alloc, IO {
     match methods {
         Some(list) => {
             let item = (*list).head
@@ -5273,7 +5359,7 @@ fn ir_fast_summary_preseed_impl_methods_owned(
                 if !ir_name_eq(mangled, skip_name) {
                     match item.fn_def {
                         Some(fd) => {
-                            module_value = ir_fast_summary_preseed_fn_signature_owned(module_value, mangled, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                            module_value = ir_fast_summary_preseed_fn_signature_owned(module_value, mangled, &(*fd).params, &(*fd).return_type, &(*fd).effects, (*fd).is_kernel, false)
                         }
                         _ => {}
                     }
@@ -5289,7 +5375,7 @@ fn ir_fast_summary_preseed_items_owned(
     module: IrModule,
     items: Option<Box<ItemList>>,
     skip_name: Name
-) -> IrModule with Mut, Panic, Div, Alloc {
+) -> IrModule with Mut, Panic, Div, Alloc, IO {
     match items {
         Some(list) => {
             let item = (*list).head
@@ -5301,7 +5387,7 @@ fn ir_fast_summary_preseed_items_owned(
                 if !ir_name_eq(name, skip_name) {
                     match item.fn_def {
                         Some(fd) => {
-                            module_value = ir_fast_summary_preseed_fn_signature_owned(module_value, name, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                            module_value = ir_fast_summary_preseed_fn_signature_owned(module_value, name, &(*fd).params, &(*fd).return_type, &(*fd).effects, (*fd).is_kernel, visibility_to_bool(item.visibility))
                         }
                         _ => {}
                     }
@@ -5416,7 +5502,7 @@ fn ir_fast_summary_preseed_impl_methods_seed_owned(
     type_name: Name,
     methods: Option<Box<ItemList>>,
     skip_name: Name
-) -> IrFastSummaryOwnedSeed with Mut, Panic, Div, Alloc {
+) -> IrFastSummaryOwnedSeed with Mut, Panic, Div, Alloc, IO {
     match methods {
         Some(list) => {
             let item = (*list).head
@@ -5427,7 +5513,7 @@ fn ir_fast_summary_preseed_impl_methods_seed_owned(
                 if !ir_name_eq(mangled, skip_name) {
                     match item.fn_def {
                         Some(fd) => {
-                            seed_value.module = ir_fast_summary_preseed_fn_signature_owned(seed_value.module, mangled, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                            seed_value.module = ir_fast_summary_preseed_fn_signature_owned(seed_value.module, mangled, &(*fd).params, &(*fd).return_type, &(*fd).effects, (*fd).is_kernel, false)
                         }
                         _ => {}
                     }
@@ -5443,7 +5529,7 @@ fn ir_fast_summary_preseed_items_seed_owned(
     seed: IrFastSummaryOwnedSeed,
     items: Option<Box<ItemList>>,
     skip_name: Name
-) -> IrFastSummaryOwnedSeed with Mut, Panic, Div, Alloc {
+) -> IrFastSummaryOwnedSeed with Mut, Panic, Div, Alloc, IO {
     match items {
         Some(list) => {
             let item = (*list).head
@@ -5455,7 +5541,7 @@ fn ir_fast_summary_preseed_items_seed_owned(
                 if !ir_name_eq(name, skip_name) {
                     match item.fn_def {
                         Some(fd) => {
-                            seed_value.module = ir_fast_summary_preseed_fn_signature_owned(seed_value.module, name, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                            seed_value.module = ir_fast_summary_preseed_fn_signature_owned(seed_value.module, name, &(*fd).params, &(*fd).return_type, &(*fd).effects, (*fd).is_kernel, visibility_to_bool(item.visibility))
                                 }
                                 _ => {
                                     var bss_mod = seed_value.module
@@ -5553,7 +5639,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                             if fn_id >= 0 {
                                 let strategy = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
                                 var fn_slot = ir_fn_get(&module, fn_id as usize)
-                                fn_slot.compile_strategy = strategy
+                                fn_slot.compile_strategy = ir_fast_summary_declared_strategy(strategy, (*fd).is_kernel, visibility_to_bool(item.visibility))
                                 fn_slot.returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                 fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                 fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
@@ -5576,6 +5662,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                     }
                                 }
                                 ir_fn_set(&! module, fn_id as usize, fn_slot)
+                                if visibility_to_bool(item.visibility) && !(*fd).is_kernel { ir_fast_summary_record_export(&! module, name) }
                             }
                         }
                         _ => {
@@ -5652,7 +5739,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                     if fn_id >= 0 {
                                                         let strategy = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
                                                         var fn_slot = ir_fn_get(&module, fn_id as usize)
-                                                        fn_slot.compile_strategy = strategy
+                                                        fn_slot.compile_strategy = ir_fast_summary_declared_strategy(strategy, (*fd).is_kernel, false)
                                                         fn_slot.returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                                         fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                                         fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
@@ -5941,6 +6028,24 @@ fn lowerer_mark_local_opt_payload_kind_mut(
 fn lower_type_expr_is_rgn_numeric(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if lower_type_expr_is_wide_float(te) { return false }
     lower_type_expr_is_f64(te) || lower_type_expr_is_integer(te) || lower_type_expr_is_bool(te)
+}
+
+// #2830: stamp is_unsigned_int on a parameter bound through lowerer_bind_local_mut
+// (which zeroes it). The other parameter binder, Lowerer::lower_fn_params_ref,
+// already stamps it (#2339); this one -- the path lowerer_lower_fn_item_mut
+// actually takes -- did not, so `a >> k`, `a / k` and `a > b` on a `u64`
+// parameter stayed signed while the same code on a `let a: u64` local did not.
+fn lowerer_mark_local_unsigned_int_mut(lo: &! Lowerer, name: Name) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).is_unsigned_int).values[i as usize] = 1
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
 }
 
 fn lowerer_mark_local_wide_bits_mut(
@@ -6268,6 +6373,9 @@ fn lowerer_lower_fn_params_mut(
                 }
 
                 lowerer_bind_local_mut(lo, (*list).head.name, param_value_reg, (*list).head.is_self_mut)
+                if lower_type_expr_is_unsigned_int(&(*list).head.ty) {
+                    lowerer_mark_local_unsigned_int_mut(lo, (*list).head.name)
+                }
                 let param_tuple_float_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                 let param_tuple_arr_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                 lowerer_mark_local_tuple_masks_mut(lo, (*list).head.name, param_tuple_float_mask, param_tuple_arr_mask)
@@ -6714,6 +6822,7 @@ fn lowerer_lower_fn_item_mut(
     lower_record_option_box_return((*strategy_func_box).name, &fd.return_type)
     (*strategy_func_box).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
     (*strategy_func_box).f128_param_mask = lower_f128_param_mask_of(&fd.params)
+    lowerer_sco_strategy_trace(name, (*strategy_func_box).compile_strategy)
     (*lo).current_func = strategy_func_box
 
     // #1547: an extern "C" declaration has no body. Flush it now as an
@@ -13020,7 +13129,27 @@ impl Lowerer {
     // a parameter, so without this the binary arm below matches nothing and the
     // field stays unregistered.
     fn fo_ctor_param_index_thru_lets(self, blk: &Block, e: &Expr, p0: Name, p1: Name, nparams: i64, depth: i64) -> i64 with Mut, Panic, Div, Alloc, IO {
-        if depth > 8 || (*e).kind != ExprKind::ExprIdent {
+        if depth > 8 {
+            return 0 - 1
+        }
+        // A Knowledge result field can be initialized from `p.value`, or from
+        // a let-bound alias such as `let f = p.value`. The constructor transfer
+        // vocabulary operates on parameter indices, so peel the value field and
+        // recover the Knowledge parameter that owns it. This is deliberately
+        // restricted to `.value`; `.variance` and metadata are not payloads.
+        if (*e).kind == ExprKind::ExprFieldAccess && ir_name_eq((*e).name, make_name("value")) {
+            match (*e).left {
+                Some(base) => {
+                    if (*base).kind == ExprKind::ExprIdent {
+                        if nparams >= 1 && ir_name_eq((*base).name, p0) { return 0 }
+                        if nparams >= 2 && ir_name_eq((*base).name, p1) { return 1 }
+                    }
+                }
+                _ => {}
+            }
+            return 0 - 1
+        }
+        if (*e).kind != ExprKind::ExprIdent {
             return 0 - 1
         }
         if nparams >= 1 && ir_name_eq((*e).name, p0) {
@@ -13052,9 +13181,80 @@ impl Lowerer {
         0 - 1
     }
 
+    // Param index only when the expression is that parameter's `.value`,
+    // through lets and casts. A bare parameter is not an amount.
+    fn fo_ctor_amount_index_thru_lets(self, blk: &Block, e: &Expr, p0: Name, p1: Name, nparams: i64, depth: i64) -> i64 with Mut, Panic, Div, Alloc, IO {
+        if depth > 8 {
+            return 0 - 1
+        }
+        if (*e).kind == ExprKind::ExprCast || (*e).kind == ExprKind::ExprReturn {
+            match (*e).left {
+                Some(inner) => {
+                    return self.fo_ctor_amount_index_thru_lets(blk, &(*inner), p0, p1, nparams, depth + 1)
+                }
+                _ => { return 0 - 1 }
+            }
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess && ir_name_eq((*e).name, make_name("value")) {
+            match (*e).left {
+                Some(base) => {
+                    if (*base).kind == ExprKind::ExprIdent {
+                        if nparams >= 1 && ir_name_eq((*base).name, p0) { return 0 }
+                        if nparams >= 2 && ir_name_eq((*base).name, p1) { return 1 }
+                    }
+                    return self.fo_ctor_amount_index_thru_lets(blk, &(*base), p0, p1, nparams, depth + 1)
+                }
+                _ => { return 0 - 1 }
+            }
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            var current = &(*blk).stmts
+            while true {
+                match *current {
+                    Some(list) => {
+                        let stmt_ref = &(*list).head
+                        if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
+                            if ir_name_eq(stmt_ref.name, (*e).name) {
+                                match stmt_ref.expr {
+                                    Some(rhs) => {
+                                        return self.fo_ctor_amount_index_thru_lets(blk, &(*rhs), p0, p1, nparams, depth + 1)
+                                    }
+                                    _ => { return 0 - 1 }
+                                }
+                            }
+                        }
+                        current = &(*list).tail
+                    }
+                    _ => break
+                }
+            }
+        }
+        0 - 1
+    }
+
     fn fo_ctor_classify_leaf(self, fn_hash: i64, path: i64, field0: i64, blk: &Block, e: &Expr, p0: Name, p1: Name, nparams: i64, depth: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         if depth > 8 {
+            return lo
+        }
+        if (*e).kind == ExprKind::ExprCast || (*e).kind == ExprKind::ExprReturn {
+            match (*e).left {
+                Some(inner) => {
+                    return lo.fo_ctor_classify_leaf(fn_hash, path, field0, blk, &(*inner), p0, p1, nparams, depth + 1)
+                }
+                _ => { return lo }
+            }
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess && ir_name_eq((*e).name, make_name("value")) {
+            let amt = lo.fo_ctor_amount_index_thru_lets(blk, e, p0, p1, nparams, 0)
+            if amt == 0 {
+                fo_ctor_global_set(fn_hash, path, 10, 0.0, field0)
+                return lo
+            }
+            if amt == 1 {
+                fo_ctor_global_set(fn_hash, path, 10, 1.0, field0)
+                return lo
+            }
             return lo
         }
         if (*e).kind == ExprKind::ExprIdent {
@@ -13093,6 +13293,11 @@ impl Lowerer {
             return lo
         }
         if (*e).kind == ExprKind::ExprBinary {
+            let prod = lo.fo_amount_product(blk, e, p0, p1, nparams, 0)
+            if prod.0 == 12 {
+                fo_ctor_global_set(fn_hash, path, 12, prod.1, field0)
+                return lo
+            }
             match (*e).left {
                 Some(le) => {
                     match (*e).right {
@@ -13102,6 +13307,12 @@ impl Lowerer {
                             let ll = lo.fo_expr_as_lit(&(*le))
                             let rl = lo.fo_expr_as_lit(&(*re))
                             if (*e).bin_op == BinaryOp::OpMul {
+                                let la = lo.fo_ctor_amount_index_thru_lets(blk, &(*le), p0, p1, nparams, 0)
+                                let ra = lo.fo_ctor_amount_index_thru_lets(blk, &(*re), p0, p1, nparams, 0)
+                                if la >= 0 && ra >= 0 && la != ra {
+                                    fo_ctor_global_set(fn_hash, path, 12, 1.0, field0)
+                                    return lo
+                                }
                                 if ll.0 && ri == 0 { fo_ctor_global_set(fn_hash, path, 2, ll.1, field0); return lo }
                                 if rl.0 && li == 0 { fo_ctor_global_set(fn_hash, path, 2, rl.1, field0); return lo }
                                 if nparams >= 2 && ((li == 0 && ri == 1) || (li == 1 && ri == 0)) {
@@ -15312,6 +15523,14 @@ impl Lowerer {
                 match (*e).left {
                     Some(base_expr) => {
                         if (*base_expr).kind == ExprKind::ExprIdent {
+                            let base_reg = self.lookup_local((*base_expr).name)
+                            if base_reg >= 0 {
+                                let carried = self.lookup_variance_for_field(base_reg, 0)
+                                if carried >= 0 {
+                                    let lo_c = self.so_clear_expr_hess().fo_seed_from_variance(carried, 0 - 1)
+                                    return (lo_c, carried)
+                                }
+                            }
                             let kn_pair = self.lower_knowledge_variance_for_ident((*base_expr).name)
                             if kn_pair.1 >= 0 {
                                 // Seed/reuse FO channel for this Knowledge seed.
@@ -19479,36 +19698,16 @@ impl Lowerer {
         self,
         return_type: &Option<Box<TypeExpr>>,
         effects: &Option<Box<EffectList>>
-    ) -> i64 with Mut, Panic, Div {
-        if self.ir_effect_list_has_name_ref(effects, "GPU") {
-            return IR_STRATEGY_GPU_KERNEL
-        }
-        if self.ir_effect_list_has_name_ref(effects, "Prob") {
-            return IR_STRATEGY_PROBABILISTIC
-        }
-
-        match *return_type {
-            Some(type_node) => {
-                let rk = (*type_node).kind
-                if rk == TypeExprKind::TypeValidated {
-                    IR_STRATEGY_AGGRESSIVE
-                } else if rk == TypeExprKind::TypeKnowledge {
-                    IR_STRATEGY_PRECISION_PRESERVING
-                } else if rk == TypeExprKind::TypeContest || rk == TypeExprKind::TypeRobust {
-                    IR_STRATEGY_INSTRUMENTED
-                } else {
-                    IR_STRATEGY_STANDARD
-                }
-            }
-            None => IR_STRATEGY_STANDARD,
-        }
+    ) -> i64 with Mut, Panic, Div, IO {
+        // Share the scientific-effect policy with the mutable lowering path.
+        lowerer_compute_strategy_from_ast_ref(return_type, effects)
     }
 
     fn ir_compute_strategy_from_ast(
         self,
         return_type: Option<Box<TypeExpr>>,
         effects: Option<Box<EffectList>>
-    ) -> i64 with Mut, Panic, Div {
+    ) -> i64 with Mut, Panic, Div, IO {
         self.ir_compute_strategy_from_ast_ref(&return_type, &effects)
     }
 
@@ -19644,6 +19843,7 @@ impl Lowerer {
         } else {
             (*lo.current_func).compile_strategy = strategy
         }
+        lowerer_sco_strategy_trace(name, (*lo.current_func).compile_strategy)
         (*lo.current_func).returns_float = lower_opt_return_float_code(&fd.return_type)
         (*lo.current_func).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
@@ -19834,6 +20034,7 @@ impl Lowerer {
         } else {
             (*lo.current_func).compile_strategy = strategy
         }
+        lowerer_sco_strategy_trace(name, (*lo.current_func).compile_strategy)
         (*lo.current_func).returns_float = lower_opt_return_float_code(&fd.return_type)
         (*lo.current_func).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
@@ -21128,6 +21329,11 @@ impl Lowerer {
                 || lower_name_is_integer_type(pointee_name)
                 || lower_name_is_bool_type(pointee_name) {
                 lo = lo.bind_local_struct_type(s.name, pointee_name, false)
+            } else if pointee_name.len > 0 && !ir_name_is_box(pointee_name)
+                && lower_struct_layout_index_of(&(*lo.struct_layouts), pointee_name) >= 0 {
+                // #1702: `let r: &!S = ...` names a registered struct pointee; record
+                // it as a `r: &!S` parameter does, so `(*r).f` resolves against S.
+                lo = lo.bind_local_struct_type(s.name, pointee_name, false)
             }
         }
         if fixed_array_len >= 0 {
@@ -21919,6 +22125,24 @@ impl Lowerer {
                     let src_elem_wide = lo.lookup_local_array_elem_wide_bits((*expr_box).name)
                     if src_elem_wide > 0 {
                         lo = lo.bind_local_array_elem_wide_bits(s.name, src_elem_wide)
+                    }
+                } else if (*expr_box).kind == ExprKind::ExprUnary
+                    && ((*expr_box).un_op == UnaryOp::OpRef || (*expr_box).un_op == UnaryOp::OpRefMut) {
+                    // #1702: `let r = &x` / `let r = &!x` keeps the referent's layout,
+                    // as a `p: &!S` parameter does (lower_param_struct_type_name).
+                    // Without it `(*r).f` had no owner type, field_idx_for_base_ref
+                    // fell to the cross-struct by-name scan, and with two structs
+                    // sharing a field name the store wrote the other struct's slot.
+                    match (*expr_box).left {
+                        Some(ref_operand) => {
+                            if (*ref_operand).kind == ExprKind::ExprIdent && !ir_name_eq((*ref_operand).name, s.name) {
+                                let referent_st = lo.lookup_local_struct_type((*ref_operand).name)
+                                if referent_st.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), referent_st) >= 0 {
+                                    lo = lo.bind_local_struct_type(s.name, referent_st, false)
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -23820,7 +24044,7 @@ impl Lowerer {
         let dst_pair = lo2.fresh_reg()
         let lo3 = dst_pair.0
         let dst_reg = dst_pair.1
-        let lo4 = lo3.emit(ir_alloc(dst_reg, 0))
+        let lo4 = lo3.emit(ir_alloc_measure(dst_reg))
 
         // field 0: value
         let lo5 = lo4.emit(ir_field_set(dst_reg, 0, value_reg, make_name("value")))
@@ -23906,6 +24130,10 @@ impl Lowerer {
     // nominal expression and must not duplicate an effectful factory call.
     fn lower_direct_knowledge_call_variance_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if (*e).kind == ExprKind::ExprFieldAccess && ir_name_eq((*e).name, make_name("value")) {
+            let carried = self.fo_ctor_chain_apply(e)
+            if carried.1 >= 0 {
+                return carried
+            }
             match (*e).left {
                 Some(base) => {
                     if (*base).kind == ExprKind::ExprCall || (*base).kind == ExprKind::ExprMethodCall {
@@ -26262,6 +26490,14 @@ impl Lowerer {
         let both_typed_unsigned_p = lhs_unsigned_p && rhs_unsigned_p
         let literal_pair_with_unsigned_p =
             (lhs_is_intlit_p && rhs_unsigned_p) || (rhs_is_intlit_p && lhs_unsigned_p)
+        // #2830: a right shift's result signedness is the LEFT operand's alone;
+        // the amount's type does not matter. `fn shr(a: u64, k: i64) { a >> k }`
+        // must be logical. (The guard above is about the opposite shape -- a
+        // signed left operand with an unsigned amount, `(0-8) >> sh`, which
+        // stays arithmetic, and still does: this only looks at the left side.)
+        if e.bin_op == BinaryOp::OpShr && lhs_unsigned_p {
+            final_op = BinaryOp::OpUShr
+        }
         if both_typed_unsigned_p || literal_pair_with_unsigned_p {
             if e.bin_op == BinaryOp::OpDiv {
                 final_op = BinaryOp::OpUDiv
@@ -26269,6 +26505,30 @@ impl Lowerer {
                 final_op = BinaryOp::OpURem
             } else if e.bin_op == BinaryOp::OpShr {
                 final_op = BinaryOp::OpUShr
+            }
+            // #2830: unsigned < <= > >=. BinaryOp has no unsigned compares and every
+            // backend emits setl/setg (signed), so `a > 1` was false for a u64 with
+            // bit 63 set. Flipping bit 63 of both operands maps unsigned order onto
+            // signed order exactly (x <u y  <=>  (x ^ MIN) <s (y ^ MIN)), so the
+            // existing signed compare gives the unsigned answer on every backend
+            // and through const_prop, with no new opcode. == and != need nothing.
+            if !lhs_expr_is_float && !rhs_expr_is_float
+                && (e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
+                    || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe) {
+                let pb = lo3.fresh_reg()
+                var lo_u = pb.0
+                let bias_reg = pb.1
+                lo_u = lo_u.emit(ir_load_imm(bias_reg, (0 - 9223372036854775807) - 1))
+                let pl = lo_u.fresh_reg()
+                lo_u = pl.0
+                let lhs_b = pl.1
+                lo_u = lo_u.emit(ir_binop(lhs_b, lhs, BinaryOp::OpBitXor, bias_reg))
+                let pr = lo_u.fresh_reg()
+                lo_u = pr.0
+                let rhs_b = pr.1
+                lo_u = lo_u.emit(ir_binop(rhs_b, rhs, BinaryOp::OpBitXor, bias_reg))
+                lo_u = lo_u.emit(ir_binop(dst, lhs_b, e.bin_op, rhs_b))
+                return (lo_u, dst)
             }
         }
         let lo4 = lo3.emit(ir_binop_typed(dst, lhs, final_op, rhs, lhs_expr_is_float, rhs_expr_is_float))
@@ -28069,7 +28329,15 @@ impl Lowerer {
         let pair = lo.fresh_reg()
         lo = pair.0
         let dst = pair.1
-        lo = lo.emit(ir_call(dst, fn_id, fname, args, argc))
+        var owned_call = ir_call(dst, fn_id, fname, args, argc)
+        // Only this compiler-owned producer stamps the region envelope. User
+        // calls through ordinary lower_call retain the unmarked ir_call default.
+        if ir_name_eq(fname, make_name("__rgn_enter")) && argc == 0 {
+            owned_call.imm_flags = IR_RGN_FRAME_ENTER_FLAG
+        } else if ir_name_eq(fname, make_name("__rgn_exit_scalar")) && argc == 2 {
+            owned_call.imm_flags = IR_RGN_FRAME_SCALAR_EXIT_FLAG
+        }
+        lo = lo.emit(owned_call)
         (lo, dst)
     }
 
@@ -28287,6 +28555,37 @@ impl Lowerer {
         (lo, reg)
     }
 
+
+    fn lower_knowledge_literal_variance(self, dst: i64, fields: &Option<Box<StructFieldList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var current = fields
+        while true {
+            match *current {
+                Some(list) => {
+                    if ir_name_eq((*list).head.name, make_name("value")) {
+                        let fv = self.lower_expr_variance_ref(&(*list).head.value)
+                        var lo = fv.0
+                        if fv.1 >= 0 {
+                            lo = lo.emit(ir_mark_float_reg(fv.1))
+                            lo = lo.emit(ir_field_set(dst, 1, fv.1, make_name("variance")))
+                            lo = lo.bind_variance_for_base_reg(dst, fv.1)
+                            lo.pending_variance_reg = fv.1
+                            lo = lo.fo_seed_from_variance(fv.1, 0 - 1)
+                            var mk: i64 = 0
+                            while mk < 32 {
+                                lo.fo_pending_sens[mk as usize] = lo.fo_expr_sens[mk as usize]
+                                mk = mk + 1
+                            }
+                        }
+                        return lo
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        self
+    }
+
     fn lower_struct_literal_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
@@ -28299,6 +28598,9 @@ impl Lowerer {
         lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(count_struct_fields_ref(&e.fields))))
         lo = lo.ensure_struct_literal_layout_ref(ir_path_first_name(e.path), &e.fields)
         lo = lo.lower_struct_fields_ref(dst, ir_path_first_name(e.path), &e.fields, 0)
+        if ir_name_eq(ir_path_first_name(e.path), make_name("Knowledge")) {
+            lo = lo.lower_knowledge_literal_variance(dst, &e.fields)
+        }
         (lo, dst)
     }
 
