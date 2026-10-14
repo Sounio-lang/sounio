@@ -14,6 +14,28 @@ use parser::stmts::*
 use parser::items::*
 use io::env::{read_env}
 
+// SOUNIO_DISABLE_GLOBAL_INIT_IMPL_EXCLUSION=1 (#2661) restores only the recording of
+// impl methods under their bare name in the pure-fn constant-fold table (items.sio
+// ITEMS_IMPL_EXCLUSION_OFF). Unlike the module-scope switch (GVI_SCOPE_OFF, below), the exclusion acts in
+// EVERY compile, single-module included, so this is read at every parse entry point and
+// not only on the SUPPRESS_RESET != 0 path. Independent of
+// SOUNIO_DISABLE_GLOBAL_INIT_MODULE_SCOPE in both directions. Memoised like GVI_SCOPE_OFF.
+var GVI_IMPL_EXCL_CHECKED: i64 = 0
+
+fn parse_gvi_impl_exclusion_init() with IO, Mut, Panic, Div {
+    if GVI_IMPL_EXCL_CHECKED == 0 {
+        GVI_IMPL_EXCL_CHECKED = 1
+        if str_eq(read_env("SOUNIO_DISABLE_GLOBAL_INIT_IMPL_EXCLUSION"), "1") {
+            items_set_impl_exclusion_off()
+        }
+        // #2661: SOUNIO_DUMP_GLOBAL_INIT_TABLE=1 prints every word recorded in the
+        // constant-fold table, with its name and owner (ast.sio ast_gvi_dump_note).
+        if str_eq(read_env("SOUNIO_DUMP_GLOBAL_INIT_TABLE"), "1") {
+            ast_gvi_dump_enable()
+        }
+    }
+}
+
 fn parse_program_loop(mut_p: Parser) -> Program with Mut, IO, Panic, Div, Alloc {
     var p = mut_p
     var rev_items_opt: Option<Box<ItemList>> = None
@@ -59,10 +81,13 @@ fn parse_program_loop(mut_p: Parser) -> Program with Mut, IO, Panic, Div, Alloc 
         print("   = help: split the literal, or raise Name capacity with matching IR name-pool stride\n")
     }
     parser_set_last_errors(p.had_error, p.error_count)
+    ast_gvi_dump_flush()
     Program { module_path: empty_path(), items: reverse_item_list_opt(rev_items_opt) }
 }
 
-fn parse_program(tokens: [Token; 2097152], token_count: i64) -> Program with Mut, IO, Panic, Div, Alloc {
+// #1156: by reference, see parser_set_tokens.
+fn parse_program(tokens: &[Token; 2097152], token_count: i64) -> Program with Mut, IO, Panic, Div, Alloc {
+    parse_gvi_impl_exclusion_init()
     parser_reset_last_errors()
     parser_reset_truncated_literals()
     var p = parser_new()
@@ -75,6 +100,7 @@ fn parse_program(tokens: [Token; 2097152], token_count: i64) -> Program with Mut
 }
 
 pub fn parse_program_preloaded(token_count: i64) -> Program with Mut, IO, Panic, Div, Alloc {
+    parse_gvi_impl_exclusion_init()
     parser_reset_last_errors()
     parser_reset_truncated_literals()
     var p = parser_new()
@@ -123,6 +149,7 @@ fn parse_items_loop(mut_p: Parser) -> Option<Box<ItemList>> with Mut, IO, Panic,
         print("   = help: split the literal, or raise Name capacity with matching IR name-pool stride\n")
     }
     parser_set_last_errors(p.had_error, p.error_count)
+    ast_gvi_dump_flush()
     reverse_item_list_opt(rev_items_opt)
 }
 
@@ -154,6 +181,7 @@ fn parse_gvi_scope_disabled() -> bool with IO, Mut, Panic, Div {
 }
 
 pub fn parse_items_preloaded(token_count: i64) -> Option<Box<ItemList>> with Mut, IO, Panic, Div, Alloc {
+    parse_gvi_impl_exclusion_init()
     parser_reset_last_errors()
     parser_reset_truncated_literals()
     if GLOBAL_VAR_INIT_SUPPRESS_RESET == 0 {

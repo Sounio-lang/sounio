@@ -815,6 +815,7 @@ pub fn ir_strategy_name(s: i64) -> string {
 // address of a temporary and the load returns that pointer as the first field.
 // Measured, isolated, and kept as a reproduction in
 // tests/known_failures/lean_single_global_aggregate_store.sio.
+// (Fixed in the seed by #1655; this layout stays because it is also far cheaper.)
 //
 // Global arrays of SCALARS are fine, so every field gets its own. Measured under
 // the seed: i64 OK, f64 OK, i8 OK, enum BROKEN, Option<Box<_>> segfaults --
@@ -2040,6 +2041,12 @@ pub struct IrFunction {
     // in a name-keyed side table, so two same-named fns or a table capacity
     // can never swap or drop the semantic ABI.
     pub f128_param_mask: i64,
+    // #2820: bit i set <=> declared param i is `&S` / `&!S` for a named,
+    // non-primitive pointee (i < 62). The checker accepts a struct VALUE for such
+    // a parameter (an implicit borrow), and lean_single passes it as one; the
+    // call site reads this to borrow the value instead of passing its handle,
+    // which the callee would dereference one level too many (SIGSEGV).
+    pub ref_struct_param_mask: i64,
     // #1669: which vregs live in an xmm. This used to be smuggled through the
     // instruction stream as IrNop + IR_FLOAT_REG_MARKER_FLAG -- a fact with
     // FUNCTION lifetime stored in a slot with PASS lifetime. compact_nops deleted
@@ -3569,6 +3576,11 @@ pub struct StructFieldEntry {
     // a layout from a struct literal's values leaves it 0, because its
     // is_float is a guess about the value expression.
     pub decl_word_scalar: i64,
+    // Element count of a `[T; N]` field, or 0 when the field is not a fixed
+    // array. Unlike word_scalar_array_len, this is set for struct elements too:
+    // a `heap_alloc` payload inlines the array, so a later field's raw offset
+    // has to skip N words (or N bytes, packed) rather than one handle slot.
+    pub fixed_array_len: i64,
 }
 
 pub struct StructLayoutEntry {
@@ -3609,7 +3621,7 @@ pub struct StructLayoutTable {
 }
 
 pub fn empty_struct_field_entry() -> StructFieldEntry {
-    StructFieldEntry { name_id: 0, index: 0, is_float: 0, elem_type_name_id: 0, word_scalar_array_len: 0, named_type_name_id: 0, decl_word_scalar: 0 }
+    StructFieldEntry { name_id: 0, index: 0, is_float: 0, elem_type_name_id: 0, word_scalar_array_len: 0, named_type_name_id: 0, decl_word_scalar: 0, fixed_array_len: 0 }
 }
 
 pub fn empty_struct_layout_entry() -> StructLayoutEntry {
@@ -5764,6 +5776,7 @@ pub fn ir_empty_function() -> IrFunction {
         bss_size: 0,
         first_param_is_ref: 0,
         f128_param_mask: 0,
+        ref_struct_param_mask: 0,
         float_reg_bits: [0; 64],
     }
 }
@@ -6127,6 +6140,3 @@ pub fn ir_module_add_export(module: IrModule, name: Name) -> IrModule with Mut, 
     m
 }
 
-pub fn ir_forbidden_law_mask(algebra_tag: i64, strategy: i64) -> i64 {
-    0
-}

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 cd "$ROOT_DIR"
 
 TMP_DIR="$(mktemp -d)"
@@ -71,11 +73,15 @@ else
 fi
 
 DERIVED_REJECT_LOG="$TMP_DIR/unit-derived-velocity-reject.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$DERIVED_REJECT" >"$DERIVED_REJECT_LOG" 2>&1; then
+__refusal_rc=0
+SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$DERIVED_REJECT" >"$DERIVED_REJECT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly accepted length as velocity\n' "$DERIVED_REJECT" >&2
   cat "$DERIVED_REJECT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$DERIVED_REJECT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$DERIVED_REJECT_LOG" "$(sounio_refusal_reason)" >&2; cat "$DERIVED_REJECT_LOG" >&2; exit 1; }
 if grep -q 'unit mismatch in call argument' "$DERIVED_REJECT_LOG"; then
   printf 'PASS  %s rejected length where velocity is required\n' "$DERIVED_REJECT"
 else
@@ -95,11 +101,15 @@ else
 fi
 
 DERIVED_CHAIN_REJECT_LOG="$TMP_DIR/unit-derived-acceleration-reject.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$DERIVED_CHAIN_REJECT" >"$DERIVED_CHAIN_REJECT_LOG" 2>&1; then
+__refusal_rc=0
+SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$DERIVED_CHAIN_REJECT" >"$DERIVED_CHAIN_REJECT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly accepted velocity as acceleration\n' "$DERIVED_CHAIN_REJECT" >&2
   cat "$DERIVED_CHAIN_REJECT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$DERIVED_CHAIN_REJECT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$DERIVED_CHAIN_REJECT_LOG" "$(sounio_refusal_reason)" >&2; cat "$DERIVED_CHAIN_REJECT_LOG" >&2; exit 1; }
 if grep -q 'unit mismatch in call argument' "$DERIVED_CHAIN_REJECT_LOG"; then
   printf 'PASS  %s rejected velocity where acceleration is required\n' "$DERIVED_CHAIN_REJECT"
 else
@@ -119,11 +129,15 @@ else
 fi
 
 F64_UNIT_EXPR_REJECT_LOG="$TMP_DIR/unit-f64-unit-expr-reject.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$F64_UNIT_EXPR_REJECT" >"$F64_UNIT_EXPR_REJECT_LOG" 2>&1; then
+__refusal_rc=0
+SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$F64_UNIT_EXPR_REJECT" >"$F64_UNIT_EXPR_REJECT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly accepted length as f64<m/s>\n' "$F64_UNIT_EXPR_REJECT" >&2
   cat "$F64_UNIT_EXPR_REJECT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$F64_UNIT_EXPR_REJECT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$F64_UNIT_EXPR_REJECT_LOG" "$(sounio_refusal_reason)" >&2; cat "$F64_UNIT_EXPR_REJECT_LOG" >&2; exit 1; }
 if grep -q 'unit mismatch in call argument' "$F64_UNIT_EXPR_REJECT_LOG"; then
   printf 'PASS  %s rejected length where f64<m/s> is required\n' "$F64_UNIT_EXPR_REJECT"
 else
@@ -133,11 +147,15 @@ else
 fi
 
 F64_UNIT_EXPR_UNKNOWN_LOG="$TMP_DIR/unit-f64-unit-expr-unknown.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$F64_UNIT_EXPR_UNKNOWN_REJECT" >"$F64_UNIT_EXPR_UNKNOWN_LOG" 2>&1; then
+__refusal_rc=0
+SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$F64_UNIT_EXPR_UNKNOWN_REJECT" >"$F64_UNIT_EXPR_UNKNOWN_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly accepted an unknown f64<UnitExpr> unit\n' "$F64_UNIT_EXPR_UNKNOWN_REJECT" >&2
   cat "$F64_UNIT_EXPR_UNKNOWN_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$F64_UNIT_EXPR_UNKNOWN_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$F64_UNIT_EXPR_UNKNOWN_LOG" "$(sounio_refusal_reason)" >&2; cat "$F64_UNIT_EXPR_UNKNOWN_LOG" >&2; exit 1; }
 if grep -q 'unknown unit in f64<UnitExpr> annotation' "$F64_UNIT_EXPR_UNKNOWN_LOG"; then
   printf 'PASS  %s rejected an unknown f64<UnitExpr> unit\n' "$F64_UNIT_EXPR_UNKNOWN_REJECT"
 else
@@ -157,11 +175,15 @@ else
 fi
 
 LITERAL_SUFFIX_REJECT_LOG="$TMP_DIR/unit-literal-suffix-reject.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$LITERAL_SUFFIX_REJECT" >"$LITERAL_SUFFIX_REJECT_LOG" 2>&1; then
+__refusal_rc=0
+SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$LITERAL_SUFFIX_REJECT" >"$LITERAL_SUFFIX_REJECT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly accepted a length literal where mass was required\n' "$LITERAL_SUFFIX_REJECT" >&2
   cat "$LITERAL_SUFFIX_REJECT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$LITERAL_SUFFIX_REJECT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$LITERAL_SUFFIX_REJECT_LOG" "$(sounio_refusal_reason)" >&2; cat "$LITERAL_SUFFIX_REJECT_LOG" >&2; exit 1; }
 if grep -q 'unit mismatch in call argument' "$LITERAL_SUFFIX_REJECT_LOG"; then
   printf 'PASS  %s rejected numeric literal unit suffix with incompatible dimension\n' "$LITERAL_SUFFIX_REJECT"
 else
@@ -181,11 +203,15 @@ else
 fi
 
 CLINICAL_LITERAL_REJECT_LOG="$TMP_DIR/unit-literal-clinical-reject.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$CLINICAL_LITERAL_REJECT" >"$CLINICAL_LITERAL_REJECT_LOG" 2>&1; then
+__refusal_rc=0
+SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$CLINICAL_LITERAL_REJECT" >"$CLINICAL_LITERAL_REJECT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly accepted mass concentration where amount concentration was required\n' "$CLINICAL_LITERAL_REJECT" >&2
   cat "$CLINICAL_LITERAL_REJECT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$CLINICAL_LITERAL_REJECT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$CLINICAL_LITERAL_REJECT_LOG" "$(sounio_refusal_reason)" >&2; cat "$CLINICAL_LITERAL_REJECT_LOG" >&2; exit 1; }
 if grep -q 'unit mismatch in call argument' "$CLINICAL_LITERAL_REJECT_LOG"; then
   printf 'PASS  %s rejected incompatible internal label dimension\n' "$CLINICAL_LITERAL_REJECT"
 else
@@ -205,11 +231,15 @@ else
 fi
 
 ENERGY_REQUIRES_EXPLICIT_LOG="$TMP_DIR/unit-energy-requires-explicit.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$ENERGY_REQUIRES_EXPLICIT" >"$ENERGY_REQUIRES_EXPLICIT_LOG" 2>&1; then
+__refusal_rc=0
+SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$ENERGY_REQUIRES_EXPLICIT" >"$ENERGY_REQUIRES_EXPLICIT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly accepted energy-unit arithmetic without explicit conversion\n' "$ENERGY_REQUIRES_EXPLICIT" >&2
   cat "$ENERGY_REQUIRES_EXPLICIT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$ENERGY_REQUIRES_EXPLICIT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$ENERGY_REQUIRES_EXPLICIT_LOG" "$(sounio_refusal_reason)" >&2; cat "$ENERGY_REQUIRES_EXPLICIT_LOG" >&2; exit 1; }
 if grep -q 'unit mismatch' "$ENERGY_REQUIRES_EXPLICIT_LOG"; then
   printf 'PASS  %s rejected compatible-dimension energy arithmetic without explicit conversion\n' "$ENERGY_REQUIRES_EXPLICIT"
 else

@@ -114,6 +114,15 @@ check not_executable       INFRA               126   ''
 # A large fraction of lean_single.sio diagnostics carry no E-code.
 check uncoded_diag         REFUSED               1   'error: unresolved function body for call target fn#7 g at line 12'
 check verdict_marker_only  REFUSED               1   'typecheck: failed'
+# lean_single's `type error line N:` shape, verbatim from
+# tests/compile-fail/knightian_mixed.sio on both targets (#2424). Before the
+# fix it classified REFUSED_UNDIAGNOSED, so the fixture asserted nothing.
+check type_error_line      REFUSED               1   'source: tests/compile-fail/knightian_mixed.sio 363 bytes
+total source: 10641 bytes
+type error line 9: Knightian uncertainty (ε=⊥) cannot satisfy required confidence'
+check type_error_line_temp REFUSED               1   'type error line 12: Temporal validity window mismatch'
+# The shape must start the line: the words inside a message are not a diagnostic.
+check type_error_midline   REFUSED_UNDIAGNOSED   1   'note: no type error line 3: here'
 
 # --- primary diagnostic is the FIRST diagnostic, not the first E-code --------
 # Regression test for the bug this found on
@@ -129,6 +138,17 @@ if [[ "$(sounio_primary_diag "$TMP_DIR/order.log")" != "P0003" ]]; then
   fails=$((fails + 1))
 else
   printf 'ok    %-24s P0003\n' "primary_is_first_diag"
+fi
+# A `type error line N:` diagnostic is the first diagnostic, uncoded, even when
+# a later line carries a code.
+printf 'type error line 9: Knightian\nerror[E200]: later\n' > "$TMP_DIR/type_first.log"
+checks=$((checks + 1))
+if [[ -n "$(sounio_primary_diag "$TMP_DIR/type_first.log")" ]]; then
+  printf 'FAIL  %-24s want=<empty> got=%s\n' "primary_type_error_first" \
+    "$(sounio_primary_diag "$TMP_DIR/type_first.log")" >&2
+  fails=$((fails + 1))
+else
+  printf 'ok    %-24s none\n' "primary_type_error_first"
 fi
 # An uncoded first diagnostic reports none, even when a later line carries a code.
 printf 'error: unknown identifier `x` at <main>:9 (bundle line 9)\nerror[E200]: later\n' \
@@ -178,6 +198,42 @@ if [[ "$(sounio_primary_diag "$TMP_DIR/codes.log")" != "E218" ]]; then
 else
   printf 'ok    %-24s E218\n' "primary_diag"
 fi
+
+# --- sounio_capture_rc: the status survives `set -e` and is not collapsed -----
+for want in 0 1 124 139; do
+  checks=$((checks + 1))
+  sounio_capture_rc got_rc "$TMP_DIR/cap_$want.log" -- bash -c "echo out; exit $want"
+  if [[ "$got_rc" != "$want" ]] || ! grep -qx out "$TMP_DIR/cap_$want.log"; then
+    printf 'FAIL  %-24s want=%s got=%s\n' "capture_rc_$want" "$want" "$got_rc" >&2
+    fails=$((fails + 1))
+  else
+    printf 'ok    %-24s %s\n' "capture_rc_$want" "$got_rc"
+  fi
+done
+
+# --- sounio_expect_failed_exit: a runtime refusal, not a crash ---------------
+# failed_exit_is LABEL EXPECT(yes|no) RC LOGTEXT [MARKER]
+failed_exit_is() {
+  local label="$1" expect="$2" rc="$3" logtext="$4" marker="${5:-}"
+  local log="$TMP_DIR/$label.log" got="no"
+  checks=$((checks + 1))
+  printf '%s\n' "$logtext" > "$log"
+  if sounio_expect_failed_exit "$rc" "$log" "$marker"; then got="yes"; fi
+  if [[ "$got" != "$expect" ]]; then
+    printf 'FAIL  %-24s failed_exit want=%s got=%s (class=%s)\n' "$label" "$expect" "$got" "$SOUNIO_CC_CLASS" >&2
+    fails=$((fails + 1))
+  else
+    printf 'ok    %-24s failed_exit=%s\n' "$label" "$got"
+  fi
+}
+failed_exit_is fe_marker_rc1      yes   1 'probe=rejected'                       'probe=rejected'
+failed_exit_is fe_no_marker       no    1 'probe=accepted'                       'probe=rejected'
+failed_exit_is fe_rc0             no    0 'probe=rejected'                       'probe=rejected'
+failed_exit_is fe_segv_marker     no  139 'probe=rejected'                       'probe=rejected'
+failed_exit_is fe_timeout_marker  no  124 'probe=rejected'                       'probe=rejected'
+failed_exit_is fe_oom_marker      no  137 'probe=rejected'                       'probe=rejected'
+failed_exit_is fe_masked_crash    no    1 'probe=rejected
+Segmentation fault (core dumped)'                                                 'probe=rejected'
 
 echo "checks=$checks failures=$fails"
 if [[ "$fails" -ne 0 ]]; then

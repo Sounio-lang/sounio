@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 SOURCE_ROOT="${ZERO_EVENT_SOURCE_ROOT:-$ROOT_DIR}"
 MADAROS_BIN="${MADAROS_BIN:-$ROOT_DIR/artifacts/self-hosted/madaros}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zero-native-privacy.XXXXXX")"
@@ -18,14 +20,18 @@ compile_rejects() {
   local source="$2"
   local marker="$3"
   local log="$TMP_DIR/$name.log"
+  local rc=0
 
-  if (cd "$SOURCE_ROOT" && timeout 30 "$MADAROS_BIN" compile "$source" -o "$TMP_DIR/$name") >"$log" 2>&1; then
+  # The status is the evidence: a 30 s hang (124), a crash or an OOM kill is
+  # not a refusal, even if the marker was printed first (#2425).
+  (cd "$SOURCE_ROOT" && timeout 30 "$MADAROS_BIN" compile "$source" -o "$TMP_DIR/$name") >"$log" 2>&1 || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
     cat "$log" >&2
     fail "$name unexpectedly compiled"
   fi
-  grep -Fq "$marker" "$log" || {
+  sounio_expect_refusal "$rc" "$log" "$TMP_DIR/$name" "$marker" || {
     cat "$log" >&2
-    fail "$name did not emit $marker"
+    fail "$name is not a clean refusal carrying $marker: $(sounio_refusal_reason)"
   }
 }
 

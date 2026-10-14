@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zero-event.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -20,14 +22,17 @@ expect_check_fail() {
   local pattern="$2"
   local name="$3"
   local log="$TMP_DIR/$name.log"
+  local rc=0
 
-  if "$ROOT_DIR/bin/souc" check "$source" >"$log" 2>&1; then
+  "$ROOT_DIR/bin/souc" check "$source" >"$log" 2>&1 || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
     cat "$log" >&2
     fail "$name unexpectedly passed Madaros check"
   fi
-  grep -Fq "$pattern" "$log" || {
+  # A crash or timeout that left the marker behind is not a refusal (#2425).
+  sounio_expect_refusal "$rc" "$log" "" "$pattern" || {
     cat "$log" >&2
-    fail "$name failed without expected marker: $pattern"
+    fail "$name is not a clean refusal carrying $pattern: $(sounio_refusal_reason)"
   }
 }
 
