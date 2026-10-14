@@ -1,0 +1,196 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: VANTHOFF_PRESSURE_OK
+// Delivery pressure leaves as Knowledge. The value is the nominal van't Hoff
+// point. second_order_mean is the curvature correction. variance_of is the
+// linear GUM variance. The Monte Carlo of the same exp map is the clock for
+// the nonlinear pressure: the mean sits above the point, and the linear
+// variance is short of the sampled spread.
+//
+// Oracle class: the linear and second-order numbers are checked against the
+// closed form written below, which does not call variance_of or
+// second_order_mean. The Monte Carlo is a different method (ADR-009).
+//
+// Two models of the same pressure. Model A treats the published bars as
+// independent. Model B uses a fit correlation of 0.9. That 0.9 is a scenario,
+// not a coefficient from Gkanas. claim_meet is the language operation: the
+// shared interval is the overlap, and the excess is what only one model claims.
+
+use epistemic::claim_meet::{claim_meet, claim_sqrt}
+
+ontology Lab {
+    class Quantity { property amount: f64 where amount >= 0.0 }
+    class Enthalpy subclass_of Quantity
+    class Entropy subclass_of Quantity
+    class Pressure subclass_of Quantity
+    disjoint Enthalpy, Entropy
+    disjoint Entropy, Pressure
+    disjoint Enthalpy, Pressure
+}
+
+struct Stage {
+    pressure: Knowledge[Pressure, ValidUntil("2026-12-31"), epsilon < 0.05, Derived]
+}
+
+var R_GAS: f64 = 8.314462618
+var T_HOT: f64 = 353.15
+var DH: f64 = 30800.0
+var DS: f64 = 108.0
+var U_DH: f64 = 1500.0
+var U_DS: f64 = 2.0
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn ln_p(dh: f64, ds: f64) -> f64 {
+    ds / R_GAS - dh / (R_GAS * T_HOT)
+}
+
+fn vanthoff_p(dh: f64, ds: f64) -> f64 with Div {
+    exp(ln_p(dh, ds))
+}
+
+fn delivery(h: Knowledge<Enthalpy>, s: Knowledge<Entropy>) -> Stage with Epistemic, Mut, Div {
+    let dh: f64 = h.value
+    let ds: f64 = s.value
+    let p: f64 = vanthoff_p(dh, ds)
+    let branded: Pressure = p
+    Stage {
+        pressure: Knowledge { value: branded, epsilon: 0.01, validity: "2027-06-30", provenance: "cell" }
+    }
+}
+
+fn s_ln2() -> f64 {
+    let a = U_DS / R_GAS
+    let b = U_DH / (R_GAS * T_HOT)
+    a * a + b * b
+}
+
+fn s_ln_rho(rho: f64) -> f64 {
+    let a = U_DS / R_GAS
+    let b = U_DH / (R_GAS * T_HOT)
+    a * a + b * b - 2.0 * a * b * rho
+}
+
+fn rng_init() with Mut {
+    RNG_A = 314159265
+    RNG_B = 271828182
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_uniform() -> f64 with Mut, Div {
+    let r = rng_next()
+    (r % 10000) as f64 / 10000.0
+}
+
+fn rand_normal() -> f64 with Mut, Div {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_uniform(); j = j + 1 }
+    sum - 6.0
+}
+
+fn near(actual: f64, expected: f64, tol: f64) -> bool {
+    let d = actual - expected
+    if d < 0.0 { return (0.0 - d) < tol }
+    d < tol
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    let h0: Enthalpy = DH
+    let s0: Entropy = DS
+    let hk: Knowledge<Enthalpy> = measure(h0, uncertainty: U_DH)
+    let sk: Knowledge<Entropy> = measure(s0, uncertainty: U_DS)
+    let stage = delivery(hk, sk)
+    let p = stage.pressure.value
+    let v = variance_of(stage.pressure.value)
+    let m = second_order_mean(stage.pressure.value)
+    let hd: f64 = hk.value
+    let sd: f64 = sk.value
+    let rho = 0.9
+    let _c = correlate(hd, sd, 0.9)
+    let v_fit = variance_of(stage.pressure.value)
+    let m_fit = second_order_mean(stage.pressure.value)
+    let meet = claim_meet(m, v, m_fit, v_fit)
+    let p0 = vanthoff_p(DH, DS)
+    let sl2 = s_ln2()
+    let e_sl = exp(sl2)
+    let var_form = p0 * p0 * e_sl * (e_sl - 1.0)
+    let mean_form = p0 * exp(0.5 * sl2)
+    let sl_fit = s_ln_rho(rho)
+    let e_fit = exp(sl_fit)
+    let var_fit_form = p0 * p0 * e_fit * (e_fit - 1.0)
+    let mean_fit_form = p0 * exp(0.5 * sl_fit)
+    let s_a = claim_sqrt(var_form)
+    let s_b = claim_sqrt(var_fit_form)
+    var lo = mean_form - s_a
+    if mean_fit_form - s_b > lo { lo = mean_fit_form - s_b }
+    var hi = mean_form + s_a
+    if mean_fit_form + s_b < hi { hi = mean_fit_form + s_b }
+    rng_init()
+    let n: i64 = 4000
+    var i: i64 = 0
+    var sum = 0.0
+    var sumsq = 0.0
+    while i < n {
+        let sample = vanthoff_p(DH + U_DH * rand_normal(), DS + U_DS * rand_normal())
+        sum = sum + sample
+        sumsq = sumsq + sample * sample
+        i = i + 1
+    }
+    let mc_mean = sum / 4000.0
+    let mc_var = sumsq / 4000.0 - mc_mean * mc_mean
+    var gap_nom = mc_mean - p0
+    var gap_e2 = mc_mean - m
+    if gap_nom < 0.0 { gap_nom = 0.0 - gap_nom }
+    if gap_e2 < 0.0 { gap_e2 = 0.0 - gap_e2 }
+    var j: i64 = 0
+    var sum_c = 0.0
+    var sumsq_c = 0.0
+    let scale = claim_sqrt(1.0 - rho * rho)
+    while j < n {
+        let z1 = rand_normal()
+        let z2 = rand_normal()
+        let sample = vanthoff_p(DH + U_DH * z1, DS + U_DS * (rho * z1 + scale * z2))
+        sum_c = sum_c + sample
+        sumsq_c = sumsq_c + sample * sample
+        j = j + 1
+    }
+    let mc_fit = sum_c / 4000.0
+    let mc_fit_var = sumsq_c / 4000.0 - mc_fit * mc_fit
+    print("p ")
+    print_f64(p)
+    print(" mean ")
+    print_f64(m)
+    print(" fit ")
+    print_f64(v_fit)
+    print(" shared ")
+    print_f64(meet.lo)
+    print(" .. ")
+    print_f64(meet.hi)
+    print("\n")
+    var gap_lin = mc_var - (p0 * p0 * sl2)
+    var gap_exact = mc_var - v
+    if gap_lin < 0.0 { gap_lin = 0.0 - gap_lin }
+    if gap_exact < 0.0 { gap_exact = 0.0 - gap_exact }
+    var gap_fit_form = mc_fit_var - var_fit_form
+    var gap_fit_indep = mc_fit_var - var_form
+    if gap_fit_form < 0.0 { gap_fit_form = 0.0 - gap_fit_form }
+    if gap_fit_indep < 0.0 { gap_fit_indep = 0.0 - gap_fit_indep }
+    if near(p, p0, 0.001) && near(v, var_form, 0.01) && near(m, mean_form, 0.001) && mc_mean > p0 && gap_exact < gap_lin && gap_e2 < gap_nom && near(v_fit, var_fit_form, 0.01) && near(m_fit, mean_fit_form, 0.001) && gap_fit_form < gap_fit_indep && meet.shared && near(meet.lo, lo, 0.01) && near(meet.hi, hi, 0.01) && meet.excess > 1.0 {
+        println("VANTHOFF_PRESSURE_OK")
+        return 0
+    }
+    println("VANTHOFF_PRESSURE_FAIL")
+    1
+}

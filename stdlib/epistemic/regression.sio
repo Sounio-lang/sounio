@@ -1,0 +1,104 @@
+// stdlib/epistemic/regression.sio
+//
+// Straight-line fit y = a + b x, with the covariance of (a, b).
+// The correlation of a van t Hoff pair is this object: it is fixed by the
+// temperature window and the residual, and it is a runtime number.
+// correlate() still demands a compile-time literal, so a fitted rho cannot
+// be pushed back through that builtin. gum_var takes the covariance as data.
+
+pub struct LineFit {
+    pub intercept: f64
+    pub slope: f64
+    pub var_intercept: f64
+    pub var_slope: f64
+    pub cov: f64
+    pub rho: f64
+    pub s2: f64
+    pub xbar: f64
+    pub sxx: f64
+    pub n: f64
+}
+
+pub fn reg_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 40 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+pub fn ols_line(xs: [f64; 8], ys: [f64; 8], n: i64) -> LineFit with Mut, Div {
+    if n < 3 {
+        return LineFit {
+            intercept: 0.0, slope: 0.0, var_intercept: 0.0, var_slope: 0.0, cov: 0.0, rho: 0.0,
+            s2: 0.0, xbar: 0.0, sxx: 0.0, n: 0.0
+        }
+    }
+    let nf = n as f64
+    var sx = 0.0
+    var sy = 0.0
+    var i: i64 = 0
+    while i < n {
+        sx = sx + xs[i as usize]
+        sy = sy + ys[i as usize]
+        i = i + 1
+    }
+    let xb = sx / nf
+    let yb = sy / nf
+    var sxx = 0.0
+    var sxy = 0.0
+    i = 0
+    while i < n {
+        let dx = xs[i as usize] - xb
+        let dy = ys[i as usize] - yb
+        sxx = sxx + dx * dx
+        sxy = sxy + dx * dy
+        i = i + 1
+    }
+    let slope = sxy / sxx
+    let intercept = yb - slope * xb
+    var sse = 0.0
+    i = 0
+    while i < n {
+        let e = ys[i as usize] - intercept - slope * xs[i as usize]
+        sse = sse + e * e
+        i = i + 1
+    }
+    let s2 = sse / (nf - 2.0)
+    let var_slope = s2 / sxx
+    let var_intercept = s2 * (1.0 / nf + xb * xb / sxx)
+    let cov = 0.0 - s2 * xb / sxx
+    let rho = cov / reg_sqrt(var_intercept * var_slope)
+    LineFit {
+        intercept: intercept,
+        slope: slope,
+        var_intercept: var_intercept,
+        var_slope: var_slope,
+        cov: cov,
+        rho: rho,
+        s2: s2,
+        xbar: xb,
+        sxx: sxx,
+        n: nf
+    }
+}
+
+// Variance of the fitted line at x. Equals gum_var(1, x, var_intercept, var_slope, cov).
+pub fn ols_mean_var(fit: LineFit, x: f64) -> f64 with Div {
+    if fit.sxx <= 0.0 { return 0.0 }
+    let d = x - fit.xbar
+    fit.s2 * (1.0 / fit.n + d * d / fit.sxx)
+}
+
+// Variance of a new observation at x: the line, plus the residual already seen.
+pub fn ols_predict_var(fit: LineFit, x: f64) -> f64 with Div {
+    ols_mean_var(fit, x) + fit.s2
+}
+
+// Variance of s0*u + s1*v when Cov(u, v) = cov. Runtime covariance.
+pub fn gum_var(s0: f64, s1: f64, v0: f64, v1: f64, cov: f64) -> f64 {
+    s0 * s0 * v0 + s1 * s1 * v1 + 2.0 * s0 * s1 * cov
+}
