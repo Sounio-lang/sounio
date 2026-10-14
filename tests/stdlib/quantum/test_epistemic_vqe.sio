@@ -1,14 +1,26 @@
 //@ run-pass
-// Tests for stdlib/quantum/epistemic_vqe — VQE with epistemic uncertainty
+// Tests for stdlib/quantum/epistemic_vqe — two-qubit H2 VQE with a
+// second-order GUM band on the gate angles.
 //
 // Coverage:
-//   T1  |0⟩ state: ⟨Z⟩ = 1.0
-//   T2  Hadamard |0⟩ → |+⟩: ⟨Z⟩ ≈ 0.0
-//   T3  Ry(π)|0⟩ = |1⟩: ⟨Z⟩ ≈ -1.0
-//   T4  CNOT|10⟩ = |11⟩: amplitude check
-//   T5  H₂ VQE: energy < -1.0 Ha
+//   T1  |0> state: <Z> = 1.0
+//   T2  Hadamard |0> -> |+>: <Z> ~ 0.0
+//   T3  Ry(pi)|0> = |1>: <Z> ~ -1.0
+//   T4  CNOT|10> = |11>: amplitude check
+//   T5  H2 VQE: energy < -1.0 Ha (the original bound, kept)
 //   T6  Epistemic VQE: energy_unc > 0 when gate_unc > 0
-//   T7  Gate uncertainty propagation: larger gate_unc → larger energy_unc
+//   T7  Larger gate_unc -> larger energy_unc
+//   T8  Exact oracle: Jacobi diagonalisation of the 4x4 Hamiltonian, built
+//       here from the Pauli structure independently of the library, agrees
+//       with the library's closed-form 2x2-block value to 1e-12
+//   T9  |E_vqe - E_exact| < 1e-9 Ha (measured ~4e-16; chemical accuracy is
+//       1.6e-3 Ha, which the old fixed-step optimiser only just met at 1.5e-3)
+//   T10 theta* is stationary: parameter-shift |grad E| < 1e-6, so the
+//       first-order GUM term vanishes there
+//   T11 second-order GUM u(E) / Monte Carlo sigma (N = 20000, seeded) in
+//       [0.8, 1.25] at gate_unc = 0.01, 0.05, 0.1
+//
+// Hamiltonian: O'Malley et al., Phys. Rev. X 6, 031007 (2016), two-qubit H2.
 
 use quantum::epistemic_vqe::{
     sv_zero,
@@ -19,15 +31,17 @@ use quantum::epistemic_vqe::{
     expectation_pauli_z,
     expectation_zz,
     h2_hamiltonian,
+    h2_exact_ground_energy,
     vqe_ansatz,
     vqe_cost,
     vqe_optimize,
     vqe_epistemic,
-    esv_zero,
-    esv_apply_ry,
+    vqe_gum2,
+    vqe_mc_band,
     Statevector,
-    EpistemicStatevector,
     VQEResult,
+    GumBand,
+    McBand,
 }
 
 // =============================================================================
@@ -51,6 +65,101 @@ fn check(name: string, ok: bool) -> i32 with IO {
     return 1
 }
 
+fn t_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = if x > 1.0 { x } else { 1.0 }
+    var i = 0
+    while i < 200 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    return y
+}
+
+// =============================================================================
+// Exact-diagonalisation oracle (independent of the library)
+// =============================================================================
+// Basis index i = 2 b1 + b0 (bit k = qubit k).
+//   Z_k |i> = (-1)^{b_k} |i>
+//   X0X1 |i> = |i xor 3>
+//   Y0Y1 |i> = -(-1)^{b0 xor b1} |i xor 3>   (Y|0> = i|1>, Y|1> = -i|0>)
+// so the 4x4 matrix is real symmetric. Lowest eigenvalue by cyclic Jacobi.
+
+fn oracle_h2_matrix() -> [f64; 16] with Mut, Div, Panic {
+    let c0 = 0.0 - 0.4804
+    let c1 = 0.3435
+    let c2 = 0.0 - 0.4347
+    let c3 = 0.5716
+    let c4 = 0.0910
+    var a: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < 4 {
+        let b0 = i & 1
+        let b1 = (i >> 1) & 1
+        let z0 = if b0 == 0 { 1.0 } else { 0.0 - 1.0 }
+        let z1 = if b1 == 0 { 1.0 } else { 0.0 - 1.0 }
+        a[i * 4 + i] = c0 + c1 * z0 + c2 * z1 + c3 * z0 * z1
+        let j = i ^ 3
+        let par = (b0 + b1) & 1
+        let yy = if par == 0 { 0.0 - 1.0 } else { 1.0 }
+        a[j * 4 + i] = c4 * 1.0 + c4 * yy
+        i = i + 1
+    }
+    return a
+}
+
+fn oracle_min_eigenvalue() -> f64 with Mut, Div, Panic {
+    var a = oracle_h2_matrix()
+    var sweep = 0
+    while sweep < 60 {
+        var p = 0
+        while p < 4 {
+            var q = p + 1
+            while q < 4 {
+                let apq: f64 = a[p * 4 + q]
+                let apq_abs = if apq < 0.0 { 0.0 - apq } else { apq }
+                if apq_abs > 1.0e-300 {
+                    let app: f64 = a[p * 4 + p]
+                    let aqq: f64 = a[q * 4 + q]
+                    let theta = (aqq - app) / (2.0 * apq)
+                    let th_abs = if theta < 0.0 { 0.0 - theta } else { theta }
+                    let sgn = if theta < 0.0 { 0.0 - 1.0 } else { 1.0 }
+                    let t = sgn / (th_abs + t_sqrt(theta * theta + 1.0))
+                    let c = 1.0 / t_sqrt(t * t + 1.0)
+                    let s = t * c
+                    var k = 0
+                    while k < 4 {
+                        let akp: f64 = a[k * 4 + p]
+                        let akq: f64 = a[k * 4 + q]
+                        a[k * 4 + p] = c * akp - s * akq
+                        a[k * 4 + q] = s * akp + c * akq
+                        k = k + 1
+                    }
+                    k = 0
+                    while k < 4 {
+                        let apk: f64 = a[p * 4 + k]
+                        let aqk: f64 = a[q * 4 + k]
+                        a[p * 4 + k] = c * apk - s * aqk
+                        a[q * 4 + k] = s * apk + c * aqk
+                        k = k + 1
+                    }
+                }
+                q = q + 1
+            }
+            p = p + 1
+        }
+        sweep = sweep + 1
+    }
+    var m: f64 = a[0]
+    var d = 1
+    while d < 4 {
+        let v: f64 = a[d * 4 + d]
+        if v < m { m = v }
+        d = d + 1
+    }
+    return m
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -58,45 +167,67 @@ fn check(name: string, ok: bool) -> i32 with IO {
 fn main() -> i32 with Mut, Div, Panic, IO {
     var fail = 0
 
-    // T1: |0⟩ state — ⟨Z⟩ = 1.0 (qubit in |0⟩ has Z eigenvalue +1)
+    // T1: |0> state — <Z> = 1.0
     let sv0 = sv_zero(2)
     let z0 = sv_measure_z(&sv0, 0)
     fail = fail + check("T1_z0_state", near(z0, 1.0, 0.0001))
 
-    // T2: Hadamard |0⟩ → |+⟩ = (|0⟩+|1⟩)/√2, ⟨Z⟩ = 0
+    // T2: Hadamard |0> -> |+>, <Z> = 0
     let svh = sv_apply_h(sv_zero(2), 0)
     let zh = sv_measure_z(&svh, 0)
     fail = fail + check("T2_hadamard_z", near(zh, 0.0, 0.001))
 
-    // T3: Ry(π)|0⟩ = |1⟩, ⟨Z⟩ = -1
+    // T3: Ry(pi)|0> = |1>, <Z> = -1
     let pi = 3.141592653589793
     let sv1 = sv_apply_ry(sv_zero(2), 0, pi)
     let z1 = sv_measure_z(&sv1, 0)
     fail = fail + check("T3_ry_pi_z", near(z1, 0.0 - 1.0, 0.001))
 
-    // T4: CNOT|10⟩ = |11⟩
-    // Prepare |10⟩: apply Ry(π) to qubit 0 (LSB qubit), qubit 1 stays |0⟩
-    // Wait — index 0 = qubit 0 (LSB). |10⟩ means qubit 1 = 1, qubit 0 = 0.
-    // So apply Ry(π) to qubit 1 to get |10⟩.
+    // T4: CNOT|10> = |11> (qubit 1 set by Ry(pi), control = qubit 1, target = qubit 0)
     let sv10 = sv_apply_ry(sv_zero(2), 1, pi)
-    // CNOT with control=qubit 1, target=qubit 0 should flip qubit 0
     let sv11 = sv_apply_cx(sv10, 1, 0)
-    // In |11⟩, both qubits are 1. Index = 3 (binary 11). |α_3|² ≈ 1.
     let prob11 = sv11.re[3] * sv11.re[3] + sv11.im[3] * sv11.im[3]
     fail = fail + check("T4_cnot_state", near(prob11, 1.0, 0.001))
 
-    // T5: H₂ VQE — energy should approach -1.137 Ha, at minimum < -1.0 Ha
+    // T5: H2 VQE energy bound (kept from the original test)
     let vqe_result = vqe_optimize(200, 0.1)
     fail = fail + check("T5_vqe_energy_bound", vqe_result.energy < 0.0 - 1.0)
 
-    // T6: Epistemic VQE — with gate_unc > 0, energy_unc > 0
+    // T6: with gate_unc > 0, energy_unc > 0
     let epist_result = vqe_epistemic(100, 0.05)
     fail = fail + check("T6_epistemic_unc_positive", epist_result.energy_unc > 0.0)
 
-    // T7: Larger gate_unc → larger energy_unc
+    // T7: larger gate_unc -> larger energy_unc
     let epist_small = vqe_epistemic(50, 0.01)
     let epist_large = vqe_epistemic(50, 0.1)
     fail = fail + check("T7_unc_monotone", epist_large.energy_unc > epist_small.energy_unc)
+
+    // T8: independent Jacobi oracle vs library closed form
+    let e_oracle = oracle_min_eigenvalue()
+    let e_closed = h2_exact_ground_energy()
+    fail = fail + check("T8_exact_oracle_agrees", near(e_oracle, e_closed, 0.000000000001))
+    fail = fail + check("T8b_exact_value", near(e_oracle, 0.0 - 1.851199124123644, 0.000000000001))
+
+    // T9: VQE reaches the exact ground energy
+    fail = fail + check("T9_vqe_vs_exact_1e-9", near(vqe_result.energy, e_oracle, 0.000000001))
+    fail = fail + check("T9b_converged", vqe_result.converged == 1)
+
+    // T10: stationarity at theta*
+    let band05 = vqe_gum2(&vqe_result.optimal_params, 0.05)
+    fail = fail + check("T10_gradient_vanishes", band05.grad_norm < 0.000001)
+
+    // T11: second-order GUM vs Monte Carlo
+    let mc01 = vqe_mc_band(&vqe_result.optimal_params, 0.01, 20000, 1001)
+    let mc05 = vqe_mc_band(&vqe_result.optimal_params, 0.05, 20000, 1005)
+    let mc10 = vqe_mc_band(&vqe_result.optimal_params, 0.1, 20000, 1010)
+    let band01 = vqe_gum2(&vqe_result.optimal_params, 0.01)
+    let band10 = vqe_gum2(&vqe_result.optimal_params, 0.1)
+    let r01 = band01.u_total / mc01.sigma
+    let r05 = band05.u_total / mc05.sigma
+    let r10 = band10.u_total / mc10.sigma
+    fail = fail + check("T11a_gum2_mc_0.01", r01 >= 0.8 && r01 <= 1.25)
+    fail = fail + check("T11b_gum2_mc_0.05", r05 >= 0.8 && r05 <= 1.25)
+    fail = fail + check("T11c_gum2_mc_0.10", r10 >= 0.8 && r10 <= 1.25)
 
     if fail == 0 {
         print("ALL_PASS\n")

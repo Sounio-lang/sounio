@@ -502,3 +502,8 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E261 | type-checker/ontology | error | ontology classes are disjoint and cannot be combined by this operator (e.g. an amount of H2 added to an amount of CO2) | — |
 | E262 | type-checker/ontology | error | ontology classes are unrelated: no subsumption between them, so the operator cannot say what the result is an amount of | — |
 | E263 | type-checker/modules | error | qualified call is ambiguous: the qualifier names a `use`d module but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs | — |
+| E264 | type-checker/enums | error | enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped (construction, payload sub-pattern, or struct pattern over a user enum) | — |
+| E265 | type-checker/epistemic | error | Temporal validity window mismatch: the provided value's validity window cannot satisfy the required type's validity constraint | [E265.md](explanations/E265.md) |
+| E267 | type-checker/ownership | error | cannot assign through a shared reference: the place is reached through `&T` (explicit `*p` or the auto-deref of `p.f` / `p[i]`), which is read-only; take `&!T` (#888) | — |
+| E269 | type-checker/epistemic | error | a `where` refinement on `Knowledge<T>` is not enforced by this compiler yet; the program is refused instead of running with the predicate silently ignored (#2753) | — |
+| E270 | type-checker/casts | error | `as string` does not convert a number, bool or char to text; the cast is refused instead of compiling to a program that uses the value as a string pointer (#2354) | — |

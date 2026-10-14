@@ -1,0 +1,92 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: GUM_FO_RUNTIME_IF_1706_OK
+//@ note: lean_single computes its own if-join (#2776); this file pins the Madaros variance rule, hence requires: madaros.
+// #1706 (KL-11): the first-order variance of an `if` whose condition is decided
+// at run time must follow the arm the program actually takes.
+//
+// Before: the variance rule picked an arm at COMPILE time (the then-arm whenever
+// it carried a sensitivity), so `if n < 0.5 { x } else { 2.0 * x }` reported
+// var(x) for every n, and helpers containing such an `if`, recursive helpers and
+// methods were not re-lowered at all (variance 0 across the call).
+// Analytic values: tests/oracles/gum_fo_runtime_if_1706.cpp (forward-mode duals,
+// derivative along the executed branch); a = 2.0 +- 0.05, var(a) = 0.0025.
+
+struct Scale {
+    k: f64
+}
+
+impl Scale {
+    fn apply(self: &Scale, x: f64, n: f64) -> f64 {
+        if n < 0.5 { self.k * x } else { 2.0 * self.k * x }
+    }
+}
+
+fn pick(n: f64, x: f64) -> f64 {
+    if n < 0.5 { x } else { 2.0 * x }
+}
+
+fn pw(x: f64, n: i64) -> f64 {
+    if n <= 0 { 1.0 } else { x * pw(x, n - 1) }
+}
+
+fn even_m(x: f64, n: i64) -> f64 {
+    if n < 1 { x } else { odd_m(x * 1.1, n - 1) }
+}
+
+fn odd_m(x: f64, n: i64) -> f64 {
+    if n < 1 { x } else { even_m(x * 1.1, n - 1) }
+}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+fn close(got: f64, want: f64) -> bool {
+    abs_f(got - want) <= 1.0e-12 + 1.0e-9 * abs_f(want)
+}
+
+fn main() -> i64 with IO, Mut, Div, Epistemic {
+    let ka: Knowledge<f64> = measure(2.0, uncertainty: 0.05)
+    let kn: Knowledge<f64> = measure(0.0 - 2.0, uncertainty: 0.0)
+    let kp: Knowledge<f64> = measure(2.0, uncertainty: 0.0)
+    let a = ka.value
+    let n_neg = kn.value
+    let n_pos = kp.value
+
+    // An if in the function itself, condition known only at run time.
+    let y_then = if n_neg < 0.5 { a } else { 2.0 * a }
+    let y_else = if n_pos < 0.5 { a } else { 2.0 * a }
+    let v_inline_then = variance_of(y_then)
+    let v_inline_else = variance_of(y_else)
+    // The same through a helper, a method, recursion and mutual recursion.
+    let v_helper_then = variance_of(pick(0.0, a))
+    let v_helper_else = variance_of(pick(1.0, a))
+    let sc = Scale { k: 1.0 }
+    let v_meth_else = variance_of(sc.apply(a, 1.0))
+    let v_pw3 = variance_of(pw(a, 3))
+    let v_pw5 = variance_of(pw(a, 5))
+    let v_mut4 = variance_of(even_m(a, 4))
+
+    print("inline_then="); print_f64(v_inline_then); print(" analytic=0.002500\n")
+    print("inline_else="); print_f64(v_inline_else); print(" analytic=0.010000\n")
+    print("helper_then="); print_f64(v_helper_then); print(" analytic=0.002500\n")
+    print("helper_else="); print_f64(v_helper_else); print(" analytic=0.010000\n")
+    print("meth_else="); print_f64(v_meth_else); print(" analytic=0.010000\n")
+    print("pw3="); print_f64(v_pw3); print(" analytic=0.360000\n")
+    print("pw5="); print_f64(v_pw5); print(" analytic=16.000000\n")
+    print("mut4="); print_f64(v_mut4); print(" analytic=0.005359\n")
+
+    let ok = close(v_inline_then, 0.0025) && close(v_inline_else, 0.01)
+        && close(v_helper_then, 0.0025) && close(v_helper_else, 0.01)
+        && close(v_meth_else, 0.01)
+        && close(v_pw3, 0.36) && close(v_pw5, 16.0)
+        && close(v_mut4, 0.005358972025)
+    if ok {
+        print("GUM_FO_RUNTIME_IF_1706_OK\n")
+        return 0
+    }
+    print("GUM_FO_RUNTIME_IF_1706_FAIL\n")
+    1
+}

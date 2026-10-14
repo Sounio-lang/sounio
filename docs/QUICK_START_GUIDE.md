@@ -180,7 +180,7 @@ cd examples/epistemic
 
 2. **Explore your domain**:
    - `examples/pbpk/` - Pharmacokinetics
-   - `examples/fmri/` - Neuroimaging
+   - `examples/connectivity/` - Brain-network analysis
    - `examples/science/` - General scientific computing
 
 3. **Read the manifesto** to understand the philosophy

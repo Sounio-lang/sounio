@@ -1,0 +1,65 @@
+// Source/ELF-bound CI gate input. Executed by sco_egraph_metadata_gate.sh.
+use ir::egraph::{EgSmallContext, eg_small_init, eg_small_add_var_with_unc, eg_small_add_binop_with_unc, eg_small_saturate_float, eg_small_extract_epistemic, test_eg_small_epistemic_first_valid_large_unc, test_eg_small_epistemic_missing_unc_refused, test_eg_small_epistemic_reassoc_unc_propagated, test_eg_small_epistemic_sum_overflow_refused}
+fn exact_reassociated_shape(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    ctx.allow_inexact_reassoc = true
+    let a = eg_small_add_var_with_unc(ctx, 1, 1000000000)
+    let b = eg_small_add_var_with_unc(ctx, 2, 0)
+    let c = eg_small_add_var_with_unc(ctx, 3, 0)
+    let ab = eg_small_add_binop_with_unc(ctx, 8, a, b)
+    let root = eg_small_add_binop_with_unc(ctx, 8, ab, c)
+    let _ = eg_small_saturate_float(ctx)
+    var found = false
+    var i: i64 = 0
+    while i < ctx.node_count {
+        let node = ctx.nodes[i as usize]
+        if node.op == 8 && node.children[0] == a {
+            let rhs = node.children[1]
+            if rhs >= 0 && rhs < ctx.node_count {
+                let inner = ctx.nodes[rhs as usize]
+                if inner.op == 8 && inner.children[0] == b && inner.children[1] == c {
+                    if ctx.unc_lo[i as usize] != 1000000000 { return false }
+                    found = true
+                }
+            }
+        }
+        i = i + 1
+    }
+    let extracted = eg_small_extract_epistemic(ctx, root)
+    found && extracted.op == 8
+}
+fn fsub_refused(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    ctx.allow_inexact_reassoc = true
+    let a = eg_small_add_var_with_unc(ctx, 1, 1000)
+    let b = eg_small_add_var_with_unc(ctx, 2, 1000)
+    let c = eg_small_add_var_with_unc(ctx, 3, 1000)
+    let ab = eg_small_add_binop_with_unc(ctx, 9, a, b)
+    let _ = eg_small_add_binop_with_unc(ctx, 9, ab, c)
+    eg_small_saturate_float(ctx) == 0
+}
+fn nonadditive_refused(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let a = eg_small_add_var_with_unc(ctx, 1, 1000)
+    let b = eg_small_add_var_with_unc(ctx, 2, 1000)
+    let root = eg_small_add_binop_with_unc(ctx, 10, a, b)
+    let extracted = eg_small_extract_epistemic(ctx, root)
+    extracted.eclass_id == -1
+}
+fn main() -> i32 with IO, Mut, Div, Panic {
+    if !test_eg_small_epistemic_first_valid_large_unc() { return 11 }
+    print("FIRST_VALID_LARGE_UNC_PASS\n")
+    if !test_eg_small_epistemic_missing_unc_refused() { return 12 }
+    print("MISSING_UNC_REFUSED_PASS\n")
+    if !test_eg_small_epistemic_reassoc_unc_propagated() { return 13 }
+    print("REASSOC_UNC_PROPAGATED_PASS\n")
+    if !test_eg_small_epistemic_sum_overflow_refused() { return 14 }
+    print("SUM_OVERFLOW_REFUSED_PASS\n")
+    var ctx = eg_small_init()
+    if !exact_reassociated_shape(&! ctx) { return 1 }
+    print("EXACT_REASSOCIATED_SHAPE_UNC_PASS\n")
+    var subctx = eg_small_init()
+    if !fsub_refused(&! subctx) { return 2 }
+    print("FSUB_REASSOCIATION_REFUSED_PASS\n")
+    var mulctx = eg_small_init()
+    if !nonadditive_refused(&! mulctx) { return 3 }
+    print("NONADDITIVE_RSS_REFUSED_PASS\n")
+    0
+}

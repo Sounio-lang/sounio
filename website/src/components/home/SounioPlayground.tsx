@@ -109,8 +109,8 @@ export default function SounioPlayground() {
             Try Sounio in your browser
           </h2>
           <p className="text-[clamp(0.96rem,2.1vw,1.1rem)] text-[var(--color-text-secondary)] max-w-[68ch]">
-            Live syntax checking — catch Rust habits, missing <code className="font-mono text-[var(--color-accent-gold-soft)]">with IO</code>,
-            and epistemic type errors before the compiler ever runs.
+            Explore basic syntax hints and simulated output in a JavaScript preview.
+            Use Madaros to compile or run a Sounio program.
           </p>
         </div>
 
@@ -159,7 +159,7 @@ export default function SounioPlayground() {
                         : 'text-[var(--color-text-secondary)]'
                     }`}
                   >
-                    {m.charAt(0).toUpperCase() + m.slice(1)}
+                    {m === 'compile' ? 'Syntax hints' : 'Simulate output'}
                   </button>
                 ))}
               </div>
@@ -168,7 +168,7 @@ export default function SounioPlayground() {
                 disabled={!shimReady || running}
                 className="ml-auto px-5 py-1.5 rounded-full text-xs font-semibold bg-[linear-gradient(120deg,var(--color-accent-gold),var(--color-accent-gold-soft))] text-[#10233e] disabled:opacity-40 hover:-translate-y-px transition-all"
               >
-                {!shimReady ? 'Loading…' : running ? 'Running…' : mode === 'compile' ? '⚡ Compile' : '▶ Run'}
+                {!shimReady ? 'Loading…' : running ? 'Working…' : mode === 'compile' ? 'Check preview' : 'Show preview'}
               </button>
             </div>
           </div>
@@ -181,18 +181,18 @@ export default function SounioPlayground() {
               </span>
               {result && (
                 <span className={`text-xs font-semibold ${result.success ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {result.success ? '✓ OK' : '✗ ERRORS'}
+                  {result.success ? 'No preview hints' : 'Preview issue'}
                 </span>
               )}
             </div>
             <div className="bg-[#0d1117] p-6 font-mono text-sm leading-relaxed min-h-[340px]">
               {!result && (
                 <span className="text-[var(--color-text-tertiary)] text-xs">
-                  Click Compile or Run to see output…
+                  Choose a preview action to see illustrative output…
                 </span>
               )}
               {result && result.diagnostics.length === 0 && result.success && (
-                <div className="text-emerald-400 text-xs mb-3">No diagnostics — clean compile.</div>
+                <div className="text-emerald-400 text-xs mb-3">No hints from the preview. Compiler status unknown.</div>
               )}
               {result?.diagnostics.map((d, i) => (
                 <div key={i} className={`mb-2 ${d.severity === 'error' ? 'text-red-400' : 'text-yellow-400'}`}>
@@ -204,7 +204,7 @@ export default function SounioPlayground() {
               ))}
               {'output' in (result ?? {}) && (result as RunResult).output && (
                 <div className="mt-4 pt-4 border-t border-[var(--glass-border)]">
-                  <div className="text-xs text-[var(--color-text-tertiary)] mb-2">stdout:</div>
+                  <div className="text-xs text-[var(--color-text-tertiary)] mb-2">Simulated output:</div>
                   <div className="text-[#e6edf3] whitespace-pre-wrap">
                     {(result as RunResult).output}
                   </div>

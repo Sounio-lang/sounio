@@ -1312,6 +1312,8 @@ pub struct EgSmallContext {
     pub best:       [i64; 64],
     pub unc_lo:     [i64; 64],
     pub unc_hi:     [i64; 64],
+    // Explicit annotation validity: an absent annotation is not zero uncertainty.
+    pub unc_known:  [bool; 64],
     // Q certificate — basis support per node index (the second certificate of the
     // anti-garbling FUSION theorem, formal/lean4/EpistemicEffectsNSA.lean: qCovers,
     // qCovers_vadd, qCovers_cdMul, assoc_zero_of_qCoversL). Bit k set ⇔ the coefficient
@@ -1370,6 +1372,7 @@ pub fn eg_small_init() -> EgSmallContext {
         best:       [EG_INVALID; 64],
         unc_lo:     [0; 64],
         unc_hi:     [0; 64],
+        unc_known:  [false; 64],
         q_mask:     [0 - 1; 64],
     }
 }
@@ -1399,6 +1402,7 @@ fn eg_small_init_algebra(strategy: i64, cd_bits_in: i64) -> EgSmallContext {
         best:       [EG_INVALID; 64],
         unc_lo:     [0; 64],
         unc_hi:     [0; 64],
+        unc_known:  [false; 64],
         q_mask:     [0 - 1; 64],
     }
 }
@@ -1595,6 +1599,7 @@ pub fn eg_small_add_var_with_unc(ctx: &! EgSmallContext, var_id: i64, unc: i64) 
     let node_idx = eg_small_add_var(ctx, var_id)
     if node_idx >= 0 && node_idx < 64 {
         ctx.unc_lo[node_idx as usize] = unc
+        ctx.unc_known[node_idx as usize] = unc >= 0 && unc <= 2000000000
         // Q certificate: this feed carries scalar f64 registers (the epistemic pass works
         // on Knowledge<f64> values), i.e. real numbers — basis support {e_0}. The real line
         // associates inside every Cayley-Dickson algebra (real_assoc), which is exactly
@@ -1617,20 +1622,24 @@ pub fn eg_small_add_basis_var(ctx: &! EgSmallContext, var_id: i64, basis_k: i64)
 }
 
 // Add binary op node with propagated uncertainty for epistemic pass
-// GUM §5.1.2: u(z)^2 = u(x)^2 + u(y)^2 for additive ops; conservative for mul/div.
+// Bounded independent-input RSS metadata for additive ops only; no mul/div model.
 // lhs_class/rhs_class are node indices (same as e-class IDs for leaf nodes) into unc_lo.
 pub fn eg_small_add_binop_with_unc(ctx: &! EgSmallContext, op: i64, lhs_class: i64, rhs_class: i64) -> i64 with Mut, Div, Panic {
-    let lhs_unc = if lhs_class >= 0 && lhs_class < 64 { ctx.unc_lo[lhs_class as usize] } else { 0 }
-    let rhs_unc = if rhs_class >= 0 && rhs_class < 64 { ctx.unc_lo[rhs_class as usize] } else { 0 }
-    // Clamp to avoid i64 overflow in the square (safe up to ~3.03e9 per operand)
-    let max_safe: i64 = 3000000000
-    let l = if lhs_unc > max_safe { max_safe } else { lhs_unc }
-    let r = if rhs_unc > max_safe { max_safe } else { rhs_unc }
-    let combined_unc = eg_isqrt(l * l + r * r)
+    if lhs_class < 0 || lhs_class >= ctx.node_count || rhs_class < 0 || rhs_class >= ctx.node_count { return EG_INVALID }
     let node_idx = eg_small_add_binop(ctx, op, lhs_class, rhs_class)
-    if node_idx >= 0 && node_idx < 64 {
-        ctx.unc_lo[node_idx as usize] = combined_unc
-    }
+    if node_idx < 0 || node_idx >= 64 { return node_idx }
+    ctx.unc_known[node_idx as usize] = false
+    if op != EG_OP_ADD && op != EG_OP_SUB && op != EG_OP_FADD && op != EG_OP_FSUB { return node_idx }
+    if lhs_class < 0 || lhs_class >= 64 || rhs_class < 0 || rhs_class >= 64 { return node_idx }
+    if !ctx.unc_known[lhs_class as usize] || !ctx.unc_known[rhs_class as usize] { return node_idx }
+    let l = ctx.unc_lo[lhs_class as usize]
+    let r = ctx.unc_lo[rhs_class as usize]
+    // The bounded domain prevents overflow of both squares AND their sum.
+    // Refuse rather than silently clamp an unknown/out-of-domain uncertainty.
+    if l < 0 || r < 0 || l > 2000000000 || r > 2000000000 { return node_idx }
+    let combined_unc = eg_isqrt(l * l + r * r)
+    ctx.unc_lo[node_idx as usize] = combined_unc
+    ctx.unc_known[node_idx as usize] = combined_unc <= 2000000000
     node_idx
 }
 
@@ -1760,20 +1769,23 @@ pub fn eg_small_extract(ctx: &! EgSmallContext, class_id: i64) -> EgNode with Mu
 // Uncertainty-guided extraction (Sprint 225 epistemic pass)
 // Extracts the equivalent node with minimum uncertainty (GUM cost model)
 pub fn eg_small_extract_epistemic(ctx: &! EgSmallContext, class_id: i64) -> EgNode with Mut, Div, Panic {
+    if class_id < 0 || class_id >= ctx.uf_size { return eg_node_new() }
     let canonical  = eg_small_find(ctx, class_id)
     var best       = eg_node_new()
-    var best_unc: i64 = 999999999
-    var best_cost: i64 = 999999
+    var found = false
+    var best_unc: i64 = 0
+    var best_cost: i64 = 0
     var i: i64 = 0
     while i < ctx.node_count {
         let node = ctx.nodes[i as usize]
         if node.eclass_id >= 0 {
             let node_cls = eg_small_find(ctx, node.eclass_id)
-            if node_cls == canonical {
-                let node_unc = if i < 64 { ctx.unc_lo[i as usize] } else { 999999999 }
+            if node_cls == canonical && i < 64 && ctx.unc_known[i as usize] {
+                let node_unc = ctx.unc_lo[i as usize]
                 let cost = eg_small_cost_by_op(node.op)
-                // Prefer lower uncertainty; tie-break by lower cost
-                if node_unc < best_unc || (node_unc == best_unc && cost < best_cost) {
+                // First valid candidate avoids an artificial numeric ceiling.
+                if !found || node_unc < best_unc || (node_unc == best_unc && cost < best_cost) {
+                    found = true
                     best_unc = node_unc
                     best_cost = cost
                     best = node
@@ -1936,7 +1948,7 @@ pub fn eg_q_triple_associative(bits: i64, qa: i64, qb: i64, qc: i64) -> bool wit
 //      1 = blocked: multiplication NEVER reassociated (sedenion+)
 //      2 = fano_selective: multiplication checked per-triple via
 //          ir_can_reassociate_triple() — the 168 theorem as a compiler predicate
-//    FADD/FSUB is associative in every Cayley-Dickson algebra, so it is bound by
+//    FADD is associative in every Cayley-Dickson algebra, so it is bound by
 //    gate 1 alone.
 pub fn eg_small_saturate_float(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
     // A-layer-2: on a chaotic integration path, refuse ALL float reassociation. A
@@ -1952,9 +1964,9 @@ pub fn eg_small_saturate_float(ctx: &! EgSmallContext) -> i64 with Mut, Div, Pan
         while i < ctx.node_count {
             let node = ctx.nodes[i as usize]
 
-            // FADD/FSUB reassociation: associative in every Cayley-Dickson algebra,
-            // but NOT in IEEE-754 — gated by the exactness opt-in (gate 1).
-            if ctx.allow_inexact_reassoc && (node.op == EG_OP_FADD || node.op == EG_OP_FSUB) && node.child_count >= 2 {
+            // Only FADD has this algebraic association identity. FSUB does not.
+            // IEEE reassociation still requires the explicit exactness opt-in.
+            if ctx.allow_inexact_reassoc && node.op == EG_OP_FADD && node.child_count >= 2 {
                 let lhs_class = node.children[0]
                 let rhs_class = node.children[1]
 
@@ -1965,12 +1977,16 @@ pub fn eg_small_saturate_float(ctx: &! EgSmallContext) -> i64 with Mut, Div, Pan
                         let inner_eclass = eg_small_find(ctx, inner.eclass_id)
                         let lhs_canonical = eg_small_find(ctx, lhs_class)
                         if inner_eclass == lhs_canonical {
-                            let bc_class = eg_small_add_binop(ctx, node.op, inner.children[1], rhs_class)
-                            let result_class = eg_small_add_binop(ctx, node.op, inner.children[0], bc_class)
-                            let node_eclass = eg_small_find(ctx, node.eclass_id)
-                            let result_eclass = eg_small_find(ctx, result_class)
-                            if eg_small_union(ctx, node_eclass, result_eclass) {
-                                merges = merges + 1
+                            let bc_class = eg_small_add_binop_with_unc(ctx, node.op, inner.children[1], rhs_class)
+                            if bc_class != EG_INVALID {
+                                let result_class = eg_small_add_binop_with_unc(ctx, node.op, inner.children[0], bc_class)
+                                if result_class != EG_INVALID {
+                                    let node_eclass = eg_small_find(ctx, node.eclass_id)
+                                    let result_eclass = eg_small_find(ctx, result_class)
+                                    if eg_small_union(ctx, node_eclass, result_eclass) {
+                                        merges = merges + 1
+                                    }
+                                }
                             }
                         }
                     }
@@ -2012,11 +2028,15 @@ pub fn eg_small_saturate_float(ctx: &! EgSmallContext) -> i64 with Mut, Div, Pan
                                 }
                                 if allow {
                                     let bc = eg_small_add_binop(ctx, EG_OP_FMUL, inner.children[1], mul_rhs)
-                                    let result = eg_small_add_binop(ctx, EG_OP_FMUL, inner.children[0], bc)
-                                    let ne = eg_small_find(ctx, node.eclass_id)
-                                    let re = eg_small_find(ctx, result)
-                                    if eg_small_union(ctx, ne, re) {
-                                        merges = merges + 1
+                                    if bc != EG_INVALID {
+                                        let result = eg_small_add_binop(ctx, EG_OP_FMUL, inner.children[0], bc)
+                                        if result != EG_INVALID {
+                                            let ne = eg_small_find(ctx, node.eclass_id)
+                                            let re = eg_small_find(ctx, result)
+                                            if eg_small_union(ctx, ne, re) {
+                                                merges = merges + 1
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -2970,6 +2990,7 @@ fn test_eg_small_extract_epistemic_basic_inner(ctx: &! EgSmallContext) -> bool w
     let const1 = eg_small_add_const(ctx, 1)
     let _var1 = eg_small_add_var_with_unc(ctx, 0, 2000000000)
     ctx.unc_lo[const1 as usize] = 0
+    ctx.unc_known[const1 as usize] = true
     let extracted = eg_small_extract_epistemic(ctx, const1)
     extracted.op == EG_OP_CONST
 }
@@ -2990,6 +3011,52 @@ fn test_eg_small_saturate_float_basic() -> bool with Mut, Div, Panic {
     // Float saturation should complete without error
     var ctx = eg_small_init()
     return test_eg_small_saturate_float_basic_inner(&! ctx)
+}
+
+// Regressions for scientific metadata, independent of production activation.
+pub fn test_eg_small_epistemic_first_valid_large_unc() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    let cls = eg_small_add_var_with_unc(&! ctx, 17, 1000000000)
+    let extracted = eg_small_extract_epistemic(&! ctx, cls)
+    extracted.op == EG_OP_VAR && extracted.value == 17
+}
+
+pub fn test_eg_small_epistemic_missing_unc_refused() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    let cls = eg_small_add_var(&! ctx, 19)
+    let extracted = eg_small_extract_epistemic(&! ctx, cls)
+    extracted.eclass_id == EG_INVALID
+}
+
+pub fn test_eg_small_epistemic_reassoc_unc_propagated() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    ctx.allow_inexact_reassoc = true
+    let a = eg_small_add_var_with_unc(&! ctx, 1, 1000000000)
+    let b = eg_small_add_var_with_unc(&! ctx, 2, 0)
+    let c = eg_small_add_var_with_unc(&! ctx, 3, 0)
+    let ab = eg_small_add_binop_with_unc(&! ctx, EG_OP_FADD, a, b)
+    let root = eg_small_add_binop_with_unc(&! ctx, EG_OP_FADD, ab, c)
+    let _ = eg_small_saturate_float(&! ctx)
+    var i: i64 = 0
+    var checked = false
+    while i < ctx.node_count {
+        let node = ctx.nodes[i as usize]
+        if node.op == EG_OP_FADD && node.children[0] == a && node.children[1] != ab {
+            if !ctx.unc_known[i as usize] || ctx.unc_lo[i as usize] != 1000000000 { return false }
+            checked = true
+        }
+        i = i + 1
+    }
+    let extracted = eg_small_extract_epistemic(&! ctx, root)
+    checked && extracted.op == EG_OP_FADD
+}
+
+pub fn test_eg_small_epistemic_sum_overflow_refused() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    let a = eg_small_add_var_with_unc(&! ctx, 1, 3000000000)
+    let b = eg_small_add_var_with_unc(&! ctx, 2, 3000000000)
+    let root = eg_small_add_binop_with_unc(&! ctx, EG_OP_FADD, a, b)
+    !ctx.unc_known[root as usize]
 }
 
 fn test_eg_quantize_unc_zero() -> bool {

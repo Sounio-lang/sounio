@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Copilot review (PR #2516), comment 4113449699: an IMPORTED tuple-array-
-# returning callee, through the real thin-link multi-module path
-# (module_loader.sio's thin_build_compiled_unit), not a lowerer probe entry
-# point. See tests/multimodule/thinlink_tuple_arr_import/README.md for what
-# the `basic` fixture pins and does not pin.
+# returning callee, through the public native-compile multi-module path,
+# not a lowerer probe. The current CLI uses module_native_driver's full IR
+# route, not module_loader's legacy thin-link unit builder. The fixture name
+# is historical; its assertions still pin tuple-array return classification.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -64,12 +64,26 @@ fi
 [[ "$(head -c 2 "$RAW")" != '#!' ]] || fail "not a raw ELF (a wrapper script?): $RAW"
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+# Exercise the shipped default, even if the caller exported the A/B opt-out.
+unset SOUNIO_NO_REGION_RECLAIM
+
+# Match bin/madaros without changing the compiled program's stack limit.
+raw_compile() (
+  local stack_kb="${MADAROS_STACK_KB:-524288}"
+  case "$stack_kb" in
+    ''|*[!0-9]*) fail "invalid MADAROS_STACK_KB: $stack_kb" ;;
+    0) stack_kb=unlimited ;;
+  esac
+  ulimit -s "$stack_kb" 2>/dev/null || fail "cannot configure compiler stack to $stack_kb KiB; no verdict"
+  [[ "$(ulimit -s)" == "$stack_kb" ]] || fail "compiler stack does not match requested $stack_kb; no verdict"
+  exec "$RAW" "$@"
+)
 
 compile_and_run() {
   local label="$1" src="$2"
   local log="$WORK/$label.log" elf="$WORK/$label.elf" out="$WORK/$label.out"
   [[ -f "$src" ]] || fail "$label: missing fixture $src"
-  if ! "$RAW" --native-compile "$src" -o "$elf" >"$log" 2>&1; then
+  if ! raw_compile --native-compile "$src" -o "$elf" >"$log" 2>&1; then
     tail -n 40 "$log" >&2 || true
     fail "$label: did not compile"
   fi
@@ -99,4 +113,4 @@ compile_and_run zero_mask "$FIX/zero_mask/main.sio"
 expect_output zero_mask "$FIX/zero_mask/expected.txt"
 echo "$TAG PASS(zero_mask): selected integer-array tuple return records an authoritative zero mask, not a later namesake f64-array mask"
 
-echo "$TAG PASS: imported tuple-array callee through the real thin-link unit builder"
+echo "$TAG PASS: imported tuple-array callee through the default modular native path"

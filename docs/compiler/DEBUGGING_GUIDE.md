@@ -11,6 +11,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.debug
 
 > **⚠️ File paths updated 2026-07-11 (doc-reality audit).** This page was written against the retired Rust compiler tree (`crates/`, `compiler/src/*.rs`, `codegen/llvm/`); those files no longer exist — the compiler is self-hosted Sounio (Madaros v0.80.0). The design and concepts below remain accurate, but DWARF/debug-info emission now lives in `self-hosted/native/dwarf.sio` and `self-hosted/native/debug_info.sio`; the epistemic/knowledge runtime in `self-hosted/compiler/knowledge_runtime_guard*.sio` — not any `codegen/llvm/*.rs` or `backend/native/*.rs`. Do not look for the `.rs` paths below.
 
+> **Which epistemic surface is which.** This document uses `Knowledge<T>`, `Knowledge<f64>`, `Knowledge<mg/L>` and the `measure()` constructor to show how the compiler's epistemic representation appears in DWARF debug info. `Knowledge<T>` with `measure(value, uncertainty: σ)` is a checked lower-level intrinsic: `tests/run-pass/variance_of_measure_sum.sio` runs on Madaros, and [`docs/reference/KNOWLEDGE_REFERENCE.md`](../reference/KNOWLEDGE_REFERENCE.md) documents it. The preferred stdlib API for user code is the `Epistemic` struct from `stdlib/epistemic/knowledge.sio`, used through free functions (`ep_measured`, `ep_val`, `ep_std`, `ep_add`, `ep_div`) and exercised by `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio`. The GDB pretty-printer output shown below has not been re-verified against the current DWARF emitter. See [`docs/compiler/KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
+
 
 ## 1. Introduction
 

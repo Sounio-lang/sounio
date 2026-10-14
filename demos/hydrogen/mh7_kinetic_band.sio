@@ -1,0 +1,197 @@
+// demos/hydrogen/mh7_kinetic_band.sio
+//
+// Gkanas et al. 2020, eqs. 9 and 10, on the bottleneck link S6 -> S7.
+// The constants the paper does not print are a declared box. Nothing in
+// the box is adjusted to Table 4.
+//
+// Eq. 9  absorption:  C_a * exp(-E_a/(R T)) * ln(p/P_eq) * (1 - x)
+// Eq. 10 desorption:  C_d * exp(-E_d/(R T)) * (P_eq - p)/P_eq * x
+// Eq. 11 here is flat van 't Hoff from Table 3 (sigma = 0, Y = 0). The
+// tangent form of eq. 11 is not used: it diverges, and mhhc.sio records why.
+//
+// THE BOX. The only numerical set this rate form is usually given with is
+// LaNi5, Jemni and Ben Nasrallah 1995, which is what the paper's ref. [95]
+// points at without quoting. Stages 2-7 are AB2. Declared, not fitted:
+//   each prefactor spans a factor of ten each side of the LaNi5 value;
+//   each activation energy spans +/- 2 kJ/mol around it.
+// The centre of the box is the LaNi5 point, named as such.
+//
+// WHAT IS SOLVED. At half loading, the interconnector pressure where the
+// desorption rate of S6 at T_hot equals the absorption rate of S7 at
+// T_cold = 10 C. That pressure is not the delivery pressure. The delivery
+// ceiling is the desorption plateau of S7 at T_hot, printed beside it.
+// Table 4 is printed as the paper's COMSOL number, not as a target.
+//
+// The absolute scale of C sets the time, not the pressure: a common factor
+// cancels when the two rates are set equal. The box varies the four
+// constants independently, so the pressure can move. The time is reported
+// at the LaNi5 centre, as 1/rate, against the paper's cycle time.
+
+use hydride::mhhc::{
+    p_eq_flat, rate_abs, rate_des, HydrideKinetics,
+    gkanas_dh_abs, gkanas_ds_abs, gkanas_dh_des, gkanas_ds_des
+}
+
+var X_HALF: f64 = 0.5
+var T_COLD: f64 = 283.15
+
+// LaNi5 centre. Not the paper's AB2 constants.
+var CA0: f64 = 59.187
+var EA0: f64 = 21179.6
+var CD0: f64 = 9.57
+var ED0: f64 = 16420.0
+var C_FACTOR: f64 = 10.0
+var E_HALF: f64 = 2000.0
+
+var P_SOLVED: f64 = 0.0
+var RATE_SOLVED: f64 = 0.0
+var N_REFUSED: i64 = 0
+
+fn kin_at(c_abs: f64, e_abs: f64, c_des: f64, e_des: f64) -> HydrideKinetics {
+    HydrideKinetics { c_abs: c_abs, e_abs: e_abs, c_des: c_des, e_des: e_des }
+}
+
+fn bit_on(i: i64, b: i64) -> bool {
+    var x = i
+    var k: i64 = 0
+    while k < b {
+        x = x / 2
+        k = k + 1
+    }
+    (x - (x / 2) * 2) == 1
+}
+
+fn corner(i: i64) -> HydrideKinetics {
+    var ca = CA0 / C_FACTOR
+    var ea = EA0 - E_HALF
+    var cd = CD0 / C_FACTOR
+    var ed = ED0 - E_HALF
+    if bit_on(i, 0) { ca = CA0 * C_FACTOR }
+    if bit_on(i, 1) { ea = EA0 + E_HALF }
+    if bit_on(i, 2) { cd = CD0 * C_FACTOR }
+    if bit_on(i, 3) { ed = ED0 + E_HALF }
+    kin_at(ca, ea, cd, ed)
+}
+
+fn gap(kin: HydrideKinetics, t_hot: f64, p: f64, p_des: f64, p_abs: f64) -> f64 with Mut, Div, Panic {
+    let rd = rate_des(kin, t_hot, p, p_des, X_HALF)
+    let ra = rate_abs(kin, T_COLD, p, p_abs, X_HALF)
+    rd - ra
+}
+
+// Pressure where eq. 10 on S6 equals eq. 9 on S7. Refuses if the bracket
+// has no sign change.
+fn solve_p(kin: HydrideKinetics, t_hot: f64, p_des: f64, p_abs: f64) -> bool with Mut, Div, Panic {
+    if p_des <= p_abs { return false }
+    var lo = p_abs * 1.000001
+    var hi = p_des * 0.999999
+    let f_lo = gap(kin, t_hot, lo, p_des, p_abs)
+    let f_hi = gap(kin, t_hot, hi, p_des, p_abs)
+    if (f_lo < 0.0 && f_hi < 0.0) || (f_lo > 0.0 && f_hi > 0.0) { return false }
+    var k: i64 = 0
+    while k < 70 {
+        let mid = 0.5 * (lo + hi)
+        let f_mid = gap(kin, t_hot, mid, p_des, p_abs)
+        if (f_lo < 0.0 && f_mid < 0.0) || (f_lo > 0.0 && f_mid > 0.0) { lo = mid } else { hi = mid }
+        k = k + 1
+    }
+    P_SOLVED = 0.5 * (lo + hi)
+    RATE_SOLVED = rate_des(kin, t_hot, P_SOLVED, p_des, X_HALF)
+    true
+}
+
+fn print_bar(x: f64) with IO, Mut, Div, Panic {
+    var v = x
+    if v < 0.0 { v = 0.0 }
+    let scaled = v * 100.0
+    var n = scaled as i64
+    let frac = scaled - (n as f64)
+    if frac >= 0.5 { n = n + 1 }
+    let whole = n / 100
+    let cent = n - whole * 100
+    print(whole) print(".")
+    if cent < 10 { print("0") }
+    print(cent)
+}
+
+fn one_case(t_c: f64, comsol: f64, t_paper: f64) with IO, Mut, Div, Panic {
+    let t_hot = t_c + 273.15
+    // stages are 0-indexed: S6 = 5, S7 = 6
+    let p_des6 = p_eq_flat(gkanas_dh_des(5), gkanas_ds_des(5), t_hot)
+    let p_abs7 = p_eq_flat(gkanas_dh_abs(6), gkanas_ds_abs(6), T_COLD)
+    let ceiling = p_eq_flat(gkanas_dh_des(6), gkanas_ds_des(6), t_hot)
+
+    let centre = kin_at(CA0, EA0, CD0, ED0)
+    let centre_ok = solve_p(centre, t_hot, p_des6, p_abs7)
+    var p_centre = 0.0
+    var t_char = 0.0
+    var residual = 0.0
+    if centre_ok {
+        p_centre = P_SOLVED
+        if RATE_SOLVED > 0.0 { t_char = 1.0 / RATE_SOLVED }
+        residual = gap(centre, t_hot, P_SOLVED, p_des6, p_abs7)
+    }
+
+    var p_lo = 0.0
+    var p_hi = 0.0
+    var seen = false
+    var i: i64 = 0
+    var refused: i64 = 0
+    while i < 16 {
+        let ok = solve_p(corner(i), t_hot, p_des6, p_abs7)
+        if ok {
+            if !seen || P_SOLVED < p_lo { p_lo = P_SOLVED }
+            if !seen || P_SOLVED > p_hi { p_hi = P_SOLVED }
+            seen = true
+        } else {
+            refused = refused + 1
+        }
+        i = i + 1
+    }
+    N_REFUSED = N_REFUSED + refused
+
+    print("case T_hot ") print(t_c as i64) println(" C")
+    print("   window P_abs7 .. P_des6 (bar)  ") print_bar(p_abs7) print(" .. ") print_bar(p_des6) println("")
+    print("   S7 desorption ceiling (bar)    ") print_bar(ceiling) println("")
+    print("   COMSOL Table 4 (bar)           ") print_bar(comsol) println("")
+    if centre_ok {
+        print("   p where eq9 = eq10, LaNi5     ") print_bar(p_centre) println("")
+        print("   residual of that root         ") print_bar(residual * 1.0e6) println(" e-6 /s")
+    } else {
+        println("   LaNi5 centre: REFUSED")
+    }
+    if seen {
+        print("   p band over the declared box  ") print_bar(p_lo) print(" .. ") print_bar(p_hi) println("")
+    } else {
+        println("   box: every corner REFUSED")
+    }
+    print("   corners refused                ") print(refused) println(" / 16")
+    if centre_ok {
+        print("   1/rate at LaNi5 centre (s)    ") print(t_char as i64) println("")
+        print("   paper cycle time (s)          ") print(t_paper as i64) println("")
+    }
+    println("")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("MH7 KINETIC BAND -- eqs. 9 and 10 on S6 -> S7")
+    println("Constants: declared box around LaNi5 (Jemni 1995), not fitted to Table 4.")
+    println("Prefactor x1/10 to x10. Activation energy +/- 2 kJ/mol.")
+    println("Half loading. Flat van 't Hoff, Table 3. T_cold = 10 C.")
+    println("p_op is the interconnector pressure, not the delivery pressure.")
+    println("")
+
+    one_case(80.0, 374.0, 6625.0)
+    one_case(90.0, 483.2, 5760.0)
+    one_case(100.0, 606.4, 5090.0)
+    one_case(105.0, 682.0, 4720.0)
+    one_case(110.0, 742.0, 4530.0)
+    one_case(120.0, 830.0, 3760.0)
+
+    if N_REFUSED != 0 {
+        print("REFUSED corners in total ") print(N_REFUSED) println("")
+        return 1
+    }
+    println("KINETIC_BAND_OK")
+    0
+}
