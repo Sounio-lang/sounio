@@ -877,6 +877,12 @@ var FO_SIGMA_REG: [i64; 32] = [-1; 32]
 var FO_CH_DEPTH: [i64; 32] = [0; 32]
 
 var FO_COV_RHO: [f64; 64] = [0.0; 64]
+// Runtime rho, as a register. -1 means the pair uses the f64 table above.
+// A fitted correlation is not a literal, and baking 0.0 there asserts independence.
+var FO_COV_RHO_REG: [i64; 64] = [-1; 64]
+// 1 only after correlate stored a register. A zero register is a real reg,
+// so absence cannot be encoded as 0 or every variance emits the cross term.
+var FO_COV_RHO_HAS: [i64; 64] = [0; 64]
 
 fn fo_cov_rho_idx(i: i64, j: i64) -> i64 with Div {
     var a = i
@@ -913,6 +919,46 @@ fn fo_cov_rho_get(i: i64, j: i64) -> f64 with Mut, Panic, Div {
     FO_COV_RHO[fo_cov_rho_idx(i, j) as usize]
 }
 
+fn fo_cov_rho_reg_set(i: i64, j: i64, reg: i64) with Mut, Panic, Div, IO {
+    if i < 0 || j < 0 || i >= 8 || j >= 8 {
+        return
+    }
+    if i == j {
+        return
+    }
+    if sab_correlate_rho() {
+        return
+    }
+    let idx = fo_cov_rho_idx(i, j)
+    if reg < 0 {
+        FO_COV_RHO_REG[idx as usize] = 0 - 1
+        FO_COV_RHO_HAS[idx as usize] = 0
+        return
+    }
+    FO_COV_RHO_REG[idx as usize] = reg
+    FO_COV_RHO_HAS[idx as usize] = 1
+}
+
+fn fo_cov_rho_reg_get(i: i64, j: i64) -> i64 with Mut, Panic, Div {
+    if i < 0 || j < 0 || i >= 8 || j >= 8 {
+        return 0 - 1
+    }
+    if i == j {
+        return 0 - 1
+    }
+    FO_COV_RHO_REG[fo_cov_rho_idx(i, j) as usize]
+}
+
+fn fo_cov_rho_live(i: i64, j: i64) -> bool with Mut, Panic, Div {
+    if i < 0 || j < 0 || i >= 8 || j >= 8 || i == j {
+        return false
+    }
+    if FO_COV_RHO_HAS[fo_cov_rho_idx(i, j) as usize] != 0 {
+        return true
+    }
+    fo_cov_rho_get(i, j) != 0.0
+}
+
 // Sensitivities of a struct field, saved when a call result is named.
 // The variance scalar is not enough for Cov(field_a, field_b): that dot
 // product needs each field's channel vector, and the let that binds the
@@ -923,6 +969,68 @@ var FO_FIELD_SENS: [i64; 2048] = [-1; 2048]
 
 fn fo_field_sens_reset() with Mut {
     FO_FIELD_SENS_COUNT = 0
+    FO_LETCALL_HEAD = None
+    FO_LOGN_ACTIVE = 0
+    FO_LOGN_COUNT = 0
+}
+
+// Exact moments of exp(u) when u is affine in the gaussian channels.
+// FO_LOGN_ACTIVE is set by that exp and cleared when a later let consumes it.
+// The registers are the exponent value and its variance.
+var FO_LOGN_ACTIVE: i64 = 0
+var FO_LOGN_U: i64 = 0 - 1
+var FO_LOGN_V: i64 = 0 - 1
+var FO_LOGN_COUNT: i64 = 0
+var FO_LOGN_NAME: [Name; 64] = [ir_empty_name(); 64]
+var FO_LOGN_LU: [i64; 64] = [0 - 1; 64]
+var FO_LOGN_LV: [i64; 64] = [0 - 1; 64]
+
+fn fo_logn_note(name: Name, u: i64, v: i64) with Mut, Panic, Div {
+    if FO_LOGN_COUNT >= 64 { return }
+    var i: i64 = 0
+    while i < FO_LOGN_COUNT {
+        if ir_name_eq(FO_LOGN_NAME[i as usize], name) {
+            FO_LOGN_LU[i as usize] = u
+            FO_LOGN_LV[i as usize] = v
+            return
+        }
+        i = i + 1
+    }
+    FO_LOGN_NAME[FO_LOGN_COUNT as usize] = name
+    FO_LOGN_LU[FO_LOGN_COUNT as usize] = u
+    FO_LOGN_LV[FO_LOGN_COUNT as usize] = v
+    FO_LOGN_COUNT = FO_LOGN_COUNT + 1
+}
+
+fn fo_logn_activate(name: Name) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < FO_LOGN_COUNT {
+        if ir_name_eq(FO_LOGN_NAME[i as usize], name) {
+            FO_LOGN_ACTIVE = 1
+            FO_LOGN_U = FO_LOGN_LU[i as usize]
+            FO_LOGN_V = FO_LOGN_LV[i as usize]
+            return
+        }
+        i = i + 1
+    }
+}
+
+struct FoLetCallNode {
+    local: Name,
+    callee: Name,
+    args: Option<Box<ExprList> >,
+    next: Option<Box<FoLetCallNode> >,
+}
+
+var FO_LETCALL_HEAD: Option<Box<FoLetCallNode> > = None
+
+fn fo_letcall_note(local: Name, callee: Name, args: Option<Box<ExprList> >) with Mut, Panic, Div, Alloc {
+    FO_LETCALL_HEAD = Some(Box::new(FoLetCallNode {
+        local: local,
+        callee: callee,
+        args: args,
+        next: FO_LETCALL_HEAD,
+    }))
 }
 var FO_XFER_FWD_HASH: [i64; 64] = [0; 64]
 
@@ -7060,6 +7168,8 @@ fn lowerer_lower_fn_item_mut(
     var fo_cri: i64 = 0
     while fo_cri < 64 {
         FO_COV_RHO[fo_cri as usize] = 0.0
+        FO_COV_RHO_REG[fo_cri as usize] = 0 - 1
+        FO_COV_RHO_HAS[fo_cri as usize] = 0
         fo_cri = fo_cri + 1
     }
     // #2143 (sibling of #2145): the FO channel table is keyed by vreg, which restarts
@@ -13778,6 +13888,14 @@ impl Lowerer {
     }
 
     // Var = Σ_k s_k² · σ²_k from current fo_expr_sens.
+    fn fo_emit_rho_reg(self, i: i64, j: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let reg = fo_cov_rho_reg_get(i, j)
+        if reg >= 0 {
+            return (self, reg)
+        }
+        self.emit_f64_const(fo_cov_rho_get(i, j))
+    }
+
     fn fo_emit_var_from_sens(self) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let z = self.emit_f64_const(0.0)
         var lo = z.0
@@ -13828,12 +13946,11 @@ impl Lowerer {
         while ci < 8 {
             var cj: i64 = ci + 1
             while cj < 8 {
-                let rho = fo_cov_rho_get(ci, cj)
                 let si = lo.fo_expr_sens[ci as usize]
                 let sj = lo.fo_expr_sens[cj as usize]
                 let v_i = lo.fo_sigma2[ci as usize]
                 let v_j = lo.fo_sigma2[cj as usize]
-                if rho != 0.0 && si >= 0 && sj >= 0 && v_i >= 0 && v_j >= 0 {
+                if fo_cov_rho_live(ci, cj) && si >= 0 && sj >= 0 && v_i >= 0 && v_j >= 0 {
                     let pp = lo.fresh_reg()
                     lo = pp.0
                     lo = lo.emit(ir_binop_typed(pp.1, v_i, BinaryOp::OpMul, v_j, true, true))
@@ -13847,8 +13964,14 @@ impl Lowerer {
                     sqi.imm_flags = IR_FLOAT_REG_MARKER_FLAG
                     lo = lo.emit(sqi)
                     lo = lo.emit(ir_mark_float_reg(sig_prod))
-                    let kp = lo.emit_f64_const(2.0 * rho)
+                    let rr = lo.fo_emit_rho_reg(ci, cj)
+                    lo = rr.0
+                    let two = lo.emit_f64_const(2.0)
+                    lo = two.0
+                    let kp = lo.fresh_reg()
                     lo = kp.0
+                    lo = lo.emit(ir_binop_typed(kp.1, two.1, BinaryOp::OpMul, rr.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(kp.1))
                     let t1 = lo.fresh_reg()
                     lo = t1.0
                     lo = lo.emit(ir_binop_typed(t1.1, si, BinaryOp::OpMul, sj, true, true))
@@ -13955,7 +14078,6 @@ impl Lowerer {
         while ci < 8 {
             var cj: i64 = ci + 1
             while cj < 8 {
-                let rho = fo_cov_rho_get(ci, cj)
                 let sai = sA[ci as usize]
                 let saj = sA[cj as usize]
                 let sbi = sB[ci as usize]
@@ -13964,7 +14086,7 @@ impl Lowerer {
                 let v_j = lo.fo_sigma2[cj as usize]
                 let has_ij = sai >= 0 && sbj >= 0
                 let has_ji = saj >= 0 && sbi >= 0
-                if rho != 0.0 && (has_ij || has_ji) && v_i >= 0 && v_j >= 0 {
+                if fo_cov_rho_live(ci, cj) && (has_ij || has_ji) && v_i >= 0 && v_j >= 0 {
                     let pp = lo.fresh_reg()
                     lo = pp.0
                     lo = lo.emit(ir_binop_typed(pp.1, v_i, BinaryOp::OpMul, v_j, true, true))
@@ -13978,7 +14100,7 @@ impl Lowerer {
                     sqi.imm_flags = IR_FLOAT_REG_MARKER_FLAG
                     lo = lo.emit(sqi)
                     lo = lo.emit(ir_mark_float_reg(sig_prod))
-                    let rp = lo.emit_f64_const(rho)
+                    let rp = lo.fo_emit_rho_reg(ci, cj)
                     lo = rp.0
                     var t_sum_reg: i64 = 0 - 1
                     if has_ij {
@@ -15334,6 +15456,61 @@ impl Lowerer {
         print("\n")
     }
 
+    fn fo_hess_is_clear(self) -> bool with Mut, Div {
+        var i: i64 = 0
+        while i < 36 {
+            if self.so_expr_hess[i as usize] >= 0 { return false }
+            i = i + 1
+        }
+        true
+    }
+
+    // Var(exp(u)) = exp(2u + v) * (exp(v) - 1), u affine, v = Var(u).
+    fn fo_emit_lognormal_var(self, u: i64, v: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let two = lo.emit_f64_const(2.0)
+        lo = two.0
+        let tp = lo.fresh_reg()
+        lo = tp.0
+        lo = lo.emit(ir_binop_typed(tp.1, two.1, BinaryOp::OpMul, u, true, true))
+        lo = lo.emit(ir_mark_float_reg(tp.1))
+        let sp = lo.fresh_reg()
+        lo = sp.0
+        lo = lo.emit(ir_binop_typed(sp.1, tp.1, BinaryOp::OpAdd, v, true, true))
+        lo = lo.emit(ir_mark_float_reg(sp.1))
+        let e2 = lo.fo_emit_math_call(make_name("exp"), sp.1)
+        lo = e2.0
+        let ev = lo.fo_emit_math_call(make_name("exp"), v)
+        lo = ev.0
+        let one = lo.emit_f64_const(1.0)
+        lo = one.0
+        let dm = lo.fresh_reg()
+        lo = dm.0
+        lo = lo.emit(ir_binop_typed(dm.1, ev.1, BinaryOp::OpSub, one.1, true, true))
+        lo = lo.emit(ir_mark_float_reg(dm.1))
+        let out = lo.fresh_reg()
+        lo = out.0
+        lo = lo.emit(ir_binop_typed(out.1, e2.1, BinaryOp::OpMul, dm.1, true, true))
+        lo = lo.emit(ir_mark_float_reg(out.1))
+        (lo, out.1)
+    }
+
+    // E[exp(u)] = exp(u + v/2).
+    fn fo_emit_lognormal_mean(self, u: i64, v: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let half = lo.emit_f64_const(0.5)
+        lo = half.0
+        let hp = lo.fresh_reg()
+        lo = hp.0
+        lo = lo.emit(ir_binop_typed(hp.1, half.1, BinaryOp::OpMul, v, true, true))
+        lo = lo.emit(ir_mark_float_reg(hp.1))
+        let sp = lo.fresh_reg()
+        lo = sp.0
+        lo = lo.emit(ir_binop_typed(sp.1, u, BinaryOp::OpAdd, hp.1, true, true))
+        lo = lo.emit(ir_mark_float_reg(sp.1))
+        lo.fo_emit_math_call(make_name("exp"), sp.1)
+    }
+
     fn fo_emit_math_call(self, nm: Name, argv: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         let fid = lowerer_find_or_add_fn_id_mut(&! lo, nm)
@@ -15830,6 +16007,7 @@ impl Lowerer {
             if dname.len == 0 {
                 return (lo.fo_clear_expr_sens(), -1)
             }
+            let exp_affine = ir_name_eq(dname, make_name("exp")) && lo.fo_hess_is_clear()
             let aval = lo.fo_lower_nth_arg_value(args, 0)
             lo = aval.0
             let argv = aval.1
@@ -15973,6 +16151,13 @@ impl Lowerer {
             }
             var sZ: [i64; 32] = [-1; 32]
             lo = lo.fo_combine_sens_mul(sZ, s0, factor, factor)
+            if exp_affine && v0 >= 0 && argv >= 0 {
+                FO_LOGN_ACTIVE = 1
+                FO_LOGN_U = argv
+                FO_LOGN_V = v0
+                return lo.fo_emit_lognormal_var(argv, v0)
+            }
+            FO_LOGN_ACTIVE = 0
             return lo.fo_emit_var_from_sens()
         }
         // kind 3 add / 4 mul need arg1
@@ -16684,6 +16869,8 @@ impl Lowerer {
                         nf64 = nf64 + 1
                     } else if fo_inline_param_is_struct(&(*pl).head.ty) {
                         nf64 = nf64 + 1
+                    } else if (*pl).head.ty.kind == TypeExprKind::TypeKnowledge {
+                        nf64 = nf64 + 1
                     } else if !(lower_type_expr_is_integer(&(*pl).head.ty) || lower_type_expr_is_bool(&(*pl).head.ty)) {
                         return lo
                     }
@@ -16808,6 +16995,21 @@ impl Lowerer {
             }
         }
         if !found { return (lo, 0 - 1) }
+        // A long body re-lowered at every field read blows the instruction
+        // budget of the caller. vg_gum read seven fields and each read
+        // pasted the whole function. Small helpers stay inline.
+        var nstmt: i64 = 0
+        var scount = &fd.body.stmts
+        while true {
+            match *scount {
+                Some(slc) => {
+                    nstmt = nstmt + 1
+                    scount = &(*slc).tail
+                }
+                None => break
+            }
+        }
+        if nstmt > 24 { return (lo, 0 - 1) }
         // An f64 return answers a plain call; a struct return answers a field path.
         match fd.return_type {
             Some(rt) => {
@@ -16907,6 +17109,7 @@ impl Lowerer {
                 Some(al) => {
                     // Advance to the next non-self parameter.
                     var pf = false
+                    var kn_param = false
                     var seeking = true
                     while seeking {
                         match *pa {
@@ -16915,6 +17118,10 @@ impl Lowerer {
                                     pa = &(*pl).tail
                                 } else {
                                     pf = lower_type_expr_is_f64(&(*pl).head.ty)
+                                    if (*pl).head.ty.kind == TypeExprKind::TypeKnowledge {
+                                        pf = true
+                                        kn_param = true
+                                    }
                                     pa = &(*pl).tail
                                     seeking = false
                                 }
@@ -16932,7 +17139,7 @@ impl Lowerer {
                         vals[i as usize] = vp.1
                     }
                     if pf {
-                        isf[i as usize] = 1
+                        if kn_param { isf[i as usize] = 2 } else { isf[i as usize] = 1 }
                         let wp = lo.lower_expr_variance_ref(&(*al).head)
                         lo = wp.0
                         var v = wp.1
@@ -17007,8 +17214,13 @@ impl Lowerer {
                     } else if !(*pl).head.is_self {
                         let pname = (*pl).head.name
                         lo = lo.bind_local(pname, vals[i as usize], false)
-                        if isf[i as usize] == 1 {
-                            lo = lo.bind_local_scalar_kind(pname, 2)
+                        if isf[i as usize] >= 1 {
+                            if isf[i as usize] == 2 {
+                                lo = lo.bind_local_struct_type(pname, make_name("Knowledge"), false)
+                                lowerer_bind_kn_value_float_mut(&! lo, pname, 1)
+                            } else {
+                                lo = lo.bind_local_scalar_kind(pname, 2)
+                            }
                             lo = lo.bind_local_variance_reg(pname, vars[i as usize])
                             var k2: i64 = 0
                             while k2 < 32 {
@@ -17027,7 +17239,7 @@ impl Lowerer {
                             // The parameter's second-order row: the argument's,
                             // or none (never a caller local's of the same name).
                             var hrow: [i64; 36] = [0 - 1; 36]
-                            if isf[i as usize] == 1 && i < 16 {
+                            if isf[i as usize] >= 1 && i < 16 {
                                 var hk2: i64 = 0
                                 while hk2 < 36 { hrow[hk2 as usize] = hess[(i * 36 + hk2) as usize]; hk2 = hk2 + 1 }
                             }
@@ -17205,6 +17417,20 @@ impl Lowerer {
                     return self.fo_inline_call_variance_ex(mangled, &(*cur).args, (*recv).name, true, path, n)
                 }
                 None => { return (self, 0 - 1) }
+            }
+        }
+        if (*cur).kind == ExprKind::ExprIdent {
+            var node = FO_LETCALL_HEAD
+            while true {
+                match node {
+                    Some(nd) => {
+                        if ir_name_eq((*nd).local, (*cur).name) {
+                            return self.fo_inline_call_variance_ex((*nd).callee, &(*nd).args, ir_empty_name(), false, path, n)
+                        }
+                        node = (*nd).next
+                    }
+                    None => break
+                }
             }
         }
         (self, 0 - 1)
@@ -17496,6 +17722,7 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprIdent {
             let local_v = self.lookup_local_variance_reg((*e).name)
             if local_v >= 0 {
+                fo_logn_activate((*e).name)
                 // Prefer bound multi-channel sens; else seed a channel from σ².
                 var lo = self.fo_load_local_sens((*e).name).so_load_local_hess((*e).name)
                 if !lo.fo_expr_has_sens() {
@@ -17527,15 +17754,19 @@ impl Lowerer {
             return z
         }
         if (*e).kind == ExprKind::ExprFieldAccess {
+            let inl_let = self.fo_inline_field_chain(e)
+            if inl_let.1 >= 0 {
+                return inl_let
+            }
             if ir_name_eq((*e).name, make_name("value")) {
                 match (*e).left {
                     Some(base_expr) => {
                         if (*base_expr).kind == ExprKind::ExprIdent {
-                            let base_reg = self.lookup_local((*base_expr).name)
+                            let base_reg = inl_let.0.lookup_local((*base_expr).name)
                             if base_reg >= 0 {
-                                let carried = self.lookup_variance_for_field(base_reg, 0)
+                                let carried = inl_let.0.lookup_variance_for_field(base_reg, 0)
                                 if carried >= 0 {
-                                    let live0 = self.fo_live_var_from_field_key(base_reg, 0)
+                                    let live0 = inl_let.0.fo_live_var_from_field_key(base_reg, 0)
                                     if live0.1 >= 0 {
                                         return live0
                                     }
@@ -23718,6 +23949,7 @@ impl Lowerer {
                                     }
                                     cj = cj + 1
                                 }
+                                fo_letcall_note(s.name, cnm, (*rhs_call).args)
                                 lo = lo.fo_clear_expr_sens()
                             }
                         }
@@ -23773,6 +24005,10 @@ impl Lowerer {
                 }
                 _ => {}
             }
+        }
+        if FO_LOGN_ACTIVE != 0 {
+            fo_logn_note(s.name, FO_LOGN_U, FO_LOGN_V)
+            FO_LOGN_ACTIVE = 0
         }
         // #2827: the variance re-lowering just above walks the RHS again, and a
         // `k.value` inside it (`let z = k.value * 2.0`) sets the pending
@@ -26868,7 +27104,12 @@ impl Lowerer {
 
     fn fo_sens_of_cov_arg(self, e: &Expr) -> (Lowerer, [i64; 32]) with Mut, Panic, Div, Alloc, IO {
         if (*e).kind == ExprKind::ExprFieldAccess {
-            let fbase = self.variance_field_chain_base(e)
+            let inl = self.fo_inline_field_chain(e)
+            if inl.1 >= 0 {
+                var lo_i = inl.0
+                return (lo_i, lo_i.fo_snapshot_expr_sens())
+            }
+            let fbase = inl.0.variance_field_chain_base(e)
             var lo = fbase.0
             if fbase.1 >= 0 {
                 let idx = lo.field_idx_from_name_simple((*e).name)
@@ -27044,10 +27285,9 @@ impl Lowerer {
     // correlate(a, b, rho): record Cov between the channels a and b carry, and
     // evaluate to rho so the call is usable as an expression.
     //
-    // rho must be a float literal. A runtime rho would have to be threaded into
-    // both consumers as a register, and a correlation that is only known at
-    // runtime cannot be folded into the compile-time channel table at all --
-    // refusing is honest, silently reading 0.0 would not be.
+    // A literal rho stays in the f64 table. Any other f64 is lowered to a
+    // register and read by the variance, covariance and second-order consumers.
+    // A missing rho is 0, which is independence, and the checker already rejects it.
     fn lower_correlate_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(l0) => {
@@ -27066,10 +27306,12 @@ impl Lowerer {
                         // negative correlation into independence in silence --
                         // and a negative rho is the case the builtin exists for.
                         var rho: f64 = 0.0
+                        var lit = false
                         match (*l1).tail {
                             Some(l2) => {
                                 if (*l2).head.kind == ExprKind::ExprFloatLit {
                                     rho = (*l2).head.float_val
+                                    lit = true
                                 }
                                 if (*l2).head.kind == ExprKind::ExprBinary && (*l2).head.bin_op == BinaryOp::OpSub {
                                     match (*l2).head.left {
@@ -27079,6 +27321,7 @@ impl Lowerer {
                                                     if (*lz).kind == ExprKind::ExprFloatLit && (*rz).kind == ExprKind::ExprFloatLit {
                                                         if (*lz).float_val == 0.0 {
                                                             rho = 0.0 - (*rz).float_val
+                                                            lit = true
                                                         }
                                                     }
                                                 }
@@ -27088,11 +27331,21 @@ impl Lowerer {
                                         _ => {}
                                     }
                                 }
+                                if lit {
+                                    fo_cov_rho_set(ci, cj, rho)
+                                    fo_cov_rho_reg_set(ci, cj, 0 - 1)
+                                    return lo.emit_f64_const(rho)
+                                }
+                                let pr = lo.lower_expr_ref(&(*l2).head)
+                                lo = pr.0
+                                fo_cov_rho_set(ci, cj, 0.0)
+                                fo_cov_rho_reg_set(ci, cj, pr.1)
+                                return (lo, pr.1)
                             }
                             _ => {}
                         }
-                        fo_cov_rho_set(ci, cj, rho)
-                        return lo.emit_f64_const(rho)
+                        fo_cov_rho_set(ci, cj, 0.0)
+                        return lo.emit_f64_const(0.0)
                     }
                     _ => {}
                 }
@@ -27103,6 +27356,7 @@ impl Lowerer {
     }
 
     fn lower_second_order_mean_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        FO_LOGN_ACTIVE = 0
         match *args {
             Some(list) => {
                 // Walk first, so the Hessian and the sigmas exist to read.
@@ -27149,9 +27403,8 @@ impl Lowerer {
                 while oi < 8 {
                     var oj: i64 = oi + 1
                     while oj < 8 {
-                        let rho = fo_cov_rho_get(oi, oj)
                         let hij = lo.so_expr_hess[lo.so_hess_idx(oi, oj) as usize]
-                        if rho != 0.0 && hij >= 0 {
+                        if fo_cov_rho_live(oi, oj) && hij >= 0 {
                             // Inline, for the same reason as the variance cross term: a helper
                             // taking self by value read the SAME sigma for every channel.
                             let ev_i = lo.fo_sigma2[oi as usize]
@@ -27170,7 +27423,7 @@ impl Lowerer {
                                 eci.imm_flags = IR_FLOAT_REG_MARKER_FLAG
                                 lo = lo.emit(eci)
                                 lo = lo.emit(ir_mark_float_reg(esig))
-                                let rp = lo.emit_f64_const(rho)
+                                let rp = lo.fo_emit_rho_reg(oi, oj)
                                 lo = rp.0
                                 let u1 = lo.fresh_reg()
                                 lo = u1.0
@@ -27195,6 +27448,9 @@ impl Lowerer {
                 let vp = lo.lower_expr_ref(&(*list).head)
                 lo = vp.0
                 let mean1 = vp.1
+                if FO_LOGN_ACTIVE != 0 {
+                    return lo.fo_emit_lognormal_mean(FO_LOGN_U, FO_LOGN_V)
+                }
                 let dp = lo.fresh_reg()
                 lo = dp.0
                 let dst = dp.1
