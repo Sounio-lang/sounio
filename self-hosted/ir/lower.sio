@@ -141,6 +141,22 @@ fn empty_lower_fo_bind_table() -> LowerFoBindTable {
     }
 }
 
+// #1706 (KL-11): a pure f64 helper the variance lowering may re-lower inline at
+// a call site, so first-order sensitivities cross the call through the callee's
+// actual arithmetic instead of the narrow transfer-kind table. One node per
+// registered helper, newest first; `def` is a shallow copy (the AST is shared).
+struct FoInlineNode {
+    id: i64,
+    def: FnDef,
+    next: Option<Box<FoInlineNode> >,
+}
+
+var FO_INLINE_DEPTH: i64 = 0
+// Global, like the FO_XFER_* table: a Lowerer is rebuilt per function, so a
+// Lowerer field would not survive from the helper's lowering to its caller's.
+var FO_INLINE_HEAD: Option<Box<FoInlineNode> > = None
+var FO_INLINE_STACK: [i64; 8] = [0; 8]
+
 fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
     let names = lowerer_box_empty_local_name_slots()
     let struct_types = lowerer_box_empty_local_name_slots()
@@ -987,15 +1003,110 @@ fn lower_unit_float_note(n: Name, module_id: i64) with Mut, Panic, Div {
     LOWER_UNIT_FLOAT_COUNT = idx + 1
 }
 
+// #2874 residual: the checker's BUILT-IN units (check/units.sio
+// register_builtin_units, plus mL/L) are f64 quantities too, but only `unit`
+// declarations reached the registry above, so `fn f(x: kg)` lowered `x` as an
+// integer word and read the f64 argument's bits (2.5 -> 4612811918334230528).
+fn lower_builtin_unit_name(n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 || n.len > 6 { return false }
+    ir_name_eq(n, make_name("mg")) || ir_name_eq(n, make_name("g")) || ir_name_eq(n, make_name("kg"))
+        || ir_name_eq(n, make_name("m")) || ir_name_eq(n, make_name("km")) || ir_name_eq(n, make_name("cm"))
+        || ir_name_eq(n, make_name("mm")) || ir_name_eq(n, make_name("s")) || ir_name_eq(n, make_name("ms"))
+        || ir_name_eq(n, make_name("min")) || ir_name_eq(n, make_name("h")) || ir_name_eq(n, make_name("K"))
+        || ir_name_eq(n, make_name("mol")) || ir_name_eq(n, make_name("cm3")) || ir_name_eq(n, make_name("cal"))
+        || ir_name_eq(n, make_name("mg_dL")) || ir_name_eq(n, make_name("mmol_L")) || ir_name_eq(n, make_name("U_L"))
+        || ir_name_eq(n, make_name("mm_h")) || ir_name_eq(n, make_name("mL")) || ir_name_eq(n, make_name("L"))
+}
+
+// A module that declares its own struct/enum/type/unit under a built-in unit's
+// name (`struct K { .. }`) means that declaration, not the unit: such names are
+// recorded here per module and excluded from the built-in rule.
+var LOWER_UNIT_SHADOW_COUNT: i64 = 0
+var LOWER_UNIT_SHADOW_MODULE_ID: [i64; 256] = [0 - 1; 256]
+var LOWER_UNIT_SHADOW_NAME_ID: [i64; 256] = [0; 256]
+var LOWER_UNIT_SHADOW_OVERFLOWED: bool = false
+
+fn lower_unit_shadow_note(n: Name, module_id: i64) with Mut, Panic, Div {
+    if !lower_builtin_unit_name(n) { return }
+    if LOWER_UNIT_SHADOW_COUNT >= 256 {
+        LOWER_UNIT_SHADOW_OVERFLOWED = true
+        return
+    }
+    LOWER_UNIT_SHADOW_MODULE_ID[LOWER_UNIT_SHADOW_COUNT as usize] = module_id
+    LOWER_UNIT_SHADOW_NAME_ID[LOWER_UNIT_SHADOW_COUNT as usize] = ir_intern_name(n)
+    LOWER_UNIT_SHADOW_COUNT = LOWER_UNIT_SHADOW_COUNT + 1
+}
+
+fn lower_unit_shadowed(n: Name, module_id: i64) -> bool with Mut, Panic, Div {
+    // Overflow: be conservative and treat every built-in name as shadowed.
+    if LOWER_UNIT_SHADOW_OVERFLOWED { return true }
+    let id = ir_intern_name(n)
+    var i: i64 = 0
+    while i < LOWER_UNIT_SHADOW_COUNT {
+        if LOWER_UNIT_SHADOW_MODULE_ID[i as usize] == module_id && LOWER_UNIT_SHADOW_NAME_ID[i as usize] == id { return true }
+        i = i + 1
+    }
+    false
+}
+
 fn lower_unit_float_type_known(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeNamed { return false }
     // A namespace prefix is not a declared local unit type.
     if (*te).path.seg_count != 1 { return false }
-    if !lower_unit_float_name_known(ir_path_first_name((*te).path), lower_effective_current_module_id()) { return false }
+    let unit_name = ir_path_first_name((*te).path)
+    let module_id = lower_effective_current_module_id()
+    let builtin = lower_builtin_unit_name(unit_name) && !lower_unit_shadowed(unit_name, module_id)
+    if !builtin && !lower_unit_float_name_known(unit_name, module_id) { return false }
     match (*te).type_args {
         Some(_) => { LOWER_UNIT_FLOAT_OVERFLOWED = true; false }
         None => true,
     }
+}
+
+// #2504: the `.value` kind (lower_type_expr_knowledge_value_float: 1 float,
+// 0 integer, 2 unknown payload) of a struct field declared `Knowledge<T>`,
+// keyed by interned (struct name, field name). Read by
+// field_base_kn_value_float_ref for an `s.k.value` base. Two registrations of
+// the same key with different kinds (two same-named structs in different
+// modules) collapse to -1, the caller's "unknown" answer, rather than letting
+// the last one win.
+var LOWER_KN_FIELD_COUNT: i64 = 0
+var LOWER_KN_FIELD_TYPE: [i64; 2048] = [0; 2048]
+var LOWER_KN_FIELD_NAME: [i64; 2048] = [0; 2048]
+var LOWER_KN_FIELD_KIND: [i64; 2048] = [0; 2048]
+
+fn lower_kn_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeKnowledge { return }
+    let kind = lower_type_expr_knowledge_value_float(ty)
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_KN_FIELD_COUNT {
+        if LOWER_KN_FIELD_TYPE[i as usize] == tid && LOWER_KN_FIELD_NAME[i as usize] == fid {
+            if LOWER_KN_FIELD_KIND[i as usize] != kind { LOWER_KN_FIELD_KIND[i as usize] = 0 - 1 }
+            return
+        }
+        i = i + 1
+    }
+    if LOWER_KN_FIELD_COUNT >= 2048 { return }
+    LOWER_KN_FIELD_TYPE[LOWER_KN_FIELD_COUNT as usize] = tid
+    LOWER_KN_FIELD_NAME[LOWER_KN_FIELD_COUNT as usize] = fid
+    LOWER_KN_FIELD_KIND[LOWER_KN_FIELD_COUNT as usize] = kind
+    LOWER_KN_FIELD_COUNT = LOWER_KN_FIELD_COUNT + 1
+}
+
+fn lower_kn_field_kind(type_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
+    if type_name.len <= 0 { return 0 - 1 }
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_KN_FIELD_COUNT {
+        if LOWER_KN_FIELD_TYPE[i as usize] == tid && LOWER_KN_FIELD_NAME[i as usize] == fid {
+            return LOWER_KN_FIELD_KIND[i as usize]
+        }
+        i = i + 1
+    }
+    0 - 1
 }
 
 var LOWER_USE_MODULE_COUNT: i64 = 0
@@ -1201,6 +1312,32 @@ pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>, module_id: i64) 
                 let item_ref = &(*list).head
                 if item_ref.kind == ItemKind::ItemUnit {
                     lower_unit_float_note(item_ref.name, module_id)
+                }
+                if item_ref.kind == ItemKind::ItemStruct || item_ref.kind == ItemKind::ItemEnum
+                    || item_ref.kind == ItemKind::ItemTypeAlias {
+                    lower_unit_shadow_note(item_ref.name, module_id)
+                }
+                // A struct's generic parameter (`struct Map<K, V>`) is a type
+                // variable, not kelvin: the checker shadows units with in-scope
+                // type parameters (checker_name_is_type_param_in_scope), so do
+                // the same, module-wide.
+                if item_ref.kind == ItemKind::ItemStruct {
+                    match item_ref.struct_def {
+                        Some(sd) => {
+                            var tp = &(*sd).type_params
+                            var more = true
+                            while more {
+                                match *tp {
+                                    Some(tl) => {
+                                        lower_unit_shadow_note((*tl).head.name, module_id)
+                                        tp = &(*tl).tail
+                                    }
+                                    None => { more = false }
+                                }
+                            }
+                        }
+                        None => {}
+                    }
                 }
                 if item_ref.kind == ItemKind::ItemUse {
                     // Records every SUFFIX of the `use` path (the full path,
@@ -2220,6 +2357,9 @@ var LOWER_MONOLITHIC_PUBLIC_PROBE_TRACE: bool = false
 // this instead of a call to a name that binds to nothing (which left its dst vreg
 // unwritten, i.e. reading 0). See lowerer_lower_fn_mut and the ExprCall lowering.
 var LOWER_KERNEL_TID_REG: i64 = 0 - 1
+// #2766: the scrutinee of the match being lowered is a reference local, so a
+// struct-pattern arm reads its fields through the reference (field_get label 1).
+var LOWER_MATCH_SCRUT_IS_REF: bool = false
 
 // Label of the lane-increment block while a `kernel fn` body is lowered; -1
 // outside a kernel. `return` inside a kernel ends THAT LANE, not the launch —
@@ -4177,6 +4317,7 @@ fn lowerer_preseed_external_struct_items_mut(
                                 while keep_going && fc < 128 {
                                     match fcur {
                                         Some(flist) => {
+                                            lower_kn_field_note(head_owned.name, (*flist).head.name, &(*flist).head.ty)
                                             entry.fields[fc as usize] = StructFieldEntry {
                                                 name_id: ir_intern_name((*flist).head.name),
                                                 index: fc,
@@ -4370,6 +4511,7 @@ fn lowerer_preseed_external_items_into_acc_mut(
                                 while keep_going && fc < 128 {
                                     match fcur {
                                         Some(flist) => {
+                                            lower_kn_field_note(head_owned.name, (*flist).head.name, &(*flist).head.ty)
                                             entry.fields[fc as usize] = StructFieldEntry {
                                                 name_id: ir_intern_name((*flist).head.name),
                                                 index: fc,
@@ -4458,6 +4600,7 @@ fn lowerer_register_struct_fields_direct_mut(
     while keep_going && fc < 128 {
         match *fcur {
             Some(flist) => {
+                lower_kn_field_note(type_name, (*flist).head.name, &(*flist).head.ty)
                 entry.fields[fc as usize] = StructFieldEntry {
                     name_id: ir_intern_name((*flist).head.name),
                     index: fc,
@@ -4520,6 +4663,7 @@ fn lowerer_register_struct_fields_mut(
                 }
                 let fc = (*(*lo).struct_layouts).entries[layout_idx as usize].field_count
                 if fc < 128 {
+                    lower_kn_field_note(type_name, (*list).head.name, &(*list).head.ty)
                     (*(*lo).struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
                         name_id: ir_intern_name((*list).head.name),
                         index: field_idx,
@@ -5487,6 +5631,7 @@ fn ir_fast_summary_register_struct_fields_owned(
                 // the lean_single by-value-aggregate miscompile, so the field never lands
                 // and field-index resolution later falls back to a name hash (OOB access).
                 // Build in a local entry, then assign it back once (single level).
+                lower_kn_field_note(type_name, (*list).head.name, &(*list).head.ty)
                 var lay_entry = table_value.entries[layout_idx as usize]
                 lay_entry.fields[fc as usize] = StructFieldEntry {
                     name_id: ir_intern_name((*list).head.name),
@@ -6659,6 +6804,64 @@ fn lowerer_rgn_body_worth_region(lo: &! Lowerer, first: i64, end: i64) -> bool w
     allocs >= 2 || (allocs >= 1 && jumps >= 1)
 }
 
+// #2355: evaluate, at `main`'s entry, every closed module-level initializer
+// the parser could not fold into BSS fill words (parser/ast.sio
+// ast_record_global_deferred_init; parser/items.sio items_expr_is_closed) --
+// above all struct literals, which used to be dropped, leaving a struct
+// global's handle slot at 0 so that any field access dereferenced handle 0.
+// lean_single has always evaluated global initializers at main's entry
+// (emit_global_inits_x86). Slots are
+// visited in BSS order, which is declaration order, so an initializer may read
+// a global declared above it. A name declared in several modules shares one
+// BSS slot (lowerer_preseed_external_bss_globals_mut dedups by name); the
+// first module's initializer wins, as for the folded words
+// (ast_global_var_init_count).
+fn lowerer_emit_deferred_global_inits_mut(lo: &! Lowerer) with Mut, Panic, Div, Alloc, IO {
+    let total = ast_global_deferred_init_count()
+    if ast_global_deferred_init_overflowed() {
+        print("error: more than 16384 module-level initializers need run-time evaluation; the rest would be left zero, so the compile is refused (#2355)\n")
+        lowerer_mark_hard_error(lo)
+        return
+    }
+    if total <= 0 && ast_global_decl_type_count() <= 0 { return }
+    var fi: i64 = 0
+    while fi < (*(*lo).module).fn_count {
+        let slot = ir_fn_get(&(*(*lo).module), fi)
+        if slot.compile_strategy == IR_STRATEGY_BSS_GLOBAL && slot.name.len > 0 {
+            let h = ast_name_hash(slot.name)
+            var k: i64 = 0
+            var found: i64 = 0 - 1
+            while k < total && found < 0 {
+                if ast_global_deferred_init_hash(k) == h {
+                    found = k
+                }
+                k = k + 1
+            }
+            if found >= 0 {
+                let p = ast_global_deferred_init_ptr(found) as *mut Expr
+                if p != (0 as *mut Expr) {
+                    let pair = (*lo).lower_expr_ref(&(*p))
+                    (*lo) = pair.0
+                    (*lo) = (*lo).emit(ir_store_global(pair.1, slot.param_count, slot.name))
+                }
+            } else if slot.returns_float != 1 {
+                // `var G: S` with no initializer: give it a zeroed struct, as
+                // `var s: S` gets for a local (#2667-repeat), instead of handle 0.
+                let st = (*lo).global_struct_type_name(slot.name)
+                if st.len > 0 {
+                    let slots = (*lo).struct_layout_slot_count(st)
+                    if slots > 0 {
+                        let dst = lowerer_fresh_reg_mut(lo)
+                        (*lo) = (*lo).emit(ir_alloc(dst, (*lo).aggregate_storage_bytes(slots)))
+                        (*lo) = (*lo).emit(ir_store_global(dst, slot.param_count, slot.name))
+                    }
+                }
+            }
+        }
+        fi = fi + 1
+    }
+}
+
 fn lowerer_lower_fn_item_mut(
     lo: &! Lowerer,
     name: Name,
@@ -6952,6 +7155,9 @@ lower_rss_mark("before_block")
     var rgn_type = ir_empty_name()
     var rgn_enter_idx: i64 = 0 - 1
     var rgn_tok: i64 = 0 - 1
+    if lowerer_name_is_main(name) && !fd.is_kernel && !fd.is_extern {
+        lowerer_emit_deferred_global_inits_mut(lo)
+    }
     var result_reg = lowerer_try_canonical_hello_block_mut(lo, &fd.body)
     if result_reg == IR_INVALID_REG {
         if lower_rgn_enabled() && (*(*lo).module).fn_count <= IR_MAX_FUNCS - 10
@@ -9079,11 +9285,99 @@ fn lower_expr_list_relower_safe(opt: &Option<Box<ExprList>>) -> bool with Mut, P
 
 // Like !lower_expr_contains_call_ref, but a call to a pure math builtin with
 // re-lower-safe arguments is still safe to evaluate twice.
+// #1706: true when evaluating `e` may take an `if` whose condition is not a
+// bool literal. The if-expression variance rule picks an arm at COMPILE time
+// (then-arm first), so through an inlined helper body like
+// `if n < 0.5 { x } else { g(1.1 * x) }` it would report a confident wrong
+// value; such helpers are not inlined (the call keeps its previous -1).
+fn fo_expr_has_runtime_if(e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 64 { return true }
+    let k = (*e).kind
+    if k == ExprKind::ExprIf {
+        match (*e).left {
+            Some(c) => {
+                if (*c).kind != ExprKind::ExprBoolTrue && (*c).kind != ExprKind::ExprBoolFalse { return true }
+            }
+            None => { return true }
+        }
+        if fo_block_has_runtime_if(&(*e).block, depth + 1) { return true }
+        match (*e).else_expr {
+            Some(ee) => { return fo_expr_has_runtime_if(&(*ee), depth + 1) }
+            None => { return false }
+        }
+    }
+    if k == ExprKind::ExprBlock {
+        return fo_block_has_runtime_if(&(*e).block, depth + 1)
+    }
+    if k == ExprKind::ExprMatch || k == ExprKind::ExprWhile || k == ExprKind::ExprLoop || k == ExprKind::ExprForIn
+        || k == ExprKind::ExprClosure || k == ExprKind::ExprHandle {
+        return true
+    }
+    match (*e).left {
+        Some(l) => { if fo_expr_has_runtime_if(&(*l), depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).right {
+        Some(r) => { if fo_expr_has_runtime_if(&(*r), depth + 1) { return true } }
+        None => {}
+    }
+    var ac = &(*e).args
+    while true {
+        match *ac {
+            Some(al) => {
+                if fo_expr_has_runtime_if(&(*al).head, depth + 1) { return true }
+                ac = &(*al).tail
+            }
+            None => break
+        }
+    }
+    false
+}
+
+fn fo_block_has_runtime_if(blk_opt: &Option<Box<Block>>, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    match *blk_opt {
+        Some(blk) => {
+            var sc = &(*blk).stmts
+            while true {
+                match *sc {
+                    Some(sl) => {
+                        match (*sl).head.expr {
+                            Some(se) => { if fo_expr_has_runtime_if(&(*se), depth + 1) { return true } }
+                            None => {}
+                        }
+                        sc = &(*sl).tail
+                    }
+                    None => break
+                }
+            }
+            false
+        }
+        None => false,
+    }
+}
+
+// #1706: a helper registered for inline FO declares no IO/Mut/Alloc effect
+// (fo_inline_note), so calling it twice is as safe as a pure math builtin.
+fn fo_inline_known(n: Name) -> bool with Mut, Panic, Div, Alloc {
+    let id = ir_intern_name(n)
+    var cur = FO_INLINE_HEAD
+    while true {
+        match cur {
+            Some(node) => {
+                if (*node).id == id { return true }
+                cur = (*node).next
+            }
+            None => break
+        }
+    }
+    false
+}
+
 fn lower_expr_relower_safe_ref(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
     if (*e).kind == ExprKind::ExprCall {
         match (*e).left {
             Some(callee) => {
-                if (*callee).kind == ExprKind::ExprIdent && lower_name_is_pure_math_builtin((*callee).name) {
+                if (*callee).kind == ExprKind::ExprIdent && (lower_name_is_pure_math_builtin((*callee).name) || fo_inline_known((*callee).name)) {
                     return lower_expr_list_relower_safe(&(*e).args)
                 }
             }
@@ -9112,6 +9406,50 @@ fn lower_expr_is_f64_array_literal_ref(e: &Expr) -> bool with Mut, Panic, Div {
             }
         }
     }
+}
+
+// #2354: scalar kind of a generic struct field, PER INSTANCE. `struct Pair<T>
+// { first: T }` registers one layout for every instantiation, so the field's
+// declared type says nothing about `Pair { first: 10 }` vs `Pair { first: 1.5 }`
+// -- println(p.first) was refused ("unresolved scalar kind"), and once any
+// literal stored a float the shared layout called every instance's field f64.
+// A `let` bound to a struct literal records each type-variable field's kind
+// (1 int, 2 f64, 3 string) here, keyed by the function, the local's register
+// and the field; field reads through that local consult it first.
+var LOWER_GFK_COUNT: i64 = 0
+var LOWER_GFK_FN: [i64; 1024] = [0; 1024]
+var LOWER_GFK_REG: [i64; 1024] = [0; 1024]
+var LOWER_GFK_FIELD: [i64; 1024] = [0; 1024]
+var LOWER_GFK_KIND: [i64; 1024] = [0; 1024]
+
+fn lower_gfk_note(fn_key: i64, reg: i64, field_key: i64, kind: i64) with Mut, Panic {
+    var i: i64 = 0
+    while i < LOWER_GFK_COUNT {
+        if LOWER_GFK_FN[i as usize] == fn_key && LOWER_GFK_REG[i as usize] == reg && LOWER_GFK_FIELD[i as usize] == field_key {
+            LOWER_GFK_KIND[i as usize] = kind
+            return
+        }
+        i = i + 1
+    }
+    // Full: forget the oldest half rather than refuse; a missing entry only
+    // means the old (layout-based) classification is used for that read.
+    if LOWER_GFK_COUNT >= 1024 { LOWER_GFK_COUNT = 0 }
+    LOWER_GFK_FN[LOWER_GFK_COUNT as usize] = fn_key
+    LOWER_GFK_REG[LOWER_GFK_COUNT as usize] = reg
+    LOWER_GFK_FIELD[LOWER_GFK_COUNT as usize] = field_key
+    LOWER_GFK_KIND[LOWER_GFK_COUNT as usize] = kind
+    LOWER_GFK_COUNT = LOWER_GFK_COUNT + 1
+}
+
+fn lower_gfk_lookup(fn_key: i64, reg: i64, field_key: i64) -> i64 with Mut, Panic {
+    var i: i64 = LOWER_GFK_COUNT - 1
+    while i >= 0 {
+        if LOWER_GFK_FN[i as usize] == fn_key && LOWER_GFK_REG[i as usize] == reg && LOWER_GFK_FIELD[i as usize] == field_key {
+            return LOWER_GFK_KIND[i as usize]
+        }
+        i = i - 1
+    }
+    0
 }
 
 fn lower_struct_field_float_kind_ref(e: &Expr) -> i64 with Mut, Panic, Div {
@@ -10704,7 +11042,16 @@ impl Lowerer {
     // scalars (`[Struct; N]`), Box, Knowledge, reference locals and BSS globals
     // keep the handle.
     fn emit_ident_aggregate_value_copy(self, name: Name, reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        if self.lookup_local(name) < 0 { return (self, reg) }
+        if self.lookup_local(name) < 0 {
+            // #2355: `x = G` / `G2 = G` from a struct-typed module global copies
+            // too, as lean_single does; storing the handle aliased the global.
+            let global_st = self.global_struct_type_name(name)
+            if global_st.len <= 0 { return (self, reg) }
+            if !self.struct_local_is_value_copyable(name, global_st) { return (self, reg) }
+            let global_slots = self.struct_layout_slot_count(global_st)
+            if global_slots <= 0 { return (self, reg) }
+            return self.emit_struct_value_copy_budgeted(reg, global_st, global_slots)
+        }
         if self.lookup_local_is_global(name) { return (self, reg) }
         let arr_len = self.lookup_local_fixed_array_len(name)
         if arr_len >= 0 {
@@ -10737,6 +11084,14 @@ impl Lowerer {
     //               straight at the epistemic gates.
     //   is_ref    — `&T` / `&!T` locals: aliasing is what a reference MEANS.
     //   is_global — BSS-backed globals use their own addressing.
+    // Struct type of an identifier used as a value: the local's, else (#2355)
+    // the declared type of a struct-typed module global.
+    fn ident_value_struct_type(self, name: Name) -> Name with Mut, Panic, Div, Alloc {
+        let local_st = self.lookup_local_struct_type(name)
+        if local_st.len > 0 { return local_st }
+        self.global_struct_type_name(name)
+    }
+
     fn struct_local_is_value_copyable(self, name: Name, type_name: Name) -> bool with Mut, Panic, Div, Alloc {
         if type_name.len <= 0 { return false }
         if ir_name_is_box(type_name) { return false }
@@ -12702,6 +13057,40 @@ impl Lowerer {
         lo
     }
 
+    // #2827: move the expression's sensitivity on the channel whose σ² register IS
+    // `slot` (a local's loop-carried variance slot, about to be overwritten by an
+    // assignment) onto a fresh channel whose σ² is a copy of the slot's current
+    // value. The slot's own channel stays registered, so later reads of the local
+    // still seed from the updated slot. When the channel table is full, or the
+    // second-order tables are live (they index channels positionally), the
+    // expression's sens is dropped instead: later uses then fall back to the
+    // local's slot variance, which is correct for an independent use.
+    fn fo_detach_self_channel(self, slot: i64) -> Lowerer with Mut, Panic, Div, IO {
+        var lo = self
+        if slot < 0 { return lo }
+        var k: i64 = 0
+        while k < lo.fo_nchan && k < 32 {
+            if lo.fo_sigma2[k as usize] == slot && lo.fo_expr_sens[k as usize] >= 0 {
+                if lo.so_enabled || lo.fo_nchan >= 32 {
+                    return lo.fo_clear_expr_sens().so_clear_expr_hess()
+                }
+                let snap_pair = lo.fresh_reg()
+                lo = snap_pair.0
+                let snap = snap_pair.1
+                lo = lo.emit(ir_copy(snap, slot))
+                lo = lo.emit(ir_mark_float_reg(snap))
+                let ch = lo.fo_nchan
+                lo.fo_sigma2[ch as usize] = snap
+                FO_SIGMA_REG[ch as usize] = 0 - 1
+                lo.fo_nchan = ch + 1
+                lo.fo_expr_sens[ch as usize] = lo.fo_expr_sens[k as usize]
+                lo.fo_expr_sens[k as usize] = 0 - 1
+            }
+            k = k + 1
+        }
+        lo
+    }
+
     fn fo_snapshot_expr_sens(self) -> [i64; 32] with Mut {
         var snap: [i64; 32] = [-1; 32]
         var k: i64 = 0
@@ -13196,7 +13585,7 @@ impl Lowerer {
 
     // Classify pure helper body and record FO transfer (id / scale / add / mul / fwd).
     fn fo_register_pure_fn_transfer(self, name: Name, fd: &FnDef) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        var lo = self
+        var lo = self.fo_inline_note(name, fd)
         // Collect up to 2 param names.
         var p0 = ir_empty_name()
         var p1 = ir_empty_name()
@@ -15525,6 +15914,282 @@ impl Lowerer {
         self.variance_field_chain_base_of_parent(e, 0)
     }
 
+    // #1706: remember `fd` for inline FO when it is a pure f64 helper: every
+    // parameter and the return are f64, it is neither extern nor a kernel, and it
+    // declares no effect beyond Div/Panic/Epistemic (re-lowering its body at a
+    // call site must not repeat IO, mutation or allocation).
+    fn fo_inline_note(self, name: Name, fd: &FnDef) -> Lowerer with Mut, Panic, Div, Alloc {
+        var lo = self
+        if (*fd).is_extern || (*fd).is_kernel { return lo }
+        match (*fd).return_type {
+            Some(rt) => { if !lower_type_expr_is_f64(&(*rt)) { return lo } }
+            None => { return lo }
+        }
+        var pc = &(*fd).params
+        var nparams: i64 = 0
+        while true {
+            match *pc {
+                Some(pl) => {
+                    if (*pl).head.is_self || !lower_type_expr_is_f64(&(*pl).head.ty) { return lo }
+                    nparams = nparams + 1
+                    pc = &(*pl).tail
+                }
+                None => break
+            }
+        }
+        if nparams <= 0 || nparams > 16 { return lo }
+        var ec = &(*fd).effects
+        while true {
+            match *ec {
+                Some(el) => {
+                    let en = Name { buf: [0; 384], len: 0 }
+                    var eff = en
+                    var j: i64 = 0
+                    while j < (*el).head.name_len && j < 64 {
+                        eff.buf[j as usize] = (*el).head.name_buf[j as usize]
+                        j = j + 1
+                    }
+                    eff.len = j
+                    // Mut is admitted: with f64 by-value parameters the only
+                    // mutation a body could do is through an assignment or a
+                    // call, and fo_inline_call_variance re-lowers neither (it
+                    // stops at any statement that is not a `let` with a
+                    // re-lower-safe right-hand side, or the tail).
+                    if !(ir_name_eq(eff, make_name("Div")) || ir_name_eq(eff, make_name("Panic"))
+                        || ir_name_eq(eff, make_name("Epistemic")) || ir_name_eq(eff, make_name("Mut"))) {
+                        return lo
+                    }
+                    ec = &(*el).tail
+                }
+                None => break
+            }
+        }
+        var bc = &(*fd).body.stmts
+        while true {
+            match *bc {
+                Some(bl) => {
+                    match (*bl).head.expr {
+                        Some(be) => { if fo_expr_has_runtime_if(&(*be), 0) { return lo } }
+                        None => {}
+                    }
+                    bc = &(*bl).tail
+                }
+                None => break
+            }
+        }
+        let id = ir_intern_name(name)
+        var cur = FO_INLINE_HEAD
+        while true {
+            match cur {
+                Some(node) => {
+                    if (*node).id == id { return lo }
+                    cur = (*node).next
+                }
+                None => break
+            }
+        }
+        FO_INLINE_HEAD = Some(Box::new(FoInlineNode { id: id, def: *fd, next: FO_INLINE_HEAD }))
+        lo
+    }
+
+    // #1706: variance of `callee(args)` by re-lowering the callee's body in the
+    // caller with each parameter bound to its argument's value, variance and
+    // first-order sensitivities. Channels are the caller's, so correlation with
+    // the caller's other uses of the same measurements is kept. Only a body made
+    // of `let` statements and a tail expression (optionally `return e`) is
+    // handled; anything else, a recursive or too-deep call, or an argument that
+    // is not safe to evaluate twice returns -1 (the previous "no variance").
+    fn fo_inline_call_variance(self, callee: Name, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if lo.so_enabled || FO_INLINE_DEPTH >= 6 { return (lo, 0 - 1) }
+        if !lower_expr_list_relower_safe(args) { return (lo, 0 - 1) }
+        let id = ir_intern_name(callee)
+        var d: i64 = 0
+        while d < FO_INLINE_DEPTH {
+            if FO_INLINE_STACK[d as usize] == id { return (lo, 0 - 1) }
+            d = d + 1
+        }
+        var found = false
+        var fd = FnDef {
+            name: ir_empty_name(),
+            params: None,
+            return_type: None,
+            effects: None,
+            body: Block { stmts: None, span: Span { file_id: 0, start: 0, end: 0 } },
+            span: Span { file_id: 0, start: 0, end: 0 },
+            is_kernel: false,
+            is_extern: false,
+        }
+        var cur = FO_INLINE_HEAD
+        while !found {
+            match cur {
+                Some(node) => {
+                    if (*node).id == id {
+                        fd = (*node).def
+                        found = true
+                    } else {
+                        cur = (*node).next
+                    }
+                }
+                None => break
+            }
+        }
+        if !found { return (lo, 0 - 1) }
+        // Arity must match exactly.
+        var nargs: i64 = 0
+        var ac = args
+        while true {
+            match *ac {
+                Some(al) => { nargs = nargs + 1; ac = &(*al).tail }
+                None => break
+            }
+        }
+        var nparams: i64 = 0
+        var pc0 = &fd.params
+        while true {
+            match *pc0 {
+                Some(pl) => { nparams = nparams + 1; pc0 = &(*pl).tail }
+                None => break
+            }
+        }
+        if nargs != nparams || nargs > 16 { return (lo, 0 - 1) }
+        // Each argument's value, variance and sensitivities, in the caller.
+        var vals: [i64; 16] = [0 - 1; 16]
+        var vars: [i64; 16] = [0 - 1; 16]
+        var sens: [i64; 512] = [0 - 1; 512]
+        var i: i64 = 0
+        ac = args
+        while true {
+            match *ac {
+                Some(al) => {
+                    let vp = lo.lower_expr_ref(&(*al).head)
+                    lo = vp.0
+                    vals[i as usize] = vp.1
+                    let wp = lo.lower_expr_variance_ref(&(*al).head)
+                    lo = wp.0
+                    var v = wp.1
+                    if v < 0 {
+                        if lo.fo_expr_has_sens() {
+                            let ep = lo.fo_emit_var_from_sens()
+                            lo = ep.0
+                            v = ep.1
+                        } else {
+                            let zp = lo.fo_clear_expr_sens().emit_zero_variance()
+                            lo = zp.0
+                            v = zp.1
+                        }
+                    }
+                    vars[i as usize] = v
+                    var k: i64 = 0
+                    while k < 32 {
+                        sens[(i * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
+                        k = k + 1
+                    }
+                    i = i + 1
+                    ac = &(*al).tail
+                }
+                None => break
+            }
+        }
+        // Bind the parameters in a fresh scope; the FO bind rows are keyed by
+        // name only, so they are saved and restored around the body.
+        let saved_bind = *lo.fo_bind
+        let saved_bind_count = lo.fo_bind_count
+        let saved_locals = (*lo.locals).count
+        lo.scope_depth = lo.scope_depth + 1
+        FO_INLINE_STACK[FO_INLINE_DEPTH as usize] = id
+        FO_INLINE_DEPTH = FO_INLINE_DEPTH + 1
+        var pc = &fd.params
+        i = 0
+        while true {
+            match *pc {
+                Some(pl) => {
+                    let pname = (*pl).head.name
+                    lo = lo.bind_local(pname, vals[i as usize], false)
+                    lo = lo.bind_local_scalar_kind(pname, 2)
+                    lo = lo.bind_local_variance_reg(pname, vars[i as usize])
+                    var k2: i64 = 0
+                    while k2 < 32 {
+                        lo.fo_expr_sens[k2 as usize] = sens[(i * 32 + k2) as usize]
+                        k2 = k2 + 1
+                    }
+                    lo = lo.fo_bind_local_sens(pname)
+                    i = i + 1
+                    pc = &(*pl).tail
+                }
+                None => break
+            }
+        }
+        var result: i64 = 0 - 1
+        var ok = true
+        var sc = &fd.body.stmts
+        while ok {
+            match *sc {
+                Some(sl) => {
+                    let st = &(*sl).head
+                    var is_last = false
+                    match (*sl).tail {
+                        Some(_) => { is_last = false }
+                        None => { is_last = true }
+                    }
+                    if st.kind == StmtKind::StmtLet && !is_last {
+                        if !lower_opt_expr_relower_safe(&st.expr) {
+                            ok = false
+                        } else {
+                            let lp = lo.lower_let_stmt_ref(st, false)
+                            lo = lp.0
+                        }
+                    } else if st.kind == StmtKind::StmtExpr && is_last {
+                        match st.expr {
+                            Some(te) => {
+                                if (*te).kind == ExprKind::ExprReturn {
+                                    match (*te).left {
+                                        Some(rv) => {
+                                            let rp = lo.lower_expr_variance_ref(&(*rv))
+                                            lo = rp.0
+                                            result = rp.1
+                                        }
+                                        None => { ok = false }
+                                    }
+                                } else {
+                                    let rp2 = lo.lower_expr_variance_ref(&(*te))
+                                    lo = rp2.0
+                                    result = rp2.1
+                                }
+                            }
+                            None => { ok = false }
+                        }
+                    } else {
+                        ok = false
+                    }
+                    sc = &(*sl).tail
+                }
+                None => break
+            }
+        }
+        if ok && result < 0 && lo.fo_expr_has_sens() {
+            let ep2 = lo.fo_emit_var_from_sens()
+            lo = ep2.0
+            result = ep2.1
+        }
+        var out_sens: [i64; 32] = [0 - 1; 32]
+        var k3: i64 = 0
+        while k3 < 32 {
+            out_sens[k3 as usize] = lo.fo_expr_sens[k3 as usize]
+            k3 = k3 + 1
+        }
+        FO_INLINE_DEPTH = FO_INLINE_DEPTH - 1
+        lo.scope_depth = lo.scope_depth - 1
+        (*lo.locals).count = saved_locals
+        lo.fo_bind = Box::new(saved_bind)
+        lo.fo_bind_count = saved_bind_count
+        if !ok || result < 0 {
+            return (lo.fo_clear_expr_sens().so_clear_expr_hess(), 0 - 1)
+        }
+        lo = lo.fo_restore_expr_sens(out_sens)
+        (lo, result)
+    }
+
     fn lower_call_expr_variance_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match (*e).left {
             Some(callee_expr) => {
@@ -15551,7 +16216,12 @@ impl Lowerer {
                 if lo_x.fo_expr_has_sens() {
                     return lo_x.fo_emit_var_from_sens()
                 }
-                return (lo_x.fo_clear_expr_sens().so_clear_expr_hess(), -1)
+                // #1706: not in the transfer table -- re-lower a pure helper inline.
+                let inl = lo_x.fo_inline_call_variance(callee_name, &(*e).args)
+                if inl.1 >= 0 {
+                    return inl
+                }
+                return (inl.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
             }
             _ => {}
         }
@@ -15594,7 +16264,11 @@ impl Lowerer {
                     if lo_x.fo_expr_has_sens() {
                         return lo_x.fo_emit_var_from_sens()
                     }
-                    return (lo_x.fo_clear_expr_sens().so_clear_expr_hess(), -1)
+                    let inl = lo_x.fo_inline_call_variance(callee_name, &(*e).args)
+                    if inl.1 >= 0 {
+                        return inl
+                    }
+                    return (inl.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                 }
                 _ => {}
             }
@@ -15969,10 +16643,22 @@ impl Lowerer {
                 var lo = self
                 var last_v: i64 = -1
                 var found = false
+                // #1706: an arm's own `let`s must be bound before its tail is
+                // read (`if c { let two = 2.0; two * x } else { x }` reached the
+                // tail with `two` unresolved once callee bodies are re-lowered
+                // inline). Scoped like lower_block_ref.
+                lo.scope_depth = lo.scope_depth + 1
+                let saved_tail_locals = (*lo.locals).count
                 while true {
                     match *current {
                         Some(list) => {
                             let stmt_ref = &(*list).head
+                            // Only a let that is safe to evaluate twice: the value
+                            // path has already run this arm once.
+                            if stmt_ref.kind == StmtKind::StmtLet && lower_opt_expr_relower_safe(&stmt_ref.expr) {
+                                let lp = lo.lower_let_stmt_ref(stmt_ref, false)
+                                lo = lp.0
+                            }
                             if stmt_ref.kind == StmtKind::StmtExpr {
                                 match stmt_ref.expr {
                                     Some(te) => {
@@ -15989,6 +16675,8 @@ impl Lowerer {
                         _ => break
                     }
                 }
+                lo.scope_depth = lo.scope_depth - 1
+                (*lo.locals).count = saved_tail_locals
                 if found {
                     (lo, last_v)
                 } else {
@@ -16799,6 +17487,84 @@ impl Lowerer {
         ir_empty_name()
     }
 
+    // #2354: is this field's declared type a struct TYPE VARIABLE (`first: T`)?
+    // Declared word scalars, f64 arrays, pointer and integer markers, strings and
+    // registered structs are not.
+    fn field_decl_is_type_variable_for_struct(self, type_name: Name, field_name: Name) -> bool with Mut, Panic, Div {
+        if type_name.len <= 0 { return false }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    let fe = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
+                    if ir_name_eq(ir_name_at(fe.name_id), field_name) {
+                        if fe.decl_word_scalar != 0 { return false }
+                        if fe.is_float == 2 || fe.is_float == 3 || fe.is_float == 4 { return false }
+                        if fe.word_scalar_array_len > 0 || fe.elem_type_name_id != 0 { return false }
+                        let nt = ir_name_at(fe.named_type_name_id)
+                        if nt.len <= 0 { return false }
+                        if lower_name_is_string_type(nt) || lower_name_is_integer_type(nt)
+                            || lower_name_is_bool_type(nt) || lower_name_is_f64_scalar_type(nt)
+                            || lower_name_is_wide_float_type(nt) || ir_name_is_box(nt) {
+                            return false
+                        }
+                        return lower_struct_layout_index_of(&(*self.struct_layouts), nt) < 0
+                    }
+                    fi = fi + 1
+                }
+                return false
+            }
+            si = si + 1
+        }
+        false
+    }
+
+    fn gfk_fn_key(self) -> i64 with Mut, Panic, Div {
+        ir_intern_name((*self.current_func).name)
+    }
+
+    // #2354: the recorded per-instance kind of `base.field` (0 = none).
+    fn field_instance_kind_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base_expr) => {
+                if (*base_expr).kind != ExprKind::ExprIdent { return 0 }
+                let reg = self.lookup_local((*base_expr).name)
+                if reg < 0 { return 0 }
+                let st = self.lookup_local_struct_type((*base_expr).name)
+                if !self.field_decl_is_type_variable_for_struct(st, field_name) { return 0 }
+                lower_gfk_lookup(self.gfk_fn_key(), reg, ir_intern_name(field_name))
+            }
+            _ => 0,
+        }
+    }
+
+    // #2354: `let p = S { f: v, .. }` -- note v's scalar kind for each
+    // type-variable field f of S, against p's register.
+    fn note_struct_literal_instance_kinds_ref(self, local_name: Name, lit: &Expr) -> Lowerer with Mut, Panic, Div, Alloc {
+        let lo = self
+        if (*lit).kind != ExprKind::ExprStructLit { return lo }
+        let st = ir_path_first_name((*lit).path)
+        let reg = lo.lookup_local(local_name)
+        if reg < 0 || st.len <= 0 { return lo }
+        var cur = &(*lit).fields
+        while true {
+            match *cur {
+                Some(list) => {
+                    if lo.field_decl_is_type_variable_for_struct(st, (*list).head.name) {
+                        let k = lo.expr_result_scalar_kind_ref(&(*list).head.value)
+                        if k == 1 || k == 2 || k == 3 {
+                            lower_gfk_note(lo.gfk_fn_key(), reg, ir_intern_name((*list).head.name), k)
+                        }
+                    }
+                    cur = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        lo
+    }
+
     fn field_named_type_for_struct(self, type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
         if type_name.len <= 0 { return ir_empty_name() }
         var si: i64 = 0
@@ -16933,7 +17699,7 @@ impl Lowerer {
         match *base_opt {
             Some(base_expr) => {
                 if (*base_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*base_expr).name)
+                    let type_name = self.ident_value_struct_type((*base_expr).name)
                     return self.field_is_pointer_for_struct(type_name, field_name)
                 }
                 false
@@ -16995,6 +17761,17 @@ impl Lowerer {
                             return (*(*self.locals).kn_value_float).values[i as usize]
                         }
                         i = i - 1
+                    }
+                }
+                // #2504: `s.k.value` where the struct field `k` is declared
+                // `Knowledge<T>`: the field's declared T decides, not the f64 default.
+                if (*be).kind == ExprKind::ExprFieldAccess {
+                    match (*be).left {
+                        Some(owner) => {
+                            let owner_ty = self.expr_receiver_struct_type_ref(&(*owner))
+                            return lower_kn_field_kind(owner_ty, (*be).name)
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -17199,9 +17976,45 @@ impl Lowerer {
     // Receiver layout for a field access. Array indexing preserves the element
     // layout, including an array reached through another field access such as
     // `candidates[0].buffers[0]`.
+    // #2355: declared struct type of a module-level global, for a name that is
+    // NOT a local (a local of the same name shadows it). Globals are never bound
+    // as locals, so lookup_local_struct_type answered empty for `G` in `G.f`, and
+    // every field classifier fell back to "unknown owner": an `[f64; N]` field's
+    // element was read as raw integer bits (`G.values[1] - 1.0` -> 4.6e18 or a
+    // crash), and the slot index was guessed by field name across all structs.
+    fn global_struct_type_name(self, name: Name) -> Name with Mut, Panic, Div, Alloc {
+        let th = ast_global_decl_type_hash_of(name)
+        if th == 0 { return ir_empty_name() }
+        if self.lookup_local(name) >= 0 { return ir_empty_name() }
+        let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, name)
+        if fn_id < 0 || fn_id >= self.module.fn_count { return ir_empty_name() }
+        if ir_fn_get(&(*self.module), fn_id).compile_strategy != IR_STRATEGY_BSS_GLOBAL { return ir_empty_name() }
+        // Exactly one registered layout must carry that name hash; two distinct
+        // names on one hash resolve to nothing rather than to a guess.
+        var found = ir_empty_name()
+        var hits: i64 = 0
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            let tn = (*self.struct_layouts).entries[si as usize].type_name
+            if ast_name_hash(tn) == th {
+                if hits == 0 {
+                    found = tn
+                    hits = 1
+                } else if !ir_name_eq(found, tn) {
+                    hits = hits + 1
+                }
+            }
+            si = si + 1
+        }
+        if hits != 1 { return ir_empty_name() }
+        found
+    }
+
     fn expr_receiver_struct_type_ref(self, expr: &Expr) -> Name with Mut, Panic, Div, Alloc {
         if (*expr).kind == ExprKind::ExprIdent {
-            return self.lookup_local_struct_type((*expr).name)
+            let local_st = self.lookup_local_struct_type((*expr).name)
+            if local_st.len > 0 { return local_st }
+            return self.global_struct_type_name((*expr).name)
         }
         // Copilot review (PR #2516), round 11: this resolver had no arm for
         // ExprStructLit/ExprIf/ExprMatch/ExprBlock owners, so
@@ -17939,6 +18752,9 @@ impl Lowerer {
             return false
         }
         if (*e).kind == ExprKind::ExprFieldAccess {
+            // #2354: per-instance kind of a generic field, before the shared layout.
+            let gfk_f = self.field_instance_kind_for_base_ref(&(*e).left, (*e).name)
+            if gfk_f != 0 { return gfk_f == 2 }
             // #1502: a tuple slot (`s.1`) is NOT a named struct field -- both lookups
             // below resolve by name against struct_layouts, so "1" matched nothing and
             // an f64 slot was misclassified as integer. Consult the tuple mask first.
@@ -18610,6 +19426,9 @@ impl Lowerer {
             }
         }
         if (*e).kind == ExprKind::ExprFieldAccess {
+            // #2354: a generic field read through a literal-bound local.
+            let gfk = self.field_instance_kind_for_base_ref(&(*e).left, (*e).name)
+            if gfk != 0 { return gfk }
             // V0-E.5.5: an f128 field reads as a wide-float handle.
             if self.lower_field_is_f128_ref(&(*e).left, (*e).name) { return 5 }
             // #2504: `.value` of a Knowledge<integer> local is an integer word.
@@ -21213,7 +22032,7 @@ impl Lowerer {
                         let array_copy_pair = lo.emit_fixed_array_value_copy(reg, fixed_array_len, rhs_array_elem_is_float)
                         lo = array_copy_pair.0
                         bind_reg = array_copy_pair.1
-                    } else if fixed_array_len < 0 && lo.struct_local_is_value_copyable((*rhs_ident).name, lo.lookup_local_struct_type((*rhs_ident).name)) && lo.struct_layout_slot_count(lo.lookup_local_struct_type((*rhs_ident).name)) > 0 {
+                    } else if fixed_array_len < 0 && lo.struct_local_is_value_copyable((*rhs_ident).name, lo.ident_value_struct_type((*rhs_ident).name)) && lo.struct_layout_slot_count(lo.ident_value_struct_type((*rhs_ident).name)) > 0 {
                         // #1475: a struct handle is a POINTER to arena storage, so the
                         // ir_copy below copies the HANDLE and `var p2 = p1` aliases —
                         // `p2.x = 99` was observable through `p1.x`, silently, exit 0.
@@ -21238,7 +22057,7 @@ impl Lowerer {
                         // how a new miscompile class gets born. Those fields keep the
                         // shared handle and are reported as still broken, consistent with
                         // the #1475 carve-out for `[Struct;N]` LOCALS.
-                        let st_name = lo.lookup_local_struct_type((*rhs_ident).name)
+                        let st_name = lo.ident_value_struct_type((*rhs_ident).name)
                         let slot_count = lo.struct_layout_slot_count(st_name)
                         let struct_copy_pair = lo.emit_struct_value_copy_budgeted(reg, st_name, slot_count)
                         lo = struct_copy_pair.0
@@ -21349,6 +22168,13 @@ impl Lowerer {
         rhs_ident_is_ref: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        // #2354: record the per-instance kinds of a generic struct literal's fields.
+        match s.expr {
+            Some(init_gfk) => {
+                lo = lo.note_struct_literal_instance_kinds_ref(s.name, &(*init_gfk))
+            }
+            None => {}
+        }
         match s.ty {
             Some(ty) => {
                 let option_inner = lower_option_box_inner_type_name(&(*ty))
@@ -22222,6 +23048,12 @@ impl Lowerer {
                     let src_st = lo.lookup_local_struct_type((*expr_box).name)
                     if src_st.len > 0 {
                         lo = lo.bind_local_struct_type(s.name, src_st, lo.lookup_local_struct_type_is_array_elem((*expr_box).name))
+                    } else {
+                        // #2355: `let c = G` on a struct-typed module global.
+                        let global_st = lo.global_struct_type_name((*expr_box).name)
+                        if global_st.len > 0 {
+                            lo = lo.bind_local_struct_type(s.name, global_st, false)
+                        }
                     }
                     let src_elem_layout = lo.lookup_local_tuple0_array_elem_layout((*expr_box).name)
                     if src_elem_layout >= 0 {
@@ -22553,6 +23385,15 @@ impl Lowerer {
                                 // path, which is no worse than before.
                                 let vslot = lo.lookup_local_variance_reg((*target_expr).name)
                                 if vslot >= 0 {
+                                    // #2827: the RHS may read this very local through a
+                                    // channel seeded from its slot (`acc = acc + k.value`
+                                    // with no sens rows for `acc`). The copy below
+                                    // overwrites that slot, so the channel would then stand
+                                    // for the NEW variance, and every later use of the
+                                    // rebound sens counts the update twice (after a loop,
+                                    // var(acc / 2) read (0.0725 + 0.0225) / 4, not 0.0725 / 4).
+                                    // Freeze the old value in its own channel first.
+                                    lo = lo.fo_detach_self_channel(vslot)
                                     if vslot != rhs_variance {
                                         lo = lo.emit(ir_copy(vslot, rhs_variance))
                                     }
@@ -23836,10 +24677,118 @@ impl Lowerer {
             lo = lo.emit(ir_jump(l_end))
             lo = lo.emit(ir_label(l_skip))
             lo
+        } else if pat.kind == PatternKind::PatStruct {
+            // #2766: `S { a, b: y, c: _ } => body` on a struct scrutinee is
+            // irrefutable: bind each field from the scrutinee and run the arm.
+            // This arm used to fall to "unsupported -- skip", so the match produced
+            // the 0 the end label loads (0.000000 for an f64 body) with check: OK.
+            var lo = self.bind_struct_pattern_fields(scrut, ir_path_first_name(pat.path), &pat.pat_fields)
+            if lo.had_error { return lo }
+            let pair_l = lo.fresh_label()
+            lo = pair_l.0
+            let l_skip = pair_l.1
+            lo = lo.lower_arm_guard(&arm.guard, l_skip)
+            let pair_b = lo.lower_expr_ref(&arm.body)
+            lo = pair_b.0
+            let body_reg = pair_b.1
+            lo = lo.emit(ir_copy(res, body_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_skip))
+            lo
         } else {
             // Unsupported pattern — skip
             self
         }
+    }
+
+    // Refuse a struct pattern Madaros cannot lower (fail-closed, #2766): an
+    // unregistered struct name, an unknown field, or a field sub-pattern other
+    // than a binding or `_` (nested struct, literal, enum).
+    fn refuse_struct_pattern(self, why: string) -> Lowerer with Mut, Panic, Div, IO {
+        print("error: Madaros cannot lower this struct pattern (")
+        print(why)
+        print("); only `field`, `field: name` and `field: _` over a struct are supported -- bind the field and match on it instead (fail-closed, #2766)\n")
+        var lo = self
+        lowerer_mark_hard_error(&! lo)
+        lo
+    }
+
+    fn bind_struct_pattern_fields(self, scrut: i64, struct_name: Name, fields: &Option<Box<PatFieldList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        if lower_struct_layout_index_of(&(*self.struct_layouts), struct_name) < 0 {
+            return self.refuse_struct_pattern("pattern does not name a struct")
+        }
+        var lo = self
+        var cur = fields
+        while true {
+            match *cur {
+                Some(list) => {
+                    let fname = (*list).head.name
+                    let sub = &(*list).head.pattern
+                    if (*sub).kind == PatternKind::PatWildcard {
+                        // nothing to bind
+                    } else if (*sub).kind == PatternKind::PatBinding {
+                        if !lo.struct_has_field(struct_name, fname) {
+                            return lo.refuse_struct_pattern("unknown field")
+                        }
+                        let fidx = lo.field_idx_from_name(struct_name, fname)
+                        let is_float = lo.field_is_float_for_struct(struct_name, fname)
+                        let pair_d = lo.fresh_reg()
+                        lo = pair_d.0
+                        let dst = pair_d.1
+                        var instr = ir_field_get(dst, scrut, fidx, fname)
+                        if LOWER_MATCH_SCRUT_IS_REF { instr.label_id = 1 }
+                        if is_float { instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG }
+                        lo = lo.emit(instr)
+                        if is_float { lo = lo.emit(ir_mark_float_reg(dst)) }
+                        lo = lo.bind_local((*sub).name, dst, (*sub).is_mut)
+                        if is_float {
+                            lo = lo.bind_local_scalar_kind((*sub).name, 2)
+                        } else if lo.field_is_integer_scalar_for_struct(struct_name, fname) {
+                            lo = lo.bind_local_scalar_kind((*sub).name, 1)
+                        }
+                        if lo.field_array_elem_is_float_for_struct(struct_name, fname) {
+                            lo = lo.bind_local_array_elem_float((*sub).name)
+                        }
+                        let ftype = lo.field_named_type_for_struct(struct_name, fname)
+                        if ftype.len > 0 && (ir_name_is_box(ftype) || lower_struct_layout_index_of(&(*lo.struct_layouts), ftype) >= 0) {
+                            lo = lo.bind_local_struct_type((*sub).name, ftype, false)
+                        }
+                    } else {
+                        return lo.refuse_struct_pattern("nested or literal field sub-pattern")
+                    }
+                    cur = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        lo
+    }
+
+    fn struct_has_field(self, type_name: Name, field_name: Name) -> bool with Mut, Panic, Div {
+        let si = lower_struct_layout_index_of(&(*self.struct_layouts), type_name)
+        if si < 0 { return false }
+        var fi: i64 = 0
+        while fi < (*self.struct_layouts).entries[si as usize].field_count {
+            if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                return true
+            }
+            fi = fi + 1
+        }
+        false
+    }
+
+    // is_float == 3 marks an integer/bool scalar field (register_struct_fields).
+    fn field_is_integer_scalar_for_struct(self, type_name: Name, field_name: Name) -> bool with Mut, Panic, Div {
+        let si = lower_struct_layout_index_of(&(*self.struct_layouts), type_name)
+        if si < 0 { return false }
+        var fi: i64 = 0
+        while fi < (*self.struct_layouts).entries[si as usize].field_count {
+            if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 3
+            }
+            fi = fi + 1
+        }
+        false
     }
 
     fn lower_match_arm(self, scrut: i64, res: i64, l_end: i64, arm: MatchArm) -> Lowerer with Mut, Panic, Div, Alloc, IO {
@@ -26881,6 +27830,9 @@ impl Lowerer {
         // Tuple desugar: let __tup = f(); let a = __tup.0 — float-element base
         // means .0/.1 are f64 even without a struct layout entry.
         var field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name) || lo1.field_is_float_by_name_simple(e.name)
+        // #2354: a generic field's kind is per instance (see LOWER_GFK_*).
+        let gfk_read = lo1.field_instance_kind_for_base_ref(&e.left, e.name)
+        if gfk_read != 0 { field_is_float = gfk_read == 2 }
         // #2504: see field_base_kn_value_float_ref.
         if ir_name_eq(e.name, make_name("value")) {
             let kn0 = lo1.field_base_kn_value_float_ref(&e.left)
@@ -27415,6 +28367,11 @@ impl Lowerer {
                     let struct_type = self.lookup_local_struct_type((*recv).name)
                     if struct_type.len > 0 {
                         return struct_type
+                    }
+                    // #2355: `G.method()` on a struct-typed module global.
+                    let global_type = self.global_struct_type_name((*recv).name)
+                    if global_type.len > 0 {
+                        return global_type
                     }
                     // Primitive impl methods are registered under their builtin
                     // type names (`i64_er_add`), not under the bare method name.
@@ -28028,9 +28985,14 @@ impl Lowerer {
                 } }
             None => {}
         }
+        let scrut_is_ref = match e.left {
+            Some(se) => (*se).kind == ExprKind::ExprIdent && self.lookup_local_is_ref((*se).name),
+            None => false,
+        }
         let pair_scrut = self.lower_opt_expr_ref(&e.left)
         var lo = pair_scrut.0
         let scrut = pair_scrut.1
+        let saved_scrut_is_ref = LOWER_MATCH_SCRUT_IS_REF
         let pair_res = lo.fresh_reg()
         lo = pair_res.0
         let res = pair_res.1
@@ -28038,7 +29000,9 @@ impl Lowerer {
         lo = pair_end.0
         let l_end = pair_end.1
         let scrut_opk = lo.opt_expr_option_payload_kind_ref(&e.left)
+        LOWER_MATCH_SCRUT_IS_REF = scrut_is_ref
         lo = lo.lower_match_arms_ref(scrut, res, l_end, &e.arms, payload_layout, scrut_opk)
+        LOWER_MATCH_SCRUT_IS_REF = saved_scrut_is_ref
         lo = lo.emit(ir_load_imm(res, 0))
         lo = lo.emit(ir_label(l_end))
         (lo, res)

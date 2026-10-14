@@ -108,18 +108,22 @@ pub fn parser_new() -> Parser {
     }
 }
 
-pub fn parser_set_tokens(tokens: [Token; 2097152], token_count: i64) with Mut, Panic, Div {
+// #1156: the token array is taken by reference. By value, every call copied
+// 2,097,152 tokens (~688 MB: a Token carries a 256-byte text buffer) into
+// the callee frame, and a program that merely contains this function makes the
+// native lowerer materialise that aggregate.
+pub fn parser_set_tokens(tokens: &[Token; 2097152], token_count: i64) with Mut, Panic, Div {
     var i: i64 = 0
     while i < token_count && i < 2097152 {
         // Write to parallel scalar arrays (boot4-compatible)
-        PT_KIND[i as usize] = tokens[i as usize].kind
-        PT_KIND_CODE[i as usize] = tokens[i as usize].kind as i64
-        PT_START[i as usize] = tokens[i as usize].start
-        PT_END[i as usize] = tokens[i as usize].end
-        PT_LINE[i as usize] = tokens[i as usize].line
-        PT_COL[i as usize] = tokens[i as usize].col
-        PT_INT_VALUE[i as usize] = tokens[i as usize].int_value
-        PT_TEXT_LEN[i as usize] = tokens[i as usize].text_len
+        PT_KIND[i as usize] = (*tokens)[i as usize].kind
+        PT_KIND_CODE[i as usize] = (*tokens)[i as usize].kind as i64
+        PT_START[i as usize] = (*tokens)[i as usize].start
+        PT_END[i as usize] = (*tokens)[i as usize].end
+        PT_LINE[i as usize] = (*tokens)[i as usize].line
+        PT_COL[i as usize] = (*tokens)[i as usize].col
+        PT_INT_VALUE[i as usize] = (*tokens)[i as usize].int_value
+        PT_TEXT_LEN[i as usize] = (*tokens)[i as usize].text_len
         i = i + 1
     }
 }
@@ -1338,6 +1342,18 @@ fn pfl_slow(sig: i64, dexp: i64) -> f64 with Mut, Panic, Div {
     // while every normal value was already exact.
     var want: i64 = 53
     if e < 0 - 1022 { want = e + 1075 }
+    // #2769: want == 0 is e == -1075, i.e. the value is in [2^-1075, 2^-1074):
+    // no significand bit is kept, but the value is at least half the smallest
+    // subnormal, so it still has to be ROUNDED, not flushed. Above the half
+    // (N/D > 1) it rounds up to 2^-1074 (4.9406564584124654e-324); exactly the
+    // half is a tie and rounds to even, 0. Returning 0.0 here read every
+    // literal in that interval -- including 4.9406564584124654e-324 and 3e-324
+    // -- as zero, silently.
+    if want == 0 {
+        pfl_sub()
+        if pfl_is_zero(true) { return 0.0 }
+        return pfl_scale2(1.0, 0 - 1074)
+    }
     if want < 1 { return 0.0 }
     if want > 53 { want = 53 }
 

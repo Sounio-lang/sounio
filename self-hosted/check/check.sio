@@ -12809,6 +12809,18 @@ fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, ar
 
 
 
+// #2766: the parser desugars a destructuring `let S { a, b } = q` (and a tuple
+// `let (a, b) = t`) into `let __tupN = q` followed by one `let a = __tupN.a` per
+// field. The source `q` is consumed exactly once, by the first statement; the
+// per-field reads of the compiler temp are not uses of a linear value, they are
+// that single move split by field. Tracking the temp as linear reported the
+// second field read as E039 (and, with a field skipped, E040), rejecting a
+// correct single use. The temp is therefore tracked as non-linear.
+fn checker_name_is_destructure_temp(n: Name) -> bool {
+    n.len > 5 && n.buf[0] == 95 as i8 && n.buf[1] == 95 as i8 && n.buf[2] == 116 as i8
+        && n.buf[3] == 117 as i8 && n.buf[4] == 112 as i8
+}
+
 // *mut ExprIdent leaf — transcription of the by-value ExprIdent arm (13856). env lookup +
 // linear-consume in place; returns only the TypeEntry (no 164KB self SRET — the by-value
 // arm's `(c2, ident_ty)` return was the last bridge before crash in 165 deeply-nested cases).
@@ -12873,6 +12885,15 @@ fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             }
             if is_wide_float_type(src_ty) || is_wide_float_type(target_ty) {
                 checker_report_error_at_inplace(c, e.span, 248, 0, 0, 0)
+                return ty_error()
+            }
+            // #2354 (E270): `n as string` on a number/bool/char is not a
+            // conversion on this engine -- nothing formats the value, so the
+            // integer was later used as a string pointer (`let s: string = n as
+            // string` SIGSEGVed). Refuse it, as lean_single refuses the binding.
+            if target_ty.kind == TypeKind::TyString
+                && (is_numeric_type(src_ty) || src_ty.kind == TypeKind::TyBool || src_ty.kind == TypeKind::TyChar) {
+                checker_report_error_at_inplace(c, e.span, 270, 0, 0, 0)
                 return ty_error()
             }
             let src_is_epistemic = src_ty.kind == TypeKind::TyKnowledge
@@ -13402,7 +13423,7 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         checker_const_int_bind_unknown_inplace(c, s.name)
     }
     // Track variable for borrow checking (linear if struct is declared linear)
-    let lin = checker_is_linear_type_inplace(c, bind_ty)
+    let lin = checker_is_linear_type_inplace(c, bind_ty) && !checker_name_is_destructure_temp(s.name)
     (*c).borrows = (*c).borrows.track(s.name, lin)
     // Propagate escape provenance: `let r = &x` taints r LOCAL; `let r = &self.f` keeps it first-class.
     (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
@@ -13487,7 +13508,7 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     } else {
         checker_const_int_bind_unknown_inplace(c, s.name)
     }
-    let lin = checker_is_linear_type_inplace(c, bind_ty)
+    let lin = checker_is_linear_type_inplace(c, bind_ty) && !checker_name_is_destructure_temp(s.name)
     (*c).borrows = (*c).borrows.track(s.name, lin)
     (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
     ty_unit()
@@ -18084,6 +18105,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
     else if code == 264 { print("enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped") }
+    else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
     else { print("unknown error") }
 }
@@ -18395,6 +18417,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 248 {
         print("   |\n   = help: wait for explicit from_bits/conversion operations; no f64 cast is a valid f128/f256 implementation\n")
+    }
+    else if code == 270 {
+        print("   |\n   = help: print the value directly (`println(n)`, `print_int(n)`, `print_f64(x)`); there is no number-to-string conversion yet\n")
     }
     else if code == 264 {
         print("   |\n   = help: carry the payload in a struct next to a payload-free enum tag, e.g. `struct Shape { kind: ShapeKind, a: f64, b: f64 }`; or use Option<T> for a single optional value\n")
@@ -19296,6 +19321,7 @@ fn name_is_dynlink_extern(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
     if name_eq(n, make_name("kl14c_neg")) { return true }
     if name_eq(n, make_name("kl14d_a")) { return true }
     if name_eq(n, make_name("kl14d_b")) { return true }
+    if name_eq(n, make_name("kl14d_align_probe")) { return true }   // #2537 witness
     if name_eq(n, make_name("ZSTD_compress")) { return true }
     if name_eq(n, make_name("ZSTD_decompress")) { return true }
     if name_eq(n, make_name("ZSTD_isError")) { return true }
@@ -25842,7 +25868,7 @@ impl Checker {
             c = c.const_int_bind_unknown(s.name)
         }
         // Track variable for borrow checking (linear if struct is declared linear)
-        let lin = c.is_linear_type(bind_ty)
+        let lin = c.is_linear_type(bind_ty) && !checker_name_is_destructure_temp(s.name)
         c.borrows = c.borrows.track(s.name, lin)
         (c, ty_unit())
     }
@@ -25911,7 +25937,7 @@ impl Checker {
             c = c.const_int_bind_unknown(s.name)
         }
         // Track variable for borrow checking (linear if struct is declared linear)
-        let lin = c.is_linear_type(bind_ty)
+        let lin = c.is_linear_type(bind_ty) && !checker_name_is_destructure_temp(s.name)
         c.borrows = c.borrows.track(s.name, lin)
         (c, ty_unit())
     }
