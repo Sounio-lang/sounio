@@ -2,7 +2,7 @@
 topic_id: repo.docs.compiler.known-limitations
 authority: repo_only
 audience: contributors
-last_validated: 2026-09-22
+last_validated: 2026-10-06
 validated_by: claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.known-limitations
 -->
@@ -43,6 +43,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-20 | enum variants with payloads (`Circle(f64)`, `Rect { w: f64 }`): no runtime representation | both |
 | KL-21 | user fns named like compiler builtins: `pub` residual on Madaros; seed hijacks or rejects | both |
 | KL-18 | `Hyper<…>` CPU values: Madaros fail-closed; lean_single prints a wrong value (seed) | both |
+| KL-17 | #2773 same-named items across modules: fns resolved per module on both engines; differing same-named structs refused instead of kept apart | both (types) |
 
 ## Ledger
 
@@ -72,6 +73,20 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ### KL-11 — #1792: first-order channels do not cross user calls
 
+- **Narrowed (#1706, 2026-10-13).** A call to a *pure f64 helper* (every
+  parameter and the return `f64`, no effect beyond Div/Panic/Epistemic/Mut,
+  body = `let`s with re-lower-safe right-hand sides plus a tail, no `if` on a
+  runtime condition, no loop/match/closure) now carries first-order channels:
+  the variance lowering re-lowers the helper's body inline in the caller with
+  each parameter bound to its argument's value, variance and sensitivities
+  (`fo_inline_call_variance` in `self-hosted/ir/lower.sio`). Witnesses now
+  passing on Madaros: `gum_fo_across_call`, `fo_call_boundary_arity3`,
+  `gum_fo_arity3_boundary`, `madaros_gum_fo_import`, `_eight_param`,
+  `_sixteen_param`, `_let_bytecode`, and `gum_fo_inline_helper_1706` (values
+  against a C++ oracle). **Still open:** helpers whose value depends on a
+  runtime `if` (`madaros_gum_fo_if_helper` I2/I3), recursion
+  (`_mutual`, `_mutual_deep`), methods (`_struct_field`), struct
+  constructors (`_let_ctor`).
 - #1792 (filed 2026-08-17) named two distinct witnesses. **F1**:
   `tests/run-pass/rapamycin_epistemic_adaptive.sio` — `madaros` originally
   printed `var(blood)=0.000000` where `lean_single` shows ~1e-5. **F2**:
@@ -219,8 +234,27 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `EXPR_*` no longer alias the variable). Pin:
   `tests/run-pass/kl16f_loop_accum.sio`,
   `scripts/ci/lean_single_kl16f_loop_accum_gate.sh`.
+- **KL-16g — CLOSED (seed, x86, #2776 part 2).** First-order variance
+  through struct fields (literal, nested, rebind, alias), struct-returning
+  calls, by-value and by-reference struct parameters, methods, constructor
+  lets and a returned `Knowledge` value: a field-shadow table keyed by the
+  struct's region carries each f64 field's variance and sensitivities and
+  crosses calls in tagged BSS blocks. Channels 8..31 give the 9th..32nd
+  measured input of a function its own first-order channel; when the
+  program asks for an uncertainty and has nine or more `measure(` sites
+  (`SX_XCALL`) they also cross direct calls, method calls and struct fields.
+  A call nested in a later argument no longer overwrites the earlier
+  arguments' shadows, and a closure literal no longer wipes the shadows of
+  the locals declared before it. Pin: `tests/run-pass/gum_fo_struct_fields_channels_2776.sio`
+  (analytic values: `tests/oracles/gum_fo_struct_fields_channels_2776.cpp`).
 - **Residual (OPEN).** HSHADOW multi-pair interproc; HSHADOW pairs other
-  than `[0,0]` through if/else; a64 `atan2`/`pow` AD.
+  than `[0,0]` through if/else; a64 `atan2`/`pow` AD. Calls through a
+  function value or a closure carry shadows like direct calls (since #2776
+  part 2; they used to keep the LAST ARGUMENT's), and a closure's env carries
+  each captured f64's variance and channels 0-7 (not channels 8..31).
+  Calls with more than 16
+  arguments carry shadows for the first 16. The #2776 part 2 work is x86
+  only; the a64 mirror is unchanged.
 - Channel-at-`.value` semantics (`MEAS_KNOW_IDX`,
   `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
   see the history snapshot for the KAS-1 rationale.
@@ -339,6 +373,51 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   change and a seed refresh (`scripts/dev/refresh_lean_seed.sh`), which is a
   founder-run step. Until then: do not use `Hyper<…>` values under
   `SOUNIO_SOUC_ENGINE=lean_single`.
+
+### KL-17 — #2773: same-named items in different modules
+
+- **Madaros, functions — CLOSED for plain `pub` and private fns (#2773).** A
+  module's unqualified call to its own function used to bind to a same-named
+  `pub fn` of another, first-loaded module (the merged IR keys functions by
+  bare name): measured `-14.5` expected, `3.0` printed, on both engines.
+  `self-hosted/compiler/private_fn_identity.sio` (pub phase) now renames
+  every non-first plain-`pub` definer to `N__m<idx>` and rebinds each
+  importer's unqualified, module-qualified and import-list references through
+  that importer's own `use` items (explicit import beats glob; own definition
+  beats both). Two explicit imports of different definers, or two globs of
+  different definers neither of which is the first-loaded one, are refused
+  with `error[module_name_resolution]`. Pins:
+  `tests/run-pass/madaros_module_local_name_resolution.sio`,
+  `tests/run-pass/madaros_module_local_name_import_rebind.sio`,
+  `tests/run-pass/madaros_module_local_name_glob.sio`,
+  `tests/compile-fail/madaros_module_name_ambiguous_import.sio`.
+- **Madaros, structs — refused, not resolved.** Two loaded modules that
+  define one struct name with *different* definitions are refused with
+  `error[module_struct_identity]` (struct layouts and the checker's struct
+  table are bare-name keyed, so they would be one type). Identical copies are
+  accepted. Pins: `tests/compile-fail/madaros_module_same_struct_differs.sio`,
+  `tests/run-pass/madaros_module_same_struct_identical_copies.sio`. Residual:
+  keeping two different same-named structs apart (module-qualified type
+  identity) is not implemented; same-named enums, type aliases and globals are
+  not checked at all.
+- **Madaros, residual fn shapes.** A name referenced by a module that does not
+  import it from any definer keeps the first-loaded binding (unchanged); a
+  re-export (`pub use`) is not followed; restricted-public (`pub(crate)` …)
+  collisions are refused as before.
+- **lean_single — CLOSED for the same shapes (#2773).** `lmr_resolve` in
+  `self-hosted/compiler/lean_single.sio` runs on the token stream right after
+  lexing and applies the same rules: a free fn defined at top level in two or
+  more modules keeps its name in the first-loaded definer and is renamed
+  `N__m<k>` in every other definer k; each module's references bind through
+  its own definition, then its explicit `use` imports, then its globs (only
+  `pub` definers count as import sources); two explicit imports of different
+  definers, or globs of two non-first definers, are refused with
+  `error[module_name_resolution]`; `q::N(..)` resolves through the `use` whose
+  last segment is `q`. `lmr_struct_identity` refuses same-named structs with
+  different definitions (`error[module_struct_identity]`). The pins above now
+  run on both engines. Same residuals as Madaros (no import from any definer
+  keeps the first-loaded binding; `pub use` is not followed); a bare fn value
+  is rebound only in a module that declares no local of that name.
 
 ## Registry-governed, not rungs
 
