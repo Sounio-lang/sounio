@@ -3543,6 +3543,7 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                         lower_record_option_box_return(fn_slot_sig.name, &(*fd).return_type)
                                         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
                                         fn_slot_sig.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+                                        fn_slot_sig.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
                                         fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                         if strategy_sig == IR_STRATEGY_INSTRUMENTED {
                                             fn_slot_sig.param_count = fn_slot_sig.param_count + 1
@@ -4220,6 +4221,7 @@ fn lowerer_preseed_fn_signature_mut(
     lower_record_option_box_return(fn_slot.name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
+    fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
         fn_slot.param_count = fn_slot.param_count + 1
@@ -5156,6 +5158,7 @@ fn lowerer_preseed_one_item_mut(
                         lower_record_option_box_return(fn_slot_sig.name, &(*fd).return_type)
                         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
                         fn_slot_sig.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+                        fn_slot_sig.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
                         fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                         if strategy_sig == IR_STRATEGY_INSTRUMENTED {
                             fn_slot_sig.param_count = fn_slot_sig.param_count + 1
@@ -5365,6 +5368,7 @@ fn ir_fast_summary_preseed_fn_signature(
     lower_record_option_box_return(fn_slot.name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
+    fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
         fn_slot.param_count = fn_slot.param_count + 1
@@ -5502,6 +5506,7 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     lower_record_option_box_return(fn_slot.name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
+    fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
         fn_slot.param_count = fn_slot.param_count + 1
@@ -5828,6 +5833,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 lower_record_option_box_return(fn_slot.name, &(*fd).return_type)
                                 fn_slot.param_count = ir_param_list_count_ref(&(*fd).params)
                                 fn_slot.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+                                fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
                                 fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                 if strategy == IR_STRATEGY_INSTRUMENTED {
                                     fn_slot.param_count = fn_slot.param_count + 1
@@ -5928,6 +5934,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                         lower_record_option_box_return(fn_slot.name, &(*fd).return_type)
                                                         fn_slot.param_count = ir_param_list_count_ref(&(*fd).params)
                                                         fn_slot.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+                                                        fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
                                                         fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                                         if strategy == IR_STRATEGY_INSTRUMENTED {
                                                             fn_slot.param_count = fn_slot.param_count + 1
@@ -6322,6 +6329,28 @@ fn lowerer_bind_local_struct_type_mut(
     }
 }
 
+// #2820: like lowerer_bind_local_struct_type_mut, but the name is the ELEMENT
+// type of an array local (struct_type_is_array_elem = 1), as
+// bind_local_struct_type(name, elem, true) records for `let` arrays.
+fn lowerer_bind_local_array_elem_struct_type_mut(
+    lo: &! Lowerer,
+    name: Name,
+    type_name: Name
+) with Mut, Alloc, Panic, Div {
+    if type_name.len <= 0 { return }
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).struct_types).values[i as usize] = type_name
+            (*(*locals_box).struct_type_is_array_elem).values[i as usize] = 1
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
 fn lowerer_bind_local_index_elem_layout_mut(
     lo: &! Lowerer,
     name: Name,
@@ -6574,6 +6603,12 @@ fn lowerer_lower_fn_params_mut(
                     lowerer_mark_local_array_copy_word_scalar_mut(lo, (*list).head.name)
                 }
                 lowerer_bind_local_struct_type_mut(lo, (*list).head.name, lower_param_struct_type_name(&(*list).head.ty))
+                // #2820: an array-of-struct parameter records its ELEMENT struct.
+                let param_elem_struct = lower_param_array_elem_struct_name(&(*list).head.ty)
+                if param_elem_struct.len > 0 && !ir_name_is_box(param_elem_struct)
+                    && lower_struct_layout_index_of(&(*(*lo).struct_layouts), param_elem_struct) >= 0 {
+                    lowerer_bind_local_array_elem_struct_type_mut(lo, (*list).head.name, param_elem_struct)
+                }
                 // #2504: a `k: Knowledge<i64>` parameter's `.value` is an i64 word.
                 let param_kn = lower_type_expr_knowledge_value_float(&(*list).head.ty)
                 if param_kn >= 0 {
@@ -7061,6 +7096,7 @@ fn lowerer_lower_fn_item_mut(
     lower_record_option_box_return((*strategy_func_box).name, &fd.return_type)
     (*strategy_func_box).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
     (*strategy_func_box).f128_param_mask = lower_f128_param_mask_of(&fd.params)
+    (*strategy_func_box).ref_struct_param_mask = lower_ref_struct_param_mask_of(&fd.params)
     lowerer_sco_strategy_trace(name, (*strategy_func_box).compile_strategy)
     (*lo).current_func = strategy_func_box
 
@@ -7839,6 +7875,44 @@ fn lower_f128_param_mask_of(params: &Option<Box<ParamList>>) -> i64 with Mut, Pa
             Some(list) => {
                 if idx < 62 && lower_type_expr_is_f128(&(*list).head.ty) {
                     mask = mask | bit
+                }
+                bit = bit * 2
+                idx = idx + 1
+                cur = &(*list).tail
+            }
+            None => { going = false }
+        }
+    }
+    mask
+}
+
+// #2820: which params are `&S` / `&!S` with a named, non-primitive, non-Box
+// pointee -- see IrFunction.ref_struct_param_mask.
+fn lower_ref_struct_param_mask_of(params: &Option<Box<ParamList>>) -> i64 with Mut, Panic, Div {
+    var mask: i64 = 0
+    var bit: i64 = 1
+    var idx: i64 = 0
+    var cur = params
+    var going = true
+    while going {
+        match *cur {
+            Some(list) => {
+                let ty = &(*list).head.ty
+                if idx < 62 && lower_type_expr_is_ref_like(ty) {
+                    match (*ty).inner {
+                        Some(pointee) => {
+                            if (*pointee).kind == TypeExprKind::TypeNamed && (*pointee).path.seg_count == 1 {
+                                let pn = ir_path_first_name((*pointee).path)
+                                if !lower_name_is_integer_type(pn) && !lower_name_is_bool_type(pn)
+                                    && !lower_name_is_f64_scalar_type(pn) && !lower_name_is_wide_float_type(pn)
+                                    && !lower_name_is_string_type(pn) && !ir_name_is_box(pn)
+                                    && !ir_name_eq(pn, make_name("str")) && !ir_name_eq(pn, make_name("char")) {
+                                    mask = mask | bit
+                                }
+                            }
+                        }
+                        None => {}
+                    }
                 }
                 bit = bit * 2
                 idx = idx + 1
@@ -9013,6 +9087,26 @@ fn lowerer_bind_kn_value_float_mut(lo: &! Lowerer, name: Name, flag: i64) with M
     }
 }
 
+// #2820: element struct of an array parameter -- `ps: [S; N]`, `ps: &[S; N]`,
+// `ps: &![S; N]`. lower_param_struct_type_name answers empty for these, so
+// `ps[i].f` resolved `f` by NAME against the first registered struct with such
+// a field: osk_all_probes_complete(probes: &[PireusOskProbe; 3]) read
+// `probes[i].complete` at another struct's offset and the seed kernel's
+// probe 2 reported complete=0 with clean counters.
+fn lower_param_array_elem_struct_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*ty).kind == TypeExprKind::TypeArray {
+        return lower_type_expr_array_elem_name(ty)
+    }
+    if (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut
+        || (*ty).kind == TypeExprKind::TypeRawPtr {
+        match (*ty).inner {
+            Some(inner) => { return lower_type_expr_array_elem_name(&(*inner)) }
+            None => { return ir_empty_name() }
+        }
+    }
+    ir_empty_name()
+}
+
 // #2377: an identifier expression naming `name`, so a const pattern can lower
 // the constant through the ordinary identifier path (global load).
 fn lower_ident_expr_for_name(name: Name, span: Span) -> Expr {
@@ -9098,6 +9192,23 @@ fn lower_kernel_extent_param_index(params: &Option<Box<ParamList>>) -> i64 with 
         }
     }
     0 - 1
+}
+
+// #2820: does the place expression `e` (an ident, or a field / index / deref
+// chain over one) start at the local `name`? `let x = &x.f` must not resolve
+// `x.f` against the fresh `x` slot the binding just created.
+fn lower_expr_mentions_root_name(e: &Expr, name: Name) -> bool with Mut, Panic, Div {
+    if (*e).kind == ExprKind::ExprIdent { return ir_name_eq((*e).name, name) }
+    if (*e).kind == ExprKind::ExprFieldAccess || (*e).kind == ExprKind::ExprIndex
+        || (*e).kind == ExprKind::ExprUnary {
+        match (*e).left {
+            Some(inner) => { return lower_expr_mentions_root_name(&(*inner), name) }
+            None => { return false }
+        }
+    }
+    // Any other shape (call, literal, block): no fresh-slot hazard is tracked
+    // here, so answer conservatively.
+    true
 }
 
 fn lower_type_expr_is_ref_like(ty: &TypeExpr) -> bool {
@@ -20868,6 +20979,7 @@ impl Lowerer {
         lower_record_option_box_return(func.name, return_type)
         func.param_count = ir_param_list_count_ref(params)
         func.f128_param_mask = lower_f128_param_mask_of(params)
+        func.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
         func.first_param_is_ref = lower_fn_first_param_is_ref(params)
         func.param_regs = [IR_INVALID_REG; 64]
         func.instr_count = 0
@@ -21329,6 +21441,14 @@ impl Lowerer {
                         // struct_type_is_array_elem set on the slot this parameter
                         // reuses, which would suppress the copy for a struct param.
                         (*(*locals).struct_type_is_array_elem).values[idx as usize] = 0
+                        // #2820: an array-of-struct parameter records its ELEMENT struct
+                        // (see lower_param_array_elem_struct_name).
+                        let slot_elem_struct = lower_param_array_elem_struct_name(&(*list).head.ty)
+                        if slot_elem_struct.len > 0 && !ir_name_is_box(slot_elem_struct)
+                            && lower_struct_layout_index_of(&(*lo.struct_layouts), slot_elem_struct) >= 0 {
+                            (*(*locals).struct_types).values[idx as usize] = slot_elem_struct
+                            (*(*locals).struct_type_is_array_elem).values[idx as usize] = 1
+                        }
                         // V0-E.5.4: f128 params are F128Bits handles (wide_bits=128, kind 5
                         // below) so they are ready softfloat operands; f256 stays kind 5 only.
                         (*(*locals).wide_bits).values[idx as usize] = if lower_type_expr_is_f128(&(*list).head.ty) { 128 } else { 0 }
@@ -23075,6 +23195,29 @@ impl Lowerer {
                                         && !ir_name_eq((*target_e).name, s.name)
                                         && lo.lookup_local_scalar_kind((*target_e).name) == 2 {
                                         pointee_name = make_name("f64")
+                                    } else if !lower_expr_mentions_root_name(&(*target_e), s.name) {
+                                        // #2820: `let ng = &result.negatives` (or `&r`, `&a[i]`)
+                                        // borrows a STRUCT. Record its type, as the annotated
+                                        // `let ng: &Neg = ...` form does (#1702), or `ng.total`
+                                        // resolves by field NAME against whichever registered
+                                        // struct has a `total` first -- a different offset,
+                                        // read silently (a bool where 25 was stored). The
+                                        // registered-struct check below keeps scalars out.
+                                        // Arrays are not struct pointees: an array local's
+                                        // struct_types entry is its ELEMENT type, and so is an
+                                        // array field's -- binding that as the pointee would
+                                        // make `p` look like one element.
+                                        var target_is_array = false
+                                        if (*target_e).kind == ExprKind::ExprIdent {
+                                            target_is_array = lo.lookup_local_fixed_array_len((*target_e).name) >= 0
+                                                || lo.lookup_local_struct_type_is_array_elem((*target_e).name)
+                                        }
+                                        if (*target_e).kind == ExprKind::ExprFieldAccess {
+                                            target_is_array = lo.field_array_elem_type_name_for_base_ref(&(*target_e).left, (*target_e).name).len > 0
+                                        }
+                                        if !target_is_array {
+                                            pointee_name = lo.expr_receiver_struct_type_ref(&(*target_e))
+                                        }
                                     }
                                 }
                                 None => {}
@@ -24397,7 +24540,37 @@ impl Lowerer {
 
     // V0-E.5.4: `f128_mask` bit i set ⇔ callee param i is f128; that argument is
     // lowered as an f128 value (binary128 literal / handle), the rest as usual.
+    // #2820: is `e`, passed for a `&S` parameter, a struct VALUE that must be
+    // borrowed? Only shapes whose struct type is known and that are not already
+    // a reference: a non-ref local, a struct literal, a call returning a struct,
+    // or an inline (non-pointer) struct field. Anything else is left as it was.
+    fn lower_arg_is_struct_value_to_borrow_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+        if (*e).kind == ExprKind::ExprIdent {
+            if self.lookup_local((*e).name) < 0 { return false }
+            if self.lookup_local_is_ref((*e).name) || self.lookup_local_is_global((*e).name) { return false }
+            if self.lookup_local_fixed_array_len((*e).name) >= 0 || self.lookup_local_struct_type_is_array_elem((*e).name) { return false }
+            let tn = self.lookup_local_struct_type((*e).name)
+            if tn.len <= 0 || ir_name_is_box(tn) { return false }
+            return lower_struct_layout_index_of(&(*self.struct_layouts), tn) >= 0
+        }
+        if (*e).kind == ExprKind::ExprStructLit || (*e).kind == ExprKind::ExprCall
+            || (*e).kind == ExprKind::ExprMethodCall || (*e).kind == ExprKind::ExprFieldAccess {
+            if (*e).kind == ExprKind::ExprFieldAccess
+                && self.field_is_pointer_for_base_ref(&(*e).left, (*e).name) {
+                return false
+            }
+            let tn = self.expr_receiver_struct_type_ref(e)
+            if tn.len <= 0 || ir_name_is_box(tn) { return false }
+            return lower_struct_layout_index_of(&(*self.struct_layouts), tn) >= 0
+        }
+        false
+    }
+
     fn lower_expr_args_masked_ref(self, opt: &Option<Box<ExprList>>, f128_mask: i64) -> LowerExprArgsResult with Mut, Panic, Div, Alloc, IO {
+        self.lower_expr_args_masked_borrow_ref(opt, f128_mask, 0)
+    }
+
+    fn lower_expr_args_masked_borrow_ref(self, opt: &Option<Box<ExprList>>, f128_mask: i64, ref_mask: i64) -> LowerExprArgsResult with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var current = opt
         var regs: [i64; 64] = [0; 64]
@@ -24406,6 +24579,8 @@ impl Lowerer {
         while true {
             match *current {
                 Some(list) => {
+                    let borrow = (ref_mask & f128_bit) != 0
+                        && lo.lower_arg_is_struct_value_to_borrow_ref(&(*list).head)
                     let pair_head = if (f128_mask & f128_bit) != 0 {
                         lo.lower_f128_value_ref(&(*list).head)
                     } else {
@@ -24413,8 +24588,16 @@ impl Lowerer {
                     }
                     f128_bit = f128_bit * 2
                     lo = pair_head.0
+                    var arg_reg = pair_head.1
+                    if borrow {
+                        // The same OpRef an explicit `&value` argument lowers to.
+                        let pair_bref = lo.fresh_reg()
+                        lo = pair_bref.0
+                        lo = lo.emit(ir_unaryop(pair_bref.1, UnaryOp::OpRef, arg_reg))
+                        arg_reg = pair_bref.1
+                    }
                     if reg_count < 64 {
-                        regs[reg_count as usize] = pair_head.1
+                        regs[reg_count as usize] = arg_reg
                         reg_count = reg_count + 1
                     } else {
                         break
@@ -27542,7 +27725,12 @@ impl Lowerer {
         let pair_args: LowerExprArgsResult = if handle_buf_idx >= 0 {
             lo1.lower_expr_args_handle_buf_ref(&e.args, handle_buf_idx)
         } else {
-            lo1.lower_expr_args_masked_ref(&e.args, f128_arg_mask)
+            let ref_arg_mask: i64 = if fn_id >= 0 && fn_id < lo1.module.fn_count {
+                ir_fn_get(&(*lo1.module), fn_id as usize).ref_struct_param_mask
+            } else {
+                0
+            }
+            lo1.lower_expr_args_masked_borrow_ref(&e.args, f128_arg_mask, ref_arg_mask)
         }
         let lo2 = pair_args.lowerer
         let args: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
@@ -29824,7 +30012,13 @@ impl Lowerer {
         } else {
             0
         }
-        let pair_args: LowerExprArgsResult = lo1.lower_expr_args_masked_ref(&e.args, f128_arg_mask_m)
+        // #2820: same receiver shift for the borrowed-struct params.
+        let ref_arg_mask_m: i64 = if fn_id0 >= 0 && fn_id0 < (*lo1.module).fn_count {
+            ir_fn_get(&(*lo1.module), fn_id0 as usize).ref_struct_param_mask / 2
+        } else {
+            0
+        }
+        let pair_args: LowerExprArgsResult = lo1.lower_expr_args_masked_borrow_ref(&e.args, f128_arg_mask_m, ref_arg_mask_m)
         let lo2 = pair_args.lowerer
         let arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
         let arg_count = pair_args.count
