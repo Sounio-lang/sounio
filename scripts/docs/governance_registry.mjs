@@ -748,7 +748,7 @@ export function preservedProvenance(existingMeta) {
     return {};
   }
   const date = String(existingMeta.last_validated ?? '').trim();
-  if (!isRealValidationDate(date)) {
+  if (!isRealValidationDate(date) || date === LEGACY_PLACEHOLDER_DATE) {
     return {};
   }
   const fields = { last_validated: date };

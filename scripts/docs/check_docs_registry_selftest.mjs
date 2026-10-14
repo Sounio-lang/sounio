@@ -307,6 +307,19 @@ async function main() {
         && legacyCheck.stdout.includes('docs/features/GPU_RUNTIME.md'),
       `checker did not report the retired placeholder:\n${legacyCheck.stdout}`
     );
+    const legacySync = await runNode(syncScript, legacyDir, ['--snapshot']);
+    assert(legacySync.ok, `Legacy-placeholder sync failed:\n${legacySync.stderr || legacySync.stdout}`);
+    const legacyAfterSync = await readFile(legacyPath, 'utf8');
+    assert(
+      legacyAfterSync.includes('last_validated: unvalidated')
+        && legacyAfterSync.includes('validated_by: none'),
+      'the sync preserved the retired 2026-03-07 placeholder as validation provenance'
+    );
+    const legacyCheckAfterSync = await runNode(registryCheckScript, legacyDir);
+    assert(
+      legacyCheckAfterSync.ok,
+      `Checker rejected the fallback-stamped legacy doc:\n${legacyCheckAfterSync.stderr || legacyCheckAfterSync.stdout}`
+    );
 
     // An unvalidated document names no validator.
     const unvalByDir = await cloneFixture(baseDir, 'unvalidated-with-validator');

@@ -187,6 +187,7 @@ def clause_v1() -> tuple[bool, str]:
         and seen["good"] == {"last_validated": "2026-08-16",
                              "validated_by": "cursor-agent"}
         and seen["badDate"] == {}
+        and seen["legacy"] == {}
         and seen["noValidator"] == {"last_validated": "2026-08-16"}
         and seen["withRecord"]["last_validated"] == "2026-08-16"
         and seen["withRecord"]["validated_by"] == "cursor-agent"
