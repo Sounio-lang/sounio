@@ -73,6 +73,20 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ### KL-11 — #1792: first-order channels do not cross user calls
 
+- **Narrowed (#1706, 2026-10-13).** A call to a *pure f64 helper* (every
+  parameter and the return `f64`, no effect beyond Div/Panic/Epistemic/Mut,
+  body = `let`s with re-lower-safe right-hand sides plus a tail, no `if` on a
+  runtime condition, no loop/match/closure) now carries first-order channels:
+  the variance lowering re-lowers the helper's body inline in the caller with
+  each parameter bound to its argument's value, variance and sensitivities
+  (`fo_inline_call_variance` in `self-hosted/ir/lower.sio`). Witnesses now
+  passing on Madaros: `gum_fo_across_call`, `fo_call_boundary_arity3`,
+  `gum_fo_arity3_boundary`, `madaros_gum_fo_import`, `_eight_param`,
+  `_sixteen_param`, `_let_bytecode`, and `gum_fo_inline_helper_1706` (values
+  against a C++ oracle). **Still open:** helpers whose value depends on a
+  runtime `if` (`madaros_gum_fo_if_helper` I2/I3), recursion
+  (`_mutual`, `_mutual_deep`), methods (`_struct_field`), struct
+  constructors (`_let_ctor`).
 - #1792 (filed 2026-08-17) named two distinct witnesses. **F1**:
   `tests/run-pass/rapamycin_epistemic_adaptive.sio` — `madaros` originally
   printed `var(blood)=0.000000` where `lean_single` shows ~1e-5. **F2**:

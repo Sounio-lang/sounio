@@ -1974,6 +1974,153 @@ fn compiler_ir_read_i64_at(buf: &![i8; 131072], pos: i64) -> i64 with Mut, Panic
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
 }
 
+// #1161: what this SOIR v2 encoding cannot carry. The writer above emits, per
+// function, only name (128 bytes), instr/reg/label/param counts, param_regs,
+// compile_strategy and prof_counter_id; per instruction, 13 fields with the
+// opcode as a 0..38 tag (-1 for every other opcode), no call-argument
+// identities and no imm_flags; per module, the string table and 35 zero
+// words. Before #1161 --ir-roundtrip byte-copied that buffer and compared the
+// copy with itself, so it printed OK for programs with globals or extern
+// calls whose state the encoding had dropped. This returns "" only when every
+// field the encoding does NOT write holds its default; otherwise the reason.
+fn compiler_ir_v2_name_reason(what: string, n: Name) -> string with Mut, Panic, Div {
+    if n.len < 0 || n.len > 128 { return what + ": name longer than 128 bytes" }
+    ""
+}
+
+fn compiler_ir_v2_unrepresentable(module: &IrModule) -> string with Mut, Panic, Div, Alloc {
+    if !compiler_ir_epistemic_empty((*module).epistemic) { return "epistemic section" }
+    if (*module).bss_total_size != 0 { return "module BSS globals (bss_total_size)" }
+    if (*module).export_count != 0 { return "module export table" }
+    if (*module).prof_counter_count != 0 { return "module profiling counters" }
+    if (*module).algebras.count != 0 { return "module algebra table" }
+    if (*module).ontologies.count != 0 || (*module).ontologies.property_count != 0 || (*module).ontologies.parameter_link_count != 0 {
+        return "module ontology table"
+    }
+    var si: i64 = 0
+    while si < (*module).string_count {
+        let sr = compiler_ir_v2_name_reason("string table entry", (*module).string_table[si as usize])
+        if str_len(sr) > 0 { return sr }
+        si = si + 1
+    }
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        let f = ir_fn_get(module, fi as usize)
+        let nm = str_from_bytes(f.name.buf, f.name.len)
+        let fr = compiler_ir_v2_name_reason("fn `" + nm + "`", f.name)
+        if str_len(fr) > 0 { return fr }
+        if f.compile_strategy == 99 || f.bss_size != 0 { return "BSS global `" + nm + "`" }
+        if f.returns_float != 0 { return "fn `" + nm + "`: returns_float (f64 return)" }
+        if f.return_kn_value_float != 0 - 1 { return "fn `" + nm + "`: return_kn_value_float" }
+        if f.return_struct_name.len != 0 { return "fn `" + nm + "`: return_struct_name (named return type)" }
+        if f.return_fixed_array_len != 0 - 1 { return "fn `" + nm + "`: return_fixed_array_len" }
+        if f.hyper_algebra_kind != 0 - 1 { return "fn `" + nm + "`: hyper_algebra_kind" }
+        if f.is_sret != 0 || f.sret_dest_reg != 0 - 1 { return "fn `" + nm + "`: sret ABI" }
+        if f.first_param_is_ref != 0 { return "fn `" + nm + "`: first_param_is_ref" }
+        if f.f128_param_mask != 0 { return "fn `" + nm + "`: f128_param_mask" }
+        var w: i64 = 0
+        while w < 64 {
+            if f.float_reg_bits[w as usize] != 0 {
+                return "fn `" + nm + "`: float register classes (" + int_to_string(ir_function_count_float_bits(&f)) + " vregs marked f64; word " + int_to_string(w) + " = " + int_to_string(f.float_reg_bits[w as usize]) + ")"
+            }
+            w = w + 1
+        }
+        var k: i64 = 0
+        while k < f.instr_count {
+            let ins = ir_arena_load(ir_region_slot_r(f.region, k))
+            if compiler_ir_ser_opcode_tag(ins.op) < 0 { return "fn `" + nm + "`: an opcode outside the 39 SOIR v2 tags" }
+            if ins.imm_flags != 0 { return "fn `" + nm + "`: instruction imm_flags" }
+            let is_call = ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallExtern || ins.op == IrOpcode::IrCallIndirect || ins.op == IrOpcode::IrCallSret
+            if is_call && ins.arg_count > 0 { return "fn `" + nm + "`: call argument registers" }
+            let ir = compiler_ir_v2_name_reason("fn `" + nm + "` instruction", ir_name_at(ins.name_id))
+            if str_len(ir) > 0 { return ir }
+            k = k + 1
+        }
+        fi = fi + 1
+    }
+    ""
+}
+
+// Decode the v2 bytes and compare every encoded field with the module it came
+// from: the actual round trip (bytes -> values == source values). Returns ""
+// or the first mismatch.
+fn compiler_ir_v2_read_name_eq(buf: &![i8; 131072], pos: i64, n: Name) -> bool with Mut, Panic, Div {
+    if compiler_ir_read_i64_at(buf, pos) != n.len { return false }
+    var i: i64 = 0
+    while i < 128 {
+        if (*buf)[(pos + 8 + i) as usize] != n.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn compiler_ir_v2_verify(buf: &![i8; 131072], len: i64, module: &IrModule) -> string with Mut, Panic, Div, Alloc {
+    if len < 16 || len > 131072 { return "encoded size outside the 131072-byte buffer" }
+    if (*buf)[0] != (83 as i8) || (*buf)[1] != (79 as i8) || (*buf)[2] != (73 as i8) || (*buf)[3] != (82 as i8) { return "magic" }
+    var p: i64 = 8
+    if compiler_ir_read_i64_at(buf, p) != (*module).fn_count { return "fn_count" }
+    p = p + 8
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        let f = ir_fn_get(module, fi as usize)
+        if p + 136 + 32 + 512 + 16 > len { return "truncated function header" }
+        if !compiler_ir_v2_read_name_eq(buf, p, f.name) { return "function name" }
+        p = p + 136
+        if compiler_ir_read_i64_at(buf, p) != f.instr_count { return "instr_count" }
+        if compiler_ir_read_i64_at(buf, p + 8) != f.reg_count { return "reg_count" }
+        if compiler_ir_read_i64_at(buf, p + 16) != f.label_count { return "label_count" }
+        if compiler_ir_read_i64_at(buf, p + 24) != f.param_count { return "param_count" }
+        p = p + 32
+        var r: i64 = 0
+        while r < 64 {
+            if compiler_ir_read_i64_at(buf, p) != f.param_regs[r as usize] { return "param_regs" }
+            p = p + 8
+            r = r + 1
+        }
+        if compiler_ir_read_i64_at(buf, p) != f.compile_strategy { return "compile_strategy" }
+        if compiler_ir_read_i64_at(buf, p + 8) != f.prof_counter_id { return "prof_counter_id" }
+        p = p + 16
+        var k: i64 = 0
+        while k < f.instr_count {
+            if p + 232 > len { return "truncated instruction" }
+            let ins = ir_arena_load(ir_region_slot_r(f.region, k))
+            if ((*buf)[p as usize] as i64) != compiler_ir_ser_opcode_tag(ins.op) { return "opcode" }
+            p = p + 8
+            if compiler_ir_read_i64_at(buf, p) != ins.dst { return "dst" }
+            if compiler_ir_read_i64_at(buf, p + 8) != ins.src1 { return "src1" }
+            if compiler_ir_read_i64_at(buf, p + 16) != ins.src2 { return "src2" }
+            if compiler_ir_read_i64_at(buf, p + 24) != ins.imm_i64 { return "imm_i64" }
+            if compiler_ir_read_i64_at(buf, p + 32) != f64_to_bits(ins.imm_f64) { return "imm_f64" }
+            if compiler_ir_read_i64_at(buf, p + 40) != ins.label_id { return "label_id" }
+            if compiler_ir_read_i64_at(buf, p + 48) != ins.fn_id { return "fn_id" }
+            if compiler_ir_read_i64_at(buf, p + 56) != ins.field_idx { return "field_idx" }
+            p = p + 64
+            if ((*buf)[p as usize] as i64) != compiler_ir_ser_binary_op_tag(ins.bin_op) { return "bin_op" }
+            p = p + 8
+            if ((*buf)[p as usize] as i64) != compiler_ir_ser_unary_op_tag(ins.un_op) { return "un_op" }
+            p = p + 8
+            if !compiler_ir_v2_read_name_eq(buf, p, ir_name_at(ins.name_id)) { return "instruction name" }
+            p = p + 136
+            if compiler_ir_read_i64_at(buf, p) != ins.arg_count { return "arg_count" }
+            p = p + 8
+            k = k + 1
+        }
+        fi = fi + 1
+    }
+    if p + 8 > len { return "truncated string table" }
+    if compiler_ir_read_i64_at(buf, p) != (*module).string_count { return "string_count" }
+    p = p + 8
+    var si: i64 = 0
+    while si < (*module).string_count {
+        if !compiler_ir_v2_read_name_eq(buf, p, (*module).string_table[si as usize]) { return "string table entry" }
+        p = p + 136
+        si = si + 1
+    }
+    p = p + 280
+    if p != len { return "trailing or missing bytes" }
+    ""
+}
+
 struct CompilerIrCopyProgress {
     src_pos: i64,
     dst_pos: i64,
@@ -2426,9 +2573,16 @@ fn run_ir_dump_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Al
         panic("ir-dump failed")
     }
 
+    // #1161: refuse what the encoding cannot carry instead of dumping a lossy image.
+    let module = ir_result.module
+    let reason = compiler_ir_v2_unrepresentable(&module)
+    if str_len(reason) > 0 {
+        println("error: ir-dump: SOIR v2 cannot represent " + reason + " -- refusing (nothing written)")
+        panic("ir-dump failed")
+    }
     let serialized_len = compiler_ir_module_serialized_size(ir_result.module)
-    if serialized_len <= 0 {
-        println("error: ir-dump unsupported for non-empty epistemic IR")
+    if serialized_len <= 0 || serialized_len > 131072 {
+        println("error: ir-dump: SOIR v2 image would need " + int_to_string(serialized_len) + " bytes, more than the 131072-byte buffer -- refusing")
         panic("ir-dump failed")
     }
 
@@ -2455,42 +2609,41 @@ fn run_ir_roundtrip_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Di
         panic("ir-roundtrip failed")
     }
 
+    // #1161: preflight, then a real round trip -- decode the bytes and compare
+    // every encoded field with the source module (the old check compared a
+    // byte copy of the buffer with the buffer).
+    let module = ir_result.module
+    let reason = compiler_ir_v2_unrepresentable(&module)
+    if str_len(reason) > 0 {
+        println("error: ir-roundtrip: SOIR v2 cannot represent " + reason + " -- refusing (no round trip claimed)")
+        panic("ir-roundtrip failed")
+    }
     let pair_a_len = compiler_ir_module_serialized_size(ir_result.module)
-    if pair_a_len <= 0 {
-        println("error: ir-roundtrip unsupported for non-empty epistemic IR")
+    if pair_a_len <= 0 || pair_a_len > 131072 {
+        println("error: ir-roundtrip: SOIR v2 image would need " + int_to_string(pair_a_len) + " bytes, more than the 131072-byte buffer -- refusing")
         panic("ir-roundtrip failed")
     }
-
     var pair_a_buf: [i8; 131072] = [0; 131072]
-    compiler_ir_serialize_non_ep_module(ir_result.module, &! pair_a_buf)
-    var pair_b_buf: [i8; 131072] = [0; 131072]
-    let roundtrip = compiler_ir_roundtrip_non_ep_buffer(&! pair_a_buf, pair_a_len, &! pair_b_buf)
-    if !roundtrip.ok {
-        println("error: ir roundtrip decode failed")
-        print("error: partial_len=")
-        print_int(roundtrip.out_len)
-        print(" functions=")
-        print_int(roundtrip.fn_count)
-        print(" strings=")
-        print_int(roundtrip.string_count)
-        print("\n")
+    let written = compiler_ir_serialize_non_ep_module(ir_result.module, &! pair_a_buf)
+    if written != pair_a_len {
+        println("error: ir roundtrip length mismatch (wrote " + int_to_string(written) + ", expected " + int_to_string(pair_a_len) + ")")
         panic("ir-roundtrip failed")
     }
-    let pair_b_len = roundtrip.out_len
-    if pair_b_len != pair_a_len {
-        println("error: ir roundtrip length mismatch")
-        panic("ir-roundtrip failed")
+    // Mutation hook for scripts/ci/madaros_ir_roundtrip_gate.sh: flip the low
+    // byte of the first instruction's dst (header 16 + function header 136 +
+    // counts 32 + param_regs 512 + strategy/prof 16 + opcode slot 8 = 720).
+    // The decode must notice; a verifier that cannot fail proves nothing.
+    if str_eq(read_env("SOUNIO_SABOTAGE_IR_ROUNDTRIP"), "1") && pair_a_len > 728 {
+        let flipped = ((pair_a_buf[720] as i64) ^ 1) & 255
+        pair_a_buf[720] = flipped as i8
     }
-    if !compiler_ir_buffers_equal(pair_a_buf, pair_a_len, pair_b_buf, pair_b_len) {
-        println("error: ir roundtrip byte mismatch")
+    let mismatch = compiler_ir_v2_verify(&! pair_a_buf, pair_a_len, &module)
+    if str_len(mismatch) > 0 {
+        println("error: ir roundtrip: decoded " + mismatch + " differs from the source module")
         panic("ir-roundtrip failed")
     }
 
-    print("ir-roundtrip: OK bytes=")
-    print_int(pair_a_len)
-    print(" functions=")
-    print_int(ir_result.module.fn_count)
-    print("\n")
+    println(compiler_ir_roundtrip_summary(pair_a_len, ir_result.module.fn_count))
 }
 
 fn run_native_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {

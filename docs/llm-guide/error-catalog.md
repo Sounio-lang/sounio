@@ -506,3 +506,4 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E265 | type-checker/epistemic | error | Temporal validity window mismatch: the provided value's validity window cannot satisfy the required type's validity constraint | [E265.md](explanations/E265.md) |
 | E267 | type-checker/ownership | error | cannot assign through a shared reference: the place is reached through `&T` (explicit `*p` or the auto-deref of `p.f` / `p[i]`), which is read-only; take `&!T` (#888) | — |
 | E269 | type-checker/epistemic | error | a `where` refinement on `Knowledge<T>` is not enforced by this compiler yet; the program is refused instead of running with the predicate silently ignored (#2753) | — |
+| E270 | type-checker/casts | error | `as string` does not convert a number, bool or char to text; the cast is refused instead of compiling to a program that uses the value as a string pointer (#2354) | — |
