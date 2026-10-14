@@ -9,6 +9,12 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.divida-z
 
 # Dívida Zero v3 — Bloco 0: instrumentos e inventário (2026-09-22)
 
+> Registro histórico da fonte `69b7fe7546e8`, observado em 2026-09-22.
+> Os números, PRs, problemas de instrumentos e status abaixo descrevem essa
+> fotografia; não são um inventário da `main` atual nem resultados reexecutados.
+> Autoria e responsabilidade humana: Demetrios Agourakis. Nomes de agentes
+> identificam execução e revisão, sem atribuir propriedade do projeto.
+
 Natureza: primeira entrega do plano `SOUNIO_DIVIDA_ZERO_PLANO_v3_2026-09-22` (§5, Bloco 0 /
 DZ-00, DZ-01). Este documento é instrumento e inventário — **não** é uma correção de
 defeito, não fecha M1/M2/M3, e não afirma que a suíte completa foi executada nesta
@@ -26,8 +32,8 @@ estável). As referências `§N` deste documento apontam para a numeração dess
 sessão, não para um artefato reproduzível de dentro do repositório; um leitor sem acesso
 a essa sessão não consegue verificar as citações de seção por conta própria. Este achado
 **não é corrigido nesta entrega** — commitar o plano inteiro é uma decisão de outra lane
-(é um documento de campanha, não um artefato de auditoria técnica, e sua autoria/dono não
-foi determinado aqui); a proveniência é apenas tornada explícita para que a limitação de
+(é um documento de campanha, não um artefato de auditoria técnica, cuja autoria e responsabilidade humana são de Demetrios
+Agourakis; o artefato do plano não foi recuperado nesta reconciliação); a proveniência é apenas tornada explícita para que a limitação de
 verificabilidade fique registrada.
 
 ## 1. Recalibração de escala (§1 do CLAUDE.md)
