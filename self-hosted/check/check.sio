@@ -2295,6 +2295,21 @@ fn checker_check_validwhile_predicate_inplace(c: *mut Checker, validity_opt: Opt
     }
 }
 
+// #2753 (E269): no engine enforces a `Knowledge<T where { ... }>` predicate yet
+// (the runtime guard exists only as the scripts/ontology expander), so a program
+// carrying one used to run with the predicate silently ignored. Refuse it.
+fn checker_refuse_knowledge_where_mut(c: *mut Checker, opt: Option<Box<KnowledgeTypeInfo> >, span: Span) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(info_box) => {
+            match (*info_box).proof_constraints {
+                Some(_) => checker_report_error_at_inplace(c, span, 269, 0, 0, 0),
+                None => {}
+            }
+        }
+        None => {}
+    }
+}
+
 fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTypeInfo> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(info_box) => {
@@ -2987,7 +3002,10 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
         TypeExprKind::TypeNever => ty_never()
         TypeExprKind::TypeInfer => ty_unknown()
         TypeExprKind::TypeSelfUpper => (*c).current_impl_type
-        TypeExprKind::TypeKnowledge => checker_lower_knowledge_type_mut(c, te.knowledge_info)
+        TypeExprKind::TypeKnowledge => {
+            checker_refuse_knowledge_where_mut(c, te.knowledge_info, te.span)
+            checker_lower_knowledge_type_mut(c, te.knowledge_info)
+        }
         TypeExprKind::TypeModel => checker_lower_model_type_mut(c, te.type_args, te.span)
         TypeExprKind::TypePolicy => {
             let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
@@ -12937,11 +12955,31 @@ fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 // reverse order. Faithful to the by-value original's scope discipline (env.push_scope /
 // borrows.push_scope / push_const_scope on entry; pop_const_scope / borrows.pop_scope /
 // env.pop_scope on exit, in that exact order). The body is checked via the *mut spine.
+// #2377: is `name`, as a bare match-arm pattern, a module-level `let`/`const`
+// (a value pattern) rather than a fresh binding? Only when no local of that
+// name is in scope: a local (scope_depth >= 1) shadows the constant, as in an
+// expression. Must agree with lower_match_arm_ref and lean_single.
+fn checker_pattern_names_global_const_inplace(c: *mut Checker, name: Name) -> bool with Mut, Panic, Div {
+    if !ast_is_global_const_name(name) { return false }
+    var i = (*c).env.count - 1
+    while i >= 0 {
+        if name_eq((*c).env.bindings[i as usize].name, name) {
+            return (*c).env.bindings[i as usize].scope_depth == 0
+        }
+        i = i - 1
+    }
+    false
+}
+
 fn checker_check_match_arm_inplace(c: *mut Checker, arm: MatchArm, scrut_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     (*c).env = (*c).env.push_scope()
     (*c).borrows = (*c).borrows.push_scope()
     checker_push_const_scope_inplace(c)
-    checker_bind_pattern_inplace(c, arm.pattern, scrut_ty)
+    if arm.pattern.kind == PatternKind::PatBinding && checker_pattern_names_global_const_inplace(c, arm.pattern.name) {
+        // #2377: value pattern -- binds nothing; the arm compares against the constant.
+    } else {
+        checker_bind_pattern_inplace(c, arm.pattern, scrut_ty)
+    }
     // Type-check the `if <cond>` guard (if any) with the pattern variables in scope.
     match arm.guard {
         Some(g) => {
@@ -13039,7 +13077,22 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
         }
         checker_bind_tuple_pattern_list_idx_inplace(c, pat.sub_patterns, scrut_ty, 0)
     } else if pat.kind == PatternKind::PatOr {
-        checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
+        // #2377: an alternative naming a module-level const/let is a value, not a
+        // binding (A | B => ..); bind only the others.
+        var alt_cur = pat.sub_patterns
+        var alt_going = true
+        while alt_going {
+            match alt_cur {
+                Some(alts) => {
+                    let alt = (*alts).head
+                    if !(alt.kind == PatternKind::PatBinding && checker_pattern_names_global_const_inplace(c, alt.name)) {
+                        checker_bind_pattern_inplace(c, alt, scrut_ty)
+                    }
+                    alt_cur = (*alts).tail
+                }
+                None => { alt_going = false }
+            }
+        }
     }
     // PatWildcard / PatIntLit / PatBoolTrue / PatBoolFalse / PatStringLit bind nothing.
 }
@@ -13515,9 +13568,82 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
 }
 
 // *mut assign-mutability (E003) — transcription of check_assign_mutability (14176).
+// #888: the static type of an assignment PLACE, recomputed from the environment
+// and the struct table without re-checking (and so without re-reporting) any
+// sub-expression. Returns ty_unknown() for any shape it does not model, which
+// makes the shared-reference walk below fail open on it (no false reject).
+fn checker_place_static_type(c: *mut Checker, place: Expr, depth: i64) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if depth > 16 { return ty_unknown() }
+    if place.kind == ExprKind::ExprIdent {
+        if !(*c).env.has_binding(place.name) { return ty_unknown() }
+        return (*c).env.lookup(place.name)
+    }
+    let base_ptr = expr_opt_get(place.left)
+    if base_ptr == 0 as *mut Expr { return ty_unknown() }
+    let base_ty = checker_place_static_type(c, *base_ptr, depth + 1)
+    if place.kind == ExprKind::ExprUnary && place.un_op == UnaryOp::OpDeref {
+        return checker_place_deref_type(base_ty)
+    }
+    if place.kind == ExprKind::ExprFieldAccess {
+        let sty = checker_place_deref_type(base_ty)
+        if sty.kind != TypeKind::TyNamed { return ty_unknown() }
+        let sidx = struct_table_find((*c).structs, sty.name)
+        if sidx < 0 { return ty_unknown() }
+        let si = struct_table_get((*c).structs, sidx)
+        if !field_info_list_has(si.fields, place.name) { return ty_unknown() }
+        return field_info_list_find(si.fields, place.name)
+    }
+    if place.kind == ExprKind::ExprIndex {
+        let aty = checker_place_deref_type(base_ty)
+        if aty.kind == TypeKind::TyArray || aty.kind == TypeKind::TySlice || aty.kind == TypeKind::TySliceMut {
+            match aty.inner {
+                Some(el) => { return *el }
+                None => { return ty_unknown() }
+            }
+        }
+        return ty_unknown()
+    }
+    ty_unknown()
+}
+
+// One auto-deref step: `&T` / `&!T` -> T, anything else unchanged.
+fn checker_place_deref_type(ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if ty.kind == TypeKind::TyRef || ty.kind == TypeKind::TyRefMut {
+        match ty.inner {
+            Some(inner) => { return *inner }
+            None => { return ty_unknown() }
+        }
+    }
+    ty
+}
+
+// #888: does storing into `place` write THROUGH a shared reference? Walks the
+// place towards its root; every hop that dereferences (explicit `*p`, or the
+// auto-deref of `p.f` / `p[i]`) a value whose static type is a shared `&T` /
+// `&[T]` makes the store a write through shared data, which both engines used
+// to accept ("assume mutable for now"). Exclusive `&!T`, raw pointers, by-value
+// locals and globals are unaffected. Unknown shapes return false (fail open).
+fn checker_place_writes_through_shared_ref(c: *mut Checker, place: Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+    if depth > 16 { return false }
+    if place.kind == ExprKind::ExprFieldAccess || place.kind == ExprKind::ExprIndex
+        || (place.kind == ExprKind::ExprUnary && place.un_op == UnaryOp::OpDeref) {
+        let base_ptr = expr_opt_get(place.left)
+        if base_ptr == 0 as *mut Expr { return false }
+        let base_ty = checker_place_static_type(c, *base_ptr, depth + 1)
+        if base_ty.kind == TypeKind::TyRef || base_ty.kind == TypeKind::TySlice {
+            return true
+        }
+        return checker_place_writes_through_shared_ref(c, *base_ptr, depth + 1)
+    }
+    false
+}
+
 fn checker_check_assign_mutability_inplace(c: *mut Checker, opt: Option<Box<Expr> >, span: Span) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(e) => {
+            if (*e).kind != ExprKind::ExprIdent && checker_place_writes_through_shared_ref(c, *e, 0) {
+                checker_report_error_at_inplace(c, span, 267, 0, 0, 0)
+            }
             if (*e).kind == ExprKind::ExprIdent {
                 // E003 only for a name that IS bound (a local) and is immutable (a `let`).
                 // Module-level globals are not bound into env, so an unbound name is NOT a
@@ -18105,6 +18231,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
     else if code == 264 { print("enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped") }
+    else if code == 267 { print("cannot assign through a shared reference: the place is reached through `&T`, which is read-only") }
+    else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
     else { print("unknown error") }
@@ -18418,6 +18546,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     else if code == 248 {
         print("   |\n   = help: wait for explicit from_bits/conversion operations; no f64 cast is a valid f128/f256 implementation\n")
     }
+    else if code == 269 {
+        print("   |\n   = help: drop the `where { ... }` and check the predicate explicitly (`if !(k.value.age >= 18) { panic(...) }`), or run the source through scripts/ontology/expand_knowledge_runtime_guards.sh, which inserts that check\n")
+    }
     else if code == 270 {
         print("   |\n   = help: print the value directly (`println(n)`, `print_int(n)`, `print_f64(x)`); there is no number-to-string conversion yet\n")
     }
@@ -18449,6 +18580,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("\n   =       (then the reported variance overstates, which is safe); `/` refuses")
         print("\n   =       any shared source, because its dropped term also depends on the sign")
         print("\n   =       of the product of the operand values, which is not tracked.\n")
+    }
+    else if code == 267 {
+        print("   |\n   = help: take the parameter or binding as an exclusive reference `&!T` (and pass `&!x` at the call site) to modify it\n")
     }
     else if code == 263 {
         print("   |\n   = help: rename the struct/enum, the method, or the module import so the qualifier is no longer ambiguous\n")
@@ -30188,7 +30322,22 @@ impl Checker {
         c.env = c.env.push_scope()
         c.borrows = c.borrows.push_scope()
         c = c.push_const_scope()
-        c = c.bind_pattern(arm.pattern, scrut_ty)
+        // #2377: a module-level let/const named by a bare arm is a value pattern.
+        var arm_is_const_value = false
+        if arm.pattern.kind == PatternKind::PatBinding && ast_is_global_const_name(arm.pattern.name) {
+            var bi = c.env.count - 1
+            var found = false
+            while bi >= 0 && !found {
+                if name_eq(c.env.bindings[bi as usize].name, arm.pattern.name) {
+                    found = true
+                    arm_is_const_value = c.env.bindings[bi as usize].scope_depth == 0
+                }
+                bi = bi - 1
+            }
+        }
+        if !arm_is_const_value {
+            c = c.bind_pattern(arm.pattern, scrut_ty)
+        }
         let pair = c.check_expr(arm.body)
         c = pair.0
         let body_ty = pair.1

@@ -212,19 +212,22 @@ for forbidden_control in IrCall IrCallExtern IrCallIndirect IrCallSret IrPhi; do
     fail "explicit control-use model must refuse $forbidden_control"
 done
 
-pass_a1_slice="$(awk '
-  /^fn ocp_const_fold_pass_a1\(/ { inside=1 }
-  /^fn ocp_const_fold_pass_a2\(/ { exit }
+# #1680: the const-fold blocks run in one scan again (ocp_const_fold_scan); the
+# former pass_a1/pass_a2/pass_b split never shared tracker state between them.
+scan_slice="$(awk '
+  /^fn ocp_const_fold_scan\(/ { inside=1 }
   inside { print }
+  inside && /^}/ { exit }
 ' "$OPT")"
-[[ "$pass_a1_slice" == *'former direct'* || "$pass_a1_slice" == *'former Block BG direct'* ]] ||
-  fail "pass A1 must declare its authority-owned rebracketing handoff"
-[[ "$pass_a1_slice" != *'Block AE: And-mask chain fold'* ]] ||
-  fail "pass A1 must not retain the pre-authority AND-chain mutation"
-[[ "$pass_a1_slice" != *'Block BG: OR constant-chain fold'* ]] ||
-  fail "pass A1 must not retain the pre-authority OR-chain mutation"
-[[ "$pass_a1_slice" != *'Block BM: XOR constant-chain fold'* ]] ||
-  fail "pass A1 must not retain the pre-authority XOR-chain mutation"
+[[ -n "$scan_slice" ]] || fail "ocp_const_fold_scan is missing"
+[[ "$scan_slice" == *'former direct'* || "$scan_slice" == *'former Block BG direct'* ]] ||
+  fail "the const-fold scan must declare its authority-owned rebracketing handoff"
+[[ "$scan_slice" != *'Block AE: And-mask chain fold'* ]] ||
+  fail "the const-fold scan must not retain the pre-authority AND-chain mutation"
+[[ "$scan_slice" != *'Block BG: OR constant-chain fold'* ]] ||
+  fail "the const-fold scan must not retain the pre-authority OR-chain mutation"
+[[ "$scan_slice" != *'Block BM: XOR constant-chain fold'* ]] ||
+  fail "the const-fold scan must not retain the pre-authority XOR-chain mutation"
 
 kernel_log="$WORK/kernel.log"
 if ! "$SOUC" run "$KERNEL" >"$kernel_log" 2>&1; then
