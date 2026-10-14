@@ -6389,6 +6389,45 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
     }
 }
 
+fn lower_fn_is_orbit_is_contested(lo: &Lowerer) -> bool with Mut, Panic, Div {
+    ir_name_eq((*(*lo).current_func).name, make_name("orbit_is_contested"))
+}
+
+// Last 16 slots of the locals table, only while lowering orbit_is_contested.
+// The param walker reports param_count=3 and the body still misses idents at
+// site 15349; this is the table lookup_local actually reads at those two moments.
+fn lower_dump_orbit_locals(lo: &Lowerer, tag: string) with IO, Mut, Panic, Div {
+    if !lower_fn_is_orbit_is_contested(lo) { return }
+    let stk = (*lo).locals
+    print("lower_locals: ")
+    print(tag)
+    print(" count=")
+    print_int((*stk).count)
+    print(" scope=")
+    print_int((*lo).scope_depth)
+    print("\n")
+    var i: i64 = 0
+    if (*stk).count > 16 { i = (*stk).count - 16 }
+    while i < (*stk).count && i < 4096 {
+        let nm = (*(*stk).names).values[i as usize]
+        var nlen = nm.len
+        if nlen < 0 { nlen = 0 }
+        if nlen > 64 { nlen = 64 }
+        print("  slot=")
+        print_int(i)
+        print(" len=")
+        print_int(nm.len)
+        print(" depth=")
+        print_int((*(*stk).depths).values[i as usize])
+        print(" reg=")
+        print_int((*(*stk).regs).values[i as usize])
+        print(" name=")
+        print(str_from_bytes(nm.buf, nlen))
+        print("\n")
+        i = i + 1
+    }
+}
+
 fn lowerer_bind_local_mut(
     lo: &! Lowerer,
     name: Name,
@@ -7568,6 +7607,7 @@ fn lowerer_lower_fn_item_mut(
         print_int((*(*lo).current_func).param_count)
         print("\n")
     }
+    lower_dump_orbit_locals(lo, "after_params")
 
     // ---- kernel CPU lane loop (#1504) ----
     // A `kernel fn` on a CPU host must run its body once per lane, not once with
@@ -13645,6 +13685,42 @@ impl Lowerer {
         lo = lo.emit(ir_jump(top_label))
         lo = lo.emit(ir_label(end_label))
         (lo, dst_reg)
+    }
+
+    // Fresh zeroed backing for every [T; N] field of an uninitialized struct.
+    // The field slot otherwise stays 0, and indexing resolves handle 0.
+    fn emit_uninit_struct_array_fields(self, dst_reg: i64, type_name: Name, slot_count: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var i: i64 = 0
+        while i < slot_count && i < 128 {
+            let pos = lo.struct_layout_field_pos(type_name, i)
+            var n = lo.struct_layout_pos_array_len(pos)
+            let noted = lower_raw_arr_len_for(type_name, i)
+            if noted > n { n = noted }
+            if pos >= 0 {
+                let si = pos / 128
+                let fi = pos - si * 128
+                if si >= 0 && si < (*lo.struct_layouts).count {
+                    let field = (*lo.struct_layouts).entries[si as usize].fields[fi as usize]
+                    if field.fixed_array_len > n { n = field.fixed_array_len }
+                    if field.word_scalar_array_len > n { n = field.word_scalar_array_len }
+                }
+            }
+            if n > 0 {
+                let fname = lo.struct_layout_pos_field_name(pos)
+                let pair = lo.fresh_reg()
+                lo = pair.0
+                let arr = pair.1
+                lo = lo.emit(ir_alloc_array(arr, lo.aggregate_storage_bytes(n), n))
+                if lo.struct_layout_pos_is_float(pos) == 2 {
+                    lo = lo.emit(ir_mark_float_reg(arr))
+                    lo = lo.bind_reg_array_elem_float(arr)
+                }
+                lo = lo.emit(ir_field_set(dst_reg, i, arr, fname))
+            }
+            i = i + 1
+        }
+        lo
     }
 
     // Slot count of a registered struct layout, or -1 when the type is unknown.
@@ -28226,6 +28302,10 @@ impl Lowerer {
                         lo = uninit_pair.0
                         let uninit_dst = uninit_pair.1
                         lo = lo.emit(ir_alloc(uninit_dst, lo.aggregate_storage_bytes(st_slot_count)))
+                        // Array fields are handles, not inline words. A zero slot
+                        // is handle 0, and the first m.arr[i] = store lands at
+                        // address 0x20. Allocate each [T; N] field up front.
+                        lo = lo.emit_uninit_struct_array_fields(uninit_dst, st_name, st_slot_count)
                         lo = lo.bind_local_struct_type(s.name, st_name, false)
                         bind_reg = uninit_dst
                     }
@@ -29214,6 +29294,22 @@ impl Lowerer {
                 }
             }
             _ => {}
+        }
+        // `let r = m.reward[i]` / `let vsp = V[sp]`. The element type is known
+        // (array field or array local) but the binding was untyped, so
+        // r.variance resolved by name and hit the first struct with that field
+        // (PBox.variance at slot 2, not Epistemic.variance at slot 1).
+        match s.expr {
+            Some(idx_rhs) => {
+                if (*idx_rhs).kind == ExprKind::ExprIndex {
+                    let elem_ty = lo.expr_receiver_struct_type_ref(&(*idx_rhs))
+                    if elem_ty.len > 0 && !ir_name_is_box(elem_ty)
+                        && lower_struct_layout_index_of(&(*lo.struct_layouts), elem_ty) >= 0 {
+                        lo = lo.bind_local_struct_type(s.name, elem_ty, false)
+                    }
+                }
+            }
+            None => {}
         }
         match s.expr {
             Some(expr_box) => {
