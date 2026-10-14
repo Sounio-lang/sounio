@@ -2,8 +2,8 @@
 topic_id: repo.frontdoor.docs-index
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.docs-index
 -->
 
@@ -36,7 +36,6 @@ Start with these current-state maps before diving into older deep reports:
 - [Self-Hosted Compiler](implementation/SELF_HOSTED_COMPILER.md)
 - [Tooling Summary](implementation/TOOLING_SUMMARY.md)
 - [Developer Workflow](contributor-guide/DEVELOPER_WORKFLOW.md)
-- [Foundry/Slurm Handoff](ops/foundry_slurm_handoff.md)
 
 ### Additional internals and design notes
 - [Technical Report](compiler/TECHNICAL_REPORT.md)

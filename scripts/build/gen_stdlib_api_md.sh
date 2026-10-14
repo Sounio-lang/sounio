@@ -68,8 +68,8 @@ total_modules=0
 topic_id: repo.docs.stdlib.stdlib-api-reference
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A3
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.stdlib.stdlib-api-reference
 -->
 
@@ -114,7 +114,7 @@ HEADER
         clean="${line#"${line%%[![:space:]]*}"}"
         module_fns+="- \`${clean}\` — *${rel}*"$'\n'
         ((module_count++)) || true
-      done < <(grep -E '^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]' "$f" | grep 'pub' || true)
+      done < <(grep -E '^[[:space:]]*pub[[:space:]]+fn[[:space:]]' "$f" || true)
     done
 
     if [ "$module_count" -gt 0 ]; then

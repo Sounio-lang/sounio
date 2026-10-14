@@ -2,8 +2,8 @@
 topic_id: repo.docs.implementation.migration-guide
 authority: historical
 audience: maintainers
-last_validated: 2026-03-07
-validated_by: A7
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.migration-guide
 -->
 
@@ -626,7 +626,7 @@ The answer below then pointed at signed bundle/state commands.
 > `scripts/omega/omega_prepare_policy_smoke.sh`,
 > `scripts/omega/omega_policy_status.sh`,
 > `scripts/bootstrap/omega_canonical_policy_sign.sh`,
-> `scripts/dev/diverse_double_compile_check.sh`) is dead for the same reason.
+> `scripts/archive/diverse_double_compile_check.sh`) is dead for the same reason.
 > The bootstrap chain that is actually exercised today is
 > `scripts/ci/bootstrap_chain_gate.sh`, which drives `bootstrap/stage0.c` ->
 > `bootstrap/boot1.sio` directly without any `souc` subcommand, alongside

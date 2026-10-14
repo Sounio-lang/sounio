@@ -2,8 +2,8 @@
 topic_id: website.docs.getting-started
 authority: dual
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#website.docs.getting-started
 -->
 
@@ -140,16 +140,16 @@ Para experimentar os recursos únicos de ciência e metrologia do Sounio diretam
 
 ```bash
 # Demo 1: Verificação dimensional estática (compilação aceita)
-./bin/souc run demo_unidades.sio
+./bin/souc run demos/intro/demo_unidades.sio
 
 # Demo 2: Propagação analítica de incertezas em tempo real (ISO GUM)
-./bin/souc run demo_incerteza.sio
+./bin/souc run demos/intro/demo_incerteza.sio
 
 # Demo 3: Portas de confiança dinâmicas (Sucesso - guarda aceita)
-bash scripts/ontology/expand_knowledge_runtime_guards.sh demo_portas_sucesso.sio /tmp/demo3_sucesso.sio && ./bin/souc run /tmp/demo3_sucesso.sio
+bash scripts/ontology/expand_knowledge_runtime_guards.sh demos/intro/demo_portas_sucesso.sio /tmp/demo3_sucesso.sio && ./bin/souc run /tmp/demo3_sucesso.sio
 
 # Demo 4: Portas de confiança dinâmicas (Rejeição - asserção falha no runtime)
-bash scripts/ontology/expand_knowledge_runtime_guards.sh demo_portas_rejeicao.sio /tmp/demo3_rejeicao.sio && ./bin/souc run /tmp/demo3_rejeicao.sio
+bash scripts/ontology/expand_knowledge_runtime_guards.sh demos/intro/demo_portas_rejeicao.sio /tmp/demo3_rejeicao.sio && ./bin/souc run /tmp/demo3_rejeicao.sio
 ```
 
 ### 6. Effects

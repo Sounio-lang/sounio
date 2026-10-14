@@ -2,8 +2,8 @@
 topic_id: repo.docs.training.rosetta.06-struct-and-methods
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.training.rosetta.06-struct-and-methods
 -->
 
@@ -85,4 +85,3 @@ fn main() -> i32 with IO, Mut, Panic, Div {
 - **By-value return** for `translate` — returns new `Point`, no mutation
 - **No `**0.5`** — write your own `sqrt` via Newton's method
 - **No f-strings** — use multiple `print()` calls
-- **No unary minus** — `0.0 - 1.0` instead of `-1.0`

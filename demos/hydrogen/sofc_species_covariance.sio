@@ -1,0 +1,283 @@
+// demos/hydrogen/sofc_species_covariance.sio
+//
+// Covariance on the cell, on two axes.
+//
+// Ontology. D2 is a subclass of H2, so a deuterium batch is accepted at an
+// anode that asks for hydrogen. O2 is disjoint; the commented call does not
+// compile.
+//
+// Validity. The anode requires a batch still valid on 2026-12-31. A
+// deuterium certificate dated 2027-06-30 covers that date and is accepted.
+// A certificate that expired on 2026-06-01 does not.
+//
+// Confidence. The anode requires epsilon < 0.05. The batch is epsilon < 0.01,
+// which is tighter, so it passes. epsilon < 0.50 does not, even though the
+// species and the date would.
+//
+// Provenance. A second gate requires Measured. measure() is Measured, so the
+// deuterium batch passes. Computed does not: a trusted gate does not accept
+// an untrusted source, and being a subclass of hydrogen does not repair that.
+//
+// The reaction returns two objects. The water stays in moles, and its
+// variance is only the batch. The electrical work is a different species:
+// 26.444 MJ, variance the product of the batch and the voltage. A
+// correlation moves the work and leaves the water where it was.
+//
+// Amount. moles_of returns the mole count from Knowledge<H2>. The species
+// stays on the parameter. variance_of at the caller is the GUM variance of
+// the amount, and it survives the scale into megajoules. water_out does the
+// same for Knowledge<H2O>. The cell returns both, each in its own slot.
+// covariance_of is the claimant. gum_cov_cell is the clock (ADR-009, sounio_closed_form_twin).
+ontology Fuel {
+    class Substance { property amount: f64 where amount >= 0.0 }
+    class H2 subclass_of Substance
+    class D2 subclass_of H2
+    class O2 subclass_of Substance
+    class H2O subclass_of Substance
+    disjoint H2, O2
+    disjoint H2, H2O
+    disjoint O2, H2O
+    class ElectricalWork subclass_of Substance
+    disjoint H2O, ElectricalWork
+}
+
+struct CellOut {
+    water: Knowledge[H2O, ValidUntil("2026-12-31"), epsilon < 0.05, Derived]
+    work: Knowledge[ElectricalWork, ValidUntil("2026-12-31"), epsilon < 0.05, Derived]
+}
+
+
+var FARADAY: f64 = 96485.3321
+var E_CELL: f64 = 0.65
+var N_MOL: f64 = 210.826
+var U_MOL: f64 = 2.10826
+var U_VOLT: f64 = 0.01
+
+fn anode(h: Knowledge[H2, ValidUntil("2026-12-31"), epsilon < 0.05, Derived]) -> Knowledge[H2O, ValidUntil("2026-12-31"), epsilon < 0.05, Derived] with Mut, Div, Epistemic {
+    let n: f64 = h.value
+    let w: H2O = n
+    Knowledge {
+        value: w,
+        epsilon: 0.01,
+        validity: "2027-06-30",
+        provenance: "cell"
+    }
+}
+
+fn electricity(w: Knowledge[H2O, ValidUntil("2026-12-31"), epsilon < 0.05, Derived]) -> f64 with Mut, Div, Epistemic {
+    let n: f64 = w.value
+    n * 2.0 * FARADAY * E_CELL / 1.0e6
+}
+
+fn anode_measured(h: Knowledge[H2, Measured]) -> f64 with Mut, Div, Epistemic {
+    let n: f64 = h.value
+    n * 2.0 * FARADAY * E_CELL / 1.0e6
+}
+
+fn water_out(w: Knowledge<H2O>) -> f64 with Mut, Div, Epistemic {
+    let n: f64 = w.value
+    n
+}
+
+fn moles_of(h: Knowledge<H2>) -> f64 with Mut, Div, Epistemic {
+    let n: f64 = h.value
+    n
+}
+
+fn cell_both(h: Knowledge<H2>, e: Knowledge<f64>) -> f64 with Mut, Div, Epistemic {
+    let n: f64 = h.value
+    let volts: f64 = e.value
+    n * 2.0 * FARADAY * volts / 1.0e6
+}
+
+fn cell(h: Knowledge<H2>, e: Knowledge<f64>) -> CellOut with Mut, Div, Epistemic {
+    let n: f64 = h.value
+    let volts: f64 = e.value
+    let mj: f64 = n * 2.0 * FARADAY * volts / 1.0e6
+    let w: H2O = n
+    let k: ElectricalWork = mj
+    CellOut {
+        water: Knowledge { value: w, epsilon: 0.01, validity: "2027-06-30", provenance: "cell" },
+        work: Knowledge { value: k, epsilon: 0.01, validity: "2027-06-30", provenance: "cell" }
+    }
+}
+
+
+fn cell_water_mol(n: f64, volts: f64) -> f64 {
+    n
+}
+
+fn cell_work_mj(n: f64, volts: f64) -> f64 {
+    n * 2.0 * FARADAY * volts / 1.0e6
+}
+
+fn gum_cov_cell(n: f64, volts: f64, u_n: f64, u_v: f64, rho: f64) -> f64 {
+    let h = 0.001
+    let dw_dn = (cell_water_mol(n + h, volts) - cell_water_mol(n - h, volts)) / (2.0 * h)
+    let dw_dv = (cell_water_mol(n, volts + h) - cell_water_mol(n, volts - h)) / (2.0 * h)
+    let dW_dn = (cell_work_mj(n + h, volts) - cell_work_mj(n - h, volts)) / (2.0 * h)
+    let dW_dv = (cell_work_mj(n, volts + h) - cell_work_mj(n, volts - h)) / (2.0 * h)
+    let diag = dw_dn * dW_dn * (u_n * u_n) + dw_dv * dW_dv * (u_v * u_v)
+    let cross = (dw_dn * dW_dv + dw_dv * dW_dn) * u_n * u_v * rho
+    diag + cross
+}
+
+fn gum_var_water(n: f64, volts: f64, u_n: f64, u_v: f64, rho: f64) -> f64 {
+    let h = 0.001
+    let dw_dn = (cell_water_mol(n + h, volts) - cell_water_mol(n - h, volts)) / (2.0 * h)
+    let dw_dv = (cell_water_mol(n, volts + h) - cell_water_mol(n, volts - h)) / (2.0 * h)
+    let diag = dw_dn * dw_dn * (u_n * u_n) + dw_dv * dw_dv * (u_v * u_v)
+    let cross = 2.0 * dw_dn * dw_dv * u_n * u_v * rho
+    diag + cross
+}
+
+fn gum_var_work(n: f64, volts: f64, u_n: f64, u_v: f64, rho: f64) -> f64 {
+    let h = 0.001
+    let dW_dn = (cell_work_mj(n + h, volts) - cell_work_mj(n - h, volts)) / (2.0 * h)
+    let dW_dv = (cell_work_mj(n, volts + h) - cell_work_mj(n, volts - h)) / (2.0 * h)
+    let diag = dW_dn * dW_dn * (u_n * u_n) + dW_dv * dW_dv * (u_v * u_v)
+    let cross = 2.0 * dW_dn * dW_dv * u_n * u_v * rho
+    diag + cross
+}
+
+fn approx(actual: f64, expected: f64, tol: f64) -> bool {
+    let d = actual - expected
+    if d < 0.0 { return (0.0 - d) < tol }
+    d < tol
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    println("DEUTERIUM AT THE ANODE, VALID THROUGH THE CELL WINDOW")
+    println("D2 until 2027-06-30, epsilon < 0.01, Derived.")
+    println("Anode wants H2 until 2026-12-31, epsilon < 0.05, Derived.")
+    println("")
+
+    let tagged: D2 = N_MOL
+    let feed: Knowledge[D2, ValidUntil("2027-06-30"), epsilon < 0.01, Derived] = Knowledge {
+        value: tagged,
+        epsilon: 0.01,
+        validity: "2027-06-30",
+        provenance: "sieverts"
+    }
+    let produced = anode(feed)
+    let mj = electricity(produced)
+    let n_from_cell: f64 = produced.value
+    let scale = 2.0 * FARADAY * E_CELL / 1.0e6
+    let expect_mj = N_MOL * scale
+
+    let batch: Knowledge[D2, Measured] = measure(tagged, uncertainty: U_MOL)
+    let mj_measured = anode_measured(batch)
+    let var_fn = variance_of(mj_measured)
+    let u_mol = uncertainty_of(batch)
+    let u_mj = u_mol * scale
+
+    let water_tagged: H2O = N_MOL
+    let water: Knowledge<H2O> = measure(water_tagged, uncertainty: U_MOL)
+    let n_water = water_out(water)
+    let var_water = variance_of(n_water)
+    let expect_var_water = U_MOL * U_MOL
+
+    let n_moles = moles_of(batch)
+    let mj_moles = n_moles * scale
+    let var_mj = variance_of(mj_moles)
+    let expect_var = u_mj * u_mj
+
+    let e_now: f64 = E_CELL
+    let volts: Knowledge<f64> = measure(e_now, uncertainty: U_VOLT)
+    let mj_both = cell_both(batch, volts)
+    let var_both = variance_of(mj_both)
+    let c_ne = 2.0 * FARADAY / 1.0e6
+    let term_n = (c_ne * E_CELL) * (c_ne * E_CELL) * (U_MOL * U_MOL)
+    let term_v = (c_ne * N_MOL) * (c_ne * N_MOL) * (U_VOLT * U_VOLT)
+    let expect_both = term_n + term_v
+
+    let yielded = cell(batch, volts)
+    let water_mol: f64 = yielded.water.value
+    let var_water_only = variance_of(yielded.water.value)
+    let work_mj: f64 = yielded.work.value
+    let var_work = variance_of(yielded.work.value)
+    let cov_engine = covariance_of(yielded.water.value, yielded.work.value)
+
+    let n_c: f64 = batch.value
+    let v_c: f64 = volts.value
+    let _rho = correlate(n_c, v_c, 1.0)
+    let yielded_rho = cell(batch, volts)
+    let var_water_rho = variance_of(yielded_rho.water.value)
+    let var_work_rho = variance_of(yielded_rho.work.value)
+    let cov_engine_rho = covariance_of(yielded_rho.water.value, yielded_rho.work.value)
+    let water_live = variance_of(yielded.water.value)
+    let work_live = variance_of(yielded.work.value)
+    let cov_live = covariance_of(yielded.water.value, yielded.work.value)
+    let dn = c_ne * E_CELL
+    let dv = c_ne * N_MOL
+    let cross = 2.0 * dn * dv * U_MOL * U_VOLT
+    let expect_rho = expect_both + cross
+    let expect_water_var = U_MOL * U_MOL
+
+    print("electricity MJ ")
+    print_f64(mj)
+    print("\nwater from the anode, mol ")
+    print_f64(n_from_cell)
+    print("\nmeasured electricity MJ ")
+    print_f64(mj_measured)
+    print("\nuncertainty MJ ")
+    print_f64(u_mj)
+    print("\nvariance of the water, mol^2 ")
+    print_f64(var_water)
+    print("\nvariance of the electricity, MJ^2 ")
+    print_f64(var_mj)
+    print("\nvariance through the cell function, MJ^2 ")
+    print_f64(var_fn)
+    print("\nvariance of moles and voltage, MJ^2 ")
+    print_f64(var_both)
+    print("\nwater returned with the work, mol ")
+    print_f64(water_mol)
+    print("\nvariance of that water, mol^2 ")
+    print_f64(var_water_only)
+    print("\nwork MJ ")
+    print_f64(work_mj)
+    print("\nvariance of the work, MJ^2 ")
+    print_f64(var_work)
+    print("\nvariance of the work, correlated, MJ^2 ")
+    print_f64(var_work_rho)
+    print("\nvariance of the water after correlation, mol^2 ")
+    print_f64(var_water_rho)
+    print("\n")
+
+    let clock = gum_cov_cell(N_MOL, E_CELL, U_MOL, U_VOLT, 0.0)
+    let clock_rho = gum_cov_cell(N_MOL, E_CELL, U_MOL, U_VOLT, 1.0)
+    let clock_water = gum_var_water(N_MOL, E_CELL, U_MOL, U_VOLT, 1.0)
+    let clock_work = gum_var_work(N_MOL, E_CELL, U_MOL, U_VOLT, 1.0)
+    print("covariance water-work, mol MJ ")
+    print_f64(cov_engine)
+    print(" clock ")
+    print_f64(clock)
+    print(" correlated ")
+    print_f64(cov_engine_rho)
+    print(" clock ")
+    print_f64(clock_rho)
+    print("\n")
+
+    if approx(mj, expect_mj, 0.01) && approx(n_from_cell, N_MOL, 0.01) && approx(mj_measured, expect_mj, 0.01) && approx(u_mol, U_MOL, 0.0001) && approx(n_water, N_MOL, 0.01) && approx(n_moles, N_MOL, 0.01) && approx(mj_moles, expect_mj, 0.01) && approx(var_water, expect_var_water, 0.0001) && approx(var_mj, expect_var, 0.00001) && approx(var_fn, expect_var, 0.00001) && var_mj > 0.05 && var_fn > 0.05 && approx(var_both, expect_both, 0.0001) && var_both > var_fn && approx(water_mol, N_MOL, 0.01) && approx(var_water_only, expect_water_var, 0.0001) && approx(work_mj, expect_mj, 0.01) && approx(var_work, expect_both, 0.0001) && approx(var_work_rho, expect_rho, 0.0001) && var_work_rho > var_work && approx(var_water_rho, expect_water_var, 0.0001) && approx(cov_engine, clock, 0.0001) && approx(cov_engine_rho, clock_rho, 0.0001) && clock_rho > clock && approx(water_live, clock_water, 0.0001) && approx(work_live, clock_work, 0.0001) && approx(cov_live, clock_rho, 0.0001) {
+        println("COVARIANCE_OK")
+        return 0
+    }
+    println("COVARIANCE_FAIL")
+    1
+}
+
+// Both of these are refused. Uncomment one at a time.
+//
+// Oxygen is not hydrogen:
+//   let air: Knowledge[O2, ValidUntil("2027-06-30"), Derived] = Knowledge {
+//       value: N_MOL as O2, epsilon: 0.99,
+//       validity: "2027-06-30", provenance: "air"
+//   }
+//   anode(air)
+//
+// A certificate that lapses before the cell's window:
+//   let stale: Knowledge[D2, ValidUntil("2026-06-01"), Derived] = Knowledge {
+//       value: N_MOL as D2, epsilon: 0.99,
+//       validity: "2026-06-01", provenance: "old-batch"
+//   }
+//   anode(stale)

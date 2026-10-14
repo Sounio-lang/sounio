@@ -2,10 +2,12 @@
 topic_id: repo.docs.dissertation.results.sobol-pce-semaglutide-v1
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.results.sobol-pce-semaglutide-v1
 -->
+
+> **SUPERSEDED 2026-09-26: floor-biased PBPK28 numbers.** Every Saltelli sample on this page was simulated through `pbpk28_full_cn_step`, whose negativity floors injected mass into the bolus: +28% AUC_blood for the 1 mg semaglutide bolus at the harness's dt = 0.5 h, by an amount that depends on the sampled parameters. Regenerated results: [`sobol_pce_semaglutide_v2.md`](sobol_pce_semaglutide_v2.md). Audit: `docs/audit/PBPK28_CN_RANNACHER_MASS_BALANCE_2026-09-26.md`.
 
 # §4.10.5 — Sobol' / Cut-HDMR / PCE: Semaglutide
 

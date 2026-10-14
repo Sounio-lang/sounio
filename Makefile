@@ -67,9 +67,36 @@ test-stdlib:         ## Run stdlib integration tests (subset)
 	$(SOUC) run tests/stdlib/bayes/test_prior_e2e.sio
 	$(SOUC) run tests/stdlib/complex/test_complex.sio
 
-build-madaros:       ## Build the Stage1 modular compiler (Madaros)
+build-madaros:       ## Build the Stage1 modular compiler (Madaros); cached by content, see scripts/dev/madaros-cache.sh
 	@echo "→ Building Madaros (Stage1 modular compiler)"
 	bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
+
+MADAROS_BG_LOG := artifacts/self-hosted/build-madaros.log
+MADAROS_BG_PID := artifacts/self-hosted/build-madaros.pid
+
+build-madaros-bg:    ## Same, detached (survives SSH drops); log+pid under artifacts/self-hosted/
+	@mkdir -p artifacts/self-hosted
+	@# One shell: `exit` in a separate recipe line would not stop the launch.
+	@if [ -f $(MADAROS_BG_PID) ] && kill -0 $$(cat $(MADAROS_BG_PID)) 2>/dev/null; then \
+	  echo "build already running: pid $$(cat $(MADAROS_BG_PID)), log $(MADAROS_BG_LOG)"; \
+	else \
+	  nohup bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros > $(MADAROS_BG_LOG) 2>&1 & echo $$! > $(MADAROS_BG_PID); \
+	  echo "→ Madaros build detached: pid $$(cat $(MADAROS_BG_PID)), log $(MADAROS_BG_LOG)"; \
+	  echo "   follow with: make build-madaros-wait"; \
+	fi
+
+build-madaros-wait:  ## Block until the detached build finishes; exit with its status
+	@if [ ! -f $(MADAROS_BG_PID) ]; then echo "no detached build (no $(MADAROS_BG_PID))"; exit 2; fi
+	@pid=$$(cat $(MADAROS_BG_PID)); \
+	while kill -0 $$pid 2>/dev/null; do sleep 15; done; \
+	tail -n 3 $(MADAROS_BG_LOG); \
+	test -s artifacts/self-hosted/madaros && grep -q "Madaros ready" $(MADAROS_BG_LOG)
+
+madaros-cache-status: ## Show what the content-addressed Madaros cache holds
+	@bash -c 'source scripts/dev/madaros-cache.sh; d=$$(madaros_cache_dir); echo "cache: $$d"; \
+	  for s in seed madaros; do echo "-- $$s"; ls -1t $$d/$$s 2>/dev/null | grep -v "^\." | while read k; do \
+	    printf "  %s  built %s  head %s\n" "$${k:0:12}" "$$(cat $$d/$$s/$$k/built 2>/dev/null)" "$$(cat $$d/$$s/$$k/head 2>/dev/null)"; done; done; \
+	  echo "-- current tree key: $$(madaros_tree_key | cut -c1-12)"'
 
 test-madaros-identity: ## Verify Madaros identifies as the Stage1 modular Sounio compiler
 	@bash scripts/gates/g6_madaros_identity.sh

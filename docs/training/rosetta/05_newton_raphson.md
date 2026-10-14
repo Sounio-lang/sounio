@@ -2,8 +2,8 @@
 topic_id: repo.docs.training.rosetta.05-newton-raphson
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.training.rosetta.05-newton-raphson
 -->
 
@@ -79,7 +79,7 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     print("Root of sin near 3.0: ")
     print(root)
     println("")
-    0
+    return 0
 }
 ```
 
@@ -87,6 +87,5 @@ fn main() -> i32 with IO, Mut, Panic, Div {
 - **No `import math`** — Sounio has no stdlib imports for math; write your own `sin` (Taylor series)
 - **Function references**: `newton(tc_sin, 3.0)` passes named function, not lambda
 - **No f-strings** — use `print()` for each value
-- **No unary minus** — `0.0 - x` instead of `-x`
 - **Effects propagate**: `fn(f64) -> f64 with Mut, Panic, Div` in function pointer type
 - **Explicit tolerance** — `0.000000000001` instead of `1e-12` (scientific notation works in literals but spelling out is clearer)

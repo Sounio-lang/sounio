@@ -2,8 +2,8 @@
 topic_id: repo.docs.quick-start-guide
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.quick-start-guide
 -->
 
@@ -180,7 +180,7 @@ cd examples/epistemic
 
 2. **Explore your domain**:
    - `examples/pbpk/` - Pharmacokinetics
-   - `examples/fmri/` - Neuroimaging
+   - `examples/connectivity/` - Brain-network analysis
    - `examples/science/` - General scientific computing
 
 3. **Read the manifesto** to understand the philosophy

@@ -34,15 +34,14 @@ pub fn native_v2_handle_entry_field_flags() -> i64 { 32 }
 pub fn native_v2_handle_entry_field_epoch() -> i64 { 40 }
 pub fn native_v2_handle_entry_size() -> i64 { 48 }
 // Managed-handle ceiling for one native-v2 process. Handles are allocated by a
-// MONOTONIC bump of RuntimeContext.handle_count and are NEVER reclaimed: the
-// only reset emitter (native_v2_emit_gc_empty_frame_reset) is deliberately
-// unwired on this backend because stack maps carry slot COUNTS, not a root
-// bitmap, so no safe liveness point exists (see the "Fail closed" comment at the
-// exit-182 site in native/codegen_x86_linux.sio). This number is therefore a
-// hard per-process allocation budget, not a working-set size.
+// bump of RuntimeContext.handle_count. The only thing that ever lowers it is
+// region reclamation at function return (see "Region reclamation" below): a
+// whole-heap reset (native_v2_emit_gc_empty_frame_reset) stays unwired on this
+// backend because stack maps carry slot COUNTS, not a root bitmap, so no point
+// exists at which every live root is known.
 //
-// 2^22 (raised from 2^20 on 2026-07-26). This MOVES the wall; it does not
-// remove it. The lifetime problem is unchanged and still open.
+// 2^22 (raised from 2^20 on 2026-07-26). Raising it only MOVES the wall; the
+// region reclamation below is what keeps iterative code under it.
 //
 // Cost is zero-sum against the heap, not against the ELF. The table is carved
 // out of the single fixed 2 GiB anonymous mmap taken in the entry trampoline:
@@ -69,6 +68,49 @@ pub fn native_v2_handle_table_bytes() -> i64 { native_v2_handle_entry_size() * n
 // small-value allocation. Raw pointers from the native heap always sit
 // strictly above the handle-id range.
 pub fn native_v2_handle_raw_ptr_threshold() -> i64 { native_v2_handle_table_capacity_default() }
+
+// ---------------------------------------------------------------------------
+// Region reclamation (docs/audit/MADAROS_HANDLE_182_BBB_PER_CONSTRUCTION_DISPATCH_2026-09-26.md)
+//
+// A function that lowering marks eligible opens a REGION at entry: it records
+// the heap cursor H0 and handle count C0 on a small side stack. Everything the
+// call allocates lands at addresses >= H0 and handle ids > C0, because both
+// resources are bumped. At return, if nothing allocated inside the region was
+// stored anywhere older, the only way out for a region object is the return
+// value. Lowering then copies the young part of the return value to the top,
+// resets both bumps to (H0, C0), and copies it back down. The dead remainder
+// of the region is reclaimed.
+//
+// The invariant that makes "older" checkable by address: every live object
+// allocated before a region opened sits below its H0, and every object
+// allocated after sits at or above it. Bumping preserves that, and so does a
+// reset, since the survivors are re-placed at the top of the parent's region.
+//
+// Escapes are caught DYNAMICALLY, not by static analysis. Every store that can
+// write a reference word into memory first calls the barrier with the stored
+// word w and the target t. If w is a heap object born at address b and the
+// target was born at a < b, every open region whose start s satisfies
+// a < s <= b is marked escaped, and those regions skip the reset. A scalar that
+// happens to look like a reference can only mark a region escaped, never free
+// a live object. Stack and BSS targets count as a = 0 (older than everything).
+//
+// Records are 6 words {H0, C0, escaped, zero_to, handles_to, reserved} in a
+// stack carved from the top of the 2 GiB arena, above heap_limit. A reset
+// leaves the first copy of the return value above the new cursor and above
+// the new handle count; zero_to and handles_to remember how far it reaches, so
+// the second copy can still recognise it as young, and so leaving the region
+// can zero it (lowering assumes fresh heap bytes are zero). RuntimeContext.region_top points
+// at the innermost record, 0 when no region is open. Overflow (deeper than the
+// record capacity) simply declines to open a region.
+// ---------------------------------------------------------------------------
+pub fn native_v2_region_record_size() -> i64 { 48 }
+pub fn native_v2_region_record_field_heap_start() -> i64 { 0 }
+pub fn native_v2_region_record_field_handle_start() -> i64 { 8 }
+pub fn native_v2_region_record_field_escaped() -> i64 { 16 }
+pub fn native_v2_region_record_field_zero_to() -> i64 { 24 }
+pub fn native_v2_region_record_field_handles_to() -> i64 { 32 }
+pub fn native_v2_region_stack_capacity() -> i64 { 65536 }
+pub fn native_v2_region_stack_bytes() -> i64 { native_v2_region_record_size() * native_v2_region_stack_capacity() }
 
 // SysV x86-64 register-pair threshold: ≤16 B value structs must not consume
 // a GC handle (issue #919). IR lowering emits aggregate_storage_bytes = n*8

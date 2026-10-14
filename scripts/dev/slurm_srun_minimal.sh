@@ -4,7 +4,7 @@
 #
 # Supported path today: srun (this script). sbatch is NOT repaired —
 # user_env_retrieval_failed is an admin/controller issue for openvscode-server;
-# lanes cannot fix it. See docs/ops/SLURM_LAUNCH_REPAIR_2026-08-17.md.
+# lanes cannot fix it.
 #
 # Usage:
 #   scripts/dev/slurm_srun_minimal.sh 'echo hello'

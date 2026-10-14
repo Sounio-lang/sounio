@@ -2,8 +2,8 @@
 topic_id: repo.docs.guide.tutorial
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.tutorial
 -->
 
@@ -576,7 +576,7 @@ fn dot_product<T: Numeric>(a: [T], b: [T]) -> T {
 ### Start Building
 - Try the [medical examples](../../examples/medlang/) for PK/PD modeling
 - Explore [GPU examples](../../examples/gpu/) for high-performance computing
-- Check [fMRI examples](../../examples/fmri/) for neuroimaging
+- Check [connectivity examples](../../examples/connectivity/) for brain-network analysis
 
 ### Get Help
 - **[FAQ](../FAQ.md)** - Common questions

@@ -2,8 +2,8 @@
 topic_id: repo.docs.guide.programming
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.programming
 -->
 
@@ -1965,8 +1965,6 @@ fn foo() -> i32 {
 
 // Type annotations: use same syntax
 let x: i32 = 5         // OK
-let x = 5<i32>         // OK (type suffix syntax)
-let x = 5.0<f64>       // OK for floats with units
 
 // Effect annotation: use 'with' keyword
 fn foo() -> i32 with IO { }   // Sounio style

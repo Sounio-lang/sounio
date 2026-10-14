@@ -1,0 +1,179 @@
+// demos/hydrogen/sofc_mh_design.sio
+//
+// The compressor that is thermally autonomous on SOFC waste heat.
+//
+// sofc_mh_coupling.sio showed that Gkanas et al. 2020 Table 6 asks the cell
+// to burn about six moles of hydrogen for every mole the seven-stage machine
+// releases. This file turns that into a design: the longest cascade, starting
+// from the 20 bar feed, whose heat fits inside what the cell rejects when it
+// burns that same hydrogen.
+//
+// Heat split, checked against the paper rather than assumed. The sum of
+// absorption and desorption enthalpies in Table 3, times the moles in 0.425 kg,
+// reproduces Table 6's latent column (case 1, 61.83 MJ) to a tenth of a
+// percent. Sensible heat is split equally across the seven stages: the paper
+// gives each stage the same 136 kg of steel and the same temperature swing.
+//
+// A stage is included only if the cascade up to it still fits. Skipping a
+// stage is not allowed: the feed is 20 bar, and stage k cannot run without
+// stage k-1.
+
+unit mol;
+
+ontology Fuel {
+    class Substance { property amount: f64 where amount >= 0.0 }
+    class H2 subclass_of Substance
+    class O2 subclass_of Substance
+    class H2O subclass_of Substance
+    disjoint H2, O2
+    disjoint H2, H2O
+    disjoint O2, H2O
+}
+
+var R_GAS: f64 = 8.314462618
+var FARADAY: f64 = 96485.3321
+var DH_RXN: f64 = 0.0 - 241826.0
+var E_CELL: f64 = 0.700
+var H2_KG: f64 = 0.425
+var M_H2: f64 = 0.00201588
+var T_HOT: f64 = 353.15
+var SENSIBLE_MJ: f64 = 71.76
+var LATENT_PAPER_MJ: f64 = 61.83
+
+fn dh_abs(stage: i64) -> f64 {
+    if stage == 0 { 25242.0 } else if stage == 1 { 21466.0 } else if stage == 2 { 20354.0 }
+    else if stage == 3 { 19991.0 } else if stage == 4 { 18198.0 } else if stage == 5 { 16232.0 }
+    else { 14702.0 }
+}
+fn dh_des(stage: i64) -> f64 {
+    if stage == 0 { 28195.0 } else if stage == 1 { 26133.0 } else if stage == 2 { 24823.0 }
+    else if stage == 3 { 20252.0 } else if stage == 4 { 19856.0 } else if stage == 5 { 19125.0 }
+    else { 18916.0 }
+}
+fn ds_des(stage: i64) -> f64 {
+    if stage == 0 { 106.8 } else if stage == 1 { 107.1 } else if stage == 2 { 108.7 }
+    else if stage == 3 { 100.8 } else if stage == 4 { 101.4 } else if stage == 5 { 101.5 }
+    else { 106.2 }
+}
+
+fn water_from(h2: H2, o2: O2) -> H2O with Mut, Div, Panic {
+    let from_h: f64 = h2
+    let from_o: f64 = o2 * 2.0
+    let w: f64 = if from_h < from_o { from_h } else { from_o }
+    let out: H2O = w
+    out
+}
+
+fn q_cell(e_op: f64) -> f64 with Mut, Div, Panic {
+    (0.0 - DH_RXN) - 2.0 * FARADAY * e_op
+}
+
+fn p_des(stage: i64) -> f64 with Mut, Div, Panic {
+    exp(ds_des(stage) / R_GAS - dh_des(stage) / (R_GAS * T_HOT))
+}
+
+fn print_fix2(x: f64) with IO, Mut, Div, Panic {
+    var v = x
+    var neg = false
+    if v < 0.0 { neg = true  v = 0.0 - v }
+    let scaled = v * 100.0
+    var n = scaled as i64
+    let frac = scaled - (n as f64)
+    if frac >= 0.5 { n = n + 1 }
+    let whole = n / 100
+    let cent = n - whole * 100
+    if neg { print("-") }
+    print(whole) print(".")
+    if cent < 10 { print("0") }
+    print(cent)
+}
+
+fn enthalpy_sum() -> f64 {
+    var s = 0.0
+    var i: i64 = 0
+    while i < 7 {
+        s = s + dh_abs(i) + dh_des(i)
+        i = i + 1
+    }
+    s
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("AUTONOMOUS CASCADE: heat fits what the cell rejects")
+    println("H2 + 1/2 O2 -> H2O, ChEBI 18276 / 15379 / 15377")
+    println("Cell at 0.70 V. Feed 20 bar. T_hot 80 C. Case 1 of Table 6.")
+    println("")
+
+    let n_mol = H2_KG / M_H2
+    let h2: H2 = n_mol
+    let o2: O2 = n_mol
+    let water = water_from(h2, o2)
+    let n_w: f64 = water
+    if n_w + 0.01 < n_mol {
+        println("STOICHIOMETRY_FAIL")
+        return 1
+    }
+
+    let latent_check = enthalpy_sum() * n_mol / 1.0e6
+    print("latent from Table 3 enthalpies (MJ) ") print_fix2(latent_check)
+    print("   paper ") print_fix2(LATENT_PAPER_MJ) println("")
+    let latent_err = latent_check - LATENT_PAPER_MJ
+    var abs_err = latent_err
+    if abs_err < 0.0 { abs_err = 0.0 - abs_err }
+    if abs_err > 0.2 {
+        println("LATENT_SPLIT_FAIL")
+        return 1
+    }
+    println("split accepted: latent tracks absorption plus desorption enthalpy")
+    println("")
+
+    let qc = q_cell(E_CELL)
+    let sensible_per = (SENSIBLE_MJ * 1.0e6 / n_mol) / 7.0
+    print("cell rejects (kJ/mol) ") print_fix2(qc / 1000.0) println("")
+    print("steel per stage (kJ/mol) ") print_fix2(sensible_per / 1000.0) println("")
+    println("")
+
+    println("stage  enthalpy+steel (kJ/mol)  cumulative  P_des (bar)  fits")
+    var cum = 0.0
+    var kept: i64 = 0
+    var p_kept = 0.0
+    var i: i64 = 0
+    while i < 7 {
+        let cost = dh_abs(i) + dh_des(i) + sensible_per
+        cum = cum + cost
+        let p = p_des(i)
+        let fits = cum <= qc
+        print("  S") print(i + 1)
+        print("   ") print_fix2(cost / 1000.0)
+        print("   ") print_fix2(cum / 1000.0)
+        print("   ") print_fix2(p)
+        if fits {
+            println("   yes")
+            kept = i + 1
+            p_kept = p
+        } else {
+            println("   no")
+        }
+        i = i + 1
+    }
+
+    println("")
+    print("longest cascade that closes: ") print(kept) println(" stage(s)")
+    print("delivery pressure of that cascade (bar) ") print_fix2(p_kept) println("")
+    print("their seven-stage ceiling at 80 C (bar) ") print_fix2(p_des(6)) println("")
+
+    // Steel factor for a two-stage machine: enthalpy of S1+S2 plus f times
+    // two stages of steel, fitted inside the cell heat. f = 1 is the paper.
+    let enth2 = dh_abs(0) + dh_des(0) + dh_abs(1) + dh_des(1)
+    let room = qc - enth2
+    let f = room / (2.0 * sensible_per)
+    print("steel mass, relative to 136 kg, for TWO stages to close: ")
+    print_fix2(f) println("")
+    print("that is ") print_fix2(f * 136.0) println(" kg of steel per stage")
+
+    println("")
+    println("Seven stages do not close at any steel mass: the enthalpies alone")
+    println("already exceed what the cell rejects.")
+    println("DESIGN_OK")
+    0
+}

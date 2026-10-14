@@ -4,10 +4,14 @@ import path from 'node:path';
 import {
   ACCEPTANCE_RELATIVE_PATH,
   LOCALES,
+  MATRIX_RELATIVE_PATH,
   REGISTRY_RELATIVE_PATH,
   buildGovernedTopicRegistry,
   formatAcceptanceReportStub,
   isRealValidationDate,
+  LEGACY_PLACEHOLDER_DATE,
+  UNVALIDATED_BY,
+  UNVALIDATED_DATE,
   metadataFieldsForTopic,
   parseFrontmatter,
   parseRepoMetadata,
@@ -22,6 +26,12 @@ function compareRegistry(expected, actual) {
 }
 
 function fail(errors) {
+  if (placeholderPaths.length > 0) {
+    console.log(`Notice: stale generated snapshot ${MATRIX_RELATIVE_PATH} still carries the retired ${LEGACY_PLACEHOLDER_DATE} placeholder, which records no validation (#1240).`);
+  }
+  if (unvalidatedCount > 0) {
+    console.log(`Notice: ${unvalidatedCount} governed documents carry no validation record (last_validated: ${UNVALIDATED_DATE}).`);
+  }
   if (errors.length === 0) {
     console.log('Docs registry check passed.');
     return;
@@ -125,7 +135,11 @@ async function validateRepoLinks(topic, errors) {
 }
 
 function metadataMismatch(expectedFields, actualFields, context, errors) {
-  for (const [key, expected] of Object.entries(expectedFields)) {
+  // Provenance is checked by provenanceFormatErrors. Only these structural
+  // fields are registry-authoritative; comparing generated provenance here
+  // would make a stale snapshot block an unrelated PR.
+  for (const key of ['topic_id', 'authority', 'audience', 'source_of_truth']) {
+    const expected = expectedFields[key];
     if ((actualFields?.[key] ?? '') !== expected) {
       errors.push(`${context} metadata mismatch for ${key}: expected "${expected}"`);
     }
@@ -140,15 +154,43 @@ function metadataMismatch(expectedFields, actualFields, context, errors) {
 // meaningful for the pair -- it still rejects a malformed or blanked record --
 // without rejecting the true values the old constant-equality enforcement used
 // to fail on (the defect the self-falsifying lineage recorded as R22/R23).
+//
+// The one other accepted shape is the explicit no-record marker
+// (`unvalidated` / `none`, #1240). The retired 2026-03-07 placeholder is
+// shaped like a record and is not one; the generator no longer writes it and
+// the checker counts the documents that still carry it (the generated
+// DOCS_AUTHORITY_MATRIX.md snapshot until its next refresh).
+let unvalidatedCount = 0;
+const placeholderPaths = [];
+
 function provenanceFormatErrors(actualFields, context, errors) {
   if (!actualFields) {
     return;
   }
   const date = String(actualFields.last_validated ?? '').trim();
+  const validator = String(actualFields.validated_by ?? '').trim();
+  if (date === UNVALIDATED_DATE) {
+    unvalidatedCount += 1;
+    if (validator !== UNVALIDATED_BY) {
+      errors.push(`${context} metadata mismatch for validated_by: an unvalidated document names no validator, expected "${UNVALIDATED_BY}", got "${validator}"`);
+    }
+    return;
+  }
+  if (date === LEGACY_PLACEHOLDER_DATE) {
+    const isExactStaleMatrixPair = context === MATRIX_RELATIVE_PATH && validator === 'A1';
+    if (isExactStaleMatrixPair) {
+      if (process.env.SOUNIO_DOCS_REGISTRY_STRICT_SNAPSHOT === '1') {
+        errors.push(`${context} has stale generated snapshot provenance; refresh it with --snapshot`);
+      } else {
+        placeholderPaths.push(context);
+      }
+      return;
+    }
+    errors.push(`${context} metadata mismatch for last_validated: retired placeholder is valid only in the stale authority-matrix snapshot`);
+  }
   if (!isRealValidationDate(date)) {
     errors.push(`${context} metadata mismatch for last_validated: expected a YYYY-MM-DD date, got "${date}"`);
   }
-  const validator = String(actualFields.validated_by ?? '').trim();
   if (!validator) {
     errors.push(`${context} metadata mismatch for validated_by: expected a non-empty validator, got ""`);
   }
@@ -159,8 +201,18 @@ async function main() {
   const expectedRegistry = await buildGovernedTopicRegistry(rootDir);
   const actualRegistry = await readRegistryFile(rootDir);
 
+  // The checked-in registry is a snapshot (see sync_governance_metadata.mjs):
+  // every check below runs against the registry rebuilt from the tree, so a
+  // stale snapshot cannot hide a defect and is only reported. Requiring it to
+  // be fresh made every docs PR regenerate it, and any two such PRs conflict.
+  // SOUNIO_DOCS_REGISTRY_STRICT_SNAPSHOT=1 restores the hard check, for the
+  // snapshot-refresh PR itself.
   if (!compareRegistry(expectedRegistry, actualRegistry)) {
-    errors.push(`Checked-in ${REGISTRY_RELATIVE_PATH} is stale. Re-run node scripts/docs/sync_governance_metadata.mjs`);
+    if (process.env.SOUNIO_DOCS_REGISTRY_STRICT_SNAPSHOT === '1') {
+      errors.push(`Checked-in ${REGISTRY_RELATIVE_PATH} is stale. Re-run node scripts/docs/sync_governance_metadata.mjs --snapshot`);
+    } else {
+      console.log(`Notice: ${REGISTRY_RELATIVE_PATH} snapshot differs from the tree (expected between snapshot refreshes; not an error).`);
+    }
   }
 
   // Deliberately NOT a function of expectedRegistry: the acceptance report is
@@ -178,7 +230,7 @@ async function main() {
     errors.push(`Missing acceptance report: ${ACCEPTANCE_RELATIVE_PATH}`);
   }
 
-  for (const topic of actualRegistry.topics) {
+  for (const topic of expectedRegistry.topics) {
     if (topic.repo_doc_path) {
       const absPath = path.join(rootDir, topic.repo_doc_path);
       try {

@@ -2,8 +2,8 @@
 topic_id: repo.docs.roadmap.2026-technical-showcase-deep-dive
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.roadmap.2026-technical-showcase-deep-dive
 -->
 
@@ -170,8 +170,8 @@ When two unit types are multiplied or divided:
 - **Addition/Casts**: The compiler compares the packed `i64` values. If they do not match, the compiler rejects the operation immediately.
 
 ```sio
-unit mg // Mass dimension: mass=1 (packed value: 1u64)
-unit dL // Volume dimension: length=3 (packed value: 3u64 << 4 = 48)
+unit mg // Mass dimension: mass=1 (packed value: 1)
+unit dL // Volume dimension: length=3 (packed value: 3 << 4 = 48)
 
 fn process(density: mg/dL) { ... } // Composed natively as packed dimension mask
 ```
@@ -250,7 +250,7 @@ When the compiler encounters a function call with a proof context, it attempts t
 fn main() with IO {
     // SNOMED_44054006 represents "Type 2 Diabetes Mellitus"
     let p_diabetic = Patient {
-        diagnosis: 44054006u32,
+        diagnosis: 44054006,
         fasting_glucose: 142.0
     }
 
@@ -261,7 +261,7 @@ fn main() with IO {
 
     // SNOMED_195967001 represents "Asthma"
     let p_asthmatic = Patient {
-        diagnosis: 195967001u32,
+        diagnosis: 195967001,
         fasting_glucose: 95.0
     }
 

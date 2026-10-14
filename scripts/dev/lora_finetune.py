@@ -47,7 +47,6 @@ Critical rules:
 - `var` for mutable bindings (not `let mut`)
 - `&!T` for exclusive/mutable references (not `&mut T`)
 - No macros: use `assert()` not `assert!()`, `println()` not `println!()`
-- Negative numbers: write `0 - 42` not `-42`
 - Functions must declare all effects: `fn f() with IO { ... }`
 - No generics except `Knowledge<T>` — use fixed-size arrays `[T; N]`
 - No closures — use named function references

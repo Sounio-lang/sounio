@@ -2,8 +2,8 @@
 topic_id: repo.docs.superpowers.specs.2026-07-19-proof-carrying-shift-robust-risk-transport-d11-design
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.specs.2026-07-19-proof-carrying-shift-robust-risk-transport-d11-design
 -->
 

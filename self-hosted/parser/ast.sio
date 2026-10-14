@@ -1183,6 +1183,13 @@ pub struct VariantDef {
 
 // Scalar accessor for bootstrap-sensitive consumers. Returning the Box payload
 // through Option from a nested ItemList field path is miscompiled by lean_single.
+pub fn item_fn_def_ptr(item: &Item) -> *mut FnDef {
+    match (*item).fn_def {
+        Some(fd) => fd as *mut FnDef,
+        None => 0 as *mut FnDef,
+    }
+}
+
 pub fn item_enum_def_ptr(item: &Item) -> *mut EnumDef {
     match (*item).enum_def {
         Some(ed) => ed as *mut EnumDef,
@@ -1430,6 +1437,39 @@ pub var GLOBAL_VAR_INIT_COUNT: i64 = 0
 // Overflow past 8192 is still a silent drop (record fns return unit).
 pub var GLOBAL_VAR_INIT_HASHES: [i64; 8192] = [0; 8192]
 pub var GLOBAL_VAR_INIT_VALUES: [i64; 8192] = [0; 8192]
+// Module identity of every word above (parallel arrays, same index). The table is
+// keyed by the BARE name and deliberately accumulates across modules, so two
+// modules that each define a private `fn helper` (or a same-named global) used to
+// share one key: the second module's fn was never recorded ("already has init
+// words"), and a global initialiser calling `helper()` folded the OTHER module's
+// body. Each word now carries the serial of the module being parsed and whether its
+// definition is importable, and the parse-time lookups (ast_gvi_scope) resolve a
+// name against one module instead of against the whole table.
+//   MODS[i]  serial of the module that recorded word i (0 = main / single module)
+//   PUBS[i]  1 if another module may name the definition: every global (visibility
+//            is not enforced on globals), and a free fn declared `pub`/`pub(..)`;
+//            0 for a private fn
+pub var GLOBAL_VAR_INIT_MODS: [i64; 8192] = [0; 8192]
+pub var GLOBAL_VAR_INIT_PUBS: [i64; 8192] = [0; 8192]
+// CUR_MOD: the module being parsed (record tag). EVAL_MOD: the module whose names a
+// lookup resolves in -- equal to CUR_MOD except while the body of a pure fn that
+// belongs to ANOTHER module is being folded. NEXT_MOD: next serial to hand out.
+pub var GLOBAL_VAR_INIT_CUR_MOD: i64 = 0
+pub var GLOBAL_VAR_INIT_EVAL_MOD: i64 = 0
+pub var GLOBAL_VAR_INIT_NEXT_MOD: i64 = 0
+pub var GLOBAL_VAR_INIT_CUR_PUB: i64 = 1
+// Top-level definition names (fn / var / let / const) of the module being parsed,
+// as ast_name_hash values, filled by a token pre-scan before the module is parsed.
+// It answers "does the module being parsed define this name?" even for a definition
+// that is not foldable or that comes later in the file -- the case where falling
+// back to another module's record would fold the wrong body. Overflow is
+// conservative: DEF_OVERFLOW makes every name "defined", i.e. no cross-module fold.
+pub var GLOBAL_VAR_INIT_DEFS: [i64; 16384] = [0; 16384]
+pub var GLOBAL_VAR_INIT_DEF_COUNT: i64 = 0
+pub var GLOBAL_VAR_INIT_DEF_OVERFLOW: i64 = 0
+// Lookups that could not be resolved because two or more OTHER modules define the
+// name; reported (not silently zero-filled) by the parse driver.
+pub var GLOBAL_VAR_INIT_AMBIG_COUNT: i64 = 0
 // When 1, parse_items_preloaded does NOT reset the global-init table, so a
 // multi-module compilation accumulates every module's f64 global initializers
 // (main is parsed first, then each import). The multimodule lower entry sets it
@@ -1455,14 +1495,652 @@ pub fn ast_name_hash(n: Name) -> i64 with Div {
     if hash < 0 { 0 - hash } else { hash }
 }
 
+// Segment k of `sl`, by recursion (mirrors the identical nth-segment helper
+// each of check.sio / ir::lower / specializer.sio already has locally).
+fn ast_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic, Div {
+    if k <= 0 {
+        return Name { buf: sl.head_buf, len: sl.head_len }
+    }
+    match sl.tail {
+        Some(rest) => ast_string_list_nth_name(*rest, k - 1),
+        None => Name { buf: [0; 384], len: 0 },
+    }
+}
+
+// Joins segments 0..=upto_inclusive of `path` into one synthetic Name using
+// "::" as separator (e.g. segments 0..1 of `q::x::something` -> "q::x").
+// Used as the key for lower_named_item_terminal_known/_note below: review
+// comment 4091287602 (round 7) found that keying that registry by the BARE
+// TERMINAL SEGMENT ALONE conflated unrelated `use` paths that happen to
+// share a terminal name -- `use p::x;` (x a named function) in one module
+// and `use q::x;` (x a real module) in another both resolve their `x`
+// differently, but a terminal-only key made whichever got recorded first
+// answer for BOTH, everywhere, for the rest of the process. Keying by the
+// FULL prefix path text instead (this function) disambiguates them: "p::x"
+// and "q::x" are different keys, so each keeps its own correct answer.
+// Segments [from_inclusive, upto_inclusive] of `path` joined with "::" (both
+// ends inclusive). Generalizes ast_path_prefix_name below (the
+// from_inclusive=0 case) to also build SUFFIXES of a path, not just
+// prefixes. Declared BEFORE ast_path_prefix_name (review comment 4100285005,
+// round 11): Sounio requires a callee to be defined before its caller in the
+// self-hosted compiler source, and ast_path_prefix_name delegates to this
+// function.
+//
+// Round 8 (review comment 4096338764): the qualifier registries in
+// check.sio/ir::lower/specializer.sio recorded each `use` path SEGMENT
+// independently as positive evidence ("this module registered `math`",
+// "this module registered `tc_c`"). A call's qualifier was then accepted if
+// each of ITS segments independently matched some recorded segment for the
+// current module -- so a module with `use math::dd64;` and
+// `use testmod::tc_c;` accepted the bogus recombined qualifier `math::tc_c`,
+// which was never actually imported as one path. The fix: register/check the
+// COMPLETE joined qualifier text (a suffix of the real `use` path, since
+// `use a::b;` supports both `b::f()` and `a::b::f()`), not independent
+// segments -- this helper builds that joined text for both registration
+// (all suffixes of the `use` path) and lookup (the call's full qualifier).
+// Round 9 (review comment 4098353679): each path SEGMENT can itself be up to
+// 384 bytes (Name's own capacity), so joining two or more segments with "::"
+// can exceed 384 bytes long before this function's own truncating writes to
+// `result.buf` would suggest -- a joined path was silently cut to a 384-byte
+// PREFIX, so two genuinely DIFFERENT overlong qualifiers sharing the same
+// first 384 bytes became IDENTICAL as far as every registry keyed by this
+// function's return value is concerned (all three `use`-qualifier registries,
+// plus the shared named-item-terminal registry below). That let a bogus path
+// inherit a real import's signature/rewriting, or a real module's entry
+// silently answer for an unrelated named-item marker.
+//
+// Track the UNTRUNCATED length separately from the capped `result.len`; if
+// they ever diverge, the join would have truncated, so return empty_name()
+// (len 0) instead of the truncated bytes. Every caller of this function
+// already treats len<=0 as "does not match anything" (checker_use_module_known
+// / lower_use_module_known / spec_use_module_known / spec_item_module_lookup
+// / lower_named_item_terminal_known all reject `n.len <= 0` immediately), so
+// this fails CLOSED -- an overlong qualifier can never register a false
+// collision-prone shorthand and can never match one either, rather than
+// silently trusting a truncated prefix as exact identity.
+// Round 14 (review comment 4105262394): returning empty_name() on truncation
+// above only fails closed for REJECTION -- every consumer treats an empty
+// qualifier as "not registered", so an overlong qualifier can never falsely
+// MATCH. But for a genuinely long, otherwise-valid qualifier that only
+// exceeds 384 bytes because of its own legitimate length, that same empty
+// result is indistinguishable from "no qualifier was ever written here at
+// all": checker_path_qualifier_all_modules_known's caller falls through to
+// the non-fatal W044 warning path, and the lowerer's callee_path_module_stripped_name
+// falls through to the legacy first/last-segment mangled stub -- silently
+// reproducing the body-less-stub/SIGILL failure this whole qualifier
+// machinery exists to prevent, for a call that was never actually invalid.
+// Name's 384-byte buffer is a hard, unavoidable ceiling (every registry is
+// keyed by Name), so representing the full untruncated identity here is not
+// an option; instead, set this durable flag so the truncation is escalated
+// into a genuine compile-time hard refusal (folded into
+// lower_hard_error_pending() / compiler_visibility_preflight, same as the
+// other registry-overflow flags) rather than silently degrading to the
+// legacy unsafe behavior.
+var AST_PATH_RANGE_NAME_OVERFLOWED: bool = false
+
+pub fn ast_path_range_name_overflowed() -> bool { AST_PATH_RANGE_NAME_OVERFLOWED }
+
+// Copilot review (PR #2515): unlike AST_NAMED_ITEM_TERMINAL_OVERFLOWED (never
+// reset -- see its own comment for why that one specific flag is populated
+// once, early, from durable filesystem facts), this flag is set by
+// ast_path_range_name, which every check/lower/specializer pass calls
+// throughout an ENTIRE compile, not just once up front. Leaving it durable
+// forever would let one over-384-byte joined path in an early compile poison
+// compiler_visibility_preflight / lower_hard_error_pending as a false-success
+// blocker for every later, unrelated compile in the same long-lived process.
+// Called from module_frontend_global_init_compile_begin, the actual
+// top-level compile entry for every multi-module path, before dependency
+// resolution -- same boundary lower_use_module_reset() already resets at.
+pub fn ast_path_range_name_reset() with Mut { AST_PATH_RANGE_NAME_OVERFLOWED = false }
+
+pub fn ast_path_range_name(path: AstPath, from_inclusive: i64, upto_inclusive: i64) -> Name with Mut, Panic, Div {
+    var result = Name { buf: [0; 384], len: 0 }
+    var natural_len: i64 = 0
+    var k: i64 = from_inclusive
+    while k <= upto_inclusive && k < path.seg_count {
+        let seg = ast_string_list_nth_name(path.segments, k)
+        if k > from_inclusive {
+            natural_len = natural_len + 2
+            if result.len + 2 <= 384 {
+                result.buf[result.len as usize] = 58
+                result.buf[(result.len + 1) as usize] = 58
+                result.len = result.len + 2
+            }
+        }
+        natural_len = natural_len + seg.len
+        var i: i64 = 0
+        while i < seg.len && result.len < 384 {
+            result.buf[result.len as usize] = seg.buf[i as usize]
+            result.len = result.len + 1
+            i = i + 1
+        }
+        k = k + 1
+    }
+    if natural_len != result.len {
+        AST_PATH_RANGE_NAME_OVERFLOWED = true
+        return Name { buf: [0; 384], len: 0 }
+    }
+    result
+}
+
+// Round 10 (review comment 4099548981): this used to duplicate
+// ast_path_range_name's join loop with its OWN silent-truncation bug (fixed
+// there in round 9, comment 4098353679, but not here) -- resolve_import_file_path
+// stores named-item evidence keyed by this function's result, so two distinct
+// overlong import paths sharing the same first 384 bytes collided and could
+// suppress a real module or legitimize a bogus qualifier, exactly the same
+// failure class ast_path_range_name's own fix closed. Delegate instead of
+// duplicating, so both helpers share one fail-closed implementation.
+pub fn ast_path_prefix_name(path: AstPath, upto_inclusive: i64) -> Name with Mut, Panic, Div {
+    ast_path_range_name(path, 0, upto_inclusive)
+}
+
+// Round 14 (review comment 4105262460): join two Names with "::" using the
+// same fail-closed truncation discipline as ast_path_range_name above,
+// tracking natural_len separately and returning empty_name() on overflow
+// instead of a silently truncated prefix. Needed to register a brace
+// import's (`use a::b::{Type};`) combined "a::b::Type" suffix, where `a::b`
+// is a joined AstPath and `Type` is a separate item name never itself part
+// of that path (see checker_use_module_note_path's caller in check.sio).
+pub fn ast_name_join_sep(a: Name, b: Name) -> Name with Mut, Panic, Div {
+    var result = Name { buf: [0; 384], len: 0 }
+    var natural_len: i64 = a.len + 2 + b.len
+    var i: i64 = 0
+    while i < a.len && result.len < 384 {
+        result.buf[result.len as usize] = a.buf[i as usize]
+        result.len = result.len + 1
+        i = i + 1
+    }
+    if result.len + 2 <= 384 {
+        result.buf[result.len as usize] = 58
+        result.buf[(result.len + 1) as usize] = 58
+        result.len = result.len + 2
+    }
+    var j: i64 = 0
+    while j < b.len && result.len < 384 {
+        result.buf[result.len as usize] = b.buf[j as usize]
+        result.len = result.len + 1
+        j = j + 1
+    }
+    if natural_len != result.len {
+        AST_PATH_RANGE_NAME_OVERFLOWED = true
+        return Name { buf: [0; 384], len: 0 }
+    }
+    result
+}
+
+// Authoritative (not heuristic) registry of names KNOWN to be the terminal
+// item of a path-form NAMED import (`use a::b::specific_fn;`), as opposed to
+// a whole-module import's terminal (`use a::b;`) -- the two are otherwise
+// syntactically identical. Populated from module_frontend.sio's
+// resolve_import_file_path, the SAME logic that already, authoritatively,
+// decides this exact question for real when loading dependency files: it
+// tries the FULL `use` path as a file first, and only drops the last segment
+// and retries as the PARENT file when that first attempt misses. A name only
+// ever lands here when that fallback branch is the one that actually
+// resolved -- i.e. the name is confirmed (by real file resolution, not name
+// collision with an unrelated declaration) to be a named item, not a module.
+//
+// Lives here (parser::ast), not in ir::lower where it was first added,
+// because ir::lower already imports check::specializer
+// (spec_dce_filter_with_global_marks / spec_dce_global_marks_ready), and
+// check::specializer needs to read this same registry -- putting it in
+// ir::lower would make that a circular import. parser::ast is the common,
+// import-nothing-back base every one of check::check / check::specializer /
+// ir::lower / compiler::module_frontend already depends on.
+//
+// A GLOBAL set, not per-module -- with a KNOWN, documented gap (review
+// comment 4100990447, round 12, not yet closed): resolve_import_file_path
+// resolves `path` relative to `cur_dir`, the IMPORTING FILE's own directory
+// (module_frontend.sio: `cur_dir = module_frontend_path_directory_slice(
+// caller_path)`), trying the full path as a file THERE first. The same
+// literal path text can therefore genuinely resolve differently depending
+// on which directory tree is doing the importing -- a real `x/y.sio` module
+// reachable from one file's directory, a named-item fallback (no such file,
+// but the parent `x.sio` exists and has it) from another's. Once EITHER
+// resolution records `x::y` here, the OTHER context's own (correct, for
+// it) resolution is masked by the first, so one of the two either loses a
+// legitimate module qualifier or wrongly trusts a named item as a module.
+// Closing this properly needs the registry keyed by resolution CONTEXT
+// (e.g. `cur_dir`, or the module that triggered it), not path text alone --
+// a genuine architectural change (every current caller of
+// lower_named_item_terminal_known only ever passes a Name, with no context
+// to key by) deliberately left out of this round rather than rushed: this
+// exact codebase has twice already (rounds 10 and 11) shown that a
+// text-keyed "fix" for a real but narrow collision can itself introduce a
+// silent regression far more common than the collision it targets when
+// applied without enough care. Left as an accepted, documented residual gap
+// instead.
+//
+// Populated ONCE, very early, during module_frontend.sio's dependency-file
+// resolution -- which runs before any check/lower/specializer pass, and
+// before those passes' own per-compile-boundary registry resets -- from real
+// filesystem outcomes that do not change for the rest of THAT compile.
+// Resetting it on the same cadence as e.g. LOWER_USE_MODULE_HASH -- mid
+// dependency-resolution, before the qualifier-validation code that needs it
+// ever runs -- would wipe this data out too early and is never done that
+// way; ast_named_item_terminal_reset (below) instead runs once, at the
+// START of a compile, alongside every sibling registry's own reset.
+//
+// Copilot review (PR #2515), round 3 (comment 4109067513): a previous
+// version of this comment argued the registry never needed a reset function
+// at all, on the assumption that it is populated once per PROCESS -- true
+// only if a process ever runs one compile. Every other durable overflow
+// flag in this file (AST_PATH_RANGE_NAME_OVERFLOWED) and in ir/lower.sio
+// (LOWER_USE_MODULE_OVERFLOWED, IR_LOWER_HARD_ERROR, LOWER_FN_TUPLE_ARR_*)
+// was fixed earlier in this same review for exactly the opposite case: a
+// process that compiles more than one program (an LSP, or any CLI path
+// that loads several files) left an EARLIER compile's overflow durable
+// across a LATER, unrelated compile's own preflight. This registry has the
+// identical shape -- AST_NAMED_ITEM_TERMINAL_OVERFLOWED feeds
+// lower_hard_error_pending()/compiler_visibility_preflight exactly like
+// those siblings -- so it has the identical bug: once any compile in a
+// process fills 4096 entries, every later compile in that process is
+// refused, even one with no named imports of its own. Reset the count,
+// flag, and table at the same top-level compile boundaries those siblings
+// already reset at (module_frontend_global_init_compile_begin,
+// bridge_lower_single_module_box), before dependency resolution
+// repopulates them for the new compile.
+//
+// Review history: round 5 (comments 4090734423/4090734484) tried "does this
+// name ALSO resolve as some real top-level function" as the disambiguator,
+// in both check.sio and ir::lower (and specializer.sio built its own small
+// copy of a function-name registry for the same purpose, pre-typecheck).
+// Round 6 (comments 4090966164/4090966230/4090966282) found that heuristic
+// unsound in the OTHER direction (finding C): a genuine module whose name
+// happens to coincide with an unrelated top-level function elsewhere in the
+// program was wrongly excluded too, breaking the real module's own qualified
+// calls. This registry has no such false positives, because it is never
+// guessing from a name collision -- it is exactly the answer
+// module_frontend.sio itself already computed when it decided which file to
+// load, so all three of check.sio / ir::lower / specializer.sio now query
+// this ONE authoritative source instead of each re-deriving their own guess.
+var AST_NAMED_ITEM_TERMINAL_COUNT: i64 = 0
+var AST_NAMED_ITEM_TERMINAL_HASH: [i64; 4096] = [0; 4096]
+var AST_NAMED_ITEM_TERMINAL_LEN: [i64; 4096] = [0; 4096]
+var AST_NAMED_ITEM_TERMINAL_BUF: [i8; 1572864] = [0; 1572864]
+// Read by ir/lower.sio's lower_hard_error_pending()/lower_hard_error_report()
+// so an overflow here refuses the binary instead of silently degrading. See
+// lower_named_item_terminal_note's own comment.
+var AST_NAMED_ITEM_TERMINAL_OVERFLOWED: bool = false
+
+pub fn ast_named_item_terminal_overflowed() -> bool { AST_NAMED_ITEM_TERMINAL_OVERFLOWED }
+
+// Copilot review (PR #2515), round 3: reset at the top of a compile, NOT
+// mid dependency-resolution -- see the registry's own comment for why this
+// exists at all now (a process compiling more than one program left an
+// earlier compile's overflow durable across a later, unrelated one). The
+// dense HASH/LEN/BUF arrays are not cleared, only COUNT and OVERFLOWED:
+// every reader already bounds its scan by COUNT (lower_named_item_terminal_known's
+// own `while i < AST_NAMED_ITEM_TERMINAL_COUNT`), so entries past the reset
+// COUNT are simply unreachable stale data, the same convention every
+// sibling reset in this file/ir::lower.sio already uses.
+pub fn ast_named_item_terminal_reset() with Mut {
+    AST_NAMED_ITEM_TERMINAL_COUNT = 0
+    AST_NAMED_ITEM_TERMINAL_OVERFLOWED = false
+}
+
+pub fn lower_named_item_terminal_known(n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 || n.len > 384 {
+        return false
+    }
+    let h = ast_name_hash(n)
+    var i: i64 = 0
+    while i < AST_NAMED_ITEM_TERMINAL_COUNT {
+        if AST_NAMED_ITEM_TERMINAL_HASH[i as usize] == h && AST_NAMED_ITEM_TERMINAL_LEN[i as usize] == n.len {
+            let base = i * 384
+            var eq = true
+            var j: i64 = 0
+            while j < n.len {
+                if AST_NAMED_ITEM_TERMINAL_BUF[(base + j) as usize] != n.buf[j as usize] {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+pub fn lower_named_item_terminal_note(n: Name) with Mut, Panic, Div {
+    if n.len <= 0 || n.len > 384 {
+        return
+    }
+    if lower_named_item_terminal_known(n) {
+        return
+    }
+    if AST_NAMED_ITEM_TERMINAL_COUNT >= 4096 {
+        // Round 10 (review comment 4099549017): the comment this replaces
+        // argued a dropped entry here only WIDENS the set of segments the
+        // module registries trust, "not a new failure mode" -- but round 9's
+        // finding 4 fix (checker_use_module_note_path / lower_use_modules_collect
+        // / spec_use_modules_collect) now SKIPS suffix registration entirely
+        // for any `use` path this registry confirms is a named item, not a
+        // module. A dropped entry past this cap is therefore no longer
+        // "widen a positive-evidence set" -- it is "the one signal that keeps
+        // a named import's own suffixes OUT of the module registries goes
+        // missing", which lets exactly the round-7 namespace-erasure class
+        // back in for whichever names overflow. This table is also never
+        // reset (see its own top-level comment), so the cap is cumulative
+        // across every compilation in one process, not just one. Refuse
+        // loudly instead: set the durable overflow flag folded into
+        // lower_hard_error_pending()/lower_hard_error_report() (ir/lower.sio),
+        // matching every sibling registry's own overflow handling.
+        AST_NAMED_ITEM_TERMINAL_OVERFLOWED = true
+        return
+    }
+    let idx = AST_NAMED_ITEM_TERMINAL_COUNT
+    AST_NAMED_ITEM_TERMINAL_HASH[idx as usize] = ast_name_hash(n)
+    let base = idx * 384
+    var ci: i64 = 0
+    while ci < n.len {
+        AST_NAMED_ITEM_TERMINAL_BUF[(base + ci) as usize] = n.buf[ci as usize]
+        ci = ci + 1
+    }
+    AST_NAMED_ITEM_TERMINAL_LEN[idx as usize] = n.len
+    AST_NAMED_ITEM_TERMINAL_COUNT = idx + 1
+}
+
+// #2377: names of module-level `let` / `const` items (both parse through
+// parse_global_let_item). A bare identifier match arm naming one of them is a
+// VALUE pattern (`A => ..` is `x == A`), not a binding: before, Madaros bound
+// the scrutinee to a new local `A`, so the first such arm matched everything.
+// `var` globals are not recorded; lean_single's constant table (CONST_*) holds
+// `let`/`const` only, and the two engines must agree.
+pub var GLOBAL_CONST_NAME_HASHES: [i64; 8192] = [0; 8192]
+pub var GLOBAL_CONST_NAME_COUNT: i64 = 0
+
+pub fn ast_record_global_const_name(name: Name) with Mut, Div {
+    if GLOBAL_CONST_NAME_COUNT < 8192 {
+        GLOBAL_CONST_NAME_HASHES[GLOBAL_CONST_NAME_COUNT as usize] = ast_name_hash(name)
+        GLOBAL_CONST_NAME_COUNT = GLOBAL_CONST_NAME_COUNT + 1
+    }
+}
+
+pub fn ast_is_global_const_name(name: Name) -> bool with Div {
+    let h = ast_name_hash(name)
+    var i: i64 = 0
+    while i < GLOBAL_CONST_NAME_COUNT {
+        if GLOBAL_CONST_NAME_HASHES[i as usize] == h { return true }
+        i = i + 1
+    }
+    false
+}
+// State of the #2661 constant-fold table dump (see ast_gvi_dump_note below).
+pub var GVI_DUMP_ON: i64 = 0
+// Set by parser/items.sio around a record: 0 global initialiser, 1 free fn, 2 impl method.
+pub var GVI_DUMP_ORIGIN: i64 = 0
+var GVI_DUMP_N: i64 = 0
+var GVI_DUMP_PRINTED: i64 = 0
+var GVI_DUMP_DROPPED: i64 = 0
+var GVI_DUMP_NAME_W: [i64; 16384] = [0; 16384]   // 4 words (32 bytes) per entry
+var GVI_DUMP_NAME_LEN: [i64; 4096] = [0; 4096]
+var GVI_DUMP_ORIG: [i64; 4096] = [0; 4096]
+var GVI_DUMP_MOD: [i64; 4096] = [0; 4096]
+var GVI_DUMP_PUB: [i64; 4096] = [0; 4096]
+var GVI_DUMP_VAL: [i64; 4096] = [0; 4096]
+var GVI_DUMP_SLOT: [i64; 4096] = [0; 4096]
+
+// #2355: closed module-level initializers that cannot be folded into BSS fill
+// words (a struct literal above all; see parser/items.sio items_expr_is_closed)
+// are evaluated at run time, once, at `main`'s entry -- what lean_single has
+// always done (emit_global_inits_x86). Before this table the expression was
+// discarded and the global stayed BSS zero: a struct-typed global is a HANDLE
+// slot, so every field read or write then dereferenced handle 0 (SIGSEGV).
+//
+// Entries hold the parser's own Box<Expr> as a raw address (the AST arena is
+// never reclaimed before lowering; module_frontend's __arena_reset window opens
+// after parsing). Keyed like GLOBAL_VAR_INIT_* by name hash, tagged with the
+// recording module's serial. Overflow is recorded, never silent: lowering
+// refuses the compile (ir/lower.sio lowerer_emit_deferred_global_inits_mut).
+pub var GLOBAL_DEFERRED_INIT_HASHES: [i64; 16384] = [0; 16384]
+pub var GLOBAL_DEFERRED_INIT_PTRS: [i64; 16384] = [0; 16384]
+pub var GLOBAL_DEFERRED_INIT_MODS: [i64; 16384] = [0; 16384]
+pub var GLOBAL_DEFERRED_INIT_COUNT: i64 = 0
+pub var GLOBAL_DEFERRED_INIT_OVERFLOW: i64 = 0
+
+pub fn ast_record_global_deferred_init(name: Name, init: Box<Expr>) with Mut, Div {
+    let p = init as *mut Expr
+    let h = ast_name_hash(name)
+    // A module parsed twice in one compile (preflight, then the lowering load)
+    // replaces its own entry instead of queueing the initializer a second time.
+    var k: i64 = 0
+    while k < GLOBAL_DEFERRED_INIT_COUNT {
+        if GLOBAL_DEFERRED_INIT_HASHES[k as usize] == h && GLOBAL_DEFERRED_INIT_MODS[k as usize] == GLOBAL_VAR_INIT_CUR_MOD {
+            GLOBAL_DEFERRED_INIT_PTRS[k as usize] = p as i64
+            return
+        }
+        k = k + 1
+    }
+    if GLOBAL_DEFERRED_INIT_COUNT >= 16384 {
+        GLOBAL_DEFERRED_INIT_OVERFLOW = 1
+        return
+    }
+    GLOBAL_DEFERRED_INIT_HASHES[GLOBAL_DEFERRED_INIT_COUNT as usize] = h
+    GLOBAL_DEFERRED_INIT_PTRS[GLOBAL_DEFERRED_INIT_COUNT as usize] = p as i64
+    GLOBAL_DEFERRED_INIT_MODS[GLOBAL_DEFERRED_INIT_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
+    GLOBAL_DEFERRED_INIT_COUNT = GLOBAL_DEFERRED_INIT_COUNT + 1
+}
+
+pub fn ast_global_deferred_init_count() -> i64 { GLOBAL_DEFERRED_INIT_COUNT }
+pub fn ast_global_deferred_init_overflowed() -> bool { GLOBAL_DEFERRED_INIT_OVERFLOW != 0 }
+pub fn ast_global_deferred_init_hash(i: i64) -> i64 with Panic {
+    if i < 0 || i >= GLOBAL_DEFERRED_INIT_COUNT { return 0 }
+    GLOBAL_DEFERRED_INIT_HASHES[i as usize]
+}
+pub fn ast_global_deferred_init_ptr(i: i64) -> i64 with Panic {
+    if i < 0 || i >= GLOBAL_DEFERRED_INIT_COUNT { return 0 }
+    GLOBAL_DEFERRED_INIT_PTRS[i as usize]
+}
+pub fn ast_global_deferred_init_mod(i: i64) -> i64 with Panic {
+    if i < 0 || i >= GLOBAL_DEFERRED_INIT_COUNT { return 0 - 1 }
+    GLOBAL_DEFERRED_INIT_MODS[i as usize]
+}
+
+// #2355: the declared struct type of each module-level `let`/`var`/`const`
+// whose annotation names a type (`var G: S`), as (global-name hash, type-name
+// hash). Lowering kept no per-global struct type, so `G.values[i]` on
+// `var G: S` could not tell which layout `values` belongs to: an f64-array
+// element came back as raw integer bits, and with two structs sharing a field
+// name the slot index was guessed. Only capitalised TypeNamed annotations are
+// recorded -- scalars and arrays never need it and would only lengthen the
+// lowering-time scan. A global name recorded with two different type names
+// (two modules) is marked ambiguous (type hash -1) and resolves to nothing,
+// i.e. the old behaviour, rather than to a guess.
+pub var GLOBAL_DECL_TYPE_HASHES: [i64; 4096] = [0; 4096]
+pub var GLOBAL_DECL_TYPE_TYPES: [i64; 4096] = [0; 4096]
+pub var GLOBAL_DECL_TYPE_COUNT: i64 = 0
+pub var GLOBAL_DECL_TYPE_OVERFLOW: i64 = 0
+
+pub fn ast_record_global_decl_type(name: Name, ty: &Option<Box<TypeExpr>>) with Mut, Panic, Div {
+    match *ty {
+        Some(t) => {
+            if (*t).kind != TypeExprKind::TypeNamed { return }
+            if (*t).path.seg_count <= 0 { return }
+            let tn = ast_path_prefix_name((*t).path, 0)
+            if tn.len <= 0 { return }
+            let c0 = tn.buf[0] as i64
+            if c0 < 65 || c0 > 90 { return }
+            let h = ast_name_hash(name)
+            let th = ast_name_hash(tn)
+            var k: i64 = 0
+            while k < GLOBAL_DECL_TYPE_COUNT {
+                if GLOBAL_DECL_TYPE_HASHES[k as usize] == h {
+                    if GLOBAL_DECL_TYPE_TYPES[k as usize] != th {
+                        GLOBAL_DECL_TYPE_TYPES[k as usize] = 0 - 1
+                    }
+                    return
+                }
+                k = k + 1
+            }
+            if GLOBAL_DECL_TYPE_COUNT >= 4096 {
+                GLOBAL_DECL_TYPE_OVERFLOW = 1
+                return
+            }
+            GLOBAL_DECL_TYPE_HASHES[GLOBAL_DECL_TYPE_COUNT as usize] = h
+            GLOBAL_DECL_TYPE_TYPES[GLOBAL_DECL_TYPE_COUNT as usize] = th
+            GLOBAL_DECL_TYPE_COUNT = GLOBAL_DECL_TYPE_COUNT + 1
+        }
+        None => {}
+    }
+}
+
+pub fn ast_global_decl_type_count() -> i64 { GLOBAL_DECL_TYPE_COUNT }
+
+// Type-name hash recorded for global `name`, or 0 (none / ambiguous).
+pub fn ast_global_decl_type_hash_of(name: Name) -> i64 with Div {
+    if GLOBAL_DECL_TYPE_COUNT <= 0 { return 0 }
+    let h = ast_name_hash(name)
+    var k: i64 = 0
+    while k < GLOBAL_DECL_TYPE_COUNT {
+        if GLOBAL_DECL_TYPE_HASHES[k as usize] == h {
+            let th = GLOBAL_DECL_TYPE_TYPES[k as usize]
+            if th < 0 { return 0 }
+            return th
+        }
+        k = k + 1
+    }
+    0
+}
+
 pub fn ast_reset_global_var_inits() with Mut {
+    GLOBAL_DECL_TYPE_COUNT = 0
+    GLOBAL_DECL_TYPE_OVERFLOW = 0
+    GLOBAL_DEFERRED_INIT_COUNT = 0
+    GLOBAL_DEFERRED_INIT_OVERFLOW = 0
+    GLOBAL_CONST_NAME_COUNT = 0
     GLOBAL_VAR_INIT_COUNT = 0
+    // The dump notes are per parse session too (a printed note is never repeated).
+    GVI_DUMP_N = 0
+    GVI_DUMP_PRINTED = 0
+    GLOBAL_VAR_INIT_CUR_MOD = 0
+    GLOBAL_VAR_INIT_EVAL_MOD = 0
+    GLOBAL_VAR_INIT_NEXT_MOD = 0
+    GLOBAL_VAR_INIT_CUR_PUB = 1
+    GLOBAL_VAR_INIT_DEF_COUNT = 0
+    GLOBAL_VAR_INIT_DEF_OVERFLOW = 0
+    GLOBAL_VAR_INIT_AMBIG_COUNT = 0
+}
+
+// A new module is about to be parsed into an ACCUMULATING table
+// (GLOBAL_VAR_INIT_SUPPRESS_RESET == 1). Hands out the next serial; the first module
+// parsed (main) is 0, then imports in load order. Not called when the table is
+// reset per parse, so a single-module compile keeps serial 0 throughout and behaves
+// exactly as before.
+pub fn ast_global_var_init_begin_module() with Mut {
+    GLOBAL_VAR_INIT_CUR_MOD = GLOBAL_VAR_INIT_NEXT_MOD
+    GLOBAL_VAR_INIT_EVAL_MOD = GLOBAL_VAR_INIT_NEXT_MOD
+    GLOBAL_VAR_INIT_NEXT_MOD = GLOBAL_VAR_INIT_NEXT_MOD + 1
+    GLOBAL_VAR_INIT_CUR_PUB = 1
+    GLOBAL_VAR_INIT_DEF_COUNT = 0
+    GLOBAL_VAR_INIT_DEF_OVERFLOW = 0
+}
+
+pub fn ast_gvi_def_add(h: i64) with Mut {
+    if GLOBAL_VAR_INIT_DEF_COUNT < 16384 {
+        GLOBAL_VAR_INIT_DEFS[GLOBAL_VAR_INIT_DEF_COUNT as usize] = h
+        GLOBAL_VAR_INIT_DEF_COUNT = GLOBAL_VAR_INIT_DEF_COUNT + 1
+    } else {
+        GLOBAL_VAR_INIT_DEF_OVERFLOW = 1
+    }
+}
+
+// #2661: debug dump of the constant-fold table, SOUNIO_DUMP_GLOBAL_INIT_TABLE=1
+// (read in parser/mod.sio, which has IO). Every word recorded by
+// ast_record_global_var_init is noted here with its NAME (the table itself keeps
+// only the hash), its module serial, its pub bit and the kind of definition that
+// recorded it, and parser/mod.sio prints the new notes after each parsed module
+// as `[gvi-dump] ...` lines. This is what attributes a fold to an impl method or
+// to a free fn (SOUNIO_DISABLE_GLOBAL_INIT_IMPL_EXCLUSION flips which one owns
+// the bare name). Off by default: nothing is noted and nothing is printed.
+// Flat i64 arrays only (no Name-typed globals, see check/specializer.sio).
+pub fn ast_gvi_dump_enable() with Mut {
+    GVI_DUMP_ON = 1
+}
+
+fn ast_gvi_dump_note(name: Name, value: i64, slot: i64) with Mut, Div {
+    if GVI_DUMP_N >= 4096 {
+        GVI_DUMP_DROPPED = GVI_DUMP_DROPPED + 1
+        return
+    }
+    let e = GVI_DUMP_N
+    var w: i64 = 0
+    while w < 4 {
+        var word: i64 = 0
+        var b: i64 = 7
+        while b >= 0 {
+            let ci = w * 8 + b
+            var ch: i64 = 0
+            if ci < name.len { ch = (name.buf[ci as usize] as i64) & 255 }
+            word = word * 256 + ch
+            b = b - 1
+        }
+        GVI_DUMP_NAME_W[(e * 4 + w) as usize] = word
+        w = w + 1
+    }
+    GVI_DUMP_NAME_LEN[e as usize] = name.len
+    GVI_DUMP_ORIG[e as usize] = GVI_DUMP_ORIGIN
+    GVI_DUMP_MOD[e as usize] = GLOBAL_VAR_INIT_CUR_MOD
+    GVI_DUMP_PUB[e as usize] = GLOBAL_VAR_INIT_CUR_PUB
+    GVI_DUMP_VAL[e as usize] = value
+    GVI_DUMP_SLOT[e as usize] = slot
+    GVI_DUMP_N = e + 1
+}
+
+// Print the notes recorded since the last flush, one line per table word:
+//   [gvi-dump] slot=<i> mod=<serial> pub=<0|1> origin=<global|fn|impl-method> name=<name> word=<i64>
+pub fn ast_gvi_dump_flush() with IO, Mut, Panic, Div {
+    if GVI_DUMP_ON == 0 { return }
+    while GVI_DUMP_PRINTED < GVI_DUMP_N {
+        let e = GVI_DUMP_PRINTED
+        print("[gvi-dump] slot=")
+        print_int(GVI_DUMP_SLOT[e as usize])
+        print(" mod=")
+        print_int(GVI_DUMP_MOD[e as usize])
+        print(" pub=")
+        print_int(GVI_DUMP_PUB[e as usize])
+        let o = GVI_DUMP_ORIG[e as usize]
+        if o == 1 { print(" origin=fn") } else if o == 2 { print(" origin=impl-method") } else { print(" origin=global") }
+        print(" name=")
+        var len = GVI_DUMP_NAME_LEN[e as usize]
+        if len > 32 { len = 32 }
+        var ci: i64 = 0
+        while ci < len {
+            let word = GVI_DUMP_NAME_W[(e * 4 + ci / 8) as usize]
+            var sh: i64 = ci % 8
+            var v = word
+            while sh > 0 {
+                v = v / 256
+                sh = sh - 1
+            }
+            print_char(v & 255)
+            ci = ci + 1
+        }
+        if GVI_DUMP_NAME_LEN[e as usize] > 32 { print("...") }
+        print(" word=")
+        print_int(GVI_DUMP_VAL[e as usize])
+        print("\n")
+        GVI_DUMP_PRINTED = e + 1
+    }
+    if GVI_DUMP_DROPPED > 0 {
+        print("[gvi-dump] dropped=")
+        print_int(GVI_DUMP_DROPPED)
+        print(" (dump capacity 4096 words)\n")
+        GVI_DUMP_DROPPED = 0
+    }
 }
 
 pub fn ast_record_global_var_init(name: Name, value: i64) with Mut, Div {
     if GLOBAL_VAR_INIT_COUNT < 8192 {
+        if GVI_DUMP_ON == 1 { ast_gvi_dump_note(name, value, GLOBAL_VAR_INIT_COUNT) }
         GLOBAL_VAR_INIT_HASHES[GLOBAL_VAR_INIT_COUNT as usize] = ast_name_hash(name)
         GLOBAL_VAR_INIT_VALUES[GLOBAL_VAR_INIT_COUNT as usize] = value
+        GLOBAL_VAR_INIT_MODS[GLOBAL_VAR_INIT_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
+        GLOBAL_VAR_INIT_PUBS[GLOBAL_VAR_INIT_COUNT as usize] = GLOBAL_VAR_INIT_CUR_PUB
         GLOBAL_VAR_INIT_COUNT = GLOBAL_VAR_INIT_COUNT + 1
     }
 }
@@ -1519,6 +2197,129 @@ pub fn ast_record_global_str_init(name: Name, lit: Name) with Mut, Div {
     }
 }
 
+// ---- module-scoped reads -------------------------------------------------------
+// Every reader below is scoped to ONE module's words for `name`. `ast_gvi_*_in`
+// take the module explicitly; the unsuffixed ast_global_var_init_* keep their old
+// NAME-only signature (lower time has no "current module") and read the words of
+// the first module that recorded `name`. With one defining module that is the whole
+// table, as before; with two, it no longer concatenates their words into one
+// garbled element list.
+
+// Serial of the first module that recorded any word for `name`, or -1.
+pub fn ast_gvi_first_mod(name: Name) -> i64 with Div {
+    let h = ast_name_hash(name)
+    var i: i64 = 0
+    while i < GLOBAL_VAR_INIT_COUNT {
+        if GLOBAL_VAR_INIT_HASHES[i as usize] == h {
+            return GLOBAL_VAR_INIT_MODS[i as usize]
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Count of words module `m` recorded for `name`.
+pub fn ast_gvi_count_in(name: Name, m: i64) -> i64 with Div {
+    let h = ast_name_hash(name)
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < GLOBAL_VAR_INIT_COUNT {
+        if GLOBAL_VAR_INIT_HASHES[i as usize] == h && GLOBAL_VAR_INIT_MODS[i as usize] == m {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    n
+}
+
+// Nth word (0-based, source order) module `m` recorded for `name`; 0 if out of range.
+pub fn ast_gvi_nth_in(name: Name, m: i64, index: i64) -> i64 with Div {
+    let h = ast_name_hash(name)
+    var seen: i64 = 0
+    var i: i64 = 0
+    while i < GLOBAL_VAR_INIT_COUNT {
+        if GLOBAL_VAR_INIT_HASHES[i as usize] == h && GLOBAL_VAR_INIT_MODS[i as usize] == m {
+            if seen == index {
+                return GLOBAL_VAR_INIT_VALUES[i as usize]
+            }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    0
+}
+
+// Does the module being parsed define `name` at top level (fn / var / let / const)?
+pub fn ast_gvi_cur_module_defines(name: Name) -> bool with Div {
+    if GLOBAL_VAR_INIT_DEF_OVERFLOW != 0 {
+        return true
+    }
+    let h = ast_name_hash(name)
+    var i: i64 = 0
+    while i < GLOBAL_VAR_INIT_DEF_COUNT {
+        if GLOBAL_VAR_INIT_DEFS[i as usize] == h {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// The one OTHER module with an importable record for `name`: its serial, or -1 if
+// there is none, or -2 if more than one module has one.
+pub fn ast_gvi_foreign_pub_mod(name: Name) -> i64 with Div {
+    let h = ast_name_hash(name)
+    var found: i64 = 0 - 1
+    var i: i64 = 0
+    while i < GLOBAL_VAR_INIT_COUNT {
+        if GLOBAL_VAR_INIT_HASHES[i as usize] == h && GLOBAL_VAR_INIT_PUBS[i as usize] == 1 {
+            let m = GLOBAL_VAR_INIT_MODS[i as usize]
+            if m != GLOBAL_VAR_INIT_CUR_MOD {
+                if found == 0 - 1 {
+                    found = m
+                } else if found != m {
+                    return 0 - 2
+                }
+            }
+        }
+        i = i + 1
+    }
+    found
+}
+
+// Which module's words a PARSE-TIME lookup of `name` reads (-1 = none: unfoldable).
+//   1. the module doing the lookup, if it has recorded `name`;
+//   2. while the body of another module's pure fn is being folded (EVAL_MOD !=
+//      CUR_MOD): nothing else. That body's other names live in ITS module, and this
+//      module's same-named record must not stand in for them;
+//   3. otherwise, the single other module with an importable record -- unless the
+//      module being parsed defines `name` itself (then the name is its own, merely
+//      unfoldable, and another module's record is not a stand-in);
+//   4. two or more such modules: ambiguous, unfolded and counted.
+pub fn ast_gvi_scope(name: Name) -> i64 with Mut, Div {
+    let ctx = GLOBAL_VAR_INIT_EVAL_MOD
+    if ast_gvi_count_in(name, ctx) > 0 {
+        return ctx
+    }
+    if ctx != GLOBAL_VAR_INIT_CUR_MOD {
+        return 0 - 1
+    }
+    let f = ast_gvi_foreign_pub_mod(name)
+    if f < 0 - 1 {
+        if !ast_gvi_cur_module_defines(name) {
+            GLOBAL_VAR_INIT_AMBIG_COUNT = GLOBAL_VAR_INIT_AMBIG_COUNT + 1
+        }
+        return 0 - 1
+    }
+    if f >= 0 {
+        if ast_gvi_cur_module_defines(name) {
+            return 0 - 1
+        }
+        return f
+    }
+    0 - 1
+}
+
 pub fn ast_lookup_global_var_init(name: Name) -> i64 with Div {
     let h = ast_name_hash(name)
     var i: i64 = 0
@@ -1531,37 +2332,24 @@ pub fn ast_lookup_global_var_init(name: Name) -> i64 with Div {
     0
 }
 
-// Count of recorded init words for `name`. Scalar / array-repeat → 1;
-// element-list `[a,b,c]` → N. Zero means "no recorded initializer".
-// Distinct from lookup(value)==0: a recorded zero fill still counts as present.
+// Count of recorded init words for `name` (first defining module). Scalar /
+// array-repeat -> 1; element-list `[a,b,c]` -> N. Zero means "no recorded
+// initializer". Distinct from lookup(value)==0: a recorded zero fill still counts.
 pub fn ast_global_var_init_count(name: Name) -> i64 with Div {
-    let h = ast_name_hash(name)
-    var n: i64 = 0
-    var i: i64 = 0
-    while i < GLOBAL_VAR_INIT_COUNT {
-        if GLOBAL_VAR_INIT_HASHES[i as usize] == h {
-            n = n + 1
-        }
-        i = i + 1
+    let m = ast_gvi_first_mod(name)
+    if m < 0 {
+        return 0
     }
-    n
+    ast_gvi_count_in(name, m)
 }
 
 // Nth recorded init word for `name` (0-based, source order). Returns 0 if out of range.
 pub fn ast_global_var_init_nth(name: Name, index: i64) -> i64 with Div {
-    let h = ast_name_hash(name)
-    var seen: i64 = 0
-    var i: i64 = 0
-    while i < GLOBAL_VAR_INIT_COUNT {
-        if GLOBAL_VAR_INIT_HASHES[i as usize] == h {
-            if seen == index {
-                return GLOBAL_VAR_INIT_VALUES[i as usize]
-            }
-            seen = seen + 1
-        }
-        i = i + 1
+    let m = ast_gvi_first_mod(name)
+    if m < 0 {
+        return 0
     }
-    0
+    ast_gvi_nth_in(name, m, index)
 }
 
 // 1 if GLOBAL_VAR_INIT words for `name` encode a string literal (Wave15e).

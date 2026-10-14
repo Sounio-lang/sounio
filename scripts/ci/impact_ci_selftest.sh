@@ -33,7 +33,32 @@ compiler="$(classify_pr self-hosted/compiler/main.sio)"
 expect "$compiler" compiler true
 expect "$compiler" sio true
 
+# Exact SCO fixture boundary selects source-built gates, without widening every example.
+sco="$(classify_pr examples/sco_corpus/v3_observe/v3_main.sio)"
+expect "$sco" tests true
+expect "$sco" sio true
+expect "$sco" compiler false
+expect "$sco" full false
+sco_expected="$(classify_pr examples/sco_corpus/v3_observe/expected.txt)"
+expect "$sco_expected" tests true
+expect "$sco_expected" sio false
+expect "$sco_expected" full false
+ordinary_example="$(classify_pr examples/hello.sio)"
+expect "$ordinary_example" tests false
+expect "$ordinary_example" sio true
+expect "$ordinary_example" full false
+mq_sco="$(CI_EVENT_NAME=merge_group "$CLASSIFIER" examples/sco_corpus/strategy_probe/probe_nonassoc.sio)"
+expect "$mq_sco" tests true
+expect "$mq_sco" full false
+
 unknown="$(classify_pr newly-introduced/build.graph)"
+
+for manifest_path in chaos_sensitivity_manifest.tsv artifacts/research/chaos/chaos_sensitivity_manifest.tsv; do
+  manifest="$(classify_pr "$manifest_path")"
+  expect "$manifest" full true
+  expect "$manifest" compiler true
+done
+
 expect "$unknown" full true
 expect "$unknown" compiler true
 expect "$unknown" lean true
@@ -49,6 +74,21 @@ done
 non_pr="$(CI_EVENT_NAME=push $CLASSIFIER)"
 expect "$non_pr" full true
 expect "$non_pr" compiler true
+
+# merge_group is diff-classified like the PR it carries (not forced full).
+mq_docs="$(CI_EVENT_NAME=merge_group "$CLASSIFIER" docs/internal/concepts/README.md)"
+expect "$mq_docs" docs true
+expect "$mq_docs" compiler false
+expect "$mq_docs" full false
+mq_compiler="$(CI_EVENT_NAME=merge_group "$CLASSIFIER" self-hosted/ir/opt_cleanup.sio)"
+expect "$mq_compiler" compiler true
+mq_workflow="$(CI_EVENT_NAME=merge_group "$CLASSIFIER" .github/workflows/ci.yml)"
+expect "$mq_workflow" full true
+# ...and refuses a merge group with no base, instead of an all-false matrix.
+if (cd "$ROOT_DIR" && CI_EVENT_NAME=merge_group CI_BASE_SHA= "$CLASSIFIER" >/dev/null 2>&1); then
+  echo "impact-ci-selftest: classifier accepted a merge_group with no base SHA" >&2
+  exit 1
+fi
 
 # A failed `git diff` used to be invisible through process substitution:
 # paths=(), every output false, exit 0 -- a run downstream reads identically
@@ -72,6 +112,12 @@ root_commit="$(cd "$ROOT_DIR" && git rev-list --max-parents=0 HEAD | tail -1)"
 live="$(cd "$ROOT_DIR" && CI_EVENT_NAME=pull_request \
       CI_BASE_SHA="$root_commit" CI_HEAD_SHA=HEAD "$CLASSIFIER")"
 expect "$live" full true
+
+# Optional shell-only boundary leaves the default evaluator tests intact.
+if [[ "${1:-}" == "--classifier-only" ]]; then
+  echo "impact-ci-selftest: classifier controls PASS"
+  exit 0
+fi
 
 # Derive one needs-fixture from another by replacing a job's result.
 #
