@@ -912,6 +912,18 @@ fn fo_cov_rho_get(i: i64, j: i64) -> f64 with Mut, Panic, Div {
     }
     FO_COV_RHO[fo_cov_rho_idx(i, j) as usize]
 }
+
+// Sensitivities of a struct field, saved when a call result is named.
+// The variance scalar is not enough for Cov(field_a, field_b): that dot
+// product needs each field's channel vector, and the let that binds the
+// call is the last place those vectors exist together.
+var FO_FIELD_SENS_COUNT: i64 = 0
+var FO_FIELD_SENS_KEY: [i64; 64] = [0; 64]
+var FO_FIELD_SENS: [i64; 2048] = [-1; 2048]
+
+fn fo_field_sens_reset() with Mut {
+    FO_FIELD_SENS_COUNT = 0
+}
 var FO_XFER_FWD_HASH: [i64; 64] = [0; 64]
 
 // Copilot review (PR #2516): the byte cap here must match Name.buf's actual
@@ -6964,6 +6976,7 @@ fn lowerer_lower_fn_item_mut(
         FO_SIGMA_REG[fo_sri as usize] = -1
         fo_sri = fo_sri + 1
     }
+    fo_field_sens_reset()
     // Seed the transcendental chain-rule entries here, on the confirmed live path.
     //
     // fo_xfer_global_reset (:3578, :9019) and lowerer_lower_program_bodies_dedup_mut
@@ -10421,6 +10434,7 @@ impl Lowerer {
         // Multi-channel FO seeds are per-function.
         lo.fo_nchan = 0
         lo.fo_bind_count = 0
+        fo_field_sens_reset()
         var fci: i64 = 0
         while fci < 32 {
             lo.fo_sigma2[fci as usize] = -1
@@ -12980,6 +12994,17 @@ impl Lowerer {
         && n.buf[10] == 102 as i8
     }
 
+    fn name_is_covariance_of(self, n: Name) -> bool with Div {
+        n.len == 13
+        && n.buf[0] == 99 as i8 && n.buf[1] == 111 as i8
+        && n.buf[2] == 118 as i8 && n.buf[3] == 97 as i8
+        && n.buf[4] == 114 as i8 && n.buf[5] == 105 as i8
+        && n.buf[6] == 97 as i8 && n.buf[7] == 110 as i8
+        && n.buf[8] == 99 as i8 && n.buf[9] == 101 as i8
+        && n.buf[10] == 95 as i8 && n.buf[11] == 111 as i8
+        && n.buf[12] == 102 as i8
+    }
+
     fn name_is_sensitivity_of(self, n: Name) -> bool with Div {
         n.len == 14
         && n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8
@@ -13745,6 +13770,192 @@ impl Lowerer {
         (lo, acc)
     }
 
+    // Remember the channel vector just applied to a field. Overwrites a
+    // previous vector for the same key: a later let of the same local is a
+    // new binding, and the old partials must not leak into it.
+    fn fo_field_sens_store(self, key: i64) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        if key < 0 {
+            return lo
+        }
+        var i: i64 = 0
+        var slot: i64 = 0 - 1
+        while i < FO_FIELD_SENS_COUNT {
+            if FO_FIELD_SENS_KEY[i as usize] == key {
+                slot = i
+                break
+            }
+            i = i + 1
+        }
+        if slot < 0 {
+            if FO_FIELD_SENS_COUNT >= 64 {
+                return lo
+            }
+            slot = FO_FIELD_SENS_COUNT
+            FO_FIELD_SENS_KEY[slot as usize] = key
+            FO_FIELD_SENS_COUNT = slot + 1
+        }
+        var k: i64 = 0
+        while k < 32 {
+            FO_FIELD_SENS[(slot * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
+            k = k + 1
+        }
+        lo
+    }
+
+    fn fo_field_sens_slot(self, key: i64) -> i64 with Mut, Panic, Div {
+        if key < 0 {
+            return 0 - 1
+        }
+        var i: i64 = 0
+        while i < FO_FIELD_SENS_COUNT {
+            if FO_FIELD_SENS_KEY[i as usize] == key {
+                return i
+            }
+            i = i + 1
+        }
+        0 - 1
+    }
+
+    // Cov(f, g) = sum_k sF_k sG_k sigma2_k
+    //   + sum_{i<j} (sF_i sG_j + sF_j sG_i) rho_ij sigma_i sigma_j.
+    // When f and g are the same expression this is Var. The cross term is
+    // not folded into either variance.
+    fn fo_emit_cov_from_sens(self, sA: [i64; 32], sB: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let z = self.emit_f64_const(0.0)
+        var lo = z.0
+        var acc = z.1
+        var k: i64 = 0
+        while k < 32 {
+            let sa = sA[k as usize]
+            let sb = sB[k as usize]
+            let sig = lo.fo_sigma2[k as usize]
+            if sa >= 0 && sb >= 0 && sig >= 0 {
+                let p1 = lo.fresh_reg()
+                lo = p1.0
+                lo = lo.emit(ir_binop_typed(p1.1, sa, BinaryOp::OpMul, sb, true, true))
+                lo = lo.emit(ir_mark_float_reg(p1.1))
+                let p2 = lo.fresh_reg()
+                lo = p2.0
+                lo = lo.emit(ir_binop_typed(p2.1, p1.1, BinaryOp::OpMul, sig, true, true))
+                lo = lo.emit(ir_mark_float_reg(p2.1))
+                let p3 = lo.fresh_reg()
+                lo = p3.0
+                lo = lo.emit(ir_binop_typed(p3.1, acc, BinaryOp::OpAdd, p2.1, true, true))
+                lo = lo.emit(ir_mark_float_reg(p3.1))
+                acc = p3.1
+            }
+            k = k + 1
+        }
+        var ci: i64 = 0
+        while ci < 8 {
+            var cj: i64 = ci + 1
+            while cj < 8 {
+                let rho = fo_cov_rho_get(ci, cj)
+                let sai = sA[ci as usize]
+                let saj = sA[cj as usize]
+                let sbi = sB[ci as usize]
+                let sbj = sB[cj as usize]
+                let v_i = lo.fo_sigma2[ci as usize]
+                let v_j = lo.fo_sigma2[cj as usize]
+                let has_ij = sai >= 0 && sbj >= 0
+                let has_ji = saj >= 0 && sbi >= 0
+                if rho != 0.0 && (has_ij || has_ji) && v_i >= 0 && v_j >= 0 {
+                    let pp = lo.fresh_reg()
+                    lo = pp.0
+                    lo = lo.emit(ir_binop_typed(pp.1, v_i, BinaryOp::OpMul, v_j, true, true))
+                    lo = lo.emit(ir_mark_float_reg(pp.1))
+                    let sq_id = lowerer_find_or_add_fn_id_mut(&! lo, make_name("sqrt"))
+                    let sq_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(pp.1)))
+                    let dp = lo.fresh_reg()
+                    lo = dp.0
+                    let sig_prod = dp.1
+                    var sqi = ir_call(sig_prod, sq_id, make_name("sqrt"), sq_args, 1)
+                    sqi.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                    lo = lo.emit(sqi)
+                    lo = lo.emit(ir_mark_float_reg(sig_prod))
+                    let rp = lo.emit_f64_const(rho)
+                    lo = rp.0
+                    var t_sum_reg: i64 = 0 - 1
+                    if has_ij {
+                        let t_ij = lo.fresh_reg()
+                        lo = t_ij.0
+                        lo = lo.emit(ir_binop_typed(t_ij.1, sai, BinaryOp::OpMul, sbj, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t_ij.1))
+                        t_sum_reg = t_ij.1
+                    }
+                    if has_ji {
+                        let t_ji = lo.fresh_reg()
+                        lo = t_ji.0
+                        lo = lo.emit(ir_binop_typed(t_ji.1, saj, BinaryOp::OpMul, sbi, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t_ji.1))
+                        if t_sum_reg < 0 {
+                            t_sum_reg = t_ji.1
+                        } else {
+                            let t_sum = lo.fresh_reg()
+                            lo = t_sum.0
+                            lo = lo.emit(ir_binop_typed(t_sum.1, t_sum_reg, BinaryOp::OpAdd, t_ji.1, true, true))
+                            lo = lo.emit(ir_mark_float_reg(t_sum.1))
+                            t_sum_reg = t_sum.1
+                        }
+                    }
+                    let t_sum_box = lo.fresh_reg()
+                    lo = t_sum_box.0
+                    lo = lo.emit(ir_copy(t_sum_box.1, t_sum_reg))
+                    lo = lo.emit(ir_mark_float_reg(t_sum_box.1))
+                    let t_sum = t_sum_box
+                    let t_sig = lo.fresh_reg()
+                    lo = t_sig.0
+                    lo = lo.emit(ir_binop_typed(t_sig.1, t_sum.1, BinaryOp::OpMul, sig_prod, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t_sig.1))
+                    let t_rho = lo.fresh_reg()
+                    lo = t_rho.0
+                    lo = lo.emit(ir_binop_typed(t_rho.1, t_sig.1, BinaryOp::OpMul, rp.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t_rho.1))
+                    let ap = lo.fresh_reg()
+                    lo = ap.0
+                    lo = lo.emit(ir_binop_typed(ap.1, acc, BinaryOp::OpAdd, t_rho.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(ap.1))
+                    acc = ap.1
+                }
+                cj = cj + 1
+            }
+            ci = ci + 1
+        }
+        (lo, acc)
+    }
+
+
+    // A named field keeps the partials from the call. variance_of re-emits
+    // from those partials and the correlation as it stands at this read.
+    // The number bound at the let is a snapshot; a later correlate must
+    // move this variance together with the covariance of the same fields.
+    fn fo_live_var_from_field_key(self, base_reg: i64, field_idx: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let key = self.variance_field_key(base_reg, field_idx)
+        let slot = self.fo_field_sens_slot(key)
+        if slot < 0 {
+            return (self, 0 - 1)
+        }
+        let copied = self.fo_copy_field_sens(slot)
+        var lo = copied.0
+        lo = lo.fo_restore_expr_sens(copied.1)
+        lo.fo_emit_var_from_sens()
+    }
+
+    fn fo_copy_field_sens(self, slot: i64) -> (Lowerer, [i64; 32]) with Mut, Panic, Div {
+        var snap: [i64; 32] = [-1; 32]
+        if slot < 0 {
+            return (self, snap)
+        }
+        var k: i64 = 0
+        while k < 32 {
+            snap[k as usize] = FO_FIELD_SENS[(slot * 32 + k) as usize]
+            k = k + 1
+        }
+        (self, snap)
+    }
+
+
     // s_out[k] = sL[k] + sR[k]  (add) or sL[k] - sR[k] (sub)
     fn fo_combine_sens_addsub(self, sL: [i64; 32], sR: [i64; 32], is_sub: bool) -> Lowerer with Mut, Panic, Div, IO {
         var lo = self
@@ -14247,7 +14458,7 @@ impl Lowerer {
     // Walk a struct literal, registering one entry per LEAF field path.
     // `make_d(x, v0) -> D { c: C { b: B { a: A { x: x } } }, v0: v0 }` yields
     // path(c,b,a,x) -> kind 1 @ p0 and path(v0) -> kind 1 @ p1.
-    fn fo_ctor_walk_literal(self, fn_hash: i64, path: i64, blk: &Block, e: &Expr, p0: Name, p1: Name, nparams: i64, depth: i64, sname: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn fo_ctor_walk_literal(self, fn_hash: i64, path: i64, blk: &Block, e: &Expr, p0: Name, p1: Name, nparams: i64, depth: i64, sname: Name, outer_idx: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         if depth > 8 {
             return lo
@@ -14260,13 +14471,30 @@ impl Lowerer {
                     let fname = (*list).head.name
                     let sub = fo_ctor_path_fold(path, fo_name_hash(fname))
                     let init = &(*list).head.value
-                    let f0 = if depth == 0 {
-                        if sname.len > 0 { lo.field_idx_from_struct_literal_name(sname, fname, field_idx) } else { lo.field_idx_from_name_simple(fname) }
-                    } else { 0 - 1 }
+                    // A leaf one struct inside the returned value keeps both
+                    // indices. field0 >= 0 is still the top-level slot. A
+                    // negative code at or below -2 is (outer, leaf): the let
+                    // that names the call binds that leaf on a hop through
+                    // the outer field, so variance_of(result.water.value)
+                    // is the same transfer as variance_of(call().water.value).
+                    var leaf_f0: i64 = 0 - 1
+                    if depth == 0 {
+                        if sname.len > 0 {
+                            leaf_f0 = lo.field_idx_from_struct_literal_name(sname, fname, field_idx)
+                        } else {
+                            leaf_f0 = lo.field_idx_from_name_simple(fname)
+                        }
+                    } else if depth == 1 && outer_idx >= 0 && outer_idx < 128 {
+                        let leaf = lo.field_idx_from_name_simple(fname)
+                        if leaf >= 0 && leaf < 128 {
+                            leaf_f0 = 0 - (2 + outer_idx * 128 + leaf)
+                        }
+                    }
                     if (*init).kind == ExprKind::ExprStructLit {
-                        lo = lo.fo_ctor_walk_literal(fn_hash, sub, blk, init, p0, p1, nparams, depth + 1, ir_path_first_name((*init).path))
+                        let child_outer = if depth == 0 { lo.field_idx_from_name_simple(fname) } else { 0 - 1 }
+                        lo = lo.fo_ctor_walk_literal(fn_hash, sub, blk, init, p0, p1, nparams, depth + 1, ir_path_first_name((*init).path), child_outer)
                     } else {
-                        lo = lo.fo_ctor_classify_leaf(fn_hash, sub, f0, blk, init, p0, p1, nparams, 0)
+                        lo = lo.fo_ctor_classify_leaf(fn_hash, sub, leaf_f0, blk, init, p0, p1, nparams, 0)
                     }
                     field_idx = field_idx + 1
                     current = &(*list).tail
@@ -14313,13 +14541,13 @@ impl Lowerer {
                                     }
                                 }
                                 if (*e_ref).kind == ExprKind::ExprStructLit {
-                                    lo = lo.fo_ctor_walk_literal(fn_hash, 5381, blk, e_ref, p0, p1, nparams, 0, ir_path_first_name((*e_ref).path))
+                                    lo = lo.fo_ctor_walk_literal(fn_hash, 5381, blk, e_ref, p0, p1, nparams, 0, ir_path_first_name((*e_ref).path), 0 - 1)
                                 } else if (*e_ref).kind == ExprKind::ExprIdent && last_let_name.len > 0 {
                                     if ir_name_eq((*e_ref).name, last_let_name) {
                                         match last_let_expr {
                                             Some(rhs) => {
                                                 if (*rhs).kind == ExprKind::ExprStructLit {
-                                                    lo = lo.fo_ctor_walk_literal(fn_hash, 5381, blk, &(*rhs), p0, p1, nparams, 0, ir_path_first_name((*rhs).path))
+                                                    lo = lo.fo_ctor_walk_literal(fn_hash, 5381, blk, &(*rhs), p0, p1, nparams, 0, ir_path_first_name((*rhs).path), 0 - 1)
                                                 }
                                             }
                                             _ => {}
@@ -17203,6 +17431,10 @@ impl Lowerer {
                             if base_reg >= 0 {
                                 let carried = self.lookup_variance_for_field(base_reg, 0)
                                 if carried >= 0 {
+                                    let live0 = self.fo_live_var_from_field_key(base_reg, 0)
+                                    if live0.1 >= 0 {
+                                        return live0
+                                    }
                                     let lo_c = self.so_clear_expr_hess().fo_seed_from_variance(carried, 0 - 1)
                                     return (lo_c, carried)
                                 }
@@ -17227,6 +17459,10 @@ impl Lowerer {
             if fbase.1 >= 0 {
                 var lo_f = fbase.0
                 let idx = lo_f.field_idx_from_name_simple((*e).name)
+                let live = lo_f.fo_live_var_from_field_key(fbase.1, idx)
+                if live.1 >= 0 {
+                    return live
+                }
                 let fv = lo_f.lookup_variance_for_field(fbase.1, idx)
                 if fv >= 0 {
                     lo_f = lo_f.so_clear_expr_hess().fo_seed_from_variance(fv, 0 - 1)
@@ -19633,6 +19869,7 @@ impl Lowerer {
                 Some(callee_expr) => {
                     let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                     if self.name_is_variance_of(callee_name)
+                        || self.name_is_covariance_of(callee_name)
                         || self.name_is_uncertainty_of(callee_name)
                         || self.name_is_sensitivity_of(callee_name)
                         || self.name_is_second_order_mean(callee_name)
@@ -23286,10 +23523,10 @@ impl Lowerer {
         }
         // #1706: `let pk = make_let(x)` -- the RHS is a ctor CALL. Its per-field
         // transfers are registered, so evaluate each TOP-LEVEL field against the
-        // call's arguments and bind the result under this local's reg. Only
-        // depth-0 entries participate: a path hash cannot be walked back to a
-        // field index, so deeper paths stay reachable only through the direct
-        // `make(...).a.b` form, which fo_ctor_chain_apply already handles.
+        // call's arguments and bind the result under this local's reg.
+        // Top-level entries bind on the result local. A leaf nested one
+        // struct down is packed into field0 (<= -2) and bound on a hop
+        // through that outer field, so a named result keeps each leaf.
         match s.expr {
             Some(rhs_call) => {
                 if (*rhs_call).kind == ExprKind::ExprCall {
@@ -23306,9 +23543,37 @@ impl Lowerer {
                                         lo = ap.0
                                         if ap.1 >= 0 {
                                             lo = lo.bind_variance_for_field(dst_reg, FO_CTOR_FIELD0[ci as usize], ap.1)
+                                            lo = lo.fo_field_sens_store(lo.variance_field_key(dst_reg, FO_CTOR_FIELD0[ci as usize]))
                                         }
                                     }
                                     ci = ci + 1
+                                }
+                                // Nested leaf: field0 <= -2 packs the outer field
+                                // and the leaf. The variance is bound on a hop
+                                // base, which is what variance_of(local.a.b) reads.
+                                var cj: i64 = 0
+                                while cj < FO_CTOR_COUNT {
+                                    if FO_CTOR_FN_HASH[cj as usize] == chash && FO_CTOR_FIELD0[cj as usize] <= (0 - 2) {
+                                        let packed = (0 - FO_CTOR_FIELD0[cj as usize]) - 2
+                                        let outer = packed / 128
+                                        let leaf = packed - outer * 128
+                                        if outer >= 0 && outer < 128 && leaf >= 0 && leaf < 128 {
+                                            let apn = lo.fo_apply_transfer_kind(FO_CTOR_KIND[cj as usize], FO_CTOR_LIT[cj as usize], 0 - 1, &(*rhs_call).args, 0)
+                                            lo = apn.0
+                                            if apn.1 >= 0 {
+                                                var inner = lo.lookup_variance_for_field_base(dst_reg, outer)
+                                                if inner < 0 {
+                                                    let fr = lo.fresh_reg()
+                                                    lo = fr.0
+                                                    inner = fr.1
+                                                    lo = lo.bind_variance_for_field_base(dst_reg, outer, inner)
+                                                }
+                                                lo = lo.bind_variance_for_field(inner, leaf, apn.1)
+                                                lo = lo.fo_field_sens_store(lo.variance_field_key(inner, leaf))
+                                            }
+                                        }
+                                    }
+                                    cj = cj + 1
                                 }
                                 lo = lo.fo_clear_expr_sens()
                             }
@@ -26412,6 +26677,52 @@ impl Lowerer {
         (lo, vr.1)
     }
 
+    fn fo_sens_of_cov_arg(self, e: &Expr) -> (Lowerer, [i64; 32]) with Mut, Panic, Div, Alloc, IO {
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            let fbase = self.variance_field_chain_base(e)
+            var lo = fbase.0
+            if fbase.1 >= 0 {
+                let idx = lo.field_idx_from_name_simple((*e).name)
+                let key = lo.variance_field_key(fbase.1, idx)
+                let slot = lo.fo_field_sens_slot(key)
+                if slot >= 0 {
+                    return lo.fo_copy_field_sens(slot)
+                }
+            }
+            let pair = lo.lower_expr_variance_ref(e)
+            lo = pair.0
+            return (lo, lo.fo_snapshot_expr_sens())
+        }
+        let pair = self.lower_expr_variance_ref(e)
+        var lo = pair.0
+        (lo, lo.fo_snapshot_expr_sens())
+    }
+
+    fn lower_covariance_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *args {
+            Some(list) => {
+                match (*list).tail {
+                    Some(rest) => {
+                        let a = self.fo_sens_of_cov_arg(&(*list).head)
+                        var lo = a.0
+                        let sA = a.1
+                        let b = lo.fo_sens_of_cov_arg(&(*rest).head)
+                        lo = b.0
+                        let cp = lo.fo_emit_cov_from_sens(sA, b.1)
+                        lo = cp.0
+                        let dstp = lo.fresh_reg()
+                        lo = dstp.0
+                        lo = lo.emit(ir_copy(dstp.1, cp.1))
+                        lo = lo.emit(ir_mark_float_reg(dstp.1))
+                        return (lo, dstp.1)
+                    }
+                    _ => self.emit_zero_variance(),
+                }
+            }
+            _ => self.emit_zero_variance(),
+        }
+    }
+
     fn lower_variance_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(list) => {
@@ -27457,6 +27768,7 @@ impl Lowerer {
             || ir_name_is_measure(callee_name)
             || ir_name_is_knowledge_ctor(callee_name)
             || self.name_is_variance_of(callee_name)
+            || self.name_is_covariance_of(callee_name)
             || self.name_is_uncertainty_of(callee_name)
             || self.name_is_sensitivity_of(callee_name)
             || self.name_is_hessian_of(callee_name)
@@ -27573,6 +27885,9 @@ impl Lowerer {
         }
         if self.name_is_variance_of(callee_name) {
             return self.lower_variance_of_call_ref(&e.args)
+        }
+        if self.name_is_covariance_of(callee_name) {
+            return self.lower_covariance_of_call_ref(&e.args)
         }
         if self.name_is_uncertainty_of(callee_name) {
             return self.lower_uncertainty_of_call_ref(&e.args)
