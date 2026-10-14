@@ -52,8 +52,8 @@ jobs:
       - name: Classifier self-test
         run: bash scripts/ci/impact_ci_selftest.sh
 
-  contracts:
-    name: Contracts
+  contracts-core:
+    name: Contracts Core
     needs: impact
     runs-on: ubuntu-24.04
     # Bounded (#2443). 63 successful runs of this job, 2026-10-06T15:44Z..
@@ -70,6 +70,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Contracts shard decision self-test
+        run: bash scripts/ci/contracts_shard_decision_selftest.sh
       - name: Workflow script references
         run: bash scripts/dev/check_workflow_script_refs.sh
       # The docs claimed "Cranelift JIT enabled" and named a JIT profile artifact
@@ -622,8 +624,6 @@ jobs:
         run: bash scripts/ci/madaros_uncertain_eq_trust_gate.sh
       - name: Ontology frontiers hold
         run: bash scripts/ci/ontology_frontiers_gate.sh
-      - name: Multi-ontology composition holds
-        run: bash scripts/ci/ontology_multi_ontology_gate.sh
       # Absence of measurement must not read as success. Meta-gate requires a
       # positive GATE_MEASURED assertions=N receipt (see CI_ABSENCE_AS_SUCCESS_CONTRACT).
       #
@@ -808,6 +808,36 @@ jobs:
               echo "A contract gate failed or was cancelled; subsequent gates were not evaluated." >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
+
+  # Independent gate: its inputs and temporary outputs are checkout-local.
+  # Preserve the Contracts check as a fail-closed join of both complete jobs.
+  contracts-ontology:
+    name: Contracts Ontology
+    needs: impact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
+      - name: Multi-ontology composition holds
+        run: bash scripts/ci/ontology_multi_ontology_gate.sh
+
+  contracts:
+    name: Contracts
+    if: always()
+    needs: [contracts-core, contracts-ontology]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Both Contracts shards must succeed
+        env:
+          CONTRACTS_CORE_RESULT: ${{ needs.contracts-core.result }}
+          CONTRACTS_ONTOLOGY_RESULT: ${{ needs.contracts-ontology.result }}
+        run: bash scripts/ci/contracts_shard_decision.sh "$CONTRACTS_CORE_RESULT" "$CONTRACTS_ONTOLOGY_RESULT"
 
   r6-corpus-sweep:
     name: R6 Corpus Sweep (Nightly)
