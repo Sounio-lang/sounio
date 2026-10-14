@@ -73,7 +73,7 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     assert(c[1] == 22.0)
     assert(c[2] == 43.0)
     assert(c[3] == 50.0)
-    0
+    return 0
 }
 ```
 

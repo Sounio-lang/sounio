@@ -1,0 +1,76 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: #2827 — a loop-carried accumulator keeps the right GUM variance when scaled or divided after the loop (analytic: var(acc) = 0.1^2 + 0.2^2 + 0.15^2 = 0.0725; var(acc/2) = var(acc*0.5) = 0.018125)
+//@ expect-stdout: acc_var=0.072500
+//@ expect-stdout: h_var=0.018125
+//@ expect-stdout: t_var=0.018125
+//@ expect-stdout: w_acc_var=169.444444
+//@ expect-stdout: mu_var=0.005902
+//@ expect-stdout: GUM_LOOP_ACC_2827_OK
+//
+// Before the fix Madaros printed h_var=0.023750 and t_var=0.023750, i.e.
+// (0.0725 + 0.0225) / 4: the accumulator's sensitivities, rebound at the
+// assignment, referred to the accumulator's own loop-carried variance slot
+// (already holding the final 0.0725) PLUS the last iteration's measurement
+// (0.15^2 = 0.0225), so the last iteration was counted twice.
+// Before the fix the weighted case (a 1/u^2-weighted accumulator divided by the
+// constant W) read 0.007450 = (W + 1/0.15^2) / W^2 for var(acc / W).
+// The weighted case is the inverse-variance pooled mean: W = 1/0.1^2 + 1/0.2^2 +
+// 1/0.15^2 = 169.444444, var(acc) = W, var(acc / W) = 1 / W = 0.005902.
+
+// lean_single computes var(acc / c) as 0 (its in-function division defect,
+// #2776), hence `requires: madaros` until that lands.
+
+fn close(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    d < tol && d > 0.0 - tol
+}
+
+fn weighted_case(u: [f64; 3]) -> i64 with IO, Mut, Div, Panic, Alloc, Epistemic {
+    var fails: i64 = 0
+    var wacc: f64 = 0.0
+    var j: i64 = 0
+    while j < 3 {
+        let k2: Knowledge<f64> = measure(1.0, uncertainty: u[j])
+        wacc = wacc + k2.value * (1.0 / (u[j] * u[j]))
+        j = j + 1
+    }
+    let vw = variance_of(wacc)
+    print("w_acc_var="); print_f64(vw); print("\n")
+    if !close(vw, 169.444444444, 1.0e-6) { fails = fails + 1 }
+    let big_w = 169.444444444444
+    let mu = wacc / big_w
+    let vmu = variance_of(mu)
+    print("mu_var="); print_f64(vmu); print("\n")
+    if !close(vmu, 0.00590163934, 1.0e-9) { fails = fails + 1 }
+    fails
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic, Alloc, Epistemic {
+    let u: [f64; 3] = [0.1, 0.2, 0.15]
+    var fails: i64 = 0
+
+    var acc: f64 = 0.0
+    var i: i64 = 0
+    while i < 3 {
+        let k: Knowledge<f64> = measure(1.0, uncertainty: u[i])
+        acc = acc + k.value
+        i = i + 1
+    }
+    let va = variance_of(acc)
+    print("acc_var="); print_f64(va); print("\n")
+    if !close(va, 0.0725, 1.0e-9) { fails = fails + 1 }
+    let h = acc / 2.0
+    let vh = variance_of(h)
+    print("h_var="); print_f64(vh); print("\n")
+    if !close(vh, 0.018125, 1.0e-9) { fails = fails + 1 }
+    let t = acc * 0.5
+    let vt = variance_of(t)
+    print("t_var="); print_f64(vt); print("\n")
+    if !close(vt, 0.018125, 1.0e-9) { fails = fails + 1 }
+
+    fails = fails + weighted_case(u)
+
+    if fails == 0 { println("GUM_LOOP_ACC_2827_OK") } else { println("GUM_LOOP_ACC_2827_FAIL") }
+    fails
+}

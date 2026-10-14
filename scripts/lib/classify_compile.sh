@@ -74,6 +74,12 @@ _SOUNIO_CC_SUCCESS_RE='^compile: fns=|^check: OK|^run_check_mode: verdict=0'
 # failed` and returns 1 before reaching any write_file call.
 _SOUNIO_CC_VERDICT_FAIL_RE='^typecheck: failed|^run_check_mode: verdict=1'
 
+# lean_single's epistemic/temporal type checks (lean_single.sio, "type error
+# line ") print a further diagnostic shape, `type error line N: <message>`,
+# with no `error:` prefix and no code, on both targets. Missing it made four
+# compile-fail fixtures read as silent refusals (#2424).
+_SOUNIO_CC_TYPE_ERROR_RE='^type error line [0-9]+:'
+
 sounio_is_fatal_log() {
   local log="$1"
   [[ -f "$log" ]] || return 1
@@ -120,7 +126,7 @@ sounio_primary_diag() {
   local log="$1"
   [[ -f "$log" ]] || return 0
   local first
-  first="$(grep -m1 -E '^(error|warning)|^[EPW][0-9]{3,4}\b' "$log" 2>/dev/null || true)"
+  first="$(grep -m1 -E '^(error|warning)|^[EPW][0-9]{3,4}\b|'"$_SOUNIO_CC_TYPE_ERROR_RE" "$log" 2>/dev/null || true)"
   [[ -n "$first" ]] || return 0
   local code
   code="$(printf '%s' "$first" | grep -oE '\b[EPW][0-9]{3,4}\b' | head -1 || true)"
@@ -135,7 +141,7 @@ sounio_primary_diag() {
 _sounio_has_diagnostic() {
   local log="$1"
   [[ -f "$log" ]] || return 1
-  grep -qE '\b[EPW][0-9]{3,4}\b|^error:|^error\[|'"$_SOUNIO_CC_VERDICT_FAIL_RE" "$log"
+  grep -qE '\b[EPW][0-9]{3,4}\b|^error:|^error\[|'"$_SOUNIO_CC_TYPE_ERROR_RE"'|'"$_SOUNIO_CC_VERDICT_FAIL_RE" "$log"
 }
 
 # sounio_classify_compile RC LOG [OUT]

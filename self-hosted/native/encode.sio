@@ -5,15 +5,11 @@
 
 module native::encode
 
-// Lane B residual (2026-08-13): `.bytes` is vestigial on the Linux native_v2 path.
-// Real machine code lives in NC_BIG_CODE; `.len` is the only live field threaded
-// through by-value emit_* and by-ref nc_emit_*. Keeping a multi-256 KiB array here
-// forced every `var out = buf` / `nc: NativeCompiler` copy to pay ~256 KiB per
-// stack frame (and nested emit_u64 → emit_u32 → emit_byte chains stacked several).
-// The 64-byte stub preserves a non-empty array type for the few macho/pe readers
-// that still mention `.bytes`; those paths must read NC_BIG_CODE for payload.
+// CodeBuffer is only the length cursor for NC_BIG_CODE. The bytes are not in
+// the struct: a by-value copy must not be able to snapshot or clobber the image.
+// Keeping a multi-256 KiB array here forced every `var out = buf` /
+// `nc: NativeCompiler` copy to pay that many bytes per stack frame.
 pub struct CodeBuffer {
-    pub bytes: [i8; 64],
     pub len: i64,
 }
 
@@ -23,8 +19,7 @@ pub struct CodeBuffer {
 // module-global BSS array holds the emitted code so NativeCompiler stays small on
 // the stack, while `.len` (a scalar, threaded through BOTH the by-ref nc_emit_byte
 // path and the by-value emit_byte path) stays the authoritative length. Both emit
-// paths write NC_BIG_CODE[.len]; the struct .bytes field is now a 64-byte stub (see
-// struct comment). Because .len is threaded consistently, the by-value builtin
+// paths write NC_BIG_CODE[.len]. Because .len is threaded consistently, the by-value builtin
 // emitters (which emit into a copy of nc) append to the same global at the shared
 // offset, so no persist/call-site changes are needed. Accessed INLINE only —
 // never via a returning helper (miscompiles under the seed).
@@ -39,33 +34,6 @@ pub var NC_BIG_CODE: [i8; 134217728] = [0; 134217728]
 // scripts/ci/native_capacity_tiers_gate.sh.
 pub fn nc_code_capacity_bytes() -> i64 { 134217728 }
 
-// Materialise NC_BIG_CODE into fixed arrays expected by legacy macho/pe assemblers
-// that still take by-value `[i8; N]`. Linux ELF writers read NC_BIG_CODE directly.
-pub fn nc_code_copy_to_262144(code_len: i64) -> [i8; 262144] with Mut, Panic, Div {
-    var out: [i8; 262144] = [0; 262144]
-    var i: i64 = 0
-    let n = if code_len < 262144 { code_len } else { 262144 }
-    let cap = nc_code_capacity_bytes()
-    let lim = if n < cap { n } else { cap }
-    while i < lim {
-        out[i as usize] = NC_BIG_CODE[i as usize]
-        i = i + 1
-    }
-    out
-}
-
-pub fn nc_code_copy_to_65536(code_len: i64) -> [i8; 65536] with Mut, Panic, Div {
-    var out: [i8; 65536] = [0; 65536]
-    var i: i64 = 0
-    let n = if code_len < 65536 { code_len } else { 65536 }
-    let cap = nc_code_capacity_bytes()
-    let lim = if n < cap { n } else { cap }
-    while i < lim {
-        out[i as usize] = NC_BIG_CODE[i as usize]
-        i = i + 1
-    }
-    out
-}
 
 pub fn code_buffer_new() -> CodeBuffer {
     var out: CodeBuffer
@@ -73,8 +41,14 @@ pub fn code_buffer_new() -> CodeBuffer {
     out
 }
 
-// Read materialized Linux native-v2 code without exposing the vestigial
-// CodeBuffer.bytes stub to byte-level backend gates.
+// Same byte as an i8, so existing `buf.bytes[i]` comparisons keep their type.
+// Does not consult `.len`: callers that indexed the old array did not either.
+pub fn code_buffer_read_i8(buf: CodeBuffer, idx: i64) -> i8 with Mut, Panic, Div {
+    let _cursor = buf.len
+    if idx < 0 || idx >= nc_code_capacity_bytes() { return 0 }
+    NC_BIG_CODE[idx as usize]
+}
+// Read one emitted byte as 0..255. Past `.len` returns -1.
 pub fn code_buffer_read_byte(buf: CodeBuffer, idx: i64) -> i64 with Mut, Panic, Div {
     if idx < 0 || idx >= buf.len || idx >= nc_code_capacity_bytes() { return -1 }
     let x = NC_BIG_CODE[idx as usize] as i64
@@ -94,10 +68,15 @@ pub struct WideCodeBuffer {
     pub len: i64,
 }
 
+// Construct via struct literal: `var` default-init leaves array fields as the
+// null handle and the backend's indexed element-store path dereferences it
+// without materializing, so the first `bytes[i] = v` segfaults. The literal
+// zero-fill materializes the array (same shape as wide_relocation_table_new).
 pub fn wide_code_buffer_new() -> WideCodeBuffer with Mut {
-    var out: WideCodeBuffer
-    out.len = 0
-    out
+    WideCodeBuffer {
+        bytes: [0; 262144],
+        len: 0,
+    }
 }
 
 pub fn wide_emit_byte(buf: WideCodeBuffer, b: i64) -> WideCodeBuffer with Mut, Panic {

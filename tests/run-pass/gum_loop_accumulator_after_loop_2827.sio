@@ -1,0 +1,112 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: GUM_LOOP_ACC_AFTER_LOOP_2827_OK
+//@ note: lean_single fails on main's seed (measured: mu_var = 0, half_var = 169.44, between = 0.01, straight = 0.04; the #2917 seed: acc_var = 619.44) and passes from the #2776 part 2 lean_single PR on, which carries the loop-fresh channel fix. Drop this requires line once both have landed.
+// #2827, case (a) of the issue: an inverse-variance pooled mean whose
+// accumulator loop runs AFTER an earlier, unrelated loop.
+//
+//   u = [0.1, 0.2, 0.15], w_i = 1/u_i^2,  acc = sum_i w_i * y_i  (y_i measured with u_i)
+//   var(acc) = sum_i w_i^2 u_i^2 = sum_i 1/u_i^2 = W = 169.444444...
+//   mu = acc / W (W computed in an earlier loop, exact)  ->  var(mu) = 1/W = 0.005901639...
+//
+// Before: the earlier loop made a first-order channel exist when `var acc` was
+// declared, so acc got sens rows; the in-loop measure() channel had no row and
+// each assignment dropped it, so var(acc) kept only the LAST iteration
+// (44.444444 = 1/0.15^2) and var(acc / w) read 0. The same happens inside a
+// function that reads the data through a struct reference (case `pooled`).
+//
+// Three more shapes of the same accumulator, fixed alongside:
+//   stale_init: `var acc: f64 = 0.0` right after `let z = k.value * 2.0` read
+//     var(acc) = var(k) = 0.09 (the pending variance of the previous line's
+//     re-lowered k.value leaked into this declaration). Analytic: 0.
+//   between: a measurement taken AFTER the accumulator's declaration but before
+//     the loop is the same quantity on every iteration:
+//     acc = sum_{4} 0.5 m  ->  var = (4 * 0.5)^2 * 0.1^2 = 0.04.
+//   straight: `x = x + m2` outside any loop, then `x - m2` cancels: var 0.
+// Analytic values from tests/oracles/gum_loop_accumulator_after_loop_2827.cpp.
+
+struct Arr { y: [f64; 8], u: [f64; 8], n: i64 }
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+fn rel_ok(got: f64, want: f64) -> bool {
+    abs_f(got - want) <= 1.0e-9 * abs_f(want)
+}
+
+fn pooled_var(a: &Arr) -> f64 with IO, Mut, Div, Panic, Alloc, Epistemic {
+    var w: f64 = 0.0
+    var i: i64 = 0
+    while i < a.n { w = w + 1.0 / (a.u[i] * a.u[i]); i = i + 1 }
+    var acc: f64 = 0.0
+    i = 0
+    while i < a.n {
+        let k: Knowledge<f64> = measure(a.y[i], uncertainty: a.u[i])
+        let v = k.value
+        acc = acc + v * (1.0 / (a.u[i] * a.u[i]))
+        i = i + 1
+    }
+    let mu = acc / w
+    variance_of(mu)
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic, Alloc, Epistemic {
+    let want_w = 169.44444444444443
+    let want_mu = 0.0059016393442622955
+    let u: [f64; 3] = [0.1, 0.2, 0.15]
+    var w: f64 = 0.0
+    var i: i64 = 0
+    while i < 3 { w = w + 1.0 / (u[i] * u[i]); i = i + 1 }
+    var acc: f64 = 0.0
+    i = 0
+    while i < 3 {
+        let k: Knowledge<f64> = measure(1.0, uncertainty: u[i])
+        acc = acc + k.value * (1.0 / (u[i] * u[i]))
+        i = i + 1
+    }
+    let acc_var = variance_of(acc)
+    let mu = acc / w
+    let mu_var = variance_of(mu)
+    let half_var = variance_of(acc * 0.5)
+
+    var a = Arr { y: [0.3, 0.1, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0], u: [0.1, 0.2, 0.15, 1.0, 1.0, 1.0, 1.0, 1.0], n: 3 }
+    let fn_mu_var = pooled_var(&a)
+
+    let k0: Knowledge<f64> = measure(1.0, uncertainty: 0.3)
+    let z = k0.value * 2.0
+    var acc2: f64 = 0.0
+    let stale_var = variance_of(acc2)
+    let km: Knowledge<f64> = measure(2.0, uncertainty: 0.1)
+    let m = km.value
+    var j: i64 = 0
+    while j < 4 {
+        acc2 = acc2 + 0.5 * m
+        j = j + 1
+    }
+    let between_var = variance_of(acc2)
+    var x: f64 = 0.0
+    let km2: Knowledge<f64> = measure(3.0, uncertainty: 0.2)
+    let m2 = km2.value
+    x = x + m2
+    let straight_var = variance_of(x - m2)
+
+    print("acc_var="); print_f64(acc_var); print(" analytic=169.444444\n")
+    print("mu_var="); print_f64(mu_var); print(" analytic=0.005902\n")
+    print("half_var="); print_f64(half_var); print(" analytic=42.361111\n")
+    print("fn_mu_var="); print_f64(fn_mu_var); print(" analytic=0.005902\n")
+    print("stale_init="); print_f64(stale_var); print(" analytic=0.000000\n")
+    print("between="); print_f64(between_var); print(" analytic=0.040000\n")
+    print("straight="); print_f64(straight_var); print(" analytic=0.000000\n")
+    print("z="); print_f64(z); print("\n")
+    if rel_ok(acc_var, want_w) && rel_ok(mu_var, want_mu)
+        && rel_ok(half_var, 0.25 * want_w) && rel_ok(fn_mu_var, want_mu)
+        && abs_f(stale_var) <= 1.0e-12 && rel_ok(between_var, 0.04)
+        && abs_f(straight_var) <= 1.0e-12 {
+        print("GUM_LOOP_ACC_AFTER_LOOP_2827_OK\n")
+        return 0
+    }
+    print("GUM_LOOP_ACC_AFTER_LOOP_2827_FAIL\n")
+    1
+}

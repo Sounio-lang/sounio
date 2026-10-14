@@ -576,7 +576,7 @@ fn dot_product<T: Numeric>(a: [T], b: [T]) -> T {
 ### Start Building
 - Try the [medical examples](../../examples/medlang/) for PK/PD modeling
 - Explore [GPU examples](../../examples/gpu/) for high-performance computing
-- Check [fMRI examples](../../examples/fmri/) for neuroimaging
+- Check [connectivity examples](../../examples/connectivity/) for brain-network analysis
 
 ### Get Help
 - **[FAQ](../FAQ.md)** - Common questions
