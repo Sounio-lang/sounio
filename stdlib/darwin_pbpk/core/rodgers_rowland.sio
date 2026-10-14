@@ -5,7 +5,9 @@
 // Rodgers-Rowland (2006) mechanistic tissue:plasma partition coefficient
 // prediction for neutral compounds with GUM uncertainty propagation.
 //
-// Reference: Rodgers T & Rowland M (2006) J Pharm Sci 95:1743-1764
+// Reference: Rodgers T & Rowland M (2006) J Pharm Sci 95(6):1238-1257 (doi:10.1002/jps.20502)
+// Erratum:   Rodgers T & Rowland M (2007) J Pharm Sci 96(11):3153-3154 (doi:10.1002/jps.20857)
+//            -- zwitterion equations only; does not affect this module's classes.
 //
 // SCOPE: Neutral compounds only (rapamycin is a neutral macrolide, pKa N/A).
 //
@@ -20,6 +22,129 @@
 // For GUM budget purposes, the sensitivity structure from R-R is applied to
 // the literature Kp values (rapamycin.sio), consistent with JCGM 100:2008 §5.1.3.
 //
+// HOW FAR OUT OF DOMAIN rapamycin is, measured 2026-09-26 rather than implied
+// by "overestimates". At logP = 7.0, P = 1e7 and the lipid term dominates.
+// Like for like, both as Kp (total tissue : total plasma), fu = 0.08 -- and
+// these are printed by main() rather than transcribed:
+//   this function returns      1976.05 (blood) .. 682880.01 (adipose)
+//   rr_rapamycin_kp_literature    0.08 (brain)  ..     10.00 (lung)
+// Compared TISSUE BY TISSUE, the overprediction spans a factor of 1906.68 to
+// 2276266.71, i.e. 3.3 to 6.4 ORDERS of magnitude -- not a modest bias.
+// Nothing may read `RRResult.kp` for rapamycin and call it a prediction.
+//
+// Two earlier versions of this note were wrong and are recorded rather than
+// quietly replaced, because each was wrong for a different reason:
+//   (1) the first compared Kpu against total-plasma literature Kp and gave the
+//       literature floor as 1 rather than 0.08 -- a mismatched-basis comparison;
+//   (2) the second was like-for-like but quoted 1702.31 .. 588278.57 and
+//       "1642.5 to 1960928.6", which were the outputs of the module's OWN
+//       broken rr_pow10 (effective P = 8.61e6 instead of 1e7, 13.9% low), so it
+//       conflated model error with a numerical error in the helper. Both were
+//       found in review by copilot-pull-request-reviewer. The figures above are
+//       measured on the corrected helpers, whose accuracy is itself gated
+//       (T9-T11).
+//
+// ERRATUM CHECKED (2026-09-26). Rodgers & Rowland published a correction to
+// the 2006 paper: J Pharm Sci 96(11):3153-3154, Nov 2007,
+// doi:10.1002/jps.20857 (read in full). It corrects Equations 10 and 14, and
+// all derivations from them, for DI-BASIC AND DI-ACIDIC ZWITTERIONS only
+// (pipemidic acid, tetracycline, ceftazidime), plus one typo in Table 5
+// (tetracycline kidney Kpu is 10.7, not 1.06). It does NOT touch the
+// neutral / acid / very-weak-base equations, so the compound classes this
+// module implements are unaffected by it, and neither are midazolam or
+// ketoconazole. The erratum states the accuracy figures and conclusions of the
+// original paper are unchanged.
+//
+// OPEN LEAD from that erratum, NOT yet applied to the code. Its printed
+// equations carry the phospholipid term as (0.3*P + 0.7)*fNP, whereas this
+// module uses 0.3*P*fNP inside the P factor -- i.e. the module appears to be
+// missing a "+ 0.7*fNP" contribution outside the lipophilicity factor
+// (magnitude ~0.007 to 0.028 given fNP of 0.01 to 0.04). The erratum prints
+// that term only for zwitterions, so carrying it over to the neutral equation
+// would be an inference across compound classes, not a reading of the neutral
+// equation. Deliberately NOT changed until R&R 2006's own neutral/acid
+// equation (Eq 8/9) is read; recorded here so the lead is not lost.
+//
+// STILL UNRESOLVED, pending R&R 2006 itself (not in PMC; the equations and
+// Table 1 could not be retrieved, and are not reconstructed from memory here):
+//   - the extracellular-protein (albumin) term. The 2006 abstract states it is
+//     incorporated "for the other compound classes", which includes neutrals,
+//     so this implementation is missing a term the paper has.
+//   - which tissue-composition table is the paper's. MEASURED 2026-09-26 by
+//     reading both tables out of the tree and applying only constraints they
+//     must satisfy internally -- no literature value is used below:
+//       * the two tables AGREE on the water fractions in 10 of 14 organs
+//         (differing only in blood, brain, lung, pancreas) and DISAGREE on the
+//         lipid fractions in 12 of 14 (f_nl) and 13 of 14 (f_np). The
+//         per-tissue ratio B/A spans 0.136 (lung f_nl) to 2.775 (skin f_np),
+//         in both directions, so this is not a unit or scaling difference:
+//         they are two different tables, differing essentially only in lipid.
+//       * consequence, one formula and two tables: predicted Kp moves by up to
+//         2.15x (muscle) and down to 0.22x (lung) -- a factor of 9.8 in the
+//         cross-tissue RATIO -- at P = 1e7 and, per organ, the same to within
+//         0.009 at P = 1e4 (logP 4.0, the top of R&R's calibrated range),
+//         because the lipid term dominates in both regimes, so the divergence
+//         does not wash out for an in-domain drug. The table choice is worth
+//         about one order of magnitude, well below the 3.3-6.4 orders of the
+//         domain violation above but not negligible.
+//       * the ADIPOSE ROW OF THIS FILE IS INFEASIBLE: f_ew + f_iw + f_nl + f_np
+//         = 0.135 + 0.017 + 0.8530 + 0.0020 = 1.0070, which leaves negative
+//         volume for protein and solids. The excess is only 0.70%, but it sits
+//         on the one fraction that dominates every Kp this module predicts, and
+//         core/tissue_composition.sio's adipose (f_nl 0.7900) is feasible at
+//         0.9440. Gated by rr_check_volume_feasible() -> 13/14, which pins the
+//         violation instead of closing it with an invented number.
+//       * core/tissue_composition.sio's own T1, "14/14 organ compositions sum
+//         to 1.0 (mass balance)", CANNOT FAIL: its f_protein column is defined
+//         as 1 minus the other four, and the sums are 1.0000000 exactly for all
+//         14 organs. That test is not evidence for that table.
+//       * tissue_kidney() in this file contradicts this file: f_water 0.783
+//         against f_ew + f_iw = 0.692 (delta 0.091), f_ew 0.209 against the
+//         accessor's 0.273, f_np 0.0240 against 0.0120. tissue_brain()
+//         satisfies f_water = f_ew + f_iw exactly and tissue_liver() misses it
+//         by 0.017, so the identity is this file's own convention and kidney
+//         breaks it. Those legacy structs have no caller; they are left in
+//         place rather than edited, because the correct values are exactly what
+//         is unresolved here.
+//     None of this identifies which table is R&R 2006 Table 1. It narrows the
+//     question to the lipid columns and rules out the adipose row of this file
+//     on arithmetic alone. EVERY figure in this bullet is recomputed and
+//     asserted by a committed gate, over both tables as they sit in the tree:
+//         bash scripts/dev/run_sio_test_suite_v2.sh --filter composition_tables
+//     (tests/stdlib/darwin_pbpk/test_composition_tables.sio). The exploratory
+//     version of this audit was a Python script in a scratchpad, which an
+//     earlier revision of this comment cited -- an unreproducible reference to a
+//     file that is not in the repository, and Python in the science path besides
+//     (CLAUDE.md principle 4). Caught in review by
+//     copilot-pull-request-reviewer; the Sounio gate replaces it.
+//
+//     ONE CLASS OF ANSWER IS RULED OUT, verified 2026-09-26 against PubMed
+//     directly (not from memory, and not from a secondary source): BOTH R&R
+//     papers report RAT compositions only.
+//       * 2006, PMID 16639716, doi:10.1002/jps.20502 -- "...has been
+//         investigated for 7 very weak bases, 20 acids, 4 neutral drugs and 8
+//         zwitterions in RAT adipose, bone, brain, gut, heart, kidney, liver,
+//         lung, muscle, pancreas, skin, spleen and thymus."
+//       * 2005, PMID 15858854, doi:10.1002/jps.20322 -- "...in RAT adipose,
+//         bone, gut, heart, kidney, liver, muscle, pancreas, skin, spleen and
+//         thymus."
+//       * Independently, the MeSH terms of both records include Animals and
+//         Rats and do NOT include Humans.
+//     So "R&R 2006 Table 1, human" is a category error: there is no such table.
+//     A human composition attributed to R&R is R&R's RAT composition applied to
+//     human organ volumes and flows, which is a defensible modelling choice but
+//     must be labelled as one. core/tissue_composition.sio attributes its table
+//     to "Rodgers-Rowland (2006) / Poulin-Theil (2002)" without that
+//     distinction, and this module is called for a human PBPK28 physiology.
+//     Resolving which column belongs to which species, and re-attributing both
+//     tables, is tracked as separate work -- it changes numbers, so it does not
+//     ride along with a units-and-numerics fix.
+//   - ionisable species. This module is neutral-only, so it cannot predict Kp
+//     for midazolam (weak base, pKa 6.2) or ketoconazole (dibasic 6.51/2.94),
+//     both of which fall under the 2006 paper's scope but need its ionisation
+//     terms. R&R 2005 (pKa >= 7 bases, doi:10.1002/jps.20322) does not apply
+//     to either.
+//
 // GUM formula (JCGM 100:2008 Eq 13):
 //   u²(Kp_i) = [∂Kp_i/∂logP]² u²(logP) + [∂Kp_i/∂fu]² u²(fu)
 //
@@ -31,36 +156,161 @@
 // MATH HELPERS
 // ============================================================================
 
-fn rr_sqrt(x: f64) -> f64 with Mut, Div {
+// All three helpers below were replaced on 2026-09-26. The previous versions
+// were fixed-iteration-count series about a single point, and their error was
+// large enough to corrupt the module's own published figures -- MEASURED, not
+// suspected, with a 60-line repro (scratchpad rrexp/probe.sio, probe2.sio):
+//
+//   rr_sqrt, 12 Newton steps from y = x:
+//     sqrt(1e13)  gave 2441407615.333099 for 3162277.660168   -- 772x high
+//     sqrt(1e30)  gave 9223372036854775808.0 for 1e15         -- saturated
+//     sqrt(1e6)   gave 1000.553871 for 1000.0                 -- 0.055% high
+//     sqrt(2.0)   was correct; small arguments were fine, which is why nothing
+//     noticed: from y = x the iteration needs about 0.5*log2(x) HALVINGS before
+//     Newton's quadratic phase begins, so 12 steps cover x up to ~1e7 and
+//     nothing beyond. kp_unc_raw for rapamycin takes sqrt of ~2.4e12, squarely
+//     in the broken regime, and T2 only asserted "> 0".
+//   rr_exp, 20-term Taylor about 0 (caught in review by copilot-pull-request-reviewer):
+//     rr_pow10(-3) gave 0.007281 for 0.001                    -- 7.28x high
+//     rr_pow10(7)  gave 8614669.529655 for 1e7                -- 13.9% low
+//     rr_pow10(2)  gave 99.999998 for 100.0
+//     The series is alternating for x < 0 and its terms peak near n = |x|, so
+//     truncating at 20 is meaningless once |x| approaches 20. logP 7 gives
+//     x = 16.118 and logP -3 gives x = -6.908; both land there.
+//
+// Every figure this module prints depends on these, so the corrected versions
+// are gated by properties that need no external reference values: T9-T11.
+
+// sqrt(x) by exponent reduction plus Newton. Write x = m*4^k with m in [1, 4),
+// so sqrt(x) = sqrt(m)*2^k; Newton on [1, 4) from y0 = (1 + m)/2 reaches full
+// binary64 precision in about 5 steps (8 are taken), and the 2^k rescaling is
+// exact. Both reduction loops are bounded by ~540 iterations across the whole
+// binary64 range.
+fn rr_sqrt(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 }
-    var y = x
+    // `x <= MAX` is false for +Inf AND for NaN, so this one negated test closes
+    // both, and closes the reduction loops below, which would not terminate on
+    // an infinity. A finite x passes it.
+    if !(x <= 1.7976931348623157e308) { panic("rr_sqrt: argument is +Inf or NaN") }
+    var m = x
+    var k: i64 = 0
+    while m >= 4.0 {
+        m = m * 0.25
+        k = k + 1
+    }
+    while m < 1.0 {
+        m = m * 4.0
+        k = k - 1
+    }
+    var y = (1.0 + m) * 0.5
     var i = 0
-    while i < 12 { y = (y + x / y) * 0.5; i = i + 1 }
-    y
+    while i < 8 {
+        y = (y + m / y) * 0.5
+        i = i + 1
+    }
+    var res = y
+    let n = if k < 0 { 0 - k } else { k }
+    var j: i64 = 0
+    while j < n {
+        if k < 0 { res = res * 0.5 } else { res = res * 2.0 }
+        j = j + 1
+    }
+    res
 }
 
 fn rr_abs(x: f64) -> f64 {
     if x < 0.0 { 0.0 - x } else { x }
 }
 
-// exp(x) — Taylor series, matches ppcr_neural_net_demo pattern
+// exp(x) by range reduction: x = k*ln2 + r with |r| <= ln2/2 = 0.3466, so
+// exp(x) = 2^k * exp(r). The Taylor series is then evaluated only where it
+// converges fast -- 14 terms leave a truncation error below 1e-19 relative --
+// and the 2^k rescaling is exact in binary64.
 fn rr_exp(x: f64) -> f64 with Mut, Div, Panic {
-    if x > 20.0 { return rr_exp(x - 10.0) * rr_exp(10.0) }
-    if x < 0.0 - 20.0 { return 0.0 }
+    // Negated, so NaN is refused rather than silently carried.
+    if !(x <= 709.7827128933841) { panic("rr_exp: argument overflows binary64 or is NaN") }
+    if x < 0.0 - 745.2 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    let inv_ln2 = 1.4426950408889634
+    let kf = x * inv_ln2
+    // Nearest integer. The f64 -> i64 cast truncates toward zero (verified:
+    // 2.7 -> 2, -2.7 -> -2), so the half-offset must follow the sign.
+    let k = (if kf < 0.0 { kf - 0.5 } else { kf + 0.5 }) as i64
+    let r = x - (k as f64) * ln2
     var sum = 1.0
     var term = 1.0
     var i = 1
-    while i <= 20 {
-        term = term * x / (i as f64)
+    while i <= 14 {
+        term = term * r / (i as f64)
         sum = sum + term
         i = i + 1
     }
-    sum
+    var res = sum
+    let m = if k < 0 { 0 - k } else { k }
+    var j: i64 = 0
+    while j < m {
+        if k < 0 { res = res * 0.5 } else { res = res * 2.0 }
+        j = j + 1
+    }
+    res
 }
 
-// 10^x = exp(x * ln(10))
+// 10^x, split as 10^n * 10^f with n the nearest integer and |f| <= 0.5. Every
+// power 10^0 .. 10^22 is exactly representable in binary64, so an INTEGRAL logP
+// -- which is what the rapamycin profile and the T6 gate both use -- comes out
+// exact: 10^7 is 1e7 and 10^-3 is the correctly rounded 0.001, rather than the
+// 8.61e6 and 0.00728 the old path returned. Beyond 10^22 the multiplication
+// chain rounds, accumulating about |n|*eps relative, which for the |x| <= 10
+// this module is ever called with is not reached at all.
 fn rr_pow10(x: f64) -> f64 with Mut, Div, Panic {
-    rr_exp(x * 2.302585092994046)
+    if !(x <= 308.0 && x >= 0.0 - 323.0) { panic("rr_pow10: argument outside the supported range [-323, 308] or NaN") }
+    let n = (if x < 0.0 { x - 0.5 } else { x + 0.5 }) as i64
+    let f = x - (n as f64)
+    let frac = rr_exp(f * 2.302585092994046)
+    let m = if n < 0 { 0 - n } else { n }
+
+    if n >= 0 {
+        // m <= 308 by the guard, so 10^m is finite.
+        var pw = 1.0
+        var j: i64 = 0
+        while j < m {
+            pw = pw * 10.0
+            j = j + 1
+        }
+        return frac * pw
+    }
+
+    // NEGATIVE exponents are split at 10^22, the largest power of ten that is
+    // EXACTLY representable in binary64. At or below it, one division by the
+    // exact power costs a single rounding, which is what keeps 10^-3
+    // bit-identical to the literal 0.001 -- T10's integral case and T11 both
+    // depend on that.
+    if m <= 22 {
+        var pw = 1.0
+        var j: i64 = 0
+        while j < m {
+            pw = pw * 10.0
+            j = j + 1
+        }
+        return frac / pw
+    }
+
+    // Beyond 10^22 no exact power exists, so the chain is unavoidable -- and it
+    // must be a chain. The first version of this function built 10^|n| and then
+    // divided once, which for n < -308 overflowed the DENOMINATOR to +Inf and
+    // collapsed the quotient to zero, silently discarding every representable
+    // subnormal result between 10^-309 and 10^-323 while the guard above
+    // advertised that range. Measured: the old form was not even monotonic there
+    // (10^-308 > 10^-309 > 10^-320 > 0 was FALSE); dividing stepwise degrades
+    // into the subnormals gracefully and restores it. Found in review by
+    // copilot-pull-request-reviewer; gated by rr_check_pow10_subnormal.
+    var res = frac
+    var t: i64 = 0
+    while t < m {
+        res = res / 10.0
+        t = t + 1
+    }
+    res
 }
 
 // ============================================================================
@@ -70,7 +320,7 @@ fn rr_pow10(x: f64) -> f64 with Mut, Div, Panic {
 // Sources: Rodgers & Rowland (2006) Table 1 for most tissues;
 //          PK-Sim Human Reference Values for adipose/bone/other.
 
-fn rr_fw_e(i: i32) -> f64 {   // extracellular water
+pub fn rr_fw_e(i: i32) -> f64 {   // extracellular water
     if i == 0  { return 0.620 }   // blood
     if i == 1  { return 0.161 }   // liver
     if i == 2  { return 0.273 }   // kidney
@@ -87,7 +337,7 @@ fn rr_fw_e(i: i32) -> f64 {   // extracellular water
     return 0.200                   // other
 }
 
-fn rr_fw_i(i: i32) -> f64 {   // intracellular water
+pub fn rr_fw_i(i: i32) -> f64 {   // intracellular water
     if i == 0  { return 0.038 }
     if i == 1  { return 0.573 }
     if i == 2  { return 0.483 }
@@ -104,7 +354,7 @@ fn rr_fw_i(i: i32) -> f64 {   // intracellular water
     return 0.500
 }
 
-fn rr_fn_l(i: i32) -> f64 {   // neutral lipid fraction
+pub fn rr_fn_l(i: i32) -> f64 {   // neutral lipid fraction
     if i == 0  { return 0.0019 }
     if i == 1  { return 0.0140 }
     if i == 2  { return 0.0130 }
@@ -121,7 +371,7 @@ fn rr_fn_l(i: i32) -> f64 {   // neutral lipid fraction
     return 0.0200
 }
 
-fn rr_fn_ph(i: i32) -> f64 {  // phospholipid fraction
+pub fn rr_fn_ph(i: i32) -> f64 {  // phospholipid fraction
     if i == 0  { return 0.0019 }
     if i == 1  { return 0.0240 }
     if i == 2  { return 0.0120 }
@@ -136,6 +386,30 @@ fn rr_fn_ph(i: i32) -> f64 {  // phospholipid fraction
     if i == 11 { return 0.0110 }
     if i == 12 { return 0.0130 }
     return 0.0100
+}
+
+// ----------------------------------------------------------------------------
+// VOLUME-FRACTION FEASIBILITY
+// ----------------------------------------------------------------------------
+// These are fractions of tissue volume, so every organ must satisfy
+// f_ew + f_iw + f_nl + f_np <= 1; the remainder is protein and solids. This
+// needs no literature -- it is a constraint on the table's own arithmetic.
+
+pub fn rr_volume_sum(i: i32) -> f64 {
+    rr_fw_e(i) + rr_fw_i(i) + rr_fn_l(i) + rr_fn_ph(i)
+}
+
+// How many of the 14 organs leave non-negative room for protein.
+// MEASURED 2026-09-26: 13/14. Adipose (7) sums to 1.0070. The header explains
+// why that value is not silently replaced.
+pub fn rr_check_volume_feasible() -> i32 with Mut {
+    var ok = 0
+    var i = 0
+    while i < 14 {
+        if rr_volume_sum(i) <= 1.0 { ok = ok + 1 }
+        i = i + 1
+    }
+    ok
 }
 
 // ============================================================================
@@ -165,12 +439,63 @@ pub struct RRScaledUnc {
 // CORE COMPUTATION — Neutral Compound R-R (Eq. 6 in Rodgers 2006)
 // ============================================================================
 // For a neutral molecule (no ionization, fu_water = 1.0):
-//   Kpu_i = fw_e_i + fw_i_i + P*(fn_L_i + 0.3*fn_P_i)   [unbound tissue:unbound plasma]
-//   Kp_i  = Kpu_i / fu_plasma                             [total tissue:total plasma]
+//   Kpu_i = fw_e_i + fw_i_i + P*(fn_L_i + 0.3*fn_P_i)
+//   Kp_i  = Kpu_i * fu_plasma
 //
-// Analytical GUM sensitivities:
-//   ∂Kp/∂logP = P * ln(10) * (fn_L + 0.3*fn_P) / fu_plasma
-//   ∂Kp/∂fu   = -Kp / fu_plasma
+// UNITS (corrected 2026-09-26; this block previously divided by fu_plasma).
+// R&R's Kpu is the "tissue-to-plasma WATER partition coefficient" -- the title
+// and abstract of the 2006 paper say so -- i.e. TOTAL tissue concentration per
+// unit UNBOUND plasma concentration. The equation above computes exactly that:
+// tissue water contributes its volume fraction 1:1 against an unbound driving
+// concentration, and neutral lipid/phospholipid contribute P times theirs.
+// Since C_plasma,total = C_plasma,unbound / fu_p,
+//   Kp = C_tissue,total / C_plasma,total = Kpu * fu_p,
+// so the conversion MULTIPLIES by fu_plasma. Dividing was wrong by 1/fu^2
+// (156x at rapamycin's fu = 0.08) and had the wrong physical sense: it made a
+// more heavily plasma-bound drug look MORE concentrated in tissue, when
+// binding drug up in plasma must lower the tissue:plasma total ratio. The
+// module's old label for Kpu ("unbound tissue:unbound plasma") was the source
+// of the error; that quantity is not what the equation computes.
+//
+// Sensitivities follow the corrected conversion:
+//   dKp/dlogP = P*ln(10)*(fn_L + 0.3*fn_P) * fu_plasma
+//   dKp/dfu   = +Kpu = +Kp/fu_plasma      (was -Kp/fu_plasma)
+// The dimensionless log-sensitivity dln(Kp)/dlogP is INVARIANT under this
+// correction -- numerator and denominator scale together -- which is why the
+// GUM path that consumes only log_sens and literature Kp
+// (rr_scaled_uncertainty) is numerically unchanged by this fix.
+//
+// CONSUMERS, measured 2026-09-26: this module has NO .sio caller. The only
+// import of it anywhere in the tree is
+// tests/stdlib/darwin_pbpk/test_rodgers_rowland.sio, which takes the three
+// rr_check_* functions below; verify with
+//     grep -rn --include='*.sio' 'core::rodgers_rowland' .
+// rr_scaled_uncertainty is called only from this file's own main(). So the 156x
+// conversion error corrupted no downstream result -- not because the consumers
+// were insensitive to it, but because there are none yet.
+// examples/dissertation_hybrid_demo.sio names "literature Kp from
+// rodgers_rowland.sio" in a comment but imports nothing from here and carries
+// its own constants. Wiring this module up is future work, and whatever wires it
+// must not read RRResult.kp for rapamycin -- see the out-of-domain figures.
+//
+// A THIRD R&R-named implementation exists and is INERT:
+// examples/pbpk/darwin_pbpk_14comp.sio:222 calculate_kp_rodgers_rowland, which
+// sits inside the block comment that file opens with ("Aspirational example
+// preserved below. To restore, remove this stub and uncomment the original
+// content."), so it is not compiled and has no caller -- souc check on that
+// file passes because essentially all of it is commented out. Do not treat it
+// as a second opinion on anything here: its lipid term is
+// `1.0 + logp * lipid_fraction`, linear in logP rather than in P = 10^logP, so
+// it is not the Rodgers-Rowland model despite the name and the
+// Provenance::derived("rodgers_rowland_kp") tag it attaches, and it divides by
+// fu in the same direction as the defect this module has just lost. Recorded
+// here so a future restore of that example does not re-import both.
+//
+// Analytical GUM sensitivities, as the code below computes them (the corrected
+// conversion above; an earlier revision of this comment still carried the
+// pre-fix "/ fu_plasma" and "-Kp / fu_plasma" beside the corrected block):
+//   ∂Kp/∂logP = P * ln(10) * (fn_L + 0.3*fn_P) * fu_plasma
+//   ∂Kp/∂fu   = +Kpu = +Kp / fu_plasma
 //   u²(Kp) = (∂Kp/∂logP)² u²(logP) + (∂Kp/∂fu)² u²(fu)
 
 pub fn rr_neutral(
@@ -196,16 +521,18 @@ pub fn rr_neutral(
         // Lipid composite term (neutral lipid + 30% of phospholipid)
         let lipid_c = fn_l + 0.3 * fn_ph
 
-        // Unbound tissue:unbound plasma ratio
+        // Kpu: TOTAL tissue : UNBOUND (water) plasma -- see the UNITS note.
+        // Not "unbound tissue : unbound plasma"; that mislabel is what produced
+        // the inverted conversion this module used to carry.
         let kpu = fw_e + fw_i + P * lipid_c
 
-        // Total tissue:total plasma (JCGM-compatible; accounts for plasma binding)
-        let kp_i = kpu / fu_plasma
+        // Total tissue:total plasma (see the UNITS note above)
+        let kp_i = kpu * fu_plasma
         kp[i] = kp_i
 
         // GUM sensitivity coefficients (analytical)
-        let dkp_dlogP = P * ln10 * lipid_c / fu_plasma
-        let dkp_dfu   = 0.0 - kp_i / fu_plasma
+        let dkp_dlogP = P * ln10 * lipid_c * fu_plasma
+        let dkp_dfu   = kpu
 
         // Combined GUM variance (JCGM 100:2008 Eq 13)
         let var_i = dkp_dlogP * dkp_dlogP * u_logP * u_logP
@@ -264,13 +591,181 @@ pub fn rr_scaled_uncertainty(
         // logP contribution: u(Kp_i) from u_logP
         let term_logP = ls * u_logP * kp_i
 
-        // fu contribution: u(Kp_i) from u_fu — ∂Kp/∂fu = -Kp/fu
+        // fu contribution: u(Kp_i) from u_fu — ∂Kp/∂fu = +Kp/fu (the sign is squared away below)
         let term_fu = kp_i / fu * u_fu
 
         u_kp[i] = rr_sqrt(term_logP * term_logP + term_fu * term_fu)
         i = i + 1
     }
     RRScaledUnc { u_kp: u_kp, conf: 0.60 }
+}
+
+// ============================================================================
+// UNIT-CONVERSION PROPERTY CHECKS (exposed for the CI fixture)
+// ============================================================================
+// RRResult's fields are private, and Madaros correctly enforces that (E259)
+// while lean_single does not, so an out-of-module test cannot read .kp or
+// .log_sens. These return the number of tissues (out of 14) satisfying each
+// scale-SENSITIVE property, so tests/stdlib/darwin_pbpk/test_rodgers_rowland.sio
+// can assert them without widening the struct. The module's own T5-T7 call
+// these too, so there is one implementation, not two.
+
+// Kp must INCREASE with fu_plasma: Kp = Kpu*fu_p and Kpu is independent of
+// fu_p. Dividing instead of multiplying inverts this.
+pub fn rr_check_monotone_fu() -> i32 with Mut, Div, Panic {
+    let lo = rr_neutral(2.0, 0.02, 0.1, 0.005)
+    let mid = rr_neutral(2.0, 0.20, 0.1, 0.005)
+    let hi = rr_neutral(2.0, 1.00, 0.1, 0.005)
+    var ok = 0
+    var i = 0
+    while i < 14 {
+        if lo.kp[i] < mid.kp[i] && mid.kp[i] < hi.kp[i] { ok = ok + 1 }
+        i = i + 1
+    }
+    ok
+}
+
+// A drug with negligible lipid affinity can at most fill tissue water, so
+// Kp = fu_p*(fw_e + fw_i) <= 1. logP = -3 gives P = 1e-3.
+pub fn rr_check_hydrophilic_bounded() -> i32 with Mut, Div, Panic {
+    let dilute = rr_neutral(0.0 - 3.0, 0.5, 0.1, 0.005)
+    var ok = 0
+    var i = 0
+    while i < 14 {
+        if dilute.kp[i] <= 1.0 { ok = ok + 1 }
+        i = i + 1
+    }
+    ok
+}
+
+// dln(Kp)/dlogP must not depend on fu_plasma: numerator and denominator carry
+// the same factor. This is why rr_scaled_uncertainty is unaffected by the
+// conversion correction.
+pub fn rr_check_logsens_fu_invariant() -> i32 with Mut, Div, Panic {
+    let lo = rr_neutral(2.0, 0.02, 0.1, 0.005)
+    let hi = rr_neutral(2.0, 1.00, 0.1, 0.005)
+    var ok = 0
+    var i = 0
+    while i < 14 {
+        let d = lo.log_sens[i] - hi.log_sens[i]
+        let ad = if d < 0.0 { 0.0 - d } else { d }
+        if ad <= 1.0e-12 { ok = ok + 1 }
+        i = i + 1
+    }
+    ok
+}
+
+// NUMERIC-HELPER GATES. These assert identities the helpers must satisfy, so
+// they need no reference constants from outside the file: a wrong helper cannot
+// satisfy an identity it does not respect. Each returns a count of the cases
+// that hold.
+
+// sqrt: rr_sqrt(x)^2 must return x. Tolerance 1e-14 relative is derived, not
+// observed: the reduction is exact (multiplications by 4 and 2), Newton is
+// self-correcting to about 1 ulp, and squaring adds one rounding -- a few eps,
+// where eps = 2.22e-16. The OLD helper fails this by 772x at 1e13 and by 9.2e3x
+// at 1e30, so the gate is what would have caught it.
+pub fn rr_check_sqrt() -> i32 with Mut, Div, Panic {
+    var ok = 0
+    var i = 0
+    // x = 10^(2i - 12), i.e. 1e-12 .. 1e16 -- spans the range kp_unc_raw uses.
+    while i < 15 {
+        let x = rr_pow10((2 * i - 12) as f64)
+        let r = rr_sqrt(x)
+        let back = r * r
+        if rr_abs(back - x) <= 1.0e-14 * x { ok = ok + 1 }
+        i = i + 1
+    }
+    ok
+}
+
+// pow10: three identities, each checked at 5 arguments.
+//   (a) 10^x * 10^-x = 1
+//   (b) 10^a * 10^b = 10^(a+b)
+//   (c) 10^n is the exact integral power for integral n
+// Tolerance 1e-14 relative, derived as above: each side is at most one reduced
+// exp (<= 2 ulp) times an exact power chain of length <= 10.
+pub fn rr_check_pow10() -> i32 with Mut, Div, Panic {
+    var ok = 0
+    var i = 0
+    while i < 5 {
+        let x = 1.3 + 1.7 * (i as f64)
+        // (a)
+        let prod = rr_pow10(x) * rr_pow10(0.0 - x)
+        if rr_abs(prod - 1.0) <= 1.0e-14 { ok = ok + 1 }
+        // (b)
+        let lhs = rr_pow10(x) * rr_pow10(0.7)
+        let rhs = rr_pow10(x + 0.7)
+        if rr_abs(lhs - rhs) <= 1.0e-14 * rhs { ok = ok + 1 }
+        // (c) integral powers, built here by repeated multiplication
+        var want = 1.0
+        var j = 0
+        while j < i { want = want * 10.0
+            j = j + 1 }
+        if rr_pow10(i as f64) == want { ok = ok + 1 }
+        i = i + 1
+    }
+    ok
+}
+
+// SUBNORMAL BOUNDARY of the advertised domain. A guard that accepts an argument
+// must not return zero for it when a representable answer exists.
+pub fn rr_check_pow10_subnormal() -> i32 with Mut, Div, Panic {
+    var ok = 0
+    // Strictly decreasing and strictly positive through the subnormal region.
+    if rr_pow10(0.0 - 308.0) > rr_pow10(0.0 - 309.0) { ok = ok + 1 }
+    if rr_pow10(0.0 - 309.0) > rr_pow10(0.0 - 320.0) { ok = ok + 1 }
+    if rr_pow10(0.0 - 320.0) > 0.0 { ok = ok + 1 }
+    // And the positive end of the advertised range stays finite.
+    if rr_pow10(308.0) <= 1.7976931348623157e308 { ok = ok + 1 }
+    ok
+}
+
+// DERIVATIVE CONSISTENCY. `dkp_dlogP = P*ln10*lipid_c*fu` is the analytic
+// derivative of the IDEAL 10^x, so it is the derivative of the function ACTUALLY
+// EXECUTED only if rr_pow10 satisfies exp' = exp to that accuracy. The old
+// 20-term Taylor did not: the derivative of a degree-20 truncation is the
+// degree-19 one, and at logP 7 the analytic value was 19836009 against the
+// polynomial's own derivative 18510553 -- 7.16% apart, so log_sens and the raw
+// GUM uncertainty were both inconsistent with the evaluated function. Found in
+// review by copilot-pull-request-reviewer; fixed by making the power path
+// accurate rather than by returning a matching wrong derivative, and gated here.
+//
+// A central difference at h = 1e-6 has truncation error h^2*ln10^2/6, about
+// 8.8e-13 relative, so the 1e-9 bound sits comfortably above the method's own
+// error and orders below any helper defect it is meant to catch. Derived, not
+// tuned to the residual.
+pub fn rr_check_pow10_derivative() -> i32 with Mut, Div, Panic {
+    let ln10 = 2.302585092994046
+    let h = 1.0e-6
+    var ok = 0
+    var i = 0
+    while i < 5 {
+        let x = 0.0 - 3.0 + 2.5 * (i as f64)
+        let cd = (rr_pow10(x + h) - rr_pow10(x - h)) / (2.0 * h)
+        let an = rr_pow10(x) * ln10
+        if rr_abs(cd - an) <= 1.0e-9 * an { ok = ok + 1 }
+        i = i + 1
+    }
+    ok
+}
+
+// ABSOLUTE-SCALE gate on Kp, which is what T6's `<= 1` could not give. At
+// logP = -3 the lipid factor is exactly 1e-3, so Kp must equal
+// fu*(fw_e + fw_i + 1e-3*(fn_l + 0.3*fn_ph)) organ by organ. The 1e-3 here is
+// written as a literal and does NOT go through rr_pow10, so this pins the power
+// path too: the old 20-term Taylor returned 0.007281 for 10^-3 and fails this
+// 14/14. Tolerance 1e-12 relative covers the handful of roundings on each side.
+pub fn rr_check_kp_absolute() -> i32 with Mut, Div, Panic {
+    let r = rr_neutral(0.0 - 3.0, 0.5, 0.1, 0.005)
+    var ok = 0
+    var i = 0
+    while i < 14 {
+        let want = 0.5 * (rr_fw_e(i) + rr_fw_i(i) + 0.001 * (rr_fn_l(i) + 0.3 * rr_fn_ph(i)))
+        if rr_abs(r.kp[i] - want) <= 1.0e-12 * want { ok = ok + 1 }
+        i = i + 1
+    }
+    ok
 }
 
 // ============================================================================
@@ -340,6 +835,22 @@ struct DrugPropertiesRR {
 // T2: GUM uncertainties non-zero for all 14 compartments
 // T3: Log-sensitivities in valid range (0, ln(10)] for lipid-rich tissues
 // T4: Scaled GUM uncertainties non-zero and finite
+// T5: Kp monotonically increasing in fu_plasma (discriminates the Kpu->Kp
+//     conversion direction; T1-T4 are scale-invariant and cannot)
+// T6: a drug with no lipid affinity has Kp <= 1 (absolute-scale check)
+// T7: log-sensitivity independent of fu_plasma (justifies the claim that the
+//     GUM path is unchanged by the conversion fix)
+// T8: volume-fraction feasibility of the composition table itself -- no organ
+//     other than the known adipose row may sum above 1.0
+// T9:  rr_sqrt(x)^2 == x across 1e-12..1e16 (the old helper was 772x out at 1e13)
+// T10: rr_pow10 identities incl. exact integral powers (the old helper gave
+//      0.007281 for 1e-3 and 8.61e6 for 1e7)
+// T11: absolute Kp at logP = -3 against the closed form, the check T6's bound
+//      was too loose to be
+// T12: rr_pow10 satisfies exp' = exp, so dkp_dlogP is the derivative of the
+//      function actually executed (it was 7.16% out at logP 7 before)
+// T13: rr_pow10 returns the representable subnormals its own guard admits
+//      (10^-309 .. 10^-323 collapsed to zero, and were not even monotonic)
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     let rr = rr_rapamycin()
@@ -392,6 +903,132 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         failed = failed + 1
     }
 
+    // T5: Kp must INCREASE with fu. Kp = Kpu*fu_p and Kpu does not depend on
+    //     fu_p, so this is monotone by construction; the pre-2026-09-26 body
+    //     divided by fu_p and therefore had it backwards. Scale-invariant
+    //     checks (T1-T4) all pass under either convention, so this is the test
+    //     that discriminates.
+    let mono = rr_check_monotone_fu()
+    if mono == 14 {
+        println("T5 PASS: Kp increases with fu_plasma in all 14 tissues")
+        passed = passed + 1
+    } else {
+        print("T5 FAIL: Kp not monotone in fu_plasma in ")
+        print(14 - mono)
+        println("/14 tissues (conversion inverted?)")
+        failed = failed + 1
+    }
+
+    // T6: A drug with negligible lipid affinity can at most fill tissue water,
+    //     so Kp = fu_p*(fw_e + fw_i) <= fw_e + fw_i <= 1. At logP = -3,
+    //     P = 1e-3 and the lipid term is negligible. With fu_p = 0.5 the old
+    //     body returned about twice the water fraction instead of half of it.
+    let bounded = rr_check_hydrophilic_bounded()
+    if bounded == 14 {
+        println("T6 PASS: hydrophilic drug Kp <= 1 in all 14 tissues")
+        passed = passed + 1
+    } else {
+        print("T6 FAIL: ")
+        print(14 - bounded)
+        println("/14 tissues report Kp > 1 for a drug with no lipid affinity")
+        failed = failed + 1
+    }
+
+    // T7: the dimensionless log-sensitivity must NOT depend on fu_plasma
+    //     (numerator and denominator carry the same factor). This is what
+    //     makes rr_scaled_uncertainty -- the only consumer of this module --
+    //     numerically unaffected by the T5 correction, so it is asserted
+    //     rather than merely claimed in the header.
+    let ls_same = rr_check_logsens_fu_invariant()
+    if ls_same == 14 {
+        println("T7 PASS: log-sensitivity independent of fu_plasma (14/14)")
+        passed = passed + 1
+    } else {
+        print("T7 FAIL: log-sensitivity varies with fu_plasma in ")
+        print(14 - ls_same)
+        println("/14 tissues")
+        failed = failed + 1
+    }
+
+    // T8: the composition table must leave non-negative protein volume in every
+    //     organ. Adipose is the one known violation (1.0070, documented in the
+    //     header and deliberately not closed with an invented value), so this
+    //     passes either at 14/14 or at 13/14 WITH the violation still at
+    //     adipose -- it fails the moment a second organ, or a different one,
+    //     goes infeasible.
+    let feasible = rr_check_volume_feasible()
+    let adipose_sum = rr_volume_sum(7)
+    if feasible == 14 || (feasible == 13 && adipose_sum > 1.0) {
+        print("T8 PASS: volume fractions feasible in ")
+        print(feasible)
+        print("/14 organs (adipose sum = ")
+        print(adipose_sum)
+        println(")")
+        passed = passed + 1
+    } else {
+        print("T8 FAIL: ")
+        print(14 - feasible)
+        println("/14 organs assign negative protein volume -- not only adipose")
+        failed = failed + 1
+    }
+
+    // T9-T11: the numeric helpers. Every figure this module prints goes through
+    //         rr_pow10 and rr_sqrt, so these come before any claim about Kp.
+    let sq = rr_check_sqrt()
+    if sq == 15 {
+        println("T9 PASS: rr_sqrt(x)^2 == x at 15/15 magnitudes (1e-12..1e16)")
+        passed = passed + 1
+    } else {
+        print("T9 FAIL: rr_sqrt round trip breaks at ")
+        print(15 - sq)
+        println("/15 magnitudes")
+        failed = failed + 1
+    }
+
+    let pw = rr_check_pow10()
+    if pw == 15 {
+        println("T10 PASS: rr_pow10 identities hold 15/15 (inverse, product, integral)")
+        passed = passed + 1
+    } else {
+        print("T10 FAIL: ")
+        print(15 - pw)
+        println("/15 rr_pow10 identity checks fail")
+        failed = failed + 1
+    }
+
+    let abs_ok = rr_check_kp_absolute()
+    if abs_ok == 14 {
+        println("T11 PASS: absolute Kp at logP = -3 matches the closed form 14/14")
+        passed = passed + 1
+    } else {
+        print("T11 FAIL: absolute Kp wrong in ")
+        print(14 - abs_ok)
+        println("/14 organs at logP = -3")
+        failed = failed + 1
+    }
+
+    let dv = rr_check_pow10_derivative()
+    if dv == 5 {
+        println("T12 PASS: rr_pow10 satisfies exp' = exp at 5/5 arguments")
+        passed = passed + 1
+    } else {
+        print("T12 FAIL: analytic dkp_dlogP disagrees with the executed function at ")
+        print(5 - dv)
+        println("/5 arguments")
+        failed = failed + 1
+    }
+
+    let sub = rr_check_pow10_subnormal()
+    if sub == 4 {
+        println("T13 PASS: rr_pow10 monotone and positive through the subnormals (4/4)")
+        passed = passed + 1
+    } else {
+        print("T13 FAIL: ")
+        print(4 - sub)
+        println("/4 subnormal-boundary checks fail -- the guard admits values the body cannot return")
+        failed = failed + 1
+    }
+
     // T4: Scaled GUM uncertainties non-zero for literature Kp
     var scaled_ok = 0
     var j = 0
@@ -423,6 +1060,36 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     println("")
     print("  [NOTE] R-R raw Kp overestimates logP>4 drugs by design")
     println("")
+
+    // The out-of-domain figures quoted in the header, printed by the module
+    // itself so they are its output and not a transcription. Like for like:
+    // both sides are Kp (total tissue : total plasma) at fu = 0.08.
+    var kp_lo = rr.kp[0]
+    var kp_hi = rr.kp[0]
+    var ratio_lo = rr.kp[0] / kp_lit[0]
+    var ratio_hi = ratio_lo
+    var t = 0
+    while t < 14 {
+        if rr.kp[t] < kp_lo { kp_lo = rr.kp[t] }
+        if rr.kp[t] > kp_hi { kp_hi = rr.kp[t] }
+        let rt = rr.kp[t] / kp_lit[t]
+        if rt < ratio_lo { ratio_lo = rt }
+        if rt > ratio_hi { ratio_hi = rt }
+        t = t + 1
+    }
+    print("  Kp range          ")
+    print(kp_lo)
+    print(" .. ")
+    println(kp_hi)
+    print("  literature range  ")
+    print(kp_lit[3])
+    print(" .. ")
+    println(kp_lit[5])
+    print("  tissue-matched overprediction  ")
+    print(ratio_lo)
+    print("x .. ")
+    print(ratio_hi)
+    println("x")
     print("  log_sens_adipose=")
     print(rr.log_sens[7])
     print("  log_sens_liver=")

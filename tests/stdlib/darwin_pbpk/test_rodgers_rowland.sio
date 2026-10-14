@@ -1,0 +1,94 @@
+//@ run-pass
+//@ expect-stdout-contains: RR_KP_UNITS_OK
+
+// CI-collected regression fixture for core/rodgers_rowland.sio.
+//
+// The module carries its own //@ run-pass annotations, but it lives under
+// stdlib/ and scripts/dev/run_sio_test_suite_v2.sh collects only
+// tests/run-pass/*.sio, tests/compile-fail/*.sio, tests/ui/*/*.sio,
+// tests/stdlib/*/test_*.sio and tests/gpu/*.sio -- so those tests never ran in
+// CI and the Kpu->Kp conversion could regress unnoticed. This file is the
+// collected mirror of the two scale-SENSITIVE properties; the module's own
+// T1-T4 are scale-invariant and cannot detect the defect this guards.
+//
+// R1  Kp increases with fu_plasma. Kp = Kpu*fu_p and Kpu does not depend on
+//     fu_p, so this is monotone by construction. Dividing instead of
+//     multiplying (the pre-2026-09-26 body) inverts it.
+// R2  A drug with negligible lipid affinity can at most fill tissue water, so
+//     Kp = fu_p*(fw_e + fw_i) <= 1. At logP = -3, P = 1e-3.
+// R3  The log-sensitivity is independent of fu_plasma. This is what leaves
+//     rr_scaled_uncertainty -- the only consumer of the module's own output,
+//     from its main(); the module has no .sio caller at all -- unaffected by
+//     the conversion fix, so it is asserted rather than claimed.
+// R4  Volume-fraction feasibility of the composition table the conversion is
+//     applied to: no organ may assign negative protein volume, i.e.
+//     f_ew + f_iw + f_nl + f_np <= 1. MEASURED 2026-09-26: 13/14, the single
+//     violation being adipose at 1.0070 (0.70% over), documented in the module
+//     header and deliberately not closed by inventing a replacement value. R4
+//     therefore accepts 14/14 or 13/14-with-adipose and fails if a second or a
+//     different organ goes infeasible.
+// R5  rr_sqrt(x)^2 == x across 1e-12..1e16. The module's hand-rolled sqrt was
+//     12 fixed Newton steps from y = x, which needs ~0.5*log2(x) halvings before
+//     the quadratic phase: MEASURED 2026-09-26, sqrt(1e13) came out 772x high
+//     and sqrt(1e30) saturated at 2^63. kp_unc_raw takes sqrt of ~2.4e12 for
+//     rapamycin, i.e. squarely in the broken regime, and the module's T2 only
+//     asserted "> 0".
+// R6  rr_pow10 identities: 10^x*10^-x = 1, 10^a*10^b = 10^(a+b), and integral
+//     powers exact. The old 20-term Taylor about 0 returned 0.007281 for 10^-3
+//     (7.28x high) and 8.61e6 for 10^7 (13.9% low).
+// R7  Absolute Kp at logP = -3 against the closed form, organ by organ -- the
+//     scale-anchored check R2's `<= 1` bound was too loose to be. Its 1e-3 is a
+//     literal and does not go through rr_pow10, so it pins the power path.
+// R8  rr_pow10 satisfies exp' = exp, checked by central difference against the
+//     analytic P*ln10. `dkp_dlogP` is the derivative of the IDEAL 10^x, so it is
+//     the derivative of the function actually executed only if the power path is
+//     accurate. With the old 20-term Taylor it was not: the derivative of a
+//     degree-20 truncation is the degree-19 one, and at logP 7 the analytic
+//     19836009 stood against the polynomial's own 18510553 -- 7.16% apart, which
+//     made log_sens and the raw GUM uncertainty inconsistent with the evaluated
+//     function.
+// R9  rr_pow10 returns the representable subnormals its own guard admits. The
+//     first version of the corrected power path built 10^|n| and divided once,
+//     so for n < -308 the DENOMINATOR overflowed to +Inf and every result
+//     between 10^-309 and 10^-323 collapsed to zero -- not even monotonic --
+//     while the guard advertised that range.
+//
+// R5-R9 are the gates that would have caught the helper defects; with the old
+// helpers restored they fail 7/15, 14/15 and 14/14 respectively while R1-R4 and
+// the module's T1-T8 all still pass.
+
+// RRResult's fields are private and Madaros enforces that (E259), so the checks
+// are exposed by the module as functions rather than read out of the struct.
+use darwin_pbpk::core::rodgers_rowland::{rr_check_monotone_fu, rr_check_hydrophilic_bounded, rr_check_logsens_fu_invariant, rr_check_volume_feasible, rr_volume_sum, rr_check_sqrt, rr_check_pow10, rr_check_kp_absolute, rr_check_pow10_derivative, rr_check_pow10_subnormal}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let mono = rr_check_monotone_fu()
+    let bounded = rr_check_hydrophilic_bounded()
+    let ls_same = rr_check_logsens_fu_invariant()
+    let feasible = rr_check_volume_feasible()
+    let adipose_sum = rr_volume_sum(7)
+    let feas_ok = feasible == 14 || (feasible == 13 && adipose_sum > 1.0)
+    let sq = rr_check_sqrt()
+    let pw = rr_check_pow10()
+    let kp_abs = rr_check_kp_absolute()
+    let dv = rr_check_pow10_derivative()
+    let sub = rr_check_pow10_subnormal()
+
+    print("R1 Kp monotone in fu_plasma      : ") print(mono) println("/14")
+    print("R2 hydrophilic Kp <= 1           : ") print(bounded) println("/14")
+    print("R3 log-sens independent of fu    : ") print(ls_same) println("/14")
+    print("R4 volume fractions feasible     : ") print(feasible) println("/14")
+    print("R4 adipose fraction sum          : ") println(adipose_sum)
+    print("R5 rr_sqrt round trip            : ") print(sq) println("/15")
+    print("R6 rr_pow10 identities           : ") print(pw) println("/15")
+    print("R7 absolute Kp at logP = -3      : ") print(kp_abs) println("/14")
+    print("R8 rr_pow10 satisfies exp'=exp   : ") print(dv) println("/5")
+    print("R9 rr_pow10 subnormal boundary    : ") print(sub) println("/4")
+
+    if mono == 14 && bounded == 14 && ls_same == 14 && feas_ok && sq == 15 && pw == 15 && kp_abs == 14 && dv == 5 && sub == 4 {
+        println("RR_KP_UNITS_OK")
+        return 0
+    }
+    println("RR_KP_UNITS_FAIL")
+    return 1
+}
