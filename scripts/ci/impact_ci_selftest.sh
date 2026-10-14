@@ -52,6 +52,13 @@ expect "$mq_sco" tests true
 expect "$mq_sco" full false
 
 unknown="$(classify_pr newly-introduced/build.graph)"
+
+for manifest_path in eeg_temporal_manifest.tsv artifacts/research/eeg_hessian/eeg_temporal_manifest.tsv; do
+  manifest="$(classify_pr "$manifest_path")"
+  expect "$manifest" full true
+  expect "$manifest" compiler true
+done
+
 expect "$unknown" full true
 expect "$unknown" compiler true
 expect "$unknown" lean true
