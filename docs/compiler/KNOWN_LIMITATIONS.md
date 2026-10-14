@@ -73,20 +73,42 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ### KL-11 — #1792: first-order channels do not cross user calls
 
-- **Narrowed (#1706, 2026-10-13).** A call to a *pure f64 helper* (every
-  parameter and the return `f64`, no effect beyond Div/Panic/Epistemic/Mut,
-  body = `let`s with re-lower-safe right-hand sides plus a tail, no `if` on a
-  runtime condition, no loop/match/closure) now carries first-order channels:
-  the variance lowering re-lowers the helper's body inline in the caller with
-  each parameter bound to its argument's value, variance and sensitivities
-  (`fo_inline_call_variance` in `self-hosted/ir/lower.sio`). Witnesses now
-  passing on Madaros: `gum_fo_across_call`, `fo_call_boundary_arity3`,
-  `gum_fo_arity3_boundary`, `madaros_gum_fo_import`, `_eight_param`,
-  `_sixteen_param`, `_let_bytecode`, and `gum_fo_inline_helper_1706` (values
-  against a C++ oracle). **Still open:** helpers whose value depends on a
-  runtime `if` (`madaros_gum_fo_if_helper` I2/I3), recursion
-  (`_mutual`, `_mutual_deep`), methods (`_struct_field`), struct
-  constructors (`_let_ctor`).
+- **Narrowed (#1706, 2026-10-13).** A call to a *pure helper* (an `f64`
+  return, or a struct return when a field of the call is read; `f64`, integer
+  or bool parameters, struct parameters by value or by reference whose
+  argument names a struct local (`p`, `&p`), plus an optional `self`; no effect beyond
+  Div/Panic/Epistemic/Mut; body = `let`s with re-lower-safe right-hand sides
+  plus a tail; no loop/match/closure) carries first-order channels: the
+  variance lowering re-lowers the helper's body inline in the caller with each
+  parameter bound to its argument's value, variance and sensitivities
+  (`fo_inline_call_variance_ex` in `self-hosted/ir/lower.sio`). Methods of a
+  struct local bind `self` to the receiver (`pk.clearance(eta)` reads `pk.cl0`'s
+  field variance); `make(x).cl0` is projected out of the helper's tail struct
+  literal. An `if` whose condition is decided at run time merges the two arms'
+  variance and sensitivities on that condition (`lower_if_variance_runtime_ref`):
+  the result follows the arm actually taken, where the rule it replaces picked
+  the then-arm at compile time -- also outside helpers
+  (`let y = if n < 0.5 { x } else { 2.0 * x }`). Recursion is unrolled through
+  that merge, up to 8 nested inline levels and 96 inlines per outermost call
+  site. A struct parameter is bound, like `self`, to the caller's local, so
+  its fields keep their variance (`twice(p)`, `twice_ref(&p)`, `p.prod()` with
+  no f64 parameter at all). With second order on (a function that calls
+  `hessian_of`), the re-lowering carries each argument's Hessian row too, so
+  `sensitivity_of(sq(x), 0)` = 2x and `hessian_of(sq(x), 0, 0)` = 2 across the
+  call (`kl16c_fo_across_user_fn` now runs on both engines; Madaros read 0.0).
+  Witnesses passing on Madaros: every
+  `madaros_gum_fo_*` in tests/run-pass (madaros_gum_fo_knowledge_ops, in
+  tests/known_failures/, is refused by E245 -- Knowledge (x) Knowledge has no
+  Madaros lowering),
+  `gum_fo_across_call`, `fo_call_boundary_arity3`, `gum_fo_arity3_boundary`,
+  `gum_fo_inline_helper_1706`, `gum_fo_runtime_if_1706` and
+  `gum_fo_struct_helpers_1706` (values against C++ oracles). **Still open:** a recursion that runs deeper than the unroll cap
+  reads **NaN** for the arm that needed the missing level (never a confident 0);
+  an `if` whose condition has side effects cannot be re-tested and has no
+  variance (-1, read as 0); helpers with loops, `match` or closures are not
+  re-lowered; a call through a closure or function value has no variance
+  (`let f = |y: f64| 2.0 * y; variance_of(f(a))` reads 0); a struct reached
+  through a reference local (`let r = &p; variance_of(r.cl0)`) reads 0.
 - #1792 (filed 2026-08-17) named two distinct witnesses. **F1**:
   `tests/run-pass/rapamycin_epistemic_adaptive.sio` — `madaros` originally
   printed `var(blood)=0.000000` where `lean_single` shows ~1e-5. **F2**:
