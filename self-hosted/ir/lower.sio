@@ -880,6 +880,9 @@ var FO_COV_RHO: [f64; 64] = [0.0; 64]
 // Runtime rho, as a register. -1 means the pair uses the f64 table above.
 // A fitted correlation is not a literal, and baking 0.0 there asserts independence.
 var FO_COV_RHO_REG: [i64; 64] = [-1; 64]
+// 1 only after correlate stored a register. A zero register is a real reg,
+// so absence cannot be encoded as 0 or every variance emits the cross term.
+var FO_COV_RHO_HAS: [i64; 64] = [0; 64]
 
 fn fo_cov_rho_idx(i: i64, j: i64) -> i64 with Div {
     var a = i
@@ -926,7 +929,14 @@ fn fo_cov_rho_reg_set(i: i64, j: i64, reg: i64) with Mut, Panic, Div, IO {
     if sab_correlate_rho() {
         return
     }
-    FO_COV_RHO_REG[fo_cov_rho_idx(i, j) as usize] = reg
+    let idx = fo_cov_rho_idx(i, j)
+    if reg < 0 {
+        FO_COV_RHO_REG[idx as usize] = 0 - 1
+        FO_COV_RHO_HAS[idx as usize] = 0
+        return
+    }
+    FO_COV_RHO_REG[idx as usize] = reg
+    FO_COV_RHO_HAS[idx as usize] = 1
 }
 
 fn fo_cov_rho_reg_get(i: i64, j: i64) -> i64 with Mut, Panic, Div {
@@ -940,7 +950,10 @@ fn fo_cov_rho_reg_get(i: i64, j: i64) -> i64 with Mut, Panic, Div {
 }
 
 fn fo_cov_rho_live(i: i64, j: i64) -> bool with Mut, Panic, Div {
-    if fo_cov_rho_reg_get(i, j) >= 0 {
+    if i < 0 || j < 0 || i >= 8 || j >= 8 || i == j {
+        return false
+    }
+    if FO_COV_RHO_HAS[fo_cov_rho_idx(i, j) as usize] != 0 {
         return true
     }
     fo_cov_rho_get(i, j) != 0.0
@@ -7156,6 +7169,7 @@ fn lowerer_lower_fn_item_mut(
     while fo_cri < 64 {
         FO_COV_RHO[fo_cri as usize] = 0.0
         FO_COV_RHO_REG[fo_cri as usize] = 0 - 1
+        FO_COV_RHO_HAS[fo_cri as usize] = 0
         fo_cri = fo_cri + 1
     }
     // #2143 (sibling of #2145): the FO channel table is keyed by vreg, which restarts
@@ -16981,6 +16995,21 @@ impl Lowerer {
             }
         }
         if !found { return (lo, 0 - 1) }
+        // A long body re-lowered at every field read blows the instruction
+        // budget of the caller. vg_gum read seven fields and each read
+        // pasted the whole function. Small helpers stay inline.
+        var nstmt: i64 = 0
+        var scount = &fd.body.stmts
+        while true {
+            match *scount {
+                Some(slc) => {
+                    nstmt = nstmt + 1
+                    scount = &(*slc).tail
+                }
+                None => break
+            }
+        }
+        if nstmt > 24 { return (lo, 0 - 1) }
         // An f64 return answers a plain call; a struct return answers a field path.
         match fd.return_type {
             Some(rt) => {
