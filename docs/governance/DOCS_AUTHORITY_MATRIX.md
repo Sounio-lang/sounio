@@ -2,8 +2,8 @@
 topic_id: repo.governance.authority-matrix
 authority: repo_only
 audience: maintainers
-last_validated: unvalidated
-validated_by: none
+last_validated: 2026-03-07
+validated_by: A1
 source_of_truth: docs/governance/topic-registry.v1.json#repo.governance.authority-matrix
 -->
 

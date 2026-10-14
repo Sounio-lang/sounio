@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   ACCEPTANCE_RELATIVE_PATH,
   LOCALES,
+  MATRIX_RELATIVE_PATH,
   REGISTRY_RELATIVE_PATH,
   buildGovernedTopicRegistry,
   formatAcceptanceReportStub,
@@ -26,7 +27,7 @@ function compareRegistry(expected, actual) {
 
 function fail(errors) {
   if (placeholderPaths.length > 0) {
-    console.log(`Notice: ${placeholderPaths.length} governed documents still carry the retired ${LEGACY_PLACEHOLDER_DATE} placeholder, which records no validation (#1240): ${placeholderPaths.slice(0, 5).join(', ')}`);
+    console.log(`Notice: stale generated snapshot ${MATRIX_RELATIVE_PATH} still carries the retired ${LEGACY_PLACEHOLDER_DATE} placeholder, which records no validation (#1240).`);
   }
   if (unvalidatedCount > 0) {
     console.log(`Notice: ${unvalidatedCount} governed documents carry no validation record (last_validated: ${UNVALIDATED_DATE}).`);
@@ -134,7 +135,11 @@ async function validateRepoLinks(topic, errors) {
 }
 
 function metadataMismatch(expectedFields, actualFields, context, errors) {
-  for (const [key, expected] of Object.entries(expectedFields)) {
+  // Provenance is checked by provenanceFormatErrors. Only these structural
+  // fields are registry-authoritative; comparing generated provenance here
+  // would make a stale snapshot block an unrelated PR.
+  for (const key of ['topic_id', 'authority', 'audience', 'source_of_truth']) {
+    const expected = expectedFields[key];
     if ((actualFields?.[key] ?? '') !== expected) {
       errors.push(`${context} metadata mismatch for ${key}: expected "${expected}"`);
     }
@@ -172,7 +177,16 @@ function provenanceFormatErrors(actualFields, context, errors) {
     return;
   }
   if (date === LEGACY_PLACEHOLDER_DATE) {
-    placeholderPaths.push(context);
+    const isExactStaleMatrixPair = context === MATRIX_RELATIVE_PATH && validator === 'A1';
+    if (isExactStaleMatrixPair) {
+      if (process.env.SOUNIO_DOCS_REGISTRY_STRICT_SNAPSHOT === '1') {
+        errors.push(`${context} has stale generated snapshot provenance; refresh it with --snapshot`);
+      } else {
+        placeholderPaths.push(context);
+      }
+      return;
+    }
+    errors.push(`${context} metadata mismatch for last_validated: retired placeholder is valid only in the stale authority-matrix snapshot`);
   }
   if (!isRealValidationDate(date)) {
     errors.push(`${context} metadata mismatch for last_validated: expected a YYYY-MM-DD date, got "${date}"`);
