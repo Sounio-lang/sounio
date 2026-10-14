@@ -37,6 +37,26 @@
 #      data past the 256 KiB cap with no error -- the ELF still wrote and still
 #      ran, reading stale/zero BSS through pointers into the never-written tail.
 #      Measured need 963,478 bytes; raised to 2 MiB with headroom (#2393).
+#  10. #1646, four more walls of the same shape, each now fail-closed:
+#      a. RETURN-JUMP tier (NC_RETURN_JUMPS, frame.sio): was [i64; 16] with no
+#         else, so the 17th `ret` lowered by the MIR emitter kept a 0 jump and
+#         fell through. Now nc_return_jump_capacity() >= IR_MAX_INSTRS, every
+#         writer has an else that raises label_overflow (rc 22), and no literal
+#         `< 16` bound survives.
+#      b. FLOAT-TYPING tier (NC_IS_FLOAT_REG): was [i64; 2048] (NC_MAX_VREGS)
+#         while the lowerer accepts IR_MAX_VREGS vregs, so marks past 2048 were
+#         dropped and reads there said "not float". Now sized NC_VREG_LIMIT ==
+#         IR_MAX_VREGS and no read/write of it is bounded by NC_MAX_VREGS.
+#      c. STRING-TABLE tier (elf.sio StringTable, .rodata/.data constants):
+#         data_section_add_f64 advanced len past 8192 without writing the bytes
+#         and string_table_add truncated silently. Now elf_strtab_capacity_bytes()
+#         matches the declaration, every appender sets ELF_STRTAB_OVERFLOW
+#         instead, and both native writers refuse with rc 28 (the streaming
+#         finalize returns no ELF).
+#      d. DRIVER LABEL tier (native_compile_driver.sio DRV_LABEL_*): both bounds
+#         silent, and an undefined label was patched as a jump to garbage. Now
+#         drv_label_capacity() matches the declarations, overflow / undefined
+#         targets set DRV_LABEL_OVERFLOW and the driver refuses (rc 6).
 #
 # Static only: it does not run the compiler. rc=20 firing end-to-end is proven in
 # the commit that introduced this gate (capacity temporarily lowered in a scratch
@@ -55,6 +75,9 @@ ELF_BASE_ADDR=4194304      # 0x400000 — load address, NOT a capacity
 EXPECT_LABEL=16384         # NC_V2_LABEL_* x3     16,384 labels/patches per fn
                            # (must stay >= IR_MAX_INSTRS — see clause 8)
 EXPECT_RODATA=2097152      # NC_BIG_RODATA         2 MiB (rc=23, clause 9)
+EXPECT_RETURN_JUMPS=16384  # NC_RETURN_JUMPS       >= IR_MAX_INSTRS (clause 10a, rc=22)
+EXPECT_STRTAB=8192         # elf.sio StringTable   8 KiB (clause 10c, rc=28)
+EXPECT_DRV_LABEL=1024      # DRV_LABEL_* x3        driver labels (clause 10d, rc=6)
 
 if ! command -v python3 >/dev/null 2>&1; then
   printf 'NATIVE_CAPACITY_TIERS_FAIL reason=python3_missing\n' >&2
@@ -69,7 +92,8 @@ fi
 # one in the middle silently rotates every tier that follows it.
 python3 "$CHECKER" "$ROOT" \
   "$EXPECT_CODE" "$EXPECT_RELOC" "$EXPECT_ELF" "$EXPECT_LEGACY_ELF" "$ELF_BASE_ADDR" \
-  "$EXPECT_LABEL" "$EXPECT_RODATA"
+  "$EXPECT_LABEL" "$EXPECT_RODATA" \
+  "$EXPECT_RETURN_JUMPS" "$EXPECT_STRTAB" "$EXPECT_DRV_LABEL"
 
 head_sha="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || printf not_available)"
 tree_sha="$(git -C "$ROOT" rev-parse 'HEAD^{tree}' 2>/dev/null || printf not_available)"

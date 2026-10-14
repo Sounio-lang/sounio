@@ -1281,6 +1281,52 @@ fn setup_intrinsics(tbl: *mut FnSigTable) with Mut, Panic, Div, Alloc {
     }
     let _ = fn_sig_table_add(tbl, var_sig)
 
+    // covariance_of(a: f64, b: f64) -> f64
+    var cov_name = Name { buf: [0; 384], len: 13 }
+    cov_name.buf[0] = 99
+    cov_name.buf[1] = 111
+    cov_name.buf[2] = 118
+    cov_name.buf[3] = 97
+    cov_name.buf[4] = 114
+    cov_name.buf[5] = 105
+    cov_name.buf[6] = 97
+    cov_name.buf[7] = 110
+    cov_name.buf[8] = 99
+    cov_name.buf[9] = 101
+    cov_name.buf[10] = 95
+    cov_name.buf[11] = 111
+    cov_name.buf[12] = 102
+    let cov_p1 = FnParamInfo { name: Name { buf: [0; 384], len: 0 }, ty: ty_f64() }
+    let cov_p2 = FnParamInfo { name: Name { buf: [0; 384], len: 0 }, ty: ty_f64() }
+    let cov_pl = FnParamList {
+        head: cov_p1,
+        tail: Some(Box::new(FnParamList { head: cov_p2, tail: None }))
+    }
+    let cov_sig = FnSig {
+        name: cov_name,
+        params: Some(Box::new(cov_pl)),
+        param_count: 2,
+        return_type: ty_f64(),
+        is_method: false,
+        self_type_name: Name { buf: [0; 384], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: [0; 8],
+        effect_count: 0,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_extern: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+        epistemic_min_confidence: 0 - 1,
+        visibility_kind: VISIBILITY_PUB,
+        defining_module_seg_count: 0,
+        defining_module_id: 0,
+        visibility: visibility_pub(),
+        defining_module: empty_path(),
+    }
+    let _ = fn_sig_table_add(tbl, cov_sig)
+
     // seq_new() -> Seq<T>
     var seq_name = Name { buf: [0; 384], len: 7 }
     seq_name.buf[0] = 115    // 's'
@@ -2295,6 +2341,21 @@ fn checker_check_validwhile_predicate_inplace(c: *mut Checker, validity_opt: Opt
     }
 }
 
+// #2753 (E269): no engine enforces a `Knowledge<T where { ... }>` predicate yet
+// (the runtime guard exists only as the scripts/ontology expander), so a program
+// carrying one used to run with the predicate silently ignored. Refuse it.
+fn checker_refuse_knowledge_where_mut(c: *mut Checker, opt: Option<Box<KnowledgeTypeInfo> >, span: Span) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(info_box) => {
+            match (*info_box).proof_constraints {
+                Some(_) => checker_report_error_at_inplace(c, span, 269, 0, 0, 0),
+                None => {}
+            }
+        }
+        None => {}
+    }
+}
+
 fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTypeInfo> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(info_box) => {
@@ -2987,7 +3048,10 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
         TypeExprKind::TypeNever => ty_never()
         TypeExprKind::TypeInfer => ty_unknown()
         TypeExprKind::TypeSelfUpper => (*c).current_impl_type
-        TypeExprKind::TypeKnowledge => checker_lower_knowledge_type_mut(c, te.knowledge_info)
+        TypeExprKind::TypeKnowledge => {
+            checker_refuse_knowledge_where_mut(c, te.knowledge_info, te.span)
+            checker_lower_knowledge_type_mut(c, te.knowledge_info)
+        }
         TypeExprKind::TypeModel => checker_lower_model_type_mut(c, te.type_args, te.span)
         TypeExprKind::TypePolicy => {
             let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
@@ -5219,6 +5283,7 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("panic"))
     checker_bind_import_unknown_inplace(c, make_name("exit"))
     checker_bind_import_unknown_inplace(c, make_name("variance_of"))
+    checker_bind_import_unknown_inplace(c, make_name("covariance_of"))
     checker_bind_import_unknown_inplace(c, make_name("sensitivity_of"))
     checker_bind_import_unknown_inplace(c, make_name("uncertainty_of"))
     checker_bind_import_unknown_inplace(c, make_name("hessian_of"))
@@ -10477,6 +10542,7 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
     if call_expr_is_builtin_lift_knowledge(e.left) { return true }
     if call_expr_is_builtin_measure(e.left) { return true }
     if call_expr_is_builtin_variance_of(e.left) { return true }
+    if call_expr_is_builtin_covariance_of(e.left) { return true }
     if call_expr_is_builtin_uncertainty_of(e.left) { return true }
     if call_expr_is_builtin_sensitivity_of(e.left) { return true }
     if call_expr_is_builtin_hessian_of(e.left) { return true }
@@ -10942,6 +11008,27 @@ fn checker_check_variance_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeE
         Some(_) => {}
     }
     match second_arg {
+        Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        None => {}
+    }
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    ty_f64()
+}
+
+
+fn checker_check_covariance_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let third_arg = expr_list_third(e.args)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match third_arg {
         Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
         None => {}
     }
@@ -11501,6 +11588,9 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     if call_expr_is_builtin_variance_of(e.left) {
         return checker_check_variance_metric_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_covariance_of(e.left) {
+        return checker_check_covariance_metric_expr_inplace(c, e)
     }
     if call_expr_is_builtin_uncertainty_of(e.left) {
         return checker_check_variance_metric_expr_inplace(c, e)
@@ -12809,6 +12899,18 @@ fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, ar
 
 
 
+// #2766: the parser desugars a destructuring `let S { a, b } = q` (and a tuple
+// `let (a, b) = t`) into `let __tupN = q` followed by one `let a = __tupN.a` per
+// field. The source `q` is consumed exactly once, by the first statement; the
+// per-field reads of the compiler temp are not uses of a linear value, they are
+// that single move split by field. Tracking the temp as linear reported the
+// second field read as E039 (and, with a field skipped, E040), rejecting a
+// correct single use. The temp is therefore tracked as non-linear.
+fn checker_name_is_destructure_temp(n: Name) -> bool {
+    n.len > 5 && n.buf[0] == 95 as i8 && n.buf[1] == 95 as i8 && n.buf[2] == 116 as i8
+        && n.buf[3] == 117 as i8 && n.buf[4] == 112 as i8
+}
+
 // *mut ExprIdent leaf — transcription of the by-value ExprIdent arm (13856). env lookup +
 // linear-consume in place; returns only the TypeEntry (no 164KB self SRET — the by-value
 // arm's `(c2, ident_ty)` return was the last bridge before crash in 165 deeply-nested cases).
@@ -12875,6 +12977,15 @@ fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 checker_report_error_at_inplace(c, e.span, 248, 0, 0, 0)
                 return ty_error()
             }
+            // #2354 (E270): `n as string` on a number/bool/char is not a
+            // conversion on this engine -- nothing formats the value, so the
+            // integer was later used as a string pointer (`let s: string = n as
+            // string` SIGSEGVed). Refuse it, as lean_single refuses the binding.
+            if target_ty.kind == TypeKind::TyString
+                && (is_numeric_type(src_ty) || src_ty.kind == TypeKind::TyBool || src_ty.kind == TypeKind::TyChar) {
+                checker_report_error_at_inplace(c, e.span, 270, 0, 0, 0)
+                return ty_error()
+            }
             let src_is_epistemic = src_ty.kind == TypeKind::TyKnowledge
                 || src_ty.kind == TypeKind::TyIntervention
                 || src_ty.kind == TypeKind::TyCounterfactual
@@ -12916,11 +13027,31 @@ fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 // reverse order. Faithful to the by-value original's scope discipline (env.push_scope /
 // borrows.push_scope / push_const_scope on entry; pop_const_scope / borrows.pop_scope /
 // env.pop_scope on exit, in that exact order). The body is checked via the *mut spine.
+// #2377: is `name`, as a bare match-arm pattern, a module-level `let`/`const`
+// (a value pattern) rather than a fresh binding? Only when no local of that
+// name is in scope: a local (scope_depth >= 1) shadows the constant, as in an
+// expression. Must agree with lower_match_arm_ref and lean_single.
+fn checker_pattern_names_global_const_inplace(c: *mut Checker, name: Name) -> bool with Mut, Panic, Div {
+    if !ast_is_global_const_name(name) { return false }
+    var i = (*c).env.count - 1
+    while i >= 0 {
+        if name_eq((*c).env.bindings[i as usize].name, name) {
+            return (*c).env.bindings[i as usize].scope_depth == 0
+        }
+        i = i - 1
+    }
+    false
+}
+
 fn checker_check_match_arm_inplace(c: *mut Checker, arm: MatchArm, scrut_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     (*c).env = (*c).env.push_scope()
     (*c).borrows = (*c).borrows.push_scope()
     checker_push_const_scope_inplace(c)
-    checker_bind_pattern_inplace(c, arm.pattern, scrut_ty)
+    if arm.pattern.kind == PatternKind::PatBinding && checker_pattern_names_global_const_inplace(c, arm.pattern.name) {
+        // #2377: value pattern -- binds nothing; the arm compares against the constant.
+    } else {
+        checker_bind_pattern_inplace(c, arm.pattern, scrut_ty)
+    }
     // Type-check the `if <cond>` guard (if any) with the pattern variables in scope.
     match arm.guard {
         Some(g) => {
@@ -13018,7 +13149,22 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
         }
         checker_bind_tuple_pattern_list_idx_inplace(c, pat.sub_patterns, scrut_ty, 0)
     } else if pat.kind == PatternKind::PatOr {
-        checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
+        // #2377: an alternative naming a module-level const/let is a value, not a
+        // binding (A | B => ..); bind only the others.
+        var alt_cur = pat.sub_patterns
+        var alt_going = true
+        while alt_going {
+            match alt_cur {
+                Some(alts) => {
+                    let alt = (*alts).head
+                    if !(alt.kind == PatternKind::PatBinding && checker_pattern_names_global_const_inplace(c, alt.name)) {
+                        checker_bind_pattern_inplace(c, alt, scrut_ty)
+                    }
+                    alt_cur = (*alts).tail
+                }
+                None => { alt_going = false }
+            }
+        }
     }
     // PatWildcard / PatIntLit / PatBoolTrue / PatBoolFalse / PatStringLit bind nothing.
 }
@@ -13402,7 +13548,7 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         checker_const_int_bind_unknown_inplace(c, s.name)
     }
     // Track variable for borrow checking (linear if struct is declared linear)
-    let lin = checker_is_linear_type_inplace(c, bind_ty)
+    let lin = checker_is_linear_type_inplace(c, bind_ty) && !checker_name_is_destructure_temp(s.name)
     (*c).borrows = (*c).borrows.track(s.name, lin)
     // Propagate escape provenance: `let r = &x` taints r LOCAL; `let r = &self.f` keeps it first-class.
     (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
@@ -13487,16 +13633,89 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     } else {
         checker_const_int_bind_unknown_inplace(c, s.name)
     }
-    let lin = checker_is_linear_type_inplace(c, bind_ty)
+    let lin = checker_is_linear_type_inplace(c, bind_ty) && !checker_name_is_destructure_temp(s.name)
     (*c).borrows = (*c).borrows.track(s.name, lin)
     (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
     ty_unit()
 }
 
 // *mut assign-mutability (E003) — transcription of check_assign_mutability (14176).
+// #888: the static type of an assignment PLACE, recomputed from the environment
+// and the struct table without re-checking (and so without re-reporting) any
+// sub-expression. Returns ty_unknown() for any shape it does not model, which
+// makes the shared-reference walk below fail open on it (no false reject).
+fn checker_place_static_type(c: *mut Checker, place: Expr, depth: i64) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if depth > 16 { return ty_unknown() }
+    if place.kind == ExprKind::ExprIdent {
+        if !(*c).env.has_binding(place.name) { return ty_unknown() }
+        return (*c).env.lookup(place.name)
+    }
+    let base_ptr = expr_opt_get(place.left)
+    if base_ptr == 0 as *mut Expr { return ty_unknown() }
+    let base_ty = checker_place_static_type(c, *base_ptr, depth + 1)
+    if place.kind == ExprKind::ExprUnary && place.un_op == UnaryOp::OpDeref {
+        return checker_place_deref_type(base_ty)
+    }
+    if place.kind == ExprKind::ExprFieldAccess {
+        let sty = checker_place_deref_type(base_ty)
+        if sty.kind != TypeKind::TyNamed { return ty_unknown() }
+        let sidx = struct_table_find((*c).structs, sty.name)
+        if sidx < 0 { return ty_unknown() }
+        let si = struct_table_get((*c).structs, sidx)
+        if !field_info_list_has(si.fields, place.name) { return ty_unknown() }
+        return field_info_list_find(si.fields, place.name)
+    }
+    if place.kind == ExprKind::ExprIndex {
+        let aty = checker_place_deref_type(base_ty)
+        if aty.kind == TypeKind::TyArray || aty.kind == TypeKind::TySlice || aty.kind == TypeKind::TySliceMut {
+            match aty.inner {
+                Some(el) => { return *el }
+                None => { return ty_unknown() }
+            }
+        }
+        return ty_unknown()
+    }
+    ty_unknown()
+}
+
+// One auto-deref step: `&T` / `&!T` -> T, anything else unchanged.
+fn checker_place_deref_type(ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if ty.kind == TypeKind::TyRef || ty.kind == TypeKind::TyRefMut {
+        match ty.inner {
+            Some(inner) => { return *inner }
+            None => { return ty_unknown() }
+        }
+    }
+    ty
+}
+
+// #888: does storing into `place` write THROUGH a shared reference? Walks the
+// place towards its root; every hop that dereferences (explicit `*p`, or the
+// auto-deref of `p.f` / `p[i]`) a value whose static type is a shared `&T` /
+// `&[T]` makes the store a write through shared data, which both engines used
+// to accept ("assume mutable for now"). Exclusive `&!T`, raw pointers, by-value
+// locals and globals are unaffected. Unknown shapes return false (fail open).
+fn checker_place_writes_through_shared_ref(c: *mut Checker, place: Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+    if depth > 16 { return false }
+    if place.kind == ExprKind::ExprFieldAccess || place.kind == ExprKind::ExprIndex
+        || (place.kind == ExprKind::ExprUnary && place.un_op == UnaryOp::OpDeref) {
+        let base_ptr = expr_opt_get(place.left)
+        if base_ptr == 0 as *mut Expr { return false }
+        let base_ty = checker_place_static_type(c, *base_ptr, depth + 1)
+        if base_ty.kind == TypeKind::TyRef || base_ty.kind == TypeKind::TySlice {
+            return true
+        }
+        return checker_place_writes_through_shared_ref(c, *base_ptr, depth + 1)
+    }
+    false
+}
+
 fn checker_check_assign_mutability_inplace(c: *mut Checker, opt: Option<Box<Expr> >, span: Span) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(e) => {
+            if (*e).kind != ExprKind::ExprIdent && checker_place_writes_through_shared_ref(c, *e, 0) {
+                checker_report_error_at_inplace(c, span, 267, 0, 0, 0)
+            }
             if (*e).kind == ExprKind::ExprIdent {
                 // E003 only for a name that IS bound (a local) and is immutable (a `let`).
                 // Module-level globals are not bound into env, so an unbound name is NOT a
@@ -18084,6 +18303,9 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
     else if code == 264 { print("enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped") }
+    else if code == 267 { print("cannot assign through a shared reference: the place is reached through `&T`, which is read-only") }
+    else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
+    else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
     else { print("unknown error") }
 }
@@ -18396,6 +18618,12 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     else if code == 248 {
         print("   |\n   = help: wait for explicit from_bits/conversion operations; no f64 cast is a valid f128/f256 implementation\n")
     }
+    else if code == 269 {
+        print("   |\n   = help: drop the `where { ... }` and check the predicate explicitly (`if !(k.value.age >= 18) { panic(...) }`), or run the source through scripts/ontology/expand_knowledge_runtime_guards.sh, which inserts that check\n")
+    }
+    else if code == 270 {
+        print("   |\n   = help: print the value directly (`println(n)`, `print_int(n)`, `print_f64(x)`); there is no number-to-string conversion yet\n")
+    }
     else if code == 264 {
         print("   |\n   = help: carry the payload in a struct next to a payload-free enum tag, e.g. `struct Shape { kind: ShapeKind, a: f64, b: f64 }`; or use Option<T> for a single optional value\n")
     }
@@ -18424,6 +18652,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("\n   =       (then the reported variance overstates, which is safe); `/` refuses")
         print("\n   =       any shared source, because its dropped term also depends on the sign")
         print("\n   =       of the product of the operand values, which is not tracked.\n")
+    }
+    else if code == 267 {
+        print("   |\n   = help: take the parameter or binding as an exclusive reference `&!T` (and pass `&!x` at the call site) to modify it\n")
     }
     else if code == 263 {
         print("   |\n   = help: rename the struct/enum, the method, or the module import so the qualifier is no longer ambiguous\n")
@@ -19134,6 +19365,19 @@ fn call_expr_is_builtin_variance_of(opt: Option<Box<Expr> >) -> bool with Mut, P
     }
 }
 
+
+fn call_expr_is_builtin_covariance_of(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str13((*expr).name, 99, 111, 118, 97, 114, 105, 97, 110, 99, 101, 95, 111, 102)
+        }
+        None => false
+    }
+}
+
 fn call_expr_is_builtin_hessian_of(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
@@ -19296,6 +19540,7 @@ fn name_is_dynlink_extern(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
     if name_eq(n, make_name("kl14c_neg")) { return true }
     if name_eq(n, make_name("kl14d_a")) { return true }
     if name_eq(n, make_name("kl14d_b")) { return true }
+    if name_eq(n, make_name("kl14d_align_probe")) { return true }   // #2537 witness
     if name_eq(n, make_name("ZSTD_compress")) { return true }
     if name_eq(n, make_name("ZSTD_decompress")) { return true }
     if name_eq(n, make_name("ZSTD_isError")) { return true }
@@ -25842,7 +26087,7 @@ impl Checker {
             c = c.const_int_bind_unknown(s.name)
         }
         // Track variable for borrow checking (linear if struct is declared linear)
-        let lin = c.is_linear_type(bind_ty)
+        let lin = c.is_linear_type(bind_ty) && !checker_name_is_destructure_temp(s.name)
         c.borrows = c.borrows.track(s.name, lin)
         (c, ty_unit())
     }
@@ -25911,7 +26156,7 @@ impl Checker {
             c = c.const_int_bind_unknown(s.name)
         }
         // Track variable for borrow checking (linear if struct is declared linear)
-        let lin = c.is_linear_type(bind_ty)
+        let lin = c.is_linear_type(bind_ty) && !checker_name_is_destructure_temp(s.name)
         c.borrows = c.borrows.track(s.name, lin)
         (c, ty_unit())
     }
@@ -27491,6 +27736,9 @@ impl Checker {
         }
         if call_expr_is_builtin_variance_of(e.left) {
             return self.check_variance_metric_expr(e)
+        }
+        if call_expr_is_builtin_covariance_of(e.left) {
+            return self.check_covariance_metric_expr(e)
         }
         if call_expr_is_builtin_uncertainty_of(e.left) {
             return self.check_variance_metric_expr(e)
@@ -29558,6 +29806,28 @@ impl Checker {
         (c, ty_f64())
     }
 
+
+    fn check_covariance_metric_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let first_arg = expr_list_head(e.args)
+        let second_arg = expr_list_second(e.args)
+        let third_arg = expr_list_third(e.args)
+        var c = self
+        match first_arg {
+            None => c = c.report_error_at(e.span, 10, 0, 0, 0)
+            Some(_) => {}
+        }
+        match second_arg {
+            None => c = c.report_error_at(e.span, 10, 0, 0, 0)
+            Some(_) => {}
+        }
+        match third_arg {
+            Some(_) => c = c.report_error_at(e.span, 10, 0, 0, 0)
+            None => {}
+        }
+        c = c.check_expr_list_no_type_no_linear_consume(e.args)
+        (c, ty_f64())
+    }
+
     fn borrow_state_and_shared_count(self, name: Name) -> (i64, i64) with Mut, Panic, Div, Alloc, IO {
         let idx = self.borrows.find(name)
         if idx >= 0 {
@@ -30162,7 +30432,22 @@ impl Checker {
         c.env = c.env.push_scope()
         c.borrows = c.borrows.push_scope()
         c = c.push_const_scope()
-        c = c.bind_pattern(arm.pattern, scrut_ty)
+        // #2377: a module-level let/const named by a bare arm is a value pattern.
+        var arm_is_const_value = false
+        if arm.pattern.kind == PatternKind::PatBinding && ast_is_global_const_name(arm.pattern.name) {
+            var bi = c.env.count - 1
+            var found = false
+            while bi >= 0 && !found {
+                if name_eq(c.env.bindings[bi as usize].name, arm.pattern.name) {
+                    found = true
+                    arm_is_const_value = c.env.bindings[bi as usize].scope_depth == 0
+                }
+                bi = bi - 1
+            }
+        }
+        if !arm_is_const_value {
+            c = c.bind_pattern(arm.pattern, scrut_ty)
+        }
         let pair = c.check_expr(arm.body)
         c = pair.0
         let body_ty = pair.1
