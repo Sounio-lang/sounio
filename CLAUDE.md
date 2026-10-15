@@ -113,10 +113,10 @@ var buf: [i64; 8] = [0; 8]             // fixed-size array
 &T / &!T                               // shared / exclusive ref
 fn f(x: i32) -> i32 with IO { }        // effects declaration
 linear struct Handle { fd: i32 }       // linear types
-let dose: mg = 500.0                   // units
+let dose: mg = 500.0                   // NOT on default Madaros: `let d: m = 100.0` is E001 (#2752). lean_single demo only.
 let arr2 = a ++ b                      // array concatenation
 type Pos = { x: i32 | x > 0 }          // refinement type
-let m: Knowledge<mg> = measure(500.0, uncertainty: 2.5)
+let m: Knowledge<f64> = measure(10.0, uncertainty: 0.1)  // demo_incerteza.sio; not Knowledge<mg>
 fn observe(x: Unobserved<f64>) -> bool with Observe { x > 0.0 }
 
 // Effects: IO, Mut, Div, Panic, Alloc, Async, GPU, Prob, Observe
@@ -160,9 +160,9 @@ Headline limitations (full list in [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/c
 
 - **Imported-module native path — partial closeout.** Residuals remain: multi-module memory-wall / exclusive-ref fragile chains, named-import/`print_f64` papercuts. Finite-dof `gum_k95` is **trustworthy** under default Madaros.
 - `Knowledge<T>` supports struct-level generics (`f64`, `bool`, struct types)
-- `--show-ast` / `--show-types` are unavailable under the default Madaros engine (`bin/souc compile ... --show-ast` -> `error: madaros build: unsupported option`); both work under `SOUNIO_SOUC_ENGINE=lean_single` / `bin/souc-lean-single-x86_64`. A REPL does exist (`souc repl` -> `tools/repl.sh`) -- it's a file-based compile-and-run loop over whichever engine `bin/souc` currently resolves to, not a true interactive evaluator.
+- `--show-ast` / `--show-types` on `compile` or `build` are rejected by default Madaros (`error: madaros build: unsupported option`, exit 2). Measured 2026-10-15: `check --show-ast` and `check --show-types` are **ignored** and still print `check: OK`. `SOUNIO_SOUC_ENGINE=lean_single souc check --show-ast` prints compiler stats, not a source AST. A REPL does exist (`souc repl` -> `tools/repl.sh`) -- it's a file-based compile-and-run loop over whichever engine `bin/souc` currently resolves to, not a true interactive evaluator.
 - `&![T; N]` bare array mutation broken in JIT — use struct wrapper or `(*arr)[i]`
-- GPU: end-to-end `kernel fn` → PTX path **exists and is reproducible under default Madaros**. `bin/souc build <file>.sio --backend gpu -o out.ptx` (verified: `examples/kernel_vec_add.sio` → valid PTX). This is Madaros-only: `SOUNIO_SOUC_ENGINE=lean_single ./bin/souc build ... --backend gpu ...` has no GPU CLI surface at all and fails to parse the invocation (verified 2026-08-17). Runtime execution is fixture-bounded (L4-validated profiles).
+- GPU: two records, not re-run on 2026-10-15. `TOUR.md` §6 (2026-10-04) measured `souc build --backend gpu` as PTX for empty kernel bodies only. An older note in this section said `examples/kernel_vec_add.sio` emitted valid PTX under Madaros, and that `lean_single` has no GPU CLI (verified 2026-08-17). The root README (2026-10-11) records scoped Spark evidence for GPU/Pireus and says the generic GPU CLI needs its own status. Do not teach a general kernel launch from this bullet.
 - **Dual-engine divergence.** `f128` is a working binary128 type on **both** engines, but they cover different surfaces. Both give 113 halvings to `1 + eps == 1` (binary64 gives 53) and print `1/3` as `3.33333333333333333333333333333333317e-0001` via `math::softfloat_f128_fmt::print_f128`.
   - **Madaros** computes `+ - * / %`, unary minus and IEEE compares, and supports params/returns, struct fields, methods, fixed arrays, exact 36-digit printing and exact literals. Measured: `7.5 % 2.0 = 1.5`; `2/3` through a struct field and an array element is correct to the last digit. It refuses, fail-closed:
     - `as` casts between `f128` and `f64` (**E248**, "wide-float casts fail closed");
@@ -175,7 +175,7 @@ Headline limitations (full list in [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/c
     - Portable constants: small dyadic decimals that are exact in binary64 (`0.25`, `3.0`), `f128_from_limbs(lo, hi)` (works on both), or computation (`one / ten`).
   - **Not implemented anywhere:** `Knowledge<f128>` and GUM over `f128` (KL-15).
   - **`f256`** on Madaros: declarations and some operators typecheck (an unused f256 enum field or global builds), but executable f256 value lowering is refused fail-closed (V0-E.4.1), never lowered as f64. lean_single refuses `f256` outright (KL-9). Only `stdlib/math/softfloat_f256.sio` add/sub over `F256Bits` computes f256 values (KL-15a); there is no f256 mul, div, fields, arrays or printing.
-- **Cross-call first-order variance (KL-11) is open.** First-order channels do not cross user calls: `tests/run-pass/gum_fo_across_call.sio` and `tests/run-pass/fo_call_boundary_arity3.sio` still carry `//@ known-failure` (see `docs/compiler/KNOWN_LIMITATIONS.md`). Re-verify `gum_fo_across_call.sio` before relying on general cross-call FO propagation.
+- **Cross-call first-order variance (KL-11) is narrowed, not closed.** Pure helpers carry first-order channels (ledger, 2026-10-13). A general user call still does not: `tests/run-pass/gum_fo_across_call.sio` and `tests/run-pass/fo_call_boundary_arity3.sio` keep `//@ known-failure`. Do not treat every call as variance-preserving.
 
 ---
 

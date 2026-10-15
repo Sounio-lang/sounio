@@ -11,7 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.docs-inde
 
 Welcome to the Sounio documentation index. Public website summaries live under `website/src/content`, while repo-native deep dives, evidence packs, and implementation notes live here under `docs/`, `paper/`, `tests/`, and `examples/`.
 
-If you only read one current-state document first, read `guide/MINIMUM_VIABLE_SOUNIO.md`. It is the conservative contract for what is actually validated by repository gates and committed artifacts.
+If you only read one current-state document first, read [`guide/getting-started.md`](guide/getting-started.md). It was checked against Madaros v0.80.0 on 2026-10-15. [`TOUR.md`](../TOUR.md) (measured 2026-10-04) and [`compiler/KNOWN_LIMITATIONS.md`](compiler/KNOWN_LIMITATIONS.md) are the positive and negative ledgers. [`guide/MINIMUM_VIABLE_SOUNIO.md`](guide/MINIMUM_VIABLE_SOUNIO.md) is an April 22, 2026 snapshot; do not prefer it when it disagrees with those three.
 
 ## For Users
 
@@ -46,7 +46,7 @@ Start with these current-state maps before diving into older deep reports:
 - [LLVM Codegen](architecture/LLVM_CODEGEN.md)
 - [GPU Runtime](features/GPU_RUNTIME.md)
 - [Async Runtime](architecture/ASYNC_RUNTIME.md)
-- [Roadmap](archived/COMPILER_ROADMAP.md)
+- Roadmap: `archived/COMPILER_ROADMAP.md` is archived lineage, not the current contract. Use [TOUR.md](../TOUR.md) and [Known Limitations](compiler/KNOWN_LIMITATIONS.md).
 - [Paper Artifact Packaging Spec](implementation/PAPER_ARTIFACT_PACKAGING_SPEC.md)
 - [Website Design System & UI Components](../website/README.md)
 
