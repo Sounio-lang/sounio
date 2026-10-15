@@ -105,10 +105,8 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `gum_fo_struct_helpers_1706` (values against C++ oracles). **Still open:** a recursion that runs deeper than the unroll cap
   reads **NaN** for the arm that needed the missing level (never a confident 0);
   an `if` whose condition has side effects cannot be re-tested and has no
-  variance (-1, read as 0); helpers with loops, `match` or closures are not
-  re-lowered; a call through a closure or function value has no variance
-  (`let f = |y: f64| 2.0 * y; variance_of(f(a))` reads 0); a struct reached
-  through a reference local (`let r = &p; variance_of(r.cl0)`) reads 0.
+  variance (-1, read as 0); a `while` carries the loop-carried channel across the call (pin `tests/run-pass/gum_fo_while_call.sio`, measured three 0.810000 and four 1.440000); `for` and `loop`/`break` carry the same channel across the call, and a `let`-bound closure inside the callee is re-lowered at its call (pin `tests/run-pass/gum_fo_for_loop_call.sio`, measured for3 0.810000, loop3 0.810000, closure 0.360000); a `match` on integer, bool or wildcard arms carries the arm taken
+  (pin `tests/run-pass/gum_fo_match_call.sio`, measured arm0 0.090000, arm1 0.360000, arm2 9.000000); a `let`-bound closure carries the body's variance (`let f = |y: f64| 2.0 * y; variance_of(f(a))`; pin `tests/run-pass/gum_fo_closure_call.sio`, measured scale 0.360000, square 9.000000, capture 0.090000); a struct reached through a reference local carries the borrowed field (`let r = &p; variance_of(r.cl0)`, `let s = r`, `(*r).cl0`; pin `tests/run-pass/gum_fo_ref_local_field.sio`).
 - #1792 (filed 2026-08-17) named two distinct witnesses. **F1**:
   `tests/run-pass/rapamycin_epistemic_adaptive.sio` — `madaros` originally
   printed `var(blood)=0.000000` where `lean_single` shows ~1e-5. **F2**:
@@ -118,11 +116,11 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   (`d33cf5856b57f3341db9392d263045d090d88ae7`, merged 2026-08-18):
   `Knowledge.confidence` was tagged `is_float: 3` at IR layout instead of `1`,
   so `sitofp` on the raw bits produced the huge value;
-  `ir_register_knowledge_layout` now tags it `1`. **F1, and this rung in
-  general, stay OPEN**: `tests/run-pass/gum_fo_across_call.sio` and
-  `tests/run-pass/fo_call_boundary_arity3.sio` still document, with a live
-  `//@ known-failure`, that FO/variance channels stop at `ir_call` for the
-  general case. Re-measured 2026-09-22: the specific
+  `ir_register_knowledge_layout` now tags it `1`. The two call-boundary pins pass on Madaros (measured 2026-10-15):
+  `tests/run-pass/gum_fo_across_call.sio` prints `CALL_var 0.002117` against
+  its oracle, and `tests/run-pass/fo_call_boundary_arity3.sio` prints
+  `id3_var 1.000000`. Neither file carries `//@ known-failure`. What stays
+  open is the list above. Re-measured 2026-09-22: the specific
   `rapamycin_epistemic_adaptive` witness (F1) now reports non-zero variance
   too, and the accompanying test change is `b2df0727` (2026-09-18) — but that
   commit touches only the test fixture and its recorded gate/dataset
@@ -329,9 +327,9 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   branch: it desugars to `match`, like `while let`. Pin:
   `tests/run-pass/if_let_desugar_forms.sio`. Found on the way: a bare `None`
   pattern parsed as a *binding*, so `match v { None => a, Some(x) => b }`
-  took the `None` arm for `Some(42)`; fixed in the same branch. Residual,
-  unchanged: Madaros lowers `Option<i64>` as a nullable word, so `Some(0)`
-  is indistinguishable from `None`.
+  took the `None` arm for `Some(42)`; fixed in the same branch. `Some(0)` is not `None` (#2787; pin
+  `tests/run-pass/option_scalar_match_issue2787.sio`, measured
+  `ISSUE_2787_OK`).
 
 ### KL-21 — user functions named like compiler builtins (P1.4)
 

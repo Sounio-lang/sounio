@@ -162,6 +162,20 @@ struct FoInlineNode {
     next: Option<Box<FoInlineNode> >,
 }
 
+// A `let f = |y: f64| ...` is not a named fn, so the call-boundary inline
+// never sees it and variance_of(f(a)) reads 0. The body stays here, keyed by
+// the local, and the call re-lowers it with y bound to a.
+struct FoClosureNode {
+    local: Name,
+    nparams: i64,
+    params: [Name; 8],
+    isf: [i64; 8],
+    body: Expr,
+    next: Option<Box<FoClosureNode> >,
+}
+
+var FO_CL_HEAD: Option<Box<FoClosureNode> > = None
+
 var FO_INLINE_DEPTH: i64 = 0
 // Global, like the FO_XFER_* table: a Lowerer is rebuilt per function, so a
 // Lowerer field would not survive from the helper's lowering to its caller's.
@@ -967,8 +981,48 @@ var FO_FIELD_SENS_COUNT: i64 = 0
 var FO_FIELD_SENS_KEY: [i64; 64] = [0; 64]
 var FO_FIELD_SENS: [i64; 2048] = [-1; 2048]
 
+// A `let r = &p` (or `let s = r`) names the same struct local for field
+// variance. Without this, variance_of(r.cl0) keys the reference's own
+// register and reads 0 while variance_of(p.cl0) is live.
+var FO_REF_ALIAS_COUNT: i64 = 0
+var FO_REF_ALIAS_NAME: [Name; 64] = [ir_empty_name(); 64]
+var FO_REF_ALIAS_BASE: [i64; 64] = [0 - 1; 64]
+
+fn fo_ref_alias_reset() with Mut {
+    FO_REF_ALIAS_COUNT = 0
+}
+
+fn fo_ref_alias_note(name: Name, base: i64) with Mut, Panic, Div {
+    if base < 0 { return }
+    var i: i64 = 0
+    while i < FO_REF_ALIAS_COUNT {
+        if ir_name_eq(FO_REF_ALIAS_NAME[i as usize], name) {
+            FO_REF_ALIAS_BASE[i as usize] = base
+            return
+        }
+        i = i + 1
+    }
+    if FO_REF_ALIAS_COUNT >= 64 { return }
+    FO_REF_ALIAS_NAME[FO_REF_ALIAS_COUNT as usize] = name
+    FO_REF_ALIAS_BASE[FO_REF_ALIAS_COUNT as usize] = base
+    FO_REF_ALIAS_COUNT = FO_REF_ALIAS_COUNT + 1
+}
+
+fn fo_ref_alias_base(name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < FO_REF_ALIAS_COUNT {
+        if ir_name_eq(FO_REF_ALIAS_NAME[i as usize], name) {
+            return FO_REF_ALIAS_BASE[i as usize]
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
 fn fo_field_sens_reset() with Mut {
     FO_FIELD_SENS_COUNT = 0
+    fo_ref_alias_reset()
+    FO_CL_HEAD = None
     FO_LETCALL_HEAD = None
     FO_LOGN_ACTIVE = 0
     FO_LOGN_COUNT = 0
@@ -9705,15 +9759,66 @@ fn lower_expr_list_relower_safe(opt: &Option<Box<ExprList>>) -> bool with Mut, P
     true
 }
 
+// Integer, bool or wildcard arms, no guard. Anything else stays off this path
+// so a match we cannot join is not registered as a pure helper.
+fn fo_match_arms_variance_ok(arms: &Option<Box<MatchArmList>>) -> bool with Mut, Panic, Div, Alloc {
+    var any = false
+    var cur = arms
+    while true {
+        match *cur {
+            Some(al) => {
+                let k = (*al).head.pattern.kind
+                if k != PatternKind::PatWildcard && k != PatternKind::PatIntLit
+                    && k != PatternKind::PatBoolTrue && k != PatternKind::PatBoolFalse {
+                    return false
+                }
+                match (*al).head.guard {
+                    Some(_) => { return false }
+                    None => {}
+                }
+                any = true
+                cur = &(*al).tail
+            }
+            None => break
+        }
+    }
+    any
+}
+
 // #1706: true when `e` contains control flow the inline re-lowering cannot
-// follow: a loop, match, closure or handler. An `if` is fine -- its variance is
-// merged on the condition at run time (lower_if_variance_runtime_ref).
+// follow: a loop, closure or handler. An `if` is merged on its condition.
+// A `match` is followed into its arms; integer, bool and wildcard arms are
+// joined by lower_match_variance_ref.
 fn fo_expr_has_unsupported_ctl(e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
     if depth > 64 { return true }
     let k = (*e).kind
-    if k == ExprKind::ExprMatch || k == ExprKind::ExprWhile || k == ExprKind::ExprLoop || k == ExprKind::ExprForIn
-        || k == ExprKind::ExprClosure || k == ExprKind::ExprHandle {
+    if k == ExprKind::ExprHandle {
         return true
+    }
+    if k == ExprKind::ExprWhile || k == ExprKind::ExprLoop || k == ExprKind::ExprForIn {
+        if fo_block_has_unsupported_ctl(&(*e).block, depth + 1) { return true }
+    }
+    if k == ExprKind::ExprClosure {
+        match (*e).closure_body {
+            Some(cb) => { if fo_expr_has_unsupported_ctl(&(*cb), depth + 1) { return true } }
+            None => {}
+        }
+    }
+    if k == ExprKind::ExprMatch {
+        var mac = &(*e).arms
+        while true {
+            match *mac {
+                Some(mal) => {
+                    if fo_expr_has_unsupported_ctl(&(*mal).head.body, depth + 1) { return true }
+                    match (*mal).head.guard {
+                        Some(mg) => { if fo_expr_has_unsupported_ctl(&(*mg), depth + 1) { return true } }
+                        None => {}
+                    }
+                    mac = &(*mal).tail
+                }
+                None => break
+            }
+        }
     }
     if k == ExprKind::ExprIf || k == ExprKind::ExprBlock {
         if fo_block_has_unsupported_ctl(&(*e).block, depth + 1) { return true }
@@ -9794,6 +9899,40 @@ fn fo_inline_known(n: Name) -> bool with Mut, Panic, Div, Alloc {
 
 // Like !lower_expr_contains_call_ref, but a call to a pure math builtin with
 // re-lower-safe arguments is still safe to evaluate twice.
+fn fo_closure_note(local: Name, e: &Expr) with Mut, Panic, Div, Alloc {
+    if (*e).kind != ExprKind::ExprClosure { return }
+    match (*e).closure_body {
+        Some(b) => {
+            if fo_expr_has_unsupported_ctl(&(*b), 0) { return }
+            var nparams: i64 = 0
+            var params: [Name; 8] = [ir_empty_name(); 8]
+            var isf: [i64; 8] = [0; 8]
+            var pc = &(*e).closure_params
+            while true {
+                match *pc {
+                    Some(pl) => {
+                        if nparams >= 8 { return }
+                        params[nparams as usize] = (*pl).head.name
+                        if lower_type_expr_is_f64(&(*pl).head.ty) { isf[nparams as usize] = 1 }
+                        nparams = nparams + 1
+                        pc = &(*pl).tail
+                    }
+                    None => break
+                }
+            }
+            FO_CL_HEAD = Some(Box::new(FoClosureNode {
+                local: local,
+                nparams: nparams,
+                params: params,
+                isf: isf,
+                body: *b,
+                next: FO_CL_HEAD,
+            }))
+        }
+        None => {}
+    }
+}
+
 fn lower_expr_relower_safe_ref(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
     if (*e).kind == ExprKind::ExprCall {
         match (*e).left {
@@ -16631,7 +16770,26 @@ impl Lowerer {
             return (self, -1)
         }
         if (*base).kind == ExprKind::ExprIdent {
+            if self.lookup_local_is_ref((*base).name) {
+                let aliased = fo_ref_alias_base((*base).name)
+                if aliased >= 0 {
+                    return (self, aliased)
+                }
+            }
             return (self, self.lookup_local((*base).name))
+        }
+        if (*base).kind == ExprKind::ExprUnary && (*base).un_op == UnaryOp::OpDeref {
+            match (*base).left {
+                Some(inner) => {
+                    if (*inner).kind == ExprKind::ExprIdent && self.lookup_local_is_ref((*inner).name) {
+                        let aliased_d = fo_ref_alias_base((*inner).name)
+                        if aliased_d >= 0 {
+                            return (self, aliased_d)
+                        }
+                    }
+                }
+                None => {}
+            }
         }
         if (*base).kind == ExprKind::ExprFieldAccess {
             let inner = self.variance_field_chain_base_of_parent(base, depth + 1)
@@ -16915,7 +17073,10 @@ impl Lowerer {
             }
         }
         // A runtime `if` is admitted: lower_if_variance_runtime_ref merges the
-        // arms on the condition at run time. Loops, match and closures are not.
+        // arms on the condition at run time. A `while` is admitted: its body is lowered with the same loop-carried
+        // rows as a loop in the caller, so the same channel added three times
+        // stays one channel. `for` and `loop`/`break` use that same lowering.
+        // A `let`-bound closure in the body is re-lowered at its call.
         var bc = &(*fd).body.stmts
         while true {
             match *bc {
@@ -16954,6 +17115,174 @@ impl Lowerer {
     // merged on its condition at run time. Anything else, an argument that is not
     // safe to evaluate twice, or a call past the depth cap returns -1 (the
     // previous "no variance"); the cap also raises FO_INLINE_TRUNCATED.
+    // variance_of(f(a)) when f is `let f = |y: f64| body`. Same binding rules
+    // as a pure helper: an f64 parameter carries the argument's variance and
+    // sensitivities; a loop, match or nested closure was not recorded.
+    fn fo_closure_call_variance(self, local: Name, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if FO_INLINE_DEPTH >= 8 {
+            FO_INLINE_TRUNCATED = 1
+            return (lo, 0 - 1)
+        }
+        if FO_INLINE_DEPTH > 0 && FO_INLINE_COUNT >= FO_INLINE_BUDGET {
+            FO_INLINE_TRUNCATED = 1
+            return (lo, 0 - 1)
+        }
+        var found = false
+        var nparams: i64 = 0
+        var params: [Name; 8] = [ir_empty_name(); 8]
+        var isf: [i64; 8] = [0; 8]
+        var body = lower_ident_expr_for_name(ir_empty_name(), Span { file_id: 0, start: 0, end: 0 })
+        var cur = FO_CL_HEAD
+        while !found {
+            match cur {
+                Some(node) => {
+                    if ir_name_eq((*node).local, local) {
+                        nparams = (*node).nparams
+                        params = (*node).params
+                        isf = (*node).isf
+                        body = (*node).body
+                        found = true
+                    } else {
+                        cur = (*node).next
+                    }
+                }
+                None => break
+            }
+        }
+        if !found { return (lo, 0 - 1) }
+        var nargs: i64 = 0
+        var ac = args
+        while true {
+            match *ac {
+                Some(al) => {
+                    if !lower_expr_relower_safe_ref(&(*al).head) { return (lo, 0 - 1) }
+                    nargs = nargs + 1
+                    ac = &(*al).tail
+                }
+                None => break
+            }
+        }
+        if nargs != nparams { return (lo, 0 - 1) }
+        var vals: [i64; 8] = [0 - 1; 8]
+        var vars: [i64; 8] = [0 - 1; 8]
+        var sens: [i64; 256] = [0 - 1; 256]
+        var hess: [i64; 288] = [0 - 1; 288]
+        ac = args
+        var i: i64 = 0
+        while i < nargs {
+            match *ac {
+                Some(al) => {
+                    let vp = lo.lower_expr_ref(&(*al).head)
+                    lo = vp.0
+                    vals[i as usize] = vp.1
+                    if isf[i as usize] == 1 {
+                        let wp = lo.lower_expr_variance_ref(&(*al).head)
+                        lo = wp.0
+                        var v = wp.1
+                        if v < 0 {
+                            if lo.fo_expr_has_sens() {
+                                let ep = lo.fo_emit_var_from_sens()
+                                lo = ep.0
+                                v = ep.1
+                            } else {
+                                let zp = lo.fo_clear_expr_sens().emit_zero_variance()
+                                lo = zp.0
+                                v = zp.1
+                            }
+                        }
+                        vars[i as usize] = v
+                        var k: i64 = 0
+                        while k < 32 {
+                            sens[(i * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
+                            k = k + 1
+                        }
+                        if lo.so_enabled && i < 8 {
+                            var hk: i64 = 0
+                            while hk < 36 {
+                                hess[(i * 36 + hk) as usize] = lo.so_expr_hess[hk as usize]
+                                hk = hk + 1
+                            }
+                        }
+                    }
+                    i = i + 1
+                    ac = &(*al).tail
+                }
+                None => { return (lo, 0 - 1) }
+            }
+        }
+        let saved_bind = *lo.fo_bind
+        let saved_bind_count = lo.fo_bind_count
+        let saved_hess_rows = (*lo.big).so_bind_hess
+        let saved_locals = (*lo.locals).count
+        lo.scope_depth = lo.scope_depth + 1
+        FO_INLINE_DEPTH = FO_INLINE_DEPTH + 1
+        FO_INLINE_COUNT = FO_INLINE_COUNT + 1
+        i = 0
+        while i < nparams {
+            let pname = params[i as usize]
+            lo = lo.bind_local(pname, vals[i as usize], false)
+            if isf[i as usize] == 1 {
+                lo = lo.bind_local_scalar_kind(pname, 2)
+                lo = lo.bind_local_variance_reg(pname, vars[i as usize])
+                var k2: i64 = 0
+                while k2 < 32 {
+                    lo.fo_expr_sens[k2 as usize] = sens[(i * 32 + k2) as usize]
+                    k2 = k2 + 1
+                }
+            } else {
+                lo = lo.bind_local_scalar_kind(pname, 1)
+                lo = lo.fo_clear_expr_sens()
+            }
+            lo = lo.fo_bind_local_sens(pname)
+            if lo.so_enabled {
+                var hrow: [i64; 36] = [0 - 1; 36]
+                if isf[i as usize] == 1 {
+                    var hk2: i64 = 0
+                    while hk2 < 36 {
+                        hrow[hk2 as usize] = hess[(i * 36 + hk2) as usize]
+                        hk2 = hk2 + 1
+                    }
+                }
+                lo = lo.so_set_local_hess_row(pname, hrow)
+            }
+            i = i + 1
+        }
+        let rp = lo.lower_expr_variance_ref(&body)
+        lo = rp.0
+        var result = rp.1
+        if result < 0 && lo.fo_expr_has_sens() {
+            let ep2 = lo.fo_emit_var_from_sens()
+            lo = ep2.0
+            result = ep2.1
+        }
+        var out_sens: [i64; 32] = [0 - 1; 32]
+        var k3: i64 = 0
+        while k3 < 32 {
+            out_sens[k3 as usize] = lo.fo_expr_sens[k3 as usize]
+            k3 = k3 + 1
+        }
+        let out_hess = lo.so_snapshot_expr_hess()
+        FO_INLINE_DEPTH = FO_INLINE_DEPTH - 1
+        lo.scope_depth = lo.scope_depth - 1
+        (*lo.locals).count = saved_locals
+        lo.fo_bind = Box::new(saved_bind)
+        lo.fo_bind_count = saved_bind_count
+        var bigr = lo.big
+        (*bigr).so_bind_hess = saved_hess_rows
+        lo.big = bigr
+        if result < 0 {
+            return (lo.fo_clear_expr_sens().so_clear_expr_hess(), 0 - 1)
+        }
+        lo = lo.fo_restore_expr_sens(out_sens)
+        var hk3: i64 = 0
+        while hk3 < 36 {
+            lo.so_expr_hess[hk3 as usize] = out_hess[hk3 as usize]
+            hk3 = hk3 + 1
+        }
+        (lo, result)
+    }
+
     fn fo_inline_call_variance(self, callee: Name, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let no_path: [Name; 8] = [ir_empty_name(); 8]
         self.fo_inline_call_variance_ex(callee, args, ir_empty_name(), false, no_path, 0)
@@ -17274,7 +17603,19 @@ impl Lowerer {
                         None => { is_last = true }
                     }
                     if st.kind == StmtKind::StmtLet && !is_last {
-                        if !lower_opt_expr_relower_safe(&st.expr) {
+                        var is_closure_let = false
+                        match st.expr {
+                            Some(cle) => {
+                                if (*cle).kind == ExprKind::ExprClosure { is_closure_let = true }
+                            }
+                            None => {}
+                        }
+                        if is_closure_let {
+                            let lp = lo.lower_let_stmt_ref(st, false)
+                            lo = lp.0
+                            last_let_name = st.name
+                            last_let_expr = st.expr
+                        } else if !lower_opt_expr_relower_safe(&st.expr) {
                             ok = false
                         } else {
                             let lp = lo.lower_let_stmt_ref(st, false)
@@ -17282,6 +17623,33 @@ impl Lowerer {
                             last_let_name = st.name
                             last_let_expr = st.expr
                         }
+                    } else if st.kind == StmtKind::StmtVar && !is_last {
+                        let vp = lo.lower_let_stmt_ref(st, true)
+                        lo = vp.0
+                    } else if st.kind == StmtKind::StmtAssign && !is_last {
+                        let ap = lo.lower_assign_stmt_ref(st)
+                        lo = ap.0
+                    } else if st.kind == StmtKind::StmtExpr && !is_last {
+                        var is_loop = false
+                        match st.expr {
+                            Some(we) => {
+                                if (*we).kind == ExprKind::ExprWhile {
+                                    is_loop = true
+                                    let wp = lo.lower_while_expr_ref(&(*we))
+                                    lo = wp.0
+                                } else if (*we).kind == ExprKind::ExprForIn {
+                                    is_loop = true
+                                    let fp = lo.lower_for_in_expr_ref(&(*we))
+                                    lo = fp.0
+                                } else if (*we).kind == ExprKind::ExprLoop {
+                                    is_loop = true
+                                    let lpw = lo.lower_loop_expr_ref(&(*we))
+                                    lo = lpw.0
+                                }
+                            }
+                            None => {}
+                        }
+                        if !is_loop { ok = false }
                     } else if st.kind == StmtKind::StmtExpr && is_last {
                         match st.expr {
                             Some(te0) => {
@@ -17642,6 +18010,159 @@ impl Lowerer {
     }
 
 
+    // The arm the scrutinee actually takes. Same join as a runtime `if`:
+    // each integer or bool arm is a branch, the rest of the arms are the
+    // other side, a wildcard is that side with no further test.
+    fn lower_match_variance_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if !fo_match_arms_variance_ok(&(*e).arms) {
+            return (self.fo_clear_expr_sens().so_clear_expr_hess(), 0 - 1)
+        }
+        let scrut_pair = self.lower_opt_expr_ref(&(*e).left)
+        scrut_pair.0.lower_match_chain_variance(scrut_pair.1, &(*e).arms)
+    }
+
+    fn lower_match_chain_variance(self, scrut: i64, arms: &Option<Box<MatchArmList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *arms {
+            None => {
+                return self.fo_clear_expr_sens().so_clear_expr_hess().emit_zero_variance()
+            }
+            Some(al) => {
+                let patk = (*al).head.pattern.kind
+                if patk == PatternKind::PatWildcard {
+                    return self.lower_if_arm_variance_ref(&(*al).head.body)
+                }
+                var lo = self
+                let pl1 = lo.fresh_label()
+                lo = pl1.0
+                let l_else = pl1.1
+                let pl2 = lo.fresh_label()
+                lo = pl2.0
+                let l_join = pl2.1
+                let pl3 = lo.fresh_label()
+                lo = pl3.0
+                let l_end = pl3.1
+                let nch0 = lo.fo_nchan
+                let reg0 = (*lo.current_func).reg_count
+                let trunc_saved = FO_INLINE_TRUNCATED
+                if patk == PatternKind::PatIntLit {
+                    let pair_d = lo.fresh_reg()
+                    lo = pair_d.0
+                    let lit_reg = pair_d.1
+                    lo = lo.emit(ir_load_imm(lit_reg, (*al).head.pattern.int_val))
+                    let pair_cmp = lo.fresh_reg()
+                    lo = pair_cmp.0
+                    let cmp_reg = pair_cmp.1
+                    lo = lo.emit(ir_binop(cmp_reg, scrut, BinaryOp::OpEq, lit_reg))
+                    lo = lo.emit(ir_branch_false(cmp_reg, l_else))
+                } else if patk == PatternKind::PatBoolTrue {
+                    lo = lo.emit(ir_branch_false(scrut, l_else))
+                } else if patk == PatternKind::PatBoolFalse {
+                    lo = lo.emit(ir_branch_true(scrut, l_else))
+                } else {
+                    return (lo.fo_clear_expr_sens().so_clear_expr_hess(), 0 - 1)
+                }
+                FO_INLINE_TRUNCATED = 0
+                lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+                let tp = lo.lower_if_arm_variance_ref(&(*al).head.body)
+                lo = tp.0
+                let t_var = tp.1
+                let t_trunc = FO_INLINE_TRUNCATED
+                let t_sens = lo.fo_snapshot_expr_sens()
+                let t_hess = lo.so_snapshot_expr_hess()
+                let nch_t = lo.fo_nchan
+                lo = lo.emit(ir_jump(l_join))
+                lo = lo.emit(ir_label(l_else))
+                FO_INLINE_TRUNCATED = 0
+                lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+                let ep = lo.lower_match_chain_variance(scrut, &(*al).tail)
+                lo = ep.0
+                let e_var = ep.1
+                let e_trunc = FO_INLINE_TRUNCATED
+                FO_INLINE_TRUNCATED = trunc_saved
+                let e_sens = lo.fo_snapshot_expr_sens()
+                let e_hess = lo.so_snapshot_expr_hess()
+                let nch_e = lo.fo_nchan
+                let mvp = lo.fresh_reg()
+                lo = mvp.0
+                let mv = mvp.1
+                var msens: [i64; 32] = [0 - 1; 32]
+                var k: i64 = 0
+                while k < 32 {
+                    if t_sens[k as usize] >= 0 || e_sens[k as usize] >= 0 {
+                        let rp = lo.fresh_reg()
+                        lo = rp.0
+                        msens[k as usize] = rp.1
+                    }
+                    k = k + 1
+                }
+                var mhess: [i64; 36] = [0 - 1; 36]
+                var h: i64 = 0
+                while h < 36 {
+                    if t_hess[h as usize] >= 0 || e_hess[h as usize] >= 0 {
+                        let rp = lo.fresh_reg()
+                        lo = rp.0
+                        mhess[h as usize] = rp.1
+                    }
+                    h = h + 1
+                }
+                var msig: [i64; 32] = [0 - 1; 32]
+                k = nch0
+                while k < nch_e && k < 32 {
+                    if lo.fo_sigma2[k as usize] >= reg0 {
+                        let rp = lo.fresh_reg()
+                        lo = rp.0
+                        msig[k as usize] = rp.1
+                    }
+                    k = k + 1
+                }
+                let poison = (t_trunc != 0 || e_trunc != 0) && nch_e < 32
+                var mpsig: i64 = 0 - 1
+                var mpsens: i64 = 0 - 1
+                if poison {
+                    let a = lo.fresh_reg()
+                    lo = a.0
+                    mpsig = a.1
+                    let b = lo.fresh_reg()
+                    lo = b.0
+                    mpsens = b.1
+                }
+                lo = lo.fo_if_merge_side(mv, e_var, e_trunc != 0, msens, e_sens, mhess, e_hess, msig, nch_t, nch_e, false, mpsig, mpsens)
+                lo = lo.emit(ir_jump(l_end))
+                lo = lo.emit(ir_label(l_join))
+                lo = lo.fo_if_merge_side(mv, t_var, t_trunc != 0, msens, t_sens, mhess, t_hess, msig, nch_t, nch_e, true, mpsig, mpsens)
+                lo = lo.emit(ir_label(l_end))
+                lo = lo.emit(ir_mark_float_reg(mv))
+                k = 0
+                while k < 32 {
+                    if msens[k as usize] >= 0 { lo = lo.emit(ir_mark_float_reg(msens[k as usize])) }
+                    if msig[k as usize] >= 0 {
+                        lo = lo.emit(ir_mark_float_reg(msig[k as usize]))
+                        lo.fo_sigma2[k as usize] = msig[k as usize]
+                        FO_SIGMA_REG[k as usize] = 0 - 1
+                    }
+                    lo.fo_expr_sens[k as usize] = msens[k as usize]
+                    k = k + 1
+                }
+                h = 0
+                while h < 36 {
+                    if mhess[h as usize] >= 0 { lo = lo.emit(ir_mark_float_reg(mhess[h as usize])) }
+                    lo.so_expr_hess[h as usize] = mhess[h as usize]
+                    h = h + 1
+                }
+                if poison {
+                    lo = lo.emit(ir_mark_float_reg(mpsig))
+                    lo = lo.emit(ir_mark_float_reg(mpsens))
+                    let pch = lo.fo_nchan
+                    lo.fo_sigma2[pch as usize] = mpsig
+                    FO_SIGMA_REG[pch as usize] = 0 - 1
+                    lo.fo_nchan = pch + 1
+                    lo.fo_expr_sens[pch as usize] = mpsens
+                }
+                (lo, mv)
+            }
+        }
+    }
+
     fn lower_call_expr_variance_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match (*e).left {
             Some(callee_expr) => {
@@ -17672,6 +18193,13 @@ impl Lowerer {
                 let inl = lo_x.fo_inline_call_variance(callee_name, &(*e).args)
                 if inl.1 >= 0 {
                     return inl
+                }
+                if (*callee_expr).kind == ExprKind::ExprIdent {
+                    let cv = inl.0.fo_closure_call_variance((*callee_expr).name, &(*e).args)
+                    if cv.1 >= 0 {
+                        return cv
+                    }
+                    return (cv.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                 }
                 return (inl.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
             }
@@ -17719,6 +18247,13 @@ impl Lowerer {
                     let inl = lo_x.fo_inline_call_variance(callee_name, &(*e).args)
                     if inl.1 >= 0 {
                         return inl
+                    }
+                    if (*callee_expr).kind == ExprKind::ExprIdent {
+                        let cv = inl.0.fo_closure_call_variance((*callee_expr).name, &(*e).args)
+                        if cv.1 >= 0 {
+                            return cv
+                        }
+                        return (cv.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                     }
                     return (inl.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                 }
@@ -17844,6 +18379,9 @@ impl Lowerer {
                 }
                 _ => {}
             }
+        }
+        if (*e).kind == ExprKind::ExprMatch {
+            return self.lower_match_variance_ref(e)
         }
         // Unary negation. Var(-x) = Var(x), but ∂(-x)/∂k = -∂x/∂k, so the variance
         // passes through unchanged while every live channel flips sign. Without this
@@ -23753,6 +24291,36 @@ impl Lowerer {
         }
         if bind_as_ref {
             lo = lo.bind_local_ref(s.name)
+            match s.expr {
+                Some(alias_rhs) => {
+                    if (*alias_rhs).kind == ExprKind::ExprIdent && rhs_ident_is_ref {
+                        if !ir_name_eq((*alias_rhs).name, s.name) {
+                            let src_base = fo_ref_alias_base((*alias_rhs).name)
+                            if src_base >= 0 {
+                                fo_ref_alias_note(s.name, src_base)
+                            }
+                        }
+                    } else if (*alias_rhs).kind == ExprKind::ExprUnary
+                        && ((*alias_rhs).un_op == UnaryOp::OpRef || (*alias_rhs).un_op == UnaryOp::OpRefMut) {
+                        match (*alias_rhs).left {
+                            Some(alias_tgt) => {
+                                if (*alias_tgt).kind == ExprKind::ExprIdent
+                                    && !ir_name_eq((*alias_tgt).name, s.name)
+                                    && !lo.lookup_local_is_ref((*alias_tgt).name) {
+                                    let tgt_base = lo.lookup_local((*alias_tgt).name)
+                                    let tgt_ty = lo.lookup_local_struct_type((*alias_tgt).name)
+                                    if tgt_base >= 0 && tgt_ty.len > 0
+                                        && lower_struct_layout_index_of(&(*lo.struct_layouts), tgt_ty) >= 0 {
+                                        fo_ref_alias_note(s.name, tgt_base)
+                                    }
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                None => {}
+            }
             // Record the pointee's named type, as parameters already do
             // (lower_param_struct_type_name), so `*r` used as an operand is typed
             // by deref_operand_pointee_kind_ref. Scalar pointees only: a struct
@@ -23868,6 +24436,14 @@ impl Lowerer {
         if lo.pending_closure_fn_id >= 0 {
             lo = lo.bind_local_closure_fn_id(s.name, lo.pending_closure_fn_id)
             lo.pending_closure_fn_id = -1
+        }
+        match s.expr {
+            Some(cl_rhs) => {
+                if (*cl_rhs).kind == ExprKind::ExprClosure {
+                    fo_closure_note(s.name, &(*cl_rhs))
+                }
+            }
+            None => {}
         }
         // #1706: `let pk2 = pk` on an aggregate gives pk2 its own reg, so the field
         // slots recorded under pk's reg are invisible through pk2. Copy the mapping
