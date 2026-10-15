@@ -239,9 +239,10 @@ struct CaptureList {
     names: [Name; 8],
     regs: [i64; 8],
     count: i64,
+    overflow: bool,
 }
 fn empty_capture_list() -> CaptureList {
-    CaptureList { names: [ir_empty_name(); 8], regs: [IR_INVALID_REG; 8], count: 0 }
+    CaptureList { names: [ir_empty_name(); 8], regs: [IR_INVALID_REG; 8], count: 0, overflow: false }
 }
 fn capture_list_add(caps: CaptureList, name: Name, reg: i64) -> CaptureList with Mut, Panic, Div {
     var c = caps
@@ -255,6 +256,8 @@ fn capture_list_add(caps: CaptureList, name: Name, reg: i64) -> CaptureList with
         c.names[idx as usize] = name
         c.regs[idx as usize] = reg
         c.count = idx + 1
+    } else {
+        c.overflow = true
     }
     c
 }
@@ -6954,6 +6957,18 @@ fn lowerer_lower_fn_params_mut(
                 if lower_type_expr_is_array_of_f64(&(*list).head.ty) {
                     lowerer_mark_local_array_elem_float_mut(lo, (*list).head.name)
                 }
+                let float_array_depth = lower_type_float_array_depth(&(*list).head.ty)
+                if float_array_depth > 1 {
+                    var locals_box = (*lo).locals
+                    var local_i = (*locals_box).count - 1
+                    while local_i >= 0 {
+                        if ir_name_eq((*(*locals_box).names).values[local_i as usize], (*list).head.name) {
+                            (*(*locals_box).array_elem_float).values[local_i as usize] = float_array_depth
+                            break
+                        }
+                        local_i = local_i - 1
+                    }
+                }
                 current = &(*list).tail
             }
             _ => break
@@ -8878,11 +8893,59 @@ fn lower_opt_type_is_tuple_of_all_f64(opt: &Option<Box<TypeExpr>>) -> bool with 
     }
 }
 
+// Preserve rank, not just a boolean: indexing a matrix produces an array,
+// whereas indexing its row produces a scalar f64. References do not add rank.
+var LOWER_NATIVE_CLOSURE_ENVS: bool = false
+
+pub fn lower_swap_native_closure_envs(enabled: bool) -> bool with Mut {
+    let previous = LOWER_NATIVE_CLOSURE_ENVS
+    LOWER_NATIVE_CLOSURE_ENVS = enabled
+    previous
+}
+
+fn lower_type_float_array_depth(te: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeReference || (*te).kind == TypeExprKind::TypeRefMut {
+        match (*te).inner {
+            Some(inner) => return lower_type_float_array_depth(&(*inner)),
+            None => return 0,
+        }
+    }
+    if lower_type_expr_is_array_of_f64(te) { return 1 }
+    if (*te).kind == TypeExprKind::TypeArray {
+        match (*te).inner {
+            Some(inner) => {
+                let depth = lower_type_float_array_depth(&(*inner))
+                if depth > 0 && depth < 1022 { return depth + 1 }
+            }
+            None => {}
+        }
+    }
+    0
+}
+
+fn lower_opt_float_array_depth(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_float_array_depth(&(*te)),
+        None => 0,
+    }
+}
+
 fn lower_opt_return_float_code(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => {
+            // Function value, not scalar f64: retain its result kind so a local
+            // bound to a factory call can type an eventual indirect call.
+            if lower_type_expr_fn_returns_f64(&(*te)) { return -2 }
+        }
+        None => {}
+    }
     if lower_opt_type_is_f64(opt) {
         1
     } else if lower_opt_type_is_array_of_f64(opt) || lower_opt_type_is_tuple_of_all_f64(opt) {
         2
+    } else if lower_opt_float_array_depth(opt) > 1 {
+        // 3..1023 were unused; keep scalar/flat/tuple-mask encodings intact.
+        lower_opt_float_array_depth(opt) + 1
     // 1024+mask keeps every existing consumer (all of which test == 1 or == 2)
     // inert while carrying per-slot float-ness for tuple returns.
     //
@@ -9882,7 +9945,7 @@ fn fo_block_has_unsupported_ctl(blk_opt: &Option<Box<Block>>, depth: i64) -> boo
 
 // #1706: a helper registered for inline FO declares no IO/Mut/Alloc effect
 // (fo_inline_note), so calling it twice is as safe as a pure math builtin.
-fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
+fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64, expand_calls: bool) -> i64 with Mut, Panic, Div, Alloc {
     if depth > 32 { return 100 }
     var n: i64 = 0
     var cur = opt
@@ -9891,10 +9954,11 @@ fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64) -> i64 with Mut
             Some(sl) => {
                 n = n + 1
                 match (*sl).head.expr {
-                    Some(ex) => { n = n + fo_nested_expr_stmts(&(*ex), depth + 1) }
+                    Some(ex) => { n = n + fo_nested_expr_stmts(&(*ex), depth + 1, expand_calls) }
                     None => {}
                 }
                 cur = &(*sl).tail
+                if n > 24 { return n }
             }
             None => break
         }
@@ -9902,24 +9966,24 @@ fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64) -> i64 with Mut
     n
 }
 
-fn fo_nested_block_stmts(blk: &Option<Box<Block>>, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
+fn fo_nested_block_stmts(blk: &Option<Box<Block>>, depth: i64, expand_calls: bool) -> i64 with Mut, Panic, Div, Alloc {
     match *blk {
-        Some(b) => fo_nested_stmt_count(&(*b).stmts, depth),
+        Some(b) => fo_nested_stmt_count(&(*b).stmts, depth, expand_calls),
         None => 0,
     }
 }
 
-fn fo_nested_expr_stmts(e: &Expr, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
+fn fo_nested_expr_stmts(e: &Expr, depth: i64, expand_calls: bool) -> i64 with Mut, Panic, Div, Alloc {
     if depth > 32 { return 100 }
     let k = (*e).kind
     var n: i64 = 0
     if k == ExprKind::ExprWhile || k == ExprKind::ExprLoop || k == ExprKind::ExprForIn
         || k == ExprKind::ExprBlock || k == ExprKind::ExprIf {
-        n = n + fo_nested_block_stmts(&(*e).block, depth + 1)
+        n = n + fo_nested_block_stmts(&(*e).block, depth + 1, expand_calls)
     }
     if k == ExprKind::ExprIf {
         match (*e).else_expr {
-            Some(ee) => { n = n + fo_nested_expr_stmts(&(*ee), depth + 1) }
+            Some(ee) => { n = n + fo_nested_expr_stmts(&(*ee), depth + 1, expand_calls) }
             None => {}
         }
     }
@@ -9929,7 +9993,8 @@ fn fo_nested_expr_stmts(e: &Expr, depth: i64) -> i64 with Mut, Panic, Div, Alloc
             match *ac {
                 Some(al) => {
                     n = n + 1
-                    n = n + fo_nested_expr_stmts(&(*al).head.body, depth + 1)
+                    n = n + fo_nested_expr_stmts(&(*al).head.body, depth + 1, expand_calls)
+                    if n > 24 { return n }
                     ac = &(*al).tail
                 }
                 None => break
@@ -9938,8 +10003,67 @@ fn fo_nested_expr_stmts(e: &Expr, depth: i64) -> i64 with Mut, Panic, Div, Alloc
     }
     if k == ExprKind::ExprClosure {
         match (*e).closure_body {
-            Some(cb) => { n = n + fo_nested_expr_stmts(&(*cb), depth + 1) }
+            Some(cb) => { n = n + fo_nested_expr_stmts(&(*cb), depth + 1, expand_calls) }
             None => {}
+        }
+    }
+    // A projected struct result is re-lowered once per requested field. Count
+    // the helpers expanded beneath it too: a short RK4 wrapper can otherwise
+    // paste thousands of instructions at every field read. Saturate at the
+    // existing statement budget; no IR capacity or refusal rule is relaxed.
+    if expand_calls {
+        if n > 24 { return n }
+        if k == ExprKind::ExprCall {
+            match (*e).left {
+                Some(ce) => {
+                    if (*ce).kind == ExprKind::ExprIdent {
+                        let id = ir_intern_name((*ce).name)
+                        var cur = FO_INLINE_HEAD
+                        while true {
+                            match cur {
+                                Some(node) => {
+                                    if (*node).id == id {
+                                        n = n + fo_nested_stmt_count(&(*node).def.body.stmts, depth + 1, true)
+                                        break
+                                    }
+                                    cur = (*node).next
+                                }
+                                None => break
+                            }
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        match (*e).left {
+            Some(l) => { n = n + fo_nested_expr_stmts(&(*l), depth + 1, true) }
+            None => {}
+        }
+        if n > 24 { return n }
+        match (*e).right {
+            Some(r) => { n = n + fo_nested_expr_stmts(&(*r), depth + 1, true) }
+            None => {}
+        }
+        var args = &(*e).args
+        while n <= 24 {
+            match *args {
+                Some(a) => {
+                    n = n + fo_nested_expr_stmts(&(*a).head, depth + 1, true)
+                    args = &(*a).tail
+                }
+                None => break
+            }
+        }
+        var fields = &(*e).fields
+        while n <= 24 {
+            match *fields {
+                Some(f) => {
+                    n = n + fo_nested_expr_stmts(&(*f).head.value, depth + 1, true)
+                    fields = &(*f).tail
+                }
+                None => break
+            }
         }
     }
     n
@@ -11798,7 +11922,12 @@ impl Lowerer {
 
         let pair_value = lo.lower_expr_ref(value_expr)
         lo = pair_value.0
-        let value_reg = pair_value.1
+        var value_reg = pair_value.1
+        if (*value_expr).kind == ExprKind::ExprIdent {
+            let copied = lo.emit_ident_aggregate_value_copy((*value_expr).name, value_reg)
+            lo = copied.0
+            value_reg = copied.1
+        }
         lo = lo.emit(ir_index_set(base_reg, idx_reg, value_reg))
 
         let pair_next = lo.fresh_reg()
@@ -11885,7 +12014,18 @@ impl Lowerer {
                 // every element aliases one object. repeat_count <= 0 keeps the
                 // legacy path so the value expression is still lowered exactly
                 // as before for empty arrays.
-                if repeat_count > 0 && lo.expr_is_aggregate_value_ref(&(*value_expr)) {
+                var distinct = lo.expr_is_aggregate_value_ref(&(*value_expr))
+                if (*value_expr).kind == ExprKind::ExprIdent {
+                    let name = (*value_expr).name
+                    let struct_name = lo.ident_value_struct_type(name)
+                    if lo.struct_local_is_value_copyable(name, struct_name) {
+                        distinct = true
+                    }
+                    if lo.lookup_local_fixed_array_len(name) >= 0 && lo.lookup_local_array_copy_word_scalar(name) {
+                        distinct = true
+                    }
+                }
+                if repeat_count > 0 && distinct {
                     lo = lo.lower_array_repeat_fill_distinct(dst, &(*value_expr), repeat_count)
                 } else {
                     let zero_fill = lo.expr_is_zero_fill_value(*value_expr)
@@ -12402,12 +12542,16 @@ impl Lowerer {
     }
 
     fn bind_local_array_elem_float(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        self.bind_local_float_array_depth(name, 1)
+    }
+
+    fn bind_local_float_array_depth(self, name: Name, depth: i64) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
         var stk = lo.locals
         var i = (*stk).count - 1
         while i >= 0 {
             if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
-                (*(*stk).array_elem_float).values[i as usize] = 1
+                (*(*stk).array_elem_float).values[i as usize] = depth
                 lo.locals = stk
                 return lo
             }
@@ -17400,7 +17544,7 @@ impl Lowerer {
         // inside it: one loop header with a large body is not a small helper.
         // lex_source_to_globals crossed IR_MAX_INSTRS when those bodies were
         // pasted in. Small helpers stay inline.
-        let nstmt = fo_nested_stmt_count(&fd.body.stmts, 0)
+        let nstmt = fo_nested_stmt_count(&fd.body.stmts, 0, npath > 0)
         if nstmt > 24 { return (lo, 0 - 1) }
         // An f64 return answers a plain call; a struct return answers a field path.
         match fd.return_type {
@@ -19985,6 +20129,9 @@ impl Lowerer {
     fn index_base_elem_is_float_ref(self, base_opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprIndex {
+                    return self.expr_float_array_depth_ref(&(*base_expr)) == 1
+                }
                 if (*base_expr).kind == ExprKind::ExprIdent {
                     if self.lookup_local_array_elem_float((*base_expr).name) {
                         return true
@@ -23403,6 +23550,9 @@ impl Lowerer {
     // needed for tuple-literal slots like `(obj.mk_arr(), 0)` where the slot
     // itself is a single [f64; N] array, not a tuple.
     fn expr_result_is_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIndex {
+            return self.expr_float_array_depth_ref(e) == 1
+        }
         // Copilot review (PR #2516), round 11 finding 2: round 10's
         // ExprIf/ExprMatch/ExprBlock propagation below recurses into each
         // arm/block-tail through THIS function, but this function only ever
@@ -24701,6 +24851,87 @@ impl Lowerer {
         }
     }
 
+    fn expr_float_array_depth_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIdent {
+            var i = (*self.locals).count - 1
+            while i >= 0 {
+                if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], (*e).name) {
+                    return (*(*self.locals).array_elem_float).values[i as usize]
+                }
+                i = i - 1
+            }
+            return 0
+        }
+        if (*e).kind == ExprKind::ExprIndex || ((*e).kind == ExprKind::ExprUnary && ((*e).un_op == UnaryOp::OpDeref || (*e).un_op == UnaryOp::OpRef || (*e).un_op == UnaryOp::OpRefMut)) {
+            match (*e).left {
+                Some(base) => {
+                    let depth = self.expr_float_array_depth_ref(&(*base))
+                    if (*e).kind == ExprKind::ExprIndex {
+                        if depth > 0 { return depth - 1 }
+                        return 0
+                    }
+                    return depth
+                }
+                None => return 0,
+            }
+        }
+        if (*e).kind == ExprKind::ExprArrayLit {
+            if self.array_literal_elems_are_float_ref(e) { return 1 }
+            match (*e).left {
+                Some(repeated) => {
+                    let depth = self.expr_float_array_depth_ref(&(*repeated))
+                    if depth > 0 { return depth + 1 }
+                }
+                None => {
+                    match (*e).args {
+                        Some(items) => {
+                            let depth = self.expr_float_array_depth_ref(&(*items).head)
+                            if depth > 0 { return depth + 1 }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            return 0
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee) => {
+                    let name = self.expr_to_callee_name_ref(&(*callee))
+                    let id = lowerer_lookup_fn_id_by_name_ref(&self, name)
+                    if id >= 0 && id < self.module.fn_count {
+                        let code = ir_fn_get(&(*self.module), id as usize).returns_float
+                        if code >= 2 && code < 1024 { return code - 1 }
+                    }
+                }
+                None => {}
+            }
+        }
+        0
+    }
+
+    fn expr_fn_value_returns_float_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIdent {
+            if self.lookup_local_fn_ptr_ret_float((*e).name) { return true }
+            let id = lowerer_lookup_fn_id_by_name_ref(&self, (*e).name)
+            if id >= 0 && id < self.module.fn_count { return ir_fn_get(&(*self.module), id as usize).returns_float == 1 }
+        }
+        if (*e).kind == ExprKind::ExprClosure {
+            return lower_opt_type_is_f64(&(*e).closure_return)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee) => {
+                    let name = self.expr_to_callee_name_ref(&(*callee))
+                    let id = lowerer_lookup_fn_id_by_name_ref(&self, name)
+                    if id >= 0 && id < self.module.fn_count { return ir_fn_get(&(*self.module), id as usize).returns_float == -2 }
+                }
+                None => {}
+            }
+        }
+        false
+    }
+
     fn lower_let_stmt_type_metadata_ref(
         self,
         s: &Stmt,
@@ -24708,6 +24939,28 @@ impl Lowerer {
         rhs_array_elem_is_float: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        var fn_result_float = false
+        match s.ty {
+            Some(ty) => { fn_result_float = lower_type_expr_fn_returns_f64(&(*ty)) }
+            None => {}
+        }
+        match s.expr {
+            Some(rhs) => {
+                if lo.expr_fn_value_returns_float_ref(&(*rhs)) { fn_result_float = true }
+            }
+            None => {}
+        }
+        if fn_result_float { lowerer_mark_local_fn_ptr_ret_float_mut(&!lo, s.name) }
+        var float_array_depth = lower_opt_float_array_depth(&s.ty)
+        if float_array_depth == 0 {
+            match s.expr {
+                Some(rhs) => { float_array_depth = lo.expr_float_array_depth_ref(&(*rhs)) }
+                None => {}
+            }
+        }
+        if float_array_depth > 0 {
+            lo = lo.bind_local_float_array_depth(s.name, float_array_depth)
+        }
         // V0-E.5.7: `let r: &[f128; N] = &xs` — a reference to an f128 array (the
         // TypeArray form never reaches here: lower_let_stmt_f128_array_ref), and
         // `[f256; N]` / `&[f256; N]` annotations, whose elements must then fail
@@ -31258,7 +31511,7 @@ impl Lowerer {
                             let pair_s = self.fresh_reg()
                             var lo = pair_s.0
                             let src = pair_s.1
-                            lo = lo.emit(ir_load_imm(src, adjusted))
+                            lo = lo.emit(ir_load_bss_address(src, adjusted))
                             let pair_d = lo.fresh_reg()
                             lo = pair_d.0
                             let dst = pair_d.1
@@ -33072,7 +33325,7 @@ impl Lowerer {
                         // Multi-word, packed byte arrays (#1353), and any array kind
                         // including `[T; 1]` (#1350) must not take the scalar load path.
                         if lower_bss_slot_is_aggregate(gsize, hyper_kind) || lower_global_kind_is_array_base(global_elem_kind) {
-                            lo3 = lo2.emit(ir_load_imm(ref_reg, BSS_BASE_LINUX + bss_off))
+                            lo3 = lo2.emit(ir_load_bss_address(ref_reg, BSS_BASE_LINUX + bss_off))
                         } else {
                             lo3 = lo2.emit(ir_load_global(ref_reg, bss_off, e.name))
                         }
@@ -33450,6 +33703,7 @@ impl Lowerer {
         // rather than acquiring a new failure mode. Escaping captures need a real
         // environment -- the "captures are TBD (Phase 2)" case (#1542).
         var captures = empty_capture_list()
+        var heap_environment = false
         if saved_allow_direct_capture {
             captures = lo.scan_captures_opt(&e.closure_body, &e.closure_params, captures)
         } else {
@@ -33457,7 +33711,10 @@ impl Lowerer {
             // (`apply2(|x, y| x * y + bias, 5, 6)` gave 30, not 130). Refuse.
             var escaping = empty_capture_list()
             escaping = lo.scan_captures_opt(&e.closure_body, &e.closure_params, escaping)
-            if escaping.count > 0 {
+            if escaping.count > 0 && LOWER_NATIVE_CLOSURE_ENVS {
+                captures = escaping
+                heap_environment = true
+            } else if escaping.count > 0 {
                 print("error: a capturing closure is passed where Madaros cannot supply its captured values (a fn value, or a higher-order function that is not a single direct `f(args)` forward); the capture would read as 0 -- pass the captured value as a parameter or bind the closure and call it directly (fail-closed, #1542)\n")
                 // Hard error: report_fatal_lowering_error alone does not stop the
                 // build (the module is replaced and an ELF with a ud2 stub is
@@ -33473,12 +33730,30 @@ impl Lowerer {
                 return loe.emit_unit()
             }
         }
+        if captures.overflow {
+            print("error: closure capture capacity exceeded; refusing to discard captured values\n")
+            var loe = lo
+            if IR_LOWER_HARD_ERROR_REASON == 0 {
+                IR_LOWER_HARD_ERROR_REASON = 9
+                IR_LOWER_HARD_ERROR_NEEDED = 9
+                IR_LOWER_HARD_ERROR_LIMIT = 8
+                ir_copy_name_to_flat(&(*saved_func).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+            }
+            lowerer_mark_hard_error(&! loe)
+            return loe.emit_unit()
+        }
         if captures.count > 0 {
-            if !lo.allow_direct_capturing_closure_literal {
+            if !lo.allow_direct_capturing_closure_literal && !heap_environment {
                 print("error: native-v2 capturing closure literals are not yet supported as values; bind and call directly, use a named function, or use a noncapturing closure\n")
                 let loe = lo.report_fatal_lowering_error()
                 return loe.emit_unit()
             }
+        }
+        var capture_float: [bool; 8] = [false; 8]
+        var float_ci: i64 = 0
+        while float_ci < captures.count {
+            capture_float[float_ci as usize] = lo.lookup_local_scalar_kind(captures.names[float_ci as usize]) == 2
+            float_ci = float_ci + 1
         }
 
         // 3. Switch to the closure function context. current_func_loaded MUST be true so
@@ -33497,6 +33772,7 @@ impl Lowerer {
         // to a refused build on any Madaros built after the arena landing.
         if (*lo.current_func).region.slot < 0 { ir_function_alloc_region(&! (*lo.current_func)) }
         (*lo.current_func).name = closure_name
+        (*lo.current_func).returns_float = lower_opt_return_float_code(&e.closure_return)
         lo.current_func_loaded = true
         lo.locals = lowerer_box_empty_locals()
         lo.scope_depth = 0
@@ -33512,18 +33788,34 @@ impl Lowerer {
         // free `k` resolves to a param (not 0). The captured enclosing regs themselves are
         // injected at the call site; here we only allocate param regs + bind the names.
         var ci: i64 = 0
+        var environment_param: i64 = IR_INVALID_REG
+        if heap_environment {
+            let env_pair = lo.fresh_reg()
+            lo = env_pair.0
+            environment_param = env_pair.1
+            var env_func = lo.current_func
+            (*env_func).param_regs[0] = environment_param
+            (*env_func).param_count = 1
+            lo.current_func = env_func
+        }
         while ci < captures.count {
             let cap_pair = lo.fresh_reg()
             lo = cap_pair.0
             let cap_preg = cap_pair.1
             var cf_box_cap = lo.current_func
-            if (*cf_box_cap).param_count < IR_MAX_PARAMS {
+            if heap_environment {
+                lo = lo.emit(ir_field_get(cap_preg, environment_param, ci + 1, ir_empty_name()))
+            } else if (*cf_box_cap).param_count < IR_MAX_PARAMS {
                 let pcc = (*cf_box_cap).param_count
                 (*cf_box_cap).param_regs[pcc as usize] = cap_preg
                 (*cf_box_cap).param_count = pcc + 1
             }
             lo.current_func = cf_box_cap
             lo = lo.bind_local(captures.names[ci as usize], cap_preg, false)
+            if capture_float[ci as usize] {
+                lo = lo.emit(ir_mark_float_reg(cap_preg))
+                lo = lo.bind_local_scalar_kind(captures.names[ci as usize], 2)
+            }
             ci = ci + 1
         }
 
@@ -33591,7 +33883,7 @@ impl Lowerer {
         // 8b. For a capturing closure, record the captured ENCLOSING regs keyed by fn_id and
         // flag the pending closure so the let-binding marks its local. (Zero-capture closures
         // stay bare fn-refs — unchanged from #418.) Extract the Box to a local first.
-        if captures.count > 0 {
+        if captures.count > 0 && !heap_environment {
             lo = lo.record_closure_caps(closure_fn_id, captures)
             lo.pending_closure_fn_id = closure_fn_id
         }
@@ -33601,6 +33893,27 @@ impl Lowerer {
         lo = ref_pair.0
         let ref_reg = ref_pair.1
         lo = lo.emit(ir_load_fn_ref(ref_reg, closure_fn_id))
+        if heap_environment {
+            // Descriptor payload: code pointer, then immutable captured words.
+            // The odd pointer tag is disjoint from aligned instruction addresses.
+            let env_pair = lo.fresh_reg()
+            lo = env_pair.0
+            let env_reg = env_pair.1
+            lo = lo.emit(ir_alloc(env_reg, lo.aggregate_storage_bytes(captures.count + 1)))
+            lo = lo.emit(ir_field_set(env_reg, 0, ref_reg, ir_empty_name()))
+            var cap_i: i64 = 0
+            while cap_i < captures.count {
+                lo = lo.emit(ir_field_set(env_reg, cap_i + 1, captures.regs[cap_i as usize], ir_empty_name()))
+                cap_i = cap_i + 1
+            }
+            let tag_pair = lo.fresh_reg()
+            lo = tag_pair.0
+            lo = lo.emit(ir_load_imm(tag_pair.1, 1))
+            let tagged_pair = lo.fresh_reg()
+            lo = tagged_pair.0
+            lo = lo.emit(ir_binop(tagged_pair.1, env_reg, BinaryOp::OpBitOr, tag_pair.1))
+            return (lo, tagged_pair.1)
+        }
         (lo, ref_reg)
     }
 
@@ -34315,7 +34628,10 @@ pub fn lower_program_bodies_from_summary_with_epistemic_boxed_owned(
     epistemic: &IrEpistemicSection
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
     var lo = lowerer_new_from_program_summary_owned(summary, epistemic)
-    lowerer_lower_program_bodies_mut(&! lo, &prog.items)
+    // Own the small list handle before borrowing it. A borrow of the field
+    // through the Program reference must not become a borrow of its contents.
+    let body_items = (*prog).items
+    lowerer_lower_program_bodies_mut(&! lo, &body_items)
     var patch_stats = ir_empty_validated_patch_stats()
     if lower_ok_without_hard(lo.had_error) {
         var module_box = lo.module
