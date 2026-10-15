@@ -9945,7 +9945,7 @@ fn fo_block_has_unsupported_ctl(blk_opt: &Option<Box<Block>>, depth: i64) -> boo
 
 // #1706: a helper registered for inline FO declares no IO/Mut/Alloc effect
 // (fo_inline_note), so calling it twice is as safe as a pure math builtin.
-fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
+fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64, expand_calls: bool) -> i64 with Mut, Panic, Div, Alloc {
     if depth > 32 { return 100 }
     var n: i64 = 0
     var cur = opt
@@ -9954,10 +9954,11 @@ fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64) -> i64 with Mut
             Some(sl) => {
                 n = n + 1
                 match (*sl).head.expr {
-                    Some(ex) => { n = n + fo_nested_expr_stmts(&(*ex), depth + 1) }
+                    Some(ex) => { n = n + fo_nested_expr_stmts(&(*ex), depth + 1, expand_calls) }
                     None => {}
                 }
                 cur = &(*sl).tail
+                if n > 24 { return n }
             }
             None => break
         }
@@ -9965,24 +9966,24 @@ fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64) -> i64 with Mut
     n
 }
 
-fn fo_nested_block_stmts(blk: &Option<Box<Block>>, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
+fn fo_nested_block_stmts(blk: &Option<Box<Block>>, depth: i64, expand_calls: bool) -> i64 with Mut, Panic, Div, Alloc {
     match *blk {
-        Some(b) => fo_nested_stmt_count(&(*b).stmts, depth),
+        Some(b) => fo_nested_stmt_count(&(*b).stmts, depth, expand_calls),
         None => 0,
     }
 }
 
-fn fo_nested_expr_stmts(e: &Expr, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
+fn fo_nested_expr_stmts(e: &Expr, depth: i64, expand_calls: bool) -> i64 with Mut, Panic, Div, Alloc {
     if depth > 32 { return 100 }
     let k = (*e).kind
     var n: i64 = 0
     if k == ExprKind::ExprWhile || k == ExprKind::ExprLoop || k == ExprKind::ExprForIn
         || k == ExprKind::ExprBlock || k == ExprKind::ExprIf {
-        n = n + fo_nested_block_stmts(&(*e).block, depth + 1)
+        n = n + fo_nested_block_stmts(&(*e).block, depth + 1, expand_calls)
     }
     if k == ExprKind::ExprIf {
         match (*e).else_expr {
-            Some(ee) => { n = n + fo_nested_expr_stmts(&(*ee), depth + 1) }
+            Some(ee) => { n = n + fo_nested_expr_stmts(&(*ee), depth + 1, expand_calls) }
             None => {}
         }
     }
@@ -9992,7 +9993,8 @@ fn fo_nested_expr_stmts(e: &Expr, depth: i64) -> i64 with Mut, Panic, Div, Alloc
             match *ac {
                 Some(al) => {
                     n = n + 1
-                    n = n + fo_nested_expr_stmts(&(*al).head.body, depth + 1)
+                    n = n + fo_nested_expr_stmts(&(*al).head.body, depth + 1, expand_calls)
+                    if n > 24 { return n }
                     ac = &(*al).tail
                 }
                 None => break
@@ -10001,8 +10003,67 @@ fn fo_nested_expr_stmts(e: &Expr, depth: i64) -> i64 with Mut, Panic, Div, Alloc
     }
     if k == ExprKind::ExprClosure {
         match (*e).closure_body {
-            Some(cb) => { n = n + fo_nested_expr_stmts(&(*cb), depth + 1) }
+            Some(cb) => { n = n + fo_nested_expr_stmts(&(*cb), depth + 1, expand_calls) }
             None => {}
+        }
+    }
+    // A projected struct result is re-lowered once per requested field. Count
+    // the helpers expanded beneath it too: a short RK4 wrapper can otherwise
+    // paste thousands of instructions at every field read. Saturate at the
+    // existing statement budget; no IR capacity or refusal rule is relaxed.
+    if expand_calls {
+        if n > 24 { return n }
+        if k == ExprKind::ExprCall {
+            match (*e).left {
+                Some(ce) => {
+                    if (*ce).kind == ExprKind::ExprIdent {
+                        let id = ir_intern_name((*ce).name)
+                        var cur = FO_INLINE_HEAD
+                        while true {
+                            match cur {
+                                Some(node) => {
+                                    if (*node).id == id {
+                                        n = n + fo_nested_stmt_count(&(*node).def.body.stmts, depth + 1, true)
+                                        break
+                                    }
+                                    cur = (*node).next
+                                }
+                                None => break
+                            }
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        match (*e).left {
+            Some(l) => { n = n + fo_nested_expr_stmts(&(*l), depth + 1, true) }
+            None => {}
+        }
+        if n > 24 { return n }
+        match (*e).right {
+            Some(r) => { n = n + fo_nested_expr_stmts(&(*r), depth + 1, true) }
+            None => {}
+        }
+        var args = &(*e).args
+        while n <= 24 {
+            match *args {
+                Some(a) => {
+                    n = n + fo_nested_expr_stmts(&(*a).head, depth + 1, true)
+                    args = &(*a).tail
+                }
+                None => break
+            }
+        }
+        var fields = &(*e).fields
+        while n <= 24 {
+            match *fields {
+                Some(f) => {
+                    n = n + fo_nested_expr_stmts(&(*f).head.value, depth + 1, true)
+                    fields = &(*f).tail
+                }
+                None => break
+            }
         }
     }
     n
@@ -17483,7 +17544,7 @@ impl Lowerer {
         // inside it: one loop header with a large body is not a small helper.
         // lex_source_to_globals crossed IR_MAX_INSTRS when those bodies were
         // pasted in. Small helpers stay inline.
-        let nstmt = fo_nested_stmt_count(&fd.body.stmts, 0)
+        let nstmt = fo_nested_stmt_count(&fd.body.stmts, 0, npath > 0)
         if nstmt > 24 { return (lo, 0 - 1) }
         // An f64 return answers a plain call; a struct return answers a field path.
         match fd.return_type {

@@ -27,7 +27,9 @@ echo 'PASS negative: missing timeout refused before compiler build'
 for test in a64_tuple_call_snapshot a64_box_large_field_table \
     a64_array_element_borrow madaros_nested_float_array_rank \
     madaros_generic_hof_scalar_inference madaros_measure_literal_variance_bound \
-    madaros_escaping_float_closure madaros_measure_variance_joins; do
+    madaros_escaping_float_closure madaros_measure_variance_joins \
+    rapamycin_epistemic_pbpk gum_fo_closure_call gum_fo_for_loop_call \
+    gum_fo_match_call gum_fo_ref_local_field gum_fo_while_call; do
     source_path="tests/run-pass/$test.sio"
     timeout 90 "$COMPILER" build "$source_path" --target aarch64-macos -o "$WORK/$test" > "$WORK/$test.build.log" 2>&1
     chmod +x "$WORK/$test"

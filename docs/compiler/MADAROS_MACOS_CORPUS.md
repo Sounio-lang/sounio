@@ -41,6 +41,35 @@ is useful when correcting harness interpretation, not to validate a new compiler
 Replay also refuses changed fixture source, before opening any result receipt.
 Fresh runs refuse to overwrite an existing result directory.
 
+## Main-integration regression, 2026-10-15
+
+The merge-queue run `38776296357`, integration commit
+`9d99a9a817da9c353a2879da3dcb2ef3918475f8`, must not be conflated with the
+earlier successful corrected-corpus run: it reported 199 passes and one compile
+failure, `rapamycin_epistemic_pbpk.sio`. All selected GPU members passed.
+This is a different failure from the original, uncorrected
+`epistemic_subsumption.sio` baseline.
+
+A native rebuild integrating main `9b5dba8b3f09a952802cebf68f7ab700f3ab88b4`
+reproduced the PBPK refusal: `simulate_epistemic_rp3` requested 33981 IR
+instructions, exceeding `IR_MAX_INSTRS=16384`. The struct-field variance
+projection copied a short helper's transitive call tree repeatedly. The
+existing 24-statement guard now includes transitive helper costs for these
+projections, without raising IR capacity or changing the scalar-call policy.
+
+The rebuilt native candidate, signed SHA-256
+`040e5358124fd410728c226a79022c1581f1454c899e04d7e9d8ccb409321378`,
+passed native acceptance and the extended port regression gate. That gate
+fails on PBPK before the fix and passes afterward, and also executes main's
+five new first-order call/closure/loop/reference fixtures. This focused result
+does not replace a fresh complete corpus or post-merge CI result.
+
+Failed corpus members now print their build/run return codes and logs into
+the CI console. A deliberate invalid-compiler control fails the diagnostics
+gate with the previous harness and passes with the new harness; it cannot
+turn an actual corpus failure into a pass. Generated binaries and receipts
+remain outside version control.
+
 ## Baseline, 2026-10-15
 
 Signed native Madaros SHA-256:

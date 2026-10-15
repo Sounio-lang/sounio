@@ -131,6 +131,13 @@ int main(int argc,char** argv) {
             std::lock_guard guard(lock); totals[status]++;
             results<<name<<'\t'<<status<<'\t'<<cr<<'\t'<<rr<<'\t'<<(contains.empty()?"exit-only":"contains")<<'\n'; results.flush();
             std::cout<<i+1<<'/'<<names.size()<<' '<<name<<' '<<status<<std::endl;
+            if(status!="pass") {
+                std::cerr<<"FAIL "<<name<<" status="<<status<<" compile_rc="<<cr<<" run_rc="<<rr<<'\n';
+                for(const auto* log:{"build.log","sign.log","stdout.log","stderr.log"}) {
+                    const auto text=read(dir/log);
+                    if(!text.empty()) std::cerr<<"--- "<<name<<'/'<<log<<" ---\n"<<text<<'\n';
+                }
+            }
         }
     });
     for(auto& t:workers)t.join(); std::ofstream summary(out/"summary.txt");
