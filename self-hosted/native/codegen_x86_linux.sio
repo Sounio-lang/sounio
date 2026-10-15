@@ -11,6 +11,7 @@ use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRIN
 use native::encode::*
 use native::elf::*
 use native::aarch64::*
+use native::codegen_arm64_macos::{compile_arm64_macos_to_file}
 use native::macho::*
 use native::reloc::*
 use native::frame::*
@@ -823,6 +824,23 @@ pub fn native_target_source_string(source_id: i64) -> string {
 }
 
 fn native_host_probe_target() -> string with IO, Mut, Panic, Div {
+    // Darwin shells do not normally export HOSTTYPE/OSTYPE. Probe the host
+    // instead of silently falling back to Linux when these variables are empty.
+    // Guard the Darwin syscall by a Darwin-only system file.
+    if file_size("/System/Library/CoreServices/SystemVersion.plist") > 0 {
+        // Packed int32 MIB { CTL_HW=6, HW_MACHINE=1 }.
+        var host_mib: [i8; 8] = [0; 8]
+        host_mib[0] = 6
+        host_mib[4] = 1
+        var host_machine: [i8; 64] = [0; 64]
+        var host_size: i64 = 64
+        if syscall6(202, &! host_mib, 2, &! host_machine, &! host_size, 0, 0) == 0 {
+            if host_machine[0] == 97 as i8 && host_machine[1] == 114 as i8 {
+                return "aarch64-macos"
+            }
+            if host_machine[0] == 120 as i8 { return "x86_64-macos" }
+        }
+    }
     let host_type = read_env("HOSTTYPE")
     let os_type = read_env("OSTYPE")
 
@@ -14762,6 +14780,9 @@ fn native_v2_trace_module_ir_ref(module: &IrModule) with IO, Mut, Panic, Div {
 pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeTargetSpec, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
     if target_spec.matrix_mode < 0 {
         return 10
+    }
+    if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_MACOS() {
+        return compile_arm64_macos_to_file(module, output_path)
     }
     if !(target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_LINUX()) {
         return 11

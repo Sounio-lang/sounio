@@ -1491,6 +1491,7 @@ fn spec_name_to_path(n: Name) -> AstPath {
     }
 }
 
+struct SpecTypeStage { ty: TypeExpr }
 fn spec_subst_type(te: TypeExpr, ctx: i64, targs: Option<Box<TypeExprList>>) -> TypeExpr with Mut, Panic, Div, Alloc {
     if ctx == 0 - 1 { return te }
     if te.kind == TypeExprKind::TypeNamed && te.path.seg_count == 1 {
@@ -1499,26 +1500,30 @@ fn spec_subst_type(te: TypeExpr, ctx: i64, targs: Option<Box<TypeExprList>>) -> 
             return spec_type_args_nth(targs, idx)
         }
     }
-    var out = te
-    out.inner = spec_subst_type_opt(te.inner, ctx, targs)
-    out.type_args = spec_subst_type_list_opt(te.type_args, ctx, targs)
+    // The nested fn(T)->T case must retain BOTH substituted fields across
+    // recursive calls. Use the same heap-staged mutation spine as Expr/Stmt;
+    // writes on a large by-value TypeExpr local were lost by the bootstrap.
+    let out = heap_alloc(32768) as *mut SpecTypeStage
+    (*out).ty = te
+    (*out).ty.inner = spec_subst_type_opt(te.inner, ctx, targs)
+    (*out).ty.type_args = spec_subst_type_list_opt(te.type_args, ctx, targs)
 
     // Local generic struct with (now concrete) args -> mangled instance name.
-    if out.kind == TypeExprKind::TypeNamed && out.path.seg_count == 1 {
-        match out.type_args {
+    if (*out).ty.kind == TypeExprKind::TypeNamed && (*out).ty.path.seg_count == 1 {
+        match (*out).ty.type_args {
             Some(al) => {
-                let base = spec_path_single_name(out.path)
+                let base = spec_path_single_name((*out).ty.path)
                 let st_idx = spec_struct_table_find(base)
                 if st_idx >= 0 && spec_type_args_count(Some(al)) == spec_struct_table_tp_count(st_idx) {
                     let mangled = spec_get_or_create_struct_instance(st_idx, base, Some(al))
-                    out.path = spec_name_to_path(mangled)
-                    out.type_args = None
+                    (*out).ty.path = spec_name_to_path(mangled)
+                    (*out).ty.type_args = None
                 }
             }
             None => {}
         }
     }
-    out
+    (*out).ty
 }
 
 fn spec_subst_type_opt(opt: Option<Box<TypeExpr>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<TypeExpr>> with Mut, Panic, Div, Alloc {
@@ -1961,12 +1966,123 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
 // itself OR on its callee ident — the parser stamps both).
 // ============================================================
 
-fn spec_call_expr_type_args(e: Expr) -> Option<Box<TypeExprList>> with Mut, Panic, Div {
+struct SpecInferredScalarArgs {
+    type0: Option<Box<TypeExpr>>,
+    type1: Option<Box<TypeExpr>>,
+    type2: Option<Box<TypeExpr>>,
+    type3: Option<Box<TypeExpr>>,
+}
+fn spec_inferred_scalar_at(p: *mut SpecInferredScalarArgs, index: i64) -> Option<Box<TypeExpr>> with Mut, Panic, Div {
+    if index == 0 { return (*p).type0 }
+    if index == 1 { return (*p).type1 }
+    if index == 2 { return (*p).type2 }
+    (*p).type3
+}
+
+// Infer only syntactically proven scalar arguments. In particular, do not
+// stop at a fn(T)->T parameter: a later plain T argument can determine it.
+// No checking/effects/linear consumption is repeated during this AST pass.
+fn spec_inferred_named_scalar(spelling: string) -> TypeExpr with Mut, Panic, Div, Alloc {
+    var ty = dummy_type_expr()
+    ty.kind = TypeExprKind::TypeNamed
+    ty.path = spec_name_to_path(make_name(spelling))
+    ty
+}
+fn spec_literal_scalar_type(e: &Expr) -> TypeExpr with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprIntLit { return spec_inferred_named_scalar("i64") }
+    if (*e).kind == ExprKind::ExprFloatLit { return spec_inferred_named_scalar("f64") }
+    if (*e).kind == ExprKind::ExprBoolLit { return spec_inferred_named_scalar("bool") }
+    if (*e).kind == ExprKind::ExprCast {
+        match (*e).cast_type {
+            Some(cast) => {
+                if spec_type_arg_is_scalar(*cast) { return *cast }
+            }
+            None => {}
+        }
+    }
+    if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+        match (*e).left { Some(inner) => return spec_literal_scalar_type(&(*inner)), None => {} }
+    }
+    dummy_type_expr()
+}
+
+fn spec_infer_call_type_args(e: Expr) -> Option<Box<TypeExprList>> with Mut, Panic, Div, Alloc {
+    let slot = spec_generic_table_find(spec_call_expr_callee_name(e))
+    if slot < 0 || SPEC_GF_IS_METHOD[slot as usize] { return None }
+    let count = spec_generic_table_tp_count(slot)
+    if count <= 0 || count > 4 { return None }
+    let ctx = spec_ctx_from_fn_slot(slot)
+    let inferred = heap_alloc(4096) as *mut SpecInferredScalarArgs
+    (*inferred).type0 = None
+    (*inferred).type1 = None
+    (*inferred).type2 = None
+    (*inferred).type3 = None
+    match spec_generic_table_fd(slot) {
+        Some(fd) => {
+            var params = &(*fd).params
+            var args = &e.args
+            while true {
+                match *params {
+                    Some(p) => {
+                        match *args {
+                            Some(a) => {
+                                let formal = &(*p).head.ty
+                                if (*formal).kind == TypeExprKind::TypeNamed && (*formal).path.seg_count == 1 {
+                                    let index = spec_ctx_tp_index(ctx, ast_name_hash(spec_path_single_name((*formal).path)))
+                                    if index >= 0 {
+                                        let actual = spec_literal_scalar_type(&(*a).head)
+                                        if spec_type_arg_is_scalar(actual) {
+                                            match spec_inferred_scalar_at(inferred, index) {
+                                                Some(previous) => {
+                                                    let old = spec_name_to_string(spec_path_single_name((*previous).path))
+                                                    let new = spec_name_to_string(spec_path_single_name(actual.path))
+                                                    if !str_eq(old, new) { return None }
+                                                }
+                                                None => {}
+                                            }
+                                            let found = Some(Box::new(actual))
+                                            if index == 0 { (*inferred).type0 = found }
+                                            if index == 1 { (*inferred).type1 = found }
+                                            if index == 2 { (*inferred).type2 = found }
+                                            if index == 3 { (*inferred).type3 = found }
+                                        }
+                                    }
+                                }
+                                args = &(*a).tail
+                            }
+                            None => break,
+                        }
+                        params = &(*p).tail
+                    }
+                    None => break,
+                }
+            }
+        }
+        None => return None,
+    }
+    var result: Option<Box<TypeExprList>> = None
+    var i = count - 1
+    while i >= 0 {
+        match spec_inferred_scalar_at(inferred, i) {
+            Some(ty) => { result = Some(Box::new(TypeExprList { head: *ty, tail: result })) }
+            None => return None,
+        }
+        i = i - 1
+    }
+    result
+}
+
+fn spec_call_expr_type_args(e: Expr) -> Option<Box<TypeExprList>> with Mut, Panic, Div, Alloc {
     match e.type_args {
         Some(args) => Some(args)
         None => {
             match e.left {
-                Some(callee) => (*callee).type_args
+                Some(callee) => {
+                    match (*callee).type_args {
+                        Some(args) => Some(args),
+                        None => spec_infer_call_type_args(e),
+                    }
+                }
                 None => None
             }
         }

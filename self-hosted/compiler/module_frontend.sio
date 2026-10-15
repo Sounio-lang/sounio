@@ -12,8 +12,11 @@ use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_module_map, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
 use ir::lower::{lower_hard_error_report, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_compile_error_scope_begin, lower_compile_error_scope_end, lower_hard_error_pending, ir_instr_census_report, fo_preregister_program_items_multipass, fo_xfer_global_reset, lower_use_module_reset, lower_set_current_module_id, lower_set_skip_use_recollect_for_merged, lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect}
-use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name, native_v2_builtin_returns_float, ARCH_X86_64, OS_LINUX}
+use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name, native_v2_builtin_returns_float, ARCH_X86_64, OS_LINUX, ARCH_AARCH64, OS_MACOS}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
+use check::check::{checker_swap_darwin_math}
+use ir::lower::{lower_swap_native_closure_envs}
+use gpu::native_metal::{native_metal_begin, native_metal_collect_program, native_metal_failed}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
 use private_fn_identity::{private_fn_identity_apply, module_struct_identity_check, pfi_use_map_reset, pfi_use_map_module_begin, pfi_use_map_note}
@@ -7145,6 +7148,34 @@ pub fn module_frontend_compile_imported_to_file(
     output_path: string,
     optimize: bool,
 ) -> i32 with IO, Mut, Div, Panic, Alloc {
+    module_frontend_compile_imported_to_file_for_target(main_path, output_path, optimize, "native", false)
+}
+
+pub fn module_frontend_compile_imported_to_file_for_target(
+    main_path: string,
+    output_path: string,
+    optimize: bool,
+    requested_target: string,
+    explicit_target: bool,
+) -> i32 with IO, Mut, Div, Panic, Alloc {
+    let target = native_resolve_target(requested_target, "auto", explicit_target)
+    let previous_math = checker_swap_darwin_math(target.arch_id == ARCH_AARCH64() && target.os_id == OS_MACOS())
+    let previous_closures = lower_swap_native_closure_envs(target.arch_id == ARCH_AARCH64() && target.os_id == OS_MACOS())
+    native_metal_begin(target.arch_id == ARCH_AARCH64() && target.os_id == OS_MACOS())
+    let result = module_frontend_compile_imported_to_file_target_impl(main_path, output_path, optimize, requested_target, explicit_target)
+    let _restored = checker_swap_darwin_math(previous_math)
+    let _restored_closures = lower_swap_native_closure_envs(previous_closures)
+    native_metal_begin(false)
+    result
+}
+
+fn module_frontend_compile_imported_to_file_target_impl(
+    main_path: string,
+    output_path: string,
+    optimize: bool,
+    requested_target: string,
+    explicit_target: bool,
+) -> i32 with IO, Mut, Div, Panic, Alloc {
     module_frontend_load_ocp_skip_mask()
     parser_reset_last_errors()
     // One reset + suppress for the full multi-mod load/typecheck/lower window so
@@ -7307,6 +7338,15 @@ pub fn module_frontend_compile_imported_to_file(
         return 1
     }
 
+    // Kernel identities must agree with the IR's resolved/private names, not
+    // the pre-resolution spelling. Include imported kernels in the same table.
+    var metal_module_i: i64 = 0
+    while metal_module_i < loaded {
+        let metal_program = programs[metal_module_i as usize]
+        native_metal_collect_program(&metal_program)
+        metal_module_i = metal_module_i + 1
+    }
+
     // Same gap as module_frontend_merge_imported_box, fixed the same way: neither
     // the specialized-collapse branch below nor its ordinary fallback resets or
     // populates LOWER_USE_MODULE_* on their own. This is a separate, duplicated
@@ -7452,7 +7492,7 @@ pub fn module_frontend_compile_imported_to_file(
             return 1
         }
         module_frontend_print_float_bits_probe("single", &(*module_box))
-        let single_target_spec = native_resolve_target("native", "auto", false)
+        let single_target_spec = native_resolve_target(requested_target, "auto", explicit_target)
         let single_write_rc = compile_native_v2_preview_to_file(&(*module_box), single_target_spec, output_path)
         if single_write_rc != 0 {
             print("Error: Failed to write native binary to ")
@@ -7557,7 +7597,7 @@ pub fn module_frontend_compile_imported_to_file(
         return 1
     }
     module_frontend_print_float_bits_probe("merged", &(*module_box))
-    let target_spec = native_resolve_target("native", "auto", false)
+    let target_spec = native_resolve_target(requested_target, "auto", explicit_target)
     let write_rc = compile_native_v2_preview_to_file(&(*module_box), target_spec, output_path)
     if write_rc != 0 {
         print("Error: Failed to write native binary to ")

@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Extra discriminators discovered during the 200-program port. Not a replacement
+# or extension of the pinned corpus denominator.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+COMPILER="${1:?pass the native Madaros candidate}"
+case "$COMPILER" in /*) ;; *) COMPILER="$PWD/$COMPILER" ;; esac
+WORK="${2:-$(mktemp -d "${TMPDIR:-/tmp}/madaros-port-regressions.XXXXXX")}"
+mkdir -p "$WORK"
+cd "$ROOT"
+export SOUNIO_STDLIB_PATH="$ROOT/stdlib"
+for test in a64_tuple_call_snapshot a64_box_large_field_table \
+    a64_array_element_borrow madaros_nested_float_array_rank \
+    madaros_generic_hof_scalar_inference madaros_measure_literal_variance_bound \
+    madaros_escaping_float_closure; do
+    source_path="tests/run-pass/$test.sio"
+    timeout 90 "$COMPILER" build "$source_path" --target aarch64-macos -o "$WORK/$test" > "$WORK/$test.build.log" 2>&1
+    chmod +x "$WORK/$test"
+    codesign -s - -f "$WORK/$test"
+    codesign --verify "$WORK/$test"
+    timeout 30 "$WORK/$test" > "$WORK/$test.stdout.log" 2> "$WORK/$test.stderr.log"
+    sed -n 's|^//@ expect-stdout: ||p' "$source_path" > "$WORK/$test.expected.log"
+    test -s "$WORK/$test.expected.log"
+    while IFS= read -r expected; do
+        grep -Fq -- "$expected" "$WORK/$test.stdout.log"
+    done < "$WORK/$test.expected.log"
+    echo "PASS positive: $test"
+done
+for test in madaros_closure_inferred_numeric_rejects_bool \
+    madaros_generic_hof_inference_mismatch \
+    madaros_measure_unknown_variance_not_attested \
+    madaros_measure_excess_variance_not_attested \
+    ontology_epistemic_closure_return_downgrade_reject; do
+    source_path="tests/compile-fail/$test.sio"
+    set +e
+    timeout 90 "$COMPILER" check "$source_path" > "$WORK/$test.check.log" 2>&1
+    check_status=$?
+    set -e
+    # Require a normal diagnostic refusal, never a crash or timeout.
+    test "$check_status" = 1
+    grep -Eq 'error\[E[0-9]+\]' "$WORK/$test.check.log"
+    sed -n 's|^//@ error-pattern: ||p' "$source_path" > "$WORK/$test.expected.log"
+    while IFS= read -r expected; do
+        grep -Fq -- "$expected" "$WORK/$test.check.log"
+    done < "$WORK/$test.expected.log"
+    echo "PASS negative: $test"
+done
+set +e
+timeout 90 "$COMPILER" build tests/compile-fail/madaros_closure_capture_capacity_refuses.sio \
+    --target aarch64-macos -o "$WORK/capture-overflow" > "$WORK/capture-overflow.build.log" 2>&1
+overflow_status=$?
+set -e
+test "$overflow_status" = 1
+test ! -s "$WORK/capture-overflow"
+grep -Fq 'closure capture capacity exceeded' "$WORK/capture-overflow.build.log"
+echo 'PASS negative: closure capture capacity refuses without output'
+echo "PASS: native port extra positive/negative discriminators; artifacts=$WORK"

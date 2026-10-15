@@ -6,6 +6,13 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/madaros-a1.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 export SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib"
 
+# BSD mktemp randomizes only trailing Xs; a suffix after XXXXXX can become a
+# literal name and make a later invocation collide. Receipts need no extension.
+if grep -Eq 'mktemp .*XXXXXX\.' "$ROOT_DIR/bin/madaros"; then
+  echo 'FAIL: launcher mktemp templates must end in Xs for macOS portability' >&2
+  exit 1
+fi
+
 set +e
 "$ROOT_DIR/bin/madaros" build "$WORK/does-not-exist.sio" -o "$WORK/out.elf" >"$WORK/log.txt" 2>&1
 rc=$?
