@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 cd "$ROOT_DIR"
 
 TMP_DIR="$(mktemp -d /tmp/proof-carrying-d2-gate.XXXXXX)"
@@ -79,10 +81,17 @@ expect_type_rejection() {
     local expected="$2"
     local found="$3"
     local log="$TMP_DIR/$(basename "$source").reject.log"
-    if bin/souc check "$source" >"$log" 2>&1; then
+    local rc=0
+    bin/souc check "$source" >"$log" 2>&1 || rc=$?
+    if [[ "$rc" -eq 0 ]]; then
         cat "$log" >&2
         fail "$source unexpectedly typechecked"
     fi
+    # rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+    sounio_expect_failed_exit "$rc" "$log" || {
+        cat "$log" >&2
+        fail "$source: not a clean refusal: $(sounio_refusal_reason)"
+    }
     grep -q "expected $expected" "$log" || {
         cat "$log" >&2
         fail "$source lacked expected type $expected"

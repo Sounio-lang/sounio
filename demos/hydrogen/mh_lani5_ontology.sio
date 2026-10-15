@@ -1,0 +1,233 @@
+// LaNi5 desorption, named.
+// Kral et al., METAL 2025. Zenodo 10.5281/zenodo.15395389.
+// Four isotherms, 308 K, 323 K, 333 K, 343 K.
+// The sheet column is ln(P/P0). Table 2 of the paper is the clock:
+// desorption enthalpy 33.5 kJ/mol, entropy 135.9 J/(mol K).
+// Pressure in bar is exp(y)/10.
+//
+// Hydrogen, LaNi5, Enthalpy, Entropy, Temperature and PlateauPressure
+// are ontology classes. The plateau leaves as Knowledge. Independent
+// bars and the fit covariance are two readings of that same object.
+// claim_meet keeps only the interval both still sign. A new isotherm
+// adds the residual, as its own Measured pressure.
+
+use epistemic::regression::{ols_line, gum_var, reg_sqrt, ols_mean_var, ols_predict_var}
+use epistemic::claim_meet::{claim_meet}
+use epistemic::sign::{sign_interval}
+
+ontology Hydride {
+    class Quantity { property amount: f64 where amount >= 0.0 }
+    class Hydrogen subclass_of Quantity
+    class Alloy subclass_of Quantity
+    class LaNi5 subclass_of Alloy
+    class Enthalpy subclass_of Quantity
+    class Entropy subclass_of Quantity
+    class Temperature subclass_of Quantity
+    class Pressure subclass_of Quantity
+    class PlateauPressure subclass_of Pressure
+    disjoint Hydrogen, Enthalpy
+    disjoint Hydrogen, Entropy
+    disjoint Hydrogen, Pressure
+    disjoint Enthalpy, Entropy
+    disjoint Enthalpy, Pressure
+    disjoint Entropy, Pressure
+    disjoint Temperature, Pressure
+    disjoint Alloy, Pressure
+    disjoint LaNi5, Enthalpy
+}
+
+var R_GAS: f64 = 8.314462618
+var LN10: f64 = 2.302585092994046
+var T_HOT: f64 = 353.15
+
+fn near(actual: f64, expected: f64, tol: f64) -> bool {
+    let d = actual - expected
+    if d < 0.0 { return (0.0 - d) < tol }
+    d < tol
+}
+
+fn design_rho(x0: f64, x1: f64, x2: f64, x3: f64) -> f64 with Mut, Div {
+    let xb = (x0 + x1 + x2 + x3) / 4.0
+    let d0 = x0 - xb
+    let d1 = x1 - xb
+    let d2 = x2 - xb
+    let d3 = x3 - xb
+    let sxx = d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3
+    0.0 - xb / reg_sqrt(sxx / 4.0 + xb * xb)
+}
+
+struct Reading {
+    pressure: Knowledge[PlateauPressure, ValidUntil("2026-12-31"), epsilon < 0.05, Derived]
+}
+
+fn ln_bar(dh: f64, ds: f64) -> f64 {
+    ds / R_GAS - dh / (R_GAS * T_HOT) - LN10
+}
+
+fn plateau(h: Knowledge<Enthalpy>, s: Knowledge<Entropy>) -> Reading with Epistemic, Mut, Div {
+    let dh: f64 = h.value
+    let ds: f64 = s.value
+    let p: f64 = exp(ln_bar(dh, ds))
+    let branded: PlateauPressure = p
+    Reading {
+        pressure: Knowledge {
+            value: branded,
+            epsilon: 0.01,
+            validity: "2027-06-30",
+            provenance: "sieverts"
+        }
+    }
+}
+
+
+fn show_pressure(h_tag: Enthalpy, s_tag: Entropy, sig_h: f64, sig_s: f64, rho: f64, expect_p: f64, expect_var_ind: f64, expect_mean_ind: f64, expect_var_fit: f64, expect_mean_fit: f64, mean_pred: f64, var_pred: f64) -> i64 with IO, Epistemic, Mut, Div {
+    let h: Knowledge<Enthalpy> = measure(h_tag, uncertainty: sig_h)
+    let s: Knowledge<Entropy> = measure(s_tag, uncertainty: sig_s)
+    let named = plateau(h, s)
+    let v_before = variance_of(named.pressure.value)
+    let m_before = second_order_mean(named.pressure.value)
+    let point = named.pressure.value
+    let hd: f64 = h.value
+    let sd: f64 = s.value
+    let _c = correlate(hd, sd, rho)
+    let v_after = variance_of(named.pressure.value)
+    let m_after = second_order_mean(named.pressure.value)
+    let meet = claim_meet(m_before, v_before, m_after, v_after)
+    let pred_tag: PlateauPressure = mean_pred
+    let sig_pred = reg_sqrt(var_pred)
+    let predicted: Knowledge[PlateauPressure, Measured] = measure(pred_tag, uncertainty: sig_pred)
+    let v_new = variance_of(predicted.value)
+    let meet_obs = claim_meet(m_after, v_after, predicted.value, v_new)
+    println("PlateauPressure, bar, nominal")
+    print_f64(point)
+    println("")
+    println("Same pressure, independent bars, variance, bar^2")
+    print_f64(v_before)
+    println("")
+    println("Same pressure, fit covariance kept, variance, bar^2")
+    print_f64(v_after)
+    println("")
+    println("Interval both readings still sign, bar")
+    print_f64(meet.lo)
+    println("")
+    println("to")
+    print_f64(meet.hi)
+    println("")
+    println("A new isotherm, residual included, variance, bar^2")
+    print_f64(v_new)
+    println("")
+    println("Interval the line and the new isotherm both still sign, bar")
+    print_f64(meet_obs.lo)
+    println("")
+    println("to")
+    print_f64(meet_obs.hi)
+    println("")
+    let signed = sign_interval(m_before, v_before, m_after, v_after)
+    let origin = 0.0
+    let noise: Knowledge<f64> = measure(origin, uncertainty: signed.sigma)
+    let branded: PlateauPressure = signed.mid + noise.value
+    let leaving: Knowledge[PlateauPressure, ValidUntil("2026-12-31"), epsilon < 0.05, Derived] = Knowledge {
+        value: branded,
+        epsilon: 0.01,
+        validity: "2027-06-30",
+        provenance: "cell"
+    }
+    let v_leave = variance_of(leaving.value)
+    println("What leaves, PlateauPressure, variance, bar^2")
+    print_f64(v_leave)
+    println("")
+    let rel = onward(leaving)
+    let held = inside_operating(leaving)
+    println("Relative half-width seen by the next function")
+    print_f64(rel)
+    println("")
+    println("Co-signed plateau inside 10 to 20 bar")
+    if held { println("yes") } else { println("no") }
+    if near(point, expect_p, 0.001) && near(v_before, expect_var_ind, 0.05) && near(m_before, expect_mean_ind, 0.01) && near(v_after, expect_var_fit, 0.02) && near(m_after, expect_mean_fit, 0.01) && meet.shared && near(v_new, var_pred, 0.001) && meet_obs.shared && signed.agreed && v_leave < 1.0 && v_leave < v_before && near(v_leave, signed.sigma * signed.sigma, 0.001) && rel < 0.05 && held {
+        return 0
+    }
+    1
+}
+
+
+fn onward(p: Knowledge[PlateauPressure, ValidUntil("2026-12-31"), epsilon < 0.05, Derived]) -> f64 with Epistemic, Mut, Div {
+    let s = reg_sqrt(variance_of(p.value))
+    let v = p.value
+    s / v
+}
+
+fn inside_operating(p: Knowledge[PlateauPressure, ValidUntil("2026-12-31"), epsilon < 0.05, Derived]) -> bool with Epistemic, Mut, Div {
+    let s = reg_sqrt(variance_of(p.value))
+    let v = p.value
+    (v - s) >= 10.0 && (v + s) <= 20.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    var xs: [f64; 8] = [0.0; 8]
+    var ys: [f64; 8] = [0.0; 8]
+    xs[0] = 1.0 / 308.0
+    xs[1] = 1.0 / 323.0
+    xs[2] = 1.0 / 333.0
+    xs[3] = 1.0 / 343.0
+    ys[0] = 3.244933551495201
+    ys[1] = 3.9088103497550333
+    ys[2] = 4.2745529686763595
+    ys[3] = 4.571804492144291
+    let fit = ols_line(xs, ys, 4)
+    let rho_x = design_rho(xs[0], xs[1], xs[2], xs[3])
+    let d_h = 0.0 - R_GAS * fit.slope
+    let d_s = R_GAS * fit.intercept
+    let sig_h = R_GAS * reg_sqrt(fit.var_slope)
+    let sig_s = R_GAS * reg_sqrt(fit.var_intercept)
+    let x = 1.0 / T_HOT
+    let v_ln_ind = gum_var(1.0, x, fit.var_intercept, fit.var_slope, 0.0)
+    let v_ln_fit = gum_var(1.0, x, fit.var_intercept, fit.var_slope, fit.cov)
+    let v_ln_line = ols_mean_var(fit, x)
+    let v_ln_pred = ols_predict_var(fit, x)
+    let u = fit.intercept + fit.slope * x - LN10
+    let p0 = exp(u)
+    let e_ind = exp(v_ln_ind)
+    let e_fit = exp(v_ln_fit)
+    let e_pred = exp(v_ln_pred)
+    let mean_ind = p0 * exp(0.5 * v_ln_ind)
+    let mean_fit = p0 * exp(0.5 * v_ln_fit)
+    let mean_pred = p0 * exp(0.5 * v_ln_pred)
+    let var_ind = p0 * p0 * e_ind * (e_ind - 1.0)
+    let var_fit = p0 * p0 * e_fit * (e_fit - 1.0)
+    let var_pred = p0 * p0 * e_pred * (e_pred - 1.0)
+
+    let species: Hydrogen = 1.0
+    let alloy: LaNi5 = 1.0
+    let hot: Temperature = T_HOT
+    let h_tag: Enthalpy = d_h
+    let s_tag: Entropy = d_s
+    let hk: Knowledge<Enthalpy> = measure(h_tag, uncertainty: 1355.5)
+    let sk: Knowledge<Entropy> = measure(s_tag, uncertainty: 4.158)
+    let basis: f64 = species
+    let alloy_id: f64 = alloy
+    let rho_dh = 0.0 - fit.rho
+
+    println("LaNi5 desorption. Kral et al., METAL 2025.")
+    println("Zenodo 10.5281/zenodo.15395389. Sieverts isotherms, 308 K to 343 K.")
+    println("Species Hydrogen, one mole. Alloy LaNi5.")
+    println("Enthalpy, J/mol, from the van t Hoff line")
+    print_f64(hk.value)
+    println("")
+    println("Entropy, J/(mol K)")
+    print_f64(sk.value)
+    println("")
+    println("Correlation of Enthalpy and Entropy")
+    print_f64(rho_dh)
+    println("")
+    println("Temperature, K")
+    print_f64(hot)
+    println("")
+    let shown = show_pressure(h_tag, s_tag, sig_h, sig_s, 0.0 - fit.rho, p0, var_ind, mean_ind, var_fit, mean_fit, mean_pred, var_pred)
+    println("")
+    if near(d_h, 33500.0, 80.0) && near(d_s, 135.9, 0.15) && near(fit.rho, rho_x, 0.000001) && near(rho_dh, 0.9992, 0.000001) && near(v_ln_line, v_ln_fit, 0.000000001) && near(hk.value, d_h, 0.01) && shown == 0 && basis > 0.999 && basis < 1.001 && alloy_id > 0.999 && alloy_id < 1.001 {
+        println("ONTOLOGY_PRESSURE_OK")
+        return 0
+    }
+    println("ONTOLOGY_PRESSURE_FAIL")
+    1
+}

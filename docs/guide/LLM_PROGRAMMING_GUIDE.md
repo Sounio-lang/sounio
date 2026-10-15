@@ -2,35 +2,35 @@
 topic_id: repo.docs.guide.llm-programming-guide
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.llm-programming-guide
 -->
 
 # Sounio LLM Programming Guide
 
-Definitive syntax reference for LLMs writing Sounio code. Every example is verified from `tests/run-pass/` or working stdlib files.
+Syntax notes for LLMs writing Sounio. This file is not a second contract. The measured walkthrough is [getting-started.md](getting-started.md). A `[Production]` tag below was not re-measured on 2026-10-15 unless this page says so.
 
-**Sounio is NOT Rust.** The syntax looks similar but semantics differ. When in doubt, check real `.sio` files.
+**Sounio is NOT Rust.** When in doubt, check `examples/hello.sio` and `souc check` on Linux x86-64.
 
 ## 1. Hello World
 
 ```sio
-// Source: tests/run-pass/hello.sio
-fn main() with IO {
-    println("Hello, Sounio!")
+fn main() -> i32 with IO {
+    println("Hello, Sounio")
+    return 0
 }
 ```
+
+That is `examples/hello.sio`. Measured 2026-10-15 on Madaros v0.80.0.
 
 ## 2. Variables
 
 ```sio
-let x = 5                    // immutable
-var y: i32 = 10              // mutable (can reassign)
-y = y + 1                    // OK — var allows reassignment
-
-// NO semicolons
-// let x = 5;   <-- WRONG
+let x = 5                    // immutable, preferred
+var y: i32 = 10              // mutable. Not `let mut`.
+y = y + 1
+let z = 5;                   // accepted. A trailing semicolon is style, not a compile error.
 ```
 
 **No `let mut`** — use `var`.
@@ -95,17 +95,19 @@ fn divide(num: i32, denom: { d: i32 | d != 0 }) -> i32 with Panic {
 }
 ```
 
-### Units of Measure [Production]
+### Units of Measure [prototype, engine-split]
+
+Do not copy `let dose: mg = 500.0` as Madaros. Measured 2026-10-15: default Madaros rejects `let distance: m = 100.0` with `error[E001]` (#2752). `lean_single` runs `demos/intro/demo_unidades.sio`. A multiply into a derived unit is still accepted on that engine (#2751). KL-13 closed derived annotations such as `f64<m/s>` and did not close #2752.
+
+### Epistemic Types [validated research]
+
+The intro demo uses `Knowledge<f64>` and `measure`, not `Knowledge<mg>`:
+
 ```sio
-unit kg;
-unit mg = 0.001 * kg;
-let dose: mg = 500.0
+let k: Knowledge<f64> = measure(10.0, uncertainty: 0.1)
 ```
 
-### Epistemic Types [Production]
-```sio
-let m: Knowledge<mg> = measure(500.0, uncertainty: 2.5)
-```
+The library surface is `epistemic::knowledge` (`ep_measured`, `ep_val`, `ep_std`). `print` takes one argument. `ep_std` requires `Mut, Div, Panic` on the caller.
 
 ### Algebra Declarations [Beta]
 ```sio

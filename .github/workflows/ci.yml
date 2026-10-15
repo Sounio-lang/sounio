@@ -52,8 +52,8 @@ jobs:
       - name: Classifier self-test
         run: bash scripts/ci/impact_ci_selftest.sh
 
-  contracts:
-    name: Contracts
+  contracts-core:
+    name: Contracts Core
     needs: impact
     runs-on: ubuntu-24.04
     # Bounded (#2443). 63 successful runs of this job, 2026-10-06T15:44Z..
@@ -70,6 +70,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Contracts shard decision self-test
+        run: bash scripts/ci/contracts_shard_decision_selftest.sh
       - name: Workflow script references
         run: bash scripts/dev/check_workflow_script_refs.sh
       # The docs claimed "Cranelift JIT enabled" and named a JIT profile artifact
@@ -132,6 +134,17 @@ jobs:
       # identical, so one cannot regress while the fixture still passes.
       - name: ep_sqrt is a square root across the f64 range
         run: bash scripts/ci/ep_sqrt_range_gate.sh
+      # #846: the per-module stdlib exp helpers were Taylor series around 0 that
+      # cancelled catastrophically (x = -13.855 off by up to 4e10); 70 now
+      # delegate to math::pure::exp and are swept against it on both engines,
+      # and a lint pins the remaining (range-reduced) series so no new one
+      # appears.
+      - name: stdlib exp helpers agree with math::pure::exp (Madaros)
+        run: bash scripts/ci/stdlib_exp_helpers_gate.sh
+      - name: stdlib exp helpers agree with math::pure::exp (lean_single)
+        env:
+          SOUNIO_SOUC_ENGINE: lean_single
+        run: bash scripts/ci/stdlib_exp_helpers_gate.sh
       # The GUM rules drop Cov(X,Y), so they are the independent case only, and
       # nothing said so: ep_mul(&x,&x) understated variance by 2x while
       # ep_square(&x) in the same module was right. E230 does not reach it --
@@ -224,6 +237,10 @@ jobs:
         run: bash scripts/dev/check_docs_consistency.sh
       - name: Docs registry
         run: bash scripts/dev/check_docs_registry.sh
+      - name: Doc snippet checker self-test
+        run: bash scripts/ci/check_doc_snippets_selftest.sh
+      - name: Selected documentation sample check
+        run: bash scripts/ci/check_doc_snippets.sh
       # Public claims retired on 2026-10-05 because they did not match what is
       # measured (1.0.0-beta versions, 251/251, "5 backends", Cranelift JIT as
       # shipped, compile-time dimensional analysis, GPU acceleration, zero sorry,
@@ -426,6 +443,12 @@ jobs:
       - name: Compile-outcome classifier self-test
         run: bash scripts/ci/classify_compile_selftest.sh
 
+      # No compiler, ~1 s: every script under scripts/ci/ that asserts a
+      # refusal must route the exit status through classify_compile.sh, so a
+      # segfault, timeout or OOM kill cannot pass as "refused" (#2425).
+      - name: Refusal gates use the classifier
+        run: bash scripts/ci/refusal_gates_use_classifier_gate.sh
+
       - name: Worktree governance gate
         run: bash scripts/dev/worktree_branch_audit.sh --check
       - name: Compiler lane status contract
@@ -605,8 +628,6 @@ jobs:
         run: bash scripts/ci/madaros_uncertain_eq_trust_gate.sh
       - name: Ontology frontiers hold
         run: bash scripts/ci/ontology_frontiers_gate.sh
-      - name: Multi-ontology composition holds
-        run: bash scripts/ci/ontology_multi_ontology_gate.sh
       # Absence of measurement must not read as success. Meta-gate requires a
       # positive GATE_MEASURED assertions=N receipt (see CI_ABSENCE_AS_SUCCESS_CONTRACT).
       #
@@ -791,6 +812,36 @@ jobs:
               echo "A contract gate failed or was cancelled; subsequent gates were not evaluated." >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
+
+  # Independent gate: its inputs and temporary outputs are checkout-local.
+  # Preserve the Contracts check as a fail-closed join of both complete jobs.
+  contracts-ontology:
+    name: Contracts Ontology
+    needs: impact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
+      - name: Multi-ontology composition holds
+        run: bash scripts/ci/ontology_multi_ontology_gate.sh
+
+  contracts:
+    name: Contracts
+    if: always()
+    needs: [contracts-core, contracts-ontology]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Both Contracts shards must succeed
+        env:
+          CONTRACTS_CORE_RESULT: ${{ needs.contracts-core.result }}
+          CONTRACTS_ONTOLOGY_RESULT: ${{ needs.contracts-ontology.result }}
+        run: bash scripts/ci/contracts_shard_decision.sh "$CONTRACTS_CORE_RESULT" "$CONTRACTS_ONTOLOGY_RESULT"
 
   r6-corpus-sweep:
     name: R6 Corpus Sweep (Nightly)

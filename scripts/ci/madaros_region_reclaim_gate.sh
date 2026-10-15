@@ -20,6 +20,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 TAG="[madaros-region-reclaim]"
 fail() { echo "$TAG FAIL: $*" >&2; exit 1; }
 
@@ -129,9 +131,16 @@ SOUNIO_NV2_CORE_REFUSE_FN=put_ref SOUNIO_PROBE_STREAMING_OUT="$WORK/refuse.strea
 grep -q "streaming_used=true ok=false err=streaming_native_v2_codegen_failed:put_ref" "$WORK/refuse.stream.log" \
   || { tail -n 20 "$WORK/refuse.stream.log" >&2; fail "streaming lane did not refuse a function the core emitter refused"; }
 [[ ! -e "$WORK/refuse.stream.elf" ]] || fail "streaming lane wrote an ELF despite a refused function"
-if SOUNIO_NV2_CORE_REFUSE_FN=put_ref default_build "$src" "$WORK/refuse.default.elf" >"$WORK/refuse.default.log" 2>&1; then
+refuse_default_rc=0
+SOUNIO_NV2_CORE_REFUSE_FN=put_ref default_build "$src" "$WORK/refuse.default.elf" >"$WORK/refuse.default.log" 2>&1 || refuse_default_rc=$?
+if [[ "$refuse_default_rc" -eq 0 ]]; then
   fail "default lane compiled a program whose function the core emitter refused"
 fi
+# rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+sounio_expect_failed_exit "$refuse_default_rc" "$WORK/refuse.default.log" || {
+  tail -n 20 "$WORK/refuse.default.log" >&2
+  fail "default lane: not a clean refusal: $(sounio_refusal_reason)"
+}
 [[ ! -e "$WORK/refuse.default.elf" ]] || fail "default lane wrote an ELF despite a refused function"
 echo "$TAG PASS: both lanes fail closed on a refused function"
 

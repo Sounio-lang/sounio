@@ -5283,6 +5283,7 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("panic"))
     checker_bind_import_unknown_inplace(c, make_name("exit"))
     checker_bind_import_unknown_inplace(c, make_name("variance_of"))
+    checker_bind_import_unknown_inplace(c, make_name("sign"))
     checker_bind_import_unknown_inplace(c, make_name("covariance_of"))
     checker_bind_import_unknown_inplace(c, make_name("sensitivity_of"))
     checker_bind_import_unknown_inplace(c, make_name("uncertainty_of"))
@@ -10635,6 +10636,7 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
     if call_expr_is_builtin_rollback_transition(e.left) { return true }
     if call_expr_is_builtin_lift_knowledge(e.left) { return true }
     if call_expr_is_builtin_measure(e.left) { return true }
+    if call_expr_is_builtin_sign(e.left) { return true }
     if call_expr_is_builtin_variance_of(e.left) { return true }
     if call_expr_is_builtin_covariance_of(e.left) { return true }
     if call_expr_is_builtin_uncertainty_of(e.left) { return true }
@@ -10873,6 +10875,48 @@ fn checker_measure_literal_variance(args: Option<Box<ExprList>>) -> f64 with Mut
         None => {}
     }
     0.0 - 1.0
+}
+
+fn checker_check_sign_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let third_arg = expr_list_third(e.args)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match third_arg {
+        Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        None => {}
+    }
+    let ty_a = checker_check_opt_expr_inplace(c, first_arg)
+    let ty_b = checker_check_opt_expr_inplace(c, second_arg)
+    if !is_knowledge_type(ty_a) || !is_knowledge_type(ty_b) {
+        checker_report_error_at_inplace(c, e.span, 9, 0, 0, 0)
+        return ty_error()
+    }
+    let inner_a = knowledge_inner(ty_a)
+    let inner_b = knowledge_inner(ty_b)
+    if inner_a.ontology_id >= 0 && inner_b.ontology_id >= 0 {
+        if inner_a.ontology_id != inner_b.ontology_id {
+            if ontology_kernel_is_disjoint((*c).ontology_kernel, inner_a.ontology_id, inner_b.ontology_id) {
+                checker_report_error_at_inplace(c, e.span, 151, 0, 0, 0)
+            } else {
+                checker_report_mismatch_inplace(c, e.span, 9, inner_a, inner_b)
+            }
+            return ty_error()
+        }
+    } else if !types_equal(inner_a, inner_b) {
+        checker_report_mismatch_inplace(c, e.span, 9, inner_a, inner_b)
+        return ty_error()
+    }
+    var result = ty_a
+    result.knowledge_provenance_kind = PROVENANCE_KIND_DERIVED
+    result
 }
 
 fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -11195,16 +11239,10 @@ fn checker_check_correlate_metric_expr_inplace(c: *mut Checker, e: Expr) -> Type
     }
     match third_arg {
         None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
-        Some(rho_ex) => {
-            // rho must fold at compile time. The lowerer keeps a f64, not a
-            // register, so a runtime third argument never propagates -- it
-            // silently leaves rho at 0.0, fabricating the very independence
-            // this builtin exists to deny. There is no lowering to fall back
-            // on, so refusing is the only honest answer.
-            let rho_lit_7930 = correlate_rho_literal(Some(rho_ex))
-            if !rho_lit_7930.0 {
-                checker_report_error_at_inplace(c, e.span, 243, 0, 0, 0)
-            }
+        Some(_) => {
+            // A literal is folded. Any other f64 is a register in the lowerer.
+            // Refusing a computed rho was the honest answer only while the
+            // lowerer had nowhere to put it.
         }
     }
     checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
@@ -11671,6 +11709,9 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     // by-value bridge below (which SRET-smashes on the 164KB Checker return).
     if call_expr_is_builtin_measure(e.left) {
         return checker_check_measure_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_sign(e.left) {
+        return checker_check_sign_expr_inplace(c, e)
     }
     if call_expr_is_builtin_seq_new(e.left) {
         return checker_check_seq_new_expr_inplace(c, e)
@@ -19475,6 +19516,22 @@ fn call_expr_is_builtin_variance_of(opt: Option<Box<Expr> >) -> bool with Mut, P
     }
 }
 
+
+
+fn call_expr_is_builtin_sign(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            let n = (*expr).name
+            n.len == 4
+            && n.buf[0] == 115 as i8 && n.buf[1] == 105 as i8
+            && n.buf[2] == 103 as i8 && n.buf[3] == 110 as i8
+        }
+        None => false
+    }
+}
 
 fn call_expr_is_builtin_covariance_of(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
@@ -27853,6 +27910,9 @@ impl Checker {
         if call_expr_is_builtin_measure(e.left) {
             return self.check_measure_expr(e)
         }
+        if call_expr_is_builtin_sign(e.left) {
+            return self.check_sign_expr(e)
+        }
         if call_expr_is_builtin_knowledge_ctor(e.left) {
             return self.check_knowledge_ctor_expr(e)
         }
@@ -29871,6 +29931,35 @@ impl Checker {
             return (c, ty_contest(expected_inner, expected_contest_ty.epistemic_meta_id))
         }
         (c, expected_contest_ty)
+    }
+
+
+    fn check_sign_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let first_arg = expr_list_head(e.args)
+        let second_arg = expr_list_second(e.args)
+        let a_pair = self.check_opt_expr(first_arg)
+        var c = a_pair.0
+        let ty_a = a_pair.1
+        let b_pair = c.check_opt_expr(second_arg)
+        c = b_pair.0
+        let ty_b = b_pair.1
+        if !is_knowledge_type(ty_a) || !is_knowledge_type(ty_b) {
+            c = c.report_error_at(e.span, 9, 0, 0, 0)
+            return (c, ty_error())
+        }
+        let inner_a = knowledge_inner(ty_a)
+        let inner_b = knowledge_inner(ty_b)
+        if inner_a.ontology_id >= 0 && inner_b.ontology_id >= 0 && inner_a.ontology_id != inner_b.ontology_id {
+            c = c.report_error_at(e.span, 151, 0, 0, 0)
+            return (c, ty_error())
+        }
+        if !types_equal(inner_a, inner_b) && (inner_a.ontology_id < 0 || inner_b.ontology_id < 0) {
+            c = c.report_error_at(e.span, 9, 0, 0, 0)
+            return (c, ty_error())
+        }
+        var result = ty_a
+        result.knowledge_provenance_kind = PROVENANCE_KIND_DERIVED
+        (c, result)
     }
 
     fn check_measure_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {

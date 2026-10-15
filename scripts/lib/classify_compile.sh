@@ -42,6 +42,10 @@
 #   sounio_primary_diag LOG               — code on the first diagnostic, or empty
 #   sounio_is_fatal_log LOG               — true if the log shows a crash
 #   sounio_expect_refusal RC LOG OUT RULE — 0 iff REFUSED and rule matches
+#   sounio_expect_failed_exit RC LOG [MARKER] — 0 iff the process ran and exited
+#                                         1..123 (no crash/timeout/infra), marker present
+#   sounio_capture_rc VAR LOG -- CMD...   — run CMD into LOG, store its exit status
+#   sounio_refusal_reason                 — "CLASS (detail)" of the last classification
 
 # Guard against double-sourcing.
 if [[ -n "${_SOUNIO_CLASSIFY_COMPILE_LOADED:-}" ]]; then
@@ -259,4 +263,39 @@ sounio_expect_refusal() {
     grep -qF -- "$rule" "$log" || return 1
   fi
   return 0
+}
+
+# sounio_capture_rc VAR LOG -- CMD...
+# Runs CMD with stdout and stderr in LOG and stores its exit status in VAR,
+# under `set -e` or not. Use it instead of `if CMD; then` when the status is
+# the evidence: an `if` collapses 1, 124, 137 and 139 into "false".
+sounio_capture_rc() {
+  local __sc_var="$1" __sc_log="$2"
+  shift 2
+  [[ "${1:-}" == "--" ]] && shift
+  local __sc_rc=0
+  "$@" >"$__sc_log" 2>&1 || __sc_rc=$?
+  printf -v "$__sc_var" '%s' "$__sc_rc"
+  return 0
+}
+
+# sounio_expect_failed_exit RC LOG [MARKER]
+# For probes whose expected outcome is a program that runs and exits non-zero
+# (a runtime refusal, a negative witness printing its verdict), not a compiler
+# diagnostic. Returns 0 only when the exit is an ordinary status (1..123, no
+# crash text) and, if given, MARKER is in LOG. A segfault, timeout, OOM kill or
+# missing binary that happens to leave the marker behind does not count.
+sounio_expect_failed_exit() {
+  local rc="$1" log="$2" marker="${3:-}"
+  sounio_classify_compile "$rc" "$log" ""
+  case "$SOUNIO_CC_CLASS" in
+    REFUSED|REFUSED_UNDIAGNOSED) ;;
+    *) return 1 ;;
+  esac
+  [[ -z "$marker" ]] && return 0
+  grep -qF -- "$marker" "$log"
+}
+
+sounio_refusal_reason() {
+  printf '%s (%s)' "${SOUNIO_CC_CLASS:-unclassified}" "${SOUNIO_CC_DETAIL:-}"
 }
