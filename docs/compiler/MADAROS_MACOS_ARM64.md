@@ -14,6 +14,12 @@ The native host is built from `self-hosted/compiler/main.sio` by a current-sourc
 when compiling user programs: Madaros parses, checks, lowers to IR and invokes
 `native/codegen_arm64_macos.sio` for its native output.
 
+Prerequisites on Apple Silicon: Apple command-line tools (`codesign` and a
+C++23-capable `clang++`), a `timeout` command (`brew install coreutils` if absent),
+Boost headers for the exact wide oracle (`brew install boost`), and a real Metal
+device for full publication. The build refuses a missing `timeout` before
+compiling the candidate; it does not silently omit bounded execution checks.
+
 Build and install the local artifact on Apple Silicon:
 
 ```sh

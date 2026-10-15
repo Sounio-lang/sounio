@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Build from an explicit current-source lean_single Mach-O seed and publish the
 # local artifact only after executing the end-to-end acceptance gate.
+# Prerequisites: Apple command-line tools and GNU timeout (brew install coreutils).
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 if [[ "$(uname -s)/$(uname -m)" != Darwin/arm64 ]]; then
     echo 'ERROR: this build requires macOS arm64' >&2
+    exit 2
+fi
+if ! command -v timeout >/dev/null 2>&1; then
+    echo 'ERROR: GNU timeout is required before building; install it with: brew install coreutils' >&2
     exit 2
 fi
 SEED_BIN="${1:?pass the current-source lean_single macOS arm64 seed}"

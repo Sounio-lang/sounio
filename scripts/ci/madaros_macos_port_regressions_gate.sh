@@ -9,6 +9,18 @@ WORK="${2:-$(mktemp -d "${TMPDIR:-/tmp}/madaros-port-regressions.XXXXXX")}"
 mkdir -p "$WORK"
 cd "$ROOT"
 export SOUNIO_STDLIB_PATH="$ROOT/stdlib"
+# Simulate a clean macOS PATH lacking timeout without hiding uname/dirname.
+mkdir -p "$WORK/without-timeout"
+ln -s /usr/bin/uname "$WORK/without-timeout/uname"
+ln -s /usr/bin/dirname "$WORK/without-timeout/dirname"
+set +e
+PATH="$WORK/without-timeout" /bin/bash scripts/ci/build_madaros_macos_arm64.sh \
+    "$WORK/nonexistent-seed" > "$WORK/timeout-preflight.log" 2>&1
+preflight_status=$?
+set -e
+test "$preflight_status" = 2
+grep -Fq 'brew install coreutils' "$WORK/timeout-preflight.log"
+echo 'PASS negative: missing timeout refused before compiler build'
 "${CXX:-/usr/bin/clang++}" -std=c++23 -O2 -ffp-contract=off -Wall -Wextra -Werror \
     scripts/ci/knowledge_measure_variance_oracle.cpp -o "$WORK/variance-oracle"
 "$WORK/variance-oracle" > "$WORK/variance-oracle.log"
