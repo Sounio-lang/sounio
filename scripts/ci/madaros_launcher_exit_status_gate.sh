@@ -109,4 +109,11 @@ fi
   >"$WORK/good-log.txt" 2>&1
 test -s "$WORK/good-program"
 grep -Fq 'Compilation successful!' "$WORK/good-log.txt"
+grep -Fxq "   Output: $WORK/good-program" "$WORK/good-log.txt"
+"$ROOT_DIR/bin/madaros" --science-boundary off run \
+  "$ROOT_DIR/tests/run-pass/a64_unit_literal_return.sio" >"$WORK/run-log.txt" 2>&1
+grep -q '^   Output: ' "$WORK/run-log.txt"
+sed '1,/^   Output: /d' "$WORK/run-log.txt" >"$WORK/program.stdout"
+sed -n 's|^//@ expect-stdout: ||p' "$ROOT_DIR/tests/run-pass/a64_unit_literal_return.sio" >"$WORK/program.expected"
+diff -u "$WORK/program.expected" "$WORK/program.stdout"
 echo "MADAROS_LAUNCHER_EXIT_STATUS_GATE_PASS"
