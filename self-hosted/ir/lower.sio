@@ -3712,9 +3712,12 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                     let fn_id_ps = lowerer_find_or_add_fn_id_mut(lo, name)
                                     if fn_id_ps >= 0 {
                                         if (*fd).is_kernel {
+                                            // Do not stamp IR_STRATEGY_EXTERN (6). A kernel has a
+                                            // CPU lane-loop body; strategy 6 makes every call
+                                            // IrCallExtern, which native v2 cannot emit (rc=12).
                                             var mbox_k = (*lo).module
                                             var slot_k = ir_fn_get(&(*mbox_k), fn_id_ps as usize)
-                                            slot_k.compile_strategy = 6
+                                            if slot_k.compile_strategy == 6 { slot_k.compile_strategy = IR_STRATEGY_GPU_KERNEL }
                                             if slot_k.region.slot < 0 { ir_function_alloc_region(&! slot_k) }
                                             ir_fn_set(&! (*mbox_k), fn_id_ps as usize, slot_k)
                                             (*lo).module = mbox_k
@@ -5407,9 +5410,11 @@ fn lowerer_preseed_one_item_mut(
                     let fn_id_ps = lowerer_find_or_add_fn_id_mut(lo, name)
                     if fn_id_ps >= 0 {
                         if (*fd).is_kernel {
+                            // Strategy 6 is IR_STRATEGY_EXTERN. Stamping it here made
+                            // every kernel call IrCallExtern (native v2 rc=12).
                             { var mbox_k = (*lo).module
                             var slot_k = ir_fn_get(&(*mbox_k), fn_id_ps as usize)
-                            slot_k.compile_strategy = 6
+                            if slot_k.compile_strategy == 6 { slot_k.compile_strategy = IR_STRATEGY_GPU_KERNEL }
                             ir_fn_set(&! (*mbox_k), fn_id_ps as usize, slot_k)
                             (*lo).module = mbox_k }
                         }
@@ -5522,10 +5527,12 @@ fn lowerer_preseed_program_items_mut(
 }
 
 // Match the full item preseed's declaration authority. A public top-level
-// function is strategy7; a kernel is strategy6. Method visibility does not
-// create a top-level export (the existing full impl-method lane does not do so).
+// function is strategy7. A kernel is IR_STRATEGY_GPU_KERNEL (4), never 6:
+// 6 is IR_STRATEGY_EXTERN, and call lowering emits IrCallExtern for it.
+// Native v2 has no IrCallExtern arm, so every caller failed with rc=12.
+// Method visibility does not create a top-level export.
 fn ir_fast_summary_declared_strategy(inferred: i64, is_kernel: bool, is_exported: bool) -> i64 {
-    if is_kernel { 6 } else if is_exported { 7 } else { inferred }
+    if is_kernel { IR_STRATEGY_GPU_KERNEL } else if is_exported { 7 } else { inferred }
 }
 
 fn ir_fast_summary_record_export(module: &! IrModule, name: Name) with Mut, Panic, Div {
@@ -21478,7 +21485,9 @@ impl Lowerer {
                                     if fn_id_ps >= 0 {
                                         var fn_slot_ps = ir_fn_get(&(*lo.module), fn_id_ps as usize)
                                         if (*fd).is_kernel {
-                                            fn_slot_ps.compile_strategy = 6
+                                            // Not 6: that is IR_STRATEGY_EXTERN, and the call
+                                            // site would emit IrCallExtern (native v2 rc=12).
+                                            fn_slot_ps.compile_strategy = IR_STRATEGY_GPU_KERNEL
                                         } else if visibility_to_bool(head.visibility) {
                                             fn_slot_ps.compile_strategy = 7
                                             let exp_count = (*lo.module).export_count
@@ -28797,6 +28806,22 @@ impl Lowerer {
     }
 
     fn lower_call_expr_named_ref(self, e: &Expr, callee_name: Name) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // gpu_thread_id_x() is the lane counter, not a function. Registering it
+        // first left an empty stub (ud2 / NATIVE_REFUSAL missing_lowered_body).
+        // Outside a kernel there is no counter: read 0, do not call the stub.
+        if name_eq(callee_name, make_name("gpu_thread_id_x")) {
+            let pair_tid = self.fresh_reg()
+            var lo_tid = pair_tid.0
+            let dst_tid = pair_tid.1
+            if LOWER_KERNEL_TID_REG >= 0 {
+                lo_tid = lo_tid.emit(ir_copy(dst_tid, LOWER_KERNEL_TID_REG))
+                return (lo_tid, dst_tid)
+            }
+            print("warning: gpu_thread_id_x() outside a kernel lane loop reads 0")
+            print(" -- inline it into the `kernel fn` body; a helper cannot see the lane counter (#1504)\n")
+            lo_tid = lo_tid.emit(ir_load_imm(dst_tid, 0))
+            return (lo_tid, dst_tid)
+        }
         var lo1 = self
         let fn_id = lowerer_find_or_add_fn_id_mut(&! lo1, callee_name)
         if lo1.ir_name_is_knowledge_kaxi_publish(callee_name) {
@@ -28845,32 +28870,13 @@ impl Lowerer {
         let pair_d = lo2.fresh_reg()
         let lo3 = pair_d.0
         let dst = pair_d.1
-        // gpu_thread_id_x() inside a kernel lane loop is the loop counter, not a
-        // call. resolve.sio:1059 allowlists the 12 GPU intrinsics as implicit
-        // builtins that are never bound, so the emitted call names nothing and
-        // leaves `dst` unwritten — which reads as 0 and is why every lane looked
-        // like lane 0. Outside a kernel LOWER_KERNEL_TID_REG is -1 and this is
-        // skipped, preserving the previous behaviour for the other 11 intrinsics.
-        if name_eq(callee_name, make_name("gpu_thread_id_x")) {
-            if LOWER_KERNEL_TID_REG >= 0 {
-                let lo_tid = lo3.emit(ir_copy(dst, LOWER_KERNEL_TID_REG))
-                return (lo_tid, dst)
-            }
-            // Reached outside a kernel lane loop — typically a helper function
-            // that reads gpu_thread_id_x() and is called from a kernel. The lane
-            // counter is a vreg local to the kernel frame, so it cannot be seen
-            // from here and the read still degrades to 0.
-            //
-            // This is the residue of #1504 and it is announced rather than left
-            // silent: a wrong answer nobody is told about is the failure mode
-            // that let the original defect survive for weeks. lean_single does
-            // not get this right either — it skips the lane loop entirely for
-            // such a kernel (measured: 1 lane instead of 4).
-            print("warning: gpu_thread_id_x() outside a kernel lane loop reads 0")
-            print(" — inline it into the `kernel fn` body; a helper cannot see the lane counter (#1504)\n")
-        }
         let callee_strat_ext: i64 = if fn_id >= 0 && fn_id < (*lo3.module).fn_count { ir_fn_get(&(*lo3.module), fn_id as usize).compile_strategy } else { 0 }
-        if callee_strat_ext == 6 {
+        let callee_body_ic: i64 = if fn_id >= 0 && fn_id < (*lo3.module).fn_count { ir_fn_get(&(*lo3.module), fn_id as usize).instr_count } else { 0 }
+        // Strategy 6 is IR_STRATEGY_EXTERN, but it is also the chaotic-effect
+        // id and was stamped on kernels. IrCallExtern has no native-v2 arm
+        // (rc=12). A callee that already has a body is a direct call. A true
+        // extern still has instr_count 0.
+        if callee_strat_ext == 6 && callee_body_ic <= 0 {
             let lo_ext = lo3.emit(ir_call_extern(dst, callee_name, args, argc))
             return (lo_ext, dst)
         }

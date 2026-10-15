@@ -1288,6 +1288,23 @@ fn name_is_heap_free(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+fn name_is_heap_realloc(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 12 { return false }
+    if n.buf[0] != 104 as i8 { return false }
+    if n.buf[1] != 101 as i8 { return false }
+    if n.buf[2] != 97 as i8 { return false }
+    if n.buf[3] != 112 as i8 { return false }
+    if n.buf[4] != 95 as i8 { return false }
+    if n.buf[5] != 114 as i8 { return false }
+    if n.buf[6] != 101 as i8 { return false }
+    if n.buf[7] != 97 as i8 { return false }
+    if n.buf[8] != 108 as i8 { return false }
+    if n.buf[9] != 108 as i8 { return false }
+    if n.buf[10] != 111 as i8 { return false }
+    if n.buf[11] != 99 as i8 { return false }
+    true
+}
+
 fn name_ref_is_print_int(n: &Name) -> bool with Mut, Panic, Div {
     if (*n).len != 9 { return false }
     if (*n).buf[0] != 112 as i8 { return false }
@@ -1358,6 +1375,7 @@ fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_is_assert(*name) { return 21 }
     if name_is_heap_alloc(*name) { return 23 }
     if name_is_heap_free(*name) { return 24 }
+    if name_is_heap_realloc(*name) { return 71 }
     if name_is_malloc(*name) { return 23 }
     if name_is_free(*name) { return 24 }
     if name_is_arena_mark(*name) { return 56 }
@@ -1470,6 +1488,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_str_from_bytes((*func).name) { return 22 }
     if name_is_heap_alloc((*func).name) { return 23 }
     if name_is_heap_free((*func).name) { return 24 }
+    if name_is_heap_realloc((*func).name) { return 71 }
     if name_is_syscall6((*func).name) { return 27 }
     if name_is_malloc((*func).name) { return 23 }
     if name_is_free((*func).name) { return 24 }
@@ -4343,6 +4362,75 @@ fn emit_builtin_heap_free_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_xor_rax_rax(nc)
     nc_emit_ret(nc)
     nc_patch_u32_le(nc, null_patch, done_offset - (null_patch + 4))
+}
+
+// heap_realloc(ptr, new_n) -> payload. Same header as heap_alloc: the
+// page-rounded mapping length lives at ptr-8. Growth uses mremap so the
+// bytes already written stay put. A null ptr is a fresh alloc.
+fn emit_builtin_heap_realloc_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_test_rdi_rdi(nc)
+    let null_jz = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x84)
+    nc_emit_u32_le(nc, 0)
+
+    // r8 = page_round_up(new_n + 8), same arithmetic as heap_alloc.
+    nc_emit_byte(nc, 0x49)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xf0)
+    nc_emit_byte(nc, 0x49)
+    nc_emit_byte(nc, 0x81)
+    nc_emit_byte(nc, 0xc0)
+    nc_emit_u32_le(nc, 4103)
+    nc_emit_byte(nc, 0x4d)
+    nc_emit_byte(nc, 0x85)
+    nc_emit_byte(nc, 0xc0)
+    let overflow_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x8e)
+    nc_emit_u32_le(nc, 0)
+    nc_emit_byte(nc, 0x49)
+    nc_emit_byte(nc, 0x81)
+    nc_emit_byte(nc, 0xe0)
+    nc_emit_u32_le(nc, -4096)
+
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xef)
+    nc_emit_byte(nc, 8)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x37)
+    nc_emit_byte(nc, 0x4c)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xc2)
+    nc_emit_mov_r10_imm32(nc, 1)
+    nc_emit_mov_rax_imm(nc, 25)
+    nc_emit_syscall(nc)
+    nc_emit_test_rax_rax(nc)
+    let mremap_fail = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x88)
+    nc_emit_u32_le(nc, 0)
+    nc_emit_byte(nc, 0x4c)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0x00)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xc0)
+    nc_emit_byte(nc, 8)
+    nc_emit_ret(nc)
+
+    let fresh = (*nc).code.len
+    nc_emit_mov_reg_reg(nc, 7, 6)
+    emit_builtin_heap_alloc_into(nc)
+
+    let fail_offset = (*nc).code.len
+    nc_emit_xor_rax_rax(nc)
+    nc_emit_ret(nc)
+    nc_patch_u32_le(nc, null_jz, fresh - (null_jz + 4))
+    nc_patch_u32_le(nc, overflow_patch, fail_offset - (overflow_patch + 4))
+    nc_patch_u32_le(nc, mremap_fail, fail_offset - (mremap_fail + 4))
 }
 
 fn nc_alloc_diag_append_ascii_into(nc: &! NativeCompiler, text: string) with Mut, Panic, Div {
@@ -9126,6 +9214,7 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_str_from_bytes(name) { return 22 }
     if name_is_heap_alloc(name) { return 23 }
     if name_is_heap_free(name) { return 24 }
+    if name_is_heap_realloc(name) { return 71 }
     if name_is___sounio_seq_push(name) { return 51 }
     if name_is___sounio_seq_push_scalar(name) { return 70 }
     if name_is___sounio_seq_get(name) { return 52 }
@@ -9242,6 +9331,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 22 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_from_bytes((*nc))); return }
     if builtin_id == 23 { emit_builtin_heap_alloc_into(nc); return }
     if builtin_id == 24 { emit_builtin_heap_free_into(nc); return }
+    if builtin_id == 71 { emit_builtin_heap_realloc_into(nc); return }
     if builtin_id == 25 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
     if builtin_id == 26 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
     if builtin_id == 27 { emit_builtin_syscall6_into(nc); return }
