@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.compiler.madaros-macos-corpus
+authority: repo_only
+audience: contributors
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.madaros-macos-corpus
+-->
+
 # Native macOS Madaros: pinned 200-program corpus
 
 The immutable selection is `tests/manifests/madaros_macos_200.txt`, recovered

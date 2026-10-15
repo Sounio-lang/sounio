@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.compiler.madaros-macos-arm64
+authority: repo_only
+audience: contributors
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.madaros-macos-arm64
+-->
+
 # Madaros on macOS arm64
 
 The native host is built from `self-hosted/compiler/main.sio` by a current-source
