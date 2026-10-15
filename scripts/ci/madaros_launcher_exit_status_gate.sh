@@ -100,4 +100,13 @@ if [[ -s "$WORK/bad.elf" ]]; then
   echo "FAIL: madaros left an artifact after a failed native build" >&2
   exit 1
 fi
+if grep -Fq 'Compilation successful!' "$WORK/bad-log.txt"; then
+  echo 'FAIL: failed compilation printed the public success marker' >&2
+  exit 1
+fi
+"$ROOT_DIR/bin/madaros" --science-boundary off build \
+  "$ROOT_DIR/tests/run-pass/a64_unit_literal_return.sio" -o "$WORK/good-program" \
+  >"$WORK/good-log.txt" 2>&1
+test -s "$WORK/good-program"
+grep -Fq 'Compilation successful!' "$WORK/good-log.txt"
 echo "MADAROS_LAUNCHER_EXIT_STATUS_GATE_PASS"

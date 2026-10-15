@@ -51,7 +51,7 @@ sed -n 's|^//@ expect-stdout: ||p' "$CONTROL_SOURCE" >"$GATE_DIR/control.expecte
 tail -n 2 "$GATE_DIR/control.log" >"$GATE_DIR/control.stdout.log"
 diff -u "$GATE_DIR/control.expected.log" "$GATE_DIR/control.stdout.log"
 set +e
-"$MADAROS_BIN" run "$ROOT_DIR/tests/run-pass/madaros_macos_exit_status.sio" --target aarch64-macos -o "$GATE_DIR/exit-program" >"$GATE_DIR/exit.log" 2>"$GATE_DIR/exit.stderr.log"
+"$MADAROS_BIN" run "$ROOT_DIR/tests/native/madaros_macos_exit_status.sio" --target aarch64-macos -o "$GATE_DIR/exit-program" >"$GATE_DIR/exit.log" 2>"$GATE_DIR/exit.stderr.log"
 program_status=$?
 set -e
 if [[ "$program_status" != 7 ]]; then

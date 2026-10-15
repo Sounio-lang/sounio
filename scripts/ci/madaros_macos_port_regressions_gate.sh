@@ -9,10 +9,13 @@ WORK="${2:-$(mktemp -d "${TMPDIR:-/tmp}/madaros-port-regressions.XXXXXX")}"
 mkdir -p "$WORK"
 cd "$ROOT"
 export SOUNIO_STDLIB_PATH="$ROOT/stdlib"
+"${CXX:-/usr/bin/clang++}" -std=c++23 -O2 -ffp-contract=off -Wall -Wextra -Werror \
+    scripts/ci/knowledge_measure_variance_oracle.cpp -o "$WORK/variance-oracle"
+"$WORK/variance-oracle" > "$WORK/variance-oracle.log"
 for test in a64_tuple_call_snapshot a64_box_large_field_table \
     a64_array_element_borrow madaros_nested_float_array_rank \
     madaros_generic_hof_scalar_inference madaros_measure_literal_variance_bound \
-    madaros_escaping_float_closure; do
+    madaros_escaping_float_closure madaros_measure_variance_joins; do
     source_path="tests/run-pass/$test.sio"
     timeout 90 "$COMPILER" build "$source_path" --target aarch64-macos -o "$WORK/$test" > "$WORK/$test.build.log" 2>&1
     chmod +x "$WORK/$test"
@@ -30,6 +33,11 @@ for test in madaros_closure_inferred_numeric_rejects_bool \
     madaros_generic_hof_inference_mismatch \
     madaros_measure_unknown_variance_not_attested \
     madaros_measure_excess_variance_not_attested \
+    madaros_measure_sum_variance_not_attested \
+    madaros_measure_correlated_variance_not_attested \
+    madaros_measure_unknown_sum_not_attested \
+    madaros_measure_large_sum_not_attested \
+    madaros_measure_add_payload_mismatch \
     ontology_epistemic_closure_return_downgrade_reject; do
     source_path="tests/compile-fail/$test.sio"
     set +e
