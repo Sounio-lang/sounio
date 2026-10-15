@@ -9792,6 +9792,70 @@ fn fo_inline_known(n: Name) -> bool with Mut, Panic, Div, Alloc {
     false
 }
 
+// #2966: an `if` is not a call. lower_expr_contains_call_ref returns true
+// for every non-whitelisted kind, so `let abs_dist = if d < 0.0 { 0.0 - d }
+// else { d }` was not re-lower-safe. The inline variance walk then skipped
+// the binding and the tail `1.0 - abs_dist / half_width` died at site 15349
+// (`orbit_boundary_epsilon`, inlined while lowering `orbit_is_contested`).
+// A pure tree (literals, idents, arithmetic, nested if/block, no call, no
+// return, no assign) is safe to evaluate twice. A call inside the if stays
+// unsafe: re-emitting it would run the call a second time, including a Mut
+// helper that fo_inline_known would otherwise admit.
+fn lower_opt_expr_pure_tree(opt: &Option<Box<Expr>>, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    match *opt {
+        Some(e) => lower_expr_pure_tree(&(*e), depth),
+        None => true,
+    }
+}
+
+fn lower_block_pure_tree(blk_opt: &Option<Box<Block>>, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 64 { return false }
+    match *blk_opt {
+        Some(blk) => {
+            var cur = &(*blk).stmts
+            while true {
+                match *cur {
+                    Some(list) => {
+                        let st = &(*list).head
+                        if st.kind == StmtKind::StmtAssign { return false }
+                        if !lower_opt_expr_pure_tree(&st.expr, depth + 1) { return false }
+                        cur = &(*list).tail
+                    }
+                    None => break
+                }
+            }
+            true
+        }
+        None => true,
+    }
+}
+
+fn lower_expr_pure_tree(e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 64 { return false }
+    let k = (*e).kind
+    if k == ExprKind::ExprIntLit || k == ExprKind::ExprFloatLit || k == ExprKind::ExprBoolTrue
+        || k == ExprKind::ExprBoolFalse || k == ExprKind::ExprStringLit || k == ExprKind::ExprCharLit
+        || k == ExprKind::ExprIdent || k == ExprKind::ExprPath {
+        return true
+    }
+    if k == ExprKind::ExprBinary || k == ExprKind::ExprIndex {
+        if !lower_opt_expr_pure_tree(&(*e).left, depth + 1) { return false }
+        return lower_opt_expr_pure_tree(&(*e).right, depth + 1)
+    }
+    if k == ExprKind::ExprUnary || k == ExprKind::ExprCast || k == ExprKind::ExprFieldAccess {
+        return lower_opt_expr_pure_tree(&(*e).left, depth + 1)
+    }
+    if k == ExprKind::ExprIf {
+        if !lower_opt_expr_pure_tree(&(*e).left, depth + 1) { return false }
+        if !lower_block_pure_tree(&(*e).block, depth + 1) { return false }
+        return lower_opt_expr_pure_tree(&(*e).else_expr, depth + 1)
+    }
+    if k == ExprKind::ExprBlock {
+        return lower_block_pure_tree(&(*e).block, depth + 1)
+    }
+    false
+}
+
 // Like !lower_expr_contains_call_ref, but a call to a pure math builtin with
 // re-lower-safe arguments is still safe to evaluate twice.
 fn lower_expr_relower_safe_ref(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
@@ -9812,6 +9876,9 @@ fn lower_expr_relower_safe_ref(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
     }
     if (*e).kind == ExprKind::ExprUnary || (*e).kind == ExprKind::ExprCast || (*e).kind == ExprKind::ExprFieldAccess {
         return lower_opt_expr_relower_safe(&(*e).left)
+    }
+    if (*e).kind == ExprKind::ExprIf || (*e).kind == ExprKind::ExprBlock {
+        return lower_expr_pure_tree(e, 0)
     }
     !lower_expr_contains_call_ref(e)
 }
@@ -18153,25 +18220,38 @@ impl Lowerer {
                 // inline). Scoped like lower_block_ref.
                 lo.scope_depth = lo.scope_depth + 1
                 let saved_tail_locals = (*lo.locals).count
+                // #2966: a let whose RHS cannot be evaluated twice is not bound.
+                // Continuing into a later expression looks the name up and
+                // reports site 15349. Unknown variance is -1, not a hard error.
+                var skip_later_expr = false
                 while true {
                     match *current {
                         Some(list) => {
                             let stmt_ref = &(*list).head
                             // Only a let that is safe to evaluate twice: the value
                             // path has already run this arm once.
-                            if stmt_ref.kind == StmtKind::StmtLet && lower_opt_expr_relower_safe(&stmt_ref.expr) {
-                                let lp = lo.lower_let_stmt_ref(stmt_ref, false)
-                                lo = lp.0
+                            if stmt_ref.kind == StmtKind::StmtLet {
+                                if lower_opt_expr_relower_safe(&stmt_ref.expr) {
+                                    let lp = lo.lower_let_stmt_ref(stmt_ref, false)
+                                    lo = lp.0
+                                } else {
+                                    skip_later_expr = true
+                                }
                             }
                             if stmt_ref.kind == StmtKind::StmtExpr {
-                                match stmt_ref.expr {
-                                    Some(te) => {
-                                        let p = lo.lower_expr_variance_ref(&(*te))
-                                        lo = p.0
-                                        last_v = p.1
-                                        found = true
+                                if skip_later_expr {
+                                    found = false
+                                    last_v = 0 - 1
+                                } else {
+                                    match stmt_ref.expr {
+                                        Some(te) => {
+                                            let p = lo.lower_expr_variance_ref(&(*te))
+                                            lo = p.0
+                                            last_v = p.1
+                                            found = true
+                                        }
+                                        _ => {}
                                     }
-                                    _ => {}
                                 }
                             }
                             current = &(*list).tail
