@@ -9880,6 +9880,41 @@ fn fo_block_has_unsupported_ctl(blk_opt: &Option<Box<Block>>, depth: i64) -> boo
     }
 }
 
+// Speculative FO re-lower must not refuse ELF publication. #2956 made
+// had_error + IR_LOWER_COMPILE_ERROR_LATCH survive `(*lo) = ...` stores;
+// before that, an ident miss inside fo_inline_call_variance was dropped and
+// gen2 still reached rung `run`. After it, `orbit_is_contested` (two nested
+// if-helpers as call args) stopped the ratcheted self-compile at
+// into_acc_done=7 with report_error_at(15349). Snapshot / restore the ledger
+// so a failed inline stays a -1 variance, not a hard compile error.
+struct FoInlineErrorSnap {
+    error_count: i64,
+    had_error: bool,
+    total: i64,
+    latch: bool,
+    unres: i64,
+}
+
+fn fo_inline_error_snap(error_count: i64, had_error: bool) -> FoInlineErrorSnap {
+    FoInlineErrorSnap {
+        error_count: error_count,
+        had_error: had_error,
+        total: IR_LOWER_ERROR_TOTAL,
+        latch: IR_LOWER_COMPILE_ERROR_LATCH,
+        unres: IR_LOWER_UNRES_COUNT,
+    }
+}
+
+fn fo_inline_error_grew(error_count: i64, had_error: bool, snap: FoInlineErrorSnap) -> bool {
+    error_count > snap.error_count || IR_LOWER_ERROR_TOTAL > snap.total || (had_error && !snap.had_error)
+}
+
+fn fo_inline_error_restore_globals(snap: FoInlineErrorSnap) with Mut {
+    IR_LOWER_ERROR_TOTAL = snap.total
+    IR_LOWER_COMPILE_ERROR_LATCH = snap.latch
+    IR_LOWER_UNRES_COUNT = snap.unres
+}
+
 // #1706: a helper registered for inline FO declares no IO/Mut/Alloc effect
 // (fo_inline_note), so calling it twice is as safe as a pure math builtin.
 fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
@@ -17486,6 +17521,10 @@ impl Lowerer {
         }
         // Each argument's value (and, for an f64 parameter, its variance and
         // sensitivities), in the caller.
+        // Re-lowering the helper is best-effort. Any diagnostic it raises
+        // (ident miss, unsupported shape) must roll back: this is variance
+        // analysis, not the call's value path, which already succeeded.
+        let fo_err_snap = fo_inline_error_snap(lo.error_count, lo.had_error)
         var vals: [i64; 16] = [0 - 1; 16]
         var vars: [i64; 16] = [0 - 1; 16]
         var isf: [i64; 16] = [0; 16]
@@ -17794,6 +17833,12 @@ impl Lowerer {
         var bigr = lo.big
         (*bigr).so_bind_hess = saved_hess_rows
         lo.big = bigr
+        if fo_inline_error_grew(lo.error_count, lo.had_error, fo_err_snap) {
+            lo.error_count = fo_err_snap.error_count
+            lo.had_error = fo_err_snap.had_error
+            fo_inline_error_restore_globals(fo_err_snap)
+            return (lo.fo_clear_expr_sens().so_clear_expr_hess(), 0 - 1)
+        }
         if !ok || result < 0 {
             return (lo.fo_clear_expr_sens().so_clear_expr_hess(), 0 - 1)
         }
@@ -33101,6 +33146,7 @@ impl Lowerer {
                         print_int(self.locals.count)
                         print("\n")
                     }
+                    lower_note_unresolved(e.name)
                     let loe = self.report_error_at(15349)
                     loe.emit_unit()
                 }
