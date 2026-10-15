@@ -43,6 +43,46 @@ Fresh runs refuse to overwrite an existing result directory.
 
 ## Main-integration regression, 2026-10-15
 
+### Post-merge self-check capacity and scalar initialization follow-up
+
+The port merged as `f5b2c5850be9f3d3995719ffcade44a6d851658a`. Its post-merge
+CI `38796025054` independently passed the native macOS/Metal 200-member gate,
+but failed the Linux self-compile ladder at `check`: `E-USE-MOD-CAP`. The
+module-scoped import registry exceeded 1024 entries. A follow-up aligns the
+checker, specializer and lowerer at 4096 entries, retaining module identity,
+full-name collision checks and hard overflow refusal.
+
+`scripts/ci/module_registry_capacity_gate.sh COMPILER` generates a fixture
+from the production registry functions and executes it. The C++23 generator
+is not an alternate registry implementation. Only the extracted hash's effect
+annotation is widened for the bootstrap seed's local-mutation rules; its body
+is unchanged. The probe exercises hash collisions, module isolation,
+duplicates at capacity, the 4096/4097 refusal edge, and scalar boolean globals.
+The previous source fails the capacity probe with rc 5. The candidate passes.
+
+The same probe exposed an ARM64 startup defect: a scalar boolean's one-byte
+logical size divided by a word stride produced zero iterations in a
+post-tested BSS fill loop, which then wrote beyond `__DATA` (Bus error).
+The follow-up emits one word store for the eight-byte-padded scalar slot,
+as on x86, and the candidate executes the previously crashing probe.
+
+Slurm job 14482 on `cpuops-t560-proxmox` rebuilt the Linux candidate, executed
+the registry probe and checked the full compiler entry point, all with rc 0.
+Linux candidate SHA-256:
+`6831d6b09b3f99716ec21854dbabc1b44580bd74e2390ea43166d7ad741686f4`.
+The independently rebuilt and signed native macOS candidate passed ABI
+acceptance, extended positive/negative regressions and a fresh **200/200**
+with mandatory real Metal. Its C++23 binary64 oracle checked 40960 comparisons
+with zero failures. Signed host SHA-256:
+`58c1cd35986f149e5abc45958dffb939e1779e02860e47c272729a5b48a16b10`.
+All binaries and generated receipts remain excluded.
+
+`fixed_point_named_diagnostic_gate.sh` also proves that a named checker error
+is counted rather than reported as zero: the injected failure remains rc 1
+and rung `none` both before and after the reporting fix. These focused and
+corpus passes do **not** establish recovery of gen2/run, a modular Madaros
+fixed point, or green remote CI for the follow-up.
+
 The merge-queue run `38776296357`, integration commit
 `9d99a9a817da9c353a2879da3dcb2ef3918475f8`, must not be conflated with the
 earlier successful corrected-corpus run: it reported 199 passes and one compile
