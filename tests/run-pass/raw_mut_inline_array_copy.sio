@@ -1,0 +1,57 @@
+//@ run-pass
+//@ requires: madaros
+// Copying an inline array out of a *mut payload must not load word 0 and
+// treat it as a GC handle. heap_alloc zeroes that word, so
+// `var bufs = (*p).bytes; bufs[i] = v` resolved handle 0 and stored at
+// address 0x20 (gen2 SIGSEGV in checker_const_name_write).
+
+struct Bytes {
+    bytes: [i8; 32],
+    tag: i64,
+}
+
+struct Words {
+    slots: [i64; 4],
+    tag: i64,
+}
+
+fn write_byte(buf: &![i8; 32], i: i64, v: i8) with Mut {
+    buf[i] = v
+}
+
+fn bump_slot(slots: &![i64; 4]) with Mut {
+    slots[1] = slots[1] + 5
+}
+
+fn poke_bytes(p: *mut Bytes) with Mut {
+    var bufs = (*p).bytes
+    write_byte(&! bufs, 1, 97 as i8)
+    (*p).bytes = bufs
+}
+
+fn poke_words(p: *mut Words) with Mut {
+    var slots = (*p).slots
+    bump_slot(&! slots)
+    (*p).slots = slots
+}
+
+fn main() -> i64 with Mut, Alloc, Panic, Div {
+    let pb = heap_alloc(4096) as *mut Bytes
+    if (pb as i64) == 0 { return 1 }
+    (*pb).tag = 7
+    poke_bytes(pb)
+    if (*pb).bytes[0] != 0 as i8 { return 2 }
+    if (*pb).bytes[1] != 97 as i8 { return 3 }
+    if (*pb).tag != 7 { return 4 }
+    heap_free(pb as *mut u8)
+
+    let pw = heap_alloc(4096) as *mut Words
+    if (pw as i64) == 0 { return 5 }
+    (*pw).slots[1] = 10
+    (*pw).tag = 9
+    poke_words(pw)
+    if (*pw).slots[1] != 15 { return 6 }
+    if (*pw).tag != 9 { return 7 }
+    heap_free(pw as *mut u8)
+    0
+}
