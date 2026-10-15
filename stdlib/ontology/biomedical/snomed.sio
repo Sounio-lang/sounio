@@ -191,6 +191,12 @@ pub struct SNOMEDHierarchyEntry {
     child_ids: [i64; 8],
     n_children: i64,
     depth: i64,
+    // Set when a parent or child id was DROPPED because the 8-slot list
+    // was full.  A dropped parent silently removes an is-a edge from the
+    // hierarchy, which makes every downstream ancestor / Wu-Palmer answer
+    // wrong in the unsound direction, so the drop is recorded instead of
+    // being invisible.  Propagated into SNOMEDHierarchy.truncated by add.
+    truncated: bool,
 }
 
 pub fn snomed_hierarchy_entry_new(id: i64) -> SNOMEDHierarchyEntry {
@@ -201,23 +207,34 @@ pub fn snomed_hierarchy_entry_new(id: i64) -> SNOMEDHierarchyEntry {
         child_ids: [0; 8],
         n_children: 0,
         depth: 0,
+        truncated: false,
     }
 }
 
 impl SNOMEDHierarchyEntry {
-    // Append a parent id (no-op when full).
+    // True when add_parent / add_child dropped an id for lack of room.
+    pub fn entry_is_truncated(self: &SNOMEDHierarchyEntry) -> bool {
+        self.truncated
+    }
+
+    // Append a parent id.  Records truncation when full instead of
+    // dropping the edge silently.
     pub fn add_parent(self: &!SNOMEDHierarchyEntry, parent: i64) with Mut {
         if self.n_parents < SNOMED_MAX_PARENTS {
             self.parent_ids[self.n_parents] = parent
             self.n_parents = self.n_parents + 1
+        } else {
+            self.truncated = true
         }
     }
 
-    // Append a child id (no-op when full).
+    // Append a child id.  Records truncation when full.
     pub fn add_child(self: &!SNOMEDHierarchyEntry, child: i64) with Mut {
         if self.n_children < SNOMED_MAX_PARENTS {
             self.child_ids[self.n_children] = child
             self.n_children = self.n_children + 1
+        } else {
+            self.truncated = true
         }
     }
 }
@@ -231,6 +248,14 @@ pub struct SNOMEDHierarchy {
     n_parents: [i64; 64],
     parents: [i64; 512],
     n: i64,
+    // Set whenever a capacity limit dropped data that the caller supplied
+    // or that a traversal still needed: a full 64-entry table, an entry
+    // that itself dropped parents, a full BFS queue, or a full ancestor
+    // output buffer.  Once set, is_ancestor / collect_ancestors /
+    // lca_depth / similarity answers are NOT trustworthy — a genuine
+    // ancestor can be reported absent, which silently deflates Wu-Palmer
+    // scores.  Read with is_truncated.
+    truncated: bool,
 }
 
 pub fn snomed_hierarchy_new() -> SNOMEDHierarchy {
@@ -240,6 +265,7 @@ pub fn snomed_hierarchy_new() -> SNOMEDHierarchy {
         n_parents: [0; 64],
         parents: [0; 512],
         n: 0,
+        truncated: false,
     }
 }
 
@@ -256,7 +282,21 @@ fn snomed_i64_contains(xs: &[i64; 64], n: i64, x: i64) -> bool {
 }
 
 impl SNOMEDHierarchy {
-    // Copy an entry into the hierarchy (no-op when full).
+    // True when any capacity limit dropped data (see the `truncated`
+    // field).  Callers that need sound ancestor / similarity answers must
+    // check this after building and after querying.
+    pub fn is_truncated(self: &SNOMEDHierarchy) -> bool {
+        self.truncated
+    }
+
+    // Clear the truncation flag (e.g. after rebuilding the hierarchy).
+    pub fn clear_truncated(self: &!SNOMEDHierarchy) with Mut {
+        self.truncated = false
+    }
+
+    // Copy an entry into the hierarchy.  Records truncation when the
+    // table is full, or when the entry itself already dropped parents,
+    // instead of dropping the concept silently.
     pub fn add(self: &!SNOMEDHierarchy, entry: &SNOMEDHierarchyEntry) with Mut {
         if self.n < SNOMED_MAXH {
             let i = self.n
@@ -269,6 +309,11 @@ impl SNOMEDHierarchy {
                 k = k + 1
             }
             self.n = self.n + 1
+            if entry.truncated {
+                self.truncated = true
+            }
+        } else {
+            self.truncated = true
         }
     }
 
@@ -286,7 +331,10 @@ impl SNOMEDHierarchy {
 
     // Check if concept A is an ancestor of concept B (non-reflexive:
     // the descendant's stated parents and their ancestors are searched).
-    pub fn is_ancestor(self: &SNOMEDHierarchy, ancestor_id: i64, descendant_id: i64) -> bool with Mut {
+    // Takes &! because a full BFS queue must be RECORDED: returning
+    // false for an unexplored ancestor is a wrong answer, not a missing
+    // one.  See the `truncated` field.
+    pub fn is_ancestor(self: &!SNOMEDHierarchy, ancestor_id: i64, descendant_id: i64) -> bool with Mut {
         let desc_idx = self.find(descendant_id)
         if desc_idx < 0 {
             return false
@@ -315,9 +363,17 @@ impl SNOMEDHierarchy {
                 k = 0
                 while k < self.n_parents[current_idx] {
                     let p = self.parents[current_idx * SNOMED_MAX_PARENTS + k]
-                    if !snomed_i64_contains(&queue, tail, p) && tail < 64 {
-                        queue[tail] = p
-                        tail = tail + 1
+                    if !snomed_i64_contains(&queue, tail, p) {
+                        if tail < 64 {
+                            queue[tail] = p
+                            tail = tail + 1
+                        } else {
+                            // The queue is full and `p` was never visited,
+                            // so this BFS can no longer decide the
+                            // question.  Falling through to `false` would
+                            // report a GENUINE ancestor as absent.
+                            self.truncated = true
+                        }
                     }
                     k = k + 1
                 }
@@ -329,7 +385,10 @@ impl SNOMEDHierarchy {
 
     // Collect the ancestor ids of `id` (including `id` itself) by BFS
     // over parents; writes up to 64 ids into `out`, returns the count.
-    pub fn collect_ancestors(self: &SNOMEDHierarchy, id: i64, out: &![i64; 64]) -> i64 with Mut {
+    // Takes &! for the same reason as is_ancestor: an ancestor set cut
+    // short by the 64-slot output buffer or the 64-slot BFS queue is
+    // INCOMPLETE, and lca_depth / similarity would silently under-report.
+    pub fn collect_ancestors(self: &!SNOMEDHierarchy, id: i64, out: &![i64; 64]) -> i64 with Mut {
         var n: i64 = 0
         var queue: [i64; 64] = [0; 64]
         var head: i64 = 0
@@ -348,20 +407,30 @@ impl SNOMEDHierarchy {
                 var k: i64 = 0
                 while k < self.n_parents[ci] {
                     let p = self.parents[ci * SNOMED_MAX_PARENTS + k]
-                    if !snomed_i64_contains(&queue, tail, p) && tail < 64 {
-                        queue[tail] = p
-                        tail = tail + 1
+                    if !snomed_i64_contains(&queue, tail, p) {
+                        if tail < 64 {
+                            queue[tail] = p
+                            tail = tail + 1
+                        } else {
+                            self.truncated = true
+                        }
                     }
                     k = k + 1
                 }
             }
+        }
+        // Work still queued means the 64-slot `out` buffer ran out first:
+        // the returned ancestor set is a PREFIX, not the full set.
+        if head < tail {
+            self.truncated = true
         }
         n
     }
 
     // Lowest common ancestor depth (max stored depth over common
     // ancestors, self included).
-    pub fn lca_depth(self: &SNOMEDHierarchy, id1: i64, id2: i64) -> i64 with Mut {
+    // Takes &! because collect_ancestors does (truncation is recorded).
+    pub fn lca_depth(self: &!SNOMEDHierarchy, id1: i64, id2: i64) -> i64 with Mut {
         var ancestors1: [i64; 64] = [0; 64]
         var ancestors2: [i64; 64] = [0; 64]
 
@@ -390,7 +459,9 @@ impl SNOMEDHierarchy {
     }
 
     // Wu-Palmer similarity between two SNOMED concepts.
-    pub fn similarity(self: &SNOMEDHierarchy, id1: i64, id2: i64) -> f64 with Mut, Div {
+    // Takes &! because lca_depth does.  Check is_truncated afterwards:
+    // a truncated ancestor set deflates the returned Wu-Palmer score.
+    pub fn similarity(self: &!SNOMEDHierarchy, id1: i64, id2: i64) -> f64 with Mut, Div {
         if id1 == id2 {
             return 1.0
         }
@@ -445,6 +516,39 @@ pub let SNOMED_ELPLUS_MAX_STATED: i64 = 64
 // First existential concept id (atoms live below it).
 pub let SNOMED_ELPLUS_EX_BASE: i64 = 33
 
+// ── Fail-closed overflow register ────────────────────────────────────────
+//
+// Every fixed capacity in this adapter used to drop the caller's axiom
+// SILENTLY.  That is unsound, not merely lossy: `close()` then computes the
+// EL+ closure over a TBox strictly WEAKER than the one the caller declared,
+// so `elplus_conflict` misses conflicts and `ontology::evolve::guarded_add`
+// accepts inconsistent additions on the strength of a closure that never
+// saw the dropped axioms.  Each drop site now ORs a bit into
+// `SNOMEDElplus.overflow_bits`, and `snomed_elplus_close` REFUSES to run
+// (sentinel 0 - 1) while any bit is set.
+//
+// Raising a capacity is deliberately NOT the fix here: the caps stay as
+// they are and the failure becomes loud.
+
+/// The 32-atom concept table was full; an atom did not intern.
+pub let SNOMED_ELPLUS_OVF_ATOM: i64 = 1
+/// The 8-role table was full; a role did not intern.
+pub let SNOMED_ELPLUS_OVF_ROLE: i64 = 2
+/// The 64-concept universe was full; an existential did not intern.
+pub let SNOMED_ELPLUS_OVF_EX: i64 = 4
+/// The stated-axiom buffer was full; a subsumption axiom was dropped.
+pub let SNOMED_ELPLUS_OVF_STATED: i64 = 8
+/// A subsumption axiom was dropped because an operand failed to intern.
+pub let SNOMED_ELPLUS_OVF_DROPPED_AXIOM: i64 = 16
+/// The 8-chain buffer was full; a composition chain was dropped.
+pub let SNOMED_ELPLUS_OVF_CHAIN_CAP: i64 = 32
+/// A composition chain named a role that failed to intern.
+pub let SNOMED_ELPLUS_OVF_CHAIN_ROLE: i64 = 64
+/// A role-hierarchy inclusion named a role that failed to intern.
+pub let SNOMED_ELPLUS_OVF_ROLE_SUB: i64 = 128
+/// close() found a dimension outside the dense EL+ capacities.
+pub let SNOMED_ELPLUS_OVF_CAPS: i64 = 256
+
 // Role-aware EL+ closure over a curated SNOMED fragment.
 pub struct SNOMEDElplus {
     // concept table (elplus dense layout)
@@ -474,6 +578,10 @@ pub struct SNOMEDElplus {
     nchain: i64,
     top: i64,
     rounds: i64,
+    // Bitwise OR of every SNOMED_ELPLUS_OVF_* recorded since construction.
+    // Non-zero means at least one declared axiom is NOT in the TBox, so
+    // close() refuses.  Read with snomed_elplus_overflow_bits.
+    overflow_bits: i64,
 }
 
 // New adapter state: top interned as concept 0, everything else empty.
@@ -505,6 +613,7 @@ pub fn snomed_elplus_new(top_sctid: i64) -> SNOMEDElplus with Mut {
         nchain: 0,
         top: 0,
         rounds: 0,
+        overflow_bits: 0,
     }
     c.ckind[0] = 1
     c.sctid_of[0] = top_sctid
@@ -517,6 +626,25 @@ pub fn snomed_elplus_new(top_sctid: i64) -> SNOMEDElplus with Mut {
 }
 
 impl SNOMEDElplus {
+    // Record an overflow / drop.  Every silent-truncation site in this
+    // adapter routes through here.  Defined first: helpers must precede
+    // their callers.
+    pub fn note_overflow(self: &!SNOMEDElplus, bit: i64) with Mut {
+        self.overflow_bits = self.overflow_bits | bit
+    }
+
+    // Bitwise OR of every SNOMED_ELPLUS_OVF_* recorded so far; 0 means
+    // every axiom the caller declared is actually in the TBox.
+    pub fn snomed_elplus_overflow_bits(self: &SNOMEDElplus) -> i64 {
+        self.overflow_bits
+    }
+
+    // Did anything the caller declared get dropped?  When true, close()
+    // returns 0 - 1 and every query answer is meaningless.
+    pub fn snomed_elplus_overflowed(self: &SNOMEDElplus) -> bool {
+        self.overflow_bits != 0
+    }
+
     // Look up an interned atom by SCTID; -1 if absent.  (The top
     // concept is id 0 and is matched separately where accepted.)
     pub fn find_atom(self: &SNOMEDElplus, sctid: i64) -> i64 {
@@ -543,6 +671,7 @@ impl SNOMEDElplus {
         }
         let id = self.na + 1
         if id >= SNOMED_ELPLUS_EX_BASE {
+            self.note_overflow(SNOMED_ELPLUS_OVF_ATOM)
             return 0 - 1
         }
         self.ckind[id] = 0
@@ -574,6 +703,7 @@ impl SNOMEDElplus {
             return found
         }
         if self.nr >= 8 {
+            self.note_overflow(SNOMED_ELPLUS_OVF_ROLE)
             return 0 - 1
         }
         let id = self.nr
@@ -590,6 +720,10 @@ impl SNOMEDElplus {
         let role = self.intern_role(type_sctid)
         let f = self.intern_atom(filler_sctid)
         if role < 0 || f < 0 {
+            // intern_role / intern_atom already recorded their own bit;
+            // record the existential drop too, so the caller can tell the
+            // axiom it declared never made it into the TBox.
+            self.note_overflow(SNOMED_ELPLUS_OVF_EX)
             return 0 - 1
         }
         let existing = self.exid[role * 64 + f]
@@ -598,6 +732,7 @@ impl SNOMEDElplus {
         }
         let id = SNOMED_ELPLUS_EX_BASE + self.nex
         if id >= 64 {
+            self.note_overflow(SNOMED_ELPLUS_OVF_EX)
             return 0 - 1
         }
         self.ckind[id] = 3
@@ -612,11 +747,23 @@ impl SNOMEDElplus {
     }
 
     // Stage a stated subsumption edge (replayed onto s by close()).
+    //
+    // SOUNDNESS-CRITICAL.  This used to be a bare `if` with no `else`: a
+    // stated axiom whose operands failed to intern, or that arrived after
+    // the buffer filled, simply VANISHED, and close() then reported a
+    // closure over a TBox weaker than the caller declared.  Both drop
+    // paths are now recorded, and close() refuses while either bit is set.
     pub fn stage(self: &!SNOMEDElplus, a: i64, b: i64) with Mut {
-        if a >= 0 && b >= 0 && self.n_stated < SNOMED_ELPLUS_MAX_STATED {
-            self.stated_a[self.n_stated] = a
-            self.stated_b[self.n_stated] = b
-            self.n_stated = self.n_stated + 1
+        if a < 0 || b < 0 || a >= 64 || b >= 64 {
+            self.note_overflow(SNOMED_ELPLUS_OVF_DROPPED_AXIOM)
+        } else {
+            if self.n_stated < SNOMED_ELPLUS_MAX_STATED {
+                self.stated_a[self.n_stated] = a
+                self.stated_b[self.n_stated] = b
+                self.n_stated = self.n_stated + 1
+            } else {
+                self.note_overflow(SNOMED_ELPLUS_OVF_STATED)
+            }
         }
     }
 
@@ -656,22 +803,45 @@ impl SNOMEDElplus {
     pub fn snomed_elplus_add_role_sub(self: &!SNOMEDElplus, sub_type: i64, sup_type: i64) with Mut {
         let r1 = self.intern_role(sub_type)
         let r2 = self.intern_role(sup_type)
-        if r1 >= 0 && r2 >= 0 {
+        if r1 >= 0 && r1 < 8 && r2 >= 0 && r2 < 8 {
             self.rclos[r1 * 8 + r2] = true
+        } else {
+            // The inclusion the caller stated is NOT in the role
+            // hierarchy: record it rather than closing over a weaker one.
+            self.note_overflow(SNOMED_ELPLUS_OVF_ROLE_SUB)
         }
     }
 
     // State a composition chain t1 o t2 <= t3 (relationship type
     // SCTIDs).
+    // MEMORY SAFETY.  intern_role returns 0 - 1 once the 8-role table is
+    // full.  This function used to write that 0 - 1 straight into
+    // ch1/ch2/ch3 with NO guard, unlike its sibling
+    // snomed_elplus_add_role_sub which has always guarded r >= 0.  The
+    // (RC) rule in close() then computed
+    //   CLOSE_R[(r1 * 64 + c) * 64 + f]  with r1 = 0 - 1  ->  index -4096
+    // (an out-of-bounds READ) and, on the conclusion,
+    //   CLOSE_R[(r3 * 64 + c) * 64 + f2] = true  with r3 = 0 - 1
+    // (an out-of-bounds WRITE).  CLOSE_S: [bool; 4096] is declared
+    // immediately before CLOSE_R: [bool; 32768] at the top of this module,
+    // so that write landed INSIDE the subsumption matrix and silently
+    // corrupted the closure.  Both capacity and role validity are now
+    // checked, and the drop is recorded so close() refuses.
     pub fn snomed_elplus_add_role_chain(self: &!SNOMEDElplus, t1: i64, t2: i64, t3: i64) with Mut {
-        if self.nchain < 8 {
+        if self.nchain >= 8 {
+            self.note_overflow(SNOMED_ELPLUS_OVF_CHAIN_CAP)
+        } else {
             let r1 = self.intern_role(t1)
             let r2 = self.intern_role(t2)
             let r3 = self.intern_role(t3)
-            self.ch1[self.nchain] = r1
-            self.ch2[self.nchain] = r2
-            self.ch3[self.nchain] = r3
-            self.nchain = self.nchain + 1
+            if r1 >= 0 && r1 < 8 && r2 >= 0 && r2 < 8 && r3 >= 0 && r3 < 8 {
+                self.ch1[self.nchain] = r1
+                self.ch2[self.nchain] = r2
+                self.ch3[self.nchain] = r3
+                self.nchain = self.nchain + 1
+            } else {
+                self.note_overflow(SNOMED_ELPLUS_OVF_CHAIN_ROLE)
+            }
         }
     }
 
@@ -686,7 +856,28 @@ impl SNOMEDElplus {
     // 2026-08), while the same call on locals is exact (z24).  Goes
     // through elplus_fixpoint_packed because imported calls with more
     // than 8 parameters fail native codegen from non-main callers.
+    //
+    // FAIL CLOSED.  Returns 0 - 1 (never a valid round count, which is
+    // always >= 1) when anything the caller declared was dropped, or when
+    // a dimension is outside the dense EL+ capacities.  Running anyway
+    // would report a closure over a TBox weaker than the declared one,
+    // which is exactly the failure mode that makes elplus_conflict miss
+    // conflicts.  Inspect snomed_elplus_overflow_bits for the reason.
     pub fn snomed_elplus_close(self: &!SNOMEDElplus) -> i64 with Mut, Div, Panic {
+        if self.overflow_bits != 0 {
+            self.rounds = 0 - 1
+            return 0 - 1
+        }
+        if self.nc < 0 || self.nc > 64 || self.nr < 0 || self.nr > 8 {
+            self.note_overflow(SNOMED_ELPLUS_OVF_CAPS)
+            self.rounds = 0 - 1
+            return 0 - 1
+        }
+        if self.nchain < 0 || self.nchain > 8 || self.top < 0 || self.top >= 64 {
+            self.note_overflow(SNOMED_ELPLUS_OVF_CAPS)
+            self.rounds = 0 - 1
+            return 0 - 1
+        }
         // Explicitly zero the BSS scratch buffers (initialiser only
         // covers the first slice on the current lane).
         var k: i64 = 0
@@ -748,7 +939,16 @@ impl SNOMEDElplus {
         }
         k = 0
         while k < self.n_stated {
-            CLOSE_S[self.stated_a[k] * 64 + self.stated_b[k]] = true
+            // Defence in depth: stage() already rejects out-of-range
+            // operands, so an id here that is not a legal concept would be
+            // a negative / oversized index straight into CLOSE_S.
+            let sa = self.stated_a[k]
+            let sb = self.stated_b[k]
+            if sa >= 0 && sa < 64 && sb >= 0 && sb < 64 {
+                CLOSE_S[sa * 64 + sb] = true
+            } else {
+                self.note_overflow(SNOMED_ELPLUS_OVF_DROPPED_AXIOM)
+            }
             k = k + 1
         }
         // The cross-module elplus_fixpoint_packed call miscompiles
@@ -901,6 +1101,18 @@ impl SNOMEDElplus {
                 r1 = self.ch1[k]
                 r2 = self.ch2[k]
                 r3 = self.ch3[k]
+                // MEMORY SAFETY (mirrors the same guard in
+                // ontology::elplus::elplus_fixpoint_packed — any rule
+                // change must be applied to BOTH copies of this fixpoint).
+                // A role id of 0 - 1 here makes the guard below read
+                // CLOSE_R[c * 64 + f - 4096] and the conclusion WRITE at a
+                // negative index, which lands in CLOSE_S (declared
+                // immediately before CLOSE_R) and corrupts the subsumption
+                // matrix.  snomed_elplus_add_role_chain now refuses to
+                // store such a chain; this is the second line of defence.
+                if r1 < 0 || r1 >= 8 || r2 < 0 || r2 >= 8 || r3 < 0 || r3 >= 8 {
+                    self.note_overflow(SNOMED_ELPLUS_OVF_CHAIN_ROLE)
+                } else {
                 c = 0
                 while c < self.nc {
                     f = 0
@@ -921,6 +1133,7 @@ impl SNOMEDElplus {
                         f = f + 1
                     }
                     c = c + 1
+                }
                 }
                 k = k + 1
             }
