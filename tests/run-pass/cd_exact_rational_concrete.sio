@@ -1,0 +1,109 @@
+//@ run-pass
+//@ requires: madaros
+// Issue #651 — the SCIENCE the issue said was blocked, PROVED on Madaros.
+// Exact Cayley–Dickson product over Rational (ℚ) at k=4 (sedenion, 16 components):
+// the canonical zero-divisor pair (e3+e10)(e6−e15) ANNIHILATES exactly — decidable
+// rational equality, no f64 tolerance — and e1² = −1/1. A 16×16 = 256-iteration loop,
+// far below the 2²⁰ handle-table wrap (#651 Defect A) that only bites the large-N d8 repro.
+//
+// Complements sr_mul_array_of_struct_651.sio (that guards codegen at N=16 with integer
+// coeffs; this proves the actual algebra over ℚ). cd_sigma is INLINED so this stays a
+// SINGLE-module program (import math::rational only): adding a second module import trips
+// the multimodule native thin-link (#651 Defect B) on current Madaros — a leaf cd_sigma
+// module does NOT dodge it (leaf+rational still fails). See
+// docs/audit/HYPERCOMPLEX_651_ROOTCAUSE_2026-07-14.md.
+use math::rational::{Rational, rat_zero, rat_one, rat_make, rat_add, rat_sub, rat_mul, rat_is_zero, rat_eq}
+
+// Cayley–Dickson twist sign σ(i,j,bits) ∈ {+1,−1}; pure i32, field-independent.
+fn cd_sigma(a: i32, b: i32, bits: i32) -> i32 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return -1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma(0, a_lo, bits - 1) }
+    cd_sigma(b_lo, a_lo, bits - 1)
+}
+
+struct SedR { c: [Rational; 16] }
+
+fn sr_zero() -> SedR with Mut, Panic, Div { SedR { c: [rat_zero(); 16] } }
+
+fn sr_basis(idx: i32) -> SedR with Mut, Panic, Div {
+    var r = sr_zero()
+    r.c[idx as usize] = rat_one()
+    r
+}
+
+fn sr_add(a: SedR, b: SedR) -> SedR with Mut, Panic, Div {
+    var r = sr_zero()
+    var i: i32 = 0
+    while i < 16 {
+        r.c[i as usize] = rat_add(a.c[i as usize], b.c[i as usize])
+        i = i + 1
+    }
+    r
+}
+fn sr_sub(a: SedR, b: SedR) -> SedR with Mut, Panic, Div {
+    var r = sr_zero()
+    var i: i32 = 0
+    while i < 16 {
+        r.c[i as usize] = rat_sub(a.c[i as usize], b.c[i as usize])
+        i = i + 1
+    }
+    r
+}
+
+// (a*b)[i^j] += σ(i,j,4) · a[i]·b[j]
+fn sr_mul(a: SedR, b: SedR) -> SedR with Mut, Panic, Div {
+    var r = sr_zero()
+    var i: i32 = 0
+    while i < 16 {
+        if !rat_is_zero(a.c[i as usize]) {
+            var j: i32 = 0
+            while j < 16 {
+                if !rat_is_zero(b.c[j as usize]) {
+                    let idx = i ^ j
+                    let sign = cd_sigma(i, j, 4)
+                    let prod = rat_mul(a.c[i as usize], b.c[j as usize])
+                    if sign > 0 { r.c[idx as usize] = rat_add(r.c[idx as usize], prod) }
+                    else { r.c[idx as usize] = rat_sub(r.c[idx as usize], prod) }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    r
+}
+
+fn sr_is_zero(x: SedR) -> bool with Mut, Panic, Div {
+    var i: i32 = 0
+    while i < 16 {
+        if !rat_is_zero(x.c[i as usize]) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    let a = sr_add(sr_basis(3), sr_basis(10))
+    let b = sr_sub(sr_basis(6), sr_basis(15))
+    let zd = sr_is_zero(sr_mul(a, b))
+    if zd { print("RAT-ZD PROVED\n") } else { print("RAT-ZD FAIL\n") }
+
+    let sq = sr_mul(sr_basis(1), sr_basis(1))
+    let sqok = rat_eq(sq.c[0 as usize], rat_make(0 - 1, 1))
+    if sqok { print("RAT-SQ PASS\n") } else { print("RAT-SQ FAIL\n") }
+
+    if zd && sqok { return 0 }
+    return 1
+}
