@@ -20,7 +20,7 @@
 #   //@ xfail-exit: N         — the known failure's souc exit code must be N
 #                               (124 = timeout); mismatch is a fresh FAIL
 #   //@ skip-if: CONDITION    — conditional skip (e.g., skip-if: no-gpu)
-#   //@ requires: FEATURE     — feature dependency (gpu|llvm|madaros|lean_single|slow)
+#   //@ requires: FEATURE     — feature dependency (gpu|llvm|madaros|lean_single|slow|vendor-material)
 #   //@ flaky                 — known flaky test
 #   //@ timeout: SECONDS      — override default timeout
 #
@@ -530,13 +530,37 @@ run_test() {
             # is set; the nightly slow-lane job sets it, with a much larger
             # job timeout budget.
             slow) [[ -z "${SOUNIO_SLOW_TESTS_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:slow\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
+            # `requires: vendor-material` — the test reads third-party material
+            # (vendor PDFs, datafiles) that the repository cannot carry, named one
+            # path per line in its `.args` sidecar (repo-relative or absolute).
+            # Skipped, naming the first missing path, unless every path exists;
+            # then the header's mode (check-only) applies, and
+            # scripts/ci/pireus_argv_tests_gate.sh runs it with that argv. A
+            # missing sidecar is a test-authoring error, not a skip (#2820).
+            vendor-material)
+                local vm_args="${file}.args"
+                if [[ ! -f "$vm_args" ]]; then
+                    echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"requires: vendor-material but no .args sidecar names the material\",\"idx\":$idx}" > "$output_file"
+                    return
+                fi
+                local vm_missing="" vm_line vm_path
+                while IFS= read -r vm_line || [[ -n "$vm_line" ]]; do
+                    [[ -z "$vm_line" ]] && continue
+                    vm_path="$vm_line"; [[ "$vm_path" == /* ]] || vm_path="$ROOT_DIR/$vm_path"
+                    if [[ ! -e "$vm_path" ]]; then vm_missing="$vm_line"; break; fi
+                done < "$vm_args"
+                if [[ -n "$vm_missing" ]]; then
+                    echo "{\"status\":\"skip\",\"reason\":\"requires:vendor-material (missing $vm_missing)\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"
+                    return
+                fi
+                ;;
             # An unrecognized requires value must not fall through silently: a typo
             # (e.g. `requires: madros`) would otherwise run the test against
             # whatever engine is present instead of being gated as intended, with
             # the annotation asserting nothing -- indistinguishable from the
             # vacuous-match defect this PR exists to remove.
             *)
-                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros|lean_single|slow)\",\"idx\":$idx}" > "$output_file"
+                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros|lean_single|slow|vendor-material)\",\"idx\":$idx}" > "$output_file"
                 return
                 ;;
         esac
