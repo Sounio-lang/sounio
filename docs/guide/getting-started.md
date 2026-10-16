@@ -15,7 +15,7 @@ Welcome to **Sounio**, a programming language for scientific code that carries u
 
 This page teaches the surface measured in October 2026, not the April 22 snapshot. The positive measurements are [`TOUR.md`](../../TOUR.md) (2026-10-04), the open-item ledger in [`KNOWN_LIMITATIONS.md`](../compiler/KNOWN_LIMITATIONS.md) (validated 2026-10-06; KL-11 narrowed 2026-10-13), and [`public-claim-registry.v1.tsv`](../serious-language/public-claim-registry.v1.tsv). [`MINIMUM_VIABLE_SOUNIO.md`](MINIMUM_VIABLE_SOUNIO.md) is an older conservative contract; where it still says April 22, prefer the tour and the ledger.
 
-Native execution in this guide is **Linux x86-64**. `bin/souc` routes to Madaros and, on a checkout without a local build, materializes the committed Linux ELF `bin/madaros-linux-x86_64`. That binary does not run on macOS. A Mach-O cross-compile lane exists as validated research (`platform.macos` in the claim registry). It is not the default path, and this guide does not tell you to `souc run` on a Mac.
+The committed prebuilt used by the default `bin/souc` route is a Linux x86-64 ELF; it does not run on macOS. Apple Silicon also has a separate current-source native ARM64 build and real Metal route integrated in [#2978](https://github.com/Sounio-lang/sounio/pull/2978). A clean checkout needs the native artifact built and installed before the launcher can use that route. Follow the [macOS ARM64 guide](../compiler/MADAROS_MACOS_ARM64.md) for setup and measured limits. The commands below describe the Linux prebuilt path unless stated otherwise.
 
 ## 1. Check before you run
 
@@ -116,7 +116,7 @@ souc --version
 
 ## 5. Where to look next
 
-- [README.md](../../README.md) — 2026-10-11 reconciliation, including Apple execution in #2873
+- [README.md](../../README.md) — repository map, current platform routes, and evidence boundaries
 - [Tutorial](tutorial.md) — syntax, the epistemic API, and the unit engine split
 - [TOUR.md](../../TOUR.md) — twenty measured claims, and the table of what does not work
 - [Known limitations](../compiler/KNOWN_LIMITATIONS.md) — open ledger, including KL-11 and KL-20
