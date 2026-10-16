@@ -640,6 +640,50 @@ this result. The native reader fixture also reports pool-mark sentinel -1
 through this Linux emitter, so only the complete process RSS measurement, not
 that fixture's cursor values, supports the memory conclusion. Fresh PR/queue
 and exact post-merge main CI remain required before final delivery.
+
+### Published-head CI boundary follow-up (not yet accepted)
+
+Head `10a03ee94b` reached remote f64 validation, but the existing 8,191-global
+boundary gate failed with `E-TYPE-ENV-CAP` at 8,192 total bindings. The checker
+also needs other bindings and lexical locals; a total table only one slot above
+the advertised BSS-global limit is insufficient. This is a real regression in
+the earlier fail-closed checker repair, not an OOM or a reason to weaken the
+global gate. The dedicated gen2 workflow stopped at the same pre-ladder gate.
+Logs: `/private/tmp/pr2981-head10a-f64-job-raw.log`.
+
+The unpublished candidate uses a 12,288-entry TypeEnv, preserving sticky
+overflow and all BSS/IR limits. Its production-container generator derives
+overflow from `TYPE_ENV_CAPACITY + 1` and adds a mixed fixture at the actual
+`BSS_MAX_GLOBALS` with 16 locals. The previous host refuses that mixed fixture
+with `E-TYPE-ENV-CAP`; candidate module checking passed. No candidate runtime
+success is claimed until rebuilding. A separate `envreserve` Linux snapshot
+includes the entire existing f64 gate as well as the focused gates and ladder;
+a fresh Mac build and strict corpus watcher are also pending. Changed TypeEnv
+source SHA-256:
+`e0c2f00b61c6e7f7cf0bd49c66ef2f9e4ee88065407a5801b92bc47f9eb90f80`.
+Slurm job 14715 subsequently passed the complete existing f64 gate, including
+8,191 globals compiling/executing and 8,192 cleanly refusing; imported capacity
+16,383/16,384 and ordered 7/8/9/13-argument calls also passed. The mixed
+global/local check passed, exact production-container tests passed, and the
+larger TypeEnv's overflow check refused with status 1. Focused lifetime,
+IR/address, boolean, FO/lopt and registry fixtures passed. Main check returned
+zero errors; gen2 is still running, so no new rung result is claimed yet.
+Fresh native Mac validation completed 200/200 with required real Metal,
+self-check and regressions. Host SHA-256:
+`4b92b489d4699871954ea8168190cb8af86df547c6488d872fb35b31cd3c0e5c`.
+Its Metal log reports 40,960 checked and zero failures with the C++23 oracle;
+the final validation marker is `/private/tmp/pr2981-envreserve-native-validation.log`.
+The same candidate subsequently completed Slurm 14715's unchanged ladder with
+status 0: check zero errors, gen2 rc=0, 129 dependencies, 14,732 merged functions,
+and a running Madaros gen2 banner. Reached/expected rung remain `run`; gen3 still
+exits 139, so there is no fixed-point claim. Peak RSS was 64,603,280 KiB under
+the same 64 GiB allocation. Linux gen1 SHA-256:
+`3170660e1b74b5539df798a3d45a2678fa15b4bbb166750d56560720222f9b36`;
+gen2 SHA-256:
+`ab77c3f937148b11180202ea88fba50c603c1630277dc074ac7c82a3d453ca14`.
+Full f64 gate and ladder statuses are both 0 in
+`/tmp/pr2981-bool.QVgKpb/envreserve-result/out`. This closes local verification
+of the boundary follow-up, not fresh CI or the exact post-merge main result.
 No combined commit, push or merge is justified before the ladder completes
 successfully.
 

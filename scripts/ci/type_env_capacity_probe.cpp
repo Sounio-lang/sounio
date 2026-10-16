@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <iostream>
+#include <regex>
 namespace fs = std::filesystem;
 std::string read(const fs::path& p) {
     std::ifstream f(p);
@@ -23,6 +24,14 @@ int main(int argc, char** argv) try {
     auto ast = read(root / "self-hosted/parser/ast.sio");
     auto types = read(root / "self-hosted/check/types.sio");
     auto env = read(root / "self-hosted/check/env.sio");
+    auto constant = [](const std::string& text, const std::string& name) {
+        std::smatch match;
+        if (!std::regex_search(text, match, std::regex("pub let " + name + ": i64 = ([0-9]+)")))
+            throw std::runtime_error("missing numeric capacity " + name);
+        return std::stoi(match[1].str());
+    };
+    const auto capacity = constant(env, "TYPE_ENV_CAPACITY");
+    const auto globals = constant(read(root / "self-hosted/ir/ir.sio"), "BSS_MAX_GLOBALS");
     std::ofstream p(out / "probe.sio");
     p << definition(ast, "pub struct Name {") << definition(ast, "pub fn name_eq(")
       << definition(types, "pub enum TypeKind {") << definition(types, "pub struct TypeEntry {")
@@ -86,9 +95,10 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
 }
 )";
     // True compiler front-end controls, not just a container model.
-    for (const auto& name : {"pressure", "overflow"}) {
+    for (const auto& name : {"pressure", "global-boundary", "overflow"}) {
         std::ofstream f(out / (std::string(name) + ".sio"));
-        int count = std::string(name) == "pressure" ? 4090 : 8300;
+        int count = std::string(name) == "overflow" ? capacity + 1 :
+            (std::string(name) == "global-boundary" ? globals : 4090);
         for (int i = 0; i < count; ++i) f << "var g" << i << ": i64 = 7\n";
         if (std::string(name) == "overflow") {
             f << "fn main() -> i64 { 0 }\n";

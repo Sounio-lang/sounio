@@ -25,6 +25,7 @@ if [[ "$target" = aarch64-macos ]]; then codesign -s - -f "$OUT/probe"; codesign
 timeout 90 "$OUT/probe" >"$OUT/stdout.log" 2>"$OUT/stderr.log"
 grep -Fxq TYPE_ENV_CAPACITY_OK "$OUT/stdout.log"
 "$HOST" check "$OUT/pressure.sio" >"$OUT/pressure.log" 2>&1
+"$HOST" check "$OUT/global-boundary.sio" >"$OUT/global-boundary.log" 2>&1
 set +e
 "$HOST" check "$OUT/overflow.sio" >"$OUT/overflow-check.log" 2>&1
 check_status=$?
