@@ -8,6 +8,8 @@ WORK="${2:-$(mktemp -d "${TMPDIR:-/tmp}/module-registry-capacity.XXXXXX")}"
 mkdir -p "$WORK"
 cd "$ROOT"
 export SOUNIO_STDLIB_PATH="$ROOT/stdlib"
+source "$ROOT/scripts/lib/souc_invoke.sh"
+_souc_limits
 "${CXX:-c++}" -std=c++23 -O2 -Wall -Wextra -Werror \
   scripts/ci/module_registry_capacity_probe.cpp -o "$WORK/generate"
 "$WORK/generate" "$ROOT" "$WORK/probe.sio"

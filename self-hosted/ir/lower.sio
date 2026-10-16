@@ -9944,6 +9944,67 @@ fn fo_block_has_unsupported_ctl(blk_opt: &Option<Box<Block>>, depth: i64) -> boo
     }
 }
 
+// Speculative FO re-lower must not refuse ELF publication. #2956 made
+// had_error + IR_LOWER_COMPILE_ERROR_LATCH survive `(*lo) = ...` stores;
+// before that, an ident miss inside fo_inline_call_variance was dropped and
+// gen2 still reached rung `run`. After it, `orbit_is_contested` (two nested
+// if-helpers as call args) stopped the ratcheted self-compile at
+// into_acc_done=7 with report_error_at(15349). Snapshot / restore the ledger
+// so a failed inline stays a -1 variance, not a hard compile error.
+//
+// The same speculation must not keep the IR it emitted. After the orbit
+// rollback, gen2 reached `ocp_const_fold_scan` (into_acc_done=55) and
+// needed 30745 instructions: every `let` re-walks the RHS for variance,
+// FO pastes a helper, then `!ok` returned -1 while leaving those instrs
+// and IR_INSTR_OVERFLOW_COUNT / IR_LOWER_HARD_ERROR in the caller.
+struct FoInlineErrorSnap {
+    error_count: i64,
+    had_error: bool,
+    total: i64,
+    latch: bool,
+    unres: i64,
+    instrs: i64,
+    regs: i64,
+    overflow: i64,
+    hard: i64,
+    hard_reason: i64,
+    hard_needed: i64,
+    hard_limit: i64,
+}
+
+fn fo_inline_error_snap(error_count: i64, had_error: bool, instrs: i64, regs: i64) -> FoInlineErrorSnap {
+    FoInlineErrorSnap {
+        error_count: error_count,
+        had_error: had_error,
+        total: IR_LOWER_ERROR_TOTAL,
+        latch: IR_LOWER_COMPILE_ERROR_LATCH,
+        unres: IR_LOWER_UNRES_COUNT,
+        instrs: instrs,
+        regs: regs,
+        overflow: IR_INSTR_OVERFLOW_COUNT,
+        hard: IR_LOWER_HARD_ERROR,
+        hard_reason: IR_LOWER_HARD_ERROR_REASON,
+        hard_needed: IR_LOWER_HARD_ERROR_NEEDED,
+        hard_limit: IR_LOWER_HARD_ERROR_LIMIT,
+    }
+}
+
+fn fo_inline_error_grew(error_count: i64, had_error: bool, snap: FoInlineErrorSnap) -> bool {
+    error_count > snap.error_count || IR_LOWER_ERROR_TOTAL > snap.total || (had_error && !snap.had_error)
+        || IR_INSTR_OVERFLOW_COUNT > snap.overflow || IR_LOWER_HARD_ERROR != snap.hard
+}
+
+fn fo_inline_error_restore_globals(snap: FoInlineErrorSnap) with Mut {
+    IR_LOWER_ERROR_TOTAL = snap.total
+    IR_LOWER_COMPILE_ERROR_LATCH = snap.latch
+    IR_LOWER_UNRES_COUNT = snap.unres
+    IR_INSTR_OVERFLOW_COUNT = snap.overflow
+    IR_LOWER_HARD_ERROR = snap.hard
+    IR_LOWER_HARD_ERROR_REASON = snap.hard_reason
+    IR_LOWER_HARD_ERROR_NEEDED = snap.hard_needed
+    IR_LOWER_HARD_ERROR_LIMIT = snap.hard_limit
+}
+
 // #1706: a helper registered for inline FO declares no IO/Mut/Alloc effect
 // (fo_inline_note), so calling it twice is as safe as a pure math builtin.
 fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64, expand_calls: bool) -> i64 with Mut, Panic, Div, Alloc {
@@ -17372,6 +17433,10 @@ impl Lowerer {
             }
         }
         if nargs != nparams { return (lo, 0 - 1) }
+        if (*lo.current_func).instr_count > IR_MAX_INSTRS - 512 {
+            return (lo, 0 - 1)
+        }
+        let fo_err_snap = fo_inline_error_snap(lo.error_count, lo.had_error, (*lo.current_func).instr_count, (*lo.current_func).reg_count)
         var vals: [i64; 8] = [0 - 1; 8]
         var vars: [i64; 8] = [0 - 1; 8]
         var sens: [i64; 256] = [0 - 1; 256]
@@ -17416,7 +17481,14 @@ impl Lowerer {
                     i = i + 1
                     ac = &(*al).tail
                 }
-                None => { return (lo, 0 - 1) }
+                None => {
+                    lo.error_count = fo_err_snap.error_count
+                    lo.had_error = fo_err_snap.had_error
+                    fo_inline_error_restore_globals(fo_err_snap)
+                    (*lo.current_func).instr_count = fo_err_snap.instrs
+                    (*lo.current_func).reg_count = fo_err_snap.regs
+                    return (lo, 0 - 1)
+                }
             }
         }
         let saved_bind = *lo.fo_bind
@@ -17479,7 +17551,12 @@ impl Lowerer {
         var bigr = lo.big
         (*bigr).so_bind_hess = saved_hess_rows
         lo.big = bigr
-        if result < 0 {
+        if fo_inline_error_grew(lo.error_count, lo.had_error, fo_err_snap) || result < 0 {
+            lo.error_count = fo_err_snap.error_count
+            lo.had_error = fo_err_snap.had_error
+            fo_inline_error_restore_globals(fo_err_snap)
+            (*lo.current_func).instr_count = fo_err_snap.instrs
+            (*lo.current_func).reg_count = fo_err_snap.regs
             return (lo.fo_clear_expr_sens().so_clear_expr_hess(), 0 - 1)
         }
         lo = lo.fo_restore_expr_sens(out_sens)
@@ -17631,6 +17708,15 @@ impl Lowerer {
         }
         // Each argument's value (and, for an f64 parameter, its variance and
         // sensitivities), in the caller.
+        // Re-lowering the helper is best-effort. Any diagnostic it raises
+        // (ident miss, unsupported shape) must roll back: this is variance
+        // analysis, not the call's value path, which already succeeded.
+        // A caller already near IR_MAX_INSTRS cannot afford a paste
+        // (ocp_const_fold_scan needed 30745). Skip; do not emit.
+        if (*lo.current_func).instr_count > IR_MAX_INSTRS - 512 {
+            return (lo, 0 - 1)
+        }
+        let fo_err_snap = fo_inline_error_snap(lo.error_count, lo.had_error, (*lo.current_func).instr_count, (*lo.current_func).reg_count)
         var vals: [i64; 16] = [0 - 1; 16]
         var vars: [i64; 16] = [0 - 1; 16]
         var isf: [i64; 16] = [0; 16]
@@ -17939,7 +18025,12 @@ impl Lowerer {
         var bigr = lo.big
         (*bigr).so_bind_hess = saved_hess_rows
         lo.big = bigr
-        if !ok || result < 0 {
+        if fo_inline_error_grew(lo.error_count, lo.had_error, fo_err_snap) || !ok || result < 0 {
+            lo.error_count = fo_err_snap.error_count
+            lo.had_error = fo_err_snap.had_error
+            fo_inline_error_restore_globals(fo_err_snap)
+            (*lo.current_func).instr_count = fo_err_snap.instrs
+            (*lo.current_func).reg_count = fo_err_snap.regs
             return (lo.fo_clear_expr_sens().so_clear_expr_hess(), 0 - 1)
         }
         lo = lo.fo_restore_expr_sens(out_sens)
@@ -24778,19 +24869,24 @@ impl Lowerer {
             // Pending FO sens from Knowledge.value extraction (or measure).
             lo = lo.fo_bind_pending_to_local(s.name)
         } else {
-            // β-Madaros: bind FO variance for any pure RHS (k.value, a*b, 4.0*x, …)
-            // so variance_of(local) works after `let x = <expr>`.
+            // β-Madaros: bind FO variance for a float RHS (k.value, a*b, 4.0*x, …)
+            // so variance_of(local) works after `let x = <expr>`. Integer/bool/
+            // struct lets must not take this walk: ocp_const_fold_scan has ~1370
+            // of them, and re-lowering each RHS (field chain + FO paste) needed
+            // 30741 IR instructions against IR_MAX_INSTRS=16384.
             match s.expr {
                 Some(rhs_v) => {
-                    let vpair2 = lo.lower_expr_variance_ref(&(*rhs_v))
-                    lo = vpair2.0
-                    if vpair2.1 >= 0 {
-                        lo = lo.bind_local_variance_reg(s.name, vpair2.1)
-                        // Capture multi-channel sens produced by RHS FO lower.
-                        if lo.fo_expr_has_sens() {
-                            lo = lo.fo_bind_local_sens(s.name)
+                    if lo.expr_result_is_float_ref(&(*rhs_v)) {
+                        let vpair2 = lo.lower_expr_variance_ref(&(*rhs_v))
+                        lo = vpair2.0
+                        if vpair2.1 >= 0 {
+                            lo = lo.bind_local_variance_reg(s.name, vpair2.1)
+                            // Capture multi-channel sens produced by RHS FO lower.
+                            if lo.fo_expr_has_sens() {
+                                lo = lo.fo_bind_local_sens(s.name)
+                            }
+                            lo = lo.so_bind_local_hess(s.name)
                         }
-                        lo = lo.so_bind_local_hess(s.name)
                     }
                 }
                 _ => {}
@@ -27535,7 +27631,7 @@ impl Lowerer {
                 lo = pair_v.0
                 let val_reg = pair_v.1
                 // Allocate 8 bytes on heap
-                lo = lo.emit(ir_alloc(ptr_reg, 8))
+                lo = lo.emit(ir_alloc_box(ptr_reg, 8))
                 // Store value at ptr[0]
                 lo = lo.emit(ir_field_set(ptr_reg, 0, val_reg, ir_empty_name()))
                 (lo, ptr_reg)
@@ -33355,6 +33451,7 @@ impl Lowerer {
                         print_int(self.locals.count)
                         print("\n")
                     }
+                    lower_note_unresolved(e.name)
                     let loe = self.report_error_at(15349)
                     loe.emit_unit()
                 }
