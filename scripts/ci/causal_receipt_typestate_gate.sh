@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 SOUC="${SOUNIO_CAUSAL_TYPESTATE_SOUC:-$ROOT_DIR/bin/souc}"
 STDLIB="$ROOT_DIR/stdlib"
 WITNESS="$ROOT_DIR/tests/compiler/causal_receipt_typestate_check.sio"
@@ -33,6 +35,8 @@ expect_rejection() {
     cat "$log" >&2
     fail "$label must reject with rc=1, got rc=$rc"
   }
+  # rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+  sounio_expect_failed_exit "$rc" "$log" || { cat "$log" >&2; fail "$label: not a clean refusal: $(sounio_refusal_reason)"; }
   [[ "$(rg -c "error\[$code" "$log")" -eq 1 ]] || {
     cat "$log" >&2
     fail "$label must emit exactly one $code"

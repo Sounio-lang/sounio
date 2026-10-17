@@ -37,18 +37,45 @@ fn thermo_ln(x: f64) -> f64 with Mut, Div, Panic {
     2.0 * sum + (e_val as f64) * 0.6931471805599453
 }
 
+// #846: Cody-Waite ln2 reduction, the same algorithm as math::pure::exp
+// (checked against it by scripts/ci/stdlib_exp_helpers_gate.sh). Kept local
+// because importing math::pure here puts its private `gamma`/`lgamma` next to
+// physics::sr's in lean_single's single bundle (tests/stdlib/physics/
+// test_thermo_sr_e2e.sio imports both).
+fn thermo_pow2_bit(m: i64, bit: i64, f: f64) -> f64 {
+    if ((m / bit) % 2) != 0 { f } else { 1.0 }
+}
+
+fn thermo_pow2_pos(m: i64) -> f64 {
+    let p16 = 65536.0
+    let p32 = p16 * p16
+    let p64 = p32 * p32
+    let p128 = p64 * p64
+    let p256 = p128 * p128
+    let p512 = p256 * p256
+    let a = thermo_pow2_bit(m, 1, 2.0) * thermo_pow2_bit(m, 2, 4.0) * thermo_pow2_bit(m, 4, 16.0)
+    let b = thermo_pow2_bit(m, 8, 256.0) * thermo_pow2_bit(m, 16, p16)
+    let c = thermo_pow2_bit(m, 32, p32) * thermo_pow2_bit(m, 64, p64)
+    let d = thermo_pow2_bit(m, 128, p128) * thermo_pow2_bit(m, 256, p256)
+    let e = thermo_pow2_bit(m, 512, p512)
+    a * b * c * d * e
+}
+
+fn thermo_pow2(m: i64) -> f64 {
+    if m >= 0 { thermo_pow2_pos(m) } else { 1.0 / thermo_pow2_pos(0 - m) }
+}
+
 fn thermo_exp(x: f64) -> f64 with Mut, Div, Panic {
-    if x > 50.0 { return 1.0e20 }
-    if x < -50.0 { return 0.0 }
-    var sum = 1.0
-    var term = 1.0
-    var n: i64 = 1
-    while n < 20 {
-        term = term * x / (n as f64)
-        sum = sum + term
-        n = n + 1
-    }
-    sum
+    if x != x { return x }
+    if x > 709.782712893384 { return 1.0e308 * 10.0 }
+    if x < -745.1332191019412 { return 0.0 }
+    let q = x * 1.4426950408889634
+    let k: i64 = if q >= 0.0 { (q + 0.5) as i64 } else { (q - 0.5) as i64 }
+    let kf = k as f64
+    let r = (x - kf * 6.93147180369123816490e-01) - kf * 1.90821492927058770002e-10
+    let p = 1.0 + r * (1.0 + r * (0.5 + r * (1.6666666666666666e-01 + r * (4.1666666666666664e-02 + r * (8.3333333333333332e-03 + r * (1.3888888888888889e-03 + r * (1.9841269841269841e-04 + r * (2.4801587301587302e-05 + r * (2.7557319223985893e-06 + r * (2.7557319223985888e-07 + r * (2.5052108385441720e-08 + r * (2.0876756987868100e-09 + r * 1.6059043836821613e-10))))))))))))
+    let k1 = k / 2
+    p * thermo_pow2(k1) * thermo_pow2(k - k1)
 }
 
 fn thermo_pow(x: f64, p: f64) -> f64 with Mut, Div, Panic {

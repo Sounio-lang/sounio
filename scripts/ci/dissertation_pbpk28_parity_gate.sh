@@ -948,6 +948,12 @@ awk -F= '
 ' "$VFX_SIO_LOG"
 
 echo
+# Two-sided mass identity (#2718): scripts/ci/venlafaxine_mass_identity_gate.sh,
+# run here on this gate's own logs (it also runs standalone in CI).
+VFX_SIO_LOG="$VFX_SIO_LOG" VFX_NODE_LOG="$VFX_NODE_LOG" OUT_DIR="$OUT_DIR" \
+  bash "$ROOT_DIR/scripts/ci/venlafaxine_mass_identity_gate.sh" || exit 1
+
+echo
 echo "[pbpk28-parity] venlafaxine guards: Node input/interval checks + Sounio vfx_integrate_to refusals"
 node "$ROOT_DIR/scripts/ci/pbpk28_core_venlafaxine_guards.mjs" || {
   echo "[pbpk28-parity] FAIL: Node venlafaxine core guards" >&2; exit 1; }
