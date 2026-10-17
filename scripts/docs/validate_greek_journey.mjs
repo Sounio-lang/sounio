@@ -52,7 +52,9 @@ function coverageIssues(coverage, documents, expectedSources) {
     const body = documents.get(file);
     if (typeof body !== 'string') { errors.push(`missing document: ${file}`); continue; }
     const parsed = scanMarkdown(body, file);
-    const heading = /^# (.+)$/m.exec(parsed.prose)?.[1] ?? '';
+    const heading = file.startsWith('website/')
+      ? /^title: (.+)$/m.exec(body)?.[1] ?? ''
+      : /^# (.+)$/m.exec(parsed.prose)?.[1] ?? '';
     if (!greekText.test(heading)) errors.push(`missing Greek heading: ${file}`);
     if (file.startsWith('website/')) {
       for (const field of ['title', 'description']) if (!greekText.test(new RegExp(`^${field}: (.+)$`, 'm').exec(body)?.[1] ?? '')) errors.push(`untranslated ${field}: ${file}`);
@@ -183,6 +185,12 @@ async function main() {
     mutate(value => value.documents = value.documents.filter(file => file !== 'INSTALL.el.md'), 'missing journey surface');
     mutate((value, changed) => changed.delete('README.el.md'), 'missing document');
     mutate((value, changed) => changed.set('README.el.md', '# English heading'), 'Greek heading');
+    const websiteEntry = 'website/src/content/docs/el/getting-started.mdx';
+    mutate((value, changed) => changed.set(websiteEntry, changed.get(websiteEntry).replace(/^title: .+$/m, 'title: "English heading"')), 'Greek heading');
+    mutate((value, changed) => changed.set(websiteEntry, changed.get(websiteEntry).replace(/^title: .+$/m, '')), 'Greek heading');
+    const withoutBodyHeading = new Map(documents);
+    withoutBodyHeading.set(websiteEntry, documents.get(websiteEntry).replace(/^# .+\n/m, ''));
+    assert.deepEqual(coverageIssues(coverage, withoutBodyHeading, expectedSources), []);
     mutate((value, changed) => changed.set('README.el.md', '# Ελληνικά'), 'frontdoor destination');
     mutate((value, changed) => changed.set(value.llm_guide, changed.get(value.llm_guide).replace('llm:section syntax', 'missing-marker')), 'fifteen distinct');
     mutate((value, changed) => changed.set(value.llm_guide, changed.get(value.llm_guide).replace('Hello, Sounio', 'Altered source')), 'unbound Sounio');
