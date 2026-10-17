@@ -38402,8 +38402,14 @@ fn emit_read_line_a64() with Mut, Panic, Div {
     patch_branch_a64(mmap_fail_done, CL)  // done: (mmap() failure lands here with x0 = &empty_str, the BSS slot reserved above)
 }
 
-fn emit_read_file_a64() with Mut, Panic {
+fn emit_read_file_a64() with Mut, Panic, Div {
     // x0 = path (C string pointer)
+    // Empty-string sentinel for open()/mmap() failure. Same contract as
+    // emit_read_line_a64 Fix 4: a live BSS NUL, never NULL. Callers
+    // (lex_file_to_globals) dereference the result unconditionally.
+    let rf_empty_str_off = bss_alloc_aligned(8)
+    var rf_fail_open: i64 = 0
+    var rf_fail_mmap: i64 = 0
     emit_push_a64()
     if TARGET_OS == 2 {
         // macOS: open(path, O_RDONLY=0)
@@ -38417,6 +38423,30 @@ fn emit_read_file_a64() with Mut, Panic {
         em32(0xD2800000 | ((56 & 0xFFFF) << 5) | 8)  // movz x8, #56
     }
     emit_syscall_a64()
+    // Detect open() failure before treating x0 as an fd. Darwin signals
+    // errors with CARRY set and a POSITIVE errno (ENOENT=2, …); Linux
+    // returns -errno. Left unchecked, errno is pushed as "fd" and every
+    // later read() fails the same way. #2832's loop then adds +errno to
+    // len until the 4 MiB cap and prints "file larger than 4 MiB" for a
+    // 30-byte --check fixture (Apple Self-Host native typecheck).
+    if TARGET_OS == 2 {
+        let rf_open_ok = CL
+        em32(0x54000003)  // b.cc open_ok (carry clear = success; patched)
+        em32(0x91000000 | (16 << 10) | (31 << 5) | 31)  // add sp, sp, #16 (pop path)
+        emit_image_addr_a64(GL_BSS_BASE + rf_empty_str_off)
+        rf_fail_open = CL
+        em32(0x14000000)  // b done (patched)
+        patch_branch_a64(rf_open_ok, CL)
+    } else {
+        em32(0xF100001F)  // cmp x0, #0
+        let rf_open_ok = CL
+        em32(0x5400000A)  // b.ge open_ok (patched)
+        em32(0x91000000 | (16 << 10) | (31 << 5) | 31)  // add sp, sp, #16
+        emit_image_addr_a64(GL_BSS_BASE + rf_empty_str_off)
+        rf_fail_open = CL
+        em32(0x14000000)  // b done (patched)
+        patch_branch_a64(rf_open_ok, CL)
+    }
     // x0 = fd. Push it.
     emit_push_a64()
     // mmap(NULL, 4MB+1, 3, MAP_PRIVATE|MAP_ANON, -1, 0)
@@ -38436,6 +38466,33 @@ fn emit_read_file_a64() with Mut, Panic {
         em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8)  // x8 = 222 (mmap)
     }
     emit_syscall_a64()
+    // Same mmap-failure check as emit_read_line_a64. A failed mapping
+    // used as "buf" makes every read() EFAULT; carry-unaware addition of
+    // +errno then hits the 4 MiB refuse after ~10^5 syscalls (~3 min).
+    if TARGET_OS == 2 {
+        let rf_mmap_ok = CL
+        em32(0x54000003)  // b.cc mmap_ok (patched)
+        em32(0xF94003E0)  // ldr x0, [sp] (fd)
+        emit_imm64_reg_a64(16, 6)
+        emit_syscall_a64()
+        em32(0x91000000 | (32 << 10) | (31 << 5) | 31)  // add sp, sp, #32 (fd+path)
+        emit_image_addr_a64(GL_BSS_BASE + rf_empty_str_off)
+        rf_fail_mmap = CL
+        em32(0x14000000)  // b done (patched)
+        patch_branch_a64(rf_mmap_ok, CL)
+    } else {
+        em32(0xF100001F)  // cmp x0, #0
+        let rf_mmap_ok = CL
+        em32(0x5400000A)  // b.ge mmap_ok (patched)
+        em32(0xF94003E0)  // ldr x0, [sp] (fd)
+        em32(0xD2800000 | ((57 & 0xFFFF) << 5) | 8)  // close
+        emit_syscall_a64()
+        em32(0x91000000 | (32 << 10) | (31 << 5) | 31)  // add sp, sp, #32
+        emit_image_addr_a64(GL_BSS_BASE + rf_empty_str_off)
+        rf_fail_mmap = CL
+        em32(0x14000000)  // b done (patched)
+        patch_branch_a64(rf_mmap_ok, CL)
+    }
     // x0 = buf. Push it, then len = 0.       stack: [len sp+0, buf sp+16, fd sp+32]
     emit_push_a64()
     em32(0xD2800000)  // movz x0, #0
@@ -38459,6 +38516,14 @@ fn emit_read_file_a64() with Mut, Panic {
         em32(0xD2800000 | ((63 & 0xFFFF) << 5) | 8)  // x8 = 63 (read)
     }
     emit_syscall_a64()
+    if TARGET_OS == 2 {
+        // Failed read(): carry + +errno. Plain `cmp x0, #0` would add errno
+        // to len and loop until the 4 MiB refuse. Sentinel 0 is EOF.
+        let rf_rd1_ok = CL
+        em32(0x54000003)  // b.cc ok (patched)
+        em32(0xD2800000)  // movz x0, #0
+        patch_branch_a64(rf_rd1_ok, CL)
+    }
     em32(0xF100001F)  // cmp x0, #0
     let rf_eof1 = CL
     em32(0x5400000D)  // b.le eof
@@ -38481,6 +38546,12 @@ fn emit_read_file_a64() with Mut, Panic {
         em32(0xD2800000 | ((63 & 0xFFFF) << 5) | 8)
     }
     emit_syscall_a64()
+    if TARGET_OS == 2 {
+        let rf_rd2_ok = CL
+        em32(0x54000003)  // b.cc ok (patched)
+        em32(0xD2800000)  // movz x0, #0
+        patch_branch_a64(rf_rd2_ok, CL)
+    }
     em32(0xF100001F)  // cmp x0, #0
     let rf_eof2 = CL
     em32(0x5400000D)  // b.le eof
@@ -38528,6 +38599,8 @@ fn emit_read_file_a64() with Mut, Panic {
     emit_syscall_a64()
     em32(0xF9400000 | ((16/8) << 10) | (31 << 5) | 0)  // ldr x0, [sp, #16] (buf)
     em32(0x91000000 | (48 << 10) | (31 << 5) | 31)  // add sp, sp, #48
+    patch_branch_a64(rf_fail_open, CL)
+    patch_branch_a64(rf_fail_mmap, CL)
 }
 
 // ─── ARM64 write_file ───
