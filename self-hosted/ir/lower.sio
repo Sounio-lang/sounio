@@ -194,6 +194,24 @@ var FO_INLINE_TRUNCATED: i64 = 0
 var FO_RECUR_COEF: f64 = 2.0
 var FO_RECUR_LIT: f64 = 0.0
 var FO_RECUR_BASE: f64 = 1.0
+var FO_STEP_BASE_LIT: i64 = 0
+var FO_STEP_BASE_SLOT: i64 = 0 - 1
+var FO_STEP_NF: i64 = 0
+var FO_STEP_NIDX: i64 = 0 - 1
+var FO_STEP_FIDX: [i64; 4] = [-1; 4]
+var FO_STEP_FNAME: [Name; 4] = [ir_empty_name(); 4]
+var FO_STEP_NNAME: Name = ir_empty_name()
+var FO_STEP_FN: Name = ir_empty_name()
+var FO_STEP_ZERO: i64 = 0
+var FO_STEP_ZVAL: i64 = 0
+var FO_STEP_ZS: [i64; 32] = [-1; 32]
+var FO_STEP_VALS: [i64; 16] = [-1; 16]
+var FO_STEP_SENS: [i64; 512] = [-1; 512]
+var FO_STEP_OUT_VAL: i64 = 0
+var FO_STEP_OUT_S: [i64; 32] = [-1; 32]
+var FO_STEP_CARRY: i64 = 0
+var FO_STEP_H: [i64; 36] = [-1; 36]
+var FO_STEP_OUT_H: [i64; 36] = [-1; 36]
 
 fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
     let names = lowerer_box_empty_local_name_slots()
@@ -11316,6 +11334,348 @@ fn fo_recur_step2_indexes(fd: &FnDef, kind: i64) -> (i64, i64) with Mut, Panic, 
     (0 - 1, 0 - 1)
 }
 
+fn fo_recur_call_is_this(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind != ExprKind::ExprCall { return false }
+    match (*e).left {
+        Some(cal) => {
+            if (*cal).kind != ExprKind::ExprIdent || !ir_name_eq((*cal).name, FO_STEP_FN) { return false }
+        }
+        None => { return false }
+    }
+    var i: i64 = 0
+    var ac = &(*e).args
+    let need = FO_STEP_NF + 1
+    while i < need {
+        match *ac {
+            Some(al) => {
+                if i == FO_STEP_NIDX {
+                    if !fo_expr_is_name_minus_one(&(*al).head, FO_STEP_NNAME) { return false }
+                } else {
+                    var slot: i64 = 0 - 1
+                    var s: i64 = 0
+                    while s < FO_STEP_NF {
+                        if FO_STEP_FIDX[s as usize] == i { slot = s }
+                        s = s + 1
+                    }
+                    if slot < 0 { return false }
+                    if !fo_expr_is_ident_name(&(*al).head, FO_STEP_FNAME[slot as usize]) { return false }
+                }
+                i = i + 1
+                ac = &(*al).tail
+            }
+            None => { return false }
+        }
+    }
+    match *ac {
+        Some(_) => false,
+        None => true,
+    }
+}
+
+fn fo_recur_step_pure(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprBlock {
+        match (*e).block {
+            Some(b) => {
+                match (*b).stmts {
+                    Some(sl) => {
+                        match (*sl).tail {
+                            Some(_) => { return false }
+                            None => {}
+                        }
+                        if (*sl).head.kind != StmtKind::StmtExpr { return false }
+                        match (*sl).head.expr {
+                            Some(ex) => { return fo_recur_step_pure(&(*ex)) }
+                            None => { return false }
+                        }
+                    }
+                    None => { return false }
+                }
+            }
+            None => { return false }
+        }
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(inner) => { return fo_recur_step_pure(&(*inner)) }
+            None => { return false }
+        }
+    }
+    if (*e).kind == ExprKind::ExprFloatLit || (*e).kind == ExprKind::ExprIntLit { return true }
+    if (*e).kind == ExprKind::ExprCall { return fo_recur_call_is_this(e) }
+    if (*e).kind == ExprKind::ExprIdent {
+        var s: i64 = 0
+        while s < FO_STEP_NF {
+            if fo_expr_is_ident_name(e, FO_STEP_FNAME[s as usize]) { return true }
+            s = s + 1
+        }
+        return false
+    }
+    if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+        match (*e).left {
+            Some(inner) => { return fo_recur_step_pure(&(*inner)) }
+            None => { return false }
+        }
+    }
+    if (*e).kind != ExprKind::ExprBinary { return false }
+    if (*e).bin_op != BinaryOp::OpAdd && (*e).bin_op != BinaryOp::OpSub
+        && (*e).bin_op != BinaryOp::OpMul && (*e).bin_op != BinaryOp::OpDiv {
+        return false
+    }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    if !fo_recur_step_pure(&(*l)) { return false }
+                    fo_recur_step_pure(&(*r))
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn fo_recur_expr_ok(fd: &FnDef) -> bool with Mut, Panic, Div, Alloc {
+    var nf: i64 = 0
+    var nidx: i64 = 0 - 1
+    var i: i64 = 0
+    var pc = &(*fd).params
+    while true {
+        match *pc {
+            Some(pl) => {
+                if !(*pl).head.is_self {
+                    if lower_type_expr_is_f64(&(*pl).head.ty) {
+                        if nf >= 4 { return false }
+                        FO_STEP_FIDX[nf as usize] = i
+                        FO_STEP_FNAME[nf as usize] = (*pl).head.name
+                        nf = nf + 1
+                    } else {
+                        if nidx >= 0 { return false }
+                        nidx = i
+                        FO_STEP_NNAME = (*pl).head.name
+                    }
+                    i = i + 1
+                }
+                pc = &(*pl).tail
+            }
+            None => break
+        }
+    }
+    if nf < 1 || nidx < 0 || i != nf + 1 { return false }
+    FO_STEP_NF = nf
+    FO_STEP_NIDX = nidx
+    FO_STEP_FN = (*fd).name
+    match (*fd).body.stmts {
+        Some(only) => {
+            match (*only).tail {
+                Some(_) => { return false }
+                None => {}
+            }
+            if (*only).head.kind != StmtKind::StmtExpr { return false }
+            match (*only).head.expr {
+                Some(body_e) => {
+                    if (*body_e).kind != ExprKind::ExprIf { return false }
+                    match (*body_e).left {
+                        Some(cond) => {
+                            if !fo_recur_guard_is_stop(&(*cond), FO_STEP_NNAME) { return false }
+                        }
+                        None => { return false }
+                    }
+                    var slot: i64 = 0 - 1
+                    var s: i64 = 0
+                    while s < nf {
+                        if fo_recur_arm_is_x(&(*body_e).block, FO_STEP_FNAME[s as usize]) { slot = s }
+                        s = s + 1
+                    }
+                    var lit: i64 = 0
+                    if slot < 0 {
+                        if !fo_recur_arm_lit(&(*body_e).block) { return false }
+                        lit = 1
+                    }
+                    match (*body_e).else_expr {
+                        Some(ee) => {
+                            if !fo_recur_step_pure(&(*ee)) { return false }
+                        }
+                        None => { return false }
+                    }
+                    FO_STEP_BASE_LIT = lit
+                    FO_STEP_BASE_SLOT = slot
+                    if lit == 1 { FO_RECUR_BASE = FO_RECUR_LIT }
+                    return true
+                }
+                None => { return false }
+            }
+        }
+        None => { return false }
+    }
+    false
+}
+
+fn fo_recur_block_expr_calls(e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprBlock {
+        match (*e).block {
+            Some(b) => { return fo_recur_block_list_calls(&(*b).stmts) }
+            None => { return 0 - 1 }
+        }
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(inner) => { return fo_recur_block_expr_calls(&(*inner)) }
+            None => { return 0 - 1 }
+        }
+    }
+    if (*e).kind == ExprKind::ExprCall {
+        if fo_recur_call_is_this(e) { return 1 }
+        return 0 - 1
+    }
+    if (*e).kind == ExprKind::ExprIdent {
+        if fo_expr_is_ident_name(e, FO_STEP_NNAME) { return 0 - 1 }
+        return 0
+    }
+    if (*e).kind == ExprKind::ExprFloatLit || (*e).kind == ExprKind::ExprIntLit { return 0 }
+    if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+        match (*e).left {
+            Some(inner) => { return fo_recur_block_expr_calls(&(*inner)) }
+            None => { return 0 - 1 }
+        }
+    }
+    if (*e).kind != ExprKind::ExprBinary { return 0 - 1 }
+    if (*e).bin_op != BinaryOp::OpAdd && (*e).bin_op != BinaryOp::OpSub
+        && (*e).bin_op != BinaryOp::OpMul && (*e).bin_op != BinaryOp::OpDiv {
+        return 0 - 1
+    }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    let a = fo_recur_block_expr_calls(&(*l))
+                    if a < 0 { return 0 - 1 }
+                    let b = fo_recur_block_expr_calls(&(*r))
+                    if b < 0 { return 0 - 1 }
+                    return a + b
+                }
+                None => { return 0 - 1 }
+            }
+        }
+        None => { return 0 - 1 }
+    }
+    0 - 1
+}
+
+fn fo_recur_block_list_calls(stmts: &Option<Box<StmtList>>) -> i64 with Mut, Panic, Div, Alloc {
+    match *stmts {
+        Some(sl) => {
+            var is_last = false
+            match (*sl).tail {
+                Some(_) => { is_last = false }
+                None => { is_last = true }
+            }
+            if is_last {
+                if (*sl).head.kind != StmtKind::StmtExpr { return 0 - 1 }
+                match (*sl).head.expr {
+                    Some(ex) => { return fo_recur_block_expr_calls(&(*ex)) }
+                    None => { return 0 - 1 }
+                }
+            }
+            if (*sl).head.kind != StmtKind::StmtLet { return 0 - 1 }
+            match (*sl).head.expr {
+                Some(ex) => {
+                    let c = fo_recur_block_expr_calls(&(*ex))
+                    if c < 0 { return 0 - 1 }
+                    let r = fo_recur_block_list_calls(&(*sl).tail)
+                    if r < 0 { return 0 - 1 }
+                    return c + r
+                }
+                None => { return 0 - 1 }
+            }
+        }
+        None => { return 0 - 1 }
+    }
+    0 - 1
+}
+
+fn fo_recur_block_ok(fd: &FnDef) -> bool with Mut, Panic, Div, Alloc {
+    var nf: i64 = 0
+    var nidx: i64 = 0 - 1
+    var i: i64 = 0
+    var pc = &(*fd).params
+    while true {
+        match *pc {
+            Some(pl) => {
+                if (*pl).head.is_self { return false }
+                if lower_type_expr_is_f64(&(*pl).head.ty) {
+                    if nf >= 4 { return false }
+                    FO_STEP_FIDX[nf as usize] = i
+                    FO_STEP_FNAME[nf as usize] = (*pl).head.name
+                    nf = nf + 1
+                } else {
+                    if nidx >= 0 { return false }
+                    nidx = i
+                    FO_STEP_NNAME = (*pl).head.name
+                }
+                i = i + 1
+                pc = &(*pl).tail
+            }
+            None => break
+        }
+    }
+    if nf < 1 || nidx < 0 || i != nf + 1 { return false }
+    FO_STEP_NF = nf
+    FO_STEP_NIDX = nidx
+    FO_STEP_FN = (*fd).name
+    match (*fd).body.stmts {
+        Some(only) => {
+            match (*only).tail {
+                Some(_) => { return false }
+                None => {}
+            }
+            if (*only).head.kind != StmtKind::StmtExpr { return false }
+            match (*only).head.expr {
+                Some(body_e) => {
+                    if (*body_e).kind != ExprKind::ExprIf { return false }
+                    match (*body_e).left {
+                        Some(cond) => {
+                            if !fo_recur_guard_is_stop(&(*cond), FO_STEP_NNAME) { return false }
+                        }
+                        None => { return false }
+                    }
+                    var slot: i64 = 0 - 1
+                    var s: i64 = 0
+                    while s < nf {
+                        if fo_recur_arm_is_x(&(*body_e).block, FO_STEP_FNAME[s as usize]) { slot = s }
+                        s = s + 1
+                    }
+                    var lit: i64 = 0
+                    if slot < 0 {
+                        if !fo_recur_arm_lit(&(*body_e).block) { return false }
+                        lit = 1
+                    }
+                    match (*body_e).else_expr {
+                        Some(ee) => {
+                            if (*ee).kind != ExprKind::ExprBlock { return false }
+                            match (*ee).block {
+                                Some(b) => {
+                                    let calls = fo_recur_block_list_calls(&(*b).stmts)
+                                    if calls < 1 { return false }
+                                }
+                                None => { return false }
+                            }
+                        }
+                        None => { return false }
+                    }
+                    FO_STEP_BASE_LIT = lit
+                    FO_STEP_BASE_SLOT = slot
+                    if lit == 1 { FO_RECUR_BASE = FO_RECUR_LIT }
+                    return true
+                }
+                None => { return false }
+            }
+        }
+        None => { return false }
+    }
+    false
+}
+
 fn fo_inline_known(n: Name) -> bool with Mut, Panic, Div, Alloc {
     let id = ir_intern_name(n)
     var cur = FO_INLINE_HEAD
@@ -19447,6 +19807,706 @@ impl Lowerer {
         lo.fo_emit_var_from_sens()
     }
 
+    fn fo_step_init_h(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var i: i64 = 0
+        while i < 36 {
+            let sp = lo.fresh_reg()
+            lo = sp.0
+            FO_STEP_H[i as usize] = sp.1
+            lo = lo.emit(ir_copy(sp.1, FO_STEP_ZERO))
+            lo = lo.emit(ir_mark_float_reg(sp.1))
+            FO_STEP_OUT_H[i as usize] = FO_STEP_ZERO
+            i = i + 1
+        }
+        lo
+    }
+
+    fn fo_step_fill_zero(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var k: i64 = 0
+        while k < 32 {
+            FO_STEP_OUT_S[k as usize] = FO_STEP_ZERO
+            k = k + 1
+        }
+        k = 0
+        while k < 36 {
+            FO_STEP_OUT_H[k as usize] = FO_STEP_ZERO
+            k = k + 1
+        }
+        self
+    }
+
+    fn fo_step_store_hess(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var i: i64 = 0
+        while i < 36 {
+            let h = lo.so_expr_hess[i as usize]
+            if h >= 0 {
+                FO_STEP_OUT_H[i as usize] = h
+            } else {
+                FO_STEP_OUT_H[i as usize] = FO_STEP_ZERO
+            }
+            i = i + 1
+        }
+        lo
+    }
+
+    fn fo_step_combine(self, op: BinaryOp, lv: i64, rv: i64, ls: [i64; 32], rs: [i64; 32]) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let vp = lo.fresh_reg()
+        lo = vp.0
+        lo = lo.emit(ir_binop_typed(vp.1, lv, op, rv, true, true))
+        lo = lo.emit(ir_mark_float_reg(vp.1))
+        FO_STEP_OUT_VAL = vp.1
+        var den: i64 = FO_STEP_ZERO
+        if op == BinaryOp::OpDiv {
+            let d = lo.fresh_reg()
+            lo = d.0
+            lo = lo.emit(ir_binop_typed(d.1, rv, BinaryOp::OpMul, rv, true, true))
+            lo = lo.emit(ir_mark_float_reg(d.1))
+            den = d.1
+        }
+        var k: i64 = 0
+        while k < 32 {
+            let a = ls[k as usize]
+            let b = rs[k as usize]
+            if a == FO_STEP_ZERO && b == FO_STEP_ZERO {
+                FO_STEP_OUT_S[k as usize] = FO_STEP_ZERO
+            } else if op == BinaryOp::OpAdd {
+                if a == FO_STEP_ZERO {
+                    FO_STEP_OUT_S[k as usize] = b
+                } else if b == FO_STEP_ZERO {
+                    FO_STEP_OUT_S[k as usize] = a
+                } else {
+                    let t = lo.fresh_reg()
+                    lo = t.0
+                    lo = lo.emit(ir_binop_typed(t.1, a, BinaryOp::OpAdd, b, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t.1))
+                    FO_STEP_OUT_S[k as usize] = t.1
+                }
+            } else if op == BinaryOp::OpSub {
+                if b == FO_STEP_ZERO {
+                    FO_STEP_OUT_S[k as usize] = a
+                } else if a == FO_STEP_ZERO {
+                    let t = lo.fresh_reg()
+                    lo = t.0
+                    lo = lo.emit(ir_binop_typed(t.1, FO_STEP_ZERO, BinaryOp::OpSub, b, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t.1))
+                    FO_STEP_OUT_S[k as usize] = t.1
+                } else {
+                    let t2 = lo.fresh_reg()
+                    lo = t2.0
+                    lo = lo.emit(ir_binop_typed(t2.1, a, BinaryOp::OpSub, b, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t2.1))
+                    FO_STEP_OUT_S[k as usize] = t2.1
+                }
+            } else if op == BinaryOp::OpMul {
+                if a == FO_STEP_ZERO && b != FO_STEP_ZERO {
+                    let t = lo.fresh_reg()
+                    lo = t.0
+                    lo = lo.emit(ir_binop_typed(t.1, lv, BinaryOp::OpMul, b, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t.1))
+                    FO_STEP_OUT_S[k as usize] = t.1
+                } else if b == FO_STEP_ZERO {
+                    let t2 = lo.fresh_reg()
+                    lo = t2.0
+                    lo = lo.emit(ir_binop_typed(t2.1, rv, BinaryOp::OpMul, a, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t2.1))
+                    FO_STEP_OUT_S[k as usize] = t2.1
+                } else {
+                    let t3 = lo.fresh_reg()
+                    lo = t3.0
+                    lo = lo.emit(ir_binop_typed(t3.1, rv, BinaryOp::OpMul, a, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t3.1))
+                    let t4 = lo.fresh_reg()
+                    lo = t4.0
+                    lo = lo.emit(ir_binop_typed(t4.1, lv, BinaryOp::OpMul, b, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t4.1))
+                    let t5 = lo.fresh_reg()
+                    lo = t5.0
+                    lo = lo.emit(ir_binop_typed(t5.1, t3.1, BinaryOp::OpAdd, t4.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t5.1))
+                    FO_STEP_OUT_S[k as usize] = t5.1
+                }
+            } else {
+                var num: i64 = FO_STEP_ZERO
+                if a != FO_STEP_ZERO {
+                    let ta = lo.fresh_reg()
+                    lo = ta.0
+                    lo = lo.emit(ir_binop_typed(ta.1, a, BinaryOp::OpMul, rv, true, true))
+                    lo = lo.emit(ir_mark_float_reg(ta.1))
+                    num = ta.1
+                }
+                if b != FO_STEP_ZERO {
+                    let tb = lo.fresh_reg()
+                    lo = tb.0
+                    lo = lo.emit(ir_binop_typed(tb.1, lv, BinaryOp::OpMul, b, true, true))
+                    lo = lo.emit(ir_mark_float_reg(tb.1))
+                    if num == FO_STEP_ZERO {
+                        let neg = lo.fresh_reg()
+                        lo = neg.0
+                        lo = lo.emit(ir_binop_typed(neg.1, FO_STEP_ZERO, BinaryOp::OpSub, tb.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(neg.1))
+                        num = neg.1
+                    } else {
+                        let df = lo.fresh_reg()
+                        lo = df.0
+                        lo = lo.emit(ir_binop_typed(df.1, num, BinaryOp::OpSub, tb.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(df.1))
+                        num = df.1
+                    }
+                }
+                let q = lo.fresh_reg()
+                lo = q.0
+                lo = lo.emit(ir_binop_typed(q.1, num, BinaryOp::OpDiv, den, true, true))
+                lo = lo.emit(ir_mark_float_reg(q.1))
+                FO_STEP_OUT_S[k as usize] = q.1
+            }
+            k = k + 1
+        }
+        lo
+    }
+
+    fn fo_emit_step_node(self, e: &Expr) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if (*e).kind == ExprKind::ExprBlock {
+            match (*e).block {
+                Some(b) => {
+                    match (*b).stmts {
+                        Some(sl) => {
+                            match (*sl).head.expr {
+                                Some(ex) => { return lo.fo_emit_step_node(&(*ex)) }
+                                None => { return lo.fo_step_fill_zero() }
+                            }
+                        }
+                        None => { return lo.fo_step_fill_zero() }
+                    }
+                }
+                None => { return lo.fo_step_fill_zero() }
+            }
+        }
+        if (*e).kind == ExprKind::ExprReturn {
+            match (*e).left {
+                Some(inner) => { return lo.fo_emit_step_node(&(*inner)) }
+                None => { return lo.fo_step_fill_zero() }
+            }
+        }
+        if (*e).kind == ExprKind::ExprFloatLit || (*e).kind == ExprKind::ExprIntLit {
+            var lit: f64 = 0.0
+            if (*e).kind == ExprKind::ExprFloatLit {
+                lit = (*e).float_val
+            } else {
+                lit = (*e).int_val as f64
+            }
+            let c = lo.emit_f64_const(lit)
+            lo = c.0
+            FO_STEP_OUT_VAL = c.1
+            return lo.fo_step_fill_zero()
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            FO_STEP_OUT_VAL = FO_STEP_ZVAL
+            var k: i64 = 0
+            while k < 32 {
+                FO_STEP_OUT_S[k as usize] = FO_STEP_ZS[k as usize]
+                k = k + 1
+            }
+            k = 0
+            while k < 36 {
+                FO_STEP_OUT_H[k as usize] = FO_STEP_H[k as usize]
+                k = k + 1
+            }
+            return lo
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            var slot: i64 = 0 - 1
+            var s: i64 = 0
+            while s < FO_STEP_NF {
+                if fo_expr_is_ident_name(e, FO_STEP_FNAME[s as usize]) { slot = s }
+                s = s + 1
+            }
+            if slot < 0 {
+                FO_STEP_OUT_VAL = FO_STEP_ZERO
+                return lo.fo_step_fill_zero()
+            }
+            let pi = FO_STEP_FIDX[slot as usize]
+            FO_STEP_OUT_VAL = FO_STEP_VALS[pi as usize]
+            lo = lo.emit(ir_mark_float_reg(FO_STEP_OUT_VAL))
+            var k2: i64 = 0
+            while k2 < 32 {
+                let sk = FO_STEP_SENS[(pi * 32 + k2) as usize]
+                if sk >= 0 {
+                    FO_STEP_OUT_S[k2 as usize] = sk
+                } else {
+                    FO_STEP_OUT_S[k2 as usize] = FO_STEP_ZERO
+                }
+                k2 = k2 + 1
+            }
+            k2 = 0
+            while k2 < 36 {
+                FO_STEP_OUT_H[k2 as usize] = FO_STEP_ZERO
+                k2 = k2 + 1
+            }
+            return lo
+        }
+        if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+            match (*e).left {
+                Some(inner) => { lo = lo.fo_emit_step_node(&(*inner)) }
+                None => { return lo.fo_step_fill_zero() }
+            }
+            let v = FO_STEP_OUT_VAL
+            var ss: [i64; 32] = [-1; 32]
+            var ku: i64 = 0
+            while ku < 32 {
+                ss[ku as usize] = FO_STEP_OUT_S[ku as usize]
+                ku = ku + 1
+            }
+            let zp = lo.emit_f64_const(0.0)
+            lo = zp.0
+            let np = lo.fresh_reg()
+            lo = np.0
+            lo = lo.emit(ir_binop_typed(np.1, zp.1, BinaryOp::OpSub, v, true, true))
+            lo = lo.emit(ir_mark_float_reg(np.1))
+            FO_STEP_OUT_VAL = np.1
+            ku = 0
+            while ku < 32 {
+                if ss[ku as usize] == FO_STEP_ZERO {
+                    FO_STEP_OUT_S[ku as usize] = FO_STEP_ZERO
+                } else {
+                    let tn = lo.fresh_reg()
+                    lo = tn.0
+                    lo = lo.emit(ir_binop_typed(tn.1, zp.1, BinaryOp::OpSub, ss[ku as usize], true, true))
+                    lo = lo.emit(ir_mark_float_reg(tn.1))
+                    FO_STEP_OUT_S[ku as usize] = tn.1
+                }
+                ku = ku + 1
+            }
+            var uh: [i64; 36] = [-1; 36]
+            ku = 0
+            while ku < 36 {
+                uh[ku as usize] = FO_STEP_OUT_H[ku as usize]
+                ku = ku + 1
+            }
+            ku = 0
+            while ku < 36 {
+                if uh[ku as usize] == FO_STEP_ZERO {
+                    FO_STEP_OUT_H[ku as usize] = FO_STEP_ZERO
+                } else {
+                    let th = lo.fresh_reg()
+                    lo = th.0
+                    lo = lo.emit(ir_binop_typed(th.1, zp.1, BinaryOp::OpSub, uh[ku as usize], true, true))
+                    lo = lo.emit(ir_mark_float_reg(th.1))
+                    FO_STEP_OUT_H[ku as usize] = th.1
+                }
+                ku = ku + 1
+            }
+            return lo
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            match (*e).left {
+                Some(l) => {
+                    match (*e).right {
+                        Some(r) => {
+                            lo = lo.fo_emit_step_node(&(*l))
+                            let lv = FO_STEP_OUT_VAL
+                            var ls: [i64; 32] = [-1; 32]
+                            var lh: [i64; 36] = [-1; 36]
+                            var kb: i64 = 0
+                            while kb < 32 {
+                                ls[kb as usize] = FO_STEP_OUT_S[kb as usize]
+                                kb = kb + 1
+                            }
+                            kb = 0
+                            while kb < 36 {
+                                lh[kb as usize] = FO_STEP_OUT_H[kb as usize]
+                                kb = kb + 1
+                            }
+                            lo = lo.fo_emit_step_node(&(*r))
+                            let rv = FO_STEP_OUT_VAL
+                            var rs: [i64; 32] = [-1; 32]
+                            var rh: [i64; 36] = [-1; 36]
+                            kb = 0
+                            while kb < 32 {
+                                rs[kb as usize] = FO_STEP_OUT_S[kb as usize]
+                                kb = kb + 1
+                            }
+                            kb = 0
+                            while kb < 36 {
+                                rh[kb as usize] = FO_STEP_OUT_H[kb as usize]
+                                kb = kb + 1
+                            }
+                            lo = lo.fo_step_combine((*e).bin_op, lv, rv, ls, rs)
+                            if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub {
+                                lo = lo.so_combine_hess_addsub(lh, rh, (*e).bin_op == BinaryOp::OpSub)
+                            } else if (*e).bin_op == BinaryOp::OpMul {
+                                lo = lo.so_combine_hess_mul(lh, rh, ls, rs, lv, rv)
+                            } else {
+                                lo = lo.so_combine_hess_div(lh, rh, ls, rs, lv, rv)
+                            }
+                            return lo.fo_step_store_hess()
+                        }
+                        None => { return lo.fo_step_fill_zero() }
+                    }
+                }
+                None => { return lo.fo_step_fill_zero() }
+            }
+        }
+        FO_STEP_OUT_VAL = FO_STEP_ZERO
+        lo.fo_step_fill_zero()
+    }
+
+    // The else-expression is differentiated in forward mode and the step is
+    // repeated n times. A recursive call reads the loop-carried value and
+    // sensitivity. A literal contributes 0. A parameter contributes its channel.
+    fn fo_emit_recur_expr_body(self, step: &Expr, n_reg: i64, vals: [i64; 16], sens: [i64; 512]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var i: i64 = 0
+        while i < 16 {
+            FO_STEP_VALS[i as usize] = vals[i as usize]
+            i = i + 1
+        }
+        i = 0
+        while i < 512 {
+            FO_STEP_SENS[i as usize] = sens[i as usize]
+            i = i + 1
+        }
+        let zf = lo.emit_f64_const(0.0)
+        lo = zf.0
+        FO_STEP_ZERO = zf.1
+        lo = lo.fo_step_init_h()
+        let vp = lo.fresh_reg()
+        lo = vp.0
+        FO_STEP_ZVAL = vp.1
+        if FO_STEP_BASE_LIT == 1 {
+            let base_c = lo.emit_f64_const(FO_RECUR_BASE)
+            lo = base_c.0
+            lo = lo.emit(ir_copy(FO_STEP_ZVAL, base_c.1))
+        } else {
+            let bpi = FO_STEP_FIDX[FO_STEP_BASE_SLOT as usize]
+            lo = lo.emit(ir_copy(FO_STEP_ZVAL, FO_STEP_VALS[bpi as usize]))
+        }
+        lo = lo.emit(ir_mark_float_reg(FO_STEP_ZVAL))
+        var k0: i64 = 0
+        while k0 < 32 {
+            let sp = lo.fresh_reg()
+            lo = sp.0
+            FO_STEP_ZS[k0 as usize] = sp.1
+            var src: i64 = FO_STEP_ZERO
+            if FO_STEP_BASE_LIT == 0 {
+                let bpi2 = FO_STEP_FIDX[FO_STEP_BASE_SLOT as usize]
+                let sk0 = FO_STEP_SENS[(bpi2 * 32 + k0) as usize]
+                if sk0 >= 0 { src = sk0 }
+            }
+            lo = lo.emit(ir_copy(sp.1, src))
+            lo = lo.emit(ir_mark_float_reg(sp.1))
+            k0 = k0 + 1
+        }
+        let ip = lo.fresh_reg()
+        lo = ip.0
+        let ireg = ip.1
+        lo = lo.emit(ir_load_imm(ireg, 0))
+        let pl_top = lo.fresh_label()
+        lo = pl_top.0
+        let l_top = pl_top.1
+        let pl_end = lo.fresh_label()
+        lo = pl_end.0
+        let l_end = pl_end.1
+        lo = lo.emit(ir_label(l_top))
+        let cmp_p = lo.fresh_reg()
+        lo = cmp_p.0
+        lo = lo.emit(ir_binop(cmp_p.1, ireg, BinaryOp::OpLt, n_reg))
+        lo = lo.emit(ir_branch_false(cmp_p.1, l_end))
+        lo = lo.fo_emit_step_node(step)
+        lo = lo.emit(ir_copy(FO_STEP_ZVAL, FO_STEP_OUT_VAL))
+        lo = lo.emit(ir_mark_float_reg(FO_STEP_ZVAL))
+        var kc: i64 = 0
+        while kc < 32 {
+            lo = lo.emit(ir_copy(FO_STEP_ZS[kc as usize], FO_STEP_OUT_S[kc as usize]))
+            lo = lo.emit(ir_mark_float_reg(FO_STEP_ZS[kc as usize]))
+            kc = kc + 1
+        }
+        var hc: i64 = 0
+        while hc < 36 {
+            lo = lo.emit(ir_copy(FO_STEP_H[hc as usize], FO_STEP_OUT_H[hc as usize]))
+            lo = lo.emit(ir_mark_float_reg(FO_STEP_H[hc as usize]))
+            hc = hc + 1
+        }
+        let one_i = lo.emit_i64_const(1)
+        lo = one_i.0
+        let next_p = lo.fresh_reg()
+        lo = next_p.0
+        lo = lo.emit(ir_binop(next_p.1, ireg, BinaryOp::OpAdd, one_i.1))
+        lo = lo.emit(ir_copy(ireg, next_p.1))
+        lo = lo.emit(ir_jump(l_top))
+        lo = lo.emit(ir_label(l_end))
+        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+        var k: i64 = 0
+        while k < 32 {
+            var live = false
+            var p: i64 = 0
+            while p < FO_STEP_NF {
+                let pi = FO_STEP_FIDX[p as usize]
+                if FO_STEP_SENS[(pi * 32 + k) as usize] >= 0 { live = true }
+                p = p + 1
+            }
+            if live {
+                lo.fo_expr_sens[k as usize] = FO_STEP_ZS[k as usize]
+            }
+            k = k + 1
+        }
+        var hi: i64 = 0
+        while hi < 36 {
+            lo.so_expr_hess[hi as usize] = FO_STEP_H[hi as usize]
+            hi = hi + 1
+        }
+        lo.fo_emit_var_from_sens()
+    }
+
+    fn fo_emit_recur_expr_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match (*fd).body.stmts {
+            Some(only) => {
+                match (*only).head.expr {
+                    Some(body_e) => {
+                        match (*body_e).else_expr {
+                            Some(ee) => { return self.fo_emit_recur_expr_body(&(*ee), n_reg, vals, sens) }
+                            None => { return (self, 0 - 1) }
+                        }
+                    }
+                    None => { return (self, 0 - 1) }
+                }
+            }
+            None => { return (self, 0 - 1) }
+        }
+    }
+
+    fn fo_emit_recur_block_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], vars: [i64; 16], isf: [i64; 16]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        match (*fd).body.stmts {
+            Some(only) => {
+                match (*only).head.expr {
+                    Some(body_e) => {
+                        match (*body_e).else_expr {
+                            Some(ee) => {
+                                match (*ee).block {
+                                    Some(b) => { return lo.fo_emit_recur_block_body(&(*b).stmts, fd, n_reg, vals, sens, vars, isf) }
+                                    None => { return (lo, 0 - 1) }
+                                }
+                            }
+                            None => { return (lo, 0 - 1) }
+                        }
+                    }
+                    None => { return (lo, 0 - 1) }
+                }
+            }
+            None => { return (lo, 0 - 1) }
+        }
+    }
+
+    // The else block is lowered by the ordinary let/expression lowerer. The
+    // recursive call reads the loop-carried value and sensitivity instead of
+    // inlining another copy of the function.
+    fn fo_emit_recur_block_body(self, stmts: &Option<Box<StmtList>>, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], vars: [i64; 16], isf: [i64; 16]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var i: i64 = 0
+        while i < 16 {
+            FO_STEP_VALS[i as usize] = vals[i as usize]
+            i = i + 1
+        }
+        i = 0
+        while i < 512 {
+            FO_STEP_SENS[i as usize] = sens[i as usize]
+            i = i + 1
+        }
+        let saved_bind = *lo.fo_bind
+        let saved_bind_count = lo.fo_bind_count
+        let saved_hess_rows = (*lo.big).so_bind_hess
+        let saved_locals = (*lo.locals).count
+        let saved_carry = FO_STEP_CARRY
+        lo.scope_depth = lo.scope_depth + 1
+        var pc = &(*fd).params
+        i = 0
+        while true {
+            match *pc {
+                Some(pl) => {
+                    if !(*pl).head.is_self {
+                        let pname = (*pl).head.name
+                        lo = lo.bind_local(pname, vals[i as usize], false)
+                        if isf[i as usize] >= 1 {
+                            lo = lo.bind_local_scalar_kind(pname, 2)
+                            lo = lo.bind_local_variance_reg(pname, vars[i as usize])
+                            var k2: i64 = 0
+                            while k2 < 32 {
+                                lo.fo_expr_sens[k2 as usize] = sens[(i * 32 + k2) as usize]
+                                k2 = k2 + 1
+                            }
+                        } else {
+                            lo = lo.bind_local_scalar_kind(pname, 1)
+                            lo = lo.fo_clear_expr_sens()
+                        }
+                        lo = lo.fo_bind_local_sens(pname)
+                        if lo.so_enabled {
+                            var hrow: [i64; 36] = [0 - 1; 36]
+                            lo = lo.so_set_local_hess_row(pname, hrow)
+                        }
+                        i = i + 1
+                    }
+                    pc = &(*pl).tail
+                }
+                None => break
+            }
+        }
+        let zf = lo.emit_f64_const(0.0)
+        lo = zf.0
+        FO_STEP_ZERO = zf.1
+        lo = lo.fo_step_init_h()
+        let vp0 = lo.fresh_reg()
+        lo = vp0.0
+        FO_STEP_ZVAL = vp0.1
+        if FO_STEP_BASE_LIT == 1 {
+            let base_c = lo.emit_f64_const(FO_RECUR_BASE)
+            lo = base_c.0
+            lo = lo.emit(ir_copy(FO_STEP_ZVAL, base_c.1))
+        } else {
+            let bpi = FO_STEP_FIDX[FO_STEP_BASE_SLOT as usize]
+            lo = lo.emit(ir_copy(FO_STEP_ZVAL, FO_STEP_VALS[bpi as usize]))
+        }
+        lo = lo.emit(ir_mark_float_reg(FO_STEP_ZVAL))
+        var k0: i64 = 0
+        while k0 < 32 {
+            let sp = lo.fresh_reg()
+            lo = sp.0
+            FO_STEP_ZS[k0 as usize] = sp.1
+            var src: i64 = FO_STEP_ZERO
+            if FO_STEP_BASE_LIT == 0 {
+                let bpi2 = FO_STEP_FIDX[FO_STEP_BASE_SLOT as usize]
+                let sk0 = FO_STEP_SENS[(bpi2 * 32 + k0) as usize]
+                if sk0 >= 0 { src = sk0 }
+            }
+            lo = lo.emit(ir_copy(sp.1, src))
+            lo = lo.emit(ir_mark_float_reg(sp.1))
+            k0 = k0 + 1
+        }
+        let ip = lo.fresh_reg()
+        lo = ip.0
+        let ireg = ip.1
+        lo = lo.emit(ir_load_imm(ireg, 0))
+        let pl_top = lo.fresh_label()
+        lo = pl_top.0
+        let l_top = pl_top.1
+        let pl_end = lo.fresh_label()
+        lo = pl_end.0
+        let l_end = pl_end.1
+        lo = lo.emit(ir_label(l_top))
+        let cmp_p = lo.fresh_reg()
+        lo = cmp_p.0
+        lo = lo.emit(ir_binop(cmp_p.1, ireg, BinaryOp::OpLt, n_reg))
+        lo = lo.emit(ir_branch_false(cmp_p.1, l_end))
+        FO_STEP_CARRY = 1
+        var step_val: i64 = 0 - 1
+        var sc = stmts
+        var stepping = true
+        while stepping {
+            match *sc {
+                Some(sl) => {
+                    var is_last = false
+                    match (*sl).tail {
+                        Some(_) => { is_last = false }
+                        None => { is_last = true }
+                    }
+                    if is_last && (*sl).head.kind == StmtKind::StmtExpr {
+                        match (*sl).head.expr {
+                            Some(te0) => {
+                                var te: &Expr = &(*te0)
+                                if (*te0).kind == ExprKind::ExprReturn {
+                                    match (*te0).left {
+                                        Some(rv) => { te = &(*rv) }
+                                        None => {}
+                                    }
+                                }
+                                let step_pair = lo.lower_expr_ref(te)
+                                lo = step_pair.0
+                                step_val = step_pair.1
+                                let sens_pair = lo.lower_expr_variance_ref(te)
+                                lo = sens_pair.0
+                            }
+                            None => {}
+                        }
+                        stepping = false
+                    } else if (*sl).head.kind == StmtKind::StmtLet {
+                        let lp = lo.lower_let_stmt_ref(&(*sl).head, false)
+                        lo = lp.0
+                        sc = &(*sl).tail
+                    } else {
+                        stepping = false
+                    }
+                }
+                None => { stepping = false }
+            }
+        }
+        FO_STEP_CARRY = saved_carry
+        if step_val >= 0 {
+            lo = lo.emit(ir_copy(FO_STEP_ZVAL, step_val))
+            lo = lo.emit(ir_mark_float_reg(FO_STEP_ZVAL))
+        }
+        var kc: i64 = 0
+        while kc < 32 {
+            let sk = lo.fo_expr_sens[kc as usize]
+            if sk >= 0 {
+                lo = lo.emit(ir_copy(FO_STEP_ZS[kc as usize], sk))
+            } else {
+                lo = lo.emit(ir_copy(FO_STEP_ZS[kc as usize], FO_STEP_ZERO))
+            }
+            lo = lo.emit(ir_mark_float_reg(FO_STEP_ZS[kc as usize]))
+            kc = kc + 1
+        }
+        var hc: i64 = 0
+        while hc < 36 {
+            let hk = lo.so_expr_hess[hc as usize]
+            if hk >= 0 {
+                lo = lo.emit(ir_copy(FO_STEP_H[hc as usize], hk))
+            } else {
+                lo = lo.emit(ir_copy(FO_STEP_H[hc as usize], FO_STEP_ZERO))
+            }
+            lo = lo.emit(ir_mark_float_reg(FO_STEP_H[hc as usize]))
+            hc = hc + 1
+        }
+        let one_i = lo.emit_i64_const(1)
+        lo = one_i.0
+        let next_p = lo.fresh_reg()
+        lo = next_p.0
+        lo = lo.emit(ir_binop(next_p.1, ireg, BinaryOp::OpAdd, one_i.1))
+        lo = lo.emit(ir_copy(ireg, next_p.1))
+        lo = lo.emit(ir_jump(l_top))
+        lo = lo.emit(ir_label(l_end))
+        lo.scope_depth = lo.scope_depth - 1
+        (*lo.locals).count = saved_locals
+        lo.fo_bind = Box::new(saved_bind)
+        lo.fo_bind_count = saved_bind_count
+        var bigr = lo.big
+        (*bigr).so_bind_hess = saved_hess_rows
+        lo.big = bigr
+        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+        var k: i64 = 0
+        while k < 32 {
+            var live = false
+            var p: i64 = 0
+            while p < FO_STEP_NF {
+                let pi = FO_STEP_FIDX[p as usize]
+                if FO_STEP_SENS[(pi * 32 + k) as usize] >= 0 { live = true }
+                p = p + 1
+            }
+            if live {
+                lo.fo_expr_sens[k as usize] = FO_STEP_ZS[k as usize]
+            }
+            k = k + 1
+        }
+        var hi: i64 = 0
+        while hi < 36 {
+            lo.so_expr_hess[hi as usize] = FO_STEP_H[hi as usize]
+            hi = hi + 1
+        }
+        lo.fo_emit_var_from_sens()
+    }
+
     fn fo_inline_call_variance(self, callee: Name, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let no_path: [Name; 8] = [ir_empty_name(); 8]
         self.fo_inline_call_variance_ex(callee, args, ir_empty_name(), false, no_path, 0)
@@ -19768,6 +20828,12 @@ impl Lowerer {
                 ck = ck + 1
             }
             return lo.fo_emit_recur_chcoef_scale(vals[ch_n as usize], vals[ch_idx.0 as usize], vals[ch_idx.1 as usize], cxs, cys)
+        }
+        if fo_recur_expr_ok(&fd) {
+            return lo.fo_emit_recur_expr_scale(&fd, vals[FO_STEP_NIDX as usize], vals, sens)
+        }
+        if fo_recur_block_ok(&fd) {
+            return lo.fo_emit_recur_block_scale(&fd, vals[FO_STEP_NIDX as usize], vals, sens, vars, isf)
         }
         // Bind the parameters in a fresh scope; the FO bind rows are keyed by
         // name only, so they are saved and restored around the body.
@@ -20423,6 +21489,34 @@ impl Lowerer {
     }
 
     fn lower_call_expr_variance_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if FO_STEP_CARRY == 1 && fo_recur_call_is_this(e) {
+            var lo = self.fo_clear_expr_sens().so_clear_expr_hess()
+            var k: i64 = 0
+            while k < 32 {
+                let src = FO_STEP_ZS[k as usize]
+                if src >= 0 {
+                    let sp = lo.fresh_reg()
+                    lo = sp.0
+                    lo = lo.emit(ir_copy(sp.1, src))
+                    lo = lo.emit(ir_mark_float_reg(sp.1))
+                    lo.fo_expr_sens[k as usize] = sp.1
+                }
+                k = k + 1
+            }
+            var hi: i64 = 0
+            while hi < 36 {
+                let src_h = FO_STEP_H[hi as usize]
+                if src_h >= 0 {
+                    let hp = lo.fresh_reg()
+                    lo = hp.0
+                    lo = lo.emit(ir_copy(hp.1, src_h))
+                    lo = lo.emit(ir_mark_float_reg(hp.1))
+                    lo.so_expr_hess[hi as usize] = hp.1
+                }
+                hi = hi + 1
+            }
+            return lo.fo_emit_var_from_sens()
+        }
         match (*e).left {
             Some(callee_expr) => {
                 let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
@@ -32762,6 +33856,14 @@ impl Lowerer {
 
     fn lower_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        if FO_STEP_CARRY == 1 && fo_recur_call_is_this(e) {
+            let c = lo.fresh_reg()
+            lo = c.0
+            lo = lo.emit(ir_copy(c.1, FO_STEP_ZVAL))
+            lo = lo.emit(ir_mark_float_reg(c.1))
+            lo.pending_variance_reg = 0 - 1
+            return (lo, c.1)
+        }
         let callee_short = match e.left {
             Some(c) => lower_f128_expr_callee_short(&(*c)),
             None => ir_empty_name(),
