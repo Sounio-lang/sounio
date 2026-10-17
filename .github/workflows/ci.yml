@@ -1074,11 +1074,14 @@ jobs:
       # the runner's ~70 GB /mnt temp disk moves the rung off the cliff; it is
       # a headroom measure, not a correctness claim. Printed before/after so a
       # future reader can see the actual numbers in the log.
-      - name: Add swap headroom for the gen2 self-compile (peak RSS 18.4 GB vs 16 GB RAM)
+      # Slurm 14701 (2026-10-16) reached run at 63,570,060 KiB peak RSS;
+      # the earlier 16 GiB extra swap no longer fits current compiler sources.
+      # This changes available resources, not the expected rung or IR limits.
+      - name: Add measured swap headroom for the gen2 self-compile
         if: runner.environment == 'github-hosted'
         run: |
           echo "--- before"; free -m; swapon --show; df -h /mnt
-          sudo fallocate -l 16G /mnt/swapfile-gen2
+          sudo fallocate -l 48G /mnt/swapfile-gen2
           sudo chmod 600 /mnt/swapfile-gen2
           sudo mkswap /mnt/swapfile-gen2
           sudo swapon /mnt/swapfile-gen2
@@ -1086,6 +1089,10 @@ jobs:
       - name: Mark that the compiler build was reached
         id: compiler-reached
         run: echo "reached=true" >> "$GITHUB_OUTPUT"
+      - name: Explicit AST expression-kind consumers reference real variants
+        run: |
+          c++ -std=c++23 -O2 -Wall -Wextra -Werror scripts/ci/ast_expr_kind_surface.cpp -o /tmp/madaros-ast-expr-surface
+          /tmp/madaros-ast-expr-surface "$PWD"
       - name: Build Madaros once and run current-source f64 lowering gates
         run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
       # SCO gates require a compiler from this exact source, not the shipping prebuilt.
@@ -1397,6 +1404,20 @@ jobs:
       # missed it and it was found by accident. Re-measured afterwards: 118 of
       # 559 files under self-hosted/ failed. This step reuses the ELF the step
       # above already built and kept (KEEP=1) — it adds no build.
+      - name: Module registry capacity preserves scoped identity and refusal
+        env:
+          MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/module_registry_capacity_gate.sh "$MADAROS_BIN"
+      - name: Type environment capacity and fail-closed binding pressure
+        run: bash scripts/ci/type_env_capacity_gate.sh /tmp/sounio-madaros-current-source-f64-lowering/madaros /tmp/madaros-type-env
+      - name: IR tail growth and native address-window contract
+        run: bash scripts/ci/ir_tail_growth_gate.sh /tmp/sounio-madaros-current-source-f64-lowering/madaros /tmp/madaros-ir-tail
+      - name: Flat argument lifetime across compiler Box-arena reclaim
+        run: bash scripts/ci/flat_arg_reclaim_gate.sh /tmp/sounio-madaros-current-source-f64-lowering/madaros /tmp/madaros-flat-reclaim
+      - name: Native diagnostic environment refresh allocation bound
+        run: bash scripts/ci/native_env_refresh_gate.sh /tmp/sounio-madaros-current-source-f64-lowering/madaros /tmp/madaros-env-refresh
+      - name: Fixed-point diagnostics count named checker errors
+        run: bash scripts/ci/fixed_point_named_diagnostic_gate.sh
       - name: Madaros parses its own source tree
         env:
           SOUNIO_MADAROS_SELF_PARSE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
@@ -1577,10 +1598,20 @@ jobs:
           brew list boost >/dev/null 2>&1 || brew install boost
           codesign -s - -f artifacts/self-hosted/souc-self-hosted-arm64-macos
           codesign --verify artifacts/self-hosted/souc-self-hosted-arm64-macos
+      - name: Native AST expression-kind surface preflight
+        run: |
+          /usr/bin/clang++ -std=c++23 -O2 -Wall -Wextra -Werror scripts/ci/ast_expr_kind_surface.cpp -o /tmp/madaros-ast-expr-surface
+          /tmp/madaros-ast-expr-surface "$PWD"
       - name: Build and execute current-source native Madaros
         run: bash scripts/ci/build_madaros_macos_arm64.sh "$PWD/artifacts/self-hosted/souc-self-hosted-arm64-macos" /tmp/madaros-current-macos
       - name: Native Madaros ABI acceptance
         run: bash scripts/ci/madaros_macos_arm64_acceptance_gate.sh /tmp/madaros-current-macos
+      - name: Native module registry capacity and scalar bool globals
+        run: bash scripts/ci/module_registry_capacity_gate.sh /tmp/madaros-current-macos /tmp/madaros-module-registry
+      - name: Native type environment capacity and binding refusal
+        run: bash scripts/ci/type_env_capacity_gate.sh /tmp/madaros-current-macos /tmp/madaros-type-env
+      - name: Native IR tail growth and ARM64 address-window contract
+        run: bash scripts/ci/ir_tail_growth_gate.sh /tmp/madaros-current-macos /tmp/madaros-ir-tail
       - name: Native Madaros positive and negative regressions
         run: bash scripts/ci/madaros_macos_port_regressions_gate.sh /tmp/madaros-current-macos /tmp/madaros-port-regressions
       - name: Native wide arithmetic with exact C++23 oracle

@@ -5729,154 +5729,49 @@ pub fn module_frontend_check_imported_modules_verdict(main_path: string) -> i64 
 }
 
 // ============================================================================
-// Per-module arena-reset scratch (Box-arena churn reclaim, see docs/handoff).
-//
-// module_frontend_lower_programs_array_direct_box lowers each imported module
-// into a fresh Box<IrModule> (dep_box, ~hundreds of MB: [IrFunction; 2048])
-// purely as scratch to extract a handful of merged functions into the
-// running accumulator (acc_box). Everything in dep_box's Box-arena window
-// is dead once its functions/strings/epistemic/algebras are copied into
-// acc_box BY VALUE -- except IrInstr.call_args: Option<Box<IrRegList>>,
-// whose Box POINTER is copied shallow by struct assignment. Left alone,
-// that pointer would keep referencing dep_box's soon-to-be-reset memory.
-//
-// Re-box path (Wave9 / memory-wall residual):
-//   1. Scan newly-appended functions; snapshot every live call_args chain into
-//      BSS fixed arrays (NOT Box-arena) — reg heads only, max 8 args/site.
-//      Wider chains mark overflow and keep the module arena alive rather than
-//      silently rebuilding a truncated argument list.
-//   2. __arena_reset(dep mark) — reclaim the dep lowering window.
-//   3. Rebuild fresh Box<IrRegList> chains from BSS and write them back via the
-//      A14 whole-function idiom (by-value IrFunction, 2-level field store,
-//      1-level array writeback). Nested
-//      `IR_INSTR_ARENA[ir_region_slot_w(ir_fn_get(&(*module), fi).region, (ii)) as usize].call_args = …` is a 3-level store
-//      through Box that lean_single silently DROPS — that was the residual
-//      that forced the post-#832 "skip when live call_args" retreat. Do NOT
-//      reintroduce A8 by-value IrInstr argument scramble.
-// Overflow (sites > MF_AREBOX_CAP) still skips reset for that module only.
-// Cap raised 8192 -> 32768: modules 1-7 of the main build hit 8192 (gen2 log,
-// main at b4edb0a94), so their arena reset was skipped. ARGS holds 8 per site.
-// ============================================================================
-let MF_AREBOX_CAP: i64 = 32768
-var MF_AREBOX_FI: [i64; 32768] = [0; 32768]
-var MF_AREBOX_II: [i64; 32768] = [0; 32768]
-var MF_AREBOX_ARGC: [i64; 32768] = [0; 32768]
-var MF_AREBOX_ARGS: [i64; 262144] = [0; 262144]
+// Per-module Box-arena reclaim after the scalar IR-pool migration.
+// IrFunction carries a region handle, not Box<IrRegList>. Argument registers
+// and names live in BSS pools; function-table chunks are heap_alloc allocations
+// separate from the Box arena. IrModule's remaining metadata is copied by value.
+// Therefore a dep reset must NOT rebuild argument lists (which would duplicate
+// the flat pool and could overflow it). Validate pool intervals before reclaim.
 var MF_AREBOX_COUNT: i64 = 0
-var MF_AREBOX_OVERFLOW: bool = false
-// Loud metrics (session totals across lower_array dep merges).
 var MF_AREBOX_RESET_OK: i64 = 0
 var MF_AREBOX_RESET_SKIP: i64 = 0
 var MF_AREBOX_SITES_RECLAIMED: i64 = 0
 
-fn mf_arebox_reset_scratch() with Mut {
-    MF_AREBOX_COUNT = 0
-    MF_AREBOX_OVERFLOW = false
+fn mf_flat_args_valid(at: i64) -> bool with Mut, Panic, Div {
+    if at < 0 || at >= ir_instr_arena_capacity() { return false }
+    let count = IR_A_ARG_COUNT[at as usize]
+    if count < 0 || count > 64 { return false }
+    if count == 0 { return true }
+    // Sret calls use a contiguous virtual-register span, not IR_ARG_POOL.
+    if IR_A_OP[at as usize] == (IrOpcode::IrCallSret as i64) { return true }
+    let base = IR_A_ARG_BASE[at as usize]
+    if IR_ARG_POOL_LEN < 0 || IR_ARG_POOL_LEN > ir_arg_pool_capacity() { return false }
+    if base < 0 || base > IR_ARG_POOL_LEN { return false }
+    count <= IR_ARG_POOL_LEN - base
 }
 
-// Extract up to 8 reg heads from the call_args chain at (fi, ii) into
-// MF_AREBOX_ARGS[slot*8 ..]. Walks via module indices so we never pass a
-// Box-carrying Option into a helper by value (defense in depth vs A8-class
-// large-struct/Box by-value miscompiles). A wider chain cannot be rebuilt from
-// this scratch slot, so mark overflow and let the caller skip the arena reset.
-fn mf_arebox_extract_at(module: &IrModule, fi: i64, ii: i64, slot: i64) -> i64 with Mut, Panic, Div {
-    // #1649: read the FLAT POOL, not the Box chain. ir_arena_load does not
-    // rebuild call_args -- rebuilding needs Alloc and it is called at ~431 sites
-    // -- so the chain walked here was ALWAYS None, this returned 0 for every
-    // instruction, and the reset proceeded believing no call had arguments to
-    // preserve. Silent argument loss on the dependency-merge path, not a crash.
-    // The pool needs no allocation, so this is also simpler than what it replaces.
-    let at = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (ii))
-    let total = IR_A_ARG_COUNT[at as usize]
-    if total <= 0 { return 0 }
-    var n: i64 = 0
-    while n < 8 && n < total {
-        MF_AREBOX_ARGS[(slot * 8 + n) as usize] = ir_arena_arg_at(at, n)
-        n = n + 1
-    }
-    if total > 8 { MF_AREBOX_OVERFLOW = true }
-    n
-}
-
-// Record one (fi, ii) call-arg site for post-reset re-boxing, extracting its
-// args NOW while the source (pre-reset) memory is still valid.
-fn mf_arebox_record_at(module: &IrModule, fi: i64, ii: i64) with Mut, Panic, Div {
-    if MF_AREBOX_COUNT >= MF_AREBOX_CAP {
-        MF_AREBOX_OVERFLOW = true
-        return
-    }
-    let slot = MF_AREBOX_COUNT
-    let n = mf_arebox_extract_at(module, fi, ii, slot)
-    MF_AREBOX_FI[slot as usize] = fi
-    MF_AREBOX_II[slot as usize] = ii
-    MF_AREBOX_ARGC[slot as usize] = n
-    MF_AREBOX_COUNT = slot + 1
-}
-
-// Rebuild a fresh Box<IrRegList> chain from scratch slot `slot`, preserving
-// original head-first arg order. Must only be called AFTER __arena_reset so
-// the Box::new allocations land in the freed (reused) window.
-fn mf_arebox_rebuild(slot: i64) -> Option<Box<IrRegList>> with Alloc, Mut, Panic, Div {
-    let n = MF_AREBOX_ARGC[slot as usize]
-    var out: Option<Box<IrRegList>> = None
-    var k = n - 1
-    while k >= 0 {
-        out = Some(Box::new(ir_reg_list_cons(MF_AREBOX_ARGS[(slot * 8 + k) as usize], out)))
-        k = k - 1
-    }
-    out
-}
-
-// Scan functions [fn_lo, fn_hi) of `module` for instrs carrying a live
-// call_args chain, recording each for post-reset re-boxing. Returns false
-// (capacity exceeded, MF_AREBOX_OVERFLOW set) if the caller must skip the
-// arena reset for this module.
 fn mf_arebox_scan(module: &IrModule, fn_lo: i64, fn_hi: i64) -> bool with Mut, Panic, Div {
-    mf_arebox_reset_scratch()
+    MF_AREBOX_COUNT = 0
+    if fn_lo < 0 || fn_hi < fn_lo || fn_hi > (*module).fn_count { return false }
     var fi = fn_lo
     while fi < fn_hi {
-        let ic = ir_fn_get(&(*module), fi as usize).instr_count
+        let f = ir_fn_get(module, fi as usize)
         var ii: i64 = 0
-        while ii < ic {
-            // #1649: same correction -- ask the pool whether this instruction has
-            // arguments. The call_args chain on a loaded instr is always empty.
-            if IR_A_ARG_COUNT[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (ii))) as usize] > 0 {
-                mf_arebox_record_at(module, fi, ii)
-            }
+        while ii < f.instr_count {
+            let at = ir_region_slot_r(f.region, ii)
+            if !mf_flat_args_valid(at) { return false }
+            if IR_A_ARG_COUNT[at as usize] > 0 { MF_AREBOX_COUNT = MF_AREBOX_COUNT + 1 }
             ii = ii + 1
         }
         fi = fi + 1
     }
-    !MF_AREBOX_OVERFLOW
+    IR_ARENA_VIOLATION == 0
 }
 
-// Write the rebuilt (post-reset) call_args chains back into `module`. Must be
-// called strictly after __arena_reset.
-//
-// A14 whole-function writeback: lean_single drops 3-level nested stores of the
-// form `ir_fn_get(&(*module), fi).instrs[ii].call_args = rebuilt` (now
-// `ir_arena_put_args(ir_region_slot_w(...), rebuilt, ...)`), leaving the
-// shallow (now-dangling) Box pointer in place — that is the observed
-// "corrupts IrRegList heads" residual after arena reclaim. Copy the IrFunction
-// out, mutate call_args on the owned local (2-level field store, same proven
-// pattern as fn_id rebinding), write the whole function back once.
-// Do NOT take IrInstr by value (A8 scramble).
-fn mf_arebox_apply(module: &! IrModule) with Alloc, Mut, Panic, Div {
-    var s: i64 = 0
-    while s < MF_AREBOX_COUNT {
-        let fi = MF_AREBOX_FI[s as usize]
-        let ii = MF_AREBOX_II[s as usize]
-        let rebuilt = mf_arebox_rebuild(s)
-        if fi >= 0 && fi < (*module).fn_count {
-            var f = ir_fn_get(&(*module), fi as usize)
-            if ii >= 0 && ii < f.instr_count {
-                ir_arena_put_args(ir_region_slot_w(f.region, (ii)), rebuilt, ir_reg_list_len(rebuilt))
-                ir_fn_set(&! (*module), fi as usize, f)
-            }
-        }
-        s = s + 1
-    }
-}
+// ============================================================================
 
 fn module_frontend_lower_single_program_array_direct_box(
     programs: &! [Program; 256],
@@ -6102,9 +5997,8 @@ fn module_frontend_lower_programs_array_direct_box_multi(
                         return module_frontend_lower_direct_box_error("ir_into_acc_failed")
                     }
                     acc_box = into_result.module
-                    // Into-acc fills stubs at low fn_ids AND may append. Re-box
-                    // call_args for the whole module before arena_reset so filled
-                    // stubs' chains (allocated post-mark) are not left dangling.
+                    // Into-acc fills low stubs and may append. Validate all flat
+                    // argument ranges before reclaim; they are not Box pointers.
                     // Opt-out: SOUNIO_INTO_ACC_NO_RESET=1 keeps post-mark boxes live
                     // (peak slightly higher; useful for residual diagnosis).
                     if str_eq(read_env("SOUNIO_INTO_ACC_NO_RESET"), "1") {
@@ -6119,12 +6013,11 @@ fn module_frontend_lower_programs_array_direct_box_multi(
                         let dep_rebox_sites = MF_AREBOX_COUNT
                         if dep_arena_scan_ok {
                             __arena_reset(dep_arena_mark)
-                            mf_arebox_apply(&! (*acc_box))
                             MF_AREBOX_RESET_OK = MF_AREBOX_RESET_OK + 1
                             MF_AREBOX_SITES_RECLAIMED = MF_AREBOX_SITES_RECLAIMED + dep_rebox_sites
                             print("lower_array: arena_reset_ok module ")
                             print_int(i)
-                            print(" rebox_sites ")
+                            print(" flat_arg_sites ")
                             print_int(dep_rebox_sites)
                             print(" into_acc fn_before ")
                             print_int(dep_fn_before)
@@ -6133,7 +6026,7 @@ fn module_frontend_lower_programs_array_direct_box_multi(
                             print("\n")
                         } else {
                             MF_AREBOX_RESET_SKIP = MF_AREBOX_RESET_SKIP + 1
-                            print("lower_array: arena_reset_skipped (call-arg scratch overflow) module ")
+                            print("lower_array: arena_reset_skipped (invalid flat-arg metadata) module ")
                             print_int(i)
                             print(" sites ")
                             print_int(dep_rebox_sites)
@@ -6308,17 +6201,16 @@ fn module_frontend_lower_programs_array_direct_box_multi(
                             let dep_rebox_sites = MF_AREBOX_COUNT
                             if dep_arena_scan_ok {
                                 __arena_reset(dep_arena_mark)
-                                mf_arebox_apply(&! (*acc_box))
                                 MF_AREBOX_RESET_OK = MF_AREBOX_RESET_OK + 1
                                 MF_AREBOX_SITES_RECLAIMED = MF_AREBOX_SITES_RECLAIMED + dep_rebox_sites
                                 print("lower_array: arena_reset_ok module ")
                                 print_int(i)
-                                print(" rebox_sites ")
+                                print(" flat_arg_sites ")
                                 print_int(dep_rebox_sites)
                                 print("\n")
                             } else {
                                 MF_AREBOX_RESET_SKIP = MF_AREBOX_RESET_SKIP + 1
-                                print("lower_array: arena_reset_skipped (call-arg scratch overflow) module ")
+                                print("lower_array: arena_reset_skipped (invalid flat-arg metadata) module ")
                                 print_int(i)
                                 print(" sites ")
                                 print_int(dep_rebox_sites)
@@ -7561,6 +7453,7 @@ fn module_frontend_compile_imported_to_file_target_impl(
     if module_frontend_dump_merged_calls_enabled() {
         ir_module_dump_merge_calls(&(*module_box))
     }
+    print("compile_stage: merged_cleanup_begin\n")
     if optimize {
         module_frontend_load_ocp_skip_mask()
         let cleanup_receipt = opt_cleanup_module_inplace(&! (*module_box))
@@ -7572,8 +7465,10 @@ fn module_frontend_compile_imported_to_file_target_impl(
     // Finalization and cleanup are complete; codegen receives an immutable
     // module reference after this audit snapshot. Sealed, so that claim is
     // checked rather than asserted -- see the single route above.
+    print("compile_stage: merged_seal_begin\n")
     let merged_sealed = ir_module_seal_functions(&(*module_box))
     module_frontend_print_seal_receipt("merged", merged_sealed, fn_count)
+    print("compile_stage: merged_ordered_audit_begin\n")
     module_frontend_print_ordered_path_receipt("merged-final", optimize, &(*module_box))
     parser_reset_last_errors()
     // Last barrier before the ELF is written. The OR into had_error at every
@@ -7598,9 +7493,12 @@ fn module_frontend_compile_imported_to_file_target_impl(
         module_frontend_global_init_compile_end()
         return 1
     }
+    print("compile_stage: merged_float_probe_begin\n")
     module_frontend_print_float_bits_probe("merged", &(*module_box))
     let target_spec = native_resolve_target(requested_target, "auto", explicit_target)
+    print("compile_stage: merged_native_emit_begin\n")
     let write_rc = compile_native_v2_preview_to_file(&(*module_box), target_spec, output_path)
+    print("compile_stage: merged_native_emit_end\n")
     if write_rc != 0 {
         print("Error: Failed to write native binary to ")
         print(output_path)

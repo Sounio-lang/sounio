@@ -9,6 +9,42 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.madar
 
 # Native macOS Madaros: pinned 200-program corpus
 
+## Region witness cursor-domain correction (PR #2981 follow-up)
+
+The published `7f13ba664a` CI failed the syscall escape witness with exit 2:
+the witness observed `__arena_mark`, now the independent Box arena cursor,
+while its allocations live in the aggregate/region heap. The candidate binds
+the already implemented `__rgn_cursor` diagnostic in the checker and changes
+only the witness's three cursor observations, preserving its assertions and
+iteration counts. A new allocation-domain witness checks independent cursor
+advancement and preservation of aggregates across an actual Box reset.
+
+Slurm job 14729 rebuilt the compiler from the canonical seed and passed the
+complete region gate, including all nine barrier sabotage discriminators,
+streaming coverage, refusal in both lanes and the opt-out comparison. Removing
+the syscall barrier still yields exit 2. The full current-source f64 gate also
+passed. The modular ladder returned check=0, gen2=0, 129 modules (minimum 122),
+14,732 merged functions, and executed the gen2 Madaros banner. The optional
+gen3 remains SIGSEGV 139: this is rung `run`, not a fixed-point claim.
+Remote evidence is retained separately in
+`/tmp/pr2981-bool.QVgKpb/domain-result/out`. The rebuilt Linux host SHA-256 is
+`21d96e479f262c88f1550c0308fb34afa683969dd5345db704dc5bad2e2ab65b`;
+the ladder's recorded peak RSS is 64,581,320 KiB and its exit status is 0.
+The fresh signed native macOS host SHA-256 is
+`a63c96ca67e2ba775b7aafc42d836559fb733e64ee0224ff081709f887c20b1a`.
+It passed bounded native acceptance, the production IR/address and TypeEnv
+probes, full main self-check (`verdict=0`, `check: OK`), module registry and
+extended positive/negative port regressions. The fresh pinned corpus completed
+200/200 with required real Metal launches. The Apple M5 Max Metal conformance
+run checked 40,960 results with zero failures against the C++23 oracle.
+Local logs and generated receipts remain outside Git in
+`/private/tmp/pr2981-domain-native-validation.log` and
+`/private/tmp/pr2981-domain-native-corpus/`; no prior receipts substitute for
+this fresh execution. This is local validation, not a claim that the new head
+or the eventual main merge revision has passed remote CI.
+The original 199/200, historical corrected 200/200, PBPK queue 199/200 and fresh
+candidate runs remain distinct; the pinned 200-member manifest is unchanged.
+
 The immutable selection is `tests/manifests/madaros_macos_200.txt`, recovered
 from the original `scratchpad/list200.txt`. It is not a new sample or a filtered
 subset. The manifest pins membership; source snapshots record the exact fixture
@@ -42,6 +78,277 @@ Replay also refuses changed fixture source, before opening any result receipt.
 Fresh runs refuse to overwrite an existing result directory.
 
 ## Main-integration regression, 2026-10-15
+
+### Post-merge self-check capacity and scalar initialization follow-up
+
+The port merged as `f5b2c5850be9f3d3995719ffcade44a6d851658a`. Its post-merge
+CI `38796025054` independently passed the native macOS/Metal 200-member gate,
+but failed the Linux self-compile ladder at `check`: `E-USE-MOD-CAP`. The
+module-scoped import registry exceeded 1024 entries. A follow-up aligns the
+checker, specializer and lowerer at 4096 entries, retaining module identity,
+full-name collision checks and hard overflow refusal.
+
+`scripts/ci/module_registry_capacity_gate.sh COMPILER` generates a fixture
+from the production registry functions and executes it. The C++23 generator
+is not an alternate registry implementation. Only the extracted hash's effect
+annotation is widened for the bootstrap seed's local-mutation rules; its body
+is unchanged. The probe exercises hash collisions, module isolation,
+duplicates at capacity, the 4096/4097 refusal edge, and scalar boolean globals.
+The previous source fails the capacity probe with rc 5. The candidate passes.
+
+The same probe exposed an ARM64 startup defect: a scalar boolean's one-byte
+logical size divided by a word stride produced zero iterations in a
+post-tested BSS fill loop, which then wrote beyond `__DATA` (Bus error).
+The follow-up emits one word store for the eight-byte-padded scalar slot,
+as on x86, and the candidate executes the previously crashing probe.
+
+Slurm job 14482 on `cpuops-t560-proxmox` rebuilt the Linux candidate, executed
+the registry probe and checked the full compiler entry point, all with rc 0.
+Linux candidate SHA-256:
+`6831d6b09b3f99716ec21854dbabc1b44580bd74e2390ea43166d7ad741686f4`.
+The independently rebuilt and signed native macOS candidate passed ABI
+acceptance, extended positive/negative regressions and a fresh **200/200**
+with mandatory real Metal. Its C++23 binary64 oracle checked 40960 comparisons
+with zero failures. Signed host SHA-256:
+`58c1cd35986f149e5abc45958dffb939e1779e02860e47c272729a5b48a16b10`.
+All binaries and generated receipts remain excluded.
+
+`fixed_point_named_diagnostic_gate.sh` also proves that a named checker error
+is counted rather than reported as zero: the injected failure remains rc 1
+and rung `none` both before and after the reporting fix. These focused and
+corpus passes do **not** establish recovery of gen2/run, a modular Madaros
+fixed point, or green remote CI for the follow-up.
+
+### Combined FO-inline dependency validation, 2026-10-16
+
+The locally integrated sources from PRs #2980 and #2981 were rebuilt into a
+fresh signed Mach-O arm64 host, SHA-256
+`93e611061c3f81fff935b7e3f00aae6108823d19fd6de443ab78b07efd5403cc`.
+This candidate passed native ABI acceptance, the production registry probe,
+extended port regressions, all three FO-inline/loop fixtures from #2980, and
+the unresolved-identifier negative control (E137, nonzero build status and no
+published executable). A fresh corrected pinned corpus passed **200/200**
+with required real Metal launches. The binary64 C++23 oracle recorded
+`checked=40960 failures=0` on Apple M5 Max.
+
+This is a new combined-source execution, separate from the original 199/200,
+the historical corrected 200/200, the PBPK queue failure at 199/200, and the
+registry-only follow-up above. Local logs and generated receipts are retained
+outside Git under `/private/tmp/pr2981-combined-*`. Slurm job 14547 is the
+independent Linux rebuild and ratcheted ladder for the combination. Its
+ladder failed at `check` with rc 1 and 292 E137 diagnostics, before gen2.
+Declared locals such as `p42` in `native_v2_write_contract` were reported as
+undeclared. A separate generated pressure fixture also reproduces lost local
+bindings when many globals fill the shared 4096-entry type environment; this
+capacity path silently drops insertions and requires a fail-closed repair.
+The combined native self-check reproduces missing-local diagnostics too;
+the 200-member corpus does not cover this self-check capacity boundary.
+Its source-built Linux host (SHA-256
+`c1a652b67f2746b91761ef191421577e2406e5a03d827f1dd28083a534bb0d31`)
+was built with rc 0, executed the three dependency fixtures with rc 0, and
+refused the unresolved identifier with E137 and rc 1. Neither the native corpus nor PR-only
+CI establishes a modular fixed point or a green post-merge main revision.
+
+The subsequent type-environment candidate uses 8192 binding slots consistently
+and carries sticky overflow state through scope exits. Collection and both
+checker entry paths convert it to `E-TYPE-ENV-CAP`, nonzero status and refusal
+to publish. The old host accepted 8300 globals and an empty `main` with check
+rc 0 despite dropping bindings; the repaired native host refuses that input.
+The old 4090-global/local pressure case fails with E137, while the repaired
+host checks it successfully. The new production-extracted capacity probe
+executes the actual `TypeEnv.bind()` consumer path, including exact capacity,
+scope shadowing/restoration, mutability, sticky overflow and fresh reset.
+The private `type_env_bind_mut` helper has no production callers and is not
+claimed as covered by that executable probe.
+
+This native candidate is signed SHA-256
+`167ea6daca04a0ded6a966d63a097c9697ca073cf9fd8b1b8ecf3a298aefa3d0`.
+Its capacity/pressure/refusal gate and full compiler self-check passed
+(`verdict=0`, `check: OK`). Extended port regressions and all three dependency
+fixtures also passed, followed by a new **200/200** corpus with mandatory real
+Metal and C++23 binary64 conformance (`checked=40960 failures=0`). This is not
+a replay of the earlier combined-source run.
+
+Slurm job 14566's rebuilt Linux host is SHA-256
+`bb1711748557bb2013827c9504a221e223b79e644cb1f4041d2ffca3049d4ce5`.
+Its compiler self-check passed with rc 0 and zero errors, recovering the
+292-E137 failure above. Its gen2 ladder subsequently stopped after 14 modules
+with rc 1: `spec_literal_scalar_type` referenced the nonexistent variant
+`ExprKind::ExprBoolLit`. No gen2 executable was published.
+An independent probe step initially used Linux's 8192 KiB shell stack and
+returned 139. Its repeat uses the existing `souc_invoke.sh` raw-compiler
+limits contract; both traces are retained separately. Capacity gates use
+that same helper, consistent with the public wrapper and self-compile ladder.
+With that contract, the updated Linux production probe checks and executes
+with rc 0; the pressure case checks with rc 0; overflow check and build both
+return rc 1 with `E-TYPE-ENV-CAP`, and no executable is published. Its host
+and both repaired source-file hashes match the ladder candidate exactly.
+
+The AST defines `ExprBoolTrue` and `ExprBoolFalse`. The specializer and closure
+peer-inference checker each contained the stale `ExprBoolLit` spelling; the
+next candidate handles both real variants. The new generic boolean-literal
+fixture fails against the preceding host (E009/E005) and is included in native
+port regressions. A C++23 surface preflight rejects both old references and
+passes after the repair. It audits explicit consumers importing `parser::ast`,
+not unrelated prototype enums also named `ExprKind`.
+
+The rebuilt, signed macOS host is SHA-256
+`c31722bcca7b9850712a1f63328bdf6ba677684c86ad24ae9f6001ab90ad74e5`.
+It passes native ABI acceptance, the capacity/refusal gates, full compiler
+self-check (`verdict=0`, `check: OK`), extended regressions and the three
+dependency fixtures. The new boolean fixture compiles, is signed, and executes
+with exit 0 and `GENERIC_BOOL_LITERAL_OK`, discriminating the preceding
+E009/E005 failure. A fresh corpus for this host passes **200/200**, including
+mandatory real Metal launches; binary64 conformance on Apple M5 Max reports
+`checked=40960 failures=0` with the C++23 oracle.
+
+Slurm job 14578 rebuilt the repaired Linux host, SHA-256
+`34aff9e546860749c7256b02fbe5e58d9b083462a133c228d32d79826ee09c1b`.
+The boolean and three dependency fixtures, production capacity and registry
+probes, pressure check and absence-of-overflow-artifact test all return 0;
+overflow check/build refuse with rc 1 as required. Compiler self-check passes
+(rc 0, zero errors). Gen2 completes 23 modules before rc 137; Slurm explicitly
+records an OOM kill in step 14578.0, with peak RSS 33471672 KiB under the 32 GiB
+allocation. This is separate from the earlier semantic failures. A 64 GiB
+ladder repeat reuses the identical verified host and source without rebuilding
+or changing the required rung, minimum module count or IR limits. There is
+still no proof of rung `run`, a modular fixed point, or green post-merge main.
+
+The 64 GiB repeat (Slurm 14585) completes lowering of 129 modules and reports
+14733 merged functions, but refuses emission with rc 1: the instruction arena
+holds 4194292 of 4194304 slots, with live capacity 2215828 and 1978464 slots
+abandoned by growth. Peak RSS is 62642236 KiB; this run has no OOM report.
+The fixed arena limit and fail-closed emission check are retained. The next
+candidate extends a region in place only when its end equals the arena top;
+non-tail growth still copies, and the checked reserve API still advances its
+generation so stale handles remain refused.
+
+A C++23 generator extracts the production growth, reserve, handle-validation
+and scalar-copy functions unchanged. Its native-seed-compiled discriminator
+returns 2 on the preceding allocator and prints `IR_TAIL_GROWTH_OK` with rc 0
+on the candidate. It exercises tail growth, non-tail relocation with neighbor
+and payload preservation, stale/sealed refusal, exact-capacity extension and
+overflow refusal without mutation. The candidate module typechecks. This is
+not yet a new-host result: the preceding modular ARM64 host refuses the probe
+at `ir_region_status_v`, instruction 4, and that trace remains an open
+validation gap. New modular hosts, the Linux ladder and a fresh Metal corpus
+are being rebuilt/validated before publication.
+
+Tracing the refusal identifies `IrLoadGlobal` at offset 571090960: ARM64 data
+address emission and global initialization each imposed a 128 MiB ceiling,
+despite the larger mapped Mach-O data window. The next backend candidate
+derives its capacity from the existing data VM address and dyld shared-region
+boundary, reserving import/linkedit pages, and explicitly checks ADRP's signed
+page reach. The final Mach-O overlap refusal remains unchanged. No IR arena
+capacity is increased. A production-function address probe compares emitted
+ADRP/ADD bytes with C++23 expected encodings, including offsets above 128 MiB,
+the largest permitted access, and refusal immediately outside the window.
+The preceding source returns 57; the repaired functions execute with rc 0 and
+`ARM64_DATA_ADDRESS_OK`, compiled by the preceding modular host. The new
+`ir_tail_growth_gate.sh` requires both production probes to compile and execute
+through the selected modular host, and is wired into Linux and macOS CI.
+Backend module check and workflow-reference checks pass. New-host execution
+of the combined allocator/address fix and another fresh Metal corpus are
+still pending; the earlier tail-only host's probe refusal is not a success.
+
+The rebuilt allocator/address candidate is a signed native host with SHA-256
+`c4151f7eadd98328135c15ce42ab48f9a3d2a15482cc289dc195ad05b0930515`.
+It passes ABI acceptance and the new gate: the selected Madaros compiles both
+production probes to Mach-O, signs and executes them, yielding
+`IR_TAIL_GROWTH_OK` and `ARM64_DATA_ADDRESS_OK`, each with exit 0. TypeEnv
+capacity/refusal and full compiler self-check also pass (`verdict=0`,
+`check: OK`). Large-frame warnings, including the existing enormous nested
+HLIR layout estimates, are also present in the preceding boolean-host log;
+they are not claimed fixed here. Fresh regressions/corpus and the Linux
+ladder remained pending at that observation. The same candidate subsequently
+passes the full extended regressions and a fresh **200/200** corpus with
+required real Metal launches. Binary64 conformance on Apple M5 Max reports
+`checked=40960 failures=0`, using the C++23 oracle. The native validation
+finishes with `PASS: production IR growth/address gate, native self-check,
+regressions and fresh real Metal`. This fresh corpus belongs to the
+allocator/address candidate, not to either preceding host.
+Slurm 14593 is now running, not
+merely queued; its snapshot predates the ARM64 address-window edit and must
+not be described as identical to this macOS source snapshot.
+
+Slurm 14593 subsequently stops with rc 137 after lowering all 129 modules:
+Slurm explicitly reports an OOM kill in step 14593.0, with peak RSS 66962948
+KiB under the 64 GiB allocation. It emits no ELF. This does not prove the
+tail allocator fix alone closes the full-build memory wall.
+
+The dependency-reclaim path still used pre-scalar-pool reboxing: it copied
+argument registers to a 32768-site, eight-argument scratch, then rebuilt Box
+lists and appended them to the already persistent argument pool. Every
+module in the failed run skipped reclaim. The next candidate removes this
+obsolete copying, validates flat argument intervals, and resets only when
+the validation and arena contract are clean. Sret spans are not flat-pool
+lists. No instruction, pool, function or rung limit is increased. The lifetime
+audit distinguishes BSS argument/name lanes and independent heap-allocated
+function-table chunks from temporary Box lists; module metadata is by value.
+
+The production-composed regression creates 33000 call sites (including nine
+arguments), resets and churns the Box arena, then verifies order, pool length,
+function-table survival and invalid-range refusal. It preserves production
+bodies/layouts; only test-copy effect annotations are widened for the stricter
+bootstrap checker. Compiled and executed with the native seed, the previous
+scanner returns 2 and the candidate prints `FLAT_ARG_RECLAIM_OK` with rc 0.
+The candidate module typechecks. Full new-host and measured ladder results
+remain pending; no reduced peak RSS is claimed yet.
+
+The preceding modular ARM64 backend refuses this larger runtime probe at
+`heap_alloc` rather than emitting a stub (`ARM64_REFUSAL unresolved_call`).
+That explicit backend capability gap is not a passing native runtime proof.
+The new Linux CI gate exercises the production reset/heap builtins through
+the modular Linux emitter; native macOS validation still requires fresh
+compiler/corpus execution, and does not claim arbitrary heap/arena builtins
+are complete in generated ARM64 programs.
+
+The extra imported nine-argument fixture, `madaros_flat_arg_dep_reset`, pins
+actual compiler reclaim independently of that generated-runtime limitation.
+Its preceding-host build reports `arena_reset_skipped (call-arg scratch
+overflow) module 1 sites 5`. The native regression gate now requires an
+`arena_reset_ok` record, no skipped-reset record, and correct program output;
+the new-host result is pending. This is outside the pinned 200 denominator.
+The first new Linux launcher stopped before Slurm submission because GCC's
+`int64_t` type differs from Darwin's in mixed initializer lists. Explicit
+`std::array<std::int64_t, N>` fixes the generator's portable C++23 typing;
+the original failed launcher log is retained separately from the retry.
+
+The reclaim candidate's signed macOS host is SHA-256
+`98cf37a9ea92e8f9617b64b501067cac4b6050d4dd8c9460a429e2b64039bae6`.
+Its dependency fixture now records `arena_reset_ok module 1 flat_arg_sites 5`
+and totals `ok=1 skip=0`, then the signed program prints
+`FLAT_ARG_DEP_RESET_OK` with rc 0. This discriminates the preceding skipped
+reset without relying on the unsupported generated-runtime heap builtin.
+ABI acceptance, IR growth/address and capacity gates, compiler self-check
+(`verdict=0`, `check: OK`) and extended regressions pass. A new **200/200**
+corpus with mandatory real Metal launches also passes; Apple M5 Max binary64
+conformance reports `checked=40960 failures=0`, with the C++23 oracle.
+Slurm 14605 started at 03:38:56 UTC, rebuilding the combined current source;
+its measured ladder remains pending. No lower peak memory or rung `run`
+is claimed from the native selected-corpus result alone.
+
+**Blocking regression in the modular Linux runtime:** job 14605 builds its
+host successfully (SHA-256
+`64a3d1d99605f034498304c4c1295e84ecea4216e7227c676b61645b54774998`),
+but the production-composed flat reclaim probe returns **5** after reset and
+churn. Tail/address, imported-reset, boolean, dependency, TypeEnv and registry
+fixtures return 0; these do not override the failing lifetime discriminator.
+The ladder's check passes and gen2 is still running at this observation.
+
+A separate diagnostic step on the same Slurm allocation retains pool length
+33008 but shows `arena_violation=1`, zero scanned sites and corrupted function
+metadata: function 0 has instruction count 16 and region slot/generation 0/0.
+Reading the next corrupted function during diagnostics terminates with 139;
+that secondary diagnostic crash is separate from the original probe's rc 5.
+Its logs are retained under `flat-diagnostic-result` beside the job results.
+The lifetime argument based only on the independently allocated chunk is
+therefore insufficient: values referenced by that chunk can still live in
+the modular runtime's shared allocation arena. The native-seed allocator's
+separate aggregate pool does not establish the modular emitter's contract.
+**Do not publish this reclaim candidate or accept its new gate until that
+regression passes.** No reset/churn assertion is removed, no zero-result
+runtime stub is substituted, and no ladder progress is counted as its proof.
 
 The merge-queue run `38776296357`, integration commit
 `9d99a9a817da9c353a2879da3dcb2ef3918475f8`, must not be conflated with the
@@ -224,6 +531,197 @@ Round 18 executes the original generic and named callback cases. It also turns
 the ontology closure downgrade negative test from SIGSEGV into E008; named-type
 optional-inner equality now uses nested matches rather than an aggregate tuple
 match that corrupted the ARM64 bootstrap.
+
+## Box-domain repair follow-up (2026-10-16, validation pending)
+
+Slurm job 14605 did not close the ladder: gen2 exited 137 after 129 modules,
+with an explicit Slurm OOM report and maximum RSS 66,962,128 KiB. Its separate
+flat-argument lifetime probe exited 5 after reset/churn; the diagnostic variant
+subsequently exited 139 while inspecting corrupted function metadata. These are
+distinct failures. Neither the native Mac corpus success nor reset log markers
+override that Linux lifetime failure.
+
+The next candidate distinguishes Box allocation in IR, appends a separate Box
+base/cursor/limit to the runtime context (old offsets preserved), and makes the
+x86-64 arena mark/reset operate only on that domain. Aggregate allocations keep
+their original cursor. Invalid reset marks must refuse with exit 183. This is
+an implementation candidate, not yet executable proof of repaired lifetime or
+reduced peak memory. Runtime-context, IR, lowering and x86 backend module checks
+passed through the preceding native host; the separate main check timed out
+(124), so it is not recorded as a pass.
+
+The strengthened production probe requires actual Box cursor advancement,
+rewind to the saved mark, and survival of an object allocated before the mark,
+in addition to the existing 33,000-site/reset/churn/metadata checks. On the
+ARM64 bootstrap seed this stronger test exits 13: its Box lowering uses separate
+`mmap` allocations while arena marks track the AST arena cursor. Consequently,
+the earlier seed probe success did not prove actual Box memory reclamation.
+It remains useful only for the assertions it actually exercised. No-op reset,
+skipped reclaim, or seed fallback is accepted as a Linux gate success.
+
+Job 14617 (`pr2981-boxdom`) started on Slurm with the new Linux candidate and
+unchanged ladder requirements. Results are separate under
+`/tmp/pr2981-bool.QVgKpb/boxdom-result/out`; the prior failures remain preserved.
+The invalid-mark test is included in that snapshot. The additional empty-arena
+mark/lazy-initialization regression was added afterward and still requires a
+separate Linux execution. Job 14617's rebuilt modular Linux host passed the
+strengthened lifetime probe (exit 0), the invalid-mark refusal (183), IR/address,
+boolean, FO/lopt, TypeEnv and registry fixtures. Its main check passed with zero
+errors and gen2 is still running; this is not yet a rung `run` result.
+
+The new native Mac build completed bounded acceptance, IR/TypeEnv/registry
+gates, full main self-check, regressions and a fresh required-real-Metal corpus:
+200/200. Its SHA-256 is
+`e8a18cab69f5f5238826a98bddff8be7e7649ee417a9c50d1fbc313d3a6fc48e`.
+Metal binary64 conformance on Apple M5 Max reports 40,960 checked, zero failures,
+with the C++23 oracle. Logs are under `/private/tmp/pr2981-boxdom-native-*`.
+The additional empty-mark fixture subsequently compiled and executed through
+the same Linux host (SHA-256
+`60101c259fd9523fb560547f19d158b18c74a0047c278126035a7b687904e898`),
+with build/run statuses 0/0 and `BOX_ARENA_EMPTY_MARK_OK`. Its node-local logs
+are in `out/empty-mark` alongside the ladder evidence. The first attempted
+invocation used a workspace-local input path unavailable on the compute node;
+it failed before compiling the fixture and is not a compiler regression. The
+successful run transferred the fixture to the allocated node explicitly.
+Job 14617 subsequently failed the ladder: gen2 exited 137 after all 129
+dependencies and `Merged IR: 14729 functions`, with an explicit Slurm OOM event
+at 05:10:10 UTC and maximum RSS 66,961,892 KiB. The reached rung remains
+`check`, expected `run`; no gen2 ELF was produced. This does not invalidate the
+focused lifetime repair, but it does disprove that this repair alone closes
+the self-compilation memory wall. All output remains in `boxdom-result/out`.
+The merged route next enters cleanup (when enabled), sealing and audit before
+native emission; the last log alone does not identify which of those stages
+caused the peak. Stage-specific measurement is required before another fix.
+The diagnostic candidate now emits `compile_stage:` markers at merged cleanup,
+sealing, ordered audit, float probe and native emission boundaries. A separate
+Slurm wrapper samples process memory from `/proc` every ten seconds and keeps
+`stageprobe-result` separate from the failed `boxdom-result`. These markers do
+not alter the compilation passes or ratchet. The frontend source SHA-256 is
+`0b7e00de2666437ad7eb3b43c4d652697f5c214078b4499c1305e1d7488a7434`,
+verified against the transferred snapshot. Launch preparation is not a completed
+measurement; no stage attribution or fresh execution success is claimed yet.
+The first instrumented allocation, job 14633, was cancelled after 57 seconds
+with signal 15 (wrapper status 143), before any result archive was returned.
+Slurm reported `CANCELLED`, not OOM; the cause of cancellation is not established.
+Its stderr, launcher log and empty result archive are retained. A separate
+`stageprobe2` retry uses the same diagnostics and criteria without overwriting
+that evidence.
+The instrumented retry 14636 also suffered an explicit Slurm OOM. Its last
+stage marker was `merged_native_emit_begin`, after cleanup, sealing, ordered
+audit and float-probe markers. The sampler recorded RSS 66,779,232 KiB at
+06:14:50 UTC, mostly anonymous memory; Slurm reported OOM at 06:15:07 UTC.
+This localizes the final failure to the native-emission call, not to cleanup.
+It does not yet distinguish backend initialization from the function loop.
+The existing `SOUNIO_NV2_ARENA_TRACE` diagnostic is selected for a separate
+same-host measurement; no optimization, limit or refusal is disabled.
+Job 14668 completed with an explicit Slurm OOM at 06:54:22 UTC: check passed,
+gen2 lowered 129 dependencies / 14,729 merged functions and exited 137. Native
+trace samples showed the Box arena cursor stable while the aggregate pool
+cursor advanced across emitted-function samples; no generic pool rewind is
+safe because its blocks may escape. Logs remain under `nvtrace-result/out`.
+
+A candidate now memoizes the region/dynlink, wide-multiply and IEEE diagnostic
+configuration, following the lowering's existing process-lifetime flag policy,
+and reads the arena-trace option before the function loop. The backend module
+check passed. The production-extract C++23 fixture instruments real `read_env`
+calls and checks all four flag values plus the lower-IR IEEE setter. The strict
+seed test requires an additional Mut annotation on the copied setter, without
+changing its body. Before: 1,024 reads / exit 5; after: four reads / exit 0 in
+both off and on environments. This establishes memoization and flag behavior,
+not that the complete OOM is fixed. The ARM64 seed's pool-mark values were zero
+and therefore provide no allocation measurement. A raw Madaros ARM64 build of
+this standalone reader fixture refused `str_from_bytes`; it is explicitly not
+a passing native gate. The new CI fixture gate is connected on Linux only.
+
+A separate `envcache` Slurm rebuild and unchanged full ladder are being
+launched, alongside a fresh native Mac build/corpus watcher. Backend source
+SHA-256 is `0439eefbf0cec0c38d9683f653531e40c13c51be7e1e8aa462d9c2cf1bb45fe5`.
+Neither launch preparation nor the extracted seed fixture closes the ladder.
+Job 14701's newly built Linux Madaros subsequently compiled and executed both
+fixture revisions: before status 5, after status 0, after with enabled flags
+status 0. IR/address, lifetime, bool, FO/lopt, TypeEnv and registry fixtures also
+passed; invalid reset remained 183. Main check passed with zero errors and
+gen2 is in progress, so the whole-program OOM repair is still unproven.
+The new Mac host SHA-256 is
+`54843092b8efbc43fddc61fa46ecf8e127c923cc9089d146a69c4e11b3eaa922`.
+It passed bounded acceptance, main self-check and regressions, and subsequently
+completed the fresh required-real-Metal corpus: 200/200. The Metal binary64 log
+records 40,960 checked and zero failures. Final marker is in
+`/private/tmp/pr2981-envcache-native-validation.log`. This is a Mac result, not
+a completed Linux self-compilation ladder.
+
+### Final combined local gate: rung run, not fixed point
+
+Slurm job 14701 completed the unchanged fixed-point ladder gate with status 0:
+check rc=0/errors=0, gen2 rc=0, 129 dependencies against minimum 122,
+14,732 merged IR functions, and a gen2 `Madaros` version banner. The reached
+and expected rung are both `run`. Maximum resident set size was 63,570,060 KiB
+under the same 64 GiB allocation; preceding same-source-family runs were killed
+at the allocation limit. This is executable evidence that the candidate closes
+the previously measured OOM wall for this local rung, not a general memory bound.
+
+Linux gen1 SHA-256:
+`97885b74deee41a3b1bd9121e97ea582ec406f4751735286013200e410e43651`.
+Produced gen2 SHA-256:
+`29fbfa0168b57c8ec9a5aabc5a3410aed16311df7d01ad4d0c07724107531f20`.
+Evidence is retained separately in the workspace
+`/tmp/pr2981-bool.QVgKpb/envcache-result/out`, including source identities,
+fixtures, ladder logs and resource samples. No generated binary or receipt is
+included in the source change.
+
+The optional next rung, gen3, failed with SIGSEGV (139) before compiling itself.
+No modular fixed point, gen3 reproducibility or determinism is claimed. The
+gate was already configured to require `run`; it was not lowered to accept
+this result. The native reader fixture also reports pool-mark sentinel -1
+through this Linux emitter, so only the complete process RSS measurement, not
+that fixture's cursor values, supports the memory conclusion. Fresh PR/queue
+and exact post-merge main CI remain required before final delivery.
+
+### Published-head CI boundary follow-up (not yet accepted)
+
+Head `10a03ee94b` reached remote f64 validation, but the existing 8,191-global
+boundary gate failed with `E-TYPE-ENV-CAP` at 8,192 total bindings. The checker
+also needs other bindings and lexical locals; a total table only one slot above
+the advertised BSS-global limit is insufficient. This is a real regression in
+the earlier fail-closed checker repair, not an OOM or a reason to weaken the
+global gate. The dedicated gen2 workflow stopped at the same pre-ladder gate.
+Logs: `/private/tmp/pr2981-head10a-f64-job-raw.log`.
+
+The unpublished candidate uses a 12,288-entry TypeEnv, preserving sticky
+overflow and all BSS/IR limits. Its production-container generator derives
+overflow from `TYPE_ENV_CAPACITY + 1` and adds a mixed fixture at the actual
+`BSS_MAX_GLOBALS` with 16 locals. The previous host refuses that mixed fixture
+with `E-TYPE-ENV-CAP`; candidate module checking passed. No candidate runtime
+success is claimed until rebuilding. A separate `envreserve` Linux snapshot
+includes the entire existing f64 gate as well as the focused gates and ladder;
+a fresh Mac build and strict corpus watcher are also pending. Changed TypeEnv
+source SHA-256:
+`e0c2f00b61c6e7f7cf0bd49c66ef2f9e4ee88065407a5801b92bc47f9eb90f80`.
+Slurm job 14715 subsequently passed the complete existing f64 gate, including
+8,191 globals compiling/executing and 8,192 cleanly refusing; imported capacity
+16,383/16,384 and ordered 7/8/9/13-argument calls also passed. The mixed
+global/local check passed, exact production-container tests passed, and the
+larger TypeEnv's overflow check refused with status 1. Focused lifetime,
+IR/address, boolean, FO/lopt and registry fixtures passed. Main check returned
+zero errors; gen2 is still running, so no new rung result is claimed yet.
+Fresh native Mac validation completed 200/200 with required real Metal,
+self-check and regressions. Host SHA-256:
+`4b92b489d4699871954ea8168190cb8af86df547c6488d872fb35b31cd3c0e5c`.
+Its Metal log reports 40,960 checked and zero failures with the C++23 oracle;
+the final validation marker is `/private/tmp/pr2981-envreserve-native-validation.log`.
+The same candidate subsequently completed Slurm 14715's unchanged ladder with
+status 0: check zero errors, gen2 rc=0, 129 dependencies, 14,732 merged functions,
+and a running Madaros gen2 banner. Reached/expected rung remain `run`; gen3 still
+exits 139, so there is no fixed-point claim. Peak RSS was 64,603,280 KiB under
+the same 64 GiB allocation. Linux gen1 SHA-256:
+`3170660e1b74b5539df798a3d45a2678fa15b4bbb166750d56560720222f9b36`;
+gen2 SHA-256:
+`ab77c3f937148b11180202ea88fba50c603c1630277dc074ac7c82a3d453ca14`.
+Full f64 gate and ladder statuses are both 0 in
+`/tmp/pr2981-bool.QVgKpb/envreserve-result/out`. This closes local verification
+of the boundary follow-up, not fresh CI or the exact post-merge main result.
+No combined commit, push or merge is justified before the ladder completes
+successfully.
 
 ## Additional wide-integer backend gate
 
