@@ -14,6 +14,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 
 # Sounio
 
+[English](README.md) · [Ελληνικά — ξεκινήστε εδώ](README.el.md)
+
 **Scientific computing with explicit uncertainty, units and effects — powered by a self-hosted compiler.**
 
 Sounio is an epistemic systems language created by **Demetrios Chiuratto Agourakis**. Its scientific abstractions and compiler are developed together: measurements carry uncertainty, quantities carry dimensions, and computations declare effects. Explore the language, the compiler and a scientific library spanning eight research domains below.

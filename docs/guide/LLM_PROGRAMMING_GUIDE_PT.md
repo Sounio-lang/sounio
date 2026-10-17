@@ -9,6 +9,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.llm-prog
 
 # Escrever Sounio com um modelo de linguagem
 
+[Ελληνικά](LLM_PROGRAMMING_GUIDE_EL.md) · [English](LLM_PROGRAMMING_GUIDE.md)
+
 **Edição:** outubro de 2026. **Preparação:** 2026-10-16.
 **Base de código:** `f5b2c5850be9f3d3995719ffcade44a6d851658a`.
 
@@ -37,6 +39,15 @@ compilador, conformidade completa, certificação numérica ou sucesso de todo L
 [Manifesto dos exemplos](../llm-guide/example-manifest.json) ·
 [Diagnósticos](../llm-guide/error-catalog.md) ·
 [Descoberta de APIs](../llm-guide/stdlib-index.md)
+
+Para começar com um contexto completo do tamanho da tarefa, use o
+[currículo trilíngue de trinta roteiros](../llm-guide/task-playbook.md):
+`node scripts/docs/sounio_task_context.mjs show first-program --lang pt`.
+O comando fornece fontes completas de referência/controle, resultados
+históricos do perfil, passos de adaptação e armadilhas sem executar compilador
+ou LLM. Os roteiros reutilizam programas existentes; não são trinta novas
+execuções. O [guia de tradução e reparo](../llm-guide/translation-and-repair.md)
+explica ports que preservam intenção, diagnóstico por etapa e reparos limitados.
 
 <!-- llm:section orientation -->
 ## 1. O contexto certo para o modelo
