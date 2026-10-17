@@ -2,8 +2,8 @@
 topic_id: repo.frontdoor.readme
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 -->
 
@@ -18,7 +18,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 
 Sounio is an epistemic systems language created by **Demetrios Chiuratto Agourakis**. Its scientific abstractions and compiler are developed together: measurements carry uncertainty, quantities carry dimensions, and computations declare effects. Explore the language, the compiler and a scientific library spanning eight research domains below.
 
-[Explore the science](#a-scientific-library-across-disciplines) · [Explore the compiler](#architecture) · [Start here](#get-started)
+[Explore the science](#a-scientific-library-across-disciplines) · [Language reference](docs/spec/LANGUAGE_SPECIFICATION.md) · [Explore the compiler](#architecture) · [Start here](#get-started)
 
 ## Science expressed in the program
 
@@ -54,10 +54,18 @@ The compiler lives in this repository alongside the language. Follow the impleme
 | Examples and experiments | [examples](https://github.com/Sounio-lang/sounio/tree/main/examples) |
 | Regression evidence | [tests](https://github.com/Sounio-lang/sounio/tree/main/tests) |
 | Architecture | [Compiler documentation](https://github.com/Sounio-lang/sounio/tree/main/docs/compiler) |
+| Language specification | [Language reference and grammar](docs/spec/LANGUAGE_SPECIFICATION.md) |
+
+### Repository map
+
+- `self-hosted/` and `bootstrap/`: compiler and bootstrap paths.
+- `stdlib/`, `tests/`, `examples/` and `demos/`: libraries, regression evidence, examples and guided demonstrations.
+- `docs/` and `artifacts/research/`: technical documentation and research assets.
+- `website/` and `site-next/`: separate website implementations; `ecosystem/` contains distributable templates.
 
 ## Get started
 
-The default `bin/souc` route selects Madaros; its committed prebuilt compiler is Linux x86-64. Native macOS/AArch64 compile, runtime and type-check acceptance is recorded separately in [#2873](https://github.com/Sounio-lang/sounio/pull/2873), and does not imply a matching host-native compiler is distributed by this launcher. Inspect the selected artifact before running examples.
+The default `bin/souc` route selects Madaros; its committed prebuilt compiler is Linux x86-64. Apple Silicon also has a separate current-source native ARM64 build and real Metal execution route integrated in [#2978](https://github.com/Sounio-lang/sounio/pull/2978); see the [macOS ARM64 guide](docs/compiler/MADAROS_MACOS_ARM64.md) for its setup and limits. A clean checkout still needs the documented native artifact before the launcher can use that route. Inspect the selected artifact before running examples.
 
 ```sh
 git clone https://github.com/Sounio-lang/sounio.git
@@ -82,7 +90,7 @@ Source, distributed binaries, individual test lanes and remote CI are separate e
 
 | Capability | Current evidence |
 |---|---|
-| Native Apple execution | Compile, runtime and type-check acceptance on macOS/AArch64 in [#2873](https://github.com/Sounio-lang/sounio/pull/2873). Distribution and source-bootstrap routes are tracked separately. |
+| Native Apple execution | Native ARM64 build and real Metal execution integrated in [#2978](https://github.com/Sounio-lang/sounio/pull/2978); see the [macOS ARM64 guide](docs/compiler/MADAROS_MACOS_ARM64.md). Linux parity and self-hosting remain separate claims. |
 | Scientific values through calls | Direct and stored returned `Knowledge` values preserve variance in the tested paths integrated by [#2878](https://github.com/Sounio-lang/sounio/pull/2878). |
 | Derived-unit numerical representation | Scientific parameter representation repairs integrated by [#2878](https://github.com/Sounio-lang/sounio/pull/2878). |
 | Quantum circuits and experiments | Born-law, QASM tape and CHSH routes integrated by [#2880](https://github.com/Sounio-lang/sounio/pull/2880), with classical execution evidence. |
@@ -90,7 +98,7 @@ Source, distributed binaries, individual test lanes and remote CI are separate e
 
 GPU/Pireus execution has evidence on scoped Spark routes. The generic GPU CLI path and each other backend require their own status; support is recorded per engine, target and source revision.
 
-This overview is reconciled against main `571848a5` on 11 October 2026. Follow the linked changes and current CI for subsequent integration.
+This status snapshot was reconciled against main `571848a5` on 11 October 2026. The later Apple Silicon integration is recorded in [#2978](https://github.com/Sounio-lang/sounio/pull/2978); follow the linked changes and current CI for subsequent integration.
 
 ## Research and design
 

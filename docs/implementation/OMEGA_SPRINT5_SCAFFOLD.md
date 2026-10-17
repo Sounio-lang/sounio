@@ -2,8 +2,8 @@
 topic_id: repo.docs.implementation.omega-sprint5-scaffold
 authority: historical
 audience: maintainers
-last_validated: 2026-03-07
-validated_by: A7
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.omega-sprint5-scaffold
 -->
 
