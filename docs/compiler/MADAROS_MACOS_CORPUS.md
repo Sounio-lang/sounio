@@ -9,6 +9,42 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.madar
 
 # Native macOS Madaros: pinned 200-program corpus
 
+## Region witness cursor-domain correction (PR #2981 follow-up)
+
+The published `7f13ba664a` CI failed the syscall escape witness with exit 2:
+the witness observed `__arena_mark`, now the independent Box arena cursor,
+while its allocations live in the aggregate/region heap. The candidate binds
+the already implemented `__rgn_cursor` diagnostic in the checker and changes
+only the witness's three cursor observations, preserving its assertions and
+iteration counts. A new allocation-domain witness checks independent cursor
+advancement and preservation of aggregates across an actual Box reset.
+
+Slurm job 14729 rebuilt the compiler from the canonical seed and passed the
+complete region gate, including all nine barrier sabotage discriminators,
+streaming coverage, refusal in both lanes and the opt-out comparison. Removing
+the syscall barrier still yields exit 2. The full current-source f64 gate also
+passed. The modular ladder returned check=0, gen2=0, 129 modules (minimum 122),
+14,732 merged functions, and executed the gen2 Madaros banner. The optional
+gen3 remains SIGSEGV 139: this is rung `run`, not a fixed-point claim.
+Remote evidence is retained separately in
+`/tmp/pr2981-bool.QVgKpb/domain-result/out`. The rebuilt Linux host SHA-256 is
+`21d96e479f262c88f1550c0308fb34afa683969dd5345db704dc5bad2e2ab65b`;
+the ladder's recorded peak RSS is 64,581,320 KiB and its exit status is 0.
+The fresh signed native macOS host SHA-256 is
+`a63c96ca67e2ba775b7aafc42d836559fb733e64ee0224ff081709f887c20b1a`.
+It passed bounded native acceptance, the production IR/address and TypeEnv
+probes, full main self-check (`verdict=0`, `check: OK`), module registry and
+extended positive/negative port regressions. The fresh pinned corpus completed
+200/200 with required real Metal launches. The Apple M5 Max Metal conformance
+run checked 40,960 results with zero failures against the C++23 oracle.
+Local logs and generated receipts remain outside Git in
+`/private/tmp/pr2981-domain-native-validation.log` and
+`/private/tmp/pr2981-domain-native-corpus/`; no prior receipts substitute for
+this fresh execution. This is local validation, not a claim that the new head
+or the eventual main merge revision has passed remote CI.
+The original 199/200, historical corrected 200/200, PBPK queue 199/200 and fresh
+candidate runs remain distinct; the pinned 200-member manifest is unchanged.
+
 The immutable selection is `tests/manifests/madaros_macos_200.txt`, recovered
 from the original `scratchpad/list200.txt`. It is not a new sample or a filtered
 subset. The manifest pins membership; source snapshots record the exact fixture
