@@ -13,19 +13,25 @@
 # leave that test green. This gate closes the gap in two halves:
 #
 #   static  the branch exists inside apply_relocations_into (calls the recorder
-#           and latches reloc_overflow), and every writer --
-#           compile_native_v2_preview_to_file,
-#           compile_native_finalize_and_write_ref and the common
-#           native_v2_write_min_elf64_to_file (which the sret witness route
-#           calls directly after apply_relocations_into) -- check
-#           NC_RELOC_UNKNOWN_KIND_COUNT, name the site count, and return 20
-#           before they write anything.
-#   live    self-test T70r (native_v2_reloc_unknown_kind_selftest) in a Madaros
-#           built from current source. T70r builds a NativeCompiler, adds a
-#           kind-9 relocation, runs the real apply_relocations_into, and fails if
+#           and latches reloc_overflow); the single refusal point
+#           native_reloc_refuse_if_invalid (native/frame.sio) prints the unknown
+#           kind and the site count and returns 20 for an unknown kind and for
+#           reloc_overflow; and EVERY route from apply_relocations_into to a file
+#           write passes through it. The routes are DERIVED from the code by
+#           scripts/ci/native_reloc_refusal_routes.py (callers of
+#           apply_relocations_into, followed through wrappers that relocate the
+#           caller's NativeCompiler, to every writer they reach) -- not a fixed
+#           list, so a new route or writer is checked without editing this gate.
+#   live    (1) self-test T70r (native_v2_reloc_unknown_kind_selftest) in a
+#           Madaros built from current source. T70r builds a NativeCompiler, adds
+#           a kind-9 relocation, runs the real apply_relocations_into, and fails if
 #           the flag, the counter or the untouched placeholder are wrong; a
 #           known-kind control checks nothing else refuses. Removing the branch
 #           turns T70r into "FAIL: T70r".
+#           (2) scripts/ci/native_reloc_sret_refusal_check.sh: the sret witness
+#           route driven with an injected kind-9 relocation must report rc 20 and
+#           leave NO output file; the uninjected control must write an ELF that
+#           exits 14. Fails on d52b82d4, the #2803 head first reviewed.
 #
 # Env:
 #   SOUNIO_NATIVE_RELOC_UNKNOWN_KIND_MADAROS  Madaros built from current source
@@ -85,31 +91,42 @@ grep -Eq 'kind_code >= 1 && kind_code <= 4' "$TMP/pred" \
   || gate_fail "native_v2_reloc_kind_is_known no longer accepts exactly kinds 1..4"
 echo "PASS  static:native_v2_reloc_kind_is_known accepts exactly 1..4"
 
-writers=0
-for w in compile_native_v2_preview_to_file compile_native_finalize_and_write_ref native_v2_write_min_elf64_to_file; do
-  fn_body "$SRC" "$w" >"$TMP/$w"
-  require_nonempty_file "$TMP/$w" "writer $w not found in $SRC"
-  # The refusal block must come before the first byte is written, print both the
-  # first unknown kind and the site count, and return 20.
-  awk '
-    NR > 1 && /native_v2_write_min_elf64_to_file\(output_path|nc_elf_put_u8\(|write_file\(/ && !done { wrote = 1 }
-    /if NC_RELOC_UNKNOWN_KIND_COUNT > 0 \{/ && !wrote { blk = 1; next }
-    blk && /print_int\(NC_RELOC_UNKNOWN_KIND_FIRST\)/ { first = 1 }
-    blk && /print_int\(NC_RELOC_UNKNOWN_KIND_COUNT\)/ { count = 1 }
-    blk && /return 20/ { ret = 1 }
-    blk && /^    }/ { blk = 0; done = 1 }
-    END { exit (done && first && count && ret) ? 0 : 1 }
-  ' "$TMP/$w" \
-    || gate_fail "$w does not refuse (rc 20, naming kind and site count) on NC_RELOC_UNKNOWN_KIND_COUNT > 0 before writing"
-  echo "PASS  static:$w refuses before writing, naming kind and site count"
-  writers=$((writers + 1))
-done
-require_min_count "$writers" 3 "writers checked"
+fn_body "$FRAME" native_reloc_refuse_if_invalid >"$TMP/helper"
+require_nonempty_file "$TMP/helper" "native_reloc_refuse_if_invalid not found in $FRAME"
+# Unknown kind: names the first kind and the site count, returns 20. Overflow:
+# returns 20. Both before the fall-through `0`.
+awk '
+  /if NC_RELOC_UNKNOWN_KIND_COUNT > 0 \{/ { blk = 1; next }
+  blk && /print_int\(NC_RELOC_UNKNOWN_KIND_FIRST\)/ { first = 1 }
+  blk && /print_int\(NC_RELOC_UNKNOWN_KIND_COUNT\)/ { count = 1 }
+  blk && /return 20/ { ret = 1 }
+  blk && /^    }/ { blk = 0; done = 1 }
+  /if \(\*nc\)\.reloc_overflow \{/ { ob = 1; next }
+  ob && /return 20/ { oret = 1 }
+  ob && /^    }/ { ob = 0 }
+  END { exit (done && first && count && ret && oret) ? 0 : 1 }
+' "$TMP/helper" \
+  || gate_fail "native_reloc_refuse_if_invalid does not return 20 (naming kind and site count) on an unknown kind, or does not return 20 on reloc_overflow"
+echo "PASS  static:native_reloc_refuse_if_invalid refuses rc 20 on unknown kind (naming kind and site count) and on reloc_overflow"
+
+# No second copy of the refusal: outside the helper, nothing tests the counter.
+dups="$(grep -rn --include='*.sio' 'NC_RELOC_UNKNOWN_KIND_COUNT > 0' self-hosted | grep -v "^$FRAME:" || true)"
+[[ -z "$dups" ]] || gate_fail "refusal duplicated outside native_reloc_refuse_if_invalid: $dups"
+echo "PASS  static:no duplicated refusal outside native_reloc_refuse_if_invalid"
+
+echo "--- routes (derived from callers of apply_relocations_into) ---"
+python3 "$ROOT_DIR/scripts/ci/native_reloc_refusal_routes.py" "$ROOT_DIR" >"$TMP/routes" 2>&1
+routes_rc=$?
+cat "$TMP/routes"
+[[ "$routes_rc" == 0 ]] || gate_fail "a route from apply_relocations_into reaches a write without native_reloc_refuse_if_invalid (see FAIL lines above)"
+routes="$(grep -c '^PASS  route' "$TMP/routes" || true)"
+require_min_count "$routes" 1 "routes from apply_relocations_into to a write"
+echo "PASS  static:$routes route(s) to a write, every one through native_reloc_refuse_if_invalid"
 
 echo "--- live ---"
 MADAROS="${SOUNIO_NATIVE_RELOC_UNKNOWN_KIND_MADAROS:-}"
 if [[ -z "$MADAROS" ]]; then
-  echo "NOT_RUN  live:T70r (set SOUNIO_NATIVE_RELOC_UNKNOWN_KIND_MADAROS to a Madaros built via scripts/ci/build_modular_madaros.sh)"
+  echo "NOT_RUN  live:T70r + sret refusal check (set SOUNIO_NATIVE_RELOC_UNKNOWN_KIND_MADAROS to a Madaros built via scripts/ci/build_modular_madaros.sh)"
   gate_pass "static half only (live T70r NOT_RUN)"
   exit 0
 fi
@@ -138,4 +155,8 @@ else
   gate_fail "self-test T70r was not reached (rc=$madaros_rc) -- the live half is required when a Madaros is given"
 fi
 
-gate_pass "unknown relocation kinds are refused statically and live (T70r)"
+echo "--- live: sret route, injected unknown kind ---"
+bash "$ROOT_DIR/scripts/ci/native_reloc_sret_refusal_check.sh" "$MADAROS" \
+  || gate_fail "sret route with an injected unknown relocation kind did not refuse (rc 20, no output file)"
+
+gate_pass "unknown relocation kinds are refused statically (every derived route) and live (T70r, sret route)"
