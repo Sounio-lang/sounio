@@ -1275,12 +1275,27 @@ pub fn types_equal(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div {
         // structural-equality arm below and compared equal regardless of
         // identity, letting an invalid substitution through in let/return
         // contexts that only ever call this canonical predicate.
-        name_eq(a.name, b.name) && a.ontology_id == b.ontology_id &&
-        (match (a.inner, b.inner) {
-            (Some(inner_a), Some(inner_b)) => types_equal(*inner_a, *inner_b),
-            (None, None) => true,
-            _ => false
-        })
+        if !name_eq(a.name, b.name) || a.ontology_id != b.ontology_id {
+            false
+        } else {
+            // The named-type arm needs the same nested Option match as the
+            // ordinary arm below. A tuple of Options is not safely lowered by
+            // the ARM64 bootstrap and dereferenced null on a named leaf.
+            match a.inner {
+                Some(inner_a) => {
+                    match b.inner {
+                        Some(inner_b) => types_equal(*inner_a, *inner_b),
+                        None => false,
+                    }
+                }
+                None => {
+                    match b.inner {
+                        None => true,
+                        Some(_) => false,
+                    }
+                }
+            }
+        }
     } else {
         // Nested Option match — `match (a.inner, b.inner)` is E218 on
         // lean_single a64 (tuple of Options). Same meaning; both backends
@@ -1417,6 +1432,17 @@ pub fn epsilon_combine_unknown(eps_a: f64, eps_b: f64) -> f64 {
     epsilon_combine_correlated(eps_a, eps_b)
 }
 
+// S08 Knowledge epsilon bounds runtime variance, not standard deviation.
+// Identical-slot addition doubles the value and quadruples its variance.
+// Unknown/out-of-domain bounds must stay unknown, never clamp to zero/one.
+pub fn knowledge_same_slot_add_variance(ty: TypeEntry) -> f64 {
+    if ty.knowledge_epsilon_mode != 0 || ty.knowledge_epsilon < 0.0 {
+        return 0.0 - 1.0
+    }
+    let variance = 4.0 * ty.knowledge_epsilon
+    if variance >= 0.0 && variance <= 1.0 { variance } else { 0.0 - 1.0 }
+}
+
 // Weighted combination for weighted averages
 pub fn epsilon_combine_weighted(eps_a: f64, eps_b: f64, weight_a: f64, weight_b: f64) -> f64 with Panic, Div {
     let weighted_sum = weight_a * eps_a + weight_b * eps_b
@@ -1477,14 +1503,17 @@ pub fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeE
             return ty_error()
         }
 
-        // Determine result epsilon based on operation
-        let result_epsilon = match op {
-            BinaryOp::OpAdd => epsilon_combine_independent(left_eps, right_eps),
-            BinaryOp::OpSub => epsilon_combine_independent(left_eps, right_eps),
-            BinaryOp::OpMul => epsilon_combine_relative(left_eps, right_eps),
-            BinaryOp::OpDiv => epsilon_combine_relative(left_eps, right_eps),
-            BinaryOp::OpRem => epsilon_combine_independent(left_eps, right_eps),
-            _ => 0.0
+        // A measure literal now exposes a variance bound. Do not feed it to
+        // legacy standard-error quadrature, nor fabricate a bound from the
+        // unknown sentinel. Add's independent lane has the runtime sum rule;
+        // the checker replaces it for the same-slot Correlated case. Other
+        // operations/modes need additional evidence, so keep their bound unknown.
+        var result_epsilon = 0.0 - 1.0
+        let variance_modes = (!left_is_knowledge || left_ty.knowledge_epsilon_mode == 0)
+            && (!right_is_knowledge || right_ty.knowledge_epsilon_mode == 0)
+        if op == BinaryOp::OpAdd && variance_modes && left_eps >= 0.0 && right_eps >= 0.0 {
+            let variance = left_eps + right_eps
+            if variance <= 1.0 { result_epsilon = variance }
         }
 
         // Determine result type based on operation

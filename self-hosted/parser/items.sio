@@ -63,6 +63,18 @@ pub fn items_reset_pure_fn_reg() with Mut {
 // fn of the same name -- in its own module and, if `pub`, in every importer.
 var ITEMS_IN_IMPL: i64 = 0
 
+// #2661: SOUNIO_DISABLE_GLOBAL_INIT_IMPL_EXCLUSION=1 sets this to 1 and restores
+// ONLY the old recording of impl methods under their bare name in the pure-fn
+// constant-fold table (the exclusion #2603 introduced). Attribution knob, the
+// sibling of SOUNIO_DISABLE_GLOBAL_INIT_MODULE_SCOPE (mod.sio GVI_SCOPE_OFF);
+// the two are independent. Written from mod.sio (read_env needs IO, which
+// items_maybe_record_pure_fn_const does not have) before any item is parsed.
+var ITEMS_IMPL_EXCLUSION_OFF: i64 = 0
+
+pub fn items_set_impl_exclusion_off() with Mut {
+    ITEMS_IMPL_EXCLUSION_OFF = 1
+}
+
 // Fill GLOBAL_VAR_INIT_DEFS with the top-level definition names of the module whose
 // tokens are loaded, before it is parsed. A name is a top-level definition when
 // `fn` / `var` / `let` / `const` sits at brace depth 0 directly before an
@@ -898,7 +910,7 @@ fn items_maybe_record_pure_fn_const(
     effects: &Option<Box<EffectList>>,
     body: &Block
 ) with Mut, Div {
-    if ITEMS_IN_IMPL == 1 {
+    if ITEMS_IN_IMPL == 1 && ITEMS_IMPL_EXCLUSION_OFF == 0 {
         return
     }
     match *effects {
@@ -912,10 +924,13 @@ fn items_maybe_record_pure_fn_const(
     if ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD) != 0 {
         return
     }
+    // #2661 dump attribution: which kind of definition owns these words.
+    GVI_DUMP_ORIGIN = if ITEMS_IN_IMPL == 1 { 2 } else { 1 }
     match *params {
         Some(_) => {
             // Wave13e: pure paramful → body registry (call-site fold).
             pure_fn_reg_record(name, params, body)
+            GVI_DUMP_ORIGIN = 0
             return
         }
         None => {}
@@ -932,6 +947,7 @@ fn items_maybe_record_pure_fn_const(
         }
         None => {}
     }
+    GVI_DUMP_ORIGIN = 0
 }
 
 // Record a compile-time integer/float/bool global initializer for native BSS fill.
@@ -1002,6 +1018,101 @@ fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
     let pair = items_eval_global_init_word(init)
     if pair.0 {
         ast_record_global_var_init(name, pair.1)
+    }
+}
+
+// #2355: fold the initializer into BSS fill words when the parse-time folder
+// can; otherwise keep a closed expression for run-time evaluation at `main`'s
+// entry (ast_record_global_deferred_init). Before, every struct literal was
+// dropped here and the global's handle slot read as 0.
+//
+// Only a one-word slot is deferred: no annotation, or a plain named type. A
+// fixed-array global holds its elements inline in BSS and a multi-limb global
+// (i128/u128/i256/u256/f128/f256) holds several words, so one run-time store
+// would be wrong for both; they keep the old zero fill.
+fn items_global_init_deferrable(ty: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *ty {
+        Some(t) => {
+            if (*t).kind != TypeExprKind::TypeNamed { return false }
+            let tn = ast_path_prefix_name((*t).path, 0)
+            if name_eq(tn, make_name("i128")) || name_eq(tn, make_name("u128")) { return false }
+            if name_eq(tn, make_name("i256")) || name_eq(tn, make_name("u256")) { return false }
+            if name_eq(tn, make_name("f128")) || name_eq(tn, make_name("f256")) { return false }
+            true
+        }
+        None => true,
+    }
+}
+
+// Only a CLOSED initializer is deferred: one that names nothing -- literals,
+// struct / array / tuple literals, and unary, binary and cast operators over
+// those. The deferred expression is lowered at `main`'s entry, i.e. outside the
+// module that wrote it, where a bare callee or global name would resolve
+// against the merged program instead of the defining module (a private
+// `helper` would bind another module's `pub fn helper`; see
+// scripts/ci/madaros_global_init_identity_gate.sh, case `shadow`). An
+// initializer that names a fn or global keeps the previous behaviour.
+fn items_expr_is_closed(e: &Expr) -> bool with Mut, Panic, Div {
+    let k = (*e).kind
+    if k == ExprKind::ExprIntLit || k == ExprKind::ExprFloatLit || k == ExprKind::ExprBoolTrue
+        || k == ExprKind::ExprBoolFalse || k == ExprKind::ExprCharLit || k == ExprKind::ExprStringLit {
+        return true
+    }
+    if k == ExprKind::ExprUnary || k == ExprKind::ExprCast {
+        return items_opt_expr_is_closed(&(*e).left)
+    }
+    if k == ExprKind::ExprBinary {
+        return items_opt_expr_is_closed(&(*e).left) && items_opt_expr_is_closed(&(*e).right)
+    }
+    if k == ExprKind::ExprStructLit {
+        var cur = &(*e).fields
+        while true {
+            match *cur {
+                Some(fl) => {
+                    if !items_expr_is_closed(&(*fl).head.value) { return false }
+                    cur = &(*fl).tail
+                }
+                None => { break }
+            }
+        }
+        return true
+    }
+    if k == ExprKind::ExprArrayLit || k == ExprKind::ExprTupleLit {
+        match (*e).left {
+            Some(rv) => {
+                if !items_expr_is_closed(&(*rv)) { return false }
+                return items_opt_expr_is_closed(&(*e).right)
+            }
+            None => {}
+        }
+        var cur = &(*e).args
+        while true {
+            match *cur {
+                Some(al) => {
+                    if !items_expr_is_closed(&(*al).head) { return false }
+                    cur = &(*al).tail
+                }
+                None => { break }
+            }
+        }
+        return true
+    }
+    false
+}
+
+fn items_opt_expr_is_closed(opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(x) => items_expr_is_closed(&(*x)),
+        None => true,
+    }
+}
+
+fn items_record_global_init_or_defer(name: Name, init: Box<Expr>, deferrable: bool) with Mut, Panic, Div {
+    let before = ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD)
+    items_record_global_int_init(name, &(*init))
+    if deferrable && ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD) == before
+        && items_expr_is_closed(&(*init)) {
+        ast_record_global_deferred_init(name, init)
     }
 }
 
@@ -1552,11 +1663,13 @@ impl Parser {
         let ty_pair = p.parse_optional_type()
         p = ty_pair.0
         let global_ty: Option<Box<TypeExpr>> = ty_pair.1
+        ast_record_global_decl_type(name, &global_ty)
 
         p = p.expect(TokenKind::Eq)
         p = p.parse_expr()
         let init_let_box = parser_take_expr_box()
-        items_record_global_int_init(name, &(*init_let_box))
+        items_record_global_init_or_defer(name, init_let_box, items_global_init_deferrable(&global_ty))
+        ast_record_global_const_name(name)
         if parser_peek(p) == TokenKind::Semi {
             p = p.advance()
         }
@@ -1608,12 +1721,13 @@ impl Parser {
         let ty_pair = p.parse_optional_type()
         p = ty_pair.0
         let global_ty: Option<Box<TypeExpr>> = ty_pair.1
+        ast_record_global_decl_type(name, &global_ty)
 
         if parser_peek(p) == TokenKind::Eq {
             p = p.advance()
             p = p.parse_expr()
             let init_var_box = parser_take_expr_box()
-            items_record_global_int_init(name, &(*init_var_box))
+            items_record_global_init_or_defer(name, init_var_box, items_global_init_deferrable(&global_ty))
         }
         if parser_peek(p) == TokenKind::Semi {
             p = p.advance()
