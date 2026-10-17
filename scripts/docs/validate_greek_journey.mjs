@@ -19,6 +19,22 @@ async function readRepository(file) {
   return readFile(resolved, 'utf8');
 }
 
+function shellContainsSounio(body) {
+  let fence = null;
+  for (const rawLine of body.split('\n')) {
+    const line = rawLine.replace(/^(?:[ \t]*>[ \t]?)+/, '');
+    if (fence) {
+      const closing = /^[ \t]*(`{3,}|~{3,})[ \t]*$/.exec(line);
+      if (closing && closing[1][0] === fence.delimiter[0] && closing[1].length >= fence.delimiter.length) fence = null;
+      else if (fence.shell && /^[ \t]*(?:fn|struct)\s+\w+/.test(line)) return true;
+      continue;
+    }
+    const opening = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(line);
+    if (opening) fence = { delimiter: opening[1], shell: /^(?:sh|bash)(?:\s|$)/i.test(opening[2].trim()) };
+  }
+  return false;
+}
+
 function coverageIssues(coverage, documents, expectedSources) {
   const errors = [];
   if (coverage.schema !== 'sounio.greek-journey.v1' || coverage.locale !== 'el' || coverage.scope !== 'public-user-journey') errors.push('invalid coverage identity');
@@ -28,6 +44,10 @@ function coverageIssues(coverage, documents, expectedSources) {
   if (!files.length || files.some(file => !safePath(file)) || new Set(files).size !== files.length) errors.push('invalid covered file set');
   const required = ['README.el.md', 'INSTALL.el.md', 'docs/el/README.md', 'docs/el/getting-started.md', 'docs/el/applications-chemistry.md', 'docs/el/applications-ai.md', 'docs/el/developing.md', 'docs/el/contributing.md', 'docs/el/language-reference.md', 'docs/el/review-receipt.md', 'docs/guide/LLM_PROGRAMMING_GUIDE_EL.md'];
   for (const file of required) if (!files.includes(file)) errors.push(`missing journey surface: ${file}`);
+  for (const page of ['hello-world', 'first-program']) {
+    const file = `website/src/content/docs/el/getting-started/${page}.mdx`;
+    if (!coverage.website_pages?.includes(file)) errors.push(`missing canonical onboarding surface: ${file}`);
+  }
   for (const file of files) {
     const body = documents.get(file);
     if (typeof body !== 'string') { errors.push(`missing document: ${file}`); continue; }
@@ -41,6 +61,7 @@ function coverageIssues(coverage, documents, expectedSources) {
       if (![...expectedSources.values()].includes(snippet.source.replace(/\n$/, ''))) errors.push(`unbound Sounio source: ${file}`);
     }
     if (/```(?:sh|bash)\n[^]*?\bsounio run\b/.test(body)) errors.push(`obsolete launcher: ${file}`);
+    if (shellContainsSounio(body)) errors.push(`Sounio source in shell fence: ${file}`);
   }
   const guide = documents.get(coverage.llm_guide) ?? '';
   const topics = scanMarkdown(guide, coverage.llm_guide ?? '').sections;
@@ -166,6 +187,9 @@ async function main() {
     mutate((value, changed) => changed.set(value.llm_guide, changed.get(value.llm_guide).replace('llm:section syntax', 'missing-marker')), 'fifteen distinct');
     mutate((value, changed) => changed.set(value.llm_guide, changed.get(value.llm_guide).replace('Hello, Sounio', 'Altered source')), 'unbound Sounio');
     mutate(value => value.documents.push('../secret'), 'covered file set');
+    for (const page of ['hello-world', 'first-program']) mutate(value => value.website_pages = value.website_pages.filter(file => !file.endsWith(`/getting-started/${page}.mdx`)), 'missing canonical onboarding surface');
+    for (const block of ['```bash\nfn main() {}\n```', '  ```sh\n  struct Wrong {}\n  ```', '~~~bash\nfn main() {}\n~~~~', '````bash\n```\nfn main() {}\n````']) mutate((value, changed) => changed.set('README.el.md', `${changed.get('README.el.md')}\n${block}\n`), 'Sounio source in shell fence');
+    assert.equal(shellContainsSounio('````text\n```bash\nfn main() {}\n```\n````'), false);
     result.mutation_controls = mutations;
     result.mock_preflight_controls = await mockPreflightChecks(documents.get('docs/el/getting-started.md'));
   }
