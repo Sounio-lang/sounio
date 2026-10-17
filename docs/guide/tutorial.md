@@ -43,7 +43,7 @@ A step-by-step guide to learning Sounio, the language for epistemic computing.
 
 ## 1. Getting Started
 
-Native execution is Linux x86-64. `bin/souc` routes to Madaros and materializes a Linux ELF. Do not treat `souc run` as a macOS command. `check` is the command that is safe on every host that can launch the wrapper.
+The committed `bin/souc` prebuilt is a Linux x86-64 ELF. Apple Silicon has a separate current-source native ARM64 route; build and install its artifact as described in the [macOS ARM64 guide](../compiler/MADAROS_MACOS_ARM64.md) before using the launcher there. The commands below use the committed Linux prebuilt unless stated otherwise. `check` does not execute the generated program.
 
 ### Installation
 

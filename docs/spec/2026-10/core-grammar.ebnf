@@ -1,0 +1,337 @@
+(* CORE-MADAROS-2026-10
+   Source baseline: f5b2c5850be9f3d3995719ffcade44a6d851658a.
+   Companion: 01-lexical-syntax-and-modules.md and 01-evidence.tsv.
+
+   Status: conservative source-derived recognition profile, not the complete
+   grammar accepted by Sounio, not normative design, and not checked equivalent
+   to the parser. No compiler or conformance test was executed for this file.
+
+   Notation: = defines; | chooses; [ ] is optional; { } repeats; commas outside
+   quotes concatenate; quoted strings are terminals; comments use paired
+   parenthesis-star and star-parenthesis delimiters;
+   ? ... ? is a prose-defined terminal or predicate.
+
+   Layering: lexical productions describe contiguous byte spellings. The syntax
+   productions consume tokens, allowing trivia between tokens except where the
+   location predicates below prohibit it. A lexical underscore is not an EBNF
+   metasymbol. The end-of-input terminal is not a source byte.
+
+   Lexical profile: ordinary names are ASCII and exclude keyword spellings from
+   LEX-005. Use the chapter's contextual-name rules for broader actual acceptance.
+   Closed comments/strings and known escapes are required by THIS SUBSET; the
+   production scalar lexer has documented malformed-input acceptance gaps.
+   Binary/octal integers, character literals, decimal numeric suffixes, raw and
+   interpolated strings, Unicode identifiers, BOMs, and Unicode whitespace are
+   excluded. Hexadecimal floats use a contiguous spelling in this profile even
+   though the current parser reconstructs them from several tokens.
+
+   Syntactic profile: requires explicit commas where listed, although some
+   parser loops accept omitted commas. Full keyword-as-name relaxation, arbitrary
+   research DSLs, specialized epistemic/session types, unit arithmetic types,
+   effect handlers, async/spawn/contest expressions, postfix audit attachments,
+   and contextual extern-from library identities are outside this subset.
+   A recognized construct is not necessarily type-correct or target-supported.
+
+   REQUIRED LOCATION/CONTEXT PREDICATES, not expressible by these CFG rules:
+   P1. Call '(' and index '[' must not have a newline before them; a method's
+       argument '(' must not have a newline before it either.
+   P2. After an unparenthesized block-like atom (if, match, while, loop, block,
+       for), newline before an infix operator stops that expression. Grouping
+       the block-like atom permits the continuation. Postfixes are considered
+       before this test in the implementation.
+   P3. At newline, tight '*x', '&x', and '&!x' start another prefix expression;
+       spaced '* x' and '& x' may continue binary expressions. Tightness means
+       the operator token end equals the next token start, not just no LF.
+   P4. '!' and '~' have no infix/postfix expression meaning; after LF they can
+       start a new statement. They cannot be treated as binary fallback '+' .
+   P5. condition-expression and restricted-pattern contexts preserve the
+       implementation's no_struct_lit flag recursively; parentheses do not
+       independently clear it. A block is still an atom where its parser allows.
+   P6. In type contexts only, expect('>') can consume one half of '>>' using
+       pending_gt. Expression '>>' is a shift. Reconcile lexical maximal munch
+       with that contextual splitting before using type-arguments below.
+   P7. Item position, statement position, and pattern position have distinct
+       dispatch. For example, 'var name' starts a var statement, while the
+       pattern parser also recognizes var binding patterns.
+   P8. Return/break operands and range right endpoints are selected by
+       Parser::at_expr_start, represented by current-operand-start below.
+       This is positive lookahead, not a consumed token: false forces omission
+       of that optional operand; true requires parsing it, with the appropriate
+       binding power. Newline alone does not force omission. Prefix/starter
+       mismatches are current defects (SYN-012), not approved language limits.
+       Passing the lookahead does not add extension forms excluded by this profile.
+   P9. Prefix and postfix parsing must be coupled to Pratt state. The precedence
+       ladder below describes ordinary grouping; assignment is a statement.
+       The parser considers postfixes before the minimum-power test.
+   P10. Parsing errors must survive recovery. Placeholder ASTs and a cursor
+       reaching EOF do not establish successful acceptance.
+
+   Mapping to source and fixtures is in the companion chapter section 7.
+*)
+
+(* Lexical layer. *)
+
+ascii-letter = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I"
+             | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R"
+             | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z"
+             | "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i"
+             | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r"
+             | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
+decimal-digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+hexadecimal-digit = decimal-digit | "a" | "b" | "c" | "d" | "e" | "f"
+                                     | "A" | "B" | "C" | "D" | "E" | "F" ;
+identifier-start = ascii-letter | "_" ;
+identifier-continue = identifier-start | decimal-digit ;
+identifier-spelling = identifier-start, { identifier-continue } ;
+identifier = ? identifier-spelling excluding LEX-005 keyword spellings and
+               the single underscore; at most 256 spelling bytes in this profile ? ;
+keyword-path-segment = ? a keyword spelling classified by tk_is_keyword ? ;
+path-segment = identifier | keyword-path-segment ;
+declaration-name = identifier ;
+
+space = " " ;
+horizontal-tab = ? byte 0x09 ? ;
+carriage-return = ? byte 0x0d ? ;
+line-feed = ? byte 0x0a ? ;
+whitespace = space | horizontal-tab | carriage-return | line-feed ;
+line-comment = "//", { line-comment-byte } ;
+line-comment-byte = ? any byte other than LF; stop at EOF ? ;
+block-comment = "/*", { block-comment-byte | block-comment }, "*/" ;
+block-comment-byte = ? any byte except the start of '/*' or '*/'; LF is allowed ? ;
+trivia = whitespace | line-comment | block-comment ;
+
+decimal-digits = decimal-digit, { decimal-digit | "_", decimal-digit } ;
+hexadecimal-digits = hexadecimal-digit,
+                     { hexadecimal-digit | "_", hexadecimal-digit } ;
+decimal-integer = decimal-digits ;
+hexadecimal-integer = ( "0x" | "0X" ), hexadecimal-digits ;
+integer = decimal-integer | hexadecimal-integer ;
+sign = "+" | "-" ;
+decimal-exponent = ( "e" | "E" ), [ sign ], decimal-digits ;
+decimal-float = decimal-digits, ".", decimal-digits, [ decimal-exponent ]
+              | decimal-digits, decimal-exponent ;
+hexadecimal-exponent = ( "p" | "P" ), [ sign ], decimal-digits ;
+hexadecimal-float = ( "0x" | "0X" ),
+                    ( hexadecimal-digits, [ ".", hexadecimal-digits ]
+                    | ".", hexadecimal-digits ), hexadecimal-exponent ;
+floating = decimal-float | hexadecimal-float ;
+
+string = '"', { string-byte | escape }, '"' ;
+string-byte = ? any byte except double quote, backslash, CR, LF, or NUL;
+                no claim of UTF-8 validation; source spelling including quotes
+                must fit the 384-byte Name limit ? ;
+escape = '\n' | '\t' | '\r' | '\"' | '\\' ;
+
+(* Syntax layer. Trivia may occur between tokens subject to P1-P10.
+   ';' denotes a source semicolon; the unquoted final ';' ends a production.
+   Ordinary item names use the conservative identifier subset above.
+*)
+
+translation-unit = { ";" | item }, end-of-input ;
+end-of-input = ? EOF token ? ;
+item = [ visibility ], item-body ;
+item-body = module-declaration | import-declaration | function-declaration
+          | struct-declaration | enum-declaration | impl-declaration
+          | trait-declaration | type-alias | global-binding
+          | unit-declaration | effect-declaration
+          | extern-declaration | export-declaration ;
+
+path = path-segment, { "::", path-segment } ;
+visibility = "pub", [ "(", ( "crate" | "super" | path ), ")" ] ;
+module-declaration = "module", path ;
+import-declaration = ( "use" | "import" ), path,
+                     [ "::", ( "*" | "{", [ import-names ], "}" ) ], [ ";" ] ;
+import-names = identifier, { ",", identifier }, [ "," ] ;
+
+function-declaration = [ function-modifier ], function-header, block ;
+function-modifier = "kernel" | "const" | "async" ;
+function-header = "fn", declaration-name, [ generic-header ],
+                  "(", [ parameters ], ")", [ return-type ], [ effects ] ;
+parameters = parameter, { ",", parameter }, [ "," ] ;
+parameter = declaration-name, ":", type | "self", [ ":", type ] ;
+return-type = "->", type ;
+generic-header = "<", generic-parameter, { ",", generic-parameter }, [ "," ], ">" ;
+generic-parameter = [ "const" ], declaration-name, [ ":", type ] ;
+
+struct-declaration = [ "linear" | "affine" ], "struct", declaration-name,
+                     [ generic-header ], "{", [ field-definitions ], "}" ;
+field-definitions = field-definition, { ",", field-definition }, [ "," ] ;
+field-definition = [ "pub" ], declaration-name, ":", type ;
+enum-declaration = "enum", declaration-name, "{", [ variants ], "}" ;
+variants = variant, { ",", variant }, [ "," ] ;
+variant = declaration-name,
+          [ "(", [ variant-types ], ")" | "{", [ field-definitions ], "}" ] ;
+variant-types = type, { ",", type } ;
+impl-declaration = "impl", type, [ "for", type ], "{", { impl-method }, "}" ;
+impl-method = [ visibility ], function-header, block | ";" ;
+trait-declaration = "trait", declaration-name, "{", { trait-method | ";" }, "}" ;
+trait-method = function-header, [ block ], [ ";" ] ;
+type-alias = "type", declaration-name, "=", type, [ ";" ] ;
+global-binding = ( "let" | "const" ), declaration-name, [ ":", type ], "=", expression
+               | "var", declaration-name, [ ":", type ], [ "=", expression ] ;
+unit-declaration = "unit", declaration-name, [ "=", type ], [ ";" ] ;
+
+effects = "with", effect-reference, { ",", effect-reference } ;
+effect-reference = identifier, [ "(", decimal-integer, ")" ] ;
+effect-declaration = "effect", declaration-name,
+                     "{", { effect-operation | ";" }, "}" ;
+effect-operation = "fn", declaration-name, "(", [ parameters ], ")",
+                   [ return-type ], [ ";" ] ;
+extern-declaration = "extern", [ string ],
+                     ( foreign-function | "{", { foreign-function | ";" }, "}" ) ;
+foreign-function = "fn", declaration-name, "(", [ parameters ], ")",
+                   [ return-type ], [ ";" ] ;
+export-declaration = "export", [ string ],
+                     ( function-header, block | extern-declaration ) ;
+
+(* Types: specialized heads such as Knowledge have dedicated productions in
+   the real parser and are excluded from named-type-head here. fn parameter
+   type lists and type argument lists have no trailing comma in this profile.
+*)
+
+type = named-type | reference-type | raw-pointer-type | array-type
+     | tuple-or-group-type | function-type | refinement-type
+     | "!" | "Self" | "_" | "?", type ;
+named-type = named-type-head, [ type-arguments ] ;
+named-type-head = ? path with no specialized parser-dispatch head, and no unit
+                   product/division/power tail; numeric names are syntax only ? ;
+type-arguments = "<", type, { ",", type }, ">" ;
+reference-type = ( "&" | "&!" ), type ;
+raw-pointer-type = "*", [ "const" | "mut" ], type ;
+array-type = "[", type, [ ";", expression ], "]" ;
+tuple-or-group-type = "(", ")" | "(", type, ")"
+                    | "(", type, ",", [ tuple-types ], ")" ;
+tuple-types = type, { ",", type }, [ "," ] ;
+function-type = "fn", "(", [ function-parameter-types ], ")",
+                [ return-type ], [ effects ] ;
+function-parameter-types = type, { ",", type } ;
+refinement-type = "{", identifier, ":", type, "|", simple-predicate,
+                  [ ( "&&" | "||" ), simple-predicate ], "}" ;
+simple-predicate = identifier, comparison-operator, ( decimal-integer | decimal-float ) ;
+comparison-operator = "<" | "<=" | ">" | ">=" | "==" | "!=" ;
+
+(* Patterns: acceptance of recursive patterns here does not imply recursive
+   let destructuring. Only direct binding children are emitted by the current
+   tuple/struct let desugaring. No rest, range, float, char, or reference pattern.
+*)
+
+pattern = pattern-atom, { "|", pattern-atom } ;
+pattern-atom = "_" | "true" | "false" | integer | "-", integer | string
+             | tuple-pattern | constructor-pattern | struct-pattern
+             | qualified-unit-pattern | binding-pattern ;
+binding-pattern = [ "var" ], identifier ;
+tuple-pattern = "(", [ patterns ], ")" ;
+patterns = pattern, { ",", pattern }, [ "," ] ;
+constructor-pattern = pattern-path, "(", [ constructor-patterns ], ")" ;
+constructor-patterns = pattern, { ",", pattern } ;
+pattern-path = identifier, { "::", path-segment } ;
+qualified-unit-pattern = identifier, "::", path-segment,
+                         { "::", path-segment } | "None" ;
+struct-pattern = pattern-path, "{", [ pattern-fields ], "}" ;
+pattern-fields = pattern-field, { ",", pattern-field }, [ "," ] ;
+pattern-field = identifier, [ ":", pattern ] ;
+
+(* Statements. No explicit LF separator exists in the token grammar. Semantic
+   location predicates and structural expression termination select boundaries.
+   A leading ';' inside a block is deliberately excluded; post-statement repeats
+   are admitted. Assignments are not expression operators or chain expressions.
+*)
+
+block = "{", { statement, { ";" } }, "}" ;
+statement = let-statement | var-statement | expression-statement ;
+let-statement = "let", pattern, [ ":", type ], "=", expression ;
+var-statement = "var", declaration-name, [ ":", type ], [ "=", expression ] ;
+expression-statement = expression, [ assignment-operator, expression ] ;
+assignment-operator = "=" | "+=" | "-=" | "*=" | "/=" | "%=" ;
+
+(* Precedence follows tk_precedence, low to high. Ordinary repeated binaries
+   fold left. The range production admits at most one range in this subset;
+   the implementation loop currently also accepts left-nested chained ranges.
+   Comparison chains are syntactic left nesting, never a mathematical chain.
+*)
+
+expression = logical-or-expression ;
+logical-or-expression = logical-and-expression, { "||", logical-and-expression } ;
+logical-and-expression = equality-expression, { "&&", equality-expression } ;
+equality-expression = comparison-expression, { ( "==" | "!=" ), comparison-expression } ;
+comparison-expression = bitwise-or-expression,
+                        { ( "<" | "<=" | ">" | ">=" ), bitwise-or-expression } ;
+bitwise-or-expression = bitwise-xor-expression, { "|", bitwise-xor-expression } ;
+bitwise-xor-expression = bitwise-and-expression, { "^", bitwise-and-expression } ;
+bitwise-and-expression = shift-expression, { "&", shift-expression } ;
+shift-expression = range-expression, { ( "<<" | ">>" ), range-expression } ;
+range-expression = additive-expression,
+                   [ ( ".." | "..=" ), [ current-operand-start, additive-expression ] ] ;
+additive-expression = multiplicative-expression,
+                      { ( "+" | "-" | "++" ), multiplicative-expression } ;
+multiplicative-expression = cast-expression, { ( "*" | "/" | "%" ), cast-expression } ;
+cast-expression = unary-expression, { "as", type } ;
+unary-expression = prefix-operator, unary-expression | postfix-expression ;
+prefix-operator = "-" | "!" | "~" | "&" | "&!" | "*" ;
+postfix-expression = atom, { postfix } ;
+postfix = call-suffix | index-suffix | field-or-method-suffix ;
+call-suffix = "(", [ call-arguments ], ")" ;
+call-arguments = call-argument, { ",", call-argument }, [ "," ] ;
+call-argument = [ identifier, ( ":" | "=" ) ], expression ;
+index-suffix = "[", expression, "]" ;
+field-or-method-suffix = ".", ( identifier | decimal-integer ),
+                         [ turbofish ], [ call-suffix ] ;
+turbofish = "::", type-arguments ;
+
+atom = integer | floating | string | "true" | "false"
+     | name-expression | tuple-or-group-expression | array-expression
+     | struct-expression | block | if-expression | match-expression
+     | while-expression | loop-expression | for-expression
+     | return-expression | break-expression | "continue" | closure-expression ;
+name-expression = expression-path, [ turbofish ] | "self" ;
+expression-path = identifier, { "::", path-segment } ;
+tuple-or-group-expression = "(", ")" | "(", expression, ")"
+                          | "(", expression, ",", [ tuple-elements ], ")" ;
+tuple-elements = expression, { ",", expression }, [ "," ] ;
+array-expression = "[", "]"
+                 | "[", expression, ";", expression, "]"
+                 | "[", expression, { ",", expression }, [ "," ], "]" ;
+struct-expression = expression-path, "{", [ struct-initializers ], "}" ;
+struct-initializers = struct-initializer, { ",", struct-initializer }, [ "," ] ;
+struct-initializer = identifier, [ ":", expression ] ;
+
+condition-expression = ? expression parsed with no_struct_lit set recursively;
+                          subject to P1-P10, not an arbitrary struct expression ? ;
+if-expression = "if", ( condition-expression
+                       | "let", pattern, "=", condition-expression ),
+                block, [ "else", ( block | if-expression ) ] ;
+match-expression = "match", condition-expression, "{", [ match-arms ], "}" ;
+match-arms = match-arm, { ",", match-arm }, [ "," ] ;
+match-arm = pattern, [ "if", condition-expression ], "=>", match-body ;
+match-body = expression, [ assignment-operator, expression ] ;
+while-expression = "while", ( condition-expression
+                             | "let", pattern, "=", condition-expression ), block ;
+loop-expression = "loop", block ;
+for-expression = "for", identifier, "in", condition-expression, block ;
+current-operand-start = ? non-consuming positive lookahead on the decoded next token:
+                         IntLit FloatLit StringLit CharLit True False
+                         Ident Knowledge Close Unit Kernel SelfLower
+                         LParen LBracket LBrace Minus Bang Amp AmpBang Star
+                         If Match While Loop Return Break Continue
+                         ContestLower Handle Async Spawn Perform,
+                         or a token admitted by tk_is_contextual_ident;
+                         no other token kind satisfies this predicate ? ;
+(* Current omissions relative to parse_prefix: HexLit BinLit OctLit Tilde
+   Pipe PipePipe For Var. BinLit/OctLit are not emitted by the active scalar
+   lexer, a separate limitation. Hex/tilde/closure operands can enter via an
+   initial '('; the corresponding unparenthesized forms fail this lookahead.
+   Documenting this defect does not approve it as the intended operand rule.
+*)
+return-expression = "return", [ current-operand-start, expression ] ;
+break-expression = "break", [ current-operand-start, expression ] ;
+closure-expression = ( "||" | "|", [ closure-parameters ], "|" ),
+                     [ return-type ], [ effects ], expression ;
+closure-parameters = closure-parameter, { ",", closure-parameter }, [ "," ] ;
+closure-parameter = identifier, [ ":", type ] ;
+
+(* Not encoded: typing; ownership; lvalue legality; effect accounting;
+   refinement proofs; numeric overflow/rounding semantics; pattern coverage;
+   complete extension syntax; evaluation/short-circuit guarantees; filesystem
+   import search; symbol visibility; crate identity; runtime linking; target
+   support. Do not infer those obligations from recognition by this grammar.
+*)

@@ -190,6 +190,10 @@ var FO_INLINE_CAP: i64 = 8
 var FO_INLINE_BUDGET: i64 = 96
 var FO_INLINE_COUNT: i64 = 0
 var FO_INLINE_TRUNCATED: i64 = 0
+// Literal factor in `c * self(x, n - 1)`. Twin self+self is 2.
+var FO_RECUR_COEF: f64 = 2.0
+var FO_RECUR_LIT: f64 = 0.0
+var FO_RECUR_BASE: f64 = 1.0
 
 fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
     let names = lowerer_box_empty_local_name_slots()
@@ -239,9 +243,10 @@ struct CaptureList {
     names: [Name; 8],
     regs: [i64; 8],
     count: i64,
+    overflow: bool,
 }
 fn empty_capture_list() -> CaptureList {
-    CaptureList { names: [ir_empty_name(); 8], regs: [IR_INVALID_REG; 8], count: 0 }
+    CaptureList { names: [ir_empty_name(); 8], regs: [IR_INVALID_REG; 8], count: 0, overflow: false }
 }
 fn capture_list_add(caps: CaptureList, name: Name, reg: i64) -> CaptureList with Mut, Panic, Div {
     var c = caps
@@ -255,6 +260,8 @@ fn capture_list_add(caps: CaptureList, name: Name, reg: i64) -> CaptureList with
         c.names[idx as usize] = name
         c.regs[idx as usize] = reg
         c.count = idx + 1
+    } else {
+        c.overflow = true
     }
     c
 }
@@ -6954,6 +6961,18 @@ fn lowerer_lower_fn_params_mut(
                 if lower_type_expr_is_array_of_f64(&(*list).head.ty) {
                     lowerer_mark_local_array_elem_float_mut(lo, (*list).head.name)
                 }
+                let float_array_depth = lower_type_float_array_depth(&(*list).head.ty)
+                if float_array_depth > 1 {
+                    var locals_box = (*lo).locals
+                    var local_i = (*locals_box).count - 1
+                    while local_i >= 0 {
+                        if ir_name_eq((*(*locals_box).names).values[local_i as usize], (*list).head.name) {
+                            (*(*locals_box).array_elem_float).values[local_i as usize] = float_array_depth
+                            break
+                        }
+                        local_i = local_i - 1
+                    }
+                }
                 current = &(*list).tail
             }
             _ => break
@@ -8878,11 +8897,59 @@ fn lower_opt_type_is_tuple_of_all_f64(opt: &Option<Box<TypeExpr>>) -> bool with 
     }
 }
 
+// Preserve rank, not just a boolean: indexing a matrix produces an array,
+// whereas indexing its row produces a scalar f64. References do not add rank.
+var LOWER_NATIVE_CLOSURE_ENVS: bool = false
+
+pub fn lower_swap_native_closure_envs(enabled: bool) -> bool with Mut {
+    let previous = LOWER_NATIVE_CLOSURE_ENVS
+    LOWER_NATIVE_CLOSURE_ENVS = enabled
+    previous
+}
+
+fn lower_type_float_array_depth(te: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeReference || (*te).kind == TypeExprKind::TypeRefMut {
+        match (*te).inner {
+            Some(inner) => return lower_type_float_array_depth(&(*inner)),
+            None => return 0,
+        }
+    }
+    if lower_type_expr_is_array_of_f64(te) { return 1 }
+    if (*te).kind == TypeExprKind::TypeArray {
+        match (*te).inner {
+            Some(inner) => {
+                let depth = lower_type_float_array_depth(&(*inner))
+                if depth > 0 && depth < 1022 { return depth + 1 }
+            }
+            None => {}
+        }
+    }
+    0
+}
+
+fn lower_opt_float_array_depth(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_float_array_depth(&(*te)),
+        None => 0,
+    }
+}
+
 fn lower_opt_return_float_code(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => {
+            // Function value, not scalar f64: retain its result kind so a local
+            // bound to a factory call can type an eventual indirect call.
+            if lower_type_expr_fn_returns_f64(&(*te)) { return -2 }
+        }
+        None => {}
+    }
     if lower_opt_type_is_f64(opt) {
         1
     } else if lower_opt_type_is_array_of_f64(opt) || lower_opt_type_is_tuple_of_all_f64(opt) {
         2
+    } else if lower_opt_float_array_depth(opt) > 1 {
+        // 3..1023 were unused; keep scalar/flat/tuple-mask encodings intact.
+        lower_opt_float_array_depth(opt) + 1
     // 1024+mask keeps every existing consumer (all of which test == 1 or == 2)
     // inert while carrying per-slot float-ness for tuple returns.
     //
@@ -9943,7 +10010,7 @@ fn fo_inline_error_restore_globals(snap: FoInlineErrorSnap) with Mut {
 
 // #1706: a helper registered for inline FO declares no IO/Mut/Alloc effect
 // (fo_inline_note), so calling it twice is as safe as a pure math builtin.
-fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
+fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64, expand_calls: bool) -> i64 with Mut, Panic, Div, Alloc {
     if depth > 32 { return 100 }
     var n: i64 = 0
     var cur = opt
@@ -9952,10 +10019,11 @@ fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64) -> i64 with Mut
             Some(sl) => {
                 n = n + 1
                 match (*sl).head.expr {
-                    Some(ex) => { n = n + fo_nested_expr_stmts(&(*ex), depth + 1) }
+                    Some(ex) => { n = n + fo_nested_expr_stmts(&(*ex), depth + 1, expand_calls) }
                     None => {}
                 }
                 cur = &(*sl).tail
+                if n > 24 { return n }
             }
             None => break
         }
@@ -9963,24 +10031,24 @@ fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64) -> i64 with Mut
     n
 }
 
-fn fo_nested_block_stmts(blk: &Option<Box<Block>>, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
+fn fo_nested_block_stmts(blk: &Option<Box<Block>>, depth: i64, expand_calls: bool) -> i64 with Mut, Panic, Div, Alloc {
     match *blk {
-        Some(b) => fo_nested_stmt_count(&(*b).stmts, depth),
+        Some(b) => fo_nested_stmt_count(&(*b).stmts, depth, expand_calls),
         None => 0,
     }
 }
 
-fn fo_nested_expr_stmts(e: &Expr, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
+fn fo_nested_expr_stmts(e: &Expr, depth: i64, expand_calls: bool) -> i64 with Mut, Panic, Div, Alloc {
     if depth > 32 { return 100 }
     let k = (*e).kind
     var n: i64 = 0
     if k == ExprKind::ExprWhile || k == ExprKind::ExprLoop || k == ExprKind::ExprForIn
         || k == ExprKind::ExprBlock || k == ExprKind::ExprIf {
-        n = n + fo_nested_block_stmts(&(*e).block, depth + 1)
+        n = n + fo_nested_block_stmts(&(*e).block, depth + 1, expand_calls)
     }
     if k == ExprKind::ExprIf {
         match (*e).else_expr {
-            Some(ee) => { n = n + fo_nested_expr_stmts(&(*ee), depth + 1) }
+            Some(ee) => { n = n + fo_nested_expr_stmts(&(*ee), depth + 1, expand_calls) }
             None => {}
         }
     }
@@ -9990,7 +10058,8 @@ fn fo_nested_expr_stmts(e: &Expr, depth: i64) -> i64 with Mut, Panic, Div, Alloc
             match *ac {
                 Some(al) => {
                     n = n + 1
-                    n = n + fo_nested_expr_stmts(&(*al).head.body, depth + 1)
+                    n = n + fo_nested_expr_stmts(&(*al).head.body, depth + 1, expand_calls)
+                    if n > 24 { return n }
                     ac = &(*al).tail
                 }
                 None => break
@@ -9999,11 +10068,1313 @@ fn fo_nested_expr_stmts(e: &Expr, depth: i64) -> i64 with Mut, Panic, Div, Alloc
     }
     if k == ExprKind::ExprClosure {
         match (*e).closure_body {
-            Some(cb) => { n = n + fo_nested_expr_stmts(&(*cb), depth + 1) }
+            Some(cb) => { n = n + fo_nested_expr_stmts(&(*cb), depth + 1, expand_calls) }
             None => {}
         }
     }
+    // A projected struct result is re-lowered once per requested field. Count
+    // the helpers expanded beneath it too: a short RK4 wrapper can otherwise
+    // paste thousands of instructions at every field read. Saturate at the
+    // existing statement budget; no IR capacity or refusal rule is relaxed.
+    if expand_calls {
+        if n > 24 { return n }
+        if k == ExprKind::ExprCall {
+            match (*e).left {
+                Some(ce) => {
+                    if (*ce).kind == ExprKind::ExprIdent {
+                        let id = ir_intern_name((*ce).name)
+                        var cur = FO_INLINE_HEAD
+                        while true {
+                            match cur {
+                                Some(node) => {
+                                    if (*node).id == id {
+                                        n = n + fo_nested_stmt_count(&(*node).def.body.stmts, depth + 1, true)
+                                        break
+                                    }
+                                    cur = (*node).next
+                                }
+                                None => break
+                            }
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        match (*e).left {
+            Some(l) => { n = n + fo_nested_expr_stmts(&(*l), depth + 1, true) }
+            None => {}
+        }
+        if n > 24 { return n }
+        match (*e).right {
+            Some(r) => { n = n + fo_nested_expr_stmts(&(*r), depth + 1, true) }
+            None => {}
+        }
+        var args = &(*e).args
+        while n <= 24 {
+            match *args {
+                Some(a) => {
+                    n = n + fo_nested_expr_stmts(&(*a).head, depth + 1, true)
+                    args = &(*a).tail
+                }
+                None => break
+            }
+        }
+        var fields = &(*e).fields
+        while n <= 24 {
+            match *fields {
+                Some(f) => {
+                    n = n + fo_nested_expr_stmts(&(*f).head.value, depth + 1, true)
+                    fields = &(*f).tail
+                }
+                None => break
+            }
+        }
+    }
     n
+}
+
+fn fo_expr_is_ident_name(e: &Expr, name: Name) -> bool with Mut, Panic, Div {
+    (*e).kind == ExprKind::ExprIdent && ir_name_eq((*e).name, name)
+}
+
+fn fo_expr_is_name_minus_one(e: &Expr, name: Name) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind != ExprKind::ExprBinary || (*e).bin_op != BinaryOp::OpSub { return false }
+    match (*e).left {
+        Some(l) => {
+            if !fo_expr_is_ident_name(&(*l), name) { return false }
+        }
+        None => { return false }
+    }
+    match (*e).right {
+        Some(r) => (*r).kind == ExprKind::ExprIntLit && (*r).int_val == 1,
+        None => false,
+    }
+}
+
+// `if n < 1 { x } else { self(x, n - 1) + x }`, parameters in either order.
+// The same channel is added once per step, so the sensitivity is (n+1) times
+// x when n >= 1, and x itself when n < 1. Unrolling cannot carry that past
+// the depth cap.
+fn fo_recur_guard_is_stop(e: &Expr, nname: Name) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind != ExprKind::ExprBinary { return false }
+    match (*e).left {
+        Some(cl) => { if !fo_expr_is_ident_name(&(*cl), nname) { return false } }
+        None => { return false }
+    }
+    match (*e).right {
+        Some(cr) => {
+            if (*cr).kind != ExprKind::ExprIntLit { return false }
+            if (*e).bin_op == BinaryOp::OpLt && (*cr).int_val == 1 { return true }
+            if (*e).bin_op == BinaryOp::OpLe && (*cr).int_val == 0 { return true }
+            false
+        }
+        None => false,
+    }
+}
+
+fn fo_recur_note_lit(e: &Expr) -> bool with Mut, Panic, Div {
+    if (*e).kind == ExprKind::ExprFloatLit {
+        FO_RECUR_LIT = (*e).float_val
+        return true
+    }
+    if (*e).kind == ExprKind::ExprIntLit {
+        FO_RECUR_LIT = (*e).int_val as f64
+        return true
+    }
+    false
+}
+
+fn fo_recur_arm_lit(blk: &Option<Box<Block>>) -> bool with Mut, Panic, Div, Alloc {
+    match *blk {
+        Some(b) => {
+            match (*b).stmts {
+                Some(sl) => {
+                    match (*sl).tail {
+                        Some(_) => { return false }
+                        None => {}
+                    }
+                    if (*sl).head.kind != StmtKind::StmtExpr { return false }
+                    match (*sl).head.expr {
+                        Some(ex) => fo_recur_expr_lit(&(*ex)),
+                        None => false,
+                    }
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn fo_recur_expr_lit(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprBlock {
+        return fo_recur_arm_lit(&(*e).block)
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(inner) => { return fo_recur_expr_lit(&(*inner)) }
+            None => { return false }
+        }
+    }
+    fo_recur_note_lit(e)
+}
+
+fn fo_recur_linear_indexes(fd: &FnDef) -> (i64, i64) with Mut, Panic, Div, Alloc {
+    var names: [Name; 8] = [ir_empty_name(); 8]
+    var isf: [i64; 8] = [0; 8]
+    var np: i64 = 0
+    var pc = &(*fd).params
+    while true {
+        match *pc {
+            Some(pl) => {
+                if !(*pl).head.is_self {
+                    if np >= 2 { return (0 - 1, 0 - 1) }
+                    names[np as usize] = (*pl).head.name
+                    if lower_type_expr_is_f64(&(*pl).head.ty) { isf[np as usize] = 1 }
+                    np = np + 1
+                }
+                pc = &(*pl).tail
+            }
+            None => break
+        }
+    }
+    if np != 2 { return (0 - 1, 0 - 1) }
+    var x_idx: i64 = 0 - 1
+    var n_idx: i64 = 0 - 1
+    if isf[0] == 1 && isf[1] == 0 {
+        x_idx = 0
+        n_idx = 1
+    } else if isf[0] == 0 && isf[1] == 1 {
+        x_idx = 1
+        n_idx = 0
+    } else {
+        return (0 - 1, 0 - 1)
+    }
+    let xname = names[x_idx as usize]
+    let nname = names[n_idx as usize]
+    match (*fd).body.stmts {
+        Some(only) => {
+            match (*only).tail {
+                Some(_) => { return (0 - 1, 0 - 1) }
+                None => {}
+            }
+            if (*only).head.kind != StmtKind::StmtExpr { return (0 - 1, 0 - 1) }
+            match (*only).head.expr {
+                Some(body_e) => {
+                    if (*body_e).kind != ExprKind::ExprIf { return (0 - 1, 0 - 1) }
+                    match (*body_e).left {
+                        Some(cond) => {
+                            if !fo_recur_guard_is_stop(&(*cond), nname) {
+                                return (0 - 1, 0 - 1)
+                            }
+                        }
+                        None => { return (0 - 1, 0 - 1) }
+                    }
+                    if !fo_recur_arm_is_x(&(*body_e).block, xname) { return (0 - 1, 0 - 1) }
+                    match (*body_e).else_expr {
+                        Some(ee) => {
+                            if !fo_recur_else_is_step(&(*ee), (*fd).name, xname, nname, x_idx, n_idx) {
+                                return (0 - 1, 0 - 1)
+                            }
+                        }
+                        None => { return (0 - 1, 0 - 1) }
+                    }
+                    return (x_idx, n_idx)
+                }
+                None => { return (0 - 1, 0 - 1) }
+            }
+        }
+        None => { return (0 - 1, 0 - 1) }
+    }
+    (0 - 1, 0 - 1)
+}
+
+fn fo_recur_arm_is_x(blk: &Option<Box<Block>>, xname: Name) -> bool with Mut, Panic, Div, Alloc {
+    match *blk {
+        Some(b) => {
+            match (*b).stmts {
+                Some(sl) => {
+                    match (*sl).tail {
+                        Some(_) => { return false }
+                        None => {}
+                    }
+                    if (*sl).head.kind != StmtKind::StmtExpr { return false }
+                    match (*sl).head.expr {
+                        Some(ex) => fo_recur_expr_is_x(&(*ex), xname),
+                        None => false,
+                    }
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn fo_recur_expr_is_x(e: &Expr, xname: Name) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprBlock {
+        return fo_recur_arm_is_x(&(*e).block, xname)
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(inner) => { return fo_recur_expr_is_x(&(*inner), xname) }
+            None => { return false }
+        }
+    }
+    fo_expr_is_ident_name(e, xname)
+}
+
+fn fo_recur_else_is_step(e: &Expr, fname: Name, xname: Name, nname: Name, x_idx: i64, n_idx: i64) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprBlock {
+        match (*e).block {
+            Some(b) => {
+                match (*b).stmts {
+                    Some(sl) => {
+                        match (*sl).tail {
+                            Some(_) => { return false }
+                            None => {}
+                        }
+                        if (*sl).head.kind != StmtKind::StmtExpr { return false }
+                        match (*sl).head.expr {
+                            Some(ex) => { return fo_recur_else_is_step(&(*ex), fname, xname, nname, x_idx, n_idx) }
+                            None => { return false }
+                        }
+                    }
+                    None => { return false }
+                }
+            }
+            None => { return false }
+        }
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(inner) => { return fo_recur_else_is_step(&(*inner), fname, xname, nname, x_idx, n_idx) }
+            None => { return false }
+        }
+    }
+    if (*e).kind != ExprKind::ExprBinary || (*e).bin_op != BinaryOp::OpAdd { return false }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    if fo_recur_expr_is_x(&(*l), xname) {
+                        return fo_recur_call_is_step(&(*r), fname, xname, nname, x_idx, n_idx)
+                    }
+                    if fo_recur_expr_is_x(&(*r), xname) {
+                        return fo_recur_call_is_step(&(*l), fname, xname, nname, x_idx, n_idx)
+                    }
+                    false
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn fo_recur_call_is_step(e: &Expr, fname: Name, xname: Name, nname: Name, x_idx: i64, n_idx: i64) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind != ExprKind::ExprCall { return false }
+    match (*e).left {
+        Some(cal) => {
+            if (*cal).kind != ExprKind::ExprIdent || !ir_name_eq((*cal).name, fname) { return false }
+        }
+        None => { return false }
+    }
+    var i: i64 = 0
+    var ac = &(*e).args
+    while i < 2 {
+        match *ac {
+            Some(al) => {
+                if i == x_idx {
+                    if !fo_expr_is_ident_name(&(*al).head, xname) { return false }
+                } else if i == n_idx {
+                    if !fo_expr_is_name_minus_one(&(*al).head, nname) { return false }
+                } else {
+                    return false
+                }
+                i = i + 1
+                ac = &(*al).tail
+            }
+            None => { return false }
+        }
+    }
+    match *ac {
+        Some(_) => false,
+        None => true,
+    }
+}
+
+fn fo_expr_is_two(e: &Expr) -> bool with Mut, Panic, Div {
+    if (*e).kind == ExprKind::ExprFloatLit {
+        FO_RECUR_COEF = (*e).float_val
+        return true
+    }
+    if (*e).kind == ExprKind::ExprIntLit {
+        FO_RECUR_COEF = (*e).int_val as f64
+        return true
+    }
+    false
+}
+
+fn fo_recur_else_is_scale(e: &Expr, fname: Name, xname: Name, nname: Name, x_idx: i64, n_idx: i64) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprBlock {
+        match (*e).block {
+            Some(b) => {
+                match (*b).stmts {
+                    Some(sl) => {
+                        match (*sl).tail {
+                            Some(_) => { return false }
+                            None => {}
+                        }
+                        if (*sl).head.kind != StmtKind::StmtExpr { return false }
+                        match (*sl).head.expr {
+                            Some(ex) => { return fo_recur_else_is_scale(&(*ex), fname, xname, nname, x_idx, n_idx) }
+                            None => { return false }
+                        }
+                    }
+                    None => { return false }
+                }
+            }
+            None => { return false }
+        }
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(inner) => { return fo_recur_else_is_scale(&(*inner), fname, xname, nname, x_idx, n_idx) }
+            None => { return false }
+        }
+    }
+    if (*e).kind != ExprKind::ExprBinary || (*e).bin_op != BinaryOp::OpMul { return false }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    if fo_expr_is_two(&(*l)) {
+                        return fo_recur_call_is_step(&(*r), fname, xname, nname, x_idx, n_idx)
+                    }
+                    if fo_expr_is_two(&(*r)) {
+                        return fo_recur_call_is_step(&(*l), fname, xname, nname, x_idx, n_idx)
+                    }
+                    false
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn fo_recur_add_count(e: &Expr, fname: Name, xname: Name, nname: Name, x_idx: i64, n_idx: i64) -> i64 with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprBlock {
+        match (*e).block {
+            Some(b) => {
+                match (*b).stmts {
+                    Some(sl) => {
+                        match (*sl).tail {
+                            Some(_) => { return 0 }
+                            None => {}
+                        }
+                        if (*sl).head.kind != StmtKind::StmtExpr { return 0 }
+                        match (*sl).head.expr {
+                            Some(ex) => { return fo_recur_add_count(&(*ex), fname, xname, nname, x_idx, n_idx) }
+                            None => { return 0 }
+                        }
+                    }
+                    None => { return 0 }
+                }
+            }
+            None => { return 0 }
+        }
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(inner) => { return fo_recur_add_count(&(*inner), fname, xname, nname, x_idx, n_idx) }
+            None => { return 0 }
+        }
+    }
+    if fo_recur_call_is_step(e, fname, xname, nname, x_idx, n_idx) { return 1 }
+    if (*e).kind != ExprKind::ExprBinary || (*e).bin_op != BinaryOp::OpAdd { return 0 }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    let a = fo_recur_add_count(&(*l), fname, xname, nname, x_idx, n_idx)
+                    let b = fo_recur_add_count(&(*r), fname, xname, nname, x_idx, n_idx)
+                    if a > 0 && b > 0 { return a + b }
+                    0
+                }
+                None => 0,
+            }
+        }
+        None => 0,
+    }
+}
+
+fn fo_recur_else_is_div(e: &Expr, fname: Name, xname: Name, nname: Name, x_idx: i64, n_idx: i64) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprBlock {
+        match (*e).block {
+            Some(b) => {
+                match (*b).stmts {
+                    Some(sl) => {
+                        match (*sl).tail {
+                            Some(_) => { return false }
+                            None => {}
+                        }
+                        if (*sl).head.kind != StmtKind::StmtExpr { return false }
+                        match (*sl).head.expr {
+                            Some(ex) => { return fo_recur_else_is_div(&(*ex), fname, xname, nname, x_idx, n_idx) }
+                            None => { return false }
+                        }
+                    }
+                    None => { return false }
+                }
+            }
+            None => { return false }
+        }
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(inner) => { return fo_recur_else_is_div(&(*inner), fname, xname, nname, x_idx, n_idx) }
+            None => { return false }
+        }
+    }
+    if (*e).kind != ExprKind::ExprBinary || (*e).bin_op != BinaryOp::OpDiv { return false }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    if fo_recur_call_is_step(&(*l), fname, xname, nname, x_idx, n_idx) && fo_recur_note_lit(&(*r)) {
+                        if FO_RECUR_LIT == 0.0 { return false }
+                        FO_RECUR_COEF = 1.0 / FO_RECUR_LIT
+                        return true
+                    }
+                    false
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn fo_recur_else_is_twin(e: &Expr, fname: Name, xname: Name, nname: Name, x_idx: i64, n_idx: i64) -> bool with Mut, Panic, Div, Alloc {
+    let n = fo_recur_add_count(e, fname, xname, nname, x_idx, n_idx)
+    if n >= 2 {
+        FO_RECUR_COEF = n as f64
+        return true
+    }
+    false
+}
+
+fn fo_recur_else_is_xmul(e: &Expr, fname: Name, xname: Name, nname: Name, x_idx: i64, n_idx: i64) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprBlock {
+        match (*e).block {
+            Some(b) => {
+                match (*b).stmts {
+                    Some(sl) => {
+                        match (*sl).tail {
+                            Some(_) => { return false }
+                            None => {}
+                        }
+                        if (*sl).head.kind != StmtKind::StmtExpr { return false }
+                        match (*sl).head.expr {
+                            Some(ex) => { return fo_recur_else_is_xmul(&(*ex), fname, xname, nname, x_idx, n_idx) }
+                            None => { return false }
+                        }
+                    }
+                    None => { return false }
+                }
+            }
+            None => { return false }
+        }
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(inner) => { return fo_recur_else_is_xmul(&(*inner), fname, xname, nname, x_idx, n_idx) }
+            None => { return false }
+        }
+    }
+    if (*e).kind != ExprKind::ExprBinary || (*e).bin_op != BinaryOp::OpMul { return false }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    if fo_expr_is_ident_name(&(*l), xname) {
+                        return fo_recur_call_is_step(&(*r), fname, xname, nname, x_idx, n_idx)
+                    }
+                    if fo_expr_is_ident_name(&(*r), xname) {
+                        return fo_recur_call_is_step(&(*l), fname, xname, nname, x_idx, n_idx)
+                    }
+                    false
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn fo_recur_scaled_call(e: &Expr, fname: Name, xname: Name, nname: Name, x_idx: i64, n_idx: i64) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind != ExprKind::ExprBinary || (*e).bin_op != BinaryOp::OpMul { return false }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    if fo_expr_is_two(&(*l)) && fo_recur_call_is_step(&(*r), fname, xname, nname, x_idx, n_idx) {
+                        return true
+                    }
+                    if fo_expr_is_two(&(*r)) && fo_recur_call_is_step(&(*l), fname, xname, nname, x_idx, n_idx) {
+                        return true
+                    }
+                    false
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn fo_recur_else_is_affine(e: &Expr, fname: Name, xname: Name, nname: Name, x_idx: i64, n_idx: i64) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprBlock {
+        match (*e).block {
+            Some(b) => {
+                match (*b).stmts {
+                    Some(sl) => {
+                        match (*sl).tail {
+                            Some(_) => { return false }
+                            None => {}
+                        }
+                        if (*sl).head.kind != StmtKind::StmtExpr { return false }
+                        match (*sl).head.expr {
+                            Some(ex) => { return fo_recur_else_is_affine(&(*ex), fname, xname, nname, x_idx, n_idx) }
+                            None => { return false }
+                        }
+                    }
+                    None => { return false }
+                }
+            }
+            None => { return false }
+        }
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(inner) => { return fo_recur_else_is_affine(&(*inner), fname, xname, nname, x_idx, n_idx) }
+            None => { return false }
+        }
+    }
+    if (*e).kind != ExprKind::ExprBinary || (*e).bin_op != BinaryOp::OpAdd { return false }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    if fo_expr_is_ident_name(&(*l), xname) {
+                        return fo_recur_scaled_call(&(*r), fname, xname, nname, x_idx, n_idx)
+                    }
+                    if fo_expr_is_ident_name(&(*r), xname) {
+                        return fo_recur_scaled_call(&(*l), fname, xname, nname, x_idx, n_idx)
+                    }
+                    false
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn fo_recur_affine_indexes(fd: &FnDef) -> (i64, i64) with Mut, Panic, Div, Alloc {
+    var names: [Name; 8] = [ir_empty_name(); 8]
+    var isf: [i64; 8] = [0; 8]
+    var np: i64 = 0
+    var pc = &(*fd).params
+    while true {
+        match *pc {
+            Some(pl) => {
+                if !(*pl).head.is_self {
+                    if np >= 2 { return (0 - 1, 0 - 1) }
+                    names[np as usize] = (*pl).head.name
+                    if lower_type_expr_is_f64(&(*pl).head.ty) { isf[np as usize] = 1 }
+                    np = np + 1
+                }
+                pc = &(*pl).tail
+            }
+            None => break
+        }
+    }
+    if np != 2 { return (0 - 1, 0 - 1) }
+    var x_idx: i64 = 0 - 1
+    var n_idx: i64 = 0 - 1
+    if isf[0] == 1 && isf[1] == 0 {
+        x_idx = 0
+        n_idx = 1
+    } else if isf[0] == 0 && isf[1] == 1 {
+        x_idx = 1
+        n_idx = 0
+    } else {
+        return (0 - 1, 0 - 1)
+    }
+    let xname = names[x_idx as usize]
+    let nname = names[n_idx as usize]
+    match (*fd).body.stmts {
+        Some(only) => {
+            match (*only).tail {
+                Some(_) => { return (0 - 1, 0 - 1) }
+                None => {}
+            }
+            if (*only).head.kind != StmtKind::StmtExpr { return (0 - 1, 0 - 1) }
+            match (*only).head.expr {
+                Some(body_e) => {
+                    if (*body_e).kind != ExprKind::ExprIf { return (0 - 1, 0 - 1) }
+                    match (*body_e).left {
+                        Some(cond) => {
+                            if !fo_recur_guard_is_stop(&(*cond), nname) {
+                                return (0 - 1, 0 - 1)
+                            }
+                        }
+                        None => { return (0 - 1, 0 - 1) }
+                    }
+                    if !fo_recur_arm_is_x(&(*body_e).block, xname) { return (0 - 1, 0 - 1) }
+                    match (*body_e).else_expr {
+                        Some(ee) => {
+                            if !fo_recur_else_is_affine(&(*ee), (*fd).name, xname, nname, x_idx, n_idx) {
+                                return (0 - 1, 0 - 1)
+                            }
+                        }
+                        None => { return (0 - 1, 0 - 1) }
+                    }
+                    return (x_idx, n_idx)
+                }
+                None => { return (0 - 1, 0 - 1) }
+            }
+        }
+        None => { return (0 - 1, 0 - 1) }
+    }
+    (0 - 1, 0 - 1)
+}
+
+fn fo_recur_xmul_indexes(fd: &FnDef) -> (i64, i64) with Mut, Panic, Div, Alloc {
+    var names: [Name; 8] = [ir_empty_name(); 8]
+    var isf: [i64; 8] = [0; 8]
+    var np: i64 = 0
+    var pc = &(*fd).params
+    while true {
+        match *pc {
+            Some(pl) => {
+                if !(*pl).head.is_self {
+                    if np >= 2 { return (0 - 1, 0 - 1) }
+                    names[np as usize] = (*pl).head.name
+                    if lower_type_expr_is_f64(&(*pl).head.ty) { isf[np as usize] = 1 }
+                    np = np + 1
+                }
+                pc = &(*pl).tail
+            }
+            None => break
+        }
+    }
+    if np != 2 { return (0 - 1, 0 - 1) }
+    var x_idx: i64 = 0 - 1
+    var n_idx: i64 = 0 - 1
+    if isf[0] == 1 && isf[1] == 0 {
+        x_idx = 0
+        n_idx = 1
+    } else if isf[0] == 0 && isf[1] == 1 {
+        x_idx = 1
+        n_idx = 0
+    } else {
+        return (0 - 1, 0 - 1)
+    }
+    let xname = names[x_idx as usize]
+    let nname = names[n_idx as usize]
+    match (*fd).body.stmts {
+        Some(only) => {
+            match (*only).tail {
+                Some(_) => { return (0 - 1, 0 - 1) }
+                None => {}
+            }
+            if (*only).head.kind != StmtKind::StmtExpr { return (0 - 1, 0 - 1) }
+            match (*only).head.expr {
+                Some(body_e) => {
+                    if (*body_e).kind != ExprKind::ExprIf { return (0 - 1, 0 - 1) }
+                    match (*body_e).left {
+                        Some(cond) => {
+                            if !fo_recur_guard_is_stop(&(*cond), nname) {
+                                return (0 - 1, 0 - 1)
+                            }
+                        }
+                        None => { return (0 - 1, 0 - 1) }
+                    }
+                    if !fo_recur_arm_is_x(&(*body_e).block, xname) { return (0 - 1, 0 - 1) }
+                    match (*body_e).else_expr {
+                        Some(ee) => {
+                            if !fo_recur_else_is_xmul(&(*ee), (*fd).name, xname, nname, x_idx, n_idx) {
+                                return (0 - 1, 0 - 1)
+                            }
+                        }
+                        None => { return (0 - 1, 0 - 1) }
+                    }
+                    return (x_idx, n_idx)
+                }
+                None => { return (0 - 1, 0 - 1) }
+            }
+        }
+        None => { return (0 - 1, 0 - 1) }
+    }
+    (0 - 1, 0 - 1)
+}
+
+fn fo_recur_scale_indexes(fd: &FnDef) -> (i64, i64) with Mut, Panic, Div, Alloc {
+    var names: [Name; 8] = [ir_empty_name(); 8]
+    var isf: [i64; 8] = [0; 8]
+    var np: i64 = 0
+    var pc = &(*fd).params
+    while true {
+        match *pc {
+            Some(pl) => {
+                if !(*pl).head.is_self {
+                    if np >= 2 { return (0 - 1, 0 - 1) }
+                    names[np as usize] = (*pl).head.name
+                    if lower_type_expr_is_f64(&(*pl).head.ty) { isf[np as usize] = 1 }
+                    np = np + 1
+                }
+                pc = &(*pl).tail
+            }
+            None => break
+        }
+    }
+    if np != 2 { return (0 - 1, 0 - 1) }
+    var x_idx: i64 = 0 - 1
+    var n_idx: i64 = 0 - 1
+    if isf[0] == 1 && isf[1] == 0 {
+        x_idx = 0
+        n_idx = 1
+    } else if isf[0] == 0 && isf[1] == 1 {
+        x_idx = 1
+        n_idx = 0
+    } else {
+        return (0 - 1, 0 - 1)
+    }
+    let xname = names[x_idx as usize]
+    let nname = names[n_idx as usize]
+    match (*fd).body.stmts {
+        Some(only) => {
+            match (*only).tail {
+                Some(_) => { return (0 - 1, 0 - 1) }
+                None => {}
+            }
+            if (*only).head.kind != StmtKind::StmtExpr { return (0 - 1, 0 - 1) }
+            match (*only).head.expr {
+                Some(body_e) => {
+                    if (*body_e).kind != ExprKind::ExprIf { return (0 - 1, 0 - 1) }
+                    match (*body_e).left {
+                        Some(cond) => {
+                            if !fo_recur_guard_is_stop(&(*cond), nname) {
+                                return (0 - 1, 0 - 1)
+                            }
+                        }
+                        None => { return (0 - 1, 0 - 1) }
+                    }
+                    if !fo_recur_arm_is_x(&(*body_e).block, xname) { return (0 - 1, 0 - 1) }
+                    match (*body_e).else_expr {
+                        Some(ee) => {
+                            if !fo_recur_else_is_scale(&(*ee), (*fd).name, xname, nname, x_idx, n_idx)
+                                && !fo_recur_else_is_div(&(*ee), (*fd).name, xname, nname, x_idx, n_idx)
+                                && !fo_recur_else_is_twin(&(*ee), (*fd).name, xname, nname, x_idx, n_idx) {
+                                return (0 - 1, 0 - 1)
+                            }
+                        }
+                        None => { return (0 - 1, 0 - 1) }
+                    }
+                    return (x_idx, n_idx)
+                }
+                None => { return (0 - 1, 0 - 1) }
+            }
+        }
+        None => { return (0 - 1, 0 - 1) }
+    }
+    (0 - 1, 0 - 1)
+}
+
+fn fo_recur_call_is_mix(e: &Expr, fname: Name, xname: Name, yname: Name, nname: Name, x_idx: i64, y_idx: i64, n_idx: i64) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind != ExprKind::ExprCall { return false }
+    match (*e).left {
+        Some(cal) => {
+            if (*cal).kind != ExprKind::ExprIdent || !ir_name_eq((*cal).name, fname) { return false }
+        }
+        None => { return false }
+    }
+    var i: i64 = 0
+    var ac = &(*e).args
+    while i < 3 {
+        match *ac {
+            Some(al) => {
+                if i == x_idx {
+                    if !fo_expr_is_ident_name(&(*al).head, xname) { return false }
+                } else if i == y_idx {
+                    if !fo_expr_is_ident_name(&(*al).head, yname) { return false }
+                } else if i == n_idx {
+                    if !fo_expr_is_name_minus_one(&(*al).head, nname) { return false }
+                } else {
+                    return false
+                }
+                i = i + 1
+                ac = &(*al).tail
+            }
+            None => { return false }
+        }
+    }
+    match *ac {
+        Some(_) => false,
+        None => true,
+    }
+}
+
+fn fo_recur_else_is_mix(e: &Expr, fname: Name, xname: Name, yname: Name, nname: Name, x_idx: i64, y_idx: i64, n_idx: i64, mul: bool) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprBlock {
+        match (*e).block {
+            Some(b) => {
+                match (*b).stmts {
+                    Some(sl) => {
+                        match (*sl).tail {
+                            Some(_) => { return false }
+                            None => {}
+                        }
+                        if (*sl).head.kind != StmtKind::StmtExpr { return false }
+                        match (*sl).head.expr {
+                            Some(ex) => { return fo_recur_else_is_mix(&(*ex), fname, xname, yname, nname, x_idx, y_idx, n_idx, mul) }
+                            None => { return false }
+                        }
+                    }
+                    None => { return false }
+                }
+            }
+            None => { return false }
+        }
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(inner) => { return fo_recur_else_is_mix(&(*inner), fname, xname, yname, nname, x_idx, y_idx, n_idx, mul) }
+            None => { return false }
+        }
+    }
+    if (*e).kind != ExprKind::ExprBinary { return false }
+    if mul {
+        if (*e).bin_op != BinaryOp::OpMul { return false }
+    } else {
+        if (*e).bin_op != BinaryOp::OpAdd { return false }
+    }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    if fo_expr_is_ident_name(&(*l), yname) {
+                        return fo_recur_call_is_mix(&(*r), fname, xname, yname, nname, x_idx, y_idx, n_idx)
+                    }
+                    if fo_expr_is_ident_name(&(*r), yname) {
+                        return fo_recur_call_is_mix(&(*l), fname, xname, yname, nname, x_idx, y_idx, n_idx)
+                    }
+                    false
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+// `if n < 1 { x } else { self(x, y, n - 1) + y }`. For n >= 1 the value is
+// x + n*y. Past the unroll cap the missing steps were a confident 0.
+fn fo_recur_mix_indexes(fd: &FnDef, mul: bool) -> (i64, i64) with Mut, Panic, Div, Alloc {
+    var names: [Name; 8] = [ir_empty_name(); 8]
+    var isf: [i64; 8] = [0; 8]
+    var np: i64 = 0
+    var pc = &(*fd).params
+    while true {
+        match *pc {
+            Some(pl) => {
+                if !(*pl).head.is_self {
+                    if np >= 3 { return (0 - 1, 0 - 1) }
+                    names[np as usize] = (*pl).head.name
+                    if lower_type_expr_is_f64(&(*pl).head.ty) { isf[np as usize] = 1 }
+                    np = np + 1
+                }
+                pc = &(*pl).tail
+            }
+            None => break
+        }
+    }
+    if np != 3 { return (0 - 1, 0 - 1) }
+    var f64_a: i64 = 0 - 1
+    var f64_b: i64 = 0 - 1
+    var n_idx: i64 = 0 - 1
+    var pi: i64 = 0
+    while pi < 3 {
+        if isf[pi as usize] == 1 {
+            if f64_a < 0 { f64_a = pi } else { f64_b = pi }
+        } else {
+            n_idx = pi
+        }
+        pi = pi + 1
+    }
+    if f64_a < 0 || f64_b < 0 || n_idx < 0 { return (0 - 1, 0 - 1) }
+    let nname = names[n_idx as usize]
+    let xname_a = names[f64_a as usize]
+    let xname_b = names[f64_b as usize]
+    match (*fd).body.stmts {
+        Some(only) => {
+            match (*only).tail {
+                Some(_) => { return (0 - 1, 0 - 1) }
+                None => {}
+            }
+            if (*only).head.kind != StmtKind::StmtExpr { return (0 - 1, 0 - 1) }
+            match (*only).head.expr {
+                Some(body_e) => {
+                    if (*body_e).kind != ExprKind::ExprIf { return (0 - 1, 0 - 1) }
+                    match (*body_e).left {
+                        Some(cond) => {
+                            if !fo_recur_guard_is_stop(&(*cond), nname) {
+                                return (0 - 1, 0 - 1)
+                            }
+                        }
+                        None => { return (0 - 1, 0 - 1) }
+                    }
+                    var x_idx: i64 = 0 - 1
+                    var y_idx: i64 = 0 - 1
+                    if fo_recur_arm_is_x(&(*body_e).block, xname_a) {
+                        x_idx = f64_a
+                        y_idx = f64_b
+                    } else if fo_recur_arm_is_x(&(*body_e).block, xname_b) {
+                        x_idx = f64_b
+                        y_idx = f64_a
+                    } else {
+                        return (0 - 1, 0 - 1)
+                    }
+                    let xname = names[x_idx as usize]
+                    let yname = names[y_idx as usize]
+                    match (*body_e).else_expr {
+                        Some(ee) => {
+                            if !fo_recur_else_is_mix(&(*ee), (*fd).name, xname, yname, nname, x_idx, y_idx, n_idx, mul) {
+                                return (0 - 1, 0 - 1)
+                            }
+                        }
+                        None => { return (0 - 1, 0 - 1) }
+                    }
+                    // Pack n into the high side: caller recovers n as 3 - x - y
+                    // only when both indexes are in 0..2. Return (x, y).
+                    return (x_idx, y_idx)
+                }
+                None => { return (0 - 1, 0 - 1) }
+            }
+        }
+        None => { return (0 - 1, 0 - 1) }
+    }
+    (0 - 1, 0 - 1)
+}
+
+fn fo_recur_mul_is_lit_mix(e: &Expr, fname: Name, xname: Name, yname: Name, nname: Name, x_idx: i64, y_idx: i64, n_idx: i64) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind != ExprKind::ExprBinary || (*e).bin_op != BinaryOp::OpMul { return false }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    if fo_recur_note_lit(&(*l)) && fo_recur_call_is_mix(&(*r), fname, xname, yname, nname, x_idx, y_idx, n_idx) {
+                        FO_RECUR_COEF = FO_RECUR_LIT
+                        return true
+                    }
+                    if fo_recur_note_lit(&(*r)) && fo_recur_call_is_mix(&(*l), fname, xname, yname, nname, x_idx, y_idx, n_idx) {
+                        FO_RECUR_COEF = FO_RECUR_LIT
+                        return true
+                    }
+                    false
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn fo_recur_else_is_affy(e: &Expr, fname: Name, xname: Name, yname: Name, nname: Name, x_idx: i64, y_idx: i64, n_idx: i64) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprBlock {
+        match (*e).block {
+            Some(b) => {
+                match (*b).stmts {
+                    Some(sl) => {
+                        match (*sl).tail {
+                            Some(_) => { return false }
+                            None => {}
+                        }
+                        if (*sl).head.kind != StmtKind::StmtExpr { return false }
+                        match (*sl).head.expr {
+                            Some(ex) => { return fo_recur_else_is_affy(&(*ex), fname, xname, yname, nname, x_idx, y_idx, n_idx) }
+                            None => { return false }
+                        }
+                    }
+                    None => { return false }
+                }
+            }
+            None => { return false }
+        }
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(inner) => { return fo_recur_else_is_affy(&(*inner), fname, xname, yname, nname, x_idx, y_idx, n_idx) }
+            None => { return false }
+        }
+    }
+    if (*e).kind != ExprKind::ExprBinary || (*e).bin_op != BinaryOp::OpAdd { return false }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    if fo_expr_is_ident_name(&(*l), yname) {
+                        return fo_recur_mul_is_lit_mix(&(*r), fname, xname, yname, nname, x_idx, y_idx, n_idx)
+                    }
+                    if fo_expr_is_ident_name(&(*r), yname) {
+                        return fo_recur_mul_is_lit_mix(&(*l), fname, xname, yname, nname, x_idx, y_idx, n_idx)
+                    }
+                    false
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn fo_recur_mul_is_y_mix(e: &Expr, fname: Name, xname: Name, yname: Name, nname: Name, x_idx: i64, y_idx: i64, n_idx: i64) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind != ExprKind::ExprBinary || (*e).bin_op != BinaryOp::OpMul { return false }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    if fo_expr_is_ident_name(&(*l), yname) && fo_recur_call_is_mix(&(*r), fname, xname, yname, nname, x_idx, y_idx, n_idx) {
+                        return true
+                    }
+                    if fo_expr_is_ident_name(&(*r), yname) && fo_recur_call_is_mix(&(*l), fname, xname, yname, nname, x_idx, y_idx, n_idx) {
+                        return true
+                    }
+                    false
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn fo_recur_else_is_chcoef(e: &Expr, fname: Name, xname: Name, yname: Name, nname: Name, x_idx: i64, y_idx: i64, n_idx: i64) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprBlock {
+        match (*e).block {
+            Some(b) => {
+                match (*b).stmts {
+                    Some(sl) => {
+                        match (*sl).tail {
+                            Some(_) => { return false }
+                            None => {}
+                        }
+                        if (*sl).head.kind != StmtKind::StmtExpr { return false }
+                        match (*sl).head.expr {
+                            Some(ex) => { return fo_recur_else_is_chcoef(&(*ex), fname, xname, yname, nname, x_idx, y_idx, n_idx) }
+                            None => { return false }
+                        }
+                    }
+                    None => { return false }
+                }
+            }
+            None => { return false }
+        }
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(inner) => { return fo_recur_else_is_chcoef(&(*inner), fname, xname, yname, nname, x_idx, y_idx, n_idx) }
+            None => { return false }
+        }
+    }
+    if (*e).kind != ExprKind::ExprBinary || (*e).bin_op != BinaryOp::OpAdd { return false }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    if fo_expr_is_ident_name(&(*l), xname) {
+                        return fo_recur_mul_is_y_mix(&(*r), fname, xname, yname, nname, x_idx, y_idx, n_idx)
+                    }
+                    if fo_expr_is_ident_name(&(*r), xname) {
+                        return fo_recur_mul_is_y_mix(&(*l), fname, xname, yname, nname, x_idx, y_idx, n_idx)
+                    }
+                    false
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn fo_recur_else_is_step2(e: &Expr, fname: Name, xname: Name, yname: Name, nname: Name, x_idx: i64, y_idx: i64, n_idx: i64, kind: i64) -> bool with Mut, Panic, Div, Alloc {
+    if kind == 0 {
+        return fo_recur_else_is_affy(e, fname, xname, yname, nname, x_idx, y_idx, n_idx)
+    }
+    fo_recur_else_is_chcoef(e, fname, xname, yname, nname, x_idx, y_idx, n_idx)
+}
+
+fn fo_recur_powbase_indexes(fd: &FnDef) -> (i64, i64) with Mut, Panic, Div, Alloc {
+    var names: [Name; 8] = [ir_empty_name(); 8]
+    var isf: [i64; 8] = [0; 8]
+    var np: i64 = 0
+    var pc = &(*fd).params
+    while true {
+        match *pc {
+            Some(pl) => {
+                if !(*pl).head.is_self {
+                    if np >= 2 { return (0 - 1, 0 - 1) }
+                    names[np as usize] = (*pl).head.name
+                    if lower_type_expr_is_f64(&(*pl).head.ty) { isf[np as usize] = 1 }
+                    np = np + 1
+                }
+                pc = &(*pl).tail
+            }
+            None => break
+        }
+    }
+    if np != 2 { return (0 - 1, 0 - 1) }
+    var x_idx: i64 = 0 - 1
+    var n_idx: i64 = 0 - 1
+    if isf[0] == 1 && isf[1] == 0 {
+        x_idx = 0
+        n_idx = 1
+    } else if isf[0] == 0 && isf[1] == 1 {
+        x_idx = 1
+        n_idx = 0
+    } else {
+        return (0 - 1, 0 - 1)
+    }
+    let xname = names[x_idx as usize]
+    let nname = names[n_idx as usize]
+    match (*fd).body.stmts {
+        Some(only) => {
+            match (*only).tail {
+                Some(_) => { return (0 - 1, 0 - 1) }
+                None => {}
+            }
+            if (*only).head.kind != StmtKind::StmtExpr { return (0 - 1, 0 - 1) }
+            match (*only).head.expr {
+                Some(body_e) => {
+                    if (*body_e).kind != ExprKind::ExprIf { return (0 - 1, 0 - 1) }
+                    match (*body_e).left {
+                        Some(cond) => {
+                            if !fo_recur_guard_is_stop(&(*cond), nname) {
+                                return (0 - 1, 0 - 1)
+                            }
+                        }
+                        None => { return (0 - 1, 0 - 1) }
+                    }
+                    if !fo_recur_arm_lit(&(*body_e).block) { return (0 - 1, 0 - 1) }
+                    match (*body_e).else_expr {
+                        Some(ee) => {
+                            if !fo_recur_else_is_xmul(&(*ee), (*fd).name, xname, nname, x_idx, n_idx) {
+                                return (0 - 1, 0 - 1)
+                            }
+                        }
+                        None => { return (0 - 1, 0 - 1) }
+                    }
+                    FO_RECUR_BASE = FO_RECUR_LIT
+                    return (x_idx, n_idx)
+                }
+                None => { return (0 - 1, 0 - 1) }
+            }
+        }
+        None => { return (0 - 1, 0 - 1) }
+    }
+    (0 - 1, 0 - 1)
+}
+
+fn fo_recur_step2_indexes(fd: &FnDef, kind: i64) -> (i64, i64) with Mut, Panic, Div, Alloc {
+    var names: [Name; 8] = [ir_empty_name(); 8]
+    var isf: [i64; 8] = [0; 8]
+    var np: i64 = 0
+    var pc = &(*fd).params
+    while true {
+        match *pc {
+            Some(pl) => {
+                if !(*pl).head.is_self {
+                    if np >= 3 { return (0 - 1, 0 - 1) }
+                    names[np as usize] = (*pl).head.name
+                    if lower_type_expr_is_f64(&(*pl).head.ty) { isf[np as usize] = 1 }
+                    np = np + 1
+                }
+                pc = &(*pl).tail
+            }
+            None => break
+        }
+    }
+    if np != 3 { return (0 - 1, 0 - 1) }
+    var f64_a: i64 = 0 - 1
+    var f64_b: i64 = 0 - 1
+    var n_idx: i64 = 0 - 1
+    var pi: i64 = 0
+    while pi < 3 {
+        if isf[pi as usize] == 1 {
+            if f64_a < 0 { f64_a = pi } else { f64_b = pi }
+        } else {
+            n_idx = pi
+        }
+        pi = pi + 1
+    }
+    if f64_a < 0 || f64_b < 0 || n_idx < 0 { return (0 - 1, 0 - 1) }
+    let nname = names[n_idx as usize]
+    let xname_a = names[f64_a as usize]
+    let xname_b = names[f64_b as usize]
+    match (*fd).body.stmts {
+        Some(only) => {
+            match (*only).tail {
+                Some(_) => { return (0 - 1, 0 - 1) }
+                None => {}
+            }
+            if (*only).head.kind != StmtKind::StmtExpr { return (0 - 1, 0 - 1) }
+            match (*only).head.expr {
+                Some(body_e) => {
+                    if (*body_e).kind != ExprKind::ExprIf { return (0 - 1, 0 - 1) }
+                    match (*body_e).left {
+                        Some(cond) => {
+                            if !fo_recur_guard_is_stop(&(*cond), nname) {
+                                return (0 - 1, 0 - 1)
+                            }
+                        }
+                        None => { return (0 - 1, 0 - 1) }
+                    }
+                    var x_idx: i64 = 0 - 1
+                    var y_idx: i64 = 0 - 1
+                    if fo_recur_arm_is_x(&(*body_e).block, xname_a) {
+                        x_idx = f64_a
+                        y_idx = f64_b
+                    } else if fo_recur_arm_is_x(&(*body_e).block, xname_b) {
+                        x_idx = f64_b
+                        y_idx = f64_a
+                    } else {
+                        return (0 - 1, 0 - 1)
+                    }
+                    let xname = names[x_idx as usize]
+                    let yname = names[y_idx as usize]
+                    match (*body_e).else_expr {
+                        Some(ee) => {
+                            if !fo_recur_else_is_step2(&(*ee), (*fd).name, xname, yname, nname, x_idx, y_idx, n_idx, kind) {
+                                return (0 - 1, 0 - 1)
+                            }
+                        }
+                        None => { return (0 - 1, 0 - 1) }
+                    }
+                    // Pack n into the high side: caller recovers n as 3 - x - y
+                    // only when both indexes are in 0..2. Return (x, y).
+                    return (x_idx, y_idx)
+                }
+                None => { return (0 - 1, 0 - 1) }
+            }
+        }
+        None => { return (0 - 1, 0 - 1) }
+    }
+    (0 - 1, 0 - 1)
 }
 
 fn fo_inline_known(n: Name) -> bool with Mut, Panic, Div, Alloc {
@@ -11859,7 +13230,12 @@ impl Lowerer {
 
         let pair_value = lo.lower_expr_ref(value_expr)
         lo = pair_value.0
-        let value_reg = pair_value.1
+        var value_reg = pair_value.1
+        if (*value_expr).kind == ExprKind::ExprIdent {
+            let copied = lo.emit_ident_aggregate_value_copy((*value_expr).name, value_reg)
+            lo = copied.0
+            value_reg = copied.1
+        }
         lo = lo.emit(ir_index_set(base_reg, idx_reg, value_reg))
 
         let pair_next = lo.fresh_reg()
@@ -11946,7 +13322,18 @@ impl Lowerer {
                 // every element aliases one object. repeat_count <= 0 keeps the
                 // legacy path so the value expression is still lowered exactly
                 // as before for empty arrays.
-                if repeat_count > 0 && lo.expr_is_aggregate_value_ref(&(*value_expr)) {
+                var distinct = lo.expr_is_aggregate_value_ref(&(*value_expr))
+                if (*value_expr).kind == ExprKind::ExprIdent {
+                    let name = (*value_expr).name
+                    let struct_name = lo.ident_value_struct_type(name)
+                    if lo.struct_local_is_value_copyable(name, struct_name) {
+                        distinct = true
+                    }
+                    if lo.lookup_local_fixed_array_len(name) >= 0 && lo.lookup_local_array_copy_word_scalar(name) {
+                        distinct = true
+                    }
+                }
+                if repeat_count > 0 && distinct {
                     lo = lo.lower_array_repeat_fill_distinct(dst, &(*value_expr), repeat_count)
                 } else {
                     let zero_fill = lo.expr_is_zero_fill_value(*value_expr)
@@ -12463,12 +13850,16 @@ impl Lowerer {
     }
 
     fn bind_local_array_elem_float(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        self.bind_local_float_array_depth(name, 1)
+    }
+
+    fn bind_local_float_array_depth(self, name: Name, depth: i64) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
         var stk = lo.locals
         var i = (*stk).count - 1
         while i >= 0 {
             if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
-                (*(*stk).array_elem_float).values[i as usize] = 1
+                (*(*stk).array_elem_float).values[i as usize] = depth
                 lo.locals = stk
                 return lo
             }
@@ -17423,6 +18814,716 @@ impl Lowerer {
         (lo, result)
     }
 
+    // nest(x, n) = x when n < 1, else nest(x, n - 1) + x. The multiplier is
+    // a runtime value, so the depth cap never has to unroll it.
+    fn fo_emit_recur_count_scale(self, n_reg: i64, xs: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let one_i = lo.emit_i64_const(1)
+        lo = one_i.0
+        let cmp_p = lo.fresh_reg()
+        lo = cmp_p.0
+        lo = lo.emit(ir_binop(cmp_p.1, n_reg, BinaryOp::OpLt, one_i.1))
+        let pl_else = lo.fresh_label()
+        lo = pl_else.0
+        let l_else = pl_else.1
+        let pl_end = lo.fresh_label()
+        lo = pl_end.0
+        let l_end = pl_end.1
+        let mp = lo.fresh_reg()
+        lo = mp.0
+        let mreg = mp.1
+        lo = lo.emit(ir_branch_false(cmp_p.1, l_else))
+        let one_f = lo.emit_f64_const(1.0)
+        lo = one_f.0
+        lo = lo.emit(ir_copy(mreg, one_f.1))
+        lo = lo.emit(ir_jump(l_end))
+        lo = lo.emit(ir_label(l_else))
+        let nf_p = lo.fresh_reg()
+        lo = nf_p.0
+        lo = lo.emit(ir_int_to_float(nf_p.1, n_reg))
+        lo = lo.emit(ir_mark_float_reg(nf_p.1))
+        let one_f2 = lo.emit_f64_const(1.0)
+        lo = one_f2.0
+        let sum_p = lo.fresh_reg()
+        lo = sum_p.0
+        lo = lo.emit(ir_binop_typed(sum_p.1, nf_p.1, BinaryOp::OpAdd, one_f2.1, true, true))
+        lo = lo.emit(ir_mark_float_reg(sum_p.1))
+        lo = lo.emit(ir_copy(mreg, sum_p.1))
+        lo = lo.emit(ir_label(l_end))
+        lo = lo.emit(ir_mark_float_reg(mreg))
+        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+        var k: i64 = 0
+        while k < 32 {
+            let s = xs[k as usize]
+            if s >= 0 {
+                let pr = lo.fresh_reg()
+                lo = pr.0
+                lo = lo.emit(ir_binop_typed(pr.1, s, BinaryOp::OpMul, mreg, true, true))
+                lo = lo.emit(ir_mark_float_reg(pr.1))
+                lo.fo_expr_sens[k as usize] = pr.1
+            }
+            k = k + 1
+        }
+        lo.fo_emit_var_from_sens()
+    }
+
+    // scale(x, n) = x when n < 1, else 2 * scale(x, n - 1). The factor is 2^n
+    // for n >= 0 and 1 otherwise, computed by a runtime loop so n = 12 does
+    // not depend on the unroll cap.
+    fn fo_emit_recur_pow2_scale(self, n_reg: i64, xs: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let mp = lo.fresh_reg()
+        lo = mp.0
+        let mreg = mp.1
+        let one_f = lo.emit_f64_const(1.0)
+        lo = one_f.0
+        lo = lo.emit(ir_copy(mreg, one_f.1))
+        lo = lo.emit(ir_mark_float_reg(mreg))
+        let ip = lo.fresh_reg()
+        lo = ip.0
+        let ireg = ip.1
+        lo = lo.emit(ir_load_imm(ireg, 0))
+        let pl_top = lo.fresh_label()
+        lo = pl_top.0
+        let l_top = pl_top.1
+        let pl_end = lo.fresh_label()
+        lo = pl_end.0
+        let l_end = pl_end.1
+        lo = lo.emit(ir_label(l_top))
+        let cmp_p = lo.fresh_reg()
+        lo = cmp_p.0
+        lo = lo.emit(ir_binop(cmp_p.1, ireg, BinaryOp::OpLt, n_reg))
+        lo = lo.emit(ir_branch_false(cmp_p.1, l_end))
+        let two_f = lo.emit_f64_const(FO_RECUR_COEF)
+        lo = two_f.0
+        let prod_p = lo.fresh_reg()
+        lo = prod_p.0
+        lo = lo.emit(ir_binop_typed(prod_p.1, mreg, BinaryOp::OpMul, two_f.1, true, true))
+        lo = lo.emit(ir_mark_float_reg(prod_p.1))
+        lo = lo.emit(ir_copy(mreg, prod_p.1))
+        let one_i = lo.emit_i64_const(1)
+        lo = one_i.0
+        let next_p = lo.fresh_reg()
+        lo = next_p.0
+        lo = lo.emit(ir_binop(next_p.1, ireg, BinaryOp::OpAdd, one_i.1))
+        lo = lo.emit(ir_copy(ireg, next_p.1))
+        lo = lo.emit(ir_jump(l_top))
+        lo = lo.emit(ir_label(l_end))
+        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+        var k: i64 = 0
+        while k < 32 {
+            let s = xs[k as usize]
+            if s >= 0 {
+                let pr = lo.fresh_reg()
+                lo = pr.0
+                lo = lo.emit(ir_binop_typed(pr.1, s, BinaryOp::OpMul, mreg, true, true))
+                lo = lo.emit(ir_mark_float_reg(pr.1))
+                lo.fo_expr_sens[k as usize] = pr.1
+            }
+            k = k + 1
+        }
+        lo.fo_emit_var_from_sens()
+    }
+
+    // mix(x, y, n) = x when n < 1, else mix(...) + y. The coefficient of y
+    // is n, a runtime value. x keeps its own channels.
+    fn fo_emit_recur_mix_scale(self, n_reg: i64, xs: [i64; 32], ys: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let one_i = lo.emit_i64_const(1)
+        lo = one_i.0
+        let cmp_p = lo.fresh_reg()
+        lo = cmp_p.0
+        lo = lo.emit(ir_binop(cmp_p.1, n_reg, BinaryOp::OpLt, one_i.1))
+        let pl_else = lo.fresh_label()
+        lo = pl_else.0
+        let l_else = pl_else.1
+        let pl_end = lo.fresh_label()
+        lo = pl_end.0
+        let l_end = pl_end.1
+        let mp = lo.fresh_reg()
+        lo = mp.0
+        let mreg = mp.1
+        lo = lo.emit(ir_branch_false(cmp_p.1, l_else))
+        let zero_f = lo.emit_f64_const(0.0)
+        lo = zero_f.0
+        lo = lo.emit(ir_copy(mreg, zero_f.1))
+        lo = lo.emit(ir_jump(l_end))
+        lo = lo.emit(ir_label(l_else))
+        let nf_p = lo.fresh_reg()
+        lo = nf_p.0
+        lo = lo.emit(ir_int_to_float(nf_p.1, n_reg))
+        lo = lo.emit(ir_mark_float_reg(nf_p.1))
+        lo = lo.emit(ir_copy(mreg, nf_p.1))
+        lo = lo.emit(ir_label(l_end))
+        lo = lo.emit(ir_mark_float_reg(mreg))
+        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+        var k: i64 = 0
+        while k < 32 {
+            let sx = xs[k as usize]
+            let sy = ys[k as usize]
+            if sx >= 0 && sy >= 0 {
+                let yp = lo.fresh_reg()
+                lo = yp.0
+                lo = lo.emit(ir_binop_typed(yp.1, sy, BinaryOp::OpMul, mreg, true, true))
+                lo = lo.emit(ir_mark_float_reg(yp.1))
+                let sp = lo.fresh_reg()
+                lo = sp.0
+                lo = lo.emit(ir_binop_typed(sp.1, sx, BinaryOp::OpAdd, yp.1, true, true))
+                lo = lo.emit(ir_mark_float_reg(sp.1))
+                lo.fo_expr_sens[k as usize] = sp.1
+            } else if sx >= 0 {
+                lo.fo_expr_sens[k as usize] = sx
+            } else if sy >= 0 {
+                let yp2 = lo.fresh_reg()
+                lo = yp2.0
+                lo = lo.emit(ir_binop_typed(yp2.1, sy, BinaryOp::OpMul, mreg, true, true))
+                lo = lo.emit(ir_mark_float_reg(yp2.1))
+                lo.fo_expr_sens[k as usize] = yp2.1
+            }
+            k = k + 1
+        }
+        lo.fo_emit_var_from_sens()
+    }
+
+    // byy(x, y, n) = x when n < 1, else y * byy(...). After n steps the
+    // value is x*y^n, the x-coefficient is y^n and the y-coefficient is
+    // n*x*y^(n-1). Both are tracked in the loop, so y = 0 does not divide.
+    fn fo_emit_recur_ymul_scale(self, n_reg: i64, x_val: i64, y_val: i64, xs: [i64; 32], ys: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        lo = lo.emit(ir_mark_float_reg(x_val))
+        lo = lo.emit(ir_mark_float_reg(y_val))
+        let cxp = lo.fresh_reg()
+        lo = cxp.0
+        let cx = cxp.1
+        let one_f = lo.emit_f64_const(1.0)
+        lo = one_f.0
+        lo = lo.emit(ir_copy(cx, one_f.1))
+        lo = lo.emit(ir_mark_float_reg(cx))
+        let cyp = lo.fresh_reg()
+        lo = cyp.0
+        let cy = cyp.1
+        let zero_f = lo.emit_f64_const(0.0)
+        lo = zero_f.0
+        lo = lo.emit(ir_copy(cy, zero_f.1))
+        lo = lo.emit(ir_mark_float_reg(cy))
+        let vp = lo.fresh_reg()
+        lo = vp.0
+        let val = vp.1
+        lo = lo.emit(ir_copy(val, x_val))
+        lo = lo.emit(ir_mark_float_reg(val))
+        let ip = lo.fresh_reg()
+        lo = ip.0
+        let ireg = ip.1
+        lo = lo.emit(ir_load_imm(ireg, 0))
+        let pl_top = lo.fresh_label()
+        lo = pl_top.0
+        let l_top = pl_top.1
+        let pl_end = lo.fresh_label()
+        lo = pl_end.0
+        let l_end = pl_end.1
+        lo = lo.emit(ir_label(l_top))
+        let cmp_p = lo.fresh_reg()
+        lo = cmp_p.0
+        lo = lo.emit(ir_binop(cmp_p.1, ireg, BinaryOp::OpLt, n_reg))
+        lo = lo.emit(ir_branch_false(cmp_p.1, l_end))
+        let cy1 = lo.fresh_reg()
+        lo = cy1.0
+        lo = lo.emit(ir_binop_typed(cy1.1, cy, BinaryOp::OpMul, y_val, true, true))
+        lo = lo.emit(ir_mark_float_reg(cy1.1))
+        let cy2 = lo.fresh_reg()
+        lo = cy2.0
+        lo = lo.emit(ir_binop_typed(cy2.1, cy1.1, BinaryOp::OpAdd, val, true, true))
+        lo = lo.emit(ir_mark_float_reg(cy2.1))
+        let cx1 = lo.fresh_reg()
+        lo = cx1.0
+        lo = lo.emit(ir_binop_typed(cx1.1, cx, BinaryOp::OpMul, y_val, true, true))
+        lo = lo.emit(ir_mark_float_reg(cx1.1))
+        let v1 = lo.fresh_reg()
+        lo = v1.0
+        lo = lo.emit(ir_binop_typed(v1.1, val, BinaryOp::OpMul, y_val, true, true))
+        lo = lo.emit(ir_mark_float_reg(v1.1))
+        lo = lo.emit(ir_copy(cy, cy2.1))
+        lo = lo.emit(ir_copy(cx, cx1.1))
+        lo = lo.emit(ir_copy(val, v1.1))
+        let one_i = lo.emit_i64_const(1)
+        lo = one_i.0
+        let next_p = lo.fresh_reg()
+        lo = next_p.0
+        lo = lo.emit(ir_binop(next_p.1, ireg, BinaryOp::OpAdd, one_i.1))
+        lo = lo.emit(ir_copy(ireg, next_p.1))
+        lo = lo.emit(ir_jump(l_top))
+        lo = lo.emit(ir_label(l_end))
+        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+        var k: i64 = 0
+        while k < 32 {
+            let sx = xs[k as usize]
+            let sy = ys[k as usize]
+            if sx >= 0 && sy >= 0 {
+                let px = lo.fresh_reg()
+                lo = px.0
+                lo = lo.emit(ir_binop_typed(px.1, cx, BinaryOp::OpMul, sx, true, true))
+                lo = lo.emit(ir_mark_float_reg(px.1))
+                let py = lo.fresh_reg()
+                lo = py.0
+                lo = lo.emit(ir_binop_typed(py.1, cy, BinaryOp::OpMul, sy, true, true))
+                lo = lo.emit(ir_mark_float_reg(py.1))
+                let sp = lo.fresh_reg()
+                lo = sp.0
+                lo = lo.emit(ir_binop_typed(sp.1, px.1, BinaryOp::OpAdd, py.1, true, true))
+                lo = lo.emit(ir_mark_float_reg(sp.1))
+                lo.fo_expr_sens[k as usize] = sp.1
+            } else if sx >= 0 {
+                let px2 = lo.fresh_reg()
+                lo = px2.0
+                lo = lo.emit(ir_binop_typed(px2.1, cx, BinaryOp::OpMul, sx, true, true))
+                lo = lo.emit(ir_mark_float_reg(px2.1))
+                lo.fo_expr_sens[k as usize] = px2.1
+            } else if sy >= 0 {
+                let py2 = lo.fresh_reg()
+                lo = py2.0
+                lo = lo.emit(ir_binop_typed(py2.1, cy, BinaryOp::OpMul, sy, true, true))
+                lo = lo.emit(ir_mark_float_reg(py2.1))
+                lo.fo_expr_sens[k as usize] = py2.1
+            }
+            k = k + 1
+        }
+        lo.fo_emit_var_from_sens()
+    }
+
+    // powx(x, n) = x when n < 1, else x * powx(x, n - 1). After n steps the
+    // value is x^(n+1) and the sensitivity is (n+1) x^n times the sensitivity
+    // of x. The running value is what multiplies the original sensitivity.
+    fn fo_emit_recur_xmul_scale(self, n_reg: i64, x_val: i64, xs: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        lo = lo.emit(ir_mark_float_reg(x_val))
+        var sk: [i64; 32] = [0 - 1; 32]
+        let zf = lo.emit_f64_const(0.0)
+        lo = zf.0
+        var k0: i64 = 0
+        while k0 < 32 {
+            let sp = lo.fresh_reg()
+            lo = sp.0
+            sk[k0 as usize] = sp.1
+            if xs[k0 as usize] >= 0 {
+                lo = lo.emit(ir_copy(sp.1, xs[k0 as usize]))
+            } else {
+                lo = lo.emit(ir_copy(sp.1, zf.1))
+            }
+            lo = lo.emit(ir_mark_float_reg(sp.1))
+            k0 = k0 + 1
+        }
+        let vp = lo.fresh_reg()
+        lo = vp.0
+        let val = vp.1
+        lo = lo.emit(ir_copy(val, x_val))
+        lo = lo.emit(ir_mark_float_reg(val))
+        let ip = lo.fresh_reg()
+        lo = ip.0
+        let ireg = ip.1
+        lo = lo.emit(ir_load_imm(ireg, 0))
+        let pl_top = lo.fresh_label()
+        lo = pl_top.0
+        let l_top = pl_top.1
+        let pl_end = lo.fresh_label()
+        lo = pl_end.0
+        let l_end = pl_end.1
+        lo = lo.emit(ir_label(l_top))
+        let cmp_p = lo.fresh_reg()
+        lo = cmp_p.0
+        lo = lo.emit(ir_binop(cmp_p.1, ireg, BinaryOp::OpLt, n_reg))
+        lo = lo.emit(ir_branch_false(cmp_p.1, l_end))
+        var k: i64 = 0
+        while k < 32 {
+            if xs[k as usize] >= 0 {
+                let t1 = lo.fresh_reg()
+                lo = t1.0
+                lo = lo.emit(ir_binop_typed(t1.1, val, BinaryOp::OpMul, xs[k as usize], true, true))
+                lo = lo.emit(ir_mark_float_reg(t1.1))
+                let t2 = lo.fresh_reg()
+                lo = t2.0
+                lo = lo.emit(ir_binop_typed(t2.1, x_val, BinaryOp::OpMul, sk[k as usize], true, true))
+                lo = lo.emit(ir_mark_float_reg(t2.1))
+                let t3 = lo.fresh_reg()
+                lo = t3.0
+                lo = lo.emit(ir_binop_typed(t3.1, t1.1, BinaryOp::OpAdd, t2.1, true, true))
+                lo = lo.emit(ir_mark_float_reg(t3.1))
+                lo = lo.emit(ir_copy(sk[k as usize], t3.1))
+            }
+            k = k + 1
+        }
+        let v1 = lo.fresh_reg()
+        lo = v1.0
+        lo = lo.emit(ir_binop_typed(v1.1, val, BinaryOp::OpMul, x_val, true, true))
+        lo = lo.emit(ir_mark_float_reg(v1.1))
+        lo = lo.emit(ir_copy(val, v1.1))
+        let one_i = lo.emit_i64_const(1)
+        lo = one_i.0
+        let next_p = lo.fresh_reg()
+        lo = next_p.0
+        lo = lo.emit(ir_binop(next_p.1, ireg, BinaryOp::OpAdd, one_i.1))
+        lo = lo.emit(ir_copy(ireg, next_p.1))
+        lo = lo.emit(ir_jump(l_top))
+        lo = lo.emit(ir_label(l_end))
+        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+        k = 0
+        while k < 32 {
+            if xs[k as usize] >= 0 {
+                lo.fo_expr_sens[k as usize] = sk[k as usize]
+            }
+            k = k + 1
+        }
+        lo.fo_emit_var_from_sens()
+    }
+
+    // aff(x, n) = x when n < 1, else c * aff(x, n - 1) + x.
+    // m starts at 1 and each step is m = c*m + 1, so m = (c^(n+1)-1)/(c-1)
+    // when c != 1, and m = n+1 when c = 1. n < 1 leaves m = 1.
+    fn fo_emit_recur_affine_scale(self, n_reg: i64, xs: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let mp = lo.fresh_reg()
+        lo = mp.0
+        let mreg = mp.1
+        let one_f = lo.emit_f64_const(1.0)
+        lo = one_f.0
+        lo = lo.emit(ir_copy(mreg, one_f.1))
+        lo = lo.emit(ir_mark_float_reg(mreg))
+        let ip = lo.fresh_reg()
+        lo = ip.0
+        let ireg = ip.1
+        lo = lo.emit(ir_load_imm(ireg, 0))
+        let pl_top = lo.fresh_label()
+        lo = pl_top.0
+        let l_top = pl_top.1
+        let pl_end = lo.fresh_label()
+        lo = pl_end.0
+        let l_end = pl_end.1
+        lo = lo.emit(ir_label(l_top))
+        let cmp_p = lo.fresh_reg()
+        lo = cmp_p.0
+        lo = lo.emit(ir_binop(cmp_p.1, ireg, BinaryOp::OpLt, n_reg))
+        lo = lo.emit(ir_branch_false(cmp_p.1, l_end))
+        let cf = lo.emit_f64_const(FO_RECUR_COEF)
+        lo = cf.0
+        let t1 = lo.fresh_reg()
+        lo = t1.0
+        lo = lo.emit(ir_binop_typed(t1.1, cf.1, BinaryOp::OpMul, mreg, true, true))
+        lo = lo.emit(ir_mark_float_reg(t1.1))
+        let one_f2 = lo.emit_f64_const(1.0)
+        lo = one_f2.0
+        let t2 = lo.fresh_reg()
+        lo = t2.0
+        lo = lo.emit(ir_binop_typed(t2.1, t1.1, BinaryOp::OpAdd, one_f2.1, true, true))
+        lo = lo.emit(ir_mark_float_reg(t2.1))
+        lo = lo.emit(ir_copy(mreg, t2.1))
+        let one_i = lo.emit_i64_const(1)
+        lo = one_i.0
+        let next_p = lo.fresh_reg()
+        lo = next_p.0
+        lo = lo.emit(ir_binop(next_p.1, ireg, BinaryOp::OpAdd, one_i.1))
+        lo = lo.emit(ir_copy(ireg, next_p.1))
+        lo = lo.emit(ir_jump(l_top))
+        lo = lo.emit(ir_label(l_end))
+        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+        var k: i64 = 0
+        while k < 32 {
+            let s = xs[k as usize]
+            if s >= 0 {
+                let pr = lo.fresh_reg()
+                lo = pr.0
+                lo = lo.emit(ir_binop_typed(pr.1, s, BinaryOp::OpMul, mreg, true, true))
+                lo = lo.emit(ir_mark_float_reg(pr.1))
+                lo.fo_expr_sens[k as usize] = pr.1
+            }
+            k = k + 1
+        }
+        lo.fo_emit_var_from_sens()
+    }
+
+    // powbase(x, n) = b when n < 1, else x * powbase(x, n - 1), b a numeric
+    // literal. After n steps the value is b*x^n and the sensitivity is
+    // b*n*x^(n-1) times the sensitivity of x. n < 1 leaves sensitivity 0.
+    fn fo_emit_recur_powbase_scale(self, n_reg: i64, x_val: i64, xs: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        lo = lo.emit(ir_mark_float_reg(x_val))
+        var sk: [i64; 32] = [0 - 1; 32]
+        let zf = lo.emit_f64_const(0.0)
+        lo = zf.0
+        var k0: i64 = 0
+        while k0 < 32 {
+            let sp = lo.fresh_reg()
+            lo = sp.0
+            sk[k0 as usize] = sp.1
+            lo = lo.emit(ir_copy(sp.1, zf.1))
+            lo = lo.emit(ir_mark_float_reg(sp.1))
+            k0 = k0 + 1
+        }
+        let vp = lo.fresh_reg()
+        lo = vp.0
+        let val = vp.1
+        let base_c = lo.emit_f64_const(FO_RECUR_BASE)
+        lo = base_c.0
+        lo = lo.emit(ir_copy(val, base_c.1))
+        lo = lo.emit(ir_mark_float_reg(val))
+        let ip = lo.fresh_reg()
+        lo = ip.0
+        let ireg = ip.1
+        lo = lo.emit(ir_load_imm(ireg, 0))
+        let pl_top = lo.fresh_label()
+        lo = pl_top.0
+        let l_top = pl_top.1
+        let pl_end = lo.fresh_label()
+        lo = pl_end.0
+        let l_end = pl_end.1
+        lo = lo.emit(ir_label(l_top))
+        let cmp_p = lo.fresh_reg()
+        lo = cmp_p.0
+        lo = lo.emit(ir_binop(cmp_p.1, ireg, BinaryOp::OpLt, n_reg))
+        lo = lo.emit(ir_branch_false(cmp_p.1, l_end))
+        var k: i64 = 0
+        while k < 32 {
+            if xs[k as usize] >= 0 {
+                let t1 = lo.fresh_reg()
+                lo = t1.0
+                lo = lo.emit(ir_binop_typed(t1.1, val, BinaryOp::OpMul, xs[k as usize], true, true))
+                lo = lo.emit(ir_mark_float_reg(t1.1))
+                let t2 = lo.fresh_reg()
+                lo = t2.0
+                lo = lo.emit(ir_binop_typed(t2.1, x_val, BinaryOp::OpMul, sk[k as usize], true, true))
+                lo = lo.emit(ir_mark_float_reg(t2.1))
+                let t3 = lo.fresh_reg()
+                lo = t3.0
+                lo = lo.emit(ir_binop_typed(t3.1, t1.1, BinaryOp::OpAdd, t2.1, true, true))
+                lo = lo.emit(ir_mark_float_reg(t3.1))
+                lo = lo.emit(ir_copy(sk[k as usize], t3.1))
+            }
+            k = k + 1
+        }
+        let v1 = lo.fresh_reg()
+        lo = v1.0
+        lo = lo.emit(ir_binop_typed(v1.1, val, BinaryOp::OpMul, x_val, true, true))
+        lo = lo.emit(ir_mark_float_reg(v1.1))
+        lo = lo.emit(ir_copy(val, v1.1))
+        let one_i = lo.emit_i64_const(1)
+        lo = one_i.0
+        let next_p = lo.fresh_reg()
+        lo = next_p.0
+        lo = lo.emit(ir_binop(next_p.1, ireg, BinaryOp::OpAdd, one_i.1))
+        lo = lo.emit(ir_copy(ireg, next_p.1))
+        lo = lo.emit(ir_jump(l_top))
+        lo = lo.emit(ir_label(l_end))
+        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+        k = 0
+        while k < 32 {
+            if xs[k as usize] >= 0 {
+                lo.fo_expr_sens[k as usize] = sk[k as usize]
+            }
+            k = k + 1
+        }
+        lo.fo_emit_var_from_sens()
+    }
+
+    // affy(x, y, n) = x when n < 1, else c * affy(x, y, n - 1) + y.
+    // sx starts at 1 and sy at 0. Each step is sy = c*sy + 1, sx = c*sx.
+    // After n steps sx = c^n and sy = (c^n - 1)/(c - 1) when c != 1, else n.
+    fn fo_emit_recur_affy_scale(self, n_reg: i64, xs: [i64; 32], ys: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let sxp = lo.fresh_reg()
+        lo = sxp.0
+        let sx = sxp.1
+        let one_f = lo.emit_f64_const(1.0)
+        lo = one_f.0
+        lo = lo.emit(ir_copy(sx, one_f.1))
+        lo = lo.emit(ir_mark_float_reg(sx))
+        let syp = lo.fresh_reg()
+        lo = syp.0
+        let sy = syp.1
+        let zero_f = lo.emit_f64_const(0.0)
+        lo = zero_f.0
+        lo = lo.emit(ir_copy(sy, zero_f.1))
+        lo = lo.emit(ir_mark_float_reg(sy))
+        let ip = lo.fresh_reg()
+        lo = ip.0
+        let ireg = ip.1
+        lo = lo.emit(ir_load_imm(ireg, 0))
+        let pl_top = lo.fresh_label()
+        lo = pl_top.0
+        let l_top = pl_top.1
+        let pl_end = lo.fresh_label()
+        lo = pl_end.0
+        let l_end = pl_end.1
+        lo = lo.emit(ir_label(l_top))
+        let cmp_p = lo.fresh_reg()
+        lo = cmp_p.0
+        lo = lo.emit(ir_binop(cmp_p.1, ireg, BinaryOp::OpLt, n_reg))
+        lo = lo.emit(ir_branch_false(cmp_p.1, l_end))
+        let cf = lo.emit_f64_const(FO_RECUR_COEF)
+        lo = cf.0
+        let sy1 = lo.fresh_reg()
+        lo = sy1.0
+        lo = lo.emit(ir_binop_typed(sy1.1, cf.1, BinaryOp::OpMul, sy, true, true))
+        lo = lo.emit(ir_mark_float_reg(sy1.1))
+        let one_f2 = lo.emit_f64_const(1.0)
+        lo = one_f2.0
+        let sy2 = lo.fresh_reg()
+        lo = sy2.0
+        lo = lo.emit(ir_binop_typed(sy2.1, sy1.1, BinaryOp::OpAdd, one_f2.1, true, true))
+        lo = lo.emit(ir_mark_float_reg(sy2.1))
+        let sx1 = lo.fresh_reg()
+        lo = sx1.0
+        lo = lo.emit(ir_binop_typed(sx1.1, cf.1, BinaryOp::OpMul, sx, true, true))
+        lo = lo.emit(ir_mark_float_reg(sx1.1))
+        lo = lo.emit(ir_copy(sy, sy2.1))
+        lo = lo.emit(ir_copy(sx, sx1.1))
+        let one_i = lo.emit_i64_const(1)
+        lo = one_i.0
+        let next_p = lo.fresh_reg()
+        lo = next_p.0
+        lo = lo.emit(ir_binop(next_p.1, ireg, BinaryOp::OpAdd, one_i.1))
+        lo = lo.emit(ir_copy(ireg, next_p.1))
+        lo = lo.emit(ir_jump(l_top))
+        lo = lo.emit(ir_label(l_end))
+        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+        var k: i64 = 0
+        while k < 32 {
+            let sxs = xs[k as usize]
+            let sys = ys[k as usize]
+            if sxs >= 0 && sys >= 0 {
+                let px = lo.fresh_reg()
+                lo = px.0
+                lo = lo.emit(ir_binop_typed(px.1, sx, BinaryOp::OpMul, sxs, true, true))
+                lo = lo.emit(ir_mark_float_reg(px.1))
+                let py = lo.fresh_reg()
+                lo = py.0
+                lo = lo.emit(ir_binop_typed(py.1, sy, BinaryOp::OpMul, sys, true, true))
+                lo = lo.emit(ir_mark_float_reg(py.1))
+                let sp = lo.fresh_reg()
+                lo = sp.0
+                lo = lo.emit(ir_binop_typed(sp.1, px.1, BinaryOp::OpAdd, py.1, true, true))
+                lo = lo.emit(ir_mark_float_reg(sp.1))
+                lo.fo_expr_sens[k as usize] = sp.1
+            } else if sxs >= 0 {
+                let px2 = lo.fresh_reg()
+                lo = px2.0
+                lo = lo.emit(ir_binop_typed(px2.1, sx, BinaryOp::OpMul, sxs, true, true))
+                lo = lo.emit(ir_mark_float_reg(px2.1))
+                lo.fo_expr_sens[k as usize] = px2.1
+            } else if sys >= 0 {
+                let py2 = lo.fresh_reg()
+                lo = py2.0
+                lo = lo.emit(ir_binop_typed(py2.1, sy, BinaryOp::OpMul, sys, true, true))
+                lo = lo.emit(ir_mark_float_reg(py2.1))
+                lo.fo_expr_sens[k as usize] = py2.1
+            }
+            k = k + 1
+        }
+        lo.fo_emit_var_from_sens()
+    }
+
+    // ch(x, y, n) = x when n < 1, else y * ch(x, y, n - 1) + x.
+    // Sensitivity update uses the running value: s = val*sy + y*s + sx,
+    // then val = y*val + x.
+    fn fo_emit_recur_chcoef_scale(self, n_reg: i64, x_val: i64, y_val: i64, xs: [i64; 32], ys: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        lo = lo.emit(ir_mark_float_reg(x_val))
+        lo = lo.emit(ir_mark_float_reg(y_val))
+        var sk: [i64; 32] = [0 - 1; 32]
+        let zf = lo.emit_f64_const(0.0)
+        lo = zf.0
+        var k0: i64 = 0
+        while k0 < 32 {
+            let sp = lo.fresh_reg()
+            lo = sp.0
+            sk[k0 as usize] = sp.1
+            if xs[k0 as usize] >= 0 {
+                lo = lo.emit(ir_copy(sp.1, xs[k0 as usize]))
+            } else {
+                lo = lo.emit(ir_copy(sp.1, zf.1))
+            }
+            lo = lo.emit(ir_mark_float_reg(sp.1))
+            k0 = k0 + 1
+        }
+        let vp = lo.fresh_reg()
+        lo = vp.0
+        let val = vp.1
+        lo = lo.emit(ir_copy(val, x_val))
+        lo = lo.emit(ir_mark_float_reg(val))
+        let ip = lo.fresh_reg()
+        lo = ip.0
+        let ireg = ip.1
+        lo = lo.emit(ir_load_imm(ireg, 0))
+        let pl_top = lo.fresh_label()
+        lo = pl_top.0
+        let l_top = pl_top.1
+        let pl_end = lo.fresh_label()
+        lo = pl_end.0
+        let l_end = pl_end.1
+        lo = lo.emit(ir_label(l_top))
+        let cmp_p = lo.fresh_reg()
+        lo = cmp_p.0
+        lo = lo.emit(ir_binop(cmp_p.1, ireg, BinaryOp::OpLt, n_reg))
+        lo = lo.emit(ir_branch_false(cmp_p.1, l_end))
+        var k: i64 = 0
+        while k < 32 {
+            if xs[k as usize] >= 0 || ys[k as usize] >= 0 {
+                let accp = lo.fresh_reg()
+                lo = accp.0
+                lo = lo.emit(ir_copy(accp.1, zf.1))
+                lo = lo.emit(ir_mark_float_reg(accp.1))
+                if ys[k as usize] >= 0 {
+                    let ty = lo.fresh_reg()
+                    lo = ty.0
+                    lo = lo.emit(ir_binop_typed(ty.1, val, BinaryOp::OpMul, ys[k as usize], true, true))
+                    lo = lo.emit(ir_mark_float_reg(ty.1))
+                    lo = lo.emit(ir_copy(accp.1, ty.1))
+                }
+                let tz = lo.fresh_reg()
+                lo = tz.0
+                lo = lo.emit(ir_binop_typed(tz.1, y_val, BinaryOp::OpMul, sk[k as usize], true, true))
+                lo = lo.emit(ir_mark_float_reg(tz.1))
+                let acc2 = lo.fresh_reg()
+                lo = acc2.0
+                lo = lo.emit(ir_binop_typed(acc2.1, accp.1, BinaryOp::OpAdd, tz.1, true, true))
+                lo = lo.emit(ir_mark_float_reg(acc2.1))
+                if xs[k as usize] >= 0 {
+                    let acc3 = lo.fresh_reg()
+                    lo = acc3.0
+                    lo = lo.emit(ir_binop_typed(acc3.1, acc2.1, BinaryOp::OpAdd, xs[k as usize], true, true))
+                    lo = lo.emit(ir_mark_float_reg(acc3.1))
+                    lo = lo.emit(ir_copy(sk[k as usize], acc3.1))
+                } else {
+                    lo = lo.emit(ir_copy(sk[k as usize], acc2.1))
+                }
+            }
+            k = k + 1
+        }
+        let vy = lo.fresh_reg()
+        lo = vy.0
+        lo = lo.emit(ir_binop_typed(vy.1, y_val, BinaryOp::OpMul, val, true, true))
+        lo = lo.emit(ir_mark_float_reg(vy.1))
+        let v1 = lo.fresh_reg()
+        lo = v1.0
+        lo = lo.emit(ir_binop_typed(v1.1, vy.1, BinaryOp::OpAdd, x_val, true, true))
+        lo = lo.emit(ir_mark_float_reg(v1.1))
+        lo = lo.emit(ir_copy(val, v1.1))
+        let one_i = lo.emit_i64_const(1)
+        lo = one_i.0
+        let next_p = lo.fresh_reg()
+        lo = next_p.0
+        lo = lo.emit(ir_binop(next_p.1, ireg, BinaryOp::OpAdd, one_i.1))
+        lo = lo.emit(ir_copy(ireg, next_p.1))
+        lo = lo.emit(ir_jump(l_top))
+        lo = lo.emit(ir_label(l_end))
+        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+        k = 0
+        while k < 32 {
+            if xs[k as usize] >= 0 || ys[k as usize] >= 0 {
+                lo.fo_expr_sens[k as usize] = sk[k as usize]
+            }
+            k = k + 1
+        }
+        lo.fo_emit_var_from_sens()
+    }
+
     fn fo_inline_call_variance(self, callee: Name, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let no_path: [Name; 8] = [ir_empty_name(); 8]
         self.fo_inline_call_variance_ex(callee, args, ir_empty_name(), false, no_path, 0)
@@ -17477,7 +19578,7 @@ impl Lowerer {
         // inside it: one loop header with a large body is not a small helper.
         // lex_source_to_globals crossed IR_MAX_INSTRS when those bodies were
         // pasted in. Small helpers stay inline.
-        let nstmt = fo_nested_stmt_count(&fd.body.stmts, 0)
+        let nstmt = fo_nested_stmt_count(&fd.body.stmts, 0, npath > 0)
         if nstmt > 24 { return (lo, 0 - 1) }
         // An f64 return answers a plain call; a struct return answers a field path.
         match fd.return_type {
@@ -17651,6 +19752,108 @@ impl Lowerer {
                 }
                 None => break
             }
+        }
+        let rec_idx = fo_recur_linear_indexes(&fd)
+        if rec_idx.0 >= 0 && isf[rec_idx.0 as usize] == 1 {
+            var xs: [i64; 32] = [0 - 1; 32]
+            var rk: i64 = 0
+            while rk < 32 {
+                xs[rk as usize] = sens[(rec_idx.0 * 32 + rk) as usize]
+                rk = rk + 1
+            }
+            return lo.fo_emit_recur_count_scale(vals[rec_idx.1 as usize], xs)
+        }
+        let scale_idx = fo_recur_scale_indexes(&fd)
+        if scale_idx.0 >= 0 && isf[scale_idx.0 as usize] == 1 {
+            var xs2: [i64; 32] = [0 - 1; 32]
+            var sk: i64 = 0
+            while sk < 32 {
+                xs2[sk as usize] = sens[(scale_idx.0 * 32 + sk) as usize]
+                sk = sk + 1
+            }
+            return lo.fo_emit_recur_pow2_scale(vals[scale_idx.1 as usize], xs2)
+        }
+        let mix_idx = fo_recur_mix_indexes(&fd, false)
+        if mix_idx.0 >= 0 && mix_idx.1 >= 0 && isf[mix_idx.0 as usize] == 1 && isf[mix_idx.1 as usize] == 1 {
+            let mix_n = 3 - mix_idx.0 - mix_idx.1
+            var mxs: [i64; 32] = [0 - 1; 32]
+            var mys: [i64; 32] = [0 - 1; 32]
+            var mk: i64 = 0
+            while mk < 32 {
+                mxs[mk as usize] = sens[(mix_idx.0 * 32 + mk) as usize]
+                mys[mk as usize] = sens[(mix_idx.1 * 32 + mk) as usize]
+                mk = mk + 1
+            }
+            return lo.fo_emit_recur_mix_scale(vals[mix_n as usize], mxs, mys)
+        }
+        let ymul_idx = fo_recur_mix_indexes(&fd, true)
+        if ymul_idx.0 >= 0 && ymul_idx.1 >= 0 && isf[ymul_idx.0 as usize] == 1 && isf[ymul_idx.1 as usize] == 1 {
+            let ymul_n = 3 - ymul_idx.0 - ymul_idx.1
+            var yxs: [i64; 32] = [0 - 1; 32]
+            var yys: [i64; 32] = [0 - 1; 32]
+            var yk: i64 = 0
+            while yk < 32 {
+                yxs[yk as usize] = sens[(ymul_idx.0 * 32 + yk) as usize]
+                yys[yk as usize] = sens[(ymul_idx.1 * 32 + yk) as usize]
+                yk = yk + 1
+            }
+            return lo.fo_emit_recur_ymul_scale(vals[ymul_n as usize], vals[ymul_idx.0 as usize], vals[ymul_idx.1 as usize], yxs, yys)
+        }
+        let xmul_idx = fo_recur_xmul_indexes(&fd)
+        if xmul_idx.0 >= 0 && isf[xmul_idx.0 as usize] == 1 {
+            var xxs: [i64; 32] = [0 - 1; 32]
+            var xk: i64 = 0
+            while xk < 32 {
+                xxs[xk as usize] = sens[(xmul_idx.0 * 32 + xk) as usize]
+                xk = xk + 1
+            }
+            return lo.fo_emit_recur_xmul_scale(vals[xmul_idx.1 as usize], vals[xmul_idx.0 as usize], xxs)
+        }
+        let aff_idx = fo_recur_affine_indexes(&fd)
+        if aff_idx.0 >= 0 && isf[aff_idx.0 as usize] == 1 {
+            var axs: [i64; 32] = [0 - 1; 32]
+            var ak: i64 = 0
+            while ak < 32 {
+                axs[ak as usize] = sens[(aff_idx.0 * 32 + ak) as usize]
+                ak = ak + 1
+            }
+            return lo.fo_emit_recur_affine_scale(vals[aff_idx.1 as usize], axs)
+        }
+        let pb_idx = fo_recur_powbase_indexes(&fd)
+        if pb_idx.0 >= 0 && isf[pb_idx.0 as usize] == 1 {
+            var pxs: [i64; 32] = [0 - 1; 32]
+            var pk: i64 = 0
+            while pk < 32 {
+                pxs[pk as usize] = sens[(pb_idx.0 * 32 + pk) as usize]
+                pk = pk + 1
+            }
+            return lo.fo_emit_recur_powbase_scale(vals[pb_idx.1 as usize], vals[pb_idx.0 as usize], pxs)
+        }
+        let affy_idx = fo_recur_step2_indexes(&fd, 0)
+        if affy_idx.0 >= 0 && affy_idx.1 >= 0 && isf[affy_idx.0 as usize] == 1 && isf[affy_idx.1 as usize] == 1 {
+            let affy_n = 3 - affy_idx.0 - affy_idx.1
+            var ayxs: [i64; 32] = [0 - 1; 32]
+            var ayys: [i64; 32] = [0 - 1; 32]
+            var ayk: i64 = 0
+            while ayk < 32 {
+                ayxs[ayk as usize] = sens[(affy_idx.0 * 32 + ayk) as usize]
+                ayys[ayk as usize] = sens[(affy_idx.1 * 32 + ayk) as usize]
+                ayk = ayk + 1
+            }
+            return lo.fo_emit_recur_affy_scale(vals[affy_n as usize], ayxs, ayys)
+        }
+        let ch_idx = fo_recur_step2_indexes(&fd, 1)
+        if ch_idx.0 >= 0 && ch_idx.1 >= 0 && isf[ch_idx.0 as usize] == 1 && isf[ch_idx.1 as usize] == 1 {
+            let ch_n = 3 - ch_idx.0 - ch_idx.1
+            var cxs: [i64; 32] = [0 - 1; 32]
+            var cys: [i64; 32] = [0 - 1; 32]
+            var ck: i64 = 0
+            while ck < 32 {
+                cxs[ck as usize] = sens[(ch_idx.0 * 32 + ck) as usize]
+                cys[ck as usize] = sens[(ch_idx.1 * 32 + ck) as usize]
+                ck = ck + 1
+            }
+            return lo.fo_emit_recur_chcoef_scale(vals[ch_n as usize], vals[ch_idx.0 as usize], vals[ch_idx.1 as usize], cxs, cys)
         }
         // Bind the parameters in a fresh scope; the FO bind rows are keyed by
         // name only, so they are saved and restored around the body.
@@ -18789,22 +20992,15 @@ impl Lowerer {
                 }
             }
             // Non-const cond (#1706): the variance follows the arm taken at RUN
-            // time. The rule this replaces returned the then-arm whenever it
-            // carried a sensitivity, whatever the condition evaluated to. A
-            // condition that is not safe to evaluate a second time (it calls
-            // something with effects) cannot be re-tested here, so its variance
-            // is unknown rather than a guessed arm.
-            var cond_safe = false
-            match (*e).left {
-                Some(cond_e) => { cond_safe = lower_expr_relower_safe_ref(&(*cond_e)) }
-                _ => {}
-            }
+            // time. The condition is lowered once (lower_opt_expr_ref) and the
+            // branch uses that register. A call in the condition is not a reason
+            // to drop the variance: it is not evaluated again to guess an arm.
             var has_else = false
             match (*e).else_expr {
                 Some(_) => { has_else = true }
                 _ => {}
             }
-            if cond_safe && has_else {
+            if has_else {
                 return self.lower_if_variance_runtime_ref(e)
             }
             return (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
@@ -20076,6 +22272,9 @@ impl Lowerer {
     fn index_base_elem_is_float_ref(self, base_opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprIndex {
+                    return self.expr_float_array_depth_ref(&(*base_expr)) == 1
+                }
                 if (*base_expr).kind == ExprKind::ExprIdent {
                     if self.lookup_local_array_elem_float((*base_expr).name) {
                         return true
@@ -23494,6 +25693,9 @@ impl Lowerer {
     // needed for tuple-literal slots like `(obj.mk_arr(), 0)` where the slot
     // itself is a single [f64; N] array, not a tuple.
     fn expr_result_is_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIndex {
+            return self.expr_float_array_depth_ref(e) == 1
+        }
         // Copilot review (PR #2516), round 11 finding 2: round 10's
         // ExprIf/ExprMatch/ExprBlock propagation below recurses into each
         // arm/block-tail through THIS function, but this function only ever
@@ -24797,6 +26999,87 @@ impl Lowerer {
         }
     }
 
+    fn expr_float_array_depth_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIdent {
+            var i = (*self.locals).count - 1
+            while i >= 0 {
+                if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], (*e).name) {
+                    return (*(*self.locals).array_elem_float).values[i as usize]
+                }
+                i = i - 1
+            }
+            return 0
+        }
+        if (*e).kind == ExprKind::ExprIndex || ((*e).kind == ExprKind::ExprUnary && ((*e).un_op == UnaryOp::OpDeref || (*e).un_op == UnaryOp::OpRef || (*e).un_op == UnaryOp::OpRefMut)) {
+            match (*e).left {
+                Some(base) => {
+                    let depth = self.expr_float_array_depth_ref(&(*base))
+                    if (*e).kind == ExprKind::ExprIndex {
+                        if depth > 0 { return depth - 1 }
+                        return 0
+                    }
+                    return depth
+                }
+                None => return 0,
+            }
+        }
+        if (*e).kind == ExprKind::ExprArrayLit {
+            if self.array_literal_elems_are_float_ref(e) { return 1 }
+            match (*e).left {
+                Some(repeated) => {
+                    let depth = self.expr_float_array_depth_ref(&(*repeated))
+                    if depth > 0 { return depth + 1 }
+                }
+                None => {
+                    match (*e).args {
+                        Some(items) => {
+                            let depth = self.expr_float_array_depth_ref(&(*items).head)
+                            if depth > 0 { return depth + 1 }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            return 0
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee) => {
+                    let name = self.expr_to_callee_name_ref(&(*callee))
+                    let id = lowerer_lookup_fn_id_by_name_ref(&self, name)
+                    if id >= 0 && id < self.module.fn_count {
+                        let code = ir_fn_get(&(*self.module), id as usize).returns_float
+                        if code >= 2 && code < 1024 { return code - 1 }
+                    }
+                }
+                None => {}
+            }
+        }
+        0
+    }
+
+    fn expr_fn_value_returns_float_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIdent {
+            if self.lookup_local_fn_ptr_ret_float((*e).name) { return true }
+            let id = lowerer_lookup_fn_id_by_name_ref(&self, (*e).name)
+            if id >= 0 && id < self.module.fn_count { return ir_fn_get(&(*self.module), id as usize).returns_float == 1 }
+        }
+        if (*e).kind == ExprKind::ExprClosure {
+            return lower_opt_type_is_f64(&(*e).closure_return)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee) => {
+                    let name = self.expr_to_callee_name_ref(&(*callee))
+                    let id = lowerer_lookup_fn_id_by_name_ref(&self, name)
+                    if id >= 0 && id < self.module.fn_count { return ir_fn_get(&(*self.module), id as usize).returns_float == -2 }
+                }
+                None => {}
+            }
+        }
+        false
+    }
+
     fn lower_let_stmt_type_metadata_ref(
         self,
         s: &Stmt,
@@ -24804,6 +27087,28 @@ impl Lowerer {
         rhs_array_elem_is_float: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        var fn_result_float = false
+        match s.ty {
+            Some(ty) => { fn_result_float = lower_type_expr_fn_returns_f64(&(*ty)) }
+            None => {}
+        }
+        match s.expr {
+            Some(rhs) => {
+                if lo.expr_fn_value_returns_float_ref(&(*rhs)) { fn_result_float = true }
+            }
+            None => {}
+        }
+        if fn_result_float { lowerer_mark_local_fn_ptr_ret_float_mut(&!lo, s.name) }
+        var float_array_depth = lower_opt_float_array_depth(&s.ty)
+        if float_array_depth == 0 {
+            match s.expr {
+                Some(rhs) => { float_array_depth = lo.expr_float_array_depth_ref(&(*rhs)) }
+                None => {}
+            }
+        }
+        if float_array_depth > 0 {
+            lo = lo.bind_local_float_array_depth(s.name, float_array_depth)
+        }
         // V0-E.5.7: `let r: &[f128; N] = &xs` — a reference to an f128 array (the
         // TypeArray form never reaches here: lower_let_stmt_f128_array_ref), and
         // `[f256; N]` / `&[f256; N]` annotations, whose elements must then fail
@@ -31354,7 +33659,7 @@ impl Lowerer {
                             let pair_s = self.fresh_reg()
                             var lo = pair_s.0
                             let src = pair_s.1
-                            lo = lo.emit(ir_load_imm(src, adjusted))
+                            lo = lo.emit(ir_load_bss_address(src, adjusted))
                             let pair_d = lo.fresh_reg()
                             lo = pair_d.0
                             let dst = pair_d.1
@@ -33168,7 +35473,7 @@ impl Lowerer {
                         // Multi-word, packed byte arrays (#1353), and any array kind
                         // including `[T; 1]` (#1350) must not take the scalar load path.
                         if lower_bss_slot_is_aggregate(gsize, hyper_kind) || lower_global_kind_is_array_base(global_elem_kind) {
-                            lo3 = lo2.emit(ir_load_imm(ref_reg, BSS_BASE_LINUX + bss_off))
+                            lo3 = lo2.emit(ir_load_bss_address(ref_reg, BSS_BASE_LINUX + bss_off))
                         } else {
                             lo3 = lo2.emit(ir_load_global(ref_reg, bss_off, e.name))
                         }
@@ -33547,6 +35852,7 @@ impl Lowerer {
         // rather than acquiring a new failure mode. Escaping captures need a real
         // environment -- the "captures are TBD (Phase 2)" case (#1542).
         var captures = empty_capture_list()
+        var heap_environment = false
         if saved_allow_direct_capture {
             captures = lo.scan_captures_opt(&e.closure_body, &e.closure_params, captures)
         } else {
@@ -33554,7 +35860,10 @@ impl Lowerer {
             // (`apply2(|x, y| x * y + bias, 5, 6)` gave 30, not 130). Refuse.
             var escaping = empty_capture_list()
             escaping = lo.scan_captures_opt(&e.closure_body, &e.closure_params, escaping)
-            if escaping.count > 0 {
+            if escaping.count > 0 && LOWER_NATIVE_CLOSURE_ENVS {
+                captures = escaping
+                heap_environment = true
+            } else if escaping.count > 0 {
                 print("error: a capturing closure is passed where Madaros cannot supply its captured values (a fn value, or a higher-order function that is not a single direct `f(args)` forward); the capture would read as 0 -- pass the captured value as a parameter or bind the closure and call it directly (fail-closed, #1542)\n")
                 // Hard error: report_fatal_lowering_error alone does not stop the
                 // build (the module is replaced and an ELF with a ud2 stub is
@@ -33570,12 +35879,30 @@ impl Lowerer {
                 return loe.emit_unit()
             }
         }
+        if captures.overflow {
+            print("error: closure capture capacity exceeded; refusing to discard captured values\n")
+            var loe = lo
+            if IR_LOWER_HARD_ERROR_REASON == 0 {
+                IR_LOWER_HARD_ERROR_REASON = 9
+                IR_LOWER_HARD_ERROR_NEEDED = 9
+                IR_LOWER_HARD_ERROR_LIMIT = 8
+                ir_copy_name_to_flat(&(*saved_func).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+            }
+            lowerer_mark_hard_error(&! loe)
+            return loe.emit_unit()
+        }
         if captures.count > 0 {
-            if !lo.allow_direct_capturing_closure_literal {
+            if !lo.allow_direct_capturing_closure_literal && !heap_environment {
                 print("error: native-v2 capturing closure literals are not yet supported as values; bind and call directly, use a named function, or use a noncapturing closure\n")
                 let loe = lo.report_fatal_lowering_error()
                 return loe.emit_unit()
             }
+        }
+        var capture_float: [bool; 8] = [false; 8]
+        var float_ci: i64 = 0
+        while float_ci < captures.count {
+            capture_float[float_ci as usize] = lo.lookup_local_scalar_kind(captures.names[float_ci as usize]) == 2
+            float_ci = float_ci + 1
         }
 
         // 3. Switch to the closure function context. current_func_loaded MUST be true so
@@ -33594,6 +35921,7 @@ impl Lowerer {
         // to a refused build on any Madaros built after the arena landing.
         if (*lo.current_func).region.slot < 0 { ir_function_alloc_region(&! (*lo.current_func)) }
         (*lo.current_func).name = closure_name
+        (*lo.current_func).returns_float = lower_opt_return_float_code(&e.closure_return)
         lo.current_func_loaded = true
         lo.locals = lowerer_box_empty_locals()
         lo.scope_depth = 0
@@ -33609,18 +35937,34 @@ impl Lowerer {
         // free `k` resolves to a param (not 0). The captured enclosing regs themselves are
         // injected at the call site; here we only allocate param regs + bind the names.
         var ci: i64 = 0
+        var environment_param: i64 = IR_INVALID_REG
+        if heap_environment {
+            let env_pair = lo.fresh_reg()
+            lo = env_pair.0
+            environment_param = env_pair.1
+            var env_func = lo.current_func
+            (*env_func).param_regs[0] = environment_param
+            (*env_func).param_count = 1
+            lo.current_func = env_func
+        }
         while ci < captures.count {
             let cap_pair = lo.fresh_reg()
             lo = cap_pair.0
             let cap_preg = cap_pair.1
             var cf_box_cap = lo.current_func
-            if (*cf_box_cap).param_count < IR_MAX_PARAMS {
+            if heap_environment {
+                lo = lo.emit(ir_field_get(cap_preg, environment_param, ci + 1, ir_empty_name()))
+            } else if (*cf_box_cap).param_count < IR_MAX_PARAMS {
                 let pcc = (*cf_box_cap).param_count
                 (*cf_box_cap).param_regs[pcc as usize] = cap_preg
                 (*cf_box_cap).param_count = pcc + 1
             }
             lo.current_func = cf_box_cap
             lo = lo.bind_local(captures.names[ci as usize], cap_preg, false)
+            if capture_float[ci as usize] {
+                lo = lo.emit(ir_mark_float_reg(cap_preg))
+                lo = lo.bind_local_scalar_kind(captures.names[ci as usize], 2)
+            }
             ci = ci + 1
         }
 
@@ -33688,7 +36032,7 @@ impl Lowerer {
         // 8b. For a capturing closure, record the captured ENCLOSING regs keyed by fn_id and
         // flag the pending closure so the let-binding marks its local. (Zero-capture closures
         // stay bare fn-refs — unchanged from #418.) Extract the Box to a local first.
-        if captures.count > 0 {
+        if captures.count > 0 && !heap_environment {
             lo = lo.record_closure_caps(closure_fn_id, captures)
             lo.pending_closure_fn_id = closure_fn_id
         }
@@ -33698,6 +36042,27 @@ impl Lowerer {
         lo = ref_pair.0
         let ref_reg = ref_pair.1
         lo = lo.emit(ir_load_fn_ref(ref_reg, closure_fn_id))
+        if heap_environment {
+            // Descriptor payload: code pointer, then immutable captured words.
+            // The odd pointer tag is disjoint from aligned instruction addresses.
+            let env_pair = lo.fresh_reg()
+            lo = env_pair.0
+            let env_reg = env_pair.1
+            lo = lo.emit(ir_alloc(env_reg, lo.aggregate_storage_bytes(captures.count + 1)))
+            lo = lo.emit(ir_field_set(env_reg, 0, ref_reg, ir_empty_name()))
+            var cap_i: i64 = 0
+            while cap_i < captures.count {
+                lo = lo.emit(ir_field_set(env_reg, cap_i + 1, captures.regs[cap_i as usize], ir_empty_name()))
+                cap_i = cap_i + 1
+            }
+            let tag_pair = lo.fresh_reg()
+            lo = tag_pair.0
+            lo = lo.emit(ir_load_imm(tag_pair.1, 1))
+            let tagged_pair = lo.fresh_reg()
+            lo = tagged_pair.0
+            lo = lo.emit(ir_binop(tagged_pair.1, env_reg, BinaryOp::OpBitOr, tag_pair.1))
+            return (lo, tagged_pair.1)
+        }
         (lo, ref_reg)
     }
 
@@ -34412,7 +36777,10 @@ pub fn lower_program_bodies_from_summary_with_epistemic_boxed_owned(
     epistemic: &IrEpistemicSection
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
     var lo = lowerer_new_from_program_summary_owned(summary, epistemic)
-    lowerer_lower_program_bodies_mut(&! lo, &prog.items)
+    // Own the small list handle before borrowing it. A borrow of the field
+    // through the Program reference must not become a borrow of its contents.
+    let body_items = (*prog).items
+    lowerer_lower_program_bodies_mut(&! lo, &body_items)
     var patch_stats = ir_empty_validated_patch_stats()
     if lower_ok_without_hard(lo.had_error) {
         var module_box = lo.module

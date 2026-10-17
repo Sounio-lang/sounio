@@ -26,7 +26,15 @@ def extract_fn(text: str, name: str) -> str:
 
 
 def main() -> int:
-    body = extract_fn(SRC.read_text(), "emit_read_file_a64")
+    text = SRC.read_text()
+    wrapper = extract_fn(text, "emit_read_file_a64")
+    body = extract_fn(text, "emit_read_file_ordinary_a64")
+    if "emit_read_file_ordinary_a64()" not in wrapper:
+        print("FAIL emit_read_file_a64 must dispatch to emit_read_file_ordinary_a64")
+        return 1
+    if "/proc/self/environ" not in wrapper:
+        print("FAIL emit_read_file_a64 must keep Darwin envp synthesis")
+        return 1
     required = [
         "bss_alloc_aligned(8)",
         "b.cc open_ok",
@@ -36,14 +44,14 @@ def main() -> int:
     ]
     missing = [item for item in required if item not in body]
     if missing:
-        print("FAIL emit_read_file_a64 missing carry/mmap guards:")
+        print("FAIL emit_read_file_ordinary_a64 missing carry/mmap guards:")
         for item in missing:
             print(f"  {item}")
         return 1
     if "with Mut, Panic, Div" not in body.split("{", 1)[0]:
-        print("FAIL emit_read_file_a64 must declare Div for bss_alloc_aligned")
+        print("FAIL emit_read_file_ordinary_a64 must declare Div for bss_alloc_aligned")
         return 1
-    print("PASS emit_read_file_a64 Darwin carry / mmap-fail guards present")
+    print("PASS emit_read_file_a64 Darwin envp + ordinary carry/mmap guards present")
     return 0
 
 
