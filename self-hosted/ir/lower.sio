@@ -3773,9 +3773,12 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                     let fn_id_ps = lowerer_find_or_add_fn_id_mut(lo, name)
                                     if fn_id_ps >= 0 {
                                         if (*fd).is_kernel {
+                                            // Do not stamp IR_STRATEGY_EXTERN (6). A kernel has a
+                                            // CPU lane-loop body; strategy 6 makes every call
+                                            // IrCallExtern, which native v2 cannot emit (rc=12).
                                             var mbox_k = (*lo).module
                                             var slot_k = ir_fn_get(&(*mbox_k), fn_id_ps as usize)
-                                            slot_k.compile_strategy = 6
+                                            if slot_k.compile_strategy == 6 { slot_k.compile_strategy = IR_STRATEGY_GPU_KERNEL }
                                             if slot_k.region.slot < 0 { ir_function_alloc_region(&! slot_k) }
                                             ir_fn_set(&! (*mbox_k), fn_id_ps as usize, slot_k)
                                             (*lo).module = mbox_k
@@ -5468,9 +5471,11 @@ fn lowerer_preseed_one_item_mut(
                     let fn_id_ps = lowerer_find_or_add_fn_id_mut(lo, name)
                     if fn_id_ps >= 0 {
                         if (*fd).is_kernel {
+                            // Strategy 6 is IR_STRATEGY_EXTERN. Stamping it here made
+                            // every kernel call IrCallExtern (native v2 rc=12).
                             { var mbox_k = (*lo).module
                             var slot_k = ir_fn_get(&(*mbox_k), fn_id_ps as usize)
-                            slot_k.compile_strategy = 6
+                            if slot_k.compile_strategy == 6 { slot_k.compile_strategy = IR_STRATEGY_GPU_KERNEL }
                             ir_fn_set(&! (*mbox_k), fn_id_ps as usize, slot_k)
                             (*lo).module = mbox_k }
                         }
@@ -5583,10 +5588,12 @@ fn lowerer_preseed_program_items_mut(
 }
 
 // Match the full item preseed's declaration authority. A public top-level
-// function is strategy7; a kernel is strategy6. Method visibility does not
-// create a top-level export (the existing full impl-method lane does not do so).
+// function is strategy7. A kernel is IR_STRATEGY_GPU_KERNEL (4), never 6:
+// 6 is IR_STRATEGY_EXTERN, and call lowering emits IrCallExtern for it.
+// Native v2 has no IrCallExtern arm, so every caller failed with rc=12.
+// Method visibility does not create a top-level export.
 fn ir_fast_summary_declared_strategy(inferred: i64, is_kernel: bool, is_exported: bool) -> i64 {
-    if is_kernel { 6 } else if is_exported { 7 } else { inferred }
+    if is_kernel { IR_STRATEGY_GPU_KERNEL } else if is_exported { 7 } else { inferred }
 }
 
 fn ir_fast_summary_record_export(module: &! IrModule, name: Name) with Mut, Panic, Div {
@@ -11331,6 +11338,70 @@ fn fo_inline_known(n: Name) -> bool with Mut, Panic, Div, Alloc {
     false
 }
 
+// #2966: an `if` is not a call. lower_expr_contains_call_ref returns true
+// for every non-whitelisted kind, so `let abs_dist = if d < 0.0 { 0.0 - d }
+// else { d }` was not re-lower-safe. The inline variance walk then skipped
+// the binding and the tail `1.0 - abs_dist / half_width` died at site 15349
+// (`orbit_boundary_epsilon`, inlined while lowering `orbit_is_contested`).
+// A pure tree (literals, idents, arithmetic, nested if/block, no call, no
+// return, no assign) is safe to evaluate twice. A call inside the if stays
+// unsafe: re-emitting it would run the call a second time, including a Mut
+// helper that fo_inline_known would otherwise admit.
+fn lower_opt_expr_pure_tree(opt: &Option<Box<Expr>>, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    match *opt {
+        Some(e) => lower_expr_pure_tree(&(*e), depth),
+        None => true,
+    }
+}
+
+fn lower_block_pure_tree(blk_opt: &Option<Box<Block>>, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 64 { return false }
+    match *blk_opt {
+        Some(blk) => {
+            var cur = &(*blk).stmts
+            while true {
+                match *cur {
+                    Some(list) => {
+                        let st = &(*list).head
+                        if st.kind == StmtKind::StmtAssign { return false }
+                        if !lower_opt_expr_pure_tree(&st.expr, depth + 1) { return false }
+                        cur = &(*list).tail
+                    }
+                    None => break
+                }
+            }
+            true
+        }
+        None => true,
+    }
+}
+
+fn lower_expr_pure_tree(e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 64 { return false }
+    let k = (*e).kind
+    if k == ExprKind::ExprIntLit || k == ExprKind::ExprFloatLit || k == ExprKind::ExprBoolTrue
+        || k == ExprKind::ExprBoolFalse || k == ExprKind::ExprStringLit || k == ExprKind::ExprCharLit
+        || k == ExprKind::ExprIdent || k == ExprKind::ExprPath {
+        return true
+    }
+    if k == ExprKind::ExprBinary || k == ExprKind::ExprIndex {
+        if !lower_opt_expr_pure_tree(&(*e).left, depth + 1) { return false }
+        return lower_opt_expr_pure_tree(&(*e).right, depth + 1)
+    }
+    if k == ExprKind::ExprUnary || k == ExprKind::ExprCast || k == ExprKind::ExprFieldAccess {
+        return lower_opt_expr_pure_tree(&(*e).left, depth + 1)
+    }
+    if k == ExprKind::ExprIf {
+        if !lower_opt_expr_pure_tree(&(*e).left, depth + 1) { return false }
+        if !lower_block_pure_tree(&(*e).block, depth + 1) { return false }
+        return lower_opt_expr_pure_tree(&(*e).else_expr, depth + 1)
+    }
+    if k == ExprKind::ExprBlock {
+        return lower_block_pure_tree(&(*e).block, depth + 1)
+    }
+    false
+}
+
 // Like !lower_expr_contains_call_ref, but a call to a pure math builtin with
 // re-lower-safe arguments is still safe to evaluate twice.
 fn fo_closure_note(local: Name, e: &Expr) with Mut, Panic, Div, Alloc {
@@ -11385,6 +11456,9 @@ fn lower_expr_relower_safe_ref(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
     }
     if (*e).kind == ExprKind::ExprUnary || (*e).kind == ExprKind::ExprCast || (*e).kind == ExprKind::ExprFieldAccess {
         return lower_opt_expr_relower_safe(&(*e).left)
+    }
+    if (*e).kind == ExprKind::ExprIf || (*e).kind == ExprKind::ExprBlock {
+        return lower_expr_pure_tree(e, 0)
     }
     !lower_expr_contains_call_ref(e)
 }
@@ -20943,25 +21017,38 @@ impl Lowerer {
                 // inline). Scoped like lower_block_ref.
                 lo.scope_depth = lo.scope_depth + 1
                 let saved_tail_locals = (*lo.locals).count
+                // #2966: a let whose RHS cannot be evaluated twice is not bound.
+                // Continuing into a later expression looks the name up and
+                // reports site 15349. Unknown variance is -1, not a hard error.
+                var skip_later_expr = false
                 while true {
                     match *current {
                         Some(list) => {
                             let stmt_ref = &(*list).head
                             // Only a let that is safe to evaluate twice: the value
                             // path has already run this arm once.
-                            if stmt_ref.kind == StmtKind::StmtLet && lower_opt_expr_relower_safe(&stmt_ref.expr) {
-                                let lp = lo.lower_let_stmt_ref(stmt_ref, false)
-                                lo = lp.0
+                            if stmt_ref.kind == StmtKind::StmtLet {
+                                if lower_opt_expr_relower_safe(&stmt_ref.expr) {
+                                    let lp = lo.lower_let_stmt_ref(stmt_ref, false)
+                                    lo = lp.0
+                                } else {
+                                    skip_later_expr = true
+                                }
                             }
                             if stmt_ref.kind == StmtKind::StmtExpr {
-                                match stmt_ref.expr {
-                                    Some(te) => {
-                                        let p = lo.lower_expr_variance_ref(&(*te))
-                                        lo = p.0
-                                        last_v = p.1
-                                        found = true
+                                if skip_later_expr {
+                                    found = false
+                                    last_v = 0 - 1
+                                } else {
+                                    match stmt_ref.expr {
+                                        Some(te) => {
+                                            let p = lo.lower_expr_variance_ref(&(*te))
+                                            lo = p.0
+                                            last_v = p.1
+                                            found = true
+                                        }
+                                        _ => {}
                                     }
-                                    _ => {}
                                 }
                             }
                             current = &(*list).tail
@@ -24191,7 +24278,9 @@ impl Lowerer {
                                     if fn_id_ps >= 0 {
                                         var fn_slot_ps = ir_fn_get(&(*lo.module), fn_id_ps as usize)
                                         if (*fd).is_kernel {
-                                            fn_slot_ps.compile_strategy = 6
+                                            // Not 6: that is IR_STRATEGY_EXTERN, and the call
+                                            // site would emit IrCallExtern (native v2 rc=12).
+                                            fn_slot_ps.compile_strategy = IR_STRATEGY_GPU_KERNEL
                                         } else if visibility_to_bool(head.visibility) {
                                             fn_slot_ps.compile_strategy = 7
                                             let exp_count = (*lo.module).export_count
@@ -27620,6 +27709,19 @@ impl Lowerer {
                     if value_type.len > 0 && !ir_name_is_box(value_type) {
                         lo = lo.bind_local_struct_type(s.name, value_type, false)
                     }
+                } else if (*expr_box).kind == ExprKind::ExprIndex {
+                    // `let n = scene.nodes[i]`. The index itself is typed
+                    // (expr_receiver_struct_type_ref answers VizNode), but the
+                    // binding was not, so `n.layout.x` fell through to the
+                    // first struct that happened to have a field named `x`.
+                    // Measured in viz_scene_hit_test: the copy reported x=20
+                    // where the scene's layout.x was 10, and the hit test
+                    // missed. Direct `scene.nodes[i].layout.x` in the same
+                    // function was already correct.
+                    let elem_ty = lo.expr_receiver_struct_type_ref(&(*expr_box))
+                    if elem_ty.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), elem_ty) >= 0 {
+                        lo = lo.bind_local_struct_type(s.name, elem_ty, false)
+                    }
                 } else if (*expr_box).kind == ExprKind::ExprIdent {
                     // `let b = nx`: propagate the source variable's struct type (e.g. a Box
                     // bound from `Some(nx)`) so `*b` / field access on b resolve correctly.
@@ -28020,6 +28122,14 @@ impl Lowerer {
                                 }
                                 lo = pair_base.0
                                 let base_reg = pair_base.1
+                                if raw_mut_deref {
+                                    let inline_n = lo.raw_payload_field_array_len(&(*target_expr).left, (*target_expr).name)
+                                    if inline_n > 0 {
+                                        let packed = lo.raw_payload_field_copy_is_byte(&(*target_expr).left, (*target_expr).name)
+                                        lo = lo.emit_handle_to_raw_inline_array(base_reg, &(*target_expr).left, (*target_expr).name, rhs, inline_n, packed)
+                                        return (lo, rhs)
+                                    }
+                                }
                                 var set_instr = ir_field_set(base_reg, field_word, rhs, (*target_expr).name)
                                 if raw_mut_deref {
                                     // Payload address, not a handle slot. See expr_is_raw_mut_deref_ref.
@@ -31654,6 +31764,22 @@ impl Lowerer {
     }
 
     fn lower_call_expr_named_ref(self, e: &Expr, callee_name: Name) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // gpu_thread_id_x() is the lane counter, not a function. Registering it
+        // first left an empty stub (ud2 / NATIVE_REFUSAL missing_lowered_body).
+        // Outside a kernel there is no counter: read 0, do not call the stub.
+        if name_eq(callee_name, make_name("gpu_thread_id_x")) {
+            let pair_tid = self.fresh_reg()
+            var lo_tid = pair_tid.0
+            let dst_tid = pair_tid.1
+            if LOWER_KERNEL_TID_REG >= 0 {
+                lo_tid = lo_tid.emit(ir_copy(dst_tid, LOWER_KERNEL_TID_REG))
+                return (lo_tid, dst_tid)
+            }
+            print("warning: gpu_thread_id_x() outside a kernel lane loop reads 0")
+            print(" -- inline it into the `kernel fn` body; a helper cannot see the lane counter (#1504)\n")
+            lo_tid = lo_tid.emit(ir_load_imm(dst_tid, 0))
+            return (lo_tid, dst_tid)
+        }
         var lo1 = self
         let fn_id = lowerer_find_or_add_fn_id_mut(&! lo1, callee_name)
         if lo1.ir_name_is_knowledge_kaxi_publish(callee_name) {
@@ -31702,32 +31828,13 @@ impl Lowerer {
         let pair_d = lo2.fresh_reg()
         let lo3 = pair_d.0
         let dst = pair_d.1
-        // gpu_thread_id_x() inside a kernel lane loop is the loop counter, not a
-        // call. resolve.sio:1059 allowlists the 12 GPU intrinsics as implicit
-        // builtins that are never bound, so the emitted call names nothing and
-        // leaves `dst` unwritten — which reads as 0 and is why every lane looked
-        // like lane 0. Outside a kernel LOWER_KERNEL_TID_REG is -1 and this is
-        // skipped, preserving the previous behaviour for the other 11 intrinsics.
-        if name_eq(callee_name, make_name("gpu_thread_id_x")) {
-            if LOWER_KERNEL_TID_REG >= 0 {
-                let lo_tid = lo3.emit(ir_copy(dst, LOWER_KERNEL_TID_REG))
-                return (lo_tid, dst)
-            }
-            // Reached outside a kernel lane loop — typically a helper function
-            // that reads gpu_thread_id_x() and is called from a kernel. The lane
-            // counter is a vreg local to the kernel frame, so it cannot be seen
-            // from here and the read still degrades to 0.
-            //
-            // This is the residue of #1504 and it is announced rather than left
-            // silent: a wrong answer nobody is told about is the failure mode
-            // that let the original defect survive for weeks. lean_single does
-            // not get this right either — it skips the lane loop entirely for
-            // such a kernel (measured: 1 lane instead of 4).
-            print("warning: gpu_thread_id_x() outside a kernel lane loop reads 0")
-            print(" — inline it into the `kernel fn` body; a helper cannot see the lane counter (#1504)\n")
-        }
         let callee_strat_ext: i64 = if fn_id >= 0 && fn_id < (*lo3.module).fn_count { ir_fn_get(&(*lo3.module), fn_id as usize).compile_strategy } else { 0 }
-        if callee_strat_ext == 6 {
+        let callee_body_ic: i64 = if fn_id >= 0 && fn_id < (*lo3.module).fn_count { ir_fn_get(&(*lo3.module), fn_id as usize).instr_count } else { 0 }
+        // Strategy 6 is IR_STRATEGY_EXTERN, but it is also the chaotic-effect
+        // id and was stamped on kernels. IrCallExtern has no native-v2 arm
+        // (rc=12). A callee that already has a body is a direct call. A true
+        // extern still has instr_count 0.
+        if callee_strat_ext == 6 && callee_body_ic <= 0 {
             let lo_ext = lo3.emit(ir_call_extern(dst, callee_name, args, argc))
             return (lo_ext, dst)
         }
@@ -32980,6 +33087,180 @@ impl Lowerer {
         (lo, pair_sum.1)
     }
 
+    // Element count of an inline `[T; N]` field on a *mut payload. 0 means the
+    // field is a scalar (or unknown) and the one-word field_get/field_set path
+    // is correct. fixed_array_len on the layout entry is not trustworthy — a
+    // call inside the StructFieldEntry literal is dropped — so the side table
+    // raw_payload_word_offset already trusts wins.
+    fn raw_payload_field_array_len(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base_expr) => {
+                let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
+                if type_name.len <= 0 { return 0 }
+                var si: i64 = 0
+                while si < (*self.struct_layouts).count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                        let fc = (*self.struct_layouts).entries[si as usize].field_count
+                        var fi: i64 = 0
+                        while fi < fc && fi < 128 {
+                            let field = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
+                            if ir_name_eq(ir_name_at(field.name_id), field_name) {
+                                var n = field.fixed_array_len
+                                if field.word_scalar_array_len > n { n = field.word_scalar_array_len }
+                                let noted = lower_raw_arr_len_for(type_name, field.index)
+                                if noted > n { n = noted }
+                                return n
+                            }
+                            fi = fi + 1
+                        }
+                        return 0
+                    }
+                    si = si + 1
+                }
+                0
+            }
+            None => 0,
+        }
+    }
+
+    fn raw_payload_field_copy_is_byte(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        if self.raw_payload_field_array_len(base_opt, field_name) <= 0 { return false }
+        if self.raw_payload_field_is_byte(base_opt, field_name) { return true }
+        match *base_opt {
+            Some(base_expr) => {
+                let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
+                if type_name.len <= 0 { return false }
+                var si: i64 = 0
+                while si < (*self.struct_layouts).count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                        let fc = (*self.struct_layouts).entries[si as usize].field_count
+                        var fi: i64 = 0
+                        while fi < fc && fi < 128 {
+                            let field = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
+                            if ir_name_eq(ir_name_at(field.name_id), field_name) {
+                                return lower_raw_arr_is_packed_byte(type_name, field.index)
+                            }
+                            fi = fi + 1
+                        }
+                        return false
+                    }
+                    si = si + 1
+                }
+                false
+            }
+            None => false,
+        }
+    }
+
+    // `var bufs = (*p).bytes` on an inline `[T; N]` must not load word 0 of the
+    // payload and treat it as a GC handle. heap_alloc zeroes that word, so the
+    // following `&! bufs` index store resolves handle 0 and writes address 0x20.
+    // Copy the payload into a real array handle (one word per element, matching
+    // a local `[T; N]`). Packed bytes are widened on the way out.
+    fn emit_raw_inline_array_to_handle(self, ptr_reg: i64, base_opt: &Option<Box<Expr>>, field_name: Name, elem_count: i64, packed_byte: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let word_off = self.raw_payload_word_offset(base_opt, field_name, 0)
+        let addr_base = if packed_byte { word_off * 8 } else { word_off }
+        let raw_label = if packed_byte { 3 } else { 2 }
+        let pair_dst = self.fresh_reg()
+        var lo = pair_dst.0
+        let dst_reg = pair_dst.1
+        lo = lo.emit(ir_alloc_array(dst_reg, lo.aggregate_storage_bytes(elem_count), elem_count))
+        if elem_count <= 0 {
+            return (lo, dst_reg)
+        }
+        let pair_idx = lo.emit_i64_const(0)
+        lo = pair_idx.0
+        let idx_reg = pair_idx.1
+        let pair_limit = lo.emit_i64_const(elem_count)
+        lo = pair_limit.0
+        let limit_reg = pair_limit.1
+        let pair_one = lo.emit_i64_const(1)
+        lo = pair_one.0
+        let one_reg = pair_one.1
+        let pair_off = lo.emit_i64_const(addr_base)
+        lo = pair_off.0
+        let off_reg = pair_off.1
+        let pair_top = lo.fresh_label()
+        lo = pair_top.0
+        let top_label = pair_top.1
+        let pair_end = lo.fresh_label()
+        lo = pair_end.0
+        let end_label = pair_end.1
+        lo = lo.emit(ir_label(top_label))
+        let pair_cond = lo.fresh_reg()
+        lo = pair_cond.0
+        lo = lo.emit(ir_binop(pair_cond.1, idx_reg, BinaryOp::OpLt, limit_reg))
+        lo = lo.emit(ir_branch_false(pair_cond.1, end_label))
+        let pair_raw_idx = lo.fresh_reg()
+        lo = pair_raw_idx.0
+        lo = lo.emit(ir_binop(pair_raw_idx.1, idx_reg, BinaryOp::OpAdd, off_reg))
+        let pair_elem = lo.fresh_reg()
+        lo = pair_elem.0
+        var load_instr = ir_index_get(pair_elem.1, ptr_reg, pair_raw_idx.1)
+        load_instr.label_id = raw_label
+        lo = lo.emit(load_instr)
+        lo = lo.emit(ir_index_set(dst_reg, idx_reg, pair_elem.1))
+        let pair_next = lo.fresh_reg()
+        lo = pair_next.0
+        lo = lo.emit(ir_binop(pair_next.1, idx_reg, BinaryOp::OpAdd, one_reg))
+        lo = lo.emit(ir_copy(idx_reg, pair_next.1))
+        lo = lo.emit(ir_jump(top_label))
+        lo = lo.emit(ir_label(end_label))
+        (lo, dst_reg)
+    }
+
+    // Inverse of emit_raw_inline_array_to_handle: `(*p).bytes = bufs` writes the
+    // handle's elements back into the inline payload. A scalar field_set would
+    // plant the handle in word 0 and leave the rest untouched.
+    fn emit_handle_to_raw_inline_array(self, ptr_reg: i64, base_opt: &Option<Box<Expr>>, field_name: Name, src_reg: i64, elem_count: i64, packed_byte: bool) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let word_off = self.raw_payload_word_offset(base_opt, field_name, 0)
+        let addr_base = if packed_byte { word_off * 8 } else { word_off }
+        let raw_label = if packed_byte { 3 } else { 2 }
+        var lo = self
+        if elem_count <= 0 {
+            return lo
+        }
+        let pair_idx = lo.emit_i64_const(0)
+        lo = pair_idx.0
+        let idx_reg = pair_idx.1
+        let pair_limit = lo.emit_i64_const(elem_count)
+        lo = pair_limit.0
+        let limit_reg = pair_limit.1
+        let pair_one = lo.emit_i64_const(1)
+        lo = pair_one.0
+        let one_reg = pair_one.1
+        let pair_off = lo.emit_i64_const(addr_base)
+        lo = pair_off.0
+        let off_reg = pair_off.1
+        let pair_top = lo.fresh_label()
+        lo = pair_top.0
+        let top_label = pair_top.1
+        let pair_end = lo.fresh_label()
+        lo = pair_end.0
+        let end_label = pair_end.1
+        lo = lo.emit(ir_label(top_label))
+        let pair_cond = lo.fresh_reg()
+        lo = pair_cond.0
+        lo = lo.emit(ir_binop(pair_cond.1, idx_reg, BinaryOp::OpLt, limit_reg))
+        lo = lo.emit(ir_branch_false(pair_cond.1, end_label))
+        let pair_elem = lo.fresh_reg()
+        lo = pair_elem.0
+        lo = lo.emit(ir_index_get(pair_elem.1, src_reg, idx_reg))
+        let pair_raw_idx = lo.fresh_reg()
+        lo = pair_raw_idx.0
+        lo = lo.emit(ir_binop(pair_raw_idx.1, idx_reg, BinaryOp::OpAdd, off_reg))
+        var store_instr = ir_index_set(ptr_reg, pair_raw_idx.1, pair_elem.1)
+        store_instr.label_id = raw_label
+        lo = lo.emit(store_instr)
+        let pair_next = lo.fresh_reg()
+        lo = pair_next.0
+        lo = lo.emit(ir_binop(pair_next.1, idx_reg, BinaryOp::OpAdd, one_reg))
+        lo = lo.emit(ir_copy(idx_reg, pair_next.1))
+        lo = lo.emit(ir_jump(top_label))
+        lo = lo.emit(ir_label(end_label))
+        lo
+    }
+
     // `(*raw).field[i]`: index the payload at field_offset + i. Do not load
     // word 0 and resolve it as a GC handle — heap_alloc leaves that word 0.
     fn prepare_raw_mut_field_index(self, field_expr: &Expr, elem_idx: i64) -> RawMutIndexAddr with Mut, Panic, Div, Alloc, IO {
@@ -33204,6 +33485,13 @@ impl Lowerer {
                 }
                 print("\n")
                 di = di + 1
+            }
+        }
+        if raw_mut_deref {
+            let inline_n = lo1.raw_payload_field_array_len(&e.left, e.name)
+            if inline_n > 0 {
+                let packed = lo1.raw_payload_field_copy_is_byte(&e.left, e.name)
+                return lo1.emit_raw_inline_array_to_handle(base, &e.left, e.name, inline_n, packed)
             }
         }
         let pair_d = lo1.fresh_reg()

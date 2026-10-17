@@ -578,19 +578,17 @@ pub fn viz_node_set_label(scene: &!VizScene, node_idx: i64, text: &[i8; 64], len
     var n = len
     if n < 0 { n = 0 }
     if n > 64 { n = 64 }
-    var node = scene.nodes[node_idx as usize]
-    node.label_len = n
+    scene.nodes[node_idx as usize].label_len = n
     var i: i64 = 0
     while i < 64 {
-        node.label[i as usize] = 0
+        scene.nodes[node_idx as usize].label[i as usize] = 0
         i = i + 1
     }
     i = 0
     while i < n {
-        node.label[i as usize] = text[i as usize]
+        scene.nodes[node_idx as usize].label[i as usize] = text[i as usize]
         i = i + 1
     }
-    scene.nodes[node_idx as usize] = node
 }
 
 pub fn viz_add_label(scene: &!VizScene, text: &[i8; 64], len: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {
@@ -673,7 +671,15 @@ fn viz_node_is_focusable_kind(node: VizNode) -> bool {
 
 fn viz_scene_is_focusable_node(scene: &VizScene, node_idx: i64) -> bool {
     if node_idx < 0 || node_idx >= scene.node_count { return false }
-    return viz_node_is_focusable_kind(scene.nodes[node_idx as usize])
+    let kind = scene.nodes[node_idx as usize].kind
+    let slot = scene.nodes[node_idx as usize].data_slot
+    if kind != VIZ_NODE_CONTROL { return false }
+    if slot == VIZ_CONTROL_BUTTON { return true }
+    if slot == VIZ_CONTROL_SLIDER { return true }
+    if slot == VIZ_CONTROL_TOGGLE { return true }
+    if slot == VIZ_CONTROL_TABS { return true }
+    if slot == VIZ_CONTROL_VIEWPORT { return true }
+    return false
 }
 
 fn viz_scene_focus_set(scene: &!VizScene, node_idx: i64) with Mut {
@@ -728,17 +734,17 @@ pub fn viz_scene_focus_prev(scene: &!VizScene) -> i64 with Mut {
 pub fn viz_scene_activate_focused(scene: &!VizScene) -> bool with Mut, Div {
     let idx = scene.focused_node
     if idx < 0 || idx >= scene.node_count { return false }
-    let node = scene.nodes[idx as usize]
-    if !viz_node_is_focusable_kind(node) { return false }
+    if !viz_scene_is_focusable_node(scene, idx) { return false }
     scene.selected_node = idx
     var i: i64 = 0
     while i < scene.node_count {
         scene.nodes[i as usize].selected = i == idx
         i = i + 1
     }
-    if node.data_slot == VIZ_CONTROL_TOGGLE {
+    let slot = scene.nodes[idx as usize].data_slot
+    if slot == VIZ_CONTROL_TOGGLE {
         viz_scene_toggle(scene, idx)
-    } else if node.data_slot == VIZ_CONTROL_TABS {
+    } else if slot == VIZ_CONTROL_TABS {
         viz_scene_step_tab_key(scene, idx, 1)
     }
     return true
@@ -773,15 +779,14 @@ fn viz_print_i64(n: i64) with IO, Mut, Div {
 }
 
 fn viz_dump_node(scene: &VizScene, idx: i64) with IO, Mut, Div {
-    let n = scene.nodes[idx as usize]
     print("node idx="); viz_print_i64(idx)
-    print(" id="); viz_print_i64(n.id)
-    print(" parent_id="); viz_print_i64(n.parent_id)
-    print(" tag="); viz_print_i64(n.tag)
-    print(" kind="); viz_print_i64(n.kind)
-    print(" slot="); viz_print_i64(n.data_slot)
-    print(" rect="); viz_print_i64(n.layout.x); print(","); viz_print_i64(n.layout.y)
-    print(","); viz_print_i64(n.layout.w); print(","); viz_print_i64(n.layout.h)
+    print(" id="); viz_print_i64(scene.nodes[idx as usize].id)
+    print(" parent_id="); viz_print_i64(scene.nodes[idx as usize].parent_id)
+    print(" tag="); viz_print_i64(scene.nodes[idx as usize].tag)
+    print(" kind="); viz_print_i64(scene.nodes[idx as usize].kind)
+    print(" slot="); viz_print_i64(scene.nodes[idx as usize].data_slot)
+    print(" rect="); viz_print_i64(scene.nodes[idx as usize].layout.x); print(","); viz_print_i64(scene.nodes[idx as usize].layout.y)
+    print(","); viz_print_i64(scene.nodes[idx as usize].layout.w); print(","); viz_print_i64(scene.nodes[idx as usize].layout.h)
     println("")
 }
 
@@ -821,9 +826,7 @@ pub fn viz_scene_apply_layout_range(scene: &!VizScene, first_idx: i64, count: i6
         var i: i64 = 0
         while i < n {
             let idx = first_idx + i
-            var node = scene.nodes[idx as usize]
-            node.layout = viz_layout_rect(layout.x + i * (cell_w + layout.gap), layout.y, cell_w, layout.h)
-            scene.nodes[idx as usize] = node
+            scene.nodes[idx as usize].layout = viz_layout_rect(layout.x + i * (cell_w + layout.gap), layout.y, cell_w, layout.h)
             i = i + 1
         }
     } else if layout.layout_kind == VIZ_LAYOUT_COLUMN {
@@ -832,9 +835,7 @@ pub fn viz_scene_apply_layout_range(scene: &!VizScene, first_idx: i64, count: i6
         var i: i64 = 0
         while i < n {
             let idx = first_idx + i
-            var node = scene.nodes[idx as usize]
-            node.layout = viz_layout_rect(layout.x, layout.y + i * (cell_h + layout.gap), layout.w, cell_h)
-            scene.nodes[idx as usize] = node
+            scene.nodes[idx as usize].layout = viz_layout_rect(layout.x, layout.y + i * (cell_h + layout.gap), layout.w, cell_h)
             i = i + 1
         }
     }
@@ -842,63 +843,66 @@ pub fn viz_scene_apply_layout_range(scene: &!VizScene, first_idx: i64, count: i6
 
 pub fn viz_scene_set_slider(scene: &!VizScene, node_idx: i64, value: f64) with Mut {
     if node_idx < 0 || node_idx >= scene.node_count { return }
-    var node = scene.nodes[node_idx as usize]
     var v = value
-    if v < node.min_value { v = node.min_value }
-    if v > node.max_value { v = node.max_value }
-    node.value = v
-    scene.nodes[node_idx as usize] = node
+    let min_v = scene.nodes[node_idx as usize].min_value
+    let max_v = scene.nodes[node_idx as usize].max_value
+    if v < min_v { v = min_v }
+    if v > max_v { v = max_v }
+    scene.nodes[node_idx as usize].value = v
 }
 
 pub fn viz_scene_set_time_from_slider(scene: &!VizScene, node_idx: i64, value: f64) with Mut {
     viz_scene_set_slider(scene, node_idx, value)
     if node_idx < 0 || node_idx >= scene.node_count { return }
-    let node = scene.nodes[node_idx as usize]
-    if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_SLIDER {
-        scene.time = node.value
+    let kind = scene.nodes[node_idx as usize].kind
+    let slot = scene.nodes[node_idx as usize].data_slot
+    if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_SLIDER {
+        scene.time = scene.nodes[node_idx as usize].value
     }
 }
 
 pub fn viz_scene_set_toggle(scene: &!VizScene, node_idx: i64, enabled: bool) with Mut {
     if node_idx < 0 || node_idx >= scene.node_count { return }
-    var node = scene.nodes[node_idx as usize]
-    if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TOGGLE {
-        node.value = if enabled { 1.0 } else { 0.0 }
-        node.selected = enabled
-        scene.nodes[node_idx as usize] = node
+    let kind = scene.nodes[node_idx as usize].kind
+    let slot = scene.nodes[node_idx as usize].data_slot
+    if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_TOGGLE {
+        scene.nodes[node_idx as usize].value = if enabled { 1.0 } else { 0.0 }
+        scene.nodes[node_idx as usize].selected = enabled
     }
 }
 
 pub fn viz_scene_toggle(scene: &!VizScene, node_idx: i64) with Mut {
     if node_idx < 0 || node_idx >= scene.node_count { return }
-    let node = scene.nodes[node_idx as usize]
-    if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TOGGLE {
-        viz_scene_set_toggle(scene, node_idx, node.value <= 0.0)
+    let kind = scene.nodes[node_idx as usize].kind
+    let slot = scene.nodes[node_idx as usize].data_slot
+    if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_TOGGLE {
+        viz_scene_set_toggle(scene, node_idx, scene.nodes[node_idx as usize].value <= 0.0)
     }
 }
 
 pub fn viz_scene_set_tab(scene: &!VizScene, node_idx: i64, tab_idx: i64) with Mut {
     if node_idx < 0 || node_idx >= scene.node_count { return }
-    var node = scene.nodes[node_idx as usize]
-    if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TABS {
+    let kind = scene.nodes[node_idx as usize].kind
+    let slot = scene.nodes[node_idx as usize].data_slot
+    if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_TABS {
         var idx = tab_idx
-        let min_i = node.min_value as i64
-        let max_i = node.max_value as i64
+        let min_i = scene.nodes[node_idx as usize].min_value as i64
+        let max_i = scene.nodes[node_idx as usize].max_value as i64
         if idx < min_i { idx = min_i }
         if idx > max_i { idx = max_i }
-        node.value = idx as f64
+        scene.nodes[node_idx as usize].value = idx as f64
         scene.active_tab = idx
-        scene.nodes[node_idx as usize] = node
     }
 }
 
-fn viz_scene_tab_from_pointer(node: &VizNode, px: i64) -> i64 with Mut, Div {
-    let min_i = node.min_value as i64
-    let max_i = node.max_value as i64
+fn viz_scene_tab_from_pointer(scene: &VizScene, node_idx: i64, px: i64) -> i64 with Mut, Div {
+    let min_i = scene.nodes[node_idx as usize].min_value as i64
+    let max_i = scene.nodes[node_idx as usize].max_value as i64
     var count = max_i - min_i + 1
     if count <= 0 { count = 1 }
-    let denom = if node.layout.w <= 0 { 1 } else { node.layout.w }
-    var rel = px - node.layout.x
+    let w = scene.nodes[node_idx as usize].layout.w
+    let denom = if w <= 0 { 1 } else { w }
+    var rel = px - scene.nodes[node_idx as usize].layout.x
     if rel < 0 { rel = 0 }
     if rel >= denom { rel = denom - 1 }
     let tab_w = if denom / count <= 0 { 1 } else { denom / count }
@@ -909,11 +913,12 @@ fn viz_scene_tab_from_pointer(node: &VizNode, px: i64) -> i64 with Mut, Div {
 
 pub fn viz_scene_activate_control(scene: &!VizScene, node_idx: i64, px: i64, py: i64) -> i64 with Mut, Div {
     if node_idx < 0 || node_idx >= scene.node_count { return node_idx }
-    let node = scene.nodes[node_idx as usize]
-    if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TOGGLE {
+    let kind = scene.nodes[node_idx as usize].kind
+    let slot = scene.nodes[node_idx as usize].data_slot
+    if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_TOGGLE {
         viz_scene_toggle(scene, node_idx)
-    } else if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TABS {
-        let tab = viz_scene_tab_from_pointer(&node, px)
+    } else if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_TABS {
+        let tab = viz_scene_tab_from_pointer(scene, node_idx, px)
         viz_scene_set_tab(scene, node_idx, tab)
     }
     node_idx
@@ -923,8 +928,15 @@ pub fn viz_scene_hit_test(scene: &VizScene, px: i64, py: i64) -> i64 with Mut {
     var found: i64 = 0 - 1
     var i: i64 = 0
     while i < scene.node_count {
-        let n = scene.nodes[i as usize]
-        if px >= n.layout.x && px < n.layout.x + n.layout.w && py >= n.layout.y && py < n.layout.y + n.layout.h {
+        // Do not copy the node. `let n = scene.nodes[i]` loses VizNode's
+        // layout in this module: the copy's `.layout.x` reads the real `.y`
+        // (measured: caller x=10, copy x=20). Indexing the scene directly
+        // resolves VizLayout and hits the right slot.
+        let x = scene.nodes[i as usize].layout.x
+        let y = scene.nodes[i as usize].layout.y
+        let w = scene.nodes[i as usize].layout.w
+        let h = scene.nodes[i as usize].layout.h
+        if px >= x && px < x + w && py >= y && py < y + h {
             found = i
         }
         i = i + 1
@@ -972,36 +984,35 @@ pub fn viz_scene_pointer_update(scene: &!VizScene, px: i64, py: i64) -> i64 with
         scene.selected_node = idx
     }
     if idx < 0 || idx >= scene.node_count { return idx }
-    var node = scene.nodes[idx as usize]
-    if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_SLIDER {
-        let denom = if node.layout.w <= 0 { 1 } else { node.layout.w }
-        var rel = px - node.layout.x
+    let kind = scene.nodes[idx as usize].kind
+    let slot = scene.nodes[idx as usize].data_slot
+    if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_SLIDER {
+        let w = scene.nodes[idx as usize].layout.w
+        let denom = if w <= 0 { 1 } else { w }
+        var rel = px - scene.nodes[idx as usize].layout.x
         if rel < 0 { rel = 0 }
         if rel > denom { rel = denom }
+        let min_v = scene.nodes[idx as usize].min_value
+        let max_v = scene.nodes[idx as usize].max_value
         let frac = (rel as f64) / (denom as f64)
-        let value = node.min_value + frac * (node.max_value - node.min_value)
+        let value = min_v + frac * (max_v - min_v)
         viz_scene_set_time_from_slider(scene, idx, value)
-        node = scene.nodes[idx as usize]
-    } else if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TABS {
-        let tab = viz_scene_tab_from_pointer(&node, px)
+    } else if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_TABS {
+        let tab = viz_scene_tab_from_pointer(scene, idx, px)
         viz_scene_set_tab(scene, idx, tab)
-        node = scene.nodes[idx as usize]
     }
-    scene.nodes[idx as usize] = node
     idx
 }
 
 fn viz_scene_step_slider_key(scene: &!VizScene, node_idx: i64, direction: i64) with Mut {
     if node_idx < 0 || node_idx >= scene.node_count { return }
-    let node = scene.nodes[node_idx as usize]
-    let step = (node.max_value - node.min_value) / 10.0
-    viz_scene_set_time_from_slider(scene, node_idx, node.value + step * (direction as f64))
+    let step = (scene.nodes[node_idx as usize].max_value - scene.nodes[node_idx as usize].min_value) / 10.0
+    viz_scene_set_time_from_slider(scene, node_idx, scene.nodes[node_idx as usize].value + step * (direction as f64))
 }
 
 fn viz_scene_step_tab_key(scene: &!VizScene, node_idx: i64, direction: i64) with Mut {
     if node_idx < 0 || node_idx >= scene.node_count { return }
-    let node = scene.nodes[node_idx as usize]
-    let tab = (node.value as i64) + direction
+    let tab = (scene.nodes[node_idx as usize].value as i64) + direction
     viz_scene_set_tab(scene, node_idx, tab)
 }
 
@@ -1019,8 +1030,9 @@ pub fn viz_scene_key_press(scene: &!VizScene, key: i64) -> bool with Mut {
     if idx < 0 || idx >= scene.node_count {
         return false
     }
-    let node = scene.nodes[idx as usize]
-    if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_SLIDER {
+    let kind = scene.nodes[idx as usize].kind
+    let slot = scene.nodes[idx as usize].data_slot
+    if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_SLIDER {
         if key == KEY_LEFT {
             viz_scene_step_slider_key(scene, idx, 0 - 1)
             return true
@@ -1029,7 +1041,7 @@ pub fn viz_scene_key_press(scene: &!VizScene, key: i64) -> bool with Mut {
             viz_scene_step_slider_key(scene, idx, 1)
             return true
         }
-    } else if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TABS {
+    } else if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_TABS {
         if key == KEY_LEFT {
             viz_scene_step_tab_key(scene, idx, 0 - 1)
             return true
@@ -1038,7 +1050,7 @@ pub fn viz_scene_key_press(scene: &!VizScene, key: i64) -> bool with Mut {
             viz_scene_step_tab_key(scene, idx, 1)
             return true
         }
-    } else if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TOGGLE {
+    } else if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_TOGGLE {
         if key == KEY_SPACE || key == KEY_RETURN {
             viz_scene_toggle(scene, idx)
             return true
