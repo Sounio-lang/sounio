@@ -91,6 +91,16 @@ predicate returned `true` for an English search result at
 The canonical-locale regression now rejects it. Synthetic search controls also
 exercise a Greek match ranked after twelve English hits and request invalidation.
 
+The first exact-head CI run (`39039652983`, head `2713690da65a`) passed
+the Website job but correctly failed Contracts Core at the selected-doc-snippet
+check: the first-program contract still hashed the replaced illustrative struct.
+The follow-up changes only that contract's hash to
+`b795fedfd7bd16ab2f7edbccbef9229c59a8bc4985b3af250337cf65151435f8`,
+the exact unchanged `examples/native/struct_basic.sio` bytes displayed on the
+page. Its `standalone` kind and required `positive` compiler verdict remain
+unchanged; no skip, contextual downgrade or gate bypass is introduced. The
+subsequent exact-head CI must still execute that positive compiler check.
+
 ### Interactive checks
 
 Browser testing of the built preview confirmed Greek search results, ArrowDown
@@ -151,6 +161,13 @@ review, not proof of correctness.
    - Input: `51a315725efbae579214bfa67e367515b7c6c5bd7c4e46b0779b944de9ac21fd`
    - xAI: `de599155c64da2089844449f2edd56d80ff744af3fa595db2d78b1a3b738c118`
    - Kimi: `555d885ab14095a52f8322e7b7e71fd0ac19cf9f2d6966a5eab18a8106f9c916`
+6. CI-discovered snippet-contract repair, `/tmp/llm-offload-ExCCly`: same two
+   models, both `stop`, no supported MAJOR/BLOCKER. Review verifies the
+   hash-only positive-contract change, not compilation. A separate local
+   byte-identity assertion confirms source, fence and contract agree.
+   - Input: `001420edc0c501d31bc6dbf731d5a1c34fead6937b715d5d190ae1ace6b9d0b2`
+   - xAI: `4c57f91841ab0f77e04a4df4595368acc31c326549e870d30ead1166c4adc5ed`
+   - Kimi: `e07249db9d6ef836d58c69002b82214b1a2c56bbaa1d32487b89795a1ee8c00c`
 
 ## Publication and remaining boundaries
 
