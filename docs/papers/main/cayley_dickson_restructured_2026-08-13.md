@@ -2,8 +2,8 @@
 topic_id: repo.docs.papers.main.cayley-dickson-restructured-2026-08-13
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.main.cayley-dickson-restructured-2026-08-13
 -->
 

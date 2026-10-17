@@ -1,0 +1,200 @@
+//@ run-pass
+//@ requires: lean_single
+//@ expect-stdout: GUM_FO_STRUCT_FIELDS_CHANNELS_2776_OK
+// #2776 part 2: first-order (GUM) variance on lean_single through struct
+// fields, struct-returning calls, struct parameters, methods, more than eight
+// measured inputs in one function, a loop accumulator over in-loop
+// measurements, a returned Knowledge value, the 10th/11th inputs through
+// calls, fields, struct parameters and methods, and a call nested in a later
+// call argument. Every expected value is the
+// analytic first-order GUM value, printed next to the result; they come from
+// tests/oracles/gum_fo_struct_fields_channels_2776.cpp (C++23).
+//
+// Before (lean_single seed of #2917, measured): field = nested = sum_fields =
+// call_field = param_field = param_ref = method = method10 = knowledge_ret = 0,
+// nested_arg = 0.45, cube10 = 0.2, diffsq10 = 0.0425, field10_cancel = 0.0025,
+// method10_minus_a = 0.0025, nested_arg10 = 0.0125 (the 10th and 11th inputs
+// had no first-order channel; a call nested in a later argument overwrote the
+// earlier argument's shadows), fn_value = 0.09 and closure_* = 0 or the last
+// argument's variance (a call through a pointer kept the last argument's
+// shadows; a closure literal wiped every earlier local's: closure_after_def =
+// 0). cancel10, call10_cancel, param10_cancel,
+// loop_acc and pooled were already right and stay as regressions.
+//
+// lean_single only: this file pins the lean_single engine. On Madaros the
+// param_field / method rows (by-value struct parameter, method on a struct
+// local) are the #1706 helper-inlining gap and loop_acc / pooled the #2827
+// accumulator gap; those rows are covered by the Madaros tests of those PRs.
+
+struct Inner {
+    cl0: f64
+}
+
+struct Pk {
+    cl0: f64
+    v0: f64
+}
+
+struct Outer {
+    inner: Inner
+    tag: i64
+}
+
+impl Pk {
+    fn prod(self: &Pk) -> f64 {
+        self.cl0 * self.v0
+    }
+}
+
+fn mk(x: f64, s: f64) -> Pk {
+    let y = x * s
+    Pk { cl0: y, v0: 1.0 }
+}
+
+fn twice(p: Pk) -> f64 {
+    2.0 * p.cl0
+}
+
+struct Pr {
+    a: f64
+    b: f64
+}
+
+impl Pr {
+    fn d(self: &Pr) -> f64 {
+        self.a - self.b
+    }
+}
+
+fn twice_ref(p: &Pk) -> f64 {
+    2.0 * p.cl0
+}
+
+fn twice_a(p: Pr) -> f64 {
+    2.0 * p.a
+}
+
+fn sq(x: f64) -> f64 {
+    x * x
+}
+
+fn dbl(x: f64) -> f64 {
+    2.0 * x
+}
+
+fn add2(x: f64, y: f64) -> f64 {
+    x + y
+}
+
+fn apply1(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64) -> f64 with Mut, Div, Panic {
+    f(x)
+}
+
+fn mk_k(y: f64, u: f64) -> Knowledge<f64> with Mut, Div, Panic, Alloc, Epistemic {
+    let k: Knowledge<f64> = measure(y, uncertainty: u)
+    k
+}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+fn close(got: f64, want: f64) -> bool {
+    abs_f(got - want) <= 1.0e-12 + 1.0e-9 * abs_f(want)
+}
+
+fn show(label: string, got: f64, want: f64) -> i64 with IO, Mut, Div {
+    print(label); print("="); print_f64(got); print(" analytic="); print_f64(want)
+    if close(got, want) {
+        print("\n")
+        return 0
+    }
+    print(" MISMATCH\n")
+    1
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic, Alloc, Epistemic {
+    var fails: i64 = 0
+    let kx: Knowledge<f64> = measure(5.0, uncertainty: 0.3)
+    let kv: Knowledge<f64> = measure(50.0, uncertainty: 2.0)
+    let ks: Knowledge<f64> = measure(2.0, uncertainty: 0.1)
+    let x = kx.value
+    let v = kv.value
+    let s = ks.value
+
+    let p = Pk { cl0: x, v0: v }
+    let o = Outer { inner: Inner { cl0: x }, tag: 1 }
+    fails = fails + show("field", variance_of(p.cl0), 0.09)
+    fails = fails + show("nested", variance_of(o.inner.cl0), 0.09)
+    fails = fails + show("sum_fields", variance_of(p.cl0 + p.v0), 4.09)
+    fails = fails + show("call_field", variance_of(mk(x, s).cl0), 0.61)
+    fails = fails + show("param_field", variance_of(twice(p)), 0.36)
+    fails = fails + show("param_ref", variance_of(twice_ref(&p)), 0.36)
+    fails = fails + show("method", variance_of(p.prod()), 325.0)
+    // A call nested in a later argument used to overwrite the earlier
+    // argument's shadows: 0.6625 (= 0.36 + 0.36 + ...) instead of 4.36.
+    fails = fails + show("nested_arg", variance_of(add2(v, dbl(x))), 4.36)
+    // Function values and closures (calls through a pointer).
+    let fdbl = dbl
+    fails = fails + show("fn_value", variance_of(fdbl(x)), 0.36)
+    fails = fails + show("fn_value_hof", variance_of(apply1(dbl, x)), 0.36)
+    let before_closure = 3.0 * x
+    let cmul = |y: f64, z: f64| y * z
+    fails = fails + show("closure_after_def", variance_of(before_closure), 0.81)
+    fails = fails + show("closure_params", variance_of(cmul(x, s)), 0.61)
+    fails = fails + show("closure_cancel", variance_of(cmul(x, s) - x * s), 0.0)
+    let cap = |y: f64| y * v
+    fails = fails + show("closure_capture", variance_of(cap(2.0)), 16.0)
+    fails = fails + show("closure_capture_cancel", variance_of(cap(2.0) - 2.0 * v), 0.0)
+
+    // Six more inputs, so `a` is the 10th measured value of this function and
+    // `b` the 11th: they have no first-order channel among the first eight.
+    let k4: Knowledge<f64> = measure(1.0, uncertainty: 0.01)
+    let k5: Knowledge<f64> = measure(1.0, uncertainty: 0.01)
+    let k6: Knowledge<f64> = measure(1.0, uncertainty: 0.01)
+    let k7: Knowledge<f64> = measure(1.0, uncertainty: 0.01)
+    let k8: Knowledge<f64> = measure(1.0, uncertainty: 0.01)
+    let k9: Knowledge<f64> = measure(1.0, uncertainty: 0.01)
+    let pad = k4.value + k5.value + k6.value + k7.value + k8.value + k9.value
+    let ka: Knowledge<f64> = measure(2.0, uncertainty: 0.05)
+    let kb: Knowledge<f64> = measure(3.0, uncertainty: 0.2)
+    let a = ka.value
+    let b = kb.value
+    fails = fails + show("cube10", variance_of(a * a * a), 0.36)
+    fails = fails + show("diffsq10", variance_of((a + b) * (a - b)), 1.48)
+    fails = fails + show("cancel10", variance_of((a + b) - a - b), 0.0)
+    // Channels 8..31 across calls, struct fields, struct parameters, methods.
+    let pr = Pr { a: a, b: b }
+    fails = fails + show("call10_cancel", variance_of(sq(a) - a * a), 0.0)
+    fails = fails + show("field10_cancel", variance_of(pr.a - a), 0.0)
+    fails = fails + show("method10", variance_of(pr.d()), 0.0425)
+    fails = fails + show("method10_minus_a", variance_of(pr.d() - a), 0.04)
+    fails = fails + show("param10_cancel", variance_of(twice_a(pr) - 2.0 * a), 0.0)
+    fails = fails + show("nested_arg10", variance_of(add2(b, dbl(a))), 0.05)
+
+    let u: [f64; 3] = [0.1, 0.2, 0.15]
+    var w: f64 = 0.0
+    var i: i64 = 0
+    while i < 3 { w = w + 1.0 / (u[i] * u[i]); i = i + 1 }
+    var acc: f64 = 0.0
+    i = 0
+    while i < 3 {
+        let ky: Knowledge<f64> = measure(1.0, uncertainty: u[i])
+        acc = acc + ky.value * (1.0 / (u[i] * u[i]))
+        i = i + 1
+    }
+    fails = fails + show("loop_acc", variance_of(acc), 169.44444444444444)
+    fails = fails + show("pooled", variance_of(acc / w), 0.0059016393442622951)
+
+    let kr = mk_k(0.25, 0.05)
+    fails = fails + show("knowledge_ret", variance_of(kr), 0.0025)
+
+    print_f64(pad); print("\n")
+    if fails == 0 {
+        print("GUM_FO_STRUCT_FIELDS_CHANNELS_2776_OK\n")
+        return 0
+    }
+    print("GUM_FO_STRUCT_FIELDS_CHANNELS_2776_FAIL\n")
+    1
+}
