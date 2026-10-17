@@ -191,9 +191,21 @@ var FO_INLINE_BUDGET: i64 = 96
 var FO_INLINE_COUNT: i64 = 0
 var FO_INLINE_TRUNCATED: i64 = 0
 // Loop bodies are real IR. Re-lowering one is only sound for an explicit
-// variance_of/sensitivity_of/hessian_of, whose caller is that query. Doing it
-// while lowering an ordinary let pastes a second loop into a live function.
+// uncertainty query (variance_of, sensitivity_of, hessian_of, and the
+// second-order consumers). Doing it while lowering an ordinary let pastes a
+// second loop into a live function. A straight-line helper is different: the
+// sensitivity has to be recorded on the let, or a later variance_of(local)
+// reads the seed and never the call.
 var FO_INLINE_ALLOW_LOOPS: i64 = 0
+// Set when an inlined let would emit a borrowing call into the caller's
+// frame. The value path and that call then share one spill slot: the index
+// lands where the pointer should be, and the next deref faults (si_addr 0x1).
+var FO_INLINE_FRAME_CLASH: i64 = 0
+// Cycle guard for fo_nested_stmt_count. A recursive helper is a few
+// statements plus a call to itself; walking that call to depth 32 counted it
+// as over the 24-statement budget and refused pw / even_mag / f.
+var FO_COUNT_STACK: [i64; 16] = [0; 16]
+var FO_COUNT_DEPTH: i64 = 0
 
 fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
     let names = lowerer_box_empty_local_name_slots()
@@ -9949,6 +9961,71 @@ fn fo_block_has_unsupported_ctl(blk_opt: &Option<Box<Block>>, depth: i64) -> boo
 
 // #1706: a helper registered for inline FO declares no IO/Mut/Alloc effect
 // (fo_inline_note), so calling it twice is as safe as a pure math builtin.
+// A borrow (`&x`, `&!x`, a method receiver) re-emitted while inlining is a
+// second store through the caller's spill slot. Pure f64 calls are not:
+// they either inline to arithmetic or call a function with its own frame.
+fn fo_expr_borrows_frame(e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 12 { return true }
+    let k = (*e).kind
+    if k == ExprKind::ExprUnary {
+        if (*e).un_op == UnaryOp::OpRef || (*e).un_op == UnaryOp::OpRefMut { return true }
+    }
+    if k == ExprKind::ExprMethodCall { return true }
+    match (*e).left {
+        Some(l) => { if fo_expr_borrows_frame(&(*l), depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).right {
+        Some(r) => { if fo_expr_borrows_frame(&(*r), depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).else_expr {
+        Some(ee) => { if fo_expr_borrows_frame(&(*ee), depth + 1) { return true } }
+        None => {}
+    }
+    if k == ExprKind::ExprIf || k == ExprKind::ExprBlock || k == ExprKind::ExprWhile
+        || k == ExprKind::ExprLoop || k == ExprKind::ExprForIn {
+        match (*e).block {
+            Some(b) => {
+                var sc = &(*b).stmts
+                while true {
+                    match *sc {
+                        Some(sl) => {
+                            match (*sl).head.expr {
+                                Some(se) => { if fo_expr_borrows_frame(&(*se), depth + 1) { return true } }
+                                None => {}
+                            }
+                            sc = &(*sl).tail
+                        }
+                        None => break
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    var args = &(*e).args
+    while true {
+        match *args {
+            Some(a) => {
+                if fo_expr_borrows_frame(&(*a).head, depth + 1) { return true }
+                args = &(*a).tail
+            }
+            None => break
+        }
+    }
+    false
+}
+
+fn fo_count_seeing(id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < FO_COUNT_DEPTH && i < 16 {
+        if FO_COUNT_STACK[i as usize] == id { return true }
+        i = i + 1
+    }
+    false
+}
+
 fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64, expand_calls: bool) -> i64 with Mut, Panic, Div, Alloc {
     if depth > 32 { return 100 }
     var n: i64 = 0
@@ -10022,17 +10099,22 @@ fn fo_nested_expr_stmts(e: &Expr, depth: i64, expand_calls: bool) -> i64 with Mu
                 Some(ce) => {
                     if (*ce).kind == ExprKind::ExprIdent {
                         let id = ir_intern_name((*ce).name)
-                        var cur = FO_INLINE_HEAD
-                        while true {
-                            match cur {
-                                Some(node) => {
-                                    if (*node).id == id {
-                                        n = n + fo_nested_stmt_count(&(*node).def.body.stmts, depth + 1, true)
-                                        break
+                        if !fo_count_seeing(id) && FO_COUNT_DEPTH < 16 {
+                            var cur = FO_INLINE_HEAD
+                            while true {
+                                match cur {
+                                    Some(node) => {
+                                        if (*node).id == id {
+                                            FO_COUNT_STACK[FO_COUNT_DEPTH as usize] = id
+                                            FO_COUNT_DEPTH = FO_COUNT_DEPTH + 1
+                                            n = n + fo_nested_stmt_count(&(*node).def.body.stmts, depth + 1, true)
+                                            FO_COUNT_DEPTH = FO_COUNT_DEPTH - 1
+                                            break
+                                        }
+                                        cur = (*node).next
                                     }
-                                    cur = (*node).next
+                                    None => break
                                 }
-                                None => break
                             }
                         }
                     }
@@ -17647,25 +17729,49 @@ impl Lowerer {
             }
         }
         if !found { return (lo, 0 - 1) }
-        // Ordinary expression lowering must not re-emit a helper. That paste
-        // is a second copy of the body in a live function. variance_of sets
-        // the flag around its query; that is the call the gum_fo tests measure.
-        if FO_INLINE_ALLOW_LOOPS == 0 { return (lo, 0 - 1) }
+        FO_INLINE_FRAME_CLASH = 0
+        // A non-self reference parameter is the caller's spill slot. Re-lowering
+        // the body emits amp_real(qs, idx) into that frame, and the index is
+        // what the value path later dereferences. self: &T stays: the method
+        // tests only read it, and the call is inlined rather than re-emitted.
+        var pc_alias = &fd.params
+        while true {
+            match *pc_alias {
+                Some(pl) => {
+                    if !(*pl).head.is_self && (lower_type_expr_is_ref_like(&(*pl).head.ty) || lower_type_expr_is_pointer_like(&(*pl).head.ty)) {
+                        return (lo, 0 - 1)
+                    }
+                    pc_alias = &(*pl).tail
+                }
+                None => break
+            }
+        }
         // A wide loop is the real loop, not a variance note. Pasting it into
         // the caller crossed IR_MAX_INSTRS (simulate_epistemic_dp14, 31334)
         // and ran a second copy beside the value path (SIGSEGV). The small
         // gum_fo loops stay: their bodies are a few assignments.
-        if fo_stmt_list_has_wide_loop(&fd.body.stmts, 0) { return (lo, 0 - 1) }
+        // The callee is already on the count stack, so a call back to itself
+        // is a cycle. Otherwise pw(x, n - 1) walks to depth 32 and the
+        // 24-statement budget refuses a three-line helper.
+        FO_COUNT_STACK[0] = id
+        FO_COUNT_DEPTH = 1
+        let wide = fo_stmt_list_has_wide_loop(&fd.body.stmts, 0)
+        FO_COUNT_DEPTH = 0
+        if wide { return (lo, 0 - 1) }
         // A loop pasted while lowering an ordinary expression runs beside the
         // value path and faults (test_nn_primitives_d3, si_addr 0x28).
-        // variance_of sets FO_INLINE_ALLOW_LOOPS around its own query.
+        // An explicit uncertainty query sets FO_INLINE_ALLOW_LOOPS.
         if FO_INLINE_ALLOW_LOOPS == 0 && fo_stmt_list_has_any_loop(&fd.body.stmts, 0) {
             return (lo, 0 - 1)
         }
         // A long body re-lowered at every field read blows the instruction
         // budget of the caller. Count nested helpers too, not only when the
-        // call is a field projection.
+        // call is a field projection. A call already on FO_COUNT_STACK is a
+        // cycle, not another 24 statements.
+        FO_COUNT_STACK[0] = id
+        FO_COUNT_DEPTH = 1
         let nstmt = fo_nested_stmt_count(&fd.body.stmts, 0, true)
+        FO_COUNT_DEPTH = 0
         if nstmt > 24 { return (lo, 0 - 1) }
         if lo.current_func_loaded && lo.current_func.instr_count > IR_MAX_INSTRS - 4096 {
             return (lo, 0 - 1)
@@ -17937,6 +18043,7 @@ impl Lowerer {
                         if is_closure_let {
                             let lp = lo.lower_let_stmt_ref(st, false)
                             lo = lp.0
+                            if FO_INLINE_FRAME_CLASH != 0 { ok = false }
                             last_let_name = st.name
                             last_let_expr = st.expr
                         } else if !lower_opt_expr_relower_safe(&st.expr) {
@@ -17944,15 +18051,28 @@ impl Lowerer {
                         } else {
                             let lp = lo.lower_let_stmt_ref(st, false)
                             lo = lp.0
+                            if FO_INLINE_FRAME_CLASH != 0 { ok = false }
                             last_let_name = st.name
                             last_let_expr = st.expr
                         }
                     } else if st.kind == StmtKind::StmtVar && !is_last {
-                        let vp = lo.lower_let_stmt_ref(st, true)
-                        lo = vp.0
+                        // A var/assign re-lowered into an ordinary caller is a
+                        // second executable copy. variance_of (and the other
+                        // queries) set the flag; a let-only helper does not need it.
+                        if FO_INLINE_ALLOW_LOOPS == 0 {
+                            ok = false
+                        } else {
+                            let vp = lo.lower_let_stmt_ref(st, true)
+                            lo = vp.0
+                            if FO_INLINE_FRAME_CLASH != 0 { ok = false }
+                        }
                     } else if st.kind == StmtKind::StmtAssign && !is_last {
-                        let ap = lo.lower_assign_stmt_ref(st)
-                        lo = ap.0
+                        if FO_INLINE_ALLOW_LOOPS == 0 {
+                            ok = false
+                        } else {
+                            let ap = lo.lower_assign_stmt_ref(st)
+                            lo = ap.0
+                        }
                     } else if st.kind == StmtKind::StmtExpr && !is_last {
                         var is_loop = false
                         match st.expr {
@@ -24169,6 +24289,22 @@ impl Lowerer {
     }
 
     fn lower_let_stmt_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Variance inline re-lowers this let into the function that is already
+        // live. A borrow in the RHS (`amp_prob(&qs, 1)`, `&!qs`) is a second
+        // store through that frame's spill slot: the index 1 replaces the
+        // pointer, and the value path dereferences it. Pure arithmetic does
+        // not take the address, so the gum_fo lets still re-lower.
+        if FO_INLINE_DEPTH > 0 {
+            match s.expr {
+                Some(rhs) => {
+                    if fo_expr_borrows_frame(&(*rhs), 0) {
+                        FO_INLINE_FRAME_CLASH = 1
+                        return (self, 0 - 1)
+                    }
+                }
+                None => {}
+            }
+        }
         if lower_opt_type_is_f128(&s.ty) {
             return self.lower_let_stmt_f128_ref(s, is_mut)
         }
@@ -28404,10 +28540,13 @@ impl Lowerer {
             Some(list) => {
                 match (*list).tail {
                     Some(rest) => {
+                        let saved_loops = FO_INLINE_ALLOW_LOOPS
+                        FO_INLINE_ALLOW_LOOPS = 1
                         let a = self.fo_sens_of_cov_arg(&(*list).head)
                         var lo = a.0
                         let sA = a.1
                         let b = lo.fo_sens_of_cov_arg(&(*rest).head)
+                        FO_INLINE_ALLOW_LOOPS = saved_loops
                         lo = b.0
                         let cp = lo.fo_emit_cov_from_sens(sA, b.1)
                         lo = cp.0
@@ -28571,12 +28710,15 @@ impl Lowerer {
     fn lower_correlate_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(l0) => {
+                let saved_loops = FO_INLINE_ALLOW_LOOPS
+                FO_INLINE_ALLOW_LOOPS = 1
                 let p0 = self.lower_expr_variance_ref(&(*l0).head)
                 var lo = p0.0
                 let ci = lo.fo_primary_channel()
                 match (*l0).tail {
                     Some(l1) => {
                         let p1 = lo.lower_expr_variance_ref(&(*l1).head)
+                        FO_INLINE_ALLOW_LOOPS = saved_loops
                         lo = p1.0
                         let cj = lo.fo_primary_channel()
                         // Both literal forms, matching the checker's
@@ -28629,6 +28771,7 @@ impl Lowerer {
                     }
                     _ => {}
                 }
+                FO_INLINE_ALLOW_LOOPS = saved_loops
                 lo.emit_f64_const(0.0)
             }
             _ => self.emit_f64_const(0.0),
@@ -28640,7 +28783,12 @@ impl Lowerer {
         match *args {
             Some(list) => {
                 // Walk first, so the Hessian and the sigmas exist to read.
+                // Same inline window as variance_of: a stored field whose
+                // hessian lives in a helper is otherwise a bare point.
+                let saved_loops = FO_INLINE_ALLOW_LOOPS
+                FO_INLINE_ALLOW_LOOPS = 1
                 let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                FO_INLINE_ALLOW_LOOPS = saved_loops
                 var lo = pair_v.0
                 let zp = lo.emit_f64_const(0.0)
                 lo = zp.0
