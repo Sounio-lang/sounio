@@ -17,6 +17,14 @@ Choose a recipe in the [Scientist workspace](https://www.souniolang.org/scientis
 
 An optional local connected agent can read the checkout and execute authorized checks where a compatible compiler and dependencies are available. A chat-only LLM cannot execute the workflow: its code, suggested commands and predicted output remain unexecuted until an actual connected environment returns evidence. This interface supplies prompts; it does not provide a current hosted runtime or execute research on the website.
 
+## Two stages, with scientist confirmation
+
+The first copy, download and preview actions prepare only your scientific brief and the closed `SOUNIO_INTAKE_V1` protocol. This stage includes no code, domain source links or language examples. Paste the request into your chosen AI, then paste its complete reply unchanged into the clarification box. You do not need to write JSON or code. Use the field hints and scientific sidebar to resolve missing information in your brief.
+
+Select **Validate clarification**. The local validator checks receipt syntax and correspondence with the current six scientific fields, workflow and language. Review the matching brief and reply, then explicitly check the scientist confirmation. Only then can you copy or download the second-stage implementation instructions, which include the full canonical source-bound context pack. Each implementation action validates the current reply again. Editing a scientific field, changing workflow or reply, or unchecking confirmation revokes acceptance; validate and confirm again. Replies above 60,000 characters are rejected.
+
+This gate does not establish scientific truth, LLM authorship, source attestation or actual tool use. `source_access: not_verified` and `execution: not_executed` describe evidence for this request, not everything a model may previously have read. Confirmation prepares instructions; it neither executes a study nor automatically approves a scientific model. Consequential scientific choices still require scientist review.
+
 ## Available research recipes
 
 The [catalog](../../website/src/data/scientistWorkflows.json) binds these recipes to existing sources at `106f7a988d5b007472d0eead724f58ac50f92200`. Every recipe has state `prompt-template-not-executed`. Its `starter_task` is an existing language-learning task, not a domain-validation ID. None of these domain programs is an example ID in the [LLM execution manifest](../llm-guide/example-manifest.json).
