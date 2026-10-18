@@ -29247,6 +29247,14 @@ impl Lowerer {
                                 }
                                 lo = pair_base.0
                                 let base_reg = pair_base.1
+                                if raw_mut_deref {
+                                    let inline_n = lo.raw_payload_field_array_len(&(*target_expr).left, (*target_expr).name)
+                                    if inline_n > 0 {
+                                        let packed = lo.raw_payload_field_copy_is_byte(&(*target_expr).left, (*target_expr).name)
+                                        lo = lo.emit_handle_to_raw_inline_array(base_reg, &(*target_expr).left, (*target_expr).name, rhs, inline_n, packed)
+                                        return (lo, rhs)
+                                    }
+                                }
                                 var set_instr = ir_field_set(base_reg, field_word, rhs, (*target_expr).name)
                                 if raw_mut_deref {
                                     // Payload address, not a handle slot. See expr_is_raw_mut_deref_ref.
@@ -34205,6 +34213,167 @@ impl Lowerer {
         }
     }
 
+    fn raw_payload_field_array_len(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base_expr) => {
+                let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
+                if type_name.len <= 0 { return 0 }
+                var si: i64 = 0
+                while si < (*self.struct_layouts).count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                        let fc = (*self.struct_layouts).entries[si as usize].field_count
+                        var fi: i64 = 0
+                        while fi < fc && fi < 128 {
+                            let field = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
+                            if ir_name_eq(ir_name_at(field.name_id), field_name) {
+                                var n = field.fixed_array_len
+                                if field.word_scalar_array_len > n { n = field.word_scalar_array_len }
+                                let noted = lower_raw_arr_len_for(type_name, field.index)
+                                if noted > n { n = noted }
+                                return n
+                            }
+                            fi = fi + 1
+                        }
+                        return 0
+                    }
+                    si = si + 1
+                }
+                0
+            }
+            None => 0,
+        }
+    }
+
+    fn raw_payload_field_copy_is_byte(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        if self.raw_payload_field_array_len(base_opt, field_name) <= 0 { return false }
+        if self.raw_payload_field_is_byte(base_opt, field_name) { return true }
+        match *base_opt {
+            Some(base_expr) => {
+                let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
+                if type_name.len <= 0 { return false }
+                var si: i64 = 0
+                while si < (*self.struct_layouts).count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                        let fc = (*self.struct_layouts).entries[si as usize].field_count
+                        var fi: i64 = 0
+                        while fi < fc && fi < 128 {
+                            let field = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
+                            if ir_name_eq(ir_name_at(field.name_id), field_name) {
+                                return lower_raw_arr_is_packed_byte(type_name, field.index)
+                            }
+                            fi = fi + 1
+                        }
+                        return false
+                    }
+                    si = si + 1
+                }
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn emit_raw_inline_array_to_handle(self, ptr_reg: i64, base_opt: &Option<Box<Expr>>, field_name: Name, elem_count: i64, packed_byte: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let word_off = self.raw_payload_word_offset(base_opt, field_name, 0)
+        let addr_base = if packed_byte { word_off * 8 } else { word_off }
+        let raw_label = if packed_byte { 3 } else { 2 }
+        let pair_dst = self.fresh_reg()
+        var lo = pair_dst.0
+        let dst_reg = pair_dst.1
+        lo = lo.emit(ir_alloc_array(dst_reg, lo.aggregate_storage_bytes(elem_count), elem_count))
+        if elem_count <= 0 {
+            return (lo, dst_reg)
+        }
+        let pair_idx = lo.emit_i64_const(0)
+        lo = pair_idx.0
+        let idx_reg = pair_idx.1
+        let pair_limit = lo.emit_i64_const(elem_count)
+        lo = pair_limit.0
+        let limit_reg = pair_limit.1
+        let pair_one = lo.emit_i64_const(1)
+        lo = pair_one.0
+        let one_reg = pair_one.1
+        let pair_off = lo.emit_i64_const(addr_base)
+        lo = pair_off.0
+        let off_reg = pair_off.1
+        let pair_top = lo.fresh_label()
+        lo = pair_top.0
+        let top_label = pair_top.1
+        let pair_end = lo.fresh_label()
+        lo = pair_end.0
+        let end_label = pair_end.1
+        lo = lo.emit(ir_label(top_label))
+        let pair_cond = lo.fresh_reg()
+        lo = pair_cond.0
+        lo = lo.emit(ir_binop(pair_cond.1, idx_reg, BinaryOp::OpLt, limit_reg))
+        lo = lo.emit(ir_branch_false(pair_cond.1, end_label))
+        let pair_raw_idx = lo.fresh_reg()
+        lo = pair_raw_idx.0
+        lo = lo.emit(ir_binop(pair_raw_idx.1, idx_reg, BinaryOp::OpAdd, off_reg))
+        let pair_elem = lo.fresh_reg()
+        lo = pair_elem.0
+        var load_instr = ir_index_get(pair_elem.1, ptr_reg, pair_raw_idx.1)
+        load_instr.label_id = raw_label
+        lo = lo.emit(load_instr)
+        lo = lo.emit(ir_index_set(dst_reg, idx_reg, pair_elem.1))
+        let pair_next = lo.fresh_reg()
+        lo = pair_next.0
+        lo = lo.emit(ir_binop(pair_next.1, idx_reg, BinaryOp::OpAdd, one_reg))
+        lo = lo.emit(ir_copy(idx_reg, pair_next.1))
+        lo = lo.emit(ir_jump(top_label))
+        lo = lo.emit(ir_label(end_label))
+        (lo, dst_reg)
+    }
+
+    fn emit_handle_to_raw_inline_array(self, ptr_reg: i64, base_opt: &Option<Box<Expr>>, field_name: Name, src_reg: i64, elem_count: i64, packed_byte: bool) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let word_off = self.raw_payload_word_offset(base_opt, field_name, 0)
+        let addr_base = if packed_byte { word_off * 8 } else { word_off }
+        let raw_label = if packed_byte { 3 } else { 2 }
+        var lo = self
+        if elem_count <= 0 {
+            return lo
+        }
+        let pair_idx = lo.emit_i64_const(0)
+        lo = pair_idx.0
+        let idx_reg = pair_idx.1
+        let pair_limit = lo.emit_i64_const(elem_count)
+        lo = pair_limit.0
+        let limit_reg = pair_limit.1
+        let pair_one = lo.emit_i64_const(1)
+        lo = pair_one.0
+        let one_reg = pair_one.1
+        let pair_off = lo.emit_i64_const(addr_base)
+        lo = pair_off.0
+        let off_reg = pair_off.1
+        let pair_top = lo.fresh_label()
+        lo = pair_top.0
+        let top_label = pair_top.1
+        let pair_end = lo.fresh_label()
+        lo = pair_end.0
+        let end_label = pair_end.1
+        lo = lo.emit(ir_label(top_label))
+        let pair_cond = lo.fresh_reg()
+        lo = pair_cond.0
+        lo = lo.emit(ir_binop(pair_cond.1, idx_reg, BinaryOp::OpLt, limit_reg))
+        lo = lo.emit(ir_branch_false(pair_cond.1, end_label))
+        let pair_elem = lo.fresh_reg()
+        lo = pair_elem.0
+        lo = lo.emit(ir_index_get(pair_elem.1, src_reg, idx_reg))
+        let pair_raw_idx = lo.fresh_reg()
+        lo = pair_raw_idx.0
+        lo = lo.emit(ir_binop(pair_raw_idx.1, idx_reg, BinaryOp::OpAdd, off_reg))
+        var store_instr = ir_index_set(ptr_reg, pair_raw_idx.1, pair_elem.1)
+        store_instr.label_id = raw_label
+        lo = lo.emit(store_instr)
+        let pair_next = lo.fresh_reg()
+        lo = pair_next.0
+        lo = lo.emit(ir_binop(pair_next.1, idx_reg, BinaryOp::OpAdd, one_reg))
+        lo = lo.emit(ir_copy(idx_reg, pair_next.1))
+        lo = lo.emit(ir_jump(top_label))
+        lo = lo.emit(ir_label(end_label))
+        lo
+    }
+
     fn emit_add_imm(self, reg: i64, imm: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if imm == 0 { return (self, reg) }
         let pair_imm = self.emit_i64_const(imm)
@@ -34270,6 +34439,13 @@ impl Lowerer {
         }
         let lo1_pre = pair_b.0
         let base_pre = pair_b.1
+        if raw_mut_deref {
+            let inline_n = lo1_pre.raw_payload_field_array_len(&e.left, e.name)
+            if inline_n > 0 {
+                let packed = lo1_pre.raw_payload_field_copy_is_byte(&e.left, e.name)
+                return lo1_pre.emit_raw_inline_array_to_handle(base_pre, &e.left, e.name, inline_n, packed)
+            }
+        }
         // AUTO-DEREF THROUGH A POINTER-TYPED FIELD.
         //
         // A Box deref is represented in this IR as IrFieldGet with field index 0 — see
