@@ -10017,6 +10017,84 @@ fn fo_expr_borrows_frame(e: &Expr, depth: i64) -> bool with Mut, Panic, Div, All
     false
 }
 
+// True when `name` is passed to a call. `p.cl0` is not. `amp_real(qs, idx)` is.
+fn fo_expr_passes_name(e: &Expr, name: Name, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 16 { return true }
+    let k = (*e).kind
+    if k == ExprKind::ExprCall || k == ExprKind::ExprMethodCall {
+        match (*e).left {
+            Some(recv) => {
+                if (*recv).kind == ExprKind::ExprIdent && ir_name_eq((*recv).name, name) { return true }
+                if fo_expr_passes_name(&(*recv), name, depth + 1) { return true }
+            }
+            None => {}
+        }
+        var args = &(*e).args
+        while true {
+            match *args {
+                Some(a) => {
+                    if (*a).head.kind == ExprKind::ExprIdent && ir_name_eq((*a).head.name, name) { return true }
+                    if fo_expr_passes_name(&(*a).head, name, depth + 1) { return true }
+                    args = &(*a).tail
+                }
+                None => break
+            }
+        }
+    }
+    match (*e).left {
+        Some(l) => { if fo_expr_passes_name(&(*l), name, depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).right {
+        Some(r) => { if fo_expr_passes_name(&(*r), name, depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).else_expr {
+        Some(ee) => { if fo_expr_passes_name(&(*ee), name, depth + 1) { return true } }
+        None => {}
+    }
+    if k == ExprKind::ExprIf || k == ExprKind::ExprBlock || k == ExprKind::ExprWhile
+        || k == ExprKind::ExprLoop || k == ExprKind::ExprForIn {
+        match (*e).block {
+            Some(b) => {
+                var sc = &(*b).stmts
+                while true {
+                    match *sc {
+                        Some(sl) => {
+                            match (*sl).head.expr {
+                                Some(se) => { if fo_expr_passes_name(&(*se), name, depth + 1) { return true } }
+                                None => {}
+                            }
+                            sc = &(*sl).tail
+                        }
+                        None => break
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    false
+}
+
+fn fo_stmt_list_passes_name(opt: &Option<Box<StmtList>>, name: Name, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 16 { return true }
+    var cur = opt
+    while true {
+        match *cur {
+            Some(sl) => {
+                match (*sl).head.expr {
+                    Some(ex) => { if fo_expr_passes_name(&(*ex), name, depth + 1) { return true } }
+                    None => {}
+                }
+                cur = &(*sl).tail
+            }
+            None => break
+        }
+    }
+    false
+}
+
 fn fo_count_seeing(id: i64) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < FO_COUNT_DEPTH && i < 16 {
@@ -17730,16 +17808,18 @@ impl Lowerer {
         }
         if !found { return (lo, 0 - 1) }
         FO_INLINE_FRAME_CLASH = 0
-        // A non-self reference parameter is the caller's spill slot. Re-lowering
-        // the body emits amp_real(qs, idx) into that frame, and the index is
-        // what the value path later dereferences. self: &T stays: the method
-        // tests only read it, and the call is inlined rather than re-emitted.
+        // `&Pk` that is only field-read binds to the caller's struct local, same
+        // as `twice(p)`. A reference passed on to another call (`amp_real(qs, idx)`)
+        // is re-emitted into this frame and the index lands in the spill slot.
+        // A reference that is not a struct cannot be bound by name, so taking its
+        // address would emit into the caller too.
         var pc_alias = &fd.params
         while true {
             match *pc_alias {
                 Some(pl) => {
                     if !(*pl).head.is_self && (lower_type_expr_is_ref_like(&(*pl).head.ty) || lower_type_expr_is_pointer_like(&(*pl).head.ty)) {
-                        return (lo, 0 - 1)
+                        if !fo_inline_param_is_struct(&(*pl).head.ty) { return (lo, 0 - 1) }
+                        if fo_stmt_list_passes_name(&fd.body.stmts, (*pl).head.name, 0) { return (lo, 0 - 1) }
                     }
                     pc_alias = &(*pl).tail
                 }
@@ -24288,16 +24368,73 @@ impl Lowerer {
         }
     }
 
+    // A call that passes a struct or ref local, re-emitted while inlining,
+    // writes through the caller's spill slot. `amp_real(qs, idx)` has no `&`
+    // in the AST: qs is already the reference parameter. `p.cl0` is not a call.
+    fn expr_reemits_frame_call(self, e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+        if depth > 12 { return true }
+        let k = (*e).kind
+        if k == ExprKind::ExprCall || k == ExprKind::ExprMethodCall {
+            var args = &(*e).args
+            while true {
+                match *args {
+                    Some(a) => {
+                        if (*a).head.kind == ExprKind::ExprIdent && self.lookup_local_is_ref((*a).head.name) {
+                            return true
+                        }
+                        if self.expr_reemits_frame_call(&(*a).head, depth + 1) { return true }
+                        args = &(*a).tail
+                    }
+                    None => break
+                }
+            }
+        }
+        match (*e).left {
+            Some(l) => { if self.expr_reemits_frame_call(&(*l), depth + 1) { return true } }
+            None => {}
+        }
+        match (*e).right {
+            Some(r) => { if self.expr_reemits_frame_call(&(*r), depth + 1) { return true } }
+            None => {}
+        }
+        match (*e).else_expr {
+            Some(ee) => { if self.expr_reemits_frame_call(&(*ee), depth + 1) { return true } }
+            None => {}
+        }
+        if k == ExprKind::ExprIf || k == ExprKind::ExprBlock || k == ExprKind::ExprWhile
+            || k == ExprKind::ExprLoop || k == ExprKind::ExprForIn {
+            match (*e).block {
+                Some(b) => {
+                    var sc = &(*b).stmts
+                    while true {
+                        match *sc {
+                            Some(sl) => {
+                                match (*sl).head.expr {
+                                    Some(se) => { if self.expr_reemits_frame_call(&(*se), depth + 1) { return true } }
+                                    None => {}
+                                }
+                                sc = &(*sl).tail
+                            }
+                            None => break
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        false
+    }
+
     fn lower_let_stmt_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         // Variance inline re-lowers this let into the function that is already
-        // live. A borrow in the RHS (`amp_prob(&qs, 1)`, `&!qs`) is a second
-        // store through that frame's spill slot: the index 1 replaces the
-        // pointer, and the value path dereferences it. Pure arithmetic does
-        // not take the address, so the gum_fo lets still re-lower.
+        // live. A borrow, or a call that passes a struct/ref local
+        // (`amp_real(qs, idx)`), stores through that frame's spill slot: the
+        // index replaces the pointer. A field read (`p.cl0`) does not, so
+        // twice_ref(&p) still re-lowers.
         if FO_INLINE_DEPTH > 0 {
             match s.expr {
                 Some(rhs) => {
-                    if fo_expr_borrows_frame(&(*rhs), 0) {
+                    if fo_expr_borrows_frame(&(*rhs), 0) || self.expr_reemits_frame_call(&(*rhs), 0) {
                         FO_INLINE_FRAME_CLASH = 1
                         return (self, 0 - 1)
                     }
