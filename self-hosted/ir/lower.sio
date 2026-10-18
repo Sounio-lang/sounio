@@ -219,6 +219,7 @@ var FO_STEP_OUT_S: [i64; 32] = [-1; 32]
 var FO_STEP_CARRY: i64 = 0
 var FO_STEP_H: [i64; 36] = [-1; 36]
 var FO_STEP_OUT_H: [i64; 36] = [-1; 36]
+var FO_STEP_ARGH: [i64; 576] = [-1; 576]
 
 fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
     let names = lowerer_box_empty_local_name_slots()
@@ -20408,7 +20409,12 @@ impl Lowerer {
             }
             k2 = 0
             while k2 < 36 {
-                FO_STEP_OUT_H[k2 as usize] = FO_STEP_ZERO
+                let hk = FO_STEP_ARGH[(pi * 36 + k2) as usize]
+                if hk >= 0 {
+                    FO_STEP_OUT_H[k2 as usize] = hk
+                } else {
+                    FO_STEP_OUT_H[k2 as usize] = FO_STEP_ZERO
+                }
                 k2 = k2 + 1
             }
             return lo
@@ -20522,7 +20528,7 @@ impl Lowerer {
     // The else-expression is differentiated in forward mode and the step is
     // repeated n times. A recursive call reads the loop-carried value and
     // sensitivity. A literal contributes 0. A parameter contributes its channel.
-    fn fo_emit_recur_expr_body(self, step: &Expr, n_reg: i64, vals: [i64; 16], sens: [i64; 512]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_expr_body(self, step: &Expr, n_reg: i64, vals: [i64; 16], sens: [i64; 512], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var i: i64 = 0
         while i < 16 {
@@ -20534,6 +20540,12 @@ impl Lowerer {
             FO_STEP_SENS[i as usize] = sens[i as usize]
             i = i + 1
         }
+        i = 0
+        while i < 576 {
+            FO_STEP_ARGH[i as usize] = hess[i as usize]
+            i = i + 1
+        }
+        FO_LOGN_ACTIVE = 0
         let zf = lo.emit_f64_const(0.0)
         lo = zf.0
         FO_STEP_ZERO = zf.1
@@ -20626,13 +20638,13 @@ impl Lowerer {
         lo.fo_emit_var_from_sens()
     }
 
-    fn fo_emit_recur_expr_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_expr_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match (*fd).body.stmts {
             Some(only) => {
                 match (*only).head.expr {
                     Some(body_e) => {
                         match (*body_e).else_expr {
-                            Some(ee) => { return self.fo_emit_recur_expr_body(&(*ee), n_reg, vals, sens) }
+                            Some(ee) => { return self.fo_emit_recur_expr_body(&(*ee), n_reg, vals, sens, hess) }
                             None => { return (self, 0 - 1) }
                         }
                     }
@@ -20643,7 +20655,7 @@ impl Lowerer {
         }
     }
 
-    fn fo_emit_recur_block_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], vars: [i64; 16], isf: [i64; 16]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_block_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], vars: [i64; 16], isf: [i64; 16], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         match (*fd).body.stmts {
             Some(only) => {
@@ -20652,7 +20664,7 @@ impl Lowerer {
                         match (*body_e).else_expr {
                             Some(ee) => {
                                 match (*ee).block {
-                                    Some(b) => { return lo.fo_emit_recur_block_body(&(*b).stmts, fd, n_reg, vals, sens, vars, isf) }
+                                    Some(b) => { return lo.fo_emit_recur_block_body(&(*b).stmts, fd, n_reg, vals, sens, vars, isf, hess) }
                                     None => { return (lo, 0 - 1) }
                                 }
                             }
@@ -20669,7 +20681,7 @@ impl Lowerer {
     // The else block is lowered by the ordinary let/expression lowerer. The
     // recursive call reads the loop-carried value and sensitivity instead of
     // inlining another copy of the function.
-    fn fo_emit_recur_block_body(self, stmts: &Option<Box<StmtList>>, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], vars: [i64; 16], isf: [i64; 16]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_block_body(self, stmts: &Option<Box<StmtList>>, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], vars: [i64; 16], isf: [i64; 16], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var i: i64 = 0
         while i < 16 {
@@ -20710,6 +20722,11 @@ impl Lowerer {
                         lo = lo.fo_bind_local_sens(pname)
                         if lo.so_enabled {
                             var hrow: [i64; 36] = [0 - 1; 36]
+                            var hk: i64 = 0
+                            while hk < 36 {
+                                hrow[hk as usize] = hess[(i * 36 + hk) as usize]
+                                hk = hk + 1
+                            }
                             lo = lo.so_set_local_hess_row(pname, hrow)
                         }
                         i = i + 1
@@ -20719,6 +20736,7 @@ impl Lowerer {
                 None => break
             }
         }
+        FO_LOGN_ACTIVE = 0
         let zf = lo.emit_f64_const(0.0)
         lo = zf.0
         FO_STEP_ZERO = zf.1
@@ -21188,16 +21206,6 @@ impl Lowerer {
             }
             return lo.fo_emit_recur_affine_scale(vals[aff_idx.1 as usize], axs)
         }
-        let pb_idx = fo_recur_powbase_indexes(&fd)
-        if pb_idx.0 >= 0 && isf[pb_idx.0 as usize] == 1 {
-            var pxs: [i64; 32] = [0 - 1; 32]
-            var pk: i64 = 0
-            while pk < 32 {
-                pxs[pk as usize] = sens[(pb_idx.0 * 32 + pk) as usize]
-                pk = pk + 1
-            }
-            return lo.fo_emit_recur_powbase_scale(vals[pb_idx.1 as usize], vals[pb_idx.0 as usize], pxs)
-        }
         let affy_idx = fo_recur_step2_indexes(&fd, 0)
         if affy_idx.0 >= 0 && affy_idx.1 >= 0 && isf[affy_idx.0 as usize] == 1 && isf[affy_idx.1 as usize] == 1 {
             let affy_n = 3 - affy_idx.0 - affy_idx.1
@@ -21225,10 +21233,10 @@ impl Lowerer {
             return lo.fo_emit_recur_chcoef_scale(vals[ch_n as usize], vals[ch_idx.0 as usize], vals[ch_idx.1 as usize], cxs, cys)
         }
         if fo_recur_expr_ok(&fd) {
-            return lo.fo_emit_recur_expr_scale(&fd, vals[FO_STEP_NIDX as usize], vals, sens)
+            return lo.fo_emit_recur_expr_scale(&fd, vals[FO_STEP_NIDX as usize], vals, sens, hess)
         }
         if fo_recur_block_ok(&fd) {
-            return lo.fo_emit_recur_block_scale(&fd, vals[FO_STEP_NIDX as usize], vals, sens, vars, isf)
+            return lo.fo_emit_recur_block_scale(&fd, vals[FO_STEP_NIDX as usize], vals, sens, vars, isf, hess)
         }
         // Bind the parameters in a fresh scope; the FO bind rows are keyed by
         // name only, so they are saved and restored around the body.
@@ -22160,6 +22168,7 @@ impl Lowerer {
             }
             var lo = pair_in.0
             let vin = pair_in.1
+            FO_LOGN_ACTIVE = 0
             var hi: i64 = 0
             while hi < 36 && lo.so_enabled {
                 let hk = lo.so_expr_hess[hi as usize]
@@ -22227,6 +22236,10 @@ impl Lowerer {
             let rv = rv_pair.1
             let sR = lo.fo_snapshot_expr_sens()
             let hR = lo.so_snapshot_expr_hess()
+            // A product or sum is not exp of an affine. The inner exp may have
+            // raised FO_LOGN_ACTIVE; leaving it set makes second_order_mean
+            // return that inner mean and ignore the Hessian just computed.
+            FO_LOGN_ACTIVE = 0
 
             // Multi-channel FO path when either side carries seed sensitivities.
             // Both snapshots are named (KL-6): the live fo_expr_sens is sR at
