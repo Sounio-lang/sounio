@@ -47,6 +47,24 @@ const payload = JSON.stringify({ catalog: { workflows: clientWorkflows }, langua
       <summary>{copy.preview}</summary>
       <textarea data-prompt-output readonly rows="16" aria-label={copy.preview} spellcheck="false"></textarea>
     </details>
+    <section class="implementation-stage" aria-labelledby="scientist-implementation-title">
+      <h2 id="scientist-implementation-title">{copy.implementationTitle}</h2>
+      <label for="scientist-intake-reply">{copy.replyLabel}</label>
+      <p id="scientist-reply-hint" class="field-hint">{copy.replyHint}</p>
+      <textarea id="scientist-intake-reply" data-intake-reply rows="8" aria-describedby="scientist-reply-hint" spellcheck="false"></textarea>
+      <button class="download-prompt" type="button" data-validate-intake disabled>{copy.validateReply}</button>
+      <p class="prompt-status" data-intake-status role="status" aria-live="polite">{copy.intakePending}</p>
+      <label class="scientist-confirmation"><input type="checkbox" data-scientist-confirmation /> {copy.confirmBrief}</label>
+      <p class="field-hint">{copy.validationBoundary}</p>
+      <div class="prompt-actions">
+        <button class="copy-prompt" type="button" data-copy-implementation disabled>{copy.copyImplementation}</button>
+        <button class="download-prompt" type="button" data-download-implementation disabled>{copy.downloadImplementation}</button>
+      </div>
+      <details class="prompt-preview" data-implementation-preview data-pagefind-ignore>
+        <summary>{copy.implementationPreview}</summary>
+        <textarea data-implementation-output readonly rows="16" aria-label={copy.implementationPreview} spellcheck="false"></textarea>
+      </details>
+    </section>
   </form>
   <aside class="research-protocol" aria-labelledby="scientist-protocol-title">
     <p class="template-state">{copy.template}</p>
@@ -60,14 +78,14 @@ const payload = JSON.stringify({ catalog: { workflows: clientWorkflows }, langua
 </div>
 
 <script>
-  import { buildScientistPrompt, scientistFields, scientistFieldLimit } from '../../lib/scientist-prompt.mjs';
+  import { buildScientistPrompt, buildScientistImplementationPrompt, validateScientistIntake, scientistFields, scientistFieldLimit, scientistReplyLimit } from '../../lib/scientist-prompt.mjs';
 
   let listeners: AbortController | undefined;
   function initializeScientist() {
     listeners?.abort();
     const root = document.querySelector<HTMLElement>('[data-scientist-workbench]');
     if (!root) return;
-    for (const button of root.querySelectorAll<HTMLButtonElement>('[data-copy-prompt], [data-download-prompt]')) button.disabled = true;
+    for (const button of root.querySelectorAll<HTMLButtonElement>('button')) button.disabled = true;
     const payload = root.querySelector('[data-scientist-payload]');
     let configuration;
     try {
@@ -86,9 +104,84 @@ const payload = JSON.stringify({ catalog: { workflows: clientWorkflows }, langua
     const preview = root.querySelector<HTMLDetailsElement>('[data-prompt-preview]');
     const download = root.querySelector<HTMLButtonElement>('[data-download-prompt]');
     const copyButton = root.querySelector<HTMLButtonElement>('[data-copy-prompt]');
-    if (!form || !select || !output || !status || !preview || !download || !copyButton) return;
+    const reply = root.querySelector<HTMLTextAreaElement>('[data-intake-reply]');
+    const confirmation = root.querySelector<HTMLInputElement>('[data-scientist-confirmation]');
+    const validate = root.querySelector<HTMLButtonElement>('[data-validate-intake]');
+    const intakeStatus = root.querySelector<HTMLElement>('[data-intake-status]');
+    const implementationCopy = root.querySelector<HTMLButtonElement>('[data-copy-implementation]');
+    const implementationDownload = root.querySelector<HTMLButtonElement>('[data-download-implementation]');
+    const implementationOutput = root.querySelector<HTMLTextAreaElement>('[data-implementation-output]');
+    const implementationPreview = root.querySelector<HTMLDetailsElement>('[data-implementation-preview]');
+    if (!form || !select || !output || !status || !preview || !download || !copyButton || !reply || !confirmation || !validate || !intakeStatus || !implementationCopy || !implementationDownload || !implementationOutput || !implementationPreview) return;
     listeners = new AbortController();
     const options = { signal: listeners.signal };
+    const current = () => {
+      const answers = Object.fromEntries(scientistFields.map(field => [field, form.querySelector<HTMLTextAreaElement>(`#scientist-${field}`)?.value ?? '']));
+      const workflow = catalog.workflows.find((entry: { id: string }) => entry.id === select.value);
+      return { workflow, language, copy, answers, context: contexts[workflow?.id] };
+    };
+    const signature = () => JSON.stringify([select.value, language, current().answers, reply.value]);
+    let accepted: string | null = null;
+    const updateControls = () => {
+      const enabled = accepted !== null && accepted === signature() && confirmation.checked;
+      implementationCopy.disabled = !enabled;
+      implementationDownload.disabled = !enabled;
+    };
+    const revoke = () => {
+      accepted = null;
+      confirmation.checked = false;
+      implementationOutput.value = '';
+      intakeStatus.textContent = copy.intakePending;
+      updateControls();
+    };
+    revoke();
+    const checkReply = () => {
+      if (!reply.value.trim()) { intakeStatus.textContent = copy.replyRequired; return false; }
+      if (reply.value.length > scientistReplyLimit) { intakeStatus.textContent = copy.replyTooLong; return false; }
+      try {
+        const result = validateScientistIntake({ ...current(), reply: reply.value });
+        if (!result.ok) { intakeStatus.textContent = result.error === 'intake-mismatch' ? copy.replyMismatch : copy.replyInvalid; return false; }
+        return true;
+      } catch { intakeStatus.textContent = copy.replyInvalid; return false; }
+    };
+    validate.addEventListener('click', () => {
+      revoke();
+      if (checkReply()) { accepted = signature(); intakeStatus.textContent = copy.intakeValid; }
+      updateControls();
+    }, options);
+    reply.addEventListener('input', revoke, options);
+    confirmation.addEventListener('change', () => {
+      if (!confirmation.checked) revoke();
+      else updateControls();
+    }, options);
+    const prepareImplementation = () => {
+      if (!checkReply()) { accepted = null; confirmation.checked = false; implementationOutput.value = ''; updateControls(); return null; }
+      if (accepted !== signature() || !confirmation.checked) { revoke(); return null; }
+      try {
+        const prompt = buildScientistImplementationPrompt({ ...current(), intakeReply: reply.value, confirmed: true });
+        implementationOutput.value = prompt;
+        return prompt;
+      } catch { revoke(); intakeStatus.textContent = copy.assemblyFailed; return null; }
+    };
+    const downloadText = (prompt: string, phase: string) => {
+      const url = URL.createObjectURL(new Blob([prompt], { type: 'text/markdown;charset=utf-8' }));
+      try {
+        const anchor = document.createElement('a'); anchor.href = url; anchor.download = `sounio-${select.value}-${language}-${phase}.md`; anchor.click();
+      } finally { setTimeout(() => URL.revokeObjectURL(url), 1000); }
+    };
+    implementationCopy.addEventListener('click', async () => {
+      const prompt = prepareImplementation();
+      if (!prompt) return;
+      const prepared = signature();
+      try { await navigator.clipboard.writeText(prompt); if (accepted === prepared && signature() === prepared && confirmation.checked) intakeStatus.textContent = copy.implementationCopied; }
+      catch { if (accepted === prepared && signature() === prepared && confirmation.checked) { implementationPreview.open = true; implementationOutput.focus(); implementationOutput.select(); intakeStatus.textContent = copy.copyFailed; } }
+    }, options);
+    implementationDownload.addEventListener('click', () => {
+      const prompt = prepareImplementation();
+      if (!prompt) return;
+      try { downloadText(prompt, 'implementation'); } catch { intakeStatus.textContent = copy.downloadFailed; }
+    }, options);
+    implementationPreview.addEventListener('toggle', () => { if (implementationPreview.open && accepted !== null && confirmation.checked) prepareImplementation(); }, options);
     const assemble = () => {
       const answers = Object.fromEntries(scientistFields.map(field => [field, form.querySelector<HTMLTextAreaElement>(`#scientist-${field}`)?.value ?? '']));
       if (!answers.question.trim()) { status.textContent = copy.required; output.value = ''; return null; }
@@ -105,6 +198,7 @@ const payload = JSON.stringify({ catalog: { workflows: clientWorkflows }, langua
       }
     };
     select.addEventListener('change', () => {
+      revoke();
       try {
         const workflow = catalog.workflows.find((entry: { id: string }) => entry.id === select.value);
         if (!workflow) throw new Error('Missing scientist workflow');
@@ -137,14 +231,16 @@ const payload = JSON.stringify({ catalog: { workflows: clientWorkflows }, langua
     download.addEventListener('click', () => {
       const prompt = assemble();
       if (!prompt) return;
-      const url = URL.createObjectURL(new Blob([prompt], { type: 'text/markdown;charset=utf-8' }));
-      const anchor = document.createElement('a'); anchor.href = url; anchor.download = `sounio-${select.value}-${language}.md`; anchor.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      try { downloadText(prompt, 'clarification'); } catch { status.textContent = copy.downloadFailed; }
     }, options);
-    form.addEventListener('input', () => { status.textContent = ''; if (preview.open) assemble(); }, options);
+    form.addEventListener('input', (event) => {
+      if (!(event.target instanceof HTMLTextAreaElement) || !scientistFields.some(field => event.target === form.querySelector(`#scientist-${field}`))) return;
+      revoke(); status.textContent = ''; if (preview.open) assemble();
+    }, options);
     preview.addEventListener('toggle', () => { if (preview.open) assemble(); }, options);
     copyButton.disabled = false;
     download.disabled = false;
+    validate.disabled = false;
   }
   initializeScientist();
   document.addEventListener('astro:page-load', initializeScientist);
@@ -152,6 +248,11 @@ const payload = JSON.stringify({ catalog: { workflows: clientWorkflows }, langua
 
 <style>
   .prompt-workbench { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, .9fr); gap: clamp(2rem, 5vw, 5rem); align-items: start; }
+  .implementation-stage { margin-top: 2.5rem; padding-top: 2rem; border-top: 2px solid var(--color-border); }
+  .implementation-stage > button { margin-top: 1rem; }
+  .scientist-confirmation { margin-top: 1rem; }
+  input[type="checkbox"] { width: 1.1rem; height: 1.1rem; accent-color: var(--color-accent-gold); }
+  input:focus-visible { outline: 3px solid var(--color-accent-gold); outline-offset: 3px; }
   h2 { font-size: 1.65rem; font-weight: 650; line-height: 1.25; margin-bottom: 1.5rem; }
   h3 { font-size: 1.05rem; font-weight: 650; margin-bottom: .6rem; }
   label { display: block; font-weight: 600; font-size: .94rem; line-height: 1.5; margin-bottom: .5rem; }

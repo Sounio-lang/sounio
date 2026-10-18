@@ -17,6 +17,14 @@ Escolha uma receita no [Espaço do cientista](https://www.souniolang.org/pt/scie
 
 Um agente local conectado é opcional e pode ler o checkout e executar checagens autorizadas onde houver compilador e dependências compatíveis. Um LLM apenas em chat não consegue executar o fluxo: código, comandos sugeridos e saídas previstas permanecem não executados até que um ambiente conectado devolva evidências reais. Esta interface fornece prompts; não oferece runtime hospedado atual nem executa pesquisa no site.
 
+## Duas etapas, com confirmação do cientista
+
+As ações iniciais de copiar, baixar e visualizar preparam somente seu resumo científico e o protocolo fechado `SOUNIO_INTAKE_V1`, sem código, links de fontes de domínio ou exemplos da linguagem. Cole o pedido na IA escolhida e cole a resposta completa, sem alterações, no campo de esclarecimento. Você não precisa escrever JSON ou código. Use as dicas dos campos e a barra lateral científica para resolver informações ausentes no resumo.
+
+Selecione **Validar esclarecimento**. O validador local verifica sintaxe do recibo e correspondência com os seis campos científicos atuais, tarefa e idioma. Revise o resumo e a resposta correspondente e marque explicitamente a confirmação do cientista. Só então é possível copiar ou baixar instruções da segunda etapa, com o pacote canônico completo de contexto vinculado às fontes. Cada ação de implementação valida novamente a resposta atual. Alterar campo científico, tarefa ou resposta, ou desmarcar a confirmação, revoga a aceitação; valide e confirme novamente. Respostas acima de 60.000 caracteres são rejeitadas.
+
+Este gate não estabelece verdade científica, autoria por LLM, atestação de fontes ou uso real de ferramentas. `source_access: not_verified` e `execution: not_executed` descrevem evidências deste pedido, não tudo que um modelo possa ter lido antes. A confirmação prepara instruções; não executa o estudo nem aprova automaticamente um modelo científico. Escolhas científicas relevantes continuam exigindo revisão do cientista.
+
 ## Receitas de pesquisa disponíveis
 
 O [catálogo](../../website/src/data/scientistWorkflows.json) vincula as receitas a códigos existentes em `106f7a988d5b007472d0eead724f58ac50f92200`. Todas têm estado `prompt-template-not-executed`. O campo `starter_task` aponta para uma tarefa existente de aprendizado da linguagem, não para um ID de validação de domínio. Nenhum desses programas de domínio é um ID de exemplo no [manifesto de execução LLM](../llm-guide/example-manifest.json).
