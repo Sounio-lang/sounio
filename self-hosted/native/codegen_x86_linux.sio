@@ -3084,7 +3084,15 @@ fn nc_emit_bt_rax_imm8(nc: &! NativeCompiler, bit_pos: i64) with Mut, Panic, Div
 fn nc_refresh_rgn_sabotage() with IO, Mut, Panic, Div {
     if NC_RGN_ENV_CHECKED == 1 { return }
     NC_RGN_ENV_CHECKED = 1
-    NC_DYNLINK_THUNK_SABOTAGE = if str_eq(read_env("SOUNIO_SABOTAGE_DYNLINK_THUNK_CALLRET"), "1") { 1 } else { 0 }
+    // Keep the allocating read out of an assignment's if-expression: the
+    // source-tracking bootstrap's generated host re-evaluated this condition.
+    // One captured read is required independently of that lowering path.
+    let dynlink_flag = read_env("SOUNIO_SABOTAGE_DYNLINK_THUNK_CALLRET")
+    if str_eq(dynlink_flag, "1") {
+        NC_DYNLINK_THUNK_SABOTAGE = 1
+    } else {
+        NC_DYNLINK_THUNK_SABOTAGE = 0
+    }
     let v = read_env("SOUNIO_RGN_BARRIER_SABOTAGE")
     NC_RGN_SABOTAGE = 0
     if str_len(v) == 0 { return }
@@ -13539,6 +13547,45 @@ fn emit_entry_trampoline_split_into(nc: &! NativeCompiler, main_fn_index: i64) w
 //   - array-repeat `[V; N]` (instr_count == 0, bss_size > elem): rep stosq/stosb
 // f64 values are stored as IEEE-754 bit patterns (same path as i64 words).
 // hyper_algebra_kind: 1=u8, 17=i8 (both physical size 1), 8=qword.
+fn nc_emit_global_zero_stores_into(nc: &! NativeCompiler, base: i64, bytes: i64) with Mut, Panic, Div {
+    if bytes <= 0 { return }
+    nc_emit_mov_rax_imm(nc, 0)
+    nc_emit_mov_rdi_imm(nc, base)
+    nc_emit_mov_reg_imm(nc, 1, bytes)
+    nc_emit_byte(nc, 0xf3)
+    nc_emit_byte(nc, 0xaa)
+}
+
+// The ELF writer maps this BSS as private anonymous zero-backed memory.
+// Keep this zero operation at its original initializer position. Only discard
+// complete interior pages; partial pages and a denied syscall use stores.
+fn nc_emit_global_zero_bss_into(nc: &! NativeCompiler, base: i64, bytes: i64) with Mut, Panic, Div {
+    let first = ((base + 4095) / 4096) * 4096
+    let last = ((base + bytes) / 4096) * 4096
+    if last <= first {
+        nc_emit_global_zero_stores_into(nc, base, bytes)
+        return
+    }
+    nc_emit_mov_rax_imm(nc, 28)
+    nc_emit_mov_rdi_imm(nc, first)
+    nc_emit_mov_reg_imm(nc, 6, last - first)
+    nc_emit_mov_reg_imm(nc, 2, 4)
+    nc_emit_syscall(nc)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x88)
+    let failed = (*nc).code.len
+    nc_emit_u32_le(nc, 0)
+    nc_emit_global_zero_stores_into(nc, base, first - base)
+    nc_emit_global_zero_stores_into(nc, last, base + bytes - last)
+    nc_emit_byte(nc, 0xe9)
+    let done = (*nc).code.len
+    nc_emit_u32_le(nc, 0)
+    nc_patch_u32_le(nc, failed, (*nc).code.len - failed - 4)
+    nc_emit_global_zero_stores_into(nc, base, bytes)
+    nc_patch_u32_le(nc, done, (*nc).code.len - done - 4)
+}
+
 fn emit_global_var_inits_into(nc: &! NativeCompiler, module: &IrModule) with Mut, Panic, Div {
     var fi: i64 = 0
     while fi < (*module).fn_count {
@@ -13600,6 +13647,8 @@ fn emit_global_var_inits_into(nc: &! NativeCompiler, module: &IrModule) with Mut
                 nc_emit_mov_rax_imm(nc, init_val)
                 nc_emit_mov_reg_imm(nc, 3, abs_addr)
                 nc_emit_store_rax_mem_rbx_disp32(nc, 0)
+            } else if total > 0 && init_val == 0 {
+                nc_emit_global_zero_bss_into(nc, abs_addr, total)
             } else if total > 0 {
                 // Array-repeat fill. DF=0 (ascending) is the process default.
                 // rax = fill value, rdi = dest, rcx = element count.

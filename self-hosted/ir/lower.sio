@@ -4273,6 +4273,42 @@ fn lowerer_sco_strategy_trace(name: Name, s: i64) with Mut, Panic, Div, IO {
     }
 }
 
+var LOWER_INTO_ACC_ALLOC_TRACE_CHECKED: i64 = 0
+var LOWER_INTO_ACC_ALLOC_TRACE_ON: i64 = 0
+var LOWER_STRATEGY_ENV_TRACE_CALLS: i64 = 0
+var LOWER_STRATEGY_ENV_TRACE_REFILL: i64 = 0
+var LOWER_SCO_ABLATION_CHECKED: i64 = 0
+var LOWER_SCO_ABLATION_ON: i64 = 0
+
+fn lower_into_acc_alloc_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    if LOWER_INTO_ACC_ALLOC_TRACE_CHECKED == 0 {
+        LOWER_INTO_ACC_ALLOC_TRACE_CHECKED = 1
+        let flag = read_env("SOUNIO_INTO_ACC_ALLOC_TRACE")
+        if str_eq(flag, "1") { LOWER_INTO_ACC_ALLOC_TRACE_ON = 1 }
+    }
+    LOWER_INTO_ACC_ALLOC_TRACE_ON == 1
+}
+
+// This compiler option is process-scoped, like the command-line target. Retain
+// only its boolean value, never the temporary read_env string or pool storage.
+// Re-preseeding external declarations must not re-read /proc/self/environ.
+fn lower_sco_ablation_enabled() -> bool with IO, Mut, Panic, Div {
+    if LOWER_SCO_ABLATION_CHECKED == 0 {
+        let env_alloc_trace = lower_into_acc_alloc_trace_enabled()
+        var env_refill_before: i64 = 0
+        if env_alloc_trace { env_refill_before = __pool_refill_bytes() }
+        let flag = read_env("SOUNIO_SCO_ABLATION")
+        if env_alloc_trace {
+            let env_refill_after = __pool_refill_bytes()
+            LOWER_STRATEGY_ENV_TRACE_CALLS = LOWER_STRATEGY_ENV_TRACE_CALLS + 1
+            LOWER_STRATEGY_ENV_TRACE_REFILL = LOWER_STRATEGY_ENV_TRACE_REFILL + env_refill_after - env_refill_before
+        }
+        if str_eq(flag, "1") { LOWER_SCO_ABLATION_ON = 1 }
+        LOWER_SCO_ABLATION_CHECKED = 1
+    }
+    LOWER_SCO_ABLATION_ON == 1
+}
+
 fn lowerer_compute_strategy_from_ast_ref(
     return_type: &Option<Box<TypeExpr>>,
     effects: &Option<Box<EffectList>>
@@ -4301,7 +4337,7 @@ fn lowerer_compute_strategy_from_ast_ref(
     // Marker: SCO_ETAU_ELEVATE_SCIENTIFIC_EFFECTS
     // Marker: SCO_ETAU_ABLATION_ENV
     // Environment-backed ablation is IO; callers propagate that effect explicitly.
-    if !str_eq(read_env("SOUNIO_SCO_ABLATION"), "1") {
+    if !lower_sco_ablation_enabled() {
         if lowerer_sco_scientific_effects_ref(effects) {
             strategy = IR_STRATEGY_PRECISION_PRESERVING
 
@@ -34750,6 +34786,39 @@ pub fn lower_program_bodies_from_summary_with_epistemic_boxed_owned(
 // Skips dep test `main` (seed owns entry). Force-fills ItemImpl method stubs
 // left ic=0 by seed extern preseed. Caller owns arena mark/reset + call_args
 // re-box for functions written in this pass (including filled stubs).
+// Diagnostic only: never reclaim or mutate either allocation domain. Capture
+// counters before printing so the receipt does not include its own formatting.
+// Cursor values alone are not byte totals across pool refills; retain the
+// cumulative refill/mmap counters and report unsupported sentinels unchanged.
+fn lower_into_acc_alloc_trace_mark(enabled: bool, module_index: i64, stage: string) with IO, Mut, Panic, Div {
+    if !enabled { return }
+    // The bootstrap seed has no __rgn_cursor intrinsic. Do not substitute a
+    // different allocation domain: -1 explicitly means unavailable here.
+    let pool_cursor: i64 = -1
+    let pool_refill = __pool_refill_bytes()
+    let mmap_bytes = __rtmmap_bytes()
+    let box_cursor = __arena_mark()
+    let strategy_env_calls = LOWER_STRATEGY_ENV_TRACE_CALLS
+    let strategy_env_refill = LOWER_STRATEGY_ENV_TRACE_REFILL
+    print("into_acc_alloc: module=")
+    print_int(module_index)
+    print(" stage=")
+    print(stage)
+    print(" pool_cursor=")
+    print_int(pool_cursor)
+    print(" pool_refill=")
+    print_int(pool_refill)
+    print(" mmap_bytes=")
+    print_int(mmap_bytes)
+    print(" box_cursor=")
+    print_int(box_cursor)
+    print(" strategy_env_calls=")
+    print_int(strategy_env_calls)
+    print(" strategy_env_refill=")
+    print_int(strategy_env_refill)
+    print("\n")
+}
+
 pub fn lower_dep_program_items_into_acc_with_externs(
     items: &Option<Box<ItemList>>,
     programs: &! [Program; 256],
@@ -34757,7 +34826,10 @@ pub fn lower_dep_program_items_into_acc_with_externs(
     self_index: i64,
     acc: Box<IrModule>
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
+    let alloc_trace = lower_into_acc_alloc_trace_enabled()
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "begin")
     var lo = lowerer_from_acc_module(acc)
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "lowerer_ready")
     var i: i64 = 0
     while i < program_count {
         if i != self_index {
@@ -34792,8 +34864,10 @@ pub fn lower_dep_program_items_into_acc_with_externs(
         }
         i = i + 1
     }
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "externs_ready")
     lower_set_current_module_id(self_index)
     lowerer_preseed_dep_items_into_acc_mut(&! lo, items, ir_empty_name())
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "own_preseed_ready")
     // DEDUP body lower: skip main + existing bodies; fill stubs and new names.
     // self_index is this dependency module's own loaded-program index (the
     // same id fo_preregister_program_items_multipass stamped its `use`
@@ -34803,14 +34877,17 @@ pub fn lower_dep_program_items_into_acc_with_externs(
     // whole loaded module graph. See LOWER_CURRENT_MODULE_ID's comment.
     lower_set_current_module_id(self_index)
     lowerer_lower_program_bodies_dedup_mut(&! lo, items)
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "bodies_ready")
     // Residual closeout: re-attempt any ItemImpl methods still at ic=0.
     lowerer_force_fill_impl_methods_mut(&! lo, items)
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "impl_ready")
     var patch_stats = ir_empty_validated_patch_stats()
     if lower_ok_without_hard(lo.had_error) {
         var module_box = lo.module
         patch_stats = ir_patch_validated_calls(&! (*module_box))
         lo.module = module_box
     }
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "patch_ready")
     if str_eq(read_env("SOUNIO_INTO_ACC_TRACE"), "1") {
         print("into_acc: dep_done self_index=")
         print_int(self_index)

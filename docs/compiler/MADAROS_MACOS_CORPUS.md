@@ -9,6 +9,33 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.madar
 
 # Native macOS Madaros: pinned 200-program corpus
 
+## Single captured diagnostic-flag read (candidate after `b8ec6be2f9`)
+
+Remote CI 39023869483 passed native macOS 200/200 with real Metal and the
+dedicated Gen2 run 39023869475 passed, but the environment refresh witness
+failed with exit 5. The exact CI host (SHA-256
+`c5d083408877220b44c96d36cf38a0f3b430ddfe3da5508b001e09bb19cc940e`)
+reproduced five reads in both off/on configurations on Slurm, whereas the
+direct-bootstrap host made four. Diagnostic instrumentation located the extra
+read at `SOUNIO_SABOTAGE_DYNLINK_THUNK_CALLRET` in the assigned if-expression;
+the counter started at zero and reading `PROBE_ON` did not increment it.
+
+The candidate captures that allocating read once and uses statement-form
+branches to assign the flag. The unchanged production-extraction witness,
+compiled by the same CI host on Slurm, then made exactly four reads and
+returned zero with correct flags in both configurations. This is a scoped
+refresh-path correction, not a claim that general effectful if-expression
+re-lowering or all differences between bootstrap chains are resolved.
+The gate now exposes the captured output on failure while preserving its
+original exit status and exact four-read/256-cycle assertions.
+
+Evidence remains outside Git in the remote scratch
+`/tmp/pr2981-bool.QVgKpb/envgate-ci-result/out` (before),
+`envgate-diagnostic-result/out` (key trace) and `envgate-once-result/out`
+(after). A full rebuild through the source-tracking Linux bootstrap chain
+and a fresh Mac build/corpus are pending; no earlier 200/200 receipts are
+substituted for this candidate.
+
 ## Region witness cursor-domain correction (PR #2981 follow-up)
 
 The published `7f13ba664a` CI failed the syscall escape witness with exit 2:
@@ -777,3 +804,402 @@ Commit preparation removed one trailing blank line from the backend source after
 the recorded build snapshot and reran its module check successfully. No semantic
 compiler changes were made after the full execution gate; the recorded binary
 and source-snapshot identities continue to identify the tested build itself.
+
+## Linux startup-memory experiment — 2026-10-17, validation pending
+
+Slurm 14817 rebuilt the Linux host with the anonymous-BSS zero initializer
+candidate. The selected host SHA-256 is
+`3092a2b2f2d89360361e622028fec40c8598c12d63f67dd8d9d7dc6ae331d053`.
+The frozen input archive is
+`ea54d0a589738606352d6898921b842f6b46577210524684f9c417b63588d7e3`.
+Three successful compile/run trials per small case gave these preliminary
+comparisons against the earlier CI host (peak MiB; median wall seconds):
+
+| Case | Before RAM | Candidate RAM | Before time | Candidate time |
+|---|---:|---:|---:|---:|
+| Minimal | 1306.023438 | 254.023438 | 0.543709 | 0.105984 |
+| Imports | 1359.023438 | 307.023438 | 0.607614 | 0.147256 |
+| PBPK | 1361.023438 | 308.023438 | 1.386511 | 0.934198 |
+
+Conversions and medians were computed in C++23. This comparison also includes
+the env-once repair; it does not isolate the BSS change. Slurm 14846 is the
+paired control against the env-once host, with before/after executed
+serially in one allocation on identical frozen sources and resource limits.
+At 15:26 UTC, its small-case measurements and comparison completed successfully
+on `/tmp/pr2981-paired-node.2oJvLp`; both small harness statuses and the C++23
+comparison status were zero. The matched env-once versus seed-only BSS small
+results are below (three trials per case); the subsequently completed paired
+self-compilation results are recorded separately below.
+
+| Paired case | Before peak MiB | After peak MiB | Before median seconds | After median seconds |
+|---|---:|---:|---:|---:|
+| Minimal | 1306.007812 | 225.023438 | 0.884308 | 0.106098 |
+| Imports | 1359.007812 | 277.523438 | 0.715732 | 0.141589 |
+| PBPK | 1360.507812 | 280.523438 | 1.406794 | 0.948180 |
+
+Raw evidence is in job 14846's `out/{before-small,after-small}/measurements.tsv`
+and `out/small-comparison.tsv`. This control isolates the seed-only change;
+it does not validate the later modular-emitter candidate in job 14859.
+At 15:56 UTC, the paired control's before-self harness completed with status 0:
+`self.compile` took 1,656.150854 seconds with 62,920.152344 MiB peak RSS;
+`self.execute` (`--version`) took 0.522682 seconds with 1,122.578125 MiB peak RSS.
+Both command exits were zero. These conversions were produced by the C++23
+reporter from `before-self/measurements.tsv`, also preserved separately as
+`/tmp/pr2981-paired.367Vo0/before-self.tsv`.
+
+The paired experiment subsequently completed with all six harness/comparison
+statuses zero. C++23 comparison of the same frozen source in the same allocation
+gave the following final self results (one trial per host):
+
+| Paired self case | Before peak MiB | After peak MiB | Before seconds | After seconds |
+|---|---:|---:|---:|---:|
+| Compile | 62920.152344 | 62361.875000 | 1656.150854 | 1731.231835 |
+| Generated `--version` | 1122.578125 | 1122.515625 | 0.522682 | 0.504429 |
+
+The compile peak decreased 0.887279%, while observed compile time increased
+4.533463%. This is not evidence of a self-compilation speedup, and one trial per
+host does not establish statistical significance. Generated startup RAM was
+essentially unchanged. Both `/proc/swaps` receipts contain only the header.
+The seed-only change therefore does not resolve the dominant self-compilation
+memory cost or propagate its small-case startup saving to the generated host.
+
+A read-only C++23 reduction of the paired 500 ms memory samples locates most of
+the retained memory before native emission: at the first observed
+`merged_native_emit_begin` label, before-self already had 61,547.503906 MiB RSS
+and after-self had 60,773.539062 MiB RSS. These are observer samples, not exact
+instruction-boundary readings. The earlier interval remains labelled `unmarked`,
+so this does not yet distinguish loading, checking and lowering or identify an
+allocation owner. It does rule out attributing the entire peak to allocation
+inside the final native-emission call. The phase reports are preserved as
+`/tmp/pr2981-paired.367Vo0/{before,after}-phases.tsv`; the reporting source is
+`/tmp/pr2981-memory-phase-report.cpp` outside Git. No measured compiler was
+rerun or modified to produce these reports.
+
+The launcher had written `before: OK` and `after: OK` checksum diagnostics into
+stdout before the gzip archive. The raw `result.tar.gz` was preserved; a C++23
+recovery tool verified the exact 21-byte diagnostic prefix and gzip signature,
+then wrote `result.recovered.tar.gz`. `gzip -t` and extraction succeeded. Final
+TSVs and status receipts are under
+`/tmp/pr2981-paired.367Vo0/recovered/out/`. The launcher was corrected to send
+checksum diagnostics to stderr; no measured compiler execution was repeated.
+The seed-only pinned-source self-compilation measurement completed: exit 0,
+1,678,305,975 microseconds and 63,863,584 KiB peak RSS. The generated compiler's
+`--version` still required 1,149,520 KiB, so the seed-only repair does not propagate
+the startup gain to gen2. Strong lifetime and region checks passed; its ladder
+reached the required `run` rung in 30:58.08 with 64,029,180 KiB peak RSS and zero
+reported swaps. Optional gen3 still exited 139. None of these results validates
+the subsequent modular-emitter change, whose Linux validation is Slurm 14859.
+The fresh macOS regression
+run completed all 200 members with required real Metal execution, including
+40,960 binary64 checks with zero failures. It used the existing signed host
+`fb2a3c23dc1c6e835a6cb13df0b143e99ffd252c1eaece54b6e5dc815573514e`;
+the change under test is in the Linux-only seed emitter, not its modular Mac
+sources. This is a fresh execution receipt, not a newly rebuilt Mac host.
+
+A subsequent rebuild including the changed modular Linux emitter produced the
+signed ARM64 host
+`e616d77e72d357f2f6a9ee7786551b57ad3cc05343e99f19ad5056d992b3df17`.
+It passed native acceptance, self-check, IR/address, TypeEnv, registry, extended
+positive/negative regressions and a fresh 200/200 corpus with required real Metal.
+Its binary64 Metal receipt again records 40,960 checks and zero failures. This
+Mac success does not substitute for the Linux receipts subsequently recorded
+below or turn the seed-only paired result into a modular-backend result.
+
+Slurm 14859 subsequently built the modular candidate successfully. Its native
+host SHA-256 is
+`8f63b9a1d6219a5c410fc2a6da50406d6897740e40e7346c7e14db54fabe3dd7`.
+Both direct-seed order tests passed. The modular BSS-pages test passed normally
+and under syscall denial, printing `BSS_ZERO_PAGES_OK` and
+`MADVISE_WITNESS calls=2 enosys=2 child_exit=0`; build, normal and fallback
+statuses were zero. This closes the emitted modular-path discriminator whose
+old-backend witness saw zero calls. It does not yet certify the entire permanent
+gate script; the final self, lifetime, region and ladder receipts follow below.
+Its three-trial small-case harness passed compile and execution for every case;
+C++23 summaries were minimum 254.039062 MiB / 0.110815 seconds, imports
+307.039062 MiB / 0.158350 seconds, and PBPK 308.039062 MiB / 1.040846 seconds.
+These are not the serial paired-control results above. Evidence is on node
+`/tmp/pr2981-discard-node.YUJnGW/out/`, with the small TSV additionally retained
+as `/tmp/pr2981-modular-discard.UnY6In/after-small.tsv`.
+
+Slurm 14859 then completed with every recorded stage status zero: seed/build,
+both seed-order cases, BSS normal/denied, small/self harnesses, strong lifetime,
+region gate and ladder. The ladder checked successfully, emitted 14,734 merged
+functions from 129 dependencies (minimum 122), and executed gen2's identification
+banner. Its wall receipt is 29:43.28 with 64,139,976 KiB peak RSS and zero swaps.
+The optional gen3 compile still exited 139; this is not a fixed point.
+
+The frozen-source self harness recorded `self.compile` exit 0 in 1,677.983772
+seconds with 62,469.800781 MiB peak RSS, and generated `--version` exit 0 in
+0.001293 seconds with 7.593750 MiB peak RSS. Thus the modular repair propagates
+the startup saving to the generated compiler, but does not solve the dominant
+self-compilation memory cost. Compared descriptively with the env-once control's
+before-self measurement on the same frozen source, compile RAM decreased
+0.715751% and observed time increased 1.318293%. These are separate one-trial
+runs, not a new serial paired or statistical performance claim. The C++23
+comparison is `self-v-envonce.tsv` in the candidate snapshot.
+
+All final Linux artifacts are under
+`/tmp/pr2981-modular-discard.UnY6In/result/out/`, with the original archive
+preserved. The supplemental production-container/f64 checks and finer frontend
+allocation diagnosis still need separate execution. A read-only C++23 external
+observer was prepared to correlate existing load/check/lower log milestones
+with `/proc` samples, avoiding the internal allocating RSS probes. It passed a
+short live-process control (exit 0) and missing-PID refusal (exit 3); this is
+observer validation, not evidence identifying the dominant allocation owner.
+
+The separate diagnostic allocation, Slurm 14926, started with the checked host
+and seed identities. Its first supplemental attempt stopped at the empty-mark
+fixture because that file was missing from the older source snapshot; the log
+reports an unreadable input, not a compiler semantic failure. Earlier production
+IR/address, registry, TypeEnv boundary/refusal, environment and invalid-mark
+receipts were retained, but the supplemental status remains 1 and is not counted
+as a full pass. The existing unchanged empty-mark fixture was transferred with
+SHA-256 `a5a7cfd4c712fd6a370cbf14e8ba82ebda5683984cb0542a7262d62e94377575`.
+The corrected wrapper accepts that explicit fixture path and checks its presence
+before compiling anything. Slurm 14935 repeats only the supplemental checks in a
+separate allocation; it does not rerun the measured 14859 pipeline.
+Slurm 14935 subsequently completed with supplemental status 0, including the
+empty-mark case, observed seed/modular fallback and full current-source f64
+gate. Its receipts are in
+`/tmp/pr2981-supplemental-retry.2QOsJR/result/out/`; the failed first attempt
+remains separate. This execution used the real precompiled production generators
+and permanent helper bodies; it does not claim that the entire permanent shell
+gate was executed with a node-local C++ toolchain.
+
+Slurm 14926's external frontend observer runs independently of those checks.
+Its partial report showed 11,037.082031 MiB at the first observed imported
+typecheck-begin label, compared with the much larger pre-emission RSS observed
+in the completed paired experiment. The current report is incomplete: neither
+the final largest-growth phase nor an allocation owner has yet been established.
+The initial `unmarked` interval contains the visibility preflight before the
+imported compile route, as corroborated by its `run_check_mode` log and caller;
+it must not be relabelled as native emission. Diagnostic elapsed times are not
+substitutes for the isolated benchmark receipts.
+The later partial profile localizes the dominant growth to dependency lowering:
+the first observed lower-begin sample had 14,266.582031 MiB RSS, the seed-lowering
+interval peaked at 17,644.984375 MiB, and the first sample for dependency 58 had
+51,316.238281 MiB. These values were computed by the C++23 frontend-stage
+reporter from external samples. The profile is still running, but this already
+distinguishes the large lowering accumulation from the much smaller earlier
+load/check footprint. The precise allocating subpass and object owner remain
+unproven; successful Box resets do not authorize resetting persistent aggregate
+storage.
+
+Slurm 14926 subsequently completed its diagnostic compile and generated-version
+execution with status 0; its failed first supplemental attempt remains status 1,
+and is closed separately by the successful 14935 receipts above. The final
+external profile reaches 60,819.218750 MiB at the first observed lower-done label
+and 62,320.875000 MiB peak during native emission. Its final phase report is
+`/tmp/pr2981-frontdiag.WGDaEf/frontstage-final.tsv`; raw evidence is under
+`result/out/frontend-diagnostic.uu1FWt/` in that snapshot.
+
+The next diagnostic adds opt-in `SOUNIO_INTO_ACC_ALLOC_TRACE` receipts between
+lowerer construction, external registration, own preseed, body lowering,
+implementation fill and validated-call patching. The markers capture existing
+pool-refill/mmap counters before formatting and never reclaim either domain.
+The changed lowering module (SHA-256
+`2590ae53f1e471ef30d116f66fdf2d4a8f0a94367463c69353fb1f6e0abb366d`)
+passed module checking; this is instrumentation, not a memory repair. Slurm
+14953 builds it, requires successful imports-fixture execution and markers with
+the flag enabled plus silence with it disabled, and only then runs the same
+frozen-source diagnostic. Its snapshot is `/tmp/pr2981-subpass.hDJiGR`, node
+`/tmp/pr2981-subpass-node.wm9EZ4/`. These runtime controls and attribution were
+still pending when recorded. The earlier Mac corpus and full Linux gates do not
+certify this later instrumented source revision.
+
+Slurm 14953 subsequently failed its build with E200 for `__rgn_cursor`: the
+bootstrap seed does not implement that intrinsic. The build gate refused the
+artifact, and the failure remains preserved in its snapshot. The diagnostic
+was corrected to report that cursor as unavailable (`-1`), not as zero or as a
+different allocation domain. Cumulative refill/mmap counters remain the basis
+for attribution. The revised lower module, SHA-256
+`8c62899e76e9b7d67a452493d9a41b0381a65cedc76061f94827b1c2ae192a0c`,
+passed module checking. Slurm 14966, snapshot `/tmp/pr2981-subpass.4xarbB`, node
+`/tmp/pr2981-subpass-node.RIxVX3/`, passed build and both imports compile/run
+controls, trace-off silence and trace-on markers (all status 0). Its frozen
+self-compilation diagnostic entered lowering; final counter attribution and
+the dominant-memory repair are still pending. These are diagnostic controls,
+not new before/after performance or full-corpus acceptance receipts.
+
+The running 14966 diagnostic subsequently yielded 125 complete dependency
+marker blocks. The C++23 subpass reporter attributes cumulative pool-refill
+increments of 32,000 MiB to external registration, 9,216 MiB to body lowering,
+1,024 MiB to lowerer construction and 512 MiB to own preseed; implementation
+fill and validated-call patching crossed no refill boundary in those blocks.
+Runtime-mmap counter increments were zero within these marked transitions.
+These are allocation-counter deltas, not net resident-memory measurements:
+refill granularity can charge an earlier allocation to a later boundary. The
+partial raw log and complete blocks are preserved as `compile.partial.log` and
+`complete-blocks.partial.log` in `/tmp/pr2981-subpass.4xarbB/`. The largest
+measured subpass is now external registration, but its precise allocating
+operation and a safe repair still require discriminating evidence. The job was
+still active, and no final benchmark or acceptance claim follows from this
+partial diagnostic.
+
+Slurm 14966 subsequently completed: build, both flag controls, diagnostic
+compile, observer and diagnostic wrapper all returned 0, and the generated
+compiler printed the Madaros version banner. The final 129-block C++ report
+retains 32,000 MiB for external registration and reports 9,472 MiB for bodies,
+1,024 MiB for construction and 512 MiB for own preseed. The final raw log is
+`result/out/frontend-diagnostic.54ivVz/compile.log`, and the report is
+`subpass-final.tsv` in its snapshot. This diagnostic does not establish a
+memory repair or fixed point.
+
+A further diagnostic revision counts real `SOUNIO_SCO_ABLATION` reads in
+strategy selection and captures refill increments immediately around each
+read. It neither memoizes the ablation value nor changes the strategy rule.
+Its lower-module SHA-256 is
+`4da36bf6b0ea422e428b56620df50708f6377fbe673355e056c7eadc4ed2cd2f`,
+and module checking passed. Slurm 14997 is running this revision from the
+separate snapshot `/tmp/pr2981-subpass.bONRku`; runtime controls and allocation
+attribution remain pending. The local-model suggestion used placeholder
+environment/counter functions and was rejected, not used as executed evidence.
+
+The 14997 snapshot was then found to have been copied before the source upload
+completed: its source hash differed from the checked revision. That exact job
+was cancelled and its snapshot retained as failed preparation, not compiler
+evidence. After the complete remote source was verified, replacement Slurm
+14998 started from `/tmp/pr2981-subpass.ivP42g`. The separate C++23 environment
+counter reporter compiled with warnings-as-errors and passed a synthetic
+8-read/1-MiB control; it refuses older logs missing those counters. Production
+results remain pending and must also pass the seven-stage completeness report.
+
+Slurm 14998 subsequently passed build, both imports-fixture compile/run
+controls, trace-off silence and trace-on markers, all status 0. Its exact node
+is `/tmp/pr2981-subpass-node.vO4FDh/`; the live frozen-source diagnostic entered
+seed lowering. The controls show the new real-read counters present, not a
+production attribution result. A guarded future launcher now checks an
+explicit `PR2981_EXPECTED_LOWER_SHA` both before and after copying the source,
+without modifying this running job or its snapshot.
+
+The later 14998 partial report covers 128 complete blocks: 525,342 actual
+`SOUNIO_SCO_ABLATION` reads during external registration account for 28,672 MiB
+of refill increments, within that subpass's 32,000 MiB total. Own preseed and
+bodies report 10,932 and 10,929 reads respectively, each with 512 MiB of refill
+increments. This directly localizes a major allocating operation; it is still
+not a resident-memory before/after benchmark.
+
+The candidate repair caches only the process-scoped ablation boolean. It
+retains the first real read and both flag meanings, without retaining a string
+pointer or reclaiming persistent storage. Lower-module SHA-256
+`81b24cf25319869525d6c9fcb6d53d80702d3be6c69887324e044ed66d7e85a0`
+passed module checking. A new `sco_env_once_gate.sh` requires one real read in
+the imports fixture and checks the named NonAssoc strategy under ablation 0/1.
+Its actual before/after execution remains pending. Slurm 15000, snapshot
+`/tmp/pr2981-sco-once.yBws1r`, was submitted and is pending resources: it rebuilds
+the candidate, runs that gate, then benchmarks baseline and candidate serially
+on the identical frozen inputs before lifetime, region and rung-run checks.
+No benchmark improvement is claimed yet. A fresh Mac build and subsequent
+full Metal validation were also started, with logs under
+`/private/tmp/pr2981-sco-once-native-*`; these are not yet passing receipts.
+
+Slurm 14998 subsequently completed all controls, diagnostic compile and
+observer with status 0. Its complete environment-attribution report retains
+525,342 reads / 28,672 MiB in external registration; own preseed and bodies
+report 10,949 and 10,946 reads respectively, each crossing 512 MiB of refills.
+
+Slurm 15000 is now running at `/tmp/pr2981-sco-once-node.T60vXJ/`; build and the
+entire new SCO gate passed (`SCO_ENV_ONCE_OK`). The candidate host SHA-256 is
+`20604ca5110c427d3f77be083c9b3a6e5e5987d0b716aa1fc0cd2177ac5fc5a1`.
+The serial small-case comparison is not uniformly better: minimum compile
+225.039062 -> 254.046875 MiB / 0.106770 -> 0.130607 s; imports
+278.039062 -> 306.546875 MiB / 0.176322 -> 0.153128 s; PBPK
+280.539062 -> 306.546875 MiB / 1.182280 -> 0.945409 s. Each side has three
+trials; the increased small-case RSS remains an open regression to investigate,
+not a claimed improvement. Self-compilation was still measuring the before
+host. The SCO gate was added to the Linux workflow after its executed pass;
+workflow references validate at 342. A separate before-gate negative control
+is scheduled only after job 15000 so it cannot contaminate that benchmark.
+
+Slurm 15000 subsequently completed every recorded gate/harness/comparison
+status with 0. Its serial same-allocation, same-input self-compilation comparison
+is **62,426.964844 -> 31,390.320312 MiB**, and
+**1,634.053042 -> 1,371.061383 s** (C++23 report: 49.716728% less peak RAM,
+16.094438% less elapsed time). Raw wait4 receipts are 63,925,212 -> 32,143,688
+KiB and 1,634,053,042 -> 1,371,061,383 microseconds. Generated `--version`
+remains 7.593750 MiB on both sides. This is one self-compilation trial per host,
+not a statistical significance claim. Both swap files contain only the header.
+Strong lifetime, all region sabotage checks and rung `run` passed; the latter
+lowered 129 modules / 14,743 merged functions. Optional gen3 remains exit 139,
+so this is not a fixed point.
+
+Slurm 15002 also completed: the real pre-fix compiler fails the whole new gate
+with status 1 and the specific repeated-environment-read diagnostic; the
+negative control status is 0. The candidate's whole gate passed in 15000.
+Artifacts remain at `/tmp/pr2981-sco-before.3CUxWG/result/out/` and
+`/tmp/pr2981-sco-once.yBws1r/result/out/` respectively.
+
+The small-case RSS increase remains under investigation. A separate C++23
+external smaps diagnostic on the same frozen minimum input completed three
+runs per host with nearly equal wait4 peaks (230,440 KiB before / 230,448 KiB
+after), so it did not reproduce the original increase. Its one-millisecond
+observer changes the diagnostic conditions and is not a replacement benchmark.
+Raw mappings and measurements are preserved at
+`/tmp/pr2981-vma.yP7b9k/result/out/`. A follow-up uses the original frozen
+harness with reversed host order before any map sampling. Full candidate
+supplemental validation and the fresh Mac Metal result are still pending;
+none of these partial results authorize a completion or main-green claim.
+
+The reversed-order repetition with the original frozen harness also completed
+all six compile/run sequences successfully. C++23 comparison in
+`/tmp/pr2981-vma.SJNn40/result/out/` reports minimum 225.039062 -> 225.046875
+MiB, imports 278.039062 -> 277.546875 MiB and PBPK 280.539062 -> 279.046875
+MiB. Thus the original approximately 29-MiB increase was not reproduced by
+either this harness repetition or the map observer. Both original and repeated
+receipts remain evidence; neither is discarded. Repeated minimum latency
+0.115805 -> 0.219778 s is worse, while imports 0.219019 -> 0.168848 s and PBPK
+0.934956 -> 0.924175 s are better. These short-run results do not support a
+uniform performance-improvement claim or establish the cause of their variance.
+
+Slurm 15012 then passed the full supplemental suite on the exact candidate
+without rebuilding: f64, production-container/refusal, TypeEnv, registry,
+environment flags, invalid/empty arena marks, initializer order and observed
+syscall fallback. Evidence is
+`/tmp/pr2981-sco-supplemental.smbNh1/result/out/extra.yY07f4/`, with
+`supplemental.status=0`. These checks use the production generators and real
+precompiled helper bodies. The entire standalone BSS shell gate still needs
+its own C++-toolchain execution: the node reports gcc/cc but not g++/c++.
+The new Mac build emitted its executable and passed IR/address and TypeEnv;
+selfcheck and the fresh Metal corpus were still running when recorded.
+
+The fresh Mac rebuild subsequently completed all acceptance, signature,
+selfcheck, registry, port regressions and the required real-Metal corpus:
+200/200 manifest members compiled and ran. The new signed ARM64 host is
+`/private/tmp/pr2981-sco-once-madaros`, SHA-256
+`eb350428b49284c3b87c387d550fb7576b60d18d4b406991a732f25e4874cad5`.
+`/private/tmp/pr2981-sco-once-native-corpus/metal-conformance.log` records
+Apple M5 Max execution with 40,960 checks, zero failures and the C++23 oracle.
+This is a new build and run of the candidate source, not reuse of the older
+Mac receipt. Validation log: `/private/tmp/pr2981-sco-once-native-validation.log`.
+
+The standalone BSS script's first whole-script allocation stopped before
+execution because the node's package indexes could not locate the matching
+C++ development packages. Its evidence is retained at
+`/tmp/pr2981-whole-bss.zdUPmp/result/out/`; it is a preparation failure, not a
+gate pass or compiler failure. A replacement packages the workspace's existing
+GCC 13 C++ components privately (no system installation) so the unchanged gate
+can compile its own helpers in Slurm. Archive SHA-256:
+`5ef82ee8bdc569e96be1a044631e2e6c046ff2669e377ba66373dfe0cab7be15`.
+
+The initial private-toolchain archive also lacked the linker plugin; that
+preparation failure is preserved at `/tmp/pr2981-whole-bss.dMgITO/`. Including
+the complete GCC libexec directory fixed it without changing any gate or
+compiler source. The corrected archive SHA-256 is
+`4bf53bb15825a4e474c4004075a49a946d98251e87409c3ef128cf9d7bbb0409`;
+both real helpers compiled successfully in a private-toolchain preflight.
+The subsequent complete standalone `bss_zero_pages_gate.sh` execution in Slurm
+passed with `gate.status=0` and `slurm.status=0`, evidence
+`/tmp/pr2981-whole-bss.QCC3KZ/result/out/`. Both seed initializer order and
+modular BSS page fixtures passed normally and under actual seccomp denial,
+each with `MADVISE_WITNESS calls=2 enosys=2 child_exit=0`. This closes the
+whole-script execution gap; it is no longer only manually equivalent checks.
+These local/Slurm/Mac proofs still do not establish remote CI success, merge,
+or exact-main acceptance: those require fresh receipts after publication.
+
+The initializer-order fixture passed through both direct seed entrypoints.
+The candidate-emitted executable also passed with seccomp denying `madvise`:
+`GLOBAL_ZERO_ORDER_OK`, `MADVISE_WITNESS calls=2 enosys=2 child_exit=0`.
+This is executed fallback evidence, not merely the independent C++ microprobe.
+The earlier prefix-elision attempt (Slurm 14797) passed rung `run` but did not
+reduce small-case RAM and is not the selected memory repair. Neither attempt
+establishes a gen3 fixed point. No swap capacity or gate threshold was changed.
