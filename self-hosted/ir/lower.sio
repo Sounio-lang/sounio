@@ -731,7 +731,7 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
     }
     if IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH { print("  cause: lowering reported an error in this compilation; refusing binary publication ") }
     if LOWER_USE_MODULE_OVERFLOWED {
-        print("  cause: more than 1024 distinct lowercase `use` path segments in this\n")
+        print("  cause: more than 4096 module-scoped lowercase `use` path suffixes in this\n")
         print("         compilation; the module-qualified-call registry (LOWER_USE_MODULE_HASH)\n")
         print("         dropped the rest. Any `mod::f(..)` naming a module past this point\n")
         print("         falls back to the mangled `mod_f` stub this gate exists to prevent,\n")
@@ -1334,9 +1334,10 @@ fn lower_kn_field_kind(type_name: Name, field_name: Name) -> i64 with Mut, Panic
     0 - 1
 }
 
+let LOWER_USE_MODULE_CAP: i64 = 4096
 var LOWER_USE_MODULE_COUNT: i64 = 0
-var LOWER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
-var LOWER_USE_MODULE_MODULE_ID: [i64; 1024] = [0 - 1; 1024]
+var LOWER_USE_MODULE_HASH: [i64; 4096] = [0; 4096]
+var LOWER_USE_MODULE_MODULE_ID: [i64; 4096] = [0 - 1; 4096]
 
 // The module id callee_path_module_stripped_name's qualifier lookup checks
 // registry entries against. -1 (the default) means "unscoped": the single-
@@ -1439,8 +1440,8 @@ pub fn lower_use_module_reset() with Mut {
 // pattern already proven reliable throughout this file (LOWER_USE_MODULE_HASH
 // itself, LOWER_ENUM_VARIANT_PTRS, FN_PARAM_NAME_OFF, …).
 let LOWER_USE_MODULE_SEG_MAX: i64 = 384
-var LOWER_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
-var LOWER_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
+var LOWER_USE_MODULE_LEN: [i64; 4096] = [0; 4096]
+var LOWER_USE_MODULE_BUF: [i8; 1572864] = [0; 1572864]
 
 fn lower_use_module_known(module_id: i64, n: Name) -> bool with Mut, Panic, Div {
     if n.len <= 0 || n.len > LOWER_USE_MODULE_SEG_MAX {
@@ -1479,7 +1480,7 @@ fn lower_use_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
     if lower_use_module_known(module_id, n) {
         return
     }
-    if LOWER_USE_MODULE_COUNT >= 1024 {
+    if LOWER_USE_MODULE_COUNT >= LOWER_USE_MODULE_CAP {
         // Silently continuing here would recreate exactly the bug this registry exists
         // to prevent: a `mod::f(..)` call for the segment that didn't fit falls back to
         // the mangled `mod_f` stub, but now with no diagnostic at all. Refuse instead.
@@ -1491,7 +1492,7 @@ fn lower_use_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
         if IR_LOWER_HARD_ERROR == 0 {
             IR_LOWER_HARD_ERROR = 1
             IR_LOWER_HARD_ERROR_REASON = 3
-            IR_LOWER_HARD_ERROR_LIMIT = 1024
+            IR_LOWER_HARD_ERROR_LIMIT = LOWER_USE_MODULE_CAP
         }
         return
     }
@@ -4294,6 +4295,42 @@ fn lowerer_sco_strategy_trace(name: Name, s: i64) with Mut, Panic, Div, IO {
     }
 }
 
+var LOWER_INTO_ACC_ALLOC_TRACE_CHECKED: i64 = 0
+var LOWER_INTO_ACC_ALLOC_TRACE_ON: i64 = 0
+var LOWER_STRATEGY_ENV_TRACE_CALLS: i64 = 0
+var LOWER_STRATEGY_ENV_TRACE_REFILL: i64 = 0
+var LOWER_SCO_ABLATION_CHECKED: i64 = 0
+var LOWER_SCO_ABLATION_ON: i64 = 0
+
+fn lower_into_acc_alloc_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    if LOWER_INTO_ACC_ALLOC_TRACE_CHECKED == 0 {
+        LOWER_INTO_ACC_ALLOC_TRACE_CHECKED = 1
+        let flag = read_env("SOUNIO_INTO_ACC_ALLOC_TRACE")
+        if str_eq(flag, "1") { LOWER_INTO_ACC_ALLOC_TRACE_ON = 1 }
+    }
+    LOWER_INTO_ACC_ALLOC_TRACE_ON == 1
+}
+
+// This compiler option is process-scoped, like the command-line target. Retain
+// only its boolean value, never the temporary read_env string or pool storage.
+// Re-preseeding external declarations must not re-read /proc/self/environ.
+fn lower_sco_ablation_enabled() -> bool with IO, Mut, Panic, Div {
+    if LOWER_SCO_ABLATION_CHECKED == 0 {
+        let env_alloc_trace = lower_into_acc_alloc_trace_enabled()
+        var env_refill_before: i64 = 0
+        if env_alloc_trace { env_refill_before = __pool_refill_bytes() }
+        let flag = read_env("SOUNIO_SCO_ABLATION")
+        if env_alloc_trace {
+            let env_refill_after = __pool_refill_bytes()
+            LOWER_STRATEGY_ENV_TRACE_CALLS = LOWER_STRATEGY_ENV_TRACE_CALLS + 1
+            LOWER_STRATEGY_ENV_TRACE_REFILL = LOWER_STRATEGY_ENV_TRACE_REFILL + env_refill_after - env_refill_before
+        }
+        if str_eq(flag, "1") { LOWER_SCO_ABLATION_ON = 1 }
+        LOWER_SCO_ABLATION_CHECKED = 1
+    }
+    LOWER_SCO_ABLATION_ON == 1
+}
+
 fn lowerer_compute_strategy_from_ast_ref(
     return_type: &Option<Box<TypeExpr>>,
     effects: &Option<Box<EffectList>>
@@ -4322,7 +4359,7 @@ fn lowerer_compute_strategy_from_ast_ref(
     // Marker: SCO_ETAU_ELEVATE_SCIENTIFIC_EFFECTS
     // Marker: SCO_ETAU_ABLATION_ENV
     // Environment-backed ablation is IO; callers propagate that effect explicitly.
-    if !str_eq(read_env("SOUNIO_SCO_ABLATION"), "1") {
+    if !lower_sco_ablation_enabled() {
         if lowerer_sco_scientific_effects_ref(effects) {
             strategy = IR_STRATEGY_PRECISION_PRESERVING
 
@@ -9963,6 +10000,67 @@ fn fo_block_has_unsupported_ctl(blk_opt: &Option<Box<Block>>, depth: i64) -> boo
         }
         None => false,
     }
+}
+
+// Speculative FO re-lower must not refuse ELF publication. #2956 made
+// had_error + IR_LOWER_COMPILE_ERROR_LATCH survive `(*lo) = ...` stores;
+// before that, an ident miss inside fo_inline_call_variance was dropped and
+// gen2 still reached rung `run`. After it, `orbit_is_contested` (two nested
+// if-helpers as call args) stopped the ratcheted self-compile at
+// into_acc_done=7 with report_error_at(15349). Snapshot / restore the ledger
+// so a failed inline stays a -1 variance, not a hard compile error.
+//
+// The same speculation must not keep the IR it emitted. After the orbit
+// rollback, gen2 reached `ocp_const_fold_scan` (into_acc_done=55) and
+// needed 30745 instructions: every `let` re-walks the RHS for variance,
+// FO pastes a helper, then `!ok` returned -1 while leaving those instrs
+// and IR_INSTR_OVERFLOW_COUNT / IR_LOWER_HARD_ERROR in the caller.
+struct FoInlineErrorSnap {
+    error_count: i64,
+    had_error: bool,
+    total: i64,
+    latch: bool,
+    unres: i64,
+    instrs: i64,
+    regs: i64,
+    overflow: i64,
+    hard: i64,
+    hard_reason: i64,
+    hard_needed: i64,
+    hard_limit: i64,
+}
+
+fn fo_inline_error_snap(error_count: i64, had_error: bool, instrs: i64, regs: i64) -> FoInlineErrorSnap {
+    FoInlineErrorSnap {
+        error_count: error_count,
+        had_error: had_error,
+        total: IR_LOWER_ERROR_TOTAL,
+        latch: IR_LOWER_COMPILE_ERROR_LATCH,
+        unres: IR_LOWER_UNRES_COUNT,
+        instrs: instrs,
+        regs: regs,
+        overflow: IR_INSTR_OVERFLOW_COUNT,
+        hard: IR_LOWER_HARD_ERROR,
+        hard_reason: IR_LOWER_HARD_ERROR_REASON,
+        hard_needed: IR_LOWER_HARD_ERROR_NEEDED,
+        hard_limit: IR_LOWER_HARD_ERROR_LIMIT,
+    }
+}
+
+fn fo_inline_error_grew(error_count: i64, had_error: bool, snap: FoInlineErrorSnap) -> bool {
+    error_count > snap.error_count || IR_LOWER_ERROR_TOTAL > snap.total || (had_error && !snap.had_error)
+        || IR_INSTR_OVERFLOW_COUNT > snap.overflow || IR_LOWER_HARD_ERROR != snap.hard
+}
+
+fn fo_inline_error_restore_globals(snap: FoInlineErrorSnap) with Mut {
+    IR_LOWER_ERROR_TOTAL = snap.total
+    IR_LOWER_COMPILE_ERROR_LATCH = snap.latch
+    IR_LOWER_UNRES_COUNT = snap.unres
+    IR_INSTR_OVERFLOW_COUNT = snap.overflow
+    IR_LOWER_HARD_ERROR = snap.hard
+    IR_LOWER_HARD_ERROR_REASON = snap.hard_reason
+    IR_LOWER_HARD_ERROR_NEEDED = snap.hard_needed
+    IR_LOWER_HARD_ERROR_LIMIT = snap.hard_limit
 }
 
 // #1706: a helper registered for inline FO declares no IO/Mut/Alloc effect
@@ -18978,6 +19076,10 @@ impl Lowerer {
             }
         }
         if nargs != nparams { return (lo, 0 - 1) }
+        if (*lo.current_func).instr_count > IR_MAX_INSTRS - 512 {
+            return (lo, 0 - 1)
+        }
+        let fo_err_snap = fo_inline_error_snap(lo.error_count, lo.had_error, (*lo.current_func).instr_count, (*lo.current_func).reg_count)
         var vals: [i64; 8] = [0 - 1; 8]
         var vars: [i64; 8] = [0 - 1; 8]
         var sens: [i64; 256] = [0 - 1; 256]
@@ -19022,7 +19124,14 @@ impl Lowerer {
                     i = i + 1
                     ac = &(*al).tail
                 }
-                None => { return (lo, 0 - 1) }
+                None => {
+                    lo.error_count = fo_err_snap.error_count
+                    lo.had_error = fo_err_snap.had_error
+                    fo_inline_error_restore_globals(fo_err_snap)
+                    (*lo.current_func).instr_count = fo_err_snap.instrs
+                    (*lo.current_func).reg_count = fo_err_snap.regs
+                    return (lo, 0 - 1)
+                }
             }
         }
         let saved_bind = *lo.fo_bind
@@ -19085,7 +19194,12 @@ impl Lowerer {
         var bigr = lo.big
         (*bigr).so_bind_hess = saved_hess_rows
         lo.big = bigr
-        if result < 0 {
+        if fo_inline_error_grew(lo.error_count, lo.had_error, fo_err_snap) || result < 0 {
+            lo.error_count = fo_err_snap.error_count
+            lo.had_error = fo_err_snap.had_error
+            fo_inline_error_restore_globals(fo_err_snap)
+            (*lo.current_func).instr_count = fo_err_snap.instrs
+            (*lo.current_func).reg_count = fo_err_snap.regs
             return (lo.fo_clear_expr_sens().so_clear_expr_hess(), 0 - 1)
         }
         lo = lo.fo_restore_expr_sens(out_sens)
@@ -20647,6 +20761,15 @@ impl Lowerer {
         }
         // Each argument's value (and, for an f64 parameter, its variance and
         // sensitivities), in the caller.
+        // Re-lowering the helper is best-effort. Any diagnostic it raises
+        // (ident miss, unsupported shape) must roll back: this is variance
+        // analysis, not the call's value path, which already succeeded.
+        // A caller already near IR_MAX_INSTRS cannot afford a paste
+        // (ocp_const_fold_scan needed 30745). Skip; do not emit.
+        if (*lo.current_func).instr_count > IR_MAX_INSTRS - 512 {
+            return (lo, 0 - 1)
+        }
+        let fo_err_snap = fo_inline_error_snap(lo.error_count, lo.had_error, (*lo.current_func).instr_count, (*lo.current_func).reg_count)
         var vals: [i64; 16] = [0 - 1; 16]
         var vars: [i64; 16] = [0 - 1; 16]
         var isf: [i64; 16] = [0; 16]
@@ -21063,7 +21186,12 @@ impl Lowerer {
         var bigr = lo.big
         (*bigr).so_bind_hess = saved_hess_rows
         lo.big = bigr
-        if !ok || result < 0 {
+        if fo_inline_error_grew(lo.error_count, lo.had_error, fo_err_snap) || !ok || result < 0 {
+            lo.error_count = fo_err_snap.error_count
+            lo.had_error = fo_err_snap.had_error
+            fo_inline_error_restore_globals(fo_err_snap)
+            (*lo.current_func).instr_count = fo_err_snap.instrs
+            (*lo.current_func).reg_count = fo_err_snap.regs
             return (lo.fo_clear_expr_sens().so_clear_expr_hess(), 0 - 1)
         }
         lo = lo.fo_restore_expr_sens(out_sens)
@@ -27923,19 +28051,24 @@ impl Lowerer {
             // Pending FO sens from Knowledge.value extraction (or measure).
             lo = lo.fo_bind_pending_to_local(s.name)
         } else {
-            // β-Madaros: bind FO variance for any pure RHS (k.value, a*b, 4.0*x, …)
-            // so variance_of(local) works after `let x = <expr>`.
+            // β-Madaros: bind FO variance for a float RHS (k.value, a*b, 4.0*x, …)
+            // so variance_of(local) works after `let x = <expr>`. Integer/bool/
+            // struct lets must not take this walk: ocp_const_fold_scan has ~1370
+            // of them, and re-lowering each RHS (field chain + FO paste) needed
+            // 30741 IR instructions against IR_MAX_INSTRS=16384.
             match s.expr {
                 Some(rhs_v) => {
-                    let vpair2 = lo.lower_expr_variance_ref(&(*rhs_v))
-                    lo = vpair2.0
-                    if vpair2.1 >= 0 {
-                        lo = lo.bind_local_variance_reg(s.name, vpair2.1)
-                        // Capture multi-channel sens produced by RHS FO lower.
-                        if lo.fo_expr_has_sens() {
-                            lo = lo.fo_bind_local_sens(s.name)
+                    if lo.expr_result_is_float_ref(&(*rhs_v)) {
+                        let vpair2 = lo.lower_expr_variance_ref(&(*rhs_v))
+                        lo = vpair2.0
+                        if vpair2.1 >= 0 {
+                            lo = lo.bind_local_variance_reg(s.name, vpair2.1)
+                            // Capture multi-channel sens produced by RHS FO lower.
+                            if lo.fo_expr_has_sens() {
+                                lo = lo.fo_bind_local_sens(s.name)
+                            }
+                            lo = lo.so_bind_local_hess(s.name)
                         }
-                        lo = lo.so_bind_local_hess(s.name)
                     }
                 }
                 _ => {}
@@ -30680,7 +30813,7 @@ impl Lowerer {
                 lo = pair_v.0
                 let val_reg = pair_v.1
                 // Allocate 8 bytes on heap
-                lo = lo.emit(ir_alloc(ptr_reg, 8))
+                lo = lo.emit(ir_alloc_box(ptr_reg, 8))
                 // Store value at ptr[0]
                 lo = lo.emit(ir_field_set(ptr_reg, 0, val_reg, ir_empty_name()))
                 (lo, ptr_reg)
@@ -36508,6 +36641,7 @@ impl Lowerer {
                         print_int(self.locals.count)
                         print("\n")
                     }
+                    lower_note_unresolved(e.name)
                     let loe = self.report_error_at(15349)
                     loe.emit_unit()
                 }
@@ -37806,6 +37940,39 @@ pub fn lower_program_bodies_from_summary_with_epistemic_boxed_owned(
 // Skips dep test `main` (seed owns entry). Force-fills ItemImpl method stubs
 // left ic=0 by seed extern preseed. Caller owns arena mark/reset + call_args
 // re-box for functions written in this pass (including filled stubs).
+// Diagnostic only: never reclaim or mutate either allocation domain. Capture
+// counters before printing so the receipt does not include its own formatting.
+// Cursor values alone are not byte totals across pool refills; retain the
+// cumulative refill/mmap counters and report unsupported sentinels unchanged.
+fn lower_into_acc_alloc_trace_mark(enabled: bool, module_index: i64, stage: string) with IO, Mut, Panic, Div {
+    if !enabled { return }
+    // The bootstrap seed has no __rgn_cursor intrinsic. Do not substitute a
+    // different allocation domain: -1 explicitly means unavailable here.
+    let pool_cursor: i64 = -1
+    let pool_refill = __pool_refill_bytes()
+    let mmap_bytes = __rtmmap_bytes()
+    let box_cursor = __arena_mark()
+    let strategy_env_calls = LOWER_STRATEGY_ENV_TRACE_CALLS
+    let strategy_env_refill = LOWER_STRATEGY_ENV_TRACE_REFILL
+    print("into_acc_alloc: module=")
+    print_int(module_index)
+    print(" stage=")
+    print(stage)
+    print(" pool_cursor=")
+    print_int(pool_cursor)
+    print(" pool_refill=")
+    print_int(pool_refill)
+    print(" mmap_bytes=")
+    print_int(mmap_bytes)
+    print(" box_cursor=")
+    print_int(box_cursor)
+    print(" strategy_env_calls=")
+    print_int(strategy_env_calls)
+    print(" strategy_env_refill=")
+    print_int(strategy_env_refill)
+    print("\n")
+}
+
 pub fn lower_dep_program_items_into_acc_with_externs(
     items: &Option<Box<ItemList>>,
     programs: &! [Program; 256],
@@ -37813,7 +37980,10 @@ pub fn lower_dep_program_items_into_acc_with_externs(
     self_index: i64,
     acc: Box<IrModule>
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
+    let alloc_trace = lower_into_acc_alloc_trace_enabled()
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "begin")
     var lo = lowerer_from_acc_module(acc)
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "lowerer_ready")
     var i: i64 = 0
     while i < program_count {
         if i != self_index {
@@ -37848,8 +38018,10 @@ pub fn lower_dep_program_items_into_acc_with_externs(
         }
         i = i + 1
     }
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "externs_ready")
     lower_set_current_module_id(self_index)
     lowerer_preseed_dep_items_into_acc_mut(&! lo, items, ir_empty_name())
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "own_preseed_ready")
     // DEDUP body lower: skip main + existing bodies; fill stubs and new names.
     // self_index is this dependency module's own loaded-program index (the
     // same id fo_preregister_program_items_multipass stamped its `use`
@@ -37859,14 +38031,17 @@ pub fn lower_dep_program_items_into_acc_with_externs(
     // whole loaded module graph. See LOWER_CURRENT_MODULE_ID's comment.
     lower_set_current_module_id(self_index)
     lowerer_lower_program_bodies_dedup_mut(&! lo, items)
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "bodies_ready")
     // Residual closeout: re-attempt any ItemImpl methods still at ic=0.
     lowerer_force_fill_impl_methods_mut(&! lo, items)
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "impl_ready")
     var patch_stats = ir_empty_validated_patch_stats()
     if lower_ok_without_hard(lo.had_error) {
         var module_box = lo.module
         patch_stats = ir_patch_validated_calls(&! (*module_box))
         lo.module = module_box
     }
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "patch_ready")
     if str_eq(read_env("SOUNIO_INTO_ACC_TRACE"), "1") {
         print("into_acc: dep_done self_index=")
         print_int(self_index)

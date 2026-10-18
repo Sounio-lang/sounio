@@ -26,7 +26,9 @@ echo 'PASS negative: missing timeout refused before compiler build'
 "$WORK/variance-oracle" > "$WORK/variance-oracle.log"
 for test in a64_tuple_call_snapshot a64_box_large_field_table \
     a64_array_element_borrow madaros_nested_float_array_rank \
-    madaros_generic_hof_scalar_inference madaros_measure_literal_variance_bound \
+    madaros_generic_hof_scalar_inference madaros_generic_bool_literal_inference \
+    madaros_flat_arg_dep_reset \
+    madaros_measure_literal_variance_bound \
     madaros_escaping_float_closure madaros_measure_variance_joins \
     rapamycin_epistemic_pbpk gum_fo_closure_call gum_fo_for_loop_call \
     gum_fo_match_call gum_fo_ref_local_field gum_fo_while_call; do
@@ -42,6 +44,13 @@ for test in a64_tuple_call_snapshot a64_box_large_field_table \
         grep -Fq -- "$expected" "$WORK/$test.stdout.log"
     done < "$WORK/$test.expected.log"
     echo "PASS positive: $test"
+    if [[ "$test" = madaros_flat_arg_dep_reset ]]; then
+        grep -Fq 'lower_array: arena_reset_ok module ' "$WORK/$test.build.log"
+        if grep -Fq 'arena_reset_skipped' "$WORK/$test.build.log"; then
+            echo 'FAIL: dependency Box arena was not reclaimed' >&2
+            exit 1
+        fi
+    fi
 done
 for test in madaros_closure_inferred_numeric_rejects_bool \
     madaros_generic_hof_inference_mismatch \

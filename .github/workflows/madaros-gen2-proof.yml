@@ -1,0 +1,74 @@
+name: Madaros Gen2 Recovery Proof
+
+# The general PR CI intentionally skips the self-compile rung. Changes to the
+# GPU opcode bridge or to FO-inline error rollback need an executed witness:
+# checking them alone missed #2881, and the orbit_is_contested wall (#2956
+# latch + FO ident miss) is only visible on the ratcheted gen2 run.
+on:
+  pull_request:
+    paths:
+      - self-hosted/gpu/hlir_to_gpu.sio
+      - self-hosted/gpu/kernel_ir.sio
+      - self-hosted/gpu/opt/autotune.sio
+      - self-hosted/ir/lower.sio
+      - self-hosted/ir/opt_cleanup.sio
+      - self-hosted/ir/loop_opt.sio
+      - tests/gpu/check_gpu_opcode_surface.py
+      - .github/workflows/madaros-gen2-proof.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: madaros-gen2-proof-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  proof:
+    name: Executed Madaros gen2 rung
+    # PR code stays on isolated GitHub-hosted hardware, without shared caches.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 110
+    env:
+      SOUNIO_MADAROS_NOCACHE: "1"
+      SOUNIO_MADAROS_F64_LOWERING_GATE_DIR: /tmp/madaros-gen2-proof
+      SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify opcode references
+        run: python3 tests/gpu/check_gpu_opcode_surface.py
+      - name: Record source under test
+        run: git rev-parse HEAD
+      - name: Add swap headroom for the self-compile
+        run: |
+          free -m
+          df -h /mnt
+          # Local rung run measured 63,570,060 KiB RSS; retain the same gate.
+          sudo fallocate -l 48G /mnt/swapfile-gen2
+          sudo chmod 600 /mnt/swapfile-gen2
+          sudo mkswap /mnt/swapfile-gen2
+          sudo swapon /mnt/swapfile-gen2
+          free -m
+      - name: Build current-source gen1 and run f64 lowering gates
+        run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
+      - name: Preserve scalar PTX emission and refusals
+        env:
+          SOUNIO_MADAROS_BIN: /tmp/madaros-gen2-proof/madaros
+        run: bash tests/gpu/gate_ptx_scalar_literals.sh
+      - name: Execute the ratcheted self-compile rung
+        env:
+          MADAROS_BIN: /tmp/madaros-gen2-proof/madaros
+          SOUNIO_MADAROS_FP_DIR: /tmp/madaros-gen2-proof/fixed-point
+          SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE: "122"
+        run: bash scripts/ci/madaros_fixed_point_gate.sh
+      - name: Upload compiler and executed rung evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: madaros-gen2-proof-${{ github.event.pull_request.head.sha || github.sha }}
+          path: /tmp/madaros-gen2-proof
+          retention-days: 5

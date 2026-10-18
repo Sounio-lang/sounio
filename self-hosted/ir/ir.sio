@@ -91,6 +91,8 @@ pub let IR_RGN_FRAME_SCALAR_EXIT_FLAG: i64 = 64067
 // Compiler-owned address provenance. Other targets retain imm_i64's legacy
 // absolute BSS address; PIE targets relocate it instead of guessing by value.
 pub let IR_BSS_ADDRESS_FLAG: i64 = 64068
+// Box wrappers have a resettable lifetime distinct from value aggregates.
+pub let IR_BOX_ALLOC_FLAG: i64 = 64069
 pub let IR_XOR_TWIST_CAYLEY_DICKSON_SIGN: i64 = 1
 pub let IR_XOR_CANDIDATE_AUTO: i64 = 0
 pub let IR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE: i64 = 1
@@ -1734,8 +1736,16 @@ fn ir_region_grow_slot(slot: i64, want: i64) -> i64 with Mut, Panic, Div {
     if want <= IR_REGION_CAP[slot as usize] { return IR_ARENA_OK }
     var grown = IR_REGION_CAP[slot as usize] * 2
     if grown < want { grown = want }
-    if IR_ARENA_TOP + grown > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
     let old_base = IR_REGION_BASE[slot as usize]
+    // The tail region owns the entire suffix. Extend it in place rather than
+    // stranding every previous doubling; no other region can occupy this range.
+    if old_base + IR_REGION_CAP[slot as usize] == IR_ARENA_TOP {
+        if grown > ir_instr_arena_capacity() - old_base { return IR_ARENA_ERR_CAPACITY }
+        IR_ARENA_TOP = old_base + grown
+        IR_REGION_CAP[slot as usize] = grown
+        return IR_ARENA_OK
+    }
+    if grown > ir_instr_arena_capacity() - IR_ARENA_TOP { return IR_ARENA_ERR_CAPACITY }
     let len = IR_REGION_LEN[slot as usize]
     let new_base = IR_ARENA_TOP
     var i: i64 = 0
@@ -1844,20 +1854,10 @@ pub fn ir_region_reserve(r: &! IrInstrRegion, want: i64) -> i64 with Mut, Panic,
     let slot = (*r).slot
     if IR_REGION_STATE[slot as usize] == IR_REGION_SEALED { return IR_ARENA_ERR_SEALED }
     if want <= IR_REGION_CAP[slot as usize] { return IR_ARENA_OK }
-    var grown = IR_REGION_CAP[slot as usize] * 2
-    if grown < want { grown = want }
-    if IR_ARENA_TOP + grown > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
-    let old_base = IR_REGION_BASE[slot as usize]
-    let len = IR_REGION_LEN[slot as usize]
-    let new_base = IR_ARENA_TOP
-    var i: i64 = 0
-    while i < len {
-        ir_arena_copy_slot(new_base + i, old_base + i)
-        i = i + 1
-    }
-    IR_ARENA_TOP = new_base + grown
-    IR_REGION_BASE[slot as usize] = new_base
-    IR_REGION_CAP[slot as usize] = grown
+    let rc = ir_region_grow_slot(slot, want)
+    if rc != IR_ARENA_OK { return rc }
+    // Preserve the checked API's generation boundary even for in-place growth:
+    // copied handles must still be explicitly refreshed by their owner.
     IR_REGION_GEN[slot as usize] = IR_REGION_GEN[slot as usize] + 1
     (*r).generation = IR_REGION_GEN[slot as usize]
     IR_ARENA_OK
@@ -5383,6 +5383,12 @@ pub fn ir_alloc(dst: i64, type_id: i64) -> IrInstr {
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
+}
+
+pub fn ir_alloc_box(dst: i64, type_id: i64) -> IrInstr with Mut {
+    var instr = ir_alloc(dst, type_id)
+    instr.imm_flags = IR_BOX_ALLOC_FLAG
+    instr
 }
 
 // ir_alloc_array: like ir_alloc, but additionally records the LOGICAL element
