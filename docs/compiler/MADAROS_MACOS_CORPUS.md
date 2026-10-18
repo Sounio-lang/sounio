@@ -1232,3 +1232,93 @@ and modular-page tests passed normally and under observed denial, with
 canonical gate as pending fresh CI rather than claiming its Python-based
 provenance wrapper was executed locally. Only the canonical Linux seed and
 its matching receipt are refreshed; no `.sio` body or gate criterion changed.
+
+### Residual lowering allocation: process-scoped BOX trace option (2026-10-19)
+
+The follow-up to PR #2981 measures a separate residual allocation owner, not a
+second claim for the earlier SCO improvement. An immutable current-source probe
+counted 66,042 actual `read_env("SOUNIO_BOX_TRACE")` calls at the field-read site,
+with 3,840 MiB of pool refill directly between the before/after counters. The
+bind site counted 1,317 reads with no refill at that boundary. These are pool
+refill counters, not net RSS; overlapping body/expression counters must not be
+added to them. Evidence: Slurm 15252,
+`/tmp/madaros-residual-box.RapscT/result/out/frontend-diagnostic.OIpuE4/`.
+
+`lower_box_trace_enabled` now retains only the parsed process-scoped boolean,
+including false/unset, after the first actual read. It does not retain an
+environment-string pointer or reset an arena. Field lowering, Box parameter
+binding, diagnostic contents, initializer order and allocation lifetimes remain
+unchanged. The opt-in allocation receipt counts real reads at the three sites.
+The source SHA-256 of `self-hosted/ir/lower.sio` used for the following proofs is
+`123099c45918c1c35de8a852d7c6df604407f6ad8d331118b29b6bb0a730dc4d`.
+
+The paired measurement (Slurm 15368) ran before then after serially in one
+64 GiB / one-CPU allocation, using the identical frozen input archive
+`ea54d0a589738606352d6898921b842f6b46577210524684f9c417b63588d7e3`
+and C++23 harness
+`9dc2dc3c45a2a25d5582ee1fc9f406e17e9661426326a28f3e2682fdeb708ac2`.
+All diagnostic flags were unset. Both compilations and both generated-compiler
+executions exited zero. `/proc/swaps` contained only its header before and after.
+
+| Self compilation | Before | After |
+| --- | ---: | ---: |
+| Peak RSS (KiB) | 32,125,608 | 28,313,996 |
+| Wall time (microseconds) | 1,374,707,649 | 1,375,939,696 |
+| Peak RSS (MiB, C++23 report) | 31,372.664062 | 27,650.386719 |
+
+The C++23 comparison reports 11.864716% less RAM and 0.089622% more wall time.
+This is one self-compilation trial, not statistical significance, and substantial
+residual memory remains. The generated version command used 7.601562 MiB in both
+cases. Before compiler SHA-256:
+`b4f46bd7cae939da10fc7284e837c8cbee7894e346cd62750cb3d4a990d73c37`;
+after: `ca2fb9ff55496af0d5485cccb192a96b1be0d3744e314c33bb518ff976123fad`.
+Receipts: `/tmp/madaros-box-pair.F1O5n6/result/out/`.
+
+Small-input results are not uniformly better. The initial three-trial run
+showed higher RSS (minimum 225.027344 to 252.031250 MiB; imports 276.777344 to
+304.281250; PBPK 279.777344 to 295.281250). In a fresh original-harness run in
+reversed host order, before any intrusive map sampling, the corresponding
+medians were 225.027344 to 225.031250 MiB, 277.527344 to 277.531250, and
+280.027344 to 269.531250. Three subsequent C++23 external map profiles of the
+minimum each reported wait4 RSS 230,428 KiB before and 230,432 KiB after. The
+initial RSS increase was therefore not reproduced; its exact cause is not
+established. Minimum-input latency was slightly worse in both runs. The map
+observer perturbs execution and is not a replacement benchmark. All results
+are retained in `/tmp/madaros-box-vma.SmSk6F/result/out/` (Slurm 15387).
+
+The durable `box_env_once_gate.sh` compiles its C++23 verifier, executes the
+import/Box/decoy-field witness with trace 0, 1 and unset, checks runtime values
+and trace behavior, then requires one real environment read. The whole script
+failed on the instrumented prior compiler with `BOX_ENV_NOT_ONCE` only after
+semantic controls passed, and passed on the candidate (Slurm 15427,
+`/tmp/madaros-box-durable.ZfD2d0/result/out/`). The separate original regression
+also established six reads before versus one after and exact trace parity.
+
+Additional candidate acceptance:
+
+- Slurm 15397: original fixed-point gate check and gen2 compilation exit zero,
+  14,825 merged IR functions, 129 modules against minimum 122, and generated
+  Madaros execution reaching required rung `run`. Optional gen3 still exits 139:
+  this is not a full fixed point. Historical five empty stubs are not resolved.
+- Supplemental snapshot `/tmp/madaros-box-supplemental.ByJqYA/result/out/`:
+  full f64, IR/address, TypeEnv pressure/boundary/refusal, registry, environment,
+  invalid/empty mark, initializer-order and observed BSS denial checks passed.
+- Slurm 15412 (`/tmp/madaros-box-final.FjxwNE/result/out/`): the entire permanent
+  BSS script compiled its C++ helpers and passed normal/denied paths, each with
+  `MADVISE_WITNESS calls=2 enosys=2 child_exit=0`; flat33000 and region reclaim
+  including negative barrier controls passed.
+- Fresh signed native macOS candidate SHA-256
+  `514502c9dca7552d7c5fc39f421140561adba87cb9913bd4d1c0e652960c65fe`:
+  ABI/semantics/trace parity/selfcheck/IR/TypeEnv/registry/port regressions and
+  required real Metal 200/200 passed. Apple M5 Max binary64 conformance checked
+  40,960 results with zero failures against C++23. Evidence:
+  `/private/tmp/madaros-box-once-native-resume-validation.log` and
+  `/private/tmp/madaros-box-once-native-resume-corpus/`.
+
+Failed preparation attempts remain distinct: Slurm 15289 ran an x86 seed on
+ARM and failed before compilation; 15298 timed out with an incomplete pair;
+15395 lacked the external time utility; the first supplementary snapshot lacked
+the canonical wrapper. None is counted as a passing gate. Canonical wrappers
+and the original gate thresholds were preserved in the successful replacements.
+These are pre-publication proofs of this source; a subsequent PR merge and
+fresh exact-main CI are separate acceptance steps, not implied by this audit.

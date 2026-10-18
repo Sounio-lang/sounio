@@ -402,6 +402,42 @@ var LOWER_RSS_TRACE_ON: i64 = 0
 var LOWER_RSS_TRACE_CHECKED: i64 = 0
 var LOWER_RSS_LAST: i64 = 0
 
+var LOWER_INTO_ACC_ALLOC_TRACE_CHECKED: i64 = 0
+var LOWER_INTO_ACC_ALLOC_TRACE_ON: i64 = 0
+var LOWER_BOX_ENV_CALLS: [i64; 3] = [0; 3]
+var LOWER_BOX_ENV_REFILL: [i64; 3] = [0; 3]
+var LOWER_BOX_TRACE_CHECKED: i64 = 0
+var LOWER_BOX_TRACE_ON: i64 = 0
+
+fn lower_into_acc_alloc_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    if LOWER_INTO_ACC_ALLOC_TRACE_CHECKED == 0 {
+        LOWER_INTO_ACC_ALLOC_TRACE_CHECKED = 1
+        let flag = read_env("SOUNIO_INTO_ACC_ALLOC_TRACE")
+        if str_eq(flag, "1") { LOWER_INTO_ACC_ALLOC_TRACE_ON = 1 }
+    }
+    LOWER_INTO_ACC_ALLOC_TRACE_ON == 1
+}
+
+// Like the other lowering diagnostic options, BOX_TRACE is process-scoped.
+// Keep only its parsed boolean; never retain the temporary environment string.
+// The opt-in receipt counts the actual first read, not helper invocations.
+fn lower_box_trace_enabled(site: i64) -> bool with IO, Mut, Panic, Div {
+    if LOWER_BOX_TRACE_CHECKED == 0 {
+        let enabled = lower_into_acc_alloc_trace_enabled()
+        var before: i64 = 0
+        if enabled { before = __pool_refill_bytes() }
+        let flag = read_env("SOUNIO_BOX_TRACE")
+        if enabled {
+            let after = __pool_refill_bytes()
+            LOWER_BOX_ENV_CALLS[site as usize] = LOWER_BOX_ENV_CALLS[site as usize] + 1
+            LOWER_BOX_ENV_REFILL[site as usize] = LOWER_BOX_ENV_REFILL[site as usize] + after - before
+        }
+        if str_eq(flag, "1") { LOWER_BOX_TRACE_ON = 1 }
+        LOWER_BOX_TRACE_CHECKED = 1
+    }
+    LOWER_BOX_TRACE_ON == 1
+}
+
 fn lower_rss_enabled() -> bool with IO, Mut, Panic, Div, Alloc {
     if LOWER_RSS_TRACE_CHECKED == 0 {
         LOWER_RSS_TRACE_CHECKED = 1
@@ -4295,21 +4331,10 @@ fn lowerer_sco_strategy_trace(name: Name, s: i64) with Mut, Panic, Div, IO {
     }
 }
 
-var LOWER_INTO_ACC_ALLOC_TRACE_CHECKED: i64 = 0
-var LOWER_INTO_ACC_ALLOC_TRACE_ON: i64 = 0
 var LOWER_STRATEGY_ENV_TRACE_CALLS: i64 = 0
 var LOWER_STRATEGY_ENV_TRACE_REFILL: i64 = 0
 var LOWER_SCO_ABLATION_CHECKED: i64 = 0
 var LOWER_SCO_ABLATION_ON: i64 = 0
-
-fn lower_into_acc_alloc_trace_enabled() -> bool with IO, Mut, Panic, Div {
-    if LOWER_INTO_ACC_ALLOC_TRACE_CHECKED == 0 {
-        LOWER_INTO_ACC_ALLOC_TRACE_CHECKED = 1
-        let flag = read_env("SOUNIO_INTO_ACC_ALLOC_TRACE")
-        if str_eq(flag, "1") { LOWER_INTO_ACC_ALLOC_TRACE_ON = 1 }
-    }
-    LOWER_INTO_ACC_ALLOC_TRACE_ON == 1
-}
 
 // This compiler option is process-scoped, like the command-line target. Retain
 // only its boolean value, never the temporary read_env string or pool storage.
@@ -7005,7 +7030,7 @@ fn lowerer_lower_fn_params_mut(
                 if lower_box_or_option_inner_type_name(&(*list).head.ty).len > 0 {
                     let bl = lower_struct_layout_index_of(&(*(*lo).struct_layouts), lower_box_or_option_inner_type_name(&(*list).head.ty))
                     lowerer_bind_local_box_inner_mut(lo, (*list).head.name, bl)
-                    if str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
+                    if lower_box_trace_enabled(0) {
                         print("boxtrace: WRITE-A ")
                         print(str_from_bytes((*list).head.name.buf, (*list).head.name.len))
                         print(" layout=")
@@ -26069,7 +26094,7 @@ impl Lowerer {
                         (*(*locals).tuple_float_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).tuple_arr_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).box_inner_layout).values[idx as usize] = lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_or_option_inner_type_name(&(*list).head.ty))
-                        if lower_type_expr_is_box(&(*list).head.ty) && str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
+                        if lower_type_expr_is_box(&(*list).head.ty) && lower_box_trace_enabled(1) {
                             print("boxtrace: WRITE-B ")
                             print(str_from_bytes((*list).head.name.buf, (*list).head.name.len))
                             print(" layout=")
@@ -34337,7 +34362,7 @@ impl Lowerer {
             _ => false,
         }
         let base_ident_is_box = base_box_layout >= 0 || base_ident_box_tagged
-        if str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
+        if lower_box_trace_enabled(2) {
             print("boxtrace: READ field=")
             print(str_from_bytes(e.name.buf, e.name.len))
             print(" layout=")
@@ -37954,6 +37979,8 @@ fn lower_into_acc_alloc_trace_mark(enabled: bool, module_index: i64, stage: stri
     let box_cursor = __arena_mark()
     let strategy_env_calls = LOWER_STRATEGY_ENV_TRACE_CALLS
     let strategy_env_refill = LOWER_STRATEGY_ENV_TRACE_REFILL
+    let box_calls = LOWER_BOX_ENV_CALLS
+    let box_refill = LOWER_BOX_ENV_REFILL
     print("into_acc_alloc: module=")
     print_int(module_index)
     print(" stage=")
@@ -37971,6 +37998,21 @@ fn lower_into_acc_alloc_trace_mark(enabled: bool, module_index: i64, stage: stri
     print(" strategy_env_refill=")
     print_int(strategy_env_refill)
     print("\n")
+    if str_eq(stage, "patch_ready") {
+        var slot: i64 = 0
+        while slot < 3 {
+            print("box_env_alloc: module=")
+            print_int(module_index)
+            print(" site=")
+            print_int(slot)
+            print(" calls=")
+            print_int(box_calls[slot as usize])
+            print(" pool_refill=")
+            print_int(box_refill[slot as usize])
+            print("\n")
+            slot = slot + 1
+        }
+    }
 }
 
 pub fn lower_dep_program_items_into_acc_with_externs(
