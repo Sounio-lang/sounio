@@ -1203,3 +1203,32 @@ This is executed fallback evidence, not merely the independent C++ microprobe.
 The earlier prefix-elision attempt (Slurm 14797) passed rung `run` but did not
 reduce small-case RAM and is not the selected memory repair. Neither attempt
 establishes a gen3 fixed point. No swap capacity or gate threshold was changed.
+
+### Canonical Linux seed refresh after published CI
+
+Fresh PR CI for `0dc219a26cdc34a451241b1eb99e4d2f13fa7d42` exposed
+the expected seed-surface coupling: `Contracts Core` rejected the old committed
+Lean seed because its self-compile differed from the changed `lean_single.sio`.
+The exact failing gate was `canonical_compiler_gate.sh`, not the memory,
+f64, Metal or rung checks. No gate criterion was changed.
+
+Slurm job 15059 derived the replacement from the committed seed and exact source
+SHA-256 `cdd399c7e9db6ccf0faa7e52a1b2fb87348aef3f8741d06e1310bc6125c91501`.
+Generation 1 differed; generations 2 and 3 were byte-identical. The settled
+candidate also reproduced itself in two additional compilations with identical
+bytes. Their MD5 is `d83da2359f74ea04317991aebc0b21d9`, SHA-256
+`2ef3cb5a84c0b899e02a6ccf97dfa196cfdb27609f189ab73372c370c3610425`.
+Evidence is preserved at `/tmp/pr2981-seed-settle.GU17Cl/result/out/` on the
+workspace. An independent C++23/OpenSSL receipt emitter verified the generation,
+source and output hashes and refused an incorrect source-SHA control. This
+establishes the Lean seed's M1/M2/M3 properties only; it does not establish a
+modular Madaros gen3 fixed point or diverse double-compilation.
+
+The follow-up Slurm snapshot `/tmp/pr2981-seed-check.Tvdv1m/result/out/`
+passed the original `verify_lean_seed.sh` (fixed point and determinism), and
+the entire standalone BSS gate with the refreshed seed. Both initializer-order
+and modular-page tests passed normally and under observed denial, with
+`MADVISE_WITNESS calls=2 enosys=2 child_exit=0`. The receipt records the named
+canonical gate as pending fresh CI rather than claiming its Python-based
+provenance wrapper was executed locally. Only the canonical Linux seed and
+its matching receipt are refreshed; no `.sio` body or gate criterion changed.
