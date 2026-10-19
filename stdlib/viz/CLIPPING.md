@@ -13,8 +13,10 @@ uses RGB directly; alpha and wider strokes are separate rendering work.
 The chart layout gives endpoint distances: closed pixel-center bounds
 [x,x+w] by [y,y+h]. Coordinates stay within +/-1,000,000 and extents in 1..1,000,000.
 
-Scatter/bar/ribbon clipping, log/symlog transforms, automatic domain/axis linking,
-adaptive ticks and multiseries layouts are not certified by this checkpoint.
+The original line checkpoint did not certify other mark clipping. Checked scatter
+is specified below; bar/ribbon clipping remains future work. Log/symlog line
+transforms have a separate contract in SCALES.md. Automatic domain/axis linking,
+adaptive ticks and multiseries layouts are outside this clipping contract.
 
 ## Shared clipping and normalization
 
@@ -100,3 +102,49 @@ docs/plans/SCIENTIFIC_CLIPPING_LEGENDS_EXECUTION_2026_10_17.md.
 Compact clipped export now uses independent M/L subpaths in one path per chart.
 See SVG_PATHS.md and SCIENTIFIC_SVG_PATHS_EXECUTION_2026_10_17.md for the
 format change, preserved geometry, measured size and raster limits.
+
+
+## Checked scatter centers and glyph footprints
+
+`viz_scatter_set_viewport` opts a raw-linear scatter node into closed-center
+viewport clipping. It validates node/slot, untransformed flags, finite strictly
+increasing domains with finite spans, bounded layout (both endpoints within
+±1,000,000, positive extents ≤1,000,000), opaque RGB8 and stroke1 before mutation.
+An invalid request returns false with no changes. The domain is stored in the
+series, so callers must account for any other nodes sharing that series.
+
+Both backends use `viz::scatter::scatter_project`. Status0 is a projectable
+center, 1 a clipped out-of-domain center, and 2 invalid. Error coordinates are0.
+Geometry, finite samples/bounds, ordered bounds and finite spans are checked
+before any floating-to-integer cast. A constant axis accepts only an exactly
+equal sample, mapping integer offset extent/2; y is origin+height-height/2.
+Constant mismatch is invalid even in clip mode. Explicit scatter viewports
+require strictly increasing bounds; constants serve the legacy auto-domain path.
+
+Nonconstant mapping retains truncation of ((sample-lo)/(hi-lo))*extent, unlike
+line clipping's nearest-pixel rule. Normalized coordinates beyond ±1,000,000
+are conservatively invalid before conversion. Opposite-sign extreme bounds
+whose span overflows are invalid; this API does not promise arbitrary-range
+projection. Nonfinite samples are omitted. No point is clamped onto a boundary.
+
+Scatter auto bounds now use paired finite rows only, retaining the original n
+and sample arrays. Nonempty all-invalid input returns -1 transactionally; empty
+input remains allowed. Invalid rows are omitted by each renderer. Singleton and
+constant data map to the same integer center in Canvas and SVG without epsilon
+padding, including zero and large constants.
+
+Legacy Canvas crosses and SVG radius3 circles retain their shapes. Opt-in
+clipping renders radius3 filled circles in both: integer disk dx²+dy²≤9 for
+Canvas; a circle and user-space clipPath for SVG. Only centers inside the CLOSED
+raw domain are emitted. Glyph pixels are contained in the closed rectangle
+[x,x+w]×[y,y+h]; SVG uses the corresponding pixel-cell rectangle
+[x-.5,x+w+.5]×[y-.5,y+h+.5]. No implicit axes are drawn for clipped Canvas scatter;
+legacy Canvas retains its axes. Raster and SVG antialiasing are not identical.
+
+SVG retains `<!-- scatter n=N -->` and adds
+`<!-- scatter counts visible=V outside=O invalid=I -->`. These count active rows,
+not distinct centers. Clip IDs are `scatter-clip-NODEINDEX`.
+
+This slice adds no scaled-scatter builder: log/symlog transformation contracts
+remain in `scaled_plot.sio`. The raw viewport setter rejects transformed flags;
+zero is not silently replaced by epsilon for log axes.

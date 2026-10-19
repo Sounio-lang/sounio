@@ -15,7 +15,7 @@ scientific contracts, render semantics and domain consumers.
 |---|---|---|
 | Statistics | Raw MAD; direct t survival; df-aware t/F helpers; public one-sample/pooled/Welch/paired tests with 95% t intervals and statuses | Stable simple OLS, real deletion DFFITS/Cook, Student slope CI and unassessed statuses accepted; seeded robust percentile bootstrap accepted; checked exhaustive/Monte Carlo permutation accepted; checked mean BCa accepted; checked JB/Koenker/Shapiro-Wilk, median Brown-Forsythe, fitted-normal AD and checked KS accepted (60/60), with repaired shared F/beta extreme tails and removed legacy assumption p-to-Beta machinery; checked Pearson/Spearman and explicit inference accepted in77/77; labelled correlation permutations and seed-state repair accepted in80/80; shared rectangular QR and multiple regression accepted in83/83; weighted fits and tiny-projection QR repair accepted in86/86; conditional weighted covariance/Student inference accepted in90/90; checked offset-aware Poisson mean fitting accepted in101/101; OLS HC3 covariance accepted in105/105 ([receipt](HC3_COUNT_TSV_ACCEPTANCE_2026_10_19.md)); CR0/CR1S covariance and synthetic coefficient/SE consumer accepted in108/108, job15643 ([receipt](CLUSTER_COVARIANCE_EXECUTION_2026_10_19.md)); next weak-null inference and empirical calibration studies |
 | Mathematics | Small/large sqrt scaling; direct small-angle sine; finite predicate; analytic Cauchy quantile | Checked information measures and channel helpers accepted in73/73; checked rectangular pivoted QR accepted in83/83; shared QR tiny-projection repair accepted in86/86; balanced scale restoration and repaired Student extreme/near-origin tails accepted in90/90; next condition estimation, large-argument trig and convergence policies |
-| Scientific visualization | Explicit CI/prediction/credible bounds; inferential forest consumer; shared linear axes/ticks/labels; explicit row-count read; shared line viewport/clip and legend geometry | DFFITS-linked Canvas/SVG figure, automatic nice ticks, shared line domains, compact clipped SVG and explicit log/symlog accepted; conditional weighted-coefficient forest with independent geometry checks accepted in90/90; declared-correlation/standard-uncertainty Canvas/SVG consumer accepted in95/95; offset-aware count-rate/Pearson-residual consumer accepted in101/101; counts-to-QC consumer accepted in105/105 and clustered coefficient/CR0-CR1S SE consumer accepted in108/108; next nonlinear nice ticks, other-mark clipping, layout and provenance |
+| Scientific visualization | Explicit CI/prediction/credible bounds; inferential forest consumer; shared linear axes/ticks/labels; explicit row-count read; shared line viewport/clip and legend geometry | DFFITS-linked Canvas/SVG figure, automatic nice ticks, shared line domains, compact clipped SVG and explicit log/symlog accepted; conditional weighted-coefficient forest with independent geometry checks accepted in90/90; declared-correlation/standard-uncertainty Canvas/SVG consumer accepted in95/95; offset-aware count-rate/Pearson-residual consumer accepted in101/101; counts-to-QC consumer accepted in105/105 and clustered coefficient/CR0-CR1S SE consumer accepted in108/108; shared scatter projection and checked glyph clipping accepted in111/111, job15650 ([receipt](SCATTER_PROJECTION_EXECUTION_2026_10_19.md)); next nonlinear nice ticks, remaining other-mark clipping, layout and provenance |
 | Genomics | Sequence/FASTA foundations; checked streaming two-pass TPM; shared streaming k-mers with exact integer counts, checked public adapter, idempotent profiles and stable JSD accepted in the64/64 closure | Checked anchored median-log-ratio reference-panel size factors and scalar count application accepted in95/95; offset-aware Poisson mean kernel accepted in101/101, separate from negative-binomial inference; incremental count TSV/QC/256x8 adapter and counts-to-Canvas/SVG consumer accepted in105/105, repeated on refreshed main in15633 ([receipt](HC3_COUNT_TSV_ACCEPTANCE_2026_10_19.md)); long-stream resource measurements remain open; PWM/motif/hashed embedding uncertainty remains unassessed |
 | Physics | Correct Compton units and trigonometry, angular uncertainty and legacy adapter | Checked isothermal entropy and explicit standard-uncertainty bars accepted in69/69; declared two-volume covariance and calibration-cancellation consumer accepted in95/95; checked Lorentz Jacobian covariance and repaired legacy adapters accepted in101/101; next units and invariant-based validation |
 | Execution support | Smaller runtime package; measured build/runtime separation; compile-once bundle | Bundle phase split recorded in job 15619; reuse that receipt, extend only when a library implementation is blocked |
@@ -855,3 +855,36 @@ render semantics, count-domain consumers, physical units/invariants and measured
 execution/memory/artifact work remain explicit priorities. Packaging and profiling
 support those kernels and their consumers. Broader CI, merge/publication and
 scientific validation remain separately reported states.
+
+## Continuation checkpoint — shared scatter projection, 2026-10-19
+
+Following accepted108/108 cluster covariance, the next bounded implementation
+repairs a shared scientific rendering defect: constant/singleton scatter centers
+differed between Canvas and SVG, and glyphs could escape the plot viewport.
+Both renderers now use a finite checked projector. Scatter auto bounds use paired
+finite rows; nonempty all-invalid input fails transactionally. Legacy glyph
+shapes remain; the opt-in raw-linear viewport uses clipped radius3 disks/circles
+with closed-center-domain classification and explicit row counters.
+
+Independent C++23 covers64 projection cases, with byte-identical regenerated
+fixtures. The real previous-renderer control15649 compiles/runs but fails its SVG
+center expectation:actual(40,110),expected(140,70). Full111-entry native15650 accepts111/111 with zero failures/skips/errors,
+retaining all108 previous entries. Scissor-removal control15651 compiles then
+fails the selected viewport fixture0/1, zero skips.
+See [scatter execution receipt](SCATTER_PROJECTION_EXECUTION_2026_10_19.md).
+
+This continues rendering semantics within the broader statistics, mathematics,
+genomics and physics sprint. Nonlinear nice ticks, other-mark clipping,
+conditioning/convergence, calibration and measured resource work remain open.
+
+Focused entries100/101/102 pass (singleton,64-case reference,viewport); the final
+C++23 checker accepts the actual five-circle figure and its boundary clip
+annotation. Center/clipwidth/group-removal SVG mutations each exit2. Scissor
+control15651 compiles384functions then fails the viewport fixture0/1 in7s,
+zero skips. Root rebuilt C++23 references warning-free with generatedfixturecmp0.
+Final15650 summary passes three layers:111/111, zero failures/skips/errors.
+Scientific and boundary SVG XML checks both exit0. Corpus340s and overall341s
+are whole-run observations; Slurm elapsed5:42, TotalCPU11:18.137 and batch
+MaxRSS7152996K describe the two-worker compile/run job, not renderer performance.
+The final source snapshot370cc50246991bc39421b4530b8ec55b10b3dbd67cc2102ab710e1c055cf009e
+precedes final documentation edits. Broader CI/merge remain separate states.
