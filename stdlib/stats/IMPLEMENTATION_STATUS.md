@@ -1,13 +1,19 @@
 # Statistics Stdlib Implementation Status
 
-## Current multi-domain native closure
+## Current accepted native checkpoint
 
-Main-based Forge15457 passes95/95, retaining all90 previous fixtures.
-Active worktree /workspace/sounio-sprint-stats-viz-main-20261019 is based on
-remote main54f73df0. The new methods are genomic count normalization and
-correlated physical uncertainty; the statistical methods below retain their
-individual contracts. This does not certify every stdlib function or a count
-likelihood model. See [receipt](../../docs/plans/COUNTS_COVARIANCE_EXECUTION_2026_10_19.md).
+Corrected main3 Forge/Slurm15643 accepts108/108, zero failures/skips/errors,
+including all105 previously accepted entries, CR0/CR1S reference/status and
+the scientific cluster-covariance figure. The real SVG passes an independent
+six-marker checker and three geometry mutation controls are rejected.
+Failed v1 Slurm15637 (107/108, sole visualization timeout) and numerical
+fault controls15638/15639 remain explicitly preserved in the
+[cluster receipt](../../docs/plans/CLUSTER_COVARIANCE_EXECUTION_2026_10_19.md).
+
+Earlier95-entry multi-domain acceptance is retained in its
+[receipt](../../docs/plans/COUNTS_COVARIANCE_EXECUTION_2026_10_19.md).
+Named executable receipts establish their scoped acceptance; this file does
+not certify every stdlib function or scientific inference model.
 
 ## Previous statistical method checkpoint — 2026-10-19
 
@@ -821,3 +827,35 @@ Rounded-leverage/representability limits remain; no cluster inference or broad
 statistical calibration is claimed. Full compiler CI/merge remain separate.
 
 Refreshed remote main ea36493e is incorporated in main3; Slurm15633 repeats105/105, zero failures/skips/errors.
+
+### Checked single-way clustered OLS covariance — 2026-10-19
+
+regression::robust_covariance::multiple_linear_cluster adds covariance-only
+CR0 and CR1S from existing checked pivoted/scaled QR factors. CR1S is explicitly
+G/(G-1)*(n-1)/(n-p), with returned correction_factor; it is not the bare
+G/(G-1) convention. Signed label equality, compensated within-cluster influence
+sums BEFORE outer products, finite/representability statuses and a shared
+LASSQ/Gram path preserve the HC3 statistical procedure.
+
+Independent C++23 quad raw-score aggregation/triangular solves cover31cases;
+relative nonzero coefficient/SE/diagonal checks have no1+abs floor. Cases include
+arbitrary signed/relabelled/noncontiguous groups, extreme units, permutations,
+G256 and nonzero G2 withp8. Exact cancellation is checked conditional on actual
+reported residuals rather than forcing analytic zeros.
+
+Final native v2 Slurm15643 passes108/108, zero failures/skips/errors, retaining
+all105 prior entries. Corpus phase212s; overall215s, not a paired speed claim.
+The real native figure passes the independent six-marker checker; position,
+count and radius mutations each exit2. V1 Slurm15637 remains107/108 with the
+sole missing-increment visualization timeout. Controls15638 (wrong partition)
+and15639 (omitted CR1S correction with unchanged metadata) compile and fail
+their numerical assertions. The corrected figure is bound by the receipt's
+source/SVG hashes and accepted snapshot e4c93240fc9ed22a6d70c2fa51d6f6bc17b4b53a180bcd11f181876996e0859b.
+
+G>=2 andn>p are arithmetic availability rules, not few-cluster calibration.
+G<=p is permitted and covariance may be singular. No clustered t/p/CI,
+independence assessment, finite-sample coverage or measured speed/RSS superiority
+is claimed. Fixed buffers include two2048-element group sum/correction arrays
+plus bounded labels/indices and nested QR/result storage.
+See [contract](regression/CLUSTER_COVARIANCE.md) and
+[execution receipt](../../docs/plans/CLUSTER_COVARIANCE_EXECUTION_2026_10_19.md).
