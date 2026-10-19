@@ -16,9 +16,9 @@ scientific contracts, render semantics and domain consumers.
 | Statistics | Raw MAD; direct t survival; df-aware t/F helpers; public one-sample/pooled/Welch/paired tests with 95% t intervals and statuses | Stable simple OLS, real deletion DFFITS/Cook, Student slope CI and unassessed statuses accepted; seeded robust percentile bootstrap accepted; checked exhaustive/Monte Carlo permutation accepted; checked mean BCa accepted; checked JB/Koenker/Shapiro-Wilk, median Brown-Forsythe, fitted-normal AD and checked KS accepted (60/60), with repaired shared F/beta extreme tails and removed legacy assumption p-to-Beta machinery; checked Pearson/Spearman and explicit inference accepted in77/77; labelled correlation permutations and seed-state repair accepted in80/80; shared rectangular QR and multiple regression accepted in83/83; weighted fits and tiny-projection QR repair accepted in86/86; conditional weighted covariance/Student inference accepted in90/90; checked offset-aware Poisson mean fitting accepted in101/101; next robust/clustered and weak-null inference and empirical calibration studies |
 | Mathematics | Small/large sqrt scaling; direct small-angle sine; finite predicate; analytic Cauchy quantile | Checked information measures and channel helpers accepted in73/73; checked rectangular pivoted QR accepted in83/83; shared QR tiny-projection repair accepted in86/86; balanced scale restoration and repaired Student extreme/near-origin tails accepted in90/90; next condition estimation, large-argument trig and convergence policies |
 | Scientific visualization | Explicit CI/prediction/credible bounds; inferential forest consumer; shared linear axes/ticks/labels; explicit row-count read; shared line viewport/clip and legend geometry | DFFITS-linked Canvas/SVG figure, automatic nice ticks, shared line domains, compact clipped SVG and explicit log/symlog accepted; conditional weighted-coefficient forest with independent geometry checks accepted in90/90; declared-correlation/standard-uncertainty Canvas/SVG consumer accepted in95/95; offset-aware count-rate/Pearson-residual consumer accepted in101/101; next nonlinear nice ticks, other-mark clipping, layout and provenance |
-| Genomics | Sequence/FASTA foundations; checked streaming two-pass TPM; shared streaming k-mers with exact integer counts, checked public adapter, idempotent profiles and stable JSD accepted in the64/64 closure | Checked anchored median-log-ratio reference-panel size factors and scalar count application accepted in95/95; offset-aware Poisson mean kernel accepted in101/101, separate from negative-binomial inference; next count-matrix/I/O and long-stream resource measurements; PWM/motif/hashed embedding uncertainty remains unassessed |
+| Genomics | Sequence/FASTA foundations; checked streaming two-pass TPM; shared streaming k-mers with exact integer counts, checked public adapter, idempotent profiles and stable JSD accepted in the64/64 closure | Checked anchored median-log-ratio reference-panel size factors and scalar count application accepted in95/95; offset-aware Poisson mean kernel accepted in101/101, separate from negative-binomial inference; incremental count TSV/QC/256x8 adapter typechecked in 15622; numerical status fixture and C++23 checker added, native concordance still open; long-stream resource measurements remain open; PWM/motif/hashed embedding uncertainty remains unassessed |
 | Physics | Correct Compton units and trigonometry, angular uncertainty and legacy adapter | Checked isothermal entropy and explicit standard-uncertainty bars accepted in69/69; declared two-volume covariance and calibration-cancellation consumer accepted in95/95; checked Lorentz Jacobian covariance and repaired legacy adapters accepted in101/101; next units and invariant-based validation |
-| Execution support | Smaller runtime package; measured build/runtime separation; compile-once bundle | Reuse existing support; extend only when a library implementation is blocked |
+| Execution support | Smaller runtime package; measured build/runtime separation; compile-once bundle | Bundle phase split recorded in job 15619; reuse that receipt, extend only when a library implementation is blocked |
 
 This is a method-level ledger, not certification of every function in a track.
 A source implementation, a native acceptance receipt, remote CI, and publication
@@ -34,7 +34,41 @@ Controlled before job 14851 retains thirteen passes and fails the two new consum
 See SCIENTIFIC_CLIPPING_LEGENDS_EXECUTION_2026_10_17.md.
 The regression/influence checkpoint has final acceptance in job 14870: eighteen tests, zero failures/skips/errors. Controlled legacy determinant-policy job 14871 compiles but fails the small-scale numerical assertions (seventeen passes, one failure). See STATS_REGRESSION_INFLUENCE_EXECUTION_2026_10_17.md. Automatic scientific axes and shared line-domain binding have final acceptance in job 14879: twenty tests, zero failures/skips/errors. Controlled explicit-domain-policy job 14880 retains eighteen passes and fails the two new fixtures after successful compilation. See SCIENTIFIC_AUTO_AXES_EXECUTION_2026_10_17.md. Compact clipped SVG has final acceptance in job 14889: twenty-one tests, zero failures/skips/errors. Before renderer job 14890 retains twenty passes and fails only the new markup assertion. Independent C++23 comparison confirms exact canonical geometry, style, mask and audit equality; the dense 1024-point SVG decreases from 111053 to 18050 bytes, and gzip from 7379 to 4792 bytes. See SCIENTIFIC_SVG_PATHS_EXECUTION_2026_10_17.md. Explicit log10/symlog and checked logarithm have final acceptance in job 14905: twenty-three tests, zero failures/skips/errors. Controlled identity-transform job 14906 preserves twenty-one passes and fails both new fixtures after compilation. C++23 covers 51 transforms/round trips with explicit subnormal quantization bounds, exact Compton log/log projection and byte-identical legacy SVG comparisons. See SCIENTIFIC_LOG_SYMLOG_EXECUTION_2026_10_17.md. Seeded percentile bootstrap has final acceptance in job 14939: twenty-seven tests, zero failures/skips/errors. The untouched former bootstrap in job 14929 compiles and fails the seed-degeneracy assertion while retaining twenty-three prior passes. C++23 covers ten datasets including maximum capacity, extreme finite scales and signed seed limits; the same results feed Canvas and SVG with explicit 95% percentile semantics. The same visual review also repaired SVG forest/axis RGB preservation; controlled renderer-before job 14940 retains twenty-six passes and fails the new exact-RGB assertion. See STATS_BOOTSTRAP_EXECUTION_2026_10_17.md. Checked permutation inference has final acceptance in job 14974: thirty-two tests, zero failures/skips/errors. Fourteen independent C++23 cases cover full label enumeration, 48620 assignments, 1-by-255 and 255-by-1 groups, extreme values, seeded Monte Carlo counts and Wilson bounds. Old implementation job 14961 retains twenty-seven passes and fails the raw-unit tolerance regression after compilation. A Canvas/SVG consumer displays Monte Carlo tail-probability intervals with explicit budgets and meaning; the legacy example remains accepted. One index buffer is reused as the enumeration cursor. The effect oracle uses relative accuracy against the effect itself, including on a 1e15 common offset. Main rechecked at c4f1d3ce73987de9e2694af393711180f6a57fb1; its new website/docs changes do not touch this closure. See STATS_PERMUTATION_EXECUTION_2026_10_17.md. Checked mean BCa has acceptance in job 15063: thirty-seven tests, zero failures/skips/errors, including all previous thirty-two fixtures. Nine C++23 cases independently compute explicit jackknife deletions, bias/tie counts, adjusted probabilities and endpoints; 25 CDF and 11 inverse-normal checks cover the bounded normal kernel. The mean acceleration uses a scale-free moment identity without a jackknife buffer; ordinary percentile and BCa share draw/sort/variance logic. Controlled legacy numerical body job 15066 compiles and fails both large-value consumers while retaining thirty-five passes. See STATS_BCA_EXECUTION_2026_10_18.md. Next priority is explicit assumption assessment and continued genomics/physics numerical kernels; correlation/general-statistic BCa and coverage studies remain open. The master sprint remains in progress.
 
-## Latest checkpoint — compact validation and measured phases, 2026-10-19
+## Bundle phase attribution — job 15619, 2026-10-19
+
+Job 15619 on cpu-ops measured the existing `build_stats_viz_bundle.sh` path
+separately from execution for the three accepted Poisson/Lorentz fixtures.
+The frozen v3 package was copied and not modified. Archive
+`806aa97f5b459ce8ada29aeadd425801e43bb4aa6127a795f0b9cbb02287cb44` checked
+before and after. Manifest
+`d4bb6caab77912c1972e6713cb34569038c576d6ae874048fb45a18f4be1878a`.
+Pinned Madaros
+`125c25703ac4062fc6befb7acf77e945abb13405f0adb5ab09fbc5a8d4b5b29f`.
+
+Each phased `souc compile` ELF matched the official bundle ELF on three
+repetitions. Stdout was byte-identical and every pass marker was present.
+All 51 GNU-time rows exited 0. The job itself exited 127:0 after those checks
+because the worker image has no g++. Medians come from the same C++23
+summarizer, compiled off the worker. Elapsed 0.00 s is below the 0.01 s clock,
+not zero cost. Phase peaks are separate process maxima and must not be added.
+
+| Fixture | Compile median KiB | Execute median KiB | Bundle-build KiB |
+|---|---:|---:|---:|
+| stats_poisson_reference | 1802764 | 3192 | 1802252 |
+| physics_lorentz_reference | 1492492 | 3184 | 1491980 |
+| viz_poisson_offsets | 3323392 | 8192 | 3323404 |
+
+Materialize was 3680–3760 KiB. Hashing was about 3200–3280 KiB. For these
+fixtures the bundle-build peak is the compile peak. These numbers do not
+explain or reduce batch MaxRSS 5277668K (job 15602) or 7062324K (job 15603).
+No kernel-only measurement, memory reduction, or speedup is claimed. Numerical
+sources and the 101/101 acceptance are unchanged.
+
+This measurement is distinct from the compact-reference profile in jobs
+15615/15616. That profile times direct ELF execution of a smaller fixture.
+Job 15619 times the existing bundle builder and its internal phases.
+
+## Previous checkpoint — compact validation and measured phases, 2026-10-19
 
 The compact Poisson reference retains **101/101** native acceptance in Slurm15613,
 zero failures/skips/errors,exit0:0,5:05. Snapshot

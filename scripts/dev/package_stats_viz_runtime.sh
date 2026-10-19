@@ -60,6 +60,10 @@ files=(
     tests/reference/ks_reference.cpp
     tests/reference/anderson_darling_reference.cpp
     tests/reference/brown_forsythe_reference.cpp
+    tests/reference/linear_hc3_reference.cpp
+    tests/reference/linear_hc3_fixture.cpp
+    tests/reference/count_tsv_reference.cpp
+    tests/reference/count_matrix_qc_svg_reference.cpp
 )
 tests=(
     stats_descriptive_mad stats_inferential_tails
@@ -92,6 +96,7 @@ tests=(
     physics_lorentz_reference physics_lorentz_status physics_lorentz_legacy
     genomics_size_factors_reference genomics_size_factors_status
     physics_entropy_covariance_reference physics_entropy_covariance_status viz_entropy_covariance
+    stats_linear_hc3_reference stats_linear_hc3_status genomics_count_tsv viz_count_matrix_qc
 )
 for name in "${tests[@]}"; do files+=("tests/run-pass/$name.sio"); done
 for path in "${files[@]}"; do

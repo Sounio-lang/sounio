@@ -95,3 +95,11 @@ score-aggregation contract. No new performance or SOTA superiority is claimed.
 Final typecheck receipt: v2, **Slurm15622**, status pass, all three orchestration
 phases pass, no failed layer. The log contains TYPECHECK_OK for each module and
 TYPECHECK_READY. This is two module checks, not three scientific tests.
+
+## Superseding native acceptance
+
+The numerical/consumer work left pending above is now covered by Slurm15625,
+105/105 with zero failures/skips/errors, independent C++23 concordance and a
+native counts-to-QC Canvas/SVG consumer. This file retains the historical
+implementation checkpoint; see HC3_COUNT_TSV_ACCEPTANCE_2026_10_19.md for the
+current result, controls and remaining limits.

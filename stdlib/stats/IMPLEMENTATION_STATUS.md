@@ -809,3 +809,15 @@ existing pivoted/scaled QR factors. Native typecheck passes in Slurm15622;
 independent C++23 reference syntax passes on t560. Numerical concordance and
 executable consumers remain pending. This is not covered by the earlier101/101
 acceptance. No cluster covariance or calibrated t/p/CI is claimed.
+
+### HC3 concordance and counts-to-figure acceptance — 2026-10-19
+
+This supersedes the earlier experimental-only checkpoint: native Slurm15625
+accepts105/105, zero failures/skips/errors, including24-case HC3 reference/status,
+incremental count TSV/QC and counts-to-Canvas/SVG. Independent C++23 generators
+reproduce the fixtures and an exact six-marker checker accepts the native SVG.
+HC0 weighting and overflow-to-zero controls compile and fail in15626/15629.
+Rounded-leverage/representability limits remain; no cluster inference or broad
+statistical calibration is claimed. Full compiler CI/merge remain separate.
+
+Refreshed remote main ea36493e is incorporated in main3; Slurm15633 repeats105/105, zero failures/skips/errors.
