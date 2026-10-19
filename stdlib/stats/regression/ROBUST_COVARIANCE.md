@@ -132,3 +132,12 @@ claimed from source inspection.
 Source completion is not native numerical acceptance. Typechecking and
 execution must be coordinated through Forge/Slurm. Independent numerical
 reference work follows ADR009, using C++23 rather than Python/Rust/Julia.
+
+## Native acceptance — 2026-10-19
+
+The24-case independent C++23/quad reference and status/metamorphic consumers
+pass in Slurm15625 within105/105, zero failures/skips/errors. The portable
+linear_hc3_fixture.cpp emitter reproduces the reference fixture byte-for-byte.
+An isolated HC0-weighting control compiles but fails the reference in15626.
+These bounded cases do not establish inferential calibration or cluster support.
+See docs/plans/HC3_COUNT_TSV_ACCEPTANCE_2026_10_19.md for receipts and limits.

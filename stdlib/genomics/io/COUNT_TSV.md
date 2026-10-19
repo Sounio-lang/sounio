@@ -142,3 +142,12 @@ This is numeric count interchange, not FASTA, Matrix Market, 10x, CSV, a feature
 identity table, or a filesystem reader. No uncertainty model or inferential
 interval is generated. A plot consuming QC must label totals as counts and
 zero fractions with the correct row denominator.
+
+## Native acceptance — 2026-10-19
+
+Slurm15625 passes105/105 including the count parser/QC fixture and its native
+Canvas/SVG consumer. Independent C++23 from_chars reference generates24 input
+cases walked at chunk sizes1,2,3,7,256, plus dedicated transaction/capacity checks.
+An injected overflow-to-zero control compiles and fails unchanged assertions
+in15629. A weaker threshold mutation in15627 remains passing and is recorded as
+non-discriminating. See docs/plans/HC3_COUNT_TSV_ACCEPTANCE_2026_10_19.md.

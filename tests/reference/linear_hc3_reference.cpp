@@ -1,7 +1,7 @@
 // Independent HC3 numerical reference, C++23 + libquadmath.
-// Compile ONLY when separately authorized:
+// Build:
 //   g++ -std=c++23 -O2 -Wall -Wextra -pedantic linear_hc3_reference.cpp -lquadmath -o linear_hc3_reference
-// This source was prepared without compiling or executing it.
+// Execution receipts are recorded externally; source comments are not receipts.
 // Production API: stats::regression::robust_covariance::multiple_linear_hc3,
 // stride8, n1..256,p1..8,p<=n; method3, assumptions_assessed=false.
 // Independence: raw-design two-pass modified Gram-Schmidt in __float128,
