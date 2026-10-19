@@ -801,3 +801,11 @@ Independent C++23 analysis rejects missing/failed/nonfinite/zero-RSS observation
 Observed compile CPU median7.59s→5.38s, ELF2150856→885192bytes; three pairs on one
 host, descriptive only. Direct-run wall median remains0.03s. Whole101 corpus does
 not demonstrate an overall speedup. See docs/plans/STATS_VIZ_PHASE_PROFILE_EXECUTION_2026_10_19.md.
+
+### Experimental HC3 implementation — 2026-10-19
+
+regression/robust_covariance.sio now provides covariance-only OLS HC3 from the
+existing pivoted/scaled QR factors. Native typecheck passes in Slurm15622;
+independent C++23 reference syntax passes on t560. Numerical concordance and
+executable consumers remain pending. This is not covered by the earlier101/101
+acceptance. No cluster covariance or calibrated t/p/CI is claimed.
