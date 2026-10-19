@@ -64,6 +64,8 @@ files=(
     tests/reference/linear_hc3_fixture.cpp
     tests/reference/count_tsv_reference.cpp
     tests/reference/count_matrix_qc_svg_reference.cpp
+    tests/reference/linear_cluster_reference.cpp
+    tests/reference/cluster_covariance_svg_reference.cpp
 )
 tests=(
     stats_descriptive_mad stats_inferential_tails
@@ -97,6 +99,7 @@ tests=(
     genomics_size_factors_reference genomics_size_factors_status
     physics_entropy_covariance_reference physics_entropy_covariance_status viz_entropy_covariance
     stats_linear_hc3_reference stats_linear_hc3_status genomics_count_tsv viz_count_matrix_qc
+    stats_linear_cluster_reference stats_linear_cluster_status viz_cluster_covariance
 )
 for name in "${tests[@]}"; do files+=("tests/run-pass/$name.sio"); done
 for path in "${files[@]}"; do

@@ -13,10 +13,10 @@ scientific contracts, render semantics and domain consumers.
 
 | Track | Implemented / previously evidenced | Current and next work |
 |---|---|---|
-| Statistics | Raw MAD; direct t survival; df-aware t/F helpers; public one-sample/pooled/Welch/paired tests with 95% t intervals and statuses | Stable simple OLS, real deletion DFFITS/Cook, Student slope CI and unassessed statuses accepted; seeded robust percentile bootstrap accepted; checked exhaustive/Monte Carlo permutation accepted; checked mean BCa accepted; checked JB/Koenker/Shapiro-Wilk, median Brown-Forsythe, fitted-normal AD and checked KS accepted (60/60), with repaired shared F/beta extreme tails and removed legacy assumption p-to-Beta machinery; checked Pearson/Spearman and explicit inference accepted in77/77; labelled correlation permutations and seed-state repair accepted in80/80; shared rectangular QR and multiple regression accepted in83/83; weighted fits and tiny-projection QR repair accepted in86/86; conditional weighted covariance/Student inference accepted in90/90; checked offset-aware Poisson mean fitting accepted in101/101; next robust/clustered and weak-null inference and empirical calibration studies |
+| Statistics | Raw MAD; direct t survival; df-aware t/F helpers; public one-sample/pooled/Welch/paired tests with 95% t intervals and statuses | Stable simple OLS, real deletion DFFITS/Cook, Student slope CI and unassessed statuses accepted; seeded robust percentile bootstrap accepted; checked exhaustive/Monte Carlo permutation accepted; checked mean BCa accepted; checked JB/Koenker/Shapiro-Wilk, median Brown-Forsythe, fitted-normal AD and checked KS accepted (60/60), with repaired shared F/beta extreme tails and removed legacy assumption p-to-Beta machinery; checked Pearson/Spearman and explicit inference accepted in77/77; labelled correlation permutations and seed-state repair accepted in80/80; shared rectangular QR and multiple regression accepted in83/83; weighted fits and tiny-projection QR repair accepted in86/86; conditional weighted covariance/Student inference accepted in90/90; checked offset-aware Poisson mean fitting accepted in101/101; OLS HC3 covariance accepted in105/105 ([receipt](HC3_COUNT_TSV_ACCEPTANCE_2026_10_19.md)); CR0/CR1S covariance and synthetic coefficient/SE consumer accepted in108/108, job15643 ([receipt](CLUSTER_COVARIANCE_EXECUTION_2026_10_19.md)); next weak-null inference and empirical calibration studies |
 | Mathematics | Small/large sqrt scaling; direct small-angle sine; finite predicate; analytic Cauchy quantile | Checked information measures and channel helpers accepted in73/73; checked rectangular pivoted QR accepted in83/83; shared QR tiny-projection repair accepted in86/86; balanced scale restoration and repaired Student extreme/near-origin tails accepted in90/90; next condition estimation, large-argument trig and convergence policies |
-| Scientific visualization | Explicit CI/prediction/credible bounds; inferential forest consumer; shared linear axes/ticks/labels; explicit row-count read; shared line viewport/clip and legend geometry | DFFITS-linked Canvas/SVG figure, automatic nice ticks, shared line domains, compact clipped SVG and explicit log/symlog accepted; conditional weighted-coefficient forest with independent geometry checks accepted in90/90; declared-correlation/standard-uncertainty Canvas/SVG consumer accepted in95/95; offset-aware count-rate/Pearson-residual consumer accepted in101/101; next nonlinear nice ticks, other-mark clipping, layout and provenance |
-| Genomics | Sequence/FASTA foundations; checked streaming two-pass TPM; shared streaming k-mers with exact integer counts, checked public adapter, idempotent profiles and stable JSD accepted in the64/64 closure | Checked anchored median-log-ratio reference-panel size factors and scalar count application accepted in95/95; offset-aware Poisson mean kernel accepted in101/101, separate from negative-binomial inference; incremental count TSV/QC/256x8 adapter typechecked in 15622; numerical status fixture and C++23 checker added, native concordance still open; long-stream resource measurements remain open; PWM/motif/hashed embedding uncertainty remains unassessed |
+| Scientific visualization | Explicit CI/prediction/credible bounds; inferential forest consumer; shared linear axes/ticks/labels; explicit row-count read; shared line viewport/clip and legend geometry | DFFITS-linked Canvas/SVG figure, automatic nice ticks, shared line domains, compact clipped SVG and explicit log/symlog accepted; conditional weighted-coefficient forest with independent geometry checks accepted in90/90; declared-correlation/standard-uncertainty Canvas/SVG consumer accepted in95/95; offset-aware count-rate/Pearson-residual consumer accepted in101/101; counts-to-QC consumer accepted in105/105 and clustered coefficient/CR0-CR1S SE consumer accepted in108/108; next nonlinear nice ticks, other-mark clipping, layout and provenance |
+| Genomics | Sequence/FASTA foundations; checked streaming two-pass TPM; shared streaming k-mers with exact integer counts, checked public adapter, idempotent profiles and stable JSD accepted in the64/64 closure | Checked anchored median-log-ratio reference-panel size factors and scalar count application accepted in95/95; offset-aware Poisson mean kernel accepted in101/101, separate from negative-binomial inference; incremental count TSV/QC/256x8 adapter and counts-to-Canvas/SVG consumer accepted in105/105, repeated on refreshed main in15633 ([receipt](HC3_COUNT_TSV_ACCEPTANCE_2026_10_19.md)); long-stream resource measurements remain open; PWM/motif/hashed embedding uncertainty remains unassessed |
 | Physics | Correct Compton units and trigonometry, angular uncertainty and legacy adapter | Checked isothermal entropy and explicit standard-uncertainty bars accepted in69/69; declared two-volume covariance and calibration-cancellation consumer accepted in95/95; checked Lorentz Jacobian covariance and repaired legacy adapters accepted in101/101; next units and invariant-based validation |
 | Execution support | Smaller runtime package; measured build/runtime separation; compile-once bundle | Bundle phase split recorded in job 15619; reuse that receipt, extend only when a library implementation is blocked |
 
@@ -824,3 +824,34 @@ native typecheck in Slurm15622. The independent C++23 HC3 reference passes synta
 checking only. Numerical concordance, executable consumers, corpus inclusion and
 a new scientific figure remain pending; earlier101/101 does not cover these additions.
 See HC3_COUNT_TSV_IMPLEMENTATION_2026_10_19.md for source identities and boundaries.
+
+## Continuation checkpoint — clustered OLS covariance, 2026-10-19
+
+The HC3/incremental-count implementation-only note above is superseded by
+[HC3/count acceptance](HC3_COUNT_TSV_ACCEPTANCE_2026_10_19.md):105/105 in15625
+and refreshed-main repeat15633. The new bounded statistical slice is single-way
+CR0/CR1S covariance using checked QR factors, signed group labels and compensated
+within-group influence sums before outer products.
+
+Independent C++23 quad covers31cluster cases, including extreme units,
+partition/relabel/permutation behavior, representability and nonzeroG2,p8
+maximum-shape coverage. CR1S is the explicit fullG/(G-1)*(n-1)/(n-p) convention;
+no clustered t/p/CI or few-group calibration is implied. Fixed buffers and
+shared Gram code are resource contracts, not a new measured RSS/speed claim.
+
+Corrected native v2 Slurm15643 accepts108/108 with zero failures/skips/errors,
+retaining all105 prior entries. The real SVG passes an independent six-marker
+checker; position/count/radius mutations each exit2. Corpus phase212s and
+overall215s are run observations, not a paired speed claim. V1 Slurm15637
+remains preserved as107/108 with the missing-increment figure timeout.
+Wrong-partition15638 and omitted-correction15639 controls compile then fail
+numerically. See [cluster execution receipt](CLUSTER_COVARIANCE_EXECUTION_2026_10_19.md)
+for source/snapshot/SVG identity and exact scope.
+
+This checkpoint continues the mass implementation sprint; it does not complete
+statistics, scientific visualization, mathematics, genomics or physics.
+Conditioning/convergence policies, empirical inferential calibration, scientific
+render semantics, count-domain consumers, physical units/invariants and measured
+execution/memory/artifact work remain explicit priorities. Packaging and profiling
+support those kernels and their consumers. Broader CI, merge/publication and
+scientific validation remain separately reported states.
