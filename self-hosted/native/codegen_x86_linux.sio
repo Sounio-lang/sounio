@@ -3659,6 +3659,12 @@ fn native_v2_emit_gc_empty_frame_reset(nc: NativeCompiler) -> NativeCompiler wit
 //   raw pointer ≥ capacity      → already an object base (unboxed small value)
 // Unboxed ≤16 B value structs return the raw object base so they never consume
 // a handle-table slot; field load/store must accept both encodings.
+//
+// Handle 0 is not in that range. Entry 0 is empty, so a lookup returns object
+// base 0 and the caller's field load reads address 0x20 (header + field 0).
+// An occupied slot whose object_base is also 0 is the same null. The check is
+// only on the table path: a raw pointer never consults the table, so the
+// compiler's field lookups of unboxed values pay the original instruction stream.
 fn native_v2_resolve_handle_to_object_base_rax(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     c.code = emit_mov_rbx_rax(c.code)
@@ -3677,8 +3683,15 @@ fn native_v2_resolve_handle_to_object_base_rax(nc: NativeCompiler) -> NativeComp
     c.code = emit_mov_reg_reg(c.code, 3, 7)
     c.code = emit_add_rax_rbx(c.code)
     c.code = emit_load_rax_mem_rax_disp32(c.code, native_v2_handle_entry_field_object_base())
+    c.code = emit_test_rax_rax(c.code)
+    let empty_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
     let done_jmp = c.code.len
     c.code = emit_jmp_rel32(c.code)
+
+    let refuse = c.code.len
+    c.code = patch_u32_le(c.code, empty_jz + 2, refuse - (empty_jz + 6))
+    c.code = emit_ud2(c.code)
 
     let raw_target = c.code.len
     c.code = patch_u32_le(c.code, raw_jnz + 2, raw_target - (raw_jnz + 6))
@@ -3705,8 +3718,15 @@ fn native_v2_resolve_handle_to_object_base_rax_into(nc: &! NativeCompiler) with 
     nc_emit_mov_reg_reg(nc, 3, 7)
     nc_emit_add_rax_rbx(nc)
     nc_emit_load_rax_mem_rax_disp32(nc, native_v2_handle_entry_field_object_base())
+    nc_emit_test_rax_rax(nc)
+    let empty_jz = (*nc).code.len
+    nc_emit_jz_rel32(nc)
     let done_jmp = (*nc).code.len
     nc_emit_jmp_rel32(nc)
+
+    let refuse = (*nc).code.len
+    nc_patch_u32_le(nc, empty_jz + 2, refuse - (empty_jz + 6))
+    nc_emit_ud2(nc)
 
     let raw_target = (*nc).code.len
     nc_patch_u32_le(nc, raw_jnz + 2, raw_target - (raw_jnz + 6))
