@@ -1,3 +1,5 @@
+use viz::legend::{legend_layout}
+use viz::axis::{axis_ticks}
 // stdlib/viz/ir.sio — Sounio-owned Visual IR
 //
 // Fixed-capacity scene graph for native visual frontends. Scientific meaning
@@ -28,6 +30,11 @@ pub const VIZ_NODE_WATERFALL: i64 = 16
 pub const VIZ_NODE_VECTOR_FIELD: i64 = 17
 pub const VIZ_NODE_TRAJECTORY: i64 = 18
 pub const VIZ_NODE_SPECTRUM: i64 = 19
+pub const VIZ_INTERVAL_NONE: i64 = 0
+pub const VIZ_INTERVAL_CONFIDENCE: i64 = 1
+pub const VIZ_INTERVAL_PREDICTION: i64 = 2
+pub const VIZ_INTERVAL_CREDIBLE: i64 = 3
+pub const VIZ_INTERVAL_STANDARD_UNCERTAINTY: i64 = 4
 
 pub const VIZ_CONTROL_BUTTON: i64 = 1
 pub const VIZ_CONTROL_SLIDER: i64 = 2
@@ -85,6 +92,10 @@ pub struct VizSeriesData {
     pub xs: [f64; 1024],
     pub ys: [f64; 1024],
     pub vars: [f64; 1024],
+    pub lower: [f64; 1024],
+    pub upper: [f64; 1024],
+    pub interval_kind: i64,
+    pub interval_level: f64,
     pub n: i64,
     pub x_min: f64,
     pub x_max: f64,
@@ -199,7 +210,9 @@ pub fn viz_node_empty() -> VizNode {
 
 pub fn viz_series_empty() -> VizSeriesData {
     VizSeriesData {
-        xs: [0.0; 1024], ys: [0.0; 1024], vars: [0.0; 1024], n: 0,
+        xs: [0.0; 1024], ys: [0.0; 1024], vars: [0.0; 1024],
+        lower: [0.0; 1024], upper: [0.0; 1024],
+        interval_kind: VIZ_INTERVAL_NONE, interval_level: 0.0, n: 0,
         x_min: 0.0, x_max: 1.0, y_min: 0.0, y_max: 1.0,
     }
 }
@@ -327,6 +340,7 @@ pub fn viz_scene_set_parent(scene: &!VizScene, node_idx: i64, parent_idx: i64) w
 
 pub fn viz_scene_add_series(scene: &!VizScene, xs: &[f64; 1024], ys: &[f64; 1024], vars: &[f64; 1024], n: i64) -> i64 with Mut {
     if scene.series_count >= 8 { return 0 - 1 }
+    if n < 0 || n > 1024 { return 0 - 1 }
     let slot = scene.series_count
     var d = viz_series_empty()
     d.n = n
@@ -469,29 +483,34 @@ pub fn viz_scene_add_mesh_data(scene: &!VizScene, tris: &[Tri3D; 128], n: i64) -
 }
 
 pub fn viz_add_line_chart(scene: &!VizScene, xs: &[f64; 1024], ys: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {
+    if n < 0 || n > 1024 || scene.series_count >= 8 || scene.node_count >= 64 { return 0 - 1 }
     let vars: [f64; 1024] = [0.0; 1024]
     let slot = viz_scene_add_series(scene, xs, ys, &vars, n)
     viz_scene_add_node(scene, VIZ_NODE_CHART_LINE, layout, style, slot)
 }
 
 pub fn viz_add_scatter_chart(scene: &!VizScene, xs: &[f64; 1024], ys: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {
+    if n < 0 || n > 1024 || scene.series_count >= 8 || scene.node_count >= 64 { return 0 - 1 }
     let vars: [f64; 1024] = [0.0; 1024]
     let slot = viz_scene_add_series(scene, xs, ys, &vars, n)
     viz_scene_add_node(scene, VIZ_NODE_CHART_SCATTER, layout, style, slot)
 }
 
 pub fn viz_add_bar_chart(scene: &!VizScene, xs: &[f64; 1024], ys: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {
+    if n < 0 || n > 1024 || scene.series_count >= 8 || scene.node_count >= 64 { return 0 - 1 }
     let vars: [f64; 1024] = [0.0; 1024]
     let slot = viz_scene_add_series(scene, xs, ys, &vars, n)
     viz_scene_add_node(scene, VIZ_NODE_CHART_BAR, layout, style, slot)
 }
 
 pub fn viz_add_uncertainty_band(scene: &!VizScene, xs: &[f64; 1024], ys: &[f64; 1024], vars: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {
+    if n < 0 || n > 1024 || scene.series_count >= 8 || scene.node_count >= 64 { return 0 - 1 }
     let slot = viz_scene_add_series(scene, xs, ys, vars, n)
     viz_scene_add_node(scene, VIZ_NODE_UNCERTAINTY_BAND, layout, style, slot)
 }
 
 pub fn viz_add_forest_plot(scene: &!VizScene, estimates: &[f64; 1024], variances: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {
+    if n < 0 || n > 1024 || scene.series_count >= 8 || scene.node_count >= 64 { return 0 - 1 }
     var rows: [f64; 1024] = [0.0; 1024]
     var i: i64 = 0
     while i < n && i < 1024 {
@@ -502,7 +521,66 @@ pub fn viz_add_forest_plot(scene: &!VizScene, estimates: &[f64; 1024], variances
     viz_scene_add_node(scene, VIZ_NODE_FOREST, layout, style, slot)
 }
 
+fn viz_interval_finite(x: f64) -> bool {
+    if x != x { return false }
+    if x == 0.0 && x == 1.0 { return false }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    ax <= 1.7976931348623157e308
+}
+
+/// Build a forest chart from explicit interval bounds.
+/// Unlike viz_add_forest_plot, this never interprets variance as an interval.
+/// `kind` is confidence, prediction, or credible; `level` is a fraction in (0,1).
+pub fn viz_add_forest_interval_plot(
+    scene: &!VizScene,
+    estimates: &[f64; 1024],
+    lower: &[f64; 1024],
+    upper: &[f64; 1024],
+    n: i64,
+    kind: i64,
+    level: f64,
+    layout: VizLayout,
+    style: VizStyle,
+) -> i64 with Mut {
+    if n < 1 || n > 1024 || scene.series_count >= 8 || scene.node_count >= 64 { return 0 - 1 }
+    if kind < VIZ_INTERVAL_CONFIDENCE || kind > VIZ_INTERVAL_CREDIBLE { return 0 - 1 }
+    if !viz_interval_finite(level) || level <= 0.0 || level >= 1.0 { return 0 - 1 }
+    var i: i64 = 0
+    while i < n {
+        if !viz_interval_finite(estimates[i as usize]) { return 0 - 1 }
+        if !viz_interval_finite(lower[i as usize]) { return 0 - 1 }
+        if !viz_interval_finite(upper[i as usize]) { return 0 - 1 }
+        if lower[i as usize] > estimates[i as usize] || estimates[i as usize] > upper[i as usize] { return 0 - 1 }
+        i = i + 1
+    }
+    // All rejection checks precede mutation. Fill the destination directly:
+    // no row/variance temporaries and no general-series staging copy.
+    let slot = scene.series_count
+    scene.series[slot as usize] = viz_series_empty()
+    scene.series[slot as usize].n = n
+    scene.series[slot as usize].x_min = estimates[0]
+    scene.series[slot as usize].x_max = estimates[0]
+    scene.series[slot as usize].y_min = 0.0
+    scene.series[slot as usize].y_max = (n - 1) as f64
+    i = 0
+    while i < n {
+        let estimate = estimates[i as usize]
+        scene.series[slot as usize].xs[i as usize] = estimate
+        scene.series[slot as usize].ys[i as usize] = i as f64
+        scene.series[slot as usize].lower[i as usize] = lower[i as usize]
+        scene.series[slot as usize].upper[i as usize] = upper[i as usize]
+        if estimate < scene.series[slot as usize].x_min { scene.series[slot as usize].x_min = estimate }
+        if estimate > scene.series[slot as usize].x_max { scene.series[slot as usize].x_max = estimate }
+        i = i + 1
+    }
+    scene.series[slot as usize].interval_kind = kind
+    scene.series[slot as usize].interval_level = level
+    scene.series_count = scene.series_count + 1
+    viz_scene_add_node(scene, VIZ_NODE_FOREST, layout, style, slot)
+}
+
 pub fn viz_add_waterfall(scene: &!VizScene, values: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {
+    if n < 0 || n > 1024 || scene.series_count >= 8 || scene.node_count >= 64 { return 0 - 1 }
     var xs: [f64; 1024] = [0.0; 1024]
     var vars: [f64; 1024] = [0.0; 1024]
     var i: i64 = 0
@@ -1079,4 +1157,107 @@ pub fn viz_scene_handle_event(scene: &!VizScene, ev: Event) -> bool with Mut, Di
         return viz_scene_key_press(scene, ev.key)
     }
     false
+}
+
+// A scientific axis occupies no series slot. flags: 0=horizontal, 1=vertical;
+// data_slot stores the requested interval count. Label is a short ASCII unit/title.
+// Returns -1 without scene mutation for invalid/unreadable plans or geometry.
+// Caller reserves margins for endpoint labels and title.
+pub const VIZ_NODE_AXIS: i64 = 20
+
+pub fn viz_add_axis(scene: &!VizScene, lo: f64, hi: f64, intervals: i64,
+    vertical: bool, layout: VizLayout, style: VizStyle) -> i64 with Mut, Div {
+    let ticks = axis_ticks(lo, hi, intervals)
+    if ticks.status != 0 { return 0 - 1 }
+    if layout.x < 0 - 1000000 || layout.x > 1000000 { return 0 - 1 }
+    if layout.y < 0 - 1000000 || layout.y > 1000000 { return 0 - 1 }
+    if layout.w < 1 || layout.w > 1000000 || layout.h < 1 || layout.h > 1000000 { return 0 - 1 }
+    // Longest label is 13 glyphs; 112 px leaves one glyph of separation.
+    if !vertical && layout.w < intervals * 112 { return 0 - 1 }
+    if vertical && layout.h < intervals * 12 { return 0 - 1 }
+    let idx = viz_scene_add_node(scene, VIZ_NODE_AXIS, layout, style, intervals)
+    if idx < 0 { return idx }
+    scene.nodes[idx as usize].min_value = lo
+    scene.nodes[idx as usize].max_value = hi
+    scene.nodes[idx as usize].flags = if vertical { 1 } else { 0 }
+    idx
+}
+
+// Opt-in clipping for linear polylines. Domain belongs to the shared series.
+pub const VIZ_FLAG_CLIP_PLOT: i64 = 256
+pub fn viz_line_set_viewport(scene: &!VizScene, node_idx: i64,
+    xmin: f64, xmax: f64, ymin: f64, ymax: f64) -> bool with Mut {
+    if node_idx < 0 || node_idx >= scene.node_count { return false }
+    let kind: i64 = scene.nodes[node_idx as usize].kind
+    let stroke: i64 = scene.nodes[node_idx as usize].style.stroke_width
+    let data_slot: i64 = scene.nodes[node_idx as usize].data_slot
+    let flags: i64 = scene.nodes[node_idx as usize].flags
+    if (flags & 7680) != 0 { return false }
+    let layout: VizLayout = scene.nodes[node_idx as usize].layout
+    if kind != VIZ_NODE_CHART_LINE || stroke != 1 { return false }
+    if data_slot < 0 || data_slot >= scene.series_count { return false }
+    if layout.x < -1000000 || layout.y < -1000000 { return false }
+    if layout.w < 1 || layout.h < 1 || layout.w > 1000000 || layout.h > 1000000 { return false }
+    if layout.x > 1000000 - layout.w || layout.y > 1000000 - layout.h { return false }
+    if !viz_interval_finite(xmin) || !viz_interval_finite(xmax) || !viz_interval_finite(ymin) || !viz_interval_finite(ymax) { return false }
+    let dx: f64 = xmax - xmin
+    let dy: f64 = ymax - ymin
+    if dx <= 0.0 || dy <= 0.0 || !viz_interval_finite(dx) || !viz_interval_finite(dy) { return false }
+    let slot = data_slot as usize
+    scene.series[slot].x_min = xmin; scene.series[slot].x_max = xmax
+    scene.series[slot].y_min = ymin; scene.series[slot].y_max = ymax
+    scene.nodes[node_idx as usize].flags = flags | VIZ_FLAG_CLIP_PLOT
+    true
+}
+
+// Snapshot the chart style, so the legend sample represents the same series.
+// Visible text is bounded by the shared 8px-cell layout; full label stays in IR.
+pub fn viz_add_series_legend(scene: &!VizScene, chart_idx: i64, text: &[i8; 64],
+    len: i64, layout: VizLayout) -> i64 with Mut, Div {
+    if chart_idx < 0 || chart_idx >= scene.node_count || len < 1 || len > 64 { return 0 - 1 }
+    let kind: i64 = scene.nodes[chart_idx as usize].kind
+    let style: VizStyle = scene.nodes[chart_idx as usize].style
+    if kind != VIZ_NODE_CHART_LINE && kind != VIZ_NODE_CHART_SCATTER &&
+       kind != VIZ_NODE_CHART_BAR && kind != VIZ_NODE_FOREST { return 0 - 1 }
+    var k: i64 = 0
+    while k < len {
+        let ch = text[k as usize] as i64
+        if ch < 32 || ch > 126 { return 0 - 1 }
+        k = k + 1
+    }
+    let plan = legend_layout(layout.x, layout.y, layout.w, layout.h, len)
+    if plan.status != 0 || plan.visible_len < 1 { return 0 - 1 }
+    viz_add_legend(scene, text, len, layout, style)
+}
+
+// Typed vertical standard-uncertainty bar on a raw linear two-point series.
+// Bounds must already equal center +/- u. Level0 means no coverage probability.
+// All validation precedes mutation; existing interval labels cannot be replaced.
+pub fn viz_line_set_standard_uncertainty(scene:&!VizScene,node_idx:i64,
+ center:f64,u:f64)->bool with Mut,Div,Panic {
+ if node_idx<0 || node_idx>=scene.node_count {return false}
+ let kind:i64=scene.nodes[node_idx as usize].kind
+ let slot:i64=scene.nodes[node_idx as usize].data_slot
+ let flags:i64=scene.nodes[node_idx as usize].flags
+ if kind!=VIZ_NODE_CHART_LINE || slot<0 || slot>=scene.series_count {return false}
+ if (flags & 7680)!=0 {return false}
+ let count:i64=scene.series[slot as usize].n
+ let previous:i64=scene.series[slot as usize].interval_kind
+ if count!=2 || (previous!=VIZ_INTERVAL_NONE && previous!=VIZ_INTERVAL_STANDARD_UNCERTAINTY) {return false}
+ if !viz_interval_finite(center) || !viz_interval_finite(u) || u<0.0 {return false}
+ let lower=center-u
+ let upper=center+u
+ if !viz_interval_finite(lower) || !viz_interval_finite(upper) {return false}
+ let x0:f64=scene.series[slot as usize].xs[0]
+ let x1:f64=scene.series[slot as usize].xs[1]
+ let y0:f64=scene.series[slot as usize].ys[0]
+ let y1:f64=scene.series[slot as usize].ys[1]
+ if !viz_interval_finite(x0) || x0!=x1 || y0!=lower || y1!=upper {return false}
+ scene.series[slot as usize].lower[0]=lower
+ scene.series[slot as usize].lower[1]=lower
+ scene.series[slot as usize].upper[0]=upper
+ scene.series[slot as usize].upper[1]=upper
+ scene.series[slot as usize].interval_level=0.0
+ scene.series[slot as usize].interval_kind=VIZ_INTERVAL_STANDARD_UNCERTAINTY
+ return true
 }

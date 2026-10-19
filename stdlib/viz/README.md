@@ -1,5 +1,28 @@
 # Sounio Viz
 
+## Declared correlation and physical standard uncertainty
+
+viz_entropy_covariance computes five supplied-rho physical cases through
+the checked entropy API and renders production Canvas/SVG. It labels J/K,
+first-order propagation, declared-not-estimated rho and standard uncertainty
+without a confidence-interval claim. The shared-calibration endpoint has
+available zero uncertainty. The independent analytic C++23 checker validates
+five circles, four segments, geometry and semantics; altered artifact copies
+are rejected. Final main-based Forge15457:95/95.
+See [receipt](../../docs/plans/COUNTS_COVARIANCE_EXECUTION_2026_10_19.md).
+
+
+## Conditional weighted coefficient intervals
+
+The checked scientific consumer viz_weighted_inference renders actual Canvas
+and SVG pointwise95% Student intervals under a declared Gaussian precision
+model, with df/units/SE and unassessed-model labels. Its independent C++23
+checker validates geometry, RGB and semantics and rejects altered copies.
+Final Forge15430:90/90. This is a conditional coefficient interval consumer,
+not general prediction bands or a certification of every renderer operation.
+See [receipt](../../docs/plans/STATS_WEIGHTED_INFERENCE_EXECUTION_2026_10_19.md).
+
+
 `stdlib/viz` is the first native visual frontend layer for Sounio.
 
 ## Stdlib harness
@@ -53,3 +76,18 @@ Scientific meaning stays in Sounio. Units, epistemic variance, molecules, lattic
 - Native windows are an optional layer over the same app runner; CI proofs stay headless.
 - `render::renderer3d` remains a CPU Canvas renderer. Its v1.1 path adds Blinn-Phong specular shading and antialiased triangle edge lines while keeping 3D scene meaning in Sounio data.
 - GPU rendering is deferred until general compiler GPU backend wiring is ready.
+
+## Scientific axes
+
+`viz::axis` defines shared linear ticks, scientific labels and integer tick placement.
+`viz::ir::viz_add_axis` adds an explicit horizontal or vertical axis consumed by
+Canvas and SVG without allocating a series slot. See [AXES.md](AXES.md) for
+precision, domain, spacing, status and margin contracts and remaining work.
+
+## Scientific line windows and legends
+
+`viz_line_set_viewport` selects an explicit linear domain and enables shared
+segment clipping in Canvas/SVG. `viz_add_series_legend` takes a chart style
+snapshot; both backends share swatch/text positions and bounded ASCII layout.
+See [CLIPPING.md](CLIPPING.md) for clipping, missing-data, antialiasing,
+legend and source-domain contracts, native evidence and supported limits.

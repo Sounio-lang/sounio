@@ -14,13 +14,14 @@
 //   Jarque-Bera  JB = n/6 · ( S² + (K−3)²/4 )   ~  χ²(2)  under H₀,
 // so the p-value has the closed form  p = e^{−JB/2}  (χ²₂ survival).
 //
-// Pure Sounio: inline sqrt/exp; single pass for the mean, one pass for the
-// moments; no external dependency, no nested data-array calls.
+// Pure Sounio, bounded scratch storage and compensated scaled central moments.
+// See NORMALITY.md for availability and asymptotic interpretation.
 //
 // References:
 //   Jarque & Bera (1987) Int. Stat. Rev. 55:163; Bowman & Shenton (1975).
 
 module stats::normality
+use math::pure::{is_finite}
 
 fn nm_sqrt(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 }
@@ -35,67 +36,132 @@ fn nm_sqrt(x: f64) -> f64 with Mut, Div, Panic {
 }
 
 fn nm_exp(x: f64) -> f64 with Mut, Div, Panic {
-    if x < 0.0 { return 1.0 / nm_exp(0.0 - x) }
-    var k = 0
+    // Called only with nonpositive finite input. Reduce before Taylor evaluation;
+    // repeated squaring underflows naturally without an overflowing reciprocal.
     var r = x
-    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var k = 0
+    while r < -0.5 { r = r * 0.5; k = k + 1 }
     var term = 1.0
     var sum = 1.0
-    var n = 1
-    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var j = 1
+    while j < 24 { term = term * r / (j as f64); sum = sum + term; j = j + 1 }
     var i = 0
     while i < k { sum = sum * sum; i = i + 1 }
     return sum
 }
 
-pub struct NormalityResult {
-    pub skewness: f64,   // m3 / s^3
-    pub kurtosis: f64,   // m4 / m2^2 (normal = 3)
-    pub excess: f64,     // kurtosis - 3
-    pub jb: f64,         // Jarque-Bera statistic
-    pub p: f64,          // p-value, chi-squared(2) survival = exp(-JB/2)
+fn nm_abs(x: f64) -> f64 {
+    if x < 0.0 { return -x }
+    return x
 }
 
-/// Jarque-Bera omnibus normality test on a sample.
-///
-/// Parâmetros: x — sample; n — size (>=4 for a meaningful test, <=256).
-/// Retorno: NormalityResult (skewness, kurtosis, excess, jb, p).
-/// Referências: Jarque & Bera (1987).
-pub fn normality(x: &[f64; 256], n: i32) -> NormalityResult with Mut, Div, Panic {
-    if n < 2 {
-        return NormalityResult { skewness: 0.0, kurtosis: 0.0, excess: 0.0 - 3.0, jb: 0.0, p: 1.0 }
+pub struct NormalityResult {
+    pub skewness: f64,
+    pub kurtosis: f64,
+    pub excess: f64,
+    pub jb: f64,
+    pub p: f64,
+    // 0 available, 1 invalid n, 2 nonfinite input, 3 constant sample,
+    // 4 arithmetic failure. Numerical payload is zero when unavailable.
+    pub status: i32,
+    pub n: i32,
+    // The chi-square(2) reference is asymptotic, never a posterior probability.
+    pub asymptotic: bool,
+}
+
+fn nm_unavailable(status: i32, n: i32) -> NormalityResult {
+    return NormalityResult { skewness:0.0,kurtosis:0.0,excess:0.0,
+        jb:0.0,p:0.0,status:status,n:n,asymptotic:true }
+}
+
+/// Checked moment Jarque-Bera, 2 <= n <= 256. Read status before payload.
+/// p is the asymptotic chi-square(2) survival, with no finite-sample calibration
+/// or independence assessment. A large p is not evidence of normality.
+pub fn normality(x: &[f64;256], n:i32) -> NormalityResult with Mut,Div,Panic {
+    if n < 2 || n > 256 { return nm_unavailable(1,n) }
+    var scale = 0.0
+    var diff_scale = 0.0
+    var direct = true
+    let anchor = x[0]
+    var i = 0
+    while i < n {
+        let v = x[i as usize]
+        if !is_finite(v) { return nm_unavailable(2,n) }
+        let a = nm_abs(v)
+        if a > scale { scale = a }
+        let d = v - anchor
+        if !is_finite(d) { direct = false }
+        let ad = nm_abs(d)
+        if ad > diff_scale { diff_scale = ad }
+        i = i + 1
+    }
+    if scale == 0.0 { return nm_unavailable(3,n) }
+    if direct && diff_scale == 0.0 { return nm_unavailable(3,n) }
+    // One scratch array, independent of n; preserve representable small
+    // differences at large offsets by subtracting the anchor before scaling.
+    var z:[f64;256] = [0.0;256]
+    var sum = 0.0
+    var correction = 0.0
+    i = 0
+    while i < n {
+        var d = 0.0
+        if direct { d = (x[i as usize] - anchor) / diff_scale }
+        else { d = x[i as usize] / scale - anchor / scale }
+        z[i as usize] = d
+        let y = d - correction
+        let t = sum + y
+        correction = (t - sum) - y
+        sum = t
+        i = i + 1
     }
     let nf = n as f64
-    var sum = 0.0
-    var i = 0
-    while i < n { sum = sum + x[i as usize]; i = i + 1 }
     let mean = sum / nf
+    var spread = 0.0
+    i = 0
+    while i < n {
+        let d = z[i as usize] - mean
+        z[i as usize] = d
+        let a = nm_abs(d)
+        if a > spread { spread = a }
+        i = i + 1
+    }
+    if spread == 0.0 { return nm_unavailable(3,n) }
     var m2 = 0.0
     var m3 = 0.0
     var m4 = 0.0
-    var j = 0
-    while j < n {
-        let d = x[j as usize] - mean
+    var c2 = 0.0
+    var c3 = 0.0
+    var c4 = 0.0
+    i = 0
+    while i < n {
+        let d = z[i as usize] / spread
         let d2 = d * d
-        m2 = m2 + d2
-        m3 = m3 + d2 * d
-        m4 = m4 + d2 * d2
-        j = j + 1
+        let y2 = d2 - c2
+        let t2 = m2 + y2
+        c2 = (t2 - m2) - y2
+        m2 = t2
+        let y3 = d2 * d - c3
+        let t3 = m3 + y3
+        c3 = (t3 - m3) - y3
+        m3 = t3
+        let y4 = d2 * d2 - c4
+        let t4 = m4 + y4
+        c4 = (t4 - m4) - y4
+        m4 = t4
+        i = i + 1
     }
     m2 = m2 / nf
     m3 = m3 / nf
     m4 = m4 / nf
-    if m2 <= 0.0 {
-        // constant sample: no dispersion, perfectly degenerate
-        return NormalityResult { skewness: 0.0, kurtosis: 0.0, excess: 0.0 - 3.0, jb: 0.0, p: 1.0 }
-    }
-    let s = nm_sqrt(m2)
-    let skew = m3 / (s * s * s)
-    let kurt = m4 / (m2 * m2)
+    if m2 <= 0.0 { return nm_unavailable(4,n) }
+    let skew = (m3 / m2) / nm_sqrt(m2)
+    let kurt = (m4 / m2) / m2
     let excess = kurt - 3.0
     let jb = nf / 6.0 * (skew * skew + excess * excess / 4.0)
-    let p = nm_exp(0.0 - jb / 2.0)   // chi-squared(2) survival
-    return NormalityResult { skewness: skew, kurtosis: kurt, excess: excess, jb: jb, p: p }
+    let p = nm_exp(-jb / 2.0)
+    if !is_finite(jb) || !is_finite(p) { return nm_unavailable(4,n) }
+    return NormalityResult {skewness:skew,kurtosis:kurt,excess:excess,
+        jb:jb,p:p,status:0,n:n,asymptotic:true}
 }
 
 // ============================================================================
