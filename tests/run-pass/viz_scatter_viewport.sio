@@ -1,0 +1,424 @@
+//@ run-pass
+//@ expect-stdout: VIZ_SCATTER_VIEWPORT_PASS
+//@ expect-stdout: <rect x="999989.500000" y="999989.500000" width="11" height="11"/>
+//@ expect-stdout: Synthetic intercept-only residuals (mV); n=4
+//@ expect-stdout: Closed crop: observations 2 and 3; no intervals
+//@ expect-stdout: scatter counts visible=2 outside=2 invalid=0
+use stats::regression::multiple::{multiple_linear_fit}
+use viz::ir::{viz_scene_new,viz_add_scatter_chart,viz_add_line_chart,viz_scatter_set_viewport,viz_add_axis,viz_node_set_label,viz_add_label,viz_layout_rect,viz_style_rgb}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_html::{viz_html_emit_scene}
+use display::canvas::{Canvas,canvas_clear}
+fn exhaustive_disk() with Mut,Div,Alloc,Panic {
+ var scene=viz_scene_new()
+ var xs:[f64;1024]=[0.0;1024]
+ var ys:[f64;1024]=[0.0;1024]
+ xs[1]=1.0
+ ys[2]=1.0
+ xs[3]=1.0
+ ys[3]=1.0
+ xs[4]= -0.01
+ ys[4]=0.5
+ xs[5]=1.01
+ ys[5]=0.5
+ xs[6]=0.5
+ ys[6]= -0.01
+ xs[7]=0.5
+ ys[7]=1.01
+ xs[8]=0.0/0.0
+ ys[8]=0.5
+ let mark=viz_add_scatter_chart(&!scene,&xs,&ys,9,viz_layout_rect(10,10,8,8),viz_style_rgb(80,170,220))
+ assert(mark==0)
+ assert(viz_scatter_set_viewport(&!scene,mark,0.0,1.0,0.0,1.0))
+ let pixels=heap_alloc(32*32*8) as *mut i64
+ var canvas=Canvas{pixels:pixels,width:32,height:32}
+ canvas_clear(&!canvas,0,0,0)
+ viz_canvas_render_scene(&scene,&!canvas)
+ var py:i64=0
+ while py<32 {
+  var px:i64=0
+  while px<32 {
+   var expected:i64=0
+   if px>=10 && px<=18 && py>=10 && py<=18 {
+    var corner:i64=0
+    while corner<4 {
+     let cx:i64=if corner%2==0 {10}else{18}
+     let cy:i64=if corner<2 {10}else{18}
+     let dx=px-cx
+     let dy=py-cy
+     if dx*dx+dy*dy<=9 { expected=80*65536+170*256+220 }
+     corner=corner+1
+    }
+   }
+   assert(read_i64(canvas.pixels,py*32+px)==expected)
+   px=px+1
+  }
+  py=py+1
+ }
+}
+fn transactions() with Mut,Div,Panic {
+ var scene=viz_scene_new()
+ var xs:[f64;1024]=[0.0;1024]
+ var ys:[f64;1024]=[0.0;1024]
+ xs[0]=0.0/0.0
+ let rejected=viz_add_scatter_chart(&!scene,&xs,&ys,1,viz_layout_rect(10,10,20,20),viz_style_rgb(1,2,3))
+ assert(rejected<0 && scene.node_count==0 && scene.series_count==0 && scene.next_node_id==1)
+ xs[0]=0.0
+ xs[1]=1.0
+ ys[1]=1.0
+ let mark=viz_add_scatter_chart(&!scene,&xs,&ys,2,viz_layout_rect(10,10,20,20),viz_style_rgb(1,2,3))
+ assert(mark==0)
+ let old_flags:i64=scene.nodes[0].flags
+ let old_xmin:f64=scene.series[0].x_min
+ let old_xmax:f64=scene.series[0].x_max
+ assert(!viz_scatter_set_viewport(&!scene,mark,1.0,1.0,0.0,1.0))
+ assert(!viz_scatter_set_viewport(&!scene,mark,0.0,1.0,1.0,0.0))
+ assert(!viz_scatter_set_viewport(&!scene,mark,0.0,1.0,0.0,0.0/0.0))
+ assert(scene.nodes[0].flags==old_flags && scene.series[0].x_min==old_xmin && scene.series[0].x_max==old_xmax)
+ assert(scene.node_count==1 && scene.series_count==1)
+ let line=viz_add_line_chart(&!scene,&xs,&ys,2,viz_layout_rect(10,10,20,20),viz_style_rgb(1,2,3))
+ assert(!viz_scatter_set_viewport(&!scene,line,0.0,1.0,0.0,1.0))
+}
+fn scientific_scene() with IO,Mut,Div,Alloc,Panic {
+ var a:[f64;2048]=[0.0;2048]
+ var b:[f64;256]=[0.0;256]
+ var i:i64=0
+ while i<4 {
+  a[(8*i) as usize]=1.0
+  b[i as usize]=(i+1) as f64
+  i=i+1
+ }
+ let fit=multiple_linear_fit(&a,&b,4,1,0.0)
+ assert(fit.status==0 && fit.rank==1 && fit.df==3)
+ var order:[f64;1024]=[0.0;1024]
+ var residual:[f64;1024]=[0.0;1024]
+ i=0
+ while i<4 {
+  order[i as usize]=(i+1) as f64
+  residual[i as usize]=fit.residuals[i as usize]
+  i=i+1
+ }
+ let lo:f64=residual[1]
+ let hi:f64=residual[2]
+ assert(lo<0.0 && hi>0.0)
+ var scene=viz_scene_new()
+ let crop=viz_add_scatter_chart(&!scene,&order,&residual,4,viz_layout_rect(100,140,240,160),viz_style_rgb(70,180,235))
+ assert(crop==0 && viz_scatter_set_viewport(&!scene,crop,2.0,3.0,lo,hi))
+ var constant_x:[f64;1024]=[0.0;1024]
+ var constant_y:[f64;1024]=[0.0;1024]
+ let zero=viz_add_scatter_chart(&!scene,&constant_x,&constant_y,1,viz_layout_rect(440,140,160,160),viz_style_rgb(220,135,225))
+ constant_x[0]=1.0e300
+ constant_y[0]=1.0e300
+ let huge=viz_add_scatter_chart(&!scene,&constant_x,&constant_y,1,viz_layout_rect(740,140,160,160),viz_style_rgb(245,170,65))
+ var mixed_x:[f64;1024]=[0.0;1024]
+ var mixed_y:[f64;1024]=[0.0;1024]
+ mixed_x[0]=0.0/0.0
+ mixed_y[0]=7.0
+ mixed_x[1]=1.0
+ mixed_y[1]=0.0/0.0
+ mixed_x[2]=2.0
+ mixed_y[2]=3.0
+ let mixed=viz_add_scatter_chart(&!scene,&mixed_x,&mixed_y,3,viz_layout_rect(440,420,160,160),viz_style_rgb(100,220,170))
+ assert(zero==1 && huge==2 && mixed==3)
+ assert(scene.series[3].x_min==2.0 && scene.series[3].x_max==2.0)
+ assert(scene.series[3].y_min==3.0 && scene.series[3].y_max==3.0)
+ let xa=viz_add_axis(&!scene,2.0,3.0,1,false,viz_layout_rect(100,318,240,1),viz_style_rgb(190,200,215))
+ let ya=viz_add_axis(&!scene,lo,hi,2,true,viz_layout_rect(80,140,1,160),viz_style_rgb(190,200,215))
+ var title:[i8;64]=[0;64]
+ title[0]=83
+ title[1]=121
+ title[2]=110
+ title[3]=116
+ title[4]=104
+ title[5]=101
+ title[6]=116
+ title[7]=105
+ title[8]=99
+ title[9]=32
+ title[10]=105
+ title[11]=110
+ title[12]=116
+ title[13]=101
+ title[14]=114
+ title[15]=99
+ title[16]=101
+ title[17]=112
+ title[18]=116
+ title[19]=45
+ title[20]=111
+ title[21]=110
+ title[22]=108
+ title[23]=121
+ title[24]=32
+ title[25]=114
+ title[26]=101
+ title[27]=115
+ title[28]=105
+ title[29]=100
+ title[30]=117
+ title[31]=97
+ title[32]=108
+ title[33]=115
+ title[34]=32
+ title[35]=40
+ title[36]=109
+ title[37]=86
+ title[38]=41
+ title[39]=59
+ title[40]=32
+ title[41]=110
+ title[42]=61
+ title[43]=52
+ var subtitle:[i8;64]=[0;64]
+ subtitle[0]=67
+ subtitle[1]=108
+ subtitle[2]=111
+ subtitle[3]=115
+ subtitle[4]=101
+ subtitle[5]=100
+ subtitle[6]=32
+ subtitle[7]=99
+ subtitle[8]=114
+ subtitle[9]=111
+ subtitle[10]=112
+ subtitle[11]=58
+ subtitle[12]=32
+ subtitle[13]=111
+ subtitle[14]=98
+ subtitle[15]=115
+ subtitle[16]=101
+ subtitle[17]=114
+ subtitle[18]=118
+ subtitle[19]=97
+ subtitle[20]=116
+ subtitle[21]=105
+ subtitle[22]=111
+ subtitle[23]=110
+ subtitle[24]=115
+ subtitle[25]=32
+ subtitle[26]=50
+ subtitle[27]=32
+ subtitle[28]=97
+ subtitle[29]=110
+ subtitle[30]=100
+ subtitle[31]=32
+ subtitle[32]=51
+ subtitle[33]=59
+ subtitle[34]=32
+ subtitle[35]=110
+ subtitle[36]=111
+ subtitle[37]=32
+ subtitle[38]=105
+ subtitle[39]=110
+ subtitle[40]=116
+ subtitle[41]=101
+ subtitle[42]=114
+ subtitle[43]=118
+ subtitle[44]=97
+ subtitle[45]=108
+ subtitle[46]=115
+ var zero_label:[i8;64]=[0;64]
+ zero_label[0]=76
+ zero_label[1]=101
+ zero_label[2]=103
+ zero_label[3]=97
+ zero_label[4]=99
+ zero_label[5]=121
+ zero_label[6]=32
+ zero_label[7]=115
+ zero_label[8]=105
+ zero_label[9]=110
+ zero_label[10]=103
+ zero_label[11]=108
+ zero_label[12]=101
+ zero_label[13]=116
+ zero_label[14]=111
+ zero_label[15]=110
+ zero_label[16]=32
+ zero_label[17]=122
+ zero_label[18]=101
+ zero_label[19]=114
+ zero_label[20]=111
+ var huge_label:[i8;64]=[0;64]
+ huge_label[0]=76
+ huge_label[1]=101
+ huge_label[2]=103
+ huge_label[3]=97
+ huge_label[4]=99
+ huge_label[5]=121
+ huge_label[6]=32
+ huge_label[7]=115
+ huge_label[8]=105
+ huge_label[9]=110
+ huge_label[10]=103
+ huge_label[11]=108
+ huge_label[12]=101
+ huge_label[13]=116
+ huge_label[14]=111
+ huge_label[15]=110
+ huge_label[16]=32
+ huge_label[17]=49
+ huge_label[18]=101
+ huge_label[19]=51
+ huge_label[20]=48
+ huge_label[21]=48
+ var mixed_label:[i8;64]=[0;64]
+ mixed_label[0]=80
+ mixed_label[1]=97
+ mixed_label[2]=105
+ mixed_label[3]=114
+ mixed_label[4]=101
+ mixed_label[5]=100
+ mixed_label[6]=45
+ mixed_label[7]=102
+ mixed_label[8]=105
+ mixed_label[9]=110
+ mixed_label[10]=105
+ mixed_label[11]=116
+ mixed_label[12]=101
+ mixed_label[13]=32
+ mixed_label[14]=98
+ mixed_label[15]=111
+ mixed_label[16]=117
+ mixed_label[17]=110
+ mixed_label[18]=100
+ mixed_label[19]=115
+ mixed_label[20]=59
+ mixed_label[21]=32
+ mixed_label[22]=105
+ mixed_label[23]=110
+ mixed_label[24]=118
+ mixed_label[25]=97
+ mixed_label[26]=108
+ mixed_label[27]=105
+ mixed_label[28]=100
+ mixed_label[29]=32
+ mixed_label[30]=112
+ mixed_label[31]=111
+ mixed_label[32]=105
+ mixed_label[33]=110
+ mixed_label[34]=116
+ mixed_label[35]=115
+ mixed_label[36]=32
+ mixed_label[37]=111
+ mixed_label[38]=109
+ mixed_label[39]=105
+ mixed_label[40]=116
+ mixed_label[41]=116
+ mixed_label[42]=101
+ mixed_label[43]=100
+ var note:[i8;64]=[0;64]
+ note[0]=86
+ note[1]=105
+ note[2]=101
+ note[3]=119
+ note[4]=32
+ note[5]=99
+ note[6]=114
+ note[7]=111
+ note[8]=112
+ note[9]=112
+ note[10]=105
+ note[11]=110
+ note[12]=103
+ note[13]=32
+ note[14]=100
+ note[15]=111
+ note[16]=101
+ note[17]=115
+ note[18]=32
+ note[19]=110
+ note[20]=111
+ note[21]=116
+ note[22]=32
+ note[23]=97
+ note[24]=108
+ note[25]=116
+ note[26]=101
+ note[27]=114
+ note[28]=32
+ note[29]=116
+ note[30]=104
+ note[31]=101
+ note[32]=32
+ note[33]=102
+ note[34]=105
+ note[35]=116
+ note[36]=116
+ note[37]=101
+ note[38]=100
+ note[39]=32
+ note[40]=109
+ note[41]=111
+ note[42]=100
+ note[43]=101
+ note[44]=108
+ var obs:[i8;64]=[0;64]
+ obs[0]=111
+ obs[1]=98
+ obs[2]=115
+ obs[3]=101
+ obs[4]=114
+ obs[5]=118
+ obs[6]=97
+ obs[7]=116
+ obs[8]=105
+ obs[9]=111
+ obs[10]=110
+ obs[11]=32
+ obs[12]=105
+ obs[13]=110
+ obs[14]=100
+ obs[15]=101
+ obs[16]=120
+ var unit:[i8;64]=[0;64]
+ unit[0]=114
+ unit[1]=101
+ unit[2]=115
+ unit[3]=105
+ unit[4]=100
+ unit[5]=117
+ unit[6]=97
+ unit[7]=108
+ unit[8]=32
+ unit[9]=40
+ unit[10]=109
+ unit[11]=86
+ unit[12]=41
+ viz_node_set_label(&!scene,xa,&obs,17)
+ viz_node_set_label(&!scene,ya,&unit,13)
+ assert(viz_add_label(&!scene,&title,44,viz_layout_rect(100,20,900,20),viz_style_rgb(220,230,240))>=0)
+ assert(viz_add_label(&!scene,&subtitle,47,viz_layout_rect(100,52,900,20),viz_style_rgb(220,230,240))>=0)
+ assert(viz_add_label(&!scene,&zero_label,21,viz_layout_rect(440,94,240,20),viz_style_rgb(220,230,240))>=0)
+ assert(viz_add_label(&!scene,&huge_label,22,viz_layout_rect(740,94,240,20),viz_style_rgb(220,230,240))>=0)
+ assert(viz_add_label(&!scene,&mixed_label,44,viz_layout_rect(440,374,540,20),viz_style_rgb(220,230,240))>=0)
+ assert(viz_add_label(&!scene,&note,45,viz_layout_rect(100,625,900,20),viz_style_rgb(220,230,240))>=0)
+ assert(scene.node_count==12 && scene.series_count==4)
+ let pixels=heap_alloc(1040*680*8) as *mut i64
+ var canvas=Canvas{pixels:pixels,width:1040,height:680}
+ canvas_clear(&!canvas,0,0,0)
+ viz_canvas_render_scene(&scene,&!canvas)
+ assert(read_i64(canvas.pixels,300*1040+100)==70*65536+180*256+235)
+ assert(read_i64(canvas.pixels,140*1040+340)==70*65536+180*256+235)
+ assert(read_i64(canvas.pixels,220*1040+520)==220*65536+135*256+225)
+ assert(read_i64(canvas.pixels,220*1040+820)==245*65536+170*256+65)
+ assert(read_i64(canvas.pixels,500*1040+520)==100*65536+220*256+170)
+ viz_html_emit_scene(&scene,1040,680)
+}
+fn boundary_serialization() with IO,Mut,Div,Panic {
+ var scene=viz_scene_new()
+ let xs:[f64;1024]=[0.0;1024]
+ let ys:[f64;1024]=[0.0;1024]
+ let mark=viz_add_scatter_chart(&!scene,&xs,&ys,1,viz_layout_rect(999990,999990,10,10),viz_style_rgb(70,180,235))
+ assert(mark==0 && viz_scatter_set_viewport(&!scene,mark,0.0,1.0,0.0,1.0))
+ // Serialization only: no million-pixel Canvas allocation or rendering.
+ viz_html_emit_scene(&scene,1000000,1000000)
+}
+fn main() with IO,Mut,Div,Alloc,Panic {
+ transactions()
+ exhaustive_disk()
+ scientific_scene()
+ boundary_serialization()
+ println("VIZ_SCATTER_VIEWPORT_PASS")
+ 0
+}
