@@ -1,0 +1,285 @@
+// Conditional Gaussian relative-precision inference from one checked WLS QR.
+// Assumptions are caller declarations; variance_model_assessed remains false.
+use linalg::weighted_least_squares::{weighted_qr_least_squares_factor}
+use linalg::least_squares_scale::{LeastSquaresNumber,least_squares_scaled_product}
+use stats::student_t::{t_two_tail}
+use math::pure::{sqrt,is_finite}
+pub struct WeightedLinearInference {
+    pub status: i64,
+    pub m: i64,
+    pub p: i64,
+    pub rank: i64,
+    pub df: i64,
+    pub coefficients: [f64;8],
+    pub covariance: [f64;64],
+    pub standard_errors: [f64;8],
+    pub t_statistics: [f64;8],
+    pub p_values: [f64;8],
+    pub ci_lower: [f64;8],
+    pub ci_upper: [f64;8],
+    pub residual_norm: f64,
+    pub normalized_weighted_residual_norm: f64,
+    pub weight_scale: f64,
+    pub rcond_used: f64,
+    pub r_diagonal_ratio: f64,
+    pub pivot: [i64;8],
+    pub covariance_status: i64,
+    pub inference_status: i64,
+    pub level: f64,
+    pub calibration: i64,
+    pub variance_model_assessed: bool,
+}
+fn wi_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn wi_index(row: i64, column: i64) -> usize { (row * 8 + column) as usize }
+fn wi_empty(m: i64,p: i64) -> WeightedLinearInference {
+    WeightedLinearInference {
+        status: 0, m: m, p: p, rank: 0, df: 0,
+        coefficients: [0.0;8], covariance: [0.0;64], standard_errors: [0.0;8],
+        t_statistics: [0.0;8], p_values: [0.0;8], ci_lower: [0.0;8], ci_upper: [0.0;8],
+        residual_norm: 0.0, normalized_weighted_residual_norm: 0.0,
+        weight_scale: 0.0, rcond_used: 0.0, r_diagonal_ratio: 0.0, pivot: [0;8],
+        covariance_status: 1, inference_status: 1, level: 0.0,
+        calibration: 0, variance_model_assessed: false,
+    }
+}
+fn wi_clear_inference(result: &!WeightedLinearInference, status: i64) with Mut,Div,Panic {
+    result.inference_status = status
+    result.level = 0.0
+    var i: i64 = 0
+    while i < 8 {
+        result.t_statistics[i as usize] = 0.0
+        result.p_values[i as usize] = 0.0
+        result.ci_lower[i as usize] = 0.0
+        result.ci_upper[i as usize] = 0.0
+        i = i + 1
+    }
+}
+fn wi_covariance_error(result: &!WeightedLinearInference) with Mut,Div,Panic {
+    result.covariance_status = 4
+    var i: i64 = 0
+    while i < 64 { result.covariance[i as usize] = 0.0; i = i + 1 }
+    i = 0
+    while i < 8 { result.standard_errors[i as usize] = 0.0; i = i + 1 }
+    wi_clear_inference(result,4)
+}
+fn wi_critical(df: f64, conf: f64) -> LeastSquaresNumber with Mut,Div,Panic {
+    let target = 1.0 - conf
+    var lower: f64 = 0.0
+    var upper: f64 = 1.0
+    var tail = t_two_tail(upper,df)
+    if !is_finite(tail) || tail < 0.0 || tail > 1.0 {
+        return LeastSquaresNumber { status: 4, value: 0.0 }
+    }
+    var iteration: i64 = 0
+    while tail > target && iteration < 64 {
+        upper = upper * 2.0
+        if !is_finite(upper) { return LeastSquaresNumber { status: 4, value: 0.0 } }
+        tail = t_two_tail(upper,df)
+        if !is_finite(tail) || tail < 0.0 || tail > 1.0 {
+            return LeastSquaresNumber { status: 4, value: 0.0 }
+        }
+        iteration = iteration + 1
+    }
+    if tail > target { return LeastSquaresNumber { status: 4, value: 0.0 } }
+    iteration = 0
+    while iteration < 100 {
+        let middle = lower + (upper - lower) * 0.5
+        let probability = t_two_tail(middle,df)
+        if !is_finite(probability) || probability < 0.0 || probability > 1.0 {
+            return LeastSquaresNumber { status: 4, value: 0.0 }
+        }
+        if probability > target { lower = middle } else { upper = middle }
+        iteration = iteration + 1
+    }
+    let critical = lower + (upper - lower) * 0.5
+    let roundtrip = t_two_tail(critical,df)
+    if !is_finite(critical) || critical < 0.0 || !is_finite(roundtrip) ||
+       roundtrip < 0.0 || roundtrip > 1.0 ||
+       wi_abs(roundtrip-target) > target*1.0e-9+2.0e-15 {
+        return LeastSquaresNumber { status: 4, value: 0.0 }
+    }
+    LeastSquaresNumber { status: 0, value: critical }
+}
+pub fn weighted_linear_inference(a: &[f64;2048], b: &[f64;256], w: &[f64;256],
+    m: i64, p: i64, rcond: f64, conf: f64,
+    assume_gaussian_precision: bool) -> WeightedLinearInference with Mut,Div,Panic {
+    var r_factor: [f64;64] = [0.0;64]
+    var outer_scale: [f64;8] = [0.0;8]
+    var inner_scale: [f64;8] = [0.0;8]
+    let fit = weighted_qr_least_squares_factor(a,b,w,m,p,rcond,&!r_factor,&!outer_scale,&!inner_scale)
+    var result = wi_empty(m,p)
+    result.status = fit.status
+    result.rank = fit.rank
+    result.df = fit.df
+    result.residual_norm = fit.residual_norm
+    result.normalized_weighted_residual_norm = fit.normalized_weighted_residual_norm
+    result.weight_scale = fit.weight_scale
+    result.rcond_used = fit.rcond_used
+    result.r_diagonal_ratio = fit.r_diagonal_ratio
+    var i: i64 = 0
+    while i < 8 {
+        result.coefficients[i as usize] = fit.coefficients[i as usize]
+        result.pivot[i as usize] = fit.pivot[i as usize]
+        i = i + 1
+    }
+    if fit.status != 0 {
+        result.covariance_status = 4
+        result.inference_status = 4
+        return result
+    }
+    if !assume_gaussian_precision { return result }
+    result.calibration = 1
+    if fit.df <= 0 {
+        result.covariance_status = 2
+        result.inference_status = 2
+        return result
+    }
+    let valid_conf = is_finite(conf) && conf >= 0.5 && conf <= 0.999999
+    let weighted_norm: f64 = fit.normalized_weighted_residual_norm
+    if weighted_norm == 0.0 {
+        result.covariance_status = 0
+        result.inference_status = if valid_conf { 3 } else { 5 }
+        return result
+    }
+    let root_df = sqrt(fit.df as f64)
+    if !is_finite(root_df) || root_df <= 0.0 || !is_finite(weighted_norm) || weighted_norm < 0.0 {
+        wi_covariance_error(&!result)
+        return result
+    }
+    var inverse_r: [f64;64] = [0.0;64]
+    var column: i64 = 0
+    while column < p {
+        i = column
+        while i >= 0 {
+            var sum: f64 = 0.0
+            var correction: f64 = 0.0
+            var k = i + 1
+            while k <= column {
+                let term = r_factor[wi_index(i,k)] * inverse_r[wi_index(k,column)] - correction
+                let next = sum + term
+                correction = (next - sum) - term
+                sum = next
+                k = k + 1
+            }
+            let rhs: f64 = if i == column { 1.0 } else { 0.0 }
+            let numerator = rhs - sum
+            let diagonal: f64 = r_factor[wi_index(i,i)]
+            if !is_finite(diagonal) || diagonal == 0.0 { wi_covariance_error(&!result); return result }
+            let value = numerator / diagonal
+            if !is_finite(value) || (numerator != 0.0 && value == 0.0) {
+                wi_covariance_error(&!result)
+                return result
+            }
+            inverse_r[wi_index(i,column)] = value
+            i = i - 1
+        }
+        column = column + 1
+    }
+    var h: [f64;64] = [0.0;64]
+    i = 0
+    while i < p {
+        let original: i64 = fit.pivot[i as usize]
+        if original < 0 || original >= p { wi_covariance_error(&!result); return result }
+        column = 0
+        while column < p {
+            let value: f64 = inverse_r[wi_index(i,column)]
+            let scaled = least_squares_scaled_product(value,weighted_norm,1.0,
+                outer_scale[original as usize],inner_scale[original as usize],root_df)
+            if scaled.status != 0 || (value != 0.0 && scaled.value == 0.0) {
+                wi_covariance_error(&!result)
+                return result
+            }
+            h[wi_index(original,column)] = scaled.value
+            column = column + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < p {
+        var scale: f64 = 0.0
+        var ssq: f64 = 1.0
+        column = 0
+        while column < p {
+            let magnitude = wi_abs(h[wi_index(i,column)])
+            if magnitude > 0.0 {
+                if magnitude > scale {
+                    let ratio = scale / magnitude
+                    ssq = 1.0 + ssq * ratio * ratio
+                    scale = magnitude
+                } else {
+                    let ratio = magnitude / scale
+                    ssq = ssq + ratio * ratio
+                }
+            }
+            column = column + 1
+        }
+        let norm = least_squares_scaled_product(scale,sqrt(ssq),1.0,1.0,1.0,1.0)
+        if norm.status != 0 || norm.value <= 0.0 {
+            wi_covariance_error(&!result)
+            return result
+        }
+        result.standard_errors[i as usize] = norm.value
+        i = i + 1
+    }
+    i = 0
+    while i < p {
+        var j = i
+        while j < p {
+            let se_i: f64 = result.standard_errors[i as usize]
+            let se_j: f64 = result.standard_errors[j as usize]
+            var dot: f64 = 0.0
+            var correction: f64 = 0.0
+            column = 0
+            while column < p {
+                let left = h[wi_index(i,column)] / se_i
+                let right = h[wi_index(j,column)] / se_j
+                let term = left * right - correction
+                let next = dot + term
+                correction = (next - dot) - term
+                dot = next
+                column = column + 1
+            }
+            let covariance = least_squares_scaled_product(dot,se_i,se_j,1.0,1.0,1.0)
+            if covariance.status != 0 || (i == j && covariance.value <= 0.0) {
+                wi_covariance_error(&!result)
+                return result
+            }
+            result.covariance[wi_index(i,j)] = covariance.value
+            result.covariance[wi_index(j,i)] = covariance.value
+            j = j + 1
+        }
+        i = i + 1
+    }
+    result.covariance_status = 0
+    if !valid_conf { result.inference_status = 5; return result }
+    let critical = wi_critical(fit.df as f64,conf)
+    if critical.status != 0 { wi_clear_inference(&!result,4); return result }
+    i = 0
+    while i < p {
+        let coefficient: f64 = fit.coefficients[i as usize]
+        let se: f64 = result.standard_errors[i as usize]
+        let statistic = coefficient / se
+        if !is_finite(statistic) { wi_clear_inference(&!result,4); return result }
+        let probability = t_two_tail(statistic,fit.df as f64)
+        if !is_finite(probability) || probability < 0.0 || probability > 1.0 {
+            wi_clear_inference(&!result,4)
+            return result
+        }
+        let width = critical.value * se
+        let lower = coefficient - width
+        let upper = coefficient + width
+        if !is_finite(width) || width <= 0.0 || !is_finite(lower) ||
+           !is_finite(upper) || lower >= upper {
+            wi_clear_inference(&!result,4)
+            return result
+        }
+        result.t_statistics[i as usize] = statistic
+        result.p_values[i as usize] = probability
+        result.ci_lower[i as usize] = lower
+        result.ci_upper[i as usize] = upper
+        i = i + 1
+    }
+    result.inference_status = 0
+    result.level = conf
+    result
+}

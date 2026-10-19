@@ -1,0 +1,134 @@
+//@ run-pass
+//@ expect-stdout: GENOMICS_KMER_EMBEDDING_PASS
+use genomics::embedding::{kmer_count,kmer_normalize,kmer_distance_checked,kmer_distance}
+fn near(a:f64,b:f64)->bool {
+ let d=if a>b {a-b} else {b-a}
+ return d<1e-12
+}
+// Independent direct-window enumeration, deliberately not a rolling encoder.
+// Executed by the native Forge fixture, including chunk boundaries.
+fn compare_direct(seq:&[i32;4096],n:i32,k:i32) with Mut,Div,Panic {
+ let p=kmer_count(seq,n,k)
+ assert(p.status==0 && !p.normalized)
+ var bins:[f64;256]=[0.0;256]
+ var total=0.0
+ var pos:i32=0
+ while pos<=n-k {
+  var idx:i32=0
+  var j:i32=0
+  var valid=true
+  while j<k {
+   let base=seq[(pos+j) as usize]
+   if base<0 || base>3 {valid=false}
+   if valid {idx=4*idx+base}
+   j=j+1
+  }
+  if valid {
+   bins[idx as usize]=bins[idx as usize]+1.0
+   total=total+1.0
+  }
+  pos=pos+1
+ }
+ assert(p.total==total)
+ var i:i32=0
+ while i<256 {
+  assert(p.counts[i as usize]==bins[i as usize])
+  i=i+1
+ }
+}
+fn main() with IO,Mut,Div,Panic {
+ var seq:[i32;4096]=[0;4096]
+ seq[255]=1
+ compare_direct(&seq,260,4)
+ seq[255]=-1
+ compare_direct(&seq,260,4)
+ seq[255]=4
+ compare_direct(&seq,260,4)
+ var i:i32=0
+ while i<4096 {
+  seq[i as usize]=i%4
+  i=i+1
+ }
+ var k:i32=1
+ while k<=4 {compare_direct(&seq,4096,k);k=k+1}
+ let badk0=kmer_count(&seq,260,0)
+ let badk5=kmer_count(&seq,260,5)
+ let badlen=kmer_count(&seq,-1,2)
+ let longlen=kmer_count(&seq,4097,2)
+ assert(badk0.status==1 && badk5.status==1)
+ assert(badlen.status==2 && longlen.status==2)
+ var alias:[i32;4096]=[0;4096]
+ alias[0]=-1
+ alias[1]=4
+ let invalid_bases=kmer_count(&alias,2,2)
+ assert(invalid_bases.status==0 && invalid_bases.total==0.0)
+ assert(invalid_bases.counts[0]==0.0)
+ var aseq:[i32;4096]=[0;4096]
+ var cseq:[i32;4096]=[1;4096]
+ var a=kmer_count(&aseq,20,2)
+ var c=kmer_count(&cseq,20,2)
+ let same=kmer_distance_checked(&a,&a)
+ let disjoint=kmer_distance_checked(&a,&c)
+ assert(same.status==0 && same.value==0.0)
+ assert(disjoint.status==0 && near(disjoint.value,1.0))
+ assert(near(kmer_distance(&a,&c),1.0))
+ var raw=kmer_count(&seq,260,3)
+ var norm=kmer_count(&seq,260,3)
+ assert(kmer_normalize(&!norm))
+ assert(norm.status==0 && norm.normalized && norm.total==raw.total)
+ var snapshot:[f64;256]=[0.0;256]
+ i=0
+ while i<256 {snapshot[i as usize]=norm.counts[i as usize];i=i+1}
+ assert(kmer_normalize(&!norm))
+ i=0
+ while i<256 {assert(norm.counts[i as usize]==snapshot[i as usize]);i=i+1}
+ let mixed=kmer_distance_checked(&raw,&norm)
+ assert(mixed.status==0 && near(mixed.value,0.0))
+ var other=kmer_count(&cseq,260,3)
+ let ab=kmer_distance_checked(&raw,&other)
+ let ba=kmer_distance_checked(&other,&raw)
+ let normalized_ab=kmer_distance_checked(&norm,&other)
+ assert(ab.status==0 && ba.status==0 && normalized_ab.status==0)
+ assert(ab.value>=0.0 && ab.value<=1.0)
+ assert(near(ab.value,ba.value) && near(ab.value,normalized_ab.value))
+ assert(kmer_normalize(&!other))
+ let both_normalized=kmer_distance_checked(&norm,&other)
+ assert(both_normalized.status==0 && near(ab.value,both_normalized.value))
+ var empty=kmer_count(&aseq,1,2)
+ assert(empty.status==0 && empty.total==0.0 && !empty.normalized)
+ assert(!kmer_normalize(&!empty))
+ assert(!empty.normalized)
+ let empty_distance=kmer_distance_checked(&empty,&a)
+ assert(empty_distance.status==3 && kmer_distance(&empty,&a)== -1.0)
+ let mismatched=kmer_distance_checked(&raw,&a)
+ assert(mismatched.status==2)
+ let badprofile=kmer_distance_checked(&badk0,&a)
+ assert(badprofile.status==1)
+ var malformed=kmer_count(&aseq,20,2)
+ malformed.n_kmers=257
+ let invalid_metadata=kmer_distance_checked(&malformed,&a)
+ assert(invalid_metadata.status==1)
+ malformed=kmer_count(&aseq,20,2)
+ malformed.counts[0]=-1.0
+ let invalid_count=kmer_distance_checked(&malformed,&a)
+ assert(invalid_count.status==1)
+ malformed=kmer_count(&aseq,20,2)
+ malformed.total=malformed.total+1.0
+ let invalid_mass=kmer_distance_checked(&malformed,&a)
+ assert(invalid_mass.status==1)
+ // C++23 long-double raw-KL oracle: uniform four-bin profile versus
+ // one A/C count transfer. This probes cancellation near equal profiles.
+ var perturbed:[i32;4096]=[0;4096]
+ i=0
+ while i<4096 {perturbed[i as usize]=i%4;i=i+1}
+ perturbed[1]=0
+ let uniform_profile=kmer_count(&seq,4096,1)
+ let perturbed_profile=kmer_count(&perturbed,4096,1)
+ let tiny=kmer_distance_checked(&uniform_profile,&perturbed_profile)
+ assert(tiny.status==0 && tiny.value>0.0)
+ let expected=0.000293242816366117167131
+ let relative=(tiny.value-expected)/expected
+ assert(relative> -1e-9 && relative<1e-9)
+ println("GENOMICS_KMER_EMBEDDING_PASS")
+ 0
+}

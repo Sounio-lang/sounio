@@ -1,0 +1,109 @@
+// Checked streaming DNA k-mer counts, k=1..4. See KMER.md.
+pub struct KmerState {
+    pub status: i64,
+    pub k: i64,
+    pub n_bins: i64,
+    pub counts: [i64; 256],
+    pub total_windows: i64,
+    pub rolling_index: i64,
+    pub valid_run: i64,
+    pub accepted_bases: i64,
+    pub ambiguous_bases: i64,
+}
+pub struct KmerProbability {
+    pub status: i64,
+    pub value: f64,
+}
+fn kmer_bins(k: i64) -> i64 {
+    if k == 1 { return 4 }
+    if k == 2 { return 16 }
+    if k == 3 { return 64 }
+    if k == 4 { return 256 }
+    0
+}
+fn kmer_add_ok(x: i64) -> bool {
+    x >= 0 && x < 9223372036854775807
+}
+// This checks the bounded header, not the entire externally mutable histogram.
+fn kmer_header_ok(s: &KmerState) -> bool with Mut, Div, Panic {
+    if s.status != 0 { return false }
+    let bins = kmer_bins(s.k)
+    if bins == 0 || s.n_bins != bins { return false }
+    if s.valid_run < 0 || s.valid_run > s.k { return false }
+    if s.accepted_bases < s.valid_run || s.ambiguous_bases < 0 { return false }
+    if s.total_windows < 0 || s.total_windows > s.accepted_bases { return false }
+    if s.accepted_bases < s.k && s.total_windows != 0 { return false }
+    var prefix_bins: i64 = 1
+    var j: i64 = 0
+    while j < s.valid_run {
+        prefix_bins = prefix_bins * 4
+        j = j + 1
+    }
+    if s.rolling_index < 0 || s.rolling_index >= prefix_bins { return false }
+    true
+}
+pub fn kmer_new(k: i64) -> KmerState {
+    let bins = kmer_bins(k)
+    let status: i64 = if bins == 0 { 1 } else { 0 }
+    KmerState {
+        status: status, k: k, n_bins: bins, counts: [0; 256],
+        total_windows: 0, rolling_index: 0, valid_run: 0,
+        accepted_bases: 0, ambiguous_bases: 0,
+    }
+}
+// Caller has checked the header. A rejected base changes only sticky status.
+fn kmer_push_ready(s: &!KmerState, base: i32) -> bool with Mut, Div, Panic {
+    if base < 0 || base > 3 {
+        if !kmer_add_ok(s.ambiguous_bases) { s.status = 4; return false }
+        s.ambiguous_bases = s.ambiguous_bases + 1
+        s.rolling_index = 0
+        s.valid_run = 0
+        return true
+    }
+    let index: i64 = (s.rolling_index * 4 + (base as i64)) % s.n_bins
+    let run: i64 = if s.valid_run < s.k { s.valid_run + 1 } else { s.k }
+    if !kmer_add_ok(s.accepted_bases) { s.status = 4; return false }
+    if run == s.k {
+        let old_count: i64 = s.counts[index as usize]
+        if old_count < 0 || old_count > s.total_windows { s.status = 3; return false }
+        if !kmer_add_ok(s.total_windows) || !kmer_add_ok(old_count) {
+            s.status = 4
+            return false
+        }
+    }
+    s.accepted_bases = s.accepted_bases + 1
+    s.rolling_index = index
+    s.valid_run = run
+    if run == s.k {
+        s.counts[index as usize] = s.counts[index as usize] + 1
+        s.total_windows = s.total_windows + 1
+    }
+    true
+}
+pub fn kmer_push_base(s: &!KmerState, base: i32) -> bool with Mut, Div, Panic {
+    if s.status != 0 { return false }
+    if !kmer_header_ok(s) { s.status = 3; return false }
+    kmer_push_ready(s, base)
+}
+pub fn kmer_push_chunk(s: &!KmerState, seq: &[i32; 256], n: i64) -> bool with Mut, Div, Panic {
+    if s.status != 0 { return false }
+    if n < 0 || n > 256 { s.status = 2; return false }
+    if !kmer_header_ok(s) { s.status = 3; return false }
+    var i: i64 = 0
+    while i < n {
+        if !kmer_push_ready(s, seq[i as usize]) { return false }
+        i = i + 1
+    }
+    true
+}
+pub fn kmer_probability(s: &KmerState, index: i64) -> KmerProbability with Mut, Div, Panic {
+    var result = KmerProbability { status: 1, value: 0.0 }
+    if !kmer_header_ok(s) { return result }
+    if index < 0 || index >= s.n_bins { result.status = 2; return result }
+    if s.total_windows == 0 { result.status = 3; return result }
+    let count: i64 = s.counts[index as usize]
+    if count < 0 || count > s.total_windows { return result }
+    result.status = 0
+    result.value = (count as f64) / (s.total_windows as f64)
+    result
+}
