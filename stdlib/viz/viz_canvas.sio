@@ -217,9 +217,11 @@ fn vc_draw_field(scene: &VizScene, c: &!Canvas, idx: i64) with Mut, Div {
 }
 
 fn vc_draw_vector_field(scene: &VizScene, c: &!Canvas, idx: i64) with Mut, Div {
-    let f = scene.vector_data[scene.nodes[idx as usize].data_slot as usize]
-    let rows = scene.vector_field_rows[scene.nodes[idx as usize].data_slot as usize]
-    let cols = scene.vector_field_cols[scene.nodes[idx as usize].data_slot as usize]
+    // Do not copy VizVectorFieldData. Its inline `[f64; 4096]` payload is not a
+    // GC handle. Also do not reuse `idx` for the cell: that name is the node.
+    let slot = scene.nodes[idx as usize].data_slot
+    let rows = scene.vector_field_rows[slot as usize]
+    let cols = scene.vector_field_cols[slot as usize]
     let cell_w = if cols <= 0 { 1 } else { scene.nodes[idx as usize].layout.w / cols }
     let cell_h = if rows <= 0 { 1 } else { scene.nodes[idx as usize].layout.h / rows }
     canvas_draw_rect(c, scene.nodes[idx as usize].layout.x, scene.nodes[idx as usize].layout.y, scene.nodes[idx as usize].layout.w, scene.nodes[idx as usize].layout.h, 120, 110, 70)
@@ -227,11 +229,11 @@ fn vc_draw_vector_field(scene: &VizScene, c: &!Canvas, idx: i64) with Mut, Div {
     while rr < rows && rr < 32 {
         var cc: i64 = 0
         while cc < cols && cc < 32 {
-            let idx = rr * cols + cc
+            let cell = rr * cols + cc
             let cx = scene.nodes[idx as usize].layout.x + cc * cell_w + cell_w / 2
             let cy = scene.nodes[idx as usize].layout.y + rr * cell_h + cell_h / 2
-            let dx = vc_clamp((f.vx[idx as usize] * 3.0) as i64, 0 - cell_w / 2, cell_w / 2)
-            let dy = vc_clamp((f.vy[idx as usize] * 3.0) as i64, 0 - cell_h / 2, cell_h / 2)
+            let dx = vc_clamp((scene.vector_data[slot as usize].vx[cell as usize] * 3.0) as i64, 0 - cell_w / 2, cell_w / 2)
+            let dy = vc_clamp((scene.vector_data[slot as usize].vy[cell as usize] * 3.0) as i64, 0 - cell_h / 2, cell_h / 2)
             canvas_draw_line_aa(c, cx, cy, cx + dx, cy + dy, scene.nodes[idx as usize].style.r, scene.nodes[idx as usize].style.g, scene.nodes[idx as usize].style.b)
             canvas_fill_rect(c, cx + dx - 1, cy + dy - 1, 3, 3, scene.nodes[idx as usize].style.r, scene.nodes[idx as usize].style.g, scene.nodes[idx as usize].style.b)
             cc = cc + 1
@@ -249,30 +251,31 @@ fn vc_traj_y(scene: &VizScene, idx: i64, y: f64, z: f64) -> i64 {
 }
 
 fn vc_draw_trajectory(scene: &VizScene, c: &!Canvas, idx: i64) with Mut, Div {
-    let tr = scene.trajectory_data[scene.nodes[idx as usize].data_slot as usize]
+    let slot = scene.nodes[idx as usize].data_slot
+    let n = scene.trajectory_data[slot as usize].n
     canvas_draw_rect(c, scene.nodes[idx as usize].layout.x, scene.nodes[idx as usize].layout.y, scene.nodes[idx as usize].layout.w, scene.nodes[idx as usize].layout.h, 120, 95, 150)
     var i: i64 = 1
-    while i < tr.n && i < 1024 {
-        let x0 = vc_traj_x(scene, idx, tr.x[(i - 1) as usize], tr.z[(i - 1) as usize])
-        let y0 = vc_traj_y(scene, idx, tr.y[(i - 1) as usize], tr.z[(i - 1) as usize])
-        let x1 = vc_traj_x(scene, idx, tr.x[i as usize], tr.z[i as usize])
-        let y1 = vc_traj_y(scene, idx, tr.y[i as usize], tr.z[i as usize])
+    while i < n && i < 1024 {
+        let x0 = vc_traj_x(scene, idx, scene.trajectory_data[slot as usize].x[(i - 1) as usize], scene.trajectory_data[slot as usize].z[(i - 1) as usize])
+        let y0 = vc_traj_y(scene, idx, scene.trajectory_data[slot as usize].y[(i - 1) as usize], scene.trajectory_data[slot as usize].z[(i - 1) as usize])
+        let x1 = vc_traj_x(scene, idx, scene.trajectory_data[slot as usize].x[i as usize], scene.trajectory_data[slot as usize].z[i as usize])
+        let y1 = vc_traj_y(scene, idx, scene.trajectory_data[slot as usize].y[i as usize], scene.trajectory_data[slot as usize].z[i as usize])
         canvas_draw_line_aa(c, x0, y0, x1, y1, scene.nodes[idx as usize].style.r, scene.nodes[idx as usize].style.g, scene.nodes[idx as usize].style.b)
         i = i + 1
     }
-    if tr.n > 0 {
-        let sx = vc_traj_x(scene, idx, tr.x[0], tr.z[0])
-        let sy = vc_traj_y(scene, idx, tr.y[0], tr.z[0])
+    if n > 0 {
+        let sx = vc_traj_x(scene, idx, scene.trajectory_data[slot as usize].x[0], scene.trajectory_data[slot as usize].z[0])
+        let sy = vc_traj_y(scene, idx, scene.trajectory_data[slot as usize].y[0], scene.trajectory_data[slot as usize].z[0])
         canvas_fill_rect(c, sx - 2, sy - 2, 5, 5, 180, 230, 190)
-        let last = tr.n - 1
-        let ex = vc_traj_x(scene, idx, tr.x[last as usize], tr.z[last as usize])
-        let ey = vc_traj_y(scene, idx, tr.y[last as usize], tr.z[last as usize])
+        let last = n - 1
+        let ex = vc_traj_x(scene, idx, scene.trajectory_data[slot as usize].x[last as usize], scene.trajectory_data[slot as usize].z[last as usize])
+        let ey = vc_traj_y(scene, idx, scene.trajectory_data[slot as usize].y[last as usize], scene.trajectory_data[slot as usize].z[last as usize])
         canvas_fill_rect(c, ex - 2, ey - 2, 5, 5, 255, 180, 130)
         var cur = scene.time as i64
         if cur < 0 { cur = 0 }
-        if cur >= tr.n { cur = tr.n - 1 }
-        let tx = vc_traj_x(scene, idx, tr.x[cur as usize], tr.z[cur as usize])
-        let ty = vc_traj_y(scene, idx, tr.y[cur as usize], tr.z[cur as usize])
+        if cur >= n { cur = n - 1 }
+        let tx = vc_traj_x(scene, idx, scene.trajectory_data[slot as usize].x[cur as usize], scene.trajectory_data[slot as usize].z[cur as usize])
+        let ty = vc_traj_y(scene, idx, scene.trajectory_data[slot as usize].y[cur as usize], scene.trajectory_data[slot as usize].z[cur as usize])
         canvas_draw_rect(c, tx - 4, ty - 4, 9, 9, 255, 245, 120)
     }
 }
@@ -288,14 +291,19 @@ fn vc_spec_y(scene: &VizScene, idx: i64, y: f64, ymin: f64, ymax: f64) -> i64 {
 }
 
 fn vc_draw_spectrum(scene: &VizScene, c: &!Canvas, idx: i64) with Mut, Div {
-    let s = scene.spectrum_data[scene.nodes[idx as usize].data_slot as usize]
+    let slot = scene.nodes[idx as usize].data_slot
+    let n = scene.spectrum_data[slot as usize].n
+    let x_min = scene.spectrum_data[slot as usize].x_min
+    let x_max = scene.spectrum_data[slot as usize].x_max
+    let y_min = scene.spectrum_data[slot as usize].y_min
+    let y_max = scene.spectrum_data[slot as usize].y_max
     canvas_draw_rect(c, scene.nodes[idx as usize].layout.x, scene.nodes[idx as usize].layout.y, scene.nodes[idx as usize].layout.w, scene.nodes[idx as usize].layout.h, 140, 110, 70)
     var i: i64 = 1
-    while i < s.n && i < 1024 {
-        let x0 = vc_spec_x(scene, idx, s.x[(i - 1) as usize], s.x_min, s.x_max)
-        let y0 = vc_spec_y(scene, idx, s.intensity[(i - 1) as usize], s.y_min, s.y_max)
-        let x1 = vc_spec_x(scene, idx, s.x[i as usize], s.x_min, s.x_max)
-        let y1 = vc_spec_y(scene, idx, s.intensity[i as usize], s.y_min, s.y_max)
+    while i < n && i < 1024 {
+        let x0 = vc_spec_x(scene, idx, scene.spectrum_data[slot as usize].x[(i - 1) as usize], x_min, x_max)
+        let y0 = vc_spec_y(scene, idx, scene.spectrum_data[slot as usize].intensity[(i - 1) as usize], y_min, y_max)
+        let x1 = vc_spec_x(scene, idx, scene.spectrum_data[slot as usize].x[i as usize], x_min, x_max)
+        let y1 = vc_spec_y(scene, idx, scene.spectrum_data[slot as usize].intensity[i as usize], y_min, y_max)
         canvas_draw_line_aa(c, x0, y0, x1, y1, scene.nodes[idx as usize].style.r, scene.nodes[idx as usize].style.g, scene.nodes[idx as usize].style.b)
         i = i + 1
     }
@@ -337,26 +345,35 @@ pub fn viz_canvas_render_scene(scene: &VizScene, c: &!Canvas) with Mut, Div, All
         } else if kind == VIZ_NODE_CONTROL {
             vc_draw_control(scene, c, i)
         } else if kind == VIZ_NODE_CHART_LINE || kind == VIZ_NODE_CHART_SCATTER || kind == VIZ_NODE_CHART_BAR || kind == VIZ_NODE_UNCERTAINTY_BAND {
-            let d = scene.series[slot as usize]
-            let x0 = if d.x_min == d.x_max { vc_pad_range_min(d.x_min) } else { d.x_min }
-            let x1 = if d.x_min == d.x_max { vc_pad_range_max(d.x_max) } else { d.x_max }
-            let y0 = if d.y_min == d.y_max { vc_pad_range_min(d.y_min) } else { d.y_min }
-            let y1 = if d.y_min == d.y_max { vc_pad_range_max(d.y_max) } else { d.y_max }
+            // VizSeriesData's inline arrays are not a GC handle. Copying the
+            // element loads word 0 and the chart index SIGSEGVs.
+            let x_min = scene.series[slot as usize].x_min
+            let x_max = scene.series[slot as usize].x_max
+            let y_min = scene.series[slot as usize].y_min
+            let y_max = scene.series[slot as usize].y_max
+            let n = scene.series[slot as usize].n
+            let x0 = if x_min == x_max { vc_pad_range_min(x_min) } else { x_min }
+            let x1 = if x_min == x_max { vc_pad_range_max(x_max) } else { x_max }
+            let y0 = if y_min == y_max { vc_pad_range_min(y_min) } else { y_min }
+            let y1 = if y_min == y_max { vc_pad_range_max(y_max) } else { y_max }
             let cs = coord_new(x0, x1, y0, y1, x, y, w, h)
             coord_draw_axes(&cs, c)
             if kind == VIZ_NODE_CHART_LINE {
-                chart_line(&cs, &d.xs, &d.ys, d.n, c, sr, sg, sb)
+                chart_line(&cs, &scene.series[slot as usize].xs, &scene.series[slot as usize].ys, n, c, sr, sg, sb)
             } else if kind == VIZ_NODE_CHART_SCATTER {
-                chart_scatter(&cs, &d.xs, &d.ys, d.n, c, sr, sg, sb)
+                chart_scatter(&cs, &scene.series[slot as usize].xs, &scene.series[slot as usize].ys, n, c, sr, sg, sb)
             } else if kind == VIZ_NODE_CHART_BAR {
-                chart_bar(&cs, &d.xs, &d.ys, d.n, c, sr, sg, sb)
+                chart_bar(&cs, &scene.series[slot as usize].xs, &scene.series[slot as usize].ys, n, c, sr, sg, sb)
             } else {
-                epiviz_band(&cs, &d.xs, &d.ys, &d.vars, d.n, c, sr, sg, sb)
+                epiviz_band(&cs, &scene.series[slot as usize].xs, &scene.series[slot as usize].ys, &scene.series[slot as usize].vars, n, c, sr, sg, sb)
             }
         } else if kind == VIZ_NODE_HEATMAP {
-            let heat = scene.heatmaps[slot as usize]
-            let cs = coord_new(0.0, heat.cols as f64, 0.0, heat.rows as f64, x, y, w, h)
-            chart_heatmap(&cs, &heat.values, heat.rows, heat.cols, heat.min_value, heat.max_value, c)
+            let rows = scene.heatmaps[slot as usize].rows
+            let cols = scene.heatmaps[slot as usize].cols
+            let min_value = scene.heatmaps[slot as usize].min_value
+            let max_value = scene.heatmaps[slot as usize].max_value
+            let cs = coord_new(0.0, cols as f64, 0.0, rows as f64, x, y, w, h)
+            chart_heatmap(&cs, &scene.heatmaps[slot as usize].values, rows, cols, min_value, max_value, c)
             coord_draw_axes(&cs, c)
         } else if kind == VIZ_NODE_FOREST {
             vc_draw_forest(scene, c, i)
