@@ -780,3 +780,13 @@ the bounded acceptance and artifacts. The next implementation front is accurate
 inferential tails and their caller contracts, followed by regression diagnostics
 and the scientific chart specification. Content digests, axes/ticks/labels,
 publication layouts, and domain galleries remain required for full acceptance.
+
+## Implementation continuation — HC3 and incremental counts, 2026-10-19
+
+After the published101-test checkpoint, two experimental modules were added:
+OLS HC3 covariance via existing QR factors, and incremental nonnegative-i64 count
+TSV with transactional QC and a checked256x8 normalization adapter. Both pass
+native typecheck in Slurm15622. The independent C++23 HC3 reference passes syntax
+checking only. Numerical concordance, executable consumers, corpus inclusion and
+a new scientific figure remain pending; earlier101/101 does not cover these additions.
+See HC3_COUNT_TSV_IMPLEMENTATION_2026_10_19.md for source identities and boundaries.
