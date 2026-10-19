@@ -11,7 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-q
 
 > **Other guides**: [Scientists' Quick Start](../QUICK_START_GUIDE.md) | [General Getting Started](getting-started.md) | [Conservative contract](MINIMUM_VIABLE_SOUNIO.md)
 
-**TL;DR**: Sounio is NOT Rust. Effects are required. `&!` not `&mut`. `println` takes one argument. Study real `.sio` files. Native `souc run` is Linux x86-64.
+**TL;DR**: Sounio is NOT Rust. Effects are required. `&!` not `&mut`. `println` takes one argument. Study real `.sio` files. The committed prebuilt runs on Linux x86-64; Apple Silicon has a separate [native ARM64 route](../compiler/MADAROS_MACOS_ARM64.md).
 
 **Full syntax ref**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](LLM_PROGRAMMING_GUIDE.md)
 

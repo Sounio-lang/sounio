@@ -1,8 +1,8 @@
 # Sounio Installation Guide
 
-The default compiler is the committed Madaros binary behind `bin/souc`. Measured 2026-10-15: `./bin/souc --version` prints `Madaros v0.80.0`. That binary is a static Linux x86-64 ELF. It does not run on macOS. On a Mac checkout the launcher materializes `bin/madaros-linux-x86_64` and cannot execute it.
+The committed Madaros prebuilt behind `bin/souc` is a static Linux x86-64 ELF; it does not run on macOS. Apple Silicon has a separate current-source native ARM64 build and real Metal route integrated in [#2978](https://github.com/Sounio-lang/sounio/pull/2978). Follow the [macOS ARM64 guide](docs/compiler/MADAROS_MACOS_ARM64.md) to build and install the native artifact before using the launcher on that platform.
 
-Apple execution is tracked separately in [#2873](https://github.com/Sounio-lang/sounio/pull/2873). That record does not mean this launcher distributes a host-native macOS compiler. See the root [README.md](README.md).
+The prebuilt binary and native source-built route are distinct. See the root [README.md](README.md) for the current repository map and status.
 
 ## Check the checkout
 

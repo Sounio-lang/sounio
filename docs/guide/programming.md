@@ -15,7 +15,7 @@ This guide is a long reference for generating Sounio. It is not a dialect of Rus
 
 ## Implementation Status (Read First)
 
-Aligned to `docs/serious-language/public-claim-registry.v1.tsv`, `TOUR.md` (measured 2026-10-04), and `docs/compiler/KNOWN_LIMITATIONS.md` (ledger validated 2026-10-06; KL-11 narrowed 2026-10-13). Native `souc run` is Linux x86-64. This table is not a new measurement.
+Aligned to `docs/serious-language/public-claim-registry.v1.tsv`, `TOUR.md` (measured 2026-10-04), and `docs/compiler/KNOWN_LIMITATIONS.md` (ledger validated 2026-10-06; KL-11 narrowed 2026-10-13). The committed prebuilt runs on Linux x86-64; the separate Apple Silicon route and its limits are listed below. This table is not a new measurement.
 
 | Feature | Status |
 |---------|--------|
@@ -31,7 +31,7 @@ Aligned to `docs/serious-language/public-claim-registry.v1.tsv`, `TOUR.md` (meas
 | GPU PTX | Named gate only (`gpu.ptx`). `TOUR.md` §6 (2026-10-04) measured empty-body emission, not a general kernel backend. Do not copy later GPU snippets as working code. |
 | Async `spawn` / `await` / channels | Not part of the checked user contract in this guide. |
 | Package manager | Local registry only. Registry: `tooling.package = validated_research`. No public registry. |
-| macOS execution | Do not claim `souc run` on macOS. Mach-O is a validated-research cross-compile lane, not this guide's default path. |
+| macOS execution | The committed prebuilt is Linux x86-64. A separate current-source native ARM64 build and real Metal route is integrated in [#2978](https://github.com/Sounio-lang/sounio/pull/2978); follow the [macOS ARM64 guide](../compiler/MADAROS_MACOS_ARM64.md) for setup and limits. Do not infer Linux parity or self-hosting from this route. |
 
 ### Canonical References
 
@@ -71,7 +71,7 @@ Aligned to `docs/serious-language/public-claim-registry.v1.tsv`, `TOUR.md` (meas
 
 ### Hello World
 
-Same program as `examples/hello.sio`. `souc run` executes it on Linux x86-64 only.
+Same program as `examples/hello.sio`. The following command uses the committed Linux x86-64 prebuilt; for Apple Silicon, see the [native ARM64 guide](../compiler/MADAROS_MACOS_ARM64.md).
 
 ```sounio
 fn main() -> i32 with IO {
@@ -2318,7 +2318,7 @@ This guide is for **Sounio L0** (low-level systems syntax). The compiler source 
 
 ```bash
 souc check your_file.sio
-souc run your_file.sio          # Linux x86-64 ELF
+souc run your_file.sio          # committed prebuilt: Linux x86-64 ELF
 souc info
 souc --version                  # Madaros v0.80.0 on the committed binary
 ```

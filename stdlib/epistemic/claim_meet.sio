@@ -41,3 +41,105 @@ pub fn claim_meet(mean_a: f64, var_a: f64, mean_b: f64, var_b: f64) -> ClaimMeet
     let excess = (hi_a - lo_a) + (hi_b - lo_b) - 2.0 * shared_w
     ClaimMeet { lo: lo, hi: hi, shared: shared, excess: excess }
 }
+
+// The shared band is not a licence to read either centre.
+// BothInside keeps both witnesses and yields no single centre.
+// OnlyA and OnlyB yield the one centre the band still contains.
+// NeitherInside is a band with no centre in it.
+// ReviseModel is an empty overlap: there is no band and no centre.
+
+pub enum CentreSeat {
+    BothInside,
+    OnlyA,
+    OnlyB,
+    NeitherInside,
+    ReviseModel,
+}
+
+pub struct HeldCentre {
+    pub held: bool
+    pub centre: f64
+}
+
+pub fn centre_seat(
+    lo_a: f64, hi_a: f64, centre_a: f64,
+    lo_b: f64, hi_b: f64, centre_b: f64,
+) -> CentreSeat with Mut {
+    var lo = lo_a
+    if lo_b > lo { lo = lo_b }
+    var hi = hi_a
+    if hi_b < hi { hi = hi_b }
+    if lo > hi { return CentreSeat::ReviseModel }
+    let a_in = centre_a >= lo && centre_a <= hi
+    let b_in = centre_b >= lo && centre_b <= hi
+    if a_in && b_in { return CentreSeat::BothInside }
+    if a_in { return CentreSeat::OnlyA }
+    if b_in { return CentreSeat::OnlyB }
+    CentreSeat::NeitherInside
+}
+
+pub fn seat_code(seat: CentreSeat) -> i64 {
+    match seat {
+        CentreSeat::BothInside => 0
+        CentreSeat::OnlyA => 1
+        CentreSeat::OnlyB => 2
+        CentreSeat::NeitherInside => 3
+        CentreSeat::ReviseModel => 4
+    }
+}
+
+pub fn held_centre(seat: CentreSeat, centre_a: f64, centre_b: f64) -> HeldCentre {
+    let code = seat_code(seat)
+    if code == 1 { return HeldCentre { held: true, centre: centre_a } }
+    if code == 2 { return HeldCentre { held: true, centre: centre_b } }
+    HeldCentre { held: false, centre: 0.0 }
+}
+
+// k = 1, symmetric on the scale of the mean: mean ± sqrt(var).
+// The point value is not read.
+pub fn seat_moments(mean_a: f64, var_a: f64, mean_b: f64, var_b: f64) -> CentreSeat with Mut, Div {
+    let sa = claim_sqrt(var_a)
+    let sb = claim_sqrt(var_b)
+    centre_seat(mean_a - sa, mean_a + sa, mean_a, mean_b - sb, mean_b + sb, mean_b)
+}
+
+// k = 1 on the log scale: [centre * exp(-u), centre * exp(u)].
+// u is a standard uncertainty of ln(centre), not sqrt(var) of the centre.
+// A non-positive centre, or a negative u, has no such band.
+pub fn seat_log(centre_a: f64, u_a: f64, centre_b: f64, u_b: f64) -> CentreSeat with Mut {
+    if centre_a <= 0.0 || centre_b <= 0.0 || u_a < 0.0 || u_b < 0.0 {
+        return CentreSeat::ReviseModel
+    }
+    let lo_a = centre_a * exp(0.0 - u_a)
+    let hi_a = centre_a * exp(u_a)
+    let lo_b = centre_b * exp(0.0 - u_b)
+    let hi_b = centre_b * exp(u_b)
+    centre_seat(lo_a, hi_a, centre_a, lo_b, hi_b, centre_b)
+}
+
+// The same centres and the same u(ln). Two scales.
+// Linear pretends u is a Gaussian width centre*u on the centre itself.
+// Logarithmic keeps the multiplicative band. A centre that only one
+// scale would hand back is not handed back.
+pub struct ScaleContest {
+    pub linear_code: i64
+    pub log_code: i64
+    pub parted: bool
+}
+
+pub fn scale_contest(centre_a: f64, u_a: f64, centre_b: f64, u_b: f64) -> ScaleContest with Mut, Div {
+    let var_a = (centre_a * u_a) * (centre_a * u_a)
+    let var_b = (centre_b * u_b) * (centre_b * u_b)
+    let linear_code = seat_code(seat_moments(centre_a, var_a, centre_b, var_b))
+    let log_code = seat_code(seat_log(centre_a, u_a, centre_b, u_b))
+    var parted = false
+    if linear_code != log_code { parted = true }
+    ScaleContest { linear_code: linear_code, log_code: log_code, parted: parted }
+}
+
+pub fn held_across_scales(scales: ScaleContest, centre_a: f64, centre_b: f64) -> HeldCentre {
+    if scales.parted { return HeldCentre { held: false, centre: 0.0 } }
+    if scales.log_code == 1 { return HeldCentre { held: true, centre: centre_a } }
+    if scales.log_code == 2 { return HeldCentre { held: true, centre: centre_b } }
+    HeldCentre { held: false, centre: 0.0 }
+}

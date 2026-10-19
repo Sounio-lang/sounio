@@ -3224,6 +3224,19 @@ fn checker_lower_unit_or_ref_type_mut(c: *mut Checker, te: TypeExpr, is_mut_ref:
     }
 }
 
+fn checker_type_env_capacity_ok_inplace(c: *mut Checker) -> bool with Mut, Panic, Div, IO {
+    if !(*c).env.overflowed { return true }
+    (*c).had_error = true
+    if !(*c).env.overflow_reported {
+        (*c).env.overflow_reported = true
+        (*c).error_count = (*c).error_count + 1
+        print("error[E-TYPE-ENV-CAP]: type environment is full (")
+        print_int(TYPE_ENV_CAPACITY)
+        print(" bindings); refusing to discard a global or local binding\n")
+    }
+    false
+}
+
 pub fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
     // Route through the true *mut collect spine (ItemFn handled in place,
     // other item kinds bridge by value). The crash lived here: the by-value
@@ -4734,7 +4747,7 @@ fn checker_collect_global_item_inplace(
         None => {}
     }
     let benv_idx = (*c).env.count
-    if benv_idx < 4096 {
+    if benv_idx < TYPE_ENV_CAPACITY {
         (*c).env.bindings[benv_idx as usize] = TypeBinding {
             name: name,
             ty: ty_unknown(),
@@ -4742,6 +4755,8 @@ fn checker_collect_global_item_inplace(
             scope_depth: (*c).env.scope_depth,
         }
         (*c).env.count = benv_idx + 1
+    } else {
+        (*c).env.overflowed = true
     }
     checker_const_int_bind_unknown_inplace(c, name)
 }
@@ -4774,7 +4789,7 @@ fn checker_bind_import_unknown_with_mutability_inplace(c: *mut Checker, name: Na
         i = i - 1
     }
     let benv_idx = (*c).env.count
-    if benv_idx < 4096 {
+    if benv_idx < TYPE_ENV_CAPACITY {
         (*c).env.bindings[benv_idx as usize] = TypeBinding {
             name: name,
             ty: ty_unknown(),
@@ -4782,6 +4797,8 @@ fn checker_bind_import_unknown_with_mutability_inplace(c: *mut Checker, name: Na
             scope_depth: (*c).env.scope_depth,
         }
         (*c).env.count = benv_idx + 1
+    } else {
+        (*c).env.overflowed = true
     }
     checker_const_int_bind_unknown_inplace(c, name)
 }
@@ -4868,11 +4885,14 @@ fn checker_path_first_two_eq(path: AstPath, first: string, second: string) -> bo
 // so no new module-identity plumbing was needed -- just applying the id
 // that already existed.
 let CHECKER_USE_MODULE_SEG_MAX: i64 = 384
+// Entries are (module id, suffix), not globally unique suffixes: the full
+// modular compiler exceeds 1024 after loading the native macOS/Metal modules.
+let CHECKER_USE_MODULE_CAP: i64 = 4096
 var CHECKER_USE_MODULE_COUNT: i64 = 0
-var CHECKER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
-var CHECKER_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
-var CHECKER_USE_MODULE_MODULE_ID: [i64; 1024] = [0 - 1; 1024]
-var CHECKER_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
+var CHECKER_USE_MODULE_HASH: [i64; 4096] = [0; 4096]
+var CHECKER_USE_MODULE_LEN: [i64; 4096] = [0; 4096]
+var CHECKER_USE_MODULE_MODULE_ID: [i64; 4096] = [0 - 1; 4096]
+var CHECKER_USE_MODULE_BUF: [i8; 1572864] = [0; 1572864]
 // Review comment 4089532579 (round 3, finding A): silently dropping an entry
 // past capacity here fails OPEN, not closed. A `souc check`-only caller never
 // runs the lowerer's own overflow refusal (IR_LOWER_HARD_ERROR), so once this
@@ -4949,7 +4969,7 @@ fn checker_use_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
     if checker_use_module_known(module_id, n) {
         return
     }
-    if CHECKER_USE_MODULE_COUNT >= 1024 {
+    if CHECKER_USE_MODULE_COUNT >= CHECKER_USE_MODULE_CAP {
         CHECKER_USE_MODULE_OVERFLOWED = true
         return
     }
@@ -5214,7 +5234,9 @@ fn checker_report_use_module_overflow_inplace(c: *mut Checker, span: Span) with 
     print_int(span.start)
     print("..")
     print_int(span.end)
-    print(": module-qualified-call registry is full (1024 distinct lowercase `use` segments)\n")
+    print(": module-qualified-call registry is full (")
+    print_int(CHECKER_USE_MODULE_CAP)
+    print(" module-scoped lowercase `use` suffixes)\n")
     print("   = note: later module-qualified calls cannot be fully checked (argument/effect/")
     print("visibility checks are skipped, only an unresolved-path warning fires) -- refusing")
     print(" rather than silently under-checking the rest of this compile\n")
@@ -5258,6 +5280,8 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("syscall6"))
     checker_bind_import_unknown_inplace(c, make_name("__arena_mark"))
     checker_bind_import_unknown_inplace(c, make_name("__arena_reset"))
+    // Existing native region diagnostic, distinct from the Box-arena cursor.
+    checker_bind_import_unknown_inplace(c, make_name("__rgn_cursor"))
     checker_bind_import_unknown_inplace(c, make_name("__arena_refill_bytes"))
     checker_bind_import_unknown_inplace(c, make_name("__arena_unmap_bytes"))
     checker_bind_import_unknown_inplace(c, make_name("__pool_mark"))
@@ -6510,14 +6534,17 @@ pub fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList
             None => break
         }
     }
+    let _capacity_ok = checker_type_env_capacity_ok_inplace(c)
 }
 
 fn checker_check_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    if !checker_type_env_capacity_ok_inplace(c) { return }
     var cursor = items
     while true {
         match cursor {
             Some(list) => {
                 checker_check_item_inplace(c, (*list).head)
+                if !checker_type_env_capacity_ok_inplace(c) { return }
                 cursor = (*list).tail
             }
             None => break
@@ -8356,7 +8383,11 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     // neither. Found by instrumenting a source build: the site fifteen lines
     // below reported ignunits=1 and reskind=1 (not an error) for exactly the
     // operand pair this line was rejecting.
-    if !both_hyper && !either_cond_indep && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !compat_numeric_ignoring_units(left_ty, right_ty) {
+    // The supported Knowledge ident-add lane joins metadata rather than
+    // assigning one operand to the other. Its payload/units/noise/validity
+    // checks below remain authoritative even when epsilon bounds differ.
+    let knowledge_ident_add = checker_is_knowledge_ident_add(e, left_ty, right_ty)
+    if !both_hyper && !either_cond_indep && !knowledge_ident_add && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !compat_numeric_ignoring_units(left_ty, right_ty) {
         let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
             || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
         let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
@@ -8431,7 +8462,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             checker_report_error_at_inplace(c, e.span, 230, 0, 0, 0)
         }
         if correlated_same_slot_add {
-            knowledge_result.knowledge_epsilon = epsilon_combine_correlated(left_ty.knowledge_epsilon, right_ty.knowledge_epsilon)
+            knowledge_result.knowledge_epsilon = knowledge_same_slot_add_variance(left_ty)
         }
         let final_result = checker_finish_binary_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_result)
         if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
@@ -10115,11 +10146,107 @@ fn checker_bind_closure_params_inplace(c: *mut Checker, opt: Option<Box<ClosureP
     }
 }
 
+fn checker_closure_peer_primitive(c: *mut Checker, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprIntLit { return make_name("i64") }
+    if (*e).kind == ExprKind::ExprFloatLit { return make_name("f64") }
+    if (*e).kind == ExprKind::ExprBoolTrue || (*e).kind == ExprKind::ExprBoolFalse {
+        return make_name("bool")
+    }
+    if (*e).kind == ExprKind::ExprIdent {
+        let ty = (*c).env.lookup((*e).name)
+        if ty.kind == TypeKind::TyI64 { return make_name("i64") }
+        if ty.kind == TypeKind::TyF64 { return make_name("f64") }
+        if ty.kind == TypeKind::TyBool { return make_name("bool") }
+    }
+    empty_name()
+}
+
+fn checker_closure_param_constraint(c: *mut Checker, param: Name, opt: &Option<Box<Expr>>, known: Name) -> Name with Mut, Panic, Div, Alloc, IO {
+    var result = known
+    match *opt {
+        Some(e) => {
+            if (*e).kind == ExprKind::ExprClosure { return result }
+            if (*e).kind == ExprKind::ExprBinary {
+                match (*e).left {
+                    Some(left) => {
+                        match (*e).right {
+                            Some(right) => {
+                                var candidate = empty_name()
+                                if (*left).kind == ExprKind::ExprIdent && name_eq((*left).name, param) {
+                                    candidate = checker_closure_peer_primitive(c, &(*right))
+                                }
+                                if (*right).kind == ExprKind::ExprIdent && name_eq((*right).name, param) {
+                                    candidate = checker_closure_peer_primitive(c, &(*left))
+                                }
+                                if !name_is_empty(candidate) {
+                                    if !name_is_empty(result) && !name_eq(result, candidate) {
+                                        checker_report_error_at_inplace(c, (*e).span, 4, 0, 0, 0)
+                                    } else { result = candidate }
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    None => {}
+                }
+            }
+            result = checker_closure_param_constraint(c, param, &(*e).left, result)
+            result = checker_closure_param_constraint(c, param, &(*e).right, result)
+            result = checker_closure_param_constraint(c, param, &(*e).else_expr, result)
+            match (*e).block {
+                Some(block) => {
+                    var stmts = &(*block).stmts
+                    while true {
+                        match *stmts {
+                            Some(node) => {
+                                // A shadowing binding starts a different variable.
+                                if ((*node).head.kind == StmtKind::StmtLet || (*node).head.kind == StmtKind::StmtVar) && name_eq((*node).head.name, param) { break }
+                                result = checker_closure_param_constraint(c, param, &(*node).head.expr, result)
+                                stmts = &(*node).tail
+                            }
+                            None => break,
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        None => {}
+    }
+    result
+}
+
+fn checker_resolve_closure_params_inplace(c: *mut Checker, params: Option<Box<ClosureParamList>>, body: &Option<Box<Expr>>) -> Option<Box<ClosureParamList>> with Mut, Panic, Div, Alloc, IO {
+    match params {
+        Some(list) => {
+            var param = (*list).head
+            if param.ty.kind == TypeExprKind::TypeInfer {
+                let primitive = checker_closure_param_constraint(c, param.name, body, empty_name())
+                if name_is_empty(primitive) {
+                    // Do not publish a wildcard signature that accepts bool/string
+                    // calls to a numeric closure. Context-only inference is not
+                    // implemented on this path: require an annotation there.
+                    checker_report_error_at_inplace(c, param.span, 4, 0, 0, 0)
+                } else {
+                    param.ty.kind = TypeExprKind::TypeNamed
+                    param.ty.path = AstPath { segments: StringList { head_buf: primitive.buf, head_len: primitive.len, tail: None }, seg_count: 1 }
+                }
+            }
+            Some(Box::new(ClosureParamList {
+                head: param,
+                tail: checker_resolve_closure_params_inplace(c, (*list).tail, body),
+            }))
+        }
+        None => None,
+    }
+}
+
 fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // *mut closure helpers (no 164KB Checker SRET-move; only lower_type_expr is bridged,
     // which works in isolation — the crash was the ACCUMULATED by-value Checker returns of
     // collect_closure_params / lower_opt_closure_return / bind_closure_params).
-    let params_pair = checker_collect_closure_params_inplace(c, e.closure_params)
+    let resolved_params = checker_resolve_closure_params_inplace(c, e.closure_params, &e.closure_body)
+    let params_pair = checker_collect_closure_params_inplace(c, resolved_params)
     let params = params_pair.0
     let param_count = params_pair.1
 
@@ -10135,7 +10262,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     (*c).borrows = (*c).borrows.push_scope()
     checker_push_const_scope_inplace(c)
 
-    checker_bind_closure_params_inplace(c, e.closure_params)
+    checker_bind_closure_params_inplace(c, resolved_params)
     var capture_candidates: [bool; 128] = [false; 128]
     var capture_seed_i: i64 = 0
     while capture_seed_i < outer_borrow_count {
@@ -10804,6 +10931,21 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
 }
 
 // *mut ExprCall handler — transcription of check_call_expr's normal path (14605-14687).
+// A literal standard uncertainty discharges a variance upper bound without
+// trusting the destination annotation. Non-literals stay unknown, and values
+// outside the epsilon domain never acquire a fabricated confidence promise.
+fn checker_measure_literal_variance(args: Option<Box<ExprList>>) -> f64 with Mut, Panic, Div, Alloc {
+    match expr_list_second(args) {
+        Some(uncertainty) => {
+            var u: f64 = 0.0 - 1.0
+            if (*uncertainty).kind == ExprKind::ExprFloatLit { u = (*uncertainty).float_val }
+            if (*uncertainty).kind == ExprKind::ExprIntLit { u = (*uncertainty).int_val as f64 }
+            if u >= 0.0 && u <= 1.0 { return u * u }
+        }
+        None => {}
+    }
+    0.0 - 1.0
+}
 
 fn checker_check_sign_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_arg = expr_list_head(e.args)
@@ -10854,7 +10996,13 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     // (~41% of remaining checker crashers).
     let first_arg = expr_list_head(e.args)
     let v_ty = checker_check_opt_expr_inplace(c, first_arg)
+    // Preserve the payload-type correspondence constructor: an instrument
+    // starts with an unknown bound, refined only by independent literal data.
     var result = ty_knowledge(v_ty, 0.0 - 1.0)
+    let literal_variance = checker_measure_literal_variance(e.args)
+    if literal_variance >= 0.0 {
+        result.knowledge_epsilon = literal_variance
+    }
     // N2 seed (REQ-2): a measured value is a fresh independent source, so it
     // becomes a NEW singleton set -- never empty (that would claim it shares
     // no uncertainty with itself) and never a leftover handle from an
@@ -19618,7 +19766,19 @@ fn call_expr_is_syscall6(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, 
 // correct (verified: copied verbatim under another name, atan(0.5) = 0.463648).
 // They were not `pub` until this change, so importing them failed with E175 and
 // the refusal would have been a dead end -- measured, not assumed.
+// Scoped by the target-aware compile entry point. Plain check and other targets
+// retain the fail-closed default. The caller restores the previous capability
+// even when parsing/checking/lowering returns an error.
+var CHECKER_DARWIN_MATH: bool = false
+
+pub fn checker_swap_darwin_math(enabled: bool) -> bool with Mut {
+    let previous = CHECKER_DARWIN_MATH
+    CHECKER_DARWIN_MATH = enabled
+    previous
+}
+
 fn name_is_unimplemented_native_math(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if CHECKER_DARWIN_MATH { return false }
     if name_eq(n, make_name("tan")) { return true }
     if name_eq(n, make_name("atan")) { return true }
     if name_eq(n, make_name("tanh")) { return true }
@@ -25803,11 +25963,13 @@ impl Checker {
 impl Checker {
     fn check_items(self, items: Option<Box<ItemList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         var c = self
+        if !checker_type_env_capacity_ok_inplace((&! c) as *mut Checker) { return c }
         var cursor = items
         while true {
             match cursor {
                 Some(list) => {
                     c = c.check_item((*list).head)
+                    if !checker_type_env_capacity_ok_inplace((&! c) as *mut Checker) { return c }
                     cursor = (*list).tail
                 }
                 None => break
@@ -26721,7 +26883,7 @@ impl Checker {
                 c = c.report_error_at(e.span, 230, 0, 0, 0)
             }
             if correlated_same_slot_add {
-                knowledge_result.knowledge_epsilon = epsilon_combine_correlated(left_ty.knowledge_epsilon, right_ty.knowledge_epsilon)
+                knowledge_result.knowledge_epsilon = knowledge_same_slot_add_variance(left_ty)
             }
             // Continue with normal checking for inner type compatibility
             // The knowledge_binary_result handles epsilon propagation
@@ -29893,6 +30055,10 @@ impl Checker {
         // (checker_check_measure_expr_inplace) -- without this, authoritative
         // four-axis subsumption rejects `let a: Knowledge[f64, Measured] = measure(...)`.
         var result = ty_knowledge(v_ty, 0.0 - 1.0)
+        let literal_variance = checker_measure_literal_variance(e.args)
+        if literal_variance >= 0.0 {
+            result.knowledge_epsilon = literal_variance
+        }
         result.knowledge_provenance_kind = PROVENANCE_KIND_MEASURED
         (c, result)
     }
@@ -31277,9 +31443,10 @@ impl Checker {
 
     fn check_closure_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
+        let resolved_params = checker_resolve_closure_params_inplace((&!c) as *mut Checker, e.closure_params, &e.closure_body)
 
         // Convert closure params to FnParamList for signature
-        let params_result = c.collect_closure_params(e.closure_params)
+        let params_result = c.collect_closure_params(resolved_params)
         c = params_result.checker
         let params = params_result.params
         let param_count = params_result.count
@@ -31302,7 +31469,7 @@ impl Checker {
         c = c.push_const_scope()
 
         // Bind closure params in environment
-        c = c.bind_closure_params(e.closure_params)
+        c = c.bind_closure_params(resolved_params)
         var capture_candidates: [bool; 128] = [false; 128]
         var capture_seed_i: i64 = 0
         while capture_seed_i < outer_borrow_count {
