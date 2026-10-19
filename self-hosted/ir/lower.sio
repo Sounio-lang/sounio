@@ -3836,12 +3836,9 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                     let fn_id_ps = lowerer_find_or_add_fn_id_mut(lo, name)
                                     if fn_id_ps >= 0 {
                                         if (*fd).is_kernel {
-                                            // Do not stamp IR_STRATEGY_EXTERN (6). A kernel has a
-                                            // CPU lane-loop body; strategy 6 makes every call
-                                            // IrCallExtern, which native v2 cannot emit (rc=12).
                                             var mbox_k = (*lo).module
                                             var slot_k = ir_fn_get(&(*mbox_k), fn_id_ps as usize)
-                                            if slot_k.compile_strategy == 6 { slot_k.compile_strategy = IR_STRATEGY_GPU_KERNEL }
+                                            slot_k.compile_strategy = 6
                                             if slot_k.region.slot < 0 { ir_function_alloc_region(&! slot_k) }
                                             ir_fn_set(&! (*mbox_k), fn_id_ps as usize, slot_k)
                                             (*lo).module = mbox_k
@@ -5559,11 +5556,9 @@ fn lowerer_preseed_one_item_mut(
                     let fn_id_ps = lowerer_find_or_add_fn_id_mut(lo, name)
                     if fn_id_ps >= 0 {
                         if (*fd).is_kernel {
-                            // Strategy 6 is IR_STRATEGY_EXTERN. Stamping it here made
-                            // every kernel call IrCallExtern (native v2 rc=12).
                             { var mbox_k = (*lo).module
                             var slot_k = ir_fn_get(&(*mbox_k), fn_id_ps as usize)
-                            if slot_k.compile_strategy == 6 { slot_k.compile_strategy = IR_STRATEGY_GPU_KERNEL }
+                            slot_k.compile_strategy = 6
                             ir_fn_set(&! (*mbox_k), fn_id_ps as usize, slot_k)
                             (*lo).module = mbox_k }
                         }
@@ -5676,12 +5671,10 @@ fn lowerer_preseed_program_items_mut(
 }
 
 // Match the full item preseed's declaration authority. A public top-level
-// function is strategy7. A kernel is IR_STRATEGY_GPU_KERNEL (4), never 6:
-// 6 is IR_STRATEGY_EXTERN, and call lowering emits IrCallExtern for it.
-// Native v2 has no IrCallExtern arm, so every caller failed with rc=12.
-// Method visibility does not create a top-level export.
+// function is strategy7; a kernel is strategy6. Method visibility does not
+// create a top-level export (the existing full impl-method lane does not do so).
 fn ir_fast_summary_declared_strategy(inferred: i64, is_kernel: bool, is_exported: bool) -> i64 {
-    if is_kernel { IR_STRATEGY_GPU_KERNEL } else if is_exported { 7 } else { inferred }
+    if is_kernel { 6 } else if is_exported { 7 } else { inferred }
 }
 
 fn ir_fast_summary_record_export(module: &! IrModule, name: Name) with Mut, Panic, Div {
@@ -7501,10 +7494,8 @@ fn lowerer_lower_fn_item_mut(
     // instr_count == 0 — applies. Params are deliberately NOT lowered:
     // lowerer_lower_fn_params_mut emits ir_mark_float_reg for f64 params,
     // which would push instr_count > 0 and re-break dispatch.
-    // Do NOT mark these slots compile_strategy == 6 (IR_STRATEGY_EXTERN):
-    // call lowering (lower.sio callee_strat_ext == 6) emits IrCallExtern for
-    // such callees, and native v2 codegen has no IrCallExtern arm — every
-    // caller fails with rc=12. The ic==0 stub is what dispatch needs.
+    // Do NOT mark these slots compile_strategy == 6. 6 is also the kernel /
+    // PRECISION_PRESERVING_CHAOTIC stamp. The ic==0 stub is what dispatch needs.
     if fd.is_extern {
         lowerer_flush_current_func_mut(lo)
         (*lo).current_fn = IR_INVALID_FN
@@ -25824,9 +25815,7 @@ impl Lowerer {
                                     if fn_id_ps >= 0 {
                                         var fn_slot_ps = ir_fn_get(&(*lo.module), fn_id_ps as usize)
                                         if (*fd).is_kernel {
-                                            // Not 6: that is IR_STRATEGY_EXTERN, and the call
-                                            // site would emit IrCallExtern (native v2 rc=12).
-                                            fn_slot_ps.compile_strategy = IR_STRATEGY_GPU_KERNEL
+                                            fn_slot_ps.compile_strategy = 6
                                         } else if visibility_to_bool(head.visibility) {
                                             fn_slot_ps.compile_strategy = 7
                                             let exp_count = (*lo.module).export_count
@@ -33468,16 +33457,6 @@ impl Lowerer {
         let pair_d = lo2.fresh_reg()
         let lo3 = pair_d.0
         let dst = pair_d.1
-        let callee_strat_ext: i64 = if fn_id >= 0 && fn_id < (*lo3.module).fn_count { ir_fn_get(&(*lo3.module), fn_id as usize).compile_strategy } else { 0 }
-        let callee_body_ic: i64 = if fn_id >= 0 && fn_id < (*lo3.module).fn_count { ir_fn_get(&(*lo3.module), fn_id as usize).instr_count } else { 0 }
-        // Strategy 6 is IR_STRATEGY_EXTERN, but it is also the chaotic-effect
-        // id and was stamped on kernels. IrCallExtern has no native-v2 arm
-        // (rc=12). A callee that already has a body is a direct call. A true
-        // extern still has instr_count 0.
-        if callee_strat_ext == 6 && callee_body_ic <= 0 {
-            let lo_ext = lo3.emit(ir_call_extern(dst, callee_name, args, argc))
-            return (lo_ext, dst)
-        }
         let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args, argc)
         var lo4 = pair_call.lo
         // Same rule as the binary-operand site: a call consumes its arguments'
