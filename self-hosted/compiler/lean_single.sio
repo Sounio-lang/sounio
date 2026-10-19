@@ -15224,6 +15224,60 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 }
             }
         }
+        // &root.arr[idx].leaf: array-of-struct slots hold pointers, not inline
+        // bytes (same layout as compile_indexed_field_field_store_x86). The field
+        // loop left rax at the pointer-slot array. Load the element, then add the
+        // leaf offset. Leaving the cell address made the callee read the pointer
+        // bits as the first word of the inline array and SIGSEGV (#1678).
+        if inner_ty == 8 && arr_hash_elem_ty(inner_hash) == 6 && TK[EP as usize] == 41 {
+            let elem_hash_b = arr_hash_elem_hash(inner_hash)
+            let arr_base_slot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(arr_base_slot)
+            EP = EP + 1
+            compile_or()
+            if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+            if TK[EP as usize] == 42 { EP = EP + 1 }
+            em(0x48); em(0x89); em(0xc1)
+            emit_load_var(arr_base_slot)
+            em(0x48); em(0x8b); em(0x04); em(0xc8)
+            var cur_ty_b: i64 = 6
+            var cur_hash_b = elem_hash_b
+            while TK[EP as usize] == 50 {
+                EP = EP + 1
+                let lf_tok = EP
+                let lfh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+                EP = EP + 1
+                let lsi = st_find(cur_hash_b)
+                if lsi < 0 {
+                    tc_error(lf_tok, "field borrow requires struct base")
+                    em(0x31); em(0xc0)
+                    cur_ty_b = 0
+                    cur_hash_b = 0
+                } else {
+                    ST_QUERY_NS = TS[lf_tok as usize]
+                    ST_QUERY_NE = TE[lf_tok as usize]
+                    let loff = st_field_offset(lsi, lfh)
+                    if loff < 0 {
+                        tc_error(lf_tok, "unknown field access")
+                        em(0x31); em(0xc0)
+                        cur_ty_b = 0
+                        cur_hash_b = 0
+                    } else {
+                        if loff != 0 { em(0x48); em(0x8d); em(0x80); em32(loff) }
+                        cur_ty_b = st_field_ty(lsi, lfh)
+                        cur_hash_b = st_field_hash(lsi, lfh)
+                        ST_QUERY_NS = -1
+                        ST_QUERY_NE = -1
+                    }
+                }
+            }
+            EXPR_IS_F64 = 0
+            EXPR_TY = 10
+            if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(cur_ty_b, cur_hash_b, 1) }
+            else { EXPR_TY_HASH = ref_hash_make(cur_ty_b, cur_hash_b, 0) }
+            return
+        }
         // &obj.field[i] : the field chain left rax = address of a Seq field cell.
         // Load the Seq pointer and borrow element i (heap ptr = &Inner for structs).
         if inner_ty == 12 && TK[EP as usize] == 41 {
