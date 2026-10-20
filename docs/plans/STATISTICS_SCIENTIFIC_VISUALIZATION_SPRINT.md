@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.statistics-scientific-visualization-sprint
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.statistics-scientific-visualization-sprint
+-->
+
 # Sounio standard-library sprint: statistics, scientific visualization, mathematics, genomics and physics
 
 ## Sprint mandate and continuity — refreshed 2026-10-19

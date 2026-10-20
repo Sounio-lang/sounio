@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.scientific-kernel-audit-2026-10-18
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.scientific-kernel-audit-2026-10-18
+-->
+
 # Next scientific kernels — source audit, 2026-10-18
 
 This is a source-derived audit, not native acceptance. A dedicated subagent

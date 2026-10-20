@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.stats-koenker-execution-2026-10-18
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.stats-koenker-execution-2026-10-18
+-->
+
 # Checked Koenker heteroscedasticity and residual figure — 2026-10-18
 
 ## Final execution

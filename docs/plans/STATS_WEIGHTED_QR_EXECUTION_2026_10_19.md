@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.stats-weighted-qr-execution-2026-10-19
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.stats-weighted-qr-execution-2026-10-19
+-->
+
 # Weighted QR least squares and calibration — 2026-10-19
 
 ## Accepted execution

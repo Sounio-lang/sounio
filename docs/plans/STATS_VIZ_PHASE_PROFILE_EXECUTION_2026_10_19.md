@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.stats-viz-phase-profile-execution-2026-10-19
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.stats-viz-phase-profile-execution-2026-10-19
+-->
+
 # Scientific stdlib validation: phase profiling and compact reference — 2026-10-19
 
 ## Accepted source and scope

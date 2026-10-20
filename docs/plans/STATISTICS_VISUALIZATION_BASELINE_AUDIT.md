@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.statistics-visualization-baseline-audit
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.statistics-visualization-baseline-audit
+-->
+
 # Statistics and Scientific Visualization: Baseline Audit
 
 ## Audit identity

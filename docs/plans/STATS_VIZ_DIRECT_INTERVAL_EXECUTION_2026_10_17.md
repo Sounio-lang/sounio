@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.stats-viz-direct-interval-execution-2026-10-17
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.stats-viz-direct-interval-execution-2026-10-17
+-->
+
 # Direct interval construction — 2026-10-17
 
 ## Implemented and accepted

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.scatter-projection-execution-2026-10-19
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.scatter-projection-execution-2026-10-19
+-->
+
 # Checked scatter projection and viewport execution — 2026-10-19
 
 ## Acceptance boundary

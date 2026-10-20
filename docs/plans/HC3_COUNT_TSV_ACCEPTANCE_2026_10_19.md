@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.hc3-count-tsv-acceptance-2026-10-19
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.hc3-count-tsv-acceptance-2026-10-19
+-->
+
 # HC3, incremental counts and scientific QC figure — native acceptance
 
 > Current checkpoint: main3 with remote main ea36493 incorporated; Slurm15633 accepts105/105. Original receipts are retained below.

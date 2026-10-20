@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.poisson-lorentz-execution-2026-10-19
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.poisson-lorentz-execution-2026-10-19
+-->
+
 # Offset-aware count models and Lorentz covariance — 2026-10-19
 
 ## Source and delivery boundaries

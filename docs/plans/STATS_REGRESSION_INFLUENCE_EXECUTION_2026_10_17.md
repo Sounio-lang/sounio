@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.stats-regression-influence-execution-2026-10-17
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.stats-regression-influence-execution-2026-10-17
+-->
+
 # Stable simple OLS, real influence and scientific consumer — 2026-10-17
 
 ## Accepted native scope

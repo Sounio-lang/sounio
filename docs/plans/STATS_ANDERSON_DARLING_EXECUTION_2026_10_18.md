@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.stats-anderson-darling-execution-2026-10-18
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.stats-anderson-darling-execution-2026-10-18
+-->
+
 # Anderson-Darling execution receipt — 2026-10-18
 
 ## Scope and source identity

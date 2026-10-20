@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.hc3-count-tsv-implementation-2026-10-19
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.hc3-count-tsv-implementation-2026-10-19
+-->
+
 # HC3 and incremental count TSV — implementation checkpoint, 2026-10-19
 
 ## Scope and acceptance boundary
