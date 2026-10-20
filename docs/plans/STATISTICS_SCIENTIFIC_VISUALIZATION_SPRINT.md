@@ -911,3 +911,23 @@ Statistics, mathematics, genomics and physics remain in scope. Conditioning and
 convergence, inferential calibration, count/variant consumers, physical units and
 invariants, and measured execution/memory/artifact work continue. This is a
 bounded acceptance checkpoint; broader compiler CI and merge remain separate.
+
+## Continuation checkpoint — count dispersion on refreshed main, 2026-10-20
+
+The approved exact59 source offload completed with 59 recovery indices and
+10,733,223,936 bytes available at the final measurement; the quota remains3TiB.
+See [archival execution](SOURCE59_ARCHIVE_EXECUTION_2026_10_20.md).
+
+A new isolated sprint branch incorporates remote main b10c046e7b and retains
+all accepted increments through the signed-bar114/114 and archival checkpoints.
+Production NB2 supplied-means moment dispersion is ported from9f8b8617aa with
+narrow underflow corrections and explicit arithmetic/status limits. A count/offset
+Poisson diagnostic consumer connects the statistics to scientific visualization.
+This increment is implementation plus static review, with no new tests added or
+run and no new native/figure/corpus acceptance implied.
+See [implementation receipt](NB_DISPERSION_IMPLEMENTATION_2026_10_20.md).
+
+The wider statistics, mathematics, genomics, physics and execution/memory/artifact
+sprint remains active. Maximum-likelihood NB fitting, shrinkage, inferential
+calibration, native figure acceptance and measured resource comparisons remain
+open; the moment diagnostic does not stand in for those methods.
