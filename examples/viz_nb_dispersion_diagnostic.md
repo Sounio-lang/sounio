@@ -4,9 +4,11 @@ Source: `viz_nb_dispersion_diagnostic.sio`.
 
 ## Implementation status
 
-This is an implementation example. It has not been compiled, typechecked,
-executed, numerically verified, or visually inspected as part of this change.
-It adds no test and does not extend a native acceptance claim.
+This example passed typecheck with a current-source Madaros build in Slurm
+15747, exit 0:0. See the [typecheck receipt](../docs/plans/NB_DISPERSION_TYPECHECK_2026_10_20.md).
+It has not been compiled to a program ELF, executed, numerically verified or
+visually inspected as part of this change. It adds no test and does not extend
+a native runtime or scientific acceptance claim.
 
 ## Data and model
 
@@ -33,7 +35,8 @@ this moment equation, not evidence from a test that dispersion is zero.
 The textual report includes fit and dispersion statuses, signed alpha,
 projected alpha, truncation, descriptive Pearson X2, the declared parameter
 count, residual degrees of freedom, and both assumption-assessment flags.
-Failures print an unavailable status and stop before presenting a figure.
+Failures stop before presenting a figure; fit, dispersion, capacity and allocation
+failures print an unavailable status, while viewport refusals return without one.
 
 The left panel shows observed count/exposure and fitted count mean/exposure,
 in events per second. The right panel shows the **Poisson** Pearson residual

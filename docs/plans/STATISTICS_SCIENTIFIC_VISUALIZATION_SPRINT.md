@@ -931,3 +931,9 @@ The wider statistics, mathematics, genomics, physics and execution/memory/artifa
 sprint remains active. Maximum-likelihood NB fitting, shrinkage, inferential
 calibration, native figure acceptance and measured resource comparisons remain
 open; the moment diagnostic does not stand in for those methods.
+
+Current-source typecheck follow-up: Slurm15747 completed0:0 after rebuilding
+the seed and modular Madaros; both NB2 module and new count-diagnostic example
+returned TYPECHECK_OK. The transport label corpus_smoke represents only this
+package-specific check dispatcher, not a corpus run. No tests or example
+execution occurred. [Exact receipt](NB_DISPERSION_TYPECHECK_2026_10_20.md).

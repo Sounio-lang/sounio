@@ -2,10 +2,11 @@
 
 ## State
 
-**Implementation and independent static review only.** No fresh compiler,
-typecheck, numerical reference run, native figure, corpus, CI or merge acceptance
-is claimed for this increment. No tests were added or run in this operation.
-The earlier signed-bar checkpoint remains 114/114 on its own historical snapshot.
+**Implemented, independently reviewed and typechecked with current-source Madaros.**
+Slurm 15747 completed with exit 0:0 and both file checks passed.
+See [the typecheck receipt](NB_DISPERSION_TYPECHECK_2026_10_20.md) for identities
+and raw evidence. No numerical example, native figure, tests or corpus were run.
+The earlier signed-bar checkpoint remains 114/114 on its historical snapshot.
 
 Worktree: `/workspace/sounio-sprint-stats-viz-main6-counts-20261020`.
 Branch: `sprint/stats-viz-main-b10c-20261020`.
@@ -47,7 +48,7 @@ fitted means/rates, signed dispersion, its nonnegative projection and unassessed
 assumptions. No confidence interval, NB maximum likelihood, RNA-seq differential
 expression or empirical calibration claim follows from this consumer.
 
-The example is source for a future native scientific figure. It has not produced
+The example is source for a future native scientific figure. It passed current-source typecheck but has not produced
 an accepted SVG or Canvas artifact in this operation.
 
 ## Resources and archival continuity
@@ -65,7 +66,7 @@ Those are source-level resource properties, not measured time or peak-RSS gains.
 
 ## Remaining acceptance work
 
-Fresh native baseline and candidate compilation, independent C++23 concordance
+Native numerical baseline and example compilation/execution, independent C++23 concordance
 including mixed tiny/ordinary means, subnormal zero-count Pearson contributions,
 all-rounded-zero weights and declared-parameter boundaries, discriminating old
 kernel controls, actual SVG inspection, and resource observations remain open.
