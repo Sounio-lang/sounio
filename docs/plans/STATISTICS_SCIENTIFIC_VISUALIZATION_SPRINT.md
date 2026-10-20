@@ -969,3 +969,38 @@ mass-sprint scope. Next concrete candidate: stable NB2 count diagnostics with
 supplied mean/dispersion, explicit Poisson limit and representability statuses,
 reusing the count/offset consumer and existing genomics input path. This candidate
 has not been implemented or numerically accepted by the current checkpoint.
+
+## Continuation checkpoint — scaled NB2 count diagnostics, 2026-10-21
+
+The main8 branch retains main085da and all prior increments. New scalar
+nb2_count_diagnostic supplies Poisson/NB2 Pearson residuals from count means and
+supplied dispersion, with independent staged variance availability. Scaling
+avoids first constructing the variance; alpha0 copies the Poisson residual.
+Count conversion is bounded to0..2^53. The binary64/status contract explicitly
+limits rounding and representability claims. No heap allocation is introduced in
+the scalar kernel. Deviance and likelihood/inferential outputs remain deferred.
+
+The synthetic count/offset consumer compares both residuals on one explicit axis,
+retains observed/fitted exposure-adjusted rates, and labels the same-data moment
+alpha as plug-in. It reuses its two existing1024-element scratch arrays; failed
+availability paths now return1 instead of a successful exit with no figure.
+
+Slurm15783 completed0:0 in7:08 after a current-source seed/Madaros rebuild, four
+selected typechecks, native compilation and complete example execution. Canvas
+rendering completed in memory and actual SVG was emitted. The complete1380x620
+sips rendering of the extracted SVG was inspected with both panels, legends,
+units, negative labels and caveats visible. Slurm15785 executed the same attested
+ELF under GNU time:0.01s elapsed,8748KiB peak native-process RSS, exit0. This is
+one eight-observation whole-program observation, not isolated kernel performance,
+a scaling study or comparative superiority. Whole-job compiler/transport RSS is
+recorded separately. [Execution receipt](NB2_DIAGNOSTICS_EXECUTION_2026_10_21.md).
+
+Raw build logs/input manifests are retained losslessly compressed with original
+hashes; source packets and large compiler custody remain remote. The quota stays
+3TiB, without new removals. No tests were added or run. Numerical concordance,
+explicit boundary runtime coverage, model calibration, Canvas pixel comparison,
+full corpus/CI and merge remain open; historical114/114 is unchanged.
+
+The larger statistics/scientific-rendering/mathematics/genomics/physics sprint
+continues. Stable deviance/logarithmic primitives, genomic count consumers,
+physical-unit/invariant work and measured resource comparisons remain in scope.

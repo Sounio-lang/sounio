@@ -20,12 +20,26 @@ The kernel does not estimate mu or alpha, fit an NB likelihood, calculate
 deviance, shrink dispersion, test a hypothesis, construct a confidence interval,
 or assess a statistical model. A supplied parameter is not an assessed parameter.
 
-This is the initial source-contract checkpoint. No executable validation,
-numerical concordance, native example or figure acceptance is claimed here.
-No tests were added or run for this contract. The historical acceptance of
-Poisson fitting, moment dispersion or visualization does not validate this new
-kernel. Proof, source implementation, typecheck, execution and scientific
-acceptance remain different claims.
+Current-source typecheck and native demonstration execution are complete:
+Slurm15783 completed0:0 after rebuilding the seed and modular Madaros.
+Four targets returned TYPECHECK_OK: nb2_diagnostics, nb_dispersion, poisson and
+the count diagnostic example. The example compiled and executed with exit0,
+including its in-memory Canvas render and SVG emission. This is demonstration
+execution, not numerical concordance or a Canvas pixel comparison.
+
+The root extracted the actual HTML/SVG, validated the SVG using xmllint (exit0),
+converted the SVG with sips to a1380×620 PNG and inspected the full figure.
+Both panels, two residual colors, legends, units and negative labels were
+visible without clipping. A clipped QuickLook preview was not used as the
+accepted full-figure inspection.
+
+No tests were added or run. Independent numerical concordance, boundary tests,
+Canvas pixel/geometry comparison and repository CI/merge remain pending.
+The historical acceptance of earlier kernels or renderers does not extend those
+pending claims. Exact evidence:
+[NB2 diagnostics execution receipt](../../../docs/plans/NB2_DIAGNOSTICS_EXECUTION_2026_10_21.md).
+Proof, implementation, typecheck, execution and scientific acceptance remain
+different claims.
 
 ## Public API
 
@@ -153,11 +167,27 @@ Independence, count likelihood, mean specification, exposure adequacy and
 dispersion-model assumptions are unassessed. There is no deviance output,
 likelihood-ratio statistic, p-value, interval or shrinkage procedure in this API.
 
+## Executable identity and bounded resource observation
+
+Frozen source commit:4a65e767af7ce955cfde85f25484ea7f8a5f44f2.
+Compiler SHA256:
+0c896942018ff4be9a86d69f30e3a8aadac955f32451c445a07fbf502ae37fc3.
+Program SHA256:
+694a9bab24cde523bced34c36a67d5070635b601c04da575cc22ee1458fc8a13.
+Although the compiler bytes match a previously observed hash, this checkpoint
+rebuilt the current-source seed/Madaros; it is not an unverified reuse claim.
+
+Exact-ELF profiling Slurm15785 completed0:0. GNU time recorded elapsed0.01s and
+maximum RSS8748KiB for the single eight-row demonstration. This observation
+includes the whole native program, including scene construction/Canvas work/SVG
+output. It is not a scalar-kernel benchmark, comparative performance study or
+general memory/runtime guarantee.
+
 ## Continuation
 
-A new current-source build/typecheck is planned for the changed stdlib tree;
-this document does not claim reuse of a previously attested compiler for that
-new tree. Future numerical agreement and current-source typecheck/native evidence require
-their own receipts and supported-domain checks. No validation result is inferred
-from a source formula or a prior renderer checkpoint. The broader statistics,
-genomics, mathematics, physics and execution/resource sprint remains active.
+Independent numerical agreement and boundary behavior require their own
+authorized evidence. No correctness result is inferred from a formula, a clean
+typecheck, a successful demonstration or a legible figure. Canvas execution is
+recorded, while pixel comparison remains pending. No tests or full corpus were
+run for this checkpoint. The broader statistics, genomics, mathematics, physics
+and execution/resource sprint remains active.

@@ -2,14 +2,31 @@
 
 Source: `viz_nb_dispersion_diagnostic.sio`.
 
-## Implementation status
+## Execution evidence
 
-The earlier Poisson-only residual version passed typecheck in Slurm 15747;
-see the [historical receipt](../docs/plans/NB_DISPERSION_TYPECHECK_2026_10_20.md).
-That result does not verify this revised dual-residual version. This change
-has not been typechecked, compiled, executed, numerically verified, or
-visually inspected by its author. It adds no test and does not extend a
-native runtime or scientific acceptance claim.
+The revised dual-residual example was typechecked, compiled and executed in
+Slurm 15783 (COMPLETED, exit 0:0), after a current-source Madaros compiler
+rebuild. Four explicit typechecks passed, including this example. The native
+program exited zero after completing the Canvas and SVG paths. Frozen
+source commit: `4a65e767af7ce955cfde85f25484ea7f8a5f44f2`. Program ELF
+SHA-256: `694a9bab24cde523bced34c36a67d5070635b601c04da575cc22ee1458fc8a13`.
+See the [execution receipt](../docs/plans/NB2_DIAGNOSTICS_EXECUTION_2026_10_21.md).
+
+The coordinator extracted the report prefix, HTML and SVG from actual native
+stdout. XML parsing with xmllint exited zero. A sips-rendered 1380x620 PNG
+was inspected: both panels, the shared residual axis, both residual legends,
+units, caveat and minus labels were legible. The clipped QuickLook preview
+was not used for that visual conclusion. The native Canvas path completed;
+there was no captured-pixel comparison between Canvas and SVG.
+
+An exact-ELF profile in Slurm 15785 (exit 0:0) recorded GNU time wall duration
+0.01 s and maximum RSS 8748 KiB for one execution of this eight-row complete
+program. This is a single observation of the full program, not an isolated
+kernel measurement, general benchmark or comparative performance result.
+
+These runs do not establish numerical concordance, statistical calibration,
+full-corpus acceptance, CI or merge status. No tests were added or run for
+this example.
 
 ## Data and model
 
