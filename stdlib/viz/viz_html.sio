@@ -1,3 +1,5 @@
+use viz::uncertainty::{uncertainty_prefix,uncertainty_domain,uncertainty_strip,uncertainty_segment}
+use viz::scatter::{scatter_geometry}
 use viz::bar::{bar_pair_width,bar_project}
 use viz::scatter::{scatter_project,scatter_finite}
 use viz::scale::{ScaleSpec,axis_scaled_ticks}
@@ -158,6 +160,79 @@ fn vh_emit_series_polyline(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
         j = j + 1
     }
     println("\"/>")
+}
+
+// Sampled one-sigma strips preserve the Canvas checkerboard pixel cells.
+// A single reusable pattern bounds serialization by sample count, not height.
+fn vh_emit_uncertainty_band(scene:&VizScene,node_idx:i64) with IO,Mut,Div,Panic {
+ let slot:i64=scene.nodes[node_idx as usize].data_slot
+ if slot<0 || slot>=scene.series_count {return}
+ let count:i64=scene.series[slot as usize].n
+ if !uncertainty_prefix(&scene.series[slot as usize].xs,&scene.series[slot as usize].ys,&scene.series[slot as usize].vars,count) {return}
+ let xmin:f64=scene.series[slot as usize].x_min
+ let xmax:f64=scene.series[slot as usize].x_max
+ let ymin:f64=scene.series[slot as usize].y_min
+ let ymax:f64=scene.series[slot as usize].y_max
+ let x:i64=scene.nodes[node_idx as usize].layout.x
+ let y:i64=scene.nodes[node_idx as usize].layout.y
+ let w:i64=scene.nodes[node_idx as usize].layout.w
+ let h:i64=scene.nodes[node_idx as usize].layout.h
+ let r:i64=scene.nodes[node_idx as usize].style.r
+ let g:i64=scene.nodes[node_idx as usize].style.g
+ let b:i64=scene.nodes[node_idx as usize].style.b
+ if !uncertainty_domain(xmin,xmax,ymin,ymax) || !scatter_geometry(x,y,w,h) {return}
+ print("<!-- uncertainty variance plus-minus-one-sigma sampled-not-CI n=");vh_print_i64(count);println(" -->")
+ if count==0 {return}
+ print("<defs><pattern id=\"uncertainty-pattern-");vh_print_i64(node_idx)
+ print("\" patternUnits=\"userSpaceOnUse\" x=\"-0.5\" y=\"-0.5\" width=\"2\" height=\"2\" viewBox=\"0 0 2 2\">")
+ print("<g fill=\"rgb(");vh_print_i64(r/2);print(",");vh_print_i64(g/2);print(",");vh_print_i64(b)
+ println(")\"><rect x=\"0\" y=\"0\" width=\"1\" height=\"1\"/><rect x=\"1\" y=\"1\" width=\"1\" height=\"1\"/></g></pattern>")
+ print("<clipPath id=\"uncertainty-clip-");vh_print_i64(node_idx);print("\" clipPathUnits=\"userSpaceOnUse\"><rect x=\"")
+ let left:f64=(x as f64)-0.5
+ let top:f64=(y as f64)-0.5
+ print(left);print("\" y=\"");print(top);print("\" width=\"");vh_print_i64(w+1)
+ print("\" height=\"");vh_print_i64(h+1);println("\"/></clipPath></defs>")
+ print("<g data-uncertainty-input=\"variance\" data-uncertainty-span=\"plus-minus-one-sigma\" data-uncertainty-sampling=\"sampled-not-CI\" clip-path=\"url(#uncertainty-clip-")
+ vh_print_i64(node_idx);println(")\">")
+ var i:i64=0
+ while i<count {
+  let sx:f64=scene.series[slot as usize].xs[i as usize]
+  let sy:f64=scene.series[slot as usize].ys[i as usize]
+  let variance:f64=scene.series[slot as usize].vars[i as usize]
+  let strip=uncertainty_strip(sx,sy,variance,xmin,xmax,ymin,ymax,x,y,w,h)
+  if strip.status==0 {
+   let rx:i64=strip.x
+   let ry:i64=strip.y
+   let rw:i64=strip.w
+   let rh:i64=strip.h
+   let px:f64=(rx as f64)-0.5
+   let py:f64=(ry as f64)-0.5
+   print("<rect data-uncertainty-strip=\"");vh_print_i64(i);print("\" x=\"");print(px)
+   print("\" y=\"");print(py);print("\" width=\"");vh_print_i64(rw);print("\" height=\"");vh_print_i64(rh)
+   print("\" fill=\"url(#uncertainty-pattern-");vh_print_i64(node_idx);println(")\"/>")
+  }
+  i=i+1
+ }
+ var j:i64=0
+ while j+1<count {
+  let ax:f64=scene.series[slot as usize].xs[j as usize]
+  let ay:f64=scene.series[slot as usize].ys[j as usize]
+  let bx:f64=scene.series[slot as usize].xs[(j+1) as usize]
+  let by:f64=scene.series[slot as usize].ys[(j+1) as usize]
+  let seg=uncertainty_segment(ax,ay,bx,by,xmin,xmax,ymin,ymax,x,y,w,h)
+  if seg.status==0 {
+   let x0:i64=seg.x0
+   let y0:i64=seg.y0
+   let x1:i64=seg.x1
+   let y1:i64=seg.y1
+   print("<line data-uncertainty-center=\"");vh_print_i64(j);print("\" x1=\"");vh_print_i64(x0)
+   print("\" y1=\"");vh_print_i64(y0);print("\" x2=\"");vh_print_i64(x1);print("\" y2=\"");vh_print_i64(y1)
+   print("\" stroke=\"rgb(");vh_print_i64(r);print(",");vh_print_i64(g);print(",");vh_print_i64(b)
+   println(")\" stroke-width=\"1\" stroke-linecap=\"round\"/>")
+  }
+  j=j+1
+ }
+ println("</g>")
 }
 
 fn vh_emit_scatter(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
@@ -551,7 +626,7 @@ fn vh_emit_control(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
     }
 }
 
-pub fn viz_html_emit_scene(scene: &VizScene, width: i64, height: i64) with IO, Mut, Div {
+pub fn viz_html_emit_scene(scene: &VizScene, width: i64, height: i64) with IO, Mut, Div, Panic {
     println("<!doctype html><html><body>")
     vh_emit_scene_audit(scene)
     print("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\""); vh_print_i64(width)
@@ -570,7 +645,9 @@ pub fn viz_html_emit_scene(scene: &VizScene, width: i64, height: i64) with IO, M
             vh_emit_text(scene, i, n.layout.x, n.layout.y + 10, n.style.r, n.style.g, n.style.b)
         } else if n.kind == VIZ_NODE_CHART_LINE && (n.flags & VIZ_FLAG_CLIP_PLOT) != 0 {
             vh_emit_clipped_line(scene, i)
-        } else if n.kind == VIZ_NODE_CHART_LINE || n.kind == VIZ_NODE_UNCERTAINTY_BAND {
+        } else if n.kind == VIZ_NODE_UNCERTAINTY_BAND {
+            vh_emit_uncertainty_band(scene,i)
+        } else if n.kind == VIZ_NODE_CHART_LINE {
             vh_emit_series_polyline(scene, i)
         } else if n.kind == VIZ_NODE_CHART_SCATTER {
             vh_emit_scatter(scene, i)
