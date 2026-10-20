@@ -3735,6 +3735,16 @@ fn native_v2_resolve_handle_to_object_base_rax(nc: NativeCompiler) -> NativeComp
     c.code = emit_mov_rax_rbx(c.code)
     let done_target = c.code.len
     c.code = patch_u32_le(c.code, done_jmp + 1, done_target - (done_jmp + 5))
+    // Both paths leave the object base in rax. A null here is an empty handle
+    // slot; a raw pointer cannot be null (it compared >= the threshold). Do not
+    // return it for a later field store (gen3 SIGSEGV, issue #2966).
+    c.code = emit_test_rax_rax(c.code)
+    let live_jnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+    c.code = emit_exit(c.code, native_v2_null_object_base_exit_code())
+    c.code = emit_ud2(c.code)
+    let live_target = c.code.len
+    c.code = patch_u32_le(c.code, live_jnz + 2, live_target - (live_jnz + 6))
     c
 }
 
@@ -3770,6 +3780,15 @@ fn native_v2_resolve_handle_to_object_base_rax_into(nc: &! NativeCompiler) with 
     nc_emit_mov_rax_rbx(nc)
     let done_target = (*nc).code.len
     nc_patch_u32_le(nc, done_jmp + 1, done_target - (done_jmp + 5))
+    // Keep in lockstep with the by-value resolver above. Exit, then ud2 so a
+    // failed syscall cannot fall into the caller's field store.
+    nc_emit_test_rax_rax(nc)
+    let live_jnz = (*nc).code.len
+    nc_emit_jnz_rel32(nc)
+    nc_emit_exit_code(nc, native_v2_null_object_base_exit_code())
+    nc_emit_ud2(nc)
+    let live_target = (*nc).code.len
+    nc_patch_u32_le(nc, live_jnz + 2, live_target - (live_jnz + 6))
 }
 
 fn nc_flat_data_prepare_into(nc: &! NativeCompiler) with Mut, Panic, Div {
