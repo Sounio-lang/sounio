@@ -4271,13 +4271,49 @@ fn checker_const_int_bind_raw_inplace(c: *mut Checker, name: Name, known: i64, v
     } else {
         (*c).const_int_count = (*c).const_int_count + 1
     }
-    var bufs = (*c).const_int_name_bufs
-    var lens = (*c).const_int_name_lens
-    checker_const_name_write(&! bufs, &! lens, idx, name)
-    (*c).const_int_name_bufs = bufs
-    (*c).const_int_name_lens = lens
+    // Write the inline payload directly. Copying `[i8; 16384]` out to a local
+    // and passing `&!` loaded word 0 (zero on a fresh heap_alloc) and the
+    // ref-array store resolved handle 0 — SIGSEGV at address 0x20.
+    checker_const_name_write_raw(c, idx, name)
     (*c).const_int_known[idx as usize] = known
     (*c).const_int_values[idx as usize] = value
+}
+
+fn checker_const_name_write_raw(c: *mut Checker, idx: i64, name: Name) with Mut, Panic, Div {
+    if idx < 0 || idx >= 128 {
+        return
+    }
+    let clamped_len = if name.len > 128 { 128 } else { name.len }
+    (*c).const_int_name_lens[idx as usize] = clamped_len
+    let base = idx * 128
+    var j: i64 = 0
+    while j < 128 {
+        if j < clamped_len {
+            (*c).const_int_name_bufs[(base + j) as usize] = name.buf[j as usize]
+        } else {
+            (*c).const_int_name_bufs[(base + j) as usize] = 0 as i8
+        }
+        j = j + 1
+    }
+}
+
+fn checker_const_name_eq_raw(c: *mut Checker, idx: i64, name: Name) -> bool with Mut, Panic, Div {
+    if idx < 0 || idx >= 128 {
+        return false
+    }
+    let clamped_len = if name.len > 128 { 128 } else { name.len }
+    if (*c).const_int_name_lens[idx as usize] != clamped_len {
+        return false
+    }
+    let base = idx * 128
+    var j: i64 = 0
+    while j < clamped_len {
+        if (*c).const_int_name_bufs[(base + j) as usize] != name.buf[j as usize] {
+            return false
+        }
+        j = j + 1
+    }
+    true
 }
 
 fn checker_const_int_bind_unknown_inplace(c: *mut Checker, name: Name) with Mut, Div, Panic {
@@ -13439,7 +13475,7 @@ fn checker_const_int_bind_value_inplace(c: *mut Checker, name: Name, value: i64)
 fn checker_const_int_lookup_mut(c: *mut Checker, name: Name) -> (bool, i64) with Mut, Panic, Div {
     var i = (*c).const_int_count - 1
     while i >= 0 {
-        if checker_const_name_eq(&(*c).const_int_name_bufs, &(*c).const_int_name_lens, i, name) {
+        if checker_const_name_eq_raw(c, i, name) {
             if (*c).const_int_known[i as usize] == 1 {
                 return (true, (*c).const_int_values[i as usize])
             }
@@ -19797,6 +19833,7 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq(n, make_name("str_from_bytes")) { return true }   // id 22
     if name_eq(n, make_name("heap_alloc")) { return true }       // id 23
     if name_eq(n, make_name("heap_free")) { return true }        // id 24
+    if name_eq(n, make_name("heap_realloc")) { return true }     // id 71
     if name_eq(n, make_name("f64_to_bits")) { return true }      // id 25
     if name_eq(n, make_name("bits_to_f64")) { return true }      // id 26
     if name_eq(n, make_name("syscall6")) { return true }         // id 27
@@ -19906,6 +19943,7 @@ fn native_backend_builtin_arity_is_valid(n: Name, argc: i64) -> bool with Mut, P
             || name_eq(n, make_name("acknowledge"))
             || name_eq(n, make_name("require_confidence"))
             || name_eq(n, make_name("pow"))
+            || name_eq(n, make_name("heap_realloc"))
             || name_eq(n, make_name("__sounio_seq_push"))
             || name_eq(n, make_name("__sounio_seq_push_scalar"))
             || name_eq(n, make_name("__sounio_seq_get"))
