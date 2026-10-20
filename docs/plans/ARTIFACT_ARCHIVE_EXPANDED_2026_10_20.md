@@ -28,3 +28,17 @@ Restaurar exige espaço para o snapshot selecionado. Usar a cópia restaurada, c
 ## Validação do sprint
 
 A última aceitação nativa é111/111 do commit7cbe54d415 na base anterior. O novo código9975c1d017 está publicado e tem revisão estática sem bloqueador concreto;83casos do verificador C++23 passaram. Baseline111 sobre main atual, signed-before e corpus114 ainda estão pendentes de armazenamento. Não há nova aceitação nativa, CI verde ou merge alegados.
+
+## Preparação concluída e protocolo corrigido
+
+Os107arquivos completos foram criados:1.245.420.775bytes de tar.zst. Todos passaram zstd, extração, hashes recursivos, tamanhos, modos, tipos, caminhos e destinos de symlinks. Proprietário não foi comparado após `--no-same-owner`. As107origens foram rechecadas. A cópia B recebeu todos os arquivos e manifests por stream direto do cluster e passou a conferência completa.
+
+Manifests:
+
+- `COHORT_RUNS.txt`: fa0534d0bae56fb4f09d877d67ff73a79a3e5fdea13fb9d341ece05747235165
+- `ARCHIVES.sha256`: 805f43b7a65118865269b94ed46d97b03445bc7c3714f28f37c568d149739b2e
+- `RECEIPTS.sha256`: 6db6f8f745c525ef8d571d32ee75998a0b62bf822d1df23ec89186482345da70
+
+Como o uso começa acima da quota, a ampliação precisa registrar o índice/journal nas custódias externas A/B ANTES de qualquer retirada; tentar escrever o índice quente após a primeira retirada repetiria a falha conhecida. O journal externo deve guardar nome exato e hashes antes/depois de cada retirada. Criar ponteiros quentes somente quando o Ceph voltar a admitir escrita. Esta descrição substitui a condição anterior de interromper apenas porque um ponteiro quente continua bloqueado durante o excedente conhecido. Divergência de hash/consumidor ou falha de custódia/journal exige interrupção.
+
+Isso amplia o lote inicialmente revisado de seis arquivos para107nomes explícitos. Nenhum arquivo desse novo lote foi retirado. A decisão pendente é autorizar essa ampliação mantendo logs/resultados no Ceph e a quota inalterada. A margem estimada102.007.616bytes depende do uso real no momento da execução.
