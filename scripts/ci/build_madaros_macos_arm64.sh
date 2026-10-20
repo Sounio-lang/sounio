@@ -21,6 +21,14 @@ file "$SEED_BIN" | grep -Eq 'Mach-O 64-bit.*arm64'
 codesign --verify "$SEED_BIN"
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/madaros-macos-build.XXXXXX")"
 echo "build_artifacts=$BUILD_DIR"
+persist_madaros_build_log() {
+    local gate_dir="${SOUNIO_SELFHOST_HOST_GATE_DIR:-}"
+    if [[ -n "$gate_dir" && -f "$BUILD_DIR/build.log" ]]; then
+        mkdir -p "$gate_dir/logs"
+        cp -f "$BUILD_DIR/build.log" "$gate_dir/logs/madaros-build.log" || true
+    fi
+}
+trap persist_madaros_build_log EXIT
 cd "$ROOT_DIR"
 export SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib"
 "$SEED_BIN" tests/run-pass/a64_macos_mapped_stack.sio "$BUILD_DIR/stack-probe" --target aarch64-macos >"$BUILD_DIR/stack-build.log" 2>&1

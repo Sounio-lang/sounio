@@ -10705,6 +10705,46 @@ fn emit_global_agg_repeat_fill_x86(gi: i64) with Mut, Panic, Div {
     em(0x75); em(0xf0)                                             // jnz loop (-16)
 }
 
+// Only used for an ELF anonymous BSS range whose initializer must write zero.
+// Partial pages use stores so adjacent globals are never discarded.
+fn emit_global_zero_stores_x86(base: i64, bytes: i64) with Mut, Panic, Div {
+    if bytes <= 0 { return }
+    em(0x31); em(0xc0)
+    em(0x48); em(0xbf); em64(base)
+    em(0x48); em(0xb9); em64(bytes)
+    em(0xf3); em(0xaa)
+}
+
+fn emit_global_zero_bss_x86(base: i64, bytes: i64) with Mut, Panic, Div {
+    let first = ((base + 4095) / 4096) * 4096
+    let last = ((base + bytes) / 4096) * 4096
+    if last <= first {
+        emit_global_zero_stores_x86(base, bytes)
+        return
+    }
+    // Linux MADV_DONTNEED on private anonymous BSS restores zero pages at the
+    // SAME initializer position, including writes from earlier initializers.
+    // It neither unmaps the addresses nor changes capacity or object lifetime.
+    em(0xb8); em32(28)
+    em(0x48); em(0xbf); em64(first)
+    em(0x48); em(0xbe); em64(last - first)
+    em(0xba); em32(4)
+    em(0x0f); em(0x05)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x88)
+    let failed = CL
+    em32(0)
+    emit_global_zero_stores_x86(base, first - base)
+    emit_global_zero_stores_x86(last, base + bytes - last)
+    em(0xe9)
+    let done = CL
+    em32(0)
+    patch32(failed, CL)
+    // Seccomp, unsupported kernels, etc.: preserve the original zero writes.
+    emit_global_zero_stores_x86(base, bytes)
+    patch32(done, CL)
+}
+
 fn emit_global_inits_x86() with IO, Mut, Panic, Div {
     emit_global_agg_slots_x86()
     var p: i64 = 0
@@ -10797,6 +10837,7 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
                     // Array repeat initializer: [V; N]
                     if gi_arr >= 0 {
                         p = p + 1                              // skip [
+                        let repeat_zero = TK[p as usize] == 4 && TV[p as usize] == 0 && TK[(p + 1) as usize] == 27
                         EP = p
                         compile_or()                           // value V in rax
                         p = EP
@@ -10808,6 +10849,8 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
                         let alen = GL[(gi_arr * 4 + 3) as usize]
                         if GL_AGG_NSL[gi_arr as usize] > 0 {
                             emit_global_agg_repeat_fill_x86(gi_arr)
+                        } else if alen > 0 && repeat_zero {
+                            emit_global_zero_bss_x86(base, alen * esiz)
                         } else if alen > 0 {
                             em(0x48); em(0xbf); em64(base)         // mov rdi, base
                             em(0x48); em(0xb9); em64(alen)         // mov rcx, alen

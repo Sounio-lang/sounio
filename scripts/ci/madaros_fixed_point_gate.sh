@@ -205,11 +205,11 @@ echo
 echo "[rung check] gen1 typechecks $SRC"
 ( ulimit -s 524288 2>/dev/null || true; "$MADAROS" check "$SRC" ) >"$WORK/check.log" 2>&1
 CHECK_RC=$?
-ERRORS="$(grep -oE 'error\[E[0-9]+\]' "$WORK/check.log" | wc -l | tr -d ' ')"
+ERRORS="$(grep -oE 'error\[E[A-Z0-9_-]+\]' "$WORK/check.log" | wc -l | tr -d ' ')"
 echo "           rc=$CHECK_RC errors=$ERRORS"
 if [[ "$ERRORS" -gt 0 ]]; then
   echo "           by code:"
-  grep -oE 'error\[E[0-9]+\]' "$WORK/check.log" | sort | uniq -c | sort -rn | head -8 | sed 's/^/             /'
+  grep -oE 'error\[E[A-Z0-9_-]+\]' "$WORK/check.log" | sort | uniq -c | sort -rn | head -8 | sed 's/^/             /'
 fi
 
 if [[ "$CHECK_RC" -ne 0 || "$ERRORS" -gt 0 ]]; then

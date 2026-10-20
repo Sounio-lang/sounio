@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.docs-inde
 
 # Sounio Documentation
 
+**Ελληνικά:** [εγκατάσταση, εφαρμογές στη χημεία και την τεχνητή νοημοσύνη,
+ανάπτυξη, LLM και συνεισφορά](el/README.md).
+
 Welcome to the Sounio documentation index. Public website summaries live under `website/src/content`, while repo-native deep dives, evidence packs, and implementation notes live here under `docs/`, `paper/`, `tests/`, and `examples/`.
 
 For a first program, start with [`guide/getting-started.md`](guide/getting-started.md), then use the [`tutorial`](guide/tutorial.md) for the core syntax. The longer [`programming guide`](guide/programming.md) is organized by feature, but explicitly marks sections that are not part of the checked user surface. For current limits, consult [`compiler/KNOWN_LIMITATIONS.md`](compiler/KNOWN_LIMITATIONS.md) and the linked tests; [`TOUR.md`](../TOUR.md) is a dated measurement snapshot, not a current release claim.

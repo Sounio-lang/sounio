@@ -9,6 +9,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.llm-prog
 
 # Write Sounio with a language model
 
+[Ελληνικά](LLM_PROGRAMMING_GUIDE_EL.md) · [Português](LLM_PROGRAMMING_GUIDE_PT.md)
+
 **Edition:** October 2026. **Prepared:** 2026-10-16.
 **Source baseline:** `f5b2c5850be9f3d3995719ffcade44a6d851658a`.
 
@@ -37,6 +39,15 @@ certification, and a guarantee about every language model are not established.
 [Example manifest](../llm-guide/example-manifest.json) ·
 [Errors](../llm-guide/error-catalog.md) ·
 [Library discovery](../llm-guide/stdlib-index.md)
+
+For a task-sized, copyable starting context, use the
+[thirty-task trilingual curriculum](../llm-guide/task-playbook.md):
+`node scripts/docs/sounio_task_context.mjs show first-program --lang en`.
+It emits complete reference/control sources, historical profile-specific
+results, adaptation steps and pitfalls without running a compiler or LLM.
+The tasks reuse existing programs; they are not thirty new executions.
+The [translation and repair guide](../llm-guide/translation-and-repair.md)
+explains intent-preserving ports, stage diagnosis and bounded repairs.
 
 <!-- llm:section orientation -->
 ## 1. Give the model the right amount of context
