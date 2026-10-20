@@ -643,4 +643,108 @@ fn vh_emit_axis(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
         while k < label.n { print_char(label.text[k as usize] as i64);k=k+1 }
         println("\"/>")
     }
-    let ver
+    let vertical = (flags & 1) == 1
+    let x = node.layout.x
+    let y = node.layout.y
+    if vertical { vh_emit_line(x, y, x, y + node.layout.h, red, green, blue) }
+    else { vh_emit_line(x, y, x + node.layout.w, y, red, green, blue) }
+    var i: i64 = 0
+    while i < ticks.n {
+        let label = axis_label(ticks.values[i as usize])
+        var tx = x
+        var ty = y
+        if vertical {
+            let py = y + node.layout.h - axis_offset(i, node.data_slot, node.layout.h)
+            vh_emit_line(x - 4, py, x, py, red, green, blue)
+            tx = x - 8 - label.n * 8; ty = py - 4
+        } else {
+            let px = x + axis_offset(i, node.data_slot, node.layout.w)
+            vh_emit_line(px, y, px, y + 4, red, green, blue)
+            tx = px - label.n * 4; ty = y + 8
+        }
+        print("<text x=\""); vh_print_i64(tx); print("\" y=\""); vh_print_i64(ty + 7)
+        print("\" fill=\"rgb("); vh_print_i64(red); print(",")
+        vh_print_i64(green); print(","); vh_print_i64(blue)
+        print(")\" font-family=\"monospace\" font-size=\"8\" textLength=\"")
+        vh_print_i64(label.n * 8); print("\" lengthAdjust=\"spacingAndGlyphs\">")
+        var j: i64 = 0
+        while j < label.n { print_char(label.text[j as usize] as i64); j = j + 1 }
+        println("</text>")
+        i = i + 1
+    }
+    let title_y = if vertical { y - 16 } else { y + 24 }
+    vh_emit_text(scene, node_idx, x, title_y + 10, red, green, blue)
+}
+
+fn vh_emit_clipped_line(scene: &VizScene, idx: i64) with IO, Mut, Div {
+    let node = scene.nodes[idx as usize]
+    let slot = node.data_slot as usize
+    let count: i64 = scene.series[slot].n
+    let d = &scene.series[slot]
+    if (node.flags & 7680) != 0 {
+        print("<metadata data-x-scale=\"");vh_scale_name((node.flags/512)%4)
+        print("\" data-y-scale=\"");vh_scale_name((node.flags/2048)%4);println("\"/>")
+    }
+    print("<defs><clipPath id=\"plot-clip-"); vh_print_i64(idx)
+    print("\" clipPathUnits=\"userSpaceOnUse\">")
+    let clip_left: f64 = (node.layout.x as f64) - 0.5
+    let clip_top: f64 = (node.layout.y as f64) - 0.5
+    print("<rect x=\""); print(clip_left); print("\" y=\""); print(clip_top)
+    print("\" width=\""); vh_print_i64(node.layout.w + 1)
+    print("\" height=\""); vh_print_i64(node.layout.h + 1); println("\"/>")
+    println("</clipPath></defs>")
+    print("<g clip-path=\"url(#plot-clip-"); vh_print_i64(idx); println(")\">")
+    var visible: i64 = 0
+    var outside: i64 = 0
+    var invalid: i64 = 0
+    var i: i64 = 0
+    while i + 1 < count && i + 1 < 1024 {
+        let seg = clip_series_segment(d.xs[i as usize], d.ys[i as usize],
+            d.xs[(i+1) as usize], d.ys[(i+1) as usize], d.x_min, d.x_max, d.y_min, d.y_max)
+        if seg.status == 0 {
+            let x0: i64 = clip_pixel(node.layout.x, node.layout.w, seg.x0)
+            let x1: i64 = clip_pixel(node.layout.x, node.layout.w, seg.x1)
+            let y0: i64 = clip_pixel(node.layout.y, node.layout.h, 1.0 - seg.y0)
+            let y1: i64 = clip_pixel(node.layout.y, node.layout.h, 1.0 - seg.y1)
+            // Independent subpaths preserve every segment's end caps and gaps.
+            // Streaming serialization: no second pass or coordinate buffer.
+            if visible == 0 {
+                print("<path fill=\"none\" stroke=\"rgb(")
+                vh_print_i64(node.style.r); print(",")
+                vh_print_i64(node.style.g); print(","); vh_print_i64(node.style.b)
+                print(")\" stroke-width=\"1\" stroke-linecap=\"round\" d=\"")
+            }
+            print("M"); vh_print_i64(x0); print(" "); vh_print_i64(y0)
+            print(" L"); vh_print_i64(x1); print(" "); vh_print_i64(y1); print(" ")
+            visible = visible + 1
+        } else if seg.status == 1 { outside = outside + 1 }
+        else { invalid = invalid + 1 }
+        i = i + 1
+    }
+    if visible > 0 { println("\"/>") }
+    print("</g><!-- clipped-line visible="); vh_print_i64(visible)
+    print(" outside="); vh_print_i64(outside); print(" invalid="); vh_print_i64(invalid); println(" -->")
+}
+
+fn vh_emit_legend(scene: &VizScene, idx: i64) with IO, Mut, Div {
+    let node = scene.nodes[idx as usize]
+    let plan = legend_layout(node.layout.x, node.layout.y, node.layout.w, node.layout.h, node.label_len)
+    if plan.status != 0 { return }
+    vh_emit_rect(plan.swatch_x, plan.swatch_y, 10, 6, node.style.r, node.style.g, node.style.b)
+    print("<text x=\""); vh_print_i64(plan.text_x); print("\" y=\""); vh_print_i64(plan.text_y + 7)
+    print("\" fill=\"rgb("); vh_print_i64(node.style.r); print(","); vh_print_i64(node.style.g)
+    print(","); vh_print_i64(node.style.b)
+    print(")\" font-family=\"monospace\" font-size=\"8\" textLength=\"")
+    vh_print_i64(plan.visible_len * 8); print("\" lengthAdjust=\"spacingAndGlyphs\">")
+    var k: i64 = 0
+    while k < plan.visible_len {
+        let ch = node.label[k as usize] as i64
+        if ch == 38 { print("&amp;") }
+        else if ch == 60 { print("&lt;") }
+        else if ch == 62 { print("&gt;") }
+        else if ch == 34 { print("&quot;") }
+        else if ch >= 32 && ch <= 126 { print_char(ch) }
+        k = k + 1
+    }
+    println("</text>")
+}
