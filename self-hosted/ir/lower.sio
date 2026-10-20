@@ -9464,60 +9464,84 @@ fn lower_layout_has_kind_zero(entry: &StructLayoutEntry) -> bool with Mut, Panic
     lower_layout_field_index(entry, make_name("kind")) == 0
 }
 
+// Unique winning index in `votes[0..64)`, or -1 on a tie / no votes.
+fn lower_vote_unique_best(votes: &[i64; 64]) -> i64 with Mut, Panic, Div {
+    var best_idx: i64 = 0 - 1
+    var best_n: i64 = 0
+    var tied = false
+    var i: i64 = 0
+    while i < 64 {
+        let n = (*votes)[i as usize]
+        if n > best_n {
+            best_idx = i
+            best_n = n
+            tied = false
+        } else if n == best_n && n > 0 {
+            tied = true
+        }
+        i = i + 1
+    }
+    if best_n > 0 && !tied {
+        return best_idx
+    }
+    0 - 1
+}
+
 // Untyped `.field` must not return the first layout that happens to carry the
-// name. Gen3 SIGILL at the null-handle ud2 (file 0x34e5efd): the caller of a
-// 2-arg Span-shaped ctor loaded ExprIdent.field[2] (int_val, always 0 for an
-// ident) and field-got handle 0. Expr.span is field 1; OntologyDisjointDecl.span
-// (and any later `span` at index 2) first-matched when the receiver type was
-// empty, so `e.span` became int_val. Same class as the `fn_count` first-match
-// that read string_table as a loop bound (comment on expr_receiver_struct_type_ref).
+// name, and must not require every layout to agree. Gen3 SIGILL at the
+// #2979 null-handle ud2: the caller of a 2-arg Span-shaped ctor did `e.span`
+// on an ExprIdent. Unanimous consensus fails because `span` lives at 1 on
+// Expr/Stmt/Item/TypeExpr/Pattern, at 2 on SessionStep (kind-tagged) and
+// OntologyDisjointDecl, and at 3 on AuditSection. The miss fell through to
+// `(name[0] as i64) % 64` = 51 for "span", which is past Expr's payload, so
+// the load was 0 and the next field-get hit handle 0. Majority among
+// kind-tagged AST layouts keeps `.span` at 1. Same class as the `fn_count`
+// first-match that read string_table as a loop bound (comment on
+// expr_receiver_struct_type_ref).
 //
-// Returns a field index when every non-Knowledge hit agrees, or when every
-// kind-tagged (field 0 is `kind`) hit agrees after a conflict. -1 if neither
-// is safe; caller keeps the legacy hash.
+// Order: unique kind-tagged majority, unique non-Knowledge majority,
+// Knowledge, then the AST convention (`kind`=0, `span`=1). -1 otherwise;
+// caller keeps the legacy hash.
 fn lower_field_idx_untyped(table: &StructLayoutTable, field_name: Name) -> i64 with Mut, Panic, Div {
     let kname = make_name("Knowledge")
-    var agreed: i64 = 0 - 1
-    var seen = false
-    var conflict = false
-    var kind_agreed: i64 = 0 - 1
-    var kind_seen = false
-    var kind_conflict = false
+    var votes: [i64; 64] = [0; 64]
+    var kind_votes: [i64; 64] = [0; 64]
     var knowledge_idx: i64 = 0 - 1
     var si: i64 = 0
     while si < (*table).count {
         let idx = lower_layout_field_index(&(*table).entries[si as usize], field_name)
-        if idx >= 0 {
+        if idx >= 0 && idx < 64 {
             if ir_name_eq((*table).entries[si as usize].type_name, kname) {
                 if knowledge_idx < 0 {
                     knowledge_idx = idx
                 }
             } else {
-                if !seen {
-                    agreed = idx
-                    seen = true
-                } else if agreed != idx {
-                    conflict = true
-                }
+                votes[idx as usize] = votes[idx as usize] + 1
                 if lower_layout_has_kind_zero(&(*table).entries[si as usize]) {
-                    if !kind_seen {
-                        kind_agreed = idx
-                        kind_seen = true
-                    } else if kind_agreed != idx {
-                        kind_conflict = true
-                    }
+                    kind_votes[idx as usize] = kind_votes[idx as usize] + 1
                 }
             }
         }
         si = si + 1
     }
-    if seen && !conflict {
-        return agreed
+    let kind_best = lower_vote_unique_best(&kind_votes)
+    if kind_best >= 0 {
+        return kind_best
     }
-    if kind_seen && !kind_conflict {
-        return kind_agreed
+    let all_best = lower_vote_unique_best(&votes)
+    if all_best >= 0 {
+        return all_best
     }
-    knowledge_idx
+    if knowledge_idx >= 0 {
+        return knowledge_idx
+    }
+    if ir_name_eq(field_name, make_name("kind")) {
+        return 0
+    }
+    if ir_name_eq(field_name, make_name("span")) {
+        return 1
+    }
+    0 - 1
 }
 
 // Read the side table WITHOUT copying the Lowerer. Bisected: writing this slot at param-bind time
@@ -23255,12 +23279,8 @@ impl Lowerer {
                     fi = fi + 1
                 }
                 // Named layout is present but this field is not on it. Do not
-                // first-match another struct (that is how `.span` became
-                // Expr.int_val). Consensus / kind-tagged index only; else hash.
-                let consensual = lower_field_idx_untyped(&(*self.struct_layouts), field_name)
-                if consensual >= 0 {
-                    return consensual
-                }
+                // consult other structs: a majority of `.end` is Span.end = 2,
+                // which is also Expr.int_val. Hash only.
                 if field_name.len <= 0 {
                     return 0
                 }
@@ -23303,11 +23323,11 @@ impl Lowerer {
         if tuple_idx >= 0 {
             return tuple_idx
         }
-        // Untyped `.field`: consensus across layouts, then kind-tagged AST
-        // layouts (kind at slot 0), then Knowledge, then the legacy hash.
-        // First-match is how an untyped `e.span` became Expr.int_val (field 2)
-        // and the gen3 null-handle ud2. Knowledge stays last so a user
-        // `value` / `variance` / `confidence` still wins a unique hit.
+        // Untyped `.field`: unique kind-tagged majority, then unique
+        // non-Knowledge majority, then Knowledge, then `kind`/`span`
+        // convention, then the legacy hash. Unanimous consensus was too
+        // strict: SessionStep.span=2 and AuditSection.span=3 vetoed
+        // Expr.span=1 and hashed "span" to 51 (gen3 null-handle ud2).
         let consensual = lower_field_idx_untyped(&(*self.struct_layouts), n)
         if consensual >= 0 {
             return consensual
