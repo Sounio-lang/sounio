@@ -2948,19 +2948,74 @@ pub struct ModuleClosure {
     pub parse_failed_path: string,
 }
 
+// Breadcrumb trace for the closure walk, opt-in with SOUNIO_PREFLIGHT_TRACE=1.
+// print is buffered and lost on SIGSEGV; write_file is a syscall and survives
+// (it always opens O_TRUNC, so the file holds the LAST step executed, not the
+// history -- that is the point: no file or file ending in "done" means the walk
+// survived, anything else names the step it died after).
+//
+// Memoised read_env for the same reason as every other gate in this file: the
+// runtime allocator never reclaims, so a call per invocation is a per-compile
+// leak -- and this gate runs about fourteen times per module.
+var MF_CLOSURE_TRACE_ON: i64 = 0
+var MF_CLOSURE_TRACE_CHECKED: i64 = 0
+
+fn closure_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    if MF_CLOSURE_TRACE_CHECKED == 0 {
+        MF_CLOSURE_TRACE_CHECKED = 1
+        if str_eq(read_env("SOUNIO_PREFLIGHT_TRACE"), "1") {
+            MF_CLOSURE_TRACE_ON = 1
+        }
+    }
+    MF_CLOSURE_TRACE_ON == 1
+}
+
+fn closure_trace(step: string) with IO, Mut, Panic, Div {
+    if !closure_trace_enabled() { return }
+    print("preflight_trace: closure ")
+    println(step)
+    var buf: [i8; 512] = [0; 512]
+    let prefix = "closure "
+    var pos: i64 = 0
+    var pi: i64 = 0
+    while pi < str_len(prefix) && pos < 511 {
+        buf[pos as usize] = str_char_at(prefix, pi) as i8
+        pos = pos + 1
+        pi = pi + 1
+    }
+    var i: i64 = 0
+    while i < str_len(step) && pos < 511 {
+        buf[pos as usize] = str_char_at(step, i) as i8
+        pos = pos + 1
+        i = i + 1
+    }
+    let _written = write_file("/tmp/sounio-preflight-trace.txt", buf, pos)
+}
+
 pub fn module_frontend_collect_ast_closure_into(
     main_path: string,
     out: &!ModuleClosure
 ) -> bool with IO, Mut, Panic, Div, Alloc {
+    closure_trace("enter")
+    closure_trace(main_path)
     (*out).node_count = 0
+    closure_trace("cleared_node_count")
     (*out).edge_count = 0
+    closure_trace("cleared_edge_count")
     (*out).unresolved_count = 0
+    closure_trace("cleared_unresolved_count")
     (*out).saturated = false
+    closure_trace("cleared_saturated")
     (*out).parse_failed = false
+    closure_trace("cleared_parse_failed")
     (*out).parse_failed_path = ""
+    closure_trace("cleared_parse_failed_path")
 
     parser_reset_last_errors()
+    closure_trace("parser_reset_returned")
+    closure_trace("before_load_main")
     let main_prog = load_module_file(main_path)
+    closure_trace("load_main_returned")
     if parser_last_error_count() > 0 {
         (*out).parse_failed = true
         (*out).parse_failed_path = main_path
@@ -2972,6 +3027,8 @@ pub fn module_frontend_collect_ast_closure_into(
     var work_front: i64 = 0
     while work_front < (*out).node_count {
         let caller_path = (*out).paths[work_front]
+        closure_trace("module")
+        closure_trace(caller_path)
         let cur_dir = module_frontend_path_directory_slice(caller_path)
         parser_reset_last_errors()
         let work_prog = load_module_file(caller_path)
@@ -3020,6 +3077,7 @@ pub fn module_frontend_collect_ast_closure_into(
         }
         work_front = work_front + 1
     }
+    closure_trace("done")
     !(*out).saturated && !(*out).parse_failed && (*out).unresolved_count == 0
 }
 
@@ -5373,6 +5431,83 @@ fn module_frontend_loaded_ir_slot_capacity_error(programs: &! [Program; 256], lo
     module_frontend_ir_slot_capacity_error_from_counts(total_slots, bss_slots, slot_limit)
 }
 
+// Gen3 preflight trace -- opt-in with SOUNIO_GEN3_PREFLIGHT_TRACE=1. The gen2
+// census above prints only from inside the capacity ERROR, so a preflight that
+// PASSES is silent: nothing records what the cross-module DCE deleted, and the
+// only way to see the raw-vs-live split was to instrument the error line as
+// gen2 did and then push over the limit on purpose. This prints BEFORE the
+// capacity decision in both callers instead, and says nothing at all when the
+// variable is not 1.
+//
+// Memoised read_env for the same reason as every other gate in this file: the
+// runtime allocator never reclaims, so a call per invocation is a per-compile
+// leak.
+var MF_GEN3_PREFLIGHT_TRACE_ON: i64 = 0
+var MF_GEN3_PREFLIGHT_TRACE_CHECKED: i64 = 0
+
+fn module_frontend_gen3_preflight_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    if MF_GEN3_PREFLIGHT_TRACE_CHECKED == 0 {
+        MF_GEN3_PREFLIGHT_TRACE_CHECKED = 1
+        if str_eq(read_env("SOUNIO_GEN3_PREFLIGHT_TRACE"), "1") {
+            MF_GEN3_PREFLIGHT_TRACE_ON = 1
+        }
+    }
+    MF_GEN3_PREFLIGHT_TRACE_ON == 1
+}
+
+// Summary line carries the numbers the census uses (globals = raw BSS slots,
+// functions = the rest of the DCE-filtered total -- the same split
+// module_frontend_count_loaded_* makes), plus one line per loaded module with
+// its raw slot count, its count after the filter, and its BSS globals. The two
+// per-module counts are what the summary total and the DCE's deletion are made
+// of.
+//
+// dce_marks is passed in rather than recomputed because -1 is a statement
+// about the filter, not a count: the mark set was refused, so
+// spec_dce_filter_with_global_marks gave back its input intact and "raw" equals
+// "after dce" by contract, not by the program being dead-code free. The
+// summary has to say so, or those two columns agreeing reads as an accident.
+fn module_frontend_gen3_preflight_trace(
+    programs: &! [Program; 256],
+    loaded: i64,
+    dce_marks: i64
+) with IO, Mut, Panic, Div, Alloc {
+    if !module_frontend_gen3_preflight_trace_enabled() { return }
+    let total_slots = module_frontend_count_loaded_ir_slots(programs, loaded)
+    let bss_slots = module_frontend_count_loaded_bss_global_slots(programs, loaded)
+    let slot_limit = module_frontend_loaded_ir_slot_limit(loaded)
+    print("gen3_preflight: globals ")
+    print_int(bss_slots)
+    print(" + functions ")
+    print_int(total_slots - bss_slots)
+    print(" = ")
+    print_int(total_slots)
+    print(" (max ")
+    print_int(slot_limit)
+    print(", over by ")
+    print_int(total_slots - slot_limit)
+    print(")")
+    if dce_marks < 0 {
+        print(" dce marks=-1: mark set refused, filter kept input intact")
+    }
+    print("\n")
+    var i: i64 = 0
+    while i < loaded && i < 256 {
+        let raw_items = (*programs)[i as usize].items
+        let live_items = spec_dce_filter_with_global_marks((*programs)[i as usize].items)
+        print("gen3_preflight: module ")
+        print_int(i)
+        print(" slots raw=")
+        print_int(module_frontend_count_lowered_ir_slots(&raw_items))
+        print(" after dce=")
+        print_int(module_frontend_count_lowered_ir_slots(&live_items))
+        print(" globals bss=")
+        print_int(module_frontend_count_bss_global_slots(&raw_items))
+        print("\n")
+        i = i + 1
+    }
+}
+
 fn module_frontend_lower_program_counts_traced(
     program: Program,
     module_index: i64,
@@ -5785,6 +5920,10 @@ fn module_frontend_lower_single_program_array_direct_box(
         print_int(dce_marks)
         print("\n")
     }
+    // Gen3 trace point: after the mark pass, before the capacity verdict -- the
+    // counts that decide the preflight are the ones that get printed, pass or
+    // fail. Silence unless SOUNIO_GEN3_PREFLIGHT_TRACE=1.
+    module_frontend_gen3_preflight_trace(programs, 1, dce_marks)
     if module_frontend_loaded_ir_slot_capacity_exceeded(programs, 1) {
         trace.last_stage = "lower_summary_error"
         return module_frontend_lower_direct_box_error(module_frontend_loaded_ir_slot_capacity_error(programs, 1))
@@ -5885,6 +6024,9 @@ fn module_frontend_lower_programs_array_direct_box_multi(
         print_int(dce_marks)
         print("\n")
     }
+    // Same gen3 trace point as the single-program path above: numbers of the
+    // preflight that is about to decide, not numbers of a wall already hit.
+    module_frontend_gen3_preflight_trace(programs, loaded, dce_marks)
     if module_frontend_loaded_ir_slot_capacity_exceeded(programs, loaded) {
         trace.last_stage = "lower_summary_error"
         return module_frontend_lower_direct_box_error(module_frontend_loaded_ir_slot_capacity_error(programs, loaded))
