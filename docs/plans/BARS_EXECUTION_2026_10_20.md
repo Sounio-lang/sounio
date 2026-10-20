@@ -63,7 +63,7 @@ The first margin packet `bars-20261020-v4` was made readonly, causing Forge vali
 
 ## Storage and resource scope
 
-[The authorized offload](ARTIFACT_OFFLOAD_EXECUTION_2026_10_20.md) removed107 historical source archives after two complete restore-verified copies and encrypted GitHub custody. It retained logs/results and wrote an A/B journal before and after each exact removal. Including the earlier one-file step,1262940884 logical bytes were offloaded; quota remained3TiB. Observed availability after the107 offload was96468992bytes. New validation snapshots consumed most of this margin; final availability observed was8388608bytes. This is insufficient headroom for a massive ongoing batch and requires further reviewed retention work.
+[The authorized offload](ARTIFACT_OFFLOAD_EXECUTION_2026_10_20.md) removed107 historical source archives after two complete restore-verified copies and encrypted GitHub custody. It retained logs/results and wrote an A/B journal before and after each exact removal. Including the earlier one-file step,1262940884 logical bytes were offloaded; quota remained3TiB. Observed availability after the107 offload was96468992bytes. New validation snapshots consumed most of this margin; final availability observed was4194304bytes. This is insufficient headroom for a massive ongoing batch and requires further reviewed retention work.
 
 Final batch MaxRSS7340964K includes compiler, harness and native workloads. It does not measure isolated bar rendering or establish comparative speed/memory superiority. Shared geometry uses scalar storage and renderers avoid a coordinate buffer; broader execution/memory profiling remains open.
 

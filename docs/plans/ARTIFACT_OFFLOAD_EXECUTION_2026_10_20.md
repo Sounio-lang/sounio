@@ -44,4 +44,4 @@ Os logs de parsing preservam essa falha. BEFORE e controle não são evidência 
 
 ## Recuperação e validação concluídas
 
-O fonte completo foi restaurado em b9cfcc7d98 e a margem do exemplo foi corrigida em f17bb2c67b. A nova baseline15712 passou111/111, e o final15718 passou114/114, com controles discriminantes válidos e SVG nativo conferido independentemente. Consulte [o recibo final de barras](BARS_EXECUTION_2026_10_20.md). A folga após os snapshots de validação ficou em8388608bytes; não é margem suficiente para novas baterias massivas sem retenção adicional revisada.
+O fonte completo foi restaurado em b9cfcc7d98 e a margem do exemplo foi corrigida em f17bb2c67b. A nova baseline15712 passou111/111, e o final15718 passou114/114, com controles discriminantes válidos e SVG nativo conferido independentemente. Consulte [o recibo final de barras](BARS_EXECUTION_2026_10_20.md). A folga após os snapshots de validação ficou em4194304bytes; não é margem suficiente para novas baterias massivas sem retenção adicional revisada.

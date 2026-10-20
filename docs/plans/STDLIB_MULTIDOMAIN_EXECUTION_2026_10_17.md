@@ -203,7 +203,7 @@ The authorized107-snapshot offload passed two-copy restoration and an A/B journa
 audit; complete encrypted custody is on GitHub, keys held separately. Including
 the earlier one-file step,1262940884 logical bytes left the hot quota. Quota stays
 3TiB. Availability returned to96468992bytes, but validation snapshots reduced it
-to8388608bytes: further reviewed retention is required for a massive ongoing
+to4194304bytes: further reviewed retention is required for a massive ongoing
 batch. See [offload receipt](ARTIFACT_OFFLOAD_EXECUTION_2026_10_20.md).
 
 Statistics, mathematics, genomics and physics remain in scope. Conditioning and
