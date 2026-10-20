@@ -41,3 +41,7 @@ Recibos publicados em [artifacts/offload-20261020](artifacts/offload-20261020/),
 Foram submetidos os jobs 15706 (barras), 15707 (before), 15708 (controle) e 15709 (baseline main). Os pacotes incluíam `viz_html.sio` truncado no meio de `vh_emit_axis`, terminando em `let ver`. A truncagem surgiu ao resolver o merge; estava no fonte preparado e nos snapshots, não no compilador nem no processo de arquivamento.
 
 Os logs de parsing preservam essa falha. BEFORE e controle não são evidência discriminante válida, pois não chegaram à execução nativa. O resultado não estende a aceitação anterior 111/111 do commit7cbe54d415 à nova main ou às barras. A restauração do fonte completo e novos gates são necessários.
+
+## Recuperação e validação concluídas
+
+O fonte completo foi restaurado em b9cfcc7d98 e a margem do exemplo foi corrigida em f17bb2c67b. A nova baseline15712 passou111/111, e o final15718 passou114/114, com controles discriminantes válidos e SVG nativo conferido independentemente. Consulte [o recibo final de barras](BARS_EXECUTION_2026_10_20.md). A folga após os snapshots de validação ficou em8388608bytes; não é margem suficiente para novas baterias massivas sem retenção adicional revisada.
