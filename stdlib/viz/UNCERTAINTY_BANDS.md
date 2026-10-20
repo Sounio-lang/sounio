@@ -9,12 +9,16 @@ Variance is sigma² in squared Y units; the mean and the resulting bounds have
 Y units. A one-standard-deviation interval is not a confidence interval, credible
 interval, prediction interval or coverage-probability claim.
 
-Production source is prepared in the main7 worktree. Typecheck, independent
-numerical comparison, native execution and figure acceptance are pending.
-No tests were added or run for this implementation checkpoint. A source example
-is prepared; its planned typecheck/execution and artifact inspection are separate
-pending steps. Earlier renderer
-acceptance, including the historical114-entry checkpoint, does not cover it.
+Current-compiler typecheck and native SVG example execution are complete:
+Slurm15776 returned TYPECHECK_OK for18 targets and compiled/executed the SVG
+example with exit0. The compiler was built from current source in15772 and reused
+after exact unchanged bin/scripts/self-hosted/stdlib tree verification.
+Root structural and visual SVG inspection is complete: extracted native SVG passed
+xmllint and its actual QuickLook preview was inspected. This establishes neither
+scientific numerical agreement nor Canvas pixel parity. Independent numerical
+concordance, Canvas runtime validation, full corpus and CI/merge remain pending.
+No tests were added or run. Historical114-entry acceptance does not cover this
+increment. See [execution receipt](../../docs/plans/SAMPLED_UNCERTAINTY_EXECUTION_2026_10_20.md).
 
 ## Input and builder contract
 
@@ -57,10 +61,13 @@ closed plot bounds. Samples are not connected into a filled ribbon.
 The center line is handled separately with shared segment clipping. SVG uses
 round caps so a segment reduced to a point remains visible.
 
-Strip visibility is based on intersection of the uncertainty mark with the plot,
-not membership of its mean in the viewport. A mean outside the Y window can
-therefore retain a visible interval fragment. Clipping does not invent a mean at
-a boundary. Constant domains map to an integer center without epsilon padding.
+A sampled strip requires its X center inside the CLOSED declared X domain.
+An X center outside is omitted even if its three-pixel footprint could overlap.
+In Y, visibility instead depends on intersection of the full uncertainty interval
+with the declared window: the mean may be outside while an interval fragment
+remains visible. The accepted strip footprint is intersected with plot bounds.
+Clipping does not invent a mean at a boundary. Constant domains map to an integer
+center without epsilon padding.
 
 The plot uses closed pixel-center bounds[x,x+w]×[y,y+h]. Intersection occurs
 before Canvas pixel loops, bounding raster work to the plot. Invalid samples
@@ -121,10 +128,16 @@ a confidence field as a coverage level for these marks.
 
 ## Evidence boundaries and continuation
 
-Required follow-up evidence remains separate: typecheck with the current compiler,
-independent C++23 agreement, explicit zero/negative/nonfinite/constant/large-scale
-coverage, native Canvas/SVG execution and inspection of the actual figure.
-This document does not claim those steps happened.
+Completed evidence is limited to18 current-compiler typechecks and execution of
+the native SVG demonstration. The checked source commit is
+52ba99b87d49da04e97524fa0d8911b1d1d4d46b. Compiler SHA256:
+0c896942018ff4be9a86d69f30e3a8aadac955f32451c445a07fbf502ae37fc3.
+Native HTML SHA256:
+82b72b8c718a8ab2743c038d289f4c704f4bb541f6e49a3a5cbf2ad4015f614e.
+
+Independent C++23 numerical agreement and boundary coverage, Canvas runtime
+validation, full corpus and CI/merge remain separate pending states. Root SVG
+structure/visual inspection is complete within the execution receipt's scope. A demonstration without assertions is not a numerical test suite.
 
 The change retains prior statistical, genomic, physics and NB2 work. It is a
 bounded semantic repair within the mass stdlib sprint, with no new statistical

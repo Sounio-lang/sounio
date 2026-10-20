@@ -937,3 +937,35 @@ the seed and modular Madaros; both NB2 module and new count-diagnostic example
 returned TYPECHECK_OK. The transport label corpus_smoke represents only this
 package-specific check dispatcher, not a corpus run. No tests or example
 execution occurred. [Exact receipt](NB_DISPERSION_TYPECHECK_2026_10_20.md).
+
+## Continuation checkpoint — sampled uncertainty and native SVG, 2026-10-20 UTC
+
+Remote main085da is incorporated. The uncertainty builder now validates finite
+means/X and nonnegative finite variance before mutation, includes mean±sigma in
+its Y domain, and shares checked sampled-strip/center geometry between Canvas
+and SVG. Direct renderers validate array prefixes before access. SVG now emits
+the uncertainty marks it previously omitted. The contract remains sampled±1sigma,
+with no confidence-interval or continuous-ribbon claim. Known production/demo
+consumers propagate required Panic effects.
+
+Slurm15776 completed0:0: eighteen selected files typecheck, and the native SVG
+example compiled/executed with exit0. The actual complete SVG parsed as XML and
+was visually inspected with legible axes, preserved minus sign and explicit
+unitless synthetic caption. The compiler came from a current-source build15772,
+preserved and hash-verified before scratch cleanup, then reused after proving
+unchanged bin/scripts/self-hosted/stdlib input trees. Failed effect/axis-spacing
+attempts are retained. [Execution receipt](SAMPLED_UNCERTAINTY_EXECUTION_2026_10_20.md).
+
+No tests were added or run for this slice; historical114/114 is unchanged.
+Numerical concordance, Canvas runtime/cross-backend comparison, calibration,
+renderer latency/RSS comparisons, full corpus/CI and merge remain open.
+The final checks/compile/figure job took26s; this is a whole-job observation with
+compiler reuse, not a renderer benchmark. Source geometry adds no lower/upper IR
+buffers and bounds Canvas traversal before loops. Shared quota remains3TiB,
+with no further removals; compiler custody/prepared packets stay on t560 ext4.
+
+Statistics, scientific rendering, mathematics, genomics and physics remain the
+mass-sprint scope. Next concrete candidate: stable NB2 count diagnostics with
+supplied mean/dispersion, explicit Poisson limit and representability statuses,
+reusing the count/offset consumer and existing genomics input path. This candidate
+has not been implemented or numerically accepted by the current checkpoint.
