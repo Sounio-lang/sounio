@@ -2,10 +2,11 @@
 
 ## Estado e decisão
 
-**Somente proposta para revisão do lote ampliado. Os 59 originais source.tar.gz
-continuam presentes; nenhuma remoção deste lote é registrada ou autorizada por
-este documento.** A opção anterior do usuário exige apresentar o escopo antes
-de ampliar a retirada. Publicar custódia não implica aprovar remoção.
+**Proposta posteriormente aprovada e executada.** Após a publicação desta lista,
+o usuário autorizou explicitamente a retirada dos 59 snapshots. A execução
+concluiu a remoção dos 59 originais e criou seus índices de recuperação.
+Consultar [o recibo final](SOURCE59_ARCHIVE_EXECUTION_2026_10_20.md) e a auditoria
+C++23. O conteúdo abaixo conserva o escopo e o protocolo apresentados à revisão.
 
 O lote contém exatamente 59 snapshots históricos opacos, totalizando
 **10847851056 bytes lógicos de source.tar.gz**. A soma é do inventário C++23
@@ -20,7 +21,7 @@ A/B foram verificadas. A release criptografada GitHub está publicada com
 O download integral dos 60 assets criptografados passou na comparação SHA256;
 o próprio SHA256SUMS público também foi baixado e comparado byte a byte. A cópia protegida da chave
 no Mac foi verificada por SHA256 contra a custódia A; permissões restringem acesso ao proprietário.
-Os recibos finais estão em artifacts/source59-20261020/. Nenhum original foi retirado.
+Os recibos finais estão em artifacts/source59-20261020/. A retirada posterior está registrada no recibo final de execução.
 
 ## Lista fechada e identidade
 
