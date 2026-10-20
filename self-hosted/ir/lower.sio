@@ -9446,6 +9446,18 @@ fn lower_struct_layout_index_of(table: &StructLayoutTable, type_name: Name) -> i
     0 - 1
 }
 
+fn lower_name_is_kind(n: Name) -> bool with Panic, Div {
+    n.len == 4 && n.buf[0] == 107 && n.buf[1] == 105 && n.buf[2] == 110 && n.buf[3] == 100
+}
+
+fn lower_name_is_span(n: Name) -> bool with Panic, Div {
+    n.len == 4 && n.buf[0] == 115 && n.buf[1] == 112 && n.buf[2] == 97 && n.buf[3] == 110
+}
+
+fn lower_name_is_knowledge(n: Name) -> bool with Panic, Div {
+    n.len == 10 && n.buf[0] == 75 && n.buf[1] == 110 && n.buf[2] == 111 && n.buf[3] == 119 && n.buf[4] == 108 && n.buf[5] == 101 && n.buf[6] == 100 && n.buf[7] == 103 && n.buf[8] == 101 && n.buf[9] == 101
+}
+
 // Index of `field_name` in one layout, or -1.
 fn lower_layout_field_index(entry: &StructLayoutEntry, field_name: Name) -> i64 with Mut, Panic, Div {
     var fi: i64 = 0
@@ -9461,25 +9473,132 @@ fn lower_layout_field_index(entry: &StructLayoutEntry, field_name: Name) -> i64 
 // AST tagged structs are `kind` then `span` then payload. Used only when an
 // untyped field name appears at more than one index across the table.
 fn lower_layout_has_kind_zero(entry: &StructLayoutEntry) -> bool with Mut, Panic, Div {
-    lower_layout_field_index(entry, make_name("kind")) == 0
+    if (*entry).field_count <= 0 {
+        return false
+    }
+    let fname = ir_name_at((*entry).fields[0].name_id)
+    lower_name_is_kind(fname) && (*entry).fields[0].index == 0
 }
 
-// Unique winning index in `votes[0..64)`, or -1 on a tie / no votes.
-fn lower_vote_unique_best(votes: &[i64; 64]) -> i64 with Mut, Panic, Div {
+// Unique majority index of `field_name`. `kind_only` counts only layouts
+// whose field 0 is `kind`. One pass, eight scalar slots, no heap arrays and
+// no `make_name` — this sits on every untyped field-get. After the SIGILL
+// fix, gen2 compiling main.sio died in 3s with `arena full (allocation of
+// 2080 bytes)` (32-byte header + 2048-byte intern slab); a pair of
+// `[i64; 64]` vote buffers plus three `make_name` calls per lookup is the
+// first suspect. Eight slots cover the distinct indices a real field name
+// actually takes (span is 1 / 2 / 3).
+fn lower_field_idx_majority(table: &StructLayoutTable, field_name: Name, kind_only: bool) -> i64 with Mut, Panic, Div {
+    var s0: i64 = 0 - 1
+    var s1: i64 = 0 - 1
+    var s2: i64 = 0 - 1
+    var s3: i64 = 0 - 1
+    var s4: i64 = 0 - 1
+    var s5: i64 = 0 - 1
+    var s6: i64 = 0 - 1
+    var s7: i64 = 0 - 1
+    var n0: i64 = 0
+    var n1: i64 = 0
+    var n2: i64 = 0
+    var n3: i64 = 0
+    var n4: i64 = 0
+    var n5: i64 = 0
+    var n6: i64 = 0
+    var n7: i64 = 0
+    var si: i64 = 0
+    while si < (*table).count {
+        if !lower_name_is_knowledge((*table).entries[si as usize].type_name) {
+            if !kind_only || lower_layout_has_kind_zero(&(*table).entries[si as usize]) {
+                let idx = lower_layout_field_index(&(*table).entries[si as usize], field_name)
+                if idx >= 0 {
+                    if s0 < 0 || s0 == idx {
+                        s0 = idx
+                        n0 = n0 + 1
+                    } else if s1 < 0 || s1 == idx {
+                        s1 = idx
+                        n1 = n1 + 1
+                    } else if s2 < 0 || s2 == idx {
+                        s2 = idx
+                        n2 = n2 + 1
+                    } else if s3 < 0 || s3 == idx {
+                        s3 = idx
+                        n3 = n3 + 1
+                    } else if s4 < 0 || s4 == idx {
+                        s4 = idx
+                        n4 = n4 + 1
+                    } else if s5 < 0 || s5 == idx {
+                        s5 = idx
+                        n5 = n5 + 1
+                    } else if s6 < 0 || s6 == idx {
+                        s6 = idx
+                        n6 = n6 + 1
+                    } else if s7 < 0 || s7 == idx {
+                        s7 = idx
+                        n7 = n7 + 1
+                    }
+                }
+            }
+        }
+        si = si + 1
+    }
     var best_idx: i64 = 0 - 1
     var best_n: i64 = 0
     var tied = false
-    var i: i64 = 0
-    while i < 64 {
-        let n = (*votes)[i as usize]
-        if n > best_n {
-            best_idx = i
-            best_n = n
-            tied = false
-        } else if n == best_n && n > 0 {
-            tied = true
-        }
-        i = i + 1
+    if n0 > best_n {
+        best_idx = s0
+        best_n = n0
+        tied = false
+    } else if n0 == best_n && n0 > 0 && s0 != best_idx {
+        tied = true
+    }
+    if n1 > best_n {
+        best_idx = s1
+        best_n = n1
+        tied = false
+    } else if n1 == best_n && n1 > 0 && s1 != best_idx {
+        tied = true
+    }
+    if n2 > best_n {
+        best_idx = s2
+        best_n = n2
+        tied = false
+    } else if n2 == best_n && n2 > 0 && s2 != best_idx {
+        tied = true
+    }
+    if n3 > best_n {
+        best_idx = s3
+        best_n = n3
+        tied = false
+    } else if n3 == best_n && n3 > 0 && s3 != best_idx {
+        tied = true
+    }
+    if n4 > best_n {
+        best_idx = s4
+        best_n = n4
+        tied = false
+    } else if n4 == best_n && n4 > 0 && s4 != best_idx {
+        tied = true
+    }
+    if n5 > best_n {
+        best_idx = s5
+        best_n = n5
+        tied = false
+    } else if n5 == best_n && n5 > 0 && s5 != best_idx {
+        tied = true
+    }
+    if n6 > best_n {
+        best_idx = s6
+        best_n = n6
+        tied = false
+    } else if n6 == best_n && n6 > 0 && s6 != best_idx {
+        tied = true
+    }
+    if n7 > best_n {
+        best_idx = s7
+        best_n = n7
+        tied = false
+    } else if n7 == best_n && n7 > 0 && s7 != best_idx {
+        tied = true
     }
     if best_n > 0 && !tied {
         return best_idx
@@ -9503,42 +9622,33 @@ fn lower_vote_unique_best(votes: &[i64; 64]) -> i64 with Mut, Panic, Div {
 // Knowledge, then the AST convention (`kind`=0, `span`=1). -1 otherwise;
 // caller keeps the legacy hash.
 fn lower_field_idx_untyped(table: &StructLayoutTable, field_name: Name) -> i64 with Mut, Panic, Div {
-    let kname = make_name("Knowledge")
-    var votes: [i64; 64] = [0; 64]
-    var kind_votes: [i64; 64] = [0; 64]
+    let kind_best = lower_field_idx_majority(table, field_name, true)
+    if kind_best >= 0 {
+        return kind_best
+    }
+    let all_best = lower_field_idx_majority(table, field_name, false)
+    if all_best >= 0 {
+        return all_best
+    }
     var knowledge_idx: i64 = 0 - 1
     var si: i64 = 0
     while si < (*table).count {
-        let idx = lower_layout_field_index(&(*table).entries[si as usize], field_name)
-        if idx >= 0 && idx < 64 {
-            if ir_name_eq((*table).entries[si as usize].type_name, kname) {
-                if knowledge_idx < 0 {
-                    knowledge_idx = idx
-                }
-            } else {
-                votes[idx as usize] = votes[idx as usize] + 1
-                if lower_layout_has_kind_zero(&(*table).entries[si as usize]) {
-                    kind_votes[idx as usize] = kind_votes[idx as usize] + 1
-                }
+        if lower_name_is_knowledge((*table).entries[si as usize].type_name) {
+            let idx = lower_layout_field_index(&(*table).entries[si as usize], field_name)
+            if idx >= 0 {
+                knowledge_idx = idx
+                break
             }
         }
         si = si + 1
     }
-    let kind_best = lower_vote_unique_best(&kind_votes)
-    if kind_best >= 0 {
-        return kind_best
-    }
-    let all_best = lower_vote_unique_best(&votes)
-    if all_best >= 0 {
-        return all_best
-    }
     if knowledge_idx >= 0 {
         return knowledge_idx
     }
-    if ir_name_eq(field_name, make_name("kind")) {
+    if lower_name_is_kind(field_name) {
         return 0
     }
-    if ir_name_eq(field_name, make_name("span")) {
+    if lower_name_is_span(field_name) {
         return 1
     }
     0 - 1
