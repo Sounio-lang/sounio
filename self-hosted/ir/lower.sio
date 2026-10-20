@@ -9446,6 +9446,80 @@ fn lower_struct_layout_index_of(table: &StructLayoutTable, type_name: Name) -> i
     0 - 1
 }
 
+// Index of `field_name` in one layout, or -1.
+fn lower_layout_field_index(entry: &StructLayoutEntry, field_name: Name) -> i64 with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < (*entry).field_count {
+        if ir_name_eq(ir_name_at((*entry).fields[fi as usize].name_id), field_name) {
+            return (*entry).fields[fi as usize].index
+        }
+        fi = fi + 1
+    }
+    0 - 1
+}
+
+// AST tagged structs are `kind` then `span` then payload. Used only when an
+// untyped field name appears at more than one index across the table.
+fn lower_layout_has_kind_zero(entry: &StructLayoutEntry) -> bool with Mut, Panic, Div {
+    lower_layout_field_index(entry, make_name("kind")) == 0
+}
+
+// Untyped `.field` must not return the first layout that happens to carry the
+// name. Gen3 SIGILL at the null-handle ud2 (file 0x34e5efd): the caller of a
+// 2-arg Span-shaped ctor loaded ExprIdent.field[2] (int_val, always 0 for an
+// ident) and field-got handle 0. Expr.span is field 1; OntologyDisjointDecl.span
+// (and any later `span` at index 2) first-matched when the receiver type was
+// empty, so `e.span` became int_val. Same class as the `fn_count` first-match
+// that read string_table as a loop bound (comment on expr_receiver_struct_type_ref).
+//
+// Returns a field index when every non-Knowledge hit agrees, or when every
+// kind-tagged (field 0 is `kind`) hit agrees after a conflict. -1 if neither
+// is safe; caller keeps the legacy hash.
+fn lower_field_idx_untyped(table: &StructLayoutTable, field_name: Name) -> i64 with Mut, Panic, Div {
+    let kname = make_name("Knowledge")
+    var agreed: i64 = 0 - 1
+    var seen = false
+    var conflict = false
+    var kind_agreed: i64 = 0 - 1
+    var kind_seen = false
+    var kind_conflict = false
+    var knowledge_idx: i64 = 0 - 1
+    var si: i64 = 0
+    while si < (*table).count {
+        let idx = lower_layout_field_index(&(*table).entries[si as usize], field_name)
+        if idx >= 0 {
+            if ir_name_eq((*table).entries[si as usize].type_name, kname) {
+                if knowledge_idx < 0 {
+                    knowledge_idx = idx
+                }
+            } else {
+                if !seen {
+                    agreed = idx
+                    seen = true
+                } else if agreed != idx {
+                    conflict = true
+                }
+                if lower_layout_has_kind_zero(&(*table).entries[si as usize]) {
+                    if !kind_seen {
+                        kind_agreed = idx
+                        kind_seen = true
+                    } else if kind_agreed != idx {
+                        kind_conflict = true
+                    }
+                }
+            }
+        }
+        si = si + 1
+    }
+    if seen && !conflict {
+        return agreed
+    }
+    if kind_seen && !kind_conflict {
+        return kind_agreed
+    }
+    knowledge_idx
+}
+
 // Read the side table WITHOUT copying the Lowerer. Bisected: writing this slot at param-bind time
 // is harmless (a written-but-never-read array changes nothing), while every earlier attempt read it
 // back through a by-value `self` method — which copies the whole ~struct Lowerer — at the
@@ -23180,33 +23254,12 @@ impl Lowerer {
                     }
                     fi = fi + 1
                 }
-                // Field not found in the named layout. Keep searching the rest
-                // of the table before falling back to the legacy hash path;
-                // partially seeded layouts must not collapse every miss to .0.
-                var sj: i64 = 0
-                // Same Knowledge-preseed shadow as field_idx_from_name_simple:
-                // defer the synthetic layout so a user struct's own field wins.
-                let kname = make_name("Knowledge")
-                var kidx: i64 = -1
-                while sj < (*self.struct_layouts).count {
-                    let sj_is_knowledge = ir_name_eq((*self.struct_layouts).entries[sj as usize].type_name, kname)
-                    var fj: i64 = 0
-                    while fj < (*self.struct_layouts).entries[sj as usize].field_count {
-                        if ir_name_eq(ir_name_at((*self.struct_layouts).entries[sj as usize].fields[fj as usize].name_id), field_name) {
-                            if sj_is_knowledge {
-                                if kidx < 0 {
-                                    kidx = (*self.struct_layouts).entries[sj as usize].fields[fj as usize].index
-                                }
-                            } else {
-                                return (*self.struct_layouts).entries[sj as usize].fields[fj as usize].index
-                            }
-                        }
-                        fj = fj + 1
-                    }
-                    sj = sj + 1
-                }
-                if kidx >= 0 {
-                    return kidx
+                // Named layout is present but this field is not on it. Do not
+                // first-match another struct (that is how `.span` became
+                // Expr.int_val). Consensus / kind-tagged index only; else hash.
+                let consensual = lower_field_idx_untyped(&(*self.struct_layouts), field_name)
+                if consensual >= 0 {
+                    return consensual
                 }
                 if field_name.len <= 0 {
                     return 0
@@ -23215,7 +23268,12 @@ impl Lowerer {
             }
             si = si + 1
         }
-        // Struct not in layout table — fallback: use first byte hash (legacy compat)
+        // Struct not in layout table — same untyped consensus as the miss path,
+        // then the legacy first-byte hash.
+        let consensual = lower_field_idx_untyped(&(*self.struct_layouts), field_name)
+        if consensual >= 0 {
+            return consensual
+        }
         if field_name.len <= 0 {
             0
         } else {
@@ -23245,36 +23303,14 @@ impl Lowerer {
         if tuple_idx >= 0 {
             return tuple_idx
         }
-        // The synthetic "Knowledge" layout (ir_register_knowledge_layout) is
-        // preseeded as entry 0, before any user struct is registered, and its
-        // field names — value / variance / confidence — are ordinary user
-        // identifiers. Scanned in table order it shadowed every user struct
-        // carrying one of them, so `arr[i].value` resolved to Knowledge's slot 0
-        // and silently clobbered whatever field really lives there. Defer it:
-        // a user layout always wins, and Knowledge answers only if nothing else
-        // does (genuine Knowledge<T> access through an untyped base).
-        let knowledge_name = make_name("Knowledge")
-        var knowledge_idx: i64 = -1
-        var si: i64 = 0
-        while si < (*self.struct_layouts).count {
-            let is_knowledge = ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, knowledge_name)
-            var fi: i64 = 0
-            while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), n) {
-                    if is_knowledge {
-                        if knowledge_idx < 0 {
-                            knowledge_idx = (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
-                        }
-                    } else {
-                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
-                    }
-                }
-                fi = fi + 1
-            }
-            si = si + 1
-        }
-        if knowledge_idx >= 0 {
-            return knowledge_idx
+        // Untyped `.field`: consensus across layouts, then kind-tagged AST
+        // layouts (kind at slot 0), then Knowledge, then the legacy hash.
+        // First-match is how an untyped `e.span` became Expr.int_val (field 2)
+        // and the gen3 null-handle ud2. Knowledge stays last so a user
+        // `value` / `variance` / `confidence` still wins a unique hit.
+        let consensual = lower_field_idx_untyped(&(*self.struct_layouts), n)
+        if consensual >= 0 {
+            return consensual
         }
         // Last-resort legacy compatibility for unregistered dynamic/foreign shapes.
         if n.len <= 0 {
