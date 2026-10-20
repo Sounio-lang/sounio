@@ -1074,9 +1074,19 @@ fn a64m_emit_instr(module: &IrModule, func: &IrFunction, ii: i64) -> bool with I
         if instr.dst >= 0 { A64M_FLOAT[instr.dst as usize] = true; A64M_INT[instr.dst as usize] = false }
     } else if op == IrOpcode::IrCall {
         if instr.arg_count > 64 || instr.fn_id < 0 || instr.fn_id >= (*module).fn_count { return false }
-        let cleanup = a64m_args(at, instr.arg_count)
         let target = ir_fn_get(module, instr.fn_id)
         let name = str_from_bytes(target.name.buf, target.name.len)
+        // Option A dropped IrCallExtern-on-6 so native v2 can emit kernel
+        // callers (that opcode has no v2 arm: rc=12). Metal launch used to
+        // ride strategy 6. A collected kernel is still a device launch here
+        // by name, without remapping 6→4 or restoring IrCallExtern-on-6.
+        let metal_id = native_metal_find(name)
+        if metal_id >= 0 {
+            if !a64m_metal_launch(metal_id, name, at, instr.arg_count) { return false }
+            a64m_store(0, instr.dst)
+            return !A64M_ERROR
+        }
+        let cleanup = a64m_args(at, instr.arg_count)
         // mmap allocations have process lifetime: no reusable region can open.
         // Zero is the lowering protocol's explicit plain-return fallback.
         if target.instr_count == 0 && name == "__rgn_enter" {

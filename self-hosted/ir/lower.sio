@@ -7494,10 +7494,8 @@ fn lowerer_lower_fn_item_mut(
     // instr_count == 0 — applies. Params are deliberately NOT lowered:
     // lowerer_lower_fn_params_mut emits ir_mark_float_reg for f64 params,
     // which would push instr_count > 0 and re-break dispatch.
-    // Do NOT mark these slots compile_strategy == 6 (IR_STRATEGY_EXTERN):
-    // call lowering (lower.sio callee_strat_ext == 6) emits IrCallExtern for
-    // such callees, and native v2 codegen has no IrCallExtern arm — every
-    // caller fails with rc=12. The ic==0 stub is what dispatch needs.
+    // Do NOT mark these slots compile_strategy == 6. 6 is also the kernel /
+    // PRECISION_PRESERVING_CHAOTIC stamp. The ic==0 stub is what dispatch needs.
     if fd.is_extern {
         lowerer_flush_current_func_mut(lo)
         (*lo).current_fn = IR_INVALID_FN
@@ -12066,6 +12064,70 @@ fn fo_inline_known(n: Name) -> bool with Mut, Panic, Div, Alloc {
     false
 }
 
+// #2966: an `if` is not a call. lower_expr_contains_call_ref returns true
+// for every non-whitelisted kind, so `let abs_dist = if d < 0.0 { 0.0 - d }
+// else { d }` was not re-lower-safe. The inline variance walk then skipped
+// the binding and the tail `1.0 - abs_dist / half_width` died at site 15349
+// (`orbit_boundary_epsilon`, inlined while lowering `orbit_is_contested`).
+// A pure tree (literals, idents, arithmetic, nested if/block, no call, no
+// return, no assign) is safe to evaluate twice. A call inside the if stays
+// unsafe: re-emitting it would run the call a second time, including a Mut
+// helper that fo_inline_known would otherwise admit.
+fn lower_opt_expr_pure_tree(opt: &Option<Box<Expr>>, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    match *opt {
+        Some(e) => lower_expr_pure_tree(&(*e), depth),
+        None => true,
+    }
+}
+
+fn lower_block_pure_tree(blk_opt: &Option<Box<Block>>, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 64 { return false }
+    match *blk_opt {
+        Some(blk) => {
+            var cur = &(*blk).stmts
+            while true {
+                match *cur {
+                    Some(list) => {
+                        let st = &(*list).head
+                        if st.kind == StmtKind::StmtAssign { return false }
+                        if !lower_opt_expr_pure_tree(&st.expr, depth + 1) { return false }
+                        cur = &(*list).tail
+                    }
+                    None => break
+                }
+            }
+            true
+        }
+        None => true,
+    }
+}
+
+fn lower_expr_pure_tree(e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 64 { return false }
+    let k = (*e).kind
+    if k == ExprKind::ExprIntLit || k == ExprKind::ExprFloatLit || k == ExprKind::ExprBoolTrue
+        || k == ExprKind::ExprBoolFalse || k == ExprKind::ExprStringLit || k == ExprKind::ExprCharLit
+        || k == ExprKind::ExprIdent || k == ExprKind::ExprPath {
+        return true
+    }
+    if k == ExprKind::ExprBinary || k == ExprKind::ExprIndex {
+        if !lower_opt_expr_pure_tree(&(*e).left, depth + 1) { return false }
+        return lower_opt_expr_pure_tree(&(*e).right, depth + 1)
+    }
+    if k == ExprKind::ExprUnary || k == ExprKind::ExprCast || k == ExprKind::ExprFieldAccess {
+        return lower_opt_expr_pure_tree(&(*e).left, depth + 1)
+    }
+    if k == ExprKind::ExprIf {
+        if !lower_opt_expr_pure_tree(&(*e).left, depth + 1) { return false }
+        if !lower_block_pure_tree(&(*e).block, depth + 1) { return false }
+        return lower_opt_expr_pure_tree(&(*e).else_expr, depth + 1)
+    }
+    if k == ExprKind::ExprBlock {
+        return lower_block_pure_tree(&(*e).block, depth + 1)
+    }
+    false
+}
+
 // Like !lower_expr_contains_call_ref, but a call to a pure math builtin with
 // re-lower-safe arguments is still safe to evaluate twice.
 fn fo_closure_note(local: Name, e: &Expr) with Mut, Panic, Div, Alloc {
@@ -12120,6 +12182,9 @@ fn lower_expr_relower_safe_ref(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
     }
     if (*e).kind == ExprKind::ExprUnary || (*e).kind == ExprKind::ExprCast || (*e).kind == ExprKind::ExprFieldAccess {
         return lower_opt_expr_relower_safe(&(*e).left)
+    }
+    if (*e).kind == ExprKind::ExprIf || (*e).kind == ExprKind::ExprBlock {
+        return lower_expr_pure_tree(e, 0)
     }
     !lower_expr_contains_call_ref(e)
 }
@@ -22486,25 +22551,38 @@ impl Lowerer {
                 // inline). Scoped like lower_block_ref.
                 lo.scope_depth = lo.scope_depth + 1
                 let saved_tail_locals = (*lo.locals).count
+                // #2966: a let whose RHS cannot be evaluated twice is not bound.
+                // Continuing into a later expression looks the name up and
+                // reports site 15349. Unknown variance is -1, not a hard error.
+                var skip_later_expr = false
                 while true {
                     match *current {
                         Some(list) => {
                             let stmt_ref = &(*list).head
                             // Only a let that is safe to evaluate twice: the value
                             // path has already run this arm once.
-                            if stmt_ref.kind == StmtKind::StmtLet && lower_opt_expr_relower_safe(&stmt_ref.expr) {
-                                let lp = lo.lower_let_stmt_ref(stmt_ref, false)
-                                lo = lp.0
+                            if stmt_ref.kind == StmtKind::StmtLet {
+                                if lower_opt_expr_relower_safe(&stmt_ref.expr) {
+                                    let lp = lo.lower_let_stmt_ref(stmt_ref, false)
+                                    lo = lp.0
+                                } else {
+                                    skip_later_expr = true
+                                }
                             }
                             if stmt_ref.kind == StmtKind::StmtExpr {
-                                match stmt_ref.expr {
-                                    Some(te) => {
-                                        let p = lo.lower_expr_variance_ref(&(*te))
-                                        lo = p.0
-                                        last_v = p.1
-                                        found = true
+                                if skip_later_expr {
+                                    found = false
+                                    last_v = 0 - 1
+                                } else {
+                                    match stmt_ref.expr {
+                                        Some(te) => {
+                                            let p = lo.lower_expr_variance_ref(&(*te))
+                                            lo = p.0
+                                            last_v = p.1
+                                            found = true
+                                        }
+                                        _ => {}
                                     }
-                                    _ => {}
                                 }
                             }
                             current = &(*list).tail
@@ -29241,6 +29319,19 @@ impl Lowerer {
                     if value_type.len > 0 && !ir_name_is_box(value_type) {
                         lo = lo.bind_local_struct_type(s.name, value_type, false)
                     }
+                } else if (*expr_box).kind == ExprKind::ExprIndex {
+                    // `let n = scene.nodes[i]`. The index itself is typed
+                    // (expr_receiver_struct_type_ref answers VizNode), but the
+                    // binding was not, so `n.layout.x` fell through to the
+                    // first struct that happened to have a field named `x`.
+                    // Measured in viz_scene_hit_test: the copy reported x=20
+                    // where the scene's layout.x was 10, and the hit test
+                    // missed. Direct `scene.nodes[i].layout.x` in the same
+                    // function was already correct.
+                    let elem_ty = lo.expr_receiver_struct_type_ref(&(*expr_box))
+                    if elem_ty.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), elem_ty) >= 0 {
+                        lo = lo.bind_local_struct_type(s.name, elem_ty, false)
+                    }
                 } else if (*expr_box).kind == ExprKind::ExprIdent {
                     // `let b = nx`: propagate the source variable's struct type (e.g. a Box
                     // bound from `Some(nx)`) so `*b` / field access on b resolve correctly.
@@ -33302,6 +33393,22 @@ impl Lowerer {
     }
 
     fn lower_call_expr_named_ref(self, e: &Expr, callee_name: Name) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // gpu_thread_id_x() is the lane counter, not a function. Registering it
+        // first left an empty stub (ud2 / NATIVE_REFUSAL missing_lowered_body).
+        // Outside a kernel there is no counter: read 0, do not call the stub.
+        if name_eq(callee_name, make_name("gpu_thread_id_x")) {
+            let pair_tid = self.fresh_reg()
+            var lo_tid = pair_tid.0
+            let dst_tid = pair_tid.1
+            if LOWER_KERNEL_TID_REG >= 0 {
+                lo_tid = lo_tid.emit(ir_copy(dst_tid, LOWER_KERNEL_TID_REG))
+                return (lo_tid, dst_tid)
+            }
+            print("warning: gpu_thread_id_x() outside a kernel lane loop reads 0")
+            print(" -- inline it into the `kernel fn` body; a helper cannot see the lane counter (#1504)\n")
+            lo_tid = lo_tid.emit(ir_load_imm(dst_tid, 0))
+            return (lo_tid, dst_tid)
+        }
         var lo1 = self
         let fn_id = lowerer_find_or_add_fn_id_mut(&! lo1, callee_name)
         if lo1.ir_name_is_knowledge_kaxi_publish(callee_name) {
@@ -33350,35 +33457,8 @@ impl Lowerer {
         let pair_d = lo2.fresh_reg()
         let lo3 = pair_d.0
         let dst = pair_d.1
-        // gpu_thread_id_x() inside a kernel lane loop is the loop counter, not a
-        // call. resolve.sio:1059 allowlists the 12 GPU intrinsics as implicit
-        // builtins that are never bound, so the emitted call names nothing and
-        // leaves `dst` unwritten — which reads as 0 and is why every lane looked
-        // like lane 0. Outside a kernel LOWER_KERNEL_TID_REG is -1 and this is
-        // skipped, preserving the previous behaviour for the other 11 intrinsics.
-        if name_eq(callee_name, make_name("gpu_thread_id_x")) {
-            if LOWER_KERNEL_TID_REG >= 0 {
-                let lo_tid = lo3.emit(ir_copy(dst, LOWER_KERNEL_TID_REG))
-                return (lo_tid, dst)
-            }
-            // Reached outside a kernel lane loop — typically a helper function
-            // that reads gpu_thread_id_x() and is called from a kernel. The lane
-            // counter is a vreg local to the kernel frame, so it cannot be seen
-            // from here and the read still degrades to 0.
-            //
-            // This is the residue of #1504 and it is announced rather than left
-            // silent: a wrong answer nobody is told about is the failure mode
-            // that let the original defect survive for weeks. lean_single does
-            // not get this right either — it skips the lane loop entirely for
-            // such a kernel (measured: 1 lane instead of 4).
-            print("warning: gpu_thread_id_x() outside a kernel lane loop reads 0")
-            print(" — inline it into the `kernel fn` body; a helper cannot see the lane counter (#1504)\n")
-        }
-        let callee_strat_ext: i64 = if fn_id >= 0 && fn_id < (*lo3.module).fn_count { ir_fn_get(&(*lo3.module), fn_id as usize).compile_strategy } else { 0 }
-        if callee_strat_ext == 6 {
-            let lo_ext = lo3.emit(ir_call_extern(dst, callee_name, args, argc))
-            return (lo_ext, dst)
-        }
+        // Not IrCallExtern-on-6: native v2 has no arm for that opcode (rc=12).
+        // macOS Metal launch is name-based on IrCall in codegen_arm64_macos.
         let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args, argc)
         var lo4 = pair_call.lo
         // Same rule as the binary-operand site: a call consumes its arguments'
@@ -35028,6 +35108,13 @@ impl Lowerer {
                 }
                 print("\n")
                 di = di + 1
+            }
+        }
+        if raw_mut_deref {
+            let inline_n = lo1.raw_payload_field_array_len(&e.left, e.name)
+            if inline_n > 0 {
+                let packed = lo1.raw_payload_field_copy_is_byte(&e.left, e.name)
+                return lo1.emit_raw_inline_array_to_handle(base, &e.left, e.name, inline_n, packed)
             }
         }
         let pair_d = lo1.fresh_reg()
