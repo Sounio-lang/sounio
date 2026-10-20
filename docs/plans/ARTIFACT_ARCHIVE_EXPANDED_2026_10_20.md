@@ -42,3 +42,16 @@ Manifests:
 Como o uso começa acima da quota, a ampliação precisa registrar o índice/journal nas custódias externas A/B ANTES de qualquer retirada; tentar escrever o índice quente após a primeira retirada repetiria a falha conhecida. O journal externo deve guardar nome exato e hashes antes/depois de cada retirada. Criar ponteiros quentes somente quando o Ceph voltar a admitir escrita. Esta descrição substitui a condição anterior de interromper apenas porque um ponteiro quente continua bloqueado durante o excedente conhecido. Divergência de hash/consumidor ou falha de custódia/journal exige interrupção.
 
 Isso amplia o lote inicialmente revisado de seis arquivos para107nomes explícitos. Nenhum arquivo desse novo lote foi retirado. A decisão pendente é autorizar essa ampliação mantendo logs/resultados no Ceph e a quota inalterada. A margem estimada102.007.616bytes depende do uso real no momento da execução.
+
+## GitHub: publicação e readback concluídos
+
+Release de custódia: [107 terminal runs encrypted](https://github.com/Sounio-lang/sounio/releases/tag/archive-stats-viz-terminal107-20261020).
+
+- Asset `stats-terminal-107.tar.gpg`:1.245.552.735bytes.
+- SHA256 criptografado: `13987e2fc7bf30dbf42766d3daac25e3b60847fb9cd535162f33f2c2ac5bac81`.
+- Descriptografia reproduziu o hash do tar original.
+- Asset baixado integralmente do GitHub e conferido: `GH_107_CUSTODY_READBACK_VERIFIED`.
+- Chaves nas custódias A/B têm hash idêntico e não foram publicadas.
+- A primeira release de seis runs é imutável; este lote usa uma segunda release, preservando a primeira.
+
+A ampliação de remoção foi submetida para revisão do usuário. Até esta atualização, nenhum source.tar.gz do lote107 foi removido; quota e disponibilidade de escrita continuam sem mudança.
