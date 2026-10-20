@@ -30,10 +30,12 @@ int main(int argc,char** argv) try {
     while(std::getline(lines,line)) {
         if(line.starts_with("pub var IR_A_") || line.starts_with("pub var IR_REGION_") ||
            line.starts_with("pub var IR_ARENA_TOP:") || line.starts_with("pub let IR_REGION_") ||
-           line.starts_with("pub let IR_ARENA_")) out<<line<<'\n';
+           line.starts_with("pub let IR_ARENA_") ||
+           line.starts_with("pub var IR_HOLE_") || line.starts_with("pub let IR_HOLE_")) out<<line<<'\n';
     }
     for(auto marker:{"pub struct IrInstrRegion {","pub fn ir_instr_arena_capacity()",
        "pub fn ir_region_status_v(","pub fn ir_region_status(","pub fn ir_arena_copy_slot(",
+       "fn ir_arena_push_hole(","fn ir_arena_take_hole(",
        "fn ir_region_grow_slot(","pub fn ir_region_reserve("}) out<<block(s,marker);
     out<<R"SIO(
 fn main() -> i64 with IO, Mut, Panic, Div {
