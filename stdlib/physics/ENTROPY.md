@@ -90,12 +90,17 @@ the norm can round to zero without constituting an unavailable contribution.
 
 ## Numerical implementation
 
-Close volumes, within a factor of two, use d=(Vf-Vi)/Vi and
-ln(1+d)=2 sum t^(2j+1)/(2j+1), t=d/(2+d), with 32 terms. This avoids
-subtracting nearly equal logarithms. The factor-two branch uses halved
-positive volumes rather than a possibly overflowing doubled threshold.
-Subnormal halving may round at the threshold; the neighboring ratio remains
-within this series convergence region. Exactly equal volumes return L=0.
+Close volumes, within a factor of two, retain d=(Vf-Vi)/Vi and delegate
+ln(1+d) to math::logarithmic::log1p_checked. The shared helper owns its tiny-input,
+compensated local series and rounded-addition correction branches; unavailable
+checked-log evaluation maps to the existing entropy arithmetic status4.
+This avoids subtracting nearly equal volume logarithms without maintaining a
+second private log1p implementation. See [shared contract](../math/LOGARITHMIC.md).
+
+The factor-two branch still uses halved positive volumes rather than a possibly
+overflowing doubled threshold. Subnormal halving may round at the threshold;
+the shared helper checks its resulting increment domain. Exactly equal volumes
+still return L=0 before delegation.
 
 Other volumes use ln_checked(Vf)-ln_checked(Vi), without forming Vf/Vi.
 Each entropy or uncertainty contribution independently normalizes its three
@@ -200,3 +205,16 @@ unit rescaling, swapping volumes, subnormal values and validation precedence.
 The legacy Lorentz-force uncertainty routines in `physics::em` retain their
 separate limitations. This extension does not certify their dimensional
 uncertainty propagation or provide a general covariance-matrix engine.
+
+## Shared-logarithm ownership checkpoint
+
+The near-volume-ratio path now delegates to the shared logarithmic module.
+The equality and far-volume log-difference paths, scaled contribution products,
+uncertainty norms, zero-amount semantics and correlated-volume propagation are
+unchanged. Public entropy APIs/effects/status conventions are retained.
+
+This integration is source-prepared only. Historical independent/correlated
+entropy references and native acceptance do not establish validation of the
+changed near-ratio arithmetic. No tests, builds, numerical execution or figure
+acceptance are claimed for this checkpoint. Last-bit changes remain possible;
+no new accuracy, performance or universal representability guarantee is made.

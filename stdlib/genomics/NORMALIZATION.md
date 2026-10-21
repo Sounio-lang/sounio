@@ -70,8 +70,11 @@ Count zero is valid and evaluates to zero with a valid factor.
 Uses canonical checked natural logarithm and exp, compensated log means,
 and the shared deterministic stats::order::sort256. For close positive counts, subtract the integer anchor BEFORE binary64 conversion;
 the signed i64 difference is safe because both operands are positive. If the
-relative difference has magnitude at most0.5, evaluate log1p using32 artanh
-terms; otherwise subtract canonical checked logs. This retains close-i64 log
+relative difference has magnitude at most0.5, call the shared
+math::logarithmic::log1p_checked kernel; a failed checked result maps to
+normalization status4. The shared kernel preserves tiny represented increments
+before its series transformation and uses compensated accumulation. Otherwise
+subtract canonical checked logs. This retains close-i64 log
 contrasts even when both count conversions round to the same f64. The gene
 relative-mean buffer uses1e300 as an exclusion sentinel: valid means have magnitude
 below44. No third buffer is needed. Conversion of the anchor, far-count logarithms,
@@ -108,3 +111,6 @@ The reference includes a3-sample even-median fault discriminator and checks
 nonzero near-i64MAX log contrasts with relative tolerance on those contrasts,
 without an absolute tolerance that could admit zero. C++ execution belongs on t560. Sounio compilation/execution belongs to Forge;
 source preparation or C++ success alone does not establish native Sounio acceptance.
+The shared-log1p migration described above has not been typechecked or executed
+as part of this source change; prior reference and runtime evidence does not
+automatically validate the migrated implementation.
