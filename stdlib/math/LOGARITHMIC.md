@@ -109,9 +109,43 @@ explains why small increments require dedicated evaluation.
 These references motivate the numerical problem and reduction ideas.
 No implementation code or their accuracy guarantees are copied or claimed here.
 
-Source preparation and consumer integration are not executable validation.
-Initial typecheck, independent numerical concordance, native demonstrations,
-figure inspection and any prior-consumer corpus checks remain pending.
-No tests have been added or run for this checkpoint. In particular no
-correct-rounding, uniform ULP accuracy, formal proof, universal representability
-or comparative performance claim follows from the series length.
+## Current-source execution evidence
+
+Slurm15823 completed0:0 in7:13 after a fresh seed/modular Madaros build,
+seven selected typechecks and two native demonstration executions.
+The caption-only final source is27ea4ec6c2b97892e9e92cf982b0af90e2241023.
+Final Slurm15825 completed0:0 in25s with seven selected typechecks and both
+native examples compiled/executed successfully. The attested compiler was reused
+only after an exact empty Git diff for bin/scripts/self-hosted/stdlib.
+Compiler SHA256:
+0c896942018ff4be9a86d69f30e3a8aadac955f32451c445a07fbf502ae37fc3.
+
+| Artifact | SHA256 |
+|---|---|
+| Math demonstration ELF | c137e7474e1ca66b483c3451764cd9dfb202a913fe574d0607d5eedd8a129669 |
+| Count diagnostic ELF | cd514796f69585d85b6ca85a91564d0b82322c78aaaa85cbafb010bc01ce1465 |
+| Math complete stdout | 17018168d668ee34b4f3d1f48788adeeeb059690ae97167f0eaf461dc1a4e352 |
+| Count complete stdout | c4638d32173f59987360db4d33fae97f903ca71e1fe884ba44e8ac9a6709f9bc |
+
+Both complete HTML/SVG artifacts passed xmllint (exit0). The root converted each
+SVG with sips to a1380×620 PNG and inspected the full previews. Math axes, legends,
+captions and seven samples were visible; count panels, negative labels and units
+were visible. These observations establish bounded artifact inspection, not
+numerical agreement. The math example is SVG-only. The count example completes
+its in-memory Canvas render, without pixel capture/comparison.
+
+GNU time for one final fixed run of each child program recorded math elapsed0.00s
+at centisecond resolution and maximum RSS1576KiB; count elapsed0.01s and maximum
+RSS8768KiB. The displayed0.00s is below resolution, not zero runtime. These are
+whole-demonstration observations, not scalar-kernel benchmarks or comparative
+performance evidence.
+
+Exact execution/source custody is in the
+[execution receipt](../../docs/plans/LOGARITHMIC_EXECUTION_2026_10_21.md).
+These documentation edits follow the frozen executable source commit.
+
+No tests or independent numerical oracle were added/run. Independent numerical
+concordance, ULP/error characterization, boundary coverage, prior-consumer corpus
+and repository CI/merge remain pending. No correct-rounding, uniform ULP accuracy,
+formal proof, universal representability or comparative performance claim follows
+from the series length, successful typechecks or visible demonstrations.

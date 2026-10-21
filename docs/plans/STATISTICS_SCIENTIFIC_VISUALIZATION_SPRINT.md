@@ -1004,3 +1004,36 @@ full corpus/CI and merge remain open; historical114/114 is unchanged.
 The larger statistics/scientific-rendering/mathematics/genomics/physics sprint
 continues. Stable deviance/logarithmic primitives, genomic count consumers,
 physical-unit/invariant work and measured resource comparisons remain in scope.
+
+## Continuation checkpoint — shared checked logarithmic primitives, 2026-10-21
+
+Main9 retains remote main085da and all prior increments. Three shared scalar
+primitives now provide checked log1p, log1pmx and (1+x)log1p(x)-x with explicit
+domain/availability/sign contracts and compensated factored near-zero series.
+Four private bodies were removed across information theory, channels and Poisson.
+The scalar helpers add no arrays or explicit heap allocation. Numerical precision
+certification is a separate open requirement.
+
+Slurm15823 rebuilt the current-source seed/Madaros and completed0:0 in7:13.
+Slurm15825 completed0:0 in25s after the example caption explicitly disclosed seven
+samples, reusing the exact hash-verified compiler after unchanged compiler/input
+trees were proved. Both jobs ran seven typechecks and compiled/executed two real
+SVG examples. Final native-process peak RSS was1576KiB for the logarithmic example
+and8768KiB for NB2/Poisson. Time reporting was0.00s/0.01s respectively;0.00s is
+centisecond resolution, not zero time. These whole-example observations are not
+comparative kernel benchmarks. Both complete1380x620 SVG renderings were inspected.
+[Execution receipt](LOGARITHMIC_EXECUTION_2026_10_21.md).
+
+Evidence includes exact source/compiler/ELF/stdout identities, lossless compressed
+logs/manifests, native receipts and complete figures. Quota remains3TiB, without
+new removals. No tests were added or run. Independent numerical concordance,
+boundary runtime coverage, calibration, full corpus/CI and merge remain open;
+historical114/114 is unchanged.
+
+Next concrete cross-domain migrations: sf_log_ratio in genomics normalization,
+preserving exact i64 count-anchor before f64 conversion, zero exclusion,
+median/centering and far log-difference; entropy_log_ratio in physics, preserving
+exact equal-volume zero, scaled products, covariance and n=0 semantics. These
+candidates were audited read-only and remain unimplemented. Statistics,
+scientific rendering, math, genomics, physics and execution/memory/artifact costs
+remain the continuing mass-sprint scope.

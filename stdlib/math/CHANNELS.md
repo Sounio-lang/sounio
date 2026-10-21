@@ -75,6 +75,14 @@ sampling-calibration or comparative-performance claim.
 ## Shared-logarithm integration state
 
 Public APIs, channel units, BSC endpoint behavior and scalar-domain conventions
-remain consumer-owned. The shared-helper integration is initially prepared;
-no new typecheck, numerical concordance, native/figure/corpus acceptance is
-claimed by this source refactor. No tests were added or run for this checkpoint.
+remain consumer-owned. Selected current-source typecheck is complete in Slurm15825 (seven targets);
+two native demonstrations compiled and executed, and their actual XML/full SVG
+previews were inspected. Frozen executable source:
+27ea4ec6c2b97892e9e92cf982b0af90e2241023. Compiler reuse followed an exact
+unchanged bin/scripts/self-hosted/stdlib check.
+See [execution receipt](../../docs/plans/LOGARITHMIC_EXECUTION_2026_10_21.md).
+
+No tests or independent numerical oracle were added/run. Channel boundary
+concordance, numerical/ULP characterization, corpus validation and CI/merge
+remain pending. A visible demonstration is not an independent calibration or
+correct-rounding proof. Documentation edits follow the frozen executable source.

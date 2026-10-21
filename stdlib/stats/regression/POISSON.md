@@ -179,6 +179,16 @@ This changes validation cost, not the production estimator or its scientific con
 This source refactor changes ownership of the local phi evaluation, preserving
 the solver API, count0 case, initialization, score/full-step stopping and local
 exponential objective-change safeguard. The exponential remainder used by that
-safeguard is not redefined as a logarithmic remainder. New current-source
-validation remains pending; the historical Poisson corpus receipts above do not
-automatically accept this refactor. No tests were added or run for this checkpoint.
+safeguard is not redefined as a logarithmic remainder. Selected current-source typecheck is complete in final Slurm15825,
+alongside two compiled/executed native examples. The count diagnostic completes
+Poisson-based means, its in-memory Canvas path and SVG emission. Its actual
+SVG/XML/full PNG preview was inspected; no Canvas pixel comparison occurred.
+Frozen executable source:27ea4ec6c2b97892e9e92cf982b0af90e2241023. Compiler
+reuse followed exact unchanged bin/scripts/self-hosted/stdlib verification.
+See [shared-log execution receipt](../../../docs/plans/LOGARITHMIC_EXECUTION_2026_10_21.md).
+
+No tests or independent numerical oracle were added/run. The historical Poisson
+corpus receipts above do not automatically validate the changed arithmetic;
+new numerical concordance, boundary/convergence coverage, full corpus and
+CI/merge remain pending. No statistical calibration follows from native
+demonstration success. These documentation edits postdate the frozen source.

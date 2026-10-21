@@ -142,7 +142,15 @@ of native execution, complete-corpus acceptance, or comparative performance.
 
 This refactor changes scalar-helper ownership, not public units, mass/support
 validation or zero-bin conventions. Existing p0 contributions remain explicit.
-The shared logarithmic source/integration is initially prepared; this addition
-claims no new typecheck, numerical/native concordance, figure acceptance or
-corpus result. No tests were added or run for this checkpoint. Historical
-probability acceptance does not automatically validate the refactor.
+Selected current-source typecheck is complete in the final seven-target
+Slurm15825 closure; the math demonstration and count diagnostic both compiled
+and executed, with actual SVG/XML/full-preview inspection. Frozen executable
+source:27ea4ec6c2b97892e9e92cf982b0af90e2241023. The attested compiler was
+reused only after exact unchanged bin/scripts/self-hosted/stdlib comparison.
+See [execution receipt](../../docs/plans/LOGARITHMIC_EXECUTION_2026_10_21.md).
+
+No tests or independent numerical oracle were added/run. In particular these
+demonstrations do not establish full-vector probability concordance, boundary
+coverage, ULP accuracy, complete-corpus acceptance or CI/merge. Historical
+probability acceptance does not automatically validate every changed result.
+The documentation update follows the frozen executable source.
