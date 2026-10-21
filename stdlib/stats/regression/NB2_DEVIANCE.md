@@ -100,3 +100,10 @@ track source/typecheck/native/figure evidence separately. Independent C++23/Soun
 concordance, boundary corpus, global accuracy, calibration and comparative resource
 claims remain separate. No tests or independent numerical oracle were added or
 run for this increment.
+
+Balanced continuation execution: Slurm15874 completed0:0 after a fresh current-source
+seed/Madaros build, five selected typechecks and real native figure execution.
+The count8/mean1e-308/alpha1e-15 scenario reports residual/deviance statuses0; the
+preceding frozen native report recorded status5. This establishes observed
+availability in that demonstration, without independent numerical concordance,
+global precision or full boundary coverage. No tests or numerical oracle were run.

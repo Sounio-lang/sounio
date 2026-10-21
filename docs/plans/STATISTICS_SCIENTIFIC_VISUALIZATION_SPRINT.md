@@ -1101,3 +1101,35 @@ scientific rendering, math, genomics, physics and execution/memory/artifact cost
 remain the continuing mass-sprint scope. Next numerical hardening candidate is
 balanced products for the deliberately unavailable far subnormal-product region;
 this requires independent concordance before widening the advertised contract.
+
+## Continuation checkpoint — balanced tiny-product NB2 arithmetic, 2026-10-22
+
+Main12 retains remote main06f927 and all earlier increments. The previously
+unavailable distant tiny-product region now evaluates mean*(1+alpha*count) before
+normalization, avoiding amplification of rounded alpha*mean by count. If the
+intermediate m1 is subnormal, its logarithm is carried independently from the
+original mean and checked log increments rather than taken after coarse rounding.
+Other status guards and independent residual/squared-deviance availability remain.
+Independent static review accepted the bounded formula/source, without a global
+accuracy, correct-rounding or numerical-concordance claim.
+
+The existing formatter now prints available residual/deviance payloads with15
+significant digits and gates both payloads independently. Unavailable values are
+text, not error-placeholder zeros. No points, parameters, geometry, buffers,
+scene nodes or renderer changes were added. Fifteen-digit formatting is not a
+binary64 roundtrip or an independent numerical reference.
+[Execution receipt](NB2_BALANCED_EXECUTION_2026_10_22.md) records frozen source,
+five selected checks, actual native report/figure and whole-process resources.
+
+No tests or numerical oracle were added or run. Independent C++23/Sounio
+concordance, boundary coverage, calibration, global error, comparative resources,
+full corpus/CI and merge remain open. Shared quota remains3TiB with no new removal.
+The statistics/scientific-rendering/math/genomics/physics/resource sprint remains
+active. Cache dependency-manifest narrowing is an audited optimization candidate,
+not implemented: current sprint dispatch explicitly disables cache for fresh
+build provenance, and existing broad cache keys include unrelated stdlib/docs.
+Any future reuse must first preserve a complete proven compiler-input manifest.
+
+Final readback advanced main to7d67f3a944 (README-only), incorporated after the
+native run. Merge input-tree comparison preserves bin/scripts/self-hosted/stdlib/
+examples relative to the evidence closure; executed source remains eeeab3025c.

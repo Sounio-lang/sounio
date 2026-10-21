@@ -45,3 +45,15 @@ unchanged. It adds no tests or numerical oracle. Source preparation alone does
 not establish typecheck, execution, correctness of the formatter, or acceptance
 of a new arithmetic regime. Existing execution receipts describe their frozen
 sources and do not automatically validate this revised report.
+
+## Balanced continuation native checkpoint
+
+Slurm15874 rebuilt the source-tracking seed/modular compiler from frozen eeeab3025c,
+passed five explicit typechecks including the formatter, and compiled/executed the
+real example with exit0. Scientific output preserves a visible nonzero local
+large-alpha residual. The far subnormal-product scenario now reports both statuses0
+and scientific payloads; the preceding frozen report recorded status5. These are
+observed descriptive outputs, not independent numerical agreement. The current SVG
+is byte-identical to the preceding figure; XML parsing and full1040x620 image
+inspection completed. No tests or numerical oracle were run.
+[Balanced continuation receipt](../docs/plans/NB2_BALANCED_EXECUTION_2026_10_22.md).
