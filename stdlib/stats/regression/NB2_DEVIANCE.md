@@ -23,8 +23,7 @@ never consume them without their status. `poisson_limit` records alpha==0 on a
 successful result; negative zero also selects this branch. Count==mean returns
 positive-zero residual/deviance. A nonzero contrast never returns a successful
 zero residual. Status5 is conservative and does not imply the exact mathematical
-result is unrepresentable. In particular the distant branch rejects a zero or
-subnormal rounded alpha*mean, and a rounded-zero scaled contrast.
+result is unrepresentable. In particular the distant branch rejects a rounded-zero scaled contrast.
 
 ## Statistical quantity and arithmetic organization
 
@@ -69,6 +68,24 @@ continuous ratio1 when t rounds to0. If t overflows, it evaluates log(t) through
 log(alpha)+log(mean), omitting the negligible log1p(1/t) correction. Staged
 binary64 rounding and underflow remain; not every representable exact result is
 promised available. The scalar implementation uses no arrays or explicit heap.
+
+### Balanced tiny-product continuation
+
+When rounded alpha*mean is zero or subnormal, the distant positive-count branch
+now forms alpha*y first and then m1=mean*(1+alpha*y)/(1+alpha*mean).
+It retains delta1=(y-mean)/(1+alpha*mean) separately. This order avoids multiplying
+the relative rounding error of subnormal alpha*mean by y. In this bounded region,
+1+alpha*mean rounds to one; this remains staged binary64 arithmetic and is not a
+correct-rounding certificate. Input count/mean/alpha validation and finite guards
+remain required. Positive count<=2^53 bounds alpha*y in this branch.
+
+If m1 itself is subnormal, its logarithm is carried independently as
+ln(mean)+log1p(alpha*y)-log1p(alpha*mean). The far Poisson term consumes this
+logarithm rather than ln(rounded m1), avoiding magnification of the coarse relative
+rounding of a subnormal m1. The positive additive m1 remains rounded. This is an
+algebraically motivated availability extension, with no global precision bound.
+Other guards and independent residual/squared-deviance statuses are unchanged.
+[Balanced continuation receipt](../../../docs/plans/NB2_BALANCED_EXECUTION_2026_10_22.md).
 
 ## Scientific limits and evidence
 

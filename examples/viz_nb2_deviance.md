@@ -11,8 +11,16 @@ The program checks every required diagnostic/scene status before consuming its
 payload. Supplemental parameter scenarios are printed without expected-result
 assertions: alpha0 Poisson, a very large mean, local very large alpha and a
 subnormal-product regime. Their availability states are descriptive, not an
-independent numerical reference or a boundary-coverage claim. Default decimal
-printing does not resolve every tiny residual.
+independent numerical reference or a boundary-coverage claim. Residual and deviance payloads use the existing io::sci_print::println_f64_sci
+formatter with 15 significant decimal digits. This scientific notation keeps
+tiny nonzero printed magnitudes visible; it is not a binary64 roundtrip
+representation, an accuracy certificate, or independent numerical verification.
+The formatter normalizes signed zeros to positive-zero text. Statuses are
+printed before payloads: unavailable residuals or squared deviances print the
+word unavailable rather than an error payload zero. Both statuses and, when
+available, both scientific payloads are reported for every supplemental
+scenario, including count8, mean1e-308 and alpha1e-15. Availability is observed
+from the kernel; no expected status or value is asserted.
 
 Two1024-element plotting buffers and one64-byte label buffer are reused. Scene
 builders copy active prefixes into owned storage. SVG-only emission avoids Canvas
@@ -28,3 +36,12 @@ when a conservative intermediate guard reports arithmetic unavailable.
 No p-values, goodness-of-fit acceptance, confidence intervals, global accuracy,
 comparative performance, numerical concordance or inference calibration follow
 from this visualization.
+
+## Scientific report formatting increment
+
+This increment changes report formatting and status-gated supplemental output;
+the plotted observations, graph geometry, domains, scene nodes and labels are
+unchanged. It adds no tests or numerical oracle. Source preparation alone does
+not establish typecheck, execution, correctness of the formatter, or acceptance
+of a new arithmetic regime. Existing execution receipts describe their frozen
+sources and do not automatically validate this revised report.
