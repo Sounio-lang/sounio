@@ -101,7 +101,7 @@ Source, distributed binaries, individual test lanes and remote CI are separate e
 
 GPU/Pireus execution has evidence on scoped Spark routes. The generic GPU CLI path and each other backend require their own status; support is recorded per engine, target and source revision.
 
-This status snapshot was reconciled against `main` at `085da1da15f3` on 20 October 2026. Follow the linked changes and current CI for subsequent source, target and execution evidence.
+This status snapshot was reconciled against `main` at `06f927dbca57` on 22 October 2026. Follow the linked changes and current CI for subsequent source, target and execution evidence.
 
 ## Research and design
 
