@@ -289,6 +289,20 @@ Return concrete findings with source paths and a discriminating existing test.
 Do not publish, upload, commit, or contact anyone without user authorization.
 ```
 
+## Domain-specific prompt cards
+
+The language guides now include copy-ready, source-first cards for three
+high-value scientific workflows:
+
+- [English domain cards](../guide/LLM_PROGRAMMING_GUIDE.md#domain-specific-task-cards)
+- [Portuguese domain cards](../guide/LLM_PROGRAMMING_GUIDE_PT.md)
+- [Greek domain cards](../guide/LLM_PROGRAMMING_GUIDE_EL.md)
+
+They cover chemistry/kinetics/materials, AI/ML/tensors, and research-only
+medicine/ontology/PBPK. The cards are prompt templates, not new runnable
+examples, compiler receipts, clinical advice, or evidence that a model can
+complete every task. Attach the current source and profile before using one.
+
 ## Keep the guide honest as the language evolves
 
 When a recommendation disagrees with a fresh diagnostic, inspect the selected

@@ -680,6 +680,119 @@ Com modelos menores, uma mudança de cada vez. Com agentes maiores, permita
 plano delimitado e recuperação de APIs, mantendo um escritor por arquivo
 compartilhado e evidência explícita em cada etapa.
 
+### Cartões de tarefa por domínio
+
+Estes cartões tornam uma solicitação científica concreta sem fingir que um
+prompt de domínio é um recibo do compilador. Anexe a fonte completa, a
+declaração da biblioteca, a observação esperada e o perfil de execução. O
+modelo deve recuperar a API atual do Sounio antes de escrever; os nomes abaixo
+são áreas de busca, não autorização para inventar APIs. Mantenha hipóteses do
+modelo, dados científicos, evidência do compilador, verificação numérica e
+decisões de publicação em camadas separadas.
+
+#### Química, cinética e materiais
+
+```text
+Você está auxiliando uma tarefa de química em Sounio.
+
+Tarefa de pesquisa: [reação, equilíbrio, cinética, espectroscopia, materiais
+                    ou outra pergunta precisa].
+Entradas científicas: [espécies, concentrações, unidades, temperatura,
+                       pressão, grade temporal, medidas, incerteza, proveniência].
+Observação exigida: [tabela, curva, invariável, status, arquivo ou saída].
+Arquivos permitidos: [caminhos exatos da fonte e dos testes]. Não publique.
+Perfil: [revisão, compilador bruto/hash, host/target, raiz da stdlib].
+
+Antes de editar:
+1. Leia a fonte fornecida e recupere as declarações reais e um consumidor
+   real para cada API de química, unidades, arrays, numérica ou resultado.
+2. Liste espécies e unidades explicitamente. Diga se cada valor é medido,
+   assumido, ajustado, simulado ou derivado, preservando a proveniência.
+3. Declare precisão, incerteza/dependência, condições de contorno e falhas.
+   Não converta unidades em silêncio, descarte incerteza nem troque o modelo
+   de reação por uma conta mais simples.
+4. Separe afirmação de check/type-check, observação de execução e verificação
+   numérica autorizada. Simulação não é experimento; exemplo aprovado não é
+   garantia química ou industrial.
+
+Faça a menor mudança vinculada à fonte. Use apenas APIs confirmadas na fonte
+e no perfil. Entregue arquivo completo ou patch exato e relate comando de
+check, execução, exit, stdout, stderr, hash da fonte e passos não rodados.
+Se faltar declaração ou pré-requisito, pare e identifique a lacuna; não
+invente helper.
+```
+
+#### IA/ML, tensores e programas diferenciáveis
+
+```text
+Você está auxiliando uma tarefa de IA/ML em Sounio.
+
+Classe: [preparação de dados, transformação tensorial, inferência, treino,
+        autodiff, otimização, avaliação ou reprodutibilidade].
+Entradas: [schema/fonte dos dados, shapes, eixos, dtype, precisão, dispositivo,
+          seed, proveniência, restrições de privacidade].
+Observação exigida: [shape/valor, loss, métrica, artefato, exit ou recusa].
+Arquivos permitidos: [fonte, fixture e testes exatos]. Não publique.
+Perfil: [revisão, compilador bruto/hash, host/target, stdlib, dispositivo/runtime].
+
+Antes de editar:
+1. Classifique a operação: construção, transformação, modelo, autodiff,
+   otimizador, inferência ou avaliação. Recupere declarações reais e consumidor
+   completo das fontes atuais de tensor, autodiff, ML ou exemplos; não importe
+   uma API de outra linguagem por analogia.
+2. Registre shape, rank, ordem dos eixos, dtype, precisão, batching, máscara,
+   dispositivo, aleatoriedade e ownership. Preserve proveniência e incerteza;
+   ausência de benchmark não pode virar alegação de desempenho.
+3. Separe implementação, compilação, execução, benchmark, dados de treino e
+   verificação estatística/numérica. Operação tensorial aprovada não é acurácia,
+   segurança nem generalização.
+4. Não fabrique dataset, checkpoint, acelerador, seed, métrica ou resultado.
+   Se a capacidade não existir no perfil, declare a falta e proponha o próximo
+   passo mínimo ligado à fonte.
+
+Faça uma mudança mínima por vez. Entregue fonte completa ou patch exato e um
+registro reproduzível: comandos, exits, streams brutos, hashes de fonte/
+artefato, identidade dos dados e passos não rodados. Limite as conclusões ao
+perfil observado.
+```
+
+#### Medicina, ontologia e PBPK somente para pesquisa
+
+```text
+Você está auxiliando uma tarefa de medicina, ontologia ou PBPK em Sounio
+somente para pesquisa. Isto não é aconselhamento clínico, diagnóstico,
+prescrição, validação de dispositivo nem recomendação para paciente.
+
+Pergunta: [questão precisa de terminologia, ontologia, PK/PD, PBPK, coorte,
+           mecanismo ou reprodutibilidade].
+Entradas e governança: [dados desidentificados ou fixture sintético,
+                        proveniência, unidades, população, hipóteses, permissão].
+Observação exigida: [relação ontológica, registro tipado, simulação,
+                     tabela de sensibilidade/resultado, recusa ou status].
+Arquivos permitidos: [caminhos exatos da fonte e dos testes]. Não publique.
+Perfil: [revisão, compilador bruto/hash, host/target, raiz da stdlib].
+
+Antes de editar:
+1. Recupere as declarações reais de ontologia, clínica, PBPK, incerteza e
+   bibliotecas, além de um consumidor real. Classifique cada afirmação como
+   fato de vocabulário/ontologia, hipótese de modelo, resultado de simulação,
+   resultado do compilador, prova formal ou alegação clínica empírica.
+2. Preserve proveniência, população/coorte, unidades, precisão, incerteza,
+   dependência, ausências e governança. Não extraia conclusão individual de
+   modelo populacional nem relação clínica de uma relação terminológica.
+3. Mantenha distintas a correspondência ontológica, execução do modelo,
+   verificação numérica e validação clínica. Código executado não prova
+   diagnóstico, eficácia, segurança, aprovação regulatória ou benefício.
+4. Use somente a cadeia numérica/probatória autorizada. Se faltar requisito
+   clínico, de governança, de dados ou de execução, marque não verificado e
+   pare, em vez de preencher a lacuna.
+
+Faça a menor mudança vinculada à fonte. Entregue fonte ou patch exato e
+registro limitado com comandos, exits, saída bruta, identidade de fonte/
+artefato/dados, hipóteses e validações não rodadas. Inclua a limitação de
+pesquisa em qualquer resumo voltado ao usuário.
+```
+
 <!-- llm:section delivery -->
 ## 15. Entrega verificável e limites honestos
 
