@@ -93,14 +93,15 @@ Source, distributed binaries, individual test lanes and remote CI are separate e
 | Capability | Current evidence |
 |---|---|
 | Native Apple execution | Native ARM64 build and real Metal execution integrated in [#2978](https://github.com/Sounio-lang/sounio/pull/2978); see the [macOS ARM64 guide](docs/compiler/MADAROS_MACOS_ARM64.md). Linux parity and self-hosting remain separate claims. |
+| Madaros raw payload handling | Inline-array copies through raw mutable payloads are repaired in [#2995](https://github.com/Sounio-lang/sounio/pull/2995) and covered by a dedicated regression; this does not certify every payload shape or target. |
 | Scientific values through calls | Direct and stored returned `Knowledge` values preserve variance in the tested paths integrated by [#2878](https://github.com/Sounio-lang/sounio/pull/2878). |
 | Derived-unit numerical representation | Scientific parameter representation repairs integrated by [#2878](https://github.com/Sounio-lang/sounio/pull/2878). |
 | Quantum circuits and experiments | Born-law, QASM tape and CHSH routes integrated by [#2880](https://github.com/Sounio-lang/sounio/pull/2880), with classical execution evidence. |
-| Borrow and unit binding reconciliation | [#2882](https://github.com/Sounio-lang/sounio/pull/2882) is a validated draft candidate, awaiting integration. |
+| Borrow and unit binding reconciliation | Integrated in [#2882](https://github.com/Sounio-lang/sounio/pull/2882); route-specific execution evidence remains separate from the merge state. |
 
 GPU/Pireus execution has evidence on scoped Spark routes. The generic GPU CLI path and each other backend require their own status; support is recorded per engine, target and source revision.
 
-This status snapshot was reconciled against main `571848a5` on 11 October 2026. The later Apple Silicon integration is recorded in [#2978](https://github.com/Sounio-lang/sounio/pull/2978); follow the linked changes and current CI for subsequent integration.
+This status snapshot was reconciled against `main` at `085da1da15f3` on 20 October 2026. Follow the linked changes and current CI for subsequent source, target and execution evidence.
 
 ## Research and design
 
