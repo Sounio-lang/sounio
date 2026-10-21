@@ -1124,6 +1124,23 @@ from the n leave-one-out recomputations. Validated: mean of {1..5} → SE=0.7071
 bias 0; the ÷n variance is bias-corrected back to the unbiased ÷(n−1) value
 (θ̂=2, jackknife estimate 2.5, bias −0.5, SE 1.0458).
 
+### `stats::bayesian::psis_loo` — Pareto-smoothed importance-sampling LOO
+
+| Function | Signature |
+|---|---|
+| `psis_loo_i` | `pub fn psis_loo_i(ll: &[f64; 16384], s: i64, out: &![f64; 4]) with Mut, Div, Panic` |
+| `psis_gpdfit` | `pub fn psis_gpdfit(x: &[f64; 16384], n: i64, out: &![f64; 4]) with Mut, Div, Panic` |
+| `psis_lse` / `psis_log1p` / `psis_expm1` / `psis_sort` | log-sum-exp, cancellation-free `log(1+x)` and `exp(x)-1`, index-carrying heap sort |
+
+Pointwise PSIS-LOO for one observation from its S log-likelihood draws (S ≤ 16384):
+`out = [elpd_loo_i, lpd_i, Pareto k_i, threshold]`, with k_i = 1e300 when not
+estimable and the estimate reliable for k_i < min(1 − 1/log10 S, 0.7). Follows the
+R package `loo`; the caller loops over observations. Validated against an
+independent C++ transcription of `loo` to ≤5e-9 relative (Pareto ratios with
+k = 0.5 and 1.2, S = 200 and 400, and the unsmoothed S = 16 case).
+References: Vehtari, Gelman & Gabry (2017) Stat Comput 27:1413; Vehtari et al.
+(2024) JMLR 25(72); Zhang & Stephens (2009) Technometrics 51:316.
+
 ### `stats::rng` — Park-Miller MINSTD generator
 
 | Function | Signature |
