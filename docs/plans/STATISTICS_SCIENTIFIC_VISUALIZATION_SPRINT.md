@@ -1071,3 +1071,33 @@ Poisson-limit branches. No gamma engine or renderer changes are required by the
 identified scope; no inference calibration or implementation is claimed here.
 Statistics, scientific rendering, math, genomics, physics and execution/memory/
 artifact efficiency remain the mass-sprint scope.
+
+## Continuation checkpoint — conditional NB2 deviance, 2026-10-22
+
+Remote main advanced to06f927dbca5753f5d7b6f64c29eb745eff77f351; it was fetched
+and merged, retaining earlier sprint work including genomic/physical shared-log
+consumers. New scalar nb2_deviance supplies signed saturated-deviance residuals
+and independent squared-deviance availability for supplied count mean/dispersion.
+The local branch uses a compensated factored series; the distant branch uses a
+positive Poisson/correction decomposition and combines component roots by scale.
+No arrays or explicit heap are introduced in the kernel. Input/status guards
+preserve the2^53 count bound and reject unsupported intermediate regions instead
+of turning them into zero. Independent static review identified and the source
+addressed subnormal amplification and missing canonical sqrt Panic effects.
+
+The separate real SVG example compares Pearson NB2 against signed deviance at nine
+counts for supplied mean4/alpha0.25, with common dimensionless residual axis and
+zero reference. Supplemental parameter scenarios report availability without
+assertions. This is not a fitted-model or calibrated inferential result.
+[Execution receipt](NB2_DEVIANCE_EXECUTION_2026_10_22.md) records final source,
+initial cancelled build, fresh corrected compiler build, selected checks/native
+execution, complete figure inspection, exact hashes and per-process resources.
+
+No tests or independent numerical oracle were added or run. Numerical concordance,
+boundary corpus, global accuracy, model calibration, comparative resources, full
+corpus/CI and merge remain separate. Quota remains3TiB with no new removal;
+large compiler custody remains remote with verified ext4 copy. Statistics,
+scientific rendering, math, genomics, physics and execution/memory/artifact costs
+remain the continuing mass-sprint scope. Next numerical hardening candidate is
+balanced products for the deliberately unavailable far subnormal-product region;
+this requires independent concordance before widening the advertised contract.
