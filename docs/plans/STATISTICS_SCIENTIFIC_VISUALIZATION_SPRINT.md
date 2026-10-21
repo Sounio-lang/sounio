@@ -1037,3 +1037,37 @@ exact equal-volume zero, scaled products, covariance and n=0 semantics. These
 candidates were audited read-only and remain unimplemented. Statistics,
 scientific rendering, math, genomics, physics and execution/memory/artifact costs
 remain the continuing mass-sprint scope.
+
+## Continuation checkpoint — genomics and physics share log1p, 2026-10-21
+
+Main10 retains main085da and previous sprint increments. The two audited
+cross-domain migrations are now implemented: sf_log_ratio near branch delegates
+to the shared checked logarithm while preserving integer subtraction before f64
+conversion; entropy_log_ratio delegates its close-volume branch while preserving
+equality, far log differences, scaled products, covariance and n=0 behavior.
+Two private series bodies were removed; existing public contracts/statuses remain.
+
+The real synthetic SVG example calls median-ratio normalization and both physical
+entropy uncertainty models, reusing two plotting buffers. Its panels are independent
+domain demonstrations. Three eligible genes/one excluded row, categorical sample
+order, seven volume ratios, supplied rho=0.5 and report-only first-order standard
+uncertainties are disclosed. Full-scale/report formatting does not resolve every
+tiny contrast and is not an accuracy certificate.
+
+[Native execution and artifacts](DOMAIN_LOG1P_EXECUTION_2026_10_21.md) record frozen
+source ab10a22026, fresh compiler build, exact selected targets, process resources,
+figure inspection and acceptance limits. No tests were added or run. Quota stays
+3TiB with no new removals; compiler custody also lives on t560 ext4. Independent
+numerical concordance, boundary runtime coverage, calibration, comparative resource
+studies, full corpus/CI and merge remain open.
+
+Next bounded statistics candidate: supplied-parameter NB2 saturated deviance and
+signed deviance residual per count, separately from fitting alpha or regression.
+Current nb2_diagnostics exposes Pearson/variance only. A future scalar contract
+must address near-mean cancellation, alpha->0 without overflowing1/alpha,
+large alpha*mean, large-alpha cancellation and distinct representability of a
+contribution versus its square root. Preserve zero-count, equality and exact
+Poisson-limit branches. No gamma engine or renderer changes are required by the
+identified scope; no inference calibration or implementation is claimed here.
+Statistics, scientific rendering, math, genomics, physics and execution/memory/
+artifact efficiency remain the mass-sprint scope.

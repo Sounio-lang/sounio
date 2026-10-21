@@ -213,8 +213,12 @@ The equality and far-volume log-difference paths, scaled contribution products,
 uncertainty norms, zero-amount semantics and correlated-volume propagation are
 unchanged. Public entropy APIs/effects/status conventions are retained.
 
-This integration is source-prepared only. Historical independent/correlated
-entropy references and native acceptance do not establish validation of the
-changed near-ratio arithmetic. No tests, builds, numerical execution or figure
-acceptance are claimed for this checkpoint. Last-bit changes remain possible;
+Slurm15826 rebuilt the current-source seed/Madaros and completed0:0. The migrated
+module and synthetic SVG consumer typechecked; independent and correlated-volume
+calls at seven supplied ratios executed with exit0. Only nominal entropy is
+plotted; first-order standard uncertainties remain in the report. The complete
+SVG parsed and its1380x620 rendering was visually inspected. Historical references
+do not establish independent concordance of this migrated arithmetic. No tests
+or independent numerical oracle were run. Last-bit changes remain possible;
 no new accuracy, performance or universal representability guarantee is made.
+[Execution receipt](../../docs/plans/DOMAIN_LOG1P_EXECUTION_2026_10_21.md).

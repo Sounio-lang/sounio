@@ -111,6 +111,10 @@ The reference includes a3-sample even-median fault discriminator and checks
 nonzero near-i64MAX log contrasts with relative tolerance on those contrasts,
 without an absolute tolerance that could admit zero. C++ execution belongs on t560. Sounio compilation/execution belongs to Forge;
 source preparation or C++ success alone does not establish native Sounio acceptance.
-The shared-log1p migration described above has not been typechecked or executed
-as part of this source change; prior reference and runtime evidence does not
-automatically validate the migrated implementation.
+Slurm15826 rebuilt the current-source seed/Madaros and completed0:0. The migrated
+module and real synthetic SVG consumer typechecked; the consumer compiled and
+executed with exit0, reporting three used genes and one excluded zero-containing
+row. The complete SVG parsed and its1380x620 rendering was visually inspected.
+No tests or independent numerical reference were run for this migration. Prior
+reference evidence does not automatically certify its last-bit arithmetic.
+[Execution receipt](../../docs/plans/DOMAIN_LOG1P_EXECUTION_2026_10_21.md).
