@@ -1133,3 +1133,35 @@ Any future reuse must first preserve a complete proven compiler-input manifest.
 Final readback advanced main to7d67f3a944 (README-only), incorporated after the
 native run. Merge input-tree comparison preserves bin/scripts/self-hosted/stdlib/
 examples relative to the evidence closure; executed source remains eeeab3025c.
+
+## Continuation checkpoint — observational compiler paths and cold-storage layout, 2026-10-22
+
+Main13 retains mainf02db32 and earlier scientific work. A new standalone non-root
+observer captures selected pathname/process/cwd syscalls, failed lookups and broad
+source before/after inventories, with independent traced-command/collector states,
+private raw custody and lossless archive readback. It never narrows the cache key
+or authorizes reuse. Endpoint equality does not establish transient immutability
+or a complete content-input closure. Open events from tree-hash utilities must be
+distinguished from compiler import accesses in future analysis.
+
+Slurm15940 completed0:0 in7:18: fresh instrumented source-tracking seed/Madaros
+build, captured_endpoints_equal, empty tracer diagnostics and existing NB2 example
+typecheck/compile/native execution. Native ELF/stdout identities match the preceding
+NB2 balanced run. Native process RSS1052KiB/time0.00s is one whole-example observation;
+traced whole-job timing is not an uninstrumented benchmark.
+[Execution receipt](COMPILER_INPUT_OBSERVATION_EXECUTION_2026_10_22.md).
+
+Existing Forge snapshot reuse was used, with a separately hashed collector/recipe
+overlay and one run-local runner command delta. Compiler source remains the known
+eeeab302 snapshot; collector source is3860980. This is not a fresh compiler built
+from the collector Git tree. No new source archive was made. The new shared run
+contains110568 apparent bytes of orchestration metadata; traces/compiler/packages
+use scratch and private t560 ext4. Trace15888844 raw bytes is preserved in383405
+lossless gzip bytes, with readback. Quota remains3TiB; no historical removal.
+
+No tests or independent numerical oracle ran. Cache/build scripts and no-cache
+policy remain unchanged. Next scope is process-image attribution of compiler reads
+versus orchestration/hash accesses, with explicit decoding/negative-lookup gaps;
+not cache activation. Generated transient seed identity and external inputs need
+binding before any complete-input claim. The broader statistics, scientific
+rendering, mathematics, genomics, physics and resource sprint remains active.
