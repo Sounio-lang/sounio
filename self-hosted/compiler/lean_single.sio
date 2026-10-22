@@ -16245,6 +16245,39 @@ fn flt_fill_bits(int_part: i64, frac: i64, denom_in: i64, exp: i64) with Mut, Di
     FLT_BITS_OK = 1
 }
 
+// A token that starts no expression reaches the last arm of compile_primary
+// (and compile_primary_a64), which consumes it and loads 0. That arm is
+// load-bearing for recovery: on 2026-10-22, 166 files in tests/, stdlib/ and
+// examples/ reached it and still compiled (trailing commas, `[x; N]` with a
+// char literal, `println()`, `var` used as a name, unary `+`), so refusing every
+// such token is a larger change than one arm. These cases, though, can only
+// mean a value the program then silently replaces with 0, and no file in the
+// tree relies on them: the keyword spellings the lexer classifies but that the
+// expression parser has no arm for (`linear` 62, `study` 71, `affine` 73), and
+// a leading-dot float such as `.5`. Refuse those, located, in Madaros's wording.
+fn primary_fallback_refuses(tok: i64) -> bool with Panic, Mut {
+    let k = TK[tok as usize]
+    if k == 62 || k == 71 || k == 73 { return true }
+    if k == 50 {
+        let after = TE[tok as usize]
+        if after < SRC_LEN {
+            let d = SRC[after as usize] as i64
+            if d >= 48 && d <= 57 { return true }
+        }
+    }
+    return false
+}
+
+fn primary_fallback_report(tok: i64) with IO, Mut, Panic {
+    print("parse error: expected expression at ")
+    print_src_loc_for_tok(tok)
+    print(": found `")
+    var bad_i: i64 = TS[tok as usize]
+    while bad_i < TE[tok as usize] { print_char(SRC[bad_i as usize] as i64); bad_i = bad_i + 1 }
+    print("`\n")
+    tc_mark_failed()
+}
+
 fn compile_primary() with IO, Mut, Panic, Div {
     if tc_reject_rust_macro_at(EP) { }
     LAST_EXPR_IS_CLOSURE = 0
@@ -22462,6 +22495,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         return
     }
+    if primary_fallback_refuses(EP) { primary_fallback_report(EP) }
     EP = EP + 1
     em(0x31); em(0xc0)
     EXPR_IS_F64 = 0
@@ -44215,6 +44249,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         }
         return
     }
+    if primary_fallback_refuses(EP) { primary_fallback_report(EP) }
     EP = EP + 1
     em32(0xD2800000)
     EXPR_IS_F64 = 0
