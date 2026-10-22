@@ -132,7 +132,7 @@ before and print as the intended bytes after.
 - That any keyword should be reserved or any literal form should exist; those
   are D-33.
 - That the seed's defects are fixed. `.5` and the three keywords are refused by
-  a companion seed change (§6); skipped bytes, missing block comments and junk
+  PR #3019, unmerged when this was written (§6); skipped bytes, missing block comments and junk
   between items are open.
 
 ## 6. The seed's silent zero is wider than the lexer
@@ -160,8 +160,15 @@ The first row reaches the standard library: `pb_apply2_monotone_inc_dec`
 (`stdlib/epistemic/knightian.sio:307–309`) binds `let var = …` and returns
 `variance: var`, so under the seed every p-box it combines has variance 0.
 
-The companion seed change refuses only the cases no file relies on (the three
-keywords and a dot followed by a digit). Refusing the whole arm moves 126
+The same arm reached Madaros, which the seed compiles: `active_study_has_hypothesis_outcome`
+(`self-hosted/check/check.sio`) binds `let study = …`, and the seed reads
+`study.hypothesis_count` as 0 (reproduced in isolation), so a seed-built Madaros
+could never find a pre-registered outcome there.
+
+The companion seed change, [PR #3019](https://github.com/Sounio-lang/sounio/pull/3019),
+refuses only the cases no file relies on (the three keywords and a dot followed
+by a digit) and renames that local; a tree-wide sweep with it refuses nothing
+else, and Madaros still builds with it. Refusing the whole arm moves 126
 tests, so it is per-construct work — `var` as a name, empty argument lists,
 unary `+`, character literals in array repeats — each with its own fix and
 golden review. It is listed in the [backlog](../../planning/LANGUAGE_BACKLOG_2026-10-22.md) §1.
