@@ -1,132 +1,38 @@
-// stdlib/math/information.sio — Information Theory
-// Sprint 23 Track I: Shannon entropy, Renyi entropy, KL divergence, DPI
-//
-// References:
-//   Shannon (1948) "A Mathematical Theory of Communication" Bell System Tech J
-//   Cover & Thomas (2006) "Elements of Information Theory" 2nd ed.
-//   Renyi (1961) "On measures of entropy and information"
-//   Pinsker (1964) — Pinsker's inequality
-
-// ============================================================
-// Entropy
-// ============================================================
-
-fn shannon_entropy_exact(probs: [f64; 8], k: i64) -> f64 with IO, Div, Mut, Panic {
-    var h: f64 = 0.0
-    var i: i64 = 0
-    while i < k && i < 8 {
-        let p = probs[i as usize]
-        if p > 0.0 {
-            let r = p + (0.0 - 1.0)
-            let ln_p = 2.0 * r / (p + 1.0)  // Pade approx to ln(p)
-            h = h + (0.0 - p) * ln_p
-        }
-        i = i + 1
-    }
-    h
+// Compatibility names for checked information theory kernels.
+// The historical "_exact" names are retained; results are numerical, not proofs.
+// Entropies/divergences nats; BSC bits/use; real AWGN nats/use.
+// Invalid inputs return -1; KL support mismatch returns positive infinity.
+use math::probability::{InformationResult,information_shannon,information_collision,information_min,information_kl,information_js}
+use math::channels::{bsc_capacity_bits,awgn_capacity_nats,pinsker_bound_nats,cramer_rao_bound}
+fn information_legacy_value(r:InformationResult)->f64 {
+ if r.status==5 && r.infinite{return 1e308*2.0}
+ if r.status!=0{return -1.0}
+ return r.value
 }
-
-// Renyi entropy of order alpha: H_alpha(X) = (1/(1-alpha)) * ln(sum p_i^alpha)
-// alpha=1 limit -> Shannon entropy; alpha=2 -> collision entropy
-fn renyi_entropy_alpha2(probs: [f64; 8], k: i64) -> f64 with IO, Div, Mut, Panic {
-    // H_2(X) = -ln(sum p_i^2)  [collision entropy]
-    var sum_p2: f64 = 0.0
-    var i: i64 = 0
-    while i < k && i < 8 {
-        let p = probs[i as usize]
-        sum_p2 = sum_p2 + p * p
-        i = i + 1
-    }
-    // -ln(sum_p2) via Pade
-    let r = sum_p2 + (0.0 - 1.0)
-    0.0 - 2.0 * r / (sum_p2 + 1.0)
+pub fn shannon_entropy_exact(p:[f64;8],k:i64)->f64 with Mut,Div,Panic {
+ information_legacy_value(information_shannon(&p,k))
 }
-
-fn min_entropy(probs: [f64; 8], k: i64) -> f64 with IO, Div, Mut, Panic {
-    // H_inf(X) = -ln(max p_i)
-    var max_p: f64 = 0.0
-    var i: i64 = 0
-    while i < k && i < 8 {
-        if probs[i as usize] > max_p { max_p = probs[i as usize] }
-        i = i + 1
-    }
-    if max_p <= 0.0 { return 0.0 }
-    let r = max_p + (0.0 - 1.0)
-    0.0 - 2.0 * r / (max_p + 1.0)
+pub fn renyi_entropy_alpha2(p:[f64;8],k:i64)->f64 with Mut,Div,Panic {
+ information_legacy_value(information_collision(&p,k))
 }
-
-// ============================================================
-// Divergences
-// ============================================================
-
-fn kl_divergence_exact(p: [f64; 8], q: [f64; 8], k: i64) -> f64 with IO, Div, Mut, Panic {
-    var kl: f64 = 0.0
-    var i: i64 = 0
-    while i < k && i < 8 {
-        let pi = p[i as usize]
-        let qi = q[i as usize]
-        if pi > 0.0 && qi > 0.0 {
-            let ratio = pi / qi
-            let ln_r = 2.0 * (ratio + (0.0 - 1.0)) / (ratio + 1.0)
-            kl = kl + pi * ln_r
-        }
-        i = i + 1
-    }
-    kl
+pub fn min_entropy(p:[f64;8],k:i64)->f64 with Mut,Div,Panic {
+ information_legacy_value(information_min(&p,k))
 }
-
-fn jsd_divergence_exact(p: [f64; 8], q: [f64; 8], k: i64) -> f64 with IO, Div, Mut, Panic {
-    var m: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    var i: i64 = 0
-    while i < k && i < 8 {
-        m[i as usize] = (p[i as usize] + q[i as usize]) / 2.0
-        i = i + 1
-    }
-    let kl_pm = kl_divergence_exact(p, m, k)
-    let kl_qm = kl_divergence_exact(q, m, k)
-    (kl_pm + kl_qm) / 2.0
+pub fn kl_divergence_exact(p:[f64;8],q:[f64;8],k:i64)->f64 with Mut,Div,Panic {
+ information_legacy_value(information_kl(&p,&q,k))
 }
-
-fn pinsker_tv_bound(kl: f64) -> f64 with IO, Div, Mut, Panic {
-    // TV(P,Q) <= sqrt(KL(P||Q) / 2)
-    if kl <= 0.0 { return 0.0 }
-    let half_kl = kl / 2.0
-    var y = half_kl
-    var i: i64 = 0
-    while i < 10 {
-        if y > 0.0 { y = (y + half_kl / y) / 2.0 }
-        i = i + 1
-    }
-    y
+pub fn jsd_divergence_exact(p:[f64;8],q:[f64;8],k:i64)->f64 with Mut,Div,Panic {
+ information_legacy_value(information_js(&p,&q,k))
 }
-
-// ============================================================
-// Channel capacity
-// ============================================================
-
-fn channel_capacity_bsc(p_error: f64) -> f64 with IO, Div, Panic {
-    // BSC capacity: C = 1 - H_b(p) [bits]
-    // H_b(p) = -p*ln(p) - (1-p)*ln(1-p)   [binary entropy]
-    if p_error <= 0.0 || p_error >= 1.0 { return 0.0 }
-    let q = 1.0 + (0.0 - p_error)
-    let ln_p = 2.0 * (p_error + (0.0 - 1.0)) / (p_error + 1.0)
-    let ln_q = 2.0 * (q + (0.0 - 1.0)) / (q + 1.0)
-    let hb = (0.0 - p_error) * ln_p + (0.0 - q) * ln_q
-    // C = ln(2) - H_b(p) [nats], return as ratio
-    0.693 + (0.0 - hb)
+pub fn pinsker_tv_bound(kl:f64)->f64 with Mut,Div,Panic {
+ information_legacy_value(pinsker_bound_nats(kl))
 }
-
-fn channel_capacity_awgn(snr: f64) -> f64 with IO, Div, Panic {
-    // AWGN capacity: C = 0.5 * ln(1 + SNR) [nats]
-    let x = 1.0 + snr
-    0.5 * 2.0 * (x + (0.0 - 1.0)) / (x + 1.0)  // 0.5 * Pade ln
+pub fn channel_capacity_bsc(p:f64)->f64 with Mut,Div,Panic {
+ information_legacy_value(bsc_capacity_bits(p))
 }
-
-// ============================================================
-// Value of information (Cramer-Rao lower bound proxy)
-// ============================================================
-
-fn cramer_rao_lower_bound(fisher_info: f64) -> f64 with IO, Div, Panic {
-    // Var(theta_hat) >= 1 / I(theta)
-    1.0 / fisher_info
+pub fn channel_capacity_awgn(snr:f64)->f64 with Mut,Div,Panic {
+ information_legacy_value(awgn_capacity_nats(snr))
+}
+pub fn cramer_rao_lower_bound(info:f64)->f64 with Mut,Div,Panic {
+ information_legacy_value(cramer_rao_bound(info))
 }

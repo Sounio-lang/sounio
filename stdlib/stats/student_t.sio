@@ -22,8 +22,8 @@
 // (special::beta) and log-gamma (special::gamma); the large-df path uses the
 // normal quantile/CDF (special::erf). No FFI, no sampling dependency.
 //
-// Validated domain: df >= 2 (df = 1, the Cauchy limit, is a degenerate
-// two-observation case and out of scope). The quantile uses the exact
+// df=1 uses the analytic Cauchy quantile. For df >= 2 the existing beta /
+// Cornish-Fisher paths apply. The quantile uses the exact
 // incomplete-beta inverse for df <= 500 and a Cornish-Fisher expansion off the
 // normal quantile for df > 500 — the two agree to < 1e-5 across the crossover,
 // and the split also routes around the extreme-parameter breakdown of
@@ -54,6 +54,7 @@
 module stats::student_t
 
 use special::beta::{ibeta, ibeta_inv}
+use math::pure::{tan, atan}
 use special::gamma::{lgamma}
 use special::erf::{normal_cdf, normal_quantile}
 
@@ -166,8 +167,30 @@ pub fn t_two_tail(t: f64, df: f64) -> f64 with Mut, Div, Panic {
         // T ~ N(0,1) to < 3e-4 here; two-tailed = 2*(1 - Phi(|t|))
         return 2.0 * (1.0 - normal_cdf(st_abs(t)))
     }
-    let t2 = t * t
-    let x = df / (df + t2)
+    // Cauchy reciprocal tail avoids t*t overflow and 1-CDF cancellation.
+    let magnitude = st_abs(t)
+    if df == 1.0 {
+        if magnitude > 1.0 { return (2.0 / ST_PI) * atan(1.0 / magnitude) }
+        return 1.0 - (2.0 / ST_PI) * atan(magnitude)
+    }
+    // A bounded ratio avoids squaring an unbounded t.
+    let root_df = st_sqrt(df)
+    var x = 0.0
+    if magnitude > root_df {
+        let ratio = root_df / magnitude
+        let square = ratio * ratio
+        x = square / (1.0 + square)
+    } else {
+        let ratio = magnitude / root_df
+        let square = ratio * ratio
+        // Near the origin preserve the O(abs(t)) departure from one.
+        // Farther out evaluate the tail directly: subtracting a nearly
+        // unit beta CDF would erase small representable tail probabilities.
+        if magnitude <= 0.5 {
+            return 1.0 - ibeta(0.5, df / 2.0, square / (1.0 + square))
+        }
+        x = 1.0 / (1.0 + square)
+    }
     return ibeta(df / 2.0, 0.5, x)
 }
 
@@ -185,9 +208,13 @@ pub fn t_cdf(t: f64, df: f64) -> f64 with Mut, Div, Panic {
     return 0.5 * tail
 }
 
-/// Survival function S(t) = 1 - F(t) = P(T > t).
+/// Survival function P(T > t), evaluated directly from the symmetric tail.
+/// This avoids cancellation in 1 - CDF for small positive-tail probabilities.
 pub fn t_sf(t: f64, df: f64) -> f64 with Mut, Div, Panic {
-    return 1.0 - t_cdf(t, df)
+    if df <= 0.0 { return 0.5 }
+    let tail = t_two_tail(t, df)
+    if t >= 0.0 { return 0.5 * tail }
+    return 1.0 - 0.5 * tail
 }
 
 // ============================================================================
@@ -208,6 +235,13 @@ pub fn t_quantile(p: f64, df: f64) -> f64 with Mut, Div, Panic {
     if p == 0.5 { return 0.0 }
     if df <= 0.0 { return 0.0 }
 
+    // df=1 is Cauchy; bypass the incomplete-beta inverse's a=1/2 limit.
+    if df == 1.0 {
+        let small_p = if p < 0.5 { p } else { 1.0 - p }
+        let magnitude = 1.0 / tan(ST_PI * small_p)
+        if p < 0.5 { return 0.0 - magnitude }
+        return magnitude
+    }
     let z = normal_quantile(p)   // signed standard-normal quantile
 
     // Exact incomplete-beta inverse where it is reliable.

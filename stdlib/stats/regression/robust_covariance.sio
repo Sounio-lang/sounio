@@ -1,0 +1,326 @@
+// Covariance-only HC3 for a checked OLS QR fit. See ROBUST_COVARIANCE.md.
+use math::pure::{is_finite,sqrt}
+use linalg::least_squares::{LeastSquaresResult,qr_least_squares_factor}
+use linalg::least_squares_scale::{LeastSquaresNumber,least_squares_scaled_product}
+pub struct LinearHc3Result {
+ pub fit:LeastSquaresResult,
+ pub covariance_status:i64,
+ pub covariance:[f64;64],
+ pub standard_errors:[f64;8],
+ pub leverage:[f64;256],
+ pub method:i64,
+ pub assumptions_assessed:bool,
+}
+// Single-way clustered OLS covariance. method0 CR0; method1 CR1S.
+pub struct LinearClusterResult {
+ pub fit:LeastSquaresResult,
+ pub covariance_status:i64,
+ pub covariance:[f64;64],
+ pub standard_errors:[f64;8],
+ pub clusters:i64,
+ pub method:i64,
+ pub correction_factor:f64,
+ pub assumptions_assessed:bool,
+}
+fn hc3_abs(x:f64)->f64 { if x<0.0 { 0.0-x } else { x } }
+fn hc3_index(row:i64,column:i64)->usize { (row*8+column) as usize }
+fn hc3_influence(row:i64,column:i64)->usize { (column*256+row) as usize }
+fn hc3_clear(result:&!LinearHc3Result,status:i64) with Mut,Div,Panic {
+ result.covariance_status=status
+ var i:i64=0
+ while i<64 { result.covariance[i as usize]=0.0 i=i+1 }
+ i=0
+ while i<8 { result.standard_errors[i as usize]=0.0 i=i+1 }
+ i=0
+ while i<256 { result.leverage[i as usize]=0.0 i=i+1 }
+}
+// R is upper triangular in pivot order. Neither solve forms X'X.
+fn hc3_forward_transpose(r:&[f64;64],z:&[f64;8],p:i64,q:&![f64;8])->bool with Mut,Div,Panic {
+ var j:i64=0
+ while j<p {
+  var sum:f64=0.0
+  var correction:f64=0.0
+  var k:i64=0
+  while k<j {
+   let product=r[hc3_index(k,j)]*q[k as usize]
+   if !is_finite(product) { return false }
+   let adjusted=product-correction
+   let next=sum+adjusted
+   correction=(next-sum)-adjusted
+   sum=next
+   if !is_finite(sum) { return false }
+   k=k+1
+  }
+  let diagonal=r[hc3_index(j,j)]
+  if !is_finite(diagonal) || diagonal==0.0 { return false }
+  let numerator=z[j as usize]-sum
+  let value=numerator/diagonal
+  if !is_finite(value) || (numerator!=0.0 && value==0.0) { return false }
+  q[j as usize]=value
+  j=j+1
+ }
+ true
+}
+fn hc3_backward(r:&[f64;64],q:&[f64;8],p:i64,v:&![f64;8])->bool with Mut,Div,Panic {
+ var j=p-1
+ while j>=0 {
+  var sum:f64=0.0
+  var correction:f64=0.0
+  var k=j+1
+  while k<p {
+   let product=r[hc3_index(j,k)]*v[k as usize]
+   if !is_finite(product) { return false }
+   let adjusted=product-correction
+   let next=sum+adjusted
+   correction=(next-sum)-adjusted
+   sum=next
+   if !is_finite(sum) { return false }
+   k=k+1
+  }
+  let diagonal=r[hc3_index(j,j)]
+  if !is_finite(diagonal) || diagonal==0.0 { return false }
+  let numerator=q[j as usize]-sum
+  let value=numerator/diagonal
+  if !is_finite(value) || (numerator!=0.0 && value==0.0) { return false }
+  v[j as usize]=value
+  j=j-1
+ }
+ true
+}
+fn hc3_row_norm(influences:&[f64;2048],column:i64,n:i64)->LeastSquaresNumber with Mut,Div,Panic {
+ var scale:f64=0.0
+ var ssq:f64=1.0
+ var i:i64=0
+ while i<n {
+  let magnitude=hc3_abs(influences[hc3_influence(i,column)])
+  if !is_finite(magnitude) { return LeastSquaresNumber{status:4,value:0.0} }
+  if magnitude>0.0 {
+   if magnitude>scale {
+    let ratio=scale/magnitude
+    ssq=1.0+ssq*ratio*ratio
+    scale=magnitude
+   } else {
+    let ratio=magnitude/scale
+    ssq=ssq+ratio*ratio
+   }
+  }
+  i=i+1
+ }
+ least_squares_scaled_product(scale,sqrt(ssq),1.0,1.0,1.0,1.0)
+}
+// Shared LASSQ/normalized-Gram order is identical for HC3 and cluster sums.
+fn hc3_gram(influences:&[f64;2048],n:i64,p:i64,cov_out:&![f64;64],se_out:&![f64;8])->bool with Mut,Div,Panic {
+ var j:i64=0
+ var row:i64=0
+ var i:i64=0
+ while i<p {
+  let norm=hc3_row_norm(influences,i,n)
+  if norm.status!=0 || !is_finite(norm.value) { return false }
+  se_out[i as usize]=norm.value
+  i=i+1
+ }
+ i=0
+ while i<p {
+  j=i
+  while j<p {
+   let left_scale=se_out[i as usize]
+   let right_scale=se_out[j as usize]
+   var covariance:f64=0.0
+   if left_scale>0.0 && right_scale>0.0 {
+    var dot:f64=0.0
+    var correction:f64=0.0
+    row=0
+    while row<n {
+     let left=influences[hc3_influence(row,i)]/left_scale
+     let right=influences[hc3_influence(row,j)]/right_scale
+     let adjusted=left*right-correction
+     let next=dot+adjusted
+     correction=(next-dot)-adjusted
+     dot=next
+     row=row+1
+    }
+    let restored=least_squares_scaled_product(dot,left_scale,right_scale,1.0,1.0,1.0)
+    if restored.status!=0 || (i==j && restored.value<=0.0) { return false }
+    covariance=restored.value
+   }
+   cov_out[hc3_index(i,j)]=covariance
+   cov_out[hc3_index(j,i)]=covariance
+   j=j+1
+  }
+  i=i+1
+ }
+ true
+}
+pub fn multiple_linear_hc3(design:&[f64;2048],response:&[f64;256],n:i64,p:i64,rcond:f64)->LinearHc3Result with Mut,Div,Panic {
+ var r_factor:[f64;64]=[0.0;64]
+ var scales:[f64;8]=[0.0;8]
+ let fit=qr_least_squares_factor(design,response,n,p,rcond,&!r_factor,&!scales)
+ var out=LinearHc3Result{fit:fit,covariance_status:1,covariance:[0.0;64],standard_errors:[0.0;8],leverage:[0.0;256],method:3,assumptions_assessed:false}
+ if fit.status!=0 { return out }
+ if n<=p { out.covariance_status=2 return out }
+ // Factor metadata comes from the successful fit; guard before using pivots.
+ var seen:[bool;8]=[false;8]
+ var j:i64=0
+ while j<p {
+  let original=fit.pivot[j as usize]
+  if original<0 || original>=p { hc3_clear(&!out,4) return out }
+  if seen[original as usize] { hc3_clear(&!out,4) return out }
+  seen[original as usize]=true
+  if !is_finite(scales[original as usize]) || scales[original as usize]<=0.0 { hc3_clear(&!out,4) return out }
+  j=j+1
+ }
+ // Coefficient-major influence columns; one bounded p-by-n Gram buffer.
+ var influences:[f64;2048]=[0.0;2048]
+ var row:i64=0
+ while row<n {
+  var z:[f64;8]=[0.0;8]
+  j=0
+  while j<p {
+   let original=fit.pivot[j as usize]
+   let raw=design[hc3_index(row,original)]
+   let value=raw/scales[original as usize]
+   if !is_finite(value) || (raw!=0.0 && value==0.0) { hc3_clear(&!out,4) return out }
+   z[j as usize]=value
+   j=j+1
+  }
+  var q:[f64;8]=[0.0;8]
+  if !hc3_forward_transpose(&r_factor,&z,p,&!q) { hc3_clear(&!out,4) return out }
+  var h:f64=0.0
+  var correction:f64=0.0
+  j=0
+  while j<p {
+   let square=q[j as usize]*q[j as usize]
+   if !is_finite(square) { hc3_clear(&!out,4) return out }
+   let adjusted=square-correction
+   let next=h+adjusted
+   correction=(next-h)-adjusted
+   h=next
+   j=j+1
+  }
+  if !is_finite(h) || h<0.0 { hc3_clear(&!out,4) return out }
+  if h>=1.0 { hc3_clear(&!out,3) return out }
+  out.leverage[row as usize]=h
+  let denominator=1.0-h
+  var v:[f64;8]=[0.0;8]
+  if !hc3_backward(&r_factor,&q,p,&!v) { hc3_clear(&!out,4) return out }
+  let residual=fit.residuals[row as usize]
+  if !is_finite(residual) { hc3_clear(&!out,4) return out }
+  j=0
+  while j<p {
+   let original=fit.pivot[j as usize]
+   let influence=least_squares_scaled_product(v[j as usize],hc3_abs(residual),1.0,
+    scales[original as usize],denominator,1.0)
+   if influence.status!=0 || (v[j as usize]!=0.0 && residual!=0.0 && influence.value==0.0) { hc3_clear(&!out,4) return out }
+   influences[hc3_influence(row,original)]=if residual<0.0 { 0.0-influence.value } else { influence.value }
+   j=j+1
+  }
+  row=row+1
+ }
+ if !hc3_gram(&influences,n,p,&!out.covariance,&!out.standard_errors) { hc3_clear(&!out,4) return out }
+ out.covariance_status=0
+ out
+}
+
+fn cluster_clear(result:&!LinearClusterResult,status:i64) with Mut,Div,Panic {
+ result.covariance_status=status
+ result.correction_factor=0.0
+ var i:i64=0
+ while i<64 { result.covariance[i as usize]=0.0 i=i+1 }
+ i=0
+ while i<8 { result.standard_errors[i as usize]=0.0 i=i+1 }
+}
+pub fn multiple_linear_cluster(design:&[f64;2048],response:&[f64;256],cluster_ids:&[i64;256],n:i64,p:i64,rcond:f64,method:i64)->LinearClusterResult with Mut,Div,Panic {
+ var r_factor:[f64;64]=[0.0;64]
+ var scales:[f64;8]=[0.0;8]
+ let fit=qr_least_squares_factor(design,response,n,p,rcond,&!r_factor,&!scales)
+ var out=LinearClusterResult{fit:fit,covariance_status:1,covariance:[0.0;64],standard_errors:[0.0;8],clusters:0,method:method,correction_factor:0.0,assumptions_assessed:false}
+ if fit.status!=0 { return out }
+ if method!=0 && method!=1 { out.covariance_status=5 return out }
+ if n<=p { out.covariance_status=2 return out }
+ // Equality-only lookup: arbitrary signed labels, first-appearance order.
+ var labels:[i64;256]=[0;256]
+ var row_group:[i64;256]=[0;256]
+ var groups:i64=0
+ var row:i64=0
+ while row<n {
+  let label=cluster_ids[row as usize]
+  var group:i64=0
+  while group<groups && labels[group as usize]!=label { group=group+1 }
+  if group==groups { labels[group as usize]=label groups=groups+1 }
+  row_group[row as usize]=group
+  row=row+1
+ }
+ out.clusters=groups
+ if groups<2 { out.covariance_status=3 return out }
+ var seen:[bool;8]=[false;8]
+ var j:i64=0
+ while j<p {
+  let original=fit.pivot[j as usize]
+  if original<0 || original>=p { cluster_clear(&!out,4) return out }
+  if seen[original as usize] { cluster_clear(&!out,4) return out }
+  seen[original as usize]=true
+  if !is_finite(scales[original as usize]) || scales[original as usize]<=0.0 { cluster_clear(&!out,4) return out }
+  j=j+1
+ }
+ var sums:[f64;2048]=[0.0;2048]
+ var corrections:[f64;2048]=[0.0;2048]
+ row=0
+ while row<n {
+  var z:[f64;8]=[0.0;8]
+  j=0
+  while j<p {
+   let original=fit.pivot[j as usize]
+   let raw=design[hc3_index(row,original)]
+   let value=raw/scales[original as usize]
+   if !is_finite(value) || (raw!=0.0 && value==0.0) { cluster_clear(&!out,4) return out }
+   z[j as usize]=value
+   j=j+1
+  }
+  var q:[f64;8]=[0.0;8]
+  if !hc3_forward_transpose(&r_factor,&z,p,&!q) { cluster_clear(&!out,4) return out }
+  var v:[f64;8]=[0.0;8]
+  if !hc3_backward(&r_factor,&q,p,&!v) { cluster_clear(&!out,4) return out }
+  let residual=fit.residuals[row as usize]
+  if !is_finite(residual) { cluster_clear(&!out,4) return out }
+  let group=row_group[row as usize]
+  j=0
+  while j<p {
+   let original=fit.pivot[j as usize]
+   let influence=least_squares_scaled_product(v[j as usize],hc3_abs(residual),1.0,scales[original as usize],1.0,1.0)
+   if influence.status!=0 || (v[j as usize]!=0.0 && residual!=0.0 && influence.value==0.0) { cluster_clear(&!out,4) return out }
+   let value=if residual<0.0 { 0.0-influence.value } else { influence.value }
+   let index=hc3_influence(group,original)
+   let adjusted=value-corrections[index]
+   let next=sums[index]+adjusted
+   if !is_finite(adjusted) || !is_finite(next) { cluster_clear(&!out,4) return out }
+   corrections[index]=(next-sums[index])-adjusted
+   if !is_finite(corrections[index]) { cluster_clear(&!out,4) return out }
+   sums[index]=next
+   j=j+1
+  }
+  row=row+1
+ }
+ var factor:f64=1.0
+ if method==1 {
+  factor=((groups as f64)/((groups-1) as f64))*(((n-1) as f64)/((n-p) as f64))
+  let root_factor=sqrt(factor)
+  if !is_finite(factor) || factor<=0.0 || !is_finite(root_factor) || root_factor<=0.0 { cluster_clear(&!out,4) return out }
+  var group:i64=0
+  while group<groups {
+   j=0
+   while j<p {
+    let index=hc3_influence(group,j)
+    let value=sums[index]
+    let corrected=least_squares_scaled_product(value,root_factor,1.0,1.0,1.0,1.0)
+    if corrected.status!=0 || (value!=0.0 && corrected.value==0.0) { cluster_clear(&!out,4) return out }
+    sums[index]=corrected.value
+    j=j+1
+   }
+   group=group+1
+  }
+ }
+ if !hc3_gram(&sums,groups,p,&!out.covariance,&!out.standard_errors) { cluster_clear(&!out,4) return out }
+ out.covariance_status=0
+ out.correction_factor=factor
+ out
+}

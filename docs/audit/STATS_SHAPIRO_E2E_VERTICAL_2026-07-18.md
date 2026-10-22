@@ -21,18 +21,18 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.stats-sh
 
 ## Formula
 
-- Half-coefficients aᵢ from Shapiro & Wilk (1965) Table 5 (4 d.p.).
-- W = b² / Σ(xᵢ − x̄)² with b = Σ aᵢ (x_{(n−i+1)} − x_{(i)}).
-- p (n ≥ 7): Royston (1992) y = ln(1−W), μ/σ polynomials in ln n, p = 1 − Φ(z).
-- p for n ∈ {5,6}: returned as **−1** (not claimed).
+The public implementation is Royston AS R94, the same approximation as tests/reference/shapiro_reference.cpp. The 1965 4 d.p. table is not what shapiro_wilk computes, so the e2e oracles follow the C++ reference.
+
+- W from normalized normal-order weights with the Royston polynomial corrections.
+- p from the Royston small-n transform for n <= 11, including n = 5.
 
 ## Fixed-sample oracles
 
 | Sample | W | p |
 |---|---:|---:|
-| 1..5 | 0.9865881 | n/a (−1) |
-| 2..11 | 0.970158460121212 | ~0.941 (high) |
-| skew 1..13-ish | 0.738023544970166 | ~0.0045 (&lt; 0.05) |
+| 1..5 | 0.98676215544771961 | 0.96717393596804047 |
+| 2..11 | 0.97016461123066611 | ~0.892 (high) |
+| skew 1, 1.1, ... 13 | 0.73781870358086632 | ~0.0025 (&lt; 0.05) |
 
 ## Claims not made
 

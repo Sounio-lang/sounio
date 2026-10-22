@@ -1,15 +1,21 @@
+use stats::correlation_core::{spearman_checked}
+use stats::correlation_inference::{spearman_inference}
 // stats::inferential — Inferential Statistics with Uncertainty
 //
-// Hypothesis testing with GUM-compliant uncertainty on test statistics
-// and effect sizes. Returns p-values and confidence intervals.
+// Public t-tests carry estimates, standard errors, t-calibrated 95% intervals,
+// sample sizes, method identity, p-values and explicit result status.
+// Other procedures retain their own approximation and validation contracts.
 //
 // References:
 // - Student (1908): "The probable error of a mean"
 // - Welch (1947): "The generalization of Student's problem"
 // - Mann & Whitney (1947): "On a test of whether one of two random variables..."
 
+use stats::student_t::{t_two_tail, t_ci_multiplier}
+use math::pure::{sqrt, is_finite}
+use stats::fisher_f::{f_sf}
+
 extern "C" {
-    fn sqrt(x: f64) -> f64;
     fn exp(x: f64) -> f64;
     fn log(x: f64) -> f64;
     fn pow(x: f64, y: f64) -> f64;
@@ -21,19 +27,29 @@ extern "C" {
 // ============================================================================
 
 // Result of a t-test
-struct TTestResult {
-    t_stat: f64,        // t-statistic
-    df: f64,            // degrees of freedom
-    p_value: f64,       // two-tailed p-value
-    mean_diff: f64,     // difference in means
-    se_diff: f64,       // standard error of difference
-    ci_lower: f64,      // 95% CI lower bound
-    ci_upper: f64,      // 95% CI upper bound
-    cohens_d: f64,      // effect size (Cohen's d)
+pub struct TTestResult {
+    pub t_stat: f64,        // t-statistic
+    pub df: f64,            // degrees of freedom
+    pub p_value: f64,       // two-tailed p-value
+    pub mean_diff: f64,     // difference in means
+    pub se_diff: f64,       // standard error of difference
+    pub ci_lower: f64,      // 95% CI lower bound
+    pub ci_upper: f64,      // 95% CI upper bound
+    pub cohens_d: f64,      // effect size (Cohen's d)
+    pub status: i64,
+    pub confidence_level: f64,
+    pub method: i64,
+    pub n_x: i64,
+    pub n_y: i64,
 }
 
 fn ttest_result_new() -> TTestResult {
     TTestResult {
+        status: 1,
+        confidence_level: 0.95,
+        method: 0,
+        n_x: 0,
+        n_y: 0,
         t_stat: 0.0,
         df: 0.0,
         p_value: 1.0,
@@ -111,54 +127,18 @@ fn variance(data: [f64; 100], n: i64) -> f64 {
     sum_sq / ((n - 1) as f64)
 }
 
-fn std_dev(data: [f64; 100], n: i64) -> f64 {
+fn std_dev(data: [f64; 100], n: i64) -> f64 with Mut, Div, Panic {
     sqrt(variance(data, n))
 }
 
-// Approximate p-value from t-distribution using normal approximation
-// Valid for df > 30; conservative for smaller df
-fn t_to_p_approx(t: f64, df: f64) -> f64 {
-    let abs_t = if t < 0.0 { -t } else { t }
-
-    // Normal approximation for large df
-    // For df < 30, this underestimates p (conservative)
-    // Using logistic approximation to normal CDF
-    let z = abs_t
-
-    // Approximate 2-tailed p-value using error function approximation
-    // P(|T| > t) ≈ 2 * Φ(-|t|) for large df
-    let a1 = 0.254829592
-    let a2 = -0.284496736
-    let a3 = 1.421413741
-    let a4 = -1.453152027
-    let a5 = 1.061405429
-    let p = 0.3275911
-
-    let sign = if z < 0.0 { -1.0 } else { 1.0 }
-    let x = if z < 0.0 { -z } else { z }
-
-    let t_erf = 1.0 / (1.0 + p * x)
-    let erf = 1.0 - (((((a5 * t_erf + a4) * t_erf) + a3) * t_erf + a2) * t_erf + a1) * t_erf * exp(-x * x)
-
-    // Two-tailed p-value
-    1.0 - erf
+// Two-sided Student probability; retains the degrees of freedom.
+fn t_to_p(t: f64, df: f64) -> f64 with Mut, Div, Panic {
+    t_two_tail(t, df)
 }
 
-// Approximate p-value from F-distribution
-fn f_to_p_approx(f: f64, df1: i64, df2: i64) -> f64 {
-    // Very rough approximation using chi-square relationship
-    // For production: use proper incomplete beta function
-    if f <= 0.0 {
-        return 1.0
-    }
-
-    // Fisher's approximation for large df
-    let x = ((df1 as f64) * f) / ((df1 as f64) * f + (df2 as f64))
-
-    // Approximate p-value (underestimates for small df)
-    let p = 1.0 - x
-
-    if p < 0.0 { 0.0 } else if p > 1.0 { 1.0 } else { p }
+// Upper-tail Fisher probability via the direct incomplete-beta complement.
+fn f_to_p(f: f64, df1: i64, df2: i64) -> f64 with Mut, Div, Panic {
+    f_sf(f, df1 as f64, df2 as f64)
 }
 
 // Approximate p-value from z-score (normal distribution)
@@ -184,131 +164,142 @@ fn z_to_p(z: f64) -> f64 {
 // T-TESTS
 // ============================================================================
 
-// One-sample t-test: test if mean differs from mu0
-fn t_test_one_sample(data: [f64; 100], n: i64, mu0: f64) -> TTestResult {
-    var result = ttest_result_new()
+// Public t-tests use fixed 95% confidence intervals and observable status.
+// Numerical fields are meaningful only when status == T_TEST_OK.
+pub let T_TEST_OK: i64 = 0
+pub let T_TEST_INVALID_SAMPLE: i64 = 1
+pub let T_TEST_NONFINITE: i64 = 2
+pub let T_TEST_ZERO_VARIANCE: i64 = 3
+pub let T_TEST_NUMERIC_FAILURE: i64 = 4
+pub let T_METHOD_ONE_SAMPLE: i64 = 1
+pub let T_METHOD_POOLED: i64 = 2
+pub let T_METHOD_WELCH: i64 = 3
+pub let T_METHOD_PAIRED: i64 = 4
 
-    let m = mean(data, n)
-    let s = std_dev(data, n)
-    let se = s / sqrt(n as f64)
-
-    result.mean_diff = m - mu0
-    result.se_diff = se
-    result.df = (n - 1) as f64
-
-    if se > 1e-10 {
-        result.t_stat = result.mean_diff / se
-    }
-
-    result.p_value = t_to_p_approx(result.t_stat, result.df)
-
-    // 95% CI (using t-critical ≈ 2.0 for large n)
-    let t_crit = 2.0
-    result.ci_lower = result.mean_diff - t_crit * se
-    result.ci_upper = result.mean_diff + t_crit * se
-
-    // Cohen's d = (mean - mu0) / s
-    if s > 1e-10 {
-        result.cohens_d = result.mean_diff / s
-    }
-
-    result
+struct TSampleMoments {
+    mean: f64,
+    variance: f64,
+    status: i64,
 }
 
-// Independent samples t-test (equal variance assumed)
-fn t_test_independent(x: [f64; 100], nx: i64, y: [f64; 100], ny: i64) -> TTestResult {
-    var result = ttest_result_new()
-
-    let mx = mean(x, nx)
-    let my = mean(y, ny)
-    let sx = std_dev(x, nx)
-    let sy = std_dev(y, ny)
-
-    result.mean_diff = mx - my
-    result.df = (nx + ny - 2) as f64
-
-    // Pooled standard deviation
-    let var_x = sx * sx
-    let var_y = sy * sy
-    let sp_sq = (((nx - 1) as f64) * var_x + ((ny - 1) as f64) * var_y) / result.df
-    let sp = sqrt(sp_sq)
-
-    // Standard error of difference
-    result.se_diff = sp * sqrt(1.0 / (nx as f64) + 1.0 / (ny as f64))
-
-    if result.se_diff > 1e-10 {
-        result.t_stat = result.mean_diff / result.se_diff
+// Welford moments avoid the cancellation of E[x*x] - E[x]^2.
+fn t_sample_moments(data: &[f64; 100], n: i64) -> TSampleMoments with Mut, Div, Panic {
+    var r = TSampleMoments { mean: 0.0, variance: 0.0, status: T_TEST_INVALID_SAMPLE }
+    if n < 2 || n > 100 { return r }
+    var m: f64 = 0.0
+    var m2: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let x = data[i as usize]
+        if !is_finite(x) { r.status = T_TEST_NONFINITE; return r }
+        let delta = x - m
+        m = m + delta / ((i + 1) as f64)
+        m2 = m2 + delta * (x - m)
+        i = i + 1
     }
-
-    result.p_value = t_to_p_approx(result.t_stat, result.df)
-
-    // 95% CI
-    let t_crit = 2.0
-    result.ci_lower = result.mean_diff - t_crit * result.se_diff
-    result.ci_upper = result.mean_diff + t_crit * result.se_diff
-
-    // Cohen's d
-    if sp > 1e-10 {
-        result.cohens_d = result.mean_diff / sp
-    }
-
-    result
+    r.mean = m
+    r.variance = m2 / ((n - 1) as f64)
+    r.status = T_TEST_OK
+    if !is_finite(m) || !is_finite(r.variance) || r.variance < 0.0 { r.status = T_TEST_NUMERIC_FAILURE }
+    r
 }
 
-// Welch's t-test (unequal variance)
-fn t_test_welch(x: [f64; 100], nx: i64, y: [f64; 100], ny: i64) -> TTestResult {
-    var result = ttest_result_new()
-
-    let mx = mean(x, nx)
-    let my = mean(y, ny)
-    let var_x = variance(x, nx)
-    let var_y = variance(y, ny)
-
-    result.mean_diff = mx - my
-
-    // Welch's SE
-    let se_x_sq = var_x / (nx as f64)
-    let se_y_sq = var_y / (ny as f64)
-    result.se_diff = sqrt(se_x_sq + se_y_sq)
-
-    // Welch-Satterthwaite df
-    let num = (se_x_sq + se_y_sq) * (se_x_sq + se_y_sq)
-    let denom = se_x_sq * se_x_sq / ((nx - 1) as f64) + se_y_sq * se_y_sq / ((ny - 1) as f64)
-    result.df = if denom > 1e-10 { num / denom } else { ((nx + ny - 2) as f64) }
-
-    if result.se_diff > 1e-10 {
-        result.t_stat = result.mean_diff / result.se_diff
+fn t_test_finish(result: TTestResult, effect_sd: f64) -> TTestResult with Mut, Div, Panic {
+    var r = result
+    if !is_finite(r.mean_diff) || !is_finite(r.se_diff) || !is_finite(r.df) || r.df < 1.0 {
+        r.status = T_TEST_NUMERIC_FAILURE
+        return r
     }
-
-    result.p_value = t_to_p_approx(result.t_stat, result.df)
-
-    // 95% CI
-    let t_crit = 2.0
-    result.ci_lower = result.mean_diff - t_crit * result.se_diff
-    result.ci_upper = result.mean_diff + t_crit * result.se_diff
-
-    // Cohen's d using pooled SD approximation
-    let avg_var = (var_x + var_y) / 2.0
-    let sp = sqrt(avg_var)
-    if sp > 1e-10 {
-        result.cohens_d = result.mean_diff / sp
+    if r.se_diff <= 0.0 || effect_sd <= 0.0 {
+        r.status = T_TEST_ZERO_VARIANCE
+        return r
     }
-
-    result
+    r.t_stat = r.mean_diff / r.se_diff
+    r.p_value = t_to_p(r.t_stat, r.df)
+    let critical = t_ci_multiplier(0.95, r.df)
+    let half_width = critical * r.se_diff
+    r.ci_lower = r.mean_diff - half_width
+    r.ci_upper = r.mean_diff + half_width
+    r.cohens_d = r.mean_diff / effect_sd
+    r.status = T_TEST_OK
+    if !is_finite(r.t_stat) || !is_finite(r.p_value) || r.p_value < 0.0 || r.p_value > 1.0 ||
+       !is_finite(critical) || critical <= 0.0 || !is_finite(r.ci_lower) ||
+       !is_finite(r.ci_upper) || !is_finite(r.cohens_d) {
+        r.status = T_TEST_NUMERIC_FAILURE
+    }
+    r
 }
 
-// Paired t-test
-fn t_test_paired(x: [f64; 100], y: [f64; 100], n: i64) -> TTestResult {
-    // Compute differences
+/// One-sample t-test; CI is for mean(data) - mu0, not the uncentered mean.
+pub fn t_test_one_sample(data: [f64; 100], n: i64, mu0: f64) -> TTestResult with Mut, Div, Panic {
+    var r = ttest_result_new()
+    r.method = T_METHOD_ONE_SAMPLE; r.n_x = n
+    if !is_finite(mu0) { r.status = T_TEST_NONFINITE; return r }
+    let sample = t_sample_moments(&data, n)
+    if sample.status != T_TEST_OK { r.status = sample.status; return r }
+    r.mean_diff = sample.mean - mu0
+    r.df = (n - 1) as f64
+    let sd = sqrt(sample.variance)
+    r.se_diff = sd / sqrt(n as f64)
+    t_test_finish(r, sd)
+}
+
+/// Equal-variance independent-samples t-test; CI is for mean(x) - mean(y).
+pub fn t_test_independent(x: [f64; 100], nx: i64, y: [f64; 100], ny: i64) -> TTestResult with Mut, Div, Panic {
+    var r = ttest_result_new()
+    r.method = T_METHOD_POOLED; r.n_x = nx; r.n_y = ny
+    let a = t_sample_moments(&x, nx)
+    let b = t_sample_moments(&y, ny)
+    if a.status != T_TEST_OK { r.status = a.status; return r }
+    if b.status != T_TEST_OK { r.status = b.status; return r }
+    r.mean_diff = a.mean - b.mean
+    r.df = (nx + ny - 2) as f64
+    let pooled = ((nx - 1) as f64) / r.df * a.variance + ((ny - 1) as f64) / r.df * b.variance
+    let sd = sqrt(pooled)
+    r.se_diff = sd * sqrt(1.0 / (nx as f64) + 1.0 / (ny as f64))
+    t_test_finish(r, sd)
+}
+
+/// Welch test with scaled Satterthwaite df; fractional df are retained.
+/// cohens_d uses sqrt((sample_variance_x + sample_variance_y)/2).
+pub fn t_test_welch(x: [f64; 100], nx: i64, y: [f64; 100], ny: i64) -> TTestResult with Mut, Div, Panic {
+    var r = ttest_result_new()
+    r.method = T_METHOD_WELCH; r.n_x = nx; r.n_y = ny
+    let a = t_sample_moments(&x, nx)
+    let b = t_sample_moments(&y, ny)
+    if a.status != T_TEST_OK { r.status = a.status; return r }
+    if b.status != T_TEST_OK { r.status = b.status; return r }
+    r.mean_diff = a.mean - b.mean
+    let va = a.variance / (nx as f64)
+    let vb = b.variance / (ny as f64)
+    let total = va + vb
+    if total <= 0.0 { r.status = T_TEST_ZERO_VARIANCE; return r }
+    if !is_finite(total) { r.status = T_TEST_NUMERIC_FAILURE; return r }
+    let wa = va / total
+    let wb = vb / total
+    r.df = 1.0 / (wa * wa / ((nx - 1) as f64) + wb * wb / ((ny - 1) as f64))
+    r.se_diff = sqrt(total)
+    let effect_sd = sqrt(0.5 * a.variance + 0.5 * b.variance)
+    t_test_finish(r, effect_sd)
+}
+
+/// Paired t-test on x-y; a constant difference has undefined t significance.
+pub fn t_test_paired(x: [f64; 100], y: [f64; 100], n: i64) -> TTestResult with Mut, Div, Panic {
+    var r = ttest_result_new()
+    r.method = T_METHOD_PAIRED; r.n_x = n; r.n_y = n
+    if n < 2 || n > 100 { return r }
     var diff: [f64; 100] = [0.0; 100]
     var i: i64 = 0
     while i < n {
+        if !is_finite(x[i as usize]) || !is_finite(y[i as usize]) { r.status = T_TEST_NONFINITE; return r }
         diff[i as usize] = x[i as usize] - y[i as usize]
+        if !is_finite(diff[i as usize]) { r.status = T_TEST_NUMERIC_FAILURE; return r }
         i = i + 1
     }
-
-    // One-sample t-test on differences
-    t_test_one_sample(diff, n, 0.0)
+    var answer = t_test_one_sample(diff, n, 0.0)
+    answer.method = T_METHOD_PAIRED
+    answer.n_x = n; answer.n_y = n
+    answer
 }
 
 // ============================================================================
@@ -318,7 +309,7 @@ fn t_test_paired(x: [f64; 100], y: [f64; 100], n: i64) -> TTestResult {
 // One-way ANOVA for 3 groups
 fn anova_oneway_3(g1: [f64; 100], n1: i64,
                   g2: [f64; 100], n2: i64,
-                  g3: [f64; 100], n3: i64) -> AnovaResult {
+                  g3: [f64; 100], n3: i64) -> AnovaResult with Mut, Div, Panic {
     var result = anova_result_new()
 
     let n_total = n1 + n2 + n3
@@ -385,7 +376,7 @@ fn anova_oneway_3(g1: [f64; 100], n1: i64,
         result.f_stat = ms_between / ms_within
     }
 
-    result.p_value = f_to_p_approx(result.f_stat, result.df_between, result.df_within)
+    result.p_value = f_to_p(result.f_stat, result.df_between, result.df_within)
 
     // Eta squared
     let ss_total = result.ss_between + result.ss_within
@@ -401,7 +392,7 @@ fn anova_oneway_3(g1: [f64; 100], n1: i64,
 // ============================================================================
 
 // Mann-Whitney U test (Wilcoxon rank-sum)
-fn mann_whitney_u(x: [f64; 100], nx: i64, y: [f64; 100], ny: i64) -> MannWhitneyResult {
+fn mann_whitney_u(x: [f64; 100], nx: i64, y: [f64; 100], ny: i64) -> MannWhitneyResult with Mut, Div, Panic {
     var result = mannwhitney_result_new()
 
     // Combine and rank
@@ -449,120 +440,53 @@ fn mann_whitney_u(x: [f64; 100], nx: i64, y: [f64; 100], ny: i64) -> MannWhitney
 // ============================================================================
 
 // Result of Spearman rho test
-struct SpearmanResult {
-    rho: f64,     // rank correlation in [-1, 1]
-    t_stat: f64,  // t = rho * sqrt((n - 2) / (1 - rho^2))
-    p_value: f64, // two-sided, via t-distribution with n-2 df
-    df: f64,
+pub struct SpearmanResult {
+    pub status:i64,
+    pub p_status:i64,
+    pub calibration:i64,
+    pub rho: f64,     // rank correlation in [-1, 1]
+    pub t_stat: f64,  // t = rho * sqrt((n - 2) / (1 - rho^2))
+    pub p_value: f64, // two-sided t approximation with n-2 df; not a permutation p-value
+    pub df: f64,
 }
 
 fn spearman_result_new() -> SpearmanResult {
     SpearmanResult {
+        status:1, p_status:1, calibration:0,
         rho: 0.0,
         t_stat: 0.0,
-        p_value: 1.0,
+        p_value: -1.0,
         df: 0.0,
     }
 }
 
-// Tie-averaged ranks (1-based). Selection-sort on indices to keep
-// memory predictable; n <= 100 is the stdlib convention.
-fn rank_f64(data: [f64; 100], n: i64) -> [f64; 100] with Mut, Div, Panic {
-    var ranks: [f64; 100] = [0.0; 100]
-    var order: [i64; 100] = [0; 100]
-    var i: i64 = 0
-    while i < n {
-        order[i as usize] = i
-        i = i + 1
-    }
-    i = 0
-    while i < n - 1 {
-        var min_idx = i
-        var j: i64 = i + 1
-        while j < n {
-            if data[order[j as usize] as usize] < data[order[min_idx as usize] as usize] {
-                min_idx = j
-            }
-            j = j + 1
-        }
-        if min_idx != i {
-            let tmp = order[i as usize]
-            order[i as usize] = order[min_idx as usize]
-            order[min_idx as usize] = tmp
-        }
-        i = i + 1
-    }
-
-    // Walk sorted order, assigning tie-averaged ranks.
-    i = 0
-    while i < n {
-        var j: i64 = i + 1
-        while j < n && data[order[j as usize] as usize] == data[order[i as usize] as usize] {
-            j = j + 1
-        }
-        let tie_len = j - i
-        // Average of (i+1)..(j) in 1-based ranks.
-        let avg = ((i + 1) as f64 + (j as f64)) / 2.0
-        var k: i64 = i
-        while k < j {
-            ranks[order[k as usize] as usize] = avg
-            k = k + 1
-        }
-        i = j
-    }
-    ranks
+// Checked adapters for the fixed100 legacy surface. No copy before size validation.
+pub fn spearman_rho(x:[f64;100],y:[f64;100],n:i64)->f64 with Mut,Div,Panic {
+ if n<2 || n>100 {return -2.0}
+ var xx:[f64;256]=[0.0;256]
+ var yy:[f64;256]=[0.0;256]
+ var i:i64=0
+ while i<n {xx[i as usize]=x[i as usize];yy[i as usize]=y[i as usize];i=i+1}
+ let c=spearman_checked(&xx,&yy,n)
+ if c.status!=0{return -2.0}
+ return c.coefficient
 }
-
-// Spearman's rho via Pearson correlation on tie-averaged ranks.
-pub fn spearman_rho(x: [f64; 100], y: [f64; 100], n: i64) -> f64 with Mut, Div, Panic {
-    if n < 2 { return 0.0 }
-    let rx = rank_f64(x, n)
-    let ry = rank_f64(y, n)
-
-    var mean_x = 0.0
-    var mean_y = 0.0
-    var i: i64 = 0
-    while i < n {
-        mean_x = mean_x + rx[i as usize]
-        mean_y = mean_y + ry[i as usize]
-        i = i + 1
-    }
-    mean_x = mean_x / (n as f64)
-    mean_y = mean_y / (n as f64)
-
-    var sxy = 0.0
-    var sxx = 0.0
-    var syy = 0.0
-    i = 0
-    while i < n {
-        let dx = rx[i as usize] - mean_x
-        let dy = ry[i as usize] - mean_y
-        sxy = sxy + dx * dy
-        sxx = sxx + dx * dx
-        syy = syy + dy * dy
-        i = i + 1
-    }
-    let denom = sqrt(sxx * syy)
-    if denom < 1.0e-12 { return 0.0 }
-    sxy / denom
-}
-
-// Full Spearman test: rho plus t-based two-sided p-value.
-pub fn spearman_test(x: [f64; 100], y: [f64; 100], n: i64) -> SpearmanResult with Mut, Div, Panic {
-    var result = spearman_result_new()
-    if n < 3 { return result }
-    let rho = spearman_rho(x, y, n)
-    result.rho = rho
-    result.df = (n - 2) as f64
-    let one_minus_r2 = 1.0 - rho * rho
-    if one_minus_r2 <= 1.0e-12 {
-        result.t_stat = if rho >= 0.0 { 1.0e12 } else { 0.0 - 1.0e12 }
-        result.p_value = 0.0
-        return result
-    }
-    result.t_stat = rho * sqrt(result.df / one_minus_r2)
-    result.p_value = t_to_p_approx(result.t_stat, result.df)
-    result
+pub fn spearman_test(x:[f64;100],y:[f64;100],n:i64)->SpearmanResult with Mut,Div,Panic {
+ var result=spearman_result_new()
+ if n<2 || n>100 {return result}
+ var xx:[f64;256]=[0.0;256]
+ var yy:[f64;256]=[0.0;256]
+ var i:i64=0
+ while i<n {xx[i as usize]=x[i as usize];yy[i as usize]=y[i as usize];i=i+1}
+ let c=spearman_inference(&xx,&yy,n,true)
+ result.status=c.status
+ result.p_status=c.p_status
+ result.calibration=c.calibration
+ result.rho=c.coefficient
+ result.t_stat=c.t_stat
+ result.df=c.df
+ if c.p_status==0{result.p_value=c.p_value}
+ return result
 }
 
 // ============================================================================
@@ -606,7 +530,7 @@ fn inf_abs_f64(x: f64) -> f64 {
     if x < 0.0 { -x } else { x }
 }
 
-fn test_one_sample_t() -> bool {
+fn test_one_sample_t() -> bool with Mut, Div, Panic {
     var data: [f64; 100] = [0.0; 100]
     data[0] = 5.0
     data[1] = 6.0
@@ -620,7 +544,7 @@ fn test_one_sample_t() -> bool {
     inf_abs_f64(result.t_stat) < 0.01
 }
 
-fn test_independent_t() -> bool {
+fn test_independent_t() -> bool with Mut, Div, Panic {
     var x: [f64; 100] = [0.0; 100]
     var y: [f64; 100] = [0.0; 100]
 
@@ -644,7 +568,7 @@ fn test_independent_t() -> bool {
     inf_abs_f64(result.mean_diff - (-5.0)) < 0.1
 }
 
-fn test_paired_t() -> bool {
+fn test_paired_t() -> bool with Mut, Div, Panic {
     var pre: [f64; 100] = [0.0; 100]
     var post: [f64; 100] = [0.0; 100]
 
@@ -668,7 +592,7 @@ fn test_paired_t() -> bool {
     inf_abs_f64(result.mean_diff - 5.0) < 0.1
 }
 
-fn test_mann_whitney() -> bool {
+fn test_mann_whitney() -> bool with Mut, Div, Panic {
     var x: [f64; 100] = [0.0; 100]
     var y: [f64; 100] = [0.0; 100]
 
@@ -684,8 +608,8 @@ fn test_mann_whitney() -> bool {
 
     let result = mann_whitney_u(x, 3, y, 3)
 
-    // U should reflect clear separation
-    result > 0.0
+    // With separated groups, the smaller U is zero.
+    result.u_stat == 0.0
 }
 
 fn test_spearman_rho_perfect() -> bool with Mut, Div, Panic {

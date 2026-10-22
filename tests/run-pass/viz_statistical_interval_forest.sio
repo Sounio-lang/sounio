@@ -1,0 +1,122 @@
+//@ run-pass
+//@ expect-stdout: VIZ_STAT_INTERVAL_FOREST_PASS
+//@ expect-stdout: data-interval-kind="confidence"
+//@ expect-stdout: data-interval-kind="prediction"
+//@ expect-stdout: x1="20" y1="26" x2="80" y2="26"
+//@ timeout: 180
+// End-to-end Student-t intervals, independent C++23 agreement, and geometry.
+// Reference: tests/reference/statistical_interval_reference.cpp (quadrature).
+use display::canvas::{Canvas, canvas_clear}
+use stats::student_t::{TCI, t_mean_ci}
+use viz::ir::{
+    viz_scene_new, viz_layout_rect, viz_style_rgb, viz_add_forest_interval_plot,
+    VIZ_INTERVAL_CONFIDENCE, VIZ_INTERVAL_PREDICTION, VIZ_NODE_FOREST,
+}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_html::{viz_html_emit_scene}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn close_to(got: f64, expected: f64) -> bool {
+    let d = got - expected
+    d > 0.0 - 1.0e-6 && d < 1.0e-6
+}
+
+fn assert_pixel(c: &Canvas, x: i64, y: i64, expected: i64) with Mut, Panic {
+    let actual = read_i64(c.pixels, y * c.width + x)
+    assert(actual == expected)
+}
+
+fn main() with IO, Alloc, Mut, Div, Panic {
+    var estimates: [f64; 1024] = [0.0; 1024]
+    var lower: [f64; 1024] = [0.0; 1024]
+    var upper: [f64; 1024] = [0.0; 1024]
+    let a: TCI = t_mean_ci(10.0, 2.0, 10, 0.95)
+    let b: TCI = t_mean_ci(15.0, 3.0, 12, 0.95)
+    let c: TCI = t_mean_ci(8.0, 1.5, 9, 0.95)
+    // Independent long-double C++23 density integration and CDF inversion.
+    assert(close_to(a.lo, 8.5692861880586702))
+    assert(close_to(a.hi, 11.4307138119413298))
+    assert(close_to(b.lo, 13.0938909380080802))
+    assert(close_to(b.hi, 16.9061090619919198))
+    assert(close_to(c.lo, 6.84699793239791666))
+    assert(close_to(c.hi, 9.15300206760208334))
+    estimates[0] = a.mean; lower[0] = a.lo; upper[0] = a.hi
+    estimates[1] = b.mean; lower[1] = b.lo; upper[1] = b.hi
+    estimates[2] = c.mean; lower[2] = c.lo; upper[2] = c.hi
+
+    var scene = viz_scene_new()
+    let layout = viz_layout_rect(8, 8, 180, 100)
+    let style = viz_style_rgb(80, 180, 240)
+    let node = viz_add_forest_interval_plot(
+        &!scene, &estimates, &lower, &upper, 3,
+        VIZ_INTERVAL_CONFIDENCE, 0.95, layout, style)
+    assert(node == 0)
+    assert(scene.series_count == 1)
+    assert(scene.nodes[node as usize].kind == VIZ_NODE_FOREST)
+    assert(scene.series[0].interval_kind == VIZ_INTERVAL_CONFIDENCE)
+    assert(scene.series[0].interval_level == 0.95)
+    assert(scene.series[0].lower[0] == a.lo)
+    assert(scene.series[0].upper[0] == a.hi)
+    assert(scene.series[0].lower[1] == b.lo)
+    assert(scene.series[0].upper[1] == b.hi)
+    assert(scene.series[0].lower[2] == c.lo)
+    assert(scene.series[0].upper[2] == c.hi)
+
+    // Invalid input is rejected atomically.
+    var bad_lower = lower
+    bad_lower[1] = estimates[1] + 1.0
+    assert(viz_add_forest_interval_plot(&!scene, &estimates, &bad_lower, &upper,
+        3, VIZ_INTERVAL_CONFIDENCE, 0.95, layout, style) == 0 - 1)
+    assert(viz_add_forest_interval_plot(&!scene, &estimates, &lower, &upper,
+        3, VIZ_INTERVAL_CONFIDENCE, 1.0, layout, style) == 0 - 1)
+    assert(viz_add_forest_interval_plot(&!scene, &estimates, &lower, &upper,
+        0, VIZ_INTERVAL_CONFIDENCE, 0.95, layout, style) == 0 - 1)
+    assert(viz_add_forest_interval_plot(&!scene, &estimates, &lower, &upper,
+        1025, VIZ_INTERVAL_CONFIDENCE, 0.95, layout, style) == 0 - 1)
+    assert(viz_add_forest_interval_plot(&!scene, &estimates, &lower, &upper,
+        3, 99, 0.95, layout, style) == 0 - 1)
+    var huge = 1.0e308
+    huge = huge * 10.0
+    bad_lower[1] = 0.0 - huge
+    assert(viz_add_forest_interval_plot(&!scene, &estimates, &bad_lower, &upper,
+        3, VIZ_INTERVAL_CONFIDENCE, 0.95, layout, style) == 0 - 1)
+    bad_lower[1] = huge - huge
+    assert(viz_add_forest_interval_plot(&!scene, &estimates, &bad_lower, &upper,
+        3, VIZ_INTERVAL_CONFIDENCE, 0.95, layout, style) == 0 - 1)
+    assert(scene.series_count == 1)
+    assert(scene.node_count == 1)
+    var canvas = make_canvas(200, 120)
+    canvas_clear(&!canvas, 0, 0, 0)
+    viz_canvas_render_scene(&scene, &!canvas)
+    viz_html_emit_scene(&scene, 200, 120)
+
+    // Asymmetric intervals have exact, independently specified pixel geometry.
+    // Domain [0,10] maps to x=[20,120]; two rows are at y=26 and y=39.
+    scene = viz_scene_new()
+    estimates[0] = 2.0; lower[0] = 0.0; upper[0] = 6.0
+    estimates[1] = 8.0; lower[1] = 4.0; upper[1] = 10.0
+    let exact_node = viz_add_forest_interval_plot(
+        &!scene, &estimates, &lower, &upper, 2, VIZ_INTERVAL_PREDICTION, 0.8,
+        viz_layout_rect(20, 20, 100, 40), style)
+    assert(exact_node == 0)
+    canvas_clear(&!canvas, 0, 0, 0)
+    viz_canvas_render_scene(&scene, &!canvas)
+    let interval_color: i64 = 220 | (180 << 8) | (180 << 16)
+    let estimate_color: i64 = 240 | (180 << 8) | (80 << 16)
+    assert_pixel(&canvas, 60, 26, interval_color)
+    assert_pixel(&canvas, 80, 24, interval_color)
+    assert_pixel(&canvas, 60, 39, interval_color)
+    assert_pixel(&canvas, 120, 39, interval_color)
+    assert_pixel(&canvas, 40, 26, estimate_color)
+    assert_pixel(&canvas, 100, 39, estimate_color)
+    assert_pixel(&canvas, 85, 26, 0)
+    assert_pixel(&canvas, 55, 39, 0)
+    viz_html_emit_scene(&scene, 200, 120)
+    heap_free(canvas.pixels as *mut i8)
+    println("VIZ_STAT_INTERVAL_FOREST_PASS")
+    0
+}

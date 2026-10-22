@@ -1,0 +1,591 @@
+//@ run-pass
+//@ expect-stdout: GENOMICS_COUNT_TSV_PASS
+// Generated C++23 from_chars exact parser reference.
+use genomics::io::count_tsv::{count_tsv_new,count_tsv_feed,count_tsv_finish,count_tsv_ack_row,count_qc_new,count_qc_add_row,count_matrix_append_checked}
+
+fn drive(bytes:&[i64;256],length:i64,samples:i64,chunk:i64,expected_status:i64,expected_position:i64,expected:&[i64;2048],expected_rows:i64) with Mut,Div,Panic {
+ var state=count_tsv_new(samples)
+ var matrix:[i64;2048]=[-7;2048]
+ var rows:i64=0
+ var position:i64=0
+ while position<length && state.status==0 {
+  var part:[i64;256]=[0;256]
+  var n=length-position
+  if n>chunk {n=chunk}
+  var i:i64=0
+  while i<n {part[i as usize]=bytes[(position+i) as usize] i=i+1}
+  let r=count_tsv_feed(&!state,&part,n)
+  assert(r.consumed>=0 && r.consumed<=n)
+  position=position+r.consumed
+  if r.row_ready {
+   let appended=count_matrix_append_checked(&!matrix,rows,&state.row,samples)
+   assert(appended.status==0)
+   rows=appended.rows
+   assert(count_tsv_ack_row(&!state))
+  } else {assert(r.consumed>0 || r.status!=0)}
+ }
+ if state.status==0 {
+  let eof=count_tsv_finish(&!state)
+  if eof.row_ready {
+   let appended=count_matrix_append_checked(&!matrix,rows,&state.row,samples)
+   assert(appended.status==0)
+   rows=appended.rows
+   assert(count_tsv_ack_row(&!state))
+  }
+  let again=count_tsv_finish(&!state)
+  if again.status==0 {assert(again.finished)}
+ }
+ assert(state.status==expected_status)
+ assert(state.position==expected_position)
+ assert(rows==expected_rows && state.rows==expected_rows)
+ if expected_status!=0 {assert(state.error_position==expected_position)}
+ var i:i64=0
+ while i<rows*8 {assert(matrix[i as usize]==expected[i as usize]) i=i+1}
+ while i<2048 {assert(matrix[i as usize]== -7) i=i+1}
+}
+fn boundaries() with Mut,Div,Panic {
+ var state=count_tsv_new(1)
+ var bytes:[i64;256]=[0;256]
+ bytes[0]=49 bytes[1]=10 bytes[2]=50
+ let first=count_tsv_feed(&!state,&bytes,3)
+ assert(first.consumed==2 && first.row_ready && !first.finished && state.row[0]==1)
+ let paused=count_tsv_feed(&!state,&bytes,3)
+ assert(paused.consumed==0 && paused.row_ready && state.position==2)
+ let paused_eof=count_tsv_finish(&!state)
+ assert(paused_eof.row_ready && !paused_eof.finished)
+ assert(count_tsv_ack_row(&!state))
+ bytes[0]=50
+ let last=count_tsv_feed(&!state,&bytes,1)
+ assert(last.consumed==1 && !last.row_ready)
+ let eof=count_tsv_finish(&!state)
+ assert(eof.row_ready && eof.finished && state.row[0]==2 && state.rows==2)
+ assert(count_tsv_ack_row(&!state))
+ assert(state.finished)
+ let empty=count_tsv_feed(&!state,&bytes,0)
+ assert(empty.status==0 && empty.finished)
+ let after=count_tsv_feed(&!state,&bytes,1)
+ assert(after.status==6 && after.consumed==0)
+ assert(count_tsv_finish(&!state).status==6)
+ var invalid=count_tsv_new(1)
+ assert(count_tsv_feed(&!invalid,&bytes,257).status==2)
+ assert(count_tsv_feed(&!invalid,&bytes,1).consumed==0)
+ var invalid_byte=count_tsv_new(1)
+ bytes[0]=256
+ let rejected=count_tsv_feed(&!invalid_byte,&bytes,1)
+ assert(rejected.status==3 && rejected.consumed==0 && rejected.error_position==0)
+ var split=count_tsv_new(1)
+ bytes[0]=49 bytes[1]=13
+ assert(count_tsv_feed(&!split,&bytes,2).consumed==2)
+ assert(split.pending_cr && !split.ready)
+ bytes[0]=10
+ let lf=count_tsv_feed(&!split,&bytes,1)
+ assert(lf.consumed==1 && lf.row_ready && split.row[0]==1)
+}
+fn qc_atomic_and_capacity() with Mut,Div,Panic {
+ var qc=count_qc_new(3)
+ let row:[i64;8]=[9223372036854775807,1,0,-9,-9,-9,-9,-9]
+ assert(count_qc_add_row(&!qc,&row)==0)
+ let overflow:[i64;8]=[1,0,0,0,0,0,0,0]
+ assert(count_qc_add_row(&!qc,&overflow)==5)
+ assert(qc.rows==1 && qc.totals[0]==9223372036854775807 && qc.totals[1]==1 && qc.totals[2]==0)
+ assert(qc.zeros[0]==0 && qc.zeros[1]==0 && qc.zeros[2]==1)
+ assert(count_qc_add_row(&!qc,&row)==5 && qc.rows==1)
+ var negative=count_qc_new(3)
+ let valid:[i64;8]=[2,3,4,0,0,0,0,0]
+ assert(count_qc_add_row(&!negative,&valid)==0)
+ let bad:[i64;8]=[8,9,-1,0,0,0,0,0]
+ assert(count_qc_add_row(&!negative,&bad)==2)
+ assert(negative.rows==1 && negative.totals[0]==2 && negative.totals[1]==3 && negative.totals[2]==4)
+ var malformed=count_qc_new(1)
+ malformed.zeros[0]=1
+ assert(count_qc_add_row(&!malformed,&valid)==6 && malformed.rows==0 && malformed.totals[0]==0)
+ var matrix:[i64;2048]=[-7;2048]
+ var i:i64=0
+ while i<256 {
+  var values:[i64;8]=[0;8]
+  var j:i64=0
+  while j<8 {values[j as usize]=i*10+j j=j+1}
+  let a=count_matrix_append_checked(&!matrix,i,&values,8)
+  assert(a.status==0 && a.rows==i+1)
+  i=i+1
+ }
+ i=0
+ while i<256 {
+  var j:i64=0
+  while j<8 {assert(matrix[(i*8+j) as usize]==i*10+j) j=j+1}
+  i=i+1
+ }
+ let full=count_matrix_append_checked(&!matrix,256,&valid,8)
+ assert(full.status==8 && full.rows==256 && matrix[0]==0 && matrix[2047]==2557)
+ var partial:[i64;2048]=[-7;2048]
+ let failed=count_matrix_append_checked(&!partial,0,&bad,3)
+ assert(failed.status==2 && failed.rows==0 && partial[0]== -7 && partial[7]== -7)
+ let inactive=count_matrix_append_checked(&!partial,0,&row,3)
+ assert(inactive.status==0 && inactive.rows==1 && partial[0]==9223372036854775807 && partial[1]==1 && partial[2]==0)
+ assert(partial[3]==0 && partial[7]==0 && partial[8]== -7)
+}
+fn case_0() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=48
+ bytes[1]=9
+ bytes[2]=50
+ bytes[3]=9
+ bytes[4]=52
+ bytes[5]=13
+ bytes[6]=10
+ bytes[7]=51
+ bytes[8]=9
+ bytes[9]=48
+ bytes[10]=9
+ bytes[11]=48
+ bytes[12]=10
+ bytes[13]=48
+ bytes[14]=9
+ bytes[15]=54
+ bytes[16]=9
+ bytes[17]=48
+ bytes[18]=13
+ bytes[19]=10
+ bytes[20]=53
+ bytes[21]=9
+ bytes[22]=55
+ bytes[23]=9
+ bytes[24]=56
+ expected[1]=2
+ expected[2]=4
+ expected[8]=3
+ expected[17]=6
+ expected[24]=5
+ expected[25]=7
+ expected[26]=8
+ drive(&bytes,25,3,1,0,25,&expected,4)
+ drive(&bytes,25,3,2,0,25,&expected,4)
+ drive(&bytes,25,3,3,0,25,&expected,4)
+ drive(&bytes,25,3,7,0,25,&expected,4)
+ drive(&bytes,25,3,256,0,25,&expected,4)
+}
+fn case_1() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ drive(&bytes,0,3,1,0,0,&expected,0)
+ drive(&bytes,0,3,2,0,0,&expected,0)
+ drive(&bytes,0,3,3,0,0,&expected,0)
+ drive(&bytes,0,3,7,0,0,&expected,0)
+ drive(&bytes,0,3,256,0,0,&expected,0)
+}
+fn case_2() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=49
+ bytes[1]=9
+ bytes[2]=50
+ bytes[3]=10
+ expected[0]=1
+ expected[1]=2
+ drive(&bytes,4,2,1,0,4,&expected,1)
+ drive(&bytes,4,2,2,0,4,&expected,1)
+ drive(&bytes,4,2,3,0,4,&expected,1)
+ drive(&bytes,4,2,7,0,4,&expected,1)
+ drive(&bytes,4,2,256,0,4,&expected,1)
+}
+fn case_3() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=49
+ bytes[1]=9
+ bytes[2]=50
+ bytes[3]=13
+ bytes[4]=10
+ expected[0]=1
+ expected[1]=2
+ drive(&bytes,5,2,1,0,5,&expected,1)
+ drive(&bytes,5,2,2,0,5,&expected,1)
+ drive(&bytes,5,2,3,0,5,&expected,1)
+ drive(&bytes,5,2,7,0,5,&expected,1)
+ drive(&bytes,5,2,256,0,5,&expected,1)
+}
+fn case_4() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=49
+ bytes[1]=9
+ bytes[2]=50
+ expected[0]=1
+ expected[1]=2
+ drive(&bytes,3,2,1,0,3,&expected,1)
+ drive(&bytes,3,2,2,0,3,&expected,1)
+ drive(&bytes,3,2,3,0,3,&expected,1)
+ drive(&bytes,3,2,7,0,3,&expected,1)
+ drive(&bytes,3,2,256,0,3,&expected,1)
+}
+fn case_5() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=57
+ bytes[1]=50
+ bytes[2]=50
+ bytes[3]=51
+ bytes[4]=51
+ bytes[5]=55
+ bytes[6]=50
+ bytes[7]=48
+ bytes[8]=51
+ bytes[9]=54
+ bytes[10]=56
+ bytes[11]=53
+ bytes[12]=52
+ bytes[13]=55
+ bytes[14]=55
+ bytes[15]=53
+ bytes[16]=56
+ bytes[17]=48
+ bytes[18]=55
+ bytes[19]=10
+ expected[0]=9223372036854775807
+ drive(&bytes,20,1,1,0,20,&expected,1)
+ drive(&bytes,20,1,2,0,20,&expected,1)
+ drive(&bytes,20,1,3,0,20,&expected,1)
+ drive(&bytes,20,1,7,0,20,&expected,1)
+ drive(&bytes,20,1,256,0,20,&expected,1)
+}
+fn case_6() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=57
+ bytes[1]=50
+ bytes[2]=50
+ bytes[3]=51
+ bytes[4]=51
+ bytes[5]=55
+ bytes[6]=50
+ bytes[7]=48
+ bytes[8]=51
+ bytes[9]=54
+ bytes[10]=56
+ bytes[11]=53
+ bytes[12]=52
+ bytes[13]=55
+ bytes[14]=55
+ bytes[15]=53
+ bytes[16]=56
+ bytes[17]=48
+ bytes[18]=56
+ bytes[19]=10
+ drive(&bytes,20,1,1,5,18,&expected,0)
+ drive(&bytes,20,1,2,5,18,&expected,0)
+ drive(&bytes,20,1,3,5,18,&expected,0)
+ drive(&bytes,20,1,7,5,18,&expected,0)
+ drive(&bytes,20,1,256,5,18,&expected,0)
+}
+fn case_7() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=57
+ bytes[1]=57
+ bytes[2]=57
+ bytes[3]=57
+ bytes[4]=57
+ bytes[5]=57
+ bytes[6]=57
+ bytes[7]=57
+ bytes[8]=57
+ bytes[9]=57
+ bytes[10]=57
+ bytes[11]=57
+ bytes[12]=57
+ bytes[13]=57
+ bytes[14]=57
+ bytes[15]=57
+ bytes[16]=57
+ bytes[17]=57
+ bytes[18]=57
+ bytes[19]=57
+ bytes[20]=57
+ bytes[21]=57
+ bytes[22]=57
+ bytes[23]=57
+ bytes[24]=57
+ bytes[25]=57
+ bytes[26]=57
+ bytes[27]=57
+ bytes[28]=57
+ bytes[29]=57
+ bytes[30]=10
+ drive(&bytes,31,1,1,5,18,&expected,0)
+ drive(&bytes,31,1,2,5,18,&expected,0)
+ drive(&bytes,31,1,3,5,18,&expected,0)
+ drive(&bytes,31,1,7,5,18,&expected,0)
+ drive(&bytes,31,1,256,5,18,&expected,0)
+}
+fn case_8() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=48
+ bytes[1]=48
+ bytes[2]=48
+ bytes[3]=48
+ bytes[4]=48
+ bytes[5]=48
+ bytes[6]=48
+ bytes[7]=48
+ bytes[8]=48
+ bytes[9]=48
+ bytes[10]=48
+ bytes[11]=48
+ bytes[12]=48
+ bytes[13]=48
+ bytes[14]=48
+ bytes[15]=48
+ bytes[16]=48
+ bytes[17]=48
+ bytes[18]=48
+ bytes[19]=48
+ bytes[20]=48
+ bytes[21]=48
+ bytes[22]=48
+ bytes[23]=49
+ bytes[24]=9
+ bytes[25]=48
+ bytes[26]=48
+ bytes[27]=48
+ bytes[28]=10
+ expected[0]=1
+ drive(&bytes,29,2,1,0,29,&expected,1)
+ drive(&bytes,29,2,2,0,29,&expected,1)
+ drive(&bytes,29,2,3,0,29,&expected,1)
+ drive(&bytes,29,2,7,0,29,&expected,1)
+ drive(&bytes,29,2,256,0,29,&expected,1)
+}
+fn case_9() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=49
+ bytes[1]=10
+ drive(&bytes,2,2,1,4,1,&expected,0)
+ drive(&bytes,2,2,2,4,1,&expected,0)
+ drive(&bytes,2,2,3,4,1,&expected,0)
+ drive(&bytes,2,2,7,4,1,&expected,0)
+ drive(&bytes,2,2,256,4,1,&expected,0)
+}
+fn case_10() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=49
+ bytes[1]=9
+ bytes[2]=50
+ bytes[3]=9
+ bytes[4]=51
+ bytes[5]=10
+ drive(&bytes,6,2,1,4,3,&expected,0)
+ drive(&bytes,6,2,2,4,3,&expected,0)
+ drive(&bytes,6,2,3,4,3,&expected,0)
+ drive(&bytes,6,2,7,4,3,&expected,0)
+ drive(&bytes,6,2,256,4,3,&expected,0)
+}
+fn case_11() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=9
+ bytes[1]=49
+ bytes[2]=10
+ drive(&bytes,3,2,1,3,0,&expected,0)
+ drive(&bytes,3,2,2,3,0,&expected,0)
+ drive(&bytes,3,2,3,3,0,&expected,0)
+ drive(&bytes,3,2,7,3,0,&expected,0)
+ drive(&bytes,3,2,256,3,0,&expected,0)
+}
+fn case_12() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=49
+ bytes[1]=9
+ bytes[2]=10
+ drive(&bytes,3,2,1,3,2,&expected,0)
+ drive(&bytes,3,2,2,3,2,&expected,0)
+ drive(&bytes,3,2,3,3,2,&expected,0)
+ drive(&bytes,3,2,7,3,2,&expected,0)
+ drive(&bytes,3,2,256,3,2,&expected,0)
+}
+fn case_13() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=49
+ bytes[1]=9
+ drive(&bytes,2,2,1,3,2,&expected,0)
+ drive(&bytes,2,2,2,3,2,&expected,0)
+ drive(&bytes,2,2,3,3,2,&expected,0)
+ drive(&bytes,2,2,7,3,2,&expected,0)
+ drive(&bytes,2,2,256,3,2,&expected,0)
+}
+fn case_14() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=10
+ drive(&bytes,1,1,1,3,0,&expected,0)
+ drive(&bytes,1,1,2,3,0,&expected,0)
+ drive(&bytes,1,1,3,3,0,&expected,0)
+ drive(&bytes,1,1,7,3,0,&expected,0)
+ drive(&bytes,1,1,256,3,0,&expected,0)
+}
+fn case_15() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=49
+ bytes[1]=13
+ drive(&bytes,2,1,1,3,2,&expected,0)
+ drive(&bytes,2,1,2,3,2,&expected,0)
+ drive(&bytes,2,1,3,3,2,&expected,0)
+ drive(&bytes,2,1,7,3,2,&expected,0)
+ drive(&bytes,2,1,256,3,2,&expected,0)
+}
+fn case_16() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=49
+ bytes[1]=13
+ bytes[2]=120
+ drive(&bytes,3,1,1,3,2,&expected,0)
+ drive(&bytes,3,1,2,3,2,&expected,0)
+ drive(&bytes,3,1,3,3,2,&expected,0)
+ drive(&bytes,3,1,7,3,2,&expected,0)
+ drive(&bytes,3,1,256,3,2,&expected,0)
+}
+fn case_17() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=45
+ bytes[1]=49
+ bytes[2]=10
+ drive(&bytes,3,1,1,3,0,&expected,0)
+ drive(&bytes,3,1,2,3,0,&expected,0)
+ drive(&bytes,3,1,3,3,0,&expected,0)
+ drive(&bytes,3,1,7,3,0,&expected,0)
+ drive(&bytes,3,1,256,3,0,&expected,0)
+}
+fn case_18() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=43
+ bytes[1]=49
+ bytes[2]=10
+ drive(&bytes,3,1,1,3,0,&expected,0)
+ drive(&bytes,3,1,2,3,0,&expected,0)
+ drive(&bytes,3,1,3,3,0,&expected,0)
+ drive(&bytes,3,1,7,3,0,&expected,0)
+ drive(&bytes,3,1,256,3,0,&expected,0)
+}
+fn case_19() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=32
+ bytes[1]=49
+ bytes[2]=10
+ drive(&bytes,3,1,1,3,0,&expected,0)
+ drive(&bytes,3,1,2,3,0,&expected,0)
+ drive(&bytes,3,1,3,3,0,&expected,0)
+ drive(&bytes,3,1,7,3,0,&expected,0)
+ drive(&bytes,3,1,256,3,0,&expected,0)
+}
+fn case_20() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=49
+ bytes[1]=46
+ bytes[2]=48
+ bytes[3]=10
+ drive(&bytes,4,1,1,3,1,&expected,0)
+ drive(&bytes,4,1,2,3,1,&expected,0)
+ drive(&bytes,4,1,3,3,1,&expected,0)
+ drive(&bytes,4,1,7,3,1,&expected,0)
+ drive(&bytes,4,1,256,3,1,&expected,0)
+}
+fn case_21() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=49
+ bytes[1]=44
+ bytes[2]=50
+ bytes[3]=10
+ drive(&bytes,4,2,1,3,1,&expected,0)
+ drive(&bytes,4,2,2,3,1,&expected,0)
+ drive(&bytes,4,2,3,3,1,&expected,0)
+ drive(&bytes,4,2,7,3,1,&expected,0)
+ drive(&bytes,4,2,256,3,1,&expected,0)
+}
+fn case_22() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=49
+ bytes[1]=9
+ bytes[2]=50
+ bytes[3]=10
+ bytes[4]=51
+ bytes[5]=9
+ bytes[6]=120
+ bytes[7]=10
+ expected[0]=1
+ expected[1]=2
+ drive(&bytes,8,2,1,3,6,&expected,1)
+ drive(&bytes,8,2,2,3,6,&expected,1)
+ drive(&bytes,8,2,3,3,6,&expected,1)
+ drive(&bytes,8,2,7,3,6,&expected,1)
+ drive(&bytes,8,2,256,3,6,&expected,1)
+}
+fn case_23() with Mut,Div,Panic {
+ var bytes:[i64;256]=[0;256]
+ var expected:[i64;2048]=[0;2048]
+ bytes[0]=49
+ bytes[1]=10
+ drive(&bytes,2,0,1,1,0,&expected,0)
+ drive(&bytes,2,0,2,1,0,&expected,0)
+ drive(&bytes,2,0,3,1,0,&expected,0)
+ drive(&bytes,2,0,7,1,0,&expected,0)
+ drive(&bytes,2,0,256,1,0,&expected,0)
+}
+fn visual_qc() with Mut,Div,Panic {
+ var qc=count_qc_new(3)
+ let r0:[i64;8]=[0,2,4,0,0,0,0,0]
+ assert(count_qc_add_row(&!qc,&r0)==0)
+ let r1:[i64;8]=[3,0,0,0,0,0,0,0]
+ assert(count_qc_add_row(&!qc,&r1)==0)
+ let r2:[i64;8]=[0,6,0,0,0,0,0,0]
+ assert(count_qc_add_row(&!qc,&r2)==0)
+ let r3:[i64;8]=[5,7,8,0,0,0,0,0]
+ assert(count_qc_add_row(&!qc,&r3)==0)
+ assert(qc.rows==4)
+ assert(qc.totals[0]==8 && qc.zeros[0]==2)
+ assert(qc.totals[1]==15 && qc.zeros[1]==1)
+ assert(qc.totals[2]==12 && qc.zeros[2]==2)
+}
+fn main() with IO,Mut,Div,Panic {
+ case_0()
+ case_1()
+ case_2()
+ case_3()
+ case_4()
+ case_5()
+ case_6()
+ case_7()
+ case_8()
+ case_9()
+ case_10()
+ case_11()
+ case_12()
+ case_13()
+ case_14()
+ case_15()
+ case_16()
+ case_17()
+ case_18()
+ case_19()
+ case_20()
+ case_21()
+ case_22()
+ case_23()
+ boundaries()
+ qc_atomic_and_capacity()
+ visual_qc()
+ println("GENOMICS_COUNT_TSV_PASS")
+ 0
+}
