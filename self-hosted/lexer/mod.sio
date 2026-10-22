@@ -107,6 +107,127 @@ pub fn lexer_report_token_overflow_if_any() -> bool with IO, Mut {
 }
 
 // ============================================================================
+// LEXICAL ERRORS (fail closed, with a location)
+// ============================================================================
+//
+// Until 2026-10-22 the live loop below accepted five malformed inputs without
+// a located diagnostic (docs/spec/2026-10/01-lexical-syntax-and-modules.md,
+// LEX-004/LEX-007/LEX-012; measured by the probes of the edition's lexical
+// execution receipt, docs/spec/2026-10/18-lexical-execution-receipt.md):
+//   - an unknown byte became an Error token and the parse failed with no line
+//     or column ("module failed to parse");
+//   - a block comment still open at end of input swallowed the rest of the
+//     file, so a forgotten `/*` silently deleted code;
+//   - a string with no closing quote ran to end of input;
+//   - an escape the lowering does not know (`\q`, `\u{41}`) had its backslash
+//     dropped, so "\q" compiled as "q";
+//   - an unknown escape in a character literal yielded the bare character, so
+//     '\q' was 113.
+// Each is now recorded here (first site wins, like the overflow record above)
+// and reported by lex_file_parse_items before any parse.
+//
+// LEXER_LEX_ERROR_KIND: 0 = none, 1 = unexpected character, 2 = unterminated
+// block comment, 3 = unterminated string literal, 4 = invalid escape sequence
+// in a string literal, 5 = invalid escape sequence in a character literal.
+var LEXER_LEX_ERROR_KIND: i64 = 0
+var LEXER_LEX_ERROR_LINE: i64 = 0
+var LEXER_LEX_ERROR_COL: i64 = 0
+var LEXER_LEX_ERROR_BYTE: i64 = 0
+
+pub fn lexer_reset_lex_error() with Mut {
+    LEXER_LEX_ERROR_KIND = 0
+    LEXER_LEX_ERROR_LINE = 0
+    LEXER_LEX_ERROR_COL = 0
+    LEXER_LEX_ERROR_BYTE = 0
+}
+
+pub fn lexer_lex_error_kind() -> i64 {
+    LEXER_LEX_ERROR_KIND
+}
+
+pub fn lexer_lex_error_line() -> i64 {
+    LEXER_LEX_ERROR_LINE
+}
+
+fn lexer_mark_lex_error(kind: i64, line: i64, col: i64, byte_val: i64) with Mut {
+    if LEXER_LEX_ERROR_KIND == 0 {
+        LEXER_LEX_ERROR_KIND = kind
+        LEXER_LEX_ERROR_LINE = line
+        LEXER_LEX_ERROR_COL = col
+        LEXER_LEX_ERROR_BYTE = byte_val
+    }
+}
+
+// A string escape the lowering decodes (ir_normalize_string_literal_name):
+// \n \t \r \0 \\ \" and \xHH. This is the union of what the two engines decode
+// today; lean_single refuses every other escape, and so does this lexer now.
+fn lexer_escape_ok(pos: i64, n: i64) -> bool with Mut, Panic {
+    // pos is the backslash; the caller guarantees pos + 1 < n.
+    let e = CURSOR_SOURCE[(pos + 1) as usize]
+    if e == 110 as i8 || e == 116 as i8 || e == 114 as i8 || e == 48 as i8 || e == 92 as i8 || e == 34 as i8 {
+        return true
+    }
+    if e == 120 as i8 && pos + 3 < n {
+        return is_hex_digit(CURSOR_SOURCE[(pos + 2) as usize]) && is_hex_digit(CURSOR_SOURCE[(pos + 3) as usize])
+    }
+    false
+}
+
+fn lexer_print_location(path: string) with IO {
+    print("\n  --> ")
+    print(path)
+    print(":")
+    print_int(LEXER_LEX_ERROR_LINE)
+    print(":")
+    print_int(LEXER_LEX_ERROR_COL)
+    print("\n")
+}
+
+// Print the recorded lexical error and return true, or return false if none.
+pub fn lexer_report_lex_error_if_any(path: string) -> bool with IO, Mut {
+    if LEXER_LEX_ERROR_KIND == 0 {
+        return false
+    }
+    if LEXER_LEX_ERROR_KIND == 1 {
+        print("error[E271]: Unexpected character (byte ")
+        print_int(LEXER_LEX_ERROR_BYTE)
+        print(")")
+        lexer_print_location(path)
+        print("  = note: tokens are ASCII; outside strings and comments only letters, digits, `_`,\n")
+        print("          operators and punctuation are accepted (`ε` and `⊥` only as Knowledge parameters)\n")
+    } else if LEXER_LEX_ERROR_KIND == 2 {
+        print("error[E272]: unterminated block comment")
+        lexer_print_location(path)
+        print("  = note: the comment opened here is still open at end of file; everything after it\n")
+        print("          was being discarded. Block comments nest: each `/*` needs its own `*/`.\n")
+    } else if LEXER_LEX_ERROR_KIND == 3 {
+        print("error[E273]: unterminated string literal")
+        lexer_print_location(path)
+        print("  = note: no closing `\"` before end of file\n")
+    } else {
+        let in_char = LEXER_LEX_ERROR_KIND == 5
+        print("error[E274]: invalid escape sequence `\\")
+        if LEXER_LEX_ERROR_BYTE >= 32 && LEXER_LEX_ERROR_BYTE < 127 {
+            print_char(LEXER_LEX_ERROR_BYTE)
+        } else {
+            print("<byte ")
+            print_int(LEXER_LEX_ERROR_BYTE)
+            print(">")
+        }
+        if in_char {
+            print("` in character literal")
+            lexer_print_location(path)
+            print("  = note: accepted escapes are \\n \\t \\r \\0 \\\\ \\' and \\\"\n")
+        } else {
+            print("` in string literal")
+            lexer_print_location(path)
+            print("  = note: accepted escapes are \\n \\t \\r \\0 \\\\ \\\" and \\xHH (two hex digits)\n")
+        }
+    }
+    true
+}
+
+// ============================================================================
 // WHITESPACE AND COMMENT HANDLING
 // ============================================================================
 
@@ -743,6 +864,7 @@ fn lex_flat_sep_before_hex_digit(pos: i64, n: i64) -> bool with Mut, Panic {
 // Returns the total number of tokens emitted (including the EOF token).
 pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
     lexer_reset_token_overflow()
+    lexer_reset_lex_error()
     var n: i64 = source_len
     if n < 0 { n = 0 }
     // Source buffer is CURSOR_SOURCE, [i8; 16777216]. Truncating here was a
@@ -756,6 +878,9 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
     var line: i64 = 1
     var col: i64 = 1
     var tc: i64 = 0
+    // Bytes up to this offset belong to a tolerated UTF-8 sequence (see the
+    // unknown-byte arm at the end of the loop).
+    var tolerate_until: i64 = 0
 
     while pos < n {
         // Fail closed before any further emit once the table is full.
@@ -787,6 +912,8 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                 continue
             }
             if next == 42 as i8 {
+                let comment_line = line
+                let comment_col = col
                 pos = pos + 2
                 col = col + 2
                 var depth: i64 = 1
@@ -810,6 +937,9 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                         }
                         pos = pos + 1
                     }
+                }
+                if depth > 0 {
+                    lexer_mark_lex_error(2, comment_line, comment_col, 0)
                 }
                 continue
             }
@@ -918,13 +1048,33 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
 
         if ch == 34 as i8 {
             let start = pos
+            let start_line = line
             let start_col = col
             pos = pos + 1
             col = col + 1
+            // A raw LF inside the literal is a source line: count it, or every
+            // later token (and diagnostic) is reported lines too early.
             while pos < n && CURSOR_SOURCE[pos as usize] != 34 as i8 {
                 if CURSOR_SOURCE[pos as usize] == 92 as i8 && pos + 1 < n {
-                    pos = pos + 2
-                    col = col + 2
+                    if !lexer_escape_ok(pos, n) {
+                        let bad = (CURSOR_SOURCE[(pos + 1) as usize] as i64) & 255
+                        lexer_mark_lex_error(4, line, col, bad)
+                    }
+                    if CURSOR_SOURCE[(pos + 1) as usize] == 120 as i8 && lexer_escape_ok(pos, n) {
+                        pos = pos + 4
+                        col = col + 4
+                    } else if CURSOR_SOURCE[(pos + 1) as usize] == 10 as i8 {
+                        pos = pos + 2
+                        line = line + 1
+                        col = 1
+                    } else {
+                        pos = pos + 2
+                        col = col + 2
+                    }
+                } else if CURSOR_SOURCE[pos as usize] == 10 as i8 {
+                    pos = pos + 1
+                    line = line + 1
+                    col = 1
                 } else {
                     pos = pos + 1
                     col = col + 1
@@ -933,8 +1083,10 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
             if pos < n && CURSOR_SOURCE[pos as usize] == 34 as i8 {
                 pos = pos + 1
                 col = col + 1
+            } else {
+                lexer_mark_lex_error(3, start_line, start_col, 0)
             }
-            tc = lexer_push_flat(tc, 126, start, pos, line, start_col, 0)
+            tc = lexer_push_flat(tc, 126, start, pos, start_line, start_col, 0)
             if tc < 0 { break }
             continue
         }
@@ -959,7 +1111,11 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                     else if esc == 92 as i8 { value = 92 }
                     else if esc == 39 as i8 { value = 39 }
                     else if esc == 34 as i8 { value = 34 }
-                    else { value = esc as i64 }
+                    else {
+                        // Used to yield the bare character ('\q' == 113).
+                        lexer_mark_lex_error(5, line, col, (esc as i64) & 255)
+                        value = esc as i64
+                    }
                     pos = pos + 2
                     col = col + 2
                 } else {
@@ -1038,6 +1194,27 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
         else if ch == 46 as i8 { kind_code = 183 }
         else if ch == 64 as i8 { kind_code = 184 }
         else if ch == 35 as i8 { kind_code = 185 }
+
+        // An unknown byte still becomes an Error token (flat code 1), but it is
+        // now also recorded, so the file is refused with its location instead
+        // of failing the parse with none. Two UTF-8 sequences are tolerated
+        // because the parser consumes their Error tokens on purpose as the
+        // epistemic bound of a Knowledge parameter: `ε` (U+03B5, CE B5) in
+        // `Knowledge<f64, ε < 0.01>` (parser/types.sio) and `⊥` (U+22A5,
+        // E2 8A A5) in `Knowledge[f64, ε=⊥]` (tests/run-pass/knightian_syntax.sio).
+        if kind_code == 1 {
+            let b0 = (ch as i64) & 255
+            let b1 = (c2 as i64) & 255
+            let b2 = (c3 as i64) & 255
+            if b0 == 206 && b1 == 181 {
+                tolerate_until = pos + 2
+            } else if b0 == 226 && b1 == 138 && b2 == 165 {
+                tolerate_until = pos + 3
+            }
+            if pos >= tolerate_until {
+                lexer_mark_lex_error(1, line, start_col, b0)
+            }
+        }
 
         tc = lexer_push_flat(tc, kind_code, start, start + width, line, start_col, 0)
         if tc < 0 { break }
@@ -1341,6 +1518,13 @@ pub fn lex_file_parse_items(path: string) -> Option<Box<ItemList>> with IO, Mut,
         // Make check-mode preflight fail (same channel as parse errors).
         parser_set_last_errors(true, 1)
         if SOURCEFILE_TRACE == 1 { print("trace=lex_token_overflow\n") }
+        return None
+    }
+    // Fail closed, with a location, on malformed source (E271-E274).
+    if lexer_lex_error_kind() != 0 {
+        let _reported_lex = lexer_report_lex_error_if_any(path)
+        parser_set_last_errors(true, 1)
+        if SOURCEFILE_TRACE == 1 { print("trace=lex_error\n") }
         return None
     }
     if SOURCEFILE_TRACE == 1 { print("trace=lex_ok\n") }
