@@ -10134,6 +10134,21 @@ fn ep_before_body_close() -> bool {
     return EP < CURRENT_BODY_CLOSE
 }
 
+// From just past a `[`, move EP to just past the `]` that closes it. The local
+// `[V; N]` initializer used to scan to the FIRST `]`, which inside
+// `[m.v[1]; 4]` is the index's: parsing resumed at `; 4]` and the stray `]`
+// was compiled as a statement that loads 0.
+fn skip_past_matching_bracket() with Mut, Panic {
+    var depth: i64 = 0
+    while ep_before_body_close() && TK[EP as usize] != 0 {
+        let k = TK[EP as usize]
+        if k == 42 && depth == 0 { EP = EP + 1; return }
+        if k == 41 || k == 6 || k == 8 { depth = depth + 1 }
+        if (k == 42 || k == 7 || k == 9) && depth > 0 { depth = depth - 1 }
+        EP = EP + 1
+    }
+}
+
 // ─── Emit helpers ───
 // mov rax, [rbp - 8*slot]
 fn emit_load_var(slot: i64) with Mut { em(0x48); em(0x8b); em(0x85); em32(0 - slot * 8) }
@@ -17205,7 +17220,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
         return
     }
     // Identifier or function call
-    if k == 3 || k == 79 {
+    // `var` lexes as TK=12 (the binding keyword) but is a legal name, as on
+    // Madaros (contextual, parser/patterns.sio): `let var = 5` binds it. Without
+    // this arm a use of it fell to the last arm and read as 0 -- including
+    // stdlib/epistemic/knightian.sio:309, whose p-box variance was 0.
+    if k == 3 || k == 79 || k == 12 {
         var ns: i64 = TS[EP as usize]
         var ne: i64 = TE[EP as usize]
         EP = EP + 1
@@ -17998,6 +18017,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 7 {
                     emit_print(EP)
                     EP = EP + 1
+                    emit_print_nl()
+                } else if TK[EP as usize] == 7 {
+                    // `println()` prints an empty line, as on Madaros. Without
+                    // this arm the `)` fell to compile_primary's last arm and
+                    // printed `0`.
                     emit_print_nl()
                 } else {
                     compile_or()
@@ -30436,8 +30460,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             //  documented remaining gap, so this is no regression for them.)
             EP = EP + 1  // skip [
             let val_ep = EP                       // remember where the fill value V starts
-            while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
-            if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
+            skip_past_matching_bracket()
             let after_ep = EP
             var nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
@@ -41767,7 +41790,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         return
     }
     // Identifier or function call
-    if k == 3 || k == 79 {  // "kernel" lexes as TK=79 (the `kernel fn` GPU keyword), not TK=3; the x86 twin, compile_primary's identifier-dispatch check, already handles `k == 3 || k == 79`. Missing here, any bare use of the identifier "kernel" as a value (e.g. a parameter named kernel passed as a call argument) fell through this dispatch unrecognized on aarch64, leaving EXPR_TY/EXPR_TY_HASH at whatever the previous expression left them.
+    if k == 3 || k == 79 || k == 12 {  // `var` (TK=12) as a name: see compile_primary. "kernel" lexes as TK=79 (the `kernel fn` GPU keyword), not TK=3; the x86 twin, compile_primary's identifier-dispatch check, already handles `k == 3 || k == 79`. Missing here, any bare use of the identifier "kernel" as a value (e.g. a parameter named kernel passed as a call argument) fell through this dispatch unrecognized on aarch64, leaving EXPR_TY/EXPR_TY_HASH at whatever the previous expression left them.
         var ns: i64 = TS[EP as usize]
         var ne: i64 = TE[EP as usize]
         EP = EP + 1
@@ -42059,6 +42082,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     emit_print_a64(EP)
                     EP = EP + 1
                     emit_print_nl_a64()
+                } else if TK[EP as usize] == 7 {
+                    emit_print_nl_a64()  // `println()`: see the x86-64 twin
                 } else {
                     compile_or_a64()
                     // Observation boundary: println of Unobserved<T> is IO that collapses uncertainty
@@ -46203,8 +46228,7 @@ fn compile_stmt_a64_body() with IO, Mut, Panic, Div {
         if has_eq == 1 && is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
             EP = EP + 1
             let a64_val_ep = EP
-            while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
-            if TK[EP as usize] == 42 { EP = EP + 1 }
+            skip_past_matching_bracket()
             let a64_after_ep = EP
             var nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
