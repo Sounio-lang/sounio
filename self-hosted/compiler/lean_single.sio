@@ -2673,6 +2673,12 @@ var LAST_EXPR_IS_CLOSURE: i64 = 0
 // Scratch globals for float scientific exponent (avoids extra locals in compile_primary)
 var FL_SCI_SCRATCH: i64 = 0
 var FLT_BITS_OK: i64 = 0
+var FLT_DEN: [i64; 48] = [0; 48]
+var FLT_SRC: [i64; 48] = [0; 48]
+var FLT_REM: [i64; 48] = [0; 48]
+var FLT_DLEN: i64 = 1
+var FLT_SLEN: i64 = 1
+var FLT_RLEN: i64 = 1
 var FLT_BITS: i64 = 0
 var FL_SCI_NEG: i64 = 0
 var FL_FRAC_DIGITS: i64 = 0
@@ -15527,6 +15533,327 @@ fn flt_sig_bits(sig: i64, exp10: i64) -> i64 with Mut, Div, Panic {
     let frac = mant - 4503599627370496
     field * 4503599627370496 + frac
 }
+fn flt_den_clear() with Mut {
+    var i: i64 = 0
+    while i < 48 { FLT_DEN[i as usize] = 0; i = i + 1 }
+    FLT_DLEN = 1
+}
+fn flt_src_clear() with Mut {
+    var i: i64 = 0
+    while i < 48 { FLT_SRC[i as usize] = 0; i = i + 1 }
+    FLT_SLEN = 1
+}
+fn flt_rem_clear() with Mut {
+    var i: i64 = 0
+    while i < 48 { FLT_REM[i as usize] = 0; i = i + 1 }
+    FLT_RLEN = 1
+}
+fn flt_den_set(v: i64) with Mut, Div {
+    flt_den_clear()
+    var x = v
+    var n: i64 = 0
+    while x > 0 {
+        FLT_DEN[n as usize] = x % 1073741824
+        x = x / 1073741824
+        n = n + 1
+    }
+    if n == 0 { n = 1 }
+    FLT_DLEN = n
+}
+fn flt_src_set(v: i64) with Mut, Div {
+    flt_src_clear()
+    var x = v
+    var n: i64 = 0
+    while x > 0 {
+        FLT_SRC[n as usize] = x % 1073741824
+        x = x / 1073741824
+        n = n + 1
+    }
+    if n == 0 { n = 1 }
+    FLT_SLEN = n
+}
+fn flt_den_copy_to_rem() with Mut {
+    var i: i64 = 0
+    while i < 48 { FLT_REM[i as usize] = FLT_DEN[i as usize]; i = i + 1 }
+    FLT_RLEN = FLT_DLEN
+}
+fn flt_rem_mul(m: i64) -> bool with Mut, Div {
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < FLT_RLEN {
+        let v = FLT_REM[i as usize] * m + carry
+        FLT_REM[i as usize] = v % 1073741824
+        carry = v / 1073741824
+        i = i + 1
+    }
+    while carry > 0 {
+        if FLT_RLEN >= 48 { return false }
+        FLT_REM[FLT_RLEN as usize] = carry % 1073741824
+        carry = carry / 1073741824
+        FLT_RLEN = FLT_RLEN + 1
+    }
+    return true
+}
+fn flt_rem_shl15() -> bool with Mut, Div {
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < FLT_RLEN {
+        let v = FLT_REM[i as usize] * 32768 + carry
+        FLT_REM[i as usize] = v % 1073741824
+        carry = v / 1073741824
+        i = i + 1
+    }
+    if carry > 0 {
+        if FLT_RLEN >= 48 { return false }
+        FLT_REM[FLT_RLEN as usize] = carry
+        FLT_RLEN = FLT_RLEN + 1
+    }
+    return true
+}
+fn flt_den_add_rem() -> bool with Mut {
+    var carry: i64 = 0
+    var i: i64 = 0
+    var n = FLT_DLEN
+    if FLT_RLEN > n { n = FLT_RLEN }
+    while i < n || carry > 0 {
+        if i >= 48 { return false }
+        var dv: i64 = 0
+        var rv: i64 = 0
+        if i < FLT_DLEN { dv = FLT_DEN[i as usize] }
+        if i < FLT_RLEN { rv = FLT_REM[i as usize] }
+        let v = dv + rv + carry
+        FLT_DEN[i as usize] = v % 1073741824
+        carry = v / 1073741824
+        i = i + 1
+    }
+    FLT_DLEN = i
+    if FLT_DLEN == 0 { FLT_DLEN = 1 }
+    return true
+}
+fn flt_src_copy_to_rem() with Mut {
+    var i: i64 = 0
+    while i < 48 { FLT_REM[i as usize] = FLT_SRC[i as usize]; i = i + 1 }
+    FLT_RLEN = FLT_SLEN
+}
+fn flt_den_mul_i64(m: i64) -> bool with Mut, Div {
+    if m < 0 { return false }
+    if m < 32768 { return flt_den_mul(m) }
+    var i: i64 = 0
+    while i < 48 { FLT_SRC[i as usize] = FLT_DEN[i as usize]; i = i + 1 }
+    FLT_SLEN = FLT_DLEN
+    flt_den_clear()
+    FLT_DEN[0] = 0
+    var left = m
+    var shifts: i64 = 0
+    while left > 0 {
+        let chunk = left % 32768
+        left = left / 32768
+        flt_src_copy_to_rem()
+        if chunk == 0 {
+            var z: i64 = 0
+            while z < FLT_RLEN { FLT_REM[z as usize] = 0; z = z + 1 }
+        } else {
+            if flt_rem_mul(chunk) == false { return false }
+        }
+        var s: i64 = 0
+        while s < shifts {
+            if flt_rem_shl15() == false { return false }
+            s = s + 1
+        }
+        if flt_den_add_rem() == false { return false }
+        shifts = shifts + 1
+    }
+    return true
+}
+fn flt_den_mul(m: i64) -> bool with Mut, Div {
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < FLT_DLEN {
+        let v = FLT_DEN[i as usize] * m + carry
+        FLT_DEN[i as usize] = v % 1073741824
+        carry = v / 1073741824
+        i = i + 1
+    }
+    while carry > 0 {
+        if FLT_DLEN >= 48 { return false }
+        FLT_DEN[FLT_DLEN as usize] = carry % 1073741824
+        carry = carry / 1073741824
+        FLT_DLEN = FLT_DLEN + 1
+    }
+    return true
+}
+fn flt_src_mul(m: i64) -> bool with Mut, Div {
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < FLT_SLEN {
+        let v = FLT_SRC[i as usize] * m + carry
+        FLT_SRC[i as usize] = v % 1073741824
+        carry = v / 1073741824
+        i = i + 1
+    }
+    while carry > 0 {
+        if FLT_SLEN >= 48 { return false }
+        FLT_SRC[FLT_SLEN as usize] = carry % 1073741824
+        carry = carry / 1073741824
+        FLT_SLEN = FLT_SLEN + 1
+    }
+    return true
+}
+fn flt_src_shl(bits: i64) -> bool with Mut, Div {
+    var left = bits
+    while left >= 30 {
+        if FLT_SLEN >= 47 { return false }
+        var i = FLT_SLEN
+        while i > 0 {
+            FLT_SRC[i as usize] = FLT_SRC[(i - 1) as usize]
+            i = i - 1
+        }
+        FLT_SRC[0] = 0
+        FLT_SLEN = FLT_SLEN + 1
+        left = left - 30
+    }
+    if left == 0 { return true }
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < FLT_SLEN {
+        let v = FLT_SRC[i as usize] * flt_pow2(left) + carry
+        FLT_SRC[i as usize] = v % 1073741824
+        carry = v / 1073741824
+        i = i + 1
+    }
+    if carry > 0 {
+        if FLT_SLEN >= 48 { return false }
+        FLT_SRC[FLT_SLEN as usize] = carry
+        FLT_SLEN = FLT_SLEN + 1
+    }
+    return true
+}
+fn flt_limb_bitlen(which: i64) -> i64 with Mut, Div {
+    var n = if which == 0 { FLT_DLEN } else { FLT_SLEN }
+    var i = n - 1
+    var found: i64 = 0
+    while i > 0 && found == 0 {
+        let limb = if which == 0 { FLT_DEN[i as usize] } else { FLT_SRC[i as usize] }
+        if limb != 0 { found = 1 } else { i = i - 1 }
+    }
+    var v = if which == 0 { FLT_DEN[i as usize] } else { FLT_SRC[i as usize] }
+    var b: i64 = 0
+    while v > 0 { v = v / 2; b = b + 1 }
+    if b == 0 { return 0 }
+    return i * 30 + b
+}
+fn flt_src_bit(i: i64) -> i64 with Mut, Div {
+    let limb = i / 30
+    let off = i % 30
+    return (FLT_SRC[limb as usize] / flt_pow2(off)) % 2
+}
+fn flt_rem_ge_den() -> bool with Mut {
+    var k = FLT_RLEN
+    if FLT_DLEN > k { k = FLT_DLEN }
+    k = k - 1
+    while k > 0 && FLT_REM[k as usize] == FLT_DEN[k as usize] { k = k - 1 }
+    return FLT_REM[k as usize] >= FLT_DEN[k as usize]
+}
+fn flt_rem_sub_den() with Mut {
+    var borrow: i64 = 0
+    var k: i64 = 0
+    while k < FLT_DLEN || borrow > 0 {
+        var dv: i64 = 0
+        if k < FLT_DLEN { dv = FLT_DEN[k as usize] }
+        var rv = FLT_REM[k as usize] - dv - borrow
+        if rv < 0 { rv = rv + 1073741824; borrow = 1 } else { borrow = 0 }
+        FLT_REM[k as usize] = rv
+        k = k + 1
+    }
+}
+fn flt_rem_shl_add(bit: i64) with Mut, Div {
+    var cout = bit
+    var k: i64 = 0
+    while k < FLT_RLEN {
+        let v = FLT_REM[k as usize] * 2 + cout
+        FLT_REM[k as usize] = v % 1073741824
+        cout = v / 1073741824
+        k = k + 1
+    }
+    if cout > 0 {
+        FLT_REM[FLT_RLEN as usize] = cout
+        FLT_RLEN = FLT_RLEN + 1
+    }
+}
+fn flt_wide_bits(sig: i64, exp10: i64) -> i64 with Mut, Div, Panic {
+    if sig == 0 { return 0 }
+    if exp10 > 400 || exp10 < 0 - 400 { return 0 - 1 }
+    var shift: i64 = 0
+    var bin_exp = exp10
+    if exp10 >= 0 {
+        flt_den_set(1)
+        var i: i64 = 0
+        while i < exp10 {
+            if flt_den_mul(5) == false { return 0 - 1 }
+            i = i + 1
+        }
+        if flt_den_mul_i64(sig) == false { return 0 - 1 }
+        var j: i64 = 0
+        while j < 48 { FLT_SRC[j as usize] = FLT_DEN[j as usize]; j = j + 1 }
+        FLT_SLEN = FLT_DLEN
+        flt_den_set(1)
+        shift = 0
+    } else {
+        flt_den_set(1)
+        var e = 0 - exp10
+        var i: i64 = 0
+        while i < e {
+            if flt_den_mul(5) == false { return 0 - 1 }
+            i = i + 1
+        }
+        let den_bits = flt_limb_bitlen(0)
+        shift = den_bits + 60
+        flt_src_set(sig)
+        if flt_src_shl(shift) == false { return 0 - 1 }
+    }
+    flt_rem_clear()
+    let bl = flt_limb_bitlen(1)
+    var idx = bl - 1
+    var seen: i64 = 0
+    var mant: i64 = 0
+    var got: i64 = 0
+    var round_bit: i64 = 0
+    var sticky: i64 = 0
+    var after: i64 = 0
+    while idx >= 0 {
+        flt_rem_shl_add(flt_src_bit(idx))
+        var q: i64 = 0
+        if flt_rem_ge_den() {
+            flt_rem_sub_den()
+            q = 1
+        }
+        if seen == 0 {
+            if q == 1 { seen = 1; mant = 1; got = 1 }
+        } else {
+            after = after + 1
+            if after <= 52 { mant = mant * 2 + q; got = got + 1 }
+            else if after == 53 { round_bit = q }
+            else if q == 1 { sticky = 1 }
+        }
+        idx = idx - 1
+    }
+    var k: i64 = 0
+    while k < FLT_RLEN {
+        if FLT_REM[k as usize] != 0 { sticky = 1 }
+        k = k + 1
+    }
+    if seen == 0 { return 0 }
+    if round_bit == 1 && (sticky == 1 || (mant % 2) == 1) { mant = mant + 1 }
+    var exp_bump: i64 = 0
+    if mant >= 9007199254740992 { mant = mant / 2; exp_bump = 1 }
+    let exp_unbiased = bin_exp + after - shift + exp_bump
+    if exp_unbiased > 1023 { return 9218868437227405312 }
+    if exp_unbiased < 0 - 1022 { return 0 - 1 }
+    while got < 53 { mant = mant * 2; got = got + 1 }
+    let field = exp_unbiased + 1023
+    let frac = mant - 4503599627370496
+    return field * 4503599627370496 + frac
+}
 fn flt_fill_bits(int_part: i64, frac: i64, denom_in: i64, exp: i64) with Mut, Div, Panic {
     FLT_BITS_OK = 0
     FLT_BITS = 0
@@ -15540,12 +15867,17 @@ fn flt_fill_bits(int_part: i64, frac: i64, denom_in: i64, exp: i64) with Mut, Di
         d = d + 1
     }
     let exp10 = exp - d
-    if exp10 > 22 || exp10 < 0 - 22 { return }
     if int_part < 0 || frac < 0 { return }
     if int_part > 0 && denom > 9223372036854775807 / int_part { return }
     let sig = int_part * denom + frac
     if sig < 0 { return }
-    let bits = flt_sig_bits(sig, exp10)
+    var bits: i64 = 0 - 1
+    if exp10 <= 22 && exp10 >= 0 - 22 {
+        bits = flt_sig_bits(sig, exp10)
+    }
+    if bits < 0 {
+        bits = flt_wide_bits(sig, exp10)
+    }
     if bits < 0 { return }
     FLT_BITS = bits
     FLT_BITS_OK = 1
