@@ -7,10 +7,16 @@ set -euo pipefail
 # Configuration
 RECEIPT_DIR="${PIREUS_HEARTBEAT_RECEIPT_DIR:-/tmp/pireus-heartbeat}"
 DRY_RUN="${PIREUS_HEARTBEAT_DRY_RUN:-false}"
-EVIDENCE_DIRS="${PIREUS_EVIDENCE_DIRS:-tools/pireus/evidence:tools/pireus/continuity/runtime:tools/pireus/continuity/recovered}"
+# Default evidence paths: CLUSTER-side paths outside the runner checkout
+# These prove actual Pireus execution on the cluster, not just repo contents
+EVIDENCE_DIRS="${PIREUS_EVIDENCE_DIRS:-/workspace/.wt/pireus-integration-20260906/tools/pireus/continuity/validation}"
 
 # Evidence directory configuration (colon-separated)
 IFS=':' read -ra EVIDENCE_PATHS <<< "$EVIDENCE_DIRS"
+
+# Freshness threshold (seconds) - 26 hours
+FRESHNESS_THRESHOLD_HOURS=26
+FRESHNESS_THRESHOLD_SECONDS=$((FRESHNESS_THRESHOLD_HOURS * 3600))
 
 # Helper functions
 log() {
@@ -53,10 +59,20 @@ collect_slurm_state() {
         fi
         echo ""
         
-        # Recent job history (last 26 hours)
+        # Recent job history (last 26 hours) with WorkDir
         echo "--- Recent Job History (26h window) ---"
         if check_command sacct; then
-            sacct -S now-26hours --format=JobID,JobName%40,User,NodeList,Start,End,State,ExitCode,Elapsed 2>/dev/null || echo "sacct query failed"
+            sacct -S now-26hours --format=JobID,JobName%40,User,NodeList,Start,End,State,ExitCode,Elapsed,WorkDir%80 2>/dev/null || echo "sacct query failed"
+        else
+            echo "sacct not available"
+        fi
+        echo ""
+        
+        # Extract Pireus/Inkling WorkDirs for evidence collection
+        echo "--- Pireus/Inkling Working Directories ---"
+        if check_command sacct; then
+            sacct -S now-26hours --format=WorkDir%200 --noheader 2>/dev/null | \
+                grep -iE 'pireus|inkling|sglang' | sort -u || echo "No Pireus/Inkling work directories found"
         else
             echo "sacct not available"
         fi
@@ -99,9 +115,46 @@ collect_gpu_state() {
     } | tee -a "$output_file"
 }
 
+get_directory_freshness() {
+    local dir_path="$1"
+    
+    if [[ ! -d "$dir_path" ]]; then
+        echo "null"
+        return
+    fi
+    
+    # Find newest file mtime in the directory (recursively)
+    local newest_mtime
+    newest_mtime=$(find "$dir_path" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1)
+    
+    if [[ -z "$newest_mtime" ]]; then
+        echo "null"
+        return
+    fi
+    
+    # Convert to integer (strip decimal)
+    newest_mtime=${newest_mtime%.*}
+    
+    # Calculate age in seconds
+    local current_time
+    current_time=$(date +%s)
+    local age_seconds=$((current_time - newest_mtime))
+    
+    # Return JSON object with mtime, age, and human-readable timestamp
+    local newest_timestamp
+    newest_timestamp=$(date -u -d "@${newest_mtime}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+    
+    jq -n --argjson mtime "$newest_mtime" \
+          --argjson age_seconds "$age_seconds" \
+          --arg timestamp "$newest_timestamp" \
+          --argjson threshold "$FRESHNESS_THRESHOLD_SECONDS" \
+          '{mtime: $mtime, age_seconds: $age_seconds, timestamp: $timestamp, is_fresh: ($age_seconds < $threshold)}'
+}
+
 collect_evidence_state() {
     local output_file="$1"
     local json_file="$2"
+    local slurm_output="$3"
     
     log "Collecting evidence directory state..."
     
@@ -111,11 +164,27 @@ collect_evidence_state() {
     # Initialize evidence JSON array
     echo '[]' > "$evidence_json_file"
     
+    # Extract Pireus/Inkling WorkDirs from Slurm output
+    local workdir_list=()
+    if [[ -f "$slurm_output" ]]; then
+        while IFS= read -r workdir; do
+            workdir=$(echo "$workdir" | xargs)  # trim whitespace
+            if [[ -n "$workdir" && -d "$workdir" ]]; then
+                workdir_list+=("$workdir")
+            fi
+        done < <(grep -A 100 "Pireus/Inkling Working Directories" "$slurm_output" | grep -v "^---" | grep -v "Working Directories" | grep -v "sacct not available" | grep -v "^$" | grep -iE 'pireus|inkling|sglang' || true)
+    fi
+    
+    # Combine configured evidence paths with discovered WorkDirs
+    local all_paths=("${EVIDENCE_PATHS[@]}" "${workdir_list[@]}")
+    
     {
         echo "=== Pireus Evidence Directories ==="
         echo ""
+        echo "Freshness threshold: ${FRESHNESS_THRESHOLD_HOURS}h (${FRESHNESS_THRESHOLD_SECONDS}s)"
+        echo ""
         
-        for evidence_path in "${EVIDENCE_PATHS[@]}"; do
+        for evidence_path in "${all_paths[@]}"; do
             if [[ -d "$evidence_path" ]]; then
                 echo "--- Directory: $evidence_path ---"
                 echo "Exists: yes"
@@ -124,6 +193,18 @@ collect_evidence_state() {
                 local file_count
                 file_count=$(find "$evidence_path" -type f 2>/dev/null | wc -l)
                 echo "File count: $file_count"
+                
+                # Get freshness
+                local freshness_json
+                freshness_json=$(get_directory_freshness "$evidence_path")
+                local newest_timestamp
+                newest_timestamp=$(echo "$freshness_json" | jq -r '.timestamp')
+                local age_seconds
+                age_seconds=$(echo "$freshness_json" | jq -r '.age_seconds')
+                local is_fresh
+                is_fresh=$(echo "$freshness_json" | jq -r '.is_fresh')
+                
+                echo "Newest file: $newest_timestamp (age: ${age_seconds}s, fresh: $is_fresh)"
                 
                 # List recent files (last 7 days, limit to 50)
                 echo "Recent files (last 7 days, max 50):"
@@ -142,10 +223,12 @@ collect_evidence_state() {
                 echo ""
                 evidence_found="true"
                 
-                # Append to JSON array
-                jq --arg path "$evidence_path" --argjson count "$file_count" \
-                    '. + [{path: $path, exists: true, file_count: $count}]' \
-                    "$evidence_json_file" > "${evidence_json_file}.2"
+                # Append to JSON array with freshness
+                jq --arg path "$evidence_path" \
+                   --argjson count "$file_count" \
+                   --argjson freshness "$freshness_json" \
+                   '. + [{path: $path, exists: true, file_count: $count, freshness: $freshness}]' \
+                   "$evidence_json_file" > "${evidence_json_file}.2"
                 mv "${evidence_json_file}.2" "$evidence_json_file"
             else
                 echo "--- Directory: $evidence_path ---"
@@ -184,24 +267,54 @@ determine_verdict() {
     if grep -q "verdict: NO_SLURM" "$slurm_output" 2>/dev/null; then
         verdict="NO_SLURM"
         reason="Slurm commands not available"
-    # Check for failed jobs (non-zero exit codes in recent history)
-    elif grep -E 'FAILED|CANCELLED|TIMEOUT|NODE_FAIL|BOOT_FAIL|OUT_OF_MEMORY' "$slurm_output" &>/dev/null && \
-         grep -iE 'pireus|inkling|sglang' "$slurm_output" &>/dev/null; then
-        verdict="FAILED_JOBS"
-        reason="Pireus-related jobs with failure states detected in last 26 hours"
-    # Check for running Pireus jobs
-    elif grep -iE 'pireus|inkling|sglang' "$slurm_output" &>/dev/null && \
-         grep -E 'RUNNING|PENDING|CONFIGURING' "$slurm_output" &>/dev/null; then
-        verdict="RUNNING"
-        reason="Pireus-related jobs currently running or pending"
-    # Check for evidence but no active jobs
-    elif [[ "$evidence_found" == "true" ]]; then
-        verdict="IDLE"
-        reason="Evidence directories present but no active Pireus jobs"
-    # No evidence and no jobs
     else
-        verdict="NO_EVIDENCE"
-        reason="No Pireus-related jobs and no evidence directories found"
+        # Check if there are any Pireus-related jobs in the last 26h (active or completed)
+        # Look in the job history section, not the entire output
+        local has_recent_pireus_job=false
+        if grep -A 100 "Recent Job History" "$slurm_output" 2>/dev/null | grep -iE 'pireus|inkling|sglang' &>/dev/null; then
+            has_recent_pireus_job=true
+        fi
+        
+        # Check if there are currently running or pending Pireus jobs
+        local has_active_pireus_job=false
+        if grep -A 50 "Active Jobs" "$slurm_output" 2>/dev/null | grep -iE 'pireus|inkling|sglang' | grep -E 'RUNNING|PENDING|CONFIGURING' &>/dev/null; then
+            has_active_pireus_job=true
+        fi
+        
+        # Check evidence freshness (any directory with fresh evidence)
+        local has_fresh_evidence=false
+        if [[ -f "$json_file" ]]; then
+            has_fresh_evidence=$(jq -r '[.evidence_directories[]? | select(.exists == true) | .freshness.is_fresh] | any' "$json_file" 2>/dev/null || echo "false")
+        fi
+        
+        # FRESHNESS rule: RUNNING requires active/recent job AND fresh evidence
+        if [[ "$has_active_pireus_job" == "true" && "$has_fresh_evidence" == "true" ]]; then
+            verdict="RUNNING"
+            reason="Pireus jobs active and evidence fresh (< ${FRESHNESS_THRESHOLD_HOURS}h)"
+        elif [[ "$has_active_pireus_job" == "true" && "$has_fresh_evidence" == "false" ]]; then
+            verdict="RUNNING"
+            reason="Pireus jobs active but evidence stale (≥ ${FRESHNESS_THRESHOLD_HOURS}h) - possible issue"
+        elif [[ "$has_recent_pireus_job" == "true" && "$has_fresh_evidence" == "true" ]]; then
+            verdict="RUNNING"
+            reason="Pireus jobs ended within ${FRESHNESS_THRESHOLD_HOURS}h and evidence fresh"
+        # Check for failed jobs
+        elif grep -E 'FAILED|CANCELLED|TIMEOUT|NODE_FAIL|BOOT_FAIL|OUT_OF_MEMORY' "$slurm_output" &>/dev/null && \
+             grep -iE 'pireus|inkling|sglang' "$slurm_output" &>/dev/null; then
+            verdict="FAILED_JOBS"
+            reason="Pireus-related jobs with failure states detected in last ${FRESHNESS_THRESHOLD_HOURS}h"
+        # Check for stale evidence without recent jobs
+        elif [[ "$evidence_found" == "true" && "$has_fresh_evidence" == "false" ]]; then
+            verdict="IDLE"
+            reason="Evidence directories present but stale (≥ ${FRESHNESS_THRESHOLD_HOURS}h) and no recent jobs"
+        # Evidence exists but no recent jobs
+        elif [[ "$evidence_found" == "true" ]]; then
+            verdict="IDLE"
+            reason="Evidence directories present but no Pireus jobs in last ${FRESHNESS_THRESHOLD_HOURS}h"
+        # No evidence and no jobs
+        else
+            verdict="NO_EVIDENCE"
+            reason="No Pireus-related jobs and no evidence directories found"
+        fi
     fi
     
     log "Verdict: $verdict - $reason"
@@ -247,9 +360,9 @@ generate_markdown_summary() {
         
         echo "## Verdict Rules"
         echo ""
-        echo "- **RUNNING**: Pireus-related jobs (pireus/inkling/sglang) are RUNNING or PENDING"
-        echo "- **IDLE**: Evidence directories exist but no active Pireus jobs"
-        echo "- **FAILED_JOBS**: Pireus-related jobs with failure states in last 26h"
+        echo "- **RUNNING**: Pireus job active/recent (< ${FRESHNESS_THRESHOLD_HOURS}h) AND evidence fresh (< ${FRESHNESS_THRESHOLD_HOURS}h)"
+        echo "- **IDLE**: Evidence directories exist but stale (≥ ${FRESHNESS_THRESHOLD_HOURS}h) or no recent jobs"
+        echo "- **FAILED_JOBS**: Pireus-related jobs with failure states in last ${FRESHNESS_THRESHOLD_HOURS}h"
         echo "- **NO_EVIDENCE**: No Pireus jobs and no evidence directories found"
         echo "- **NO_SLURM**: Slurm commands unavailable"
         echo ""
@@ -259,9 +372,14 @@ generate_markdown_summary() {
         local evidence_count
         evidence_count=$(jq -r '.evidence_directories | length' "$json_file")
         if [[ "$evidence_count" -gt 0 ]]; then
-            echo "| Path | Exists | File Count |"
-            echo "|------|--------|------------|"
-            jq -r '.evidence_directories[] | "| \(.path) | \(.exists) | \(.file_count // "N/A") |"' "$json_file"
+            echo "| Path | Exists | Files | Newest | Age | Fresh |"
+            echo "|------|--------|-------|--------|-----|-------|"
+            jq -r '.evidence_directories[] | 
+                if .exists == true then
+                    "| \(.path) | \(.exists) | \(.file_count) | \(.freshness.timestamp // "N/A") | \(.freshness.age_seconds // 0)s | \(.freshness.is_fresh // false) |"
+                else
+                    "| \(.path) | \(.exists) | N/A | N/A | N/A | N/A |"
+                end' "$json_file"
         else
             echo "*No evidence directories configured*"
         fi
@@ -294,6 +412,9 @@ dry_run_mode() {
         echo ""
         echo "This is a dry-run simulation. No actual Slurm queries were executed."
         echo ""
+        echo "--- Pireus/Inkling Working Directories ---"
+        echo "No WorkDirs in dry-run mode"
+        echo ""
     } > "$output_file"
     
     # Create base JSON
@@ -302,7 +423,7 @@ dry_run_mode() {
     
     # Collect evidence state (reuse actual function)
     local evidence_found
-    evidence_found=$(collect_evidence_state "$output_file" "$json_file")
+    evidence_found=$(collect_evidence_state "$output_file" "$json_file" "$output_file")
     
     # Create verdict
     determine_verdict "$output_file" "$evidence_found" "$json_file"
@@ -341,9 +462,9 @@ main() {
     # Collect GPU state
     collect_gpu_state "$output_file" || true
     
-    # Collect evidence state
+    # Collect evidence state (passing slurm output for WorkDir extraction)
     local evidence_found
-    evidence_found=$(collect_evidence_state "$output_file" "$json_file")
+    evidence_found=$(collect_evidence_state "$output_file" "$json_file" "$output_file")
     
     # Determine verdict
     determine_verdict "$output_file" "$evidence_found" "$json_file"

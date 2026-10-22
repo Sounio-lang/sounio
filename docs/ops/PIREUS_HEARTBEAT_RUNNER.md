@@ -15,15 +15,21 @@ The workflow **never submits, modifies, or terminates jobs**. It produces a JSON
 
 ## Verdict Rules
 
-The heartbeat script determines one of five verdicts:
+The heartbeat script determines one of five verdicts based on **freshness** (26-hour threshold):
 
 | Verdict | Meaning | Exit Code |
 |---------|---------|-----------|
-| `RUNNING` | Pireus-related jobs (pireus/inkling/sglang) are RUNNING or PENDING | 0 |
-| `IDLE` | Evidence directories exist but no active Pireus jobs | 0 |
+| `RUNNING` | Pireus job active/recent (< 26h) **AND** evidence fresh (< 26h) | 0 |
+| `IDLE` | Evidence exists but stale (≥ 26h) or no recent Pireus jobs | 0 |
 | `FAILED_JOBS` | Pireus-related jobs with failure states in last 26h | 0 |
 | `NO_EVIDENCE` | No Pireus jobs and no evidence directories found | 0 |
 | `NO_SLURM` | Slurm commands unavailable | 1 |
+
+**Freshness rule**: A `RUNNING` verdict requires **both**:
+1. A Pireus/Inkling/SGLang job that is currently active OR ended within the last 26 hours, **AND**
+2. At least one evidence directory with files modified within the last 26 hours.
+
+This ensures the verdict reflects actual cluster activity, not just stale artifacts.
 
 ## Prerequisites
 
@@ -236,19 +242,32 @@ The runner will disappear from the GitHub Runners page.
 
 ## Evidence Directory Configuration
 
-By default, the workflow monitors these directories:
+By default, the workflow monitors **cluster-side paths** outside the runner checkout:
 
 ```bash
-PIREUS_EVIDENCE_DIRS=tools/pireus/evidence:tools/pireus/continuity/runtime:tools/pireus/continuity/recovered
+PIREUS_EVIDENCE_DIRS=/workspace/.wt/pireus-integration-20260906/tools/pireus/continuity/validation
 ```
+
+This points to the Pireus worktree on the cluster, which contains:
+- `validation/` directory with actual execution receipts
+- `real-inkling-cycle-20260907/` subdirectory with live Inkling cycle artifacts
+
+**Automatic WorkDir discovery**: The script also automatically discovers and monitors Slurm job working directories by parsing `sacct --format=WorkDir` output for any jobs matching `pireus`, `inkling`, or `sglang` in the last 26 hours.
+
+**Freshness calculation**: For each directory, the script:
+- Finds the newest file (by mtime, recursively)
+- Reports its timestamp and age in seconds
+- Marks it as "fresh" if age < 26 hours
 
 To add more directories, update the `PIREUS_EVIDENCE_DIRS` environment variable in the workflow file or pass it as a repository variable:
 
 1. Go to **Settings** > **Secrets and variables** > **Actions** > **Variables**
 2. Create a new repository variable: `PIREUS_EVIDENCE_DIRS`
-3. Set the value to a colon-separated list of paths
+3. Set the value to a colon-separated list of **absolute cluster paths**
 
 The workflow will prefer the repository variable if set.
+
+**Important**: Evidence directories must be **cluster-side paths** (e.g. `/workspace/.wt/...`, `/scratch/...`, `/data/...`), not repository-tracked paths. Repository paths like `tools/pireus/evidence` prove nothing about actual cluster execution.
 
 ## Contact
 
