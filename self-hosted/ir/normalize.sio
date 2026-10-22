@@ -76,20 +76,25 @@ fn sort_string_table(strings: [Name; 16384], count: i64) -> [Name; 16384] with M
 }
 
 // Build label renumbering map by scanning instruction order
-fn build_label_map(func: IrFunction) -> [i64; 256] with Mut, Panic, Div {
-    var label_map: [i64; 256] = [IR_INVALID_LABEL; 256]
-    var next_label: i64 = 0
-
+// Writes into the provided label_map buffer to avoid returning 2048 bytes by value.
+fn build_label_map(func: IrFunction, label_map: &![i64; 256]) with Mut, Panic, Div {
     var i: i64 = 0
+    while i < 256 {
+        (*label_map)[i as usize] = IR_INVALID_LABEL
+        i = i + 1
+    }
+    
+    var next_label: i64 = 0
+    i = 0
     while i < func.instr_count {
         let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         match instr.op {
             IrOpcode::IrLabel => {
                 let old_label = instr.label_id
                 if old_label >= 0 && old_label < 256 {
-                    if label_map[old_label] == IR_INVALID_LABEL {
+                    if (*label_map)[old_label as usize] == IR_INVALID_LABEL {
                         // First definition of this label
-                        label_map[old_label] = next_label
+                        (*label_map)[old_label as usize] = next_label
                         next_label = next_label + 1
                     }
                 }
@@ -98,19 +103,17 @@ fn build_label_map(func: IrFunction) -> [i64; 256] with Mut, Panic, Div {
         }
         i = i + 1
     }
-
-    label_map
 }
 
 // Apply label renumbering to all instructions
-fn renumber_labels(func: IrFunction, label_map: [i64; 256]) -> IrFunction with Mut, Panic, Div {
+fn renumber_labels(func: IrFunction, label_map: &[i64; 256]) -> IrFunction with Mut, Panic, Div {
     var new_func = ir_function_clone(&func)
     var i: i64 = 0
     while i < new_func.instr_count {
         let instr = ir_arena_load(ir_region_slot_r(new_func.region, (i)))
         let old_label = instr.label_id
         let new_label = if old_label >= 0 && old_label < 256 {
-            let mapped = label_map[old_label]
+            let mapped = (*label_map)[old_label as usize]
             if mapped != IR_INVALID_LABEL { mapped } else { old_label }
         } else {
             old_label
@@ -141,49 +144,53 @@ fn renumber_labels(func: IrFunction, label_map: [i64; 256]) -> IrFunction with M
 }
 
 // Build register renumbering map by scanning first use order
-fn build_register_map(func: IrFunction) -> [i64; 1024] with Mut, Panic, Div {
-    var reg_map: [i64; 1024] = [IR_INVALID_REG; 1024]
+// Writes into the provided reg_map buffer to avoid returning 8192 bytes by value.
+fn build_register_map(func: IrFunction, reg_map: &![i64; 1024]) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 1024 {
+        (*reg_map)[i as usize] = IR_INVALID_REG
+        i = i + 1
+    }
+    
     var next_reg: i64 = 0
 
     // Scan all instructions
-    var i: i64 = 0
+    i = 0
     while i < func.instr_count {
         let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
 
         // Record dst register (definition)
         if instr.dst >= 0 && instr.dst < 1024 {
-            if reg_map[instr.dst] == IR_INVALID_REG {
-                reg_map[instr.dst] = next_reg
+            if (*reg_map)[instr.dst as usize] == IR_INVALID_REG {
+                (*reg_map)[instr.dst as usize] = next_reg
                 next_reg = next_reg + 1
             }
         }
 
         // Record src1 register (use)
         if instr.src1 >= 0 && instr.src1 < 1024 {
-            if reg_map[instr.src1] == IR_INVALID_REG {
-                reg_map[instr.src1] = next_reg
+            if (*reg_map)[instr.src1 as usize] == IR_INVALID_REG {
+                (*reg_map)[instr.src1 as usize] = next_reg
                 next_reg = next_reg + 1
             }
         }
 
         // Record src2 register (use)
         if instr.src2 >= 0 && instr.src2 < 1024 {
-            if reg_map[instr.src2] == IR_INVALID_REG {
-                reg_map[instr.src2] = next_reg
+            if (*reg_map)[instr.src2 as usize] == IR_INVALID_REG {
+                (*reg_map)[instr.src2 as usize] = next_reg
                 next_reg = next_reg + 1
             }
         }
 
         i = i + 1
     }
-
-    reg_map
 }
 
 // Helper to map a single register using the renumbering map
-fn map_register(old_reg: i64, reg_map: [i64; 1024]) -> i64 with Mut, Panic, Div {
+fn map_register(old_reg: i64, reg_map: &[i64; 1024]) -> i64 with Mut, Panic, Div {
     if old_reg >= 0 && old_reg < 1024 {
-        let mapped = reg_map[old_reg]
+        let mapped = (*reg_map)[old_reg as usize]
         if mapped != IR_INVALID_REG { mapped } else { old_reg }
     } else {
         old_reg
@@ -191,13 +198,13 @@ fn map_register(old_reg: i64, reg_map: [i64; 1024]) -> i64 with Mut, Panic, Div 
 }
 
 // Apply register renumbering to all instructions and params
-fn renumber_registers(func: IrFunction, reg_map: [i64; 1024]) -> IrFunction with Mut, Panic, Div {
+fn renumber_registers(func: IrFunction, reg_map: &[i64; 1024]) -> IrFunction with Mut, Panic, Div {
     var new_func = ir_function_clone(&func)
 
     // Renumber param_regs
     var j: i64 = 0
     while j < 64 {
-        new_func.param_regs[j] = map_register(func.param_regs[j], reg_map)
+        new_func.param_regs[j] = map_register(func.param_regs[j], &reg_map)
         j = j + 1
     }
 
@@ -205,9 +212,9 @@ fn renumber_registers(func: IrFunction, reg_map: [i64; 1024]) -> IrFunction with
     var i: i64 = 0
     while i < new_func.instr_count {
         let instr = ir_arena_load(ir_region_slot_r(new_func.region, (i)))
-        let new_dst = map_register(instr.dst, reg_map)
-        let new_src1 = map_register(instr.src1, reg_map)
-        let new_src2 = map_register(instr.src2, reg_map)
+        let new_dst = map_register(instr.dst, &reg_map)
+        let new_src1 = map_register(instr.src1, &reg_map)
+        let new_src2 = map_register(instr.src2, &reg_map)
 
         ir_arena_store(ir_region_slot_w(new_func.region, (i)), IrInstr {
             op: instr.op,
@@ -235,12 +242,16 @@ fn renumber_registers(func: IrFunction, reg_map: [i64; 1024]) -> IrFunction with
 // Normalize a single function
 fn normalize_function(func: IrFunction) -> IrFunction with Mut, Panic, Div {
     // Step 1: Renumber labels
-    let label_map = build_label_map(func)
-    let func1 = renumber_labels(func, label_map)
+    // Use local buffer to avoid allocating 2048 bytes per call
+    var label_map: [i64; 256] = [0; 256]
+    build_label_map(func, &!label_map)
+    let func1 = renumber_labels(func, &label_map)
 
     // Step 2: Renumber registers
-    let reg_map = build_register_map(func1)
-    let func2 = renumber_registers(func1, reg_map)
+    // Use local buffer to avoid allocating 8192 bytes per call
+    var reg_map: [i64; 1024] = [0; 1024]
+    build_register_map(func1, &!reg_map)
+    let func2 = renumber_registers(func1, &reg_map)
 
     func2
 }

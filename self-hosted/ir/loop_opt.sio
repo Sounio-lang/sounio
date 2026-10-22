@@ -4036,7 +4036,7 @@ fn lopt_ir_find_preheader(cfg: &LoptIrCfg, body: [bool; 128], header: i64) -> i6
     if count == 1 { found } else { LOPT_INVALID }
 }
 
-fn lopt_ir_reg_is_invariant(reg: i64, body: [bool; 128], def_instr: [i64; 256], def_block: [i64; 256], hoisted_defs: [bool; 256]) -> bool with Mut, Panic, Div {
+fn lopt_ir_reg_is_invariant(reg: i64, body: [bool; 128], def_instr: &[i64; 256], def_block: &[i64; 256], hoisted_defs: [bool; 256]) -> bool with Mut, Panic, Div {
     if reg < 0 {
         return true
     }
@@ -4046,51 +4046,56 @@ fn lopt_ir_reg_is_invariant(reg: i64, body: [bool; 128], def_instr: [i64; 256], 
     if hoisted_defs[reg as usize] {
         return true
     }
-    let di = def_instr[reg as usize]
+    let di = (*def_instr)[reg as usize]
     if di == LOPT_INVALID {
         return true
     }
     if di == -2 {
         return false
     }
-    let db = def_block[reg as usize]
+    let db = (*def_block)[reg as usize]
     if db < 0 {
         return true
     }
     lopt_ir_block_in_body(body, db) == false
 }
 
-fn lopt_ir_operands_invariant(instr: IrInstr, body: [bool; 128], def_instr: [i64; 256], def_block: [i64; 256], hoisted_defs: [bool; 256]) -> bool with Mut, Panic, Div {
+fn lopt_ir_operands_invariant(instr: IrInstr, body: [bool; 128], def_instr: &[i64; 256], def_block: &[i64; 256], hoisted_defs: [bool; 256]) -> bool with Mut, Panic, Div {
     let s1_ok = lopt_ir_reg_is_invariant(instr.src1, body, def_instr, def_block, hoisted_defs)
     let s2_ok = lopt_ir_reg_is_invariant(instr.src2, body, def_instr, def_block, hoisted_defs)
     s1_ok && s2_ok
 }
 
-fn lopt_ir_build_defs(func: &IrFunction, cfg: &LoptIrCfg) -> ([i64; 256], [i64; 256]) with Mut, Panic, Div {
-    var def_instr: [i64; 256] = [LOPT_INVALID; 256]
-    var def_block: [i64; 256] = [LOPT_INVALID; 256]
+// Build definition info into provided buffers to avoid returning 4096 bytes by value.
+fn lopt_ir_build_defs(func: &IrFunction, cfg: &LoptIrCfg, def_instr: &![i64; 256], def_block: &![i64; 256]) with Mut, Panic, Div {
     var i: i64 = 0
+    while i < 256 {
+        (*def_instr)[i as usize] = LOPT_INVALID
+        (*def_block)[i as usize] = LOPT_INVALID
+        i = i + 1
+    }
+    
+    i = 0
     while i < func.instr_count {
         let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         if lopt_ir_has_dst(instr.op) && instr.dst >= 0 && instr.dst < LOPT_IR_MAX_REGS {
-            if def_instr[instr.dst as usize] == LOPT_INVALID {
-                def_instr[instr.dst as usize] = i
-                def_block[instr.dst as usize] = cfg.instr_block[i as usize]
+            if (*def_instr)[instr.dst as usize] == LOPT_INVALID {
+                (*def_instr)[instr.dst as usize] = i
+                (*def_block)[instr.dst as usize] = cfg.instr_block[i as usize]
             } else {
-                def_instr[instr.dst as usize] = -2
-                def_block[instr.dst as usize] = -2
+                (*def_instr)[instr.dst as usize] = -2
+                (*def_block)[instr.dst as usize] = -2
             }
         }
         i = i + 1
     }
-    (def_instr, def_block)
 }
 
 fn lopt_ir_schedule_loop_hoists(func: &IrFunction, cfg: &LoptIrCfg, body: [bool; 128], preheader: i64, assigned: [i64; 128]) -> LoptScheduleResult with Mut, Panic, Div {
     var result = lopt_schedule_result_new(assigned)
-    let defs = lopt_ir_build_defs(func, cfg)
-    let def_instr = defs.0
-    let def_block = defs.1
+    var def_instr: [i64; 256] = [0; 256]
+    var def_block: [i64; 256] = [0; 256]
+    lopt_ir_build_defs(func, cfg, &!def_instr, &!def_block)
     var hoisted_defs: [bool; 256] = [false; 256]
     var changed = true
     var guard: i64 = 0
@@ -4105,7 +4110,7 @@ fn lopt_ir_schedule_loop_hoists(func: &IrFunction, cfg: &LoptIrCfg, body: [bool;
                 if lopt_ir_block_in_body(body, block_id) {
                     let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
                     if lopt_ir_is_hoistable_opcode(instr.op) {
-                        if lopt_ir_operands_invariant(instr, body, def_instr, def_block, hoisted_defs) {
+                        if lopt_ir_operands_invariant(instr, body, &def_instr, &def_block, hoisted_defs) {
                             result.assigned[i as usize] = preheader
                             if instr.dst >= 0 && instr.dst < LOPT_IR_MAX_REGS {
                                 hoisted_defs[instr.dst as usize] = true
