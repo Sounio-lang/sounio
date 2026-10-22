@@ -65,11 +65,15 @@ SYNC = "scripts/docs/sync_governance_metadata.mjs"
 # 2026-08-28 when cd-tower-automorphism-freeze.md was whitelisted in the
 # same change that added it; grew to 6 on 2026-09-22 when
 # docs/research/delta_epistemic_gradual_compilation_paper.md was
-# reclassified from historical lineage to the design target (PR #2648).
+# reclassified from historical lineage to the design target (PR #2648);
+# grew to 8 on 2026-10-22 when the two research records of that day
+# (EPISTEMIC_REASONING_AND_METACOGNITION and ONTOLOGY_ALGEBRA_AND_COMPILER_TOWER)
+# were whitelisted in the change that added them: open lines indexed by
+# docs/planning/LANGUAGE_BACKLOG_2026-10-22.md with kill tests still to run.
 # Bump this deliberately when the whitelist legitimately changes size --
 # do not let this constant silently drift out of sync with
 # governance_registry.mjs.
-WHITELIST_SIZE = 6
+WHITELIST_SIZE = 8
 
 SUBJECT = "docs/research/self_falsifying_compilation_line_r24_2026-07-31.md"
 FARM_COPY = ["docs", "examples", "paper", "spec", "README.md"]
