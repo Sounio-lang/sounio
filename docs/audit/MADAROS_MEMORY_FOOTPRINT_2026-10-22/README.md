@@ -110,6 +110,17 @@ convention.
 attribution needs a seed that reports bytes per `bss_alloc_aligned` caller;
 until then 2.2 is a demonstrated mechanism, not a measured share.
 
+**The most likely carrier, from an independent investigation.** PR #3015
+(merged 2026-10-22, issue #2966) found the same convention from the stack side:
+the IR `Lowerer` struct is about 4.5 MB by value, and `self-hosted/ir/lower.sio`
+has 618 methods that take `self` by value (recounted here: 618, of which 125 also
+return `Lowerer` by value). At that size every such call site is above the
+seed's 1 MiB threshold, so under §2.2 each one reserves its own blocks; a few
+hundred sites would make up the 2.58 GB. That is a prediction, not a measurement,
+and it has a direct test: rebuilding with `Lowerer` taken as `&!Lowerer` (the
+refactor #3015 sizes at weeks of work) should shrink the BSS by roughly the
+number of converted sites times the struct's size under the seed's layout.
+
 ## 3. The gen3 OOM, reasoned from what is known
 
 If gen2 is bit-identical to gen1, building gen3 with gen2 is **the same
@@ -128,6 +139,13 @@ ratio like that, between two compilers of the same source, points at phases
 that stay alive after they are consumed rather than at the source's size. The measurement this record
 lacks is the one that matters: peak RSS of a Madaros-built Madaros compiling
 `main.sio` (the gen2 → gen3 step), which a 7 GiB container cannot host safely.
+
+One environment variable is already known to decide the outcome. PR #3015 records
+that GitHub Actions runs with a 16 MB stack and an 8 MB stack is the Linux
+default; on 8 MB a Madaros self-compile boundary test dies with SIGSEGV (rc 139),
+on 16 MB the gen3 self-compile completes in CI, and #2966's "IR arena full" was an
+artefact of the 8 MB stack. A gen3 failure report therefore needs its
+`ulimit -s` beside its memory limit before the two are compared.
 
 Triage for the gen7 fixed point (the self-compilation map `gen_{n+1} = F(gen_n)`):
 
