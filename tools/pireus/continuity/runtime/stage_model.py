@@ -68,6 +68,8 @@ def fetch(root, entry):
                                 next_progress += 1024**3
                         out.flush()
                         os.fsync(out.fileno())
+            if partial.stat().st_size < entry["size"]:
+                raise OSError("early EOF; partial transfer retained for Range resume")
             if not verify(partial, entry):
                 raise ValueError(f"snapshot hash/size mismatch: {name}")
             os.replace(partial, path)

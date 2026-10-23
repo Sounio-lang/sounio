@@ -26,7 +26,7 @@ Todo módulo `MODULO` em `stdlib/` deve ter exatamente esta estrutura:
 Todo `pub fn` **deve** ter docstring `///` completa, incluindo:
 
 * **Parâmetros**: Descrição detalhada de cada `param`.
-* **Retorno**: Tipo exato, destacando `Knowledge<T>` se numérico.
+* **Retorno**: Tipo exato, destacando `Epistemic` se numérico.
 * **Complexidade**: Notação O(?), ex: `O(n log n)`.
 * **Referências bibliográficas**: DOIs, papers ou standards (NIST, GUM, etc.).
 
@@ -39,50 +39,55 @@ Todo `pub fn` **deve** ter docstring `///` completa, incluindo:
 /// - `data`: Vetor de medidas com incerteza.
 ///
 /// # Retorno
-/// `Knowledge<f64>` com média e confidence propagado.
+/// `Epistemic` com média e confidence propagado (confidence é i64, 0..1000).
 ///
 /// # Complexidade
 /// O(n)
 ///
 /// # Exemplo
 /// ```sio
-/// let data = [knowledge(1.0, 0.01), knowledge(2.0, 0.02)];
-/// let mean = compute_mean(data);
-/// assert(mean.confidence > 0.95);
+/// use epistemic::knowledge::{ep_measured, ep_is_credible}
+/// let data = [ep_measured(1.0, 0.01), ep_measured(2.0, 0.02)]
+/// let mean = compute_mean(&data)
+/// assert(ep_is_credible(&mean, 900))
 /// ```
 ///
 /// # Referências
 /// - GUM 2008, JCGM 100:2008
-pub fn compute_mean(data: &[Knowledge<f64>]) -> Knowledge<f64>
+pub fn compute_mean(data: &[Epistemic]) -> Epistemic
 ```
 
 ## 4. Integração Epistêmica
 
-- **Todo resultado numérico**: Retornar `Knowledge<T>` ou [`GUMUncertainty`](epistemic/gum.sio).
-- **Propagação automática**: Incerteza deve propagar em todas ops matemáticas (`+`, `*`, etc.).
-- **Confidence degradation**: Composições complexas degradam confidence automaticamente.
+- **Todo resultado numérico**: Retornar `Epistemic` (`stdlib/epistemic/knowledge.sio`) ou `GUMResult` ([`gum.sio`](epistemic/gum.sio)).
+- **Propagação**: Incerteza propaga pelas funções livres `ep_add`, `ep_sub`, `ep_mul`, `ep_div` (método GUM delta, entradas não correlacionadas). Não há sobrecarga de `+`/`*` para `Epistemic` na superfície checada.
+- **Confidence**: `i64` na escala 0..1000. Combinações aplicam decaimento operação-específico à menor confidence de entrada: `ep_add`/`ep_sub` multiplicam por 99/100, `ep_mul` por 98/100, `ep_div` por 97/100 (nunca aumenta). `ep_scale`/`ep_shift` preservam; `ep_merge` faz a média das duas confidences (`(a + b)/2`).
 
 Exemplo mínimo em todo `pub fn` numérico:
 
 ```sio
-pub fn add_epistemic(a: Knowledge<f64>, b: Knowledge<f64>) -> Knowledge<f64> {
-    knowledge(a.value + b.value, sqrt(a.u**2 + b.u**2))
+use epistemic::knowledge::{Epistemic, ep_add}
+
+pub fn add_measurements(a: Epistemic, b: Epistemic) -> Epistemic {
+    ep_add(&a, &b)
 }
 ```
 
 ## 5. Testes
 
-- **Unit tests**: Inline em `lib.sio`, usando `assert` e `assert_eq!`.
+- **Unit tests**: Inline em `lib.sio`, usando `assert`.
 - **E2E tests**: Diretório `tests/stdlib/MODULO/` com cenários reais.
 - **Validação vs referências**: Comparar resultados com SciPy, NIST datasets, etc.
 
 Exemplo de test inline:
 
 ```sio
-fn test_compute_mean() {
-    let data = [knowledge(1.0, 0.0), knowledge(3.0, 0.0)];
-    let mean = compute_mean(&data);
-    assert_eq!(mean.value, 2.0);
-    assert!(mean.confidence >= 1.0);
+use epistemic::knowledge::{ep_certain, ep_val, ep_confidence}
+
+fn test_compute_mean() with Panic {
+    let data = [ep_certain(1.0), ep_certain(3.0)]
+    let mean = compute_mean(&data)
+    assert(ep_val(&mean) == 2.0)
+    assert(ep_confidence(&mean) == 1000)
 }
 ```

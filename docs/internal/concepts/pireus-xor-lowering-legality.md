@@ -2,8 +2,8 @@
 topic_id: repo.docs.internal.concepts.pireus-xor-lowering-legality
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.pireus-xor-lowering-legality
 -->
 
@@ -11,7 +11,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-PIREUS-XOR-LOWERING-LEGALITY`
 
-Status: `SEMANTICS_FROZEN`
+Status: executable
+
+Historical-Lane-State: `SEMANTICS_FROZEN`
+Evidence-Pass: tests/stdlib/hardware/test_pireus_xor_lowering_legality.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 Semantic-Lane-ID: `pireus-xor-lowering-legality-20260827`
 
@@ -93,7 +100,7 @@ requires a separately admitted numerical or refinement contract.
 All Darwin CPUs in the frozen target profile are Xeon. Canonical declaration
 is not observation.
 
-## Closed Claims
+## Claims Forbidden
 
 This freeze does not establish:
 

@@ -45,7 +45,7 @@ export default function AudienceSelector({ strings = defaultStrings }: Props) {
 
   if (!mounted) {
     return (
-      <button type="button" className="audience-toggle-btn" aria-label="Toggle audience view">
+      <button type="button" className="audience-toggle-btn" aria-label={strings.choose} disabled>
         <span className="audience-label">{strings.scientist}</span>
       </button>
     );
@@ -57,8 +57,8 @@ export default function AudienceSelector({ strings = defaultStrings }: Props) {
         type="button"
         onClick={toggle}
         className="audience-toggle-btn"
-        aria-label={`Viewing as ${labels[audience]}. Click to switch.`}
-        title={`View: ${labels[audience]}`}
+        aria-label={`${strings.choose}: ${labels[audience]}`}
+        title={labels[audience]}
       >
         <svg className="w-3.5 h-3.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
           {audience === 'scientist' ? (

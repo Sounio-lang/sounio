@@ -37,13 +37,19 @@ oracles.
   standards, which is the acceptance criterion — the language standard is not
   a numerical variable.
   Run: `g++ -std=c++23 -O2 -o band_crosscheck cpp/gri30_h2_band_crosscheck.cpp && ./band_crosscheck gri30_h2_mechanism.json`
-- `formal/lean4/SounioIndepComposition.lean` — the machine-checked side of the
+- `SounioIndepComposition.lean` — the machine-checked side of the
   same result: 15 theorems, zero `sorry`, establishing that quadrature is the
   ρ = 0 case of the JCGM combination law, that it understates under positive
   correlation, and that N fully-correlated steps combined in quadrature
   understate by exactly √N — which is the √(T/dt) law measured in
-  `RESULTS.md` section 5.3, derived rather than fitted.
-  Run: `cd formal/lean4 && lake build SounioIndepComposition`
+  `RESULTS.md` section 5.3, derived rather than fitted. **Not present in this
+  repository as a buildable Lake target**: `formal/lean4/` here carries a Lake
+  project but no source for this module, only stale `.lake/build/` output from
+  a build made elsewhere (`cd formal/lean4 && lake build SounioIndepComposition`
+  fails with `error: unknown target`). It ships in the frozen snapshot at
+  `formal/SounioIndepComposition.lean`, Mathlib-free core Lean 4 needing no
+  Lake project, and builds standalone there:
+  Run (against the snapshot): `elan run leanprover/lean4:v4.33.0 lean formal/SounioIndepComposition.lean`
 - `gri30_h2_cantera_parity.py` — Cantera 3.2 reference: builds the same
   sub-mechanism from Cantera's own `gri30.yaml`, runs the identical isothermal
   protocol, prints the parity table and ignition delays.

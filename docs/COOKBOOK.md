@@ -2,24 +2,27 @@
 topic_id: repo.docs.cookbook
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.cookbook
 -->
 
-> **Status**: Production | **Last validated**: 2026-04-12 | **Source**: `tests/run-pass/`
+> **Status**: mixed | **Last validated**: unvalidated except the hello below | **Source**: `examples/hello.sio`
 
 # Sounio Cookbook
 
-Task-oriented recipes. Every example is derived from or verified against `tests/run-pass/`.
+Task-oriented recipes. A block that names a `tests/run-pass/` file was not re-run on 2026-10-15. Do not treat an uncited block as the contract. The current walkthrough is [guide/getting-started.md](guide/getting-started.md).
 
 ---
 
 ## Hello World
 
+Same program as `examples/hello.sio`. `souc run` executes it on Linux x86-64. Measured 2026-10-15.
+
 ```sio
-fn main() with IO {
-    println("Hello, Sounio!")
+fn main() -> i32 with IO {
+    println("Hello, Sounio")
+    return 0
 }
 ```
 
@@ -346,16 +349,11 @@ kernel fn vec_add(a: &[f64], b: &[f64], out: &![f64], n: i32) {
 Source: `tests/run-pass/vancomycin_propagation.sio`
 
 ```sio
-struct KnowledgeF64 {
-    value: f64,
-    uncertainty: f64,
-    confidence: f64,
-}
-
-fn gum_mul(a: KnowledgeF64, b: KnowledgeF64) -> KnowledgeF64 {
-    let val = a.value * b.value
-    let unc = val * (((a.uncertainty / a.value) * (a.uncertainty / a.value)) + ((b.uncertainty / b.value) * (b.uncertainty / b.uncertainty))) * 0.5
-    KnowledgeF64 { value: val, uncertainty: unc, confidence: 0.0 }
+// Canonical epistemic value type — stdlib/epistemic/knowledge.sio:
+//   Epistemic { val: f64, variance: f64, confidence: i64 }
+fn gum_mul(a: Epistemic, b: Epistemic) -> Epistemic {
+    // GUM uncorrelated delta method; read the std-dev with ep_std(&r).
+    ep_mul(&a, &b)
 }
 ```
 

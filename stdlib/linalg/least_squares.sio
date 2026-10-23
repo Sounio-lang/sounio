@@ -1,0 +1,294 @@
+// Bounded column-pivoted Householder least squares. See LEAST_SQUARES.md.
+use math::pure::{is_finite, sqrt}
+use linalg::least_squares_scale::{LeastSquaresNumber,least_squares_restore}
+pub struct LeastSquaresResult {
+    pub status: i64,
+    pub m: i64,
+    pub p: i64,
+    pub rank: i64,
+    pub df: i64,
+    pub coefficients: [f64;8],
+    pub fitted: [f64;256],
+    pub residuals: [f64;256],
+    pub residual_norm: f64,
+    pub rcond_used: f64,
+    pub r_diagonal_ratio: f64,
+    pub pivot: [i64;8],
+}
+fn ls_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn ls_index(row: i64, column: i64) -> usize { (row * 8 + column) as usize }
+fn ls_empty(status: i64, m: i64, p: i64) -> LeastSquaresResult {
+    LeastSquaresResult {
+        status: status, m: m, p: p, rank: 0, df: 0,
+        coefficients: [0.0;8], fitted: [0.0;256], residuals: [0.0;256],
+        residual_norm: 0.0, rcond_used: 0.0, r_diagonal_ratio: 0.0, pivot: [0;8],
+    }
+}
+// Recompute each remaining norm from its current column. No downdates.
+fn ls_column_norm(a: &[f64;2048], first: i64, m: i64, column: i64) -> f64 with Mut, Div, Panic {
+    var scale: f64 = 0.0
+    var ssq: f64 = 1.0
+    var row = first
+    while row < m {
+        let magnitude = ls_abs(a[ls_index(row,column)])
+        if !is_finite(magnitude) { return magnitude }
+        if magnitude > 0.0 {
+            if magnitude > scale {
+                let ratio = scale / magnitude
+                ssq = 1.0 + ssq * ratio * ratio
+                scale = magnitude
+            } else {
+                let ratio = magnitude / scale
+                ssq = ssq + ratio * ratio
+            }
+        }
+        row = row + 1
+    }
+    scale * sqrt(ssq)
+}
+fn ls_engine(a: &[f64;2048], b: &[f64;256], m: i64, p: i64,
+    rcond: f64, want_factor: bool, r_out: &![f64;64],
+    scales_out: &![f64;8]) -> LeastSquaresResult with Mut, Div, Panic {
+    if m < 1 || m > 256 || p < 1 || p > 8 || m < p { return ls_empty(1,m,p) }
+    if !is_finite(rcond) || rcond < 0.0 || rcond >= 1.0 { return ls_empty(5,m,p) }
+    let cutoff = if rcond == 0.0 { (m as f64) * 2.2204460492503131e-16 } else { rcond }
+    var row: i64 = 0
+    while row < m {
+        if !is_finite(b[row as usize]) { return ls_empty(2,m,p) }
+        var column: i64 = 0
+        while column < p {
+            if !is_finite(a[ls_index(row,column)]) { return ls_empty(2,m,p) }
+            column = column + 1
+        }
+        row = row + 1
+    }
+    var matrix: [f64;2048] = [0.0;2048]
+    var rhs: [f64;256] = [0.0;256]
+    var scales: [f64;8] = [0.0;8]
+    var solution: [f64;8] = [0.0;8]
+    var response_scale: f64 = 0.0
+    row = 0
+    while row < m {
+        let magnitude = ls_abs(b[row as usize])
+        if magnitude > response_scale { response_scale = magnitude }
+        var column: i64 = 0
+        while column < p {
+            let magnitude = ls_abs(a[ls_index(row,column)])
+            if magnitude > scales[column as usize] { scales[column as usize] = magnitude }
+            column = column + 1
+        }
+        row = row + 1
+    }
+    if response_scale == 0.0 { response_scale = 1.0 }
+    row = 0
+    while row < m {
+        rhs[row as usize] = b[row as usize] / response_scale
+        var column: i64 = 0
+        while column < p {
+            let scale: f64 = scales[column as usize]
+            if scale > 0.0 { matrix[ls_index(row,column)] = a[ls_index(row,column)] / scale }
+            column = column + 1
+        }
+        row = row + 1
+    }
+    var result = ls_empty(0,m,p)
+    result.rcond_used = cutoff
+    var j: i64 = 0
+    while j < p { result.pivot[j as usize] = j; j = j + 1 }
+    var reference: f64 = 0.0
+    var diagonal_max: f64 = 0.0
+    var diagonal_min: f64 = 0.0
+    var k: i64 = 0
+    while k < p {
+        var best = k
+        var norm: f64 = 0.0
+        j = k
+        while j < p {
+            let candidate = ls_column_norm(&matrix,k,m,j)
+            if !is_finite(candidate) { return ls_empty(4,m,p) }
+            if candidate > norm { norm = candidate; best = j }
+            j = j + 1
+        }
+        if best != k {
+            row = 0
+            while row < m {
+                let saved: f64 = matrix[ls_index(row,k)]
+                matrix[ls_index(row,k)] = matrix[ls_index(row,best)]
+                matrix[ls_index(row,best)] = saved
+                row = row + 1
+            }
+            let saved: i64 = result.pivot[k as usize]
+            result.pivot[k as usize] = result.pivot[best as usize]
+            result.pivot[best as usize] = saved
+        }
+        if k == 0 { reference = norm }
+        if norm == 0.0 || norm <= cutoff * reference {
+            result.status = 3
+            result.rank = k
+            if diagonal_max > 0.0 { result.r_diagonal_ratio = diagonal_min / diagonal_max }
+            return result
+        }
+        let alpha: f64 = matrix[ls_index(k,k)]
+        let beta: f64 = if alpha >= 0.0 { 0.0 - norm } else { norm }
+        let divisor = alpha - beta
+        let tau = (beta - alpha) / beta
+        if !is_finite(divisor) || !is_finite(tau) || divisor == 0.0 { return ls_empty(4,m,p) }
+        row = k + 1
+        while row < m {
+            matrix[ls_index(row,k)] = matrix[ls_index(row,k)] / divisor
+            if !is_finite(matrix[ls_index(row,k)]) { return ls_empty(4,m,p) }
+            row = row + 1
+        }
+        // Implicit reflector v[k]=1; store R diagonal before trailing updates.
+        matrix[ls_index(k,k)] = beta
+        j = k + 1
+        while j < p {
+            let old_top: f64 = matrix[ls_index(k,j)]
+            var dot: f64 = 0.0
+            var correction: f64 = 0.0
+            row = k + 1
+            while row < m {
+                let term = matrix[ls_index(row,k)] * matrix[ls_index(row,j)] - correction
+                let next = dot + term
+                correction = (next - dot) - term
+                dot = next
+                row = row + 1
+            }
+            let projection = tau * (old_top + dot)
+            // 1-tau=alpha/beta: retain a tiny tail instead of old_top-projection.
+            matrix[ls_index(k,j)] = (alpha / beta) * old_top - tau * dot
+            if !is_finite(matrix[ls_index(k,j)]) { return ls_empty(4,m,p) }
+            row = k + 1
+            while row < m {
+                matrix[ls_index(row,j)] = matrix[ls_index(row,j)] - matrix[ls_index(row,k)] * projection
+                if !is_finite(matrix[ls_index(row,j)]) { return ls_empty(4,m,p) }
+                row = row + 1
+            }
+            j = j + 1
+        }
+        let old_top: f64 = rhs[k as usize]
+        var dot: f64 = 0.0
+        var correction: f64 = 0.0
+        row = k + 1
+        while row < m {
+            let term = matrix[ls_index(row,k)] * rhs[row as usize] - correction
+            let next = dot + term
+            correction = (next - dot) - term
+            dot = next
+            row = row + 1
+        }
+        let projection = tau * (old_top + dot)
+        rhs[k as usize] = (alpha / beta) * old_top - tau * dot
+        if !is_finite(rhs[k as usize]) { return ls_empty(4,m,p) }
+        row = k + 1
+        while row < m {
+            rhs[row as usize] = rhs[row as usize] - matrix[ls_index(row,k)] * projection
+            if !is_finite(rhs[row as usize]) { return ls_empty(4,m,p) }
+            row = row + 1
+        }
+        if k == 0 { diagonal_max = norm; diagonal_min = norm }
+        else {
+            if norm > diagonal_max { diagonal_max = norm }
+            if norm < diagonal_min { diagonal_min = norm }
+        }
+        result.rank = k + 1
+        k = k + 1
+    }
+    k = p - 1
+    while k >= 0 {
+        var sum: f64 = 0.0
+        var correction: f64 = 0.0
+        j = k + 1
+        while j < p {
+            let term = matrix[ls_index(k,j)] * solution[j as usize] - correction
+            let next = sum + term
+            correction = (next - sum) - term
+            sum = next
+            j = j + 1
+        }
+        let numerator = rhs[k as usize] - sum
+        let value = numerator / matrix[ls_index(k,k)]
+        if !is_finite(value) || (numerator != 0.0 && value == 0.0) { return ls_empty(4,m,p) }
+        solution[k as usize] = value
+        k = k - 1
+    }
+    j = 0
+    while j < p {
+        let original: i64 = result.pivot[j as usize]
+        let coefficient = least_squares_restore(solution[j as usize],response_scale,scales[original as usize])
+        if coefficient.status != 0 { return ls_empty(4,m,p) }
+        result.coefficients[original as usize] = coefficient.value
+        j = j + 1
+    }
+    var residual_scale: f64 = 0.0
+    var residual_ssq: f64 = 1.0
+    row = 0
+    while row < m {
+        var fitted: f64 = 0.0
+        var correction: f64 = 0.0
+        j = 0
+        while j < p {
+            let original: i64 = result.pivot[j as usize]
+            let coordinate = a[ls_index(row,original)] / scales[original as usize]
+            let term = coordinate * solution[j as usize] - correction
+            let next = fitted + term
+            correction = (next - fitted) - term
+            fitted = next
+            j = j + 1
+        }
+        if !is_finite(fitted) { return ls_empty(4,m,p) }
+        // Single final rounding into response units, including subnormal/zero.
+        let raw_fitted = fitted * response_scale
+        if !is_finite(raw_fitted) { return ls_empty(4,m,p) }
+        let residual = b[row as usize] - raw_fitted
+        if !is_finite(residual) { return ls_empty(4,m,p) }
+        result.fitted[row as usize] = raw_fitted
+        result.residuals[row as usize] = residual
+        let magnitude = ls_abs(residual)
+        if magnitude > 0.0 {
+            if magnitude > residual_scale {
+                let ratio = residual_scale / magnitude
+                residual_ssq = 1.0 + residual_ssq * ratio * ratio
+                residual_scale = magnitude
+            } else {
+                let ratio = magnitude / residual_scale
+                residual_ssq = residual_ssq + ratio * ratio
+            }
+        }
+        row = row + 1
+    }
+    let residual_norm = least_squares_restore(residual_scale,1.0,1.0 / sqrt(residual_ssq))
+    if residual_norm.status != 0 { return ls_empty(4,m,p) }
+    result.residual_norm = residual_norm.value
+    result.df = m - p
+    result.r_diagonal_ratio = diagonal_min / diagonal_max
+    if want_factor {
+        var clear: i64 = 0
+        while clear < 64 { r_out[clear as usize] = 0.0; clear = clear + 1 }
+        clear = 0
+        while clear < 8 { scales_out[clear as usize] = 0.0; clear = clear + 1 }
+        var factor_row: i64 = 0
+        while factor_row < p {
+            scales_out[factor_row as usize] = scales[factor_row as usize]
+            var factor_column = factor_row
+            while factor_column < p {
+                r_out[ls_index(factor_row,factor_column)] = matrix[ls_index(factor_row,factor_column)]
+                factor_column = factor_column + 1
+            }
+            factor_row = factor_row + 1
+        }
+    }
+    result
+}
+
+pub fn qr_least_squares(a: &[f64;2048], b: &[f64;256], m: i64, p: i64,
+    rcond: f64) -> LeastSquaresResult with Mut, Div, Panic {
+    var r_unused: [f64;64] = [0.0;64]
+    var scales_unused: [f64;8] = [0.0;8]
+    ls_engine(a,b,m,p,rcond,false,&!r_unused,&!scales_unused)
+}
+// Factors are available only when the returned fit has status0.
+pub fn qr_least_squares_factor(a: &[f64;2048], b: &[f64;256], m: i64, p: i64,
+    rcond: f64, r_out: &![f64;64], scales_out: &![f64;8]) -> LeastSquaresResult with Mut, Div, Panic {
+    ls_engine(a,b,m,p,rcond,true,r_out,scales_out)
+}

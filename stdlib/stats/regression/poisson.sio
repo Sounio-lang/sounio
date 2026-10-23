@@ -1,0 +1,324 @@
+// Offset-aware Poisson log-link Fisher scoring. See POISSON.md.
+use math::pure::{is_finite,ln_checked,exp}
+use linalg::least_squares::{qr_least_squares}
+use linalg::weighted_least_squares::{weighted_qr_least_squares}
+pub struct PoissonFit {
+ pub status:i64, pub n:i64, pub p:i64, pub rank:i64, pub df:i64,
+ pub iterations:i64, pub coefficients:[f64;8], pub means:[f64;256],
+ pub linear_predictors:[f64;256], pub deviance:f64, pub score_norm:f64,
+ pub step_norm:f64, pub rcond_used:f64, pub poisson_assumptions_assessed:bool,
+}
+struct PoissonNumber { status:i64, value:f64 }
+struct PoissonEvaluation { status:i64, means:[f64;256], eta:[f64;256], deviance:f64 }
+fn pois_abs(x:f64)->f64 { if x<0.0 { 0.0-x } else { x } }
+fn pois_empty(status:i64,n:i64,p:i64)->PoissonFit {
+ PoissonFit{status:status,n:n,p:p,rank:0,df:0,iterations:0,coefficients:[0.0;8],means:[0.0;256],linear_predictors:[0.0;256],deviance:0.0,score_norm:0.0,step_norm:0.0,rcond_used:0.0,poisson_assumptions_assessed:false}
+}
+fn pois_dot(a:&[f64;2048],beta:&[f64;8],row:i64,p:i64)->PoissonNumber with Mut,Div,Panic {
+ var sum:f64=0.0
+ var correction:f64=0.0
+ var j:i64=0
+ while j<p {
+  let term=a[(row*8+j) as usize]*beta[j as usize]
+  if !is_finite(term) { return PoissonNumber{status:4,value:0.0} }
+  let adjusted=term-correction
+  let next=sum+adjusted
+  correction=(next-sum)-adjusted
+  sum=next
+  if !is_finite(sum) { return PoissonNumber{status:4,value:0.0} }
+  j=j+1
+ }
+ PoissonNumber{status:0,value:sum}
+}
+// phi(d)=(1+d)ln(1+d)-d; used only for |d|<=1/4.
+fn pois_phi(d:f64)->f64 with Mut,Div,Panic {
+ var power=d*d
+ var sum=power*0.5
+ var k:i64=3
+ while k<=32 {
+  power=power*d
+  let term=power/((k*(k-1)) as f64)
+  if k%2==1 { sum=sum-term } else { sum=sum+term }
+  k=k+1
+ }
+ sum
+}
+fn pois_evaluate(a:&[f64;2048],counts:&[i64;256],offset:&[f64;256],beta:&[f64;8],n:i64,p:i64)->PoissonEvaluation with Mut,Div,Panic {
+ var out=PoissonEvaluation{status:4,means:[0.0;256],eta:[0.0;256],deviance:0.0}
+ var total:f64=0.0
+ var correction:f64=0.0
+ var i:i64=0
+ while i<n {
+  let xb=pois_dot(a,beta,i,p)
+  if xb.status!=0 { return out }
+  let eta=offset[i as usize]+xb.value
+  if !is_finite(eta) { return out }
+  let mu=exp(eta)
+  if !is_finite(mu) || mu<=0.0 { return out }
+  let y=counts[i as usize] as f64
+  var unit:f64=0.0
+  if y==0.0 { unit=2.0*mu } else {
+   let difference=y-mu
+   if pois_abs(difference)<=mu*0.25 {
+    let d=difference/mu
+    unit=mu*(2.0*pois_phi(d))
+   } else {
+    let ly=ln_checked(y)
+    let lm=ln_checked(mu)
+    if ly.status!=0 || lm.status!=0 { return out }
+    unit=2.0*((y*(ly.value-lm.value)-y)+mu)
+   }
+  }
+  if !is_finite(unit) || unit<0.0 { return out }
+  let adjusted=unit-correction
+  let next=total+adjusted
+  correction=(next-total)-adjusted
+  total=next
+  if !is_finite(total) { return out }
+  out.means[i as usize]=mu
+  out.eta[i as usize]=eta
+  i=i+1
+ }
+ out.status=0
+ out.deviance=total
+ out
+}
+// Stable local half-deviance change anchored at the represented current means.
+// The change follows the actual represented coefficient displacement. Large movements
+// retain the absolute-deviance comparison; backtracking reaches this branch.
+fn pois_objective_change(a:&[f64;2048],counts:&[i64;256],beta:&[f64;8],trial_beta:&[f64;8],current:&PoissonEvaluation,trial:&PoissonEvaluation,n:i64,p:i64)->PoissonNumber with Mut,Div,Panic {
+ var displacement:[f64;8]=[0.0;8]
+ var j:i64=0
+ while j<p {
+  displacement[j as usize]=trial_beta[j as usize]-beta[j as usize]
+  if !is_finite(displacement[j as usize]) { return PoissonNumber{status:4,value:0.0} }
+  j=j+1
+ }
+ var i:i64=0
+ while i<n {
+  let movement=pois_dot(a,&displacement,i,p)
+  if movement.status!=0 { return PoissonNumber{status:4,value:0.0} }
+  let d=movement.value
+  if !is_finite(d) { return PoissonNumber{status:4,value:0.0} }
+  if pois_abs(d)>0.5 {
+   return PoissonNumber{status:0,value:trial.deviance-current.deviance}
+  }
+  i=i+1
+ }
+ var sum:f64=0.0
+ var correction:f64=0.0
+ i=0
+ while i<n {
+  let movement=pois_dot(a,&displacement,i,p)
+  if movement.status!=0 { return PoissonNumber{status:4,value:0.0} }
+  let d=movement.value
+  var term=d*d*0.5
+  var remainder=term
+  var remainder_correction:f64=0.0
+  var k:i64=3
+  while k<=32 {
+   term=term*d/(k as f64)
+   let adjusted=term-remainder_correction
+   let next=remainder+adjusted
+   remainder_correction=(next-remainder)-adjusted
+   remainder=next
+   k=k+1
+  }
+  let mu=current.means[i as usize]
+  let slope_term=(mu-(counts[i as usize] as f64))*d
+  let curved=mu*remainder
+  if !is_finite(slope_term) || !is_finite(curved) { return PoissonNumber{status:4,value:0.0} }
+  let row=slope_term+curved
+  let adjusted=row-correction
+  let next=sum+adjusted
+  correction=(next-sum)-adjusted
+  sum=next
+  if !is_finite(sum) { return PoissonNumber{status:4,value:0.0} }
+  i=i+1
+ }
+ PoissonNumber{status:0,value:sum}
+}
+fn pois_score(a:&[f64;2048],counts:&[i64;256],mu:&[f64;256],scales:&[f64;8],n:i64,p:i64,denominator:f64)->PoissonNumber with Mut,Div,Panic {
+ var largest:f64=0.0
+ var j:i64=0
+ while j<p {
+  var sum:f64=0.0
+  var correction:f64=0.0
+  var i:i64=0
+  while i<n {
+   let residual=(counts[i as usize] as f64)-mu[i as usize]
+   let term=(a[(i*8+j) as usize]/scales[j as usize])*(residual/denominator)
+   let adjusted=term-correction
+   let next=sum+adjusted
+   correction=(next-sum)-adjusted
+   sum=next
+   i=i+1
+  }
+  if !is_finite(sum) { return PoissonNumber{status:4,value:0.0} }
+  if pois_abs(sum)>largest { largest=pois_abs(sum) }
+  j=j+1
+ }
+ PoissonNumber{status:0,value:largest}
+}
+fn pois_step(a:&[f64;2048],offset:&[f64;256],beta:&[f64;8],delta:&[f64;8],alpha:f64,n:i64,p:i64)->PoissonNumber with Mut,Div,Panic {
+ var largest:f64=0.0
+ var i:i64=0
+ while i<n {
+  let current=pois_dot(a,beta,i,p)
+  let move=pois_dot(a,delta,i,p)
+  if current.status!=0 || move.status!=0 { return PoissonNumber{status:4,value:0.0} }
+  let eta=offset[i as usize]+current.value
+  if !is_finite(eta) { return PoissonNumber{status:4,value:0.0} }
+  let change=pois_abs(alpha*move.value)/(1.0+pois_abs(eta))
+  if !is_finite(change) { return PoissonNumber{status:4,value:0.0} }
+  if change>largest { largest=change }
+  i=i+1
+ }
+ PoissonNumber{status:0,value:largest}
+}
+pub fn poisson_fit_offset(a:&[f64;2048],counts:&[i64;256],log_offset:&[f64;256],n:i64,p:i64,rcond:f64,max_iterations:i64,tolerance:f64)->PoissonFit with Mut,Div,Panic {
+ if n<1 || n>256 || p<1 || p>8 || p>n { return pois_empty(1,n,p) }
+ if !is_finite(rcond) || rcond<0.0 || rcond>=1.0 || max_iterations<1 || max_iterations>100 || !is_finite(tolerance) || tolerance<1.0e-12 || tolerance>1.0e-4 { return pois_empty(5,n,p) }
+ var i:i64=0
+ while i<n {
+  if !is_finite(log_offset[i as usize]) { return pois_empty(2,n,p) }
+  var j:i64=0
+  while j<p {
+   if !is_finite(a[(i*8+j) as usize]) { return pois_empty(2,n,p) }
+   j=j+1
+  }
+  i=i+1
+ }
+ i=0
+ while i<n {
+  if counts[i as usize]<0 { return pois_empty(6,n,p) }
+  i=i+1
+ }
+ var initial:[f64;256]=[0.0;256]
+ var denominator:f64=1.0
+ var sum_correction:f64=0.0
+ i=0
+ while i<n {
+  let logged=ln_checked((counts[i as usize] as f64)+0.5)
+  if logged.status!=0 { return pois_empty(4,n,p) }
+  initial[i as usize]=logged.value-log_offset[i as usize]
+  if !is_finite(initial[i as usize]) { return pois_empty(4,n,p) }
+  let adjusted=(counts[i as usize] as f64)-sum_correction
+  let next=denominator+adjusted
+  sum_correction=(next-denominator)-adjusted
+  denominator=next
+  i=i+1
+ }
+ let seed=qr_least_squares(a,&initial,n,p,rcond)
+ if seed.status!=0 {
+  var failed=pois_empty(if seed.status==3 {3}else{4},n,p)
+  if seed.status==3 { failed.rank=seed.rank failed.rcond_used=seed.rcond_used }
+  return failed
+ }
+ // A nonzero constant column certifies an intercept direction. Only this
+ // sufficient all-zero boundary is diagnosed here, not general separation.
+ if denominator==1.0 {
+  var j:i64=0
+  while j<p {
+   var constant=a[j as usize]!=0.0
+   i=1
+   while i<n {
+    if a[(i*8+j) as usize]!=a[j as usize] { constant=false }
+    i=i+1
+   }
+   if constant { return pois_empty(8,n,p) }
+   j=j+1
+  }
+ }
+ var scales:[f64;8]=[0.0;8]
+ var j:i64=0
+ while j<p {
+  i=0
+  while i<n {
+   let value=pois_abs(a[(i*8+j) as usize])
+   if value>scales[j as usize] { scales[j as usize]=value }
+   i=i+1
+  }
+  if scales[j as usize]==0.0 { return pois_empty(3,n,p) }
+  j=j+1
+ }
+ var beta=seed.coefficients
+ var current=pois_evaluate(a,counts,log_offset,&beta,n,p)
+ if current.status!=0 { return pois_empty(4,n,p) }
+ var out=pois_empty(7,n,p)
+ var iteration:i64=0
+ var finished=false
+ var final_score:f64=0.0
+ var final_step:f64=0.0
+ while iteration<max_iterations && !finished {
+  let score=pois_score(a,counts,&current.means,&scales,n,p,denominator)
+  if score.status!=0 { return pois_empty(4,n,p) }
+  var response:[f64;256]=[0.0;256]
+  i=0
+  while i<n {
+   response[i as usize]=((counts[i as usize] as f64)-current.means[i as usize])/current.means[i as usize]
+   if !is_finite(response[i as usize]) { return pois_empty(4,n,p) }
+   i=i+1
+  }
+  let increment=weighted_qr_least_squares(a,&response,&current.means,n,p,rcond)
+  if increment.status!=0 {
+   var failed=pois_empty(if increment.status==3 {3}else{4},n,p)
+   failed.iterations=iteration
+   if increment.status==3 { failed.rank=increment.rank failed.rcond_used=increment.rcond_used }
+   return failed
+  }
+  let full_step=pois_step(a,log_offset,&beta,&increment.coefficients,1.0,n,p)
+  if full_step.status!=0 { return pois_empty(4,n,p) }
+  iteration=iteration+1
+  if score.value<=tolerance && full_step.value<=tolerance {
+   finished=true
+   final_score=score.value
+   final_step=full_step.value
+  } else {
+   var alpha:f64=1.0
+   var accepted=false
+   var halvings:i64=0
+   while halvings<=32 && !accepted {
+    var trial_beta:[f64;8]=[0.0;8]
+    j=0
+    while j<p {
+     trial_beta[j as usize]=beta[j as usize]+alpha*increment.coefficients[j as usize]
+     j=j+1
+    }
+    let trial=pois_evaluate(a,counts,log_offset,&trial_beta,n,p)
+    var acceptable=false
+    if trial.status==0 {
+     let change=pois_objective_change(a,counts,&beta,&trial_beta,&current,&trial,n,p)
+     if change.status==0 && change.value<=0.0 { acceptable=true }
+    }
+    if acceptable {
+     let step=pois_step(a,log_offset,&beta,&increment.coefficients,alpha,n,p)
+     if step.status!=0 { return pois_empty(4,n,p) }
+     beta=trial_beta
+     current=trial
+     accepted=true
+     final_step=step.value
+    } else { alpha=alpha*0.5 halvings=halvings+1 }
+   }
+   if !accepted { out.iterations=iteration return out }
+   let updated_score=pois_score(a,counts,&current.means,&scales,n,p,denominator)
+   if updated_score.status!=0 { return pois_empty(4,n,p) }
+   final_score=updated_score.value
+   // Only the next full Fisher step can certify convergence; a damped
+   // accepted movement is not a stationarity test.
+  }
+ }
+ if !finished { out.iterations=iteration return out }
+ out.status=0
+ out.rank=p
+ out.df=n-p
+ out.iterations=iteration
+ out.coefficients=beta
+ out.means=current.means
+ out.linear_predictors=current.eta
+ out.deviance=current.deviance
+ out.score_norm=final_score
+ out.step_norm=final_step
+ out.rcond_used=seed.rcond_used
+ out
+}

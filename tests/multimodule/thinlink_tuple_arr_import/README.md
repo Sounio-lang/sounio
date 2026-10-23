@@ -1,0 +1,37 @@
+# Imported tuple-array callee through the real thin-link unit builder
+
+Regression fixture for `self-hosted/compiler/module_loader.sio`'s
+`thin_build_compiled_unit` and the `LOWER_FN_TUPLE_ARR_*` collection it drives
+(`self-hosted/ir/lower.sio`). Driven by
+`scripts/ci/madaros_thinlink_tuple_arr_import_gate.sh`, via `--native-compile`
+(the real multi-module frontend), not a lowerer probe entry point.
+
+| case    | what it pins |
+|---------|--------------|
+| `basic` | `main.sio` imports `make_pair` (returns `(i64, [f64; 2])`) from `tta_callee.sio` and does arithmetic on its destructured `[f64; 2]` slot. `tta_other.sio`, `use`d FIRST, declares an unrelated PRIVATE `make_pair` (never imported, never reachable from `main`) under the exact same bare name but a DIFFERENT tuple-array shape/mask. Before this review round's fix, the per-unit collector handed each imported module's WHOLE raw item list to the tuple-array collector, not just the one export that module's own import_map entry actually names -- so tta_other's colliding private `make_pair`, collected first (its `use` comes first in `main.sio`), would occupy the shared bare-name slot and the real export's own, different mask would lose the table's "already present" dedup check. `lower_fn_tuple_f64_arrays_collect_one_named` (ir/lower.sio) now matches only the requested export name, so the private, uncalled `make_pair` is never even visited. |
+| `zero_mask` | `main.sio` imports a selected `make_pair` returning only an integer-array tuple slot, so its authoritative tuple-array mask is zero. A subsequently lowered imported module contains an unrelated private, same-named `make_pair` with an f64-array slot. The selected declaration must be forced into the table even when its mask is zero; otherwise the later full-body scan can claim the bare name with the unrelated nonzero mask and misclassify the selected integer array. |
+
+This does not replay the exact historical crash from the reset-erasure bug
+`thin_build_compiled_unit`'s own comment describes (that required reverting
+to a per-lowering-call reset, which this repo's current code no longer
+does): it pins the current, real multi-module path end to end instead of
+only a synthetic probe boundary, so a regression that reintroduces per-call
+resetting, or that widens collection back to a whole imported module's item
+list, has an actual compiled-and-run program to fail against.
+
+A residual, narrower case remains out of scope: two DIFFERENT imports, from
+two different modules, that are BOTH genuinely selected (both actually named
+in some `use`, both `pub`) and happen to share one bare name -- e.g.
+`a::make_pair()` and `b::make_pair()`. Verified directly: `self-hosted/
+check/defs.sio`'s `fn_sig_table_find_prefer_module` (the checker's own
+qualified-call resolver) takes no path/qualifier argument at all and picks
+whichever same-named `pub` free fn comes first in table order regardless of
+which qualifier was written, so no resolved module/function identity exists
+ANYWHERE in this compiler yet for this shape -- not only in
+`LOWER_FN_TUPLE_ARR_*`. Keying this side table by an identity the checker
+and lowerer's own call resolution do not yet compute would either be
+unreachable or silently diverge from what the call actually resolves to.
+Closing this needs the same qualifier/module resolution this PR's sibling
+review (PR #2515) already scoped as a genuine architectural addition -- see
+`lower_fn_tuple_f64_arrays_collect_owner_priority`'s own comment in
+`ir/lower.sio` for the full finding.

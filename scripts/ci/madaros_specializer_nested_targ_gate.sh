@@ -38,25 +38,21 @@ grep -q 'SPECIALIZER_NESTED_TARG_OK' "$LOG" || {
   exit 1
 }
 
-# The refused shapes. The struct-argument one is the load-bearing case: on the
-# compiler before this guard it compiled with rc=0 and printed zeros, so a gate
-# that only checked the nested shape would not have caught the wrong code.
-REFUSAL='more than one type-argument list in a single compilation unit'
-for refused in \
-  tests/compile-fail/specializer_multi_instantiation_struct_args.sio \
-  tests/compile-fail/specializer_multi_instantiation_nonscalar.sio
-do
-  RLOG="$OUT/$(basename "$refused" .sio).log"
-  if "$SOUC" compile "$refused" -o "$OUT/refused.elf" >"$RLOG" 2>&1; then
-    echo "FAIL: $refused was accepted"
-    tail -40 "$RLOG" || true
-    exit 1
-  fi
-  grep -qF "$REFUSAL" "$RLOG" || {
-    echo "FAIL: $refused rejected for the wrong reason"
-    tail -40 "$RLOG" || true
-    exit 1
+# These previously refused cases are now specialized. Verify values: accepting
+# a program that prints zeros would reintroduce the original wrong-code bug.
+for shape in struct_args nonscalar; do
+  src="tests/run-pass/specializer_multi_instantiation_${shape}.sio"
+  "$SOUC" compile "$src" -o "$OUT/$shape.elf" >"$OUT/$shape.compile" 2>&1 || {
+    cat "$OUT/$shape.compile"; exit 1;
   }
+  chmod +x "$OUT/$shape.elf"
+  "$OUT/$shape.elf" >"$OUT/$shape.stdout"
+  if [[ "$shape" == struct_args ]]; then
+    expect=$'7\n3'
+  else
+    expect=$'7\n1.500000'
+  fi
+  diff -u <(printf '%s\n' "$expect") "$OUT/$shape.stdout"
 done
 
 echo "MADAROS_SPECIALIZER_NESTED_TARG_GATE_OK"

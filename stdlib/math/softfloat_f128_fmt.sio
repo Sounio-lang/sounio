@@ -1,0 +1,372 @@
+//! stdlib/math/softfloat_f128_fmt.sio — exact textual output of a language `f128` (V0-E.5.8)
+//!
+//! Semantic-Lane-ID: WS-G-V0E-STDLIB-GUM-SURFACE
+//! Claim clock: ADR-008 / ADR-009 — callers judge with sounio_native_expected
+//! strings; Python/Rust never judge.
+//!
+//! Two exact renderings of an IEEE binary128 value, computed from its limbs
+//! (`f128_to_lo` / `f128_to_hi`, intercepted intrinsics) with integer
+//! arithmetic only. Host f64 is never touched: no `as f64`, no f64 literal on
+//! the payload path.
+//!
+//! Hex float (`f128_to_hex_string` / `print_f128_hex`) — C99 `%a` shape:
+//!   `[-]0x1.<28 hex digits>p<±dec exp>`   normal (exp in -16382..16383)
+//!   `[-]0x0.<28 hex digits>p-16382`       subnormal
+//!   `0x0p+0` / `-0x0p+0`                 zeros
+//!   `inf` / `-inf` / `nan`
+//! Exact by construction (the 112 fraction bits are the 28 hex digits).
+//!
+//! Decimal (`f128_to_string` / `print_f128` / `println_f128`) — scientific,
+//! correctly rounded (round-half-even) to 36 significant digits, which is
+//! enough to identify every binary128 value uniquely:
+//!   `[-]d.ddddddddddddddddddddddddddddddddddde[+-]dddd`
+//!   exponent always sign + exactly four digits (`e+0000`, `e-4966`, `e+4932`)
+//!   `0.0e+0000` / `-0.0e+0000`            zeros
+//!   `inf` / `-inf` / `nan`
+//! Algorithm: value = sig · 2^e2 with sig < 2^113. The exact integer
+//!   N = sig · 2^e2            (e2 >= 0, value = N)
+//!   N = sig · 5^(-e2)         (e2 <  0, value = N · 10^e2)
+//! is built in base-10^9 limbs (small-constant multiplications by 2^32 and
+//! 5^13 chunks), its first 37 decimal digits plus a sticky bit are read off,
+//! and the 37th digit + sticky round the 36-digit mantissa half-to-even. The
+//! largest N is 2^113 · 5^16494 (11563 digits, 1285 limbs), so the fixed
+//! 1320-limb store covers the whole binary128 range including subnormals.
+
+use math::softfloat_f128::{f128_to_lo, f128_to_hi}
+
+// ---------------------------------------------------------------------------
+// Bit-field access (self-contained; softfloat_f128's SfU128 helpers are private)
+// ---------------------------------------------------------------------------
+
+fn ff_u32(x: i64) -> i64 {
+    x & 4294967295
+}
+
+fn ff_sign(hi: i64) -> i64 {
+    if hi < 0 { 1 } else { 0 }
+}
+
+fn ff_exp(hi: i64) -> i64 {
+    (hi >> 48) & 32767
+}
+
+// Fraction words (32-bit each in i64 containers); w3 holds the top 16 bits.
+fn ff_w0(lo: i64) -> i64 { ff_u32(lo) }
+fn ff_w1(lo: i64) -> i64 { ff_u32(lo >> 32) }
+fn ff_w2(hi: i64) -> i64 { ff_u32(hi) }
+fn ff_w3(hi: i64) -> i64 { (hi >> 32) & 65535 }
+
+fn ff_frac_is_zero(lo: i64, hi: i64) -> bool {
+    lo == 0 && (hi & 281474976710655) == 0
+}
+
+// ---------------------------------------------------------------------------
+// Small string helpers (builtin str_concat / str_slice; no f64 anywhere)
+// ---------------------------------------------------------------------------
+
+fn ff_digit(d: i64) -> string with Mut, Panic, Div {
+    str_slice("0123456789abcdef", d, d + 1)
+}
+
+/// Non-negative i64 → decimal string (no padding).
+fn ff_u_to_string(n0: i64) -> string with Mut, Panic, Div {
+    if n0 == 0 { return "0" }
+    var n = n0
+    var out = ""
+    while n > 0 {
+        out = str_concat(ff_digit(n % 10), out)
+        n = n / 10
+    }
+    out
+}
+
+/// Non-negative i64 < 10000 → exactly four decimal digits.
+fn ff_pad4(n: i64) -> string with Mut, Panic, Div {
+    var out = ""
+    if n < 10 { out = "000" } else if n < 100 { out = "00" } else if n < 1000 { out = "0" }
+    str_concat(out, ff_u_to_string(n))
+}
+
+/// Append the low `ndig` hex digits of `w` (MSB first) to `acc`.
+fn ff_hex_word(acc: string, w: i64, ndig: i64) -> string with Mut, Panic, Div {
+    var out = acc
+    var shift = (ndig - 1) * 4
+    while shift >= 0 {
+        out = str_concat(out, ff_digit((w >> shift) & 15))
+        shift = shift - 4
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Hex float
+// ---------------------------------------------------------------------------
+
+/// Exact C99-style hex float of a language f128 (see module header).
+pub fn f128_to_hex_string(x: f128) -> string with Mut, Panic, Div {
+    let lo = f128_to_lo(x)
+    let hi = f128_to_hi(x)
+    let s = ff_sign(hi)
+    let e = ff_exp(hi)
+    let frac_zero = ff_frac_is_zero(lo, hi)
+    if e == 32767 {
+        if !frac_zero { return "nan" }
+        if s == 1 { return "-inf" }
+        return "inf"
+    }
+    var out = ""
+    if s == 1 { out = "-" }
+    if e == 0 && frac_zero {
+        return str_concat(out, "0x0p+0")
+    }
+    var exp2: i64 = 0
+    if e == 0 {
+        out = str_concat(out, "0x0.")
+        exp2 = 0 - 16382
+    } else {
+        out = str_concat(out, "0x1.")
+        exp2 = e - 16383
+    }
+    out = ff_hex_word(out, ff_w3(hi), 4)
+    out = ff_hex_word(out, ff_w2(hi), 8)
+    out = ff_hex_word(out, ff_w1(lo), 8)
+    out = ff_hex_word(out, ff_w0(lo), 8)
+    out = str_concat(out, "p")
+    if exp2 < 0 {
+        out = str_concat(out, "-")
+        out = str_concat(out, ff_u_to_string(0 - exp2))
+    } else {
+        out = str_concat(out, "+")
+        out = str_concat(out, ff_u_to_string(exp2))
+    }
+    out
+}
+
+/// Print the hex float form (no newline).
+pub fn print_f128_hex(x: f128) with IO, Mut, Panic, Div {
+    print(f128_to_hex_string(x))
+}
+
+/// Print the hex float form followed by a newline.
+pub fn println_f128_hex(x: f128) with IO, Mut, Panic, Div {
+    println(f128_to_hex_string(x))
+}
+
+// ---------------------------------------------------------------------------
+// Exact big natural in base 10^9 (little-endian limbs)
+// ---------------------------------------------------------------------------
+
+/// 1320 limbs of 10^9 hold 11880 decimal digits > 11563 (the largest N above).
+struct FfBig {
+    limbs: [i64; 1320],
+    len: i64,
+}
+
+/// b = b * m + add. Requires m <= 2^32 and add < 2^32 so that
+/// limb * m + carry < 10^9 * 2^32 + 2^33 < 2^63 (no i64 wrap).
+fn ff_big_mul_add(b: &! FfBig, m: i64, add: i64) with Mut, Panic, Div {
+    var carry: i64 = add
+    var i: i64 = 0
+    while i < b.len {
+        let t = b.limbs[i as usize] * m + carry
+        b.limbs[i as usize] = t % 1000000000
+        carry = t / 1000000000
+        i = i + 1
+    }
+    while carry != 0 {
+        if b.len >= 1320 {
+            // Unreachable for binary128 (max 1285 limbs); fail loudly rather
+            // than write out of bounds.
+            panic("softfloat_f128_fmt: FfBig capacity exceeded")
+        }
+        b.limbs[b.len as usize] = carry % 1000000000
+        carry = carry / 1000000000
+        b.len = b.len + 1
+    }
+}
+
+/// b = b * 2^n, n >= 0, in 2^32 chunks.
+fn ff_big_mul_pow2(b: &! FfBig, n: i64) with Mut, Panic, Div {
+    var left = n
+    while left >= 32 {
+        ff_big_mul_add(b, 4294967296, 0)
+        left = left - 32
+    }
+    if left > 0 {
+        ff_big_mul_add(b, 1 << left, 0)
+    }
+}
+
+/// b = b * 5^n, n >= 0, in 5^13 chunks (5^13 = 1220703125 < 2^32).
+fn ff_big_mul_pow5(b: &! FfBig, n: i64) with Mut, Panic, Div {
+    var left = n
+    while left >= 13 {
+        ff_big_mul_add(b, 1220703125, 0)
+        left = left - 13
+    }
+    var p: i64 = 1
+    while left > 0 {
+        p = p * 5
+        left = left - 1
+    }
+    if p > 1 {
+        ff_big_mul_add(b, p, 0)
+    }
+}
+
+/// Number of decimal digits of a limb value 1..10^9-1 (0 → 1).
+fn ff_ndigits(v: i64) -> i64 {
+    var n: i64 = 1
+    var t = v / 10
+    while t > 0 {
+        n = n + 1
+        t = t / 10
+    }
+    n
+}
+
+fn ff_pow10(n: i64) -> i64 {
+    var p: i64 = 1
+    var i: i64 = 0
+    while i < n {
+        p = p * 10
+        i = i + 1
+    }
+    p
+}
+
+/// First 37 significant digits of `b` (MSB first) into `digs[0..37]`, zero
+/// padded when b has fewer digits; returns sticky (1 if any dropped digit is
+/// non-zero). Also writes the total digit count into digs[37].
+fn ff_big_lead_digits(b: &! FfBig, digs: &![i64; 40]) -> i64 with Mut, Panic, Div {
+    var k: i64 = 0
+    var sticky: i64 = 0
+    var i = b.len - 1
+    let top = b.limbs[i as usize]
+    let ntop = ff_ndigits(top)
+    digs[37 as usize] = 9 * (b.len - 1) + ntop
+    while i >= 0 {
+        var v = b.limbs[i as usize]
+        var p: i64 = 100000000
+        if i == b.len - 1 { p = ff_pow10(ntop - 1) }
+        while p > 0 {
+            let d = v / p
+            v = v - d * p
+            if k < 37 {
+                digs[k as usize] = d
+                k = k + 1
+            } else if d != 0 {
+                sticky = 1
+            }
+            p = p / 10
+        }
+        i = i - 1
+    }
+    while k < 37 {
+        digs[k as usize] = 0
+        k = k + 1
+    }
+    sticky
+}
+
+// ---------------------------------------------------------------------------
+// Decimal
+// ---------------------------------------------------------------------------
+
+/// Exact decimal of a language f128: 36 significant digits, round-half-even,
+/// scientific form with a signed four-digit exponent (see module header).
+pub fn f128_to_string(x: f128) -> string with Mut, Panic, Div {
+    let lo = f128_to_lo(x)
+    let hi = f128_to_hi(x)
+    let s = ff_sign(hi)
+    let e = ff_exp(hi)
+    let frac_zero = ff_frac_is_zero(lo, hi)
+    if e == 32767 {
+        if !frac_zero { return "nan" }
+        if s == 1 { return "-inf" }
+        return "inf"
+    }
+    var out = ""
+    if s == 1 { out = "-" }
+    if e == 0 && frac_zero {
+        return str_concat(out, "0.0e+0000")
+    }
+    // sig = 113-bit significand (implicit bit set for normals), e2 its binary
+    // exponent: value = sig * 2^e2.
+    var w3 = ff_w3(hi)
+    var e2: i64 = 0
+    if e == 0 {
+        e2 = 0 - 16494
+    } else {
+        w3 = w3 | 65536
+        e2 = e - 16383 - 112
+    }
+    var big = FfBig { limbs: [0; 1320], len: 0 }
+    ff_big_mul_add(&!big, 1, w3)
+    ff_big_mul_add(&!big, 4294967296, ff_w2(hi))
+    ff_big_mul_add(&!big, 4294967296, ff_w1(lo))
+    ff_big_mul_add(&!big, 4294967296, ff_w0(lo))
+    var d10: i64 = 0
+    if e2 >= 0 {
+        ff_big_mul_pow2(&!big, e2)
+    } else {
+        ff_big_mul_pow5(&!big, 0 - e2)
+        d10 = e2
+    }
+    var digs: [i64; 40] = [0; 40]
+    let sticky = ff_big_lead_digits(&!big, &!digs)
+    var exp10 = digs[37 as usize] - 1 + d10
+    // Round half-even on digit 37 (index 36) + sticky.
+    let r = digs[36 as usize]
+    var up = false
+    if r > 5 {
+        up = true
+    } else if r == 5 {
+        if sticky == 1 || (digs[35 as usize] & 1) == 1 { up = true }
+    }
+    if up {
+        var j: i64 = 35
+        var carry: i64 = 1
+        while carry == 1 && j >= 0 {
+            let nd = digs[j as usize] + 1
+            if nd == 10 {
+                digs[j as usize] = 0
+                j = j - 1
+            } else {
+                digs[j as usize] = nd
+                carry = 0
+            }
+        }
+        if carry == 1 {
+            // 999…9 rolled over to 1000…0: one more decade.
+            digs[0 as usize] = 1
+            exp10 = exp10 + 1
+        }
+    }
+    out = str_concat(out, ff_digit(digs[0 as usize]))
+    out = str_concat(out, ".")
+    var k: i64 = 1
+    while k < 36 {
+        out = str_concat(out, ff_digit(digs[k as usize]))
+        k = k + 1
+    }
+    out = str_concat(out, "e")
+    if exp10 < 0 {
+        out = str_concat(out, "-")
+        out = str_concat(out, ff_pad4(0 - exp10))
+    } else {
+        out = str_concat(out, "+")
+        out = str_concat(out, ff_pad4(exp10))
+    }
+    out
+}
+
+/// Print the exact 36-digit decimal (no newline).
+pub fn print_f128(x: f128) with IO, Mut, Panic, Div {
+    print(f128_to_string(x))
+}
+
+/// Print the exact 36-digit decimal followed by a newline.
+pub fn println_f128(x: f128) with IO, Mut, Panic, Div {
+    println(f128_to_string(x))
+}

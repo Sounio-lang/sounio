@@ -1,0 +1,551 @@
+// File: stdlib/compiler/effects/sandbox.sio
+// Effect-aware sandbox execution using the bytecode VM
+// Tracks/enforces algebraic effects during bytecode interpretation.
+
+// Depend only on vm.sio (it already embeds ByteCode + opcodes).
+// Avoid bytecode.sio here: its private APIs + broken extern print shadow.
+use compiler::codegen::vm::*
+
+// print / print_int are compiler builtins — do not redeclare via extern "C"
+
+// ============================================================================
+// LOCAL EFFECT HELPERS (mirror infer.sio; keep sandbox self-sufficient)
+// ============================================================================
+
+pub fn EFFECT_IO() -> i64 { 0 }
+pub fn EFFECT_MUT() -> i64 { 1 }
+pub fn EFFECT_ALLOC() -> i64 { 2 }
+pub fn EFFECT_PANIC() -> i64 { 3 }
+pub fn EFFECT_ASYNC() -> i64 { 4 }
+pub fn EFFECT_GPU() -> i64 { 5 }
+pub fn EFFECT_PROB() -> i64 { 6 }
+pub fn EFFECT_DIV() -> i64 { 7 }
+pub fn EFFECT_MAX() -> i64 { 31 }
+
+pub fn effect_bit(eff_id: i64) -> i64 with Mut, Panic, Div {
+    if eff_id <= 0 {
+        return 1
+    }
+    var result: i64 = 1
+    var i: i64 = 0
+    while i < eff_id {
+        result = result * 2
+        i = i + 1
+    }
+    result
+}
+
+pub fn effect_has(mask: i64, eff_id: i64) -> bool with Mut, Panic, Div {
+    let bit = effect_bit(eff_id)
+    let shifted = mask / bit
+    let remainder = shifted - (shifted / 2) * 2
+    remainder == 1
+}
+
+pub fn effect_add(mask: i64, eff_id: i64) -> i64 with Mut, Panic, Div {
+    if effect_has(mask, eff_id) {
+        return mask
+    }
+    mask + effect_bit(eff_id)
+}
+
+pub fn effect_union(a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    var result = a
+    var i: i64 = 0
+    while i < EFFECT_MAX() {
+        if effect_has(b, i) {
+            result = effect_add(result, i)
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// EFFECT TRACKING IN VM
+// ============================================================================
+
+pub struct EffectLogEntry {
+    effect_id: i64,
+    pc: i64,
+    operation: i64,
+    timestamp: i64,
+}
+
+pub struct EffectHandlerFrame {
+    handler_id: i64,
+    handles_effects: i64,
+    resume_pc: i64,
+    is_multi_shot: bool,
+}
+
+pub struct EffectVM {
+    vm: VM,
+    current_effects: i64,
+    allowed_effects: i64,
+    effect_log: [EffectLogEntry; 256],
+    effect_log_count: i64,
+    handler_stack: [EffectHandlerFrame; 32],
+    handler_depth: i64,
+}
+
+fn effect_log_entry_empty() -> EffectLogEntry with Mut {
+    EffectLogEntry {
+        effect_id: 0,
+        pc: 0,
+        operation: 0,
+        timestamp: 0,
+    }
+}
+
+fn effect_handler_frame_empty() -> EffectHandlerFrame with Mut {
+    EffectHandlerFrame {
+        handler_id: 0,
+        handles_effects: 0,
+        resume_pc: 0,
+        is_multi_shot: false,
+    }
+}
+
+pub fn effect_vm_new(allowed: i64) -> EffectVM with Mut {
+    EffectVM {
+        vm: vm_new(),
+        current_effects: 0,
+        allowed_effects: allowed,
+        effect_log: [effect_log_entry_empty(); 256],
+        effect_log_count: 0,
+        handler_stack: [effect_handler_frame_empty(); 32],
+        handler_depth: 0,
+    }
+}
+
+fn EF_OP_PERFORM() -> i64 { 1 }
+fn EF_OP_HANDLE() -> i64 { 2 }
+fn EF_OP_RESUME() -> i64 { 3 }
+
+pub fn effect_vm_check_allowed(evm: &EffectVM, effect_id: i64) -> bool with Mut, Panic, Div {
+    effect_has(evm.allowed_effects, effect_id)
+}
+
+pub fn effect_vm_perform(evm: EffectVM, effect_id: i64, pc: i64) -> EffectVM with Mut, Panic, Div {
+    var m = evm
+
+    if !effect_vm_check_allowed(&m, effect_id) {
+        m.vm = vm_with_error(m.vm)
+        return m
+    }
+
+    m.current_effects = effect_add(m.current_effects, effect_id)
+
+    if m.effect_log_count < 256 {
+        m.effect_log[m.effect_log_count as usize] = EffectLogEntry {
+            effect_id: effect_id,
+            pc: pc,
+            operation: EF_OP_PERFORM(),
+            timestamp: m.effect_log_count,
+        }
+        m.effect_log_count = m.effect_log_count + 1
+    }
+
+    var found_handler = false
+    var h: i64 = m.handler_depth - 1
+    while h >= 0 && !found_handler {
+        let frame = m.handler_stack[h as usize]
+        if effect_has(frame.handles_effects, effect_id) {
+            found_handler = true
+            m.vm = vm_with_pc(m.vm, frame.resume_pc)
+        }
+        h = h - 1
+    }
+
+    if !found_handler {
+        m.vm = vm_with_error(m.vm)
+    }
+
+    m
+}
+
+pub fn effect_vm_install_handler(evm: EffectVM, handles: i64, resume_pc: i64, multi_shot: bool) -> EffectVM with Mut, Panic, Div {
+    var m = evm
+    if m.handler_depth < 32 {
+        m.handler_stack[m.handler_depth as usize] = EffectHandlerFrame {
+            handler_id: m.handler_depth,
+            handles_effects: handles,
+            resume_pc: resume_pc,
+            is_multi_shot: multi_shot,
+        }
+        m.handler_depth = m.handler_depth + 1
+    }
+    m
+}
+
+pub fn effect_vm_remove_handler(evm: EffectVM) -> EffectVM with Mut {
+    var m = evm
+    if m.handler_depth > 0 {
+        m.handler_depth = m.handler_depth - 1
+    }
+    m
+}
+
+// Keep the bytecode VM implementation private while exposing the sandbox
+// observations that callers and run-pass tests need.
+pub fn effect_vm_pc(evm: &EffectVM) -> i64 {
+    vm_pc(&evm.vm)
+}
+
+pub fn effect_vm_has_error(evm: &EffectVM) -> bool {
+    vm_has_error(&evm.vm)
+}
+
+pub fn effect_vm_log_count(evm: &EffectVM) -> i64 {
+    evm.effect_log_count
+}
+
+pub fn effect_vm_log_effect_id(evm: &EffectVM, index: i64) -> i64 {
+    let entry = evm.effect_log[index as usize]
+    entry.effect_id
+}
+
+pub fn effect_vm_log_pc(evm: &EffectVM, index: i64) -> i64 {
+    let entry = evm.effect_log[index as usize]
+    entry.pc
+}
+
+// ============================================================================
+// EFFECT-AWARE BYTECODE EXTENSIONS
+// ============================================================================
+
+pub fn OP_EFFECT_PERFORM() -> i32 { 100 }
+pub fn OP_EFFECT_HANDLE() -> i32 { 101 }
+pub fn OP_EFFECT_RESUME() -> i32 { 102 }
+pub fn OP_EFFECT_END_HANDLE() -> i32 { 103 }
+
+pub fn emit_effect_perform(bc: ByteCode, effect_id: i32) -> ByteCode with Mut, Panic {
+    var b = bc
+    b = emit_op(b, OP_EFFECT_PERFORM())
+    b = emit_op_i32(b, 0, effect_id)
+    b
+}
+
+pub fn emit_effect_handle(bc: ByteCode, effect_mask: i32, resume_pc: i32) -> ByteCode with Mut, Panic {
+    var b = bc
+    b = emit_op(b, OP_EFFECT_HANDLE())
+    b = emit_op_i32(b, 0, effect_mask)
+    b = emit_op_i32(b, 0, resume_pc)
+    b
+}
+
+pub fn emit_effect_end_handle(bc: ByteCode) -> ByteCode with Mut, Panic {
+    var b = bc
+    b = emit_op(b, OP_EFFECT_END_HANDLE())
+    b
+}
+
+// ============================================================================
+// SANDBOX POLICY
+// ============================================================================
+
+pub struct SandboxPolicy {
+    allow_io: bool,
+    allow_mut: bool,
+    allow_alloc: bool,
+    allow_panic: bool,
+    allow_async: bool,
+    allow_gpu: bool,
+    allow_prob: bool,
+    allow_div: bool,
+    max_instructions: i64,
+    max_memory: i64,
+    max_stack_depth: i64,
+}
+
+pub fn sandbox_policy_permissive() -> SandboxPolicy with Mut {
+    SandboxPolicy {
+        allow_io: true,
+        allow_mut: true,
+        allow_alloc: true,
+        allow_panic: true,
+        allow_async: true,
+        allow_gpu: true,
+        allow_prob: true,
+        allow_div: true,
+        max_instructions: 1000000,
+        max_memory: 1024 * 1024 * 1024,
+        max_stack_depth: 1000,
+    }
+}
+
+pub fn sandbox_policy_restricted() -> SandboxPolicy with Mut {
+    SandboxPolicy {
+        allow_io: false,
+        allow_mut: false,
+        allow_alloc: false,
+        allow_panic: true,
+        allow_async: false,
+        allow_gpu: false,
+        allow_prob: false,
+        allow_div: true,
+        max_instructions: 10000,
+        max_memory: 1024 * 1024,
+        max_stack_depth: 100,
+    }
+}
+
+pub fn sandbox_policy_pure() -> SandboxPolicy with Mut {
+    SandboxPolicy {
+        allow_io: false,
+        allow_mut: false,
+        allow_alloc: false,
+        allow_panic: false,
+        allow_async: false,
+        allow_gpu: false,
+        allow_prob: false,
+        allow_div: false,
+        max_instructions: 1000,
+        max_memory: 64 * 1024,
+        max_stack_depth: 10,
+    }
+}
+
+pub fn policy_to_effect_mask(policy: SandboxPolicy) -> i64 with Mut, Panic, Div {
+    var mask: i64 = 0
+    if policy.allow_io {
+        mask = effect_add(mask, EFFECT_IO())
+    }
+    if policy.allow_mut {
+        mask = effect_add(mask, EFFECT_MUT())
+    }
+    if policy.allow_alloc {
+        mask = effect_add(mask, EFFECT_ALLOC())
+    }
+    if policy.allow_panic {
+        mask = effect_add(mask, EFFECT_PANIC())
+    }
+    if policy.allow_async {
+        mask = effect_add(mask, EFFECT_ASYNC())
+    }
+    if policy.allow_gpu {
+        mask = effect_add(mask, EFFECT_GPU())
+    }
+    if policy.allow_prob {
+        mask = effect_add(mask, EFFECT_PROB())
+    }
+    if policy.allow_div {
+        mask = effect_add(mask, EFFECT_DIV())
+    }
+    mask
+}
+
+pub fn sandbox_execute(bc: ByteCode, policy: SandboxPolicy) -> (EffectVM, i64) with Mut, Panic, Div {
+    let allowed_effects = policy_to_effect_mask(policy)
+    var evm = effect_vm_new(allowed_effects)
+    var instruction_count: i64 = 0
+
+    while !vm_is_halted(&evm.vm) && !vm_has_error(&evm.vm) && instruction_count < policy.max_instructions {
+        if vm_stack_depth(&evm.vm) > policy.max_stack_depth {
+            evm.vm = vm_with_error(evm.vm)
+            break
+        }
+        evm.vm = vm_step(evm.vm, bc)
+        instruction_count = instruction_count + 1
+    }
+
+    (evm, instruction_count)
+}
+
+pub struct EffectSummary {
+    effects_performed: i64,
+    effect_counts: [i64; 32],
+    violations: i64,
+    instructions_executed: i64,
+}
+
+pub fn effect_vm_summary(evm: EffectVM, instructions: i64) -> EffectSummary with Mut, Panic, Div {
+    var summary = EffectSummary {
+        effects_performed: evm.current_effects,
+        effect_counts: [0; 32],
+        violations: 0,
+        instructions_executed: instructions,
+    }
+
+    var i: i64 = 0
+    while i < evm.effect_log_count {
+        let entry = evm.effect_log[i as usize]
+        if entry.operation == EF_OP_PERFORM() {
+            let eff = entry.effect_id
+            if eff >= 0 && eff < 32 {
+                summary.effect_counts[eff as usize] = summary.effect_counts[eff as usize] + 1
+            }
+        }
+        i = i + 1
+    }
+
+    summary
+}
+
+pub fn effect_summary_effects_performed(summary: &EffectSummary) -> i64 {
+    summary.effects_performed
+}
+
+pub fn effect_summary_instructions_executed(summary: &EffectSummary) -> i64 {
+    summary.instructions_executed
+}
+
+pub struct CompilePipeline {
+    source: [i8; 8192],
+    source_len: i64,
+    bytecode: ByteCode,
+    effect_policy: SandboxPolicy,
+}
+
+pub fn compile_pipeline_new(src: [i8; 8192], src_len: i64, policy: SandboxPolicy) -> CompilePipeline with Mut {
+    CompilePipeline {
+        source: src,
+        source_len: src_len,
+        bytecode: bytecode_new(),
+        effect_policy: policy,
+    }
+}
+
+pub fn compile_to_effect_bytecode(pipeline: CompilePipeline) -> CompilePipeline with Mut, Panic, Div {
+    var p = pipeline
+    p
+}
+
+pub fn sandbox_compile_and_run(src: [i8; 8192], src_len: i64, policy: SandboxPolicy) -> (EffectSummary, bool) with Mut, Panic, Div {
+    let pipeline = compile_pipeline_new(src, src_len, policy)
+    let compiled = compile_to_effect_bytecode(pipeline)
+    let exec = sandbox_execute(compiled.bytecode, compiled.effect_policy)
+    let evm = exec.0
+    let inst_count = exec.1
+    let summary = effect_vm_summary(evm, inst_count)
+    let success = !vm_has_error(&evm.vm) && !vm_is_halted(&evm.vm)
+    (summary, success)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_effect_vm_new() -> bool with Mut, Panic, Div {
+    let allowed = effect_add(effect_bit(EFFECT_IO()), EFFECT_MUT())
+    let evm = effect_vm_new(allowed)
+    evm.allowed_effects == allowed
+}
+
+fn test_effect_vm_perform_allowed() -> bool with Mut, Panic, Div {
+    let allowed = effect_add(effect_bit(EFFECT_IO()), EFFECT_MUT())
+    var evm = effect_vm_new(allowed)
+    // Install handler so perform does not treat IO as unhandled
+    evm = effect_vm_install_handler(evm, effect_bit(EFFECT_IO()), 50, false)
+    evm = effect_vm_perform(evm, EFFECT_IO(), 10)
+    !vm_has_error(&evm.vm) && evm.current_effects == effect_bit(EFFECT_IO())
+}
+
+fn test_effect_vm_perform_denied() -> bool with Mut, Panic, Div {
+    let allowed = effect_bit(EFFECT_MUT())
+    var evm = effect_vm_new(allowed)
+    evm = effect_vm_perform(evm, EFFECT_IO(), 10)
+    vm_has_error(&evm.vm)
+}
+
+fn test_effect_vm_handler() -> bool with Mut, Panic, Div {
+    let allowed = effect_bit(EFFECT_IO())
+    var evm = effect_vm_new(allowed)
+    evm = effect_vm_install_handler(evm, effect_bit(EFFECT_IO()), 100, false)
+    evm = effect_vm_perform(evm, EFFECT_IO(), 10)
+    vm_pc(&evm.vm) == 100
+}
+
+fn test_policy_to_mask() -> bool with Mut, Panic, Div {
+    let policy = sandbox_policy_pure()
+    let mask = policy_to_effect_mask(policy)
+    mask == 0
+}
+
+fn test_policy_permissive() -> bool with Mut, Panic, Div {
+    let policy = sandbox_policy_permissive()
+    let mask = policy_to_effect_mask(policy)
+    var expected: i64 = 0
+    expected = effect_add(expected, EFFECT_IO())
+    expected = effect_add(expected, EFFECT_MUT())
+    expected = effect_add(expected, EFFECT_ALLOC())
+    expected = effect_add(expected, EFFECT_PANIC())
+    expected = effect_add(expected, EFFECT_ASYNC())
+    expected = effect_add(expected, EFFECT_GPU())
+    expected = effect_add(expected, EFFECT_PROB())
+    expected = effect_add(expected, EFFECT_DIV())
+    mask == expected
+}
+
+fn test_sandbox_execute() -> bool with Mut, Panic, Div {
+    var bc = bytecode_new()
+    bc = add_const_i64(bc, 42)
+    bc = emit_op_i32(bc, OP_PUSH_I64(), 0)
+    bc = emit_op(bc, OP_HALT())
+
+    let policy = sandbox_policy_permissive()
+    let exec = sandbox_execute(bc, policy)
+    let evm = exec.0
+    let inst = exec.1
+    inst == 2 && vm_stack_depth(&evm.vm) == 1 && value_as_i64(vm_result(evm.vm)) == 42
+}
+
+pub fn effects_sandbox_run_tests() -> i64 with IO, Mut, Panic, Div {
+    print("=== Effects Sandbox Tests ===\n")
+    var fails: i64 = 0
+
+    if !test_effect_vm_new() {
+        print("FAIL: test_effect_vm_new\n")
+        fails = fails + 1
+    } else {
+        print("PASS: test_effect_vm_new\n")
+    }
+
+    if !test_effect_vm_perform_allowed() {
+        print("FAIL: test_effect_vm_perform_allowed\n")
+        fails = fails + 1
+    } else {
+        print("PASS: test_effect_vm_perform_allowed\n")
+    }
+
+    if !test_effect_vm_perform_denied() {
+        print("FAIL: test_effect_vm_perform_denied\n")
+        fails = fails + 1
+    } else {
+        print("PASS: test_effect_vm_perform_denied\n")
+    }
+
+    if !test_effect_vm_handler() {
+        print("FAIL: test_effect_vm_handler\n")
+        fails = fails + 1
+    } else {
+        print("PASS: test_effect_vm_handler\n")
+    }
+
+    if !test_policy_to_mask() {
+        print("FAIL: test_policy_to_mask\n")
+        fails = fails + 1
+    } else {
+        print("PASS: test_policy_to_mask\n")
+    }
+
+    if !test_policy_permissive() {
+        print("FAIL: test_policy_permissive\n")
+        fails = fails + 1
+    } else {
+        print("PASS: test_policy_permissive\n")
+    }
+
+    if !test_sandbox_execute() {
+        print("FAIL: test_sandbox_execute\n")
+        fails = fails + 1
+    } else {
+        print("PASS: test_sandbox_execute\n")
+    }
+
+    print("Total failures: ")
+    print_int(fails)
+    print("\n")
+    fails
+}

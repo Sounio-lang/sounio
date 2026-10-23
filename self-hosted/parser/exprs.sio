@@ -10,7 +10,8 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_assign_op_code, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_store_expr_box, parser_take_expr_box}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_ahead_is_p_ident, parser_ahead_is_hex_frac_p_ident, parser_ahead_fused_exp_ident, parser_assign_op_code, parser_advance, parser_prev_token_end, mk_expr, error_expr, dummy_type_expr, parser_store_expr_box, parser_take_expr_box, f64_hex_literal_from_source}
+use parser::f128_literal::*
 use parser::types::*
 use parser::stmts::*
 use parser::patterns::*
@@ -38,6 +39,17 @@ impl Parser {
     // ============================================================
 
     fn parse_expr_bp(self, min_bp: i64) -> Parser with Mut, IO, Panic, Div, Alloc {
+        // Byte start of this expression, captured before any advance. Used instead
+        // of lhs.span: that field's payload is null on the Gen3 preflight path and
+        // span_from SIGSEGVs reading it. PT_START is the same byte current_span uses.
+        let expr_start = if self.pos >= 0 && self.pos < self.token_count { PT_START[self.pos as usize] } else { 0 }
+        // #2779: a block-like atom written inside parentheses (`(if a {1} else {0})`)
+        // is closed by its `)`, so a newline-led operator on the next line continues
+        // it. Grouping keeps the inner Expr unchanged (parse_paren_expr), so remember
+        // here that the atom started with `(`. A block-like kind can only come from
+        // the atom itself -- every postfix/infix step below replaces `lhs` with a
+        // call/index/field/binary node -- so this flag needs no reset.
+        let atom_parenthesized = parser_peek(self) == TokenKind::LParen || pt_read_kind_code(self.pos) == 174
         // Parse prefix / atom; result stored in LAST_EXPR
         var p = self.parse_prefix()
         var lhs = parser_take_expr_box()
@@ -76,12 +88,16 @@ impl Parser {
                 continue
             }
 
+            // `audit` is also a name (`var audit = 1` / `audit = audit + 1`).
+            // Without this, the initializer on the previous line swallows the
+            // next statement: `2029\naudit = mix(...)` is parsed as
+            // `2029 audit =` and expect_ident dies on `=`.
             if op_kind == TokenKind::AuditLower {
+                if p.had_newline_before() { break }
                 p = p.advance()
                 let audit_name = p.current_name()
                 p = p.expect_ident()
-                let lhs_span = lhs.span
-                let span = p.span_from(lhs_span)
+                let span = p.span_from_off(expr_start)
                 var audit_e = mk_expr(ExprKind::ExprAuditAttach, span)
                 audit_e.left = Some(lhs)
                 audit_e.name = audit_name
@@ -92,7 +108,7 @@ impl Parser {
             // A control/block expression followed by a newline starts a new
             // statement. Without this, `while { ... }\n-1` becomes
             // `(while { ... }) - 1` and type-checks as `() - i64`.
-            if p.had_newline_before() && expr_kind_ends_line_stmt((*lhs).kind) {
+            if p.had_newline_before() && expr_kind_ends_line_stmt((*lhs).kind) && !atom_parenthesized {
                 break
             }
 
@@ -125,6 +141,25 @@ impl Parser {
                 break
             }
 
+            // #2249: `!` and `~` are prefix operators only. After an operand they
+            // have no meaning, so `x ! y`, `x ~ y` and the spaced `x! (y)` are
+            // refused here rather than handed to token_to_binop, whose fallback
+            // used to read them as `x + y`. At the start of a line (any spacing)
+            // the operator begins a new statement, as on lean_single.
+            if op_kind == TokenKind::Bang || op_kind == TokenKind::Tilde {
+                if p.had_newline_before() { break }
+                p.had_error = true
+                p.error_count = p.error_count + 1
+                if p.error_count <= 20 {
+                    if op_kind == TokenKind::Bang {
+                        print("error: `!` is not a binary operator: `a ! b` has no meaning (prefix `!x` is logical not; for inequality write `!=`)\n")
+                    } else {
+                        print("error: `~` is not a binary operator: `a ~ b` has no meaning (prefix `~x` is bitwise not; for xor write `^`)\n")
+                    }
+                }
+                break
+            }
+
             let prec = tk_precedence(op_kind)
 
             // Stop if current operator has lower or equal precedence
@@ -137,8 +172,7 @@ impl Parser {
                 if p.at_expr_start() {
                     p = p.parse_expr_bp(prec)
                     let rhs = parser_take_expr_box()
-                    let lhs_span = lhs.span
-                    let span = p.span_from(lhs_span)
+                    let span = p.span_from_off(expr_start)
                     var range_e = mk_expr(ExprKind::ExprRange, span)
                     range_e.bin_op = bin_op
                     range_e.left = Some(lhs)
@@ -146,8 +180,7 @@ impl Parser {
                     lhs = Box::new(range_e)
                 } else {
                     // Half-open range: expr..
-                    let lhs_span = lhs.span
-                    let span = p.span_from(lhs_span)
+                    let span = p.span_from_off(expr_start)
                     var range_e = mk_expr(ExprKind::ExprRange, span)
                     range_e.bin_op = bin_op
                     range_e.left = Some(lhs)
@@ -163,8 +196,7 @@ impl Parser {
                 let pair2 = p.parse_type()
                 p = pair2.0
                 let target_ty = pair2.1
-                let lhs_span = lhs.span
-                let span = p.span_from(lhs_span)
+                let span = p.span_from_off(expr_start)
                 var cast_e = mk_expr(ExprKind::ExprCast, span)
                 cast_e.left = Some(lhs)
                 cast_e.cast_type = Some(Box::new(target_ty))
@@ -175,14 +207,24 @@ impl Parser {
             // Standard binary operator
             if prec == 0 { break }
 
+            // #2249: fail closed on a token that has a precedence but no binary
+            // operator, instead of token_to_binop's old silent OpAdd fallback.
+            if !token_is_binop(op_kind) {
+                p.had_error = true
+                p.error_count = p.error_count + 1
+                if p.error_count <= 20 {
+                    print("error: unexpected token in binary operator position (no binary operator for it)\n")
+                }
+                break
+            }
+
             let bin_op = token_to_binop(op_kind)
             p = p.advance()
 
             // Right-hand side: use prec for left-associativity
             p = p.parse_expr_bp(prec)
             let rhs = parser_take_expr_box()
-            let lhs_span = lhs.span
-            let span = p.span_from(lhs_span)
+            let span = p.span_from_off(expr_start)
 
             var bin_e = mk_expr(ExprKind::ExprBinary, span)
             bin_e.bin_op = bin_op
@@ -208,7 +250,7 @@ impl Parser {
         } else if k == TokenKind::Bang {
             self.parse_unary(UnaryOp::OpNot)
         } else if k == TokenKind::Tilde {
-            self.parse_unary(UnaryOp::OpNot)
+            self.parse_unary(UnaryOp::OpBitNot)
         } else if k == TokenKind::Amp {
             self.parse_unary(UnaryOp::OpRef)
         } else if k == TokenKind::AmpBang {
@@ -217,7 +259,15 @@ impl Parser {
             self.parse_unary(UnaryOp::OpDeref)
         }
         // Literals
-        else if k == TokenKind::IntLit || k == TokenKind::HexLit || k == TokenKind::BinLit || k == TokenKind::OctLit {
+        else if k == TokenKind::HexLit {
+            // V0-B: C99 hex-float may arrive split as HexLit + (Dot+digits)? + p + exp
+            // when the lexer still emits legacy HexLit for the 0x… mantissa.
+            if parser_hex_float_tail_ahead(self) {
+                self.parse_c99_hex_float_literal()
+            } else {
+                self.parse_int_literal()
+            }
+        } else if k == TokenKind::IntLit || k == TokenKind::BinLit || k == TokenKind::OctLit {
             self.parse_int_literal()
         } else if k == TokenKind::FloatLit {
             self.parse_float_literal()
@@ -366,6 +416,74 @@ impl Parser {
         let p = self.advance()
         var e = mk_expr(ExprKind::ExprFloatLit, span)
         e.float_val = tok.float_value
+        // V0-E.5.9: exact binary128 identity from the token's source bytes
+        // (decimal, or a lexer-fused C99 hex-float). No f64 on this path.
+        let lit = f128_literal_from_source(span.start, span.end)
+        e.f128_lit_lo = lit.lo
+        e.f128_lit_hi = lit.hi
+        e.f128_lit_exact = lit.exact
+        parser_store_expr_box(Box::new(e))
+        p
+    }
+
+    // Consume HexLit [ . frac | FloatLit | Ident(hex+p) ] p? [+|-] IntLit [suffix] as FloatLit,
+    // or, unsigned, HexLit [ . frac | FloatLit ] Ident(hex*p<digits>[suffix]).
+    // Magnitude is a V0-B placeholder (limb identity is V0-D).
+    fn parse_c99_hex_float_literal(self) -> Parser with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // HexLit mantissa
+        // An unsigned exponent arrives inside the Ident (`p0`, `fp10`), digits
+        // and any glued suffix included; nothing after that Ident belongs to
+        // the literal (`0x1p0 + 2.0` must not swallow `+ 2`).
+        var exp_fused = false
+        if parser_peek(p) == TokenKind::Dot {
+            p = parser_advance(p)
+            let frac = parser_peek(p)
+            if frac == TokenKind::IntLit || frac == TokenKind::HexLit || frac == TokenKind::FloatLit {
+                p = parser_advance(p)
+            } else if frac == TokenKind::Ident {
+                // Either hex-frac+p fused, or hex-frac then separate p.
+                exp_fused = parser_ahead_fused_exp_ident(p, 0, 1)
+                p = parser_advance(p)
+            }
+        } else if parser_peek(p) == TokenKind::FloatLit {
+            p = parser_advance(p)
+        }
+        if !exp_fused && parser_peek(p) == TokenKind::Ident {
+            exp_fused = parser_ahead_fused_exp_ident(p, 0, 0)
+            p = parser_advance(p)  // p / P (when not fused into frac Ident)
+        }
+        if !exp_fused {
+            let sign_or_exp = parser_peek(p)
+            if sign_or_exp == TokenKind::Plus || sign_or_exp == TokenKind::Minus {
+                p = parser_advance(p)
+            }
+            if parser_peek(p) == TokenKind::IntLit {
+                p = parser_advance(p)
+            }
+            // Optional numeric suffix tokenised as Ident (f128 / f256). V0-E.5.10:
+            // only when GLUED to the exponent digits — an identifier on the next
+            // line (`0x1.8p+0\n    print(...)`) was swallowed as a suffix, turning
+            // the following `(` into a call on the literal (E017).
+            if parser_peek(p) == TokenKind::Ident {
+                let sfx_span = p.current_span()
+                if sfx_span.start == parser_prev_token_end(p) {
+                    p = parser_advance(p)
+                }
+            }
+        }
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprFloatLit, span)
+        // V0-E.5.9: the exact identity is read from the bytes actually
+        // consumed (start of the HexLit .. end of the last token above), so
+        // the placeholder magnitude can never reach an f128 position.
+        // V0-E.5.10: the f64 value is read from the same bytes, correctly
+        // rounded — no more 1.0 placeholder on the f64 path either.
+        e.float_val = f64_hex_literal_from_source(start.start, parser_prev_token_end(p))
+        let lit = f128_literal_from_source(start.start, parser_prev_token_end(p))
+        e.f128_lit_lo = lit.lo
+        e.f128_lit_hi = lit.hi
+        e.f128_lit_exact = lit.exact
         parser_store_expr_box(Box::new(e))
         p
     }
@@ -761,6 +879,9 @@ impl Parser {
         let name = self.current_name()
         var p = self.advance()  // skip param name
         var ty = dummy_type_expr()
+        // Omitted closure annotations request inference, not the unit type.
+        // A unit placeholder made `|x| x + 1` reject both the body and calls.
+        ty.kind = TypeExprKind::TypeInfer
         if parser_peek(p) == TokenKind::Colon {
             p = p.advance()
             let ty_pair = p.parse_type()
@@ -779,14 +900,7 @@ impl Parser {
         var p = self.advance()  // skip 'if'
         var cond_box: Box<Expr> = Box::new(error_expr(start))
         if parser_peek(p) == TokenKind::Let {
-            p = p.advance()
-            let pat_pair = p.parse_pattern()
-            p = pat_pair.0
-            p = p.expect(TokenKind::Eq)
-            p.no_struct_lit = true
-            p = p.parse_expr()
-            cond_box = parser_take_expr_box()
-            p.no_struct_lit = false
+            return p.parse_if_let_expr(start)
         } else {
             // Restrict struct literals in condition to avoid { ambiguity
             p.no_struct_lit = true
@@ -824,6 +938,91 @@ impl Parser {
         e.block = Some(Box::new(then_block))
         e.else_expr = else_opt
         parser_store_expr_box(Box::new(e))
+        p
+    }
+
+    // `if let PAT = SCRUT { THEN } [else ELSE]` desugars to
+    //     match SCRUT { PAT => { THEN }, _ => ELSE-or-{} }
+    // the same way parse_while_let_expr desugars `while let`. The previous
+    // parse consumed PAT and then DROPPED it, leaving SCRUT as a plain `if`
+    // condition: every `if let Some(x) = opt` became E006 (condition is not
+    // bool) and every use of `x` in THEN became E137 (unbound identifier).
+    fn parse_if_let_expr(self, start: Span) -> Parser with Mut, IO, Panic, Div, Alloc {
+        var p = self.advance()  // skip 'let'
+        let pat_pair = p.parse_pattern()
+        p = pat_pair.0
+        let success_pattern = pat_pair.1
+        p = p.expect(TokenKind::Eq)
+
+        p.no_struct_lit = true
+        p = p.parse_expr()
+        let scrutinee_box = parser_take_expr_box()
+        p.no_struct_lit = false
+
+        let then_pair = p.parse_block()
+        p = then_pair.0
+        let then_block = then_pair.1
+
+        var else_body = mk_expr(ExprKind::ExprBlock, then_block.span)
+        var has_else = false
+        if parser_peek(p) == TokenKind::Else {
+            p = p.advance()  // skip 'else'
+            has_else = true
+            if parser_peek(p) == TokenKind::If {
+                // else if / else if let -- recursively parses and stores to LAST_EXPR
+                p = p.parse_if_expr()
+                let else_if_box = parser_take_expr_box()
+                else_body = *else_if_box
+            } else {
+                let else_pair = p.parse_block()
+                p = else_pair.0
+                let else_block = else_pair.1
+                else_body = mk_expr(ExprKind::ExprBlock, else_block.span)
+                else_body.block = Some(Box::new(else_block))
+            }
+        }
+
+        let span = p.span_from(start)
+        if !has_else {
+            // No else: the fall-through arm is an empty block (unit).
+            else_body = mk_expr(ExprKind::ExprBlock, span)
+            else_body.block = Some(Box::new(Block { stmts: None, span: span }))
+        }
+
+        var then_expr = mk_expr(ExprKind::ExprBlock, then_block.span)
+        then_expr.block = Some(Box::new(then_block))
+        let success_arm = MatchArm {
+            pattern: success_pattern,
+            guard: None,
+            body: then_expr,
+            span: then_block.span,
+        }
+
+        let wildcard_pattern = Pattern {
+            kind: PatternKind::PatWildcard,
+            span: span,
+            name: empty_name(),
+            int_val: 0,
+            path: empty_path(),
+            sub_patterns: None,
+            pat_fields: None,
+            is_mut: false,
+        }
+        let else_arm = MatchArm {
+            pattern: wildcard_pattern,
+            guard: None,
+            body: else_body,
+            span: span,
+        }
+
+        let arms = MatchArmList {
+            head: success_arm,
+            tail: Some(Box::new(MatchArmList { head: else_arm, tail: None })),
+        }
+        var match_expr = mk_expr(ExprKind::ExprMatch, span)
+        match_expr.left = Some(scrutinee_box)
+        match_expr.arms = Some(Box::new(arms))
+        parser_store_expr_box(Box::new(match_expr))
         p
     }
 
@@ -1756,7 +1955,37 @@ fn token_to_binop(kind: TokenKind) -> BinaryOp {
         TokenKind::PlusPlus => BinaryOp::OpConcat,
         TokenKind::DotDot => BinaryOp::OpRange,
         TokenKind::DotDotEq => BinaryOp::OpRangeInclusive,
+        // Unreachable from parse_expr_bp, which refuses any token that
+        // token_is_binop rejects (#2249); there is no meaningful default.
         _ => BinaryOp::OpAdd,
+    }
+}
+
+// #2249: the tokens token_to_binop maps. Keep the two in sync.
+fn token_is_binop(kind: TokenKind) -> bool {
+    match kind {
+        TokenKind::Plus => true,
+        TokenKind::Minus => true,
+        TokenKind::Star => true,
+        TokenKind::Slash => true,
+        TokenKind::Percent => true,
+        TokenKind::EqEq => true,
+        TokenKind::BangEq => true,
+        TokenKind::Lt => true,
+        TokenKind::LtEq => true,
+        TokenKind::Gt => true,
+        TokenKind::GtEq => true,
+        TokenKind::AmpAmp => true,
+        TokenKind::PipePipe => true,
+        TokenKind::Amp => true,
+        TokenKind::Pipe => true,
+        TokenKind::Caret => true,
+        TokenKind::Shl => true,
+        TokenKind::Shr => true,
+        TokenKind::PlusPlus => true,
+        TokenKind::DotDot => true,
+        TokenKind::DotDotEq => true,
+        _ => false,
     }
 }
 

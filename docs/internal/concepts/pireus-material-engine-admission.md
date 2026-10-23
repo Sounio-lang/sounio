@@ -2,8 +2,8 @@
 topic_id: repo.docs.internal.concepts.pireus-material-engine-admission
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.pireus-material-engine-admission
 -->
 
@@ -11,7 +11,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-PIREUS-MATERIAL-ENGINE-ADMISSION`
 
-Status: `executable`
+Status: executable
+
+Historical-Lane-State: `executable`
+Evidence-Pass: tests/stdlib/hardware/test_pireus_material_engine_admission.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 Canonical surface:
 `stdlib/hardware/pireus/material_engine_admission.sio`

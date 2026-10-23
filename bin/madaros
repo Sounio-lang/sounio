@@ -23,7 +23,11 @@
 #   MADAROS_STACK_KB       — soft stack limit (default 524288 = 512 MiB). Measured
 #                            floor 2026-08-13: minimal ok at 16 MiB+, helper at 32 MiB+.
 #                            Set 0 for unlimited. See MADAROS_HARDENING_PLAN_2026-08-12.md.
+#                            If the hard limit forbids it, compile commands refuse
+#                            with rc 75 (#2813); a smaller value is the opt-in to try.
 #   MADAROS_VMEM_LIMIT_KB  — virtual-memory guard (default 32 GiB)
+#   MADAROS_NATIVE_COMPILE_TIMEOUT_SECONDS — native compile deadline, 1..600
+#                            seconds (default 300); does not change GPU/check deadlines.
 #
 # To obtain the raw ELF, run:
 #   make build-madaros
@@ -31,6 +35,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/resolve_madaros.sh"
 
 # Resolve the underlying modular raw ELF.
 # An explicit raw-ELF override that cannot be used ABORTS rather than being
@@ -64,13 +69,39 @@ for _mv in MADAROS_RAW_BIN SOUNIO_MADAROS_BIN; do
 done
 unset _mv _mv_val
 
+# The committed prebuilt is stored as bin/madaros-linux-x86_64.gz plus the ELF's
+# sha256; the ELF path is generated from them. Materialize it (verified against
+# the tracked sha256, exit 78 on a mismatch) before resolution looks for it.
+# Always attempt this -- even when a higher-priority override (MADAROS_RAW_BIN,
+# SOUNIO_MADAROS_BIN, or a local artifacts/self-hosted/madaros) is present, so
+# that the strict-mode `cmp` below has a materialized bin/madaros-linux-x86_64
+# to compare a byte-identical override against and correctly accept it, rather
+# than refusing it for want of a comparison file. Only tolerate a
+# materialization FAILURE (a corrupted or missing prebuilt) when a higher-
+# priority override is present: that run was never going to use the prebuilt
+# ELF itself, only (optionally) compare against it, so it must not abort --
+# resolution just proceeds without a committed comparison file.
+_madaros_higher_priority_override_present() {
+  local cand
+  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" "$(sounio_madaros_host_raw || true)" "$ROOT_DIR/artifacts/self-hosted/madaros"; do
+    [[ -n "$cand" && -x "$cand" && "$(head -c 2 "$cand" 2>/dev/null)" != "#!" ]] && return 0
+  done
+  return 1
+}
+if [[ -f "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" ]]; then
+  if ! bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh"; then
+    _mat_rc=$?
+    _madaros_higher_priority_override_present || exit "$_mat_rc"
+  fi
+fi
+
 # Resolution order:
 #   1. MADAROS_RAW_BIN / SOUNIO_MADAROS_BIN env var
 #   2. artifacts/self-hosted/madaros (built by make build-madaros)
 #   3. bin/madaros-linux-x86_64 (checked-in prebuilt)
 _resolve_modular_elf() {
   local cand
-  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" "$(sounio_madaros_host_raw || true)" "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
     if [[ -n "$cand" && -x "$cand" && "$(head -c 2 "$cand" 2>/dev/null)" != "#!" ]]; then
       echo "$cand"
       return 0
@@ -112,12 +143,49 @@ SCIENCE_BOUNDARY_ARGS=()
 # lowering path fails through 384 MiB and passes at 448 MiB; reserve 512 MiB.
 # Named reservation replaces blanket unlimited until IR-arena root fix lands.
 # MADAROS_STACK_KB=0 restores unlimited.
+#
+# #2813: the reservation used to be best-effort (`|| true`). Under a hard stack
+# limit below it (e.g. `ulimit -Hs 8192`) the raw compiler then ran with the
+# 8 MiB default and SIGSEGV'd (rc=139) compiling large programs -- an
+# undiagnosed crash. Now every compiler invocation first checks that the soft
+# limit actually reached MADAROS_STACK_KB and refuses (rc=75, EX_TEMPFAIL)
+# with the limits in the message otherwise. MADAROS_STACK_KB=<smaller KiB> is
+# the explicit opt-in for running with less (small programs fit in 8 MiB).
+# --version, info and help never need the stack and are not gated.
+_madaros_explicit_stack="${MADAROS_STACK_KB+x}"
 MADAROS_STACK_KB="${MADAROS_STACK_KB:-524288}"
+if [[ "$(uname -s)" == Darwin ]]; then
+  export SOUNIO_METAL_RUNTIME="${SOUNIO_METAL_RUNTIME:-$ROOT_DIR/artifacts/self-hosted/libsounio_metal.dylib}"
+fi
+if [[ "$(uname -s)" == Darwin && -z "$_madaros_explicit_stack" ]]; then
+  MADAROS_STACK_KB="$(ulimit -H -s)"
+  [[ "$MADAROS_STACK_KB" == unlimited ]] && MADAROS_STACK_KB=65536
+fi
 if [[ "$MADAROS_STACK_KB" == "0" ]]; then
   ulimit -s unlimited 2>/dev/null || true
 else
   ulimit -s "$MADAROS_STACK_KB" 2>/dev/null || true
 fi
+
+_require_compiler_stack() {
+  local soft hard want
+  soft="$(ulimit -S -s)"
+  hard="$(ulimit -H -s)"
+  if [[ "$MADAROS_STACK_KB" == "0" ]]; then
+    want="unlimited"
+    [[ "$soft" == "unlimited" ]] && return 0
+  else
+    want="$MADAROS_STACK_KB"
+    [[ "$soft" == "unlimited" ]] && return 0
+    if [[ "$soft" =~ ^[0-9]+$ && "$want" =~ ^[0-9]+$ ]] && (( soft >= want )); then
+      return 0
+    fi
+  fi
+  echo "error: madaros: cannot reserve the compiler stack: need ${want} KiB, soft limit is ${soft} KiB (hard limit ${hard} KiB)" >&2
+  echo "  The compiler recurses deeply on large programs and would crash (SIGSEGV) with less." >&2
+  echo "  Raise the hard limit (ulimit -Hs ${want}, or unlimited), or set MADAROS_STACK_KB=${soft} to try with the current stack." >&2
+  exit 75
+}
 
 usage() {
   cat <<USAGE
@@ -312,7 +380,7 @@ _science_evaluate() {
   # Auto mode still needs the raw collector: the attestor may discover an
   # ancestor science-rings.tsv or [science] table after option parsing.
   if [[ "$SCIENCE_BOUNDARY_MODE" != "off" ]] && _science_raw_closure_supported; then
-    closure_report="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-closure.XXXXXX.tsv")"
+    closure_report="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-closure.tsv.XXXXXX")"
     if _science_raw_closure_report "$src" "$closure_report"; then
       command+=(--closure-report "$closure_report")
     else
@@ -368,7 +436,7 @@ _science_check_preflight() {
   local receipt="$SCIENCE_BOUNDARY_RECEIPT"
   local temporary_receipt=""
   if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" && -z "$receipt" ]]; then
-    temporary_receipt="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-check.XXXXXX.json")"
+    temporary_receipt="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-check.json.XXXXXX")"
     receipt="$temporary_receipt"
   fi
   set +e
@@ -497,7 +565,7 @@ _run_raw_check() {
   _check_source_arg "$src"
   if [[ ! -s "$src" ]]; then
     local tmp_empty
-    tmp_empty="$(mktemp "${TMPDIR:-/tmp}/madaros-empty-check.XXXXXX.sio")"
+    tmp_empty="$(mktemp "${TMPDIR:-/tmp}/madaros-empty-check.sio.XXXXXX")"
     printf '\n' > "$tmp_empty"
     "$RAW_MADAROS" --check "$tmp_empty" "$@"
     local rc=$?
@@ -518,10 +586,19 @@ _run_raw_check() {
 _parse_build_options() {
   BUILD_OUT="a.out"
   BUILD_BACKEND="native"
+  BUILD_TARGET="native"
   BUILD_GPU_TARGET="cuda-sm80"
   BUILD_GPU_BINARY_FORMAT=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      -t|--target)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros build: $1 requires a target" >&2
+          return 2
+        fi
+        BUILD_TARGET="$2"
+        shift 2
+        ;;
       -o|--output)
         if [[ $# -lt 2 ]]; then
           echo "error: madaros build: $1 requires a path" >&2
@@ -614,8 +691,13 @@ _compile_source_to_artifact() {
     fi
     return 0
   fi
+  local native_timeout="${MADAROS_NATIVE_COMPILE_TIMEOUT_SECONDS:-300}"
+  if [[ ! "$native_timeout" =~ ^[1-9][0-9]{0,2}$ ]] || (( native_timeout > 600 )); then
+    echo "error: madaros build: MADAROS_NATIVE_COMPILE_TIMEOUT_SECONDS must be an integer from 1 to 600" >&2
+    return 2
+  fi
   set +e
-  ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" "$src" -o "$out" )
+  ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout "$native_timeout" "$RAW_MADAROS" build "$src" --target "$BUILD_TARGET" -o "$out" )
   rc=$?
   set -e
   if [[ $rc -ne 0 ]]; then
@@ -666,10 +748,10 @@ _build_source() {
     if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" ]]; then
       rm -f "$receipt"
     fi
-    preflight_receipt="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-build.XXXXXX.json")"
+    preflight_receipt="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-build.json.XXXXXX")"
     temporary_preflight="$preflight_receipt"
   elif [[ "$SCIENCE_BOUNDARY_MODE" == "strict" ]]; then
-    preflight_receipt="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-build.XXXXXX.json")"
+    preflight_receipt="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-build.json.XXXXXX")"
     temporary_preflight="$preflight_receipt"
   fi
 
@@ -706,6 +788,8 @@ _build_source() {
       return 1
     fi
     rm -f "$temporary_preflight"
+    echo 'Compilation successful!'
+    printf '   Output: %s\n' "$out"
     return 0
   fi
 
@@ -719,6 +803,8 @@ _build_source() {
     fi
   fi
   rm -f "$temporary_preflight"
+  echo 'Compilation successful!'
+  printf '   Output: %s\n' "$out"
 }
 
 _run_source() {
@@ -728,8 +814,13 @@ _run_source() {
   tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/madaros-run.XXXXXX")"
   out="$tmp_dir/main.elf"
   _build_source "$src" -o "$out"
+  if [[ "$(uname -s)" == Darwin ]] && file "$out" | grep -q 'Mach-O'; then
+    codesign -s - -f "$out"
+  fi
+  set +e
   "$out" "$@"
   local rc=$?
+  set -e
   rm -rf "$tmp_dir"
   return "$rc"
 }
@@ -755,6 +846,7 @@ case "$1" in
     info
     ;;
   check)
+    _require_compiler_stack
     shift
     candidate="${1:-}"
     if ! src="$(resolve_source_or_project "$candidate")"; then
@@ -775,6 +867,7 @@ case "$1" in
       usage
       exit 0
     fi
+    _require_compiler_stack
     candidate="${1:-}"
     if [[ -n "$candidate" && "$candidate" != -* ]]; then
       shift
@@ -795,6 +888,7 @@ case "$1" in
     _build_source "$src" "$@"
     ;;
   run)
+    _require_compiler_stack
     shift
     candidate="${1:-}"
     if ! src="$(resolve_source_or_project "$candidate")"; then
@@ -807,6 +901,7 @@ case "$1" in
     _run_source "$src" "$@"
     ;;
   pkg)
+    _require_compiler_stack
     shift
     pkg_subcommand="${1:-}"
     if [[ "$pkg_subcommand" == "build" && "$SCIENCE_BOUNDARY_MODE" != "strict" ]] && _args_have_release_bundle "$@"; then
@@ -859,6 +954,7 @@ case "$1" in
     usage
     ;;
   *)
+    _require_compiler_stack
     if [[ "$1" == "--check" && $# -ge 2 ]]; then
       if ! _science_check_preflight "$2"; then
         exit 1

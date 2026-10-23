@@ -1,16 +1,22 @@
+use viz::scatter::{scatter_project}
+use viz::scale::{ScaleSpec,axis_scaled_ticks}
+use viz::clip::{clip_series_segment, clip_pixel}
+use viz::legend::{legend_layout}
+use viz::axis::{axis_ticks, axis_label, axis_offset}
 // stdlib/viz/viz_canvas.sio — Visual IR renderer to display::Canvas
 
-use display::canvas::{Canvas, canvas_fill_rect, canvas_draw_rect, canvas_draw_text, canvas_fill_circle}
-use display::canvas_ext::{canvas_draw_line_aa}
-use viz::coord::{coord_new, coord_draw_axes}
-use viz::chart::{chart_line, chart_scatter, chart_bar, chart_heatmap}
+use display::canvas::{Canvas, canvas_set_pixel, canvas_fill_rect, canvas_draw_rect, canvas_draw_text, canvas_fill_circle}
+use display::canvas_ext::{canvas_draw_line_aa, PixelScissor, canvas_draw_line_aa_scissored}
+use viz::coord::{coord_new, coord_draw_axes, coord_draw_frame}
+use viz::chart::{chart_line, chart_bar, chart_heatmap}
 use viz::epiviz::{epiviz_band}
 use render::renderer3d::{Camera3D, Light3D, Tri3D, r3d_depth_buf_alloc, r3d_depth_buf_clear, r3d_render_viewport}
 use viz::ir::{
-    VizScene, VizNode,
+    VizScene, VizNode, VIZ_NODE_AXIS, VIZ_FLAG_CLIP_PLOT,
     VIZ_NODE_PANEL, VIZ_NODE_CHART_LINE, VIZ_NODE_CHART_SCATTER, VIZ_NODE_CHART_BAR,
     VIZ_NODE_HEATMAP, VIZ_NODE_UNCERTAINTY_BAND, VIZ_NODE_LABEL, VIZ_NODE_CONTROL,
     VIZ_NODE_FOREST, VIZ_NODE_WATERFALL,
+    VIZ_INTERVAL_NONE,
     VIZ_NODE_MOLECULE, VIZ_NODE_FIELD, VIZ_NODE_VECTOR_FIELD, VIZ_NODE_TRAJECTORY, VIZ_NODE_SPECTRUM, VIZ_NODE_MESH,
     VIZ_CONTROL_SLIDER, VIZ_CONTROL_TOGGLE, VIZ_CONTROL_TABS, VIZ_CONTROL_LEGEND,
     VIZ_CONTROL_BUTTON, VIZ_CONTROL_TOOLTIP, VIZ_CONTROL_VIEWPORT
@@ -54,8 +60,14 @@ fn vc_draw_control(c: &!Canvas, node: &VizNode) with Mut, Div {
         canvas_draw_rect(c, x, y, w, h, 120, 135, 150)
     } else if node.data_slot == VIZ_CONTROL_LEGEND {
         canvas_draw_rect(c, x, y, w, h, 120, 135, 150)
-        canvas_fill_rect(c, x + 4, y + h / 2 - 3, 10, 6, node.style.r, node.style.g, node.style.b)
-        vc_draw_label(c, node)
+        let plan = legend_layout(x, y, w, h, node.label_len)
+        if plan.status == 0 {
+            canvas_fill_rect(c, plan.swatch_x, plan.swatch_y, 10, 6, node.style.r, node.style.g, node.style.b)
+            var text: [i8; 256] = [0; 256]
+            var k: i64 = 0
+            while k < plan.visible_len { text[k as usize] = node.label[k as usize]; k = k + 1 }
+            canvas_draw_text(c, &text, plan.visible_len, plan.text_x, plan.text_y, node.style.r, node.style.g, node.style.b)
+        }
     } else if node.data_slot == VIZ_CONTROL_TOOLTIP {
         canvas_fill_rect(c, x, y, w, h, 28, 34, 42)
         canvas_draw_rect(c, x, y, w, h, 140, 155, 170)
@@ -109,15 +121,16 @@ fn vc_draw_waterfall(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Di
 }
 
 fn vc_draw_forest(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div {
-    let d = scene.series[node.data_slot as usize]
-    if d.n <= 0 { return }
+    let row_count: i64 = scene.series[node.data_slot as usize].n
+    let d = &scene.series[node.data_slot as usize]
+    if row_count <= 0 { return }
     var x_min = d.x_min
     var x_max = d.x_max
     var i: i64 = 0
-    while i < d.n && i < 1024 {
+    while i < row_count && i < 1024 {
         let sigma = vc_sqrt(d.vars[i as usize])
-        let lo = d.xs[i as usize] - sigma
-        let hi = d.xs[i as usize] + sigma
+        let lo = if d.interval_kind == VIZ_INTERVAL_NONE { d.xs[i as usize] - sigma } else { d.lower[i as usize] }
+        let hi = if d.interval_kind == VIZ_INTERVAL_NONE { d.xs[i as usize] + sigma } else { d.upper[i as usize] }
         if lo < x_min { x_min = lo }
         if hi > x_max { x_max = hi }
         i = i + 1
@@ -126,18 +139,22 @@ fn vc_draw_forest(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div {
         x_min = x_min - 1.0
         x_max = x_max + 1.0
     }
-    let row_h = vc_clamp(node.layout.h / (d.n + 1), 5, 22)
+    let row_h = vc_clamp(node.layout.h / (row_count + 1), 5, 22)
     canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 90, 95, 120)
     i = 0
-    while i < d.n && i < 1024 {
+    while i < row_count && i < 1024 {
         let sigma = vc_sqrt(d.vars[i as usize])
         let row_y = node.layout.y + row_h / 2 + i * row_h
-        let sx = node.layout.x + (((d.xs[i as usize] - x_min) / (x_max - x_min)) * (node.layout.w as f64)) as i64
-        let slo = node.layout.x + ((((d.xs[i as usize] - sigma) - x_min) / (x_max - x_min)) * (node.layout.w as f64)) as i64
-        let shi = node.layout.x + ((((d.xs[i as usize] + sigma) - x_min) / (x_max - x_min)) * (node.layout.w as f64)) as i64
+        let lo = if d.interval_kind == VIZ_INTERVAL_NONE { d.xs[i as usize] - sigma } else { d.lower[i as usize] }
+        let hi = if d.interval_kind == VIZ_INTERVAL_NONE { d.xs[i as usize] + sigma } else { d.upper[i as usize] }
+        let slo = node.layout.x + (((lo - x_min) / (x_max - x_min)) * (node.layout.w as f64)) as i64
+        let shi = node.layout.x + (((hi - x_min) / (x_max - x_min)) * (node.layout.w as f64)) as i64
         canvas_fill_rect(c, slo, row_y, shi - slo + 1, 1, 180, 180, 220)
         canvas_fill_rect(c, slo, row_y - 2, 1, 5, 180, 180, 220)
         canvas_fill_rect(c, shi, row_y - 2, 1, 5, 180, 180, 220)
+        let estimate: f64 = d.xs[i as usize]
+        let relative: f64 = (estimate - x_min) / (x_max - x_min)
+        let sx: i64 = node.layout.x + ((relative * (node.layout.w as f64)) as i64)
         canvas_fill_rect(c, sx - 3, row_y - 3, 7, 7, node.style.r, node.style.g, node.style.b)
         i = i + 1
     }
@@ -318,17 +335,85 @@ fn vc_draw_mesh(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div, Al
     canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 120, 130, 150)
 }
 
+fn vc_draw_scatter(scene:&VizScene,c:&!Canvas,idx:i64) with Mut,Div {
+    let slot:i64=scene.nodes[idx as usize].data_slot
+    if slot < 0 || slot >= scene.series_count { return }
+    let x:i64=scene.nodes[idx as usize].layout.x
+    let y:i64=scene.nodes[idx as usize].layout.y
+    let w:i64=scene.nodes[idx as usize].layout.w
+    let h:i64=scene.nodes[idx as usize].layout.h
+    let red:i64=scene.nodes[idx as usize].style.r
+    let green:i64=scene.nodes[idx as usize].style.g
+    let blue:i64=scene.nodes[idx as usize].style.b
+    let clipped=(scene.nodes[idx as usize].flags & VIZ_FLAG_CLIP_PLOT) != 0
+    let xmin:f64=scene.series[slot as usize].x_min
+    let xmax:f64=scene.series[slot as usize].x_max
+    let ymin:f64=scene.series[slot as usize].y_min
+    let ymax:f64=scene.series[slot as usize].y_max
+    let domain_check=scatter_project(xmin,ymin,xmin,xmax,ymin,ymax,x,y,w,h,false)
+    if domain_check.status != 0 { return }
+    if !clipped {
+        var y_zero:i64=y+h-1
+        var x_zero:i64=x
+        if ymin <= 0.0 && ymax >= 0.0 {
+            let axis_point=scatter_project(xmin,0.0,xmin,xmax,ymin,ymax,x,y,w,h,false)
+            if axis_point.status == 0 { y_zero=axis_point.y }
+        }
+        if xmin <= 0.0 && xmax >= 0.0 {
+            let axis_point=scatter_project(0.0,ymin,xmin,xmax,ymin,ymax,x,y,w,h,false)
+            if axis_point.status == 0 { x_zero=axis_point.x }
+        }
+        canvas_fill_rect(c,x,y_zero,w,1,220,220,220)
+        canvas_fill_rect(c,x_zero,y,1,h,220,220,220)
+        let cs=coord_new(xmin,xmax,ymin,ymax,x,y,w,h)
+        coord_draw_frame(&cs,c)
+    }
+    var i:i64=0
+    while i < scene.series[slot as usize].n && i < 1024 {
+        let sx:f64=scene.series[slot as usize].xs[i as usize]
+        let sy:f64=scene.series[slot as usize].ys[i as usize]
+        let point=scatter_project(sx,sy,xmin,xmax,ymin,ymax,x,y,w,h,clipped)
+        if point.status == 0 {
+            let px:i64=point.x; let py:i64=point.y
+            if clipped {
+                var dy:i64 = -3
+                while dy <= 3 {
+                    var dx:i64 = -3
+                    while dx <= 3 {
+                        let qx=px+dx; let qy=py+dy
+                        if dx*dx+dy*dy <= 9 && qx >= x && qx <= x+w && qy >= y && qy <= y+h {
+                            canvas_set_pixel(c,qx,qy,red,green,blue)
+                        }
+                        dx=dx+1
+                    }
+                    dy=dy+1
+                }
+            } else {
+                canvas_fill_rect(c,px-3,py,7,1,red,green,blue)
+                canvas_fill_rect(c,px,py-3,1,7,red,green,blue)
+            }
+        }
+        i=i+1
+    }
+}
+
 pub fn viz_canvas_render_scene(scene: &VizScene, c: &!Canvas) with Mut, Div, Alloc {
     var i: i64 = 0
     while i < scene.node_count {
         let node = scene.nodes[i as usize]
         if node.kind == VIZ_NODE_PANEL {
             vc_draw_panel(c, &node)
+        } else if node.kind == VIZ_NODE_AXIS {
+            vc_draw_axis(c, &node)
         } else if node.kind == VIZ_NODE_LABEL {
             vc_draw_label(c, &node)
         } else if node.kind == VIZ_NODE_CONTROL {
             vc_draw_control(c, &node)
-        } else if node.kind == VIZ_NODE_CHART_LINE || node.kind == VIZ_NODE_CHART_SCATTER || node.kind == VIZ_NODE_CHART_BAR || node.kind == VIZ_NODE_UNCERTAINTY_BAND {
+        } else if node.kind == VIZ_NODE_CHART_LINE && (node.flags & VIZ_FLAG_CLIP_PLOT) != 0 {
+            vc_draw_clipped_line(scene, c, &node)
+        } else if node.kind == VIZ_NODE_CHART_SCATTER {
+            vc_draw_scatter(scene,c,i)
+        } else if node.kind == VIZ_NODE_CHART_LINE || node.kind == VIZ_NODE_CHART_BAR || node.kind == VIZ_NODE_UNCERTAINTY_BAND {
             let d = scene.series[node.data_slot as usize]
             let x0 = if d.x_min == d.x_max { vc_pad_range_min(d.x_min) } else { d.x_min }
             let x1 = if d.x_min == d.x_max { vc_pad_range_max(d.x_max) } else { d.x_max }
@@ -338,8 +423,7 @@ pub fn viz_canvas_render_scene(scene: &VizScene, c: &!Canvas) with Mut, Div, All
             coord_draw_axes(&cs, c)
             if node.kind == VIZ_NODE_CHART_LINE {
                 chart_line(&cs, &d.xs, &d.ys, d.n, c, node.style.r, node.style.g, node.style.b)
-            } else if node.kind == VIZ_NODE_CHART_SCATTER {
-                chart_scatter(&cs, &d.xs, &d.ys, d.n, c, node.style.r, node.style.g, node.style.b)
+
             } else if node.kind == VIZ_NODE_CHART_BAR {
                 chart_bar(&cs, &d.xs, &d.ys, d.n, c, node.style.r, node.style.g, node.style.b)
             } else {
@@ -366,6 +450,71 @@ pub fn viz_canvas_render_scene(scene: &VizScene, c: &!Canvas) with Mut, Div, All
             vc_draw_spectrum(scene, c, &node)
         } else if node.kind == VIZ_NODE_MESH {
             vc_draw_mesh(scene, c, &node)
+        }
+        i = i + 1
+    }
+}
+
+fn vc_draw_axis(c: &!Canvas, node: &VizNode) with Mut, Div {
+    let flags:i64=node.flags
+    let constant:f64=node.value
+    let raw_lo:f64=node.min_value
+    let raw_hi:f64=node.max_value
+    let intervals:i64=node.data_slot
+    let spec=ScaleSpec{mode:flags/2,constant:if flags < 2 {1.0} else {constant}}
+    let ticks = axis_scaled_ticks(raw_lo,raw_hi,intervals,&spec)
+    if ticks.status != 0 { return }
+    let vertical = (flags & 1) == 1
+    let x = node.layout.x
+    let y = node.layout.y
+    if vertical {
+        canvas_fill_rect(c, x, y, 1, node.layout.h + 1, node.style.r, node.style.g, node.style.b)
+    } else {
+        canvas_fill_rect(c, x, y, node.layout.w + 1, 1, node.style.r, node.style.g, node.style.b)
+    }
+    var i: i64 = 0
+    while i < ticks.n {
+        let label = axis_label(ticks.values[i as usize])
+        var text: [i8; 256] = [0; 256]
+        var j: i64 = 0
+        while j < label.n { text[j as usize] = label.text[j as usize]; j = j + 1 }
+        if vertical {
+            let py = y + node.layout.h - axis_offset(i, node.data_slot, node.layout.h)
+            canvas_fill_rect(c, x - 4, py, 5, 1, node.style.r, node.style.g, node.style.b)
+            canvas_draw_text(c, &text, label.n, x - 8 - label.n * 8, py - 4, node.style.r, node.style.g, node.style.b)
+        } else {
+            let px = x + axis_offset(i, node.data_slot, node.layout.w)
+            canvas_fill_rect(c, px, y, 1, 5, node.style.r, node.style.g, node.style.b)
+            canvas_draw_text(c, &text, label.n, px - label.n * 4, y + 8, node.style.r, node.style.g, node.style.b)
+        }
+        i = i + 1
+    }
+    var title: [i8; 256] = [0; 256]
+    var k: i64 = 0
+    while k < node.label_len && k < 64 {
+        title[k as usize] = node.label[k as usize]
+        k = k + 1
+    }
+    let title_y = if vertical { y - 16 } else { y + 24 }
+    canvas_draw_text(c, &title, k, x, title_y, node.style.r, node.style.g, node.style.b)
+}
+
+fn vc_draw_clipped_line(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div {
+    let slot = node.data_slot as usize
+    let count: i64 = scene.series[slot].n
+    let d = &scene.series[slot]
+    let sc = PixelScissor { left: node.layout.x, top: node.layout.y,
+        right: node.layout.x + node.layout.w, bottom: node.layout.y + node.layout.h }
+    var i: i64 = 0
+    while i + 1 < count && i + 1 < 1024 {
+        let seg = clip_series_segment(d.xs[i as usize], d.ys[i as usize],
+            d.xs[(i+1) as usize], d.ys[(i+1) as usize], d.x_min, d.x_max, d.y_min, d.y_max)
+        if seg.status == 0 {
+            let x0: i64 = clip_pixel(node.layout.x, node.layout.w, seg.x0)
+            let x1: i64 = clip_pixel(node.layout.x, node.layout.w, seg.x1)
+            let y0: i64 = clip_pixel(node.layout.y, node.layout.h, 1.0 - seg.y0)
+            let y1: i64 = clip_pixel(node.layout.y, node.layout.h, 1.0 - seg.y1)
+            canvas_draw_line_aa_scissored(c, &sc, x0, y0, x1, y1, node.style.r, node.style.g, node.style.b)
         }
         i = i + 1
     }

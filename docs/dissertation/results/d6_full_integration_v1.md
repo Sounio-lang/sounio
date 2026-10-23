@@ -2,8 +2,8 @@
 topic_id: repo.docs.dissertation.results.d6-full-integration-v1
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.results.d6-full-integration-v1
 -->
 
@@ -171,7 +171,7 @@ Results:
 - `D5_CAPUTO_TENSOR_PASS`: PASS
 - PBPK suite: PASS, `50/50`
 - PBPK28 MC cross-validation: PASS
-- rel_Hess: `0.175405`
+- rel_Hess: `0.175405` (superseded 2026-09-26: this was measured through the floored PBPK28 kernel; on the mass-conserving kernel rel_Hess = 0.018801, see `m6_prior_update_v2.md`)
 
 ## Gate
 

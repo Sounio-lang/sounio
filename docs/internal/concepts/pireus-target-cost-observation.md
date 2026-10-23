@@ -2,8 +2,8 @@
 topic_id: repo.docs.internal.concepts.pireus-target-cost-observation
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.pireus-target-cost-observation
 -->
 
@@ -11,7 +11,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-PIREUS-TARGET-COST-OBSERVATION`
 
-Status: `SEMANTICS_FROZEN`
+Status: executable
+
+Historical-Lane-State: `SEMANTICS_FROZEN`
+Evidence-Pass: tests/stdlib/hardware/test_pireus_target_cost_observation.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 Semantic-Lane-ID: `pireus-target-cost-observation-20260827`
 
@@ -108,7 +115,7 @@ The frozen live engine projection contains five Darwin Xeon CPU engines, four
 Darwin NVIDIA GPU engines, nine Darwin observed engines total, and zero Apple
 or DGX observed engines. Each canonical target retains two blueprints.
 
-## Closed Claims
+## Claims Forbidden
 
 This freeze establishes no:
 

@@ -2,8 +2,8 @@
 topic_id: repo.docs.internal.concepts.pireus-xor-convolution-operation
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.pireus-xor-convolution-operation
 -->
 
@@ -11,7 +11,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-PIREUS-XOR-CONVOLUTION-OPERATION`
 
-Status: `SEMANTICS_FROZEN`
+Status: executable
+
+Historical-Lane-State: `SEMANTICS_FROZEN`
+Evidence-Pass: tests/stdlib/hardware/test_pireus_xor_convolution_operation.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 Semantic-Lane-ID: `pireus-xor-operation-20260827`
 
@@ -75,3 +82,9 @@ subquadratic transform exists.
 The result establishes no instruction coverage, lowering, cost, performance,
 hardware observation, Fano-plane interpretation, or cross-language parity.
 `PARITY_OPEN=false` and `CLAIM_READY=false`.
+
+## Claims Forbidden
+
+- Existence of this witness proves fresh execution on the current host.
+- A bounded corpus or control establishes general hardware capability.
+- Registry metadata establishes performance gain, scientific novelty, or claim readiness.

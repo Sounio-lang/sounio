@@ -2,8 +2,8 @@
 topic_id: repo.docs.training.rosetta.08-matrix-multiply
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.training.rosetta.08-matrix-multiply
 -->
 
@@ -73,7 +73,7 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     assert(c[1] == 22.0)
     assert(c[2] == 43.0)
     assert(c[3] == 50.0)
-    0
+    return 0
 }
 ```
 

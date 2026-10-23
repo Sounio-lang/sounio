@@ -1,0 +1,42 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: REAL_MODULE_NAME_COLLISION PASS
+//
+// PR #2515 review round 6, finding C (comment_id 4090966282,
+// self-hosted/ir/lower.sio; the same tie-breaker was also used in
+// check.sio and specializer.sio): round 5's fix for the "named-function-
+// import terminal wrongly treated as a module" bug (findings A/B, round 5)
+// used "does this segment ALSO resolve as some real top-level function" as
+// its disambiguator. That is unsound the other way: if a program imports a
+// REAL module (`use testmod::tc_c;`, tc_c a genuine module -- see
+// stdlib/testmod/tc_c.sio) AND separately declares an unrelated top-level
+// function that happens to be named EXACTLY like the module (`fn tc_c(..)`
+// below, unrelated to the module's own contents), round 5's heuristic
+// concluded `tc_c` must be a named-item-import terminal (since a function
+// named `tc_c` DOES exist) and wrongly excluded it from being trusted as a
+// qualifier -- breaking the real module's own qualified calls
+// (`tc_c::tc_c_add(..)`).
+//
+// The fix replaces that heuristic with an AUTHORITATIVE registry
+// (parser/ast.sio's lower_named_item_terminal_known, populated from
+// module_frontend.sio's real file-resolution outcome for each `use`
+// declaration, not from incidental name collisions): `testmod::tc_c`
+// resolves as a real file on the FIRST attempt (whole-path-is-file), so
+// `tc_c` is never recorded as a named-item terminal, regardless of any
+// unrelated function elsewhere happening to share its name.
+use testmod::tc_c;
+
+fn tc_c(x: i64) -> i64 with Mut, Panic {
+    x + 777
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    let real: i64 = tc_c::tc_c_add(2, 3)
+    let unrelated: i64 = tc_c(1)
+    if real == 105 && unrelated == 778 {
+        println("REAL_MODULE_NAME_COLLISION PASS")
+        return 0
+    }
+    println("REAL_MODULE_NAME_COLLISION FAIL")
+    1
+}

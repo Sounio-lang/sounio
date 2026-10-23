@@ -2,8 +2,8 @@
 topic_id: repo.docs.internal.concepts.pireus-xed-permute-import
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.pireus-xed-permute-import
 -->
 
@@ -11,7 +11,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Proposed Concept-ID: `SOUNIO-PIREUS-XED-PERMUTE-IMPORT`
 
-Status: `SEMANTICS_FROZEN_PENDING_REGISTRY_AND_LOOM_ACCEPTANCE`
+Status: executable
+
+Historical-Lane-State: `SEMANTICS_FROZEN_PENDING_REGISTRY_AND_LOOM_ACCEPTANCE`
+Evidence-Pass: examples/pireus_xed_permute_import.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 Semantic-Lane-ID: `pireus-xed-permute-import-20260827`
 
@@ -125,3 +132,9 @@ or a Cayley-Dickson speedup.
 
 `PARITY_OPEN` remains closed until the Concept-ID is registered and Loom
 accepts the frozen Sounio receipt.
+
+## Claims Forbidden
+
+- Existence of this witness proves fresh execution on the current host.
+- A bounded corpus or control establishes general hardware capability.
+- Registry metadata establishes performance gain, scientific novelty, or claim readiness.

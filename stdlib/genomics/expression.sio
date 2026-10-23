@@ -1,1 +1,62 @@
-//! stdlib/genomics/expression (disabled — pending parser support)
+// Streaming, two-pass TPM normalization from counts and effective lengths.
+// First accumulate every row; then evaluate the same rows with tpm_value.
+// Effective lengths must be positive and in a common unit (typically bases).
+// This does not perform read assignment, bias correction, or differential testing.
+use math::pure::{is_finite}
+pub let EXPRESSION_OK: i64 = 0
+pub let EXPRESSION_INVALID_INPUT: i64 = 1
+pub let EXPRESSION_NONFINITE: i64 = 2
+pub let EXPRESSION_EMPTY_TOTAL: i64 = 3
+pub let EXPRESSION_NUMERIC_FAILURE: i64 = 4
+
+pub struct TpmAccumulator {
+    pub rate_sum: f64,
+    pub correction: f64,
+    pub features: i64,
+    pub status: i64,
+}
+pub struct ExpressionValue {
+    pub value: f64,
+    pub status: i64,
+}
+pub fn tpm_new() -> TpmAccumulator {
+    TpmAccumulator { rate_sum: 0.0, correction: 0.0, features: 0, status: EXPRESSION_OK }
+}
+fn expression_input_status(count: f64, length: f64) -> i64 {
+    if !is_finite(count) || !is_finite(length) { return EXPRESSION_NONFINITE }
+    if count < 0.0 || length <= 0.0 { return EXPRESSION_INVALID_INPUT }
+    EXPRESSION_OK
+}
+/// Kahan accumulation; any bad row invalidates the whole normalizer.
+pub fn tpm_accumulate(state: &!TpmAccumulator, count: f64, effective_length: f64) -> bool with Mut, Div, Panic {
+    if state.status != EXPRESSION_OK { return false }
+    let input_status = expression_input_status(count, effective_length)
+    if input_status != EXPRESSION_OK { state.status = input_status; return false }
+    let rate = count / effective_length
+    if !is_finite(rate) || (count > 0.0 && rate == 0.0) { state.status = EXPRESSION_NUMERIC_FAILURE; return false }
+    let adjusted = rate - state.correction
+    let total = state.rate_sum + adjusted
+    if !is_finite(total) { state.status = EXPRESSION_NUMERIC_FAILURE; return false }
+    state.correction = (total - state.rate_sum) - adjusted
+    state.rate_sum = total
+    state.features = state.features + 1
+    true
+}
+/// No array capacity: the caller can stream a transcriptome in two passes.
+/// The row must belong to the same sample accumulated in state.
+pub fn tpm_value(state: &TpmAccumulator, count: f64, effective_length: f64) -> ExpressionValue with Mut, Div, Panic {
+    var r = ExpressionValue { value: 0.0, status: state.status }
+    if r.status != EXPRESSION_OK { return r }
+    r.status = expression_input_status(count, effective_length)
+    if r.status != EXPRESSION_OK { return r }
+    if state.features <= 0 || state.rate_sum <= 0.0 { r.status = EXPRESSION_EMPTY_TOTAL; return r }
+    let rate = count / effective_length
+    let fraction = rate / state.rate_sum
+    if !is_finite(fraction) || fraction < 0.0 || fraction > 1.0 ||
+       (count > 0.0 && fraction == 0.0) {
+        r.status = EXPRESSION_NUMERIC_FAILURE
+        return r
+    }
+    r.value = fraction * 1000000.0
+    r
+}

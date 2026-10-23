@@ -2,8 +2,8 @@
 topic_id: repo.contributor.codebase-overview
 authority: repo_only
 audience: contributors
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.contributor.codebase-overview
 -->
 

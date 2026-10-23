@@ -145,3 +145,27 @@ Consultar tools/pireus/continuity/status.json, a branch e as claims antes de
 escrever. Atualizações substantivas incluem comando, resultado, artefato,
 blocker com owner/gate quando necessário, e próxima ação. Não marcar marcos
 planejados como PASS.
+
+## Aceitação do canário real — 2026-09-07
+
+O ciclo Inkling/ontologia/admissão/materialização/medição está executado no
+escopo do smoke de8 propostas. Geração11939: checkpoint fixado,2 ranks,943 tokens,
+8 respostas completas e idênticas entre ranks, término0. Decode11940: texto
+preservado sem reparo. A autoridade Sounio admitiu8 propostas, correspondentes
+a4 planos normalizados. Paridade11941:16 comparações candidato/nó passaram,
+5120 componentes exatos por caso. Timing11942:30 blocos intercalados por nó;
+8 NO_GAIN,0 elegíveis. Evidências: tools/pireus/continuity/validation/real-inkling-cycle-20260907.
+
+A aceitação é InklingTP2<offline,canário congelado,cache6144>, com contexto
+configurado16384,concorrência1,saída máxima4096,piso32GiB e guard33GiB.
+Embedding de entrada usa arquivo/CPU; LM-head usa pesos BF16 em arquivo e
+projeção GPU em blocos de4096 linhas. Os controles11938 coincidem byte a byte
+em21 estados ocultos sintéticos por rank; blocos8192 diferem e foram rejeitados.
+Não é prova universal de equivalência numérica. HTTP e inferência geral16K
+continuam fora da aceitação. A menor memória observada foi33,08/33,22GiB.
+
+Continuidade: reparar gates herdados da base antes de merge; congelar o piloto
+de3 condições ×3 rodadas ×32 propostas com deduplicação e proveniência factual
+das ontologias; manter V13/V14,novos operadores e corpus GRPO como obrigações
+abertas. O canário concluiu corretamente sem ganho; critérios de promoção
+permanecem iguais.

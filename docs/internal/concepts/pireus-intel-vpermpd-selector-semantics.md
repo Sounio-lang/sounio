@@ -2,8 +2,8 @@
 topic_id: repo.docs.internal.concepts.pireus-intel-vpermpd-selector-semantics
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.pireus-intel-vpermpd-selector-semantics
 -->
 
@@ -11,7 +11,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-PIREUS-INTEL-VPERMPD-SELECTOR-SEMANTICS`
 
-Status: `SEMANTICS_FROZEN`
+Status: executable
+
+Historical-Lane-State: `SEMANTICS_FROZEN`
+Evidence-Pass: tests/stdlib/hardware/test_pireus_intel_vpermpd_semantics.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 Semantic-Lane-ID: `pireus-intel-vpermpd-selector-semantics-20260827`
 
@@ -115,7 +122,7 @@ imm8_complete=false
 No immediate encoding is promoted as a complete realization of the frozen
 XOR layout.
 
-## Closed Claims
+## Claims Forbidden
 
 The result establishes none of the following:
 

@@ -1,0 +1,1045 @@
+//@ run-pass
+//@ expect-stdout-contains: PBPK28_MULTIDRUG_GATES_PASS
+//@ timeout: 180
+
+// Runtime (2026-09-27): 17.3 s on lean_single (souc-stage2 engine, this
+// workspace pod, run only). CI job 108525867166 put the Full Test Suite
+// runner at 2.65-4.3x slower than the pod (hepatic 11.3 s timed out at
+// 30 s; calibration 42 s passed within 180 s), so the timeout is about
+// 2x the worst projected CI time, 4.3 x 17.3 s.
+//
+// Gates for stdlib/darwin_pbpk/ddi/multidrug28.sio (dynamic multi-drug driver).
+//
+// M   Mass balance per drug under NONLINEAR coupling (two drugs, mutual CYP3A4
+//     competition at liver and gut, oral + IV dosing, central clearance):
+//       body + lumen + unabsorbed + eliminated = administered, to 1e-10,
+//     and the clamped mass is exactly 0: the default transport (TR-BDF2 with
+//     a backward-Euler restart) has no negativity floor; it panics instead
+//     (pbpk28_hepatic.sio, TR-BDF2 section). Until 2026-09-27 the driver
+//     stepped floored CN, and this gate bounded the clamped mass by
+//     n_steps·27·eps·dose instead (floored round-off in the deep terminal
+//     phase: V3 over 300 h, 1.3e-12 mg). The legacy path keeps that floor;
+//     tests/run-pass/darwin_pbpk28_trbdf2_gates.sio (I) shows what it costs.
+//
+// V3  Static limit, exact. With a constant external inhibitor load L the factor
+//     f = 1/(1+L) is constant and the system is linear. Integrating it to
+//     infinity (portal routing; sinks k_L in liver tissue, k_g in gut tissue;
+//     central clearance CL_c):
+//       AUC_b = (D_iv + F_H · F_G · D_gut) / CL_sys
+//       X_L = k_L·PS_L/(PS_L/Kp_L + k_L),  F_H = Q_L/(Q_L + X_L)
+//       a   = (PS_g/Kp_g)/(PS_g/Kp_g + k_g), X_g = PS_g·k_g/(PS_g/Kp_g + k_g)
+//       F_G = a · Q_g/(Q_g + X_g)
+//       CL_sys = CL_c + Q_L·X_L/(Q_L + X_L) + F_H · Q_g·X_g/(Q_g + X_g)
+//     with k = f·CLint·fu/K_p and D_gut = fa·D_oral. The last CL_sys term is gut
+//     metabolism of SYSTEMIC drug (blood -> gut -> portal -> liver), which the
+//     static well-stirred module (ddi/cyp3a_competitive.sio) does not have; its
+//     AUCR is printed for context, not gated. Every step satisfies
+//     x_{n+1} - x_n = dt·A·Q_n + dt·b exactly, where Q_n is the step's own
+//     quadrature of the state (TR-BDF2 (w, w, d) on x_n, x_γ, x_{n+1}; the
+//     backward-Euler restart (0, 1/2, 1/2) on x_n, midpoint, x_{n+1}), and the
+//     AUC is accumulated with those weights; summing the steps gives
+//     A·AUC = -(delivered mass) exactly for constant A, so the discrete AUC
+//     equals the continuous one for ANY dt: the gate error is truncation
+//     (residual mass at t_end) plus round-off only; the clamped mass must be
+//     0 (as in M). Because the result is exact for any dt, V3 steps at
+//     dt = 0.1 h (0.02 until 2026-09-27; changed for runtime; the 300 h
+//     horizon that bounds the residual mass is kept). Q_g here is the whole gut blood flow
+//     (q[8] = 55 L/h), not villous flow, and PS_g is large, so F_G is nearly
+//     flow-limited: a kernel-identity fixture, not a gut-physiology claim.
+//
+// V4  Enzyme-site concentration convention, exact. The perpetrator has no
+//     CLint, only central clearance CL_p, and is held at steady state by an IV
+//     infusion R; every sink-free organ then has C_v = C_b = R/CL_p and
+//     C_t = K_p·C_b, so the unbound site concentrations are known in closed
+//     form: C_u,L = fu_p·C_b, C_u,g = fu_gut,p·C_b, and the victim's factors are
+//     f_L = 1/(1 + C_u,L/Ki), f_g = 1/(1 + C_u,g/Ki) (different, because
+//     fu_p != fu_gut,p). The victim, which carries its own Ki so that
+//     self-inhibition would show, is dosed orally at 120 h (both phases at
+//     dt = 0.1 h since 2026-09-27: the steady state is the scheme's exact
+//     fixed point, and the victim under constant factors is linear, so its
+//     quadrature AUC is exact for any dt; the 120 h and 300 h horizons are
+//     kept) and its AUC must
+//     equal the V3 closed form with site-specific f_L, f_g to 1e-9 (the
+//     perpetrator's distance from steady state, ~1e-10, times a factor
+//     sensitivity <= 1, plus V3's truncation). V3 alone cannot see the site
+//     convention (its load is a constant). Adversarial review 2026-09-26,
+//     sabotages of md_factors that pass M, V3, V5 and V6 but fail V4: gut-site
+//     inhibition dropped (rel err 0.76), self-inhibition included (4.3e-4),
+//     fu omitted (0.54), fu·C_t·K_p instead of fu·C_t/K_p (3.4).
+//
+// V5  Coupling order: moved to tests/run-pass/darwin_pbpk28_multidrug_order_gates.sio
+//     (2026-09-27, runtime split; the checks are independent of the ones here).
+//
+// V6  Controls (by construction; they check plumbing, not conventions -- see V4).
+//     (a) A co-administered CYP3A4 substrate that is NOT an inhibitor
+//     (Ki unset) leaves the victim BIT-IDENTICAL to the victim alone. (b) The same
+//     with Ki = 1e300. (c) Two identical drugs, identical doses, mutual Ki:
+//     bit-identical trajectories (symmetry). (a)-(c) compare every per-drug
+//     state and accounting field with md_same_drug (all 14 cv and 14 ct
+//     entries, lumen, AUC, eliminated, clamped, administered, never absorbed;
+//     exact ==, NaN fails). (d) A call that adds nothing is
+//     not a dosing event: an oral dose of 0, a bolus of 0 and an infusion rate
+//     set to its current value, all mid-run, leave the victim bit-identical
+//     (md_same_drug) to the run without those calls; they must not schedule the
+//     restart. A real rate change still does. Nor is an oral dose of a drug
+//     that cannot absorb it: a CYP3A4 inhibitor co-drug with fa = 0, or with
+//     ka = 0, dosed 50 mg mid-run leaves the victim bit-identical to the run
+//     without that dose, and neither drug's restart is pending after it. Before
+//     2026-09-27 such a dose scheduled a restart for the co-drug and, through
+//     its Ki, for the victim, and this check fails.
+//     (e) The restart is per drug. A mid-run oral dose of a co-drug that is a
+//     CYP3A4 substrate but NOT an inhibitor leaves the victim bit-identical
+//     (md_same_drug) to the run without that dose. With the single global
+//     restart flag this driver had before 2026-09-27, the co-drug's dose
+//     switched the victim's next step to backward Euler and the gate failed
+//     (measured: victim differs). Controls: right after the dose the
+//     co-drug's own restart is pending and the victim's is not; when the
+//     co-drug inhibits CYP3A4 (Ki > 0) and the victim has CYP3A4 CLint, the
+//     victim's restart IS pending (the propagation rule in the driver header).
+//
+// V7  md_run_to reaches targets off the dt grid exactly. From t = 0 with
+//     dt = 0.02: t_end = 0.61 must end at t == 0.61 with the drug's state and
+//     accounting identical to the explicit sequence of 30 steps of 0.02 and one
+//     of 0.01 (md_step); t_end = 0.005 (below one step) must take one 0.005
+//     step; and t_end = 0.6 on the grid must take exactly 30 steps: 29 of
+//     0.02 and a last remainder step 0.6 - t, identical to that explicit
+//     sequence (thirty accumulated steps of 0.02 put the clock at
+//     0.6000000000000002, past 0.6, so no full step may end there; no extra
+//     vanishing step from accumulated round-off either). "Identical" is exact
+//     `==` on every per-drug state and accounting field: all 14 cv and 14 ct
+//     entries, lumen, AUC, eliminated, clamped, administered and never-absorbed
+//     mass (md_same_drug). A NaN on either side fails it; the only distinct bit
+//     patterns `==` identifies are +0 and -0. A t_end not ahead of t
+//     must leave t and the AUC untouched, whether it is below t by less than
+//     tol (which the snap would otherwise move backwards) or well below it.
+//     A step far larger than the span must still integrate: run_to(1.0) with
+//     dt = 1e12 from t = 0 must end at t == 1.0 with a positive AUC for the
+//     dosed drug, not merely move the clock (1e-9·dt exceeded the span).
+//     A real remainder far below dt is integrated, not snapped away:
+//     run_to(1.0000000005) with dt = 1.0 must equal one md_step(1.0) plus one
+//     md_step of the 5e-10 h remainder (md_same_drug) and end at that t. With
+//     the previous 1e-9·dt snap tolerance it took one step and dropped the
+//     remainder, and this check fails.
+//     At a large clock the full-step count must not pass the target: from
+//     t0 = 2^53 (ulp 2 h) with a 1 mg/h infusion, run_to(t0 + 2, dt 2) must
+//     end at t0 + 2 having infused exactly 2 mg; run_to(t0 + 2, dt 3) too
+//     (no 3 h full step may be taken toward a 2 h target); and from
+//     t0 = 2^40, run_to(t0 + 10.5, dt 2) five 2 h steps plus a 0.5 h one,
+//     10.5 mg: the integrated time equals the clock advance. The first
+//     step-count rule took three steps in the first case (6 mg), and the
+//     second (count fixed from span/dt with an allowance on the target) one
+//     3 h step in the dt 3 case (3 mg); this check fails on both. And
+//     run_to(t0 + 6, dt 4) from 2^53 must infuse 6 mg: one 4 h step plus the
+//     2 h remainder, which a drift allowance on the remainder skipped
+//     (4 mg for 6 h), and this check fails on that rule too.
+//     Each step integrates the clock delta it actually makes, not the
+//     requested dt: from 2^53, run_to(t0 + 4, dt 3) is one step that the
+//     clock rounds to t0 + 4 (fl(2^53 + 3) = 2^53 + 4), and it must infuse
+//     4 mg. Integrating dt gave 3 mg for 4 h of clock, and this check fails.
+//     A dt below the clock's resolution (fl(t + dt) == t) is refused up front
+//     rather than replaced by a coarser step: md_run_to_error returns 3 for
+//     dt 1 at t = 2^53 and for dt 1e-17 at t = 1, and 0 for dt 2 at 2^53 and
+//     for a target behind t (a no-op). Without the check it returns 0 and
+//     this fails.
+//     Resolution is checked over the whole run, where it is coarsest, not
+//     only at the starting clock: from t = 2^53 - 1 toward 2^53 + 2 with
+//     dt = 1 the first step is fine (ulp 1) but lands on 2^53, where
+//     fl(2^53 + 1) = 2^53, and the next step panicked after the first had
+//     mutated the state. md_run_to_error must return 3 there, before any step,
+//     and leave the drug state and clock identical to an untouched twin
+//     (md_same_drug and t). The check at the starting clock alone returned 0
+//     and this fails.
+//     A non-finite current clock (t = NaN, t = -Inf) returns code 4. The same interval with dt = 2 is valid (0), and running
+//     it must infuse exactly the 3 h of clock advance (a 1 h step that the
+//     clock rounds from 2^53 + 1 down to 2^53, then a 2 h step).
+//
+// V8  Configuration. md_config_error, the check every md_step panics on,
+//     returns 2 for md.iters < 0 (a negative count ran zero sweeps: silent Lie
+//     coupling, bit-identical to iters = 0), 1 for an unknown md.method, and 0
+//     for iters 0, 1, 12. Without the iters check it returns 0 for iters = -1
+//     and this gate fails. (The panic itself is not observable by this
+//     harness; measured by hand: md_step with iters = -1 exits 1 on both
+//     engines.)
+//
+// V9  Absorbed fraction 1 - exp(-y) = -expm1(-y) at 13 magnitudes of
+//     y = ka·dt from 1e-17 to 40, against a reference: the 5th-order Taylor
+//     polynomial for y <= 1e-4 (truncation < y^5/720 relative, 10 flops) and
+//     1 - math::pure::exp(-y) above (an independent ln2 range reduction; the
+//     subtraction is well conditioned there for the reference's purpose, its
+//     amplification c = e^-y/(1 - e^-y) is in the budget). Budget per y, from
+//     operation counts: the driver's series 165u (100 flops, absolute-sum
+//     ratio <= 1.65) for y <= 1/2, or md_exp_neg's 72 Taylor flops amplified by
+//     its m = 2^halvings squarings, (72m + m)u·c + u, above; the reference's
+//     10u, or (74 + y/ln2 + 1)u·c + u. The old form 1 - md_exp_neg(y) was off by
+//     100 % at 1e-17, 11 % at 1e-16 and 2.2e-5 at 1e-12, and fails.
+//
+// V10 Parameter domains (md_params_error, which md_add_drug panics on). The
+//     four stock profiles return 0 (portal on). One-field violations return
+//     the field's code: v_ref[0] = 0 and v_ref[3] = NaN -> 1, cl_central = -1
+//     and +Inf -> 2, kp[4] = 0 -> 3, ps[5] = -1 -> 4, q[6] = -1 -> 5,
+//     vasc_frac[2] = 0, 1 and NaN -> 6, kp[0] = +Inf -> 7, and gut flow above
+//     the liver's share with portal routing -> 8 (0 without it). The boundary
+//     values ps = 0 and q = 0 are valid (0). Rounding (PR #2695 review):
+//     Q_L = 1, Q_gut = 1, Q_spleen = 2^-54, Q_pancreas = 0 -> 8, because the
+//     kernel's sequential Q_L - Q_gut - Q_spleen - Q_pancreas is -2^-54 and it
+//     panics; the check used to compare Q_L with the rounded sum (= 1) and
+//     returned 0. With Q_spleen = 0 the same flows give Q_ha = 0 exactly -> 0. Until 2026-09-27 md_add_drug
+//     copied the profile unchecked (it accepted v_ref[0] = 0, and the next
+//     bolus divided by zero); with the check returning 0, V10 fails.
+//     v_ref[1] = 4e-30 -> 9 (Copilot review, PR #2695, 2026-10-01): liver
+//     vasc_frac is 0.210, so the vascular layer's raw volume is 8.4e-31,
+//     below the kernel's 1e-30 floor, while v_ref[1] = 4e-30 alone passes
+//     check 1 (only requires > 0). v_ref[1] = 1e-29 is the control: both
+//     raw layer volumes clear 1e-30 (2.1e-30 and 7.9e-30) -> 0.
+//
+// V11 Cumulative dose accounting cannot overflow (md_oral_dose_ok and
+//     md_bolus_dose_ok, which the dosing calls panic on before mutating
+//     anything). On a fresh drug a 1e308 oral dose and a 1e308 bolus are
+//     accepted; after one of each, a second 1e308 dose is refused (its
+//     administered total would be +Inf) while a 5 mg dose is still accepted.
+//     Before 2026-09-27 two 1e308 oral doses left administered = +Inf and
+//     returned normally; with the predicates always true, V11 fails. (The
+//     step-level sums -- elimination, dose, AUC -- are checked the same way
+//     in md_advance; measured by hand: AUC at the largest double plus a
+//     1e295 mg bolus step exits 1 on both engines, where it returned +Inf.)
+//
+// V12 One inhibitor-load implementation. The victim (CYP3A4 liver CLint) and
+//     an inhibitor (Ki = 1e-6 mg/L) are dosed; the inhibitor's liver tissue
+//     concentration is set to -1e-15 of its blood value, a negative entry the
+//     clamp-free kernel tolerates (far inside -tol·scale), right after its
+//     bolus, when that tissue is at 0. The inspection factor (md_factor_now)
+//     and the factor the next step is taken with (f_n after md_step) must be
+//     equal and exactly 1: the floor makes the load 0 rather than negative.
+//     Then, after 0.5 h with positive concentrations, the two must again be
+//     equal and below 1. Before 2026-09-27 neither path floored, and both
+//     gave 1 + 1.85e-11 on this state (the inhibitor acting as an
+//     activator); V12 fails on that.
+//
+// V13 md_neg_min_rel counts the predictor's stages. A victim whose only mass
+//     outside an isolated store (organ 7, PS = 0: it sets the step's scale and
+//     never moves) is 1e-10 of it in liver tissue, with liver PS = 1 L/h and
+//     a CYP3A4 sink of 60.5 L/h, steps TR-BDF2 over 0.1 h next to an
+//     inhibitor (Ki = 1e-12 mg/L) just dosed by bolus. At t_n the inhibitor
+//     has not reached the liver, so f_n = 1, and the predictor steps the
+//     victim with the full sink, which drives the tissue entry to about
+//     -0.15 of itself within the step: a tolerated negative (-1.5e-11 of
+//     scale, tol 4.3e-10). The predicted state inhibits fully (f* ~ 0), so the
+//     corrector steps with half the sink and stays positive. The first
+//     predictor pass is the Lie step exactly (same state, same factors f_n),
+//     so md_neg_min_rel with iters = 1 and with iters = 4 must equal its
+//     iters = 0 value, bit for bit, and be negative. The victim's restart,
+//     scheduled by the inhibitor's bolus through the shared enzyme, is
+//     cleared by hand: the backward-Euler restart cannot go negative. Before
+//     2026-09-27 only the corrector was folded in, iters 1 and 4 reported 0,
+//     and V13 fails.
+//
+// V14 The dose predicates mean "the dosing call accepts this dose".
+//     md_oral_dose_ok and md_bolus_dose_ok must be false for mg = -1, NaN and
+//     +Inf, which md_dose_oral / md_dose_iv_bolus reject, and true for 0 and
+//     5, which the calls accept (0 as a no-op); each true case is then dosed
+//     here and must return normally, with the administered total moving by
+//     exactly mg. The false cases are the refusal side: scripts/ci/
+//     pbpk28_refusal_gate.sh doses each of them and requires the panic.
+//     Until 2026-09-27 the predicates checked only overflow and answered true
+//     for -1, and V14 fails on that.
+//
+// V15 Kinetic setters after the first step schedule the restart (PR #2695
+//     review). Victims v, w (CLint on CYP3A4 at both sites), perpetrator x
+//     (no CLint, Ki on CYP3A4), all dosed and run to 1 h so every pending
+//     restart has been consumed. Then, one change at a time, each followed by
+//     a step that consumes it: Ki of x 1.0 -> 2.0 schedules v and w, not x;
+//     Ki 2.0 -> 0 (inhibition switched OFF) schedules v and w as well; the
+//     external CYP3A4 liver load 0 -> 0.5 schedules v and w; CLint of v
+//     schedules v alone; fu of x at the liver schedules v and w (x's
+//     inhibitor load moves) but NOT x itself. Re-writing a stored value
+//     schedules nothing, and on a fresh driver before any step no setter
+//     schedules anything (setup order stays bit-identical). Without the
+//     scheduling, every "schedules" case reads false and V15 fails.
+//
+//     x is not restarted on its own fu change (Copilot review, PR #2695,
+//     2026-10-01): fu enters a drug's own ODE only through its sink
+//     k_t = CLint_u·fu/K_p (pbpk28_sink_from_clint), so with CLint = 0 at
+//     this site x's own trajectory cannot depend on fu at all, and
+//     restarting x anyway would switch its own step to the backward-Euler
+//     pair for no physical reason -- a different (if tiny) numerical answer
+//     from an otherwise-untouched step. Measured directly: x's cv/ct after
+//     the next step are bit-identical whether or not fu_site is changed,
+//     once x itself is not restarted; before the fix the two differed in
+//     the 5th significant digit (0.102604 vs 0.102561 for cv[liver]).
+//
+// Transport parameters are the rapamycin PBPK28 profile with synthetic CLint and
+// Ki values: kernel/driver correctness fixtures, not drug claims.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::pbpk28_hepatic::*
+use darwin_pbpk::ddi::multidrug28::*
+use darwin_pbpk::ddi::cyp3a_competitive::*
+use math::pure::{exp}
+
+fn g_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn e12(x: f64) -> i64 { return (x * 1000000000000.0) as i64 }
+
+// Victim fixture: liver + gut CYP3A4 substrate.
+fn add_victim(md: &!MultiDrug28, cl_c: f64) -> i32 with Mut, Panic {
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = cl_c
+    let i = md_add_drug(md, p, 0.1, 0.95, 1.5)
+    md_set_fu_site(md, i, md_site_gut(), 1.0)
+    md_set_clint(md, i, md_site_liver(), md_cyp3a4(), 200.0)
+    md_set_clint(md, i, md_site_gut(), md_cyp3a4(), 30.0)
+    return i
+}
+
+// M ---------------------------------------------------------------------------
+fn gate_mass() -> bool with Mut, Div, Panic, IO {
+    var md = md_new(true)
+    let a = add_victim(&!md, 1.5)
+    let b = add_victim(&!md, 0.5)
+    md_set_ki(&!md, a, md_cyp3a4(), 0.02)
+    md_set_ki(&!md, b, md_cyp3a4(), 0.005)
+    md_dose_oral(&!md, a, 5.0)
+    md_set_iv_rate(&!md, a, 0.3)
+    md_dose_oral(&!md, b, 100.0)
+    md_dose_iv_bolus(&!md, b, 10.0)
+    md_run_to(&!md, 48.0, 0.02)
+    let ra = md_mass_residual(&md, a)
+    let rb = md_mass_residual(&md, b)
+    print("M residual A (x1e12) = ") println(e12(ra))
+    print("M residual B (x1e12) = ") println(e12(rb))
+    print("M victim factor at 48 h (liver, 3A4) = ") println(md_factor_now(&md, a, md_site_liver(), md_cyp3a4()))
+    let cl = md_clamped(&md, a) + md_clamped(&md, b)
+    print("M mass added by the negativity clamp (mg) = ") println(cl)
+    let cl_ok = md_clamped(&md, a) == 0.0 && md_clamped(&md, b) == 0.0
+    return ra < 1.0e-10 && rb < 1.0e-10 && cl_ok
+}
+
+// V3 --------------------------------------------------------------------------
+fn closed_auc(f: f64, cl_c: f64, d_iv: f64, d_oral: f64) -> f64 with Div {
+    let p = pbpk28_params_rapamycin()
+    let fa = 0.95
+    let k_l = f * 200.0 * 0.1 / p.kp[1]
+    let k_g = f * 30.0 * 1.0 / p.kp[8]
+    let ql = p.q[1]
+    let qg = p.q[8]
+    let x_l = k_l * p.ps[1] / (p.ps[1] / p.kp[1] + k_l)
+    let a = (p.ps[8] / p.kp[8]) / (p.ps[8] / p.kp[8] + k_g)
+    let x_g = p.ps[8] * k_g / (p.ps[8] / p.kp[8] + k_g)
+    let fh = ql / (ql + x_l)
+    let fg = a * qg / (qg + x_g)
+    let cl_sys = cl_c + ql * x_l / (ql + x_l) + fh * qg * x_g / (qg + x_g)
+    return (d_iv + fh * fg * fa * d_oral) / cl_sys
+}
+
+fn run_auc(load: f64, cl_c: f64, d_iv: f64, d_oral: f64, t_end: f64, dt: f64) -> (f64, f64, f64) with Mut, Div, Panic {
+    var md = md_new(true)
+    let v = add_victim(&!md, cl_c)
+    md_set_ext_load(&!md, md_site_liver(), md_cyp3a4(), load)
+    md_set_ext_load(&!md, md_site_gut(), md_cyp3a4(), load)
+    if d_oral > 0.0 { md_dose_oral(&!md, v, d_oral) }
+    if d_iv > 0.0 { md_dose_iv_bolus(&!md, v, d_iv) }
+    md_run_to(&!md, t_end, dt)
+    let left = (md_body_mass(&md, v) + md.lumen[v]) / md.dose_in[v]
+    return (md.auc_b[v], left, md_clamped(&md, v))
+}
+
+fn gate_v3() -> bool with Mut, Div, Panic, IO {
+    let cl_c = 1.5
+    let load = 8.0
+    let f = 1.0 / (1.0 + load)
+    let t_end = 300.0
+    let dt = 0.1
+
+    let (po0, left_po0, cl_po0) = run_auc(0.0, cl_c, 0.0, 1.0, t_end, dt)
+    let (poi, left_poi, cl_poi) = run_auc(load, cl_c, 0.0, 1.0, t_end, dt)
+    let (iv0, left_iv0, cl_iv0) = run_auc(0.0, cl_c, 1.0, 0.0, t_end, dt)
+    let (ivi, left_ivi, cl_ivi) = run_auc(load, cl_c, 1.0, 0.0, t_end, dt)
+
+    let c_po0 = closed_auc(1.0, cl_c, 0.0, 1.0)
+    let c_poi = closed_auc(f, cl_c, 0.0, 1.0)
+    let c_iv0 = closed_auc(1.0, cl_c, 1.0, 0.0)
+    let c_ivi = closed_auc(f, cl_c, 1.0, 0.0)
+
+    let e1 = g_abs(po0 - c_po0) / c_po0
+    let e2 = g_abs(poi - c_poi) / c_poi
+    let e3 = g_abs(iv0 - c_iv0) / c_iv0
+    let e4 = g_abs(ivi - c_ivi) / c_ivi
+    let worst_left = left_po0 + left_poi + left_iv0 + left_ivi
+
+    // Static well-stirred module with the same CLint/fu/flows (context only).
+    let p = pbpk28_params_rapamycin()
+    let sub = Cyp3aSubstrate { qh: p.q[1], qg: p.q[8], fu: 0.1, fu_gut: 1.0, fa: 0.95, clint_h: 200.0, clint_g: 30.0 }
+    let static_aucr = cyp3a_aucr(sub, f)
+
+    print("V3 oral AUCR dynamic = ") println(poi / po0)
+    print("V3 oral AUCR closed form = ") println(c_poi / c_po0)
+    print("V3 IV AUCR dynamic = ") println(ivi / iv0)
+    print("V3 IV AUCR closed form = ") println(c_ivi / c_iv0)
+    print("V3 oral AUCR static well-stirred module (context, not gated) = ") println(static_aucr)
+    print("V3 worst rel AUC error (x1e12) = ")
+    var worst = e1
+    if e2 > worst { worst = e2 }
+    if e3 > worst { worst = e3 }
+    if e4 > worst { worst = e4 }
+    println(e12(worst))
+    print("V3 residual mass fraction at t_end (x1e12) = ") println(e12(worst_left))
+    let clamped = cl_po0 + cl_poi + cl_iv0 + cl_ivi
+    print("V3 mass added by the negativity clamp (mg) = ") println(clamped)
+    return worst < 1.0e-9 && worst_left < 1.0e-12 && clamped == 0.0
+}
+
+// V4 --------------------------------------------------------------------------
+// V3 closed form with separate liver and gut factors.
+fn closed_auc_sites(f_l: f64, f_g: f64, cl_c: f64, d_oral: f64) -> f64 with Div {
+    let p = pbpk28_params_rapamycin()
+    let fa = 0.95
+    let k_l = f_l * 200.0 * 0.1 / p.kp[1]
+    let k_g = f_g * 30.0 * 1.0 / p.kp[8]
+    let ql = p.q[1]
+    let qg = p.q[8]
+    let x_l = k_l * p.ps[1] / (p.ps[1] / p.kp[1] + k_l)
+    let a = (p.ps[8] / p.kp[8]) / (p.ps[8] / p.kp[8] + k_g)
+    let x_g = p.ps[8] * k_g / (p.ps[8] / p.kp[8] + k_g)
+    let fh = ql / (ql + x_l)
+    let fg = a * qg / (qg + x_g)
+    let cl_sys = cl_c + ql * x_l / (ql + x_l) + fh * qg * x_g / (qg + x_g)
+    return fh * fg * fa * d_oral / cl_sys
+}
+
+fn gate_v4() -> bool with Mut, Div, Panic, IO {
+    var md = md_new(true)
+    let v = add_victim(&!md, 1.5)
+    md_set_ki(&!md, v, md_cyp3a4(), 1.0)
+    var pp = pbpk28_params_rapamycin()
+    let cl_p = 10.0
+    pp.cl_central = cl_p
+    let fu_p = 0.3
+    let fu_gut_p = 1.0
+    let x = md_add_drug(&!md, pp, fu_p, 1.0, 1.0)
+    md_set_fu_site(&!md, x, md_site_gut(), fu_gut_p)
+    let ki = 0.05
+    md_set_ki(&!md, x, md_cyp3a4(), ki)
+    let rate = 5.0
+    md_set_iv_rate(&!md, x, rate)
+    md_run_to(&!md, 120.0, 0.1)
+    let cb = rate / cl_p
+    let ss_err = g_abs(md.cv[x * 14] - cb) / cb
+    let f_l = 1.0 / (1.0 + fu_p * cb / ki)
+    let f_g = 1.0 / (1.0 + fu_gut_p * cb / ki)
+    print("V4 perpetrator C_b vs R/CL at 120 h (rel x1e12) = ") println(e12(ss_err))
+    print("V4 victim factors liver, gut: driver ") print(md_factor_now(&md, v, md_site_liver(), md_cyp3a4())) print("  ") print(md_factor_now(&md, v, md_site_gut(), md_cyp3a4()))
+    print("  closed ") print(f_l) print("  ") println(f_g)
+    md_dose_oral(&!md, v, 1.0)
+    let auc0 = md.auc_b[v]
+    md_run_to(&!md, 420.0, 0.1)
+    let auc = md.auc_b[v] - auc0
+    let closed = closed_auc_sites(f_l, f_g, 1.5, 1.0)
+    let base = closed_auc_sites(1.0, 1.0, 1.5, 1.0)
+    let err = g_abs(auc - closed) / closed
+    let left = md_body_mass(&md, v) + md.lumen[v]
+    let clamped = md_clamped(&md, v) + md_clamped(&md, x)
+    print("V4 victim oral AUCR dynamic, closed form = ") print(auc / base) print("  ") println(closed / base)
+    print("V4 victim AUC rel error (x1e12) = ") println(e12(err))
+    print("V4 victim residual mass at t_end (x1e12) = ") println(e12(left))
+    print("V4 mass added by the negativity clamp (mg) = ") println(clamped)
+    let cl_ok = md_clamped(&md, v) == 0.0 && md_clamped(&md, x) == 0.0
+    return ss_err < 1.0e-9 && err < 1.0e-9 && left < 1.0e-12 && cl_ok
+}
+
+// V6 --------------------------------------------------------------------------
+// Exact equality of drug i in a and drug j in b over every per-drug state and
+// accounting field. Each test is `!(x == y)`, so a NaN on either side fails
+// rather than passing (NaN == NaN is false).
+fn md_same_drug(a: &MultiDrug28, i: i32, b: &MultiDrug28, j: i32) -> bool with Mut {
+    var ok = true
+    var o: i32 = 0
+    while o < 14 {
+        if !((*a).cv[i * 14 + o] == (*b).cv[j * 14 + o]) { ok = false }
+        if !((*a).ct[i * 14 + o] == (*b).ct[j * 14 + o]) { ok = false }
+        o = o + 1
+    }
+    if !((*a).lumen[i] == (*b).lumen[j]) { ok = false }
+    if !((*a).auc_b[i] == (*b).auc_b[j]) { ok = false }
+    if !((*a).elim[i] == (*b).elim[j]) { ok = false }
+    if !((*a).clamped[i] == (*b).clamped[j]) { ok = false }
+    if !((*a).dose_in[i] == (*b).dose_in[j]) { ok = false }
+    if !((*a).lost[i] == (*b).lost[j]) { ok = false }
+    return ok
+}
+
+// The victim is drug 0 in every run.
+fn victim_run(with_b: bool, ki_b: f64) -> MultiDrug28 with Mut, Div, Panic {
+    var md = md_new(true)
+    let a = add_victim(&!md, 1.5)
+    md_dose_oral(&!md, a, 5.0)
+    if with_b {
+        let b = add_victim(&!md, 0.5)
+        if ki_b > 0.0 { md_set_ki(&!md, b, md_cyp3a4(), ki_b) }
+        md_dose_oral(&!md, b, 100.0)
+    }
+    md_run_to(&!md, 24.0, 0.05)
+    return md
+}
+
+fn v6d_run(noop_calls: bool) -> MultiDrug28 with Mut, Div, Panic {
+    var md = md_new(true)
+    let v = add_victim(&!md, 1.5)
+    md_dose_oral(&!md, v, 5.0)
+    md_set_iv_rate(&!md, v, 2.0)
+    md_run_to(&!md, 1.0, 0.02)
+    if noop_calls {
+        md_dose_oral(&!md, v, 0.0)
+        md_dose_iv_bolus(&!md, v, 0.0)
+        md_set_iv_rate(&!md, v, 2.0)
+    }
+    md_run_to(&!md, 2.0, 0.02)
+    return md
+}
+
+// Victim (drug 0) plus a CYP3A4-inhibitor co-drug (drug 1) that cannot absorb
+// an oral dose (fa = 0 when no_fa, else ka = 0); the co-drug is dosed 50 mg at
+// 1 h or not. Returns the driver at 1 h, right after that call.
+fn v6d_inert_to_dose(no_fa: bool, dose: bool) -> MultiDrug28 with Mut, Div, Panic {
+    var md = md_new(true)
+    let v = add_victim(&!md, 1.5)
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = 0.5
+    let fa = if no_fa { 0.0 } else { 0.95 }
+    let ka = if no_fa { 1.5 } else { 0.0 }
+    let b = md_add_drug(&!md, p, 0.1, fa, ka)
+    md_set_ki(&!md, b, md_cyp3a4(), 0.02)
+    md_dose_oral(&!md, v, 5.0)
+    md_run_to(&!md, 1.0, 0.02)
+    if dose { md_dose_oral(&!md, b, 50.0) }
+    return md
+}
+
+fn v6d_inert(no_fa: bool) -> bool with Mut, Div, Panic {
+    var a = v6d_inert_to_dose(no_fa, false)
+    var b = v6d_inert_to_dose(no_fa, true)
+    let no_restart = !md_restart_pending(&b, 0) && !md_restart_pending(&b, 1)
+    md_run_to(&!a, 2.0, 0.02)
+    md_run_to(&!b, 2.0, 0.02)
+    return no_restart && a.t == b.t && md_same_drug(&a, 0, &b, 0)
+}
+
+fn gate_v6d() -> bool with Mut, Div, Panic {
+    let a = v6d_run(false)
+    let b = v6d_run(true)
+    let same = a.t == b.t && md_same_drug(&a, 0, &b, 0)
+    // Control: a real rate change is a discontinuity and schedules the start-up.
+    var c = v6d_run(false)
+    md_set_iv_rate(&!c, 0, 3.0)
+    let inert = v6d_inert(true) && v6d_inert(false)
+    return same && md_restart_pending(&c, 0) && inert
+}
+
+// Victim dosed at 0, run to 6 h; the co-drug (a CYP3A4 substrate; an
+// inhibitor when ki_b > 0) is then dosed or not. The caller reads the restart
+// flags and runs on to 12 h.
+fn v6e_to_dose(dose_b: bool, ki_b: f64) -> MultiDrug28 with Mut, Div, Panic {
+    var md = md_new(true)
+    let v = add_victim(&!md, 1.5)
+    let b = add_victim(&!md, 0.5)
+    if ki_b > 0.0 { md_set_ki(&!md, b, md_cyp3a4(), ki_b) }
+    md_dose_oral(&!md, v, 5.0)
+    md_run_to(&!md, 6.0, 0.05)
+    if dose_b { md_dose_oral(&!md, b, 50.0) }
+    return md
+}
+
+fn gate_v6e() -> bool with Mut, Div, Panic, IO {
+    var a = v6e_to_dose(false, 0.0)
+    md_run_to(&!a, 12.0, 0.05)
+    var b = v6e_to_dose(true, 0.0)
+    let rb_v = md_restart_pending(&b, 0)
+    let rb_b = md_restart_pending(&b, 1)
+    md_run_to(&!b, 12.0, 0.05)
+    let same = a.t == b.t && md_same_drug(&a, 0, &b, 0)
+    let c = v6e_to_dose(true, 0.02)
+    let rc_v = md_restart_pending(&c, 0)
+    let rc_b = md_restart_pending(&c, 1)
+    print("V6e non-inhibitor co-drug dosed at 6 h: victim bit-identical ") print(same)
+    print("; restart pending victim, co-drug ") print(rb_v) print(" ") println(rb_b)
+    print("V6e inhibitor co-drug dosed at 6 h: restart pending victim, co-drug ") print(rc_v) print(" ") println(rc_b)
+    return same && !rb_v && rb_b && rc_v && rc_b
+}
+
+fn gate_v6() -> bool with Mut, Div, Panic, IO {
+    let alone = victim_run(false, 0.0)
+    let non_inh = victim_run(true, 0.0)
+    let huge_ki = victim_run(true, 1.0e300)
+    let ok_a = md_same_drug(&alone, 0, &non_inh, 0)
+    let ok_b = md_same_drug(&alone, 0, &huge_ki, 0)
+
+    var md = md_new(true)
+    let x = add_victim(&!md, 1.5)
+    let y = add_victim(&!md, 1.5)
+    md_set_ki(&!md, x, md_cyp3a4(), 0.02)
+    md_set_ki(&!md, y, md_cyp3a4(), 0.02)
+    md_dose_oral(&!md, x, 20.0)
+    md_dose_oral(&!md, y, 20.0)
+    md_run_to(&!md, 24.0, 0.05)
+    let ok_c = md_same_drug(&md, x, &md, y)
+
+    if ok_a { println("V6a non-inhibitor co-drug: victim bit-identical") } else { println("V6a FAIL: non-inhibitor co-drug changed the victim") }
+    if ok_b { println("V6b Ki=1e300 co-drug: victim bit-identical") } else { println("V6b FAIL: Ki=1e300 changed the victim") }
+    if ok_c { println("V6c identical drugs: trajectories bit-identical") } else { println("V6c FAIL: symmetric pair diverged") }
+    let ok_d = gate_v6d()
+    if ok_d { println("V6d zero dose / unchanged rate / dose that cannot absorb (fa = 0, ka = 0): victim bit-identical, no restart") } else { println("V6d FAIL: a no-op dosing call changed the victim") }
+    let ok_e = gate_v6e()
+    if ok_e { println("V6e per-drug restart: uncoupled victim bit-identical, coupled victim restarted") } else { println("V6e FAIL: restart scheduling is not per drug") }
+    return ok_a && ok_b && ok_c && ok_d && ok_e
+}
+
+// V7 --------------------------------------------------------------------------
+fn v7_setup(md: &!MultiDrug28) -> i32 with Mut, Div, Panic {
+    let i = add_victim(md, 1.5)
+    md_dose_oral(md, i, 5.0)
+    md_dose_iv_bolus(md, i, 1.0)
+    return i
+}
+
+// Infusion of 1 mg/h from clock t0; returns infused mass minus clock advance
+// after run_to(t0 + span, dt), or 1e300 when the clock did not land on t_end.
+fn v7_big_clock(t0: f64, span: f64, dt: f64) -> f64 with Mut, Div, Panic {
+    var md = md_new(true)
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = 1.0
+    let i = md_add_drug(&!md, p, 0.1, 1.0, 1.0)
+    md.t = t0
+    md_set_iv_rate(&!md, i, 1.0)
+    md_run_to(&!md, t0 + span, dt)
+    if !(md.t == t0 + span) { return 1.0e300 }
+    return md.dose_in[i] - (md.t - t0)
+}
+
+fn gate_v7() -> bool with Mut, Div, Panic, IO {
+    var a = md_new(true)
+    let i = v7_setup(&!a)
+    md_run_to(&!a, 0.61, 0.02)
+    var b = md_new(true)
+    let j = v7_setup(&!b)
+    var k: i32 = 0
+    while k < 30 {
+        md_step(&!b, 0.02)
+        k = k + 1
+    }
+    md_step(&!b, 0.61 - b.t)
+    let same = md_same_drug(&a, i, &b, j)
+    print("V7 run_to(0.61, dt 0.02): t = ") print(a.t) print("  matches explicit 30 x 0.02 + remainder: ") println(same)
+
+    var c = md_new(true)
+    let ic = v7_setup(&!c)
+    md_run_to(&!c, 0.005, 0.02)
+    var d = md_new(true)
+    let id = v7_setup(&!d)
+    md_step(&!d, 0.005)
+    let short_ok = c.t == 0.005 && md_same_drug(&c, ic, &d, id)
+    print("V7 run_to(0.005, dt 0.02): t = ") print(c.t) print("  one 0.005 step: ") println(short_ok)
+
+    var e = md_new(true)
+    let ie = v7_setup(&!e)
+    md_run_to(&!e, 0.6, 0.02)
+    var f = md_new(true)
+    let jf = v7_setup(&!f)
+    k = 0
+    while k < 29 {
+        md_step(&!f, 0.02)
+        k = k + 1
+    }
+    md_step(&!f, 0.6 - f.t)
+    let grid_ok = e.t == 0.6 && md_same_drug(&e, ie, &f, jf)
+    print("V7 run_to(0.6, dt 0.02) on the grid: exactly 30 steps (29 x 0.02 + remainder): ") println(grid_ok)
+
+    // A target not ahead of t must not move the clock: without the early
+    // return, a t_end below t but within tol was snapped backwards.
+    let auc_at_06 = e.auc_b[ie]
+    md_run_to(&!e, 0.6 - 0.000000000001, 0.02)
+    let back_ok = e.t == 0.6 && e.auc_b[ie] == auc_at_06
+    md_run_to(&!e, 0.3, 0.02)
+    let past_ok = e.t == 0.6 && e.auc_b[ie] == auc_at_06
+    print("V7 run_to(t_end just below t) and run_to(0.3) are no-ops: ") print(back_ok) print(" ") println(past_ok)
+
+    var g = md_new(true)
+    let ig = v7_setup(&!g)
+    md_run_to(&!g, 1.0, 1000000000000.0)
+    let big_ok = g.t == 1.0 && g.auc_b[ig] > 0.0
+    print("V7 run_to(1.0, dt 1e12): t = ") print(g.t) print("  AUC = ") print(g.auc_b[ig]) print("  integrated: ") println(big_ok)
+    // A real off-grid remainder far below dt must be integrated, not dropped
+    // by the snap: (1.0000000005, dt 1.0) is one 1.0 step plus a 5e-10 step.
+    var h = md_new(true)
+    let ih = v7_setup(&!h)
+    md_run_to(&!h, 1.0000000005, 1.0)
+    var hx = md_new(true)
+    let jx = v7_setup(&!hx)
+    md_step(&!hx, 1.0)
+    md_step(&!hx, 1.0000000005 - hx.t)
+    let rem_ok = h.t == 1.0000000005 && md_same_drug(&h, ih, &hx, jx)
+    print("V7 run_to(1.0000000005, dt 1.0) = explicit 1.0 + 5e-10 steps: ") println(rem_ok)
+    let big_a = v7_big_clock(9007199254740992.0, 2.0, 2.0)
+    let big_b = v7_big_clock(1099511627776.0, 10.5, 2.0)
+    let big_c = v7_big_clock(9007199254740992.0, 2.0, 3.0)
+    let big_d = v7_big_clock(9007199254740992.0, 6.0, 4.0)
+    let big_e = v7_big_clock(9007199254740992.0, 4.0, 3.0)
+    let big_f = v7_big_clock(9007199254740991.0, 3.0, 2.0)
+    print("V7 large clock, infused mass - clock advance (mg): t0 = 2^53, +2 h dt 2: ") print(big_a) print("  t0 = 2^40, +10.5 h dt 2: ") print(big_b)
+    print("  t0 = 2^53, +2 h dt 3: ") print(big_c) print("  t0 = 2^53, +6 h dt 4: ") print(big_d) print("  t0 = 2^53, +4 h dt 3: ") print(big_e) print("  t0 = 2^53 - 1, +3 h dt 2: ") println(big_f)
+    let clock_ok = big_a == 0.0 && big_b == 0.0 && big_c == 0.0 && big_d == 0.0 && big_e == 0.0 && big_f == 0.0
+    // dt below the clock's resolution is refused up front (code 3), not
+    // replaced by a coarser step; a resolvable dt at the same clock is valid.
+    var r = md_new(true)
+    r.t = 9007199254740992.0
+    let res_1 = md_run_to_error(&r, r.t + 2.0, 1.0)
+    let res_2 = md_run_to_error(&r, r.t + 2.0, 2.0)
+    r.t = 1.0
+    let res_tiny = md_run_to_error(&r, 2.0, 1.0e-17)
+    let res_past = md_run_to_error(&r, 0.5, 1.0e-17)
+    print("V7 run_to argument check: 2^53 dt 1, 2^53 dt 2, t=1 dt 1e-17, target behind = ")
+    print(res_1) print(" ") print(res_2) print(" ") print(res_tiny) print(" ") println(res_past)
+    // Binade boundary on the way: refused before any step, state untouched.
+    var bb = md_new(true)
+    let ib = v7_setup(&!bb)
+    bb.t = 9007199254740991.0
+    var tw = md_new(true)
+    let jw = v7_setup(&!tw)
+    tw.t = 9007199254740991.0
+    let res_bb = md_run_to_error(&bb, 9007199254740994.0, 1.0)
+    let res_bb2 = md_run_to_error(&bb, 9007199254740994.0, 2.0)
+    let untouched = bb.t == tw.t && md_same_drug(&bb, ib, &tw, jw)
+    // Ending exactly on the binade boundary is refused too (PR #2695 review
+    // proposed accepting it): from 2^53 - 2 to 2^53 with dt 1 both full steps
+    // land exactly, but at 2^53 the loop test fl(2^53 + 1) <= 2^53 still holds
+    // (ties to even), so md_run_to would take a third full step that does
+    // not advance the clock and panic after two steps had mutated the state.
+    // Measured with the check disabled: that run panics. So the endpoint's
+    // ulp belongs in Y, and the answer must be 3, before any step.
+    var be = md_new(true)
+    be.t = 9007199254740990.0
+    let res_edge = md_run_to_error(&be, 9007199254740992.0, 1.0)
+    // A non-finite current clock is code 4 (PR #2695 review): with t = NaN
+    // every comparison was false and md_run_to returned without stepping;
+    // with t = -Inf md_ulp(+Inf) never terminated.
+    let inf7 = 1.0e308 * 10.0
+    be.t = 0.0 * inf7
+    let res_nan = md_run_to_error(&be, 1.0, 0.1)
+    be.t = 0.0 - inf7
+    let res_ninf = md_run_to_error(&be, 1.0, 0.1)
+    print("V7 binade boundary 2^53 - 1 -> 2^53 + 2: dt 1, dt 2 = ") print(res_bb) print(" ") print(res_bb2)
+    print("  state untouched: ") print(untouched)
+    print("  2^53 - 2 -> 2^53 dt 1: ") print(res_edge) print("  clock NaN, -Inf: ") print(res_nan) print(" ") println(res_ninf)
+    let res_ok = res_1 == 3 && res_2 == 0 && res_tiny == 3 && res_past == 0 && res_bb == 3 && res_bb2 == 0 && untouched && res_edge == 3 && res_nan == 4 && res_ninf == 4
+    return a.t == 0.61 && same && short_ok && grid_ok && back_ok && past_ok && big_ok && rem_ok && clock_ok && res_ok
+}
+
+// V8 --------------------------------------------------------------------------
+fn gate_v8() -> bool with Mut, Div, Panic, IO {
+    var md = md_new(true)
+    let fresh = md_config_error(&md)
+    md.iters = 0 - 1
+    let neg = md_config_error(&md)
+    md.iters = 0
+    let lie = md_config_error(&md)
+    md.iters = 12
+    let many = md_config_error(&md)
+    md.iters = 1
+    md.method = 7
+    let bad_m = md_config_error(&md)
+    print("V8 md_config_error: default, iters -1, 0, 12, method 7 = ")
+    print(fresh) print(" ") print(neg) print(" ") print(lie) print(" ") print(many) print(" ") println(bad_m)
+    return fresh == 0 && neg == 2 && lie == 0 && many == 0 && bad_m == 1
+}
+
+// V9 --------------------------------------------------------------------------
+// Rounding budget (relative) of md_absorbed_fraction(y) against its reference,
+// from operation counts (u = 2^-53); see the V9 header.
+fn v9_tol(y: f64) -> f64 with Mut, Div, Panic {
+    let u = 1.1102230246251565e-16
+    if y <= 0.0001 { return (165.0 + 10.0) * u }
+    let e = exp(0.0 - y)
+    let c = e / (1.0 - e)
+    let k = y / 0.6931471805599453 + 1.0
+    let ref_side = (74.0 + k) * u * c + u
+    if y <= 0.5 { return 165.0 * u + ref_side }
+    var z = y
+    var m = 1.0
+    while z > 0.5 {
+        z = z * 0.5
+        m = m * 2.0
+    }
+    let md_side = (72.0 * m + m) * u * c + u
+    return md_side + ref_side
+}
+
+fn gate_v9() -> bool with Mut, Div, Panic, IO {
+    let ys = [1.0e-17, 1.0e-16, 1.0e-12, 1.0e-8, 1.0e-4, 0.01, 0.1, 0.49, 0.5, 0.51, 1.0, 5.0, 40.0]
+    var ok = true
+    var worst = 0.0
+    var k: i32 = 0
+    while k < 13 {
+        let y = ys[k]
+        let got = md_absorbed_fraction(y)
+        var want = 0.0
+        if y <= 0.0001 {
+            want = y * (1.0 - y * (0.5 - y * (1.0 / 6.0 - y * (1.0 / 24.0 - y / 120.0))))
+        } else {
+            want = 1.0 - exp(0.0 - y)
+        }
+        let rel = g_abs(got - want) / want
+        let r = rel / v9_tol(y)
+        if !(r <= worst) { worst = r }
+        if !(r <= 1.0) {
+            ok = false
+            print("V9 FAIL at y x1e20 = ") print(y * 1.0e20) print("  rel err x1e15 = ") println(rel * 1.0e15)
+        }
+        k = k + 1
+    }
+    print("V9 absorbed fraction, 13 magnitudes 1e-17..40: worst error / rounding budget = ") println(worst)
+    return ok
+}
+
+// V10 -------------------------------------------------------------------------
+fn v10_case(field: i32, idx: i32, value: f64, portal: bool) -> i32 with Mut {
+    var p = pbpk28_params_rapamycin()
+    if field == 1 { p.v_ref[idx] = value }
+    if field == 2 { p.cl_central = value }
+    if field == 3 { p.kp[idx] = value }
+    if field == 4 { p.ps[idx] = value }
+    if field == 5 { p.q[idx] = value }
+    if field == 6 { p.vasc_frac[idx] = value }
+    return md_params_error(p, portal)
+}
+
+// Portal flows set exactly; every other field is the rapamycin profile.
+fn v10_portal(q_l: f64, q_gut: f64, q_spleen: f64, q_pancreas: f64) -> i32 with Mut {
+    var p = pbpk28_params_rapamycin()
+    p.q[1] = q_l
+    p.q[8] = q_gut
+    p.q[11] = q_spleen
+    p.q[12] = q_pancreas
+    return md_params_error(p, true)
+}
+
+fn gate_v10() -> bool with Mut, Div, Panic, IO {
+    let inf = 1.0e308 * 10.0
+    let nan = 0.0 * inf
+    let stock = md_params_error(pbpk28_params_rapamycin(), true) + md_params_error(pbpk28_params_venlafaxine_parent(), true) + md_params_error(pbpk28_params_venlafaxine_odv(), true) + md_params_error(pbpk28_params_semaglutide(), true)
+    var ok = stock == 0
+    let got = [
+        v10_case(1, 0, 0.0, true), v10_case(1, 3, nan, true), v10_case(2, 0, 0.0 - 1.0, true), v10_case(2, 0, inf, true),
+        v10_case(3, 4, 0.0, true), v10_case(4, 5, 0.0 - 1.0, true), v10_case(5, 6, 0.0 - 1.0, true),
+        v10_case(6, 2, 0.0, true), v10_case(6, 2, 1.0, true), v10_case(6, 2, nan, true), v10_case(3, 0, inf, true),
+        v10_case(5, 8, 90.0, true), v10_case(5, 8, 90.0, false), v10_case(4, 5, 0.0, true), v10_case(5, 6, 0.0, true),
+        v10_portal(1.0, 1.0, 5.551115123125783e-17, 0.0), v10_portal(1.0, 1.0, 0.0, 0.0),
+        v10_case(1, 1, 4.0e-30, true), v10_case(1, 1, 1.0e-29, true)
+    ]
+    let want = [1, 1, 2, 2, 3, 4, 5, 6, 6, 6, 7, 8, 0, 0, 0, 8, 0, 9, 0]
+    print("V10 md_params_error: stock profiles ") print(stock) print("; cases")
+    var k: i32 = 0
+    while k < 19 {
+        print(" ") print(got[k])
+        if got[k] != want[k] { ok = false }
+        k = k + 1
+    }
+    println("")
+    return ok
+}
+
+// V11 -------------------------------------------------------------------------
+fn gate_v11() -> bool with Mut, Div, Panic, IO {
+    var md = md_new(true)
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = 1.0
+    let a = md_add_drug(&!md, p, 0.1, 0.95, 1.0)
+    let b = md_add_drug(&!md, p, 0.1, 0.95, 1.0)
+    let o_first = md_oral_dose_ok(&md, a, 1.0e308)
+    let b_first = md_bolus_dose_ok(&md, b, 1.0e308)
+    md_dose_oral(&!md, a, 1.0e308)
+    md_dose_iv_bolus(&!md, b, 1.0e308)
+    let o_again = md_oral_dose_ok(&md, a, 1.0e308)
+    let b_again = md_bolus_dose_ok(&md, b, 1.0e308)
+    let o_small = md_oral_dose_ok(&md, a, 5.0)
+    let b_small = md_bolus_dose_ok(&md, b, 5.0)
+    print("V11 oral ok: first 1e308, second 1e308, 5 mg = ") print(o_first) print(" ") print(o_again) print(" ") println(o_small)
+    print("V11 bolus ok: first 1e308, second 1e308, 5 mg = ") print(b_first) print(" ") print(b_again) print(" ") println(b_small)
+    return o_first && b_first && !o_again && !b_again && o_small && b_small
+}
+
+// V12 -------------------------------------------------------------------------
+fn gate_v12() -> bool with Mut, Div, Panic, IO {
+    var md = md_new(true)
+    let v = add_victim(&!md, 1.5)
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = 1.5
+    let x = md_add_drug(&!md, p, 0.1, 1.0, 1.0)
+    md_set_ki(&!md, x, md_cyp3a4(), 0.000001)
+    md_dose_iv_bolus(&!md, v, 5.0)
+    md_run_to(&!md, 1.0, 0.1)
+    md_dose_iv_bolus(&!md, x, 5.0)
+    md.ct[x * 14 + 1] = 0.0 - 1.0e-15 * md.cv[x * 14]
+    let idx = v * 8 + md_site_liver() * 4 + md_cyp3a4()
+    let f_insp = md_factor_now(&md, v, md_site_liver(), md_cyp3a4())
+    md_step(&!md, 0.01)
+    let f_prod = md.f_n[idx]
+    md_run_to(&!md, 1.5, 0.1)
+    let g_insp = md_factor_now(&md, v, md_site_liver(), md_cyp3a4())
+    md_step(&!md, 0.01)
+    let g_prod = md.f_n[idx]
+    print("V12 negative inhibitor C_t: inspection, production factor - 1 (x1e15) = ") print((f_insp - 1.0) * 1.0e15) print(" ") println((f_prod - 1.0) * 1.0e15)
+    print("V12 positive state: inspection, production factor = ") print(g_insp) print(" ") print(g_prod) print("  equal: ") println(g_insp == g_prod)
+    return f_insp == f_prod && f_prod == 1.0 && g_insp == g_prod && g_prod < 1.0
+}
+
+// V13 -------------------------------------------------------------------------
+fn v13_neg(iters: i32) -> f64 with Mut, Div, Panic {
+    var md = md_new(true)
+    md.iters = iters
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = 0.0
+    p.ps[1] = 1.0
+    p.ps[7] = 0.0
+    let v = md_add_drug(&!md, p, 1.0, 1.0, 1.0)
+    md_set_clint(&!md, v, md_site_liver(), md_cyp3a4(), 60.5 * 5.4)
+    var q = pbpk28_params_rapamycin()
+    q.cl_central = 1.0
+    let x = md_add_drug(&!md, q, 0.1, 1.0, 1.0)
+    md_set_ki(&!md, x, md_cyp3a4(), 0.000000000001)
+    md.ct[v * 14 + 7] = 1.0
+    md.ct[v * 14 + 1] = 1.0e-10
+    md_dose_iv_bolus(&!md, x, 5.0)
+    md.restart[v] = 0.0
+    md_step(&!md, 0.1)
+    return md_neg_min_rel(&md, v)
+}
+
+fn gate_v13() -> bool with Mut, Div, Panic, IO {
+    let lie = v13_neg(0)
+    let pc = v13_neg(1)
+    let it4 = v13_neg(4)
+    print("V13 md_neg_min_rel x1e12: iters 0 (Lie = first predictor pass), 1, 4 = ")
+    print(lie * 1.0e12) print(" ") print(pc * 1.0e12) print(" ") println(it4 * 1.0e12)
+    return lie < 0.0 && pc == lie && it4 == lie
+}
+
+// V15 -------------------------------------------------------------------------
+fn v15_pending(md: &MultiDrug28, v: i32, w: i32, x: i32) -> i32 with Mut, Panic {
+    var code: i32 = 0
+    if md_restart_pending(md, v) { code = code + 1 }
+    if md_restart_pending(md, w) { code = code + 2 }
+    if md_restart_pending(md, x) { code = code + 4 }
+    return code
+}
+
+fn gate_v15() -> bool with Mut, Div, Panic, IO {
+    var fresh = md_new(true)
+    let fv = add_victim(&!fresh, 1.5)
+    var q = pbpk28_params_rapamycin()
+    q.cl_central = 1.0
+    let fx = md_add_drug(&!fresh, q, 0.1, 1.0, 1.0)
+    md_set_ki(&!fresh, fx, md_cyp3a4(), 1.0)
+    md_set_ext_load(&!fresh, md_site_liver(), md_cyp3a4(), 0.5)
+    let pre = v15_pending(&fresh, fv, fv, fx)
+
+    var md = md_new(true)
+    let v = add_victim(&!md, 1.5)
+    let w = add_victim(&!md, 0.5)
+    let x = md_add_drug(&!md, q, 0.1, 1.0, 1.0)
+    md_set_ki(&!md, x, md_cyp3a4(), 1.0)
+    md_dose_iv_bolus(&!md, v, 5.0)
+    md_dose_iv_bolus(&!md, w, 5.0)
+    md_dose_iv_bolus(&!md, x, 5.0)
+    md_run_to(&!md, 1.0, 0.1)
+    let settled = v15_pending(&md, v, w, x)
+    md_set_ki(&!md, x, md_cyp3a4(), 2.0)
+    let c_ki = v15_pending(&md, v, w, x)
+    md_step(&!md, 0.1)
+    md_set_ki(&!md, x, md_cyp3a4(), 2.0)
+    let c_same = v15_pending(&md, v, w, x)
+    md_set_ki(&!md, x, md_cyp3a4(), 0.0)
+    let c_off = v15_pending(&md, v, w, x)
+    md_step(&!md, 0.1)
+    md_set_ext_load(&!md, md_site_liver(), md_cyp3a4(), 0.5)
+    let c_ext = v15_pending(&md, v, w, x)
+    md_step(&!md, 0.1)
+    md_set_clint(&!md, v, md_site_liver(), md_cyp3a4(), 150.0)
+    let c_cl = v15_pending(&md, v, w, x)
+    md_step(&!md, 0.1)
+    md_set_ki(&!md, x, md_cyp3a4(), 1.0)
+    md_step(&!md, 0.1)
+    md_set_fu_site(&!md, x, md_site_liver(), 0.2)
+    let c_fu = v15_pending(&md, v, w, x)
+    print("V15 pending bitmask (v=1, w=2, x=4): pre-start ") print(pre) print(", settled ") print(settled)
+    print(", Ki change ") print(c_ki) print(", same Ki ") print(c_same) print(", Ki off ") print(c_off)
+    print(", ext load ") print(c_ext) print(", CLint v ") print(c_cl) print(", fu x ") println(c_fu)
+    return pre == 0 && settled == 0 && c_ki == 3 && c_same == 0 && c_off == 3 && c_ext == 3 && c_cl == 1 && c_fu == 3
+}
+
+// V14 -------------------------------------------------------------------------
+fn gate_v14() -> bool with Mut, Div, Panic, IO {
+    let inf = 1.0e308 * 10.0
+    let nan = 0.0 * inf
+    var md = md_new(true)
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = 1.0
+    let a = md_add_drug(&!md, p, 0.1, 0.95, 1.0)
+    let bad = [0.0 - 1.0, nan, inf]
+    var ok = true
+    var k: i32 = 0
+    print("V14 predicates (oral, bolus) for -1, NaN, +Inf, 0, 5:")
+    while k < 3 {
+        let o = md_oral_dose_ok(&md, a, bad[k])
+        let b = md_bolus_dose_ok(&md, a, bad[k])
+        print(" ") print(o) print("/") print(b)
+        if o || b { ok = false }
+        k = k + 1
+    }
+    let good = [0.0, 5.0]
+    k = 0
+    while k < 2 {
+        let mg = good[k]
+        let o = md_oral_dose_ok(&md, a, mg)
+        let b = md_bolus_dose_ok(&md, a, mg)
+        print(" ") print(o) print("/") print(b)
+        if !(o && b) { ok = false }
+        let d0 = md.dose_in[a]
+        md_dose_oral(&!md, a, mg)
+        md_dose_iv_bolus(&!md, a, mg)
+        if !(md.dose_in[a] == d0 + mg + mg) { ok = false }
+        k = k + 1
+    }
+    println("")
+    return ok
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let m = gate_mass()
+    let v3 = gate_v3()
+    let v4 = gate_v4()
+    let v6 = gate_v6()
+    let v7 = gate_v7()
+    let v8 = gate_v8()
+    let v9 = gate_v9()
+    let v10 = gate_v10()
+    let v11 = gate_v11()
+    let v12 = gate_v12()
+    let v13 = gate_v13()
+    let v14 = gate_v14()
+    let v15 = gate_v15()
+    if m { println("M PASS") } else { println("M FAIL") }
+    if v3 { println("V3 PASS") } else { println("V3 FAIL") }
+    if v4 { println("V4 PASS") } else { println("V4 FAIL") }
+    if v6 { println("V6 PASS") } else { println("V6 FAIL") }
+    if v7 { println("V7 PASS") } else { println("V7 FAIL") }
+    if v8 { println("V8 PASS") } else { println("V8 FAIL") }
+    if v9 { println("V9 PASS") } else { println("V9 FAIL") }
+    if v10 { println("V10 PASS") } else { println("V10 FAIL") }
+    if v11 { println("V11 PASS") } else { println("V11 FAIL") }
+    if v12 { println("V12 PASS") } else { println("V12 FAIL") }
+    if v13 { println("V13 PASS") } else { println("V13 FAIL") }
+    if v14 { println("V14 PASS") } else { println("V14 FAIL") }
+    if v15 { println("V15 PASS") } else { println("V15 FAIL") }
+    if m && v3 && v4 && v6 && v7 && v8 && v9 && v10 && v11 && v12 && v13 && v14 && v15 {
+        println("PBPK28_MULTIDRUG_GATES_PASS")
+        return 0
+    }
+    return 1
+}

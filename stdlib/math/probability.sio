@@ -1,0 +1,321 @@
+// Checked eight-bin information measures, in nats. See PROBABILITY.md.
+use math::pure::{is_finite, ln_checked}
+pub struct InformationResult {
+    pub status: i64,
+    pub value: f64,
+    pub infinite: bool,
+}
+struct InformationMass {
+    status: i64,
+    mass: f64,
+}
+fn information_error(status: i64) -> InformationResult {
+    InformationResult { status: status, value: 0.0, infinite: false }
+}
+fn information_mass(p: &[f64; 8], k: i64) -> InformationMass with Mut, Div, Panic {
+    if k < 1 || k > 8 { return InformationMass { status: 1, mass: 0.0 } }
+    var i: i64 = 0
+    while i < k {
+        if !is_finite(p[i as usize]) { return InformationMass { status: 2, mass: 0.0 } }
+        i = i + 1
+    }
+    i = 0
+    while i < k {
+        if p[i as usize] < 0.0 { return InformationMass { status: 3, mass: 0.0 } }
+        i = i + 1
+    }
+    var sum: f64 = 0.0
+    var correction: f64 = 0.0
+    i = 0
+    while i < k {
+        let adjusted = p[i as usize] - correction
+        let next = sum + adjusted
+        correction = (next - sum) - adjusted
+        sum = next
+        i = i + 1
+    }
+    let difference = if sum >= 1.0 { sum - 1.0 } else { 1.0 - sum }
+    if !is_finite(sum) || sum <= 0.0 || difference > 1.0e-12 {
+        return InformationMass { status: 4, mass: 0.0 }
+    }
+    InformationMass { status: 0, mass: sum }
+}
+// (1+d)ln(1+d)-d for |d|<=1/4, without subtracting linear terms.
+fn information_phi(d: f64) -> f64 with Mut, Div, Panic {
+    var power = d * d
+    var sum = power * 0.5
+    var n: i64 = 3
+    while n <= 32 {
+        power = power * d
+        let term = power / ((n * (n - 1)) as f64)
+        if n % 2 == 1 { sum = sum - term } else { sum = sum + term }
+        n = n + 1
+    }
+    sum
+}
+// Natural ln(1+d), used only for |d|<=1/4.
+fn information_log1p(d: f64) -> f64 with Mut, Div, Panic {
+    let magnitude = if d < 0.0 { 0.0 - d } else { d }
+    if magnitude < 1.0e-16 { return d }
+    let t = d / (2.0 + d)
+    let square = t * t
+    var power = t
+    var sum = t
+    var n: i64 = 1
+    while n < 32 {
+        power = power * square
+        sum = sum + power / ((2 * n + 1) as f64)
+        n = n + 1
+    }
+    2.0 * sum
+}
+// Generalized KL contribution, nonnegative for p>=0,q>0.
+fn information_generalized(p: f64, q: f64) -> InformationResult with Mut, Div, Panic {
+    if p == q { return InformationResult { status: 0, value: 0.0, infinite: false } }
+    if p == 0.0 { return InformationResult { status: 0, value: q, infinite: false } }
+    let difference = p - q
+    let magnitude = if difference < 0.0 { 0.0 - difference } else { difference }
+    var value: f64 = 0.0
+    if magnitude <= q * 0.25 {
+        value = q * information_phi(difference / q)
+    } else {
+        let lp = ln_checked(p)
+        let lq = ln_checked(q)
+        if lp.status != 0 || lq.status != 0 { return information_error(6) }
+        value = p * (lp.value - lq.value) + (q - p)
+    }
+    if !is_finite(value) || value < 0.0 { return information_error(6) }
+    InformationResult { status: 0, value: value, infinite: false }
+}
+pub fn information_shannon(p: &[f64; 8], k: i64) -> InformationResult with Mut, Div, Panic {
+    let mass = information_mass(p, k)
+    if mass.status != 0 { return information_error(mass.status) }
+    var maximum: f64 = 0.0
+    var max_index: i64 = 0
+    var j: i64 = 0
+    while j < k {
+        if p[j as usize] > maximum { maximum = p[j as usize]; max_index = j }
+        j = j + 1
+    }
+    var tail: f64 = 0.0
+    var tail_correction: f64 = 0.0
+    j = 0
+    while j < k {
+        if j != max_index {
+            let adjusted = p[j as usize] - tail_correction
+            let next = tail + adjusted
+            tail_correction = (next - tail) - adjusted
+            tail = next
+        }
+        j = j + 1
+    }
+    let tail_fraction = tail / mass.mass
+    var sum: f64 = 0.0
+    var correction: f64 = 0.0
+    var tiny_sum: f64 = 0.0
+    var tiny_correction: f64 = 0.0
+    var i: i64 = 0
+    while i < k {
+        let probability = p[i as usize] / mass.mass
+        if probability > 0.0 {
+            let logarithm = ln_checked(probability)
+            if logarithm.status != 0 { return information_error(6) }
+            let log_value = if i == max_index && tail_fraction <= 0.25 {
+                information_log1p(0.0 - tail_fraction)
+            } else { logarithm.value }
+            if probability < 1.0e-200 {
+                let term = (probability / 2.2250738585072014e-308) * (0.0 - log_value)
+                let adjusted = term - tiny_correction
+                let next = tiny_sum + adjusted
+                tiny_correction = (next - tiny_sum) - adjusted
+                tiny_sum = next
+            } else {
+                let term = (0.0 - probability) * log_value
+                let adjusted = term - correction
+                let next = sum + adjusted
+                correction = (next - sum) - adjusted
+                sum = next
+            }
+        }
+        i = i + 1
+    }
+    sum = sum + tiny_sum * 2.2250738585072014e-308
+    if !is_finite(sum) || sum < 0.0 { return information_error(6) }
+    InformationResult { status: 0, value: sum, infinite: false }
+}
+pub fn information_collision(p: &[f64; 8], k: i64) -> InformationResult with Mut, Div, Panic {
+    let mass = information_mass(p, k)
+    if mass.status != 0 { return information_error(mass.status) }
+    var cross: f64 = 0.0
+    var correction: f64 = 0.0
+    var square_sum: f64 = 0.0
+    var square_correction: f64 = 0.0
+    var i: i64 = 0
+    while i < k {
+        let a = p[i as usize] / mass.mass
+        let square = a * a - square_correction
+        let next_square = square_sum + square
+        square_correction = (next_square - square_sum) - square
+        square_sum = next_square
+        var j = i + 1
+        while j < k {
+            let b = p[j as usize] / mass.mass
+            let term = (2.0 * a) * b
+            let adjusted = term - correction
+            let next = cross + adjusted
+            correction = (next - cross) - adjusted
+            cross = next
+            j = j + 1
+        }
+        i = i + 1
+    }
+    var value: f64 = 0.0
+    if cross <= 0.25 {
+        value = 0.0 - information_log1p(0.0 - cross)
+    } else {
+        let logarithm = ln_checked(square_sum)
+        if logarithm.status != 0 { return information_error(6) }
+        value = 0.0 - logarithm.value
+    }
+    if !is_finite(value) || value < 0.0 { return information_error(6) }
+    InformationResult { status: 0, value: value, infinite: false }
+}
+pub fn information_min(p: &[f64; 8], k: i64) -> InformationResult with Mut, Div, Panic {
+    let mass = information_mass(p, k)
+    if mass.status != 0 { return information_error(mass.status) }
+    var maximum: f64 = 0.0
+    var max_index: i64 = 0
+    var i: i64 = 0
+    while i < k {
+        if p[i as usize] > maximum { maximum = p[i as usize]; max_index = i }
+        i = i + 1
+    }
+    var tail: f64 = 0.0
+    var correction: f64 = 0.0
+    i = 0
+    while i < k {
+        if i != max_index {
+            let adjusted = p[i as usize] - correction
+            let next = tail + adjusted
+            correction = (next - tail) - adjusted
+            tail = next
+        }
+        i = i + 1
+    }
+    let fraction = tail / mass.mass
+    var value: f64 = 0.0
+    if fraction <= 0.25 {
+        value = 0.0 - information_log1p(0.0 - fraction)
+    } else {
+        let logarithm = ln_checked(maximum / mass.mass)
+        if logarithm.status != 0 { return information_error(6) }
+        value = 0.0 - logarithm.value
+    }
+    if !is_finite(value) || value < 0.0 { return information_error(6) }
+    InformationResult { status: 0, value: value, infinite: false }
+}
+pub fn information_kl(p: &[f64; 8], q: &[f64; 8], k: i64) -> InformationResult with Mut, Div, Panic {
+    let pm = information_mass(p, k)
+    if pm.status != 0 { return information_error(pm.status) }
+    let qm = information_mass(q, k)
+    if qm.status != 0 { return information_error(qm.status) }
+    var i: i64 = 0
+    while i < k {
+        if p[i as usize] > 0.0 && q[i as usize] == 0.0 {
+            return InformationResult { status: 5, value: 0.0, infinite: true }
+        }
+        i = i + 1
+    }
+    var sum: f64 = 0.0
+    var correction: f64 = 0.0
+    var tiny_sum: f64 = 0.0
+    var tiny_correction: f64 = 0.0
+    i = 0
+    while i < k {
+        let a = p[i as usize] / pm.mass
+        let b = q[i as usize] / qm.mass
+        if b > 0.0 {
+            if a < 1.0e-200 && b < 1.0e-200 {
+                let term = information_generalized(a / 2.2250738585072014e-308, b / 2.2250738585072014e-308)
+                if term.status != 0 { return information_error(6) }
+                let adjusted = term.value - tiny_correction
+                let next = tiny_sum + adjusted
+                tiny_correction = (next - tiny_sum) - adjusted
+                tiny_sum = next
+            } else {
+                let term = information_generalized(a, b)
+                if term.status != 0 { return information_error(6) }
+                let adjusted = term.value - correction
+                let next = sum + adjusted
+                correction = (next - sum) - adjusted
+                sum = next
+            }
+        }
+        i = i + 1
+    }
+    sum = sum + tiny_sum * 2.2250738585072014e-308
+    if !is_finite(sum) || sum < 0.0 { return information_error(6) }
+    InformationResult { status: 0, value: sum, infinite: false }
+}
+pub fn information_js(p: &[f64; 8], q: &[f64; 8], k: i64) -> InformationResult with Mut, Div, Panic {
+    let pm = information_mass(p, k)
+    if pm.status != 0 { return information_error(pm.status) }
+    let qm = information_mass(q, k)
+    if qm.status != 0 { return information_error(qm.status) }
+    var sum: f64 = 0.0
+    var correction: f64 = 0.0
+    var tiny_sum: f64 = 0.0
+    var tiny_correction: f64 = 0.0
+    var i: i64 = 0
+    while i < k {
+        let a = p[i as usize] / pm.mass
+        let b = q[i as usize] / qm.mass
+        let scale = if a > b { a } else { b }
+        if scale > 0.0 {
+            let combined = a + b
+            let difference = a - b
+            let distance = if difference < 0.0 { 0.0 - difference } else { difference }
+            var shape: f64 = 0.0
+            if distance <= combined * 0.25 {
+                // Direct difference is exact near equality (Sterbenz); avoid
+                // rounding two scaled inputs and their midpoint first.
+                let ratio = difference / combined
+                let square = ratio * ratio
+                var power = square
+                var even_sum: f64 = 0.0
+                var j: i64 = 1
+                while j <= 24 {
+                    even_sum = even_sum + power / (((2 * j) * (2 * j - 1)) as f64)
+                    power = power * square
+                    j = j + 1
+                }
+                shape = (combined / scale) * (0.5 * even_sum)
+            } else {
+                let aa = a / scale
+                let bb = b / scale
+                let mixture = (aa + bb) * 0.5
+                let left = information_generalized(aa, mixture)
+                let right = information_generalized(bb, mixture)
+                if left.status != 0 || right.status != 0 { return information_error(6) }
+                shape = (left.value + right.value) * 0.5
+            }
+            if scale < 1.0e-200 {
+                let term = (scale / 2.2250738585072014e-308) * shape
+                let adjusted = term - tiny_correction
+                let next = tiny_sum + adjusted
+                tiny_correction = (next - tiny_sum) - adjusted
+                tiny_sum = next
+            } else {
+                let term = scale * shape
+                let adjusted = term - correction
+                let next = sum + adjusted
+                correction = (next - sum) - adjusted
+                sum = next
+            }
+        }
+        i = i + 1
+    }
+    sum = sum + tiny_sum * 2.2250738585072014e-308
+    if !is_finite(sum) || sum < 0.0 { return information_error(6) }
+    InformationResult { status: 0, value: sum, infinite: false }
+}
