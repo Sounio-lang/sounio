@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.nb2-diagnostics-execution-2026-10-21
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.nb2-diagnostics-execution-2026-10-21
+-->
+
 # NB2 supplied-parameter diagnostics — execution, 2026-10-21
 
 ## Delivered implementation

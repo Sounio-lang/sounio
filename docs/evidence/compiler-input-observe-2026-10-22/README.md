@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.compiler-input-observe-2026-10-22.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.compiler-input-observe-2026-10-22.readme
+-->
+
 # Instrumented compiler pathname observation
 
 Slurm15940 completed0:0. Collector source3860980c8d16f513b9ba3e779c397d9afc0b4fd3 is a separately hashed overlay. Compiler source uses the existing immutable snapshot from nb2-balanced-current-source-20261022, frozen eeeab3025c68bebfdbde284116e41176b9976770. The snapshot was validated/reused without a new archive. The only run-local runner change invokes the overlay instead of the generic corpus-smoke command. No tests/corpus acceptance are claimed.

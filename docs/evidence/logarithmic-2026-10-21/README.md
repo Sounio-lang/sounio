@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.logarithmic-2026-10-21.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.logarithmic-2026-10-21.readme
+-->
+
 # Logarithmic primitives native evidence, 2026-10-21
 
 Initial Slurm job 15823 rebuilt the source-tracking seed and modular compiler from source 5708a48a22684f242b3fa5d8d376d6389c456b68. Final job 15825 used source 27ea4ec6c2b97892e9e92cf982b0af90e2241023 and reused the exact attested compiler after proving unchanged bin/scripts/self-hosted/stdlib trees. The final source changes only the visible seven-sample caption. Both jobs completed 0:0.

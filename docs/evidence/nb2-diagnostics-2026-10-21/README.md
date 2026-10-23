@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.nb2-diagnostics-2026-10-21.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.nb2-diagnostics-2026-10-21.readme
+-->
+
 # NB2 diagnostic execution evidence
 
 Frozen executable source: `4a65e767af7ce955cfde85f25484ea7f8a5f44f2`.

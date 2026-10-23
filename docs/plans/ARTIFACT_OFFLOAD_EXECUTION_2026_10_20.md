@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.artifact-offload-execution-2026-10-20
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.artifact-offload-execution-2026-10-20
+-->
+
 # Retirada autorizada dos snapshots — 20/10/2026
 
 ## Resultado executado

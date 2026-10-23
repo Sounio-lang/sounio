@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.compiler-path-attribution-execution-2026-10-22
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.compiler-path-attribution-execution-2026-10-22
+-->
+
 # Compiler pathname attribution checkpoint — 2026-10-22
 
 ## Scope and source identity

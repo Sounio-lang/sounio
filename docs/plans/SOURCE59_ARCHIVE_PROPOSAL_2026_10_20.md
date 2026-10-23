@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.source59-archive-proposal-2026-10-20
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.source59-archive-proposal-2026-10-20
+-->
+
 # Proposta exata SOURCE59 — revisão do escopo ampliado, 20/10/2026
 
 ## Estado e decisão

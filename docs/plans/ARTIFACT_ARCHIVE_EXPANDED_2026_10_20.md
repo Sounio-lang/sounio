@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.artifact-archive-expanded-2026-10-20
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.artifact-archive-expanded-2026-10-20
+-->
+
 > **Atualização executada:** o usuário autorizou `execute`; os 107 snapshots da ampliação foram retirados com journal A/B verificado. A quota de 3 TiB foi mantida, a escrita foi restabelecida e 108 ponteiros de restauração foram gravados, incluindo o snapshot do passo anterior. Consulte [o recibo de execução](ARTIFACT_OFFLOAD_EXECUTION_2026_10_20.md). O texto abaixo preserva as propostas e os checkpoints anteriores; condições de autorização pendente foram superadas pela execução registrada.
 
 # Ampliação proposta de arquivamento — 20/10/2026

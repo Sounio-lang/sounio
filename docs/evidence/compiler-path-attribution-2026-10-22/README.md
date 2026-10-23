@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.compiler-path-attribution-2026-10-22.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.compiler-path-attribution-2026-10-22.readme
+-->
+
 # Compiler path attribution — 2026-10-22
 
 Compact public evidence for analysis of the retained Slurm15940 trace. This is

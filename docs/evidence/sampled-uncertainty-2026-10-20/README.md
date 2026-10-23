@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.sampled-uncertainty-2026-10-20.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.sampled-uncertainty-2026-10-20.readme
+-->
+
 # Sampled uncertainty: retained execution evidence
 
 Frozen executable source: `52ba99b87d49da04e97524fa0d8911b1d1d4d46b`.

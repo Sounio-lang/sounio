@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.compiler-input-observation-execution-2026-10-22
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.compiler-input-observation-execution-2026-10-22
+-->
+
 # Instrumented compiler pathname observation: execution receipt, 2026-10-22
 
 ## Separate source identities

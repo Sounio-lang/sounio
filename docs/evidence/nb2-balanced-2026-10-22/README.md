@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.nb2-balanced-2026-10-22.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.nb2-balanced-2026-10-22.readme
+-->
+
 # Balanced NB2 tiny-product continuation evidence
 
 Slurm15874 uses frozen source eeeab3025c68bebfdbde284116e41176b9976770, after a fresh source-tracking seed and modular Madaros rebuild. Five selected typechecks precede native compilation/execution of the real scientific example. No tests or independent numerical oracle are included. Forge corpus_smoke naming is transport only.

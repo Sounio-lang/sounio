@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.sampled-uncertainty-execution-2026-10-20
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.sampled-uncertainty-execution-2026-10-20
+-->
+
 # Sampled uncertainty — native SVG execution, 2026-10-20 UTC
 
 ## Result and exact scope

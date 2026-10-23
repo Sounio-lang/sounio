@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.nb2-deviance-2026-10-22.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.nb2-deviance-2026-10-22.readme
+-->
+
 # Shared log1p genomics/physics evidence
 
 Slurm15854 uses frozen source 76f30851adaace93d0dfc5ff4c0d3b8df3741973 and a fresh source-tracking seed/modular compiler build. Four selected typechecks precede compilation/execution of the real synthetic example. No tests or independent numerical oracle are included. Generic Forge corpus_smoke naming is transport only.

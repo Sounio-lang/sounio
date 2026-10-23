@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.compiler-input-manifest-candidate-2026-10-22
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.compiler-input-manifest-candidate-2026-10-22
+-->
+
 # Compiler input manifest: observational optimization candidate
 
 Status: read-only audit and proposal; no cache behavior was changed.

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.nb2-balanced-execution-2026-10-22
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.nb2-balanced-execution-2026-10-22
+-->
+
 # Balanced NB2 tiny-product continuation: execution receipt, 2026-10-22
 
 ## Source and scope

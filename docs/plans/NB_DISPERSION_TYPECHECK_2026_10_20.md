@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.nb-dispersion-typecheck-2026-10-20
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.nb-dispersion-typecheck-2026-10-20
+-->
+
 # NB2 count diagnostic — current-source typecheck, 2026-10-20
 
 ## Result and exact scope

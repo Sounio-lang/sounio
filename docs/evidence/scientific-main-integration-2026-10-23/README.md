@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.scientific-main-integration-2026-10-23.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.scientific-main-integration-2026-10-23.readme
+-->
+
 # Current-main scientific stdlib integration — 2026-10-23
 
 Source19c684a99bb5728c15b424a13fd190742efad718 reconciles the later scientific

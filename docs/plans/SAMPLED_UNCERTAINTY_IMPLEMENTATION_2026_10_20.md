@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.plans.sampled-uncertainty-implementation-2026-10-20
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.plans.sampled-uncertainty-implementation-2026-10-20
+-->
+
 # Sampled uncertainty implementation checkpoint — 2026-10-20
 
 ## Current boundary
