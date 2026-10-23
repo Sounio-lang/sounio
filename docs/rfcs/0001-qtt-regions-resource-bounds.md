@@ -1,10 +1,10 @@
 <!-- docs:meta
 topic_id: repo.docs.rfcs.0001-qtt-regions-resource-bounds
 authority: repo_only
-audience: contributors
+audience: users
 last_validated: 2026-10-22
 validated_by: Cloud Agent
-source_of_truth: docs/rfcs/0001-qtt-regions-resource-bounds.md
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.rfcs.0001-qtt-regions-resource-bounds
 -->
 
 # RFC-0001: Quantitative Types, Effect-Based Regions, and Resource-Bounded Allocation
