@@ -1,0 +1,96 @@
+// Actual canonical 8x8-cell tick-label planning. No renderer/IR dependency.
+use math::pure::{is_finite}
+use viz::axis::{AxisTicks,AxisLabel,axis_label,axis_offset}
+use viz::scale::{ScaleSpec,scale_valid,axis_scaled_ticks}
+pub struct AxisLabelPlan {
+ pub status:i64,pub n:i64,pub intervals:i64,pub first_problem:i64,
+ pub required_left:i64,pub required_right:i64,pub required_top:i64,pub required_bottom:i64,
+ pub tick_x:[i64;9],pub tick_y:[i64;9],pub text_x:[i64;9],pub text_y:[i64;9],
+ pub text_width:[i64;9],pub labels:[AxisLabel;9],
+}
+fn axis_label_plan_empty()->AxisLabelPlan {
+ AxisLabelPlan{status:1,n:0,intervals:0,first_problem:-1,
+ required_left:0,required_right:0,required_top:0,required_bottom:0,
+ tick_x:[0;9],tick_y:[0;9],text_x:[0;9],text_y:[0;9],text_width:[0;9],
+ labels:[AxisLabel{text:[0;32],n:0};9]}
+}
+fn axis_layout_labels_equal(a:&AxisLabel,b:&AxisLabel)->bool with Mut {
+ if a.n!=b.n {return false}
+ var i:i64=0
+ while i<a.n {if a.text[i as usize]!=b.text[i as usize] {return false};i=i+1}
+ true
+}
+// Status0 fit,1 invalid input/ticks/labels,2 insufficient separation,
+// 3 label or axis footprint outside the document. Failure n=0.
+// Rect arrays are diagnostics on failure, not permission to render.
+pub fn axis_measure_labels(ticks:&AxisTicks,vertical:bool,x:i64,y:i64,extent:i64,
+ document_w:i64,document_h:i64)->AxisLabelPlan with Mut,Div {
+ var out=axis_label_plan_empty()
+ if ticks.status!=0 || ticks.n<2 || ticks.n>9 || extent<1 || extent>1000000 ||
+    x < -1000000 || x>1000000 || y < -1000000 || y>1000000 ||
+    document_w<1 || document_w>1000000 || document_h<1 || document_h>1000000 {return out}
+ let intervals=ticks.n-1
+ var overlaps=false
+ var outside=false
+ var i:i64=0
+ while i<ticks.n {
+  let value=ticks.values[i as usize]
+  if !is_finite(value) {out.first_problem=i;return out}
+  if i>0 && value<=ticks.values[(i-1) as usize] {out.first_problem=i;return out}
+  let label=axis_label(value)
+  if label.n<1 || label.n>32 {out.first_problem=i;return out}
+  if i>0 {
+   let previous=out.labels[(i-1) as usize]
+   if axis_layout_labels_equal(&previous,&label) {out.first_problem=i;return out}
+  }
+  let offset=axis_offset(i,intervals,extent)
+  let px=if vertical {x} else {x+offset}
+  let py=if vertical {y+extent-offset} else {y}
+  let tx=if vertical {x-8-label.n*8} else {px-label.n*4}
+  let ty=if vertical {py-4} else {y+8}
+  let width=label.n*8
+  out.tick_x[i as usize]=px;out.tick_y[i as usize]=py
+  out.text_x[i as usize]=tx;out.text_y[i as usize]=ty
+  out.text_width[i as usize]=width;out.labels[i as usize]=label
+  if tx<0 {if -tx>out.required_left {out.required_left= -tx};outside=true}
+  if ty<0 {if -ty>out.required_top {out.required_top= -ty};outside=true}
+  if tx+width>document_w {
+   if tx+width-document_w>out.required_right {out.required_right=tx+width-document_w};outside=true
+  }
+  if ty+8>document_h {
+   if ty+8-document_h>out.required_bottom {out.required_bottom=ty+8-document_h};outside=true
+  }
+  if px<0 {if -px>out.required_left {out.required_left= -px};outside=true}
+  if py<0 {if -py>out.required_top {out.required_top= -py};outside=true}
+  if px>=document_w {if px-document_w+1>out.required_right {out.required_right=px-document_w+1};outside=true}
+  if py>=document_h {if py-document_h+1>out.required_bottom {out.required_bottom=py-document_h+1};outside=true}
+  if i>0 {
+   let previous=(i-1) as usize
+   let collision=if vertical {ty+8+2>out.text_y[previous]}
+                 else {tx<out.text_x[previous]+out.text_width[previous]+2}
+   if collision {overlaps=true;if out.first_problem<0 {out.first_problem=i}}
+  }
+  i=i+1
+ }
+ if outside {out.status=3;return out}
+ if overlaps {out.status=2;return out}
+ out.status=0;out.n=ticks.n;out.intervals=intervals
+ out
+}
+// Try fewer intervals without changing the supplied raw domain or scale.
+// The chosen plan still includes every tick label and both exact endpoints.
+pub fn axis_fit_labels(lo:f64,hi:f64,max_intervals:i64,vertical:bool,
+ x:i64,y:i64,extent:i64,document_w:i64,document_h:i64,spec:&ScaleSpec)->AxisLabelPlan with Mut,Div {
+ var last=axis_label_plan_empty()
+ if max_intervals<1 || max_intervals>8 || !scale_valid(spec) ||
+    !is_finite(lo) || !is_finite(hi) || hi<=lo {return last}
+ var budget=max_intervals
+ while budget>=1 {
+  let ticks=axis_scaled_ticks(lo,hi,budget,spec)
+  let plan=axis_measure_labels(&ticks,vertical,x,y,extent,document_w,document_h)
+  if plan.status==0 {return plan}
+  last=plan
+  budget=budget-1
+ }
+ last
+}
