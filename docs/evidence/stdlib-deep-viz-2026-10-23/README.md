@@ -39,3 +39,51 @@ Input hashes cover listed files and were verified at the endpoints. They are not
 a proof of every environmental dependency or whole-tree immutability; the wrapper
 may materialize its prebuilt marker. These checks establish the stated fixtures,
 not general numerical, visual or publication-quality superiority.
+
+## Stage2 compatibility repair, 2026-10-23
+
+PR3048 CI run39997094713/job120567131861 exposed six renderer crashes and
+two stale SVG line markers. Its base run39994861909/job120559563649 passed;
+the eight fixtures were unchanged. A later science CI also exposed crashes in
+`viz_bca_mean` and `viz_permutation_mc`. No engine requirement was added to hide
+these previously supported Stage2 programs.
+
+The repair nests the axis tick ordering check so tick zero never evaluates an
+index of minus one. Axis emitters recompute canonical label text from each
+scalar tick instead of copying an indexed nested label record out of the
+returned plan. Planned coordinates, fit decisions and the plan schema remain
+unchanged. Forest expectations now identify the actual clipped pixel-cell
+rectangles; their Canvas assertions remain unchanged.
+
+The exact failing-CI Stage2 ELF has SHA256
+`fea662a291d0b57e99bfadbdd09d0984e1f348a938a20bb8ca1c962d250c1571`.
+Slurm16177 reproduced the original entropy crash and both marker mismatches;
+the ordering guard alone removed the count-matrix crash but left five other
+crashes. Slurm16183, with scalar label emission, executed all eight original
+programs successfully, leaving only the expected old forest marker mismatch.
+Slurm16184 independently verified both replacement SVG rectangle geometries in
+C++23. Actual output uses literal quotes.
+
+Final Slurm16188 passed compilation, execution and every expected stdout marker
+for all ten legacy fixtures plus `viz_axis_first_tick_guard` on Stage2. It also
+passed Madaros check/compile/execution/markers for the focused axis-layout,
+forest and new first-tick fixtures, plus the two existing C++23 actual-output
+axis/forest comparisons and the legacy forest span comparison. Madaros reused
+the attested compiler SHA256
+`1148eabd3905ec76911d027c578fb8d6b2bd2dde2c186ee3c02c4c3b97733029`
+with the frozen updated visual stdlib and isolated uncached invocation.
+These are focused controls, not a full corpus or remote CI pass.
+
+The valid first-tick fixture also passes against the original PR head. It is
+coverage-only, not a failing-before witness. An earlier version had an invalid
+label budget and is not regression evidence. Slurm16175 initially produced
+execution status126 because the harness omitted executable permission on
+Stage2 output; Slurm16177 retried the same byte-identified ELFs with the harness
+repaired. These raw statuses remain separate.
+
+Compact phase statuses, resource receipts, source manifests, executable/output
+identities and C++ summaries are retained in `stage2-compat/`. Full outputs,
+compiler logs and ELFs remain under
+`/scratch/sounio-stdlib-deep-20261023/pr3048-ci-controls/artifacts`.
+Source inventories were verified unchanged after the final execution. No
+measured speed or memory superiority is claimed.
