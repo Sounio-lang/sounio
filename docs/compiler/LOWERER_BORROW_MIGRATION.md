@@ -60,7 +60,7 @@ The current madaros binary in `artifacts/` appears **broken** or triggers a path
 
 **Result**: 0 typecheck errors, 496 call sites → 493 call sites.
 
-### Phase 1: Next 5 Hot Functions (Blocked)
+### Phase 1: Next 5 Hot Functions (Failed — Incomplete Substitution)
 
 Top candidates (by `fresh_reg()` call count):
 1. `lower_sign_call_ref` (49 calls, 251 lines)
@@ -69,7 +69,29 @@ Top candidates (by `fresh_reg()` call count):
 4. `fo_step_combine` (15 calls)
 5. `fo_emit_recur_ymul_scale` (15 calls)
 
-**Cannot proceed**: Gate failure prevents measurement.
+**Result**: Migration introduced 196 E012 errors (syntax errors).
+
+**Root cause**: Incomplete pattern substitution. The automated script replaced:
+```sio
+let r = lo.fresh_reg()  // returns (Lowerer, i64)
+lo = r.0
+// use r.1
+```
+with:
+```sio
+let r = lo.fresh_reg_mut()  // returns i64 directly
+// use r.1  ← ERROR: r is i64, not a tuple!
+```
+
+The correct substitution must also replace **all** references to `r.1` with just `r`:
+```sio
+let r = lo.fresh_reg_mut()
+// use r  ← correct
+```
+
+**Commits reverted**: All 5 migrations were reverted due to this error.
+
+**Lesson**: Automated substitution is unsafe for this pattern. Manual migration required, or a two-pass script: (1) replace call + remove `.0` assignment, (2) replace all `.1` accesses with direct variable.
 
 ---
 
