@@ -201,3 +201,48 @@ The classifier-only controls and new contract controls pass; actual CI rerun
 remains pending. PR3047 Lean compiled but its generated file-count inventory
 was stale; PR3048 has a real legacy Stage2 renderer regression being corrected
 with the original CI executable. Neither is excused by the Madaros replay.
+
+## Cumulative main integration and final replay
+
+Compiler PR3044 merged into main57a33bd7de. PR3052 now targets main as the
+cumulative integration of foundation870df, rendering00d9a34ede and scientific
+core74996. Branch synchronization preserved the approved compiler, numerical
+and renderer source bytes. The separate modular PRs retain their review history.
+Main integration and its required merge queue remain pending at this checkpoint.
+
+Sourcefc78b54079275a13f431a54507a7dbbf89693bd6/tree
+8faff63080680d361f49b8e7dbe47a7a6ca05d85 passed Slurm16189:374 records,
+zero failures, exit0:0, wall00:09:03. This extends the330-record suite with
+eleven legacy rendering fixtures on Madaros. Rendering repair16188 separately
+passed ten legacy fixtures plus first-tick coverage on the original Stage2
+CI executable, focused Madaros cases and C++ concordances. The valid first-tick
+control also passes the old source and is coverage-only; the preserved crashes
+and marker differences are the discriminating before controls.
+
+GitHub Stdlib Deep Science also passed on de975 (330 records) and fc78
+(the expanded replay). On fc78, Full Test Suite, Lean and Contracts Core passed.
+The initial effects-scanner false positive was repaired with balanced return
+delimiter handling: old full gate refused216->218; corrected full gate measures
+214/frozen216, with15 lexical/direct/NUL CLI controls and unchanged frozen lists.
+The native Mac/full-suite jobs now respect cancellation; decision-contract
+rejection controls and independent YAML parsing passed.
+
+The remaining fc78 f64 changed-test failure was the workload's default30-second
+runner deadline, not an assertion failure: the full20000x512 normalization case
+already measured34.79s. Its existing per-fixture annotation now grants120s,
+keeping the global default30, dataset, executable body and assertions intact.
+Parser controls captured30 before/120 after. Slurm16219 ran the canonical
+runner with this exact annotated fixture: Pass1/Fail0/Skip0, real completion
+marker, compiler1148eabd...,36.94s including compilation and execution.
+Its722604KiB peak includes compilation and must not replace the standalone
+kernel RSS80384KiB measurement. An earlier interface-refusal attempt16217
+executed no numerical workload and is retained separately.
+
+Durable final-source receipt6018764d5a64b9caf6abce7cc981f08606894638 lives on
+evidence/stdlib-deep-final-20261023, under
+docs/evidence/stdlib-deep-integration-2026-10-23. Thirteen compact files retain
+results, source/executable identities, resources, raw-output hashes and two
+native synthetic SVG examples. Keeping receipt custody separate preserves the
+code tip during CI; a docs-only follow-up can integrate it after the code merge.
+The source-bound receipt predates only the fixture deadline annotation and this
+ledger update; the numerical libraries and test body remain unchanged.
