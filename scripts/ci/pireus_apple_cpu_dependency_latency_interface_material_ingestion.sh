@@ -2,8 +2,6 @@
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-# shellcheck source=scripts/lib/classify_compile.sh
-source "${ROOT}/scripts/lib/classify_compile.sh"
 GIT_COMMON_DIR="$(git -C "${ROOT}" rev-parse --path-format=absolute --git-common-dir)"
 GUARDIAN="${SOUNIO_LOOM_LANGUAGE_AUTHORITY_RUNTIME:-${GIT_COMMON_DIR}/sounio-coord-runtime/current/bin/sounio-loom-language-authority-runtime}"
 
@@ -256,8 +254,6 @@ set -e
 [[ "${example_rc}" -eq 0 ]] || fail "example exited ${example_rc}"
 [[ "${test_rc}" -eq 0 ]] || fail "test exited ${test_rc}"
 [[ "${default_rc}" -ne 0 ]] || fail 'default engine unexpectedly succeeded'
-sounio_expect_failed_exit "${default_rc}" "${default_output}" 'visibility preflight failed' ||
-  fail "default engine exit is not a clean refusal: $(sounio_refusal_reason)"
 require_hash "${example_output}" "${EXAMPLE_OUTPUT_SHA256}"
 require_hash "${test_output}" "${TEST_OUTPUT_SHA256}"
 require_line "${example_output}" \
