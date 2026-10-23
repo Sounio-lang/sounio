@@ -52,6 +52,7 @@ const sounioSiteTheme = {
 // https://astro.build/config
 export default defineConfig({
   site: 'https://www.souniolang.org',
+  trailingSlash: 'always',
 
   integrations: [
     react(),
@@ -67,6 +68,11 @@ export default defineConfig({
           es: 'es',
           'zh-hk': 'zh-HK',
         },
+      },
+      filter: (page) => {
+        const url = new URL(page);
+        const path = url.pathname;
+        return !path.match(/^\/(pt\/|el\/|zh\/|ja\/|es\/|zh-hk\/)?(docs|showcases|blog)(\/|$)/);
       },
     }),
     mdx({
