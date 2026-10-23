@@ -223,14 +223,18 @@ through a region exit block. The kernel lowering also distinguishes a lane's
 `return` from returning from the entire host launch. These distinctions are
 observable whenever a condition, body, or return has I/O or mutation.
 
-The ordinary `lower_binary_expr_ref` lowers both operands before emitting its
-binary operation. No short-circuit branch is present there for `OpAnd` or
-`OpOr`. This is observed lowering behavior and a language-contract gap, not a
-normative declaration that Sounio must be eager. Short-circuiting remains an
-open decision in `EXEC-040`. The available type-error fixtures do not test RHS
-suppression. Metal's separate AST renderer spells `&&` and `||` in MSL; that
-fact makes a cross-route side-effect witness necessary, rather than establishing
-agreement. No runtime result for this discrepancy is claimed here.
+`&&` and `||` short-circuit (ADR-014, 2026-10-23). The right operand is
+evaluated only when the left one does not decide the result.
+
+- **Madaros:** `lower_binary_expr_ref` routes both operators to
+  `lower_short_circuit_ref`, which branches on the left operand. Until that
+  change Madaros lowered both operands and then emitted the binop.
+- **lean_single:** already short-circuited.
+
+`tests/run-pass/logical_ops_short_circuit.sio` is the side-effect witness. It
+counts calls on each side and guards an out-of-range index. lean_single printed
+`SHORT_CIRCUIT_OK`; Madaros before ADR-014 printed `101010`. Metal's separate AST
+renderer spells `&&` and `||` in MSL; no Metal runtime witness is claimed here.
 
 `EXEC-012` — `source-observed`: module/global storage is represented using
 BSS entries and initialization metadata. `module_frontend_global_init_compile_begin`
@@ -812,9 +816,10 @@ request to bypass the authorized no-heavy-build boundary or ADR009.
 
 ## 6.11 Open decisions and known gaps
 
-`EXEC-040` — `open-decision`: adopt a language-wide evaluation-order and
-logical-operator rule. The evidence supports ordinary native left-to-right
-lowering, but does not settle short-circuiting, every compound lvalue's
+`EXEC-040` — `open-decision`: adopt a language-wide evaluation-order rule.
+The logical-operator part is decided: `&&` and `||` short-circuit (ADR-014).
+The evidence supports ordinary native left-to-right lowering, but does not
+settle every compound lvalue's
 single-evaluation behavior, builtin special cases, or kernel side-effect order.
 The required discriminator is an effectful RHS/callee/index counter observed
 under each relevant route and optimization setting. Typechecking a bool
