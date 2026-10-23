@@ -1,0 +1,248 @@
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_set}
+// Dynamic column-pivoted, column-equilibrated Givens QR.
+// No implicit intercept, no normal equations. Inputs/outputs are borrowed.
+// Workspace: m*p + m + 4*p doubles; caller budgets all owners explicitly.
+// Status:0success,1shape/workspace,2nonfinite input,3rank deficiency,
+// 4arithmetic range,5invalid rcond. x is changed only on success.
+use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_buffer_rotate_rows,numeric_buffer_status,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_get}
+use math::pure::{is_finite,sqrt}
+use linalg::least_squares_scale::{least_squares_restore}
+pub struct DynamicLeastSquares {
+    pub status:i64, pub rows:i64, pub columns:i64, pub rank:i64,
+    pub df:i64, pub residual_norm:f64, pub r_diagonal_ratio:f64,
+    pub workspace_elements:i64,
+}
+fn dqr_abs(x:f64)->f64 { if x<0.0 { -x } else { x } }
+fn dqr_hypot(a:f64,b:f64)->f64 with Div, Mut, Panic {
+    let aa=dqr_abs(a)
+    let bb=dqr_abs(b)
+    let hi=if aa>bb {aa}else{bb}
+    let lo=if aa>bb {bb}else{aa}
+    if hi==0.0 {return 0.0}
+    let r=lo/hi
+    return hi*sqrt(1.0+r*r)
+}
+// LASSQ norm: one square root per column, rather than per matrix element.
+fn dqr_column_norm(work:&NumericBuffer,first:i64,m:i64,p:i64,j:i64)->f64 with Mut,Div,Panic {
+    var scale=0.0
+    var ssq=1.0
+    var i=first
+    while i<m {
+        let value=dqr_abs(numeric_buffer_at(work,i*p+j))
+        if value>0.0 {
+            if value>scale {let ratio=scale/value;ssq=1.0+ssq*ratio*ratio;scale=value}
+            else {let ratio=value/scale;ssq=ssq+ratio*ratio}
+        }
+        i=i+1
+    }
+    return scale*sqrt(ssq)
+}
+pub fn dynamic_qr_workspace(rows:i64,columns:i64)->i64 with Div {
+    if rows<1 || columns<1 || rows<columns {return -1}
+    // Permutations live as exact integers in f64 workspace; no rounding allowed.
+    if columns>9007199254740992 {return -1}
+    if columns>(9223372036854775807-rows)/4 {return -1}
+    let tail=rows+4*columns
+    if rows>(9223372036854775807-tail)/columns {return -1}
+    return rows*columns+tail
+}
+pub fn dynamic_qr_least_squares(a:&NumericBuffer,layout:&NumericMatrix,
+    b:&NumericBuffer,x:&!NumericBuffer,work:&!NumericBuffer,rcond:f64)
+    ->DynamicLeastSquares with Mut, Div, Panic {
+    let m=numeric_matrix_rows(layout)
+    let p=numeric_matrix_cols(layout)
+    let need=dynamic_qr_workspace(m,p)
+    var out=DynamicLeastSquares{status:1,rows:m,columns:p,rank:0,df:0,
+        residual_norm:0.0,r_diagonal_ratio:0.0,workspace_elements:need}
+    if numeric_matrix_status(layout)!=0 || numeric_buffer_status(a)!=0 ||
+       numeric_buffer_status(b)!=0 || numeric_buffer_status(x)!=0 ||
+       numeric_buffer_status(work)!=0 || need<0 {return out}
+    if numeric_buffer_len(b)!=m || numeric_buffer_len(x)!=p ||
+       numeric_buffer_len(work)<need {return out}
+    if !is_finite(rcond) || rcond<0.0 || rcond>=1.0 {out.status=5;return out}
+    let cutoff=if rcond==0.0 {(m as f64)*2.2204460492503131e-16}else{rcond}
+    if cutoff>=1.0 {out.status=5;return out}
+    let rhs=m*p
+    let scales=rhs+m
+    let pivots=scales+p
+    let solution=pivots+p
+    let restored=solution+p
+    var bscale=0.0
+    var i:i64=0
+    while i<m {
+        let v=numeric_buffer_at(b,i)
+        if !is_finite(v) {out.status=2;return out}
+        if dqr_abs(v)>bscale {bscale=dqr_abs(v)}
+        i=i+1
+    }
+    if bscale==0.0 {bscale=1.0}
+    var j:i64=0
+    while j<p {
+        var scale=0.0
+        i=0
+        while i<m {
+            let v=numeric_matrix_get(a,layout,i,j)
+            if v.status!=0 {return out}
+            if !is_finite(v.value) {out.status=2;return out}
+            if dqr_abs(v.value)>scale {scale=dqr_abs(v.value)}
+            i=i+1
+        }
+        numeric_buffer_set(work,scales+j,scale)
+        numeric_buffer_set(work,pivots+j,j as f64)
+        i=0
+        while i<m {
+            let v=numeric_matrix_get(a,layout,i,j)
+            let z=if scale==0.0 {0.0}else{v.value/scale}
+            if v.value!=0.0 && z==0.0 {out.status=4;return out}
+            numeric_buffer_set(work,i*p+j,z)
+            i=i+1
+        }
+        j=j+1
+    }
+    i=0
+    while i<m {
+        let original=numeric_buffer_at(b,i)
+        let normalized=original/bscale
+        if original!=0.0 && normalized==0.0 {out.status=4;return out}
+        numeric_buffer_set(work,rhs+i,normalized)
+        i=i+1
+    }
+    var k:i64=0
+    var diagmax=0.0
+    var diagmin=0.0
+    while k<p {
+        var best=k
+        var bestnorm=0.0
+        j=k
+        while j<p {
+            let norm=dqr_column_norm(work,k,m,p,j)
+            if !is_finite(norm) {out.status=4;return out}
+            if norm>bestnorm {bestnorm=norm;best=j}
+            j=j+1
+        }
+        if best!=k {
+            i=0
+            while i<m {
+                let v=numeric_buffer_at(work,i*p+k)
+                let swapped_value=numeric_buffer_at(work,i*p+best)
+                numeric_buffer_set(work,i*p+k,swapped_value)
+                numeric_buffer_set(work,i*p+best,v)
+                i=i+1
+            }
+            let pivot=numeric_buffer_at(work,pivots+k)
+            let swapped_pivot=numeric_buffer_at(work,pivots+best)
+            numeric_buffer_set(work,pivots+k,swapped_pivot)
+            numeric_buffer_set(work,pivots+best,pivot)
+        }
+        if k==0 {diagmax=bestnorm;diagmin=bestnorm}
+        if bestnorm==0.0 || bestnorm<=cutoff*diagmax {out.status=3;return out}
+        i=k+1
+        while i<m {
+            let aa=numeric_buffer_at(work,k*p+k)
+            let bb=numeric_buffer_at(work,i*p+k)
+            if bb!=0.0 {
+                let radius=dqr_hypot(aa,bb)
+                let c=aa/radius
+                let s=bb/radius
+                let rotated=numeric_buffer_rotate_rows(work,k*p+k+1,i*p+k+1,p-k-1,c,s)
+                if rotated!=0 {out.status=4;return out}
+                let top=numeric_buffer_at(work,rhs+k)
+                let bottom=numeric_buffer_at(work,rhs+i)
+                numeric_buffer_set(work,rhs+k,c*top+s*bottom)
+                numeric_buffer_set(work,rhs+i,c*bottom-s*top)
+                numeric_buffer_set(work,k*p+k,radius)
+                numeric_buffer_set(work,i*p+k,0.0)
+            }
+            i=i+1
+        }
+        let diag=dqr_abs(numeric_buffer_at(work,k*p+k))
+        if diag>diagmax {diagmax=diag}
+        if diag<diagmin {diagmin=diag}
+        out.rank=k+1
+        k=k+1
+    }
+    k=p-1
+    while k>=0 {
+        var sum=0.0
+        var correction=0.0
+        j=k+1
+        while j<p {
+            let term=numeric_buffer_at(work,k*p+j)*numeric_buffer_at(work,solution+j)-correction
+            let next=sum+term
+            correction=(next-sum)-term
+            sum=next
+            j=j+1
+        }
+        let numerator=numeric_buffer_at(work,rhs+k)-sum
+        let value=numerator/numeric_buffer_at(work,k*p+k)
+        if !is_finite(value) || (numerator!=0.0 && value==0.0) {out.status=4;return out}
+        numeric_buffer_set(work,solution+k,value)
+        k=k-1
+    }
+    j=0
+    while j<p {
+        let original=numeric_buffer_at(work,pivots+j) as i64
+        let value=least_squares_restore(numeric_buffer_at(work,solution+j),bscale,numeric_buffer_at(work,scales+original))
+        if value.status!=0 {out.status=4;return out}
+        numeric_buffer_set(work,restored+original,value.value)
+        j=j+1
+    }
+    var norm=0.0
+    i=p
+    while i<m {norm=dqr_hypot(norm,numeric_buffer_at(work,rhs+i));i=i+1}
+    let residual=least_squares_restore(norm,bscale,1.0)
+    if residual.status!=0 {out.status=4;return out}
+    // Transactional output: no coefficient mutation until all checks pass.
+    j=0
+    while j<p {numeric_buffer_set(x,j,numeric_buffer_at(work,restored+j));j=j+1}
+    out.status=0
+    out.df=m-p
+    out.residual_norm=residual.value
+    out.r_diagonal_ratio=diagmin/diagmax
+    return out
+}
+
+// Export the successful QR factor without forming A^T A. The response owner is
+// scratch and is zeroed. R is row-major p*p in pivoted coordinates, scales are
+// in original-column order, and permutation[j] identifies original column j.
+// A[:,permutation] = Q * R * diag(scales[permutation]).
+// Every public output retains its old contents on failure; scratch may change.
+pub fn dynamic_qr_factorize(a:&NumericBuffer,layout:&NumericMatrix,
+    zero_rhs:&!NumericBuffer,work:&!NumericBuffer,r:&!NumericBuffer,
+    scales:&!NumericBuffer,permutation:&!IntegerBuffer,rcond:f64)
+    ->DynamicLeastSquares with Mut,Div,Panic {
+    let m=numeric_matrix_rows(layout)
+    let p=numeric_matrix_cols(layout)
+    let need=dynamic_qr_workspace(m,p)
+    let bad=DynamicLeastSquares{status:1,rows:m,columns:p,rank:0,df:0,
+        residual_norm:0.0,r_diagonal_ratio:0.0,workspace_elements:need}
+    if need<0 {return bad}
+    if numeric_buffer_status(r)!=0 || numeric_buffer_status(scales)!=0 ||
+       numeric_buffer_status(zero_rhs)!=0 || integer_buffer_status(permutation)!=0 {return bad}
+    if numeric_buffer_len(r)!=p*p || numeric_buffer_len(scales)!=p ||
+       numeric_buffer_len(zero_rhs)!=m || integer_buffer_len(permutation)!=p {return bad}
+    var i:i64=0
+    while i<m {numeric_buffer_set(zero_rhs,i,0.0);i=i+1}
+    // scales temporarily serves as the dummy zero-solution output. There is
+    // no failure path after the successful fit commits that zero vector.
+    let result=dynamic_qr_least_squares(a,layout,zero_rhs,scales,work,rcond)
+    if result.status!=0 {return result}
+    let scale_offset=m*p+m
+    let pivot_offset=scale_offset+p
+    i=0
+    while i<p {
+        let scale=numeric_buffer_at(work,scale_offset+i)
+        let original=numeric_buffer_at(work,pivot_offset+i) as i64
+        numeric_buffer_set(scales,i,scale)
+        integer_buffer_set(permutation,i,original)
+        var j:i64=0
+        while j<p {
+            var value=0.0
+            if j>=i {value=numeric_buffer_at(work,i*p+j)}
+            numeric_buffer_set(r,i*p+j,value)
+            j=j+1
+        }
+        i=i+1
+    }
+    return result
+}

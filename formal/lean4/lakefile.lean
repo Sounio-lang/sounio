@@ -797,3 +797,7 @@ lean_lib «SounioPireusMultiProbePartitionV14» where
 
 @[default_target]
 lean_lib «SounioPireusMultiProbePartitionV14AxiomAudit» where
+
+-- Checked dynamic numerical storage: structural contract invariants.
+@[default_target]
+lean_lib «SounioNumericBuffer» where
