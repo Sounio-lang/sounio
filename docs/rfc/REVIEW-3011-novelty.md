@@ -821,6 +821,81 @@ SC (Supercomputing), ICCS (Computational Science), or ISC (High-Performance Comp
 
 ---
 
+## If You Want Real Novelty (Strategic Path)
+
+The RFC as written is a **stack of known techniques**. Novelty of combination is not novelty of idea. If the goal is a top-venue result (POPL/PLDI), stop collecting pieces and pick **one hard theorem that does not already have a name**.
+
+### Rule of thumb (hostile)
+
+Ask of every claim:
+
+1. **Is there a paper whose abstract already says this?** If yes → not novel.
+2. **Would a referee say "that is just X + Y"?** If yes → synthesis, not novelty.
+3. **What theorem becomes false if you remove one ingredient?** If none → you have engineering glue, not a research contribution.
+4. **What did you prove that no prior system can even state?** That is the novelty bar.
+
+### Path 1 (recommended): Own the one claim that already clears the bar
+
+**Self-certifying bootstrap with memory certificates** is the only claim with no known precedent. Everything else should be demoted to *enabling machinery*.
+
+To make it **defense-proof**, you must deliver all of:
+
+| Deliverable | Why it is non-negotiable |
+|-------------|--------------------------|
+| Machine-checkable certificate format (bounds + kind + witness + source hash) | Without a formal object, it is sloganeering |
+| Checker that Gen *n* runs on Gen *n*−1 | Self-certifying means the *compiler* checks, not a human |
+| Lean theorem: verified certificate ⇒ actual alloc ≤ declared bound | Otherwise "theorem" is marketing |
+| Measured Gen 0 → proved Gen ≥1 → bit-identical fixed point | Without fixed point you have PCC, not bootstrap novelty |
+| Trust story: where the root of trust sits and what it does *not* prove | Reviewers will ask this first |
+
+**Cut ruthlessly:** Stages that do not serve certificate emission/verification are out of the paper. QTT, `Alloc<R>`, and bounds stay only insofar as they produce certificates.
+
+**Paper shape:** one result, one theorem, one evaluation (Madaros Gen 0…*k*). Title that names the result, not the kitchen sink.
+
+### Path 2: Manufacture a second novelty by solving an open interaction problem
+
+Synthesis becomes novelty only when the **interaction** is the contribution — i.e. a theorem that fails for each piece alone. Candidate hard problems *inside* this RFC that are not yet owned by anyone:
+
+| Open problem | Why it could be novel | What you must prove |
+|--------------|----------------------|---------------------|
+| **Graded effects + multi-shot handlers** | Granule restricts to single-shot; Effekt ignores grades. A system that allows multi-shot *and* preserves grade-1 is missing | Sound graded effect calculus with multi-shot, or a proof that multi-shot + grade-1 is impossible and a complete characterization of the allowed fragment |
+| **Epistemic vs aleatory resource bounds** | Probabilistic WCET ≠ measurement uncertainty on bounds. No framework separates Exact / UpperBound / Estimated(μ±σ) *as epistemic kinds* with GUM-style composition | Soundness theorems for each kind; calibration theorem (more profiles ⇒ tighter Estimated); clear non-conflation with Ngo-style expected cost |
+| **Effect-parameter regions that beat lifetime over-approx** | Koka/Tofte already have effect regions. Novelty only if you prove a *strict expressiveness* or *precision* win vs Rust lifetimes on a defined class of programs | Formal comparison + programs typed in `Alloc<R>` that Rust rejects (or vice versa) with a theorem, not anecdotes |
+| **Static plan completeness** | MLKit + RAML exist separately. Novelty = a decidable fragment where region+bound+grade inference is complete and emits a zero-allocator plan, with a hardness result outside the fragment | Completeness + complexity; fail-closed boundary theorem |
+
+If you cannot state the interaction theorem in one sentence, you do not have Path 2 — stay on Path 1.
+
+### Path 3: What will *never* be novelty no matter how you implement it
+
+Do not spend research capital here:
+
+- "QTT grades mean move" — Idris 2 / Linear Haskell already.
+- "`Alloc<R>` prevents escape" — Koka `st<h>` / Tofte-Talpin already.
+- "Bytes as a unit" — F#-style dimensions applied to memory; one-line extension.
+- "We combined five things no language has all of" — product of features ≠ research novelty.
+
+### Decision procedure (what a hostile panel would accept)
+
+```
+if you can ship Path 1 end-to-end (certificate + Lean + fixed point):
+    write THAT paper; demote everything else to "implementation substrate"
+elif you can state and prove one Path 2 interaction theorem:
+    write THAT paper; cite Koka/RAML/Idris as prior components
+else:
+    you have a systems engineering RFC, not a novelty thesis chapter
+    publish as experience report / tool paper, not claim "beyond SOTA"
+```
+
+### Concrete rewrite of the RFC abstract (novelty-first)
+
+Replace the kitchen-sink abstract with something like:
+
+> We present a self-certifying bootstrap for a self-hosted systems compiler: each generation emits a machine-checkable memory certificate (symbolic allocation bounds, proof or measurement kind, execution witness). The next generation verifies the previous certificate; at bit-identical fixed point the compiler's memory behaviour is a Lean theorem. We show Madaros Gen 0…*k* converging under this discipline.
+
+Everything else (QTT, regions, GUM) becomes one paragraph of *how certificates are obtained*, not co-equal "novelties."
+
+---
+
 ## Conclusion: Reframe as Synthesis, Not Novelty
 
 **Honest assessment:**  
