@@ -69,6 +69,8 @@ files=(
     tests/reference/cluster_covariance_svg_reference.cpp
     tests/reference/scatter_projection_reference.cpp
     tests/reference/scatter_viewport_svg_reference.cpp
+    tests/reference/bar_geometry_reference.cpp
+    tests/reference/bar_viewport_svg_reference.cpp
 )
 tests=(
     stats_descriptive_mad stats_inferential_tails
@@ -105,6 +107,7 @@ tests=(
     stats_nb_dispersion_status
     stats_linear_cluster_reference stats_linear_cluster_status viz_cluster_covariance
     viz_scatter_constant viz_scatter_projection_reference viz_scatter_viewport
+    viz_bar_signed viz_bar_geometry_reference viz_bar_viewport
 )
 for name in "${tests[@]}"; do files+=("tests/run-pass/$name.sio"); done
 for path in "${files[@]}"; do

@@ -70,8 +70,12 @@ before using value; a numerical payload of zero alone is not a validity flag.
 
 ## Numerical methods
 
-Shared checked natural logarithms supply range reduction. All summations of
-probability contributions use compensated accumulation.
+Shared checked natural logarithms supply range reduction.
+`math::logarithmic::{log1p_checked,log1p_phi_checked}` owns the local
+logarithmic increment and phi evaluations; the former private numerical
+implementations are replaced by checked delegation. Helper failure maps to
+the existing InformationResult arithmetic status6. All summations of probability
+contributions use compensated accumulation. See [shared contract](LOGARITHMIC.md).
 
 KL is accumulated through nonnegative generalized contributions
 
@@ -87,7 +91,7 @@ phi(d) = (1+d)ln(1+d)-d
        = d^2/2 - d^3/6 + d^4/12 - ...
 ```
 
-The 32-term local series avoids subtracting first-order terms near equality.
+The shared factored local phi series avoids subtracting first-order terms near equality.
 Away from equality, log differences avoid overflow in p/q. No blanket
 negative-result clamp conceals failed arithmetic.
 
@@ -103,7 +107,7 @@ retains tiny aggregate divergences that individual subnormal products
 could otherwise round away.
 
 Near a concentrated distribution, collision entropy uses positive cross
-products 2*sum_(i<j) P_i P_j and a local log1p series. Min entropy uses the
+products 2*sum_(i<j) P_i P_j and shared checked log1p evaluation. Min entropy uses the
 mass outside the selected largest bin with log1p. Shannon likewise uses
 the tail mass to evaluate the dominant-bin logarithm. These avoid losing
 small entropy solely because a normalized largest bin rounds to one.
@@ -133,3 +137,20 @@ Finite precision must be considered in comparisons near those bounds.
 An independent C++23 quadmath reference and native Sounio execution through
 Forge are the intended acceptance route. A source edit alone is not evidence
 of native execution, complete-corpus acceptance, or comparative performance.
+
+## Shared-logarithm integration state
+
+This refactor changes scalar-helper ownership, not public units, mass/support
+validation or zero-bin conventions. Existing p0 contributions remain explicit.
+Selected current-source typecheck is complete in the final seven-target
+Slurm15825 closure; the math demonstration and count diagnostic both compiled
+and executed, with actual SVG/XML/full-preview inspection. Frozen executable
+source:27ea4ec6c2b97892e9e92cf982b0af90e2241023. The attested compiler was
+reused only after exact unchanged bin/scripts/self-hosted/stdlib comparison.
+See [execution receipt](../../docs/plans/LOGARITHMIC_EXECUTION_2026_10_21.md).
+
+No tests or independent numerical oracle were added/run. In particular these
+demonstrations do not establish full-vector probability concordance, boundary
+coverage, ULP accuracy, complete-corpus acceptance or CI/merge. Historical
+probability acceptance does not automatically validate every changed result.
+The documentation update follows the frozen executable source.

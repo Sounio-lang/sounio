@@ -1,4 +1,5 @@
-use viz::scatter::{scatter_project}
+use viz::bar::{bar_pair_width,bar_project}
+use viz::scatter::{scatter_project,scatter_finite}
 use viz::scale::{ScaleSpec,axis_scaled_ticks}
 use viz::clip::{clip_series_segment, clip_pixel}
 use viz::legend::{legend_layout}
@@ -8,7 +9,7 @@ use viz::axis::{axis_ticks, axis_label, axis_offset}
 use display::canvas::{Canvas, canvas_set_pixel, canvas_fill_rect, canvas_draw_rect, canvas_draw_text, canvas_fill_circle}
 use display::canvas_ext::{canvas_draw_line_aa, PixelScissor, canvas_draw_line_aa_scissored}
 use viz::coord::{coord_new, coord_draw_axes, coord_draw_frame}
-use viz::chart::{chart_line, chart_bar, chart_heatmap}
+use viz::chart::{chart_line, chart_heatmap}
 use viz::epiviz::{epiviz_band}
 use render::renderer3d::{Camera3D, Light3D, Tri3D, r3d_depth_buf_alloc, r3d_depth_buf_clear, r3d_render_viewport}
 use viz::ir::{
@@ -397,7 +398,88 @@ fn vc_draw_scatter(scene:&VizScene,c:&!Canvas,idx:i64) with Mut,Div {
     }
 }
 
-pub fn viz_canvas_render_scene(scene: &VizScene, c: &!Canvas) with Mut, Div, Alloc {
+fn vc_draw_bar(scene:&VizScene,c:&!Canvas,idx:i64) with Mut,Div {
+    let slot:i64=scene.nodes[idx as usize].data_slot
+    if slot < 0 || slot >= scene.series_count { return }
+    let x:i64=scene.nodes[idx as usize].layout.x
+    let y:i64=scene.nodes[idx as usize].layout.y
+    let w:i64=scene.nodes[idx as usize].layout.w
+    let h:i64=scene.nodes[idx as usize].layout.h
+    let red:i64=scene.nodes[idx as usize].style.r
+    let green:i64=scene.nodes[idx as usize].style.g
+    let blue:i64=scene.nodes[idx as usize].style.b
+    let clipped=(scene.nodes[idx as usize].flags & VIZ_FLAG_CLIP_PLOT) != 0
+    let xmin:f64=scene.series[slot as usize].x_min
+    let xmax:f64=scene.series[slot as usize].x_max
+    let ymin:f64=scene.series[slot as usize].y_min
+    let ymax:f64=scene.series[slot as usize].y_max
+    let domain_check=scatter_project(xmin,ymin,xmin,xmax,ymin,ymax,x,y,w,h,false)
+    if domain_check.status != 0 { return }
+    if !clipped {
+        var y_zero:i64=y+h-1
+        var x_zero:i64=x
+        if ymin <= 0.0 && ymax >= 0.0 {
+            let axis_point=scatter_project(xmin,0.0,xmin,xmax,ymin,ymax,x,y,w,h,false)
+            if axis_point.status == 0 { y_zero=axis_point.y }
+        }
+        if xmin <= 0.0 && xmax >= 0.0 {
+            let axis_point=scatter_project(0.0,ymin,xmin,xmax,ymin,ymax,x,y,w,h,false)
+            if axis_point.status == 0 { x_zero=axis_point.x }
+        }
+        canvas_fill_rect(c,x,y_zero,w,1,220,220,220)
+        canvas_fill_rect(c,x_zero,y,1,h,220,220,220)
+        let cs=coord_new(xmin,xmax,ymin,ymax,x,y,w,h)
+        coord_draw_frame(&cs,c)
+    }
+    var first:f64=0.0; var second:f64=0.0
+    var pairs:i64=0
+    var scan:i64=0
+    while scan < scene.series[slot as usize].n && scan < 1024 && pairs < 2 {
+        let sx:f64=scene.series[slot as usize].xs[scan as usize]
+        let sy:f64=scene.series[slot as usize].ys[scan as usize]
+        if scatter_finite(sx) && scatter_finite(sy) {
+            if pairs == 0 { first=sx } else { second=sx }
+            pairs=pairs+1
+        }
+        scan=scan+1
+    }
+    let width=bar_pair_width(first,second,pairs,xmin,xmax,x,w)
+    if width.status != 0 { return }
+    var i:i64=0
+    while i < scene.series[slot as usize].n && i < 1024 {
+        let sx:f64=scene.series[slot as usize].xs[i as usize]
+        let sy:f64=scene.series[slot as usize].ys[i as usize]
+        let rect=bar_project(sx,sy,xmin,xmax,ymin,ymax,x,y,w,h,width.value,clipped)
+        if rect.status == 0 {
+            let rx:i64=rect.x; let ry:i64=rect.y
+            let rw:i64=rect.w; let rh:i64=rect.h
+            canvas_fill_rect(c,rx,ry,rw,rh,red,green,blue)
+        }
+        i=i+1
+    }
+}
+
+// Dedicated band path: direct scalar loads, shared checked geometry.
+fn vc_draw_uncertainty_band(scene:&VizScene,c:&!Canvas,node_idx:i64) with Mut,Div,Panic {
+ let slot:i64=scene.nodes[node_idx as usize].data_slot
+ if slot<0 || slot>=scene.series_count {return}
+ let xmin:f64=scene.series[slot as usize].x_min
+ let xmax:f64=scene.series[slot as usize].x_max
+ let ymin:f64=scene.series[slot as usize].y_min
+ let ymax:f64=scene.series[slot as usize].y_max
+ let x:i64=scene.nodes[node_idx as usize].layout.x
+ let y:i64=scene.nodes[node_idx as usize].layout.y
+ let w:i64=scene.nodes[node_idx as usize].layout.w
+ let h:i64=scene.nodes[node_idx as usize].layout.h
+ let r:i64=scene.nodes[node_idx as usize].style.r
+ let g:i64=scene.nodes[node_idx as usize].style.g
+ let b:i64=scene.nodes[node_idx as usize].style.b
+ let n:i64=scene.series[slot as usize].n
+ let cs=coord_new(xmin,xmax,ymin,ymax,x,y,w,h)
+ epiviz_band(&cs,&scene.series[slot as usize].xs,&scene.series[slot as usize].ys,&scene.series[slot as usize].vars,n,c,r,g,b)
+}
+
+pub fn viz_canvas_render_scene(scene: &VizScene, c: &!Canvas) with Mut, Div, Alloc, Panic {
     var i: i64 = 0
     while i < scene.node_count {
         let node = scene.nodes[i as usize]
@@ -413,7 +495,11 @@ pub fn viz_canvas_render_scene(scene: &VizScene, c: &!Canvas) with Mut, Div, All
             vc_draw_clipped_line(scene, c, &node)
         } else if node.kind == VIZ_NODE_CHART_SCATTER {
             vc_draw_scatter(scene,c,i)
-        } else if node.kind == VIZ_NODE_CHART_LINE || node.kind == VIZ_NODE_CHART_BAR || node.kind == VIZ_NODE_UNCERTAINTY_BAND {
+        } else if node.kind == VIZ_NODE_CHART_BAR {
+            vc_draw_bar(scene,c,i)
+        } else if node.kind == VIZ_NODE_UNCERTAINTY_BAND {
+            vc_draw_uncertainty_band(scene,c,i)
+        } else if node.kind == VIZ_NODE_CHART_LINE {
             let d = scene.series[node.data_slot as usize]
             let x0 = if d.x_min == d.x_max { vc_pad_range_min(d.x_min) } else { d.x_min }
             let x1 = if d.x_min == d.x_max { vc_pad_range_max(d.x_max) } else { d.x_max }
@@ -421,14 +507,7 @@ pub fn viz_canvas_render_scene(scene: &VizScene, c: &!Canvas) with Mut, Div, All
             let y1 = if d.y_min == d.y_max { vc_pad_range_max(d.y_max) } else { d.y_max }
             let cs = coord_new(x0, x1, y0, y1, node.layout.x, node.layout.y, node.layout.w, node.layout.h)
             coord_draw_axes(&cs, c)
-            if node.kind == VIZ_NODE_CHART_LINE {
-                chart_line(&cs, &d.xs, &d.ys, d.n, c, node.style.r, node.style.g, node.style.b)
-
-            } else if node.kind == VIZ_NODE_CHART_BAR {
-                chart_bar(&cs, &d.xs, &d.ys, d.n, c, node.style.r, node.style.g, node.style.b)
-            } else {
-                epiviz_band(&cs, &d.xs, &d.ys, &d.vars, d.n, c, node.style.r, node.style.g, node.style.b)
-            }
+            chart_line(&cs, &d.xs, &d.ys, d.n, c, node.style.r, node.style.g, node.style.b)
         } else if node.kind == VIZ_NODE_HEATMAP {
             let h = scene.heatmaps[node.data_slot as usize]
             let cs = coord_new(0.0, h.cols as f64, 0.0, h.rows as f64, node.layout.x, node.layout.y, node.layout.w, node.layout.h)
