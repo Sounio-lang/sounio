@@ -1202,3 +1202,32 @@ complete_input_closure=false.
 
 [Execution and integration queue](COMPILER_PATH_ATTRIBUTION_EXECUTION_2026_10_22.md)
 retain exact source/binary/trace identities, reviewed parser scope and open gates.
+
+## Main15 — reconciled scientific source with current main, 2026-10-23
+
+Source19c684a99bb5728c15b424a13fd190742efad718 merges the later scientific branch
+with remote main3ef3dbaa6e and retains Main14's path-attribution tools/evidence.
+The scientific integration queue in Main14 is closed at this source checkpoint:
+shared logs, genomic normalization, entropy, NB moment/Poisson/NB2, signed bars,
+sampled uncertainty, rendering effects and packaging selection are reconciled.
+Main's explicit beta_new import, Shapiro sw_exp wrapper and Boltzmann direct loop
+are preserved. Compiler/bin sources equal incorporated main; source identity is
+not inferred from old compiler receipts.
+
+Fresh Slurm15992 COMPLETED0:0: canonical modular build,23 typechecks and five
+real native examples all pass. All five actual SVGs parse with xmllint and have
+full-aspect PNG visual inspection, including an independent second review.
+Build402.87s/maxRSS736380KiB; whole-job elapsed7:37/batchMaxRSS3588712K. These
+are separate observations, not a comparative improvement claim. Canonical
+compilerSHA238c7e210d82cdd8474f68c488a0aed2b22d3157f64536703f03e1d995dce734.
+
+Attempt15990 failed before compiler execution because Forge's */data exclusion
+removed stdlib/data. Exact selected-packet tar + extracted-manifest verification
+and --reuse-snapshot resolved transport for15992; failure evidence is retained.
+Heavy artifacts remain private ext4, source snapshot is reused for retry, quota
+stays3TiB and no historical removal occurs. No test suite or numeric oracle ran.
+Complete corpus, CI, numerical concordance, calibration and merge remain open.
+
+[Completed integration receipt](SCIENTIFIC_MAIN_INTEGRATION_EXECUTION_2026_10_23.md)
+contains parent/source comparisons, all execution statuses, native resources,
+figure limits, custody and storage identities.
