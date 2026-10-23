@@ -84,3 +84,17 @@ of the final repository example.
 Related contracts:
 [NB2 Pearson diagnostics](../stdlib/stats/regression/NB2_DIAGNOSTICS.md),
 [NB2 deviance](../stdlib/stats/regression/NB2_DEVIANCE.md).
+
+## Initial native attempt and axis budget correction
+
+Slurm 16017 completed its compiler build and nine typechecks, but the native
+consumer stopped with EXAMPLE_UNAVAILABLE: axes. The two horizontal axes
+requested five intervals in a 400-pixel layout; the existing axis guard
+requires at least 112 pixels per requested interval. This source revision
+requests two horizontal intervals, preserving the guard, all observations,
+the 0..10 viewports and every other geometry/domain choice. The axes still
+express categorical observation order; ticks need not label every observation.
+
+The corrected consumer has not yet passed a native retry. This source change
+modifies no library or compiler input. A later receipt must identify the
+corrected source and any attested compiler reused for its execution.
