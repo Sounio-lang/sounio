@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <iostream>
 #include <iterator>
 #include <regex>
@@ -30,8 +32,45 @@ std::vector<Rect> reference() {
  }
  return result;
 }
+
+std::string legacy_span_marker(int which) {
+ const long long x=which==0?10:20,y=which==0?10:20;
+ const long long w=which==0?120:100,h=which==0?60:40,n=which==0?1:2;
+ const long long denominator=which==0?1:10,lower=0,upper=which==0?1:6;
+ const long long step=std::clamp(h/(n+1),7LL,22LL);
+ const long long center=y+step/2;
+ const long long left=x+lower*w/denominator,right=x+upper*w/denominator;
+ const long long clipped_left=std::max(x,left),clipped_right=std::min(x+w+1,right+1);
+ std::ostringstream out;
+ out<<"<rect data-forest-part=\"0\" x=\""<<std::fixed<<std::setprecision(6)
+    <<static_cast<long double>(clipped_left)-0.5L<<"\" y=\""
+    <<static_cast<long double>(center)-0.5L<<"\" width=\""<<clipped_right-clipped_left
+    <<"\" height=\"1\" fill=\"rgb(180,180,220)\"/>";
+ return out.str();
+}
+std::string legacy_escape_quotes(const std::string& value) {
+ std::string out;for(char c:value){if(c=='"')out+='\\';out+=c;}return out;
+}
+
 int main(int argc,char**argv) {
  try {
+  if(argc==2&&std::string(argv[1])=="--legacy-markers"){
+   for(int which=0;which<2;++which)std::cout<<legacy_span_marker(which)<<"\n";
+   return 0;
+  }
+  if(argc==4&&std::string(argv[1])=="--legacy-check"){
+   for(int which=0;which<2;++which){
+    std::ifstream input(argv[which+2],std::ios::binary);
+    if(!input)throw std::runtime_error("legacy stdout unavailable");
+    std::string actual((std::istreambuf_iterator<char>(input)),{}),expected=legacy_span_marker(which);
+    const bool normal=actual.find(expected)!=std::string::npos;
+    const bool escaped=actual.find(legacy_escape_quotes(expected))!=std::string::npos;
+    if(!normal&&!escaped)throw std::runtime_error("legacy interval pixel-cell geometry");
+    std::cout<<"LEGACY_FOREST_SPAN_PASS case="<<which
+       <<" serialization="<<(normal?"literal-quotes":"stage2-escaped-quotes")<<"\n";
+   }
+   return 0;
+  }
   const auto expected=reference();
   for(const auto& z:expected) {
    if(z.x<20||z.y<20||z.x+z.w>41||z.y+z.h>41||z.w<=0||z.h<=0)
