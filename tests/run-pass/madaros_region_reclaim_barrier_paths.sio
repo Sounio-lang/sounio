@@ -1,0 +1,129 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: REGION_RECLAIM_BARRIER_PATHS_OK
+//@ description: every store path that can publish a young struct into older memory keeps it alive
+// Copilot review (PR #2737): madaros_region_reclaim_escape.sio covers field and
+// global stores; the raw-pointer, index, Seq.set, Seq.push and write_i64
+// barriers had no witness. Each helper below returns a scalar, so its region
+// resets on return unless the barrier on that one store path saw a young
+// object written into something older. A missed barrier is a use-after-reclaim:
+// churn() then overwrites the reclaimed object with 99s and the check fails.
+// Each helper calls decoy(), which makes it worth a region
+// (lowerer_rgn_body_worth_region) -- a helper without one never opens a region
+// and would prove nothing.
+
+struct P { a: i64, b: i64, c: i64 }
+struct Holder { items: [P; 4], n: i64 }
+
+fn decoy() -> i64 with Mut {
+    let d = P { a: 0, b: 0, c: 0 }
+    d.a
+}
+
+// IrStorePtr: `*slot = v` through a reference repoints the caller's local.
+fn put_ptr(slot: &!P, k: i64) -> i64 with Mut {
+    let z = decoy()
+    *slot = P { a: k, b: k + 1, c: k + 2 }
+    z
+}
+
+// IrIndexSet through a reference to the caller's array.
+fn put_index_ref(arr: &![P; 4], i: i64, k: i64) -> i64 with Mut {
+    let z = decoy()
+    (*arr)[i] = P { a: k, b: k + 1, c: k + 2 }
+    z
+}
+
+// IrIndexSet into an array object born before the region (a field of an
+// older heap struct), so the barrier compares two heap births.
+fn put_index_field(h: &!Holder, i: i64, k: i64) -> i64 with Mut {
+    let z = decoy()
+    (*h).items[i] = P { a: k, b: k + 1, c: k + 2 }
+    z
+}
+
+// __sounio_seq_set on an older Seq.
+fn put_seq_set(s: &!Seq<P>, i: i64, k: i64) -> i64 with Mut, Panic, Epistemic {
+    let z = decoy()
+    s.set(i, P { a: k, b: k + 1, c: k + 2 })
+    z
+}
+
+// __sounio_seq_push on an older Seq (no growth, then growth).
+fn put_seq_push(s: &!Seq<P>, k: i64) -> i64 with Mut, Panic, Epistemic {
+    let z = decoy()
+    s.push(P { a: k, b: k + 1, c: k + 2 })
+    z
+}
+
+// write_i64 (emit_builtin_write_offset64_into) into memory outside the heap.
+fn put_raw(buf: i64, k: i64) -> i64 with Mut, IO {
+    let z = decoy()
+    let p = P { a: k, b: k + 1, c: k + 2 }
+    write_i64(buf, 0, p)
+    z
+}
+
+fn churn() -> i64 with Mut {
+    var i: i64 = 0
+    var n: i64 = 0
+    while i < 10000 {
+        let q = P { a: 99, b: 99, c: 99 }
+        n = n + q.a
+        i = i + 1
+    }
+    n
+}
+
+fn ok(p: P, k: i64) -> bool {
+    p.a == k && p.b == k + 1 && p.c == k + 2
+}
+
+fn main() -> i32 with IO, Mut, Panic, Epistemic, Alloc {
+    var q = P { a: 0, b: 0, c: 0 }
+    let r1 = put_ptr(&!q, 10)
+    let c1 = churn()
+    if !ok(q, 10) { return 1 }
+
+    var arr: [P; 4] = [P { a: 0, b: 0, c: 0 }, P { a: 0, b: 0, c: 0 }, P { a: 0, b: 0, c: 0 }, P { a: 0, b: 0, c: 0 }]
+    let r2 = put_index_ref(&!arr, 2, 20)
+    let c2 = churn()
+    if !ok(arr[2], 20) { return 2 }
+
+    var h = Holder { items: [P { a: 0, b: 0, c: 0 }, P { a: 0, b: 0, c: 0 }, P { a: 0, b: 0, c: 0 }, P { a: 0, b: 0, c: 0 }], n: 0 }
+    let r3 = put_index_field(&!h, 1, 30)
+    let c3 = churn()
+    if !ok(h.items[1], 30) { return 3 }
+
+    var s: Seq<P> = seq_new()
+    s.push(P { a: 0, b: 0, c: 0 })
+    s.push(P { a: 0, b: 0, c: 0 })
+    let r4 = put_seq_set(&!s, 1, 40)
+    let c4 = churn()
+    if !ok(s.get(1), 40) { return 4 }
+
+    var j: i64 = 0
+    var r5: i64 = 0
+    while j < 40 {
+        r5 = r5 + put_seq_push(&!s, 100 + j)
+        j = j + 1
+    }
+    let c5 = churn()
+    j = 0
+    while j < 40 {
+        if !ok(s.get(2 + j), 100 + j) { return 5 }
+        j = j + 1
+    }
+
+    let buf = heap_alloc(4096)
+    let r6 = put_raw(buf, 60)
+    let c6 = churn()
+    let p6 = read_i64(buf, 0) as P
+    if !ok(p6, 60) { return 6 }
+    heap_free(buf)
+
+    if r1 + r2 + r3 + r4 + r5 + r6 != 0 { return 7 }
+    if c1 != 990000 || c2 != 990000 || c3 != 990000 || c4 != 990000 || c5 != 990000 || c6 != 990000 { return 8 }
+    println("REGION_RECLAIM_BARRIER_PATHS_OK")
+    0
+}

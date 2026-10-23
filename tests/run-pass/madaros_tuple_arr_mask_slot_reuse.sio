@@ -1,0 +1,56 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: TUPLE_ARR_MASK_SLOT_REUSE PASS
+//
+// tuple_arr_mask (self-hosted/ir/lower.sio) is a per-slot table on the
+// Lowerer's locals stack, REUSED across function bodies at compile time:
+// `count` resets to 0 when lowering moves to the next function, but the
+// backing arrays are not cleared. The normal `bind_local` path zeroes
+// tuple_arr_mask for the slot it (re)claims, but the two ALTERNATE binders
+// -- lowerer_bind_local_mut and the direct parameter binder in
+// lower_fn_params_ref -- did not, so a tuple-array local's mask bit could
+// survive into a later, unrelated function's slot at the same table row.
+//
+// `poison`'s only local (`t`, table row 0) is a tuple whose slot 0 is an
+// `[f64; 2]` array, setting row 0's mask bit 0. `victim`'s PARAMETER `t`
+// (also row 0, since each function's locals start over at row 0) is a
+// DIFFERENT tuple whose slot 0 is `[i64; 2]`, not a float array at all.
+// Before the direct parameter binder populated (and reset) its own mask,
+// row 0's stale bit 0 = 1 survived, so `victim`'s `t.0` read as an f64
+// array and corrupted the plain i64 elements.
+fn mk_pair() -> ([f64; 2], i64) with Mut, Panic {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 9.0
+    a[1] = 1.0
+    (a, 7)
+}
+
+fn poison() -> i32 with Mut, Panic {
+    let t = mk_pair()
+    let a0: f64 = t.0[0]
+    let a1: f64 = t.0[1]
+    let acc: f64 = a0 + a1
+    if acc == 10.0 {
+        0
+    } else {
+        1
+    }
+}
+
+fn victim(t: ([i64; 2], f64)) -> i64 with Mut, Panic {
+    let ov = t.0
+    ov[0] + ov[1]
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    let p = poison()
+    var arr: [i64; 2] = [0; 2]
+    arr[0] = 3
+    arr[1] = 4
+    let v = victim((arr, 0.0))
+    if p == 0 && v == 7 {
+        println("TUPLE_ARR_MASK_SLOT_REUSE PASS")
+        return 0
+    }
+    1
+}

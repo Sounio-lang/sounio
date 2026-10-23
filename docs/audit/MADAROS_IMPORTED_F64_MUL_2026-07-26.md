@@ -2,8 +2,8 @@
 topic_id: repo.docs.audit.madaros-imported-f64-mul-2026-07-26
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-imported-f64-mul-2026-07-26
 -->
 

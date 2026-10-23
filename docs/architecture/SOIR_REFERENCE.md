@@ -2,8 +2,8 @@
 topic_id: repo.docs.architecture.soir-reference
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.soir-reference
 -->
 
@@ -280,6 +280,6 @@ Offset    Hex                                          ASCII
 
 ## Further Reading
 
-- [RUSTLESS_CUTOVER.md](RUSTLESS_CUTOVER.md) - Complete documentation
-- [DEVELOPER_WORKFLOW.md](DEVELOPER_WORKFLOW.md) - Daily workflow guide
+- [RUSTLESS_CUTOVER.md](../implementation/RUSTLESS_CUTOVER.md) - Complete documentation
+- [DEVELOPER_WORKFLOW.md](../contributor-guide/DEVELOPER_WORKFLOW.md) - Daily workflow guide
 - `self-hosted/ir/serialize.sio` - Reference implementation

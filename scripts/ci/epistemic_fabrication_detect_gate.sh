@@ -7,7 +7,9 @@
 #   F2 — confidence printed / stored as a huge magnitude (bit-pattern-as-integer
 #        class), outside (0,1] (epistemic_pbpk28 TEST 6 under Madaros).
 #
-# Positive controls (must fire on current Madaros default):
+# Positive controls (designed to fire if F1/F2 recur on current Madaros;
+# as of 2026-09-22 both witnesses measure healthy — see the "engine healthy"
+# pass branches below, not "must currently fire"):
 #   - adaptive run must NOT exit 0 with var(blood)=0.000000
 #   - ep28 run must emit EPISTEMIC_FABRICATION or FAIL on TEST 6 if conf corrupted
 #
@@ -50,8 +52,10 @@ timeout 120 "$SOUC" run "$ADAPTIVE" \
 arc=$?
 set -e
 
+f1_madaros_collapsed=0
 if grep -Eq 'var\(blood\)[[:space:]]*=[[:space:]]*0\.0+$' "$TMP/adaptive_madaros.log" \
    || grep -Fq 'var(blood)  = 0.000000' "$TMP/adaptive_madaros.log"; then
+  f1_madaros_collapsed=1
   if [[ "$arc" -eq 0 ]] && grep -Fq 'PASS' "$TMP/adaptive_madaros.log"; then
     fail "F1 silent fabrication: zero variance with PASS and rc=0 (see $TMP/adaptive_madaros.log)"
   fi
@@ -110,7 +114,11 @@ if grep -Eq 'var\(blood\)[[:space:]]*=[[:space:]]*0\.0+$' "$TMP/adaptive_lean.lo
    || grep -Fq 'var(blood)  = 0.000000' "$TMP/adaptive_lean.log"; then
   fail "F1 lean_single also zero — would refute Madaros-only fabrication diagnosis"
 fi
-pass "F1 lean_single reference has non-zero variance (Madaros-only collapse stands)"
+if [[ "$f1_madaros_collapsed" -eq 1 ]]; then
+  pass "F1 lean_single reference has non-zero variance (Madaros-only collapse stands)"
+else
+  pass "F1 lean_single reference has non-zero variance too (no collapse on this witness to compare against)"
+fi
 
 echo "[epistemic-fab] RECEIPT f1=checked f2=checked log_dir=$TMP"
 echo "[epistemic-fab] GATE_RECEIPT id=epistemic_fabrication_detect result=pass measured=1 inputs=2 assertions=4"

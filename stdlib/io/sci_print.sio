@@ -1,0 +1,187 @@
+// io::sci_print — print an f64 in C-style scientific notation.
+//
+// `println(<f64>)` prints six fixed decimals, so any value below 5e-7
+// comes out as 0.000000 and any value near 1e-3 keeps only three
+// significant digits. Producers whose output is reshaped by awk or
+// another tool (the PBPK28 parity gate builds benchmarks/pbpk/*.csv
+// this way) need a form that keeps the value: `print_f64_sci` prints
+// `d.ddd…e±XX` with `sig` significant digits, e.g. 2.517927e-07 for
+// sig = 7, which awk, Python and C all parse as a number.
+//
+// Contract:
+//   * finite x: correctly rounded to `sig` significant digits (round
+//     half up on the decimal digits), except that a value lying within
+//     a few ulps of a rounding tie may come out one unit off in the
+//     last digit. The scaling uses exact powers of ten up to 1e22 and
+//     at most 15 chunked multiplications beyond that, so the relative
+//     error before rounding is below 2e-15.
+//   * the exponent always carries a sign and at least two digits
+//     (e+00, e-07, e+308), like C's %e.
+//   * 0.0 and -0.0 print as 0.000…e+00.
+//   * NaN prints `NaN`, +inf prints `inf`, -inf prints `-inf`.
+//   * sig outside [1, 15] prints `SCI_PRINT_ERROR_BAD_SIG`.
+//   These tokens are not numbers, so a consumer that checks its fields
+//   refuses them; the printer never prints a wrong number in their place.
+//
+// Implementation note: locals only, no `&f64` / `&!f64` dereferences in
+// arithmetic, no integer division. The digit extraction subtracts
+// powers of ten.
+
+// 10^n as f64 for 0 <= n <= 22, where every power is exact.
+fn sci_p10f(n: i64) -> f64 with Mut {
+    var r = 1.0
+    var k: i64 = 0
+    while k < n {
+        r = r * 10.0
+        k = k + 1
+    }
+    r
+}
+
+// 10^n as i64 for 0 <= n <= 18.
+fn sci_p10i(n: i64) -> i64 with Mut {
+    var r: i64 = 1
+    var k: i64 = 0
+    while k < n {
+        r = r * 10
+        k = k + 1
+    }
+    r
+}
+
+// a / 10^e for finite a > 0. Each step multiplies or divides by an
+// exact power of ten.
+fn sci_scale(a: f64, e: i64) -> f64 with Mut {
+    var v = a
+    if e >= 0 {
+        var r = e
+        while r > 22 {
+            v = v / 1.0e22
+            r = r - 22
+        }
+        v = v / sci_p10f(r)
+    } else {
+        var r = 0 - e
+        while r > 22 {
+            v = v * 1.0e22
+            r = r - 22
+        }
+        v = v * sci_p10f(r)
+    }
+    v
+}
+
+// Print the `width` decimal digits of 0 <= n < 10^width, leading zeros
+// included, most significant first.
+fn sci_print_digits(n: i64, width: i64) with IO, Mut {
+    var v = n
+    var k = width - 1
+    while k >= 0 {
+        let p = sci_p10i(k)
+        var d: i64 = 0
+        while v >= p {
+            v = v - p
+            d = d + 1
+        }
+        print(d)
+        k = k - 1
+    }
+}
+
+pub fn sci_is_nan(x: f64) -> bool {
+    if x != x { return true }
+    // Some engines have answered every ordered compare on NaN with
+    // "equal"; no real number equals both 0 and 1.
+    x == 0.0 && x == 1.0
+}
+
+pub fn print_f64_sci(x: f64, sig: i64) with IO, Mut {
+    if sig < 1 || sig > 15 {
+        print("SCI_PRINT_ERROR_BAD_SIG")
+        return
+    }
+    if sci_is_nan(x) {
+        print("NaN")
+        return
+    }
+    if x > 1.7976931348623157e308 {
+        print("inf")
+        return
+    }
+    if x < 0.0 - 1.7976931348623157e308 {
+        print("-inf")
+        return
+    }
+    if x == 0.0 {
+        print("0")
+        if sig > 1 {
+            print(".")
+            sci_print_digits(0, sig - 1)
+        }
+        print("e+00")
+        return
+    }
+    var a = x
+    if x < 0.0 {
+        print("-")
+        a = 0.0 - x
+    }
+    // Estimate the decimal exponent, then fix it on the exactly scaled
+    // mantissa so that 1 <= m < 10.
+    var e: i64 = 0
+    var b = a
+    while b >= 10.0 {
+        b = b / 10.0
+        e = e + 1
+    }
+    while b < 1.0 {
+        b = b * 10.0
+        e = e - 1
+    }
+    var m = sci_scale(a, e)
+    if m >= 10.0 {
+        e = e + 1
+        m = sci_scale(a, e)
+    }
+    if m < 1.0 {
+        e = e - 1
+        m = sci_scale(a, e)
+    }
+    // Round the mantissa to `sig` digits as an integer in
+    // [10^(sig-1), 10^sig]; 10^sig means it rounded across a decade.
+    let q = m * sci_p10f(sig - 1) + 0.5
+    var n = q as i64
+    if n >= sci_p10i(sig) {
+        n = sci_p10i(sig - 1)
+        e = e + 1
+    }
+    let lead_p = sci_p10i(sig - 1)
+    var lead: i64 = 0
+    while n >= lead_p {
+        n = n - lead_p
+        lead = lead + 1
+    }
+    print(lead)
+    if sig > 1 {
+        print(".")
+        sci_print_digits(n, sig - 1)
+    }
+    print("e")
+    var ex = e
+    if e < 0 {
+        print("-")
+        ex = 0 - e
+    } else {
+        print("+")
+    }
+    if ex >= 100 {
+        sci_print_digits(ex, 3)
+    } else {
+        sci_print_digits(ex, 2)
+    }
+}
+
+pub fn println_f64_sci(x: f64, sig: i64) with IO, Mut {
+    print_f64_sci(x, sig)
+    println("")
+}

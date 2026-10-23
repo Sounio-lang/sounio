@@ -60,16 +60,17 @@ fn desb_interp(t: f64, t0: f64, t1: f64, c0: f64, c1: f64) -> f64 with Div, Pani
 pub struct DESBBBTrace {
     n_points:    i32,
     times_h:     [f64; 32],
-    plasma:      [f64; 32],
-    isf_u:       [f64; 32],
-    icf_u:       [f64; 32],
+    pub plasma:      [f64; 32],   // plasma = blood / rb_ratio (#2816)
+    pub blood:       [f64; 32],   // whole blood (PBPKState14.blood)
+    pub isf_u:       [f64; 32],
+    pub icf_u:       [f64; 32],
     released:    [f64; 32],   // cumulative release (mg) at each checkpoint
     auc_plasma_u: f64,
     auc_isf_u:    f64,
     auc_icf_u:    f64,
-    kpuu_auc:     f64,
-    total_released_end: f64,
-    success: bool,
+    pub kpuu_auc:     f64,
+    pub total_released_end: f64,
+    pub success: bool,
 }
 
 fn desb_trace_zero() -> DESBBBTrace {
@@ -77,6 +78,7 @@ fn desb_trace_zero() -> DESBBBTrace {
         n_points: 0,
         times_h:   [0.0; 32],
         plasma:    [0.0; 32],
+        blood:     [0.0; 32],
         isf_u:     [0.0; 32],
         icf_u:     [0.0; 32],
         released:  [0.0; 32],
@@ -108,10 +110,14 @@ pub fn des_bbb_run(
 
     var sys_st = pbpk_state_zero()
     var bbb_st = bbb_state_zero()
+    // PBPKState14.blood is whole blood; the BBB driver and the plasma series
+    // are plasma, C_plasma = C_blood / rb_ratio (#2816).
+    let rb = sys_prm.rb_ratio
 
     // t = 0 record (no release yet).
     trace.times_h[0]  = 0.0
-    trace.plasma[0]   = sys_st.blood
+    trace.plasma[0]   = sys_st.blood / rb
+    trace.blood[0]    = sys_st.blood
     trace.isf_u[0]    = bbb_prm.fu_isf * bbb_st.c_isf
     trace.icf_u[0]    = bbb_prm.fu_icf * bbb_st.c_icf
     trace.released[0] = 0.0
@@ -124,7 +130,7 @@ pub fn des_bbb_run(
         let idx = point_i as usize
         let target = checkpoints[idx]
         let t_prev = t
-        let c_prev = sys_st.blood
+        let c_prev = sys_st.blood / rb
 
         // --- Systemic PBPK with operator-split Higuchi release ---
         var nsteps: i64 = 0
@@ -153,7 +159,7 @@ pub fn des_bbb_run(
         }
 
         // --- BBB sub-model over [t_prev, target] ---
-        let c_now = sys_st.blood
+        let c_now = sys_st.blood / rb
         var t_bbb = t_prev
         while t_bbb < target {
             let dt_use_bbb = if t_bbb + bbb_dt > target { target - t_bbb } else { bbb_dt }
@@ -164,6 +170,7 @@ pub fn des_bbb_run(
 
         trace.times_h[idx]  = target
         trace.plasma[idx]   = c_now
+        trace.blood[idx]    = sys_st.blood
         trace.isf_u[idx]    = bbb_prm.fu_isf * bbb_st.c_isf
         trace.icf_u[idx]    = bbb_prm.fu_icf * bbb_st.c_icf
         trace.released[idx] = desb_higuchi_cum(kh, total_dose, target)

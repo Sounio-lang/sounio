@@ -1,176 +1,108 @@
 //@ run-pass
 //@ expect-stdout: HELIOBIOLOGY_OK
 // Test suite for stdlib/heliobiology: geomagnetic indices, solar events,
-// biological effects, and unit conversions.
+// unit conversions, and the published effect estimates in effects.sio.
 //
-// Imports: heliobiology::indices, heliobiology::solar, heliobiology::units
-// Inlined: heliobiology::effects (that module has its own main(), causing
-//           duplicate-definition on import, so functions are reproduced here).
+// The effect estimates are checked against an independent transcription of
+// the source tables (#2835): Zilli Vieira et al. 2019, Environ Health 18:83,
+// Tables 2 and 3 (doi:10.1186/s12940-019-0516-0), and Zilli Vieira et al.
+// 2022, Sci Total Environ 839:156235, abstract (doi:10.1016/j.scitotenv.
+// 2022.156235). For every row: the module value equals the published point
+// estimate, its standard uncertainty equals (upper - lower) / (2 z_0.975),
+// and value +- z_0.975 u reproduces the published 95 % bounds to within
+// 0.016 (the published bounds are rounded to two decimals and some point
+// estimates to one, so a bound and the midpoint can differ by that much; the
+// largest deviation over all 34 rows is printed and asserted).
 
 use heliobiology::indices::*
 use heliobiology::solar::*
 use heliobiology::units::*
+use heliobiology::effects::*
+use epistemic::knowledge::{Epistemic, ep_val, ep_std}
 
 // ============================================================================
-// INLINED EFFECTS TYPES (from heliobiology/effects.sio)
+// SOURCE TABLES, transcribed independently of stdlib/heliobiology/effects.sio
 // ============================================================================
 
-extern "C" {
-    fn exp(x: f64) -> f64;
-    fn sqrt(x: f64) -> f64;
-    fn log(x: f64) -> f64;
+struct HbRow {
+    point: f64,
+    lower: f64,
+    upper: f64
 }
 
-struct CardiovascularRiskModel {
-    baseline: f64,
-    kp_coeff: f64,
-    dst_coeff: f64,
-    lag_hours: f64
+fn hb_row(point: f64, lower: f64, upper: f64) -> HbRow {
+    HbRow { point: point, lower: lower, upper: upper }
 }
 
-fn cv_model_default() -> CardiovascularRiskModel {
-    return CardiovascularRiskModel {
-        baseline: 1.0,
-        kp_coeff: 0.03,
-        dst_coeff: 0.01,
-        lag_hours: 24.0
-    }
+// Zilli Vieira et al. 2019, Table 2 ("Estimated daily percent increase in
+// mortality (95% CI) associated with one standard deviation of z-score Kp
+// index"). Columns Total, CVD, MI, Stroke; rows Winter, Spring, Summer, Fall.
+fn paper_table2(season: i32, outcome: i32) -> HbRow {
+    if season == 0 && outcome == 0 { return hb_row(0.13, 0.02, 0.24) }
+    if season == 0 && outcome == 1 { return hb_row(0.0 - 0.04, 0.0 - 0.22, 0.13) }
+    if season == 0 && outcome == 2 { return hb_row(0.21, 0.0 - 0.07, 0.5) }
+    if season == 0 && outcome == 3 { return hb_row(0.0 - 0.74, 0.0 - 0.96, 0.0 - 0.51) }
+    if season == 1 && outcome == 0 { return hb_row(0.31, 0.21, 0.41) }
+    if season == 1 && outcome == 1 { return hb_row(0.21, 0.05, 0.37) }
+    if season == 1 && outcome == 2 { return hb_row(0.4, 0.05, 0.72) }
+    if season == 1 && outcome == 3 { return hb_row(0.0 - 0.03, 0.0 - 0.4, 0.33) }
+    if season == 2 && outcome == 0 { return hb_row(0.27, 0.16, 0.37) }
+    if season == 2 && outcome == 1 { return hb_row(0.15, 0.0 - 0.01, 0.33) }
+    if season == 2 && outcome == 2 { return hb_row(0.14, 0.0 - 0.2, 0.5) }
+    // printed as -0.52 (-0.14, -0.9)
+    if season == 2 && outcome == 3 { return hb_row(0.0 - 0.52, 0.0 - 0.9, 0.0 - 0.14) }
+    if season == 3 && outcome == 0 { return hb_row(0.31, 0.23, 0.4) }
+    if season == 3 && outcome == 1 { return hb_row(0.34, 0.23, 0.44) }
+    if season == 3 && outcome == 2 { return hb_row(0.7, 0.43, 0.94) }
+    return hb_row(0.06, 0.0 - 0.3, 0.4)
 }
 
-struct RiskResult {
-    value: f64,
-    uncertainty: f64
-}
-
-fn cv_mi_risk(model: CardiovascularRiskModel, kp: f64, dst: f64) -> RiskResult  with Mut, Div{
-    var kp_effect = 1.0
-    if kp >= 5.0 {
-        kp_effect = 1.0 + model.kp_coeff * (kp - 4.0)
-    }
-    var dst_effect = 1.0
-    if dst < 0.0 - 30.0 {
-        dst_effect = 1.0 + model.dst_coeff * ((0.0 - dst - 30.0) / 10.0)
-    }
-    let rr = model.baseline * kp_effect * dst_effect
-    return RiskResult { value: rr, uncertainty: rr * 0.15 }
-}
-
-fn cv_stroke_risk(model: CardiovascularRiskModel, kp: f64, dst: f64) -> RiskResult  with IO, Mut, Panic, Div{
-    let mi = cv_mi_risk(model, kp, dst)
-    let val = mi.value * 0.6 + 0.4
-    return RiskResult { value: val, uncertainty: mi.uncertainty * 0.6 }
-}
-
-struct HRVModel {
-    baseline_sdnn: f64,
-    reduction_per_kp: f64
-}
-
-fn hrv_model_default() -> HRVModel {
-    return HRVModel { baseline_sdnn: 140.0, reduction_per_kp: 3.0 }
-}
-
-fn hrv_estimated_sdnn(model: HRVModel, kp: f64) -> RiskResult  with Mut, Div{
-    var reduction = 0.0
-    if kp > 3.0 {
-        reduction = model.reduction_per_kp * (kp - 3.0)
-    }
-    let sdnn = model.baseline_sdnn - reduction
-    return RiskResult { value: sdnn, uncertainty: 15.0 }
-}
-
-struct MigraineModel {
-    baseline_prob: f64,
-    dkp_sensitivity: f64
-}
-
-fn migraine_model_default() -> MigraineModel {
-    return MigraineModel { baseline_prob: 0.05, dkp_sensitivity: 0.02 }
-}
-
-fn migraine_trigger_prob(model: MigraineModel, kp_current: f64, kp_previous: f64) -> RiskResult  with Mut, Div{
-    let dkp = kp_current - kp_previous
-    var multiplier = 1.0
-    if dkp > 2.0 {
-        multiplier = 1.0 + model.dkp_sensitivity * dkp * 10.0
-    }
-    var prob = model.baseline_prob * multiplier
-    if prob > 0.5 { prob = 0.5 }
-    return RiskResult { value: prob, uncertainty: prob * 0.3 }
-}
-
-fn melatonin_suppression(kp: f64) -> RiskResult  with Mut, Div{
-    var suppression = 0.0
-    if kp >= 7.0 {
-        suppression = 0.15
-    } else if kp >= 5.0 {
-        suppression = 0.08
-    }
-    return RiskResult { value: suppression, uncertainty: suppression * 0.5 }
-}
-
-fn sleep_quality_estimate(kp: f64, dst: f64) -> RiskResult  with Mut, Div{
-    let baseline = 75.0
-    var kp_penalty = 0.0
-    if kp >= 5.0 { kp_penalty = (kp - 4.0) * 3.0 }
-    var dst_penalty = 0.0
-    if dst < 0.0 - 50.0 { dst_penalty = (0.0 - dst - 50.0) * 0.05 }
-    var quality = baseline - kp_penalty - dst_penalty
-    if quality < 30.0 { quality = 30.0 }
-    return RiskResult { value: quality, uncertainty: 10.0 }
-}
-
-fn aviation_baseline_dose_rate(altitude_km: f64, latitude: f64) -> f64 {
-    let pi = 3.14159265358979
-    let alt_factor = exp((altitude_km - 10.0) * 0.2)
-    let lat_rad = latitude * pi / 180.0
-    let s = lat_rad - lat_rad * lat_rad * lat_rad / 6.0
-    let lat_factor = 1.0 + 0.5 * s
-    let base_rate = 3.0
-    return base_rate * alt_factor * lat_factor
-}
-
-fn spe_dose_rate(baseline: f64, proton_flux: f64) -> RiskResult  with Mut, Div{
-    var enhancement = 1.0
-    if proton_flux > 10.0 {
-        enhancement = 1.0 + log(proton_flux / 10.0) * 2.0
-    }
-    let rate = baseline * enhancement
-    return RiskResult { value: rate, uncertainty: rate * 0.3 }
-}
-
-struct SchumannResonance {
-    f1: f64,
-    amplitude: f64,
-    q_factor: f64
-}
-
-fn schumann_quiet_baseline() -> SchumannResonance {
-    return SchumannResonance { f1: 7.83, amplitude: 1.0, q_factor: 5.0 }
-}
-
-fn schumann_storm_deviation(kp: f64) -> SchumannResonance  with Mut, Div{
-    var f_shift = 0.0
-    var amp_mult = 1.0
-    if kp >= 5.0 {
-        f_shift = 0.0 - 0.1 * (kp - 4.0)
-        amp_mult = 1.0 + 0.2 * (kp - 4.0)
-    }
-    return SchumannResonance {
-        f1: 7.83 + f_shift,
-        amplitude: 1.0 * amp_mult,
-        q_factor: 5.0
-    }
+// Zilli Vieira et al. 2019, Table 3 (same, adjusted for PM2.5).
+fn paper_table3(season: i32, outcome: i32) -> HbRow {
+    if season == 0 && outcome == 0 { return hb_row(0.47, 0.3, 0.65) }
+    if season == 0 && outcome == 1 { return hb_row(0.54, 0.23, 0.84) }
+    if season == 0 && outcome == 2 { return hb_row(1.0, 0.4, 1.62) }
+    if season == 0 && outcome == 3 { return hb_row(0.35, 0.0 - 0.27, 0.97) }
+    if season == 1 && outcome == 0 { return hb_row(0.0 - 0.03, 0.0 - 0.2, 0.14) }
+    if season == 1 && outcome == 1 { return hb_row(0.28, 0.0 - 0.01, 0.57) }
+    if season == 1 && outcome == 2 { return hb_row(0.5, 0.0 - 0.2, 1.17) }
+    if season == 1 && outcome == 3 { return hb_row(0.0 - 0.13, 0.0 - 0.72, 0.45) }
+    if season == 2 && outcome == 0 { return hb_row(0.22, 0.05, 0.4) }
+    if season == 2 && outcome == 1 { return hb_row(0.16, 0.0 - 0.03, 0.35) }
+    if season == 2 && outcome == 2 { return hb_row(0.0 - 0.25, 0.0 - 0.92, 0.4) }
+    if season == 2 && outcome == 3 { return hb_row(0.24, 0.0 - 0.44, 0.92) }
+    if season == 3 && outcome == 0 { return hb_row(0.23, 0.09, 0.37) }
+    if season == 3 && outcome == 1 { return hb_row(0.46, 0.23, 0.7) }
+    if season == 3 && outcome == 2 { return hb_row(0.36, 0.0 - 0.24, 0.96) }
+    return hb_row(0.0 - 0.3, 0.0 - 0.81, 0.22)
 }
 
 // ============================================================================
 // HELPERS
 // ============================================================================
 
-fn near(a: f64, b: f64, tol: f64) -> bool {
-    let d = a - b
-    let ad = if d < 0.0 { 0.0 - d } else { d }
-    ad < tol
+fn hb_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn hb_near(a: f64, b: f64, tol: f64) -> bool {
+    hb_abs(a - b) < tol
+}
+
+fn hb_z975() -> f64 { 1.959963984540054 }
+
+// Deviation of the reconstructed 95 % interval from the published one, or
+// 1000 if the value or the standard uncertainty is not the published one.
+fn hb_row_deviation(e: Epistemic, r: HbRow) -> f64 with Mut, Div, Panic {
+    let v = ep_val(&e)
+    let u = ep_std(&e)
+    if !hb_near(v, r.point, 1e-12) { return 1000.0 }
+    let u_paper = (r.upper - r.lower) / (2.0 * hb_z975())
+    if !hb_near(u, u_paper, 1e-12) { return 1000.0 }
+    let dlo = hb_abs((v - hb_z975() * u) - r.lower)
+    let dhi = hb_abs((v + hb_z975() * u) - r.upper)
+    if dlo > dhi { return dlo }
+    dhi
 }
 
 // ============================================================================
@@ -193,39 +125,45 @@ fn run_tests() -> i32 with IO, Mut, Panic, Div {
     if classify_dst(0.0 - 40.0) != DST_WEAK()    { return 1 }
     if classify_dst(0.0 - 75.0) != DST_MODERATE() { return 1 }
     if classify_dst(0.0 - 150.0) != DST_INTENSE() { return 1 }
-    if classify_dst(0.0 - 250.0) != DST_SUPERSTORM() { return 1 }
+    if classify_dst(0.0 - 250.0) != DST_MAJOR() { return 1 }
+    // Mursula et al. 2022 class boundaries are closed at the stronger end.
+    if classify_dst(0.0 - 29.0) != DST_QUIET()   { return 1 }
+    if classify_dst(0.0 - 30.0) != DST_WEAK()    { return 1 }
+    if classify_dst(0.0 - 50.0) != DST_MODERATE() { return 1 }
+    if classify_dst(0.0 - 100.0) != DST_INTENSE() { return 1 }
+    if classify_dst(0.0 - 200.0) != DST_MAJOR()  { return 1 }
+    // NOAA G scale: G4 is Kp 8 including 9- (8.67), G5 is Kp 9.
+    if kp_to_storm_level(5.0) != KP_G1_MINOR()   { return 1 }
+    if kp_to_storm_level(8.67) != KP_G4_SEVERE() { return 1 }
 
     // --- indices: classify_proton_storm ---
     if classify_proton_storm(5.0) != S_SCALE_NONE()  { return 1 }
     if classify_proton_storm(50.0) != S_SCALE_S1()   { return 1 }
     if classify_proton_storm(500.0) != S_SCALE_S2()  { return 1 }
     if classify_proton_storm(5000.0) != S_SCALE_S3() { return 1 }
+    // NOAA S scale thresholds are inclusive: 10, 1e2, 1e3, 1e4, 1e5 pfu.
+    if classify_proton_storm(10.0) != S_SCALE_S1()     { return 1 }
+    if classify_proton_storm(10000.0) != S_SCALE_S4()  { return 1 }
+    if classify_proton_storm(100000.0) != S_SCALE_S5() { return 1 }
 
     // --- indices: IMF magnitude ---
     let imf = IMFVector { bx: 3.0, by: 4.0, bz: 0.0 }
-    if !near(imf_magnitude(imf), 5.0, 0.01) { return 1 }
+    if !hb_near(imf_magnitude(imf), 5.0, 0.01) { return 1 }
 
     // --- indices: geoeffective Bz ---
     let southward = IMFVector { bx: 0.0, by: 0.0, bz: 0.0 - 10.0 }
-    if !near(imf_geoeffective_bz(southward), 10.0, 0.01) { return 1 }
+    if !hb_near(imf_geoeffective_bz(southward), 10.0, 0.01) { return 1 }
     let northward = IMFVector { bx: 0.0, by: 0.0, bz: 5.0 }
-    if !near(imf_geoeffective_bz(northward), 0.0, 0.01) { return 1 }
-
-    // --- indices: activity_level ---
-    let quiet_state = SpaceWeatherState { kp: 2.0, dst: 0.0 - 10.0, bz: 2.0, f10_7: 70.0, proton_flux: 1.0 }
-    if activity_level(quiet_state) != 0 { return 1 }
-
-    let storm_state = SpaceWeatherState { kp: 7.5, dst: 0.0 - 120.0, bz: 0.0 - 15.0, f10_7: 200.0, proton_flux: 1000.0 }
-    if activity_level(storm_state) != 3 { return 1 }
+    if !hb_near(imf_geoeffective_bz(northward), 0.0, 0.01) { return 1 }
 
     // --- solar: flare classification ---
     let x_flare = flare_new(FLARE_X(), 5.2)
     let flux = flare_peak_flux(x_flare)
-    if !near(flux, 5.2e-4, 1e-6) { return 1 }
+    if !hb_near(flux, 5.2e-4, 1e-6) { return 1 }
 
     let m_flare = flare_new(FLARE_M(), 1.0)
     let m_flux = flare_peak_flux(m_flare)
-    if !near(m_flux, 1.0e-5, 1e-8) { return 1 }
+    if !hb_near(m_flux, 1.0e-5, 1e-8) { return 1 }
 
     // --- solar: radio blackout scale ---
     let big_x = flare_new(FLARE_X(), 25.0)
@@ -240,140 +178,72 @@ fn run_tests() -> i32 with IO, Mut, Panic, Div {
     let c_flare = flare_new(FLARE_C(), 3.0)
     if flare_radio_scale(c_flare) != R_NONE() { return 1 }
 
-    // --- solar: CME speed/width class ---
-    let slow_cme = CME { speed: 300.0, width_deg: 45.0, position_angle: 90.0, acceleration: 0.0 }
-    if cme_speed_class(slow_cme) != CME_SLOW()   { return 1 }
-    if cme_width_class(slow_cme) != CME_NARROW() { return 1 }
+    let c1 = flare_new(FLARE_C(), 1.0)
+    if !hb_near(flare_peak_flux(c1), 1.0e-6, 1e-15) { return 1 }
+    let b1 = flare_new(FLARE_B(), 1.0)
+    if !hb_near(flare_peak_flux(b1), 1.0e-7, 1e-16) { return 1 }
+    let a1 = flare_new(FLARE_A(), 1.0)
+    if !hb_near(flare_peak_flux(a1), 1.0e-8, 1e-17) { return 1 }
+    // R scale: R1 = M1, R2 = M5
+    if flare_radio_scale(flare_new(FLARE_M(), 1.0)) != R1_MINOR()    { return 1 }
+    if flare_radio_scale(flare_new(FLARE_M(), 5.0)) != R2_MODERATE() { return 1 }
+    if flare_radio_scale(flare_new(FLARE_X(), 1.0)) != R3_STRONG()   { return 1 }
 
+    // --- solar: ballistic CME transit, 1 au = 149597870.7 km (IAU 2012) ---
     let halo_cme = CME { speed: 1500.0, width_deg: 360.0, position_angle: 270.0, acceleration: 0.0 - 5.0 }
-    if cme_speed_class(halo_cme) != CME_FAST()  { return 1 }
-    if cme_width_class(halo_cme) != CME_HALO()  { return 1 }
-    if !cme_is_earth_directed(halo_cme)          { return 1 }
-    if cme_is_earth_directed(slow_cme)           { return 1 }
-
-    // --- solar: CME transit time ---
     let transit_b = cme_transit_ballistic_hours(halo_cme)
-    if !near(transit_b, 27.7, 0.5) { return 1 }
+    // 149597870.7 / 1500 / 3600 = 27.703309388...
+    if !hb_near(transit_b, 27.70330938888889, 1e-9) { return 1 }
 
-    let transit_d = cme_transit_drag_hours(halo_cme)
-    if transit_d <= transit_b { return 1 }
+    // --- units: exact definitional conversion factors ---
+    if !hb_near(gauss_to_tesla(1.0), 1.0e-4, 1e-18) { return 1 }
+    if !hb_near(tesla_to_gauss(1.0e-4), 1.0, 1e-12) { return 1 }
+    if !hb_near(gamma_to_nT(7.0), 7.0, 1e-15) { return 1 }
+    if !hb_near(sfu_to_si(150.0), 1.5e-20, 1e-32) { return 1 }
 
-    // --- solar: SEP well-connected ---
-    let sep_west = SEPEvent { peak_flux_10: 1000.0, peak_flux_100: 100.0, source_longitude: 60.0 }
-    if !sep_is_well_connected(sep_west) { return 1 }
-
-    let sep_east = SEPEvent { peak_flux_10: 500.0, peak_flux_100: 50.0, source_longitude: 0.0 - 30.0 }
-    if sep_is_well_connected(sep_east) { return 1 }
-
-    // --- solar: active region potential ---
-    let ar_complex = ActiveRegion {
-        number: 13000,
-        latitude: 15.0,
-        longitude: 10.0,
-        area_msh: 500.0,
-        spot_count: 20,
-        mt_wilson_class: MW_BETA_GAMMA_DELTA()
+    // --- effects: Zilli Vieira et al. 2019, Tables 2 and 3 (32 rows) ---
+    var max_dev = 0.0
+    var si = 0
+    while si < 4 {
+        var oi = 0
+        while oi < 4 {
+            let d2 = hb_row_deviation(gmd_mortality_pct_per_sd_kp(si, oi, false), paper_table2(si, oi))
+            if d2 > max_dev { max_dev = d2 }
+            let d3 = hb_row_deviation(gmd_mortality_pct_per_sd_kp(si, oi, true), paper_table3(si, oi))
+            if d3 > max_dev { max_dev = d3 }
+            // Rate ratio = 1 + percent / 100, with u scaled by 1/100.
+            let rr = gmd_mortality_rr_per_sd_kp(si, oi, true)
+            let p3 = paper_table3(si, oi)
+            if !hb_near(ep_val(&rr), 1.0 + p3.point / 100.0, 1e-12) { return 1 }
+            if !hb_near(ep_std(&rr), (p3.upper - p3.lower) / (2.0 * hb_z975()) / 100.0, 1e-14) { return 1 }
+            oi = oi + 1
+        }
+        si = si + 1
     }
-    if ar_flare_potential(ar_complex) != 4 { return 1 }
-    if !ar_is_geoeffective(ar_complex)     { return 1 }
+    // The named selectors address the same rows.
+    let mi_fall = gmd_mortality_pct_per_sd_kp(SEASON_FALL(), OUTCOME_MI(), false)
+    if !hb_near(ep_val(&mi_fall), 0.7, 1e-12) { return 1 }
+    let mi_winter_pm = gmd_mortality_pct_per_sd_kp(SEASON_WINTER(), OUTCOME_MI(), true)
+    if !hb_near(ep_val(&mi_winter_pm), 1.0, 1e-12) { return 1 }
+    let stroke_summer = gmd_mortality_pct_per_sd_kp(SEASON_SUMMER(), OUTCOME_STROKE(), false)
+    if !hb_near(ep_val(&stroke_summer), 0.0 - 0.52, 1e-12) { return 1 }
+    let cvd_spring = gmd_mortality_pct_per_sd_kp(SEASON_SPRING(), OUTCOME_CVD(), false)
+    if !hb_near(ep_val(&cvd_spring), 0.21, 1e-12) { return 1 }
 
-    let ar_simple = ActiveRegion {
-        number: 13001,
-        latitude: 10.0,
-        longitude: 80.0,
-        area_msh: 50.0,
-        spot_count: 2,
-        mt_wilson_class: MW_ALPHA()
-    }
-    if ar_flare_potential(ar_simple) != 0 { return 1 }
-    if ar_is_geoeffective(ar_simple)      { return 1 }
+    // --- effects: Zilli Vieira et al. 2022 (HRV, intense GMD) ---
+    let dsdnn = hb_row_deviation(hrv_intense_gmd_sdnn_change_ms(), hb_row(0.0 - 8.2, 0.0 - 13.9, 0.0 - 2.5))
+    if dsdnn > max_dev { max_dev = dsdnn }
+    let drmssd = hb_row_deviation(hrv_intense_gmd_rmssd_change_ms(), hb_row(0.0 - 14.7, 0.0 - 23.1, 0.0 - 6.3))
+    if drmssd > max_dev { max_dev = drmssd }
 
-    // --- units: inline f64 equivalents (unit types not supported in native mode) ---
-    // gauss_to_tesla: 1 G = 1e-4 T
-    if !near(1.0 * 1.0e-4, 1.0e-4, 1e-12) { return 1 }
-    // tesla_to_gauss: 1e-4 T * 1e4 = 1.0
-    if !near(1.0e-4 * 1.0e4, 1.0, 1e-10) { return 1 }
-    // seconds per hour/day: pure arithmetic
-    if !near(3600.0, 3600.0, 0.1) { return 1 }
-    if !near(86400.0, 86400.0, 0.1) { return 1 }
-    // dose rate: 1 uSv/h * 24h / 1000 = 0.024 mSv/day
-    if !near(1.0 * 24.0 / 1000.0, 0.024, 1e-8) { return 1 }
-
-    // --- effects (inlined): CV MI risk at baseline (Kp < 5) ---
-    let cv_model = cv_model_default()
-    let mi_quiet = cv_mi_risk(cv_model, 3.0, 0.0)
-    if !near(mi_quiet.value, 1.0, 0.001) { return 1 }
-
-    let mi_storm = cv_mi_risk(cv_model, 7.0, 0.0 - 100.0)
-    if mi_storm.value <= 1.0 { return 1 }
-    if !near(mi_storm.uncertainty, mi_storm.value * 0.15, 0.001) { return 1 }
-
-    // --- effects: stroke risk < MI risk ---
-    let stroke_storm = cv_stroke_risk(cv_model, 7.0, 0.0 - 100.0)
-    if stroke_storm.value >= mi_storm.value { return 1 }
-
-    // --- effects: HRV baseline (Kp=0 → no reduction) ---
-    let hrv_model = hrv_model_default()
-    let hrv_quiet = hrv_estimated_sdnn(hrv_model, 2.0)
-    if !near(hrv_quiet.value, 140.0, 0.01) { return 1 }
-
-    let hrv_storm = hrv_estimated_sdnn(hrv_model, 7.0)
-    if !near(hrv_storm.value, 128.0, 0.01) { return 1 }
-
-    // --- effects: migraine trigger (no delta) ---
-    let mig_model = migraine_model_default()
-    let mig_quiet = migraine_trigger_prob(mig_model, 3.0, 3.0)
-    if !near(mig_quiet.value, 0.05, 0.001) { return 1 }
-
-    let mig_storm = migraine_trigger_prob(mig_model, 8.0, 2.0)
-    if mig_storm.value <= mig_quiet.value { return 1 }
-    let mig_extreme = migraine_trigger_prob(mig_model, 9.0, 0.0)
-    if mig_extreme.value > 0.5 { return 1 }
-
-    // --- effects: melatonin suppression ---
-    let mel_quiet = melatonin_suppression(3.0)
-    if !near(mel_quiet.value, 0.0, 0.001) { return 1 }
-    let mel_g1 = melatonin_suppression(6.0)
-    if !near(mel_g1.value, 0.08, 0.001) { return 1 }
-    let mel_g5 = melatonin_suppression(8.0)
-    if !near(mel_g5.value, 0.15, 0.001) { return 1 }
-
-    // --- effects: sleep quality ---
-    let sleep_quiet = sleep_quality_estimate(2.0, 0.0 - 10.0)
-    if !near(sleep_quiet.value, 75.0, 0.01) { return 1 }
-    let sleep_storm = sleep_quality_estimate(8.0, 0.0 - 150.0)
-    if sleep_storm.value >= sleep_quiet.value { return 1 }
-    let sleep_extreme = sleep_quality_estimate(9.0, 0.0 - 500.0)
-    if sleep_extreme.value < 30.0 { return 1 }
-
-    // --- effects: aviation dose rate increases with altitude ---
-    let dose_low = aviation_baseline_dose_rate(10.0, 0.0)
-    let dose_high = aviation_baseline_dose_rate(12.0, 0.0)
-    if dose_high <= dose_low { return 1 }
-
-    // --- effects: SPE dose enhancement ---
-    let spe_baseline = 5.0
-    let spe_below = spe_dose_rate(spe_baseline, 5.0)
-    if !near(spe_below.value, spe_baseline, 0.001) { return 1 }
-    let spe_above = spe_dose_rate(spe_baseline, 100.0)
-    if spe_above.value <= spe_below.value { return 1 }
-
-    // --- effects: Schumann resonance baseline ---
-    let sr_base = schumann_quiet_baseline()
-    if !near(sr_base.f1, 7.83, 0.001)   { return 1 }
-    if !near(sr_base.q_factor, 5.0, 0.001) { return 1 }
-
-    let sr_storm = schumann_storm_deviation(7.0)
-    if sr_storm.f1 >= sr_base.f1         { return 1 }
-    if sr_storm.amplitude <= sr_base.amplitude { return 1 }
-
-    let sr_quiet = schumann_storm_deviation(3.0)
-    if !near(sr_quiet.f1, 7.83, 0.001)  { return 1 }
+    print("max |reconstructed 95% bound - published bound| = ")
+    println(max_dev)
+    if max_dev > 0.016 { return 1 }
 
     return 0
 }
 
-fn main() -> i32 with Mut, Div, Panic {
+fn main() -> i32 with IO, Mut, Div, Panic {
     let result = run_tests()
     if result == 0 {
         print("HELIOBIOLOGY_OK\n")

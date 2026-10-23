@@ -2,8 +2,8 @@
 topic_id: repo.docs.research.paper-a-ns-metatheory-xai-review-2026-08-30
 authority: historical
 audience: researchers
-last_validated: 2026-03-07
-validated_by: A6
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.paper-a-ns-metatheory-xai-review-2026-08-30
 -->
 

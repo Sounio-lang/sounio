@@ -10,7 +10,7 @@
 # `scripts/ci/*.sh` invoke a higher-level subcommand interface:
 #
 #   <souc> check <file>             typecheck only, no execute
-#   <souc> run   <file> [args...]   typecheck + compile + execute with literal argv
+#   <souc> run   <file>             typecheck + compile + execute
 #   <souc> compile <file> -o <out>  typecheck + compile to <out>
 #   <souc> info                     print this wrapper's resolution path
 #   <souc> <file> <out>             raw positional passthrough
@@ -110,10 +110,24 @@ _detect_raw_mode() {
   fi
   local base
   base="$(basename "$RAW_SOUC")"
-  if [[ "$base" == *madaros* ]]; then
-    echo "modular"
-    return 0
-  fi
+  # Filename short-circuit. Executing the ELF to read its banner faults
+  # the ~1.8GB image and adds ~1.5s to every harness call.
+  #
+  # These basenames are Madaros even when they do not contain "madaros":
+  #   madaros*          artifacts/self-hosted/madaros, madaros-ci.elf,
+  #                     madaros-linux-x86_64, suite-madaros.elf, madaros.gen2
+  #   *optguard*        optguard-gen1.elf
+  #   *nullfix*         nullfix-gen1.elf
+  #
+  # Do not match lean_single generation names. gen1.elf, gen2.elf, gen3.elf,
+  # souc-stage2, souc-linux-x86_64 and souc-lean-single-* use the positional
+  # CLI and must still fall through to the probe.
+  case "$base" in
+    *madaros*|*optguard*|*nullfix*)
+      echo "modular"
+      return 0
+      ;;
+  esac
   local ident
   ident="$("$RAW_SOUC" /dev/null /dev/null 2>/dev/null | head -n 1 || true)"
   if grep -q "Madaros v" <<<"$ident"; then
@@ -131,7 +145,7 @@ souc-native-wrapper.sh — subcommand wrapper around $RAW_SOUC
 
 Usage:
   $(basename "$0") check <file.sio>             typecheck only
-  $(basename "$0") run   <file.sio> [args...]   compile + execute with program arguments
+  $(basename "$0") run   <file.sio>             compile + execute
   $(basename "$0") compile <file.sio> -o <out>  compile to <out>
   $(basename "$0") info                          print resolution path
   $(basename "$0") <file.sio> <out>              raw positional passthrough
@@ -209,8 +223,8 @@ case "${1:-}" in
 
   run)
     shift
-    if [[ $# -lt 1 ]]; then
-      echo "error: run requires a source file (file.sio) followed by optional program arguments" >&2
+    if [[ $# -ne 1 ]]; then
+      echo "error: run takes exactly 1 argument (file.sio)" >&2
       usage >&2
       exit 2
     fi
@@ -227,8 +241,7 @@ case "${1:-}" in
     fi
     chmod +x "$tmp"
     set +e
-    shift
-    "$tmp" "$@"
+    "$tmp"
     rc=$?
     set -e
     rm -f "$tmp"

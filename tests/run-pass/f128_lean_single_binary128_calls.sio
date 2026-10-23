@@ -1,0 +1,66 @@
+//@ run-pass
+//@ requires: lean_single
+//@ description: #2387 — lean_single binary128 survives calls, returns, IEEE compares and f64 casts
+//@ expect-stdout-contains: PASS f128_lean_single_binary128_calls
+//
+// Params take two ABI slots (lo, hi), returns come back in rax:rdx, compares go
+// through libgcc __eqtf2/__lttf2/... (IEEE: NaN unordered, -0 == +0), and an
+// exactly-representable f64 literal widens to f128 in argument, return and
+// comparison position. 1 + 2^-100 != 1 only holds in binary128.
+
+fn add128(a: f128, b: f128) -> f128 {
+    a + b
+}
+
+fn sub_ret(a: f128, b: f128) -> f128 {
+    return a - b
+}
+
+fn half() -> f128 {
+    0.5
+}
+
+fn mix(n: i64, a: f128, m: i64, b: f128) -> f128 {
+    if n + m != 7 { return 0.0 }
+    a * b
+}
+
+fn sum4(a: f128, b: f128, c: f128, d: f128) -> f128 {
+    a + b + c + d
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let one: f128 = 1.0
+    let two: f128 = 2.0
+    let three: f128 = 3.0
+    if add128(one, two) != three { println("FAIL var args"); return 1 }
+    if add128(1.0, 2.0) != three { println("FAIL literal args"); return 2 }
+    if sub_ret(three, 1.0) != two { println("FAIL explicit return"); return 3 }
+    if half() + half() != one { println("FAIL tail widen"); return 4 }
+    if mix(3, three, 4, two) != 6.0 { println("FAIL mixed params"); return 5 }
+    if sum4(one, one, one, one) != 4.0 { println("FAIL stack params"); return 6 }
+
+    if (one < two) == false { println("FAIL <"); return 10 }
+    if (two > one) == false { println("FAIL >"); return 11 }
+    if (one <= one) == false { println("FAIL <="); return 12 }
+    if one >= two { println("FAIL >="); return 13 }
+    let zero: f128 = 0.0
+    let neg_zero = -zero
+    if neg_zero != zero { println("FAIL -0 == +0"); return 14 }
+    let nan = zero / zero
+    if nan == nan { println("FAIL nan == nan"); return 15 }
+    if (nan != nan) == false { println("FAIL nan != nan"); return 16 }
+    if nan < one || nan > one || nan <= one || nan >= one { println("FAIL nan ordered"); return 17 }
+
+    var e: f128 = 1.0
+    var i = 0
+    while i < 100 { e = e / 2.0; i = i + 1 }
+    if add128(one, e) == one { println("FAIL binary128 across call"); return 20 }
+
+    let x: f128 = 1.5
+    if (x as f64) != 1.5 { println("FAIL f128 as f64"); return 30 }
+    if (2.25 as f128) <= x { println("FAIL f64 as f128"); return 31 }
+
+    println("PASS f128_lean_single_binary128_calls")
+    return 0
+}

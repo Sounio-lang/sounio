@@ -30,6 +30,8 @@ const ACTIVE_FEATURE_DOCS = new Set([
 ]);
 
 const ACTIVE_RESEARCH_DOCS = new Set([
+  // The design target for the language, not retired lineage.
+  'docs/research/delta_epistemic_gradual_compilation_paper.md',
   'docs/research/RESEARCH_VALIDATION_SUMMARY.md',
   'docs/research/epistemic_algebra_review.md',
   'docs/research/vancomycin-uncertainty.md',
@@ -642,14 +644,27 @@ export function topicSourceOfTruth(topicId) {
   return `${REGISTRY_RELATIVE_PATH}#${topicId}`;
 }
 
+// A document with no validation record says so. Until 2026-10-12 the
+// generator stamped such documents with the literal date 2026-03-07 and the
+// topic's owner agent as validator -- a date older than the repository's
+// first commit, on 1347 documents, that recorded no validation event (#1240).
+// The marker pair below carries no claim: it reads "nobody has validated this".
+export const UNVALIDATED_DATE = 'unvalidated';
+export const UNVALIDATED_BY = 'none';
+// The old placeholder is recognised by the checker, which counts the documents
+// that still carry it. They were converted to the marker in the same change;
+// the one generated snapshot that carries it (DOCS_AUTHORITY_MATRIX.md) is
+// restamped by formatAuthorityMatrix at its next --snapshot refresh.
+export const LEGACY_PLACEHOLDER_DATE = '2026-03-07';
+
 export function formatRepoMetadataBlock(topic, existingMeta = null) {
   const lines = [
     '<!-- docs:meta',
     `topic_id: ${topic.topic_id}`,
     `authority: ${topic.authority}`,
     `audience: ${topic.audience}`,
-    'last_validated: 2026-03-07',
-    `validated_by: ${topic.owner_agent}`,
+    `last_validated: ${UNVALIDATED_DATE}`,
+    `validated_by: ${UNVALIDATED_BY}`,
     `source_of_truth: ${topicSourceOfTruth(topic.topic_id)}`,
     '-->',
   ];
@@ -718,8 +733,9 @@ export function isRealValidationDate(value) {
 //
 // Preserve an existing record when it is well-formed: a real date and, when
 // present, a non-empty validator. When the document carries no record (or a
-// malformed one), the generator's defaults apply exactly as before -- a doc
-// genuinely missing a header still gets one, stamped with the placeholder.
+// malformed one), the generator's defaults apply -- a doc genuinely missing a
+// header still gets one, marked `last_validated: unvalidated` /
+// `validated_by: none` (#1240).
 //
 // History: before 2026-08-16 the sync REPLACED the whole docs:meta block with
 // freshly generated fields, so any document outside the curated owner table
@@ -732,7 +748,7 @@ export function preservedProvenance(existingMeta) {
     return {};
   }
   const date = String(existingMeta.last_validated ?? '').trim();
-  if (!isRealValidationDate(date)) {
+  if (!isRealValidationDate(date) || date === LEGACY_PLACEHOLDER_DATE) {
     return {};
   }
   const fields = { last_validated: date };
@@ -794,8 +810,8 @@ export function metadataFieldsForTopic(topic, existingMeta = null) {
     topic_id: topic.topic_id,
     authority: topic.authority,
     audience: topic.audience,
-    last_validated: '2026-03-07',
-    validated_by: topic.owner_agent,
+    last_validated: UNVALIDATED_DATE,
+    validated_by: UNVALIDATED_BY,
     source_of_truth: topicSourceOfTruth(topic.topic_id),
   };
   return { ...fields, ...preservedProvenance(existingMeta) };

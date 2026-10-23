@@ -26,7 +26,7 @@ const renderSpecs = [
     assetFile: 'triangle-basic.svg',
     title: 'Triangle raster render',
     description:
-      'Software-rasterized triangle with barycentric color interpolation emitted by the checked JIT artifact.',
+      'Software-rasterized triangle with barycentric color interpolation emitted by the Sounio example program.',
     command:
       'bin/souc run examples/render/triangle_basic.sio > triangle_basic.ppm',
   },
@@ -35,7 +35,7 @@ const renderSpecs = [
     assetFile: 'cube-wireframe.svg',
     title: 'Wireframe cube render',
     description:
-      'Perspective-projected cube with depth-tinted edges emitted by the checked JIT artifact.',
+      'Perspective-projected cube with depth-tinted edges emitted by the Sounio example program.',
     command:
       'bin/souc run examples/render/cube_wireframe.sio > cube_wireframe.ppm',
   },
@@ -44,7 +44,7 @@ const renderSpecs = [
     assetFile: 'uncertainty-field.svg',
     title: 'Uncertainty field render',
     description:
-      'Epistemic heatmap over value and epsilon axes emitted as a real 128x128 raster by the checked JIT artifact.',
+      'Epistemic heatmap over value and epsilon axes emitted as a real 128x128 raster by the Sounio example program.',
     command:
       'bin/souc run examples/render/uncertainty_field.sio > uncertainty_field.ppm',
   },
@@ -53,7 +53,7 @@ const renderSpecs = [
     assetFile: 'causal-dag.svg',
     title: 'Causal DAG render',
     description:
-      'Front-door causal graph with intervention and latent-node annotations emitted as a real 256x128 raster by the checked JIT artifact.',
+      'Front-door causal graph with intervention and latent-node annotations emitted as a real 256x128 raster by the Sounio example program.',
     command:
       'bin/souc run examples/render/causal_dag.sio > causal_dag.ppm',
   },
@@ -62,7 +62,7 @@ const renderSpecs = [
     assetFile: 'quaternion-rotation.svg',
     title: 'Quaternion rotation render',
     description:
-      'Tetrahedron wireframe showing original and quaternion-rotated geometry emitted as a real 192x192 raster by the checked JIT artifact.',
+      "Illustrative tetrahedron wireframe using the example's small-angle quaternion approximation, emitted as a real 192x192 raster by the Sounio example program.",
     command:
       'bin/souc run examples/render/quaternion_rotation.sio > quaternion_rotation.ppm',
   },

@@ -211,6 +211,21 @@ for g in $GATES; do
         fi
       done
       ;;
+    karg)
+      echo "REMOTE: --- knowledge arg variance ---"
+      ulimit -s 524288 2>/dev/null || true
+      export SOUNIO_STDLIB_PATH="\$W/stdlib"
+      "\$W/madaros.elf" compile "\$W/tests/compiler/knowledge_arg_variance.sio" -o "\$W/karg.elf" > "\$W/karg.log" 2>&1
+      karg_c=\$?
+      echo "REMOTE: karg compile_rc=\$karg_c"
+      if [ \$karg_c -ne 0 ]; then tail -40 "\$W/karg.log" | sed 's/^/REMOTE: /'; exit \$karg_c; fi
+      chmod +x "\$W/karg.elf"
+      "\$W/karg.elf" > "\$W/karg.out" 2>&1
+      karg_r=\$?
+      sed 's/^/REMOTE: karg out=/' "\$W/karg.out"
+      echo "REMOTE: karg run_rc=\$karg_r"
+      if [ \$karg_r -ne 0 ]; then exit \$karg_r; fi
+      ;;
     hello)
       echo "REMOTE: --- gen1 compile/run examples/hello.sio ---"
       # Gate cases share this shell; lowering its stack here poisoned a later
@@ -351,6 +366,7 @@ REMOTE
 PAYLOAD="self-hosted stdlib bin/souc bin/souc-linux-x86_64 bin/souc-lean-single-x86_64 scripts"
 case "$GATES" in *full*|*corpus*|*witness*|*sabotage*|*silent*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
 case "$GATES" in *hello*) PAYLOAD="$PAYLOAD examples" ;; esac
+case "$GATES" in *karg*) PAYLOAD="$PAYLOAD tests/compiler/knowledge_arg_variance.sio" ;; esac
 
 SRUN_ENV_ARGS=()
 if [ "$CLEAN_ENV" = "1" ]; then
@@ -362,5 +378,5 @@ fi
 tar czf - $PAYLOAD -C "$SCRIPT_ROOT" scripts/ci/madaros_fixed_point_gate.sh 2>/dev/null \
   | srun --partition="$PARTITION" ${NODE:+--nodelist="$NODE"} --ntasks=1 \
      "${SRUN_ENV_ARGS[@]}" --job-name="${SOUNIO_REMOTE_JOBNAME:-souc-${GATES:-build}-$$}" \
-         --cpus-per-task="$CPUS" --time="$TIMELIMIT" /usr/bin/bash -c "$REMOTE_SCRIPT" 2>&1 \
+         --cpus-per-task="$CPUS" ${SOUNIO_REMOTE_MEM:+--mem=$SOUNIO_REMOTE_MEM} --time="$TIMELIMIT" /usr/bin/bash -c "$REMOTE_SCRIPT" 2>&1 \
   | grep -vE "^srun: (job|Job)|couldn't chdir"

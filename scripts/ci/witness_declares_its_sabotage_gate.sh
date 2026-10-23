@@ -30,11 +30,11 @@
 #
 # Merge Conflicts and Derived Artefacts (#2391)
 # ---------------------------------------------
-# artifacts/gates/witness_declares_its_sabotage.json is a derived artefact.
-# When concurrent branches add witnesses, the cardinality and corpus digest
-# will conflict on merge. NEVER resolve the conflict by picking HEAD or main:
-# always re-derive via:
-#   SOUNIO_WITNESS_SABOTAGE_CENSUS_ONLY=1 bash scripts/ci/witness_declares_its_sabotage_gate.sh
+# artifacts/gates/witness_declares_its_sabotage.json is a derived artefact and
+# is not committed. measured_claim_gate.sh regenerates it in census-only mode
+# before comparing the witness_census_* rows against the tree, so a pull
+# request that adds a witness changes nothing a human has to resolve. Do not
+# commit the file: its total and corpus digest are functions of the tree.
 #
 # Usage:
 #   SOUNIO_WITNESS_SABOTAGE_MADAROS=/path/to/madaros   # required
@@ -53,6 +53,7 @@ sab_env_for() {
     hessian-chain)    echo "SOUNIO_SABOTAGE_HESSIAN_CHAIN" ;;
     correlate-rho)    echo "SOUNIO_SABOTAGE_CORRELATE_RHO" ;;
     wide-mul)         echo "SOUNIO_WIDE_MUL_SABOTAGE" ;;
+    ieee-f64-special) echo "SOUNIO_SABOTAGE_IEEE_F64_SPECIAL" ;;
     *)                echo "" ;;
   esac
 }
@@ -61,7 +62,19 @@ ART_DIR="$ROOT_DIR/artifacts/gates"
 mkdir -p "$ART_DIR"
 ART="$ART_DIR/witness_declares_its_sabotage.json"
 
-mapfile -t ALL_WITNESSES < <(find tests/run-pass -name '*.sio' -type f | LC_ALL=C sort)
+# Prefer tracked witnesses so Finder "foo 2.sio" duplicates cannot inflate the
+# census. Fall back to find(1) for temp-tree selftests that are not a git worktree.
+mapfile -t ALL_WITNESSES < <(
+  tracked=""
+  if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    tracked="$(git -C "$ROOT_DIR" ls-files 'tests/run-pass/*.sio' | LC_ALL=C sort || true)"
+  fi
+  if [[ -n "$tracked" ]]; then
+    printf '%s\n' "$tracked"
+  else
+    find tests/run-pass -name '*.sio' -type f | LC_ALL=C sort
+  fi
+)
 
 # Map declared witnesses quickly without spawning thousands of separate subshells.
 declare -A DECL_MAP=()
@@ -84,8 +97,24 @@ total_w=${#ALL_WITNESSES[@]}
 n_decl=${#declared[@]}
 n_undecl=${#undeclared[@]}
 
-# Corpus identity digest: SHA-256 of sorted newline-joined paths (#2391).
-corpus_sha="$(printf '%s\n' "${ALL_WITNESSES[@]}" | (sha256sum 2>/dev/null || shasum -a 256) | awk '{print $1}')"
+# Corpus identity digest: SHA-256 over sorted "path + content-hash" pairs.
+#
+# #2391 landed this as a digest of the sorted PATHS alone, which fixes
+# cardinality and naming but not identity: rewriting a witness's body while
+# keeping its filename leaves the digest unchanged. That is precisely the
+# "corpus swap with cardinality preserved" case this census is meant to make
+# impossible, so the content hash is folded in here. The digest necessarily
+# changes value when this line lands — it is a different, stronger claim, and
+# the pinned value in scripts/ci/fixtures/measured_claims.tsv is re-derived in
+# the same commit.
+# One hasher invocation over the whole (already sorted) list: its output is
+# "<content-hash>  <path>" per line, so the inner digest covers content AND
+# naming AND ordering in a single pass. Hashing file-by-file in a shell loop
+# would spawn ~1900 processes here and cost seconds per gate run.
+corpus_sha="$(
+  { sha256sum "${ALL_WITNESSES[@]}" 2>/dev/null || shasum -a 256 "${ALL_WITNESSES[@]}"; } \
+    | (sha256sum 2>/dev/null || shasum -a 256) | awk '{print $1}'
+)"
 
 # Per-class counts of run-pass directives (#2391).
 n_check_only="$(grep -r -m1 -l '^//@ check-only' tests/run-pass 2>/dev/null | wc -l | tr -d ' ')"

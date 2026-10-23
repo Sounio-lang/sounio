@@ -1,7 +1,6 @@
 # demos/hydrogen — Metal-Hydride Hydrogen Compression, Uncertainty-Quantified
 
-A Sounio demonstration written for **Dr. Emmanuel Stamatakis** (NCSR Demokritos,
-Integrated Hydrogen Laboratory / H2Lab; CYRUS S.A.).
+A Sounio demonstration written for **Dr. Emmanuel Stamatakis**.
 
 It takes the single-stage core of the metal-hydride (MH) thermal compression
 concept he has published on for a decade — and shows what Sounio adds on top of
@@ -11,7 +10,14 @@ reproducibility living inside the language itself**, not in an external toolbox.
 ## Run
 
 ```bash
-bin/souc run demos/hydrogen/mh7_reliability.sio                         # 7-stage HRS reliability (flagship)
+bin/souc run demos/hydrogen/mh7_coupled_ceiling.sio                     # 7-stage cascade ceiling from measured Table 3, nothing fitted
+bin/souc run demos/hydrogen/mh7_kinetic_band.sio                        # eqs. 9-10 on S6->S7, declared box on the missing constants
+bin/souc run demos/hydrogen/sofc_hydride_optimum.sio                   # compressor delivery scored as SOFC electricity per heat
+bin/souc run demos/hydrogen/sofc_mh_coupling.sio                        # Yiotis/Stubos heat balance on the seven-stage machine
+bin/souc run demos/hydrogen/sofc_mh_design.sio                          # longest cascade whose heat the cell can cover
+bin/souc run demos/hydrogen/sofc_mh_frontier.sio                        # voltage and temperature that maximise autonomous delivery pressure
+bin/souc run demos/hydrogen/sofc_species_covariance.sio                # H2/H2O Knowledge keeps species, validity, and GUM variance across the cell
+bin/souc run demos/hydrogen/mh7_reliability.sio                         # 7-stage HRS reliability (fitted surrogate, see below)
 bin/souc run demos/hydrogen/trieres_chain.sio                           # TRIERES valley: dispensed EUR/kg p-box
 bin/souc run demos/hydrogen/valley_chain_epistemic.sio                  # composed twin: subsurface -> compressor -> dispenser
 bin/souc run demos/hydrogen/mh_stage_uq.sio                              # stage model
@@ -19,37 +25,212 @@ bin/souc run demos/hydrogen/mh_cascade_uq.sio                            # casca
 bin/souc run demos/hydrogen/bayes_pilot.sio                              # value of pilot data (IDM)
 bin/souc run demos/hydrogen/hub_chain.sio                                # full chain: delivered EUR/kg
 bin/souc run demos/hydrogen/methanation_logk_gate.sio                   # methanation log-K gate
-SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/uhs_brine_calcite.sio  # UHS H2-brine-calcite network (lean_single only, see below)
-SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/site_screening.sio     # epistemic UHS site screening, sourced Greek sites (lean_single only)
+bin/souc run demos/hydrogen/uhs_brine_calcite.sio                       # UHS H2-brine-calcite network
+bin/souc run demos/hydrogen/site_screening.sio                          # epistemic UHS site screening, sourced Greek sites
 ```
 
 Deterministic (seeded xorshift PRNG): every run prints the same numbers and
-ends with `MH_STAGE_UQ_OK` / `MH_CASCADE_UQ_OK`. All demos run on the default
-Madaros engine as well as lean_single. (Historical note: the cascade imports
-`stdlib/epistemic/pce.sio`, which calls libm through `extern "C"`; until
-#1550 the Madaros native path dropped all but the first extern decl and
-mis-evaluated the exp/log builtins — issue #1547, fixed.)
+ends with its `*_OK` marker (`MH_STAGE_UQ_OK`, `MH_CASCADE_UQ_OK`, ...).
+(Historical note: the cascade imports `stdlib/epistemic/pce.sio`, which calls
+libm through `extern "C"`; until #1550 the Madaros native path dropped all but
+the first extern decl and mis-evaluated the exp/log builtins — issue #1547,
+fixed.)
+Until 2026-10-06 the cascade's Monte Carlo block also differed on Madaros
+(MC mean P3 368.005190 vs 367.339816): `p = p * mh_exp(..) * rand_gaussian(..)`
+called the RNG twice per stage because the FO product rule re-lowered its
+operands. Fixed; Madaros now prints byte-identical output, pinned by
+`tests/run-pass/fo_product_rule_call_evaluated_once.sio`.
 
-## The flagship (`mh7_reliability.sio`) — his seven-stage HRS compressor, reliability-quantified
+### Engine status, measured
 
-His first-author seven-stage paper (*Renewable Energy* 147 (2020) 164–178,
-DOI 10.1016/j.renene.2019.08.104) chains seven MH stages on 80 °C heat to
-reach 365 bar for 350-bar dispensing — and offers itself explicitly as a
-model and tool for sensitivity analysis. This demo takes the offer
-literally: the whole chain, plus the batch-to-batch alloy scatter no
-nominal-point run can see, as one deterministic receipt on both engines.
+Measured 2026-10-06 with `bin/souc run`, 900 s timeout, Madaros **built from
+source** (`make build-madaros`; the committed `bin/madaros-linux-x86_64` dates
+from 2026-09-15 and lags it) against `SOUNIO_SOUC_ENGINE=lean_single`.
+"Same output" means the program's stdout is byte-identical on both engines.
+Wall time is the whole `souc run`, so the Madaros column includes compiling
+(about 4 s for a small demo, 30–50 s for the two that import
+`chemistry::kinetics`); runs were four at a time on a shared node, so read the
+times as ±30 %.
 
-The paper's per-stage alloy internals (its Table 3) sit behind a paywall,
-so the per-stage ΔH ladder (24–36 kJ/mol H2, batch half-widths
-±1.5–2.5 kJ/mol assigned by alloy maturity) is **representative — ours,
-labeled as such in the file header, with a swap slot for the real values**.
-What is his: both published system-level oracles reproduce exactly.
+| demo | Madaros | lean_single | same output | wall Madaros | wall lean_single |
+|---|---|---|---|---|---|
+| `bayes_pilot` | OK | OK | yes | 5 s | 1 s |
+| `caprock_integrity_v2` | OK | OK | yes | 6 s | 8 s |
+| `caprock_seal_pbox` | OK | OK | yes | 4 s | 2 s |
+| `hub_chain` | OK | OK | yes | 8 s | 26 s |
+| `methanation_logk_gate` | OK | OK | yes | 5 s | 1 s |
+| `mh7_coupled_ceiling` | OK | OK | yes | 4 s | 1 s |
+| `mh7_reliability` | OK | OK | yes | 8 s | 3 s |
+| `mh_cascade_uq` | OK | OK | yes (re-measured after merging main's FO product-rule fix; before it the three Monte Carlo lines differed) | 6 s | 2 s |
+| `mh_stage_uq` | OK | OK | yes | 5 s | 1 s |
+| `site_screening` | OK | OK | yes | 55 s | 62 s |
+| `smr_h2_lcoh` | OK | OK | yes | 5 s | 3 s |
+| `sobol_voi` | OK | OK | yes | 5 s | 4 s |
+| `trieres_chain` | OK | OK | yes | 11 s | 27 s |
+| `uhs_brine_calcite` | OK | OK | yes | 37 s | 7 s |
+| `valley_chain_epistemic` | OK | OK | yes | 16 s | 59 s |
+| `vanthoff_gate` | OK | OK | yes | 6 s | 1 s |
 
-| oracle (his paper) | demo |
-| --- | --- |
-| overall compression ratio 18.7 @ 80 °C | 18.700002 |
-| delivery pressure 365 bar | 365.000037 bar |
-| ratio 41.5 @ 120 °C | 41.500004 |
+Before 2026-10-06 the two subsurface demos did not run on Madaros:
+on the source-built Madaros both stopped at type-check (`E175` x2,
+`chemistry::kinetics` calling `plot::line::line_plot` / `plot::bar::bar_chart`,
+which were private), and on the committed ELF both stopped at run time with a
+bare `madaros: arena full` (exit 181) — `uhs_brine_calcite` after printing
+`H2 = NON-FINITE` at 25 °C, `site_screening` at its first site. lean_single
+took 61 s and 678 s for them. The cause and the fix are in the
+`uhs_brine_calcite` section below ("Engine coverage"); the same change made
+`site_screening` about 10x faster on lean_single, with byte-identical output.
+
+Most of `site_screening`'s 55 s on Madaros is compiling: the run itself
+measured 16 s (lean_single compiles it in a few seconds). To show it live, compile once (`bin/souc compile demos/hydrogen/site_screening.sio -o
+site_screening.elf`) and run the ELF. Profiled by timestamping every output
+line: after the fix no single section dominates (the slowest line takes under
+1 s); the remaining cost is ~150 short calibrated-law runs plus the corner
+p-boxes, spread evenly.
+
+`examples/hydrogen/mhhc_corner_pbox.sio` (the 128-corner box over the
+seven-stage compressor) **terminates, but takes about two hours** on Madaros;
+it is not a live demo. Measured 2026-10-06 on Madaros built from source:
+corners 0–69 took 3600 s in one process on a loaded 8-CPU host, and corners
+70–127, split into four processes, took 1585, 1223, 326 and 322 s, about
+7000 s of single-core time in all. Every one of the 128 corners reached
+cyclic steady state: 64 in 4 fixed-point sweeps, 32 in 6, and 32 in 16 (the
+high-σ corners from 64 up, the slowest at 381 s each). The 900 s sweep timed
+out on both engines; a single uninterrupted 128-corner run was not completed
+here (the pod running it restarted), and lean_single, about 4x slower than
+Madaros on the sibling `mhhc_cascade` (217 s vs 51 s), was not timed. The
+file now prints one line per corner, so a run in progress no longer looks
+like a hang.
+
+## The physics-grounded replacement (`mh7_coupled_ceiling.sio`) — the cascade's ceiling from measured Table 3, nothing fitted
+
+Added 2026-10-04. `mh7_reliability.sio` below reproduces the paper's ratios by
+fitting to them, and its README section says why that form is wrong. This file
+is what the measured Table 3 supports **without any fitted parameter**:
+
+```bash
+bin/souc run demos/hydrogen/mh7_coupled_ceiling.sio      # ends MH7_COUPLED_CEILING_OK (both engines, ~3 s)
+g++ -std=c++23 -O2 -o mh7x demos/hydrogen/tools/mh7_ceiling_crosscheck.cpp && ./mh7x   # independent cross-check
+```
+
+Under flat plateaus (the σ→0, Y→0 limit of the paper's eq. 11), a cascade
+coupled through interconnectors is bounded by one number, the desorption
+plateau of its **last** stage at T_hot, provided every coupling
+P_des,i(T_hot) > P_abs,i+1(T_cold) is feasible. The free per-stage ratios do
+not multiply.
+
+| case | T_hot | ceiling P_des,7 (bar) | paper COMSOL (bar) | paper/ceiling | ratio-chain product |
+|---|---|---|---|---|---|
+| 1 | 80 °C | 561.55 | 374.0 | 0.666 | 6640 |
+| 2 | 90 °C | 670.55 | 483.2 | 0.721 | 29029 |
+| 3 | 100 °C | 793.13 | 606.4 | 0.765 | 117263 |
+| 4 | 105 °C | 859.72 | 682.0 | 0.793 | 229245 |
+| 5 | 110 °C | 929.93 | 742.0 | 0.798 | 440394 |
+| 6 | 120 °C | 1081.55 | 830.0 | 0.767 | 1546278 |
+
+What follows from Table 3 alone, checked mechanically in the file:
+
+- all 36 couplings (6 links × 6 cases) are thermodynamically feasible;
+- the bottleneck link is **S6 → S7 in every case** (driving force
+  ln P_des,6/P_abs,7 = 0.140 at 80 °C, 0.803 at 120 °C);
+- the ceiling orders the paper's delivered pressures in **15/15** case pairs,
+  and the S6 → S7 driving force orders its cycle times (shorter as the drive
+  rises) in **15/15** pairs.
+
+What it does **not** claim: the delivered pressure. The COMSOL output sits at
+67–80 % of the ceiling, and that ratio is not monotone, so the ceiling orders
+the cases without predicting the kinetic gap. The gap belongs to eqs. 9–11,
+whose constants (C_a, C_d, E_a, E_d, σ_s, σ_0, Y) the paper does not publish.
+
+**Two questions this raises for the authors** (printed in sections D and E):
+
+1. The text gives 180 bar (80 °C) and 365 bar (120 °C) at the *third*
+   coupling. By the paper's own Step 3, coupling 1 is S1 → S2, so the third is
+   S3 → S4, but S3 desorbs at only 101.5 bar at 80 °C under Table 3. Either
+   the figure counts couplings differently, or the S3 plateau slope is large.
+2. A ±1 kJ/mol ΔH error at fixed ΔS moves the 80 °C ceiling by ×1.41, while
+   the same error compensated through ΔS (as a van 't Hoff fit couples them)
+   moves it by ×1.02 at an illustrative 60 °C pivot. The covariance of each
+   van 't Hoff fit is the single number per stage that would bound the
+   ceiling honestly.
+
+## The flagship (`mh7_reliability.sio`) — the seven-stage HRS compressor he co-authored, reliability-quantified
+
+The seven-stage paper he co-authored (Gkanas, Christodoulou, Tzamalis,
+**Stamatakis**, Chroneos, Deligiannis, Karagiorgis & Stubos, *Renewable
+Energy* 147 (2020) 164–178, DOI 10.1016/j.renene.2019.08.104) chains seven
+MH stages on 80 °C heat to reach **374 bar** from a 20 bar supply — and
+offers itself explicitly as a model and tool for sensitivity analysis.
+
+> **Correction, 2026-09-15.** 374 bar is the paper's **simulated** delivery:
+> its Table 4 reports COMSOL output ("Bed Avg Pressure"), not a measurement
+> of a seven-stage system. The paper's experimental validation is of one
+> alloy (0.85 g of the S2 material in a Sieverts apparatus, temperature and
+> hydrogenation curves). Nothing on this page is a comparison with an
+> experiment on the compressor; every "oracle" below is a number from that
+> simulation.
+
+This
+demo takes the offer literally: the whole chain, plus the batch-to-batch
+alloy scatter no nominal-point run can see, as one deterministic receipt on
+both engines.
+
+> **Two corrections, 2026-09-09, from recovering the paper itself.** This
+> section previously called it "his first-author" paper: he is the **fourth**
+> author, E. Gkanas is first. And it quoted "delivery pressure 365 bar" as a
+> published oracle: 365 bar is the pressure at the paper's **third coupling
+> process** at 120 °C, not the system delivery, which is 374 bar in Case 1
+> and 830 bar in Case 6. The accepted post-print is open access
+> (Coventry University repository, CC-BY-NC-ND) and every table is now
+> transcribed in `demos/hydrogen/data/gkanas2020_seven_stage.md`.
+
+The paper's Table 3 was recorded here as paywalled, so the per-stage ΔH
+ladder (24–36 kJ/mol H2, batch half-widths ±1.5–2.5 kJ/mol assigned by
+alloy maturity) was **representative — ours, labeled as such in the file
+header, with a swap slot for the real values**.
+
+> **Table 3 has since been recovered** (see
+> `data/gkanas2020_seven_stage.md`), and it says the representative ladder
+> was not merely approximate but **inverted**. The measured ΔH(abs) ladder
+> *decreases* along the cascade — 25.24, 21.47, 20.35, 19.99, 18.20, 16.23,
+> 14.70 kJ/mol — because van 't Hoff (`ln P = ΔS/R − ΔH/(R·T)`) requires the
+> high-pressure stage to have the *lowest* ΔH. The ladder used here
+> increases. The paper also reports absorption and desorption thermodynamics
+> separately for every stage, rather than one lumped efficiency.
+>
+> *Correction, 2026-09-15.* This paragraph said the absorption/desorption
+> enthalpy gap "widens from 3.0 kJ/mol at S1 to 4.2 at S7". Table 3 does not
+> say that: ΔH(des) − ΔH(abs) is 2.95, 4.67, 4.47, 0.26, 1.66, 2.89 and
+> 4.21 kJ/mol for S1–S7, not monotonic. An enthalpy difference alone is also
+> not the hysteresis: the pressure hysteresis at a given temperature depends
+> on the entropy difference as well.
+>
+> **And the oracle table below is a fit, not a derivation.** The chain
+> carries three free quantities tuned to land on the published ratios — a
+> lumped `eta_nom = 0.90` ("assumption"), a swing exponent
+> `gamma = 0.613475` ("same fit"), and a supply pressure back-solved from
+> the oracle itself (`p0 = 365.0 / 18.7`). Fed the *measured* Table 3
+> values, this same ratio-chain model returns a compression ratio of
+> **6640×** rather than 18.7×, which shows the model FORM is wrong and not
+> just its parameters: the seven stages are coupled through an
+> interconnector (the paper's eq. 12), so each absorbs at whatever pressure
+> the previous one can deliver into it, and none achieves its free van 't
+> Hoff ratio. A ratio chain can only match the published numbers by being
+> fitted to them.
+>
+> The UQ machinery below — batch correlation, Sobol shares, the corner
+> p-box — is unaffected in structure and remains the point of the demo. What
+> is affected is the claim that it reproduces published physics; it
+> reproduces published *numbers*, from a fitted surrogate. A coupled
+> replacement built on the measured Table 3 is the correct fix and is the
+> current work.
+
+| oracle (the paper) | demo | status |
+| --- | --- | --- |
+| overall compression ratio 18.7 @ 80 °C | 18.700002 | fitted, not derived |
+| ratio 41.5 @ 120 °C | 41.500004 | fitted, not derived |
+| delivery pressure 374 bar @ 80 °C | not reproduced | demo targets the misattributed 365 bar |
+| cycle time 6625 s @ 80 °C | not modelled | no dynamics in this demo |
 
 Nominal chain: per-stage ratios 1.464–1.565 across overlapping temperature
 windows (20→35 … 65→80 °C), cumulative pressure 28.6 → 42.5 → 64.0 → 97.6 →
@@ -77,9 +258,75 @@ stages 6–7 first.* And the honest floor: the longest published industrial
 MH-compressor campaigns run ~1 year / 10 000 cycles (Tarasov et al.,
 *J. Phys.: Energy* 2, 2020), so fleet batch data barely exists — which is
 exactly why the deliverable is a p-box, not a point reliability. The
-sensitivity analysis his paper offered itself as the tool for, run as one
+sensitivity analysis the paper offered itself as the tool for, run as one
 reproducible receipt: `bin/souc run demos/hydrogen/mh7_reliability.sio` →
 `MH7_RELIABILITY_OK`.
+
+> **What these reliability numbers are, 2026-09-15.** 67.3 %, 65.3 %,
+> 59.0 %, the 6.2 pp dependence cost, the [1.3 %, 99.9 %] p-box and the
+> Sobol shares are properties of the **fitted surrogate** described above:
+> its ΔH ladder runs the wrong way and its ratios are tuned to the
+> simulated Table 4. They show what the UQ machinery does. They are **not**
+> reliability figures for the Gkanas et al. compressor, and the measurement
+> priorities ("characterize stages 6–7 first") inherit the same caveat.
+> The replacement built on the measured Table 3 lives in
+> `examples/hydrogen/mhhc_cascade.sio` and `mhhc_corner_pbox.sio`. Its
+> delivered pressure at σ = 0 is exactly S7's free van 't Hoff desorption
+> plateau (561.5 bar at 80 °C). That number is an upper bound, not a
+> prediction, and the "Table 3 bounds Table 4" check is the same arithmetic,
+> not an independent result. Its p-box is over intervals **we declared** for
+> parameters the paper does not publish (plateau slope, hysteresis, kinetics,
+> heat transfer, interconnector volume). It is an analysis, not a validation.
+
+> **Batch tolerance on the measured Table 3, 2026-09-15.**
+> `examples/hydrogen/mhhc_batch_margins.sio` asks the batch question of the
+> compressor as measured rather than of the surrogate. It does not sweep the
+> delivered pressure — at the plateau that is S7's alone, the trap
+> `mhhc_corner_pbox.sio` records — but the driving force of every coupling,
+> `ln P_des,k(T_hot) − ln P_abs,k+1(T_cold)` at mid-plateau, computed from
+> Table 3 only, so it is invariant under every unmeasured input of the
+> corner p-box. A batch shifts a stage's ΔH by δ on both branches with ΔS
+> held; δ is an interval, and the worst cases are exact because the margins
+> are linear in δ. Both engines, byte-identical → `MHHC_BATCH_MARGINS_OK`.
+>
+> | Case 1 (10 → 80 °C, 20 bar feed, 374 bar) | result |
+> | --- | --- |
+> | tightest coupling | **S6 → S7**, plateau ratio 1.151 (ln margin 0.140); next S2 → S3 (1.596) and S5 → S6 (1.708) |
+> | leverage of a batch shift | identical for all seven stages: 0.341 per kJ/mol at 80 °C, 0.425 at 10 °C |
+> | one stage off-batch, others at Table 3 | **S7 tolerates ±0.331 kJ/mol** (2.2 % of its ΔH), S6 ±0.412, S3 ±1.100; S1 ±2.677 |
+> | every stage off-batch independently, equal ±w | the first coupling (S6 → S7) can close at **±0.183 kJ/mol**; at ±1.5, 6 of 8 can |
+> | one shared shift on the AB2 stages S2–S7 | ±1.193 kJ/mol, limited by S7 against the 374 bar line — **6.5× the independent tolerance**, because neighbours shifting together move a coupling 0.084 per kJ/mol instead of 0.765 |
+> | desorption at 90 / 100 / 120 °C, each against its own Table 4 delivered pressure | independent tolerance ±0.423 (S6 → S7) / ±0.655 (S6 → S7) / ±0.865 kJ/mol (**S7 against 830 bar**, not S6 → S7) |
+>
+> *Two readings of that table, 2026-09-15.* **The delivery line is the
+> paper's simulated result, not a requirement.** 374 bar is what the COMSOL
+> model delivered in Case 1; the file uses it as the pressure S7 must clear.
+> The S6/S7 ranking and the ±0.183 independent tolerance do not depend on
+> that choice, but the shared-shift row does: against a 350 bar dispensing
+> line the shared tolerance is ±1.388 kJ/mol (still limited by S7), and with
+> no delivery line at all it is ±1.668, limited by S6 → S7. **And the binding
+> coupling changes with temperature.** With each case's own delivered
+> pressure as the line, S6 → S7 closes first at 80, 90 and 100 °C; from
+> 105 °C on (682, 742 and 830 bar) it is S7 against the delivery line:
+> Table 4's delivered pressure climbs almost in step with S7's plateau, so
+> that ln margin narrows to 0.23–0.27 while S6 → S7 widens from 0.14 to
+> 0.80. Without a delivery line S6 → S7 is the first to close at every
+> temperature (±0.769, ±0.881 and ±1.099 kJ/mol at 105, 110 and 120 °C).
+> These alternative-line figures come from the same arithmetic on Table 3,
+> run outside the file; the file itself prints only the 374 bar and per-case
+> lines.
+>
+> On the measured ladder the stages to characterise first are **S6 and
+> S7**, and that ranking involves no width we assigned: every stage has the
+> same leverage per kJ/mol, so it comes from Table 3's margins. The
+> surrogate above also named stages 6–7; that agreement is a coincidence,
+> since the surrogate got there through the widths it assigned. What the
+> answer does depend on: whether batch spreads of a few tenths of a kJ/mol
+> are real for these AB2 alloys (no batch data is published), and the
+> necessary-not-sufficient nature of a mid-plateau margin — plateau slope
+> and kinetics decide whether a closed margin actually stalls the cascade.
+> Holding ΔS fixed is the conservative choice; enthalpy–entropy
+> compensation would widen every tolerance.
 
 ## The valley chain (`trieres_chain.sio`) — TRIERES wellhead-to-dispensed cost as a p-box
 
@@ -89,11 +336,12 @@ claim — hybridization lifts utilization — by chaining wellhead production �
 compression → storage → **dispensing** and asking the procurement question:
 does valley-scale green H2 beat the **€6/kg** dispensing gate?
 
-Sourced inputs are his literature exactly as in `hub_chain.sio` (Energies
-2023 CAPEX/O&M/LCOE/specific energy; the 44–89 kWh_th/kg compression span
-of his two compressor papers; heat price and tank cycling intervals). The
+Sourced inputs are the co-authored literature exactly as in `hub_chain.sio`
+(Chalkiadakis et al., Energies 2023 CAPEX/O&M/LCOE/specific energy; the
+44–89 kWh_th/kg compression span of the two Gkanas et al. compressor papers;
+heat price and tank cycling intervals). The
 valley-specific knobs are **illustrative assumptions, labeled in the file
-header**: CF ∈ [0.55, 0.80] (the utilization claim on trial — his published
+header**: CF ∈ [0.55, 0.80] (the utilization claim on trial — the published
 Crete electrolyser CF is [0.35, 0.44]), CAPEX ×[0.8, 1.2], specific energy
 ±2.5 kWh/kg, dispensing [0.50, 1.50] €/kg (no citable source; swap slots).
 
@@ -159,7 +407,11 @@ harsher — post-coupling, **only compressor R can flip the gate alone**
 (the eight economic intervals and the subsurface loss each move 0.00
 points); Sobol agrees (R carries ~94 % of Var(D) under the conventional
 measure, Jansen). *The euro is not in the rock at 1-yr residence — it is
-in the reliability data.* Reference engine: lean_single →
+in the reliability data.* (That R is the fitted surrogate's reliability,
+see the 2026-09-15 note under the flagship. The structural finding, that
+once coupled a single uncertain availability factor dominates the gate,
+holds for any R. The numbers do not transfer to the real compressor.)
+Reference engine: lean_single →
 `VALLEY_CHAIN_OK`. On Madaros the receipt is byte-identical through
 Section H, then hits the same pre-existing Saltelli-machinery SIGSEGV
 (#1570 family) as both component demos. Suite coverage:
@@ -210,8 +462,8 @@ for exactly that, alongside GUM and p-boxes.
 ## The cascade model (`mh_cascade_uq.sio`)
 
 Three identical LaNi5 stages chained from a 1 bar electrolyser supply to the
-200 bar HRS delivery target, following the multi-stage architecture of his
-2020 paper. Per stage: `ln r = ΔH/R·(1/T_cold − 1/T_hot) + ln η` — ΔS cancels
+200 bar HRS delivery target, following the multi-stage architecture of the
+2020 seven-stage paper (Gkanas et al.). Per stage: `ln r = ΔH/R·(1/T_cold − 1/T_hot) + ln η` — ΔS cancels
 in the ratio; η = 0.80 ± 0.05 lumps hysteresis, plateau slope and drops.
 
 Crucially, the demo models **batch correlation**: one alloy batch fills the
@@ -230,11 +482,11 @@ Three UQ levels in one deterministic run, validated against a SciPy oracle:
 The design statement: the nominal point promises 321 bar; uncertainty says
 **~19 % of alloy batches miss the 200 bar target**, and the skew-correct
 mean sits +15 % above nominal. Reliability numbers like this — not nominal
-margins — are what HRS procurement and his techno-economic studies need.
+margins — are what HRS procurement and his group's techno-economic studies need.
 
-## The caprock model (`caprock_seal_pbox.sio`) — his newest research line
+## The caprock model (`caprock_seal_pbox.sio`) — a current research line of his group
 
-His latest paper (*Hydrogen* 6(4):91, 2025) reviews caprock integrity for
+The 2025 review he co-authored (Trimi et al., *Hydrogen* 6(4):91) covers caprock integrity for
 underground hydrogen storage: wettability, interfacial tension and diffusion
 control the seal — and H2 contact-angle data is scarce and conflicting.
 That is an **epistemic** uncertainty problem, and it gets the deepest tool:
@@ -365,10 +617,10 @@ guarantee never reaches 0.90 at any campaign size — the honest caveat.* Pure r
 ## The full chain (`hub_chain.sio`) — delivered cost, decision-grade
 
 The chain nobody closes: production → compression → storage → **delivered
-€/kg**, every number from the Demokritos/FORTH literature (Energies
-16:6257 Crete case: 50 MW PEM, 46.4 kWh/kg, €1500/kW, LCOE 0.046–0.052
-€/kWh; MH compression energy 44–89 kWh_th/kg spanning his dual-stage and
-seven-stage papers; €500/kg tank storage cycling 37.29×/yr nominal, epistemic interval [30, 45]).
+€/kg**, every number from the Demokritos/FORTH literature (Chalkiadakis et
+al., Energies 16:6257 Crete case: 50 MW PEM, 46.4 kWh/kg, €1500/kW, LCOE
+0.046–0.052 €/kWh; MH compression energy 44–89 kWh_th/kg spanning the
+Gkanas et al. dual-stage and seven-stage papers; €500/kg tank storage cycling 37.29×/yr nominal, epistemic interval [30, 45]).
 
 Delivered cost is **monotone in every epistemic input**, so the p-box is
 exact by corner evaluation — machine-checked in Lean 4
@@ -426,12 +678,12 @@ bignum arithmetic — no floats anywhere:
 
 What a script checks, this file proves.
 
-## The extrapolation gate (`vanthoff_gate.sio`) — his own failure mode, armed
+## The extrapolation gate (`vanthoff_gate.sio`) — his group's own failure mode, armed
 
-His GHG 2025 paper showed PHREEQC defaults + van't Hoff extrapolation of
-the methanation equilibrium constant produce **misleading** results; his
-2026 geothermal paper models calcite scaling with the same class of
-extrapolation. This demo takes the shared core — calcite solubility,
+The GHG 2025 paper he co-authored (Ghaedi et al.) showed PHREEQC defaults +
+van't Hoff extrapolation of the methanation equilibrium constant produce
+**misleading** results; the same authors' 2026 geothermal paper models
+calcite scaling with the same class of extrapolation. This demo takes the shared core — calcite solubility,
 pK0 = 8.48 at 25 °C, ΔH ∈ [−12, −7] kJ/mol epistemic — and asks when an
 extrapolation stops being a fact and becomes a guess.
 
@@ -451,14 +703,14 @@ The point estimate (ΔH = −9.61) at 90 °C says SI = **+0.001** — a point
 geochem code reports "scale" on a rounding artifact. The p-box on the
 scaling decision is **[2.2 %, 97.2 %]**. At 150 °C the constant-ΔH and
 ΔCp-corrected models' intervals **don't overlap** — model-form
-uncertainty, invisible to any single-code run. *His GHG-2025 fix was a
+uncertainty, invisible to any single-code run. *The GHG-2025 fix was a
 better correlation; the deeper fix is a code that knows when
 extrapolation has become a guess.* Both engines → `VANTHOFF_GATE_OK`.
 
-## The methanation log-K gate (`methanation_logk_gate.sio`) — the constant he had to calibrate by hand
+## The methanation log-K gate (`methanation_logk_gate.sio`) — the constant his co-authors had to calibrate by hand
 
-The companion to the calcite gate, aimed at the exact constant his
-GHG-2025 paper (DOI 10.1002/ghg.2368) had to fix: the methanation
+The companion to the calcite gate, aimed at the exact constant the
+GHG-2025 paper he co-authored (Ghaedi et al., DOI 10.1002/ghg.2368) had to fix: the methanation
 equilibrium. phreeqc.dat anchors `CO3-2 + 10H+ + 8e- = CH4 + 3H2O` at
 log K0 = 41.071, ΔH = −61.039 kcal/mol (25 °C); a naive constant-ΔH
 van't Hoff then extrapolates it to storage temperatures without
@@ -484,13 +736,13 @@ on; the same proxy through the honest band spans **[0.85, 4.68] %**
 the extrapolated log K is. A p-box on breaching Bo's worst field case
 (2.76 %) comes back **[0 %, 100 %] at 90 °C: undetermined.**
 
-The file's center is a **calibration slot**: his paper's fix was a
+The file's center is a **calibration slot**: the paper's fix (Ghaedi et al. 2025) was a
 hand-calibrated log K(T) predicting *less* methanation than the
 database default — and that expression is paywalled. So the demo
 encodes only the abstract-level finding as a labeled placeholder
 interval (calibrated log K = naive − [2, 6]; toy 90 °C loss drops from
-2.0 % to [0.064, 0.637] %), with a two-line swap point inviting his
-real expression. And it closes with why the phantom CH4 dies either
+2.0 % to [0.064, 0.637] %), with a two-line swap point inviting the
+authors' real expression. And it closes with why the phantom CH4 dies either
 way: even the *low* end of the 150 °C band is ~10^23 — near-total
 conversion on thermodynamics alone, which is exactly why an
 equilibrium constant cannot price the kinetic losses that real UHS
@@ -506,7 +758,7 @@ construction**. Both engines → `METHANATION_LOGK_GATE_OK`.
 ## The UHS geochemistry network (`uhs_brine_calcite.sio`) — the whole H2–brine–calcite system, with bands
 
 The two gate demos gate *constants*. This one integrates the *network*
-his GHG-2025 paper models — H2(aq) methanation coupled to PWP calcite
+the GHG-2025 paper he co-authored (Ghaedi et al.) models — H2(aq) methanation coupled to PWP calcite
 dissolution/precipitation — as a Sounio epistemic CRN
 (`chemistry::kinetics::simulate_general_epistemic`), delivering what a
 point-value PHREEQC run cannot: **a native GUM 1σ band and interval /
@@ -546,19 +798,60 @@ comparison-arguable and labeled unproven. Second, the house engine's
 per-step GUM propagator has its own caveats — the band scales with dt
 and does not accumulate, sub-1e-6 σ values hit a sqrt-convergence floor
 (flagged ENGINE-FLOOR), and at 90 °C the J² amplification diverges, so
-the band is **refused** there rather than printed. All of this is
+the band is **refused** there rather than printed. The refusal accepts a
+band only when every printed σ is finite and positive: the engine hands
+the diverged variance back as 0.0 on some lean_single seeds and as NaN on
+others, and a NaN used to slip past the old `<= 0` test and hang the digit
+printer (fixed 2026-09-15). All of this is
 labeled E1–E6 in the file header (E6: lean_single aliases returned
 arrays across calls, so the demo extracts every run's scalars before the
 next call — do not refactor it to collect-then-print).
 
-Engine coverage: **lean_single only** — on current main, Madaros fails
-"visibility preflight" on *any* `chemistry::kinetics` import (reproduced
-with the repo's own `tests/stdlib/chemistry/test_kinetics_epistemic_ensemble.sio`;
-pre-existing blocker, not from this demo). Run:
+**On the 90 °C column (corrected 2026-10-04).** The 0.000 % loss at 90 °C
+is the k_m = 0 slot read back, not a test of the abstract's "negligible
+above ~70 °C". An earlier revision of the demo printed it as "consistent
+with the abstract's qualitative claim", which was circular; it now prints
+"A2: NOT TESTED HERE". Only the paper's own rate law (slot S2) can test A2.
 
-```bash
-SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/uhs_brine_calcite.sio
-```
+Engine coverage: **both engines, byte-identical output** (since
+2026-10-06; see the engine table at the top). The history, because each step
+hid the next:
+
+1. Until 2026-10-04 Madaros stopped in native lowering at stdlib/plot
+   (`cannot safely lower print/println argument with unresolved scalar kind`).
+   Binding the struct-field string to a typed local fixed that.
+2. Madaros then enforced module privacy, and `chemistry::kinetics` calls
+   `plot::line::line_plot` and `plot::bar::bar_chart`, which were private
+   (`E175` x2, both subsurface demos). They are `pub` now, and
+   `bar_chart_horizontal` reads its string fields into typed locals for the
+   same lowering reason as step 1.
+3. The run then stopped at `madaros: arena full` (exit 181). That is the
+   **generated program's** runtime heap, not the compiler's: Madaros's native
+   runtime bump-allocates every aggregate value from one fixed ~2 GiB arena
+   that is never reclaimed. `simulate_general_epistemic` built about two
+   hundred 32 KiB `MatNM` values per RK4 step (an 8x1 matrix plus
+   `matnm_set` copies in every `general_dc`, and an nsp x nsp Jacobian matrix
+   with one `matnm_set` per entry), so the arena lasted a few hundred steps
+   and this demo needs thousands. Minimal repro: a 32 KiB struct rebuilt by
+   value 100000 times in a loop (`scripts/ci/arena_full_diagnostic_gate.sh`).
+   The simulator now reads `nu` once into a stack `[f64; 64]` and writes
+   every per-step quantity through hoisted `&!` buffers, operation for
+   operation as before; it also skips the Jacobian when every k-uncertainty
+   and the variance are zero, which is exact under bounds it checks (the
+   value-only corner runs). Same fix, same wall, as `chemistry::catalysis`
+   on 2026-09-15.
+4. The `H2 = NON-FINITE` that the committed ELF prints at 25 °C is not
+   produced by a Madaros built from current source (`H2 = 9.881639 mmol`,
+   matching lean_single); it was a codegen defect fixed on main (#2771).
+
+The allocation wall itself is still there for other programs. Its message is
+no longer bare: it now names the size of the allocation that did not fit
+(32800 bytes is a `MatNM`), the 2 GiB limit, and the fix.
+`test_kinetics_gri_mech` hit the same wall through a `MatNM` in
+`simulate_big_crn_gri`'s step loop and got the same rewrite (D06, closed
+2026-10-06). `test_kinetics_gri_mech`, `test_kinetics_core`,
+`test_kinetics_deep_stdlib` and `test_kinetics_epistemic_ensemble` exit 0 on
+both engines with identical output (measured 2026-10-06).
 
 Suite coverage: `tests/run-pass/uhs_brine_calcite_selftest.sio` pins the
 25 °C trajectory and band against an independent Python delta-method
@@ -690,8 +983,8 @@ replica, τ-monotonicity across the 285 d step bracket), and the
 field-calibration path (inverse-calibration pins for Lehen and
 Lobodice, Tyne bridge arithmetic, CTMI scan at Tyne's 50.7 °C, and the
 KMF lower edge above 100× the falsified lab anchor)
-(`SITE_SCREENING_SELFTEST_OK`). lean_single only
-(same Madaros chemistry-import blocker as the network demo).
+(`SITE_SCREENING_SELFTEST_OK`). Both engines, identical output
+(measured 2026-10-06; see the engine table at the top).
 
 ## The stdlib modules (new, reusable)
 
@@ -711,18 +1004,30 @@ KMF lower edge above 100× the falsified lab anchor)
 
 ## Why this maps to his work
 
-- *Renewable Energy 147 (2020) 164–178*, DOI 10.1016/j.renene.2019.08.104
-  (seven-stage MH compression for HRS) and *IJHE 46 (2021) 29272–29287*
-  (dual-stage MH2C under thermal management): the stage
-  and cascade files are the per-stage core of those system models,
-  `mh7_reliability.sio` reproduces the seven-stage paper's published
-  system-level oracles exactly and computes the batch-uncertainty
-  reliability it does not report, and
-  their thermal-energy figures (44–89 kWh_th/kg) are the two endpoints of
-  the decisive interval in `hub_chain.sio`.
-- *Hydrogen* 6(4):91 (2025) (caprock integrity for UHS): the p-box demo
+He is a co-author, not the first author, of every paper below; author
+order checked against the Crossref records (2026-09-15).
+
+- Gkanas et al., *Renewable Energy 147 (2020) 164–178*, DOI
+  10.1016/j.renene.2019.08.104 (seven-stage MH compression for HRS;
+  Stamatakis 4th of 8) and Gkanas et al., *IJHE 46 (2021) 29272–29287*,
+  DOI 10.1016/j.ijhydene.2021.02.062 (dual-stage MH2C under thermal
+  management; Stamatakis 2nd of 9): the stage
+  and cascade files are the per-stage core of those system models.
+  `mh7_reliability.sio` *fits* two of the seven-stage paper's simulated
+  compression ratios with a surrogate and runs batch-uncertainty analysis
+  on that surrogate. It does not reproduce the paper's physics (corrected
+  2026-09-15; it used to say "reproduces … exactly").
+  `examples/hydrogen/mhhc_cascade.sio` couples the stages on the measured
+  Table 3 and bounds the delivery by S7's desorption plateau, and
+  `mhhc_batch_margins.sio` gives each stage's alloy-batch tolerance on that
+  same table (S7 and S6 run out first). Their
+  thermal-energy figures (44–89 kWh_th/kg) are the two endpoints of the
+  decisive interval in `hub_chain.sio`.
+- Trimi et al., *Hydrogen* 6(4):91 (2025), DOI 10.3390/hydrogen6040091
+  (caprock integrity for UHS; Stamatakis 7th of 8): the p-box demo
   quantifies the exact measurement gap the review identifies.
-- *Energies* 16:6257 (2023) (SMR/H2 feasibility, Crete): the hub-chain
+- Chalkiadakis et al., *Energies* 16:6257 (2023), DOI 10.3390/en16176257
+  (SMR/H2 feasibility, Crete; Stamatakis 2nd of 6): the hub-chain
   demo is built entirely from its published parameters — and computes the
   delivered-€/kg uncertainty the paper does not report.
 - TRIERES (EU hydrogen valley, Grant Agreement 101112056; Demokritos is a
@@ -730,14 +1035,16 @@ KMF lower edge above 100× the falsified lab anchor)
   claim — the wellhead-to-dispensed €/kg p-box says the €6/kg gate is
   decided by the heat contract and the dispensing tariff, not by the
   electrolyser spec sheet.
-- *GHG: Sci. & Technol.* (2025), DOI 10.1002/ghg.2368 (H2–brine–calcite
-  geochemistry) and the 2026 geothermal scaling paper: the two gate demos
+- Ghaedi, Gholami, Bellas & Stamatakis, *GHG: Sci. & Technol.* 15 (2025)
+  757–768, DOI 10.1002/ghg.2368 (H2–brine–calcite geochemistry) and the
+  2026 geothermal scaling paper by the same authors (*Geoenergy Sci. Eng.*
+  260:214415, DOI 10.1016/j.geoen.2026.214415): the two gate demos
   arm the exact failure mode they report — extrapolated equilibrium
   constants used past their evidence — with an interval and a refusal
   instead of a silent wrong answer. `vanthoff_gate.sio` gates the calcite
-  pK; `methanation_logk_gate.sio` gates the very log K his GHG paper had
-  to hand-calibrate, and carries a two-line slot for his expression.
-- His techno-economic analyses run sensitivity by hand; here uncertainty
+  pK; `methanation_logk_gate.sio` gates the very log K the GHG paper had
+  to hand-calibrate, and carries a two-line slot for that expression.
+- The group's techno-economic analyses run sensitivity by hand; here uncertainty
   is part of the program's value, and the run is a reproducible receipt.
 - For dual-use / safety contexts (INRASTES is an Energy & **Safety**
   institute, and he leads innovation at CYRUS S.A.): deterministic receipts
@@ -745,12 +1052,22 @@ KMF lower edge above 100× the falsified lab anchor)
 
 ## Honest boundaries
 
-- One stage, flat plateau, no hysteresis/slope, constant C_eff — the
-  extension path (multi-stage cascade, plateau slope, heat-recovery) is
-  straightforward.
+- `mh_stage_uq.sio`: one stage, flat plateau, no hysteresis or slope,
+  constant C_eff. The coupled seven-stage cascade, a three-region PCT
+  isotherm and a cyclic steady state now exist in `examples/hydrogen/`.
+  They are driven by the paper's measured Table 3, but every parameter the
+  paper does not publish is an interval we declared. None of it has been
+  compared with an experiment on a multistage compressor, because no such
+  data is public for this system.
+- `mh7_reliability.sio` is a fitted surrogate with an inverted ΔH ladder;
+  its reliability numbers describe the surrogate, not the compressor (see
+  the flagship section).
 - The MC uses a CLT normal (sum-of-12 uniforms), not an exact Gaussian;
   agreement with a SciPy oracle is within ~2 % on σ_P.
-- Units are encoded by naming/comment discipline in this file; Sounio's
-  compile-time units binding (`stdlib/units`, QUDT) is landing separately —
-  when it does, every equation here becomes dimension-checked by the
-  compiler.
+- Units in these demo files are still encoded by naming and comment
+  discipline. Compile-time units now reach the default engine
+  (`docs/chemistry/SOUNIO_FOR_SURFACE_MICROKINETICS.md` §5), and
+  `examples/hydrogen/h2_verified_surface_rate.sio` shows the refusals.
+  Porting these files to declared units is not done yet, and in that
+  example the dimension and the species are checked on different values,
+  not on one.

@@ -2,7 +2,7 @@
 topic_id: repo.docs.audit.epsilon-polarity-fork-2026-08-19
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-09-11
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.epsilon-polarity-fork-2026-08-19
 -->
@@ -11,7 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.epsilon-
 title: The two engines hold opposite meanings for ε
 status: measured
 date: 2026-08-19
-last_validated: 2026-08-19
+last_validated: 2026-09-11
 engines: Madaros v0.80.0 (default), lean_single
 ---
 
@@ -222,3 +222,22 @@ default compiler.**
     ./bin/souc check tests/compile-fail/vancomycin_low_conf.sio            # check: OK, rc=0
     SOUNIO_SOUC_ENGINE=lean_single ./bin/souc check \
         tests/compile-fail/vancomycin_low_conf.sio                        # error[P0003]
+
+## Closure — 2026-09-11
+
+Closed by PR [#2484](https://github.com/Sounio-lang/sounio/pull/2484), rung
+KL-5. The language decision is to follow the bootstrap seed exactly:
+
+- `ε >= n` is a confidence floor; a provided value must be `>= n`;
+- `ε = n` requires equality;
+- `ε < n` and `ε <= n` are error bounds; a provided value must be `<= n`;
+- an unspecified requirement remains unconstrained, and incompatible modes
+  retain the seed's fail-closed behavior.
+
+Madaros now preserves the parsed `EpsilonBound.op` in `TypeEntry` and uses it
+at compatibility and call boundaries. The negative vancomycin witness is
+refused by both engines, while
+`tests/run-pass/kl5_epsilon_confidence_boundary_ok.sio` supplies 0.90 to a
+`ε >= 0.82` parameter and executes under both. The ratchets are
+`scripts/ci/epsilon_engine_parity_gate.sh` (zero divergence) and
+`scripts/ci/madaros_kl5_epsilon_polarity_gate.sh`.

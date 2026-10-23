@@ -2,454 +2,386 @@
 topic_id: repo.docs.llm-guide.error-catalog
 authority: repo_only
 audience: users
-last_validated: 2026-08-26
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.llm-guide.error-catalog
 -->
 
-# Sounio Error Catalog
-
-Every error an LLM is likely to produce, with diagnosis and fix.
-Organized by the mistake pattern, not the error message text.
-
----
-
-## E01 — Missing effect declaration
-
-**Symptom:** Code compiles in your head but the checker rejects it.
-
-**Error pattern:**
-```
-error: function `foo` uses IO but does not declare `IO` in its effects
-error: effect `Div` required but not declared
-```
-
-**Cause:** You called a function (or used `/`, `%`, `println`, array index) without declaring the
-required effect in `with`.
-
-**Fix:**
-```sio
-// ✗ WRONG
-fn compute(a: f64, b: f64) -> f64 {
-    a / b
-}
-
-// ✓ CORRECT
-fn compute(a: f64, b: f64) -> f64 with Div, Panic {
-    a / b
-}
-```
-
-**Rule:** Effects propagate upward. If `inner` needs `Div`, then every caller of `inner` also needs `Div`.
-When in doubt, give `main` the full set: `with IO, Mut, Div, Panic`.
-
-**Effect reference:**
-
-| What you wrote | Effect needed |
-|----------------|---------------|
-| `a / b` or `a % b` | `Div` |
-| `arr[i]` | `Panic` |
-| `assert(x)` | `Panic` |
-| `x as u8` | `Panic` |
-| `println(...)` | `IO` |
-| `*x = v` or `self.field = v` | `Mut` |
-| `var x = 0; x = 1` | `Mut` |
-| `if obs > threshold` on `Unobserved<T>` | `Observe` |
-
----
-
-## E02 — Semicolon in expression
-
-**Symptom:** Function returns wrong type; unexpected `()` return.
-
-**Error pattern:**
-```
-error: expected i32, found ()
-type mismatch: statement returns () but function declares -> i32
-```
-
-**Cause:** Added `;` after an expression, turning it into a statement that returns `()`.
-
-**Fix:**
-```sio
-// ✗ WRONG
-fn get_val() -> i32 {
-    let x = 5;
-    x + 1;           // ← semicolon makes this return ()
-}
-
-// ✓ CORRECT
-fn get_val() -> i32 {
-    let x = 5
-    x + 1            // no semicolons, expression is the return value
-}
-```
-
-**Global rule:** No semicolons. Ever. Not on `let`, not on expressions, not anywhere.
-
----
-
-## E03 — `&mut` instead of `&!`
-
-**Symptom:** Parse error on function signature.
-
-**Error pattern:**
-```
-error: unexpected token `mut`
-expected type, found `mut`
-```
-
-**Cause:** Used Rust's `&mut T` instead of Sounio's `&!T`.
-
-**Fix:**
-```sio
-// ✗ WRONG
-fn fill(arr: &mut [i64; 8]) { ... }
-fill(&mut buf)
-
-// ✓ CORRECT
-fn fill(arr: &![i64; 8]) with Mut, Panic { ... }
-fill(&!buf)
-```
-
----
-
-## E04 — `let mut` instead of `var`
-
-**Symptom:** Parse error, or variable treated as immutable.
-
-**Fix:**
-```sio
-// ✗ WRONG
-let mut counter = 0
-counter = counter + 1
-
-// ✓ CORRECT
-var counter = 0
-counter = counter + 1
-```
-
----
-
-## E05 — Rust macro syntax
-
-**Symptom:** Parse error on `!` after function name.
-
-**Error pattern:**
-```
-error: unexpected `!` after identifier
-```
-
-**Fix:**
-```sio
-// ✗ WRONG
-println!("hello")
-assert!(x == 5)
-vec![1, 2, 3]
-
-// ✓ CORRECT
-println("hello")
-assert(x == 5)
-// No vec! — use [T; N] arrays
-```
-
----
-
-## E06 — Unary minus
-
-**Symptom:** Parse error on negative literal.
-
-**Fix:**
-```sio
-// ✗ WRONG
-let x = -42
-let y = -3.14
-let z = 0 - -x   // double negative
-
-// ✓ CORRECT
-let x = 0 - 42
-let y = 0.0 - 3.14
-let z = x         // 0 - (0 - x) = x
-```
-
----
-
-## E07 — Closure literal
-
-**Symptom:** Parse error on `|`.
-
-**Error pattern:**
-```
-error: unexpected `|`
-```
-
-**Cause:** Used closure syntax `|x| expr` which is not supported.
-
-**Fix:**
-```sio
-// ✗ WRONG
-let doubled = map(data, |x| x * 2)
-let f = |x: i64| -> i64 { x + 1 }
-
-// ✓ CORRECT — define a named function, pass its reference
-fn double(x: i64) -> i64 { x * 2 }
-fn add_one(x: i64) -> i64 { x + 1 }
-
-let doubled = map(data, double)
-let f = add_one
-```
-
----
-
-## E08 — Generic type parameter
-
-**Symptom:** Parse error on `<T>` in function signature.
-
-**Fix:**
-```sio
-// ✗ WRONG
-fn identity<T>(x: T) -> T { x }
-fn process<T: Display>(x: T) { }
-
-// ✓ CORRECT — write monomorphic functions, one per type
-fn identity_i64(x: i64) -> i64 { x }
-fn identity_f64(x: f64) -> f64 { x }
-```
-
-The only exception: `Knowledge<T>` is a built-in generic — use it as-is.
-
----
-
-## E09 — Bit shift without `u8` operand
-
-**Symptom:** Type error on shift expression.
-
-**Error pattern:**
-```
-error: shift amount must be u8
-```
-
-**Fix:**
-```sio
-// ✗ WRONG
-let high = byte >> 4
-let low = byte & 15
-
-// ✓ CORRECT
-let high = byte >> 4u8
-let low = byte & 15u8
-```
-
----
-
-## E10 — Array mutation doesn't propagate (interpreter)
-
-**Symptom:** Values written to `&![T; N]` inside a function are invisible to the caller.
-
-**Cause:** Known interpreter limitation — bare array `&!` mutation doesn't propagate.
-(Native compiler is unaffected.)
-
-**Fix — wrap in struct:**
-```sio
-// ✗ Broken in JIT interpreter
-fn fill(arr: &![f64; 16]) with Mut, Panic {
-    (*arr)[0] = 99.0    // caller doesn't see this
-}
-
-// ✓ CORRECT — wrap in struct
-struct Buf16 { data: [f64; 16] }
-
-fn fill(buf: &!Buf16) with Mut, Panic {
-    buf.data[0] = 99.0  // struct field mutation works
-}
-
-var b = Buf16 { data: [0.0; 16] }
-fill(&!b)
-// b.data[0] is now 99.0
-```
-
----
-
-## E11 — Top-level `let` (global variable)
-
-**Symptom:** Compiles with JIT, crashes or links incorrectly with native.
-
-**Cause:** The native compiler does not support global `let` bindings (BSS limitation).
-
-**Fix:**
-```sio
-// ✗ WRONG — not portable
-let BUFFER_SIZE: i64 = 256
-let PI: f64 = 3.14159
-
-// ✓ CORRECT — use fn constants
-fn BUFFER_SIZE() -> i64 { 256 }
-fn PI() -> f64 { 3.14159265358979323846 }
-```
-
----
-
-## E12 — Missing explicit `self` in impl
-
-**Symptom:** Method compiles but doesn't mutate anything, or type error.
-
-**Cause:** Forgot `self: &Type` or `self: &!Type`.
-
-**Fix:**
-```sio
-// ✗ WRONG — no self parameter
-impl Counter {
-    fn increment() with Mut { count = count + 1 }  // count is undefined
-}
-
-// ✓ CORRECT
-impl Counter {
-    fn increment(self: &!Counter) with Mut {
-        self.count = self.count + 1
-    }
-    fn value(self: &Counter) -> i64 {
-        self.count
-    }
-}
-```
-
----
-
-## E13 — Float comparison with `==`
-
-**Symptom:** Test passes or fails non-deterministically; assertion on computed float fails.
-
-**Cause:** `f64 == f64` is exact equality — rounding error causes mismatch.
-
-**Fix:**
-```sio
-// ✗ WRONG
-assert(result == 3.14159)
-assert(computed == expected)
-
-// ✓ CORRECT
-use test::helpers::{check_near}
-assert(check_near(result, 3.14159, 1e-5))
-assert(check_near(computed, expected, 1e-9))
-```
-
----
-
-## E14 — Array index type
-
-**Symptom:** Type error when indexing with `i64` or `i32`.
-
-**Error pattern:**
-```
-error: array index must be usize
-```
-
-**Fix:**
-```sio
-// ✗ WRONG
-let x = arr[i]         // i is i64
-
-// ✓ CORRECT
-let x = arr[i as usize]   // needs Panic effect
-```
-
-Or declare the loop variable as `usize` if indexing only:
-```sio
-var i: usize = 0
-while i < n { arr[i]; i = i + 1 }
-```
-
----
-
-## E15 — Returning from inside `if` branch
-
-**Symptom:** Return value is ignored; function returns wrong value.
-
-**Fix:**
-```sio
-// This is correct — early return with explicit return keyword
-fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
-    if x < lo { return lo }
-    if x > hi { return hi }
-    x
-}
-
-// This is also correct — if as expression
-fn abs(x: f64) -> f64 {
-    if x < 0.0 { 0.0 - x } else { x }
-}
-```
-
-Both forms work. Use `return` for early exit, if-expression for terminal value.
-
----
-
-## Quick Diagnosis Flowchart
-
-```
-Got an error?
-│
-├─ Parse error → Check for semicolons, &mut, let mut, |x|, #[, <T>, -n literals
-│
-├─ Effect error → Add missing effects to the function signature (and all callers)
-│
-├─ Type mismatch → Check array index type (usize), check f64 == comparison
-│
-├─ Mutation not working → Are you on JIT? Wrap array in struct
-│
-└─ Undefined variable → Top-level let? Convert to fn constant
-```
-
----
-
-## Machine-Readable Error Code Reference
-
-Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `souc check --json` flag and **no** `souc explain <CODE>` subcommand in Madaros v0.80.0 (both were removed / never shipped — verify with `souc --help`). Read the per-code files under `explanations/` directly.
-
-> **⚠️ Enforcement reality — verified 2026-07-11 against the default `bin/souc` (Madaros).** The default compiler is **more permissive** than this table implies; several listed codes do **not** currently fire under `souc check` (the "wrong" example compiles clean). Verified non-firing: **E035** (missing IO/Div/Observe effect — effects are not enforced under `check`), **E040/E041/E042/E043** (Rust `let mut` / `&mut` / `#[...]` / `ident!()` — these surface as a bare `parse error` or `check: OK`, not a coded compat error), **E201–E207** (the `ZD` capability family — unenforced), **E208/E209** (refinement predicates — `Pos`/`Prob` treated nominally; the predicate is not evaluated), **E213** (tuple-destructure arity), **E216** (recursive struct type), **E224** (unreadable/dead import — silently ignored). Wrong code numbers: an arity mismatch surfaces as **E010** (not E006); a tail/return-type mismatch as **E008** (not E218). Confirmed firing: E001, E010, E170, E171. `check` stops before codegen, so codegen/linker codes (E007, E217–E223) are not reachable via `check`. Treat this table as the code *namespace*, not a guarantee that every guard is wired. (Note: the `lean_single` seed engine is stricter and rejects some of the above — but agents use the default Madaros.)
-
-> **⚠️ One number, two meanings — measured 2026-08-26 (#2180).** This namespace has
-> **two owners**. `lean_single` (the CI oracle and the seed) and `check.sio` (the
-> Madaros checker) both emit `error[E<N>]`, and for the fifteen codes below they
-> emit it for **different diagnostics**. The table above documents the
-> `lean_single` identity in every case; `explanations/E<N>.md` explains that one.
-> If you saw the code come out of the default `bin/souc`, the right-hand column is
-> what you actually hit, and the explanation file will not describe it.
->
-> This happened mechanically, not carelessly: until #2180 `lean_single` printed 42
-> of its diagnostics as a bare `error: <text>` with no number, so a survey taken
-> from inside `check.sio` saw those numbers as free. It now prints 41 of them,
-> and `scripts/ci/diagnostic_identity_gate.sh` surveys both engines, so the next
-> re-allocation collides visibly instead of silently. Which identity keeps each
-> number is a separate decision, per code, and is not yet made.
->
-| Code | `lean_single` emits (documented above) | `check.sio` / Madaros emits |
-|------|----------------------------------------|------------------------------|
-| E006 | arity mismatch | conditions must be of type `bool` |
-| E007 | too many local variables in function | branches have incompatible types |
-| E008 | too many globals | return value does not match the declared return type |
-| E036 | `Unobserved<T>` crosses the observation boundary without `with Observe` | confidence bound is not tight enough |
-| E040 | Rust `let mut` — use `var` | linear value must be used |
-| E041 | Rust `&mut` — use `&!` | ontology subsumption could not be verified |
-| E042 | Rust attribute `#[...]` not valid in Sounio | value does not satisfy the refinement predicate |
-| E043 | Rust macro `ident!(...)` not valid in Sounio | incompatible unit dimensions in conversion |
-| E067 | potential confounding | causal query is non-identifiable (no valid adjustment set) |
-| E080 | `Deterministic` function declares an IO effect | contest metadata is incomplete for witness projection |
-| E208 | refinement type violation (integer) | ZD locus is not a well-formed sedenion pair `eIeJ` |
-| E217 | invalid function body span | f128/f256 value conversion is not implemented; wide-float casts fail closed |
-| E218 | tail type mismatch | f128/f256 is reserved for compiler-owned format identity |
-| E219 | function pass mismatch | call to an `extern "C"` function |
-
-> **E219 is the one exception, and it is instructive.** `lean_single` does NOT
-> print its tag for `function pass mismatch`, because
-> `scripts/ci/e219_engine_oracle_gate.sh` asserts the seed must not spell E219 at
-> all: that oracle scores an engine SPLIT in which E219 is a Madaros judgment
-> about an unimplemented `extern "C"` builtin, and it says outright that a
-> cosmetic E219 on the seed "is a fail, not a close. A real seed refuse is also a
-> fail — update the theorem, do not silence the gate." So the catalogue and that
-> gate disagree about who owns E219. Tagging the seat forced the disagreement
-> into the open; resolving it is a decision about the theorem, not an edit.
-| E221 | no main | this math function is bound for typechecking but the native backend cannot emit it |
+# Diagnose and repair Sounio failures
+
+Read a failure as **engine + adapter + stage + complete message + code + source
+revision**. The same number can identify different failures on different
+routes. An editor's synthesized diagnostic is not necessarily a compiler code.
+
+This guide inspects source at
+`f5b2c5850be9f3d3995719ffcade44a6d851658a`. It does not run the listed
+fixtures, certify every guard, or establish a global error-code namespace.
+This is a source-inspected edition; structural checks and execution receipts
+remain separate. The [diagnostics chapter](../spec/2026-10/09-conformance-diagnostics-and-compatibility.md)
+defines the evidence boundaries. Use the [complete example atlas](examples.md)
+for full positive programs and intentional refusal witnesses, with their
+manifest/profile qualifications.
+
+## Start with the deciding route
+
+| Route | What actually decides the result | First source to inspect |
+| --- | --- | --- |
+| Public default `bin/souc check` | Madaros resolution followed by the selected wrapper/raw artifact; the modular wrapper requests raw `--check`. | [bin/souc](../../bin/souc), [bin/madaros](../../bin/madaros), [main.sio](../../self-hosted/compiler/main.sio), and the artifact/build receipt. |
+| Explicit `lean_single` through `bin/souc check` | The adapter invokes the seed's positional compiler with a temporary output. This can reach native compilation. | [bin/souc](../../bin/souc) forced-engine branch and [lean_single.sio](../../self-hosted/compiler/lean_single.sio). |
+| Modular parser compatibility refusal | The parser can emit a code and recover enough to find more errors. Recovery does not make the source valid. | [stmts.sio](../../self-hosted/parser/stmts.sio), [types.sio](../../self-hosted/parser/types.sio), and [exprs.sio](../../self-hosted/parser/exprs.sio). |
+| Modular type/effect/ownership refusal | The particular checker entrypoint reached from preflight; inspect its caller as well as the message table. | [check.sio](../../self-hosted/check/check.sio), especially `print_error_message`, dedicated reporters, and call sites. |
+| Native lowering, emission, linking, or execution | The requested backend and target after any frontend checks; a different stage can expose an independent defect. | [main.sio](../../self-hosted/compiler/main.sio), [lower.sio](../../self-hosted/ir/lower.sio), the named backend, and fresh output. |
+| MCP/editor presentation | Normalization and fallback parsing can alter the code, span, severity view, or classification. | [MCP diagnostics](../../tools/mcp/sounio_mcp/diagnostics.py), [check adapter](../../tools/mcp/sounio_mcp/check.py), and [LSP text parser](../../tools/lsp/parse_diagnostics.sh). |
+
+The [canonical test suite](../../scripts/run_sio_test_suite.sh), its
+[implementation](../../scripts/dev/run_sio_test_suite.sh), the
+[conformance runner](../../scripts/ci/serious_language_conformance_gate.sh), and
+[MCP test tool](../../tools/mcp/sounio_mcp/test.py) are different dispatchers.
+In the conformance runner both `check-fail` and `compile-fail` call `check`.
+MCP also checks its recognized negative cases. These labels alone establish
+neither a parser-only failure nor a native emission attempt. A library module
+without `main` should normally be checked or exercised through its driver;
+requesting execution can create an unrelated entrypoint failure.
+
+### Preserve this evidence before editing
+
+1. Record source path/hash, imports, revision/dirty source state, compiler
+   artifact/hash/build receipt, engine, adapter, target, and stdlib.
+2. Save the exact invocation, exit status, and both complete streams. Inspect
+   messages before the final “preflight failed” or “type checking failed”
+   summary; the summary usually names a consequence.
+3. Identify the earliest cause and its stage. Verify the enclosing module and
+   callee declaration; a source span without file identity may be insufficient.
+4. Reproduce on the same profile and make one justified edit. Keep the
+   requirement, expected output, and semantic invariants fixed.
+5. Recheck, then verify the requested behavior or named refusal. Acceptance by
+   another engine is separate comparative evidence. Stop and retain a
+   reproducer for an unsupported operation or compiler defect.
+
+Do not remove effects, type annotations, constraints, uncertainty, or provenance
+to make the diagnostic disappear. Do not lower precision, change algebra,
+weaken expected results, or disable a checker. A negative test must fail for
+the intended cause; missing tools, timeouts, unsupported imports, and crashes
+do not satisfy its semantic refusal contract.
+
+## Common syntax mistakes and misleading old advice
+
+Use [syntax and modules](../spec/2026-10/01-lexical-syntax-and-modules.md)
+and the actual parser before turning a historical workaround into a rule.
+
+| Symptom | Genuine cause to investigate | Safe repair and existing source candidate |
+| --- | --- | --- |
+| `let mut` rejected | Mutable bindings use `var`; the compatibility parser recognizes the foreign spelling to diagnose it. | Change binding syntax while preserving its type and intended mutability. Inspect [parser_rust_let_mut.sio](../../tests/compile-fail/parser_rust_let_mut.sio). |
+| `&mut T` rejected | Exclusive references use `&!T`; a shared `&T` cannot replace an exclusive capability. | Match parameter and call-site borrow to the required capability. Inspect [parser_rust_mut_ref.sio](../../tests/compile-fail/parser_rust_mut_ref.sio). |
+| Macro-like `ident!(...)` rejected | A foreign macro call was written instead of an ordinary declared function call. | Look up the real function signature; deleting `!` does not create a missing API. Inspect [parser_rust_macro.sio](../../tests/compile-fail/parser_rust_macro.sio) and [parser_rust_macro_path_qualified.sio](../../tests/compile-fail/parser_rust_macro_path_qualified.sio). |
+| `#[...]` rejected | The Rust-attribute compatibility refusal does not define Sounio annotation syntax. | Use only the annotation form supported for that item. Inspect [parser_rust_attribute.sio](../../tests/compile-fail/parser_rust_attribute.sio). |
+| Unexpected unit or tail result | A final expression, explicit return, or branch differs from the declared result. | Compare every return path. “No semicolons anywhere” is false: array syntax contains `;` and the modular statement parser handles optional semicolons. Do not remove punctuation mechanically. |
+| Failure near unary minus | Operand type, parser route, or lowering may be at fault. | `parse_prefix` in [exprs.sio](../../self-hosted/parser/exprs.sio) handles unary minus. Inspect [kl1_unary_type_errors.sio](../../tests/compile-fail/kl1_unary_type_errors.sio); do not impose a language-wide `0 - x` rewrite. |
+| Failure near a closure or generic application | Specialization, captures, effect inference, a higher-order call, or representation may be unsupported. | Current source has generics and closures. Compare [generic_struct_basic.sio](../../tests/run-pass/generic_struct_basic.sio), [generics_multi_param.sio](../../tests/run-pass/generics_multi_param.sio), and [closure_effect_infer_auto.sio](../../tests/run-pass/closure_effect_infer_auto.sio); preserve profile boundaries. |
+| Compound assignment rejected by the seed | A seed compatibility limit differs from the modular assignment parser. | Inspect the actual `E260` message. A profile-specific explicit assignment may be appropriate; it is not a ban throughout Sounio. |
+
+The old local headings `E01`, `E02`, and so on were tutorial mistake numbers,
+not stable compiler identities. Descriptive sections avoid confusing them with
+actual `E001` and similar codes.
+
+## Types, names, calls, and returns
+
+These are **modular checker message identities** from `print_error_message`,
+not universal meanings across engines.
+
+| Diagnostic | Cause | Repair that preserves the contract |
+| --- | --- | --- |
+| `E001`, `E002`, `E003` | Binding mismatch, assignment mismatch, or mutation of an immutable binding. | Trace declared and inferred types. Use `var` only for intended mutation; do not widen types merely to suppress a mismatch. Check whether `E001` was synthesized first. |
+| `E004`, `E005`, `E048`–`E051` | Operator incompatible with its operands. | Select an operation defined for the types. An `as` cast is not a universal conversion and must not erase epistemic or precision information. |
+| `E006`, `E007`, `E008`, `E009`, `E010`, `E018` | Non-boolean condition, differing branch types, wrong return, argument type, arity, or match-arm result. | Compare the declaration with the entire call or branch. Fix argument order/count and the wrong expression; do not change the function contract by guesswork. |
+| `E011`–`E017`, `E020`, `E046`, `E047` | Wrong receiver, member, index, aggregate field, element type, or tuple position. | Read the complete definition and initializer. The modular index message requires an integer; it does not mandate `usize` for every index. |
+| `E175`–`E177`, `E259` | Access through a private function, constructor, or field boundary. | Use the public API or request an authorized API change. Renaming a qualifier does not grant visibility. |
+| `E213`, `E216` | Tuple destructuring arity mismatch or an infinitely recursive type. | Match the tuple shape; for recursion, inspect permitted representation/indirection. Do not invent a supported heap abstraction. |
+| `E263` | A qualified call's module name collides with an unrelated method identity. | Inspect imports and declarations; use an existing unambiguous API or report the boundary. More qualification is not an automatic fix. |
+| `E264` | The selected native representation cannot preserve a payload-bearing enum use. | Preserve data and meaning. Change representation only through an authorized review, or report an unsupported-profile result. |
+| `E270` | `as string` is being used as numeric/bool/char formatting. | Use a real formatting or typed-printing API after inspecting its implementation/profile support. Do not reinterpret a scalar as a string pointer. |
+
+Existing negative witnesses include
+[condition_not_bool.sio](../../tests/ui/type/condition_not_bool.sio),
+[if_branch_mismatch.sio](../../tests/ui/type/if_branch_mismatch.sio),
+[array_index_type.sio](../../tests/ui/type/array_index_type.sio),
+[tuple_destructure_arity_mismatch.sio](../../tests/compile-fail/tuple_destructure_arity_mismatch.sio),
+and [cast_float_as_string_print_refused_issue_2354.sio](../../tests/compile-fail/cast_float_as_string_print_refused_issue_2354.sio).
+Read annotations; source presence is not a fresh passing result.
+
+An unresolved name is not evidence that forward declarations are prohibited.
+Read import loading, spelling, visibility, receiver type, and the call signature.
+The seed's `E200` undefined-identifier identity collides with the modular
+message for a `Forgettable` effect obligation.
+
+## Effects: repair the obligation, not the symptom
+
+`E035` is actively represented in modular source. The checker includes
+`report_effect_error_from`, `check_callee_effects`, and dedicated mutation/effect
+checks; effect-name admission is also checked. The July 2026 claim that
+default `check` never enforces effects is historical, not current guidance.
+The [bounded conformance receipt](../spec/2026-10/15-bounded-conformance-receipt.md)
+records a separately executed profile and an effects-negative case. That
+receipt does not establish every trigger on every installed binary.
+
+Read the diagnostic's enclosing function, `missing:` list, and `required by`
+callee when present. Compare the callee's actual effect row with the caller's
+permitted row, including function-valued arguments and closures. Add only the
+required, justified effects at the correct boundary and propagate obligations
+to affected named callers. Moving an operation to a permitted effectful boundary
+is an alternative only when it preserves the task's behavior.
+
+Mutation generation has operation-specific rules. The checker introduces `Mut`
+for a store through an exclusive reference; that does not justify the old
+blanket claim that every local `var` declaration/reassignment requires `Mut`.
+Inspect [effect_mut_generated_at_excl_ref_store.sio](../../tests/compile-fail/effect_mut_generated_at_excl_ref_store.sio)
+and the [effects chapter](../spec/2026-10/03-effects-handlers-and-concurrency.md).
+Determine the effect from the actual builtin/checker path rather than assigning
+`Panic` to every index or cast by analogy.
+
+| Diagnostic or message | Cause and safe response | Existing source witness |
+| --- | --- | --- |
+| `E035`: missing effects | A checked body/call requires effects absent from its permitted row. Repair the named obligation and recheck callers. | [effect_missing.sio](../../tests/compile-fail/effect_missing.sio) and [effect_superset_ok.sio](../../tests/run-pass/effect_superset_ok.sio). |
+| `E246`: unknown effect | A spelling is neither a supported builtin nor an admitted declared effect on this route. Verify the declaration/registry. | [effect_unknown_name_refused.sio](../../tests/compile-fail/effect_unknown_name_refused.sio). |
+| `E246`: ninth distinct effect dropped | The selected representation has eight signature slots and refuses overflow. Do not drop necessary obligations or add a blanket “all effects” row. | [effect_ninth_slot_refused.sio](../../tests/compile-fail/effect_ninth_slot_refused.sio). |
+| `E053`: closure effect uncertainty | A particular higher-order boundary cannot establish permitted effects. Inspect inference and the receiving function type. | [closure_effect_escape.sio](../../tests/compile-fail/closure_effect_escape.sio). |
+| `E070` or `E253` in a kernel | Forbidden kernel effects or non-unit return on the inspected modular route. Move host operations to a justified host boundary. | [check.sio](../../self-hosted/check/check.sio) and [targets chapter](../spec/2026-10/06-execution-memory-and-targets.md). |
+| `E201`–`E207` capability effects | A type-specific `ZD` or additional effect boundary is unsatisfied. Inspect the type/reporter before changing the signature. | [check.sio](../../self-hosted/check/check.sio) capability checks. |
+
+Declaring an effect permits an operation at a typed boundary; it does not supply
+an implementation, runtime witness, scientific guarantee, or proof. Diagnostic
+prose about capability guarantees is not independent mathematical or security
+evidence.
+
+## Ownership, aliases, and mutation
+
+The modular `E037`/`E038` messages distinguish an active exclusive borrow from
+conflicting outstanding borrows. `E039` reports reuse of a linear value and
+`E040` can report failure to consume it. Inspect control-flow paths and capture
+behavior; copying the handle, adding a dummy use, or discarding it can violate
+the resource contract.
+
+`E267` refuses assignment through a shared reference, including relevant
+auto-dereferenced field/index forms. Changing a shared parameter to exclusive
+changes its API and caller obligations; do so only for intended and permitted
+mutation. Scope or release a borrow using an existing supported pattern.
+
+Start with paired
+[borrow_call_conflict_explicit.sio](../../tests/compile-fail/borrow_call_conflict_explicit.sio)
+and [borrow_call_explicit_release.sio](../../tests/run-pass/borrow_call_explicit_release.sio).
+For mutation that compiles but is not observable, inspect value layout,
+copying, aliasing, and the actual engine. Wrapping every array in a struct
+was an interpreter-specific workaround, not a language rule or native guarantee.
+
+`E232` names a shallow array-copy hazard when one local initializes two fields.
+Preserve the required sharing or independence explicitly. Do not rewrite a
+data structure without checking caller-visible behavior.
+
+## Knowledge, uncertainty, provenance, and refinements
+
+Read the [epistemic chapter](../spec/2026-10/04-knowledge-uncertainty-and-provenance.md)
+before modifying these contracts. A convenient scalar replacement can erase
+the very information the program must preserve.
+
+| Diagnostic or family | What to establish | Safe response |
+| --- | --- | --- |
+| `E170`, `E171` | Which extraction/access or cast crosses the epistemic boundary on this route. | Keep `Knowledge<T>` through computations where possible. Use an implemented, justified extraction boundary with required `Epistemic`; never cast away the wrapper. |
+| `E036`, `E214`, `E215` | The actual confidence/completeness or observation requirement for that engine. | Repair missing evidence or incorrect flow. Lowering a threshold or inventing confidence changes the requirement. |
+| `E230`, `E236` | Shared noise/source lineage or a reused correlated binding, and the operation's independence assumption. | Preserve correlation and variance. Do not duplicate measurements, strip wrappers, or assert independence. `Correlated` is not a numerical implementation or covariance proof. |
+| `E178`, `E179` | Noise-source or source-set tracking capacity was exhausted. | Retain the refusal and investigate the supported workload/representation. Disabling tracking changes the claim. |
+| `E243` | A required compile-time correlation coefficient was supplied as an unsupported runtime expression. | Use evidence-supported metadata in a supported representation; substituting zero asserts a different model. |
+| `E244`, `E265` | Argument provenance or temporal validity fails the parameter's requirement. | Repair custody/validity at its real source or supply a satisfying value. Renaming a provenance tag/date is not evidence. |
+| Modular `E042`, `E052`; seed `E208`/`E209` | A refinement is violated or cannot be established. | Inspect the predicate, supported guard/proving path, and exact caller/return. Do not weaken the predicate to accept an invalid value. |
+| `E269` | The profile refuses a `where` refinement on `Knowledge<T>` because it would otherwise be ignored. | Both satisfying and violating values can be refused for unsupported enforcement. Preserve the predicate and report the boundary. |
+
+Existing sources include
+[knowledge_no_silent_unwrap.sio](../../tests/compile-fail/knowledge_no_silent_unwrap.sio),
+[ns_add_shared_source_rejected.sio](../../tests/compile-fail/ns_add_shared_source_rejected.sio),
+[ns_add_via_identity_rejected.sio](../../tests/compile-fail/ns_add_via_identity_rejected.sio),
+and paired
+[valid-value E269 refusal](../../tests/compile-fail/knowledge_where_refinement_refused_valid_2753.sio)
+and [invalid-value E269 refusal](../../tests/compile-fail/knowledge_where_refinement_refused_invalid_2753.sio).
+These are source-selected candidates, not calculations performed here.
+
+`E245` is a separate modular boundary for arithmetic between two
+`Knowledge<T>` values. Adding effects or repairing lineage does not supply
+missing lowering. Inspect
+[knowledge_binary_arith_has_no_lowering.sio](../../tests/compile-fail/knowledge_binary_arith_has_no_lowering.sio)
+and its engine requirement. A seed implementation or a library struct named
+`Epistemic` is a different route and must not be substituted silently.
+
+For `.value`, inspect the actual receiver type and extraction path. A plain
+library struct field does not automatically acquire the builtin `Knowledge`
+gate because its field has the same name. Absence of a diagnostic also does
+not prove that epistemic meaning survived lowering.
+
+## Precision, algebra, unsupported operations, and resources
+
+A refusal can protect against silent corruption. Treat these as operation-specific
+implementation limits until the requested path has evidence.
+
+| Diagnostic | Interpretation on the inspected route | Safe next step |
+| --- | --- | --- |
+| `E247` | Invalid encoded `ZD` sedenion-pair locus shape. | Correct the malformed locus from its declaration/source convention; preserve the algebra. |
+| `E248` | A particular wide-float value conversion lacks implementation. | Preserve required `f128`/`f256` identity and report the conversion boundary. Inspect [f128_cast_to_f64_unimplemented.sio](../../tests/compile-fail/f128_cast_to_f64_unimplemented.sio). |
+| `E249` | Retained V0-A reservation identity, with no live modular parser emitter in the inspected V0-B source. | Inspect the emitted diagnostic and specific operation/profile. Do not infer that all wide types are unavailable. |
+| `E250` | A called `extern "C"` function lacks implementation on the selected native path. | Distinguish declaration from call. Use only an implemented call or report missing backend integration. |
+| `E251`, `E252` | Refused algebra-dependent variance shortcut or unjustified reassociation strategy. | Preserve variance, multiplication law, order, and parenthesization. Review the model/implementation contract. |
+| Modular `E221` | A math function is bound for checking but lacks native emission. | Inspect the backend and an existing driver; frontend acceptance is not execution. |
+| Seed/codegen `E217`–`E223` | Body-span, return/pass-layout, unresolved-call, entrypoint, or capacity failures in published identities. | Check syntax/declarations and the deciding backend. Internal invariants need a reproducer and compiler repair. |
+| `E224`–`E229`, `E258`, explicit overflow | Import/readability, source/token/name capacity, or truncation refusal on the emitting route. | Verify the real dependency and path. Arbitrarily shortening literals or identities changes the program. |
+
+The [numeric specification](../spec/2026-10/05-numerics-units-and-algebra.md)
+documents selected wide-operation paths. Several old negative fixtures for
+V0-A `E249` are ignored as superseded: read their annotations before
+presenting them as current requirements. Do not demote a precision-sensitive
+task to `f64` to bypass a refusal.
+
+For ontology/causal failures, inspect the actual graph/class and rule.
+Modular `E041`, `E150`–`E152`, `E261`/`E262` name ontology obligations
+on relevant paths; `E067`/`E068` and `E254`–`E257` concern causal-query
+or independence boundaries where wired. A fabricated node or weakened graph
+does not repair the original model. A compiler check is not empirical causality.
+
+## Known identity collisions and remaps
+
+Use the full message and emitting stage. These observations do not allocate
+or rename codes.
+
+| Code encountered | Distinct identities to distinguish |
+| --- | --- |
+| `E006`, `E007`, `E008` | Seed: arity / local capacity / global capacity. Modular: boolean condition / branch type / return type. |
+| `E035` | Modular and seed effect reporters exist. The MCP resource titles it “Recursive type rejected,” which does not describe the current effect reporter. |
+| `E036` | Seed observation-boundary identity versus modular confidence bound. |
+| `E040` | Parser/seed `let mut` refusal versus modular linear-consumption checks. |
+| `E041` | Parser/seed `&mut` refusal; modular ontology message-table identity; separate direct unit-mismatch prints also exist in `check.sio`. |
+| `E042`, `E043` | Parser/seed attribute or macro refusal versus modular refinement or unit-conversion identity. |
+| `E070`, `E072` | Historical kernel explanations coexist with other checker identities. Current modular kernel return refusal is `E253`; modular `E072` names a malformed conditional-independence claim. |
+| `E200`, `E221` | Seed undefined identifier / missing main versus modular `Forgettable` effect obligation / missing native math implementation. |
+
+The [remap gate](../../scripts/ci/diagnostic_remap_2170_gate.sh) retains seed
+`E208`/`E217`/`E218`/`E219` and assigns the unrelated modular identities to
+`E247`/`E248`/`E249`/`E250`. The old table pairing those as current collisions
+was stale. `E249` is catalog-only in that gate: a message arm is not an emitter.
+
+The [identity ratchet](../../scripts/ci/diagnostic_identity_gate.sh) scans
+message tables, direct prints, and this page's published namespace rows.
+Known remaining collisions are permitted up to explicit ceilings; a pass
+does not prove that every code has one meaning.
+
+## Diagnostic transport is not the compiler verdict
+
+The MCP [check implementation](../../tools/mcp/sounio_mcp/check.py) requests
+`check <source> --json`. Its [normalizer](../../tools/mcp/sounio_mcp/diagnostics.py)
+accepts JSON diagnostics or scans stdout/stderr for lines containing “error”
+or “warning.” A well-formed adapter envelope does not establish native JSON
+support.
+
+- JSON/LSP ranges are zero-based; MCP `line`/`column`/`span` are one-based.
+  Preserve the original range, URI, and raw streams.
+- Text fallback recognizes limited location wording and can use line 1,
+  column 1. Offsets without a file identity are not exact editor locations.
+- Missing paths, resolver failures, timeouts, and unclassified nonzero exits
+  can become synthetic `E001`. A suggested type fix may be irrelevant.
+- `valid` requires an empty diagnostic list and exit zero; a warning prevents
+  this adapter's next step. A warning is not automatically a compiler error.
+- Schema `sounio.diagnostic.v1` validates shape, not attribution, parser
+  completeness, or checking-route coverage.
+- Outer `isError: false` can accompany a failed tool result. Inspect
+  `structuredContent`, `valid`/`status`, return code, and streams.
+- `sounio_compile` tests nonempty output and no timeout when forming `status`;
+  its success predicate does not require return code zero. Inspect that code,
+  diagnostics, fresh artifact identity, and target format.
+- `sounio_run` checks first, then separately calls `run`. A subsequent compile
+  refusal is classified as `runtime_error` on nonzero exit; execution may
+  never have begun.
+
+The check result does not report a resolved raw compiler path/hash or stdlib
+identity. Retrieve those through a separate receipt in the server's actual
+environment. Moreover, `run.py` calls its initial check without the per-call
+`env` overrides, then applies those overrides to the later `run` command.
+Compiler/profile overrides can produce different checking and execution
+profiles. Keep those settings identical server-side and record the environment
+externally. If agreement cannot be established, label the identity unknown or
+the profiles separate and repeat CLI check plus run on one known profile.
+Normalized MCP diagnostics alone do not establish conformance.
+
+The MCP [test tool](../../tools/mcp/sounio_mcp/test.py) reads only the first
+20 lines of annotations and a subset of canonical metadata. It lacks full
+`requires`, `known-failure`, and `typecheck-fail` admission semantics. An
+`error-pattern` can route a fixture to `check`, but does not identify its engine.
+Its check-only success predicate uses absence of parsed diagnostics without
+requiring exit zero and no timeout. Its negative predicate checks diagnostics
+and an optional substring rather than the full conformance exit/stage contract.
+Its `expect-stdout` assertion is a substring check. Use the canonical suite or
+named gate when these distinctions matter.
+
+The [tool tests](../../tools/mcp/tests/test_tools.py) and
+[protocol tests](../../tools/mcp/tests/test_protocol.py) assert selected tool,
+schema, discovery, and SDK properties. Their source does not establish all
+profile, severity, transport fallback, or negative-case boundaries above.
+
+## Maintaining the explanation pages
+
+There are three separate surfaces:
+
+1. Compiler/parser emitters and focused tests establish source behavior;
+   current receipts establish what actually ran.
+2. Committed [explanations/](explanations) pages are historical Markdown of
+   differing ages and engine assumptions. Illustrative fragments and
+   recommendations require profile-specific review.
+3. MCP resources are rendered by
+   [errors_catalog.py](../../tools/mcp/sounio_mcp/errors_catalog.py) from its own
+   `ERROR_CATALOG`, not from those Markdown files.
+
+No checked-in regeneration command for the entire `explanations/E*.md` set was
+identified in this inspection. No `souc explain` route was found in the inspected
+public launcher dispatch. Do not invent a regeneration or explain command.
+Reading `sounio://errors/<CODE>` renders the static catalog again; it does
+not refresh the meaning from compiler source.
+
+To refresh an explanation safely:
+
+1. Pin revision, profile, emitter, dispatch/caller, and test annotations.
+   Find every identity using that code, including direct prints.
+2. Compare fresh messages with the proposed text and source traces. Old
+   line numbers drift. Mark retired emitters and preserve engine distinctions.
+3. Update only approved Markdown/catalog entries and governance metadata.
+   Check copied full-program markers against the atlas manifest; a fragment
+   is not an executable example.
+4. Review positive/refusal witnesses in the authorized environment and retain
+   identities/results. A timeout, missing tool, or wrong engine is not the
+   intended refusal.
+5. Re-read the affected resource/page, check links and metadata, and report
+   which surfaces changed versus remain stale.
+
+Relevant checks, **listed rather than executed by this guide**:
+
+| Check | What it establishes | Qualification |
+| --- | --- | --- |
+| `node scripts/docs/check_docs_registry.mjs` | Registry, metadata, and selected local-link consistency. | Does not validate Sounio execution or scientific meaning. |
+| `node scripts/docs/validate_language_spec.mjs` | Edition structure and source/evidence reference consistency. | Does not establish a compiler result. |
+| `scripts/ci/diagnostic_remap_2170_gate.sh` | Static mappings and mutation controls; optional live `--souc` path. | Success without `--souc` is explicitly not live evidence. |
+| `scripts/ci/diagnostic_identity_gate.sh` | Namespace ratchets and extraction controls. | A passing ceiling is not per-code semantic verification. |
+| `tools/mcp/tests/test_tools.py`, `test_protocol.py`, `test_loop.py` | Selected direct-tool, schema, protocol, deterministic-loop assertions. | This page claims no test execution or model benchmark. |
+
+The diagnostic shell gates contain Python helpers and the MCP loop recipe
+calculates benchmark aggregates in Python. They are inventory references,
+not permission to bypass ADR009. Use an authorized path for numerical
+verification or disclose the execution constraint before running it.
+
+Unresolved contradictions are recorded in the
+[diagnostics audit](reviews/diagnostics-audit.md). Use that bounded inventory
+rather than rewriting all explanations at once.
+
+## Published namespace index
+
+The table preserves published identities and links for discovery and the
+identity ratchet's input format. **This is historical namespace data, not a
+universal current-route lookup.** Route-specific sections above supersede its
+gloss when they differ. In particular, `E249` is retired on the inspected
+modular parser path, several low-numbered identities collide, and a linked
+page is not a fresh execution receipt.
 
 | Code | Component | Severity | Gloss | Explanation |
 |------|-----------|----------|-------|-------------|
@@ -519,3 +451,13 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E256 | type-checker/causal | error | `d_separated` needs a declared causal graph and exactly two variable names, with an optional conditioning set | — |
 | E257 | type-checker/causal | error | `indep_dsep`'s argument must be a `d_separated(...)` call the compiler itself discharged, not a hand-written value | — |
 | E258 | parser | error | string literal(s) exceed Name capacity (384 bytes incl. quotes); refuses rather than silently truncating | [E258.md](explanations/E258.md) |
+| E259 | type-checker/visibility | error | struct field is private in its defining module | — |
+| E260 | lexer (lean_single) | error | compound assignment (`+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=`) is not supported by lean_single; write `x = x op (e)` | — |
+| E261 | type-checker/ontology | error | ontology classes are disjoint and cannot be combined by this operator (e.g. an amount of H2 added to an amount of CO2) | — |
+| E262 | type-checker/ontology | error | ontology classes are unrelated: no subsumption between them, so the operator cannot say what the result is an amount of | — |
+| E263 | type-checker/modules | error | qualified call is ambiguous: the qualifier names a `use`d module but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs | — |
+| E264 | type-checker/enums | error | enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped (construction, payload sub-pattern, or struct pattern over a user enum) | — |
+| E265 | type-checker/epistemic | error | Temporal validity window mismatch: the provided value's validity window cannot satisfy the required type's validity constraint | [E265.md](explanations/E265.md) |
+| E267 | type-checker/ownership | error | cannot assign through a shared reference: the place is reached through `&T` (explicit `*p` or the auto-deref of `p.f` / `p[i]`), which is read-only; take `&!T` (#888) | — |
+| E269 | type-checker/epistemic | error | a `where` refinement on `Knowledge<T>` is not enforced by this compiler yet; the program is refused instead of running with the predicate silently ignored (#2753) | — |
+| E270 | type-checker/casts | error | `as string` does not convert a number, bool or char to text; the cast is refused instead of compiling to a program that uses the value as a string pointer (#2354) | — |

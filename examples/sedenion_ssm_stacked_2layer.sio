@@ -14,6 +14,17 @@
 //   - Selective gating preserves state through zeros
 //   - ZD annihilation in layer 1 propagates forgetting into layer 2
 //   - 16D sedenion coupling creates richer trajectories than 8D octonion
+//
+// Finding (2026-10-06): with these hand-set parameters depth does NOT
+// amplify. Layer 2 sees layer 1 through B2 = 0.4·e0 and a lerp gate, so it is
+// a lagged, smoothed copy of layer 1: separation shrinks on every one of
+// the 15 permutation pairs (2L/1L <= 0.32), and nearest-reference accuracy
+// at D=40 drops from 6/6 to 4/6. T3 ("sep2 >= 0.95 sep1") and T6 ("acc2 >=
+// acc1") asserted the opposite and failed on both engines. The compiled
+// numbers match an independent float64 reimplementation of this file to the
+// printed digits, so this is the model's behaviour, not a compiler bug. T3
+// and T6 now record the measured direction; if a change to the model or the
+// compiler flips it, they fail and the finding must be re-examined.
 
 use math::sedenion::*;
 
@@ -378,6 +389,16 @@ fn eval_separation_2layer() -> f64 with Mut, Div, Panic {
     if count > 0 { total / (count as f64) } else { 0.0 }
 }
 
+// ─── Permutation table: token k (0..2) of permutation p (0..5) ────────────
+fn perm_t(p: i64, k: i64) -> i64 {
+    if p == 0 { if k == 0 { 1 } else if k == 1 { 2 } else { 3 } }
+    else if p == 1 { if k == 0 { 1 } else if k == 1 { 3 } else { 2 } }
+    else if p == 2 { if k == 0 { 2 } else if k == 1 { 1 } else { 3 } }
+    else if p == 3 { if k == 0 { 2 } else if k == 1 { 3 } else { 1 } }
+    else if p == 4 { if k == 0 { 3 } else if k == 1 { 1 } else { 2 } }
+    else { if k == 0 { 3 } else if k == 1 { 2 } else { 1 } }
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────
 fn main() -> i32 with IO, Mut, Div, Panic {
     var passed: i32 = 0
@@ -404,15 +425,35 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         failed = failed + 1
     }
 
-    // T3: 2-layer state separation > 1-layer
+    // T3: Depth contracts state separation, pair by pair.
+    // Was: sep2 >= 0.95 * sep1. Falsified (see header): measured 2026-10-06,
+    // sep2 = 0.107 vs sep1 = 0.513 on both engines. T3 now checks the
+    // measured direction on every one of the 15 pairs, not just the mean.
     let sep1: f64 = eval_separation_1layer()
     let sep2: f64 = eval_separation_2layer()
-    // Depth improves accuracy; separation should not collapse (≥95% of 1L)
-    if sep2 >= sep1 * 0.95 {
-        print("T3 PASS: sep 2L="); print(sep2); print(" >= 0.95*1L="); print(sep1 * 0.95); println("")
+    var pairs_contracted: i64 = 0
+    var worst_ratio: f64 = 0.0
+    var pi: i64 = 0
+    while pi < 6 {
+        var qj: i64 = pi + 1
+        while qj < 6 {
+            let d1: f64 = state_dist(forward_1layer(perm_t(pi, 0), perm_t(pi, 1), perm_t(pi, 2), 0, 0),
+                                     forward_1layer(perm_t(qj, 0), perm_t(qj, 1), perm_t(qj, 2), 0, 0))
+            let d2: f64 = state_dist(forward_2layer(perm_t(pi, 0), perm_t(pi, 1), perm_t(pi, 2), 0, 0),
+                                     forward_2layer(perm_t(qj, 0), perm_t(qj, 1), perm_t(qj, 2), 0, 0))
+            if d2 < d1 { pairs_contracted = pairs_contracted + 1 }
+            if d1 > 0.0 { if d2 / d1 > worst_ratio { worst_ratio = d2 / d1 } }
+            qj = qj + 1
+        }
+        pi = pi + 1
+    }
+    if sep2 < sep1 && pairs_contracted == 15 {
+        print("T3 PASS: depth contracts, sep 2L="); print(sep2); print(" < 1L="); print(sep1)
+        print("; 15/15 pairs, max 2L/1L ratio="); print(worst_ratio); println("")
         passed = passed + 1
     } else {
-        println("T3 FAIL")
+        print("T3 FAIL: sep 2L="); print(sep2); print(" 1L="); print(sep1)
+        print(" pairs contracted="); print_int(pairs_contracted); println("/15")
         failed = failed + 1
     }
 
@@ -439,14 +480,17 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         failed = failed + 1
     }
 
-    // T6: 2-layer accuracy >= 1-layer accuracy at D=40
+    // T6: At D=40 depth costs accuracy.
+    // Was: acc2 >= acc1. Falsified (see header): measured 2026-10-06,
+    // 2L = 4/6 vs 1L = 6/6 on both engines (and 2L < 1L at D = 0, 5, 10,
+    // 20 too, in the independent reimplementation).
     let acc1_40: i64 = eval_accuracy_1layer(0, 40)
     let acc2_40: i64 = eval_accuracy_2layer(0, 40)
-    if acc2_40 >= acc1_40 {
-        print("T6 PASS: 2L acc="); print_int(acc2_40); print("/6 >= 1L acc="); print_int(acc1_40); println("/6")
+    if acc2_40 < acc1_40 {
+        print("T6 PASS: depth costs accuracy at D=40, 2L acc="); print_int(acc2_40); print("/6 < 1L acc="); print_int(acc1_40); println("/6")
         passed = passed + 1
     } else {
-        println("T6 FAIL")
+        print("T6 FAIL: 2L acc="); print_int(acc2_40); print("/6 1L acc="); print_int(acc1_40); println("/6")
         failed = failed + 1
     }
 

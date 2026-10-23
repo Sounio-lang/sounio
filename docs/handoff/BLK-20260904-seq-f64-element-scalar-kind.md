@@ -2,8 +2,8 @@
 topic_id: repo.docs.handoff.blk-20260904-seq-f64-element-scalar-kind
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.blk-20260904-seq-f64-element-scalar-kind
 -->
 
@@ -11,7 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.blk-20
 
 ```text
 Blocker-ID: BLK-20260904-seq-f64-element-scalar-kind
-Status: open
+Status: closed
 Severity: B1
 Class: compiler-semantics
 Owner: lang-limits-20260903
@@ -24,12 +24,18 @@ Observed: reading a Seq<f64> element produced 2^63 instead of the value, and
   println refused the same read with "unresolved scalar kind".
 Expected: a Seq<f64> element is a float in every spelling.
 Acceptance-Gate: scripts/ci/madaros_seq_f64_scalar_kind_gate.sh
-Evidence-Level: E3
+Evidence-Level: E4
+Evidence: scripts/ci/madaros_seq_f64_scalar_kind_gate.sh ->
+  MADAROS_SEQ_F64_SCALAR_KIND_GATE_OK, run 2026-09-06 against two engines built
+  from source: 39d72a37a9 (md5 54eccf3d), the merge of PR #2413, and main
+  6b2b7ff9b0 (md5 593ab4c9), two merges later. Remote: GitHub CI run
+  34030342462 on main 6b2b7ff9b0, job "Madaros Current-Source f64 Lowering",
+  step "Seq<f64> element reads classify as float" -> success.
 Fallback-Path: bind the read to a typed local before use.
 LLM-Offload: not-required
-Residual: `&Seq<f64>` PARAMETER is NOT fixed -- separate path, wrong value in
-  one shape and SIGSEGV in another.
-Next-Action: root-cause the parameter path.
+Residual: `&Seq<T>` PARAMETER -- CLOSED 2026-09-09, see Residual closure. It was
+  NOT a separate pre-existing path as recorded below: PR #2413 introduced it.
+Next-Action: none for this blocker. The parameter path is tracked separately.
 ```
 
 ## Observed
@@ -95,3 +101,112 @@ classifiers were fixed, and all six verifications still pass without them.
 - **`&Seq<f64>` as a parameter.** Distinct from the local and struct-field
   paths. One shape returns a wrong value, another segfaults. Not investigated.
 - Seq element types other than f64/f32 and i64 are untested here.
+
+## Closure (2026-09-06)
+
+Closed as fixed, not waived. Landed in PR #2413, merged to `main` as
+`0f46f7c3dc`.
+
+What closes it: `scripts/ci/madaros_seq_f64_scalar_kind_gate.sh`, the acceptance
+gate named in the record above, returns `MADAROS_SEQ_F64_SCALAR_KIND_GATE_OK`.
+Re-run on 2026-09-06 against a Madaros built from the merged commit
+`39d72a37a9`, engine md5 `54eccf3d`, with `SOUNIO_MADAROS_BIN` pinned, and again
+against one built from `main` at `6b2b7ff9b0`, engine md5 `593ab4c9`, two merges
+later. Green on both. The second is the one that matters for a closure: it says
+the fix survives on the branch it landed on, not only on the commit that made
+it.
+
+The gate runs two fixtures, not one: the minimal
+`tests/run-pass/seq_f64_element_scalar_kind.sio`, and the stdlib consumer
+`tests/stdlib/graph/test_sinkhorn_e2e.sio`, which carries `Seq<f64>` measures and
+matrices read through `&ProbMeasure` / `&CostMatrix` receivers. The second is
+there because the first alone would pass on a fix that only handled bare locals.
+Both are wired into `.github/workflows/ci.yml` (job "Madaros Current-Source f64
+Lowering").
+
+### Remote confirmation (E4)
+
+GitHub CI run 34030342462, on `main` at `6b2b7ff9b0`, job "Madaros
+Current-Source f64 Lowering": the gate step reports success on a runner-built
+compiler, with no local environment involved. That is what lifts this record
+from E3 (gate-bound) to E4 (remote-confirmed).
+
+The same job fails at a later, unrelated step — "Run changed Madaros tests with
+the current-source compiler", an intermittent exit 137 (killed) while rechecking
+a fixed list of 20 known-failure tests. It fails identically on `main` and has
+failed at other commits, so it is not attributable to this work and is not
+claimed fixed here.
+
+### The residual is live, and did not close with this record
+
+`&Seq<T>` as a **parameter** is still broken. Closing this blocker without
+moving that finding would have left an active wrong-code defect recorded only
+inside a document marked closed — which is the failure mode this whole round of
+work was about.
+
+Re-measured 2026-09-06 on the `39d72a37a9` engine, `Seq<i64>` holding
+`10, 20, 30`:
+
+| shape | by reference | by value |
+|---|---|---|
+| `s.len().unwrap(...)` | `4201410`, same every run | `3` |
+| `s.get(0)` | a stack address, different every run | `10` |
+| accumulating loop over both | SIGSEGV (rc 139) | `60` |
+
+Both by-reference results are addresses rather than data: one static, one moving
+under ASLR across five runs. The callee is reading one indirection level off —
+it receives the address of the handle instead of the handle. `souc check`
+accepts all of it.
+
+On the `main` engine `593ab4c9` only the witness was re-run, not the full table;
+it reports the gap present.
+
+This also **narrows** the original residual: it is not specific to `f64`. It
+reproduces on `Seq<i64>`, so it is not a float-classification defect at all and
+never belonged to this blocker's root cause.
+
+It now lives in three places that stay open:
+
+- `docs/compiler/KNOWN_LIMITATIONS.md` — the measured limitation and the working
+  rule (take `Seq<T>` by value).
+- `tests/known-gaps/language/seq_ref_param_loses_handle.sio` — the repro, which
+  asserts the defect.
+- `scripts/ci/language_gap_ratchet_gate.sh` — a ratchet line that fails on
+  purpose when the parameter path starts working, which is the signal to move
+  the repro into `tests/run-pass/` and write the migration note.
+
+To re-open this blocker: `bash scripts/ci/madaros_seq_f64_scalar_kind_gate.sh`.
+A non-zero exit or a missing sentinel re-opens it. The parameter residual is a
+different failure and does not re-open this record.
+
+## Residual closure (2026-09-09) — and a correction
+
+The `&Seq<T>` parameter residual is fixed. `lower_seq_recv_base_ref` in
+`self-hosted/ir/lower.sio` loads through the reference before handing the handle
+to the Seq intrinsics. Fixture
+`tests/run-pass/seq_ref_param_delivers_handle.sio`, gate
+`scripts/ci/madaros_seq_ref_param_gate.sh`; both verified able to fail against a
+compiler built without the change.
+
+**The framing above is wrong and is corrected here.** This record called the
+parameter path "separate" and implicitly pre-existing. It was neither. Measured
+on a compiler built from PR #2413's merge-base `d8048c7ad9`, `s.len()` on a
+`&Seq<i64>` is refused:
+
+```
+error[E019] ... method calls are not supported for this type
+```
+
+PR #2413's own reference-receiver fix — unwrapping a `TyRef` receiver to its
+`TyNamed` pointee in the checker — made the call resolve, with no counterpart in
+lowering. A clean rejection became silent wrong code, and it shipped that way
+for three days. The residual was not something this blocker inherited; it was
+something the blocker's own branch created and then documented as inherited.
+
+The mechanism that caught it was the ratchet line added when the residual was
+recorded: it asserts the defect and goes red when the defect closes. It did,
+naming the witness, which is what triggered this migration.
+
+A/B on one worktree with only the engine swapped (`750c19bd` without the fix,
+`6f961a02` with it): `graph` and `generic` suites have byte-identical failure
+sets, and `seq` differs by exactly the new fixture. Zero regressions.

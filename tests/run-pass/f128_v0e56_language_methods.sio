@@ -1,0 +1,204 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: V0-E.5.6 — language f128 through impl methods: `-> f128` returns, f128 params, self / &self / &!self receivers (no f64 payload)
+//@ ladder-stage: V0-E.5.6
+//@ semantic-lane: WS-G-V0E-STDLIB-GUM-SURFACE
+//@ claim-clock: sounio_native_expected (ADR-008 / ADR-009)
+//@ note: lean_single language f128 still greenwashes to f64 — not a claim path
+//@ note: f128_from_limbs/to_lo/to_hi call sites are intercepted; bodies are placeholders
+//
+// Gate: scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e56
+//
+// An impl method is lowered as the mangled free function `Vec2_norm2`; its
+// IrFunction carries the same identity a free fn does (return_struct_name ==
+// "f128", f128_param_mask). V0-E.5.6 teaches the lowerer to read that identity
+// at a METHOD CALL: `v.norm2()` is an f128 expression (annotated / unannotated
+// `let`, operand, argument to an f128-param fn, comparison operand, assignment
+// RHS, chained `v.scale(two).norm2()`), and an explicit argument to an f128
+// param lowers as binary128 through the callee's mask with the receiver bit
+// shifted out (`v.scale(2.0)`: the literal is the bit for `k`, never f64 bits).
+// Receivers: by value `self`, `self: &Vec2`, `self: &!Vec2` (mutating an f128
+// field through the reference). Mixed `i64 + f128` params. f256 methods, arrays
+// of f128, and compound assignment (`+=`) stay deferred / fail-closed.
+// Distinct non-zero exits:
+// 11=annotated_let 12=unannotated_let 13=operand 14=arg_to_f128_fn
+// 15=cmp_operand 16=literal_arg 17=chained 18=bool_method_f128_param
+// 19=struct_param_dot 20=ref_self 21=refmut_self_bump 22=mixed_i64_f128
+// 23=greenwash_sq 24=sq 25=assign_rhs 26=method_result_field
+
+use math::softfloat_f128::{
+    f128_from_limbs,
+    f128_to_lo,
+    f128_to_hi,
+}
+use math::wide_float::{print_limb_hex16}
+
+struct Vec2 { x: f128, y: f128 }
+
+impl Vec2 {
+    fn norm2(self) -> f128 { self.x * self.x + self.y * self.y }
+    fn dot(self, o: Vec2) -> f128 { self.x * o.x + self.y * o.y }
+    fn scale(self, k: f128) -> Vec2 { Vec2 { x: self.x * k, y: self.y * k } }
+    fn x_lt(self, t: f128) -> bool { self.x < t }
+    fn sq(self) -> f128 { self.x * self.x }
+    fn sum_ref(self: &Vec2) -> f128 { self.x + self.y }
+    fn bump(self: &!Vec2, d: f128) with Mut { self.x = self.x + d }
+    fn axpy(self, n: i64, k: f128) -> f128 {
+        var acc: f128 = 0.0
+        var i: i64 = 0
+        while i < n {
+            acc = acc + self.x * k
+            i = i + 1
+        }
+        acc
+    }
+}
+
+fn twice(a: f128) -> f128 { a + a }
+fn sum_via_ref(p: &Vec2) -> f128 { p.sum_ref() }
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("v0e56_main_entered")
+    let one: f128 = 1.0
+    let two: f128 = 2.0
+    let tiny: f128 = f128_from_limbs(3746994889972252672, 4592679628783035426)
+    let v = Vec2 { x: 1.0, y: 2.0 }
+
+    // Annotated let from a `-> f128` method: 1 + 4 = 5.
+    let n: f128 = v.norm2()
+    if f128_to_lo(n) != 0 || f128_to_hi(n) != 4612037862148276224 {
+        println("FAIL annotated_let")
+        return 11
+    }
+    // Unannotated let: the local must be a wide handle, not f64.
+    let m = v.norm2()
+    if f128_to_lo(m) != 0 || f128_to_hi(m) != 4612037862148276224 {
+        println("FAIL unannotated_let")
+        return 12
+    }
+    // Method result as an operand: 5 + 1 = 6; 5 * 2 = 10.
+    let s: f128 = v.norm2() + one
+    let p: f128 = v.norm2() * two
+    if f128_to_hi(s) != 4612108230892453888 || f128_to_hi(p) != 4612319337124986880 || f128_to_lo(p) != 0 {
+        println("FAIL operand")
+        return 13
+    }
+    // Method result as the argument of an f128-param free fn: 2 * 5 = 10.
+    let t: f128 = twice(v.norm2())
+    if f128_to_lo(t) != 0 || f128_to_hi(t) != 4612319337124986880 {
+        println("FAIL arg_to_f128_fn")
+        return 14
+    }
+    // Method result as a comparison operand.
+    if !(v.norm2() > two) || v.norm2() < two || !(v.norm2() == n) {
+        println("FAIL cmp_operand")
+        return 15
+    }
+    // Bare literal argument to an f128 param: binary128 2.0, so (2, 4).
+    let w = v.scale(2.0)
+    if f128_to_lo(w.x) != 0 || f128_to_hi(w.x) != 4611686018427387904
+        || f128_to_lo(w.y) != 0 || f128_to_hi(w.y) != 4611967493404098560 {
+        println("FAIL literal_arg")
+        return 16
+    }
+    // Chained: (2, 4).norm2() = 4 + 16 = 20.
+    let c: f128 = v.scale(two).norm2()
+    if f128_to_lo(c) != 0 || f128_to_hi(c) != 4612600812101697536 {
+        println("FAIL chained")
+        return 17
+    }
+    // bool method with an f128 param, ident and literal arguments.
+    if !v.x_lt(two) || v.x_lt(0.5) || w.x_lt(two) {
+        println("FAIL bool_method_f128_param")
+        return 18
+    }
+    // By-value struct param on a method: (1,2)·(2,4) = 2 + 8 = 10.
+    let d: f128 = v.dot(w)
+    if f128_to_lo(d) != 0 || f128_to_hi(d) != 4612319337124986880 {
+        println("FAIL struct_param_dot")
+        return 19
+    }
+    // `self: &Vec2` receiver, on a local and through a `&Vec2` param: 1 + 2 = 3.
+    let r1: f128 = v.sum_ref()
+    let r2 = sum_via_ref(&v)
+    if f128_to_hi(r1) != 4611826755915743232 || f128_to_hi(r2) != 4611826755915743232 || f128_to_lo(r2) != 0 {
+        println("FAIL ref_self")
+        return 20
+    }
+    // `self: &!Vec2` receiver mutating an f128 field: 1 + 2 = 3, then + 0.5 = 3.5.
+    var b = Vec2 { x: 1.0, y: 1.0 }
+    b.bump(two)
+    if f128_to_hi(b.x) != 4611826755915743232 {
+        println("FAIL refmut_self_bump_ident")
+        return 21
+    }
+    b.bump(0.5)
+    if f128_to_lo(b.x) != 0 || f128_to_hi(b.x) != 4611897124659920896 || !(b.y == one) {
+        println("FAIL refmut_self_bump")
+        return 21
+    }
+    // Mixed i64 + f128 params: 3 * (1 * 2) = 6.
+    let ax: f128 = v.axpy(3, two)
+    if f128_to_lo(ax) != 0 || f128_to_hi(ax) != 4612108230892453888 {
+        println("FAIL mixed_i64_f128")
+        return 22
+    }
+    // Anti-f64 through a method: (1+~1e-20)^2 keeps the 2*tiny term.
+    let g = Vec2 { x: one + tiny, y: one }
+    let sq: f128 = g.sq()
+    print("got_method_sq=")
+    print_limb_hex16(f128_to_lo(sq))
+    print(":")
+    print_limb_hex16(f128_to_hi(sq))
+    println("")
+    if f128_to_lo(sq) == 0 && f128_to_hi(sq) == 4611404543450677248 {
+        println("FAIL f64_greenwash_method_sq")
+        return 23
+    }
+    if f128_to_lo(sq) != 103845937170696 || f128_to_hi(sq) != 4611404543450677248 {
+        println("FAIL method_sq")
+        return 24
+    }
+    // Method call as the RHS of an f128 assignment: 5.
+    var acc: f128 = 0.0
+    acc = v.dot(v)
+    if f128_to_lo(acc) != 0 || f128_to_hi(acc) != 4612037862148276224 {
+        println("FAIL assign_rhs")
+        return 25
+    }
+    // f128 field read straight off a struct-returning method: (1,2)*2 → x = 2.
+    let mx: f128 = v.scale(two).x
+    if f128_to_lo(mx) != 0 || f128_to_hi(mx) != 4611686018427387904 {
+        println("FAIL method_result_field")
+        return 26
+    }
+
+    print("wire_norm2=")
+    print_limb_hex16(f128_to_lo(n))
+    print(":")
+    print_limb_hex16(f128_to_hi(n))
+    println("")
+    print("wire_chained=")
+    print_limb_hex16(f128_to_lo(c))
+    print(":")
+    print_limb_hex16(f128_to_hi(c))
+    println("")
+    print("wire_method_sq=")
+    print_limb_hex16(f128_to_lo(sq))
+    print(":")
+    print_limb_hex16(f128_to_hi(sq))
+    println("")
+    print("wire_bump_x=")
+    print_limb_hex16(f128_to_lo(b.x))
+    print(":")
+    print_limb_hex16(f128_to_hi(b.x))
+    println("")
+    print("wire_axpy=")
+    print_limb_hex16(f128_to_lo(ax))
+    print(":")
+    print_limb_hex16(f128_to_hi(ax))
+    println("")
+
+    println("PASS f128_v0e56_language_methods general=ieee754 anti_f64=green language_methods=madaros")
+    return 0
+}

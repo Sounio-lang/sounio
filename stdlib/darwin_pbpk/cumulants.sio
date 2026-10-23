@@ -9,6 +9,7 @@
 
 use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::theta_pbpk28::*
 use darwin_pbpk::epistemic_pbpk28::{EpPrior28, ep28_rapamycin_params, ep28_rapamycin_priors}
 use darwin_pbpk::epistemic_pbpk28_hessian::{Pbpk28HessianBudget, hessian_pbpk28_auc}
 
@@ -107,8 +108,8 @@ pub struct CumulantState {
 pub struct CumulantSummary {
     mean:     f64,
     variance: f64,
-    kappa3:   f64,
-    kappa4:   f64,
+    pub kappa3:   f64,
+    pub kappa4:   f64,
 }
 
 pub fn cumulant_init() -> CumulantState {
@@ -153,11 +154,11 @@ pub fn cumulant_finalize(state: CumulantState) -> CumulantSummary with Div {
 // ============================================================================
 
 pub struct LognormalCumulants {
-    sigma2_log: f64,
+    pub sigma2_log: f64,
     variance:   f64,
-    kappa3:     f64,
-    kappa4:     f64,
-    central4:   f64,
+    pub kappa3:     f64,
+    pub kappa4:     f64,
+    pub central4:   f64,
 }
 
 pub fn lognormal_cumulants_from_mean_variance(mean: f64, variance: f64) -> LognormalCumulants with Mut, Div, Panic {
@@ -181,10 +182,10 @@ pub fn lognormal_cumulants_from_mean_variance(mean: f64, variance: f64) -> Logno
 // ============================================================================
 
 pub struct DerivativeBudget {
-    d1:      [f64; 8],
-    d2:      [f64; 8],
-    d3:      [f64; 8],
-    success: bool,
+    pub d1:      [f64; 8],
+    pub d2:      [f64; 8],
+    pub d3:      [f64; 8],
+    pub success: bool,
 }
 
 fn m5_derivatives_zero() -> DerivativeBudget {
@@ -209,26 +210,26 @@ fn m5_perturb(prm: PBPKParams28, idx: i32, delta: f64) -> PBPKParams28 with Mut,
     return p
 }
 
+// Bolus run at dt = 0.1 h: Rannacher-started clamp-free CN (theta_pbpk28).
+// Shared by m5_simulate_auc and the mass-balance gate. Until 2026-09-26 this
+// was pbpk28_full_cn_step (+52% AUC_blood floor bias at this dt).
+pub fn m5_simulate_ledger(prm: PBPKParams28, dose_mg: f64, t_end: f64,
+                          st: &!PBPKState28, led: &!PBPK28Ledger) -> bool with Mut, Div {
+    return pbpk28_bolus_run_mut(prm, dose_mg, 0.1, t_end, 5000, st, led)
+}
+
+// A stencil AUC is usable iff finite and > 0 (0.0 is m5_simulate_auc's
+// failure value).
+fn m5_solve_ok(auc: f64) -> bool {
+    return m5_finite(auc) && auc > 0.0
+}
+
 fn m5_simulate_auc(prm: PBPKParams28, dose_mg: f64, t_end: f64) -> f64 with Mut, Div, Panic {
-    let dt = 0.1
     var st = pbpk28_state_zero()
-    st.cv[0] = dose_mg / prm.v_ref[0]
-    var t = 0.0
-    var auc = 0.0
-    var c_prev = st.cv[0]
-    var steps = 0
-    while t < t_end {
-        if steps > 5000 { return 0.0 }
-        let dt_use = if t + dt > t_end { t_end - t } else { dt }
-        let st_new = pbpk28_full_cn_step(st, prm, 0.0, dt_use)
-        let c_new = st_new.cv[0]
-        if !m5_finite(c_new) { return 0.0 }
-        auc = auc + 0.5 * (c_prev + c_new) * dt_use
-        c_prev = c_new
-        t = t + dt_use
-        st = st_new
-        steps = steps + 1
-    }
+    var led = pbpk28_ledger_zero()
+    if !m5_simulate_ledger(prm, dose_mg, t_end, &!st, &!led) { return 0.0 }
+    let auc = led.auc[0]
+    if !m5_finite(auc) { return 0.0 }
     return auc
 }
 
@@ -257,6 +258,12 @@ pub fn extract_pbpk28_derivatives(
             let f_n1 = m5_simulate_auc(m5_perturb(base_prm, i, 0.0 - h), dose_mg, t_end)
             let f_p2 = m5_simulate_auc(m5_perturb(base_prm, i, 2.0 * h), dose_mg, t_end)
             let f_n2 = m5_simulate_auc(m5_perturb(base_prm, i, 0.0 - 2.0 * h), dose_mg, t_end)
+            // m5_simulate_auc returns 0.0 for a rejected trajectory (see
+            // pbpk28_bolus_run_mut); one rejected stencil solve fails the
+            // whole budget rather than entering the quotients as 0.
+            if !m5_solve_ok(f_p1) || !m5_solve_ok(f_n1) || !m5_solve_ok(f_p2) || !m5_solve_ok(f_n2) {
+                return m5_derivatives_zero()
+            }
             out.d1[i] = (0.0 - f_p2 + 8.0 * f_p1 - 8.0 * f_n1 + f_n2) / (12.0 * h)
             out.d2[i] = (0.0 - f_p2 + 16.0 * f_p1 - 30.0 * f0 + 16.0 * f_n1 - f_n2) / (12.0 * h * h)
             out.d3[i] = (f_p2 - 2.0 * f_p1 + 2.0 * f_n1 - f_n2) / (2.0 * h * h * h)
@@ -287,22 +294,22 @@ pub fn extract_auc_inverse_derivatives(dose: f64, cl: f64, v: f64, h: f64) -> De
 // ============================================================================
 
 pub struct VarianceBudget4th {
-    u_1st:               f64,
-    u_2nd_hessian:       f64,
+    pub u_1st:               f64,
+    pub u_2nd_hessian:       f64,
     u_2nd_skewness:      f64,
     u_4th_kurtosis:      f64,
     u_4th_cubic:         f64,
-    u_total:             f64,
-    var_1st:             f64,
+    pub u_total:             f64,
+    pub var_1st:             f64,
     var_hessian:         f64,
-    var_skewness:        f64,
-    var_kurtosis:        f64,
-    var_cubic:           f64,
-    var_total:           f64,
-    rel_hess_residual:   f64,
-    rel_fourth_residual: f64,
-    dominant_index:      i32,
-    success:             bool,
+    pub var_skewness:        f64,
+    pub var_kurtosis:        f64,
+    pub var_cubic:           f64,
+    pub var_total:           f64,
+    pub rel_hess_residual:   f64,
+    pub rel_fourth_residual: f64,
+    pub dominant_index:      i32,
+    pub success:             bool,
 }
 
 fn m5_variance_zero() -> VarianceBudget4th {
@@ -439,14 +446,20 @@ pub fn variance_budget_4th_from_hessian(
     return out
 }
 
+// M6 canonical MC truth: u_MC of AUC_blood(0-168 h) from
+// validation/pbpk28_mc_cross_validation.sio (LogNormal priors, N=2000,
+// seed=1729, dt=0.5 h). Re-derived 2026-09-26 after that module moved off the
+// floored CN kernel: 0.357945 -> 0.211790 mg·h/L (lean_single run). The old
+// value is the one docs/dissertation/results/m6_prior_update_v1.md records;
+// it carried the +140% floor bias of the dt=0.5 h kernel.
+pub fn m5_pbpk28_u_mc_canonical() -> f64 { return 0.211790 }
+
 pub fn m5_pbpk28_convergence_budget() -> VarianceBudget4th with Mut, Div, Panic, Epistemic {
     let prm = ep28_rapamycin_params()
     let priors = ep28_rapamycin_priors()
     let der = extract_pbpk28_derivatives(prm, priors, 5.0, 168.0)
     let hess = hessian_pbpk28_auc(prm, priors, 5.0, 168.0)
-    // M6 canonical MC truth, N=2000 seed=1729 dt=0.5h, documented in
-    // docs/dissertation/results/m6_prior_update_v1.md.
-    variance_budget_4th_from_hessian(der, hess, priors, 0.357945)
+    variance_budget_4th_from_hessian(der, hess, priors, m5_pbpk28_u_mc_canonical())
 }
 
 pub fn m5_pbpk28_second_order_reference() -> Pbpk28HessianBudget with Mut, Div, Panic, Epistemic {

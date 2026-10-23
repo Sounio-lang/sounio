@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 cd "$ROOT_DIR"
 
 TMP_DIR="$(mktemp -d /tmp/statistical-coverage-binding-d9-gate.XXXXXX)"
@@ -114,7 +116,7 @@ printf '\n' >>"$TMP_DIR/tampered.data"
 if python3 "$oracle" --dataset "$TMP_DIR/tampered.data" \
     --manifest "$manifest" --protocol "$protocol" \
     >"$TMP_DIR/data-tamper.log" 2>&1; then
-    fail "dataset byte tamper unexpectedly passed"
+    fail "dataset byte tamper unexpectedly passed"  # refusal-classifier-exempt: Python oracle hash check, not a compiler refusal
 fi
 grep -Fq "dataset SHA-256 mismatch" "$TMP_DIR/data-tamper.log" || {
     cat "$TMP_DIR/data-tamper.log" >&2
@@ -126,7 +128,7 @@ printf ' ' >>"$TMP_DIR/tampered-protocol.json"
 if python3 "$oracle" --dataset "$dataset" --manifest "$manifest" \
     --protocol "$TMP_DIR/tampered-protocol.json" \
     >"$TMP_DIR/protocol-tamper.log" 2>&1; then
-    fail "protocol byte tamper unexpectedly passed"
+    fail "protocol byte tamper unexpectedly passed"  # refusal-classifier-exempt: Python oracle hash check, not a compiler refusal
 fi
 grep -Fq "protocol SHA-256 mismatch" "$TMP_DIR/protocol-tamper.log" || {
     cat "$TMP_DIR/protocol-tamper.log" >&2
@@ -138,10 +140,17 @@ expect_type_rejection() {
     local expected="$2"
     local found="$3"
     local log="$TMP_DIR/$(basename "$source").reject.log"
-    if bin/souc check "$source" >"$log" 2>&1; then
+    local rc=0
+    bin/souc check "$source" >"$log" 2>&1 || rc=$?
+    if [[ "$rc" -eq 0 ]]; then
         cat "$log" >&2
         fail "$source unexpectedly typechecked"
     fi
+    # rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+    sounio_expect_failed_exit "$rc" "$log" || {
+        cat "$log" >&2
+        fail "$source: not a clean refusal: $(sounio_refusal_reason)"
+    }
     grep -q "expected $expected" "$log" || {
         cat "$log" >&2
         fail "$source lacked expected type $expected"
@@ -155,10 +164,17 @@ expect_type_rejection() {
 expect_private_constructor_rejection() {
     local source="$1"
     local log="$TMP_DIR/$(basename "$source").private.log"
-    if bin/souc check "$source" >"$log" 2>&1; then
+    local rc=0
+    bin/souc check "$source" >"$log" 2>&1 || rc=$?
+    if [[ "$rc" -eq 0 ]]; then
         cat "$log" >&2
         fail "$source unexpectedly constructed a reserved authority receipt"
     fi
+    # rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+    sounio_expect_failed_exit "$rc" "$log" || {
+        cat "$log" >&2
+        fail "$source: not a clean refusal: $(sounio_refusal_reason)"
+    }
     grep -q 'error\[E176' "$log" || {
         cat "$log" >&2
         fail "$source lacked E176 private-constructor refusal"

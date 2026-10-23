@@ -2,8 +2,8 @@
 topic_id: repo.docs.architecture.async-runtime
 authority: historical
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.async-runtime
 -->
 
@@ -577,9 +577,9 @@ cargo test channel
 
 ## Related Documentation
 
-- [Effects System](LLM_PROGRAMMING_GUIDE.md#effects) - `with Async` effect
-- [GPU Runtime](GPU_RUNTIME.md) - GPU async operations
-- [Epistemic Types](api/EPISTEMIC_API.md) - Uncertainty through async
+- [Effects System](../guide/LLM_PROGRAMMING_GUIDE.md#effects) - `with Async` effect
+- [GPU Runtime](../features/GPU_RUNTIME.md) - GPU async operations
+- [Epistemic Types](../reference/EPISTEMIC_API.md) - Uncertainty through async
 
 ---
 

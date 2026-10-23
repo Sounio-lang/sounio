@@ -24,6 +24,17 @@
 //   2. Monte Carlo: perturb ALL 180 coefficients by N(0, σ²),
 //      run forward pass, collect output distribution
 //   3. Compare: GUM σ_output vs MC std, coverage analysis
+//
+// MEASURED (2026-10-06, both engines, this file; MC N=2000 x 3 inputs):
+//   additive band (hidden u(h) added with sensitivity 1 -- the rule in the
+//   paper draft's Algorithm 1): σ ratio GUM/MC 1.48-3.23, out0 coverage
+//   99.75-99.85 %, pooled (both outputs) 99.9 % of a nominal 95 % interval.
+//   That band is CONSERVATIVE, not calibrated.
+//   first-order LPU (sensitivity dφ/dh applied): ratio 0.98-1.21, pooled
+//   coverage 96.3 %; out0 94.4-96.2 %, out1 97.0-97.8 %.
+//   + second-order cross term: ratio 0.98-1.23, pooled coverage 96.5 %.
+//   T1-T5 are the original order-of-magnitude checks on the additive band
+//   and are unchanged; nothing here is tuned toward 95 %.
 
 // ─── Math helpers ───
 
@@ -89,6 +100,16 @@ fn hat(x: f64, k: i64) -> f64 with Div {
     1.0 - d
 }
 
+// d hat_k / dx (piecewise constant: ±4 on the two active hats, 0 elsewhere).
+// At an exact knot the right-hand derivative is used.
+fn hat_deriv(x: f64, k: i64) -> f64 with Div {
+    let c = (k as f64) * 0.25
+    let d = abs_e(x - c) / 0.25
+    if d >= 1.0 { return 0.0 }
+    if x >= c { return 0.0 - 4.0 }
+    4.0
+}
+
 // ─── Weight storage ───
 // L1: 24 edges × 5 coeffs = 120
 // L2: 12 edges × 5 coeffs = 60
@@ -125,6 +146,11 @@ fn get_pert(idx: i64) -> f64 with Div {
 // Hidden layer values
 var H_VAL: [i64; 6] = [0; 6]
 var H_UNC: [i64; 6] = [0; 6]
+
+// Output standard uncertainties of the three GUM bands (scaled by 1e9).
+// Index band * 2 + output, band 0 = additive (Algorithm 1 of the paper draft),
+// band 1 = first-order LPU, band 2 = first-order LPU + second-order term.
+var BAND_SIG: [i64; 6] = [0; 6]
 
 fn kan_forward_gum(x0: f64, x1: f64, x2: f64, x3: f64) with Mut, Div, Panic {
     // Layer 1: 4 inputs → 6 hidden
@@ -170,47 +196,74 @@ fn kan_forward_gum(x0: f64, x1: f64, x2: f64, x3: f64) with Mut, Div, Panic {
 
     // Layer 2: 6 hidden → 2 output
     // Edge (i, j) at index 120 + (i*2+j)*5+k
+    // The hidden-layer uncertainties u(h_i) are exact here: layer 1 is linear
+    // in its coefficients and the inputs carry no uncertainty.  Hidden units
+    // use disjoint coefficients, so they are uncorrelated with each other and
+    // with the layer-2 coefficients.
+    //
+    // Three ways of carrying u(h_i) through edge (i, j) of layer 2, where
+    // x = clamp((h_i + 2) / 4) and phi(x) = Σ c_k hat_k(x):
+    //   additive  : u²_prop = u²(h_i)                     (sensitivity taken as 1)
+    //   LPU (1st) : u²_prop = (∂phi/∂h_i)² u²(h_i)         (JCGM 100:2008 eq. 10)
+    //               ∂phi/∂h_i = Σ_k c_k hat_k'(x) / 4, zero where x is clamped
+    //   LPU + 2nd : adds Σ_k (∂²phi/∂c_k∂h_i)² u²(c_k) u²(h_i)  (JCGM 100:2008
+    //               5.1.2 note; the pure ∂²phi/∂h_i² term is zero inside a
+    //               hat segment, so the cross term is the only one left)
     j = 0
     while j < 2 {
         var s = 0.0
-        var vs = 0.0
+        var vs_add = 0.0
+        var vs_lpu = 0.0
+        var vs_so = 0.0
         var i = 0
         while i < 6 {
             // Normalize hidden to [0,1]
             let hv = (H_VAL[i] as f64) / 1000000000.0
             let hu = (H_UNC[i] as f64) / 1000000000.0
             var x = (hv + 2.0) / 4.0
-            if x < 0.0 { x = 0.0 }
-            if x > 1.0 { x = 1.0 }
+            var dxdh = 0.25
+            if x < 0.0 { x = 0.0; dxdh = 0.0 }
+            if x > 1.0 { x = 1.0; dxdh = 0.0 }
 
             let base = 120 + (i * 2 + j) * 5
             var edge_val = 0.0
             var edge_var = 0.0
+            var dphi = 0.0
+            var cross = 0.0
             var k = 0
             while k < 5 {
                 let b = hat(x, k)
+                let db = hat_deriv(x, k) * dxdh
                 let c = get_weight(base + k)
                 edge_val = edge_val + c * b
                 edge_var = edge_var + b * b * get_sigma() * get_sigma()
+                dphi = dphi + c * db
+                cross = cross + db * db * get_sigma() * get_sigma()
                 k = k + 1
             }
             s = s + edge_val
-            // Propagate hidden uncertainty through layer 2
-            // Approximate: σ²_out += edge_var + hidden_var (additive)
-            vs = vs + edge_var + hu * hu
+            vs_add = vs_add + edge_var + hu * hu
+            vs_lpu = vs_lpu + edge_var + dphi * dphi * hu * hu
+            vs_so = vs_so + edge_var + dphi * dphi * hu * hu + cross * hu * hu
             i = i + 1
         }
-        // Store output (reuse H_VAL/H_UNC for simplicity — only 2 outputs)
+        // Store output (reuse H_VAL/H_UNC for simplicity — only 2 outputs).
+        // H_UNC keeps the additive band so the T1-T5 checks below are unchanged.
         if j == 0 {
             H_VAL[0] = (s * 1000000000.0) as i64
-            H_UNC[0] = (sqrt_e(vs) * 1000000000.0) as i64
+            H_UNC[0] = (sqrt_e(vs_add) * 1000000000.0) as i64
         } else {
             H_VAL[1] = (s * 1000000000.0) as i64
-            H_UNC[1] = (sqrt_e(vs) * 1000000000.0) as i64
+            H_UNC[1] = (sqrt_e(vs_add) * 1000000000.0) as i64
         }
+        BAND_SIG[j] = (sqrt_e(vs_add) * 1000000000.0) as i64
+        BAND_SIG[2 + j] = (sqrt_e(vs_lpu) * 1000000000.0) as i64
+        BAND_SIG[4 + j] = (sqrt_e(vs_so) * 1000000000.0) as i64
         j = j + 1
     }
 }
+
+fn band_sig(band: i64, out: i64) -> f64 with Div { (BAND_SIG[band * 2 + out] as f64) / 1000000000.0 }
 
 fn gum_out0() -> f64 with Div { (H_VAL[0] as f64) / 1000000000.0 }
 fn gum_out1() -> f64 with Div { (H_VAL[1] as f64) / 1000000000.0 }
@@ -314,6 +367,13 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     var total_ratio_good = 0
     var n_tests = 0
 
+    // Per-band aggregates over 3 inputs x 2 outputs (band 0 additive,
+    // band 1 first-order LPU, band 2 first-order LPU + second-order term)
+    var band_rmin: [f64; 3] = [1000.0; 3]
+    var band_rmax: [f64; 3] = [0.0; 3]
+    var band_in: [i64; 3] = [0; 3]
+    var band_tot: i64 = 0
+
     var inp_idx = 0
     while inp_idx < 3 {
         let b = inp_idx * 4
@@ -346,6 +406,20 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         let gum_hi = gum_v0 + 1.96 * gum_s0
         var in_ci = 0
 
+        // 95 % intervals (k = 1.96) of all three bands, both outputs
+        var blo: [f64; 6] = [0.0; 6]
+        var bhi: [f64; 6] = [0.0; 6]
+        var bin: [i64; 6] = [0; 6]
+        var bq = 0
+        while bq < 6 {
+            var centre = gum_v0
+            if bq % 2 == 1 { centre = gum_v1 }
+            let bs = band_sig(bq / 2, bq % 2)
+            blo[bq] = centre - 1.96 * bs
+            bhi[bq] = centre + 1.96 * bs
+            bq = bq + 1
+        }
+
         var sample = 0
         while sample < mc_n {
             var wi2 = 0
@@ -366,6 +440,13 @@ fn main() -> i32 with IO, Mut, Div, Panic {
 
             // Inline coverage
             if o0 >= gum_lo && o0 <= gum_hi { in_ci = in_ci + 1 }
+            var bq2 = 0
+            while bq2 < 6 {
+                var o = o0
+                if bq2 % 2 == 1 { o = o1 }
+                if o >= blo[bq2] && o <= bhi[bq2] { bin[bq2] = bin[bq2] + 1 }
+                bq2 = bq2 + 1
+            }
 
             sample = sample + 1
         }
@@ -395,6 +476,31 @@ fn main() -> i32 with IO, Mut, Div, Panic {
 
         if cov >= 0.60 { total_coverage_good = total_coverage_good + 1 }
         n_tests = n_tests + 1
+
+        // All three bands: sigma ratio and 95 % coverage per output
+        var bb = 0
+        while bb < 3 {
+            if bb == 0 { print("  [additive ] ") }
+            if bb == 1 { print("  [LPU 1st  ] ") }
+            if bb == 2 { print("  [LPU 1st+2nd] ") }
+            var oo = 0
+            while oo < 2 {
+                var ms = mc_std0
+                if oo == 1 { ms = mc_std1 }
+                var rr = 0.0
+                if ms > 0.0001 { rr = band_sig(bb, oo) / ms }
+                let cc = (bin[bb * 2 + oo] as f64) / (mc_n as f64)
+                print("out"); print_int(oo); print(" ratio="); print(rr)
+                print(" cov95="); print(cc); print("  ")
+                if rr < band_rmin[bb] { band_rmin[bb] = rr }
+                if rr > band_rmax[bb] { band_rmax[bb] = rr }
+                band_in[bb] = band_in[bb] + bin[bb * 2 + oo]
+                oo = oo + 1
+            }
+            print("\n")
+            bb = bb + 1
+        }
+        band_tot = band_tot + 2 * mc_n
 
         inp_idx = inp_idx + 1
     }
@@ -441,22 +547,47 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         passed = passed + 1
     } else { println("T5 FAIL"); failed = failed + 1 }
 
+    // T6: the second-order band is never narrower than the first-order LPU
+    // band (it only adds a non-negative term) -- a consistency check
+    var t6_ok = 1
+    var oq = 0
+    while oq < 2 {
+        if band_sig(2, oq) < band_sig(1, oq) { t6_ok = 0 }
+        oq = oq + 1
+    }
+    if t6_ok == 1 {
+        println("T6 PASS: second-order band >= first-order LPU band")
+        passed = passed + 1
+    } else { println("T6 FAIL"); failed = failed + 1 }
+
     // ═══════════════════════════════════════════
-    // Verdict
+    // Verdict -- measured calibration, stated as measured
     // ═══════════════════════════════════════════
     print("\n=== Verdict ===\n")
-    if total_coverage_good >= 2 && total_ratio_good >= 4 {
-        print("  GUM linear propagation provides USABLE uncertainty\n")
-        print("  estimates through a 2-layer piecewise-linear E-KAN.\n")
-        print("  Coverage is lower than smooth ODEs (expected: hat basis\n")
-        print("  non-differentiable at knots violates LPU smoothness).\n")
-        print("  Conclusion: GUM valid for SHALLOW scientific NNs with\n")
-        print("  piecewise-linear activations and moderate weight σ.\n")
-    } else {
-        print("  GUM linear propagation BREAKS DOWN through E-KAN.\n")
-        print("  Confirms Grok's prediction: deep nonlinear nets\n")
-        print("  violate LPU assumptions. Use Bayesian methods instead.\n")
+    print("  Nominal: 95 % interval (k = 1.96); MC N=2000 per input,\n")
+    print("  3 inputs x 2 outputs. Binomial SE of a 95 % coverage over\n")
+    print("  12000 draws is ~0.2 points.\n")
+    var vb = 0
+    while vb < 3 {
+        if vb == 0 { print("  additive (u_prop = u(h)):     ") }
+        if vb == 1 { print("  first-order LPU:              ") }
+        if vb == 2 { print("  first-order LPU + 2nd order:  ") }
+        let pooled = (band_in[vb] as f64) / (band_tot as f64)
+        print("sigma ratio GUM/MC "); print(band_rmin[vb]); print(" .. "); print(band_rmax[vb])
+        print(", pooled coverage "); print(pooled)
+        print(" (coverage - 0.95 = "); print(pooled - 0.95); print(")")
+        if pooled > 0.97 { print("  -> CONSERVATIVE, not calibrated\n") }
+        else { print("\n") }
+        vb = vb + 1
     }
+    print("  The additive rule treats every hidden-to-output sensitivity\n")
+    print("  as 1; the true sensitivity is dphi/dh = sum_k c_k hat_k'(x)/4,\n")
+    print("  so the additive band is not a calibrated 95 % interval.\n")
+    print("  The second-order term is the c x h cross term only (hat edges\n")
+    print("  have zero curvature inside a segment); it cannot shrink a band.\n")
+    print("  With the LPU sensitivity the band is close to calibrated for\n")
+    print("  out0 but still wider than MC for out1 (see per-input lines);\n")
+    print("  the residual is not removed by the second-order term.\n")
 
     print("\nPassed: "); print_int(passed); print("\n")
     print("Failed: "); print_int(failed); print("\n")

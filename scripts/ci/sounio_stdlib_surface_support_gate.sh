@@ -60,7 +60,7 @@ summary_path = Path(sys.argv[4]).resolve()
 
 registry_path = root / "docs/serious-language/public-claim-registry.v1.tsv"
 spec_matrix_path = root / "docs/serious-language/spec-evidence-matrix.v1.tsv"
-known_limitations_path = root / "docs/compiler/KNOWN_LIMITATIONS.md"
+known_limitations_path = root / "docs/compiler/MATURITY.md"
 
 gate_ref = "scripts/ci/sounio_stdlib_surface_support_gate.sh"
 

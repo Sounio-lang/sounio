@@ -1,9 +1,14 @@
+use viz::scatter::{scatter_project}
+use viz::scale::{ScaleSpec,axis_scaled_ticks}
+use viz::clip::{clip_series_segment, clip_pixel}
+use viz::legend::{legend_layout}
+use viz::axis::{axis_ticks, axis_label, axis_offset}
 // stdlib/viz/viz_html.sio — Visual IR to static HTML/SVG export surface
 //
 // V1 emits static SVG/HTML markup to stdout. No JavaScript owns scientific
 // semantics; this renderer only serializes Sounio Visual IR geometry.
 
-use viz::ir::{VizScene, VIZ_NODE_PANEL, VIZ_NODE_CHART_LINE, VIZ_NODE_CHART_SCATTER, VIZ_NODE_CHART_BAR, VIZ_NODE_HEATMAP, VIZ_NODE_UNCERTAINTY_BAND, VIZ_NODE_LABEL, VIZ_NODE_CONTROL, VIZ_NODE_FOREST, VIZ_NODE_WATERFALL, VIZ_NODE_MOLECULE, VIZ_NODE_FIELD, VIZ_NODE_VECTOR_FIELD, VIZ_NODE_TRAJECTORY, VIZ_NODE_SPECTRUM, VIZ_NODE_MESH, VIZ_CONTROL_BUTTON, VIZ_CONTROL_SLIDER, VIZ_CONTROL_TOGGLE, VIZ_CONTROL_TABS, VIZ_CONTROL_LEGEND, VIZ_CONTROL_TOOLTIP, VIZ_CONTROL_VIEWPORT}
+use viz::ir::{VizScene, VIZ_NODE_AXIS, VIZ_FLAG_CLIP_PLOT, VIZ_INTERVAL_NONE, VIZ_INTERVAL_STANDARD_UNCERTAINTY, VIZ_NODE_PANEL, VIZ_NODE_CHART_LINE, VIZ_NODE_CHART_SCATTER, VIZ_NODE_CHART_BAR, VIZ_NODE_HEATMAP, VIZ_NODE_UNCERTAINTY_BAND, VIZ_NODE_LABEL, VIZ_NODE_CONTROL, VIZ_NODE_FOREST, VIZ_NODE_WATERFALL, VIZ_NODE_MOLECULE, VIZ_NODE_FIELD, VIZ_NODE_VECTOR_FIELD, VIZ_NODE_TRAJECTORY, VIZ_NODE_SPECTRUM, VIZ_NODE_MESH, VIZ_CONTROL_BUTTON, VIZ_CONTROL_SLIDER, VIZ_CONTROL_TOGGLE, VIZ_CONTROL_TABS, VIZ_CONTROL_LEGEND, VIZ_CONTROL_TOOLTIP, VIZ_CONTROL_VIEWPORT}
 
 fn vh_print_i64(n: i64) with IO, Mut, Div {
     if n == 0 { print("0"); return }
@@ -87,6 +92,14 @@ fn vh_emit_node_group_open(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
     print("\" data-viz-kind=\""); vh_print_i64(n.kind)
     print("\" data-viz-slot=\""); vh_print_i64(n.data_slot)
     println("\">")
+    let tagged_kind:i64=scene.nodes[node_idx as usize].kind
+    let tagged_slot:i64=scene.nodes[node_idx as usize].data_slot
+    if tagged_kind==VIZ_NODE_CHART_LINE && tagged_slot>=0 && tagged_slot<scene.series_count {
+        let interval:i64=scene.series[tagged_slot as usize].interval_kind
+        if interval==VIZ_INTERVAL_STANDARD_UNCERTAINTY {
+            println("<metadata data-interval-kind=\"standard-uncertainty\" data-interval-level=\"0\"/>")
+        }
+    }
 }
 
 fn vh_emit_scene_audit(scene: &VizScene) with IO, Mut, Div {
@@ -126,80 +139,136 @@ fn vh_series_y(y0: i64, h: i64, y: f64, ymin: f64, ymax: f64) -> i64 {
 
 fn vh_emit_series_polyline(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
     let n = scene.nodes[node_idx as usize]
-    let d = scene.series[n.data_slot as usize]
+    let slot = n.data_slot as usize
+    let count = scene.series[slot].n
+    let x_min = scene.series[slot].x_min
+    let x_max = scene.series[slot].x_max
+    let y_min = scene.series[slot].y_min
+    let y_max = scene.series[slot].y_max
     print("<polyline fill=\"none\" stroke=\"rgb(")
     vh_print_i64(n.style.r); print(","); vh_print_i64(n.style.g); print(","); vh_print_i64(n.style.b)
     print(")\" stroke-width=\""); vh_print_i64(n.style.stroke_width); print("\" points=\"")
     var j: i64 = 0
-    while j < d.n {
-        let px = vh_series_x(n.layout.x, n.layout.w, d.xs[j as usize], d.x_min, d.x_max)
-        let py = vh_series_y(n.layout.y, n.layout.h, d.ys[j as usize], d.y_min, d.y_max)
+    while j < count {
+        let px = vh_series_x(n.layout.x, n.layout.w, scene.series[slot].xs[j as usize], x_min, x_max)
+        let py = vh_series_y(n.layout.y, n.layout.h, scene.series[slot].ys[j as usize], y_min, y_max)
         vh_print_i64(px); print(","); vh_print_i64(py)
-        if j < d.n - 1 { print(" ") }
+        if j < count - 1 { print(" ") }
         j = j + 1
     }
     println("\"/>")
 }
 
 fn vh_emit_scatter(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
-    let n = scene.nodes[node_idx as usize]
-    let d = scene.series[n.data_slot as usize]
+    // Direct scalar loads avoid copied-record projections in the pinned backend.
+    let slot: i64 = scene.nodes[node_idx as usize].data_slot
+    let count: i64 = scene.series[slot as usize].n
+    let x: i64 = scene.nodes[node_idx as usize].layout.x
+    let y: i64 = scene.nodes[node_idx as usize].layout.y
+    let width: i64 = scene.nodes[node_idx as usize].layout.w
+    let height: i64 = scene.nodes[node_idx as usize].layout.h
+    let red: i64 = scene.nodes[node_idx as usize].style.r
+    let green: i64 = scene.nodes[node_idx as usize].style.g
+    let blue: i64 = scene.nodes[node_idx as usize].style.b
+    let xmin: f64 = scene.series[slot as usize].x_min
+    let xmax: f64 = scene.series[slot as usize].x_max
+    let ymin: f64 = scene.series[slot as usize].y_min
+    let ymax: f64 = scene.series[slot as usize].y_max
+    let clipped=(scene.nodes[node_idx as usize].flags & VIZ_FLAG_CLIP_PLOT) != 0
+    if clipped {
+        print("<defs><clipPath id=\"scatter-clip-"); vh_print_i64(node_idx)
+        println("\" clipPathUnits=\"userSpaceOnUse\">")
+        let clip_left:f64=(x as f64)-0.5
+        let clip_top:f64=(y as f64)-0.5
+        print("<rect x=\""); print(clip_left); print("\" y=\""); print(clip_top)
+        print("\" width=\""); vh_print_i64(width+1); print("\" height=\""); vh_print_i64(height+1)
+        println("\"/></clipPath></defs>")
+        print("<g clip-path=\"url(#scatter-clip-"); vh_print_i64(node_idx); println(")\">")
+    }
+    var visible:i64=0; var outside:i64=0; var invalid:i64=0
     var j: i64 = 0
-    while j < d.n && j < 1024 {
-        let px = vh_series_x(n.layout.x, n.layout.w, d.xs[j as usize], d.x_min, d.x_max)
-        let py = vh_series_y(n.layout.y, n.layout.h, d.ys[j as usize], d.y_min, d.y_max)
-        vh_emit_circle(px, py, 3, n.style.r, n.style.g, n.style.b)
+    while j < count && j < 1024 {
+        let sample_x: f64 = scene.series[slot as usize].xs[j as usize]
+        let sample_y: f64 = scene.series[slot as usize].ys[j as usize]
+        let point=scatter_project(sample_x,sample_y,xmin,xmax,ymin,ymax,x,y,width,height,clipped)
+        if point.status == 0 {
+            let px:i64=point.x; let py:i64=point.y
+            vh_emit_circle(px,py,3,red,green,blue)
+            visible=visible+1
+        } else if point.status == 1 { outside=outside+1 }
+        else { invalid=invalid+1 }
         j = j + 1
     }
-    print("<!-- scatter n="); vh_print_i64(d.n); println(" -->")
+    if clipped { println("</g>") }
+    print("<!-- scatter counts visible="); vh_print_i64(visible)
+    print(" outside="); vh_print_i64(outside); print(" invalid="); vh_print_i64(invalid); println(" -->")
+    print("<!-- scatter n="); vh_print_i64(count); println(" -->")
 }
 
 fn vh_emit_bar(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
     let n = scene.nodes[node_idx as usize]
-    let d = scene.series[n.data_slot as usize]
-    let bar_w = if d.n <= 0 { 1 } else { n.layout.w / d.n }
+    let slot = n.data_slot as usize
+    let count = scene.series[slot].n
+    let y_min = scene.series[slot].y_min
+    let y_max = scene.series[slot].y_max
+    let bar_w = if count <= 0 { 1 } else { n.layout.w / count }
     var j: i64 = 0
-    while j < d.n && j < 1024 {
-        let py = vh_series_y(n.layout.y, n.layout.h, d.ys[j as usize], d.y_min, d.y_max)
+    while j < count && j < 1024 {
+        let py = vh_series_y(n.layout.y, n.layout.h, scene.series[slot].ys[j as usize], y_min, y_max)
         let x = n.layout.x + j * bar_w
         let h = n.layout.y + n.layout.h - py
         vh_emit_rect(x, py, if bar_w > 1 { bar_w - 1 } else { 1 }, h, n.style.r, n.style.g, n.style.b)
         j = j + 1
     }
-    print("<!-- bar n="); vh_print_i64(d.n); println(" -->")
+    print("<!-- bar n="); vh_print_i64(count); println(" -->")
 }
 
 fn vh_emit_waterfall(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
     let n = scene.nodes[node_idx as usize]
-    let d = scene.series[n.data_slot as usize]
+    let slot = n.data_slot as usize
+    let count = scene.series[slot].n
+    let y_min = scene.series[slot].y_min
+    let y_max = scene.series[slot].y_max
     vh_emit_rect_stroke(n.layout.x, n.layout.y, n.layout.w, n.layout.h, 80, 95, 110)
-    if d.n <= 0 { return }
-    let row_h = vh_clamp_i(n.layout.h / d.n - 2, 3, 24)
-    let span = if d.y_max == d.y_min { 1.0 } else { d.y_max - d.y_min }
+    if count <= 0 { return }
+    let row_h = vh_clamp_i(n.layout.h / count - 2, 3, 24)
+    let span = if y_max == y_min { 1.0 } else { y_max - y_min }
     var i: i64 = 0
-    while i < d.n && i < 1024 {
-        let frac = (d.ys[i as usize] - d.y_min) / span
+    while i < count && i < 1024 {
+        let frac = (scene.series[slot].ys[i as usize] - y_min) / span
         let bar_w = vh_clamp_i((frac * (n.layout.w as f64)) as i64, 1, n.layout.w)
         let py = n.layout.y + i * (row_h + 2)
         vh_emit_rect(n.layout.x, py, bar_w, row_h, n.style.r, n.style.g, n.style.b)
         vh_emit_rect(n.layout.x + bar_w, py, n.layout.w - bar_w, row_h, 36, 40, 50)
         i = i + 1
     }
-    print("<!-- waterfall n="); vh_print_i64(d.n); println(" -->")
+    print("<!-- waterfall n="); vh_print_i64(count); println(" -->")
 }
 
 fn vh_emit_forest(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
     let n = scene.nodes[node_idx as usize]
-    let d = scene.series[n.data_slot as usize]
+    // Explicit scalar loads avoid copied-node style projections in the pinned backend.
+    let red: i64 = scene.nodes[node_idx as usize].style.r
+    let green: i64 = scene.nodes[node_idx as usize].style.g
+    let blue: i64 = scene.nodes[node_idx as usize].style.b
+    let row_count: i64 = scene.series[n.data_slot as usize].n
+    let d = &scene.series[n.data_slot as usize]
     vh_emit_rect_stroke(n.layout.x, n.layout.y, n.layout.w, n.layout.h, 90, 95, 120)
-    if d.n <= 0 { return }
+    if row_count <= 0 { return }
+    if d.interval_kind != VIZ_INTERVAL_NONE {
+        print("<metadata data-interval-kind=\"")
+        if d.interval_kind == 1 { print("confidence") }
+        if d.interval_kind == 2 { print("prediction") }
+        if d.interval_kind == 3 { print("credible") }
+        print("\" data-interval-level=\""); print(d.interval_level); println("\"/>")
+    }
     var x_min = d.x_min
     var x_max = d.x_max
     var i: i64 = 0
-    while i < d.n && i < 1024 {
+    while i < row_count && i < 1024 {
         let sigma = vh_sqrt(d.vars[i as usize])
-        let lo = d.xs[i as usize] - sigma
-        let hi = d.xs[i as usize] + sigma
+        let lo = if d.interval_kind == VIZ_INTERVAL_NONE { d.xs[i as usize] - sigma } else { d.lower[i as usize] }
+        let hi = if d.interval_kind == VIZ_INTERVAL_NONE { d.xs[i as usize] + sigma } else { d.upper[i as usize] }
         if lo < x_min { x_min = lo }
         if hi > x_max { x_max = hi }
         i = i + 1
@@ -208,34 +277,39 @@ fn vh_emit_forest(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
         x_min = x_min - 1.0
         x_max = x_max + 1.0
     }
-    let row_h = vh_clamp_i(n.layout.h / (d.n + 1), 5, 22)
+    let row_h = vh_clamp_i(n.layout.h / (row_count + 1), 5, 22)
     i = 0
-    while i < d.n && i < 1024 {
+    while i < row_count && i < 1024 {
         let sigma = vh_sqrt(d.vars[i as usize])
         let row_y = n.layout.y + row_h / 2 + i * row_h
         let sx = vh_series_x(n.layout.x, n.layout.w, d.xs[i as usize], x_min, x_max)
-        let slo = vh_series_x(n.layout.x, n.layout.w, d.xs[i as usize] - sigma, x_min, x_max)
-        let shi = vh_series_x(n.layout.x, n.layout.w, d.xs[i as usize] + sigma, x_min, x_max)
+        let lo = if d.interval_kind == VIZ_INTERVAL_NONE { d.xs[i as usize] - sigma } else { d.lower[i as usize] }
+        let hi = if d.interval_kind == VIZ_INTERVAL_NONE { d.xs[i as usize] + sigma } else { d.upper[i as usize] }
+        let slo = vh_series_x(n.layout.x, n.layout.w, lo, x_min, x_max)
+        let shi = vh_series_x(n.layout.x, n.layout.w, hi, x_min, x_max)
         vh_emit_line(slo, row_y, shi, row_y, 180, 180, 220)
         vh_emit_rect(slo, row_y - 2, 1, 5, 180, 180, 220)
         vh_emit_rect(shi, row_y - 2, 1, 5, 180, 180, 220)
-        vh_emit_rect(sx - 3, row_y - 3, 7, 7, n.style.r, n.style.g, n.style.b)
+        vh_emit_rect(sx - 3, row_y - 3, 7, 7, red, green, blue)
         i = i + 1
     }
-    print("<!-- forest n="); vh_print_i64(d.n); println(" -->")
+    print("<!-- forest n="); vh_print_i64(row_count); println(" -->")
 }
 
 fn vh_emit_heatmap(scene: &VizScene, slot: i64, x: i64, y: i64, w: i64, h: i64) with IO, Mut, Div {
-    let hm = scene.heatmaps[slot as usize]
-    let cell_w = if hm.cols <= 0 { 1 } else { w / hm.cols }
-    let cell_h = if hm.rows <= 0 { 1 } else { h / hm.rows }
-    let span = if hm.max_value == hm.min_value { 1.0 } else { hm.max_value - hm.min_value }
+    let rows = scene.heatmaps[slot as usize].rows
+    let cols = scene.heatmaps[slot as usize].cols
+    let min_value = scene.heatmaps[slot as usize].min_value
+    let max_value = scene.heatmaps[slot as usize].max_value
+    let cell_w = if cols <= 0 { 1 } else { w / cols }
+    let cell_h = if rows <= 0 { 1 } else { h / rows }
+    let span = if max_value == min_value { 1.0 } else { max_value - min_value }
     var rr: i64 = 0
-    while rr < hm.rows && rr < 64 {
+    while rr < rows && rr < 64 {
         var cc: i64 = 0
-        while cc < hm.cols && cc < 64 {
-            let idx = rr * hm.cols + cc
-            let frac = (hm.values[idx as usize] - hm.min_value) / span
+        while cc < cols && cc < 64 {
+            let idx = rr * cols + cc
+            let frac = (scene.heatmaps[slot as usize].values[idx as usize] - min_value) / span
             let intensity = vh_clamp_i((frac * 220.0) as i64, 0, 220)
             vh_emit_rect(x + cc * cell_w, y + rr * cell_h, cell_w + 1, cell_h + 1, intensity / 3, 70 + intensity / 3, 120 + intensity / 2)
             cc = cc + 1
@@ -248,13 +322,14 @@ fn vh_emit_scalar_field(scene: &VizScene, field_slot: i64, x: i64, y: i64, w: i6
     if field_slot >= 0 && field_slot < scene.field_count {
         let heat_slot = scene.field_heatmap_slots[field_slot as usize]
         if heat_slot >= 0 && heat_slot < scene.heatmap_count {
-            let hmap = scene.heatmaps[heat_slot as usize]
+            let hmap_rows = scene.heatmaps[heat_slot as usize].rows
+            let hmap_cols = scene.heatmaps[heat_slot as usize].cols
             vh_emit_heatmap(scene, heat_slot, x, y, w, h)
             vh_emit_rect_stroke(x, y, w, h, 90, 120, 130)
             print("<!-- scalar-field slot="); vh_print_i64(field_slot)
             print(" heatmap="); vh_print_i64(heat_slot)
-            print(" rows="); vh_print_i64(hmap.rows)
-            print(" cols="); vh_print_i64(hmap.cols)
+            print(" rows="); vh_print_i64(hmap_rows)
+            print(" cols="); vh_print_i64(hmap_cols)
             println(" -->")
             return
         }
@@ -271,7 +346,6 @@ fn vh_emit_scalar_field(scene: &VizScene, field_slot: i64, x: i64, y: i64, w: i6
 fn vh_emit_vector_field(scene: &VizScene, field_slot: i64, x: i64, y: i64, w: i64, h: i64) with IO, Mut, Div {
     vh_emit_rect_stroke(x, y, w, h, 120, 110, 70)
     if field_slot >= 0 && field_slot < scene.vector_field_count {
-        let f = scene.vector_data[field_slot as usize]
         let rows = scene.vector_field_rows[field_slot as usize]
         let cols = scene.vector_field_cols[field_slot as usize]
         let cell_w = if cols <= 0 { 1 } else { w / cols }
@@ -280,11 +354,11 @@ fn vh_emit_vector_field(scene: &VizScene, field_slot: i64, x: i64, y: i64, w: i6
         while rr < rows && rr < 32 {
             var cc: i64 = 0
             while cc < cols && cc < 32 {
-                let idx = rr * cols + cc
+                let cell = rr * cols + cc
                 let cx = x + cc * cell_w + cell_w / 2
                 let cy = y + rr * cell_h + cell_h / 2
-                let dx = vh_clamp_i((f.vx[idx as usize] * 3.0) as i64, 0 - cell_w / 2, cell_w / 2)
-                let dy = vh_clamp_i((f.vy[idx as usize] * 3.0) as i64, 0 - cell_h / 2, cell_h / 2)
+                let dx = vh_clamp_i((scene.vector_data[field_slot as usize].vx[cell as usize] * 3.0) as i64, 0 - cell_w / 2, cell_w / 2)
+                let dy = vh_clamp_i((scene.vector_data[field_slot as usize].vy[cell as usize] * 3.0) as i64, 0 - cell_h / 2, cell_h / 2)
                 vh_emit_line(cx, cy, cx + dx, cy + dy, 240, 210, 120)
                 vh_emit_rect(cx + dx - 1, cy + dy - 1, 3, 3, 240, 210, 120)
                 cc = cc + 1
@@ -311,36 +385,36 @@ fn vh_traj_y(y0: i64, h: i64, y: f64, z: f64) -> i64 {
 fn vh_emit_trajectory(scene: &VizScene, slot: i64, x: i64, y: i64, w: i64, h: i64, r: i64, g: i64, b: i64) with IO, Mut, Div {
     vh_emit_rect_stroke(x, y, w, h, 120, 95, 150)
     if slot >= 0 && slot < scene.trajectory_count {
-        let tr = scene.trajectory_data[slot as usize]
+        let n = scene.trajectory_data[slot as usize].n
         print("<polyline fill=\"none\" stroke=\"rgb(")
         vh_print_i64(r); print(","); vh_print_i64(g); print(","); vh_print_i64(b)
         print(")\" stroke-width=\"1.5\" points=\"")
         var i: i64 = 0
-        while i < tr.n && i < 1024 {
-            let px = vh_traj_x(x, w, tr.x[i as usize], tr.z[i as usize])
-            let py = vh_traj_y(y, h, tr.y[i as usize], tr.z[i as usize])
+        while i < n && i < 1024 {
+            let px = vh_traj_x(x, w, scene.trajectory_data[slot as usize].x[i as usize], scene.trajectory_data[slot as usize].z[i as usize])
+            let py = vh_traj_y(y, h, scene.trajectory_data[slot as usize].y[i as usize], scene.trajectory_data[slot as usize].z[i as usize])
             vh_print_i64(px); print(","); vh_print_i64(py)
-            if i < tr.n - 1 { print(" ") }
+            if i < n - 1 { print(" ") }
             i = i + 1
         }
         println("\"/>")
-        if tr.n > 0 {
-            let sx = vh_traj_x(x, w, tr.x[0], tr.z[0])
-            let sy = vh_traj_y(y, h, tr.y[0], tr.z[0])
+        if n > 0 {
+            let sx = vh_traj_x(x, w, scene.trajectory_data[slot as usize].x[0], scene.trajectory_data[slot as usize].z[0])
+            let sy = vh_traj_y(y, h, scene.trajectory_data[slot as usize].y[0], scene.trajectory_data[slot as usize].z[0])
             vh_emit_rect(sx - 2, sy - 2, 5, 5, 180, 230, 190)
-            let last = tr.n - 1
-            let ex = vh_traj_x(x, w, tr.x[last as usize], tr.z[last as usize])
-            let ey = vh_traj_y(y, h, tr.y[last as usize], tr.z[last as usize])
+            let last = n - 1
+            let ex = vh_traj_x(x, w, scene.trajectory_data[slot as usize].x[last as usize], scene.trajectory_data[slot as usize].z[last as usize])
+            let ey = vh_traj_y(y, h, scene.trajectory_data[slot as usize].y[last as usize], scene.trajectory_data[slot as usize].z[last as usize])
             vh_emit_rect(ex - 2, ey - 2, 5, 5, 255, 180, 130)
             var cur = scene.time as i64
             if cur < 0 { cur = 0 }
-            if cur >= tr.n { cur = tr.n - 1 }
-            let tx = vh_traj_x(x, w, tr.x[cur as usize], tr.z[cur as usize])
-            let ty = vh_traj_y(y, h, tr.y[cur as usize], tr.z[cur as usize])
+            if cur >= n { cur = n - 1 }
+            let tx = vh_traj_x(x, w, scene.trajectory_data[slot as usize].x[cur as usize], scene.trajectory_data[slot as usize].z[cur as usize])
+            let ty = vh_traj_y(y, h, scene.trajectory_data[slot as usize].y[cur as usize], scene.trajectory_data[slot as usize].z[cur as usize])
             vh_emit_rect_stroke(tx - 4, ty - 4, 9, 9, 255, 245, 120)
         }
         print("<!-- trajectory slot="); vh_print_i64(slot)
-        print(" n="); vh_print_i64(tr.n)
+        print(" n="); vh_print_i64(n)
         print(" time="); vh_print_i64(scene.time as i64)
         println(" -->")
         return
@@ -361,21 +435,25 @@ fn vh_spec_y(y0: i64, h: i64, y: f64, ymin: f64, ymax: f64) -> i64 {
 fn vh_emit_spectrum(scene: &VizScene, slot: i64, x: i64, y: i64, w: i64, h: i64, r: i64, g: i64, b: i64) with IO, Mut, Div {
     vh_emit_rect_stroke(x, y, w, h, 140, 110, 70)
     if slot >= 0 && slot < scene.spectrum_count {
-        let s = scene.spectrum_data[slot as usize]
+        let n = scene.spectrum_data[slot as usize].n
+        let x_min = scene.spectrum_data[slot as usize].x_min
+        let x_max = scene.spectrum_data[slot as usize].x_max
+        let y_min = scene.spectrum_data[slot as usize].y_min
+        let y_max = scene.spectrum_data[slot as usize].y_max
         print("<polyline fill=\"none\" stroke=\"rgb(")
         vh_print_i64(r); print(","); vh_print_i64(g); print(","); vh_print_i64(b)
         print(")\" stroke-width=\"1.5\" points=\"")
         var i: i64 = 0
-        while i < s.n && i < 1024 {
-            let px = vh_spec_x(x, w, s.x[i as usize], s.x_min, s.x_max)
-            let py = vh_spec_y(y, h, s.intensity[i as usize], s.y_min, s.y_max)
+        while i < n && i < 1024 {
+            let px = vh_spec_x(x, w, scene.spectrum_data[slot as usize].x[i as usize], x_min, x_max)
+            let py = vh_spec_y(y, h, scene.spectrum_data[slot as usize].intensity[i as usize], y_min, y_max)
             vh_print_i64(px); print(","); vh_print_i64(py)
-            if i < s.n - 1 { print(" ") }
+            if i < n - 1 { print(" ") }
             i = i + 1
         }
         println("\"/>")
         print("<!-- spectrum slot="); vh_print_i64(slot)
-        print(" n="); vh_print_i64(s.n)
+        print(" n="); vh_print_i64(n)
         println(" -->")
         return
     }
@@ -414,8 +492,7 @@ fn vh_emit_control(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
         print("<!-- control tabs active="); vh_print_i64(active); println(" -->")
     } else if n.data_slot == VIZ_CONTROL_LEGEND {
         vh_emit_rect_stroke(n.layout.x, n.layout.y, n.layout.w, n.layout.h, 120, 135, 150)
-        vh_emit_rect(n.layout.x + 4, n.layout.y + n.layout.h / 2 - 3, 10, 6, n.style.r, n.style.g, n.style.b)
-        vh_emit_text(scene, node_idx, n.layout.x + 18, n.layout.y + 13, n.style.r, n.style.g, n.style.b)
+        vh_emit_legend(scene, node_idx)
         println("<!-- control legend -->")
     } else if n.data_slot == VIZ_CONTROL_TOOLTIP {
         vh_emit_rect(n.layout.x, n.layout.y, n.layout.w, n.layout.h, 28, 34, 42)
@@ -450,8 +527,12 @@ pub fn viz_html_emit_scene(scene: &VizScene, width: i64, height: i64) with IO, M
         vh_emit_node_group_open(scene, i)
         if n.kind == VIZ_NODE_PANEL {
             vh_emit_rect(n.layout.x, n.layout.y, n.layout.w, n.layout.h, 22, 28, 36)
+        } else if n.kind == VIZ_NODE_AXIS {
+            vh_emit_axis(scene, i)
         } else if n.kind == VIZ_NODE_LABEL {
             vh_emit_text(scene, i, n.layout.x, n.layout.y + 10, n.style.r, n.style.g, n.style.b)
+        } else if n.kind == VIZ_NODE_CHART_LINE && (n.flags & VIZ_FLAG_CLIP_PLOT) != 0 {
+            vh_emit_clipped_line(scene, i)
         } else if n.kind == VIZ_NODE_CHART_LINE || n.kind == VIZ_NODE_UNCERTAINTY_BAND {
             vh_emit_series_polyline(scene, i)
         } else if n.kind == VIZ_NODE_CHART_SCATTER {
@@ -459,10 +540,11 @@ pub fn viz_html_emit_scene(scene: &VizScene, width: i64, height: i64) with IO, M
         } else if n.kind == VIZ_NODE_CHART_BAR {
             vh_emit_bar(scene, i)
         } else if n.kind == VIZ_NODE_HEATMAP {
-            let h = scene.heatmaps[n.data_slot as usize]
+            let heat_rows = scene.heatmaps[n.data_slot as usize].rows
+            let heat_cols = scene.heatmaps[n.data_slot as usize].cols
             vh_emit_heatmap(scene, n.data_slot, n.layout.x, n.layout.y, n.layout.w, n.layout.h)
             vh_emit_rect_stroke(n.layout.x, n.layout.y, n.layout.w, n.layout.h, 80, 120, 140)
-            print("<!-- heatmap rows="); vh_print_i64(h.rows); print(" cols="); vh_print_i64(h.cols); println(" -->")
+            print("<!-- heatmap rows="); vh_print_i64(heat_rows); print(" cols="); vh_print_i64(heat_cols); println(" -->")
         } else if n.kind == VIZ_NODE_CONTROL {
             vh_emit_control(scene, i)
         } else if n.kind == VIZ_NODE_FOREST {
@@ -497,4 +579,135 @@ pub fn viz_html_emit_scene(scene: &VizScene, width: i64, height: i64) with IO, M
         i = i + 1
     }
     println("</svg></body></html>")
+}
+
+fn vh_scale_name(mode:i64) with IO {
+    if mode == 1 { print("log10") } else if mode == 2 { print("symlog") } else { print("linear") }
+}
+fn vh_emit_axis(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
+    let node = scene.nodes[node_idx as usize]
+    // Explicit scalar loads avoid copied-node style projections in the pinned backend.
+    let red: i64 = scene.nodes[node_idx as usize].style.r
+    let green: i64 = scene.nodes[node_idx as usize].style.g
+    let blue: i64 = scene.nodes[node_idx as usize].style.b
+    let flags:i64=scene.nodes[node_idx as usize].flags
+    let constant:f64=scene.nodes[node_idx as usize].value
+    let raw_lo:f64=scene.nodes[node_idx as usize].min_value
+    let raw_hi:f64=scene.nodes[node_idx as usize].max_value
+    let intervals:i64=scene.nodes[node_idx as usize].data_slot
+    let spec=ScaleSpec{mode:flags/2,constant:if flags < 2 {1.0} else {constant}}
+    let ticks = axis_scaled_ticks(raw_lo,raw_hi,intervals,&spec)
+    if ticks.status != 0 { return }
+    if spec.mode != 0 {
+        print("<metadata data-axis-scale=\"");vh_scale_name(spec.mode)
+        print("\" data-scale-constant-label=\"")
+        let label=axis_label(spec.constant)
+        var k:i64=0
+        while k < label.n { print_char(label.text[k as usize] as i64);k=k+1 }
+        println("\"/>")
+    }
+    let vertical = (flags & 1) == 1
+    let x = node.layout.x
+    let y = node.layout.y
+    if vertical { vh_emit_line(x, y, x, y + node.layout.h, red, green, blue) }
+    else { vh_emit_line(x, y, x + node.layout.w, y, red, green, blue) }
+    var i: i64 = 0
+    while i < ticks.n {
+        let label = axis_label(ticks.values[i as usize])
+        var tx = x
+        var ty = y
+        if vertical {
+            let py = y + node.layout.h - axis_offset(i, node.data_slot, node.layout.h)
+            vh_emit_line(x - 4, py, x, py, red, green, blue)
+            tx = x - 8 - label.n * 8; ty = py - 4
+        } else {
+            let px = x + axis_offset(i, node.data_slot, node.layout.w)
+            vh_emit_line(px, y, px, y + 4, red, green, blue)
+            tx = px - label.n * 4; ty = y + 8
+        }
+        print("<text x=\""); vh_print_i64(tx); print("\" y=\""); vh_print_i64(ty + 7)
+        print("\" fill=\"rgb("); vh_print_i64(red); print(",")
+        vh_print_i64(green); print(","); vh_print_i64(blue)
+        print(")\" font-family=\"monospace\" font-size=\"8\" textLength=\"")
+        vh_print_i64(label.n * 8); print("\" lengthAdjust=\"spacingAndGlyphs\">")
+        var j: i64 = 0
+        while j < label.n { print_char(label.text[j as usize] as i64); j = j + 1 }
+        println("</text>")
+        i = i + 1
+    }
+    let title_y = if vertical { y - 16 } else { y + 24 }
+    vh_emit_text(scene, node_idx, x, title_y + 10, red, green, blue)
+}
+
+fn vh_emit_clipped_line(scene: &VizScene, idx: i64) with IO, Mut, Div {
+    let node = scene.nodes[idx as usize]
+    let slot = node.data_slot as usize
+    let count: i64 = scene.series[slot].n
+    let d = &scene.series[slot]
+    if (node.flags & 7680) != 0 {
+        print("<metadata data-x-scale=\"");vh_scale_name((node.flags/512)%4)
+        print("\" data-y-scale=\"");vh_scale_name((node.flags/2048)%4);println("\"/>")
+    }
+    print("<defs><clipPath id=\"plot-clip-"); vh_print_i64(idx)
+    print("\" clipPathUnits=\"userSpaceOnUse\">")
+    let clip_left: f64 = (node.layout.x as f64) - 0.5
+    let clip_top: f64 = (node.layout.y as f64) - 0.5
+    print("<rect x=\""); print(clip_left); print("\" y=\""); print(clip_top)
+    print("\" width=\""); vh_print_i64(node.layout.w + 1)
+    print("\" height=\""); vh_print_i64(node.layout.h + 1); println("\"/>")
+    println("</clipPath></defs>")
+    print("<g clip-path=\"url(#plot-clip-"); vh_print_i64(idx); println(")\">")
+    var visible: i64 = 0
+    var outside: i64 = 0
+    var invalid: i64 = 0
+    var i: i64 = 0
+    while i + 1 < count && i + 1 < 1024 {
+        let seg = clip_series_segment(d.xs[i as usize], d.ys[i as usize],
+            d.xs[(i+1) as usize], d.ys[(i+1) as usize], d.x_min, d.x_max, d.y_min, d.y_max)
+        if seg.status == 0 {
+            let x0: i64 = clip_pixel(node.layout.x, node.layout.w, seg.x0)
+            let x1: i64 = clip_pixel(node.layout.x, node.layout.w, seg.x1)
+            let y0: i64 = clip_pixel(node.layout.y, node.layout.h, 1.0 - seg.y0)
+            let y1: i64 = clip_pixel(node.layout.y, node.layout.h, 1.0 - seg.y1)
+            // Independent subpaths preserve every segment's end caps and gaps.
+            // Streaming serialization: no second pass or coordinate buffer.
+            if visible == 0 {
+                print("<path fill=\"none\" stroke=\"rgb(")
+                vh_print_i64(node.style.r); print(",")
+                vh_print_i64(node.style.g); print(","); vh_print_i64(node.style.b)
+                print(")\" stroke-width=\"1\" stroke-linecap=\"round\" d=\"")
+            }
+            print("M"); vh_print_i64(x0); print(" "); vh_print_i64(y0)
+            print(" L"); vh_print_i64(x1); print(" "); vh_print_i64(y1); print(" ")
+            visible = visible + 1
+        } else if seg.status == 1 { outside = outside + 1 }
+        else { invalid = invalid + 1 }
+        i = i + 1
+    }
+    if visible > 0 { println("\"/>") }
+    print("</g><!-- clipped-line visible="); vh_print_i64(visible)
+    print(" outside="); vh_print_i64(outside); print(" invalid="); vh_print_i64(invalid); println(" -->")
+}
+
+fn vh_emit_legend(scene: &VizScene, idx: i64) with IO, Mut, Div {
+    let node = scene.nodes[idx as usize]
+    let plan = legend_layout(node.layout.x, node.layout.y, node.layout.w, node.layout.h, node.label_len)
+    if plan.status != 0 { return }
+    vh_emit_rect(plan.swatch_x, plan.swatch_y, 10, 6, node.style.r, node.style.g, node.style.b)
+    print("<text x=\""); vh_print_i64(plan.text_x); print("\" y=\""); vh_print_i64(plan.text_y + 7)
+    print("\" fill=\"rgb("); vh_print_i64(node.style.r); print(","); vh_print_i64(node.style.g)
+    print(","); vh_print_i64(node.style.b)
+    print(")\" font-family=\"monospace\" font-size=\"8\" textLength=\"")
+    vh_print_i64(plan.visible_len * 8); print("\" lengthAdjust=\"spacingAndGlyphs\">")
+    var k: i64 = 0
+    while k < plan.visible_len {
+        let ch = node.label[k as usize] as i64
+        if ch == 38 { print("&amp;") }
+        else if ch == 60 { print("&lt;") }
+        else if ch == 62 { print("&gt;") }
+        else if ch == 34 { print("&quot;") }
+        else if ch >= 32 && ch <= 126 { print_char(ch) }
+        k = k + 1
+    }
+    println("</text>")
 }

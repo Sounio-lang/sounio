@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # scripts/clinical_vanco_tdm_e2e_gate.sh
-# Vancomycin AUC/MIC TDM decision E2E under lean_single.
+# Vancomycin AUC/MIC TDM decision E2E under default Madaros.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT/stdlib}"
-export SOUNIO_SOUC_ENGINE="${SOUNIO_SOUC_ENGINE:-lean_single}"
+unset SOUNIO_SOUC_ENGINE || true
 SOUC="${SOUC:-$ROOT/bin/souc}"
 SRC="tests/stdlib/clinical/test_vanco_auc_tdm_e2e.sio"
 MOD="stdlib/darwin_pbpk/pd/vancomycin_auc_gum.sio"
@@ -18,7 +18,7 @@ RECEIPT="$RECEIPT_DIR/vanco_tdm_e2e_receipt.v1.json"
 COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 fail=0
 
-echo "== clinical_vanco_tdm_e2e_gate: engine=$SOUNIO_SOUC_ENGINE =="
+echo "== clinical_vanco_tdm_e2e_gate: engine=madaros_default =="
 
 # 1) Existing module selftest still green
 echo "== module selftest $MOD =="
@@ -71,7 +71,7 @@ cat >"$RECEIPT" <<EOF
 {
   "schema": "clinical_vanco_tdm_e2e_receipt.v1",
   "status": "$STATUS",
-  "engine": "$SOUNIO_SOUC_ENGINE",
+  "engine": "madaros_default",
   "commit": "$COMMIT",
   "source": "$SRC",
   "module_selftest": "$MOD",
@@ -88,7 +88,6 @@ cat >"$RECEIPT" <<EOF
   "claims_not_made": [
     "bedside_dosing_product",
     "nonmem_foce_parity",
-    "madaros_multimodule",
     "mimic_real_tdm_calibration",
     "numpy_sklearn"
   ]
