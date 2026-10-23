@@ -97,6 +97,14 @@ struct LowerLocalStack {
     // parse_let_stmt stored Pattern.kind as every let's name (#2966).
     tuple_struct_layout2: Box<LowerLocalI64Slots>,
     tuple_struct_slot2: Box<LowerLocalI64Slots>,
+    // A tuple slot holding Box<T> or Option<Box<T>> with T a named struct:
+    // T's layout, the slot, and 1 for Box / 2 for Option<Box>; -1 when absent.
+    // `let next = pair.1` from `-> (Parser, Box<ExprList>)` then binds `next`
+    // as a Box of ExprList instead of an untyped word (#2966,
+    // Parser::parse_call_expr_box read `next.label` at ExprList.head).
+    tuple_box_layout: Box<LowerLocalI64Slots>,
+    tuple_box_slot: Box<LowerLocalI64Slots>,
+    tuple_box_kind: Box<LowerLocalI64Slots>,
     // f64 register carrying the GUM variance shadow for scalar locals, or -1 when absent.
     variance_regs: Box<LowerLocalI64Slots>,
     // -1 = not a capturing closure; otherwise the synthetic closure fn_id whose captures
@@ -258,6 +266,9 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         tuple_struct_slot: lowerer_box_local_i64_slots(-1),
         tuple_struct_layout2: lowerer_box_local_i64_slots(-1),
         tuple_struct_slot2: lowerer_box_local_i64_slots(-1),
+        tuple_box_layout: lowerer_box_local_i64_slots(-1),
+        tuple_box_slot: lowerer_box_local_i64_slots(-1),
+        tuple_box_kind: lowerer_box_local_i64_slots(-1),
         variance_regs: lowerer_box_local_i64_slots(-1),
         closure_fn_id: lowerer_box_local_i64_slots(-1),
         box_inner_layout: lowerer_box_local_i64_slots(-1),
@@ -1714,21 +1725,77 @@ var LOWER_OPTION_BOX_RETURN_INNER: [i64; 65537] = [0; 65537]
 // name. Read by lowerer_bind_tuple_second_struct_mut.
 var LOWER_TUPLE_LAST_STRUCT_SLOT1: [i64; 65537] = [0; 65537]
 var LOWER_TUPLE_LAST_STRUCT_NAME: [i64; 65537] = [0; 65537]
+// The LAST tuple slot holding Box<T> or Option<Box<T>>, same keying: slot + 1
+// (0 = none), T's interned name, and 1 = Box / 2 = Option<Box>.
+var LOWER_TUPLE_BOX_SLOT1: [i64; 65537] = [0; 65537]
+var LOWER_TUPLE_BOX_INNER: [i64; 65537] = [0; 65537]
+var LOWER_TUPLE_BOX_KIND: [i64; 65537] = [0; 65537]
+
+fn lower_type_list_last_box_slot(opt: &Option<Box<TypeExprList>>, idx: i64, best: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            var b = best
+            if lower_box_or_option_inner_type_name(&(*list).head).len > 0 { b = idx }
+            lower_type_list_last_box_slot(&(*list).tail, idx + 1, b)
+        }
+        None => best,
+    }
+}
+
+// 1 = Box<T>, 2 = Option<Box<T>>, with T's name; (0, empty) otherwise.
+fn lower_type_list_box_at(opt: &Option<Box<TypeExprList>>, k: i64) -> (i64, Name) with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            if k <= 0 {
+                if lower_type_expr_is_box(&(*list).head) {
+                    return (1, lower_box_inner_type_name(&(*list).head))
+                }
+                let inner = lower_option_box_inner_type_name(&(*list).head)
+                if inner.len > 0 { return (2, inner) }
+                return (0, ir_empty_name())
+            }
+            lower_type_list_box_at(&(*list).tail, k - 1)
+        }
+        None => (0, ir_empty_name()),
+    }
+}
 
 fn lower_type_list_last_struct_slot(opt: &Option<Box<TypeExprList>>, idx: i64, best: i64) -> i64 with Mut, Panic, Div {
     match *opt {
         Some(list) => {
             var b = best
-            if lower_type_expr_is_candidate_struct(&(*list).head) { b = idx }
+            if lower_type_expr_is_candidate_struct(&(*list).head) && !lower_type_expr_is_box(&(*list).head) { b = idx }
             lower_type_list_last_struct_slot(&(*list).tail, idx + 1, b)
         }
         None => best,
     }
 }
 
+fn lower_record_tuple_last_box(nid: i64, rt: &Option<Box<TypeExpr>>) with Mut, Panic, Div {
+    LOWER_TUPLE_BOX_SLOT1[nid as usize] = 0
+    LOWER_TUPLE_BOX_INNER[nid as usize] = 0
+    LOWER_TUPLE_BOX_KIND[nid as usize] = 0
+    match *rt {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeTuple { return }
+            let slot = lower_type_list_last_box_slot(&(*te).type_args, 0, 0 - 1)
+            if slot < 0 { return }
+            let kb = lower_type_list_box_at(&(*te).type_args, slot)
+            if kb.0 == 0 || kb.1.len <= 0 { return }
+            let sid = ir_intern_name(kb.1)
+            if sid <= 0 { return }
+            LOWER_TUPLE_BOX_SLOT1[nid as usize] = slot + 1
+            LOWER_TUPLE_BOX_INNER[nid as usize] = sid
+            LOWER_TUPLE_BOX_KIND[nid as usize] = kb.0
+        }
+        None => {}
+    }
+}
+
 fn lower_record_tuple_last_struct(nid: i64, rt: &Option<Box<TypeExpr>>) with Mut, Panic, Div {
     LOWER_TUPLE_LAST_STRUCT_SLOT1[nid as usize] = 0
     LOWER_TUPLE_LAST_STRUCT_NAME[nid as usize] = 0
+    lower_record_tuple_last_box(nid, rt)
     match *rt {
         Some(te) => {
             if (*te).kind != TypeExprKind::TypeTuple { return }
@@ -1769,6 +1836,13 @@ fn lowerer_bind_tuple_second_struct_mut(lo: &! Lowerer, local: Name, fn_id: i64)
     if fn_id < 0 || fn_id >= (*(*lo).module).fn_count { return }
     let nid = ir_intern_name(ir_fn_get(&(*(*lo).module), fn_id as usize).name)
     if nid <= 0 || nid > 65536 { return }
+    let bslot1 = LOWER_TUPLE_BOX_SLOT1[nid as usize]
+    if bslot1 > 0 {
+        let blayout = lower_struct_layout_index_of(&(*(*lo).struct_layouts), ir_name_at(LOWER_TUPLE_BOX_INNER[nid as usize]))
+        if blayout >= 0 {
+            (*lo) = (*lo).bind_local_tuple_box(local, blayout, bslot1 - 1, LOWER_TUPLE_BOX_KIND[nid as usize])
+        }
+    }
     let slot1 = LOWER_TUPLE_LAST_STRUCT_SLOT1[nid as usize]
     if slot1 <= 0 { return }
     let layout = lower_struct_layout_index_of(&(*(*lo).struct_layouts), ir_name_at(LOWER_TUPLE_LAST_STRUCT_NAME[nid as usize]))
@@ -1861,6 +1935,9 @@ pub fn lower_fn_tuple_arr_reset() with Mut {
         LOWER_OPTION_BOX_RETURN_INNER[oi as usize] = 0
         LOWER_TUPLE_LAST_STRUCT_SLOT1[oi as usize] = 0
         LOWER_TUPLE_LAST_STRUCT_NAME[oi as usize] = 0
+        LOWER_TUPLE_BOX_SLOT1[oi as usize] = 0
+        LOWER_TUPLE_BOX_INNER[oi as usize] = 0
+        LOWER_TUPLE_BOX_KIND[oi as usize] = 0
         oi = oi + 1
     }
     LOWER_HOF_TRANSPARENT_COUNT = 0
@@ -9715,6 +9792,77 @@ fn lower_field_idx_majority(table: &StructLayoutTable, field_name: Name, kind_on
     0 - 1
 }
 
+// SOUNIO_UNTYPED_FIELD_TRACE=1: record every untyped field read whose name
+// sits at more than one index across the layout table -- the reads the vote
+// below can get wrong -- and print them after lowering as
+//   untyped-field: <function> <field> <chosen index>
+// gen2's whole-program compile mis-resolved parse_let_stmt, pure_fn_reg_record
+// and parse_call_expr_box this way (#2966); each was found by diffing machine
+// code. The trace lists the remaining candidates in one compile. Off by
+// default: the recorder is a single global compare on the hot path.
+var LOWER_UNTYPED_TRACE_ON: i64 = 0
+var LOWER_UNTYPED_TRACE_COUNT: i64 = 0
+var LOWER_UNTYPED_TRACE_FN: [i64; 131072] = [0; 131072]
+var LOWER_UNTYPED_TRACE_FIELD: [i64; 131072] = [0; 131072]
+var LOWER_UNTYPED_TRACE_IDX: [i64; 131072] = [0; 131072]
+
+pub fn lower_untyped_field_trace_init() with IO, Mut, Div, Panic {
+    LOWER_UNTYPED_TRACE_COUNT = 0
+    if read_env("SOUNIO_UNTYPED_FIELD_TRACE") == "1" {
+        LOWER_UNTYPED_TRACE_ON = 1
+    } else {
+        LOWER_UNTYPED_TRACE_ON = 0
+    }
+}
+
+fn lower_field_name_is_ambiguous(table: &StructLayoutTable, field_name: Name) -> bool with Mut, Panic, Div {
+    var first: i64 = 0 - 1
+    var si: i64 = 0
+    while si < (*table).count {
+        let idx = lower_layout_field_index(&(*table).entries[si as usize], field_name)
+        if idx >= 0 {
+            if first < 0 {
+                first = idx
+            } else if idx != first {
+                return true
+            }
+        }
+        si = si + 1
+    }
+    false
+}
+
+fn lower_untyped_field_trace_note(table: &StructLayoutTable, fn_name: Name, field_name: Name, idx: i64) with Mut, Panic, Div {
+    if LOWER_UNTYPED_TRACE_ON == 0 { return }
+    if LOWER_UNTYPED_TRACE_COUNT >= 131072 { return }
+    if !lower_field_name_is_ambiguous(table, field_name) { return }
+    let c = LOWER_UNTYPED_TRACE_COUNT
+    LOWER_UNTYPED_TRACE_FN[c as usize] = ir_intern_name(fn_name)
+    LOWER_UNTYPED_TRACE_FIELD[c as usize] = ir_intern_name(field_name)
+    LOWER_UNTYPED_TRACE_IDX[c as usize] = idx
+    LOWER_UNTYPED_TRACE_COUNT = c + 1
+}
+
+pub fn lower_untyped_field_trace_dump() with IO, Mut, Div, Panic {
+    if LOWER_UNTYPED_TRACE_ON == 0 { return }
+    var i: i64 = 0
+    while i < LOWER_UNTYPED_TRACE_COUNT {
+        let fnm = ir_name_at(LOWER_UNTYPED_TRACE_FN[i as usize])
+        let fld = ir_name_at(LOWER_UNTYPED_TRACE_FIELD[i as usize])
+        print("untyped-field: ")
+        print(str_from_bytes(fnm.buf, fnm.len))
+        print(" ")
+        print(str_from_bytes(fld.buf, fld.len))
+        print(" ")
+        print_int(LOWER_UNTYPED_TRACE_IDX[i as usize])
+        print("\n")
+        i = i + 1
+    }
+    print("untyped-field: total ")
+    print_int(LOWER_UNTYPED_TRACE_COUNT)
+    print("\n")
+}
+
 // Untyped `.field` must not return the first layout that happens to carry the
 // name, and must not require every layout to agree. Gen3 SIGILL at the
 // #2979 null-handle ud2: the caller of a 2-arg Span-shaped ctor did `e.span`
@@ -14893,6 +15041,9 @@ impl Lowerer {
                 (*(*stk).tuple_struct_slot).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_layout2).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_slot2).values[idx as usize] = 0 - 1
+                (*(*stk).tuple_box_layout).values[idx as usize] = 0 - 1
+                (*(*stk).tuple_box_slot).values[idx as usize] = 0 - 1
+                (*(*stk).tuple_box_kind).values[idx as usize] = 0 - 1
                 (*(*stk).variance_regs).values[idx as usize] = -1
                 // Explicit -1: slot reuse across functions — see lowerer_bind_local_mut.
                 (*(*stk).box_inner_layout).values[idx as usize] = 0 - 1
@@ -15007,6 +15158,40 @@ impl Lowerer {
             i = i - 1
         }
         lo
+    }
+
+    fn bind_local_tuple_box(self, name: Name, layout_idx: i64, slot: i64, kind: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        if layout_idx < 0 || slot < 0 { return lo }
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if (*stk.depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*stk.names).values[i as usize], name) {
+                (*stk.tuple_box_layout).values[i as usize] = layout_idx
+                (*stk.tuple_box_slot).values[i as usize] = slot
+                (*stk.tuple_box_kind).values[i as usize] = kind
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    // (kind, layout) of the Box<T> / Option<Box<T>> in tuple slot `slot` of
+    // `name`, or (0, -1) when that slot is not the recorded box slot.
+    fn lookup_local_tuple_box(self, name: Name, slot: i64) -> (i64, i64) with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                if (*(*self.locals).tuple_box_slot).values[i as usize] == slot {
+                    return ((*(*self.locals).tuple_box_kind).values[i as usize], (*(*self.locals).tuple_box_layout).values[i as usize])
+                }
+                return (0, 0 - 1)
+            }
+            i = i - 1
+        }
+        (0, 0 - 1)
     }
 
     fn bind_local_tuple_struct2(self, name: Name, layout_idx: i64, slot: i64) -> Lowerer with Mut, Alloc, Panic, Div {
@@ -23506,6 +23691,13 @@ impl Lowerer {
         }
     }
 
+    fn current_fn_name_for_trace(self) -> Name with Mut, Panic, Div {
+        if self.current_fn < 0 || self.current_fn >= (*self.module).fn_count {
+            return ir_empty_name()
+        }
+        ir_fn_get(&(*self.module), self.current_fn as usize).name
+    }
+
     // Phase 3.2: Proper struct field index lookup via layout table
     fn field_idx_from_name(self, struct_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
         // Search layout table for the struct
@@ -23533,6 +23725,9 @@ impl Lowerer {
         // Struct not in layout table — same untyped consensus as the miss path,
         // then the legacy first-byte hash.
         let consensual = lower_field_idx_untyped(&(*self.struct_layouts), field_name)
+        if LOWER_UNTYPED_TRACE_ON != 0 {
+            lower_untyped_field_trace_note(&(*self.struct_layouts), self.current_fn_name_for_trace(), field_name, consensual)
+        }
         if consensual >= 0 {
             return consensual
         }
@@ -23571,6 +23766,9 @@ impl Lowerer {
         // strict: SessionStep.span=2 and AuditSection.span=3 vetoed
         // Expr.span=1 and hashed "span" to 51 (gen3 null-handle ud2).
         let consensual = lower_field_idx_untyped(&(*self.struct_layouts), n)
+        if LOWER_UNTYPED_TRACE_ON != 0 {
+            lower_untyped_field_trace_note(&(*self.struct_layouts), self.current_fn_name_for_trace(), n, consensual)
+        }
         if consensual >= 0 {
             return consensual
         }
@@ -29474,6 +29672,16 @@ impl Lowerer {
                                         lo = lo.bind_local_struct_type(
                                             s.name,
                                             (*lo.struct_layouts).entries[tsl as usize].type_name, false)
+                                    }
+                                    // `let next = pair.1` with slot 1 a Box<T> / Option<Box<T>>:
+                                    // bind the payload layout the way `let b = Box::new(..)` and
+                                    // an Option<Box<T>>-returning call do.
+                                    let tbx = lo.lookup_local_tuple_box((*tb).name, tsi)
+                                    if tbx.0 > 0 && tbx.1 >= 0 && tbx.1 < (*lo.struct_layouts).count {
+                                        if tbx.0 == 1 {
+                                            lo = lo.bind_local_struct_type(s.name, make_name("Box"), false)
+                                        }
+                                        lo = lo.bind_local_box_inner_layout(s.name, tbx.1)
                                     }
                                 }
                             }

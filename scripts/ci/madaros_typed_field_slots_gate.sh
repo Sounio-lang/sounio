@@ -12,8 +12,12 @@
 #      (Parser, Pattern): only the FIRST struct slot of a tuple return was typed.
 #   2. `var cur = *params` with `params: &Option<Box<ParamList>>`: the deref
 #      copy did not inherit the Option<Box<T>> payload layout.
+#   3. `let next = pair2.1` where `p.parse_call_arg_expr()` returns
+#      (Parser, Box<ExprList>): a Box<T> or Option<Box<T>> tuple slot was not
+#      typed at all, so Parser::parse_call_expr_box stored every later call
+#      argument's head as its label.
 # Each witness surrounds the right struct with decoys that win the vote.
-# Madaros from main prints 3 and 1055; lean_single passes both.
+# Madaros from main prints 3, 1055 and 3 (or 40300003); lean_single passes all.
 #
 # Usage: madaros_typed_field_slots_gate.sh   (MADAROS_BIN = compiler under test,
 #                                             default bin/souc)
@@ -40,4 +44,5 @@ check() {
 
 check tuple_second_struct_slot_typed TUPLE_SLOT_TYPED_OK
 check deref_option_box_payload_typed DEREF_OPTION_PAYLOAD_OK
-echo "[madaros-typed-field-slots] PASS: tuple second struct slot and deref'd Option<Box<T>> read the declared struct's fields"
+check tuple_box_slot_typed TUPLE_BOX_SLOT_OK
+echo "[madaros-typed-field-slots] PASS: tuple second struct slot, tuple Box/Option<Box> slot and deref'd Option<Box<T>> read the declared struct's fields"
