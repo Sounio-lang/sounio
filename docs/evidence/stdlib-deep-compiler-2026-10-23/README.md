@@ -46,3 +46,11 @@ remaining blockers. It verified the local/global distinction, private-value
 acquisition checks and balanced borrow suppression. This is not maintainer
 acceptance or a second execution. Assigned callback aliases/reassignment were
 not part of the focused positive fixture.
+
+CI follow-up: callback regressions now declare Panic on their callback types and
+are marked requires: madaros. These exercise Madaros lexical/visibility behavior;
+the separate stage2 full-suite compiler does not implement the same path.
+Slurm job 16096 reran the updated positive (native exit 0 with pass marker) and
+all three private-access negatives (exit 1, E175) using the same protected
+current-source compiler. This changes test contracts, not compiler source.
+The remote CI suite remains a separate pending gate.
