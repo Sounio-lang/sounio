@@ -1367,10 +1367,51 @@ fn name_ref_is_print(n: &Name) -> bool with Mut, Panic, Div {
     true
 }
 
-// Bytes the bump heap may use: the 2 GiB mapping minus the runtime context,
+// Size of the one anonymous mapping the entry trampoline takes for the runtime
+// context, the handle table, the bump heap and the region record stack, and of
+// the Box pool mapping. 2 GiB by default. An x86-64 Linux compile can ask for
+// more with SOUNIO_NV2_ARENA_GIB (nc_configure_arena_from_env); the generated
+// program then maps that much with MAP_NORESERVE, so pages are committed only
+// when touched. Madaros compiling itself (the gen3 rung) needs this: its own
+// workload outgrows 2 GiB within seconds (#2966). Other targets keep 2 GiB.
+var NC_ARENA_MAPPING_BYTES: i64 = 2147483648
+var NC_ARENA_ENV_CHECKED: i64 = 0
+
+fn nc_arena_mapping_bytes() -> i64 with Mut { NC_ARENA_MAPPING_BYTES }
+
+// mmap flags for the arena and Box pool: MAP_PRIVATE|MAP_ANONYMOUS, plus
+// MAP_NORESERVE (0x4000) above the default size.
+fn nc_arena_mmap_flags() -> i64 with Mut {
+    if NC_ARENA_MAPPING_BYTES > 2147483648 { 34 + 16384 } else { 34 }
+}
+
+fn nc_configure_arena_from_env() with IO, Mut, Panic, Div {
+    if NC_ARENA_ENV_CHECKED == 1 { return }
+    NC_ARENA_ENV_CHECKED = 1
+    NC_ARENA_MAPPING_BYTES = 2147483648
+    let v = read_env("SOUNIO_NV2_ARENA_GIB")
+    if str_len(v) == 0 { return }
+    if str_eq(v, "2") { return }
+    if str_eq(v, "4") { NC_ARENA_MAPPING_BYTES = 4294967296; return }
+    if str_eq(v, "8") { NC_ARENA_MAPPING_BYTES = 8589934592; return }
+    if str_eq(v, "16") { NC_ARENA_MAPPING_BYTES = 17179869184; return }
+    if str_eq(v, "32") { NC_ARENA_MAPPING_BYTES = 34359738368; return }
+    if str_eq(v, "64") { NC_ARENA_MAPPING_BYTES = 68719476736; return }
+    if str_eq(v, "128") { NC_ARENA_MAPPING_BYTES = 137438953472; return }
+    print("warning: SOUNIO_NV2_ARENA_GIB=")
+    print(v)
+    print(" is not one of 2, 4, 8, 16, 32, 64, 128; using 2\n")
+}
+
+// Bytes the bump heap may use: the arena mapping minus the runtime context,
 // the handle table, and the region record stack carved off its top
 // (native/gc.sio, "Region reclamation").
-fn nc_heap_arena_bytes() -> i64 {
+fn nc_heap_arena_bytes() -> i64 with Mut {
+    nc_arena_mapping_bytes() - runtime_context_size() - native_v2_handle_table_bytes() - native_v2_region_stack_bytes()
+}
+
+// Windows keeps the fixed 2 GiB VirtualAlloc reservation.
+fn nc_heap_arena_bytes_fixed_2gib() -> i64 {
     2147483648 - runtime_context_size() - native_v2_handle_table_bytes() - native_v2_region_stack_bytes()
 }
 
@@ -10149,7 +10190,7 @@ fn nc_core_emit_box_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, e
     nc_emit_mov_rdi_imm(nc, 0)
     nc_emit_mov_reg_imm(nc, 6, nc_heap_arena_bytes())
     nc_emit_mov_reg_imm(nc, 2, 3)
-    nc_emit_mov_r10_imm32(nc, 34)
+    nc_emit_mov_r10_imm32(nc, nc_arena_mmap_flags())
     nc_emit_mov_r8_imm32(nc, -1)
     nc_emit_mov_r9_imm32(nc, 0)
     nc_emit_syscall(nc)
@@ -13567,9 +13608,9 @@ fn emit_entry_trampoline_mmap_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_mov_r14_rsp(nc)
     nc_emit_mov_rax_imm(nc, 9)
     nc_emit_mov_rdi_imm(nc, 0)
-    nc_emit_mov_reg_imm(nc, 6, 2147483648)
+    nc_emit_mov_reg_imm(nc, 6, nc_arena_mapping_bytes())
     nc_emit_mov_reg_imm(nc, 2, 3)
-    nc_emit_mov_r10_imm32(nc, 34)
+    nc_emit_mov_r10_imm32(nc, nc_arena_mmap_flags())
     nc_emit_mov_r8_imm32(nc, -1)
     nc_emit_mov_r9_imm32(nc, 0)
     nc_emit_syscall(nc)
@@ -13825,9 +13866,9 @@ pub fn emit_entry_trampoline_into(nc: &! NativeCompiler, main_fn_index: i64) wit
 
     (*nc).code = emit_mov_rax_imm((*nc).code, 9)
     (*nc).code = emit_mov_rdi_imm((*nc).code, 0)
-    (*nc).code = emit_mov_reg_imm((*nc).code, 6, 2147483648)
+    (*nc).code = emit_mov_reg_imm((*nc).code, 6, nc_arena_mapping_bytes())
     (*nc).code = emit_mov_reg_imm((*nc).code, 2, 3)
-    (*nc).code = emit_mov_r10_imm32((*nc).code, 34)
+    (*nc).code = emit_mov_r10_imm32((*nc).code, nc_arena_mmap_flags())
     (*nc).code = emit_mov_r8_imm32((*nc).code, -1)
     (*nc).code = emit_mov_r9_imm32((*nc).code, 0)
     (*nc).code = emit_syscall((*nc).code)
@@ -14002,7 +14043,7 @@ fn emit_entry_trampoline_windows_x86(nc: NativeCompiler, main_fn_index: i64) -> 
 
     // heap_limit = heap_base + (alloc_size - runtime_context_size - handle_table_bytes)
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_base())
-    c.code = emit_mov_reg_imm(c.code, 1, nc_heap_arena_bytes())
+    c.code = emit_mov_reg_imm(c.code, 1, nc_heap_arena_bytes_fixed_2gib())
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_limit())
 
@@ -14122,7 +14163,7 @@ fn emit_entry_trampoline_macos_x86(nc: NativeCompiler, main_fn_index: i64) -> Na
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_base())
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_base())
-    c.code = emit_mov_reg_imm(c.code, 1, nc_heap_arena_bytes())
+    c.code = emit_mov_reg_imm(c.code, 1, nc_heap_arena_bytes_fixed_2gib())
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_limit())
     c.code = emit_mov_rax_mem_r14(c.code)
@@ -15093,6 +15134,7 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         return 11
     }
 
+    nc_configure_arena_from_env()
     native_v2_trace_module_ir_ref(module)
 
     var nc = compiler_new()
@@ -15693,6 +15735,7 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
 }
 
 pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
+    nc_configure_arena_from_env()
     var nc = compiler_new()
     x86_compile_module_streaming_begin_into(&! nc, module)
     var fi: i64 = 0

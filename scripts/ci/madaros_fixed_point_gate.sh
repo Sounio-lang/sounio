@@ -61,6 +61,14 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# gen2 and gen3 are Madaros-compiled programs, and their runtime arena is
+# whatever the compile asked for (SOUNIO_NV2_ARENA_GIB, default 2 GiB). With
+# 2 GiB, gen2 ran out of arena about 3 s into compiling main.sio, while still
+# parsing it (#2966; scripts/ci/madaros_arena_size_gate.sh). Both rungs are
+# compiled under the same value, so gen2 and gen3 stay comparable. The mapping
+# is MAP_NORESERVE: only the pages the compile touches are committed.
+export SOUNIO_NV2_ARENA_GIB="${SOUNIO_NV2_ARENA_GIB:-64}"
+
 # ── receipt reuse ─────────────────────────────────────────────────────────────
 # gen2 and gen3 are two full self-compiles (~40 min in CI, in swap). Their
 # outcome is a function of: the gen1 bytes, the source tree, this gate and its
