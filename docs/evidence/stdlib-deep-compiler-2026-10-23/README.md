@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.stdlib-deep-compiler-2026-10-23.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-deep-compiler-2026-10-23.readme
+-->
+
 # Checked linear borrows and lexical callbacks — native receipt
 
 This is a focused compiler gate. Full corpus/CI/merge are separate states.
