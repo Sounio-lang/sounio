@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.stdlib-deep-foundation-2026-10-23.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-deep-foundation-2026-10-23.readme
+-->
+
 # Native foundation receipt — 2026-10-23
 
 Slurm job16114 executed the indexed source tree
