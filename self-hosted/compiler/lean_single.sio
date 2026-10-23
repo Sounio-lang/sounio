@@ -11684,9 +11684,10 @@ fn stabilize_return_agg_x86(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
 }
 
 // ─── Emit print("string") ───
-fn emit_print(tok: i64) with IO, Mut, Panic, Div {
-    let ss = TS[tok as usize] + 1
-    let se = TE[tok as usize] - 1
+// Print source bytes ss..se of the string literal at tok, decoding escapes.
+// braces == 1 is a piece of a format string: `{{` and `}}` print one brace
+// (compile_format_print).
+fn emit_print_src(tok: i64, ss: i64, se: i64, braces: i64) with IO, Mut, Panic, Div {
     var slen: i64 = 0
     var zi: i64 = 0
     while zi < 256 { SQW[zi as usize] = 0; zi = zi + 1 }
@@ -11694,7 +11695,9 @@ fn emit_print(tok: i64) with IO, Mut, Panic, Div {
     while si < se {
         let c = sb(si)
         var byte: i64 = c
-        if c == 92 && si + 1 < se {
+        if braces == 1 && (c == 123 || c == 125) && si + 1 < se && sb(si + 1) == c {
+            si = si + 2
+        } else if c == 92 && si + 1 < se {
             let c2 = sb(si + 1)
             if c2 == 120 && si + 3 < se {
                 let h1 = sb(si + 2)
@@ -11748,6 +11751,10 @@ fn emit_print(tok: i64) with IO, Mut, Panic, Div {
     em(0xba); em32(slen)
     em(0x0f); em(0x05)
     em(0x48); em(0x81); em(0xc4); em32(nq * 8)
+}
+
+fn emit_print(tok: i64) with IO, Mut, Panic, Div {
+    emit_print_src(tok, TS[tok as usize] + 1, TE[tok as usize] - 1, 0)
 }
 
 fn emit_print_cstr() with Mut {
@@ -16270,6 +16277,174 @@ fn flt_fill_bits(int_part: i64, frac: i64, denom_in: i64, exp: i64) with Mut, Di
 // tree relies on them: the keyword spellings the lexer classifies but that the
 // expression parser has no arm for (`linear` 62, `study` 71, `affine` 73), and
 // a leading-dot float such as `.5`. Refuse those, located, in Madaros's wording.
+// ─── print/println with a format and arguments ───
+// `println("x={} y={}", x, y)`: each `{}` prints the next argument exactly as
+// `print(arg)` would, `{{` and `}}` are literal braces, and the format must be
+// a string literal whose `{}` count equals the number of arguments. With one
+// argument nothing changes (`println("{}")` prints `{}`). The rule is the
+// Madaros rewrite's (self-hosted/parser/exprs.sio, fmt_print_kind); D-35.
+// Before it, everything after the format was dropped without a word.
+
+// The `{}` count of the format literal at tok; -3 for a specifier (`{:.1}`),
+// -1 for any other `{` that is neither `{}` nor `{{`, -2 for a `}` that is
+// not `}}`.
+fn fmt_count_placeholders_tok(tok: i64) -> i64 with Mut, Panic {
+    let end = TE[tok as usize] - 1
+    var i: i64 = TS[tok as usize] + 1
+    var n: i64 = 0
+    while i < end {
+        let c = sb(i)
+        if c == 92 {
+            i = i + 2
+        } else if c == 123 {
+            if i + 1 < end && sb(i + 1) == 123 { i = i + 2 }
+            else if i + 1 < end && sb(i + 1) == 125 { n = n + 1; i = i + 2 }
+            else if i + 1 < end && sb(i + 1) == 58 { return 0 - 3 }
+            else { return 0 - 1 }
+        } else if c == 125 {
+            if i + 1 < end && sb(i + 1) == 125 { i = i + 2 } else { return 0 - 2 }
+        } else {
+            i = i + 1
+        }
+    }
+    return n
+}
+
+// The arguments after the format literal at tok: commas at depth 0 before the
+// call's `)`, a trailing comma not counted.
+fn fmt_count_args_tok(tok: i64) -> i64 with Mut, Panic {
+    var p: i64 = tok + 1
+    var depth: i64 = 0
+    var n: i64 = 0
+    while p < TC {
+        let k = TK[p as usize]
+        if depth == 0 && k == 7 { return n }
+        if depth == 0 && k == 28 && TK[(p + 1) as usize] != 7 { n = n + 1 }
+        if k == 6 || k == 41 || k == 8 { depth = depth + 1 }
+        if (k == 7 || k == 42 || k == 9) && depth > 0 { depth = depth - 1 }
+        p = p + 1
+    }
+    return n
+}
+
+fn fmt_report_tok(tok: i64, holes: i64, n_args: i64) with IO, Mut, Panic {
+    print("error: format string at ")
+    print_src_loc_for_tok(tok)
+    if holes == 0 - 1 {
+        print(": `{` starts a placeholder, which is `{}` with nothing inside; write `{{` for a literal `{`\n")
+    } else if holes == 0 - 2 {
+        print(": unmatched `}`; write `}}` for a literal `}`\n")
+    } else if holes == 0 - 3 {
+        print(": format specifiers such as `{:.1}` are not supported; `{}` prints the value exactly as print does\n")
+    } else {
+        print(": ")
+        print_int(holes)
+        print(" `{}` placeholder(s) but ")
+        print_int(n_args)
+        print(" argument(s) after the format; each `{}` takes exactly one argument\n")
+    }
+    tc_mark_failed()
+}
+
+fn fmt_report_nonliteral(tok: i64) with IO, Mut, Panic {
+    print("error: format string at ")
+    print_src_loc_for_tok(tok)
+    print(": with more than one argument, the first argument of print/println is its format and must be a string literal\n")
+    tc_mark_failed()
+}
+
+// Leave EP on the `)` that closes the call whose format literal is at tok.
+fn fmt_skip_to_call_close(tok: i64) with Mut, Panic {
+    EP = tok + 1
+    var depth: i64 = 0
+    while EP < TC {
+        let k = TK[EP as usize]
+        if depth == 0 && k == 7 { return }
+        if k == 6 || k == 41 || k == 8 { depth = depth + 1 }
+        if (k == 7 || k == 42 || k == 9) && depth > 0 { depth = depth - 1 }
+        EP = EP + 1
+    }
+}
+
+// Print the value compile_or just left in rax/xmm0, as println does, without
+// the newline.
+fn fmt_emit_value_x86(name_tok: i64) with IO, Mut, Panic, Div {
+    if EXPR_TY == 13 {
+        tc_error_hard(name_tok, "printing f128 is not implemented; print `x as f64`")
+    }
+    if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+        tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
+    }
+    if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
+        emit_print_f64()
+    } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
+        emit_print_cstr()
+    } else {
+        emit_print_int()
+    }
+}
+
+fn fmt_emit_value_a64(name_tok: i64) with IO, Mut, Panic, Div {
+    if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+        tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
+    }
+    if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
+        emit_print_f64_a64()
+    } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
+        emit_print_cstr_a64()
+    } else {
+        emit_print_int_a64()
+    }
+}
+
+// EP is at the format literal and the next token is `,`. Leaves EP on the
+// call's `)`. a64 == 1 selects the aarch64 emitters.
+fn compile_format_print(name_tok: i64, newline: i64, a64: i64) with IO, Mut, Panic, Div {
+    let ft = EP
+    let holes = fmt_count_placeholders_tok(ft)
+    let n_args = fmt_count_args_tok(ft)
+    if holes < 0 || holes != n_args {
+        fmt_report_tok(ft, holes, n_args)
+        fmt_skip_to_call_close(ft)
+        return
+    }
+    let end = TE[ft as usize] - 1
+    var seg: i64 = TS[ft as usize] + 1
+    var i: i64 = seg
+    EP = ft + 1
+    while i < end {
+        let c = sb(i)
+        if c == 92 {
+            i = i + 2
+        } else if (c == 123 || c == 125) && sb(i + 1) == c {
+            i = i + 2
+        } else if c == 123 {
+            if i > seg {
+                if a64 == 1 { emit_print_a64_src(ft, seg, i, 1) } else { emit_print_src(ft, seg, i, 1) }
+            }
+            EP = EP + 1  // the `,` before this argument
+            if a64 == 1 {
+                compile_or_a64()
+                fmt_emit_value_a64(name_tok)
+            } else {
+                compile_or()
+                fmt_emit_value_x86(name_tok)
+            }
+            i = i + 2
+            seg = i
+        } else {
+            i = i + 1
+        }
+    }
+    if end > seg {
+        if a64 == 1 { emit_print_a64_src(ft, seg, end, 1) } else { emit_print_src(ft, seg, end, 1) }
+    }
+    if TK[EP as usize] == 28 && TK[(EP + 1) as usize] == 7 { EP = EP + 1 }
+    if newline == 1 {
+        if a64 == 1 { emit_print_nl_a64() } else { emit_print_nl() }
+    }
+}
+
 fn primary_fallback_refuses(tok: i64) -> bool with Panic, Mut {
     let k = TK[tok as usize]
     if k == 62 || k == 71 || k == 73 { return true }
@@ -17989,6 +18164,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 7 {
                     emit_print(EP); EP = EP + 1
+                } else if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 28 {
+                    compile_format_print(name_tok, 0, 0)
+                } else if fmt_count_args_tok(EP - 1) > 0 {
+                    fmt_report_nonliteral(EP)
+                    fmt_skip_to_call_close(EP - 1)
                 } else {
                     compile_or()
                     if EXPR_TY == 13 {
@@ -18018,6 +18198,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     emit_print(EP)
                     EP = EP + 1
                     emit_print_nl()
+                } else if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 28 {
+                    compile_format_print(name_tok, 1, 0)
+                } else if fmt_count_args_tok(EP - 1) > 0 {
+                    fmt_report_nonliteral(EP)
+                    fmt_skip_to_call_close(EP - 1)
                 } else if TK[EP as usize] == 7 {
                     // `println()` prints an empty line, as on Madaros. Without
                     // this arm the `)` fell to compile_primary's last arm and
@@ -39020,9 +39205,10 @@ fn emit_syscall6_a64(argc: i64) with Mut, Panic, Div {
 }
 
 // ─── ARM64 print("string") ───
-fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
-    let ss = TS[tok as usize] + 1
-    let se = TE[tok as usize] - 1
+// Print source bytes ss..se of the string literal at tok, decoding escapes.
+// braces == 1 is a piece of a format string: `{{` and `}}` print one brace
+// (compile_format_print).
+fn emit_print_a64_src(tok: i64, ss: i64, se: i64, braces: i64) with IO, Mut, Panic, Div {
     var slen: i64 = 0
     var zi: i64 = 0
     while zi < 256 { SQW[zi as usize] = 0; zi = zi + 1 }
@@ -39030,7 +39216,9 @@ fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
     while si < se {
         let c = sb(si)
         var byte: i64 = c
-        if c == 92 && si + 1 < se {
+        if braces == 1 && (c == 123 || c == 125) && si + 1 < se && sb(si + 1) == c {
+            si = si + 2
+        } else if c == 92 && si + 1 < se {
             let c2 = sb(si + 1)
             if c2 == 120 && si + 3 < se {
                 let h1 = sb(si + 2)
@@ -39105,6 +39293,10 @@ fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
         em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)  // movz x8, #64 (Linux write)
     }
     emit_syscall_a64()
+}
+
+fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
+    emit_print_a64_src(tok, TS[tok as usize] + 1, TE[tok as usize] - 1, 0)
 }
 
 fn emit_print_cstr_a64() with Mut {
@@ -42058,6 +42250,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1
                 if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 7 { emit_print_a64(EP); EP = EP + 1 }
+                else if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 28 { compile_format_print(name_tok, 0, 1) }
+                else if fmt_count_args_tok(EP - 1) > 0 { fmt_report_nonliteral(EP); fmt_skip_to_call_close(EP - 1) }
                 else {
                     compile_or_a64()
                     // See print's x86-64 twin for rationale (issue #633).
@@ -42082,6 +42276,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     emit_print_a64(EP)
                     EP = EP + 1
                     emit_print_nl_a64()
+                } else if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 28 {
+                    compile_format_print(name_tok, 1, 1)
+                } else if fmt_count_args_tok(EP - 1) > 0 {
+                    fmt_report_nonliteral(EP)
+                    fmt_skip_to_call_close(EP - 1)
                 } else if TK[EP as usize] == 7 {
                     emit_print_nl_a64()  // `println()`: see the x86-64 twin
                 } else {
