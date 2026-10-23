@@ -190,3 +190,14 @@ finite-sample validity. Profile curvature is a local diagnostic. The Lean result
 proves a selected exact rational clock relation, not the full floating-point ODE
 solver. Incremental TSV does not implement sample joins or a full RNA pipeline.
 No DESeq2 parity, universal performance or visual superiority is claimed.
+
+Exact-index replay job16153 passed330 records with zero failures for commit
+74996a7119722486ce1e0a1ace52815bc8aa0407. The compact source-bound receipt is
+in docs/evidence/stdlib-deep-science-2026-10-23. Science PR3052 is published.
+Initial GitHub Impact exposed a missing additive-evaluator consistency contract;
+fd4193970e replaces that static consistency block with a Node check covering
+both validators and six rejection controls. The legacy evaluator is unchanged.
+The classifier-only controls and new contract controls pass; actual CI rerun
+remains pending. PR3047 Lean compiled but its generated file-count inventory
+was stale; PR3048 has a real legacy Stage2 renderer regression being corrected
+with the original CI executable. Neither is excused by the Madaros replay.
