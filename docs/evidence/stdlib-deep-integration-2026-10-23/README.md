@@ -53,3 +53,27 @@ examples/count-matrix-qc.svg and examples/bca-mean.svg are verbatim SVG fragment
 emitted by the final source's synthetic run-pass fixtures. They illustrate
 actual rendering output; statistical interpretation follows those fixture
 contracts. No externally redrawn image is substituted for the native output.
+
+## Runtime deadline and subnormal audit follow-through
+
+Commit36188293819c5fb8db055a623775ae6cc95cdd11 adds the existing per-fixture
+timeout120 to the full20000x512 normalization test. Its executable body, dataset
+and assertions remain identical to fc78. Slurm16219 used the canonical runner
+and recorded Pass1/Fail0/Skip0 in36.94s including compilation and execution.
+normalization-timeout/ retains actual result JSON, transcript, resource and
+source identities. The earlier16217 refusal occurred before numerical execution.
+The722604KiB peak is for compiler+execution, separate from kernel80384KiB.
+
+Slurm16245 investigated the earlier suggestion that literal1e-320 becomes zero.
+That diagnosis was not reproduced on the exact protected compiler1148: native
+output is positive and2024 minimum-subnormal quanta, matching independent C++23
+bit pattern2024. Other selected subnormal literals are also positive. This is
+selected input evidence, not a full proof of decimal conversion correctness.
+The current Madaros parser already has its bignum/subnormal rounding path;
+no compiler patch was needed. The fixture's explicit minimum-subnormal
+construction names an exact boundary, rather than working around a demonstrated
+current-parser defect. The corresponding historical ledger statement is corrected.
+
+subnormal-audit/ retains the exact probe/reference text under .txt extensions,
+native/C++ output, statuses and hashes. Full original sources and ELFs remain
+on scratch at /scratch/sounio-stdlib-deep-20261023/subnormal_audit.
