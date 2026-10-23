@@ -1407,7 +1407,62 @@ fn nc_configure_arena_from_env() with IO, Mut, Panic, Div {
 // the handle table, and the region record stack carved off its top
 // (native/gc.sio, "Region reclamation").
 fn nc_heap_arena_bytes() -> i64 with Mut {
-    nc_arena_mapping_bytes() - runtime_context_size() - native_v2_handle_table_bytes() - native_v2_region_stack_bytes()
+    nc_arena_mapping_bytes() - runtime_context_size() - nc_handle_table_bytes() - native_v2_region_stack_bytes()
+}
+
+// Handle-table capacity of the generated program. 2^22 by default
+// (native/gc.sio). An x86-64 Linux compile can raise it with
+// SOUNIO_NV2_HANDLE_LOG2 = 22 .. 27 (nc_configure_handles_from_env).
+//
+// A struct-base word below the capacity is a handle id; at or above it, a raw
+// pointer (gc.sio, native_v2_handle_raw_ptr_threshold). Raw pointers are heap
+// and stack addresses, BSS addresses (from BSS_BASE_LINUX = 0x10000000) and
+// ELF image addresses (from the load base). The load base was 0x400000, which
+// is exactly 2^22, so the handle range could not grow. A larger capacity
+// therefore moves the load base to the capacity itself: ids stay below every
+// raw pointer, and with LOG2 = 22 the ELF is byte-identical. LOG2 stops at 27
+// so the image (base .. base + text + rodata + data) still ends below
+// BSS_BASE_LINUX; native_v2_write_min_elf64_to_file refuses an image that
+// would not. Madaros compiling itself needs this: gen3 filled the 4,194,304
+// handles after parsing about 3 MB of its own 28 MB of source (#2966).
+var NC_HANDLE_CAPACITY: i64 = 4194304
+var NC_HANDLE_ENV_CHECKED: i64 = 0
+
+fn nc_handle_capacity() -> i64 with Mut { NC_HANDLE_CAPACITY }
+
+fn nc_handle_table_bytes() -> i64 with Mut { native_v2_handle_entry_size() * NC_HANDLE_CAPACITY }
+
+// ELF load base of a Linux image: the handle capacity (0x400000 by default).
+fn nc_elf_base_addr() -> i64 with Mut { NC_HANDLE_CAPACITY }
+
+fn nc_configure_handles_from_env() with IO, Mut, Panic, Div {
+    if NC_HANDLE_ENV_CHECKED == 1 { return }
+    NC_HANDLE_ENV_CHECKED = 1
+    NC_HANDLE_CAPACITY = 4194304
+    let v = read_env("SOUNIO_NV2_HANDLE_LOG2")
+    if str_len(v) == 0 { return }
+    var cap: i64 = 0
+    if str_eq(v, "22") { cap = 4194304 }
+    if str_eq(v, "23") { cap = 8388608 }
+    if str_eq(v, "24") { cap = 16777216 }
+    if str_eq(v, "25") { cap = 33554432 }
+    if str_eq(v, "26") { cap = 67108864 }
+    if str_eq(v, "27") { cap = 134217728 }
+    if cap == 0 {
+        print("warning: SOUNIO_NV2_HANDLE_LOG2=")
+        print(v)
+        print(" is not one of 22 .. 27; using 22\n")
+        return
+    }
+    // The table is carved from the arena mapping; keep at least three quarters
+    // of the mapping for the heap.
+    if native_v2_handle_entry_size() * cap * 4 > nc_arena_mapping_bytes() {
+        print("warning: SOUNIO_NV2_HANDLE_LOG2=")
+        print(v)
+        print(" needs a larger arena (SOUNIO_NV2_ARENA_GIB); using 22\n")
+        return
+    }
+    NC_HANDLE_CAPACITY = cap
 }
 
 // Windows keeps the fixed 2 GiB VirtualAlloc reservation.
@@ -3746,7 +3801,7 @@ fn native_v2_emit_gc_empty_frame_reset(nc: NativeCompiler) -> NativeCompiler wit
 fn native_v2_resolve_handle_to_object_base_rax(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     c.code = emit_mov_rbx_rax(c.code)
-    c.code = emit_mov_rax_imm(c.code, native_v2_handle_raw_ptr_threshold())
+    c.code = emit_mov_rax_imm(c.code, nc_handle_capacity())
     c.code = emit_cmp_rbx_rax(c.code)
     c.code = emit_setae_al(c.code)
     c.code = emit_movzx_rax_al(c.code)
@@ -3791,7 +3846,7 @@ fn native_v2_resolve_handle_to_object_base_rax(nc: NativeCompiler) -> NativeComp
 
 fn native_v2_resolve_handle_to_object_base_rax_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_mov_rbx_rax(nc)
-    nc_emit_mov_rax_imm(nc, native_v2_handle_raw_ptr_threshold())
+    nc_emit_mov_rax_imm(nc, nc_handle_capacity())
     nc_emit_cmp_rbx_rax(nc)
     nc_emit_setae_al(nc)
     nc_emit_movzx_rax_al(nc)
@@ -4042,7 +4097,7 @@ pub fn native_v2_emit_runtime_metadata_into(nc: &! NativeCompiler) with Mut, Pan
     nc_flat_data_add_u64_into(nc, 0)
     nc_flat_data_add_u64_into(nc, 0)
     nc_flat_data_add_u64_into(nc, 0)
-    nc_flat_data_add_u64_into(nc, native_v2_handle_table_capacity_default())
+    nc_flat_data_add_u64_into(nc, nc_handle_capacity())
     nc_flat_data_add_u64_into(nc, (*nc).descriptor_data_offset)
     nc_flat_data_add_u64_into(nc, (*nc).descriptor_count)
     nc_flat_data_add_u64_into(nc, 0)
@@ -4611,7 +4666,7 @@ fn nc_core_intern_alloc_fail_explain_into(nc: &! NativeCompiler, fail_code: i64)
     // native_capacity_tiers_check.py counts every 4194304 in this file as the
     // ELF load address 0x400000 and requires exactly six argument-form hits.
     nc_alloc_diag_append_ascii_into(nc, "  the generated program's handle table (")
-    nc_alloc_diag_append_decimal_into(nc, native_v2_handle_table_capacity_default())
+    nc_alloc_diag_append_decimal_into(nc, nc_handle_capacity())
     nc_alloc_diag_append_ascii_into(nc, " managed objects, never\n")
     nc_alloc_diag_append_ascii_into(nc, "  reclaimed) is exhausted: every aggregate over 16 bytes created or copied\n")
     nc_alloc_diag_append_ascii_into(nc, "  by value takes a handle for the life of the process. Fix: hoist buffers\n")
@@ -12491,7 +12546,7 @@ pub fn compile_native_v2_sret_witness_to_file(output_path: string, plain_call: b
     let reloc_eff_rodata = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
     let reloc_data_off = align_page(reloc_rodata_off + reloc_eff_rodata)
     apply_relocations_into(&! nc, reloc_rodata_off, reloc_data_off)
-    native_v2_write_min_elf64_to_file(output_path, &! nc, nc.entry_offset, 4194304)
+    native_v2_write_min_elf64_to_file(output_path, &! nc, nc.entry_offset, nc_elf_base_addr())
 }
 
 // Map MachineOperand to a scheduler register ID for dependency tracking.
@@ -13137,7 +13192,7 @@ fn native_v2_ref_array_bss_window_end() -> i64 { 2147483648 }
 fn native_v2_ref_array_resolve_base_rax_into(nc: &! NativeCompiler, base_ref: i64) with Mut, Panic, Div {
     nc_core_load_temp_to_rax(nc, base_ref)
     nc_emit_mov_rbx_rax(nc)                                  // rbx = V
-    nc_emit_mov_rax_imm(nc, native_v2_handle_raw_ptr_threshold())
+    nc_emit_mov_rax_imm(nc, nc_handle_capacity())
     nc_emit_cmp_rbx_rax(nc)
     nc_emit_setae_al(nc)
     nc_emit_movzx_rax_al(nc)
@@ -13626,14 +13681,14 @@ fn emit_entry_trampoline_context_into(nc: &! NativeCompiler) with Mut, Panic, Di
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_handle_table_base())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_count(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_region_top(), 0)
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
+    emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_capacity(), nc_handle_capacity())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_collector_epoch(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_last_gc_stats(), 0)
 
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_table_base())
-    nc_emit_mov_reg_imm(nc, 1, native_v2_handle_table_bytes())
+    nc_emit_mov_reg_imm(nc, 1, nc_handle_table_bytes())
     nc_emit_add_reg_reg(nc, 0, 1)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_base())
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
@@ -13882,14 +13937,14 @@ pub fn emit_entry_trampoline_into(nc: &! NativeCompiler, main_fn_index: i64) wit
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_handle_table_base())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_count(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_region_top(), 0)
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
+    emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_capacity(), nc_handle_capacity())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_collector_epoch(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_last_gc_stats(), 0)
 
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_table_base())
-    (*nc).code = emit_mov_reg_imm((*nc).code, 1, native_v2_handle_table_bytes())
+    (*nc).code = emit_mov_reg_imm((*nc).code, 1, nc_handle_table_bytes())
     (*nc).code = emit_add_reg_reg((*nc).code, 0, 1)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_base())
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
@@ -14028,7 +14083,7 @@ fn emit_entry_trampoline_windows_x86(nc: NativeCompiler, main_fn_index: i64) -> 
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_handle_table_base())
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_count(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_region_top(), 0)
-    c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
+    c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), nc_handle_capacity())
     c = emit_store_runtime_context_imm(c, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
     c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     c = emit_store_runtime_context_imm(c, runtime_context_field_collector_epoch(), 0)
@@ -14036,7 +14091,7 @@ fn emit_entry_trampoline_windows_x86(nc: NativeCompiler, main_fn_index: i64) -> 
 
     // Heap allocation starts after the RuntimeContext and fixed-capacity handle table.
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_handle_table_base())
-    c.code = emit_mov_reg_imm(c.code, 1, native_v2_handle_table_bytes())
+    c.code = emit_mov_reg_imm(c.code, 1, nc_handle_table_bytes())
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_base())
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
@@ -14152,13 +14207,13 @@ fn emit_entry_trampoline_macos_x86(nc: NativeCompiler, main_fn_index: i64) -> Na
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_handle_table_base())
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_count(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_region_top(), 0)
-    c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
+    c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), nc_handle_capacity())
     c = emit_store_runtime_context_imm(c, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
     c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     c = emit_store_runtime_context_imm(c, runtime_context_field_collector_epoch(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_last_gc_stats(), 0)
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_handle_table_base())
-    c.code = emit_mov_reg_imm(c.code, 1, native_v2_handle_table_bytes())
+    c.code = emit_mov_reg_imm(c.code, 1, nc_handle_table_bytes())
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_base())
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
@@ -14716,6 +14771,20 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     let text_vaddr = base_addr + text_offset
     let rodata_vaddr = base_addr + rodata_offset
     let data_vaddr = base_addr + data_offset
+    // The image must end below the BSS window. A load base raised with
+    // SOUNIO_NV2_HANDLE_LOG2 (nc_configure_handles_from_env) moves it up, and
+    // an overlap would map data over BSS globals.
+    let image_end = if data_payload > 0 { data_vaddr + data_payload } else { rodata_vaddr + rodata_len }
+    if image_end > BSS_BASE_LINUX {
+        print("error: ELF image at load base ")
+        print_int(base_addr)
+        print(" ends at ")
+        print_int(image_end)
+        print(", past the BSS base ")
+        print_int(BSS_BASE_LINUX)
+        print("; lower SOUNIO_NV2_HANDLE_LOG2\n")
+        return 29
+    }
 
     let interp_off: i64 = 512
     let interp_len: i64 = 28
@@ -15135,6 +15204,7 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     }
 
     nc_configure_arena_from_env()
+    nc_configure_handles_from_env()
     native_v2_trace_module_ir_ref(module)
 
     var nc = compiler_new()
@@ -15333,7 +15403,7 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         print(" (raise nc_flat_rodata_capacity)\n")
         return 23
     }
-    let elf_rc = native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)
+    let elf_rc = native_v2_write_min_elf64_to_file(output_path, &! nc, entry, nc_elf_base_addr())
     if elf_rc == 0 {
         let map_path = read_env("SOUNIO_NV2_SYMBOL_MAP")
         if str_len(map_path) > 0 {
@@ -15354,7 +15424,7 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
 // ELF itself is unchanged. NC_BIG_ELF is reused as the buffer once the ELF is
 // on disk.
 fn native_v2_write_symbol_map(path: string, module: &IrModule, fn_count: i64) -> bool with IO, Mut, Panic, Div {
-    let text_vaddr: i64 = 4194304 + 4096
+    let text_vaddr: i64 = nc_elf_base_addr() + 4096
     let cap: i64 = 167772160
     var pos: i64 = 0
     var fi: i64 = 0
@@ -15457,7 +15527,7 @@ pub fn compile_native_v2_preview(module: &IrModule, target_spec: NativeTargetSpe
     }
 
     if target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_LINUX() {
-        return compile_to_elf_v2(module, 4194304)
+        return compile_to_elf_v2(module, nc_elf_base_addr())
     }
 
     if target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_MACOS() {
@@ -15501,11 +15571,11 @@ pub fn compile_native(module: &IrModule, target_spec: NativeTargetSpec) -> Nativ
     }
 
     if target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_LINUX() {
-        let preview = compile_to_elf_v2(module, 4194304)
+        let preview = compile_to_elf_v2(module, nc_elf_base_addr())
         if preview.ok || !native_should_fallback_to_legacy(preview) {
             return preview
         }
-        let base_addr: i64 = 4194304  // 0x400000
+        let base_addr: i64 = nc_elf_base_addr()
         let elf = compile_to_elf(module, base_addr)
         return native_compile_result_ok_elf(elf.bytes, elf.len, FORMAT_ELF64())
     }
@@ -15795,6 +15865,7 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
 
 pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
     nc_configure_arena_from_env()
+    nc_configure_handles_from_env()
     var nc = compiler_new()
     x86_compile_module_streaming_begin_into(&! nc, module)
     var fi: i64 = 0
@@ -15841,7 +15912,7 @@ pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) 
     let reloc_eff_rodata = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
     let reloc_data_off = if reloc_eff_data > 0 { align_page(reloc_rodata_off + reloc_eff_rodata) } else { 0 }
     apply_relocations_into(&! nc, reloc_rodata_off, reloc_data_off)
-    compile_native_finalize_and_write_ref(&! nc, 4194304, output_path)
+    compile_native_finalize_and_write_ref(&! nc, nc_elf_base_addr(), output_path)
 }
 
 fn compile_to_elf(module: &IrModule, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {

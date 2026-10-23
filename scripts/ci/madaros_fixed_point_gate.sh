@@ -68,6 +68,11 @@ cd "$ROOT_DIR"
 # compiled under the same value, so gen2 and gen3 stay comparable. The mapping
 # is MAP_NORESERVE: only the pages the compile touches are committed.
 export SOUNIO_NV2_ARENA_GIB="${SOUNIO_NV2_ARENA_GIB:-64}"
+# Likewise the handle table: 4,194,304 handles ran out in gen3 after it had
+# parsed about 3 MB of its own source (#2966). 2^27 handles take 6 GiB of the
+# 64 GiB mapping and move the ELF load base to 0x8000000
+# (scripts/ci/madaros_handle_capacity_gate.sh).
+export SOUNIO_NV2_HANDLE_LOG2="${SOUNIO_NV2_HANDLE_LOG2:-27}"
 
 # ── receipt reuse ─────────────────────────────────────────────────────────────
 # gen2 and gen3 are two full self-compiles (~40 min in CI, in swap). Their
