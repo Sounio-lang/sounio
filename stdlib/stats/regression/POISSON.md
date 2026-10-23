@@ -97,9 +97,15 @@ change the predictor-step normalization.
 ## Deviance and numerical boundaries
 
 D=2 sum[y log(y/mu)-y+mu], with the y0 contribution2mu.
-Near y=mu, a positive phi series for (1+d)ln(1+d)-d avoids subtracting the
-linear terms. Far from equality use checked log differences instead of forming
-a possibly overflowing ratio. Deviance and score sums use compensated summation.
+Near y=mu, `math::logarithmic::log1p_phi_checked` supplies the factored positive
+phi evaluation for (1+d)ln(1+d)-d, avoiding subtraction of first-order terms.
+This shared module owns the logarithmic helper; the former private phi numerical
+body is removed. Shared-helper failure maps to existing evaluation arithmetic
+status4, with the solver's existing trial-rejection/failure handling retained.
+The zero-count contribution remains explicit and does not call a logarithm
+outside its domain. Far from equality use checked log differences instead of
+forming a possibly overflowing ratio. Deviance and score sums use compensated
+summation. See [shared logarithmic contract](../../math/LOGARITHMIC.md).
 Every evaluated mean must be strictly positive and finite. Subnormal positive
 means are permitted only while subsequent arithmetic and the WLS transform
 remain representable. Individual weighted-transform underflow follows the
@@ -167,3 +173,22 @@ coefficients and metadata remain checked; the other25 cases and tolerances remai
 unchanged. Native job15613 passes101/101. Separate phase-profile job15615 records
 compilation and direct execution; see docs/plans/STATS_VIZ_PHASE_PROFILE_EXECUTION_2026_10_19.md.
 This changes validation cost, not the production estimator or its scientific contract.
+
+### Shared-logarithm integration state
+
+This source refactor changes ownership of the local phi evaluation, preserving
+the solver API, count0 case, initialization, score/full-step stopping and local
+exponential objective-change safeguard. The exponential remainder used by that
+safeguard is not redefined as a logarithmic remainder. Selected current-source typecheck is complete in final Slurm15825,
+alongside two compiled/executed native examples. The count diagnostic completes
+Poisson-based means, its in-memory Canvas path and SVG emission. Its actual
+SVG/XML/full PNG preview was inspected; no Canvas pixel comparison occurred.
+Frozen executable source:27ea4ec6c2b97892e9e92cf982b0af90e2241023. Compiler
+reuse followed exact unchanged bin/scripts/self-hosted/stdlib verification.
+See [shared-log execution receipt](../../../docs/plans/LOGARITHMIC_EXECUTION_2026_10_21.md).
+
+No tests or independent numerical oracle were added/run. The historical Poisson
+corpus receipts above do not automatically validate the changed arithmetic;
+new numerical concordance, boundary/convergence coverage, full corpus and
+CI/merge remain pending. No statistical calibration follows from native
+demonstration success. These documentation edits postdate the frozen source.

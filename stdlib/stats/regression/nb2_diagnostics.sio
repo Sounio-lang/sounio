@@ -1,0 +1,86 @@
+// Scalar diagnostics conditional on supplied NB2 mean/dispersion.
+// No fit or inference. See NB2_DIAGNOSTICS.md for arithmetic/status limits.
+use math::pure::{sqrt,is_finite}
+
+pub const NB2_DIAG_OK:i64=0
+pub const NB2_DIAG_NEGATIVE_COUNT:i64=1
+pub const NB2_DIAG_INVALID_MEAN:i64=2
+pub const NB2_DIAG_INVALID_ALPHA:i64=3
+pub const NB2_DIAG_INEXACT_COUNT:i64=4
+pub const NB2_DIAG_ARITHMETIC_UNAVAILABLE:i64=5
+pub const NB2_VARIANCE_AVAILABLE:i64=0
+pub const NB2_VARIANCE_ARITHMETIC_UNAVAILABLE:i64=1
+pub const NB2_VARIANCE_NOT_COMPUTED:i64=2
+
+pub struct Nb2CountDiagnostic {
+ pub status:i64,
+ pub variance_status:i64,
+ pub variance:f64,
+ pub poisson_pearson_residual:f64,
+ pub nb2_pearson_residual:f64,
+ pub poisson_limit:bool,
+}
+
+fn nb2_diagnostic_empty(status:i64)->Nb2CountDiagnostic {
+ Nb2CountDiagnostic{status:status,variance_status:NB2_VARIANCE_NOT_COMPUTED,
+  variance:0.0,poisson_pearson_residual:0.0,nb2_pearson_residual:0.0,poisson_limit:false}
+}
+
+pub fn nb2_count_diagnostic(count:i64,mean:f64,alpha:f64)->Nb2CountDiagnostic with Mut,Div,Panic {
+ if count<0 {return nb2_diagnostic_empty(NB2_DIAG_NEGATIVE_COUNT)}
+ if !is_finite(mean) || mean<=0.0 {return nb2_diagnostic_empty(NB2_DIAG_INVALID_MEAN)}
+ if !is_finite(alpha) || alpha<0.0 {return nb2_diagnostic_empty(NB2_DIAG_INVALID_ALPHA)}
+ // All accepted integer counts convert to binary64 without losing count units.
+ if count>9007199254740992 {return nb2_diagnostic_empty(NB2_DIAG_INEXACT_COUNT)}
+ let delta=(count as f64)-mean
+ let root_mean=sqrt(mean)
+ if !is_finite(delta) || !is_finite(root_mean) || root_mean<=0.0 {
+  return nb2_diagnostic_empty(NB2_DIAG_ARITHMETIC_UNAVAILABLE)
+ }
+ let poisson=delta/root_mean
+ if !is_finite(poisson) {return nb2_diagnostic_empty(NB2_DIAG_ARITHMETIC_UNAVAILABLE)}
+ var nb2=poisson
+ let poisson_limit=alpha==0.0
+ if !poisson_limit {
+  if mean>=1.0 {
+   // Scale by mean before dividing: variance may overflow while this is finite.
+   let argument=alpha+1.0/mean
+   if !is_finite(argument) || argument<=0.0 {return nb2_diagnostic_empty(NB2_DIAG_ARITHMETIC_UNAVAILABLE)}
+   let denominator=sqrt(argument)
+   if !is_finite(denominator) || denominator<=0.0 {return nb2_diagnostic_empty(NB2_DIAG_ARITHMETIC_UNAVAILABLE)}
+   nb2=(delta/mean)/denominator
+  } else {
+   // Here alpha*mean cannot exceed finite alpha; avoid the reciprocal of tiny mean.
+   let argument=1.0+alpha*mean
+   if !is_finite(argument) || argument<=0.0 {return nb2_diagnostic_empty(NB2_DIAG_ARITHMETIC_UNAVAILABLE)}
+   let denominator=sqrt(argument)
+   if !is_finite(denominator) || denominator<=0.0 {return nb2_diagnostic_empty(NB2_DIAG_ARITHMETIC_UNAVAILABLE)}
+   nb2=poisson/denominator
+  }
+ }
+ if !is_finite(nb2) {return nb2_diagnostic_empty(NB2_DIAG_ARITHMETIC_UNAVAILABLE)}
+ // Variance availability is independent of the residual result. These checks
+ // describe staged binary64 arithmetic, not correctly rounded exact variance.
+ var variance=mean
+ var variance_status=NB2_VARIANCE_AVAILABLE
+ if !poisson_limit {
+  let scaled=alpha*mean
+  if !is_finite(scaled) {
+   variance=0.0
+   variance_status=NB2_VARIANCE_ARITHMETIC_UNAVAILABLE
+  } else {
+   let extra=mean*scaled
+   let candidate=mean+extra
+   if !is_finite(extra) || !is_finite(candidate) || candidate<=0.0 {
+    variance=0.0
+    variance_status=NB2_VARIANCE_ARITHMETIC_UNAVAILABLE
+   } else {
+    // A rounded-zero quadratic contribution is valid; the positive mean remains.
+    variance=candidate
+   }
+  }
+ }
+ Nb2CountDiagnostic{status:NB2_DIAG_OK,variance_status:variance_status,
+  variance:variance,poisson_pearson_residual:poisson,nb2_pearson_residual:nb2,
+  poisson_limit:poisson_limit}
+}
