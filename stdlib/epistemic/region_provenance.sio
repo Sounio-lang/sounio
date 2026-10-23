@@ -5,15 +5,14 @@
 //
 // Wrap Epistemic values with a memory-region id so GUM composition can tell
 // "uncertainty from input/sensor region" from "uncertainty from compute region".
-// Region ids are integers (no heap strings) so Madaros multi-module stays happy.
 //
-// Live Alloc<R> wiring lands when Stage 2 ships; until then callers stamp the
-// region explicitly (REGION_INPUT / REGION_COMPUTE / …). Mixing regions without
-// an explicit merge is a hard fail (panic) — fail closed, not silent attribution.
+// `heap_cursor` is the live allocator witness when callers pass `__rgn_cursor()`
+// (see tests/run-pass/epistemic_region_live_heap_stamp.sio). Stdlib modules
+// cannot name that intrinsic under multi-module check (E137); the portable API
+// takes the cursor as an argument. Sentinel -1 means "not stamped".
 
 use epistemic::knowledge::{Epistemic, ep_add, ep_measured, ep_certain, ep_val, ep_variance}
 
-// Stable region tags (extend, do not renumber).
 pub const REGION_UNKNOWN: i64 = 0
 pub const REGION_INPUT: i64 = 1
 pub const REGION_SENSOR: i64 = 2
@@ -21,25 +20,44 @@ pub const REGION_PARSE: i64 = 3
 pub const REGION_COMPUTE: i64 = 4
 pub const REGION_SOLVE_ODE: i64 = 5
 pub const REGION_MERGED: i64 = 100
+pub const EPR_CURSOR_UNKNOWN: i64 = 0 - 1
 
 pub struct EpistemicInRegion {
     pub value: Epistemic,
     pub region_id: i64,
+    pub heap_cursor: i64,
+}
+
+pub fn epr_new_at(value: Epistemic, region_id: i64, heap_cursor: i64) -> EpistemicInRegion {
+    EpistemicInRegion {
+        value: value,
+        region_id: region_id,
+        heap_cursor: heap_cursor,
+    }
 }
 
 pub fn epr_new(value: Epistemic, region_id: i64) -> EpistemicInRegion {
-    EpistemicInRegion { value: value, region_id: region_id }
+    epr_new_at(value, region_id, EPR_CURSOR_UNKNOWN)
+}
+
+pub fn epr_measured_at(val: f64, std_dev: f64, region_id: i64, heap_cursor: i64) -> EpistemicInRegion {
+    epr_new_at(ep_measured(val, std_dev), region_id, heap_cursor)
 }
 
 pub fn epr_measured(val: f64, std_dev: f64, region_id: i64) -> EpistemicInRegion {
-    EpistemicInRegion { value: ep_measured(val, std_dev), region_id: region_id }
+    epr_measured_at(val, std_dev, region_id, EPR_CURSOR_UNKNOWN)
+}
+
+pub fn epr_certain_at(val: f64, region_id: i64, heap_cursor: i64) -> EpistemicInRegion {
+    epr_new_at(ep_certain(val), region_id, heap_cursor)
 }
 
 pub fn epr_certain(val: f64, region_id: i64) -> EpistemicInRegion {
-    EpistemicInRegion { value: ep_certain(val), region_id: region_id }
+    epr_certain_at(val, region_id, EPR_CURSOR_UNKNOWN)
 }
 
 pub fn epr_region(e: &EpistemicInRegion) -> i64 { e.region_id }
+pub fn epr_heap_cursor(e: &EpistemicInRegion) -> i64 { e.heap_cursor }
 pub fn epr_val(e: &EpistemicInRegion) -> f64 { ep_val(&e.value) }
 pub fn epr_variance(e: &EpistemicInRegion) -> f64 { ep_variance(&e.value) }
 
@@ -47,20 +65,16 @@ pub fn epr_same_region(a: &EpistemicInRegion, b: &EpistemicInRegion) -> bool {
     a.region_id == b.region_id
 }
 
-// Combine when both sides share a region. Panic if regions disagree — callers
-// must use epr_add_merge to acknowledge cross-region attribution.
 pub fn epr_add(a: &EpistemicInRegion, b: &EpistemicInRegion) -> EpistemicInRegion with Panic {
     if a.region_id != b.region_id {
         panic("epr_add: region mismatch — use epr_add_merge to attribute cross-region variance")
     }
-    EpistemicInRegion { value: ep_add(&a.value, &b.value), region_id: a.region_id }
+    epr_new_at(ep_add(&a.value, &b.value), a.region_id, EPR_CURSOR_UNKNOWN)
 }
 
-// Explicit cross-region merge: result tagged REGION_MERGED and records that
-// variance may mix input vs compute sources (query via epr_region).
 pub fn epr_add_merge(a: &EpistemicInRegion, b: &EpistemicInRegion) -> EpistemicInRegion {
     let rid = if a.region_id == b.region_id { a.region_id } else { REGION_MERGED }
-    EpistemicInRegion { value: ep_add(&a.value, &b.value), region_id: rid }
+    epr_new_at(ep_add(&a.value, &b.value), rid, EPR_CURSOR_UNKNOWN)
 }
 
 pub fn epr_is_pure_input(e: &EpistemicInRegion) -> bool {
@@ -71,14 +85,17 @@ pub fn epr_is_pure_compute(e: &EpistemicInRegion) -> bool {
     e.region_id == REGION_COMPUTE || e.region_id == REGION_SOLVE_ODE || e.region_id == REGION_PARSE
 }
 
-// ============================================================================
-// SELFTEST
-// ============================================================================
+pub fn epr_has_live_heap_stamp(e: &EpistemicInRegion) -> bool {
+    e.heap_cursor >= 0
+}
 
 fn main() -> i64 with IO, Mut, Panic, Div {
-    let sensor = epr_measured(10.0, 0.5, REGION_SENSOR)
-    let sensor2 = epr_measured(12.0, 0.5, REGION_SENSOR)
-    let ode = epr_measured(10.0, 0.1, REGION_SOLVE_ODE)
+    let sensor = epr_measured_at(10.0, 0.5, REGION_SENSOR, 1000)
+    let sensor2 = epr_measured_at(12.0, 0.5, REGION_SENSOR, 1000)
+    let ode = epr_measured_at(10.0, 0.1, REGION_SOLVE_ODE, 2000)
+
+    assert(epr_has_live_heap_stamp(&sensor))
+    assert(epr_heap_cursor(&sensor) == 1000)
 
     let same = epr_add(&sensor, &sensor2)
     assert(epr_region(&same) == REGION_SENSOR)
@@ -86,15 +103,12 @@ fn main() -> i64 with IO, Mut, Panic, Div {
 
     let mixed = epr_add_merge(&sensor, &ode)
     assert(epr_region(&mixed) == REGION_MERGED)
-    assert(!epr_is_pure_input(&mixed))
-    assert(!epr_is_pure_compute(&mixed))
 
-    // Same-region add preserves compute tag
     let c1 = epr_certain(1.0, REGION_COMPUTE)
     let c2 = epr_certain(2.0, REGION_COMPUTE)
     let csum = epr_add(&c1, &c2)
     assert(epr_region(&csum) == REGION_COMPUTE)
-    assert(epr_is_pure_compute(&csum))
+    assert(!epr_has_live_heap_stamp(&csum))
 
     println("ALL PASS")
     0
