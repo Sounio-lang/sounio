@@ -1231,3 +1231,27 @@ Complete corpus, CI, numerical concordance, calibration and merge remain open.
 [Completed integration receipt](SCIENTIFIC_MAIN_INTEGRATION_EXECUTION_2026_10_23.md)
 contains parent/source comparisons, all execution statuses, native resources,
 figure limits, custody and storage identities.
+
+## Main16 — real NB2 residual bars and quota-independent job paths, 2026-10-23
+
+Main15 reached main through PR3024/merge9182f3b6ea with green PR and merge-group CI.
+This continuation starts from remote main94866e463d. New supplied-parameter NB2
+Pearson/signed-deviance bar panels use common symmetric bounds, explicit zero
+references, status-gated payloads and disclosed zero-height samples.
+
+Slurm16017 fresh compiler build0 and nine typechecks0 exposed an invalid example
+axis interval request at native execution. Two consumer-only interval corrections
+preserve the axis guard; Slurm16019 passes two typechecks/two native examples0
+using the attested retained compiler, with compiler inputs unchanged. Both actual
+SVGs parse, and corrected bars pass root/independent full-aspect visual inspection.
+No new tests, numeric oracle or pixel-equivalence claim.
+
+At zero free bytes on training quota, job source/logs/temp/cache/ELFs stay on
+worker scratch ext4; stdin submission preserves UID/cleanenv guards and canonical
+build scripts. Scheduler state still uses a separate Ceph PVC. No quota change or
+historical removal. Compressed custody avoids duplicate uncompressed runtime ELFs.
+
+[Execution receipt](NB2_RESIDUAL_BARS_EXECUTION_2026_10_23.md) records failed/passing
+programs, source/consumer identities, input-endpoint limits and measured resources.
+Broader scientific coverage, numerical concordance, CI and this checkpoint merge
+remain separate states.

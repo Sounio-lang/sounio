@@ -62,9 +62,9 @@ claim the full program or imported renderer is allocation-free.
 Standard output consists of a report prefix followed by one HTML document
 containing one 1380x620 SVG; the prefix must be separated for standalone HTML.
 
-## Preparation and evidence boundary
+## Initial preparation boundary
 
-This is source preparation only. No assertions or tests were added; no
+At initial authoring this was source preparation only. No assertions or tests were added; no
 compiler, build, native execution, numerical oracle or visual inspection was
 run for this new example by its author. Existing runtime/figure receipts cover
 their identified sources, not this new consumer. The coordinator owns the
@@ -98,3 +98,20 @@ express categorical observation order; ticks need not label every observation.
 The corrected consumer has not yet passed a native retry. This source change
 modifies no library or compiler input. A later receipt must identify the
 corrected source and any attested compiler reused for its execution.
+
+## Completed native checkpoint
+
+Slurm16017 built the canonical compiler and passed nine typechecks, then the
+initial consumer correctly stopped on an invalid horizontal-axis interval request.
+After changing only those two interval arguments, Slurm16019 passed both the
+corrected bars consumer and existing NB2 deviance consumer: typecheck, compilation
+and native exit0. It reused the retained fresh compiler with unchanged compiler/
+stdlib inputs; no compiler rebuild from the consumer-only fix is claimed.
+
+The actual bars SVG parsed and rendered at1380x620; root and independent visual
+inspection found no blocking issue. Runtime maxRSS was1584KiB. This is one measured
+execution, not a general memory bound or numerical-concordance result.
+
+[Source-bound execution receipt](../docs/plans/NB2_RESIDUAL_BARS_EXECUTION_2026_10_23.md)
+contains both attempts, exact hashes, scratch-only quota fallback and remaining
+acceptance limits.
