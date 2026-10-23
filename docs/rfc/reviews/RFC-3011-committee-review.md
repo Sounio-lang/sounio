@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.rfc.reviews.rfc-3011-committee-review
+authority: repo_only
+audience: users
+last_validated: 2026-10-23
+validated_by: Cloud Agent
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.rfc.reviews.rfc-3011-committee-review
+-->
+
 # RFC-3011 Committee Review: PhD Defense Simulation
 
 **Review Board**: Hostile but Fair PL Theory, Type Systems, and Memory Management Committee  
