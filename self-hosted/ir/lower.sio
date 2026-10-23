@@ -89,6 +89,14 @@ struct LowerLocalStack {
     // would read a bool as a struct.
     tuple_struct_layout: Box<LowerLocalI64Slots>,
     tuple_struct_slot: Box<LowerLocalI64Slots>,
+    // A second named-struct slot of the same tuple, -1 when absent. The pair
+    // above records the FIRST struct slot, which for `(Parser, Pattern)` is the
+    // Parser; `let pat = pair.1` then had no type, and `pat.name` fell to the
+    // untyped-field majority. In the whole self-compile that majority is slot 0
+    // (`name` is the first field of most structs), not Pattern.name = 2, so gen2's
+    // parse_let_stmt stored Pattern.kind as every let's name (#2966).
+    tuple_struct_layout2: Box<LowerLocalI64Slots>,
+    tuple_struct_slot2: Box<LowerLocalI64Slots>,
     // f64 register carrying the GUM variance shadow for scalar locals, or -1 when absent.
     variance_regs: Box<LowerLocalI64Slots>,
     // -1 = not a capturing closure; otherwise the synthetic closure fn_id whose captures
@@ -248,6 +256,8 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         tuple0_array_elem_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_slot: lowerer_box_local_i64_slots(-1),
+        tuple_struct_layout2: lowerer_box_local_i64_slots(-1),
+        tuple_struct_slot2: lowerer_box_local_i64_slots(-1),
         variance_regs: lowerer_box_local_i64_slots(-1),
         closure_fn_id: lowerer_box_local_i64_slots(-1),
         box_inner_layout: lowerer_box_local_i64_slots(-1),
@@ -1698,9 +1708,48 @@ pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>, module_id: i64) 
 // name. Keep the declared IR return name unchanged; this is not SOIR metadata.
 var LOWER_OPTION_BOX_RETURN_INNER: [i64; 65537] = [0; 65537]
 
+// The LAST named-struct slot of a function's tuple return type when it is not
+// also the first (the first is IrFunction.return_struct_name's tuple sentinel),
+// keyed by interned function name: slot + 1 (0 = none) and the struct's interned
+// name. Read by lowerer_bind_tuple_second_struct_mut.
+var LOWER_TUPLE_LAST_STRUCT_SLOT1: [i64; 65537] = [0; 65537]
+var LOWER_TUPLE_LAST_STRUCT_NAME: [i64; 65537] = [0; 65537]
+
+fn lower_type_list_last_struct_slot(opt: &Option<Box<TypeExprList>>, idx: i64, best: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            var b = best
+            if lower_type_expr_is_candidate_struct(&(*list).head) { b = idx }
+            lower_type_list_last_struct_slot(&(*list).tail, idx + 1, b)
+        }
+        None => best,
+    }
+}
+
+fn lower_record_tuple_last_struct(nid: i64, rt: &Option<Box<TypeExpr>>) with Mut, Panic, Div {
+    LOWER_TUPLE_LAST_STRUCT_SLOT1[nid as usize] = 0
+    LOWER_TUPLE_LAST_STRUCT_NAME[nid as usize] = 0
+    match *rt {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeTuple { return }
+            let first = lower_type_list_first_struct_slot(&(*te).type_args, 0)
+            let last = lower_type_list_last_struct_slot(&(*te).type_args, 0, 0 - 1)
+            if last < 0 || last == first { return }
+            let nm = lower_type_list_named_at(&(*te).type_args, last)
+            if nm.len <= 0 { return }
+            let sid = ir_intern_name(nm)
+            if sid <= 0 { return }
+            LOWER_TUPLE_LAST_STRUCT_SLOT1[nid as usize] = last + 1
+            LOWER_TUPLE_LAST_STRUCT_NAME[nid as usize] = sid
+        }
+        None => {}
+    }
+}
+
 fn lower_record_option_box_return(name: Name, rt: &Option<Box<TypeExpr>>) with Mut, Panic, Div {
     let nid = ir_intern_name(name)
     if nid <= 0 || nid > 65536 { return }
+    lower_record_tuple_last_struct(nid, rt)
     var inner_id: i64 = 0
     match *rt {
         Some(ty) => {
@@ -1712,6 +1761,19 @@ fn lower_record_option_box_return(name: Name, rt: &Option<Box<TypeExpr>>) with M
         None => {}
     }
     LOWER_OPTION_BOX_RETURN_INNER[nid as usize] = inner_id
+}
+
+// `let pair = f(...)` / `c.m(...)`: also record the tuple's last named-struct
+// slot (LOWER_TUPLE_LAST_STRUCT_*), so `let x = pair.K` types x for that slot too.
+fn lowerer_bind_tuple_second_struct_mut(lo: &! Lowerer, local: Name, fn_id: i64) with Mut, Panic, Div, Alloc {
+    if fn_id < 0 || fn_id >= (*(*lo).module).fn_count { return }
+    let nid = ir_intern_name(ir_fn_get(&(*(*lo).module), fn_id as usize).name)
+    if nid <= 0 || nid > 65536 { return }
+    let slot1 = LOWER_TUPLE_LAST_STRUCT_SLOT1[nid as usize]
+    if slot1 <= 0 { return }
+    let layout = lower_struct_layout_index_of(&(*(*lo).struct_layouts), ir_name_at(LOWER_TUPLE_LAST_STRUCT_NAME[nid as usize]))
+    if layout < 0 { return }
+    (*lo) = (*lo).bind_local_tuple_struct2(local, layout, slot1 - 1)
 }
 
 fn lower_option_box_return_layout(module: Box<IrModule>, table: &StructLayoutTable, fn_id: i64) -> i64 with Mut, Panic, Div {
@@ -1797,6 +1859,8 @@ pub fn lower_fn_tuple_arr_reset() with Mut {
     var oi: i64 = 0
     while oi < 65537 {
         LOWER_OPTION_BOX_RETURN_INNER[oi as usize] = 0
+        LOWER_TUPLE_LAST_STRUCT_SLOT1[oi as usize] = 0
+        LOWER_TUPLE_LAST_STRUCT_NAME[oi as usize] = 0
         oi = oi + 1
     }
     LOWER_HOF_TRANSPARENT_COUNT = 0
@@ -14827,6 +14891,8 @@ impl Lowerer {
                 (*(*stk).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_slot).values[idx as usize] = 0 - 1
+                (*(*stk).tuple_struct_layout2).values[idx as usize] = 0 - 1
+                (*(*stk).tuple_struct_slot2).values[idx as usize] = 0 - 1
                 (*(*stk).variance_regs).values[idx as usize] = -1
                 // Explicit -1: slot reuse across functions — see lowerer_bind_local_mut.
                 (*(*stk).box_inner_layout).values[idx as usize] = 0 - 1
@@ -14943,6 +15009,24 @@ impl Lowerer {
         lo
     }
 
+    fn bind_local_tuple_struct2(self, name: Name, layout_idx: i64, slot: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        if layout_idx < 0 { return lo }
+        if slot < 0 { return lo }
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if (*stk.depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*stk.names).values[i as usize], name) {
+                (*stk.tuple_struct_layout2).values[i as usize] = layout_idx
+                (*stk.tuple_struct_slot2).values[i as usize] = slot
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
     // Layout index of the struct in tuple slot `slot` of `name`, or -1 -- which
     // includes the case where the local records a DIFFERENT slot, so asking for
     // `.0` on `(bool, Result)` answers -1 rather than the Result.
@@ -14952,6 +15036,9 @@ impl Lowerer {
             if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
                 if (*(*self.locals).tuple_struct_slot).values[i as usize] == slot {
                     return (*(*self.locals).tuple_struct_layout).values[i as usize]
+                }
+                if (*(*self.locals).tuple_struct_slot2).values[i as usize] == slot {
+                    return (*(*self.locals).tuple_struct_layout2).values[i as usize]
                 }
                 return 0 - 1
             }
@@ -28065,6 +28152,24 @@ impl Lowerer {
                 if (*rhs).kind == ExprKind::ExprIdent {
                     option_payload_layout = lower_lookup_box_inner_layout(self.locals, self.scope_depth, (*rhs).name)
                     has_option_payload = option_payload_layout >= 0
+                } else if (*rhs).kind == ExprKind::ExprUnary && (*rhs).un_op == UnaryOp::OpDeref {
+                    // `var cur = *params` with `params: &Option<Box<T>>`: the copy
+                    // carries the same Option<Box<T>> payload layout as the
+                    // reference it was read through. Without it a later
+                    // `match cur { Some(node) => (*node).head.name }` fell back
+                    // to the untyped field vote and, in the whole-program
+                    // compile, read `name` at another struct's index (#2966,
+                    // pure_fn_reg_record). A Box operand derefs to the payload
+                    // itself, not to an Option, so it is left alone.
+                    match (*rhs).left {
+                        Some(operand) => {
+                            if (*operand).kind == ExprKind::ExprIdent && !ir_name_is_box(self.lookup_local_struct_type((*operand).name)) {
+                                option_payload_layout = lower_lookup_box_inner_layout(self.locals, self.scope_depth, (*operand).name)
+                                has_option_payload = option_payload_layout >= 0
+                            }
+                        }
+                        None => {}
+                    }
                 } else if (*rhs).kind == ExprKind::ExprCall || (*rhs).kind == ExprKind::ExprMethodCall {
                     let fid = self.expr_method_fn_id(&(*rhs))
                     option_payload_layout = lower_option_box_return_layout(self.module, &(*self.struct_layouts), fid)
@@ -29332,6 +29437,7 @@ impl Lowerer {
                             lo.return_tuple_struct_name_for_fn_id(tuple_callee_id))
                         lo = lo.bind_local_tuple_struct(s.name, tuple_struct_layout, tuple_struct_slot)
                     }
+                    lowerer_bind_tuple_second_struct_mut(&! lo, s.name, tuple_callee_id)
                     if !callee_is_box {
                         let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
                         if ret_name.len > 0 {
@@ -29484,6 +29590,7 @@ impl Lowerer {
                             lo.return_tuple_struct_name_for_fn_id(fn_id))
                         lo = lo.bind_local_tuple_struct(s.name, m_layout, m_slot)
                     }
+                    lowerer_bind_tuple_second_struct_mut(&! lo, s.name, fn_id)
                 } else if (*expr_box).kind == ExprKind::ExprIf {
                     // `let pair = if cond { a.wide() } else { a.narrow() }`.
                     // The shape enum types a local from a call, a method call, a
