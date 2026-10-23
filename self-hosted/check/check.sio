@@ -7768,6 +7768,20 @@ fn checker_check_continue_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wi
 // Returns only the TypeEntry, so it never moves the ~164KB `self` Checker by SRET — that
 // move is what bin/souc miscompiles into a return-address smash once (*c).enums is
 // populated. See docs/audit/g1_wip/ENUM_COLLECTOR_READPATH_BLOCKER_2026-06-01.md.
+// The nearest binding decides lexical shadowing. Function items are depth0;
+// parameters and local function values are bound inside a function scope.
+fn checker_binding_is_local_function(c:*mut Checker,name:Name)->bool with Mut,Div,Panic {
+    var i=(*c).env.count-1
+    while i>=0 {
+        let binding=(*c).env.bindings[i as usize]
+        if name_eq(binding.name,name) {
+            return binding.scope_depth>0 && binding.ty.kind==TypeKind::TyFn
+        }
+        i=i-1
+    }
+    return false
+}
+
 fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_name = checker_copy_string_list_to_name(e.path.segments)
     let enum_idx = enum_table_find((*c).enums, first_name)
@@ -7792,12 +7806,23 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             if !(*c).env.has_binding(first_name) {
                 let fn_sig_id = checker_fn_sigs_find_inplace(c, first_name)
                 if fn_sig_id >= 0 {
+                    if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c,fn_sig_id) {
+                        checker_report_private_fn_inplace(c,e.span,fn_sig_id)
+                    }
                     ty_fn(fn_sig_id)
                 } else {
                     (*c).env.lookup(first_name)
                 }
             } else {
-                (*c).env.lookup(first_name)
+                let value_ty=(*c).env.lookup(first_name)
+                if value_ty.kind==TypeKind::TyFn && value_ty.fn_sig_id>=0 {
+                    if !checker_binding_is_local_function(c,first_name) {
+                        if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c,value_ty.fn_sig_id) {
+                            checker_report_private_fn_inplace(c,e.span,value_ty.fn_sig_id)
+                        }
+                    }
+                }
+                value_ty
             }
         }
     }
@@ -9173,8 +9198,18 @@ fn checker_check_unary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     if (e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut) && expr_is_half_open_range(e.left) {
         return checker_check_slice_borrow_expr_inplace(c, e)
     }
-    // Operand via the *mut spine (faithful to self.check_opt_expr(e.left)).
+    // A direct named borrow observes the owner; typing its place must not move it.
+    // Restrict suppression to an identifier, never arbitrary expressions with calls.
+    let place = expr_opt_get(e.left)
+    var named_borrow = false
+    if place != 0 as *mut Expr {
+        if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
+            named_borrow = (*place).kind == ExprKind::ExprIdent
+        }
+    }
+    if named_borrow { (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1 }
     let operand_ty = checker_check_opt_expr_inplace(c, e.left)
+    if named_borrow { (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1 }
     // Op-typing (pure helper).
     let result = unary_result_type(e.un_op, operand_ty)
     if result.kind == TypeKind::TyError && !is_error_or_unknown(operand_ty) {
@@ -12151,10 +12186,23 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
         None => {}
     }
+    // Lexical callback parameters shadow unrelated global functions with the
+    // same spelling. Calling an already-bound function value does not acquire
+    // a private symbol from its defining module.
+    var callee_is_local_fn = false
+    match e.left {
+        Some(local_callee) => {
+            if (*local_callee).kind==ExprKind::ExprIdent {
+                callee_is_local_fn=checker_binding_is_local_function(c,(*local_callee).name)
+            }
+        }
+        None => {}
+    }
+    if callee_is_local_fn { direct_sig_id = 0 - 1 }
     // #2164: a bare call to a math name the native backend cannot emit. Guarded
     // on direct_sig_id < 0 so it fires only where the name resolves to nothing
     // real -- the phantom-builtin case that produces a runtime SIGILL.
-    if direct_sig_id < 0 {
+    if direct_sig_id < 0 && !callee_is_local_fn {
         match e.left {
             Some(callee_expr) => {
                 if (*callee_expr).kind == ExprKind::ExprIdent {
@@ -12272,7 +12320,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
         let sig = fn_sig_table_get((*c).fn_sigs, callee_ty.fn_sig_id)
-        if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, callee_ty.fn_sig_id) {
+        if (*c).enforce_visibility && !callee_is_local_fn && !checker_fn_sig_visible_inplace(c, callee_ty.fn_sig_id) {
             checker_report_private_fn_inplace(c, e.span, callee_ty.fn_sig_id)
         }
         // #1622: calling an `extern "C"` name the native backend does not
@@ -13149,12 +13197,22 @@ fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         // function reference via the chunked fn_sigs before reporting E137.
         let fn_sig_id = checker_fn_sigs_find_inplace(c, e.name)
         if fn_sig_id >= 0 {
+            if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c,fn_sig_id) {
+                checker_report_private_fn_inplace(c,e.span,fn_sig_id)
+            }
             return ty_fn(fn_sig_id)
         }
         checker_report_undeclared_inplace(c, e.span, e.name)
         return ty_error()
     }
     let ident_ty = (*c).env.lookup(e.name)
+    if ident_ty.kind==TypeKind::TyFn && ident_ty.fn_sig_id>=0 {
+        if !checker_binding_is_local_function(c,e.name) {
+            if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c,ident_ty.fn_sig_id) {
+                checker_report_private_fn_inplace(c,e.span,ident_ty.fn_sig_id)
+            }
+        }
+    }
     if checker_is_linear_type_inplace(c, ident_ty) && (*c).suppress_linear_consume_depth == 0 {
         if (*c).borrows.is_borrowed(e.name) {
             checker_report_error_at_inplace(c, e.span, 38, 0, 0, 0)
@@ -27245,8 +27303,18 @@ impl Checker {
         if (e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut) && expr_is_half_open_range(e.left) {
             return self.check_slice_borrow_expr(e)
         }
-        let pair = self.check_opt_expr(e.left)
+        let place = expr_opt_get(e.left)
+        var named_borrow = false
+        if place != 0 as *mut Expr {
+            if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
+                named_borrow = (*place).kind == ExprKind::ExprIdent
+            }
+        }
+        var for_operand = self
+        if named_borrow { for_operand.suppress_linear_consume_depth = for_operand.suppress_linear_consume_depth + 1 }
+        let pair = for_operand.check_opt_expr(e.left)
         var c = pair.0
+        if named_borrow { c.suppress_linear_consume_depth = c.suppress_linear_consume_depth - 1 }
         let operand_ty = pair.1
         let result = unary_result_type(e.un_op, operand_ty)
         if result.kind == TypeKind::TyError && !is_error_or_unknown(operand_ty) {
