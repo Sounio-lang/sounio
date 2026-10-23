@@ -4542,6 +4542,45 @@ fn lowerer_preseed_fn_signature_mut(
     (*lo).module = module_box
 }
 
+// Region reclamation for enum returns (#2966). Indexed by the enum's interned
+// name id: 1 when every variant is payload-free, so a value of the enum is its
+// one-word discriminant; 2 once any declaration of that name has a variant with
+// fields (sticky, so a name shared by two enums is treated as the payload one).
+// lowerer_rgn_return_kind_mut gives a function returning a payload-free enum the
+// scalar region exit. Before, rgn_copy_cost refused every enum name, so such a
+// function never opened a region and its temporaries were never reclaimed: the
+// parser's pt_keyword_lookup_span left two 2080-byte arrays in the arena on
+// every token-kind read, about 57% of the arena gen2 spent parsing.
+var LOWER_ENUM_SHAPE: [i64; 65537] = [0; 65537]
+
+fn lower_note_enum_shape(enum_name: Name, variants: &Option<Box<VariantDefList>>) with Mut, Panic, Div {
+    let id = ir_intern_name(enum_name)
+    if id <= 0 || id > 65536 { return }
+    var shape: i64 = 1
+    var cur = variants
+    while true {
+        match *cur {
+            Some(list) => {
+                match (*list).head.fields {
+                    Some(_) => { shape = 2 }
+                    None => {}
+                }
+                cur = &(*list).tail
+            }
+            None => break
+        }
+    }
+    if LOWER_ENUM_SHAPE[id as usize] == 2 { return }
+    LOWER_ENUM_SHAPE[id as usize] = shape
+}
+
+fn lower_enum_is_payload_free(type_name: Name) -> bool with Mut, Panic, Div {
+    if type_name.len <= 0 { return false }
+    let id = ir_intern_name(type_name)
+    if id <= 0 || id > 65536 { return false }
+    LOWER_ENUM_SHAPE[id as usize] == 1
+}
+
 var LOWER_ENUM_VARIANT_PTRS: [i64; 4096] = [0; 4096]
 
 fn lower_collect_enum_variant_ptrs(variants: Option<Box<VariantDefList>>, count: i64) -> i64 with Mut, Alloc {
@@ -4562,6 +4601,7 @@ fn lowerer_register_enum_variants_mut(
     variants: &Option<Box<VariantDefList>>,
     next_disc: i64
 ) with Mut, Panic, Div, Alloc, IO {
+    lower_note_enum_shape(enum_name, variants)
     let variant_count = lower_collect_enum_variant_ptrs(*variants, 0)
     var vi: i64 = 0
     while vi < variant_count {
@@ -7150,6 +7190,11 @@ fn lowerer_rgn_return_kind_mut(lo: &! Lowerer, rt: &Option<Box<TypeExpr>>) -> i6
             if lower_type_expr_is_integer(&(*te)) || lower_type_expr_is_bool(&(*te)) { return 1 }
             let type_name = lower_type_expr_named_type_name(&(*te))
             let cost = (*lo).rgn_copy_cost(type_name, 0)
+            if cost < 0 && lower_enum_is_payload_free(type_name) {
+                // One-word discriminant: the scalar exit applies, and it still
+                // keeps the region if the word turns out to be a young reference.
+                return 1
+            }
             if cost < 0 || cost > lower_rgn_max_copy_cost() { return 0 }
             LOWER_RGN_PENDING_TYPE_ID = ir_intern_name(type_name)
             3
@@ -25681,6 +25726,7 @@ impl Lowerer {
 
     // Phase 3.1: Register enum variant discriminants
     fn register_enum_variants_ref(self, enum_name: Name, variants: &Option<Box<VariantDefList>>, next_disc: i64) -> Lowerer with Mut, Panic, Div, Alloc {
+        lower_note_enum_shape(enum_name, variants)
         var lo = self
         var current = variants
         var disc = next_disc
