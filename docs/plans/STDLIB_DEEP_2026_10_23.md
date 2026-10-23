@@ -157,7 +157,10 @@ reuse and checks exact snapshot stability; the independent C++ oracle retains
 its existing numerical tolerance for analytic -1. slots_final passed all four
 status files, including corrected slots and independent PTRS reference.
 The tiny-positive-alpha input now constructs a positive minimum subnormal
-explicitly instead of relying on an underflowing decimal literal.
+explicitly to name the exact minimum-subnormal boundary. Later Slurm16245
+confirmed literal1e-320 is positive at2024 quanta, matching C++23 on the
+same compiler1148. The earlier suggestion of current-parser literal underflow
+was not supported; this is boundary coverage, not a parser correction.
 
 Accepted later evidence:
 - job16124: copied RNG cursor ownership, exact PCG state/counters, incremental
@@ -246,3 +249,12 @@ native synthetic SVG examples. Keeping receipt custody separate preserves the
 code tip during CI; a docs-only follow-up can integrate it after the code merge.
 The source-bound receipt predates only the fixture deadline annotation and this
 ledger update; the numerical libraries and test body remain unchanged.
+
+## Confirmed main merge
+
+PR3052 merged2026-10-23T21:39:24Z as a8985fc5caeca87e04d22d6617a7bbdd9d02a1c2
+after full branch and merge-group CI success. The fresh queue compiler174dd...
+passed374 scientific records and39 changed tests, including full normalization.
+The source-bound final receipt is incorporated under
+docs/evidence/stdlib-deep-integration-2026-10-23. Its subnormal audit corrects
+the historical hypothesis above; all numerical library/test bodies stay intact.
