@@ -849,6 +849,12 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
         print("` passes a capturing closure where its captured values cannot be\n")
         print("         supplied; the capture would read as 0, so it is refused (#1542).\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 10 {
+        print("  cause: unknown struct field `")
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
+        print("` — layout table has no index (RFC-0001 Stage 0 / #2966/#3000).\n")
+        print("         The legacy name[0]%64 hash is refused fail-closed; populate\n")
+        print("         struct_layouts or declare the type before field access.\n")
     } else if IR_LOWER_HARD_ERROR_REASON == 6 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
@@ -23166,6 +23172,20 @@ impl Lowerer {
         }
     }
 
+    // RFC-0001 Stage 0 / #2966 / #3000: refuse the legacy `name[0] % 64` field-index
+    // hash. That path invented slot 51 for `.span` and wrote garbage. Callers
+    // still get index 0 as a harmless placeholder; IR_LOWER_HARD_ERROR_REASON=10
+    // refuses binary publication.
+    fn lower_refuse_untyped_field_hash(self, field_name: Name) -> i64 with Mut {
+        IR_LOWER_HARD_ERROR = 1
+        if IR_LOWER_HARD_ERROR_REASON == 0 {
+            IR_LOWER_HARD_ERROR_REASON = 10
+        }
+        ir_copy_name_to_flat(&field_name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+        lower_note_error(23170, field_name)
+        0
+    }
+
     // Phase 3.2: Proper struct field index lookup via layout table
     fn field_idx_from_name(self, struct_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
         // Search layout table for the struct
@@ -23181,8 +23201,8 @@ impl Lowerer {
                     fi = fi + 1
                 }
                 // Field not found in the named layout. Keep searching the rest
-                // of the table before falling back to the legacy hash path;
-                // partially seeded layouts must not collapse every miss to .0.
+                // of the table before failing closed; partially seeded layouts
+                // must not collapse every miss to .0.
                 var sj: i64 = 0
                 // Same Knowledge-preseed shadow as field_idx_from_name_simple:
                 // defer the synthetic layout so a user struct's own field wins.
@@ -23211,15 +23231,15 @@ impl Lowerer {
                 if field_name.len <= 0 {
                     return 0
                 }
-                return (field_name.buf[0] as i64) % 64
+                return self.lower_refuse_untyped_field_hash(field_name)
             }
             si = si + 1
         }
-        // Struct not in layout table — fallback: use first byte hash (legacy compat)
+        // Struct not in layout table — fail closed (no name[0]%64).
         if field_name.len <= 0 {
             0
         } else {
-            (field_name.buf[0] as i64) % 64
+            self.lower_refuse_untyped_field_hash(field_name)
         }
     }
 
@@ -23276,11 +23296,12 @@ impl Lowerer {
         if knowledge_idx >= 0 {
             return knowledge_idx
         }
-        // Last-resort legacy compatibility for unregistered dynamic/foreign shapes.
+        // RFC-0001 Stage 0: unregistered shapes no longer invent an index via
+        // name[0]%64 (the .span→51 class). Fail closed.
         if n.len <= 0 {
             0
         } else {
-            (n.buf[0] as i64) % 64
+            self.lower_refuse_untyped_field_hash(n)
         }
     }
 
