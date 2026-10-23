@@ -9,21 +9,45 @@ pub struct Nb2Deviance {
  pub residual:f64,
  pub poisson_limit:bool,
 }
+
+pub struct Nb2DevianceSlot { result:Nb2Deviance }
+pub fn nb2_deviance_slot()->Nb2DevianceSlot {
+ Nb2DevianceSlot{result:Nb2Deviance{status:5,deviance_status:2,deviance:0.0,residual:0.0,poisson_limit:false}}
+}
+pub fn nb2_deviance_slot_reset(s:&!Nb2DevianceSlot) with Mut {
+ s.result.status=5;s.result.deviance_status=2;s.result.deviance=0.0
+ s.result.residual=0.0;s.result.poisson_limit=false
+}
+pub fn nb2_deviance_slot_status(s:&Nb2DevianceSlot)->i64 {s.result.status}
+pub fn nb2_deviance_slot_deviance_status(s:&Nb2DevianceSlot)->i64 {s.result.deviance_status}
+pub fn nb2_deviance_slot_deviance(s:&Nb2DevianceSlot)->f64 {s.result.deviance}
+pub fn nb2_deviance_slot_residual(s:&Nb2DevianceSlot)->f64 {s.result.residual}
+pub fn nb2_deviance_slot_poisson_limit(s:&Nb2DevianceSlot)->bool {s.result.poisson_limit}
+pub fn nb2_deviance_snapshot(s:&Nb2DevianceSlot)->Nb2Deviance {
+ let status:i64=s.result.status;let availability:i64=s.result.deviance_status
+ let deviance:f64=s.result.deviance;let residual:f64=s.result.residual
+ let poisson:bool=s.result.poisson_limit
+ Nb2Deviance{status:status,deviance_status:availability,deviance:deviance,residual:residual,poisson_limit:poisson}
+}
+
 struct Nb2Root {status:i64,value:f64}
 fn nbdev_abs(x:f64)->f64 {if x<0.0 {-x} else {x}}
-fn nbdev_empty(status:i64)->Nb2Deviance {
- Nb2Deviance{status:status,deviance_status:2,deviance:0.0,residual:0.0,poisson_limit:false}
+fn nbdev_empty_into(status:i64,s:&!Nb2DevianceSlot)->i64 with Mut {
+ nb2_deviance_slot_reset(s)
+ s.result.status=status
+ status
 }
 fn nbdev_bad_root()->Nb2Root {Nb2Root{status:5,value:0.0}}
-fn nbdev_finish(root:f64,delta:f64,poisson:bool)->Nb2Deviance with Mut {
- if !is_finite(root) || root<0.0 || (root==0.0 && delta!=0.0) {return nbdev_empty(5)}
+fn nbdev_finish_into(root:f64,delta:f64,poisson:bool,s:&!Nb2DevianceSlot)->i64 with Mut {
+ if !is_finite(root) || root<0.0 || (root==0.0 && delta!=0.0) {return nbdev_empty_into(5,s)}
  var residual=root
  if delta<0.0 {residual= -root}
  var deviance=root*root
  var availability:i64=0
  if !is_finite(deviance) || (deviance==0.0 && root!=0.0) {deviance=0.0;availability=1}
- Nb2Deviance{status:0,deviance_status:availability,deviance:deviance,
-  residual:residual,poisson_limit:poisson}
+ s.result.status=0;s.result.deviance_status=availability;s.result.deviance=deviance
+ s.result.residual=residual;s.result.poisson_limit=poisson
+ 0
 }
 // Poisson contribution root, retaining supplied difference before local rounding.
 fn nbdev_poisson_root(y:f64,mu:f64,delta:f64)->Nb2Root with Mut,Div,Panic {
@@ -60,15 +84,16 @@ fn nbdev_poisson_far_log_root(y:f64,mu:f64,log_mu:f64)->Nb2Root with Mut,Div,Pan
  if !is_finite(root) || root<=0.0 {return nbdev_bad_root()}
  Nb2Root{status:0,value:root}
 }
-pub fn nb2_deviance(count:i64,mean:f64,alpha:f64)->Nb2Deviance with Mut,Div,Panic {
- if count<0 {return nbdev_empty(1)}
- if !is_finite(mean) || mean<=0.0 {return nbdev_empty(2)}
- if !is_finite(alpha) || alpha<0.0 {return nbdev_empty(3)}
- if count>9007199254740992 {return nbdev_empty(4)}
+pub fn nb2_deviance_into(count:i64,mean:f64,alpha:f64,s:&!Nb2DevianceSlot)->i64 with Mut,Div,Panic {
+ nb2_deviance_slot_reset(s)
+ if count<0 {return nbdev_empty_into(1,s)}
+ if !is_finite(mean) || mean<=0.0 {return nbdev_empty_into(2,s)}
+ if !is_finite(alpha) || alpha<0.0 {return nbdev_empty_into(3,s)}
+ if count>9007199254740992 {return nbdev_empty_into(4,s)}
  let y=count as f64
  let delta=y-mean
  let poisson=alpha==0.0
- if delta==0.0 {return nbdev_finish(0.0,0.0,poisson)}
+ if delta==0.0 {return nbdev_finish_into(0.0,0.0,poisson,s)}
  if count==0 {
   var root:f64=0.0
   if poisson {root=sqrt(mean)*sqrt(2.0)} else {
@@ -77,31 +102,31 @@ pub fn nb2_deviance(count:i64,mean:f64,alpha:f64)->Nb2Deviance with Mut,Div,Pani
     var ratio:f64=1.0
     if product!=0.0 {
      let logged=log1p_checked(product)
-     if logged.status!=0 {return nbdev_empty(5)}
+     if logged.status!=0 {return nbdev_empty_into(5,s)}
      ratio=logged.value/product
     }
-    if !is_finite(ratio) || ratio<=0.0 {return nbdev_empty(5)}
+    if !is_finite(ratio) || ratio<=0.0 {return nbdev_empty_into(5,s)}
     root=sqrt(mean)*sqrt(2.0*ratio)
    } else {
     let la=ln_checked(alpha)
     let lm=ln_checked(mean)
-    if la.status!=0 || lm.status!=0 {return nbdev_empty(5)}
+    if la.status!=0 || lm.status!=0 {return nbdev_empty_into(5,s)}
     let logged=la.value+lm.value
-    if !is_finite(logged) || logged<=0.0 {return nbdev_empty(5)}
+    if !is_finite(logged) || logged<=0.0 {return nbdev_empty_into(5,s)}
     root=(sqrt(logged)/sqrt(alpha))*sqrt(2.0)
    }
   }
-  return nbdev_finish(root,delta,poisson)
+  return nbdev_finish_into(root,delta,poisson,s)
  }
  if poisson {
   let root=nbdev_poisson_root(y,mean,delta)
-  if root.status!=0 {return nbdev_empty(5)}
-  return nbdev_finish(root.value,delta,true)
+  if root.status!=0 {return nbdev_empty_into(5,s)}
+  return nbdev_finish_into(root.value,delta,true,s)
  }
  let product=alpha*mean
  var q:f64=1.0
  if is_finite(product) {q=product/(1.0+product)}
- if !is_finite(q) || q<0.0 || q>1.0 {return nbdev_empty(5)}
+ if !is_finite(q) || q<0.0 || q>1.0 {return nbdev_empty_into(5,s)}
  if nbdev_abs(delta)<=mean*0.25 {
   // D = Pearson_NB2^2 * 2*integral, with a factored degree-31 series.
   let x=delta/mean
@@ -124,8 +149,8 @@ pub fn nb2_deviance(count:i64,mean:f64,alpha:f64)->Nb2Deviance with Mut,Div,Pani
    sum=next
    n=n+1
   }
-  if !is_finite(sum) || sum<=0.0 {return nbdev_empty(5)}
-  return nbdev_finish(nbdev_abs(pearson)*sqrt(2.0*sum),delta,false)
+  if !is_finite(sum) || sum<=0.0 {return nbdev_empty_into(5,s)}
+  return nbdev_finish_into(nbdev_abs(pearson)*sqrt(2.0*sum),delta,false,s)
  }
  // Positive decomposition: PoisHalf(y,m1) + (z-log1p(z))/alpha.
  // Carry delta1 independently; never recover it by subtracting y-m1.
@@ -140,7 +165,7 @@ pub fn nb2_deviance(count:i64,mean:f64,alpha:f64)->Nb2Deviance with Mut,Div,Pani
   let ay=alpha*y
   let multiplier=1.0+ay
   let denominator=1.0+product
-  if !is_finite(ay) || !is_finite(multiplier) || !is_finite(denominator) || denominator<=0.0 {return nbdev_empty(5)}
+  if !is_finite(ay) || !is_finite(multiplier) || !is_finite(denominator) || denominator<=0.0 {return nbdev_empty_into(5,s)}
   m1=(mean*multiplier)/denominator
   delta1=delta/denominator
   if m1>0.0 && m1<2.2250738585072014e-308 {
@@ -148,7 +173,7 @@ pub fn nb2_deviance(count:i64,mean:f64,alpha:f64)->Nb2Deviance with Mut,Div,Pani
    let lm=ln_checked(mean)
    let increment=log1p_checked(ay)
    let normalization=log1p_checked(product)
-   if lm.status!=0 || increment.status!=0 || normalization.status!=0 {return nbdev_empty(5)}
+   if lm.status!=0 || increment.status!=0 || normalization.status!=0 {return nbdev_empty_into(5,s)}
    log_m1=(lm.value+increment.value)-normalization.value
    carry_log=true
   }
@@ -164,58 +189,68 @@ pub fn nb2_deviance(count:i64,mean:f64,alpha:f64)->Nb2Deviance with Mut,Div,Pani
   delta1=delta/denominator
  }
  if product>=2.2250738585072014e-308 {m1=c+y*b}
- if !is_finite(m1) || m1<=0.0 || !is_finite(delta1) || delta1==0.0 {return nbdev_empty(5)}
+ if !is_finite(m1) || m1<=0.0 || !is_finite(delta1) || delta1==0.0 {return nbdev_empty_into(5,s)}
  var first=nbdev_bad_root()
  if carry_log {first=nbdev_poisson_far_log_root(y,m1,log_m1)} else {
   first=nbdev_poisson_root(y,m1,delta1)
  }
- if first.status!=0 {return nbdev_empty(5)}
+ if first.status!=0 {return nbdev_empty_into(5,s)}
  let z=alpha*delta1
  var second:f64=0.0
  if is_finite(z) && nbdev_abs(z)<=0.25 {
   var factor:f64=0.5
   if nbdev_abs(z)>=1e-16 {
    let shape=log1pmx_checked(z)
-   if shape.status!=0 {return nbdev_empty(5)}
+   if shape.status!=0 {return nbdev_empty_into(5,s)}
    factor=((-shape.value)/z)/z
   }
-  if !is_finite(factor) || factor<=0.0 {return nbdev_empty(5)}
+  if !is_finite(factor) || factor<=0.0 {return nbdev_empty_into(5,s)}
   second=(nbdev_abs(delta1)*sqrt(alpha))*sqrt(2.0*factor)
  } else {
   var logk:f64=0.0
-  if is_finite(z) && z> -1.0 {
+  // Near -1, forming 1+z magnifies rounding of alpha*delta1.
+  // The independent log ratio is separated from zero here; retain log1p
+  // for the remaining range to avoid subtracting nearby logarithms.
+  if is_finite(z) && z> -0.5 {
    let logged=log1p_checked(z)
-   if logged.status!=0 {return nbdev_empty(5)}
+   if logged.status!=0 {return nbdev_empty_into(5,s)}
    logk=logged.value
   } else {
    let l1=ln_checked(m1)
    let lm=ln_checked(mean)
-   if l1.status!=0 || lm.status!=0 {return nbdev_empty(5)}
+   if l1.status!=0 || lm.status!=0 {return nbdev_empty_into(5,s)}
    logk=l1.value-lm.value
   }
-  if !is_finite(logk) {return nbdev_empty(5)}
+  if !is_finite(logk) {return nbdev_empty_into(5,s)}
   var factor:f64=0.0
   if delta1>0.0 {
-   if logk<=0.0 {return nbdev_empty(5)}
+   if logk<=0.0 {return nbdev_empty_into(5,s)}
    // +infinity z from product overflow makes this quotient rounded zero.
    var quotient:f64=0.0
    if is_finite(z) {quotient=logk/z}
    factor=1.0-quotient
-   if !is_finite(factor) || factor<=0.0 {return nbdev_empty(5)}
+   if !is_finite(factor) || factor<=0.0 {return nbdev_empty_into(5,s)}
    second=sqrt(delta1)*sqrt(2.0*factor)
   } else {
-   if logk>=0.0 || !is_finite(z) || z< -1.0 {return nbdev_empty(5)}
+   if logk>=0.0 || !is_finite(z) || z< -1.0 {return nbdev_empty_into(5,s)}
    factor=1.0-((-z)/(-logk))
-   if !is_finite(factor) || factor<=0.0 {return nbdev_empty(5)}
+   if !is_finite(factor) || factor<=0.0 {return nbdev_empty_into(5,s)}
    second=(sqrt(-logk)/sqrt(alpha))*sqrt(2.0*factor)
   }
  }
- if !is_finite(second) || second<0.0 {return nbdev_empty(5)}
+ if !is_finite(second) || second<0.0 {return nbdev_empty_into(5,s)}
  var scale=first.value
  if second>scale {scale=second}
- if scale<=0.0 {return nbdev_empty(5)}
+ if scale<=0.0 {return nbdev_empty_into(5,s)}
  let a=first.value/scale
  let d=second/scale
  let root=scale*sqrt(a*a+d*d)
- nbdev_finish(root,delta,false)
+ nbdev_finish_into(root,delta,false,s)
+}
+
+// Legacy snapshot adapter. Reuse a private slot directly in repeated calls.
+pub fn nb2_deviance(count:i64,mean:f64,alpha:f64)->Nb2Deviance with Mut,Div,Panic {
+ var slot=nb2_deviance_slot()
+ let ignored=nb2_deviance_into(count,mean,alpha,&!slot)
+ nb2_deviance_snapshot(&slot)
 }

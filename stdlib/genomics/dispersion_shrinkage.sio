@@ -1,0 +1,298 @@
+// Empirical log-dispersion component under a declared Gaussian working model.
+// Dynamic borrowed buffers; no internal allocation and transactional output.
+// This is not a count likelihood fit or calibrated posterior/RNA-seq pipeline.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix}
+use linalg::dynamic_least_squares::{dynamic_qr_workspace,dynamic_qr_least_squares}
+use math::pure::{is_finite,ln_checked,exp,sqrt}
+use math::logarithmic::{log1p_checked}
+pub struct DispersionWorkspace {
+ pub status:i64, pub jacobian_elements:i64, pub response_elements:i64,
+ pub increment_elements:i64, pub qr_elements:i64, pub stage_elements:i64,
+ pub total_elements:i64,
+}
+pub fn dispersion_shrinkage_workspace(n:i64)->DispersionWorkspace with Div {
+ let bad=DispersionWorkspace{status:1,jacobian_elements:0,response_elements:0,
+ increment_elements:0,qr_elements:0,stage_elements:0,total_elements:0}
+ if n<3 || n>9007199254740992 {return bad}
+ let qr=dynamic_qr_workspace(n,2)
+ if qr<0 || n>(9223372036854775807-10)/9 {return bad}
+ DispersionWorkspace{status:0,jacobian_elements:n*2,response_elements:n,
+ increment_elements:2,qr_elements:qr,stage_elements:n*3,total_elements:n*9+10}
+}
+pub struct DispersionShrinkage {
+ pub status:i64, pub genes:i64, pub rank:i64, pub iterations:i64,
+ pub a0:f64, pub a1:f64, pub prior_log_variance:f64,
+ pub prior_boundary:bool, pub outliers:i64, pub residual_mean_square:f64,
+ pub sampling_correction:f64, pub score_norm:f64, pub step_norm:f64,
+ pub calibration_assessed:bool,
+}
+struct DispersionPoint {status:i64,log_value:f64,first:f64,second:f64}
+struct DispersionEvaluation {status:i64,objective:f64,score:f64}
+fn ds_empty(status:i64,n:i64)->DispersionShrinkage {
+ DispersionShrinkage{status:status,genes:n,rank:0,iterations:0,a0:0.0,a1:0.0,
+ prior_log_variance:0.0,prior_boundary:false,outliers:0,residual_mean_square:0.0,
+ sampling_correction:0.0,score_norm:0.0,step_norm:0.0,calibration_assessed:false}
+}
+fn ds_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn ds_point(theta0:f64,theta1:f64,log_mean:f64)->DispersionPoint with Mut,Div,Panic {
+ let bad=DispersionPoint{status:4,log_value:0.0,first:0.0,second:0.0}
+ let other=theta1-log_mean
+ if !is_finite(theta0) || !is_finite(other) {return bad}
+ let hi=if theta0>=other {theta0}else{other}
+ let lo=if theta0>=other {other}else{theta0}
+ let t=exp(lo-hi)
+ let logged=log1p_checked(t)
+ if logged.status!=0 || !is_finite(t) || t<0.0 {return bad}
+ let value=hi+logged.value
+ if !is_finite(value) {return bad}
+ let big=1.0/(1.0+t)
+ let small=t/(1.0+t)
+ if theta0>=other {return DispersionPoint{status:0,log_value:value,first:big,second:small}}
+ DispersionPoint{status:0,log_value:value,first:small,second:big}
+}
+fn ds_evaluate(means:&NumericBuffer,estimates:&NumericBuffer,n:i64,
+ theta0:f64,theta1:f64,jacobian:&!NumericBuffer,response:&!NumericBuffer,
+ write_workspace:bool)->DispersionEvaluation with Mut,Div,Panic {
+ var objective:f64=0.0
+ var correction:f64=0.0
+ var score0:f64=0.0
+ var score1:f64=0.0
+ var correction0:f64=0.0
+ var correction1:f64=0.0
+ var i:i64=0
+ while i<n {
+  let lm=ln_checked(numeric_buffer_at(means,i))
+  let la=ln_checked(numeric_buffer_at(estimates,i))
+  if lm.status!=0 || la.status!=0 {return DispersionEvaluation{status:4,objective:0.0,score:0.0}}
+  let point=ds_point(theta0,theta1,lm.value)
+  if point.status!=0 {return DispersionEvaluation{status:4,objective:0.0,score:0.0}}
+  let residual=la.value-point.log_value
+  let contribution=(residual/(n as f64))*residual
+  let adjusted=contribution-correction
+  let next=objective+adjusted
+  correction=(next-objective)-adjusted
+  objective=next
+  let term0=(point.first/(n as f64))*residual-correction0
+  let next0=score0+term0
+  correction0=(next0-score0)-term0
+  score0=next0
+  let term1=(point.second/(n as f64))*residual-correction1
+  let next1=score1+term1
+  correction1=(next1-score1)-term1
+  score1=next1
+  if write_workspace {
+   numeric_buffer_set(jacobian,i*2,point.first)
+   numeric_buffer_set(jacobian,i*2+1,point.second)
+   numeric_buffer_set(response,i,residual)
+  }
+  i=i+1
+ }
+ var score=ds_abs(score0)
+ if ds_abs(score1)>score {score=ds_abs(score1)}
+ if !is_finite(objective) || !is_finite(score) {return DispersionEvaluation{status:4,objective:0.0,score:0.0}}
+ DispersionEvaluation{status:0,objective:objective,score:score}
+}
+// status0 available component;1 shape/buffer;2 nonfinite;3 nonpositive data;
+// 4 arithmetic;5 controls/initialization;6 trend rank;7 no convergence.
+// All outputs retain their original contents on any failure. Scratch may change.
+// Outlier flags are exactly 0/1 in f64. All genes participate in trend/prior fit.
+// Sampling variances are variances OF log dispersion, not log variances.
+pub fn dispersion_shrinkage_fit(means:&NumericBuffer,estimates:&NumericBuffer,
+ sampling_variances:&NumericBuffer,a0_initial:f64,a1_initial:f64,rcond:f64,
+ max_iterations:i64,tolerance:f64,outlier_sigma:f64,
+ output_log:&!NumericBuffer,output_variance:&!NumericBuffer,output_flags:&!NumericBuffer,
+ jacobian:&!NumericBuffer,response:&!NumericBuffer,increment:&!NumericBuffer,
+ qr_workspace:&!NumericBuffer,stage:&!NumericBuffer)->DispersionShrinkage with Mut,Div,Panic {
+ let n=numeric_buffer_len(means)
+ let plan=dispersion_shrinkage_workspace(n)
+ if plan.status!=0 || numeric_buffer_status(means)!=0 ||
+ numeric_buffer_status(estimates)!=0 || numeric_buffer_status(sampling_variances)!=0 ||
+ numeric_buffer_status(output_log)!=0 || numeric_buffer_status(output_variance)!=0 ||
+ numeric_buffer_status(output_flags)!=0 || numeric_buffer_status(jacobian)!=0 ||
+ numeric_buffer_status(response)!=0 || numeric_buffer_status(increment)!=0 ||
+ numeric_buffer_status(qr_workspace)!=0 || numeric_buffer_status(stage)!=0 {return ds_empty(1,n)}
+ if numeric_buffer_len(estimates)!=n || numeric_buffer_len(sampling_variances)!=n ||
+ numeric_buffer_len(output_log)!=n || numeric_buffer_len(output_variance)!=n ||
+ numeric_buffer_len(output_flags)!=n || numeric_buffer_len(jacobian)!=plan.jacobian_elements ||
+ numeric_buffer_len(response)!=n || numeric_buffer_len(increment)!=2 ||
+ numeric_buffer_len(qr_workspace)<plan.qr_elements || numeric_buffer_len(stage)<plan.stage_elements {return ds_empty(1,n)}
+ if !is_finite(a0_initial) || !is_finite(a1_initial) || a0_initial<=0.0 || a1_initial<=0.0 ||
+ !is_finite(rcond) || rcond<0.0 || rcond>=1.0 || max_iterations<1 || max_iterations>100 ||
+ !is_finite(tolerance) || tolerance<1e-12 || tolerance>1e-4 ||
+ !is_finite(outlier_sigma) || outlier_sigma<1.0 || outlier_sigma>20.0 {return ds_empty(5,n)}
+ var i:i64=0
+ while i<n {
+  if !is_finite(numeric_buffer_at(means,i)) || !is_finite(numeric_buffer_at(estimates,i)) ||
+  !is_finite(numeric_buffer_at(sampling_variances,i)) {return ds_empty(2,n)}
+  i=i+1
+ }
+ i=0
+ while i<n {
+  if numeric_buffer_at(means,i)<=0.0 || numeric_buffer_at(estimates,i)<=0.0 ||
+  numeric_buffer_at(sampling_variances,i)<=0.0 {return ds_empty(3,n)}
+  i=i+1
+ }
+ let log0=ln_checked(a0_initial)
+ let log1=ln_checked(a1_initial)
+ if log0.status!=0 || log1.status!=0 {return ds_empty(5,n)}
+ var theta0=log0.value
+ var theta1=log1.value
+ let layout=numeric_matrix(plan.jacobian_elements,n,2,2,1,0)
+ var iteration:i64=0
+ var converged=false
+ var final_score:f64=0.0
+ var final_step:f64=0.0
+ var objective:f64=0.0
+ while iteration<max_iterations && !converged {
+  let current=ds_evaluate(means,estimates,n,theta0,theta1,jacobian,response,true)
+  if current.status!=0 {return ds_empty(4,n)}
+  let solved=dynamic_qr_least_squares(jacobian,&layout,response,increment,qr_workspace,rcond)
+  if solved.status!=0 {
+   var bad=ds_empty(if solved.status==3 {6}else{4},n)
+   bad.rank=solved.rank
+   return bad
+  }
+  let d0=numeric_buffer_at(increment,0)
+  let d1=numeric_buffer_at(increment,1)
+  var step:f64=0.0
+  i=0
+  while i<n {
+   let move=numeric_buffer_at(jacobian,i*2)*d0+numeric_buffer_at(jacobian,i*2+1)*d1
+   let lm=ln_checked(numeric_buffer_at(means,i))
+   let point=ds_point(theta0,theta1,lm.value)
+   let scaled=ds_abs(move)/(1.0+ds_abs(point.log_value))
+   if !is_finite(scaled) {return ds_empty(4,n)}
+   if scaled>step {step=scaled}
+   i=i+1
+  }
+  iteration=iteration+1
+  if current.score<=tolerance && step<=tolerance {
+   converged=true
+   final_score=current.score
+   final_step=step
+   objective=current.objective
+  } else {
+   var fraction:f64=1.0
+   var accepted=false
+   var k:i64=0
+   while k<=32 && !accepted {
+    let trial0=theta0+fraction*d0
+    let trial1=theta1+fraction*d1
+    let trial=ds_evaluate(means,estimates,n,trial0,trial1,jacobian,response,false)
+    if trial.status==0 && trial.objective<=current.objective {
+     theta0=trial0;theta1=trial1;accepted=true
+    } else {fraction=fraction*0.5}
+    k=k+1
+   }
+   if !accepted {return ds_empty(7,n)}
+  }
+ }
+ if !converged {return ds_empty(7,n)}
+ let a0=exp(theta0)
+ let a1=exp(theta1)
+ if !is_finite(a0) || !is_finite(a1) || a0<=0.0 || a1<=0.0 {return ds_empty(4,n)}
+ // Jacobian columns sum to one. Its column space is intercept plus first weight.
+ var sum:f64=0.0
+ var correction:f64=0.0
+ i=0
+ while i<n {
+  let adjusted=numeric_buffer_at(jacobian,i*2)-correction
+  let next=sum+adjusted
+  correction=(next-sum)-adjusted
+  sum=next
+  i=i+1
+ }
+ let center=sum/(n as f64)
+ var spread:f64=0.0
+ i=0
+ while i<n {
+  let deviation=ds_abs(numeric_buffer_at(jacobian,i*2)-center)
+  if deviation>spread {spread=deviation}
+  i=i+1
+ }
+ if !is_finite(spread) || spread<=0.0 {return ds_empty(6,n)}
+ var ss:f64=0.0
+ correction=0.0
+ i=0
+ while i<n {
+  let d=(numeric_buffer_at(jacobian,i*2)-center)/spread
+  let adjusted=d*d-correction
+  let next=ss+adjusted
+  correction=(next-ss)-adjusted
+  ss=next
+  i=i+1
+ }
+ if !is_finite(ss) || ss<=0.0 {return ds_empty(4,n)}
+ var sampling:f64=0.0
+ correction=0.0
+ i=0
+ while i<n {
+  let d=(numeric_buffer_at(jacobian,i*2)-center)/spread
+  let h=1.0/(n as f64)+(d*d)/ss
+  if !is_finite(h) || h<0.0 || h>1.0 {return ds_empty(4,n)}
+  let term=((1.0-h)/(n as f64))*numeric_buffer_at(sampling_variances,i)
+  let adjusted=term-correction
+  let next=sampling+adjusted
+  correction=(next-sampling)-adjusted
+  sampling=next
+  i=i+1
+ }
+ let raw=(objective-sampling)/(1.0-2.0/(n as f64))
+ if !is_finite(raw) {return ds_empty(4,n)}
+ let boundary=raw<=0.0
+ let prior=if boundary {0.0}else{raw}
+ var outliers:i64=0
+ i=0
+ while i<n {
+  let lm=ln_checked(numeric_buffer_at(means,i))
+  let la=ln_checked(numeric_buffer_at(estimates,i))
+  let point=ds_point(theta0,theta1,lm.value)
+  let residual=la.value-point.log_value
+  let variance=numeric_buffer_at(sampling_variances,i)
+  let hi=if variance>prior {variance}else{prior}
+  let lo=if variance>prior {prior}else{variance}
+  let total_root=sqrt(hi)*sqrt(1.0+lo/hi)
+  let high=residual>outlier_sigma*total_root
+  var mapped=point.log_value
+  var posterior:f64=0.0
+  if high {
+   mapped=la.value
+   posterior=variance
+   outliers=outliers+1
+  } else if prior>0.0 {
+   let ratio=lo/hi
+   // Both variances are positive. A vanished weight can still contribute
+   // after multiplication by a log value; do not silently discard it.
+   if ratio==0.0 {return ds_empty(4,n)}
+   posterior=lo/(1.0+ratio)
+   if posterior<=0.0 {return ds_empty(4,n)}
+   var trend_weight:f64=0.0
+   var estimate_weight:f64=0.0
+   if variance<=prior {
+    trend_weight=ratio/(1.0+ratio)
+    estimate_weight=1.0/(1.0+ratio)
+   } else {
+    trend_weight=1.0/(1.0+ratio)
+    estimate_weight=ratio/(1.0+ratio)
+   }
+   mapped=estimate_weight*la.value+trend_weight*point.log_value
+  }
+  if !is_finite(mapped) || !is_finite(posterior) || posterior<0.0 {return ds_empty(4,n)}
+  numeric_buffer_set(stage,i,mapped)
+  numeric_buffer_set(stage,n+i,posterior)
+  numeric_buffer_set(stage,n*2+i,if high {1.0}else{0.0})
+  i=i+1
+ }
+ // Commit only after the whole component and every staged row is available.
+ i=0
+ while i<n {
+  numeric_buffer_set(output_log,i,numeric_buffer_at(stage,i))
+  numeric_buffer_set(output_variance,i,numeric_buffer_at(stage,n+i))
+  numeric_buffer_set(output_flags,i,numeric_buffer_at(stage,n*2+i))
+  i=i+1
+ }
+ DispersionShrinkage{status:0,genes:n,rank:2,iterations:iteration,a0:a0,a1:a1,
+ prior_log_variance:prior,prior_boundary:boundary,outliers:outliers,
+ residual_mean_square:objective,sampling_correction:sampling,score_norm:final_score,
+ step_norm:final_step,calibration_assessed:false}
+}
