@@ -21,9 +21,9 @@ has_real_ripgrep() {
 
 workflow_script_refs() {
   if has_real_ripgrep; then
-    rg -No "(?:\\./)?(?:[A-Za-z0-9_.-]+/)*scripts/[A-Za-z0-9_./-]+" "${WORKFLOWS[@]}"
+    rg -No "(?:\\./)?(?:[A-Za-z0-9_.-]+/)*scripts/[A-Za-z0-9_./*?-]+" "${WORKFLOWS[@]}"
   else
-    grep -H -o -E "(\\./)?([A-Za-z0-9_.-]+/)*scripts/[A-Za-z0-9_./-]+" "${WORKFLOWS[@]}"
+    grep -H -o -E "(\\./)?([A-Za-z0-9_.-]+/)*scripts/[A-Za-z0-9_./*?-]+" "${WORKFLOWS[@]}"
   fi
 }
 
@@ -57,13 +57,12 @@ for ref in "${REFS[@]}"; do
     continue
   fi
 
-  # Check every matched shell target; globs cannot hide missing execute bits.
-  for target in "${matches[@]}"; do
-    if [[ "$target" == *.sh && ! -x "$target" ]]; then
-      echo "Non-executable workflow shell target: $target (reference: $ref)"
-      missing=1
-    fi
-  done
+  # Glob refs are path filters (data), so they only need a non-empty match.
+  # Direct refs are invocations: shell targets must stay executable.
+  if [[ "$path" != *'*'* && "$path" != *'?'* && "$path" == *.sh && ! -x "$path" ]]; then
+    echo "Non-executable workflow shell target: $ref"
+    missing=1
+  fi
 done
 
 if [[ $missing -ne 0 ]]; then
