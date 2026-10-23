@@ -174,7 +174,7 @@ identified CLI profile. Do not invent missing response fields.
 | Delete every semicolon | Do not: array types/repetition use `;`, and relevant statement positions accept it. |
 | Assume every method needs a receiver | Instance receivers are explicit; an associated constructor can have no `self` receiver. |
 | Add Rust attributes or a derive macro | Find the actual Sounio declaration/test mechanism instead of translating a foreign feature. |
-| Use a format string and extra print arguments | Read the actual printing signature; the first example uses one string argument. |
+| Use Rust-style format specifiers (`{:.2}`, `{0}`, `{name}`) | `println("x={} y={}", x, y)` takes bare `{}` placeholders only, one per argument, with `{{`/`}}` for literal braces; the format must be a string literal and the counts must match (ADR-013). With a single argument the string prints verbatim. |
 | Ban generics, traits, or closures entirely | Inspect their bounded implementation and the selected artifact's witnesses. |
 | Promise every parsed construct executes | Trace checking, lowering, emission, and runtime support separately. |
 
