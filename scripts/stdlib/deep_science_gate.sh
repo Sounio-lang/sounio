@@ -51,6 +51,14 @@ for src in tests/compile-fail/stdlib_deep_*.sio; do
     else record negative "$src" 0; fi
 done
 for src in tests/run-pass/stdlib_deep_*.sio; do native "$src" "$(basename "$src" .sio)"; done
+# Legacy render paths are replayed in the canonical engine as well as the
+# Stage2 full suite: these names exposed nested-label and first-tick defects.
+for name in stats_inference_forest viz_bootstrap_forest viz_count_matrix_qc \
+    viz_entropy_covariance viz_information_channels viz_scatter_viewport \
+    viz_scientific_clip viz_statistical_interval_forest viz_bca_mean \
+    viz_permutation_mc viz_axis_first_tick_guard; do
+    native "tests/run-pass/$name.sio" "$name"
+done
 compare() {
     local stem=$1 fixture=$2 rc=0
     if [[ ! -f "$out/$fixture.stdout" ]]; then record concordance "$stem:missing-$fixture" 1; return; fi
