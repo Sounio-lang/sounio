@@ -1,0 +1,187 @@
+---
+title: "Units and Uncertainty"
+description: "Compile-time unit checking and GUM-based uncertainty propagation in Sounio"
+weight: 25
+category: "language"
+topic_id: "website.docs.language.units-and-uncertainty"
+authority: "website_only"
+audience: "users"
+last_validated: "unvalidated"
+validated_by: "none"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.language.units-and-uncertainty"
+---
+
+# Units and Uncertainty
+
+**Does Sounio have built-in unit checking?** Yes. Physical dimensions are checked at compile time.
+
+**How do I propagate measurement uncertainty?** Use `Knowledge<T>` with GUM (Guide to the Expression of Uncertainty in Measurement) propagation.
+
+## Dimensional analysis — compile-time unit checking
+
+Sounio checks physical dimensions at the type level. Adding meters to seconds is a compile error, not a runtime bug.
+
+```sio
+fn main() with IO {
+    let distance: m = 100.0
+    let time: s = 9.58
+    
+    // This compiles: m / s = m/s
+    let velocity = distance / time
+    println(velocity)  // 10.438413
+    
+    // This is a COMPILE ERROR:
+    // let wrong = distance + time  
+    // error[E041]: unit mismatch in arithmetic operation
+    //   left unit: length^1
+    //   right unit: time^1
+}
+```
+
+### Unit declarations
+
+```sio
+// Base units
+let mass: kg = 75.0
+let length: m = 1.80
+let time: s = 10.0
+
+// Derived units compose automatically
+let velocity: m = length / time     // m/s
+let acceleration = velocity / time  // m/s^2
+let force = mass * acceleration     // kg·m/s^2 (newtons)
+```
+
+### Verified example
+
+The full dimensional-safety example is [`examples/showcase/type_safe_units.sio`](https://github.com/Sounio-lang/sounio/tree/main/examples/showcase/type_safe_units.sio). It demonstrates:
+
+- Projectile motion simulation with full dimensional checking
+- Kinetic energy: KE = 0.5 × m × v²
+- Newton's second law: F = m × a
+- Every operation verified dimensionally
+
+Run it:
+
+```bash
+./bin/souc run examples/showcase/type_safe_units.sio
+```
+
+## Uncertainty propagation — Knowledge\<T\> and GUM
+
+`Knowledge<T>` represents a measured value with its standard uncertainty. Uncertainty propagates through calculations following the Guide to the Expression of Uncertainty in Measurement (JCGM 100:2008).
+
+```sio
+// Measurements with uncertainty
+let mass = Measurement { value: 75.0, uncertainty: 0.5 }      // 75.0 ± 0.5 kg
+let height = Measurement { value: 1.80, uncertainty: 0.01 }   // 1.80 ± 0.01 m
+
+// Uncertainty propagates through BMI = m/h²
+let bmi = compute_bmi(mass, height)
+// Result: 23.148 ± 0.300 kg/m²
+
+// Variance budget: which input dominates?
+// Height contributes ~96% of BMI uncertainty
+```
+
+The implementation uses automatic differentiation to compute partial derivatives and combines uncertainties via the law of propagation:
+
+```
+u_c²(y) = Σᵢ (∂f/∂xᵢ)² · u²(xᵢ)
+```
+
+### Verified example
+
+The full GUM propagation example is [`examples/science/uncertainty_propagation.sio`](https://github.com/Sounio-lang/sounio/tree/main/examples/science/uncertainty_propagation.sio). It computes:
+
+- BMI = mass / height²
+- BSA (body surface area, Mosteller formula)
+- Full variance budget showing which measurements dominate uncertainty
+
+Run it:
+
+```bash
+./bin/souc run examples/science/uncertainty_propagation.sio
+```
+
+Expected output:
+
+```
+BMI = 23.148 +/- 0.300 kg/m^2
+BSA = 1.936 +/- 0.008 m^2
+Variance: mass=3.8%, height=96.2%
+```
+
+## PBPK with units and uncertainty
+
+The PBPK (physiologically-based pharmacokinetic) library combines both: drug concentrations carry units (mg/L, μmol/L) and uncertainty from measurement and physiological variability.
+
+Example: rapamycin blood concentration with GUM uncertainty propagation through a 14-compartment model — [`stdlib/darwin_pbpk/`](https://github.com/Sounio-lang/sounio/tree/main/stdlib/darwin_pbpk/).
+
+```bash
+./bin/souc run examples/darwin_pbpk/simulation_demo.sio
+```
+
+## Comparison with other approaches
+
+| System | Unit checking | Uncertainty | Notes |
+|--------|--------------|-------------|-------|
+| **Sounio** | Compile-time, dimensional algebra | GUM via `Knowledge<T>`, first-class | Integrated: units + uncertainty in one type system |
+| **F# units of measure** | Compile-time, erased at runtime | No built-in support | Clean syntax, no runtime overhead |
+| **Ada/GNAT** | Compile-time via dimension types | No built-in support | Strong typing, verbose declarations |
+| **Numbat** | Physical units + conversion | No uncertainty | Calculator/scripting focus |
+| **Python (Pint + uncertainties)** | Runtime checking | Runtime propagation | Flexible but slow; no compile-time safety |
+| **Julia (Unitful + Measurements)** | Runtime checking | Runtime propagation | Composable packages, runtime overhead |
+
+Sounio's approach: **compile-time dimension checking + first-class GUM uncertainty**, integrated into the type system and the compiler's automatic differentiation.
+
+## Status and limitations
+
+- **Units**: Compile-time checking works. Derived units (`m/s`, `kg·m/s²`) compose correctly. Full coverage verified in [`examples/showcase/type_safe_units.sio`](https://github.com/Sounio-lang/sounio/tree/main/examples/showcase/type_safe_units.sio).
+
+- **Uncertainty (`Knowledge<T>`)**: GUM propagation for `f64`, `bool`, and struct types is implemented. First-order derivatives cross function calls for pure helpers (see [KNOWN_LIMITATIONS.md §KL-11](https://github.com/Sounio-lang/sounio/blob/main/docs/compiler/KNOWN_LIMITATIONS.md) for call-boundary details). Second-order (Hessian) channels exist but have documented scope limits.
+
+- **Not implemented**: `Knowledge<f128>` and GUM over 128-bit floats (KL-15); wide float epistemic types remain on the roadmap.
+
+- **This is pre-1.0 software**. Expect breaking changes, incomplete surfaces, and documented limitations. See [KNOWN_LIMITATIONS.md](https://github.com/Sounio-lang/sounio/blob/main/docs/compiler/KNOWN_LIMITATIONS.md) for the current open-item ledger.
+
+## Further reading
+
+- [PBPK library documentation](https://github.com/Sounio-lang/sounio/tree/main/stdlib/darwin_pbpk/README.md)
+- [Epistemic types design](https://github.com/Sounio-lang/sounio/tree/main/docs/research/)
+- [GUM uncertainty framework (JCGM 100:2008)](https://www.bipm.org/en/publications/guides/gum)
+- [Type-safe units example](https://github.com/Sounio-lang/sounio/tree/main/examples/showcase/type_safe_units.sio)
+- [Uncertainty propagation example](https://github.com/Sounio-lang/sounio/tree/main/examples/science/uncertainty_propagation.sio)
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Does Sounio have built-in unit checking?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Sounio checks physical dimensions at compile time. Adding meters to seconds is a compile error (E041: unit mismatch). Base units (m, kg, s) and derived units (m/s, kg·m/s²) compose automatically through dimensional algebra."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How do I propagate measurement uncertainty in Sounio?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Use Knowledge<T> with GUM (Guide to the Expression of Uncertainty in Measurement) propagation. The compiler automatically differentiates calculations and propagates standard uncertainties following u_c²(y) = Σᵢ (∂f/∂xᵢ)² · u²(xᵢ). See examples/science/uncertainty_propagation.sio for a verified implementation."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How does Sounio compare to F# units of measure or Python Pint?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Sounio provides compile-time unit checking (like F#) plus first-class GUM uncertainty propagation (Python uncertainties does this at runtime). The difference: both features are integrated into the type system and checked/computed at compile time via automatic differentiation, not runtime wrappers."
+      }
+    }
+  ]
+}
+</script>
