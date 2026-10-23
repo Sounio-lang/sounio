@@ -227,7 +227,9 @@ else
 
   # ── rung: gen2 ──────────────────────────────────────────────────────────────
   echo "[rung gen2] gen1 compiles $SRC"
-  souc_compile "$MADAROS" "$SRC" "$GEN2" >"$WORK/gen2.log" 2>&1
+  # The symbol map (SOUNIO_NV2_SYMBOL_MAP) names the function at a gen2 crash
+  # address; it does not change the ELF.
+  ( export SOUNIO_NV2_SYMBOL_MAP="$GEN2.map"; souc_compile "$MADAROS" "$SRC" "$GEN2" ) >"$WORK/gen2.log" 2>&1
   GEN2_RC=$?
   MERGED="$(grep -oE 'Merged IR: *[0-9]+' "$WORK/gen2.log" | grep -oE '[0-9]+' | tail -1)"
   INTO_ACC_DONE="$(grep -oE 'into_acc_done[[:space:]]+[0-9]+' "$WORK/gen2.log" | grep -oE '[0-9]+' | tail -1)"

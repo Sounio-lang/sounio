@@ -15333,7 +15333,66 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         print(" (raise nc_flat_rodata_capacity)\n")
         return 23
     }
-    native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)
+    let elf_rc = native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)
+    if elf_rc == 0 {
+        let map_path = read_env("SOUNIO_NV2_SYMBOL_MAP")
+        if str_len(map_path) > 0 {
+            if !native_v2_write_symbol_map(map_path, module, nc.fn_count) {
+                print("warning: SOUNIO_NV2_SYMBOL_MAP: could not write ")
+                print(map_path)
+                print("\n")
+            }
+        }
+    }
+    elf_rc
+}
+
+// SOUNIO_NV2_SYMBOL_MAP=<path>: after a successful x86-64 Linux build, write
+// one line per function, `<entry vaddr in hex> <name>`, sorted by IR index.
+// The native ELF has no section headers, so without this a crash address in a
+// Madaros-built program (gen2 in the gen3 rung, #2966) names no function. The
+// ELF itself is unchanged. NC_BIG_ELF is reused as the buffer once the ELF is
+// on disk.
+fn native_v2_write_symbol_map(path: string, module: &IrModule, fn_count: i64) -> bool with IO, Mut, Panic, Div {
+    let text_vaddr: i64 = 4194304 + 4096
+    let cap: i64 = 167772160
+    var pos: i64 = 0
+    var fi: i64 = 0
+    while fi < fn_count && fi < (*module).fn_count {
+        let off = NC_FN_OFFSETS[fi as usize]
+        if off >= 0 {
+            if pos + 420 > cap { return false }
+            let addr = text_vaddr + off
+            var shift: i64 = 28
+            var started = false
+            while shift >= 0 {
+                let nib = (addr >> shift) & 15
+                if nib != 0 || started || shift == 0 {
+                    started = true
+                    if nib < 10 {
+                        NC_BIG_ELF[pos as usize] = (48 + nib) as i8
+                    } else {
+                        NC_BIG_ELF[pos as usize] = (87 + nib) as i8
+                    }
+                    pos = pos + 1
+                }
+                shift = shift - 4
+            }
+            NC_BIG_ELF[pos as usize] = 32 as i8
+            pos = pos + 1
+            let f = ir_fn_get(&(*module), fi as usize)
+            var ci: i64 = 0
+            while ci < f.name.len && ci < 384 {
+                NC_BIG_ELF[pos as usize] = f.name.buf[ci as usize]
+                pos = pos + 1
+                ci = ci + 1
+            }
+            NC_BIG_ELF[pos as usize] = 10 as i8
+            pos = pos + 1
+        }
+        fi = fi + 1
+    }
+    write_file(path, NC_BIG_ELF, pos) >= 0
 }
 
 fn compile_to_macho_arm64_preview(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult with Mut, Panic, Div, Alloc {
