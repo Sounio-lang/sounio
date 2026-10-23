@@ -1,0 +1,153 @@
+// Dynamic exact-median log-ratio normalization of raw integer counts.
+// Mode0: genes positive in every sample. Mode1: positive-count geometric means
+// and per-sample positive ratios; explicit alternative, never an automatic fallback.
+// Workspace 2*genes+2*samples doubles + 2*genes integer eligibility/anchor scratch.
+// Status0success,1shape/mode,2negative count,3no eligible ratios,
+// 4arithmetic,5count not exactly convertible to binary64. Outputs transactional.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
+use stats::dynamic_order::{numeric_select}
+use math::pure::{is_finite,ln_checked,exp}
+use math::logarithmic::{log1p_checked}
+pub struct DynamicSizeFactors {pub status:i64,pub genes:i64,pub samples:i64,pub genes_used:i64,pub genes_excluded:i64,pub mode:i64}
+pub fn dynamic_normalization_workspace(genes:i64,samples:i64)->i64 with Div {
+    if genes<1 || samples<1 || samples>4611686018427387903 {return -1}
+    if genes>(9223372036854775807-2*samples)/2 {return -1}
+    return 2*genes+2*samples
+}
+fn norm_log_ratio(count:i64,anchor:i64)->f64 with Mut,Div,Panic {
+    let delta=((count-anchor) as f64)/(anchor as f64)
+    let magnitude=if delta<0.0 {-delta}else{delta}
+    if magnitude<=0.5 {return log1p_checked(delta).value}
+    // Both integers are positive and <=2^53. The quotient is finite,
+    // nonzero and separated from1 in this branch; use one log without
+    // subtracting two logarithms of potentially large counts.
+    return ln_checked((count as f64)/(anchor as f64)).value
+}
+pub fn dynamic_median_ratio_size_factors(counts:&IntegerBuffer,genes:i64,samples:i64,mode:i64,
+    factors:&!NumericBuffer,log_factors:&!NumericBuffer,work:&!NumericBuffer,flags:&!IntegerBuffer)
+    ->DynamicSizeFactors with Mut,Div,Panic {
+    var out=DynamicSizeFactors{status:1,genes:genes,samples:samples,genes_used:0,genes_excluded:0,mode:mode}
+    let need=dynamic_normalization_workspace(genes,samples)
+    if need<0 || mode<0 || mode>1 {return out}
+    if genes>9223372036854775807/samples {return out}
+    if numeric_buffer_status(factors)!=0 || numeric_buffer_status(log_factors)!=0 ||
+       numeric_buffer_status(work)!=0 || integer_buffer_status(counts)!=0 || integer_buffer_status(flags)!=0 {return out}
+    if integer_buffer_len(counts)!=genes*samples || numeric_buffer_len(factors)!=samples ||
+       numeric_buffer_len(log_factors)!=samples || numeric_buffer_len(work)<need || integer_buffer_len(flags)<2*genes {return out}
+    var g:i64=0
+    while g<genes {
+        var s:i64=0
+        while s<samples {
+            let count=integer_buffer_at(counts,g*samples+s)
+            if count<0 {out.status=2;return out}
+            if count>9007199254740992 {out.status=5;return out}
+            s=s+1
+        }
+        g=g+1
+    }
+    let means=genes
+    let staged_logs=2*genes
+    let staged_factors=staged_logs+samples
+    g=0
+    while g<genes {
+        var anchor:i64=0
+        var positive:i64=0
+        var s:i64=0
+        while s<samples {
+            let count=integer_buffer_at(counts,g*samples+s)
+            if count>0 {positive=positive+1;if anchor==0 {anchor=count}}
+            s=s+1
+        }
+        let eligible=positive>0 && (mode==1 || positive==samples)
+        integer_buffer_set(flags,g,if eligible {1}else{0})
+        integer_buffer_set(flags,genes+g,anchor)
+        if eligible {
+            var total=0.0
+            var correction=0.0
+            s=0
+            while s<samples {
+                let count=integer_buffer_at(counts,g*samples+s)
+                if count>0 {
+                    let value=norm_log_ratio(count,anchor)-correction
+                    let next=total+value
+                    correction=(next-total)-value
+                    total=next
+                }
+                s=s+1
+            }
+            let mean=total/(positive as f64)
+            if !is_finite(mean) {out.status=4;return out}
+            numeric_buffer_set(work,means+g,mean)
+            out.genes_used=out.genes_used+1
+        }
+        g=g+1
+    }
+    out.genes_excluded=genes-out.genes_used
+    if out.genes_used==0 {out.status=3;return out}
+    var s:i64=0
+    while s<samples {
+        var used:i64=0
+        g=0
+        while g<genes {
+            let count=integer_buffer_at(counts,g*samples+s)
+            if integer_buffer_at(flags,g)==1 && count>0 {
+                let anchor=integer_buffer_at(flags,genes+g)
+                let ratio=norm_log_ratio(count,anchor)-numeric_buffer_at(work,means+g)
+                if !is_finite(ratio) {out.status=4;return out}
+                numeric_buffer_set(work,used,ratio)
+                used=used+1
+            }
+            g=g+1
+        }
+        if used==0 {out.status=3;return out}
+        let middle=used/2
+        let budget=if used<=1152921504606846975 {used*8}else{0}
+        let selected=numeric_select(work,used,middle,budget)
+        if selected.status!=0 {out.status=4;return out}
+        var median=selected.value
+        if used%2==0 {
+            // Selection partitions the prefix, so its maximum is the lower median.
+            var lower=numeric_buffer_at(work,0)
+            var at:i64=1
+            while at<middle {
+                let value=numeric_buffer_at(work,at)
+                if value>lower {lower=value}
+                at=at+1
+            }
+            median=0.5*lower+0.5*median
+        }
+        numeric_buffer_set(work,staged_logs+s,median)
+        s=s+1
+    }
+    var total=0.0
+    var correction=0.0
+    s=0
+    while s<samples {
+        let value=numeric_buffer_at(work,staged_logs+s)-correction
+        let next=total+value
+        correction=(next-total)-value
+        total=next
+        s=s+1
+    }
+    let center=total/(samples as f64)
+    s=0
+    while s<samples {
+        let logged=numeric_buffer_at(work,staged_logs+s)-center
+        let factor=exp(logged)
+        if !is_finite(logged) || !is_finite(factor) || factor<=0.0 {out.status=4;return out}
+        numeric_buffer_set(work,staged_logs+s,logged)
+        numeric_buffer_set(work,staged_factors+s,factor)
+        s=s+1
+    }
+    s=0
+    while s<samples {
+        let logged=numeric_buffer_at(work,staged_logs+s)
+        let factor=numeric_buffer_at(work,staged_factors+s)
+        numeric_buffer_set(log_factors,s,logged)
+        numeric_buffer_set(factors,s,factor)
+        s=s+1
+    }
+    out.status=0
+    return out
+}

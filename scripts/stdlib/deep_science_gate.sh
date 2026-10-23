@@ -70,15 +70,38 @@ for src in tests/reference/deep_*.cpp; do
     record cpp-compile "$src" "$rc"
     [[ $rc == 0 ]] || continue
     case "$stem" in
-      deep_ode_reference|deep_special_reference|deep_ode_dynamic_reference|deep_factor_reference|deep_svd_reference|deep_ros4_reference|deep_kde_reference)
+      deep_ode_reference|deep_special_reference|deep_ode_dynamic_reference|deep_factor_reference|deep_svd_reference|deep_ros4_reference|deep_kde_reference|deep_dynamic_count_tsv_reference|deep_numeric_select_reference)
         emit "$stem" "" "" ;;
-      deep_dynamic_qr|deep_normalization|deep_stats_reference|deep_ros4_adaptive_reference)
+      deep_dynamic_qr|deep_normalization|deep_stats_reference)
         timeout 180 "$out/$stem" > "$out/$stem.stdout" 2> "$out/$stem.stderr" || rc=$?
         record cpp-native "$stem" "$rc" ;;
       deep_stats_dispersion_reference) compare "$stem" stdlib_deep_genomics_shrinkage ;;
       deep_stats_multiple_testing_reference) compare "$stem" stdlib_deep_stats_multiple_testing ;;
       deep_stats_count_glm_reference) compare "$stem" stdlib_deep_stats_count_glm ;;
       deep_stats_nb2_likelihood_reference) compare "$stem" stdlib_deep_stats_nb2_likelihood ;;
+      deep_stats_count_fisher_reference) compare "$stem" stdlib_deep_stats_count_fisher ;;
+      deep_stats_count_bootstrap_reference) compare "$stem" stdlib_deep_stats_count_bootstrap ;;
+      deep_stats_count_increment_reference) compare "$stem" stdlib_deep_stats_count_glm ;;
+      deep_nb2_slots_reference) compare "$stem" stdlib_deep_nb2_slots ;;
+      deep_normalization_precision_reference)
+        rc=0
+        timeout 180 "$out/$stem" > "$out/$stem.fixture.sio" 2> "$out/$stem.emitter.stderr" || rc=$?
+        record emit "$stem" "$rc"
+        rc=0
+        cmp tests/run-pass/stdlib_deep_normalization_precision.sio "$out/$stem.fixture.sio" > "$out/$stem.fixture-byte-cmp.txt" 2>&1 || rc=$?
+        record source-custody "$stem" "$rc"
+        rc=0
+        timeout 180 "$out/$stem" --verify "$out/stdlib_deep_normalization_precision.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc" ;;
+      deep_ros4_adaptive_reference)
+        for mode in pure-time pure-time-corrected corrected augmented; do
+          rc=0; expected=0
+          [[ "$mode" != pure-time ]] || expected=1
+          timeout 180 "$out/$stem" "--$mode" > "$out/$stem.$mode.stdout" 2> "$out/$stem.$mode.stderr" || rc=$?
+          verified=0
+          [[ "$rc" == "$expected" ]] || verified=1
+          record oracle-control "$stem:$mode:expected=$expected:actual=$rc" "$verified"
+        done ;;
       deep_stats_dispersion_profile_reference) compare "$stem" stdlib_deep_stats_dispersion_profile ;;
       deep_summaries_reference) compare "$stem" stdlib_deep_summaries ;;
       deep_qr_factor_reference) compare "$stem" stdlib_deep_qr_factor ;;
@@ -99,7 +122,14 @@ for src in tests/reference/deep_*.cpp; do
         emit "$stem" ".moments" "--emit-moments"
         rc=0
         timeout 180 "$out/$stem" --check-moments "$out/$stem.moments.generated.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
-        record concordance "$stem" "$rc" ;;
+        record concordance "$stem" "$rc"
+        for pair in "pcg.into emit-pcg-into check-pcg-into" "count.into emit-count-into-million check-count-into" "ptrs.into emit-ptrs-into-million check-ptrs-million"; do
+          read -r suffix generator checker <<< "$pair"
+          emit "$stem" ".$suffix" "--$generator"
+          rc=0
+          timeout 180 "$out/$stem" "--$checker" "$out/$stem.$suffix.generated.stdout" > "$out/$stem.$suffix.concordance.stdout" 2> "$out/$stem.$suffix.concordance.stderr" || rc=$?
+          record concordance "$stem.$suffix" "$rc"
+        done ;;
       *) record unregistered-oracle "$stem" 1 ;;
     esac
 done

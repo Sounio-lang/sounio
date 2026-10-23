@@ -1,0 +1,80 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: STDLIB_DEEP_ROS4_STATUS_PASS
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_buffer_close}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_status,integer_buffer_close}
+use ode::solver::{default_options}
+use ode::rosenbrock_dynamic::{ros4_workspace,ros4_step_dynamic,solve_rosenbrock4_dynamic,solve_rosenbrock4_observed}
+fn model_rhs(t:f64,y:&NumericBuffer,dy:&!NumericBuffer)->i64 with Mut,Div,Panic {
+ var i:i64=0
+ while i<numeric_buffer_len(y) {numeric_buffer_set(dy,i,-10.0*numeric_buffer_at(y,i));i=i+1}
+ 0
+}
+fn model_jac(t:f64,y:&NumericBuffer,j:&!NumericBuffer,dfdt:&!NumericBuffer)->i64 with Mut,Div,Panic {
+ let n=numeric_buffer_len(y)
+ var i:i64=0
+ while i<n*n {numeric_buffer_set(j,i,0.0);i=i+1}
+ i=0
+ while i<n {numeric_buffer_set(j,i*n+i,-10.0);numeric_buffer_set(dfdt,i,0.0);i=i+1}
+ 0
+}
+fn rejected_rhs(t:f64,y:&NumericBuffer,dy:&!NumericBuffer)->i64 with Mut,Div,Panic {17}
+fn incomplete_jac(t:f64,y:&NumericBuffer,j:&!NumericBuffer,dfdt:&!NumericBuffer)->i64 with Mut,Div,Panic {
+ numeric_buffer_set(j,0,-10.0);numeric_buffer_set(dfdt,0,0.0)
+ 0
+}
+fn stream_stop(t:f64,y:&NumericBuffer,context:&!NumericBuffer)->i64 with IO,Mut,Div,Panic {
+ let count=numeric_buffer_at(context,0)+1.0
+ numeric_buffer_set(context,0,count);numeric_buffer_set(context,1,t)
+ print("ROS4_OBSERVED ");print(t);println("")
+ if count>=2.0 {return 1}
+ 0
+}
+fn stream_failure(t:f64,y:&NumericBuffer,context:&!NumericBuffer)->i64 with IO,Mut,Div,Panic {-5}
+fn main()->i32 with IO,Mut,Div,Panic,Alloc {
+ let bad_shape=ros4_workspace(9223372036854775807)
+ assert(bad_shape.status==1 && bad_shape.total_payload_bytes==0)
+ let q=ros4_workspace(2)
+ assert(q.status==0 && q.stages_len==16 && q.factor_work_len==6)
+ var state=numeric_buffer_new(2,16)
+ var trial=numeric_buffer_new(2,16)
+ var error=numeric_buffer_new(2,16)
+ var derivative=numeric_buffer_new(2,16)
+ var stages=numeric_buffer_new(q.stages_len,q.stages_len*8)
+ var matrix=numeric_buffer_new(q.matrix_len,q.matrix_len*8)
+ var factor=numeric_buffer_new(q.factor_len,q.factor_len*8)
+ var factorwork=numeric_buffer_new(q.factor_work_len,q.factor_work_len*8)
+ var pivots=integer_buffer_new(2,16)
+ var pivotwork=integer_buffer_new(2,16)
+ var context=numeric_buffer_new(2,16)
+ assert(numeric_buffer_status(&state)==0 && numeric_buffer_status(&trial)==0 && numeric_buffer_status(&error)==0 && numeric_buffer_status(&derivative)==0 && numeric_buffer_status(&stages)==0 && numeric_buffer_status(&matrix)==0 && numeric_buffer_status(&factor)==0 && numeric_buffer_status(&factorwork)==0 && integer_buffer_status(&pivots)==0 && integer_buffer_status(&pivotwork)==0 && numeric_buffer_status(&context)==0)
+ numeric_buffer_set(&!state,0,1.0);numeric_buffer_set(&!state,1,2.0)
+ numeric_buffer_set(&!context,0,0.0);numeric_buffer_set(&!context,1,0.0)
+ let rejected=ros4_step_dynamic(rejected_rhs,model_jac,&state,&!trial,&!error,&!derivative,&!stages,&!matrix,&!factor,&!factorwork,&!pivots,&!pivotwork,0.0,0.01,0.0)
+ assert(rejected.status==6 && rejected.callback_status==17 && rejected.callback_kind==1 && rejected.nfeval==1 && rejected.njev==0)
+ let incomplete=ros4_step_dynamic(model_rhs,incomplete_jac,&state,&!trial,&!error,&!derivative,&!stages,&!matrix,&!factor,&!factorwork,&!pivots,&!pivotwork,0.0,0.01,0.0)
+ assert(incomplete.status==4 && incomplete.failed_stage==2 && numeric_buffer_at(&state,0)==1.0)
+ let stalled=ros4_step_dynamic(model_rhs,model_jac,&state,&!trial,&!error,&!derivative,&!stages,&!matrix,&!factor,&!factorwork,&!pivots,&!pivotwork,1.0e300,1.0,0.0)
+ assert(stalled.status==2 && stalled.nfeval==0)
+ let step=ros4_step_dynamic(model_rhs,model_jac,&state,&!trial,&!error,&!derivative,&!stages,&!matrix,&!factor,&!factorwork,&!pivots,&!pivotwork,0.0,0.01,0.0)
+ assert(step.status==0 && step.nfeval==6 && step.njev==1 && step.nlinear==6 && step.nfactorizations==1)
+ assert(numeric_buffer_at(&state,0)==1.0 && numeric_buffer_at(&state,1)==2.0)
+ var opts=default_options()
+ opts.max_steps=0
+ let invalid=solve_rosenbrock4_observed(model_rhs,model_jac,stream_stop,&!state,&!trial,&!error,&!derivative,&!stages,&!matrix,&!factor,&!factorwork,&!pivots,&!pivotwork,&!context,0.0,1.0,opts,0.0)
+ assert(invalid.status==3 && invalid.observer_calls==0 && numeric_buffer_at(&context,0)==0.0)
+ opts=default_options();opts.dt_init=0.01;opts.dt_max=0.01
+ let stopped=solve_rosenbrock4_observed(model_rhs,model_jac,stream_stop,&!state,&!trial,&!error,&!derivative,&!stages,&!matrix,&!factor,&!factorwork,&!pivots,&!pivotwork,&!context,0.0,1.0,opts,0.0)
+ assert(stopped.status==7 && stopped.steps==1 && stopped.observer_calls==2 && stopped.t_final>0.0 && stopped.t_final<1.0)
+ assert(numeric_buffer_at(&context,0)==2.0 && numeric_buffer_at(&context,1)==stopped.t_final)
+ let observer_bad=solve_rosenbrock4_observed(model_rhs,model_jac,stream_failure,&!state,&!trial,&!error,&!derivative,&!stages,&!matrix,&!factor,&!factorwork,&!pivots,&!pivotwork,&!context,0.0,1.0,opts,0.0)
+ assert(observer_bad.status==6 && observer_bad.callback_kind==3 && observer_bad.callback_status== -5 && observer_bad.nfeval==0)
+ opts.max_steps=1
+ let exhausted=solve_rosenbrock4_dynamic(model_rhs,model_jac,&!state,&!trial,&!error,&!derivative,&!stages,&!matrix,&!factor,&!factorwork,&!pivots,&!pivotwork,0.0,1.0,opts,0.0)
+ assert(exhausted.status==1 && exhausted.attempts==1 && exhausted.steps+exhausted.nreject==1)
+ numeric_buffer_close(state);numeric_buffer_close(trial);numeric_buffer_close(error);numeric_buffer_close(derivative)
+ numeric_buffer_close(stages);numeric_buffer_close(matrix);numeric_buffer_close(factor);numeric_buffer_close(factorwork)
+ integer_buffer_close(pivots);integer_buffer_close(pivotwork);numeric_buffer_close(context)
+ println("STDLIB_DEEP_ROS4_STATUS_PASS")
+ 0
+}
