@@ -359,6 +359,21 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
     excluded because `stdlib/math/softfloat_f128.sio` defines them as the
     implementation the intercept stands for (a user one fails to build).
     The renamed spelling `<name>__user` appears in diagnostics.
+    **Witness, measured 2026-10-23 on a build from `4852ca3e30`:** two
+    modules, `pub fn measure(x: i64) -> i64 { x + 1000 }` in `shadow_leaf`
+    and `use shadow_leaf::measure` + `measure(5)` in `shadow_main` →
+    `build` rc=1 with `expected Knowledge<i64>`: the builtin still wins.
+    Entry points for a fix: `builtin_shadow_apply_items`
+    (`self-hosted/compiler/private_fn_identity.sio`) collects only
+    `visibility.kind == 0`, and `private_fn_identity_apply` skips the pub
+    phase entirely when `PFI_DUP_ANY == 0`, which a lone intercepted `pub fn`
+    never sets. The importer-rebind machinery from #2773
+    (`pfi_pub_phase` / `pfi_resolve_import` / `pfi_rewrite_use`) is the
+    reusable half. Two candidate designs, neither implemented: (A) let the
+    pub phase treat an intercepted name as a collision and rename
+    importer-visible references; (B) invert builtin recognition in the
+    checker/lowerer so a user fn in scope wins over the builtin. Both need a
+    maintainer decision on which order is authoritative.
   - **Residual (OPEN), lean_single (seed, not changed — a fix needs a seed
     refresh):** 26 of 65 wrong. Silently wrong value (builtin ran, printed
     the argument `5` or `0`): `abs`, `f64_to_bits`, `lift_knowledge`,
