@@ -419,3 +419,76 @@ Migração de `Lowerer` para `&!Lowerer` não é problema de ferramental ou temp
 - `LOWERER_MIGRATION_ANALYSIS.md`
 - `LOWERER_BORROW_MIGRATION_PLAN.md`
 - `RESPOSTAS_RODADA_3.md`
+
+## Atualização: Migração Incremental Sem Cascata (Executada)
+
+### Correção da Abordagem
+
+A conclusão "arquiteturalmente inviável" estava **incorreta**. Usei abordagem errada (remover `let lo = pair.0` quebrou referências).
+
+**Abordagem correta**: Migração incremental sem cascata.
+
+### Implementação
+
+**Passo 1**: Criar `fresh_reg_mut` + wrapper fino
+
+```sio
+fn fresh_reg_mut(self: &!Lowerer) -> i64 with Mut, Panic, Div, IO {
+    // Corpo real (sem var lo = self)
+    if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
+        // ...
+        return 0
+    }
+    var current_func_box = self.current_func
+    let reg = (*current_func_box).reg_count
+    // ...
+    self.current_func = current_func_box
+    reg
+}
+
+fn fresh_reg(self) -> (Lowerer, i64) with Mut, Panic, Div, IO {
+    var lo = self
+    let r = lo.fresh_reg_mut()
+    (lo, r)
+}
+```
+
+**Resultado**: Typecheck **0 erros**, nenhum chamador quebra.
+
+**Passo 2**: Migrar funções-folha internamente (assinatura externa mantida)
+
+```sio
+fn emit_i64_const(self, value: i64) -> (Lowerer, i64) {
+    var lo = self
+    let reg = lo.fresh_reg_mut()  // ← mudou aqui
+    lo = lo.emit(ir_load_imm(reg, value))
+    (lo, reg)
+}
+```
+
+**Resultado**: Typecheck **0 erros** após cada função.
+
+### Commits
+
+1. `2223dcecc` — fresh_reg_mut + wrapper (0 erros)
+2. `555e553b2` — emit_i64_const migrado internamente (0 erros)
+3. `2a7c68d8e` — emit_f64_const migrado internamente (0 erros)
+4. `b3b63bb2c` — emit_name_string migrado internamente (0 erros)
+
+### Medições com Gate
+
+**Configuração**:
+- ulimit -s: 8192 KB (mesmo do CI após fallback de 16 MB)
+- Gate: `scripts/ci/madaros_fixed_point_gate.sh`
+- Medição: RSS máximo via `ps`
+
+**Main baseline** (commit dbd9347aa):
+- Rodando...
+
+**Branch com migrações** (commit b3b63bb2c):
+- Aguardando resultado do main
+
+### Status
+
+✅ Migração incremental **funciona** (0 erros)  
+⏳ Medições de performance em andamento
