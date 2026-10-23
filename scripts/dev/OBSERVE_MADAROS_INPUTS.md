@@ -51,3 +51,15 @@ canonical builder or cache script, remove guards, authorize reuse, or change
 no-cache policy. The existing broad key remains authority. Future observational
 analysis must account for negative lookup candidates before any narrower cache
 proposal. See the [manifest candidate](../../docs/plans/COMPILER_INPUT_MANIFEST_CANDIDATE_2026_10_22.md).
+
+If TRACER is a launcher, its file hash binds the launcher only; separately retain
+the native tracer, loader and library/package identities. The first observed run
+uses such a bound launcher to avoid changing global loader settings.
+
+## Observed execution checkpoint
+
+Slurm15940 completed0:0 with traced status0, captured_endpoints_equal, empty tracer
+diagnostics, lossless archive readback and existing scientific example execution.
+The compiler used the prior validated immutable source snapshot; the collector
+was a separately hashed overlay. No cache validity or complete-input claim follows.
+[Execution receipt](../../docs/plans/COMPILER_INPUT_OBSERVATION_EXECUTION_2026_10_22.md).

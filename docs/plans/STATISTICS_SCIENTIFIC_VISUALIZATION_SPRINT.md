@@ -897,3 +897,31 @@ are whole-run observations; Slurm elapsed5:42, TotalCPU11:18.137 and batch
 MaxRSS7152996K describe the two-worker compile/run job, not renderer performance.
 The final source snapshot370cc50246991bc39421b4530b8ec55b10b3dbd67cc2102ab710e1c055cf009e
 precedes final documentation edits. Broader CI/merge remain separate states.
+
+## Main14 — process-attributed pathname analysis (2026-10-22)
+
+Continuation is based on remote main a59930e514, branch
+`sprint/compiler-path-attribution-main-a59930-20261022`. The prior scientific
+branch remains preserved at5c84f28288; merging its47 unique commits with main's
+31 unique commits produces real source conflicts. New compiler/seed changes in
+main require fresh native validation after that integration. Later logarithmic,
+NB2, bars and uncertainty work remains queued, with the precise conflicts and
+upstream fixes listed in the execution receipt below.
+
+Delivered: C++23 bounded analyzer of the existing Slurm15940 trace. Successful exec
+request epochs separate operator-listed compiler path hints from sha256sum and
+other utility hints. It reconstructs598 split calls across25292 physical lines,
+with zero reconstruction/decode failures for this capture. Unknown-image1210
+syscall rows remain explicit. Final role rows: compiler1906, sha256sum15177,
+other6106, unknown1210. These are syscall counts, not consumed dependencies or
+cost measurements. There is no image inheritance or cwd/dirfd resolution.
+
+Actual standalone analysis on t560: exit0, elapsed0.44s, maxRSS3252KiB. Private
+raw tables and deterministic gzip archives have matching decompression hashes.
+Only compact summaries and integrity metadata enter Git. No new compiler build,
+Sounio execution, test, source snapshot, deletion or quota change in this increment.
+The cache key and guards remain broad; cache_authority=false and
+complete_input_closure=false.
+
+[Execution and integration queue](COMPILER_PATH_ATTRIBUTION_EXECUTION_2026_10_22.md)
+retain exact source/binary/trace identities, reviewed parser scope and open gates.
