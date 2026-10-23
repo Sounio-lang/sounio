@@ -15961,13 +15961,17 @@ impl Lowerer {
         8 * r - (r * (r - 1)) / 2 + (c - r)
     }
 
-    fn so_clear_expr_hess(self) -> Lowerer with Mut {
-        var lo = self
+    fn so_clear_expr_hess_mut(self: &!Lowerer) with Mut {
         var i: i64 = 0
         while i < 36 {
-            lo.so_expr_hess[i as usize] = 0 - 1
+            self.so_expr_hess[i as usize] = 0 - 1
             i = i + 1
         }
+    }
+
+    fn so_clear_expr_hess(self) -> Lowerer with Mut {
+        var lo = self
+        lo.so_clear_expr_hess_mut()
         lo
     }
 
@@ -16219,13 +16223,17 @@ impl Lowerer {
         lo
     }
 
-    fn fo_clear_expr_sens(self) -> Lowerer with Mut {
-        var lo = self
+    fn fo_clear_expr_sens_mut(self: &!Lowerer) with Mut {
         var k: i64 = 0
         while k < 32 {
-            lo.fo_expr_sens[k as usize] = -1
+            self.fo_expr_sens[k as usize] = -1
             k = k + 1
         }
+    }
+
+    fn fo_clear_expr_sens(self) -> Lowerer with Mut {
+        var lo = self
+        lo.fo_clear_expr_sens_mut()
         lo
     }
 
@@ -16513,35 +16521,39 @@ impl Lowerer {
     }
 
     // Var = Σ_k s_k² · σ²_k from current fo_expr_sens.
-    fn fo_emit_rho_reg(self, i: i64, j: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_rho_reg_mut(self: &!Lowerer, i: i64, j: i64) -> i64 with Mut, Panic, Div, Alloc, IO {
         let reg = fo_cov_rho_reg_get(i, j)
         if reg >= 0 {
-            return (self, reg)
+            return reg
         }
-        self.emit_f64_const(fo_cov_rho_get(i, j))
+        self.emit_f64_const_mut(fo_cov_rho_get(i, j))
     }
 
-    fn fo_emit_var_from_sens(self) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        let z = self.emit_f64_const(0.0)
-        var lo = z.0
-        var acc = z.1
+    fn fo_emit_rho_reg(self, i: i64, j: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let reg = lo.fo_emit_rho_reg_mut(i, j)
+        (lo, reg)
+    }
+
+    fn fo_emit_var_from_sens_mut(self: &!Lowerer) -> i64 with Mut, Panic, Div, Alloc, IO {
+        var acc = self.emit_f64_const_mut(0.0)
         var k: i64 = 0
         while k < 32 {
-            let sreg = lo.fo_expr_sens[k as usize]
-            let sig = lo.fo_sigma2[k as usize]
+            let sreg = self.fo_expr_sens[k as usize]
+            let sig = self.fo_sigma2[k as usize]
             if sreg >= 0 && sig >= 0 {
                 // s²
-                let sq = lo.fresh_reg_mut()
-                lo = lo.emit(ir_binop_typed(sq, sreg, BinaryOp::OpMul, sreg, true, true))
-                lo = lo.emit(ir_mark_float_reg(sq))
+                let sq = self.fresh_reg_mut()
+                self.emit_mut(ir_binop_typed(sq, sreg, BinaryOp::OpMul, sreg, true, true))
+                self.emit_mut(ir_mark_float_reg(sq))
                 // s² · σ²
-                let contrib = lo.fresh_reg_mut()
-                lo = lo.emit(ir_binop_typed(contrib, sq, BinaryOp::OpMul, sig, true, true))
-                lo = lo.emit(ir_mark_float_reg(contrib))
+                let contrib = self.fresh_reg_mut()
+                self.emit_mut(ir_binop_typed(contrib, sq, BinaryOp::OpMul, sig, true, true))
+                self.emit_mut(ir_mark_float_reg(contrib))
                 // acc += contrib
-                let nacc = lo.fresh_reg_mut()
-                lo = lo.emit(ir_binop_typed(nacc, acc, BinaryOp::OpAdd, contrib, true, true))
-                lo = lo.emit(ir_mark_float_reg(nacc))
+                let nacc = self.fresh_reg_mut()
+                self.emit_mut(ir_binop_typed(nacc, acc, BinaryOp::OpAdd, contrib, true, true))
+                self.emit_mut(ir_mark_float_reg(nacc))
                 acc = nacc
             }
             k = k + 1
@@ -16565,46 +16577,50 @@ impl Lowerer {
         while ci < 8 {
             var cj: i64 = ci + 1
             while cj < 8 {
-                let si = lo.fo_expr_sens[ci as usize]
-                let sj = lo.fo_expr_sens[cj as usize]
-                let v_i = lo.fo_sigma2[ci as usize]
-                let v_j = lo.fo_sigma2[cj as usize]
+                let si = self.fo_expr_sens[ci as usize]
+                let sj = self.fo_expr_sens[cj as usize]
+                let v_i = self.fo_sigma2[ci as usize]
+                let v_j = self.fo_sigma2[cj as usize]
                 if fo_cov_rho_live(ci, cj) && si >= 0 && sj >= 0 && v_i >= 0 && v_j >= 0 {
-                    let pp = lo.fresh_reg_mut()
-                    lo = lo.emit(ir_binop_typed(pp, v_i, BinaryOp::OpMul, v_j, true, true))
-                    lo = lo.emit(ir_mark_float_reg(pp))
-                    let sq_id = lowerer_find_or_add_fn_id_mut(&! lo, make_name("sqrt"))
+                    let pp = self.fresh_reg_mut()
+                    self.emit_mut(ir_binop_typed(pp, v_i, BinaryOp::OpMul, v_j, true, true))
+                    self.emit_mut(ir_mark_float_reg(pp))
+                    let sq_id = lowerer_find_or_add_fn_id_mut(&! self, make_name("sqrt"))
                     let sq_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(pp)))
-                    let sig_prod = lo.fresh_reg_mut()
+                    let sig_prod = self.fresh_reg_mut()
                     var sqi = ir_call(sig_prod, sq_id, make_name("sqrt"), sq_args, 1)
                     sqi.imm_flags = IR_FLOAT_REG_MARKER_FLAG
-                    lo = lo.emit(sqi)
-                    lo = lo.emit(ir_mark_float_reg(sig_prod))
-                    let rr = lo.fo_emit_rho_reg(ci, cj)
-                    lo = rr.0
-                    let two = lo.emit_f64_const(2.0)
-                    lo = two.0
-                    let kp = lo.fresh_reg_mut()
-                    lo = lo.emit(ir_binop_typed(kp, two.1, BinaryOp::OpMul, rr.1, true, true))
-                    lo = lo.emit(ir_mark_float_reg(kp))
-                    let t1 = lo.fresh_reg_mut()
-                    lo = lo.emit(ir_binop_typed(t1, si, BinaryOp::OpMul, sj, true, true))
-                    lo = lo.emit(ir_mark_float_reg(t1))
-                    let t2 = lo.fresh_reg_mut()
-                    lo = lo.emit(ir_binop_typed(t2, t1, BinaryOp::OpMul, sig_prod, true, true))
-                    lo = lo.emit(ir_mark_float_reg(t2))
-                    let t3 = lo.fresh_reg_mut()
-                    lo = lo.emit(ir_binop_typed(t3, t2, BinaryOp::OpMul, kp, true, true))
-                    lo = lo.emit(ir_mark_float_reg(t3))
-                    let ap = lo.fresh_reg_mut()
-                    lo = lo.emit(ir_binop_typed(ap, acc, BinaryOp::OpAdd, t3, true, true))
-                    lo = lo.emit(ir_mark_float_reg(ap))
+                    self.emit_mut(sqi)
+                    self.emit_mut(ir_mark_float_reg(sig_prod))
+                    let rr = self.fo_emit_rho_reg_mut(ci, cj)
+                    let two = self.emit_f64_const_mut(2.0)
+                    let kp = self.fresh_reg_mut()
+                    self.emit_mut(ir_binop_typed(kp, two, BinaryOp::OpMul, rr, true, true))
+                    self.emit_mut(ir_mark_float_reg(kp))
+                    let t1 = self.fresh_reg_mut()
+                    self.emit_mut(ir_binop_typed(t1, si, BinaryOp::OpMul, sj, true, true))
+                    self.emit_mut(ir_mark_float_reg(t1))
+                    let t2 = self.fresh_reg_mut()
+                    self.emit_mut(ir_binop_typed(t2, t1, BinaryOp::OpMul, sig_prod, true, true))
+                    self.emit_mut(ir_mark_float_reg(t2))
+                    let t3 = self.fresh_reg_mut()
+                    self.emit_mut(ir_binop_typed(t3, t2, BinaryOp::OpMul, kp, true, true))
+                    self.emit_mut(ir_mark_float_reg(t3))
+                    let ap = self.fresh_reg_mut()
+                    self.emit_mut(ir_binop_typed(ap, acc, BinaryOp::OpAdd, t3, true, true))
+                    self.emit_mut(ir_mark_float_reg(ap))
                     acc = ap
                 }
                 cj = cj + 1
             }
             ci = ci + 1
         }
+        acc
+    }
+
+    fn fo_emit_var_from_sens(self) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let acc = lo.fo_emit_var_from_sens_mut()
         (lo, acc)
     }
 
@@ -19733,49 +19749,47 @@ impl Lowerer {
 
     // nest(x, n) = x when n < 1, else nest(x, n - 1) + x. The multiplier is
     // a runtime value, so the depth cap never has to unroll it.
-    fn fo_emit_recur_count_scale(self, n_reg: i64, xs: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        var lo = self
-        let one_i = lo.emit_i64_const(1)
-        lo = one_i.0
-        let cmp_p = lo.fresh_reg_mut()
-        lo = lo.emit(ir_binop(cmp_p, n_reg, BinaryOp::OpLt, one_i.1))
-        let pl_else = lo.fresh_label()
-        lo = pl_else.0
-        let l_else = pl_else.1
-        let pl_end = lo.fresh_label()
-        lo = pl_end.0
-        let l_end = pl_end.1
-        let mreg = lo.fresh_reg_mut()
-        lo = lo.emit(ir_branch_false(cmp_p, l_else))
-        let one_f = lo.emit_f64_const(1.0)
-        lo = one_f.0
-        lo = lo.emit(ir_copy(mreg, one_f.1))
-        lo = lo.emit(ir_jump(l_end))
-        lo = lo.emit(ir_label(l_else))
-        let nf_p = lo.fresh_reg_mut()
-        lo = lo.emit(ir_int_to_float(nf_p, n_reg))
-        lo = lo.emit(ir_mark_float_reg(nf_p))
-        let one_f2 = lo.emit_f64_const(1.0)
-        lo = one_f2.0
-        let sum_p = lo.fresh_reg_mut()
-        lo = lo.emit(ir_binop_typed(sum_p, nf_p, BinaryOp::OpAdd, one_f2.1, true, true))
-        lo = lo.emit(ir_mark_float_reg(sum_p))
-        lo = lo.emit(ir_copy(mreg, sum_p))
-        lo = lo.emit(ir_label(l_end))
-        lo = lo.emit(ir_mark_float_reg(mreg))
-        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+    fn fo_emit_recur_count_scale_mut(self: &!Lowerer, n_reg: i64, xs: [i64; 32]) -> i64 with Mut, Panic, Div, Alloc, IO {
+        let one_i = self.emit_i64_const_mut(1)
+        let cmp_p = self.fresh_reg_mut()
+        self.emit_mut(ir_binop(cmp_p, n_reg, BinaryOp::OpLt, one_i))
+        let l_else = self.fresh_label_mut()
+        let l_end = self.fresh_label_mut()
+        let mreg = self.fresh_reg_mut()
+        self.emit_mut(ir_branch_false(cmp_p, l_else))
+        let one_f = self.emit_f64_const_mut(1.0)
+        self.emit_mut(ir_copy(mreg, one_f))
+        self.emit_mut(ir_jump(l_end))
+        self.emit_mut(ir_label(l_else))
+        let nf_p = self.fresh_reg_mut()
+        self.emit_mut(ir_int_to_float(nf_p, n_reg))
+        self.emit_mut(ir_mark_float_reg(nf_p))
+        let one_f2 = self.emit_f64_const_mut(1.0)
+        let sum_p = self.fresh_reg_mut()
+        self.emit_mut(ir_binop_typed(sum_p, nf_p, BinaryOp::OpAdd, one_f2, true, true))
+        self.emit_mut(ir_mark_float_reg(sum_p))
+        self.emit_mut(ir_copy(mreg, sum_p))
+        self.emit_mut(ir_label(l_end))
+        self.emit_mut(ir_mark_float_reg(mreg))
+        self.fo_clear_expr_sens_mut().so_clear_expr_hess_mut()
         var k: i64 = 0
         while k < 32 {
             let s = xs[k as usize]
             if s >= 0 {
-                let pr = lo.fresh_reg_mut()
-                lo = lo.emit(ir_binop_typed(pr, s, BinaryOp::OpMul, mreg, true, true))
-                lo = lo.emit(ir_mark_float_reg(pr))
-                lo.fo_expr_sens[k as usize] = pr
+                let pr = self.fresh_reg_mut()
+                self.emit_mut(ir_binop_typed(pr, s, BinaryOp::OpMul, mreg, true, true))
+                self.emit_mut(ir_mark_float_reg(pr))
+                self.fo_expr_sens[k as usize] = pr
             }
             k = k + 1
         }
-        lo.fo_emit_var_from_sens()
+        self.fo_emit_var_from_sens_mut()
+    }
+
+    fn fo_emit_recur_count_scale(self, n_reg: i64, xs: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let result = lo.fo_emit_recur_count_scale_mut(n_reg, xs)
+        (lo, result)
     }
 
     // scale(x, n) = x when n < 1, else 2 * scale(x, n - 1). The factor is 2^n
