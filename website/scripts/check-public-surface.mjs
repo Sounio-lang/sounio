@@ -13,6 +13,7 @@ const siteIndex = args.indexOf('--site');
 const site = siteIndex < 0 ? path.join(website, 'dist') : path.resolve(args[siteIndex + 1] ?? '');
 const copy = JSON.parse(await readFile(path.join(website, 'src/data/publicSurface.json'), 'utf8'));
 const manifest = JSON.parse(await readFile(path.join(repository, 'docs/llm-guide/example-manifest.json'), 'utf8'));
+const footerSource = await readFile(path.join(website, 'src/components/common/Footer.astro'), 'utf8');
 const hash = source => createHash('sha256').update(source).digest('hex');
 const prefix = locale => locale === 'en' ? '' : `/${locale}`;
 
@@ -98,6 +99,7 @@ async function linkIssues(html) {
 }
 
 const errors = [];
+if (/label:\s*['"]Playground['"]/.test(footerSource)) errors.push('footer has hardcoded Playground label');
 const expectedKeys = Object.keys(copy.en).sort();
 const expectedChrome = Object.keys(copy.en.chrome).sort();
 for (const locale of locales) {
