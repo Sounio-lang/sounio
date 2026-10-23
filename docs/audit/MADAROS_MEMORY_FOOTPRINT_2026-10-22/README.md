@@ -17,7 +17,8 @@ build log (`BUILD_LOG=`) and the self-build step needs the derived seed
 `27afa340`. Machine: a 2-vCPU, 7 GiB container. Two things were **not**
 reproduced here and are recorded as reports, not measurements: the gen3
 self-build reaching ~15 GB and dying by OOM, and the claim that gen2 is
-bit-identical to gen1 (founder report, 2026-10-22).
+bit-identical to gen1 (founder report, 2026-10-22). CI records gen3 failing
+differently, with `arena full` and rc 181 (§3).
 
 ---
 
@@ -121,7 +122,7 @@ and it has a direct test: rebuilding with `Lowerer` taken as `&!Lowerer` (the
 refactor #3015 sizes at weeks of work) should shrink the BSS by roughly the
 number of converted sites times the struct's size under the seed's layout.
 
-## 3. The gen3 OOM, reasoned from what is known
+## 3. The gen3 failure, reasoned from what is known
 
 If gen2 is bit-identical to gen1, building gen3 with gen2 is **the same
 computation** as building gen2 with gen1: same binary, same input, same result,
@@ -140,12 +141,44 @@ that stay alive after they are consumed rather than at the source's size. The me
 lacks is the one that matters: peak RSS of a Madaros-built Madaros compiling
 `main.sio` (the gen2 → gen3 step), which a 7 GiB container cannot host safely.
 
-One environment variable is already known to decide the outcome. PR #3015 records
-that GitHub Actions runs with a 16 MB stack and an 8 MB stack is the Linux
-default; on 8 MB a Madaros self-compile boundary test dies with SIGSEGV (rc 139),
-on 16 MB the gen3 self-compile completes in CI, and #2966's "IR arena full" was an
-artefact of the 8 MB stack. A gen3 failure report therefore needs its
-`ulimit -s` beside its memory limit before the two are compared.
+**What CI has shown, and what it has not.** PR #3015 records that GitHub Actions
+starts jobs with a 16 MB soft stack limit, where the Linux default is 8 MB. On
+8 MB a Madaros capacity test with 8191 globals dies with SIGSEGV (rc 139); on
+16 MB it passes. That is a capacity result. It does **not** show the gen3
+self-compile completing, and an earlier version of this paragraph said that it
+did (corrected 2026-10-23, after review on #3018). The Madaros Gen2 Recovery Proof
+([run 39834416192](https://github.com/Sounio-lang/sounio/actions/runs/39834416192),
+job 120019580004, head `aeb5a0081`, 2026-10-22) raises the stack to 512 MiB for
+the build and runs the gen3 step with `stack=1572864` (1.5 GiB). It records:
+
+```text
+[rung gen2] gen1 compiles self-hosted/compiler/main.sio   rc=0 merged_ir_functions=14867
+[rung run]  gen2 identifies itself                        banner=madaros
+[rung gen3] gen2 compiles self-hosted/compiler/main.sio   rc=181
+MADAROS_FIXED_POINT_OK: reached rung 'run' as recorded; the next wall is 'gen3'
+```
+
+The job is green because `run` is the rung it is set to expect. The reason for
+rc 181 is in the run's artifact (`fixed-point/gen3.log`):
+
+```text
+madaros: arena full (allocation of 2080 bytes)
+  the generated program's runtime heap is one fixed ~2 GiB bump arena that is
+  never reclaimed: every aggregate value created or copied by value (struct
+  literal, by-value array/struct argument or return, ...) takes fresh arena
+  space for the life of the process.
+```
+
+So **gen3 is unproven**. With a 1.5 GiB stack it fails on the heap, not on the
+stack. #2966's "arena full" is therefore not explained by an 8 MB stack. The
+message names the same by-value convention as §2.2, seen this time in gen2's
+runtime arena instead of in the seed's BSS: each by-value copy of compiler state
+takes arena space that is never returned. That connects the two, but it is still
+a hypothesis; the direct test is the `&!Lowerer` rebuild described in §2.2. The
+workflow also carries a comment stating that a local run of the rungs peaked at
+63,570,060 KiB RSS, and it adds a 48 GiB swap file. That figure is recorded here,
+not measured. A gen3 failure report still needs its `ulimit -s` and its memory
+limit, because the stack decides the capacity tests.
 
 Triage for the gen7 fixed point (the self-compilation map `gen_{n+1} = F(gen_n)`):
 
@@ -188,6 +221,8 @@ Triage for the gen7 fixed point (the self-compilation map `gen_{n+1} = F(gen_n)`
 ## Claims Forbidden
 
 - Do not cite the 15 GB gen3 figure or gen2 = gen1 identity as measured here.
+- Do not say gen3 completes in CI, or that #2966 was a stack artefact: the CI
+  receipt is rc 181, `arena full`, with a 1.5 GiB stack (§3).
 - Do not say the 3.8 GB reservation causes the OOM; reservation is not residence
   (§1.2).
 - Do not attribute the unexplained 2.58 GB to §2.2 as a measured share.

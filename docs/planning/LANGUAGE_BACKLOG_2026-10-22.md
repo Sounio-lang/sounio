@@ -56,8 +56,8 @@ and **D-34**, the five decisions of the interval proposal.
 | item | state | owner |
 |---|---|---|
 | Madaros is not fixed-point verified; `make build` verifies lean_single | stated in `CLAUDE.md` | [ADR-006](../decisions/adr-006-fixed-point-trust-anchor.md) |
-| gen7 bit-identical self-compilation | target; gen2 = gen1 by founder report, gen3 dies by OOM | [memory audit](../audit/MADAROS_MEMORY_FOOTPRINT_2026-10-22/README.md) §3 (triage) |
-| gen3 self-build OOM at ~15 GB | founder report, not reproduced; PR #3015 shows gen3 completing in CI on a 16 MB stack and an 8 MB stack killing a boundary test, so the stack limit is part of the report | memory audit §3 |
+| gen7 bit-identical self-compilation | target; gen2 = gen1 by founder report; gen3 unproven (CI: rc 181, `arena full`; founder: OOM) | [memory audit](../audit/MADAROS_MEMORY_FOOTPRINT_2026-10-22/README.md) §3 (triage) |
+| gen3 self-build | **unproven**. CI's Gen2 Recovery Proof (run 39834416192) reaches gen2 `run`; gen2 compiling `main.sio` exits rc 181 with `arena full` in its never-reclaimed ~2 GiB runtime arena, on a 1.5 GiB stack. The ~15 GB OOM is a founder report, not reproduced. PR #3015's 8 MB vs 16 MB stack result is a capacity test, not a gen3 build | memory audit §3 |
 | `Lowerer` (~4.5 MB) passed by value in 618 methods of `ir/lower.sio` | PR #3015; refactor to `&!Lowerer` sized at weeks | memory audit §2.2 (likely carrier of the unexplained BSS) |
 | 3.8 GB static reservation; 1.23 GB explained by module arrays; seed gives every ≥1 MiB by-value aggregate a fresh block per site (reproduced) | measured | memory audit §2 |
 | committed Madaros touches 1.25 GB to compile one line; source-built 230 MB | measured | memory audit §1.2 |
