@@ -196,3 +196,26 @@ STATISTICS_SCIENTIFIC_VISUALIZATION_SPRINT.md.
   https://physics.nist.gov/cgi-bin/cuu/Value?ecomwl
 - Salmon output definitions for counts, effective lengths and TPM units:
   https://salmon.readthedocs.io/en/latest/file_formats.html
+
+## Continuation checkpoint — signed bars and artifact offload, 2026-10-20
+
+Main d7077ef1 is incorporated. Baseline Slurm15712 accepts111/111; final
+Slurm15718 accepts114/114 with zero failures/skips/errors after complete HTML
+recovery and a margin correction that preserves scientific minus signs.
+Both renderers share checked bar rectangles, actual x positions, a true zero
+baseline and whole-footprint clipping. Independent C++23 covers83 geometry/width
+cases; the actual native SVG passes8-bar and15-explicit-tick checks. Previous-SVG
+15713 and horizontal-intersection-removal15715 controls compile then fail their
+intended expectations. See [bar execution receipt](BARS_EXECUTION_2026_10_20.md).
+
+The authorized107-snapshot offload passed two-copy restoration and an A/B journal
+audit; complete encrypted custody is on GitHub, keys held separately. Including
+the earlier one-file step,1262940884 logical bytes left the hot quota. Quota stays
+3TiB. Availability returned to96468992bytes, but validation snapshots reduced it
+to4194304bytes: further reviewed retention is required for a massive ongoing
+batch. See [offload receipt](ARTIFACT_OFFLOAD_EXECUTION_2026_10_20.md).
+
+Statistics, mathematics, genomics and physics remain in scope. Conditioning and
+convergence, inferential calibration, count/variant consumers, physical units and
+invariants, and measured execution/memory/artifact work continue. This is a
+bounded acceptance checkpoint; broader compiler CI and merge remain separate.
