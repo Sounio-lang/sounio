@@ -70,3 +70,16 @@ claimed.
 CXX_TOOLCHAIN.txt and SLURM.txt normalize incidental trailing whitespace for
 versioned review; their recorded values are unchanged. Original tool output
 remains on scratch (the raw CXX transcript hash is in RAW_OUTPUTS.sha256).
+
+## Independent GitHub replay
+
+The fresh current-run witness compiler also passed Stdlib Deep Science job
+120613095330 in workflow40009549471 for source headde9751d565 and checkout
+mergefac05261d1177fa7d7b5385348e971852ebe4781. Its330 records all have status0.
+The rebuilt compiler has the same SHA256 as the protected Slurm compiler.
+GITHUB_REPLAY.tsv and GITHUB_REPLAY.txt retain the result and source/artifact
+identities. The downloaded artifact ZIP matched GitHub's SHA256 digest and is
+retained on scratch after the short GitHub retention window.
+This job success is distinct from overall CI: that candidate also exposed the
+legacy Stage2 renderer failures and function-type scanner false positives being
+corrected in subsequent commits. Those later sources need their own acceptance.

@@ -6,8 +6,14 @@ import path from "node:path";
 import assert from "node:assert/strict";
 const root=process.argv[2];
 if(!root)throw Error("usage: ci_decision_contract.mjs REPO [--selftest]");
+const nativeGuard="    if: ${{ !cancelled() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.full == 'true') && needs.source-bootstrap-selfhost-linux-x86_64.result == 'success' }}";
+const fullGuard="    if: ${{ !cancelled() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true') && needs.native-selfhost-linux-x86_64.result == 'success' }}";
 function check(workflow,decision,additive){
  const lines=workflow.split(/\r?\n/), start=lines.indexOf("  ci-decision:");
+ const mac=lines.indexOf("  native-selfhost-macos-arm64:");
+ assert(mac>=0 && lines.slice(mac+1,mac+8).includes(nativeGuard),"native Mac cannot cancel stale workflow");
+ const suite=lines.indexOf("  full-test-suite:");
+ assert(suite>=0 && lines.slice(suite+1,suite+8).includes(fullGuard),"full suite cannot cancel stale workflow");
  assert(start>=0,"missing ci-decision");
  let end=lines.findIndex((s,i)=>i>start&&/^  [A-Za-z0-9_-]+:/.test(s));
  if(end<0)end=lines.length;
@@ -48,6 +54,8 @@ const additive=fs.readFileSync(path.join(root,"scripts/ci/stdlib_deep_ci_decisio
 const result=check(workflow,decision,additive);
 if(process.argv[3]==="--selftest"){
  const controls=[
+  [workflow.replace(fullGuard,fullGuard.replace("!cancelled()","always()")),decision,additive],
+  [workflow.replace(nativeGuard,nativeGuard.replace("!cancelled()","always()")),decision,additive],
   [workflow.replace("      - stdlib-deep-science\n",""),decision,additive],
   [workflow.replace("run: bash scripts/ci/stdlib_deep_ci_decision.sh","run: true"),decision,additive],
   [workflow.replace("name: Require selected deep scientific replay\n        if: always()","name: Require selected deep scientific replay\n        if: success()"),decision,additive],
