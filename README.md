@@ -18,6 +18,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 
 **Scientific computing with explicit uncertainty, units and effects — powered by a self-hosted compiler.**
 
+> **Research language — pre-1.0**: Sounio is an active research platform. The compiler and standard library are under development. This is not production-ready software; expect breaking changes, incomplete surfaces, and documented limitations ([KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md)).
+
 Sounio is an epistemic systems language created by **Demetrios Chiuratto Agourakis**. Its scientific abstractions and compiler are developed together: measurements carry uncertainty, quantities carry dimensions, and computations declare effects. Explore the language, the compiler and a scientific library spanning eight research domains below.
 
 [Explore the science](#a-scientific-library-across-disciplines) · [Language reference](docs/spec/LANGUAGE_SPECIFICATION.md) · [Explore the compiler](#architecture) · [Start here](#get-started)
@@ -102,6 +104,10 @@ Source, distributed binaries, individual test lanes and remote CI are separate e
 GPU/Pireus execution has evidence on scoped Spark routes. The generic GPU CLI path and each other backend require their own status; support is recorded per engine, target and source revision.
 
 This status snapshot was reconciled against `main` at `06f927dbca57` on 22 October 2026. Follow the linked changes and current CI for subsequent source, target and execution evidence.
+
+## Compiler evolution note
+
+The 2026 preprint ([doi:10.22541/au.177067589.93635741/v1](https://doi.org/10.22541/au.177067589.93635741/v1)) describes a Rust-based compiler (v0.100.0) with Cranelift and LLVM backends. That compiler is now retired. The current compiler is **Madaros** (v0.80.0), self-hosted in Sounio, emitting native x86-64 ELF without LLVM. Cranelift and the v0.100.0 architecture are not part of the current codebase. Version numbering restarted at v0.1.0 for the self-hosted implementation; the preprint remains a historical design record, not a description of the current system.
 
 ## Research and design
 
