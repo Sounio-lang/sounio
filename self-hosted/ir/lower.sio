@@ -34386,7 +34386,47 @@ impl Lowerer {
         }
     }
 
+    // `a && b` and `a || b` short-circuit (ADR-014, closing EXEC-040): the
+    // right operand is evaluated only when the left one does not decide the
+    // result. lower_binary_expr_ref used to lower both operands before the
+    // binop, so `n.len > 5 && n.buf[0] == 95` read n.buf even when the length
+    // check failed. lean_single short-circuits, Madaros's own source relies on
+    // it, and gen2 trapped on exactly that guard in checker_name_is_destructure_temp
+    // (#2966).
+    //
+    //   res = lhs
+    //   && : if !lhs goto end      || : if lhs goto end
+    //   res = rhs
+    //   end:
+    fn lower_short_circuit_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_l = self.lower_opt_expr_ref(&e.left)
+        var lo = pair_l.0
+        let lhs = pair_l.1
+        lo.pending_variance_reg = -1
+        let pair_res = lo.fresh_reg()
+        lo = pair_res.0
+        let res = pair_res.1
+        lo = lo.emit(ir_copy(res, lhs))
+        let pair_end = lo.fresh_label()
+        lo = pair_end.0
+        let end_label = pair_end.1
+        if e.bin_op == BinaryOp::OpAnd {
+            lo = lo.emit(ir_branch_false(lhs, end_label))
+        } else {
+            lo = lo.emit(ir_branch_true(lhs, end_label))
+        }
+        let pair_r = lo.lower_opt_expr_ref(&e.right)
+        lo = pair_r.0
+        lo.pending_variance_reg = -1
+        lo = lo.emit(ir_copy(res, pair_r.1))
+        lo = lo.emit(ir_label(end_label))
+        (lo, res)
+    }
+
     fn lower_binary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if e.bin_op == BinaryOp::OpAnd || e.bin_op == BinaryOp::OpOr {
+            return self.lower_short_circuit_ref(e)
+        }
         // V0-E.4.1 fail-closed: never lower f128/f256 ops as f64 (lean_single greenwash).
         // V0-E.5.1: same-format f128 + / - on 2-limb locals desugars to stdlib softfloat.
         // V0-E.5.2: * and the six comparisons (bool result). V0-E.5.3: `/`. KL-8: `%`.
