@@ -6,6 +6,11 @@
 #   - JUnit/XML output format for CI integration
 #   - New annotations: @known-failure, @skip-if, @requires, @flaky
 #
+# A sibling <test>.sio.args supplies one literal program argument per line.
+# No shell expansion or evaluation; blank lines are empty arguments.
+# Relative paths are resolved from the repository root.
+# A sibling <test>.sio.timeout overrides the deadline with 1..3600 seconds.
+#
 # Annotations:
 #   //@ run-pass              — expect exit 0
 #   //@ compile-fail          — expect a compiler diagnostic, not a timeout or signal
@@ -599,6 +604,18 @@ run_test() {
         fi
     done < "$file"
     
+    # Keep byte-frozen historical sources intact while declaring their bounded
+    # execution budget. A malformed sidecar is a failure, never a skip.
+    if [[ -f "${file}.timeout" ]]; then
+        local configured_timeout
+        configured_timeout=$(cat "${file}.timeout")
+        if [[ ! "$configured_timeout" =~ ^[1-9][0-9]{0,3}$ ]] || (( configured_timeout > 3600 )); then
+            echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"invalid timeout sidecar (expected 1..3600 seconds)\",\"idx\":$idx}" > "$output_file"
+            return
+        fi
+        timeout_val="$configured_timeout"
+    fi
+
     # Execute test
     local output=""
     local exit_code=0
