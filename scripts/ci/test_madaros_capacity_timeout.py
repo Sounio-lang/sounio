@@ -39,8 +39,17 @@ class TimeoutTests(unittest.TestCase):
  def test_real_timeout_removes_partial_artifact(self):
   r,a,e=self.invoke('1',mode='sleep',real_timeout=True);self.assertEqual(r.returncode,124);self.assertFalse(e)
  def test_gate_budgets(self):
+  # Main compiles both capacity witnesses through the raw ELF inside
+  # compile_capacity_witness, bounded by a 900 s default deadline (the 300 s
+  # wrapper default timed out under CI load). Every witness compile must stay
+  # bounded: exactly one bounded call site per target, no unbounded ELF call.
   text=(ROOT/'scripts/ci/madaros_imported_capacity_gate.sh').read_text()
-  for target,budget in [('BOUNDARY_MAIN','600'),('OVERFLOW_MAIN','300')]:
-   lines=[line for line in text.splitlines() if 'bin/madaros" compile "$'+target+'"' in line]
-   self.assertEqual(len(lines),1);self.assertIn('MADAROS_NATIVE_COMPILE_TIMEOUT_SECONDS='+budget+' ',lines[0])
+  body=text.split('compile_capacity_witness() {',1)[1].split('\n}\n',1)[0]
+  self.assertEqual(body.count('exec timeout "${SOUNIO_MADAROS_IMPORTED_CAPACITY_TIMEOUT_SEC:-900}"'),1)
+  self.assertIn('"$MADAROS_ELF" "$src" -o "$out"',body)
+  self.assertEqual(text.count('"$MADAROS_ELF" "$src"'),1)
+  self.assertNotIn('bin/madaros" compile',text)
+  for target in ['BOUNDARY_MAIN','OVERFLOW_MAIN']:
+   calls=[l for l in text.splitlines() if 'compile_capacity_witness "$'+target+'"' in l]
+   self.assertEqual(len(calls),1,target)
 if __name__=='__main__':unittest.main()

@@ -634,7 +634,11 @@ run_test() {
                 test_output="check exited $exit_code"
             fi
         else
-            output=$(timeout "$timeout_val" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
+            local run_args=()
+            if [[ -f "${file}.args" ]]; then
+                mapfile -t run_args < "${file}.args"
+            fi
+            output=$(timeout "$timeout_val" "$SOUC_BIN" run "$file" "${run_args[@]}" 2>&1) || exit_code=$?
             raw_exit=$exit_code
             if [[ $exit_code -eq 124 ]]; then
                 test_output="run timed out after ${timeout_val}s"
