@@ -896,6 +896,112 @@ Everything else (QTT, regions, GUM) becomes one paragraph of *how certificates a
 
 ---
 
+## If You Want Novelty of *Work* (Not Paper)
+
+Paper novelty is referee theater. **Work novelty** means: a capability that exists in this repo as runnable evidence, that no other working systems language ships, that you can demo with a command and a failing alternative.
+
+### Definition (hostile, operational)
+
+A claim is novelty of work **iff all four hold**:
+
+1. **Shipped**: `./bin/souc …` or bootstrap script does it on `main` (or a branch that merges).
+2. **Fail-closed elsewhere**: Rust / Idris 2 / Koka / MLKit / RAML cannot do the same end-to-end without leaving their model (GC, no arenas, no epistemic types, no self-host memory cert).
+3. **Measured**: a gate or audit doc with numbers (bytes, gen hashes, exit codes) an operator can re-run.
+4. **Used on yourself**: Madaros or a real SciComp path (`Knowledge` / GUM / clinical) depends on it — not a toy example.
+
+If it only exists as RFC prose → **zero work novelty**.
+
+### What to build (order that maximizes real differentiation)
+
+Cut the RFC to a **vertical slice**. Do not implement “all five moonshots.” Ship one spine:
+
+```
+Stage 0 (already demanded by #2966/#3000)
+  kill hash field resolution — existence, not novelty
+
+Spine A — MEMORY AS CONTRACT (work novelty #1)
+  1. Per-phase arenas with declared Alloc≤B on Madaros phases
+  2. Bound check at compile of Madaros: overflow = E300, not exit 182
+  3. Emit memory certificate JSON/ELF note per Gen
+  4. Next Gen verifies previous cert before accepting binary
+  5. Fixed-point gate: cert + ELF hash stable across Gen n / n+1
+
+Spine B — EPISTEMIC THROUGH MEMORY (work novelty #2)
+  1. Provenance.region on Knowledge<T> (real stdlib, not sketch)
+  2. One GUM path that answers: variance from region R1 vs R2
+  3. Audit: clinical or PBPK example refuses mixing uncalibrated allocs
+```
+
+**Drop for now (engineering later, not novelty):** heterogeneous CPU/GPU/Remote, memory units as dimensions, full QTT surface, Lean completeness. Those are polish unless they unblock Spine A/B.
+
+### Work novelty #1: Self-certifying Madaros memory
+
+**What “done” looks like (commands, not slides):**
+
+```bash
+# Gen n builds Gen n+1 and writes cert
+./scripts/bootstrap/build_generation.sh n
+# Gen n+1 refuses Gen n if bounds broken
+./scripts/bootstrap/verify_certificate.sh $((n))
+# Fixed point: bit-identical compiler + identical cert
+./scripts/bootstrap/fixed_point_check.sh
+```
+
+**Why no other working system has this:** CompCert/CakeML verify *semantics*, not per-phase arena budgets of a bump-region self-host. RAML bounds *user* programs; nothing certifies *the compiler’s own* heap plan across bootstrap gens.
+
+**Kill criterion:** If Gen 2 still sizes arenas by “2 GiB because founder said so,” you do not have work novelty — you have ADR-010 with lipstick.
+
+### Work novelty #2: Region provenance in epistemic code
+
+**What “done” looks like:**
+
+```sio
+// real stdlib path — not RFC fiction
+let k = measure_temperature(sensor)   // provenance.region = Function/Parse/...
+let u = propagate_uncertainty(k, m)
+assert(u.provenance.regions_contain(Region::SensorIO))
+```
+
+Plus a compile-fail or runtime audit that catches “ODE numerical noise attributed to input uncertainty” when regions disagree.
+
+**Why it is work novelty for Sounio specifically:** No systems language couples bump/phase regions to GUM provenance. Info-flow and DB provenance are other domains; they do not sit in Madaros arenas.
+
+**Kill criterion:** If `Knowledge` provenance does not read `RegionId` from the live allocator/effect, it is a comment field — not novelty.
+
+### What is *not* work novelty even if you implement it
+
+| Ship this… | …and you still only matched |
+|------------|-----------------------------|
+| `@ 1` move / `@ ω` copy | Idris 2 / Rust / Linear Haskell |
+| `Alloc<R>` escape check | Koka `st<h>` / MLKit regions |
+| `≤ 16*n+128` inference alone | RAML / ARES (different packaging) |
+| `byte` as a unit | F# units with a new base |
+
+Implement those **as substrate for Spine A/B**, not as trophies.
+
+### Anti-pattern you are falling into
+
+The RFC lists nine “novelties.” That is how you get **zero** work novelty: effort spreads across renames of known PL, never reaches a vertical that only Sounio runs.
+
+Hostile rewrite of the founder ask:
+
+> Stop asking “is the design novel?”  
+> Ask “what command on this machine fails on Rust/Idris/Koka and succeeds here because of our memory+epistemic stack?”
+
+Until that command exists, novelty of work = **0**.
+
+### 90-day work plan (no paper)
+
+| Horizon | Ship | Evidence |
+|---------|------|----------|
+| Days 1–30 | Stage 0 + phase arenas + `Alloc≤B` on Parse/Codegen only | E300 on oversized module; audit of phase RSS |
+| Days 31–60 | Certificate emit + verify between two Madaros gens | `verify_certificate` green; broken bound fails closed |
+| Days 61–90 | `Knowledge` region provenance on one GUM path + fixed-point cert gate in CI | Gate script in `scripts/ci/`; clinical/GUM example |
+
+After 90 days: either Spine A works on real bootstrap, or the RFC was vapor. No third outcome.
+
+---
+
 ## Conclusion: Reframe as Synthesis, Not Novelty
 
 **Honest assessment:**  
