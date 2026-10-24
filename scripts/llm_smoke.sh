@@ -16,6 +16,7 @@ export SOUNIO_STDLIB_PATH="$root/stdlib"
 files="
 examples/tiny_train_demo.sio
 examples/tiny_gpt_demo.sio
+examples/llama_lora_demo.sio
 examples/llama_load_bench.sio
 examples/llm_serve.sio
 examples/llama_sample_demo.sio

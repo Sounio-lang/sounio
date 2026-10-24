@@ -1,0 +1,216 @@
+//@ run-pass
+//
+// Rank-1 LoRA on the frozen SmolLM2 head. The body is not written.
+// a is a small deterministic table, b starts at zero, so the first
+// loss is the frozen model's. A second call must print the same final
+// loss. Prompt ids are the canonical "The capital of France is".
+// Usage: llama_lora_demo [model-dir]
+
+use learn::adam_f64::{adam_new, adam_step}
+use llm::llama::{Llama, kv_free, kv_new, llama_forward_ln, llama_load}
+use math::pure::{exp, ln}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_free, ck_get, ck_set}
+
+fn embed_prefix(e: &CpuBuf) -> f64 with Panic {
+    var s = 0.0
+    var i: i64 = 0
+    while i < 4096 {
+        s = s + ck_get(e, i)
+        i = i + 1
+    }
+    s
+}
+
+fn zero_buf(b: &!CpuBuf) with Mut {
+    var i: i64 = 0
+    while i < b.len {
+        ck_set(b, i, 0.0)
+        i = i + 1
+    }
+}
+
+fn scale_buf(b: &!CpuBuf, s: f64) with Mut, Panic {
+    var i: i64 = 0
+    while i < b.len {
+        let v = ck_get(b, i)
+        ck_set(b, i, v * s)
+        i = i + 1
+    }
+}
+
+fn dot_n(x: &CpuBuf, y: &CpuBuf, n: i64) -> f64 with Panic {
+    var s = 0.0
+    var i: i64 = 0
+    while i < n {
+        s = s + ck_get(x, i) * ck_get(y, i)
+        i = i + 1
+    }
+    s
+}
+
+fn init_a(a: &!CpuBuf) with Mut {
+    var i: i64 = 0
+    while i < a.len {
+        let h = (i * 31 + 17) % 97
+        ck_set(a, i, ((h as f64) / 97.0 - 0.5) * 0.02)
+        i = i + 1
+    }
+}
+
+// ln from inside prompt_nll segfaulted (exit 139). The same call
+// in this small helper does not.
+fn ce_term(ztgt: f64, mx: f64, sum: f64) -> f64 with Mut, Div, Panic {
+    0.0 - (ztgt - mx - ln(sum))
+}
+
+fn tok_at(i: i64) -> f64 {
+    if i == 0 { return 0.0 }
+    if i == 1 { return 504.0 }
+    if i == 2 { return 3575.0 }
+    if i == 3 { return 282.0 }
+    if i == 4 { return 4649.0 }
+    314.0
+}
+
+fn prompt_nll(m: &Llama, a: &CpuBuf, b: &CpuBuf, ga: &!CpuBuf, gb: &!CpuBuf, with_grad: bool) -> f64 with Alloc, Mut, Div, Panic {
+    let hidden = m.cfg.hidden
+    let vocab = m.cfg.vocab
+    if with_grad {
+        zero_buf(ga)
+        zero_buf(gb)
+    }
+    var kv = kv_new(m, 16)
+    var ln = ck_alloc(hidden)
+    var corr = ck_alloc(vocab)
+    var acc = 0.0
+    var t: i64 = 0
+    while t < 5 {
+        var one = ck_alloc(1)
+        ck_set(&!one, 0, tok_at(t))
+        let logits = llama_forward_ln(m, &!kv, &one, 1, &!ln)
+        ck_free(&one)
+        let s = dot_n(a, &ln, hidden)
+        var mx = 0.0 - 1000000000.0
+        var j: i64 = 0
+        while j < vocab {
+            let z = ck_get(&logits, j) + ck_get(b, j) * s
+            ck_set(&!corr, j, z)
+            if z > mx { mx = z }
+            j = j + 1
+        }
+        let target = tok_at(t + 1) as i64
+        let ztgt = ck_get(&corr, target)
+        var sum = 0.0
+        j = 0
+        while j < vocab {
+            let e = exp(ck_get(&corr, j) - mx)
+            ck_set(&!corr, j, e)
+            sum = sum + e
+            j = j + 1
+        }
+        acc = acc + ce_term(ztgt, mx, sum)
+        if with_grad {
+            var gs = 0.0
+            j = 0
+            while j < vocab {
+                let p = ck_get(&corr, j) / sum
+                var gj = p
+                if j == target { gj = p - 1.0 }
+                let db = ck_get(gb, j)
+                ck_set(gb, j, db + gj * s)
+                let bj = ck_get(b, j)
+                gs = gs + bj * gj
+                j = j + 1
+            }
+            var i: i64 = 0
+            while i < hidden {
+                let dai = ck_get(ga, i)
+                let lni = ck_get(&ln, i)
+                ck_set(ga, i, dai + lni * gs)
+                i = i + 1
+            }
+        }
+        ck_free(&logits)
+        t = t + 1
+    }
+    kv_free(&!kv)
+    ck_free(&ln)
+    ck_free(&corr)
+    if with_grad {
+        scale_buf(ga, 0.2)
+        scale_buf(gb, 0.2)
+    }
+    acc / 5.0
+}
+
+fn run_once(m: &Llama) -> [f64; 3] with Alloc, Mut, Div, Panic, IO {
+    let hidden = m.cfg.hidden
+    let vocab = m.cfg.vocab
+    var a = ck_alloc(hidden)
+    init_a(&!a)
+    var b = ck_alloc(vocab)
+    zero_buf(&!b)
+    var ga = ck_alloc(hidden)
+    var gb = ck_alloc(vocab)
+    var sa = adam_new(hidden)
+    var sb = adam_new(vocab)
+    zero_buf(&!sa.m)
+    zero_buf(&!sa.v)
+    zero_buf(&!sb.m)
+    zero_buf(&!sb.v)
+    let before = prompt_nll(m, &a, &b, &!ga, &!gb, false)
+    var step: i64 = 0
+    while step < 2 {
+        let cur = prompt_nll(m, &a, &b, &!ga, &!gb, true)
+        adam_step(&!a, &ga, &!sa, 0.2, 0.9, 0.999, 0.00000001)
+        adam_step(&!b, &gb, &!sb, 0.2, 0.9, 0.999, 0.00000001)
+        print("step ")
+        print_int(step)
+        print(" nll(x1e6)=")
+        print_int((cur * 1000000.0) as i64)
+        print("\n")
+        step = step + 1
+    }
+    let after = prompt_nll(m, &a, &b, &!ga, &!gb, false)
+    var r: [f64; 3] = [0.0, 0.0, 0.0]
+    r[0] = before
+    r[1] = after
+    r[2] = embed_prefix(&m.embed)
+    r
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var dir = "/workspace/llm-models/SmolLM2-135M"
+    if arg_count() > 0 { dir = get_arg(0) }
+    let m = llama_load(dir)
+    print("loaded=")
+    print_int(if m.loaded { 1 } else { 0 })
+    print("\n")
+    if !m.loaded { print("LORA FAIL\n"); exit(1) }
+    let emb0 = embed_prefix(&m.embed)
+    let a = run_once(&m)
+    let b = run_once(&m)
+    let emb1 = embed_prefix(&m.embed)
+    let ia = (a[1] * 1000000.0) as i64
+    let ib = (b[1] * 1000000.0) as i64
+    print("nll_before(x1e6)=")
+    print_int((a[0] * 1000000.0) as i64)
+    print("\n")
+    print("nll_after(x1e6)=")
+    print_int(ia)
+    print("\n")
+    print("nll_after_again(x1e6)=")
+    print_int(ib)
+    print("\n")
+    print("embed_prefix(x1e3)=")
+    print_int((emb0 * 1000.0) as i64)
+    print(" after=")
+    print_int((emb1 * 1000.0) as i64)
+    print("\n")
+    var ok = true
+    if a[1] >= a[0] { ok = false; print("FAIL loss did not fall\n") }
+    if ia != ib { ok = false; print("FAIL seed mismatch\n") }
+    if emb0 != emb1 { ok = false; print("FAIL embed changed\n") }
+    if a[2] != emb0 { ok = false; print("FAIL embed mid-run\n") }
+    if ok { print("LORA PASS\n") } else { print("LORA FAIL\n") }
+}

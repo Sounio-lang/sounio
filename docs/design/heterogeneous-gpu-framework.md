@@ -732,3 +732,26 @@ OBSERVED on the workspace, two calls in one process, 125 s wall:
 
 The smoke script type-checks this file and does not run it: the
 two-call process is over a minute.
+
+## 25. LoRA on the frozen head
+
+`llama_forward_ln` writes the final RMSNorm vector into a caller
+buffer and returns the frozen head's logits. `llama_forward` and
+`llama_forward_rt` are unchanged.
+
+`examples/llama_lora_demo.sio` puts a rank-1 adapter on that vector:
+`z[j] + b[j] * dot(a, ln)`. `a` (length 576) is a deterministic
+table; `b` (length 49152) starts at zero, so the first loss is the
+frozen SmolLM2. The body is not written. Two Adam steps. Calling `ln`
+directly from the long loss function segfaulted; the same call in a
+small helper does not.
+
+OBSERVED, workspace, canonical prompt, five next-token terms:
+
+- nll_before 4.057791.
+- nll_after 2.794695, and the second call 2.794695.
+- Embedding prefix sum unchanged (−3.099 at ×1e3).
+- `LORA PASS`.
+
+A third step raised the loss (6.92). The run stops at two. The smoke
+script type-checks the file and does not run it.
