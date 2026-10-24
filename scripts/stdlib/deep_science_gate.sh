@@ -60,6 +60,9 @@ for name in stats_inference_forest viz_bootstrap_forest viz_count_matrix_qc \
     viz_permutation_mc viz_axis_first_tick_guard; do
     native "tests/run-pass/$name.sio" "$name"
 done
+for name in viz_dynamic_count_workflow viz_dynamic_ode_diagnostics; do
+    native "examples/$name.sio" "$name"
+done
 compare() {
     local stem=$1 fixture=$2 rc=0
     if [[ ! -f "$out/$fixture.stdout" ]]; then record concordance "$stem:missing-$fixture" 1; return; fi
@@ -144,15 +147,29 @@ for src in tests/reference/deep_*.cpp; do
         record mutant-rejection "$stem:nested-prefix:expected=2:actual=$rc" "$rejected" ;;
       deep_stats_dynamic_robust_reference) compare "$stem" stdlib_deep_stats_dynamic_robust ;;
       deep_stats_dynamic_robust_contrast_reference) compare "$stem" stdlib_deep_stats_dynamic_robust_contrast ;;
+      deep_count_dataset_reference)
+        compare "$stem" stdlib_deep_count_dataset_reference
+        compare_mode "$stem" --workflow viz_dynamic_count_workflow ;;
       deep_viz_scientific_document)
         compare "$stem" stdlib_deep_viz_scientific_document
         compare_mode "$stem" --count stdlib_deep_viz_count_diagnostics ;;
+      deep_ode_diagnostic_observer_reference)
+        compare "$stem" stdlib_deep_ode_diagnostic_observer
+        compare_mode "$stem" --figure viz_dynamic_ode_diagnostics ;;
       deep_stats_dispersion_profile_reference) compare "$stem" stdlib_deep_stats_dispersion_profile ;;
       deep_summaries_reference) compare "$stem" stdlib_deep_summaries ;;
       deep_qr_factor_reference) compare "$stem" stdlib_deep_qr_factor ;;
       deep_viz_forest) compare "$stem" stdlib_deep_viz_forest ;;
       deep_viz_axis_layout) compare "$stem" stdlib_deep_viz_axis_layout ;;
       deep_viz_fitted_axis) compare "$stem" stdlib_deep_viz_fitted_axis ;;
+      deep_viz_overlay_reference)
+        rc=0
+        timeout 180 "$out/$stem" --negative-selftest "$out/stdlib_deep_viz_overlay.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc" ;;
+      deep_viz_line_stream_reference)
+        rc=0
+        timeout 180 "$out/$stem" "$out/stdlib_deep_viz_line_stream.stdout" "$out/stdlib_deep_viz_reduce_runs.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc" ;;
       deep_viz_line_reduce) compare "$stem" stdlib_deep_viz_line_reduce_million ;;
       deep_viz_dynamic_plot) compare "$stem" stdlib_deep_viz_dynamic_plot ;;
       deep_viz_dynamic_fields) compare "$stem" stdlib_deep_viz_dynamic_fields ;;
@@ -178,6 +195,7 @@ for src in tests/reference/deep_*.cpp; do
       *) record unregistered-oracle "$stem" 1 ;;
     esac
 done
+
 # Canonical bitmap data and actual native raster orientation, including clipping.
 native tests/run-pass/display_font_orientation.sio display_font_orientation
 rc=0

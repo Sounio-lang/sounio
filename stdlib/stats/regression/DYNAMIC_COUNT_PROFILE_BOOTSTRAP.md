@@ -181,3 +181,87 @@ parameters, B2, seed7, tolerances, RNG/hits, both last-refit alphas and16 last
 counts. Fixed-alpha and incomplete-output controls were rejected. This validates
 the complete selected two-replicate path; it is not B199 qualification or an
 end-to-end performance comparison.
+## Prepared bounded qualification protocol
+
+`tests/reference/count_profile_calibration.cpp` emits independent C++-sampled
+observations and a generated Sounio driver that invokes this real kernel; it
+never replaces production fitting with C++ fits. Its driver owner/call shape is
+extracted from the frozen native fixture, which is included in campaign hashes.
+The observed null is a balanced two-group equal-mean model (mean8), for n16/64/256
+and alpha0/.25/1. Generation and bootstrap seed schedules are explicit per dataset.
+
+`scripts/stdlib/count_profile_calibration.sh` is a Slurm-only orchestrator,
+requires an explicit passing functional-gate receipt and attested compiler,
+and never submits itself. Qualification uses B199, batches16, at most128 datasets
+per cell and at most24h cumulative wall budget. A separate pilot namespace uses
+B31, n16/alpha.25 and16 datasets; it is not the B199 qualification result. Input
+source/compiler/gate hashes must remain identical on resume. A hard kill reserves
+the remaining wall budget conservatively, requiring review before further work.
+Incomplete batches remain intact and block resume rather than disappearing.
+
+Available p values, unavailable statuses and failing-replica metadata are kept.
+Summaries report rejection among available datasets, availability, a conditional
+Monte Carlo SE and approximate Wilson95 binomial interval; they also report the
+extreme overall rejection range if all unavailable datasets were nonrejections
+or rejections. Conditioning on solver/sampler availability can bias rejection
+fractions. Pseudorandom draws and these finite simulated cells do not certify
+universal validity, independent observations or scientific model adequacy.
+Preparation of this protocol is not evidence it was executed.
+
+The qualification gate receipt is exactly seven nonempty `key=value` lines,
+with unique keys and no executable shell content:
+
+```
+format=stdlib-advanced-functional-v1
+status=0
+compiler_sha256=<SHA256 of the selected current-source ELF>
+canonical_inputs_sha256=<SHA256 of the canonical input manifest>
+canonical_inputs_path=<readable canonical manifest path>
+results_sha256=<SHA256 of the functional RESULTS.tsv>
+results_path=<readable functional RESULTS.tsv path>
+```
+
+The canonical manifest is produced from the frozen source root by
+`find -L bin scripts self-hosted stdlib tests examples -type f -print0 | sort -z | xargs -0 sha256sum`.
+Following bin symlinks binds their actual payloads. No `.git` directory is needed.
+The orchestrator requires byte identity with its recomputed manifest and binds
+both the selected compiler and RESULTS hashes. It checks the result schema,
+all recorded exit statuses, required native/marker and independent-concordance
+rows, and the fixed-alpha mutant rejection. A readable arbitrary file is not
+sufficient. This is a consistency gate under a coordinator-controlled receipt,
+not a cryptographic signature or independent attestation of execution.
+
+Qualification visits one batch in each of the nine cells before starting the
+next round, so an exhausted time budget does not intentionally fill only the
+smallest n. `COUNT_PROFILE_WALL_BUDGET_SECONDS` accepts1..86400. The coordinating
+Slurm allocation caps the combined pilot and qualification at24h and supplies
+the remaining budget; the script alone is not a global scheduler certificate.
+
+### Process isolation within qualification batches
+
+The calibration generator still emits one ELF per batch with the same4K count
+array and unchanged dataset/seed/B schedules. At execution it selects exactly
+one local case through `COUNT_PROFILE_CALIBRATION_CASE=0..15`. A Linux-only
+bounded `/proc/self/environ` scan accepts a unique canonical decimal value and
+rejects missing, duplicate, malformed or out-of-range selections. The driver
+never logs other environment values. It emits one `CASE COMPLETE` marker.
+
+The orchestrator runs that ELF in sixteen separate processes and retains each
+case's stdout, stderr, exit status, GNUtime resource receipt and shared-ELF hash
+verification. It concatenates outputs in case order and emits exactly one final
+`BATCH COMPLETE` only after every process and required marker succeeds. A
+numerically unavailable bootstrap is retained as its status/p placeholder, not
+discarded; a crashed process or incomplete record leaves the batch partial and
+blocks aggregate publication. No partial batch is silently normalized into a
+smaller sample of successful datasets.
+
+The summary interface is now `--summarize B batch_size first_expected stdout...`.
+It verifies exact expected indices for each input batch, bounded B/hits/status
+and failure metadata, individual case completion markers and a single final
+batch marker. Missing, reordered, duplicated or incomplete datasets are errors.
+This process boundary resets process-lifetime managed temporaries between
+observations. It does not establish bounded RSS within one B-replicate bootstrap
+and does not replace the separate kernel hot-allocation fixes or measurements.
+
+The bounded cell-to-base-seed map is evaluated by the C++ `--seeds cell_index`
+mode; Bash retains only operational batch/index and wall-budget bookkeeping.

@@ -50,13 +50,19 @@ These are point-fit diagnostics. No CI, goodness-of-fit test, overdispersion
 assessment or finite-sample calibration follows from the figure. Reducing a
 diagnostic for display would not authorize reducing input used for inference.
 
-The prepared native integration fits1028 raw rows with two independent indicator
+The native integration fits1028 raw rows with two independent indicator
 columns, zero offsets, fixed alpha.25 and raw counts repeating0,2,4,6. It consumes
 the actual fitted means in BOTH backends. An independent C++23 reference uses
 the closed-form group means2 and4 and direct NB2 deviance arithmetic; geometry
 uncertainty is propagated from an explicit2e-8 relative-plus-absolute numeric
 fixture budget before integer truncation (no blanket pixel tolerance).
 Global late-error zero-output/unchanged-Canvas witnesses are included.
-All numerical execution and actual-output concordance remain pending root's
-fresh-compiler Slurm gate. No runtime, inference or performance result is claimed
-from unexecuted fixtures.
+Focused Slurm16417 passed native execution and independent actual-output
+concordance for this integration. Slurm16422 exported its actual Canvas pixels
+to PNG after validating every RLE span; a missing-run copy was rejected. The
+actual corrected-font PNG was inspected for readable labels, signed ticks and
+references. This establishes the bounded integration result, not inference,
+full-corpus acceptance or comparative performance. The [focused evidence
+bundle](../../docs/evidence/stdlib-inference-document-2026-10-23/README.md)
+preserves actual SVG/PNG, exact source/compiler identities and the scope of
+single-program resource observations.
