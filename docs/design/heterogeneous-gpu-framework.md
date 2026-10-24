@@ -694,3 +694,23 @@ decode projections take the resident GEMV. Without PTX paths,
 `POST /v1/completions` with `max_tokens` 4 returned
 ` Paris. It is`. The request, prefill included, took 8.748 s.
 The per-token decode figure remains the one in §21.
+
+## 23. Small training
+
+`stdlib/learn/adam_f64.sio` is Adam over a flat f64 buffer. The
+16-wide surgical Adam stays the kernel-preserving variant.
+`batch_shares` gives integer batch sizes proportional to measured
+throughput, largest remainder, summing to the total. That is the
+batch side of heterogeneous data parallel; it does not move
+gradients between nodes.
+
+`examples/tiny_train_demo.sio` on the workspace, OBSERVED, one run:
+
+- Linear map, squared error, 40 Adam steps from zero: loss 0.002304,
+  and the second run prints the same value.
+- Rank-1 LoRA on a frozen zero matrix: loss 1.020100 → 0.010557.
+- Bigram table, vocab 4, cross-entropy, 30 passes from zero:
+  1.386294 → 0.004871. The first number is ln 4, the uniform start.
+- Throughputs 2 and 1, total batch 9: shares 6 and 3.
+
+`TRAIN PASS`.
