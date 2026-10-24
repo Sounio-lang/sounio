@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.docs.audit.epistemic-merge-2026-10-24
+topic_id: repo.docs.audit.epistemic-merge-2026-10-24.readme
 authority: repo_only
 audience: users
 last_validated: 2026-10-24
 validated_by: peelle.cpp
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.epistemic-merge-2026-10-24
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.epistemic-merge-2026-10-24.readme
 -->
 
 # Peelle's Pertinent Puzzle — witness for ADR-016 decision 8
