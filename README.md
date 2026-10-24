@@ -113,6 +113,28 @@ The 2026 preprint ([doi:10.22541/au.177067589.93635741/v1](https://doi.org/10.22
 
 The scientific programme connects uncertainty, order and non-associative structure with executable models. Explore [the founder’s intent](FOUNDER_INTENT.md), [the language tour](TOUR.md), [research notes](docs/research/) and [the octonion associator example](examples/octonion_168_associators.sio). Formal proof, numerical verification and empirical validation remain distinct forms of evidence.
 
+## Notion MCP in Warp
+
+Warp agents can read this workspace's Notion pages through Notion's hosted MCP server. The config is per user, not part of the compiler, and it survives a new terminal because it lives outside the repo.
+
+1. Write `~/.warp/.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "notion": {
+      "url": "https://mcp.notion.com/mcp"
+    }
+  }
+}
+```
+
+2. Warp detects that file without a restart. The server shows under **Settings → Agents → MCP servers**, labeled detected from Warp.
+3. The first start opens a browser sign-in. After that, credentials stay on the machine and are reused.
+4. Confirm persistence from a new shell: the same file is still there, and a Notion search still returns workspace pages. `oz mcp list` stays empty; that command lists account-shared servers, not this file.
+
+Checked on 24 October 2026: Warp connected to Notion MCP 1.2.0 over Streamable HTTP. A new shell still read `~/.warp/.mcp.json`, and a second search for `Sounio` still returned workspace pages.
+
 ## Develop with Sounio
 
 Start with a reproducible issue, a focused example or a documented compiler limit. See [CONTRIBUTING.md](https://github.com/Sounio-lang/sounio/blob/main/CONTRIBUTING.md) for contribution guidance.
