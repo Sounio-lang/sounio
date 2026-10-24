@@ -18,6 +18,10 @@ TEST_DIRS = [
     ("run-pass", ROOT / "tests" / "run-pass"),
     ("compile-fail", ROOT / "tests" / "compile-fail"),
 ]
+# The full suite's external known-failure manifest. A test listed here does
+# not currently pass even without a `//@ known-failure` annotation in its
+# source; see scripts/dev/run_sio_test_suite_v2.sh (KNOWN_FAILURES_FILE).
+KNOWN_FAILURES_MANIFEST = ROOT / "tests" / "known_failures" / "hardened_diagnostics_full_suite.txt"
 
 
 @dataclass
@@ -66,15 +70,28 @@ def clean_comment(line: str) -> str:
 
 def parse_annotations(lines: list[str]) -> dict[str, list[str]]:
     annotations: dict[str, list[str]] = {}
+    last_key: str | None = None
     for line in lines:
         if not line.startswith("//@"):
+            last_key = None
+            continue
+        # `//@   text` (two or more spaces) continues the previous annotation's
+        # value; folding it keeps multi-line reasons whole instead of turning
+        # each wrapped fragment into a bogus key.
+        if line.startswith("//@  ") and last_key is not None:
+            text = line[3:].strip()
+            if text:
+                values = annotations[last_key]
+                values[-1] = f"{values[-1]} {text}"
             continue
         raw = line[3:].strip()
         if ":" in raw:
             key, value = raw.split(":", 1)
-            annotations.setdefault(key.strip(), []).append(value.strip())
+            last_key = key.strip()
+            annotations.setdefault(last_key, []).append(value.strip())
         else:
-            annotations.setdefault(raw.strip(), []).append("true")
+            last_key = raw.strip()
+            annotations.setdefault(last_key, []).append("true")
     return annotations
 
 
@@ -109,12 +126,31 @@ def build_summary(stem: str, annotations: dict[str, list[str]], comments: list[s
     return stem.replace("_", " ")
 
 
+def load_known_failure_manifest(path: Path = KNOWN_FAILURES_MANIFEST) -> dict[str, str]:
+    """Map repo-relative test path -> pinned failure pattern ("" if none).
+
+    Parsed as run_sio_test_suite_v2.sh parses it: `#` starts a comment, blank
+    lines are skipped, and an entry is `path` or `path|pattern`.
+    """
+    pinned: dict[str, str] = {}
+    if not path.is_file():
+        return pinned
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        test_path, _, pattern = line.partition("|")
+        pinned[test_path.strip()] = pattern.strip()
+    return pinned
+
+
 def build_instruction(
     suite: str,
     stem: str,
     summary: str,
     annotations: dict[str, list[str]],
     ignore: bool,
+    manifest_pattern: str | None = None,
 ) -> str:
     parts = [f"Write a Sounio {suite} example named `{stem}`."]
     if summary:
@@ -122,15 +158,48 @@ def build_instruction(
         if not summary.endswith("."):
             summary += "."
         parts.append(summary)
+    known_failure = annotations.get("known-failure")
+    if not known_failure and manifest_pattern is not None:
+        # Pinned only in the external manifest: the same contract as a source
+        # annotation (no success claim), with the manifest as the recorded reason.
+        reason = f"pinned in {KNOWN_FAILURES_MANIFEST.relative_to(ROOT)}"
+        if manifest_pattern:
+            reason += f", expected failure output: {manifest_pattern}"
+        known_failure = [reason]
+    # Copilot review (PR #2515), comment 4113458020: `//@ check-only` fixtures
+    # live under tests/run-pass (suite == "run-pass" here) but are verified
+    # with `--check` and never executed -- some, like the bogus-qualifier
+    # fixtures this review round added, deliberately contain a call that
+    # crashes if it ever ran. Describe them as type-check-only instead of
+    # falling into the ordinary run-pass "compile and run successfully"
+    # claim, which every //@ check-only fixture would otherwise get wrong.
+    check_only = annotations.get("check-only")
     if suite == "run-pass":
-        parts.append("It should compile and run successfully.")
-        if annotations.get("expect-stdout"):
-            parts.append(f"Expected stdout: {annotations['expect-stdout'][0]}")
+        if check_only:
+            parts.append("It is verified with type-checking only (--check); it is not expected to be executed.")
+            if annotations.get("expect-stdout-contains"):
+                patterns = "; ".join(annotations["expect-stdout-contains"])
+                parts.append(f"The check output should include: {patterns}.")
+        # A known-failure run-pass fixture does not currently pass -- some do
+        # not even compile -- so a success claim or a stdout expectation would
+        # describe a completion the source cannot produce.
+        elif not known_failure:
+            parts.append("It should compile and run successfully.")
+            if annotations.get("expect-stdout"):
+                parts.append(f"Expected stdout: {annotations['expect-stdout'][0]}")
     else:
         parts.append("It should fail to compile.")
         if annotations.get("error-pattern"):
             patterns = "; ".join(annotations["error-pattern"])
             parts.append(f"The compiler output should include: {patterns}.")
+    if known_failure:
+        note = "This is a documented known failure in the upstream test suite: it does not currently pass."
+        reason = known_failure[0].strip()
+        if reason and reason != "true":
+            if not reason.endswith("."):
+                reason += "."
+            note += f" Recorded reason: {reason}"
+        parts.append(note)
     if ignore:
         parts.append("This example is currently marked ignored in the upstream test suite.")
     return " ".join(parts).strip()
@@ -138,6 +207,7 @@ def build_instruction(
 
 def load_examples() -> list[Example]:
     examples: list[Example] = []
+    manifest = load_known_failure_manifest()
     for suite, directory in TEST_DIRS:
         for path in sorted(directory.glob("*.sio")):
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -146,7 +216,10 @@ def load_examples() -> list[Example]:
             comments = leading_comments(lines)
             ignore = "ignore" in annotations
             summary = build_summary(path.stem, annotations, comments)
-            instruction = build_instruction(suite, path.stem, summary, annotations, ignore)
+            rel_path = str(path.relative_to(ROOT))
+            instruction = build_instruction(
+                suite, path.stem, summary, annotations, ignore, manifest.get(rel_path)
+            )
             examples.append(
                 Example(
                     source_path=str(path.relative_to(ROOT)),
@@ -233,7 +306,7 @@ Instruction/completion dataset for **Sounio**, a self-hosted systems + scientifi
 
 Each record contains:
 
-- `instruction`: natural-language prompt derived from test annotations, descriptions, and file names
+- `instruction`: natural-language prompt derived from test annotations, descriptions, and file names; fixtures annotated `//@ known-failure`, and fixtures listed only in the full suite's known-failure manifest (`tests/known_failures/hardened_diagnostics_full_suite.txt`, with its pinned failure pattern as the reason), are described as documented known failures with their recorded reason, and run-pass ones carry no success claim or expected stdout
 - `completion`: the full `.sio` source file
 - `suite`: `run-pass` or `compile-fail`
 - `source_path`: original repository path

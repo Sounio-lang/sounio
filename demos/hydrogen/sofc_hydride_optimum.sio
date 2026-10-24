@@ -1,0 +1,216 @@
+// demos/hydrogen/sofc_hydride_optimum.sio
+//
+// The seven-stage hydride compressor of Gkanas et al. 2020, closed onto a
+// solid-oxide fuel cell. Their Table 4 is a delivery pressure. Their Table 6
+// is the heat that pressure cost. Neither table says which case returns the
+// most electricity per joule of heat. This file does.
+//
+// THE REACTIONS, named, and checked by the compiler.
+//
+//   anode    H2  -> 2 H+ + 2 e-          dihydrogen,  ChEBI:18276
+//   cathode  1/2 O2 + 2 H+ + 2 e- -> H2O  dioxygen,   ChEBI:15379
+//                                       water,       ChEBI:15377
+//
+// H2, O2 and H2O are disjoint. An amount of hydrogen cannot be added to an
+// amount of oxygen, and oxygen cannot be passed where hydrogen is required.
+// The stoichiometry below is a function of those types: one mole of H2 and
+// half a mole of O2 make one mole of water, and the lesser reactant limits.
+//
+// THE CELL. Steam, not liquid water.
+//   dH = -241826 J/mol, dS = -44.421 J/mol/K
+//   for H2 + 1/2 O2 -> H2O(g), from the standard entropies
+//   (188.835 - 130.680 - 0.5*205.152).
+//   E = -dG/(2 F) - (R T / 2 F) ln( p_H2O / (p_H2 * sqrt(p_O2)) )
+//   with partial pressures in bar. T_cell is 800 C, fixed: the cell is not
+//   the compressor. p_O2 = 0.21 bar (air). p_H2O = 0.15 bar, declared.
+//
+// THE SUPPLY. p_H2 is the desorption plateau of stage 7 at T_hot, from the
+// paper's own Table 3 (dH 18916 J/mol, dS 106.2 J/mol/K). That is the
+// ceiling, not the COMSOL delivery. Both are scored. The heat and the cycle
+// time are Table 6 and Table 4, transcribed, not fitted.
+
+unit mol;
+unit volt;
+unit coulomb;
+unit joule = volt * coulomb;
+
+ontology Fuel {
+    class Substance { property amount: f64 where amount >= 0.0 }
+    class H2 subclass_of Substance
+    class O2 subclass_of Substance
+    class H2O subclass_of Substance
+    disjoint H2, O2
+    disjoint H2, H2O
+    disjoint O2, H2O
+}
+
+var R_GAS: f64 = 8.314462618
+var FARADAY: f64 = 96485.3321
+var DH_WATER: f64 = 0.0 - 241826.0
+var DS_WATER: f64 = 0.0 - 44.421
+var T_CELL: f64 = 1073.15
+var P_O2: f64 = 0.21
+var P_H2O: f64 = 0.15
+var H2_KG: f64 = 0.425
+var M_H2: f64 = 0.00201588
+
+// ChEBI identifiers of the three species in the cell reaction. Printed, and
+// checked against the numbers the ontology actually uses.
+var CHEBI_H2: i64 = 18276
+var CHEBI_O2: i64 = 15379
+var CHEBI_H2O: i64 = 15377
+
+fn sqrt_newton(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i: i64 = 0
+    while i < 50 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    g
+}
+
+// One mole of water per mole of hydrogen, and two moles of water per mole of
+// oxygen. The result carries the water type. Passing the wrong species here
+// does not compile.
+fn water_from(h2: H2, o2: O2) -> H2O with Mut, Div, Panic {
+    let from_h: f64 = h2
+    let from_o: f64 = o2 * 2.0
+    let w: f64 = if from_h < from_o { from_h } else { from_o }
+    let out: H2O = w
+    out
+}
+
+fn p_des_s7(t_k: f64) -> f64 with Mut, Div, Panic {
+    exp(106.2 / R_GAS - 18916.0 / (R_GAS * t_k))
+}
+
+fn e0_steam(t_k: f64) -> f64 with Mut, Div, Panic {
+    let dg = DH_WATER - t_k * DS_WATER
+    (0.0 - dg) / (2.0 * FARADAY)
+}
+
+fn ln_pos(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 80.0 }
+    var v = x
+    var e: i64 = 0
+    while v >= 1.5 { v = v / 2.0  e = e + 1 }
+    while v < 1.0 { v = v * 2.0  e = e - 1 }
+    let z = v - 1.0
+    var sum = 0.0
+    var term = z
+    var n: i64 = 1
+    while n <= 30 {
+        let odd = n - (n / 2) * 2
+        if odd == 1 { sum = sum + term / (n as f64) } else { sum = sum - term / (n as f64) }
+        term = term * z
+        n = n + 1
+    }
+    sum + (e as f64) * 0.6931471805599453
+}
+
+fn nernst(t_k: f64, p_h2: f64) -> volt with Mut, Div, Panic {
+    let q = P_H2O / (p_h2 * sqrt_newton(P_O2))
+    let corr = (R_GAS * t_k) / (2.0 * FARADAY) * ln_pos(q)
+    let e: volt = e0_steam(t_k) - corr
+    e
+}
+
+fn print_fix2(x: f64) with IO, Mut, Div, Panic {
+    var v = x
+    var neg = false
+    if v < 0.0 { neg = true  v = 0.0 - v }
+    let scaled = v * 100.0
+    var n = scaled as i64
+    let frac = scaled - (n as f64)
+    if frac >= 0.5 { n = n + 1 }
+    let whole = n / 100
+    let cent = n - whole * 100
+    if neg { print("-") }
+    print(whole) print(".")
+    if cent < 10 { print("0") }
+    print(cent)
+}
+
+fn print_fix4(x: f64) with IO, Mut, Div, Panic {
+    var v = x
+    var neg = false
+    if v < 0.0 { neg = true  v = 0.0 - v }
+    let scaled = v * 10000.0
+    var n = scaled as i64
+    let frac = scaled - (n as f64)
+    if frac >= 0.5 { n = n + 1 }
+    let whole = n / 10000
+    let frac4 = n - whole * 10000
+    if neg { print("-") }
+    print(whole) print(".")
+    if frac4 < 1000 { print("0") }
+    if frac4 < 100 { print("0") }
+    if frac4 < 10 { print("0") }
+    print(frac4)
+}
+
+fn score(label: string, t_c: f64, p_h2: f64, heat_mj: f64, t_cycle: f64, h2: H2, o2: O2) with IO, Mut, Div, Panic {
+    let water = water_from(h2, o2)
+    let n_water: f64 = water
+    let e = nernst(T_CELL, p_h2)
+    let e_num: f64 = e
+    let joules = n_water * 2.0 * FARADAY * e_num
+    let elec_mj = joules / 1.0e6
+    let per_heat = elec_mj / heat_mj
+    let power_w = joules / t_cycle
+    print("  ") print(label)
+    print("  p_H2=") print_fix2(p_h2)
+    print(" bar  E=") print_fix4(e_num)
+    print(" V  elec=") print_fix2(elec_mj)
+    print(" MJ  elec/heat=") print_fix4(per_heat)
+    print("  power=") print_fix2(power_w)
+    println(" W")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("SOFC FED BY THE SEVEN-STAGE COMPRESSOR")
+    println("anode H2 (ChEBI 18276) -> 2 e-")
+    println("cathode 1/2 O2 (ChEBI 15379) + 2 e- -> H2O (ChEBI 15377)")
+    print("ids in this file: H2=") print(CHEBI_H2)
+    print(" O2=") print(CHEBI_O2)
+    print(" H2O=") print(CHEBI_H2O)
+    println("")
+    println("cell 800 C, air, p_H2O = 0.15 bar. Heat and cycle time from the paper.")
+    println("ceiling = S7 desorption plateau, Table 3. COMSOL = Table 4.")
+    println("")
+
+    let n_h2_mol = H2_KG / M_H2
+    let h2: H2 = n_h2_mol
+    let o2: O2 = n_h2_mol
+    let water = water_from(h2, o2)
+    let n_w: f64 = water
+    print("hydrogen in, mol ") print_fix2(n_h2_mol)
+    print("  water out, mol ") print_fix2(n_w)
+    println("")
+    if n_w + 0.001 < n_h2_mol {
+        println("STOICHIOMETRY_FAIL")
+        return 1
+    }
+
+    println("T_hot   supply")
+    score("80 C ceiling", 80.0, p_des_s7(353.15), 136.67, 6625.0, h2, o2)
+    score("80 C COMSOL ", 80.0, 374.0, 136.67, 6625.0, h2, o2)
+    score("90 C ceiling", 90.0, p_des_s7(363.15), 152.88, 5760.0, h2, o2)
+    score("90 C COMSOL ", 90.0, 483.2, 152.88, 5760.0, h2, o2)
+    score("100 C ceiling", 100.0, p_des_s7(373.15), 169.11, 5090.0, h2, o2)
+    score("100 C COMSOL ", 100.0, 606.4, 169.11, 5090.0, h2, o2)
+    score("105 C ceiling", 105.0, p_des_s7(378.15), 177.51, 4720.0, h2, o2)
+    score("105 C COMSOL ", 105.0, 682.0, 177.51, 4720.0, h2, o2)
+    score("110 C ceiling", 110.0, p_des_s7(383.15), 185.97, 4530.0, h2, o2)
+    score("110 C COMSOL ", 110.0, 742.0, 185.97, 4530.0, h2, o2)
+    score("120 C ceiling", 120.0, p_des_s7(393.15), 201.78, 3760.0, h2, o2)
+    score("120 C COMSOL ", 120.0, 830.0, 201.78, 3760.0, h2, o2)
+
+    println("")
+    println("The pressure term is logarithmic. The heat and the cycle time are not.")
+    println("SOFC_HYDRIDE_OK")
+    0
+}

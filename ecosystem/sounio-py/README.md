@@ -1,5 +1,15 @@
 # Sounio-py: Python Bindings for Epistemic Computing
 
+## Origem canônica e transição
+
+O desenvolvimento do pacote Python foi consolidado em [Sounio-lang/sounio-py](https://github.com/Sounio-lang/sounio-py). Envie alterações e testes para esse repositório. Esta árvore é uma cópia de transição, preservada até a migração dos consumidores; as propostas e instruções abaixo são históricas e não definem a API ou a instalação atuais.
+
+A [pré-release de consolidação](https://github.com/Sounio-lang/sounio-py/releases/tag/python-consolidation-20260920) fornece os wheels Python e Jupyter e seus checksums. Consulte o README externo para distinguir as APIs Python e o backend nativo opcional. A publicação desses artefatos não implica disponibilidade no PyPI nem equivalência científica entre backends.
+
+A integração com o compilador usa uma instalação explícita e versionada de `souc`, com a stdlib correspondente. A transição dos consumidores do núcleo é acompanhada no [PR #2554](https://github.com/Sounio-lang/sounio/pull/2554). Não remova esta cópia antes de validar os consumidores restantes.
+
+---
+
 **Versão proposta:** 0.1.0
 **Objetivo:** Permitir que cientistas usem o poder epistêmico do Sounio diretamente de notebooks Jupyter e scripts Python.
 

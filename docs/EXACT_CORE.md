@@ -2,8 +2,8 @@
 topic_id: repo.docs.exact-core
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: 2026-09-22
+validated_by: claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.exact-core
 -->
 
@@ -83,10 +83,13 @@ measured cases (2026-08-17), recorded so this document does not leave the reader
 | Case | Madaros (default) | lean_single | Status |
 |---|---|---|---|
 | Forward ontology `inverse_of` (#1798) | **Accepted** a role whose inverse target was declared later | **E158** reject | **CLOSED** — Madaros aligned to declaration-order; gate `scripts/ci/madaros_ontology_enforcement_gate.sh` |
-| GUM variance on dissertation surfaces (#1792) | Prints `var(...)=0.000000` (and related ep28 confidence bit-pattern fabrication) | Non-zero variance ~1e-5 / ~1e-9 on the same adaptive witness | **OPEN** — fail-closed detect gate `scripts/ci/epistemic_fabrication_detect_gate.sh`; not a full ABI fix |
+| GUM variance on dissertation surfaces (#1792), F2 witness (ep28 confidence bit-pattern) | **CLOSED** by PR #1882 (`d33cf585`, merged 2026-08-18) — now prints `0.671038`, matching lean_single | Non-zero, matching value | **CLOSED** |
+| GUM variance on dissertation surfaces (#1792), F1 general rung (first-order channels crossing user calls) | The `rapamycin_epistemic_adaptive` witness now also reports non-zero variance (re-measured 2026-09-22), but `tests/run-pass/gum_fo_across_call.sio` / `fo_call_boundary_arity3.sio` still carry a live `//@ known-failure` for the general case | Non-zero variance ~1e-5 / ~1e-9 on the same adaptive witness | **OPEN** (KL-11) — fail-closed detect gate `scripts/ci/epistemic_fabrication_detect_gate.sh`; `b2df0727` (2026-09-18) only relaxed that fixture's own pass criterion (`ok_mech` now also accepts `ok_var` without requiring `epist_active > 0`) and touches no `self-hosted/` file, so it cannot explain the witness's variance moving off zero — the compiler-side cause of that recovery is **unidentified** |
 
-#1792 is thesis-critical: silent zero variance under the default engine is fabricated science, not a
-docs nit. See also `CLAUDE.md` §13 and `docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`.
+#1792's F1 rung is thesis-critical while open: silent zero variance under the default engine, if it
+recurred on a call shape the two known-failure fixtures do not cover, would be fabricated science, not
+a docs nit. See also `CLAUDE.md` §13, `docs/compiler/KNOWN_LIMITATIONS.md` KL-11, and
+`docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`.
 
 ## What is proved, executed, and verified (souc v0.80.0)
 
@@ -239,7 +242,7 @@ i64-range coefficients; the unbounded-width integration is a compiler-capacity r
 The four compiler features the generic engine needed (generic-struct-return **#1**, bodyless
 trait-method-sig parsing **2a**, `impl Trait for Type` **2b**, trait-bounded dispatch **#3**) **all
 landed 2026-07-06** on the fable5 compiler-generic-F lane (PR #650, merge commit `2adb8f061`,
-against the prompt `docs/handoff/compiler_generic_F_engine_unblock_prompt.md`). The generic engine
+against a written compiler-lane prompt). The generic engine
 `stdlib/algebra/cayley_dickson_exact.sio` (`CDElementExact<F: ExactRing>`) now **compiles and runs**:
 
 - **`F = i64` — adopted and proven equivalent.** `tests/run-pass/cd_exact_generic_i64.sio` proves the
@@ -264,5 +267,4 @@ against the prompt `docs/handoff/compiler_generic_F_engine_unblock_prompt.md`). 
 i.e. array-of-struct coefficients — remains open, blocked by the filed non-generic `[struct;N]`
 aggregate-loop codegen bug (#651), not by the math, the parser, or the generics. Until #651 lands,
 unbounded-ℚ work continues via the common-denominator **integer** representation
-(`sedenion_cd_full16_q.sio`, `[i64;N]`, no array-of-struct — unaffected). See
-`docs/handoff/exact_engine_prereqs.md`.
+(`sedenion_cd_full16_q.sio`, `[i64;N]`, no array-of-struct — unaffected).

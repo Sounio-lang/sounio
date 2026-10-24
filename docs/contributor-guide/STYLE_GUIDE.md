@@ -2,8 +2,8 @@
 topic_id: repo.docs.contributor-guide.style-guide
 authority: repo_only
 audience: contributors
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: 2026-09-22
+validated_by: Claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.contributor-guide.style-guide
 -->
 
@@ -121,9 +121,10 @@ fn CalculateDoseAdjustment() { }
 
 ```sio
 // Good
+use epistemic::knowledge::{Epistemic}
 struct PatientData { }
 enum ResultStatus { }
-type ConcentrationValue = Knowledge<mg/mL>
+struct Concentration { value: Epistemic }
 
 // Bad
 struct patient_data { }
@@ -135,11 +136,11 @@ enum result_status { }
 
 ```sio
 // Good
-const MAX_DOSE: mg = 1000.0
+const MAX_DOSE: f64 = 1000.0
 const PI: f64 = 3.14159
 
 // Bad
-const maxDose: mg = 1000.0
+const maxDose: f64 = 1000.0
 const pi: f64 = 3.14159
 ```
 
@@ -207,56 +208,59 @@ import stdlib.epistemic::*
 
 ### Always Track Uncertainty
 ```sio
-// Good - explicit uncertainty
-let measurement = Knowledge::new(
-    value: 42.0,
-    uncertainty: 0.5,
-    source: "instrument_A"
-)
+use epistemic::knowledge::{ep_measured}
+
+// Good - explicit uncertainty (val, std_dev). Variance is stored as
+// std_dev^2 and confidence defaults to 900/1000. Provenance is not a
+// field of Epistemic; provenance bookkeeping lives in stdlib/epistemic/prov.sio
+// and covariance tracking in stdlib/epistemic/affine.sio.
+let measurement = ep_measured(42.0, 0.5)
 
 // Bad - raw value loses uncertainty
-let measurement = 42.0  // Where did this come from? How precise?
+let measurement_raw = 42.0  // Where did this come from? How precise?
 ```
 
 ### Use Confidence Gates
 ```sio
-// Good - confidence-based execution
-fn process_measurement(value: Knowledge<f64>) with IO {
-    if value.confidence > 0.95 {
-        critical_operation(value)
-    } else {
-        require_manual_review(value)
-    }
+use epistemic::knowledge::{Epistemic, ep_is_credible}
+
+// Good - confidence-based execution. The threshold is an integer on the
+// 0..1000 scale (950 = 0.95).
+fn process_measurement(value: Epistemic) -> i64 {
+    if ep_is_credible(&value, 950) { 1 } else { 0 }
 }
 
 // Bad - ignoring confidence
-fn process_measurement(value: Knowledge<f64>) with IO {
-    critical_operation(value)  // What if confidence is low?
+fn process_measurement_unchecked(value: Epistemic) -> i64 {
+    1  // What if confidence is low?
 }
 ```
 
-### Preserve Provenance
+### Preserve the Uncertainty Channel
 ```sio
-// Good - maintain source information
-fn calibrate(raw: Knowledge<T>) -> Knowledge<T> {
-    let calibrated_value = raw.value * CALIBRATION_FACTOR
-    Knowledge::new(
-        value: calibrated_value,
-        uncertainty: raw.uncertainty * CALIBRATION_FACTOR,
-        source: Source {
-            original: raw.provenance,
-            transformation: "calibration_v2.1",
-            timestamp: now(),
-        }
-    )
+use epistemic::knowledge::{Epistemic, ep_measured, ep_val, ep_std, ep_scale, ep_new, ep_confidence}
+
+// Good - scaling keeps value and variance together.
+fn calibrate(raw: Epistemic) -> Epistemic {
+    ep_scale(&raw, 1.05)
 }
 
-// Bad - losing provenance
-fn calibrate(raw: Knowledge<T>) -> Knowledge<T> {
-    Knowledge::new(calibrated_value, uncertainty: new_unc)
-    // Where did this come from?
+// Also good - rebuild explicitly, carrying the original confidence through.
+// ep_measured would force confidence=900 and discard/raise the input's
+// reliability, contradicting "preserve the epistemic channel"; use ep_new
+// (val, variance, confidence) to keep the original confidence.
+fn calibrate_rescaled(raw: Epistemic) -> Epistemic with Mut, Div, Panic {
+    let s = ep_std(&raw) * 1.05
+    ep_new(ep_val(&raw) * 1.05, s * s, ep_confidence(&raw))
+}
+
+// Bad - dropping to a bare f64 discards the uncertainty entirely.
+fn calibrate_lossy(raw: Epistemic) -> f64 {
+    ep_val(&raw) * 1.05
 }
 ```
+
+Provenance is not a field of `Epistemic`. Provenance bookkeeping lives in `stdlib/epistemic/prov.sio` (private API, not a public tracked-provenance surface); shared-source covariance tracking lives in `stdlib/epistemic/affine.sio` (anchor: `tests/run-pass/affine_shared_source_add.sio`).
 
 ---
 
@@ -324,45 +328,36 @@ fn process() -> Result {
 
 ## Units of Measure
 
-### Always Annotate Physical Quantities
-```sio
-// Good - explicit units
-fn calculate_velocity(distance: m, time: s) -> m/s {
-    distance / time
-}
+### Prefer Compiler-Checked Native Unit Annotations
 
+```sio
+// Primary path: native unit spellings are checked at COMPILE time, so
+// dimensionally inconsistent arithmetic is rejected before the program runs.
+// tests/run-pass/unit_same_add.sio accepts `mg`; tests/compile-fail/
+// unit_mismatch_add.sio rejects `mg + m`. Derived units are also supported
+// (tests/frontend/unit_derived_velocity_decl_current_source.sio).
 let dose: mg = 500.0
-let volume: mL = 250.0
-let concentration: mg/mL = dose / volume
-
-// Bad - dimensionless numbers
-fn calculate_velocity(distance: f64, time: f64) -> f64 {
-    distance / time  // Units? m/s? km/h? 
-}
+// let bad = dose + length_m   // ERROR: `mg + m` is a unit mismatch, rejected
+//                              // at compile time (tests/compile-fail/unit_mismatch_add.sio)
 ```
 
-### Let the Compiler Check Dimensions
+### Use `Quantity` for Runtime Dimensions + Uncertainty Together
+
 ```sio
-// Good - compiler catches errors
-let distance: m = 100.0
-let time: s = 10.0
-let velocity: m/s = distance / time  // ✓ Type checks
+use units::lib::{quantity_new, quantity_div, dim_mass, dim_time}
 
-// Bad - would be compile error
-// let invalid: m = distance + time  // ✗ Can't add m to s
+// Good - value, dimension, AND uncertainty travel together. Prefer this only
+// when you need the dimension and the uncertainty carried at runtime; the
+// native annotations above are statically checked and are the safer default.
+let dose = quantity_new(0.5, 0.01, dim_mass())
+let interval = quantity_new(2.0, 0.0, dim_time())
+let rate = quantity_div(dose, interval)   // derives the result dimension
+
+// quantity_add panics at runtime when the dimensions differ
+// let invalid = quantity_add(distance, time)
 ```
 
-### Use Custom Units for Domain-Specific Quantities
-```sio
-// Pharmacology
-type Clearance = L/h
-type AUC = mg*h/L
-type Dose = mg
-
-fn calculate_clearance(dose: Dose, auc: AUC) -> Clearance {
-    dose / auc  // Units automatically: mg / (mg*h/L) = L/h
-}
-```
+Anchor: `examples/units/dimensional_report.sio` and `tests/stdlib/units/test_units_stdlib.sio`. The `unit` keyword spelling exists (e.g. `unit Clearance = L / h`); domain quantities are also `Quantity` values built from `dim_*()` dimensions. Native unit spellings such as `mg` are compiler-checked — prefer them for dimensional safety, and reach for `Quantity` only when a value needs runtime dimensions **and** uncertainty together.
 
 ---
 
@@ -376,35 +371,31 @@ fn calculate_clearance(dose: Dose, auc: AUC) -> Clearance {
 /// uncertainty propagation.
 ///
 /// # Examples
-/// ```
-/// let model = OneCompartment::new(CL: 10.0 L/h, V: 100.0 L)
-/// let conc = model.predict(dose: 1000.0 mg, time: 2.0 h)
-/// ```
+/// use units::lib::{quantity_new, dim_mass, dim_time}
+/// let dose = quantity_new(1000.0, 0.0, dim_mass())
+/// let interval = quantity_new(2.0, 0.0, dim_time())
 module pk_one_compartment
 ```
 
 ### Function Documentation
 ```sio
-/// Calculate drug concentration over time using epistemic propagation.
+use epistemic::knowledge::{Epistemic, ep_div}
+
+/// Calculate drug concentration with epistemic propagation.
 ///
 /// # Parameters
-/// - `dose`: Administered dose with measurement uncertainty
-/// - `time`: Time since administration
-/// - `clearance`: Drug clearance rate
-/// - `volume`: Volume of distribution
+/// - `dose`: administered dose with measurement uncertainty
+/// - `volume`: volume of distribution
 ///
 /// # Returns
-/// Predicted concentration with propagated uncertainty
-///
-/// # Effects
-/// None (pure computation)
+/// Predicted concentration with propagated uncertainty.
+/// Units travel separately as stdlib/units/lib.sio Quantity values;
+/// unit spellings such as `mg` are implemented and tested.
 fn predict_concentration(
-    dose: Knowledge<mg>,
-    time: h,
-    clearance: Knowledge<L/h>,
-    volume: Knowledge<L>
-) -> Knowledge<mg/L> {
-    // Implementation
+    dose: Epistemic,
+    volume: Epistemic,
+) -> Epistemic with Div, Panic {
+    ep_div(&dose, &volume)
 }
 ```
 

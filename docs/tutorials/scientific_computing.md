@@ -2,8 +2,8 @@
 topic_id: repo.docs.tutorials.scientific-computing
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.tutorials.scientific-computing
 -->
 
@@ -164,8 +164,6 @@ fn main() with IO, Mut, Div, Panic {
     println("root found")
 }
 ```
-
-Note: `0.0 - x` instead of `-x`. Sounio has no unary minus operator.
 
 ## 5. Optimization (Golden Section Search)
 

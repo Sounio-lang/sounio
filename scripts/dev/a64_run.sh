@@ -19,7 +19,7 @@
 #
 # THE ROUTE, MEASURED 2026-09-04
 # ------------------------------
-# docs/ops/SLURM_LAUNCH_REPAIR_2026-08-17.md names `cpu-ops` as the proven
+# The 2026-08-17 Slurm launch repair note named `cpu-ops` as the proven
 # partition. That is no longer true and fails in a way that looks like nothing
 # at all:
 #

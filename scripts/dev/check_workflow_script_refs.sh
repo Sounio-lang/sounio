@@ -20,9 +20,9 @@ has_real_ripgrep() {
 
 workflow_script_refs() {
   if has_real_ripgrep; then
-    rg -No "(?:\\./)?scripts/[A-Za-z0-9_./-]+" "${WORKFLOWS[@]}"
+    rg -No "(?:\\./)?(?:[A-Za-z0-9_.-]+/)*scripts/[A-Za-z0-9_./-]+" "${WORKFLOWS[@]}"
   else
-    grep -H -o -E "(\\./)?scripts/[A-Za-z0-9_./-]+" "${WORKFLOWS[@]}"
+    grep -H -o -E "(\\./)?([A-Za-z0-9_.-]+/)*scripts/[A-Za-z0-9_./-]+" "${WORKFLOWS[@]}"
   fi
 }
 
@@ -30,7 +30,7 @@ mapfile -t REFS < <(
   workflow_script_refs \
     | sed -E 's#^.+:##' \
     | sed -E 's#^[[:space:]]+##' \
-    | sed -E 's#[\"\047),:;]+$##' \
+    | sed -E 's#[\"\047),:;.]+$##' \
     | sort -u
 )
 

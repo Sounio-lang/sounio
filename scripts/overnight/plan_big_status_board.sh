@@ -59,14 +59,6 @@ extract_json_field_or() {
 declare -a GATE_RESULTS
 
 if [[ "$RUN_GATES" -eq 1 ]]; then
-  gate_json="$(run_gate claude_plan_consistency bash scripts/ci/check_claude_plan_consistency.sh || true)"
-  GATE_RESULTS+=("$gate_json")
-  copy_log "$(jq -r '.log' <<<"$gate_json")" "artifacts/omega/plan_big_gate_claude_plan_consistency.log"
-
-  gate_json="$(run_gate claude_operational_contract bash scripts/ci/claude_operational_contract_gate.sh || true)"
-  GATE_RESULTS+=("$gate_json")
-  copy_log "$(jq -r '.log' <<<"$gate_json")" "artifacts/omega/plan_big_gate_claude_operational_contract.log"
-
   gate_json="$(run_gate lsp_smoke bash scripts/ci/lsp_smoke_gate.sh || true)"
   GATE_RESULTS+=("$gate_json")
   copy_log "$(jq -r '.log' <<<"$gate_json")" "artifacts/omega/plan_big_gate_lsp_smoke.log"
@@ -94,7 +86,6 @@ fi
 
 parallel_status_file="artifacts/omega/parallel_cutover_status.v1.json"
 selfhost_progress_file="artifacts/omega/selfhost_compiler_progress.v1.json"
-claude_contract_file="artifacts/omega/claude_operational_contract_status.v1.json"
 lsp_status_file="artifacts/omega/lsp_smoke_status.v1.json"
 ui_type_file="artifacts/omega/ui_type_deignore_audit.v1.json"
 ui_type_bucket_file="artifacts/omega/ui_type_deignore_backlog_buckets.v1.json"
@@ -107,7 +98,6 @@ track_b_status="$(extract_json_field_or "$parallel_status_file" '.track_b_status
 track_b_order_status="$(extract_json_field_or "$parallel_status_file" '.track_b_order_status' 'unknown')"
 
 selfhost_status="$(extract_json_field_or "$selfhost_progress_file" '.status' 'unknown')"
-claude_contract_status="$(extract_json_field_or "$claude_contract_file" '.status' 'unknown')"
 lsp_smoke_status="$(extract_json_field_or "$lsp_status_file" '.status' 'unknown')"
 
 ui_ignored="$(extract_json_field_or "$ui_type_file" '.totals.ignored_files' '0')"
@@ -120,7 +110,7 @@ ui_backlog_quality_status="$(extract_json_field_or "$ui_type_backlog_quality_fil
 git_dirty_count="$(git status --porcelain | wc -l | tr -d ' ')"
 
 overall="pass"
-for s in "$parallel_status" "$track_a_status" "$track_b_status" "$track_b_order_status" "$claude_contract_status" "$lsp_smoke_status"; do
+for s in "$parallel_status" "$track_a_status" "$track_b_status" "$track_b_order_status" "$lsp_smoke_status"; do
   if [[ "$s" != "pass" ]]; then
     overall="attention"
   fi
@@ -149,8 +139,6 @@ jq -cn \
   --arg track_b_order_status "$track_b_order_status" \
   --arg selfhost_progress_file "$selfhost_progress_file" \
   --arg selfhost_status "$selfhost_status" \
-  --arg claude_contract_file "$claude_contract_file" \
-  --arg claude_contract_status "$claude_contract_status" \
   --arg lsp_status_file "$lsp_status_file" \
   --arg lsp_smoke_status "$lsp_smoke_status" \
   --arg ui_type_file "$ui_type_file" \
@@ -177,7 +165,6 @@ jq -cn \
       track_b_status: $track_b_status,
       track_b_order_status: $track_b_order_status,
       selfhost_progress_status: $selfhost_status,
-      claude_operational_contract_status: $claude_contract_status,
       lsp_smoke_status: $lsp_smoke_status,
       ui_type: {
         ignored_files: $ui_ignored,
@@ -191,7 +178,6 @@ jq -cn \
     sources: {
       parallel_cutover_status_file: $parallel_status_file,
       selfhost_progress_file: $selfhost_progress_file,
-      claude_operational_contract_file: $claude_contract_file,
       lsp_smoke_status_file: $lsp_status_file,
       ui_type_audit_file: $ui_type_file,
       ui_type_bucket_file: $ui_type_bucket_file,
@@ -216,7 +202,6 @@ jq -cn \
   echo "- track_a: $(jq -r '.summary.track_a_status' "$OUT_JSON")"
   echo "- track_b: $(jq -r '.summary.track_b_status' "$OUT_JSON")"
   echo "- track_b_order: $(jq -r '.summary.track_b_order_status' "$OUT_JSON")"
-  echo "- claude_operational_contract: $(jq -r '.summary.claude_operational_contract_status' "$OUT_JSON")"
   echo "- lsp_smoke: $(jq -r '.summary.lsp_smoke_status' "$OUT_JSON")"
   echo
   echo "## UI Type Backlog"

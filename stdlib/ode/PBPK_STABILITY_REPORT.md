@@ -18,8 +18,8 @@ Investigated improving numerical stability of PBPK models in Sounio. Created mul
 ### Evidence
 ```sounio
 // This pattern fails after ~2 iterations:
-let mut st = State { x: 100.0 }
-let mut i = 0
+var st = State { x: 100.0 }
+var i = 0
 while i < 50 {
     let result = step_function(st)
     st = result.state_new  // <-- Mutation stops working after ~2 iterations
@@ -155,8 +155,8 @@ fn step(s: State) -> Result {
 }
 
 fn main() -> i32 {
-    let mut s = State { x: 0.0 }
-    let mut i = 0
+    var s = State { x: 0.0 }
+    var i = 0
     while i < 20 {
         let r = step(s)
         s = r.state_new  // BUG: stops working after ~2 iterations

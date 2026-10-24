@@ -86,6 +86,7 @@ MODULES=(
   stdlib/stats/hotelling_t2.sio
   stdlib/stats/pca2.sio
   stdlib/stats/jackknife.sio
+  stdlib/stats/bayesian/psis_loo.sio
   stdlib/stats/rng.sio
   stdlib/stats/bootstrap.sio
   stdlib/stats/perm_test.sio

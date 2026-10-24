@@ -83,7 +83,7 @@ Source: `l4_scale_stability_report.v1.txt`
 ```bash
 # Requires SSH access to gpu-appliance-l4
 GPU_HOST=gpu-appliance-l4 GEMM_M=4096 GEMM_N=4096 GEMM_K=4096 \
-  bash scripts/gpu_test_runner.sh
+  bash scripts/archive/gpu_test_runner.sh
 ```
 
-See `scripts/gpu_test_runner.sh` for full configuration options.
+See `scripts/archive/gpu_test_runner.sh` for full configuration options.

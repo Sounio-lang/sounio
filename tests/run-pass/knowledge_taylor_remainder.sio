@@ -1,0 +1,74 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: gap 0.163343
+//@ expect-stdout: lo 6.925419
+//@ expect-stdout: hi 21.423914
+//@ expect-stdout: LOG_BAND_OK
+// exp(ln p) and (exp(ln p / 2))^2 are the same map. second_order_mean of the
+// exp form is the lognormal mean. second_order_mean of the product stops at
+// the second-order Taylor centre. The gap is the series remainder. That
+// Taylor centre sits inside the lognormal band and is not an edge of it.
+
+use epistemic::claim_meet::{exp_mean_vote, series_remainder}
+
+var R_GAS: f64 = 8.314462618
+var T_HOT: f64 = 353.15
+var DH: f64 = 30800.0
+var DS: f64 = 108.0
+var U_DH: f64 = 1500.0
+var U_DS: f64 = 2.0
+
+fn ln_p(dh: f64, ds: f64) -> f64 { ds / R_GAS - dh / (R_GAS * T_HOT) }
+fn p_one(dh: f64, ds: f64) -> f64 { exp(ln_p(dh, ds)) }
+fn half(dh: f64, ds: f64) -> f64 { exp(ln_p(dh, ds) / 2.0) }
+fn s_ln2() -> f64 {
+    let a = U_DS / R_GAS
+    let b = U_DH / (R_GAS * T_HOT)
+    a * a + b * b
+}
+fn near(actual: f64, expected: f64, tol: f64) -> bool {
+    let d = actual - expected
+    if d < 0.0 { return (0.0 - d) < tol }
+    d < tol
+}
+
+fn main() -> i64 with IO, Mut, Div, Epistemic {
+    let dh0: f64 = DH
+    let ds0: f64 = DS
+    let hk: Knowledge<f64> = measure(dh0, uncertainty: U_DH)
+    let sk: Knowledge<f64> = measure(ds0, uncertainty: U_DS)
+    let dh = hk.value
+    let ds = sk.value
+    let one = p_one(dh, ds)
+    let sq = half(dh, ds) * half(dh, ds)
+    let mone = second_order_mean(one)
+    let msq = second_order_mean(sq)
+    let p0 = p_one(DH, DS)
+    let sl2 = s_ln2()
+    let gap = mone - msq
+    let rem = series_remainder(p0, sl2)
+    let vote = exp_mean_vote(p0, sl2)
+    var sig = sl2
+    var i = 0
+    while i < 40 {
+        sig = 0.5 * (sig + sl2 / sig)
+        i = i + 1
+    }
+    var apart = vote.centre - msq
+    if apart < 0.0 { apart = 0.0 - apart }
+    print("gap ")
+    print_f64(gap)
+    println("")
+    print("lo ")
+    print_f64(vote.lo)
+    println("")
+    print("hi ")
+    print_f64(vote.hi)
+    println("")
+    if vote.truncation && near(gap, rem, 1.0e-9) && near(gap, 0.163343094021076, 1.0e-9) && near(vote.centre, mone, 1.0e-6) && near(vote.lo, p0 * exp(0.0 - sig), 1.0e-9) && near(vote.hi, p0 * exp(sig), 1.0e-9) && near(vote.lo, 6.925418790126068, 1.0e-9) && near(vote.hi, 21.42391406793983, 1.0e-9) && vote.lo < msq && msq < vote.hi && vote.lo < p0 && p0 < vote.hi && near(msq, p0 * (1.0 + 0.5 * sl2), 1.0e-6) && apart > 0.1 {
+        println("LOG_BAND_OK")
+        return 0
+    }
+    println("LOG_BAND_FAIL")
+    1
+}

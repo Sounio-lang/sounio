@@ -2667,6 +2667,60 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with IO, 
         GpuOpcode::GpuAddImm => {
             let dst_str = if op.ty == GpuType::GpuU32 { gpu_reg_u32(op.dst_reg) } else { gpu_reg_u64(op.dst_reg) }
             var aout = buf
+            // P0.8.1: a pure immediate goes into the register class its consumers read.
+            // Floats carry their IEEE bit pattern in rhs_imm (set by hlir_to_gpu). Before
+            // this, every constant was `mov.u64 %rdN, int_val`, so `2.0` became integer 0
+            // in %rd2 while the f64 multiply read the never-written %fd2.
+            if op.lhs_reg < 0 && op.ty == GpuType::GpuF64 {
+                aout = ptx_push_str(aout, "    mov.f64 ")
+                aout = ptx_push_str(aout, gpu_reg_f64(op.dst_reg))
+                aout = ptx_push_str(aout, ", 0d")
+                aout = gpu_push_hex_fixed(aout, op.rhs_imm, 16)
+                aout = ptx_push_str(aout, ";\n")
+                return aout
+            }
+            if op.lhs_reg < 0 && op.ty == GpuType::GpuF32 {
+                aout = ptx_push_str(aout, "    mov.f32 ")
+                aout = ptx_push_str(aout, gpu_reg_f32(op.dst_reg))
+                aout = ptx_push_str(aout, ", 0f")
+                aout = gpu_push_hex_fixed(aout, op.rhs_imm, 8)
+                aout = ptx_push_str(aout, ";\n")
+                return aout
+            }
+            if op.lhs_reg < 0 && op.ty == GpuType::GpuI32 {
+                aout = ptx_push_str(aout, "    mov.s32 ")
+                aout = ptx_push_str(aout, gpu_reg_i32(op.dst_reg))
+                aout = ptx_push_str(aout, ", ")
+                aout = gpu_push_i64_signed(aout, op.rhs_imm)
+                aout = ptx_push_str(aout, ";\n")
+                return aout
+            }
+            if op.ty == GpuType::GpuF64 || op.ty == GpuType::GpuF32 || op.ty == GpuType::GpuI32 || op.ty == GpuType::GpuBool {
+                // HLIR_OP_COPY is AddImm(src, 0): a register move in the value's own class
+                // (it used to be `add.u64 %rdD, %rdS, 0` whatever the type).
+                if op.lhs_reg >= 0 && op.rhs_imm == 0 {
+                    let mv = if op.ty == GpuType::GpuF64 { "    mov.f64 " }
+                             else if op.ty == GpuType::GpuF32 { "    mov.f32 " }
+                             else if op.ty == GpuType::GpuI32 { "    mov.b32 " }
+                             else { "    mov.pred " }
+                    let d = if op.ty == GpuType::GpuF64 { gpu_reg_f64(op.dst_reg) }
+                            else if op.ty == GpuType::GpuF32 { gpu_reg_f32(op.dst_reg) }
+                            else if op.ty == GpuType::GpuI32 { gpu_reg_i32(op.dst_reg) }
+                            else { str_concat("%p", i64_to_string(op.dst_reg)) }
+                    let s = if op.ty == GpuType::GpuF64 { gpu_reg_f64(op.lhs_reg) }
+                            else if op.ty == GpuType::GpuF32 { gpu_reg_f32(op.lhs_reg) }
+                            else if op.ty == GpuType::GpuI32 { gpu_reg_i32(op.lhs_reg) }
+                            else { str_concat("%p", i64_to_string(op.lhs_reg)) }
+                    aout = ptx_push_str(aout, mv)
+                    aout = ptx_push_str(aout, d)
+                    aout = ptx_push_str(aout, ", ")
+                    aout = ptx_push_str(aout, s)
+                    aout = ptx_push_str(aout, ";\n")
+                    return aout
+                }
+                // No faithful integer add-immediate exists for these classes.
+                return gpu_refuse_unlowered(aout, "GpuAddImm (float/i32/bool register class)")
+            }
             // lhs_reg < 0 marks a PURE immediate (HLIR_OP_CONST): emit `mov dst, imm`.
             // The `add dst, %reg0, imm` form would read the first kernel param as a bogus
             // zero base and corrupt every integer constant (e.g. GEP indices).
@@ -2674,7 +2728,7 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with IO, 
                 aout = ptx_push_str(aout, if op.ty == GpuType::GpuU32 { "    mov.u32 " } else { "    mov.u64 " })
                 aout = ptx_push_str(aout, dst_str)
                 aout = ptx_push_str(aout, ", ")
-                aout = gpu_push_i64(aout, op.rhs_imm)
+                aout = gpu_push_i64_signed(aout, op.rhs_imm)
                 aout = ptx_push_str(aout, ";\n")
                 return aout
             }
@@ -2687,7 +2741,7 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with IO, 
             aout = ptx_push_str(aout, ", ")
             aout = ptx_push_str(aout, src_str)
             aout = ptx_push_str(aout, ", ")
-            aout = gpu_push_i64(aout, op.rhs_imm)
+            aout = gpu_push_i64_signed(aout, op.rhs_imm)
             aout = ptx_push_str(aout, ";\n")
             aout
         }
@@ -3003,6 +3057,20 @@ fn gpu_push_name(buf: PtxBuf, name: Name) -> PtxBuf with Mut, Panic, Div {
     out
 }
 
+// Fixed-width uppercase hex of the low `digits` nibbles of `v` (PTX float
+// immediates: 0dXXXXXXXXXXXXXXXX for f64, 0fXXXXXXXX for f32).
+fn gpu_push_hex_fixed(buf: PtxBuf, v: i64, digits: i64) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    var d: i64 = digits - 1
+    while d >= 0 {
+        let nib = (v >> (d * 4)) & 15
+        let ch = if nib < 10 { 48 + nib } else { 55 + nib }
+        out = ptx_push_byte(out, ch as i8)
+        d = d - 1
+    }
+    out
+}
+
 // Helper: Push i64 as ASCII digits directly into PtxBuf (avoids i64_to_string UAF)
 pub fn gpu_push_i64(buf: PtxBuf, n: i64) -> PtxBuf with Mut, Panic, Div {
     if n == 0 { return ptx_push_byte(buf, 48) }
@@ -3021,4 +3089,17 @@ pub fn gpu_push_i64(buf: PtxBuf, n: i64) -> PtxBuf with Mut, Panic, Div {
         k = k - 1
     }
     out
+}
+
+// Signed decimal immediate. gpu_push_i64 below prints NOTHING for a negative
+// value (it clamps to 0 and then emits no digits), which turned the constant -5
+// into `mov.u64 %rd2, ;`. Immediates that can be negative use this instead.
+pub fn gpu_push_i64_signed(buf: PtxBuf, n: i64) -> PtxBuf with Mut, Panic, Div {
+    if n >= 0 { return gpu_push_i64(buf, n) }
+    var out = ptx_push_byte(buf, 45)
+    // -(i64::MIN) overflows; peel the last digit first so every step stays in range.
+    let last = 0 - (n % 10)
+    let rest = 0 - (n / 10)
+    if rest > 0 { out = gpu_push_i64(out, rest) }
+    ptx_push_byte(out, (48 + last) as i8)
 }

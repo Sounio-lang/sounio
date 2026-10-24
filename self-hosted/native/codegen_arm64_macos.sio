@@ -1,0 +1,1645 @@
+// Stack-slot ARM64 lowering of Madaros IR. Buffers are module-owned so emission
+// never copies a large writer through the bootstrap compiler's aggregate ABI.
+module native::codegen_arm64_macos
+
+use ir::ir::*
+use parser::ast::{BinaryOp, UnaryOp, Name, make_name, empty_name}
+use io::env::{read_env}
+use native::machine_ir::{native_v2_alloc_size_from_tag}
+use gpu::native_metal::{native_metal_find, native_metal_source, native_metal_arg_count, native_metal_arg_kind, native_metal_failed}
+
+var A64M_CODE: [i8; 8388608] = [0; 8388608]
+var A64M_IMAGE: [i8; 16777216] = [0; 16777216]
+var A64M_LEN: i64 = 0
+var A64M_ENTRY: i64 = 0
+var A64M_BSS: i64 = 16384
+var A64M_ERROR: bool = false
+var A64M_TRACE: bool = false
+var A64M_FLOAT: [bool; 65536] = [false; 65536]
+var A64M_INT: [bool; 65536] = [false; 65536]
+var A64M_FN: [i64; 16384] = [-1; 16384]
+var A64M_CALL_POS: [i64; 65536] = [0; 65536]
+var A64M_CALL_FN: [i64; 65536] = [0; 65536]
+var A64M_CALL_N: i64 = 0
+var A64M_ADDR_POS: [i64; 65536] = [0; 65536]
+var A64M_ADDR_FN: [i64; 65536] = [0; 65536]
+var A64M_ADDR_N: i64 = 0
+var A64M_LIVE: [bool; 16384] = [false; 16384]
+var A64M_IMPORT_NAMES: [Name; 64] = [empty_name(); 64]
+var A64M_IMPORT_N: i64 = 0
+var A64M_LABEL: [i64; 8192] = [-1; 8192]
+var A64M_JUMP_POS: [i64; 65536] = [0; 65536]
+var A64M_JUMP_ID: [i64; 65536] = [0; 65536]
+var A64M_JUMP_KIND: [i64; 65536] = [0; 65536]
+var A64M_JUMP_N: i64 = 0
+
+fn a64m_byte(b: i64) with Mut, Panic {
+    if A64M_LEN >= 8388608 { A64M_ERROR = true; return }
+    A64M_CODE[A64M_LEN as usize] = (b & 255) as i8
+    A64M_LEN = A64M_LEN + 1
+}
+fn a64m_word(v: i64) with Mut, Panic {
+    a64m_byte(v)
+    a64m_byte(v >> 8)
+    a64m_byte(v >> 16)
+    a64m_byte(v >> 24)
+}
+fn a64m_patch(p: i64, v: i64) with Mut, Panic {
+    if p < 0 || p + 4 > A64M_LEN { A64M_ERROR = true; return }
+    A64M_CODE[p as usize] = (v & 255) as i8
+    A64M_CODE[(p + 1) as usize] = ((v >> 8) & 255) as i8
+    A64M_CODE[(p + 2) as usize] = ((v >> 16) & 255) as i8
+    A64M_CODE[(p + 3) as usize] = ((v >> 24) & 255) as i8
+}
+fn a64m_imm(r: i64, v: i64) with Mut, Panic {
+    a64m_word(0xD2800000 | ((v & 65535) << 5) | r)
+    a64m_word(0xF2A00000 | (((v >> 16) & 65535) << 5) | r)
+    a64m_word(0xF2C00000 | (((v >> 32) & 65535) << 5) | r)
+    a64m_word(0xF2E00000 | (((v >> 48) & 65535) << 5) | r)
+}
+fn a64m_slot(v: i64) with Mut, Panic {
+    if v < 0 || v >= 65536 { A64M_ERROR = true; return }
+    a64m_imm(15, (v + 1) * 8)
+    a64m_word(0xCB0F03AF) // sub x15,x29,x15
+}
+fn a64m_load(r: i64, v: i64) with Mut, Panic {
+    a64m_slot(v)
+    a64m_word(0xF94001E0 | r)
+}
+fn a64m_store(r: i64, v: i64) with Mut, Panic {
+    if v < 0 { return }
+    a64m_slot(v)
+    a64m_word(0xF90001E0 | r)
+}
+fn a64m_branch(p: i64, target: i64, kind: i64) with Mut, Panic, Div {
+    let delta = (target - p) / 4
+    if kind == 0 || kind == 1 {
+        if delta < -33554432 || delta > 33554431 { A64M_ERROR = true; return }
+        let base = if kind == 1 { 0x94000000 } else { 0x14000000 }
+        a64m_patch(p, base | (delta & 0x3FFFFFF))
+    } else {
+        if delta < -262144 || delta > 262143 { A64M_ERROR = true; return }
+        a64m_patch(p, 0x54000000 | ((delta & 0x7FFFF) << 5) | (kind - 2))
+    }
+}
+fn a64m_call(fi: i64) with Mut, Panic {
+    if A64M_CALL_N >= 65536 { A64M_ERROR = true; return }
+    A64M_CALL_POS[A64M_CALL_N as usize] = A64M_LEN
+    A64M_CALL_FN[A64M_CALL_N as usize] = fi
+    A64M_CALL_N = A64M_CALL_N + 1
+    a64m_word(0x94000000)
+}
+fn a64m_jump(id: i64, cond: i64) with Mut, Panic {
+    if A64M_JUMP_N >= 65536 { A64M_ERROR = true; return }
+    A64M_JUMP_POS[A64M_JUMP_N as usize] = A64M_LEN
+    A64M_JUMP_ID[A64M_JUMP_N as usize] = id
+    A64M_JUMP_KIND[A64M_JUMP_N as usize] = cond
+    A64M_JUMP_N = A64M_JUMP_N + 1
+    if cond == 0 { a64m_word(0x14000000) }
+    else { a64m_word(0x54000000) }
+}
+fn a64m_epilogue() with Mut, Panic {
+    a64m_word(0x910003BF) // mov sp,x29
+    a64m_word(0xA8C17BFD)
+    a64m_word(0xD65F03C0)
+}
+fn a64m_write() with Mut, Panic {
+    a64m_imm(0, 1)
+    a64m_imm(16, 4)
+    a64m_word(0xD4001001)
+}
+fn a64m_print_string() with Mut, Panic, Div {
+    a64m_word(0xAA0003E1) // x1=string
+    a64m_imm(2, 0)
+    let loop_pos = A64M_LEN
+    a64m_word(0x38626829) // ldrb w9,[x1,x2]
+    a64m_word(0x7100013F)
+    let done = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0x91000442)
+    let back = A64M_LEN
+    a64m_word(0x14000000)
+    a64m_branch(back, loop_pos, 0)
+    a64m_branch(done, A64M_LEN, 2)
+    a64m_write()
+}
+fn a64m_newline() with Mut, Panic {
+    a64m_word(0xD10043FF) // sub sp,sp,#16
+    a64m_imm(9, 10)
+    a64m_word(0x390003E9)
+    a64m_word(0x910003E1)
+    a64m_imm(2, 1)
+    a64m_write()
+    a64m_word(0x910043FF)
+}
+fn a64m_literal(text: string) with Mut, Panic, Div {
+    a64m_word(0x10000040) // adr x0,+8
+    let skip = A64M_LEN
+    a64m_word(0x14000000)
+    var k: i64 = 0
+    while k < str_len(text) { a64m_byte(text[k as usize] as i64); k = k + 1 }
+    a64m_byte(0)
+    while A64M_LEN % 4 != 0 { a64m_byte(0) }
+    a64m_branch(skip, A64M_LEN, 0)
+    a64m_print_string()
+}
+fn a64m_print_float() with Mut, Panic, Div {
+    a64m_word(0xD10103FF) // sub sp,sp,#64
+    a64m_word(0xF90003E0)
+    a64m_imm(9, 0x7FFFFFFFFFFFFFFF)
+    a64m_word(0x8A09000A) // and x10,x0,x9
+    a64m_imm(11, 52)
+    a64m_word(0x9ACB254B) // lsr x11,x10,x11
+    a64m_imm(9, 2047)
+    a64m_word(0xEB09017F)
+    let normal = A64M_LEN
+    a64m_word(0x54000001)
+    a64m_imm(9, 0xFFFFFFFFFFFFF)
+    a64m_word(0x8A090149) // and x9,x10,x9
+    a64m_word(0xF100013F)
+    let infinity = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_literal("nan")
+    let nan_done = A64M_LEN
+    a64m_word(0x14000000)
+    a64m_branch(infinity, A64M_LEN, 2)
+    a64m_word(0xF94003E9)
+    a64m_word(0xF100013F)
+    let inf_positive = A64M_LEN
+    a64m_word(0x5400000A)
+    a64m_literal("-")
+    a64m_branch(inf_positive, A64M_LEN, 12)
+    a64m_literal("inf")
+    let inf_done = A64M_LEN
+    a64m_word(0x14000000)
+    a64m_branch(normal, A64M_LEN, 3)
+    a64m_word(0xF94003E9)
+    a64m_word(0xF100013F)
+    let positive = A64M_LEN
+    a64m_word(0x5400000A)
+    a64m_literal("-")
+    a64m_branch(positive, A64M_LEN, 12)
+    a64m_word(0xF94003E9)
+    a64m_imm(10, 0x7FFFFFFFFFFFFFFF)
+    a64m_word(0x8A0A0129)
+    a64m_word(0x9E670120) // fmov d0,x9
+    a64m_word(0x9E78000D) // fcvtzs x13,d0
+    a64m_word(0x9E6201A1) // scvtf d1,x13
+    a64m_word(0x1E613800)
+    a64m_imm(10, 4696837146684686336) // 1e6
+    a64m_word(0x9E670141)
+    a64m_word(0x1E610800)
+    a64m_imm(10, 4602678819172646912) // 0.5
+    a64m_word(0x9E670141)
+    a64m_word(0x1E612800)
+    a64m_word(0x9E78000E)
+    a64m_imm(10, 1000000)
+    a64m_word(0xEB0A01DF)
+    let fraction_ok = A64M_LEN
+    a64m_word(0x5400000B)
+    a64m_imm(14, 0)
+    a64m_word(0x910005AD)
+    a64m_branch(fraction_ok, A64M_LEN, 13)
+    a64m_word(0xF90007EE) // saved fractional digits
+    a64m_word(0xAA0D03E0)
+    a64m_print_int()
+    a64m_literal(".")
+    a64m_word(0xF94007E9)
+    a64m_word(0x9100C3E1) // x1=sp+48
+    a64m_imm(10, 10)
+    a64m_imm(14, 6)
+    let digit = A64M_LEN
+    a64m_word(0x9ACA092C)
+    a64m_word(0x9B0AA58D)
+    a64m_word(0x9100C1AD)
+    a64m_word(0x381FFC2D)
+    a64m_word(0xAA0C03E9)
+    a64m_word(0xF10005CE) // subs x14,x14,#1
+    let back = A64M_LEN
+    a64m_word(0x54000001)
+    a64m_branch(back, digit, 3)
+    a64m_imm(2, 6)
+    a64m_write()
+    a64m_branch(nan_done, A64M_LEN, 0)
+    a64m_branch(inf_done, A64M_LEN, 0)
+    a64m_word(0x910103FF)
+}
+fn a64m_print_int() with Mut, Panic, Div {
+    a64m_word(0xD10103FF) // 64-byte digit scratch
+    a64m_word(0x910103E1) // x1=sp+64, digits grow backward
+    a64m_word(0xAA0003E9) // x9=magnitude
+    a64m_word(0xF100013F)
+    a64m_word(0x9A9FA7EB) // cset x11,lt
+    let nonnegative = A64M_LEN
+    a64m_word(0x5400000A)
+    a64m_word(0xCB0903E9)
+    a64m_branch(nonnegative, A64M_LEN, 12)
+    a64m_imm(10, 10)
+    a64m_imm(2, 0)
+    let digit = A64M_LEN
+    a64m_word(0x9ACA092C) // udiv x12,x9,x10
+    a64m_word(0x9B0AA58D) // msub x13,x12,x10,x9
+    a64m_word(0x9100C1AD)
+    a64m_word(0x381FFC2D) // strb w13,[x1,#-1]!
+    a64m_word(0x91000442)
+    a64m_word(0xAA0C03E9)
+    a64m_word(0xF100013F)
+    let again = A64M_LEN
+    a64m_word(0x54000001)
+    a64m_branch(again, digit, 3)
+    a64m_word(0xF100017F)
+    let positive = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_imm(13, 45)
+    a64m_word(0x381FFC2D)
+    a64m_word(0x91000442)
+    a64m_branch(positive, A64M_LEN, 2)
+    a64m_write()
+    a64m_word(0x910103FF)
+}
+fn a64m_string_length() with Mut, Panic, Div {
+    a64m_word(0xAA0003E9)
+    a64m_imm(0, 0)
+    let loop_pos = A64M_LEN
+    a64m_word(0x3940012A)
+    a64m_word(0xF100015F)
+    let done = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0x91000529)
+    a64m_word(0x91000400)
+    let back = A64M_LEN
+    a64m_word(0x14000000)
+    a64m_branch(back, loop_pos, 0)
+    a64m_branch(done, A64M_LEN, 2)
+}
+fn a64m_open_file_info() with Mut, Panic, Div {
+    // Return x0=fd, x1=length; -1/-1 on an open/stat error or a directory.
+    a64m_word(0xD10303FF) // sub sp,sp,#192
+    a64m_imm(1, 0)
+    a64m_imm(16, 5)
+    a64m_word(0xD4001001)
+    let opened = A64M_LEN
+    a64m_word(0x54000003)
+    a64m_imm(0, -1)
+    a64m_imm(1, -1)
+    let failed = A64M_LEN
+    a64m_word(0x14000000)
+    a64m_branch(opened, A64M_LEN, 5)
+    a64m_word(0xF90003E0)
+    a64m_word(0x910043E1) // stat buffer at sp+16
+    a64m_imm(16, 339)
+    a64m_word(0xD4001001)
+    let stat_failed = A64M_LEN
+    a64m_word(0x54000002)
+    a64m_word(0x79402BEA) // ldrh w10,[sp,#20] (stat.st_mode)
+    a64m_word(0x12140D4A)
+    a64m_word(0x7140115F)
+    let directory = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0xF9403BE1) // stat.st_size at sp+16+96
+    a64m_word(0xF94003E0)
+    let okay = A64M_LEN
+    a64m_word(0x14000000)
+    a64m_branch(stat_failed, A64M_LEN, 4)
+    a64m_branch(directory, A64M_LEN, 2)
+    a64m_word(0xF94003E0)
+    a64m_imm(16, 6)
+    a64m_word(0xD4001001)
+    a64m_imm(0, -1)
+    a64m_imm(1, -1)
+    a64m_branch(okay, A64M_LEN, 0)
+    a64m_branch(failed, A64M_LEN, 0)
+    a64m_word(0x910303FF)
+}
+fn a64m_file_size() with Mut, Panic, Div {
+    a64m_word(0xD10043FF)
+    a64m_open_file_info()
+    a64m_word(0xF90003E1)
+    a64m_word(0xF100001F)
+    let absent = A64M_LEN
+    a64m_word(0x5400000B)
+    a64m_imm(16, 6)
+    a64m_word(0xD4001001)
+    a64m_branch(absent, A64M_LEN, 13)
+    a64m_word(0xF94003E0)
+    a64m_word(0x910043FF)
+}
+fn a64m_read_file() with Mut, Panic, Div {
+    // Size the allocation from fstat, then loop reads: no fixed 4/16 MiB cap.
+    a64m_word(0xD10103FF)
+    a64m_open_file_info()
+    a64m_word(0xF90003E0)
+    a64m_word(0xF100003F)
+    let size_okay = A64M_LEN
+    a64m_word(0x5400000A)
+    a64m_imm(1, 0)
+    a64m_branch(size_okay, A64M_LEN, 12)
+    a64m_word(0xF90007E1)
+    a64m_word(0x91000421)
+    a64m_imm(0, 0)
+    a64m_imm(2, 3)
+    a64m_imm(3, 0x1002)
+    a64m_imm(4, -1)
+    a64m_imm(5, 0)
+    a64m_imm(16, 197)
+    a64m_word(0xD4001001)
+    a64m_word(0x54000043)
+    a64m_word(0xD4200000)
+    a64m_word(0xF9000BE0)
+    a64m_word(0xF9000FFF)
+    let loop_pos = A64M_LEN
+    a64m_word(0xF9400FE9) // read offset
+    a64m_word(0xF94007EA) // stat length
+    a64m_word(0xEB0A013F)
+    let done = A64M_LEN
+    a64m_word(0x54000002)
+    a64m_word(0xF9400BE1)
+    a64m_word(0x8B090021)
+    a64m_word(0xCB090142)
+    a64m_word(0xF94003E0)
+    a64m_imm(16, 3)
+    a64m_word(0xD4001001)
+    a64m_word(0x54000043)
+    a64m_word(0xD4200000) // read failure must not fabricate a truncated result
+    a64m_word(0xF100001F)
+    let eof = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0xF9400FE9)
+    a64m_word(0x8B000129)
+    a64m_word(0xF9000FE9)
+    let back = A64M_LEN
+    a64m_word(0x14000000)
+    a64m_branch(back, loop_pos, 0)
+    a64m_branch(done, A64M_LEN, 4)
+    a64m_branch(eof, A64M_LEN, 2)
+    a64m_word(0xF94003E0)
+    a64m_word(0xF100001F)
+    let absent = A64M_LEN
+    a64m_word(0x5400000B)
+    a64m_imm(16, 6)
+    a64m_word(0xD4001001)
+    a64m_branch(absent, A64M_LEN, 13)
+    a64m_word(0xF9400BE0)
+    a64m_word(0x910103FF)
+}
+fn a64m_binary(op: BinaryOp) -> bool with Mut, Panic {
+    if op == BinaryOp::OpDiv || op == BinaryOp::OpUDiv || op == BinaryOp::OpRem || op == BinaryOp::OpURem {
+        // ARM SDIV/UDIV returns zero for a zero divisor. Preserve the checked
+        // integer operation's failure instead of emitting a plausible zero.
+        a64m_word(0xF100015F)
+        a64m_word(0x54000041)
+        a64m_word(0xD4200000)
+    }
+    if op == BinaryOp::OpAdd { a64m_word(0x8B0A0129) }
+    else if op == BinaryOp::OpSub { a64m_word(0xCB0A0129) }
+    else if op == BinaryOp::OpMul { a64m_word(0x9B0A7D29) }
+    else if op == BinaryOp::OpDiv { a64m_word(0x9ACA0D29) }
+    else if op == BinaryOp::OpUDiv { a64m_word(0x9ACA0929) }
+    else if op == BinaryOp::OpRem || op == BinaryOp::OpURem {
+        if op == BinaryOp::OpRem { a64m_word(0x9ACA0D2B) } else { a64m_word(0x9ACA092B) }
+        a64m_word(0x9B0AA569)
+    }
+    else if op == BinaryOp::OpBitAnd || op == BinaryOp::OpAnd { a64m_word(0x8A0A0129) }
+    else if op == BinaryOp::OpBitOr || op == BinaryOp::OpOr { a64m_word(0xAA0A0129) }
+    else if op == BinaryOp::OpBitXor { a64m_word(0xCA0A0129) }
+    else if op == BinaryOp::OpShl { a64m_word(0x9ACA2129) }
+    else if op == BinaryOp::OpShr { a64m_word(0x9ACA2929) }
+    else if op == BinaryOp::OpUShr { a64m_word(0x9ACA2529) }
+    else {
+        var cond: i64 = -1
+        if op == BinaryOp::OpEq { cond = 0 }
+        else if op == BinaryOp::OpNe { cond = 1 }
+        else if op == BinaryOp::OpLt { cond = 11 }
+        else if op == BinaryOp::OpLe { cond = 13 }
+        else if op == BinaryOp::OpGt { cond = 12 }
+        else if op == BinaryOp::OpGe { cond = 10 }
+        if cond < 0 { return false }
+        a64m_word(0xEB0A013F)
+        a64m_word(0x9A9F07E9 | ((cond ^ 1) << 12))
+    }
+    true
+}
+fn a64m_float_binary(op: BinaryOp) -> bool with Mut, Panic {
+    a64m_word(0x9E670120) // fmov d0,x9
+    a64m_word(0x9E670141) // fmov d1,x10
+    if op == BinaryOp::OpAdd { a64m_word(0x1E612800) }
+    else if op == BinaryOp::OpSub { a64m_word(0x1E613800) }
+    else if op == BinaryOp::OpMul { a64m_word(0x1E610800) }
+    else if op == BinaryOp::OpDiv { a64m_word(0x1E611800) }
+    else {
+        var cond: i64 = -1
+        if op == BinaryOp::OpEq { cond = 0 }
+        else if op == BinaryOp::OpNe { cond = 1 }
+        else if op == BinaryOp::OpLt { cond = 4 }
+        else if op == BinaryOp::OpLe { cond = 9 }
+        else if op == BinaryOp::OpGt { cond = 12 }
+        else if op == BinaryOp::OpGe { cond = 10 }
+        if cond < 0 { return false }
+        a64m_word(0x1E612000) // fcmp d0,d1; ordered comparisons exclude NaN
+        a64m_word(0x9A9F07E9 | ((cond ^ 1) << 12))
+        return true
+    }
+    a64m_word(0x9E660009) // fmov x9,d0
+    true
+}
+fn a64m_array_index(base: i64, index: i64, label: i64) with Mut, Panic {
+    a64m_load(9, base)
+    if label == 1 { a64m_word(0xF9400129) }
+    a64m_load(10, index)
+    if label < 2 { a64m_word(0x91008129) } // object payload begins after 32 bytes
+    if label == 3 || label == 4 { a64m_word(0x8B0A0129) }
+    else { a64m_word(0x8B0A0D29) }
+}
+fn a64m_data_addr(reg: i64, offset: i64) with Mut, Panic, Div {
+    // Reserve the import and linkedit pages below the same dyld boundary used
+    // by the Mach-O writer. The old 128 MiB ceiling rejected valid arena globals.
+    if offset < -32 || offset > 6442450944 - 4429185024 - 32768 - 8 { A64M_ERROR = true; return }
+    if offset + 8 > A64M_BSS { A64M_BSS = offset + 8 }
+    let target = 4429185024 + 16384 + offset // first DATA page is the import table
+    let pc = 4294967296 + 16384 + A64M_LEN
+    let delta = target / 4096 - pc / 4096
+    if delta < -1048576 || delta > 1048575 { A64M_ERROR = true; return }
+    a64m_word(0x90000000 | ((delta & 3) << 29) | (((delta >> 2) & 524287) << 5) | reg)
+    a64m_word(0x91000000 | ((target & 4095) << 10) | (reg << 5) | reg)
+}
+fn a64m_system_math(name: string, argc: i64) -> bool with Mut, Panic, Div {
+    var symbol = name
+    if str_len(symbol) > 4 && symbol[0] == 102 as i8 && symbol[1] == 102 as i8 && symbol[2] == 105 as i8 && symbol[3] == 95 as i8 {
+        symbol = str_slice(symbol, 4)
+    }
+    let binary = symbol == "pow" || symbol == "atan2" || symbol == "hypot" || symbol == "fmod"
+    let unary = symbol == "sin" || symbol == "cos" || symbol == "tan" || symbol == "asin" || symbol == "acos" || symbol == "atan" || symbol == "exp" || symbol == "exp2" || symbol == "log" || symbol == "log2" || symbol == "log10" || symbol == "cbrt" || symbol == "tgamma" || symbol == "sinh" || symbol == "cosh" || symbol == "tanh" || symbol == "fabs"
+    if !unary && !binary { return false }
+    if (binary && argc != 2) || (unary && argc != 1) { return false }
+    a64m_word(0x9E670000) // internal word bits -> C ABI d0/d1
+    if binary { a64m_word(0x9E670021) }
+    if !a64m_import_call(symbol) { return false }
+    a64m_word(0x9E660000) // C ABI d0 -> internal result bits
+    true
+}
+fn a64m_import_call(symbol: string) -> bool with Mut, Panic, Div {
+    let nm = make_name(symbol)
+    var id: i64 = -1
+    var i: i64 = 0
+    while i < A64M_IMPORT_N {
+        if ir_name_eq(A64M_IMPORT_NAMES[i as usize], nm) { id = i }
+        i = i + 1
+    }
+    if id < 0 {
+        if A64M_IMPORT_N >= 64 { A64M_ERROR = true; return false }
+        id = A64M_IMPORT_N
+        A64M_IMPORT_NAMES[id as usize] = nm
+        A64M_IMPORT_N = id + 1
+    }
+    let target = 4429185024 + id * 8
+    let pc = 4294967296 + 16384 + A64M_LEN
+    let delta = target / 4096 - pc / 4096
+    a64m_word(0x9000000E | ((delta & 3) << 29) | (((delta >> 2) & 524287) << 5))
+    a64m_word(0xF94001CE | ((id * 8 / 8) << 10)) // ldr x14,[x14,#id*8]
+    a64m_word(0xD63F01C0)
+    true
+}
+fn a64m_string_address(reg: i64, text: string) with Mut, Panic, Div {
+    a64m_word(0x10000040 | reg) // adr reg,+8
+    let skip = A64M_LEN
+    a64m_word(0x14000000)
+    var i: i64 = 0
+    while i < str_len(text) { a64m_byte(text[i as usize] as i64); i = i + 1 }
+    a64m_byte(0)
+    while A64M_LEN % 4 != 0 { a64m_byte(0) }
+    a64m_branch(skip, A64M_LEN, 0)
+}
+fn a64m_require_result(nonzero: bool) with Mut, Panic, Div {
+    a64m_word(0xF100001F)
+    let okay = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_imm(0, 1)
+    a64m_imm(16, 1)
+    a64m_word(0xD4001001)
+    a64m_branch(okay, A64M_LEN, if nonzero { 3 } else { 2 })
+}
+fn a64m_metal_launch(id: i64, name: string, at: i64, argc: i64) -> bool with IO, Mut, Panic, Div {
+    if argc != native_metal_arg_count(id) || argc <= 0 || argc > 31 { return false }
+    var runtime = read_env("SOUNIO_METAL_RUNTIME")
+    if str_len(runtime) == 0 { runtime = read_env("PWD") + "/artifacts/self-hosted/libsounio_metal.dylib" }
+    if file_size(runtime) <= 0 {
+        print("error: missing native Metal runtime; run scripts/dev/build_native_metal_runtime.sh or set SOUNIO_METAL_RUNTIME\n")
+        return false
+    }
+    let bytes = argc * 16 + 16
+    a64m_word(0xD10003FF | (bytes << 10))
+    a64m_string_address(0, runtime)
+    a64m_imm(1, 2) // RTLD_NOW
+    if !a64m_import_call("dlopen") { return false }
+    a64m_require_result(true)
+    a64m_string_address(1, "sounio_metal_launch")
+    if !a64m_import_call("dlsym") { return false }
+    a64m_require_result(true)
+    a64m_word(0xF90003E0 | ((argc * 2) << 10))
+    var i: i64 = 0
+    while i < argc {
+        a64m_load(9, ir_arena_arg_at(at, i))
+        a64m_word(0xF90003E9 | ((i * 2) << 10))
+        a64m_imm(9, native_metal_arg_kind(id, i))
+        a64m_word(0xF90003E9 | ((i * 2 + 1) << 10))
+        i = i + 1
+    }
+    a64m_string_address(0, native_metal_source(id))
+    a64m_string_address(1, "sounio_kernel_" + name)
+    a64m_word(0x910003E2) // mov x2,sp
+    a64m_imm(3, argc)
+    a64m_load(4, ir_arena_arg_at(at, 0))
+    a64m_word(0xF94003EE | ((argc * 2) << 10))
+    a64m_word(0xD63F01C0)
+    a64m_word(0x910003FF | (bytes << 10))
+    a64m_require_result(false)
+    true
+}
+fn a64m_stack_args(argc: i64) -> i64 with Mut, Panic, Div {
+    let bytes = if argc > 8 { ((argc - 8) * 8 + 15) / 16 * 16 } else { 0 }
+    if bytes > 0 { a64m_word(0xD10003FF | (bytes << 10)) }
+    bytes
+}
+fn a64m_args(at: i64, argc: i64) -> i64 with Mut, Panic, Div {
+    let bytes = a64m_stack_args(argc)
+    var k: i64 = 0
+    while k < argc {
+        if k < 8 { a64m_load(k, ir_arena_arg_at(at, k)) }
+        else {
+            a64m_load(9, ir_arena_arg_at(at, k))
+            a64m_word(0xF90003E9 | ((k - 8) << 10))
+        }
+        k = k + 1
+    }
+    bytes
+}
+fn a64m_temp_load(reg: i64, word: i64) with Mut, Panic {
+    a64m_word(0xF94003E0 | (word << 10) | reg)
+}
+fn a64m_temp_store(reg: i64, word: i64) with Mut, Panic {
+    a64m_word(0xF90003E0 | (word << 10) | reg)
+}
+fn a64m_wide_result(dst: i64, n: i64, base: i64, bytes: i64) with Mut, Panic {
+    var k: i64 = 0
+    while k < n {
+        a64m_temp_load(9, base + k)
+        a64m_store(9, dst + k)
+        A64M_INT[(dst + k) as usize] = true
+        A64M_FLOAT[(dst + k) as usize] = false
+        k = k + 1
+    }
+    a64m_word(0x910003FF | (bytes << 10))
+}
+fn a64m_wide_compare(instr: IrInstr) with Mut, Panic, Div {
+    let n = instr.imm_i64
+    let op = instr.field_idx
+    a64m_imm(11, if op == 0 || op == 3 || op == 5 || op == 9 || op == 11 { 1 } else { 0 })
+    var done: [i64; 64] = [0; 64]
+    var k = n - 1
+    while k >= 0 {
+        a64m_load(9, instr.src1 + k)
+        a64m_load(10, instr.src2 + k)
+        a64m_word(0xEB0A013F) // cmp x9,x10
+        let equal = A64M_LEN
+        a64m_word(0x54000000)
+        if op == 0 { a64m_imm(11, 0) }
+        else if op == 1 { a64m_imm(11, 1) }
+        else {
+            var condition: i64 = 3 // unsigned less
+            if op == 3 || op == 9 { condition = 9 }
+            if op == 4 || op == 10 { condition = 8 }
+            if op == 5 || op == 11 { condition = 2 }
+            if op >= 8 && k == n - 1 {
+                if op == 8 { condition = 11 }
+                if op == 9 { condition = 13 }
+                if op == 10 { condition = 12 }
+                if op == 11 { condition = 10 }
+            }
+            a64m_word(0x9A9F07EB | ((condition ^ 1) << 12))
+        }
+        done[k as usize] = A64M_LEN
+        a64m_word(0x14000000)
+        a64m_branch(equal, A64M_LEN, 2)
+        k = k - 1
+    }
+    k = 0
+    while k < n { a64m_branch(done[k as usize], A64M_LEN, 0); k = k + 1 }
+    a64m_store(11, instr.dst)
+    A64M_INT[instr.dst as usize] = true
+    A64M_FLOAT[instr.dst as usize] = false
+}
+fn a64m_wide_divide(instr: IrInstr) with Mut, Panic, Div {
+    let n = instr.imm_i64
+    let single = instr.op == IrOpcode::IrWideDiv || instr.op == IrOpcode::IrWideMod
+    let remainder_result = instr.op == IrOpcode::IrWideMod || instr.op == IrOpcode::IrWideModFull
+    // Snapshot inputs, then n-word quotient and (n+1)-word remainder. The extra
+    // remainder limb preserves the carry when a full-width divisor has bit 63.
+    let bytes = ((4 * n + 1) * 8 + 15) / 16 * 16
+    a64m_word(0xD10003FF | (bytes << 10))
+    var k: i64 = 0
+    while k < n {
+        a64m_load(9, instr.src1 + k)
+        a64m_temp_store(9, k)
+        if single && k > 0 { a64m_imm(9, 0) }
+        else { a64m_load(9, instr.src2 + k) }
+        a64m_temp_store(9, n + k)
+        k = k + 1
+    }
+    a64m_imm(9, 0)
+    k = 0
+    while k < n { a64m_temp_load(10, n + k); a64m_word(0xAA0A0129); k = k + 1 }
+    a64m_word(0xF100013F)
+    a64m_word(0x54000041) // nonzero divisor skips trap
+    a64m_word(0xD4200000)
+    a64m_imm(9, 0)
+    k = 2 * n
+    while k <= 4 * n { a64m_temp_store(9, k); k = k + 1 }
+    var input_limb = n - 1
+    while input_limb >= 0 {
+        a64m_imm(17, 63)
+        let top = A64M_LEN
+        // Q <<= 1, preserving carry between limbs.
+        k = 0
+        while k < n {
+            a64m_temp_load(9, 2 * n + k)
+            a64m_word(if k == 0 { 0xAB090129 } else { 0xBA090129 })
+            a64m_temp_store(9, 2 * n + k)
+            k = k + 1
+        }
+        a64m_temp_load(9, input_limb)
+        a64m_word(0x9AD1252A) // lsr x10,x9,x17
+        a64m_imm(11, 1)
+        a64m_word(0x8A0B014A) // and x10,x10,x11
+        k = 0
+        while k <= n {
+            a64m_temp_load(9, 3 * n + k)
+            a64m_word(if k == 0 { 0xAB090129 } else { 0xBA090129 })
+            if k == 0 { a64m_word(0xAA0A0129) }
+            a64m_temp_store(9, 3 * n + k)
+            k = k + 1
+        }
+        var subtract: [i64; 65] = [0; 65]
+        var skip: [i64; 64] = [0; 64]
+        a64m_temp_load(9, 4 * n)
+        a64m_word(0xF100013F)
+        subtract[n as usize] = A64M_LEN
+        a64m_word(0x54000001)
+        k = n - 1
+        while k >= 0 {
+            a64m_temp_load(9, 3 * n + k)
+            a64m_temp_load(10, n + k)
+            a64m_word(0xEB0A013F)
+            subtract[k as usize] = A64M_LEN
+            a64m_word(0x54000008) // unsigned higher -> subtract
+            skip[k as usize] = A64M_LEN
+            a64m_word(0x54000003) // unsigned lower -> no subtraction
+            k = k - 1
+        }
+        a64m_branch(subtract[n as usize], A64M_LEN, 3)
+        k = 0
+        while k < n { a64m_branch(subtract[k as usize], A64M_LEN, 10); k = k + 1 }
+        k = 0
+        while k < n {
+            a64m_temp_load(9, 3 * n + k)
+            a64m_temp_load(10, n + k)
+            a64m_word(if k == 0 { 0xEB0A0129 } else { 0xFA0A0129 })
+            a64m_temp_store(9, 3 * n + k)
+            k = k + 1
+        }
+        a64m_temp_load(9, 4 * n)
+        a64m_word(0xDA1F0129) // sbc x9,x9,xzr
+        a64m_temp_store(9, 4 * n)
+        a64m_temp_load(9, 2 * n)
+        a64m_imm(10, 1)
+        a64m_word(0xAA0A0129)
+        a64m_temp_store(9, 2 * n)
+        k = 0
+        while k < n { a64m_branch(skip[k as usize], A64M_LEN, 5); k = k + 1 }
+        a64m_word(0xF1000631) // subs x17,x17,#1
+        let back = A64M_LEN
+        a64m_word(0x54000005) // b.pl (including bit zero)
+        a64m_branch(back, top, 7)
+        input_limb = input_limb - 1
+    }
+    a64m_wide_result(instr.dst, n, if remainder_result { 3 * n } else { 2 * n }, bytes)
+}
+fn a64m_wide(instr: IrInstr, regs: i64) -> bool with Mut, Panic, Div {
+    let op = instr.op
+    let n = instr.imm_i64
+    if n < 1 || n > 64 || instr.src1 < 0 || instr.src1 + n > regs || instr.dst < 0 { return false }
+    let is_wide_compare = op == IrOpcode::IrWideCmp
+    let is_wide_shift = op == IrOpcode::IrWideShr || op == IrOpcode::IrWideShrLimb
+    let dst_n = if is_wide_compare { 1 } else { n }
+    if instr.dst + dst_n > regs { return false }
+    if !is_wide_shift {
+        let rhs_n = if op == IrOpcode::IrWideDiv || op == IrOpcode::IrWideMod { 1 } else { n }
+        if instr.src2 < 0 || instr.src2 + rhs_n > regs { return false }
+    } else if instr.src2 < 0 { return false }
+    if is_wide_compare {
+        if instr.field_idx < 0 || instr.field_idx > 11 || instr.field_idx == 6 || instr.field_idx == 7 { return false }
+        a64m_wide_compare(instr)
+        return !A64M_ERROR
+    }
+    if op == IrOpcode::IrWideDiv || op == IrOpcode::IrWideMod || op == IrOpcode::IrWideDivFull || op == IrOpcode::IrWideModFull {
+        a64m_wide_divide(instr)
+        return !A64M_ERROR
+    }
+    let bytes = (n * 8 + 15) / 16 * 16
+    a64m_word(0xD10003FF | (bytes << 10))
+    var k: i64 = 0
+    if op == IrOpcode::IrWideMul {
+        a64m_imm(9, 0)
+        while k < n { a64m_temp_store(9, k); k = k + 1 }
+        var i: i64 = 0
+        while i < n {
+            a64m_imm(14, 0)
+            var j: i64 = 0
+            while i + j < n {
+                a64m_load(9, instr.src1 + i)
+                a64m_load(10, instr.src2 + j)
+                a64m_word(0x9B0A7D2B) // mul x11,x9,x10
+                a64m_word(0x9BCA7D2C) // umulh x12,x9,x10
+                a64m_temp_load(13, i + j)
+                a64m_word(0xAB0D016B)
+                a64m_word(0x9A1F018C)
+                a64m_word(0xAB0E016B)
+                a64m_word(0x9A1F018E)
+                a64m_temp_store(11, i + j)
+                j = j + 1
+            }
+            i = i + 1
+        }
+    } else if is_wide_shift {
+        let whole = if op == IrOpcode::IrWideShrLimb { instr.src2 } else { instr.src2 / 64 }
+        let part = if op == IrOpcode::IrWideShrLimb { 0 } else { instr.src2 % 64 }
+        while k < n {
+            if k + whole >= n { a64m_imm(9, 0) }
+            else {
+                a64m_load(9, instr.src1 + k + whole)
+                if part > 0 {
+                    a64m_imm(10, part)
+                    a64m_word(0x9ACA2529)
+                    if k + whole + 1 < n {
+                        a64m_load(11, instr.src1 + k + whole + 1)
+                        a64m_imm(10, 64 - part)
+                        a64m_word(0x9ACA216B)
+                        a64m_word(0xAA0B0129)
+                    }
+                }
+            }
+            a64m_temp_store(9, k)
+            k = k + 1
+        }
+    } else {
+        while k < n {
+            a64m_load(9, instr.src1 + k)
+            a64m_load(10, instr.src2 + k)
+            if op == IrOpcode::IrWideAdd { a64m_word(if k == 0 { 0xAB0A0129 } else { 0xBA0A0129 }) }
+            else if op == IrOpcode::IrWideSub { a64m_word(if k == 0 { 0xEB0A0129 } else { 0xFA0A0129 }) }
+            else { return false }
+            a64m_temp_store(9, k)
+            k = k + 1
+        }
+    }
+    a64m_wide_result(instr.dst, n, 0, bytes)
+    !A64M_ERROR
+}
+fn a64m_emit_instr(module: &IrModule, func: &IrFunction, ii: i64) -> bool with IO, Mut, Panic, Div {
+    let at = ir_region_slot_r((*func).region, ii)
+    let instr = ir_arena_load(at)
+    let op = instr.op
+    if A64M_TRACE {
+        print("ARM64_IR fn=")
+        print(str_from_bytes((*func).name.buf, (*func).name.len))
+        print(" op="); print_int(op as i64)
+        print(" dst="); print_int(instr.dst)
+        print(" a="); print_int(instr.src1)
+        print(" b="); print_int(instr.src2)
+        print(" imm="); print_int(instr.imm_i64)
+        print(" field="); print_int(instr.field_idx)
+        print(" label="); print_int(instr.label_id)
+        print(" fn="); print_int(instr.fn_id)
+        print(" pc="); print_int(A64M_LEN)
+        print("\n")
+    }
+    if op == IrOpcode::IrNop {
+        if instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
+            if instr.dst < 0 || instr.dst >= 65536 { return false }
+            A64M_FLOAT[instr.dst as usize] = true
+            A64M_INT[instr.dst as usize] = false
+        }
+        return true
+    }
+    if op == IrOpcode::IrLoadImm || op == IrOpcode::IrLoadBool {
+        if instr.imm_flags == IR_BSS_ADDRESS_FLAG {
+            a64m_data_addr(9, instr.imm_i64 - BSS_BASE_LINUX)
+        } else { a64m_imm(9, instr.imm_i64) }
+        a64m_store(9, instr.dst)
+        A64M_FLOAT[instr.dst as usize] = false
+        A64M_INT[instr.dst as usize] = true
+    } else if op == IrOpcode::IrLoadFloat {
+        a64m_imm(9, f64_to_bits(instr.imm_f64))
+        a64m_store(9, instr.dst)
+        A64M_FLOAT[instr.dst as usize] = true
+        A64M_INT[instr.dst as usize] = false
+    } else if op == IrOpcode::IrIntToFloat || op == IrOpcode::IrFloatToInt {
+        a64m_load(9, instr.src1)
+        if op == IrOpcode::IrIntToFloat {
+            a64m_word(0x9E620120)
+            a64m_word(0x9E660009)
+            A64M_FLOAT[instr.dst as usize] = true
+            A64M_INT[instr.dst as usize] = false
+        } else {
+            a64m_word(0x9E670120)
+            a64m_word(0x9E780009)
+            A64M_FLOAT[instr.dst as usize] = false
+            A64M_INT[instr.dst as usize] = true
+        }
+        a64m_store(9, instr.dst)
+    } else if op == IrOpcode::IrLoadString {
+        let text = ir_name_at(instr.name_id)
+        a64m_word(0x10000049) // adr x9,+8
+        let skip = A64M_LEN
+        a64m_word(0x14000000)
+        var k: i64 = 0
+        while k < text.len { a64m_byte(text.buf[k as usize] as i64); k = k + 1 }
+        a64m_byte(0)
+        while A64M_LEN % 4 != 0 { a64m_byte(0) }
+        a64m_branch(skip, A64M_LEN, 0)
+        a64m_store(9, instr.dst)
+    } else if op == IrOpcode::IrWideAdd || op == IrOpcode::IrWideSub || op == IrOpcode::IrWideMul || op == IrOpcode::IrWideCmp || op == IrOpcode::IrWideShr || op == IrOpcode::IrWideShrLimb || op == IrOpcode::IrWideDiv || op == IrOpcode::IrWideMod || op == IrOpcode::IrWideDivFull || op == IrOpcode::IrWideModFull {
+        return a64m_wide(instr, (*func).reg_count)
+    } else if op == IrOpcode::IrCopy {
+        a64m_load(9, instr.src1)
+        a64m_store(9, instr.dst)
+        A64M_FLOAT[instr.dst as usize] = A64M_FLOAT[instr.src1 as usize]
+        A64M_INT[instr.dst as usize] = A64M_INT[instr.src1 as usize]
+    } else if op == IrOpcode::IrBinOp {
+        a64m_load(9, instr.src1)
+        a64m_load(10, instr.src2)
+        let lhs_float = (A64M_FLOAT[instr.src1 as usize] || (instr.imm_flags & 2) != 0) && !A64M_INT[instr.src1 as usize]
+        let rhs_float = (A64M_FLOAT[instr.src2 as usize] || (instr.imm_flags & 4) != 0) && !A64M_INT[instr.src2 as usize]
+        if lhs_float || rhs_float {
+            if !lhs_float {
+                a64m_word(0x9E620120) // scvtf d0,x9
+                a64m_word(0x9E660009) // fmov x9,d0
+            }
+            if !rhs_float {
+                a64m_word(0x9E620141) // scvtf d1,x10
+                a64m_word(0x9E66002A) // fmov x10,d1
+            }
+            if !a64m_float_binary(instr.bin_op) { return false }
+            A64M_FLOAT[instr.dst as usize] = instr.bin_op == BinaryOp::OpAdd || instr.bin_op == BinaryOp::OpSub || instr.bin_op == BinaryOp::OpMul || instr.bin_op == BinaryOp::OpDiv
+            A64M_INT[instr.dst as usize] = !A64M_FLOAT[instr.dst as usize]
+        } else {
+            if !a64m_binary(instr.bin_op) { return false }
+            A64M_FLOAT[instr.dst as usize] = false
+            A64M_INT[instr.dst as usize] = true
+        }
+        a64m_store(9, instr.dst)
+    } else if op == IrOpcode::IrUnaryOp {
+        if instr.un_op == UnaryOp::OpRef || instr.un_op == UnaryOp::OpRefMut {
+            // References address the virtual-register cell; aggregate field
+            // operations through a reference load the handle from that cell.
+            a64m_slot(instr.src1)
+            a64m_word(0xAA0F03E9)
+        } else {
+            a64m_load(9, instr.src1)
+            if instr.un_op == UnaryOp::OpNeg {
+                if A64M_FLOAT[instr.src1 as usize] {
+                    a64m_word(0x9E670120)
+                    a64m_word(0x1E614000) // fneg d0,d0
+                    a64m_word(0x9E660009)
+                    A64M_FLOAT[instr.dst as usize] = true
+                } else { a64m_word(0xCB0903E9) }
+            }
+            else if instr.un_op == UnaryOp::OpNot {
+                a64m_word(0xF100013F)
+                a64m_word(0x9A9F17E9)
+            } else if instr.un_op == UnaryOp::OpBitNot { a64m_word(0xAA2903E9) }
+            else if instr.un_op == UnaryOp::OpDeref { a64m_word(0xF9400129) }
+            else { return false }
+        }
+        a64m_store(9, instr.dst)
+    } else if op == IrOpcode::IrAlloc {
+        a64m_imm(0, 0)
+        a64m_imm(1, native_v2_alloc_size_from_tag(instr.imm_i64) + 32)
+        a64m_imm(2, 3)
+        a64m_imm(3, 0x1002)
+        a64m_imm(4, -1)
+        a64m_imm(5, 0)
+        a64m_imm(16, 197)
+        a64m_word(0xD4001001)
+        a64m_word(0x54000043) // b.cc +8
+        a64m_word(0xD4200000) // allocation failure traps
+        a64m_imm(9, if instr.field_idx < 0 { 0 } else { instr.field_idx })
+        a64m_word(0xF9000809) // header.flags = logical element count
+        a64m_imm(9, native_v2_alloc_size_from_tag(instr.imm_i64))
+        a64m_word(0xF9000409) // header.payload_size
+        a64m_store(0, instr.dst)
+    } else if op == IrOpcode::IrIndexGet || op == IrOpcode::IrIndexSet {
+        a64m_array_index(instr.src1, instr.src2, instr.label_id)
+        if op == IrOpcode::IrIndexGet {
+            if instr.label_id == 3 { a64m_word(0x3940012A) }
+            else if instr.label_id == 4 { a64m_word(0x3980012A) }
+            else { a64m_word(0xF940012A) }
+            a64m_store(10, instr.dst)
+            A64M_FLOAT[instr.dst as usize] = instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG
+        } else {
+            a64m_load(10, instr.imm_i64)
+            if instr.label_id == 3 || instr.label_id == 4 { a64m_word(0x3900012A) }
+            else { a64m_word(0xF900012A) }
+        }
+    } else if op == IrOpcode::IrArrayLen {
+        a64m_load(9, instr.src1)
+        if instr.label_id == 1 { a64m_word(0xF9400129) }
+        a64m_word(0xF940092A)
+        a64m_store(10, instr.dst)
+    } else if op == IrOpcode::IrStorePtr {
+        a64m_load(9, instr.src1)
+        a64m_load(10, instr.src2)
+        a64m_word(0xF900012A)
+    } else if op == IrOpcode::IrLoadGlobal || op == IrOpcode::IrStoreGlobal {
+        a64m_data_addr(9, instr.imm_i64)
+        if op == IrOpcode::IrLoadGlobal {
+            a64m_word(0xF940012A)
+            a64m_store(10, instr.dst)
+        } else {
+            a64m_load(10, instr.src1)
+            a64m_word(0xF900012A)
+        }
+    } else if op == IrOpcode::IrLoadFnRef {
+        if A64M_ADDR_N >= 65536 { return false }
+        A64M_ADDR_POS[A64M_ADDR_N as usize] = A64M_LEN
+        A64M_ADDR_FN[A64M_ADDR_N as usize] = instr.fn_id
+        A64M_ADDR_N = A64M_ADDR_N + 1
+        a64m_word(0x90000009)
+        a64m_word(0x91000129)
+        a64m_store(9, instr.dst)
+    } else if op == IrOpcode::IrCallIndirect {
+        if instr.arg_count > 64 { return false }
+        a64m_load(14, instr.src1)
+        a64m_imm(9, 1)
+        a64m_word(0xEA0901DF) // tst x14,x9: odd means a closure descriptor
+        let plain = A64M_LEN
+        a64m_word(0x54000000)
+        if instr.arg_count >= 64 {
+            // An environment plus 64 explicit args exceeds the internal ABI.
+            a64m_imm(0, 1)
+            a64m_imm(16, 1)
+            a64m_word(0xD4001001)
+        } else {
+            let env_cleanup = a64m_stack_args(instr.arg_count + 1)
+            var ai: i64 = 0
+            while ai < instr.arg_count {
+                if ai < 7 { a64m_load(ai + 1, ir_arena_arg_at(at, ai)) }
+                else {
+                    a64m_load(9, ir_arena_arg_at(at, ai))
+                    a64m_word(0xF90003E9 | ((ai - 7) << 10))
+                }
+                ai = ai + 1
+            }
+            a64m_imm(9, -2)
+            a64m_word(0x8A0901C0) // and x0,x14,x9: untagged environment
+            a64m_word(0xF940100E) // ldr x14,[x0,#32]: code pointer
+            a64m_word(0xD63F01C0)
+            if env_cleanup > 0 { a64m_word(0x910003FF | (env_cleanup << 10)) }
+        }
+        let joined = A64M_LEN
+        a64m_word(0x14000000)
+        a64m_branch(plain, A64M_LEN, 2)
+        let cleanup = a64m_args(at, instr.arg_count)
+        a64m_load(14, instr.src1)
+        a64m_word(0xD63F01C0) // blr x14
+        if cleanup > 0 { a64m_word(0x910003FF | (cleanup << 10)) }
+        a64m_branch(joined, A64M_LEN, 0)
+        a64m_store(0, instr.dst)
+    } else if op == IrOpcode::IrFieldGet || op == IrOpcode::IrFieldSet {
+        a64m_load(9, instr.src1)
+        if instr.label_id == 1 { a64m_word(0xF9400129) }
+        a64m_imm(10, 32 + instr.field_idx * 8)
+        a64m_word(0x8B0A0129)
+        if op == IrOpcode::IrFieldGet {
+            a64m_word(0xF940012A)
+            a64m_store(10, instr.dst)
+            if instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG { A64M_FLOAT[instr.dst as usize] = true }
+        } else {
+            a64m_load(10, instr.src2)
+            a64m_word(0xF900012A)
+        }
+    } else if op == IrOpcode::IrLabel {
+        if instr.label_id < 0 || instr.label_id >= 8192 { return false }
+        A64M_LABEL[instr.label_id as usize] = A64M_LEN
+    } else if op == IrOpcode::IrJump {
+        a64m_jump(instr.label_id, 0)
+    } else if op == IrOpcode::IrBranchTrue || op == IrOpcode::IrBranchFalse {
+        a64m_load(9, instr.src1)
+        a64m_word(0xF100013F)
+        if op == IrOpcode::IrBranchTrue { a64m_jump(instr.label_id, 3) }
+        else { a64m_jump(instr.label_id, 2) }
+    } else if op == IrOpcode::IrReturn || op == IrOpcode::IrReturnSret {
+        if instr.src1 >= 0 { a64m_load(0, instr.src1) } else { a64m_imm(0, 0) }
+        a64m_epilogue()
+    } else if op == IrOpcode::IrCallSret {
+        if instr.arg_count > 63 || instr.fn_id < 0 || instr.fn_id >= (*module).fn_count { return false }
+        let cleanup = a64m_stack_args(instr.arg_count + 1)
+        a64m_load(0, instr.src1)
+        var k: i64 = 0
+        while k < instr.arg_count {
+            if k < 7 { a64m_load(k + 1, instr.field_idx + k) }
+            else {
+                a64m_load(9, instr.field_idx + k)
+                a64m_word(0xF90003E9 | ((k - 7) << 10))
+            }
+            k = k + 1
+        }
+        a64m_call(instr.fn_id)
+        if cleanup > 0 { a64m_word(0x910003FF | (cleanup << 10)) }
+        a64m_store(0, instr.dst)
+    } else if op == IrOpcode::IrCallExtern {
+        let metal_name = ir_name_at(instr.name_id)
+        let metal_symbol = str_from_bytes(metal_name.buf, metal_name.len)
+        let metal_id = native_metal_find(metal_symbol)
+        if metal_id >= 0 {
+            if !a64m_metal_launch(metal_id, metal_symbol, at, instr.arg_count) { return false }
+            a64m_store(0, instr.dst)
+            return !A64M_ERROR
+        }
+        if instr.arg_count > 8 { return false }
+        let cleanup = a64m_args(at, instr.arg_count)
+        let external_name = ir_name_at(instr.name_id)
+        if !a64m_system_math(str_from_bytes(external_name.buf, external_name.len), instr.arg_count) { return false }
+        if cleanup > 0 { a64m_word(0x910003FF | (cleanup << 10)) }
+        a64m_store(0, instr.dst)
+        if instr.dst >= 0 { A64M_FLOAT[instr.dst as usize] = true; A64M_INT[instr.dst as usize] = false }
+    } else if op == IrOpcode::IrCall {
+        if instr.arg_count > 64 || instr.fn_id < 0 || instr.fn_id >= (*module).fn_count { return false }
+        let target = ir_fn_get(module, instr.fn_id)
+        let name = str_from_bytes(target.name.buf, target.name.len)
+        // Option A dropped IrCallExtern-on-6 so native v2 can emit kernel
+        // callers (that opcode has no v2 arm: rc=12). Metal launch used to
+        // ride strategy 6. A collected kernel is still a device launch here
+        // by name, without remapping 6→4 or restoring IrCallExtern-on-6.
+        let metal_id = native_metal_find(name)
+        if metal_id >= 0 {
+            if !a64m_metal_launch(metal_id, name, at, instr.arg_count) { return false }
+            a64m_store(0, instr.dst)
+            return !A64M_ERROR
+        }
+        let cleanup = a64m_args(at, instr.arg_count)
+        // mmap allocations have process lifetime: no reusable region can open.
+        // Zero is the lowering protocol's explicit plain-return fallback.
+        if target.instr_count == 0 && name == "__rgn_enter" {
+            a64m_imm(0, 0)
+        } else if target.instr_count == 0 && name == "__rgn_exit_scalar" {
+            // Only the zero-token fallback is supported; never silently discard
+            // a real region close if a future producer introduces one.
+            a64m_word(0xB4000140) // cbz x0,+40 (two four-word immediates + svc)
+            a64m_imm(0, 1)
+            a64m_imm(16, 1)
+            a64m_word(0xD4001001)
+            a64m_imm(0, 0)
+        } else if target.instr_count == 0 && (name == "__rgn_escaped") {
+            a64m_imm(0, 1) // conservative: disable any attempted region reset/copy
+        } else if target.instr_count == 0 && (name == "__rgn_leave" || name == "__rgn_young" || name == "__rgn_cursor" || name == "__rgn_count" || name == "__rgn_reset_fits" || name == "__rgn_barrier" || name == "__rgn_mark_all") {
+            // No region can open on the process-lifetime mmap allocator.
+            a64m_imm(0, 0)
+        } else if target.instr_count == 0 && (name == "print" || name == "println") {
+            a64m_print_string()
+            if name == "println" { a64m_newline() }
+        } else if target.instr_count == 0 && (name == "print_int" || name == "print_i64") {
+            a64m_print_int()
+        } else if target.instr_count == 0 && (name == "print_f64" || name == "print_float") {
+            a64m_print_float()
+        } else if target.instr_count == 0 && name == "assert" {
+            a64m_word(0xF100001F)
+            let okay = A64M_LEN
+            a64m_word(0x54000001)
+            a64m_imm(0, 1)
+            a64m_imm(16, 1)
+            a64m_word(0xD4001001)
+            a64m_branch(okay, A64M_LEN, 3)
+        } else if target.instr_count == 0 && (name == "f64_to_bits" || name == "bits_to_f64") {
+            // Internal ABI already transports scalar f64 as raw x-register bits.
+        } else if target.instr_count == 0 && (name == "sqrt" || name == "ffi_sqrt") {
+            a64m_word(0x9E670000)
+            a64m_word(0x1E61C000)
+            a64m_word(0x9E660000)
+        } else if target.instr_count == 0 && (name == "getpid" || name == "ffi_getpid") {
+            a64m_imm(16, 20)
+            a64m_word(0xD4001001)
+        } else if target.instr_count == 0 && name == "str_len" {
+            a64m_string_length()
+        } else if target.instr_count == 0 && name == "str_char_at" {
+            a64m_word(0x8B010009)
+            a64m_word(0x39400120)
+        } else if target.instr_count == 0 && name == "file_size" {
+            a64m_file_size()
+        } else if target.instr_count == 0 && name == "read_file" {
+            a64m_read_file()
+        } else if target.instr_count == 0 && (name == "floor" || name == "ffi_floor" || name == "ceil" || name == "ffi_ceil") {
+            a64m_word(0x9E670000)
+            if name == "floor" || name == "ffi_floor" { a64m_word(0x1E654000) }
+            else { a64m_word(0x1E64C000) }
+            a64m_word(0x9E660000)
+        } else if target.instr_count == 0 && name == "panic" {
+            a64m_imm(0, 1)
+            a64m_imm(16, 1)
+            a64m_word(0xD4001001)
+        } else if target.instr_count == 0 && name == "print_char" {
+            a64m_word(0xD10043FF)
+            a64m_word(0x390003E0)
+            a64m_word(0x910003E1)
+            a64m_imm(2, 1)
+            a64m_write()
+            a64m_word(0x910043FF)
+        } else if target.instr_count == 0 && a64m_system_math(name, instr.arg_count) {
+            if instr.dst >= 0 { A64M_FLOAT[instr.dst as usize] = true; A64M_INT[instr.dst as usize] = false }
+        } else { a64m_call(instr.fn_id) }
+        if cleanup > 0 { a64m_word(0x910003FF | (cleanup << 10)) }
+        a64m_store(0, instr.dst)
+        if instr.dst >= 0 && target.returns_float == 1 { A64M_FLOAT[instr.dst as usize] = true }
+        if instr.dst >= 0 && name == "bits_to_f64" { A64M_FLOAT[instr.dst as usize] = true }
+    } else {
+        print("ARM64_UNSUPPORTED fn=")
+        print(str_from_bytes((*func).name.buf, (*func).name.len))
+        print(" instr=")
+        print_int(ii)
+        print(" opcode=")
+        print_int(op as i64)
+        print("\n")
+        return false
+    }
+    !A64M_ERROR
+}
+fn a64m_emit_function(module: &IrModule, fi: i64) -> bool with IO, Mut, Panic, Div {
+    let func = ir_fn_get(module, fi)
+    if func.compile_strategy == IR_STRATEGY_BSS_GLOBAL { return true }
+    if func.instr_count == 0 { return true }
+    if func.param_count > 64 || func.reg_count >= 65536 { return false }
+    A64M_FN[fi as usize] = A64M_LEN
+    A64M_JUMP_N = 0
+    var vr: i64 = 0
+    while vr < 65536 { A64M_FLOAT[vr as usize] = false; A64M_INT[vr as usize] = false; vr = vr + 1 }
+    var label: i64 = 0
+    while label < 8192 { A64M_LABEL[label as usize] = -1; label = label + 1 }
+    a64m_word(0xA9BF7BFD)
+    a64m_word(0x910003FD)
+    var frame = ((func.reg_count * 8 + 31) / 16) * 16
+    while frame > 0 {
+        let part = if frame > 4080 { 4080 } else { frame }
+        a64m_word(0xD10003FF | (part << 10))
+        frame = frame - part
+    }
+    var pi: i64 = 0
+    let hidden = if func.is_sret == 1 { 1 } else { 0 }
+    if hidden == 1 { a64m_store(0, func.sret_dest_reg) }
+    while pi < func.param_count {
+        if pi + hidden < 8 { a64m_store(pi + hidden, func.param_regs[pi as usize]) }
+        else {
+            a64m_word(0xF94003A9 | ((pi + hidden - 6) << 10)) // caller stack beyond saved fp/lr
+            a64m_store(9, func.param_regs[pi as usize])
+        }
+        pi = pi + 1
+    }
+    var ii: i64 = 0
+    while ii < func.instr_count {
+        if !a64m_emit_instr(module, &func, ii) {
+            print("ARM64_REFUSAL fn=")
+            print(str_from_bytes(func.name.buf, func.name.len))
+            print(" instr=")
+            print_int(ii)
+            print("\n")
+            return false
+        }
+        ii = ii + 1
+    }
+    a64m_imm(0, 0)
+    a64m_epilogue()
+    var j: i64 = 0
+    while j < A64M_JUMP_N {
+        let id = A64M_JUMP_ID[j as usize]
+        if id < 0 || id >= 8192 || A64M_LABEL[id as usize] < 0 { return false }
+        a64m_branch(A64M_JUMP_POS[j as usize], A64M_LABEL[id as usize], A64M_JUMP_KIND[j as usize])
+        j = j + 1
+    }
+    !A64M_ERROR
+}
+
+fn a64m_global_inits(module: &IrModule) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        let f = ir_fn_get(module, fi)
+        if f.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+            if f.param_count < 0 || f.bss_size < 0 { A64M_ERROR = true; return }
+            let limit = 6442450944 - 4429185024 - 32768
+            if f.param_count > limit || f.bss_size > limit - f.param_count { A64M_ERROR = true; return }
+            let end = f.param_count + f.bss_size
+            if end > A64M_BSS { A64M_BSS = end }
+            if f.returns_float == 1 {
+                let stride = if f.hyper_algebra_kind == 1 || f.hyper_algebra_kind == 17 { 1 } else { 8 }
+                if f.prof_counter_id == BSS_INIT_STRING_MAGIC && f.return_struct_name.len > 0 {
+                    a64m_word(0x1000004A)
+                    let skip = A64M_LEN
+                    a64m_word(0x14000000)
+                    var k: i64 = 0
+                    while k < f.return_struct_name.len { a64m_byte(f.return_struct_name.buf[k as usize] as i64); k = k + 1 }
+                    a64m_byte(0)
+                    while A64M_LEN % 4 != 0 { a64m_byte(0) }
+                    a64m_branch(skip, A64M_LEN, 0)
+                    a64m_data_addr(9, f.param_count)
+                    a64m_word(0xF900012A)
+                } else if f.instr_count > 1 {
+                    var k: i64 = 0
+                    while k < f.instr_count {
+                        let elem = ir_arena_load(ir_region_slot_r(f.region, k))
+                        a64m_data_addr(9, f.param_count + k * stride)
+                        a64m_imm(10, elem.imm_i64)
+                        if stride == 1 { a64m_word(0x3900012A) } else { a64m_word(0xF900012A) }
+                        k = k + 1
+                    }
+                } else if f.bss_size > 0 && f.bss_size <= 8 && stride == 8 {
+                    // Scalar slots are padded/aligned to eight bytes by lowering.
+                    // bool occupies one logical byte but carries the default
+                    // word stride. Dividing 1 by 8 gave a zero iteration count;
+                    // the post-tested fill then wrapped and wrote past __DATA.
+                    a64m_data_addr(9, f.param_count)
+                    a64m_imm(10, f.prof_counter_id)
+                    a64m_word(0xF900012A)
+                } else {
+                    a64m_data_addr(9, f.param_count)
+                    a64m_imm(10, f.prof_counter_id)
+                    a64m_imm(11, if f.bss_size > 0 { f.bss_size / stride } else { 1 })
+                    let loop_pos = A64M_LEN
+                    if stride == 1 { a64m_word(0x3800152A) } // strb w10,[x9],#1
+                    else { a64m_word(0xF800852A) } // str x10,[x9],#8
+                    a64m_word(0xF100056B) // subs x11,x11,#1
+                    let back = A64M_LEN
+                    a64m_word(0x54000001)
+                    a64m_branch(back, loop_pos, 3)
+                }
+            }
+        }
+        fi = fi + 1
+    }
+}
+
+fn a64m_image8(p: i64, v: i64) with Mut, Panic {
+    if p < 0 || p >= 16777216 { A64M_ERROR = true; return }
+    A64M_IMAGE[p as usize] = (v & 255) as i8
+}
+fn a64m_image16(p: i64, v: i64) with Mut, Panic {
+    a64m_image8(p, v)
+    a64m_image8(p + 1, v >> 8)
+}
+fn a64m_image32(p: i64, v: i64) with Mut, Panic {
+    a64m_image16(p, v)
+    a64m_image16(p + 2, v >> 16)
+}
+fn a64m_image64(p: i64, v: i64) with Mut, Panic {
+    a64m_image32(p, v)
+    a64m_image32(p + 4, v >> 32)
+}
+
+fn a64m_write_image(output: string) -> i64 with IO, Mut, Panic, Div {
+    let vm_base: i64 = 4294967296
+    let page_size: i64 = 16384
+    let text_vm = vm_base
+    let data_vm = 4429185024
+    let macos_build_ver: i64 = 720896   // 11.0.0
+    let hdr_size = 32
+    let lc_pagezero_size = 72
+    let lc_text_size = 72 + 80
+    let lc_data_size = 72 + 160
+    let lc_linkedit_size = 72
+    let lc_fixups_size = 16
+    let lc_exports_trie_size = 16
+    let lc_symtab_size = 24
+    let lc_dysymtab_size = 80
+    let lc_dylinker_size = 32
+    let lc_uuid_size = 24
+    let lc_build_version_size = 24
+    let lc_main_size = 24
+    let lc_dylib_size = 56
+    let ncmds = 13
+    let sizeofcmds = lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size + lc_symtab_size + lc_dysymtab_size + lc_dylinker_size + lc_uuid_size + lc_build_version_size + lc_main_size + lc_dylib_size
+    let text_file_off = ((hdr_size + sizeofcmds + page_size - 1) / page_size) * page_size
+    let text_file_size = ((A64M_LEN + page_size - 1) / page_size) * page_size
+    let text_seg_filesize = text_file_off + text_file_size
+    let data_seg_vmsize = ((A64M_BSS + page_size + page_size - 1) / page_size) * page_size
+    let data_pages = data_seg_vmsize / page_size
+    let starts_segment_size = ((22 + data_pages * 2 + 3) / 4) * 4
+    let imports_offset = 52 + starts_segment_size
+    let symbols_offset = imports_offset + A64M_IMPORT_N * 4
+    var symbols_size: i64 = 0
+    var sym: i64 = 0
+    while sym < A64M_IMPORT_N { symbols_size = symbols_size + A64M_IMPORT_NAMES[sym as usize].len + 2; sym = sym + 1 }
+    let linkedit_fixups_size = ((symbols_offset + symbols_size + 7) / 8) * 8
+    let linkedit_exports_size = 48
+    let linkedit_fileoff = text_seg_filesize + page_size
+    let linkedit_filesize = linkedit_fixups_size + linkedit_exports_size
+    let total_file_size = linkedit_fileoff + linkedit_filesize
+    let text_seg_vmsize = text_seg_filesize
+    if text_vm + text_seg_vmsize > data_vm {
+        print("error: macho __TEXT overlaps __DATA (text_end=")
+        print_int(text_vm + text_seg_vmsize)
+        print(" data_vm=")
+        print_int(data_vm)
+        print(") — refuse emit\n")
+        return 1
+    }
+    if data_vm + data_seg_vmsize + page_size > 6442450944 {
+        print("error: macho __DATA overlaps dyld shared region (data_vm=")
+        print_int(data_vm)
+        print(" data_end=")
+        print_int(data_vm + data_seg_vmsize)
+        print(") — refuse emit\n")
+        return 1
+    }
+    let linkedit_vm = data_vm + data_seg_vmsize
+    let linkedit_symtab_off = linkedit_fileoff + linkedit_filesize
+    let linkedit_stroff = linkedit_symtab_off
+    print("macho_arm64: code="); print_int(A64M_LEN); print(" text_off="); print_int(text_file_off); print("\n")
+    var i: i64 = 0
+    while i < total_file_size { A64M_IMAGE[i as usize] = 0; i = i + 1 }
+    // Header
+    a64m_image32(0, 0xFEEDFACF); a64m_image32(4, 0x0100000C); a64m_image32(8, 0)
+    a64m_image32(12, 2); a64m_image32(16, ncmds); a64m_image32(20, sizeofcmds); a64m_image32(24, 0x00200085)
+    // __PAGEZERO
+    var off = hdr_size
+    a64m_image32(off, 25); a64m_image32(off+4, lc_pagezero_size)
+    a64m_image8(off+8, 95); a64m_image8(off+9, 95); a64m_image8(off+10, 80); a64m_image8(off+11, 65); a64m_image8(off+12, 71); a64m_image8(off+13, 69); a64m_image8(off+14, 90); a64m_image8(off+15, 69); a64m_image8(off+16, 82); a64m_image8(off+17, 79)
+    a64m_image64(off+24, 0); a64m_image64(off+32, vm_base)
+    // __TEXT
+    off = hdr_size + lc_pagezero_size
+    a64m_image32(off, 25); a64m_image32(off+4, lc_text_size)
+    a64m_image8(off+8, 95); a64m_image8(off+9, 95); a64m_image8(off+10, 84); a64m_image8(off+11, 69); a64m_image8(off+12, 88); a64m_image8(off+13, 84)
+    a64m_image64(off+24, text_vm); a64m_image64(off+32, text_seg_vmsize)
+    a64m_image64(off+40, 0); a64m_image64(off+48, text_seg_filesize)
+    a64m_image32(off+56, 5); a64m_image32(off+60, 5); a64m_image32(off+64, 1)
+    let sec = off + 72
+    a64m_image8(sec, 95); a64m_image8(sec+1, 95); a64m_image8(sec+2, 116); a64m_image8(sec+3, 101); a64m_image8(sec+4, 120); a64m_image8(sec+5, 116)
+    a64m_image8(sec+16, 95); a64m_image8(sec+17, 95); a64m_image8(sec+18, 84); a64m_image8(sec+19, 69); a64m_image8(sec+20, 88); a64m_image8(sec+21, 84)
+    a64m_image64(sec+32, text_vm + text_file_off); a64m_image64(sec+40, A64M_LEN)
+    a64m_image32(sec+48, text_file_off); a64m_image32(sec+52, 4); a64m_image32(sec+64, 0x80000400)
+    // __DATA
+    off = hdr_size + lc_pagezero_size + lc_text_size
+    a64m_image32(off, 25); a64m_image32(off+4, lc_data_size)
+    a64m_image8(off+8, 95); a64m_image8(off+9, 95); a64m_image8(off+10, 68); a64m_image8(off+11, 65); a64m_image8(off+12, 84); a64m_image8(off+13, 65)
+    a64m_image64(off+24, data_vm); a64m_image64(off+32, data_seg_vmsize)
+    a64m_image64(off+40, text_seg_filesize); a64m_image64(off+48, page_size)
+    a64m_image32(off+56, 3); a64m_image32(off+60, 3); a64m_image32(off+64, 2)
+    let gotsec = off + 72
+    a64m_image8(gotsec, 95); a64m_image8(gotsec+1, 95); a64m_image8(gotsec+2, 100); a64m_image8(gotsec+3, 97); a64m_image8(gotsec+4, 116); a64m_image8(gotsec+5, 97)
+    a64m_image8(gotsec+16, 95); a64m_image8(gotsec+17, 95); a64m_image8(gotsec+18, 68); a64m_image8(gotsec+19, 65); a64m_image8(gotsec+20, 84); a64m_image8(gotsec+21, 65)
+    a64m_image64(gotsec+32, data_vm); a64m_image64(gotsec+40, page_size)
+    a64m_image32(gotsec+48, text_seg_filesize); a64m_image32(gotsec+52, 3)
+    let bsec = off + 152
+    a64m_image8(bsec, 95); a64m_image8(bsec+1, 95); a64m_image8(bsec+2, 98); a64m_image8(bsec+3, 115); a64m_image8(bsec+4, 115)
+    a64m_image8(bsec+16, 95); a64m_image8(bsec+17, 95); a64m_image8(bsec+18, 68); a64m_image8(bsec+19, 65); a64m_image8(bsec+20, 84); a64m_image8(bsec+21, 65)
+    a64m_image64(bsec+32, data_vm + page_size); a64m_image64(bsec+40, A64M_BSS)
+    a64m_image32(bsec+48, 0); a64m_image32(bsec+52, 4); a64m_image32(bsec+64, 1)
+    // __LINKEDIT
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size
+    a64m_image32(off, 25); a64m_image32(off+4, lc_linkedit_size)
+    a64m_image8(off+8, 95); a64m_image8(off+9, 95); a64m_image8(off+10, 76); a64m_image8(off+11, 73); a64m_image8(off+12, 78); a64m_image8(off+13, 75); a64m_image8(off+14, 69); a64m_image8(off+15, 68); a64m_image8(off+16, 73); a64m_image8(off+17, 84)
+    a64m_image64(off+24, linkedit_vm); a64m_image64(off+32, page_size)
+    a64m_image64(off+40, linkedit_fileoff); a64m_image64(off+48, linkedit_filesize)
+    a64m_image32(off+56, 1); a64m_image32(off+60, 1)
+    // LC_DYLD_CHAINED_FIXUPS
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size
+    a64m_image32(off, 0x80000034); a64m_image32(off+4, lc_fixups_size)
+    a64m_image32(off+8, linkedit_fileoff); a64m_image32(off+12, linkedit_fixups_size)
+    // LC_DYLD_EXPORTS_TRIE
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size
+    a64m_image32(off, 0x80000033); a64m_image32(off+4, lc_exports_trie_size)
+    a64m_image32(off+8, linkedit_fileoff + linkedit_fixups_size); a64m_image32(off+12, linkedit_exports_size)
+    // LC_SYMTAB
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size
+    a64m_image32(off, 2); a64m_image32(off+4, lc_symtab_size)
+    a64m_image32(off+8, linkedit_symtab_off); a64m_image32(off+12, 0); a64m_image32(off+16, linkedit_stroff); a64m_image32(off+20, 0)
+    // LC_DYSYMTAB
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size + lc_symtab_size
+    a64m_image32(off, 11); a64m_image32(off+4, lc_dysymtab_size)
+    // LC_LOAD_DYLINKER
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size + lc_symtab_size + lc_dysymtab_size
+    a64m_image32(off, 14); a64m_image32(off+4, lc_dylinker_size); a64m_image32(off+8, 12)
+    a64m_image8(off+12, 47); a64m_image8(off+13, 117); a64m_image8(off+14, 115); a64m_image8(off+15, 114)
+    a64m_image8(off+16, 47); a64m_image8(off+17, 108); a64m_image8(off+18, 105); a64m_image8(off+19, 98)
+    a64m_image8(off+20, 47); a64m_image8(off+21, 100); a64m_image8(off+22, 121); a64m_image8(off+23, 108); a64m_image8(off+24, 100); a64m_image8(off+25, 0)
+    // LC_UUID
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size + lc_symtab_size + lc_dysymtab_size + lc_dylinker_size
+    a64m_image32(off, 27); a64m_image32(off+4, lc_uuid_size)
+    a64m_image8(off+8, 83); a64m_image8(off+9, 79); a64m_image8(off+10, 85); a64m_image8(off+11, 78)
+    a64m_image8(off+12, 73); a64m_image8(off+13, 79); a64m_image8(off+14, 65); a64m_image8(off+15, 2)
+    a64m_image8(off+16, A64M_LEN & 255); a64m_image8(off+17, (A64M_LEN >> 8) & 255); a64m_image8(off+18, (A64M_LEN >> 16) & 255); a64m_image8(off+19, (A64M_LEN >> 24) & 255)
+    a64m_image8(off+20, A64M_BSS & 255); a64m_image8(off+21, (A64M_BSS >> 8) & 255); a64m_image8(off+22, (A64M_BSS >> 16) & 255); a64m_image8(off+23, (A64M_BSS >> 24) & 255)
+    // LC_BUILD_VERSION
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size + lc_symtab_size + lc_dysymtab_size + lc_dylinker_size + lc_uuid_size
+    a64m_image32(off, 50); a64m_image32(off+4, lc_build_version_size)
+    a64m_image32(off+8, 1); a64m_image32(off+12, macos_build_ver); a64m_image32(off+16, macos_build_ver); a64m_image32(off+20, 0)
+    // LC_MAIN
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size + lc_symtab_size + lc_dysymtab_size + lc_dylinker_size + lc_uuid_size + lc_build_version_size
+    a64m_image32(off, 0x80000028); a64m_image32(off+4, lc_main_size)
+    a64m_image64(off+8, text_file_off + A64M_ENTRY); a64m_image64(off+16, 0)
+    // LC_LOAD_DYLIB
+    off = hdr_size + lc_pagezero_size + lc_text_size + lc_data_size + lc_linkedit_size + lc_fixups_size + lc_exports_trie_size + lc_symtab_size + lc_dysymtab_size + lc_dylinker_size + lc_uuid_size + lc_build_version_size + lc_main_size
+    a64m_image32(off, 12); a64m_image32(off+4, lc_dylib_size)
+    a64m_image32(off+8, 24); a64m_image32(off+12, 2); a64m_image32(off+16, 88866816); a64m_image32(off+20, 65536)
+    a64m_image8(off+24, 47); a64m_image8(off+25, 117); a64m_image8(off+26, 115); a64m_image8(off+27, 114)
+    a64m_image8(off+28, 47); a64m_image8(off+29, 108); a64m_image8(off+30, 105); a64m_image8(off+31, 98)
+    a64m_image8(off+32, 47); a64m_image8(off+33, 108); a64m_image8(off+34, 105); a64m_image8(off+35, 98)
+    a64m_image8(off+36, 83); a64m_image8(off+37, 121); a64m_image8(off+38, 115); a64m_image8(off+39, 116)
+    a64m_image8(off+40, 101); a64m_image8(off+41, 109); a64m_image8(off+42, 46); a64m_image8(off+43, 66)
+    a64m_image8(off+44, 46); a64m_image8(off+45, 100); a64m_image8(off+46, 121); a64m_image8(off+47, 108)
+    a64m_image8(off+48, 105); a64m_image8(off+49, 98); a64m_image8(off+50, 0)
+    // dyld chained imports: regular 64-bit bind pointers in DATA's first page.
+    a64m_image32(linkedit_fileoff, 0)
+    a64m_image32(linkedit_fileoff + 4, 32)
+    a64m_image32(linkedit_fileoff + 8, imports_offset)
+    a64m_image32(linkedit_fileoff + 12, symbols_offset)
+    a64m_image32(linkedit_fileoff + 16, A64M_IMPORT_N)
+    a64m_image32(linkedit_fileoff + 20, 1)
+    a64m_image32(linkedit_fileoff + 24, 0)
+    a64m_image32(linkedit_fileoff + 28, 0)
+    a64m_image32(linkedit_fileoff + 32, 4)
+    a64m_image32(linkedit_fileoff + 36, 0)
+    a64m_image32(linkedit_fileoff + 40, 0)
+    a64m_image32(linkedit_fileoff + 44, if A64M_IMPORT_N > 0 { 20 } else { 0 })
+    a64m_image32(linkedit_fileoff + 48, 0)
+    let starts = linkedit_fileoff + 52
+    a64m_image32(starts, starts_segment_size)
+    a64m_image16(starts + 4, page_size)
+    a64m_image16(starts + 6, 2) // DYLD_CHAINED_PTR_64
+    a64m_image64(starts + 8, data_vm - vm_base)
+    a64m_image16(starts + 20, data_pages)
+    var page: i64 = 0
+    while page < data_pages { a64m_image16(starts + 22 + page * 2, if page == 0 { 0 } else { 65535 }); page = page + 1 }
+    sym = 0
+    var name_off: i64 = 0
+    while sym < A64M_IMPORT_N {
+        let nm = A64M_IMPORT_NAMES[sym as usize]
+        a64m_image32(linkedit_fileoff + imports_offset + sym * 4, 1 | (name_off << 9))
+        a64m_image8(linkedit_fileoff + symbols_offset + name_off, 95)
+        var k: i64 = 0
+        while k < nm.len { a64m_image8(linkedit_fileoff + symbols_offset + name_off + 1 + k, nm.buf[k as usize] as i64); k = k + 1 }
+        let next = if sym + 1 < A64M_IMPORT_N { 2 } else { 0 }
+        a64m_image64(text_seg_filesize + sym * 8, 0x8000000000000000 | (next << 51) | sym)
+        name_off = name_off + nm.len + 2
+        sym = sym + 1
+    }
+    // __LINKEDIT payload: minimal export trie
+    let exports_off = linkedit_fileoff + linkedit_fixups_size
+    a64m_image8(exports_off + 0, 0)
+    a64m_image8(exports_off + 1, 1)
+    a64m_image8(exports_off + 2, 95)
+    a64m_image8(exports_off + 3, 0)
+    a64m_image8(exports_off + 4, 18)
+    a64m_image8(exports_off + 5, 0)
+    a64m_image8(exports_off + 6, 0)
+    a64m_image8(exports_off + 7, 0)
+    a64m_image8(exports_off + 8, 0)
+    a64m_image8(exports_off + 9, 2)
+    a64m_image8(exports_off + 10, 0)
+    a64m_image8(exports_off + 11, 0)
+    a64m_image8(exports_off + 12, 0)
+    a64m_image8(exports_off + 13, 3)
+    a64m_image8(exports_off + 14, 0)
+    a64m_image8(exports_off + 15, 168)
+    a64m_image8(exports_off + 16, 6)
+    a64m_image8(exports_off + 17, 0)
+    a64m_image8(exports_off + 18, 0)
+    a64m_image8(exports_off + 19, 2)
+    a64m_image8(exports_off + 20, 95)
+    a64m_image8(exports_off + 21, 109)
+    a64m_image8(exports_off + 22, 104)
+    a64m_image8(exports_off + 23, 95)
+    a64m_image8(exports_off + 24, 101)
+    a64m_image8(exports_off + 25, 120)
+    a64m_image8(exports_off + 26, 101)
+    a64m_image8(exports_off + 27, 99)
+    a64m_image8(exports_off + 28, 117)
+    a64m_image8(exports_off + 29, 116)
+    a64m_image8(exports_off + 30, 101)
+    a64m_image8(exports_off + 31, 95)
+    a64m_image8(exports_off + 32, 104)
+    a64m_image8(exports_off + 33, 101)
+    a64m_image8(exports_off + 34, 97)
+    a64m_image8(exports_off + 35, 100)
+    a64m_image8(exports_off + 36, 101)
+    a64m_image8(exports_off + 37, 114)
+    a64m_image8(exports_off + 38, 0)
+    a64m_image8(exports_off + 39, 9)
+    a64m_image8(exports_off + 40, 109)
+    a64m_image8(exports_off + 41, 97)
+    a64m_image8(exports_off + 42, 105)
+    a64m_image8(exports_off + 43, 110)
+    a64m_image8(exports_off + 44, 0)
+    a64m_image8(exports_off + 45, 13)
+    a64m_image8(exports_off + 46, 0)
+    a64m_image8(exports_off + 47, 0)
+    // Copy code
+    i = 0
+    while i < A64M_LEN { A64M_IMAGE[(text_file_off + i) as usize] = A64M_CODE[i as usize]; i = i + 1 }
+    if total_file_size > 16777216 || A64M_ERROR { return 1 }
+    let ok = write_file(output, A64M_IMAGE, total_file_size)
+    if ok != total_file_size { return 1 }
+    print("macho_arm64: "); print(output); print(" "); print_int(total_file_size); print(" bytes\n")
+    return 0
+}
+
+
+
+pub fn compile_arm64_macos_to_file(module: &IrModule, output: string) -> i32 with IO, Mut, Panic, Div {
+    if native_metal_failed() {
+        print("error: native Metal kernel contains an unsupported AST/parameter shape; refusing output\n")
+        return 1
+    }
+    A64M_LEN = 0
+    A64M_ERROR = false
+    A64M_TRACE = read_env("SOUNIO_ARM64_IR_TRACE") == "1"
+    A64M_CALL_N = 0
+    A64M_ADDR_N = 0
+    A64M_IMPORT_N = 0
+    A64M_BSS = 16384
+    var fi: i64 = 0
+    var main_fn: i64 = -1
+    if (*module).fn_count > 16384 { return 1 }
+    while fi < 16384 { A64M_FN[fi as usize] = -1; A64M_LIVE[fi as usize] = false; fi = fi + 1 }
+    fi = 0
+    while fi < (*module).fn_count {
+        let f = ir_fn_get(module, fi)
+        if str_from_bytes(f.name.buf, f.name.len) == "main" { main_fn = fi }
+        fi = fi + 1
+    }
+    if main_fn < 0 { return 1 }
+    A64M_LIVE[main_fn as usize] = true
+    var changed = true
+    while changed {
+        changed = false
+        fi = 0
+        while fi < (*module).fn_count {
+            if A64M_LIVE[fi as usize] {
+                let f = ir_fn_get(module, fi)
+                var ii: i64 = 0
+                while ii < f.instr_count {
+                    let instr = ir_arena_load(ir_region_slot_r(f.region, ii))
+                    if instr.op == IrOpcode::IrCall || instr.op == IrOpcode::IrCallSret || instr.op == IrOpcode::IrLoadFnRef {
+                        let target = instr.fn_id
+                        if target >= 0 && target < (*module).fn_count && !A64M_LIVE[target as usize] {
+                            A64M_LIVE[target as usize] = true
+                            changed = true
+                        }
+                    }
+                    ii = ii + 1
+                }
+            }
+            fi = fi + 1
+        }
+    }
+    fi = 0
+    while fi < (*module).fn_count {
+        if A64M_LIVE[fi as usize] && !a64m_emit_function(module, fi) { return 1 }
+        fi = fi + 1
+    }
+    if main_fn < 0 || A64M_FN[main_fn as usize] < 0 {
+        print("ARM64_REFUSAL missing_lowered_main\n")
+        return 1
+    }
+    A64M_ENTRY = A64M_LEN
+    a64m_global_inits(module)
+    a64m_call(main_fn)
+    a64m_imm(16, 1)
+    a64m_word(0xD4001001)
+    var pi: i64 = 0
+    while pi < A64M_CALL_N {
+        let target = A64M_CALL_FN[pi as usize]
+        if target < 0 || target >= (*module).fn_count || A64M_FN[target as usize] < 0 {
+            print("ARM64_REFUSAL unresolved_call fn=")
+            print_int(target)
+            if target >= 0 && target < (*module).fn_count {
+                let missing = ir_fn_get(module, target)
+                print(" name=")
+                print(str_from_bytes(missing.name.buf, missing.name.len))
+            }
+            print("\n")
+            return 1
+        }
+        a64m_branch(A64M_CALL_POS[pi as usize], A64M_FN[target as usize], 1)
+        pi = pi + 1
+    }
+    if A64M_ERROR { return 1 }
+    pi = 0
+    while pi < A64M_ADDR_N {
+        let target = A64M_ADDR_FN[pi as usize]
+        if target < 0 || target >= (*module).fn_count || A64M_FN[target as usize] < 0 { return 1 }
+        let p = A64M_ADDR_POS[pi as usize]
+        let address = 4294967296 + 16384 + A64M_FN[target as usize]
+        let pc = 4294967296 + 16384 + p
+        let delta = address / 4096 - pc / 4096
+        a64m_patch(p, 0x90000009 | ((delta & 3) << 29) | (((delta >> 2) & 524287) << 5))
+        a64m_patch(p + 4, 0x91000129 | ((address & 4095) << 10))
+        pi = pi + 1
+    }
+    a64m_write_image(output) as i32
+}

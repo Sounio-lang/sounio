@@ -821,7 +821,7 @@ Special thanks to:
 
 ## Resources
 
-- **Documentation**: [docs/MINIMUM_VIABLE_SOUNIO.md](docs/MINIMUM_VIABLE_SOUNIO.md)
+- **Documentation**: [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md)
 - **Syntax Reference**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md)
 - **Research Papers**: [docs/RESEARCH_PAPERS.md](docs/RESEARCH_PAPERS.md)
 - **GitHub**: [github.com/demetrios/sounio](https://github.com/demetrios/sounio)

@@ -2,8 +2,8 @@
 topic_id: repo.docs.features.genomics-features
 authority: historical
 audience: users
-last_validated: 2026-03-07
-validated_by: A6
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.features.genomics-features
 -->
 
@@ -105,10 +105,10 @@ Where:
 **Example**:
 ```sio
 let p_value = hypergeometric_pvalue(
-    N: 20000u32,    // total genes
-    K: 100u32,      // pathway size
-    n: 500u32,      // DE genes
-    k: 10u32        // overlap
+    N: 20000,    // total genes
+    K: 100,      // pathway size
+    n: 500,      // DE genes
+    k: 10        // overlap
 )
 // Returns p ≈ 0.0023 (significant enrichment)
 ```

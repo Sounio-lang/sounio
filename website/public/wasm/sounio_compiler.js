@@ -74,8 +74,9 @@ function checkSource(src) {
       });
     }
 
-    // IO effect check: print without `with IO` in function signature
-    if (/\bprint\s*\(/.test(line)) {
+    // IO effect check: print/println without `with IO` in function signature
+    const printCall = line.match(/\bprint(?:ln)?\s*\(/);
+    if (printCall) {
       // Walk back to find the nearest fn declaration
       let hasWith = false;
       for (let j = i; j >= 0; j--) {
@@ -87,9 +88,9 @@ function checkSource(src) {
       if (!hasWith) {
         diagnostics.push({
           severity: 'warning',
-          message: 'Call to `print` requires `with IO` on the enclosing function',
+          message: 'Call to `print`/`println` requires `with IO` on the enclosing function',
           line: lineNo,
-          column: line.indexOf('print(') + 1,
+          column: printCall.index + 1,
         });
       }
     }
@@ -102,14 +103,37 @@ function checkSource(src) {
 // Simulate program output for well-known patterns
 // ---------------------------------------------------------------------------
 
+function decodePreviewStringLiteral(literal) {
+  const content = literal.slice(1, -1);
+  let decoded = '';
+
+  for (let i = 0; i < content.length; i += 1) {
+    const char = content[i];
+    if (char !== '\\' || i + 1 >= content.length) {
+      decoded += char;
+      continue;
+    }
+
+    i += 1;
+    const next = content[i];
+    if (next === 'n') decoded += '\n';
+    else if (next === 'r') decoded += '\r';
+    else if (next === 't') decoded += '\t';
+    else if (next === '0') decoded += '\0';
+    else decoded += next;
+  }
+
+  return decoded;
+}
+
 function simulateRun(src) {
   const output = [];
 
-  // Extract string literals from print calls
-  const printRe = /print\s*\(\s*"([^"]*)"/g;
+  // Extract double-quoted string literals from print and println calls
+  const printRe = /\bprint(?:ln)?\s*\(\s*("(?:[^"\\]|\\.)*")/g;
   let m;
   while ((m = printRe.exec(src)) !== null) {
-    output.push(m[1]);
+    output.push(decodePreviewStringLiteral(m[1]));
   }
 
   // Simple: detect the final expression in main as the return value

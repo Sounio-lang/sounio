@@ -1,0 +1,176 @@
+// Strict incremental nonnegative-i64 count TSV. See COUNT_TSV.md.
+// Bytes are supplied by the caller; this module performs no filesystem I/O.
+pub struct CountTsvState {
+ pub status:i64, pub samples:i64, pub row:[i64;8],
+ pub ready:bool, pub finished:bool, pub rows:i64,
+ pub position:i64, pub error_position:i64,
+ pub columns:i64, pub value:i64, pub has_digits:bool, pub pending_cr:bool,
+}
+pub struct CountTsvFeed {
+ pub status:i64, pub consumed:i64, pub row_ready:bool, pub finished:bool,
+ pub position:i64, pub error_position:i64,
+}
+pub struct CountQcState {
+ pub status:i64, pub samples:i64, pub rows:i64,
+ pub totals:[i64;8], pub zeros:[i64;8],
+}
+pub struct CountMatrixAppend { pub status:i64, pub rows:i64 }
+fn ct_result(state:&CountTsvState,consumed:i64)->CountTsvFeed {
+ CountTsvFeed{status:state.status,consumed:consumed,row_ready:state.ready,finished:state.finished,position:state.position,error_position:state.error_position}
+}
+fn ct_fail(state:&!CountTsvState,status:i64) with Mut {
+ state.status=status
+ state.error_position=state.position
+ state.ready=false
+}
+fn ct_valid(state:&CountTsvState)->bool {
+ if state.samples<1 || state.samples>8 || state.rows<0 || state.position<0 || state.columns<0 || state.columns>state.samples || state.value<0 { return false }
+ if state.ready && (state.columns!=state.samples || state.pending_cr || state.has_digits) { return false }
+ if state.pending_cr && (state.columns!=state.samples || state.ready || state.has_digits) { return false }
+ if !state.ready && !state.pending_cr && !state.finished && state.columns>=state.samples { return false }
+ if !state.has_digits && state.value!=0 { return false }
+ true
+}
+pub fn count_tsv_new(samples:i64)->CountTsvState {
+ CountTsvState{status:if samples<1 || samples>8 {1}else{0},samples:samples,row:[0;8],ready:false,finished:false,rows:0,position:0,error_position:0,columns:0,value:0,has_digits:false,pending_cr:false}
+}
+// All validation precedes the decimal multiply/add.
+fn ct_digit(value:i64,digit:i64)->i64 with Div {
+ if digit<0 || digit>9 || value<0 { return -1 }
+ if value>922337203685477580 || (value==922337203685477580 && digit>7) { return -1 }
+ value*10+digit
+}
+fn ct_field(state:&!CountTsvState) -> bool with Mut,Panic {
+ if !state.has_digits { ct_fail(state,3) return false }
+ if state.columns>=state.samples { ct_fail(state,4) return false }
+ state.row[state.columns as usize]=state.value
+ state.columns=state.columns+1
+ state.value=0
+ state.has_digits=false
+ true
+}
+fn ct_complete(state:&!CountTsvState)->bool with Mut {
+ if state.columns!=state.samples { ct_fail(state,4) return false }
+ if state.rows==9223372036854775807 { ct_fail(state,7) return false }
+ state.rows=state.rows+1
+ state.pending_cr=false
+ state.ready=true
+ true
+}
+pub fn count_tsv_feed(state:&!CountTsvState,bytes:&[i64;256],length:i64)->CountTsvFeed with Mut,Div,Panic {
+ if state.status!=0 { return ct_result(state,0) }
+ if !ct_valid(state) { ct_fail(state,6) return ct_result(state,0) }
+ if length<0 || length>256 { ct_fail(state,2) return ct_result(state,0) }
+ // Ready rows pause even if a caller supplies additional bytes.
+ if state.ready { return ct_result(state,0) }
+ if state.finished {
+  if length!=0 { ct_fail(state,6) }
+  return ct_result(state,0)
+ }
+ var used:i64=0
+ while used<length && !state.ready {
+  if state.position==9223372036854775807 { ct_fail(state,7) return ct_result(state,used) }
+  let byte:i64=bytes[used as usize]
+  if byte<0 || byte>255 { ct_fail(state,3) return ct_result(state,used) }
+  if state.pending_cr {
+   if byte!=10 { ct_fail(state,3) return ct_result(state,used) }
+   if !ct_complete(state) { return ct_result(state,used) }
+  } else {
+   if byte>=48 && byte<=57 {
+    let next=ct_digit(state.value,byte-48)
+    if next<0 { ct_fail(state,5) return ct_result(state,used) }
+    state.value=next
+    state.has_digits=true
+   } else {
+    if byte==9 {
+     if state.columns>=state.samples-1 { ct_fail(state,4) return ct_result(state,used) }
+     if !ct_field(state) { return ct_result(state,used) }
+    } else {
+     if byte==10 || byte==13 {
+      if !ct_field(state) { return ct_result(state,used) }
+      if state.columns!=state.samples { ct_fail(state,4) return ct_result(state,used) }
+      if byte==13 { state.pending_cr=true } else {
+       if !ct_complete(state) { return ct_result(state,used) }
+      }
+     } else { ct_fail(state,3) return ct_result(state,used) }
+    }
+   }
+  }
+  used=used+1
+  state.position=state.position+1
+ }
+ ct_result(state,used)
+}
+pub fn count_tsv_ack_row(state:&!CountTsvState)->bool with Mut,Panic {
+ if state.status!=0 { return false }
+ if !ct_valid(state) { ct_fail(state,6) return false }
+ if !state.ready { return false }
+ var j:i64=0
+ while j<8 { state.row[j as usize]=0 j=j+1 }
+ state.ready=false
+ state.columns=0
+ state.value=0
+ state.has_digits=false
+ true
+}
+pub fn count_tsv_finish(state:&!CountTsvState)->CountTsvFeed with Mut,Panic {
+ if state.status!=0 { return ct_result(state,0) }
+ if !ct_valid(state) { ct_fail(state,6) return ct_result(state,0) }
+ if state.finished { return ct_result(state,0) }
+ // A ready newline-terminated row must be acknowledged first. EOF is not
+ // committed here, because a feed caller may still have an unconsumed suffix.
+ if state.ready { return ct_result(state,0) }
+ if state.pending_cr { ct_fail(state,3) return ct_result(state,0) }
+ if state.has_digits || state.columns!=0 {
+  if !ct_field(state) { return ct_result(state,0) }
+  if !ct_complete(state) { return ct_result(state,0) }
+ }
+ state.finished=true
+ ct_result(state,0)
+}
+pub fn count_qc_new(samples:i64)->CountQcState {
+ CountQcState{status:if samples<1 || samples>8 {1}else{0},samples:samples,rows:0,totals:[0;8],zeros:[0;8]}
+}
+// Transactional numerical fields: an invalid/overflowing row changes only status.
+pub fn count_qc_add_row(state:&!CountQcState,row:&[i64;8])->i64 with Mut,Panic {
+ if state.status!=0 { return state.status }
+ if state.samples<1 || state.samples>8 || state.rows<0 { state.status=6 return 6 }
+ var j:i64=0
+ while j<state.samples {
+  if state.totals[j as usize]<0 || state.zeros[j as usize]<0 || state.zeros[j as usize]>state.rows { state.status=6 return 6 }
+  if row[j as usize]<0 { state.status=2 return 2 }
+  j=j+1
+ }
+ if state.rows==9223372036854775807 { state.status=5 return 5 }
+ j=0
+ while j<state.samples {
+  if row[j as usize]>9223372036854775807-state.totals[j as usize] { state.status=5 return 5 }
+  j=j+1
+ }
+ // Each zero counter <= rows, so rows+1 representability proves its update.
+ j=0
+ while j<state.samples {
+  state.totals[j as usize]=state.totals[j as usize]+row[j as usize]
+  if row[j as usize]==0 { state.zeros[j as usize]=state.zeros[j as usize]+1 }
+  j=j+1
+ }
+ state.rows=state.rows+1
+ 0
+}
+// No matrix copy/return. Validate the entire input row before writing any cell.
+pub fn count_matrix_append_checked(matrix:&![i64;2048],rows:i64,row:&[i64;8],samples:i64)->CountMatrixAppend with Mut,Panic {
+ if samples<1 || samples>8 { return CountMatrixAppend{status:1,rows:rows} }
+ if rows<0 || rows>256 { return CountMatrixAppend{status:6,rows:rows} }
+ if rows==256 { return CountMatrixAppend{status:8,rows:rows} }
+ var j:i64=0
+ while j<samples {
+  if row[j as usize]<0 { return CountMatrixAppend{status:2,rows:rows} }
+  j=j+1
+ }
+ j=0
+ while j<8 {
+  matrix[(rows*8+j) as usize]=if j<samples {row[j as usize]}else{0}
+  j=j+1
+ }
+ CountMatrixAppend{status:0,rows:rows+1}
+}

@@ -43,8 +43,10 @@ files. `ProvEntity` carries a W3C-PROV-shaped record: an origin class
 (measured / literature / computed / input), value, uncertainty, confidence,
 timestamp and reference hash.
 
-**The only importers are three demos** — `examples/epistemic/prov_demo.sio`,
-`ledger_demo.sio`, `slsa_demo.sio`. No stdlib module, no compiler surface and
+**The only users are three demos** — `examples/epistemic/ledger_demo.sio`, and
+`examples/_attic/epistemic/prov_demo.sio` and `slsa_demo.sio`, which were
+quarantined on 2026-10-06 because they call the module without importing it and
+fail on both engines with E137. No stdlib module, no compiler surface and
 no dissertation surface imports any of it.
 
 **`Knowledge` has no provenance field.** It holds `value`, `variance`,

@@ -2,8 +2,8 @@
 topic_id: repo.docs.audit.equivalence-theory-a-layer2-benettin-2026-06-23
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.equivalence-theory-a-layer2-benettin-2026-06-23
 -->
 
@@ -49,7 +49,7 @@ The largest Lyapunov exponent is `λ = (Σ ln‖δ‖) / T`, where `δ` is a tan
 
 ### Files
 
-- `stdlib/math/lyapunov.sio`, `chaos_sensitivity_manifest.tsv`, `tests/run-pass/lyapunov_flow_benettin.sio`.
+- `stdlib/math/lyapunov.sio`, `artifacts/research/chaos/chaos_sensitivity_manifest.tsv`, `tests/run-pass/lyapunov_flow_benettin.sio`.
 
 ---
 
@@ -80,7 +80,7 @@ Hénon **0.419336** (pub 0.41922); Lorenz **0.907356** (pub 0.9056); Rössler **
 
 ### Arquivos
 
-- `stdlib/math/lyapunov.sio`, `chaos_sensitivity_manifest.tsv`, `tests/run-pass/lyapunov_flow_benettin.sio`.
+- `stdlib/math/lyapunov.sio`, `artifacts/research/chaos/chaos_sensitivity_manifest.tsv`, `tests/run-pass/lyapunov_flow_benettin.sio`.
 
 ---
 

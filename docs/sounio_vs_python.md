@@ -2,8 +2,8 @@
 topic_id: repo.docs.sounio-vs-python
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.sounio-vs-python
 -->
 
@@ -150,7 +150,6 @@ fn binary_search(arr: &[i64; 1024], len: i64, target: i64) -> i64 with Mut, Pani
 **Differences:**
 - Sounio passes arrays by reference (`&[i64; 1024]`) with an explicit length parameter, since arrays are fixed-size.
 - Division requires the `Div` effect (always paired with `Panic`).
-- Returning `-1` is written as `0 - 1` because Sounio has no unary minus operator.
 - No tuple destructuring for `lo, hi = 0, len(arr) - 1`; each variable is declared separately.
 
 ---

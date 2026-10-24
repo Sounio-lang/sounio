@@ -18,20 +18,16 @@
 # not a hypothetical: self-hosted/ir/lower.sio carried this exact shape and its
 # error counter read 0 for every compile across three commits.
 #
-# WHAT THIS GATE ASSERTS. Not "the bug exists" — a gate that demands a bug stay
-# broken is a gate that fights its own fix. It asserts the DIVERGENCE is where we
-# recorded it, in both directions:
+# WHAT THIS GATE ASSERTS. Both engines must now be CORRECT on both files.
+# lean_single used to be recorded as BROKEN here (a ratchet that was meant to go
+# red as progress). It went red: #1655 gave global struct arrays the same
+# pointer-per-slot layout and real element storage as local ones, and the
+# plain-global overrun had already been fixed in the seed. A regression on
+# either engine is now a real regression.
 #
-#   - Madaros must be CORRECT on both files. A regression there is a real
-#     regression and is red.
-#   - lean_single is EXPECTED to be broken. If it starts passing, this gate goes
-#     red as PROGRESS, the same ratchet as madaros_fixed_point_gate.sh: the seed
-#     was fixed, the flat-array workaround is no longer forced, and that fact
-#     must be recorded rather than absorbed silently.
-#
-# The files themselves are `//@ ignore` in the test suite, and must stay that
-# way: the suite's own stage2 IS lean_single, so they would be a permanent red
-# there with no way to act on it. This gate is where they get to mean something.
+# The files keep their `//@ ignore` and stay in tests/known_failures/ as the
+# historical reproductions this gate checks; the suite-run fixture for #1655 is
+# tests/run-pass/global_struct_array_store.sio.
 
 set -uo pipefail
 
@@ -100,21 +96,17 @@ for SRC in "${CASES[@]}"; do
   grep -q '^//@ ignore' "$SRC" \
     || gate_fail "$SRC lost its '//@ ignore'. The test suite's stage2 is lean_single, so this file would be a permanent red there — it belongs to this gate, not to the suite."
 
-  # ── lean_single: expected broken ────────────────────────────────────────────
+  # ── lean_single: expected correct (#1655) ─────────────────────────────────
   TOTAL=$((TOTAL + 1))
   if [[ -x "$LEAN" ]]; then
     LEAN_V="$(run_case lean "$LEAN" "$SRC")"
-    echo "   lean_single  $LEAN_V (recorded: BROKEN)"
-    case "$LEAN_V" in
-      BROKEN)
-        PASSED=$((PASSED + 1)) ;;
-      OK)
-        FAILED=$((FAILED + 1))
-        gate_fail "lean_single now PASSES $SRC. This is PROGRESS and it is red on purpose: the seed's global-aggregate defect is fixed, so the parallel-flat-array workaround in self-hosted/ir/lower.sio and self-hosted/ir/ir.sio is no longer forced. Record that here before the fact is absorbed silently." ;;
-      *)
-        FAILED=$((FAILED + 1))
-        gate_fail "lean_single produced '$LEAN_V' on $SRC — neither verdict. The file did not compile or did not run, so it measured nothing at all; see $WORK." ;;
-    esac
+    echo "   lean_single  $LEAN_V (recorded: OK)"
+    if [[ "$LEAN_V" == "OK" ]]; then
+      PASSED=$((PASSED + 1))
+    else
+      FAILED=$((FAILED + 1))
+      gate_fail "lean_single produced '$LEAN_V' on $SRC. It was fixed by #1655 (global struct arrays are pointer-per-slot with a BSS backing block); this is a regression of that fix. See $WORK."
+    fi
   else
     NOT_RUN=$((NOT_RUN + 1))
     echo "   lean_single  SKIP (no binary at $LEAN)"
@@ -142,7 +134,7 @@ if [[ "$PASSED" -eq 0 ]]; then
   gate_fail "no arm ran: neither engine was available, so this gate measured nothing. A gate that finds none of its subject must not report success."
 fi
 
-LEAN_MEASURED=$([[ -x "$LEAN" ]] && echo "BROKEN (measured)" || echo "not measured")
+LEAN_MEASURED=$([[ -x "$LEAN" ]] && echo "OK (measured)" || echo "not measured")
 MAD_MEASURED=$([[ -n "$MADAROS" && -x "$MADAROS" ]] && echo "OK (measured)" || echo "not measured")
 
 ART_DIR="${SOUNIO_ARTIFACT_DIR:-$ROOT_DIR/artifacts/gates}"
@@ -158,19 +150,19 @@ cat <<JSON | gate_write_artifact "$ART_DIR/global_aggregate_store.json"
     "not_run": $NOT_RUN
   },
   "witness": {
-    "quantity": "GLOBAL_AGGREGATE_STORE_DIVERGENCE",
+    "quantity": "GLOBAL_AGGREGATE_STORE_ROUNDTRIP",
     "lean_single": "$LEAN_MEASURED",
     "madaros": "$MAD_MEASURED",
-    "note": "seed drops struct stores into global arrays and overruns from plain struct globals into the next global; workaround is parallel flat arrays"
+    "note": "struct stores into global arrays and plain struct globals round-trip on both engines (#1655)"
   }
 }
 JSON
 
-# Name what was actually measured. Saying "lean_single broken, Madaros correct"
+# Name what was actually measured. Saying "both engines correct"
 # when the Madaros arms were skipped is the exact vacuity this library exists to
 # prevent — and it would read as a two-engine result to whoever greps the log.
 COVERAGE="lean_single ✓, madaros ✓"
 [[ -z "$MADAROS" || ! -x "$MADAROS" ]] && COVERAGE="lean_single ✓, madaros NOT MEASURED (MADAROS_BIN unset)"
 [[ ! -x "$LEAN" ]] && COVERAGE="lean_single NOT MEASURED, madaros ✓"
 
-gate_pass "global-aggregate store divergence is where it was recorded. $COVERAGE. $PASSED/$TOTAL arms checked, $NOT_RUN skipped. Artifact: $ART_DIR/global_aggregate_store.json"
+gate_pass "global-aggregate stores round-trip. $COVERAGE. $PASSED/$TOTAL arms checked, $NOT_RUN skipped. Artifact: $ART_DIR/global_aggregate_store.json"

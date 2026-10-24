@@ -2,7 +2,7 @@
 // wasm_validate_pbpk.mjs — Validate pbpk_rapa_demo output
 //
 // Usage:
-//   target/debug/souc run self-hosted/wasm/pbpk_rapa_demo.sio | node scripts/wasm_validate_pbpk.mjs
+//   ./bin/souc run self-hosted/wasm/pbpk_rapa_demo.sio | node scripts/build/wasm_validate_pbpk.mjs
 //
 // Exits 0 if all constraints pass, 1 otherwise.
 

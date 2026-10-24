@@ -1,0 +1,277 @@
+// Supplied-parameter saturated NB2 deviance; no fit or inference.
+// See NB2_DEVIANCE.md for staged arithmetic and independent availability.
+use math::pure::{CheckedLog,sqrt,is_finite,ln_checked_into}
+use math::logarithmic::{log1p_checked_into,log1pmx_checked_into,log1p_phi_checked_into}
+pub struct Nb2Deviance {
+ pub status:i64,
+ pub deviance_status:i64,
+ pub deviance:f64,
+ pub residual:f64,
+ pub poisson_limit:bool,
+}
+
+pub struct Nb2DevianceSlot { result:Nb2Deviance,log_work:CheckedLog,working_root:f64,working_status:i64 }
+pub fn nb2_deviance_slot()->Nb2DevianceSlot {
+ Nb2DevianceSlot{result:Nb2Deviance{status:5,deviance_status:2,deviance:0.0,residual:0.0,poisson_limit:false},log_work:CheckedLog{status:2,value:0.0},working_root:0.0,working_status:5}
+}
+pub fn nb2_deviance_slot_reset(s:&!Nb2DevianceSlot) with Mut {
+ s.result.status=5;s.result.deviance_status=2;s.result.deviance=0.0
+ s.result.residual=0.0;s.result.poisson_limit=false
+ s.log_work.status=2;s.log_work.value=0.0
+ s.working_root=0.0;s.working_status=5
+}
+pub fn nb2_deviance_slot_status(s:&Nb2DevianceSlot)->i64 {s.result.status}
+pub fn nb2_deviance_slot_deviance_status(s:&Nb2DevianceSlot)->i64 {s.result.deviance_status}
+pub fn nb2_deviance_slot_deviance(s:&Nb2DevianceSlot)->f64 {s.result.deviance}
+pub fn nb2_deviance_slot_residual(s:&Nb2DevianceSlot)->f64 {s.result.residual}
+pub fn nb2_deviance_slot_poisson_limit(s:&Nb2DevianceSlot)->bool {s.result.poisson_limit}
+pub fn nb2_deviance_snapshot(s:&Nb2DevianceSlot)->Nb2Deviance {
+ let status:i64=s.result.status;let availability:i64=s.result.deviance_status
+ let deviance:f64=s.result.deviance;let residual:f64=s.result.residual
+ let poisson:bool=s.result.poisson_limit
+ Nb2Deviance{status:status,deviance_status:availability,deviance:deviance,residual:residual,poisson_limit:poisson}
+}
+
+fn nbdev_abs(x:f64)->f64 {if x<0.0 {-x} else {x}}
+fn nbdev_empty_into(status:i64,s:&!Nb2DevianceSlot)->i64 with Mut {
+ nb2_deviance_slot_reset(s)
+ s.result.status=status
+ status
+}
+fn nbdev_bad_root_into(s:&!Nb2DevianceSlot)->i64 with Mut {s.working_status=5;s.working_root=0.0;5}
+fn nbdev_finish_into(root:f64,delta:f64,poisson:bool,s:&!Nb2DevianceSlot)->i64 with Mut {
+ if !is_finite(root) || root<0.0 || (root==0.0 && delta!=0.0) {return nbdev_empty_into(5,s)}
+ var residual=root
+ if delta<0.0 {residual= -root}
+ var deviance=root*root
+ var availability:i64=0
+ if !is_finite(deviance) || (deviance==0.0 && root!=0.0) {deviance=0.0;availability=1}
+ s.result.status=0;s.result.deviance_status=availability;s.result.deviance=deviance
+ s.result.residual=residual;s.result.poisson_limit=poisson
+ 0
+}
+// Poisson contribution root, retaining supplied difference before local rounding.
+fn nbdev_poisson_root_into(y:f64,mu:f64,delta:f64,s:&!Nb2DevianceSlot)->i64 with Mut,Div,Panic {
+ let cleared=nbdev_bad_root_into(s)
+ if delta==0.0 {s.working_status=0;return 0}
+ var root:f64=0.0
+ if nbdev_abs(delta)<=mu*0.25 {
+  let d=delta/mu
+  var factor:f64=0.5
+  if nbdev_abs(d)>=1e-16 {
+   let shape_status=log1p_phi_checked_into(d,&!s.log_work)
+   let shape_value:f64=s.log_work.value
+   if shape_status!=0 {return nbdev_bad_root_into(s)}
+   factor=(shape_value/d)/d
+  }
+  if !is_finite(factor) || factor<=0.0 {return nbdev_bad_root_into(s)}
+  root=(nbdev_abs(delta)/sqrt(mu))*sqrt(2.0*factor)
+ } else {
+  let ly_status=ln_checked_into(y,&!s.log_work)
+  let ly_value:f64=s.log_work.value
+  let lm_status=ln_checked_into(mu,&!s.log_work)
+  let lm_value:f64=s.log_work.value
+  if ly_status!=0 || lm_status!=0 {return nbdev_bad_root_into(s)}
+  let half=(y*(ly_value-lm_value)-y)+mu
+  if !is_finite(half) || half<=0.0 {return nbdev_bad_root_into(s)}
+  root=sqrt(half)*sqrt(2.0)
+ }
+ if !is_finite(root) || root<0.0 {return nbdev_bad_root_into(s)}
+ s.working_status=0;s.working_root=root
+ 0
+}
+// Independent log avoids magnifying rounded-subnormal mu in the far term.
+fn nbdev_poisson_far_log_root_into(y:f64,mu:f64,log_mu:f64,s:&!Nb2DevianceSlot)->i64 with Mut,Div,Panic {
+ let cleared=nbdev_bad_root_into(s)
+ let ly_status=ln_checked_into(y,&!s.log_work)
+ let ly_value:f64=s.log_work.value
+ if ly_status!=0 || !is_finite(log_mu) {return nbdev_bad_root_into(s)}
+ let half=(y*(ly_value-log_mu)-y)+mu
+ if !is_finite(half) || half<=0.0 {return nbdev_bad_root_into(s)}
+ let root=sqrt(half)*sqrt(2.0)
+ if !is_finite(root) || root<=0.0 {return nbdev_bad_root_into(s)}
+ s.working_status=0;s.working_root=root
+ 0
+}
+pub fn nb2_deviance_into(count:i64,mean:f64,alpha:f64,s:&!Nb2DevianceSlot)->i64 with Mut,Div,Panic {
+ nb2_deviance_slot_reset(s)
+ if count<0 {return nbdev_empty_into(1,s)}
+ if !is_finite(mean) || mean<=0.0 {return nbdev_empty_into(2,s)}
+ if !is_finite(alpha) || alpha<0.0 {return nbdev_empty_into(3,s)}
+ if count>9007199254740992 {return nbdev_empty_into(4,s)}
+ let y=count as f64
+ let delta=y-mean
+ let poisson=alpha==0.0
+ if delta==0.0 {return nbdev_finish_into(0.0,0.0,poisson,s)}
+ if count==0 {
+  var root:f64=0.0
+  if poisson {root=sqrt(mean)*sqrt(2.0)} else {
+   let product=alpha*mean
+   if is_finite(product) {
+    var ratio:f64=1.0
+    if product!=0.0 {
+     let logged_status=log1p_checked_into(product,&!s.log_work)
+     let logged_value:f64=s.log_work.value
+     if logged_status!=0 {return nbdev_empty_into(5,s)}
+     ratio=logged_value/product
+    }
+    if !is_finite(ratio) || ratio<=0.0 {return nbdev_empty_into(5,s)}
+    root=sqrt(mean)*sqrt(2.0*ratio)
+   } else {
+    let la_status=ln_checked_into(alpha,&!s.log_work)
+    let la_value:f64=s.log_work.value
+    let lm_status=ln_checked_into(mean,&!s.log_work)
+    let lm_value:f64=s.log_work.value
+    if la_status!=0 || lm_status!=0 {return nbdev_empty_into(5,s)}
+    let logged=la_value+lm_value
+    if !is_finite(logged) || logged<=0.0 {return nbdev_empty_into(5,s)}
+    root=(sqrt(logged)/sqrt(alpha))*sqrt(2.0)
+   }
+  }
+  return nbdev_finish_into(root,delta,poisson,s)
+ }
+ if poisson {
+  let root_status=nbdev_poisson_root_into(y,mean,delta,s)
+  if root_status!=0 {return nbdev_empty_into(5,s)}
+  let root_value:f64=s.working_root
+  return nbdev_finish_into(root_value,delta,true,s)
+ }
+ let product=alpha*mean
+ var q:f64=1.0
+ if is_finite(product) {q=product/(1.0+product)}
+ if !is_finite(q) || q<0.0 || q>1.0 {return nbdev_empty_into(5,s)}
+ if nbdev_abs(delta)<=mean*0.25 {
+  // D = Pearson_NB2^2 * 2*integral, with a factored degree-31 series.
+  let x=delta/mean
+  var pearson:f64=0.0
+  if mean>=1.0 {pearson=(delta/mean)/sqrt(alpha+1.0/mean)} else {
+   pearson=(delta/sqrt(mean))/sqrt(1.0+product)
+  }
+  var sum:f64=0.5
+  var correction:f64=0.0
+  var power:f64=1.0
+  var geometric:f64=1.0
+  var n:i64=1
+  while n<32 {
+   power=power*(-x)
+   geometric=1.0+q*geometric
+   let term=(power*geometric)/(((n+1)*(n+2)) as f64)
+   let adjusted=term-correction
+   let next=sum+adjusted
+   correction=(next-sum)-adjusted
+   sum=next
+   n=n+1
+  }
+  if !is_finite(sum) || sum<=0.0 {return nbdev_empty_into(5,s)}
+  return nbdev_finish_into(nbdev_abs(pearson)*sqrt(2.0*sum),delta,false,s)
+ }
+ // Positive decomposition: PoisHalf(y,m1) + (z-log1p(z))/alpha.
+ // Carry delta1 independently; never recover it by subtracting y-m1.
+ var c:f64=0.0
+ var b:f64=0.0
+ var delta1:f64=0.0
+ var m1:f64=0.0
+ var carry_log=false
+ var log_m1:f64=0.0
+ if product<2.2250738585072014e-308 {
+  // Form alpha*y first, rather than amplifying rounded (alpha*mean) by y.
+  let ay=alpha*y
+  let multiplier=1.0+ay
+  let denominator=1.0+product
+  if !is_finite(ay) || !is_finite(multiplier) || !is_finite(denominator) || denominator<=0.0 {return nbdev_empty_into(5,s)}
+  m1=(mean*multiplier)/denominator
+  delta1=delta/denominator
+  if m1>0.0 && m1<2.2250738585072014e-308 {
+   // Preserve the logarithm before rounding the subnormal mean contribution.
+   let lm_status=ln_checked_into(mean,&!s.log_work)
+   let lm_value:f64=s.log_work.value
+   let increment_status=log1p_checked_into(ay,&!s.log_work)
+   let increment_value:f64=s.log_work.value
+   let normalization_status=log1p_checked_into(product,&!s.log_work)
+   let normalization_value:f64=s.log_work.value
+   if lm_status!=0 || increment_status!=0 || normalization_status!=0 {return nbdev_empty_into(5,s)}
+   log_m1=(lm_value+increment_value)-normalization_value
+   carry_log=true
+  }
+ } else if mean>=1.0 {
+  let denominator=alpha+1.0/mean
+  c=1.0/denominator
+  b=alpha/denominator
+  delta1=(delta/mean)/denominator
+ } else {
+  let denominator=1.0+product
+  c=mean/denominator
+  b=product/denominator
+  delta1=delta/denominator
+ }
+ if product>=2.2250738585072014e-308 {m1=c+y*b}
+ if !is_finite(m1) || m1<=0.0 || !is_finite(delta1) || delta1==0.0 {return nbdev_empty_into(5,s)}
+ var first_status:i64=5
+ if carry_log {first_status=nbdev_poisson_far_log_root_into(y,m1,log_m1,s)} else {
+  first_status=nbdev_poisson_root_into(y,m1,delta1,s)
+ }
+ if first_status!=0 {return nbdev_empty_into(5,s)}
+ let first_value:f64=s.working_root
+ let z=alpha*delta1
+ var second:f64=0.0
+ if is_finite(z) && nbdev_abs(z)<=0.25 {
+  var factor:f64=0.5
+  if nbdev_abs(z)>=1e-16 {
+   let shape_status=log1pmx_checked_into(z,&!s.log_work)
+   let shape_value:f64=s.log_work.value
+   if shape_status!=0 {return nbdev_empty_into(5,s)}
+   factor=((-shape_value)/z)/z
+  }
+  if !is_finite(factor) || factor<=0.0 {return nbdev_empty_into(5,s)}
+  second=(nbdev_abs(delta1)*sqrt(alpha))*sqrt(2.0*factor)
+ } else {
+  var logk:f64=0.0
+  // Near -1, forming 1+z magnifies rounding of alpha*delta1.
+  // The independent log ratio is separated from zero here; retain log1p
+  // for the remaining range to avoid subtracting nearby logarithms.
+  if is_finite(z) && z> -0.5 {
+   let logged_status=log1p_checked_into(z,&!s.log_work)
+   let logged_value:f64=s.log_work.value
+   if logged_status!=0 {return nbdev_empty_into(5,s)}
+   logk=logged_value
+  } else {
+   let l1_status=ln_checked_into(m1,&!s.log_work)
+   let l1_value:f64=s.log_work.value
+   let lm_status=ln_checked_into(mean,&!s.log_work)
+   let lm_value:f64=s.log_work.value
+   if l1_status!=0 || lm_status!=0 {return nbdev_empty_into(5,s)}
+   logk=l1_value-lm_value
+  }
+  if !is_finite(logk) {return nbdev_empty_into(5,s)}
+  var factor:f64=0.0
+  if delta1>0.0 {
+   if logk<=0.0 {return nbdev_empty_into(5,s)}
+   // +infinity z from product overflow makes this quotient rounded zero.
+   var quotient:f64=0.0
+   if is_finite(z) {quotient=logk/z}
+   factor=1.0-quotient
+   if !is_finite(factor) || factor<=0.0 {return nbdev_empty_into(5,s)}
+   second=sqrt(delta1)*sqrt(2.0*factor)
+  } else {
+   if logk>=0.0 || !is_finite(z) || z< -1.0 {return nbdev_empty_into(5,s)}
+   factor=1.0-((-z)/(-logk))
+   if !is_finite(factor) || factor<=0.0 {return nbdev_empty_into(5,s)}
+   second=(sqrt(-logk)/sqrt(alpha))*sqrt(2.0*factor)
+  }
+ }
+ if !is_finite(second) || second<0.0 {return nbdev_empty_into(5,s)}
+ var scale=first_value
+ if second>scale {scale=second}
+ if scale<=0.0 {return nbdev_empty_into(5,s)}
+ let a=first_value/scale
+ let d=second/scale
+ let root=scale*sqrt(a*a+d*d)
+ nbdev_finish_into(root,delta,false,s)
+}
+
+// Legacy snapshot adapter. Reuse a private slot directly in repeated calls.
+pub fn nb2_deviance(count:i64,mean:f64,alpha:f64)->Nb2Deviance with Mut,Div,Panic {
+ var slot=nb2_deviance_slot()
+ let ignored=nb2_deviance_into(count,mean,alpha,&!slot)
+ nb2_deviance_snapshot(&slot)
+}

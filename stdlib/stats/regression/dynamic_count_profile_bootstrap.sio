@@ -1,0 +1,326 @@
+// ML profile-refit bootstrap. Positive-alpha range edges are unavailable.
+// Explicit budgets, no allocation, no omitted failed replicate or finite-validity claim.
+use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
+use stats::regression::dynamic_dispersion::{DispersionSearchOptions,dynamic_dispersion_workspace,dynamic_dispersion_fit}
+use stats::regression::nb2_likelihood::{Nb2LikelihoodSlot,nb2_likelihood_slot,nb2_log_probability_into,nb2_likelihood_slot_log_probability}
+use stats::checked_count_sampling::{CountCursor,count_cursor_new,count_cursor_rng,count_draw_value,nb2_count_draw_into}
+use random::pcg64_core::{PcgState}
+use math::pure::{is_finite,sqrt,exp}
+pub struct CountProfileBootstrapOptions {
+ pub replicates:i64,pub rcond:f64,
+ pub log_alpha_lower:f64,pub log_alpha_upper:f64,pub outer_tolerance:f64,pub max_outer_evaluations:i64,
+ pub inner_iterations:i64,pub inner_tolerance:f64,pub max_profile_attempts:i64,
+ pub max_uniforms_per_draw:i64,pub max_proposals_per_draw:i64,
+ pub max_total_uniforms:i64,pub max_total_proposals:i64,
+ pub nesting_declared:bool,pub model_declared:bool,pub independence_declared:bool,
+}
+pub struct CountProfileBootstrapWorkspace {
+ pub status:i64,pub rows:i64,pub null_columns:i64,pub alternative_columns:i64,
+ pub null_design_elements:i64,pub alternative_design_elements:i64,
+ pub null_qr_elements:i64,pub alternative_qr_elements:i64,
+ pub null_stage_elements:i64,pub alternative_stage_elements:i64,
+ pub numeric_elements:i64,pub integer_elements:i64,pub payload_bytes:i64,
+}
+pub fn dynamic_count_profile_bootstrap_workspace(n:i64,p0:i64,p1:i64)->CountProfileBootstrapWorkspace with Div {
+ let bad=CountProfileBootstrapWorkspace{status:1,rows:n,null_columns:p0,alternative_columns:p1,
+ null_design_elements:0,alternative_design_elements:0,null_qr_elements:0,
+ alternative_qr_elements:0,null_stage_elements:0,alternative_stage_elements:0,
+ numeric_elements:0,integer_elements:0,payload_bytes:0}
+ let first=dynamic_dispersion_workspace(n,p0,0)
+ let second=dynamic_dispersion_workspace(n,p1,0)
+ if first.status!=0 || second.status!=0 {return bad}
+ let limit=9223372036854771704/8
+ var total=first.numeric_elements
+ if second.numeric_elements>limit-total {return bad}
+ total=total+second.numeric_elements
+ if p0>limit-total {return bad}
+ total=total+p0
+ if p1>limit-total {return bad}
+ total=total+p1
+ if n>(limit-total)/6 {return bad}
+ total=total+n*6
+ CountProfileBootstrapWorkspace{status:0,rows:n,null_columns:p0,alternative_columns:p1,
+ null_design_elements:first.count_design_elements,alternative_design_elements:second.count_design_elements,
+ null_qr_elements:first.qr_elements,alternative_qr_elements:second.qr_elements,
+ null_stage_elements:first.count_stage_elements,alternative_stage_elements:second.count_stage_elements,
+ numeric_elements:total-n,integer_elements:n,payload_bytes:total*8}
+}
+pub struct CountProfileBootstrapResult {
+ pub status:i64,pub available:bool,pub rng:PcgState,pub replicates_requested:i64,
+ pub replicates_completed:i64,pub hits:i64,pub p_value:f64,
+ pub mc_available:bool,pub mc_tail_fraction:f64,pub mc_standard_error:f64,
+ pub fit_attempts:i64,pub count_draws:i64,pub uniforms:i64,pub proposals:i64,
+ pub observed_available:bool,pub observed_mean_loglik_difference:f64,
+ pub observed_signed_lr:f64,pub observed_lr_available:bool,
+ pub failure_replica:i64,pub failure_row:i64,pub failure_stage:i64,
+ pub last_null_status:i64,pub last_alternative_status:i64,pub sampler_status:i64,pub likelihood_status:i64,
+ pub failure_mean_loglik_difference:f64,pub failure_signed_lr:f64,
+ pub failure_lr_available:bool,pub sampler_resolution_limited:bool,
+ pub sampler_rate_underflow:bool,pub observed_null_alpha:f64,pub observed_alternative_alpha:f64,
+ pub generating_alpha:f64,pub last_null_alpha:f64,pub last_alternative_alpha:f64,pub profile_evaluations:i64,pub last_null_profile_status:i64,pub last_alternative_profile_status:i64,
+ pub alpha_refitted:bool,pub nesting_declared:bool,
+ pub model_declared:bool,pub independence_declared:bool,
+ pub assumptions_assessed:bool,pub global_optimality_assessed:bool,
+ pub finite_sample_validity_assessed:bool,pub workspace_payload_bytes:i64,
+}
+fn cpb_checkpoint(out:&!CountProfileBootstrapResult,cursor:&CountCursor) with Mut {
+ out.rng=count_cursor_rng(cursor)
+}
+struct CPBComparison {status:i64,difference:f64,lr:f64,lr_available:bool}
+struct CPBLogMean {status:i64,value:f64}
+fn cpb_empty(status:i64,rng:PcgState,options:&CountProfileBootstrapOptions)->CountProfileBootstrapResult {
+ let hi:i64=rng.state_hi
+ let lo:i64=rng.state_lo
+ let inc_hi:i64=rng.inc_hi
+ let inc_lo:i64=rng.inc_lo
+ let snapshot=PcgState{state_hi:hi,state_lo:lo,inc_hi:inc_hi,inc_lo:inc_lo}
+ CountProfileBootstrapResult{status:status,available:false,rng:snapshot,
+ replicates_requested:options.replicates,replicates_completed:0,hits:0,p_value:0.0,
+ mc_available:false,mc_tail_fraction:0.0,mc_standard_error:0.0,
+ fit_attempts:0,count_draws:0,uniforms:0,proposals:0,observed_available:false,
+ observed_mean_loglik_difference:0.0,observed_signed_lr:0.0,observed_lr_available:false,
+ failure_replica: -1,failure_row: -1,failure_stage:0,last_null_status:0,
+ last_alternative_status:0,sampler_status:0,likelihood_status:0,failure_mean_loglik_difference:0.0,
+ failure_signed_lr:0.0,failure_lr_available:false,sampler_resolution_limited:false,
+ sampler_rate_underflow:false,observed_null_alpha:0.0,observed_alternative_alpha:0.0,
+ generating_alpha:0.0,last_null_alpha:0.0,last_alternative_alpha:0.0,profile_evaluations:0,last_null_profile_status:0,last_alternative_profile_status:0,alpha_refitted:false,
+ nesting_declared:options.nesting_declared,model_declared:options.model_declared,
+ independence_declared:options.independence_declared,assumptions_assessed:false,
+ global_optimality_assessed:false,finite_sample_validity_assessed:false,
+ workspace_payload_bytes:0}
+}
+fn cpb_take_fit(progress:&!CountProfileBootstrapResult,limit:i64)->bool with Mut {
+ if progress.fit_attempts>=limit {return false}
+ progress.fit_attempts=progress.fit_attempts+1
+ true
+}
+fn cpb_full_mean(counts:&IntegerBuffer,means:&NumericBuffer,n:i64,alpha:f64,pmf_work:&!Nb2LikelihoodSlot)->CPBLogMean with Mut,Div,Panic {
+ var scale:f64=0.0
+ var sum:f64=0.0
+ var correction:f64=0.0
+ var i:i64=0
+ while i<n {
+  let pmf_status=nb2_log_probability_into(integer_buffer_at(counts,i),numeric_buffer_at(means,i),alpha,pmf_work)
+  if pmf_status!=0 {return CPBLogMean{status:pmf_status,value:0.0}}
+  let log_probability=nb2_likelihood_slot_log_probability(pmf_work)
+  if !is_finite(log_probability) || log_probability>0.0 {return CPBLogMean{status:5,value:0.0}}
+  let magnitude= -log_probability
+  if magnitude>scale {
+   let ratio=if scale==0.0 {0.0}else{scale/magnitude}
+   sum=sum*ratio;correction=correction*ratio;scale=magnitude
+  }
+  if magnitude>0.0 {
+   let term=magnitude/scale-correction
+   let next=sum+term
+   correction=(next-sum)-term;sum=next
+  }
+  i=i+1
+ }
+ var value:f64=0.0
+ if scale>0.0 {
+  value= -(scale*(sum/(n as f64)))
+  if !is_finite(value) || value==0.0 {return CPBLogMean{status:5,value:0.0}}
+ }
+ CPBLogMean{status:0,value:value}
+}
+
+fn cpb_compare(null_design:&NumericBuffer,null_layout:&NumericMatrix,null_offsets:&NumericBuffer,
+ null_initial:&NumericBuffer,alternative_design:&NumericBuffer,alternative_layout:&NumericMatrix,
+ alternative_offsets:&NumericBuffer,alternative_initial:&NumericBuffer,
+ counts:&IntegerBuffer,options:&CountProfileBootstrapOptions,progress:&!CountProfileBootstrapResult,
+ null_coefficients:&!NumericBuffer,null_means:&!NumericBuffer,null_eta:&!NumericBuffer,
+ null_weighted:&!NumericBuffer,null_response:&!NumericBuffer,null_step:&!NumericBuffer,
+ null_qr:&!NumericBuffer,null_stage:&!NumericBuffer,
+ alternative_coefficients:&!NumericBuffer,alternative_means:&!NumericBuffer,
+ alternative_eta:&!NumericBuffer,alternative_weighted:&!NumericBuffer,
+ alternative_response:&!NumericBuffer,alternative_step:&!NumericBuffer,
+ alternative_qr:&!NumericBuffer,alternative_stage:&!NumericBuffer,
+ null_candidate_coefficients:&!NumericBuffer,null_candidate_means:&!NumericBuffer,null_candidate_eta:&!NumericBuffer,null_best_coefficients:&!NumericBuffer,null_best_means:&!NumericBuffer,null_best_eta:&!NumericBuffer,null_factor_r:&!NumericBuffer,null_factor_scales:&!NumericBuffer,null_permutation:&!IntegerBuffer,
+ alternative_candidate_coefficients:&!NumericBuffer,alternative_candidate_means:&!NumericBuffer,alternative_candidate_eta:&!NumericBuffer,alternative_best_coefficients:&!NumericBuffer,alternative_best_means:&!NumericBuffer,alternative_best_eta:&!NumericBuffer,alternative_factor_r:&!NumericBuffer,alternative_factor_scales:&!NumericBuffer,alternative_permutation:&!IntegerBuffer,pmf_work:&!Nb2LikelihoodSlot)->CPBComparison with Mut,Div,Panic {
+ progress.last_null_alpha=0.0
+ progress.last_alternative_alpha=0.0
+ let failed=CPBComparison{status:3,difference:0.0,lr:0.0,lr_available:false}
+ if !cpb_take_fit(progress,options.max_profile_attempts) {
+  return CPBComparison{status:5,difference:0.0,lr:0.0,lr_available:false}
+ }
+ let search=DispersionSearchOptions{method:0,log_alpha_lower:options.log_alpha_lower,log_alpha_upper:options.log_alpha_upper,outer_tolerance:options.outer_tolerance,max_outer_evaluations:options.max_outer_evaluations,rcond:options.rcond,inner_iterations:options.inner_iterations,inner_tolerance:options.inner_tolerance,prior_active:false,prior_center:0.0,prior_variance:1.0,compute_curvature:false}
+ let fit0=dynamic_dispersion_fit(null_design,null_layout,counts,null_offsets,null_initial,&search,null_coefficients,null_means,null_eta,null_candidate_coefficients,null_candidate_means,null_candidate_eta,null_best_coefficients,null_best_means,null_best_eta,null_weighted,null_response,null_step,null_qr,null_stage,null_factor_r,null_factor_scales,null_permutation)
+ progress.profile_evaluations=progress.profile_evaluations+fit0.evaluations
+ progress.last_null_profile_status=fit0.profile_status
+ progress.last_null_status=fit0.status
+ if fit0.status!=0 {progress.failure_stage=1;if fit0.status==5 {return CPBComparison{status:5,difference:0.0,lr:0.0,lr_available:false}};return failed}
+ progress.last_null_alpha=fit0.alpha
+ if !fit0.point_available || (!fit0.poisson_selected && (fit0.left_censored || fit0.right_censored)) {progress.failure_stage=1;return CPBComparison{status:12,difference:0.0,lr:0.0,lr_available:false}}
+ if !cpb_take_fit(progress,options.max_profile_attempts) {
+  return CPBComparison{status:5,difference:0.0,lr:0.0,lr_available:false}
+ }
+ let fit1=dynamic_dispersion_fit(alternative_design,alternative_layout,counts,alternative_offsets,alternative_initial,&search,alternative_coefficients,alternative_means,alternative_eta,alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_weighted,alternative_response,alternative_step,alternative_qr,alternative_stage,alternative_factor_r,alternative_factor_scales,alternative_permutation)
+ progress.profile_evaluations=progress.profile_evaluations+fit1.evaluations
+ progress.last_alternative_profile_status=fit1.profile_status
+ progress.last_alternative_status=fit1.status
+ if fit1.status!=0 {progress.failure_stage=2;if fit1.status==5 {return CPBComparison{status:5,difference:0.0,lr:0.0,lr_available:false}};return failed}
+ progress.last_alternative_alpha=fit1.alpha
+ if !fit1.point_available || (!fit1.poisson_selected && (fit1.left_censored || fit1.right_censored)) {progress.failure_stage=2;return CPBComparison{status:12,difference:0.0,lr:0.0,lr_available:false}}
+ if progress.failure_replica== -1 {progress.alpha_refitted=true;progress.observed_null_alpha=fit0.alpha;progress.observed_alternative_alpha=fit1.alpha;progress.generating_alpha=fit0.alpha}
+ let n=fit0.rows
+ let full0=cpb_full_mean(counts,null_means,n,fit0.alpha,pmf_work)
+ if full0.status!=0 {progress.failure_stage=3;progress.likelihood_status=full0.status;return CPBComparison{status:9,difference:0.0,lr:0.0,lr_available:false}}
+ let full1=cpb_full_mean(counts,alternative_means,n,fit1.alpha,pmf_work)
+ if full1.status!=0 {progress.failure_stage=4;progress.likelihood_status=full1.status;return CPBComparison{status:9,difference:0.0,lr:0.0,lr_available:false}}
+ let difference=full1.value-full0.value
+ if !is_finite(difference) {return CPBComparison{status:4,difference:0.0,lr:0.0,lr_available:false}}
+ let lr=(difference*(n as f64))*2.0
+ if !is_finite(lr) || (difference!=0.0 && lr==0.0) {
+  return CPBComparison{status:4,difference:difference,lr:0.0,lr_available:false}
+ }
+ if lr<0.0 {progress.failure_stage=5;return CPBComparison{status:6,difference:difference,lr:lr,lr_available:true}}
+ CPBComparison{status:0,difference:difference,lr:lr,lr_available:true}
+}
+
+// status0 tail aggregate;1shape;2controls/RNG;3fit;4arithmetic;5budget;
+// 6negative LR;7sampler;8sampler precision;9full likelihood;12positive profile edge;
+// 11scientific declarations absent. All unavailable p/MC fields are zero placeholders.
+pub fn dynamic_count_profile_lrt_bootstrap(null_design:&NumericBuffer,null_layout:&NumericMatrix,null_offsets:&NumericBuffer,
+ null_initial:&NumericBuffer,alternative_design:&NumericBuffer,alternative_layout:&NumericMatrix,
+ alternative_offsets:&NumericBuffer,alternative_initial:&NumericBuffer,
+ observed_counts:&IntegerBuffer,options:&CountProfileBootstrapOptions,rng:PcgState,
+ replicate_counts:&!IntegerBuffer,generating_means:&!NumericBuffer,
+ null_coefficients:&!NumericBuffer,null_means:&!NumericBuffer,null_eta:&!NumericBuffer,
+ null_weighted:&!NumericBuffer,null_response:&!NumericBuffer,null_step:&!NumericBuffer,
+ null_qr:&!NumericBuffer,null_stage:&!NumericBuffer,
+ alternative_coefficients:&!NumericBuffer,alternative_means:&!NumericBuffer,
+ alternative_eta:&!NumericBuffer,alternative_weighted:&!NumericBuffer,
+ alternative_response:&!NumericBuffer,alternative_step:&!NumericBuffer,
+ alternative_qr:&!NumericBuffer,alternative_stage:&!NumericBuffer,
+ null_candidate_coefficients:&!NumericBuffer,null_candidate_means:&!NumericBuffer,null_candidate_eta:&!NumericBuffer,null_best_coefficients:&!NumericBuffer,null_best_means:&!NumericBuffer,null_best_eta:&!NumericBuffer,null_factor_r:&!NumericBuffer,null_factor_scales:&!NumericBuffer,null_permutation:&!IntegerBuffer,
+ alternative_candidate_coefficients:&!NumericBuffer,alternative_candidate_means:&!NumericBuffer,alternative_candidate_eta:&!NumericBuffer,alternative_best_coefficients:&!NumericBuffer,alternative_best_means:&!NumericBuffer,alternative_best_eta:&!NumericBuffer,alternative_factor_r:&!NumericBuffer,alternative_factor_scales:&!NumericBuffer,alternative_permutation:&!IntegerBuffer)->CountProfileBootstrapResult with Mut,Div,Panic {
+ var out=cpb_empty(2,rng,options)
+ let span=options.log_alpha_upper-options.log_alpha_lower
+ if !is_finite(options.log_alpha_lower) || !is_finite(options.log_alpha_upper) || options.log_alpha_lower>=options.log_alpha_upper || !is_finite(span) ||
+ !is_finite(options.outer_tolerance) || options.outer_tolerance<=0.0 || options.max_outer_evaluations<1 || options.replicates<1 ||
+ options.replicates>9007199254740991 || !is_finite(options.rcond) || options.rcond<0.0 ||
+ options.rcond>=1.0 || options.inner_iterations<1 || options.inner_iterations>100 ||
+ !is_finite(options.inner_tolerance) || options.inner_tolerance<1e-12 ||
+ options.inner_tolerance>1e-4 || options.max_profile_attempts<0 ||
+ options.max_uniforms_per_draw<0 || options.max_proposals_per_draw<0 ||
+ options.max_total_uniforms<0 || options.max_total_proposals<0 {return out}
+ let lower_alpha=exp(options.log_alpha_lower)
+ let upper_alpha=exp(options.log_alpha_upper)
+ if !is_finite(lower_alpha) || !is_finite(upper_alpha) || lower_alpha<=0.0 || upper_alpha<=0.0 {return out}
+ if options.max_profile_attempts>9223372036854775807/options.max_outer_evaluations {return out}
+ if (rng.inc_lo & 1)==0 {return out}
+ if !options.nesting_declared || !options.model_declared || !options.independence_declared {
+  out.status=11;return out
+ }
+ out.status=1
+ if numeric_matrix_status(null_layout)!=0 || numeric_matrix_status(alternative_layout)!=0 ||
+ numeric_buffer_status(null_design)!=0 || numeric_buffer_status(alternative_design)!=0 ||
+ numeric_buffer_status(null_offsets)!=0 || numeric_buffer_status(alternative_offsets)!=0 ||
+ numeric_buffer_status(null_initial)!=0 || numeric_buffer_status(alternative_initial)!=0 ||
+ integer_buffer_status(observed_counts)!=0 || integer_buffer_status(replicate_counts)!=0 ||
+ numeric_buffer_status(generating_means)!=0 {return out}
+ let n=numeric_matrix_rows(null_layout)
+ let p0=numeric_matrix_cols(null_layout)
+ let p1=numeric_matrix_cols(alternative_layout)
+ if numeric_matrix_rows(alternative_layout)!=n || p0>p1 {return out}
+ let plan=dynamic_count_profile_bootstrap_workspace(n,p0,p1)
+ if plan.status!=0 {return out}
+ if integer_buffer_len(observed_counts)!=n || integer_buffer_len(replicate_counts)!=n ||
+ numeric_buffer_len(generating_means)!=n {return out}
+ if n>9223372036854775807/options.replicates {out.status=2;return out}
+ out.workspace_payload_bytes=plan.payload_bytes
+ if options.max_profile_attempts<2 {out.status=5;return out}
+ var cursor=count_cursor_new(rng)
+ var draw=count_draw_value()
+ var pmf_work=nb2_likelihood_slot()
+ let observed=cpb_compare(null_design,null_layout,null_offsets,null_initial,alternative_design,
+ alternative_layout,alternative_offsets,alternative_initial,observed_counts,options,&!out,
+ null_coefficients,null_means,null_eta,null_weighted,null_response,null_step,
+ null_qr,null_stage,alternative_coefficients,alternative_means,alternative_eta,
+ alternative_weighted,alternative_response,alternative_step,alternative_qr,alternative_stage,
+ null_candidate_coefficients,null_candidate_means,null_candidate_eta,null_best_coefficients,null_best_means,null_best_eta,null_factor_r,null_factor_scales,null_permutation,
+ alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_factor_r,alternative_factor_scales,alternative_permutation,&!pmf_work)
+ out.observed_mean_loglik_difference=observed.difference
+ out.observed_signed_lr=observed.lr
+ out.observed_lr_available=observed.lr_available
+ if observed.status!=0 {out.status=observed.status;cpb_checkpoint(&!out,&cursor);return out}
+ out.observed_available=true
+ var row:i64=0
+ while row<n {
+  let value=numeric_buffer_at(null_means,row)
+  numeric_buffer_set(generating_means,row,value)
+  row=row+1
+ }
+ var replica:i64=0
+ while replica<options.replicates {
+  out.failure_replica=replica
+  // Avoid consuming random numbers for a pair we cannot afford to refit.
+  if options.max_profile_attempts-out.fit_attempts<2 {out.status=5;cpb_checkpoint(&!out,&cursor);return out}
+  row=0
+  while row<n {
+   out.failure_row=row
+   var uniforms=options.max_total_uniforms-out.uniforms
+   if uniforms>options.max_uniforms_per_draw {uniforms=options.max_uniforms_per_draw}
+   var proposals=options.max_total_proposals-out.proposals
+   if proposals>options.max_proposals_per_draw {proposals=options.max_proposals_per_draw}
+   out.count_draws=out.count_draws+1
+   let draw_status=nb2_count_draw_into(&!cursor,numeric_buffer_at(generating_means,row),
+    out.generating_alpha,uniforms,proposals,&!draw)
+   if draw.uniforms<0 || draw.uniforms>uniforms || draw.proposals<0 || draw.proposals>proposals {
+    out.status=4;out.failure_stage=8;cpb_checkpoint(&!out,&cursor);return out
+   }
+   out.uniforms=out.uniforms+draw.uniforms
+   out.proposals=out.proposals+draw.proposals
+   out.sampler_status=draw_status
+   if draw.resolution_limited {out.sampler_resolution_limited=true}
+   if draw.rate_underflow {out.sampler_rate_underflow=true}
+   if draw_status!=0 {
+    out.status=7
+    if draw_status==3 {out.status=5}
+    out.failure_stage=6
+    cpb_checkpoint(&!out,&cursor);return out
+   }
+   if draw.resolution_limited || draw.rate_underflow {
+    out.status=8;out.failure_stage=7;cpb_checkpoint(&!out,&cursor);return out
+   }
+   integer_buffer_set(replicate_counts,row,draw.count)
+   row=row+1
+  }
+  out.failure_row= -1
+  let trial=cpb_compare(null_design,null_layout,null_offsets,null_initial,alternative_design,
+ alternative_layout,alternative_offsets,alternative_initial,replicate_counts,options,&!out,
+   null_coefficients,null_means,null_eta,null_weighted,null_response,null_step,
+ null_qr,null_stage,alternative_coefficients,alternative_means,alternative_eta,
+ alternative_weighted,alternative_response,alternative_step,alternative_qr,alternative_stage,
+ null_candidate_coefficients,null_candidate_means,null_candidate_eta,null_best_coefficients,null_best_means,null_best_eta,null_factor_r,null_factor_scales,null_permutation,
+ alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_factor_r,alternative_factor_scales,alternative_permutation,&!pmf_work)
+  if trial.status!=0 {
+   out.status=trial.status
+   out.failure_mean_loglik_difference=trial.difference
+   out.failure_signed_lr=trial.lr
+   out.failure_lr_available=trial.lr_available
+   cpb_checkpoint(&!out,&cursor);return out
+  }
+  if trial.lr>=observed.lr {out.hits=out.hits+1}
+  out.replicates_completed=out.replicates_completed+1
+  replica=replica+1
+ }
+ let b=options.replicates as f64
+ let raw=(out.hits as f64)/b
+ let p=((out.hits+1) as f64)/((options.replicates+1) as f64)
+ let se=(sqrt(raw)*sqrt(1.0-raw))/sqrt(b)
+ if !is_finite(p) || p<=0.0 || p>1.0 || !is_finite(se) || se<0.0 {
+  out.status=4;cpb_checkpoint(&!out,&cursor);return out
+ }
+ out.status=0
+ out.available=true
+ out.p_value=p
+ out.mc_available=true
+ out.mc_tail_fraction=raw
+ out.mc_standard_error=se
+ out.failure_replica= -1
+ out.failure_row= -1
+ cpb_checkpoint(&!out,&cursor)
+ out
+}

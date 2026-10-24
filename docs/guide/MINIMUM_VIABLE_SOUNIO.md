@@ -2,8 +2,8 @@
 topic_id: repo.docs.guide.minimum-viable-sounio
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.minimum-viable-sounio
 -->
 
@@ -11,7 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.minimum-
 
 This guide is intentionally conservative. It describes what is currently validated by committed artifacts and repository gates, not the full ambition implied by the source tree.
 
-Snapshot date: **2026-04-22**
+> **Snapshot date: 2026-04-22.** This file was not re-measured on 2026-10-15. For the onboarding path that was, read [`getting-started.md`](getting-started.md), [`../../TOUR.md`](../../TOUR.md), and [`../compiler/KNOWN_LIMITATIONS.md`](../compiler/KNOWN_LIMITATIONS.md). Where this snapshot disagrees with those, they win. Do not copy its gate counts as the current stdlib result.
 
 ## What is reliable right now
 

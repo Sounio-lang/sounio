@@ -1,0 +1,277 @@
+// stdlib/epistemic/claim_meet.sio
+//
+// Two models of one quantity, each a mean and a variance.
+// The shared interval is the overlap of the two mean +/- sigma bars.
+// The excess is the width claimed by exactly one model.
+// This is arithmetic on moments the caller already read. It does not
+// call variance_of: wrapping that builtin would drop the channels.
+
+pub struct ClaimMeet {
+    pub lo: f64
+    pub hi: f64
+    pub shared: bool
+    pub excess: f64
+}
+
+pub fn claim_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 40 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+pub fn claim_meet(mean_a: f64, var_a: f64, mean_b: f64, var_b: f64) -> ClaimMeet with Mut, Div {
+    let sa = claim_sqrt(var_a)
+    let sb = claim_sqrt(var_b)
+    let lo_a = mean_a - sa
+    let hi_a = mean_a + sa
+    let lo_b = mean_b - sb
+    let hi_b = mean_b + sb
+    var lo = lo_a
+    if lo_b > lo { lo = lo_b }
+    var hi = hi_a
+    if hi_b < hi { hi = hi_b }
+    let shared = lo <= hi
+    var shared_w = 0.0
+    if shared { shared_w = hi - lo }
+    let excess = (hi_a - lo_a) + (hi_b - lo_b) - 2.0 * shared_w
+    ClaimMeet { lo: lo, hi: hi, shared: shared, excess: excess }
+}
+
+// The shared band is not a licence to read either centre.
+// BothInside keeps both witnesses and yields no single centre.
+// OnlyA and OnlyB yield the one centre the band still contains.
+// NeitherInside is a band with no centre in it.
+// ReviseModel is an empty overlap: there is no band and no centre.
+
+pub enum CentreSeat {
+    BothInside,
+    OnlyA,
+    OnlyB,
+    NeitherInside,
+    ReviseModel,
+}
+
+pub struct HeldCentre {
+    pub held: bool
+    pub centre: f64
+}
+
+pub fn centre_seat(
+    lo_a: f64, hi_a: f64, centre_a: f64,
+    lo_b: f64, hi_b: f64, centre_b: f64,
+) -> CentreSeat with Mut {
+    var lo = lo_a
+    if lo_b > lo { lo = lo_b }
+    var hi = hi_a
+    if hi_b < hi { hi = hi_b }
+    if lo > hi { return CentreSeat::ReviseModel }
+    let a_in = centre_a >= lo && centre_a <= hi
+    let b_in = centre_b >= lo && centre_b <= hi
+    if a_in && b_in { return CentreSeat::BothInside }
+    if a_in { return CentreSeat::OnlyA }
+    if b_in { return CentreSeat::OnlyB }
+    CentreSeat::NeitherInside
+}
+
+pub fn seat_code(seat: CentreSeat) -> i64 {
+    match seat {
+        CentreSeat::BothInside => 0
+        CentreSeat::OnlyA => 1
+        CentreSeat::OnlyB => 2
+        CentreSeat::NeitherInside => 3
+        CentreSeat::ReviseModel => 4
+    }
+}
+
+pub fn held_centre(seat: CentreSeat, centre_a: f64, centre_b: f64) -> HeldCentre {
+    let code = seat_code(seat)
+    if code == 1 { return HeldCentre { held: true, centre: centre_a } }
+    if code == 2 { return HeldCentre { held: true, centre: centre_b } }
+    HeldCentre { held: false, centre: 0.0 }
+}
+
+// k = 1, symmetric on the scale of the mean: mean ± sqrt(var).
+// The point value is not read.
+pub fn seat_moments(mean_a: f64, var_a: f64, mean_b: f64, var_b: f64) -> CentreSeat with Mut, Div {
+    let sa = claim_sqrt(var_a)
+    let sb = claim_sqrt(var_b)
+    centre_seat(mean_a - sa, mean_a + sa, mean_a, mean_b - sb, mean_b + sb, mean_b)
+}
+
+// k = 1 on the log scale: [centre * exp(-u), centre * exp(u)].
+// u is a standard uncertainty of ln(centre), not sqrt(var) of the centre.
+// A non-positive centre, or a negative u, has no such band.
+pub fn seat_log(centre_a: f64, u_a: f64, centre_b: f64, u_b: f64) -> CentreSeat with Mut {
+    if centre_a <= 0.0 || centre_b <= 0.0 || u_a < 0.0 || u_b < 0.0 {
+        return CentreSeat::ReviseModel
+    }
+    let lo_a = centre_a * exp(0.0 - u_a)
+    let hi_a = centre_a * exp(u_a)
+    let lo_b = centre_b * exp(0.0 - u_b)
+    let hi_b = centre_b * exp(u_b)
+    centre_seat(lo_a, hi_a, centre_a, lo_b, hi_b, centre_b)
+}
+
+// The same centres and the same u(ln). Two scales.
+// Linear pretends u is a Gaussian width centre*u on the centre itself.
+// Logarithmic keeps the multiplicative band.
+// lo, hi is the overlap of the two shared bands. A centre is returned
+// only when it is the only one inside that overlap. Disagreeing labels
+// do not erase a centre the overlap still contains.
+fn higher(a: f64, b: f64) -> f64 {
+    if b > a { return b }
+    a
+}
+
+fn lower(a: f64, b: f64) -> f64 {
+    if b < a { return b }
+    a
+}
+
+pub struct ScaleContest {
+    pub linear_code: i64
+    pub log_code: i64
+    pub parted: bool
+    pub lo: f64
+    pub hi: f64
+    pub open: bool
+}
+
+pub fn scale_contest(centre_a: f64, u_a: f64, centre_b: f64, u_b: f64) -> ScaleContest with Mut, Div {
+    let var_a = (centre_a * u_a) * (centre_a * u_a)
+    let var_b = (centre_b * u_b) * (centre_b * u_b)
+    let linear_code = seat_code(seat_moments(centre_a, var_a, centre_b, var_b))
+    let log_code = seat_code(seat_log(centre_a, u_a, centre_b, u_b))
+    var parted = false
+    if linear_code != log_code { parted = true }
+    if centre_a <= 0.0 || centre_b <= 0.0 || u_a < 0.0 || u_b < 0.0 {
+        return ScaleContest {
+            linear_code: linear_code,
+            log_code: log_code,
+            parted: parted,
+            lo: 0.0,
+            hi: 0.0,
+            open: false,
+        }
+    }
+    // centre*(1±u) is the linearisation of centre*exp(±u). It does not vote.
+    let lo = higher(centre_a * exp(0.0 - u_a), centre_b * exp(0.0 - u_b))
+    let hi = lower(centre_a * exp(u_a), centre_b * exp(u_b))
+    ScaleContest {
+        linear_code: linear_code,
+        log_code: log_code,
+        parted: parted,
+        lo: lo,
+        hi: hi,
+        open: lo <= hi,
+    }
+}
+
+// which: 0 neither centre, 1 only the first, 2 only the second, 3 both, 4 no band.
+// There is no centre field. When which is 0 the reading is lo, hi.
+pub struct CrossReading {
+    pub lo: f64
+    pub hi: f64
+    pub open: bool
+    pub which: i64
+}
+
+pub fn cross_reading(scales: ScaleContest, centre_a: f64, centre_b: f64) -> CrossReading {
+    if !scales.open {
+        return CrossReading { lo: scales.lo, hi: scales.hi, open: false, which: 4 }
+    }
+    let a_in = centre_a >= scales.lo && centre_a <= scales.hi
+    let b_in = centre_b >= scales.lo && centre_b <= scales.hi
+    if a_in && b_in {
+        return CrossReading { lo: scales.lo, hi: scales.hi, open: true, which: 3 }
+    }
+    if a_in {
+        return CrossReading { lo: scales.lo, hi: scales.hi, open: true, which: 1 }
+    }
+    if b_in {
+        return CrossReading { lo: scales.lo, hi: scales.hi, open: true, which: 2 }
+    }
+    CrossReading { lo: scales.lo, hi: scales.hi, open: true, which: 0 }
+}
+
+fn not_a_pressure() -> f64 with Div {
+    0.0 / 0.0
+}
+
+// Two readings, each already a mean and a variance. The band is the
+// overlap of mean ± sqrt(var). No centre*(1±u) arm.
+pub fn reading_band(mean_a: f64, var_a: f64, mean_b: f64, var_b: f64) -> CrossReading with Mut, Div {
+    if var_a < 0.0 || var_b < 0.0 {
+        return CrossReading { lo: 0.0, hi: 0.0, open: false, which: 4 }
+    }
+    let sa = claim_sqrt(var_a)
+    let sb = claim_sqrt(var_b)
+    let lo = higher(mean_a - sa, mean_b - sb)
+    let hi = lower(mean_a + sa, mean_b + sb)
+    if !(lo <= hi) {
+        return CrossReading { lo: lo, hi: hi, open: false, which: 4 }
+    }
+    let a_in = mean_a >= lo && mean_a <= hi
+    let b_in = mean_b >= lo && mean_b <= hi
+    if a_in && b_in { return CrossReading { lo: lo, hi: hi, open: true, which: 3 } }
+    if a_in { return CrossReading { lo: lo, hi: hi, open: true, which: 1 } }
+    if b_in { return CrossReading { lo: lo, hi: hi, open: true, which: 2 } }
+    CrossReading { lo: lo, hi: hi, open: true, which: 0 }
+}
+
+pub fn held_across_scales(scales: ScaleContest, centre_a: f64, centre_b: f64) -> HeldCentre with Div {
+    let reading = cross_reading(scales, centre_a, centre_b)
+    if reading.which == 1 { return HeldCentre { held: true, centre: centre_a } }
+    if reading.which == 2 { return HeldCentre { held: true, centre: centre_b } }
+    HeldCentre { held: false, centre: not_a_pressure() }
+}
+
+// The bands may contain a centre. A fit whose weights the line rejects,
+// evaluated outside its temperatures, does not publish that centre.
+pub fn centre_if_fit_allows(held: HeldCentre, refused: bool) -> HeldCentre with Div {
+    if refused { return HeldCentre { held: false, centre: not_a_pressure() } }
+    held
+}
+
+// Gap between the lognormal mean p0*exp(s/2) and the Taylor centre p0*(1 + s/2).
+// That Taylor value is a truncation of the series. It is not an edge and not a rival centre.
+pub fn series_remainder(p0: f64, s: f64) -> f64 with Div {
+    p0 * (exp(s / 2.0) - 1.0 - s / 2.0)
+}
+
+pub struct ExpMeanVote {
+    pub centre: f64
+    pub lo: f64
+    pub hi: f64
+    pub gap: f64
+    pub truncation: bool
+}
+
+// centre is the lognormal mean, the only centre.
+// The band is p0*exp(±sqrt(s)), the one-sigma interval on the log scale.
+// centre ± sqrt(var) is the Gaussian drawing of that same law. It does not vote.
+pub fn exp_mean_vote(p0: f64, s: f64) -> ExpMeanVote with Mut, Div {
+    let centre = p0 * exp(s / 2.0)
+    let taylor = p0 * (1.0 + s / 2.0)
+    let gap = centre - taylor
+    let remainder = series_remainder(p0, s)
+    let sig = claim_sqrt(s)
+    let lo = p0 * exp(0.0 - sig)
+    let hi = p0 * exp(sig)
+    let raw = gap - remainder
+    var disagree = raw
+    if raw < 0.0 { disagree = 0.0 - raw }
+    let truncation = disagree < 1.0e-9
+    ExpMeanVote {
+        centre: centre,
+        lo: lo,
+        hi: hi,
+        gap: gap,
+        truncation: truncation,
+    }
+}

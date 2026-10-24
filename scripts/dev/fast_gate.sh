@@ -49,27 +49,18 @@ else
     --allowlist "$CULTURAL_FIXTURE_DIR/allowlist.tsv"
 fi
 
-echo "[fast-gate] 9/14 compiler unit tests (cargo test --lib)"
-if [[ "$SKIP_BUILD" = "1" ]]; then
-  echo "[fast-gate] skipped (no-rust mode)"
-else
-  (cd "$ROOT_DIR" && sounio_cargo test -p souc --lib)
-fi
+# Steps 9 and 10 ran the unit and integration tests of the Rust
+# compiler crate, which no longer exists. The numbering is kept so logs and docs
+# that cite "step N/14" stay valid.
+echo "[fast-gate] 9/14 compiler unit tests"
+echo "[fast-gate] skipped (no Rust compiler crate; the self-hosted compiler is covered by the tests/ gates)"
 
 echo "[fast-gate] 10/14 integration tests"
-if [[ "$SKIP_BUILD" = "1" ]]; then
-  echo "[fast-gate] skipped (no-rust mode)"
-else
-  (cd "$ROOT_DIR" && sounio_cargo test -p souc --tests)
-fi
+echo "[fast-gate] skipped (no Rust compiler crate)"
 
 echo "[fast-gate] 11/14 check canonical example"
-if [[ "$SKIP_BUILD" = "1" ]]; then
-  sounio_require_souc
-  "$SOUC_BIN" check "$ROOT_DIR/examples/hello.sio"
-else
-  (cd "$ROOT_DIR" && cargo run -p souc --quiet --bin souc -- check examples/hello.sio)
-fi
+sounio_require_souc
+"$SOUC_BIN" check "$ROOT_DIR/examples/hello.sio"
 
 echo "[fast-gate] 12/14 stdlib science pipeline gate"
 bash "$ROOT_DIR/scripts/stdlib_science_pipeline_gate.sh"
