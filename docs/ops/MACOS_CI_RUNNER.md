@@ -44,3 +44,4 @@ The next merge-queue group runs the macOS job on the Mac. To undo, delete the va
 - The machine must stay awake and online while the queue has entries; a sleeping runner leaves the job queued until `check_response_timeout_minutes` (180) expires.
 - Each job checks out into the runner's work directory; clear `~/actions-runner/_work` if disk runs low.
 - Keep the runner updated; GitHub refuses runners that are too old.
+- `/tmp` is not reset between jobs on a self-hosted machine. The job's first step deletes the entries in `/private/tmp` owned by the runner user, and nothing else, because the gates refuse to overwrite existing outputs.
