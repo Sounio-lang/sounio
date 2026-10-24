@@ -12,7 +12,8 @@ export SOUNIO_MADAROS_NOCACHE=1 SOUNIO_MADAROS_CACHE_READONLY=1
 ulimit -s 524288
 printf 'kind\tsource\texit_status\n' > "$out/RESULTS.tsv"
 sha256sum "$MADAROS_RAW_BIN" > "$out/COMPILER.sha256" || exit 65
-find stdlib tests -type f -print0 | sort -z | xargs -0 sha256sum > "$out/INPUTS.sha256" || exit 65
+# Bind compiler inputs, gate scripts, examples and followed bin payloads as well.
+find -L bin scripts self-hosted stdlib tests examples -type f -print0 | sort -z | xargs -0 sha256sum > "$out/INPUTS.sha256" || exit 65
 g++ --version > "$out/CXX_TOOLCHAIN.txt" || exit 65
 fail=0
 record() {
