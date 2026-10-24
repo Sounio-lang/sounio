@@ -50,13 +50,14 @@ release can be considered ready.
 - [ ] Science pipeline gates pass: `fmri` and `darwin_pbpk` lanes green
 - [ ] Compatibility check (ADR-018 §3) passes against the previous release's baseline, with every failure covered by a fragment of the right kind (from 3.0.1 on)
 - [ ] `CHANGELOG.md` section assembled with `scripts/release/changelog_assemble.sh`
-- [ ] `CITATION.cff` `version` and `date-released`, and `souc --version`, match the tag
+- [ ] `CITATION.cff` `version` and `date-released` match the tag
 - [ ] Language specification (`docs/spec/LANGUAGE_SPECIFICATION.md`) and `docs/guide/MINIMUM_VIABLE_SOUNIO.md` reflect the edition shipped
 - [ ] No `//@ ignore` test regressions introduced since the last release
 
 **Stable gates**, in addition:
 
 - [ ] Soak of at least 7 days since the last `rc.N`, with no new `release-blocker`
+- [ ] `souc --version` reports the same version as `CITATION.cff`
 - [ ] Zenodo version DOI minted and recorded in `CITATION.cff`
 - [ ] GitHub Release body equal to the CHANGELOG section
 - [ ] Compatibility baseline recorded for the next release

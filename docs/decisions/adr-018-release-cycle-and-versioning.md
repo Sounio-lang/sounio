@@ -23,7 +23,7 @@ Several of the changes merged in that period alter what existing programs do, as
 
 ### 1. Two version axes
 
-1. **The toolchain**, comprising `souc`, Madaros, the stdlib and the runtime, carries one Semantic Versioning 2.0.0 number, `MAJOR.MINOR.PATCH[-PRE]`. `CITATION.cff` is its single source of truth. At a release tag, `souc --version` must report the same string; the engine build identifier follows it, as in `3.0.0-rc.1 (madaros 4f1c2e9a)`, and never replaces it.
+1. **The toolchain**, comprising `souc`, Madaros, the stdlib and the runtime, carries one Semantic Versioning 2.0.0 number, `MAJOR.MINOR.PATCH[-PRE]`. `CITATION.cff` is its single source of truth. At a stable release tag, `souc --version` must report the same string; the engine build identifier follows it, as in `3.0.0-rc.1 (madaros 4f1c2e9a)`, and never replaces it.
 2. **The language** carries an **edition**, named by year: `edition = "2026"` in `sounio.toml`. `souc new` already writes this key. An edition fixes the lexical and syntactic surface and the meaning of programs. A toolchain release may add an edition but never changes an existing one.
 3. **Edition 2026** is the language as shipped in 3.0.0. **Edition 2027** will carry the thirteen lexical rulings of ADR-015. It becomes available as an opt-in in a 3.x minor, and becomes the default only in 4.0.0, because changing the default edition is a breaking change.
 4. A file outside any package, or a package that does not declare an edition, gets the default edition of the toolchain's major (2026 for 3.x), with a warning that names the edition chosen. Every edition remains supported for at least two majors after its successor becomes the default.
@@ -40,8 +40,8 @@ Several of the changes merged in that period alter what existing programs do, as
    - the stdlib reliability and science-pipeline snapshots were regenerated on the branch head;
    - the compatibility check of §3 passes against the previous release's baseline;
    - the CHANGELOG section was assembled from the fragments of §4;
-   - `CITATION.cff` and `souc --version` agree.
-6. **Gates for the stable tag:** the soak ends with no new `release-blocker`, the Zenodo version DOI is minted and recorded in `CITATION.cff`, and the GitHub Release carries the CHANGELOG section verbatim.
+   - `CITATION.cff` carries the RC version.
+6. **Gates for the stable tag:** the soak ends with no new `release-blocker`, `souc --version` reports the same version as `CITATION.cff`, the Zenodo version DOI is minted and recorded in `CITATION.cff`, and the GitHub Release carries the CHANGELOG section verbatim.
 7. **Patch releases** `vX.Y.Z` are cut from `release/X.Y` and need the RC gates without a soak.
 8. Pre-release identifiers are `alpha.N` (API unstable), `beta.N` (feature-complete), `rc.N` (frozen), and nothing else. Dated or engine-named tags (`madaros-YYYYMMDD`, `v2.1.0-native-v2`) are frozen history. Engine prebuilts ship as artifacts of a toolchain release, not as releases of their own.
 
