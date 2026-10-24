@@ -51,6 +51,7 @@ for src in tests/compile-fail/stdlib_deep_*.sio; do
     else record negative "$src" 0; fi
 done
 for src in tests/run-pass/stdlib_deep_*.sio; do native "$src" "$(basename "$src" .sio)"; done
+for name in stdlib_scale_normalization_into stdlib_scale_normalization_status; do native "tests/run-pass/$name.sio" "$name"; done
 # Legacy render paths are replayed in the canonical engine as well as the
 # Stage2 full suite: these names exposed nested-label and first-tick defects.
 for name in stats_inference_forest viz_bootstrap_forest viz_count_matrix_qc \
@@ -176,6 +177,10 @@ if [[ $rc == 0 ]]; then
  record concordance font-canonical "$rc"
 fi
 
+rc=0
+timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/normalization_into_reference.cpp -o "$out/normalization_into_reference" > "$out/normalization_into_reference.cpp.txt" 2>&1 || rc=$?
+record cpp-compile normalization_into_reference "$rc"
+if [[ $rc == 0 ]]; then compare normalization_into_reference stdlib_scale_normalization_into; fi
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"
