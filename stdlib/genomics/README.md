@@ -1,5 +1,18 @@
 # stdlib/genomics
 
+## Checked keyed count datasets
+
+[Count dataset preparation](COUNT_DATASET.md) aligns exact integer sample
+keys in deterministic O(S log S) comparison work, extracts raw gene rows into
+reusable scratch and combines reordered log-normalization factors with
+declared log-exposures. It does not divide raw counts before a count-model fit.
+
+The [complete count workflow](../../examples/viz_dynamic_count_workflow.sio)
+normalizes once, profiles genes under a bounded work budget and renders
+actual estimates and diagnostics. Poisson, range censoring and failed fits
+remain distinct; no automatic shrinkage or FDR claim is made.
+
+
 ## Checked between-sample reference-panel normalization
 
 median_ratio_size_factors estimates median-log-ratio size factors from a
@@ -25,7 +38,6 @@ Mathematical genomics: DNA as GF(4) field elements, sequence operators, and form
 | `genomics::core` | **real** | Complement, GC, Hamming, alignment score, codon translation, k-mers |
 | `genomics::io::fasta` | **real** | In-memory FASTA parser → `Seq256` |
 | `genomics::gpu::gf4` | **real** | GF(4) CPU fallback kernels + self-test |
-| `alignment`, `variant`, `types`, … | stub | Pending parser / design support |
 
 ## Usage
 

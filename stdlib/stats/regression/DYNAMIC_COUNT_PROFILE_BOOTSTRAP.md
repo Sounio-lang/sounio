@@ -107,3 +107,161 @@ identical models, positive-edge rejection, declarations, attempt/sampler budgets
 invalid count conversion, and explicit observed Poisson selection. Source
 preparation alone is not native acceptance, numeric concordance, calibrated
 coverage, a full corpus pass or a performance result.
+
+## Opt-in exact embedding and seeded alternative search
+
+The additive `dynamic_count_profile_lrt_bootstrap_nested` accepts the same
+arguments as the legacy entry, followed by a borrowed row-major embedding of
+shape p1-by-p0 and a distinct caller-owned warm_start of length p1. The new
+`dynamic_count_profile_bootstrap_nested_workspace` preserves the legacy query
+fields and adds p1 numeric scratch elements and8*p1 payload bytes. The borrowed
+embedding is input data, not extra allocated scratch; its p1*p0 extent is checked
+before indexing. No dummy owner, raw pointer view or hot allocation is required.
+
+Before fitting or consuming RNG, `count_profile_embedding_validate` checks both
+matrix descriptors against their owners, finite active coordinates and embedding,
+identical finite offsets, and the compensated binary64 reconstruction X1*E==X0.
+There is no approximate nesting tolerance in V1. This is an operational floating
+point witness, not a proof of real-arithmetic model nesting or independently
+validated sample metadata. Status13/failure_stage9 reports an invalid witness or
+warm-start configuration; preflight failure leaves output arrays and RNG intact.
+Warm_start is scratch and may change after preflight or on a later arithmetic
+failure. Distinct owners remain a caller/compiler borrowing requirement.
+
+For each observed or simulated pair the null fit is resolved first. Its beta is
+mapped through E into the separate warm_start; the alternative search evaluates
+that alpha explicitly first and performs normal convergence checks. The additive
+ML-only `dynamic_dispersion_fit_seeded` counts this extra evaluation, uses the
+best coefficient vector as a checked warm start for later alpha evaluations, and
+recomputes weights and QR. It never reuses an old factorization as if unchanged.
+The selected best candidate is ranked by checked paired likelihood increments;
+its full objective remains a report. An unresolved comparison is unavailable,
+not a rounded tie. The positive grid and bounded golden interval remain a local
+search strategy, not a global optimum certificate. A feasible embedded point is
+not called a converged fit until the ordinary inner score/step checks succeed.
+
+The legacy entry and signature remain present. Both routes share sampler
+execution, budgets/checkpoints, paired final comparison and MC summary; the
+strict route adds only the explicit fit-pair coordination and preflight. Negative
+LR remains status6, including a truly negative difference exposed by more stable
+arithmetic. No clamp, failed-replicate omission or tolerance relaxation is added.
+
+`stdlib_deep_stats_count_profile_nested.sio` retains the exact failed replicate
+count vectors from campaign cases3,11,13 as new fit inputs, plus a separate
+all-six analytic case. A two-fit budget tests the observed comparison and stops
+before random draws; invalid embedding/offset/NaN/warm-size cases test status13,
+untouched outputs and unchanged RNG. This prepared fixture is distinct from the
+fixed-point Big400 negative controls. Focused current-source integration16819 completed the snapshot of this strict
+fixture before the later adversarial product/warm-start cases, the
+updated legacy fixture, and the existing CountGLM/profile/likelihood consumers
+with native completion and selected independent C++ concordance all exit0.
+The all-six strict case returned an available observedLR0 and stopped budget5
+without RNG draws; the legacy independently fitted points correctly retain
+negative-LR status6 after Big400 fixed-point verification16818. Renewed B199
+qualification and comparative performance remain separate pending work; this
+focused gate is not calibration or global optimality evidence.
+
+The design reconstruction check does **not** establish the bitwise prediction
+identity X1*(E*beta)==X0*beta: floating multiplication and addition are not
+associative. Warm_start is a candidate, not an exact prediction witness. Its
+finite-product checks, the ordinary fit convergence checks and the final paired
+LR guards remain required. `assumptions_assessed` and global/finite-sample
+validity flags remain false. Adversarial status coverage includes finite E with
+overflowing products, a nonzero product rounded to zero, failed reconstruction,
+large/small scale cancellation, and a valid design reconstruction whose mapped
+coefficient candidate overflows. None is repaired by changing a nesting tolerance.
+
+The later full B2 strict smoke fixture is
+`stdlib_scale_count_profile_nested_bootstrap.sio`: it retains the original grouped
+model0 data/options/seed and emits actual tail, RNG, counts and refitted alphas
+for independent C++ concordance. Focused Slurm16828 completed all six library
+checks plus its check/compile/native/marker and independent --nested-single C++
+concordance with exit0. That comparison retained the original model0 reference
+parameters, B2, seed7, tolerances, RNG/hits, both last-refit alphas and16 last
+counts. Fixed-alpha and incomplete-output controls were rejected. This validates
+the complete selected two-replicate path; it is not B199 qualification or an
+end-to-end performance comparison.
+## Prepared bounded qualification protocol
+
+`tests/reference/count_profile_calibration.cpp` emits independent C++-sampled
+observations and a generated Sounio driver that invokes this real kernel; it
+never replaces production fitting with C++ fits. Its driver owner/call shape is
+extracted from the frozen native fixture, which is included in campaign hashes.
+The observed null is a balanced two-group equal-mean model (mean8), for n16/64/256
+and alpha0/.25/1. Generation and bootstrap seed schedules are explicit per dataset.
+
+`scripts/stdlib/count_profile_calibration.sh` is a Slurm-only orchestrator,
+requires an explicit passing functional-gate receipt and attested compiler,
+and never submits itself. Qualification uses B199, batches16, at most128 datasets
+per cell and at most24h cumulative wall budget. A separate pilot namespace uses
+B31, n16/alpha.25 and16 datasets; it is not the B199 qualification result. Input
+source/compiler/gate hashes must remain identical on resume. A hard kill reserves
+the remaining wall budget conservatively, requiring review before further work.
+Incomplete batches remain intact and block resume rather than disappearing.
+
+Available p values, unavailable statuses and failing-replica metadata are kept.
+Summaries report rejection among available datasets, availability, a conditional
+Monte Carlo SE and approximate Wilson95 binomial interval; they also report the
+extreme overall rejection range if all unavailable datasets were nonrejections
+or rejections. Conditioning on solver/sampler availability can bias rejection
+fractions. Pseudorandom draws and these finite simulated cells do not certify
+universal validity, independent observations or scientific model adequacy.
+Preparation of this protocol is not evidence it was executed.
+
+The qualification gate receipt is exactly seven nonempty `key=value` lines,
+with unique keys and no executable shell content:
+
+```
+format=stdlib-advanced-functional-v1
+status=0
+compiler_sha256=<SHA256 of the selected current-source ELF>
+canonical_inputs_sha256=<SHA256 of the canonical input manifest>
+canonical_inputs_path=<readable canonical manifest path>
+results_sha256=<SHA256 of the functional RESULTS.tsv>
+results_path=<readable functional RESULTS.tsv path>
+```
+
+The canonical manifest is produced from the frozen source root by
+`find -L bin scripts self-hosted stdlib tests examples -type f -print0 | sort -z | xargs -0 sha256sum`.
+Following bin symlinks binds their actual payloads. No `.git` directory is needed.
+The orchestrator requires byte identity with its recomputed manifest and binds
+both the selected compiler and RESULTS hashes. It checks the result schema,
+all recorded exit statuses, required native/marker and independent-concordance
+rows, and the fixed-alpha mutant rejection. A readable arbitrary file is not
+sufficient. This is a consistency gate under a coordinator-controlled receipt,
+not a cryptographic signature or independent attestation of execution.
+
+Qualification visits one batch in each of the nine cells before starting the
+next round, so an exhausted time budget does not intentionally fill only the
+smallest n. `COUNT_PROFILE_WALL_BUDGET_SECONDS` accepts1..86400. The coordinating
+Slurm allocation caps the combined pilot and qualification at24h and supplies
+the remaining budget; the script alone is not a global scheduler certificate.
+
+### Process isolation within qualification batches
+
+The calibration generator still emits one ELF per batch with the same4K count
+array and unchanged dataset/seed/B schedules. At execution it selects exactly
+one local case through `COUNT_PROFILE_CALIBRATION_CASE=0..15`. A Linux-only
+bounded `/proc/self/environ` scan accepts a unique canonical decimal value and
+rejects missing, duplicate, malformed or out-of-range selections. The driver
+never logs other environment values. It emits one `CASE COMPLETE` marker.
+
+The orchestrator runs that ELF in sixteen separate processes and retains each
+case's stdout, stderr, exit status, GNUtime resource receipt and shared-ELF hash
+verification. It concatenates outputs in case order and emits exactly one final
+`BATCH COMPLETE` only after every process and required marker succeeds. A
+numerically unavailable bootstrap is retained as its status/p placeholder, not
+discarded; a crashed process or incomplete record leaves the batch partial and
+blocks aggregate publication. No partial batch is silently normalized into a
+smaller sample of successful datasets.
+
+The summary interface is now `--summarize B batch_size first_expected stdout...`.
+It verifies exact expected indices for each input batch, bounded B/hits/status
+and failure metadata, individual case completion markers and a single final
+batch marker. Missing, reordered, duplicated or incomplete datasets are errors.
+This process boundary resets process-lifetime managed temporaries between
+observations. It does not establish bounded RSS within one B-replicate bootstrap
+and does not replace the separate kernel hot-allocation fixes or measurements.
+
+The bounded cell-to-base-seed map is evaluated by the C++ `--seeds cell_index`
+mode; Bash retains only operational batch/index and wall-budget bookkeeping.
