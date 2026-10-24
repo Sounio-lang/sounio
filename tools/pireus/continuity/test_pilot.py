@@ -5,9 +5,10 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 from benchmark_pair import deduplicate_candidates
 from cycle import HERE, encoded, digest
-from pilot import cells, paired_completion, launch_cell_stage, validate_checks, REQUIRED_CHECKS, summarize
+from pilot import settled_job_state, cells, paired_completion, launch_cell_stage, validate_checks, REQUIRED_CHECKS, summarize
 from tokenized_cycle import pack_offline
 
 
@@ -102,3 +103,34 @@ class PilotControls(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SettledJobState(unittest.TestCase):
+    def run_states(self, states, deadline=120):
+        outputs = iter(states)
+        now = [0.0]
+        def fake_run(command, **kwargs):
+            self.assertEqual(command[:3], ["scontrol", "show", "job"])
+            state, code = next(outputs)
+            return SimpleNamespace(returncode=0, stdout=f"JobId=7 JobState={state} ExitCode={code}\n")
+        def fake_sleep(seconds):
+            now[0] += seconds
+        with patch("pilot.subprocess.run", side_effect=fake_run):
+            return settled_job_state("7", deadline, 2, clock=lambda: now[0], sleep=fake_sleep)
+
+    def test_completing_then_completed_is_accepted(self):
+        raw, observed = self.run_states([("COMPLETING", "0:0"), ("COMPLETING", "0:0"), ("COMPLETED", "0:0")])
+        self.assertIn("JobState=COMPLETED", raw)
+        self.assertEqual([o["state"] for o in observed], ["COMPLETING", "COMPLETING", "COMPLETED"])
+
+    def test_terminal_failure_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "raw_state=FAILED raw_exit=1:0"):
+            self.run_states([("COMPLETING", "1:0"), ("FAILED", "1:0")])
+
+    def test_completed_with_nonzero_exit_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "raw_exit=0:9"):
+            self.run_states([("COMPLETED", "0:9")])
+
+    def test_persistent_completing_times_out(self):
+        with self.assertRaisesRegex(ValueError, "raw_state=COMPLETING"):
+            self.run_states([("COMPLETING", "0:0")] * 100, deadline=10)
