@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 cd "$ROOT_DIR"
 
 TMP_DIR="$(mktemp -d)"
@@ -165,11 +167,15 @@ else
   exit 1
 fi
 
-if "$FRONTEND" --check "$NUMERIC_REJECT_SRC" >"$NUMERIC_REJECT_LOG" 2>&1; then
+__refusal_rc=0
+"$FRONTEND" --check "$NUMERIC_REJECT_SRC" >"$NUMERIC_REJECT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  modular frontend unexpectedly accepted invalid numeric Knowledge<T> proof-context\n' >&2
   cat "$NUMERIC_REJECT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$NUMERIC_REJECT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$NUMERIC_REJECT_LOG" "$(sounio_refusal_reason)" >&2; cat "$NUMERIC_REJECT_LOG" >&2; exit 1; }
 printf 'PASS  modular frontend rejected imported-cache ontology when numeric Knowledge<T> proof-context fails\n'
 
 if "$FRONTEND" --check "$UNIT_POSITIVE_SRC" >"$UNIT_POSITIVE_LOG" 2>&1; then
@@ -180,11 +186,15 @@ else
   exit 1
 fi
 
-if "$FRONTEND" --check "$UNIT_REJECT_SRC" >"$UNIT_REJECT_LOG" 2>&1; then
+__refusal_rc=0
+"$FRONTEND" --check "$UNIT_REJECT_SRC" >"$UNIT_REJECT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  modular frontend unexpectedly accepted invalid unit Knowledge<T> proof-context\n' >&2
   cat "$UNIT_REJECT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$UNIT_REJECT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$UNIT_REJECT_LOG" "$(sounio_refusal_reason)" >&2; cat "$UNIT_REJECT_LOG" >&2; exit 1; }
 printf 'PASS  modular frontend rejected imported-cache ontology when unit Knowledge<T> proof-context fails\n'
 
 if "$FRONTEND" --check "$PART_POSITIVE_SRC" >"$PART_POSITIVE_LOG" 2>&1; then
@@ -195,11 +205,15 @@ else
   exit 1
 fi
 
-if "$FRONTEND" --check "$PART_DISJOINT_REJECT_SRC" >"$PART_DISJOINT_REJECT_LOG" 2>&1; then
+__refusal_rc=0
+"$FRONTEND" --check "$PART_DISJOINT_REJECT_SRC" >"$PART_DISJOINT_REJECT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  modular frontend unexpectedly accepted PART imported-cache disjoint Knowledge<T> proof-context\n' >&2
   cat "$PART_DISJOINT_REJECT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$PART_DISJOINT_REJECT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$PART_DISJOINT_REJECT_LOG" "$(sounio_refusal_reason)" >&2; cat "$PART_DISJOINT_REJECT_LOG" >&2; exit 1; }
 printf 'PASS  modular frontend rejected PART imported-cache disjoint Knowledge<T> proof-context\n'
 
 if "$FRONTEND" --check "$QM_POSITIVE_SRC" >"$QM_POSITIVE_LOG" 2>&1; then
@@ -210,11 +224,15 @@ else
   exit 1
 fi
 
-if "$FRONTEND" --check "$QM_REVERSE_REJECT_SRC" >"$QM_REVERSE_REJECT_LOG" 2>&1; then
+__refusal_rc=0
+"$FRONTEND" --check "$QM_REVERSE_REJECT_SRC" >"$QM_REVERSE_REJECT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  modular frontend unexpectedly accepted QM imported-cache reverse subclass Knowledge<T> proof-context\n' >&2
   cat "$QM_REVERSE_REJECT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$QM_REVERSE_REJECT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$QM_REVERSE_REJECT_LOG" "$(sounio_refusal_reason)" >&2; cat "$QM_REVERSE_REJECT_LOG" >&2; exit 1; }
 printf 'PASS  modular frontend rejected QM imported-cache reverse subclass Knowledge<T> proof-context\n'
 
 GENERIC_BUNDLE_FRONTEND_PAIRS=(
@@ -280,11 +298,15 @@ for bundle_spec in "${GENERIC_BUNDLE_FRONTEND_PAIRS[@]}"; do
     exit 1
   fi
 
-  if "$FRONTEND" --check "$bundle_reverse_reject_src" >"$bundle_reverse_reject_log" 2>&1; then
+  __refusal_rc=0
+  "$FRONTEND" --check "$bundle_reverse_reject_src" >"$bundle_reverse_reject_log" 2>&1 || __refusal_rc=$?
+  if [[ "$__refusal_rc" -eq 0 ]]; then
     printf 'FAIL  modular frontend unexpectedly accepted %s generic imported-cache reverse subclass Knowledge<T> proof-context\n' "$bundle_label" >&2
     cat "$bundle_reverse_reject_log" >&2
     exit 1
   fi
+  # rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+  sounio_expect_failed_exit "$__refusal_rc" "$bundle_reverse_reject_log" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$bundle_reverse_reject_log" "$(sounio_refusal_reason)" >&2; cat "$bundle_reverse_reject_log" >&2; exit 1; }
   printf 'PASS  modular frontend rejected %s generic imported-cache reverse subclass Knowledge<T> proof-context\n' "$bundle_label"
 done
 
@@ -337,11 +359,15 @@ else
   exit 1
 fi
 
-if "$FRONTEND" --check "$LOINC_REVERSE_REJECT_SRC" >"$LOINC_REVERSE_REJECT_LOG" 2>&1; then
+__refusal_rc=0
+"$FRONTEND" --check "$LOINC_REVERSE_REJECT_SRC" >"$LOINC_REVERSE_REJECT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  modular frontend unexpectedly accepted LOINC alphanumeric imported-cache reverse subclass Knowledge<T> proof-context\n' >&2
   cat "$LOINC_REVERSE_REJECT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$LOINC_REVERSE_REJECT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$LOINC_REVERSE_REJECT_LOG" "$(sounio_refusal_reason)" >&2; cat "$LOINC_REVERSE_REJECT_LOG" >&2; exit 1; }
 printf 'PASS  modular frontend rejected LOINC alphanumeric imported-cache reverse subclass Knowledge<T> proof-context\n'
 
 cat <<'MSG'

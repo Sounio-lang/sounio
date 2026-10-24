@@ -2,8 +2,8 @@
 topic_id: repo.docs.implementation.paper-artifact-packaging-spec
 authority: repo_only
 audience: maintainers
-last_validated: 2026-03-07
-validated_by: A7
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.paper-artifact-packaging-spec
 -->
 

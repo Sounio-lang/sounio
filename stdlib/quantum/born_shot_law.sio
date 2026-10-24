@@ -98,6 +98,15 @@ fn gh_w(i: i64) -> f64 with Panic {
     0.0
 }
 
+// The same nodes the probability quadrature uses. The digits stay in gh_x and gh_w.
+pub fn ry_gh_x(i: i64) -> f64 with Panic {
+    gh_x(i)
+}
+
+pub fn ry_gh_w(i: i64) -> f64 with Panic {
+    gh_w(i)
+}
+
 fn filled_number(v: f64) -> BandChannel {
     BandChannel {
         filled: 1,
@@ -672,5 +681,144 @@ pub fn ry_chsh_exit(pi: f64) -> ChshExit with Mut, Div, Panic {
         chsh_01: chsh(1, pi),
         chsh_10: chsh(2, pi),
         chsh_11: chsh(3, pi),
+    }
+}
+
+// One offset on Alice, one on Bob. Every CHSH setting of that party shifts
+// by the same number, so S = 2√2 cos(δa−δb) at every realization.
+pub fn ry_chsh_shifted(delta_a: f64, delta_b: f64, pi: f64) -> f64 with Mut, Div, Panic {
+    let a = pi / 4.0
+    let h = pi / 2.0
+    bell_zz(delta_a, a + delta_b) + bell_zz(delta_a, 0.0 - a + delta_b) + bell_zz(h + delta_a, a + delta_b) - bell_zz(h + delta_a, 0.0 - a + delta_b)
+}
+
+// δa and δb independent N(0,σ²), so η = δa−δb is N(0, 2σ²).
+// Quadrature of the shifted circuit. The characteristic function is not pasted here.
+pub fn ry_chsh_party_noise(sigma: f64, pi: f64) -> f64 with Mut, Div, Panic {
+    var m = 0.0
+    var i = 0
+    while i < 16 {
+        let eta = 2.0 * sigma * gh_x(i)
+        m = m + gh_w(i) * ry_chsh_shifted(eta, 0.0, pi)
+        i = i + 1
+    }
+    m
+}
+
+fn correlator(which: i64, alpha: f64, beta: f64) -> f64 with Mut, Div, Panic {
+    if which == 4 {
+        return bell_zz(alpha, beta)
+    }
+    basis_zz(which / 2, which - 2 * (which / 2), alpha, beta)
+}
+
+fn chsh_at(which: i64, a0: f64, a1: f64, b0: f64, b1: f64) -> f64 with Mut, Div, Panic {
+    correlator(which, a0, b0) + correlator(which, a0, b1) + correlator(which, a1, b0) - correlator(which, a1, b1)
+}
+
+pub struct ChshScale {
+    pub bell: f64,
+    pub copy: f64,
+    pub anti: f64,
+}
+
+fn scale_of(a0: f64, a1: f64, b0: f64, b1: f64) -> ChshScale with Mut, Div, Panic {
+    let c00 = chsh_at(0, a0, a1, b0, b1)
+    let c11 = chsh_at(3, a0, a1, b0, b1)
+    ChshScale {
+        bell: chsh_at(4, a0, a1, b0, b1),
+        copy: 0.5 * c00 + 0.5 * c11,
+        anti: chsh_at(1, a0, a1, b0, b1),
+    }
+}
+
+// One offset per party. The pair is twice the copied bit, and minus twice
+// the anticorrelated basis state, at every offset.
+pub fn ry_chsh_party(delta_a: f64, delta_b: f64, pi: f64) -> ChshScale with Mut, Div, Panic {
+    let a0 = delta_a
+    let a1 = pi / 2.0 + delta_a
+    let b0 = pi / 4.0 + delta_b
+    let b1 = 0.0 - pi / 4.0 + delta_b
+    scale_of(a0, a1, b0, b1)
+}
+
+// Same nodes as the pair. At every offset the copy is half the pair, so the
+// mean that sits on 2 for the pair sits on 1 for the copied mixture.
+pub fn ry_chsh_copy_noise(sigma: f64, pi: f64) -> f64 with Mut, Div, Panic {
+    var m = 0.0
+    var i = 0
+    while i < 16 {
+        let eta = 2.0 * sigma * gh_x(i)
+        let scale = ry_chsh_party(eta, 0.0, pi)
+        m = m + gh_w(i) * scale.copy
+        i = i + 1
+    }
+    m
+}
+
+// The anticorrelated product state. The pair is minus twice this reading.
+pub fn ry_chsh_anti_noise(sigma: f64, pi: f64) -> f64 with Mut, Div, Panic {
+    var m = 0.0
+    var i = 0
+    while i < 16 {
+        let eta = 2.0 * sigma * gh_x(i)
+        let scale = ry_chsh_party(eta, 0.0, pi)
+        m = m + gh_w(i) * scale.anti
+        i = i + 1
+    }
+    m
+}
+
+// Alice's second setting moves by epsilon. Bob stays at ±π/4.
+// The copied bit stays at √2. The pair falls as √2 (1 + cos epsilon).
+pub fn ry_chsh_split(epsilon: f64, pi: f64) -> ChshScale with Mut, Div, Panic {
+    let a1 = pi / 2.0 + epsilon
+    let b0 = pi / 4.0
+    let b1 = 0.0 - pi / 4.0
+    scale_of(0.0, a1, b0, b1)
+}
+
+// Party offset and Alice's split, together.
+// The pair reads √2 [cos(δa−δb) + cos(δa−δb+ε)].
+// The factor 2 is the case ε = 0. On η+ε = π/2 the two readings meet,
+// and past that line the copy is the larger one.
+pub fn ry_chsh_both(delta_a: f64, delta_b: f64, epsilon: f64, pi: f64) -> ChshScale with Mut, Div, Panic {
+    let a1 = pi / 2.0 + delta_a + epsilon
+    let b0 = pi / 4.0 + delta_b
+    let b1 = 0.0 - pi / 4.0 + delta_b
+    scale_of(delta_a, a1, b0, b1)
+}
+
+fn partial_zz(phi: f64, alpha: f64, beta: f64) -> f64 with Mut, Div, Panic {
+    var qs = quantum_state_new()
+    let q0 = qubit_alloc(&!qs)
+    let q1 = qubit_alloc(&!qs)
+    let spun = ry(q0, &!qs, phi)
+    let pair = cnot(spun, q1, &!qs)
+    zz_of(pair.first, pair.second, alpha, beta, &!qs)
+}
+
+fn partial_chsh(phi: f64, b0: f64, b1: f64, pi: f64) -> f64 with Mut, Div, Panic {
+    let h = pi / 2.0
+    partial_zz(phi, 0.0, b0) + partial_zz(phi, 0.0, b1) + partial_zz(phi, h, b0) - partial_zz(phi, h, b1)
+}
+
+pub struct PartialRead {
+    pub zz: f64,
+    pub xx: f64,
+    pub fixed: f64,
+    pub tilted: f64,
+}
+
+// Ry(phi) then CNOT. ZZ stays 1 and XX reads sin phi.
+// Bob at ±π/4 reads √2 (1 + sin phi). Bob at ±beta reads the tilted value.
+pub fn ry_partial_chsh(phi: f64, beta: f64, pi: f64) -> PartialRead with Mut, Div, Panic {
+    let h = pi / 2.0
+    let a = pi / 4.0
+    PartialRead {
+        zz: partial_zz(phi, 0.0, 0.0),
+        xx: partial_zz(phi, h, h),
+        fixed: partial_chsh(phi, a, 0.0 - a, pi),
+        tilted: partial_chsh(phi, beta, 0.0 - beta, pi),
     }
 }

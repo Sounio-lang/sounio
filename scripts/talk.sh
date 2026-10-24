@@ -192,7 +192,7 @@ fixed_point() {
 
 # 1. Uncertainty propagates (ISO GUM, first order)
 demo 1  "Uncertainty propagates through arithmetic (GUM)" madaros 5 0 \
-  demo_incerteza.sio "Área        = 50.000000 ± 0.707107"
+  demos/intro/demo_incerteza.sio "Área        = 50.000000 ± 0.707107"
 # 2. No-cloning as a type error, with its positive control
 demo   2a "No-cloning: a linear qubit used once compiles and runs" madaros 5 0 \
   demos/quantum/no_cloning_single_use.sio "1"

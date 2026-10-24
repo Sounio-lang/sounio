@@ -1,0 +1,155 @@
+// demos/hydrogen/sofc_mh_coupling.sio
+//
+// The heat balance Stubos's group published for a hydride tank, applied to
+// the seven-stage compressor the same institute published six years later.
+//
+// Yiotis, Kainourgiakis, Kosmidis, Charalambopoulou and Stubos, J. Power
+// Sources 269 (2014) 440-450, DOI 10.1016/j.jpowsour.2014.07.023.
+// They show that SOFC waste heat can drive MgH2 desorption when the hydrogen
+// utilization is at least 0.73. The heat they count is the desorption
+// enthalpy. Gkanas et al. 2020, Table 6, is a different object: most of the
+// heat is the 136 kg of steel per stage.
+//
+// THE BALANCE, declared. Per mole of hydrogen the cell burns, at an operating
+// voltage E (not the reversible Nernst voltage):
+//
+//   q_cell = -dH_rxn - 2 F E
+//
+// with dH_rxn = -241826 J/mol for H2 + 1/2 O2 -> H2O(g). The thermoneutral
+// voltage is -dH/(2F) = 1.253 V, so a cell at 0.7 V rejects the difference.
+//
+// Per mole the store must release, q_demand. Coupling without an external
+// heater requires
+//
+//   alpha = q_demand / q_cell  <=  1
+//
+// alpha is the utilization if it falls below one: the cell must burn at least
+// that fraction of the hydrogen it was given. Above one, the cell would have
+// to burn more hydrogen than the compressor released. The balance does not
+// close.
+//
+// Their stated threshold of 0.73 is recovered here at E = 0.725 V with a
+// desorption enthalpy of 74.4 kJ/mol, the usual figure for MgH2. That pair
+// is how this file reads their number. It is not a quotation of an equation
+// the paywalled text did not give us.
+//
+// Species stay typed. One mole of H2 and enough O2 make one mole of water.
+// ChEBI 18276, 15379, 15377.
+
+unit mol;
+
+ontology Fuel {
+    class Substance { property amount: f64 where amount >= 0.0 }
+    class H2 subclass_of Substance
+    class O2 subclass_of Substance
+    class H2O subclass_of Substance
+    disjoint H2, O2
+    disjoint H2, H2O
+    disjoint O2, H2O
+}
+
+var R_GAS: f64 = 8.314462618
+var FARADAY: f64 = 96485.3321
+var DH_RXN: f64 = 0.0 - 241826.0
+var DH_MGH2: f64 = 74400.0
+var E_THEIR: f64 = 0.725
+var E_CELL: f64 = 0.700
+var H2_KG: f64 = 0.425
+var M_H2: f64 = 0.00201588
+var CHEBI_H2: i64 = 18276
+var CHEBI_O2: i64 = 15379
+var CHEBI_H2O: i64 = 15377
+
+fn water_from(h2: H2, o2: O2) -> H2O with Mut, Div, Panic {
+    let from_h: f64 = h2
+    let from_o: f64 = o2 * 2.0
+    let w: f64 = if from_h < from_o { from_h } else { from_o }
+    let out: H2O = w
+    out
+}
+
+fn q_cell(e_op: f64) -> f64 with Mut, Div, Panic {
+    (0.0 - DH_RXN) - 2.0 * FARADAY * e_op
+}
+
+fn print_fix3(x: f64) with IO, Mut, Div, Panic {
+    var v = x
+    var neg = false
+    if v < 0.0 { neg = true  v = 0.0 - v }
+    let scaled = v * 1000.0
+    var n = scaled as i64
+    let frac = scaled - (n as f64)
+    if frac >= 0.5 { n = n + 1 }
+    let whole = n / 1000
+    let milli = n - whole * 1000
+    if neg { print("-") }
+    print(whole) print(".")
+    if milli < 100 { print("0") }
+    if milli < 10 { print("0") }
+    print(milli)
+}
+
+fn report(label: string, q_demand: f64, e_op: f64) with IO, Mut, Div, Panic {
+    let qc = q_cell(e_op)
+    let alpha = q_demand / qc
+    print("  ") print(label)
+    print("  q=") print_fix3(q_demand / 1000.0)
+    print(" kJ/mol  alpha=") print_fix3(alpha)
+    if alpha <= 1.0 {
+        println("  CLOSES")
+    } else {
+        println("  DOES NOT CLOSE")
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("SOFC WASTE HEAT AGAINST THE HYDRIDE, THEIR CRITERION")
+    println("Yiotis, Stubos et al., J. Power Sources 269 (2014) 440.")
+    println("anode H2 (ChEBI 18276), cathode 1/2 O2 (ChEBI 15379) -> H2O (ChEBI 15377)")
+    print("ids ") print(CHEBI_H2) print(" ") print(CHEBI_O2) print(" ") print(CHEBI_H2O) println("")
+    println("")
+
+    let n_mol = H2_KG / M_H2
+    let h2: H2 = n_mol
+    let o2: O2 = n_mol
+    let water = water_from(h2, o2)
+    let n_w: f64 = water
+    print("moles of water per compressor charge ") print_fix3(n_w) println("")
+    if n_w + 0.01 < n_mol {
+        println("STOICHIOMETRY_FAIL")
+        return 1
+    }
+
+    let qc_their = q_cell(E_THEIR)
+    let alpha_mg = DH_MGH2 / qc_their
+    println("== their tank, MgH2, 74.4 kJ/mol ==")
+    print("   cell voltage that should recover alpha=0.73   ") print_fix3(E_THEIR) println(" V")
+    print("   heat the cell rejects at that voltage         ") print_fix3(qc_their / 1000.0) println(" kJ/mol")
+    print("   utilization this balance requires             ") print_fix3(alpha_mg) println("")
+    println("   Their paper states 0.73. This is that number, at this voltage.")
+    println("")
+
+    let qc = q_cell(E_CELL)
+    print("== the seven-stage compressor, cell at ") print_fix3(E_CELL) println(" V ==")
+    print("   heat the cell rejects                         ") print_fix3(qc / 1000.0) println(" kJ/mol")
+    println("   S7 desorption enthalpy alone is 18.916 kJ/mol. One stage would close.")
+    println("   Table 6 is the whole machine.")
+    println("")
+
+    // Table 6 totals, MJ per 0.425 kg, cases 1..6. Latent is the hydride part.
+    report("80 C  total ", 136.67e6 / n_mol, E_CELL)
+    report("80 C  latent", 61.83e6 / n_mol, E_CELL)
+    report("90 C  total ", 152.88e6 / n_mol, E_CELL)
+    report("100 C total ", 169.11e6 / n_mol, E_CELL)
+    report("105 C total ", 177.51e6 / n_mol, E_CELL)
+    report("110 C total ", 185.97e6 / n_mol, E_CELL)
+    report("120 C total ", 201.78e6 / n_mol, E_CELL)
+    report("120 C latent", 84.17e6 / n_mol, E_CELL)
+    report("S7 enthalpy ", 18916.0, E_CELL)
+
+    println("")
+    println("alpha above 1 means the cell must burn more hydrogen than the")
+    println("compressor released. The steel, not the hydride, is why.")
+    println("COUPLING_BALANCE_OK")
+    0
+}

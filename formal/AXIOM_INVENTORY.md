@@ -10,9 +10,9 @@ files say in comments that they use no `sorry` or no axioms).
 
 | Count | Value |
 |---|---:|
-| `.lean` files scanned | 310 |
+| `.lean` files scanned | 316 |
 | `sorry` in code | 0 |
-| `axiom` declarations | 61, in 10 files |
+| `axiom` declarations | 59, in 10 files |
 | `native_decide` uses | 741, in 110 files |
 
 A theorem that depends on one of these axioms is proved *relative to* it.
@@ -46,25 +46,23 @@ compiled evaluator, not the kernel alone.
 | 325 | `float_sub_self` |
 | 328 | `float_div_one` |
 
-### `formal/OctonionAlgebra.lean` (15)
+### `formal/OctonionAlgebra.lean` (13)
 
 | Line | Axiom |
 |---:|---|
-| 170 | `oct_mul_add_left` |
-| 174 | `oct_mul_add_right` |
-| 215 | `oct_left_alternative` |
-| 219 | `oct_right_alternative` |
-| 228 | `oct_flexibility` |
-| 238 | `oct_moufang_left` |
-| 242 | `oct_moufang_right` |
-| 246 | `oct_moufang_middle` |
-| 256 | `oct_scalar_comm` |
-| 260 | `oct_scalar_comm_right` |
-| 269 | `oct_conj_antimultiplicative` |
-| 283 | `oct_mul_conj` |
-| 287 | `oct_conj_mul` |
-| 303 | `oct_norm_multiplicative` |
-| 312 | `oct_sq_comm_left` |
+| 271 | `oct_left_alternative` |
+| 275 | `oct_right_alternative` |
+| 283 | `oct_flexibility` |
+| 291 | `oct_moufang_left` |
+| 295 | `oct_moufang_right` |
+| 299 | `oct_moufang_middle` |
+| 307 | `oct_scalar_comm` |
+| 311 | `oct_scalar_comm_right` |
+| 319 | `oct_conj_antimultiplicative` |
+| 332 | `oct_mul_conj` |
+| 336 | `oct_conj_mul` |
+| 346 | `oct_norm_multiplicative` |
+| 357 | `oct_sq_comm_left` |
 
 ### `formal/HessianAD.lean` (6)
 

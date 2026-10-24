@@ -1,0 +1,267 @@
+// Checked bounded Pearson and averaged-rank Spearman estimates.
+// Correlation estimates only; see CORRELATION.md for inference assumptions.
+use math::pure::{is_finite, sqrt}
+pub struct CorrelationEstimate {
+    pub status: i64,
+    pub n: i64,
+    pub coefficient: f64,
+    pub residual_ratio: f64,
+}
+fn correlation_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn correlation_unavailable(status: i64, n: i64) -> CorrelationEstimate {
+    CorrelationEstimate { status: status, n: n, coefficient: 0.0, residual_ratio: 0.0 }
+}
+fn correlation_input_status(x: &[f64;256], y: &[f64;256], n: i64) -> i64 with Mut, Div, Panic {
+    if n < 2 || n > 256 { return 1 }
+    var i: i64 = 0
+    while i < n {
+        if !is_finite(x[i as usize]) || !is_finite(y[i as usize]) { return 2 }
+        i = i + 1
+    }
+    0
+}
+// Input is already finite. Preserve small representable spreads around a large
+// anchor; scale raw values only if subtraction actually overflows.
+fn correlation_center(a: &![f64;256], n: i64) -> i64 with Mut, Div, Panic {
+    let anchor: f64 = a[0]
+    var spread: f64 = 0.0
+    var raw_scale: f64 = correlation_abs(anchor)
+    var constant: bool = true
+    var overflow: bool = false
+    var i: i64 = 0
+    while i < n {
+        let value: f64 = a[i as usize]
+        if value != anchor { constant = false }
+        let magnitude = correlation_abs(value)
+        if magnitude > raw_scale { raw_scale = magnitude }
+        let difference = value - anchor
+        if !is_finite(difference) { overflow = true }
+        else {
+            let distance = correlation_abs(difference)
+            if distance > spread { spread = distance }
+        }
+        i = i + 1
+    }
+    if constant { return 3 }
+    if overflow {
+        if raw_scale <= 0.0 || !is_finite(raw_scale) { return 4 }
+        let offset = anchor / raw_scale
+        i = 0
+        while i < n { a[i as usize] = a[i as usize] / raw_scale - offset; i = i + 1 }
+    } else {
+        if spread <= 0.0 || !is_finite(spread) { return 4 }
+        i = 0
+        while i < n { a[i as usize] = (a[i as usize] - anchor) / spread; i = i + 1 }
+    }
+    var sum: f64 = 0.0
+    var correction: f64 = 0.0
+    i = 0
+    while i < n {
+        let adjusted = a[i as usize] - correction
+        let next = sum + adjusted
+        correction = (next - sum) - adjusted
+        sum = next
+        i = i + 1
+    }
+    let mean = sum / (n as f64)
+    if !is_finite(mean) { return 4 }
+    i = 0
+    while i < n {
+        a[i as usize] = a[i as usize] - mean
+        if !is_finite(a[i as usize]) { return 4 }
+        i = i + 1
+    }
+    0
+}
+// Read-only moment/projection pass over already centered private coordinates.
+fn correlation_from_centered(x: &[f64;256], y: &[f64;256], n: i64) -> CorrelationEstimate with Mut, Div, Panic {
+    var xx: f64 = 0.0
+    var yy: f64 = 0.0
+    var xy: f64 = 0.0
+    var cx: f64 = 0.0
+    var cy: f64 = 0.0
+    var cc: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let a: f64 = x[i as usize]
+        let b: f64 = y[i as usize]
+        let ax = a * a - cx
+        let nx = xx + ax
+        cx = (nx - xx) - ax
+        xx = nx
+        let ay = b * b - cy
+        let ny = yy + ay
+        cy = (ny - yy) - ay
+        yy = ny
+        let ac = a * b - cc
+        let nc = xy + ac
+        cc = (nc - xy) - ac
+        xy = nc
+        i = i + 1
+    }
+    if !is_finite(xx) || !is_finite(yy) || !is_finite(xy) || xx <= 0.0 || yy <= 0.0 {
+        return correlation_unavailable(4, n)
+    }
+    let root_x = sqrt(xx)
+    let root_y = sqrt(yy)
+    var coefficient = (xy / root_x) / root_y
+    if !is_finite(coefficient) { return correlation_unavailable(4, n) }
+    if coefficient > 1.0 {
+        if coefficient - 1.0 > 1.5e-14 { return correlation_unavailable(4, n) }
+        coefficient = 1.0
+    }
+    if coefficient < -1.0 {
+        if -1.0 - coefficient > 1.5e-14 { return correlation_unavailable(4, n) }
+        coefficient = -1.0
+    }
+    let slope = xy / xx
+    if !is_finite(slope) { return correlation_unavailable(4, n) }
+    var residual_scale: f64 = 0.0
+    var residual_ssq: f64 = 1.0
+    i = 0
+    while i < n {
+        let residual: f64 = y[i as usize] - slope * x[i as usize]
+        if !is_finite(residual) { return correlation_unavailable(4, n) }
+        let magnitude = correlation_abs(residual)
+        if magnitude > 0.0 {
+            if magnitude > residual_scale {
+                let ratio = residual_scale / magnitude
+                residual_ssq = 1.0 + residual_ssq * ratio * ratio
+                residual_scale = magnitude
+            } else {
+                let ratio = magnitude / residual_scale
+                residual_ssq = residual_ssq + ratio * ratio
+            }
+        }
+        i = i + 1
+    }
+    var residual_ratio: f64 = (residual_scale * sqrt(residual_ssq)) / root_y
+    if !is_finite(residual_ratio) || residual_ratio < 0.0 { return correlation_unavailable(4, n) }
+    if residual_ratio > 1.0 {
+        if residual_ratio - 1.0 > 1.5e-14 { return correlation_unavailable(4, n) }
+        residual_ratio = 1.0
+    }
+    CorrelationEstimate { status: 0, n: n, coefficient: coefficient, residual_ratio: residual_ratio }
+}
+
+// Mutates private scratch/rank arrays, avoiding an extra pair of Spearman copies.
+fn correlation_centered(x: &![f64;256], y: &![f64;256], n: i64) -> CorrelationEstimate with Mut, Div, Panic {
+    let xs = correlation_center(x, n)
+    if xs != 0 { return correlation_unavailable(xs, n) }
+    let ys = correlation_center(y, n)
+    if ys != 0 { return correlation_unavailable(ys, n) }
+    correlation_from_centered(x, y, n)
+}
+pub fn pearson_checked(x: &[f64;256], y: &[f64;256], n: i64) -> CorrelationEstimate with Mut, Div, Panic {
+    let status = correlation_input_status(x, y, n)
+    if status != 0 { return correlation_unavailable(status, n) }
+    var a: [f64;256] = [0.0;256]
+    var b: [f64;256] = [0.0;256]
+    var i: i64 = 0
+    while i < n { a[i as usize] = x[i as usize]; b[i as usize] = y[i as usize]; i = i + 1 }
+    correlation_centered(&!a, &!b, n)
+}
+// Strict total order on finite observations: input position breaks equal ties.
+fn correlation_index_less(values: &[f64;256], a: i64, b: i64) -> bool with Panic {
+    let av: f64 = values[a as usize]
+    let bv: f64 = values[b as usize]
+    if av < bv { return true }
+    if av > bv { return false }
+    a < b
+}
+fn correlation_rank(values: &[f64;256], ranks: &![f64;256], indices: &![i64;256], n: i64) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < n { indices[i as usize] = i; i = i + 1 }
+    var start = n / 2
+    var end = n
+    while end > 1 {
+        var root: i64 = 0
+        if start > 0 { start = start - 1; root = start }
+        else {
+            end = end - 1
+            let saved: i64 = indices[end as usize]
+            indices[end as usize] = indices[0]
+            indices[0] = saved
+        }
+        var active: bool = true
+        while active {
+            var child = root * 2 + 1
+            if child >= end { active = false }
+            else {
+                if child + 1 < end && correlation_index_less(values, indices[child as usize], indices[(child + 1) as usize]) {
+                    child = child + 1
+                }
+                if correlation_index_less(values, indices[root as usize], indices[child as usize]) {
+                    let saved: i64 = indices[root as usize]
+                    indices[root as usize] = indices[child as usize]
+                    indices[child as usize] = saved
+                    root = child
+                } else { active = false }
+            }
+        }
+    }
+    i = 0
+    while i < n {
+        var after = i + 1
+        let value: f64 = values[indices[i as usize] as usize]
+        while after < n && values[indices[after as usize] as usize] == value { after = after + 1 }
+        let rank = ((i + 1 + after) as f64) * 0.5
+        var j = i
+        while j < after {
+            ranks[indices[j as usize] as usize] = rank
+            j = j + 1
+        }
+        i = after
+    }
+}
+pub fn spearman_checked(x: &[f64;256], y: &[f64;256], n: i64) -> CorrelationEstimate with Mut, Div, Panic {
+    let status = correlation_input_status(x, y, n)
+    if status != 0 { return correlation_unavailable(status, n) }
+    var a: [f64;256] = [0.0;256]
+    var b: [f64;256] = [0.0;256]
+    var indices: [i64;256] = [0;256]
+    correlation_rank(x, &!a, &!indices, n)
+    correlation_rank(y, &!b, &!indices, n)
+    correlation_centered(&!a, &!b, n)
+}
+
+// Workspace form lets a permutation caller reuse its index buffer for ranks.
+// Output prefixes are available only when the returned estimate has status0.
+pub fn correlation_prepare_indexed(x: &[f64;256], y: &[f64;256], n: i64, ranked: bool,
+    a: &![f64;256], b: &![f64;256], indices: &![i64;256]) -> CorrelationEstimate with Mut, Div, Panic {
+    let status = correlation_input_status(x, y, n)
+    if status != 0 { return correlation_unavailable(status, n) }
+    if ranked {
+        correlation_rank(x, a, indices, n)
+        correlation_rank(y, b, indices, n)
+        var constant_a: bool = true
+        var constant_b: bool = true
+        var i: i64 = 1
+        while i < n {
+            if a[i as usize] != a[0] { constant_a = false }
+            if b[i as usize] != b[0] { constant_b = false }
+            i = i + 1
+        }
+        if constant_a || constant_b { return correlation_unavailable(3, n) }
+        let mean_rank = ((n + 1) as f64) * 0.5
+        i = 0
+        while i < n {
+            a[i as usize] = a[i as usize] - mean_rank
+            b[i as usize] = b[i as usize] - mean_rank
+            i = i + 1
+        }
+        return correlation_from_centered(a, b, n)
+    }
+    var i: i64 = 0
+    while i < n {
+        a[i as usize] = x[i as usize]
+        b[i as usize] = y[i as usize]
+        i = i + 1
+    }
+    correlation_centered(a, b, n)
+}
+pub fn correlation_prepare(x: &[f64;256], y: &[f64;256], n: i64, ranked: bool,
+    a: &![f64;256], b: &![f64;256]) -> CorrelationEstimate with Mut, Div, Panic {
+    var indices: [i64;256] = [0;256]
+    correlation_prepare_indexed(x, y, n, ranked, a, b, &!indices)
+}

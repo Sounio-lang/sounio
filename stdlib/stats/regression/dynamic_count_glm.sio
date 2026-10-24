@@ -1,0 +1,489 @@
+// Dynamic fixed-dispersion NB2 / Poisson log-link Fisher scoring.
+// Borrowed design/counts/offsets and caller initialization. No implicit intercept.
+// Point fit only; no dispersion estimation or calibrated inference.
+use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_get,numeric_matrix_at}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
+use linalg::dynamic_least_squares::{dynamic_qr_workspace,dynamic_qr_least_squares}
+use linalg::least_squares_scale::{LeastSquaresNumber,least_squares_restore,least_squares_scaled_product_into}
+use stats::regression::nb2_deviance::{Nb2DevianceSlot,nb2_deviance_slot,nb2_deviance_into,nb2_deviance_slot_deviance_status,nb2_deviance_slot_deviance}
+use math::pure::{is_finite,exp,sqrt}
+pub struct DynamicCountWorkspace {
+ pub status:i64, pub design_elements:i64, pub response_elements:i64,
+ pub step_elements:i64, pub qr_elements:i64, pub stage_elements:i64,
+ pub total_elements:i64,
+}
+pub fn dynamic_count_workspace(n:i64,p:i64)->DynamicCountWorkspace with Div {
+ let bad=DynamicCountWorkspace{status:1,design_elements:0,response_elements:0,
+ step_elements:0,qr_elements:0,stage_elements:0,total_elements:0}
+ if n<1 || p<1 || p>n || n>9007199254740992 || p>9007199254740992 {return bad}
+ if n>9223372036854775807/p {return bad}
+ let design=n*p
+ let qr=dynamic_qr_workspace(n,p)
+ if qr<0 || p>9223372036854775807/8 || n>9223372036854775807/6 {return bad}
+ if n>(9223372036854775807-p*3)/4 {return bad}
+ let stage=p*3+n*4
+ if p>(9223372036854775807-n*6)/8 {return bad}
+ let extra=n*6+p*8
+ if design>(9223372036854775807-extra)/2 {return bad}
+ let total=design*2+extra
+ // The reported scratch payload must also have a representable byte count.
+ if total>9223372036854771704/8 {return bad}
+ DynamicCountWorkspace{status:0,design_elements:design,response_elements:n,
+ step_elements:p,qr_elements:qr,stage_elements:stage,total_elements:total}
+}
+pub struct DynamicCountFit {
+ pub status:i64, pub rows:i64, pub columns:i64, pub rank:i64, pub df:i64,
+ pub iterations:i64, pub alpha:f64, pub poisson_limit:bool,
+ pub mean_deviance:f64, pub total_deviance:f64, pub deviance_status:i64,
+ pub score_norm:f64, pub step_norm:f64, pub rcond_used:f64,
+ pub workspace_elements:i64, pub assumptions_assessed:bool, pub inference_status:i64,
+}
+struct DCNumber {status:i64,value:f64}
+struct DCEvaluation {status:i64,objective:f64}
+fn dc_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn dc_empty(status:i64,n:i64,p:i64)->DynamicCountFit {
+ DynamicCountFit{status:status,rows:n,columns:p,rank:0,df:0,iterations:0,
+ alpha:0.0,poisson_limit:false,mean_deviance:0.0,total_deviance:0.0,
+ deviance_status:2,score_norm:0.0,step_norm:0.0,rcond_used:0.0,
+ workspace_elements:0,assumptions_assessed:false,inference_status:1}
+}
+fn dc_weight(mu:f64,alpha:f64)->f64 with Mut,Div,Panic {
+ var value=mu
+ if alpha>0.0 {
+  if mu>=1.0 {value=1.0/(alpha+1.0/mu)} else {value=mu/(1.0+alpha*mu)}
+ }
+ if !is_finite(value) || value<=0.0 {return -1.0}
+ value
+}
+fn dc_dot_into(a:&NumericBuffer,layout:&NumericMatrix,beta:&NumericBuffer,
+ beta_offset:i64,row:i64,p:i64,out:&!DCNumber)->i64 with Mut,Div,Panic {
+ out.status=4
+ out.value=0.0
+ var sum:f64=0.0
+ var correction:f64=0.0
+ var j:i64=0
+ while j<p {
+  let entry=numeric_matrix_at(a,layout,row,j)
+  let coefficient=numeric_buffer_at(beta,beta_offset+j)
+  let term=entry*coefficient
+  if !is_finite(term) {return 4}
+  let adjusted=term-correction
+  let next=sum+adjusted
+  correction=(next-sum)-adjusted
+  sum=next
+  j=j+1
+ }
+ if !is_finite(sum) {return 4}
+ out.status=0
+ out.value=sum
+ 0
+}
+fn dc_evaluate(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
+ offsets:&NumericBuffer,stage:&!NumericBuffer,beta_offset:i64,
+ mean_offset:i64,eta_offset:i64,n:i64,p:i64,alpha:f64,dev_work:&!Nb2DevianceSlot,dot_work:&!DCNumber)->DCEvaluation with Mut,Div,Panic {
+ var objective:f64=0.0
+ var correction:f64=0.0
+ var i:i64=0
+ while i<n {
+  let fitted_status=dc_dot_into(a,layout,stage,beta_offset,i,p,dot_work)
+  if fitted_status!=0 {return DCEvaluation{status:4,objective:0.0}}
+  let fitted_value:f64=dot_work.value
+  let eta=fitted_value+numeric_buffer_at(offsets,i)
+  if !is_finite(eta) {return DCEvaluation{status:4,objective:0.0}}
+  let mu=exp(eta)
+  if !is_finite(mu) || mu<=0.0 {return DCEvaluation{status:4,objective:0.0}}
+  let unit_status=nb2_deviance_into(integer_buffer_at(counts,i),mu,alpha,dev_work)
+  let unit_availability=nb2_deviance_slot_deviance_status(dev_work)
+  if unit_status!=0 || unit_availability!=0 {return DCEvaluation{status:4,objective:0.0}}
+  let unit_value=nb2_deviance_slot_deviance(dev_work)
+  let contribution=unit_value/(n as f64)
+  if unit_value!=0.0 {
+   if contribution==0.0 {return DCEvaluation{status:4,objective:0.0}}
+  }
+  let adjusted=contribution-correction
+  let next=objective+adjusted
+  correction=(next-objective)-adjusted
+  objective=next
+  numeric_buffer_set(stage,mean_offset+i,mu)
+  numeric_buffer_set(stage,eta_offset+i,eta)
+  i=i+1
+ }
+ if !is_finite(objective) || objective<0.0 {return DCEvaluation{status:4,objective:0.0}}
+ DCEvaluation{status:0,objective:objective}
+}
+// Stable paired fixed-alpha log-likelihood increment in the local mean domain.
+// status1 requests the existing nonlocal objective comparison;4 is arithmetic.
+// For d=(trial-current)/current:
+// d(ell)/dd=(s-W*d)/((1+d)*(1+q*d)), s=((y-mu)/mu)*W.
+// Integrating the compensated geometric series avoids cancellation at q~1.
+fn dc_local_loglik_gain(counts:&IntegerBuffer,stage:&NumericBuffer,
+ current_start:i64,trial_start:i64,n:i64,alpha:f64,product_work:&!LeastSquaresNumber)->DCEvaluation with Mut,Div,Panic {
+ var gain:f64=0.0
+ var correction:f64=0.0
+ var i:i64=0
+ while i<n {
+  let mu=numeric_buffer_at(stage,current_start+i)
+  let trial=numeric_buffer_at(stage,trial_start+i)
+  let delta_mu=trial-mu
+  if delta_mu!=0.0 {
+   let d=delta_mu/mu
+   if !is_finite(d) {return DCEvaluation{status:1,objective:0.0}}
+   if dc_abs(d)>0.25 {return DCEvaluation{status:1,objective:0.0}}
+   if d==0.0 {return DCEvaluation{status:4,objective:0.0}}
+   let weight=dc_weight(mu,alpha)
+   if weight<0.0 {return DCEvaluation{status:4,objective:0.0}}
+   var q:f64=0.0
+   if alpha>0.0 {
+    if mu>=1.0 {q=alpha/(alpha+1.0/mu)} else {
+     let product=alpha*mu
+     q=product/(1.0+product)
+    }
+   }
+   if !is_finite(q) || q<0.0 || q>1.0 {return DCEvaluation{status:4,objective:0.0}}
+   var a:f64=1.0
+   var b:f64=0.5
+   var a_correction:f64=0.0
+   var b_correction:f64=0.0
+   var power:f64=1.0
+   var geometric:f64=1.0
+   var k:i64=1
+   while k<32 {
+    power=power*(-d)
+    geometric=1.0+q*geometric
+    let a_term=(power*geometric)/((k+1) as f64)-a_correction
+    let a_next=a+a_term
+    a_correction=(a_next-a)-a_term
+    a=a_next
+    let b_term=(power*geometric)/((k+2) as f64)-b_correction
+    let b_next=b+b_term
+    b_correction=(b_next-b)-b_term
+    b=b_next
+    k=k+1
+   }
+   if !is_finite(a) || !is_finite(b) || a<=0.0 || b<=0.0 {return DCEvaluation{status:4,objective:0.0}}
+   let delta=(integer_buffer_at(counts,i) as f64)-mu
+   let absolute_d=dc_abs(d)
+   // |d|*A and |d|*B are bounded local coefficients; keep W and mu
+   // separate in the balanced products to retain extreme conditional weights.
+   let first_status=least_squares_scaled_product_into(delta,weight,absolute_d*a,mu,1.0,1.0,product_work)
+   let first_value:f64=product_work.value
+   let second_status=least_squares_scaled_product_into(weight,absolute_d,absolute_d*b,1.0,1.0,1.0,product_work)
+   let second_value:f64=product_work.value
+   if first_status!=0 || second_status!=0 {return DCEvaluation{status:4,objective:0.0}}
+   if delta!=0.0 {if first_value==0.0 {return DCEvaluation{status:4,objective:0.0}}}
+   if second_value==0.0 {return DCEvaluation{status:4,objective:0.0}}
+   var signed_first=first_value
+   if d<0.0 {signed_first= -signed_first}
+   let contribution=(signed_first-second_value)/(n as f64)
+   if !is_finite(contribution) {return DCEvaluation{status:4,objective:0.0}}
+   if signed_first!=second_value {if contribution==0.0 {return DCEvaluation{status:4,objective:0.0}}}
+   let adjusted=contribution-correction
+   let next=gain+adjusted
+   correction=(next-gain)-adjusted
+   gain=next
+   if !is_finite(gain) {return DCEvaluation{status:4,objective:0.0}}
+  }
+  i=i+1
+ }
+ DCEvaluation{status:0,objective:gain}
+}
+
+// status0 point fit;1 shape/buffer/workspace;2 nonfinite input;3 negative count;
+// 4 arithmetic/unrepresentable scaling;5 invalid controls;6 rank deficiency;
+// 7 no convergence;8 sufficient all-zero/constant-column boundary;
+// 9 count exceeds exact binary64 integer range.
+// Outputs coeff/means/eta unchanged on every failure; scratch may change.
+// Caller supplies all initial coefficients. alpha0 is the exact Poisson branch.
+pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
+ log_offsets:&NumericBuffer,initial_coefficients:&NumericBuffer,alpha:f64,rcond:f64,
+ max_iterations:i64,tolerance:f64,coefficients:&!NumericBuffer,
+ means:&!NumericBuffer,linear_predictors:&!NumericBuffer,
+ weighted_design:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_workspace:&!NumericBuffer,stage:&!NumericBuffer)->DynamicCountFit with Mut,Div,Panic {
+ let n=numeric_matrix_rows(layout)
+ let p=numeric_matrix_cols(layout)
+ let plan=dynamic_count_workspace(n,p)
+ if plan.status!=0 || numeric_matrix_status(layout)!=0 ||
+ numeric_buffer_status(a)!=0 || integer_buffer_status(counts)!=0 ||
+ numeric_buffer_status(log_offsets)!=0 || numeric_buffer_status(initial_coefficients)!=0 ||
+ numeric_buffer_status(coefficients)!=0 || numeric_buffer_status(means)!=0 ||
+ numeric_buffer_status(linear_predictors)!=0 || numeric_buffer_status(weighted_design)!=0 ||
+ numeric_buffer_status(response)!=0 || numeric_buffer_status(step)!=0 ||
+ numeric_buffer_status(qr_workspace)!=0 || numeric_buffer_status(stage)!=0 {return dc_empty(1,n,p)}
+ if integer_buffer_len(counts)!=n || numeric_buffer_len(log_offsets)!=n ||
+ numeric_buffer_len(initial_coefficients)!=p || numeric_buffer_len(coefficients)!=p ||
+ numeric_buffer_len(means)!=n || numeric_buffer_len(linear_predictors)!=n ||
+ numeric_buffer_len(weighted_design)!=plan.design_elements || numeric_buffer_len(response)!=n ||
+ numeric_buffer_len(step)!=p || numeric_buffer_len(qr_workspace)<plan.qr_elements ||
+ numeric_buffer_len(stage)<plan.stage_elements {return dc_empty(1,n,p)}
+ if !is_finite(alpha) || alpha<0.0 || !is_finite(rcond) || rcond<0.0 || rcond>=1.0 ||
+ max_iterations<1 || max_iterations>100 || !is_finite(tolerance) ||
+ tolerance<1e-12 || tolerance>1e-4 {return dc_empty(5,n,p)}
+ var i:i64=0
+ while i<n {
+  if !is_finite(numeric_buffer_at(log_offsets,i)) {return dc_empty(2,n,p)}
+  var j:i64=0
+  while j<p {
+   let value=numeric_matrix_get(a,layout,i,j)
+   if value.status!=0 {return dc_empty(1,n,p)}
+   if !is_finite(value.value) {return dc_empty(2,n,p)}
+   j=j+1
+  }
+  i=i+1
+ }
+ var j:i64=0
+ while j<p {
+  if !is_finite(numeric_buffer_at(initial_coefficients,j)) {return dc_empty(2,n,p)}
+  j=j+1
+ }
+ i=0
+ while i<n {if integer_buffer_at(counts,i)<0 {return dc_empty(3,n,p)} i=i+1}
+ i=0
+ while i<n {if integer_buffer_at(counts,i)>9007199254740992 {return dc_empty(9,n,p)} i=i+1}
+ // Rank is established independently of the caller's initialization.
+ i=0
+ while i<n {numeric_buffer_set(response,i,0.0) i=i+1}
+ let rank_fit=dynamic_qr_least_squares(a,layout,response,step,qr_workspace,rcond)
+ if rank_fit.status!=0 {
+  var bad=dc_empty(if rank_fit.status==3 {6}else if rank_fit.status==5 {5}else{4},n,p)
+  bad.rank=rank_fit.rank
+  return bad
+ }
+ var denominator:f64=1.0
+ var correction:f64=0.0
+ var all_zero=true
+ i=0
+ while i<n {
+  let count=integer_buffer_at(counts,i)
+  if count!=0 {all_zero=false}
+  let adjusted=(count as f64)-correction
+  let next=denominator+adjusted
+  correction=(next-denominator)-adjusted
+  denominator=next
+  i=i+1
+ }
+ if !is_finite(denominator) || denominator<=0.0 {return dc_empty(4,n,p)}
+ if all_zero {
+  j=0
+  while j<p {
+   let first=numeric_matrix_at(a,layout,0,j)
+   var constant=first!=0.0
+   i=1
+   while i<n {
+    let value=numeric_matrix_at(a,layout,i,j)
+    if value!=first {constant=false}
+    i=i+1
+   }
+   if constant {return dc_empty(8,n,p)}
+   j=j+1
+  }
+ }
+ let current_mean=p*2
+ let current_eta=p*2+n
+ let trial_mean=p*2+n*2
+ let trial_eta=p*2+n*3
+ let column_scales=p*2+n*4
+ j=0
+ while j<p {
+  numeric_buffer_set(stage,j,numeric_buffer_at(initial_coefficients,j))
+  var scale:f64=0.0
+  i=0
+  while i<n {
+   let value=numeric_matrix_at(a,layout,i,j)
+   if dc_abs(value)>scale {scale=dc_abs(value)}
+   i=i+1
+  }
+  if scale<=0.0 {return dc_empty(6,n,p)}
+  numeric_buffer_set(stage,column_scales+j,scale)
+  j=j+1
+ }
+ var dev_work=nb2_deviance_slot()
+ var dot_work=DCNumber{status:4,value:0.0}
+ var product_work=LeastSquaresNumber{status:4,value:0.0}
+ var current=dc_evaluate(a,layout,counts,log_offsets,stage,0,current_mean,current_eta,n,p,alpha,&!dev_work,&!dot_work)
+ if current.status!=0 {return dc_empty(4,n,p)}
+ let normalized_layout=numeric_matrix(plan.design_elements,n,p,p,1,0)
+ var iteration:i64=0
+ while iteration<max_iterations {
+  var response_scale:f64=0.0
+  var weight_scale:f64=0.0
+  i=0
+  while i<n {
+   let mu=numeric_buffer_at(stage,current_mean+i)
+   let delta=(integer_buffer_at(counts,i) as f64)-mu
+   let working=delta/mu
+   if !is_finite(working) {return dc_empty(4,n,p)}
+   if delta!=0.0 {if working==0.0 {return dc_empty(4,n,p)}}
+   numeric_buffer_set(response,i,working)
+   if dc_abs(working)>response_scale {response_scale=dc_abs(working)}
+   let weight=dc_weight(mu,alpha)
+   if weight<0.0 {return dc_empty(4,n,p)}
+   if weight>weight_scale {weight_scale=weight}
+   i=i+1
+  }
+  if response_scale==0.0 {response_scale=1.0}
+  let root_weight=sqrt(weight_scale)
+  if !is_finite(root_weight) || root_weight<=0.0 {return dc_empty(4,n,p)}
+  var score_norm:f64=0.0
+  j=0
+  while j<p {
+   var sum:f64=0.0
+   correction=0.0
+   i=0
+   while i<n {
+    let mu=numeric_buffer_at(stage,current_mean+i)
+    let delta=(integer_buffer_at(counts,i) as f64)-mu
+    let working=numeric_buffer_at(response,i)
+    let weight=dc_weight(mu,alpha)
+    if weight<0.0 {return dc_empty(4,n,p)}
+    var score_residual=delta
+    if alpha>0.0 {score_residual=working*weight}
+    if !is_finite(score_residual) {return dc_empty(4,n,p)}
+    if delta!=0.0 {if score_residual==0.0 {return dc_empty(4,n,p)}}
+    let entry=numeric_matrix_at(a,layout,i,j)
+    let coordinate=entry/numeric_buffer_at(stage,column_scales+j)
+    if entry!=0.0 {if coordinate==0.0 {return dc_empty(4,n,p)}}
+    let product=coordinate*score_residual
+    if coordinate!=0.0 {if score_residual!=0.0 {if product==0.0 {return dc_empty(4,n,p)}}}
+    let term=product/denominator
+    if !is_finite(term) {return dc_empty(4,n,p)}
+    if product!=0.0 {if term==0.0 {return dc_empty(4,n,p)}}
+    let adjusted=term-correction
+    let next=sum+adjusted
+    correction=(next-sum)-adjusted
+    sum=next
+    i=i+1
+   }
+   if !is_finite(sum) {return dc_empty(4,n,p)}
+   if dc_abs(sum)>score_norm {score_norm=dc_abs(sum)}
+   j=j+1
+  }
+  i=0
+  while i<n {
+   let mu=numeric_buffer_at(stage,current_mean+i)
+   let weight=dc_weight(mu,alpha)
+   if weight<0.0 {return dc_empty(4,n,p)}
+   let factor=sqrt(weight)/root_weight
+   if !is_finite(factor) || factor<=0.0 || factor>1.0 {return dc_empty(4,n,p)}
+   let raw=numeric_buffer_at(response,i)
+   let coordinate=raw/response_scale
+   if raw!=0.0 {if coordinate==0.0 {return dc_empty(4,n,p)}}
+   let rhs=coordinate*factor
+   if coordinate!=0.0 {if rhs==0.0 {return dc_empty(4,n,p)}}
+   numeric_buffer_set(response,i,rhs)
+   j=0
+   while j<p {
+    let entry=numeric_matrix_at(a,layout,i,j)
+    let normalized=entry/numeric_buffer_at(stage,column_scales+j)
+    if entry!=0.0 {if normalized==0.0 {return dc_empty(4,n,p)}}
+    let value=normalized*factor
+    if normalized!=0.0 {if value==0.0 {return dc_empty(4,n,p)}}
+    if !is_finite(value) {return dc_empty(4,n,p)}
+    numeric_buffer_set(weighted_design,i*p+j,value)
+    j=j+1
+   }
+   i=i+1
+  }
+  let solved=dynamic_qr_least_squares(weighted_design,&normalized_layout,response,step,qr_workspace,rcond)
+  if solved.status!=0 {
+   var bad=dc_empty(if solved.status==3 {6}else{4},n,p)
+   bad.rank=solved.rank
+   bad.iterations=iteration
+   return bad
+  }
+  j=0
+  while j<p {
+   let restored=least_squares_restore(numeric_buffer_at(step,j),response_scale,numeric_buffer_at(stage,column_scales+j))
+   if restored.status!=0 {return dc_empty(4,n,p)}
+   numeric_buffer_set(step,j,restored.value)
+   j=j+1
+  }
+  var full_step:f64=0.0
+  i=0
+  while i<n {
+   let movement_status=dc_dot_into(a,layout,step,0,i,p,&!dot_work)
+   if movement_status!=0 {return dc_empty(4,n,p)}
+   let movement_value:f64=dot_work.value
+   let scaled=dc_abs(movement_value)/(1.0+dc_abs(numeric_buffer_at(stage,current_eta+i)))
+   if !is_finite(scaled) {return dc_empty(4,n,p)}
+   if movement_value!=0.0 {if scaled==0.0 {return dc_empty(4,n,p)}}
+   if scaled>full_step {full_step=scaled}
+   i=i+1
+  }
+  iteration=iteration+1
+  if score_norm<=tolerance && full_step<=tolerance {
+   var out=dc_empty(0,n,p)
+   out.rank=p
+   out.df=n-p
+   out.iterations=iteration
+   out.alpha=alpha
+   out.poisson_limit=alpha==0.0
+   out.mean_deviance=current.objective
+   let total=current.objective*(n as f64)
+   out.total_deviance=total
+   out.deviance_status=0
+   if !is_finite(total) {out.total_deviance=0.0;out.deviance_status=1}
+   out.score_norm=score_norm
+   out.step_norm=full_step
+   out.rcond_used=if rcond==0.0 {(n as f64)*2.2204460492503131e-16}else{rcond}
+   out.workspace_elements=plan.total_elements
+   // Commit only after every convergence and arithmetic guard succeeds.
+   j=0
+   while j<p {numeric_buffer_set(coefficients,j,numeric_buffer_at(stage,j)) j=j+1}
+   i=0
+   while i<n {
+    numeric_buffer_set(means,i,numeric_buffer_at(stage,current_mean+i))
+    numeric_buffer_set(linear_predictors,i,numeric_buffer_at(stage,current_eta+i))
+    i=i+1
+   }
+   return out
+  }
+  var accepted=false
+  var fraction:f64=1.0
+  var halvings:i64=0
+  while halvings<=32 && !accepted {
+   j=0
+   while j<p {
+    let current_coefficient=numeric_buffer_at(stage,j)
+    let increment_value=numeric_buffer_at(step,j)
+    numeric_buffer_set(stage,p+j,current_coefficient+fraction*increment_value)
+    j=j+1
+   }
+   let trial=dc_evaluate(a,layout,counts,log_offsets,stage,p,trial_mean,trial_eta,n,p,alpha,&!dev_work,&!dot_work)
+   if trial.status==0 {
+    let local_gain=dc_local_loglik_gain(counts,stage,current_mean,trial_mean,n,alpha,&!product_work)
+    if local_gain.status==4 {return dc_empty(4,n,p)}
+    var improves=trial.objective<=current.objective
+    if local_gain.status==0 {improves=local_gain.objective>=0.0}
+    if improves {
+     j=0
+     while j<p {
+      let coefficient=numeric_buffer_at(stage,p+j)
+      numeric_buffer_set(stage,j,coefficient)
+      j=j+1
+     }
+     i=0
+     while i<n {
+      let accepted_mean=numeric_buffer_at(stage,trial_mean+i)
+      let accepted_eta=numeric_buffer_at(stage,trial_eta+i)
+      numeric_buffer_set(stage,current_mean+i,accepted_mean)
+      numeric_buffer_set(stage,current_eta+i,accepted_eta)
+      i=i+1
+     }
+     current=trial
+     accepted=true
+    }
+   }
+   if !accepted {fraction=fraction*0.5}
+   halvings=halvings+1
+  }
+  if !accepted {
+   var bad=dc_empty(7,n,p)
+   bad.iterations=iteration
+   return bad
+  }
+ }
+ var exhausted=dc_empty(7,n,p)
+ exhausted.iterations=iteration
+ exhausted
+}

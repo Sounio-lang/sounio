@@ -10,7 +10,7 @@ Worktree: `/workspace/sounio`
 Regenerate with:
 
 ```bash
-find tools/mcp .cursor/rules/sounio.mdc agent_logs/CC2_convergence.md tests/fixtures/broken_dose.sio tests/fixtures/broken tests/fixtures/mcp_init.json examples/hello.sio \
+find tools/mcp .cursor/rules/sounio.mdc artifacts/agent-logs/CC2_convergence.md tests/fixtures/broken_dose.sio tests/fixtures/broken tests/fixtures/mcp_init.json examples/hello.sio \
   -type f \
   -not -path '*/__pycache__/*' \
   -not -path '*/.pytest_cache/*' \
@@ -51,7 +51,7 @@ Observed:
 | Gate | Status | Evidence |
 |---|---|---|
 | Q1 | PASS | `ruff check tools/mcp`; `mypy --strict tools/mcp/sounio_mcp` |
-| Q2 | PASS | `agent_logs/CC2_convergence.md`, 4 implementation/critique/revision cycles |
+| Q2 | PASS | `artifacts/agent-logs/CC2_convergence.md`, 4 implementation/critique/revision cycles |
 | Q3 | PASS | `tools/mcp/ADVERSARIAL_SELF_CRITIQUE.md` |
 | Q4 | PARTIAL | Filtered canonical harness smoke passed; full suite not run in this turn |
 | Q5 | PASS | New `.sio` fixtures use small Sounio-native programs; `examples/hello.sio` runs |

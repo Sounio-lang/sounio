@@ -177,6 +177,11 @@ fn irt_ident_expr(name: Name) -> Expr with Mut, Panic, Div {
         fields: None,
         cast_type: None,
         handler_block: None,
+        closure_params: None,
+        closure_return: None,
+        closure_effects: None,
+        closure_body: None,
+        type_args: None,
     }
 }
 
@@ -252,6 +257,11 @@ fn irt_call_expr(callee: Expr, args: Option<Box<ExprList>>) -> Expr with Mut, Pa
         fields: None,
         cast_type: None,
         handler_block: None,
+        closure_params: None,
+        closure_return: None,
+        closure_effects: None,
+        closure_body: None,
+        type_args: None,
     }
 }
 
@@ -402,6 +412,11 @@ fn irt_field_expr(base: Expr, field_name: Name) -> Expr with Mut, Panic, Div, Al
         fields: None,
         cast_type: None,
         handler_block: None,
+        closure_params: None,
+        closure_return: None,
+        closure_effects: None,
+        closure_body: None,
+        type_args: None,
     }
 }
 
@@ -926,6 +941,9 @@ fn ir_test_16_method_call_lowered() -> bool with Mut, Panic, Div, Alloc, IO {
 
 // Phase 0 tests: IR serialization and normalization
 fn ir_test_17_serialize_roundtrip() -> bool with Alloc, Mut, Panic, Div, IO {
+    let unknown_payload_ty = TypeExpr { kind: TypeExprKind::TypeNamed, span: Span::dummy(), path: irt_single_path3(67, 117, 115), type_args: None, inner: None, array_size: None, effects: None, knowledge_info: None, refinement_info: None }
+    let unknown_knowledge_ty = TypeExpr { kind: TypeExprKind::TypeKnowledge, span: Span::dummy(), path: irt_empty_path(), type_args: None, inner: None, array_size: None, effects: None, knowledge_info: Some(Box::new(KnowledgeTypeInfo { inner_type: Box::new(unknown_payload_ty), epsilon: None, validity: None, provenance: None, proof_constraints: None })), refinement_info: None }
+    if lower_type_expr_knowledge_value_float(&unknown_knowledge_ty) != 2 { return false }
     var module = ir_empty_module()
     module.fn_count = 2
 
@@ -933,6 +951,7 @@ fn ir_test_17_serialize_roundtrip() -> bool with Alloc, Mut, Panic, Div, IO {
     func.name = ir_name_from_bytes(116 as i8, 101 as i8, 115 as i8, 116 as i8, 4)
     func.instr_count = 8
     func.reg_count = 5
+    func.return_kn_value_float = 0
     var func_region = ir_region_invalid()
     if ir_instr_arena_alloc(func.instr_count, &! func_region) != IR_ARENA_OK { return false }
     func.region = func_region
@@ -959,6 +978,7 @@ fn ir_test_17_serialize_roundtrip() -> bool with Alloc, Mut, Panic, Div, IO {
     sret_callee.instr_count = 1
     sret_callee.reg_count = 1
     sret_callee.is_sret = 1
+    sret_callee.return_kn_value_float = 2
     sret_callee.sret_dest_reg = 0
     var sret_region = ir_region_invalid()
     if ir_instr_arena_alloc(sret_callee.instr_count, &! sret_region) != IR_ARENA_OK { return false }
@@ -969,7 +989,7 @@ fn ir_test_17_serialize_roundtrip() -> bool with Alloc, Mut, Panic, Div, IO {
     let pair = serialize_ir_module(module)
     let buf = pair.0
     let len = pair.1
-    if buf[5] != 3 as i8 { return false }
+    if buf[5] != 7 as i8 { return false }
 
     let restored = deserialize_ir_module(buf, len)
 
@@ -977,6 +997,7 @@ fn ir_test_17_serialize_roundtrip() -> bool with Alloc, Mut, Panic, Div, IO {
         return false
     }
     let restored_func = ir_fn_get(&restored, 0)
+    if restored_func.return_kn_value_float != 0 { return false }
     if restored_func.instr_count != 8 {
         return false
     }
@@ -1018,18 +1039,70 @@ fn ir_test_17_serialize_roundtrip() -> bool with Alloc, Mut, Panic, Div, IO {
         return false
     }
     let restored_sret_callee = ir_fn_get(&restored, 1)
-    if restored_sret_callee.is_sret != 1 || restored_sret_callee.sret_dest_reg != 0 ||
+    if restored_sret_callee.is_sret != 1 || restored_sret_callee.sret_dest_reg != 0 || restored_sret_callee.return_kn_value_float != 2 ||
         restored_sret_callee.instr_count != 1 {
         return false
     }
 
-    // A legacy v5 header cannot honestly describe the new variable call
-    // payload. The reader must refuse rather than silently drop arguments.
-    var legacy_buf = buf
-    legacy_buf[5] = 0 as i8
+    // Build a genuine SOIR v5 artifact from an empty one-function v6 module: remove
+    // the v6 return marker at the end of the fixed v5 function metadata, then set
+    // the v5 version and its historical feature mask (call args + sret).
+    var legacy_source = ir_empty_module()
+    legacy_source.fn_count = 1
+    var legacy_function = ir_empty_function()
+    legacy_function.name = irt_name4(108, 101, 103, 97)
+    ir_fn_set(&! legacy_source, 0, legacy_function)
+    let current_pair = serialize_ir_module(legacy_source)
+    var legacy_buf = current_pair.0
+    let legacy_len = current_pair.1 - 8
+    var shift: i64 = 744
+    while shift < current_pair.1 - 8 {
+        legacy_buf[shift] = legacy_buf[shift + 8]
+        shift = shift + 1
+    }
+    legacy_buf[4] = 5 as i8
+    legacy_buf[5] = SOIR_FEATURES_V5
+    let v5_diagnostics_before = SOIR_DESER_V5_UNKNOWN_RETURN_METADATA_COUNT
+    let legacy = deserialize_ir_module(legacy_buf, legacy_len)
+    if legacy.fn_count != 1 || ir_fn_get(&legacy, 0).return_kn_value_float != -2 ||
+        SOIR_DESER_V5_UNKNOWN_RETURN_METADATA_COUNT != v5_diagnostics_before + 1 {
+        return false
+    }
+
+    var v5_lowerer = lowerer_new()
+    (*v5_lowerer.module) = legacy
+    let legacy_callee = irt_name4(108, 101, 103, 97)
+    let legacy_call = irt_call_expr(irt_ident_expr(legacy_callee), None)
+    let inferred_local = irt_name1(120)
+    let inferred_stmt = irt_stmt_let(inferred_local, legacy_call)
+    v5_lowerer = v5_lowerer.bind_local(inferred_local, 0, false)
+    let inferred_pair = v5_lowerer.lower_let_stmt_type_metadata_ref(&inferred_stmt, 0, false)
+    if inferred_pair.0.lookup_local_struct_type(inferred_local).len > 0 { return false }
+    let legacy_value_base = Some(Box::new(irt_ident_expr(inferred_local)))
+    if inferred_pair.0.field_base_kn_value_float_ref(&legacy_value_base) != -2 { return false }
+    if inferred_pair.0.field_is_float_for_base_ref(&legacy_value_base, irt_name5(118, 97, 108, 117, 101)) { return false }
+    if inferred_pair.0.expr_result_scalar_kind_ref(&irt_field_expr(irt_ident_expr(inferred_local), irt_name5(118, 97, 108, 117, 101))) != 0 { return false }
+    let legacy_value_expr = irt_field_expr(irt_ident_expr(inferred_local), irt_name5(118, 97, 108, 117, 101))
+    let error_count_before_legacy_value = inferred_pair.0.error_count
+    let legacy_value_lowered = inferred_pair.0.lower_field_access_expr_ref(&legacy_value_expr)
+    if legacy_value_lowered.1 != IR_INVALID_REG || legacy_value_lowered.0.error_count != error_count_before_legacy_value + 1 || !legacy_value_lowered.0.had_error { return false }
+    // A v6 cache with an invalid feature mask is still refused.
+    var bad_features_buf = buf
+    bad_features_buf[5] = 0 as i8
     let refusals_before = SOIR_DESER_REFUSAL_COUNT
-    let legacy = deserialize_ir_module(legacy_buf, len)
-    if legacy.fn_count != 0 || SOIR_DESER_REFUSAL_COUNT == refusals_before {
+    let bad_features = deserialize_ir_module(bad_features_buf, len)
+    if bad_features.fn_count != 0 || SOIR_DESER_REFUSAL_COUNT == refusals_before {
+        return false
+    }
+
+    // SOIR v6 stores the first function return marker at byte 752 here: the
+    // 16-byte module header + 720-byte function prefix + one float-reg word. Values outside
+    // the closed [-2, 2] encoding must refuse the entire module.
+    var bad_return_marker_buf = buf
+    bad_return_marker_buf[752] = 3 as i8
+    let bad_marker_refusals_before = SOIR_DESER_REFUSAL_COUNT
+    let bad_return_marker = deserialize_ir_module(bad_return_marker_buf, len)
+    if bad_return_marker.fn_count != 0 || SOIR_DESER_REFUSAL_COUNT != bad_marker_refusals_before + 1 {
         return false
     }
 

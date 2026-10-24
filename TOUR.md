@@ -1,9 +1,10 @@
 # A measured tour of Sounio
 
 Twenty claims, each one a program you can run, each one checked by the
-sentinel it prints. Nothing on this page was carried over from an earlier
-document; every timing and result was measured on 2026-10-04 at `main`
-(Linux x86-64, the only platform the compiler targets).
+sentinel it prints. Timings and results below are a historical snapshot
+measured on 2026-10-04 at `main` on Linux x86-64; they are not a claim about
+the current compiler or its only supported platform. For current Apple
+Silicon status and setup, see the [macOS ARM64 guide](docs/compiler/MADAROS_MACOS_ARM64.md).
 
 ```bash
 bash scripts/tour.sh            # sections 1-3, about 1 minute
@@ -25,9 +26,11 @@ drawing conclusions from sections 1–5.
 A self-hosted compiler for a language whose values can carry their own
 uncertainty (`Knowledge<T>`, propagated to first order by the GUM rules),
 their physical units, and declared effects (`IO`, `Mut`, `Div`, `Panic`, `GPU`,
-…). It compiles to static x86-64 ELF. The compiler is written in Sounio and
-rebuilds itself to a fixed point starting from the committed prebuilt compiler
-(`bin/souc-linux-x86_64`, section 4). The original C seed, `bootstrap/stage0.c`,
+…). The committed prebuilt is a static x86-64 ELF; Apple Silicon also has a
+separate current-source native ARM64 route with real Metal execution, described
+in the [macOS ARM64 guide](docs/compiler/MADAROS_MACOS_ARM64.md). The compiler
+is written in Sounio and rebuilds itself to a fixed point starting from the
+committed prebuilt compiler (`bin/souc-linux-x86_64`, section 4). The original C seed, `bootstrap/stage0.c`,
 is not on that path; `scripts/ci/bootstrap_chain_gate.sh` exercises it. Two engines
 share the front end: **Madaros**, the modular default behind `bin/souc`, and
 **lean_single**, the bootstrap seed, selected with `SOUNIO_SOUC_ENGINE=lean_single`.
@@ -39,9 +42,9 @@ Where they differ, this page says which one ran.
 
 | claim | program | time |
 |---|---|---|
-| uncertainty propagates analytically by the GUM, at compile-time-known cost | `demo_incerteza.sio` | 3 s |
-| derived units (`unit velocity = m / s;`) type-check; `m + s` is rejected | `demo_unidades.sio` (lean_single) | <1 s |
-| a `Knowledge<Patient where { age >= 18 }>` built with age 13 aborts before the next line runs | `demo_portas_rejeicao.sio`, via `scripts/ontology/expand_knowledge_runtime_guards.sh` | 3 s |
+| uncertainty propagates analytically by the GUM, at compile-time-known cost | `demos/intro/demo_incerteza.sio` | 3 s |
+| derived units (`unit velocity = m / s;`) type-check; `m + s` is rejected | `demos/intro/demo_unidades.sio` (lean_single) | <1 s |
+| a `Knowledge<Patient where { age >= 18 }>` built with age 13 aborts before the next line runs | `demos/intro/demo_portas_rejeicao.sio`, via `scripts/ontology/expand_knowledge_runtime_guards.sh` | 3 s |
 
 The last two come with caveats that matter (section 6, #2751–#2753).
 
@@ -118,7 +121,12 @@ Besides the EL+ closure, the hydrogen demos have machine-checked companions:
 each. The repository holds 255 Lean files under `formal/lean4/`; this tour runs
 only the ones it cites.
 
-## 6. What does not work, measured the same day
+## 6. Limitations observed on 2026-10-04
+
+This table preserves dated findings; do not treat every entry as verified
+against today's `main`. Check [current compiler limitations](docs/compiler/KNOWN_LIMITATIONS.md),
+the linked issue and the relevant current-source gate before presenting an
+item as current status.
 
 | area | state | tracking |
 |---|---|---|
@@ -136,7 +144,6 @@ only the ones it cites.
 | **correlated first-order, lean_single** | repeated use of one input is treated as independent. `gum_correlated` gives var(h·h) = 0.000613, where Madaros gives 0.001225 = 4h²σ². The seed's `rapamycin_iso_budget` path (a) is about 0.55× Budget64, where Madaros agrees to 0.2 % | `tests/run-pass/gum_correlated.sio` |
 | **one-hop struct-field variance, both engines** | `madaros_wide_struct_variance_field`: one_hop = two_hop = 0 on Madaros as well as on lean_single (direct = 0.09) | `tests/run-pass/madaros_wide_struct_variance_field.sio` |
 | **performance** | not benchmarked on this page. The one same-algorithm comparison measured during this tour's preparation was dominated by the model code, not the compiler, so no number is given | — |
-| **platform** | Linux x86-64 only. The binaries are static ELF and do not run on macOS | — |
 
 If you find something that belongs in this table, it is the most useful issue
 you can open.

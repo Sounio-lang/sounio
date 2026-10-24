@@ -2,8 +2,8 @@
 topic_id: repo.docs.research.fano-arcs-blocking-sounio-note
 authority: historical
 audience: researchers
-last_validated: 2026-03-07
-validated_by: A6
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.fano-arcs-blocking-sounio-note
 -->
 

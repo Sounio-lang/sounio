@@ -49,6 +49,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 FIX="$ROOT_DIR/tests/multimodule/private_fn_identity"
 TAG="[madaros-private-fn-identity]"
 WORK="${SOUNIO_MADAROS_PRIVATE_FN_IDENTITY_GATE_DIR:-$(mktemp -d /tmp/sounio-madaros-private-fn-identity.XXXXXX)}"
@@ -265,10 +267,17 @@ echo "$TAG PASS(capacity): 70 colliding private fns per module, none left behind
 expect_refusal() {
   local label="$1" src="$2" want="$3" want2="${4:-}"
   local log="$WORK/$label.log" elf="$WORK/$label.elf"
-  if "$RAW" --native-compile "$src" -o "$elf" >"$log" 2>&1; then
+  local rc=0
+  "$RAW" --native-compile "$src" -o "$elf" >"$log" 2>&1 || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
     tail -n 25 "$log" >&2 || true
     fail "$label: compiled, but the collision cannot be resolved (a known-wrong executable)"
   fi
+  # rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+  sounio_expect_failed_exit "$rc" "$log" || {
+    tail -n 25 "$log" >&2 || true
+    fail "$label: not a clean refusal: $(sounio_refusal_reason)"
+  }
   grep -Fq -- "$want" "$log" || {
     tail -n 25 "$log" >&2 || true
     fail "$label: refused, but without the expected diagnostic ($want)"

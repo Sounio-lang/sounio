@@ -31,6 +31,18 @@ Repository facts and executable scripts override stale documentation when they d
 
 ---
 
+## Defects: fix, don't file
+
+A defect you find while working is fixed in the same change, with a test that fails before the fix and passes after it. Open an issue only when one of these holds, and say which:
+
+1. the fix needs a maintainer decision (language semantics, public API, or a choice between legitimate alternatives);
+2. the fix clearly exceeds the scope of the task;
+3. you cannot write to the repository that holds the defect.
+
+The issue must localise the cause (file and function) and include the discriminating test: a minimal program with expected and actual output. Symptom-only issues, and issues for defects you could have fixed, are not filed. Search the open issues first and extend an existing one rather than opening a duplicate. Same rule as `CLAUDE.md` §6.
+
+---
+
 ## Writing Sounio
 
 Sounio is not Rust. Read `CLAUDE.md` §7 before writing any `.sio` file, and [`docs/guide/LLM_PROGRAMMING_GUIDE.md`](docs/guide/LLM_PROGRAMMING_GUIDE.md) for the full reference. After every edit, run `./bin/souc check <file>`: compilation is the test of existence, and `souc run` on a library file is a category error.

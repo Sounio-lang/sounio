@@ -2,8 +2,8 @@
 topic_id: repo.docs.guide.installation
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.installation
 -->
 
@@ -30,7 +30,11 @@ This guide covers all installation scenarios for the Sounio compiler, from basic
 
 ## Quick Start
 
-The compiler ships **prebuilt** in `bin/`. No build step is needed to use it.
+The committed prebuilt in `bin/` is for Linux x86-64. Apple Silicon has a
+separate current-source native ARM64 route; follow the
+[macOS ARM64 guide](../compiler/MADAROS_MACOS_ARM64.md) to build and install
+that artifact before using `bin/souc` on a Mac. The smoke-test command below
+uses the committed Linux prebuilt.
 
 ```bash
 # Clone the repository
@@ -39,7 +43,7 @@ cd sounio
 
 # bin/souc routes to the self-hosted Madaros engine (no Rust/cargo needed)
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"   # required when running from outside the repo root
-./bin/souc --version                        # -> Madaros v0.80.0 (an un-rebuilt checkout may still print "Madares")
+./bin/souc --version                        # Madaros version
 ./bin/souc run examples/hello.sio           # smoke test -> "Hello, Sounio"
 ```
 

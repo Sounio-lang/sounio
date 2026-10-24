@@ -70,6 +70,10 @@ pub struct SteadyStateReport {
     pub c_max_per_dose:    [f64; 32],
     pub c_trough_per_dose: [f64; 32],
     pub auc_tau_per_dose:  [f64; 32],
+    // Whole-blood counterparts (total, not unbound): sirolimus is monitored
+    // in whole blood, so clinical comparisons use these (#2816).
+    pub c_max_blood_per_dose:   [f64; 32],
+    pub auc_tau_blood_per_dose: [f64; 32],
 }
 
 fn ssr_zero() -> SteadyStateReport {
@@ -86,6 +90,8 @@ fn ssr_zero() -> SteadyStateReport {
         c_max_per_dose:    [0.0; 32],
         c_trough_per_dose: [0.0; 32],
         auc_tau_per_dose:  [0.0; 32],
+        c_max_blood_per_dose:   [0.0; 32],
+        auc_tau_blood_per_dose: [0.0; 32],
     }
 }
 
@@ -130,9 +136,13 @@ fn ssr_run_one_interval(
     var abs_st = abs_init
 
     let checkpoints = ssr_make_checkpoints(tau_h)
+    // PBPKState14.blood is whole blood; the BBB driver, the plasma series and
+    // the unbound plasma AUC are plasma, C_plasma = C_blood / rb_ratio (#2816).
+    let rb = sys_prm.rb_ratio
 
     trace.times_h[0]  = 0.0
-    trace.plasma[0]   = sys_st.blood
+    trace.plasma[0]   = sys_st.blood / rb
+    trace.blood[0]    = sys_st.blood
     trace.isf_u[0]    = bbb_prm.fu_isf * bbb_st.c_isf
     trace.icf_u[0]    = bbb_prm.fu_icf * bbb_st.c_icf
     trace.a_gut[0]    = abs_st.a_gut
@@ -142,12 +152,9 @@ fn ssr_run_one_interval(
     var dt_sys = cfg.dt_init
 
     // Per-interval AUCs, accumulated at solver resolution.
-    // auc_p integrates PBPKState14.blood, a WHOLE-BLOOD concentration
-    // (pbpk_ode's plasma is blood / rb_ratio). The BBB driver below and
-    // trace.plasma / auc_plasma_u use the same whole-blood value, so they are
-    // off from true plasma by rb_ratio (0.58 mean, 36 full-Vd). Converting
-    // changes dissertation BBB and PD numbers and awaits an operator
-    // decision: docs/audit/DARWIN_PBPK_BLOOD_AS_PLASMA_BBB_DRIVER_2026-09-26.md.
+    // auc_p integrates PBPKState14.blood, a WHOLE-BLOOD concentration; the
+    // unbound plasma AUC is fu_plasma * auc_p / rb_ratio (rb_ratio is a
+    // constant, so dividing the integral equals integrating blood / rb).
     var auc_p: f64 = 0.0
     var auc_i: f64 = 0.0
     var auc_c: f64 = 0.0
@@ -163,7 +170,7 @@ fn ssr_run_one_interval(
         let idx = point_i as usize
         let target = checkpoints[idx]
         let t_prev = t
-        let c_prev = sys_st.blood
+        let c_prev = sys_st.blood / rb
 
         while t < target && nsteps < cfg.max_steps {
             let dt_use = if t + dt_sys > target { target - t } else { dt_sys }
@@ -202,7 +209,7 @@ fn ssr_run_one_interval(
             return SSIntervalResult { trace: trace, sys_st: sys_st, bbb_st: bbb_st, abs_st: abs_st }
         }
 
-        let c_now = sys_st.blood
+        let c_now = sys_st.blood / rb
         var t_bbb = t_prev
         while t_bbb < target {
             let dt_use_bbb = if t_bbb + bbb_dt > target { target - t_bbb } else { bbb_dt }
@@ -218,6 +225,7 @@ fn ssr_run_one_interval(
 
         trace.times_h[idx]  = target
         trace.plasma[idx]   = c_now
+        trace.blood[idx]    = sys_st.blood
         trace.isf_u[idx]    = bbb_prm.fu_isf * bbb_st.c_isf
         trace.icf_u[idx]    = bbb_prm.fu_icf * bbb_st.c_icf
         trace.a_gut[idx]    = abs_st.a_gut
@@ -226,8 +234,8 @@ fn ssr_run_one_interval(
         point_i = point_i + 1
     }
 
-    // fu_plasma * AUC(whole blood): see the blood-as-plasma note at auc_p.
-    trace.auc_plasma_u = bbb_prm.fu_plasma * auc_p
+    trace.auc_blood    = auc_p
+    trace.auc_plasma_u = bbb_prm.fu_plasma * auc_p / rb
     trace.auc_isf_u    = auc_i
     trace.auc_icf_u    = auc_c
     trace.kpuu_auc     = if trace.auc_plasma_u > 0.0 { auc_i / trace.auc_plasma_u } else { 0.0 }
@@ -313,6 +321,14 @@ pub fn run_oral_multidose_cfg(
         report.c_max_per_dose[d_idx]    = cmax
         report.c_trough_per_dose[d_idx] = ctrough
         report.auc_tau_per_dose[d_idx]  = tr.auc_plasma_u
+        var cmax_b: f64 = 0.0
+        var kb: i32 = 0
+        while kb < 16 {
+            if tr.blood[kb as usize] > cmax_b { cmax_b = tr.blood[kb as usize] }
+            kb = kb + 1
+        }
+        report.c_max_blood_per_dose[d_idx]   = cmax_b
+        report.auc_tau_blood_per_dose[d_idx] = tr.auc_blood
 
         // Steady-state detection: streak of `ss_consec` consecutive
         // intervals with |ΔAUC|/AUC < ss_thresh, starting at ss_min_dose.
