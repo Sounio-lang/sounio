@@ -1,5 +1,9 @@
 # SIO-165: checked classical and relativistic uncertainty
 
+This file records the first independent-input increment (commit 588a9d4).
+[Declared covariance-factor adapters](FACTOR_ADAPTERS.md) extend that contract
+on the same PR; the first gate05 receipts below remain unchanged.
+
 Base: `origin/main` at `a2a44df195bb8caf3fb07cbc9517275b29325e94`.
 Implementation branch: `devpass/SIO-165-physics-uncertainty`.
 
@@ -14,7 +18,7 @@ The coupled energy/momentum APIs additionally return their output covariance.
 ## Contract and public interfaces
 
 Every `*_checked` scalar returns `PhysicsScalarResult` with `status`, `value`,
-`standard_uncertainty`, `uncertainty_model=1`, and `first_order=true`. Model1
+`standard_uncertainty`, `uncertainty_model=1`, and `first_order=true`. Model 1
 means supplied independent standard uncertainties and a first-order Jacobian.
 Neither tag certifies input independence or adequacy of the local linearization.
 The pair result adds two values, their standard uncertainties, and a symmetric
@@ -40,17 +44,17 @@ Unavailable results clear all numerical payloads to zero. Scalar nominal
 underflow may round to zero; a nonzero weighted uncertainty term that would
 silently disappear is declined. Pair covariance additionally requires its
 variances and individual cross-products to be representable. These checks are
-conservative: status4 does not claim the exact mathematical result is impossible
+conservative: status 4 does not claim the exact mathematical result is impossible
 to represent using every possible alternative algorithm.
 
 The classical mass must be nonnegative and dimensions must match. SR velocities
 satisfy `abs(v)<c`, with exact `c=299792458 m/s`. Invariant mass requires a strictly
 timelike future-directed 1D momentum; the light cone has a singular mass
-Jacobian and returns status2. Input uncertainties are finite and nonnegative.
+Jacobian and returns status 2. Input uncertainties are finite and nonnegative.
 Position propagation treats the supplied time as exact.
 
 Legacy Quantity/tuple/FourMomentum result layouts remain available. These
-functions call checked implementations and assert status0, so callers must now
+functions call checked implementations and assert status 0, so callers must now
 admit `Mut, Div, Panic`. Invalid inputs no longer produce a plausible zero tuple.
 The `invariant_mass_from_4p` nominal result is corrected from the old extra factor
 of c. `compton_shift` continues using its existing validated scattering kernel.
@@ -64,7 +68,7 @@ coverage intervals, covariance inputs, or multidimensional SR tensors.
 ## Numerical implementation
 
 `physics::uncertainty` reuses the actual public `physics::lorentz` scalar/vector
-kernels for balanced triple products, compensated three-term sums, and scaled
+kernels for balanced triple products, ordered scaled three-term sums, and scaled
 four-term norms. `lorentz.sio` is unchanged. Gamma preserves the representable
 SI gap using `c/sqrt((c-abs(v))*(c+abs(v)))`. Velocity addition forms its positive
 denominator as a factored sum, avoiding cancellation for opposite near-c inputs.
@@ -78,7 +82,7 @@ independent inputs `(m1,v1,m2,v2)` and preserves the induced E/p cross-covarianc
 
 ## Native evidence and practical limits
 
-Final job **17117**, Slurm `cpu-ops`, UID1000, stack limit524288 KiB:
+Final job **17117**, Slurm `cpu-ops`, UID1000, stack limit 524288 KiB:
 `/scratch/sounio-stdlib-inference-scale-20261024/SIO165/gate05`.
 The gate records **42 passing phase checks** in `gate05/RESULTS.tsv`:
 
@@ -87,7 +91,7 @@ The gate records **42 passing phase checks** in `gate05/RESULTS.tsv`:
 - C++23 independent analytic reference using Boost Decimal400 and exact binary64
   input reconstruction: 20 scalar cases, five pair cases, and eight legacy rows.
   Pair comparisons include both standard uncertainties and all four covariance
-  entries. Relative tolerance is5e-13 plus eight binary64 minimum subnormals.
+  entries. Relative tolerance is 5e-13 plus eight binary64 minimum subnormals.
 - Thirteen checked-unavailable cases verify status and cleared payloads, including
   NaN, infinity, c, negative uncertainty/mass, light cone, dimensions, and overflow.
 - Four oracle controls reject altered output and missing rows in both modes.
@@ -96,12 +100,12 @@ The gate records **42 passing phase checks** in `gate05/RESULTS.tsv`:
 
 The bounded fixture covers zero-nominal sensitivities, signed velocity, the
 nearest representable speed below c, opposite near-c velocities, large norms
-whose naive squared contributions overflow, compensated cancellation, and an
+whose naive squared contributions overflow, ordered cancellation, and an
 invariant-mass input with `E/c=1e308` and `p=5e307`.
 
-All five native programs fit the gate's10-second and128-MiB acceptance bounds.
-The checked fixture used1080 KiB maximum RSS and legacy fixture1628 KiB. Both
-elapsed readings were0.00 seconds at the timer's resolution; this is a bounded
+All five native programs fit the gate's 10-second and 128-MiB acceptance bounds.
+The checked fixture used 1080 KiB maximum RSS and legacy fixture 1628 KiB. Both
+elapsed readings were 0.00 seconds at the timer's resolution; this is a bounded
 regression measurement and does not establish a speedup. Final gate output is
 5.1 MiB, excluding the shared compiler and source staging directories.
 
@@ -115,12 +119,12 @@ this Git evidence directory contains small receipts and stdout, without ELFs.
 
 ## Failing-before witness, separated from compiler initialization
 
-Job17099 against unmodified SR source passed compilation but its imported module
+Job 17099 against unmodified SR source passed compilation but its imported module
 constant `C=speed_of_light_approx()` produced zero-gamma/NaN outputs under d74.
 The original comparison-only fixture incorrectly accepted NaN. Those first
 attempts remain preserved as `base02`; they are not numerical Jacobian evidence.
 
-Job17104's explicit-c control (`base03`) retains the original SR production
+Job 17104's explicit-c control (`base03`) retains the original SR production
 functions with exactly one operational substitution:
 
 ```diff
@@ -128,10 +132,10 @@ functions with exactly one operational substitution:
 +let C: f64 = 299792458.0;
 ```
 
-Its real imported gamma and four-momentum functions check0/compile0, then the
-same native witness exits1. The negative gamma uncertainty bit pattern is
+Its real imported gamma and four-momentum functions check 0 / compile 0, then the
+same native witness exits 1. The negative gamma uncertainty bit pattern is
 `-4660324894402989261`, and invariant mass bits are`4852146588476102301` for
-`E=c*c,p=0`. The corrected production import (`after03`) check0/compile0/exits0,
+`E=c*c,p=0`. The corrected production import (`after03`) check 0 / compile 0 / exit 0,
 with positive uncertainty bits`4563047142451786550` and mass bits
 `4607182418800017404`, then prints`SR_BASELINE_PASS`. Final gate05 additionally
 uses the independent C++ reference rather than comparison-only acceptance.
@@ -157,7 +161,7 @@ bash scripts/stdlib/physics_uncertainty_gate.sh
 ```
 
 Do not include shipped `bin/*gz` in new staging packets: the resolver may
-materialize an unused125-MB shipped compiler even with an explicit compiler
+materialize an unused 125-MB shipped compiler even with an explicit compiler
 override. Historical snapshots are retained unchanged. No quota was altered and
 no source snapshot, compiler receipt, or other lane's artifact was removed.
 

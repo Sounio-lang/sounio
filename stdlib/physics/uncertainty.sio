@@ -2,6 +2,7 @@
 // products and scaled norms of physics::lorentz. No input independence or
 // local linearization validity is inferred from a numerical status0.
 use math::pure::{is_finite,sqrt}
+use math::dd64::{two_sum,two_prod}
 use physics::lorentz::{lorentz_force_independent,lorentz_force_scalar_independent}
 pub struct PhysicsScalarResult {pub status:i64,pub value:f64,pub standard_uncertainty:f64,pub uncertainty_model:i64,pub first_order:bool}
 pub struct PhysicsPairResult {pub status:i64,pub values:[f64;2],pub covariance:[f64;4],pub standard_uncertainties:[f64;2],pub uncertainty_model:i64,pub first_order:bool}
@@ -75,4 +76,123 @@ pub fn physics_gamma_checked(v:f64,uv:f64)->PhysicsScalarResult with Mut,Div,Pan
  let hv=physics_product3(cube.value/(c*c),v,uv,true)
  if hv.status!=0 {return physics_scalar_unavailable(4)}
  physics_scalar(g,hv.value,0.0,0.0,0.0)
+}
+
+// Declared covariance factors: Sigma=L L^T. L is signed row-major and may be
+// rank deficient or nontriangular. Model2 never infers input independence.
+pub struct PhysicsFactorRow {pub status:i64,pub weights:[f64;3]}
+pub fn physics_factor_unavailable(status:i64)->PhysicsScalarResult {PhysicsScalarResult{status:status,value:0.0,standard_uncertainty:0.0,uncertainty_model:2,first_order:true}}
+pub fn physics_factor_pair_unavailable(status:i64)->PhysicsPairResult {PhysicsPairResult{status:status,values:[0.0;2],covariance:[0.0;4],standard_uncertainties:[0.0;2],uncertainty_model:2,first_order:true}}
+pub fn physics_factor_validate(factor:&[f64;9])->i64 with Mut,Div,Panic {
+ var index:i64=0
+ while index<9 {if !is_finite(factor[index]) {return 1} index=index+1}
+ 0
+}
+pub fn physics_factor_expand2(factor:&[f64;4])->[f64;9] with Panic {[factor[0],factor[1],0.0,factor[2],factor[3],0.0,0.0,0.0,0.0]}
+// Each Jacobian coefficient is represented as a product of two factors so
+// J_ij need not be materialized before multiplication by its covariance factor.
+// Exact expansion accumulation for bounded products, using the canonical EFTs.
+// Bounds keep every split/product/residual normal and avoid split overflow.
+fn physics_factor_eft_eligible(jac:&[f64;6],factor:&[f64;9],col:i64)->bool with Mut,Div,Panic {
+ var row:i64=0
+ while row<3 {
+  let a=jac[2*row];let b=jac[2*row+1];let c=factor[3*row+col]
+  if a!=0.0 && b!=0.0 && c!=0.0 {
+   let aa=physics_abs(a);let ab=physics_abs(b);let ac=physics_abs(c)
+   if aa<1e-50 || aa>1e50 || ab<1e-50 || ab>1e50 || ac<1e-50 || ac>1e50 {return false}
+  }
+  row=row+1
+ }
+ true
+}
+fn physics_factor_eft_column(jac:&[f64;6],factor:&[f64;9],col:i64)->PhysicsNumber with Mut,Div,Panic {
+ var terms:[f64;12]=[0.0;12]
+ var row:i64=0
+ while row<3 {
+  let a=jac[2*row];let b=jac[2*row+1];let c=factor[3*row+col]
+  if a!=0.0 && b!=0.0 && c!=0.0 {
+   let p=two_prod(a,b)
+   let q=two_prod(p.hi,c)
+   let r=two_prod(p.lo,c)
+   terms[4*row]=q.hi;terms[4*row+1]=q.lo;terms[4*row+2]=r.hi;terms[4*row+3]=r.lo
+  }
+  row=row+1
+ }
+ var expansion:[f64;12]=[0.0;12]
+ var count:i64=0
+ var term:i64=0
+ while term<12 {
+  var q=terms[term]
+  var work:[f64;12]=[0.0;12]
+  var next:i64=0
+  var i:i64=0
+  while i<count {
+   let r=two_sum(q,expansion[i])
+   if r.lo!=0.0 {work[next]=r.lo;next=next+1}
+   q=r.hi;i=i+1
+  }
+  if q!=0.0 || next==0 {work[next]=q;next=next+1}
+  expansion=work;count=next;term=term+1
+ }
+ var value:f64=0.0
+ var i:i64=0
+ while i<count {value=value+expansion[i];i=i+1}
+ if !is_finite(value) {return PhysicsNumber{status:4,value:0.0}}
+ PhysicsNumber{status:0,value:value}
+}
+fn physics_factor_column(jac:&[f64;6],factor:&[f64;9],col:i64)->PhysicsNumber with Mut,Div,Panic {
+ if physics_factor_eft_eligible(jac,factor,col) {return physics_factor_eft_column(jac,factor,col)}
+ let a=physics_product3(jac[0],jac[1],factor[col],true)
+ let b=physics_product3(jac[2],jac[3],factor[3+col],true)
+ let c=physics_product3(jac[4],jac[5],factor[6+col],true)
+ if a.status!=0 || b.status!=0 || c.status!=0 {return PhysicsNumber{status:4,value:0.0}}
+ let sum=physics_sum3(a.value,b.value,c.value)
+ if sum.status!=0 {return sum}
+ let positive=a.value>0.0 || b.value>0.0 || c.value>0.0
+ let negative=a.value<0.0 || b.value<0.0 || c.value<0.0
+ var largest=physics_abs(a.value)
+ if physics_abs(b.value)>largest {largest=physics_abs(b.value)}
+ if physics_abs(c.value)>largest {largest=physics_abs(c.value)}
+ // The wide-exponent fallback declines strong cancellation instead of
+ // presenting a dot product of rounded monomials as a resolved residual.
+ if positive && negative && physics_abs(sum.value)<0.125*largest {return PhysicsNumber{status:4,value:0.0}}
+ sum
+}
+pub fn physics_factor_row(jac:&[f64;6],factor:&[f64;9])->PhysicsFactorRow with Mut,Div,Panic {
+ let status=physics_factor_validate(factor)
+ if status!=0 {return PhysicsFactorRow{status:status,weights:[0.0;3]}}
+ var i:i64=0
+ while i<6 {if !is_finite(jac[i]) {return PhysicsFactorRow{status:4,weights:[0.0;3]}} i=i+1}
+ var weights:[f64;3]=[0.0;3]
+ var col:i64=0
+ while col<3 {
+  let sum=physics_factor_column(jac,factor,col)
+  if sum.status!=0 {return PhysicsFactorRow{status:4,weights:[0.0;3]}}
+  weights[col]=sum.value
+  col=col+1
+ }
+ PhysicsFactorRow{status:0,weights:weights}
+}
+pub fn physics_factor_scalar(value:f64,jac:&[f64;6],factor:&[f64;9])->PhysicsScalarResult with Mut,Div,Panic {
+ let row=physics_factor_row(jac,factor)
+ if row.status!=0 {return physics_factor_unavailable(row.status)}
+ let r=physics_scalar(value,row.weights[0],row.weights[1],row.weights[2],0.0)
+ PhysicsScalarResult{status:r.status,value:r.value,standard_uncertainty:r.standard_uncertainty,uncertainty_model:2,first_order:true}
+}
+pub fn physics_factor_pair(values:&[f64;2],jac:&[f64;12],factor:&[f64;9])->PhysicsPairResult with Mut,Div,Panic {
+ let j0=[jac[0],jac[1],jac[2],jac[3],jac[4],jac[5]]
+ let j1=[jac[6],jac[7],jac[8],jac[9],jac[10],jac[11]]
+ let r0=physics_factor_row(&j0,factor)
+ let r1=physics_factor_row(&j1,factor)
+ if r0.status!=0 {return physics_factor_pair_unavailable(r0.status)}
+ if r1.status!=0 {return physics_factor_pair_unavailable(r1.status)}
+ let h=[r0.weights[0],r0.weights[1],r0.weights[2],0.0,r1.weights[0],r1.weights[1],r1.weights[2],0.0]
+ let r=physics_pair(values,&h)
+ if r.status!=0 {return physics_factor_pair_unavailable(r.status)}
+ let cj=[h[0],1.0,h[1],1.0,h[2],1.0]
+ let cf=[h[4],0.0,0.0,h[5],0.0,0.0,h[6],0.0,0.0]
+ let cross=physics_factor_column(&cj,&cf,0)
+ if cross.status!=0 {return physics_factor_pair_unavailable(cross.status)}
+ let covariance=[r.covariance[0],cross.value,cross.value,r.covariance[3]]
+ PhysicsPairResult{status:0,values:r.values,covariance:covariance,standard_uncertainties:r.standard_uncertainties,uncertainty_model:2,first_order:true}
 }

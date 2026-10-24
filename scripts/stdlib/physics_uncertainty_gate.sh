@@ -13,7 +13,7 @@ export SOUNIO_MADAROS_NOCACHE=1 SOUNIO_MADAROS_CACHE_READONLY=1
 ulimit -s 524288
 sha256sum "$MADAROS_RAW_BIN" > "$out/COMPILER.sha256"
 find stdlib/physics stdlib/units stdlib/math stdlib/epistemic stdlib/constants -type f -print0 | sort -z | xargs -0 sha256sum > "$out/INPUTS.sha256"
-sha256sum tests/run-pass/physics_uncertainty_{checked,legacy}.sio tests/reference/physics_uncertainty_reference.cpp scripts/stdlib/physics_uncertainty_gate.sh > "$out/GATE.sha256"
+sha256sum tests/run-pass/physics_uncertainty_{checked,legacy,factor}.sio tests/reference/physics_uncertainty_reference.cpp scripts/stdlib/physics_uncertainty_gate.sh > "$out/GATE.sha256"
 g++ --version > "$out/CXX_TOOLCHAIN.txt"
 printf 'phase\tfixture\texit_status\n' > "$out/RESULTS.tsv"
 record() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$out/RESULTS.tsv"; }
@@ -38,16 +38,17 @@ native() {
 }
 native tests/run-pass/physics_uncertainty_checked.sio checked PHYSICS_UNCERTAINTY_CHECKED_PASS
 native tests/run-pass/physics_uncertainty_legacy.sio legacy PHYSICS_UNCERTAINTY_LEGACY_PASS
+native tests/run-pass/physics_uncertainty_factor.sio factor PHYSICS_COVARIANCE_FACTOR_PASS
 native stdlib/physics/classical.sio classical 'CLASSICAL E2E REAL ALL PASS'
 native stdlib/physics/sr.sio sr 'SR CHECKED ALL PASS'
 native tests/run-pass/physics_sr_compton.sio compton 'PHYSICS_SR_COMPTON_PASS'
 timeout 180 g++ -std=c++23 -O2 -Wall -Wextra -Werror tests/reference/physics_uncertainty_reference.cpp -o "$out/reference" > "$out/reference.compile.txt" 2>&1
 record cpp-compile reference 0
-for mode in checked legacy;do
+for mode in checked legacy factor;do
  timeout 30 "$out/reference" "$mode" "$out/$mode.stdout" > "$out/$mode.reference.stdout" 2> "$out/$mode.reference.stderr"
  record concordance "$mode" 0
  # Both a plausible corrupted result and missing rows must be rejected.
- sed '0,/^PHYSICS_\(SCALAR\|LEGACY\) 0 /s/^PHYSICS_SCALAR 0 0 0 /PHYSICS_SCALAR 0 0 4607182418800017408 /;0,/^PHYSICS_LEGACY 0 /s/^PHYSICS_LEGACY 0 0 /PHYSICS_LEGACY 0 4607182418800017408 /' "$out/$mode.stdout" > "$out/$mode.corrupt.stdout"
+ awk 'BEGIN{done=0} $1=="PHYSICS_SCALAR" && $2==0 && !done {$4="4607182418800017408";done=1} $1=="PHYSICS_LEGACY" && $2==0 && !done {$3="4607182418800017408";done=1} {print}' "$out/$mode.stdout" > "$out/$mode.corrupt.stdout"
  sed '/^PHYSICS_\(SCALAR\|LEGACY\) 0 /d' "$out/$mode.stdout" > "$out/$mode.missing.stdout"
  for control in corrupt missing;do
   rc=0;timeout 30 "$out/reference" "$mode" "$out/$mode.$control.stdout" > "$out/$mode.$control.reference.stdout" 2> "$out/$mode.$control.reference.stderr" || rc=$?
