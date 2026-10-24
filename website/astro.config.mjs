@@ -72,7 +72,7 @@ export default defineConfig({
       filter: (page) => {
         const url = new URL(page);
         const path = url.pathname;
-        return !path.match(/^\/(pt\/|el\/|zh\/|ja\/|es\/|zh-hk\/)?(docs|showcases|blog)(\/|$)/);
+        return !path.match(/^\/(pt\/|el\/|zh\/|ja\/|es\/|zh-hk\/)?(docs|showcases|blog|changelog|registry)(\/|$)/);
       },
     }),
     mdx({
