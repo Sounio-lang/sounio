@@ -356,16 +356,25 @@ fn ll_cpu_proj(x: &CpuBuf, w: &CpuBuf, out: &!CpuBuf, rows: i64, outd: i64, ind:
 // before the return. Cache grows by ntok.
 pub fn llama_forward(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64) -> CpuBuf with Alloc, Mut, Panic, Div {
     let rt = ll_no_rt()
-    ll_forward_impl(m, kv, tokens, ntok, &rt, false)
+    var sink = CpuBuf { data: 0 as *mut f64, len: 0 }
+    ll_forward_impl(m, kv, tokens, ntok, &rt, false, false, &!sink)
+}
+
+// Same as llama_forward, and writes the final RMSNorm vector (the
+// frozen head's input) into ln_out, which must hold `hidden` values.
+pub fn llama_forward_ln(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, ln_out: &!CpuBuf) -> CpuBuf with Alloc, Mut, Panic, Div {
+    let rt = ll_no_rt()
+    ll_forward_impl(m, kv, tokens, ntok, &rt, false, true, ln_out)
 }
 
 // Same forward with projections routed to the hetero runtime (GPU
 // prefill; decode rows < 16 stay on CPU inside rt_gemm_rect).
 pub fn llama_forward_rt(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Runtime) -> CpuBuf with Alloc, Mut, Panic, Div {
-    ll_forward_impl(m, kv, tokens, ntok, rt, true)
+    var sink = CpuBuf { data: 0 as *mut f64, len: 0 }
+    ll_forward_impl(m, kv, tokens, ntok, rt, true, false, &!sink)
 }
 
-fn ll_forward_impl(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Runtime, use_gpu: bool) -> CpuBuf with Alloc, Mut, Panic, Div {
+fn ll_forward_impl(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Runtime, use_gpu: bool, keep_ln: bool, ln_out: &!CpuBuf) -> CpuBuf with Alloc, Mut, Panic, Div {
     let hidden = m.cfg.hidden
     let inter = m.cfg.inter
     let dh = m.cfg.head_dim
@@ -509,6 +518,13 @@ fn ll_forward_impl(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Ru
     ck_free(&x)
     let ln = ll_rmsnorm(&last, &m.final_norm, 1, hidden, m.cfg.eps)
     ck_free(&last)
+    if keep_ln {
+        var jc: i64 = 0
+        while jc < hidden {
+            ck_set(ln_out, jc, read_f64(ln.data, jc))
+            jc = jc + 1
+        }
+    }
     var logits = ck_alloc(m.cfg.vocab)
     ck_gemv(&m.lm_head_t, &ln, &!logits, hidden, m.cfg.vocab)
     ck_free(&ln)
