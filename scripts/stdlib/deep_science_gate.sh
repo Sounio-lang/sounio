@@ -110,6 +110,15 @@ for src in tests/reference/deep_*.cpp; do
           [[ "$rc" == "$expected" ]] || verified=1
           record oracle-control "$stem:$mode:expected=$expected:actual=$rc" "$verified"
         done ;;
+      deep_stats_count_profile_bootstrap_reference)
+        compare "$stem" stdlib_deep_stats_count_profile_bootstrap
+        rc=0
+        timeout 180 "$out/$stem" --mutant-fixed-alpha "$out/stdlib_deep_stats_count_profile_bootstrap.stdout" > "$out/$stem.fixed-mutant.stdout" 2> "$out/$stem.fixed-mutant.stderr" || rc=$?
+        rejected=1
+        [[ "$rc" != 2 ]] || rejected=0
+        record mutant-rejection "$stem:fixed-alpha:expected=2:actual=$rc" "$rejected" ;;
+      deep_stats_dynamic_robust_reference) compare "$stem" stdlib_deep_stats_dynamic_robust ;;
+      deep_stats_dynamic_robust_contrast_reference) compare "$stem" stdlib_deep_stats_dynamic_robust_contrast ;;
       deep_stats_dispersion_profile_reference) compare "$stem" stdlib_deep_stats_dispersion_profile ;;
       deep_summaries_reference) compare "$stem" stdlib_deep_summaries ;;
       deep_qr_factor_reference) compare "$stem" stdlib_deep_qr_factor ;;
