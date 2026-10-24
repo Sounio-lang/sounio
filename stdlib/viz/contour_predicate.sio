@@ -1,0 +1,76 @@
+use math::pure::{is_finite}
+pub struct ContourSign {pub status:i64,pub sign:i64}
+struct ContourDyadic {sig:i64,exponent:i64,sign:i64}
+fn contour_dyadic(value:f64)->ContourDyadic with Mut,Div {
+ if value==0.0 {return ContourDyadic{sig:0,exponent:0,sign:0}}
+ var v=if value<0.0 {-value}else{value}
+ var exponent:i64=0
+ while v>=2.0 {v=v/2.0;exponent=exponent+1}
+ while v<1.0 {v=v*2.0;exponent=exponent-1}
+ ContourDyadic{sig:(v*4503599627370496.0) as i64,exponent:exponent-52,sign:if value<0.0 {-1}else{1}}
+}
+fn contour_product(a:&ContourDyadic,b:&ContourDyadic,coefficient:i64,positive:&![i64;180],negative:&![i64;180]) with Mut,Div,Panic {
+ if a.sig==0 || b.sig==0 {return}
+ let radix:i64=16777216
+ let aa:[i64;3]=[a.sig%radix,(a.sig/radix)%radix,a.sig/281474976710656]
+ let bb:[i64;3]=[b.sig%radix,(b.sig/radix)%radix,b.sig/281474976710656]
+ var product:[i64;6]=[0;6]
+ var i:i64=0
+ while i<3 {
+  var j:i64=0
+  while j<3 {product[(i+j) as usize]=product[(i+j) as usize]+aa[i as usize]*bb[j as usize];j=j+1}
+  i=i+1
+ }
+ i=0
+ while i<5 {let carry=product[i as usize]/radix;product[i as usize]=product[i as usize]%radix;product[(i+1) as usize]=product[(i+1) as usize]+carry;i=i+1}
+ let shift=a.exponent+b.exponent+2252
+ let offset=shift/24
+ let remainder=shift%24
+ var factor:i64=1
+ i=0
+ while i<remainder {factor=factor*2;i=i+1}
+ let sign=a.sign*b.sign*coefficient
+ i=0
+ while i<6 {
+  let digit=product[i as usize]
+  if digit!=0 {
+   let scaled=digit*factor
+   let index=offset+i
+   assert(index>=0 && index<180)
+   if sign>0 {positive[index as usize]=positive[index as usize]+scaled%radix}else{negative[index as usize]=negative[index as usize]+scaled%radix}
+   let high=scaled/radix
+   if high!=0 {
+    assert(index+1<180)
+    if sign>0 {positive[(index+1) as usize]=positive[(index+1) as usize]+high}else{negative[(index+1) as usize]=negative[(index+1) as usize]+high}
+   }
+  }
+  i=i+1
+ }
+}
+// Exact sign of (a-level)(c-level)-(b-level)(d-level) for finite f64 inputs.
+// a,b,c,d follow bottom-left,bottom-right,top-right,top-left ordering.
+pub fn contour_saddle_sign(a:f64,b:f64,c:f64,d:f64,level:f64)->ContourSign with Mut,Div,Panic {
+ if !is_finite(a) || !is_finite(b) || !is_finite(c) || !is_finite(d) || !is_finite(level) {return ContourSign{status:1,sign:0}}
+ let aa=contour_dyadic(a);let bb=contour_dyadic(b);let cc=contour_dyadic(c);let dd=contour_dyadic(d);let ll=contour_dyadic(level)
+ var positive:[i64;180]=[0;180];var negative:[i64;180]=[0;180]
+ contour_product(&aa,&cc,1,&!positive,&!negative)
+ contour_product(&bb,&dd,-1,&!positive,&!negative)
+ contour_product(&ll,&aa,-1,&!positive,&!negative)
+ contour_product(&ll,&cc,-1,&!positive,&!negative)
+ contour_product(&ll,&bb,1,&!positive,&!negative)
+ contour_product(&ll,&dd,1,&!positive,&!negative)
+ var i:i64=0
+ while i<179 {
+  let p=positive[i as usize]/16777216;let n=negative[i as usize]/16777216
+  positive[i as usize]=positive[i as usize]%16777216;negative[i as usize]=negative[i as usize]%16777216
+  positive[(i+1) as usize]=positive[(i+1) as usize]+p;negative[(i+1) as usize]=negative[(i+1) as usize]+n
+  i=i+1
+ }
+ i=179
+ while i>=0 {
+  if positive[i as usize]>negative[i as usize] {return ContourSign{status:0,sign:1}}
+  if positive[i as usize]<negative[i as usize] {return ContourSign{status:0,sign:-1}}
+  i=i-1
+ }
+ ContourSign{status:0,sign:0}
+}

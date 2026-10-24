@@ -1,0 +1,250 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: DEEP COUNT PROFILE BOOTSTRAP PASS
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_at,numeric_buffer_set,numeric_buffer_close,numeric_matrix}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+use stats::regression::dynamic_count_profile_bootstrap::{CountProfileBootstrapOptions,dynamic_count_profile_bootstrap_workspace,dynamic_count_profile_lrt_bootstrap}
+use stats::checked_count_sampling::{count_rng}
+use math::pure::{ln_checked}
+use random::pcg64_core::{pcg_step_into}
+use io::sci_print::{println_f64_sci}
+fn bootstrap_case(model:i64,variant:i64) with Alloc,IO,Mut,Div,Panic {
+ let n:i64=16
+ let p0:i64=1
+ let p1:i64=if model==1 {1}else{2}
+ let plan=dynamic_count_profile_bootstrap_workspace(n,p0,p1)
+ assert(plan.status==0)
+ var a0=numeric_buffer_new(n*p0,n*p0*8)
+ var a1=numeric_buffer_new(n*p1,n*p1*8)
+ let layout0=numeric_matrix(n*p0,n,p0,p0,1,0)
+ let layout1=numeric_matrix(n*p1,n,p1,p1,1,0)
+ var counts=integer_buffer_new(n,n*8)
+ var offsets0=numeric_buffer_new(n,n*8)
+ var offsets1=numeric_buffer_new(n,n*8)
+ var initial0=numeric_buffer_new(p0,p0*8)
+ var initial1=numeric_buffer_new(p1,p1*8)
+ var replicate=integer_buffer_new(n,n*8)
+ var generating=numeric_buffer_new(n,n*8)
+ var coefficients0=numeric_buffer_new(p0,p0*8)
+ var means0=numeric_buffer_new(n,n*8)
+ var eta0=numeric_buffer_new(n,n*8)
+ var weighted0=numeric_buffer_new(plan.null_design_elements,plan.null_design_elements*8)
+ var response0=numeric_buffer_new(n,n*8)
+ var step0=numeric_buffer_new(p0,p0*8)
+ var qr0=numeric_buffer_new(plan.null_qr_elements,plan.null_qr_elements*8)
+ var stage0=numeric_buffer_new(plan.null_stage_elements,plan.null_stage_elements*8)
+ var coefficients1=numeric_buffer_new(p1,p1*8)
+ var means1=numeric_buffer_new(n,n*8)
+ var eta1=numeric_buffer_new(n,n*8)
+ var weighted1=numeric_buffer_new(plan.alternative_design_elements,plan.alternative_design_elements*8)
+ var response1=numeric_buffer_new(n,n*8)
+ var step1=numeric_buffer_new(p1,p1*8)
+ var qr1=numeric_buffer_new(plan.alternative_qr_elements,plan.alternative_qr_elements*8)
+ var stage1=numeric_buffer_new(plan.alternative_stage_elements,plan.alternative_stage_elements*8)
+ var candidate_coefficients0=numeric_buffer_new(p0,p0*8)
+ var candidate_means0=numeric_buffer_new(n,n*8)
+ var candidate_eta0=numeric_buffer_new(n,n*8)
+ var best_coefficients0=numeric_buffer_new(p0,p0*8)
+ var best_means0=numeric_buffer_new(n,n*8)
+ var best_eta0=numeric_buffer_new(n,n*8)
+ var factor_r0=numeric_buffer_new(0,0)
+ var factor_scales0=numeric_buffer_new(0,0)
+ var permutation0=integer_buffer_new(0,0)
+ var candidate_coefficients1=numeric_buffer_new(p1,p1*8)
+ var candidate_means1=numeric_buffer_new(n,n*8)
+ var candidate_eta1=numeric_buffer_new(n,n*8)
+ var best_coefficients1=numeric_buffer_new(p1,p1*8)
+ var best_means1=numeric_buffer_new(n,n*8)
+ var best_eta1=numeric_buffer_new(n,n*8)
+ var factor_r1=numeric_buffer_new(0,0)
+ var factor_scales1=numeric_buffer_new(0,0)
+ var permutation1=integer_buffer_new(0,0)
+ let data:[i64;16]=[0,0,1,2,5,8,13,19,1,1,2,3,7,12,18,28]
+ let tiny=ln_checked(1e-20)
+ let wrong=ln_checked(10.0)
+ assert(tiny.status==0 && wrong.status==0)
+ var i:i64=0
+ while i<n {
+  integer_buffer_set(&!counts,i,data[i as usize])
+  numeric_buffer_set(&!a0,i,1.0)
+  var j:i64=0
+  while j<p1 {
+   let value=if p1==1 {1.0}else{if i/8==j {1.0}else{0.0}}
+   numeric_buffer_set(&!a1,i*p1+j,value)
+   j=j+1
+  }
+  if variant==5 {
+   if i==0 {
+    numeric_buffer_set(&!a0,0,0.0)
+    j=0
+    while j<p1 {numeric_buffer_set(&!a1,j,0.0);j=j+1}
+    numeric_buffer_set(&!offsets0,0,tiny.value)
+    numeric_buffer_set(&!offsets1,0,tiny.value)
+   }
+  }
+  if variant==7 {if i>=8 {numeric_buffer_set(&!offsets1,i,wrong.value)}}
+  i=i+1
+ }
+ if variant==6 {integer_buffer_set(&!counts,0,9007199254740993)}
+ if variant==10 {i=0;while i<n {integer_buffer_set(&!counts,i,6);i=i+1}}
+ let pooled=ln_checked(7.5)
+ assert(pooled.status==0)
+ numeric_buffer_set(&!initial0,0,pooled.value)
+ if p1==1 {numeric_buffer_set(&!initial1,0,pooled.value)}
+ else {
+  let group0=ln_checked(6.0)
+  let group1=ln_checked(9.0)
+  assert(group0.status==0 && group1.status==0)
+  numeric_buffer_set(&!initial1,0,group0.value)
+  numeric_buffer_set(&!initial1,1,group1.value)
+ }
+ var budget:i64=6
+ if variant==3 {budget=0}
+ if variant==8 {budget=3}
+ if variant==10 {budget=2}
+ var per_uniforms:i64=1000000
+ if variant==4 {per_uniforms=0}
+ let lower:f64=if variant==1 {2.0}else{-8.0}
+ let upper:f64=if variant==1 {3.0}else{5.0}
+ let options=CountProfileBootstrapOptions{replicates:2,rcond:0.0,
+ log_alpha_lower:lower,log_alpha_upper:upper,outer_tolerance:1e-7,max_outer_evaluations:120,
+ inner_iterations:100,inner_tolerance:1e-9,max_profile_attempts:budget,
+ max_uniforms_per_draw:per_uniforms,max_proposals_per_draw:1000000,
+ max_total_uniforms:1000000,max_total_proposals:1000000,
+ nesting_declared:true,model_declared:true,independence_declared:variant!=2}
+ let seed:i64=if model==0 {7}else{if model==1 {19}else{0}}
+ let initial_rng=count_rng(seed)
+ let initial_hi:i64=initial_rng.state_hi
+ let initial_lo:i64=initial_rng.state_lo
+ let initial_inc_hi:i64=initial_rng.inc_hi
+ let initial_inc_lo:i64=initial_rng.inc_lo
+ let result=dynamic_count_profile_lrt_bootstrap(&a0,&layout0,&offsets0,&initial0,&a1,&layout1,
+ &offsets1,&initial1,&counts,&options,initial_rng,&!replicate,&!generating,
+ &!coefficients0,&!means0,&!eta0,&!weighted0,&!response0,&!step0,&!qr0,&!stage0,
+ &!coefficients1,&!means1,&!eta1,&!weighted1,&!response1,&!step1,&!qr1,&!stage1,
+ &!candidate_coefficients0,&!candidate_means0,&!candidate_eta0,&!best_coefficients0,&!best_means0,&!best_eta0,&!factor_r0,&!factor_scales0,&!permutation0,
+ &!candidate_coefficients1,&!candidate_means1,&!candidate_eta1,&!best_coefficients1,&!best_means1,&!best_eta1,&!factor_r1,&!factor_scales1,&!permutation1)
+ let trace_status:i64=result.status
+ print("bootstrap trace variant: ");println(variant)
+ print("bootstrap trace status: ");println(trace_status)
+
+ let trace_model:i64=model
+ let trace_stage:i64=result.failure_stage
+ let trace_null:i64=result.last_null_status
+ let trace_alternative:i64=result.last_alternative_status
+ let trace_sampler:i64=result.sampler_status
+ let trace_replica:i64=result.failure_replica
+ let trace_row:i64=result.failure_row
+ let trace_completed:i64=result.replicates_completed
+ let trace_fits:i64=result.fit_attempts
+ let trace_draws:i64=result.count_draws
+ let trace_uniforms:i64=result.uniforms
+ let trace_proposals:i64=result.proposals
+ print("bootstrap trace model: ");println(trace_model)
+ print("bootstrap trace stage: ");println(trace_stage)
+ print("bootstrap trace null: ");println(trace_null)
+ print("bootstrap trace alternative: ");println(trace_alternative)
+ print("bootstrap trace sampler: ");println(trace_sampler)
+ print("bootstrap trace replica: ");println(trace_replica)
+ print("bootstrap trace row: ");println(trace_row)
+ print("bootstrap trace completed: ");println(trace_completed)
+ print("bootstrap trace fits: ");println(trace_fits)
+ print("bootstrap trace draws: ");println(trace_draws)
+ print("bootstrap trace uniforms: ");println(trace_uniforms)
+ print("bootstrap trace proposals: ");println(trace_proposals)
+
+ assert(initial_rng.state_hi==initial_hi && initial_rng.state_lo==initial_lo)
+ assert(initial_rng.inc_hi==initial_inc_hi && initial_rng.inc_lo==initial_inc_lo)
+ assert(!result.assumptions_assessed && !result.global_optimality_assessed && !result.finite_sample_validity_assessed)
+ if variant==0 {
+  assert(result.status==0 && result.available && result.observed_available && result.observed_lr_available)
+  assert(result.replicates_completed==2 && result.fit_attempts==6 && result.count_draws==32 && result.alpha_refitted)
+  let lr:f64=result.observed_signed_lr
+  let alpha0:f64=result.observed_null_alpha
+  let alpha1:f64=result.observed_alternative_alpha
+  let last_alpha0:f64=result.last_null_alpha
+  let last_alpha1:f64=result.last_alternative_alpha
+  let tail:f64=result.p_value
+  let hits:i64=result.hits
+  let state_hi:i64=result.rng.state_hi
+  let state_lo:i64=result.rng.state_lo
+  print("profile bootstrap case: ");println(model)
+  print("profile bootstrap lr: ");println_f64_sci(lr,15)
+  print("profile bootstrap alpha0: ");println_f64_sci(alpha0,15)
+  print("profile bootstrap alpha1: ");println_f64_sci(alpha1,15)
+  print("profile bootstrap last alpha0: ");println_f64_sci(last_alpha0,15)
+  print("profile bootstrap last alpha1: ");println_f64_sci(last_alpha1,15)
+  print("profile bootstrap tail: ");println_f64_sci(tail,15)
+  print("profile bootstrap hits: ");println(hits)
+  print("profile bootstrap state hi: ");println(state_hi)
+  print("profile bootstrap state lo: ");println(state_lo)
+  i=0
+  while i<n {let count:i64=integer_buffer_at(&replicate,i);print("profile bootstrap count: ");println(count);i=i+1}
+  if model==1 {assert(lr==0.0 && hits==2 && tail==1.0)}
+ } else {
+  assert(!result.available && !result.mc_available && result.p_value==0.0)
+  if variant==1 {assert(result.status==12 && result.fit_attempts==1)}
+  if variant==2 {assert(result.status==11 && result.fit_attempts==0)}
+  if variant==3 {assert(result.status==5 && result.fit_attempts==0)}
+  if variant==4 {assert(result.status==5 && result.sampler_status==3 && result.fit_attempts==2 && result.count_draws==1)}
+  if variant==6 {assert(result.status==3 && result.fit_attempts==1)}
+  if variant==8 {assert(result.status==5 && result.fit_attempts==2 && result.count_draws==0)}
+  if variant==10 {assert(result.status==5 && result.observed_available && result.observed_null_alpha==0.0 && result.observed_alternative_alpha==0.0 && result.count_draws==0)}
+ }
+ numeric_buffer_close(a0)
+ numeric_buffer_close(a1)
+ integer_buffer_close(counts)
+ numeric_buffer_close(offsets0)
+ numeric_buffer_close(offsets1)
+ numeric_buffer_close(initial0)
+ numeric_buffer_close(initial1)
+ integer_buffer_close(replicate)
+ numeric_buffer_close(generating)
+ numeric_buffer_close(coefficients0)
+ numeric_buffer_close(means0)
+ numeric_buffer_close(eta0)
+ numeric_buffer_close(weighted0)
+ numeric_buffer_close(response0)
+ numeric_buffer_close(step0)
+ numeric_buffer_close(qr0)
+ numeric_buffer_close(stage0)
+ numeric_buffer_close(coefficients1)
+ numeric_buffer_close(means1)
+ numeric_buffer_close(eta1)
+ numeric_buffer_close(weighted1)
+ numeric_buffer_close(response1)
+ numeric_buffer_close(step1)
+ numeric_buffer_close(qr1)
+ numeric_buffer_close(stage1)
+ numeric_buffer_close(candidate_coefficients0)
+ numeric_buffer_close(candidate_means0)
+ numeric_buffer_close(candidate_eta0)
+ numeric_buffer_close(best_coefficients0)
+ numeric_buffer_close(best_means0)
+ numeric_buffer_close(best_eta0)
+ numeric_buffer_close(factor_r0)
+ numeric_buffer_close(factor_scales0)
+ integer_buffer_close(permutation0)
+ numeric_buffer_close(candidate_coefficients1)
+ numeric_buffer_close(candidate_means1)
+ numeric_buffer_close(candidate_eta1)
+ numeric_buffer_close(best_coefficients1)
+ numeric_buffer_close(best_means1)
+ numeric_buffer_close(best_eta1)
+ numeric_buffer_close(factor_r1)
+ numeric_buffer_close(factor_scales1)
+ integer_buffer_close(permutation1)
+}
+fn main()->i32 with Alloc,IO,Mut,Div,Panic {
+ bootstrap_case(0,0)
+ bootstrap_case(1,0)
+ bootstrap_case(0,1)
+ bootstrap_case(0,2)
+ bootstrap_case(0,3)
+ bootstrap_case(0,4)
+ bootstrap_case(0,6)
+ bootstrap_case(0,8)
+ bootstrap_case(0,10)
+ println("DEEP COUNT PROFILE BOOTSTRAP PASS")
+ 0
+}

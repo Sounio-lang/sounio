@@ -1,20 +1,25 @@
 // Checked logarithmic increments and cancellation kernels. See LOGARITHMIC.md.
-use math::pure::{CheckedLog,is_finite,ln_checked}
+// Into variants reuse caller-owned CheckedLog storage; legacy wrappers own one
+// fresh local result. No into/helper allocates a result record.
+use math::pure::{CheckedLog,is_finite,ln_checked_into}
 
 fn logarithmic_input_status(x:f64)->i64 {
  if !is_finite(x) {return 2}
  if x<= -1.0 {return 1}
  0
 }
-fn logarithmic_unavailable(status:i64)->CheckedLog {CheckedLog{status:status,value:0.0}}
+fn logarithmic_unavailable_into(status:i64,out:&!CheckedLog)->i64 with Mut {
+ out.status=status;out.value=0.0;status
+}
 fn logarithmic_abs(x:f64)->f64 {if x<0.0 {-x} else {x}}
 
-pub fn log1p_checked(x:f64)->CheckedLog with Mut,Div {
+pub fn log1p_checked_into(x:f64,out:&!CheckedLog)->i64 with Mut,Div {
+ out.status=2;out.value=0.0
  let status=logarithmic_input_status(x)
- if status!=0 {return logarithmic_unavailable(status)}
+ if status!=0 {return logarithmic_unavailable_into(status,out)}
  let magnitude=logarithmic_abs(x)
  // Before halving: preserve tiny represented increments and signed zero.
- if magnitude<1.0e-16 {return CheckedLog{status:0,value:x}}
+ if magnitude<1.0e-16 {out.status=0;out.value=x;return 0}
  var value:f64=0.0
  if magnitude<=0.5 {
   let t=x/(2.0+x)
@@ -35,21 +40,28 @@ pub fn log1p_checked(x:f64)->CheckedLog with Mut,Div {
   value=2.0*sum
  } else {
   let u=1.0+x
-  let logged=ln_checked(u)
-  if logged.status!=0 {return logarithmic_unavailable(logged.status)}
+  let logged_status=ln_checked_into(u,out)
+  if logged_status!=0 {return logarithmic_unavailable_into(logged_status,out)}
+  let logged_value:f64=out.value
   // Low part of the addition, ordered by the larger addend.
   let low=if x>1.0 {1.0-(u-x)} else {x-(u-1.0)}
-  value=logged.value+low/u
+  value=logged_value+low/u
  }
- if !is_finite(value) {return logarithmic_unavailable(2)}
- CheckedLog{status:0,value:value}
+ if !is_finite(value) {return logarithmic_unavailable_into(2,out)}
+ out.status=0;out.value=value;0
+}
+pub fn log1p_checked(x:f64)->CheckedLog with Mut,Div {
+ var out=CheckedLog{status:2,value:0.0}
+ let ignored=log1p_checked_into(x,&!out)
+ out
 }
 
 // ln(1+x)-x: do not subtract the linear term close to zero.
-pub fn log1pmx_checked(x:f64)->CheckedLog with Mut,Div {
+pub fn log1pmx_checked_into(x:f64,out:&!CheckedLog)->i64 with Mut,Div {
+ out.status=2;out.value=0.0
  let status=logarithmic_input_status(x)
- if status!=0 {return logarithmic_unavailable(status)}
- if x==0.0 {return CheckedLog{status:0,value:0.0}}
+ if status!=0 {return logarithmic_unavailable_into(status,out)}
+ if x==0.0 {out.status=0;out.value=0.0;return 0}
  var value:f64=0.0
  if logarithmic_abs(x)<=0.25 {
   // Factor the degree-32 series before multiplying by x twice.
@@ -67,22 +79,29 @@ pub fn log1pmx_checked(x:f64)->CheckedLog with Mut,Div {
   }
   value=x*(x*factor)
  } else {
-  let logged=log1p_checked(x)
-  if logged.status!=0 {return logged}
-  value=logged.value-x
+  let logged_status=log1p_checked_into(x,out)
+  if logged_status!=0 {return logarithmic_unavailable_into(logged_status,out)}
+  let logged_value:f64=out.value
+  value=logged_value-x
  }
- if !is_finite(value) || value>0.0 {return logarithmic_unavailable(2)}
+ if !is_finite(value) || value>0.0 {return logarithmic_unavailable_into(2,out)}
  // Quadratic results normalize all represented zeros to +0.
- if value==0.0 {return CheckedLog{status:0,value:0.0}}
- CheckedLog{status:0,value:value}
+ if value==0.0 {out.status=0;out.value=0.0;return 0}
+ out.status=0;out.value=value;0
+}
+pub fn log1pmx_checked(x:f64)->CheckedLog with Mut,Div {
+ var out=CheckedLog{status:2,value:0.0}
+ let ignored=log1pmx_checked_into(x,&!out)
+ out
 }
 
 // (1+x)ln(1+x)-x, shared by local Poisson deviance and generalized KL.
 // Common domain is x>-1; callers retain their exact count/probability-zero cases.
-pub fn log1p_phi_checked(x:f64)->CheckedLog with Mut,Div {
+pub fn log1p_phi_checked_into(x:f64,out:&!CheckedLog)->i64 with Mut,Div {
+ out.status=2;out.value=0.0
  let status=logarithmic_input_status(x)
- if status!=0 {return logarithmic_unavailable(status)}
- if x==0.0 {return CheckedLog{status:0,value:0.0}}
+ if status!=0 {return logarithmic_unavailable_into(status,out)}
+ if x==0.0 {out.status=0;out.value=0.0;return 0}
  var value:f64=0.0
  if logarithmic_abs(x)<=0.25 {
   var term:f64=0.5
@@ -99,11 +118,17 @@ pub fn log1p_phi_checked(x:f64)->CheckedLog with Mut,Div {
   }
   value=x*(x*factor)
  } else {
-  let logged=log1p_checked(x)
-  if logged.status!=0 {return logged}
-  value=(1.0+x)*logged.value-x
+  let logged_status=log1p_checked_into(x,out)
+  if logged_status!=0 {return logarithmic_unavailable_into(logged_status,out)}
+  let logged_value:f64=out.value
+  value=(1.0+x)*logged_value-x
  }
- if !is_finite(value) || value<0.0 {return logarithmic_unavailable(2)}
- if value==0.0 {return CheckedLog{status:0,value:0.0}}
- CheckedLog{status:0,value:value}
+ if !is_finite(value) || value<0.0 {return logarithmic_unavailable_into(2,out)}
+ if value==0.0 {out.status=0;out.value=0.0;return 0}
+ out.status=0;out.value=value;0
+}
+pub fn log1p_phi_checked(x:f64)->CheckedLog with Mut,Div {
+ var out=CheckedLog{status:2,value:0.0}
+ let ignored=log1p_phi_checked_into(x,&!out)
+ out
 }

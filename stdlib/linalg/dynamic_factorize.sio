@@ -1,0 +1,353 @@
+// Checked dynamic LU/Cholesky and single-RHS solves. Caller-owned scratch only.
+// Factor outputs are scaled; completed_pivots is NOT a rank estimate.
+// status0available,1shape/options/permutation,2nonfiniteinput,3pivotthreshold,
+// 4arithmetic,5nonsymmetric,6nonpositivecomputedCholeskypivot.
+use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_get}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
+use math::pure::{is_finite,sqrt}
+use linalg::least_squares_scale::{least_squares_restore}
+pub struct DynamicFactorWorkspace {
+ pub status:i64,pub n:i64,pub factor_len:i64,pub numeric_work:i64,pub integer_work:i64,
+ pub lu_solve_work:i64,pub cholesky_solve_work:i64,
+}
+pub struct DynamicFactorResult {
+ pub status:i64,pub n:i64,pub method:i64,pub completed_pivots:i64,pub swaps:i64,
+ pub scale:f64,pub relative_threshold:f64,pub diagonal_ratio:f64,
+ pub growth_factor:f64,pub symmetry_error:f64,
+}
+pub struct DynamicSolveResult {pub status:i64,pub n:i64,pub method:i64}
+fn df_abs(x:f64)->f64 {if x<0.0 {-x} else {x}}
+fn df_empty(n:i64,method:i64)->DynamicFactorResult {
+ DynamicFactorResult{status:1,n:n,method:method,completed_pivots:0,swaps:0,scale:0.0,relative_threshold:0.0,diagonal_ratio:0.0,growth_factor:0.0,symmetry_error:0.0}
+}
+pub fn dynamic_factor_workspace(n:i64)->DynamicFactorWorkspace with Mut,Div {
+ var r=DynamicFactorWorkspace{status:1,n:n,factor_len:0,numeric_work:0,integer_work:0,lu_solve_work:0,cholesky_solve_work:0}
+ if n<1 {return r}
+ let limit=9223372036854771704/8
+ if n>limit {return r}
+ if n>(limit-n)/n {return r}
+ if n>limit/3 {return r}
+ r.factor_len=n*n;r.numeric_work=n*n;r.integer_work=n
+ r.lu_solve_work=3*n;r.cholesky_solve_work=2*n;r.status=0
+ r
+}
+fn df_shape(a:&NumericBuffer,layout:&NumericMatrix,factor:&NumericBuffer,work:&NumericBuffer)->i64 with Mut,Div {
+ let n=numeric_matrix_rows(layout)
+ let requested=dynamic_factor_workspace(n)
+ if requested.status!=0 {return 0}
+ if numeric_matrix_cols(layout)!=n || numeric_matrix_status(layout)!=0 || numeric_buffer_status(a)!=0 ||
+ numeric_buffer_status(factor)!=0 || numeric_buffer_status(work)!=0 {return 0}
+ if numeric_buffer_len(factor)<requested.factor_len || numeric_buffer_len(work)<requested.numeric_work {return 0}
+ n
+}
+// Returns status0 and scale only after ALL active inputs are finite.
+// Scratch copying follows that preflight, so active nonfinite wins over pivot failure.
+fn df_copy(a:&NumericBuffer,layout:&NumericMatrix,work:&!NumericBuffer,n:i64,method:i64,rcond:f64)->DynamicFactorResult with Mut,Div,Panic {
+ var out=df_empty(n,method)
+ if !is_finite(rcond) || rcond<0.0 || rcond>=1.0 {return out}
+ out.relative_threshold=if rcond==0.0 {(n as f64)*2.2204460492503131e-16} else {rcond}
+ if out.relative_threshold>=1.0 {return out}
+ var scale:f64=0.0
+ var i:i64=0
+ while i<n {
+  var j:i64=0
+  while j<n {
+   let entry=numeric_matrix_get(a,layout,i,j)
+   if entry.status!=0 {return out}
+   if !is_finite(entry.value) {out.status=2;return out}
+   let value=df_abs(entry.value)
+   if value>scale {scale=value}
+   j=j+1
+  }
+  i=i+1
+ }
+ if scale==0.0 {scale=1.0}
+ out.scale=scale
+ i=0
+ while i<n {
+  var j:i64=0
+  while j<n {
+   let entry=numeric_matrix_get(a,layout,i,j)
+   if entry.status!=0 {return out}
+   let value=entry.value/scale
+   if !is_finite(value) {out.status=4;return out}
+   if entry.value!=0.0 {if value==0.0 {out.status=4;return out}}
+   numeric_buffer_set(work,i*n+j,value)
+   j=j+1
+  }
+  i=i+1
+ }
+ out.status=0
+ out
+}
+pub fn dynamic_lu(
+ a:&NumericBuffer,layout:&NumericMatrix,factor:&!NumericBuffer,pivots:&!IntegerBuffer,
+ work:&!NumericBuffer,pivot_work:&!IntegerBuffer,rcond:f64
+)->DynamicFactorResult with Mut,Div,Panic {
+ let n=df_shape(a,layout,factor,work)
+ var out=df_empty(n,0)
+ if n<1 {return out}
+ if integer_buffer_status(pivots)!=0 || integer_buffer_status(pivot_work)!=0 {return out}
+ if integer_buffer_len(pivots)<n || integer_buffer_len(pivot_work)<n {return out}
+ out=df_copy(a,layout,work,n,0,rcond)
+ if out.status!=0 {return out}
+ var i:i64=0
+ while i<n {integer_buffer_set(pivot_work,i,i);i=i+1}
+ var smallest:f64=0.0
+ var largest:f64=0.0
+ out.growth_factor=1.0
+ var k:i64=0
+ while k<n {
+  var pivot_row=k
+  var maximum=df_abs(numeric_buffer_at(work,k*n+k))
+  i=k+1
+  while i<n {
+   let value=df_abs(numeric_buffer_at(work,i*n+k))
+   if value>maximum {maximum=value;pivot_row=i}
+   i=i+1
+  }
+  if !is_finite(maximum) {out.status=4;return out}
+  if maximum<=out.relative_threshold {out.status=3;return out}
+  if pivot_row!=k {
+   var j:i64=0
+   while j<n {
+    let old=numeric_buffer_at(work,k*n+j);let replacement=numeric_buffer_at(work,pivot_row*n+j)
+    numeric_buffer_set(work,k*n+j,replacement);numeric_buffer_set(work,pivot_row*n+j,old)
+    j=j+1
+   }
+   let old=integer_buffer_at(pivot_work,k);let replacement=integer_buffer_at(pivot_work,pivot_row)
+   integer_buffer_set(pivot_work,k,replacement);integer_buffer_set(pivot_work,pivot_row,old)
+   out.swaps=out.swaps+1
+  }
+  let pivot=numeric_buffer_at(work,k*n+k)
+  if pivot==0.0 {out.status=3;return out}
+  let magnitude=df_abs(pivot)
+  if k==0 {smallest=magnitude;largest=magnitude}
+  else {if magnitude<smallest {smallest=magnitude};if magnitude>largest {largest=magnitude}}
+  i=k+1
+  while i<n {
+   let numerator=numeric_buffer_at(work,i*n+k)
+   let multiplier=numerator/pivot
+   if !is_finite(multiplier) {out.status=4;return out}
+   if numerator!=0.0 {if multiplier==0.0 {out.status=4;return out}}
+   numeric_buffer_set(work,i*n+k,multiplier)
+   // Exact zero multiplier has no mathematical Schur update. No threshold drop.
+   // Skipping it does not promise identical signed-zero bits in untouched cells.
+   if multiplier!=0.0 {
+    var j=k+1
+    while j<n {
+     let value=numeric_buffer_at(work,i*n+j)-multiplier*numeric_buffer_at(work,k*n+j)
+     if !is_finite(value) {out.status=4;return out}
+     let magnitude=df_abs(value)
+     if magnitude>out.growth_factor {out.growth_factor=magnitude}
+     numeric_buffer_set(work,i*n+j,value);j=j+1
+    }
+   }
+   i=i+1
+  }
+  out.completed_pivots=k+1;k=k+1
+ }
+ out.diagonal_ratio=smallest/largest
+ i=0
+ while i<n*n {numeric_buffer_set(factor,i,numeric_buffer_at(work,i));i=i+1}
+ i=0
+ while i<n {integer_buffer_set(pivots,i,integer_buffer_at(pivot_work,i));i=i+1}
+ out.status=0
+ out
+}
+pub fn dynamic_cholesky(
+ a:&NumericBuffer,layout:&NumericMatrix,factor:&!NumericBuffer,work:&!NumericBuffer,
+ symmetry_tol:f64,rcond:f64
+)->DynamicFactorResult with Mut,Div,Panic {
+ let n=df_shape(a,layout,factor,work)
+ var out=df_empty(n,1)
+ if n<1 {return out}
+ if !is_finite(symmetry_tol) || symmetry_tol<0.0 || symmetry_tol>0.25 {return out}
+ out=df_copy(a,layout,work,n,1,rcond)
+ if out.status!=0 {return out}
+ var i:i64=0
+ while i<n {
+  var j=i+1
+  while j<n {
+   let left=numeric_matrix_get(a,layout,i,j);let right=numeric_matrix_get(a,layout,j,i)
+   if left.status!=0 || right.status!=0 {out.status=1;return out}
+   if symmetry_tol==0.0 {if left.value!=right.value {out.status=5;return out}}
+   let raw_difference=left.value-right.value
+   let difference=if is_finite(raw_difference) {raw_difference/out.scale}
+    else {numeric_buffer_at(work,i*n+j)-numeric_buffer_at(work,j*n+i)}
+   let error=df_abs(difference)
+   if !is_finite(error) {out.status=4;return out}
+   if error>out.symmetry_error {out.symmetry_error=error}
+   if error>symmetry_tol {out.status=5;return out}
+   let midpoint=(numeric_buffer_at(work,i*n+j)+numeric_buffer_at(work,j*n+i))*0.5
+   numeric_buffer_set(work,i*n+j,midpoint);numeric_buffer_set(work,j*n+i,midpoint)
+   j=j+1
+  }
+  i=i+1
+ }
+ var smallest:f64=0.0
+ var largest:f64=0.0
+ var j:i64=0
+ while j<n {
+  var sum:f64=0.0
+  var correction:f64=0.0
+  var k:i64=0
+  while k<j {
+   let value=numeric_buffer_at(work,j*n+k)
+   let term=value*value-correction
+   let next=sum+term;correction=(next-sum)-term;sum=next;k=k+1
+  }
+  let diagonal=numeric_buffer_at(work,j*n+j)-sum
+  if !is_finite(diagonal) {out.status=4;return out}
+  if diagonal<=0.0 {out.status=6;return out}
+  if diagonal<=out.relative_threshold {out.status=3;return out}
+  let root=sqrt(diagonal)
+  if !is_finite(root) || root<=0.0 {out.status=4;return out}
+  numeric_buffer_set(work,j*n+j,root)
+  if j==0 {smallest=root;largest=root}
+  else {if root<smallest {smallest=root};if root>largest {largest=root}}
+  i=j+1
+  while i<n {
+   sum=0.0;correction=0.0;k=0
+   while k<j {
+    let term=numeric_buffer_at(work,i*n+k)*numeric_buffer_at(work,j*n+k)-correction
+    let next=sum+term;correction=(next-sum)-term;sum=next;k=k+1
+   }
+   let numerator=numeric_buffer_at(work,i*n+j)-sum
+   let value=numerator/root
+   if !is_finite(value) {out.status=4;return out}
+   if numerator!=0.0 {if value==0.0 {out.status=4;return out}}
+   numeric_buffer_set(work,i*n+j,value);i=i+1
+  }
+  out.completed_pivots=j+1;j=j+1
+ }
+ out.diagonal_ratio=smallest/largest
+ i=0
+ while i<n {
+  j=0
+  while j<n {numeric_buffer_set(factor,i*n+j,if j<=i {numeric_buffer_at(work,i*n+j)} else {0.0});j=j+1}
+  i=i+1
+ }
+ out.status=0
+ out
+}
+fn df_solve_shape(factor:&NumericBuffer,b:&NumericBuffer,x:&NumericBuffer,work:&NumericBuffer,fit:&DynamicFactorResult,method:i64)->bool with Mut,Div {
+ let query=dynamic_factor_workspace(fit.n)
+ if query.status!=0 {return false}
+ if fit.status!=0 || fit.method!=method || !is_finite(fit.scale) || fit.scale<=0.0 {return false}
+ if numeric_buffer_status(factor)!=0 || numeric_buffer_status(b)!=0 || numeric_buffer_status(x)!=0 || numeric_buffer_status(work)!=0 {return false}
+ if numeric_buffer_len(factor)<query.factor_len || numeric_buffer_len(b)!=fit.n || numeric_buffer_len(x)<fit.n {return false}
+ let required=if method==0 {query.lu_solve_work} else {query.cholesky_solve_work}
+ numeric_buffer_len(work)>=required
+}
+fn df_triangular(factor:&NumericBuffer,work:&!NumericBuffer,n:i64,method:i64)->i64 with Mut,Div,Panic {
+ var i:i64=0
+ while i<n {
+  var sum:f64=0.0
+  var correction:f64=0.0
+  var j:i64=0
+  while j<i {
+   let term=numeric_buffer_at(factor,i*n+j)*numeric_buffer_at(work,j)-correction
+   let next=sum+term;correction=(next-sum)-term;sum=next;j=j+1
+  }
+  let numerator=numeric_buffer_at(work,i)-sum
+  let diagonal=if method==0 {1.0} else {numeric_buffer_at(factor,i*n+i)}
+  if diagonal==0.0 {return 3}
+  if method==1 {if diagonal<0.0 {return 6}}
+  let value=numerator/diagonal
+  if !is_finite(value) {return 4}
+  if numerator!=0.0 {if value==0.0 {return 4}}
+  numeric_buffer_set(work,i,value);i=i+1
+ }
+ i=n-1
+ while i>=0 {
+  var sum:f64=0.0
+  var correction:f64=0.0
+  var j=i+1
+  while j<n {
+   let coefficient=if method==0 {numeric_buffer_at(factor,i*n+j)} else {numeric_buffer_at(factor,j*n+i)}
+   let term=coefficient*numeric_buffer_at(work,j)-correction
+   let next=sum+term;correction=(next-sum)-term;sum=next;j=j+1
+  }
+  let numerator=numeric_buffer_at(work,i)-sum
+  let diagonal=numeric_buffer_at(factor,i*n+i)
+  if diagonal==0.0 {return 3}
+  if method==1 {if diagonal<0.0 {return 6}}
+  let value=numerator/diagonal
+  if !is_finite(value) {return 4}
+  if numerator!=0.0 {if value==0.0 {return 4}}
+  numeric_buffer_set(work,i,value);i=i-1
+ }
+ 0
+}
+fn df_restore_solution(x:&!NumericBuffer,work:&!NumericBuffer,n:i64,b_scale:f64,a_scale:f64)->i64 with Mut,Div,Panic {
+ var i:i64=0
+ while i<n {
+  let value=least_squares_restore(numeric_buffer_at(work,i),b_scale,a_scale)
+  if value.status!=0 {return 4}
+  numeric_buffer_set(work,n+i,value.value);i=i+1
+ }
+ i=0
+ while i<n {numeric_buffer_set(x,i,numeric_buffer_at(work,n+i));i=i+1}
+ 0
+}
+fn df_solve_finite(factor:&NumericBuffer,b:&NumericBuffer,n:i64)->bool with Mut,Panic {
+ var i:i64=0
+ while i<n*n {if !is_finite(numeric_buffer_at(factor,i)) {return false};i=i+1}
+ i=0
+ while i<n {if !is_finite(numeric_buffer_at(b,i)) {return false};i=i+1}
+ true
+}
+pub fn dynamic_lu_solve(
+ factor:&NumericBuffer,pivots:&IntegerBuffer,fit:&DynamicFactorResult,b:&NumericBuffer,
+ x:&!NumericBuffer,work:&!NumericBuffer
+)->DynamicSolveResult with Mut,Div,Panic {
+ var out=DynamicSolveResult{status:1,n:fit.n,method:0}
+ if !df_solve_shape(factor,b,x,work,fit,0) {return out}
+ let n=fit.n
+ if integer_buffer_status(pivots)!=0 || integer_buffer_len(pivots)<n {return out}
+ if !df_solve_finite(factor,b,n) {out.status=2;return out}
+ var b_scale:f64=0.0
+ var i:i64=0
+ while i<n {numeric_buffer_set(work,2*n+i,0.0);let value=df_abs(numeric_buffer_at(b,i));if value>b_scale {b_scale=value};i=i+1}
+ if b_scale==0.0 {b_scale=1.0}
+ i=0
+ while i<n {
+  let pivot=integer_buffer_at(pivots,i)
+  if pivot<0 {return out}
+  if pivot>=n {return out}
+  if numeric_buffer_at(work,2*n+pivot)!=0.0 {return out}
+  numeric_buffer_set(work,2*n+pivot,1.0)
+  let raw=numeric_buffer_at(b,pivot)
+  let value=raw/b_scale
+  if raw!=0.0 {if value==0.0 {out.status=4;return out}}
+  numeric_buffer_set(work,i,value);i=i+1
+ }
+ let status=df_triangular(factor,work,n,0)
+ if status!=0 {out.status=status;return out}
+ out.status=df_restore_solution(x,work,n,b_scale,fit.scale)
+ out
+}
+pub fn dynamic_cholesky_solve(
+ factor:&NumericBuffer,fit:&DynamicFactorResult,b:&NumericBuffer,x:&!NumericBuffer,work:&!NumericBuffer
+)->DynamicSolveResult with Mut,Div,Panic {
+ var out=DynamicSolveResult{status:1,n:fit.n,method:1}
+ if !df_solve_shape(factor,b,x,work,fit,1) {return out}
+ let n=fit.n
+ if !df_solve_finite(factor,b,n) {out.status=2;return out}
+ var b_scale:f64=0.0
+ var i:i64=0
+ while i<n {let value=df_abs(numeric_buffer_at(b,i));if value>b_scale {b_scale=value};i=i+1}
+ if b_scale==0.0 {b_scale=1.0}
+ i=0
+ while i<n {
+  let raw=numeric_buffer_at(b,i)
+  let value=raw/b_scale
+  if raw!=0.0 {if value==0.0 {out.status=4;return out}}
+  numeric_buffer_set(work,i,value);i=i+1
+ }
+ let status=df_triangular(factor,work,n,1)
+ if status!=0 {out.status=status;return out}
+ out.status=df_restore_solution(x,work,n,b_scale,fit.scale)
+ out
+}

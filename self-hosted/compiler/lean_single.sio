@@ -5566,6 +5566,368 @@ fn tc_linear_violation(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     return 0
 }
 
+// Chemical reaction literals: compile-time mass and charge balance.
+//
+//     reaction sulfate_reduction {
+//         4 H2(aq) + H+ + SO4-- -> HS- + 4 H2O
+//     }
+//
+// reaction is a soft keyword, following the unit precedent: it is recognised
+// in Pass 0a, where the balance is checked, and skipped by code generation.
+// Everywhere else it remains an ordinary identifier.
+//
+// E188 checks mass balance element by element.
+// E189 checks total charge balance.
+// E190 rejects unknown element symbols instead of treating them as zero.
+//
+// This deliberately checks conservation only. It does not claim that a
+// reaction is thermodynamically favourable, elementary, or kinetically sound.
+//
+// Species syntax:
+//   * optional positive integer stoichiometric coefficient
+//   * one- or two-letter element symbols with numeric subscripts
+//   * optional phase suffix (aq), (g), (s), or (l)
+//   * parenthesised multiplier groups, e.g. Ca(OH)2
+//   * trailing + / - repeated for charge multiplicity
+//
+// A + or - is charge iff it is lexically adjacent to the preceding token.
+var RX_LEFT:     [i64; 128] = [0; 128]
+var RX_RIGHT:    [i64; 128] = [0; 128]
+var RX_SYM_TS:   [i64; 128] = [0; 128]
+var RX_SYM_TE:   [i64; 128] = [0; 128]
+var RX_CHARGE_L: i64 = 0
+var RX_CHARGE_R: i64 = 0
+var RX_ERR:      i64 = 0
+
+fn rx_print_src(ps: i64, pe: i64) with IO, Mut, Panic {
+    var i: i64 = ps
+    while i < pe { print_char(sb(i)); i = i + 1 }
+}
+
+fn rx_elem_id_1(p: i64) -> i64 with Panic, Mut {
+    if src_match(p, 1, "H") { return 1 }
+    if src_match(p, 1, "B") { return 5 }
+    if src_match(p, 1, "C") { return 6 }
+    if src_match(p, 1, "N") { return 7 }
+    if src_match(p, 1, "O") { return 8 }
+    if src_match(p, 1, "F") { return 9 }
+    if src_match(p, 1, "P") { return 15 }
+    if src_match(p, 1, "S") { return 16 }
+    if src_match(p, 1, "K") { return 19 }
+    if src_match(p, 1, "V") { return 23 }
+    if src_match(p, 1, "Y") { return 39 }
+    if src_match(p, 1, "I") { return 53 }
+    if src_match(p, 1, "W") { return 74 }
+    if src_match(p, 1, "U") { return 92 }
+    return 0
+}
+
+fn rx_elem_id_2a(p: i64) -> i64 with Panic, Mut {
+    if src_match(p, 2, "He") { return 2 }
+    if src_match(p, 2, "Li") { return 3 }
+    if src_match(p, 2, "Be") { return 4 }
+    if src_match(p, 2, "Ne") { return 10 }
+    if src_match(p, 2, "Na") { return 11 }
+    if src_match(p, 2, "Mg") { return 12 }
+    if src_match(p, 2, "Al") { return 13 }
+    if src_match(p, 2, "Si") { return 14 }
+    if src_match(p, 2, "Cl") { return 17 }
+    if src_match(p, 2, "Ar") { return 18 }
+    if src_match(p, 2, "Ca") { return 20 }
+    if src_match(p, 2, "Sc") { return 21 }
+    if src_match(p, 2, "Ti") { return 22 }
+    if src_match(p, 2, "Cr") { return 24 }
+    if src_match(p, 2, "Mn") { return 25 }
+    if src_match(p, 2, "Fe") { return 26 }
+    if src_match(p, 2, "Co") { return 27 }
+    if src_match(p, 2, "Ni") { return 28 }
+    if src_match(p, 2, "Cu") { return 29 }
+    if src_match(p, 2, "Zn") { return 30 }
+    if src_match(p, 2, "Ga") { return 31 }
+    if src_match(p, 2, "Ge") { return 32 }
+    if src_match(p, 2, "As") { return 33 }
+    if src_match(p, 2, "Se") { return 34 }
+    if src_match(p, 2, "Br") { return 35 }
+    if src_match(p, 2, "Kr") { return 36 }
+    if src_match(p, 2, "Rb") { return 37 }
+    if src_match(p, 2, "Sr") { return 38 }
+    if src_match(p, 2, "Zr") { return 40 }
+    if src_match(p, 2, "Nb") { return 41 }
+    if src_match(p, 2, "Mo") { return 42 }
+    if src_match(p, 2, "Tc") { return 43 }
+    if src_match(p, 2, "Ru") { return 44 }
+    if src_match(p, 2, "Rh") { return 45 }
+    if src_match(p, 2, "Pd") { return 46 }
+    if src_match(p, 2, "Ag") { return 47 }
+    if src_match(p, 2, "Cd") { return 48 }
+    if src_match(p, 2, "In") { return 49 }
+    if src_match(p, 2, "Sn") { return 50 }
+    if src_match(p, 2, "Sb") { return 51 }
+    if src_match(p, 2, "Te") { return 52 }
+    if src_match(p, 2, "Xe") { return 54 }
+    if src_match(p, 2, "Cs") { return 55 }
+    if src_match(p, 2, "Ba") { return 56 }
+    if src_match(p, 2, "La") { return 57 }
+    if src_match(p, 2, "Ce") { return 58 }
+    if src_match(p, 2, "Pr") { return 59 }
+    if src_match(p, 2, "Nd") { return 60 }
+    if src_match(p, 2, "Pm") { return 61 }
+    if src_match(p, 2, "Sm") { return 62 }
+    if src_match(p, 2, "Eu") { return 63 }
+    if src_match(p, 2, "Gd") { return 64 }
+    return 0
+}
+
+fn rx_elem_id_2b(p: i64) -> i64 with Panic, Mut {
+    if src_match(p, 2, "Tb") { return 65 }
+    if src_match(p, 2, "Dy") { return 66 }
+    if src_match(p, 2, "Ho") { return 67 }
+    if src_match(p, 2, "Er") { return 68 }
+    if src_match(p, 2, "Tm") { return 69 }
+    if src_match(p, 2, "Yb") { return 70 }
+    if src_match(p, 2, "Lu") { return 71 }
+    if src_match(p, 2, "Hf") { return 72 }
+    if src_match(p, 2, "Ta") { return 73 }
+    if src_match(p, 2, "Re") { return 75 }
+    if src_match(p, 2, "Os") { return 76 }
+    if src_match(p, 2, "Ir") { return 77 }
+    if src_match(p, 2, "Pt") { return 78 }
+    if src_match(p, 2, "Au") { return 79 }
+    if src_match(p, 2, "Hg") { return 80 }
+    if src_match(p, 2, "Tl") { return 81 }
+    if src_match(p, 2, "Pb") { return 82 }
+    if src_match(p, 2, "Bi") { return 83 }
+    if src_match(p, 2, "Po") { return 84 }
+    if src_match(p, 2, "At") { return 85 }
+    if src_match(p, 2, "Rn") { return 86 }
+    if src_match(p, 2, "Fr") { return 87 }
+    if src_match(p, 2, "Ra") { return 88 }
+    if src_match(p, 2, "Ac") { return 89 }
+    if src_match(p, 2, "Th") { return 90 }
+    if src_match(p, 2, "Pa") { return 91 }
+    if src_match(p, 2, "Np") { return 93 }
+    if src_match(p, 2, "Pu") { return 94 }
+    if src_match(p, 2, "Am") { return 95 }
+    if src_match(p, 2, "Cm") { return 96 }
+    if src_match(p, 2, "Bk") { return 97 }
+    if src_match(p, 2, "Cf") { return 98 }
+    if src_match(p, 2, "Es") { return 99 }
+    if src_match(p, 2, "Fm") { return 100 }
+    if src_match(p, 2, "Md") { return 101 }
+    if src_match(p, 2, "No") { return 102 }
+    if src_match(p, 2, "Lr") { return 103 }
+    if src_match(p, 2, "Rf") { return 104 }
+    if src_match(p, 2, "Db") { return 105 }
+    if src_match(p, 2, "Sg") { return 106 }
+    if src_match(p, 2, "Bh") { return 107 }
+    if src_match(p, 2, "Hs") { return 108 }
+    if src_match(p, 2, "Mt") { return 109 }
+    if src_match(p, 2, "Ds") { return 110 }
+    if src_match(p, 2, "Rg") { return 111 }
+    if src_match(p, 2, "Cn") { return 112 }
+    if src_match(p, 2, "Nh") { return 113 }
+    if src_match(p, 2, "Fl") { return 114 }
+    if src_match(p, 2, "Mc") { return 115 }
+    if src_match(p, 2, "Lv") { return 116 }
+    if src_match(p, 2, "Ts") { return 117 }
+    if src_match(p, 2, "Og") { return 118 }
+    return 0
+}
+
+fn rx_elem_id(p: i64, l: i64) -> i64 with Panic, Mut {
+    if l == 1 { return rx_elem_id_1(p) }
+    if l == 2 {
+        let a = rx_elem_id_2a(p)
+        if a != 0 { return a }
+        return rx_elem_id_2b(p)
+    }
+    return 0
+}
+
+fn rx_unknown_element(tok: i64, name_tok: i64, ps: i64, pe: i64) with IO, Mut, Panic {
+    print("error[E190]: unknown element symbol `")
+    rx_print_src(ps, pe)
+    print("` in reaction `")
+    rx_print_src(TS[name_tok as usize], TE[name_tok as usize])
+    print("` at ")
+    print_src_loc_for_tok(tok)
+    print(" (bundle line ")
+    print_int(TL[tok as usize])
+    print(")\n")
+    tc_mark_failed()
+    RX_ERR = 1
+}
+
+fn rx_add_formula(ps: i64, pe: i64, mult: i64, side: i64, tok: i64, name_tok: i64) with IO, Mut, Panic {
+    var i: i64 = ps
+    while i < pe {
+        let c0 = sb(i)
+        if c0 < 65 || c0 > 90 {
+            var bad_end: i64 = i + 1
+            while bad_end < pe && sb(bad_end) >= 97 && sb(bad_end) <= 122 { bad_end = bad_end + 1 }
+            rx_unknown_element(tok, name_tok, i, bad_end)
+            return
+        }
+        var slen: i64 = 1
+        if i + 1 < pe && sb(i + 1) >= 97 && sb(i + 1) <= 122 { slen = 2 }
+        let id = rx_elem_id(i, slen)
+        if id == 0 {
+            rx_unknown_element(tok, name_tok, i, i + slen)
+            return
+        }
+        var j: i64 = i + slen
+        var cnt: i64 = 0
+        var saw: i64 = 0
+        while j < pe && sb(j) >= 48 && sb(j) <= 57 {
+            cnt = cnt * 10 + (sb(j) - 48)
+            saw = 1
+            j = j + 1
+        }
+        if saw == 0 { cnt = 1 }
+        if RX_SYM_TE[id as usize] == 0 {
+            RX_SYM_TS[id as usize] = i
+            RX_SYM_TE[id as usize] = i + slen
+        }
+        if side == 0 { RX_LEFT[id as usize] = RX_LEFT[id as usize] + cnt * mult }
+        else { RX_RIGHT[id as usize] = RX_RIGHT[id as usize] + cnt * mult }
+        i = j
+    }
+}
+
+fn rx_parse_side(start: i64, stop: i64, side: i64, name_tok: i64) with IO, Mut, Panic {
+    var p: i64 = start
+    while p < stop {
+        var coeff: i64 = 1
+        if TK[p as usize] == 4 {
+            coeff = TV[p as usize]
+            if coeff < 1 {
+                tc_linear_violation(p, "reaction stoichiometric coefficient must be a positive integer")
+                RX_ERR = 1
+                return
+            }
+            p = p + 1
+        }
+        if p >= stop || TK[p as usize] != 3 {
+            tc_linear_violation(p, "expected a chemical species in reaction body")
+            RX_ERR = 1
+            return
+        }
+        rx_add_formula(TS[p as usize], TE[p as usize], coeff, side, p, name_tok)
+        if RX_ERR == 1 { return }
+        p = p + 1
+        while p + 2 < stop && TK[p as usize] == 6 && TK[(p + 1) as usize] == 3 && TK[(p + 2) as usize] == 7 {
+            let gs = TS[(p + 1) as usize]
+            let ge = TE[(p + 1) as usize]
+            var gmult: i64 = 1
+            var after: i64 = p + 3
+            if after < stop && TK[after as usize] == 4 { gmult = TV[after as usize]; after = after + 1 }
+            let is_phase = (gmult == 1) && (src_match(gs, ge - gs, "aq") || src_match(gs, ge - gs, "g") || src_match(gs, ge - gs, "s") || src_match(gs, ge - gs, "l"))
+            if is_phase == false {
+                rx_add_formula(gs, ge, coeff * gmult, side, p + 1, name_tok)
+                if RX_ERR == 1 { return }
+            }
+            p = after
+        }
+        var chg: i64 = 0
+        while p < stop && TS[p as usize] == TE[(p - 1) as usize] && (TK[p as usize] == 17 || TK[p as usize] == 18 || TK[p as usize] == 74) {
+            if TK[p as usize] == 17 { chg = chg + 1 }
+            if TK[p as usize] == 74 { chg = chg + 2 }
+            if TK[p as usize] == 18 { chg = chg - 1 }
+            p = p + 1
+        }
+        if side == 0 { RX_CHARGE_L = RX_CHARGE_L + coeff * chg }
+        else { RX_CHARGE_R = RX_CHARGE_R + coeff * chg }
+        if p < stop {
+            if TK[p as usize] == 17 { p = p + 1 }
+            else {
+                tc_linear_violation(p, "expected `+` between species in reaction body")
+                RX_ERR = 1
+                return
+            }
+        }
+    }
+}
+
+fn rx_check_decl(kw: i64) -> i64 with IO, Mut, Panic {
+    let name_tok = kw + 1
+    let body = kw + 3
+    var depth: i64 = 1
+    var close: i64 = 0 - 1
+    var arrow: i64 = 0 - 1
+    var q: i64 = body
+    while q < TC {
+        if TK[q as usize] == 8 { depth = depth + 1 }
+        if TK[q as usize] == 9 {
+            depth = depth - 1
+            if depth == 0 { close = q; break }
+        }
+        if TK[q as usize] == 10 && depth == 1 && arrow < 0 { arrow = q }
+        q = q + 1
+    }
+    if close < 0 {
+        tc_linear_violation(kw, "unterminated `reaction` declaration")
+        return TC
+    }
+    if arrow < 0 {
+        tc_linear_violation(kw, "reaction body needs `->` separating reactants from products")
+        return close + 1
+    }
+    var i: i64 = 0
+    while i < 128 {
+        RX_LEFT[i as usize] = 0
+        RX_RIGHT[i as usize] = 0
+        RX_SYM_TS[i as usize] = 0
+        RX_SYM_TE[i as usize] = 0
+        i = i + 1
+    }
+    RX_CHARGE_L = 0
+    RX_CHARGE_R = 0
+    RX_ERR = 0
+    rx_parse_side(body, arrow, 0, name_tok)
+    if RX_ERR == 1 { return close + 1 }
+    rx_parse_side(arrow + 1, close, 1, name_tok)
+    if RX_ERR == 1 { return close + 1 }
+    i = 1
+    while i < 128 {
+        if RX_LEFT[i as usize] != RX_RIGHT[i as usize] {
+            print("error[E188]: reaction `")
+            rx_print_src(TS[name_tok as usize], TE[name_tok as usize])
+            print("` does not balance for element ")
+            rx_print_src(RX_SYM_TS[i as usize], RX_SYM_TE[i as usize])
+            print(" at ")
+            print_src_loc_for_tok(name_tok)
+            print(" (bundle line ")
+            print_int(TL[name_tok as usize])
+            print(")\n")
+            print("  = note: element ")
+            rx_print_src(RX_SYM_TS[i as usize], RX_SYM_TE[i as usize])
+            print(": left ")
+            print_int(RX_LEFT[i as usize])
+            print(", right ")
+            print_int(RX_RIGHT[i as usize])
+            print("\n")
+            tc_mark_failed()
+        }
+        i = i + 1
+    }
+    if RX_CHARGE_L != RX_CHARGE_R {
+        print("error[E189]: reaction `")
+        rx_print_src(TS[name_tok as usize], TE[name_tok as usize])
+        print("` does not balance in charge at ")
+        print_src_loc_for_tok(name_tok)
+        print(" (bundle line ")
+        print_int(TL[name_tok as usize])
+        print(")\n")
+        print("  = note: charge left ")
+        print_int(RX_CHARGE_L)
+        print(", right ")
+        print_int(RX_CHARGE_R)
+        print("\n")
+        tc_mark_failed()
+    }
+    return close + 1
+}
+
 fn tc_arity_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     print("error: ")
     print(msg)
@@ -29785,6 +30147,23 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // Skip semicolons
     if k == 27 { EP = EP + 1; return }
 
+    // Skip reaction declarations. Pass 0a performs the balance check; a
+    // reaction declaration emits no runtime code. The keyword remains soft:
+    // only reaction NAME { ... } is treated as a declaration.
+    if k == 3 && EP + 2 < TC && src_match(TS[EP as usize], TE[EP as usize] - TS[EP as usize], "reaction") && TK[(EP + 1) as usize] == 3 && TK[(EP + 2) as usize] == 8 {
+        EP = EP + 2
+        var rx_depth: i64 = 0
+        while EP < TC && TK[EP as usize] != 0 {
+            if TK[EP as usize] == 8 { rx_depth = rx_depth + 1 }
+            if TK[EP as usize] == 9 {
+                rx_depth = rx_depth - 1
+                if rx_depth == 0 { EP = EP + 1; return }
+            }
+            EP = EP + 1
+        }
+        return
+    }
+
     // Skip unit declarations (top-level only; Gen 19)
     // Soft keyword: only treat `unit` as a declaration when followed by an ident
     // (the unit name). `let unit = x` / `unit.w` / `unit + 1` are ordinary ident use.
@@ -35702,6 +36081,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if pass0a_depth == 0 && TK[p as usize] == 2 {
             tc_error_hard(p, "return outside function body is invalid module item")
             p = p + 1
+            continue
+        }
+        // Chemical reaction declaration: reaction NAME { lhs -> rhs }.
+        // Validate conservation here, alongside the unit declaration pass.
+        if pass0a_depth == 0 && p + 2 < TC && TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "reaction") && TK[(p + 1) as usize] == 3 && TK[(p + 2) as usize] == 8 {
+            p = rx_check_decl(p)
             continue
         }
         // Gen 19: unit NAME;  or  unit NAME = SCALE * BASE_UNIT;

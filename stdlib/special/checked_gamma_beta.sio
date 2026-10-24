@@ -1,0 +1,306 @@
+// Log-gamma uses the existing Lanczos coefficient implementation in special/gamma.sio.
+// Small positive shapes are shifted before delegation to avoid its reflection sentinel.
+// Continued-fraction stopping and log-prefix arithmetic require independent calibration;
+// status0 certifies the stated finite iteration criterion, NOT a relative error bound.
+// Method1 gamma series,2 gamma CF,3 beta CF,4 beta opposite-tail CF,0 endpoint.
+// Endpoint scalar probabilities are available; log(0) has unavailable flag/payload0.
+// Underflowed positive scalar tails are unavailable, with independently retained log.
+// Inverse iterations count forward evaluations (each has the supplied inner budget);
+// worst-case scalar work is quadratic in the supplied budget, no allocations/history.
+// Checked special functions, additive API only. No old module is promoted.
+// status0 converged arithmetic;1 domain/options;2 nonfinite;3 budget exhausted;
+// 4 unavailable arithmetic;5 unsupported range / unrepresentable inverse.
+// Convergence tolerance is NOT an accuracy certificate for lgamma/prefix rounding.
+// Shapes are restricted to (0,1e6]; budget1..1000000, tolerance[8eps,1e-4].
+use math::pure::{is_finite,ln_checked,exp}
+use math::logarithmic::{log1p_checked}
+use special::gamma::{lgamma}
+pub struct CheckedSpecialPair {
+ pub status:i64,pub lower:f64,pub upper:f64,pub log_lower:f64,pub log_upper:f64,
+ pub lower_available:bool,pub upper_available:bool,
+ pub log_lower_available:bool,pub log_upper_available:bool,
+ pub iterations:i64,pub method:i64,
+}
+pub struct CheckedSpecialInverse {
+ pub status:i64,pub value:f64,pub lower:f64,pub upper:f64,
+ pub iterations:i64,pub forward_log_tail:f64,pub forward_log_available:bool,
+}
+struct SpecialLog {status:i64,value:f64,iterations:i64}
+fn sp_abs(x:f64)->f64 {if x<0.0 {-x} else {x}}
+fn sp_small(x:f64)->f64 {
+ if !is_finite(x) {return x}
+ if sp_abs(x)>=1.0e-300 {return x}
+ if x<0.0 {-1.0e-300} else {1.0e-300}
+}
+fn sp_empty(status:i64,iterations:i64,method:i64)->CheckedSpecialPair {
+ CheckedSpecialPair{status:status,lower:0.0,upper:0.0,log_lower:0.0,log_upper:0.0,
+ lower_available:false,upper_available:false,log_lower_available:false,log_upper_available:false,
+ iterations:iterations,method:method}
+}
+fn sp_options(budget:i64,tolerance:f64)->bool {
+ budget>=1 && budget<=1000000 && tolerance>=1.7763568394002505e-15 && tolerance<=1.0e-4
+}
+fn sp_endpoint(lower_one:bool)->CheckedSpecialPair with Mut {
+ var r=sp_empty(0,0,0)
+ r.lower_available=true;r.upper_available=true
+ if lower_one {r.lower=1.0;r.log_lower_available=true}
+ else {r.upper=1.0;r.log_upper_available=true}
+ r
+}
+fn sp_lgamma(x:f64)->SpecialLog with Mut,Div,Panic {
+ var value:f64=0.0
+ if x<0.5 {
+  let logarithm=ln_checked(x)
+  if logarithm.status!=0 {return SpecialLog{status:4,value:0.0,iterations:0}}
+  value=lgamma(x+1.0)-logarithm.value
+ } else {value=lgamma(x)}
+ if !is_finite(value) {return SpecialLog{status:4,value:0.0,iterations:0}}
+ SpecialLog{status:0,value:value,iterations:0}
+}
+// The caller evaluates the smaller tail directly. A rounded underflowed scalar
+// has availability=false while its finite log remains independently available.
+fn sp_pair(logtail:f64,is_lower:bool,iterations:i64,method:i64)->CheckedSpecialPair with Mut,Div {
+ if !is_finite(logtail) || logtail>0.0 {return sp_empty(4,iterations,method)}
+ let tail=exp(logtail)
+ if !is_finite(tail) || tail<0.0 || tail>=1.0 {return sp_empty(4,iterations,method)}
+ let complement=1.0-tail
+ var log_complement:f64=0.0
+ var log_complement_ok=false
+ if tail>0.0 {
+  let logged=log1p_checked(-tail)
+  if logged.status!=0 {return sp_empty(4,iterations,method)}
+  log_complement=logged.value
+  log_complement_ok=true
+ }
+ var r=sp_empty(0,iterations,method)
+ if is_lower {
+  r.lower=tail;r.upper=complement;r.log_lower=logtail;r.log_upper=log_complement
+  r.lower_available=tail>0.0;r.upper_available=true
+  r.log_lower_available=true;r.log_upper_available=log_complement_ok
+ } else {
+  r.lower=complement;r.upper=tail;r.log_lower=log_complement;r.log_upper=logtail
+  r.lower_available=true;r.upper_available=tail>0.0
+  r.log_lower_available=log_complement_ok;r.log_upper_available=true
+ }
+ r
+}
+fn sp_gamma_series(a:f64,x:f64,budget:i64,tol:f64)->SpecialLog with Mut,Div,Panic {
+ let lx=ln_checked(x)
+ let gamma=sp_lgamma(a+1.0)
+ if lx.status!=0 || gamma.status!=0 {return SpecialLog{status:4,value:0.0,iterations:0}}
+ var term:f64=1.0
+ var sum:f64=1.0
+ var correction:f64=0.0
+ var n:i64=1
+ while n<=budget {
+  term=term*(x/(a+(n as f64)))
+  let adjusted=term-correction
+  let next=sum+adjusted
+  correction=(next-sum)-adjusted
+  sum=next
+  if !is_finite(term) || !is_finite(sum) || sum<=0.0 {return SpecialLog{status:4,value:0.0,iterations:n}}
+  if term<=sum*tol {
+   let ls=ln_checked(sum)
+   if ls.status!=0 {return SpecialLog{status:4,value:0.0,iterations:n}}
+   let value=(a*lx.value-x)-gamma.value+ls.value
+   if !is_finite(value) {return SpecialLog{status:4,value:0.0,iterations:n}}
+   return SpecialLog{status:0,value:value,iterations:n}
+  }
+  n=n+1
+ }
+ SpecialLog{status:3,value:0.0,iterations:budget}
+}
+fn sp_gamma_cf(a:f64,x:f64,budget:i64,tol:f64)->SpecialLog with Mut,Div,Panic {
+ let lx=ln_checked(x)
+ let gamma=sp_lgamma(a)
+ if lx.status!=0 || gamma.status!=0 {return SpecialLog{status:4,value:0.0,iterations:0}}
+ var b=x+1.0-a
+ var c:f64=1.0e300
+ var d=1.0/sp_small(b)
+ var h=d
+ var n:i64=1
+ while n<=budget {
+  let nf=n as f64
+  let an= -nf*(nf-a)
+  b=b+2.0
+  d=1.0/sp_small(an*d+b)
+  c=sp_small(b+an/c)
+  let ratio=d*c
+  h=h*ratio
+  if !is_finite(h) || !is_finite(ratio) {return SpecialLog{status:4,value:0.0,iterations:n}}
+  if sp_abs(ratio-1.0)<=tol {
+   if h<=0.0 {return SpecialLog{status:4,value:0.0,iterations:n}}
+   let lh=ln_checked(h)
+   if lh.status!=0 {return SpecialLog{status:4,value:0.0,iterations:n}}
+   let value=(a*lx.value-x)-gamma.value+lh.value
+   if !is_finite(value) {return SpecialLog{status:4,value:0.0,iterations:n}}
+   return SpecialLog{status:0,value:value,iterations:n}
+  }
+  n=n+1
+ }
+ SpecialLog{status:3,value:0.0,iterations:budget}
+}
+pub fn gamma_pq_checked(a:f64,x:f64,budget:i64,tol:f64)->CheckedSpecialPair with Mut,Div,Panic {
+ if !is_finite(a) || !is_finite(x) || !is_finite(tol) {return sp_empty(2,0,0)}
+ if a<=0.0 || x<0.0 || !sp_options(budget,tol) {return sp_empty(1,0,0)}
+ if a>1000000.0 {return sp_empty(5,0,0)}
+ if x==0.0 {return sp_endpoint(false)}
+ if x<a+1.0 {
+  let p=sp_gamma_series(a,x,budget,tol)
+  if p.status!=0 {return sp_empty(p.status,p.iterations,1)}
+  if p.value<= -0.6931471805599453 {return sp_pair(p.value,true,p.iterations,1)}
+  let remaining=budget-p.iterations
+  if remaining<1 {return sp_empty(3,p.iterations,2)}
+  let upper=sp_gamma_cf(a,x,remaining,tol)
+  if upper.status!=0 {return sp_empty(upper.status,p.iterations+upper.iterations,2)}
+  return sp_pair(upper.value,false,p.iterations+upper.iterations,2)
+ }
+ let upper=sp_gamma_cf(a,x,budget,tol)
+ if upper.status!=0 {return sp_empty(upper.status,upper.iterations,2)}
+ sp_pair(upper.value,false,upper.iterations,2)
+}
+fn sp_beta_cf(a:f64,b:f64,x:f64,budget:i64,tol:f64)->SpecialLog with Mut,Div,Panic {
+ var c:f64=1.0
+ var d=1.0/sp_small(1.0-(a+b)*x/(a+1.0))
+ var h=d
+ var m:i64=1
+ while m<=budget {
+  let mf=m as f64
+  let even=mf*(b-mf)*x/((a+2.0*mf-1.0)*(a+2.0*mf))
+  d=1.0/sp_small(1.0+even*d)
+  c=sp_small(1.0+even/c)
+  h=h*d*c
+  let odd= -(a+mf)*(a+b+mf)*x/((a+2.0*mf)*(a+2.0*mf+1.0))
+  d=1.0/sp_small(1.0+odd*d)
+  c=sp_small(1.0+odd/c)
+  let ratio=d*c
+  h=h*ratio
+  if !is_finite(h) || !is_finite(ratio) {return SpecialLog{status:4,value:0.0,iterations:m}}
+  if sp_abs(ratio-1.0)<=tol {
+   if h<=0.0 {return SpecialLog{status:4,value:0.0,iterations:m}}
+   let logged=ln_checked(h)
+   if logged.status!=0 {return SpecialLog{status:4,value:0.0,iterations:m}}
+   return SpecialLog{status:0,value:logged.value,iterations:m}
+  }
+  m=m+1
+ }
+ SpecialLog{status:3,value:0.0,iterations:budget}
+}
+pub fn beta_pq_checked(a:f64,b:f64,x:f64,budget:i64,tol:f64)->CheckedSpecialPair with Mut,Div,Panic {
+ if !is_finite(a) || !is_finite(b) || !is_finite(x) || !is_finite(tol) {return sp_empty(2,0,0)}
+ if a<=0.0 || b<=0.0 || x<0.0 || x>1.0 || !sp_options(budget,tol) {return sp_empty(1,0,0)}
+ if a>1000000.0 || b>1000000.0 {return sp_empty(5,0,0)}
+ if x==0.0 {return sp_endpoint(false)}
+ if x==1.0 {return sp_endpoint(true)}
+ let la=sp_lgamma(a)
+ let lb=sp_lgamma(b)
+ let lab=sp_lgamma(a+b)
+ let lx=ln_checked(x)
+ let ly=log1p_checked(-x)
+ let ln_a=ln_checked(a)
+ let ln_b=ln_checked(b)
+ if la.status!=0 || lb.status!=0 || lab.status!=0 || lx.status!=0 || ly.status!=0 || ln_a.status!=0 || ln_b.status!=0 {return sp_empty(4,0,3)}
+ let prefix=a*lx.value+b*ly.value-(la.value+lb.value-lab.value)
+ if !is_finite(prefix) {return sp_empty(4,0,3)}
+ var lower=x<(a+1.0)/(a+b+2.0)
+ var first:SpecialLog=SpecialLog{status:4,value:0.0,iterations:0}
+ var logshape:f64=0.0
+ if lower {first=sp_beta_cf(a,b,x,budget,tol);logshape=ln_a.value}
+ else {first=sp_beta_cf(b,a,1.0-x,budget,tol);logshape=ln_b.value}
+ if first.status!=0 {return sp_empty(first.status,first.iterations,3)}
+ let direct=prefix-logshape+first.value
+ if !is_finite(direct) {return sp_empty(4,first.iterations,3)}
+ if direct<= -0.6931471805599453 {return sp_pair(direct,lower,first.iterations,3)}
+ let remaining=budget-first.iterations
+ if remaining<1 {return sp_empty(3,first.iterations,4)}
+ var other:SpecialLog=SpecialLog{status:4,value:0.0,iterations:0}
+ if lower {other=sp_beta_cf(b,a,1.0-x,remaining,tol);logshape=ln_b.value}
+ else {other=sp_beta_cf(a,b,x,remaining,tol);logshape=ln_a.value}
+ if other.status!=0 {return sp_empty(other.status,first.iterations+other.iterations,4)}
+ sp_pair(prefix-logshape+other.value,!lower,first.iterations+other.iterations,4)
+}
+
+fn sp_inverse_empty(status:i64)->CheckedSpecialInverse {
+ CheckedSpecialInverse{status:status,value:0.0,lower:0.0,upper:0.0,iterations:0,forward_log_tail:0.0,forward_log_available:false}
+}
+fn sp_eval(is_beta:bool,a:f64,b:f64,x:f64,budget:i64,tol:f64)->CheckedSpecialPair with Mut,Div,Panic {
+ if is_beta {return beta_pq_checked(a,b,x,budget,tol)}
+ gamma_pq_checked(a,x,budget,tol)
+}
+fn sp_selected_log(r:&CheckedSpecialPair,upper:bool)->SpecialLog {
+ if r.status!=0 {return SpecialLog{status:r.status,value:0.0,iterations:r.iterations}}
+ if upper {
+  if r.log_upper_available {return SpecialLog{status:0,value:r.log_upper,iterations:r.iterations}}
+  if r.upper_available && r.upper==1.0 {return SpecialLog{status:0,value:0.0,iterations:r.iterations}}
+ } else {
+  if r.log_lower_available {return SpecialLog{status:0,value:r.log_lower,iterations:r.iterations}}
+  if r.lower_available && r.lower==1.0 {return SpecialLog{status:0,value:0.0,iterations:r.iterations}}
+ }
+ SpecialLog{status:4,value:0.0,iterations:r.iterations}
+}
+fn sp_inverse(is_beta:bool,a:f64,b:f64,p:f64,upper:bool,budget:i64,tol:f64)->CheckedSpecialInverse with Mut,Div,Panic {
+ if !is_finite(a) || !is_finite(b) || !is_finite(p) || !is_finite(tol) {return sp_inverse_empty(2)}
+ if a<=0.0 || (is_beta && b<=0.0) || p<0.0 || p>1.0 || !sp_options(budget,tol) {return sp_inverse_empty(1)}
+ if a>1000000.0 || (is_beta && b>1000000.0) {return sp_inverse_empty(5)}
+ if p==0.0 || p==1.0 {
+  let at_zero=if upper {p==1.0} else {p==0.0}
+  if !is_beta && !at_zero {return sp_inverse_empty(5)}
+  var endpoint=sp_inverse_empty(0)
+  endpoint.value=if at_zero {0.0} else {1.0}
+  endpoint.lower=endpoint.value;endpoint.upper=endpoint.value
+  endpoint.forward_log_available=p==1.0
+  return endpoint
+ }
+ let target=ln_checked(p)
+ if target.status!=0 {return sp_inverse_empty(4)}
+ var out=sp_inverse_empty(3)
+ var lo:f64=0.0
+ var hi=if is_beta {1.0} else if a>1.0 {a} else {1.0}
+ var bracketed=is_beta
+ while !bracketed && out.iterations<budget {
+  let sample=sp_eval(false,a,b,hi,budget,tol)
+  out.iterations=out.iterations+1
+  let observed=sp_selected_log(&sample,upper)
+  if observed.status!=0 {out.status=observed.status;out.lower=lo;out.upper=hi;return out}
+  bracketed=if upper {observed.value<=target.value} else {observed.value>=target.value}
+  if !bracketed {
+   lo=hi
+   let next=hi*2.0
+   if !is_finite(next) || next<=hi {out.status=5;out.lower=lo;out.upper=hi;return out}
+   hi=next
+  }
+ }
+ if !bracketed {out.lower=lo;out.upper=hi;return out}
+ while out.iterations<budget {
+  let midpoint=lo+(hi-lo)*0.5
+  if !is_finite(midpoint) || midpoint<=lo || midpoint>=hi {
+   out.status=5;out.lower=lo;out.upper=hi;return out
+  }
+  let sample=sp_eval(is_beta,a,b,midpoint,budget,tol)
+  out.iterations=out.iterations+1
+  let observed=sp_selected_log(&sample,upper)
+  if observed.status!=0 {out.status=observed.status;out.lower=lo;out.upper=hi;return out}
+  if upper {
+   if observed.value>target.value {lo=midpoint} else {hi=midpoint}
+  } else {
+   if observed.value>target.value {hi=midpoint} else {lo=midpoint}
+  }
+  let actual_log_available=if upper {sample.log_upper_available} else {sample.log_lower_available}
+  if actual_log_available && sp_abs(observed.value-target.value)<=tol && (hi-lo)/midpoint<=tol {
+   out.status=0;out.value=midpoint;out.lower=lo;out.upper=hi
+   out.forward_log_tail=observed.value;out.forward_log_available=true
+   return out
+  }
+ }
+ out.lower=lo;out.upper=hi
+ out
+}
+// Inverses target the caller-selected tail directly; no 1-p transformation.
+// Endpoint gamma quantiles at infinity return5; beta endpoints are finite0/1.
+// Bisection requires both relative bracket width and selected log-tail residual.
+pub fn gamma_inverse_checked(a:f64,p:f64,upper:bool,budget:i64,tol:f64)->CheckedSpecialInverse with Mut,Div,Panic {
+ sp_inverse(false,a,1.0,p,upper,budget,tol)
+}
+pub fn beta_inverse_checked(a:f64,b:f64,p:f64,upper:bool,budget:i64,tol:f64)->CheckedSpecialInverse with Mut,Div,Panic {
+ sp_inverse(true,a,b,p,upper,budget,tol)
+}
