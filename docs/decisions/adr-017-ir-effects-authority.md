@@ -1,4 +1,4 @@
-# ADR-013 — Efeitos de memória são declarados por opcode, numa única autoridade; passes consultam, nunca enumeram
+# ADR-017 — Efeitos de memória são declarados por opcode, numa única autoridade; passes consultam, nunca enumeram
 
 **Status:** proposto (2026-09-25)
 **Contexto de origem:** lição do PR triton-lang/triton#11964 (fechado por T. Raoux) e dos achados do Copilot naquele PR.

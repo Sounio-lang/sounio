@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Gate for ir::effects (ADR-013): the single authority for IR memory effects.
+# Gate for ir::effects (ADR-017): the single authority for IR memory effects.
 #
 # Scope: this gate protects exactly what feat/ir-effects-authority changed --
 # the new self-hosted/ir/effects.sio module and its one live caller,
 # ocp_sink_loads in opt_cleanup.sio. It does NOT enforce full migration of the
 # other four legacy side-effect tables (optimize.sio, const_prop.sio, dce.sio,
 # auto_vectorize.sio) or the memory_analysis.sio MemPtrOp table found during
-# review -- ADR-013 lists retiring those as later, separate migration steps
+# review -- ADR-017 lists retiring those as later, separate migration steps
 # (2-4), not part of this change. A gate that failed on their continued
 # existence would be checking a claim this PR never made.
 #

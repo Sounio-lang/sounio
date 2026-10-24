@@ -84,7 +84,7 @@ madaros-full-gate: build-madaros ## Build Madaros, then run the Stage1 end-to-en
 	@echo "→ Running Madaros full-functioning gate"
 	bash scripts/ci/madaros_full_gate.sh
 
-ir-effects-authority-gate: build-madaros ## Build Madaros, then verify ir::effects (ADR-013) via effects_self_test_runner.sio
+ir-effects-authority-gate: build-madaros ## Build Madaros, then verify ir::effects (ADR-017) via effects_self_test_runner.sio
 	@echo "→ Running ir::effects authority gate"
 	MADAROS_BIN=$(CURDIR)/artifacts/self-hosted/madaros bash scripts/ci/ir_effects_authority_gate.sh
 
