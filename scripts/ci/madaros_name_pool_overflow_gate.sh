@@ -48,19 +48,17 @@ fn main() -> i32 with IO {
 }
 SIO
 
-# (a) tiny id cap: must refuse.
-set +e
-( ulimit -s 1572864 2>/dev/null || true
-  SOUNIO_IR_NAME_POOL_LIMIT=8 "$MADAROS" build "$WORK/prog.sio" "$WORK/limited.elf" ) >"$WORK/limited.log" 2>&1
-limited_rc=$?
-set -e
-[[ "$limited_rc" -ne 0 ]] \
-  || fail "limit=8: build exited 0 (an exhausted name pool must refuse); log: $(tail -n 5 "$WORK/limited.log" | tr '\n' ' ')"
-grep -q "IR name-id pool overflowed" "$WORK/limited.log" \
-  || fail "limit=8: rc=$limited_rc but no 'IR name-id pool overflowed' diagnostic; log: $(tail -n 5 "$WORK/limited.log" | tr '\n' ' ')"
+# (a) tiny id cap: must refuse -- classified, not judged by exit status alone:
+# rc 1..123, the capacity diagnostic present, and no artifact written.
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
+sounio_capture_rc limited_rc "$WORK/limited.log" -- bash -c '
+  ulimit -s 1572864 2>/dev/null || true
+  SOUNIO_IR_NAME_POOL_LIMIT=8 exec "$1" build "$2" "$3"' _ "$MADAROS" "$WORK/prog.sio" "$WORK/limited.elf"
+sounio_expect_refusal "$limited_rc" "$WORK/limited.log" "$WORK/limited.elf" "IR name-id pool overflowed" \
+  || fail "limit=8: not a clean refusal: $(sounio_refusal_reason), rc=$limited_rc; log: $(tail -n 5 "$WORK/limited.log" | tr '\n' ' ')"
 grep -q "refusing" "$WORK/limited.log" \
-  || fail "limit=8: rc=$limited_rc but no 'refusing' in the diagnostic; log: $(tail -n 5 "$WORK/limited.log" | tr '\n' ' ')"
-[[ ! -e "$WORK/limited.elf" ]] || fail "limit=8: refused build left an output artifact ($WORK/limited.elf)"
+  || fail "limit=8: refused without saying it refuses to emit; log: $(tail -n 5 "$WORK/limited.log" | tr '\n' ' ')"
 
 # (b) no limit: same program builds and runs.
 ( ulimit -s 1572864 2>/dev/null || true
