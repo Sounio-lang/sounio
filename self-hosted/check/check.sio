@@ -1487,7 +1487,12 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     // before its own collect-items pass, so this is the correct, single
     // reset point for CHECKER_USE_MODULE_HASH (see its own comment).
     checker_use_module_reset()
-    type_env_reset_into(&!(*raw).env)
+    // Assigned, not reset in place: `raw` is fresh heap_alloc memory, and in a
+    // Madaros-built compiler the `env` field is a reference that is still null
+    // there, so type_env_reset_into(&!(*raw).env) would write through handle 0.
+    // One copy at init; lookups and binds stay in place (3c3514a91).
+    // scripts/ci/checker_init_in_place_fields_gate.sh requires the assignment.
+    (*raw).env = type_env_new()
     (*raw).borrows = borrow_env_new()
     (*raw).units = register_builtin_units(unit_registry_new())
     (*raw).refinements = refinement_table_new()
@@ -1551,6 +1556,18 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).current_impl_type = ty_error()
     (*raw).current_effects = [0; 8]
     (*raw).current_effect_count = 0
+    // checker_new() sets these five; this initializer did not. Under the seed
+    // the zeroed allocation passed for them (an inline empty Name, empty
+    // arrays), so nothing showed. In a Madaros-built compiler an aggregate
+    // field is a reference, so a zeroed one is null: gen2 trapped (ud2, rc 132)
+    // on `let saved_fn_name = (*c).current_fn_name` in
+    // checker_collect_fn_def_inplace for any program with a function (#2966).
+    // The w046 arrays start at -1, not 0, as in checker_new().
+    (*raw).current_fn_name = empty_name()
+    (*raw).current_type_params = empty_type_param_buf()
+    (*raw).w046_files = [0 - 1; 64]
+    (*raw).w046_starts = [0 - 1; 64]
+    (*raw).w046_count = 0
     (*raw).current_sig_id = 0 - 1
     (*raw).current_sig_name = empty_name()
     (*raw).in_closure_body = false
@@ -31535,7 +31552,11 @@ impl Checker {
 
         // Push scope for parameters
         let outer_borrow_count = c.borrows.count
-        type_env_push_scope_mut(&!c.env)
+        // By value here, not type_env_push_scope_mut(&!c.env): the
+        // `(&!c) as *mut Checker` above is still an active exclusive borrow
+        // for the Madaros borrow checker, which refuses a second one (E038
+        // on main.sio's own check rung). This is the by-value oracle path.
+        c.env = c.env.push_scope()
         c.borrows = c.borrows.push_scope()
         c = c.push_const_scope()
 

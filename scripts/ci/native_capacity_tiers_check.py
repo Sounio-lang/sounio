@@ -269,9 +269,13 @@ def main():
     if not re.search(rc23, cgx):
         fail("rc23_rodata_overflow_check_missing")
 
-    # -- 6. the 0x400000 ELF LOAD BASE ADDRESS must survive as a literal ---
+    # -- 6. the 0x400000 ELF LOAD BASE ADDRESS ---------------------------
     # This is the trap: 4194304 is BOTH the retired 4 MiB ELF capacity and the
-    # ELF load address. Every remaining occurrence must be a plain argument.
+    # ELF load address. The load base now has one source of truth,
+    # nc_elf_base_addr(), which returns the handle capacity NC_HANDLE_CAPACITY
+    # (0x400000 unless SOUNIO_NV2_HANDLE_LOG2 raises both; #2966). The literal
+    # may appear only in that capacity's declaration and configuration, never
+    # as a bound, and every ELF writer call takes the accessor.
     occ = []
     for line in cgx.splitlines():
         stripped = line.strip()
@@ -279,15 +283,21 @@ def main():
             continue
         if re.search(r"\b%d\b" % base_addr, stripped):
             occ.append(stripped)
-    if len(occ) != 6:
-        fail("elf_base_addr_occurrence_count_%d" % len(occ))
-    arg_form = re.compile(r"(?:,\s*%d\)|,\s*%d,|let base_addr: i64 = %d)"
-                          % (base_addr, base_addr, base_addr))
+    allowed = re.compile(r"^(?:var NC_HANDLE_CAPACITY: i64 = %d|NC_HANDLE_CAPACITY = %d|"
+                         r"if str_eq\(v, \"22\"\) \{ cap = %d \})$"
+                         % (base_addr, base_addr, base_addr))
     for line in occ:
         if re.search(r"[<>]=?\s*%d\b" % base_addr, line):
             fail("elf_base_addr_used_as_bound")
-        if not arg_form.search(line):
+        if not allowed.search(line):
             fail("elf_base_addr_unexpected_form")
+    if len(occ) != 3:
+        fail("elf_base_addr_occurrence_count_%d" % len(occ))
+    if not re.search(r"^fn nc_elf_base_addr\(\) -> i64 with Mut \{ NC_HANDLE_CAPACITY \}$", cgx, re.MULTILINE):
+        fail("nc_elf_base_addr_accessor_missing")
+    base_calls = len(re.findall(r"nc_elf_base_addr\(\)", cgx)) - 1
+    if base_calls != 7:
+        fail("nc_elf_base_addr_call_count_%d" % base_calls)
 
     check_1646(frame, cgx, cg, irsrc, elfsrc, lowerir, driver,
                exp_return_jumps, exp_strtab, exp_drv_label)
