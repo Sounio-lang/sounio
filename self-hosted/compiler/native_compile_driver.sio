@@ -8353,23 +8353,80 @@ fn drv_emit_rep_movsb() with Mut, Div, Panic {
     drv_emit_byte(164)
 }
 
-// heap_alloc(n_bytes) — inline mmap syscall
-// arg0_reg = n_bytes vreg; dst = result vreg
-fn drv_emit_heap_alloc(dst: i64, arg0_reg: i64) with Mut, Panic, Div {
-    drv_core_load_temp_to_rax(arg0_reg)
-    drv_emit_mov_reg_reg(6, 0)    // mov rsi, rax  (size)
+// Native heap ABI (#874), identical on every engine -- see
+// self-hosted/native/codegen_x86_linux.sio (native_v2_heap_header_bytes):
+//   base = mmap(page_round_up(n + 16)); [base+8] = mapping length (= ptr-8);
+//   ptr = base + 16 (16-byte aligned, zero filled).
+// heap_alloc(n<=0 / overflow / mmap failure) = 0; heap_free(0) is a no-op;
+// heap_realloc(0, n) = heap_alloc(n); heap_realloc(p, n<=0 / overflow /
+// mremap failure) = 0 with the old block intact. Before #874 this driver
+// returned the raw mapping, made heap_free a no-op and grew by copying
+// new_size bytes out of the (smaller) old mapping.
+fn drv_emit_jcc_rel32_placeholder(cc: i64) -> i64 with Mut, Div, Panic {
+    drv_emit_byte(0x0f)
+    drv_emit_byte(cc)
+    let at = DRV_CODE_LEN
+    drv_emit_u32_le(0)
+    at
+}
+
+fn drv_emit_jmp_rel32_placeholder() -> i64 with Mut, Div, Panic {
+    drv_emit_byte(0xe9)
+    let at = DRV_CODE_LEN
+    drv_emit_u32_le(0)
+    at
+}
+
+fn drv_patch_rel32_here(at: i64) with Mut, Div, Panic {
+    drv_patch_u32_le(at, DRV_CODE_LEN - (at + 4))
+}
+
+// rax = requested size -> rax = user ptr or 0.
+fn drv_emit_heap_alloc_core_rax() with Mut, Div, Panic {
+    drv_emit_byte(0x48); drv_emit_byte(0x85); drv_emit_byte(0xc0)   // test rax, rax
+    let p_nonpos = drv_emit_jcc_rel32_placeholder(0x8e)              // jle fail
+    drv_emit_byte(0x48); drv_emit_byte(0x05); drv_emit_u32_le(4111)  // add rax, 16 + 4095
+    drv_emit_byte(0x48); drv_emit_byte(0x85); drv_emit_byte(0xc0)   // test rax, rax
+    let p_ovf = drv_emit_jcc_rel32_placeholder(0x8e)                 // jle fail (overflow)
+    drv_emit_byte(0x48); drv_emit_byte(0x25); drv_emit_u32_le(0 - 4096) // and rax, -4096
+    drv_emit_mov_reg_reg(6, 0)    // mov rsi, rax  (mapping length)
     drv_emit_xor_rdi_rdi()        // mov rdi, 0    (addr=NULL)
     drv_emit_mov_reg_imm(2, 3)    // mov rdx, 3    (PROT_READ|PROT_WRITE)
     drv_emit_mov_r10_imm8(34)     // mov r10, 0x22 (MAP_PRIVATE|MAP_ANON)
     drv_emit_mov_r8_neg1()        // mov r8, -1    (fd=-1)
     drv_emit_xor_r9_r9()          // xor r9, r9    (offset=0)
-    drv_emit_mov_rax_imm(9)       // mov rax, 9    (SYS_mmap)
+    drv_emit_mov_rax_imm(9)       // mov rax, 9    (SYS_mmap; rsi survives)
     drv_emit_syscall()
+    drv_emit_byte(0x48); drv_emit_byte(0x85); drv_emit_byte(0xc0)   // test rax, rax
+    let p_err = drv_emit_jcc_rel32_placeholder(0x88)                 // js fail
+    drv_emit_byte(0x48); drv_emit_byte(0x89); drv_emit_byte(0x70); drv_emit_byte(8)  // mov [rax+8], rsi
+    drv_emit_byte(0x48); drv_emit_byte(0x83); drv_emit_byte(0xc0); drv_emit_byte(16) // add rax, 16
+    let p_done = drv_emit_jmp_rel32_placeholder()
+    drv_patch_rel32_here(p_nonpos)
+    drv_patch_rel32_here(p_ovf)
+    drv_patch_rel32_here(p_err)
+    drv_emit_xor_rax_rax()        // fail: rax = 0
+    drv_patch_rel32_here(p_done)
+}
+
+// heap_alloc(n_bytes) — arg0_reg = n_bytes vreg; dst = result vreg
+fn drv_emit_heap_alloc(dst: i64, arg0_reg: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(arg0_reg)
+    drv_emit_heap_alloc_core_rax()
     if dst >= 0 { drv_core_store_rax_to_temp(dst) }
 }
 
-// heap_free(ptr) — no-op, return 0
+// heap_free(ptr) — munmap(ptr-16, [ptr-8]); NULL is a no-op. Returns 0.
 fn drv_emit_heap_free(dst: i64, arg0_reg: i64) with Mut, Panic, Div {
+    drv_core_load_temp_to_rax(arg0_reg)
+    drv_emit_byte(0x48); drv_emit_byte(0x85); drv_emit_byte(0xc0)   // test rax, rax
+    let p_null = drv_emit_jcc_rel32_placeholder(0x84)                // jz done
+    drv_emit_byte(0x48); drv_emit_byte(0x83); drv_emit_byte(0xe8); drv_emit_byte(16) // sub rax, 16
+    drv_emit_mov_reg_reg(7, 0)    // mov rdi, rax  (mapping base)
+    drv_emit_byte(0x48); drv_emit_byte(0x8b); drv_emit_byte(0x77); drv_emit_byte(8)  // mov rsi, [rdi+8]
+    drv_emit_mov_rax_imm(11)      // SYS_munmap
+    drv_emit_syscall()
+    drv_patch_rel32_here(p_null)
     drv_emit_xor_rax_rax()
     if dst >= 0 { drv_core_store_rax_to_temp(dst) }
 }
@@ -8400,27 +8457,39 @@ fn drv_emit_write_i64(dst: i64, arg0_reg: i64) with Mut, Panic, Div {
     if dst >= 0 { drv_core_store_rax_to_temp(dst) }
 }
 
-// heap_realloc(old_ptr, new_size) — mmap new region, copy old_ptr content, return new_ptr
+// heap_realloc(old_ptr, new_size) — mremap per the #874 heap ABI above.
 fn drv_emit_heap_realloc(dst: i64, arg0_reg: i64) with Mut, Panic, Div {
-    // mmap(NULL, new_size, PROT_RW, MAP_PRIVATE|MAP_ANON, -1, 0)
-    drv_core_load_temp_to_rax(arg0_reg + 1)
-    drv_emit_mov_reg_reg(6, 0)    // mov rsi, rax  (new_size)
-    drv_emit_xor_rdi_rdi()
-    drv_emit_mov_reg_imm(2, 3)
-    drv_emit_mov_r10_imm8(34)
-    drv_emit_mov_r8_neg1()
-    drv_emit_xor_r9_r9()
-    drv_emit_mov_rax_imm(9)
-    drv_emit_syscall()             // rax = new_ptr
-    // save new_ptr; set up for rep movsb (rdi=new_ptr, rsi=old_ptr, rcx=new_size)
-    drv_emit_mov_reg_reg(7, 0)    // mov rdi, rax  (new_ptr = dest)
-    drv_emit_byte(87)             // push rdi      (save new_ptr)
     drv_core_load_temp_to_rax(arg0_reg)
-    drv_emit_mov_reg_reg(6, 0)    // mov rsi, rax  (old_ptr = source)
-    drv_core_load_temp_to_rax(arg0_reg + 1)
-    drv_emit_mov_reg_reg(1, 0)    // mov rcx, rax  (new_size = count)
-    drv_emit_rep_movsb()          // rep movsb
-    drv_emit_byte(88)             // pop rax       (new_ptr)
+    drv_emit_mov_reg_reg(7, 0)    // mov rdi, rax  (old_ptr)
+    drv_core_load_temp_to_rax(arg0_reg + 1)                          // rax = new_size
+    drv_emit_byte(0x48); drv_emit_byte(0x85); drv_emit_byte(0xff)   // test rdi, rdi
+    let p_alloc = drv_emit_jcc_rel32_placeholder(0x84)               // jz alloc
+    drv_emit_byte(0x48); drv_emit_byte(0x85); drv_emit_byte(0xc0)   // test rax, rax
+    let p_nonpos = drv_emit_jcc_rel32_placeholder(0x8e)              // jle fail
+    drv_emit_byte(0x48); drv_emit_byte(0x05); drv_emit_u32_le(4111)  // add rax, 16 + 4095
+    drv_emit_byte(0x48); drv_emit_byte(0x85); drv_emit_byte(0xc0)   // test rax, rax
+    let p_ovf = drv_emit_jcc_rel32_placeholder(0x8e)                 // jle fail (overflow)
+    drv_emit_byte(0x48); drv_emit_byte(0x25); drv_emit_u32_le(0 - 4096) // and rax, -4096
+    drv_emit_mov_reg_reg(2, 0)    // mov rdx, rax  (new length; survives syscall)
+    drv_emit_byte(0x48); drv_emit_byte(0x83); drv_emit_byte(0xef); drv_emit_byte(16) // sub rdi, 16
+    drv_emit_byte(0x48); drv_emit_byte(0x8b); drv_emit_byte(0x77); drv_emit_byte(8)  // mov rsi, [rdi+8]
+    drv_emit_byte(0x41); drv_emit_byte(0xba); drv_emit_u32_le(1)     // mov r10d, 1 (MREMAP_MAYMOVE)
+    drv_emit_mov_rax_imm(25)      // SYS_mremap
+    drv_emit_syscall()
+    drv_emit_byte(0x48); drv_emit_byte(0x85); drv_emit_byte(0xc0)   // test rax, rax
+    let p_err = drv_emit_jcc_rel32_placeholder(0x88)                 // js fail
+    drv_emit_byte(0x48); drv_emit_byte(0x89); drv_emit_byte(0x50); drv_emit_byte(8)  // mov [rax+8], rdx
+    drv_emit_byte(0x48); drv_emit_byte(0x83); drv_emit_byte(0xc0); drv_emit_byte(16) // add rax, 16
+    let p_done1 = drv_emit_jmp_rel32_placeholder()
+    drv_patch_rel32_here(p_alloc)
+    drv_emit_heap_alloc_core_rax() // alloc: rax = new_size
+    let p_done2 = drv_emit_jmp_rel32_placeholder()
+    drv_patch_rel32_here(p_nonpos)
+    drv_patch_rel32_here(p_ovf)
+    drv_patch_rel32_here(p_err)
+    drv_emit_xor_rax_rax()        // fail: rax = 0
+    drv_patch_rel32_here(p_done1)
+    drv_patch_rel32_here(p_done2)
     if dst >= 0 { drv_core_store_rax_to_temp(dst) }
 }
 

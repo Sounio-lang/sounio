@@ -1,0 +1,100 @@
+//@ run-pass
+//@ expect-stdout: heap_abi_align16_realloc: PASS
+//@ description: #874 native heap ABI -- 16-byte-aligned zeroed payloads, heap_realloc grow/shrink/null/refusal, heap_free(NULL)
+
+// Witness for the native heap ABI documented in
+// self-hosted/native/codegen_x86_linux.sio (native_v2_heap_header_bytes):
+// payload = mmap base + 16, mapping length at payload - 8.
+// Before #874: Madaros compiled heap_realloc to a ud2 stub (SIGILL, rc=132)
+// and both engines returned payloads that were only 8-byte aligned.
+
+fn check(ok: bool, what: string, fails: i64) -> i64 with IO {
+    if ok { return fails }
+    print("FAIL ")
+    print(what)
+    print("\n")
+    fails + 1
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    var fails: i64 = 0
+
+    // heap_alloc: aligned, writable, zeroed.
+    let p = heap_alloc(24) as *mut i64
+    fails = check((p as i64) != 0, "alloc non-null", fails)
+    fails = check((p as i64) % 16 == 0, "alloc align16", fails)
+    fails = check(read_i64(p, 0) == 0 && read_i64(p, 2) == 0, "alloc zeroed", fails)
+    write_i64(p, 0, 11)
+    write_i64(p, 1, 22)
+    write_i64(p, 2, 33)
+
+    // Explicit refusals: zero and negative sizes give NULL.
+    fails = check((heap_alloc(0) as i64) == 0, "alloc(0) null", fails)
+    fails = check((heap_alloc(0 - 8) as i64) == 0, "alloc(-8) null", fails)
+
+    // Grow across many pages: contents kept, alignment kept, growth zeroed.
+    let q = heap_realloc(p as *mut i8, 80000) as *mut i64
+    fails = check((q as i64) != 0, "grow non-null", fails)
+    fails = check((q as i64) % 16 == 0, "grow align16", fails)
+    fails = check(read_i64(q, 0) == 11 && read_i64(q, 1) == 22 && read_i64(q, 2) == 33, "grow preserves", fails)
+    fails = check(read_i64(q, 3) == 0 && read_i64(q, 9999) == 0, "grow zero filled", fails)
+    write_i64(q, 9999, 7)
+    fails = check(read_i64(q, 9999) == 7, "grow tail writable", fails)
+
+    // Refused resize leaves the old block intact.
+    fails = check((heap_realloc(q as *mut i8, 0) as i64) == 0, "realloc(p,0) null", fails)
+    fails = check(read_i64(q, 0) == 11 && read_i64(q, 9999) == 7, "refused realloc keeps block", fails)
+
+    // Shrink: prefix kept, alignment kept.
+    let r = heap_realloc(q as *mut i8, 16) as *mut i64
+    fails = check((r as i64) % 16 == 0, "shrink align16", fails)
+    fails = check(read_i64(r, 0) == 11 && read_i64(r, 1) == 22, "shrink preserves", fails)
+
+    // heap_realloc(NULL, n) behaves as heap_alloc(n).
+    let z = heap_realloc(0 as *mut i8, 40) as *mut i64
+    fails = check((z as i64) != 0 && (z as i64) % 16 == 0, "realloc(null) allocates aligned", fails)
+    fails = check(read_i64(z, 4) == 0, "realloc(null) zeroed", fails)
+
+    // Many small blocks: every one aligned (no drift from the header).
+    var i: i64 = 1
+    while i <= 64 {
+        let b = heap_alloc(i * 3) as *mut i64
+        fails = check((b as i64) % 16 == 0, "small alloc align16", fails)
+        heap_free(b as *mut u8)
+        i = i + 1
+    }
+
+    // HeapVec-style doubling growth through heap_realloc.
+    var cap: i64 = 4
+    var len: i64 = 0
+    var v = heap_alloc(cap * 8) as *mut i64
+    while len < 5000 {
+        if len >= cap {
+            cap = cap * 2
+            v = heap_realloc(v as *mut i8, cap * 8) as *mut i64
+            fails = check((v as i64) % 16 == 0, "vec growth align16", fails)
+        }
+        write_i64(v, len, len * 3 + 1)
+        len = len + 1
+    }
+    var sum: i64 = 0
+    var k: i64 = 0
+    while k < len {
+        sum = sum + read_i64(v, k)
+        k = k + 1
+    }
+    fails = check(sum == 37497500, "vec growth contents", fails)
+
+    // heap_free(NULL) is a no-op; valid blocks are released.
+    heap_free(0 as *mut u8)
+    heap_free(r as *mut u8)
+    heap_free(z as *mut u8)
+    heap_free(v as *mut u8)
+
+    if fails == 0 {
+        print("heap_abi_align16_realloc: PASS\n")
+        return 0
+    }
+    print("heap_abi_align16_realloc: FAIL\n")
+    1
+}

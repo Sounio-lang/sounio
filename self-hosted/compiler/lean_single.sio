@@ -13712,48 +13712,116 @@ fn emit_mmap_len_in_rax_x86() with Mut {
     em(0x0f); em(0x05)                      // syscall
 }
 
-fn emit_heap_alloc_x86() with Mut {
-    // rax = requested size. Allocate size+8 via mmap, write header, return user ptr.
-    emit_rtmmap_count_x86()
-    em(0x48); em(0x83); em(0xc0); em(8)     // add rax, 8 (total = size + header)
+// Native heap ABI (#874), identical on every engine -- see
+// self-hosted/native/codegen_x86_linux.sio (native_v2_heap_header_bytes):
+//   base = mmap(page_round_up(n + 16)); [base+8] = mapping length (= ptr-8);
+//   ptr = base + 16 (16-byte aligned, zero filled).
+// heap_alloc(n<=0 / overflow / mmap failure) = 0; heap_free(0) is a no-op;
+// heap_realloc(0, n) = heap_alloc(n); heap_realloc(p, n<=0 / overflow /
+// mremap failure) = 0 with the old block intact. Before #874 the payload was
+// base+8 (8-byte aligned) and a failed mmap was written through.
+fn emit_heap_alloc_core_x86() with Mut, Panic {
+    // rax = requested size -> rax = user ptr or 0.
+    em(0x48); em(0x85); em(0xc0)             // test rax, rax
+    em(0x0f); em(0x8e)                       // jle fail
+    let p_nonpos = CL
+    em32(0)
+    em(0x48); em(0x05); em32(4111)           // add rax, 16 + 4095
+    em(0x48); em(0x85); em(0xc0)             // test rax, rax
+    em(0x0f); em(0x8e)                       // jle fail (overflow)
+    let p_ovf = CL
+    em32(0)
+    em(0x48); em(0x25); em32(0 - 4096)       // and rax, -4096 (mapping length)
     em(0x48); em(0x89); em(0xc6)             // mov rsi, rax (mmap size arg)
-    em(0x50)                                  // push rax (save total size)
+    em(0x50)                                  // push rax (save mapping length)
     em(0x48); em(0x31); em(0xff)             // xor rdi, rdi (addr = NULL)
     em(0xba); em32(3)                        // mov edx, 3 (PROT_READ|PROT_WRITE)
     em(0x41); em(0xba); em32(0x22)           // mov r10d, 0x22 (MAP_PRIVATE|MAP_ANON)
     em(0x49); em(0xc7); em(0xc0); em32(-1)  // mov r8, -1 (fd)
     em(0x4d); em(0x31); em(0xc9)             // xor r9, r9 (offset)
     em(0xb8); em32(9)                        // mov eax, 9 (SYS_mmap)
-    em(0x0f); em(0x05)                       // syscall → rax = mmap base
-    em(0x59)                                  // pop rcx (total size)
-    em(0x48); em(0x89); em(0x08)             // mov [rax], rcx (write header)
-    em(0x48); em(0x83); em(0xc0); em(8)     // add rax, 8 (return user ptr)
+    em(0x0f); em(0x05)                       // syscall -> rax = mmap base
+    em(0x59)                                  // pop rcx (mapping length)
+    em(0x48); em(0x85); em(0xc0)             // test rax, rax
+    em(0x0f); em(0x88)                       // js fail (mmap error)
+    let p_err = CL
+    em32(0)
+    em(0x48); em(0x89); em(0x48); em(8)     // mov [rax+8], rcx (header)
+    em(0x48); em(0x83); em(0xc0); em(16)    // add rax, 16 (user ptr)
+    em(0xe9)                                  // jmp done
+    let p_done = CL
+    em32(0)
+    em32_at(p_nonpos, CL - (p_nonpos + 4))
+    em32_at(p_ovf, CL - (p_ovf + 4))
+    em32_at(p_err, CL - (p_err + 4))
+    em(0x31); em(0xc0)                       // fail: xor eax, eax
+    em32_at(p_done, CL - (p_done + 4))
 }
 
-fn emit_heap_free_x86() with Mut {
-    // rax = user pointer. Read header at [ptr-8], munmap(base, total).
-    em(0x48); em(0x83); em(0xe8); em(8)     // sub rax, 8 (back to mmap base)
+fn emit_heap_alloc_x86() with Mut, Panic {
+    // rax = requested size. rax = 16-byte-aligned zeroed user ptr or 0.
+    emit_rtmmap_count_x86()
+    emit_heap_alloc_core_x86()
+}
+
+fn emit_heap_free_x86() with Mut, Panic {
+    // rax = user pointer (0 is a no-op). munmap(ptr-16, [ptr-8]).
+    em(0x48); em(0x85); em(0xc0)             // test rax, rax
+    em(0x0f); em(0x84)                       // jz done
+    let p_null = CL
+    em32(0)
+    em(0x48); em(0x83); em(0xe8); em(16)    // sub rax, 16 (mmap base)
     em(0x48); em(0x89); em(0xc7)             // mov rdi, rax (munmap addr)
-    em(0x48); em(0x8b); em(0x37)             // mov rsi, [rdi] (total size)
+    em(0x48); em(0x8b); em(0x77); em(8)     // mov rsi, [rdi+8] (mapping length)
     em(0xb8); em32(11)                       // mov eax, 11 (SYS_munmap)
     em(0x0f); em(0x05)                       // syscall
+    em32_at(p_null, CL - (p_null + 4))
 }
 
-fn emit_heap_realloc_x86() with Mut {
-    // stack = [old_user_ptr], rax = new_size.
-    // mremap(old_base, old_total, new_total, MREMAP_MAYMOVE)
+fn emit_heap_realloc_x86() with Mut, Panic {
+    // stack = [old_user_ptr], rax = new_size -> rax = new user ptr or 0.
     emit_rtmmap_count_x86()
-    em(0x48); em(0x83); em(0xc0); em(8)     // add rax, 8 (new_total = new_size + header)
-    em(0x48); em(0x89); em(0xc2)             // mov rdx, rax (new_total for mremap arg3)
-    em(0x49); em(0x89); em(0xc0)             // mov r8, rax (save new_total)
     em(0x5f)                                  // pop rdi (old_user_ptr)
-    em(0x48); em(0x83); em(0xef); em(8)     // sub rdi, 8 (old mmap base)
-    em(0x48); em(0x8b); em(0x37)             // mov rsi, [rdi] (old_total)
+    em(0x48); em(0x85); em(0xff)             // test rdi, rdi
+    em(0x0f); em(0x84)                       // jz alloc (realloc(NULL, n))
+    let p_alloc = CL
+    em32(0)
+    em(0x48); em(0x85); em(0xc0)             // test rax, rax
+    em(0x0f); em(0x8e)                       // jle fail
+    let p_nonpos = CL
+    em32(0)
+    em(0x48); em(0x05); em32(4111)           // add rax, 16 + 4095
+    em(0x48); em(0x85); em(0xc0)             // test rax, rax
+    em(0x0f); em(0x8e)                       // jle fail (overflow)
+    let p_ovf = CL
+    em32(0)
+    em(0x48); em(0x25); em32(0 - 4096)       // and rax, -4096 (new mapping length)
+    em(0x48); em(0x89); em(0xc2)             // mov rdx, rax (new length; survives syscall)
+    em(0x48); em(0x83); em(0xef); em(16)    // sub rdi, 16 (old mmap base)
+    em(0x48); em(0x8b); em(0x77); em(8)     // mov rsi, [rdi+8] (old length)
     em(0x41); em(0xba); em32(1)              // mov r10d, 1 (MREMAP_MAYMOVE)
     em(0xb8); em32(25)                       // mov eax, 25 (SYS_mremap)
-    em(0x0f); em(0x05)                       // syscall → rax = new mmap base
-    em(0x4c); em(0x89); em(0x00)             // mov [rax], r8 (write new header)
-    em(0x48); em(0x83); em(0xc0); em(8)     // add rax, 8 (return user ptr)
+    em(0x0f); em(0x05)                       // syscall -> rax = new mmap base
+    em(0x48); em(0x85); em(0xc0)             // test rax, rax
+    em(0x0f); em(0x88)                       // js fail (mremap error)
+    let p_err = CL
+    em32(0)
+    em(0x48); em(0x89); em(0x50); em(8)     // mov [rax+8], rdx (header)
+    em(0x48); em(0x83); em(0xc0); em(16)    // add rax, 16 (user ptr)
+    em(0xe9)                                  // jmp done
+    let p_done1 = CL
+    em32(0)
+    em32_at(p_alloc, CL - (p_alloc + 4))
+    emit_heap_alloc_core_x86()               // alloc: rax = new_size
+    em(0xe9)                                  // jmp done
+    let p_done2 = CL
+    em32(0)
+    em32_at(p_nonpos, CL - (p_nonpos + 4))
+    em32_at(p_ovf, CL - (p_ovf + 4))
+    em32_at(p_err, CL - (p_err + 4))
+    em(0x31); em(0xc0)                       // fail: xor eax, eax
+    em32_at(p_done1, CL - (p_done1 + 4))
+    em32_at(p_done2, CL - (p_done2 + 4))
 }
 
 // ============================================================================
@@ -40390,8 +40458,10 @@ fn emit_seq_set_slots_a64(slot_s: i64, slot_idx: i64, slot_v: i64) with Mut, Pan
 
 
 fn emit_heap_alloc_a64() with Mut {
-    // x0 = requested size. Allocate size+8 via mmap, write header, return user ptr.
-    em32(0x91002000)               // add x0, x0, #8 (total = size + header)
+    // x0 = requested size. Allocate size+16 via mmap, write the length at
+    // [base+8] (= ptr-8) and return base+16: the #874 heap ABI (16-byte
+    // aligned payload), same layout as emit_heap_alloc_x86.
+    em32(0x91004000)               // add x0, x0, #16 (total = size + header)
     em32(0xAA0003E9)               // mov x9, x0 (save total size in x9)
     em32(0xAA0003E1)               // mov x1, x0 (mmap size arg)
     em32(0xD2800000)               // movz x0, #0 (addr = NULL)
@@ -40409,14 +40479,14 @@ fn emit_heap_alloc_a64() with Mut {
         em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8) // movz x8, #222 (SYS_mmap Linux)
     }
     emit_syscall_a64()             // x0 = mmap base
-    em32(0xF9000009)               // str x9, [x0] (write header)
-    em32(0x91002000)               // add x0, x0, #8 (return user ptr)
+    em32(0xF9000409)               // str x9, [x0, #8] (write header)
+    em32(0x91004000)               // add x0, x0, #16 (return user ptr)
 }
 
 fn emit_heap_free_a64() with Mut {
-    // x0 = user pointer. Read header at [ptr-8], munmap(base, total).
-    em32(0xD1002000)               // sub x0, x0, #8 (back to mmap base)
-    em32(0xF9400001)               // ldr x1, [x0] (total size)
+    // x0 = user pointer. Read header at [ptr-8], munmap(ptr-16, total).
+    em32(0xD1004000)               // sub x0, x0, #16 (back to mmap base)
+    em32(0xF9400401)               // ldr x1, [x0, #8] (total size)
     if TARGET_OS == 2 {
         emit_imm64_reg_a64(16, 73)
     } else {
@@ -40428,19 +40498,19 @@ fn emit_heap_free_a64() with Mut {
 fn emit_heap_realloc_a64() with Mut {
     // x10 = old_user_ptr (saved by caller), x0 = new_size.
     // Linux mremap(old_base, old_total, new_total, MREMAP_MAYMOVE)
-    em32(0x91002000)               // add x0, x0, #8 (new_total)
+    em32(0x91004000)               // add x0, x0, #16 (new_total)
     em32(0xAA0003E9)               // mov x9, x0 (save new_total in x9)
-    // x10 = old_user_ptr, x0 = new_size (already added 8 above)
-    em32(0xD100214A)               // sub x10, x10, #8 (old mmap base)
-    em32(0xF940014B)               // ldr x11, [x10] (old_total)
+    // x10 = old_user_ptr, x0 = new_size (already added 16 above)
+    em32(0xD100414A)               // sub x10, x10, #16 (old mmap base)
+    em32(0xF940054B)               // ldr x11, [x10, #8] (old_total)
     em32(0xAA0A03E0)               // mov x0, x10 (old base → arg1)
     em32(0xAA0B03E1)               // mov x1, x11 (old_total → arg2)
     em32(0xAA0903E2)               // mov x2, x9 (new_total → arg3)
     em32(0xD2800023)               // movz x3, #1 (MREMAP_MAYMOVE)
     em32(0xD2800000 | ((216 & 0xFFFF) << 5) | 8) // movz x8, #216 (SYS_mremap Linux)
     emit_syscall_a64()             // x0 = new mmap base
-    em32(0xF9000009)               // str x9, [x0] (write new header)
-    em32(0x91002000)               // add x0, x0, #8 (return user ptr)
+    em32(0xF9000409)               // str x9, [x0, #8] (write new header)
+    em32(0x91004000)               // add x0, x0, #16 (return user ptr)
 }
 
 fn compile_acknowledge_call_a64(call_tok: i64) with IO, Mut, Panic, Div {

@@ -1313,18 +1313,18 @@ fn name_is_heap_free(n: Name) -> bool with Mut, Panic, Div {
 
 fn name_is_heap_realloc(n: Name) -> bool with Mut, Panic, Div {
     if n.len != 12 { return false }
-    if n.buf[0] != 104 as i8 { return false }
-    if n.buf[1] != 101 as i8 { return false }
-    if n.buf[2] != 97 as i8 { return false }
-    if n.buf[3] != 112 as i8 { return false }
-    if n.buf[4] != 95 as i8 { return false }
-    if n.buf[5] != 114 as i8 { return false }
-    if n.buf[6] != 101 as i8 { return false }
-    if n.buf[7] != 97 as i8 { return false }
-    if n.buf[8] != 108 as i8 { return false }
-    if n.buf[9] != 108 as i8 { return false }
-    if n.buf[10] != 111 as i8 { return false }
-    if n.buf[11] != 99 as i8 { return false }
+    if n.buf[0] != 104 as i8 { return false }      // 'h'
+    if n.buf[1] != 101 as i8 { return false }      // 'e'
+    if n.buf[2] != 97 as i8 { return false }      // 'a'
+    if n.buf[3] != 112 as i8 { return false }      // 'p'
+    if n.buf[4] != 95 as i8 { return false }      // '_'
+    if n.buf[5] != 114 as i8 { return false }      // 'r'
+    if n.buf[6] != 101 as i8 { return false }      // 'e'
+    if n.buf[7] != 97 as i8 { return false }      // 'a'
+    if n.buf[8] != 108 as i8 { return false }      // 'l'
+    if n.buf[9] != 108 as i8 { return false }      // 'l'
+    if n.buf[10] != 111 as i8 { return false }      // 'o'
+    if n.buf[11] != 99 as i8 { return false }      // 'c'
     true
 }
 
@@ -4351,8 +4351,25 @@ fn emit_builtin_assert_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_ret(nc)
 }
 
-// heap_alloc(n) -> zeroed payload. The historical heap ABI stores the
-// page-rounded mapping length at ptr-8 so heap_free/heap_realloc can recover it.
+// Native heap ABI (#874), shared by every engine (Madaros, lean_single x86-64
+// and aarch64, the standalone native driver):
+//
+//   base = mmap(page_round_up(n + 16))      page aligned, zero filled
+//   [base + 0]  reserved (0)
+//   [base + 8]  mapping length in bytes     (= ptr - 8)
+//   ptr = base + 16                         16-byte aligned payload
+//
+// heap_alloc(n)        n <= 0, size overflow or mmap failure -> 0 (NULL).
+// heap_free(p)         p == 0 is a no-op; otherwise munmap(p - 16, [p - 8]).
+// heap_realloc(p, n)   p == 0 behaves as heap_alloc(n); n <= 0, overflow or
+//                      mremap failure -> 0 and the old block is left intact;
+//                      otherwise mremap(p - 16, [p - 8], page_round_up(n + 16),
+//                      MREMAP_MAYMOVE). Contents are preserved up to
+//                      min(old, new) and growth is zero filled.
+// The length lives at ptr-8 as it always did; only the payload offset moved
+// from 8 to 16 so the payload satisfies the SysV 16-byte alignment rule.
+fn native_v2_heap_header_bytes() -> i64 { 16 }
+
 fn emit_builtin_heap_alloc_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     // Reject n <= 0.
     nc_emit_test_rdi_rdi(nc)
@@ -4361,13 +4378,13 @@ fn emit_builtin_heap_alloc_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x8e)
     nc_emit_u32_le(nc, 0) // jle fail
 
-    // rsi = page_round_up(n + 8). Adding 8 + 4095 in one step lets the
+    // rsi = page_round_up(n + 16). Adding 16 + 4095 in one step lets the
     // signed test reject every overflow from a positive source value.
     nc_emit_mov_reg_reg(nc, 6, 7)
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x81)
     nc_emit_byte(nc, 0xc6)
-    nc_emit_u32_le(nc, 4103)
+    nc_emit_u32_le(nc, native_v2_heap_header_bytes() + 4095)
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x85)
     nc_emit_byte(nc, 0xf6) // test rsi,rsi
@@ -4403,11 +4420,12 @@ fn emit_builtin_heap_alloc_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x89)
-    nc_emit_byte(nc, 0x30) // mov [rax],rsi
+    nc_emit_byte(nc, 0x70)
+    nc_emit_byte(nc, 8) // mov [rax+8],rsi
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x83)
     nc_emit_byte(nc, 0xc0)
-    nc_emit_byte(nc, 8)
+    nc_emit_byte(nc, native_v2_heap_header_bytes()) // add rax,16
     nc_emit_ret(nc)
 
     let fail_offset = (*nc).code.len
@@ -4428,10 +4446,11 @@ fn emit_builtin_heap_free_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x83)
     nc_emit_byte(nc, 0xef)
-    nc_emit_byte(nc, 8)
+    nc_emit_byte(nc, native_v2_heap_header_bytes()) // sub rdi,16 (mapping base)
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x8b)
-    nc_emit_byte(nc, 0x37) // mov rsi,[rdi]
+    nc_emit_byte(nc, 0x77)
+    nc_emit_byte(nc, 8) // mov rsi,[rdi+8] (mapping length)
     nc_emit_mov_rax_imm(nc, 11)
     nc_emit_syscall(nc)
     let done_offset = (*nc).code.len
@@ -4440,73 +4459,87 @@ fn emit_builtin_heap_free_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_patch_u32_le(nc, null_patch, done_offset - (null_patch + 4))
 }
 
-// heap_realloc(ptr, new_n) -> payload. Same header as heap_alloc: the
-// page-rounded mapping length lives at ptr-8. Growth uses mremap so the
-// bytes already written stay put. A null ptr is a fresh alloc.
+// heap_realloc(ptr, n): rdi = ptr, rsi = n, rax = new payload or 0.
+// Before #874 Madaros had no body for this builtin and every call reached a
+// ud2 stub (SIGILL, rc=132), so any HeapVec growth died. #2979 registered the
+// same builtin (id 71) on the 8-byte historical header; this body keeps that
+// registration and null-as-fresh-alloc, but uses the 16-byte header so the
+// payload stays SysV 16-byte aligned with heap_alloc/heap_free.
 fn emit_builtin_heap_realloc_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // ptr == 0 -> heap_alloc(n).
     nc_emit_test_rdi_rdi(nc)
-    let null_jz = (*nc).code.len + 2
+    let null_patch = (*nc).code.len + 2
     nc_emit_byte(nc, 0x0f)
     nc_emit_byte(nc, 0x84)
-    nc_emit_u32_le(nc, 0)
+    nc_emit_u32_le(nc, 0) // jz alloc
 
-    // r8 = page_round_up(new_n + 8), same arithmetic as heap_alloc.
-    nc_emit_byte(nc, 0x49)
-    nc_emit_byte(nc, 0x89)
-    nc_emit_byte(nc, 0xf0)
-    nc_emit_byte(nc, 0x49)
-    nc_emit_byte(nc, 0x81)
-    nc_emit_byte(nc, 0xc0)
-    nc_emit_u32_le(nc, 4103)
-    nc_emit_byte(nc, 0x4d)
+    // Reject n <= 0 (old block untouched).
+    nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x85)
-    nc_emit_byte(nc, 0xc0)
+    nc_emit_byte(nc, 0xf6) // test rsi,rsi
+    let nonpositive_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x8e)
+    nc_emit_u32_le(nc, 0) // jle fail
+
+    // rdx = page_round_up(n + 16), refusing signed overflow.
+    nc_emit_mov_reg_reg(nc, 2, 6) // mov rdx,rsi
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x81)
+    nc_emit_byte(nc, 0xc2)
+    nc_emit_u32_le(nc, native_v2_heap_header_bytes() + 4095) // add rdx,4111
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x85)
+    nc_emit_byte(nc, 0xd2) // test rdx,rdx
     let overflow_patch = (*nc).code.len + 2
     nc_emit_byte(nc, 0x0f)
     nc_emit_byte(nc, 0x8e)
-    nc_emit_u32_le(nc, 0)
-    nc_emit_byte(nc, 0x49)
+    nc_emit_u32_le(nc, 0) // jle fail
+    nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x81)
-    nc_emit_byte(nc, 0xe0)
-    nc_emit_u32_le(nc, -4096)
+    nc_emit_byte(nc, 0xe2)
+    nc_emit_u32_le(nc, -4096) // and rdx,-4096
 
+    // mremap(base, old_len, new_len, MREMAP_MAYMOVE). rdx survives syscall.
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x83)
     nc_emit_byte(nc, 0xef)
-    nc_emit_byte(nc, 8)
+    nc_emit_byte(nc, native_v2_heap_header_bytes()) // sub rdi,16
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x8b)
-    nc_emit_byte(nc, 0x37)
-    nc_emit_byte(nc, 0x4c)
-    nc_emit_byte(nc, 0x89)
-    nc_emit_byte(nc, 0xc2)
+    nc_emit_byte(nc, 0x77)
+    nc_emit_byte(nc, 8) // mov rsi,[rdi+8]
     nc_emit_mov_r10_imm32(nc, 1)
     nc_emit_mov_rax_imm(nc, 25)
     nc_emit_syscall(nc)
     nc_emit_test_rax_rax(nc)
-    let mremap_fail = (*nc).code.len + 2
+    let mremap_error_patch = (*nc).code.len + 2
     nc_emit_byte(nc, 0x0f)
     nc_emit_byte(nc, 0x88)
-    nc_emit_u32_le(nc, 0)
-    nc_emit_byte(nc, 0x4c)
+    nc_emit_u32_le(nc, 0) // js fail
+    nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x89)
-    nc_emit_byte(nc, 0x00)
+    nc_emit_byte(nc, 0x50)
+    nc_emit_byte(nc, 8) // mov [rax+8],rdx
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x83)
     nc_emit_byte(nc, 0xc0)
-    nc_emit_byte(nc, 8)
+    nc_emit_byte(nc, native_v2_heap_header_bytes()) // add rax,16
     nc_emit_ret(nc)
-
-    let fresh = (*nc).code.len
-    nc_emit_mov_reg_reg(nc, 7, 6)
-    emit_builtin_heap_alloc_into(nc)
 
     let fail_offset = (*nc).code.len
     nc_emit_xor_rax_rax(nc)
     nc_emit_ret(nc)
-    nc_patch_u32_le(nc, null_jz, fresh - (null_jz + 4))
+
+    // alloc: rdi = n, then the heap_alloc body (which returns itself).
+    let alloc_offset = (*nc).code.len
+    nc_emit_mov_reg_reg(nc, 7, 6) // mov rdi,rsi
+    emit_builtin_heap_alloc_into(nc)
+
+    nc_patch_u32_le(nc, null_patch, alloc_offset - (null_patch + 4))
+    nc_patch_u32_le(nc, nonpositive_patch, fail_offset - (nonpositive_patch + 4))
     nc_patch_u32_le(nc, overflow_patch, fail_offset - (overflow_patch + 4))
-    nc_patch_u32_le(nc, mremap_fail, fail_offset - (mremap_fail + 4))
+    nc_patch_u32_le(nc, mremap_error_patch, fail_offset - (mremap_error_patch + 4))
 }
 
 fn nc_alloc_diag_append_ascii_into(nc: &! NativeCompiler, text: string) with Mut, Panic, Div {
@@ -9390,7 +9423,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 42 { emit_builtin_ffi_abort_into(nc); return }
     // ffi_malloc/ffi_free reuse the mmap-backed heap builtins: same
     // signature shape (rdi in, rax out) and a matched pair — heap_free
-    // recovers the mapping length heap_alloc stores at ptr-8.
+    // recovers the mapping length heap_alloc stores at ptr-8 (#874 ABI).
     if builtin_id == 43 { emit_builtin_heap_alloc_into(nc); return }
     if builtin_id == 44 { emit_builtin_heap_free_into(nc); return }
     if builtin_id == 45 { emit_builtin_ffi_system_into(nc); return }
@@ -9542,6 +9575,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
         if name_is___sounio_seq_get(func.name) { emit_builtin_native_seq_get_into(&! c); return c }
         if name_is___sounio_seq_set(func.name) { emit_builtin_native_seq_set_into(&! c); return c }
         if name_is_heap_free(func.name) { emit_builtin_heap_free_into(&! c); return c }
+        if name_is_heap_realloc(func.name) { emit_builtin_heap_realloc_into(&! c); return c }
         if name_is_malloc(func.name) { emit_builtin_heap_alloc_into(&! c); return c }
         if name_is_free(func.name) { emit_builtin_heap_free_into(&! c); return c }
         if name_is_getpid(func.name) { emit_builtin_getpid_into(&! c); return c }
@@ -12550,6 +12584,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
         if name_is___sounio_seq_get(func.name) { emit_builtin_native_seq_get_into(nc); return }
         if name_is___sounio_seq_set(func.name) { emit_builtin_native_seq_set_into(nc); return }
         if name_is_heap_free(func.name) { emit_builtin_heap_free_into(nc); return }
+        if name_is_heap_realloc(func.name) { emit_builtin_heap_realloc_into(nc); return }
         if name_is_malloc(func.name) { emit_builtin_heap_alloc_into(nc); return }
         if name_is_free(func.name) { emit_builtin_heap_free_into(nc); return }
         if name_is_getpid(func.name) { emit_builtin_getpid_into(nc); return }
