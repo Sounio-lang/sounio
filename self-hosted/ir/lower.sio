@@ -25052,6 +25052,46 @@ impl Lowerer {
     // An `else { ... }` arrives as an ExprBlock, so the tail has to be reached
     // through it; anything that is not ultimately a method call answers -1.
     fn expr_method_fn_id(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        // A nested if can be the tail of either arm of a record-valued if.
+        // Without this recursive join, the let binder loses the record owner
+        // and later fields fall back to a cross-struct name/offset vote.
+        // Choose a representative callee only when BOTH arms carry the same
+        // known record return, or the same named record in the same tuple slot.
+        if (*e).kind == ExprKind::ExprIf {
+            let then_fn = self.opt_block_tail_method_fn_id(&(*e).block)
+            let else_fn = self.opt_expr_method_fn_id(&(*e).else_expr)
+            if then_fn < 0 || else_fn < 0 { return 0 - 1 }
+            let then_return = self.return_struct_name_for_fn_id(then_fn)
+            let else_return = self.return_struct_name_for_fn_id(else_fn)
+            let then_slot = self.return_tuple_struct_slot_for_fn_id(then_fn)
+            let else_slot = self.return_tuple_struct_slot_for_fn_id(else_fn)
+            if then_slot != else_slot || !ir_name_eq(then_return, else_return) {
+                return 0 - 1
+            }
+            if then_slot >= 0 {
+                let then_name = self.return_tuple_struct_name_for_fn_id(then_fn)
+                let else_name = self.return_tuple_struct_name_for_fn_id(else_fn)
+                if then_name.len <= 0 || !ir_name_eq(then_name, else_name) {
+                    return 0 - 1
+                }
+                if lower_struct_layout_index_of(&(*self.struct_layouts), then_name) < 0 {
+                    return 0 - 1
+                }
+                return then_fn
+            }
+            // A fixed-array element name does not describe a record return.
+            if ir_fn_get(&(*self.module), then_fn as usize).return_fixed_array_len >= 0 {
+                return 0 - 1
+            }
+            if ir_fn_get(&(*self.module), else_fn as usize).return_fixed_array_len >= 0 {
+                return 0 - 1
+            }
+            if then_return.len <= 0 { return 0 - 1 }
+            if lower_struct_layout_index_of(&(*self.struct_layouts), then_return) < 0 {
+                return 0 - 1
+            }
+            return then_fn
+        }
         if (*e).kind == ExprKind::ExprBlock {
             return self.opt_block_tail_method_fn_id(&(*e).block)
         }

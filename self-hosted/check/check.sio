@@ -10276,6 +10276,13 @@ fn checker_resolve_closure_params_inplace(c: *mut Checker, params: Option<Box<Cl
     }
 }
 
+// Keep the exclusive borrow a direct call argument: a cast around &!c at
+// the caller obscures its call-scoped lifetime from borrow release tracking.
+// The raw pointer stays inside this bridge and never escapes its invocation.
+fn checker_resolve_closure_params_borrowed(c: &!Checker, params: Option<Box<ClosureParamList>>, body: &Option<Box<Expr>>) -> Option<Box<ClosureParamList>> with Mut, Panic, Div, Alloc, IO {
+    checker_resolve_closure_params_inplace(c as *mut Checker, params, body)
+}
+
 fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // *mut closure helpers (no 164KB Checker SRET-move; only lower_type_expr is bridged,
     // which works in isolation — the crash was the ACCUMULATED by-value Checker returns of
@@ -31514,11 +31521,7 @@ impl Checker {
 
     fn check_closure_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
-        // `cp` escapes into the callee, so the exclusive borrow of `c` stays live
-        // for this function. A later `&!c.env` is a second exclusive borrow of that
-        // root and is E038. Mutate the environment through the pointer already taken.
-        let cp = (&!c) as *mut Checker
-        let resolved_params = checker_resolve_closure_params_inplace(cp, e.closure_params, &e.closure_body)
+        let resolved_params = checker_resolve_closure_params_borrowed(&!c, e.closure_params, &e.closure_body)
 
         // Convert closure params to FnParamList for signature
         let params_result = c.collect_closure_params(resolved_params)
@@ -31539,7 +31542,7 @@ impl Checker {
 
         // Push scope for parameters
         let outer_borrow_count = c.borrows.count
-        type_env_push_scope_mut(&!(*cp).env)
+        type_env_push_scope_mut(&!c.env)
         c.borrows = c.borrows.push_scope()
         c = c.push_const_scope()
 
@@ -31600,7 +31603,7 @@ impl Checker {
         c = c.require_current_linear_scope_consumed()
         c = c.pop_const_scope()
         c.borrows = c.borrows.pop_scope()
-        type_env_pop_scope_mut(&!(*cp).env)
+        type_env_pop_scope_mut(&!c.env)
 
         // Restore outer effects context
         c.current_sig_id = 0 - 1
