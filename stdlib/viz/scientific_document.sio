@@ -3,7 +3,7 @@ use collections::numeric_buffer::{NumericBuffer}
 use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
 use display::canvas::{Canvas,canvas_fill_rect,canvas_draw_char,canvas_draw_line}
 use viz::scatter::{scatter_project}
-use viz::dynamic_plot::{DynamicPlotSpec}
+use viz::dynamic_plot::{DynamicPlotSpec,dynamic_line_validate,dynamic_line_canvas,dynamic_line_svg}
 use viz::dynamic_fields::{dynamic_scatter_validate,dynamic_scatter_canvas,dynamic_scatter_svg}
 use viz::axis::{axis_label,axis_ticks,axis_offset}
 use viz::axis_layout::{axis_fit_labels}
@@ -181,11 +181,7 @@ fn sd_axis_canvas(c:&!Canvas,s:&DynamicPlotSpec,vertical:bool,intervals:i64) wit
   i=i+1
  }
 }
-pub fn scientific_document_svg(p:&ScientificDocumentPlan,t:&ScientificDocumentText,bytes:&IntegerBuffer,
- x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer)->ScientificDocumentResult with IO,Mut,Div,Panic {
- let status=scientific_document_validate(p,t,bytes,x0,y0,a0,x1,y1,a1)
- var result=ScientificDocumentResult{status:status,stage:0,left_painted:0,right_painted:0}
- if status!=0 {return result}
+fn sd_svg_open(p:&ScientificDocumentPlan,t:&ScientificDocumentText,bytes:&IntegerBuffer) with IO,Mut,Div,Panic {
  let document_width:i64=p.width;let document_height:i64=p.height
  print("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"");print(document_width);print("\" height=\"");print(document_height)
  print("\" viewBox=\"0 0 ");print(document_width);print(" ");print(document_height);println("\">")
@@ -201,6 +197,21 @@ pub fn scientific_document_svg(p:&ScientificDocumentPlan,t:&ScientificDocumentTe
  sd_axis_svg(&p.left,false,p.left_x_intervals);sd_axis_svg(&p.left,true,p.left_y_intervals)
  sd_axis_svg(&p.right,false,p.right_x_intervals);sd_axis_svg(&p.right,true,p.right_y_intervals)
  sd_references_svg(p)
+}
+fn sd_canvas_open(c:&!Canvas,p:&ScientificDocumentPlan,t:&ScientificDocumentText,bytes:&IntegerBuffer) with Mut,Div,Panic {
+ canvas_fill_rect(c,0,0,p.width,p.height,22,28,36)
+ sd_canvas_text(c,bytes,t.title_start,t.title_len,16,16)
+ sd_canvas_text(c,bytes,t.left_start,t.left_len,16,64);sd_canvas_text(c,bytes,t.right_start,t.right_len,p.width/2+16,64)
+ sd_axis_canvas(c,&p.left,false,p.left_x_intervals);sd_axis_canvas(c,&p.left,true,p.left_y_intervals)
+ sd_axis_canvas(c,&p.right,false,p.right_x_intervals);sd_axis_canvas(c,&p.right,true,p.right_y_intervals)
+ sd_references_canvas(c,p)
+}
+pub fn scientific_document_svg(p:&ScientificDocumentPlan,t:&ScientificDocumentText,bytes:&IntegerBuffer,
+ x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer)->ScientificDocumentResult with IO,Mut,Div,Panic {
+ let status=scientific_document_validate(p,t,bytes,x0,y0,a0,x1,y1,a1)
+ var result=ScientificDocumentResult{status:status,stage:0,left_painted:0,right_painted:0}
+ if status!=0 {return result}
+ sd_svg_open(p,t,bytes)
  println("<g id=\"scientific-panel-0\">")
  let left=dynamic_scatter_svg(&p.left,x0,y0,a0);println("</g>")
  println("<g id=\"scientific-panel-1\">")
@@ -221,14 +232,137 @@ pub fn scientific_document_canvas(c:&!Canvas,p:&ScientificDocumentPlan,t:&Scient
  var result=ScientificDocumentResult{status:status,stage:0,left_painted:0,right_painted:0}
  if status!=0 {return result}
  if c.width!=p.width || c.height!=p.height || (c.pixels as i64)<=0 {result.status=3;return result}
- canvas_fill_rect(c,0,0,p.width,p.height,22,28,36)
- sd_canvas_text(c,bytes,t.title_start,t.title_len,16,16)
- sd_canvas_text(c,bytes,t.left_start,t.left_len,16,64);sd_canvas_text(c,bytes,t.right_start,t.right_len,p.width/2+16,64)
- sd_axis_canvas(c,&p.left,false,p.left_x_intervals);sd_axis_canvas(c,&p.left,true,p.left_y_intervals)
- sd_axis_canvas(c,&p.right,false,p.right_x_intervals);sd_axis_canvas(c,&p.right,true,p.right_y_intervals)
- sd_references_canvas(c,p)
+ sd_canvas_open(c,p,t,bytes)
  let left=dynamic_scatter_canvas(c,&p.left,x0,y0,a0)
  let right=dynamic_scatter_canvas(c,&p.right,x1,y1,a1)
  sd_canvas_text(c,bytes,t.footer_start,t.footer_len,16,p.height-40)
  result.status=0;result.left_painted=left.painted;result.right_painted=right.painted;result
+}
+
+
+// Opt-in two datasets per panel. Primary layers are scatter; secondary kinds
+// are explicit0scatter/1ordered-input-line. All owners remain independent.
+pub struct ScientificOverlayPlan {pub document:ScientificDocumentPlan,pub left_kind:i64,pub right_kind:i64}
+pub struct ScientificOverlayText {
+ pub document:ScientificDocumentText,
+ pub left_first_start:i64,pub left_first_len:i64,pub left_second_start:i64,pub left_second_len:i64,
+ pub right_first_start:i64,pub right_first_len:i64,pub right_second_start:i64,pub right_second_len:i64
+}
+pub struct ScientificOverlayResult {
+ pub status:i64,pub left_primary:i64,pub left_secondary:i64,pub right_primary:i64,pub right_secondary:i64
+}
+fn sd_overlay_spec(s:&DynamicPlotSpec,secondary:bool)->DynamicPlotSpec {
+ DynamicPlotSpec{x:s.x,y:s.y,w:s.w,h:s.h,xmin:s.xmin,xmax:s.xmax,ymin:s.ymin,ymax:s.ymax,
+ r:if secondary {235}else{70},g:if secondary {130}else{180},b:if secondary {70}else{235},interval_kind:0,level:0.0}
+}
+fn sd_overlay_extra(s:&DynamicPlotSpec,kind:i64,x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer,indices:&IntegerBuffer,count:i64)->i64 with Mut,Div,Panic {
+ if kind==0 {return dynamic_scatter_validate(s,x,y,a)}
+ dynamic_line_validate(s,x,y,a,indices,count)
+}
+pub fn scientific_overlay_validate(p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,
+ x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer,
+ bx0:&NumericBuffer,by0:&NumericBuffer,ba0:&IntegerBuffer,bi0:&IntegerBuffer,bc0:i64,
+ bx1:&NumericBuffer,by1:&NumericBuffer,ba1:&IntegerBuffer,bi1:&IntegerBuffer,bc1:i64)->i64 with Mut,Div,Panic {
+ if p.left_kind<0 || p.left_kind>1 || p.right_kind<0 || p.right_kind>1 {return 31}
+ let status=scientific_document_validate(&p.document,&t.document,bytes,x0,y0,a0,x1,y1,a1)
+ if status!=0 {return status}
+ let capacity=(p.document.width/4-40)/8
+ if !sd_text_valid(bytes,t.left_first_start,t.left_first_len,capacity) ||
+ !sd_text_valid(bytes,t.left_second_start,t.left_second_len,capacity) ||
+ !sd_text_valid(bytes,t.right_first_start,t.right_first_len,capacity) ||
+ !sd_text_valid(bytes,t.right_second_start,t.right_second_len,capacity) {return 32}
+ let left=sd_overlay_spec(&p.document.left,true);let right=sd_overlay_spec(&p.document.right,true)
+ let ls=sd_overlay_extra(&left,p.left_kind,bx0,by0,ba0,bi0,bc0)
+ if ls!=0 {return 40+ls}
+ let rs=sd_overlay_extra(&right,p.right_kind,bx1,by1,ba1,bi1,bc1)
+ if rs!=0 {return 50+rs}
+ 0
+}
+fn sd_legend_svg(s:&DynamicPlotSpec,bytes:&IntegerBuffer,start:i64,n:i64,x:i64,kind:i64) with IO,Mut,Panic {
+ if kind==0 {
+  let px:f64=(x as f64)-0.5
+  print("<rect data-overlay-legend=\"scatter\" x=\"");print(px)
+  print("\" y=\"83.500000\" width=\"3\" height=\"3\" fill=\"rgb(")
+ } else {
+  print("<line data-overlay-legend=\"line\" x1=\"");print(x);print("\" x2=\"");print(x+16)
+  print("\" y1=\"85\" y2=\"85\" stroke=\"rgb(")
+ }
+ let r:i64=s.r;let g:i64=s.g;let b:i64=s.b
+ print(r);print(",");print(g);print(",");print(b)
+ if kind==0 {println(")\"/>")} else {println(")\" stroke-width=\"1\" stroke-linecap=\"round\"/>")}
+ sd_svg_text(bytes,start,n,x+24,82)
+}
+fn sd_legend_canvas(c:&!Canvas,s:&DynamicPlotSpec,bytes:&IntegerBuffer,start:i64,n:i64,x:i64,kind:i64) with Mut,Panic {
+ if kind==0 {canvas_fill_rect(c,x,84,3,3,s.r,s.g,s.b)} else {canvas_draw_line(c,x,85,x+16,85,s.r,s.g,s.b)}
+ sd_canvas_text(c,bytes,start,n,x+24,82)
+}
+fn sd_overlay_legends_svg(p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,left:&DynamicPlotSpec,right:&DynamicPlotSpec) with IO,Mut,Panic {
+ sd_legend_svg(&p.document.left,bytes,t.left_first_start,t.left_first_len,16,0)
+ sd_legend_svg(left,bytes,t.left_second_start,t.left_second_len,p.document.width/4+16,p.left_kind)
+ let primary_right=sd_overlay_spec(&p.document.right,false)
+ sd_legend_svg(&primary_right,bytes,t.right_first_start,t.right_first_len,p.document.width/2+16,0)
+ sd_legend_svg(right,bytes,t.right_second_start,t.right_second_len,p.document.width/2+p.document.width/4+16,p.right_kind)
+}
+fn sd_overlay_legends_canvas(c:&!Canvas,p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,left:&DynamicPlotSpec,right:&DynamicPlotSpec) with Mut,Panic {
+ sd_legend_canvas(c,&p.document.left,bytes,t.left_first_start,t.left_first_len,16,0)
+ sd_legend_canvas(c,left,bytes,t.left_second_start,t.left_second_len,p.document.width/4+16,p.left_kind)
+ let primary_right=sd_overlay_spec(&p.document.right,false)
+ sd_legend_canvas(c,&primary_right,bytes,t.right_first_start,t.right_first_len,p.document.width/2+16,0)
+ sd_legend_canvas(c,right,bytes,t.right_second_start,t.right_second_len,p.document.width/2+p.document.width/4+16,p.right_kind)
+}
+fn sd_overlay_count(painted:i64,kind:i64) with IO {
+ print(painted);print("\" data-secondary-kind=\"")
+ if kind==0 {print("scatter")} else {print("line-input-order")}
+}
+pub fn scientific_overlay_svg(p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,
+ x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer,
+ bx0:&NumericBuffer,by0:&NumericBuffer,ba0:&IntegerBuffer,bi0:&IntegerBuffer,bc0:i64,
+ bx1:&NumericBuffer,by1:&NumericBuffer,ba1:&IntegerBuffer,bi1:&IntegerBuffer,bc1:i64)->ScientificOverlayResult with IO,Mut,Div,Panic {
+ let status=scientific_overlay_validate(p,t,bytes,x0,y0,a0,x1,y1,a1,bx0,by0,ba0,bi0,bc0,bx1,by1,ba1,bi1,bc1)
+ var result=ScientificOverlayResult{status:status,left_primary:0,left_secondary:0,right_primary:0,right_secondary:0}
+ if status!=0 {return result}
+ let left=sd_overlay_spec(&p.document.left,true);let right=sd_overlay_spec(&p.document.right,true)
+ sd_svg_open(&p.document,&t.document,bytes)
+ sd_overlay_legends_svg(p,t,bytes,&left,&right)
+ println("<g id=\"scientific-layer-left-primary\">")
+ let lp=dynamic_scatter_svg(&p.document.left,x0,y0,a0);println("</g>")
+ println("<g id=\"scientific-layer-left-secondary\">")
+ if p.left_kind==0 {let layer=dynamic_scatter_svg(&left,bx0,by0,ba0);result.left_secondary=layer.painted}
+ else {let layer=dynamic_line_svg(&left,bx0,by0,ba0,bi0,bc0,100);result.left_secondary=layer.visible_primitives}
+ println("</g><g id=\"scientific-layer-right-primary\">")
+ let primary_right=sd_overlay_spec(&p.document.right,false)
+ let rp=dynamic_scatter_svg(&primary_right,x1,y1,a1);println("</g>")
+ println("<g id=\"scientific-layer-right-secondary\">")
+ if p.right_kind==0 {let layer=dynamic_scatter_svg(&right,bx1,by1,ba1);result.right_secondary=layer.painted}
+ else {let layer=dynamic_line_svg(&right,bx1,by1,ba1,bi1,bc1,101);result.right_secondary=layer.visible_primitives}
+ println("</g>")
+ sd_svg_text(bytes,t.document.footer_start,t.document.footer_len,16,p.document.height-40)
+ let lpc:i64=lp.painted;let rpc:i64=rp.painted;let lsc:i64=result.left_secondary;let rsc:i64=result.right_secondary
+ print("<metadata data-scientific-document-complete=\"true\" data-scientific-overlay-complete=\"true\" data-left-primary-painted=\"");print(lpc)
+ print("\" data-left-secondary-primitives=\"");sd_overlay_count(lsc,p.left_kind);print("\"/>")
+ print("<metadata data-right-primary-painted=\"");print(rpc)
+ print("\" data-right-secondary-primitives=\"");sd_overlay_count(rsc,p.right_kind);println("\"/>")
+ println("</svg>")
+ result.status=0;result.left_primary=lpc;result.right_primary=rpc;result
+}
+pub fn scientific_overlay_canvas(c:&!Canvas,p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,
+ x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer,
+ bx0:&NumericBuffer,by0:&NumericBuffer,ba0:&IntegerBuffer,bi0:&IntegerBuffer,bc0:i64,
+ bx1:&NumericBuffer,by1:&NumericBuffer,ba1:&IntegerBuffer,bi1:&IntegerBuffer,bc1:i64)->ScientificOverlayResult with Mut,Div,Panic {
+ let status=scientific_overlay_validate(p,t,bytes,x0,y0,a0,x1,y1,a1,bx0,by0,ba0,bi0,bc0,bx1,by1,ba1,bi1,bc1)
+ var result=ScientificOverlayResult{status:status,left_primary:0,left_secondary:0,right_primary:0,right_secondary:0}
+ if status!=0 {return result}
+ if c.width!=p.document.width || c.height!=p.document.height || (c.pixels as i64)<=0 {result.status=3;return result}
+ let left=sd_overlay_spec(&p.document.left,true);let right=sd_overlay_spec(&p.document.right,true)
+ sd_canvas_open(c,&p.document,&t.document,bytes)
+ sd_overlay_legends_canvas(c,p,t,bytes,&left,&right)
+ let lp=dynamic_scatter_canvas(c,&p.document.left,x0,y0,a0)
+ if p.left_kind==0 {let layer=dynamic_scatter_canvas(c,&left,bx0,by0,ba0);result.left_secondary=layer.painted}
+ else {let layer=dynamic_line_canvas(c,&left,bx0,by0,ba0,bi0,bc0);result.left_secondary=layer.visible_primitives}
+ let primary_right=sd_overlay_spec(&p.document.right,false)
+ let rp=dynamic_scatter_canvas(c,&primary_right,x1,y1,a1)
+ if p.right_kind==0 {let layer=dynamic_scatter_canvas(c,&right,bx1,by1,ba1);result.right_secondary=layer.painted}
+ else {let layer=dynamic_line_canvas(c,&right,bx1,by1,ba1,bi1,bc1);result.right_secondary=layer.visible_primitives}
+ sd_canvas_text(c,bytes,t.document.footer_start,t.document.footer_len,16,p.document.height-40)
+ result.status=0;result.left_primary=lp.painted;result.right_primary=rp.painted;result
 }
