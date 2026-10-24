@@ -81,11 +81,19 @@ pub struct Llama {
     pub loaded: bool,
 }
 
+// Paged KV cache: positions live in blocks of kv_block() rows, with
+// one block table (raw block addresses, 0 = not allocated) per K and
+// V, indexed [layer * max_blocks + block]. Blocks allocate lazily on
+// first write, so a short sequence touches ceil(len/kv_block())
+// blocks per layer instead of a dense cap-sized buffer. kv_free
+// returns every block and both tables to the heap.
 pub struct KvCache {
-    pub k: [CpuBuf; 64],
-    pub v: [CpuBuf; 64],
+    pub tab_k: *mut u8,
+    pub tab_v: *mut u8,
     pub len: i64,
     pub cap: i64,
+    pub kvdim: i64,
+    pub max_blocks: i64,
 }
 
 pub fn llama_cfg(dir: string) -> LlamaCfg with Alloc, Mut, Panic, Div {
@@ -178,16 +186,72 @@ pub fn llama_load(dir: string) -> Llama with Alloc, Mut, Panic, Div {
     m
 }
 
+// KV block size in positions.
+fn kv_block() -> i64 { 16 }
+
+fn kv_tab_addr(tab: *mut u8, li: i64, b: i64, max_blocks: i64) -> i64 {
+    read_i64(tab as *mut i64, li * max_blocks + b)
+}
+
+// Block pointer for (layer, position). With alloc=true (the write
+// path) a missing block is allocated and registered; reads pass
+// alloc=false and rely on the position having been written.
+fn kv_blk(kv: &!KvCache, li: i64, pos: i64, is_v: bool, alloc: bool) -> *mut f64 with Alloc, Mut {
+    let b = pos / kv_block()
+    let tab = if is_v { kv.tab_v } else { kv.tab_k }
+    let a = kv_tab_addr(tab, li, b, kv.max_blocks)
+    if a != 0 { return a as *mut f64 }
+    if !alloc { return 0 as *mut f64 }
+    let nb = ck_alloc(kv_block() * kv.kvdim)
+    write_i64(tab as *mut i64, li * kv.max_blocks + b, nb.data as i64)
+    nb.data
+}
+
 pub fn kv_new(m: &Llama, max_seq: i64) -> KvCache with Alloc {
-    var kv = KvCache { k: [ll_empty(); 64], v: [ll_empty(); 64], len: 0, cap: max_seq }
-    let kvdim = m.cfg.kv_heads * m.cfg.head_dim
-    var li: i32 = 0
-    while li < m.cfg.layers && li < 64 {
-        kv.k[li as usize] = ck_alloc(max_seq * kvdim)
-        kv.v[li as usize] = ck_alloc(max_seq * kvdim)
+    let mb = (max_seq + kv_block() - 1) / kv_block()
+    let tab_k = heap_alloc((64 * mb * 8) as usize)
+    let tab_v = heap_alloc((64 * mb * 8) as usize)
+    var i: i64 = 0
+    while i < 64 * mb {
+        write_i64(tab_k as *mut i64, i, 0)
+        write_i64(tab_v as *mut i64, i, 0)
+        i = i + 1
+    }
+    KvCache { tab_k: tab_k, tab_v: tab_v, len: 0, cap: max_seq, kvdim: m.cfg.kv_heads * m.cfg.head_dim, max_blocks: mb }
+}
+
+// Blocks currently allocated (K + V across all layers).
+pub fn kv_blocks_used(kv: &KvCache) -> i64 {
+    if (kv.tab_k as i64) == 0 { return 0 }
+    var cnt: i64 = 0
+    var i: i64 = 0
+    while i < 64 * kv.max_blocks {
+        if read_i64(kv.tab_k as *mut i64, i) != 0 { cnt = cnt + 1 }
+        if read_i64(kv.tab_v as *mut i64, i) != 0 { cnt = cnt + 1 }
+        i = i + 1
+    }
+    cnt
+}
+
+// Free every block and both tables; the cache must not be used after.
+pub fn kv_free(kv: &!KvCache) with Alloc, Mut {
+    var li: i64 = 0
+    while li < 64 {
+        var b: i64 = 0
+        while b < kv.max_blocks {
+            let ak = kv_tab_addr(kv.tab_k, li, b, kv.max_blocks)
+            if ak != 0 { heap_free(ak as *mut i8) }
+            let av = kv_tab_addr(kv.tab_v, li, b, kv.max_blocks)
+            if av != 0 { heap_free(av as *mut i8) }
+            b = b + 1
+        }
         li = li + 1
     }
-    kv
+    if (kv.tab_k as i64) != 0 { heap_free(kv.tab_k as *mut i8) }
+    if (kv.tab_v as i64) != 0 { heap_free(kv.tab_v as *mut i8) }
+    kv.tab_k = 0 as *mut u8
+    kv.tab_v = 0 as *mut u8
+    kv.len = 0
 }
 
 fn ll_rmsnorm(x: &CpuBuf, w: &CpuBuf, rows: i64, d: i64, eps: f64) -> CpuBuf with Alloc, Mut, Div, Panic {
@@ -335,11 +399,19 @@ fn ll_forward_impl(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Ru
         }
         ll_rope(&!q, ntok, m.cfg.heads, dh, pos0, m.cfg.theta)
         ll_rope(&!kk, ntok, m.cfg.kv_heads, dh, pos0, m.cfg.theta)
-        // Append K/V rows to the cache.
+        // Append K/V rows to the cache (blocks allocate lazily).
         var cp: i64 = 0
-        while cp < ntok * kvdim {
-            write_f64(kv.k[li as usize].data, pos0 * kvdim + cp, read_f64(kk.data, cp))
-            write_f64(kv.v[li as usize].data, pos0 * kvdim + cp, read_f64(vv.data, cp))
+        while cp < ntok {
+            let pos = pos0 + cp
+            let bk = kv_blk(kv, li as i64, pos, false, true)
+            let bv = kv_blk(kv, li as i64, pos, true, true)
+            let offb = (pos % kv_block()) * kvdim
+            var d: i64 = 0
+            while d < kvdim {
+                write_f64(bk, offb + d, read_f64(kk.data, cp * kvdim + d))
+                write_f64(bv, offb + d, read_f64(vv.data, cp * kvdim + d))
+                d = d + 1
+            }
             cp = cp + 1
         }
         // Causal GQA attention for the new rows.
@@ -354,10 +426,12 @@ fn ll_forward_impl(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Ru
                 var mx: f64 = 0.0 - 1000000000.0
                 var tt: i64 = 0
                 while tt < upto {
+                    let bk = kv_blk(kv, li as i64, tt, false, false)
+                    let boff = (tt % kv_block()) * kvdim + kvh * dh
                     var dot: f64 = 0.0
                     var d: i64 = 0
                     while d < dh {
-                        dot = dot + read_f64(q.data, si * qdim + hd * dh + d) * read_f64(kv.k[li as usize].data, tt * kvdim + kvh * dh + d)
+                        dot = dot + read_f64(q.data, si * qdim + hd * dh + d) * read_f64(bk, boff + d)
                         d = d + 1
                     }
                     let sc = dot * scale
@@ -378,7 +452,8 @@ fn ll_forward_impl(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Ru
                     var acc: f64 = 0.0
                     var t2: i64 = 0
                     while t2 < upto {
-                        acc = acc + (read_f64(scores.data, t2) / sum) * read_f64(kv.v[li as usize].data, t2 * kvdim + kvh * dh + d2)
+                        let bv = kv_blk(kv, li as i64, t2, true, false)
+                        acc = acc + (read_f64(scores.data, t2) / sum) * read_f64(bv, (t2 % kv_block()) * kvdim + kvh * dh + d2)
                         t2 = t2 + 1
                     }
                     write_f64(att.data, si * qdim + hd * dh + d2, acc)

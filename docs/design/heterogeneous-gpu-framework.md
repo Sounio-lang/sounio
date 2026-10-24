@@ -580,3 +580,42 @@ Gates (OBSERVED, curl against the workspace server):
 Limits: client disconnect mid-stream is not detected — sends fail
 silently (MSG_NOSIGNAL) and generation runs to completion; usage
 statistics are only reported in the non-streamed reply.
+
+## 19. Paged KV cache
+
+`KvCache` no longer holds one dense buffer per layer sized to `cap`.
+Positions live in blocks of 16, addressed by a block table (K and V,
+one entry per layer per block, 0 = not allocated). A block is
+allocated on the first write of a position inside it, so a sequence
+of length `len` touches `ceil(len/16)` blocks per layer instead of
+the whole cap. `kv_free` returns every block and both tables;
+`kv_blocks_used` counts what is live. `ck_free` is the matching
+release for a `CpuBuf`.
+
+The serve calls `kv_free` (and frees the prompt-id buffer) at the end
+of every completion, streamed or not.
+
+Gates (OBSERVED):
+
+- Tiny-random and SmolLM2-135M: token-by-token through paged blocks
+  versus prefill-at-once, max abs diff 0. On SmolLM2 (30 layers,
+  len 40, cap 512) both paths allocate 180 blocks, which is
+  `2 * layers * ceil(40/16)`. Bytes touched: 4,423,680 against
+  47,185,920 for the dense cap-sized cache. After `kv_free`, the
+  count is 0 and both tables are null.
+- `llama_smol_demo` on the paged cache: kv-versus-prefill max diff 0,
+  argmax 7042, greedy text the canonical continuation. PASS.
+- Serve, five identical greedy requests (`max_tokens` 8) on the paged
+  build: each returns ` Paris. It is the largest city in`.
+
+RSS of the workspace server, VmRSS, steady per-request growth
+(OBSERVED, same prompt):
+
+- Dense cache, nothing freed: +39,232 KiB/request (two identical steps).
+- Paged cache, `kv_free` per request: +38,028 KiB/request (four identical steps).
+- Returned to the heap: 1,204 KiB/request.
+
+The residual ~37 MiB/request is unfreed forward temporaries and the
+per-request HTTP buffers. Paging does not claim to remove that; it
+removes the KV accumulation, and it stops allocating the unused tail
+of `cap` (the 10× gap above is that tail, at cap 512).

@@ -1,0 +1,98 @@
+//@ run-pass
+//
+// Paged KV cache gates (stdlib/llm/llama.sio):
+//   - token-by-token through paged blocks == prefill-at-once logits
+//     (max_diff must be 0), across the 16-position block boundary
+//   - blocks allocated == 2 * layers * ceil(len / 16), i.e. lazy
+//     allocation touches only the blocks the sequence needs
+//   - kv_free returns everything (tables zeroed, count back to 0)
+// Usage: llama_kv_paged_demo [model-dir]
+
+use llm::llama::{kv_blocks_used, kv_free, kv_new, llama_argmax, llama_forward, llama_load}
+use tensor2::cpu_kernel::{ck_alloc, ck_get, ck_max_abs_diff, ck_set}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var dir = "/workspace/llm-models/SmolLM2-135M"
+    if arg_count() > 0 { dir = get_arg(0) }
+    let m = llama_load(dir)
+    print("loaded=")
+    print_int(if m.loaded { 1 } else { 0 })
+    print(" layers=")
+    print_int(m.cfg.layers as i64)
+    print("\n")
+    if !m.loaded { print("KVP FAIL\nKVP DONE\n"); exit(0) }
+    let layers = m.cfg.layers as i64
+    let kvdim = m.cfg.kv_heads * m.cfg.head_dim
+
+    // 40 fixed ids (the gate prompt repeated): crosses two block
+    // boundaries (16, 32) so paging is exercised, not just block 0
+    var ids = ck_alloc(64)
+    ck_set(&!ids, 0, 0.0)
+    ck_set(&!ids, 1, 504.0)
+    ck_set(&!ids, 2, 3575.0)
+    ck_set(&!ids, 3, 282.0)
+    ck_set(&!ids, 4, 4649.0)
+    ck_set(&!ids, 5, 314.0)
+    var i: i64 = 6
+    while i < 40 {
+        let prev = ck_get(&ids, i - 6)
+        ck_set(&!ids, i, prev)
+        i = i + 1
+    }
+
+    // (a) prefill at once
+    var kv1 = kv_new(&m, 512)
+    let la = llama_forward(&m, &!kv1, &ids, 40)
+    // (b) token by token
+    var kv2 = kv_new(&m, 512)
+    var lb = ck_alloc(1)
+    i = 0
+    while i < 40 {
+        var one = ck_alloc(1)
+        ck_set(&!one, 0, ck_get(&ids, i))
+        lb = llama_forward(&m, &!kv2, &one, 1)
+        i = i + 1
+    }
+    let d = ck_max_abs_diff(&la, &lb)
+    print("logits paged kv-vs-prefill max_diff(x1e6)=")
+    print_int((d * 1000000.0) as i64)
+    print("\n")
+    if d > 0.0 { ok = false; print("FAIL logits gate\n") }
+
+    // block accounting: len=40 -> ceil(40/16)=3 blocks per layer per K/V
+    let used1 = kv_blocks_used(&kv1)
+    let used2 = kv_blocks_used(&kv2)
+    let expect = 2 * layers * 3
+    print("blocks_used prefill=")
+    print_int(used1)
+    print(" tokenwise=")
+    print_int(used2)
+    print(" expect=")
+    print_int(expect)
+    print("\n")
+    if used1 != expect || used2 != expect { ok = false; print("FAIL block count\n") }
+
+    // memory actually touched vs the dense cap-sized equivalent
+    let paged_bytes = used1 * 16 * kvdim * 8
+    let dense_bytes = 512 * kvdim * layers * 2 * 8
+    print("paged_bytes=")
+    print_int(paged_bytes)
+    print(" dense_cap_bytes=")
+    print_int(dense_bytes)
+    print("\n")
+
+    // free returns everything
+    kv_free(&!kv1)
+    let after = kv_blocks_used(&kv1)
+    print("blocks_after_free=")
+    print_int(after)
+    print(" tab_zeroed=")
+    print_int(if (kv1.tab_k as i64) == 0 && (kv1.tab_v as i64) == 0 { 1 } else { 0 })
+    print("\n")
+    if after != 0 || (kv1.tab_k as i64) != 0 { ok = false; print("FAIL free\n") }
+    kv_free(&!kv2)
+
+    if ok { print("KVP PASS\n") } else { print("KVP FAIL\n") }
+    print("KVP DONE\n")
+}
