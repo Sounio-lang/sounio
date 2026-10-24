@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.stdlib-sio-177.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-sio-177.readme
+-->
+
 # SIO-177 first increment: decision and structural contract
 
 Base: remote main a2a44df195bb8caf3fb07cbc9517275b29325e94. ADR018 records the
@@ -67,3 +76,22 @@ Existing `data::interval`, `verify::interval` and private `epistemic::interval_i
 are distinct legacy representations, not aliases of this contract or certified
 implementations of ADR018; some use round-to-nearest endpoint arithmetic. This
 increment does not promote their containment claims or change their API behavior.
+
+## Engine and CI routing
+
+The initial PR3101 Full Test Suite failed because the bootstrap seed does not
+implement the Madaros bits_to_f64 intrinsic used for exact endpoint construction.
+The two contract fixtures now declare requires: madaros, with the reason in their
+source. The structural gate is registered explicitly in Stdlib Deep Science,
+which uses its identified source-built modular compiler and the C++23 oracle.
+This does not claim seed support or replace a native check with a skipped test.
+Required governance metadata was also added to the three new documents after
+Contracts Core localized its absence. New executable receipts follow separately.
+
+Slurm17135 completed the registered full Deep Science integration on frozen
+source08, exit0:0, elapsed17m42s. All497 recorded phase rows succeeded, including
+interval-contract and final full input/compiler hash checks. The child contract
+ELF retains SHA256f3f94c6b5c1f7bc1da0aef1a114a32ad465e42d2e2864ae1598910e6b013e413.
+Compact aggregate/child text receipts are in ci-replay-text.tar.gz. This run is
+scoped to main a2a44 plus this interval-contract increment; it does not include
+PR3102/3103/3104 or the BDF/numdiff branches. Remote CI still reruns on the new head.

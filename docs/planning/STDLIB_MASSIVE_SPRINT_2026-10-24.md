@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.planning.stdlib-massive-sprint-2026-10-24
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.planning.stdlib-massive-sprint-2026-10-24
+-->
+
 # Massive stdlib sprint: execution ledger
 
 Approved by Demetrios Agourakis, 2026-10-24. Baseline for the first implementation
@@ -73,7 +82,8 @@ kernel or physical/clinical calibration is implied by this programme.
 ## Current execution state
 
 - Accepted design: ADR018, with historical D34 alternatives retained.
-- In progress:162,163,165,177. Each needs independent native/C++ review receipts.
+- First reviewed PR deliveries:162 ([3102](https://github.com/Sounio-lang/sounio/pull/3102)),163 ([3104](https://github.com/Sounio-lang/sounio/pull/3104)),165 ([3103](https://github.com/Sounio-lang/sounio/pull/3103)); fresh-tip CI/human review remain separate.
+- In progress:164 differentiation,166 BDF,167 noncentral-t/power,172 phonon transport;177 has first structural/ADR increment in [3101](https://github.com/Sounio-lang/sounio/pull/3101), with compiler integration still pending.
 - Other packages: approved scope, not yet implemented by this wave.
 - Final programme completion requires all package gates, integration review and
   scientific examples; no task is marked done merely because CI or a pilot passes.
