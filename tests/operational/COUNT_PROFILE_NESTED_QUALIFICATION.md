@@ -96,3 +96,9 @@ is explicitly named FORGED_OLD_ROWS and must never be used as a functional recei
 Traced operational coverage additionally requires the accepted traced-source
 snapshot. Source preparation, a focused smoke, a genuine combined gate, a pilot,
 a full round and inferential calibration are distinct states.
+
+The receipt also requires all four phases for the nonempty canonical-source glob
+`tests/run-pass/stdlib_scale_count_*.sio`, plus the two normalization fixtures and
+`stdlib_deep_stats_count_profile_nested.sio`. Rank, cached-normalizer, bootstrap-cache
+and both GLM/increment trace-control C++ concordance labels are mandatory; rebinding
+a pre-cache gate such as16933 to a newer manifest does not satisfy these rows.

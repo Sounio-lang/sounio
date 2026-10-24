@@ -45,10 +45,18 @@ awk -F '\t' 'NR==1 {if($0!="kind\tsource\texit_status")exit 1;next} NF!=3||$1=="
 require_row(){ awk -F '\t' -v k="$1" -v s="$2" '$1==k&&$2==s {count++} END {exit count!=1}' "$results" || { echo "missing/duplicate gate result: $1 $2" >&2; exit 65; }; }
 # CENTRAL gate labels are exact. Never accept an old full02 receipt merely
 # because somebody rebinds its source/compiler hashes to this newer tree.
-for fixture in stdlib_scale_count_profile_nested_bootstrap stdlib_deep_stats_count_profile_nested stdlib_scale_count_likelihood_difference stdlib_scale_normalization_into stdlib_scale_normalization_status stdlib_scale_count_fit_trace stdlib_scale_count_profile_traced; do
+# Every count fixture in the canonical source is required, including cache controls.
+shopt -s nullglob
+count_fixtures=(tests/run-pass/stdlib_scale_count_*.sio)
+shopt -u nullglob
+((${#count_fixtures[@]}>0)) || { echo "canonical count fixture glob is empty" >&2; exit 65; }
+for fixture_path in "${count_fixtures[@]}"; do
+ for phase in check compile native stdout-marker; do require_row "$phase" "$fixture_path"; done
+done
+for fixture in stdlib_deep_stats_count_profile_nested stdlib_scale_normalization_into stdlib_scale_normalization_status; do
  for phase in check compile native stdout-marker; do require_row "$phase" "tests/run-pass/$fixture.sio"; done
 done
-for stem in 'deep_stats_count_profile_bootstrap_reference:nested' 'deep_stats_count_profile_bootstrap_reference:nested-traced' count_likelihood_difference_reference count_dispersion_increment_reference normalization_into_reference; do require_row concordance "$stem"; done
+for stem in 'deep_stats_count_profile_bootstrap_reference:nested' 'deep_stats_count_profile_bootstrap_reference:nested-traced' count_likelihood_difference_reference count_dispersion_increment_reference normalization_into_reference 'count_likelihood_difference_reference:rank' 'deep_stats_nb2_likelihood_reference:cached' 'deep_stats_count_profile_bootstrap_reference:cache' 'deep_stats_count_glm_reference:trace-control' 'deep_stats_count_increment_reference:trace-control'; do require_row concordance "$stem"; done
 for control in 'deep_stats_count_profile_bootstrap_reference:nested-fixed-alpha:expected=2:actual=2' 'deep_stats_count_profile_bootstrap_reference:nested-prefix:expected=2:actual=2' 'count_dispersion_increment_reference:orientation:expected=2:actual=2'; do require_row mutant-rejection "$control"; done
 
 require_row input-hashes unchanged

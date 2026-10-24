@@ -115,7 +115,7 @@ results_sha256=${rsha%% *}
 results_path=$old_results
 RECEIPT
 expect old-gate-current-manifest-rejected 65 env COUNT_PROFILE_FUNCTIONAL_GATE_RECEIPT="$out/controls/FORGED_OLD_ROWS.receipt" MADAROS_RAW_BIN="$compiler" bash "$src/scripts/stdlib/count_profile_calibration.sh" "$src" "$out/rejected-campaign" pilot
-grep -Fq 'missing/duplicate gate result: check tests/run-pass/stdlib_scale_count_profile_nested_bootstrap.sio' "$out/old-gate-current-manifest-rejected.stderr"
+grep -Fq 'missing/duplicate gate result: check tests/run-pass/' "$out/old-gate-current-manifest-rejected.stderr"
 [[ ! -e "$out/rejected-campaign/pilot_nested_B31/tools/compile.resource" ]]
 [[ ! -e "$out/rejected-campaign/pilot_B31" && ! -e "$out/rejected-campaign/qualification_B199" ]]
 printf 'pre-compile-rejection\told-full02-even-with-current-manifest\t0\n' >> "$out/RESULTS.tsv"
