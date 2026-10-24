@@ -69,10 +69,11 @@ cd "$ROOT_DIR"
 # is MAP_NORESERVE: only the pages the compile touches are committed.
 export SOUNIO_NV2_ARENA_GIB="${SOUNIO_NV2_ARENA_GIB:-64}"
 # Likewise the handle table: 4,194,304 handles ran out in gen3 after it had
-# parsed about 3 MB of its own source (#2966). 2^27 handles take 6 GiB of the
-# 64 GiB mapping and move the ELF load base to 0x8000000
+# parsed about 3 MB of its own source (#2966). 2^26 handles take 3 GiB of the
+# 64 GiB mapping and move the ELF load base to 0x4000000, which leaves 192 MB
+# for the image below BSS_BASE_LINUX (gen2 is 127 MB; 2^27 would leave 7 MB)
 # (scripts/ci/madaros_handle_capacity_gate.sh).
-export SOUNIO_NV2_HANDLE_LOG2="${SOUNIO_NV2_HANDLE_LOG2:-27}"
+export SOUNIO_NV2_HANDLE_LOG2="${SOUNIO_NV2_HANDLE_LOG2:-26}"
 
 # ── receipt reuse ─────────────────────────────────────────────────────────────
 # gen2 and gen3 are two full self-compiles (~40 min in CI, in swap). Their
@@ -288,6 +289,15 @@ else
       echo "           rc=$GEN3_RC"
       if [[ "$GEN3_RC" -ne 0 || ! -s "$GEN3" ]]; then
         FAIL_DETAIL="gen2 runs but cannot compile the source it was built from (rc=$GEN3_RC). See $WORK/gen3.log"
+        # Died on a signal: rerun under gdb and name the function
+        # (madaros_crash_backtrace.sh). Written next to gen3.log.
+        if [[ "$GEN3_RC" -ge 128 && -s "$GEN2.map" ]]; then
+          echo "           gen3 died on signal $((GEN3_RC - 128)); capturing a backtrace"
+          ( souc_scrub_foreign_env "$ROOT_DIR"; _souc_limits; \
+            bash "$ROOT_DIR/scripts/ci/madaros_crash_backtrace.sh" "$GEN2" "$GEN2.map" -- build "$SRC" "$GEN3.bt-out" ) \
+            >"$WORK/gen3_backtrace.txt" 2>&1 || true
+          sed -n '1,60p' "$WORK/gen3_backtrace.txt"
+        fi
       else
         chmod +x "$GEN3"
         reached gen3
