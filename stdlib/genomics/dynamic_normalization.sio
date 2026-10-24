@@ -1,47 +1,89 @@
 // Dynamic exact-median log-ratio normalization of raw integer counts.
 // Mode0: genes positive in every sample. Mode1: positive-count geometric means
 // and per-sample positive ratios; explicit alternative, never an automatic fallback.
-// Workspace 2*genes+2*samples doubles + 2*genes integer eligibility/anchor scratch.
+// Legacy scratch: 2*genes+2*samples doubles + 2*genes integer flags/anchors.
+// Strided into scratch: same doubles + genes integer anchors; reusable log slot.
 // Status0success,1shape/mode,2negative count,3no eligible ratios,
 // 4arithmetic,5count not exactly convertible to binary64. Outputs transactional.
 use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
 use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
 use stats::dynamic_order::{numeric_select}
-use math::pure::{is_finite,ln_checked,exp}
-use math::logarithmic::{log1p_checked}
+use math::pure::{CheckedLog,is_finite,ln_checked_into,exp}
+use math::logarithmic::{log1p_checked_into}
 pub struct DynamicSizeFactors {pub status:i64,pub genes:i64,pub samples:i64,pub genes_used:i64,pub genes_excluded:i64,pub mode:i64}
 pub fn dynamic_normalization_workspace(genes:i64,samples:i64)->i64 with Div {
     if genes<1 || samples<1 || samples>4611686018427387903 {return -1}
     if genes>(9223372036854775807-2*samples)/2 {return -1}
     return 2*genes+2*samples
 }
-fn norm_log_ratio(count:i64,anchor:i64)->f64 with Mut,Div,Panic {
-    let delta=((count-anchor) as f64)/(anchor as f64)
-    let magnitude=if delta<0.0 {-delta}else{delta}
-    if magnitude<=0.5 {return log1p_checked(delta).value}
-    // Both integers are positive and <=2^53. The quotient is finite,
-    // nonzero and separated from1 in this branch; use one log without
-    // subtracting two logarithms of potentially large counts.
-    return ln_checked((count as f64)/(anchor as f64)).value
+
+// Checked streaming-scratch query. This is a lower-allocation strided adapter,
+// not the first dimension-dynamic normalization API.
+pub struct DynamicNormalizationWorkspace {pub status:i64,pub genes:i64,pub samples:i64,pub numeric_elements:i64,pub integer_elements:i64,pub payload_bytes:i64}
+pub fn dynamic_median_ratio_size_factors_workspace(genes:i64,samples:i64)->DynamicNormalizationWorkspace with Div {
+ let bad=DynamicNormalizationWorkspace{status:1,genes:genes,samples:samples,numeric_elements:0,integer_elements:0,payload_bytes:0}
+ let numeric=dynamic_normalization_workspace(genes,samples)
+ let limit=9223372036854771704/8
+ if numeric<0 || numeric>limit {return bad}
+ if genes>limit-numeric {return bad}
+ DynamicNormalizationWorkspace{status:0,genes:genes,samples:samples,numeric_elements:numeric,integer_elements:genes,payload_bytes:(numeric+genes)*8}
 }
-pub fn dynamic_median_ratio_size_factors(counts:&IntegerBuffer,genes:i64,samples:i64,mode:i64,
-    factors:&!NumericBuffer,log_factors:&!NumericBuffer,work:&!NumericBuffer,flags:&!IntegerBuffer)
-    ->DynamicSizeFactors with Mut,Div,Panic {
-    var out=DynamicSizeFactors{status:1,genes:genes,samples:samples,genes_used:0,genes_excluded:0,mode:mode}
+pub struct DynamicSizeFactorsSlot {result:DynamicSizeFactors,log_work:CheckedLog}
+pub fn dynamic_size_factors_slot()->DynamicSizeFactorsSlot {
+ DynamicSizeFactorsSlot{result:DynamicSizeFactors{status:1,genes:0,samples:0,genes_used:0,genes_excluded:0,mode:0},log_work:CheckedLog{status:2,value:0.0}}
+}
+fn norm_size_factors_reset(genes:i64,samples:i64,mode:i64,out:&!DynamicSizeFactorsSlot) with Mut {
+ out.result.status=1;out.result.genes=genes;out.result.samples=samples
+ out.result.genes_used=0;out.result.genes_excluded=0;out.result.mode=mode
+ out.log_work.status=2;out.log_work.value=0.0
+}
+pub fn dynamic_size_factors_slot_status(out:&DynamicSizeFactorsSlot)->i64 {out.result.status}
+pub fn dynamic_size_factors_slot_genes_used(out:&DynamicSizeFactorsSlot)->i64 {out.result.genes_used}
+pub fn dynamic_size_factors_slot_genes_excluded(out:&DynamicSizeFactorsSlot)->i64 {out.result.genes_excluded}
+pub fn dynamic_size_factors_snapshot(out:&DynamicSizeFactorsSlot)->DynamicSizeFactors {
+ let status:i64=out.result.status;let genes:i64=out.result.genes;let samples:i64=out.result.samples
+ let used:i64=out.result.genes_used;let excluded:i64=out.result.genes_excluded;let mode:i64=out.result.mode
+ DynamicSizeFactors{status:status,genes:genes,samples:samples,genes_used:used,genes_excluded:excluded,mode:mode}
+}
+fn norm_log_ratio_into(count:i64,anchor:i64,out:&!DynamicSizeFactorsSlot)->i64 with Mut,Div,Panic {
+ let delta=((count-anchor) as f64)/(anchor as f64)
+ let magnitude=if delta<0.0 {-delta}else{delta}
+ if magnitude<=0.5 {return log1p_checked_into(delta,&!out.log_work)}
+ // The same finite nonlocal quotient and branch as the legacy estimator.
+ ln_checked_into((count as f64)/(anchor as f64),&!out.log_work)
+}
+
+fn norm_size_factors_core(counts:&IntegerBuffer,genes:i64,samples:i64,row_stride:i64,col_stride:i64,offset:i64,mode:i64,legacy:bool,
+    factors:&!NumericBuffer,log_factors:&!NumericBuffer,work:&!NumericBuffer,flags:&!IntegerBuffer,out:&!DynamicSizeFactorsSlot)
+    ->i64 with Mut,Div,Panic {
+    norm_size_factors_reset(genes,samples,mode,out)
     let need=dynamic_normalization_workspace(genes,samples)
-    if need<0 || mode<0 || mode>1 {return out}
-    if genes>9223372036854775807/samples {return out}
+    if need<0 || mode<0 || mode>1 {return out.result.status}
     if numeric_buffer_status(factors)!=0 || numeric_buffer_status(log_factors)!=0 ||
-       numeric_buffer_status(work)!=0 || integer_buffer_status(counts)!=0 || integer_buffer_status(flags)!=0 {return out}
-    if integer_buffer_len(counts)!=genes*samples || numeric_buffer_len(factors)!=samples ||
-       numeric_buffer_len(log_factors)!=samples || numeric_buffer_len(work)<need || integer_buffer_len(flags)<2*genes {return out}
+       numeric_buffer_status(work)!=0 || integer_buffer_status(counts)!=0 || integer_buffer_status(flags)!=0 {return out.result.status}
+    let integer_need=if legacy {2*genes}else{genes}
+    if numeric_buffer_len(factors)!=samples || numeric_buffer_len(log_factors)!=samples ||
+       numeric_buffer_len(work)<need || integer_buffer_len(flags)<integer_need {return out.result.status}
+    let count_len=integer_buffer_len(counts)
+    if legacy {
+        if genes>9223372036854775807/samples {return out.result.status}
+        if count_len!=genes*samples {return out.result.status}
+    }
+    if row_stride<0 || col_stride<0 || offset<0 || offset>=count_len {return out.result.status}
+    var available=count_len-1-offset
+    if genes>1 {
+        if row_stride>available/(genes-1) {return out.result.status}
+        available=available-row_stride*(genes-1)
+    }
+    if samples>1 {if col_stride>available/(samples-1) {return out.result.status}}
+
     var g:i64=0
     while g<genes {
         var s:i64=0
         while s<samples {
-            let count=integer_buffer_at(counts,g*samples+s)
-            if count<0 {out.status=2;return out}
-            if count>9007199254740992 {out.status=5;return out}
+            let count=integer_buffer_at(counts,offset+g*row_stride+s*col_stride)
+            if count<0 {out.result.status=2;return out.result.status}
+            if count>9007199254740992 {out.result.status=5;return out.result.status}
             s=s+1
         }
         g=g+1
@@ -55,21 +97,26 @@ pub fn dynamic_median_ratio_size_factors(counts:&IntegerBuffer,genes:i64,samples
         var positive:i64=0
         var s:i64=0
         while s<samples {
-            let count=integer_buffer_at(counts,g*samples+s)
+            let count=integer_buffer_at(counts,offset+g*row_stride+s*col_stride)
             if count>0 {positive=positive+1;if anchor==0 {anchor=count}}
             s=s+1
         }
         let eligible=positive>0 && (mode==1 || positive==samples)
-        integer_buffer_set(flags,g,if eligible {1}else{0})
-        integer_buffer_set(flags,genes+g,anchor)
+        if legacy {
+            integer_buffer_set(flags,g,if eligible {1}else{0})
+            integer_buffer_set(flags,genes+g,anchor)
+        } else {integer_buffer_set(flags,g,if eligible {anchor}else{0})}
         if eligible {
             var total=0.0
             var correction=0.0
             s=0
             while s<samples {
-                let count=integer_buffer_at(counts,g*samples+s)
+                let count=integer_buffer_at(counts,offset+g*row_stride+s*col_stride)
                 if count>0 {
-                    let value=norm_log_ratio(count,anchor)-correction
+                    let ratio_status=norm_log_ratio_into(count,anchor,out)
+                    if ratio_status!=0 {out.result.status=4;return out.result.status}
+                    let ratio_value:f64=out.log_work.value
+                    let value=ratio_value-correction
                     let next=total+value
                     correction=(next-total)-value
                     total=next
@@ -77,34 +124,39 @@ pub fn dynamic_median_ratio_size_factors(counts:&IntegerBuffer,genes:i64,samples
                 s=s+1
             }
             let mean=total/(positive as f64)
-            if !is_finite(mean) {out.status=4;return out}
+            if !is_finite(mean) {out.result.status=4;return out.result.status}
             numeric_buffer_set(work,means+g,mean)
-            out.genes_used=out.genes_used+1
+            out.result.genes_used=out.result.genes_used+1
         }
         g=g+1
     }
-    out.genes_excluded=genes-out.genes_used
-    if out.genes_used==0 {out.status=3;return out}
+    out.result.genes_excluded=genes-out.result.genes_used
+    if out.result.genes_used==0 {out.result.status=3;return out.result.status}
     var s:i64=0
     while s<samples {
         var used:i64=0
         g=0
         while g<genes {
-            let count=integer_buffer_at(counts,g*samples+s)
-            if integer_buffer_at(flags,g)==1 && count>0 {
-                let anchor=integer_buffer_at(flags,genes+g)
-                let ratio=norm_log_ratio(count,anchor)-numeric_buffer_at(work,means+g)
-                if !is_finite(ratio) {out.status=4;return out}
+            let count=integer_buffer_at(counts,offset+g*row_stride+s*col_stride)
+            let eligible=if legacy {integer_buffer_at(flags,g)==1}else{integer_buffer_at(flags,g)>0}
+            if eligible && count>0 {
+                let anchor_at=if legacy {genes+g}else{g}
+                let anchor=integer_buffer_at(flags,anchor_at)
+                let ratio_status=norm_log_ratio_into(count,anchor,out)
+                if ratio_status!=0 {out.result.status=4;return out.result.status}
+                let ratio_value:f64=out.log_work.value
+                let ratio=ratio_value-numeric_buffer_at(work,means+g)
+                if !is_finite(ratio) {out.result.status=4;return out.result.status}
                 numeric_buffer_set(work,used,ratio)
                 used=used+1
             }
             g=g+1
         }
-        if used==0 {out.status=3;return out}
+        if used==0 {out.result.status=3;return out.result.status}
         let middle=used/2
         let budget=if used<=1152921504606846975 {used*8}else{0}
         let selected=numeric_select(work,used,middle,budget)
-        if selected.status!=0 {out.status=4;return out}
+        if selected.status!=0 {out.result.status=4;return out.result.status}
         var median=selected.value
         if used%2==0 {
             // Selection partitions the prefix, so its maximum is the lower median.
@@ -135,7 +187,7 @@ pub fn dynamic_median_ratio_size_factors(counts:&IntegerBuffer,genes:i64,samples
     while s<samples {
         let logged=numeric_buffer_at(work,staged_logs+s)-center
         let factor=exp(logged)
-        if !is_finite(logged) || !is_finite(factor) || factor<=0.0 {out.status=4;return out}
+        if !is_finite(logged) || !is_finite(factor) || factor<=0.0 {out.result.status=4;return out.result.status}
         numeric_buffer_set(work,staged_logs+s,logged)
         numeric_buffer_set(work,staged_factors+s,factor)
         s=s+1
@@ -148,6 +200,26 @@ pub fn dynamic_median_ratio_size_factors(counts:&IntegerBuffer,genes:i64,samples
         numeric_buffer_set(factors,s,factor)
         s=s+1
     }
-    out.status=0
-    return out
+    out.result.status=0
+    return out.result.status
+}
+
+// Active read-only strided view; nonnegative strides, including repeated views.
+// Outputs commit together, scratch is not transactional. Caller retains slot.
+pub fn dynamic_median_ratio_size_factors_into(counts:&IntegerBuffer,genes:i64,samples:i64,
+ row_stride:i64,col_stride:i64,offset:i64,mode:i64,factors:&!NumericBuffer,
+ log_factors:&!NumericBuffer,work:&!NumericBuffer,anchors:&!IntegerBuffer,
+ out:&!DynamicSizeFactorsSlot)->i64 with Mut,Div,Panic {
+ norm_size_factors_reset(genes,samples,mode,out)
+ let plan=dynamic_median_ratio_size_factors_workspace(genes,samples)
+ if plan.status!=0 {return 1}
+ norm_size_factors_core(counts,genes,samples,row_stride,col_stride,offset,mode,false,factors,log_factors,work,anchors,out)
+}
+// Existing packed API and integer scratch layout remain compatible.
+pub fn dynamic_median_ratio_size_factors(counts:&IntegerBuffer,genes:i64,samples:i64,mode:i64,
+ factors:&!NumericBuffer,log_factors:&!NumericBuffer,work:&!NumericBuffer,flags:&!IntegerBuffer)
+ ->DynamicSizeFactors with Mut,Div,Panic {
+ var out=dynamic_size_factors_slot()
+ let status=norm_size_factors_core(counts,genes,samples,samples,1,0,mode,true,factors,log_factors,work,flags,&!out)
+ dynamic_size_factors_snapshot(&out)
 }
