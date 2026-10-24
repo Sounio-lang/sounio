@@ -58,8 +58,11 @@ The first bracket is a Poisson half-deviance. The second is nonnegative. m1 is
 formed from positive scaled contributions, while delta1 is retained independently
 rather than reconstructed by y-m1. Local component evaluation uses shared phi and
 log1pmx kernels; below1e-16 their normalized leading factor1/2 is used. Far cases
-use checked log1p where possible, with a checked-log difference when z rounds to
--1 or overflows positively. Unexpected invalid signs are rejected, never clamped.
+use checked log1p for z>−1/2, with a checked-log difference for z<=−1/2
+or positive overflow. The negative threshold avoids magnifying rounding of z
+when forming its small complement 1+z; the independent logarithms are separated
+from equality in this region. This is a staged numerical safeguard, not a
+uniform relative-accuracy guarantee. Unexpected invalid signs are rejected, never clamped.
 Component roots are combined by a scaled Euclidean norm. This preserves a finite
 residual when its squared deviance cannot be represented.
 

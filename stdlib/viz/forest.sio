@@ -1,0 +1,89 @@
+// Checked shared forest row, footprint and explicit pagination geometry.
+use math::pure::{is_finite}
+use viz::uncertainty::{uncertainty_bounds}
+use viz::scatter::{scatter_geometry,scatter_project}
+pub struct ForestLayout {pub status:i64,pub capacity:i64,pub step:i64,pub first:i64}
+pub struct ForestPage {pub status:i64,pub first:i64,pub count:i64,pub next:i64,pub total:i64,pub has_more:bool}
+pub struct ForestRow {pub status:i64,pub center:i64,pub left:i64,pub right:i64,pub estimate:i64,pub lower_cap:bool,pub upper_cap:bool,pub marker:bool}
+pub struct ForestRect {pub status:i64,pub x:i64,pub y:i64,pub w:i64,pub h:i64}
+// Status0 available,1 invalid geometry/count,2 insufficient row capacity.
+// Seven pixel centers per row keep the full marker and adjacent rows separate.
+pub fn forest_layout(n:i64,x:i64,y:i64,w:i64,h:i64)->ForestLayout with Mut,Div {
+ var out=ForestLayout{status:1,capacity:0,step:0,first:0}
+ if n<0 || n>1024 || !scatter_geometry(x,y,w,h) {return out}
+ out.capacity=(h+1)/7
+ if out.capacity>1024 {out.capacity=1024}
+ if n>out.capacity {out.status=2;return out}
+ if n==0 {out.status=0;return out}
+ var step=h/(n+1)
+ if step>22 {step=22}
+ if step<7 {step=7}
+ out.step=step
+ out.first=y+step/2
+ out.status=0
+ out
+}
+// A page is always explicit: caller receives next/count/has_more, never truncation.
+pub fn forest_page_plan(total:i64,first:i64,x:i64,y:i64,w:i64,h:i64)->ForestPage with Mut,Div {
+ var out=ForestPage{status:1,first:first,count:0,next:first,total:total,has_more:false}
+ if total<1 || total>1024 || first<0 || first>=total {return out}
+ let layout=forest_layout(0,x,y,w,h)
+ if layout.status!=0 {return out}
+ if layout.capacity<1 {out.status=2;return out}
+ var count=total-first
+ if count>layout.capacity {count=layout.capacity}
+ out.count=count;out.next=first+count;out.has_more=out.next<total;out.status=0
+ out
+}
+pub fn forest_domain(xmin:f64,xmax:f64)->bool {
+ is_finite(xmin) && is_finite(xmax) && xmax>=xmin && is_finite(xmax-xmin)
+}
+// Full active-prefix preflight: invalid rows never produce a partial forest.
+pub fn forest_prefix(estimates:&[f64;1024],vars:&[f64;1024],lower:&[f64;1024],upper:&[f64;1024],
+ n:i64,kind:i64,level:f64)->bool with Mut,Div,Panic {
+ if n<0 || n>1024 || kind<0 || kind>3 {return false}
+ if kind!=0 && (!is_finite(level) || level<=0.0 || level>=1.0) {return false}
+ var i:i64=0
+ while i<n {
+  let e=estimates[i as usize]
+  if kind==0 {
+   let bounds=uncertainty_bounds(e,vars[i as usize])
+   if bounds.status!=0 {return false}
+  } else {
+   let lo=lower[i as usize];let hi=upper[i as usize]
+   if !is_finite(e) || !is_finite(lo) || !is_finite(hi) || lo>e || e>hi {return false}
+  }
+  i=i+1
+ }
+ true
+}
+// Interval ends outside the viewport are clipped but acquire no false end cap.
+pub fn forest_project(estimate:f64,lower:f64,upper:f64,row:i64,n:i64,
+ xmin:f64,xmax:f64,x:i64,y:i64,w:i64,h:i64)->ForestRow with Mut,Div {
+ let bad=ForestRow{status:2,center:0,left:0,right:0,estimate:0,lower_cap:false,upper_cap:false,marker:false}
+ let layout=forest_layout(n,x,y,w,h)
+ if layout.status!=0 || row<0 || row>=n || !forest_domain(xmin,xmax) {return bad}
+ if !is_finite(estimate) || !is_finite(lower) || !is_finite(upper) || lower>estimate || estimate>upper {return bad}
+ if upper<xmin || lower>xmax {return ForestRow{status:1,center:0,left:0,right:0,estimate:0,lower_cap:false,upper_cap:false,marker:false}}
+ let lo=if lower<xmin {xmin} else {lower}
+ let hi=if upper>xmax {xmax} else {upper}
+ let l=scatter_project(lo,0.0,xmin,xmax,0.0,0.0,x,0,w,1,true)
+ let r=scatter_project(hi,0.0,xmin,xmax,0.0,0.0,x,0,w,1,true)
+ if l.status!=0 || r.status!=0 {return bad}
+ let center=scatter_project(estimate,0.0,xmin,xmax,0.0,0.0,x,0,w,1,false)
+ // A huge outside center does not invalidate a still visible interval.
+ let marker=center.status==0
+ ForestRow{status:0,center:layout.first+row*layout.step,left:l.x,right:r.x,
+  estimate:if marker {center.x} else {0},lower_cap:lower>=xmin,upper_cap:upper<=xmax,marker:marker}
+}
+// Clip actual filled pixel footprints against the closed plot rectangle.
+pub fn forest_clip_rect(rx:i64,ry:i64,rw:i64,rh:i64,x:i64,y:i64,w:i64,h:i64)->ForestRect with Mut {
+ let bad=ForestRect{status:2,x:0,y:0,w:0,h:0}
+ if !scatter_geometry(x,y,w,h) || rx < -2000000 || rx>2000000 || ry < -2000000 || ry>2000000 ||
+    rw<0 || rw>2000000 || rh<0 || rh>2000000 {return bad}
+ var left=rx;var top=ry;var right=rx+rw;var bottom=ry+rh
+ if left<x {left=x};if top<y {top=y}
+ if right>x+w+1 {right=x+w+1};if bottom>y+h+1 {bottom=y+h+1}
+ if right<=left || bottom<=top {return ForestRect{status:1,x:0,y:0,w:0,h:0}}
+ ForestRect{status:0,x:left,y:top,w:right-left,h:bottom-top}
+}
