@@ -41,3 +41,24 @@ files inside RAW_RECEIPTS.tar.gz. The original mapped collection verification
 passed on a restored copy before removal of only the new loose repository
 copies. The pending Slurm16995 summary still uses the unchanged, expanded
 scratch/custody_bundle01 input and is not affected by repository compaction.
+
+Historical pair16988 is now complete0:0. Both native programs completed all199
+replicates with identical scientific stdout (180hits/P.905/finalRNG identical).
+Raw GNUtime before15:58.02/RSS373376KiB, after7:46.95/RSS356564KiB. These are one
+old-candidate pair, not the final three-pair target; no pooling or ratio claim.
+HISTORICAL_B199_16988.tar.gz retains compact text receipts, identity manifests,
+held-state records and the unchanged comparator source, with verified restored
+PAYLOAD.sha256. It excludes numerical ELFs/fullstdlib trees. New final03 uses
+conservative guard-fixed source956c6b26 and compilerd74 on both variants; its
+build+newpreflight17010 is separate and not a measured pair. Future pairs require
+preflight0 and new fullCENTRAL17009 overall0 before authorization is exercised.
+
+Readiness correction: although17009 reports numerical gate STATUS0, its launcher
+materialized two ignored binary payloads after the initial source manifest.
+The old manifest sha check passed but the full source-catalog comparison did
+not, so17009 does not satisfy final readiness/custody. Root is preparing a new
+full gate with prematerialization before manifest creation and a post-catalog
+comparison. No numerical source/compiler changed. Final03's stdlib input
+manifest and preflight remain valid; its three pairs remain unqueued pending
+the replacement gate and the bounded-pilot checkpoint. Old readiness receipt65
+is retained without post-hoc rebinding. Summary16995 remains held/unexecuted.
