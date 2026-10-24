@@ -797,3 +797,11 @@ lean_lib «SounioPireusMultiProbePartitionV14» where
 
 @[default_target]
 lean_lib «SounioPireusMultiProbePartitionV14AxiomAudit» where
+
+-- Checked dynamic numerical storage: structural contract invariants.
+@[default_target]
+lean_lib «SounioNumericBuffer» where
+
+-- Exact rational sign check for the selected RODAS4 time coefficient.
+@[default_target]
+lean_lib «SounioRodas4TimeConsistency» where

@@ -2621,24 +2621,106 @@ fn ir_function_deep_copy(func: IrFunction) -> IrFunction with Mut, Panic, Div {
     out
 }
 
+// `Type_method` as `ir_mangle_method_name` writes it: a non-empty type prefix,
+// then `_`, then the bare method. Method names themselves may contain `_`
+// (`field_idx_for_base_ref`), so this matches the suffix, not the last `_`.
+fn ir_name_is_type_method_of(full: Name, method: Name) -> bool with Mut, Panic {
+    if method.len <= 0 { return false }
+    if full.len <= method.len + 1 { return false }
+    let sep = full.len - method.len - 1
+    if sep <= 0 { return false }
+    if full.buf[sep as usize] != 95 { return false }
+    // Type_method as ir_mangle_method_name writes it: the type prefix is a
+    // single PascalCase identifier. snake_case free fns
+    // (`thin_module_summary_lookup_local`) and longer names that merely
+    // start uppercase and end in `_` + the bare method
+    // (`Checker_report_unobserved_print` is not Type=`print`) are not
+    // method bodies.
+    let first = full.buf[0]
+    if first < 65 || first > 90 { return false }
+    var pi: i64 = 1
+    while pi < sep {
+        if full.buf[pi as usize] == 95 { return false }
+        pi = pi + 1
+    }
+    var i: i64 = 0
+    while i < method.len {
+        if full.buf[(sep + 1 + i) as usize] != method.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Unique lowered `Type_method` body for a bare method name.
+//   >= 0  that fn_id
+//   -1    none
+//   -2    two or more bodies — refuse rather than pick
+fn ir_module_find_unique_mangled_method_body(module: &IrModule, method: Name) -> i64 with Mut, Panic, Div {
+    var found: i64 = 0 - 1
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        if ir_fn_instr_count(module, fi) > 0 {
+            let n = ir_function_name_at(module, fi)
+            if ir_name_is_type_method_of(n, method) {
+                if found >= 0 { return 0 - 2 }
+                found = fi
+            }
+        }
+        fi = fi + 1
+    }
+    found
+}
+
 // When merge leaves import stubs (ic=0) alongside lowered duplicates at higher
 // fn_id, copy the canonical body into the stub slot so codegen fn_offsets for
 // stale low indices still reach real implementations.
+//
+// Same-name first. If no same-name body exists, a bare stub may be a
+// `Type_method` whose body was stored under the mangled name (Lowerer.emit
+// as `Lowerer_emit`, call sites as `emit`). Fill only from a unique match;
+// two Type_method bodies for the same bare name is a refusal, not a guess.
+// The stub keeps its bare name so later name lookup still binds.
 // In-place on &! IrModule (memory wall P0).
-fn ir_module_promote_canonical_into_stub_slots(module: &! IrModule) with Mut, Div, Panic {
+// Returns false if any stub was ambiguous.
+fn ir_module_promote_canonical_into_stub_slots(module: &! IrModule) -> bool with Mut, Div, Panic, IO {
+    var ok = true
     var fi: i64 = 0
     while fi < (*module).fn_count {
-        if ir_fn_get(&(*module), fi as usize).instr_count == 0 {
-            let sym_name = ir_fn_get(&(*module), fi as usize).name
-            if sym_name.len > 0 {
-                let canon = ir_merge_find_function_name_index(module, sym_name)
-                if canon >= 0 && canon != fi && ir_fn_get(&(*module), canon as usize).instr_count > 0 {
-                    ir_fn_set(&! (*module), fi as usize, ir_function_deep_copy(ir_fn_get(&(*module), canon as usize)))
+        if ir_fn_instr_count(module, fi) == 0 {
+            if ir_fn_get(&(*module), fi as usize).compile_strategy != IR_STRATEGY_BSS_GLOBAL {
+                let sym_name = ir_function_name_at(module, fi)
+                if sym_name.len > 0 {
+                    let canon = ir_merge_find_function_name_index(module, sym_name)
+                    if canon >= 0 && canon != fi && ir_fn_instr_count(module, canon) > 0 {
+                        ir_fn_set(&! (*module), fi as usize, ir_function_deep_copy(ir_fn_get(&(*module), canon as usize)))
+                    } else if native_v2_builtin_id_for_name(sym_name) != 0 {
+                        // Builtin empty stubs are synthesized at codegen. A
+                        // Type_method suffix must not replace them (print vs
+                        // Checker_report_unobserved_print).
+                    } else {
+                        let mangled = ir_module_find_unique_mangled_method_body(module, sym_name)
+                        if mangled == 0 - 2 {
+                            print("IR_PROMOTE_REFUSAL kind=ambiguous_mangled_body name=")
+                            print(str_from_bytes(sym_name.buf, sym_name.len))
+                            print("\n")
+                            ok = false
+                        } else if mangled >= 0 && mangled != fi {
+                            var filled = ir_function_deep_copy(ir_fn_get(&(*module), mangled as usize))
+                            filled.name = sym_name
+                            ir_fn_set(&! (*module), fi as usize, filled)
+                            print("IR_PROMOTE_MANGLED_BODY stub=")
+                            print(str_from_bytes(sym_name.buf, sym_name.len))
+                            print(" body=")
+                            print(str_from_bytes(ir_function_name_at(module, mangled).buf, ir_function_name_at(module, mangled).len))
+                            print("\n")
+                        }
+                    }
                 }
             }
         }
         fi = fi + 1
     }
+    ok
 }
 
 // Ensure every call to a BUILTIN name (str_char_at, str_len, str_from_bytes, ...)
@@ -2759,13 +2841,14 @@ fn ir_module_ensure_builtin_call_targets(module: &! IrModule) with Mut, Div, Pan
 // Finalize merged multi-mod call targets in place. Memory wall P0: take &! IrModule
 // only — never copy full IrModule through promote/compact/ensure/resolve chain.
 // A14 invariant preserved: rebinds use whole-function writeback (not IrInstr by-value).
-fn ir_module_finalize_merged_calls(module: &! IrModule) with Mut, Div, Panic {
+fn ir_module_finalize_merged_calls(module: &! IrModule) -> bool with Mut, Div, Panic, IO {
     ir_module_resolve_named_calls(module)
     // Promote before compaction so import stubs at low fn_id gain bodies while
-    // seed main still references those indices.
-    ir_module_promote_canonical_into_stub_slots(module)
+    // seed main still references those indices. Ambiguous Type_method fill
+    // is a refusal: do not compact or publish a half-promoted module.
+    if !ir_module_promote_canonical_into_stub_slots(module) { return false }
     ir_module_compact_duplicate_fn_refs(module)
-    ir_module_promote_canonical_into_stub_slots(module)
+    if !ir_module_promote_canonical_into_stub_slots(module) { return false }
     // Two passes after promotion: duplicate import stubs (ic=0) can alias lowered
     // bodies under the same name at higher fn_id; promotion fills stub slots first.
     var pass: i64 = 0
@@ -2798,6 +2881,7 @@ fn ir_module_finalize_merged_calls(module: &! IrModule) with Mut, Div, Panic {
         pass = pass + 1
     }
     ir_module_ensure_builtin_call_targets(module)
+    true
 }
 
 // Reinstall seed user main after finalize: finalize passes can clobber
@@ -6725,6 +6809,22 @@ fn module_frontend_private_fn_identity_ok(
     renamed >= 0 - 1
 }
 
+// Check-only and compile paths must apply the same module-identity rules, or
+// `check` rejects (or accepts) a program compilation would treat differently:
+// two modules sharing a struct name, or same-named/imported pub fns. The
+// compile path already does this in module_frontend_private_fn_identity_ok;
+// run_check_mode loads the modules itself, so it needs the `use` map and that
+// pass through one entry point, in this order (the pub phase resolves importers
+// through the map). Returns false when a diagnostic was already printed.
+pub fn module_frontend_identity_pass(
+    programs: &! [Program; 256],
+    file_paths: [string; 256],
+    loaded: i64
+) -> bool with IO, Mut, Panic, Div, Alloc {
+    module_frontend_pfi_note_use_targets(programs, file_paths, loaded)
+    module_frontend_private_fn_identity_ok(programs, loaded)
+}
+
 fn module_frontend_pfi_find_loaded(file_paths: [string; 256], loaded: i64, path: string) -> i64 with Mut, Panic, Div {
     var j: i64 = 0
     while j < loaded && j < 256 {
@@ -7061,7 +7161,10 @@ fn module_frontend_merge_imported_box(
         let user_main_snapshot = ir_function_deep_copy(ir_fn_get(&(*module_box), 0 as usize))
         // Memory wall P0: finalize/restore in place on the boxed module — no full
         // IrModule by-value chain (promote/compact/ensure/resolve each used to copy).
-        ir_module_finalize_merged_calls(&! (*module_box))
+        if !ir_module_finalize_merged_calls(&! (*module_box)) {
+            print("Error: refusing to merge -- ambiguous Type_method body for a bare stub\n")
+            return module_frontend_lower_direct_box_error("ir_promote_ambiguous_mangled_body")
+        }
         ir_module_restore_user_main_calls(&! (*module_box), user_main_snapshot)
         // #2244: the restore above replays a PRE-finalize snapshot over slot 0, so
         // it undoes what ir_module_ensure_builtin_call_targets just did to that
@@ -7564,7 +7667,11 @@ fn module_frontend_compile_imported_to_file_target_impl(
         ir_module_dump_all_calls_diag(&(*module_box))
     }
     // Memory wall P0: finalize/restore in place — no full IrModule by-value locals.
-    ir_module_finalize_merged_calls(&! (*module_box))
+    if !ir_module_finalize_merged_calls(&! (*module_box)) {
+        print("Error: refusing to write a binary -- ambiguous Type_method body for a bare stub\n")
+        module_frontend_global_init_compile_end()
+        return 1
+    }
     ir_module_restore_user_main_calls(&! (*module_box), user_main_snapshot)
     // #2244: the restore above replays a PRE-finalize snapshot over slot 0, so
     // it undoes what ir_module_ensure_builtin_call_targets just did to that

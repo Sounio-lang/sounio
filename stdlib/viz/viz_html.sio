@@ -1,4 +1,10 @@
-use viz::scatter::{scatter_project}
+use viz::axis_layout::{axis_measure_labels}
+use viz::forest::{forest_layout,forest_domain,forest_prefix,forest_project,forest_clip_rect}
+use viz::uncertainty::{uncertainty_bounds}
+use viz::uncertainty::{uncertainty_prefix,uncertainty_domain,uncertainty_strip,uncertainty_segment}
+use viz::scatter::{scatter_geometry}
+use viz::bar::{bar_pair_width,bar_project}
+use viz::scatter::{scatter_project,scatter_finite}
 use viz::scale::{ScaleSpec,axis_scaled_ticks}
 use viz::clip::{clip_series_segment, clip_pixel}
 use viz::legend::{legend_layout}
@@ -8,7 +14,7 @@ use viz::axis::{axis_ticks, axis_label, axis_offset}
 // V1 emits static SVG/HTML markup to stdout. No JavaScript owns scientific
 // semantics; this renderer only serializes Sounio Visual IR geometry.
 
-use viz::ir::{VizScene, VIZ_NODE_AXIS, VIZ_FLAG_CLIP_PLOT, VIZ_INTERVAL_NONE, VIZ_INTERVAL_STANDARD_UNCERTAINTY, VIZ_NODE_PANEL, VIZ_NODE_CHART_LINE, VIZ_NODE_CHART_SCATTER, VIZ_NODE_CHART_BAR, VIZ_NODE_HEATMAP, VIZ_NODE_UNCERTAINTY_BAND, VIZ_NODE_LABEL, VIZ_NODE_CONTROL, VIZ_NODE_FOREST, VIZ_NODE_WATERFALL, VIZ_NODE_MOLECULE, VIZ_NODE_FIELD, VIZ_NODE_VECTOR_FIELD, VIZ_NODE_TRAJECTORY, VIZ_NODE_SPECTRUM, VIZ_NODE_MESH, VIZ_CONTROL_BUTTON, VIZ_CONTROL_SLIDER, VIZ_CONTROL_TOGGLE, VIZ_CONTROL_TABS, VIZ_CONTROL_LEGEND, VIZ_CONTROL_TOOLTIP, VIZ_CONTROL_VIEWPORT}
+use viz::ir::{VizScene, VIZ_NODE_AXIS, VIZ_FLAG_CLIP_PLOT, VIZ_FLAG_FITTED_AXIS, VIZ_INTERVAL_NONE, VIZ_INTERVAL_STANDARD_UNCERTAINTY, VIZ_NODE_PANEL, VIZ_NODE_CHART_LINE, VIZ_NODE_CHART_SCATTER, VIZ_NODE_CHART_BAR, VIZ_NODE_HEATMAP, VIZ_NODE_UNCERTAINTY_BAND, VIZ_NODE_LABEL, VIZ_NODE_CONTROL, VIZ_NODE_FOREST, VIZ_NODE_WATERFALL, VIZ_NODE_MOLECULE, VIZ_NODE_FIELD, VIZ_NODE_VECTOR_FIELD, VIZ_NODE_TRAJECTORY, VIZ_NODE_SPECTRUM, VIZ_NODE_MESH, VIZ_CONTROL_BUTTON, VIZ_CONTROL_SLIDER, VIZ_CONTROL_TOGGLE, VIZ_CONTROL_TABS, VIZ_CONTROL_LEGEND, VIZ_CONTROL_TOOLTIP, VIZ_CONTROL_VIEWPORT}
 
 fn vh_print_i64(n: i64) with IO, Mut, Div {
     if n == 0 { print("0"); return }
@@ -159,6 +165,79 @@ fn vh_emit_series_polyline(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
     println("\"/>")
 }
 
+// Sampled one-sigma strips preserve the Canvas checkerboard pixel cells.
+// A single reusable pattern bounds serialization by sample count, not height.
+fn vh_emit_uncertainty_band(scene:&VizScene,node_idx:i64) with IO,Mut,Div,Panic {
+ let slot:i64=scene.nodes[node_idx as usize].data_slot
+ if slot<0 || slot>=scene.series_count {return}
+ let count:i64=scene.series[slot as usize].n
+ if !uncertainty_prefix(&scene.series[slot as usize].xs,&scene.series[slot as usize].ys,&scene.series[slot as usize].vars,count) {return}
+ let xmin:f64=scene.series[slot as usize].x_min
+ let xmax:f64=scene.series[slot as usize].x_max
+ let ymin:f64=scene.series[slot as usize].y_min
+ let ymax:f64=scene.series[slot as usize].y_max
+ let x:i64=scene.nodes[node_idx as usize].layout.x
+ let y:i64=scene.nodes[node_idx as usize].layout.y
+ let w:i64=scene.nodes[node_idx as usize].layout.w
+ let h:i64=scene.nodes[node_idx as usize].layout.h
+ let r:i64=scene.nodes[node_idx as usize].style.r
+ let g:i64=scene.nodes[node_idx as usize].style.g
+ let b:i64=scene.nodes[node_idx as usize].style.b
+ if !uncertainty_domain(xmin,xmax,ymin,ymax) || !scatter_geometry(x,y,w,h) {return}
+ print("<!-- uncertainty variance plus-minus-one-sigma sampled-not-CI n=");vh_print_i64(count);println(" -->")
+ if count==0 {return}
+ print("<defs><pattern id=\"uncertainty-pattern-");vh_print_i64(node_idx)
+ print("\" patternUnits=\"userSpaceOnUse\" x=\"-0.5\" y=\"-0.5\" width=\"2\" height=\"2\" viewBox=\"0 0 2 2\">")
+ print("<g fill=\"rgb(");vh_print_i64(r/2);print(",");vh_print_i64(g/2);print(",");vh_print_i64(b)
+ println(")\"><rect x=\"0\" y=\"0\" width=\"1\" height=\"1\"/><rect x=\"1\" y=\"1\" width=\"1\" height=\"1\"/></g></pattern>")
+ print("<clipPath id=\"uncertainty-clip-");vh_print_i64(node_idx);print("\" clipPathUnits=\"userSpaceOnUse\"><rect x=\"")
+ let left:f64=(x as f64)-0.5
+ let top:f64=(y as f64)-0.5
+ print(left);print("\" y=\"");print(top);print("\" width=\"");vh_print_i64(w+1)
+ print("\" height=\"");vh_print_i64(h+1);println("\"/></clipPath></defs>")
+ print("<g data-uncertainty-input=\"variance\" data-uncertainty-span=\"plus-minus-one-sigma\" data-uncertainty-sampling=\"sampled-not-CI\" clip-path=\"url(#uncertainty-clip-")
+ vh_print_i64(node_idx);println(")\">")
+ var i:i64=0
+ while i<count {
+  let sx:f64=scene.series[slot as usize].xs[i as usize]
+  let sy:f64=scene.series[slot as usize].ys[i as usize]
+  let variance:f64=scene.series[slot as usize].vars[i as usize]
+  let strip=uncertainty_strip(sx,sy,variance,xmin,xmax,ymin,ymax,x,y,w,h)
+  if strip.status==0 {
+   let rx:i64=strip.x
+   let ry:i64=strip.y
+   let rw:i64=strip.w
+   let rh:i64=strip.h
+   let px:f64=(rx as f64)-0.5
+   let py:f64=(ry as f64)-0.5
+   print("<rect data-uncertainty-strip=\"");vh_print_i64(i);print("\" x=\"");print(px)
+   print("\" y=\"");print(py);print("\" width=\"");vh_print_i64(rw);print("\" height=\"");vh_print_i64(rh)
+   print("\" fill=\"url(#uncertainty-pattern-");vh_print_i64(node_idx);println(")\"/>")
+  }
+  i=i+1
+ }
+ var j:i64=0
+ while j+1<count {
+  let ax:f64=scene.series[slot as usize].xs[j as usize]
+  let ay:f64=scene.series[slot as usize].ys[j as usize]
+  let bx:f64=scene.series[slot as usize].xs[(j+1) as usize]
+  let by:f64=scene.series[slot as usize].ys[(j+1) as usize]
+  let seg=uncertainty_segment(ax,ay,bx,by,xmin,xmax,ymin,ymax,x,y,w,h)
+  if seg.status==0 {
+   let x0:i64=seg.x0
+   let y0:i64=seg.y0
+   let x1:i64=seg.x1
+   let y1:i64=seg.y1
+   print("<line data-uncertainty-center=\"");vh_print_i64(j);print("\" x1=\"");vh_print_i64(x0)
+   print("\" y1=\"");vh_print_i64(y0);print("\" x2=\"");vh_print_i64(x1);print("\" y2=\"");vh_print_i64(y1)
+   print("\" stroke=\"rgb(");vh_print_i64(r);print(",");vh_print_i64(g);print(",");vh_print_i64(b)
+   println(")\" stroke-width=\"1\" stroke-linecap=\"round\"/>")
+  }
+  j=j+1
+ }
+ println("</g>")
+}
+
 fn vh_emit_scatter(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
     // Direct scalar loads avoid copied-record projections in the pinned backend.
     let slot: i64 = scene.nodes[node_idx as usize].data_slot
@@ -205,21 +284,57 @@ fn vh_emit_scatter(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
     print("<!-- scatter n="); vh_print_i64(count); println(" -->")
 }
 
-fn vh_emit_bar(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
-    let n = scene.nodes[node_idx as usize]
-    let slot = n.data_slot as usize
-    let count = scene.series[slot].n
-    let y_min = scene.series[slot].y_min
-    let y_max = scene.series[slot].y_max
-    let bar_w = if count <= 0 { 1 } else { n.layout.w / count }
-    var j: i64 = 0
-    while j < count && j < 1024 {
-        let py = vh_series_y(n.layout.y, n.layout.h, scene.series[slot].ys[j as usize], y_min, y_max)
-        let x = n.layout.x + j * bar_w
-        let h = n.layout.y + n.layout.h - py
-        vh_emit_rect(x, py, if bar_w > 1 { bar_w - 1 } else { 1 }, h, n.style.r, n.style.g, n.style.b)
-        j = j + 1
+fn vh_emit_bar(scene:&VizScene,node_idx:i64) with IO,Mut,Div {
+    let slot:i64=scene.nodes[node_idx as usize].data_slot
+    if slot < 0 || slot >= scene.series_count { return }
+    let count:i64=scene.series[slot as usize].n
+    let x:i64=scene.nodes[node_idx as usize].layout.x
+    let y:i64=scene.nodes[node_idx as usize].layout.y
+    let w:i64=scene.nodes[node_idx as usize].layout.w
+    let h:i64=scene.nodes[node_idx as usize].layout.h
+    let red:i64=scene.nodes[node_idx as usize].style.r
+    let green:i64=scene.nodes[node_idx as usize].style.g
+    let blue:i64=scene.nodes[node_idx as usize].style.b
+    let xmin:f64=scene.series[slot as usize].x_min
+    let xmax:f64=scene.series[slot as usize].x_max
+    let ymin:f64=scene.series[slot as usize].y_min
+    let ymax:f64=scene.series[slot as usize].y_max
+    let clipped=(scene.nodes[node_idx as usize].flags & VIZ_FLAG_CLIP_PLOT) != 0
+    var first:f64=0.0; var second:f64=0.0
+    var pairs:i64=0; var scan:i64=0
+    while scan < count && scan < 1024 && pairs < 2 {
+        let sx:f64=scene.series[slot as usize].xs[scan as usize]
+        let sy:f64=scene.series[slot as usize].ys[scan as usize]
+        if scatter_finite(sx) && scatter_finite(sy) {
+            if pairs == 0 { first=sx } else { second=sx }
+            pairs=pairs+1
+        }
+        scan=scan+1
     }
+    let width=bar_pair_width(first,second,pairs,xmin,xmax,x,w)
+    var visible:i64=0; var outside:i64=0; var invalid:i64=0
+    var i:i64=0
+    while i < count && i < 1024 {
+        let sx:f64=scene.series[slot as usize].xs[i as usize]
+        let sy:f64=scene.series[slot as usize].ys[i as usize]
+        let rect=bar_project(sx,sy,xmin,xmax,ymin,ymax,x,y,w,h,width.value,clipped)
+        if rect.status == 0 {
+            let rx:i64=rect.x; let ry:i64=rect.y
+            let rw:i64=rect.w; let rh:i64=rect.h
+            let left:f64=(rx as f64)-0.5
+            let top:f64=(ry as f64)-0.5
+            print("<rect x=\""); print(left); print("\" y=\""); print(top)
+            print("\" width=\""); vh_print_i64(rw); print("\" height=\""); vh_print_i64(rh)
+            print("\" fill=\"rgb("); vh_print_i64(red); print(","); vh_print_i64(green)
+            print(","); vh_print_i64(blue); println(")\"/>")
+            visible=visible+1
+        } else if rect.status == 1 { outside=outside+1 }
+        else { invalid=invalid+1 }
+        i=i+1
+    }
+    print("<!-- bar counts visible="); vh_print_i64(visible)
+    print(" empty_or_outside="); vh_print_i64(outside)
+    print(" invalid="); vh_print_i64(invalid); println(" -->")
     print("<!-- bar n="); vh_print_i64(count); println(" -->")
 }
 
@@ -245,55 +360,69 @@ fn vh_emit_waterfall(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
     print("<!-- waterfall n="); vh_print_i64(count); println(" -->")
 }
 
-fn vh_emit_forest(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
-    let n = scene.nodes[node_idx as usize]
-    // Explicit scalar loads avoid copied-node style projections in the pinned backend.
-    let red: i64 = scene.nodes[node_idx as usize].style.r
-    let green: i64 = scene.nodes[node_idx as usize].style.g
-    let blue: i64 = scene.nodes[node_idx as usize].style.b
-    let row_count: i64 = scene.series[n.data_slot as usize].n
-    let d = &scene.series[n.data_slot as usize]
-    vh_emit_rect_stroke(n.layout.x, n.layout.y, n.layout.w, n.layout.h, 90, 95, 120)
-    if row_count <= 0 { return }
-    if d.interval_kind != VIZ_INTERVAL_NONE {
-        print("<metadata data-interval-kind=\"")
-        if d.interval_kind == 1 { print("confidence") }
-        if d.interval_kind == 2 { print("prediction") }
-        if d.interval_kind == 3 { print("credible") }
-        print("\" data-interval-level=\""); print(d.interval_level); println("\"/>")
-    }
-    var x_min = d.x_min
-    var x_max = d.x_max
-    var i: i64 = 0
-    while i < row_count && i < 1024 {
-        let sigma = vh_sqrt(d.vars[i as usize])
-        let lo = if d.interval_kind == VIZ_INTERVAL_NONE { d.xs[i as usize] - sigma } else { d.lower[i as usize] }
-        let hi = if d.interval_kind == VIZ_INTERVAL_NONE { d.xs[i as usize] + sigma } else { d.upper[i as usize] }
-        if lo < x_min { x_min = lo }
-        if hi > x_max { x_max = hi }
-        i = i + 1
-    }
-    if x_min == x_max {
-        x_min = x_min - 1.0
-        x_max = x_max + 1.0
-    }
-    let row_h = vh_clamp_i(n.layout.h / (row_count + 1), 5, 22)
-    i = 0
-    while i < row_count && i < 1024 {
-        let sigma = vh_sqrt(d.vars[i as usize])
-        let row_y = n.layout.y + row_h / 2 + i * row_h
-        let sx = vh_series_x(n.layout.x, n.layout.w, d.xs[i as usize], x_min, x_max)
-        let lo = if d.interval_kind == VIZ_INTERVAL_NONE { d.xs[i as usize] - sigma } else { d.lower[i as usize] }
-        let hi = if d.interval_kind == VIZ_INTERVAL_NONE { d.xs[i as usize] + sigma } else { d.upper[i as usize] }
-        let slo = vh_series_x(n.layout.x, n.layout.w, lo, x_min, x_max)
-        let shi = vh_series_x(n.layout.x, n.layout.w, hi, x_min, x_max)
-        vh_emit_line(slo, row_y, shi, row_y, 180, 180, 220)
-        vh_emit_rect(slo, row_y - 2, 1, 5, 180, 180, 220)
-        vh_emit_rect(shi, row_y - 2, 1, 5, 180, 180, 220)
-        vh_emit_rect(sx - 3, row_y - 3, 7, 7, red, green, blue)
-        i = i + 1
-    }
-    print("<!-- forest n="); vh_print_i64(row_count); println(" -->")
+fn vh_forest_rect(rx:i64,ry:i64,rw:i64,rh:i64,x:i64,y:i64,w:i64,h:i64,r:i64,g:i64,b:i64,part:i64) with IO,Mut,Div {
+ let clipped=forest_clip_rect(rx,ry,rw,rh,x,y,w,h)
+ if clipped.status!=0 {return}
+ let cx:i64=clipped.x;let cy:i64=clipped.y;let cw:i64=clipped.w;let ch:i64=clipped.h
+ let px:f64=(cx as f64)-0.5;let py:f64=(cy as f64)-0.5
+ print("<rect data-forest-part=\"");vh_print_i64(part);print("\" x=\"");print(px)
+ print("\" y=\"");print(py);print("\" width=\"");vh_print_i64(cw);print("\" height=\"");vh_print_i64(ch)
+ print("\" fill=\"rgb(");vh_print_i64(r);print(",");vh_print_i64(g);print(",");vh_print_i64(b);println(")\"/>")
+}
+fn vh_emit_forest(scene:&VizScene,idx:i64) with IO,Mut,Div,Panic {
+ let slot:i64=scene.nodes[idx as usize].data_slot
+ if slot<0 || slot>=scene.series_count {return}
+ let n:i64=scene.series[slot as usize].n
+ let x:i64=scene.nodes[idx as usize].layout.x
+ let y:i64=scene.nodes[idx as usize].layout.y
+ let w:i64=scene.nodes[idx as usize].layout.w
+ let h:i64=scene.nodes[idx as usize].layout.h
+ let r:i64=scene.nodes[idx as usize].style.r
+ let g:i64=scene.nodes[idx as usize].style.g
+ let b:i64=scene.nodes[idx as usize].style.b
+ let xmin:f64=scene.series[slot as usize].x_min
+ let xmax:f64=scene.series[slot as usize].x_max
+ let kind:i64=scene.series[slot as usize].interval_kind
+ let level:f64=scene.series[slot as usize].interval_level
+ let layout=forest_layout(n,x,y,w,h)
+ if layout.status!=0 || !forest_domain(xmin,xmax) {return}
+ if !forest_prefix(&scene.series[slot as usize].xs,&scene.series[slot as usize].vars,
+  &scene.series[slot as usize].lower,&scene.series[slot as usize].upper,n,kind,level) {return}
+ vh_emit_rect_stroke(x,y,w,h,90,95,120)
+ if kind!=0 {
+  print("<metadata data-interval-kind=\"")
+  if kind==1 {print("confidence")}
+  if kind==2 {print("prediction")}
+  if kind==3 {print("credible")}
+  print("\" data-interval-level=\"");print(level);println("\"/>")
+ }
+ print("<metadata data-forest-first-row=\"")
+ let first:i64=scene.nodes[idx as usize].min_value as i64
+ let total:i64=scene.nodes[idx as usize].max_value as i64
+ vh_print_i64(first);print("\" data-forest-total-rows=\"");vh_print_i64(total);println("\"/>")
+ var i:i64=0
+ while i<n {
+  let e:f64=scene.series[slot as usize].xs[i as usize]
+  var lo:f64=scene.series[slot as usize].lower[i as usize]
+  var hi:f64=scene.series[slot as usize].upper[i as usize]
+  if kind==0 {
+   let bounds=uncertainty_bounds(e,scene.series[slot as usize].vars[i as usize])
+   lo=bounds.lower;hi=bounds.upper
+  }
+  let row=forest_project(e,lo,hi,i,n,xmin,xmax,x,y,w,h)
+  if row.status==0 {
+   let cy:i64=row.center
+   let left:i64=row.left
+   let right:i64=row.right
+   let estimate:i64=row.estimate
+   vh_forest_rect(left,cy,right-left+1,1,x,y,w,h,180,180,220,0)
+   if row.lower_cap {vh_forest_rect(left,cy-2,1,5,x,y,w,h,180,180,220,1)}
+   if row.upper_cap {vh_forest_rect(right,cy-2,1,5,x,y,w,h,180,180,220,2)}
+   if row.marker {vh_forest_rect(estimate-3,cy-3,7,7,x,y,w,h,r,g,b,3)}
+  }
+  i=i+1
+ }
+ print("<!-- forest n=");vh_print_i64(n);println(" -->")
 }
 
 fn vh_emit_heatmap(scene: &VizScene, slot: i64, x: i64, y: i64, w: i64, h: i64) with IO, Mut, Div {
@@ -514,7 +643,7 @@ fn vh_emit_control(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
     }
 }
 
-pub fn viz_html_emit_scene(scene: &VizScene, width: i64, height: i64) with IO, Mut, Div {
+pub fn viz_html_emit_scene(scene: &VizScene, width: i64, height: i64) with IO, Mut, Div, Panic {
     println("<!doctype html><html><body>")
     vh_emit_scene_audit(scene)
     print("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\""); vh_print_i64(width)
@@ -528,12 +657,14 @@ pub fn viz_html_emit_scene(scene: &VizScene, width: i64, height: i64) with IO, M
         if n.kind == VIZ_NODE_PANEL {
             vh_emit_rect(n.layout.x, n.layout.y, n.layout.w, n.layout.h, 22, 28, 36)
         } else if n.kind == VIZ_NODE_AXIS {
-            vh_emit_axis(scene, i)
+            vh_emit_axis(scene,i,width,height)
         } else if n.kind == VIZ_NODE_LABEL {
             vh_emit_text(scene, i, n.layout.x, n.layout.y + 10, n.style.r, n.style.g, n.style.b)
         } else if n.kind == VIZ_NODE_CHART_LINE && (n.flags & VIZ_FLAG_CLIP_PLOT) != 0 {
             vh_emit_clipped_line(scene, i)
-        } else if n.kind == VIZ_NODE_CHART_LINE || n.kind == VIZ_NODE_UNCERTAINTY_BAND {
+        } else if n.kind == VIZ_NODE_UNCERTAINTY_BAND {
+            vh_emit_uncertainty_band(scene,i)
+        } else if n.kind == VIZ_NODE_CHART_LINE {
             vh_emit_series_polyline(scene, i)
         } else if n.kind == VIZ_NODE_CHART_SCATTER {
             vh_emit_scatter(scene, i)
@@ -584,59 +715,68 @@ pub fn viz_html_emit_scene(scene: &VizScene, width: i64, height: i64) with IO, M
 fn vh_scale_name(mode:i64) with IO {
     if mode == 1 { print("log10") } else if mode == 2 { print("symlog") } else { print("linear") }
 }
-fn vh_emit_axis(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
-    let node = scene.nodes[node_idx as usize]
-    // Explicit scalar loads avoid copied-node style projections in the pinned backend.
-    let red: i64 = scene.nodes[node_idx as usize].style.r
-    let green: i64 = scene.nodes[node_idx as usize].style.g
-    let blue: i64 = scene.nodes[node_idx as usize].style.b
-    let flags:i64=scene.nodes[node_idx as usize].flags
-    let constant:f64=scene.nodes[node_idx as usize].value
-    let raw_lo:f64=scene.nodes[node_idx as usize].min_value
-    let raw_hi:f64=scene.nodes[node_idx as usize].max_value
-    let intervals:i64=scene.nodes[node_idx as usize].data_slot
-    let spec=ScaleSpec{mode:flags/2,constant:if flags < 2 {1.0} else {constant}}
-    let ticks = axis_scaled_ticks(raw_lo,raw_hi,intervals,&spec)
-    if ticks.status != 0 { return }
-    if spec.mode != 0 {
-        print("<metadata data-axis-scale=\"");vh_scale_name(spec.mode)
-        print("\" data-scale-constant-label=\"")
-        let label=axis_label(spec.constant)
-        var k:i64=0
-        while k < label.n { print_char(label.text[k as usize] as i64);k=k+1 }
-        println("\"/>")
-    }
-    let vertical = (flags & 1) == 1
-    let x = node.layout.x
-    let y = node.layout.y
-    if vertical { vh_emit_line(x, y, x, y + node.layout.h, red, green, blue) }
-    else { vh_emit_line(x, y, x + node.layout.w, y, red, green, blue) }
-    var i: i64 = 0
-    while i < ticks.n {
-        let label = axis_label(ticks.values[i as usize])
-        var tx = x
-        var ty = y
-        if vertical {
-            let py = y + node.layout.h - axis_offset(i, node.data_slot, node.layout.h)
-            vh_emit_line(x - 4, py, x, py, red, green, blue)
-            tx = x - 8 - label.n * 8; ty = py - 4
-        } else {
-            let px = x + axis_offset(i, node.data_slot, node.layout.w)
-            vh_emit_line(px, y, px, y + 4, red, green, blue)
-            tx = px - label.n * 4; ty = y + 8
-        }
-        print("<text x=\""); vh_print_i64(tx); print("\" y=\""); vh_print_i64(ty + 7)
-        print("\" fill=\"rgb("); vh_print_i64(red); print(",")
-        vh_print_i64(green); print(","); vh_print_i64(blue)
-        print(")\" font-family=\"monospace\" font-size=\"8\" textLength=\"")
-        vh_print_i64(label.n * 8); print("\" lengthAdjust=\"spacingAndGlyphs\">")
-        var j: i64 = 0
-        while j < label.n { print_char(label.text[j as usize] as i64); j = j + 1 }
-        println("</text>")
-        i = i + 1
-    }
-    let title_y = if vertical { y - 16 } else { y + 24 }
-    vh_emit_text(scene, node_idx, x, title_y + 10, red, green, blue)
+fn vh_emit_axis(scene:&VizScene,node_idx:i64,document_w:i64,document_h:i64) with IO,Mut,Div {
+ let x:i64=scene.nodes[node_idx as usize].layout.x
+ let y:i64=scene.nodes[node_idx as usize].layout.y
+ let w:i64=scene.nodes[node_idx as usize].layout.w
+ let h:i64=scene.nodes[node_idx as usize].layout.h
+ let red:i64=scene.nodes[node_idx as usize].style.r
+ let green:i64=scene.nodes[node_idx as usize].style.g
+ let blue:i64=scene.nodes[node_idx as usize].style.b
+ let flags:i64=scene.nodes[node_idx as usize].flags
+ if flags<0 {return}
+ let fitted=(flags & VIZ_FLAG_FITTED_AXIS)!=0
+ let low=flags-(if fitted {VIZ_FLAG_FITTED_AXIS}else{0})
+ if low<0 || low>5 {return}
+ let constant:f64=scene.nodes[node_idx as usize].value
+ let raw_lo:f64=scene.nodes[node_idx as usize].min_value
+ let raw_hi:f64=scene.nodes[node_idx as usize].max_value
+ let intervals:i64=scene.nodes[node_idx as usize].data_slot
+ let spec=ScaleSpec{mode:low/2,constant:if low<2 {1.0}else{constant}}
+ let ticks=axis_scaled_ticks(raw_lo,raw_hi,intervals,&spec)
+ if ticks.status!=0 {return}
+ let vertical=(low & 1)==1
+ let extent=if vertical {h}else{w}
+ let plan=axis_measure_labels(&ticks,vertical,x,y,extent,document_w,document_h)
+ if plan.status==1 || (fitted && plan.status!=0) {
+  if fitted {print("<metadata data-axis-layout=\"unavailable\" data-axis-layout-status=\"");vh_print_i64(plan.status);println("\"/>")}
+  return
+ }
+ if fitted {
+  print("<metadata data-axis-layout=\"fitted\" data-axis-layout-status=\"0\" data-axis-intervals=\"")
+  vh_print_i64(intervals);println("\"/>")
+ }
+ if spec.mode!=0 {
+  print("<metadata data-axis-scale=\"");vh_scale_name(spec.mode)
+  print("\" data-scale-constant-label=\"")
+  let label=axis_label(spec.constant)
+  var k:i64=0
+  while k<label.n {print_char(label.text[k as usize] as i64);k=k+1}
+  println("\"/>")
+ }
+ if vertical {vh_emit_line(x,y,x,y+h,red,green,blue)}
+ else {vh_emit_line(x,y,x+w,y,red,green,blue)}
+ var i:i64=0
+ while i<ticks.n {
+  // Recompute canonical text from its scalar tick; preserve planned geometry.
+  let label=axis_label(ticks.values[i as usize])
+  let px:i64=plan.tick_x[i as usize];let py:i64=plan.tick_y[i as usize]
+  if vertical {vh_emit_line(px-4,py,px,py,red,green,blue)}
+  else {vh_emit_line(px,py,px,py+4,red,green,blue)}
+  let tx:i64=plan.text_x[i as usize];let ty:i64=plan.text_y[i as usize]
+  print("<text ")
+  if fitted {print("data-axis-label=\"");vh_print_i64(i);print("\" ")}
+  print("x=\"");vh_print_i64(tx);print("\" y=\"");vh_print_i64(ty+7)
+  print("\" fill=\"rgb(");vh_print_i64(red);print(",");vh_print_i64(green);print(",");vh_print_i64(blue)
+  print(")\" font-family=\"monospace\" font-size=\"8\" textLength=\"");vh_print_i64(plan.text_width[i as usize])
+  print("\" lengthAdjust=\"spacingAndGlyphs\">")
+  var j:i64=0
+  while j<label.n {print_char(label.text[j as usize] as i64);j=j+1}
+  println("</text>")
+  i=i+1
+ }
+ let title_y=if vertical {y-16}else{y+24}
+ vh_emit_text(scene,node_idx,x,title_y+10,red,green,blue)
 }
 
 fn vh_emit_clipped_line(scene: &VizScene, idx: i64) with IO, Mut, Div {
