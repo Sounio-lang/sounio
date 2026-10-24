@@ -257,69 +257,7 @@ fi
 NEEDS_JSON="$slow_skipped" GITHUB_EVENT_NAME=workflow_dispatch NIGHTLY_INPUT=false \
   python3 "$DECISION" | grep -Fq CI_DECISION_PASS
 
-python3 - "$ROOT_DIR" <<'PY'
-import ast
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1])
-workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-decision = (root / "scripts/ci/evaluate_ci_decision.py").read_text(encoding="utf-8")
-
-lines = workflow.splitlines()
-workflow_needs = set()
-in_ci_decision = False
-in_needs = False
-for line in lines:
-    if line == "  ci-decision:":
-        in_ci_decision = True
-        continue
-    if in_ci_decision and line.startswith("  ") and not line.startswith("    ") and line != "  ci-decision:":
-        break
-    if not in_ci_decision:
-        continue
-    if line == "    needs:":
-        in_needs = True
-        continue
-    if in_needs:
-        if line.startswith("      - "):
-            workflow_needs.add(line.split("-", 1)[1].strip())
-            continue
-        # Comments and blank lines inside the list used to end the scan, which
-        # silently produced a SHORTER needs set -- and a short set still
-        # compares equal to an evaluator that is missing the same job, so the
-        # consistency check below would have reported agreement it had not
-        # verified. Skip them instead of truncating.
-        if not line.strip() or line.strip().startswith("#"):
-            continue
-        break
-if not workflow_needs:
-    raise SystemExit("impact-ci-selftest: could not parse ci-decision needs")
-workflow_needs.discard("impact")
-
-module = ast.parse(decision)
-required_keys = None
-for node in ast.walk(module):
-    if isinstance(node, ast.Assign):
-        if any(isinstance(target, ast.Name) and target.id == "required" for target in node.targets):
-            if isinstance(node.value, ast.Dict):
-                required_keys = {
-                    key.value
-                    for key in node.value.keys
-                    if isinstance(key, ast.Constant) and isinstance(key.value, str)
-                }
-                break
-if required_keys is None:
-    raise SystemExit("impact-ci-selftest: could not parse evaluator required map")
-
-if workflow_needs != required_keys:
-    missing = sorted(workflow_needs - required_keys)
-    extra = sorted(required_keys - workflow_needs)
-    raise SystemExit(
-        "impact-ci-selftest: ci-decision needs/evaluator mismatch "
-        f"missing_in_evaluator={missing} extra_in_evaluator={extra}"
-    )
-PY
+node "$ROOT_DIR/scripts/ci/ci_decision_contract.mjs" "$ROOT_DIR" --selftest
 
 stdlib_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"true","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
 if NEEDS_JSON="$stdlib_needs" python3 "$DECISION" >/dev/null 2>&1; then

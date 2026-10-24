@@ -1,3 +1,4 @@
+use math::logarithmic::{log1p_checked,log1p_phi_checked}
 // Checked eight-bin information measures, in nats. See PROBABILITY.md.
 use math::pure::{is_finite, ln_checked}
 pub struct InformationResult {
@@ -40,35 +41,6 @@ fn information_mass(p: &[f64; 8], k: i64) -> InformationMass with Mut, Div, Pani
     }
     InformationMass { status: 0, mass: sum }
 }
-// (1+d)ln(1+d)-d for |d|<=1/4, without subtracting linear terms.
-fn information_phi(d: f64) -> f64 with Mut, Div, Panic {
-    var power = d * d
-    var sum = power * 0.5
-    var n: i64 = 3
-    while n <= 32 {
-        power = power * d
-        let term = power / ((n * (n - 1)) as f64)
-        if n % 2 == 1 { sum = sum - term } else { sum = sum + term }
-        n = n + 1
-    }
-    sum
-}
-// Natural ln(1+d), used only for |d|<=1/4.
-fn information_log1p(d: f64) -> f64 with Mut, Div, Panic {
-    let magnitude = if d < 0.0 { 0.0 - d } else { d }
-    if magnitude < 1.0e-16 { return d }
-    let t = d / (2.0 + d)
-    let square = t * t
-    var power = t
-    var sum = t
-    var n: i64 = 1
-    while n < 32 {
-        power = power * square
-        sum = sum + power / ((2 * n + 1) as f64)
-        n = n + 1
-    }
-    2.0 * sum
-}
 // Generalized KL contribution, nonnegative for p>=0,q>0.
 fn information_generalized(p: f64, q: f64) -> InformationResult with Mut, Div, Panic {
     if p == q { return InformationResult { status: 0, value: 0.0, infinite: false } }
@@ -77,7 +49,9 @@ fn information_generalized(p: f64, q: f64) -> InformationResult with Mut, Div, P
     let magnitude = if difference < 0.0 { 0.0 - difference } else { difference }
     var value: f64 = 0.0
     if magnitude <= q * 0.25 {
-        value = q * information_phi(difference / q)
+        let shape = log1p_phi_checked(difference / q)
+        if shape.status != 0 { return information_error(6) }
+        value = q * shape.value
     } else {
         let lp = ln_checked(p)
         let lq = ln_checked(q)
@@ -120,9 +94,12 @@ pub fn information_shannon(p: &[f64; 8], k: i64) -> InformationResult with Mut, 
         if probability > 0.0 {
             let logarithm = ln_checked(probability)
             if logarithm.status != 0 { return information_error(6) }
-            let log_value = if i == max_index && tail_fraction <= 0.25 {
-                information_log1p(0.0 - tail_fraction)
-            } else { logarithm.value }
+            var log_value = logarithm.value
+            if i == max_index && tail_fraction <= 0.25 {
+                let near_one = log1p_checked(0.0 - tail_fraction)
+                if near_one.status != 0 { return information_error(6) }
+                log_value = near_one.value
+            }
             if probability < 1.0e-200 {
                 let term = (probability / 2.2250738585072014e-308) * (0.0 - log_value)
                 let adjusted = term - tiny_correction
@@ -171,7 +148,9 @@ pub fn information_collision(p: &[f64; 8], k: i64) -> InformationResult with Mut
     }
     var value: f64 = 0.0
     if cross <= 0.25 {
-        value = 0.0 - information_log1p(0.0 - cross)
+        let logarithm = log1p_checked(0.0 - cross)
+        if logarithm.status != 0 { return information_error(6) }
+        value = 0.0 - logarithm.value
     } else {
         let logarithm = ln_checked(square_sum)
         if logarithm.status != 0 { return information_error(6) }
@@ -205,7 +184,9 @@ pub fn information_min(p: &[f64; 8], k: i64) -> InformationResult with Mut, Div,
     let fraction = tail / mass.mass
     var value: f64 = 0.0
     if fraction <= 0.25 {
-        value = 0.0 - information_log1p(0.0 - fraction)
+        let logarithm = log1p_checked(0.0 - fraction)
+        if logarithm.status != 0 { return information_error(6) }
+        value = 0.0 - logarithm.value
     } else {
         let logarithm = ln_checked(maximum / mass.mass)
         if logarithm.status != 0 { return information_error(6) }
