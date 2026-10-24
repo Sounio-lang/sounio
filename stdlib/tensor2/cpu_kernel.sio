@@ -50,6 +50,62 @@ pub fn ck_gemm(a: &CpuBuf, b: &CpuBuf, c: &!CpuBuf, m: i64, n: i64, k: i64) {
     ck_gemm_rows(a, b, c, 0, m, n, k)
 }
 
+// GEMV for the decode shape (m = 1): y[j] = sum_i x[i] * w[i * n + j],
+// with w row-major [k][n] - the transposed-projection layout used by
+// llm::llama. The generic ck_gemm m=1 path read-modify-writes y for
+// every i; here each block of 8 columns accumulates in locals over the
+// whole contraction and y is written once, so the inner loop is one
+// streamed w read per MAC with 8 independent FMA chains. The tail
+// (n % 8) uses the same accumulation one column at a time.
+pub fn ck_gemv(w: &CpuBuf, x: &CpuBuf, y: &!CpuBuf, k: i64, n: i64) with Mut {
+    let n8 = (n / 8) * 8
+    var j0: i64 = 0
+    while j0 < n8 {
+        var a0 = 0.0
+        var a1 = 0.0
+        var a2 = 0.0
+        var a3 = 0.0
+        var a4 = 0.0
+        var a5 = 0.0
+        var a6 = 0.0
+        var a7 = 0.0
+        var kk: i64 = 0
+        while kk < k {
+            let xv = read_f64(x.data, kk)
+            let base = kk * n + j0
+            a0 = a0 + xv * read_f64(w.data, base)
+            a1 = a1 + xv * read_f64(w.data, base + 1)
+            a2 = a2 + xv * read_f64(w.data, base + 2)
+            a3 = a3 + xv * read_f64(w.data, base + 3)
+            a4 = a4 + xv * read_f64(w.data, base + 4)
+            a5 = a5 + xv * read_f64(w.data, base + 5)
+            a6 = a6 + xv * read_f64(w.data, base + 6)
+            a7 = a7 + xv * read_f64(w.data, base + 7)
+            kk = kk + 1
+        }
+        write_f64(y.data, j0, a0)
+        write_f64(y.data, j0 + 1, a1)
+        write_f64(y.data, j0 + 2, a2)
+        write_f64(y.data, j0 + 3, a3)
+        write_f64(y.data, j0 + 4, a4)
+        write_f64(y.data, j0 + 5, a5)
+        write_f64(y.data, j0 + 6, a6)
+        write_f64(y.data, j0 + 7, a7)
+        j0 = j0 + 8
+    }
+    var j: i64 = n8
+    while j < n {
+        var acc = 0.0
+        var kk2: i64 = 0
+        while kk2 < k {
+            acc = acc + read_f64(x.data, kk2) * read_f64(w.data, kk2 * n + j)
+            kk2 = kk2 + 1
+        }
+        write_f64(y.data, j, acc)
+        j = j + 1
+    }
+}
+
 // GEMM restricted to rows [r0, r1) of C (and A): one shard of a split GEMM.
 // i-k-j streaming (B row and C row sequential; the C row stays cache-hot),
 // j unrolled 4-wide. A register-blocked i-j-k variant measured SLOWER
