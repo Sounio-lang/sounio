@@ -464,3 +464,7 @@ page is not a fresh execution receipt.
 | E267 | type-checker/ownership | error | cannot assign through a shared reference: the place is reached through `&T` (explicit `*p` or the auto-deref of `p.f` / `p[i]`), which is read-only; take `&!T` (#888) | — |
 | E269 | type-checker/epistemic | error | a `where` refinement on `Knowledge<T>` is not enforced by this compiler yet; the program is refused instead of running with the predicate silently ignored (#2753) | — |
 | E270 | type-checker/casts | error | `as string` does not convert a number, bool or char to text; the cast is refused instead of compiling to a program that uses the value as a string pointer (#2354) | — |
+| E271 | lexer (Madaros) | error | Unexpected character (byte N): a byte that starts no token is refused at its line and column instead of being kept as an `Error` token; `ε` and `⊥` stay tolerated because the `Knowledge<…>` parameter and call-label parsers consume them by name | — |
+| E272 | lexer (Madaros) | error | unterminated block comment: a `/*` (block comments nest) reaches end of file with its depth above zero; reported at the opening `/*` instead of silently swallowing the rest of the file | — |
+| E273 | lexer (Madaros) | error | unterminated string literal: a `"` reaches end of file without its closing quote; reported at the opening quote | — |
+| E274 | lexer (Madaros) | error | invalid escape sequence in a string literal: only `\n` `\t` `\r` `\0` `\\` `\"` and `\xHH` (two hex digits) are escapes; any other backslash pair used to compile as the bare character | — |
