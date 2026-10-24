@@ -170,6 +170,10 @@ for src in tests/reference/deep_*.cpp; do
       deep_viz_forest) compare "$stem" stdlib_deep_viz_forest ;;
       deep_viz_axis_layout) compare "$stem" stdlib_deep_viz_axis_layout ;;
       deep_viz_fitted_axis) compare "$stem" stdlib_deep_viz_fitted_axis ;;
+      deep_viz_sized_scatter_reference)
+        rc=0
+        timeout 180 "$out/$stem" "$out/stdlib_deep_viz_sized_scatter.stdout" "$out/stdlib_deep_viz_scatter_footprint.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc" ;;
       deep_viz_overlay_reference)
         rc=0
         timeout 180 "$out/$stem" --negative-selftest "$out/stdlib_deep_viz_overlay.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
@@ -241,6 +245,42 @@ rc=0
 timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/normalization_into_reference.cpp -o "$out/normalization_into_reference" > "$out/normalization_into_reference.cpp.txt" 2>&1 || rc=$?
 record cpp-compile normalization_into_reference "$rc"
 if [[ $rc == 0 ]]; then compare normalization_into_reference stdlib_scale_normalization_into; fi
+# Replay the frozen historical campaign asset through the real scientific renderer.
+# Missing/NA cells remain explicit; this is a report, never calibration acceptance.
+rc=0
+(cd examples/data && sha256sum -c count_profile_campaign_batch0_20261024.sha256) > "$out/campaign-asset.verify.txt" 2>&1 || rc=$?
+record input-asset count_profile_campaign_batch0_20261024 "$rc"
+asset_status=$rc
+if [[ $asset_status == 0 ]]; then
+ mkdir "$out/campaign-raw"
+ tar -xzf examples/data/count_profile_campaign_batch0_20261024.tar.gz -C "$out/campaign-raw" || asset_status=$?
+ record extract-asset count_profile_campaign_batch0_20261024 "$asset_status"
+ if [[ $asset_status == 0 ]]; then
+  (cd "$out/campaign-raw" && sha256sum -c RAW.sha256) > "$out/campaign-raw.verify.txt" 2>&1 || asset_status=$?
+  record input-asset campaign-raw "$asset_status"
+ fi
+fi
+rc=0
+stem=count_profile_campaign_report_reference
+timeout 180 g++ -std=c++23 -O2 -Wall -Wextra "tests/reference/$stem.cpp" -o "$out/$stem" > "$out/$stem.cpp.txt" 2>&1 || rc=$?
+record cpp-compile "$stem" "$rc"
+if [[ $rc == 0 && $asset_status == 0 ]]; then
+ rc=0
+ timeout 180 "$out/$stem" --parser-selftest > "$out/$stem.parser.stdout" 2> "$out/$stem.parser.stderr" || rc=$?
+ record cpp-controls "$stem:parser-selftest" "$rc"
+ rc=0
+ timeout 180 "$out/$stem" --emit "$out/campaign-raw" "$out/campaign-report.generated.sio" > "$out/$stem.emit.stdout" 2> "$out/$stem.emit.stderr" || rc=$?
+ record emit "$stem" "$rc"
+ if [[ $rc == 0 ]]; then
+  rc=0
+  cmp "$out/campaign-report.generated.sio" examples/viz_count_profile_campaign.sio > "$out/campaign-report.source-cmp.txt" 2>&1 || rc=$?
+  record source-replay "$stem" "$rc"
+ fi
+ native examples/viz_count_profile_campaign.sio viz_count_profile_campaign
+ rc=0
+ timeout 180 "$out/$stem" --negative-selftest "$out/campaign-raw" "$out/viz_count_profile_campaign.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+ record concordance "$stem" "$rc"
+fi
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"

@@ -4,7 +4,7 @@ use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_bu
 use display::canvas::{Canvas,canvas_fill_rect,canvas_draw_char,canvas_draw_line}
 use viz::scatter::{scatter_project}
 use viz::dynamic_plot::{DynamicPlotSpec,dynamic_line_validate,dynamic_line_canvas,dynamic_line_svg}
-use viz::dynamic_fields::{dynamic_scatter_validate,dynamic_scatter_canvas,dynamic_scatter_svg}
+use viz::dynamic_fields::{dynamic_scatter_validate,dynamic_scatter_canvas,dynamic_scatter_svg,dynamic_scatter_validate_sized,dynamic_scatter_canvas_sized,dynamic_scatter_svg_sized}
 use viz::axis::{axis_label,axis_ticks,axis_offset}
 use viz::axis_layout::{axis_fit_labels}
 use viz::scale::{ScaleSpec}
@@ -92,19 +92,23 @@ fn sd_text_valid(bytes:&IntegerBuffer,start:i64,n:i64,capacity:i64)->bool with M
  while i<n {let ch=integer_buffer_at(bytes,start+i);if ch<32 || ch>126 {return false};i=i+1}
  true
 }
-pub fn scientific_document_validate(p:&ScientificDocumentPlan,t:&ScientificDocumentText,bytes:&IntegerBuffer,
- x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer)->i64 with Mut,Div,Panic {
+fn sd_document_validate_radius(p:&ScientificDocumentPlan,t:&ScientificDocumentText,bytes:&IntegerBuffer,
+ x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer,radius:i64)->i64 with Mut,Div,Panic {
  if !sd_plan_valid(p) {return 1}
  if integer_buffer_status(bytes)!=0 {return 2}
  if !sd_text_valid(bytes,t.title_start,t.title_len,(p.width-32)/8) ||
  !sd_text_valid(bytes,t.left_start,t.left_len,(p.width/2-32)/8) ||
  !sd_text_valid(bytes,t.right_start,t.right_len,(p.width/2-32)/8) ||
  !sd_text_valid(bytes,t.footer_start,t.footer_len,(p.width-32)/8) {return 2}
- let left=dynamic_scatter_validate(&p.left,x0,y0,a0)
+ let left=dynamic_scatter_validate_sized(&p.left,x0,y0,a0,radius)
  if left!=0 {return 10+left}
- let right=dynamic_scatter_validate(&p.right,x1,y1,a1)
+ let right=dynamic_scatter_validate_sized(&p.right,x1,y1,a1,radius)
  if right!=0 {return 20+right}
  0
+}
+pub fn scientific_document_validate(p:&ScientificDocumentPlan,t:&ScientificDocumentText,bytes:&IntegerBuffer,
+ x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer)->i64 with Mut,Div,Panic {
+ sd_document_validate_radius(p,t,bytes,x0,y0,a0,x1,y1,a1,1)
 }
 fn sd_xml_char(ch:i64) with IO {
  if ch==38 {print("&amp;")} else if ch==60 {print("&lt;")} else if ch==62 {print("&gt;")}
@@ -255,16 +259,17 @@ fn sd_overlay_spec(s:&DynamicPlotSpec,secondary:bool)->DynamicPlotSpec {
  DynamicPlotSpec{x:s.x,y:s.y,w:s.w,h:s.h,xmin:s.xmin,xmax:s.xmax,ymin:s.ymin,ymax:s.ymax,
  r:if secondary {235}else{70},g:if secondary {130}else{180},b:if secondary {70}else{235},interval_kind:0,level:0.0}
 }
-fn sd_overlay_extra(s:&DynamicPlotSpec,kind:i64,x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer,indices:&IntegerBuffer,count:i64)->i64 with Mut,Div,Panic {
- if kind==0 {return dynamic_scatter_validate(s,x,y,a)}
+fn sd_overlay_extra(s:&DynamicPlotSpec,kind:i64,x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer,indices:&IntegerBuffer,count:i64,radius:i64)->i64 with Mut,Div,Panic {
+ if kind==0 {return dynamic_scatter_validate_sized(s,x,y,a,radius)}
  dynamic_line_validate(s,x,y,a,indices,count)
 }
-pub fn scientific_overlay_validate(p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,
+pub fn scientific_overlay_validate_sized(p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,
  x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer,
  bx0:&NumericBuffer,by0:&NumericBuffer,ba0:&IntegerBuffer,bi0:&IntegerBuffer,bc0:i64,
- bx1:&NumericBuffer,by1:&NumericBuffer,ba1:&IntegerBuffer,bi1:&IntegerBuffer,bc1:i64)->i64 with Mut,Div,Panic {
+ bx1:&NumericBuffer,by1:&NumericBuffer,ba1:&IntegerBuffer,bi1:&IntegerBuffer,bc1:i64,primary_radius:i64,secondary_radius:i64)->i64 with Mut,Div,Panic {
+ if primary_radius<1 || primary_radius>4 || secondary_radius<1 || secondary_radius>4 {return 33}
  if p.left_kind<0 || p.left_kind>1 || p.right_kind<0 || p.right_kind>1 {return 31}
- let status=scientific_document_validate(&p.document,&t.document,bytes,x0,y0,a0,x1,y1,a1)
+ let status=sd_document_validate_radius(&p.document,&t.document,bytes,x0,y0,a0,x1,y1,a1,primary_radius)
  if status!=0 {return status}
  let capacity=(p.document.width/4-40)/8
  if !sd_text_valid(bytes,t.left_first_start,t.left_first_len,capacity) ||
@@ -272,17 +277,24 @@ pub fn scientific_overlay_validate(p:&ScientificOverlayPlan,t:&ScientificOverlay
  !sd_text_valid(bytes,t.right_first_start,t.right_first_len,capacity) ||
  !sd_text_valid(bytes,t.right_second_start,t.right_second_len,capacity) {return 32}
  let left=sd_overlay_spec(&p.document.left,true);let right=sd_overlay_spec(&p.document.right,true)
- let ls=sd_overlay_extra(&left,p.left_kind,bx0,by0,ba0,bi0,bc0)
+ let ls=sd_overlay_extra(&left,p.left_kind,bx0,by0,ba0,bi0,bc0,secondary_radius)
  if ls!=0 {return 40+ls}
- let rs=sd_overlay_extra(&right,p.right_kind,bx1,by1,ba1,bi1,bc1)
+ let rs=sd_overlay_extra(&right,p.right_kind,bx1,by1,ba1,bi1,bc1,secondary_radius)
  if rs!=0 {return 50+rs}
  0
 }
-fn sd_legend_svg(s:&DynamicPlotSpec,bytes:&IntegerBuffer,start:i64,n:i64,x:i64,kind:i64) with IO,Mut,Panic {
+pub fn scientific_overlay_validate(p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,
+ x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer,
+ bx0:&NumericBuffer,by0:&NumericBuffer,ba0:&IntegerBuffer,bi0:&IntegerBuffer,bc0:i64,
+ bx1:&NumericBuffer,by1:&NumericBuffer,ba1:&IntegerBuffer,bi1:&IntegerBuffer,bc1:i64)->i64 with Mut,Div,Panic {
+ scientific_overlay_validate_sized(p,t,bytes,x0,y0,a0,x1,y1,a1,bx0,by0,ba0,bi0,bc0,bx1,by1,ba1,bi1,bc1,1,1)
+}
+fn sd_legend_svg(s:&DynamicPlotSpec,bytes:&IntegerBuffer,start:i64,n:i64,x:i64,kind:i64,radius:i64) with IO,Mut,Panic {
  if kind==0 {
-  let px:f64=(x as f64)-0.5
+  let left:i64=x+1-radius;let top:i64=85-radius
+  let px:f64=(left as f64)-0.5;let py:f64=(top as f64)-0.5;let side:i64=radius*2+1
   print("<rect data-overlay-legend=\"scatter\" x=\"");print(px)
-  print("\" y=\"83.500000\" width=\"3\" height=\"3\" fill=\"rgb(")
+  print("\" y=\"");print(py);print("\" width=\"");print(side);print("\" height=\"");print(side);print("\" fill=\"rgb(")
  } else {
   print("<line data-overlay-legend=\"line\" x1=\"");print(x);print("\" x2=\"");print(x+16)
   print("\" y1=\"85\" y2=\"85\" stroke=\"rgb(")
@@ -292,48 +304,52 @@ fn sd_legend_svg(s:&DynamicPlotSpec,bytes:&IntegerBuffer,start:i64,n:i64,x:i64,k
  if kind==0 {println(")\"/>")} else {println(")\" stroke-width=\"1\" stroke-linecap=\"round\"/>")}
  sd_svg_text(bytes,start,n,x+24,82)
 }
-fn sd_legend_canvas(c:&!Canvas,s:&DynamicPlotSpec,bytes:&IntegerBuffer,start:i64,n:i64,x:i64,kind:i64) with Mut,Panic {
- if kind==0 {canvas_fill_rect(c,x,84,3,3,s.r,s.g,s.b)} else {canvas_draw_line(c,x,85,x+16,85,s.r,s.g,s.b)}
+fn sd_legend_canvas(c:&!Canvas,s:&DynamicPlotSpec,bytes:&IntegerBuffer,start:i64,n:i64,x:i64,kind:i64,radius:i64) with Mut,Panic {
+ if kind==0 {canvas_fill_rect(c,x+1-radius,85-radius,radius*2+1,radius*2+1,s.r,s.g,s.b)} else {canvas_draw_line(c,x,85,x+16,85,s.r,s.g,s.b)}
  sd_canvas_text(c,bytes,start,n,x+24,82)
 }
-fn sd_overlay_legends_svg(p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,left:&DynamicPlotSpec,right:&DynamicPlotSpec) with IO,Mut,Panic {
- sd_legend_svg(&p.document.left,bytes,t.left_first_start,t.left_first_len,16,0)
- sd_legend_svg(left,bytes,t.left_second_start,t.left_second_len,p.document.width/4+16,p.left_kind)
+fn sd_overlay_legends_svg(p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,left:&DynamicPlotSpec,right:&DynamicPlotSpec,primary_radius:i64,secondary_radius:i64) with IO,Mut,Panic {
+ sd_legend_svg(&p.document.left,bytes,t.left_first_start,t.left_first_len,16,0,primary_radius)
+ sd_legend_svg(left,bytes,t.left_second_start,t.left_second_len,p.document.width/4+16,p.left_kind,secondary_radius)
  let primary_right=sd_overlay_spec(&p.document.right,false)
- sd_legend_svg(&primary_right,bytes,t.right_first_start,t.right_first_len,p.document.width/2+16,0)
- sd_legend_svg(right,bytes,t.right_second_start,t.right_second_len,p.document.width/2+p.document.width/4+16,p.right_kind)
+ sd_legend_svg(&primary_right,bytes,t.right_first_start,t.right_first_len,p.document.width/2+16,0,primary_radius)
+ sd_legend_svg(right,bytes,t.right_second_start,t.right_second_len,p.document.width/2+p.document.width/4+16,p.right_kind,secondary_radius)
 }
-fn sd_overlay_legends_canvas(c:&!Canvas,p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,left:&DynamicPlotSpec,right:&DynamicPlotSpec) with Mut,Panic {
- sd_legend_canvas(c,&p.document.left,bytes,t.left_first_start,t.left_first_len,16,0)
- sd_legend_canvas(c,left,bytes,t.left_second_start,t.left_second_len,p.document.width/4+16,p.left_kind)
+fn sd_overlay_legends_canvas(c:&!Canvas,p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,left:&DynamicPlotSpec,right:&DynamicPlotSpec,primary_radius:i64,secondary_radius:i64) with Mut,Panic {
+ sd_legend_canvas(c,&p.document.left,bytes,t.left_first_start,t.left_first_len,16,0,primary_radius)
+ sd_legend_canvas(c,left,bytes,t.left_second_start,t.left_second_len,p.document.width/4+16,p.left_kind,secondary_radius)
  let primary_right=sd_overlay_spec(&p.document.right,false)
- sd_legend_canvas(c,&primary_right,bytes,t.right_first_start,t.right_first_len,p.document.width/2+16,0)
- sd_legend_canvas(c,right,bytes,t.right_second_start,t.right_second_len,p.document.width/2+p.document.width/4+16,p.right_kind)
+ sd_legend_canvas(c,&primary_right,bytes,t.right_first_start,t.right_first_len,p.document.width/2+16,0,primary_radius)
+ sd_legend_canvas(c,right,bytes,t.right_second_start,t.right_second_len,p.document.width/2+p.document.width/4+16,p.right_kind,secondary_radius)
 }
 fn sd_overlay_count(painted:i64,kind:i64) with IO {
  print(painted);print("\" data-secondary-kind=\"")
  if kind==0 {print("scatter")} else {print("line-input-order")}
 }
-pub fn scientific_overlay_svg(p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,
+pub fn scientific_overlay_svg_sized(p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,
  x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer,
  bx0:&NumericBuffer,by0:&NumericBuffer,ba0:&IntegerBuffer,bi0:&IntegerBuffer,bc0:i64,
- bx1:&NumericBuffer,by1:&NumericBuffer,ba1:&IntegerBuffer,bi1:&IntegerBuffer,bc1:i64)->ScientificOverlayResult with IO,Mut,Div,Panic {
- let status=scientific_overlay_validate(p,t,bytes,x0,y0,a0,x1,y1,a1,bx0,by0,ba0,bi0,bc0,bx1,by1,ba1,bi1,bc1)
+ bx1:&NumericBuffer,by1:&NumericBuffer,ba1:&IntegerBuffer,bi1:&IntegerBuffer,bc1:i64,primary_radius:i64,secondary_radius:i64)->ScientificOverlayResult with IO,Mut,Div,Panic {
+ let status=scientific_overlay_validate_sized(p,t,bytes,x0,y0,a0,x1,y1,a1,bx0,by0,ba0,bi0,bc0,bx1,by1,ba1,bi1,bc1,primary_radius,secondary_radius)
  var result=ScientificOverlayResult{status:status,left_primary:0,left_secondary:0,right_primary:0,right_secondary:0}
  if status!=0 {return result}
  let left=sd_overlay_spec(&p.document.left,true);let right=sd_overlay_spec(&p.document.right,true)
  sd_svg_open(&p.document,&t.document,bytes)
- sd_overlay_legends_svg(p,t,bytes,&left,&right)
+ if primary_radius!=1 || secondary_radius!=1 {
+  print("<metadata data-scientific-marker-shape=\"square\" data-primary-radius=\"");print(primary_radius)
+  print("\" data-secondary-radius=\"");print(secondary_radius);println("\"/>")
+ }
+ sd_overlay_legends_svg(p,t,bytes,&left,&right,primary_radius,secondary_radius)
  println("<g id=\"scientific-layer-left-primary\">")
- let lp=dynamic_scatter_svg(&p.document.left,x0,y0,a0);println("</g>")
+ let lp=dynamic_scatter_svg_sized(&p.document.left,x0,y0,a0,primary_radius);println("</g>")
  println("<g id=\"scientific-layer-left-secondary\">")
- if p.left_kind==0 {let layer=dynamic_scatter_svg(&left,bx0,by0,ba0);result.left_secondary=layer.painted}
+ if p.left_kind==0 {let layer=dynamic_scatter_svg_sized(&left,bx0,by0,ba0,secondary_radius);result.left_secondary=layer.painted}
  else {let layer=dynamic_line_svg(&left,bx0,by0,ba0,bi0,bc0,100);result.left_secondary=layer.visible_primitives}
  println("</g><g id=\"scientific-layer-right-primary\">")
  let primary_right=sd_overlay_spec(&p.document.right,false)
- let rp=dynamic_scatter_svg(&primary_right,x1,y1,a1);println("</g>")
+ let rp=dynamic_scatter_svg_sized(&primary_right,x1,y1,a1,primary_radius);println("</g>")
  println("<g id=\"scientific-layer-right-secondary\">")
- if p.right_kind==0 {let layer=dynamic_scatter_svg(&right,bx1,by1,ba1);result.right_secondary=layer.painted}
+ if p.right_kind==0 {let layer=dynamic_scatter_svg_sized(&right,bx1,by1,ba1,secondary_radius);result.right_secondary=layer.painted}
  else {let layer=dynamic_line_svg(&right,bx1,by1,ba1,bi1,bc1,101);result.right_secondary=layer.visible_primitives}
  println("</g>")
  sd_svg_text(bytes,t.document.footer_start,t.document.footer_len,16,p.document.height-40)
@@ -345,24 +361,36 @@ pub fn scientific_overlay_svg(p:&ScientificOverlayPlan,t:&ScientificOverlayText,
  println("</svg>")
  result.status=0;result.left_primary=lpc;result.right_primary=rpc;result
 }
-pub fn scientific_overlay_canvas(c:&!Canvas,p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,
+pub fn scientific_overlay_svg(p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,
  x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer,
  bx0:&NumericBuffer,by0:&NumericBuffer,ba0:&IntegerBuffer,bi0:&IntegerBuffer,bc0:i64,
- bx1:&NumericBuffer,by1:&NumericBuffer,ba1:&IntegerBuffer,bi1:&IntegerBuffer,bc1:i64)->ScientificOverlayResult with Mut,Div,Panic {
- let status=scientific_overlay_validate(p,t,bytes,x0,y0,a0,x1,y1,a1,bx0,by0,ba0,bi0,bc0,bx1,by1,ba1,bi1,bc1)
+ bx1:&NumericBuffer,by1:&NumericBuffer,ba1:&IntegerBuffer,bi1:&IntegerBuffer,bc1:i64)->ScientificOverlayResult with IO,Mut,Div,Panic {
+ scientific_overlay_svg_sized(p,t,bytes,x0,y0,a0,x1,y1,a1,bx0,by0,ba0,bi0,bc0,bx1,by1,ba1,bi1,bc1,1,1)
+}
+pub fn scientific_overlay_canvas_sized(c:&!Canvas,p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,
+ x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer,
+ bx0:&NumericBuffer,by0:&NumericBuffer,ba0:&IntegerBuffer,bi0:&IntegerBuffer,bc0:i64,
+ bx1:&NumericBuffer,by1:&NumericBuffer,ba1:&IntegerBuffer,bi1:&IntegerBuffer,bc1:i64,primary_radius:i64,secondary_radius:i64)->ScientificOverlayResult with Mut,Div,Panic {
+ let status=scientific_overlay_validate_sized(p,t,bytes,x0,y0,a0,x1,y1,a1,bx0,by0,ba0,bi0,bc0,bx1,by1,ba1,bi1,bc1,primary_radius,secondary_radius)
  var result=ScientificOverlayResult{status:status,left_primary:0,left_secondary:0,right_primary:0,right_secondary:0}
  if status!=0 {return result}
  if c.width!=p.document.width || c.height!=p.document.height || (c.pixels as i64)<=0 {result.status=3;return result}
  let left=sd_overlay_spec(&p.document.left,true);let right=sd_overlay_spec(&p.document.right,true)
  sd_canvas_open(c,&p.document,&t.document,bytes)
- sd_overlay_legends_canvas(c,p,t,bytes,&left,&right)
- let lp=dynamic_scatter_canvas(c,&p.document.left,x0,y0,a0)
- if p.left_kind==0 {let layer=dynamic_scatter_canvas(c,&left,bx0,by0,ba0);result.left_secondary=layer.painted}
+ sd_overlay_legends_canvas(c,p,t,bytes,&left,&right,primary_radius,secondary_radius)
+ let lp=dynamic_scatter_canvas_sized(c,&p.document.left,x0,y0,a0,primary_radius)
+ if p.left_kind==0 {let layer=dynamic_scatter_canvas_sized(c,&left,bx0,by0,ba0,secondary_radius);result.left_secondary=layer.painted}
  else {let layer=dynamic_line_canvas(c,&left,bx0,by0,ba0,bi0,bc0);result.left_secondary=layer.visible_primitives}
  let primary_right=sd_overlay_spec(&p.document.right,false)
- let rp=dynamic_scatter_canvas(c,&primary_right,x1,y1,a1)
- if p.right_kind==0 {let layer=dynamic_scatter_canvas(c,&right,bx1,by1,ba1);result.right_secondary=layer.painted}
+ let rp=dynamic_scatter_canvas_sized(c,&primary_right,x1,y1,a1,primary_radius)
+ if p.right_kind==0 {let layer=dynamic_scatter_canvas_sized(c,&right,bx1,by1,ba1,secondary_radius);result.right_secondary=layer.painted}
  else {let layer=dynamic_line_canvas(c,&right,bx1,by1,ba1,bi1,bc1);result.right_secondary=layer.visible_primitives}
  sd_canvas_text(c,bytes,t.document.footer_start,t.document.footer_len,16,p.document.height-40)
  result.status=0;result.left_primary=lp.painted;result.right_primary=rp.painted;result
+}
+pub fn scientific_overlay_canvas(c:&!Canvas,p:&ScientificOverlayPlan,t:&ScientificOverlayText,bytes:&IntegerBuffer,
+ x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer,
+ bx0:&NumericBuffer,by0:&NumericBuffer,ba0:&IntegerBuffer,bi0:&IntegerBuffer,bc0:i64,
+ bx1:&NumericBuffer,by1:&NumericBuffer,ba1:&IntegerBuffer,bi1:&IntegerBuffer,bc1:i64)->ScientificOverlayResult with Mut,Div,Panic {
+ scientific_overlay_canvas_sized(c,p,t,bytes,x0,y0,a0,x1,y1,a1,bx0,by0,ba0,bi0,bc0,bx1,by1,ba1,bi1,bc1,1,1)
 }
