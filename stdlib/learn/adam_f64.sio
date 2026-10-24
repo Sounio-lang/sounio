@@ -1,0 +1,49 @@
+// stdlib/learn/adam_f64.sio
+//
+// Adam (Kingma & Ba) over a flat f64 buffer. The 16-wide surgical
+// Adam in surgical_adam.sio stays the kernel-preserving variant;
+// this one is the ordinary update used by small training runs.
+
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+use math::pure::{sqrt}
+
+pub struct AdamBuf {
+    pub m: CpuBuf,
+    pub v: CpuBuf,
+    pub t: i64,
+}
+
+fn pow_int(base: f64, n: i64) -> f64 {
+    var acc = 1.0
+    var i: i64 = 0
+    while i < n {
+        acc = acc * base
+        i = i + 1
+    }
+    acc
+}
+
+pub fn adam_new(n: i64) -> AdamBuf with Alloc {
+    AdamBuf { m: ck_alloc(n), v: ck_alloc(n), t: 0 }
+}
+
+pub fn adam_step(w: &!CpuBuf, g: &CpuBuf, st: &!AdamBuf, lr: f64, b1: f64, b2: f64, eps: f64) with Mut, Div, Panic {
+    st.t = st.t + 1
+    let step = st.t
+    let bc1 = 1.0 - pow_int(b1, step)
+    let bc2 = 1.0 - pow_int(b2, step)
+    var i: i64 = 0
+    while i < w.len {
+        let gi = ck_get(g, i)
+        let mold = ck_get(&st.m, i)
+        let vold = ck_get(&st.v, i)
+        let m = b1 * mold + (1.0 - b1) * gi
+        let v = b2 * vold + (1.0 - b2) * gi * gi
+        ck_set(&!st.m, i, m)
+        ck_set(&!st.v, i, v)
+        let upd = (m / bc1) / (sqrt(v / bc2) + eps)
+        let wi = ck_get(w, i)
+        ck_set(w, i, wi - lr * upd)
+        i = i + 1
+    }
+}

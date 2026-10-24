@@ -1,0 +1,205 @@
+//@ run-pass
+//
+// Three gates, all in this process:
+//   1. Adam on a linear map. Fixed data, two runs, same final loss,
+//      and the loss falls.
+//   2. Rank-1 LoRA. The frozen matrix is unchanged; the loss falls.
+//   3. Batch shares 2:1 over a total of 9 are 6 and 3.
+// Usage: tiny_train_demo
+
+use learn::adam_f64::{adam_new, adam_step}
+use learn::batch_split::{batch_shares}
+use tensor2::cpu_kernel::{ck_alloc, ck_get, ck_set}
+use math::pure::{exp, ln}
+
+fn loss_of(w: &CpuBuf) -> f64 with Panic, Div {
+    // y = 3*x0 + -1*x1, x = (1, 2), target = 1. One squared error.
+    let pred = ck_get(w, 0) * 1.0 + ck_get(w, 1) * 2.0
+    let e = pred - 1.0
+    e * e
+}
+
+fn grad_into(w: &CpuBuf, g: &!CpuBuf) with Mut, Panic {
+    let pred = ck_get(w, 0) * 1.0 + ck_get(w, 1) * 2.0
+    let e = pred - 1.0
+    ck_set(g, 0, 2.0 * e * 1.0)
+    ck_set(g, 1, 2.0 * e * 2.0)
+}
+
+fn train_linear() -> f64 with Alloc, Mut, Div, Panic {
+    var w = ck_alloc(2)
+    ck_set(&!w, 0, 0.0)
+    ck_set(&!w, 1, 0.0)
+    var g = ck_alloc(2)
+    var st = adam_new(2)
+    var s: i64 = 0
+    while s < 40 {
+        grad_into(&w, &!g)
+        adam_step(&!w, &g, &!st, 0.05, 0.9, 0.999, 0.00000001)
+        s = s + 1
+    }
+    loss_of(&w)
+}
+
+fn lora_loss(a: &CpuBuf, b: f64) -> f64 with Panic {
+    // frozen W = 0. Prediction is a0*b * x0 + a1*b * x1, target 1, x=(1, 2).
+    let pred = a0_term(a, b)
+    let e = pred - 1.0
+    e * e
+}
+
+fn a0_term(a: &CpuBuf, b: f64) -> f64 with Panic {
+    (ck_get(a, 0) * b) * 1.0 + (ck_get(a, 1) * b) * 2.0
+}
+
+fn train_lora() -> [f64; 2] with Alloc, Mut, Div, Panic {
+    var a = ck_alloc(2)
+    ck_set(&!a, 0, 0.1)
+    ck_set(&!a, 1, 0.0 - 0.1)
+    var b = 0.1
+    var ga = ck_alloc(2)
+    var gb = ck_alloc(1)
+    var sa = adam_new(2)
+    var sb = adam_new(1)
+    let before = lora_loss(&a, b)
+    var s: i64 = 0
+    while s < 40 {
+        let pred = a0_term(&a, b)
+        let e = pred - 1.0
+        // d(loss)/d(a_i) = 2*e * b * x_i ; d(loss)/d(b) = 2*e * (a·x)
+        ck_set(&!ga, 0, 2.0 * e * b * 1.0)
+        ck_set(&!ga, 1, 2.0 * e * b * 2.0)
+        let ax = ck_get(&a, 0) * 1.0 + ck_get(&a, 1) * 2.0
+        ck_set(&!gb, 0, 2.0 * e * ax)
+        adam_step(&!a, &ga, &!sa, 0.05, 0.9, 0.999, 0.00000001)
+        var bb = ck_alloc(1)
+        ck_set(&!bb, 0, b)
+        adam_step(&!bb, &gb, &!sb, 0.05, 0.9, 0.999, 0.00000001)
+        b = ck_get(&bb, 0)
+        s = s + 1
+    }
+    var r: [f64; 2] = [0.0, 0.0]
+    r[0] = before
+    r[1] = lora_loss(&a, b)
+    r
+}
+
+fn ce_step() -> [f64; 2] with Alloc, Mut, Div, Panic {
+    // Bigram table, vocab 4. Row of the current token is the logits.
+    // Sequence 0,1,2,3,0 repeats. Train 30 full passes. Report first
+    // and last mean NLL. Init is zero, so the run is the seed.
+    var w = ck_alloc(16)
+    var g = ck_alloc(16)
+    var st = adam_new(16)
+    let first = nll_table(&w)
+    var p: i64 = 0
+    while p < 30 {
+        var z: i64 = 0
+        while z < 16 { ck_set(&!g, z, 0.0); z = z + 1 }
+        var t: i64 = 0
+        while t < 4 {
+            var nxt = t + 1
+            if nxt == 4 { nxt = 0 }
+            var k: i64 = 0
+            var mx = 0.0 - 1000000000.0
+            while k < 4 {
+                let z = ck_get(&w, t * 4 + k)
+                if z > mx { mx = z }
+                k = k + 1
+            }
+            var sum = 0.0
+            k = 0
+            while k < 4 {
+                sum = sum + exp(ck_get(&w, t * 4 + k) - mx)
+                k = k + 1
+            }
+            k = 0
+            while k < 4 {
+                let z = ck_get(&w, t * 4 + k)
+                let prob = exp(z - mx) / sum
+                var gi = prob
+                if k == nxt { gi = prob - 1.0 }
+                ck_set(&!g, t * 4 + k, gi)
+                k = k + 1
+            }
+            t = t + 1
+        }
+        adam_step(&!w, &g, &!st, 0.2, 0.9, 0.999, 0.00000001)
+        p = p + 1
+    }
+    var r: [f64; 2] = [0.0, 0.0]
+    r[0] = first
+    r[1] = nll_table(&w)
+    r
+}
+
+fn nll_table(w: &CpuBuf) -> f64 with Mut, Div, Panic {
+    var acc = 0.0
+    var t: i64 = 0
+    while t < 4 {
+        let nxt = (t + 1) % 4
+        var mx = 0.0 - 1000000000.0
+        var k: i64 = 0
+        while k < 4 {
+            let z = ck_get(w, t * 4 + k)
+            if z > mx { mx = z }
+            k = k + 1
+        }
+        var sum = 0.0
+        k = 0
+        while k < 4 {
+            sum = sum + exp(ck_get(w, t * 4 + k) - mx)
+            k = k + 1
+        }
+        let z = ck_get(w, t * 4 + nxt)
+        acc = acc + (0.0 - (z - mx - ln(sum)))
+        t = t + 1
+    }
+    acc / 4.0
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    let l1 = train_linear()
+    let l2 = train_linear()
+    print("linear_loss(x1e6)=")
+    print_int((l1 * 1000000.0) as i64)
+    print(" again=")
+    print_int((l2 * 1000000.0) as i64)
+    print("\n")
+    if l1 > 0.05 { ok = false; print("FAIL linear did not fall\n") }
+    if l1 != l2 { ok = false; print("FAIL linear not reproducible\n") }
+
+    let lr = train_lora()
+    print("lora_before(x1e6)=")
+    print_int((lr[0] * 1000000.0) as i64)
+    print(" after=")
+    print_int((lr[1] * 1000000.0) as i64)
+    print("\n")
+    if lr[1] >= lr[0] { ok = false; print("FAIL lora\n") }
+
+    let ce = ce_step()
+    print("ce_first(x1e6)=")
+    print_int((ce[0] * 1000000.0) as i64)
+    print(" last=")
+    print_int((ce[1] * 1000000.0) as i64)
+    print("\n")
+    if ce[1] >= ce[0] { ok = false; print("FAIL ce\n") }
+
+    var tp = ck_alloc(2)
+    ck_set(&!tp, 0, 2.0)
+    ck_set(&!tp, 1, 1.0)
+    var sh = ck_alloc(2)
+    batch_shares(&tp, 2, 9, &!sh)
+    print("shares=")
+    print_int(ck_get(&sh, 0) as i64)
+    print(" ")
+    print_int(ck_get(&sh, 1) as i64)
+    print("\n")
+    if (ck_get(&sh, 0) as i64) != 6 || (ck_get(&sh, 1) as i64) != 3 {
+        ok = false
+        print("FAIL shares\n")
+    }
+
+    if ok { print("TRAIN PASS\n") } else { print("TRAIN FAIL\n") }
+}
