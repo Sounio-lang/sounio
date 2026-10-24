@@ -34,19 +34,21 @@ fn oral_interp(t: f64, t0: f64, t1: f64, c0: f64, c1: f64) -> f64 with Div, Pani
 }
 
 pub struct OralBBBTrace {
-    n_points:    i32,
-    times_h:     [f64; 32],
-    plasma:      [f64; 32],
-    isf_u:       [f64; 32],
-    icf_u:       [f64; 32],
-    a_gut:       [f64; 32],   // gut-depot mass (mg) at each checkpoint
-    released:    [f64; 32],   // cumulative mass delivered to blood (mg)
-    auc_plasma_u: f64,
-    auc_isf_u:    f64,
-    auc_icf_u:    f64,
-    kpuu_auc:     f64,
-    total_released_end: f64,
-    success: bool,
+    pub n_points:    i32,
+    pub times_h:     [f64; 32],
+    pub plasma:      [f64; 32],   // plasma = blood / rb_ratio (#2816)
+    pub blood:       [f64; 32],   // whole blood (PBPKState14.blood)
+    pub isf_u:       [f64; 32],
+    pub icf_u:       [f64; 32],
+    pub a_gut:       [f64; 32],   // gut-depot mass (mg) at each checkpoint
+    pub released:    [f64; 32],   // cumulative mass delivered to blood (mg)
+    pub auc_plasma_u: f64,
+    pub auc_blood:    f64,   // total whole-blood AUC (mg*h/L), clinical TDM convention
+    pub auc_isf_u:    f64,
+    pub auc_icf_u:    f64,
+    pub kpuu_auc:     f64,
+    pub total_released_end: f64,
+    pub success: bool,
 }
 
 pub fn oral_trace_zero() -> OralBBBTrace {
@@ -54,11 +56,13 @@ pub fn oral_trace_zero() -> OralBBBTrace {
         n_points: 0,
         times_h:   [0.0; 32],
         plasma:    [0.0; 32],
+        blood:     [0.0; 32],
         isf_u:     [0.0; 32],
         icf_u:     [0.0; 32],
         a_gut:     [0.0; 32],
         released:  [0.0; 32],
         auc_plasma_u: 0.0,
+        auc_blood:    0.0,
         auc_isf_u:    0.0,
         auc_icf_u:    0.0,
         kpuu_auc:     0.0,
@@ -84,9 +88,13 @@ pub fn oral_bbb_run(
     var sys_st = pbpk_state_zero()
     var bbb_st = bbb_state_zero()
     var abs_st = absorption_state_with_dose(initial_dose_mg)
+    // PBPKState14.blood is whole blood; the BBB driver and the plasma series
+    // are plasma, C_plasma = C_blood / rb_ratio (#2816).
+    let rb = sys_prm.rb_ratio
 
     trace.times_h[0]  = 0.0
-    trace.plasma[0]   = sys_st.blood
+    trace.plasma[0]   = sys_st.blood / rb
+    trace.blood[0]    = sys_st.blood
     trace.isf_u[0]    = bbb_prm.fu_isf * bbb_st.c_isf
     trace.icf_u[0]    = bbb_prm.fu_icf * bbb_st.c_icf
     trace.a_gut[0]    = abs_st.a_gut
@@ -100,7 +108,7 @@ pub fn oral_bbb_run(
         let idx = point_i as usize
         let target = checkpoints[idx]
         let t_prev = t
-        let c_prev = sys_st.blood
+        let c_prev = sys_st.blood / rb
 
         // --- Systemic PBPK with operator-split oral release ---
         var nsteps: i64 = 0
@@ -132,7 +140,7 @@ pub fn oral_bbb_run(
         }
 
         // --- BBB sub-model over [t_prev, target] ---
-        let c_now = sys_st.blood
+        let c_now = sys_st.blood / rb
         var t_bbb = t_prev
         while t_bbb < target {
             let dt_use_bbb = if t_bbb + bbb_dt > target { target - t_bbb } else { bbb_dt }
@@ -143,6 +151,7 @@ pub fn oral_bbb_run(
 
         trace.times_h[idx]  = target
         trace.plasma[idx]   = c_now
+        trace.blood[idx]    = sys_st.blood
         trace.isf_u[idx]    = bbb_prm.fu_isf * bbb_st.c_isf
         trace.icf_u[idx]    = bbb_prm.fu_icf * bbb_st.c_icf
         trace.a_gut[idx]    = abs_st.a_gut
@@ -153,6 +162,7 @@ pub fn oral_bbb_run(
 
     // --- Trapezoidal AUCs ---
     var auc_p_u: f64 = 0.0
+    var auc_b: f64 = 0.0
     var auc_i_u: f64 = 0.0
     var auc_c_u: f64 = 0.0
     var k: i32 = 0
@@ -163,11 +173,13 @@ pub fn oral_bbb_run(
         let pu_k  = bbb_prm.fu_plasma * trace.plasma[kdx]
         let pu_k1 = bbb_prm.fu_plasma * trace.plasma[kdx1]
         auc_p_u = auc_p_u + 0.5 * h * (pu_k + pu_k1)
+        auc_b = auc_b + 0.5 * h * (trace.blood[kdx] + trace.blood[kdx1])
         auc_i_u = auc_i_u + 0.5 * h * (trace.isf_u[kdx]  + trace.isf_u[kdx1])
         auc_c_u = auc_c_u + 0.5 * h * (trace.icf_u[kdx]  + trace.icf_u[kdx1])
         k = k + 1
     }
     trace.auc_plasma_u = auc_p_u
+    trace.auc_blood    = auc_b
     trace.auc_isf_u    = auc_i_u
     trace.auc_icf_u    = auc_c_u
     trace.kpuu_auc     = if auc_p_u > 0.0 { auc_i_u / auc_p_u } else { 0.0 }

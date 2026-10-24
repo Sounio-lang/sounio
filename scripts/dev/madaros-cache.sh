@@ -103,6 +103,18 @@ madaros_build_key() {  # <seed-elf> [tree-key]
         | sha256sum | cut -c1-64
 }
 
+# Imported E200 can leave rc=0 and a nonempty ELF. Only a captured clean log
+# may authorize seed/Madaros cache storage; the receipt binds that acceptance
+# to the artifact bytes. Legacy entries without receipts are misses.
+madaros_build_log_clean() {
+    local log="$1"
+    [[ -f "$log" ]] || return 1
+    local rc=0
+    grep -Eq 'error\[E200\]|(^|[[:space:]])E200([[:space:]]|$)|undefined identifier|unknown variable' "$log" || rc=$?
+    # grep=1 means clean; a read/tool failure must not certify the log.
+    [[ "$rc" == 1 ]]
+}
+
 # madaros_cache_get <stage> <key> <out>  -> 0 on verified hit (out written), 1 on miss
 madaros_cache_get() {
     local stage="$1" key="$2" out="$3"
@@ -114,6 +126,14 @@ madaros_cache_get() {
         echo "[madaros-cache] corrupt entry $stage/$key — discarding" >&2
         rm -rf "$dir"
         return 1
+    fi
+    if [[ "$stage" == seed || "$stage" == madaros ]]; then
+        local expected="e200-clean-v1 $(_mc_sha "$dir/artifact")"
+        if [[ ! -f "$dir/diagnostic.receipt" ]] ||
+           [[ "$(cat "$dir/diagnostic.receipt")" != "$expected" ]]; then
+            echo "[madaros-cache] unverified diagnostics $stage/$key -- rebuilding" >&2
+            return 1
+        fi
     fi
     mkdir -p "$(dirname "$out")" || return 1
     if ! cp --reflink=auto -f "$dir/artifact" "$out" || ! chmod +x "$out" ||
@@ -129,7 +149,14 @@ madaros_cache_get() {
 
 # madaros_cache_put <stage> <key> <artifact>   (atomic: build in tmp, rename)
 madaros_cache_put() {
-    local stage="$1" key="$2" art="$3"
+    local stage="$1" key="$2" art="$3" log="${4:-}"
+    if [[ "$stage" == seed || "$stage" == madaros ]]; then
+        madaros_build_log_clean "$log" || {
+            echo "[madaros-cache] refusing store without clean E200 diagnostics: $stage/$key" >&2
+            return 1
+        }
+    fi
+
     [[ -s "$art" ]] || return 0
     madaros_cache_usable || return 0
     if [[ "${SOUNIO_MADAROS_CACHE_READONLY:-0}" == "1" ]]; then
@@ -140,8 +167,16 @@ madaros_cache_put() {
     local tmp; tmp="$(mktemp -d "$base/.tmp.XXXXXX")"
     cp --reflink=auto -f "$art" "$tmp/artifact"
     _mc_sha "$tmp/artifact" > "$tmp/artifact.sha256"
+    if [[ "$stage" == seed || "$stage" == madaros ]]; then
+        printf 'e200-clean-v1 %s\n' "$(_mc_sha "$tmp/artifact")" > "$tmp/diagnostic.receipt"
+    fi
     date -u +%Y-%m-%dT%H:%M:%SZ > "$tmp/built"
     ( cd "$(_mc_root)" && { git rev-parse --short HEAD 2>/dev/null || echo nogit; } ) > "$tmp/head"
+    # A legacy/unverified entry cannot remain ahead of the accepted rebuild.
+    # Writers here hold the build lock; readers treat the replacement gap as a miss.
+    if [[ "$stage" == seed || "$stage" == madaros ]]; then
+        rm -rf "$base/$key"
+    fi
     if mv -T "$tmp" "$base/$key" 2>/dev/null; then
         echo "[madaros-cache] stored $stage/$key" >&2
     else
@@ -201,9 +236,27 @@ madaros_cache_build_locked() {
         # meanwhile (another agent editing this worktree) the output no longer
         # corresponds to it, so it is used but not stored.
         tree_before="$(madaros_tree_key)"
-        "$@" || exit $?
+        build_log="$(mktemp "${TMPDIR:-/tmp}/madaros-diagnostics.XXXXXX")" || exit 1
+        trap '"'"'rm -f "$build_log"'"'"' EXIT
+        build_rc=0
+        "$@" >"$build_log" 2>&1 || build_rc=$?
+        cat "$build_log"
+        if [[ "$build_rc" -ne 0 ]]; then
+            rm -f "$out"
+            exit "$build_rc"
+        fi
+        if ! madaros_build_log_clean "$build_log"; then
+            echo "error: build emitted undeclared-local E200 diagnostics; refusing artifact" >&2
+            rm -f "$out"
+            exit 1
+        fi
+        if [[ ! -s "$out" ]]; then
+            echo "error: build produced no artifact: $out" >&2
+            rm -f "$out"
+            exit 1
+        fi
         if [[ "$(madaros_tree_key)" == "$tree_before" && "$tree_before" == "$MADAROS_CACHE_TREE_AT_KEY" ]]; then
-            madaros_cache_put "$stage" "$key" "$out"
+            madaros_cache_put "$stage" "$key" "$out" "$build_log" || exit $?
         else
             echo "[madaros-cache] source tree changed since $stage/$key was computed -- not storing" >&2
         fi

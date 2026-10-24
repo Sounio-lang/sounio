@@ -1,5 +1,15 @@
 # Sounio for Visual Studio Code
 
+## Canonical source and transition
+
+The editor client and canonical grammar are maintained in [Sounio-lang/sounio-grammar](https://github.com/Sounio-lang/sounio-grammar). Submit client, grammar, configuration and snippet changes there. The two former in-tree clients have been reconciled in that repository; this directory remains a transitional copy. The historical instructions and feature lists below do not define the current release contract.
+
+Install the VSIX from the [editor consolidation prerelease](https://github.com/Sounio-lang/sounio-grammar/releases/tag/editor-consolidation-20260920), verifying its published checksum, and configure the installed compiler through the external client's README. This is a GitHub prerelease, not a Marketplace publication. The LSP server remains with the compiler, and its supported behavior depends on the selected compiler distribution.
+
+Core consumer migration is tracked in [PR #2554](https://github.com/Sounio-lang/sounio/pull/2554). Keep this copy until the remaining consumers have transitioned and passed their tests.
+
+---
+
 Language support for [Sounio](https://github.com/sounio-lang/sounio) — the L0 systems + epistemic computing language for `.sio` files.
 
 ## Features

@@ -33,7 +33,7 @@
 #   CROSS_ENGINE_JOBS=32 CROSS_ENGINE_TIMEOUT=20 ...
 #
 # Heavy runs: use scripts/dev/slurm_srun_minimal.sh on a node that can see
-# /orangefs (not /workspace). See docs/ops/SLURM_LAUNCH_REPAIR_2026-08-17.md.
+# /orangefs (not /workspace).
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

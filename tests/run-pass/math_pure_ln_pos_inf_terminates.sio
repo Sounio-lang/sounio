@@ -1,0 +1,81 @@
+//@ run-pass
+//@ expect-stdout: PURE_LN_POS_INF_OK
+//@ timeout: 30
+//@ description: math::pure ln(+inf) returns +inf; before the guard its halving loop never ended
+// Regression for docs/audit/MATH_PURE_LN_POS_INF_DISPATCH_2026-09-27.md.
+//
+// stdlib/math/pure.sio ln range-reduces with `while m >= 2.0 { m = m / 2.0 }`.
+// For every finite m >= 2 the halving is exact and strictly decreasing, so the
+// loop ends within 1024 steps; for m = +inf, inf / 2 == inf and it never ends.
+// Without the guard this file times out at ln(pinf) and prints nothing after
+// the first line. log10 and log2 are ln / const and hung the same way.
+//
+// Every check compares bit patterns, so none depends on how the backend
+// treats an unordered (NaN) float comparison.
+use math::pure::{ln, log10, log2}
+
+fn pos_inf_bits() -> i64 { 9218868437227405312 }        // 0x7FF0000000000000
+fn dbl_max_bits() -> i64 { 9218868437227405311 }        // 0x7FEFFFFFFFFFFFFF
+fn exp_mask() -> i64 { 9218868437227405312 }            // same bits: the exponent field
+fn frac_mask() -> i64 { 4503599627370495 }              // 0x000FFFFFFFFFFFFF
+
+// DBL_MAX = (2 - 2^-52) * 2^1023, built from exact halvings and doublings so
+// that neither engine's decimal-literal rounding is involved (and lean_single
+// has no bits_to_f64).
+fn dbl_max() -> f64 with Mut, Div {
+    var eps = 1.0
+    var i = 0
+    while i < 52 {
+        eps = eps / 2.0
+        i = i + 1
+    }
+    var p = 1.0
+    var j = 0
+    while j < 1023 {
+        p = p * 2.0
+        j = j + 1
+    }
+    (2.0 - eps) * p
+}
+
+fn is_nan_bits(b: i64) -> bool {
+    (b & exp_mask()) == exp_mask() && (b & frac_mask()) != 0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("PURE_LN_POS_INF_START")
+    let big = 1.0e308
+    let pinf = big * 10.0
+    let ninf = 0.0 - pinf
+    let nan = pinf - pinf
+    var bad = 0
+
+    // The defect: +inf must return, and return +inf.
+    if f64_to_bits(pinf) != pos_inf_bits() { bad = bad + 1 }
+    if f64_to_bits(ln(pinf)) != pos_inf_bits() { bad = bad + 1 }
+    if f64_to_bits(log10(pinf)) != pos_inf_bits() { bad = bad + 1 }
+    if f64_to_bits(log2(pinf)) != pos_inf_bits() { bad = bad + 1 }
+
+    // The guard must not fire on the largest finite input: ln(DBL_MAX) is
+    // finite and keeps its pre-guard bits (709.782712893384, measured on the
+    // unguarded ln with Madaros built from source).
+    let dmax = dbl_max()
+    if f64_to_bits(dmax) != dbl_max_bits() { bad = bad + 1 }
+    if f64_to_bits(ln(dmax)) != 4649454530587146735 { bad = bad + 1 }
+
+    // Unchanged paths: non-positive inputs keep the documented -1e30 sentinel,
+    // NaN still propagates, and a mid-range value keeps its bits.
+    if f64_to_bits(ln(ninf)) != f64_to_bits(0.0 - 1.0e30) { bad = bad + 1 }
+    if f64_to_bits(ln(0.0)) != f64_to_bits(0.0 - 1.0e30) { bad = bad + 1 }
+    if is_nan_bits(f64_to_bits(ln(nan))) == false { bad = bad + 1 }
+    if f64_to_bits(ln(2.0)) != 4604418534313441775 { bad = bad + 1 }
+
+    if bad == 0 {
+        println("PURE_LN_POS_INF_OK")
+        return 0
+    }
+    print("PURE_LN_POS_INF_FAIL bad=")
+    print_int(bad)
+    println("")
+    return 1
+}

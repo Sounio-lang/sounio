@@ -1,0 +1,59 @@
+//@ run-pass
+//@ timeout: 300
+//@ expect-stdout: SHA256_UPDATE_BE64_SAME 1
+//@ expect-stdout: SHA256_UPDATE_BE64_MANY_OK
+//
+// #2820: sha256_update_be64(&!state, value) absorbs one i64 as 8 big-endian
+// bytes in place. It must give byte-for-byte the digest sha256_update gives
+// for the same bytes (checked over 1000 words, crossing many 64-byte blocks),
+// and a long in-place chain must not exhaust the Madaros arena: one million
+// words here, where the by-value sha256_update chain ran out of the 2 GiB
+// arena after ~350k (measured: "arena full (allocation of 2080 bytes)").
+use crypto::sha256::{
+    SHA256State,
+    sha256_init, sha256_update, sha256_update_be64, sha256_finalize, sha256_digest_byte,
+}
+
+fn add_by_value(state: SHA256State, value: i64) -> SHA256State with Mut, Panic, Div {
+    var bytes: [u8; 256] = [0; 256]
+    var index: i64 = 0
+    while index < 8 {
+        bytes[index] = ((value >> ((7 - index) * 8)) & 255) as u8
+        index = index + 1
+    }
+    sha256_update(state, bytes, 8)
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var a = sha256_init()
+    var b = sha256_init()
+    var i: i64 = 0
+    while i < 1000 {
+        sha256_update_be64(&! a, i * 7919 - 3)
+        b = add_by_value(b, i * 7919 - 3)
+        i = i + 1
+    }
+    let da = sha256_finalize(a)
+    let db = sha256_finalize(b)
+    var same: i64 = 1
+    var j: i32 = 0
+    while j < 32 {
+        if sha256_digest_byte(&da, j) != sha256_digest_byte(&db, j) { same = 0 }
+        j = j + 1
+    }
+    print("SHA256_UPDATE_BE64_SAME ")
+    print_int(same)
+    print("\n")
+    var c = sha256_init()
+    var n: i64 = 0
+    while n < 1000000 {
+        sha256_update_be64(&! c, n)
+        n = n + 1
+    }
+    let dc = sha256_finalize(c)
+    if same == 1 && sha256_digest_byte(&dc, 0) >= 0 {
+        print("SHA256_UPDATE_BE64_MANY_OK\n")
+        return 0
+    }
+    1
+}

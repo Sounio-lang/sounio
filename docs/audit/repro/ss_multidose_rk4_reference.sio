@@ -1,0 +1,128 @@
+// Independent reference for the steady-state demos' multi-dose AUC ratio.
+// Same model (pbpk_ode, rapamycin params, absorption params), different
+// numerics: classical RK4 at a FIXED step, gut depot integrated as a state
+// and fed to blood as a continuous rate (no operator splitting, no adaptive
+// step control). Step size is h = 0.1 / SUBSTEPS so the lag (0.5 h) and the
+// checkpoints (24/15 = 1.6 h) fall exactly on step boundaries.
+// Instance: rapamycin_fullvd_params, 14 doses, SUBSTEPS = 40 (h = 0.0025 h).
+// The 7-dose demo: ss_multidose_rk4_reference_mean.sio. Convergence check:
+// sub = 80 gives the same auc16 ratio to 1e-12 (see the dispatch doc).
+// Run under Madaros: ./bin/souc run docs/audit/repro/ss_multidose_rk4_reference.sio
+
+use darwin_pbpk::absorption::{rapamycin_absorption_params}
+use darwin_pbpk::drugs::rapamycin::{rapamycin_fullvd_params}
+use darwin_pbpk::tsit5_pbpk14::*
+
+fn axpy(y: PBPKState14, a: f64, k: PBPKState14) -> PBPKState14 {
+    PBPKState14 {
+        blood: y.blood + a * k.blood, liver: y.liver + a * k.liver,
+        kidney: y.kidney + a * k.kidney, brain: y.brain + a * k.brain,
+        heart: y.heart + a * k.heart, lung: y.lung + a * k.lung,
+        muscle: y.muscle + a * k.muscle, adipose: y.adipose + a * k.adipose,
+        gut: y.gut + a * k.gut, skin: y.skin + a * k.skin,
+        bone: y.bone + a * k.bone, spleen: y.spleen + a * k.spleen,
+        pancreas: y.pancreas + a * k.pancreas, other: y.other + a * k.other
+    }
+}
+
+fn rk4_combine(y: PBPKState14, h6: f64, k1: PBPKState14, k2: PBPKState14, k3: PBPKState14, k4: PBPKState14) -> PBPKState14 {
+    PBPKState14 {
+        blood: y.blood + h6 * (k1.blood + 2.0 * k2.blood + 2.0 * k3.blood + k4.blood),
+        liver: y.liver + h6 * (k1.liver + 2.0 * k2.liver + 2.0 * k3.liver + k4.liver),
+        kidney: y.kidney + h6 * (k1.kidney + 2.0 * k2.kidney + 2.0 * k3.kidney + k4.kidney),
+        brain: y.brain + h6 * (k1.brain + 2.0 * k2.brain + 2.0 * k3.brain + k4.brain),
+        heart: y.heart + h6 * (k1.heart + 2.0 * k2.heart + 2.0 * k3.heart + k4.heart),
+        lung: y.lung + h6 * (k1.lung + 2.0 * k2.lung + 2.0 * k3.lung + k4.lung),
+        muscle: y.muscle + h6 * (k1.muscle + 2.0 * k2.muscle + 2.0 * k3.muscle + k4.muscle),
+        adipose: y.adipose + h6 * (k1.adipose + 2.0 * k2.adipose + 2.0 * k3.adipose + k4.adipose),
+        gut: y.gut + h6 * (k1.gut + 2.0 * k2.gut + 2.0 * k3.gut + k4.gut),
+        skin: y.skin + h6 * (k1.skin + 2.0 * k2.skin + 2.0 * k3.skin + k4.skin),
+        bone: y.bone + h6 * (k1.bone + 2.0 * k2.bone + 2.0 * k3.bone + k4.bone),
+        spleen: y.spleen + h6 * (k1.spleen + 2.0 * k2.spleen + 2.0 * k3.spleen + k4.spleen),
+        pancreas: y.pancreas + h6 * (k1.pancreas + 2.0 * k2.pancreas + 2.0 * k3.pancreas + k4.pancreas),
+        other: y.other + h6 * (k1.other + 2.0 * k2.other + 2.0 * k3.other + k4.other)
+    }
+}
+
+// dy/dt = pbpk_ode(y) + e_blood * input_rate_conc
+fn rhs(y: PBPKState14, in_conc_rate: f64, prm: PBPKParams14) -> PBPKState14 with Mut, Div, Panic {
+    var d = pbpk_ode(y, 0.0, prm)
+    d.blood = d.blood + in_conc_rate
+    d
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let prm = rapamycin_fullvd_params()
+    let ab = rapamycin_absorption_params()
+    let n_doses: i32 = 14
+    let sub: i64 = 40
+    let h = 0.1 / (sub as f64)
+    let h2 = 0.5 * h
+    let h6 = h / 6.0
+    let steps_per_cp: i64 = 16 * sub          // 1.6 h
+    let steps_lag: i64 = 5 * sub              // 0.5 h
+    let steps_tau: i64 = 240 * sub            // 24 h
+    let cin = ab.f_bio * ab.ka / prm.v_blood  // blood conc rate per mg in depot
+    let fu = 0.08
+
+    var y = pbpk_state_zero()
+    var a: f64 = 0.0
+    var auc_first: f64 = 0.0
+    var auc_fine_first: f64 = 0.0
+    var cmax_first: f64 = 0.0
+    var d: i32 = 0
+    while d < n_doses {
+        a = a + 2.0
+        var auc16: f64 = 0.0
+        var auc_fine: f64 = 0.0
+        var cmax: f64 = y.blood
+        var c_cp_prev: f64 = y.blood
+        var s: i64 = 0
+        while s < steps_tau {
+            let on = if s >= steps_lag { 1.0 } else { 0.0 }
+            let ka_on = on * ab.ka
+            let c0 = y.blood
+            let k1a = 0.0 - ka_on * a
+            let k1 = rhs(y, on * cin * a, prm)
+            let a2 = a + h2 * k1a
+            let k2a = 0.0 - ka_on * a2
+            let k2 = rhs(axpy(y, h2, k1), on * cin * a2, prm)
+            let a3 = a + h2 * k2a
+            let k3a = 0.0 - ka_on * a3
+            let k3 = rhs(axpy(y, h2, k2), on * cin * a3, prm)
+            let a4 = a + h * k3a
+            let k4a = 0.0 - ka_on * a4
+            let k4 = rhs(axpy(y, h, k3), on * cin * a4, prm)
+            y = rk4_combine(y, h6, k1, k2, k3, k4)
+            a = a + h6 * (k1a + 2.0 * k2a + 2.0 * k3a + k4a)
+            auc_fine = auc_fine + 0.5 * h * (c0 + y.blood)
+            s = s + 1
+            if s % steps_per_cp == 0 {
+                let c_now = y.blood
+                auc16 = auc16 + 0.5 * 1.6 * (c_cp_prev + c_now)
+                if c_now > cmax { cmax = c_now }
+                c_cp_prev = c_now
+            }
+        }
+        let auc_u = fu * auc16
+        let auc_fine_u = fu * auc_fine
+        if d == 0 {
+            auc_first = auc_u
+            auc_fine_first = auc_fine_u
+            cmax_first = cmax
+        }
+        print("dose "); print_int((d + 1) as i64)
+        print(" cmax_e6="); print_f64(cmax * 1000000.0)
+        print(" ctrough_e6="); print_f64(y.blood * 1000000.0)
+        print(" auc16_e6="); print_f64(auc_u * 1000000.0)
+        print(" aucfine_e6="); print_f64(auc_fine_u * 1000000.0)
+        println("")
+        if d == n_doses - 1 {
+            print("RATIO auc16_last/first_e6 = "); print_f64(auc_u / auc_first * 1000000.0); println("")
+            print("RATIO aucfine_last/first_e6 = "); print_f64(auc_fine_u / auc_fine_first * 1000000.0); println("")
+            print("RATIO cmax_last/first_e6 = "); print_f64(cmax / cmax_first * 1000000.0); println("")
+        }
+        d = d + 1
+    }
+    0
+}

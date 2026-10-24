@@ -2,8 +2,8 @@
 topic_id: repo.docs.architecture.llvm-codegen
 authority: historical
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.llvm-codegen
 -->
 

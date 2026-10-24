@@ -57,7 +57,7 @@ Probes:
 | `f128.jsonl` / `f256.jsonl` (4414 + 4411 rows) | **Arithmetic** ops (add/sub/mul/div/cmp). Ladder defers ops to **V0-D** softfloat. |
 | `tests/vectors/f128_f256_v0d/arith_hard_f128.jsonl` (27) + `arith_hard_f256.jsonl` (25) | V0-D **hard cases** (halfway results, sticky-bit, tie-to-even, subnormals, Rump sign-inversion under short precision). Present in-tree from #1761 for the softfloat lane; **not** V0-B literals. |
 | `gen/mpfr_vector_gen.c` / `f128_f256_v0d/gen/arith_hard_gen.c` | Generators for arithmetic corpora — V0-D. |
-| Source spellings with leading `-` (e.g. `-0`, `-1`, `-0x1p-16494`) | **Sounio has no unary minus** (`0 - x` only). Rows remain in the JSONL and as `ORACLE_*` limb tables in the probe, but are **not** emitted as source literals. |
+| Source spellings with leading `-` (e.g. `-0`, `-1`, `-0x1p-16494`) | **Limb-oracle only** (a leading `-` is not the obstacle: `-1.0` runs as `f128` on lean_single, while `0x1p-16494` is refused even without the `-`; measured 2026-10-03). Rows remain in the JSONL and as `ORACLE_*` limb tables in the probe, but are **not** emitted as source literals. |
 | Live bit-identity assert (`literal bits == expected.limbs`) | Requires limb extraction / run path after E249 lifts. Tables are embedded now so a widen-f64 implementer has the external expected vs via_f64 pair in-tree; gate today only checks embedding + E249. |
 
 ## Gate behaviour (V0-B green on Madaros as of 2026-09-06)

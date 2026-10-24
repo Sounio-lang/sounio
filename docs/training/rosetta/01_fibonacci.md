@@ -2,8 +2,8 @@
 topic_id: repo.docs.training.rosetta.01-fibonacci
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.training.rosetta.01-fibonacci
 -->
 
@@ -36,10 +36,10 @@ fn fibonacci(n: i64) -> i64 {
         a = temp
         i = i + 1
     }
-    b
+    return b
 }
 
-fn main() with IO, Mut, Panic, Div {
+fn main() -> i32 with IO, Mut, Panic, Div {
     var i: i64 = 0
     while i < 10 {
         print(fibonacci(i))
@@ -47,6 +47,7 @@ fn main() with IO, Mut, Panic, Div {
         i = i + 1
     }
     println("")
+    return 0
 }
 ```
 
