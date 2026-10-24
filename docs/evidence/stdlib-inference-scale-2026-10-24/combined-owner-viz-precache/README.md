@@ -24,7 +24,7 @@ hash checks. The exact protocol is retained in `PROTOCOL_GATE.sh` and
 to the shared scripts. Resource files describe their individual programs and
 are not a general performance benchmark.
 
-`receipts/` contains timestamp-free gzip copies of raw stdout/stderr, check and
+`receipts.tar.gz` contains the original `receipts/` tree with timestamp-free gzip copies of raw stdout/stderr, check and
 compile logs, resource measurements, artifact identities and input manifests.
 `logs/` preserves Slurm output. `SOURCE_HEAD.txt`, `SOURCE_COMMIT_PREFIX`,
 `COMPILER.sha256` and `SUBMISSION.txt` bind the run to its recorded identities.
@@ -40,3 +40,20 @@ The later compiler self-check scopes are kept in the separate
 
 Verify this custody with `sha256sum -c MANIFEST.sha256` from this directory.
 The README and its generated governance metadata are included in that manifest.
+
+## Compact receipt archive
+
+The loose receipt copies were packed after byte-for-byte extraction and full
+historical-manifest verification. Original worker artifacts and the prior Git
+commit remain intact. No numerical result, source or acceptance criterion changed.
+The archive uses sorted paths, fixed zero timestamps, numeric owner/group0 and
+timestamp-free gzip. A second independent packing produced identical bytes.
+
+Archive SHA256: `910b72edd900f59598be9e344ff2510e145bb88ffc08ad5005f220963dd3a2fb`.
+
+First verify this compact custody with `sha256sum -c MANIFEST.sha256`. To replay
+the original receipt manifest, copy this directory to a temporary directory,
+extract `receipts.tar.gz` there, then run `sha256sum -c RECEIPTS_MANIFEST.sha256`
+from that copy. The historical manifest intentionally addresses the extracted
+`receipts/` paths. `PACKING_VERIFY.txt` records the completed byte-preservation
+checks; no executable or full-source archive is introduced.
