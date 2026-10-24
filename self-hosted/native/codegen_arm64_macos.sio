@@ -451,11 +451,14 @@ fn a64m_array_index(base: i64, index: i64, label: i64) with Mut, Panic {
     else { a64m_word(0x8B0A0D29) }
 }
 fn a64m_data_addr(reg: i64, offset: i64) with Mut, Panic, Div {
-    if offset < -32 || offset > 134217720 { A64M_ERROR = true; return }
+    // Reserve the import and linkedit pages below the same dyld boundary used
+    // by the Mach-O writer. The old 128 MiB ceiling rejected valid arena globals.
+    if offset < -32 || offset > 6442450944 - 4429185024 - 32768 - 8 { A64M_ERROR = true; return }
     if offset + 8 > A64M_BSS { A64M_BSS = offset + 8 }
     let target = 4429185024 + 16384 + offset // first DATA page is the import table
     let pc = 4294967296 + 16384 + A64M_LEN
     let delta = target / 4096 - pc / 4096
+    if delta < -1048576 || delta > 1048575 { A64M_ERROR = true; return }
     a64m_word(0x90000000 | ((delta & 3) << 29) | (((delta >> 2) & 524287) << 5) | reg)
     a64m_word(0x91000000 | ((target & 4095) << 10) | (reg << 5) | reg)
 }
@@ -1071,9 +1074,19 @@ fn a64m_emit_instr(module: &IrModule, func: &IrFunction, ii: i64) -> bool with I
         if instr.dst >= 0 { A64M_FLOAT[instr.dst as usize] = true; A64M_INT[instr.dst as usize] = false }
     } else if op == IrOpcode::IrCall {
         if instr.arg_count > 64 || instr.fn_id < 0 || instr.fn_id >= (*module).fn_count { return false }
-        let cleanup = a64m_args(at, instr.arg_count)
         let target = ir_fn_get(module, instr.fn_id)
         let name = str_from_bytes(target.name.buf, target.name.len)
+        // Option A dropped IrCallExtern-on-6 so native v2 can emit kernel
+        // callers (that opcode has no v2 arm: rc=12). Metal launch used to
+        // ride strategy 6. A collected kernel is still a device launch here
+        // by name, without remapping 6→4 or restoring IrCallExtern-on-6.
+        let metal_id = native_metal_find(name)
+        if metal_id >= 0 {
+            if !a64m_metal_launch(metal_id, name, at, instr.arg_count) { return false }
+            a64m_store(0, instr.dst)
+            return !A64M_ERROR
+        }
+        let cleanup = a64m_args(at, instr.arg_count)
         // mmap allocations have process lifetime: no reusable region can open.
         // Zero is the lowering protocol's explicit plain-return fallback.
         if target.instr_count == 0 && name == "__rgn_enter" {
@@ -1218,8 +1231,10 @@ fn a64m_global_inits(module: &IrModule) with Mut, Panic, Div {
     while fi < (*module).fn_count {
         let f = ir_fn_get(module, fi)
         if f.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+            if f.param_count < 0 || f.bss_size < 0 { A64M_ERROR = true; return }
+            let limit = 6442450944 - 4429185024 - 32768
+            if f.param_count > limit || f.bss_size > limit - f.param_count { A64M_ERROR = true; return }
             let end = f.param_count + f.bss_size
-            if end > 134217728 || f.param_count < 0 { A64M_ERROR = true; return }
             if end > A64M_BSS { A64M_BSS = end }
             if f.returns_float == 1 {
                 let stride = if f.hyper_algebra_kind == 1 || f.hyper_algebra_kind == 17 { 1 } else { 8 }
@@ -1243,6 +1258,14 @@ fn a64m_global_inits(module: &IrModule) with Mut, Panic, Div {
                         if stride == 1 { a64m_word(0x3900012A) } else { a64m_word(0xF900012A) }
                         k = k + 1
                     }
+                } else if f.bss_size > 0 && f.bss_size <= 8 && stride == 8 {
+                    // Scalar slots are padded/aligned to eight bytes by lowering.
+                    // bool occupies one logical byte but carries the default
+                    // word stride. Dividing 1 by 8 gave a zero iteration count;
+                    // the post-tested fill then wrapped and wrote past __DATA.
+                    a64m_data_addr(9, f.param_count)
+                    a64m_imm(10, f.prof_counter_id)
+                    a64m_word(0xF900012A)
                 } else {
                     a64m_data_addr(9, f.param_count)
                     a64m_imm(10, f.prof_counter_id)

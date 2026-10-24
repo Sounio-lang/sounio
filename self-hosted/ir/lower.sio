@@ -190,10 +190,36 @@ var FO_INLINE_CAP: i64 = 8
 var FO_INLINE_BUDGET: i64 = 96
 var FO_INLINE_COUNT: i64 = 0
 var FO_INLINE_TRUNCATED: i64 = 0
+// Loop bodies are real IR. Re-lowering one is only sound for an explicit
+// uncertainty query. A straight-line helper is different: the sensitivity
+// has to be recorded on the let, or a later variance_of(local) reads the seed.
+var FO_INLINE_ALLOW_LOOPS: i64 = 0
+var FO_INLINE_FRAME_CLASH: i64 = 0
+var FO_COUNT_STACK: [i64; 16] = [0; 16]
+var FO_COUNT_DEPTH: i64 = 0
 // Literal factor in `c * self(x, n - 1)`. Twin self+self is 2.
 var FO_RECUR_COEF: f64 = 2.0
 var FO_RECUR_LIT: f64 = 0.0
 var FO_RECUR_BASE: f64 = 1.0
+var FO_STEP_BASE_LIT: i64 = 0
+var FO_STEP_BASE_SLOT: i64 = 0 - 1
+var FO_STEP_NF: i64 = 0
+var FO_STEP_NIDX: i64 = 0 - 1
+var FO_STEP_FIDX: [i64; 4] = [-1; 4]
+var FO_STEP_FNAME: [Name; 4] = [ir_empty_name(); 4]
+var FO_STEP_NNAME: Name = ir_empty_name()
+var FO_STEP_FN: Name = ir_empty_name()
+var FO_STEP_ZERO: i64 = 0
+var FO_STEP_ZVAL: i64 = 0
+var FO_STEP_ZS: [i64; 32] = [-1; 32]
+var FO_STEP_VALS: [i64; 16] = [-1; 16]
+var FO_STEP_SENS: [i64; 512] = [-1; 512]
+var FO_STEP_OUT_VAL: i64 = 0
+var FO_STEP_OUT_S: [i64; 32] = [-1; 32]
+var FO_STEP_CARRY: i64 = 0
+var FO_STEP_H: [i64; 36] = [-1; 36]
+var FO_STEP_OUT_H: [i64; 36] = [-1; 36]
+var FO_STEP_ARGH: [i64; 576] = [-1; 576]
 
 fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
     let names = lowerer_box_empty_local_name_slots()
@@ -383,6 +409,42 @@ pub fn ir_instr_overflow_begin_fn() with Mut { IR_INSTR_OVERFLOW_COUNT = 0 }
 var LOWER_RSS_TRACE_ON: i64 = 0
 var LOWER_RSS_TRACE_CHECKED: i64 = 0
 var LOWER_RSS_LAST: i64 = 0
+
+var LOWER_INTO_ACC_ALLOC_TRACE_CHECKED: i64 = 0
+var LOWER_INTO_ACC_ALLOC_TRACE_ON: i64 = 0
+var LOWER_BOX_ENV_CALLS: [i64; 3] = [0; 3]
+var LOWER_BOX_ENV_REFILL: [i64; 3] = [0; 3]
+var LOWER_BOX_TRACE_CHECKED: i64 = 0
+var LOWER_BOX_TRACE_ON: i64 = 0
+
+fn lower_into_acc_alloc_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    if LOWER_INTO_ACC_ALLOC_TRACE_CHECKED == 0 {
+        LOWER_INTO_ACC_ALLOC_TRACE_CHECKED = 1
+        let flag = read_env("SOUNIO_INTO_ACC_ALLOC_TRACE")
+        if str_eq(flag, "1") { LOWER_INTO_ACC_ALLOC_TRACE_ON = 1 }
+    }
+    LOWER_INTO_ACC_ALLOC_TRACE_ON == 1
+}
+
+// Like the other lowering diagnostic options, BOX_TRACE is process-scoped.
+// Keep only its parsed boolean; never retain the temporary environment string.
+// The opt-in receipt counts the actual first read, not helper invocations.
+fn lower_box_trace_enabled(site: i64) -> bool with IO, Mut, Panic, Div {
+    if LOWER_BOX_TRACE_CHECKED == 0 {
+        let enabled = lower_into_acc_alloc_trace_enabled()
+        var before: i64 = 0
+        if enabled { before = __pool_refill_bytes() }
+        let flag = read_env("SOUNIO_BOX_TRACE")
+        if enabled {
+            let after = __pool_refill_bytes()
+            LOWER_BOX_ENV_CALLS[site as usize] = LOWER_BOX_ENV_CALLS[site as usize] + 1
+            LOWER_BOX_ENV_REFILL[site as usize] = LOWER_BOX_ENV_REFILL[site as usize] + after - before
+        }
+        if str_eq(flag, "1") { LOWER_BOX_TRACE_ON = 1 }
+        LOWER_BOX_TRACE_CHECKED = 1
+    }
+    LOWER_BOX_TRACE_ON == 1
+}
 
 fn lower_rss_enabled() -> bool with IO, Mut, Panic, Div, Alloc {
     if LOWER_RSS_TRACE_CHECKED == 0 {
@@ -713,7 +775,7 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
     }
     if IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH { print("  cause: lowering reported an error in this compilation; refusing binary publication ") }
     if LOWER_USE_MODULE_OVERFLOWED {
-        print("  cause: more than 1024 distinct lowercase `use` path segments in this\n")
+        print("  cause: more than 4096 module-scoped lowercase `use` path suffixes in this\n")
         print("         compilation; the module-qualified-call registry (LOWER_USE_MODULE_HASH)\n")
         print("         dropped the rest. Any `mod::f(..)` naming a module past this point\n")
         print("         falls back to the mangled `mod_f` stub this gate exists to prevent,\n")
@@ -1316,9 +1378,10 @@ fn lower_kn_field_kind(type_name: Name, field_name: Name) -> i64 with Mut, Panic
     0 - 1
 }
 
+let LOWER_USE_MODULE_CAP: i64 = 4096
 var LOWER_USE_MODULE_COUNT: i64 = 0
-var LOWER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
-var LOWER_USE_MODULE_MODULE_ID: [i64; 1024] = [0 - 1; 1024]
+var LOWER_USE_MODULE_HASH: [i64; 4096] = [0; 4096]
+var LOWER_USE_MODULE_MODULE_ID: [i64; 4096] = [0 - 1; 4096]
 
 // The module id callee_path_module_stripped_name's qualifier lookup checks
 // registry entries against. -1 (the default) means "unscoped": the single-
@@ -1421,8 +1484,8 @@ pub fn lower_use_module_reset() with Mut {
 // pattern already proven reliable throughout this file (LOWER_USE_MODULE_HASH
 // itself, LOWER_ENUM_VARIANT_PTRS, FN_PARAM_NAME_OFF, …).
 let LOWER_USE_MODULE_SEG_MAX: i64 = 384
-var LOWER_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
-var LOWER_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
+var LOWER_USE_MODULE_LEN: [i64; 4096] = [0; 4096]
+var LOWER_USE_MODULE_BUF: [i8; 1572864] = [0; 1572864]
 
 fn lower_use_module_known(module_id: i64, n: Name) -> bool with Mut, Panic, Div {
     if n.len <= 0 || n.len > LOWER_USE_MODULE_SEG_MAX {
@@ -1461,7 +1524,7 @@ fn lower_use_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
     if lower_use_module_known(module_id, n) {
         return
     }
-    if LOWER_USE_MODULE_COUNT >= 1024 {
+    if LOWER_USE_MODULE_COUNT >= LOWER_USE_MODULE_CAP {
         // Silently continuing here would recreate exactly the bug this registry exists
         // to prevent: a `mod::f(..)` call for the segment that didn't fit falls back to
         // the mangled `mod_f` stub, but now with no diagnostic at all. Refuse instead.
@@ -1473,7 +1536,7 @@ fn lower_use_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
         if IR_LOWER_HARD_ERROR == 0 {
             IR_LOWER_HARD_ERROR = 1
             IR_LOWER_HARD_ERROR_REASON = 3
-            IR_LOWER_HARD_ERROR_LIMIT = 1024
+            IR_LOWER_HARD_ERROR_LIMIT = LOWER_USE_MODULE_CAP
         }
         return
     }
@@ -4276,6 +4339,31 @@ fn lowerer_sco_strategy_trace(name: Name, s: i64) with Mut, Panic, Div, IO {
     }
 }
 
+var LOWER_STRATEGY_ENV_TRACE_CALLS: i64 = 0
+var LOWER_STRATEGY_ENV_TRACE_REFILL: i64 = 0
+var LOWER_SCO_ABLATION_CHECKED: i64 = 0
+var LOWER_SCO_ABLATION_ON: i64 = 0
+
+// This compiler option is process-scoped, like the command-line target. Retain
+// only its boolean value, never the temporary read_env string or pool storage.
+// Re-preseeding external declarations must not re-read /proc/self/environ.
+fn lower_sco_ablation_enabled() -> bool with IO, Mut, Panic, Div {
+    if LOWER_SCO_ABLATION_CHECKED == 0 {
+        let env_alloc_trace = lower_into_acc_alloc_trace_enabled()
+        var env_refill_before: i64 = 0
+        if env_alloc_trace { env_refill_before = __pool_refill_bytes() }
+        let flag = read_env("SOUNIO_SCO_ABLATION")
+        if env_alloc_trace {
+            let env_refill_after = __pool_refill_bytes()
+            LOWER_STRATEGY_ENV_TRACE_CALLS = LOWER_STRATEGY_ENV_TRACE_CALLS + 1
+            LOWER_STRATEGY_ENV_TRACE_REFILL = LOWER_STRATEGY_ENV_TRACE_REFILL + env_refill_after - env_refill_before
+        }
+        if str_eq(flag, "1") { LOWER_SCO_ABLATION_ON = 1 }
+        LOWER_SCO_ABLATION_CHECKED = 1
+    }
+    LOWER_SCO_ABLATION_ON == 1
+}
+
 fn lowerer_compute_strategy_from_ast_ref(
     return_type: &Option<Box<TypeExpr>>,
     effects: &Option<Box<EffectList>>
@@ -4304,7 +4392,7 @@ fn lowerer_compute_strategy_from_ast_ref(
     // Marker: SCO_ETAU_ELEVATE_SCIENTIFIC_EFFECTS
     // Marker: SCO_ETAU_ABLATION_ENV
     // Environment-backed ablation is IO; callers propagate that effect explicitly.
-    if !str_eq(read_env("SOUNIO_SCO_ABLATION"), "1") {
+    if !lower_sco_ablation_enabled() {
         if lowerer_sco_scientific_effects_ref(effects) {
             strategy = IR_STRATEGY_PRECISION_PRESERVING
 
@@ -6950,7 +7038,7 @@ fn lowerer_lower_fn_params_mut(
                 if lower_box_or_option_inner_type_name(&(*list).head.ty).len > 0 {
                     let bl = lower_struct_layout_index_of(&(*(*lo).struct_layouts), lower_box_or_option_inner_type_name(&(*list).head.ty))
                     lowerer_bind_local_box_inner_mut(lo, (*list).head.name, bl)
-                    if str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
+                    if lower_box_trace_enabled(0) {
                         print("boxtrace: WRITE-A ")
                         print(str_from_bytes((*list).head.name.buf, (*list).head.name.len))
                         print(" layout=")
@@ -7406,10 +7494,8 @@ fn lowerer_lower_fn_item_mut(
     // instr_count == 0 — applies. Params are deliberately NOT lowered:
     // lowerer_lower_fn_params_mut emits ir_mark_float_reg for f64 params,
     // which would push instr_count > 0 and re-break dispatch.
-    // Do NOT mark these slots compile_strategy == 6 (IR_STRATEGY_EXTERN):
-    // call lowering (lower.sio callee_strat_ext == 6) emits IrCallExtern for
-    // such callees, and native v2 codegen has no IrCallExtern arm — every
-    // caller fails with rc=12. The ic==0 stub is what dispatch needs.
+    // Do NOT mark these slots compile_strategy == 6. 6 is also the kernel /
+    // PRECISION_PRESERVING_CHAOTIC stamp. The ic==0 stub is what dispatch needs.
     if fd.is_extern {
         lowerer_flush_current_func_mut(lo)
         (*lo).current_fn = IR_INVALID_FN
@@ -9360,6 +9446,214 @@ fn lower_struct_layout_index_of(table: &StructLayoutTable, type_name: Name) -> i
     0 - 1
 }
 
+fn lower_name_is_kind(n: Name) -> bool with Panic, Div {
+    n.len == 4 && n.buf[0] == 107 && n.buf[1] == 105 && n.buf[2] == 110 && n.buf[3] == 100
+}
+
+fn lower_name_is_span(n: Name) -> bool with Panic, Div {
+    n.len == 4 && n.buf[0] == 115 && n.buf[1] == 112 && n.buf[2] == 97 && n.buf[3] == 110
+}
+
+fn lower_name_is_knowledge(n: Name) -> bool with Panic, Div {
+    n.len == 10 && n.buf[0] == 75 && n.buf[1] == 110 && n.buf[2] == 111 && n.buf[3] == 119 && n.buf[4] == 108 && n.buf[5] == 101 && n.buf[6] == 100 && n.buf[7] == 103 && n.buf[8] == 101 && n.buf[9] == 101
+}
+
+// Index of `field_name` in one layout, or -1.
+fn lower_layout_field_index(entry: &StructLayoutEntry, field_name: Name) -> i64 with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < (*entry).field_count {
+        if ir_name_eq(ir_name_at((*entry).fields[fi as usize].name_id), field_name) {
+            return (*entry).fields[fi as usize].index
+        }
+        fi = fi + 1
+    }
+    0 - 1
+}
+
+// AST tagged structs are `kind` then `span` then payload. Used only when an
+// untyped field name appears at more than one index across the table.
+fn lower_layout_has_kind_zero(entry: &StructLayoutEntry) -> bool with Mut, Panic, Div {
+    if (*entry).field_count <= 0 {
+        return false
+    }
+    let fname = ir_name_at((*entry).fields[0].name_id)
+    lower_name_is_kind(fname) && (*entry).fields[0].index == 0
+}
+
+// Unique majority index of `field_name`. `kind_only` counts only layouts
+// whose field 0 is `kind`. One pass, eight scalar slots, no heap arrays and
+// no `make_name` — this sits on every untyped field-get. After the SIGILL
+// fix, gen2 compiling main.sio died in 3s with `arena full (allocation of
+// 2080 bytes)` (32-byte header + 2048-byte intern slab); a pair of
+// `[i64; 64]` vote buffers plus three `make_name` calls per lookup is the
+// first suspect. Eight slots cover the distinct indices a real field name
+// actually takes (span is 1 / 2 / 3).
+fn lower_field_idx_majority(table: &StructLayoutTable, field_name: Name, kind_only: bool) -> i64 with Mut, Panic, Div {
+    var s0: i64 = 0 - 1
+    var s1: i64 = 0 - 1
+    var s2: i64 = 0 - 1
+    var s3: i64 = 0 - 1
+    var s4: i64 = 0 - 1
+    var s5: i64 = 0 - 1
+    var s6: i64 = 0 - 1
+    var s7: i64 = 0 - 1
+    var n0: i64 = 0
+    var n1: i64 = 0
+    var n2: i64 = 0
+    var n3: i64 = 0
+    var n4: i64 = 0
+    var n5: i64 = 0
+    var n6: i64 = 0
+    var n7: i64 = 0
+    var si: i64 = 0
+    while si < (*table).count {
+        if !lower_name_is_knowledge((*table).entries[si as usize].type_name) {
+            if !kind_only || lower_layout_has_kind_zero(&(*table).entries[si as usize]) {
+                let idx = lower_layout_field_index(&(*table).entries[si as usize], field_name)
+                if idx >= 0 {
+                    if s0 < 0 || s0 == idx {
+                        s0 = idx
+                        n0 = n0 + 1
+                    } else if s1 < 0 || s1 == idx {
+                        s1 = idx
+                        n1 = n1 + 1
+                    } else if s2 < 0 || s2 == idx {
+                        s2 = idx
+                        n2 = n2 + 1
+                    } else if s3 < 0 || s3 == idx {
+                        s3 = idx
+                        n3 = n3 + 1
+                    } else if s4 < 0 || s4 == idx {
+                        s4 = idx
+                        n4 = n4 + 1
+                    } else if s5 < 0 || s5 == idx {
+                        s5 = idx
+                        n5 = n5 + 1
+                    } else if s6 < 0 || s6 == idx {
+                        s6 = idx
+                        n6 = n6 + 1
+                    } else if s7 < 0 || s7 == idx {
+                        s7 = idx
+                        n7 = n7 + 1
+                    }
+                }
+            }
+        }
+        si = si + 1
+    }
+    var best_idx: i64 = 0 - 1
+    var best_n: i64 = 0
+    var tied = false
+    if n0 > best_n {
+        best_idx = s0
+        best_n = n0
+        tied = false
+    } else if n0 == best_n && n0 > 0 && s0 != best_idx {
+        tied = true
+    }
+    if n1 > best_n {
+        best_idx = s1
+        best_n = n1
+        tied = false
+    } else if n1 == best_n && n1 > 0 && s1 != best_idx {
+        tied = true
+    }
+    if n2 > best_n {
+        best_idx = s2
+        best_n = n2
+        tied = false
+    } else if n2 == best_n && n2 > 0 && s2 != best_idx {
+        tied = true
+    }
+    if n3 > best_n {
+        best_idx = s3
+        best_n = n3
+        tied = false
+    } else if n3 == best_n && n3 > 0 && s3 != best_idx {
+        tied = true
+    }
+    if n4 > best_n {
+        best_idx = s4
+        best_n = n4
+        tied = false
+    } else if n4 == best_n && n4 > 0 && s4 != best_idx {
+        tied = true
+    }
+    if n5 > best_n {
+        best_idx = s5
+        best_n = n5
+        tied = false
+    } else if n5 == best_n && n5 > 0 && s5 != best_idx {
+        tied = true
+    }
+    if n6 > best_n {
+        best_idx = s6
+        best_n = n6
+        tied = false
+    } else if n6 == best_n && n6 > 0 && s6 != best_idx {
+        tied = true
+    }
+    if n7 > best_n {
+        best_idx = s7
+        best_n = n7
+        tied = false
+    } else if n7 == best_n && n7 > 0 && s7 != best_idx {
+        tied = true
+    }
+    if best_n > 0 && !tied {
+        return best_idx
+    }
+    0 - 1
+}
+
+// Untyped `.field` must not return the first layout that happens to carry the
+// name, and must not require every layout to agree. Gen3 SIGILL at the
+// #2979 null-handle ud2: the caller of a 2-arg Span-shaped ctor did `e.span`
+// on an ExprIdent. Unanimous consensus fails because `span` lives at 1 on
+// Expr/Stmt/Item/TypeExpr/Pattern, at 2 on SessionStep (kind-tagged) and
+// OntologyDisjointDecl, and at 3 on AuditSection. The miss fell through to
+// `(name[0] as i64) % 64` = 51 for "span", which is past Expr's payload, so
+// the load was 0 and the next field-get hit handle 0. Majority among
+// kind-tagged AST layouts keeps `.span` at 1. Same class as the `fn_count`
+// first-match that read string_table as a loop bound (comment on
+// expr_receiver_struct_type_ref).
+//
+// Order: unique kind-tagged majority, unique non-Knowledge majority,
+// Knowledge, then the AST convention (`kind`=0, `span`=1). -1 otherwise;
+// caller keeps the legacy hash.
+fn lower_field_idx_untyped(table: &StructLayoutTable, field_name: Name) -> i64 with Mut, Panic, Div {
+    let kind_best = lower_field_idx_majority(table, field_name, true)
+    if kind_best >= 0 {
+        return kind_best
+    }
+    let all_best = lower_field_idx_majority(table, field_name, false)
+    if all_best >= 0 {
+        return all_best
+    }
+    var knowledge_idx: i64 = 0 - 1
+    var si: i64 = 0
+    while si < (*table).count {
+        if lower_name_is_knowledge((*table).entries[si as usize].type_name) {
+            let idx = lower_layout_field_index(&(*table).entries[si as usize], field_name)
+            if idx >= 0 {
+                knowledge_idx = idx
+                break
+            }
+        }
+        si = si + 1
+    }
+    if knowledge_idx >= 0 {
+        return knowledge_idx
+    }
+    if lower_name_is_kind(field_name) {
+        return 0
+    }
+    if lower_name_is_span(field_name) {
+        return 1
+    }
+    0 - 1
+}
+
 // Read the side table WITHOUT copying the Lowerer. Bisected: writing this slot at param-bind time
 // is harmless (a written-but-never-read array changes nothing), while every earlier attempt read it
 // back through a by-value `self` method — which copies the whole ~struct Lowerer — at the
@@ -9947,8 +10241,211 @@ fn fo_block_has_unsupported_ctl(blk_opt: &Option<Box<Block>>, depth: i64) -> boo
     }
 }
 
+// Speculative FO re-lower must not refuse ELF publication. #2956 made
+// had_error + IR_LOWER_COMPILE_ERROR_LATCH survive `(*lo) = ...` stores;
+// before that, an ident miss inside fo_inline_call_variance was dropped and
+// gen2 still reached rung `run`. After it, `orbit_is_contested` (two nested
+// if-helpers as call args) stopped the ratcheted self-compile at
+// into_acc_done=7 with report_error_at(15349). Snapshot / restore the ledger
+// so a failed inline stays a -1 variance, not a hard compile error.
+//
+// The same speculation must not keep the IR it emitted. After the orbit
+// rollback, gen2 reached `ocp_const_fold_scan` (into_acc_done=55) and
+// needed 30745 instructions: every `let` re-walks the RHS for variance,
+// FO pastes a helper, then `!ok` returned -1 while leaving those instrs
+// and IR_INSTR_OVERFLOW_COUNT / IR_LOWER_HARD_ERROR in the caller.
+struct FoInlineErrorSnap {
+    error_count: i64,
+    had_error: bool,
+    total: i64,
+    latch: bool,
+    unres: i64,
+    instrs: i64,
+    regs: i64,
+    overflow: i64,
+    hard: i64,
+    hard_reason: i64,
+    hard_needed: i64,
+    hard_limit: i64,
+}
+
+fn fo_inline_error_snap(error_count: i64, had_error: bool, instrs: i64, regs: i64) -> FoInlineErrorSnap {
+    FoInlineErrorSnap {
+        error_count: error_count,
+        had_error: had_error,
+        total: IR_LOWER_ERROR_TOTAL,
+        latch: IR_LOWER_COMPILE_ERROR_LATCH,
+        unres: IR_LOWER_UNRES_COUNT,
+        instrs: instrs,
+        regs: regs,
+        overflow: IR_INSTR_OVERFLOW_COUNT,
+        hard: IR_LOWER_HARD_ERROR,
+        hard_reason: IR_LOWER_HARD_ERROR_REASON,
+        hard_needed: IR_LOWER_HARD_ERROR_NEEDED,
+        hard_limit: IR_LOWER_HARD_ERROR_LIMIT,
+    }
+}
+
+fn fo_inline_error_grew(error_count: i64, had_error: bool, snap: FoInlineErrorSnap) -> bool {
+    error_count > snap.error_count || IR_LOWER_ERROR_TOTAL > snap.total || (had_error && !snap.had_error)
+        || IR_INSTR_OVERFLOW_COUNT > snap.overflow || IR_LOWER_HARD_ERROR != snap.hard
+}
+
+fn fo_inline_error_restore_globals(snap: FoInlineErrorSnap) with Mut {
+    IR_LOWER_ERROR_TOTAL = snap.total
+    IR_LOWER_COMPILE_ERROR_LATCH = snap.latch
+    IR_LOWER_UNRES_COUNT = snap.unres
+    IR_INSTR_OVERFLOW_COUNT = snap.overflow
+    IR_LOWER_HARD_ERROR = snap.hard
+    IR_LOWER_HARD_ERROR_REASON = snap.hard_reason
+    IR_LOWER_HARD_ERROR_NEEDED = snap.hard_needed
+    IR_LOWER_HARD_ERROR_LIMIT = snap.hard_limit
+}
+
 // #1706: a helper registered for inline FO declares no IO/Mut/Alloc effect
 // (fo_inline_note), so calling it twice is as safe as a pure math builtin.
+// A borrow (`&x`, `&!x`, a method receiver) re-emitted while inlining is a
+// second store through the caller's spill slot. Pure f64 calls are not:
+// they either inline to arithmetic or call a function with its own frame.
+fn fo_expr_borrows_frame(e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 12 { return true }
+    let k = (*e).kind
+    if k == ExprKind::ExprUnary {
+        if (*e).un_op == UnaryOp::OpRef || (*e).un_op == UnaryOp::OpRefMut { return true }
+    }
+    if k == ExprKind::ExprMethodCall { return true }
+    match (*e).left {
+        Some(l) => { if fo_expr_borrows_frame(&(*l), depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).right {
+        Some(r) => { if fo_expr_borrows_frame(&(*r), depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).else_expr {
+        Some(ee) => { if fo_expr_borrows_frame(&(*ee), depth + 1) { return true } }
+        None => {}
+    }
+    if k == ExprKind::ExprIf || k == ExprKind::ExprBlock || k == ExprKind::ExprWhile
+        || k == ExprKind::ExprLoop || k == ExprKind::ExprForIn {
+        match (*e).block {
+            Some(b) => {
+                var sc = &(*b).stmts
+                while true {
+                    match *sc {
+                        Some(sl) => {
+                            match (*sl).head.expr {
+                                Some(se) => { if fo_expr_borrows_frame(&(*se), depth + 1) { return true } }
+                                None => {}
+                            }
+                            sc = &(*sl).tail
+                        }
+                        None => break
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    var args = &(*e).args
+    while true {
+        match *args {
+            Some(a) => {
+                if fo_expr_borrows_frame(&(*a).head, depth + 1) { return true }
+                args = &(*a).tail
+            }
+            None => break
+        }
+    }
+    false
+}
+
+fn fo_count_seeing(id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < FO_COUNT_DEPTH && i < 16 {
+        if FO_COUNT_STACK[i as usize] == id { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn fo_expr_passes_name(e: &Expr, name: Name, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 16 { return true }
+    let k = (*e).kind
+    if k == ExprKind::ExprCall || k == ExprKind::ExprMethodCall {
+        match (*e).left {
+            Some(recv) => {
+                if (*recv).kind == ExprKind::ExprIdent && ir_name_eq((*recv).name, name) { return true }
+                if fo_expr_passes_name(&(*recv), name, depth + 1) { return true }
+            }
+            None => {}
+        }
+        var args = &(*e).args
+        while true {
+            match *args {
+                Some(a) => {
+                    if (*a).head.kind == ExprKind::ExprIdent && ir_name_eq((*a).head.name, name) { return true }
+                    if fo_expr_passes_name(&(*a).head, name, depth + 1) { return true }
+                    args = &(*a).tail
+                }
+                None => break
+            }
+        }
+    }
+    match (*e).left {
+        Some(l) => { if fo_expr_passes_name(&(*l), name, depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).right {
+        Some(r) => { if fo_expr_passes_name(&(*r), name, depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).else_expr {
+        Some(ee) => { if fo_expr_passes_name(&(*ee), name, depth + 1) { return true } }
+        None => {}
+    }
+    if k == ExprKind::ExprIf || k == ExprKind::ExprBlock || k == ExprKind::ExprWhile
+        || k == ExprKind::ExprLoop || k == ExprKind::ExprForIn {
+        match (*e).block {
+            Some(b) => {
+                var sc = &(*b).stmts
+                while true {
+                    match *sc {
+                        Some(sl) => {
+                            match (*sl).head.expr {
+                                Some(se) => { if fo_expr_passes_name(&(*se), name, depth + 1) { return true } }
+                                None => {}
+                            }
+                            sc = &(*sl).tail
+                        }
+                        None => break
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    false
+}
+
+fn fo_stmt_list_passes_name(opt: &Option<Box<StmtList>>, name: Name, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 16 { return true }
+    var cur = opt
+    while true {
+        match *cur {
+            Some(sl) => {
+                match (*sl).head.expr {
+                    Some(ex) => { if fo_expr_passes_name(&(*ex), name, depth + 1) { return true } }
+                    None => {}
+                }
+                cur = &(*sl).tail
+            }
+            None => break
+        }
+    }
+    false
+}
+
 fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64, expand_calls: bool) -> i64 with Mut, Panic, Div, Alloc {
     if depth > 32 { return 100 }
     var n: i64 = 0
@@ -10022,17 +10519,22 @@ fn fo_nested_expr_stmts(e: &Expr, depth: i64, expand_calls: bool) -> i64 with Mu
                 Some(ce) => {
                     if (*ce).kind == ExprKind::ExprIdent {
                         let id = ir_intern_name((*ce).name)
-                        var cur = FO_INLINE_HEAD
-                        while true {
-                            match cur {
-                                Some(node) => {
-                                    if (*node).id == id {
-                                        n = n + fo_nested_stmt_count(&(*node).def.body.stmts, depth + 1, true)
-                                        break
+                        if !fo_count_seeing(id) && FO_COUNT_DEPTH < 16 {
+                            var cur = FO_INLINE_HEAD
+                            while true {
+                                match cur {
+                                    Some(node) => {
+                                        if (*node).id == id {
+                                            FO_COUNT_STACK[FO_COUNT_DEPTH as usize] = id
+                                            FO_COUNT_DEPTH = FO_COUNT_DEPTH + 1
+                                            n = n + fo_nested_stmt_count(&(*node).def.body.stmts, depth + 1, true)
+                                            FO_COUNT_DEPTH = FO_COUNT_DEPTH - 1
+                                            break
+                                        }
+                                        cur = (*node).next
                                     }
-                                    cur = (*node).next
+                                    None => break
                                 }
-                                None => break
                             }
                         }
                     }
@@ -10071,6 +10573,103 @@ fn fo_nested_expr_stmts(e: &Expr, depth: i64, expand_calls: bool) -> i64 with Mu
         }
     }
     n
+}
+
+fn fo_expr_has_wide_loop(e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 12 { return true }
+    let k = (*e).kind
+    if k == ExprKind::ExprWhile || k == ExprKind::ExprLoop || k == ExprKind::ExprForIn {
+        if fo_nested_block_stmts(&(*e).block, 0, true) > 6 { return true }
+        if fo_block_has_wide_loop(&(*e).block, depth + 1) { return true }
+    }
+    if k == ExprKind::ExprIf || k == ExprKind::ExprBlock {
+        if fo_block_has_wide_loop(&(*e).block, depth + 1) { return true }
+    }
+    if k == ExprKind::ExprMatch {
+        var ac = &(*e).arms
+        while true {
+            match *ac {
+                Some(al) => {
+                    if fo_expr_has_wide_loop(&(*al).head.body, depth + 1) { return true }
+                    ac = &(*al).tail
+                }
+                None => break
+            }
+        }
+    }
+    false
+}
+
+fn fo_block_has_wide_loop(blk: &Option<Box<Block>>, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    match *blk {
+        Some(b) => fo_stmt_list_has_wide_loop(&(*b).stmts, depth),
+        None => false,
+    }
+}
+
+fn fo_stmt_list_has_wide_loop(opt: &Option<Box<StmtList>>, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 12 { return true }
+    var cur = opt
+    while true {
+        match *cur {
+            Some(sl) => {
+                match (*sl).head.expr {
+                    Some(ex) => { if fo_expr_has_wide_loop(&(*ex), depth + 1) { return true } }
+                    None => {}
+                }
+                cur = &(*sl).tail
+            }
+            None => break
+        }
+    }
+    false
+}
+
+fn fo_expr_has_any_loop(e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 12 { return true }
+    let k = (*e).kind
+    if k == ExprKind::ExprWhile || k == ExprKind::ExprLoop || k == ExprKind::ExprForIn { return true }
+    if k == ExprKind::ExprIf || k == ExprKind::ExprBlock {
+        if fo_block_has_any_loop(&(*e).block, depth + 1) { return true }
+    }
+    if k == ExprKind::ExprMatch {
+        var ac = &(*e).arms
+        while true {
+            match *ac {
+                Some(al) => {
+                    if fo_expr_has_any_loop(&(*al).head.body, depth + 1) { return true }
+                    ac = &(*al).tail
+                }
+                None => break
+            }
+        }
+    }
+    false
+}
+
+fn fo_block_has_any_loop(blk: &Option<Box<Block>>, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    match *blk {
+        Some(b) => fo_stmt_list_has_any_loop(&(*b).stmts, depth),
+        None => false,
+    }
+}
+
+fn fo_stmt_list_has_any_loop(opt: &Option<Box<StmtList>>, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 12 { return true }
+    var cur = opt
+    while true {
+        match *cur {
+            Some(sl) => {
+                match (*sl).head.expr {
+                    Some(ex) => { if fo_expr_has_any_loop(&(*ex), depth + 1) { return true } }
+                    None => {}
+                }
+                cur = &(*sl).tail
+            }
+            None => break
+        }
+    }
+    false
 }
 
 fn fo_expr_is_ident_name(e: &Expr, name: Name) -> bool with Mut, Panic, Div {
@@ -11316,6 +11915,348 @@ fn fo_recur_step2_indexes(fd: &FnDef, kind: i64) -> (i64, i64) with Mut, Panic, 
     (0 - 1, 0 - 1)
 }
 
+fn fo_recur_call_is_this(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind != ExprKind::ExprCall { return false }
+    match (*e).left {
+        Some(cal) => {
+            if (*cal).kind != ExprKind::ExprIdent || !ir_name_eq((*cal).name, FO_STEP_FN) { return false }
+        }
+        None => { return false }
+    }
+    var i: i64 = 0
+    var ac = &(*e).args
+    let need = FO_STEP_NF + 1
+    while i < need {
+        match *ac {
+            Some(al) => {
+                if i == FO_STEP_NIDX {
+                    if !fo_expr_is_name_minus_one(&(*al).head, FO_STEP_NNAME) { return false }
+                } else {
+                    var slot: i64 = 0 - 1
+                    var s: i64 = 0
+                    while s < FO_STEP_NF {
+                        if FO_STEP_FIDX[s as usize] == i { slot = s }
+                        s = s + 1
+                    }
+                    if slot < 0 { return false }
+                    if !fo_expr_is_ident_name(&(*al).head, FO_STEP_FNAME[slot as usize]) { return false }
+                }
+                i = i + 1
+                ac = &(*al).tail
+            }
+            None => { return false }
+        }
+    }
+    match *ac {
+        Some(_) => false,
+        None => true,
+    }
+}
+
+fn fo_recur_step_pure(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprBlock {
+        match (*e).block {
+            Some(b) => {
+                match (*b).stmts {
+                    Some(sl) => {
+                        match (*sl).tail {
+                            Some(_) => { return false }
+                            None => {}
+                        }
+                        if (*sl).head.kind != StmtKind::StmtExpr { return false }
+                        match (*sl).head.expr {
+                            Some(ex) => { return fo_recur_step_pure(&(*ex)) }
+                            None => { return false }
+                        }
+                    }
+                    None => { return false }
+                }
+            }
+            None => { return false }
+        }
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(inner) => { return fo_recur_step_pure(&(*inner)) }
+            None => { return false }
+        }
+    }
+    if (*e).kind == ExprKind::ExprFloatLit || (*e).kind == ExprKind::ExprIntLit { return true }
+    if (*e).kind == ExprKind::ExprCall { return fo_recur_call_is_this(e) }
+    if (*e).kind == ExprKind::ExprIdent {
+        var s: i64 = 0
+        while s < FO_STEP_NF {
+            if fo_expr_is_ident_name(e, FO_STEP_FNAME[s as usize]) { return true }
+            s = s + 1
+        }
+        return false
+    }
+    if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+        match (*e).left {
+            Some(inner) => { return fo_recur_step_pure(&(*inner)) }
+            None => { return false }
+        }
+    }
+    if (*e).kind != ExprKind::ExprBinary { return false }
+    if (*e).bin_op != BinaryOp::OpAdd && (*e).bin_op != BinaryOp::OpSub
+        && (*e).bin_op != BinaryOp::OpMul && (*e).bin_op != BinaryOp::OpDiv {
+        return false
+    }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    if !fo_recur_step_pure(&(*l)) { return false }
+                    fo_recur_step_pure(&(*r))
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn fo_recur_expr_ok(fd: &FnDef) -> bool with Mut, Panic, Div, Alloc {
+    var nf: i64 = 0
+    var nidx: i64 = 0 - 1
+    var i: i64 = 0
+    var pc = &(*fd).params
+    while true {
+        match *pc {
+            Some(pl) => {
+                if !(*pl).head.is_self {
+                    if lower_type_expr_is_f64(&(*pl).head.ty) {
+                        if nf >= 4 { return false }
+                        FO_STEP_FIDX[nf as usize] = i
+                        FO_STEP_FNAME[nf as usize] = (*pl).head.name
+                        nf = nf + 1
+                    } else {
+                        if nidx >= 0 { return false }
+                        nidx = i
+                        FO_STEP_NNAME = (*pl).head.name
+                    }
+                    i = i + 1
+                }
+                pc = &(*pl).tail
+            }
+            None => break
+        }
+    }
+    if nf < 1 || nidx < 0 || i != nf + 1 { return false }
+    FO_STEP_NF = nf
+    FO_STEP_NIDX = nidx
+    FO_STEP_FN = (*fd).name
+    match (*fd).body.stmts {
+        Some(only) => {
+            match (*only).tail {
+                Some(_) => { return false }
+                None => {}
+            }
+            if (*only).head.kind != StmtKind::StmtExpr { return false }
+            match (*only).head.expr {
+                Some(body_e) => {
+                    if (*body_e).kind != ExprKind::ExprIf { return false }
+                    match (*body_e).left {
+                        Some(cond) => {
+                            if !fo_recur_guard_is_stop(&(*cond), FO_STEP_NNAME) { return false }
+                        }
+                        None => { return false }
+                    }
+                    var slot: i64 = 0 - 1
+                    var s: i64 = 0
+                    while s < nf {
+                        if fo_recur_arm_is_x(&(*body_e).block, FO_STEP_FNAME[s as usize]) { slot = s }
+                        s = s + 1
+                    }
+                    var lit: i64 = 0
+                    if slot < 0 {
+                        if !fo_recur_arm_lit(&(*body_e).block) { return false }
+                        lit = 1
+                    }
+                    match (*body_e).else_expr {
+                        Some(ee) => {
+                            if !fo_recur_step_pure(&(*ee)) { return false }
+                        }
+                        None => { return false }
+                    }
+                    FO_STEP_BASE_LIT = lit
+                    FO_STEP_BASE_SLOT = slot
+                    if lit == 1 { FO_RECUR_BASE = FO_RECUR_LIT }
+                    return true
+                }
+                None => { return false }
+            }
+        }
+        None => { return false }
+    }
+    false
+}
+
+fn fo_recur_block_expr_calls(e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprBlock {
+        match (*e).block {
+            Some(b) => { return fo_recur_block_list_calls(&(*b).stmts) }
+            None => { return 0 - 1 }
+        }
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(inner) => { return fo_recur_block_expr_calls(&(*inner)) }
+            None => { return 0 - 1 }
+        }
+    }
+    if (*e).kind == ExprKind::ExprCall {
+        if fo_recur_call_is_this(e) { return 1 }
+        return 0 - 1
+    }
+    if (*e).kind == ExprKind::ExprIdent {
+        if fo_expr_is_ident_name(e, FO_STEP_NNAME) { return 0 - 1 }
+        return 0
+    }
+    if (*e).kind == ExprKind::ExprFloatLit || (*e).kind == ExprKind::ExprIntLit { return 0 }
+    if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+        match (*e).left {
+            Some(inner) => { return fo_recur_block_expr_calls(&(*inner)) }
+            None => { return 0 - 1 }
+        }
+    }
+    if (*e).kind != ExprKind::ExprBinary { return 0 - 1 }
+    if (*e).bin_op != BinaryOp::OpAdd && (*e).bin_op != BinaryOp::OpSub
+        && (*e).bin_op != BinaryOp::OpMul && (*e).bin_op != BinaryOp::OpDiv {
+        return 0 - 1
+    }
+    match (*e).left {
+        Some(l) => {
+            match (*e).right {
+                Some(r) => {
+                    let a = fo_recur_block_expr_calls(&(*l))
+                    if a < 0 { return 0 - 1 }
+                    let b = fo_recur_block_expr_calls(&(*r))
+                    if b < 0 { return 0 - 1 }
+                    return a + b
+                }
+                None => { return 0 - 1 }
+            }
+        }
+        None => { return 0 - 1 }
+    }
+    0 - 1
+}
+
+fn fo_recur_block_list_calls(stmts: &Option<Box<StmtList>>) -> i64 with Mut, Panic, Div, Alloc {
+    match *stmts {
+        Some(sl) => {
+            var is_last = false
+            match (*sl).tail {
+                Some(_) => { is_last = false }
+                None => { is_last = true }
+            }
+            if is_last {
+                if (*sl).head.kind != StmtKind::StmtExpr { return 0 - 1 }
+                match (*sl).head.expr {
+                    Some(ex) => { return fo_recur_block_expr_calls(&(*ex)) }
+                    None => { return 0 - 1 }
+                }
+            }
+            if (*sl).head.kind != StmtKind::StmtLet { return 0 - 1 }
+            match (*sl).head.expr {
+                Some(ex) => {
+                    let c = fo_recur_block_expr_calls(&(*ex))
+                    if c < 0 { return 0 - 1 }
+                    let r = fo_recur_block_list_calls(&(*sl).tail)
+                    if r < 0 { return 0 - 1 }
+                    return c + r
+                }
+                None => { return 0 - 1 }
+            }
+        }
+        None => { return 0 - 1 }
+    }
+    0 - 1
+}
+
+fn fo_recur_block_ok(fd: &FnDef) -> bool with Mut, Panic, Div, Alloc {
+    var nf: i64 = 0
+    var nidx: i64 = 0 - 1
+    var i: i64 = 0
+    var pc = &(*fd).params
+    while true {
+        match *pc {
+            Some(pl) => {
+                if (*pl).head.is_self { return false }
+                if lower_type_expr_is_f64(&(*pl).head.ty) {
+                    if nf >= 4 { return false }
+                    FO_STEP_FIDX[nf as usize] = i
+                    FO_STEP_FNAME[nf as usize] = (*pl).head.name
+                    nf = nf + 1
+                } else {
+                    if nidx >= 0 { return false }
+                    nidx = i
+                    FO_STEP_NNAME = (*pl).head.name
+                }
+                i = i + 1
+                pc = &(*pl).tail
+            }
+            None => break
+        }
+    }
+    if nf < 1 || nidx < 0 || i != nf + 1 { return false }
+    FO_STEP_NF = nf
+    FO_STEP_NIDX = nidx
+    FO_STEP_FN = (*fd).name
+    match (*fd).body.stmts {
+        Some(only) => {
+            match (*only).tail {
+                Some(_) => { return false }
+                None => {}
+            }
+            if (*only).head.kind != StmtKind::StmtExpr { return false }
+            match (*only).head.expr {
+                Some(body_e) => {
+                    if (*body_e).kind != ExprKind::ExprIf { return false }
+                    match (*body_e).left {
+                        Some(cond) => {
+                            if !fo_recur_guard_is_stop(&(*cond), FO_STEP_NNAME) { return false }
+                        }
+                        None => { return false }
+                    }
+                    var slot: i64 = 0 - 1
+                    var s: i64 = 0
+                    while s < nf {
+                        if fo_recur_arm_is_x(&(*body_e).block, FO_STEP_FNAME[s as usize]) { slot = s }
+                        s = s + 1
+                    }
+                    var lit: i64 = 0
+                    if slot < 0 {
+                        if !fo_recur_arm_lit(&(*body_e).block) { return false }
+                        lit = 1
+                    }
+                    match (*body_e).else_expr {
+                        Some(ee) => {
+                            if (*ee).kind != ExprKind::ExprBlock { return false }
+                            match (*ee).block {
+                                Some(b) => {
+                                    let calls = fo_recur_block_list_calls(&(*b).stmts)
+                                    if calls < 1 { return false }
+                                }
+                                None => { return false }
+                            }
+                        }
+                        None => { return false }
+                    }
+                    FO_STEP_BASE_LIT = lit
+                    FO_STEP_BASE_SLOT = slot
+                    if lit == 1 { FO_RECUR_BASE = FO_RECUR_LIT }
+                    return true
+                }
+                None => { return false }
+            }
+        }
+        None => { return false }
+    }
+    false
+}
+
 fn fo_inline_known(n: Name) -> bool with Mut, Panic, Div, Alloc {
     let id = ir_intern_name(n)
     var cur = FO_INLINE_HEAD
@@ -11327,6 +12268,70 @@ fn fo_inline_known(n: Name) -> bool with Mut, Panic, Div, Alloc {
             }
             None => break
         }
+    }
+    false
+}
+
+// #2966: an `if` is not a call. lower_expr_contains_call_ref returns true
+// for every non-whitelisted kind, so `let abs_dist = if d < 0.0 { 0.0 - d }
+// else { d }` was not re-lower-safe. The inline variance walk then skipped
+// the binding and the tail `1.0 - abs_dist / half_width` died at site 15349
+// (`orbit_boundary_epsilon`, inlined while lowering `orbit_is_contested`).
+// A pure tree (literals, idents, arithmetic, nested if/block, no call, no
+// return, no assign) is safe to evaluate twice. A call inside the if stays
+// unsafe: re-emitting it would run the call a second time, including a Mut
+// helper that fo_inline_known would otherwise admit.
+fn lower_opt_expr_pure_tree(opt: &Option<Box<Expr>>, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    match *opt {
+        Some(e) => lower_expr_pure_tree(&(*e), depth),
+        None => true,
+    }
+}
+
+fn lower_block_pure_tree(blk_opt: &Option<Box<Block>>, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 64 { return false }
+    match *blk_opt {
+        Some(blk) => {
+            var cur = &(*blk).stmts
+            while true {
+                match *cur {
+                    Some(list) => {
+                        let st = &(*list).head
+                        if st.kind == StmtKind::StmtAssign { return false }
+                        if !lower_opt_expr_pure_tree(&st.expr, depth + 1) { return false }
+                        cur = &(*list).tail
+                    }
+                    None => break
+                }
+            }
+            true
+        }
+        None => true,
+    }
+}
+
+fn lower_expr_pure_tree(e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 64 { return false }
+    let k = (*e).kind
+    if k == ExprKind::ExprIntLit || k == ExprKind::ExprFloatLit || k == ExprKind::ExprBoolTrue
+        || k == ExprKind::ExprBoolFalse || k == ExprKind::ExprStringLit || k == ExprKind::ExprCharLit
+        || k == ExprKind::ExprIdent || k == ExprKind::ExprPath {
+        return true
+    }
+    if k == ExprKind::ExprBinary || k == ExprKind::ExprIndex {
+        if !lower_opt_expr_pure_tree(&(*e).left, depth + 1) { return false }
+        return lower_opt_expr_pure_tree(&(*e).right, depth + 1)
+    }
+    if k == ExprKind::ExprUnary || k == ExprKind::ExprCast || k == ExprKind::ExprFieldAccess {
+        return lower_opt_expr_pure_tree(&(*e).left, depth + 1)
+    }
+    if k == ExprKind::ExprIf {
+        if !lower_opt_expr_pure_tree(&(*e).left, depth + 1) { return false }
+        if !lower_block_pure_tree(&(*e).block, depth + 1) { return false }
+        return lower_opt_expr_pure_tree(&(*e).else_expr, depth + 1)
+    }
+    if k == ExprKind::ExprBlock {
+        return lower_block_pure_tree(&(*e).block, depth + 1)
     }
     false
 }
@@ -11385,6 +12390,9 @@ fn lower_expr_relower_safe_ref(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
     }
     if (*e).kind == ExprKind::ExprUnary || (*e).kind == ExprKind::ExprCast || (*e).kind == ExprKind::ExprFieldAccess {
         return lower_opt_expr_relower_safe(&(*e).left)
+    }
+    if (*e).kind == ExprKind::ExprIf || (*e).kind == ExprKind::ExprBlock {
+        return lower_expr_pure_tree(e, 0)
     }
     !lower_expr_contains_call_ref(e)
 }
@@ -18618,6 +19626,10 @@ impl Lowerer {
             }
         }
         if nargs != nparams { return (lo, 0 - 1) }
+        if (*lo.current_func).instr_count > IR_MAX_INSTRS - 512 {
+            return (lo, 0 - 1)
+        }
+        let fo_err_snap = fo_inline_error_snap(lo.error_count, lo.had_error, (*lo.current_func).instr_count, (*lo.current_func).reg_count)
         var vals: [i64; 8] = [0 - 1; 8]
         var vars: [i64; 8] = [0 - 1; 8]
         var sens: [i64; 256] = [0 - 1; 256]
@@ -18662,7 +19674,14 @@ impl Lowerer {
                     i = i + 1
                     ac = &(*al).tail
                 }
-                None => { return (lo, 0 - 1) }
+                None => {
+                    lo.error_count = fo_err_snap.error_count
+                    lo.had_error = fo_err_snap.had_error
+                    fo_inline_error_restore_globals(fo_err_snap)
+                    (*lo.current_func).instr_count = fo_err_snap.instrs
+                    (*lo.current_func).reg_count = fo_err_snap.regs
+                    return (lo, 0 - 1)
+                }
             }
         }
         let saved_bind = *lo.fo_bind
@@ -18725,7 +19744,12 @@ impl Lowerer {
         var bigr = lo.big
         (*bigr).so_bind_hess = saved_hess_rows
         lo.big = bigr
-        if result < 0 {
+        if fo_inline_error_grew(lo.error_count, lo.had_error, fo_err_snap) || result < 0 {
+            lo.error_count = fo_err_snap.error_count
+            lo.had_error = fo_err_snap.had_error
+            fo_inline_error_restore_globals(fo_err_snap)
+            (*lo.current_func).instr_count = fo_err_snap.instrs
+            (*lo.current_func).reg_count = fo_err_snap.regs
             return (lo.fo_clear_expr_sens().so_clear_expr_hess(), 0 - 1)
         }
         lo = lo.fo_restore_expr_sens(out_sens)
@@ -19447,6 +20471,723 @@ impl Lowerer {
         lo.fo_emit_var_from_sens()
     }
 
+    fn fo_step_init_h(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var i: i64 = 0
+        while i < 36 {
+            let sp = lo.fresh_reg()
+            lo = sp.0
+            FO_STEP_H[i as usize] = sp.1
+            lo = lo.emit(ir_copy(sp.1, FO_STEP_ZERO))
+            lo = lo.emit(ir_mark_float_reg(sp.1))
+            FO_STEP_OUT_H[i as usize] = FO_STEP_ZERO
+            i = i + 1
+        }
+        lo
+    }
+
+    fn fo_step_fill_zero(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var k: i64 = 0
+        while k < 32 {
+            FO_STEP_OUT_S[k as usize] = FO_STEP_ZERO
+            k = k + 1
+        }
+        k = 0
+        while k < 36 {
+            FO_STEP_OUT_H[k as usize] = FO_STEP_ZERO
+            k = k + 1
+        }
+        self
+    }
+
+    fn fo_step_store_hess(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var i: i64 = 0
+        while i < 36 {
+            let h = lo.so_expr_hess[i as usize]
+            if h >= 0 {
+                FO_STEP_OUT_H[i as usize] = h
+            } else {
+                FO_STEP_OUT_H[i as usize] = FO_STEP_ZERO
+            }
+            i = i + 1
+        }
+        lo
+    }
+
+    fn fo_step_combine(self, op: BinaryOp, lv: i64, rv: i64, ls: [i64; 32], rs: [i64; 32]) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let vp = lo.fresh_reg()
+        lo = vp.0
+        lo = lo.emit(ir_binop_typed(vp.1, lv, op, rv, true, true))
+        lo = lo.emit(ir_mark_float_reg(vp.1))
+        FO_STEP_OUT_VAL = vp.1
+        var den: i64 = FO_STEP_ZERO
+        if op == BinaryOp::OpDiv {
+            let d = lo.fresh_reg()
+            lo = d.0
+            lo = lo.emit(ir_binop_typed(d.1, rv, BinaryOp::OpMul, rv, true, true))
+            lo = lo.emit(ir_mark_float_reg(d.1))
+            den = d.1
+        }
+        var k: i64 = 0
+        while k < 32 {
+            let a = ls[k as usize]
+            let b = rs[k as usize]
+            if a == FO_STEP_ZERO && b == FO_STEP_ZERO {
+                FO_STEP_OUT_S[k as usize] = FO_STEP_ZERO
+            } else if op == BinaryOp::OpAdd {
+                if a == FO_STEP_ZERO {
+                    FO_STEP_OUT_S[k as usize] = b
+                } else if b == FO_STEP_ZERO {
+                    FO_STEP_OUT_S[k as usize] = a
+                } else {
+                    let t = lo.fresh_reg()
+                    lo = t.0
+                    lo = lo.emit(ir_binop_typed(t.1, a, BinaryOp::OpAdd, b, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t.1))
+                    FO_STEP_OUT_S[k as usize] = t.1
+                }
+            } else if op == BinaryOp::OpSub {
+                if b == FO_STEP_ZERO {
+                    FO_STEP_OUT_S[k as usize] = a
+                } else if a == FO_STEP_ZERO {
+                    let t = lo.fresh_reg()
+                    lo = t.0
+                    lo = lo.emit(ir_binop_typed(t.1, FO_STEP_ZERO, BinaryOp::OpSub, b, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t.1))
+                    FO_STEP_OUT_S[k as usize] = t.1
+                } else {
+                    let t2 = lo.fresh_reg()
+                    lo = t2.0
+                    lo = lo.emit(ir_binop_typed(t2.1, a, BinaryOp::OpSub, b, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t2.1))
+                    FO_STEP_OUT_S[k as usize] = t2.1
+                }
+            } else if op == BinaryOp::OpMul {
+                if a == FO_STEP_ZERO && b != FO_STEP_ZERO {
+                    let t = lo.fresh_reg()
+                    lo = t.0
+                    lo = lo.emit(ir_binop_typed(t.1, lv, BinaryOp::OpMul, b, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t.1))
+                    FO_STEP_OUT_S[k as usize] = t.1
+                } else if b == FO_STEP_ZERO {
+                    let t2 = lo.fresh_reg()
+                    lo = t2.0
+                    lo = lo.emit(ir_binop_typed(t2.1, rv, BinaryOp::OpMul, a, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t2.1))
+                    FO_STEP_OUT_S[k as usize] = t2.1
+                } else {
+                    let t3 = lo.fresh_reg()
+                    lo = t3.0
+                    lo = lo.emit(ir_binop_typed(t3.1, rv, BinaryOp::OpMul, a, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t3.1))
+                    let t4 = lo.fresh_reg()
+                    lo = t4.0
+                    lo = lo.emit(ir_binop_typed(t4.1, lv, BinaryOp::OpMul, b, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t4.1))
+                    let t5 = lo.fresh_reg()
+                    lo = t5.0
+                    lo = lo.emit(ir_binop_typed(t5.1, t3.1, BinaryOp::OpAdd, t4.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t5.1))
+                    FO_STEP_OUT_S[k as usize] = t5.1
+                }
+            } else {
+                var num: i64 = FO_STEP_ZERO
+                if a != FO_STEP_ZERO {
+                    let ta = lo.fresh_reg()
+                    lo = ta.0
+                    lo = lo.emit(ir_binop_typed(ta.1, a, BinaryOp::OpMul, rv, true, true))
+                    lo = lo.emit(ir_mark_float_reg(ta.1))
+                    num = ta.1
+                }
+                if b != FO_STEP_ZERO {
+                    let tb = lo.fresh_reg()
+                    lo = tb.0
+                    lo = lo.emit(ir_binop_typed(tb.1, lv, BinaryOp::OpMul, b, true, true))
+                    lo = lo.emit(ir_mark_float_reg(tb.1))
+                    if num == FO_STEP_ZERO {
+                        let neg = lo.fresh_reg()
+                        lo = neg.0
+                        lo = lo.emit(ir_binop_typed(neg.1, FO_STEP_ZERO, BinaryOp::OpSub, tb.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(neg.1))
+                        num = neg.1
+                    } else {
+                        let df = lo.fresh_reg()
+                        lo = df.0
+                        lo = lo.emit(ir_binop_typed(df.1, num, BinaryOp::OpSub, tb.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(df.1))
+                        num = df.1
+                    }
+                }
+                let q = lo.fresh_reg()
+                lo = q.0
+                lo = lo.emit(ir_binop_typed(q.1, num, BinaryOp::OpDiv, den, true, true))
+                lo = lo.emit(ir_mark_float_reg(q.1))
+                FO_STEP_OUT_S[k as usize] = q.1
+            }
+            k = k + 1
+        }
+        lo
+    }
+
+    fn fo_emit_step_node(self, e: &Expr) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if (*e).kind == ExprKind::ExprBlock {
+            match (*e).block {
+                Some(b) => {
+                    match (*b).stmts {
+                        Some(sl) => {
+                            match (*sl).head.expr {
+                                Some(ex) => { return lo.fo_emit_step_node(&(*ex)) }
+                                None => { return lo.fo_step_fill_zero() }
+                            }
+                        }
+                        None => { return lo.fo_step_fill_zero() }
+                    }
+                }
+                None => { return lo.fo_step_fill_zero() }
+            }
+        }
+        if (*e).kind == ExprKind::ExprReturn {
+            match (*e).left {
+                Some(inner) => { return lo.fo_emit_step_node(&(*inner)) }
+                None => { return lo.fo_step_fill_zero() }
+            }
+        }
+        if (*e).kind == ExprKind::ExprFloatLit || (*e).kind == ExprKind::ExprIntLit {
+            var lit: f64 = 0.0
+            if (*e).kind == ExprKind::ExprFloatLit {
+                lit = (*e).float_val
+            } else {
+                lit = (*e).int_val as f64
+            }
+            let c = lo.emit_f64_const(lit)
+            lo = c.0
+            FO_STEP_OUT_VAL = c.1
+            return lo.fo_step_fill_zero()
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            FO_STEP_OUT_VAL = FO_STEP_ZVAL
+            var k: i64 = 0
+            while k < 32 {
+                FO_STEP_OUT_S[k as usize] = FO_STEP_ZS[k as usize]
+                k = k + 1
+            }
+            k = 0
+            while k < 36 {
+                FO_STEP_OUT_H[k as usize] = FO_STEP_H[k as usize]
+                k = k + 1
+            }
+            return lo
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            var slot: i64 = 0 - 1
+            var s: i64 = 0
+            while s < FO_STEP_NF {
+                if fo_expr_is_ident_name(e, FO_STEP_FNAME[s as usize]) { slot = s }
+                s = s + 1
+            }
+            if slot < 0 {
+                FO_STEP_OUT_VAL = FO_STEP_ZERO
+                return lo.fo_step_fill_zero()
+            }
+            let pi = FO_STEP_FIDX[slot as usize]
+            FO_STEP_OUT_VAL = FO_STEP_VALS[pi as usize]
+            lo = lo.emit(ir_mark_float_reg(FO_STEP_OUT_VAL))
+            var k2: i64 = 0
+            while k2 < 32 {
+                let sk = FO_STEP_SENS[(pi * 32 + k2) as usize]
+                if sk >= 0 {
+                    FO_STEP_OUT_S[k2 as usize] = sk
+                } else {
+                    FO_STEP_OUT_S[k2 as usize] = FO_STEP_ZERO
+                }
+                k2 = k2 + 1
+            }
+            k2 = 0
+            while k2 < 36 {
+                let hk = FO_STEP_ARGH[(pi * 36 + k2) as usize]
+                if hk >= 0 {
+                    FO_STEP_OUT_H[k2 as usize] = hk
+                } else {
+                    FO_STEP_OUT_H[k2 as usize] = FO_STEP_ZERO
+                }
+                k2 = k2 + 1
+            }
+            return lo
+        }
+        if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+            match (*e).left {
+                Some(inner) => { lo = lo.fo_emit_step_node(&(*inner)) }
+                None => { return lo.fo_step_fill_zero() }
+            }
+            let v = FO_STEP_OUT_VAL
+            var ss: [i64; 32] = [-1; 32]
+            var ku: i64 = 0
+            while ku < 32 {
+                ss[ku as usize] = FO_STEP_OUT_S[ku as usize]
+                ku = ku + 1
+            }
+            let zp = lo.emit_f64_const(0.0)
+            lo = zp.0
+            let np = lo.fresh_reg()
+            lo = np.0
+            lo = lo.emit(ir_binop_typed(np.1, zp.1, BinaryOp::OpSub, v, true, true))
+            lo = lo.emit(ir_mark_float_reg(np.1))
+            FO_STEP_OUT_VAL = np.1
+            ku = 0
+            while ku < 32 {
+                if ss[ku as usize] == FO_STEP_ZERO {
+                    FO_STEP_OUT_S[ku as usize] = FO_STEP_ZERO
+                } else {
+                    let tn = lo.fresh_reg()
+                    lo = tn.0
+                    lo = lo.emit(ir_binop_typed(tn.1, zp.1, BinaryOp::OpSub, ss[ku as usize], true, true))
+                    lo = lo.emit(ir_mark_float_reg(tn.1))
+                    FO_STEP_OUT_S[ku as usize] = tn.1
+                }
+                ku = ku + 1
+            }
+            var uh: [i64; 36] = [-1; 36]
+            ku = 0
+            while ku < 36 {
+                uh[ku as usize] = FO_STEP_OUT_H[ku as usize]
+                ku = ku + 1
+            }
+            ku = 0
+            while ku < 36 {
+                if uh[ku as usize] == FO_STEP_ZERO {
+                    FO_STEP_OUT_H[ku as usize] = FO_STEP_ZERO
+                } else {
+                    let th = lo.fresh_reg()
+                    lo = th.0
+                    lo = lo.emit(ir_binop_typed(th.1, zp.1, BinaryOp::OpSub, uh[ku as usize], true, true))
+                    lo = lo.emit(ir_mark_float_reg(th.1))
+                    FO_STEP_OUT_H[ku as usize] = th.1
+                }
+                ku = ku + 1
+            }
+            return lo
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            match (*e).left {
+                Some(l) => {
+                    match (*e).right {
+                        Some(r) => {
+                            lo = lo.fo_emit_step_node(&(*l))
+                            let lv = FO_STEP_OUT_VAL
+                            var ls: [i64; 32] = [-1; 32]
+                            var lh: [i64; 36] = [-1; 36]
+                            var kb: i64 = 0
+                            while kb < 32 {
+                                ls[kb as usize] = FO_STEP_OUT_S[kb as usize]
+                                kb = kb + 1
+                            }
+                            kb = 0
+                            while kb < 36 {
+                                lh[kb as usize] = FO_STEP_OUT_H[kb as usize]
+                                kb = kb + 1
+                            }
+                            lo = lo.fo_emit_step_node(&(*r))
+                            let rv = FO_STEP_OUT_VAL
+                            var rs: [i64; 32] = [-1; 32]
+                            var rh: [i64; 36] = [-1; 36]
+                            kb = 0
+                            while kb < 32 {
+                                rs[kb as usize] = FO_STEP_OUT_S[kb as usize]
+                                kb = kb + 1
+                            }
+                            kb = 0
+                            while kb < 36 {
+                                rh[kb as usize] = FO_STEP_OUT_H[kb as usize]
+                                kb = kb + 1
+                            }
+                            lo = lo.fo_step_combine((*e).bin_op, lv, rv, ls, rs)
+                            if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub {
+                                lo = lo.so_combine_hess_addsub(lh, rh, (*e).bin_op == BinaryOp::OpSub)
+                            } else if (*e).bin_op == BinaryOp::OpMul {
+                                lo = lo.so_combine_hess_mul(lh, rh, ls, rs, lv, rv)
+                            } else {
+                                lo = lo.so_combine_hess_div(lh, rh, ls, rs, lv, rv)
+                            }
+                            return lo.fo_step_store_hess()
+                        }
+                        None => { return lo.fo_step_fill_zero() }
+                    }
+                }
+                None => { return lo.fo_step_fill_zero() }
+            }
+        }
+        FO_STEP_OUT_VAL = FO_STEP_ZERO
+        lo.fo_step_fill_zero()
+    }
+
+    // The else-expression is differentiated in forward mode and the step is
+    // repeated n times. A recursive call reads the loop-carried value and
+    // sensitivity. A literal contributes 0. A parameter contributes its channel.
+    fn fo_emit_recur_expr_body(self, step: &Expr, n_reg: i64, vals: [i64; 16], sens: [i64; 512], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var i: i64 = 0
+        while i < 16 {
+            FO_STEP_VALS[i as usize] = vals[i as usize]
+            i = i + 1
+        }
+        i = 0
+        while i < 512 {
+            FO_STEP_SENS[i as usize] = sens[i as usize]
+            i = i + 1
+        }
+        i = 0
+        while i < 576 {
+            FO_STEP_ARGH[i as usize] = hess[i as usize]
+            i = i + 1
+        }
+        FO_LOGN_ACTIVE = 0
+        let zf = lo.emit_f64_const(0.0)
+        lo = zf.0
+        FO_STEP_ZERO = zf.1
+        lo = lo.fo_step_init_h()
+        let vp = lo.fresh_reg()
+        lo = vp.0
+        FO_STEP_ZVAL = vp.1
+        if FO_STEP_BASE_LIT == 1 {
+            let base_c = lo.emit_f64_const(FO_RECUR_BASE)
+            lo = base_c.0
+            lo = lo.emit(ir_copy(FO_STEP_ZVAL, base_c.1))
+        } else {
+            let bpi = FO_STEP_FIDX[FO_STEP_BASE_SLOT as usize]
+            lo = lo.emit(ir_copy(FO_STEP_ZVAL, FO_STEP_VALS[bpi as usize]))
+        }
+        lo = lo.emit(ir_mark_float_reg(FO_STEP_ZVAL))
+        var k0: i64 = 0
+        while k0 < 32 {
+            let sp = lo.fresh_reg()
+            lo = sp.0
+            FO_STEP_ZS[k0 as usize] = sp.1
+            var src: i64 = FO_STEP_ZERO
+            if FO_STEP_BASE_LIT == 0 {
+                let bpi2 = FO_STEP_FIDX[FO_STEP_BASE_SLOT as usize]
+                let sk0 = FO_STEP_SENS[(bpi2 * 32 + k0) as usize]
+                if sk0 >= 0 { src = sk0 }
+            }
+            lo = lo.emit(ir_copy(sp.1, src))
+            lo = lo.emit(ir_mark_float_reg(sp.1))
+            k0 = k0 + 1
+        }
+        let ip = lo.fresh_reg()
+        lo = ip.0
+        let ireg = ip.1
+        lo = lo.emit(ir_load_imm(ireg, 0))
+        let pl_top = lo.fresh_label()
+        lo = pl_top.0
+        let l_top = pl_top.1
+        let pl_end = lo.fresh_label()
+        lo = pl_end.0
+        let l_end = pl_end.1
+        lo = lo.emit(ir_label(l_top))
+        let cmp_p = lo.fresh_reg()
+        lo = cmp_p.0
+        lo = lo.emit(ir_binop(cmp_p.1, ireg, BinaryOp::OpLt, n_reg))
+        lo = lo.emit(ir_branch_false(cmp_p.1, l_end))
+        lo = lo.fo_emit_step_node(step)
+        lo = lo.emit(ir_copy(FO_STEP_ZVAL, FO_STEP_OUT_VAL))
+        lo = lo.emit(ir_mark_float_reg(FO_STEP_ZVAL))
+        var kc: i64 = 0
+        while kc < 32 {
+            lo = lo.emit(ir_copy(FO_STEP_ZS[kc as usize], FO_STEP_OUT_S[kc as usize]))
+            lo = lo.emit(ir_mark_float_reg(FO_STEP_ZS[kc as usize]))
+            kc = kc + 1
+        }
+        var hc: i64 = 0
+        while hc < 36 {
+            lo = lo.emit(ir_copy(FO_STEP_H[hc as usize], FO_STEP_OUT_H[hc as usize]))
+            lo = lo.emit(ir_mark_float_reg(FO_STEP_H[hc as usize]))
+            hc = hc + 1
+        }
+        let one_i = lo.emit_i64_const(1)
+        lo = one_i.0
+        let next_p = lo.fresh_reg()
+        lo = next_p.0
+        lo = lo.emit(ir_binop(next_p.1, ireg, BinaryOp::OpAdd, one_i.1))
+        lo = lo.emit(ir_copy(ireg, next_p.1))
+        lo = lo.emit(ir_jump(l_top))
+        lo = lo.emit(ir_label(l_end))
+        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+        var k: i64 = 0
+        while k < 32 {
+            var live = false
+            var p: i64 = 0
+            while p < FO_STEP_NF {
+                let pi = FO_STEP_FIDX[p as usize]
+                if FO_STEP_SENS[(pi * 32 + k) as usize] >= 0 { live = true }
+                p = p + 1
+            }
+            if live {
+                lo.fo_expr_sens[k as usize] = FO_STEP_ZS[k as usize]
+            }
+            k = k + 1
+        }
+        var hi: i64 = 0
+        while hi < 36 {
+            lo.so_expr_hess[hi as usize] = FO_STEP_H[hi as usize]
+            hi = hi + 1
+        }
+        lo.fo_emit_var_from_sens()
+    }
+
+    fn fo_emit_recur_expr_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match (*fd).body.stmts {
+            Some(only) => {
+                match (*only).head.expr {
+                    Some(body_e) => {
+                        match (*body_e).else_expr {
+                            Some(ee) => { return self.fo_emit_recur_expr_body(&(*ee), n_reg, vals, sens, hess) }
+                            None => { return (self, 0 - 1) }
+                        }
+                    }
+                    None => { return (self, 0 - 1) }
+                }
+            }
+            None => { return (self, 0 - 1) }
+        }
+    }
+
+    fn fo_emit_recur_block_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], vars: [i64; 16], isf: [i64; 16], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        match (*fd).body.stmts {
+            Some(only) => {
+                match (*only).head.expr {
+                    Some(body_e) => {
+                        match (*body_e).else_expr {
+                            Some(ee) => {
+                                match (*ee).block {
+                                    Some(b) => { return lo.fo_emit_recur_block_body(&(*b).stmts, fd, n_reg, vals, sens, vars, isf, hess) }
+                                    None => { return (lo, 0 - 1) }
+                                }
+                            }
+                            None => { return (lo, 0 - 1) }
+                        }
+                    }
+                    None => { return (lo, 0 - 1) }
+                }
+            }
+            None => { return (lo, 0 - 1) }
+        }
+    }
+
+    // The else block is lowered by the ordinary let/expression lowerer. The
+    // recursive call reads the loop-carried value and sensitivity instead of
+    // inlining another copy of the function.
+    fn fo_emit_recur_block_body(self, stmts: &Option<Box<StmtList>>, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], vars: [i64; 16], isf: [i64; 16], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var i: i64 = 0
+        while i < 16 {
+            FO_STEP_VALS[i as usize] = vals[i as usize]
+            i = i + 1
+        }
+        i = 0
+        while i < 512 {
+            FO_STEP_SENS[i as usize] = sens[i as usize]
+            i = i + 1
+        }
+        let saved_bind = *lo.fo_bind
+        let saved_bind_count = lo.fo_bind_count
+        let saved_hess_rows = (*lo.big).so_bind_hess
+        let saved_locals = (*lo.locals).count
+        let saved_carry = FO_STEP_CARRY
+        lo.scope_depth = lo.scope_depth + 1
+        var pc = &(*fd).params
+        i = 0
+        while true {
+            match *pc {
+                Some(pl) => {
+                    if !(*pl).head.is_self {
+                        let pname = (*pl).head.name
+                        lo = lo.bind_local(pname, vals[i as usize], false)
+                        if isf[i as usize] >= 1 {
+                            lo = lo.bind_local_scalar_kind(pname, 2)
+                            lo = lo.bind_local_variance_reg(pname, vars[i as usize])
+                            var k2: i64 = 0
+                            while k2 < 32 {
+                                lo.fo_expr_sens[k2 as usize] = sens[(i * 32 + k2) as usize]
+                                k2 = k2 + 1
+                            }
+                        } else {
+                            lo = lo.bind_local_scalar_kind(pname, 1)
+                            lo = lo.fo_clear_expr_sens()
+                        }
+                        lo = lo.fo_bind_local_sens(pname)
+                        if lo.so_enabled {
+                            var hrow: [i64; 36] = [0 - 1; 36]
+                            var hk: i64 = 0
+                            while hk < 36 {
+                                hrow[hk as usize] = hess[(i * 36 + hk) as usize]
+                                hk = hk + 1
+                            }
+                            lo = lo.so_set_local_hess_row(pname, hrow)
+                        }
+                        i = i + 1
+                    }
+                    pc = &(*pl).tail
+                }
+                None => break
+            }
+        }
+        FO_LOGN_ACTIVE = 0
+        let zf = lo.emit_f64_const(0.0)
+        lo = zf.0
+        FO_STEP_ZERO = zf.1
+        lo = lo.fo_step_init_h()
+        let vp0 = lo.fresh_reg()
+        lo = vp0.0
+        FO_STEP_ZVAL = vp0.1
+        if FO_STEP_BASE_LIT == 1 {
+            let base_c = lo.emit_f64_const(FO_RECUR_BASE)
+            lo = base_c.0
+            lo = lo.emit(ir_copy(FO_STEP_ZVAL, base_c.1))
+        } else {
+            let bpi = FO_STEP_FIDX[FO_STEP_BASE_SLOT as usize]
+            lo = lo.emit(ir_copy(FO_STEP_ZVAL, FO_STEP_VALS[bpi as usize]))
+        }
+        lo = lo.emit(ir_mark_float_reg(FO_STEP_ZVAL))
+        var k0: i64 = 0
+        while k0 < 32 {
+            let sp = lo.fresh_reg()
+            lo = sp.0
+            FO_STEP_ZS[k0 as usize] = sp.1
+            var src: i64 = FO_STEP_ZERO
+            if FO_STEP_BASE_LIT == 0 {
+                let bpi2 = FO_STEP_FIDX[FO_STEP_BASE_SLOT as usize]
+                let sk0 = FO_STEP_SENS[(bpi2 * 32 + k0) as usize]
+                if sk0 >= 0 { src = sk0 }
+            }
+            lo = lo.emit(ir_copy(sp.1, src))
+            lo = lo.emit(ir_mark_float_reg(sp.1))
+            k0 = k0 + 1
+        }
+        let ip = lo.fresh_reg()
+        lo = ip.0
+        let ireg = ip.1
+        lo = lo.emit(ir_load_imm(ireg, 0))
+        let pl_top = lo.fresh_label()
+        lo = pl_top.0
+        let l_top = pl_top.1
+        let pl_end = lo.fresh_label()
+        lo = pl_end.0
+        let l_end = pl_end.1
+        lo = lo.emit(ir_label(l_top))
+        let cmp_p = lo.fresh_reg()
+        lo = cmp_p.0
+        lo = lo.emit(ir_binop(cmp_p.1, ireg, BinaryOp::OpLt, n_reg))
+        lo = lo.emit(ir_branch_false(cmp_p.1, l_end))
+        FO_STEP_CARRY = 1
+        var step_val: i64 = 0 - 1
+        var sc = stmts
+        var stepping = true
+        while stepping {
+            match *sc {
+                Some(sl) => {
+                    var is_last = false
+                    match (*sl).tail {
+                        Some(_) => { is_last = false }
+                        None => { is_last = true }
+                    }
+                    if is_last && (*sl).head.kind == StmtKind::StmtExpr {
+                        match (*sl).head.expr {
+                            Some(te0) => {
+                                var te: &Expr = &(*te0)
+                                if (*te0).kind == ExprKind::ExprReturn {
+                                    match (*te0).left {
+                                        Some(rv) => { te = &(*rv) }
+                                        None => {}
+                                    }
+                                }
+                                let step_pair = lo.lower_expr_ref(te)
+                                lo = step_pair.0
+                                step_val = step_pair.1
+                                let sens_pair = lo.lower_expr_variance_ref(te)
+                                lo = sens_pair.0
+                            }
+                            None => {}
+                        }
+                        stepping = false
+                    } else if (*sl).head.kind == StmtKind::StmtLet {
+                        let lp = lo.lower_let_stmt_ref(&(*sl).head, false)
+                        lo = lp.0
+                        sc = &(*sl).tail
+                    } else {
+                        stepping = false
+                    }
+                }
+                None => { stepping = false }
+            }
+        }
+        FO_STEP_CARRY = saved_carry
+        if step_val >= 0 {
+            lo = lo.emit(ir_copy(FO_STEP_ZVAL, step_val))
+            lo = lo.emit(ir_mark_float_reg(FO_STEP_ZVAL))
+        }
+        var kc: i64 = 0
+        while kc < 32 {
+            let sk = lo.fo_expr_sens[kc as usize]
+            if sk >= 0 {
+                lo = lo.emit(ir_copy(FO_STEP_ZS[kc as usize], sk))
+            } else {
+                lo = lo.emit(ir_copy(FO_STEP_ZS[kc as usize], FO_STEP_ZERO))
+            }
+            lo = lo.emit(ir_mark_float_reg(FO_STEP_ZS[kc as usize]))
+            kc = kc + 1
+        }
+        var hc: i64 = 0
+        while hc < 36 {
+            let hk = lo.so_expr_hess[hc as usize]
+            if hk >= 0 {
+                lo = lo.emit(ir_copy(FO_STEP_H[hc as usize], hk))
+            } else {
+                lo = lo.emit(ir_copy(FO_STEP_H[hc as usize], FO_STEP_ZERO))
+            }
+            lo = lo.emit(ir_mark_float_reg(FO_STEP_H[hc as usize]))
+            hc = hc + 1
+        }
+        let one_i = lo.emit_i64_const(1)
+        lo = one_i.0
+        let next_p = lo.fresh_reg()
+        lo = next_p.0
+        lo = lo.emit(ir_binop(next_p.1, ireg, BinaryOp::OpAdd, one_i.1))
+        lo = lo.emit(ir_copy(ireg, next_p.1))
+        lo = lo.emit(ir_jump(l_top))
+        lo = lo.emit(ir_label(l_end))
+        lo.scope_depth = lo.scope_depth - 1
+        (*lo.locals).count = saved_locals
+        lo.fo_bind = Box::new(saved_bind)
+        lo.fo_bind_count = saved_bind_count
+        var bigr = lo.big
+        (*bigr).so_bind_hess = saved_hess_rows
+        lo.big = bigr
+        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+        var k: i64 = 0
+        while k < 32 {
+            var live = false
+            var p: i64 = 0
+            while p < FO_STEP_NF {
+                let pi = FO_STEP_FIDX[p as usize]
+                if FO_STEP_SENS[(pi * 32 + k) as usize] >= 0 { live = true }
+                p = p + 1
+            }
+            if live {
+                lo.fo_expr_sens[k as usize] = FO_STEP_ZS[k as usize]
+            }
+            k = k + 1
+        }
+        var hi: i64 = 0
+        while hi < 36 {
+            lo.so_expr_hess[hi as usize] = FO_STEP_H[hi as usize]
+            hi = hi + 1
+        }
+        lo.fo_emit_var_from_sens()
+    }
+
     fn fo_inline_call_variance(self, callee: Name, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let no_path: [Name; 8] = [ir_empty_name(); 8]
         self.fo_inline_call_variance_ex(callee, args, ir_empty_name(), false, no_path, 0)
@@ -19495,13 +21236,34 @@ impl Lowerer {
             }
         }
         if !found { return (lo, 0 - 1) }
-        // A long body re-lowered at every field read blows the instruction
-        // budget of the caller. vg_gum read seven fields and each read
-        // pasted the whole function. A while/for/loop counts the statements
-        // inside it: one loop header with a large body is not a small helper.
-        // lex_source_to_globals crossed IR_MAX_INSTRS when those bodies were
-        // pasted in. Small helpers stay inline.
-        let nstmt = fo_nested_stmt_count(&fd.body.stmts, 0, npath > 0)
+        FO_INLINE_FRAME_CLASH = 0
+        // A struct reference that is only field-read binds to the caller's
+        // local. Passing it to another call re-emits that call into this frame.
+        var pc_alias = &fd.params
+        while true {
+            match *pc_alias {
+                Some(pl) => {
+                    if !(*pl).head.is_self && (lower_type_expr_is_ref_like(&(*pl).head.ty) || lower_type_expr_is_pointer_like(&(*pl).head.ty)) {
+                        if !fo_inline_param_is_struct(&(*pl).head.ty) { return (lo, 0 - 1) }
+                        if fo_stmt_list_passes_name(&fd.body.stmts, (*pl).head.name, 0) { return (lo, 0 - 1) }
+                    }
+                    pc_alias = &(*pl).tail
+                }
+                None => break
+            }
+        }
+        if FO_INLINE_ALLOW_LOOPS == 0 && fo_stmt_list_has_any_loop(&fd.body.stmts, 0) {
+            return (lo, 0 - 1)
+        }
+        FO_COUNT_STACK[0] = id
+        FO_COUNT_DEPTH = 1
+        let wide = fo_stmt_list_has_wide_loop(&fd.body.stmts, 0)
+        FO_COUNT_DEPTH = 0
+        if wide { return (lo, 0 - 1) }
+        FO_COUNT_STACK[0] = id
+        FO_COUNT_DEPTH = 1
+        let nstmt = fo_nested_stmt_count(&fd.body.stmts, 0, true)
+        FO_COUNT_DEPTH = 0
         if nstmt > 24 { return (lo, 0 - 1) }
         // An f64 return answers a plain call; a struct return answers a field path.
         match fd.return_type {
@@ -19587,6 +21349,15 @@ impl Lowerer {
         }
         // Each argument's value (and, for an f64 parameter, its variance and
         // sensitivities), in the caller.
+        // Re-lowering the helper is best-effort. Any diagnostic it raises
+        // (ident miss, unsupported shape) must roll back: this is variance
+        // analysis, not the call's value path, which already succeeded.
+        // A caller already near IR_MAX_INSTRS cannot afford a paste
+        // (ocp_const_fold_scan needed 30745). Skip; do not emit.
+        if (*lo.current_func).instr_count > IR_MAX_INSTRS - 512 {
+            return (lo, 0 - 1)
+        }
+        let fo_err_snap = fo_inline_error_snap(lo.error_count, lo.had_error, (*lo.current_func).instr_count, (*lo.current_func).reg_count)
         var vals: [i64; 16] = [0 - 1; 16]
         var vars: [i64; 16] = [0 - 1; 16]
         var isf: [i64; 16] = [0; 16]
@@ -19733,16 +21504,6 @@ impl Lowerer {
             }
             return lo.fo_emit_recur_affine_scale(vals[aff_idx.1 as usize], axs)
         }
-        let pb_idx = fo_recur_powbase_indexes(&fd)
-        if pb_idx.0 >= 0 && isf[pb_idx.0 as usize] == 1 {
-            var pxs: [i64; 32] = [0 - 1; 32]
-            var pk: i64 = 0
-            while pk < 32 {
-                pxs[pk as usize] = sens[(pb_idx.0 * 32 + pk) as usize]
-                pk = pk + 1
-            }
-            return lo.fo_emit_recur_powbase_scale(vals[pb_idx.1 as usize], vals[pb_idx.0 as usize], pxs)
-        }
         let affy_idx = fo_recur_step2_indexes(&fd, 0)
         if affy_idx.0 >= 0 && affy_idx.1 >= 0 && isf[affy_idx.0 as usize] == 1 && isf[affy_idx.1 as usize] == 1 {
             let affy_n = 3 - affy_idx.0 - affy_idx.1
@@ -19768,6 +21529,12 @@ impl Lowerer {
                 ck = ck + 1
             }
             return lo.fo_emit_recur_chcoef_scale(vals[ch_n as usize], vals[ch_idx.0 as usize], vals[ch_idx.1 as usize], cxs, cys)
+        }
+        if fo_recur_expr_ok(&fd) {
+            return lo.fo_emit_recur_expr_scale(&fd, vals[FO_STEP_NIDX as usize], vals, sens, hess)
+        }
+        if fo_recur_block_ok(&fd) {
+            return lo.fo_emit_recur_block_scale(&fd, vals[FO_STEP_NIDX as usize], vals, sens, vars, isf, hess)
         }
         // Bind the parameters in a fresh scope; the FO bind rows are keyed by
         // name only, so they are saved and restored around the body.
@@ -19872,6 +21639,7 @@ impl Lowerer {
                         if is_closure_let {
                             let lp = lo.lower_let_stmt_ref(st, false)
                             lo = lp.0
+                            if FO_INLINE_FRAME_CLASH != 0 { ok = false }
                             last_let_name = st.name
                             last_let_expr = st.expr
                         } else if !lower_opt_expr_relower_safe(&st.expr) {
@@ -19879,15 +21647,25 @@ impl Lowerer {
                         } else {
                             let lp = lo.lower_let_stmt_ref(st, false)
                             lo = lp.0
+                            if FO_INLINE_FRAME_CLASH != 0 { ok = false }
                             last_let_name = st.name
                             last_let_expr = st.expr
                         }
                     } else if st.kind == StmtKind::StmtVar && !is_last {
-                        let vp = lo.lower_let_stmt_ref(st, true)
-                        lo = vp.0
+                        if FO_INLINE_ALLOW_LOOPS == 0 {
+                            ok = false
+                        } else {
+                            let vp = lo.lower_let_stmt_ref(st, true)
+                            lo = vp.0
+                            if FO_INLINE_FRAME_CLASH != 0 { ok = false }
+                        }
                     } else if st.kind == StmtKind::StmtAssign && !is_last {
-                        let ap = lo.lower_assign_stmt_ref(st)
-                        lo = ap.0
+                        if FO_INLINE_ALLOW_LOOPS == 0 {
+                            ok = false
+                        } else {
+                            let ap = lo.lower_assign_stmt_ref(st)
+                            lo = ap.0
+                        }
                     } else if st.kind == StmtKind::StmtExpr && !is_last {
                         var is_loop = false
                         match st.expr {
@@ -19997,7 +21775,12 @@ impl Lowerer {
         var bigr = lo.big
         (*bigr).so_bind_hess = saved_hess_rows
         lo.big = bigr
-        if !ok || result < 0 {
+        if fo_inline_error_grew(lo.error_count, lo.had_error, fo_err_snap) || !ok || result < 0 {
+            lo.error_count = fo_err_snap.error_count
+            lo.had_error = fo_err_snap.had_error
+            fo_inline_error_restore_globals(fo_err_snap)
+            (*lo.current_func).instr_count = fo_err_snap.instrs
+            (*lo.current_func).reg_count = fo_err_snap.regs
             return (lo.fo_clear_expr_sens().so_clear_expr_hess(), 0 - 1)
         }
         lo = lo.fo_restore_expr_sens(out_sens)
@@ -20423,6 +22206,34 @@ impl Lowerer {
     }
 
     fn lower_call_expr_variance_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if FO_STEP_CARRY == 1 && fo_recur_call_is_this(e) {
+            var lo = self.fo_clear_expr_sens().so_clear_expr_hess()
+            var k: i64 = 0
+            while k < 32 {
+                let src = FO_STEP_ZS[k as usize]
+                if src >= 0 {
+                    let sp = lo.fresh_reg()
+                    lo = sp.0
+                    lo = lo.emit(ir_copy(sp.1, src))
+                    lo = lo.emit(ir_mark_float_reg(sp.1))
+                    lo.fo_expr_sens[k as usize] = sp.1
+                }
+                k = k + 1
+            }
+            var hi: i64 = 0
+            while hi < 36 {
+                let src_h = FO_STEP_H[hi as usize]
+                if src_h >= 0 {
+                    let hp = lo.fresh_reg()
+                    lo = hp.0
+                    lo = lo.emit(ir_copy(hp.1, src_h))
+                    lo = lo.emit(ir_mark_float_reg(hp.1))
+                    lo.so_expr_hess[hi as usize] = hp.1
+                }
+                hi = hi + 1
+            }
+            return lo.fo_emit_var_from_sens()
+        }
         match (*e).left {
             Some(callee_expr) => {
                 let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
@@ -20655,6 +22466,7 @@ impl Lowerer {
             }
             var lo = pair_in.0
             let vin = pair_in.1
+            FO_LOGN_ACTIVE = 0
             var hi: i64 = 0
             while hi < 36 && lo.so_enabled {
                 let hk = lo.so_expr_hess[hi as usize]
@@ -20722,6 +22534,10 @@ impl Lowerer {
             let rv = rv_pair.1
             let sR = lo.fo_snapshot_expr_sens()
             let hR = lo.so_snapshot_expr_hess()
+            // A product or sum is not exp of an affine. The inner exp may have
+            // raised FO_LOGN_ACTIVE; leaving it set makes second_order_mean
+            // return that inner mean and ignore the Hessian just computed.
+            FO_LOGN_ACTIVE = 0
 
             // Multi-channel FO path when either side carries seed sensitivities.
             // Both snapshots are named (KL-6): the live fo_expr_sens is sR at
@@ -20943,25 +22759,38 @@ impl Lowerer {
                 // inline). Scoped like lower_block_ref.
                 lo.scope_depth = lo.scope_depth + 1
                 let saved_tail_locals = (*lo.locals).count
+                // #2966: a let whose RHS cannot be evaluated twice is not bound.
+                // Continuing into a later expression looks the name up and
+                // reports site 15349. Unknown variance is -1, not a hard error.
+                var skip_later_expr = false
                 while true {
                     match *current {
                         Some(list) => {
                             let stmt_ref = &(*list).head
                             // Only a let that is safe to evaluate twice: the value
                             // path has already run this arm once.
-                            if stmt_ref.kind == StmtKind::StmtLet && lower_opt_expr_relower_safe(&stmt_ref.expr) {
-                                let lp = lo.lower_let_stmt_ref(stmt_ref, false)
-                                lo = lp.0
+                            if stmt_ref.kind == StmtKind::StmtLet {
+                                if lower_opt_expr_relower_safe(&stmt_ref.expr) {
+                                    let lp = lo.lower_let_stmt_ref(stmt_ref, false)
+                                    lo = lp.0
+                                } else {
+                                    skip_later_expr = true
+                                }
                             }
                             if stmt_ref.kind == StmtKind::StmtExpr {
-                                match stmt_ref.expr {
-                                    Some(te) => {
-                                        let p = lo.lower_expr_variance_ref(&(*te))
-                                        lo = p.0
-                                        last_v = p.1
-                                        found = true
+                                if skip_later_expr {
+                                    found = false
+                                    last_v = 0 - 1
+                                } else {
+                                    match stmt_ref.expr {
+                                        Some(te) => {
+                                            let p = lo.lower_expr_variance_ref(&(*te))
+                                            lo = p.0
+                                            last_v = p.1
+                                            found = true
+                                        }
+                                        _ => {}
                                     }
-                                    _ => {}
                                 }
                             }
                             current = &(*list).tail
@@ -21559,34 +23388,9 @@ impl Lowerer {
                     }
                     fi = fi + 1
                 }
-                // Field not found in the named layout. Keep searching the rest
-                // of the table before falling back to the legacy hash path;
-                // partially seeded layouts must not collapse every miss to .0.
-                var sj: i64 = 0
-                // Same Knowledge-preseed shadow as field_idx_from_name_simple:
-                // defer the synthetic layout so a user struct's own field wins.
-                let kname = make_name("Knowledge")
-                var kidx: i64 = -1
-                while sj < (*self.struct_layouts).count {
-                    let sj_is_knowledge = ir_name_eq((*self.struct_layouts).entries[sj as usize].type_name, kname)
-                    var fj: i64 = 0
-                    while fj < (*self.struct_layouts).entries[sj as usize].field_count {
-                        if ir_name_eq(ir_name_at((*self.struct_layouts).entries[sj as usize].fields[fj as usize].name_id), field_name) {
-                            if sj_is_knowledge {
-                                if kidx < 0 {
-                                    kidx = (*self.struct_layouts).entries[sj as usize].fields[fj as usize].index
-                                }
-                            } else {
-                                return (*self.struct_layouts).entries[sj as usize].fields[fj as usize].index
-                            }
-                        }
-                        fj = fj + 1
-                    }
-                    sj = sj + 1
-                }
-                if kidx >= 0 {
-                    return kidx
-                }
+                // Named layout is present but this field is not on it. Do not
+                // consult other structs: a majority of `.end` is Span.end = 2,
+                // which is also Expr.int_val. Hash only.
                 if field_name.len <= 0 {
                     return 0
                 }
@@ -21594,7 +23398,12 @@ impl Lowerer {
             }
             si = si + 1
         }
-        // Struct not in layout table — fallback: use first byte hash (legacy compat)
+        // Struct not in layout table — same untyped consensus as the miss path,
+        // then the legacy first-byte hash.
+        let consensual = lower_field_idx_untyped(&(*self.struct_layouts), field_name)
+        if consensual >= 0 {
+            return consensual
+        }
         if field_name.len <= 0 {
             0
         } else {
@@ -21624,36 +23433,14 @@ impl Lowerer {
         if tuple_idx >= 0 {
             return tuple_idx
         }
-        // The synthetic "Knowledge" layout (ir_register_knowledge_layout) is
-        // preseeded as entry 0, before any user struct is registered, and its
-        // field names — value / variance / confidence — are ordinary user
-        // identifiers. Scanned in table order it shadowed every user struct
-        // carrying one of them, so `arr[i].value` resolved to Knowledge's slot 0
-        // and silently clobbered whatever field really lives there. Defer it:
-        // a user layout always wins, and Knowledge answers only if nothing else
-        // does (genuine Knowledge<T> access through an untyped base).
-        let knowledge_name = make_name("Knowledge")
-        var knowledge_idx: i64 = -1
-        var si: i64 = 0
-        while si < (*self.struct_layouts).count {
-            let is_knowledge = ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, knowledge_name)
-            var fi: i64 = 0
-            while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), n) {
-                    if is_knowledge {
-                        if knowledge_idx < 0 {
-                            knowledge_idx = (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
-                        }
-                    } else {
-                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
-                    }
-                }
-                fi = fi + 1
-            }
-            si = si + 1
-        }
-        if knowledge_idx >= 0 {
-            return knowledge_idx
+        // Untyped `.field`: unique kind-tagged majority, then unique
+        // non-Knowledge majority, then Knowledge, then `kind`/`span`
+        // convention, then the legacy hash. Unanimous consensus was too
+        // strict: SessionStep.span=2 and AuditSection.span=3 vetoed
+        // Expr.span=1 and hashed "span" to 51 (gen3 null-handle ud2).
+        let consensual = lower_field_idx_untyped(&(*self.struct_layouts), n)
+        if consensual >= 0 {
+            return consensual
         }
         // Last-resort legacy compatibility for unregistered dynamic/foreign shapes.
         if n.len <= 0 {
@@ -23139,6 +24926,9 @@ impl Lowerer {
         // leaves `k` untyped and a downstream `acc + k` cvtsi2sd-corrupts the bits.
         if (*e).kind == ExprKind::ExprIf {
             return self.opt_block_tail_is_float_ref(&(*e).block) || self.opt_expr_result_is_float_ref(&(*e).else_expr)
+        }
+        if (*e).kind == ExprKind::ExprBlock {
+            return self.opt_block_tail_is_float_ref(&(*e).block)
         }
         false
     }
@@ -24847,7 +26637,7 @@ impl Lowerer {
                         (*(*locals).tuple_float_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).tuple_arr_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).box_inner_layout).values[idx as usize] = lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_or_option_inner_type_name(&(*list).head.ty))
-                        if lower_type_expr_is_box(&(*list).head.ty) && str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
+                        if lower_type_expr_is_box(&(*list).head.ty) && lower_box_trace_enabled(1) {
                             print("boxtrace: WRITE-B ")
                             print(str_from_bytes((*list).head.name.buf, (*list).head.name.len))
                             print(" layout=")
@@ -26096,7 +27886,77 @@ impl Lowerer {
         }
     }
 
+    fn expr_reemits_frame_call(self, e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+        if depth > 12 { return true }
+        let k = (*e).kind
+        if k == ExprKind::ExprCall || k == ExprKind::ExprMethodCall {
+            var args = &(*e).args
+            while true {
+                match *args {
+                    Some(a) => {
+                        if (*a).head.kind == ExprKind::ExprIdent && self.lookup_local_is_ref((*a).head.name) {
+                            return true
+                        }
+                        if self.expr_reemits_frame_call(&(*a).head, depth + 1) { return true }
+                        args = &(*a).tail
+                    }
+                    None => break
+                }
+            }
+        }
+        match (*e).left {
+            Some(l) => { if self.expr_reemits_frame_call(&(*l), depth + 1) { return true } }
+            None => {}
+        }
+        match (*e).right {
+            Some(r) => { if self.expr_reemits_frame_call(&(*r), depth + 1) { return true } }
+            None => {}
+        }
+        match (*e).else_expr {
+            Some(ee) => { if self.expr_reemits_frame_call(&(*ee), depth + 1) { return true } }
+            None => {}
+        }
+        if k == ExprKind::ExprIf || k == ExprKind::ExprBlock || k == ExprKind::ExprWhile
+            || k == ExprKind::ExprLoop || k == ExprKind::ExprForIn {
+            match (*e).block {
+                Some(b) => {
+                    var sc = &(*b).stmts
+                    while true {
+                        match *sc {
+                            Some(sl) => {
+                                match (*sl).head.expr {
+                                    Some(se) => { if self.expr_reemits_frame_call(&(*se), depth + 1) { return true } }
+                                    None => {}
+                                }
+                                sc = &(*sl).tail
+                            }
+                            None => break
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        false
+    }
+
     fn lower_let_stmt_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Variance inline re-lowers this let into the function that is already
+        // live. A borrow, or a call that passes a struct/ref local
+        // (`amp_real(qs, idx)`), stores through that frame's spill slot: the
+        // index replaces the pointer. A field read (`p.cl0`) does not, so
+        // twice_ref(&p) still re-lowers.
+        if FO_INLINE_DEPTH > 0 {
+            match s.expr {
+                Some(rhs) => {
+                    if fo_expr_borrows_frame(&(*rhs), 0) || self.expr_reemits_frame_call(&(*rhs), 0) {
+                        FO_INLINE_FRAME_CLASH = 1
+                        return (self, 0 - 1)
+                    }
+                }
+                None => {}
+            }
+        }
         if lower_opt_type_is_f128(&s.ty) {
             return self.lower_let_stmt_f128_ref(s, is_mut)
         }
@@ -26829,19 +28689,24 @@ impl Lowerer {
             // Pending FO sens from Knowledge.value extraction (or measure).
             lo = lo.fo_bind_pending_to_local(s.name)
         } else {
-            // β-Madaros: bind FO variance for any pure RHS (k.value, a*b, 4.0*x, …)
-            // so variance_of(local) works after `let x = <expr>`.
+            // β-Madaros: bind FO variance for a float RHS (k.value, a*b, 4.0*x, …)
+            // so variance_of(local) works after `let x = <expr>`. Integer/bool/
+            // struct lets must not take this walk: ocp_const_fold_scan has ~1370
+            // of them, and re-lowering each RHS (field chain + FO paste) needed
+            // 30741 IR instructions against IR_MAX_INSTRS=16384.
             match s.expr {
                 Some(rhs_v) => {
-                    let vpair2 = lo.lower_expr_variance_ref(&(*rhs_v))
-                    lo = vpair2.0
-                    if vpair2.1 >= 0 {
-                        lo = lo.bind_local_variance_reg(s.name, vpair2.1)
-                        // Capture multi-channel sens produced by RHS FO lower.
-                        if lo.fo_expr_has_sens() {
-                            lo = lo.fo_bind_local_sens(s.name)
+                    if lo.expr_result_is_float_ref(&(*rhs_v)) {
+                        let vpair2 = lo.lower_expr_variance_ref(&(*rhs_v))
+                        lo = vpair2.0
+                        if vpair2.1 >= 0 {
+                            lo = lo.bind_local_variance_reg(s.name, vpair2.1)
+                            // Capture multi-channel sens produced by RHS FO lower.
+                            if lo.fo_expr_has_sens() {
+                                lo = lo.fo_bind_local_sens(s.name)
+                            }
+                            lo = lo.so_bind_local_hess(s.name)
                         }
-                        lo = lo.so_bind_local_hess(s.name)
                     }
                 }
                 _ => {}
@@ -27620,6 +29485,19 @@ impl Lowerer {
                     if value_type.len > 0 && !ir_name_is_box(value_type) {
                         lo = lo.bind_local_struct_type(s.name, value_type, false)
                     }
+                } else if (*expr_box).kind == ExprKind::ExprIndex {
+                    // `let n = scene.nodes[i]`. The index itself is typed
+                    // (expr_receiver_struct_type_ref answers VizNode), but the
+                    // binding was not, so `n.layout.x` fell through to the
+                    // first struct that happened to have a field named `x`.
+                    // Measured in viz_scene_hit_test: the copy reported x=20
+                    // where the scene's layout.x was 10, and the hit test
+                    // missed. Direct `scene.nodes[i].layout.x` in the same
+                    // function was already correct.
+                    let elem_ty = lo.expr_receiver_struct_type_ref(&(*expr_box))
+                    if elem_ty.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), elem_ty) >= 0 {
+                        lo = lo.bind_local_struct_type(s.name, elem_ty, false)
+                    }
                 } else if (*expr_box).kind == ExprKind::ExprIdent {
                     // `let b = nx`: propagate the source variable's struct type (e.g. a Box
                     // bound from `Some(nx)`) so `*b` / field access on b resolve correctly.
@@ -28020,6 +29898,14 @@ impl Lowerer {
                                 }
                                 lo = pair_base.0
                                 let base_reg = pair_base.1
+                                if raw_mut_deref {
+                                    let inline_n = lo.raw_payload_field_array_len(&(*target_expr).left, (*target_expr).name)
+                                    if inline_n > 0 {
+                                        let packed = lo.raw_payload_field_copy_is_byte(&(*target_expr).left, (*target_expr).name)
+                                        lo = lo.emit_handle_to_raw_inline_array(base_reg, &(*target_expr).left, (*target_expr).name, rhs, inline_n, packed)
+                                        return (lo, rhs)
+                                    }
+                                }
                                 var set_instr = ir_field_set(base_reg, field_word, rhs, (*target_expr).name)
                                 if raw_mut_deref {
                                     // Payload address, not a handle slot. See expr_is_raw_mut_deref_ref.
@@ -29586,7 +31472,7 @@ impl Lowerer {
                 lo = pair_v.0
                 let val_reg = pair_v.1
                 // Allocate 8 bytes on heap
-                lo = lo.emit(ir_alloc(ptr_reg, 8))
+                lo = lo.emit(ir_alloc_box(ptr_reg, 8))
                 // Store value at ptr[0]
                 lo = lo.emit(ir_field_set(ptr_reg, 0, val_reg, ir_empty_name()))
                 (lo, ptr_reg)
@@ -30332,10 +32218,13 @@ impl Lowerer {
             Some(list) => {
                 match (*list).tail {
                     Some(rest) => {
+                        let saved_loops = FO_INLINE_ALLOW_LOOPS
+                        FO_INLINE_ALLOW_LOOPS = 1
                         let a = self.fo_sens_of_cov_arg(&(*list).head)
                         var lo = a.0
                         let sA = a.1
                         let b = lo.fo_sens_of_cov_arg(&(*rest).head)
+                        FO_INLINE_ALLOW_LOOPS = saved_loops
                         lo = b.0
                         let cp = lo.fo_emit_cov_from_sens(sA, b.1)
                         lo = cp.0
@@ -30355,8 +32244,11 @@ impl Lowerer {
     fn lower_variance_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(list) => {
+                let saved_loops = FO_INLINE_ALLOW_LOOPS
+                FO_INLINE_ALLOW_LOOPS = 1
                 let direct_pair = self.lower_direct_knowledge_call_variance_ref(&(*list).head)
                 let pair_v = if direct_pair.1 >= 0 { direct_pair } else { direct_pair.0.lower_expr_variance_ref(&(*list).head) }
+                FO_INLINE_ALLOW_LOOPS = saved_loops
                 var lo = pair_v.0
                 if pair_v.1 >= 0 {
                     // Return a COPY, not the reg itself. For a mutable local that
@@ -30385,7 +32277,10 @@ impl Lowerer {
     fn lower_sensitivity_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(list) => {
+                let saved_loops = FO_INLINE_ALLOW_LOOPS
+                FO_INLINE_ALLOW_LOOPS = 1
                 let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                FO_INLINE_ALLOW_LOOPS = saved_loops
                 var lo = pair_v.0
                 var chan: i64 = 0 - 1
                 match (*list).tail {
@@ -30430,7 +32325,10 @@ impl Lowerer {
     fn lower_hessian_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(list) => {
+                let saved_loops = FO_INLINE_ALLOW_LOOPS
+                FO_INLINE_ALLOW_LOOPS = 1
                 let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                FO_INLINE_ALLOW_LOOPS = saved_loops
                 var lo = pair_v.0
                 var j: i64 = 0 - 1
                 var k: i64 = 0 - 1
@@ -30490,12 +32388,15 @@ impl Lowerer {
     fn lower_correlate_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(l0) => {
+                let saved_loops = FO_INLINE_ALLOW_LOOPS
+                FO_INLINE_ALLOW_LOOPS = 1
                 let p0 = self.lower_expr_variance_ref(&(*l0).head)
                 var lo = p0.0
                 let ci = lo.fo_primary_channel()
                 match (*l0).tail {
                     Some(l1) => {
                         let p1 = lo.lower_expr_variance_ref(&(*l1).head)
+                        FO_INLINE_ALLOW_LOOPS = saved_loops
                         lo = p1.0
                         let cj = lo.fo_primary_channel()
                         // Both literal forms, matching the checker's
@@ -30548,6 +32449,7 @@ impl Lowerer {
                     }
                     _ => {}
                 }
+                FO_INLINE_ALLOW_LOOPS = saved_loops
                 lo.emit_f64_const(0.0)
             }
             _ => self.emit_f64_const(0.0),
@@ -30559,7 +32461,10 @@ impl Lowerer {
         match *args {
             Some(list) => {
                 // Walk first, so the Hessian and the sigmas exist to read.
+                let saved_loops = FO_INLINE_ALLOW_LOOPS
+                FO_INLINE_ALLOW_LOOPS = 1
                 let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                FO_INLINE_ALLOW_LOOPS = saved_loops
                 var lo = pair_v.0
                 let zp = lo.emit_f64_const(0.0)
                 lo = zp.0
@@ -31654,6 +33559,22 @@ impl Lowerer {
     }
 
     fn lower_call_expr_named_ref(self, e: &Expr, callee_name: Name) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // gpu_thread_id_x() is the lane counter, not a function. Registering it
+        // first left an empty stub (ud2 / NATIVE_REFUSAL missing_lowered_body).
+        // Outside a kernel there is no counter: read 0, do not call the stub.
+        if name_eq(callee_name, make_name("gpu_thread_id_x")) {
+            let pair_tid = self.fresh_reg()
+            var lo_tid = pair_tid.0
+            let dst_tid = pair_tid.1
+            if LOWER_KERNEL_TID_REG >= 0 {
+                lo_tid = lo_tid.emit(ir_copy(dst_tid, LOWER_KERNEL_TID_REG))
+                return (lo_tid, dst_tid)
+            }
+            print("warning: gpu_thread_id_x() outside a kernel lane loop reads 0")
+            print(" -- inline it into the `kernel fn` body; a helper cannot see the lane counter (#1504)\n")
+            lo_tid = lo_tid.emit(ir_load_imm(dst_tid, 0))
+            return (lo_tid, dst_tid)
+        }
         var lo1 = self
         let fn_id = lowerer_find_or_add_fn_id_mut(&! lo1, callee_name)
         if lo1.ir_name_is_knowledge_kaxi_publish(callee_name) {
@@ -31702,35 +33623,8 @@ impl Lowerer {
         let pair_d = lo2.fresh_reg()
         let lo3 = pair_d.0
         let dst = pair_d.1
-        // gpu_thread_id_x() inside a kernel lane loop is the loop counter, not a
-        // call. resolve.sio:1059 allowlists the 12 GPU intrinsics as implicit
-        // builtins that are never bound, so the emitted call names nothing and
-        // leaves `dst` unwritten — which reads as 0 and is why every lane looked
-        // like lane 0. Outside a kernel LOWER_KERNEL_TID_REG is -1 and this is
-        // skipped, preserving the previous behaviour for the other 11 intrinsics.
-        if name_eq(callee_name, make_name("gpu_thread_id_x")) {
-            if LOWER_KERNEL_TID_REG >= 0 {
-                let lo_tid = lo3.emit(ir_copy(dst, LOWER_KERNEL_TID_REG))
-                return (lo_tid, dst)
-            }
-            // Reached outside a kernel lane loop — typically a helper function
-            // that reads gpu_thread_id_x() and is called from a kernel. The lane
-            // counter is a vreg local to the kernel frame, so it cannot be seen
-            // from here and the read still degrades to 0.
-            //
-            // This is the residue of #1504 and it is announced rather than left
-            // silent: a wrong answer nobody is told about is the failure mode
-            // that let the original defect survive for weeks. lean_single does
-            // not get this right either — it skips the lane loop entirely for
-            // such a kernel (measured: 1 lane instead of 4).
-            print("warning: gpu_thread_id_x() outside a kernel lane loop reads 0")
-            print(" — inline it into the `kernel fn` body; a helper cannot see the lane counter (#1504)\n")
-        }
-        let callee_strat_ext: i64 = if fn_id >= 0 && fn_id < (*lo3.module).fn_count { ir_fn_get(&(*lo3.module), fn_id as usize).compile_strategy } else { 0 }
-        if callee_strat_ext == 6 {
-            let lo_ext = lo3.emit(ir_call_extern(dst, callee_name, args, argc))
-            return (lo_ext, dst)
-        }
+        // Not IrCallExtern-on-6: native v2 has no arm for that opcode (rc=12).
+        // macOS Metal launch is name-based on IrCall in codegen_arm64_macos.
         let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args, argc)
         var lo4 = pair_call.lo
         // Same rule as the binary-operand site: a call consumes its arguments'
@@ -32762,6 +34656,14 @@ impl Lowerer {
 
     fn lower_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        if FO_STEP_CARRY == 1 && fo_recur_call_is_this(e) {
+            let c = lo.fresh_reg()
+            lo = c.0
+            lo = lo.emit(ir_copy(c.1, FO_STEP_ZVAL))
+            lo = lo.emit(ir_mark_float_reg(c.1))
+            lo.pending_variance_reg = 0 - 1
+            return (lo, c.1)
+        }
         let callee_short = match e.left {
             Some(c) => lower_f128_expr_callee_short(&(*c)),
             None => ir_empty_name(),
@@ -32970,6 +34872,167 @@ impl Lowerer {
         }
     }
 
+    fn raw_payload_field_array_len(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base_expr) => {
+                let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
+                if type_name.len <= 0 { return 0 }
+                var si: i64 = 0
+                while si < (*self.struct_layouts).count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                        let fc = (*self.struct_layouts).entries[si as usize].field_count
+                        var fi: i64 = 0
+                        while fi < fc && fi < 128 {
+                            let field = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
+                            if ir_name_eq(ir_name_at(field.name_id), field_name) {
+                                var n = field.fixed_array_len
+                                if field.word_scalar_array_len > n { n = field.word_scalar_array_len }
+                                let noted = lower_raw_arr_len_for(type_name, field.index)
+                                if noted > n { n = noted }
+                                return n
+                            }
+                            fi = fi + 1
+                        }
+                        return 0
+                    }
+                    si = si + 1
+                }
+                0
+            }
+            None => 0,
+        }
+    }
+
+    fn raw_payload_field_copy_is_byte(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        if self.raw_payload_field_array_len(base_opt, field_name) <= 0 { return false }
+        if self.raw_payload_field_is_byte(base_opt, field_name) { return true }
+        match *base_opt {
+            Some(base_expr) => {
+                let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
+                if type_name.len <= 0 { return false }
+                var si: i64 = 0
+                while si < (*self.struct_layouts).count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                        let fc = (*self.struct_layouts).entries[si as usize].field_count
+                        var fi: i64 = 0
+                        while fi < fc && fi < 128 {
+                            let field = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
+                            if ir_name_eq(ir_name_at(field.name_id), field_name) {
+                                return lower_raw_arr_is_packed_byte(type_name, field.index)
+                            }
+                            fi = fi + 1
+                        }
+                        return false
+                    }
+                    si = si + 1
+                }
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn emit_raw_inline_array_to_handle(self, ptr_reg: i64, base_opt: &Option<Box<Expr>>, field_name: Name, elem_count: i64, packed_byte: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let word_off = self.raw_payload_word_offset(base_opt, field_name, 0)
+        let addr_base = if packed_byte { word_off * 8 } else { word_off }
+        let raw_label = if packed_byte { 3 } else { 2 }
+        let pair_dst = self.fresh_reg()
+        var lo = pair_dst.0
+        let dst_reg = pair_dst.1
+        lo = lo.emit(ir_alloc_array(dst_reg, lo.aggregate_storage_bytes(elem_count), elem_count))
+        if elem_count <= 0 {
+            return (lo, dst_reg)
+        }
+        let pair_idx = lo.emit_i64_const(0)
+        lo = pair_idx.0
+        let idx_reg = pair_idx.1
+        let pair_limit = lo.emit_i64_const(elem_count)
+        lo = pair_limit.0
+        let limit_reg = pair_limit.1
+        let pair_one = lo.emit_i64_const(1)
+        lo = pair_one.0
+        let one_reg = pair_one.1
+        let pair_off = lo.emit_i64_const(addr_base)
+        lo = pair_off.0
+        let off_reg = pair_off.1
+        let pair_top = lo.fresh_label()
+        lo = pair_top.0
+        let top_label = pair_top.1
+        let pair_end = lo.fresh_label()
+        lo = pair_end.0
+        let end_label = pair_end.1
+        lo = lo.emit(ir_label(top_label))
+        let pair_cond = lo.fresh_reg()
+        lo = pair_cond.0
+        lo = lo.emit(ir_binop(pair_cond.1, idx_reg, BinaryOp::OpLt, limit_reg))
+        lo = lo.emit(ir_branch_false(pair_cond.1, end_label))
+        let pair_raw_idx = lo.fresh_reg()
+        lo = pair_raw_idx.0
+        lo = lo.emit(ir_binop(pair_raw_idx.1, idx_reg, BinaryOp::OpAdd, off_reg))
+        let pair_elem = lo.fresh_reg()
+        lo = pair_elem.0
+        var load_instr = ir_index_get(pair_elem.1, ptr_reg, pair_raw_idx.1)
+        load_instr.label_id = raw_label
+        lo = lo.emit(load_instr)
+        lo = lo.emit(ir_index_set(dst_reg, idx_reg, pair_elem.1))
+        let pair_next = lo.fresh_reg()
+        lo = pair_next.0
+        lo = lo.emit(ir_binop(pair_next.1, idx_reg, BinaryOp::OpAdd, one_reg))
+        lo = lo.emit(ir_copy(idx_reg, pair_next.1))
+        lo = lo.emit(ir_jump(top_label))
+        lo = lo.emit(ir_label(end_label))
+        (lo, dst_reg)
+    }
+
+    fn emit_handle_to_raw_inline_array(self, ptr_reg: i64, base_opt: &Option<Box<Expr>>, field_name: Name, src_reg: i64, elem_count: i64, packed_byte: bool) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let word_off = self.raw_payload_word_offset(base_opt, field_name, 0)
+        let addr_base = if packed_byte { word_off * 8 } else { word_off }
+        let raw_label = if packed_byte { 3 } else { 2 }
+        var lo = self
+        if elem_count <= 0 {
+            return lo
+        }
+        let pair_idx = lo.emit_i64_const(0)
+        lo = pair_idx.0
+        let idx_reg = pair_idx.1
+        let pair_limit = lo.emit_i64_const(elem_count)
+        lo = pair_limit.0
+        let limit_reg = pair_limit.1
+        let pair_one = lo.emit_i64_const(1)
+        lo = pair_one.0
+        let one_reg = pair_one.1
+        let pair_off = lo.emit_i64_const(addr_base)
+        lo = pair_off.0
+        let off_reg = pair_off.1
+        let pair_top = lo.fresh_label()
+        lo = pair_top.0
+        let top_label = pair_top.1
+        let pair_end = lo.fresh_label()
+        lo = pair_end.0
+        let end_label = pair_end.1
+        lo = lo.emit(ir_label(top_label))
+        let pair_cond = lo.fresh_reg()
+        lo = pair_cond.0
+        lo = lo.emit(ir_binop(pair_cond.1, idx_reg, BinaryOp::OpLt, limit_reg))
+        lo = lo.emit(ir_branch_false(pair_cond.1, end_label))
+        let pair_elem = lo.fresh_reg()
+        lo = pair_elem.0
+        lo = lo.emit(ir_index_get(pair_elem.1, src_reg, idx_reg))
+        let pair_raw_idx = lo.fresh_reg()
+        lo = pair_raw_idx.0
+        lo = lo.emit(ir_binop(pair_raw_idx.1, idx_reg, BinaryOp::OpAdd, off_reg))
+        var store_instr = ir_index_set(ptr_reg, pair_raw_idx.1, pair_elem.1)
+        store_instr.label_id = raw_label
+        lo = lo.emit(store_instr)
+        let pair_next = lo.fresh_reg()
+        lo = pair_next.0
+        lo = lo.emit(ir_binop(pair_next.1, idx_reg, BinaryOp::OpAdd, one_reg))
+        lo = lo.emit(ir_copy(idx_reg, pair_next.1))
+        lo = lo.emit(ir_jump(top_label))
+        lo = lo.emit(ir_label(end_label))
+        lo
+    }
+
     fn emit_add_imm(self, reg: i64, imm: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if imm == 0 { return (self, reg) }
         let pair_imm = self.emit_i64_const(imm)
@@ -33035,6 +35098,13 @@ impl Lowerer {
         }
         let lo1_pre = pair_b.0
         let base_pre = pair_b.1
+        if raw_mut_deref {
+            let inline_n = lo1_pre.raw_payload_field_array_len(&e.left, e.name)
+            if inline_n > 0 {
+                let packed = lo1_pre.raw_payload_field_copy_is_byte(&e.left, e.name)
+                return lo1_pre.emit_raw_inline_array_to_handle(base_pre, &e.left, e.name, inline_n, packed)
+            }
+        }
         // AUTO-DEREF THROUGH A POINTER-TYPED FIELD.
         //
         // A Box deref is represented in this IR as IrFieldGet with field index 0 — see
@@ -33102,7 +35172,7 @@ impl Lowerer {
             _ => false,
         }
         let base_ident_is_box = base_box_layout >= 0 || base_ident_box_tagged
-        if str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
+        if lower_box_trace_enabled(2) {
             print("boxtrace: READ field=")
             print(str_from_bytes(e.name.buf, e.name.len))
             print(" layout=")
@@ -33204,6 +35274,13 @@ impl Lowerer {
                 }
                 print("\n")
                 di = di + 1
+            }
+        }
+        if raw_mut_deref {
+            let inline_n = lo1.raw_payload_field_array_len(&e.left, e.name)
+            if inline_n > 0 {
+                let packed = lo1.raw_payload_field_copy_is_byte(&e.left, e.name)
+                return lo1.emit_raw_inline_array_to_handle(base, &e.left, e.name, inline_n, packed)
             }
         }
         let pair_d = lo1.fresh_reg()
@@ -35406,6 +37483,7 @@ impl Lowerer {
                         print_int(self.locals.count)
                         print("\n")
                     }
+                    lower_note_unresolved(e.name)
                     let loe = self.report_error_at(15349)
                     loe.emit_unit()
                 }
@@ -36704,6 +38782,56 @@ pub fn lower_program_bodies_from_summary_with_epistemic_boxed_owned(
 // Skips dep test `main` (seed owns entry). Force-fills ItemImpl method stubs
 // left ic=0 by seed extern preseed. Caller owns arena mark/reset + call_args
 // re-box for functions written in this pass (including filled stubs).
+// Diagnostic only: never reclaim or mutate either allocation domain. Capture
+// counters before printing so the receipt does not include its own formatting.
+// Cursor values alone are not byte totals across pool refills; retain the
+// cumulative refill/mmap counters and report unsupported sentinels unchanged.
+fn lower_into_acc_alloc_trace_mark(enabled: bool, module_index: i64, stage: string) with IO, Mut, Panic, Div {
+    if !enabled { return }
+    // The bootstrap seed has no __rgn_cursor intrinsic. Do not substitute a
+    // different allocation domain: -1 explicitly means unavailable here.
+    let pool_cursor: i64 = -1
+    let pool_refill = __pool_refill_bytes()
+    let mmap_bytes = __rtmmap_bytes()
+    let box_cursor = __arena_mark()
+    let strategy_env_calls = LOWER_STRATEGY_ENV_TRACE_CALLS
+    let strategy_env_refill = LOWER_STRATEGY_ENV_TRACE_REFILL
+    let box_calls = LOWER_BOX_ENV_CALLS
+    let box_refill = LOWER_BOX_ENV_REFILL
+    print("into_acc_alloc: module=")
+    print_int(module_index)
+    print(" stage=")
+    print(stage)
+    print(" pool_cursor=")
+    print_int(pool_cursor)
+    print(" pool_refill=")
+    print_int(pool_refill)
+    print(" mmap_bytes=")
+    print_int(mmap_bytes)
+    print(" box_cursor=")
+    print_int(box_cursor)
+    print(" strategy_env_calls=")
+    print_int(strategy_env_calls)
+    print(" strategy_env_refill=")
+    print_int(strategy_env_refill)
+    print("\n")
+    if str_eq(stage, "patch_ready") {
+        var slot: i64 = 0
+        while slot < 3 {
+            print("box_env_alloc: module=")
+            print_int(module_index)
+            print(" site=")
+            print_int(slot)
+            print(" calls=")
+            print_int(box_calls[slot as usize])
+            print(" pool_refill=")
+            print_int(box_refill[slot as usize])
+            print("\n")
+            slot = slot + 1
+        }
+    }
+}
+
 pub fn lower_dep_program_items_into_acc_with_externs(
     items: &Option<Box<ItemList>>,
     programs: &! [Program; 256],
@@ -36711,7 +38839,10 @@ pub fn lower_dep_program_items_into_acc_with_externs(
     self_index: i64,
     acc: Box<IrModule>
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
+    let alloc_trace = lower_into_acc_alloc_trace_enabled()
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "begin")
     var lo = lowerer_from_acc_module(acc)
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "lowerer_ready")
     var i: i64 = 0
     while i < program_count {
         if i != self_index {
@@ -36746,8 +38877,10 @@ pub fn lower_dep_program_items_into_acc_with_externs(
         }
         i = i + 1
     }
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "externs_ready")
     lower_set_current_module_id(self_index)
     lowerer_preseed_dep_items_into_acc_mut(&! lo, items, ir_empty_name())
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "own_preseed_ready")
     // DEDUP body lower: skip main + existing bodies; fill stubs and new names.
     // self_index is this dependency module's own loaded-program index (the
     // same id fo_preregister_program_items_multipass stamped its `use`
@@ -36757,14 +38890,17 @@ pub fn lower_dep_program_items_into_acc_with_externs(
     // whole loaded module graph. See LOWER_CURRENT_MODULE_ID's comment.
     lower_set_current_module_id(self_index)
     lowerer_lower_program_bodies_dedup_mut(&! lo, items)
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "bodies_ready")
     // Residual closeout: re-attempt any ItemImpl methods still at ic=0.
     lowerer_force_fill_impl_methods_mut(&! lo, items)
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "impl_ready")
     var patch_stats = ir_empty_validated_patch_stats()
     if lower_ok_without_hard(lo.had_error) {
         var module_box = lo.module
         patch_stats = ir_patch_validated_calls(&! (*module_box))
         lo.module = module_box
     }
+    lower_into_acc_alloc_trace_mark(alloc_trace, self_index, "patch_ready")
     if str_eq(read_env("SOUNIO_INTO_ACC_TRACE"), "1") {
         print("into_acc: dep_done self_index=")
         print_int(self_index)

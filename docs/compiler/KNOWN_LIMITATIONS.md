@@ -102,7 +102,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   Madaros lowering),
   `gum_fo_across_call`, `fo_call_boundary_arity3`, `gum_fo_arity3_boundary`,
   `gum_fo_inline_helper_1706`, `gum_fo_runtime_if_1706` and
-  `gum_fo_struct_helpers_1706` (values against C++ oracles). A linear recurrence `if n < 1 { x } else { self(x, n - 1) + x }` carries the channel without unrolling (pin `tests/run-pass/gum_fo_recur_linear.sio`, measured n0 0.090000, n3 1.440000, n12 15.210000, nneg 0.090000). a geometric recurrence `if n < 1 { x } else { 2.0 * self(x, n - 1) }` carries 2^n without unrolling (pin `tests/run-pass/gum_fo_recur_scale.sio`, measured s0 0.090000, s3 5.760000, s12 1509949.440000, sneg 0.090000). a two-channel recurrence `if n < 1 { x } else { self(x, y, n - 1) + y }` carries x + n*y without unrolling (pin `tests/run-pass/gum_fo_recur_mix.sio`, measured m0 0.090000, m3 0.180000, m12 1.530000, mneg 0.090000). the same 2^n written as `self(x, n - 1) + self(x, n - 1)` carries the channel without unrolling (pin `tests/run-pass/gum_fo_recur_twin.sio`, measured t0 0.090000, t1 0.360000, t2 1.440000, t3 5.760000, t12 1509949.440000). the factor is the literal in the body, not only 2 (pin `tests/run-pass/gum_fo_recur_coef.sio`, measured g0 0.090000, g2 7.290000, g12 25418658283.290001). a product recurrence `if n < 1 { x } else { y * self(x, y, n - 1) }` carries x*y^n and both derivatives without unrolling (pin `tests/run-pass/gum_fo_recur_ymul.sio`, measured y0 0.090000, y1 0.610000, y2 5.440000, y12 152504893.440000). a same-channel product `if n < 1 { x } else { x * self(x, n - 1) }` carries (n+1) x^n without unrolling (pin `tests/run-pass/gum_fo_recur_xmul.sio`, measured p0 0.090000, p1 9.000000, p2 506.250000, p12 906586647033691392.000000). an affine recurrence `if n < 1 { x } else { c * self(x, n - 1) + x }` carries the factor (c^(n+1)-1)/(c-1) without unrolling, and n+1 when c is 1 (pin `tests/run-pass/gum_fo_recur_affine.sio`, measured a0 0.090000, a1 0.810000, a2 4.410000, a12 6038323.290000, and c=3 at n=2 is 15.210000). a sum of k identical calls carries k^n (pin `tests/run-pass/gum_fo_recur_ksum.sio`, measured k1 0.810000, k2 7.290000, k12 25418658283.290001, and four calls at n=1 is 1.440000). `if n < 1 { x } else { c * self(x, y, n - 1) + y }` carries both channels (pin `tests/run-pass/gum_fo_recur_affy.sio`, measured y1 0.370000, y12 1677639.690000, and c=3 at n=2 is 7.450000). `if n < 1 { x } else { y * self(x, y, n - 1) + x }` carries the product rule on y (pin `tests/run-pass/gum_fo_recur_chcoef.sio`, measured c1 1.060000, c2 10.660000, c12 513571635.540000). a power whose base is a numeric literal carries b*n*x^(n-1) (pin `tests/run-pass/gum_fo_recur_powbase.sio`, measured b0 0.000000, b2 9.000000, b12 30899047851562496.000000, and base 2 at n=2 is 36.000000). `n <= 0` is the same stop as `n < 1` (pin `tests/run-pass/gum_fo_recur_guard.sio`, measured g8 7.290000, g12 15.210000, and a factor of 2 at n=12 is 1509949.440000). division by a numeric literal is the geometric step 1/c (pin `tests/run-pass/gum_fo_recur_div.sio`, measured d2 0.005625; n=12 is 0.09/4096^2, which print_f64 renders as 0.000000). A recursion that is none of these, past the unroll cap, still drops the missing steps;
+  `gum_fo_struct_helpers_1706` (values against C++ oracles). A linear recurrence `if n < 1 { x } else { self(x, n - 1) + x }` carries the channel without unrolling (pin `tests/run-pass/gum_fo_recur_linear.sio`, measured n0 0.090000, n3 1.440000, n12 15.210000, nneg 0.090000). a geometric recurrence `if n < 1 { x } else { 2.0 * self(x, n - 1) }` carries 2^n without unrolling (pin `tests/run-pass/gum_fo_recur_scale.sio`, measured s0 0.090000, s3 5.760000, s12 1509949.440000, sneg 0.090000). a two-channel recurrence `if n < 1 { x } else { self(x, y, n - 1) + y }` carries x + n*y without unrolling (pin `tests/run-pass/gum_fo_recur_mix.sio`, measured m0 0.090000, m3 0.180000, m12 1.530000, mneg 0.090000). the same 2^n written as `self(x, n - 1) + self(x, n - 1)` carries the channel without unrolling (pin `tests/run-pass/gum_fo_recur_twin.sio`, measured t0 0.090000, t1 0.360000, t2 1.440000, t3 5.760000, t12 1509949.440000). the factor is the literal in the body, not only 2 (pin `tests/run-pass/gum_fo_recur_coef.sio`, measured g0 0.090000, g2 7.290000, g12 25418658283.290001). a product recurrence `if n < 1 { x } else { y * self(x, y, n - 1) }` carries x*y^n and both derivatives without unrolling (pin `tests/run-pass/gum_fo_recur_ymul.sio`, measured y0 0.090000, y1 0.610000, y2 5.440000, y12 152504893.440000). a same-channel product `if n < 1 { x } else { x * self(x, n - 1) }` carries (n+1) x^n without unrolling (pin `tests/run-pass/gum_fo_recur_xmul.sio`, measured p0 0.090000, p1 9.000000, p2 506.250000, p12 906586647033691392.000000). an affine recurrence `if n < 1 { x } else { c * self(x, n - 1) + x }` carries the factor (c^(n+1)-1)/(c-1) without unrolling, and n+1 when c is 1 (pin `tests/run-pass/gum_fo_recur_affine.sio`, measured a0 0.090000, a1 0.810000, a2 4.410000, a12 6038323.290000, and c=3 at n=2 is 15.210000). a sum of k identical calls carries k^n (pin `tests/run-pass/gum_fo_recur_ksum.sio`, measured k1 0.810000, k2 7.290000, k12 25418658283.290001, and four calls at n=1 is 1.440000). `if n < 1 { x } else { c * self(x, y, n - 1) + y }` carries both channels (pin `tests/run-pass/gum_fo_recur_affy.sio`, measured y1 0.370000, y12 1677639.690000, and c=3 at n=2 is 7.450000). `if n < 1 { x } else { y * self(x, y, n - 1) + x }` carries the product rule on y (pin `tests/run-pass/gum_fo_recur_chcoef.sio`, measured c1 1.060000, c2 10.660000, c12 513571635.540000). a power whose base is a numeric literal carries b*n*x^(n-1) (pin `tests/run-pass/gum_fo_recur_powbase.sio`, measured b0 0.000000, b2 9.000000, b12 30899047851562496.000000, and base 2 at n=2 is 36.000000). `n <= 0` is the same stop as `n < 1` (pin `tests/run-pass/gum_fo_recur_guard.sio`, measured g8 7.290000, g12 15.210000, and a factor of 2 at n=12 is 1509949.440000). division by a numeric literal is the geometric step 1/c (pin `tests/run-pass/gum_fo_recur_div.sio`, measured d2 0.005625; n=12 is 0.09/4096^2, which print_f64 renders as 0.000000). an else-expression in the recursive value and the parameters is differentiated and repeated n times (pin `tests/run-pass/gum_fo_recur_step.sio`, measured rw12 25418658283.290001, sb12 10.890000, sq2 22500.000000, dv1 0.038125, dv2 0.021250). a block of lets whose recursive call is the previous step is lowered by the ordinary let lowerer inside the loop (pin `tests/run-pass/gum_fo_recur_let.sio`, measured l3 1.440000, l12 15.210000, two lets at n=12 is 6038323.290000, and t*t at n=2 is 22500.000000). the loop carries the Hessian the lowerer already computed (pin `tests/run-pass/gum_fo_recur_hess.sio`, measured h1 2.000000, h2 300.000000, and the same square through a let). exp(L/2)*exp(L/2) keeps the value 12.180705 and the Taylor centre 14.122522, which is p*(1 + s/2); the one-shot exp keeps the lognormal centre 14.285865 and variance 76.639194, while the product keeps the linear variance 47.305391 (pin `tests/run-pass/gum_fo_exp_square_mean.sio`). Four steps of exp(ln P / 4) land on that same Taylor centre, inside the one-shot interval (pin `tests/run-pass/gum_fo_recur_vanthoff.sio`). A step with two delays, past the unroll cap, still drops the missing steps;
   an `if` whose condition calls a function carries the arm taken (the condition is lowered once; pin `tests/run-pass/gum_fo_if_call_cond.sio`, measured zero 0.090000, other 0.360000, direct 0.090000); a `while` carries the loop-carried channel across the call (pin `tests/run-pass/gum_fo_while_call.sio`, measured three 0.810000 and four 1.440000); `for` and `loop`/`break` carry the same channel across the call, and a `let`-bound closure inside the callee is re-lowered at its call (pin `tests/run-pass/gum_fo_for_loop_call.sio`, measured for3 0.810000, loop3 0.810000, closure 0.360000); a `match` on integer, bool or wildcard arms carries the arm taken
   (pin `tests/run-pass/gum_fo_match_call.sio`, measured arm0 0.090000, arm1 0.360000, arm2 9.000000); a `let`-bound closure carries the body's variance (`let f = |y: f64| 2.0 * y; variance_of(f(a))`; pin `tests/run-pass/gum_fo_closure_call.sio`, measured scale 0.360000, square 9.000000, capture 0.090000); a struct reached through a reference local carries the borrowed field (`let r = &p; variance_of(r.cl0)`, `let s = r`, `(*r).cl0`; pin `tests/run-pass/gum_fo_ref_local_field.sio`).
 - #1792 (filed 2026-08-17) named two distinct witnesses. **F1**:
@@ -353,12 +353,47 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
     value use in a match-arm body or struct-literal field) the compile stops
     with ``error[builtin_shadow]: ... `measure` is a builtin; rename your
     function.`` Off switch: `SOUNIO_DISABLE_BUILTIN_SHADOW=1`.
-  - **Residual (OPEN), Madaros:** `pub fn` with a builtin name is not
-    renamed (importers spell it), so the builtin still wins at bare-name call
-    sites; `f128_from_limbs` / `f128_to_lo` / `f128_to_hi` are deliberately
-    excluded because `stdlib/math/softfloat_f128.sio` defines them as the
-    implementation the intercept stands for (a user one fails to build).
-    The renamed spelling `<name>__user` appears in diagnostics.
+  - **`pub fn` fixed for Madaros (2026-10-23), single definer.**
+    `builtin_shadow_apply_items` now collects `visibility.kind == 0 || 1` and
+    renames an intercepted `pub fn` to `<name>__user` like a private one;
+    `private_fn_identity_apply` records each (base name, definer) pair and the
+    #2773 pub phase rebinds every importer that spells the base name in a
+    `use` item -- by name or through a glob -- through the same table
+    (`PFI_T_USER` marks the entries that spell `__user` instead of
+    `__m<idx>`). Witness: leaf `pub fn measure(x: i64) -> i64 { x + 1000 }`,
+    main `use ...::{measure}` + `measure(5) == 1005` → before: `check` rc=1
+    with `expected Knowledge<i64>` (E004/E036); after: `check` rc=0 and `run`
+    exit 0. Glob form (`use ...::*`) also exit 0. Single module `pub fn
+    measure` + own call: before rc=1 `use of undeclared variable
+    measure__user`, after rc=0.
+  - **Two defects found while doing that, both fixed here.**
+    (1) **#2773 broke the private half it landed beside.** Its guards
+    (`PFI_T_DEF == 1`, `PFI_T_TGT == PFI_CUR_MOD`) in `pfi_rename_item_def`
+    were never matched by the shadow's table entries, so only the
+    *references* were renamed and the definition kept the builtin spelling:
+    every module with a private builtin-named fn failed with `use of
+    undeclared variable <name>__user`. Measured on the pristine `3ef3dbaa6e`
+    binary: `user_fn_shadows_builtin_measure.sio` rc=1 with that message;
+    after this change rc=0 with both PASS lines. The shadow now marks its
+    entries as definitions of module 0 carrying the `__user` spelling.
+    (2) **`run_check_mode` never ran the identity pass** (`compiler/main.sio`):
+    it loaded the modules, ran only `module_struct_identity_check`, and
+    checked -- so the checker saw the un-rebound `measure` and intercepted the
+    builtin before compilation could rewrite it. It now calls
+    `module_frontend_identity_pass` (use map + struct check + identity), the
+    same order the compile path uses.
+  - **Residual (OPEN), Madaros:** two *loaded* modules that each export a
+    `pub fn` with the same builtin name, plus a module that imports it -- the
+    rename cannot pick a target at a bare call site, so the compile stops with
+    ``error[builtin_shadow]`` naming the cause (it used to type the call as
+    `Knowledge`). Merely loading both modules is fine: the pub phase renames
+    the second `<name>__user` apart. `f128_from_limbs` / `f128_to_lo` /
+    `f128_to_hi` stay deliberately excluded because
+    `stdlib/math/softfloat_f128.sio` defines them as the implementation the
+    intercept stands for (a user one fails to build). The renamed spelling
+    `<name>__user` appears in diagnostics. Trace:
+    `SOUNIO_TRACE_BUILTIN_SHADOW=1` prints the census and the rebind
+    decisions.
   - **Residual (OPEN), lean_single (seed, not changed — a fix needs a seed
     refresh):** 26 of 65 wrong. Silently wrong value (builtin ran, printed
     the argument `5` or `0`): `abs`, `f64_to_bits`, `lift_knowledge`,
@@ -370,7 +405,16 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
     `require_confidence`, `f128_to_lo`.
 - Pins: `tests/run-pass/user_fn_shadows_builtin_measure.sio`,
   `tests/run-pass/user_fn_shadows_builtin_names.sio`,
+  `tests/run-pass/user_fn_shadows_builtin_pub_measure.sio`,
+  `tests/multimodule/user_fn_shadows_builtin_pub_main.sio` (+ `_leaf`),
+  `tests/multimodule/user_fn_shadows_builtin_pub_glob_main.sio` (+ `_leaf`),
   `tests/compile-fail/builtin_shadow_local_binding_refused.sio`.
+  A `requires: madaros` pin is skipped unless `SOUNIO_MADAROS_AVAILABLE` is
+  set, and the Madaros CI job runs only the tests a diff touches -- which is
+  why the #2773 regression above went unseen. The four `run` cases are
+  therefore also listed in `tests/madaros/multimodule_witness/manifest.tsv`,
+  run unconditionally by `scripts/ci/madaros_multimodule_witness.sh`
+  (16/16 witnesses, measured 2026-10-23).
 ### KL-18 — `Hyper<Algebra, T>` values on the CPU path (P0.8.2)
 
 - Engine: both. There is no CPU value lowering for `Hyper<Octonion, f64>`

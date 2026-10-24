@@ -1,3 +1,4 @@
+use math::pure::{is_finite,sqrt}
 // eigen.sio - Dense symmetric eigendecomposition for matrices up to 256x256
 //
 // Algorithm:
@@ -10,16 +11,7 @@ fn eg_abs(x: f64) -> f64 {
     x
 }
 
-fn eg_sqrt(x: f64) -> f64 with Mut, Div, Panic {
-    if x <= 0.0 { return 0.0 }
-    var y = x
-    var i = 0
-    while i < 24 {
-        y = 0.5 * (y + x / y)
-        i = i + 1
-    }
-    y
-}
+fn eg_sqrt(x:f64)->f64 with Mut,Div,Panic {sqrt(x)}
 
 fn eg_hypot(a: f64, b: f64) -> f64 with Mut, Div, Panic {
     let aa = eg_abs(a)
@@ -65,7 +57,8 @@ fn eg_sort_values(values: &![f64; 256], n: i32) with Mut, Div, Panic {
     while i < n {
         let key = values[i]
         var j = i - 1
-        while j >= 0 && values[j] > key {
+        while j >= 0 {
+            if values[j] <= key {break}
             values[j + 1] = values[j]
             j = j - 1
         }
@@ -86,7 +79,8 @@ fn eg_sort_pairs(values: &![f64; 256], vecs: &![f64; 65536], n: i32) with Mut, D
         }
 
         var j = i - 1
-        while j >= 0 && values[j] > key {
+        while j >= 0 {
+            if values[j] <= key {break}
             values[j + 1] = values[j]
             r = 0
             while r < n {
@@ -112,6 +106,7 @@ var EIG_WORK_DIAG: [f64; 256] = [0.0; 256]
 var EIG_WORK_SUBDIAG: [f64; 256] = [0.0; 256]
 var EIG_WORK_N: i32 = 0
 var EIG_WORK_CONVERGED: i32 = 0
+var EIG_WORK_TRIDIAG_READY: i32 = 0
 
 fn eg_shift_subdiag_left(subdiag: &![f64; 256], n: i32) with Mut, Panic {
     if n <= 0 { return }
@@ -142,7 +137,7 @@ fn eg_tred2_inplace(mat: &![f64; 65536], n: i32, diag: &![f64; 256], subdiag: &!
             k = k + 1
         }
 
-        if scale <= 1.0e-30 {
+        if scale == 0.0 {
             subdiag[i] = diag[i - 1]
             j = 0
             while j < i {
@@ -229,7 +224,7 @@ fn eg_tred2_inplace(mat: &![f64; 65536], n: i32, diag: &![f64; 256], subdiag: &!
         mat[i * n + i] = 1.0
 
         let h2 = diag[i + 1]
-        if eg_abs(h2) > 1.0e-30 {
+        if h2 != 0.0 {
             var k2 = 0
             while k2 <= i {
                 diag[k2] = mat[k2 * n + (i + 1)] / h2
@@ -274,7 +269,7 @@ fn eg_tred2_inplace(mat: &![f64; 65536], n: i32, diag: &![f64; 256], subdiag: &!
 }
 
 fn eg_tridiag_iter_no_vecs(diag: &![f64; 256], subdiag: &![f64; 256], n: i32, max_iter: i32) -> bool with Mut, Div, Panic {
-    let tol = 1.0e-12
+    let tol = 2.2204460492503131e-16
     var total_iter = 0
     var l = 0
 
@@ -284,7 +279,7 @@ fn eg_tridiag_iter_no_vecs(diag: &![f64; 256], subdiag: &![f64; 256], n: i32, ma
             var m = l
             while m < n - 1 {
                 let dd = eg_abs(diag[m]) + eg_abs(diag[m + 1])
-                if eg_abs(subdiag[m]) <= tol * (dd + 1.0) { break }
+                if eg_abs(subdiag[m]) <= tol * dd { break }
                 m = m + 1
             }
 
@@ -313,7 +308,7 @@ fn eg_tridiag_iter_no_vecs(diag: &![f64; 256], subdiag: &![f64; 256], n: i32, ma
                     let r = eg_hypot(f, g)
                     subdiag[i + 1] = r
 
-                    if r <= 1.0e-30 {
+                    if r == 0.0 {
                         diag[i + 1] = diag[i + 1] - p
                         subdiag[m] = 0.0
                         restart = true
@@ -359,7 +354,7 @@ fn eg_tridiag_iter_with_vecs(
     max_iter: i32,
     vecs: &![f64; 65536]
 ) -> bool with Mut, Div, Panic {
-    let tol = 1.0e-12
+    let tol = 2.2204460492503131e-16
     var total_iter = 0
     var l = 0
 
@@ -369,7 +364,7 @@ fn eg_tridiag_iter_with_vecs(
             var m = l
             while m < n - 1 {
                 let dd = eg_abs(diag[m]) + eg_abs(diag[m + 1])
-                if eg_abs(subdiag[m]) <= tol * (dd + 1.0) { break }
+                if eg_abs(subdiag[m]) <= tol * dd { break }
                 m = m + 1
             }
 
@@ -398,7 +393,7 @@ fn eg_tridiag_iter_with_vecs(
                     let r = eg_hypot(f, g)
                     subdiag[i + 1] = r
 
-                    if r <= 1.0e-30 {
+                    if r == 0.0 {
                         diag[i + 1] = diag[i + 1] - p
                         subdiag[m] = 0.0
                         restart = true
@@ -468,6 +463,22 @@ fn qr_tridiag_raw(
     eg_tridiag_iter_with_vecs(diag, subdiag, n, max_iter, vecs)
 }
 
+// Legacy checked entry validation. Exact symmetry is required here; the new
+// dynamic APIs expose their own scale/tolerance contracts.
+fn eg_input_valid(mat:&[f64;65536],n:i32)->bool with Mut,Div,Panic {
+    if n<1 || n>256 {return false}
+    var i:i32=0
+    while i<n {
+        var j:i32=0
+        while j<n {
+            let value=mat[i*n+j]
+            if !is_finite(value) || value!=mat[j*n+i] {return false}
+            j=j+1
+        }
+        i=i+1
+    }
+    return true
+}
 fn eigen_symmetric_raw(
     mat: &![f64; 65536],
     n: i32,
@@ -475,7 +486,7 @@ fn eigen_symmetric_raw(
     subdiag: &![f64; 256],
     vecs: &![f64; 65536]
 ) -> bool with Mut, Div, Panic {
-    if n <= 0 { return false }
+    if !eg_input_valid(mat,n) {return false}
     if n == 1 {
         diag[0] = mat[0]
         subdiag[0] = 0.0
@@ -483,20 +494,52 @@ fn eigen_symmetric_raw(
         return true
     }
 
-    eg_copy_matrix(vecs, mat, n)
+    var matrix_scale:f64=0.0
+    var row:i32=0
+    while row<n {
+        var col:i32=0
+        while col<n {
+            let value=eg_abs(mat[row*n+col])
+            if value>matrix_scale {matrix_scale=value}
+            col=col+1
+        }
+        row=row+1
+    }
+    if matrix_scale==0.0 {matrix_scale=1.0}
+    row=0
+    while row<n {
+        var col:i32=0
+        while col<n {
+            let original=mat[row*n+col]
+            let value=original/matrix_scale
+            if original!=0.0 && value==0.0 {return false}
+            vecs[row*n+col]=value
+            col=col+1
+        }
+        row=row+1
+    }
     eg_tred2_inplace(vecs, n, diag, subdiag)
     eg_shift_subdiag_left(subdiag, n)
 
     let max_steps = 128 * n
-    eg_tridiag_iter_with_vecs(diag, subdiag, n, max_steps, vecs)
+    let converged=eg_tridiag_iter_with_vecs(diag, subdiag, n, max_steps, vecs)
+    if !converged {return false}
+    row=0
+    while row<n {
+        let restored=diag[row]*matrix_scale
+        if !is_finite(restored) || (diag[row]!=0.0 && restored==0.0) {return false}
+        diag[row]=restored
+        row=row+1
+    }
+    return true
 }
 
 pub fn eigen_workspace_reset(n: i32) with Mut, Div, Panic {
     var size = n
-    if size < 0 { size = 0 }
-    if size > 256 { size = 256 }
+    if size < 0 || size > 256 { size = 0 }
     EIG_WORK_N = size
     EIG_WORK_CONVERGED = 0
+    EIG_WORK_TRIDIAG_READY = 0
 
     var i = 0
     while i < size {
@@ -521,6 +564,8 @@ pub fn eigen_workspace_set(row: i32, col: i32, value: f64) with Mut, Panic {
     if col < 0 { return }
     if row >= EIG_WORK_N { return }
     if col >= EIG_WORK_N { return }
+    EIG_WORK_CONVERGED = 0
+    EIG_WORK_TRIDIAG_READY = 0
     EIG_WORK_MAT[row * EIG_WORK_N + col] = value
 }
 
@@ -538,6 +583,7 @@ pub fn householder_tridiag(
     diag: &![f64; 256],
     subdiag: &![f64; 256]
 ) with Mut, Div, Panic {
+    if !eg_input_valid(mat,n) {return}
     householder_tridiag_raw(mat, n, diag, subdiag)
 }
 
@@ -547,7 +593,44 @@ pub fn qr_tridiag(
     n: i32,
     max_iter: i32
 ) -> bool with Mut, Div, Panic {
-    qr_tridiag_raw(diag, subdiag, n, max_iter, &!EIG_WORK_VECS)
+    if n<1 || n>256 || max_iter<1 {return false}
+    var i:i32=0
+    while i<n {
+        if !is_finite(diag[i]) || !is_finite(subdiag[i]) {return false}
+        i=i+1
+    }
+    // Scale into private scratch before any public output mutation. Direct
+    // tridiagonal callers require the same protection as the full solver.
+    var d:[f64;256]=[0.0;256]
+    var e:[f64;256]=[0.0;256]
+    var scale:f64=0.0
+    i=0
+    while i<n {
+        if eg_abs(diag[i])>scale {scale=eg_abs(diag[i])}
+        if eg_abs(subdiag[i])>scale {scale=eg_abs(subdiag[i])}
+        i=i+1
+    }
+    if scale==0.0 {scale=1.0}
+    i=0
+    while i<n {
+        d[i]=diag[i]/scale
+        e[i]=subdiag[i]/scale
+        if diag[i]!=0.0 && d[i]==0.0 {return false}
+        if subdiag[i]!=0.0 && e[i]==0.0 {return false}
+        i=i+1
+    }
+    let ok=qr_tridiag_raw(&!d,&!e,n,max_iter,&!EIG_WORK_VECS)
+    if !ok {return false}
+    i=0
+    while i<n {
+        let value=d[i]*scale
+        if !is_finite(value) || (d[i]!=0.0 && value==0.0) {return false}
+        d[i]=value
+        i=i+1
+    }
+    i=0
+    while i<n {diag[i]=d[i];subdiag[i]=e[i];i=i+1}
+    return true
 }
 
 pub fn eigen_symmetric(
@@ -562,20 +645,33 @@ pub fn eigen_symmetric(
 }
 
 pub fn eigen_workspace_householder_tridiag(n: i32) with Mut, Div, Panic {
-    EIG_WORK_N = n
+    EIG_WORK_CONVERGED = 0
+    EIG_WORK_TRIDIAG_READY = 0
+    if n<1 || n>256 || n!=EIG_WORK_N {return}
+    if !eg_input_valid(&EIG_WORK_MAT,n) {return}
     householder_tridiag(&!EIG_WORK_MAT, n, &!EIG_WORK_DIAG, &!EIG_WORK_SUBDIAG)
-    EIG_WORK_CONVERGED = 1
+    var k:i32=0
+    while k<n {
+        if !is_finite(EIG_WORK_DIAG[k]) || !is_finite(EIG_WORK_SUBDIAG[k]) {return}
+        k=k+1
+    }
+    EIG_WORK_TRIDIAG_READY = 1
+    // Reduction is not an eigensolve and cannot declare convergence.
 }
 
 pub fn eigen_workspace_qr_tridiag(n: i32, max_iter: i32) -> bool with Mut, Div, Panic {
-    EIG_WORK_N = n
+    EIG_WORK_CONVERGED = 0
+    if n<1 || n>256 || n!=EIG_WORK_N {return false}
+    if EIG_WORK_TRIDIAG_READY!=1 {return false}
     let ok = qr_tridiag(&!EIG_WORK_DIAG, &!EIG_WORK_SUBDIAG, n, max_iter)
     if ok { EIG_WORK_CONVERGED = 1 } else { EIG_WORK_CONVERGED = 0 }
     ok
 }
 
 pub fn eigen_workspace_symmetric(n: i32) -> bool with Mut, Div, Panic {
-    EIG_WORK_N = n
+    EIG_WORK_CONVERGED = 0
+    EIG_WORK_TRIDIAG_READY = 0
+    if n<1 || n>256 || n!=EIG_WORK_N {return false}
     let ok = eigen_symmetric(&!EIG_WORK_MAT, n, &!EIG_WORK_DIAG, &!EIG_WORK_VECS)
     if ok { EIG_WORK_CONVERGED = 1 } else { EIG_WORK_CONVERGED = 0 }
     ok

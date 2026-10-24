@@ -86,6 +86,15 @@ STREAM_CASES=(
   madaros_region_reclaim_syscall_escape.sio
 )
 
+domain_source="$RP/madaros_allocation_domain_cursors.sio"
+default_build "$domain_source" "$WORK/allocation-domains.elf" >"$WORK/allocation-domains.log" 2>&1 \
+  || { tail -n 30 "$WORK/allocation-domains.log" >&2; fail "allocation domains: compile failed"; }
+domain_rc="$(run_elf "$WORK/allocation-domains.elf" "$WORK/allocation-domains.out")"
+[[ "$domain_rc" == 0 ]] || fail "allocation domains: runtime exited $domain_rc"
+grep -qxF 'ALLOCATION_DOMAIN_CURSORS_OK' "$WORK/allocation-domains.out" \
+  || fail "allocation domains: exact marker missing"
+echo "$TAG PASS: Box and aggregate cursor domains remain independent"
+
 # ---------------------------------------------------------------- 1 streaming
 # The default build is compiled and RUN. The streaming lane's ELF cannot be
 # run: on origin/main it already segfaults for a hello-world (measured

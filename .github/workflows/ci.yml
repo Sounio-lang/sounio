@@ -1074,11 +1074,14 @@ jobs:
       # the runner's ~70 GB /mnt temp disk moves the rung off the cliff; it is
       # a headroom measure, not a correctness claim. Printed before/after so a
       # future reader can see the actual numbers in the log.
-      - name: Add swap headroom for the gen2 self-compile (peak RSS 18.4 GB vs 16 GB RAM)
+      # Slurm 14701 (2026-10-16) reached run at 63,570,060 KiB peak RSS;
+      # the earlier 16 GiB extra swap no longer fits current compiler sources.
+      # This changes available resources, not the expected rung or IR limits.
+      - name: Add measured swap headroom for the gen2 self-compile
         if: runner.environment == 'github-hosted'
         run: |
           echo "--- before"; free -m; swapon --show; df -h /mnt
-          sudo fallocate -l 16G /mnt/swapfile-gen2
+          sudo fallocate -l 48G /mnt/swapfile-gen2
           sudo chmod 600 /mnt/swapfile-gen2
           sudo mkswap /mnt/swapfile-gen2
           sudo swapon /mnt/swapfile-gen2
@@ -1086,6 +1089,10 @@ jobs:
       - name: Mark that the compiler build was reached
         id: compiler-reached
         run: echo "reached=true" >> "$GITHUB_OUTPUT"
+      - name: Explicit AST expression-kind consumers reference real variants
+        run: |
+          c++ -std=c++23 -O2 -Wall -Wextra -Werror scripts/ci/ast_expr_kind_surface.cpp -o /tmp/madaros-ast-expr-surface
+          /tmp/madaros-ast-expr-surface "$PWD"
       - name: Build Madaros once and run current-source f64 lowering gates
         run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
       # SCO gates require a compiler from this exact source, not the shipping prebuilt.
@@ -1397,6 +1404,41 @@ jobs:
       # missed it and it was found by accident. Re-measured afterwards: 118 of
       # 559 files under self-hosted/ failed. This step reuses the ELF the step
       # above already built and kept (KEEP=1) — it adds no build.
+      - name: Module registry capacity preserves scoped identity and refusal
+        env:
+          MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/module_registry_capacity_gate.sh "$MADAROS_BIN"
+      - name: Type environment capacity and fail-closed binding pressure
+        run: bash scripts/ci/type_env_capacity_gate.sh /tmp/sounio-madaros-current-source-f64-lowering/madaros /tmp/madaros-type-env
+      - name: IR tail growth and native address-window contract
+        run: bash scripts/ci/ir_tail_growth_gate.sh /tmp/sounio-madaros-current-source-f64-lowering/madaros /tmp/madaros-ir-tail
+      - name: Flat argument lifetime across compiler Box-arena reclaim
+        run: bash scripts/ci/flat_arg_reclaim_gate.sh /tmp/sounio-madaros-current-source-f64-lowering/madaros /tmp/madaros-flat-reclaim
+      # Issue #3005: the raw ELF must keep compiling inside the launcher's
+      # documented 16 MiB floor. #2981 spent the 8 MiB shell-default headroom
+      # (~9.3 MiB needed now vs <8 before, measured by capacity ablation); the
+      # floor itself held, and this step makes it a ratchet instead of a comment
+      # in bin/madaros. See scripts/ci/low_stack_floor_gate.sh for the walk.
+      - name: Raw compiler compiles inside the documented 16 MiB stack floor
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/low_stack_floor_gate.sh
+      - name: Native diagnostic environment refresh allocation bound
+        run: bash scripts/ci/native_env_refresh_gate.sh /tmp/sounio-madaros-current-source-f64-lowering/madaros /tmp/madaros-env-refresh
+      - name: BSS zero pages preserve initializer order and denied-syscall fallback
+        run: |
+          bss_seed="$RUNNER_TEMP/bss-source-seed"
+          bin/souc-linux-x86_64 self-hosted/compiler/lean_single.sio "$bss_seed" >"$RUNNER_TEMP/bss-seed-build.log" 2>&1
+          test -s "$bss_seed"
+          if grep -Eq 'error\[E200\]|error: undeclared local' "$RUNNER_TEMP/bss-seed-build.log"; then cat "$RUNNER_TEMP/bss-seed-build.log"; exit 1; fi
+          chmod +x "$bss_seed"
+          bash scripts/ci/bss_zero_pages_gate.sh /tmp/sounio-madaros-current-source-f64-lowering/madaros "$bss_seed" /tmp/madaros-bss-zero
+      - name: SCO strategy environment is read once without changing ablation
+        run: bash scripts/ci/sco_env_once_gate.sh /tmp/sounio-madaros-current-source-f64-lowering/madaros /tmp/madaros-sco-env-once
+      - name: Box trace environment is read once with runtime semantics preserved
+        run: bash scripts/ci/box_env_once_gate.sh /tmp/sounio-madaros-current-source-f64-lowering/madaros /tmp/madaros-box-env-once
+      - name: Fixed-point diagnostics count named checker errors
+        run: bash scripts/ci/fixed_point_named_diagnostic_gate.sh
       - name: Madaros parses its own source tree
         env:
           SOUNIO_MADAROS_SELF_PARSE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
@@ -1540,7 +1582,7 @@ jobs:
     name: Native Self-Host (macOS arm64)
     runs-on: macos-15
     needs: [impact, source-bootstrap-selfhost-linux-x86_64]
-    if: always() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.full == 'true') && needs.source-bootstrap-selfhost-linux-x86_64.result == 'success'
+    if: ${{ !cancelled() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.full == 'true') && needs.source-bootstrap-selfhost-linux-x86_64.result == 'success' }}
     timeout-minutes: 60
     env:
       SOUNIO_SELFHOST_HOST_GATE_DIR: /tmp/sounio-selfhost-macos-arm64
@@ -1577,10 +1619,20 @@ jobs:
           brew list boost >/dev/null 2>&1 || brew install boost
           codesign -s - -f artifacts/self-hosted/souc-self-hosted-arm64-macos
           codesign --verify artifacts/self-hosted/souc-self-hosted-arm64-macos
+      - name: Native AST expression-kind surface preflight
+        run: |
+          /usr/bin/clang++ -std=c++23 -O2 -Wall -Wextra -Werror scripts/ci/ast_expr_kind_surface.cpp -o /tmp/madaros-ast-expr-surface
+          /tmp/madaros-ast-expr-surface "$PWD"
       - name: Build and execute current-source native Madaros
         run: bash scripts/ci/build_madaros_macos_arm64.sh "$PWD/artifacts/self-hosted/souc-self-hosted-arm64-macos" /tmp/madaros-current-macos
       - name: Native Madaros ABI acceptance
         run: bash scripts/ci/madaros_macos_arm64_acceptance_gate.sh /tmp/madaros-current-macos
+      - name: Native module registry capacity and scalar bool globals
+        run: bash scripts/ci/module_registry_capacity_gate.sh /tmp/madaros-current-macos /tmp/madaros-module-registry
+      - name: Native type environment capacity and binding refusal
+        run: bash scripts/ci/type_env_capacity_gate.sh /tmp/madaros-current-macos /tmp/madaros-type-env
+      - name: Native IR tail growth and ARM64 address-window contract
+        run: bash scripts/ci/ir_tail_growth_gate.sh /tmp/madaros-current-macos /tmp/madaros-ir-tail
       - name: Native Madaros positive and negative regressions
         run: bash scripts/ci/madaros_macos_port_regressions_gate.sh /tmp/madaros-current-macos /tmp/madaros-port-regressions
       - name: Native wide arithmetic with exact C++23 oracle
@@ -1613,7 +1665,7 @@ jobs:
     name: Full Test Suite
     runs-on: ubuntu-24.04
     needs: [impact, native-selfhost-linux-x86_64]
-    if: always() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true') && needs.native-selfhost-linux-x86_64.result == 'success'
+    if: ${{ !cancelled() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true') && needs.native-selfhost-linux-x86_64.result == 'success' }}
     # The full compiler/test suite routinely exceeds the former 15-minute cap.
     # Let it produce a completed result so CI Decision can evaluate the suite.
     timeout-minutes: 90
@@ -1732,6 +1784,21 @@ jobs:
         run: |
           ulimit -s 1048576 2>/dev/null || true
           bash scripts/ci/build_modular_madaros.sh /tmp/madaros-ci.elf
+      - name: Bind fresh compiler to this checkout
+        run: |
+          bash scripts/ci/stdlib_deep_compiler_receipt.sh prepare \
+            "$GITHUB_WORKSPACE" /tmp/madaros-ci.elf \
+            "$RUNNER_TEMP/stdlib-deep-compiler" "$GITHUB_SHA"
+      - name: Transfer this run's current-source compiler
+        uses: actions/upload-artifact@v4
+        with:
+          # A failed-only rerun may reuse a successful Witness from this run
+          # at the identical SHA. Receipt verification rejects another tip.
+          name: current-source-madaros-${{ github.run_id }}-${{ github.sha }}
+          path: ${{ runner.temp }}/stdlib-deep-compiler/
+          overwrite: true
+          retention-days: 1
+          if-no-files-found: error
       - name: Imported Seq lowering against the fresh build
         env:
           MADAROS_RAW_BIN: /tmp/madaros-ci.elf
@@ -2023,6 +2090,74 @@ jobs:
           MADAROS_BIN: /tmp/madaros-ci.elf
         run: bash scripts/ci/madaros_ontology_enforcement_gate.sh
 
+  stdlib-deep-science:
+    name: Stdlib Deep Science
+    needs: [impact, madaros-witness-gate]
+    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install independent C++23 reference dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++ libboost-dev libquadmath0 jq
+      - name: Receipt and required-job tamper controls
+        run: |
+          bash scripts/ci/stdlib_deep_compiler_receipt.sh selftest
+          bash scripts/ci/stdlib_deep_ci_decision.sh selftest
+      - name: Receive this run's fresh compiler
+        uses: actions/download-artifact@v4
+        with:
+          name: current-source-madaros-${{ github.run_id }}-${{ github.sha }}
+          path: ${{ runner.temp }}/stdlib-deep-compiler
+      - name: Verify source and compiler before use
+        run: |
+          bash scripts/ci/stdlib_deep_compiler_receipt.sh verify \
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP/stdlib-deep-compiler" "$GITHUB_SHA"
+          chmod 755 "$RUNNER_TEMP/stdlib-deep-compiler/madaros.elf"
+      - name: Replay native stdlib and independent references
+        env:
+          MADAROS_RAW_BIN: ${{ runner.temp }}/stdlib-deep-compiler/madaros.elf
+          STDLIB_DEEP_OUT: ${{ runner.temp }}/stdlib-deep-results
+          TMPDIR: ${{ runner.temp }}/stdlib-deep-tmp
+          SOUNIO_MADAROS_NOCACHE: '1'
+          SOUNIO_MADAROS_CACHE_READONLY: '1'
+          SOUNIO_MADAROS_CACHE: ${{ runner.temp }}/stdlib-deep-cache
+          SOUNIO_BUILD_LOCK: ${{ runner.temp }}/stdlib-deep-build.lock
+        run: |
+          mkdir -p "$TMPDIR" "$SOUNIO_MADAROS_CACHE"
+          bash scripts/stdlib/deep_science_gate.sh
+      - name: Upload compact replay receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stdlib-deep-science-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 1
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/stdlib-deep-compiler/SOURCE_GIT_SHA
+            ${{ runner.temp }}/stdlib-deep-compiler/RECEIPT_VERSION
+            ${{ runner.temp }}/stdlib-deep-compiler/COMPILER.sha256
+            ${{ runner.temp }}/stdlib-deep-compiler/INPUTS.sha256
+            ${{ runner.temp }}/stdlib-deep-compiler/TRACKED_PATHS.txt
+            ${{ runner.temp }}/stdlib-deep-results/RESULTS.tsv
+            ${{ runner.temp }}/stdlib-deep-results/STATUS
+            ${{ runner.temp }}/stdlib-deep-results/COMPILER.sha256
+            ${{ runner.temp }}/stdlib-deep-results/INPUTS.sha256
+            ${{ runner.temp }}/stdlib-deep-results/INPUTS.verify.txt
+            ${{ runner.temp }}/stdlib-deep-results/COMPILER.verify.txt
+            ${{ runner.temp }}/stdlib-deep-results/CXX_TOOLCHAIN.txt
+            ${{ runner.temp }}/stdlib-deep-results/*.identities
+            ${{ runner.temp }}/stdlib-deep-results/*.stdout
+            ${{ runner.temp }}/stdlib-deep-results/*.stderr
+            ${{ runner.temp }}/stdlib-deep-results/*.resource
+            ${{ runner.temp }}/stdlib-deep-results/*.check.txt
+            ${{ runner.temp }}/stdlib-deep-results/*.compile.txt
+            ${{ runner.temp }}/stdlib-deep-results/*.cpp.txt
+
   gate-wave-0:
     name: Gate Wave 0
     needs: impact
@@ -2273,6 +2408,7 @@ jobs:
       - native-selfhost-macos-arm64
       - full-test-suite
       - madaros-witness-gate
+      - stdlib-deep-science
       - gate-wave-0
       - sounio-lint
       - lean-proofs
@@ -2291,3 +2427,8 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           NIGHTLY_INPUT: ${{ inputs.nightly }}
         run: python3 scripts/ci/evaluate_ci_decision.py
+      - name: Require selected deep scientific replay
+        if: always()
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: bash scripts/ci/stdlib_deep_ci_decision.sh

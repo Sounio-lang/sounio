@@ -1,5 +1,25 @@
 # Stats
 
+## Checked dynamic scientific workflows
+
+The borrowed count-model APIs provide fixed-alpha fitting and information,
+ML dispersion profiling, fixed-alpha bootstrap and
+[ML profile-refit bootstrap](regression/DYNAMIC_COUNT_PROFILE_BOOTSTRAP.md).
+The latter reestimates coefficients and dispersion under both models in every
+replicate, preserving explicit failure, precision and work-budget diagnostics.
+
+[Dynamic HC3 and single-way cluster covariance](regression/DYNAMIC_ROBUST_COVARIANCE.md)
+uses caller-owned buffers above the legacy fixed-size limits. These are
+computational covariance and contrast outputs; availability does not certify
+finite-sample inference or scientific assumptions.
+
+[Count dataset preparation](../genomics/COUNT_DATASET.md) connects keyed raw
+integer counts, normalization offsets and reusable per-gene fitting to
+[complete scientific documents](../viz/SCIENTIFIC_DOCUMENT.md). Numerical
+concordance, empirical calibration, resource measurements and merge status
+are separate evidence boundaries.
+
+
 ## Overview
 
 Comprehensive statistics module: distributions, inference, regression (linear/logistic/robust), Bayesian analysis, causal inference, multivariate methods, and timeseries.
