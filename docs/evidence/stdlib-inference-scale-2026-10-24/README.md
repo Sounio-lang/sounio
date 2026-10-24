@@ -101,3 +101,16 @@ This gate covers that numerical branch, including normalization and legacy
 rendering; it does not include later overlay, tracing or marker-size extensions,
 and is not B199 qualification. The separate combined-current-main gate remains
 its own acceptance boundary.
+
+## Combined inference, normalization and rendering gate
+
+`combined-current-main/` records Slurm16875: final STATUS0 on the integrated
+source archived at commit prefix761c2f71ca and compiled by the freshly rebuilt
+main29ce compiler8c630110.... The actual input manifest, phase table and compressed
+receipts bind that snapshot. All recorded native fixtures, C++ concordances,
+negative controls and final source/compiler hash checks passed, including the
+streaming reducer, layered scientific diagnostics, canonical bitmap rendering,
+count/ODE workflows and the new numerical/normalization contracts. This is the
+combined functional gate; later tracing and marker-sizing code require their
+own renewed acceptance. Neither this gate nor the earlier B31 performance pilots
+establish calibration or the B1992x target.
