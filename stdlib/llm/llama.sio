@@ -18,7 +18,7 @@
 // these same functions, not a new forward.
 
 use llm::safetensors::{StFile, st_find, st_load_f64, st_read_all, st_scan_bool, st_scan_f64, st_scan_i64}
-use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_gemm, ck_gemv, ck_get, ck_set}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_free, ck_gemm, ck_gemv, ck_get, ck_set}
 use math::pure::{cos, exp, pow, sin, sqrt}
 use hetero::cuda_exec::{CudaExec}
 use hetero::runtime::{Runtime, rt_gemm_rect}
@@ -351,7 +351,9 @@ fn ll_cpu_proj(x: &CpuBuf, w: &CpuBuf, out: &!CpuBuf, rows: i64, outd: i64, ind:
 }
 
 // Forward `ntok` tokens (ids as f64 in `tokens`) appended at kv.len.
-// Returns logits [vocab] of the last token. Cache grows by ntok.
+// Returns logits [vocab] of the last token; the caller owns that buffer
+// and releases it with ck_free. Every other buffer of the call is freed
+// before the return. Cache grows by ntok.
 pub fn llama_forward(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64) -> CpuBuf with Alloc, Mut, Panic, Div {
     let rt = ll_no_rt()
     ll_forward_impl(m, kv, tokens, ntok, &rt, false)
@@ -392,6 +394,7 @@ fn ll_forward_impl(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Ru
         let _ps2 = ll_proj(rt, use_gpu, &h, &m.wk[li as usize], &!kk, ntok, kvdim, hidden)
         var vv = ck_alloc(ntok * kvdim)
         let _ps3 = ll_proj(rt, use_gpu, &h, &m.wv[li as usize], &!vv, ntok, kvdim, hidden)
+        ck_free(&h)
         if m.qb[li as usize].len > 0 {
             ll_add_bias(&!q, &m.qb[li as usize], ntok, qdim)
             ll_add_bias(&!kk, &m.kb[li as usize], ntok, kvdim)
@@ -414,6 +417,8 @@ fn ll_forward_impl(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Ru
             }
             cp = cp + 1
         }
+        ck_free(&kk)
+        ck_free(&vv)
         // Causal GQA attention for the new rows.
         var att = ck_alloc(ntok * qdim)
         let scale = 1.0 / sqrt(dh as f64)
@@ -463,14 +468,18 @@ fn ll_forward_impl(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Ru
             }
             si = si + 1
         }
+        ck_free(&q)
         var o = ck_alloc(ntok * hidden)
         let _ps4 = ll_proj(rt, use_gpu, &att, &m.wo[li as usize], &!o, ntok, hidden, qdim)
+        ck_free(&att)
         ll_add_into(&!x, &o)
+        ck_free(&o)
         let h2 = ll_rmsnorm(&x, &m.post_norm[li as usize], ntok, hidden, m.cfg.eps)
         var g = ck_alloc(ntok * inter)
         let _ps5 = ll_proj(rt, use_gpu, &h2, &m.gate[li as usize], &!g, ntok, inter, hidden)
         var u = ck_alloc(ntok * inter)
         let _ps6 = ll_proj(rt, use_gpu, &h2, &m.up[li as usize], &!u, ntok, inter, hidden)
+        ck_free(&h2)
         var act = ck_alloc(ntok * inter)
         var ai: i64 = 0
         while ai < ntok * inter {
@@ -478,22 +487,31 @@ fn ll_forward_impl(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Ru
             write_f64(act.data, ai, (gv / (1.0 + exp(0.0 - gv))) * read_f64(u.data, ai))
             ai = ai + 1
         }
+        ck_free(&g)
+        ck_free(&u)
         var dn = ck_alloc(ntok * hidden)
         let _ps7 = ll_proj(rt, use_gpu, &act, &m.down[li as usize], &!dn, ntok, hidden, inter)
+        ck_free(&act)
         ll_add_into(&!x, &dn)
+        ck_free(&dn)
         li = li + 1
     }
+    ck_free(&scores)
     kv.len = pos0 + ntok
-    // Logits of the last position.
+    // Logits of the last position. The returned buffer is the caller's:
+    // every other allocation of this call has been released.
     var last = ck_alloc(hidden)
     var j2: i64 = 0
     while j2 < hidden {
         write_f64(last.data, j2, read_f64(x.data, (ntok - 1) * hidden + j2))
         j2 = j2 + 1
     }
+    ck_free(&x)
     let ln = ll_rmsnorm(&last, &m.final_norm, 1, hidden, m.cfg.eps)
+    ck_free(&last)
     var logits = ck_alloc(m.cfg.vocab)
     ck_gemv(&m.lm_head_t, &ln, &!logits, hidden, m.cfg.vocab)
+    ck_free(&ln)
     logits
 }
 

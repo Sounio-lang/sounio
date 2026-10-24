@@ -619,3 +619,28 @@ The residual ~37 MiB/request is unfreed forward temporaries and the
 per-request HTTP buffers. Paging does not claim to remove that; it
 removes the KV accumulation, and it stops allocating the unused tail
 of `cap` (the 10× gap above is that tail, at cap 512).
+
+## 20. Forward temporaries
+
+`ll_forward_impl` releases every buffer at its last use (`ck_free`):
+the two RMSNorms, Q/K/V, the attention output, the MLP activations,
+the score row, the hidden state and the last-position copy. The
+returned logits stay alive — the caller owns them. `llm serve` frees
+the previous logits before each decode step, the one-token id buffer,
+and the final logits at the end of the request, together with the
+paged KV.
+
+Gates (OBSERVED, SmolLM2-135M):
+
+- `llama_smol_demo`: kv-versus-prefill max abs diff 0, argmax 7042,
+  canonical greedy text. PASS. The paged-KV demo on tiny-random is
+  unchanged (max diff 0, 12 blocks, free returns to 0).
+- Serve RSS, five greedy requests, `max_tokens` 8, same prompt as §19.
+  Steady growth is +212 KiB/request (four steps of 212 KiB, one of
+  208). The §19 build, which freed only the KV, grew +38,028 KiB/request.
+  Text of all five replies: ` Paris. It is the largest city in`.
+  Wall time for the eight tokens stayed in the same band (~49–51 s).
+
+What remains is the request-scoped HTTP buffers (`sv_handle` does not
+release its read buffer, the JSON body or the decoded text). That is
+the +212 KiB, not the forward.
