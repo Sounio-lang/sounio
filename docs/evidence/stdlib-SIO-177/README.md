@@ -1,0 +1,69 @@
+# SIO-177 first increment: decision and structural contract
+
+Base: remote main a2a44df195bb8caf3fb07cbc9517275b29325e94. ADR018 records the
+maintainer-approved D34 package. `epistemic::interval_contract` is an explicit
+structural implementation with private endpoints and status; it is not the
+`Interval<F>` compiler primitive and exposes no arithmetic operators.
+
+The constructor rejects NaN endpoints and infinite singleton intervals,
+canonicalizes empty/zero/decorations, and keeps invalid input distinct from a
+valid empty set. Membership contains real finite values. Strict comparison returns
+Never/Possible/Certain/refused (0/1/2/3), never an implicit Bool. Hull combines
+already evaluated values only; it is not effect-checked `hull_branches`.
+
+## Reproduction and executable evidence
+
+```sh
+MADAROS_RAW_BIN=/absolute/identified/madaros.elf \
+INTERVAL_CONTRACT_OUT=/absolute/fresh/result \
+  bash scripts/stdlib/interval_contract_gate.sh
+```
+
+Final Slurm17107 completed0:0, UID1000, stack524288KiB. Frozen source07 and result07:
+`/scratch/sounio-stdlib-inference-scale-20261024/SIO177`.
+Retained compiler SHA256:
+`d74fbebe0ff442e8c77bec024d6d92325b83a98d3f1487caa1db59ef171a41e6`.
+This is not a fresh build of current main. Native ELF SHA256:
+`f3f94c6b5c1f7bc1da0aef1a114a32ad465e42d2e2864ae1598910e6b013e413`.
+
+Check, compile and native execution succeeded. The independent C++23 oracle
+parsed864 actual native constructor/comparison/hull rows and required exact signed
+endpoint bits/status/decoration/order/count and completion. Inputs cover both
+infinities, finite extrema, negative/positive subnormals, both zero signs, NaN,
+singletons, reversed bounds and six decoration values. The native fixture adds
+membership and invalid-result assertions. No floating-point arithmetic guarantee
+or statistical coverage is inferred from these structural checks.
+
+Controls: changed status is rejected with exit8; truncated output with exit9;
+private-field forgery is rejected by the compiler with exit1 and a private-field
+diagnostic. Source and selected compiler SHA256 checks pass after execution.
+`contract-17107-text.tar.gz` retains final text receipts without ELFs. Earlier
+`contract-17096-text.tar.gz` retains the first successful structural replay before
+control exit statuses and private-field enforcement were added to the gate.
+
+## Preserved diagnostics
+
+- 17084/source01: check succeeds; lowering rejects nested print arguments whose
+  scalar kind is unresolved. Typed i64 print locals fix the fixture interface.
+- 17087/source02: native assertion fails; no success claim.
+- 17090/source03 and17092/source04: diagnostic checkpoints isolate an inferred
+  `let inf=bits_to_f64(...)` being negated as integer bits by retained d74. Native
+  lower endpoint bits were -9218868437227405312 rather than -4503599627370496.
+- 17096/source05: explicit `let inf:f64` restores correct native binary64 bits and
+  passes864-row C++ concordance. 17102/source06 adds exact mutant status receipts;
+  17107/source07 adds the private-field negative control. All snapshots are retained.
+
+The compiler-kind diagnostic was sent to the existing shared compiler-file owner;
+it is not asserted to reproduce in a fresh current-main build. Explicit endpoint
+local types are retained in this module. No shared compiler file was edited.
+
+## Remaining programme obligations
+
+SIO177 remains in progress. Frontend/IR primitive integration, separate Knowledge
+e/u, interval Jacobians, literal conversion and effect-checked branching are not
+implemented by this increment. SIO178 still owes directed arithmetic/backends,
+FP-environment checks, million-case per-operation qualification and Lean proofs.
+Existing `data::interval`, `verify::interval` and private `epistemic::interval_ieee`
+are distinct legacy representations, not aliases of this contract or certified
+implementations of ADR018; some use round-to-nearest endpoint arithmetic. This
+increment does not promote their containment claims or change their API behavior.
