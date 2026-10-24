@@ -5637,6 +5637,30 @@ fn lower_apply_global_var_init(slot: &! IrFunction, name: Name) with Mut, Panic,
         (*slot).instr_count = j
     }
 }
+// Byte-element hint for the next array repeat literal: 0 none, 1 i8, 2 u8.
+// A struct-literal field or a `let` whose declared type is [i8; N] / [u8; N]
+// sets it right before lowering its initialiser; lower_array_repeat_literal_ref
+// reads and clears it before lowering anything else, and the setter clears it
+// again afterwards, so it never reaches a nested or a later literal. A `[0; 384]`
+// carries no element type of its own: the declaration is the only witness that
+// the array holds bytes (IR_ALLOC_PACKED_I8, #2966).
+var LOWER_PACK_BYTE_HINT: i64 = 0
+
+fn lower_byte_elem_kind_of_name(n: Name) -> i64 with Mut, Panic, Div {
+    if n.len != 2 { return 0 }
+    if n.buf[1] != 56 as i8 { return 0 }
+    if n.buf[0] == 105 as i8 { return 1 }
+    if n.buf[0] == 117 as i8 { return 2 }
+    0
+}
+
+fn lower_opt_type_byte_array_kind(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *ty_opt {
+        Some(ty) => lower_byte_elem_kind_of_name(lower_type_expr_array_elem_name(&(*ty))),
+        None => 0,
+    }
+}
+
 fn lower_type_expr_array_elem_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeArray { return ir_empty_name() }
     match (*te).inner {
@@ -13849,7 +13873,11 @@ impl Lowerer {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
         let dst_reg = pair_dst.1
-        lo = lo.emit(ir_alloc_array(dst_reg, lo.aggregate_storage_bytes(elem_count), elem_count))
+        // Same layout as the source: a packed byte array copies to a packed one.
+        var copy_alloc = ir_alloc_array(dst_reg, lo.aggregate_storage_bytes(elem_count), elem_count)
+        copy_alloc.label_id = IR_ALLOC_LIKE_SOURCE
+        copy_alloc.src1 = src_reg
+        lo = lo.emit(copy_alloc)
         if elem_is_float {
             lo = lo.emit(ir_mark_float_reg(dst_reg))
             lo = lo.bind_reg_array_elem_float(dst_reg)
@@ -14514,6 +14542,8 @@ impl Lowerer {
     }
 
     fn lower_array_repeat_literal_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pack_kind = LOWER_PACK_BYTE_HINT
+        LOWER_PACK_BYTE_HINT = 0
         let right_opt: Option<Box<Expr>> = e.right
         let repeat_count = match right_opt {
             Some(count_expr) => (*count_expr).int_val,
@@ -14522,7 +14552,13 @@ impl Lowerer {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
         let dst = pair_dst.1
-        lo = lo.emit(ir_alloc_array(dst, lo.aggregate_storage_bytes(repeat_count), repeat_count))
+        var alloc_instr = ir_alloc_array(dst, lo.aggregate_storage_bytes(repeat_count), repeat_count)
+        if repeat_count > 0 && pack_kind == 1 {
+            alloc_instr.label_id = IR_ALLOC_PACKED_I8
+        } else if repeat_count > 0 && pack_kind == 2 {
+            alloc_instr.label_id = IR_ALLOC_PACKED_U8
+        }
+        lo = lo.emit(alloc_instr)
 
         let left_opt: Option<Box<Expr>> = e.left
         match left_opt {
@@ -28322,7 +28358,16 @@ impl Lowerer {
             }
             _ => {}
         }
+        match s.expr {
+            Some(rhs_lit) => {
+                if (*rhs_lit).kind == ExprKind::ExprArrayLit {
+                    LOWER_PACK_BYTE_HINT = lower_opt_type_byte_array_kind(&s.ty)
+                }
+            }
+            None => {}
+        }
         let pair = lhs_lo.lower_opt_expr_ref(&s.expr)
+        LOWER_PACK_BYTE_HINT = 0
         var lo = pair.0
         lo.allow_direct_capturing_closure_literal = false
         var reg = pair.1
@@ -31349,7 +31394,13 @@ impl Lowerer {
                             lo.lookup_local_fixed_array_len((*list).head.value.name),
                             false)
                     } else {
-                        lo.lower_expr_ref(&(*list).head.value)
+                        if struct_name.len > 0 && (*list).head.value.kind == ExprKind::ExprArrayLit {
+                            LOWER_PACK_BYTE_HINT = lower_byte_elem_kind_of_name(
+                                lo.field_array_elem_type_name_for_struct(struct_name, (*list).head.name))
+                        }
+                        let field_pair = lo.lower_expr_ref(&(*list).head.value)
+                        LOWER_PACK_BYTE_HINT = 0
+                        field_pair
                     }
                     lo = pair.0
                     let vreg = pair.1
