@@ -10198,14 +10198,40 @@ fn checker_bind_closure_params_inplace(c: *mut Checker, opt: Option<Box<ClosureP
     }
 }
 
-fn checker_closure_peer_primitive(c: *mut Checker, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
+// Closure parameter inference reads only the type environment and reports
+// code-4 errors. The core takes the environment by reference and returns the
+// error spans instead of writing them into a Checker, so the by-value spine
+// (Checker::check_closure_expr) needs no `(&!c) as *mut Checker`: in a
+// Madaros-built compiler that pointer addresses an object, whose fields after
+// the first array are not where the raw `*mut Checker` layout reads them, and
+// a reported error wrote error_count past the object (#2966).
+pub struct ClosureSpanList {
+    pub head: Span,
+    pub tail: Option<Box<ClosureSpanList> >,
+}
+
+pub struct ClosureConstraint {
+    pub name: Name,
+    pub errs: Option<Box<ClosureSpanList> >,
+}
+
+pub struct ClosureParamsResolved {
+    pub params: Option<Box<ClosureParamList> >,
+    pub errs: Option<Box<ClosureSpanList> >,
+}
+
+fn closure_errs_push(errs: Option<Box<ClosureSpanList> >, span: Span) -> Option<Box<ClosureSpanList> > {
+    Some(Box::new(ClosureSpanList { head: span, tail: errs }))
+}
+
+fn closure_peer_primitive_env(env: &TypeEnv, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
     if (*e).kind == ExprKind::ExprIntLit { return make_name("i64") }
     if (*e).kind == ExprKind::ExprFloatLit { return make_name("f64") }
     if (*e).kind == ExprKind::ExprBoolTrue || (*e).kind == ExprKind::ExprBoolFalse {
         return make_name("bool")
     }
     if (*e).kind == ExprKind::ExprIdent {
-        let ty = type_env_lookup(&(*c).env, (*e).name)
+        let ty = type_env_lookup(env, (*e).name)
         if ty.kind == TypeKind::TyI64 { return make_name("i64") }
         if ty.kind == TypeKind::TyF64 { return make_name("f64") }
         if ty.kind == TypeKind::TyBool { return make_name("bool") }
@@ -10213,11 +10239,14 @@ fn checker_closure_peer_primitive(c: *mut Checker, e: &Expr) -> Name with Mut, P
     empty_name()
 }
 
-fn checker_closure_param_constraint(c: *mut Checker, param: Name, opt: &Option<Box<Expr>>, known: Name) -> Name with Mut, Panic, Div, Alloc, IO {
+// Errors are prepended; closure_errs_report_* walk the list from its tail, so
+// they are reported in traversal order, as before.
+fn closure_param_constraint_env(env: &TypeEnv, param: Name, opt: &Option<Box<Expr>>, known: Name, errs_in: Option<Box<ClosureSpanList> >) -> ClosureConstraint with Mut, Panic, Div, Alloc {
     var result = known
+    var errs = errs_in
     match *opt {
         Some(e) => {
-            if (*e).kind == ExprKind::ExprClosure { return result }
+            if (*e).kind == ExprKind::ExprClosure { return ClosureConstraint { name: result, errs: errs } }
             if (*e).kind == ExprKind::ExprBinary {
                 match (*e).left {
                     Some(left) => {
@@ -10225,14 +10254,14 @@ fn checker_closure_param_constraint(c: *mut Checker, param: Name, opt: &Option<B
                             Some(right) => {
                                 var candidate = empty_name()
                                 if (*left).kind == ExprKind::ExprIdent && name_eq((*left).name, param) {
-                                    candidate = checker_closure_peer_primitive(c, &(*right))
+                                    candidate = closure_peer_primitive_env(env, &(*right))
                                 }
                                 if (*right).kind == ExprKind::ExprIdent && name_eq((*right).name, param) {
-                                    candidate = checker_closure_peer_primitive(c, &(*left))
+                                    candidate = closure_peer_primitive_env(env, &(*left))
                                 }
                                 if !name_is_empty(candidate) {
                                     if !name_is_empty(result) && !name_eq(result, candidate) {
-                                        checker_report_error_at_inplace(c, (*e).span, 4, 0, 0, 0)
+                                        errs = closure_errs_push(errs, (*e).span)
                                     } else { result = candidate }
                                 }
                             }
@@ -10242,9 +10271,11 @@ fn checker_closure_param_constraint(c: *mut Checker, param: Name, opt: &Option<B
                     None => {}
                 }
             }
-            result = checker_closure_param_constraint(c, param, &(*e).left, result)
-            result = checker_closure_param_constraint(c, param, &(*e).right, result)
-            result = checker_closure_param_constraint(c, param, &(*e).else_expr, result)
+            let r_left = closure_param_constraint_env(env, param, &(*e).left, result, errs)
+            let r_right = closure_param_constraint_env(env, param, &(*e).right, r_left.name, r_left.errs)
+            let r_else = closure_param_constraint_env(env, param, &(*e).else_expr, r_right.name, r_right.errs)
+            result = r_else.name
+            errs = r_else.errs
             match (*e).block {
                 Some(block) => {
                     var stmts = &(*block).stmts
@@ -10253,7 +10284,9 @@ fn checker_closure_param_constraint(c: *mut Checker, param: Name, opt: &Option<B
                             Some(node) => {
                                 // A shadowing binding starts a different variable.
                                 if ((*node).head.kind == StmtKind::StmtLet || (*node).head.kind == StmtKind::StmtVar) && name_eq((*node).head.name, param) { break }
-                                result = checker_closure_param_constraint(c, param, &(*node).head.expr, result)
+                                let r_stmt = closure_param_constraint_env(env, param, &(*node).head.expr, result, errs)
+                                result = r_stmt.name
+                                errs = r_stmt.errs
                                 stmts = &(*node).tail
                             }
                             None => break,
@@ -10265,32 +10298,52 @@ fn checker_closure_param_constraint(c: *mut Checker, param: Name, opt: &Option<B
         }
         None => {}
     }
-    result
+    ClosureConstraint { name: result, errs: errs }
 }
 
-fn checker_resolve_closure_params_inplace(c: *mut Checker, params: Option<Box<ClosureParamList>>, body: &Option<Box<Expr>>) -> Option<Box<ClosureParamList>> with Mut, Panic, Div, Alloc, IO {
+fn closure_resolve_params_env(env: &TypeEnv, params: Option<Box<ClosureParamList> >, body: &Option<Box<Expr>>, errs_in: Option<Box<ClosureSpanList> >) -> ClosureParamsResolved with Mut, Panic, Div, Alloc {
     match params {
         Some(list) => {
             var param = (*list).head
+            var errs = errs_in
             if param.ty.kind == TypeExprKind::TypeInfer {
-                let primitive = checker_closure_param_constraint(c, param.name, body, empty_name())
+                let cons = closure_param_constraint_env(env, param.name, body, empty_name(), errs)
+                errs = cons.errs
+                let primitive = cons.name
                 if name_is_empty(primitive) {
                     // Do not publish a wildcard signature that accepts bool/string
                     // calls to a numeric closure. Context-only inference is not
                     // implemented on this path: require an annotation there.
-                    checker_report_error_at_inplace(c, param.span, 4, 0, 0, 0)
+                    errs = closure_errs_push(errs, param.span)
                 } else {
                     param.ty.kind = TypeExprKind::TypeNamed
                     param.ty.path = AstPath { segments: StringList { head_buf: primitive.buf, head_len: primitive.len, tail: None }, seg_count: 1 }
                 }
             }
-            Some(Box::new(ClosureParamList {
-                head: param,
-                tail: checker_resolve_closure_params_inplace(c, (*list).tail, body),
-            }))
+            let rest = closure_resolve_params_env(env, (*list).tail, body, errs)
+            ClosureParamsResolved {
+                params: Some(Box::new(ClosureParamList { head: param, tail: rest.params })),
+                errs: rest.errs,
+            }
         }
-        None => None,
+        None => ClosureParamsResolved { params: None, errs: errs_in },
     }
+}
+
+fn closure_errs_report_inplace(c: *mut Checker, errs: Option<Box<ClosureSpanList> >) with Mut, IO, Panic, Div, Alloc {
+    match errs {
+        Some(node) => {
+            closure_errs_report_inplace(c, (*node).tail)
+            checker_report_error_at_inplace(c, (*node).head, 4, 0, 0, 0)
+        }
+        None => {}
+    }
+}
+
+fn checker_resolve_closure_params_inplace(c: *mut Checker, params: Option<Box<ClosureParamList>>, body: &Option<Box<Expr>>) -> Option<Box<ClosureParamList>> with Mut, Panic, Div, Alloc, IO {
+    let resolved = closure_resolve_params_env(&(*c).env, params, body, None)
+    closure_errs_report_inplace(c, resolved.errs)
+    resolved.params
 }
 
 fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -26040,15 +26093,49 @@ impl Checker {
 // ============================================================
 
 impl Checker {
+    // By-value twin of checker_type_env_capacity_ok_inplace. `(&!c) as *mut
+    // Checker` handed that function the object, and its error_count/had_error
+    // writes landed at raw-layout offsets past Checker's first array (#2966).
+    fn type_env_capacity_ok(self) -> (Checker, bool) with Mut, Panic, Div, IO {
+        var c = self
+        if !c.env.overflowed { return (c, true) }
+        c.had_error = true
+        if !c.env.overflow_reported {
+            c.env.overflow_reported = true
+            c.error_count = c.error_count + 1
+            print("error[E-TYPE-ENV-CAP]: type environment is full (")
+            print_int(TYPE_ENV_CAPACITY)
+            print(" bindings); refusing to discard a global or local binding\n")
+        }
+        (c, false)
+    }
+
+    // Reports closure_resolve_params_env's spans in traversal order.
+    fn report_closure_errs(self, errs: Option<Box<ClosureSpanList> >) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        match errs {
+            Some(node) => {
+                c = c.report_closure_errs((*node).tail)
+                c = c.report_error_at((*node).head, 4, 0, 0, 0)
+            }
+            None => {}
+        }
+        c
+    }
+
     fn check_items(self, items: Option<Box<ItemList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         var c = self
-        if !checker_type_env_capacity_ok_inplace((&! c) as *mut Checker) { return c }
+        let cap0 = c.type_env_capacity_ok()
+        c = cap0.0
+        if !cap0.1 { return c }
         var cursor = items
         while true {
             match cursor {
                 Some(list) => {
                     c = c.check_item((*list).head)
-                    if !checker_type_env_capacity_ok_inplace((&! c) as *mut Checker) { return c }
+                    let cap = c.type_env_capacity_ok()
+                    c = cap.0
+                    if !cap.1 { return c }
                     cursor = (*list).tail
                 }
                 None => break
@@ -31531,11 +31618,12 @@ impl Checker {
 
     fn check_closure_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
-        // `cp` escapes into the callee, so the exclusive borrow of `c` stays live
-        // for this function. A later `&!c.env` is a second exclusive borrow of that
-        // root and is E038. Mutate the environment through the pointer already taken.
-        let cp = (&!c) as *mut Checker
-        let resolved_params = checker_resolve_closure_params_inplace(cp, e.closure_params, &e.closure_body)
+        // By value: closure_resolve_params_env reads the environment and hands
+        // back the error spans, so no `(&!c) as *mut Checker` stays live here
+        // (it addressed the object with the raw layout; see ClosureSpanList).
+        let resolved_pair = closure_resolve_params_env(&c.env, e.closure_params, &e.closure_body, None)
+        c = c.report_closure_errs(resolved_pair.errs)
+        let resolved_params = resolved_pair.params
 
         // Convert closure params to FnParamList for signature
         let params_result = c.collect_closure_params(resolved_params)
@@ -31556,7 +31644,7 @@ impl Checker {
 
         // Push scope for parameters
         let outer_borrow_count = c.borrows.count
-        type_env_push_scope_mut(&!(*cp).env)
+        type_env_push_scope_mut(&!c.env)
         c.borrows = c.borrows.push_scope()
         c = c.push_const_scope()
 
@@ -31617,7 +31705,7 @@ impl Checker {
         c = c.require_current_linear_scope_consumed()
         c = c.pop_const_scope()
         c.borrows = c.borrows.pop_scope()
-        type_env_pop_scope_mut(&!(*cp).env)
+        type_env_pop_scope_mut(&!c.env)
 
         // Restore outer effects context
         c.current_sig_id = 0 - 1

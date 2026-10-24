@@ -342,20 +342,6 @@ fn pfi_fn_def_ptr(opt: Option<Box<FnDef> >) -> *mut FnDef with Mut, Panic, Div, 
     }
 }
 
-fn pfi_sl_ptr(opt: Option<Box<StringList> >) -> *mut StringList with Mut, Panic, Div, Alloc {
-    match opt {
-        Some(l) => l as *mut StringList
-        None => 0 as *mut StringList
-    }
-}
-
-fn pfi_sl_next(node: *mut StringList) -> *mut StringList with Mut, Panic, Div {
-    match (*node).tail {
-        Some(n) => n as *mut StringList
-        None => 0 as *mut StringList
-    }
-}
-
 fn pfi_importlist_ptr(opt: Option<Box<ImportItemList> >) -> *mut ImportItemList with Mut, Panic, Div, Alloc {
     match opt {
         Some(l) => l as *mut ImportItemList
@@ -371,22 +357,29 @@ fn pfi_importlist_next(node: *mut ImportItemList) -> *mut ImportItemList with Mu
 }
 
 // Overwrite the LAST segment of a multi-segment path whose first tail node is
-// `first_tail` (the head segment is never the last one here). 1-level stores
-// through a node pointer only.
-fn pfi_sl_set_last(first_tail: *mut StringList, m: Name) with Mut, Panic, Div {
-    if first_tail == 0 as *mut StringList { return }
-    var node = first_tail
+// `first_tail` (the head segment is never the last one here). Through the Box,
+// not a `*mut StringList`: StringList holds a [i8; 384], which a raw pointer
+// addresses with the raw layout (48 inline words, head_len at word 48), while
+// the node is a managed object (head_buf a handle, head_len at slot 1). The
+// raw store wrote 48 words over whatever followed the node (#2966).
+fn pfi_sl_set_last_box(first_tail: Option<Box<StringList> >, m: Name) with Mut, Panic, Div, Alloc {
+    var cur = first_tail
     var going = true
     while going {
-        let next = pfi_sl_next(node)
-        if next == 0 as *mut StringList {
-            going = false
-        } else {
-            node = next
+        match cur {
+            Some(b) => {
+                match (*b).tail {
+                    Some(n) => { cur = Some(n) }
+                    None => {
+                        (*b).head_buf = m.buf
+                        (*b).head_len = m.len
+                        going = false
+                    }
+                }
+            }
+            None => { going = false }
         }
     }
-    (*node).head_buf = m.buf
-    (*node).head_len = m.len
 }
 
 // ---------------------------------------------------------------------------
@@ -1401,8 +1394,7 @@ fn pfi_rename_expr_node(p: *mut Expr) with Mut, Panic, Div, Alloc {
         if t >= 0 {
             let m = pfi_mangle(ir_path_last_name((*p).path), t)
             if m.len > 0 {
-                let sp = pfi_sl_ptr((*p).path.segments.tail)
-                pfi_sl_set_last(sp, m)
+                pfi_sl_set_last_box((*p).path.segments.tail, m)
             }
         }
     }
@@ -1435,8 +1427,7 @@ fn pfi_rename_args_head(node: *mut ExprList) with Mut, Panic, Div, Alloc {
         if t >= 0 {
             let m = pfi_mangle(ir_path_last_name((*node).head.path), t)
             if m.len > 0 {
-                let sp = pfi_sl_ptr((*node).head.path.segments.tail)
-                pfi_sl_set_last(sp, m)
+                pfi_sl_set_last_box((*node).head.path.segments.tail, m)
             }
         }
     }
@@ -1504,8 +1495,7 @@ fn pfi_rewrite_use(node: *mut ItemList, ord: i64) with Mut, Panic, Div, Alloc {
         if idx2 >= 0 && PFI_T_UNSAFE[idx2 as usize] == 0 && PFI_T_DEF[idx2 as usize] == 0 && PFI_T_TGT[idx2 as usize] == tgt {
             let m2 = pfi_mangle_entry(idx2)
             if m2.len > 0 {
-                let sp = pfi_sl_ptr((*node).head.use_path.segments.tail)
-                pfi_sl_set_last(sp, m2)
+                pfi_sl_set_last_box((*node).head.use_path.segments.tail, m2)
             }
         }
     }

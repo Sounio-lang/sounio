@@ -27,6 +27,13 @@
 #      (fn_sig_table_add). A raw-pointer field now types the local.
 #   6. `(*(*c).tab).entries[i]` (the deref of a raw-pointer field) took the
 #      generic deref and read word 0 of the table (checker_struct_visible).
+#   7. `*p` / `(*p).method()` over a raw struct with a fixed-array field
+#      copies the raw payload into an object, and `*p = v` copies back
+#      (the check.sio by-value bridges). A raw cast of a managed value whose
+#      struct has a fixed-array field is refused: the raw layout keeps the
+#      array inline, the object does not.
+#   8. `var paths: [string; N]` carries `string` as its struct type; as a store
+#      target it was taken for a string and written one byte at a time.
 # Each witness surrounds the right struct with decoys that win the vote.
 # Madaros from main prints 3, 1055 and 3 (or 40300003); lean_single passes all.
 #
@@ -61,4 +68,26 @@ check deref_array_param_elem_typed DEREF_ARRAY_ELEM_OK
 check raw_ptr_of_managed_object RAW_PTR_OF_MANAGED_OK
 check raw_ptr_field_chain_typed RAW_PTR_FIELD_CHAIN_OK
 check raw_ptr_field_deref_typed RAW_PTR_FIELD_DEREF_OK
+check raw_struct_whole_copy RAW_STRUCT_WHOLE_COPY_OK
+check string_array_store STRING_ARRAY_STORE_OK
+
+cat >"$WORK/refuse.sio" <<'SIO'
+struct Seg { buf: [i8; 16], len: i64 }
+
+fn seg_ptr(b: Box<Seg>) -> *mut Seg with Mut, Panic, Div, Alloc {
+    b as *mut Seg
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let p = seg_ptr(Box::new(Seg { buf: [0; 16], len: 3 }))
+    println((*p).len)
+    return 0
+}
+SIO
+set +e
+( ulimit -s 1572864 2>/dev/null || true; "$MADAROS" build "$WORK/refuse.sio" "$WORK/refuse.elf" ) >"$WORK/refuse.log" 2>&1
+refuse_rc=$?
+set -e
+[[ "$refuse_rc" -ne 0 ]] && grep -q "fixed-array field" "$WORK/refuse.log" \
+  || fail "raw cast of a managed struct with a fixed-array field: rc=$refuse_rc, expected a refusal naming the fixed-array field"
 echo "[madaros-typed-field-slots] PASS: tuple second struct slot, tuple Box/Option<Box> slot, deref'd Option<Box<T>> and raw-pointer casts read the declared struct's fields"

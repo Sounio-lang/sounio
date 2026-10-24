@@ -672,6 +672,14 @@ fn ir_copy_name_to_flat(src: &Name, buf: &! [i8; 128], len: &! i64) with Mut {
     *len = nlen
 }
 
+fn lower_print_name(n: Name) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < n.len && i < 384 {
+        print_char(n.buf[i as usize] as i64)
+        i = i + 1
+    }
+}
+
 fn ir_print_flat_name(buf: &[i8; 128], len: i64) with IO, Mut, Panic, Div {
     var i: i64 = 0
     while i < len && i < 128 {
@@ -25019,6 +25027,16 @@ impl Lowerer {
             return true
         }
         if (*e).kind == ExprKind::ExprIdent {
+            // `var paths: [string; 256]` records its ELEMENT type, `string`, as
+            // the local's struct type. The array is not a string: as a store
+            // target it took the packed-string byte path (label 3), and
+            // `file_paths[0] = main_path` wrote one byte through the array's
+            // handle (gen2 SIGSEGV in module_frontend_compile_imported_to_file_
+            // target_impl, on any program, #2966).
+            if self.lookup_local_fixed_array_len((*e).name) >= 0
+                || self.lookup_local_struct_type_is_array_elem((*e).name) {
+                return false
+            }
             if self.lookup_local_scalar_kind((*e).name) == 3 {
                 return true
             }
@@ -30598,10 +30616,33 @@ impl Lowerer {
                                 }
                                 _ => false,
                             }
+                            // A raw `*mut S` (S a struct): copy the object's fields
+                            // into the raw payload, the inverse of
+                            // emit_raw_struct_to_object. The word store below wrote
+                            // the object's handle over field 0 and nothing else.
+                            var raw_store_type = ir_empty_name()
+                            var raw_store_idx: i64 = 0 - 1
+                            if !is_box_t {
+                                match (*target_expr).left {
+                                    Some(raw_op) => {
+                                        if (*raw_op).kind == ExprKind::ExprIdent && !lo.lookup_local_is_ref((*raw_op).name)
+                                            && !lo.lookup_local_struct_type_is_array_elem((*raw_op).name) {
+                                            let rt = lo.lookup_local_struct_type((*raw_op).name)
+                                            if rt.len > 0 && !ir_name_is_box(rt) {
+                                                raw_store_idx = lower_struct_layout_index_of(&(*lo.struct_layouts), rt)
+                                                raw_store_type = rt
+                                            }
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
                             let ptr_pair = lo.lower_opt_expr_ref(&(*target_expr).left)
                             lo = ptr_pair.0
                             let ptr_reg = ptr_pair.1
-                            if is_box_t {
+                            if raw_store_idx >= 0 {
+                                lo = lo.emit_object_to_raw_struct(ptr_reg, &(*target_expr), raw_store_type, raw_store_idx, rhs)
+                            } else if is_box_t {
                                 lo = lo.emit(ir_field_set(ptr_reg, 0, rhs, ir_empty_name()))
                             } else {
                                 lo = lo.emit(ir_store_ptr(ptr_reg, rhs))
@@ -35573,6 +35614,74 @@ impl Lowerer {
         }
     }
 
+    // A fresh S object holding a copy of the raw payload at ptr_reg. deref_e is
+    // the `*p` expression, which the raw field helpers type as S. Inline arrays
+    // become array handles (emit_raw_inline_array_to_handle); every other field
+    // is one raw word, stored at the field's object slot.
+    fn emit_raw_struct_to_object(self, ptr_reg: i64, deref_e: &Expr, type_name: Name, st_idx: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let base_copy: Option<Box<Expr>> = Some(Box::new(*deref_e))
+        let slot_count = lo.struct_layout_slot_count(type_name)
+        let dst_pair = lo.fresh_reg()
+        lo = dst_pair.0
+        let dst = dst_pair.1
+        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(slot_count)))
+        let fc = (*lo.struct_layouts).entries[st_idx as usize].field_count
+        var fi: i64 = 0
+        while fi < fc && fi < 128 {
+            let field = (*lo.struct_layouts).entries[st_idx as usize].fields[fi as usize]
+            let fname = ir_name_at(field.name_id)
+            let inline_n = lo.raw_payload_field_array_len(&base_copy, fname)
+            var val_reg: i64 = 0
+            if inline_n > 0 {
+                let packed = lo.raw_payload_field_copy_is_byte(&base_copy, fname)
+                let arr_pair = lo.emit_raw_inline_array_to_handle(ptr_reg, &base_copy, fname, inline_n, packed)
+                lo = arr_pair.0
+                val_reg = arr_pair.1
+            } else {
+                let word = lo.raw_payload_word_offset(&base_copy, fname, field.index)
+                let v_pair = lo.fresh_reg()
+                lo = v_pair.0
+                val_reg = v_pair.1
+                var get_instr = ir_field_get(val_reg, ptr_reg, word, fname)
+                get_instr.label_id = 2
+                lo = lo.emit(get_instr)
+            }
+            lo = lo.emit(ir_field_set(dst, field.index, val_reg, fname))
+            fi = fi + 1
+        }
+        (lo, dst)
+    }
+
+    // `*p = v` for a raw `*mut S`: each field of the S object v is written to
+    // the raw payload at ptr_reg, arrays inline (emit_handle_to_raw_inline_array).
+    fn emit_object_to_raw_struct(self, ptr_reg: i64, deref_e: &Expr, type_name: Name, st_idx: i64, obj_reg: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let base_copy: Option<Box<Expr>> = Some(Box::new(*deref_e))
+        let fc = (*lo.struct_layouts).entries[st_idx as usize].field_count
+        var fi: i64 = 0
+        while fi < fc && fi < 128 {
+            let field = (*lo.struct_layouts).entries[st_idx as usize].fields[fi as usize]
+            let fname = ir_name_at(field.name_id)
+            let v_pair = lo.fresh_reg()
+            lo = v_pair.0
+            let val_reg = v_pair.1
+            lo = lo.emit(ir_field_get(val_reg, obj_reg, field.index, fname))
+            let inline_n = lo.raw_payload_field_array_len(&base_copy, fname)
+            if inline_n > 0 {
+                let packed = lo.raw_payload_field_copy_is_byte(&base_copy, fname)
+                lo = lo.emit_handle_to_raw_inline_array(ptr_reg, &base_copy, fname, val_reg, inline_n, packed)
+            } else {
+                let word = lo.raw_payload_word_offset(&base_copy, fname, field.index)
+                var set_instr = ir_field_set(ptr_reg, word, val_reg, fname)
+                set_instr.label_id = 2
+                lo = lo.emit(set_instr)
+            }
+            fi = fi + 1
+        }
+        lo
+    }
+
     fn emit_raw_inline_array_to_handle(self, ptr_reg: i64, base_opt: &Option<Box<Expr>>, field_name: Name, elem_count: i64, packed_byte: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let word_off = self.raw_payload_word_offset(base_opt, field_name, 0)
         let addr_base = if packed_byte { word_off * 8 } else { word_off }
@@ -36128,6 +36237,20 @@ impl Lowerer {
     // sources and, importantly, raw pointers -- a `p: *mut S` local carries S as
     // its struct type, so a bare struct-typed ident is not evidence of a managed
     // object (`c as *mut i64` over a heap_alloc'd `*mut Chunk` must not move).
+    fn struct_has_inline_array_field(self, type_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        let st_idx = lower_struct_layout_index_of(&(*self.struct_layouts), type_name)
+        if st_idx < 0 { return false }
+        let fc = (*self.struct_layouts).entries[st_idx as usize].field_count
+        var fi: i64 = 0
+        while fi < fc && fi < 128 {
+            let field = (*self.struct_layouts).entries[st_idx as usize].fields[fi as usize]
+            if field.fixed_array_len > 0 || field.word_scalar_array_len > 0 { return true }
+            if lower_raw_arr_len_for(type_name, field.index) > 0 { return true }
+            fi = fi + 1
+        }
+        false
+    }
+
     fn opt_expr_managed_object_source(self, opt: &Option<Box<Expr>>) -> (*mut Expr, i64) with Mut, Panic, Div, Alloc {
         match *opt {
             Some(src) => {
@@ -36181,6 +36304,25 @@ impl Lowerer {
         if lower_opt_type_is_raw_ptr(&e.cast_type) {
             let managed = self.opt_expr_managed_object_source(&e.left)
             if managed.1 > 0 {
+                // A raw pointer reads the raw layout (fixed arrays inline), an
+                // object keeps arrays as handles: past the first array field the
+                // two disagree, and a store through the pointer runs off the
+                // object. Fail closed rather than corrupt (#2966).
+                let raw_cast_pte = match e.cast_type {
+                    Some(ct) => lower_opt_type_named_name(&(*ct).inner),
+                    None => ir_empty_name(),
+                }
+                if self.struct_has_inline_array_field(raw_cast_pte) {
+                    print("error: `as *mut ")
+                    lower_print_name(raw_cast_pte)
+                    print("` over a managed value is not supported on the native backend: ")
+                    lower_print_name(raw_cast_pte)
+                    print(" has a fixed-array field, which a raw pointer lays out inline and the object does not\n")
+                    print("  help: pass the value by reference (`&!v`) or keep the data in heap_alloc memory\n")
+                    var lo_refuse = self
+                    lowerer_mark_hard_error(&! lo_refuse)
+                    return (lo_refuse, 0)
+                }
                 let msub = self.lower_expr_ref(&(*managed.0))
                 var lo_m = msub.0
                 var obj_reg = msub.1
@@ -36315,30 +36457,31 @@ impl Lowerer {
             return (lo_wide, dst_reg)
         }
         // `*p` with p a raw `*mut S` / `*const S` (S a struct, p neither a
-        // reference nor a Box): p is the address of S's first field (a
-        // heap_alloc payload, or __ptr_of_ref of a managed object), so the
-        // struct value is the unboxed base p - header, which field reads
-        // resolve as [base + header + 8*i]. The scalar OpDeref below loaded word
-        // 0 instead and handed field 0 on as the struct: `pfi_expr(*p)` in
-        // pfi_child read a Name's bytes as an Expr reference (gen3 SIGSEGV in
-        // pfi_expr_ptr, #2966).
+        // reference nor a Box) is a COPY of the struct p addresses, built field
+        // by field from the raw payload into a fresh object: raw memory keeps
+        // fixed arrays inline (N words, bytes packed), an object keeps them as
+        // array handles, so a struct with an array field cannot be viewed in
+        // place. Every field read takes the same raw path as `(*p).f`.
+        //   - The scalar OpDeref below loaded word 0 and handed field 0 on as the
+        //     struct: `pfi_expr(*p)` read a Name's bytes as an Expr (gen3 SIGSEGV
+        //     in pfi_expr_ptr, #2966).
+        //   - A by-value method on a raw struct, `(*c).check_expr(e)` in the
+        //     check.sio bridges, read every field after Checker's first array
+        //     at the wrong word.
         if e.un_op == UnaryOp::OpDeref {
             match e.left {
                 Some(raw_operand) => {
                     if (*raw_operand).kind == ExprKind::ExprIdent && !self.lookup_local_is_ref((*raw_operand).name) {
                         let raw_pointee = self.lookup_local_struct_type((*raw_operand).name)
+                        let raw_st_idx = lower_struct_layout_index_of(&(*self.struct_layouts), raw_pointee)
                         if raw_pointee.len > 0 && !ir_name_is_box(raw_pointee)
                             && !self.lookup_local_struct_type_is_array_elem((*raw_operand).name)
-                            && lower_struct_layout_index_of(&(*self.struct_layouts), raw_pointee) >= 0 {
+                            && raw_st_idx >= 0 {
                             let p_pair = self.lower_opt_expr_ref(&e.left)
                             var lo_p = p_pair.0
-                            if p_pair.1 < 0 { return (lo_p, p_pair.1) }
-                            let hdr_pair = lo_p.emit_i64_const(32)
-                            lo_p = hdr_pair.0
-                            let base_pair = lo_p.fresh_reg()
-                            lo_p = base_pair.0
-                            lo_p = lo_p.emit(ir_binop(base_pair.1, p_pair.1, BinaryOp::OpSub, hdr_pair.1))
-                            return (lo_p, base_pair.1)
+                            let p_reg = p_pair.1
+                            if p_reg < 0 { return (lo_p, p_reg) }
+                            return lo_p.emit_raw_struct_to_object(p_reg, e, raw_pointee, raw_st_idx)
                         }
                     }
                 }
