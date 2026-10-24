@@ -59,7 +59,9 @@ done
 for stem in 'deep_stats_count_profile_bootstrap_reference:nested' 'deep_stats_count_profile_bootstrap_reference:nested-traced' count_likelihood_difference_reference count_dispersion_increment_reference normalization_into_reference 'count_likelihood_difference_reference:rank' 'count_likelihood_difference_reference:cached-rank' count_cached_rank_reference count_aggregate_cancellation_reference 'deep_stats_nb2_likelihood_reference:cached' 'deep_stats_count_profile_bootstrap_reference:cache' 'deep_stats_count_glm_reference:trace-control' 'deep_stats_count_increment_reference:trace-control'; do require_row concordance "$stem"; done
 for control in 'deep_stats_count_profile_bootstrap_reference:nested-fixed-alpha:expected=2:actual=2' 'deep_stats_count_profile_bootstrap_reference:nested-prefix:expected=2:actual=2' 'count_dispersion_increment_reference:orientation:expected=2:actual=2'; do require_row mutant-rejection "$control"; done
 
+require_row prepare scripts/lib/materialize_madaros_prebuilt.sh
 require_row input-hashes unchanged
+require_row input-catalog unchanged
 require_row compiler-hash unchanged
 sha256sum "$MADAROS_RAW_BIN" "$COUNT_PROFILE_FUNCTIONAL_GATE_RECEIPT" "${gate[results_path]}" >> "$manifest"
 if [[ -f "$campaign/INPUTS.sha256" ]]; then

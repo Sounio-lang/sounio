@@ -12,6 +12,12 @@ export SOUNIO_MADAROS_NOCACHE=1 SOUNIO_MADAROS_CACHE_READONLY=1
 ulimit -s 524288
 printf 'kind\tsource\texit_status\n' > "$out/RESULTS.tsv"
 sha256sum "$MADAROS_RAW_BIN" > "$out/COMPILER.sha256" || exit 65
+# Launchers compare against the committed prebuilt even with an explicit override.
+# Materialize its declared derived payloads BEFORE capturing the input catalog.
+prepare_rc=0
+bash scripts/lib/materialize_madaros_prebuilt.sh --verify > "$out/PREPARE.prebuilt.stdout" 2> "$out/PREPARE.prebuilt.stderr" || prepare_rc=$?
+printf 'prepare\tscripts/lib/materialize_madaros_prebuilt.sh\t%s\n' "$prepare_rc" >> "$out/RESULTS.tsv"
+if [[ $prepare_rc != 0 ]]; then printf '1\n' > "$out/STATUS"; exit 1; fi
 # Bind compiler inputs, gate scripts, examples and followed bin payloads as well.
 find -L bin scripts self-hosted stdlib tests examples -type f -print0 | sort -z | xargs -0 sha256sum > "$out/INPUTS.sha256" || exit 65
 g++ --version > "$out/CXX_TOOLCHAIN.txt" || exit 65
@@ -330,6 +336,11 @@ fi
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"
+# Verify the complete file set as well as hashes of files present at the start.
+rc=0
+find -L bin scripts self-hosted stdlib tests examples -type f -print0 | sort -z | xargs -0 sha256sum > "$out/INPUTS.final.sha256" || rc=$?
+if [[ $rc == 0 ]]; then cmp "$out/INPUTS.sha256" "$out/INPUTS.final.sha256" > "$out/INPUTS.catalog.verify.txt" 2>&1 || rc=$?; fi
+record input-catalog unchanged "$rc"
 rc=0
 sha256sum -c "$out/COMPILER.sha256" > "$out/COMPILER.verify.txt" 2>&1 || rc=$?
 record compiler-hash unchanged "$rc"
