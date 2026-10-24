@@ -107,3 +107,77 @@ identical models, positive-edge rejection, declarations, attempt/sampler budgets
 invalid count conversion, and explicit observed Poisson selection. Source
 preparation alone is not native acceptance, numeric concordance, calibrated
 coverage, a full corpus pass or a performance result.
+
+## Opt-in exact embedding and seeded alternative search
+
+The additive `dynamic_count_profile_lrt_bootstrap_nested` accepts the same
+arguments as the legacy entry, followed by a borrowed row-major embedding of
+shape p1-by-p0 and a distinct caller-owned warm_start of length p1. The new
+`dynamic_count_profile_bootstrap_nested_workspace` preserves the legacy query
+fields and adds p1 numeric scratch elements and8*p1 payload bytes. The borrowed
+embedding is input data, not extra allocated scratch; its p1*p0 extent is checked
+before indexing. No dummy owner, raw pointer view or hot allocation is required.
+
+Before fitting or consuming RNG, `count_profile_embedding_validate` checks both
+matrix descriptors against their owners, finite active coordinates and embedding,
+identical finite offsets, and the compensated binary64 reconstruction X1*E==X0.
+There is no approximate nesting tolerance in V1. This is an operational floating
+point witness, not a proof of real-arithmetic model nesting or independently
+validated sample metadata. Status13/failure_stage9 reports an invalid witness or
+warm-start configuration; preflight failure leaves output arrays and RNG intact.
+Warm_start is scratch and may change after preflight or on a later arithmetic
+failure. Distinct owners remain a caller/compiler borrowing requirement.
+
+For each observed or simulated pair the null fit is resolved first. Its beta is
+mapped through E into the separate warm_start; the alternative search evaluates
+that alpha explicitly first and performs normal convergence checks. The additive
+ML-only `dynamic_dispersion_fit_seeded` counts this extra evaluation, uses the
+best coefficient vector as a checked warm start for later alpha evaluations, and
+recomputes weights and QR. It never reuses an old factorization as if unchanged.
+The selected best candidate is ranked by checked paired likelihood increments;
+its full objective remains a report. An unresolved comparison is unavailable,
+not a rounded tie. The positive grid and bounded golden interval remain a local
+search strategy, not a global optimum certificate. A feasible embedded point is
+not called a converged fit until the ordinary inner score/step checks succeed.
+
+The legacy entry and signature remain present. Both routes share sampler
+execution, budgets/checkpoints, paired final comparison and MC summary; the
+strict route adds only the explicit fit-pair coordination and preflight. Negative
+LR remains status6, including a truly negative difference exposed by more stable
+arithmetic. No clamp, failed-replicate omission or tolerance relaxation is added.
+
+`stdlib_deep_stats_count_profile_nested.sio` retains the exact failed replicate
+count vectors from campaign cases3,11,13 as new fit inputs, plus a separate
+all-six analytic case. A two-fit budget tests the observed comparison and stops
+before random draws; invalid embedding/offset/NaN/warm-size cases test status13,
+untouched outputs and unchanged RNG. This prepared fixture is distinct from the
+fixed-point Big400 negative controls. Focused current-source integration16819 completed the snapshot of this strict
+fixture before the later adversarial product/warm-start cases, the
+updated legacy fixture, and the existing CountGLM/profile/likelihood consumers
+with native completion and selected independent C++ concordance all exit0.
+The all-six strict case returned an available observedLR0 and stopped budget5
+without RNG draws; the legacy independently fitted points correctly retain
+negative-LR status6 after Big400 fixed-point verification16818. Renewed B199
+qualification and comparative performance remain separate pending work; this
+focused gate is not calibration or global optimality evidence.
+
+The design reconstruction check does **not** establish the bitwise prediction
+identity X1*(E*beta)==X0*beta: floating multiplication and addition are not
+associative. Warm_start is a candidate, not an exact prediction witness. Its
+finite-product checks, the ordinary fit convergence checks and the final paired
+LR guards remain required. `assumptions_assessed` and global/finite-sample
+validity flags remain false. Adversarial status coverage includes finite E with
+overflowing products, a nonzero product rounded to zero, failed reconstruction,
+large/small scale cancellation, and a valid design reconstruction whose mapped
+coefficient candidate overflows. None is repaired by changing a nesting tolerance.
+
+The later full B2 strict smoke fixture is
+`stdlib_scale_count_profile_nested_bootstrap.sio`: it retains the original grouped
+model0 data/options/seed and emits actual tail, RNG, counts and refitted alphas
+for independent C++ concordance. Focused Slurm16828 completed all six library
+checks plus its check/compile/native/marker and independent --nested-single C++
+concordance with exit0. That comparison retained the original model0 reference
+parameters, B2, seed7, tolerances, RNG/hits, both last-refit alphas and16 last
+counts. Fixed-alpha and incomplete-output controls were rejected. This validates
+the complete selected two-replicate path; it is not B199 qualification or an
+end-to-end performance comparison.

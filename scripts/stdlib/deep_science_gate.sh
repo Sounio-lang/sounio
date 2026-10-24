@@ -51,7 +51,7 @@ for src in tests/compile-fail/stdlib_deep_*.sio; do
     else record negative "$src" 0; fi
 done
 for src in tests/run-pass/stdlib_deep_*.sio; do native "$src" "$(basename "$src" .sio)"; done
-for name in stdlib_scale_normalization_into stdlib_scale_normalization_status; do native "tests/run-pass/$name.sio" "$name"; done
+for name in stdlib_scale_normalization_into stdlib_scale_normalization_status stdlib_scale_count_likelihood_difference stdlib_scale_count_profile_nested_bootstrap; do native "tests/run-pass/$name.sio" "$name"; done
 # Legacy render paths are replayed in the canonical engine as well as the
 # Stage2 full suite: these names exposed nested-label and first-tick defects.
 for name in stats_inference_forest viz_bootstrap_forest viz_count_matrix_qc \
@@ -123,7 +123,19 @@ for src in tests/reference/deep_*.cpp; do
         timeout 180 "$out/$stem" --mutant-fixed-alpha "$out/stdlib_deep_stats_count_profile_bootstrap.stdout" > "$out/$stem.fixed-mutant.stdout" 2> "$out/$stem.fixed-mutant.stderr" || rc=$?
         rejected=1
         [[ "$rc" != 2 ]] || rejected=0
-        record mutant-rejection "$stem:fixed-alpha:expected=2:actual=$rc" "$rejected" ;;
+        record mutant-rejection "$stem:fixed-alpha:expected=2:actual=$rc" "$rejected"
+        rc=0
+        timeout 180 "$out/$stem" --nested-single "$out/stdlib_scale_count_profile_nested_bootstrap.stdout" > "$out/$stem.nested.stdout" 2> "$out/$stem.nested.stderr" || rc=$?
+        record concordance "$stem:nested" "$rc"
+        rc=0
+        timeout 180 "$out/$stem" --nested-mutant-fixed-alpha "$out/stdlib_scale_count_profile_nested_bootstrap.stdout" > "$out/$stem.nested-mutant.stdout" 2> "$out/$stem.nested-mutant.stderr" || rc=$?
+        rejected=1; [[ "$rc" != 2 ]] || rejected=0
+        record mutant-rejection "$stem:nested-fixed-alpha:expected=2:actual=$rc" "$rejected"
+        grep -v '^DEEP COUNT PROFILE NESTED BOOTSTRAP PASS$' "$out/stdlib_scale_count_profile_nested_bootstrap.stdout" > "$out/$stem.nested-prefix.txt"
+        rc=0
+        timeout 180 "$out/$stem" --nested-single "$out/$stem.nested-prefix.txt" > "$out/$stem.nested-prefix.stdout" 2> "$out/$stem.nested-prefix.stderr" || rc=$?
+        rejected=1; [[ "$rc" != 2 ]] || rejected=0
+        record mutant-rejection "$stem:nested-prefix:expected=2:actual=$rc" "$rejected" ;;
       deep_stats_dynamic_robust_reference) compare "$stem" stdlib_deep_stats_dynamic_robust ;;
       deep_stats_dynamic_robust_contrast_reference) compare "$stem" stdlib_deep_stats_dynamic_robust_contrast ;;
       deep_stats_dispersion_profile_reference) compare "$stem" stdlib_deep_stats_dispersion_profile ;;
@@ -156,6 +168,28 @@ for src in tests/reference/deep_*.cpp; do
         done ;;
       *) record unregistered-oracle "$stem" 1 ;;
     esac
+done
+lr_data=tests/reference/data/count_profile_lr_20261024
+for stem in count_dispersion_increment_reference count_profile_lr_fixed_reference count_profile_lr_v10_reference count_likelihood_difference_reference; do
+ rc=0
+ timeout 180 g++ -std=c++23 -O2 -Wall -Wextra "tests/reference/$stem.cpp" -o "$out/$stem" > "$out/$stem.cpp.txt" 2>&1 || rc=$?
+ record cpp-compile "$stem" "$rc"
+ [[ $rc == 0 ]] || continue
+ rc=0
+ case "$stem" in
+  count_dispersion_increment_reference) timeout 600 "$out/$stem" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$? ;;
+  count_profile_lr_fixed_reference) timeout 180 "$out/$stem" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$? ;;
+  count_profile_lr_v10_reference) timeout 180 "$out/$stem" "$lr_data/v10.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$? ;;
+  count_likelihood_difference_reference) timeout 180 "$out/$stem" --native "$out/stdlib_scale_count_likelihood_difference.stdout" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$? ;;
+ esac
+ record concordance "$stem" "$rc"
+ if [[ "$stem" == count_dispersion_increment_reference || "$stem" == count_profile_lr_fixed_reference ]]; then
+  rc=0
+  if [[ "$stem" == count_profile_lr_fixed_reference ]]; then timeout 180 "$out/$stem" --mutant-sign "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.mutant.stdout" 2> "$out/$stem.mutant.stderr" || rc=$?
+  else timeout 180 "$out/$stem" --mutant-sign > "$out/$stem.mutant.stdout" 2> "$out/$stem.mutant.stderr" || rc=$?; fi
+  rejected=1; [[ "$rc" != 2 ]] || rejected=0
+  record mutant-rejection "$stem:orientation:expected=2:actual=$rc" "$rejected"
+ fi
 done
 rc=0
 timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/normalization_into_reference.cpp -o "$out/normalization_into_reference" > "$out/normalization_into_reference.cpp.txt" 2>&1 || rc=$?
