@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.stdlib-sio-165.factor-adapters
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-sio-165.factor-adapters
+-->
+
 # SIO-165: declared covariance-factor adapters
 
 These adapters extend the independent-input increment in PR #3103. A caller

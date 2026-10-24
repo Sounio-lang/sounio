@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.stdlib-sio-165.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-sio-165.readme
+-->
+
 # SIO-165: checked classical and relativistic uncertainty
 
 This file records the first independent-input increment (commit 588a9d4).
