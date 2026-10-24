@@ -1,0 +1,492 @@
+//! stdlib::llm::serve — OpenAI-compatible HTTP front-end for the
+//! native Llama forward (llm::llama) over hetero::net_worker sockets.
+//!
+//! Routes (v1, sequential, one request per connection):
+//!   GET  /health          -> {"status":"ok",...}
+//!   GET  /v1/models       -> model list with the served id
+//!   POST /v1/completions  -> text completion (greedy)
+//!
+//! Honest scope: decoding is greedy only. A request with
+//! temperature != 0 is rejected with 400 instead of being silently
+//! mis-served; sampling (temperature/top-p) is a separate slice.
+//! `prompt` accepts a string (BPE-encoded here, BOS prepended exactly
+//! like the demos) or an array of token ids (used verbatim). No
+//! streaming, no chat template: /v1/chat/completions is not claimed.
+
+extern "C" {
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+}
+
+use hetero::net_worker::{NwLib, nw_accept, nw_close, nw_listen, nw_open, nw_send_all}
+use hetero::probe_cuda::{pb_cstr}
+use llm::bpe::{Bpe, bpe_decode_token, bpe_encode}
+use llm::llama::{Llama, kv_new, llama_argmax, llama_forward}
+use llm::safetensors::{st_byte_at}
+use tensor2::cpu_kernel::{ck_alloc, ck_get, ck_set}
+
+fn sv_putb(buf: *mut u8, i: i64, v: i64) with Mut {
+    let w = read_i64(buf as *mut i64, i / 8)
+    let sh = (i % 8) * 8
+    let cleared = w & ((0 - 1) - (255 << sh))
+    write_i64(buf as *mut i64, i / 8, cleared | ((v & 255) << sh))
+}
+
+fn sv_byte(data: *mut u8, i: i64) -> i64 {
+    (read_i64(data as *mut i64, i / 8) >> ((i % 8) * 8)) & 255
+}
+
+// append a Sounio string's bytes; returns new position
+fn sv_app_str(out: *mut u8, pos: i64, s: string) -> i64 with Mut {
+    var p = pos
+    var i: i64 = 0
+    while i < str_len(s) {
+        sv_putb(out, p, str_char_at(s, i) & 255)
+        p = p + 1
+        i = i + 1
+    }
+    p
+}
+
+fn sv_app_int(out: *mut u8, pos: i64, v0: i64) -> i64 with Mut {
+    var v = v0
+    var p = pos
+    if v < 0 {
+        sv_putb(out, p, 45)
+        p = p + 1
+        v = 0 - v
+    }
+    let tmp = heap_alloc(32)
+    var n: i64 = 0
+    if v == 0 {
+        sv_putb(tmp, 0, 48)
+        n = 1
+    }
+    while v > 0 {
+        sv_putb(tmp, n, 48 + (v % 10))
+        v = v / 10
+        n = n + 1
+    }
+    var i: i64 = 0
+    while i < n {
+        sv_putb(out, p, sv_byte(tmp, n - 1 - i))
+        p = p + 1
+        i = i + 1
+    }
+    p
+}
+
+// append bytes [off, off+len) of src JSON-escaped (for the reply text)
+fn sv_app_escaped(out: *mut u8, pos: i64, src: *mut u8, off: i64, len: i64) -> i64 with Mut {
+    var p = pos
+    var i: i64 = 0
+    while i < len {
+        let c = sv_byte(src, off + i)
+        if c == 34 { p = sv_app_str(out, p, "\\\"") }
+        else if c == 92 { p = sv_app_str(out, p, "\\\\") }
+        else if c == 10 { p = sv_app_str(out, p, "\\n") }
+        else if c == 13 { p = sv_app_str(out, p, "\\r") }
+        else if c == 9 { p = sv_app_str(out, p, "\\t") }
+        else if c < 32 {
+            p = sv_app_str(out, p, "\\u00")
+            let hex = "0123456789abcdef"
+            sv_putb(out, p, str_char_at(hex, (c >> 4) & 15))
+            p = p + 1
+            sv_putb(out, p, str_char_at(hex, c & 15))
+            p = p + 1
+        } else {
+            sv_putb(out, p, c)
+            p = p + 1
+        }
+        i = i + 1
+    }
+    p
+}
+
+// find pattern (raw bytes of pat) in data[from..len); -1 if absent
+fn sv_find(data: *mut u8, len: i64, from: i64, pat: string) -> i64 with Mut {
+    let plen = str_len(pat)
+    var i: i64 = from
+    while i + plen <= len {
+        var ok = true
+        var j: i64 = 0
+        while j < plen {
+            if sv_byte(data, i + j) != (str_char_at(pat, j) & 255) { ok = false; j = plen }
+            j = j + 1
+        }
+        if ok { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn sv_starts(data: *mut u8, len: i64, off: i64, pat: string) -> bool with Mut {
+    if off + str_len(pat) > len { return false }
+    var j: i64 = 0
+    while j < str_len(pat) {
+        if sv_byte(data, off + j) != (str_char_at(pat, j) & 255) { return false }
+        j = j + 1
+    }
+    true
+}
+
+// parse int at/after from (skips non-digits except '-'); [value, end, found]
+fn sv_int(data: *mut u8, len: i64, from: i64) -> [i64; 3] with Mut {
+    var i: i64 = from
+    while i < len && sv_byte(data, i) != 45 && (sv_byte(data, i) < 48 || sv_byte(data, i) > 57) { i = i + 1 }
+    var r: [i64; 3] = [0, 0, 0]
+    if i >= len { r[1] = i; return r }
+    var neg: i64 = 1
+    if sv_byte(data, i) == 45 { neg = 0 - 1; i = i + 1 }
+    var v: i64 = 0
+    var any: i64 = 0
+    while i < len && sv_byte(data, i) >= 48 && sv_byte(data, i) <= 57 {
+        v = v * 10 + (sv_byte(data, i) - 48)
+        any = 1
+        i = i + 1
+    }
+    r[0] = v * neg
+    r[1] = i
+    r[2] = any
+    r
+}
+
+// parse a JSON float at/after from; [value, end]
+fn sv_float(data: *mut u8, len: i64, from: i64) -> [f64; 2] with Mut, Div, Panic {
+    var i: i64 = from
+    while i < len && sv_byte(data, i) != 45 && (sv_byte(data, i) < 48 || sv_byte(data, i) > 57) { i = i + 1 }
+    var neg = 1.0
+    if i < len && sv_byte(data, i) == 45 { neg = 0.0 - 1.0; i = i + 1 }
+    var v = 0.0
+    while i < len && sv_byte(data, i) >= 48 && sv_byte(data, i) <= 57 {
+        v = v * 10.0 + ((sv_byte(data, i) - 48) as f64)
+        i = i + 1
+    }
+    if i < len && sv_byte(data, i) == 46 {
+        i = i + 1
+        var scale = 0.1
+        while i < len && sv_byte(data, i) >= 48 && sv_byte(data, i) <= 57 {
+            v = v + ((sv_byte(data, i) - 48) as f64) * scale
+            scale = scale * 0.1
+            i = i + 1
+        }
+    }
+    var r: [f64; 2] = [0.0, 0.0]
+    r[0] = v * neg
+    r[1] = i as f64
+    r
+}
+
+// decode JSON string whose opening quote is at q into out@off; [len, end]
+fn sv_jstr(data: *mut u8, len: i64, q: i64, out: *mut u8, off: i64) -> [i64; 2] with Mut {
+    var n: i64 = 0
+    var i: i64 = q + 1
+    while i < len && sv_byte(data, i) != 34 && n < 60000 {
+        let c = sv_byte(data, i)
+        if c == 92 && i + 1 < len {
+            let e = sv_byte(data, i + 1)
+            if e == 110 { sv_putb(out, off + n, 10); n = n + 1; i = i + 2 }
+            else if e == 116 { sv_putb(out, off + n, 9); n = n + 1; i = i + 2 }
+            else if e == 114 { sv_putb(out, off + n, 13); n = n + 1; i = i + 2 }
+            else if e == 117 {
+                var cp: i64 = 0
+                var k: i64 = 0
+                while k < 4 {
+                    let h = sv_byte(data, i + 2 + k)
+                    var d: i64 = 0
+                    if h >= 48 && h <= 57 { d = h - 48 }
+                    else if h >= 97 && h <= 102 { d = h - 87 }
+                    else if h >= 65 && h <= 70 { d = h - 55 }
+                    cp = cp * 16 + d
+                    k = k + 1
+                }
+                if cp < 128 { sv_putb(out, off + n, cp); n = n + 1 }
+                else if cp < 2048 {
+                    sv_putb(out, off + n, 192 | (cp >> 6)); n = n + 1
+                    sv_putb(out, off + n, 128 | (cp & 63)); n = n + 1
+                } else {
+                    sv_putb(out, off + n, 224 | (cp >> 12)); n = n + 1
+                    sv_putb(out, off + n, 128 | ((cp >> 6) & 63)); n = n + 1
+                    sv_putb(out, off + n, 128 | (cp & 63)); n = n + 1
+                }
+                i = i + 6
+            } else { sv_putb(out, off + n, e); n = n + 1; i = i + 2 }
+        } else {
+            sv_putb(out, off + n, c)
+            n = n + 1
+            i = i + 1
+        }
+    }
+    var r: [i64; 2] = [0, 0]
+    r[0] = n
+    r[1] = i + 1
+    r
+}
+
+// read one HTTP request: headers + Content-Length body. Returns bytes read.
+fn sv_read_request(lib: &NwLib, fd: i64, buf: *mut u8, cap: i64) -> i64 with Alloc, Mut, Panic {
+    let raw = dlsym(lib.libc, pb_cstr("recv"))
+    if (raw as i64) == 0 { return 0 - 1 }
+    let f = raw as fn(i64, *mut u8, i64, i32) -> i64
+    var total: i64 = 0
+    var need: i64 = 0 - 1
+    while total < cap {
+        // header terminator CRLFCRLF seen?
+        if need < 0 && total >= 4 {
+            var i: i64 = 0
+            while i + 3 < total {
+                if sv_byte(buf, i) == 13 && sv_byte(buf, i + 1) == 10 && sv_byte(buf, i + 2) == 13 && sv_byte(buf, i + 3) == 10 {
+                    var cl: i64 = 0
+                    let cp1 = sv_find(buf, total, 0, "Content-Length")
+                    let cp2 = sv_find(buf, total, 0, "content-length")
+                    var cpos = cp1
+                    if cpos < 0 { cpos = cp2 }
+                    if cpos >= 0 {
+                        let colon = sv_find(buf, total, cpos, ":")
+                        let iv = sv_int(buf, total, colon + 1)
+                        if iv[2] == 1 { cl = iv[0] }
+                    }
+                    need = (i + 4) + cl
+                }
+                i = i + 1
+            }
+        }
+        if need >= 0 && total >= need { return total }
+        let p = ((buf as i64) + total) as *mut u8
+        let r = f(fd, p, cap - total, 0)
+        if r <= 0 {
+            if total > 0 { return total }
+            return 0 - 1
+        }
+        total = total + r
+    }
+    total
+}
+
+fn sv_reply(lib: &NwLib, fd: i64, status: string, body: *mut u8, blen: i64) with Alloc, Mut, Panic {
+    let out = heap_alloc(69632)
+    var p: i64 = 0
+    p = sv_app_str(out, p, "HTTP/1.1 ")
+    p = sv_app_str(out, p, status)
+    p = sv_app_str(out, p, "\r\nContent-Type: application/json\r\nContent-Length: ")
+    p = sv_app_int(out, p, blen)
+    p = sv_app_str(out, p, "\r\nConnection: close\r\n\r\n")
+    var i: i64 = 0
+    while i < blen {
+        sv_putb(out, p, sv_byte(body, i))
+        p = p + 1
+        i = i + 1
+    }
+    let _s = nw_send_all(lib, fd, out, p)
+}
+
+// fixed JSON error/body writer into buf; returns length
+fn sv_err_body(buf: *mut u8, msg: string) -> i64 with Mut {
+    var p: i64 = 0
+    p = sv_app_str(buf, p, "{\"error\":{\"message\":\"")
+    p = sv_app_str(buf, p, msg)
+    p = sv_app_str(buf, p, "\",\"type\":\"invalid_request_error\"}}")
+    p
+}
+
+// Handle one connection. Returns 0 normally, -1 on transport failure.
+fn sv_handle(lib: &NwLib, m: &Llama, bp: &Bpe, fd: i64, model_name: string, req_id: i64) -> i64 with Alloc, Mut, Panic, Div, IO {
+    let buf = heap_alloc(262144)
+    let n = sv_read_request(lib, fd, buf, 262144)
+    if n <= 0 { return 0 - 1 }
+    let body = heap_alloc(69632)
+
+    // route by request-line prefix
+    if sv_starts(buf, n, 0, "GET /health") {
+        var p: i64 = 0
+        p = sv_app_str(body, p, "{\"status\":\"ok\",\"model\":\"")
+        p = sv_app_str(body, p, model_name)
+        p = sv_app_str(body, p, "\",\"engine\":\"sounio-llm\"}")
+        sv_reply(lib, fd, "200 OK", body, p)
+        return 0
+    }
+    if sv_starts(buf, n, 0, "GET /v1/models") {
+        var p: i64 = 0
+        p = sv_app_str(body, p, "{\"object\":\"list\",\"data\":[{\"id\":\"")
+        p = sv_app_str(body, p, model_name)
+        p = sv_app_str(body, p, "\",\"object\":\"model\",\"owned_by\":\"sounio\"}]}")
+        sv_reply(lib, fd, "200 OK", body, p)
+        return 0
+    }
+    if !sv_starts(buf, n, 0, "POST /v1/completions") {
+        let p = sv_err_body(body, "route not found (v1: GET /health, GET /v1/models, POST /v1/completions)")
+        sv_reply(lib, fd, "404 Not Found", body, p)
+        return 0
+    }
+
+    // ---- completions ----
+    // locate JSON body (after CRLFCRLF)
+    var boff: i64 = 0
+    var i: i64 = 0
+    while i + 3 < n {
+        if sv_byte(buf, i) == 13 && sv_byte(buf, i + 1) == 10 && sv_byte(buf, i + 2) == 13 && sv_byte(buf, i + 3) == 10 { boff = i + 4; i = n }
+        i = i + 1
+    }
+
+    var max_tokens: i64 = 16
+    let mt = sv_find(buf, n, boff, "\"max_tokens\"")
+    if mt >= 0 {
+        let iv = sv_int(buf, n, mt + 12)
+        if iv[2] == 1 { max_tokens = iv[0] }
+    }
+    if max_tokens < 1 { max_tokens = 1 }
+    if max_tokens > 256 { max_tokens = 256 }
+
+    let tp = sv_find(buf, n, boff, "\"temperature\"")
+    if tp >= 0 {
+        let fv = sv_float(buf, n, tp + 13)
+        if fv[0] > 0.0000001 || fv[0] < 0.0 - 0.0000001 {
+            let p = sv_err_body(body, "only greedy decoding (temperature=0) is implemented in llm serve v1")
+            sv_reply(lib, fd, "400 Bad Request", body, p)
+            return 0
+        }
+    }
+
+    // prompt: string (BPE here) or token-id array (verbatim)
+    let pp = sv_find(buf, n, boff, "\"prompt\"")
+    if pp < 0 {
+        let p = sv_err_body(body, "missing prompt")
+        sv_reply(lib, fd, "400 Bad Request", body, p)
+        return 0
+    }
+    var colon = sv_find(buf, n, pp, ":")
+    var vi = colon + 1
+    while vi < n && (sv_byte(buf, vi) == 32 || sv_byte(buf, vi) == 9 || sv_byte(buf, vi) == 10 || sv_byte(buf, vi) == 13) { vi = vi + 1 }
+
+    var ids = ck_alloc(4096)
+    var nids: i64 = 0
+    if sv_byte(buf, vi) == 34 {
+        // string prompt: unescape, BPE-encode, prepend BOS (id 0)
+        let scratch = heap_alloc(65536)
+        let dec = sv_jstr(buf, n, vi, scratch, 0)
+        let enc = bpe_encode(bp, scratch, dec[0])
+        ck_set(&!ids, 0, 0.0)
+        nids = 1
+        var e: i64 = 0
+        while e < enc.len && nids < 4000 {
+            ck_set(&!ids, nids, ck_get(&enc, e))
+            nids = nids + 1
+            e = e + 1
+        }
+    } else if sv_byte(buf, vi) == 91 {
+        var j = vi + 1
+        // array of strings is not supported in v1
+        var k = j
+        while k < n && (sv_byte(buf, k) == 32 || sv_byte(buf, k) == 10) { k = k + 1 }
+        if sv_byte(buf, k) == 34 {
+            let p = sv_err_body(body, "prompt as array of strings is not supported; use a string or token ids")
+            sv_reply(lib, fd, "400 Bad Request", body, p)
+            return 0
+        }
+        while j < n && sv_byte(buf, j) != 93 && nids < 4000 {
+            let iv = sv_int(buf, n, j)
+            if iv[2] == 1 {
+                ck_set(&!ids, nids, iv[0] as f64)
+                nids = nids + 1
+                j = iv[1]
+            } else { j = j + 1 }
+            while j < n && (sv_byte(buf, j) == 44 || sv_byte(buf, j) == 32 || sv_byte(buf, j) == 10) { j = j + 1 }
+        }
+    } else {
+        let p = sv_err_body(body, "prompt must be a string or an array of token ids")
+        sv_reply(lib, fd, "400 Bad Request", body, p)
+        return 0
+    }
+    if nids == 0 {
+        let p = sv_err_body(body, "empty prompt")
+        sv_reply(lib, fd, "400 Bad Request", body, p)
+        return 0
+    }
+
+    // generate greedily from a fresh KV (stateless per request)
+    var cap: i64 = nids + max_tokens + 8
+    if cap > 4096 { cap = 4096 }
+    if nids + max_tokens > cap { max_tokens = cap - nids }
+    var kv = kv_new(m, cap)
+    var logits = llama_forward(m, &!kv, &ids, nids)
+    let text = heap_alloc(65536)
+    var tlen: i64 = 0
+    let tbuf = heap_alloc(8192)
+    var gen: i64 = 0
+    var finish = "length"
+    var stop_hit: i64 = 0
+    while gen < max_tokens && stop_hit == 0 {
+        let nxt = llama_argmax(&logits)
+        if nxt == 0 {
+            finish = "stop"
+            stop_hit = 1
+        } else {
+            let nb = bpe_decode_token(bp, nxt, tbuf)
+            var j: i64 = 0
+            while j < nb && tlen < 60000 {
+                sv_putb(text, tlen, st_byte_at(tbuf, j))
+                tlen = tlen + 1
+                j = j + 1
+            }
+            gen = gen + 1
+            if gen < max_tokens {
+                var one = ck_alloc(1)
+                ck_set(&!one, 0, nxt as f64)
+                logits = llama_forward(m, &!kv, &one, 1)
+            }
+        }
+    }
+
+    var p: i64 = 0
+    p = sv_app_str(body, p, "{\"id\":\"cmpl-sounio-")
+    p = sv_app_int(body, p, req_id)
+    p = sv_app_str(body, p, "\",\"object\":\"text_completion\",\"created\":")
+    p = sv_app_int(body, p, req_id)
+    p = sv_app_str(body, p, ",\"model\":\"")
+    p = sv_app_str(body, p, model_name)
+    p = sv_app_str(body, p, "\",\"choices\":[{\"text\":\"")
+    p = sv_app_escaped(body, p, text, 0, tlen)
+    p = sv_app_str(body, p, "\",\"index\":0,\"logprobs\":null,\"finish_reason\":\"")
+    p = sv_app_str(body, p, finish)
+    p = sv_app_str(body, p, "\"}],\"usage\":{\"prompt_tokens\":")
+    p = sv_app_int(body, p, nids)
+    p = sv_app_str(body, p, ",\"completion_tokens\":")
+    p = sv_app_int(body, p, gen)
+    p = sv_app_str(body, p, ",\"total_tokens\":")
+    p = sv_app_int(body, p, nids + gen)
+    p = sv_app_str(body, p, "}}")
+    sv_reply(lib, fd, "200 OK", body, p)
+
+    print("served req=")
+    print_int(req_id)
+    print(" prompt_tokens=")
+    print_int(nids)
+    print(" completion_tokens=")
+    print_int(gen)
+    print(" finish=")
+    print(finish)
+    print("\n")
+    0
+}
+
+// Serve forever (sequential). Returns negative only on setup failure.
+pub fn llm_serve(m: &Llama, bp: &Bpe, port: i64, model_name: string) -> i64 with Alloc, Mut, Panic, Div, IO {
+    let lib = nw_open()
+    if !lib.ok { return 0 - 1 }
+    let srv = nw_listen(&lib, port)
+    if srv < 0 { return 0 - 2 }
+    print("llm serve listening port=")
+    print_int(port)
+    print(" model=")
+    print(model_name)
+    print("\n")
+    var req: i64 = 0
+    while 1 == 1 {
+        let conn = nw_accept(&lib, srv)
+        if conn >= 0 {
+            req = req + 1
+            let _r = sv_handle(&lib, m, bp, conn, model_name, req)
+            nw_close(&lib, conn)
+        }
+    }
+    0
+}

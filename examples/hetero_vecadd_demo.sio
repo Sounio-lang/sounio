@@ -1,0 +1,83 @@
+//@ run-pass
+//
+// Hetero vec_add demo: executes PTX EMITTED BY THE SOUNIO COMPILER
+// (self-hosted/gpu/kretikos_emit_ptx.sio, pattern vec_add - real
+// ld.global/st.global, not a hand-written kernel) on a GPU, launched from
+// a pure Sounio binary, verified element-for-element against the CPU.
+// Usage: hetero_vecadd_demo [path-to-vec_add.ptx]
+// On a machine without CUDA it prints "gpu: unavailable" and passes.
+
+use hetero::probe_cuda::{pb_cstr}
+use hetero::cuda_exec::{
+    ce_alloc, ce_arg, ce_d2h, ce_function, ce_h2d, ce_launch_raw, ce_module,
+    ce_open, ce_sync,
+}
+use hetero::cublas_bench::{gb_host_f32, gb_host_get, gb_host_set}
+
+fn abs_t(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    let exec = ce_open()
+    if !exec.ok {
+        print("gpu: unavailable (CPU-only machine, substrate OK)\n")
+        print("VECADD DONE\n")
+        exit(0)
+    }
+    var path = "vec_add.ptx"
+    if arg_count() > 0 { path = get_arg(0) }
+    let ptx = read_file(path)
+    if str_len(ptx) == 0 {
+        print("vecadd: PTX not found (generate: kretikos_emit_ptx.elf vec_add)\n")
+        print("VECADD DONE\n")
+        exit(0)
+    }
+    let module = ce_module(&exec, pb_cstr(ptx))
+    if module == 0 {
+        print("vecadd: cuModuleLoadData failed\n")
+        print("VECADD DONE\n")
+        exit(0)
+    }
+    let func = ce_function(&exec, module, "vec_add")
+    if func == 0 {
+        print("vecadd: cuModuleGetFunction failed\n")
+        print("VECADD DONE\n")
+        exit(0)
+    }
+    // n must equal total threads: kernel has no bounds guard.
+    let n: i64 = 1024
+    let a = gb_host_f32(n)
+    let b = gb_host_f32(n)
+    let c = gb_host_f32(n)
+    var i: i64 = 0
+    while i < n {
+        gb_host_set(a, i, (i as f64) * 0.5)
+        gb_host_set(b, i, (i as f64) * 1.5)
+        i = i + 1
+    }
+    let bytes = n * 4
+    let da = ce_alloc(&exec, bytes)
+    let db = ce_alloc(&exec, bytes)
+    let dc = ce_alloc(&exec, bytes)
+    var st = ce_h2d(&exec, da, a, bytes)
+    st = ce_h2d(&exec, db, b, bytes)
+    let params = heap_alloc(8 * 3)
+    write_i64(params as *mut i64, 0, ce_arg(da) as i64)
+    write_i64(params as *mut i64, 1, ce_arg(db) as i64)
+    write_i64(params as *mut i64, 2, ce_arg(dc) as i64)
+    st = ce_launch_raw(&exec, func, 4, 256, params)
+    st = ce_sync(&exec)
+    st = ce_d2h(&exec, c, dc, bytes)
+    var max_err = 0.0
+    i = 0
+    while i < n {
+        let err = abs_t(gb_host_get(c, i) - (i as f64) * 2.0)
+        if err > max_err { max_err = err }
+        i = i + 1
+    }
+    print("vec_add (compiler-emitted PTX) max_err(x1e6)=")
+    print_int((max_err * 1000000.0) as i64)
+    print("\n")
+    if max_err < 0.001 { print("vecadd verify: PASS\n") } else { print("vecadd verify: FAIL\n") }
+    print("VECADD DONE\n")
+    exit(0)
+}

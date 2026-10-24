@@ -1,0 +1,110 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+//
+// Tensor v2 demo: dtype round-trips (real IEEE encodings), refcounted
+// storage, matmul in f32 and bf16, transpose, softmax, RMSNorm.
+// Module source: stdlib/tensor2/{types,convert,ops}.sio
+
+use tensor2::types::{
+    t2_device_cpu, t2_dtype_bf16, t2_dtype_bytes, t2_dtype_f16, t2_dtype_f32,
+    t2_dtype_f64, t2_shape2,
+}
+use tensor2::ops::{
+    t2_add, t2_clone_shared, t2_full, t2_get, t2_get2, t2_matmul, t2_refcount,
+    t2_release, t2_rmsnorm_rows, t2_set, t2_set2, t2_softmax_rows, t2_sum_all,
+    t2_transpose2, t2_zeros,
+}
+
+fn abs_t(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+
+    // Test 1: dtype sizes are real bytes, not f64 in disguise.
+    if t2_dtype_bytes(t2_dtype_f32()) != 4 { ok = false; print("FAIL bytes f32\n") }
+    if t2_dtype_bytes(t2_dtype_bf16()) != 2 { ok = false; print("FAIL bytes bf16\n") }
+    if t2_dtype_bytes(t2_dtype_f16()) != 2 { ok = false; print("FAIL bytes f16\n") }
+    if t2_dtype_bytes(t2_dtype_f64()) != 8 { ok = false; print("FAIL bytes f64\n") }
+
+    // Test 2: round-trips through each float dtype.
+    var tf = t2_zeros(t2_shape2(1 as usize, 3 as usize), t2_dtype_f32(), t2_device_cpu())
+    t2_set(&!tf, 0, 0.1)
+    t2_set(&!tf, 1, 0.0 - 2.5)
+    t2_set(&!tf, 2, 3.14159265)
+    if abs_t(t2_get(&tf, 0) - 0.1) > 0.000001 { ok = false; print("FAIL f32 0.1\n") }
+    if abs_t(t2_get(&tf, 1) + 2.5) > 0.000001 { ok = false; print("FAIL f32 -2.5\n") }
+    if abs_t(t2_get(&tf, 2) - 3.14159265) > 0.000001 { ok = false; print("FAIL f32 pi\n") }
+    t2_release(&!tf)
+
+    var tb = t2_zeros(t2_shape2(1 as usize, 2 as usize), t2_dtype_bf16(), t2_device_cpu())
+    t2_set(&!tb, 0, 0.1)
+    t2_set(&!tb, 1, 100.0)
+    // bf16 has 8 mantissa bits: 0.1 must come back close but NOT exact.
+    if abs_t(t2_get(&tb, 0) - 0.1) > 0.001 { ok = false; print("FAIL bf16 0.1\n") }
+    if t2_get(&tb, 0) == 0.1 { ok = false; print("FAIL bf16 exact (storage is fake)\n") }
+    if abs_t(t2_get(&tb, 1) - 100.0) > 0.5 { ok = false; print("FAIL bf16 100\n") }
+    t2_release(&!tb)
+
+    var th = t2_zeros(t2_shape2(1 as usize, 2 as usize), t2_dtype_f16(), t2_device_cpu())
+    t2_set(&!th, 0, 0.5)
+    t2_set(&!th, 1, 0.0 - 1.25)
+    if abs_t(t2_get(&th, 0) - 0.5) > 0.0001 { ok = false; print("FAIL f16 0.5\n") }
+    if abs_t(t2_get(&th, 1) + 1.25) > 0.0001 { ok = false; print("FAIL f16 -1.25\n") }
+    t2_release(&!th)
+
+    // Test 3: refcounted shared storage.
+    var a = t2_full(t2_shape2(2 as usize, 2 as usize), t2_dtype_f32(), t2_device_cpu(), 7.0)
+    if t2_refcount(&a) != 1 { ok = false; print("FAIL rc 1\n") }
+    var shared = t2_clone_shared(&a)
+    if t2_refcount(&a) != 2 { ok = false; print("FAIL rc 2\n") }
+    t2_release(&!a)
+    // Storage survives: the shared handle still reads 7.0 everywhere.
+    if abs_t(t2_sum_all(&shared) - 28.0) > 0.0001 { ok = false; print("FAIL shared survives\n") }
+    t2_release(&!shared)
+    if t2_refcount(&shared) != 0 { ok = false; print("FAIL rc 0\n") }
+
+    // Test 4: matmul f32, exact known product.
+    var x = t2_zeros(t2_shape2(2 as usize, 2 as usize), t2_dtype_f32(), t2_device_cpu())
+    t2_set2(&!x, 0, 0, 1.0); t2_set2(&!x, 0, 1, 2.0)
+    t2_set2(&!x, 1, 0, 3.0); t2_set2(&!x, 1, 1, 4.0)
+    var y = t2_zeros(t2_shape2(2 as usize, 2 as usize), t2_dtype_f32(), t2_device_cpu())
+    t2_set2(&!y, 0, 0, 5.0); t2_set2(&!y, 0, 1, 6.0)
+    t2_set2(&!y, 1, 0, 7.0); t2_set2(&!y, 1, 1, 8.0)
+    var p = t2_matmul(&x, &y)
+    if abs_t(t2_get2(&p, 0, 0) - 19.0) > 0.001 { ok = false; print("FAIL mm 00\n") }
+    if abs_t(t2_get2(&p, 0, 1) - 22.0) > 0.001 { ok = false; print("FAIL mm 01\n") }
+    if abs_t(t2_get2(&p, 1, 0) - 43.0) > 0.001 { ok = false; print("FAIL mm 10\n") }
+    if abs_t(t2_get2(&p, 1, 1) - 50.0) > 0.001 { ok = false; print("FAIL mm 11\n") }
+
+    // Test 5: same matmul in bf16 stays within bf16 tolerance.
+    var xb = t2_zeros(t2_shape2(2 as usize, 2 as usize), t2_dtype_bf16(), t2_device_cpu())
+    t2_set2(&!xb, 0, 0, 1.0); t2_set2(&!xb, 0, 1, 2.0)
+    t2_set2(&!xb, 1, 0, 3.0); t2_set2(&!xb, 1, 1, 4.0)
+    var yb = t2_zeros(t2_shape2(2 as usize, 2 as usize), t2_dtype_bf16(), t2_device_cpu())
+    t2_set2(&!yb, 0, 0, 5.0); t2_set2(&!yb, 0, 1, 6.0)
+    t2_set2(&!yb, 1, 0, 7.0); t2_set2(&!yb, 1, 1, 8.0)
+    var pb = t2_matmul(&xb, &yb)
+    if abs_t(t2_get2(&pb, 1, 1) - 50.0) > 0.5 { ok = false; print("FAIL mm bf16\n") }
+    t2_release(&!xb); t2_release(&!yb); t2_release(&!pb)
+
+    // Test 6: transpose and elementwise add.
+    var xt = t2_transpose2(&x)
+    if abs_t(t2_get2(&xt, 0, 1) - 3.0) > 0.001 { ok = false; print("FAIL transpose\n") }
+    var xx = t2_add(&x, &x)
+    if abs_t(t2_get2(&xx, 1, 1) - 8.0) > 0.001 { ok = false; print("FAIL add\n") }
+    t2_release(&!x); t2_release(&!y); t2_release(&!p); t2_release(&!xt); t2_release(&!xx)
+
+    // Test 7: softmax rows sum to 1; rmsnorm rows have RMS 1.
+    var s = t2_zeros(t2_shape2(2 as usize, 3 as usize), t2_dtype_f32(), t2_device_cpu())
+    t2_set2(&!s, 0, 0, 1.0); t2_set2(&!s, 0, 1, 2.0); t2_set2(&!s, 0, 2, 3.0)
+    t2_set2(&!s, 1, 0, 0.0); t2_set2(&!s, 1, 1, 0.0); t2_set2(&!s, 1, 2, 0.0)
+    var sm = t2_softmax_rows(&s)
+    if abs_t(t2_get2(&sm, 0, 0) + t2_get2(&sm, 0, 1) + t2_get2(&sm, 0, 2) - 1.0) > 0.001 { ok = false; print("FAIL softmax sum\n") }
+    if abs_t(t2_get2(&sm, 1, 0) - 0.3333333) > 0.001 { ok = false; print("FAIL softmax uniform\n") }
+    var rn = t2_rmsnorm_rows(&s, 0.00001)
+    let rms = (t2_get2(&rn, 0, 0) * t2_get2(&rn, 0, 0) + t2_get2(&rn, 0, 1) * t2_get2(&rn, 0, 1) + t2_get2(&rn, 0, 2) * t2_get2(&rn, 0, 2)) / 3.0
+    if abs_t(rms - 1.0) > 0.01 { ok = false; print("FAIL rmsnorm\n") }
+    t2_release(&!s); t2_release(&!sm); t2_release(&!rn)
+
+    if ok { print("ALL PASS") } else { print("SOME FAIL") }
+}

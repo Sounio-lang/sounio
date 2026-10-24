@@ -1,0 +1,75 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+//
+// GraphIR + CostModel + chain planner demo (pure, no GPU):
+// heterogeneous specialists split, slow link forces placement, unmeasured
+// devices are never silently used. Module source: stdlib/hetero/{graph,cost}.sio
+
+use hetero::types::{
+    backend_cpu_avx512, backend_cuda_ptx, device_caps_measured, dtype_f32,
+    op_attention, op_matmul,
+}
+use hetero::caps::{pool_add, pool_new}
+use hetero::graph::{graph_add_chain_node, graph_new, graph_total_flops}
+use hetero::cost::{
+    link_matrix_new, link_set, plan_chain, plan_evaluate,
+}
+
+fn abs_t(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+
+    // Chain: matmul -> attention -> matmul, 2 GFLOP each.
+    var g = graph_new()
+    let _a = graph_add_chain_node(&!g, op_matmul(), dtype_f32(), 2000000000.0, 1000000, 0, 0)
+    let _b = graph_add_chain_node(&!g, op_attention(), dtype_f32(), 2000000000.0, 1000000, 0, 0)
+    let _c = graph_add_chain_node(&!g, op_matmul(), dtype_f32(), 2000000000.0, 1000000, 0, 0)
+    if g.n_nodes != 3 || g.n_edges != 2 { ok = false; print("FAIL graph build\n") }
+    if abs_t(graph_total_flops(&g) - 6000000000.0) > 1.0 { ok = false; print("FAIL flops\n") }
+
+    // Specialists: A fast matmul (2000) slow attention (100);
+    //               B slow matmul (200)  fast attention (2000). GFLOP/s.
+    var pool = pool_new()
+    pool_add(&!pool, device_caps_measured(backend_cuda_ptx(), 89, 24000000000, false, 2000.0, 2000.0, 100.0, 10.0))
+    pool_add(&!pool, device_caps_measured(backend_cpu_avx512(), 0, 64000000000, false, 200.0, 200.0, 2000.0, 10.0))
+    // NOTE argument order: (backend, arch, vram, unified, matmul_bf16, matmul_f32, attn_bf16, elem)
+    // A: matmul_f32=2000 attn=100 ; B: matmul_f32=200 attn=2000 - set above accordingly.
+
+    // Fast link (100 GB/s, 5 us): planner must split [A, B, A].
+    var lm = link_matrix_new()
+    link_set(&!lm, 0, 1, 100.0, 5.0)
+    let plan = plan_chain(&g, &pool, &lm)
+    if plan.assign[0] != 0 || plan.assign[1] != 1 || plan.assign[2] != 0 {
+        ok = false; print("FAIL split assign\n")
+    }
+    if plan.n_devices_used != 2 { ok = false; print("FAIL split devices\n") }
+    if plan.predicted_s >= plan.best_single_s { ok = false; print("FAIL split should beat single\n") }
+    // Predicted: A matmul 1ms + B attn 1ms + A matmul 1ms + 2 transfers ~0.02ms
+    if abs_t(plan.predicted_s - 0.00302) > 0.0005 { ok = false; print("FAIL split predicted value\n") }
+    let audit = plan_evaluate(&g, &pool, &lm, plan.assign)
+    if abs_t(audit - plan.predicted_s) > 0.000000001 { ok = false; print("FAIL evaluate mismatch\n") }
+
+    // Slow link (0.01 GB/s): 1 MB costs 0.1 s per hop - placement must win.
+    var lm2 = link_matrix_new()
+    link_set(&!lm2, 0, 1, 0.01, 5.0)
+    let plan2 = plan_chain(&g, &pool, &lm2)
+    if plan2.n_devices_used != 1 { ok = false; print("FAIL slowlink placement\n") }
+    if abs_t(plan2.predicted_s - plan2.best_single_s) > 0.000000001 { ok = false; print("FAIL slowlink equals single\n") }
+
+    // Unmeasured link: planner must not cross devices silently.
+    let lm3 = link_matrix_new()
+    let plan3 = plan_chain(&g, &pool, &lm3)
+    if plan3.n_devices_used != 1 { ok = false; print("FAIL unmeasured placement\n") }
+
+    // Homogeneous pool: chain has no reason to split (sequential + comm cost).
+    var homo = pool_new()
+    pool_add(&!homo, device_caps_measured(backend_cuda_ptx(), 89, 24000000000, false, 1000.0, 1000.0, 1000.0, 10.0))
+    pool_add(&!homo, device_caps_measured(backend_cuda_ptx(), 89, 24000000000, false, 1000.0, 1000.0, 1000.0, 10.0))
+    var lm4 = link_matrix_new()
+    link_set(&!lm4, 0, 1, 100.0, 5.0)
+    let plan4 = plan_chain(&g, &homo, &lm4)
+    if plan4.n_devices_used != 1 { ok = false; print("FAIL homo chain placement\n") }
+
+    if ok { print("ALL PASS") } else { print("SOME FAIL") }
+}

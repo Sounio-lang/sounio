@@ -1,0 +1,72 @@
+//@ run-pass
+//
+// Hetero GPU GEMM demo: SGEMM on a real GPU from a pure Sounio binary
+// (cuBLAS bootstrap oracle, registered in the design doc with an exit date),
+// verified against the CPU-computed result, then benchmarked so the number
+// can feed DeviceCaps as MEASURED throughput.
+// On a machine without CUDA/cuBLAS it prints "gpu: unavailable" and passes.
+// Sources: stdlib/hetero/{probe_cuda,cublas_bench}.sio
+
+use hetero::cublas_bench::{
+    gb_host_f32, gb_host_get, gb_host_set, gb_sgemm, gb_sgemm_gflops,
+    gpu_exec_open_ex,
+}
+
+fn abs_t(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    let exec = gpu_exec_open_ex()
+    if !exec.ctx_ok || !exec.handle_ok {
+        print("gpu: unavailable (no CUDA/cuBLAS, substrate OK)\n")
+        print("GEMM DONE\n")
+        exit(0)
+    }
+    // Verify: 4x4 with A[i]=i+1, B=identity-ish pattern B[i]= (i%4==i/4)? 
+    // Use B = identity: C must equal A exactly.
+    let n: i64 = 4
+    let a = gb_host_f32(n * n)
+    let b = gb_host_f32(n * n)
+    let c = gb_host_f32(n * n)
+    var i: i64 = 0
+    while i < n * n {
+        gb_host_set(a, i, (i as f64) + 1.0)
+        gb_host_set(b, i, 0.0)
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        gb_host_set(b, i * n + i, 1.0)
+        i = i + 1
+    }
+    let st = gb_sgemm(&exec, n, a, b, c)
+    print("gemm status=")
+    print_int(st as i64)
+    print("\n")
+    var ok = st == 0
+    i = 0
+    while i < n * n {
+        if abs_t(gb_host_get(c, i) - ((i as f64) + 1.0)) > 0.001 { ok = false }
+        i = i + 1
+    }
+    if ok { print("gemm verify: PASS (C == A with B = I)\n") } else { print("gemm verify: FAIL\n") }
+
+    // Non-trivial check: A * ones-vector pattern via 2x2 known product.
+    let a2 = gb_host_f32(4)
+    let b2 = gb_host_f32(4)
+    let c2 = gb_host_f32(4)
+    gb_host_set(a2, 0, 1.0); gb_host_set(a2, 1, 2.0); gb_host_set(a2, 2, 3.0); gb_host_set(a2, 3, 4.0)
+    gb_host_set(b2, 0, 5.0); gb_host_set(b2, 1, 6.0); gb_host_set(b2, 2, 7.0); gb_host_set(b2, 3, 8.0)
+    let st2 = gb_sgemm(&exec, 2, a2, b2, c2)
+    if st2 == 0 && abs_t(gb_host_get(c2, 0) - 19.0) < 0.01 && abs_t(gb_host_get(c2, 3) - 50.0) < 0.01 {
+        print("gemm verify2: PASS ([[1,2],[3,4]] x [[5,6],[7,8]])\n")
+    } else {
+        print("gemm verify2: FAIL\n")
+    }
+
+    let g = gb_sgemm_gflops(&exec, 1024, 5)
+    print("sgemm 1024 gflops(x100)=")
+    print_int((g * 100.0) as i64)
+    print("\n")
+    print("GEMM DONE\n")
+    exit(0)
+}

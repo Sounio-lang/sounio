@@ -1,0 +1,119 @@
+// Tiled f32 GEMM (row-major C = A * B), 16x16 shared-memory tiles.
+// Successor to gemm_naive_f32.ptx: each block stages A/B tiles in shared
+// memory so every loaded element is reused 16 times. Interim owned PTX
+// artifact until Kretikos lowers load/store from `kernel fn` bodies.
+.version 7.0
+.target sm_50
+.address_size 64
+
+.visible .entry gemm_tiled_f32(
+    .param .u64 param_A,
+    .param .u64 param_B,
+    .param .u64 param_C,
+    .param .s32 param_M,
+    .param .s32 param_N,
+    .param .s32 param_K
+)
+{
+    .shared .align 4 .b8 As[1024];
+    .shared .align 4 .b8 Bs[1024];
+    .reg .f32 %f<6>;
+    .reg .s32 %r<28>;
+    .reg .s64 %rd<20>;
+    .reg .pred %p<6>;
+
+    ld.param.u64 %rd0, [param_A];
+    ld.param.u64 %rd1, [param_B];
+    ld.param.u64 %rd2, [param_C];
+    ld.param.s32 %r3, [param_M];
+    ld.param.s32 %r4, [param_N];
+    ld.param.s32 %r5, [param_K];
+
+    mov.u32 %r6, %tid.y;
+    mov.u32 %r7, %tid.x;
+    mov.u32 %r8, %ctaid.y;
+    mov.u32 %r9, %ctaid.x;
+    // row = by*16 + ty ; col = bx*16 + tx
+    shl.b32 %r10, %r8, 4;
+    add.s32 %r10, %r10, %r6;
+    shl.b32 %r11, %r9, 4;
+    add.s32 %r11, %r11, %r7;
+    // local tile index ty*16+tx
+    shl.b32 %r12, %r6, 4;
+    add.s32 %r12, %r12, %r7;
+
+    mov.u32 %r13, As;
+    mov.u32 %r14, Bs;
+
+    mov.f32 %f0, 0f00000000;
+    mov.s32 %r15, 0;
+KTILE:
+    setp.ge.s32 %p0, %r15, %r5;
+    @%p0 bra STORE;
+    // As[ty][tx] = (row<M && kt+tx<K) ? A[row*K + kt+tx] : 0
+    mov.f32 %f1, 0f00000000;
+    add.s32 %r16, %r15, %r7;
+    setp.lt.s32 %p1, %r10, %r3;
+    setp.lt.s32 %p2, %r16, %r5;
+    and.pred %p1, %p1, %p2;
+    @!%p1 bra A_DONE;
+    mul.lo.s32 %r17, %r10, %r5;
+    add.s32 %r17, %r17, %r16;
+    mul.wide.s32 %rd8, %r17, 4;
+    add.s64 %rd8, %rd0, %rd8;
+    ld.global.f32 %f1, [%rd8];
+A_DONE:
+    shl.b32 %r18, %r12, 2;
+    add.s32 %r25, %r13, %r18;
+    st.shared.f32 [%r25], %f1;
+    // Bs[ty][tx] = (kt+ty<K && col<N) ? B[(kt+ty)*N + col] : 0
+    mov.f32 %f2, 0f00000000;
+    add.s32 %r19, %r15, %r6;
+    setp.lt.s32 %p3, %r19, %r5;
+    setp.lt.s32 %p4, %r11, %r4;
+    and.pred %p3, %p3, %p4;
+    @!%p3 bra B_DONE;
+    mul.lo.s32 %r20, %r19, %r4;
+    add.s32 %r20, %r20, %r11;
+    mul.wide.s32 %rd10, %r20, 4;
+    add.s64 %rd10, %rd1, %rd10;
+    ld.global.f32 %f2, [%rd10];
+B_DONE:
+    add.s32 %r25, %r14, %r18;
+    st.shared.f32 [%r25], %f2;
+    bar.sync 0;
+    // acc += sum_i As[ty][i] * Bs[i][tx]
+    mov.s32 %r21, 0;
+INNER:
+    setp.ge.s32 %p5, %r21, 16;
+    @%p5 bra INNER_DONE;
+    shl.b32 %r22, %r6, 4;
+    add.s32 %r22, %r22, %r21;
+    shl.b32 %r22, %r22, 2;
+    add.s32 %r25, %r13, %r22;
+    ld.shared.f32 %f3, [%r25];
+    shl.b32 %r23, %r21, 4;
+    add.s32 %r23, %r23, %r7;
+    shl.b32 %r23, %r23, 2;
+    add.s32 %r25, %r14, %r23;
+    ld.shared.f32 %f4, [%r25];
+    fma.rn.f32 %f0, %f3, %f4, %f0;
+    add.s32 %r21, %r21, 1;
+    bra INNER;
+INNER_DONE:
+    bar.sync 0;
+    add.s32 %r15, %r15, 16;
+    bra KTILE;
+STORE:
+    setp.lt.s32 %p1, %r10, %r3;
+    setp.lt.s32 %p2, %r11, %r4;
+    and.pred %p1, %p1, %p2;
+    @!%p1 bra DONE;
+    mul.lo.s32 %r24, %r10, %r4;
+    add.s32 %r24, %r24, %r11;
+    mul.wide.s32 %rd8, %r24, 4;
+    add.s64 %rd8, %rd2, %rd8;
+    st.global.f32 [%rd8], %f0;
+DONE:
+    ret;
+}

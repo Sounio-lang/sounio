@@ -1,0 +1,116 @@
+// stdlib::hetero::hip_probe - Measured AMD device enumeration via HIP.
+//
+// Same technique as probe_cuda.sio, other vendor: dlopen("libamdhip64")
+// -> dlsym(hip*) -> call-through fn-pointer casts. Pure Sounio binary, no
+// link-time ROCm dependency. Spike evidence (2026-10-23): dl380 worker has
+// /dev/kfd, libhsa-runtime64 and libamdhip64 - the path exists; execution
+// awaits a free R9700 (no preemption of serving jobs for a probe).
+
+extern "C" {
+    fn dlopen(filename: *mut u8, flags: i32) -> *mut u8
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+    fn dlclose(handle: *mut u8) -> i32
+}
+
+use hetero::probe_cuda::{pb_cstr}
+
+fn hp_sym(handle: *mut u8, name: string) -> *mut u8 with Alloc, Mut {
+    dlsym(handle, pb_cstr(name))
+}
+
+fn hp_read_byte(data: *mut u8, off: i64) -> i64 {
+    (read_i64(data as *mut i64, off / 8) >> ((off % 8) * 8)) & 255
+}
+
+pub struct HipProbe {
+    pub handle: *mut u8,
+    pub available: bool,
+    pub device_count: i32,
+}
+
+/// Open libamdhip64 and hipInit. available=false when absent.
+///
+/// # Return
+/// Probe handle with measured device count when available.
+///
+/// # Complexity
+/// O(1)
+pub fn hip_probe_open() -> HipProbe with Alloc, Mut, Panic {
+    var h = dlopen(pb_cstr("libamdhip64.so.5"), 1)
+    if (h as i64) == 0 { h = dlopen(pb_cstr("libamdhip64.so"), 1) }
+    if (h as i64) == 0 {
+        return HipProbe { handle: 0 as *mut u8, available: false, device_count: 0 }
+    }
+    let raw_init = hp_sym(h, "hipInit")
+    if (raw_init as i64) == 0 {
+        return HipProbe { handle: 0 as *mut u8, available: false, device_count: 0 }
+    }
+    let hip_init = raw_init as fn(i32) -> i32
+    if hip_init(0) != 0 {
+        return HipProbe { handle: 0 as *mut u8, available: false, device_count: 0 }
+    }
+    var count = 0
+    let raw_count = hp_sym(h, "hipGetDeviceCount")
+    if (raw_count as i64) != 0 {
+        let buf = heap_alloc(8)
+        write_i64(buf as *mut i64, 0, 0)
+        let hip_count = raw_count as fn(*mut u8) -> i32
+        if hip_count(buf) == 0 {
+            count = (read_i64(buf as *mut i64, 0) & 4294967295) as i32
+        }
+    }
+    HipProbe { handle: h, available: true, device_count: count }
+}
+
+/// Total memory in bytes of the current device (hipMemGetInfo after select).
+///
+/// # Parameters
+/// - `probe`: open probe. - `ordinal`: device index.
+///
+/// # Return
+/// Total bytes, or 0 on error.
+///
+/// # Complexity
+/// O(1)
+pub fn hip_probe_total_mem(probe: &HipProbe, ordinal: i32) -> i64 with Alloc, Mut, Panic {
+    let raw_set = hp_sym(probe.handle, "hipSetDevice")
+    if (raw_set as i64) == 0 { return 0 }
+    let hip_set = raw_set as fn(i32) -> i32
+    if hip_set(ordinal) != 0 { return 0 }
+    let raw_info = hp_sym(probe.handle, "hipMemGetInfo")
+    if (raw_info as i64) == 0 { return 0 }
+    let freebuf = heap_alloc(8)
+    let totbuf = heap_alloc(8)
+    write_i64(freebuf as *mut i64, 0, 0)
+    write_i64(totbuf as *mut i64, 0, 0)
+    let hip_info = raw_info as fn(*mut u8, *mut u8) -> i32
+    if hip_info(freebuf, totbuf) != 0 { return 0 }
+    read_i64(totbuf as *mut i64, 0)
+}
+
+/// Print the device name (hipDeviceGetName) to stdout.
+///
+/// # Parameters
+/// - `probe`: open probe. - `ordinal`: device index.
+///
+/// # Complexity
+/// O(name length)
+pub fn hip_probe_print_name(probe: &HipProbe, ordinal: i32) with Alloc, Mut, Panic, IO {
+    let raw_name = hp_sym(probe.handle, "hipDeviceGetName")
+    if (raw_name as i64) == 0 { print("unknown"); return }
+    let namebuf = heap_alloc(256)
+    var i: i64 = 0
+    while i < 256 {
+        write_i64(namebuf as *mut i64, i / 8, 0)
+        i = i + 8
+    }
+    let hip_name = raw_name as fn(*mut u8, i32, i32) -> i32
+    if hip_name(namebuf, 256, ordinal) != 0 { print("unknown"); return }
+    i = 0
+    while i < 256 {
+        let c = hp_read_byte(namebuf, i)
+        if c == 0 { return }
+        print_char(c)
+        i = i + 1
+    }
+}
