@@ -25,7 +25,6 @@ Mathematical genomics: DNA as GF(4) field elements, sequence operators, and form
 | `genomics::core` | **real** | Complement, GC, Hamming, alignment score, codon translation, k-mers |
 | `genomics::io::fasta` | **real** | In-memory FASTA parser → `Seq256` |
 | `genomics::gpu::gf4` | **real** | GF(4) CPU fallback kernels + self-test |
-| `alignment`, `variant`, `types`, … | stub | Pending parser / design support |
 
 ## Usage
 
