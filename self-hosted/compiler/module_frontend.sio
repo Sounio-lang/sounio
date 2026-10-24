@@ -2621,24 +2621,106 @@ fn ir_function_deep_copy(func: IrFunction) -> IrFunction with Mut, Panic, Div {
     out
 }
 
+// `Type_method` as `ir_mangle_method_name` writes it: a non-empty type prefix,
+// then `_`, then the bare method. Method names themselves may contain `_`
+// (`field_idx_for_base_ref`), so this matches the suffix, not the last `_`.
+fn ir_name_is_type_method_of(full: Name, method: Name) -> bool with Mut, Panic {
+    if method.len <= 0 { return false }
+    if full.len <= method.len + 1 { return false }
+    let sep = full.len - method.len - 1
+    if sep <= 0 { return false }
+    if full.buf[sep as usize] != 95 { return false }
+    // Type_method as ir_mangle_method_name writes it: the type prefix is a
+    // single PascalCase identifier. snake_case free fns
+    // (`thin_module_summary_lookup_local`) and longer names that merely
+    // start uppercase and end in `_` + the bare method
+    // (`Checker_report_unobserved_print` is not Type=`print`) are not
+    // method bodies.
+    let first = full.buf[0]
+    if first < 65 || first > 90 { return false }
+    var pi: i64 = 1
+    while pi < sep {
+        if full.buf[pi as usize] == 95 { return false }
+        pi = pi + 1
+    }
+    var i: i64 = 0
+    while i < method.len {
+        if full.buf[(sep + 1 + i) as usize] != method.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Unique lowered `Type_method` body for a bare method name.
+//   >= 0  that fn_id
+//   -1    none
+//   -2    two or more bodies — refuse rather than pick
+fn ir_module_find_unique_mangled_method_body(module: &IrModule, method: Name) -> i64 with Mut, Panic, Div {
+    var found: i64 = 0 - 1
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        if ir_fn_instr_count(module, fi) > 0 {
+            let n = ir_function_name_at(module, fi)
+            if ir_name_is_type_method_of(n, method) {
+                if found >= 0 { return 0 - 2 }
+                found = fi
+            }
+        }
+        fi = fi + 1
+    }
+    found
+}
+
 // When merge leaves import stubs (ic=0) alongside lowered duplicates at higher
 // fn_id, copy the canonical body into the stub slot so codegen fn_offsets for
 // stale low indices still reach real implementations.
+//
+// Same-name first. If no same-name body exists, a bare stub may be a
+// `Type_method` whose body was stored under the mangled name (Lowerer.emit
+// as `Lowerer_emit`, call sites as `emit`). Fill only from a unique match;
+// two Type_method bodies for the same bare name is a refusal, not a guess.
+// The stub keeps its bare name so later name lookup still binds.
 // In-place on &! IrModule (memory wall P0).
-fn ir_module_promote_canonical_into_stub_slots(module: &! IrModule) with Mut, Div, Panic {
+// Returns false if any stub was ambiguous.
+fn ir_module_promote_canonical_into_stub_slots(module: &! IrModule) -> bool with Mut, Div, Panic, IO {
+    var ok = true
     var fi: i64 = 0
     while fi < (*module).fn_count {
-        if ir_fn_get(&(*module), fi as usize).instr_count == 0 {
-            let sym_name = ir_fn_get(&(*module), fi as usize).name
-            if sym_name.len > 0 {
-                let canon = ir_merge_find_function_name_index(module, sym_name)
-                if canon >= 0 && canon != fi && ir_fn_get(&(*module), canon as usize).instr_count > 0 {
-                    ir_fn_set(&! (*module), fi as usize, ir_function_deep_copy(ir_fn_get(&(*module), canon as usize)))
+        if ir_fn_instr_count(module, fi) == 0 {
+            if ir_fn_get(&(*module), fi as usize).compile_strategy != IR_STRATEGY_BSS_GLOBAL {
+                let sym_name = ir_function_name_at(module, fi)
+                if sym_name.len > 0 {
+                    let canon = ir_merge_find_function_name_index(module, sym_name)
+                    if canon >= 0 && canon != fi && ir_fn_instr_count(module, canon) > 0 {
+                        ir_fn_set(&! (*module), fi as usize, ir_function_deep_copy(ir_fn_get(&(*module), canon as usize)))
+                    } else if native_v2_builtin_id_for_name(sym_name) != 0 {
+                        // Builtin empty stubs are synthesized at codegen. A
+                        // Type_method suffix must not replace them (print vs
+                        // Checker_report_unobserved_print).
+                    } else {
+                        let mangled = ir_module_find_unique_mangled_method_body(module, sym_name)
+                        if mangled == 0 - 2 {
+                            print("IR_PROMOTE_REFUSAL kind=ambiguous_mangled_body name=")
+                            print(str_from_bytes(sym_name.buf, sym_name.len))
+                            print("\n")
+                            ok = false
+                        } else if mangled >= 0 && mangled != fi {
+                            var filled = ir_function_deep_copy(ir_fn_get(&(*module), mangled as usize))
+                            filled.name = sym_name
+                            ir_fn_set(&! (*module), fi as usize, filled)
+                            print("IR_PROMOTE_MANGLED_BODY stub=")
+                            print(str_from_bytes(sym_name.buf, sym_name.len))
+                            print(" body=")
+                            print(str_from_bytes(ir_function_name_at(module, mangled).buf, ir_function_name_at(module, mangled).len))
+                            print("\n")
+                        }
+                    }
                 }
             }
         }
         fi = fi + 1
     }
+    ok
 }
 
 // Ensure every call to a BUILTIN name (str_char_at, str_len, str_from_bytes, ...)
@@ -2759,13 +2841,14 @@ fn ir_module_ensure_builtin_call_targets(module: &! IrModule) with Mut, Div, Pan
 // Finalize merged multi-mod call targets in place. Memory wall P0: take &! IrModule
 // only — never copy full IrModule through promote/compact/ensure/resolve chain.
 // A14 invariant preserved: rebinds use whole-function writeback (not IrInstr by-value).
-fn ir_module_finalize_merged_calls(module: &! IrModule) with Mut, Div, Panic {
+fn ir_module_finalize_merged_calls(module: &! IrModule) -> bool with Mut, Div, Panic, IO {
     ir_module_resolve_named_calls(module)
     // Promote before compaction so import stubs at low fn_id gain bodies while
-    // seed main still references those indices.
-    ir_module_promote_canonical_into_stub_slots(module)
+    // seed main still references those indices. Ambiguous Type_method fill
+    // is a refusal: do not compact or publish a half-promoted module.
+    if !ir_module_promote_canonical_into_stub_slots(module) { return false }
     ir_module_compact_duplicate_fn_refs(module)
-    ir_module_promote_canonical_into_stub_slots(module)
+    if !ir_module_promote_canonical_into_stub_slots(module) { return false }
     // Two passes after promotion: duplicate import stubs (ic=0) can alias lowered
     // bodies under the same name at higher fn_id; promotion fills stub slots first.
     var pass: i64 = 0
@@ -2798,6 +2881,7 @@ fn ir_module_finalize_merged_calls(module: &! IrModule) with Mut, Div, Panic {
         pass = pass + 1
     }
     ir_module_ensure_builtin_call_targets(module)
+    true
 }
 
 // Reinstall seed user main after finalize: finalize passes can clobber
@@ -2948,19 +3032,74 @@ pub struct ModuleClosure {
     pub parse_failed_path: string,
 }
 
+// Breadcrumb trace for the closure walk, opt-in with SOUNIO_PREFLIGHT_TRACE=1.
+// print is buffered and lost on SIGSEGV; write_file is a syscall and survives
+// (it always opens O_TRUNC, so the file holds the LAST step executed, not the
+// history -- that is the point: no file or file ending in "done" means the walk
+// survived, anything else names the step it died after).
+//
+// Memoised read_env for the same reason as every other gate in this file: the
+// runtime allocator never reclaims, so a call per invocation is a per-compile
+// leak -- and this gate runs about fourteen times per module.
+var MF_CLOSURE_TRACE_ON: i64 = 0
+var MF_CLOSURE_TRACE_CHECKED: i64 = 0
+
+fn closure_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    if MF_CLOSURE_TRACE_CHECKED == 0 {
+        MF_CLOSURE_TRACE_CHECKED = 1
+        if str_eq(read_env("SOUNIO_PREFLIGHT_TRACE"), "1") {
+            MF_CLOSURE_TRACE_ON = 1
+        }
+    }
+    MF_CLOSURE_TRACE_ON == 1
+}
+
+fn closure_trace(step: string) with IO, Mut, Panic, Div {
+    if !closure_trace_enabled() { return }
+    print("preflight_trace: closure ")
+    println(step)
+    var buf: [i8; 512] = [0; 512]
+    let prefix = "closure "
+    var pos: i64 = 0
+    var pi: i64 = 0
+    while pi < str_len(prefix) && pos < 511 {
+        buf[pos as usize] = str_char_at(prefix, pi) as i8
+        pos = pos + 1
+        pi = pi + 1
+    }
+    var i: i64 = 0
+    while i < str_len(step) && pos < 511 {
+        buf[pos as usize] = str_char_at(step, i) as i8
+        pos = pos + 1
+        i = i + 1
+    }
+    let _written = write_file("/tmp/sounio-preflight-trace.txt", buf, pos)
+}
+
 pub fn module_frontend_collect_ast_closure_into(
     main_path: string,
     out: &!ModuleClosure
 ) -> bool with IO, Mut, Panic, Div, Alloc {
+    closure_trace("enter")
+    closure_trace(main_path)
     (*out).node_count = 0
+    closure_trace("cleared_node_count")
     (*out).edge_count = 0
+    closure_trace("cleared_edge_count")
     (*out).unresolved_count = 0
+    closure_trace("cleared_unresolved_count")
     (*out).saturated = false
+    closure_trace("cleared_saturated")
     (*out).parse_failed = false
+    closure_trace("cleared_parse_failed")
     (*out).parse_failed_path = ""
+    closure_trace("cleared_parse_failed_path")
 
     parser_reset_last_errors()
+    closure_trace("parser_reset_returned")
+    closure_trace("before_load_main")
     let main_prog = load_module_file(main_path)
+    closure_trace("load_main_returned")
     if parser_last_error_count() > 0 {
         (*out).parse_failed = true
         (*out).parse_failed_path = main_path
@@ -2972,6 +3111,8 @@ pub fn module_frontend_collect_ast_closure_into(
     var work_front: i64 = 0
     while work_front < (*out).node_count {
         let caller_path = (*out).paths[work_front]
+        closure_trace("module")
+        closure_trace(caller_path)
         let cur_dir = module_frontend_path_directory_slice(caller_path)
         parser_reset_last_errors()
         let work_prog = load_module_file(caller_path)
@@ -3020,6 +3161,7 @@ pub fn module_frontend_collect_ast_closure_into(
         }
         work_front = work_front + 1
     }
+    closure_trace("done")
     !(*out).saturated && !(*out).parse_failed && (*out).unresolved_count == 0
 }
 
@@ -5373,6 +5515,83 @@ fn module_frontend_loaded_ir_slot_capacity_error(programs: &! [Program; 256], lo
     module_frontend_ir_slot_capacity_error_from_counts(total_slots, bss_slots, slot_limit)
 }
 
+// Gen3 preflight trace -- opt-in with SOUNIO_GEN3_PREFLIGHT_TRACE=1. The gen2
+// census above prints only from inside the capacity ERROR, so a preflight that
+// PASSES is silent: nothing records what the cross-module DCE deleted, and the
+// only way to see the raw-vs-live split was to instrument the error line as
+// gen2 did and then push over the limit on purpose. This prints BEFORE the
+// capacity decision in both callers instead, and says nothing at all when the
+// variable is not 1.
+//
+// Memoised read_env for the same reason as every other gate in this file: the
+// runtime allocator never reclaims, so a call per invocation is a per-compile
+// leak.
+var MF_GEN3_PREFLIGHT_TRACE_ON: i64 = 0
+var MF_GEN3_PREFLIGHT_TRACE_CHECKED: i64 = 0
+
+fn module_frontend_gen3_preflight_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    if MF_GEN3_PREFLIGHT_TRACE_CHECKED == 0 {
+        MF_GEN3_PREFLIGHT_TRACE_CHECKED = 1
+        if str_eq(read_env("SOUNIO_GEN3_PREFLIGHT_TRACE"), "1") {
+            MF_GEN3_PREFLIGHT_TRACE_ON = 1
+        }
+    }
+    MF_GEN3_PREFLIGHT_TRACE_ON == 1
+}
+
+// Summary line carries the numbers the census uses (globals = raw BSS slots,
+// functions = the rest of the DCE-filtered total -- the same split
+// module_frontend_count_loaded_* makes), plus one line per loaded module with
+// its raw slot count, its count after the filter, and its BSS globals. The two
+// per-module counts are what the summary total and the DCE's deletion are made
+// of.
+//
+// dce_marks is passed in rather than recomputed because -1 is a statement
+// about the filter, not a count: the mark set was refused, so
+// spec_dce_filter_with_global_marks gave back its input intact and "raw" equals
+// "after dce" by contract, not by the program being dead-code free. The
+// summary has to say so, or those two columns agreeing reads as an accident.
+fn module_frontend_gen3_preflight_trace(
+    programs: &! [Program; 256],
+    loaded: i64,
+    dce_marks: i64
+) with IO, Mut, Panic, Div, Alloc {
+    if !module_frontend_gen3_preflight_trace_enabled() { return }
+    let total_slots = module_frontend_count_loaded_ir_slots(programs, loaded)
+    let bss_slots = module_frontend_count_loaded_bss_global_slots(programs, loaded)
+    let slot_limit = module_frontend_loaded_ir_slot_limit(loaded)
+    print("gen3_preflight: globals ")
+    print_int(bss_slots)
+    print(" + functions ")
+    print_int(total_slots - bss_slots)
+    print(" = ")
+    print_int(total_slots)
+    print(" (max ")
+    print_int(slot_limit)
+    print(", over by ")
+    print_int(total_slots - slot_limit)
+    print(")")
+    if dce_marks < 0 {
+        print(" dce marks=-1: mark set refused, filter kept input intact")
+    }
+    print("\n")
+    var i: i64 = 0
+    while i < loaded && i < 256 {
+        let raw_items = (*programs)[i as usize].items
+        let live_items = spec_dce_filter_with_global_marks((*programs)[i as usize].items)
+        print("gen3_preflight: module ")
+        print_int(i)
+        print(" slots raw=")
+        print_int(module_frontend_count_lowered_ir_slots(&raw_items))
+        print(" after dce=")
+        print_int(module_frontend_count_lowered_ir_slots(&live_items))
+        print(" globals bss=")
+        print_int(module_frontend_count_bss_global_slots(&raw_items))
+        print("\n")
+        i = i + 1
+    }
+}
+
 fn module_frontend_lower_program_counts_traced(
     program: Program,
     module_index: i64,
@@ -5785,6 +6004,10 @@ fn module_frontend_lower_single_program_array_direct_box(
         print_int(dce_marks)
         print("\n")
     }
+    // Gen3 trace point: after the mark pass, before the capacity verdict -- the
+    // counts that decide the preflight are the ones that get printed, pass or
+    // fail. Silence unless SOUNIO_GEN3_PREFLIGHT_TRACE=1.
+    module_frontend_gen3_preflight_trace(programs, 1, dce_marks)
     if module_frontend_loaded_ir_slot_capacity_exceeded(programs, 1) {
         trace.last_stage = "lower_summary_error"
         return module_frontend_lower_direct_box_error(module_frontend_loaded_ir_slot_capacity_error(programs, 1))
@@ -5885,6 +6108,9 @@ fn module_frontend_lower_programs_array_direct_box_multi(
         print_int(dce_marks)
         print("\n")
     }
+    // Same gen3 trace point as the single-program path above: numbers of the
+    // preflight that is about to decide, not numbers of a wall already hit.
+    module_frontend_gen3_preflight_trace(programs, loaded, dce_marks)
     if module_frontend_loaded_ir_slot_capacity_exceeded(programs, loaded) {
         trace.last_stage = "lower_summary_error"
         return module_frontend_lower_direct_box_error(module_frontend_loaded_ir_slot_capacity_error(programs, loaded))
@@ -6583,6 +6809,22 @@ fn module_frontend_private_fn_identity_ok(
     renamed >= 0 - 1
 }
 
+// Check-only and compile paths must apply the same module-identity rules, or
+// `check` rejects (or accepts) a program compilation would treat differently:
+// two modules sharing a struct name, or same-named/imported pub fns. The
+// compile path already does this in module_frontend_private_fn_identity_ok;
+// run_check_mode loads the modules itself, so it needs the `use` map and that
+// pass through one entry point, in this order (the pub phase resolves importers
+// through the map). Returns false when a diagnostic was already printed.
+pub fn module_frontend_identity_pass(
+    programs: &! [Program; 256],
+    file_paths: [string; 256],
+    loaded: i64
+) -> bool with IO, Mut, Panic, Div, Alloc {
+    module_frontend_pfi_note_use_targets(programs, file_paths, loaded)
+    module_frontend_private_fn_identity_ok(programs, loaded)
+}
+
 fn module_frontend_pfi_find_loaded(file_paths: [string; 256], loaded: i64, path: string) -> i64 with Mut, Panic, Div {
     var j: i64 = 0
     while j < loaded && j < 256 {
@@ -6919,7 +7161,10 @@ fn module_frontend_merge_imported_box(
         let user_main_snapshot = ir_function_deep_copy(ir_fn_get(&(*module_box), 0 as usize))
         // Memory wall P0: finalize/restore in place on the boxed module — no full
         // IrModule by-value chain (promote/compact/ensure/resolve each used to copy).
-        ir_module_finalize_merged_calls(&! (*module_box))
+        if !ir_module_finalize_merged_calls(&! (*module_box)) {
+            print("Error: refusing to merge -- ambiguous Type_method body for a bare stub\n")
+            return module_frontend_lower_direct_box_error("ir_promote_ambiguous_mangled_body")
+        }
         ir_module_restore_user_main_calls(&! (*module_box), user_main_snapshot)
         // #2244: the restore above replays a PRE-finalize snapshot over slot 0, so
         // it undoes what ir_module_ensure_builtin_call_targets just did to that
@@ -7422,7 +7667,11 @@ fn module_frontend_compile_imported_to_file_target_impl(
         ir_module_dump_all_calls_diag(&(*module_box))
     }
     // Memory wall P0: finalize/restore in place — no full IrModule by-value locals.
-    ir_module_finalize_merged_calls(&! (*module_box))
+    if !ir_module_finalize_merged_calls(&! (*module_box)) {
+        print("Error: refusing to write a binary -- ambiguous Type_method body for a bare stub\n")
+        module_frontend_global_init_compile_end()
+        return 1
+    }
     ir_module_restore_user_main_calls(&! (*module_box), user_main_snapshot)
     // #2244: the restore above replays a PRE-finalize snapshot over slot 0, so
     // it undoes what ir_module_ensure_builtin_call_targets just did to that

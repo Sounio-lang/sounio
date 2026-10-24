@@ -1,0 +1,164 @@
+//@ run-pass
+//@ expect-stdout: STATS_WEIGHTED_INFERENCE_STATUS_PASS
+use stats::regression::weighted_inference::{WeightedLinearInference,weighted_linear_inference}
+use linalg::least_squares_scale::{least_squares_scaled_product}
+use linalg::weighted_least_squares::{weighted_qr_least_squares_factor}
+fn no_inference(r:&WeightedLinearInference) with Mut,Div,Panic {
+ assert(r.level==0.0)
+ var j:i64=0
+ while j<8 {
+  assert(r.t_statistics[j as usize]==0.0 && r.p_values[j as usize]==0.0)
+  assert(r.ci_lower[j as usize]==0.0 && r.ci_upper[j as usize]==0.0)
+  j=j+1
+ }
+}
+fn no_covariance(r:&WeightedLinearInference) with Mut,Div,Panic {
+ var j:i64=0
+ while j<64 {assert(r.covariance[j as usize]==0.0);j=j+1}
+ j=0
+ while j<8 {assert(r.standard_errors[j as usize]==0.0);j=j+1}
+}
+fn fit_failed(r:&WeightedLinearInference,status:i64) with Mut,Div,Panic {
+ assert(r.status==status && r.covariance_status==4 && r.inference_status==4)
+ assert(r.calibration==0 && !r.variance_model_assessed)
+ no_covariance(r)
+ no_inference(r)
+}
+fn balanced_scale_edges() with Mut,Div,Panic {
+ // C++23 reference: tests/reference/weighted_inference_scale_reference.cpp.
+ let huge=least_squares_scaled_product(1e300,1e300,1.0,1e300,1e300,1.0)
+ let tiny=least_squares_scaled_product(1e-300,1e-300,1.0,1e-300,1e-300,1.0)
+ let signed=least_squares_scaled_product(-1e300,1e300,1.0,1e300,1e300,1.0)
+ assert(huge.status==0 && huge.value>1.0-1e-14 && huge.value<1.0+1e-14)
+ assert(tiny.status==0 && tiny.value>1.0-1e-14 && tiny.value<1.0+1e-14)
+ assert(signed.status==0 && signed.value> -1.0-1e-14 && signed.value< -1.0+1e-14)
+ let expected_minimum=2.2250738585072014e-308/4503599627370496.0
+ let minimum=least_squares_scaled_product(2.2250738585072014e-308,1.0,1.0,4503599627370496.0,1.0,1.0)
+ let half=least_squares_scaled_product(2.2250738585072014e-308,1.0,1.0,4503599627370496.0,2.0,1.0)
+ let odd_half=least_squares_scaled_product(2.2250738585072014e-308,3.0,1.0,4503599627370496.0,2.0,1.0)
+ assert(minimum.status==0 && minimum.value==expected_minimum)
+ assert(half.status==0 && half.value==0.0)
+ assert(odd_half.status==0 && odd_half.value==2.0*expected_minimum)
+ let below=least_squares_scaled_product(1e-300,1e-300,1.0,1.0,1.0,1.0)
+ assert(below.status==0 && below.value==0.0)
+ let overflow=least_squares_scaled_product(1e308,2.0,1.0,1.0,1.0,1.0)
+ let invalid=least_squares_scaled_product(0.0,1.0,1.0,0.0,1.0,1.0)
+ let negative_multiplier=least_squares_scaled_product(1.0,-1.0,1.0,1.0,1.0,1.0)
+ let notfinite=least_squares_scaled_product(1.0,0.0/0.0,1.0,1.0,1.0,1.0)
+ assert(overflow.status==4 && overflow.value==0.0)
+ assert(invalid.status==4 && negative_multiplier.status==4 && notfinite.status==4)
+}
+fn main() with IO,Mut,Div,Panic {
+ balanced_scale_edges()
+ let smallest=2.2250738585072014e-308/4503599627370496.0
+ var a:[f64;2048]=[0.0;2048]
+ var b:[f64;256]=[0.0;256]
+ var w:[f64;256]=[0.0;256]
+ var i:i64=0
+ while i<3 {a[(8*i) as usize]=1.0;w[i as usize]=1.0;i=i+1}
+ b[0]=-1.0;b[1]=0.0;b[2]=1.0
+ let nan=0.0/0.0
+ // Poison both inactive columns and inactive rows, including weights/response.
+ a[1]=nan;a[24]=nan;b[3]=nan;w[3]=nan
+ let available=weighted_linear_inference(&a,&b,&w,3,1,1e-12,0.95,true)
+ assert(available.status==0 && available.rank==1 && available.df==2)
+ assert(available.covariance_status==0 && available.inference_status==0)
+ assert(available.calibration==1 && available.level==0.95 && !available.variance_model_assessed)
+ assert(available.standard_errors[0]>0.0 && available.covariance[0]>0.0)
+ i=1
+ while i<8 {
+  assert(available.standard_errors[i as usize]==0.0)
+  assert(available.t_statistics[i as usize]==0.0 && available.p_values[i as usize]==0.0)
+  assert(available.ci_lower[i as usize]==0.0 && available.ci_upper[i as usize]==0.0)
+  i=i+1
+ }
+ i=0
+ while i<64 {
+  if i!=0 {assert(available.covariance[i as usize]==0.0)}
+  i=i+1
+ }
+ let undeclared=weighted_linear_inference(&a,&b,&w,3,1,1e-12,nan,false)
+ assert(undeclared.status==0 && undeclared.covariance_status==1 && undeclared.inference_status==1 && undeclared.calibration==0)
+ no_covariance(&undeclared)
+ no_inference(&undeclared)
+ let low=weighted_linear_inference(&a,&b,&w,3,1,1e-12,0.5,true)
+ let high=weighted_linear_inference(&a,&b,&w,3,1,1e-12,0.999999,true)
+ assert(low.inference_status==0 && low.level==0.5)
+ assert(high.inference_status==0 && high.level==0.999999)
+ let invalid_low=weighted_linear_inference(&a,&b,&w,3,1,1e-12,0.499999,true)
+ let invalid_high=weighted_linear_inference(&a,&b,&w,3,1,1e-12,1.0,true)
+ let invalid_nan=weighted_linear_inference(&a,&b,&w,3,1,1e-12,nan,true)
+ assert(invalid_low.covariance_status==0 && invalid_low.inference_status==5)
+ assert(invalid_high.covariance_status==0 && invalid_high.inference_status==5)
+ assert(invalid_nan.covariance_status==0 && invalid_nan.inference_status==5)
+ assert(invalid_low.standard_errors[0]>0.0 && invalid_low.calibration==1)
+ no_inference(&invalid_low)
+ no_inference(&invalid_high)
+ no_inference(&invalid_nan)
+ let invalid_dimension=weighted_linear_inference(&a,&b,&w,257,1,1e-12,0.95,true)
+ let invalid_columns=weighted_linear_inference(&a,&b,&w,3,9,1e-12,0.95,true)
+ let invalid_rcond=weighted_linear_inference(&a,&b,&w,3,1,1.0,0.95,true)
+ fit_failed(&invalid_dimension,1)
+ fit_failed(&invalid_columns,1)
+ fit_failed(&invalid_rcond,5)
+ b[0]=nan
+ let invalid_data=weighted_linear_inference(&a,&b,&w,3,1,1e-12,0.95,true)
+ fit_failed(&invalid_data,2)
+ b[0]=-1.0
+ w[0]=0.0
+ let zero_weight=weighted_linear_inference(&a,&b,&w,3,1,1e-12,0.95,true)
+ fit_failed(&zero_weight,6)
+ w[0]=-1.0
+ let negative_weight=weighted_linear_inference(&a,&b,&w,3,1,1e-12,0.95,true)
+ fit_failed(&negative_weight,6)
+ w[0]=nan
+ let nonfinite_weight=weighted_linear_inference(&a,&b,&w,3,1,1e-12,0.95,true)
+ fit_failed(&nonfinite_weight,6)
+ w[0]=1.0
+ a[1]=1.0;a[9]=1.0;a[17]=1.0
+ let deficient=weighted_linear_inference(&a,&b,&w,3,2,1e-12,0.95,true)
+ assert(deficient.rank==1)
+ fit_failed(&deficient,3)
+ a[1]=nan
+ a[0]=1e308;a[8]=smallest
+ let arithmetic_fit=weighted_linear_inference(&a,&b,&w,3,1,1e-12,0.95,true)
+ fit_failed(&arithmetic_fit,4)
+ a[0]=1.0;a[8]=1.0
+ // The zero response makes the residual scale exactly zero, without relying
+ // on a rounded fitted nonzero constant to reproduce itself bit-for-bit.
+ b[0]=0.0;b[1]=0.0;b[2]=0.0
+ let perfect=weighted_linear_inference(&a,&b,&w,3,1,1e-12,0.95,true)
+ assert(perfect.status==0 && perfect.covariance_status==0 && perfect.inference_status==3)
+ assert(perfect.calibration==1 && perfect.normalized_weighted_residual_norm==0.0)
+ no_covariance(&perfect)
+ no_inference(&perfect)
+ b[0]=1.0
+ let saturated=weighted_linear_inference(&a,&b,&w,1,1,1e-12,0.1,true)
+ assert(saturated.status==0 && saturated.df==0 && saturated.covariance_status==2 && saturated.inference_status==2)
+ assert(saturated.calibration==1)
+ no_covariance(&saturated)
+ no_inference(&saturated)
+ let saturated_undeclared=weighted_linear_inference(&a,&b,&w,1,1,1e-12,nan,false)
+ assert(saturated_undeclared.status==0 && saturated_undeclared.covariance_status==1 && saturated_undeclared.inference_status==1)
+ assert(saturated_undeclared.calibration==0)
+ no_covariance(&saturated_undeclared)
+ no_inference(&saturated_undeclared)
+ b[0]=-1.0;b[1]=0.0;b[2]=1.0
+ a[0]=1e-300;a[8]=1e-300;a[16]=1e-300
+ let covariance_overflow=weighted_linear_inference(&a,&b,&w,3,1,1e-12,0.95,true)
+ assert(covariance_overflow.status==0 && covariance_overflow.covariance_status==4 && covariance_overflow.inference_status==4)
+ no_covariance(&covariance_overflow)
+ no_inference(&covariance_overflow)
+ a[0]=1.0;a[8]=1.0;a[16]=1.0
+ var factor:[f64;64]=[99.0;64]
+ var outer:[f64;8]=[99.0;8]
+ var inner:[f64;8]=[99.0;8]
+ let factored=weighted_qr_least_squares_factor(&a,&b,&w,3,1,1e-12,&!factor,&!outer,&!inner)
+ assert(factored.status==0 && factor[0]!=0.0 && outer[0]>0.0 && inner[0]>0.0)
+ i=1
+ while i<64 {assert(factor[i as usize]==0.0);i=i+1}
+ i=1
+ while i<8 {assert(outer[i as usize]==0.0 && inner[i as usize]==0.0);i=i+1}
+ println("STATS_WEIGHTED_INFERENCE_STATUS_PASS")
+ 0
+}

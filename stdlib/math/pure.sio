@@ -91,20 +91,19 @@ fn min_i32(a: i32, b: i32) -> i32 {
 // reduction is bit-deterministic and adds at worst ~30 multiplications
 // for f64-representable inputs.
 pub fn sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x != x { return x }
+    if x == 0.0 && x == 1.0 { return x }
+    // Preserve the existing nonpositive-input sentinel.
     if x <= 0.0 { return 0.0 }
+    if !is_finite(x) { return x }
     var v = x
-    var s = 1.0
-    while v < 1.0 {
-        v = v * 4.0
-        s = s * 2.0
-    }
+    var scale = 1.0
+    while v < 1.0 { v = v * 4.0; scale = scale * 0.5 }
+    while v >= 4.0 { v = v * 0.25; scale = scale * 2.0 }
     var y = v
-    var i = 0
-    while i < 20 {
-        y = 0.5 * (y + v / y)
-        i = i + 1
-    }
-    y / s
+    var i: i64 = 0
+    while i < 20 { y = 0.5 * (y + v / y); i = i + 1 }
+    y * scale
 }
 
 // =============================================================================
@@ -114,7 +113,7 @@ pub fn sqrt(x: f64) -> f64 with Mut, Div, Panic {
 // where m in [0.5, 2). Series: ln(m) = 2*(t + t^3/3 + t^5/5 + ...)
 // with t = (m-1)/(m+1)
 
-pub fn ln(x: f64) -> f64 with Mut, Div, Panic {
+fn ln_core(x: f64) -> f64 with Mut, Div {
     if x <= 0.0 { return 0.0 - 1.0e30 }
     if x == 1.0 { return 0.0 }
     // +inf is the one input the halving loop below cannot reduce: inf / 2 == inf,
@@ -150,6 +149,27 @@ pub fn ln(x: f64) -> f64 with Mut, Div, Panic {
     let ln_m = 2.0 * sum
 
     return ln_m + (e_val as f64) * ln2()
+}
+
+// Legacy policy preserved; checked callers can avoid its domain sentinel.
+pub fn ln(x: f64) -> f64 with Mut, Div, Panic { ln_core(x) }
+pub struct CheckedLog { pub status:i64, pub value:f64 }
+// 0 available, 1 nonpositive domain, 2 nonfinite input/result.
+pub fn ln_checked_into(x:f64,out:&!CheckedLog) -> i64 with Mut, Div {
+    out.status=2
+    out.value=0.0
+    if !is_finite(x) { return 2 }
+    if x <= 0.0 { out.status=1;return 1 }
+    let value=ln_core(x)
+    if !is_finite(value) { return 2 }
+    out.status=0
+    out.value=value
+    0
+}
+pub fn ln_checked(x:f64) -> CheckedLog with Mut, Div {
+    var out=CheckedLog{status:2,value:0.0}
+    let ignored=ln_checked_into(x,&!out)
+    out
 }
 
 // Common logarithm
@@ -234,7 +254,7 @@ pub fn pow(x: f64, n: f64) -> f64 with Mut, Div, Panic {
 // =============================================================================
 
 // Cosine via Taylor series (range-reduced to [-pi, pi])
-fn cos(x: f64) -> f64 with Mut, Div, Panic {
+pub fn cos(x: f64) -> f64 with Mut, Div, Panic {
     var a = x
     let twopi = two_pi()
     while a >= twopi { a = a - twopi }
@@ -254,9 +274,28 @@ fn cos(x: f64) -> f64 with Mut, Div, Panic {
     return sum
 }
 
-// Sine via cos(x - pi/2)
-fn sin(x: f64) -> f64 with Mut, Div, Panic {
-    return cos(x - half_pi())
+// Direct sine series preserves relative accuracy near zero.
+pub fn sin(x: f64) -> f64 with Mut, Div, Panic {
+    var a = x
+    let twopi = two_pi()
+    while a > pi() { a = a - twopi }
+    while a < 0.0 - pi() { a = a + twopi }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n: i64 = 1
+    while n < 15 {
+        term = (0.0 - term) * a2 / ((2 * n) * (2 * n + 1)) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+pub fn is_finite(x: f64) -> bool {
+    if x != x { return false }
+    if x == 0.0 && x == 1.0 { return false }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    ax <= 1.7976931348623157e308
 }
 
 // Tangent

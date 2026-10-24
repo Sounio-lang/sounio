@@ -1,0 +1,181 @@
+// Checked ideal-gas isothermal entropy, independent standard uncertainties.
+// SI amount in mol; volumes share any common unit. See ENTROPY.md.
+use math::logarithmic::{log1p_checked}
+use math::pure::{is_finite, ln_checked, sqrt}
+use constants::physical::{gas_constant_approx}
+pub struct EntropyResult {
+    pub status: i64,
+    pub delta_s: f64,
+    pub standard_uncertainty: f64,
+    pub log_volume_ratio: f64,
+    pub uncertainty_model: i64,
+    pub first_order: bool,
+}
+struct EntropyScaled {
+    value: f64,
+    exponent: i64,
+}
+struct EntropyNumber {
+    status: i64,
+    value: f64,
+}
+fn entropy_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+// Input is finite and nonzero. Binary power rescaling is exact.
+fn entropy_normalize(x: f64) -> EntropyScaled with Mut, Div, Panic {
+    var m = entropy_abs(x)
+    var exponent: i64 = 0
+    while m >= 2.0 { m = m * 0.5; exponent = exponent + 1 }
+    while m < 1.0 { m = m * 2.0; exponent = exponent - 1 }
+    EntropyScaled { value: m, exponent: exponent }
+}
+// Three finite factors and positive finite denominator. Avoid all intermediate
+// product/ratio overflow and underflow, including n*R overflow before tiny L.
+fn entropy_product(a: f64, b: f64, c: f64, denominator: f64) -> EntropyNumber with Mut, Div, Panic {
+    if a == 0.0 || b == 0.0 || c == 0.0 { return EntropyNumber { status: 0, value: 0.0 } }
+    let aa = entropy_normalize(a)
+    let bb = entropy_normalize(b)
+    let cc = entropy_normalize(c)
+    let dd = entropy_normalize(denominator)
+    var m = ((aa.value * bb.value) * cc.value) / dd.value
+    var e: i64 = aa.exponent + bb.exponent + cc.exponent - dd.exponent
+    while m >= 2.0 { m = m * 0.5; e = e + 1 }
+    while m < 1.0 { m = m * 2.0; e = e - 1 }
+    if e > 1023 || e < -1075 { return EntropyNumber { status: 4, value: 0.0 } }
+    var value: f64 = 0.0
+    if e < -1022 {
+        // Single final rounding into the subnormal range; avoid repeated
+        // subnormal halvings. e=-1075 may round up to the minimum subnormal.
+        var factor: f64 = 1.0
+        var j: i64 = 0
+        let shift: i64 = e + 1074
+        if shift < 0 {
+            factor = 0.5
+        } else {
+            while j < shift { factor = factor * 2.0; j = j + 1 }
+        }
+        // Construct the minimum subnormal from normal operands; pinned literal parser
+        // rounds direct e-324 literals to zero.
+        value = (m * factor) * (2.2250738585072014e-308 / 4503599627370496.0)
+    } else {
+        var factor: f64 = 1.0
+        var j: i64 = 0
+        if e >= 0 {
+            while j < e { factor = factor * 2.0; j = j + 1 }
+        } else {
+            while j < (0 - e) { factor = factor * 0.5; j = j + 1 }
+        }
+        value = m * factor
+    }
+    if !is_finite(value) || value == 0.0 { return EntropyNumber { status: 4, value: 0.0 } }
+    var negative: bool = false
+    if a < 0.0 { negative = !negative }
+    if b < 0.0 { negative = !negative }
+    if c < 0.0 { negative = !negative }
+    if negative { value = 0.0 - value }
+    EntropyNumber { status: 0, value: value }
+}
+fn entropy_log_ratio(vf: f64, vi: f64) -> EntropyNumber with Mut, Div, Panic {
+    if vf == vi { return EntropyNumber { status: 0, value: 0.0 } }
+    if vf * 0.5 <= vi && vi * 0.5 <= vf {
+        let d = (vf - vi) / vi
+        let logged = log1p_checked(d)
+        if logged.status != 0 { return EntropyNumber { status: 4, value: 0.0 } }
+        return EntropyNumber { status: 0, value: logged.value }
+    }
+    let lf = ln_checked(vf)
+    let li = ln_checked(vi)
+    if lf.status != 0 || li.status != 0 { return EntropyNumber { status: 4, value: 0.0 } }
+    let value = lf.value - li.value
+    if !is_finite(value) { return EntropyNumber { status: 4, value: 0.0 } }
+    EntropyNumber { status: 0, value: value }
+}
+pub fn isothermal_entropy_independent(n: f64, un: f64, vf: f64, uvf: f64, vi: f64, uvi: f64) -> EntropyResult with Mut, Div, Panic {
+    var result = EntropyResult {
+        status: 1, delta_s: 0.0, standard_uncertainty: 0.0,
+        log_volume_ratio: 0.0, uncertainty_model: 1, first_order: true,
+    }
+    if !is_finite(n) || !is_finite(un) || !is_finite(vf) ||
+       !is_finite(uvf) || !is_finite(vi) || !is_finite(uvi) { return result }
+    result.status = 2
+    if n < 0.0 || vf <= 0.0 || vi <= 0.0 { return result }
+    result.status = 3
+    if un < 0.0 || uvf < 0.0 || uvi < 0.0 { return result }
+    result.status = 4
+    let lr = entropy_log_ratio(vf, vi)
+    if lr.status != 0 { return result }
+    let r = gas_constant_approx()
+    let nominal = entropy_product(n, r, lr.value, 1.0)
+    let cn = entropy_product(r, entropy_abs(lr.value), un, 1.0)
+    let cf = entropy_product(n, r, uvf, vf)
+    let ci = entropy_product(n, r, uvi, vi)
+    if nominal.status != 0 || cn.status != 0 || cf.status != 0 || ci.status != 0 { return result }
+    var scale = cn.value
+    if cf.value > scale { scale = cf.value }
+    if ci.value > scale { scale = ci.value }
+    var uncertainty: f64 = 0.0
+    if scale > 0.0 {
+        let a = cn.value / scale
+        let b = cf.value / scale
+        let c = ci.value / scale
+        uncertainty = scale * sqrt(a * a + b * b + c * c)
+        if !is_finite(uncertainty) { return result }
+    }
+    result.status = 0
+    result.delta_s = nominal.value
+    result.standard_uncertainty = uncertainty
+    result.log_volume_ratio = lr.value
+    result
+}
+
+// Correlated volumes, independent amount of substance. rho is supplied, not inferred.
+// For rho=0 preserve the independent implementation's arithmetic exactly.
+pub fn isothermal_entropy_correlated_volumes(n: f64, un: f64, vf: f64, uvf: f64, vi: f64, uvi: f64, rho: f64) -> EntropyResult with Mut, Div, Panic {
+    var result = EntropyResult {
+        status: 1, delta_s: 0.0, standard_uncertainty: 0.0,
+        log_volume_ratio: 0.0, uncertainty_model: 2, first_order: true,
+    }
+    if !is_finite(n) || !is_finite(un) || !is_finite(vf) ||
+       !is_finite(uvf) || !is_finite(vi) || !is_finite(uvi) || !is_finite(rho) { return result }
+    result.status = 2
+    if n < 0.0 || vf <= 0.0 || vi <= 0.0 { return result }
+    result.status = 3
+    if un < 0.0 || uvf < 0.0 || uvi < 0.0 { return result }
+    result.status = 5
+    if rho < -1.0 || rho > 1.0 { return result }
+    if rho == 0.0 {
+        result = isothermal_entropy_independent(n, un, vf, uvf, vi, uvi)
+        result.uncertainty_model = 2
+        return result
+    }
+    result.status = 4
+    let lr = entropy_log_ratio(vf, vi)
+    if lr.status != 0 { return result }
+    let r = gas_constant_approx()
+    let nominal = entropy_product(n, r, lr.value, 1.0)
+    let cn = entropy_product(r, entropy_abs(lr.value), un, 1.0)
+    let cf = entropy_product(n, r, uvf, vf)
+    let ci = entropy_product(n, r, uvi, vi)
+    if nominal.status != 0 || cn.status != 0 || cf.status != 0 || ci.status != 0 { return result }
+    // Subtract BEFORE norm scaling, retaining cn even if cf/ci cancel exactly.
+    let difference = cf.value - ci.value
+    let cross = entropy_product(sqrt(2.0 * (1.0 - rho)), sqrt(cf.value), sqrt(ci.value), 1.0)
+    if cross.status != 0 { return result }
+    var scale = cn.value
+    if entropy_abs(difference) > scale { scale = entropy_abs(difference) }
+    if cross.value > scale { scale = cross.value }
+    var uncertainty: f64 = 0.0
+    if scale > 0.0 {
+        let a = cn.value / scale
+        let b = difference / scale
+        let c = cross.value / scale
+        uncertainty = scale * sqrt(a * a + b * b + c * c)
+        if !is_finite(uncertainty) { return result }
+    }
+    result.status = 0
+    result.delta_s = nominal.value
+    result.standard_uncertainty = uncertainty
+    result.log_volume_ratio = lr.value
+    result
+}
