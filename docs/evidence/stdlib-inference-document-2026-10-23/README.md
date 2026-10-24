@@ -91,3 +91,13 @@ The two panels contain2050/2056 total marks for the generic/fitted examples;
 were visually inspected for readable orientation, negative ticks, titles and
 reference lines. Both SVGs passed structural XML validation. These checks are
 separate from numerical concordance and human scientific acceptance.
+
+## Final resource repeat
+
+[Resource ledger](resources/RESOURCE_LEDGER.md) retains all three paired trials
+and the failed/completed pilot controls. Resource04/job16479 completed0:0 with
+RESOURCE_COMPARE_PASS. C++ analyzer medians: QR3.16→3.13s and
+106496→8192KiB; CountGLM .5912→.6336s and42508→2788KiB. The unchanged
+median time limit is1.10; CountGLM's median ratio is1.07171853857 while its
+third individual pair is1.12855209743. This is lower measured memory with a
+modest median time increase for CountGLM, not a blanket speedup claim.
