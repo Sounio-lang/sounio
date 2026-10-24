@@ -149,6 +149,10 @@ for src in tests/reference/deep_*.cpp; do
       deep_viz_forest) compare "$stem" stdlib_deep_viz_forest ;;
       deep_viz_axis_layout) compare "$stem" stdlib_deep_viz_axis_layout ;;
       deep_viz_fitted_axis) compare "$stem" stdlib_deep_viz_fitted_axis ;;
+      deep_viz_line_stream_reference)
+        rc=0
+        timeout 180 "$out/$stem" "$out/stdlib_deep_viz_line_stream.stdout" "$out/stdlib_deep_viz_reduce_runs.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc" ;;
       deep_viz_line_reduce) compare "$stem" stdlib_deep_viz_line_reduce_million ;;
       deep_viz_dynamic_plot) compare "$stem" stdlib_deep_viz_dynamic_plot ;;
       deep_viz_dynamic_fields) compare "$stem" stdlib_deep_viz_dynamic_fields ;;
