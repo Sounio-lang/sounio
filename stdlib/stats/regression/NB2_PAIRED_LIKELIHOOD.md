@@ -258,3 +258,14 @@ zero. count_aggregate_cancellation_reference.cpp independently uses the analytic
 Poisson count-zero identity and exact rationals reconstructed from native bits;
 its --before mode requires the original false-zero witness. New-source native
 acceptance remains separate from preparation until the coordinated Slurm gate.
+
+Focused Slurm16998 completed all15 selected fixture checks, compilations, native
+runs and markers with compiler d74fbebe. The24 new traced/untraced rows passed
+the exact-rational rounding-cell oracle; preserved92d/d74 diagnostic outputs were
+independently confirmed as failing-before witnesses. Compiling the same new
+fixture against the frozen1132 pre-guard library succeeded, then its native
+assertion failed with exit1; the guarded library passed. Existing61-scalar/three-
+aggregate full/rank/cached concordance, both216-case likelihood outputs, exact
+Poisson-zero bits, eight far-fallback cases, three B2 paths and the two preserved
+legacy-output byte comparisons also passed. This selected gate preserves those
+boundaries; it is not full-suite, calibration or performance acceptance.
