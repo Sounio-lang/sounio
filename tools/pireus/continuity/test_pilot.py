@@ -101,10 +101,6 @@ class PilotControls(unittest.TestCase):
                 pack_offline(Path("/never-accessed"), dict(transport="sglang-offline-token-ids", budget=budget))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SettledJobState(unittest.TestCase):
     def run_states(self, states, deadline=120):
         outputs = iter(states)
@@ -134,3 +130,53 @@ class SettledJobState(unittest.TestCase):
     def test_persistent_completing_times_out(self):
         with self.assertRaisesRegex(ValueError, "raw_state=COMPLETING"):
             self.run_states([("COMPLETING", "0:0")] * 100, deadline=10)
+
+
+class FocusedSearchSpace(unittest.TestCase):
+    def test_deterministic_cells_stay_unique_inside_focused_region(self):
+        from cycle import (deterministic_plan, FOCUSED_LANE_STRIDES, FOCUSED_UNROLLS,
+                           FOCUSED_LAYOUTS, FOCUSED_LOADS, proposal_template)
+        base = proposal_template("c" * 64)
+        for round_id in range(3):
+            plans = [deterministic_plan(base, i, round_id) for i in range(32)]
+            self.assertEqual(len({json.dumps(p, sort_keys=True) for p in plans}), 32)
+            for p in plans:
+                self.assertIn(p["lane_stride"], FOCUSED_LANE_STRIDES)
+                self.assertIn(p["unroll"], FOCUSED_UNROLLS)
+                self.assertIn(p["layout"], FOCUSED_LAYOUTS)
+                self.assertIn(p["load"], FOCUSED_LOADS)
+                self.assertTrue(0 <= p["lane_offset"] < 16)
+                self.assertEqual({k: p[k] for k in base if k not in
+                                  ("lane_stride", "lane_offset", "load", "layout", "unroll")},
+                                 {k: base[k] for k in base if k not in
+                                  ("lane_stride", "lane_offset", "load", "layout", "unroll")})
+
+    def test_focused_region_is_inside_admitted_grammar(self):
+        from cycle import FOCUSED_LANE_STRIDES, FOCUSED_UNROLLS
+        self.assertTrue(all(s % 2 == 1 and 1 <= s <= 15 for s in FOCUSED_LANE_STRIDES))
+        self.assertTrue(set(FOCUSED_UNROLLS) <= {1, 2, 4, 8, 16})
+
+    def test_prompts_state_the_focused_region(self):
+        from cycle import LOWERING_PROMPT, OPERATOR_PROMPT, FOCUSED_REGION_TEXT
+        for prompt in (LOWERING_PROMPT, OPERATOR_PROMPT):
+            self.assertIn(FOCUSED_REGION_TEXT, prompt)
+            self.assertNotIn("unroll in [1,2,4,8,16]", prompt)
+
+    def test_promotion_threshold_and_blocks_are_unchanged(self):
+        text = (HERE / "pilot.py").read_text()
+        self.assertIn("promotion_threshold_percent=5", text)
+        self.assertIn("benchmark_blocks_per_node=30", text)
+        bench = (HERE / "gpu_benchmark.py").read_text()
+        self.assertIn('manifest["blocks"]==30', bench)
+
+    def test_every_timed_replay_follows_an_untimed_warm_replay(self):
+        bench = (HERE / "gpu_benchmark.py").read_text()
+        self.assertIn("WARM_REPLAYS_PER_MEASUREMENT=1", bench)
+        warm = bench.index("for _ in range(WARM_REPLAYS_PER_MEASUREMENT):graph.replay()")
+        timed = bench.index("start.record();graph.replay();end.record();end.synchronize()")
+        self.assertLess(warm, timed)
+        self.assertNotIn("end.synchronize()", bench[warm:timed])
+
+
+if __name__ == "__main__":
+    unittest.main()
