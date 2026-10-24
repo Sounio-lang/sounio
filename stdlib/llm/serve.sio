@@ -11,8 +11,12 @@
 //! `seed` parameter makes a sampled request reproducible - the same
 //! seed and prompt always produce the same completion.
 //! `prompt` accepts a string (BPE-encoded here, BOS prepended exactly
-//! like the demos) or an array of token ids (used verbatim). No
-//! streaming, no chat template: /v1/chat/completions is not claimed.
+//! like the demos) or an array of token ids (used verbatim).
+//! `"stream": true` switches the reply to Server-Sent Events: one
+//! OpenAI-shaped chunk per generated token, a final chunk carrying
+//! finish_reason, then `data: [DONE]`. No chat template:
+//! /v1/chat/completions is not claimed. Client disconnect mid-stream
+//! is not detected (sends fail silently, generation runs to the end).
 
 extern "C" {
     fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
@@ -281,6 +285,38 @@ fn sv_reply(lib: &NwLib, fd: i64, status: string, body: *mut u8, blen: i64) with
     let _s = nw_send_all(lib, fd, out, p)
 }
 
+// SSE response head: no Content-Length, one send per event after this
+fn sv_sse_head(lib: &NwLib, fd: i64) with Alloc, Mut, Panic {
+    let out = heap_alloc(1024)
+    var p: i64 = 0
+    p = sv_app_str(out, p, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n")
+    let _s = nw_send_all(lib, fd, out, p)
+}
+
+// one SSE chunk: `data: {chunk JSON}\n\n`; returns length. fin_null=1
+// emits finish_reason:null (delta chunks), else the quoted fin string.
+fn sv_chunk(out: *mut u8, req_id: i64, model_name: string, delta: *mut u8, dlen: i64, fin: string, fin_null: i64) -> i64 with Mut {
+    var p: i64 = 0
+    p = sv_app_str(out, p, "data: {\"id\":\"cmpl-sounio-")
+    p = sv_app_int(out, p, req_id)
+    p = sv_app_str(out, p, "\",\"object\":\"text_completion\",\"created\":")
+    p = sv_app_int(out, p, req_id)
+    p = sv_app_str(out, p, ",\"model\":\"")
+    p = sv_app_str(out, p, model_name)
+    p = sv_app_str(out, p, "\",\"choices\":[{\"text\":\"")
+    p = sv_app_escaped(out, p, delta, 0, dlen)
+    p = sv_app_str(out, p, "\",\"index\":0,\"logprobs\":null,\"finish_reason\":")
+    if fin_null == 1 {
+        p = sv_app_str(out, p, "null")
+    } else {
+        p = sv_app_str(out, p, "\"")
+        p = sv_app_str(out, p, fin)
+        p = sv_app_str(out, p, "\"")
+    }
+    p = sv_app_str(out, p, "}]}\n\n")
+    p
+}
+
 // fixed JSON error/body writer into buf; returns length
 fn sv_err_body(buf: *mut u8, msg: string) -> i64 with Mut {
     var p: i64 = 0
@@ -369,6 +405,16 @@ fn sv_handle(lib: &NwLib, m: &Llama, bp: &Bpe, fd: i64, model_name: string, req_
         if ivs[2] == 1 { seed = ivs[0] }
     }
 
+    // "stream": true -> SSE chunks instead of one JSON reply
+    var streaming: i64 = 0
+    let stp = sv_find(buf, n, boff, "\"stream\"")
+    if stp >= 0 {
+        let scolon = sv_find(buf, n, stp, ":")
+        var svi = scolon + 1
+        while svi < n && (sv_byte(buf, svi) == 32 || sv_byte(buf, svi) == 9 || sv_byte(buf, svi) == 10 || sv_byte(buf, svi) == 13) { svi = svi + 1 }
+        if sv_starts(buf, n, svi, "true") { streaming = 1 }
+    }
+
     // prompt: string (BPE here) or token-id array (verbatim)
     let pp = sv_find(buf, n, boff, "\"prompt\"")
     if pp < 0 {
@@ -425,7 +471,9 @@ fn sv_handle(lib: &NwLib, m: &Llama, bp: &Bpe, fd: i64, model_name: string, req_
         return 0
     }
 
-    // generate greedily from a fresh KV (stateless per request)
+    // generate from a fresh KV (stateless per request). Streaming
+    // sends one SSE chunk per token; otherwise bytes accumulate and
+    // a single JSON reply is sent at the end.
     var cap: i64 = nids + max_tokens + 8
     if cap > 4096 { cap = 4096 }
     if nids + max_tokens > cap { max_tokens = cap - nids }
@@ -434,10 +482,12 @@ fn sv_handle(lib: &NwLib, m: &Llama, bp: &Bpe, fd: i64, model_name: string, req_
     let text = heap_alloc(65536)
     var tlen: i64 = 0
     let tbuf = heap_alloc(8192)
+    let chunk = heap_alloc(16384)
     var gen: i64 = 0
     var finish = "length"
     var stop_hit: i64 = 0
     var rng = rng_new(seed)
+    if streaming == 1 { sv_sse_head(lib, fd) }
     while gen < max_tokens && stop_hit == 0 {
         let nxt = sample_token(&logits, temp, top_pv, &!rng)
         if nxt == 0 {
@@ -445,11 +495,16 @@ fn sv_handle(lib: &NwLib, m: &Llama, bp: &Bpe, fd: i64, model_name: string, req_
             stop_hit = 1
         } else {
             let nb = bpe_decode_token(bp, nxt, tbuf)
-            var j: i64 = 0
-            while j < nb && tlen < 60000 {
-                sv_putb(text, tlen, st_byte_at(tbuf, j))
-                tlen = tlen + 1
-                j = j + 1
+            if streaming == 1 {
+                let cl = sv_chunk(chunk, req_id, model_name, tbuf, nb, "", 1)
+                let _sc = nw_send_all(lib, fd, chunk, cl)
+            } else {
+                var j: i64 = 0
+                while j < nb && tlen < 60000 {
+                    sv_putb(text, tlen, st_byte_at(tbuf, j))
+                    tlen = tlen + 1
+                    j = j + 1
+                }
             }
             gen = gen + 1
             if gen < max_tokens {
@@ -460,25 +515,32 @@ fn sv_handle(lib: &NwLib, m: &Llama, bp: &Bpe, fd: i64, model_name: string, req_
         }
     }
 
-    var p: i64 = 0
-    p = sv_app_str(body, p, "{\"id\":\"cmpl-sounio-")
-    p = sv_app_int(body, p, req_id)
-    p = sv_app_str(body, p, "\",\"object\":\"text_completion\",\"created\":")
-    p = sv_app_int(body, p, req_id)
-    p = sv_app_str(body, p, ",\"model\":\"")
-    p = sv_app_str(body, p, model_name)
-    p = sv_app_str(body, p, "\",\"choices\":[{\"text\":\"")
-    p = sv_app_escaped(body, p, text, 0, tlen)
-    p = sv_app_str(body, p, "\",\"index\":0,\"logprobs\":null,\"finish_reason\":\"")
-    p = sv_app_str(body, p, finish)
-    p = sv_app_str(body, p, "\"}],\"usage\":{\"prompt_tokens\":")
-    p = sv_app_int(body, p, nids)
-    p = sv_app_str(body, p, ",\"completion_tokens\":")
-    p = sv_app_int(body, p, gen)
-    p = sv_app_str(body, p, ",\"total_tokens\":")
-    p = sv_app_int(body, p, nids + gen)
-    p = sv_app_str(body, p, "}}")
-    sv_reply(lib, fd, "200 OK", body, p)
+    if streaming == 1 {
+        let cl = sv_chunk(chunk, req_id, model_name, tbuf, 0, finish, 0)
+        let _sf = nw_send_all(lib, fd, chunk, cl)
+        let dl = sv_app_str(chunk, 0, "data: [DONE]\n\n")
+        let _sd = nw_send_all(lib, fd, chunk, dl)
+    } else {
+        var p: i64 = 0
+        p = sv_app_str(body, p, "{\"id\":\"cmpl-sounio-")
+        p = sv_app_int(body, p, req_id)
+        p = sv_app_str(body, p, "\",\"object\":\"text_completion\",\"created\":")
+        p = sv_app_int(body, p, req_id)
+        p = sv_app_str(body, p, ",\"model\":\"")
+        p = sv_app_str(body, p, model_name)
+        p = sv_app_str(body, p, "\",\"choices\":[{\"text\":\"")
+        p = sv_app_escaped(body, p, text, 0, tlen)
+        p = sv_app_str(body, p, "\",\"index\":0,\"logprobs\":null,\"finish_reason\":\"")
+        p = sv_app_str(body, p, finish)
+        p = sv_app_str(body, p, "\"}],\"usage\":{\"prompt_tokens\":")
+        p = sv_app_int(body, p, nids)
+        p = sv_app_str(body, p, ",\"completion_tokens\":")
+        p = sv_app_int(body, p, gen)
+        p = sv_app_str(body, p, ",\"total_tokens\":")
+        p = sv_app_int(body, p, nids + gen)
+        p = sv_app_str(body, p, "}}")
+        sv_reply(lib, fd, "200 OK", body, p)
+    }
 
     print("served req=")
     print_int(req_id)

@@ -552,3 +552,31 @@ return 400; top_p 0.9 returns a distinct sampled continuation.
 Limits: nucleus construction is O(vocab · members) per token — fine at
 135M scale, not at large vocabularies; the PRNG is deterministic by
 design and unsuitable for anything security-adjacent.
+
+## 18. Streaming (SSE)
+
+`"stream": true` on `POST /v1/completions` switches the reply to
+Server-Sent Events: an SSE head (`Content-Type: text/event-stream`, no
+Content-Length), one OpenAI-shaped chunk per generated token
+(`choices[0].text` = the token's decoded bytes, JSON-escaped,
+`finish_reason: null`), a final chunk with empty text and the real
+`finish_reason`, then `data: [DONE]`. Validation errors stay plain
+JSON: the SSE head is only sent after the request fully validates.
+Without `stream` (or with `false`) the reply is byte-identical to
+before.
+
+Gates (OBSERVED, curl against the workspace server):
+
+- Streamed greedy: 8 delta chunks arrive incrementally, spaced by the
+  per-token decode time (~3.4 s at 135M on the workspace CPU), then
+  the final chunk (`finish_reason: "length"`) and `[DONE]`.
+  Concatenating the deltas reproduces the non-streamed canonical text
+  byte for byte.
+- Streamed sampling (temperature 0.7, seed 42): concatenated deltas
+  equal the non-streamed completion with the same seed.
+- Regression: non-streamed greedy, explicit `stream: false`, /health
+  and the 400 validation paths unchanged.
+
+Limits: client disconnect mid-stream is not detected — sends fail
+silently (MSG_NOSIGNAL) and generation runs to completion; usage
+statistics are only reported in the non-streamed reply.
