@@ -29,6 +29,8 @@ class RequiredSlowWitnesses(unittest.TestCase):
                  "native-selfhost-macos-arm64", "full-test-suite", "pireus-slow-stdlib",
                  "madaros-witness-gate", "gate-wave-0", "sounio-lint", "lean-proofs", "website"]
         needs = {name: dict(result="success") for name in names}
+        # Unselected for a stdlib-only change on main: nightly sweep and slow lane are skipped.
+        needs.update({name: dict(result="skipped") for name in ["r6-corpus-sweep", "slow-lane"]})
         needs["impact"] = dict(result="success", outputs=dict(stdlib="true"))
         def check():
             return subprocess.run(["python3", str(ROOT / "scripts/ci/evaluate_ci_decision.py")],

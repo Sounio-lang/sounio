@@ -1,0 +1,115 @@
+name: Pireus Continuity Custody
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/pireus-continuity.yml'
+      - 'tools/pireus/continuity/**'
+      - 'scripts/dev/run_sio_test_suite*'
+      - 'scripts/ci/souc-native-wrapper.sh'
+      - 'scripts/lib/gate_process_observer.sh'
+      - 'tests/stdlib/hardware/*.sio.args'
+      - 'tests/stdlib/hardware/*.sio.timeout'
+      - 'scripts/ci/evaluate_ci_decision.py'
+      - '.github/workflows/ci.yml'
+      - 'stdlib/crypto/sha256.sio'
+      - 'stdlib/hardware/pireus/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/pireus-continuity.yml'
+      - 'tools/pireus/continuity/**'
+      - 'scripts/dev/run_sio_test_suite*'
+      - 'scripts/ci/souc-native-wrapper.sh'
+      - 'scripts/lib/gate_process_observer.sh'
+      - 'tests/stdlib/hardware/*.sio.args'
+      - 'tests/stdlib/hardware/*.sio.timeout'
+      - 'scripts/ci/evaluate_ci_decision.py'
+      - '.github/workflows/ci.yml'
+      - 'stdlib/crypto/sha256.sio'
+      - 'stdlib/hardware/pireus/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  transport-and-archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Passive CI resource telemetry controls
+        run: python3 tools/pireus/continuity/ops/test_gate_resource_observer.py
+      - name: Bounded native capacity timeout controls
+        run: python3 scripts/ci/test_madaros_capacity_timeout.py
+      - name: Required slow-witness routing controls
+        run: python3 tools/pireus/continuity/ci/test_ci_test_routing.py
+      - name: Literal argv through current runner and native wrapper
+        run: python3 tools/pireus/continuity/ci/test_runner_arguments.py
+      - name: Historical input corruption controls and cold downloads
+        run: python3 tools/pireus/continuity/ci/test_historical_inputs.py
+      - name: Verify pinned historical inputs and original parent commits
+        run: python3 tools/pireus/continuity/ci/prepare_historical_inputs.py --verify-history
+      - name: Execute historical input tests against current stdlib
+        env:
+          SOUNIO_TEST_SOUC_BIN: ${{ github.workspace }}/bin/souc-lean-single-x86_64
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import os
+          paths = sorted(Path('tests/stdlib/hardware').glob('*.sio.args'))
+          assert len(paths) == 11
+          Path(os.environ['RUNNER_TEMP'], 'pireus-argv-tests.list').write_text(
+              '\n'.join(str(p).removesuffix('.args') for p in paths) + '\n')
+          PYTHON
+          bash scripts/dev/run_sio_test_suite.sh --test-list "$RUNNER_TEMP/pireus-argv-tests.list" --jobs 2
+      - name: Execute restored SHA256 accessor and existing crypto vectors
+        env:
+          SOUNIO_SOUC_BIN: ${{ github.workspace }}/bin/souc-lean-single-x86_64
+          SOUNIO_TEST_SOUC_BIN: ${{ github.workspace }}/bin/souc-lean-single-x86_64
+        run: |
+          bash scripts/ci/souc-native-wrapper.sh run tools/pireus/continuity/witnesses/sha256_digest_accessor.sio
+          bash scripts/dev/run_sio_test_suite.sh --filter-exact test_sha256.sio --jobs 1
+      - name: Slurm accounting recovery controls (no job resubmission)
+        run: python3 tools/pireus/continuity/ci/test_pilot_recovery.py
+      - name: Pilot design, material deduplication and interrupted-job controls
+        run: python3 -m unittest discover -s tools/pireus/continuity -p test_pilot.py -v
+      - name: Current transport controls
+        run: python3 -m unittest discover -s tools/pireus/continuity -p test_tokenized_cycle.py -v
+      - name: Recovered preflight binding controls
+        run: python3 tools/pireus/continuity/runtime/test_preflight_binding.py
+      - name: Gen2 terminal packet negative controls (no hardware)
+        run: python3 -m unittest discover -s tools/pireus/continuity/ops -p 'test_gen2_cpu_receipt.py' -v
+      - name: Observer cadence and CPU custody controls (no hardware)
+        run: |
+          python3 -m unittest discover -s tools/pireus/continuity/ops -p 'test*external*.py'
+          python3 -m unittest discover -s tools/pireus/continuity/ops -p 'test_observer_handoff.py'
+          python3 -m unittest discover -s tools/pireus/continuity/ops -p 'test_cpu_memory_control_v*.py'
+          python3 -m unittest discover -s tools/pireus/continuity/ops -p 'test_cpu_v3_attempt.py'
+          python3 -m unittest discover -s tools/pireus/continuity/ops -p 'test_host_decode_*.py'
+          python3 tools/pireus/continuity/validation/external-container-cpu-v3-20260909/verify_freeze.py
+      - name: Linux observer resource reader control (no hardware)
+        run: |
+          python3 tools/pireus/continuity/validation/external-observer-deadline-v3-20260909/resource_reader_control.py > "$RUNNER_TEMP/pireus-observer-resource-reader.json"
+          cat "$RUNNER_TEMP/pireus-observer-resource-reader.json"
+      - name: Archive corruption and path controls
+        run: python3 -m unittest discover -s tools/pireus/continuity/ci -p test_verify_archive.py -v
+      - name: Verify historical canary custody
+        run: |
+          python3 tools/pireus/continuity/ci/verify_archive.py \
+            --archive tools/pireus/continuity/validation/real-inkling-cycle-20260907 \
+            > "$RUNNER_TEMP/pireus-archive-custody.json"
+          cat "$RUNNER_TEMP/pireus-archive-custody.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pireus-archive-custody
+          path: |
+            ${{ runner.temp }}/pireus-archive-custody.json
+            ${{ runner.temp }}/pireus-observer-resource-reader.json
+          if-no-files-found: error
