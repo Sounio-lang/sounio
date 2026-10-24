@@ -101,3 +101,24 @@ RESOURCE_COMPARE_PASS. C++ analyzer medians: QR3.16→3.13s and
 median time limit is1.10; CountGLM's median ratio is1.07171853857 while its
 third individual pair is1.12855209743. This is lower measured memory with a
 modest median time increase for CountGLM, not a blanket speedup claim.
+
+## Complete functional gate
+
+[Full02 results](functional/full02/RESULTS.tsv), Slurm16476, completed with
+STATUS0:461 recorded phases all have status0. These are phase records, not461
+independent scientific tests. This includes native fixtures, independent C++23
+concordance, the fixed-alpha mutant control, all96 canonical font glyphs and
+6832 checked pixels, and final unchanged source/compiler hash verification.
+The original [full01 results](functional/full01/RESULTS.tsv) retain STATUS1 and
+the malformed C++ stream-separator compile failure. No failing row was removed
+or reclassified to create the passing full02 result.
+
+The final qualification job16488 started only after full02 passed. Its first
+control rejected full01 with exit65. A lossless label-normalization ledger binds
+the receipt required by the harness to all original rows and can reconstruct
+the raw TSV. The final isolated pilot and B199 campaign are separate execution
+states; consult their actual receipts before making a calibration claim.
+
+Independent read-only review found no material blocker in the modified scratch
+reset/lifetime paths, exact P0 guard ordering, document/font/export code, or
+count/ODE integration. Static review does not replace native/backend evidence.
