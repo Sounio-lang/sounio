@@ -1,0 +1,112 @@
+// stdlib::hetero::types - Measured device capabilities for the heterogeneous
+// compute framework (docs/design/heterogeneous-gpu-framework.md).
+//
+// Capabilities are MEASURED by a probe, never declared from a spec sheet.
+// A DeviceCaps with measured=false may receive whole-subgraph placement only;
+// the planner must not split work onto an unmeasured device.
+
+pub fn backend_cuda_ptx() -> i32 { 1 }
+pub fn backend_spirv() -> i32 { 2 }
+pub fn backend_cpu_avx512() -> i32 { 3 }
+pub fn backend_metal() -> i32 { 4 }
+
+pub fn dtype_f32() -> i32 { 1 }
+pub fn dtype_f16() -> i32 { 2 }
+pub fn dtype_bf16() -> i32 { 3 }
+pub fn dtype_i32() -> i32 { 4 }
+pub fn dtype_i64() -> i32 { 5 }
+pub fn dtype_u8() -> i32 { 6 }
+
+pub fn op_matmul() -> i32 { 1 }
+pub fn op_attention() -> i32 { 2 }
+pub fn op_elementwise() -> i32 { 3 }
+
+pub struct DeviceCaps {
+    pub backend: i32,
+    pub arch_class: i32,
+    pub vram_bytes: i64,
+    pub unified_memory: bool,
+    pub measured: bool,
+    // Measured throughput in GFLOP/s for (op, dtype) pairs the planner uses.
+    pub tput_matmul_bf16: f64,
+    pub tput_matmul_f32: f64,
+    pub tput_attention_bf16: f64,
+    pub tput_elementwise_f32: f64,
+}
+
+pub struct LinkCaps {
+    pub bandwidth_gbps: f64,
+    pub latency_us: f64,
+    pub measured: bool,
+}
+
+pub fn device_caps_unmeasured(backend: i32, arch_class: i32, vram_bytes: i64, unified_memory: bool) -> DeviceCaps {
+    DeviceCaps {
+        backend: backend,
+        arch_class: arch_class,
+        vram_bytes: vram_bytes,
+        unified_memory: unified_memory,
+        measured: false,
+        tput_matmul_bf16: 0.0,
+        tput_matmul_f32: 0.0,
+        tput_attention_bf16: 0.0,
+        tput_elementwise_f32: 0.0,
+    }
+}
+
+pub fn device_caps_measured(backend: i32, arch_class: i32, vram_bytes: i64, unified_memory: bool, matmul_bf16: f64, matmul_f32: f64, attention_bf16: f64, elementwise_f32: f64) -> DeviceCaps {
+    DeviceCaps {
+        backend: backend,
+        arch_class: arch_class,
+        vram_bytes: vram_bytes,
+        unified_memory: unified_memory,
+        measured: true,
+        tput_matmul_bf16: matmul_bf16,
+        tput_matmul_f32: matmul_f32,
+        tput_attention_bf16: attention_bf16,
+        tput_elementwise_f32: elementwise_f32,
+    }
+}
+
+/// Throughput of one device for one op code, in GFLOP/s. 0.0 when unknown.
+///
+/// # Parameters
+/// - `caps`: measured capabilities of the device.
+/// - `op`: op code (`op_matmul`, `op_attention`, `op_elementwise`).
+/// - `dtype`: dtype code; matmul selects bf16/f32, others use their v1 field.
+///
+/// # Return
+/// Measured GFLOP/s, or 0.0 if the device was not measured for that pair.
+///
+/// # Complexity
+/// O(1)
+pub fn device_throughput(caps: DeviceCaps, op: i32, dtype: i32) -> f64 {
+    if !caps.measured { return 0.0 }
+    if op == op_matmul() {
+        if dtype == dtype_bf16() { return caps.tput_matmul_bf16 }
+        if dtype == dtype_f16() { return caps.tput_matmul_bf16 }
+        return caps.tput_matmul_f32
+    }
+    if op == op_attention() { return caps.tput_attention_bf16 }
+    if op == op_elementwise() { return caps.tput_elementwise_f32 }
+    0.0
+}
+
+/// Bytes occupied by one element of a dtype code.
+///
+/// # Parameters
+/// - `dtype`: dtype code.
+///
+/// # Return
+/// Element size in bytes (4 for f32/i32, 2 for f16/bf16, 8 for i64, 1 for u8).
+///
+/// # Complexity
+/// O(1)
+pub fn dtype_bytes(dtype: i32) -> i64 {
+    if dtype == dtype_f32() { return 4 }
+    if dtype == dtype_i32() { return 4 }
+    if dtype == dtype_f16() { return 2 }
+    if dtype == dtype_bf16() { return 2 }
+    if dtype == dtype_i64() { return 8 }
+    1
+}

@@ -1,0 +1,79 @@
+// Heterogeneous runtime dtype-conversion kernels (own PTX artifact).
+//
+// Why on device: host-side f64<->f32 conversion measured 272 ms for one
+// n=1024 GEMM staging (98% of runtime end-to-end) - the conversion is
+// bandwidth-trivial and belongs on the GPU. With these kernels the host
+// only passes pointers: H2D the f64 master, convert, GEMM, convert back,
+// D2H straight into the f64 master. Zero host conversion.
+
+.version 7.0
+.target sm_50
+.address_size 64
+
+.visible .entry cvt_f64_f32(
+	.param .u64 cvt_f64_f32_param_0,
+	.param .u64 cvt_f64_f32_param_1,
+	.param .u64 cvt_f64_f32_param_2
+)
+{
+	.reg .pred 	%p<2>;
+	.reg .f32 	%f<2>;
+	.reg .f64 	%fd<2>;
+	.reg .u32 	%r<4>;
+	.reg .u64 	%rd<7>;
+
+	ld.param.u64 	%rd1, [cvt_f64_f32_param_0];
+	ld.param.u64 	%rd2, [cvt_f64_f32_param_1];
+	ld.param.u64 	%rd3, [cvt_f64_f32_param_2];
+	mov.u32 	%r1, %ctaid.x;
+	mov.u32 	%r2, %ntid.x;
+	mul.lo.u32 	%r1, %r1, %r2;
+	mov.u32 	%r3, %tid.x;
+	add.u32 	%r1, %r1, %r3;
+	cvt.u64.u32 	%rd4, %r1;
+	setp.ge.u64 	%p1, %rd4, %rd3;
+	@%p1 bra 	DONE1;
+	shl.b64 	%rd5, %rd4, 3;
+	add.u64 	%rd6, %rd1, %rd5;
+	ld.global.f64 	%fd1, [%rd6];
+	cvt.rn.f32.f64 	%f1, %fd1;
+	shl.b64 	%rd5, %rd4, 2;
+	add.u64 	%rd6, %rd2, %rd5;
+	st.global.f32 	[%rd6], %f1;
+DONE1:
+	ret;
+}
+
+.visible .entry cvt_f32_f64(
+	.param .u64 cvt_f32_f64_param_0,
+	.param .u64 cvt_f32_f64_param_1,
+	.param .u64 cvt_f32_f64_param_2
+)
+{
+	.reg .pred 	%p<2>;
+	.reg .f32 	%f<2>;
+	.reg .f64 	%fd<2>;
+	.reg .u32 	%r<4>;
+	.reg .u64 	%rd<7>;
+
+	ld.param.u64 	%rd1, [cvt_f32_f64_param_0];
+	ld.param.u64 	%rd2, [cvt_f32_f64_param_1];
+	ld.param.u64 	%rd3, [cvt_f32_f64_param_2];
+	mov.u32 	%r1, %ctaid.x;
+	mov.u32 	%r2, %ntid.x;
+	mul.lo.u32 	%r1, %r1, %r2;
+	mov.u32 	%r3, %tid.x;
+	add.u32 	%r1, %r1, %r3;
+	cvt.u64.u32 	%rd4, %r1;
+	setp.ge.u64 	%p1, %rd4, %rd3;
+	@%p1 bra 	DONE2;
+	shl.b64 	%rd5, %rd4, 2;
+	add.u64 	%rd6, %rd1, %rd5;
+	ld.global.f32 	%f1, [%rd6];
+	cvt.f64.f32 	%fd1, %f1;
+	shl.b64 	%rd5, %rd4, 3;
+	add.u64 	%rd6, %rd2, %rd5;
+	st.global.f64 	[%rd6], %fd1;
+DONE2:
+	ret;
+}
