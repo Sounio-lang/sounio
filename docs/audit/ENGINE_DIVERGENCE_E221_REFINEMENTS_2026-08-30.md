@@ -32,6 +32,12 @@ E221`) rather than `//@`, so nothing measured this.
 This is the direction that matters: the default engine accepts a program the
 bootstrap refuses.
 
+> **Closed 2026-09-26.** Running that ELF showed what "accepts" meant. Its entry point was
+> `.text+0`, merged function 0, so it died with SIGSEGV, or with SIGILL when an emptied
+> dependency body sat in that slot. Madaros now refuses with `error[E221]: no main`, the same
+> text as lean_single. See
+> [`MADAROS_NO_MAIN_ENTRY_FN0_DISPATCH_2026-09-26.md`](MADAROS_NO_MAIN_ENTRY_FN0_DISPATCH_2026-09-26.md).
+
 ## 2. Refinement types — Madaros is too restrictive, and fails closed
 
 `type Pos = { v: i64 | v > 0 }`
