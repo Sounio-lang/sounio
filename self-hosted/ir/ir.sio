@@ -91,6 +91,8 @@ pub let IR_RGN_FRAME_SCALAR_EXIT_FLAG: i64 = 64067
 // Compiler-owned address provenance. Other targets retain imm_i64's legacy
 // absolute BSS address; PIE targets relocate it instead of guessing by value.
 pub let IR_BSS_ADDRESS_FLAG: i64 = 64068
+// Box wrappers have a resettable lifetime distinct from value aggregates.
+pub let IR_BOX_ALLOC_FLAG: i64 = 64069
 pub let IR_XOR_TWIST_CAYLEY_DICKSON_SIGN: i64 = 1
 pub let IR_XOR_CANDIDATE_AUTO: i64 = 0
 pub let IR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE: i64 = 1
@@ -827,6 +829,12 @@ pub fn ir_strategy_name(s: i64) -> string {
 //
 // It is also much cheaper than the array it replaces: ~112 MB of scalars for a
 // million instructions, against 2 GB of reserved [IrInstr; 4096] per module.
+// 4194304 instruction slots. A self-compile that gets past IR_MAX_INSTRS used
+// to fill 4194285 of 4194304, of which ~2.2M was live and ~2.0M was abandoned
+// by ir_region_grow_slot copying a non-tail region to the bump top. The next
+// doubling then missed by 8 slots. Abandoned ranges now go on a first-fit
+// hole list (ir_arena_push_hole / ir_arena_take_hole) so live demand (~2.2M)
+// fits without raising this cap or IR_MAX_INSTRS.
 pub var IR_A_OP: [i64; 4194304] = [0; 4194304]
 pub var IR_A_DST: [i64; 4194304] = [0; 4194304]
 pub var IR_A_SRC1: [i64; 4194304] = [0; 4194304]
@@ -1178,6 +1186,68 @@ pub var IR_REGION_STATE: [i64; 16640] = [0; 16640]
 // Bisected: 8189 live slots compile, 8190 and 8191 do not.
 pub fn ir_region_table_capacity() -> i64 { 16640 }
 
+// Abandoned instruction ranges from non-tail ir_region_grow_slot copies.
+// First-fit, coalesced. A full table drops the hole (same leak as before).
+pub let IR_HOLE_MAX: i64 = 4096
+pub var IR_HOLE_BASE: [i64; 4096] = [0; 4096]
+pub var IR_HOLE_CAP: [i64; 4096] = [0; 4096]
+pub var IR_HOLE_COUNT: i64 = 0
+
+fn ir_arena_push_hole(base: i64, cap: i64) with Mut, Panic, Div {
+    if base < 0 { return }
+    if cap <= 0 { return }
+    var b = base
+    var c = cap
+    var i: i64 = 0
+    while i < IR_HOLE_COUNT {
+        let hb = IR_HOLE_BASE[i as usize]
+        let hc = IR_HOLE_CAP[i as usize]
+        if hb + hc == b {
+            b = hb
+            c = hc + c
+            IR_HOLE_COUNT = IR_HOLE_COUNT - 1
+            IR_HOLE_BASE[i as usize] = IR_HOLE_BASE[IR_HOLE_COUNT as usize]
+            IR_HOLE_CAP[i as usize] = IR_HOLE_CAP[IR_HOLE_COUNT as usize]
+            i = 0
+        } else if b + c == hb {
+            c = c + hc
+            IR_HOLE_COUNT = IR_HOLE_COUNT - 1
+            IR_HOLE_BASE[i as usize] = IR_HOLE_BASE[IR_HOLE_COUNT as usize]
+            IR_HOLE_CAP[i as usize] = IR_HOLE_CAP[IR_HOLE_COUNT as usize]
+            i = 0
+        } else {
+            i = i + 1
+        }
+    }
+    if IR_HOLE_COUNT >= IR_HOLE_MAX { return }
+    IR_HOLE_BASE[IR_HOLE_COUNT as usize] = b
+    IR_HOLE_CAP[IR_HOLE_COUNT as usize] = c
+    IR_HOLE_COUNT = IR_HOLE_COUNT + 1
+}
+
+fn ir_arena_take_hole(want: i64) -> i64 with Mut, Panic, Div {
+    if want <= 0 { return 0 - 1 }
+    var i: i64 = 0
+    while i < IR_HOLE_COUNT {
+        let hc = IR_HOLE_CAP[i as usize]
+        if hc >= want {
+            let hb = IR_HOLE_BASE[i as usize]
+            let rem = hc - want
+            if rem > 0 {
+                IR_HOLE_BASE[i as usize] = hb + want
+                IR_HOLE_CAP[i as usize] = rem
+            } else {
+                IR_HOLE_COUNT = IR_HOLE_COUNT - 1
+                IR_HOLE_BASE[i as usize] = IR_HOLE_BASE[IR_HOLE_COUNT as usize]
+                IR_HOLE_CAP[i as usize] = IR_HOLE_CAP[IR_HOLE_COUNT as usize]
+            }
+            return hb
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
 // ============================================================================
 // IrCapacities: ONE object for all coupled capacity constants.
 // ============================================================================
@@ -1340,6 +1410,7 @@ pub fn ir_instr_arena_init() -> i64 with Mut, Panic, Div {
     }
     IR_ARENA_TOP = 0
     IR_REGION_COUNT = 0
+    IR_HOLE_COUNT = 0
     IR_ARENA_VIOLATION = 0
     // Slot 0 is the quarantine, so a zero-initialised handle addresses scratch.
     IR_QUARANTINE_BASE = 0
@@ -1371,14 +1442,18 @@ pub fn ir_instr_arena_alloc(cap: i64, out: &! IrInstrRegion) -> i64 with Mut, Pa
     // quarantine region unreserved. Init is idempotent-by-count here.
     if IR_REGION_COUNT == 0 { ir_instr_arena_init() }
     if IR_REGION_COUNT >= ir_region_table_capacity() { return IR_ARENA_ERR_REGIONS }
-    if IR_ARENA_TOP + cap > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
+    var base = ir_arena_take_hole(cap)
+    if base < 0 {
+        if IR_ARENA_TOP + cap > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
+        base = IR_ARENA_TOP
+        IR_ARENA_TOP = IR_ARENA_TOP + cap
+    }
     let slot = IR_REGION_COUNT
-    IR_REGION_BASE[slot as usize] = IR_ARENA_TOP
+    IR_REGION_BASE[slot as usize] = base
     IR_REGION_CAP[slot as usize] = cap
     IR_REGION_LEN[slot as usize] = 0
     IR_REGION_GEN[slot as usize] = IR_REGION_GEN[slot as usize] + 1
     IR_REGION_STATE[slot as usize] = IR_REGION_LIVE
-    IR_ARENA_TOP = IR_ARENA_TOP + cap
     IR_REGION_COUNT = slot + 1
     (*out).slot = slot
     (*out).generation = IR_REGION_GEN[slot as usize]
@@ -1734,16 +1809,28 @@ fn ir_region_grow_slot(slot: i64, want: i64) -> i64 with Mut, Panic, Div {
     if want <= IR_REGION_CAP[slot as usize] { return IR_ARENA_OK }
     var grown = IR_REGION_CAP[slot as usize] * 2
     if grown < want { grown = want }
-    if IR_ARENA_TOP + grown > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
     let old_base = IR_REGION_BASE[slot as usize]
+    // The tail region owns the entire suffix. Extend it in place rather than
+    // stranding every previous doubling; no other region can occupy this range.
+    if old_base + IR_REGION_CAP[slot as usize] == IR_ARENA_TOP {
+        if grown > ir_instr_arena_capacity() - old_base { return IR_ARENA_ERR_CAPACITY }
+        IR_ARENA_TOP = old_base + grown
+        IR_REGION_CAP[slot as usize] = grown
+        return IR_ARENA_OK
+    }
+    var new_base = ir_arena_take_hole(grown)
+    if new_base < 0 {
+        if grown > ir_instr_arena_capacity() - IR_ARENA_TOP { return IR_ARENA_ERR_CAPACITY }
+        new_base = IR_ARENA_TOP
+        IR_ARENA_TOP = new_base + grown
+    }
     let len = IR_REGION_LEN[slot as usize]
-    let new_base = IR_ARENA_TOP
     var i: i64 = 0
     while i < len {
         ir_arena_copy_slot(new_base + i, old_base + i)
         i = i + 1
     }
-    IR_ARENA_TOP = new_base + grown
+    ir_arena_push_hole(old_base, IR_REGION_CAP[slot as usize])
     IR_REGION_BASE[slot as usize] = new_base
     IR_REGION_CAP[slot as usize] = grown
     IR_ARENA_OK
@@ -1844,20 +1931,10 @@ pub fn ir_region_reserve(r: &! IrInstrRegion, want: i64) -> i64 with Mut, Panic,
     let slot = (*r).slot
     if IR_REGION_STATE[slot as usize] == IR_REGION_SEALED { return IR_ARENA_ERR_SEALED }
     if want <= IR_REGION_CAP[slot as usize] { return IR_ARENA_OK }
-    var grown = IR_REGION_CAP[slot as usize] * 2
-    if grown < want { grown = want }
-    if IR_ARENA_TOP + grown > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
-    let old_base = IR_REGION_BASE[slot as usize]
-    let len = IR_REGION_LEN[slot as usize]
-    let new_base = IR_ARENA_TOP
-    var i: i64 = 0
-    while i < len {
-        ir_arena_copy_slot(new_base + i, old_base + i)
-        i = i + 1
-    }
-    IR_ARENA_TOP = new_base + grown
-    IR_REGION_BASE[slot as usize] = new_base
-    IR_REGION_CAP[slot as usize] = grown
+    let rc = ir_region_grow_slot(slot, want)
+    if rc != IR_ARENA_OK { return rc }
+    // Preserve the checked API's generation boundary even for in-place growth:
+    // copied handles must still be explicitly refreshed by their owner.
     IR_REGION_GEN[slot as usize] = IR_REGION_GEN[slot as usize] + 1
     (*r).generation = IR_REGION_GEN[slot as usize]
     IR_ARENA_OK
@@ -5383,6 +5460,12 @@ pub fn ir_alloc(dst: i64, type_id: i64) -> IrInstr {
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
+}
+
+pub fn ir_alloc_box(dst: i64, type_id: i64) -> IrInstr with Mut {
+    var instr = ir_alloc(dst, type_id)
+    instr.imm_flags = IR_BOX_ALLOC_FLAG
+    instr
 }
 
 // ir_alloc_array: like ir_alloc, but additionally records the LOGICAL element

@@ -9,6 +9,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.llm-prog
 
 # Write Sounio with a language model
 
+[Ελληνικά](LLM_PROGRAMMING_GUIDE_EL.md) · [Português](LLM_PROGRAMMING_GUIDE_PT.md)
+
 **Edition:** October 2026. **Prepared:** 2026-10-16.
 **Source baseline:** `f5b2c5850be9f3d3995719ffcade44a6d851658a`.
 
@@ -37,6 +39,15 @@ certification, and a guarantee about every language model are not established.
 [Example manifest](../llm-guide/example-manifest.json) ·
 [Errors](../llm-guide/error-catalog.md) ·
 [Library discovery](../llm-guide/stdlib-index.md)
+
+For a task-sized, copyable starting context, use the
+[thirty-task trilingual curriculum](../llm-guide/task-playbook.md):
+`node scripts/docs/sounio_task_context.mjs show first-program --lang en`.
+It emits complete reference/control sources, historical profile-specific
+results, adaptation steps and pitfalls without running a compiler or LLM.
+The tasks reuse existing programs; they are not thirty new executions.
+The [translation and repair guide](../llm-guide/translation-and-repair.md)
+explains intent-preserving ports, stage diagnosis and bounded repairs.
 
 <!-- llm:section orientation -->
 ## 1. Give the model the right amount of context
@@ -163,7 +174,7 @@ identified CLI profile. Do not invent missing response fields.
 | Delete every semicolon | Do not: array types/repetition use `;`, and relevant statement positions accept it. |
 | Assume every method needs a receiver | Instance receivers are explicit; an associated constructor can have no `self` receiver. |
 | Add Rust attributes or a derive macro | Find the actual Sounio declaration/test mechanism instead of translating a foreign feature. |
-| Use a format string and extra print arguments | Read the actual printing signature; the first example uses one string argument. |
+| Use Rust-style format specifiers (`{:.2}`, `{0}`, `{name}`) | `println("x={} y={}", x, y)` takes bare `{}` placeholders only, one per argument, with `{{`/`}}` for literal braces; the format must be a string literal and the counts must match (ADR-013). With a single argument the string prints verbatim. |
 | Ban generics, traits, or closures entirely | Inspect their bounded implementation and the selected artifact's witnesses. |
 | Promise every parsed construct executes | Trace checking, lowering, emission, and runtime support separately. |
 
@@ -675,6 +686,122 @@ it rather than replacing the task with a simpler calculation.
 For a small model, provide one program and one change at a time. For a larger
 agent, allow a bounded plan and retrieval of additional APIs, but keep one
 owner per shared file and explicit evidence at each checkpoint.
+
+### Domain-specific task cards
+
+These cards make a scientific request concrete without pretending that a
+domain prompt is a compiler receipt. Attach the complete source, the relevant
+library declaration, the intended observation, and the selected execution
+profile. The model must retrieve the current Sounio API before writing code;
+the names below are search areas, not permission to invent an API. Keep model
+assumptions, scientific data, compiler evidence, numerical verification, and
+publication decisions as separate layers.
+
+#### Chemistry, kinetics, and materials
+
+```text
+You are assisting with a Sounio chemistry task.
+
+Research task: [reaction, equilibrium, kinetics, spectroscopy, materials, or
+                 other precisely stated question].
+Scientific inputs: [species, concentrations, units, temperature, pressure,
+                    time grid, measured values, uncertainty, provenance].
+Required observation: [table, curve, invariant, status, file, or other output].
+Allowed files: [exact source and test paths]. Do not publish changes.
+Execution profile: [revision, raw compiler/hash, host/target, stdlib root].
+
+Before editing:
+1. Inspect the supplied source and retrieve the actual declarations and a
+   real consumer for every chemistry, units, array, numeric, or result API.
+2. List species and units explicitly. State whether values are measured,
+   assumed, fitted, simulated, or derived, and preserve that provenance.
+3. State precision, uncertainty/dependence, boundary conditions, and the
+   failure contract. Do not silently coerce units, discard uncertainty, or
+   replace a reaction model with a simpler calculation.
+4. Separate a source/type-check claim, a runtime observation, and an
+   independently authorized numerical verification. A simulation is not an
+   experiment and a passing example is not a chemical or industrial guarantee.
+
+Make the smallest source-bound change. Use only APIs confirmed in the source
+and the supplied profile. Return the complete changed file or exact patch,
+then report the check command, run command, exit, stdout, stderr, source hash,
+and every step that was not executed. If a declaration or prerequisite is
+missing, stop and identify it instead of inventing a helper.
+```
+
+#### AI/ML, tensors, and differentiable programs
+
+```text
+You are assisting with a Sounio AI/ML task.
+
+Task class: [data preparation, tensor transform, inference, training,
+             autodiff, optimization, evaluation, or reproducibility].
+Inputs: [data schema/source, shapes, axes, dtype, precision, device, seed,
+         provenance, privacy constraints].
+Required observation: [shape/value contract, loss trace, metric, artifact,
+                       exit status, or explicit refusal].
+Allowed files: [exact source, fixture, and test paths]. Do not publish.
+Execution profile: [revision, raw compiler/hash, host/target, stdlib root,
+                     device/runtime if known].
+
+Before editing:
+1. Classify the operation as tensor construction, transformation, model
+   definition, autodiff, optimizer, inference, or evaluation. Retrieve the
+   actual declarations and a complete consumer from the current tensor,
+   autodiff, ML, or example sources; never import a familiar API by analogy.
+2. Write down shape, rank, axis order, dtype, precision, batching, masking,
+   device, randomness, and ownership assumptions. Preserve provenance and
+   uncertainty; do not turn an absent benchmark into a performance claim.
+3. Keep implementation, compilation, execution, benchmark, training data,
+   and statistical/numerical verification as separate evidence. A successful
+   tensor operation is not model accuracy, safety, or generalization.
+4. Do not fabricate a dataset, checkpoint, accelerator, seed, metric, or
+   result. If the requested operation is not present in the selected profile,
+   report the missing capability and propose the smallest source-bound next
+   step.
+
+Make one minimal change at a time. Return the complete source or exact patch
+and a reproducible evidence record: commands, exit statuses, raw streams,
+source/artifact hashes, data identity, and unrun steps. Keep training and
+inference claims bounded by the observed profile.
+```
+
+#### Research-only medicine, ontology, and PBPK
+
+```text
+You are assisting with a Sounio research-only medicine, ontology, or PBPK
+task. This is not clinical advice, diagnosis, prescribing, device validation,
+or a patient-specific recommendation.
+
+Research question: [precise terminology, ontology, PK/PD, PBPK, cohort,
+                   mechanistic, or reproducibility question].
+Inputs and governance: [de-identified data or synthetic fixture, provenance,
+                         units, population, assumptions, consent/permission].
+Required observation: [ontology relation, typed record, simulation output,
+                       sensitivity/result table, refusal, or status].
+Allowed files: [exact source and test paths]. Do not publish.
+Execution profile: [revision, raw compiler/hash, host/target, stdlib root].
+
+Before editing:
+1. Retrieve the actual ontology, clinical, PBPK, uncertainty, and library
+   declarations plus a real consumer. Identify whether each statement is a
+   vocabulary/ontology fact, a model assumption, a simulation result, a
+   compiler result, a formal proof, or an empirical clinical claim.
+2. Preserve provenance, cohort/population scope, units, precision, uncertainty,
+   dependence, missingness, and data-governance constraints. Do not infer a
+   patient conclusion from a population model or a terminology relation.
+3. Keep terminology closure, model execution, numerical verification, and
+   clinical validation distinct. Never claim diagnosis, treatment efficacy,
+   safety, regulatory approval, or patient benefit from code execution alone.
+4. Use only the authorized numerical/proof toolchain for the requested
+   verification. If a clinical, governance, dataset, or execution prerequisite
+   is absent, stop and label the result unverified rather than filling the gap.
+
+Make the smallest source-bound change. Return the source or exact patch and a
+bounded evidence record with commands, exits, raw output, source/artifact
+identity, data identity, assumptions, and unrun validations. Include a clear
+research-only limitation in any user-facing summary.
+```
 
 <!-- llm:section delivery -->
 ## 15. Deliver code with bounded, reproducible evidence

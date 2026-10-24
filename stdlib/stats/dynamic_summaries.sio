@@ -1,0 +1,117 @@
+// Caller-owned workspace, finite masked observations, no allocation.
+// Preparation sorts exactly once; quantiles and box summaries reuse that prefix.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
+use stats::dynamic_order::{numeric_heapsort}
+use math::pure::{is_finite}
+pub struct SummaryOrder {pub status:i64,pub observations:i64,pub available:i64}
+pub struct DynamicQuantile {pub status:i64,pub value:f64,pub observations:i64,pub method:i64}
+pub struct DynamicBoxSummary {
+    pub status:i64,pub observations:i64,pub method:i64,pub whisker_policy:i64,
+    pub q1:f64,pub median:f64,pub q3:f64,pub lower_whisker:f64,pub upper_whisker:f64,
+    pub lower_fence:f64,pub upper_fence:f64,pub lower_fence_available:bool,
+    pub upper_fence_available:bool,pub outliers:i64,
+}
+pub fn dynamic_summary_order(values:&NumericBuffer,available:&IntegerBuffer,
+    work:&!NumericBuffer)->SummaryOrder with Mut,Div,Panic {
+    let n=numeric_buffer_len(values)
+    var out=SummaryOrder{status:1,observations:n,available:0}
+    if numeric_buffer_status(values)!=0 || integer_buffer_status(available)!=0 ||
+       numeric_buffer_status(work)!=0 || integer_buffer_len(available)!=n {return out}
+    var i:i64=0
+    while i<n {
+        let flag=integer_buffer_at(available,i)
+        if flag!=0 && flag!=1 {out.status=2;return out}
+        if flag==1 {
+            if !is_finite(numeric_buffer_at(values,i)) {out.status=3;return out}
+            out.available=out.available+1
+        }
+        i=i+1
+    }
+    if out.available==0 {out.status=4;return out}
+    if out.available>9007199254740992 {out.status=5;return out}
+    if numeric_buffer_len(work)<out.available {return out}
+    i=0
+    var j:i64=0
+    while i<n {
+        if integer_buffer_at(available,i)==1 {
+            let v=numeric_buffer_at(values,i)
+            numeric_buffer_set(work,j,v);j=j+1
+        }
+        i=i+1
+    }
+    out.status=numeric_heapsort(work,out.available)
+    return out
+}
+// The sorted prefix is validated so this API is safe without a preparation token.
+pub fn dynamic_quantile_sorted(sorted:&NumericBuffer,n:i64,q:f64)->DynamicQuantile with Div,Panic {
+    var out=DynamicQuantile{status:1,value:0.0,observations:n,method:7}
+    if numeric_buffer_status(sorted)!=0 || n<1 || n>numeric_buffer_len(sorted) ||
+       n>9007199254740992 {return out}
+    if !is_finite(q) || q<0.0 || q>1.0 {out.status=2;return out}
+    var i:i64=0
+    while i<n {
+        let x=numeric_buffer_at(sorted,i)
+        if !is_finite(x) {out.status=3;return out}
+        if i>0 {if x<numeric_buffer_at(sorted,i-1) {out.status=4;return out}}
+        i=i+1
+    }
+    if q==0.0 {out.value=numeric_buffer_at(sorted,0);out.status=0;return out}
+    let rank=((n-1) as f64)*q
+    if rank>=((n-1) as f64) {out.value=numeric_buffer_at(sorted,n-1);out.status=0;return out}
+    let lower=rank as i64
+    let t=rank-(lower as f64)
+    let a=numeric_buffer_at(sorted,lower)
+    if t==0.0 {out.value=a;out.status=0;return out}
+    let b=numeric_buffer_at(sorted,lower+1)
+    if a==b {out.value=a;out.status=0;return out}
+    if a>=0.0 || b<=0.0 {out.value=a+t*(b-a)}
+    else {out.value=(1.0-t)*a+t*b}
+    if !is_finite(out.value) || out.value<a || out.value>b {out.status=5;return out}
+    out.status=0
+    return out
+}
+pub fn dynamic_box_sorted(sorted:&NumericBuffer,n:i64)->DynamicBoxSummary with Mut,Div,Panic {
+    var out=DynamicBoxSummary{status:1,observations:n,method:7,whisker_policy:1,
+        q1:0.0,median:0.0,q3:0.0,lower_whisker:0.0,upper_whisker:0.0,
+        lower_fence:0.0,upper_fence:0.0,lower_fence_available:false,
+        upper_fence_available:false,outliers:0}
+    let q1=dynamic_quantile_sorted(sorted,n,0.25)
+    if q1.status!=0 {return out}
+    let med=dynamic_quantile_sorted(sorted,n,0.5)
+    let q3=dynamic_quantile_sorted(sorted,n,0.75)
+    if med.status!=0 || q3.status!=0 {return out}
+    out.q1=q1.value;out.median=med.value;out.q3=q3.value
+    // Quarter-scale fences cannot overflow for finite ordered quartiles.
+    let low_scaled=0.625*q1.value-0.375*q3.value
+    let high_scaled=0.625*q3.value-0.375*q1.value
+    var low=low_scaled*4.0
+    var high=high_scaled*4.0
+    let iqr=q3.value-q1.value
+    if is_finite(iqr) {
+        let reach=1.5*iqr
+        if is_finite(reach) {low=q1.value-reach;high=q3.value+reach}
+    }
+    out.lower_fence_available=is_finite(low)
+    out.upper_fence_available=is_finite(high)
+    if out.lower_fence_available {out.lower_fence=low}
+    if out.upper_fence_available {out.upper_fence=high}
+    var found=false
+    var i:i64=0
+    while i<n {
+        let x=numeric_buffer_at(sorted,i)
+        var below=false
+        var above=false
+        if out.lower_fence_available {below=x<low} else {below=0.25*x<low_scaled}
+        if out.upper_fence_available {above=x>high} else {above=0.25*x>high_scaled}
+        if below || above {out.outliers=out.outliers+1}
+        else {
+            if !found {out.lower_whisker=x;found=true}
+            out.upper_whisker=x
+        }
+        i=i+1
+    }
+    if !found {out.status=5;return out}
+    out.status=0
+    return out
+}

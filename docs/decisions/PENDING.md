@@ -49,6 +49,7 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 | [D-30](#d-30) | Raízes precisas para o GC de handles | #1491 |
 | [D-31](#d-31) | Reborrow por parâmetro `&!` pode aliasar? | #1581 (resíduo) |
 | [D-32](#d-32) | `spawn {}` / `.await` / `async fn` no Madaros | #2604 (resíduo) |
+| [D-34](#d-34) | Primitiva intervalar certificada: as cinco decisões da proposta | [proposta](../proposals/CERTIFIED_INTERVAL_PRIMITIVE_2026-10-22.md) |
 
 ---
 
@@ -371,3 +372,19 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 - **Recomendação:** (b) agora (a recusa já é fail-closed, mas o E012 "this type has no field named" engana: aponta um campo inexistente em vez do recurso ausente), (a) quando o modelo de execução de `Async` for decidido.
 - **Teste discriminante:** `tests/run-pass/async_spawn.sio` imprime `spawn_basic: PASS` e `spawn_multiple: PASS` no Madaros (opção a), ou o Madaros o recusa com uma mensagem que nomeia `spawn`/`.await` (opção b). Hoje: Madaros `error[E012] … this type has no field named` (×8), `lean_single` `PASS`/`PASS`.
 - **Causa localizada:** `self-hosted/parser/exprs.sio` não tem nó de AST para `await` nem para `spawn` (`grep -n 'await' self-hosted/parser/exprs.sio` não encontra nada), então `.await` é lido como acesso a campo e o checker de `self-hosted/check/` levanta E012.
+
+<a id="d-34"></a>
+## D-34 — Primitiva intervalar certificada: as cinco decisões
+
+- **Origem:** [proposta](../proposals/CERTIFIED_INTERVAL_PRIMITIVE_2026-10-22.md) (2026-10-22). Vira ADR quando estas cinco forem tomadas.
+- **Pergunta:** como a incerteza estatística `u` e o envelope rigoroso `e` convivem no `Knowledge`, e quais alvos entram no Marco 0?
+- **Causa localizada:** nenhuma no código: hoje a propagação do `Knowledge` não carrega termo de arredondamento (`self-hosted/check/epistemic.sio`, `self-hosted/ir/lower.sio`; medido em `main` `27afa340`), então nenhuma opção muda o comportamento atual.
+
+| # | decisão | opções | recomendação | teste discriminante |
+|---|---|---|---|---|
+| D2 | `u` e `e` separados no `Knowledge` | separar, com conversão `e → u` só explícita e registrada na proveniência; ou somar em quadratura | separar (a soma implícita proposta em 2026-09-23 sai antes de entrar) | dobrar `e` em `u` sem `e_to_typeB(…)` é erro de compilação |
+| D3 | propagar `u` sob `e` não degenerado | (a) Jacobiano intervalar; (b) recusar; (c) Jacobiano pontual só via `assume_point` | (a) por padrão, (c) como saída explícita | `u` de `f(x)` com `e` largo não usa o Jacobiano no ponto médio sem `assume_point` |
+| D6 | FMA intervalar explícita | permitir `ifma.rd/.ru`; ou proibir | permitir; a contração implícita continua proibida | a mesma expressão com e sem `ifma` explícita: só a explícita emite FMA |
+| D10 | `if` sobre condição só "possivelmente" verdadeira | (a) erro de compilação, com `hull_branches` explícito; (b) alargar em silêncio | (a) | `if [0,2] > [1,1] { … }` recusado sem `hull_branches` |
+| D11 | alvos do Marco 0 | x86 EVEX, RISC-V F/D e RVV (Spike), PTX; AMD no Marco 0b; Metal, AMX e U250 fora | como na tabela da proposta | identidade bit a bit dos extremos entre os alvos do Marco 0 no corpus de casos-limite |
+

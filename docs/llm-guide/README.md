@@ -9,6 +9,12 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.llm-guide.read
 
 # Sounio for any language model
 
+**Ελληνικά:** [πλήρης οδηγός LLM](../guide/LLM_PROGRAMMING_GUIDE_EL.md) ·
+[εγκατάσταση, χημεία, ΤΝ και συνεισφορά](../el/README.md).
+All thirty task cards are also available with `--lang el`; the context
+generator now validates ninety en/pt/el packs. Earlier bilingual preparation
+receipts retain their original sixty-pack scope rather than being rewritten.
+
 Give the model a small, accurate language context, a complete existing program
 close to the task, and access to an identified compiler. Then make one bounded
 change at a time and preserve the check, compilation, and execution evidence.
@@ -25,6 +31,16 @@ for that exact source and profile. An implementation limitation does not become
 a language design rule.
 
 ## Choose a context tier
+
+**Start from a task, not a giant prompt.** The [thirty-task trilingual
+curriculum](task-playbook.md) supplies objectives, controls, adaptation steps
+and pitfalls. Generate a complete source-bound context pack with
+`node scripts/docs/sounio_task_context.mjs show first-program --lang en`
+or use `--lang pt` / `--lang el`. `list` and `search` help choose the task. The tool is
+read-only and never invokes a compiler or LLM. Historical example results
+remain historical; tasks are adaptations, not additional independent runs.
+Use [translation and evidence-based repair](translation-and-repair.md) when
+porting another language or diagnosing a generated candidate.
 
 Load the first tier initially and retrieve the next tier when the task needs
 it. Include the actual file contents or give the agent readable paths: a list
@@ -272,6 +288,20 @@ Separate source-supported observations from actually executed checks.
 Return concrete findings with source paths and a discriminating existing test.
 Do not publish, upload, commit, or contact anyone without user authorization.
 ```
+
+## Domain-specific prompt cards
+
+The language guides now include copy-ready, source-first cards for three
+high-value scientific workflows:
+
+- [English domain cards](../guide/LLM_PROGRAMMING_GUIDE.md#domain-specific-task-cards)
+- [Portuguese domain cards](../guide/LLM_PROGRAMMING_GUIDE_PT.md)
+- [Greek domain cards](../guide/LLM_PROGRAMMING_GUIDE_EL.md)
+
+They cover chemistry/kinetics/materials, AI/ML/tensors, and research-only
+medicine/ontology/PBPK. The cards are prompt templates, not new runnable
+examples, compiler receipts, clinical advice, or evidence that a model can
+complete every task. Attach the current source and profile before using one.
 
 ## Keep the guide honest as the language evolves
 

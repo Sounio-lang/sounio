@@ -1,0 +1,79 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: STDLIB_DEEP_COUNT_SAMPLING_INTO_PASS
+use random::pcg64_core::{PcgState}
+use stats::checked_count_sampling::{count_rng,count_cursor_new,count_cursor_rng,count_draw_value,gamma_draw_value,poisson_count_draw,nb2_count_draw,gamma_unit_draw,poisson_count_draw_into,nb2_count_draw_into,gamma_unit_draw_into}
+fn same(a:PcgState,b:PcgState)->bool {a.state_hi==b.state_hi && a.state_lo==b.state_lo && a.inc_hi==b.inc_hi && a.inc_lo==b.inc_lo}
+fn main()->i32 with IO,Mut,Div,Panic {
+ // Primitive snapshots detect record-handle aliasing, not just equal streams.
+ let input=count_rng(17)
+ let original_hi:i64=input.state_hi;let original_lo:i64=input.state_lo
+ let original_inc_hi:i64=input.inc_hi;let original_inc_lo:i64=input.inc_lo
+ var detached=count_cursor_new(input)
+ var detached_slot=count_draw_value()
+ let first_detached=poisson_count_draw_into(&!detached,40.0,10000,10000,&!detached_slot)
+ assert(first_detached==0)
+ assert(input.state_hi==original_hi && input.state_lo==original_lo && input.inc_hi==original_inc_hi && input.inc_lo==original_inc_lo)
+ let checkpoint=count_cursor_rng(&detached)
+ let checkpoint_hi:i64=checkpoint.state_hi;let checkpoint_lo:i64=checkpoint.state_lo
+ let next_detached=poisson_count_draw_into(&!detached,40.0,10000,10000,&!detached_slot)
+ assert(next_detached==0 && checkpoint.state_hi==checkpoint_hi && checkpoint.state_lo==checkpoint_lo)
+ let legacy_input=poisson_count_draw(input,40.0,10000,10000)
+ assert(legacy_input.status==0 && input.state_hi==original_hi && input.state_lo==original_lo && input.inc_hi==original_inc_hi && input.inc_lo==original_inc_lo)
+ var cursor=count_cursor_new(count_rng(19))
+ var result=count_draw_value()
+ var gamma=gamma_draw_value()
+ var expected_rng=count_rng(19)
+ var i:i64=0
+ while i<64 {
+  let mean=if i%3==0 {0.01}else{if i%3==1 {4.0}else{40.0}}
+  let expected=poisson_count_draw(expected_rng,mean,10000,10000)
+  let code=poisson_count_draw_into(&!cursor,mean,10000,10000,&!result)
+  assert(code==expected.status && result.status==expected.status && result.count==expected.count)
+  assert(result.uniforms==expected.uniforms && result.proposals==expected.proposals)
+  assert(result.resolution_limited==expected.resolution_limited && result.rate_underflow==expected.rate_underflow)
+  assert(same(count_cursor_rng(&cursor),expected.rng))
+  expected_rng=expected.rng
+  i=i+1
+ }
+ // Reuse the same cursor/slot after a budget failure; counters are per draw.
+ let expected=poisson_count_draw(expected_rng,20.0,0,10)
+ let budget=poisson_count_draw_into(&!cursor,20.0,0,10,&!result)
+ assert(budget==3 && result.count==0 && result.uniforms==0 && result.proposals==1)
+ assert(!result.resolution_limited && !result.rate_underflow && same(count_cursor_rng(&cursor),expected.rng))
+ expected_rng=expected.rng
+ let plain=nb2_count_draw(expected_rng,40.0,0.0,10000,10000)
+ let limit=nb2_count_draw_into(&!cursor,40.0,0.0,10000,10000,&!result)
+ assert(limit==plain.status && result.count==plain.count && result.uniforms==plain.uniforms && result.proposals==plain.proposals)
+ assert(same(count_cursor_rng(&cursor),plain.rng))
+ expected_rng=plain.rng
+ i=0
+ while i<32 {
+  let shape=if i%2==0 {0.5}else{2.5}
+  let expected=gamma_unit_draw(expected_rng,shape,10000,10000)
+  let code=gamma_unit_draw_into(&!cursor,shape,10000,10000,&!gamma)
+  assert(code==expected.status && gamma.value==expected.value && gamma.log_value==expected.log_value)
+  assert(gamma.value_available==expected.value_available && gamma.log_available==expected.log_available && gamma.rounded_underflow==expected.rounded_underflow)
+  assert(gamma.uniforms==expected.uniforms && gamma.proposals==expected.proposals && same(count_cursor_rng(&cursor),expected.rng))
+  expected_rng=expected.rng
+  i=i+1
+ }
+ let bad=gamma_unit_draw_into(&!cursor,0.0,10000,10000,&!gamma)
+ assert(bad==1 && gamma.value==0.0 && gamma.log_value==0.0 && !gamma.value_available && !gamma.log_available && !gamma.rounded_underflow && gamma.uniforms==0 && gamma.proposals==0)
+ assert(same(count_cursor_rng(&cursor),expected_rng))
+ i=0
+ while i<32 {
+  let expected=nb2_count_draw(expected_rng,12.0,0.4,10000,10000)
+  let code=nb2_count_draw_into(&!cursor,12.0,0.4,10000,10000,&!result)
+  assert(code==expected.status && result.count==expected.count && result.uniforms==expected.uniforms && result.proposals==expected.proposals)
+  assert(result.resolution_limited==expected.resolution_limited && result.rate_underflow==expected.rate_underflow && same(count_cursor_rng(&cursor),expected.rng))
+  expected_rng=expected.rng
+  i=i+1
+ }
+ let tiny=poisson_count_draw_into(&!cursor,1.0e-30,10000,10000,&!result)
+ assert(tiny==0 && result.resolution_limited)
+ let invalid=nb2_count_draw_into(&!cursor,1.0,-1.0,10000,10000,&!result)
+ assert(invalid==1 && result.count==0 && result.uniforms==0 && result.proposals==0 && !result.resolution_limited && !result.rate_underflow)
+ println("STDLIB_DEEP_COUNT_SAMPLING_INTO_PASS")
+ 0
+}

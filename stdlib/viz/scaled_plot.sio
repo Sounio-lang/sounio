@@ -1,0 +1,68 @@
+// Scaled line + two matching axes; raw input arrays remain with the caller.
+use math::pure::{is_finite}
+use viz::scale::{ScaleSpec,scale_forward,axis_scaled_ticks}
+use viz::ir::{VizScene,VizLayout,VizStyle,VIZ_NODE_CHART_LINE,VIZ_NODE_AXIS,
+    VIZ_FLAG_CLIP_PLOT,viz_series_empty,viz_scene_add_node,viz_layout_rect}
+pub struct ScaledDomain {
+    pub x_lo:f64,pub x_hi:f64,pub y_lo:f64,pub y_hi:f64,
+    pub x_scale:ScaleSpec,pub y_scale:ScaleSpec,
+    pub x_intervals:i64,pub y_intervals:i64
+}
+pub struct ScaledPlot { pub status:i64,pub chart:i64,pub x_axis:i64,pub y_axis:i64 }
+// status 1 invalid geometry/count, 2 capacity, 3 x-axis, 4 y-axis,
+// 5 invalid sample transformation. Failure preserves active counts/IDs.
+pub fn viz_add_scaled_plot(scene:&!VizScene,xs:&[f64;1024],ys:&[f64;1024],n:i64,
+    domain:&ScaledDomain,rect:VizLayout,style:VizStyle,axis_style:VizStyle)->ScaledPlot with Mut, Div {
+    var out=ScaledPlot{status:1,chart:-1,x_axis:-1,y_axis:-1}
+    if n < 2 || n > 1024 || style.stroke_width != 1 { return out }
+    if rect.x < -999982 || rect.y < -1000000 || rect.w < 1 || rect.h < 1 { return out }
+    if rect.w > 1000000 || rect.h > 1000000 || rect.x > 1000000-rect.w || rect.y > 999982-rect.h { return out }
+    if domain.x_intervals < 1 || domain.x_intervals > 8 || domain.y_intervals < 1 || domain.y_intervals > 8 { return out }
+    if rect.w < domain.x_intervals*112 || rect.h < domain.y_intervals*12 { return out }
+    if scene.node_count < 0 || scene.node_count > 61 || scene.series_count < 0 || scene.series_count >= 8 {
+        out.status=2;return out
+    }
+    let xp=axis_scaled_ticks(domain.x_lo,domain.x_hi,domain.x_intervals,&domain.x_scale)
+    if xp.status != 0 { out.status=3;return out }
+    let yp=axis_scaled_ticks(domain.y_lo,domain.y_hi,domain.y_intervals,&domain.y_scale)
+    if yp.status != 0 { out.status=4;return out }
+    let xlo=scale_forward(domain.x_lo,&domain.x_scale)
+    let xhi=scale_forward(domain.x_hi,&domain.x_scale)
+    let ylo=scale_forward(domain.y_lo,&domain.y_scale)
+    let yhi=scale_forward(domain.y_hi,&domain.y_scale)
+    // A line viewport must have finite positive transformed spans.
+    if !is_finite(xhi.value-xlo.value) { out.status=3;return out }
+    if !is_finite(yhi.value-ylo.value) { out.status=4;return out }
+    let slot:usize=scene.series_count as usize
+    scene.series[slot]=viz_series_empty()
+    var i:i64=0
+    while i < n {
+        let x=scale_forward(xs[i as usize],&domain.x_scale)
+        let y=scale_forward(ys[i as usize],&domain.y_scale)
+        if x.status != 0 || y.status != 0 { out.status=5;return out }
+        scene.series[slot].xs[i as usize]=x.value
+        scene.series[slot].ys[i as usize]=y.value
+        i=i+1
+    }
+    scene.series[slot].n=n
+    scene.series[slot].x_min=xlo.value;scene.series[slot].x_max=xhi.value
+    scene.series[slot].y_min=ylo.value;scene.series[slot].y_max=yhi.value
+    // All fallible validation is complete; capacity is reserved by this call.
+    let chart=viz_scene_add_node(scene,VIZ_NODE_CHART_LINE,rect,style,scene.series_count)
+    let xa=viz_scene_add_node(scene,VIZ_NODE_AXIS,
+        viz_layout_rect(rect.x,rect.y+rect.h+18,rect.w,1),axis_style,domain.x_intervals)
+    let ya=viz_scene_add_node(scene,VIZ_NODE_AXIS,
+        viz_layout_rect(rect.x-18,rect.y,1,rect.h),axis_style,domain.y_intervals)
+    scene.nodes[chart as usize].flags=VIZ_FLAG_CLIP_PLOT+domain.x_scale.mode*512+domain.y_scale.mode*2048
+    scene.nodes[chart as usize].min_value=domain.x_scale.constant
+    scene.nodes[chart as usize].max_value=domain.y_scale.constant
+    scene.nodes[xa as usize].flags=domain.x_scale.mode*2
+    scene.nodes[xa as usize].value=domain.x_scale.constant
+    scene.nodes[xa as usize].min_value=domain.x_lo;scene.nodes[xa as usize].max_value=domain.x_hi
+    scene.nodes[ya as usize].flags=domain.y_scale.mode*2+1
+    scene.nodes[ya as usize].value=domain.y_scale.constant
+    scene.nodes[ya as usize].min_value=domain.y_lo;scene.nodes[ya as usize].max_value=domain.y_hi
+    scene.series_count=scene.series_count+1
+    out.status=0;out.chart=chart;out.x_axis=xa;out.y_axis=ya
+    out
+}

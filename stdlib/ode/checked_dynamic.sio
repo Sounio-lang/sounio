@@ -1,0 +1,272 @@
+// Caller-owned dynamic ODE workspace; no internal or per-step allocation.
+// Native-only NumericBuffer API. No raw views, owner copies, resize or release.
+// status0complete,1attemptbudget,2noprogress,3invalidbuffers/input/options,
+// 4nonfinitearithmetic,6callbackfailure (callback_status retains supplied code).
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+use ode::solver::{ODEOptions}
+use math::pure::{is_finite,ln_checked,exp}
+pub struct DynamicOdeResult {
+ pub status:i64,pub n:i64,pub t_final:f64,pub steps:i64,pub attempts:i64,
+ pub nfeval:i64,pub nreject:i64,pub callback_status:i64,
+}
+fn dy_abs(x:f64)->f64 {if x<0.0 {-x} else {x}}
+fn dy_min(a:f64,b:f64)->f64 {if a<b {a} else {b}}
+fn dy_max(a:f64,b:f64)->f64 {if a>b {a} else {b}}
+fn dy_empty(n:i64)->DynamicOdeResult {
+ DynamicOdeResult{status:3,n:n,t_final:0.0,steps:0,attempts:0,nfeval:0,nreject:0,callback_status:0}
+}
+fn dy_finite(b:&NumericBuffer,n:i64)->bool with Panic {
+ var i:i64=0
+ while i<n {if !is_finite(numeric_buffer_at(b,i)) {return false};i=i+1}
+ true
+}
+fn dy_poison(b:&!NumericBuffer,n:i64) with Mut,Div {
+ var i:i64=0
+ while i<n {numeric_buffer_set(b,i,0.0/0.0);i=i+1}
+}
+fn dy_buffers(state:&NumericBuffer,trial:&NumericBuffer,derivative:&NumericBuffer,work:&NumericBuffer)->bool with Div {
+ let n=numeric_buffer_len(state)
+ numeric_buffer_status(state)==0 && numeric_buffer_status(trial)==0 &&
+ numeric_buffer_status(derivative)==0 && numeric_buffer_status(work)==0 && n>0 &&
+ numeric_buffer_len(trial)==n && numeric_buffer_len(derivative)==n && numeric_buffer_len(work)/7>=n
+}
+fn dy_options(o:ODEOptions)->bool {
+ is_finite(o.rtol) && o.rtol>=0.0 && is_finite(o.atol) && o.atol>0.0 &&
+ is_finite(o.dt_init) && o.dt_init>=0.0 && is_finite(o.dt_min) && o.dt_min>0.0 &&
+ is_finite(o.dt_max) && o.dt_max>=o.dt_min && o.max_steps>=1 && o.max_steps<=1000000 &&
+ is_finite(o.safety) && o.safety>0.0 && o.safety<1.0 &&
+ is_finite(o.min_shrink) && o.min_shrink>0.0 && o.min_shrink<1.0 &&
+ is_finite(o.max_growth) && o.max_growth>=1.0
+}
+// Each RHS destination has lengthn. work length>=7n, indexed row-major bystage.
+// State is committed only after every active coordinate/error has been checked.
+pub fn solve_dp54_dynamic(
+ rhs:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,
+ state:&!NumericBuffer,trial:&!NumericBuffer,derivative:&!NumericBuffer,work:&!NumericBuffer,
+ t0:f64,t_end:f64,opts:ODEOptions
+)->DynamicOdeResult with Mut,Div,Panic {
+ let n=numeric_buffer_len(state)
+ var out=dy_empty(n)
+ if !dy_buffers(state,trial,derivative,work) || !is_finite(t0) || !is_finite(t_end) || !dy_options(opts) {return out}
+ if !dy_finite(state,n) {return out}
+ out.t_final=t0
+ if t0==t_end {out.status=0;return out}
+ let span=t_end-t0
+ if !is_finite(span) {out.status=4;return out}
+ let direction=if span>0.0 {1.0} else {-1.0}
+ var step=opts.dt_init
+ if step==0.0 {step=dy_abs(span)*0.01}
+ step=dy_max(opts.dt_min,dy_min(opts.dt_max,step))
+ var i:i64=0
+ while out.t_final!=t_end && out.attempts<opts.max_steps {
+  let remaining=dy_abs(t_end-out.t_final)
+  let magnitude=dy_min(step,remaining)
+  let h=direction*magnitude
+  let next=if magnitude==remaining {t_end} else {out.t_final+h}
+  if !is_finite(next) || !is_finite(h) {out.status=4;return out}
+  if (direction>0.0 && next<=out.t_final) || (direction<0.0 && next>=out.t_final) {out.status=2;return out}
+  out.attempts=out.attempts+1
+  dy_poison(derivative,n)
+  let callback_first=rhs(out.t_final,state,derivative)
+  out.nfeval=out.nfeval+1
+  if callback_first!=0 {out.status=6;out.callback_status=callback_first;return out}
+  if !dy_finite(derivative,n) {out.status=4;return out}
+  i=0
+  while i<n {numeric_buffer_set(work,i,numeric_buffer_at(derivative,i));i=i+1}
+  i=0
+  while i<n {
+   let value=numeric_buffer_at(state,i)+h*((1.0/5.0)*numeric_buffer_at(work,0*n+i))
+   if !is_finite(value) {out.status=4;return out}
+   numeric_buffer_set(trial,i,value)
+   i=i+1
+  }
+  let time_2=if 1.0/5.0==1.0 {next} else {out.t_final+(1.0/5.0)*h}
+  if !is_finite(time_2) {out.status=4;return out}
+  dy_poison(derivative,n)
+  let callback_2=rhs(time_2,trial,derivative)
+  out.nfeval=out.nfeval+1
+  if callback_2!=0 {out.status=6;out.callback_status=callback_2;return out}
+  if !dy_finite(derivative,n) {out.status=4;return out}
+  i=0
+  while i<n {numeric_buffer_set(work,1*n+i,numeric_buffer_at(derivative,i));i=i+1}
+  i=0
+  while i<n {
+   let value=numeric_buffer_at(state,i)+h*((3.0/40.0)*numeric_buffer_at(work,0*n+i)+(9.0/40.0)*numeric_buffer_at(work,1*n+i))
+   if !is_finite(value) {out.status=4;return out}
+   numeric_buffer_set(trial,i,value)
+   i=i+1
+  }
+  let time_3=if 3.0/10.0==1.0 {next} else {out.t_final+(3.0/10.0)*h}
+  if !is_finite(time_3) {out.status=4;return out}
+  dy_poison(derivative,n)
+  let callback_3=rhs(time_3,trial,derivative)
+  out.nfeval=out.nfeval+1
+  if callback_3!=0 {out.status=6;out.callback_status=callback_3;return out}
+  if !dy_finite(derivative,n) {out.status=4;return out}
+  i=0
+  while i<n {numeric_buffer_set(work,2*n+i,numeric_buffer_at(derivative,i));i=i+1}
+  i=0
+  while i<n {
+   let value=numeric_buffer_at(state,i)+h*((44.0/45.0)*numeric_buffer_at(work,0*n+i)+(-56.0/15.0)*numeric_buffer_at(work,1*n+i)+(32.0/9.0)*numeric_buffer_at(work,2*n+i))
+   if !is_finite(value) {out.status=4;return out}
+   numeric_buffer_set(trial,i,value)
+   i=i+1
+  }
+  let time_4=if 4.0/5.0==1.0 {next} else {out.t_final+(4.0/5.0)*h}
+  if !is_finite(time_4) {out.status=4;return out}
+  dy_poison(derivative,n)
+  let callback_4=rhs(time_4,trial,derivative)
+  out.nfeval=out.nfeval+1
+  if callback_4!=0 {out.status=6;out.callback_status=callback_4;return out}
+  if !dy_finite(derivative,n) {out.status=4;return out}
+  i=0
+  while i<n {numeric_buffer_set(work,3*n+i,numeric_buffer_at(derivative,i));i=i+1}
+  i=0
+  while i<n {
+   let value=numeric_buffer_at(state,i)+h*((19372.0/6561.0)*numeric_buffer_at(work,0*n+i)+(-25360.0/2187.0)*numeric_buffer_at(work,1*n+i)+(64448.0/6561.0)*numeric_buffer_at(work,2*n+i)+(-212.0/729.0)*numeric_buffer_at(work,3*n+i))
+   if !is_finite(value) {out.status=4;return out}
+   numeric_buffer_set(trial,i,value)
+   i=i+1
+  }
+  let time_5=if 8.0/9.0==1.0 {next} else {out.t_final+(8.0/9.0)*h}
+  if !is_finite(time_5) {out.status=4;return out}
+  dy_poison(derivative,n)
+  let callback_5=rhs(time_5,trial,derivative)
+  out.nfeval=out.nfeval+1
+  if callback_5!=0 {out.status=6;out.callback_status=callback_5;return out}
+  if !dy_finite(derivative,n) {out.status=4;return out}
+  i=0
+  while i<n {numeric_buffer_set(work,4*n+i,numeric_buffer_at(derivative,i));i=i+1}
+  i=0
+  while i<n {
+   let value=numeric_buffer_at(state,i)+h*((9017.0/3168.0)*numeric_buffer_at(work,0*n+i)+(-355.0/33.0)*numeric_buffer_at(work,1*n+i)+(46732.0/5247.0)*numeric_buffer_at(work,2*n+i)+(49.0/176.0)*numeric_buffer_at(work,3*n+i)+(-5103.0/18656.0)*numeric_buffer_at(work,4*n+i))
+   if !is_finite(value) {out.status=4;return out}
+   numeric_buffer_set(trial,i,value)
+   i=i+1
+  }
+  let time_6=if 1.0==1.0 {next} else {out.t_final+(1.0)*h}
+  if !is_finite(time_6) {out.status=4;return out}
+  dy_poison(derivative,n)
+  let callback_6=rhs(time_6,trial,derivative)
+  out.nfeval=out.nfeval+1
+  if callback_6!=0 {out.status=6;out.callback_status=callback_6;return out}
+  if !dy_finite(derivative,n) {out.status=4;return out}
+  i=0
+  while i<n {numeric_buffer_set(work,5*n+i,numeric_buffer_at(derivative,i));i=i+1}
+  i=0
+  while i<n {
+   let value=numeric_buffer_at(state,i)+h*((35.0/384.0)*numeric_buffer_at(work,0*n+i)+(500.0/1113.0)*numeric_buffer_at(work,2*n+i)+(125.0/192.0)*numeric_buffer_at(work,3*n+i)+(-2187.0/6784.0)*numeric_buffer_at(work,4*n+i)+(11.0/84.0)*numeric_buffer_at(work,5*n+i))
+   if !is_finite(value) {out.status=4;return out}
+   numeric_buffer_set(trial,i,value)
+   i=i+1
+  }
+  let time_7=if 1.0==1.0 {next} else {out.t_final+(1.0)*h}
+  if !is_finite(time_7) {out.status=4;return out}
+  dy_poison(derivative,n)
+  let callback_7=rhs(time_7,trial,derivative)
+  out.nfeval=out.nfeval+1
+  if callback_7!=0 {out.status=6;out.callback_status=callback_7;return out}
+  if !dy_finite(derivative,n) {out.status=4;return out}
+  i=0
+  while i<n {numeric_buffer_set(work,6*n+i,numeric_buffer_at(derivative,i));i=i+1}
+  var error:f64=0.0
+  i=0
+  while i<n {
+   let defect=h*((71.0/57600.0)*numeric_buffer_at(work,i)-(71.0/16695.0)*numeric_buffer_at(work,2*n+i)+
+    (71.0/1920.0)*numeric_buffer_at(work,3*n+i)-(17253.0/339200.0)*numeric_buffer_at(work,4*n+i)+
+    (22.0/525.0)*numeric_buffer_at(work,5*n+i)-(1.0/40.0)*numeric_buffer_at(work,6*n+i))
+   let denominator=opts.atol+opts.rtol*dy_max(dy_abs(numeric_buffer_at(state,i)),dy_abs(numeric_buffer_at(trial,i)))
+   if !is_finite(defect) || !is_finite(denominator) || denominator<=0.0 {out.status=4;return out}
+   let normalized=dy_abs(defect)/denominator
+   if !is_finite(normalized) {out.status=4;return out}
+   if normalized>error {error=normalized}
+   i=i+1
+  }
+  var factor=opts.max_growth
+  if error>0.0 {
+   let logged=ln_checked(error)
+   if logged.status!=0 {out.status=4;return out}
+   factor=opts.safety*exp(-0.2*logged.value)
+  }
+  if !is_finite(factor) || factor<=0.0 {out.status=4;return out}
+  factor=dy_max(opts.min_shrink,dy_min(opts.max_growth,factor))
+  if error<=1.0 {
+   i=0
+   while i<n {numeric_buffer_set(state,i,numeric_buffer_at(trial,i));i=i+1}
+   out.t_final=next;out.steps=out.steps+1
+  } else {
+   out.nreject=out.nreject+1
+   factor=dy_min(0.9,factor)
+   if magnitude<=opts.dt_min {out.status=2;return out}
+  }
+  let scaled=magnitude*factor
+  if !is_finite(scaled) {step=opts.dt_max} else {step=dy_max(opts.dt_min,dy_min(opts.dt_max,scaled))}
+  if error>1.0 && step>=magnitude {out.status=2;return out}
+ }
+ if out.t_final!=t_end {out.status=1;return out}
+ out.status=0
+ out
+}
+// Position-only acceleration callback; velocity-dependent forces unsupported.
+// work row0 previous acceleration,row1 halfvelocity,row2 trialvelocity.
+// Require the same>=7n workspace as DP54 so callers can reuse ownedscratch.
+pub fn solve_verlet_dynamic(
+ acceleration:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,
+ position:&!NumericBuffer,velocity:&!NumericBuffer,trial:&!NumericBuffer,derivative:&!NumericBuffer,work:&!NumericBuffer,
+ t0:f64,t_end:f64,n_steps:i64
+)->DynamicOdeResult with Mut,Div,Panic {
+ let n=numeric_buffer_len(position)
+ var out=dy_empty(n)
+ if !dy_buffers(position,trial,derivative,work) || numeric_buffer_status(velocity)!=0 || numeric_buffer_len(velocity)!=n ||
+ !is_finite(t0) || !is_finite(t_end) || n_steps<1 || n_steps>1000000 {return out}
+ if !dy_finite(position,n) || !dy_finite(velocity,n) {return out}
+ out.t_final=t0
+ if t0==t_end {out.status=0;return out}
+ let span=t_end-t0
+ if !is_finite(span) {out.status=4;return out}
+ dy_poison(derivative,n)
+ let initial_callback=acceleration(t0,position,derivative)
+ out.nfeval=1
+ if initial_callback!=0 {out.status=6;out.callback_status=initial_callback;return out}
+ if !dy_finite(derivative,n) {out.status=4;return out}
+ var i:i64=0
+ while i<n {numeric_buffer_set(work,i,numeric_buffer_at(derivative,i));i=i+1}
+ while out.steps<n_steps {
+  let next=if out.steps+1==n_steps {t_end} else {t0+span*(((out.steps+1) as f64)/(n_steps as f64))}
+  let h=next-out.t_final
+  if !is_finite(next) || !is_finite(h) {out.status=4;return out}
+  if (span>0.0 && next<=out.t_final) || (span<0.0 && next>=out.t_final) {out.status=2;return out}
+  out.attempts=out.attempts+1
+  i=0
+  while i<n {
+   let half_velocity=numeric_buffer_at(velocity,i)+(0.5*h)*numeric_buffer_at(work,i)
+   let coordinate=numeric_buffer_at(position,i)+h*half_velocity
+   if !is_finite(half_velocity) || !is_finite(coordinate) {out.status=4;return out}
+   numeric_buffer_set(work,n+i,half_velocity)
+   numeric_buffer_set(trial,i,coordinate)
+   i=i+1
+  }
+  dy_poison(derivative,n)
+  let code=acceleration(next,trial,derivative)
+  out.nfeval=out.nfeval+1
+  if code!=0 {out.status=6;out.callback_status=code;return out}
+  if !dy_finite(derivative,n) {out.status=4;return out}
+  i=0
+  while i<n {
+   let v=numeric_buffer_at(work,n+i)+(0.5*h)*numeric_buffer_at(derivative,i)
+   if !is_finite(v) {out.status=4;return out}
+   numeric_buffer_set(work,2*n+i,v)
+   i=i+1
+  }
+  i=0
+  while i<n {
+   numeric_buffer_set(position,i,numeric_buffer_at(trial,i))
+   numeric_buffer_set(velocity,i,numeric_buffer_at(work,2*n+i))
+   numeric_buffer_set(work,i,numeric_buffer_at(derivative,i))
+   i=i+1
+  }
+  out.t_final=next;out.steps=out.steps+1
+ }
+ out.status=0
+ out
+}

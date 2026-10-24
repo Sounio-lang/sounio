@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const manifestFile = 'docs/llm-guide/example-manifest.json';
-const guides = ['docs/guide/LLM_PROGRAMMING_GUIDE.md', 'docs/guide/LLM_PROGRAMMING_GUIDE_PT.md'];
+const guides = ['docs/guide/LLM_PROGRAMMING_GUIDE.md', 'docs/guide/LLM_PROGRAMMING_GUIDE_PT.md', 'docs/guide/LLM_PROGRAMMING_GUIDE_EL.md'];
 const cookbook = 'docs/llm-guide/cookbook.md';
 const atlas = 'docs/llm-guide/examples.md';
 const snippetDocuments = [...guides, cookbook, atlas];
@@ -447,7 +447,7 @@ async function validate(manifest, documents, repository) {
     if ([...guides, cookbook, 'llms.txt', '.github/copilot-instructions.md'].includes(file)) errors.push(...staleClaimIssues(file, parsed.prose));
   }
   for (const file of [...guides, cookbook, ...frontdoors]) if (!documents.has(file)) errors.push(`missing required document ${file}`);
-  if (sectionSets.length === 2 && sectionSets[0] !== sectionSets[1]) errors.push('bilingual section topic sets differ');
+  if (sectionSets.some(sectionSet => sectionSet !== sectionSets[0])) errors.push('multilingual section topic sets differ');
   return {
     schema: 'sounio.llm-guide.validation.v1',
     source_revision: manifest?.source_revision ?? null,
@@ -686,7 +686,10 @@ async function selfTest() {
   await check('missing section', state => changeGuide(state, text => text.replace('<!-- llm:section types -->', '')), 'missing section types');
   await check('duplicate section', state => changeGuide(state, text => `${text}\n<!-- llm:section types -->`), 'duplicate section types');
   await check('unknown section', state => changeGuide(state, text => text.replace('section types', 'section invented')), 'unknown section invented');
-  await check('translation topic mismatch', state => changeGuide(state, text => text.replace('section types', 'section invented'), guides[1]), 'bilingual section topic sets differ');
+  await check('translation topic mismatch', state => changeGuide(state, text => text.replace('section types', 'section invented'), guides[1]), 'multilingual section topic sets differ');
+  await check('Greek topic mismatch', state => changeGuide(state, text => text.replace('section types', 'section invented'), guides[2]), 'multilingual section topic sets differ');
+  await check('Greek guide is mandatory', state => state.documents.delete(guides[2]), 'missing required document');
+  await check('Greek source drift refused', state => changeGuide(state, text => text.replace('return 0;', 'return 1;'), guides[2]), 'differs from complete source');
   await check('commented section ignored', state => changeGuide(state, text => text.replace('<!-- llm:section types -->', '<!--\n<!-- llm:section types -->\n-->')), 'missing section types');
   await check('fenced section ignored', state => changeGuide(state, text => text.replace('<!-- llm:section types -->', '```text\n<!-- llm:section types -->\n```')), 'missing section types');
   await check('missing marker', state => changeGuide(state, text => text.replace('<!-- llm:example hello -->\n', '')), 'missing immediately preceding');
