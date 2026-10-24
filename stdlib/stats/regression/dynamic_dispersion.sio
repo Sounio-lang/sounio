@@ -1,4 +1,4 @@
-use stats::regression::count_fit_trace::{CountFitTraceSlot,count_fit_trace_slot,count_fit_trace_status,count_fit_trace_note}
+use stats::regression::count_fit_trace::{count_fit_trace_normalizer_note,CountFitTraceSlot,count_fit_trace_slot,count_fit_trace_status,count_fit_trace_note}
 // Dynamic full-likelihood log-dispersion profile / log-coordinate MAP.
 // No allocation. Explicit search bracket, initial beta and evaluation budget.
 // Global optimality and inferential calibration are never certified here.
@@ -6,8 +6,8 @@ use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_sta
 use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
 use linalg::dynamic_least_squares::{dynamic_qr_factorize}
 use linalg::least_squares_scale::{least_squares_scaled_product}
-use stats::regression::dynamic_count_glm::{dynamic_count_workspace,dynamic_count_fit,dynamic_count_fit_traced}
-use stats::regression::nb2_likelihood::{Nb2LikelihoodDifferenceSlot,nb2_likelihood_difference_slot,nb2_log_probability_mean_difference_into,nb2_log_probability_mean_difference_traced_into,nb2_likelihood_difference_value,Nb2LikelihoodSlot,nb2_likelihood_slot,nb2_log_probability_into,nb2_likelihood_slot_log_probability}
+use stats::regression::dynamic_count_glm::{dynamic_count_fit_with_trace_control,dynamic_count_workspace,dynamic_count_fit,dynamic_count_fit_traced}
+use stats::regression::nb2_likelihood::{Nb2CachedLikelihoodSlot,nb2_cached_likelihood_slot,nb2_log_probability_cached_into,nb2_cached_likelihood_slot_log_probability,nb2_cached_likelihood_normalizer_evaluated,nb2_cached_likelihood_cache_hit,nb2_cached_likelihood_cache_bypass,nb2_log_probability_mean_rank_difference_into,nb2_log_probability_mean_rank_difference_traced_into,Nb2LikelihoodDifferenceSlot,nb2_likelihood_difference_slot,nb2_log_probability_mean_difference_into,nb2_log_probability_mean_difference_traced_into,nb2_likelihood_difference_value,Nb2LikelihoodSlot,nb2_likelihood_slot,nb2_log_probability_into,nb2_likelihood_slot_log_probability}
 use math::pure::{is_finite,ln_checked,exp,sqrt}
 pub struct DispersionSearchOptions {
  pub method:i64, pub log_alpha_lower:f64, pub log_alpha_upper:f64,
@@ -101,18 +101,16 @@ fn dp_evaluate(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
  candidate_means:&!NumericBuffer,candidate_eta:&!NumericBuffer,
  weighted:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
  qr_work:&!NumericBuffer,count_stage:&!NumericBuffer,factor_r:&!NumericBuffer,
- factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer,pmf_work:&!Nb2LikelihoodSlot,trace_enabled:bool,trace:&!CountFitTraceSlot)->DPObjective with Mut,Div,Panic {
+ factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer,pmf_work:&!Nb2CachedLikelihoodSlot,trace_enabled:bool,trace:&!CountFitTraceSlot)->DPObjective with Mut,Div,Panic {
  if trace_enabled {
   if count_fit_trace_status(trace)!=0 {return dp_bad(7,count_fit_trace_status(trace))}
   if count_fit_trace_note(trace,5)!=0 {return dp_bad(7,count_fit_trace_status(trace))}
  }
  let n=numeric_matrix_rows(layout)
  let p=numeric_matrix_cols(layout)
- let fitted=if trace_enabled {dynamic_count_fit_traced(a,layout,counts,offsets,initial,alpha,options.rcond,
+ let fitted=dynamic_count_fit_with_trace_control(a,layout,counts,offsets,initial,alpha,options.rcond,
  options.inner_iterations,options.inner_tolerance,candidate_coefficients,
- candidate_means,candidate_eta,weighted,response,step,qr_work,count_stage,trace)}else{dynamic_count_fit(a,layout,counts,offsets,initial,alpha,options.rcond,
- options.inner_iterations,options.inner_tolerance,candidate_coefficients,
- candidate_means,candidate_eta,weighted,response,step,qr_work,count_stage)}
+ candidate_means,candidate_eta,weighted,response,step,qr_work,count_stage,trace_enabled,trace)
  if fitted.status!=0 {return dp_bad(1,fitted.status)}
  // Scaled compensated nonnegative sum of -logP. Do not form an overflowing
  // total or use a recursively rounded mean that can freeze at subnormal values.
@@ -122,9 +120,17 @@ fn dp_evaluate(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
  var i:i64=0
  while i<n {
   if trace_enabled {if count_fit_trace_note(trace,7)!=0 {return dp_bad(7,count_fit_trace_status(trace))}}
-  let pmf_status=nb2_log_probability_into(integer_buffer_at(counts,i),numeric_buffer_at(candidate_means,i),alpha,pmf_work)
+  let pmf_status=nb2_log_probability_cached_into(integer_buffer_at(counts,i),numeric_buffer_at(candidate_means,i),alpha,pmf_work)
+  if trace_enabled {
+   let evaluated:bool=nb2_cached_likelihood_normalizer_evaluated(pmf_work)
+   let hit:bool=nb2_cached_likelihood_cache_hit(pmf_work)
+   let bypass:bool=nb2_cached_likelihood_cache_bypass(pmf_work)
+   if evaluated {if count_fit_trace_normalizer_note(trace,1)!=0 {return dp_bad(7,count_fit_trace_status(trace))}}
+   if hit {if count_fit_trace_normalizer_note(trace,2)!=0 {return dp_bad(7,count_fit_trace_status(trace))}}
+   if bypass {if count_fit_trace_normalizer_note(trace,3)!=0 {return dp_bad(7,count_fit_trace_status(trace))}}
+  }
   if pmf_status!=0 {return dp_bad(2,pmf_status)}
-  let log_probability=nb2_likelihood_slot_log_probability(pmf_work)
+  let log_probability=nb2_cached_likelihood_slot_log_probability(pmf_work)
   if !is_finite(log_probability) || log_probability>0.0 {return dp_bad(4,0)}
   let magnitude= -log_probability
   if magnitude>scale {
@@ -235,7 +241,7 @@ fn dp_evaluate_warm(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer
  candidate_means:&!NumericBuffer,candidate_eta:&!NumericBuffer,
  weighted:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
  qr_work:&!NumericBuffer,count_stage:&!NumericBuffer,factor_r:&!NumericBuffer,
- factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer,pmf_work:&!Nb2LikelihoodSlot,trace_enabled:bool,trace:&!CountFitTraceSlot)->DPObjective with Mut,Div,Panic {
+ factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer,pmf_work:&!Nb2CachedLikelihoodSlot,trace_enabled:bool,trace:&!CountFitTraceSlot)->DPObjective with Mut,Div,Panic {
  if use_warm {return dp_evaluate(a,layout,counts,offsets,warm,options,alpha,log_alpha,candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,qr_work,count_stage,factor_r,factor_scales,permutation,pmf_work,trace_enabled,trace)}
  dp_evaluate(a,layout,counts,offsets,initial,options,alpha,log_alpha,candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,qr_work,count_stage,factor_r,factor_scales,permutation,pmf_work,trace_enabled,trace)
 }
@@ -247,7 +253,7 @@ fn dp_candidate_rank(seeded:bool,prefer_equal:bool,objective:f64,best_objective:
   return 0
  }
  if trace_enabled {if count_fit_trace_note(trace,6)!=0 {return -1}}
- let status=if trace_enabled {nb2_log_probability_mean_difference_traced_into(counts,best,best_alpha,candidate,alpha,n,work,trace)}else{nb2_log_probability_mean_difference_into(counts,best,best_alpha,candidate,alpha,n,work)}
+ let status=if trace_enabled {nb2_log_probability_mean_rank_difference_traced_into(counts,best,best_alpha,candidate,alpha,n,work,trace)}else{nb2_log_probability_mean_rank_difference_into(counts,best,best_alpha,candidate,alpha,n,work)}
  let gain:f64=nb2_likelihood_difference_value(work)
  if status!=0 {return -1}
  if gain>0.0 {return 1}
@@ -321,7 +327,7 @@ fn dp_fit_engine(a:&NumericBuffer,layout:&NumericMatrix,
  }
  let initial_cost=(if options.prior_active {9}else{10})+(if seed_active {1}else{0})
  if options.max_outer_evaluations<initial_cost {return dp_empty(5,n,p,options.method)}
- var pmf_work=nb2_likelihood_slot()
+ var pmf_work=nb2_cached_likelihood_slot()
  var pair_work=nb2_likelihood_difference_slot()
  var used:i64=0
  var best_objective:f64=0.0

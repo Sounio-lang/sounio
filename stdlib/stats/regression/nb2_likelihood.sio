@@ -285,7 +285,7 @@ fn nl_saturated_into(count:i64,alpha:f64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Di
 // 4 count>2^53;5 arithmetic. Normalizer/residual/deviance availability separate.
 // A positive nonzero alpha whose reciprocal overflows is conservatively unavailable
 // for positive-count normalizers; it is never silently replaced by alpha0.
-pub fn nb2_log_probability_into(count:i64,mean:f64,alpha:f64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Div,Panic {
+fn nl_prepare_likelihood(count:i64,mean:f64,alpha:f64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Panic {
  nb2_likelihood_slot_reset(s)
  s.result.count=count
  if count<0 {return nl_likelihood_fail(1,count,s)}
@@ -293,7 +293,9 @@ pub fn nb2_log_probability_into(count:i64,mean:f64,alpha:f64,s:&!Nb2LikelihoodSl
  if !is_finite(alpha) || alpha<0.0 {return nl_likelihood_fail(3,count,s)}
  if count>9007199254740992 {return nl_likelihood_fail(4,count,s)}
  s.result.poisson_limit=alpha==0.0
- let normalizer_status=nl_saturated_into(count,alpha,s)
+ return 0
+}
+fn nl_finish_likelihood(count:i64,mean:f64,alpha:f64,normalizer_status:i64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Div,Panic {
  s.result.normalizer_status=normalizer_status
  if normalizer_status==0 {
   s.result.saturated_log_probability=s.normalizer.value
@@ -327,6 +329,13 @@ pub fn nb2_log_probability_into(count:i64,mean:f64,alpha:f64,s:&!Nb2LikelihoodSl
  s.result.status
 }
 
+pub fn nb2_log_probability_into(count:i64,mean:f64,alpha:f64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Div,Panic {
+ let prepared=nl_prepare_likelihood(count,mean,alpha,s)
+ if prepared!=0 {return prepared}
+ let normalizer_status=nl_saturated_into(count,alpha,s)
+ nl_finish_likelihood(count,mean,alpha,normalizer_status,s)
+}
+
 pub fn nb2_likelihood_snapshot(s:&Nb2LikelihoodSlot)->Nb2Likelihood {
  Nb2Likelihood{status:s.result.status,count:s.result.count,log_probability:s.result.log_probability,
  normalizer_status:s.result.normalizer_status,saturated_log_probability:s.result.saturated_log_probability,
@@ -346,6 +355,77 @@ pub fn nb2_log_probability(count:i64,mean:f64,alpha:f64)->Nb2Likelihood with Mut
  var slot=nb2_likelihood_slot()
  let ignored=nb2_log_probability_into(count,mean,alpha,&!slot)
  nb2_likelihood_snapshot(&slot)
+}
+
+// Opt-in bounded normalizer cache. The legacy likelihood slot remains unchanged.
+// Four fixed64-entry arrays:2048 payload bytes, excluding managed/record overhead.
+pub struct Nb2CachedLikelihoodSlot {
+ work:Nb2LikelihoodSlot,keys:[i64;64],values:[f64;64],remainders:[f64;64],flags:[i64;64],
+ last_normalizer_evaluated:bool,last_cache_hit:bool,last_cache_bypass:bool,
+}
+pub fn nb2_cached_likelihood_cache_capacity()->i64 {64}
+pub fn nb2_cached_likelihood_cache_payload_bytes()->i64 {2048}
+pub fn nb2_cached_likelihood_slot()->Nb2CachedLikelihoodSlot {
+ Nb2CachedLikelihoodSlot{work:nb2_likelihood_slot(),keys:[0;64],values:[0.0;64],remainders:[0.0;64],flags:[0;64],last_normalizer_evaluated:false,last_cache_hit:false,last_cache_bypass:false}
+}
+// Public reset clears both result and cache. Internal per-row preparation does not.
+pub fn nb2_cached_likelihood_slot_reset(s:&!Nb2CachedLikelihoodSlot) with Mut,Panic {
+ nb2_likelihood_slot_reset(&!s.work)
+ s.last_normalizer_evaluated=false;s.last_cache_hit=false;s.last_cache_bypass=false
+ var i:i64=0
+ while i<64 {s.keys[i as usize]=0;s.values[i as usize]=0.0;s.remainders[i as usize]=0.0;s.flags[i as usize]=0;i=i+1}
+}
+pub fn nb2_cached_likelihood_slot_status(s:&Nb2CachedLikelihoodSlot)->i64 {s.work.result.status}
+pub fn nb2_cached_likelihood_slot_log_probability(s:&Nb2CachedLikelihoodSlot)->f64 {s.work.result.log_probability}
+pub fn nb2_cached_likelihood_normalizer_evaluated(s:&Nb2CachedLikelihoodSlot)->bool {s.last_normalizer_evaluated}
+pub fn nb2_cached_likelihood_cache_hit(s:&Nb2CachedLikelihoodSlot)->bool {s.last_cache_hit}
+pub fn nb2_cached_likelihood_cache_bypass(s:&Nb2CachedLikelihoodSlot)->bool {s.last_cache_bypass}
+pub fn nb2_cached_likelihood_snapshot(s:&Nb2CachedLikelihoodSlot)->Nb2Likelihood {
+ nb2_likelihood_snapshot(&s.work)
+}
+fn nl_cached_restore(count:i64,word:i64,s:&!Nb2CachedLikelihoodSlot) with Mut,Panic {
+ let value:f64=s.values[count as usize]
+ let remainder:f64=s.remainders[count as usize]
+ s.work.normalizer.status=0;s.work.normalizer.count=count;s.work.normalizer.value=value
+ s.work.normalizer.poisson_limit=(word & 2)!=0
+ s.work.normalizer.stirling_used=(word & 4)!=0
+ s.work.normalizer.remainder_estimate=remainder
+ s.work.normalizer.remainder_estimate_available=(word & 8)!=0
+}
+fn nl_cached_store(count:i64,key:i64,s:&!Nb2CachedLikelihoodSlot) with Mut,Panic {
+ let value:f64=s.work.normalizer.value
+ let remainder:f64=s.work.normalizer.remainder_estimate
+ var word:i64=1
+ if s.work.normalizer.poisson_limit {word=word+2}
+ if s.work.normalizer.stirling_used {word=word+4}
+ if s.work.normalizer.remainder_estimate_available {word=word+8}
+ s.keys[count as usize]=key;s.values[count as usize]=value
+ s.remainders[count as usize]=remainder;s.flags[count as usize]=word
+}
+pub fn nb2_log_probability_cached_into(count:i64,mean:f64,alpha:f64,s:&!Nb2CachedLikelihoodSlot)->i64 with Mut,Div,Panic {
+ s.last_normalizer_evaluated=false;s.last_cache_hit=false;s.last_cache_bypass=false
+ let prepared=nl_prepare_likelihood(count,mean,alpha,&!s.work)
+ if prepared!=0 {return prepared}
+ // Complete domain validation precedes every fixed-array access.
+ if count<64 {
+  let key:i64=f64_to_bits(alpha)
+  let word:i64=s.flags[count as usize]
+  if word!=0 {
+   if s.keys[count as usize]==key {
+    s.last_cache_hit=true
+    nl_cached_restore(count,word,s)
+    return nl_finish_likelihood(count,mean,alpha,0,&!s.work)
+   }
+  }
+  s.last_normalizer_evaluated=true
+  let normalizer_status=nl_saturated_into(count,alpha,&!s.work)
+  if normalizer_status==0 {nl_cached_store(count,key,s)}
+  return nl_finish_likelihood(count,mean,alpha,normalizer_status,&!s.work)
+ }
+ s.last_cache_bypass=true
+ s.last_normalizer_evaluated=true
+ let normalizer_status=nl_saturated_into(count,alpha,&!s.work)
+ nl_finish_likelihood(count,mean,alpha,normalizer_status,&!s.work)
 }
 
 // Paired full-log-PMF difference: second minus first. Local same-alpha increments
@@ -417,8 +497,48 @@ pub fn nb2_log_probability_difference_into(count:i64,first_mean:f64,first_alpha:
  return 0
 }
 
-pub fn nb2_log_probability_mean_difference_into(counts:&IntegerBuffer,first:&NumericBuffer,first_alpha:f64,
- second:&NumericBuffer,second_alpha:f64,n:i64,work:&!Nb2LikelihoodDifferenceSlot)->i64 with Mut,Div,Panic {
+// Checked ranking-only entry: skip individual PMFs only after complete scalar domain
+// validation. first_status/second_status=2 explicitly mean NOT COMPUTED locally.
+// Unsupported geometry delegates to the unchanged full-PMF API; arithmetic stays
+// unavailable, never an authenticated tie. No allocation in this reusable entry.
+pub fn nb2_log_probability_rank_difference_into(count:i64,first_mean:f64,first_alpha:f64,
+ second_mean:f64,second_alpha:f64,s:&!Nb2LikelihoodDifferenceSlot)->i64 with Mut,Div,Panic {
+ s.status=5;s.value=0.0;s.first_status=2;s.second_status=2;s.local_increment=false;s.full_calls=0
+ var valid=true
+ if count<0 || count>9007199254740992 {valid=false}
+ if !is_finite(first_mean) || first_mean<=0.0 {valid=false}
+ if !is_finite(second_mean) || second_mean<=0.0 {valid=false}
+ if !is_finite(first_alpha) || first_alpha<0.0 {valid=false}
+ if !is_finite(second_alpha) || second_alpha<0.0 {valid=false}
+ if !valid {return nb2_log_probability_difference_into(count,first_mean,first_alpha,second_mean,second_alpha,s)}
+ if first_alpha==second_alpha {
+  let local_status=nb2_same_alpha_increment_into(count,first_mean,second_mean,first_alpha,&!s.product)
+  let local_value:f64=s.product.value
+  if local_status==0 {
+   s.status=0;s.value=local_value;s.local_increment=true;return 0
+  }
+  if local_status!=6 {return s.status}
+ }
+ if first_alpha!=second_alpha {
+  // Total change = mean change at second alpha + dispersion change at first mean.
+  let mean_status=nb2_same_alpha_increment_into(count,first_mean,second_mean,second_alpha,&!s.product)
+  let mean_value:f64=s.product.value
+  if mean_status==0 {
+   let alpha_status=nb2_dispersion_increment_into(count,first_mean,first_alpha,second_alpha,&!s.product,&!s.log_work)
+   let alpha_value:f64=s.product.value
+   if alpha_status==0 {
+    let value=mean_value+alpha_value
+    if !is_finite(value) || value==0.0 {return s.status}
+    s.status=0;s.value=value;s.local_increment=true;return 0
+   }
+   if alpha_status!=6 {return s.status}
+  } else {if mean_status!=6 {return s.status}}
+ }
+ return nb2_log_probability_difference_into(count,first_mean,first_alpha,second_mean,second_alpha,s)
+}
+
+fn nl_mean_difference_engine(counts:&IntegerBuffer,first:&NumericBuffer,first_alpha:f64,
+ second:&NumericBuffer,second_alpha:f64,n:i64,work:&!Nb2LikelihoodDifferenceSlot,prefer_local:bool)->i64 with Mut,Div,Panic {
  work.aggregate_full_calls=0;work.full_calls=0
  work.status=5;work.value=0.0;work.first_status=2;work.second_status=2;work.local_increment=false
  if n<1 {work.status=1;return 1}
@@ -432,7 +552,10 @@ pub fn nb2_log_probability_mean_difference_into(counts:&IntegerBuffer,first:&Num
  var second_status:i64=0
  var i:i64=0
  while i<n {
-  let status=nb2_log_probability_difference_into(integer_buffer_at(counts,i),numeric_buffer_at(first,i),first_alpha,numeric_buffer_at(second,i),second_alpha,work)
+  let count:i64=integer_buffer_at(counts,i)
+  let first_mean:f64=numeric_buffer_at(first,i)
+  let second_mean:f64=numeric_buffer_at(second,i)
+  let status=if prefer_local {nb2_log_probability_rank_difference_into(count,first_mean,first_alpha,second_mean,second_alpha,work)}else{nb2_log_probability_difference_into(count,first_mean,first_alpha,second_mean,second_alpha,work)}
   let value:f64=nb2_likelihood_difference_value(work)
   // Sum the hooks placed at the actual PMF callsites, including a failed row.
   if work.full_calls<0 || work.full_calls>2 {work.aggregate_full_calls= -1;work.status=5;work.value=0.0;work.local_increment=false;return 5}
@@ -468,16 +591,25 @@ pub fn nb2_log_probability_mean_difference_into(counts:&IntegerBuffer,first:&Num
  return 0
 }
 
+pub fn nb2_log_probability_mean_difference_into(counts:&IntegerBuffer,first:&NumericBuffer,first_alpha:f64,
+ second:&NumericBuffer,second_alpha:f64,n:i64,work:&!Nb2LikelihoodDifferenceSlot)->i64 with Mut,Div,Panic {
+ nl_mean_difference_engine(counts,first,first_alpha,second,second_alpha,n,work,false)
+}
+pub fn nb2_log_probability_mean_rank_difference_into(counts:&IntegerBuffer,first:&NumericBuffer,first_alpha:f64,
+ second:&NumericBuffer,second_alpha:f64,n:i64,work:&!Nb2LikelihoodDifferenceSlot)->i64 with Mut,Div,Panic {
+ nl_mean_difference_engine(counts,first,first_alpha,second,second_alpha,n,work,true)
+}
+
 // No factory here: the caller shares one trace across the aggregate.
-pub fn nb2_log_probability_mean_difference_traced_into(counts:&IntegerBuffer,first:&NumericBuffer,first_alpha:f64,
+fn nl_mean_difference_traced_engine(counts:&IntegerBuffer,first:&NumericBuffer,first_alpha:f64,
  second:&NumericBuffer,second_alpha:f64,n:i64,work:&!Nb2LikelihoodDifferenceSlot,
- trace:&!CountFitTraceSlot)->i64 with Mut,Div,Panic {
+ trace:&!CountFitTraceSlot,prefer_local:bool)->i64 with Mut,Div,Panic {
  if count_fit_trace_status(trace)!=0 {
   work.status=5;work.value=0.0;work.first_status=2;work.second_status=2;work.local_increment=false
   work.full_calls=0;work.aggregate_full_calls=0
   return 5
  }
- let status=nb2_log_probability_mean_difference_into(counts,first,first_alpha,second,second_alpha,n,work)
+ let status=nl_mean_difference_engine(counts,first,first_alpha,second,second_alpha,n,work,prefer_local)
  let calls:i64=work.aggregate_full_calls
  if calls<0 {
   let unavailable=count_fit_trace_incomplete(trace)
@@ -486,4 +618,15 @@ pub fn nb2_log_probability_mean_difference_traced_into(counts:&IntegerBuffer,fir
  }
  if count_fit_trace_add(trace,7,calls)!=0 {work.status=5;work.value=0.0;work.local_increment=false;return 5}
  return status
+}
+
+pub fn nb2_log_probability_mean_difference_traced_into(counts:&IntegerBuffer,first:&NumericBuffer,first_alpha:f64,
+ second:&NumericBuffer,second_alpha:f64,n:i64,work:&!Nb2LikelihoodDifferenceSlot,
+ trace:&!CountFitTraceSlot)->i64 with Mut,Div,Panic {
+ nl_mean_difference_traced_engine(counts,first,first_alpha,second,second_alpha,n,work,trace,false)
+}
+pub fn nb2_log_probability_mean_rank_difference_traced_into(counts:&IntegerBuffer,first:&NumericBuffer,first_alpha:f64,
+ second:&NumericBuffer,second_alpha:f64,n:i64,work:&!Nb2LikelihoodDifferenceSlot,
+ trace:&!CountFitTraceSlot)->i64 with Mut,Div,Panic {
+ nl_mean_difference_traced_engine(counts,first,first_alpha,second,second_alpha,n,work,trace,true)
 }

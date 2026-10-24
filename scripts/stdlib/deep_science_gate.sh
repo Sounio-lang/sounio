@@ -56,7 +56,14 @@ timeout 120 bin/souc check tests/compile-fail/nested_if_incompatible_record_owne
 if [[ $rc == 1 ]] && grep -qi 'incompatible types' "$out/nested_if_incompatible_record_owner.check.txt"; then record negative tests/compile-fail/nested_if_incompatible_record_owner.sio 0
 else record negative tests/compile-fail/nested_if_incompatible_record_owner.sio 1; fi
 for src in tests/run-pass/stdlib_deep_*.sio; do native "$src" "$(basename "$src" .sio)"; done
-for name in stdlib_scale_normalization_into stdlib_scale_normalization_status stdlib_scale_count_likelihood_difference stdlib_scale_count_profile_nested_bootstrap stdlib_scale_count_fit_trace stdlib_scale_count_profile_traced nested_if_record_owner nested_if_tuple_record_owner; do native "tests/run-pass/$name.sio" "$name"; done
+for name in stdlib_scale_normalization_into stdlib_scale_normalization_status nested_if_record_owner nested_if_tuple_record_owner; do native "tests/run-pass/$name.sio" "$name"; done
+# The nonempty prefix is the required bounded count-inference contract.
+count_sources=(tests/run-pass/stdlib_scale_count_*.sio)
+if [[ ${#count_sources[@]} == 0 || ! -f ${count_sources[0]} ]]; then
+ record collection stdlib_scale_count_missing 1
+else
+ for src in "${count_sources[@]}"; do native "$src" "$(basename "$src" .sio)"; done
+fi
 # Legacy render paths are replayed in the canonical engine as well as the
 # Stage2 full suite: these names exposed nested-label and first-tick defects.
 for name in stats_inference_forest viz_bootstrap_forest viz_count_matrix_qc \
@@ -73,6 +80,12 @@ compare() {
     if [[ ! -f "$out/$fixture.stdout" ]]; then record concordance "$stem:missing-$fixture" 1; return; fi
     timeout 180 "$out/$stem" "$out/$fixture.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
     record concordance "$stem" "$rc"
+}
+compare_named() {
+    local stem=$1 fixture=$2 label=$3 rc=0
+    if [[ ! -f "$out/$fixture.stdout" ]]; then record concordance "$stem:$label:missing-$fixture" 1; return; fi
+    timeout 180 "$out/$stem" "$out/$fixture.stdout" > "$out/$stem.$label.stdout" 2> "$out/$stem.$label.stderr" || rc=$?
+    record concordance "$stem:$label" "$rc"
 }
 compare_mode() {
     local stem=$1 mode=$2 fixture=$3 rc=0
@@ -100,11 +113,17 @@ for src in tests/reference/deep_*.cpp; do
         record cpp-native "$stem" "$rc" ;;
       deep_stats_dispersion_reference) compare "$stem" stdlib_deep_genomics_shrinkage ;;
       deep_stats_multiple_testing_reference) compare "$stem" stdlib_deep_stats_multiple_testing ;;
-      deep_stats_count_glm_reference) compare "$stem" stdlib_deep_stats_count_glm ;;
-      deep_stats_nb2_likelihood_reference) compare "$stem" stdlib_deep_stats_nb2_likelihood ;;
+      deep_stats_count_glm_reference)
+        compare "$stem" stdlib_deep_stats_count_glm
+        compare_named "$stem" stdlib_scale_count_trace_control trace-control ;;
+      deep_stats_nb2_likelihood_reference)
+        compare "$stem" stdlib_deep_stats_nb2_likelihood
+        compare_named "$stem" stdlib_scale_count_cached_likelihood cached ;;
       deep_stats_count_fisher_reference) compare "$stem" stdlib_deep_stats_count_fisher ;;
       deep_stats_count_bootstrap_reference) compare "$stem" stdlib_deep_stats_count_bootstrap ;;
-      deep_stats_count_increment_reference) compare "$stem" stdlib_deep_stats_count_glm ;;
+      deep_stats_count_increment_reference)
+        compare "$stem" stdlib_deep_stats_count_glm
+        compare_named "$stem" stdlib_scale_count_trace_control trace-control ;;
       deep_nb2_slots_reference) compare "$stem" stdlib_deep_nb2_slots ;;
       deep_normalization_precision_reference)
         rc=0
@@ -144,6 +163,9 @@ for src in tests/reference/deep_*.cpp; do
         rc=0
         timeout 180 "$out/$stem" --nested-single "$out/stdlib_scale_count_profile_traced.stdout" > "$out/$stem.nested-traced.stdout" 2> "$out/$stem.nested-traced.stderr" || rc=$?
         record concordance "$stem:nested-traced" "$rc"
+        rc=0
+        timeout 180 "$out/$stem" --nested-single "$out/stdlib_scale_count_profile_cache.stdout" > "$out/$stem.cache.stdout" 2> "$out/$stem.cache.stderr" || rc=$?
+        record concordance "$stem:cache" "$rc"
         rc=0
         timeout 180 "$out/$stem" --nested-mutant-fixed-alpha "$out/stdlib_scale_count_profile_nested_bootstrap.stdout" > "$out/$stem.nested-mutant.stdout" 2> "$out/$stem.nested-mutant.stderr" || rc=$?
         rejected=1; [[ "$rc" != 2 ]] || rejected=0
@@ -233,6 +255,11 @@ for stem in count_dispersion_increment_reference count_profile_lr_fixed_referenc
   count_likelihood_difference_reference) timeout 180 "$out/$stem" --native "$out/stdlib_scale_count_likelihood_difference.stdout" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$? ;;
  esac
  record concordance "$stem" "$rc"
+ if [[ "$stem" == count_likelihood_difference_reference ]]; then
+  rc=0
+  timeout 180 "$out/$stem" --native "$out/stdlib_scale_count_rank_difference.stdout" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.rank.stdout" 2> "$out/$stem.rank.stderr" || rc=$?
+  record concordance "$stem:rank" "$rc"
+ fi
  if [[ "$stem" == count_dispersion_increment_reference || "$stem" == count_profile_lr_fixed_reference ]]; then
   rc=0
   if [[ "$stem" == count_profile_lr_fixed_reference ]]; then timeout 180 "$out/$stem" --mutant-sign "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.mutant.stdout" 2> "$out/$stem.mutant.stderr" || rc=$?

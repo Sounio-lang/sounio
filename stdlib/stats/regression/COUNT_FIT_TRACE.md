@@ -76,3 +76,67 @@ counters, and exercises bounded-zero failure before RNG. Source is prepared and
 wired; central typecheck/native/concordance/resource validation is still pending
 for this instrumentation checkpoint. No measured counts or speedup are claimed
 from the source alone.
+
+## Reusing the trace when tracing is disabled
+
+The additive `dynamic_count_fit_with_trace_control(..., enabled, trace)` entry
+uses the same fully checked numerical engine as the legacy and traced fits.
+With `enabled=false` it neither reads nor mutates the trace, including an
+already unavailable trace. Buffer, shape, count, finite, numerical, iteration
+and convergence checks remain active. It does not construct a trace slot.
+`dp_evaluate` passes the profile's existing slot and its control flag to this
+entry, eliminating the former trace constructor at each profile point. Legacy
+public wrappers keep their signatures and their one local slot per wrapper call.
+There is no unchecked/trusted-input entry or cached QR/weights.
+
+The new control fixture retains the complete inputs and assertions from the
+canonical CountGLM fixture, uses a configured-unavailable trace with tracing
+disabled and checks that its status and counts stay unchanged after each fit.
+Its numerical output is checked by the same independent CountGLM and increment
+comparators. This candidate's focused execution and resource acceptance are
+recorded separately from the frozen instrumentation baseline.
+
+Focused Slurm16931 completed checks, native execution and markers for eight
+fixtures, including the complete disabled-control and legacy CountGLM cases,
+both B2 paths, trace controls and ranking metadata/extremes. Both CountGLM
+outputs passed the independent CountGLM and256-case increment comparators;
+both B2 outputs and both paired-likelihood outputs passed their comparators.
+The source inventory remained unchanged. This closes selected functional
+concordance for the control entry, not a claim about its performance. The
+isolated B31 resource pair is recorded below.
+
+Isolated factory pilot16932 used byte-identical nested B31 drivers and the same
+compiler92d, comparing fast-local ranking before/after the trace-control entry.
+The C++ analyzer found identical scientific output and reported90.74s versus
+90.69s, RSS58852KiB versus58848KiB, ratio1.00055132870217223509. This single pair
+does not demonstrate a useful performance improvement. The change is supported
+as removal of a needless constructor from the callgraph, not as acceleration or
+measured memory superiority. This pair does not use original full02 as baseline
+and does not assess the cumulative2x target.
+
+## Optional normalizer-cache trace extension (candidate)
+
+The public snapshot and metric IDs1..10 remain unchanged. Additional named
+getters report `normalizer_evaluations`, `normalizer_cache_hits` and
+`normalizer_cache_bypasses`. Their hooks record actual events in the opt-in
+cached full-PMF profile route. Evaluation means an actual top-level saturated-
+normalizer call, including a failed call; a hit means a successful lookup; bypass
+means the count is outside0..63. A bypass also performs a normalizer evaluation.
+They are not inferred from row count, profile evaluations or the old PMF counter.
+Other PMF consumers remain outside these cache-counter units.
+
+The shared per-metric limit applies independently to the three new counters.
+Reset clears them, negative additions or invalid event kinds latch status2, and
+limit/overflow failures latch status1 without wrap. The original public snapshot
+still describes its original ten metrics, and metric11 remains invalid. New
+cache getters expose the recorded prefix under the same trace status. No trace
+factory is introduced inside a scalar PMF or per-row loop. Selected functional acceptance for this extension is recorded below;
+broader qualification and comparative resource evidence remain separate.
+
+Slurm16936 passed the cache-specific counter reset, independent limits,
+invalid-event and maximum-i64 overflow controls, together with the unchanged
+trace unit and complete off/on B2 assertions. On its fixed B2 workload, the
+new named getters recorded3264 normalizer evaluations,1344 hits and0 bypasses;
+the original ten metrics remained288,307,288,307,288,235,6336,1,2,3. These are
+recorded call/lookup events in the declared cached-profile scope. They are not
+counts for sampler PMFs, uncached ranking fallbacks or an entire B199 campaign.

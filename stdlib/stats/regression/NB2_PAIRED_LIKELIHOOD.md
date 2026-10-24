@@ -112,3 +112,55 @@ Slurm16828 additionally completed a full strict two-replicate grouped-model
 bootstrap and its independent C++ comparison, including RNG/hits, last counts
 and refitted dispersions. Fixed-alpha and incomplete-output controls were
 rejected. This closes the B2 smoke path, not the pending B199 qualification.
+
+## Additive checked ranking path (candidate)
+
+`nb2_log_probability_rank_difference_into` and
+`nb2_log_probability_mean_rank_difference_into` are ranking-specific entries.
+They validate the active counts and finite positive means, finite nonnegative
+alphas and exact-count range before attempting the same checked local increment
+primitives. A local result does not evaluate either individual full PMF:
+`first_status` and `second_status` are then2 (not computed), not0. This includes
+local arithmetic unavailability; callers must inspect the main status. The
+existing full-difference APIs retain their individual PMF metadata contract.
+
+A local request outside the supported geometry (internal6) delegates to the
+entire existing full-difference route, preserving both alpha-dependent
+normalizers and its metadata. Arithmetic status5 never becomes an available
+tie. Invalid input also delegates to that checked route, retaining its error
+precedence. The aggregate engine is shared with the full route, including its
+scaled compensated sum, range checks and failure handling. No statistical
+approximation or tolerance is introduced.
+
+The traced ranking aggregate counts only PMF callsites actually executed:
+zero for a local row, two for a full-fallback row, including failed prefixes.
+Profile candidate ranking uses this additive entry; final bootstrap comparison
+continues to use the full metadata entry. Observed-null initialization, fitting,
+weighted QR and random generation are unchanged. Selected concordance and
+performance acceptance for this candidate remain separate from the earlier
+correctness baseline.
+
+Focused Slurm16912 completed checks, native execution and annotation markers for
+the new ranking status/metadata fixture, the ranking and original61-scalar/three-
+aggregate fixtures, the trace unit and both grouped B2 drivers. Both numerical
+routes passed the same independent fixed-point C++ comparator; both B2 outputs
+passed the independent profile-refit comparator. The traced B2 also retained its
+bitwise off/on assertions and actual counter checks. Its scientific output rows
+were byte-identical to corrected-compiler baseline16899. Recorded full-PMF row
+calls were6336 versus12224 in that baseline, with the other nine recorded work
+counts unchanged. These are actual callsite counts on one fixed B2 input, not a
+runtime speedup or an extrapolation to B199. The separate B31 paired resource pilot is recorded below; broader
+qualification remains pending.
+
+The selected B31 resource pilot16915 recompiles original full02 and the strict,
+replica-warmed, locally ranked candidate with the same corrected compiler
+SHA92d2108ef595c5382d582aa363df6e95dab907a554f039d5f8f008073e535c21.
+Its existing C++ analyzer reports154.05s versus90.81s and maximum RSS61568KiB
+versus59364KiB; the before/after runtime ratio is1.69639907499174099779. Dataset,
+options and seed schedules were retained, and all scientific output rows,
+hits30/31, plus-one tail and final RNG were byte-identical. This is one whole-
+program B31 pair on one worker, combining the earlier strict/warm changes with
+local ranking; it does not isolate the ranking speedup, reach the2x target or
+replace the pending B199 qualification. The untraced driver does not report
+uniform/proposal/work totals, and the analyzer explicitly leaves those counts
+unavailable. Nested preflight/status assertions passed before the timed pair.

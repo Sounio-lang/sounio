@@ -157,3 +157,68 @@ rounding defect, not evidence against slot equivalence. The original scratch
 fixture and all of its tolerances remain unchanged. The new exact-case correction
 and dedicated bitwise concordance fixture are prepared; central current-source
 execution and the wider numeric gates remain pending.
+
+## Opt-in bounded normalizer cache
+
+`Nb2CachedLikelihoodSlot` is a separate caller-owned workspace. Existing scalar
+APIs and `Nb2LikelihoodSlot` keep their layouts and do not acquire cache arrays.
+The new factory owns one existing likelihood workspace plus64 direct entries,
+indexed only after complete domain/range validation of the active count, mean
+and alpha. Entries cover counts0..63 and use the exact binary64 bits of alpha as
+key, including the distinction between signed zeros. Counts64 and above use
+the original saturated normalizer directly.
+
+`nb2_log_probability_cached_into` caches only a successful saturated normalizer,
+which depends on count and alpha, never on mean. It copies every public
+normalizer field bitwise, including the remainder estimate and all availability,
+Poisson and Stirling flags. The mean-dependent unit deviance and residual are
+recomputed on every call. A failed normalizer is never stored; a successful
+normalizer may remain reusable even when a separate mean-dependent stage is
+unavailable. This is not a cache of fitted coefficients, weights, QR factors,
+likelihood failures or complete likelihood results.
+
+The per-row result reset preserves cache entries; the public
+`nb2_cached_likelihood_slot_reset` clears both result and cache. Snapshots remain
+detached. `nb2_cached_likelihood_cache_capacity()` reports64 and
+`nb2_cached_likelihood_cache_payload_bytes()` reports2048 bytes for four fixed
+arrays only. That payload excludes the existing likelihood workspace, scalar
+controls, array/record handles and managed-runtime overhead. Profile search
+constructs one cached owner per search, not per row or alpha evaluation. Its
+actual resource cost remains subject to measurement.
+
+Per-call checked getters distinguish normalizer evaluation, cache hit and
+count-range bypass. A count-range bypass also evaluates the normalizer. These
+flags are set at the actual call/lookup sites and reset for every request,
+including invalid requests. The profile trace adds separate named counters;
+its original ten metric IDs and public snapshot retain their contracts.
+Selected bitwise metadata, independent likelihood concordance and complete
+B2/RNG results are recorded in the focused execution paragraph below.
+
+Focused Slurm16936 completed all eleven selected fixture checks, native runs and
+annotation markers, including cached/legacy216-case likelihood grids, exact
+Poisson-zero bit checks, paired contrasts, trace controls and the complete B2
+paths. Both216-case outputs passed the same independent C++ likelihood
+comparator; the exact-zero, paired and B2 comparators also passed. The cache
+fixture compared all14 public likelihood fields bitwise on hits, misses, mean
+changes, alpha changes, public reset, invalid inputs, tiny alpha, counts63/64
+and extreme finite means/counts. Named counter reset, limit and overflow
+controls passed while the old metric11-invalid contract remained intact.
+
+Slurm16941 separately compiled two narrow incorrect-cache controls, then
+observed native exit1 for both: ignoring the exact alpha key and retaining old
+entries across public reset. The original source and all gate inputs were
+preserved. This is selected implementation concordance and discrimination,
+not a universal floating-point accuracy certificate or an inference-calibration
+claim. The cache's B31 resource pilot remains separate from these checks.
+
+Whole-program pilot16939 then compared original full02 with the combined strict,
+replica-null-warm, local-ranking, trace-control and cached-profile candidate,
+recompiling both with compiler92d. Its existing C++ analyzer reported153.70s
+versus81.13s, RSS61568KiB versus58812KiB, ratio1.8944903241710834463. The B31
+n256/alpha0/case0 dataset, seed schedule and maxfits64 were retained; scientific
+rows, hits, tail and final RNG were byte-identical and source/ELF/compiler
+identities were checked. This one pair does not isolate cache speedup, establish
+the2x target or qualify B199 inference/performance. The untraced pilot does not
+report cache-work counts; the B2 named counters above have their separate scope.
+The RSS figures describe the entire executed program, not per-owner managed
+overhead. Ranking far-fallback PMFs remain uncached in this implementation.
