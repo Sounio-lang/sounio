@@ -71,3 +71,19 @@ inside each bundle identify the actual execution. Generated ELFs and full source
 archives remain on cluster scratch; they are deliberately excluded from Git.
 Later integration, CI, tracing, campaign-report and qualification receipts must
 be recorded separately rather than rewriting these historical results.
+
+## Current-main compiler refresh
+
+`compiler-main29ce/` records source commit
+`29ce2abb281e7842881f7570a47934f890de70d2`, Slurm16873 and the fresh native
+compiler hash `8c630110db238a38ad345fd782585d525b3a8d438276795cf5b253373824d31a`.
+The build completed in7:18.69 wall time, with735920KiB maximum RSS. Two positive
+native borrowing/callback probes completed; seven negative borrowing/private-call
+probes were rejected as expected. The negative rows retain actual exit1, rather
+than a transformed success code. This compiler differs from the earlier
+`ee0f341e...` controlled-pilot compiler. Its focused compiler probes do not
+establish scientific integration acceptance; that requires separate gate receipts.
+
+`benchmark-drivers/` preserves the original before/after B199 drivers, the two
+paired B31 pilot drivers, and the original transformation recipe. The B199 after
+driver is preserved input, not evidence that an after B199 benchmark was executed.
