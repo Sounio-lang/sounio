@@ -25,6 +25,8 @@
 #   5. `var cur = (*t).head` with head declared `*mut Chunk` was untyped, so
 #      `(*cur).next` used field index 1 and collided with entries[1]
 #      (fn_sig_table_add). A raw-pointer field now types the local.
+#   6. `(*(*c).tab).entries[i]` (the deref of a raw-pointer field) took the
+#      generic deref and read word 0 of the table (checker_struct_visible).
 # Each witness surrounds the right struct with decoys that win the vote.
 # Madaros from main prints 3, 1055 and 3 (or 40300003); lean_single passes all.
 #
@@ -58,4 +60,5 @@ check tuple_slot_forward_method_typed TUPLE_SLOT_FORWARD_OK
 check deref_array_param_elem_typed DEREF_ARRAY_ELEM_OK
 check raw_ptr_of_managed_object RAW_PTR_OF_MANAGED_OK
 check raw_ptr_field_chain_typed RAW_PTR_FIELD_CHAIN_OK
+check raw_ptr_field_deref_typed RAW_PTR_FIELD_DEREF_OK
 echo "[madaros-typed-field-slots] PASS: tuple second struct slot, tuple Box/Option<Box> slot, deref'd Option<Box<T>> and raw-pointer casts read the declared struct's fields"

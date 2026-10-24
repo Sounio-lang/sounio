@@ -24746,6 +24746,9 @@ impl Lowerer {
                                 let owner_type = self.expr_receiver_struct_type_ref(&(*owner))
                                 let inner = self.field_box_inner_type_for_struct(owner_type, (*operand).name)
                                 if inner.len > 0 { return inner }
+                                // `(*(*c).structs)` -- a field declared `*mut S`.
+                                let raw_inner = lower_raw_ptr_field_pointee(owner_type, (*operand).name)
+                                if raw_inner.len > 0 { return raw_inner }
                             }
                             None => {}
                         }
@@ -35333,6 +35336,20 @@ impl Lowerer {
         if (*e).un_op != UnaryOp::OpDeref { return false }
         match (*e).left {
             Some(operand) => {
+                // `(*(*c).structs).entries[i]`: the operand is a field declared
+                // `*mut S`, so it holds a payload address exactly like a raw
+                // local. Untyped, the generic OpDeref loaded word 0 of the table
+                // and the field read went through that (check phase: a 0
+                // Visibility handle in visibility_allows_access, gen3 ud2, #2966).
+                if (*operand).kind == ExprKind::ExprFieldAccess {
+                    match (*operand).left {
+                        Some(raw_owner) => {
+                            let raw_owner_type = self.expr_receiver_struct_type_ref(&(*raw_owner))
+                            return lower_raw_ptr_field_pointee(raw_owner_type, (*operand).name).len > 0
+                        }
+                        None => { return false }
+                    }
+                }
                 if (*operand).kind != ExprKind::ExprIdent { return false }
                 if self.lookup_local_is_ref((*operand).name) { return false }
                 if ir_name_is_box(self.lookup_local_struct_type((*operand).name)) { return false }
