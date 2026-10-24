@@ -49,3 +49,10 @@ The final native grid observed 0.07 seconds user CPU, 0.08 seconds elapsed and 1
 `phase14/` contains repaired gate outputs and `phase13/` the freshly executed paired before case. Source/compiler/reference/ELF hashes, generated fixtures, exact native outputs, resources and Slurm accounting are retained; `FILES.sha256` covers this compact text evidence. Large executables and source snapshots remain remotely under `/scratch/sounio-stdlib-inference-scale-20261024/SIO162`. No quota or historical artifact removal was performed.
 
 Documentation checks, whitespace and shell syntax checks are reported separately from scientific validation. Full corpus, fresh compiler rebuild, remote CI acceptance, human PR acceptance and merge are not claimed by this record.
+
+
+## ContractsCore ratchet follow-through
+
+The initial façade commit c32c3c9d79 failed [ContractsCore job121015566778](https://github.com/Sounio-lang/sounio/actions/runs/40141935813/job/121015566778) after its numerical exp-helper sweep passed. The static shrinking baseline still listed the deleted `stdlib/stats/distributions.sio dist_exp`: 113 helpers were found but 114 were pinned. The fix removes only that stale row from `scripts/ci/stdlib_exp_series_baseline.txt`, preserving the ratchet against introducing a new local exponential series.
+
+Slurm17132 ran the unchanged full exp-helper gate with both the explicit d74 default engine and lean_single. Both native sweeps and static ratchets passed, exit0, with 70 helpers, 24 grid points and 113 found/113 pinned. `phase15/` retains the gate/compiler/baseline identity, exact outputs, exits, resources and Slurm accounting. The completed remote failure log was read directly; this diagnosis is separate from a fresh remote CI acceptance claim. New remote CI must run on the updated PR head.
