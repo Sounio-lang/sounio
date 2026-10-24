@@ -7355,6 +7355,10 @@ fn lowerer_lower_fn_params_mut(
                 if lower_type_expr_is_ref_like(&(*list).head.ty) {
                     lowerer_mark_local_ref_mut(lo, (*list).head.name)
                 }
+                // `p: *mut S`: a raw pointer (is_ref == 2), see bind_local_raw_ptr.
+                if (*list).head.ty.kind == TypeExprKind::TypeRawPtr {
+                    (*lo) = (*lo).bind_local_raw_ptr((*list).head.name)
+                }
                 // #2787: `a: Option<f64>` -> a `Some(x)` binding of a gets kind 2.
                 let param_opk = lower_type_expr_option_payload_kind_in(&(*list).head.ty, &(*(*lo).struct_layouts))
                 if param_opk != 0 {
@@ -14505,6 +14509,7 @@ impl Lowerer {
         if ir_name_is_box(type_name) { return false }
         if ir_name_eq(type_name, make_name("Knowledge")) { return false }
         if self.lookup_local_is_ref(name) { return false }
+        if self.lookup_local_is_raw_ptr(name) { return false }
         if self.lookup_local_is_global(name) { return false }
         true
     }
@@ -15742,6 +15747,36 @@ impl Lowerer {
     // use label_id=1 (ref_array: load handle from the pointed-to slot). Required for
     // `var p = &!arr; p[i] = v` — without this the local takes the GC-handle array
     // path and writes into the wrong place (global BSS alias silently misses).
+    // A raw `*mut S` local (is_ref == 2): it carries S as its struct type so
+    // `(*p).f` resolves against S, but its value is an address, never an S
+    // object. `(*h).s = p` value-copied p as if it were an S (stored 1), and
+    // every other struct-value path must keep away from it too.
+    fn bind_local_raw_ptr(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = lo.locals
+        var i = (*stk).count - 1
+        while i >= 0 {
+            if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
+                (*(*stk).is_ref).values[i as usize] = 2
+                lo.locals = stk
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn lookup_local_is_raw_ptr(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).is_ref).values[i as usize] == 2
+            }
+            i = i - 1
+        }
+        false
+    }
+
     fn bind_local_ref(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
         var stk = lo.locals
@@ -27144,7 +27179,7 @@ impl Lowerer {
                         (*(*locals).wide_signed).values[idx as usize] = 0
                         // Findings 11 (#2084): stamp is_unsigned_int=1 when the param is u8/u16/u32/u64/usize.
                         (*(*locals).is_unsigned_int).values[idx as usize] = if lower_type_expr_is_unsigned_int(&(*list).head.ty) { 1 } else { 0 }
-                        (*(*locals).is_ref).values[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
+                        (*(*locals).is_ref).values[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else if (*list).head.ty.kind == TypeExprKind::TypeRawPtr { 2 } else { 0 }
                         // Copilot review (PR #2516): a tuple-typed PARAMETER (e.g.
                         // fn f(t: (f64, [f64; 8]))) needs the same per-slot masks a
                         // `let`-bound tuple local gets from its initialiser (see
@@ -29130,6 +29165,9 @@ impl Lowerer {
         if raw_pointee.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), raw_pointee) >= 0 {
             lo = lo.bind_local_struct_type(s.name, raw_pointee, false)
         }
+        if raw_pointee.len > 0 {
+            lo = lo.bind_local_raw_ptr(s.name)
+        }
         if fixed_array_len >= 0 {
             lo = lo.bind_local_fixed_array_len(s.name, fixed_array_len)
         }
@@ -30625,7 +30663,7 @@ impl Lowerer {
                             if !is_box_t {
                                 match (*target_expr).left {
                                     Some(raw_op) => {
-                                        if (*raw_op).kind == ExprKind::ExprIdent && !lo.lookup_local_is_ref((*raw_op).name)
+                                        if (*raw_op).kind == ExprKind::ExprIdent && lo.lookup_local_is_raw_ptr((*raw_op).name)
                                             && !lo.lookup_local_struct_type_is_array_elem((*raw_op).name) {
                                             let rt = lo.lookup_local_struct_type((*raw_op).name)
                                             if rt.len > 0 && !ir_name_is_box(rt) {
@@ -35392,6 +35430,22 @@ impl Lowerer {
     // field store resolves handle 0 — gen3 SIGSEGV in checker_init_in_place,
     // store at address 0x20. Field access through that deref must use the
     // pointer itself (label_id 2: no handle resolve, no object header).
+    // `*x` where x is known to hold a raw payload address: a local bound as a
+    // raw pointer (is_ref == 2) or a field declared `*mut S`. Stricter than
+    // expr_is_raw_mut_deref_ref, which accepts any non-reference, non-Box ident.
+    fn expr_is_marked_raw_deref_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind != ExprKind::ExprUnary { return false }
+        if (*e).un_op != UnaryOp::OpDeref { return false }
+        match (*e).left {
+            Some(operand) => {
+                if (*operand).kind == ExprKind::ExprIdent { return self.lookup_local_is_raw_ptr((*operand).name) }
+                if (*operand).kind == ExprKind::ExprFieldAccess { return self.expr_is_raw_mut_deref_ref(e) }
+                false
+            }
+            None => false,
+        }
+    }
+
     fn expr_is_raw_mut_deref_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
         if (*e).kind != ExprKind::ExprUnary { return false }
         if (*e).un_op != UnaryOp::OpDeref { return false }
@@ -36471,7 +36525,11 @@ impl Lowerer {
         if e.un_op == UnaryOp::OpDeref {
             match e.left {
                 Some(raw_operand) => {
-                    if (*raw_operand).kind == ExprKind::ExprIdent && !self.lookup_local_is_ref((*raw_operand).name) {
+                    // Only a local bound as a raw pointer (is_ref == 2). A struct
+                    // value local or an unmarked reference also carries a struct
+                    // type, and copying "raw" words out of an object made a
+                    // garbage struct.
+                    if (*raw_operand).kind == ExprKind::ExprIdent && self.lookup_local_is_raw_ptr((*raw_operand).name) {
                         let raw_pointee = self.lookup_local_struct_type((*raw_operand).name)
                         let raw_st_idx = lower_struct_layout_index_of(&(*self.struct_layouts), raw_pointee)
                         if raw_pointee.len > 0 && !ir_name_is_box(raw_pointee)
@@ -36482,6 +36540,63 @@ impl Lowerer {
                             let p_reg = p_pair.1
                             if p_reg < 0 { return (lo_p, p_reg) }
                             return lo_p.emit_raw_struct_to_object(p_reg, e, raw_pointee, raw_st_idx)
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        // `&(*p)` / `&!(*p)` with p a raw `*mut S`: a `&S` callee loads the
+        // object from the referenced slot and reads [base + header + 8*i].
+        //   - S without fixed-array fields: the slot holds p - header, so the
+        //     callee reads and writes the raw payload in place.
+        //   - S with one: the layouts disagree past the array. `&` passes a copy
+        //     (emit_raw_struct_to_object); `&!` cannot alias and is refused.
+        //     `ns_union(&!(*(*c).ns_table), ..)` handed the noise-set table's raw
+        //     payload to a `&!NoiseSetTable` callee, which read an inline mask
+        //     word as the `pos` array handle (gen2 ud2 in ns_intern_scratch).
+        if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
+            match e.left {
+                Some(ref_operand) => {
+                    if (*ref_operand).kind == ExprKind::ExprUnary && (*ref_operand).un_op == UnaryOp::OpDeref
+                        && self.expr_is_marked_raw_deref_ref(&(*ref_operand)) {
+                        let ref_st = self.expr_receiver_struct_type_ref(&(*ref_operand))
+                        let ref_st_idx = lower_struct_layout_index_of(&(*self.struct_layouts), ref_st)
+                        if ref_st.len > 0 && ref_st_idx >= 0 {
+                            let divergent = self.struct_has_inline_array_field(ref_st)
+                            if divergent && e.un_op == UnaryOp::OpRefMut {
+                                print("error: `&!(*p)` over a raw `*mut ")
+                                lower_print_name(ref_st)
+                                print("` is not supported on the native backend: ")
+                                lower_print_name(ref_st)
+                                print(" has a fixed-array field, which raw memory keeps inline and a `&!` callee reads as a handle\n")
+                                print("  help: take `*mut ")
+                                lower_print_name(ref_st)
+                                print("` in the callee and access it with `(*p).field`\n")
+                                var lo_refuse = self
+                                lowerer_mark_hard_error(&! lo_refuse)
+                                return (lo_refuse, 0)
+                            }
+                            let ptr_pair = self.lower_opt_expr_ref(&(*ref_operand).left)
+                            var lo_r = ptr_pair.0
+                            if ptr_pair.1 < 0 { return (lo_r, ptr_pair.1) }
+                            var obj_reg: i64 = 0
+                            if divergent {
+                                let copy_pair = lo_r.emit_raw_struct_to_object(ptr_pair.1, &(*ref_operand), ref_st, ref_st_idx)
+                                lo_r = copy_pair.0
+                                obj_reg = copy_pair.1
+                            } else {
+                                let hdr_pair = lo_r.emit_i64_const(IR_NATIVE_V2_OBJECT_HEADER_SIZE)
+                                lo_r = hdr_pair.0
+                                let base_pair = lo_r.fresh_reg()
+                                lo_r = base_pair.0
+                                lo_r = lo_r.emit(ir_binop(base_pair.1, ptr_pair.1, BinaryOp::OpSub, hdr_pair.1))
+                                obj_reg = base_pair.1
+                            }
+                            let ref_pair = lo_r.fresh_reg()
+                            lo_r = ref_pair.0
+                            lo_r = lo_r.emit(ir_unaryop(ref_pair.1, e.un_op, obj_reg))
+                            return (lo_r, ref_pair.1)
                         }
                     }
                 }

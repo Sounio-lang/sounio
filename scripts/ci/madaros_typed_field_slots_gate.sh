@@ -34,6 +34,10 @@
 #      array inline, the object does not.
 #   8. `var paths: [string; N]` carries `string` as its struct type; as a store
 #      target it was taken for a string and written one byte at a time.
+#   9. `&(*p)` / `&!(*p)` over a raw `*mut S` reach `&S` / `&!S` callees as a
+#      reference to the raw payload (a `&!` write lands in it); a raw pointer
+#      local is never value-copied as an S (`(*h).s = p` stored 1). `&!(*p)`
+#      for an S with a fixed-array field is refused.
 # Each witness surrounds the right struct with decoys that win the vote.
 # Madaros from main prints 3, 1055 and 3 (or 40300003); lean_single passes all.
 #
@@ -70,6 +74,7 @@ check raw_ptr_field_chain_typed RAW_PTR_FIELD_CHAIN_OK
 check raw_ptr_field_deref_typed RAW_PTR_FIELD_DEREF_OK
 check raw_struct_whole_copy RAW_STRUCT_WHOLE_COPY_OK
 check string_array_store STRING_ARRAY_STORE_OK
+check raw_ref_alias RAW_REF_ALIAS_OK
 
 cat >"$WORK/refuse.sio" <<'SIO'
 struct Seg { buf: [i8; 16], len: i64 }
@@ -90,4 +95,23 @@ refuse_rc=$?
 set -e
 [[ "$refuse_rc" -ne 0 ]] && grep -q "fixed-array field" "$WORK/refuse.log" \
   || fail "raw cast of a managed struct with a fixed-array field: rc=$refuse_rc, expected a refusal naming the fixed-array field"
+
+cat >"$WORK/refuse_ref.sio" <<'SIO'
+struct D { arr: [i64; 4], n: i64 }
+
+fn bump(r: &!D) with Mut, Panic, Div { r.n = r.n + 1 }
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let q = heap_alloc(256) as *mut D
+    bump(&!(*q))
+    println((*q).n)
+    return 0
+}
+SIO
+set +e
+( ulimit -s 1572864 2>/dev/null || true; "$MADAROS" build "$WORK/refuse_ref.sio" "$WORK/refuse_ref.elf" ) >"$WORK/refuse_ref.log" 2>&1
+refuse_ref_rc=$?
+set -e
+[[ "$refuse_ref_rc" -ne 0 ]] && grep -q "fixed-array field" "$WORK/refuse_ref.log" \
+  || fail "&!(*p) over a raw struct with a fixed-array field: rc=$refuse_ref_rc, expected a refusal"
 echo "[madaros-typed-field-slots] PASS: tuple second struct slot, tuple Box/Option<Box> slot, deref'd Option<Box<T>> and raw-pointer casts read the declared struct's fields"
