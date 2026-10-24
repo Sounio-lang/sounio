@@ -240,6 +240,13 @@ const TRANSITION_METRIC_RESIDUAL_TAIL_RISK: i64 = 101
 const TRANSITION_METRIC_MECHANISTIC_DIVERGENCE: i64 = 102
 const TRANSITION_METRIC_ADMISSIBILITY_MARGIN: i64 = 103
 
+// One predicate for both the in-place and by-value checkers. A depth of 0
+// is under the cap; 256 is not. The counter is incremented only after this
+// test, and starts at 0 in checker_new / checker_init_in_place.
+pub fn checker_expr_depth_exceeded(depth: i64) -> bool {
+    depth >= MAX_EXPR_DEPTH
+}
+
 fn ir_alternative_metric_name(metric_id: i64) -> Name with Mut, Panic, Div {
     if metric_id == ALTERNATIVE_METRIC_INTERVENTION_COST {
         make_name("intervention_cost")
@@ -1478,6 +1485,8 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         ns_reassigned_overflow: false,
     }
     let _ = setup_intrinsics(c.fn_sigs)
+    e035_note_module(empty_path())
+    e035_note_fn(empty_name())
     c
 }
 
@@ -1544,6 +1553,7 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).had_error = false
     (*raw).diag_emitted = false
     (*raw).current_module = empty_path()
+    e035_note_module(empty_path())
     (*raw).current_module_id = 0
     (*raw).crate_root = empty_path()
     (*raw).enforce_visibility = true
@@ -1551,6 +1561,12 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).current_impl_type = ty_error()
     (*raw).current_effects = [0; 8]
     (*raw).current_effect_count = 0
+    // The by-value constructor initializes this with empty_name(). The
+    // in-place path is the one actually used by check, and leaving the
+    // heap word zero makes checker_collect_fn_def_inplace save a null Name
+    // and crash while restoring it.
+    (*raw).current_fn_name = empty_name()
+    e035_note_fn(empty_name())
     (*raw).current_sig_id = 0 - 1
     (*raw).current_sig_name = empty_name()
     (*raw).in_closure_body = false
@@ -3250,9 +3266,24 @@ pub fn checker_check_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) w
 }
 
 fn checker_check_expr_mut(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    let pair = (*c).check_expr(e)
-    checker_store_from_value(c, pair.0)
-    pair.1
+    // Do not call (*c).check_expr(e). That method call is lowered as a load
+    // of word 0, and word 0 is env. The by-value method then treats the type
+    // environment as the Checker: a handle becomes expr_depth (false E061)
+    // and a later field walk SIGSEGVs on 0xff. Stay on this Checker.
+    if checker_expr_depth_exceeded((*c).expr_depth) {
+        checker_report_error_at_inplace(c, e.span, 61, (*c).expr_depth, MAX_EXPR_DEPTH, 0)
+        return ty_error()
+    }
+    // Kind dispatch missed. A bare ty_error() is not a failure: types_compatible
+    // treats TyError as a wildcard, so an unchecked body matches its declared
+    // return and --check would accept it. Name the miss. One line is enough.
+    if !(*c).diag_emitted {
+        print("error: expression kind was not checked in place (Expr.kind dispatch missed)\n")
+        (*c).diag_emitted = true
+    }
+    (*c).had_error = true
+    (*c).error_count = (*c).error_count + 1
+    ty_error()
 }
 
 fn checker_check_contest_expr_expected_mut(c: *mut Checker, e: Expr, expected_contest_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -4100,9 +4131,9 @@ fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a
     // cannot open a single one of the 2 269 E175s that lean.sio produces. The
     // module and the function are already on the Checker; they cost two prints.
     print(" in ")
-    e035_print_module_path((*c).current_module)
+    e035_print_noted_module()
     print("::")
-    e035_print_ident((*c).current_fn_name)
+    e035_print_noted_fn()
     if span.start > 0 || span.end > 0 {
         print(" at ")
         print_int(span.start)
@@ -4111,6 +4142,7 @@ fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a
     }
     print(": ")
     print_error_message(code)
+    e035_print_depth_suffix(code, msg_a, msg_b)
     print("\n")
     print_error_help(code)
     print_error_note(code)
@@ -4201,9 +4233,9 @@ fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expec
     // Checker already -- current_module for E175, current_fn_name added with the
     // E035 fix -- and cost two prints.
     print(" in ")
-    e035_print_module_path((*c).current_module)
+    e035_print_noted_module()
     print("::")
-    e035_print_ident((*c).current_fn_name)
+    e035_print_noted_fn()
     if span.start > 0 || span.end > 0 {
         print(" at ")
         print_int(span.start)
@@ -4370,9 +4402,9 @@ fn checker_emit_e246(c: *mut Checker, face: i64, name_buf: [i8; 64], name_len: i
     (*c).had_error = true
     print("error[E246]")
     print(" in ")
-    e035_print_module_path((*c).current_module)
+    e035_print_noted_module()
     print("::")
-    e035_print_ident((*c).current_fn_name)
+    e035_print_noted_fn()
     print(": ")
     if face == 0 {
         print("unknown effect '")
@@ -4600,6 +4632,7 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
             // after, mirroring the saved_effects pair below.
             let saved_fn_name = (*c).current_fn_name
             (*c).current_fn_name = name
+            e035_note_fn(name)
             // Effects must be current BEFORE parameter types lower. The ZD
             // family interrogates `with ZD` at the parameter; collecting the
             // signature with an empty effect set would refuse every `with ZD`
@@ -4620,6 +4653,7 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
             (*c).current_effects = saved_effects
             (*c).current_effect_count = saved_effect_count
             (*c).current_fn_name = saved_fn_name
+            e035_note_fn(saved_fn_name)
             let fn_effects = eff_pair.effects
             let fn_effect_count = eff_pair.count
             let epistemic_min_confidence = epistemic_min_confidence_from_effects((*fd).effects)
@@ -6820,6 +6854,7 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             // lane. The semantic lookup disambiguates by TypeKind (TyUnknown vs TyI64),
             // so each impl body sees ITS OWN declared effects.
             (*c).current_fn_name = (*fd).name
+            e035_note_fn((*fd).name)
             let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, (*c).current_impl_type, (*fd).name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
@@ -7149,6 +7184,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             // proven path ships. Revisit direct-read with a real return-mismatch
             // gate once `return <expr>` no longer crashes the check spine.
             (*c).current_fn_name = (*fd).name
+            e035_note_fn((*fd).name)
             // Defect B (docs/audit/MADAROS_PBPK28_NN_TENSOR_COMPILE_RUNTIME_DIVERGENCE_2026-08-17.md):
             // a bare-name fn_sig_table_find here is the exact same disease the
             // fn_sig_table_find_prefer_module doc comment describes for E175 --
@@ -7522,10 +7558,161 @@ fn expr_opt_get(opt: Option<Box<Expr> >) -> *mut Expr with Mut, Panic, Div, Allo
     }
 }
 
+fn checker_note_kind_dispatch_miss(c: *mut Checker) with Mut, IO {
+    if !(*c).diag_emitted {
+        print("error: expression kind was not checked in place (Expr.kind dispatch missed)\n")
+        (*c).diag_emitted = true
+    }
+    (*c).had_error = true
+    (*c).error_count = (*c).error_count + 1
+}
+
+// Gen1 lowers `checker_check_expr_inplace(c, *ptr)` as a load of word 0 and
+// passes that integer as the whole Expr. Word 0 is the kind, so the callee
+// then indexes word 4 of address 8 and every arm misses. Keep the box pointer.
+// `(*e).kind` is not that load: Gen1's Checker field offsets already disagree
+// with the heap object. Read word 0 as an i64, the same `mov (%reg), %reg`
+// the broken by-value deref emitted.
+fn expr_kind_tag(e: *mut Expr) -> i64 with Mut, Panic, Div {
+    let words = (e as i64) as *mut i64
+    *words
+}
+
+// Return the box as a value instead of passing `*ptr` at the call. Gen1
+// lowers that call-site deref as a one-word load; a returned Expr is the
+// shape the existing in-place arms already accept.
+fn expr_copy_ptr(e: *mut Expr) -> Expr with Mut, Panic, Div {
+    *e
+}
+
+fn checker_note_kind_tag_miss(c: *mut Checker, tag: i64) with Mut, IO {
+    if !(*c).diag_emitted {
+        print("error: expression kind was not checked in place (word0=")
+        print_int(tag)
+        print(")\n")
+        (*c).diag_emitted = true
+    }
+    (*c).had_error = true
+    (*c).error_count = (*c).error_count + 1
+}
+
+fn checker_check_ident_expr_ptr(c: *mut Checker, e: *mut Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let name = (*e).name
+    if !(*c).env.has_binding(name) {
+        let fn_sig_id = checker_fn_sigs_find_inplace(c, name)
+        if fn_sig_id >= 0 {
+            return ty_fn(fn_sig_id)
+        }
+        checker_report_undeclared_inplace(c, (*e).span, name)
+        return ty_error()
+    }
+    let ident_ty = (*c).env.lookup(name)
+    if checker_is_linear_type_inplace(c, ident_ty) && (*c).suppress_linear_consume_depth == 0 {
+        if (*c).borrows.is_borrowed(name) {
+            checker_report_error_at_inplace(c, (*e).span, 38, 0, 0, 0)
+        } else {
+            let consume_result = (*c).borrows.consume_linear(name)
+            (*c).borrows = consume_result.0
+            if consume_result.1 != 0 {
+                checker_report_error_at_inplace(c, (*e).span, consume_result.1, 0, 0, 0)
+            }
+        }
+    }
+    ident_ty
+}
+
+fn checker_check_binary_expr_ptr(c: *mut Checker, e: *mut Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let left_ty = checker_check_opt_expr_inplace(c, (*e).left)
+    let right_ty = checker_check_opt_expr_inplace(c, (*e).right)
+    let op = (*e).bin_op
+    let arith = op == BinaryOp::OpAdd || op == BinaryOp::OpSub || op == BinaryOp::OpMul || op == BinaryOp::OpDiv
+    if arith && is_integer_type(left_ty) && is_integer_type(right_ty) {
+        return ty_i64()
+    }
+    let cmp = op == BinaryOp::OpEq || op == BinaryOp::OpNe || op == BinaryOp::OpLt || op == BinaryOp::OpLe || op == BinaryOp::OpGt || op == BinaryOp::OpGe
+    if cmp && is_integer_type(left_ty) && is_integer_type(right_ty) {
+        return ty_bool()
+    }
+    checker_note_kind_dispatch_miss(c)
+    ty_error()
+}
+
+fn checker_check_call_args_ptr(c: *mut Checker, opt: Option<Box<ExprList> >) with Mut, Panic, Div, Alloc, IO {
+    var cur = opt
+    while true {
+        match cur {
+            Some(list) => {
+                let arg_ptr = (&! (*list).head) as *mut Expr
+                let _arg_ty = checker_check_expr_ptr_inplace(c, arg_ptr)
+                cur = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_check_call_expr_ptr(c: *mut Checker, e: *mut Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let callee = expr_opt_get((*e).left)
+    if callee == 0 as *mut Expr {
+        checker_note_kind_dispatch_miss(c)
+        return ty_error()
+    }
+    if expr_kind_tag(callee) != ExprKind::ExprIdent as i64 {
+        checker_note_kind_tag_miss(c, expr_kind_tag(callee))
+        return ty_error()
+    }
+    let name = (*callee).name
+    let sig_id = checker_fn_sigs_find_inplace(c, name)
+    if sig_id < 0 {
+        checker_report_undeclared_inplace(c, (*e).span, name)
+        return ty_error()
+    }
+    checker_check_call_args_ptr(c, (*e).args)
+    let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
+    sig.return_type
+}
+
+fn checker_check_expr_ptr_inplace(c: *mut Checker, e: *mut Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if e == 0 as *mut Expr {
+        return ty_unit()
+    }
+    if checker_expr_depth_exceeded((*c).expr_depth) {
+        checker_report_error_at_inplace(c, (*e).span, 61, (*c).expr_depth, MAX_EXPR_DEPTH, 0)
+        return ty_error()
+    }
+    (*c).expr_depth = (*c).expr_depth + 1
+    var result = ty_error()
+    let kind = expr_kind_tag(e)
+    if kind == ExprKind::ExprIntLit as i64 {
+        (*c).last_literal_int = (*e).int_val
+        (*c).last_literal_kind = 1
+        result = ty_i64()
+    } else if kind == ExprKind::ExprIdent as i64 {
+        result = checker_check_ident_expr_ptr(c, e)
+    } else if kind == ExprKind::ExprBinary as i64 {
+        result = checker_check_binary_expr_ptr(c, e)
+    } else if kind == ExprKind::ExprCall as i64 {
+        result = checker_check_call_expr_ptr(c, e)
+    } else {
+        // Int, ident, binary and call stay on the pointer spine. Every other
+        // kind, including the if-expression in the shallow witness, still has
+        // a complete in-place arm. Drop the depth this frame already took so
+        // that arm accounts for it once.
+        if (*c).expr_depth > 0 {
+            (*c).expr_depth = (*c).expr_depth - 1
+        }
+        return checker_check_expr_inplace(c, expr_copy_ptr(e))
+    }
+    if (*c).expr_depth > 0 {
+        (*c).expr_depth = (*c).expr_depth - 1
+    }
+    result
+}
+
 fn checker_check_opt_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let ptr = expr_opt_get(opt)
     if ptr == 0 as *mut Expr { return ty_unit() }
-    checker_check_expr_inplace(c, *ptr)
+    checker_check_expr_ptr_inplace(c, ptr)
 }
 
 fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -7591,7 +7778,7 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
 }
 
 fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    if (*c).expr_depth >= MAX_EXPR_DEPTH {
+    if checker_expr_depth_exceeded((*c).expr_depth) {
         checker_report_error_at_inplace(c, e.span, 61, (*c).expr_depth, MAX_EXPR_DEPTH, 0)
         return ty_error()
     }
@@ -14324,8 +14511,33 @@ fn checker_collect_then_check_inner_emit_status_mut(c: *mut Checker, items: Opti
     }
 }
 
-fn checker_error_count_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
+pub fn checker_error_count_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
     (*c).error_count
+}
+
+// Cross-module `(*checker).current_fn_name.len` is not a usable read under
+// Gen1. The probe calls these instead.
+pub fn checker_current_fn_name_len(c: *mut Checker) -> i64 with Mut, Panic, Div {
+    (*c).current_fn_name.len
+}
+
+pub fn checker_note_current_fn_name(c: *mut Checker, n: Name) with Mut, Panic, Div, Alloc {
+    (*c).current_fn_name = n
+    e035_note_fn(n)
+}
+
+// check::mod must not load these fields itself. Gen1 lowers
+// `(*checker_ptr).error_count` as word 1 of Checker (an environment count:
+// 2649 on two_arg.sio) and `.had_error` as word 2 (a pointer). The verdict
+// then rejects every module, and panic exits 1 without printing. This read
+// is the one the in-place checker already uses, which returned 0 for that
+// same object.
+pub fn checker_had_error_scalar(c: *mut Checker) -> i64 with Mut {
+    if (*c).had_error {
+        1
+    } else {
+        0
+    }
 }
 
 fn checker_ontology_cache_slot_name(idx: i64) -> Name with Mut, Panic, Div {
@@ -16376,6 +16588,79 @@ fn print_contest_model_family(info: ContestInfo) with IO, Mut, Panic, Div {
 // Error reporting with diagnostics
 // ============================================================
 
+// Live copies of the module path and function name. The reporters must
+// not unbox Checker.current_module: a null handle dies in the field load
+// before seg_count can be tested. These slots are written only from a
+// value that already exists (empty_path / empty_name / an AST name).
+var E035_MODULE_PTR: i64 = 0
+var E035_FN_PTR: i64 = 0
+
+pub fn e035_note_module(p: AstPath) with Mut, Panic, Div, Alloc {
+    if E035_MODULE_PTR == 0 {
+        let stage = heap_alloc(4096) as *mut AstPath
+        if stage == 0 as *mut AstPath {
+            return
+        }
+        E035_MODULE_PTR = stage as i64
+    }
+    let slot = E035_MODULE_PTR as *mut AstPath
+    if slot == 0 as *mut AstPath {
+        return
+    }
+    (*slot) = p
+}
+
+pub fn e035_note_fn(n: Name) with Mut, Panic, Div, Alloc {
+    if E035_FN_PTR == 0 {
+        let stage = heap_alloc(4096) as *mut Name
+        if stage == 0 as *mut Name {
+            return
+        }
+        E035_FN_PTR = stage as i64
+    }
+    let slot = E035_FN_PTR as *mut Name
+    if slot == 0 as *mut Name {
+        return
+    }
+    (*slot) = n
+}
+
+fn e035_print_noted_module() with IO, Mut, Panic, Div, Alloc {
+    if E035_MODULE_PTR == 0 {
+        print("<main>")
+        return
+    }
+    let p = E035_MODULE_PTR as *mut AstPath
+    if p == 0 as *mut AstPath {
+        print("<main>")
+        return
+    }
+    e035_print_module_path(*p)
+}
+
+fn e035_print_noted_fn() with IO, Mut, Panic, Div, Alloc {
+    if E035_FN_PTR == 0 {
+        print("<unnamed>")
+        return
+    }
+    let p = E035_FN_PTR as *mut Name
+    if p == 0 as *mut Name {
+        print("<unnamed>")
+        return
+    }
+    e035_print_ident(*p)
+}
+
+fn e035_print_depth_suffix(code: i64, depth: i64, limit: i64) with IO, Mut, Panic, Div {
+    if code == 61 {
+        print(" (")
+        print_int(depth)
+        print(" >= ")
+        print_int(limit)
+        print(")")
+    }
+}
+
 fn e035_print_ident(n: Name) with IO, Mut, Panic, Div {
     if n.len <= 0 {
         print("<unnamed>")
@@ -16431,9 +16716,9 @@ impl Checker {
         // The value-path twin of the naming on checker_report_error_at_inplace.
         // Both reporters carry the same spans and the same uselessness without it.
         print(" in ")
-        e035_print_module_path(c.current_module)
+        e035_print_noted_module()
         print("::")
-        e035_print_ident(c.current_fn_name)
+        e035_print_noted_fn()
         if span.start > 0 || span.end > 0 {
             print(" at ")
             print_int(span.start)
@@ -16442,6 +16727,7 @@ impl Checker {
         }
         print(": ")
         print_error_message(code)
+        e035_print_depth_suffix(code, msg_a, msg_b)
         print("\n")
         // Print help and note if available
         print_error_help(code)
@@ -18250,9 +18536,9 @@ impl Checker {
         // wrong module. current_module was already tracked for E175;
         // current_fn_name is recorded now for the same reason.
         print(" in ")
-        e035_print_module_path(c.current_module)
+        e035_print_noted_module()
         print("::")
-        e035_print_ident(c.current_fn_name)
+        e035_print_noted_fn()
         if span.start > 0 || span.end > 0 {
             print(" at ")
             print_int(span.start)
@@ -18315,7 +18601,7 @@ impl Checker {
 
     fn check_expr_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
         var c = self
-        if c.expr_depth >= MAX_EXPR_DEPTH {
+        if checker_expr_depth_exceeded(c.expr_depth) {
             c = c.report_error_at(span, 61, c.expr_depth, MAX_EXPR_DEPTH, 0)
             return (c, false)
         }
@@ -26231,6 +26517,7 @@ impl Checker {
                 // the value path never did, so every diagnostic reported through
                 // `report_error_at` would have named its caller `<unnamed>`.
                 c.current_fn_name = (*fd).name
+                e035_note_fn((*fd).name)
                 // Save outer effects context
                 let saved_effects = c.current_effects
                 let saved_effect_count = c.current_effect_count
