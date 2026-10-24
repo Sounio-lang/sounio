@@ -11,6 +11,7 @@ import ElfLinker
 import TypeChecker
 import TrustSemiring
 import EpistemicSafety
+import EpistemicStat
 
 -- EL+ saturation: complete and sound w.r.t. the derivation calculus `Der`.
 #print axioms Sounio.OntologyELPlus.subBPlusC_iff
@@ -49,3 +50,9 @@ import EpistemicSafety
 #print axioms Epi.meet_refuses
 #print axioms Epi.resolve_identifiable
 #print axioms Epi.resolve_refuses_both
+
+-- Statistical layer: E_n policy, exact on squares (ADR-016 decision 3).
+#print axioms Epi.Stat.meet_sound
+#print axioms Epi.Stat.meet_refuses
+#print axioms Epi.Stat.consistent_comm
+#print axioms Epi.Stat.consistent_mono

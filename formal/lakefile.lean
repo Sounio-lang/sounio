@@ -32,4 +32,5 @@ lean_lib Sounio where
              `OntologyELPlusClosureComplete,
              `OntologyELPlusNormalization,
              `TrustSemiring,
-             `EpistemicSafety]
+             `EpistemicSafety,
+             `EpistemicStat]
