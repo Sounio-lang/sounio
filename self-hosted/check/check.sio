@@ -8794,7 +8794,14 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
             // one decrement and leave ns_branch_depth permanently elevated.
             let else_ty = checker_check_expr_inplace(c, *else_e)
             (*c).refine_cond_env = saved_cond_env
-            var branches_ok = checker_types_compatible_inplace(c, then_ty, else_ty)
+            // #830: an unsuffixed float literal arm adopts a narrower float type
+            // from the sibling arm (`if c { x_f32 } else { 0.0 }`), mirroring
+            // checker_narrow_float_literal_operand_ty on the binary-op path.
+            let then_lit_f = checker_block_tail_float_literal_expr(e.block)
+            let else_lit_f = checker_else_arm_float_literal_expr(e.else_expr)
+            let then_join_ty = checker_if_arm_float_literal_join_ty(then_ty, then_lit_f, else_ty)
+            let else_join_ty = checker_if_arm_float_literal_join_ty(else_ty, else_lit_f, then_ty)
+            var branches_ok = checker_types_compatible_inplace(c, then_join_ty, else_join_ty)
             // Join-site metadata symmetry: checker_types_compatible_inplace delegates
             // to types_compatible, whose TyKnowledge branch (compat.sio, deliberately
             // import-free) only compares inner type + epsilon -- it never inspects
@@ -8822,7 +8829,7 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
             // the incoming known IDs; top if either incoming is top".
             // SOUNIO_NS_SABOTAGE_JOIN=1 skips the union, reproducing the
             // pre-fix "one branch" bug as the per-rule negative control.
-            var joined = then_ty
+            var joined = then_join_ty
             if then_ty.kind == TypeKind::TyKnowledge && else_ty.kind == TypeKind::TyKnowledge {
                 if !checker_ns_sabotage_join() {
                     joined.noise_set_id = ns_union(&!(*(*c).ns_table), then_ty.noise_set_id, else_ty.noise_set_id)
@@ -9622,6 +9629,9 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     var cursor = e.arms
     var result_ty = ty_unit()
     var seen_first = false
+    // #830: every arm so far is an unsuffixed float literal, and each fits f32.
+    var result_all_lit = true
+    var lits_fit_f32 = true
     // env-φ (round 3): one enter covers the WHOLE match (all arms are
     // mutually exclusive branches of one construct, exactly like if/else's
     // single enter above) -- balanced by the single
@@ -9631,7 +9641,35 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         match cursor {
             Some(list) => {
                 let arm = (*list).head
-                let arm_ty = checker_check_match_arm_inplace(c, arm, scrut_ty)
+                let arm_ty_raw = checker_check_match_arm_inplace(c, arm, scrut_ty)
+                // #830: an arm whose value is an unsuffixed float literal adopts a
+                // narrower float type from its sibling arms, as at the if/else join.
+                // A literal arm after an f32 arm narrows here; f32 arriving after
+                // only literal arms retypes the running result below.
+                // Literal-ness and magnitude as scalars (-1.0 = the arm's value
+                // is not a float literal). Measured: handing the arm's literal
+                // Expr back through Box/Option let `_ => 1e300` pass the f32
+                // range guard (cause not traced), so only the number leaves the
+                // helper.
+                let arm_lit_mag = checker_arm_body_float_literal_magnitude(arm.body)
+                let arm_is_lit = arm_lit_mag >= 0.0
+                if arm_is_lit && arm_lit_mag > 3.4028235e38 {
+                    lits_fit_f32 = false
+                }
+                var arm_ty = arm_ty_raw
+                if seen_first {
+                    if arm_is_lit && arm_ty_raw.kind == TypeKind::TyF64 && result_ty.kind == TypeKind::TyF32
+                        && arm_lit_mag <= 3.4028235e38 {
+                        arm_ty = result_ty
+                    }
+                    if result_all_lit && !arm_is_lit && arm_ty_raw.kind == TypeKind::TyF32
+                        && result_ty.kind == TypeKind::TyF64 && lits_fit_f32 {
+                        result_ty = arm_ty_raw
+                    }
+                }
+                if !arm_is_lit {
+                    result_all_lit = false
+                }
                 if !seen_first {
                     // First arm: its body type becomes the expected/result type.
                     result_ty = arm_ty
@@ -22036,6 +22074,101 @@ fn checker_expected_accepts_float_literal(e: Expr, actual_ty: TypeEntry, expecte
     checker_float_literal_magnitude(e) <= 3.4028235e38
 }
 
+// #830 helpers: the float literal (if any) that is the value of an `if` arm.
+// Returns Some(literal expr) when the arm's tail is an unsuffixed float literal
+// (optionally negated); the literal itself is needed for the f32 range guard.
+fn checker_block_tail_float_literal_expr(opt: Option<Box<Block>>) -> Option<Expr> with Mut {
+    match opt {
+        Some(blk) => {
+            var sl = (*blk).stmts
+            var tail_stmt: Option<Box<Stmt>> = None
+            while true {
+                match sl {
+                    Some(list) => {
+                        match (*list).tail {
+                            Some(rest) => { sl = Some(rest) }
+                            _ => {
+                                tail_stmt = Some(Box::new((*list).head))
+                                break
+                            }
+                        }
+                    }
+                    _ => break
+                }
+            }
+            match tail_stmt {
+                Some(s) => {
+                    if (*s).kind == StmtKind::StmtExpr {
+                        match (*s).expr {
+                            Some(expr_box) => {
+                                let te = *expr_box
+                                if checker_expr_is_float_literal_like(te) {
+                                    return Some(te)
+                                }
+                                return None
+                            }
+                            None => return None
+                        }
+                    }
+                    None
+                }
+                None => None,
+            }
+        }
+        None => None,
+    }
+}
+
+// #830 match arms: the magnitude of the unsuffixed float literal that is the
+// arm's value (the body itself, or the tail of a `{ ... }` body); -1.0 when the
+// value is not a float literal.
+fn checker_arm_body_float_literal_magnitude(ex: Expr) -> f64 with Mut {
+    if ex.kind == ExprKind::ExprBlock {
+        if !checker_block_tail_is_float_literal_like(ex.block) { return 0.0 - 1.0 }
+        match checker_block_tail_float_literal_expr(ex.block) {
+            Some(te) => { return checker_float_literal_magnitude(te) }
+            None => { return 0.0 - 1.0 }
+        }
+    }
+    if checker_expr_is_float_literal_like(ex) {
+        return checker_float_literal_magnitude(ex)
+    }
+    0.0 - 1.0
+}
+
+fn checker_else_arm_float_literal_expr(opt: Option<Box<Expr>>) -> Option<Expr> with Mut {
+    match opt {
+        Some(ee) => {
+            let ex = *ee
+            if ex.kind == ExprKind::ExprBlock {
+                return checker_block_tail_float_literal_expr(ex.block)
+            }
+            if checker_expr_is_float_literal_like(ex) {
+                return Some(ex)
+            }
+            None
+        }
+        None => None,
+    }
+}
+
+// The arm type to use at the join: an f64-typed float-literal arm takes the
+// sibling's narrower float type when the literal fits it (f32 range guard from
+// checker_expected_accepts_float_literal). Everything else is unchanged.
+fn checker_if_arm_float_literal_join_ty(arm_ty: TypeEntry, arm_lit: Option<Expr>, peer_ty: TypeEntry) -> TypeEntry {
+    match arm_lit {
+        Some(lit) => {
+            if arm_ty.kind != TypeKind::TyF64 { return arm_ty }
+            if !is_float_type(peer_ty) || peer_ty.kind == TypeKind::TyF64 { return arm_ty }
+            if checker_expected_accepts_float_literal(lit, arm_ty, peer_ty) {
+                return peer_ty
+            }
+            arm_ty
+        }
+        None => arm_ty,
+    }
+}
+
 fn checker_array_sizes_compatible(actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool {
     if actual_ty.array_size == -1 || expected_ty.array_size == -1 {
         return true
@@ -30746,7 +30879,14 @@ impl Checker {
                 // require mutual four-axis subsumption when both branches are
                 // epistemic, since types_compatible_structural's TyKnowledge case
                 // only compares inner type + epsilon.
-                var branches_ok2 = c.types_compatible_structural(then_ty, else_ty)
+                // #830: ExprHandle reaches this by-value route through check_block.
+                // Normalize literal arms exactly as the in-place route does, but
+                // retain the original types for epistemic metadata subsumption.
+                let then_lit_f = checker_block_tail_float_literal_expr(e.block)
+                let else_lit_f = checker_else_arm_float_literal_expr(e.else_expr)
+                let then_join_ty = checker_if_arm_float_literal_join_ty(then_ty, then_lit_f, else_ty)
+                let else_join_ty = checker_if_arm_float_literal_join_ty(else_ty, else_lit_f, then_ty)
+                var branches_ok2 = c.types_compatible_structural(then_join_ty, else_join_ty)
                 if branches_ok2 && is_epistemic_type(then_ty) && is_epistemic_type(else_ty) {
                     branches_ok2 = check_return_expr_knowledge_subsumes(c.ontology_items, then_ty, else_ty)
                         && check_return_expr_knowledge_subsumes(c.ontology_items, else_ty, then_ty)
@@ -30754,7 +30894,7 @@ impl Checker {
                 if !branches_ok2 {
                     c = c.report_mismatch(e.span, 7, then_ty, else_ty)
                 }
-                (c, then_ty)
+                (c, then_join_ty)
             }
             None => {
                 c.refine_cond_env = saved_cond_env
@@ -30783,11 +30923,16 @@ impl Checker {
     fn check_match_arms(self, opt: Option<Box<MatchArmList> >, scrut_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
-                let pair = self.check_match_arm((*list).head, scrut_ty)
+                let first_arm = (*list).head
+                let pair = self.check_match_arm(first_arm, scrut_ty)
                 var c = pair.0
                 let first_ty = pair.1
-                c = c.check_remaining_arms((*list).tail, scrut_ty, first_ty)
-                (c, first_ty)
+                // #830: carry literal-fit state and the final joined type through
+                // the by-value route, including a literal before a typed f32 arm.
+                let first_lit_mag = checker_arm_body_float_literal_magnitude(first_arm.body)
+                let first_is_lit = first_lit_mag >= 0.0
+                let first_fits_f32 = !first_is_lit || first_lit_mag <= 3.4028235e38
+                c.check_remaining_arms((*list).tail, scrut_ty, first_ty, first_is_lit, first_fits_f32)
             }
             None => (self, ty_unit())
         }
@@ -30824,25 +30969,45 @@ impl Checker {
         (c, body_ty)
     }
 
-    fn check_remaining_arms(self, opt: Option<Box<MatchArmList> >, scrut_ty: TypeEntry, expected_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_remaining_arms(self, opt: Option<Box<MatchArmList> >, scrut_ty: TypeEntry, expected_ty: TypeEntry, prior_all_lit: bool, prior_fit_f32: bool) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
-                let pair = self.check_match_arm((*list).head, scrut_ty)
+                let arm = (*list).head
+                let pair = self.check_match_arm(arm, scrut_ty)
                 var c = pair.0
-                let arm_ty = pair.1
+                let arm_ty_raw = pair.1
+                let arm_lit_mag = checker_arm_body_float_literal_magnitude(arm.body)
+                let arm_is_lit = arm_lit_mag >= 0.0
+                var fits_f32 = prior_fit_f32
+                if arm_is_lit && arm_lit_mag > 3.4028235e38 {
+                    fits_f32 = false
+                }
+                var result_ty = expected_ty
+                var arm_ty = arm_ty_raw
+                // Mirror the in-place match normalizer; computed f64 values
+                // never narrow, and every earlier literal must fit f32.
+                if arm_is_lit && arm_ty_raw.kind == TypeKind::TyF64 && result_ty.kind == TypeKind::TyF32
+                    && arm_lit_mag <= 3.4028235e38 {
+                    arm_ty = result_ty
+                }
+                if prior_all_lit && !arm_is_lit && arm_ty_raw.kind == TypeKind::TyF32
+                    && result_ty.kind == TypeKind::TyF64 && fits_f32 {
+                    result_ty = arm_ty_raw
+                }
+                let all_lit = prior_all_lit && arm_is_lit
                 // Mirrors the *mut spine's match-arm join fix: require mutual
-                // four-axis subsumption when both are epistemic.
-                var arm_ok = c.types_compatible_structural(arm_ty, expected_ty)
-                if arm_ok && is_epistemic_type(arm_ty) && is_epistemic_type(expected_ty) {
-                    arm_ok = check_return_expr_knowledge_subsumes(c.ontology_items, arm_ty, expected_ty)
-                        && check_return_expr_knowledge_subsumes(c.ontology_items, expected_ty, arm_ty)
+                // four-axis subsumption on the original epistemic types.
+                var arm_ok = c.types_compatible_structural(arm_ty, result_ty)
+                if arm_ok && is_epistemic_type(arm_ty_raw) && is_epistemic_type(expected_ty) {
+                    arm_ok = check_return_expr_knowledge_subsumes(c.ontology_items, arm_ty_raw, expected_ty)
+                        && check_return_expr_knowledge_subsumes(c.ontology_items, expected_ty, arm_ty_raw)
                 }
                 if !arm_ok {
-                    c = c.report_mismatch((*list).head.span, 18, expected_ty, arm_ty)
+                    c = c.report_mismatch(arm.span, 18, result_ty, arm_ty)
                 }
-                c.check_remaining_arms((*list).tail, scrut_ty, expected_ty)
+                c.check_remaining_arms((*list).tail, scrut_ty, result_ty, all_lit, fits_f32)
             }
-            None => self
+            None => (self, expected_ty)
         }
     }
 
