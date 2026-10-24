@@ -46,4 +46,5 @@ check tuple_second_struct_slot_typed TUPLE_SLOT_TYPED_OK
 check deref_option_box_payload_typed DEREF_OPTION_PAYLOAD_OK
 check tuple_box_slot_typed TUPLE_BOX_SLOT_OK
 check tuple_slot_forward_method_typed TUPLE_SLOT_FORWARD_OK
+check deref_array_param_elem_typed DEREF_ARRAY_ELEM_OK
 echo "[madaros-typed-field-slots] PASS: tuple second struct slot, tuple Box/Option<Box> slot and deref'd Option<Box<T>> read the declared struct's fields"
