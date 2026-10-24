@@ -25,9 +25,9 @@ for src in "${sources[@]}"; do
  expected=$(sed -nE 's|^//@ expect-stdout(-contains)?: ||p' "$src")
  [[ -n "$expected" ]] || { echo "missing completion marker: $src" >&2; exit 65; }
  rc=0
- timeout 240 "$raw" --native-compile "$src" -o "$work/$name.elf" > "$work/$name.compile.stdout" 2> "$work/$name.compile.stderr" || rc=$?
+ timeout 240 "$raw" build "$src" --target native -o "$work/$name.elf" > "$work/$name.compile.stdout" 2> "$work/$name.compile.stderr" || rc=$?
  printf 'compile\t%s\t%s\n' "$src" "$rc" >> "$work/RESULTS.tsv"
- [[ $rc == 0 ]] || { cat "$work/$name.compile.stderr" >&2; exit 1; }
+ [[ $rc == 0 ]] || { cat "$work/$name.compile.stdout" "$work/$name.compile.stderr" >&2; exit 1; }
  chmod +x "$work/$name.elf"
  sha256sum "$work/$name.elf" > "$work/$name.ELF.sha256"
  rc=0
