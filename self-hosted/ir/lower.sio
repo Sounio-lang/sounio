@@ -1365,7 +1365,59 @@ var LOWER_KN_FIELD_TYPE: [i64; 2048] = [0; 2048]
 var LOWER_KN_FIELD_NAME: [i64; 2048] = [0; 2048]
 var LOWER_KN_FIELD_KIND: [i64; 2048] = [0; 2048]
 
+// Pointee of a struct field declared `*mut S` / `*const S`, keyed by interned
+// (struct name, field name), so `var cur = (*t).head` binds S the way a
+// `p: *mut S` parameter does. Without it `cur` was untyped and `(*cur).next`
+// took the untyped field index (1) while the typed `(*chunk).entries[i]`
+// stores used the raw payload offset: entries[1] overwrote `next`
+// (fn_sig_table_add, gen3 SIGSEGV storing through handle 0x1687830, #2966).
+// Recorded from lower_kn_field_note, which every struct-field registration
+// calls. Conflicting registrations collapse to -1 (unknown).
+var LOWER_RAW_FIELD_COUNT: i64 = 0
+var LOWER_RAW_FIELD_TYPE: [i64; 4096] = [0; 4096]
+var LOWER_RAW_FIELD_NAME: [i64; 4096] = [0; 4096]
+var LOWER_RAW_FIELD_PTE: [i64; 4096] = [0; 4096]
+
+fn lower_raw_ptr_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeRawPtr { return }
+    let pte = lower_opt_type_named_name(&(*ty).inner)
+    if pte.len <= 0 { return }
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    let pid = ir_intern_name(pte)
+    var i: i64 = 0
+    while i < LOWER_RAW_FIELD_COUNT {
+        if LOWER_RAW_FIELD_TYPE[i as usize] == tid && LOWER_RAW_FIELD_NAME[i as usize] == fid {
+            if LOWER_RAW_FIELD_PTE[i as usize] != pid { LOWER_RAW_FIELD_PTE[i as usize] = 0 - 1 }
+            return
+        }
+        i = i + 1
+    }
+    if LOWER_RAW_FIELD_COUNT >= 4096 { return }
+    LOWER_RAW_FIELD_TYPE[LOWER_RAW_FIELD_COUNT as usize] = tid
+    LOWER_RAW_FIELD_NAME[LOWER_RAW_FIELD_COUNT as usize] = fid
+    LOWER_RAW_FIELD_PTE[LOWER_RAW_FIELD_COUNT as usize] = pid
+    LOWER_RAW_FIELD_COUNT = LOWER_RAW_FIELD_COUNT + 1
+}
+
+fn lower_raw_ptr_field_pointee(type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
+    if type_name.len <= 0 { return ir_empty_name() }
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_RAW_FIELD_COUNT {
+        if LOWER_RAW_FIELD_TYPE[i as usize] == tid && LOWER_RAW_FIELD_NAME[i as usize] == fid {
+            let pid = LOWER_RAW_FIELD_PTE[i as usize]
+            if pid <= 0 { return ir_empty_name() }
+            return ir_name_at(pid)
+        }
+        i = i + 1
+    }
+    ir_empty_name()
+}
+
 fn lower_kn_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mut, Panic, Div {
+    lower_raw_ptr_field_note(type_name, field_name, ty)
     if (*ty).kind != TypeExprKind::TypeKnowledge { return }
     let kind = lower_type_expr_knowledge_value_float(ty)
     let tid = ir_intern_name(type_name)
@@ -28997,6 +29049,29 @@ impl Lowerer {
                             None => {}
                         }
                     }
+                    if (*rhs_raw).kind == ExprKind::ExprFieldAccess && raw_pointee.len <= 0 {
+                        match (*rhs_raw).left {
+                            Some(raw_fbase) => {
+                                var raw_owner = ir_empty_name()
+                                if (*raw_fbase).kind == ExprKind::ExprUnary && (*raw_fbase).un_op == UnaryOp::OpDeref {
+                                    match (*raw_fbase).left {
+                                        Some(raw_fop) => {
+                                            if (*raw_fop).kind == ExprKind::ExprIdent {
+                                                raw_owner = lo.lookup_local_struct_type((*raw_fop).name)
+                                            }
+                                        }
+                                        None => {}
+                                    }
+                                } else {
+                                    raw_owner = lo.expr_receiver_struct_type_ref(&(*raw_fbase))
+                                }
+                                if raw_owner.len > 0 && !ir_name_is_box(raw_owner) {
+                                    raw_pointee = lower_raw_ptr_field_pointee(raw_owner, (*rhs_raw).name)
+                                }
+                            }
+                            None => {}
+                        }
+                    }
                     if (*rhs_raw).kind == ExprKind::ExprCast {
                         match (*rhs_raw).cast_type {
                             Some(ct) => {
@@ -36008,18 +36083,25 @@ impl Lowerer {
         }
     }
 
-    // The object a raw-pointer cast addresses and how to reach it: kind 1 the
-    // operand is a struct value (its handle or base), kind 2 a Box<T>, whose
-    // object holds the struct's reference in field 0 (lower_box_new). Kind 0
-    // (null operand): an integer-typed or unresolved source. `&s` / `&!s` name
-    // their operand, since native-v2 OpRef is the address of the handle slot.
+    // The object a raw-pointer cast addresses and how to reach it: kind 2 a
+    // Box<T>, whose object holds the struct's reference in field 0
+    // (lower_box_new); kind 1 the operand of `&s` / `&!s` with s a struct value
+    // (native-v2 OpRef is the address of the handle slot, so the object is the
+    // operand). Kind 0 (null operand) keeps the identity cast: integer-typed
+    // sources and, importantly, raw pointers -- a `p: *mut S` local carries S as
+    // its struct type, so a bare struct-typed ident is not evidence of a managed
+    // object (`c as *mut i64` over a heap_alloc'd `*mut Chunk` must not move).
     fn opt_expr_managed_object_source(self, opt: &Option<Box<Expr>>) -> (*mut Expr, i64) with Mut, Panic, Div, Alloc {
         match *opt {
             Some(src) => {
                 var inner = src as *mut Expr
+                var via_ref = false
                 if (*inner).kind == ExprKind::ExprUnary && ((*inner).un_op == UnaryOp::OpRef || (*inner).un_op == UnaryOp::OpRefMut) {
                     match (*inner).left {
-                        Some(op) => { inner = op as *mut Expr }
+                        Some(op) => {
+                            inner = op as *mut Expr
+                            via_ref = true
+                        }
                         None => { return (0 as *mut Expr, 0) }
                     }
                 }
@@ -36027,10 +36109,14 @@ impl Lowerer {
                 if (*inner).kind == ExprKind::ExprFieldAccess {
                     if self.field_is_box_for_base_ref(&(*inner).left, (*inner).name) { return (inner, 2) }
                 }
+                if (*inner).kind == ExprKind::ExprIdent && self.lookup_local_is_ref((*inner).name) {
+                    return (0 as *mut Expr, 0)
+                }
                 let st = self.expr_receiver_struct_type_ref(&(*inner))
                 if st.len == 0 { return (0 as *mut Expr, 0) }
                 if ir_name_is_box(st) { return (inner, 2) }
-                (inner, 1)
+                if via_ref { return (inner, 1) }
+                (0 as *mut Expr, 0)
             }
             None => (0 as *mut Expr, 0),
         }
