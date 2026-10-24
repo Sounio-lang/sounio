@@ -12,6 +12,7 @@ import TypeChecker
 import TrustSemiring
 import EpistemicSafety
 import EpistemicStat
+import EpistemicJoint
 
 -- EL+ saturation: complete and sound w.r.t. the derivation calculus `Der`.
 #print axioms Sounio.OntologyELPlus.subBPlusC_iff
@@ -56,3 +57,11 @@ import EpistemicStat
 #print axioms Epi.Stat.meet_refuses
 #print axioms Epi.Stat.consistent_comm
 #print axioms Epi.Stat.consistent_mono
+
+-- Joint layers and the statistical contest (ADR-016 decisions 2-4).
+#print axioms Epi.Joint.meet_sound
+#print axioms Epi.Joint.meet_ok_interval
+#print axioms Epi.Joint.meet_refuses_certified
+#print axioms Epi.Joint.meet_refuses_statistical
+#print axioms Epi.Joint.resolve_identifiable
+#print axioms Epi.Joint.resolve_refuses_both
