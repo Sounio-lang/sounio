@@ -6,9 +6,10 @@
 //!   GET  /v1/models       -> model list with the served id
 //!   POST /v1/completions  -> text completion (greedy)
 //!
-//! Honest scope: decoding is greedy only. A request with
-//! temperature != 0 is rejected with 400 instead of being silently
-//! mis-served; sampling (temperature/top-p) is a separate slice.
+//! Decoding: greedy when temperature is 0 or absent; otherwise
+//! seeded sampling (llm::sample: temperature + top-p nucleus). The
+//! `seed` parameter makes a sampled request reproducible - the same
+//! seed and prompt always produce the same completion.
 //! `prompt` accepts a string (BPE-encoded here, BOS prepended exactly
 //! like the demos) or an array of token ids (used verbatim). No
 //! streaming, no chat template: /v1/chat/completions is not claimed.
@@ -20,7 +21,8 @@ extern "C" {
 use hetero::net_worker::{NwLib, nw_accept, nw_close, nw_listen, nw_open, nw_send_all}
 use hetero::probe_cuda::{pb_cstr}
 use llm::bpe::{Bpe, bpe_decode_token, bpe_encode}
-use llm::llama::{Llama, kv_new, llama_argmax, llama_forward}
+use llm::llama::{Llama, kv_new, llama_forward}
+use llm::sample::{rng_new, sample_token}
 use llm::safetensors::{st_byte_at}
 use tensor2::cpu_kernel::{ck_alloc, ck_get, ck_set}
 
@@ -336,14 +338,35 @@ fn sv_handle(lib: &NwLib, m: &Llama, bp: &Bpe, fd: i64, model_name: string, req_
     if max_tokens < 1 { max_tokens = 1 }
     if max_tokens > 256 { max_tokens = 256 }
 
+    // sampling parameters: temperature (absent/0 = greedy), top_p
+    // (default 1.0), seed (default 42; same seed = same completion)
+    var temp = 0.0
     let tp = sv_find(buf, n, boff, "\"temperature\"")
     if tp >= 0 {
         let fv = sv_float(buf, n, tp + 13)
-        if fv[0] > 0.0000001 || fv[0] < 0.0 - 0.0000001 {
-            let p = sv_err_body(body, "only greedy decoding (temperature=0) is implemented in llm serve v1")
-            sv_reply(lib, fd, "400 Bad Request", body, p)
-            return 0
-        }
+        temp = fv[0]
+    }
+    if temp < 0.0 {
+        let p = sv_err_body(body, "temperature must be >= 0")
+        sv_reply(lib, fd, "400 Bad Request", body, p)
+        return 0
+    }
+    var top_pv = 1.0
+    let tpp = sv_find(buf, n, boff, "\"top_p\"")
+    if tpp >= 0 {
+        let fv2 = sv_float(buf, n, tpp + 7)
+        top_pv = fv2[0]
+    }
+    if top_pv <= 0.0 || top_pv > 1.0 {
+        let p = sv_err_body(body, "top_p must be in (0, 1]")
+        sv_reply(lib, fd, "400 Bad Request", body, p)
+        return 0
+    }
+    var seed: i64 = 42
+    let sd = sv_find(buf, n, boff, "\"seed\"")
+    if sd >= 0 {
+        let ivs = sv_int(buf, n, sd + 6)
+        if ivs[2] == 1 { seed = ivs[0] }
     }
 
     // prompt: string (BPE here) or token-id array (verbatim)
@@ -414,8 +437,9 @@ fn sv_handle(lib: &NwLib, m: &Llama, bp: &Bpe, fd: i64, model_name: string, req_
     var gen: i64 = 0
     var finish = "length"
     var stop_hit: i64 = 0
+    var rng = rng_new(seed)
     while gen < max_tokens && stop_hit == 0 {
-        let nxt = llama_argmax(&logits)
+        let nxt = sample_token(&logits, temp, top_pv, &!rng)
         if nxt == 0 {
             finish = "stop"
             stop_hit = 1

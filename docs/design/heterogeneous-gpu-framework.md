@@ -517,3 +517,38 @@ Provado, com números:
 Aberto (inalterado): sampling, decode GPU no serve, carga rápida,
 SSE, KV paginado. O `llm serve` segue greedy sobre o caminho CPU —
 agora ~1,3× menos lento, com a lentidão restante atribuída e medida.
+
+## 17. Sampling
+
+Seeded sampling in `stdlib/llm/sample.sio`: xorshift64* PRNG
+(`rng_new`/`rng_f64`), temperature via soft-max over the f64 logits, and
+top-p (nucleus) by repeated max-extraction (cap 8,192 nucleus members,
+renormalised over the covered mass). `temperature = 0` (or absent) stays
+exactly greedy (`llama_argmax`). Not cryptographic; determinism by seed
+is the feature: same seed, same completion.
+
+`llm serve` accepts `temperature`, `top_p` (default 1.0) and `seed`
+(default 42). Out-of-range values are rejected honestly: `temperature < 0`
+and `top_p` outside (0, 1] return 400.
+
+Gates (`examples/llama_sample_demo.sio`; synthetic 8-token distribution
+with logits = ln p, p = [0.40, 0.25, 0.15, 0.10, 0.05, 0.03, 0.015,
+0.005], N = 20,000 draws; OBSERVED):
+
+- temperature 1.0: empirical [0.3996, 0.2479, 0.1467, 0.1022, 0.0503,
+  0.0324, 0.0151, 0.0060], max deviation 0.0033 (threshold 0.015).
+- top_p = 0.5 (nucleus {0, 1}): zero draws outside the nucleus,
+  f0 = 0.6192 (expected 0.6154).
+- temperature 2.0: f0/f1 = 1.264 (theory sqrt(1.6) = 1.2649).
+- temperature 0: sampler output equals greedy on 8/8 steps.
+- Real model, seed 777 (temp 0.8, top_p 0.95): same seed reproduces
+  16/16 tokens; seed 778 differs in 15/16.
+
+Serve end-to-end (OBSERVED): two identical seeded requests return
+byte-identical text; temperature 0 and absent temperature both return
+the canonical greedy continuation; temperature -0.5 and top_p 1.5
+return 400; top_p 0.9 returns a distinct sampled continuation.
+
+Limits: nucleus construction is O(vocab · members) per token — fine at
+135M scale, not at large vocabularies; the PRNG is deterministic by
+design and unsuitable for anything security-adjacent.
