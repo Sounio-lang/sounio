@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.stdlib-inference-document-2026-10-23.qualification.final02-pilot.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-inference-document-2026-10-23.qualification.final02-pilot.readme
+-->
+
 # Final02 pilot: executed qualification harness, not general calibration
 
 Slurm job16488 used the final frozen source of the successful full02 functional

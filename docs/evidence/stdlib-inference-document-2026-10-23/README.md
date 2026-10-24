@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.stdlib-inference-document-2026-10-23.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-inference-document-2026-10-23.readme
+-->
+
 # Stdlib inference-to-document sprint — 2026-10-23
 
 This ledger distinguishes executable availability, numerical concordance,
@@ -138,3 +147,11 @@ same22h allocation. Its first dataset completed with199 replicas. The campaign
 is still running; no aggregate qualification result or calibrated-inference
 flag is claimed. All results, including unavailable ones, remain in its own
 campaign namespace and receipts.
+
+## Documentation metadata revision
+
+Repository governance metadata was added to the three explanatory Markdown
+documents in this bundle. Their descriptive bodies and numerical observations
+are retained; raw run outputs, compiler/source identities and execution receipts
+are unchanged. The resource and pilot bundle manifests were refreshed only for
+the corresponding explanatory document. Original bytes remain in Git history.

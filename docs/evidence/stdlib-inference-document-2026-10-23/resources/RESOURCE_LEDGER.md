@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.stdlib-inference-document-2026-10-23.resources.resource-ledger
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-inference-document-2026-10-23.resources.resource-ledger
+-->
+
 # Resource observations ledger — 2026-10-23
 
 This ledger preserves distinct observations, not a generalized speed claim.
