@@ -63,6 +63,15 @@ Grounded in: commit, artifact, or empirical result
 | 015 | Lexical structure (the thirteen rulings of D-33) | accepted | 2026-10-24 |
 | 016 | Epistemic merge, contradiction, typed zeros and provenance trust | accepted | 2026-10-24 |
 
+Reserved by open pull requests (not yet on `main`):
+
+| ADR | Title | PR |
+|-----|-------|----|
+| 014 | `&&` and `\|\|` short-circuit | #3046 |
+| 017 | Single authority for IR memory effects (`ir::effects`) | #2686 (renumbered from a colliding 013) |
+
+The next free number is **018**.
+
 ## Files
 
 - [ADR-001](./adr-001-bundle-as-authority.md)
@@ -75,6 +84,8 @@ Grounded in: commit, artifact, or empirical result
 - [ADR-008](./adr-008-claim-oracle-semantic-clock.md)
 - [ADR-009](./adr-009-verified-foreign-reference.md)
 - [ADR-010](./adr-010-madaros-region-reclamation.md)
+- [ADR-011](./adr-011-mathlib-scope-in-formal-verification.md)
+- [ADR-012](./adr-012-hyper-native-v2-bridge.md)
 - [ADR-013](./adr-013-format-printing.md)
 - [ADR-015](./adr-015-lexical-structure.md)
 - [ADR-016](./adr-016-epistemic-merge-and-provenance-trust.md)
