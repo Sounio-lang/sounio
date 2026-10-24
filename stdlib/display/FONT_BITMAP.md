@@ -69,6 +69,11 @@ has three distinct modes:
   independently in C++23 and check all masks/pixels with LSB-left orientation.
 - `--emit-font PRIMARY_HEADER`: emit the numerically packed production function.
 
-After-source native concordance, legacy display/replay checks and re-exported
-scientific Canvas images remain pending the coordinator's next Slurm gate.
-The before evidence alone is not a passing-after claim or human acceptance.
+After-source Slurm16417 passed the canonical C++ comparison for all96 glyphs
+and6832 pixels, including clipping and multiline/string advance. Slurm16422
+re-exported both actual scientific Canvas images; their glyph orientation and
+readability were inspected independently. The [focused evidence
+bundle](../../docs/evidence/stdlib-inference-document-2026-10-23/README.md)
+preserves before/after receipts, corrected actual PNGs, SVGs and source/compiler
+identities. These focused results are distinct from a full legacy display/replay
+suite, a whole-repository gate or human acceptance.

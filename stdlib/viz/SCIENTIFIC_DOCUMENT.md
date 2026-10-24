@@ -58,10 +58,15 @@ rendering traverse all samples; artifact size is proportional to visible
 scatter marks. This wrapper does not solve overplotting and does not claim a
 general performance gain or unlimited managed-runtime resources.
 
-Prepared native sources exercise1025 points, complete XML escaping, a late-row
+Native sources exercise1025 points, complete XML escaping, a late-row
 failure producing zero SVG bytes, exhaustive unchanged-Canvas assertions,
 actual colored pixels and both successful panels. The independent C++23 oracle
 checks actual SVG marks/provenance/footprints/colors, all text bounds, completion
-and a native pixel report. It does not compare every font pixel. Native execution,
-XML parsing, rendered inspection, negative oracle controls and measurements are
-pending central Slurm validation; source preparation alone establishes no pass.
+and a native pixel report. It does not compare every font pixel. In focused
+Slurm16417, both scientific-document consumers passed native execution and
+independent actual-output concordance. Slurm16422 exported actual Canvas pixels
+losslessly, with full RLE coverage checks and rejection of missing-run copies.
+The corrected native font and actual PNGs were inspected; these are bounded
+agent inspections, not human acceptance or a full-suite result. Source/compiler
+identities, actual SVG/PNG artifacts, scope and single-program measurements are
+in the [focused evidence bundle](../../docs/evidence/stdlib-inference-document-2026-10-23/README.md).
