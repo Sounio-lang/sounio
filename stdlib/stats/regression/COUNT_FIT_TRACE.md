@@ -96,7 +96,7 @@ Its numerical output is checked by the same independent CountGLM and increment
 comparators. This candidate's focused execution and resource acceptance are
 recorded separately from the frozen instrumentation baseline.
 
-Focused Slurm16931 completed checks, native execution and markers for eight
+Focused Slurm 16931 completed checks, native execution and markers for eight
 fixtures, including the complete disabled-control and legacy CountGLM cases,
 both B2 paths, trace controls and ranking metadata/extremes. Both CountGLM
 outputs passed the independent CountGLM and256-case increment comparators;
@@ -105,10 +105,10 @@ The source inventory remained unchanged. This closes selected functional
 concordance for the control entry, not a claim about its performance. The
 isolated B31 resource pair is recorded below.
 
-Isolated factory pilot16932 used byte-identical nested B31 drivers and the same
-compiler92d, comparing fast-local ranking before/after the trace-control entry.
-The C++ analyzer found identical scientific output and reported90.74s versus
-90.69s, RSS58852KiB versus58848KiB, ratio1.00055132870217223509. This single pair
+Isolated factory pilot 16932 used byte-identical nested B31 drivers and the same
+compiler 92d, comparing fast-local ranking before/after the trace-control entry.
+The C++ analyzer found identical scientific output and reported 90.74s versus
+90.69s, RSS 58852KiB versus 58848KiB, ratio 1.00055132870217223509. This single pair
 does not demonstrate a useful performance improvement. The change is supported
 as removal of a needless constructor from the callgraph, not as acceleration or
 measured memory superiority. This pair does not use original full02 as baseline
@@ -121,7 +121,7 @@ getters report `normalizer_evaluations`, `normalizer_cache_hits` and
 `normalizer_cache_bypasses`. Their hooks record actual events in the opt-in
 cached full-PMF profile route. Evaluation means an actual top-level saturated-
 normalizer call, including a failed call; a hit means a successful lookup; bypass
-means the count is outside0..63. A bypass also performs a normalizer evaluation.
+means the count is outside 0..63. A bypass also performs a normalizer evaluation.
 They are not inferred from row count, profile evaluations or the old PMF counter.
 Other PMF consumers remain outside these cache-counter units.
 
@@ -133,10 +133,25 @@ cache getters expose the recorded prefix under the same trace status. No trace
 factory is introduced inside a scalar PMF or per-row loop. Selected functional acceptance for this extension is recorded below;
 broader qualification and comparative resource evidence remain separate.
 
-Slurm16936 passed the cache-specific counter reset, independent limits,
+Slurm 16936 passed the cache-specific counter reset, independent limits,
 invalid-event and maximum-i64 overflow controls, together with the unchanged
 trace unit and complete off/on B2 assertions. On its fixed B2 workload, the
-new named getters recorded3264 normalizer evaluations,1344 hits and0 bypasses;
+new named getters recorded 3264 normalizer evaluations,1344 hits and0 bypasses;
 the original ten metrics remained288,307,288,307,288,235,6336,1,2,3. These are
 recorded call/lookup events in the declared cached-profile scope. They are not
 counts for sampler PMFs, uncached ranking fallbacks or an entire B199 campaign.
+
+The cached-ranking integration extends the named cache-event scope from
+objective PMFs alone to objective plus cached ranking-fallback PMFs. Each
+fallback side records its actual normalizer evaluation/hit/bypass; the shared
+aggregate checks sums and forwards the recorded prefix. A cache hit leaves the
+full-PMF row counter unchanged. The final uncached bootstrap comparison remains
+outside named cache counts. Earlier3264/1344 results are bound to the earlier
+objective-only source and must not be compared as equal-scope totals.
+
+Slurm 16954/16965 validated the extended scope, including warm fallback hits
+that still report two full PMF calls, failed-prefix events, independent far
+contrasts and a compiled counter mutant that was rejected natively. Its fixed
+B2 counters are 3914 normalizer evaluations,2326 hits and0 bypasses for objective
+plus ranking fallback; the original ten metrics remain unchanged. These are
+selected actual work counts, not a B199 extrapolation.

@@ -259,6 +259,9 @@ for stem in count_dispersion_increment_reference count_profile_lr_fixed_referenc
   rc=0
   timeout 180 "$out/$stem" --native "$out/stdlib_scale_count_rank_difference.stdout" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.rank.stdout" 2> "$out/$stem.rank.stderr" || rc=$?
   record concordance "$stem:rank" "$rc"
+  rc=0
+  timeout 180 "$out/$stem" --native "$out/stdlib_scale_count_cached_rank_difference.stdout" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.cached-rank.stdout" 2> "$out/$stem.cached-rank.stderr" || rc=$?
+  record concordance "$stem:cached-rank" "$rc"
  fi
  if [[ "$stem" == count_dispersion_increment_reference || "$stem" == count_profile_lr_fixed_reference ]]; then
   rc=0
@@ -268,6 +271,14 @@ for stem in count_dispersion_increment_reference count_profile_lr_fixed_referenc
   record mutant-rejection "$stem:orientation:expected=2:actual=$rc" "$rejected"
  fi
 done
+rc=0
+timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/count_cached_rank_reference.cpp -lquadmath -o "$out/count_cached_rank_reference" > "$out/count_cached_rank_reference.cpp.txt" 2>&1 || rc=$?
+record cpp-compile count_cached_rank_reference "$rc"
+if [[ $rc == 0 ]]; then
+ rc=0
+ timeout 180 "$out/count_cached_rank_reference" "$out/stdlib_scale_count_cached_rank_far.stdout" > "$out/count_cached_rank_reference.concordance.stdout" 2> "$out/count_cached_rank_reference.concordance.stderr" || rc=$?
+ record concordance count_cached_rank_reference "$rc"
+fi
 rc=0
 timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/normalization_into_reference.cpp -o "$out/normalization_into_reference" > "$out/normalization_into_reference.cpp.txt" 2>&1 || rc=$?
 record cpp-compile normalization_into_reference "$rc"

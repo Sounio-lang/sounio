@@ -56,7 +56,7 @@ done
 for fixture in stdlib_deep_stats_count_profile_nested stdlib_scale_normalization_into stdlib_scale_normalization_status; do
  for phase in check compile native stdout-marker; do require_row "$phase" "tests/run-pass/$fixture.sio"; done
 done
-for stem in 'deep_stats_count_profile_bootstrap_reference:nested' 'deep_stats_count_profile_bootstrap_reference:nested-traced' count_likelihood_difference_reference count_dispersion_increment_reference normalization_into_reference 'count_likelihood_difference_reference:rank' 'deep_stats_nb2_likelihood_reference:cached' 'deep_stats_count_profile_bootstrap_reference:cache' 'deep_stats_count_glm_reference:trace-control' 'deep_stats_count_increment_reference:trace-control'; do require_row concordance "$stem"; done
+for stem in 'deep_stats_count_profile_bootstrap_reference:nested' 'deep_stats_count_profile_bootstrap_reference:nested-traced' count_likelihood_difference_reference count_dispersion_increment_reference normalization_into_reference 'count_likelihood_difference_reference:rank' 'count_likelihood_difference_reference:cached-rank' count_cached_rank_reference 'deep_stats_nb2_likelihood_reference:cached' 'deep_stats_count_profile_bootstrap_reference:cache' 'deep_stats_count_glm_reference:trace-control' 'deep_stats_count_increment_reference:trace-control'; do require_row concordance "$stem"; done
 for control in 'deep_stats_count_profile_bootstrap_reference:nested-fixed-alpha:expected=2:actual=2' 'deep_stats_count_profile_bootstrap_reference:nested-prefix:expected=2:actual=2' 'count_dispersion_increment_reference:orientation:expected=2:actual=2'; do require_row mutant-rejection "$control"; done
 
 require_row input-hashes unchanged
