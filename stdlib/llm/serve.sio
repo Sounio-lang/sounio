@@ -25,10 +25,12 @@ extern "C" {
 use hetero::net_worker::{NwLib, nw_accept, nw_close, nw_listen, nw_open, nw_send_all}
 use hetero::probe_cuda::{pb_cstr}
 use llm::bpe::{Bpe, bpe_decode_token, bpe_encode}
-use llm::llama::{Llama, kv_free, kv_new, llama_forward}
+use hetero::cuda_exec::{CudaExec}
+use hetero::runtime::{Runtime}
+use llm::llama::{KvCache, Llama, kv_free, kv_new, llama_forward, llama_forward_rt}
 use llm::sample::{rng_new, sample_token}
 use llm::safetensors::{st_byte_at}
-use tensor2::cpu_kernel::{ck_alloc, ck_free, ck_get, ck_set}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_free, ck_get, ck_set}
 
 fn sv_putb(buf: *mut u8, i: i64, v: i64) with Mut {
     let w = read_i64(buf as *mut i64, i / 8)
@@ -327,7 +329,14 @@ fn sv_err_body(buf: *mut u8, msg: string) -> i64 with Mut {
 }
 
 // Handle one connection. Returns 0 normally, -1 on transport failure.
-fn sv_handle(lib: &NwLib, m: &Llama, bp: &Bpe, fd: i64, model_name: string, req_id: i64) -> i64 with Alloc, Mut, Panic, Div, IO {
+fn sv_fwd(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Runtime) -> CpuBuf with Alloc, Mut, Panic, Div {
+    if rt.ready {
+        return llama_forward_rt(m, kv, tokens, ntok, rt)
+    }
+    llama_forward(m, kv, tokens, ntok)
+}
+
+fn sv_handle(lib: &NwLib, m: &Llama, bp: &Bpe, fd: i64, model_name: string, req_id: i64, rt: &Runtime) -> i64 with Alloc, Mut, Panic, Div, IO {
     let buf = heap_alloc(262144)
     let n = sv_read_request(lib, fd, buf, 262144)
     if n <= 0 { return 0 - 1 }
@@ -478,7 +487,7 @@ fn sv_handle(lib: &NwLib, m: &Llama, bp: &Bpe, fd: i64, model_name: string, req_
     if cap > 4096 { cap = 4096 }
     if nids + max_tokens > cap { max_tokens = cap - nids }
     var kv = kv_new(m, cap)
-    var logits = llama_forward(m, &!kv, &ids, nids)
+    var logits = sv_fwd(m, &!kv, &ids, nids, rt)
     let text = heap_alloc(65536)
     var tlen: i64 = 0
     let tbuf = heap_alloc(8192)
@@ -511,7 +520,7 @@ fn sv_handle(lib: &NwLib, m: &Llama, bp: &Bpe, fd: i64, model_name: string, req_
                 var one = ck_alloc(1)
                 ck_set(&!one, 0, nxt as f64)
                 ck_free(&logits)
-                logits = llama_forward(m, &!kv, &one, 1)
+                logits = sv_fwd(m, &!kv, &one, 1, rt)
                 ck_free(&one)
             }
         }
@@ -563,7 +572,18 @@ fn sv_handle(lib: &NwLib, m: &Llama, bp: &Bpe, fd: i64, model_name: string, req_
 }
 
 // Serve forever (sequential). Returns negative only on setup failure.
+fn sv_idle_rt() -> Runtime {
+    Runtime { exec: CudaExec { cuda: 0 as *mut u8, ok: false }, func: 0, ready: false, cvt_down: 0, cvt_up: 0, gemv: 0, wcache: 0 as *mut u8 }
+}
+
 pub fn llm_serve(m: &Llama, bp: &Bpe, port: i64, model_name: string) -> i64 with Alloc, Mut, Panic, Div, IO {
+    let rt = sv_idle_rt()
+    llm_serve_rt(m, bp, port, model_name, &rt)
+}
+
+// Same server. When rt.ready, projections of m=1 (decode) use the
+// resident GEMV; prefill rows below the tile stay on the CPU.
+pub fn llm_serve_rt(m: &Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runtime) -> i64 with Alloc, Mut, Panic, Div, IO {
     let lib = nw_open()
     if !lib.ok { return 0 - 1 }
     let srv = nw_listen(&lib, port)
@@ -578,7 +598,7 @@ pub fn llm_serve(m: &Llama, bp: &Bpe, port: i64, model_name: string) -> i64 with
         let conn = nw_accept(&lib, srv)
         if conn >= 0 {
             req = req + 1
-            let _r = sv_handle(&lib, m, bp, conn, model_name, req)
+            let _r = sv_handle(&lib, m, bp, conn, model_name, req, rt)
             nw_close(&lib, conn)
         }
     }

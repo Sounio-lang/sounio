@@ -675,3 +675,22 @@ The whole step is timed, attention and norms included; they stay on
 the CPU. The process did not return after printing the result (CUDA
 teardown). Job 17039 was cancelled once the log was complete, so the
 L4 was not left occupied.
+
+## 22. Load width and GPU serve
+
+bf16 tensors are unpacked four values per aligned 64-bit word inside
+`st_load_f64`. A fused convert-and-transpose was measured and was
+slower (51.9 s against 44.2 s), so the projection transpose stays a
+second pass.
+
+`llama_load` of SmolLM2-135M on the workspace, `examples/llama_load_bench.sio`,
+OBSERVED: 44.218 s before, 37.706 s after. The prefill argmax on the
+canonical prompt is 7042 either way.
+
+`llm_serve_rt` uses `llama_forward_rt` when the runtime is ready, so
+decode projections take the resident GEMV. Without PTX paths,
+`llm_serve` is the CPU server. Job 17080 on the L4
+(`gpuorangefs-r770-proxmox`): the process printed `gpu=1`, and
+`POST /v1/completions` with `max_tokens` 4 returned
+` Paris. It is`. The request, prefill included, took 8.748 s.
+The per-token decode figure remains the one in §21.
