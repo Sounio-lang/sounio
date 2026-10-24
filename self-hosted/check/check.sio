@@ -31531,7 +31531,11 @@ impl Checker {
 
     fn check_closure_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
-        let resolved_params = checker_resolve_closure_params_inplace((&!c) as *mut Checker, e.closure_params, &e.closure_body)
+        // `cp` escapes into the callee, so the exclusive borrow of `c` stays live
+        // for this function. A later `&!c.env` is a second exclusive borrow of that
+        // root and is E038. Mutate the environment through the pointer already taken.
+        let cp = (&!c) as *mut Checker
+        let resolved_params = checker_resolve_closure_params_inplace(cp, e.closure_params, &e.closure_body)
 
         // Convert closure params to FnParamList for signature
         let params_result = c.collect_closure_params(resolved_params)
@@ -31552,11 +31556,7 @@ impl Checker {
 
         // Push scope for parameters
         let outer_borrow_count = c.borrows.count
-        // By value here, not type_env_push_scope_mut(&!c.env): the
-        // `(&!c) as *mut Checker` above is still an active exclusive borrow
-        // for the Madaros borrow checker, which refuses a second one (E038
-        // on main.sio's own check rung). This is the by-value oracle path.
-        c.env = c.env.push_scope()
+        type_env_push_scope_mut(&!(*cp).env)
         c.borrows = c.borrows.push_scope()
         c = c.push_const_scope()
 
@@ -31617,7 +31617,7 @@ impl Checker {
         c = c.require_current_linear_scope_consumed()
         c = c.pop_const_scope()
         c.borrows = c.borrows.pop_scope()
-        type_env_pop_scope_mut(&!c.env)
+        type_env_pop_scope_mut(&!(*cp).env)
 
         // Restore outer effects context
         c.current_sig_id = 0 - 1
