@@ -644,3 +644,34 @@ Gates (OBSERVED, SmolLM2-135M):
 What remains is the request-scoped HTTP buffers (`sv_handle` does not
 release its read buffer, the JSON body or the decoded text). That is
 the +212 KiB, not the forward.
+
+## 21. Decode on the GPU
+
+The tiled GEMM rounds its GPU rows down to a multiple of 16, so an
+m=1 projection — every decode step — never left the CPU. `rt_load_gemv`
+loads `kernels/gemv_f32.ptx` (one thread per output column) and a
+resident-weight table keyed by the host pointer: each matrix is
+uploaded and converted to f32 once, and a decode step ships the
+activation only. `rt_gemm_rect` takes that path when `m == 1` and the
+kernel is loaded. A device failure recomputes the row on the CPU.
+Shapes that are wider than one row and shorter than a tile are
+unchanged: they stay on the CPU.
+
+Bench `examples/llama_gpu_decode_bench.sio`, job 17039, partition
+`bench`, node `gpuorangefs-r770-proxmox`, NVIDIA L4. SmolLM2-135M,
+the canonical prompt, greedy. OBSERVED:
+
+- Probe, one m=1 projection: `gpu_rows=1`, status 0, max abs diff
+  3e-6 against the f64 GEMM.
+- Prefill of 6 rows (below the tile, so both paths are CPU): max abs
+  diff 0.
+- CPU decode, 8 steps, 14.097 s, 1.762 s/token (steps 1.713–1.824 s).
+- GPU decode after one warm step, 7 steps, 3.472 s, 0.496 s/token
+  (steps 0.487–0.503 s). 3.55× against the CPU on the same node.
+  The warm step, which pays the weight upload, was 0.666 s.
+- Token sequence identical, text ` Paris. It is the largest city in`.
+
+The whole step is timed, attention and norms included; they stay on
+the CPU. The process did not return after printing the result (CUDA
+teardown). Job 17039 was cancelled once the log was complete, so the
+L4 was not left occupied.

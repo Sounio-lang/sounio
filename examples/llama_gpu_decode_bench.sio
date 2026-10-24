@@ -1,0 +1,151 @@
+//@ run-pass
+//
+// Decode bench. m=1 projections go through the resident f32 GEMV;
+// anything wider (the prefill here is 6 rows) stays on the CPU, which
+// is the current tile rule. Wall time is taken outside the process:
+// CPU_DECODE_BEGIN/END and GPU_DECODE_BEGIN/END bracket only forwards.
+// The GPU window starts after one warm step, so the weight upload is
+// not inside it.
+// Usage: llama_gpu_decode_bench [dir] [gemm-ptx] [cvt-ptx] [gemv-ptx]
+
+use llm::bpe::{bpe_decode_token, bpe_load}
+use llm::llama::{kv_new, llama_argmax, llama_forward, llama_forward_rt, llama_load}
+use llm::safetensors::{st_byte_at}
+use hetero::runtime::{rt_gemm_rect, rt_load_gemv, rt_open_full}
+use tensor2::cpu_kernel::{ck_alloc, ck_gemm, ck_get, ck_max_abs_diff, ck_set}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var dir = "/workspace/llm-models/SmolLM2-135M"
+    if arg_count() > 0 { dir = get_arg(0) }
+    var ptx = "stdlib/hetero/kernels/gemm_tiled_f32.ptx"
+    if arg_count() > 1 { ptx = get_arg(1) }
+    var cvt = "stdlib/hetero/kernels/cvt_f64_f32.ptx"
+    if arg_count() > 2 { cvt = get_arg(2) }
+    var gemv = "stdlib/hetero/kernels/gemv_f32.ptx"
+    if arg_count() > 3 { gemv = get_arg(3) }
+    let nsteps: i64 = 8
+
+    let m = llama_load(dir)
+    print("loaded=")
+    print_int(if m.loaded { 1 } else { 0 })
+    print("\n")
+    if !m.loaded { print("GPUDEC FAIL\n"); exit(1) }
+    let hidden = m.cfg.hidden
+
+    var rt = rt_open_full(ptx, "gemm_tiled_f32", cvt)
+    print("rt_ready=")
+    print_int(if rt.ready { 1 } else { 0 })
+    print("\n")
+    if !rt.ready { print("GPUDEC FAIL\n"); exit(1) }
+    let gok = rt_load_gemv(&!rt, gemv)
+    print("gemv_loaded=")
+    print_int(if gok { 1 } else { 0 })
+    print("\n")
+    if !gok { print("GPUDEC FAIL\n"); exit(1) }
+
+    var px = ck_alloc(hidden)
+    var pi: i64 = 0
+    while pi < hidden {
+        ck_set(&!px, pi, (((pi * 31 + 17) % 97) as f64) / 97.0 - 0.5)
+        pi = pi + 1
+    }
+    var yg = ck_alloc(hidden)
+    var yc = ck_alloc(hidden)
+    let pr = rt_gemm_rect(&rt, &px, &m.wq[0], &!yg, 1, hidden, hidden, 1)
+    ck_gemm(&px, &m.wq[0], &!yc, 1, hidden, hidden)
+    let pd = ck_max_abs_diff(&yg, &yc)
+    print("probe gpu_rows=")
+    print_int(pr.gpu_rows)
+    print(" status=")
+    print_int(pr.status)
+    print(" diff(x1e6)=")
+    print_int((pd * 1000000.0) as i64)
+    print("\n")
+    if pr.gpu_rows != 1 || pr.status != 0 { print("GPUDEC FAIL\n"); exit(1) }
+
+    var ids = ck_alloc(16)
+    ck_set(&!ids, 0, 0.0)
+    ck_set(&!ids, 1, 504.0)
+    ck_set(&!ids, 2, 3575.0)
+    ck_set(&!ids, 3, 282.0)
+    ck_set(&!ids, 4, 4649.0)
+    ck_set(&!ids, 5, 314.0)
+
+    let bp = bpe_load(dir ++ "/tokenizer.json")
+    let dbuf = heap_alloc(8192)
+    var cpu_ids = ck_alloc(16)
+
+    var kv1 = kv_new(&m, 512)
+    var la = llama_forward(&m, &!kv1, &ids, 6)
+    print("CPU_DECODE_BEGIN\n")
+    var g: i64 = 0
+    while g < nsteps {
+        let nxt = llama_argmax(&la)
+        ck_set(&!cpu_ids, g, nxt as f64)
+        print("CPU_STEP ")
+        print_int(g)
+        print(" id=")
+        print_int(nxt)
+        print("\n")
+        var one = ck_alloc(1)
+        ck_set(&!one, 0, nxt as f64)
+        la = llama_forward(&m, &!kv1, &one, 1)
+        g = g + 1
+    }
+    print("CPU_DECODE_END\n")
+
+    var kv2 = kv_new(&m, 512)
+    var lb = llama_forward_rt(&m, &!kv2, &ids, 6, &rt)
+    var kv3 = kv_new(&m, 512)
+    let lc = llama_forward(&m, &!kv3, &ids, 6)
+    let dpre = ck_max_abs_diff(&lc, &lb)
+    print("prefill_diff(x1e6)=")
+    print_int((dpre * 1000000.0) as i64)
+    print("\n")
+
+    let warm = llama_argmax(&lb)
+    print("GPU_WARM id=")
+    print_int(warm)
+    print(" cpu=")
+    print_int(ck_get(&cpu_ids, 0) as i64)
+    print("\n")
+    var same = warm == (ck_get(&cpu_ids, 0) as i64)
+    var ow = ck_alloc(1)
+    ck_set(&!ow, 0, warm as f64)
+    lb = llama_forward_rt(&m, &!kv2, &ow, 1, &rt)
+
+    print("GPU_DECODE_BEGIN\n")
+    g = 1
+    while g < nsteps {
+        let nxt = llama_argmax(&lb)
+        let expect = ck_get(&cpu_ids, g) as i64
+        if nxt != expect { same = false }
+        print("GPU_STEP ")
+        print_int(g)
+        print(" id=")
+        print_int(nxt)
+        print(" cpu=")
+        print_int(expect)
+        print("\n")
+        var one = ck_alloc(1)
+        ck_set(&!one, 0, nxt as f64)
+        lb = llama_forward_rt(&m, &!kv2, &one, 1, &rt)
+        g = g + 1
+    }
+    print("GPU_DECODE_END\n")
+
+    print("text_cpu=")
+    g = 0
+    while g < nsteps {
+        if bp.ok {
+            let nb = bpe_decode_token(&bp, ck_get(&cpu_ids, g) as i64, dbuf)
+            var j: i64 = 0
+            while j < nb { print_char(st_byte_at(dbuf, j)); j = j + 1 }
+        }
+        g = g + 1
+    }
+    print("\ntokens_equal=")
+    print_int(if same { 1 } else { 0 })
+    print("\n")
+    if same { print("GPUDEC PASS\n") } else { print("GPUDEC FAIL\n") }
+}
