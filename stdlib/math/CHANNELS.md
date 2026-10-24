@@ -41,10 +41,13 @@ entirely to zero returns6; SNR0 has a valid zero. A nonfinite reciprocal also
 returns6. The probability-vector APIs have their separately documented size,
 mass and KL-support statuses.
 
-AWGN uses a 32-term atanh log1p series for SNR<=1/2, avoiding 1+SNR rounding
-to1; other values use the shared checked logarithm. The smallest subnormal
-input has an unrepresentable half-log and is unavailable, while twice that
-input returns the minimum-subnormal capacity.
+AWGN delegates to `math::logarithmic::log1p_checked`, which owns the tiny-argument,
+compensated atanh-series and rounded-addition correction branches. The former
+private log1p body is removed. Shared-helper failure maps to existing status6;
+the existing positive-capacity representability guard remains. SNR0 retains
+its valid zero. The smallest subnormal input has an unrepresentable half-log
+and is unavailable, while twice that input returns the minimum-subnormal
+capacity. See [shared logarithmic contract](LOGARITHMIC.md).
 
 ## Compatibility module
 
@@ -68,3 +71,18 @@ The Sounio implementation has not been proved equivalent to that formalization.
 Independent C++23 references and native Forge execution determine bounded
 acceptance. These functions make no correctly-rounded, complete-stdlib,
 sampling-calibration or comparative-performance claim.
+
+## Shared-logarithm integration state
+
+Public APIs, channel units, BSC endpoint behavior and scalar-domain conventions
+remain consumer-owned. Selected current-source typecheck is complete in Slurm15825 (seven targets);
+two native demonstrations compiled and executed, and their actual XML/full SVG
+previews were inspected. Frozen executable source:
+27ea4ec6c2b97892e9e92cf982b0af90e2241023. Compiler reuse followed an exact
+unchanged bin/scripts/self-hosted/stdlib check.
+See [execution receipt](../../docs/plans/LOGARITHMIC_EXECUTION_2026_10_21.md).
+
+No tests or independent numerical oracle were added/run. Channel boundary
+concordance, numerical/ULP characterization, corpus validation and CI/merge
+remain pending. A visible demonstration is not an independent calibration or
+correct-rounding proof. Documentation edits follow the frozen executable source.

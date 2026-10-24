@@ -353,12 +353,47 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
     value use in a match-arm body or struct-literal field) the compile stops
     with ``error[builtin_shadow]: ... `measure` is a builtin; rename your
     function.`` Off switch: `SOUNIO_DISABLE_BUILTIN_SHADOW=1`.
-  - **Residual (OPEN), Madaros:** `pub fn` with a builtin name is not
-    renamed (importers spell it), so the builtin still wins at bare-name call
-    sites; `f128_from_limbs` / `f128_to_lo` / `f128_to_hi` are deliberately
-    excluded because `stdlib/math/softfloat_f128.sio` defines them as the
-    implementation the intercept stands for (a user one fails to build).
-    The renamed spelling `<name>__user` appears in diagnostics.
+  - **`pub fn` fixed for Madaros (2026-10-23), single definer.**
+    `builtin_shadow_apply_items` now collects `visibility.kind == 0 || 1` and
+    renames an intercepted `pub fn` to `<name>__user` like a private one;
+    `private_fn_identity_apply` records each (base name, definer) pair and the
+    #2773 pub phase rebinds every importer that spells the base name in a
+    `use` item -- by name or through a glob -- through the same table
+    (`PFI_T_USER` marks the entries that spell `__user` instead of
+    `__m<idx>`). Witness: leaf `pub fn measure(x: i64) -> i64 { x + 1000 }`,
+    main `use ...::{measure}` + `measure(5) == 1005` → before: `check` rc=1
+    with `expected Knowledge<i64>` (E004/E036); after: `check` rc=0 and `run`
+    exit 0. Glob form (`use ...::*`) also exit 0. Single module `pub fn
+    measure` + own call: before rc=1 `use of undeclared variable
+    measure__user`, after rc=0.
+  - **Two defects found while doing that, both fixed here.**
+    (1) **#2773 broke the private half it landed beside.** Its guards
+    (`PFI_T_DEF == 1`, `PFI_T_TGT == PFI_CUR_MOD`) in `pfi_rename_item_def`
+    were never matched by the shadow's table entries, so only the
+    *references* were renamed and the definition kept the builtin spelling:
+    every module with a private builtin-named fn failed with `use of
+    undeclared variable <name>__user`. Measured on the pristine `3ef3dbaa6e`
+    binary: `user_fn_shadows_builtin_measure.sio` rc=1 with that message;
+    after this change rc=0 with both PASS lines. The shadow now marks its
+    entries as definitions of module 0 carrying the `__user` spelling.
+    (2) **`run_check_mode` never ran the identity pass** (`compiler/main.sio`):
+    it loaded the modules, ran only `module_struct_identity_check`, and
+    checked -- so the checker saw the un-rebound `measure` and intercepted the
+    builtin before compilation could rewrite it. It now calls
+    `module_frontend_identity_pass` (use map + struct check + identity), the
+    same order the compile path uses.
+  - **Residual (OPEN), Madaros:** two *loaded* modules that each export a
+    `pub fn` with the same builtin name, plus a module that imports it -- the
+    rename cannot pick a target at a bare call site, so the compile stops with
+    ``error[builtin_shadow]`` naming the cause (it used to type the call as
+    `Knowledge`). Merely loading both modules is fine: the pub phase renames
+    the second `<name>__user` apart. `f128_from_limbs` / `f128_to_lo` /
+    `f128_to_hi` stay deliberately excluded because
+    `stdlib/math/softfloat_f128.sio` defines them as the implementation the
+    intercept stands for (a user one fails to build). The renamed spelling
+    `<name>__user` appears in diagnostics. Trace:
+    `SOUNIO_TRACE_BUILTIN_SHADOW=1` prints the census and the rebind
+    decisions.
   - **Residual (OPEN), lean_single (seed, not changed — a fix needs a seed
     refresh):** 26 of 65 wrong. Silently wrong value (builtin ran, printed
     the argument `5` or `0`): `abs`, `f64_to_bits`, `lift_knowledge`,
@@ -370,7 +405,16 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
     `require_confidence`, `f128_to_lo`.
 - Pins: `tests/run-pass/user_fn_shadows_builtin_measure.sio`,
   `tests/run-pass/user_fn_shadows_builtin_names.sio`,
+  `tests/run-pass/user_fn_shadows_builtin_pub_measure.sio`,
+  `tests/multimodule/user_fn_shadows_builtin_pub_main.sio` (+ `_leaf`),
+  `tests/multimodule/user_fn_shadows_builtin_pub_glob_main.sio` (+ `_leaf`),
   `tests/compile-fail/builtin_shadow_local_binding_refused.sio`.
+  A `requires: madaros` pin is skipped unless `SOUNIO_MADAROS_AVAILABLE` is
+  set, and the Madaros CI job runs only the tests a diff touches -- which is
+  why the #2773 regression above went unseen. The four `run` cases are
+  therefore also listed in `tests/madaros/multimodule_witness/manifest.tsv`,
+  run unconditionally by `scripts/ci/madaros_multimodule_witness.sh`
+  (16/16 witnesses, measured 2026-10-23).
 ### KL-18 — `Hyper<Algebra, T>` values on the CPU path (P0.8.2)
 
 - Engine: both. There is no CPU value lowering for `Hyper<Octonion, f64>`

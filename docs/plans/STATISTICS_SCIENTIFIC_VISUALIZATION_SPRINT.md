@@ -897,3 +897,337 @@ are whole-run observations; Slurm elapsed5:42, TotalCPU11:18.137 and batch
 MaxRSS7152996K describe the two-worker compile/run job, not renderer performance.
 The final source snapshot370cc50246991bc39421b4530b8ec55b10b3dbd67cc2102ab710e1c055cf009e
 precedes final documentation edits. Broader CI/merge remain separate states.
+
+## Continuation checkpoint — signed bars and artifact offload, 2026-10-20
+
+Main d7077ef1 is incorporated. Baseline Slurm15712 accepts111/111; final
+Slurm15718 accepts114/114 with zero failures/skips/errors after complete HTML
+recovery and a margin correction that preserves scientific minus signs.
+Both renderers share checked bar rectangles, actual x positions, a true zero
+baseline and whole-footprint clipping. Independent C++23 covers83 geometry/width
+cases; the actual native SVG passes8-bar and15-explicit-tick checks. Previous-SVG
+15713 and horizontal-intersection-removal15715 controls compile then fail their
+intended expectations. See [bar execution receipt](BARS_EXECUTION_2026_10_20.md).
+
+The authorized107-snapshot offload passed two-copy restoration and an A/B journal
+audit; complete encrypted custody is on GitHub, keys held separately. Including
+the earlier one-file step,1262940884 logical bytes left the hot quota. Quota stays
+3TiB. Availability returned to96468992bytes, but validation snapshots reduced it
+to4194304bytes: further reviewed retention is required for a massive ongoing
+batch. See [offload receipt](ARTIFACT_OFFLOAD_EXECUTION_2026_10_20.md).
+
+Statistics, mathematics, genomics and physics remain in scope. Conditioning and
+convergence, inferential calibration, count/variant consumers, physical units and
+invariants, and measured execution/memory/artifact work continue. This is a
+bounded acceptance checkpoint; broader compiler CI and merge remain separate.
+
+## Continuation checkpoint — count dispersion on refreshed main, 2026-10-20
+
+The approved exact59 source offload completed with 59 recovery indices and
+10,733,223,936 bytes available at the final measurement; the quota remains3TiB.
+See [archival execution](SOURCE59_ARCHIVE_EXECUTION_2026_10_20.md).
+
+A new isolated sprint branch incorporates remote main b10c046e7b and retains
+all accepted increments through the signed-bar114/114 and archival checkpoints.
+Production NB2 supplied-means moment dispersion is ported from9f8b8617aa with
+narrow underflow corrections and explicit arithmetic/status limits. A count/offset
+Poisson diagnostic consumer connects the statistics to scientific visualization.
+This increment is implementation plus static review, with no new tests added or
+run and no new native/figure/corpus acceptance implied.
+See [implementation receipt](NB_DISPERSION_IMPLEMENTATION_2026_10_20.md).
+
+The wider statistics, mathematics, genomics, physics and execution/memory/artifact
+sprint remains active. Maximum-likelihood NB fitting, shrinkage, inferential
+calibration, native figure acceptance and measured resource comparisons remain
+open; the moment diagnostic does not stand in for those methods.
+
+Current-source typecheck follow-up: Slurm15747 completed0:0 after rebuilding
+the seed and modular Madaros; both NB2 module and new count-diagnostic example
+returned TYPECHECK_OK. The transport label corpus_smoke represents only this
+package-specific check dispatcher, not a corpus run. No tests or example
+execution occurred. [Exact receipt](NB_DISPERSION_TYPECHECK_2026_10_20.md).
+
+## Continuation checkpoint — sampled uncertainty and native SVG, 2026-10-20 UTC
+
+Remote main085da is incorporated. The uncertainty builder now validates finite
+means/X and nonnegative finite variance before mutation, includes mean±sigma in
+its Y domain, and shares checked sampled-strip/center geometry between Canvas
+and SVG. Direct renderers validate array prefixes before access. SVG now emits
+the uncertainty marks it previously omitted. The contract remains sampled±1sigma,
+with no confidence-interval or continuous-ribbon claim. Known production/demo
+consumers propagate required Panic effects.
+
+Slurm15776 completed0:0: eighteen selected files typecheck, and the native SVG
+example compiled/executed with exit0. The actual complete SVG parsed as XML and
+was visually inspected with legible axes, preserved minus sign and explicit
+unitless synthetic caption. The compiler came from a current-source build15772,
+preserved and hash-verified before scratch cleanup, then reused after proving
+unchanged bin/scripts/self-hosted/stdlib input trees. Failed effect/axis-spacing
+attempts are retained. [Execution receipt](SAMPLED_UNCERTAINTY_EXECUTION_2026_10_20.md).
+
+No tests were added or run for this slice; historical114/114 is unchanged.
+Numerical concordance, Canvas runtime/cross-backend comparison, calibration,
+renderer latency/RSS comparisons, full corpus/CI and merge remain open.
+The final checks/compile/figure job took26s; this is a whole-job observation with
+compiler reuse, not a renderer benchmark. Source geometry adds no lower/upper IR
+buffers and bounds Canvas traversal before loops. Shared quota remains3TiB,
+with no further removals; compiler custody/prepared packets stay on t560 ext4.
+
+Statistics, scientific rendering, mathematics, genomics and physics remain the
+mass-sprint scope. Next concrete candidate: stable NB2 count diagnostics with
+supplied mean/dispersion, explicit Poisson limit and representability statuses,
+reusing the count/offset consumer and existing genomics input path. This candidate
+has not been implemented or numerically accepted by the current checkpoint.
+
+## Continuation checkpoint — scaled NB2 count diagnostics, 2026-10-21
+
+The main8 branch retains main085da and all prior increments. New scalar
+nb2_count_diagnostic supplies Poisson/NB2 Pearson residuals from count means and
+supplied dispersion, with independent staged variance availability. Scaling
+avoids first constructing the variance; alpha0 copies the Poisson residual.
+Count conversion is bounded to0..2^53. The binary64/status contract explicitly
+limits rounding and representability claims. No heap allocation is introduced in
+the scalar kernel. Deviance and likelihood/inferential outputs remain deferred.
+
+The synthetic count/offset consumer compares both residuals on one explicit axis,
+retains observed/fitted exposure-adjusted rates, and labels the same-data moment
+alpha as plug-in. It reuses its two existing1024-element scratch arrays; failed
+availability paths now return1 instead of a successful exit with no figure.
+
+Slurm15783 completed0:0 in7:08 after a current-source seed/Madaros rebuild, four
+selected typechecks, native compilation and complete example execution. Canvas
+rendering completed in memory and actual SVG was emitted. The complete1380x620
+sips rendering of the extracted SVG was inspected with both panels, legends,
+units, negative labels and caveats visible. Slurm15785 executed the same attested
+ELF under GNU time:0.01s elapsed,8748KiB peak native-process RSS, exit0. This is
+one eight-observation whole-program observation, not isolated kernel performance,
+a scaling study or comparative superiority. Whole-job compiler/transport RSS is
+recorded separately. [Execution receipt](NB2_DIAGNOSTICS_EXECUTION_2026_10_21.md).
+
+Raw build logs/input manifests are retained losslessly compressed with original
+hashes; source packets and large compiler custody remain remote. The quota stays
+3TiB, without new removals. No tests were added or run. Numerical concordance,
+explicit boundary runtime coverage, model calibration, Canvas pixel comparison,
+full corpus/CI and merge remain open; historical114/114 is unchanged.
+
+The larger statistics/scientific-rendering/mathematics/genomics/physics sprint
+continues. Stable deviance/logarithmic primitives, genomic count consumers,
+physical-unit/invariant work and measured resource comparisons remain in scope.
+
+## Continuation checkpoint — shared checked logarithmic primitives, 2026-10-21
+
+Main9 retains remote main085da and all prior increments. Three shared scalar
+primitives now provide checked log1p, log1pmx and (1+x)log1p(x)-x with explicit
+domain/availability/sign contracts and compensated factored near-zero series.
+Four private bodies were removed across information theory, channels and Poisson.
+The scalar helpers add no arrays or explicit heap allocation. Numerical precision
+certification is a separate open requirement.
+
+Slurm15823 rebuilt the current-source seed/Madaros and completed0:0 in7:13.
+Slurm15825 completed0:0 in25s after the example caption explicitly disclosed seven
+samples, reusing the exact hash-verified compiler after unchanged compiler/input
+trees were proved. Both jobs ran seven typechecks and compiled/executed two real
+SVG examples. Final native-process peak RSS was1576KiB for the logarithmic example
+and8768KiB for NB2/Poisson. Time reporting was0.00s/0.01s respectively;0.00s is
+centisecond resolution, not zero time. These whole-example observations are not
+comparative kernel benchmarks. Both complete1380x620 SVG renderings were inspected.
+[Execution receipt](LOGARITHMIC_EXECUTION_2026_10_21.md).
+
+Evidence includes exact source/compiler/ELF/stdout identities, lossless compressed
+logs/manifests, native receipts and complete figures. Quota remains3TiB, without
+new removals. No tests were added or run. Independent numerical concordance,
+boundary runtime coverage, calibration, full corpus/CI and merge remain open;
+historical114/114 is unchanged.
+
+Next concrete cross-domain migrations: sf_log_ratio in genomics normalization,
+preserving exact i64 count-anchor before f64 conversion, zero exclusion,
+median/centering and far log-difference; entropy_log_ratio in physics, preserving
+exact equal-volume zero, scaled products, covariance and n=0 semantics. These
+candidates were audited read-only and remain unimplemented. Statistics,
+scientific rendering, math, genomics, physics and execution/memory/artifact costs
+remain the continuing mass-sprint scope.
+
+## Continuation checkpoint — genomics and physics share log1p, 2026-10-21
+
+Main10 retains main085da and previous sprint increments. The two audited
+cross-domain migrations are now implemented: sf_log_ratio near branch delegates
+to the shared checked logarithm while preserving integer subtraction before f64
+conversion; entropy_log_ratio delegates its close-volume branch while preserving
+equality, far log differences, scaled products, covariance and n=0 behavior.
+Two private series bodies were removed; existing public contracts/statuses remain.
+
+The real synthetic SVG example calls median-ratio normalization and both physical
+entropy uncertainty models, reusing two plotting buffers. Its panels are independent
+domain demonstrations. Three eligible genes/one excluded row, categorical sample
+order, seven volume ratios, supplied rho=0.5 and report-only first-order standard
+uncertainties are disclosed. Full-scale/report formatting does not resolve every
+tiny contrast and is not an accuracy certificate.
+
+[Native execution and artifacts](DOMAIN_LOG1P_EXECUTION_2026_10_21.md) record frozen
+source ab10a22026, fresh compiler build, exact selected targets, process resources,
+figure inspection and acceptance limits. No tests were added or run. Quota stays
+3TiB with no new removals; compiler custody also lives on t560 ext4. Independent
+numerical concordance, boundary runtime coverage, calibration, comparative resource
+studies, full corpus/CI and merge remain open.
+
+Next bounded statistics candidate: supplied-parameter NB2 saturated deviance and
+signed deviance residual per count, separately from fitting alpha or regression.
+Current nb2_diagnostics exposes Pearson/variance only. A future scalar contract
+must address near-mean cancellation, alpha->0 without overflowing1/alpha,
+large alpha*mean, large-alpha cancellation and distinct representability of a
+contribution versus its square root. Preserve zero-count, equality and exact
+Poisson-limit branches. No gamma engine or renderer changes are required by the
+identified scope; no inference calibration or implementation is claimed here.
+Statistics, scientific rendering, math, genomics, physics and execution/memory/
+artifact efficiency remain the mass-sprint scope.
+
+## Continuation checkpoint — conditional NB2 deviance, 2026-10-22
+
+Remote main advanced to06f927dbca5753f5d7b6f64c29eb745eff77f351; it was fetched
+and merged, retaining earlier sprint work including genomic/physical shared-log
+consumers. New scalar nb2_deviance supplies signed saturated-deviance residuals
+and independent squared-deviance availability for supplied count mean/dispersion.
+The local branch uses a compensated factored series; the distant branch uses a
+positive Poisson/correction decomposition and combines component roots by scale.
+No arrays or explicit heap are introduced in the kernel. Input/status guards
+preserve the2^53 count bound and reject unsupported intermediate regions instead
+of turning them into zero. Independent static review identified and the source
+addressed subnormal amplification and missing canonical sqrt Panic effects.
+
+The separate real SVG example compares Pearson NB2 against signed deviance at nine
+counts for supplied mean4/alpha0.25, with common dimensionless residual axis and
+zero reference. Supplemental parameter scenarios report availability without
+assertions. This is not a fitted-model or calibrated inferential result.
+[Execution receipt](NB2_DEVIANCE_EXECUTION_2026_10_22.md) records final source,
+initial cancelled build, fresh corrected compiler build, selected checks/native
+execution, complete figure inspection, exact hashes and per-process resources.
+
+No tests or independent numerical oracle were added or run. Numerical concordance,
+boundary corpus, global accuracy, model calibration, comparative resources, full
+corpus/CI and merge remain separate. Quota remains3TiB with no new removal;
+large compiler custody remains remote with verified ext4 copy. Statistics,
+scientific rendering, math, genomics, physics and execution/memory/artifact costs
+remain the continuing mass-sprint scope. Next numerical hardening candidate is
+balanced products for the deliberately unavailable far subnormal-product region;
+this requires independent concordance before widening the advertised contract.
+
+## Continuation checkpoint — balanced tiny-product NB2 arithmetic, 2026-10-22
+
+Main12 retains remote main06f927 and all earlier increments. The previously
+unavailable distant tiny-product region now evaluates mean*(1+alpha*count) before
+normalization, avoiding amplification of rounded alpha*mean by count. If the
+intermediate m1 is subnormal, its logarithm is carried independently from the
+original mean and checked log increments rather than taken after coarse rounding.
+Other status guards and independent residual/squared-deviance availability remain.
+Independent static review accepted the bounded formula/source, without a global
+accuracy, correct-rounding or numerical-concordance claim.
+
+The existing formatter now prints available residual/deviance payloads with15
+significant digits and gates both payloads independently. Unavailable values are
+text, not error-placeholder zeros. No points, parameters, geometry, buffers,
+scene nodes or renderer changes were added. Fifteen-digit formatting is not a
+binary64 roundtrip or an independent numerical reference.
+[Execution receipt](NB2_BALANCED_EXECUTION_2026_10_22.md) records frozen source,
+five selected checks, actual native report/figure and whole-process resources.
+
+No tests or numerical oracle were added or run. Independent C++23/Sounio
+concordance, boundary coverage, calibration, global error, comparative resources,
+full corpus/CI and merge remain open. Shared quota remains3TiB with no new removal.
+The statistics/scientific-rendering/math/genomics/physics/resource sprint remains
+active. Cache dependency-manifest narrowing is an audited optimization candidate,
+not implemented: current sprint dispatch explicitly disables cache for fresh
+build provenance, and existing broad cache keys include unrelated stdlib/docs.
+Any future reuse must first preserve a complete proven compiler-input manifest.
+
+Final readback advanced main to7d67f3a944 (README-only), incorporated after the
+native run. Merge input-tree comparison preserves bin/scripts/self-hosted/stdlib/
+examples relative to the evidence closure; executed source remains eeeab3025c.
+
+## Continuation checkpoint — observational compiler paths and cold-storage layout, 2026-10-22
+
+Main13 retains mainf02db32 and earlier scientific work. A new standalone non-root
+observer captures selected pathname/process/cwd syscalls, failed lookups and broad
+source before/after inventories, with independent traced-command/collector states,
+private raw custody and lossless archive readback. It never narrows the cache key
+or authorizes reuse. Endpoint equality does not establish transient immutability
+or a complete content-input closure. Open events from tree-hash utilities must be
+distinguished from compiler import accesses in future analysis.
+
+Slurm15940 completed0:0 in7:18: fresh instrumented source-tracking seed/Madaros
+build, captured_endpoints_equal, empty tracer diagnostics and existing NB2 example
+typecheck/compile/native execution. Native ELF/stdout identities match the preceding
+NB2 balanced run. Native process RSS1052KiB/time0.00s is one whole-example observation;
+traced whole-job timing is not an uninstrumented benchmark.
+[Execution receipt](COMPILER_INPUT_OBSERVATION_EXECUTION_2026_10_22.md).
+
+Existing Forge snapshot reuse was used, with a separately hashed collector/recipe
+overlay and one run-local runner command delta. Compiler source remains the known
+eeeab302 snapshot; collector source is3860980. This is not a fresh compiler built
+from the collector Git tree. No new source archive was made. The new shared run
+contains110568 apparent bytes of orchestration metadata; traces/compiler/packages
+use scratch and private t560 ext4. Trace15888844 raw bytes is preserved in383405
+lossless gzip bytes, with readback. Quota remains3TiB; no historical removal.
+
+No tests or independent numerical oracle ran. Cache/build scripts and no-cache
+policy remain unchanged. Next scope is process-image attribution of compiler reads
+versus orchestration/hash accesses, with explicit decoding/negative-lookup gaps;
+not cache activation. Generated transient seed identity and external inputs need
+binding before any complete-input claim. The broader statistics, scientific
+rendering, mathematics, genomics, physics and resource sprint remains active.
+
+## Main14 — process-attributed pathname analysis (2026-10-22)
+
+Continuation is based on remote main a59930e514, branch
+`sprint/compiler-path-attribution-main-a59930-20261022`. The prior scientific
+branch remains preserved at5c84f28288; merging its47 unique commits with main's
+31 unique commits produces real source conflicts. New compiler/seed changes in
+main require fresh native validation after that integration. Later logarithmic,
+NB2, bars and uncertainty work remains queued, with the precise conflicts and
+upstream fixes listed in the execution receipt below.
+
+Delivered: C++23 bounded analyzer of the existing Slurm15940 trace. Successful exec
+request epochs separate operator-listed compiler path hints from sha256sum and
+other utility hints. It reconstructs598 split calls across25292 physical lines,
+with zero reconstruction/decode failures for this capture. Unknown-image1210
+syscall rows remain explicit. Final role rows: compiler1906, sha256sum15177,
+other6106, unknown1210. These are syscall counts, not consumed dependencies or
+cost measurements. There is no image inheritance or cwd/dirfd resolution.
+
+Actual standalone analysis on t560: exit0, elapsed0.44s, maxRSS3252KiB. Private
+raw tables and deterministic gzip archives have matching decompression hashes.
+Only compact summaries and integrity metadata enter Git. No new compiler build,
+Sounio execution, test, source snapshot, deletion or quota change in this increment.
+The cache key and guards remain broad; cache_authority=false and
+complete_input_closure=false.
+
+[Execution and integration queue](COMPILER_PATH_ATTRIBUTION_EXECUTION_2026_10_22.md)
+retain exact source/binary/trace identities, reviewed parser scope and open gates.
+
+## Main15 — reconciled scientific source with current main, 2026-10-23
+
+Source19c684a99bb5728c15b424a13fd190742efad718 merges the later scientific branch
+with remote main3ef3dbaa6e and retains Main14's path-attribution tools/evidence.
+The scientific integration queue in Main14 is closed at this source checkpoint:
+shared logs, genomic normalization, entropy, NB moment/Poisson/NB2, signed bars,
+sampled uncertainty, rendering effects and packaging selection are reconciled.
+Main's explicit beta_new import, Shapiro sw_exp wrapper and Boltzmann direct loop
+are preserved. Compiler/bin sources equal incorporated main; source identity is
+not inferred from old compiler receipts.
+
+Fresh Slurm15992 COMPLETED0:0: canonical modular build,23 typechecks and five
+real native examples all pass. All five actual SVGs parse with xmllint and have
+full-aspect PNG visual inspection, including an independent second review.
+Build402.87s/maxRSS736380KiB; whole-job elapsed7:37/batchMaxRSS3588712K. These
+are separate observations, not a comparative improvement claim. Canonical
+compilerSHA238c7e210d82cdd8474f68c488a0aed2b22d3157f64536703f03e1d995dce734.
+
+Attempt15990 failed before compiler execution because Forge's */data exclusion
+removed stdlib/data. Exact selected-packet tar + extracted-manifest verification
+and --reuse-snapshot resolved transport for15992; failure evidence is retained.
+Heavy artifacts remain private ext4, source snapshot is reused for retry, quota
+stays3TiB and no historical removal occurs. No test suite or numeric oracle ran.
+Complete corpus, CI, numerical concordance, calibration and merge remain open.
+
+[Completed integration receipt](SCIENTIFIC_MAIN_INTEGRATION_EXECUTION_2026_10_23.md)
+contains parent/source comparisons, all execution statuses, native resources,
+figure limits, custody and storage identities.
