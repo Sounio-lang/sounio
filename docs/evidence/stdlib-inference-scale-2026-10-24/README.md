@@ -87,3 +87,17 @@ establish scientific integration acceptance; that requires separate gate receipt
 `benchmark-drivers/` preserves the original before/after B199 drivers, the two
 paired B31 pilot drivers, and the original transformation recipe. The B199 after
 driver is preserved input, not evidence that an after B199 benchmark was executed.
+
+## Complete numerical correctness gate
+
+`functional-correctness4f421/` records Slurm16870 on the immutable source commit
+`4f4210232bd57e3058651967e158d09c916b5508`, using the controlled `ee0f341e...`
+compiler. Its final STATUS is0: native fixtures, independent C++ concordance,
+mutant rejection and final source/compiler hash checks passed. This repeats the
+previous gate after correcting the missing quadmath link and annotation order.
+The complete phase table is readable directly; compressed receipts retain stdout,
+stderr, resource measurements, executable identities and hash verifications.
+This gate covers that numerical branch, including normalization and legacy
+rendering; it does not include later overlay, tracing or marker-size extensions,
+and is not B199 qualification. The separate combined-current-main gate remains
+its own acceptance boundary.
