@@ -1,0 +1,78 @@
+// Checked independent first-order physics primitives, reusing the balanced
+// products and scaled norms of physics::lorentz. No input independence or
+// local linearization validity is inferred from a numerical status0.
+use math::pure::{is_finite,sqrt}
+use physics::lorentz::{lorentz_force_independent,lorentz_force_scalar_independent}
+pub struct PhysicsScalarResult {pub status:i64,pub value:f64,pub standard_uncertainty:f64,pub uncertainty_model:i64,pub first_order:bool}
+pub struct PhysicsPairResult {pub status:i64,pub values:[f64;2],pub covariance:[f64;4],pub standard_uncertainties:[f64;2],pub uncertainty_model:i64,pub first_order:bool}
+pub struct PhysicsNumber {pub status:i64,pub value:f64}
+pub fn physics_scalar_unavailable(status:i64)->PhysicsScalarResult {PhysicsScalarResult{status:status,value:0.0,standard_uncertainty:0.0,uncertainty_model:1,first_order:true}}
+pub fn physics_pair_unavailable(status:i64)->PhysicsPairResult {PhysicsPairResult{status:status,values:[0.0;2],covariance:[0.0;4],standard_uncertainties:[0.0;2],uncertainty_model:1,first_order:true}}
+pub fn physics_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+// Nominal products may round to zero. A nonzero uncertainty contribution may not.
+pub fn physics_product3(a:f64,b:f64,c:f64,strict:bool)->PhysicsNumber with Mut,Div,Panic {
+ let r=lorentz_force_scalar_independent(a,0.0,0.0,0.0,b,0.0,c,0.0)
+ if r.status!=0 || (strict && a!=0.0 && b!=0.0 && c!=0.0 && r.force==0.0) {return PhysicsNumber{status:4,value:0.0}}
+ PhysicsNumber{status:0,value:r.force}
+}
+pub fn physics_sum3(a:f64,b:f64,c:f64)->PhysicsNumber with Mut,Div,Panic {
+ let e:[f64;3]=[a,0.0,0.0]
+ let v:[f64;3]=[0.0,b,c]
+ let field:[f64;3]=[0.0,-1.0,1.0]
+ let z:[f64;3]=[0.0;3]
+ let r=lorentz_force_independent(1.0,0.0,&e,&z,&v,&z,&field,&z)
+ if r.status!=0 {return PhysicsNumber{status:4,value:0.0}}
+ PhysicsNumber{status:0,value:r.force[0]}
+}
+pub fn physics_norm4(a:f64,b:f64,c:f64,d:f64)->PhysicsNumber with Mut,Div,Panic {
+ let r=lorentz_force_scalar_independent(1.0,physics_abs(a),0.0,physics_abs(b),1.0,physics_abs(c),1.0,physics_abs(d))
+ if r.status!=0 {return PhysicsNumber{status:4,value:0.0}}
+ PhysicsNumber{status:0,value:r.standard_uncertainty}
+}
+pub fn physics_scalar(value:f64,a:f64,b:f64,c:f64,d:f64)->PhysicsScalarResult with Mut,Div,Panic {
+ if !is_finite(value) {return physics_scalar_unavailable(4)}
+ let n=physics_norm4(a,b,c,d)
+ if n.status!=0 {return physics_scalar_unavailable(4)}
+ PhysicsScalarResult{status:0,value:value,standard_uncertainty:n.value,uncertainty_model:1,first_order:true}
+}
+pub fn physics_pair(values:&[f64;2],h:&[f64;8])->PhysicsPairResult with Mut,Div,Panic {
+ if !is_finite(values[0]) || !is_finite(values[1]) {return physics_pair_unavailable(4)}
+ let u0=physics_norm4(h[0],h[1],h[2],h[3])
+ let u1=physics_norm4(h[4],h[5],h[6],h[7])
+ if u0.status!=0 || u1.status!=0 {return physics_pair_unavailable(4)}
+ let v0=physics_product3(u0.value,u0.value,1.0,true)
+ let v1=physics_product3(u1.value,u1.value,1.0,true)
+ let c0=physics_product3(h[0],h[4],1.0,true)
+ let c1=physics_product3(h[1],h[5],1.0,true)
+ let c2=physics_product3(h[2],h[6],1.0,true)
+ let c3=physics_product3(h[3],h[7],1.0,true)
+ if v0.status!=0 || v1.status!=0 || c0.status!=0 || c1.status!=0 || c2.status!=0 || c3.status!=0 {return physics_pair_unavailable(4)}
+ let cs=physics_sum3(c0.value,c1.value,c2.value)
+ if cs.status!=0 {return physics_pair_unavailable(4)}
+ let cross=physics_sum3(cs.value,c3.value,0.0)
+ if cross.status!=0 {return physics_pair_unavailable(4)}
+ PhysicsPairResult{status:0,values:[values[0],values[1]],covariance:[v0.value,cross.value,cross.value,v1.value],standard_uncertainties:[u0.value,u1.value],uncertainty_model:1,first_order:true}
+}
+// Status codes:1 nonfinite,2 physical domain,3 negative uncertainty,
+// 4 conservative arithmetic/representation unavailable,5 unit mismatch.
+pub fn physics_input4(a:f64,ua:f64,b:f64,ub:f64)->i64 {
+ if !is_finite(a)||!is_finite(ua)||!is_finite(b)||!is_finite(ub) {return 1}
+ if ua<0.0||ub<0.0 {return 3}
+ 0
+}
+pub fn physics_gamma_checked(v:f64,uv:f64)->PhysicsScalarResult with Mut,Div,Panic {
+ let status=physics_input4(v,uv,0.0,0.0)
+ if status!=0 {return physics_scalar_unavailable(status)}
+ let c=299792458.0
+ let av=physics_abs(v)
+ if av>=c {return physics_scalar_unavailable(2)}
+ // Factoring in SI preserves the representable gap c-|v| close to c.
+ let rad=(c-av)*(c+av)
+ let g=c/sqrt(rad)
+ if !is_finite(g) {return physics_scalar_unavailable(4)}
+ let cube=physics_product3(g,g,g,false)
+ if cube.status!=0 {return physics_scalar_unavailable(4)}
+ let hv=physics_product3(cube.value/(c*c),v,uv,true)
+ if hv.status!=0 {return physics_scalar_unavailable(4)}
+ physics_scalar(g,hv.value,0.0,0.0,0.0)
+}
