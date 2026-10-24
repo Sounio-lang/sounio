@@ -1,0 +1,60 @@
+// f32 GEMV, row-major: C[n] = A[k] * B[k][n].
+// One thread per output column. The 16-row tiled GEMM cannot hold the
+// m=1 decode shape, and re-uploading B on every token is the wrong
+// cost; the runtime keeps B resident and launches this for the row.
+.version 7.0
+.target sm_50
+.address_size 64
+
+.visible .entry gemv_f32(
+    .param .u64 param_A,
+    .param .u64 param_B,
+    .param .u64 param_C,
+    .param .s32 param_N,
+    .param .s32 param_K
+)
+{
+    .reg .pred %p<3>;
+    .reg .b32 %r<12>;
+    .reg .b64 %rd<12>;
+    .reg .f32 %f<4>;
+
+    ld.param.u64 %rd0, [param_A];
+    ld.param.u64 %rd1, [param_B];
+    ld.param.u64 %rd2, [param_C];
+    ld.param.s32 %r1, [param_N];
+    ld.param.s32 %r2, [param_K];
+
+    mov.u32 %r3, %tid.x;
+    mov.u32 %r4, %ctaid.x;
+    mov.u32 %r5, %ntid.x;
+    mad.lo.u32 %r6, %r4, %r5, %r3;
+    setp.ge.u32 %p0, %r6, %r1;
+    @%p0 bra DONE;
+
+    mov.f32 %f0, 0f00000000;
+    mov.u32 %r7, 0;
+LOOP:
+    setp.ge.u32 %p1, %r7, %r2;
+    @%p1 bra STORE;
+    cvt.u64.u32 %rd3, %r7;
+    mul.lo.u64 %rd4, %rd3, 4;
+    add.u64 %rd5, %rd0, %rd4;
+    ld.global.f32 %f1, [%rd5];
+    mul.lo.u32 %r8, %r7, %r1;
+    add.u32 %r9, %r8, %r6;
+    cvt.u64.u32 %rd6, %r9;
+    mul.lo.u64 %rd7, %rd6, 4;
+    add.u64 %rd8, %rd1, %rd7;
+    ld.global.f32 %f2, [%rd8];
+    fma.rn.f32 %f0, %f1, %f2, %f0;
+    add.u32 %r7, %r7, 1;
+    bra LOOP;
+STORE:
+    cvt.u64.u32 %rd9, %r6;
+    mul.lo.u64 %rd10, %rd9, 4;
+    add.u64 %rd11, %rd2, %rd10;
+    st.global.f32 [%rd11], %f0;
+DONE:
+    ret;
+}

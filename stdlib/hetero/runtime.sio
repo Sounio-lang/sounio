@@ -55,6 +55,12 @@ pub struct Runtime {
     // 0 = unavailable, rt_gemm_split then uses packed host staging.
     pub cvt_down: i64,
     pub cvt_up: i64,
+    // gemv_f32, for the m=1 decode shape the 16-row GEMM tile cannot
+    // hold. 0 = not loaded; rt_gemm_rect then keeps m=1 on the CPU.
+    pub gemv: i64,
+    // Resident f32 copies of weight matrices, keyed by host pointer,
+    // so a decode step uploads the activation and not the weights.
+    pub wcache: *mut u8,
 }
 
 pub struct SplitResult {
@@ -65,7 +71,7 @@ pub struct SplitResult {
 }
 
 pub fn rt_open(ptx_path: string, kernel_name: string) -> Runtime with Alloc, Mut, Panic, Div, IO {
-    var rt = Runtime { exec: ce_open(), func: 0, ready: false, cvt_down: 0, cvt_up: 0 }
+    var rt = Runtime { exec: ce_open(), func: 0, ready: false, cvt_down: 0, cvt_up: 0, gemv: 0, wcache: 0 as *mut u8 }
     if !rt.exec.ok { return rt }
     let ptx = read_file(ptx_path)
     if str_len(ptx) == 0 { return rt }
@@ -143,6 +149,106 @@ fn rt_scatter_out(dst: &!CpuBuf, dst_off: i64, src: *mut u8, count: i64) with Mu
     }
 }
 
+// Load gemv_f32 and the resident-weight table. Decode (m=1) uses it;
+// wider shapes keep the tiled GEMM.
+pub fn rt_load_gemv(rt: &!Runtime, ptx_path: string) -> bool with Alloc, Mut, Panic, Div, IO {
+    if !rt.ready { return false }
+    let ptx = read_file(ptx_path)
+    if str_len(ptx) == 0 { return false }
+    let module = ce_module_log(&rt.exec, pb_cstr(ptx))
+    if module == 0 { return false }
+    let f = ce_function(&rt.exec, module, "gemv_f32")
+    if f == 0 { return false }
+    rt.gemv = f
+    let tab = heap_alloc(6160)
+    var i: i64 = 0
+    while i < 770 {
+        write_i64(tab as *mut i64, i, 0)
+        i = i + 1
+    }
+    rt.wcache = tab
+    true
+}
+
+// f32 device copy of a host weight, uploaded and converted once.
+fn rt_resident(rt: &Runtime, host: i64, n_elem: i64) -> i64 with Alloc, Mut, Panic, Div {
+    if (rt.wcache as i64) == 0 || rt.cvt_down == 0 { return 0 }
+    let tab = rt.wcache as *mut i64
+    let count = read_i64(tab, 0)
+    var i: i64 = 0
+    while i < count {
+        let base = 2 + i * 3
+        if read_i64(tab, base) == host && read_i64(tab, base + 2) == n_elem {
+            return read_i64(tab, base + 1)
+        }
+        i = i + 1
+    }
+    if count >= 256 { return 0 }
+    let d64 = ce_alloc(&rt.exec, n_elem * 8)
+    let d32 = ce_alloc(&rt.exec, n_elem * 4)
+    if d64 == 0 || d32 == 0 { return 0 }
+    if ce_h2d(&rt.exec, d64, host as *mut u8, n_elem * 8) != 0 { return 0 }
+    if rt_launch_cvt(rt, rt.cvt_down, d64, d32, n_elem) != 0 { return 0 }
+    let base = 2 + count * 3
+    write_i64(tab, base, host)
+    write_i64(tab, base + 1, d32)
+    write_i64(tab, base + 2, n_elem)
+    write_i64(tab, 0, count + 1)
+    d32
+}
+
+fn rt_launch_gemv(rt: &Runtime, da: i64, db: i64, dc: i64, n: i64, k: i64) -> i32 with Alloc, Mut, Panic, Div {
+    let params = heap_alloc(40)
+    write_i64(params as *mut i64, 0, ce_arg(da) as i64)
+    write_i64(params as *mut i64, 1, ce_arg(db) as i64)
+    write_i64(params as *mut i64, 2, ce_arg(dc) as i64)
+    write_i64(params as *mut i64, 3, ce_arg(n) as i64)
+    write_i64(params as *mut i64, 4, ce_arg(k) as i64)
+    let grid = (n + 255) / 256
+    ce_launch_raw(&rt.exec, rt.gemv, grid, 256, params)
+}
+
+// m=1 projection: y = W x, with W kept resident as f32. On any device
+// failure the whole row is recomputed on the CPU and gpu_rows comes
+// back 0, so the caller still has a correct buffer.
+fn rt_gemv_one(rt: &Runtime, a: &CpuBuf, b: &CpuBuf, c: &!CpuBuf, n: i64, k: i64) -> SplitResult with Alloc, Mut, Panic, Div {
+    var res = SplitResult { status: 0, gpu_rows: 0, cpu_rows: 1, ms: 0.0 }
+    let db = rt_resident(rt, b.data as i64, k * n)
+    if db == 0 {
+        ck_gemm_rows(a, b, c, 0, 1, n, k)
+        return res
+    }
+    let da64 = ce_alloc(&rt.exec, k * 8)
+    let da32 = ce_alloc(&rt.exec, k * 4)
+    let dc32 = ce_alloc(&rt.exec, n * 4)
+    let dc64 = ce_alloc(&rt.exec, n * 8)
+    if da64 == 0 || da32 == 0 || dc32 == 0 || dc64 == 0 {
+        ck_gemm_rows(a, b, c, 0, 1, n, k)
+        res.status = -2
+        return res
+    }
+    let ev0 = ce_event_create(&rt.exec)
+    let ev1 = ce_event_create(&rt.exec)
+    var st = ce_event_record(&rt.exec, ev0)
+    st = ce_h2d(&rt.exec, da64, a.data as *mut u8, k * 8)
+    st = rt_launch_cvt(rt, rt.cvt_down, da64, da32, k)
+    st = rt_launch_gemv(rt, da32, db, dc32, n, k)
+    if st != 0 {
+        ck_gemm_rows(a, b, c, 0, 1, n, k)
+        res.status = -3
+        return res
+    }
+    st = rt_launch_cvt(rt, rt.cvt_up, dc32, dc64, n)
+    st = ce_d2h(&rt.exec, c.data as *mut u8, dc64, n * 8)
+    st = ce_event_record(&rt.exec, ev1)
+    let _sy = ce_sync(&rt.exec)
+    res.ms = ce_event_elapsed_ms(&rt.exec, ev0, ev1)
+    res.gpu_rows = 1
+    res.cpu_rows = 0
+    res.status = 0
+    res
+}
+
 // C[m][n] = A[m][k] * B[k][n], rows [0, gpu_rows) on GPU, rest on CPU.
 // gpu_rows is rounded down to the 16-row kernel tile; the remainder rows
 // always land on CPU, so any shape is exact. ms via CUDA events spanning
@@ -150,6 +256,9 @@ fn rt_scatter_out(dst: &!CpuBuf, dst_off: i64, src: *mut u8, count: i64) with Mu
 // host staging time is NOT inside the event window - measure the full
 // call with an outer event pair if staging must be charged.
 pub fn rt_gemm_rect(rt: &Runtime, a: &CpuBuf, b: &CpuBuf, c: &!CpuBuf, m: i64, n: i64, k: i64, gpu_rows_req: i64) -> SplitResult with Alloc, Mut, Panic, Div {
+    if m == 1 && rt.gemv != 0 && gpu_rows_req >= 1 {
+        return rt_gemv_one(rt, a, b, c, n, k)
+    }
     var gr = gpu_rows_req
     if gr < 0 { gr = 0 }
     if gr > m { gr = m }
