@@ -19,7 +19,7 @@ Run the runner as its own account, never as your login user. That account must n
 
 1. System Settings → Users & Groups → Add User: a **Standard** account named `sounio-ci`.
 2. Do not sign it into an Apple ID or a browser, and do not give it admin rights.
-3. Toolchain. The job calls `/usr/bin/clang++ -std=c++23` (Apple clang 21 accepts it) and `brew list coreutils` / `brew list boost`, installing them if missing. Homebrew in `/opt/homebrew` belongs to your login user, so a Standard account cannot install into it. **Pre-install from your own account**: `brew install bash coreutils boost`. Then make sure `sounio-ci` sees `/opt/homebrew/bin` first in its `PATH`, for example via `~/actions-runner/.path`, so `bash` resolves to Homebrew's bash 5 and not to `/bin/bash` 3.2.
+3. Toolchain. The job calls `/usr/bin/clang++ -std=c++23` (Apple clang 21 accepts it) and probes `$(brew --prefix)/opt/coreutils` and `.../opt/boost` on the filesystem, running `brew install` only if one is missing. It does not call `brew list`, because Homebrew refuses every command, even read-only ones, for a user that does not own the prefix. Homebrew in `/opt/homebrew` belongs to your login user, so a Standard account cannot install into it. **Pre-install from your own account**: `brew install bash coreutils boost`. Then make sure `sounio-ci` sees `/opt/homebrew/bin` first in its `PATH`, for example via `~/actions-runner/.path`, so `bash` resolves to Homebrew's bash 5 and not to `/bin/bash` 3.2.
 
 ## 2. Register the runner
 
