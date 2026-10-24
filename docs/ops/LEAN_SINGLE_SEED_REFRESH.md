@@ -165,7 +165,6 @@ Positive control (measured 2026-08-17, still the contract):
 - partition: `cpu-ops` (or `all`)
 - example host: `cpuops-t560-proxmox`, 32 cores, rc=0
 - `/workspace` **invisible** on compute; `/orangefs` **visible**
-- details: `docs/ops/SLURM_LAUNCH_REPAIR_2026-08-17.md`
 
 **Do not write recipes that say `sbatch`.**
 

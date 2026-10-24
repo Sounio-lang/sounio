@@ -21,14 +21,14 @@ module epistemic::graded_effects
 
 // GradedProb: runtime representation of a Prob<ε>-graded computation result.
 // Carries the value, the achieved grade ε, and whether the grade is epistemic or aleatoric.
-struct GradedProb {
-    value: f64,
-    epsilon: f64,       // achieved uncertainty grade ε ∈ [0,1]
-    is_aleatoric: bool, // false = epistemic (reducible), true = aleatoric (irreducible)
+pub struct GradedProb {
+    pub value: f64,
+    pub epsilon: f64,       // achieved uncertainty grade ε ∈ [0,1]
+    pub is_aleatoric: bool, // false = epistemic (reducible), true = aleatoric (irreducible)
 }
 
 // Construct an epistemic-graded value: reducible by more data
-fn graded_epistemic(value: f64, epsilon: f64) -> GradedProb {
+pub fn graded_epistemic(value: f64, epsilon: f64) -> GradedProb {
     GradedProb {
         value: value,
         epsilon: epsilon,
@@ -37,7 +37,7 @@ fn graded_epistemic(value: f64, epsilon: f64) -> GradedProb {
 }
 
 // Construct an aleatoric-graded value: irreducible physical uncertainty
-fn graded_aleatoric(value: f64, epsilon: f64) -> GradedProb {
+pub fn graded_aleatoric(value: f64, epsilon: f64) -> GradedProb {
     GradedProb {
         value: value,
         epsilon: epsilon,
@@ -60,25 +60,170 @@ fn graded_sqrt(x: f64) -> f64 with Mut, Div, Panic {
     }
 }
 
-// Grade composition: a ∘ b
-// Composes two graded computations following the GUM propagation rule.
-// Mixed (epistemic + aleatoric) → aleatoric (worst case, irreducibility dominates).
-fn graded_compose(a: GradedProb, b: GradedProb) -> GradedProb with Mut, Div, Panic {
+// ============================================================================
+// INDEPENDENCE AS A WITNESS
+// ============================================================================
+//
+// Quadrature is not the general composition law. It is the law FOR INDEPENDENT
+// inputs (JCGM 100:2008 eq. 10); the general form (eq. 13) carries a covariance
+// term. Applying quadrature without independence emits a bound tighter than the
+// truth whenever rho > 0 — see tests/run-pass/gum_independence_required.sio,
+// which measures the gap.
+//
+// So independence stops being an unstated premise and becomes an argument that
+// must be produced. This is the same discipline the rest of the system already
+// applies to provenance: a claim carries how it came to be believed.
+//
+// The default inverts. Composition without a witness now yields the CONSERVATIVE
+// bound. Only a discharged proof or an actual measurement buys the tight one —
+// declaring independence buys nothing, because computation cannot create trust.
+
+fn witness_none() -> i64 { return 0 }
+fn witness_measured() -> i64 { return 1 }
+fn witness_d_separated() -> i64 { return 2 }
+
+// Evidence that two graded quantities may be composed in quadrature.
+//   kind = witness_d_separated: discharged structurally. The causal graph proves
+//          X ⫫ Y | Z by d-separation (self-hosted/check/causal.sio). This is the
+//          witness the type-level lift will consume.
+//   kind = witness_measured: rho estimated from n paired samples.
+//   kind = witness_none: no evidence. Conservative bound.
+pub struct Independence {
+    pub kind: i64,
+    pub rho: f64,   // measured correlation, kind = witness_measured
+    pub n: i64,     // paired samples behind rho
+}
+
+pub fn indep_unknown() -> Independence {
+    Independence { kind: witness_none(), rho: 0.0, n: 0, }
+}
+
+// Structural proof: X and Y are d-separated given Z in the declared causal graph.
+//
+// `proof` must be typed `DsepProof` -- a type with no `struct DsepProof { ... }`
+// declaration anywhere in the tree, so no source text can construct one via a
+// literal, and no compatibility rule anywhere lets an i64 (or any other type)
+// stand in for it. Its ONLY producer is the compiler's own handling of
+//
+//     d_separated(A, B | Z)
+//
+// which does not compile unless the declared `causal graph` actually
+// d-separates A from B given Z; see parser/exprs.sio (Madaros) and
+// dsep_lower() (lean_single).
+//
+// Earlier this took `proof: i64` and compared it to the literal 1 -- which
+// meant a HAND-TYPED literal 1 was accepted identically to a discharged
+// witness, because by the time either reached here they were the same value
+// with the same type. Requiring the opaque type closes that: nothing needs
+// checking in the body any more, because a value of this type existing at all
+// already IS the proof -- there is no other way one could have gotten here.
+pub fn indep_dsep(proof: DsepProof) -> Independence {
+    return Independence { kind: witness_d_separated(), rho: 0.0, n: 0, }
+}
+
+// Empirical estimate. `n` is not decoration: a correlation from a handful of
+// pairs is not evidence of independence, and the composition below refuses to
+// treat it as such.
+//
+// rho outside [-1, 1] is not a measurement error to shrug off: a correlation
+// coefficient cannot leave that range, so a value outside it means the input
+// was never a correlation at all -- computed wrong, or fabricated. Downstream,
+// an out-of-range rho can drive base + cov below zero in
+// graded_compose_indep's witness_measured branch, which used to read that as
+// epsilon = 0.0 -- false certainty manufactured from evidence that was never
+// valid. Refusing here, at construction, means no Independence value carrying
+// impossible evidence can exist for that branch to ever see.
+pub fn indep_measured(rho: f64, n: i64) -> Independence with Panic {
+    if rho < (0.0 - 1.0) || rho > 1.0 {
+        panic("indep_measured: rho must be in [-1, 1], a correlation coefficient cannot exceed unit magnitude")
+    }
+    Independence { kind: witness_measured(), rho: rho, n: n, }
+}
+
+// Below this many paired samples a measured rho is too unstable to license a
+// tighter bound. Chosen as the conventional floor for a stable correlation
+// estimate; the point is that SOME floor must exist and be visible, not that
+// this particular integer is sacred.
+fn indep_min_samples() -> i64 { return 30 }
+
+// Does this witness license quadrature (or the eq. 13 form)?
+fn indep_is_usable(w: Independence) -> bool {
+    if w.kind == witness_d_separated() { return true }
+    if w.kind == witness_measured() {
+        if w.n >= indep_min_samples() { return true }
+        return false
+    }
+    return false
+}
+
+// ============================================================================
+// COMPOSITION
+// ============================================================================
+
+// Grade composition: a ∘ b, WITHOUT evidence of independence.
+//
+// Yields the conservative additive bound. This used to return quadrature, which
+// silently assumed independence — the assumption is now the caller's to produce
+// via graded_compose_indep.
+//
+// Additive is the correct fallback: for any rho in [-1, +1],
+//     sqrt(e1^2 + e2^2 + 2*rho*e1*e2) <= e1 + e2
+// with equality at rho = 1. So the additive bound is never a lie; it is merely
+// loose, and looseness is the safe direction (SEMANTICS.md Invariant 2).
+pub fn graded_compose(a: GradedProb, b: GradedProb) -> GradedProb with Mut, Div, Panic {
+    GradedProb {
+        value: a.value,
+        epsilon: a.epsilon + b.epsilon,
+        is_aleatoric: a.is_aleatoric || b.is_aleatoric,
+    }
+}
+
+// Grade composition WITH a witness.
+//
+// Aleatoric still dominates and still composes additively: irreducible noise
+// does not become reducible because the inputs happen to be independent.
+pub fn graded_compose_indep(a: GradedProb, b: GradedProb, w: Independence) -> GradedProb with Mut, Div, Panic {
     if a.is_aleatoric || b.is_aleatoric {
-        // Aleatoric dominates: additive composition
-        GradedProb {
+        return GradedProb {
             value: a.value,
             epsilon: a.epsilon + b.epsilon,
             is_aleatoric: true,
         }
-    } else {
-        // Epistemic: quadrature — sqrt(ε1² + ε2²)
-        let sum_sq = a.epsilon * a.epsilon + b.epsilon * b.epsilon
-        GradedProb {
+    }
+
+    if !indep_is_usable(w) {
+        // No usable evidence: same conservative bound as the witness-free form.
+        return GradedProb {
             value: a.value,
-            epsilon: graded_sqrt(sum_sq),
+            epsilon: a.epsilon + b.epsilon,
             is_aleatoric: false,
         }
+    }
+
+    if w.kind == witness_measured() {
+        // JCGM 100:2008 eq. (13) with the measured rho. Note this is not always
+        // tighter than additive — with rho near 1 it converges to it, which is
+        // exactly right.
+        let base = a.epsilon * a.epsilon + b.epsilon * b.epsilon
+        let cov = 2.0 * w.rho * a.epsilon * b.epsilon
+        let total = base + cov
+        if total <= 0.0 {
+            return GradedProb { value: a.value, epsilon: 0.0, is_aleatoric: false, }
+        }
+        return GradedProb {
+            value: a.value,
+            epsilon: graded_sqrt(total),
+            is_aleatoric: false,
+        }
+    }
+
+    // Structurally proven independent: quadrature, eq. (10). This is the only
+    // path on which the historic behaviour survives, and now it costs a proof.
+    let sum_sq = a.epsilon * a.epsilon + b.epsilon * b.epsilon
+    GradedProb {
+        value: a.value,
+        epsilon: graded_sqrt(sum_sq),
+        is_aleatoric: false,
     }
 }
 

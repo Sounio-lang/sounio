@@ -1,0 +1,29 @@
+import SounioPireusMatrixCodeXorEquiv
+
+open SounioPireusMatrixCodeXorEquiv
+
+#print axioms encode_f2_word4_xor
+#print axioms parity4_lt_two
+#print axioms parity4_and_xor_on_lanes
+#print axioms matrix_parity_xor
+#print axioms matrix_apply_eq_encode_f2_word4
+#print axioms matrix_apply_lt_sixteen
+#print axioms matrix_apply_xor
+#print axioms matrix_lane_map_zero
+#print axioms matrix_lane_map_xor
+#print axioms eraseDups_length_le_nat
+#print axioms nodup_of_eraseDups_length_eq_nat
+#print axioms matrix_images_nodup_of_invertible
+#print axioms matrix_images_subset_range
+#print axioms matrix_images_get
+#print axioms natMemDecidable
+#print axioms every_lane_mem_matrix_images
+#print axioms matrix_lane_right_inverse
+#print axioms matrix_lane_map_injective
+#print axioms firstPreimage16_left_inverse
+#print axioms matrix_lane_left_inverse
+#print axioms matrix_lane_inverse_zero
+#print axioms matrix_lane_inverse_xor
+#print axioms matrixCodeXorEquiv
+#print axioms matrix_code_action_transports_basis_fixed_gauge
+#print axioms matrix_code_bridge_progress_does_not_close_v13_target03

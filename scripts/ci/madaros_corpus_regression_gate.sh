@@ -51,11 +51,33 @@ fail() {
 [[ -n "$MADAROS" ]] || fail "SOUNIO_MADAROS_CORPUS_BIN must name a current-source Madaros ELF"
 [[ -x "$MADAROS" ]] || fail "not executable: $MADAROS"
 
+# The raw Madaros ELF needs far more stack than the default 8 MiB. This gate
+# execs it directly (bin/souc and bin/madaros raise the stack; this does not go
+# through them), so it raises the limit here, in its own shell, before anything
+# spawns: xargs and every run_one.sh inherit it.
+#
+# Measured 2026-09-15 on the workspace pod: under `ulimit -s 8192`, 47 of the 56
+# programs on the #2507 regression list SIGSEGVed inside
+# `run_check_mode: about to check N modules`; under 1048576 the same binaries
+# gave ordinary diagnostics (e.g. dissertation_pbpk14_model_form_uc.sio ->
+# error[E259]). Exit 139 is reported below as "the compiler CRASHED", and a
+# refresh writes it into the baseline, so a small stack does not produce a
+# weaker verdict -- it produces false crashes. If the limit cannot be raised,
+# refuse to measure.
+CORPUS_STACK_KB="${SOUNIO_MADAROS_CORPUS_STACK_KB:-1048576}"
+[[ "$CORPUS_STACK_KB" =~ ^([1-9][0-9]*|unlimited)$ ]] \
+  || fail "SOUNIO_MADAROS_CORPUS_STACK_KB must be a positive KiB count or 'unlimited', got '$CORPUS_STACK_KB'"
+ulimit -s "$CORPUS_STACK_KB" 2>/dev/null \
+  || fail "cannot raise the stack to $CORPUS_STACK_KB KiB (soft $(ulimit -s), hard $(ulimit -Hs)) -- compiles would SIGSEGV and read as compiler crashes; no verdict"
+[[ "$(ulimit -s)" == "$CORPUS_STACK_KB" ]] \
+  || fail "stack is $(ulimit -s) KiB after requesting $CORPUS_STACK_KB -- no verdict"
+
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/sounio-madaros-corpus.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 echo "[madaros-corpus] compiler: $MADAROS"
 "$MADAROS" --version 2>&1 | head -1 | sed 's/^/[madaros-corpus] /'
+echo "[madaros-corpus] stack: ulimit -s $(ulimit -s) KiB (SOUNIO_MADAROS_CORPUS_STACK_KB)"
 
 # Only run-pass programs. compile-fail and typecheck-fail tests have their own
 # gates and their verdicts are engine-specific by design.
@@ -86,6 +108,27 @@ done
 [[ ${#PROGRAMS[@]} -gt 0 ]] || fail "no programs found under tests/run-pass"
 echo "[madaros-corpus] programs: ${#PROGRAMS[@]} (skipped $skipped: //@ ignore or no fn main)"
 
+# Dynlink run-pass programs compile, then the dynamic loader exits 127 unless
+# the probe libraries and libzstd are on LD_LIBRARY_PATH. The dedicated dynlink
+# gate builds them; this gate has to as well, or those programs fail for a
+# missing file rather than a compiler defect.
+DYNLIB="$WORK/dynlib"
+mkdir -p "$DYNLIB"
+if [[ -f tests/fixtures/kl14b/kl14b_probe.c ]]; then
+  gcc -shared -fPIC -O0 -o "$DYNLIB/libkl14b_probe.so" tests/fixtures/kl14b/kl14b_probe.c
+  gcc -shared -fPIC -O0 -o "$DYNLIB/libkl14c_probe.so" tests/fixtures/kl14c/kl14c_probe.c
+  gcc -shared -fPIC -O0 -o "$DYNLIB/libkl14d_a.so" tests/fixtures/kl14d/lib_a.c
+  gcc -shared -fPIC -O0 -o "$DYNLIB/libkl14d_b.so" tests/fixtures/kl14d/lib_b.c
+  if ! ldconfig -p 2>/dev/null | grep -q 'libzstd.so.1 '; then
+    ZSTD_SO="$(find /usr/lib /lib /usr/lib64 -name 'libzstd.so.1*' 2>/dev/null | head -1 || true)"
+    if [[ -n "$ZSTD_SO" ]]; then
+      cp -Lf "$ZSTD_SO" "$DYNLIB/libzstd.so.1"
+    fi
+  fi
+  export LD_LIBRARY_PATH="$DYNLIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  echo "[madaros-corpus] dynlink libs: $DYNLIB"
+fi
+
 cat > "$WORK/run_one.sh" <<'INNER'
 #!/usr/bin/env bash
 src="$1"
@@ -98,7 +141,7 @@ printf '%s\n' "$name" >> "$WORK/ran.txt"
 elf="$WORK/${name%.sio}.elf"
 
 # A test declaring an environment feature we are not providing is not a failure.
-if grep -qE '^//@ requires: (gpu|llvm)' "$src" 2>/dev/null; then exit 0; fi
+if grep -qE '^//@ requires: (gpu|llvm|lean_single)' "$src" 2>/dev/null; then exit 0; fi
 # Tests the repo already declares as known failures are not regressions.
 if grep -qE '^//@ known-failure' "$src" 2>/dev/null; then exit 0; fi
 
@@ -224,6 +267,12 @@ if [[ "$REFRESH" == "1" ]]; then
     echo "# Regenerate:"
     echo "#   SOUNIO_MADAROS_CORPUS_BIN=<madaros> SOUNIO_MADAROS_CORPUS_REFRESH=1 \\"
     echo "#     bash scripts/ci/madaros_corpus_regression_gate.sh"
+    echo "#"
+    echo "# Stack: Madaros needs far more than the default 8 MiB. The gate raises"
+    echo "# ulimit -s to SOUNIO_MADAROS_CORPUS_STACK_KB (default 1048576) and refuses"
+    echo "# to run if it cannot; do not regenerate by bypassing that. On a small stack"
+    echo "# compiles SIGSEGV (exit 139) and land here as false compile/run/stdout entries."
+    echo "# This file was generated under ulimit -s $(ulimit -s) KiB."
     echo "#"
     echo "# One entry per failing program:
 #   '<name>.sio compile'  -- did not compile

@@ -1,0 +1,126 @@
+{
+  "schema_version": 2,
+  "evidence_kind": "retained_foundry_logs_and_content_hashes",
+  "topic": "BLK-20260901-gen2-40-to-123 residual: native binary write rc=19 at merged_ir_functions=13107",
+  "anchor": {
+    "branch": "codex/gen2-122-current-main-20260901",
+    "sha": "996ebc3911",
+    "worktree": "/tmp/sounio-gen2-rc19 (sounio-workspace pod)"
+  },
+  "root_cause": {
+    "rc19": "NativeCompiler.code_overflow -- NC_BIG_CODE (native ELF code buffer) fixed at 8 MiB (nc_code_capacity_bytes()); self-hosted/compiler/main.sio's own generated machine code exceeded it.",
+    "rc20": "NativeCompiler.reloc_overflow -- NC_FLAT_RELOC_* (flat relocation table, 4 parallel arrays) fixed at 131,072 entries (nc_flat_reloc_capacity()); the same self-compile exceeded it once rc19 was cleared and the compile advanced."
+  },
+  "method": "Added true unconditional counters (code_overflow_bytes_attempted, reloc_overflow_count_attempted) to NativeCompiler so each overflow branch reports the exact size needed, not an estimate. Measured via scripts/dev/souc-build-remote.sh --gate gen2-progress on gpuorangefs-r770-proxmox (32 CPUs), then sized each capacity bump with real headroom against the measured number. scripts/ci/native_capacity_tiers_gate.sh / native_capacity_tiers_check.py (the static declaration/accessor coherence tripwire) updated in the same commit; its rc19/rc20 regexes were loosened to allow a diagnostic body, matching the existing rc22/label_overflow precedent.",
+  "capacity_changes": [
+    {
+      "tier": "NC_BIG_CODE / nc_code_capacity_bytes()",
+      "before_bytes": 8388608,
+      "measured_need_bytes": 53515198,
+      "after_bytes": 134217728,
+      "headroom_ratio": 2.51
+    },
+    {
+      "tier": "NC_BIG_ELF / nc_elf_capacity_bytes()",
+      "before_bytes": 16777216,
+      "after_bytes": 167772160,
+      "note": "Sized to hold NC_BIG_CODE(128 MiB) + rodata(256 KiB) + data(256 KiB) + page-alignment padding with margin. Not independently overflow-measured; no rc fired against it in any run below."
+    },
+    {
+      "tier": "NC_FLAT_RELOC_* x4 / nc_flat_reloc_capacity()",
+      "before_entries": 131072,
+      "measured_need_entries": 585871,
+      "after_entries": 2097152,
+      "headroom_ratio": 3.58
+    }
+  ],
+  "gate_ratchet": {
+    "file": "scripts/ci/madaros_fixed_point_gate.sh",
+    "SOUNIO_MADAROS_FP_EXPECT_default": "check -> gen2",
+    "reason": "Gate is a ratchet: red on falling short OR going further than the recorded rung. Reaching gen2 (below) is real, reproduced progress and must be banked per the gate's own fail message, else the next run would go red for the wrong reason."
+  },
+  "foundry_runs": [
+    {
+      "purpose": "baseline measurement, rc19",
+      "exact_command": "SOUNIO_REMOTE_GEN2_MIN_INTO_ACC_DONE=122 SOUNIO_REMOTE_TIME=01:00:00 SOUNIO_REMOTE_CPUS=32 bash scripts/dev/souc-build-remote.sh --gate check --gate hello --gate gen2-progress",
+      "source_state": "unmodified codex/gen2-122-current-main-20260901 @ 996ebc3911",
+      "result": {
+        "gen1_elf_sha256": "5bf191b18cd6376e1adad48d4270057980668db0e5d89b4751a44a3cc8177d3e",
+        "check_rc": 0,
+        "hello_run_rc": 0,
+        "gen2_compile_rc": 1,
+        "merged_ir_functions": 13107,
+        "into_acc_done": 123,
+        "first_failure": "Error: native code buffer overflow -- code_bytes_needed=53515198 capacity=8388608 (raise nc_code_capacity_bytes)"
+      }
+    },
+    {
+      "purpose": "verify rc19 cleared after NC_BIG_CODE/NC_BIG_ELF bump",
+      "source_state": "+ NC_BIG_CODE=134217728, NC_BIG_ELF=167772160, code_overflow_bytes_attempted instrumentation",
+      "result": {
+        "gen1_elf_sha256": "6dbeb46bb8c25452cf577e32465623990b20626276e8baea56a700561c8b2538",
+        "check_rc": 0,
+        "hello_run_rc": 0,
+        "gen2_compile_rc": 1,
+        "merged_ir_functions": 13140,
+        "into_acc_done": 123,
+        "first_failure": "Error: Failed to write native binary to .../madaros.gen2 rc=20",
+        "note": "rc19 cleared as intended. rc20 diagnostic text existed in source but madaros_fixed_point_gate.sh's FIRST_GEN2_FAILURE grep pattern did not yet include it, so the specific message did not surface in this run's summary -- fixed in the next run below."
+      }
+    },
+    {
+      "purpose": "measure rc20 (gate pattern fixed to surface the new diagnostic)",
+      "source_state": "same as above + madaros_fixed_point_gate.sh FIRST_GEN2_FAILURE pattern extended",
+      "result": {
+        "gen1_elf_sha256": "771a507b633dac6853fc47747e2984829ae5f80135df784cbaf903aaa16a3500",
+        "check_rc": 0,
+        "hello_run_rc": 0,
+        "gen2_compile_rc": 1,
+        "merged_ir_functions": 13140,
+        "into_acc_done": 123,
+        "first_failure": "Error: native relocation table overflow -- relocs_needed=585871 capacity=131072 (raise nc_flat_reloc_capacity)"
+      }
+    },
+    {
+      "purpose": "verify rc20 cleared after NC_FLAT_RELOC_* bump; first observation of reaching rung 'run'",
+      "source_state": "+ NC_FLAT_RELOC_*=2097152, reloc_overflow_count_attempted instrumentation",
+      "result": {
+        "gen1_elf_sha256": "354432aa895c7280009588cd8c5dbcb687f25b0bfa1e8f4d8f66a71f2d9e0ceb",
+        "check_rc": 0,
+        "hello_run_rc": 0,
+        "gen2_compile_rc": 0,
+        "merged_ir_functions": 13140,
+        "into_acc_done": 123,
+        "reached_rung": "gen2",
+        "run_rung_banner": "unknown",
+        "gate_verdict": "MADAROS_FIXED_POINT_FAIL (expected rung was still 'check' at this point in the sequence -- red on purpose per the ratchet, not a regression)"
+      }
+    },
+    {
+      "purpose": "final confirmation with SOUNIO_MADAROS_FP_EXPECT default raised to gen2",
+      "source_state": "+ madaros_fixed_point_gate.sh EXPECT default check -> gen2",
+      "result": {
+        "gen1_elf_sha256": "354432aa895c7280009588cd8c5dbcb687f25b0bfa1e8f4d8f66a71f2d9e0ceb",
+        "check_rc": 0,
+        "hello_run_rc": 0,
+        "gen2_compile_rc": 0,
+        "merged_ir_functions": 13140,
+        "into_acc_done": 123,
+        "reached_rung": "gen2",
+        "run_rung_banner": "unknown",
+        "gate_verdict": "MADAROS_FIXED_POINT_OK: reached rung 'gen2' as recorded; the next wall is 'run' -- gen2 is an ELF but does not run as Madaros (banner=unknown) -- the payload is wrong, not merely different",
+        "note": "Identical gen1_elf_sha256 to the prior run confirms build determinism -- same source, same result, twice."
+      }
+    }
+  ],
+  "verified_locally": {
+    "each_edit": "SOUNIO_STDLIB_PATH=$(pwd)/stdlib ./bin/souc check self-hosted/compiler/main.sio -> check: OK, run after every source edit before spending remote compute",
+    "static_gate": "bash scripts/ci/native_capacity_tiers_gate.sh -> NATIVE_CAPACITY_TIERS_PASS code=134217728 reloc=2097152 elf=167772160 legacy_elf=16777216"
+  },
+  "residual": {
+    "id": "gen2-run-rung-banner-unknown",
+    "description": "gen2.elf is a valid ELF, compiles rc=0, but `gen2 --version` does not print output souc_banner recognizes as either 'madaros' or 'lean_single' (scripts/lib/souc_invoke.sh). madaros_fixed_point_gate.sh: 'the payload is wrong, not merely different'. Reproduced identically across two independent runs (same gen1_elf_sha256).",
+    "scope_note": "Not touched by this fix. This is a distinct, undiagnosed class of issue (gen2 runtime/self-identification behavior) separate from the native-writer capacity walls this receipt covers. Root cause not yet investigated: could be anywhere from a --version dispatch bug to a deeper miscompile in gen2's own emitted code.",
+    "next_step": "Needs its own diagnosis pass: capture gen2's actual --version stdout/stderr (not just the banner classification), and check whether gen2 crashes, hangs, or prints something unexpected."
+  }
+}

@@ -1,0 +1,12 @@
+import SounioPireusGaugeCoboundaryFaithfulness
+
+open SounioPireusGaugeCoboundaryFaithfulness
+
+#print axioms tree_section_bit_roundtrip
+#print axioms gauge_word_eq_of_section_bits
+#print axioms gaugeCoboundary_injective
+#print axioms distinct_gauge_words_induce_distinct_coboundaries
+#print axioms gaugeAct_injective_in_word
+#print axioms distinct_gauge_words_act_distinctly_on_every_table
+#print axioms gauge_action_free_on_every_sign_table
+#print axioms gauge_faithfulness_does_not_close_v13_target03

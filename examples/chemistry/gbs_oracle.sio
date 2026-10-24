@@ -1,0 +1,352 @@
+// examples/chemistry/gbs_oracle.sio
+//
+// A SECOND integrator for the GRI-Mech 3.0 H/O checkpoint, of a different
+// method, in Sounio.  The replica behind benchmarks/chemistry/RESULTS.md is
+// fixed-step explicit RK4; this file is Gragg-Bulirsch-Stoer, the modified
+// midpoint rule with Richardson extrapolation.  Its truncation error expands
+// in EVEN powers of the substep only, and its error constants are unrelated
+// to RK4's, so a disagreement between the two is a statement about method,
+// not about a shared mistake.
+//
+// The right-hand side is copied verbatim from rep_traj_bug.sio -- the same
+// module tables and rate functions (G30_REAC / G30_PROD / G30_NU / G30_EFF,
+// g30_kfwd_eff, g30_kc_all) -- so the ONLY difference between the two
+// instruments is the time stepping.  That is the point: an oracle that shared
+// the integrator would be a second opinion from the same witness.
+//
+// It answers a question RESULTS.md 7.7 leaves open.  There the replica's
+// self-difference under step halving GROWS by 12x to 140x, which is the
+// opposite of what truncation does, and stagnation was excluded (7.7, and
+// rep_stagnation.sio).  With a third instrument the question becomes
+// answerable: if RK4's distance to GBS does NOT grow as dt is halved while
+// its self-difference does, the growth is not truncation error.
+//
+// Units, stated honestly (measured 2026-09-02 on lean_single): T is typed `K`
+// and loses that type at the first f64 parameter; derived unit types do not
+// parse on either engine.  Concentrations are bare f64 in mol/cm^3 by
+// convention, not by type.  Engine: lean_single (Madaros prints nothing).
+//
+// Run:  SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run examples/chemistry/gbs_oracle.sio
+
+use chemistry::gri30_h2::*
+
+fn pi64(x: i64) with IO, Mut, Div, Panic {
+    if x < 0 { print("-"); pi64(0 - x) } else if x >= 10 { pi64(x / 10); print((x % 10) as i32) } else { print(x as i32) }
+}
+
+// print v as an integer mantissa at 15 significant digits plus an exponent tag
+fn pv(label: string, v: f64, scale: f64, exponent: i64) with IO, Mut, Div, Panic {
+    print(label); print(" "); pi64((v * scale) as i64); print("e"); pi64(exponent); println("")
+}
+
+fn fabs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// x^p for small non-negative integer p, by multiplication (no exp/ln)
+fn ipow(x: f64, p: f64) -> f64 with Mut, Div, Panic {
+    var acc: f64 = 1.0
+    var n: i64 = p as i64
+    while n > 0 { acc = acc * x; n = n - 1 }
+    acc
+}
+
+// ---- right-hand side: verbatim from rep_traj_bug.sio, shipped form only ----
+
+fn rates_sh(t: f64, c: &[f64; 10], kc: &[f64; 29], rn: &![f64; 29]) with Mut, Div, Panic {
+    var r: i64 = 0
+    while r < (29 as i64) {
+        var m_eff: f64 = 0.0
+        var s: i64 = 0
+        while s < (10 as i64) { m_eff = m_eff + G30_EFF[r * (10 as i64) + s] * (*c)[s]; s = s + 1 }
+        let kf = g30_kfwd_eff(r, t, m_eff)
+        var fwd: f64 = kf
+        var rev: f64 = kf / (*kc)[r]
+        s = 0
+        while s < (10 as i64) {
+            let i: i64 = r * (10 as i64) + s
+            if G30_REAC[i] > 0.0 { fwd = fwd * ipow((*c)[s], G30_REAC[i]) }
+            if G30_PROD[i] > 0.0 { rev = rev * ipow((*c)[s], G30_PROD[i]) }
+            s = s + 1
+        }
+        (*rn)[r] = fwd - rev
+        r = r + 1
+    }
+}
+
+fn dcdt(t: f64, c: &[f64; 10], kc: &[f64; 29], dc: &![f64; 10]) with Mut, Div, Panic {
+    var rn: [f64; 29] = [0.0; 29]
+    rates_sh(t, c, kc, &!rn)
+    var i: i64 = 0
+    while i < (10 as i64) {
+        var acc: f64 = 0.0
+        var r: i64 = 0
+        while r < (29 as i64) { acc = acc + G30_NU[r * (10 as i64) + i] * rn[r]; r = r + 1 }
+        (*dc)[i] = acc
+        i = i + 1
+    }
+}
+
+// ---- instrument A: fixed-step explicit RK4, the replica's method ----
+
+fn rk4(t: f64, c: &![f64; 10], dt: f64, kc: &[f64; 29]) with Mut, Div, Panic {
+    var k1: [f64; 10] = [0.0; 10]
+    var k2: [f64; 10] = [0.0; 10]
+    var k3: [f64; 10] = [0.0; 10]
+    var k4: [f64; 10] = [0.0; 10]
+    var tmp: [f64; 10] = [0.0; 10]
+    dcdt(t, c, kc, &!k1)
+    var i: i64 = 0
+    while i < (10 as i64) { tmp[i] = (*c)[i] + 0.5 * dt * k1[i]; i = i + 1 }
+    dcdt(t, &tmp, kc, &!k2)
+    i = 0
+    while i < (10 as i64) { tmp[i] = (*c)[i] + 0.5 * dt * k2[i]; i = i + 1 }
+    dcdt(t, &tmp, kc, &!k3)
+    i = 0
+    while i < (10 as i64) { tmp[i] = (*c)[i] + dt * k3[i]; i = i + 1 }
+    dcdt(t, &tmp, kc, &!k4)
+    i = 0
+    while i < (10 as i64) { (*c)[i] = (*c)[i] + dt / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]); i = i + 1 }
+}
+
+// ---- instrument B: Gragg modified midpoint over one macro-step ----
+//
+//   z_0 = y,  z_1 = z_0 + h f(z_0),  z_{m+1} = z_{m-1} + 2h f(z_m),
+//   result = (z_n + z_{n-1} + h f(z_n)) / 2
+//
+// The final averaging is what kills the odd powers of h and leaves an error
+// series in h^2 alone -- the property Richardson extrapolation then exploits.
+
+fn mmid(t: f64, y: &[f64; 10], big_h: f64, n: i64, kc: &[f64; 29], out: &![f64; 10]) with Mut, Div, Panic {
+    let h: f64 = big_h / (n as f64)
+    var zm: [f64; 10] = [0.0; 10]
+    var zn: [f64; 10] = [0.0; 10]
+    var zt: [f64; 10] = [0.0; 10]
+    var d: [f64; 10] = [0.0; 10]
+    var i: i64 = 0
+    while i < (10 as i64) { zm[i] = (*y)[i]; i = i + 1 }
+    dcdt(t, y, kc, &!d)
+    i = 0
+    while i < (10 as i64) { zn[i] = zm[i] + h * d[i]; i = i + 1 }
+    var m: i64 = 1
+    while m < n {
+        dcdt(t, &zn, kc, &!d)
+        i = 0
+        while i < (10 as i64) { zt[i] = zm[i] + 2.0 * h * d[i]; i = i + 1 }
+        i = 0
+        while i < (10 as i64) { zm[i] = zn[i]; zn[i] = zt[i]; i = i + 1 }
+        m = m + 1
+    }
+    dcdt(t, &zn, kc, &!d)
+    i = 0
+    while i < (10 as i64) { (*out)[i] = 0.5 * (zn[i] + zm[i] + h * d[i]); i = i + 1 }
+}
+
+// One GBS macro-step: modified midpoint at n = 2,4,...,2*kmax substeps, then
+// Neville extrapolation in h^2 to the h -> 0 limit.  The table is flattened,
+// row k at offset k*10, because Sounio arrays are one-dimensional.
+
+fn gbs_step(t: f64, y: &![f64; 10], big_h: f64, kmax: i64, seq: &[i64; 8], kc: &[f64; 29]) with Mut, Div, Panic {
+    var tab: [f64; 80] = [0.0; 80]
+    var row: [f64; 10] = [0.0; 10]
+    var k: i64 = 0
+    while k < kmax {
+        let nk: i64 = (*seq)[k]
+        mmid(t, y, big_h, nk, kc, &!row)
+        var i: i64 = 0
+        while i < (10 as i64) { tab[k * (10 as i64) + i] = row[i]; i = i + 1 }
+        // Neville, downward: each pass removes one more power of h^2
+        var j: i64 = k - 1
+        while j >= 0 {
+            let nj: f64 = (*seq)[j] as f64
+            let ratio: f64 = ((nk as f64) / nj) * ((nk as f64) / nj)
+            i = 0
+            while i < (10 as i64) {
+                let hi: f64 = tab[(j + 1) * (10 as i64) + i]
+                let lo: f64 = tab[j * (10 as i64) + i]
+                tab[j * (10 as i64) + i] = hi + (hi - lo) / (ratio - 1.0)
+                i = i + 1
+            }
+            j = j - 1
+        }
+        k = k + 1
+    }
+    var i2: i64 = 0
+    while i2 < (10 as i64) { (*y)[i2] = tab[i2]; i2 = i2 + 1 }
+}
+
+fn init_state(t: f64, c: &![f64; 10]) with Mut, Div, Panic {
+    let mtot: f64 = 101325.0 / (8.31446261815324 * t) * 1.0e-6
+    var i: i64 = 0
+    while i < (10 as i64) { (*c)[i] = 0.0; i = i + 1 }
+    (*c)[0] = mtot * 0.02
+    (*c)[3] = mtot * 0.01
+    (*c)[8] = mtot * 0.97
+    (*c)[1] = 1.0e-11
+}
+
+fn run_gbs(t: f64, kc: &[f64; 29], big_h: f64, macro_steps: i64, kmax: i64, seq: &[i64; 8], out: &![f64; 10]) with Mut, Div, Panic {
+    var y: [f64; 10] = [0.0; 10]
+    init_state(t, &!y)
+    var n: i64 = 0
+    while n < macro_steps { gbs_step(t, &!y, big_h, kmax, seq, kc); n = n + 1 }
+    var i: i64 = 0
+    while i < (10 as i64) { (*out)[i] = y[i]; i = i + 1 }
+}
+
+fn run_rk4(t: f64, kc: &[f64; 29], dt: f64, steps: i64, out: &![f64; 10]) with Mut, Div, Panic {
+    var y: [f64; 10] = [0.0; 10]
+    init_state(t, &!y)
+    var n: i64 = 0
+    while n < steps { rk4(t, &!y, dt, kc); n = n + 1 }
+    var i: i64 = 0
+    while i < (10 as i64) { (*out)[i] = y[i]; i = i + 1 }
+}
+
+// worst relative difference over the eight reacting species, as an integer
+// count of parts in 1e18 (printing is integer-only in this file)
+fn worst_rel(a: &[f64; 10], b: &[f64; 10]) -> f64 with Mut, Div, Panic {
+    var w: f64 = 0.0
+    var i: i64 = 0
+    while i < (8 as i64) {
+        if fabs((*a)[i]) > 0.0 {
+            let d: f64 = fabs((*a)[i] - (*b)[i]) / fabs((*a)[i])
+            if d > w { w = d }
+        }
+        i = i + 1
+    }
+    w
+}
+
+// per-species relative difference, so the ladder below can be read against the
+// per-species ratios of RESULTS.md 7.7 rather than against a worst-over-species
+// summary that may follow a different species at each step
+fn report_species(label: string, names: &[string; 8], a: &[f64; 10], b: &[f64; 10]) with IO, Mut, Div, Panic {
+    print(label); print(":")
+    var i: i64 = 0
+    while i < (8 as i64) {
+        print(" "); print((*names)[i]); print("=")
+        if fabs((*a)[i]) > 0.0 {
+            pi64((fabs((*a)[i] - (*b)[i]) / fabs((*a)[i]) * 1.0e18) as i64)
+        } else { print("0") }
+        i = i + 1
+    }
+    println("")
+}
+
+fn report(label: string, a: &[f64; 10], b: &[f64; 10]) with IO, Mut, Div, Panic {
+    print(label); print("  worst rel x1e18 = "); pi64((worst_rel(a, b) * 1.0e18) as i64); println("")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let t_k: K = 1500.0
+    let t: f64 = t_k as f64
+    let kc: [f64; 29] = g30_kc_all(t)
+
+    println("GBS_ORACLE (Sounio) -- GRI-Mech 3.0 H/O at T=1500K, t=1e-4 s, shipped reverse form")
+    println("instrument A: fixed-step RK4 (the replica's method)")
+    println("instrument B: Gragg-Bulirsch-Stoer, modified midpoint + Richardson in h^2")
+    println("same right-hand side, same module tables; only the time stepping differs")
+    println("mantissas at 15 significant digits, mol/cm3; differences as worst relative x1e18")
+
+    var g1: [f64; 10] = [0.0; 10]
+    var g2: [f64; 10] = [0.0; 10]
+    var r1: [f64; 10] = [0.0; 10]
+    var r2: [f64; 10] = [0.0; 10]
+
+    // STEP 1 -- characterise the oracle before using it.  Richardson
+    // extrapolation divides by ((n_k/n_j)^2 - 1), which for close-together
+    // subdivisions is well below one, so each extra level amplifies roundoff
+    // while removing one more power of h^2.  The useful order is therefore
+    // finite, it depends on the subdivision sequence, and it has to be
+    // MEASURED: the self-difference between H and H/2 at fixed depth is the
+    // oracle's own resolution, and no cross-method verdict can be finer.
+    let harm: [i64; 8] = [2, 4, 6, 8, 10, 12, 14, 16]     // n_k = 2k
+    let bulirsch: [i64; 8] = [2, 4, 6, 8, 12, 16, 24, 32] // wider gaps, milder denominators
+    let names: [string; 8] = ["H2", "H", "O", "O2", "OH", "H2O", "HO2", "H2O2"]
+    println("")
+    println("STEP 1 -- ORACLE RESOLUTION vs EXTRAPOLATION DEPTH AND SEQUENCE")
+    println("  (GBS at H=1e-6 against GBS at H=5e-7, same depth; worst relative x1e18)")
+    println("  sequence 2,4,6,8,10,12,14,16")
+    var kk: i64 = 3
+    while kk <= (8 as i64) {
+        run_gbs(t, &kc, 1.0e-6, 100 as i64, kk, &harm, &!g1)
+        run_gbs(t, &kc, 5.0e-7, 200 as i64, kk, &harm, &!g2)
+        print("    depth "); pi64(kk); print("  self-difference x1e18 = ")
+        pi64((worst_rel(&g1, &g2) * 1.0e18) as i64); println("")
+        kk = kk + 1
+    }
+    println("  sequence 2,4,6,8,12,16,24,32")
+    kk = 3
+    while kk <= (8 as i64) {
+        run_gbs(t, &kc, 1.0e-6, 100 as i64, kk, &bulirsch, &!g1)
+        run_gbs(t, &kc, 5.0e-7, 200 as i64, kk, &bulirsch, &!g2)
+        print("    depth "); pi64(kk); print("  self-difference x1e18 = ")
+        pi64((worst_rel(&g1, &g2) * 1.0e18) as i64); println("")
+        kk = kk + 1
+    }
+    println("  A minimum inside the sweep is the truncation-to-roundoff crossover,")
+    println("  measured in place: past it, extra order costs accuracy.")
+
+    // STEP 2 -- the comparison, at the depth and sequence the sweep justifies.
+    // Measured 2026-09-02: both sequences bottom out at depth 6, and the wider
+    // one bottoms out four times lower -- 1.421e-14 against 5.734e-14 -- because
+    // its denominators are larger.  Depth 6 with 2,4,6,8,12,16,24,32 is
+    // therefore the sharpest instrument this file can build, and it is the one
+    // the verdict below is entitled to use.  Nothing here is chosen by taste:
+    // if the sweep above moves, this line moves with it.
+    let kbest: i64 = 6
+    println("")
+    print("STEP 2 -- cross-method comparison at depth "); pi64(kbest)
+    println(", sequence 2,4,6,8,12,16,24,32 (the sweep minimum)")
+    run_gbs(t, &kc, 1.0e-6, 100 as i64, kbest, &bulirsch, &!g1)
+    run_gbs(t, &kc, 5.0e-7, 200 as i64, kbest, &bulirsch, &!g2)
+    run_rk4(t, &kc, 1.0e-8, 10000 as i64, &!r1)
+    run_rk4(t, &kc, 5.0e-9, 20000 as i64, &!r2)
+
+    println("")
+    println("STATE at t=1e-4 s")
+    let scales: [f64; 8] = [1.0e22, 1.0e24, 1.0e24, 1.0e22, 1.0e24, 1.0e23, 1.0e26, 1.0e28]
+    let exps: [i64; 8] = [-22, -24, -24, -22, -24, -23, -26, -28]
+    var i: i64 = 0
+    while i < (8 as i64) {
+        print(names[i]); println("")
+        pv("  GBS H=1e-6 ", g1[i], scales[i], exps[i])
+        pv("  RK4 dt=1e-8", r1[i], scales[i], exps[i])
+        i = i + 1
+    }
+
+    println("")
+    println("SELF-CONVERGENCE OF THE ORACLE (B at H=1e-6 vs B at H=5e-7)")
+    report("  GBS vs GBS ", &g1, &g2)
+    println("  Nothing below this number is resolved by the oracle.  Per species,")
+    println("  so each distance below can be read against its OWN resolution:")
+    report_species("  GBS vs GBS", &names, &g1, &g2)
+
+    println("")
+    println("STEP 3 -- THE HALVING LADDER, RESULTS.md 7.7")
+    println("  For each dt: distance to the independent method, then the")
+    println("  self-difference against the next coarser step.")
+    var r3: [f64; 10] = [0.0; 10]
+    var r4: [f64; 10] = [0.0; 10]
+    run_rk4(t, &kc, 2.5e-9, 40000 as i64, &!r3)
+    run_rk4(t, &kc, 1.25e-9, 80000 as i64, &!r4)
+    report("  dt=1e-8    vs GBS", &r1, &g1)
+    report("  dt=5e-9    vs GBS", &r2, &g1)
+    report("  dt=2.5e-9  vs GBS", &r3, &g1)
+    report("  dt=1.25e-9 vs GBS", &r4, &g1)
+    println("")
+    println("  per species, relative distance to the oracle x1e18:")
+    report_species("  dt=1e-8   ", &names, &r1, &g1)
+    report_species("  dt=5e-9   ", &names, &r2, &g1)
+    report_species("  dt=2.5e-9 ", &names, &r3, &g1)
+    report_species("  dt=1.25e-9", &names, &r4, &g1)
+    println("")
+    report("  dt=1e-8   vs dt=5e-9   ", &r1, &r2)
+    report("  dt=5e-9   vs dt=2.5e-9 ", &r2, &r3)
+    report("  dt=2.5e-9 vs dt=1.25e-9", &r3, &r4)
+    println("")
+    println("A fourth-order method that is resolving truncation divides its error")
+    println("by sixteen at every halving.  If instead the distance to an independent")
+    println("method stops falling, or rises, while the step keeps shrinking, what is")
+    println("left is not truncation, and RESULTS.md 7.7 can stop calling it unexplained.")
+    0
+}

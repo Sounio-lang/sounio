@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 SOUC="${SOUNIO_FLEET_TYPESTATE_SOUC:-$ROOT_DIR/bin/souc}"
 ENGINE="${SOUNIO_FLEET_TYPESTATE_ENGINE:-lean_single}"
 STDLIB="$ROOT_DIR/stdlib"
@@ -32,6 +34,8 @@ expect_rejection() {
     cat "$log" >&2
     fail "$label must reject with rc=1, got rc=$rc"
   }
+  # rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+  sounio_expect_failed_exit "$rc" "$log" || { cat "$log" >&2; fail "$label: not a clean refusal: $(sounio_refusal_reason)"; }
   local count
   count="$(rg -c "error\[$code" "$log")"
   if [[ "$code" == E039 || "$code" == E175 ]]; then
@@ -83,6 +87,8 @@ expect_runtime_refusal() {
     cat "$log" >&2
     fail "$label must refuse at runtime"
   }
+  # rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+  sounio_expect_failed_exit "$rc" "$log" || { cat "$log" >&2; fail "$label: not a clean refusal: $(sounio_refusal_reason)"; }
 }
 
 [[ -x "$SOUC" ]] || fail "compiler is missing: $SOUC"

@@ -1,0 +1,11 @@
+/- Axiom audit for the concrete V13 parent-archive reconstruction theorems. -/
+import SounioPireusOperatorOrbitArchiveReconstruction
+
+open SounioPireusOperatorOrbitArchiveReconstruction
+
+#print axioms concrete_archive_reconstruction_matches_declared_frozen_summary
+#print axioms reconstructed_archive_has_exactly_128_concrete_tables
+#print axioms forty_eight_cubic_children_reconstruct_ninety_six_action_images
+#print axioms sixteen_fresh_paired_epochs_reconstruct_128_images
+#print axioms archive_reconstruction_carries_declared_frozen_hash_literals
+#print axioms archive_reconstruction_does_not_close_class_parity

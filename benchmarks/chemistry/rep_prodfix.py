@@ -86,7 +86,7 @@ def main():
     print("'fix' is a no-op relative to the shipped code; only the buggy form differs.")
 
     # (1) radical-loaded state: reverse terms must carry real flux
-    mtot = 1.0 / (82.057 * T)
+    mtot = 101325.0 / (8.31446261815324 * T) * 1e-6
     c = {s: 0.0 for s in rep.SP}
     c["H2"], c["O2"], c["N2"] = mtot * 0.02, mtot * 0.01, mtot * 0.97
     c["H"], c["OH"], c["O"] = 1e-9, 1e-10, 1e-10
@@ -130,8 +130,22 @@ def main():
           f"{worst:.3e}")
     print(f"  reported buggy form, worst relative deviation from Cantera:  "
           f"{worst_bug:.3e}")
-    print("  (the ~1e-07 floor on the shipped path is the CHEMKIN activation-energy")
-    print("   gas constant, R = 1.9872041 cal/mol/K, not a stoichiometry error)")
+    # This line used to assert, in the present tense, a ~1e-07 floor on the
+    # shipped path and attribute it to the CHEMKIN activation-energy constant
+    # R = 1.9872041 cal/mol/K.  The attribution was right and #2382 acted on
+    # it: the replica now uses Cantera's own 8.31446261815324/4.184, the floor
+    # it explained is gone, and the sentence outlived the fix that disproved
+    # it.  So the floor is printed from what this run measured, never asserted.
+    if worst > 1e-9:
+        print(f"  the {worst:.3e} floor on the shipped path is the "
+              f"activation-energy gas constant,")
+        print(f"  R_cal = {rep.R_CAL!r} against Cantera's "
+              f"8.31446261815324/4.184, not a stoichiometry error")
+    else:
+        print(f"  the shipped path agrees with the oracle to {worst:.3e}, at "
+              f"the double-precision floor:")
+        print(f"  R_cal = {rep.R_CAL!r} is Cantera's own value (#2382), so no "
+              f"activation-energy floor remains")
 
     i = [r for r in range(rep.NR) if rep.RX[r]["eq"] == "H + HO2 <=> O2 + H2"]
     for r in i:

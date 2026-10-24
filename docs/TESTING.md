@@ -2,8 +2,8 @@
 topic_id: repo.docs.testing
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.testing
 -->
 
@@ -51,7 +51,7 @@ Expected outcome: compile error indicating a missing effect annotation.
 ## 5. Optional Fast Gate
 
 ```bash
-./scripts/fast_gate.sh
+./scripts/dev/fast_gate.sh
 ```
 
 This runs repository-specific quality checks and a focused regression subset.

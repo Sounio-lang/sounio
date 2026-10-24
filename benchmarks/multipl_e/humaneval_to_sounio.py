@@ -15,7 +15,7 @@ Sounio-specific translation rules:
   - var for mutable bindings, let for immutable
   - &! for mutable references (not &mut)
   - Effects required: with IO, Mut, Panic, Div as needed
-  - No unary minus: 0 - x instead of -x
+  - Negation: -x is emitted as 0 - x (unary minus also works)
   - No closure literals: named fn refs only
   - Fixed-size arrays: [i64; 256] with explicit length
   - assert() not assert!()
@@ -91,7 +91,7 @@ _LIST_LITERAL_RE = re.compile(r"\[([^\[\]]*)\]")
 
 
 def _translate_neg_int(m: re.Match) -> str:
-    """Convert -N to (0 - N) for Sounio (no unary minus)."""
+    """Convert -N to (0 - N): the translator's explicit spelling (unary minus also works)."""
     return f"(0 - {m.group(1)})"
 
 

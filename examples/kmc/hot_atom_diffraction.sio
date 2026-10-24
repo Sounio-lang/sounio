@@ -1,0 +1,617 @@
+// examples/kmc/hot_atom_diffraction.sio
+//
+// M7: HALF-ORDER SPOT PROFILES AS THE PARITY-SIGNED CHARACTERISTIC FUNCTION
+//     OF THE FINAL SEPARATION OF DISSOCIATED ATOM PAIRS -- AND WHERE THAT
+//     STOPS BEING TRUE.
+//
+// THE EXACT STATEMENT. For a sublattice sign field sigma_F (F0 = (-1)^(r+c),
+// the c(2x2) (1/2,1/2) spot; F1 = (-1)^r, (0,1/2); F2 = (-1)^c, (1/2,0)), a
+// pair whose atoms end at r1 and r2 = r1 + D contributes
+//     |sigma(r1) e^(iq.r1) + sigma(r2) e^(iq.r2)|^2 = 2 + 2 g_F(D) cos(q.D),
+// g_F(D) = sigma(r1) sigma(r2) = -1 if D puts the atoms on opposite
+// sublattices of F, +1 if on the same. With N_p pairs whose positions are
+// uncorrelated with each other,
+//     S_F(q) = (N_p / N) * [ 2 + 2 < g_F(D) cos(q.D) >_pairs ]
+// exactly: the spot profile is the parity-signed characteristic function of
+// the distribution of FINAL pair separations, whatever path the atoms took.
+// Transient hops enter only through D. For a (1,0) landing and Poisson(lam)
+// NN hops per atom, unobstructed, F0 is same-sublattice iff the total hop
+// count is odd, with probability (1 - e^(-4 lam))/2.
+//
+// PRIOR ART, stated before any result: STM already measures full pair
+// separation distributions for immobile adatoms (O2/Al(111), O2/Ag(001),
+// N2/Ru(0001)); Bukas & Reuter (PRL 117, 146101 (2016)) caution that end
+// distances are a misleading measure of hot-atom lifetimes; equilibrium pair
+// correlations have been compared with O/Pd(100) LEED spots (Kappus 2017).
+// The diffraction readout here is complementary to STM (ensemble-averaged,
+// usable during uptake), not superior. What this file measures that the
+// exact statement cannot give: how far it survives finite coverage, landing
+// exclusion and hops blocked by earlier atoms.
+//
+// THE TRICK THAT MAKES THAT CLEAN. The program keeps every pair's final
+// sites and evaluates the exact right-hand side over the pairs actually
+// realised in that run (PRED lines, same modes and shells as the SPOT
+// lines). SPOT - PRED is then purely the cross-pair correlation term; the
+// hop model and the histogram cancel out of the comparison.
+//
+// RULES, fixed before any data from this file:
+//   H1 exact    the sum over pairs of sigma_F(r1) + sigma_F(r2) equals the
+//               lattice total charge of F, every checkpoint (integer).
+//   H2 theorem  at coverage 0.01 without exclusion, SPOT vs PRED per shell
+//               within 3 SE across seeds, multiplicity-aware (Poisson 99%
+//               allowance at the t-tail rate 0.0047 per comparison), for
+//               scenarios 0-5.
+//   H3 parity   scenarios 0-3 ((1,0), lam = 0.05, 0.1, 0.25, 0.5): realised
+//               F0 same-sublattice fraction at coverage 0.01 equals
+//               (1 - e^(-4 lam))/2 within 3 binomial-scatter SE across seeds.
+//               AMENDED BEFORE ANY PRODUCTION DATA: a local smoke run showed
+//               ~24% of hops blocked even at coverage 0.01, because right
+//               after landing the partner occupies one of the four
+//               neighbours. The formula assumed unobstructed hops, so H3 as
+//               written is expected to FAIL, low, for that stated reason; it
+//               is kept and reported, not dropped.
+//   H3' exact   for every pair, the sublattice relation of its final sites in
+//               each field equals the parity of (landing displacement +
+//               SUCCESSFUL hops) along the relevant axes; counts compared as
+//               integers at every checkpoint.
+//   H4 exploratory, NN exclusion to coverage 0.30 (scenarios 6-8): the ratio
+//               SPOT/PRED of the centre shell per checkpoint, i.e. how fast
+//               cross-pair correlations invalidate the exact reading.
+//
+// The primitives below (rng, trig tables, sk_field and its self-test) are
+// copied verbatim from uptake_diffraction.sio (commit 8a38349d19), where
+// sk_field was validated against analytic S(q) in 81 shells.
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn abs_i(x: i64) -> i64 { if x < 0 { 0 - x } else { x } }
+
+fn rng_step(s: i64) -> i64 { s * 6364136223846793005 + 1442695040888963407 }
+fn rng_unit(s: i64) -> f64 with Div, Panic {
+    let u: i64 = s & 4611686018427387903
+    let hi: i64 = u / 4294967296
+    (hi as f64) / 1073741824.0
+}
+
+fn cos_f(x0: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    var x = x0
+    while x > pi { x = x - 2.0 * pi }
+    while x < 0.0 - pi { x = x + 2.0 * pi }
+    var sum: f64 = 1.0
+    var term: f64 = 1.0
+    var i: i64 = 1
+    while i < 40 { term = 0.0 - term * x * x / (((2 * i - 1) * (2 * i)) as f64)  sum = sum + term  i = i + 1 }
+    sum
+}
+fn sin_f(x0: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    var x = x0
+    while x > pi { x = x - 2.0 * pi }
+    while x < 0.0 - pi { x = x + 2.0 * pi }
+    var sum: f64 = x
+    var term: f64 = x
+    var i: i64 = 1
+    while i < 40 { term = 0.0 - term * x * x / (((2 * i) * (2 * i + 1)) as f64)  sum = sum + term  i = i + 1 }
+    sum
+}
+
+fn trig_tables(l: i64, ct: &![f64; 1280], st: &![f64; 1280]) with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    var mm: i64 = 0
+    while mm <= 4 {
+        var c: i64 = 0
+        while c < l {
+            let a = 2.0 * pi * ((mm * c) as f64) / (l as f64)
+            ct[(mm * l + c) as usize] = cos_f(a)
+            st[(mm * l + c) as usize] = sin_f(a)
+            c = c + 1
+        }
+        mm = mm + 1
+    }
+}
+
+// Shell-averaged |sum_i f_i e^(iq.r_i)|^2 / N over q = 2 pi (mx, my)/L,
+// |mx|,|my| <= 4, half plane; shells[j] holds mx^2 + my^2 = j. Same mode set
+// and averaging as kmc_c2x2_production.sio, applied to an arbitrary field.
+fn sk_field(fld: &[f64; 65536], l: i64, ct: &[f64; 1280], st: &[f64; 1280],
+            shells: &![f64; 33]) with Mut, Div, Panic {
+    let n = l * l
+    var cnt: [i64; 33] = [0; 33]
+    var s0: i64 = 0
+    while s0 < 33 { shells[s0 as usize] = 0.0  s0 = s0 + 1 }
+    var mx: i64 = 0
+    while mx <= 4 {
+        var my: i64 = 0 - 4
+        while my <= 4 {
+            if mx > 0 || (mx == 0 && my > 0) {
+                let amy = abs_i(my)
+                var sy: f64 = 1.0
+                if my < 0 { sy = 0.0 - 1.0 }
+                var a: f64 = 0.0
+                var bs: f64 = 0.0
+                var r: i64 = 0
+                while r < l {
+                    let cyv: f64 = ct[(amy * l + r) as usize]
+                    let syv: f64 = sy * st[(amy * l + r) as usize]
+                    var c: i64 = 0
+                    while c < l {
+                        let v: f64 = fld[(r * l + c) as usize]
+                        if v != 0.0 {
+                            let cxv: f64 = ct[(mx * l + c) as usize]
+                            let sxv: f64 = st[(mx * l + c) as usize]
+                            a = a + v * (cxv * cyv - sxv * syv)
+                            bs = bs + v * (sxv * cyv + cxv * syv)
+                        }
+                        c = c + 1
+                    }
+                    r = r + 1
+                }
+                let j = mx * mx + my * my
+                shells[j as usize] = shells[j as usize] + (a * a + bs * bs) / (n as f64)
+                cnt[j as usize] = cnt[j as usize] + 1
+            }
+            my = my + 1
+        }
+        mx = mx + 1
+    }
+    var s1: i64 = 0
+    while s1 < 33 {
+        if cnt[s1 as usize] > 0 { shells[s1 as usize] = shells[s1 as usize] / (cnt[s1 as usize] as f64) }
+        s1 = s1 + 1
+    }
+}
+
+// <2 + 2 g cos(q.d)> over the 8 lattice images of (dx, dy), shell-averaged
+// over the same modes as sk_field. field: 0 = F0, 1 = F1 (row), 2 = F2 (col).
+fn analytic_shells(dx: i64, dy: i64, field: i64, l: i64, shells: &![f64; 33]) with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    var ix: [i64; 8] = [0; 8]
+    var iy: [i64; 8] = [0; 8]
+    ix[0] = dx  iy[0] = dy
+    ix[1] = 0 - dx  iy[1] = dy
+    ix[2] = dx  iy[2] = 0 - dy
+    ix[3] = 0 - dx  iy[3] = 0 - dy
+    ix[4] = dy  iy[4] = dx
+    ix[5] = 0 - dy  iy[5] = dx
+    ix[6] = dy  iy[6] = 0 - dx
+    ix[7] = 0 - dy  iy[7] = 0 - dx
+    var cnt: [i64; 33] = [0; 33]
+    var s0: i64 = 0
+    while s0 < 33 { shells[s0 as usize] = 0.0  s0 = s0 + 1 }
+    var mx: i64 = 0
+    while mx <= 4 {
+        var my: i64 = 0 - 4
+        while my <= 4 {
+            if mx > 0 || (mx == 0 && my > 0) {
+                var acc: f64 = 0.0
+                var k: i64 = 0
+                while k < 8 {
+                    let ex: i64 = ix[k as usize]
+                    let ey: i64 = iy[k as usize]
+                    var g: f64 = 1.0
+                    var par: i64 = 0
+                    if field == 0 { par = abs_i(ex + ey) }
+                    if field == 1 { par = abs_i(ey) }
+                    if field == 2 { par = abs_i(ex) }
+                    if par - (par / 2) * 2 == 1 { g = 0.0 - 1.0 }
+                    let ph = 2.0 * pi * ((mx * ex + my * ey) as f64) / (l as f64)
+                    acc = acc + 2.0 + 2.0 * g * cos_f(ph)
+                    k = k + 1
+                }
+                let j = mx * mx + my * my
+                shells[j as usize] = shells[j as usize] + acc / 8.0
+                cnt[j as usize] = cnt[j as usize] + 1
+            }
+            my = my + 1
+        }
+        mx = mx + 1
+    }
+    var s1: i64 = 0
+    while s1 < 33 {
+        if cnt[s1 as usize] > 0 { shells[s1 as usize] = shells[s1 as usize] / (cnt[s1 as usize] as f64) }
+        s1 = s1 + 1
+    }
+}
+
+fn sk_selftest() -> bool with IO, Mut, Div, Panic {
+    let pi = 3.141592653589793
+    let l: i64 = 16
+    let n = l * l
+    var ok = true
+    var fld: [f64; 65536] = [0.0; 65536]
+    var ct: [f64; 1280] = [0.0; 1280]
+    var st: [f64; 1280] = [0.0; 1280]
+    var sh: [f64; 33] = [0.0; 33]
+    trig_tables(l, &! ct, &! st)
+    var i: i64 = 0
+    while i < n {
+        let c = i - (i / l) * l
+        if c < l / 2 { fld[i as usize] = 1.0 } else { fld[i as usize] = 0.0 - 1.0 }
+        i = i + 1
+    }
+    sk_field(&fld, l, &ct, &st, &! sh)
+    var mxs: [i64; 2] = [1, 3]
+    var js: [i64; 2] = [1, 9]
+    var k: i64 = 0
+    while k < 2 {
+        let mx: i64 = mxs[k as usize]
+        var re: f64 = 0.0
+        var im: f64 = 0.0
+        var c2: i64 = 0
+        while c2 < l {
+            var ph: f64 = 1.0
+            if c2 >= l / 2 { ph = 0.0 - 1.0 }
+            let ang = 2.0 * pi * ((mx * c2) as f64) / (l as f64)
+            re = re + ph * cos_f(ang)
+            im = im + ph * sin_f(ang)
+            c2 = c2 + 1
+        }
+        let lf = l as f64
+        let direct = lf * lf * (re * re + im * im) / (n as f64) / 2.0
+        let got: f64 = sh[js[k as usize] as usize]
+        print("VALIDATION sk_field slab shell ") print(js[k as usize]) print(": ") print_f64(got)
+        print("  direct ") print_f64(direct) println("")
+        if abs_f(got - direct) > 0.000001 * (1.0 + direct) { ok = false }
+        k = k + 1
+    }
+    // a single isolated dipole (+1 at 0, -1 at the right neighbour) against the
+    // analytic shell formula with g = -1 and one image only is not available,
+    // so check the image-averaged analytic formula at q -> 0 instead: dipole
+    // fields vanish, monopole fields give 4
+    var an: [f64; 33] = [0.0; 33]
+    analytic_shells(1, 0, 0, 1000000, &! an)
+    let d1: f64 = an[1]
+    analytic_shells(2, 0, 0, 1000000, &! an)
+    let m1: f64 = an[1]
+    print("VALIDATION analytic q->0: dipole (1,0) in F0 ") print_f64(d1) print("   monopole (2,0) in F0 ") print_f64(m1) println("")
+    if abs_f(d1) > 0.000001 || abs_f(m1 - 4.0) > 0.000001 { ok = false }
+    ok
+}
+
+
+fn exp_neg(x: f64) -> f64 with Mut, Div, Panic {
+    // e^(-x) for x >= 0 by halving and squaring
+    var y = x
+    var k: i64 = 0
+    while y > 0.5 { y = y / 2.0  k = k + 1 }
+    var sum: f64 = 1.0
+    var term: f64 = 1.0
+    var i: i64 = 1
+    while i < 30 { term = 0.0 - term * y / (i as f64)  sum = sum + term  i = i + 1 }
+    while k > 0 { sum = sum * sum  k = k - 1 }
+    sum
+}
+
+fn site_sign(i: i64, l: i64, field: i64) -> i64 with Mut, Div, Panic {
+    let r = i / l
+    let c = i - r * l
+    var p: i64 = 0
+    if field == 0 { p = r + c }
+    if field == 1 { p = r }
+    if field == 2 { p = c }
+    if p - (p / 2) * 2 == 0 { 1 } else { 0 - 1 }
+}
+
+fn nb_of(i: i64, k: i64, l: i64) -> i64 with Mut, Div, Panic {
+    let r = i / l
+    let c = i - r * l
+    if k == 0 { let c2 = if c + 1 == l { 0 } else { c + 1 }  return r * l + c2 }
+    if k == 1 { let c3 = if c == 0 { l - 1 } else { c - 1 }  return r * l + c3 }
+    if k == 2 { let r2 = if r + 1 == l { 0 } else { r + 1 }  return r2 * l + c }
+    let r3 = if r == 0 { l - 1 } else { r - 1 }
+    r3 * l + c
+}
+
+// Any occupied nearest neighbour of site, ignoring `skip1` and `skip2`.
+fn crowded(occ: &[i64; 65536], site: i64, skip1: i64, skip2: i64, l: i64) -> bool with Mut, Div, Panic {
+    var k: i64 = 0
+    while k < 4 {
+        let nb = nb_of(site, k, l)
+        if nb != skip1 && nb != skip2 { if occ[nb as usize] == 1 { return true } }
+        k = k + 1
+    }
+    false
+}
+
+// Minimum-image displacement component on a ring of length l.
+fn min_image(d0: i64, l: i64) -> i64 with Mut, Div, Panic {
+    var d = d0 - (d0 / l) * l
+    if d < 0 { d = d + l }
+    if d > l / 2 { d = d - l }
+    d
+}
+
+fn hot_run(task: i64, scen: i64, rep: i64, l: i64, nh: i64, hx: &[i64; 8], hy: &[i64; 8],
+           hw: &[f64; 8], lam: f64, excl: i64, theta_max: f64) -> bool with IO, Mut, Div, Panic {
+    let pi = 3.141592653589793
+    let n = l * l
+    var ok = true
+    var occ: [i64; 65536] = [0; 65536]
+    var fld: [f64; 65536] = [0.0; 65536]
+    var pa: [i64; 32768] = [0; 32768]
+    var pb: [i64; 32768] = [0; 32768]
+    var plx: [i64; 32768] = [0; 32768]
+    var ply: [i64; 32768] = [0; 32768]
+    var pkx: [i64; 32768] = [0; 32768]
+    var pky: [i64; 32768] = [0; 32768]
+    var ct: [f64; 1280] = [0.0; 1280]
+    var st: [f64; 1280] = [0.0; 1280]
+    var sh: [f64; 33] = [0.0; 33]
+    var pr: [f64; 33] = [0.0; 33]
+    var cnt: [i64; 33] = [0; 33]
+    trig_tables(l, &! ct, &! st)
+    var cps: [f64; 9] = [0.01, 0.02, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40]
+    let seed: i64 = 9999991 * (task + 1) + scen * 104729 + rep * 1299709
+    var s: i64 = seed
+    var occ_n: i64 = 0
+    var np: i64 = 0
+    var misses: i64 = 0
+    let miss_cap: i64 = 200 * n
+    var hops_done: i64 = 0
+    var hops_blocked: i64 = 0
+    let elam = exp_neg(lam)
+    var cp: i64 = 0
+    var jammed = false
+    print("HOT_BEGIN task=") print(task) print(" scen=") print(scen) print(" rep=") print(rep)
+    print(" L=") print(l) print(" lam=") print_f64(lam) print(" excl=") print(excl) print(" seed=") print(seed) println("")
+    while cp < 9 && !jammed {
+        let target: f64 = cps[cp as usize]
+        if target > theta_max + 0.000001 {
+            cp = 9
+        } else if (occ_n as f64) >= target * (n as f64) {
+            let theta = (occ_n as f64) / (n as f64)
+            var fi: i64 = 0
+            while fi < 3 {
+                // lattice field and its total charge
+                var qlat: i64 = 0
+                var i: i64 = 0
+                while i < n {
+                    let v = occ[i as usize] * site_sign(i, l, fi)
+                    fld[i as usize] = v as f64
+                    qlat = qlat + v
+                    i = i + 1
+                }
+                // the same charge summed over the realised pairs, and the
+                // realised same-sublattice fraction
+                var qpair: i64 = 0
+                var same: i64 = 0
+                var same_book: i64 = 0
+                var p: i64 = 0
+                while p < np {
+                    let s1 = site_sign(pa[p as usize], l, fi)
+                    let s2 = site_sign(pb[p as usize], l, fi)
+                    qpair = qpair + s1 + s2
+                    if s1 == s2 { same = same + 1 }
+                    var par: i64 = 0
+                    if fi == 0 { par = abs_i(plx[p as usize] + ply[p as usize]) + pkx[p as usize] + pky[p as usize] }
+                    if fi == 1 { par = abs_i(ply[p as usize]) + pky[p as usize] }
+                    if fi == 2 { par = abs_i(plx[p as usize]) + pkx[p as usize] }
+                    if par - (par / 2) * 2 == 0 { same_book = same_book + 1 }
+                    p = p + 1
+                }
+                if qpair != qlat { ok = false }
+                if same_book != same { ok = false }
+                sk_field(&fld, l, &ct, &st, &! sh)
+                // exact prediction from the realised pairs, same modes/shells
+                var z: i64 = 0
+                while z < 33 { pr[z as usize] = 0.0  cnt[z as usize] = 0  z = z + 1 }
+                var mx: i64 = 0
+                while mx <= 4 {
+                    var my: i64 = 0 - 4
+                    while my <= 4 {
+                        if mx > 0 || (mx == 0 && my > 0) {
+                            var acc: f64 = 0.0
+                            var p2: i64 = 0
+                            while p2 < np {
+                                let a = pa[p2 as usize]
+                                let b = pb[p2 as usize]
+                                let g = (site_sign(a, l, fi) * site_sign(b, l, fi)) as f64
+                                let ra = a / l
+                                let ca = a - ra * l
+                                let rb = b / l
+                                let cb = b - rb * l
+                                // cos(q.D) from the trig tables sk_field uses:
+                                // cos(a + b) with a = 2 pi mx dx / L, b = 2 pi my dy / L
+                                var dxm = cb - ca
+                                if dxm < 0 { dxm = dxm + l }
+                                var dym = rb - ra
+                                if dym < 0 { dym = dym + l }
+                                let amy = abs_i(my)
+                                var sgy: f64 = 1.0
+                                if my < 0 { sgy = 0.0 - 1.0 }
+                                let cxa: f64 = ct[(mx * l + dxm) as usize]
+                                let sxa: f64 = st[(mx * l + dxm) as usize]
+                                let cyb: f64 = ct[(amy * l + dym) as usize]
+                                let syb: f64 = sgy * st[(amy * l + dym) as usize]
+                                acc = acc + 2.0 + 2.0 * g * (cxa * cyb - sxa * syb)
+                                p2 = p2 + 1
+                            }
+                            let j = mx * mx + my * my
+                            pr[j as usize] = pr[j as usize] + acc / (n as f64)
+                            cnt[j as usize] = cnt[j as usize] + 1
+                        }
+                        my = my + 1
+                    }
+                    mx = mx + 1
+                }
+                var z2: i64 = 0
+                while z2 < 33 { if cnt[z2 as usize] > 0 { pr[z2 as usize] = pr[z2 as usize] / (cnt[z2 as usize] as f64) }  z2 = z2 + 1 }
+
+                var kind: i64 = 0
+                while kind < 2 {
+                    if kind == 0 { print("SPOT") } else { print("PRED") }
+                    print(" scen=") print(scen) print(" rep=") print(rep) print(" field=F") print(fi)
+                    print(" theta=") print_f64(theta) print(" pairs=") print(np)
+                    var sv: [f64; 9] = [0.0; 9]
+                    var shl: [i64; 9] = [1, 2, 4, 5, 8, 9, 10, 13, 16]
+                    var u: i64 = 0
+                    while u < 9 {
+                        let js: i64 = shl[u as usize]
+                        var v: f64 = 0.0
+                        if kind == 0 { v = sh[js as usize] } else { v = pr[js as usize] }
+                        print(" S") print(js) print("u=") print_f64(1000000.0 * v)
+                        u = u + 1
+                    }
+                    println("")
+                    kind = kind + 1
+                }
+                print("PARITY scen=") print(scen) print(" rep=") print(rep) print(" field=F") print(fi)
+                print(" theta=") print_f64(theta) print(" pairs=") print(np) print(" same=") print(same) print(" same_book=") print(same_book)
+                print(" qlat=") print(qlat) print(" qpair=") print(qpair) println("")
+                fi = fi + 1
+            }
+            cp = cp + 1
+        } else {
+            // landing: choose histogram entry, lattice image, site
+            s = rng_step(s)
+            var i0: i64 = (rng_unit(s) * (n as f64)) as i64
+            if i0 >= n { i0 = n - 1 }
+            s = rng_step(s)
+            let u0 = rng_unit(s)
+            var e: i64 = 0
+            var accw: f64 = hw[0]
+            while e < nh - 1 && u0 >= accw { e = e + 1  accw = accw + hw[e as usize] }
+            let dxb: i64 = hx[e as usize]
+            let dyb: i64 = hy[e as usize]
+            s = rng_step(s)
+            var img: i64 = (rng_unit(s) * 8.0) as i64
+            if img > 7 { img = 7 }
+            var ex = dxb
+            var ey = dyb
+            if img == 1 { ex = 0 - dxb }
+            if img == 2 { ey = 0 - dyb }
+            if img == 3 { ex = 0 - dxb  ey = 0 - dyb }
+            if img == 4 { ex = dyb  ey = dxb }
+            if img == 5 { ex = 0 - dyb  ey = dxb }
+            if img == 6 { ex = dyb  ey = 0 - dxb }
+            if img == 7 { ex = 0 - dyb  ey = 0 - dxb }
+            let r0 = i0 / l
+            let c0 = i0 - r0 * l
+            var r1 = r0 + ey
+            var c1 = c0 + ex
+            while r1 < 0 { r1 = r1 + l }
+            while r1 >= l { r1 = r1 - l }
+            while c1 < 0 { c1 = c1 + l }
+            while c1 >= l { c1 = c1 - l }
+            let j0 = r1 * l + c1
+            var accept = occ[i0 as usize] == 0 && occ[j0 as usize] == 0 && i0 != j0
+            if accept && excl == 1 {
+                if crowded(&occ, i0, j0, j0, l) || crowded(&occ, j0, i0, i0, l) { accept = false }
+            }
+            if !accept {
+                misses = misses + 1
+                if misses > miss_cap { jammed = true }
+            } else {
+                misses = 0
+                occ[i0 as usize] = 1
+                occ[j0 as usize] = 1
+                var at: [i64; 2] = [0; 2]
+                at[0] = i0
+                at[1] = j0
+                var kxs: i64 = 0
+                var kys: i64 = 0
+                // transient hops: Poisson(lam) per atom, each to a random NN,
+                // blocked if occupied (or crowded under exclusion)
+                var w: i64 = 0
+                while w < 2 {
+                    s = rng_step(s)
+                    var uu = rng_unit(s)
+                    var kh: i64 = 0
+                    var pk = elam
+                    var cum = elam
+                    while uu > cum && kh < 60 { kh = kh + 1  pk = pk * lam / (kh as f64)  cum = cum + pk }
+                    var h: i64 = 0
+                    while h < kh {
+                        s = rng_step(s)
+                        var dir: i64 = (rng_unit(s) * 4.0) as i64
+                        if dir > 3 { dir = 3 }
+                        let cur: i64 = at[w as usize]
+                        let nxt = nb_of(cur, dir, l)
+                        var can = occ[nxt as usize] == 0
+                        if can && excl == 1 {
+                            let partner: i64 = at[(1 - w) as usize]
+                            // the partner is exempt from exclusion, as at landing
+                            if crowded(&occ, nxt, cur, partner, l) { can = false }
+                        }
+                        if can {
+                            occ[cur as usize] = 0
+                            occ[nxt as usize] = 1
+                            at[w as usize] = nxt
+                            hops_done = hops_done + 1
+                            if dir <= 1 { kxs = kxs + 1 } else { kys = kys + 1 }
+                        } else {
+                            hops_blocked = hops_blocked + 1
+                        }
+                        h = h + 1
+                    }
+                    w = w + 1
+                }
+                let fa: i64 = at[0]
+                let fb: i64 = at[1]
+                pa[np as usize] = fa
+                pb[np as usize] = fb
+                plx[np as usize] = ex
+                ply[np as usize] = ey
+                pkx[np as usize] = kxs
+                pky[np as usize] = kys
+                np = np + 1
+                occ_n = occ_n + 2
+            }
+        }
+    }
+    print("HOT_END scen=") print(scen) print(" rep=") print(rep)
+    print(" theta_final=") print_f64((occ_n as f64) / (n as f64))
+    print(" hops_done=") print(hops_done) print(" hops_blocked=") print(hops_blocked)
+    if ok { print(" identities=ok") } else { print(" identities=FAILED") }
+    if jammed { println(" JAMMED") } else { println("") }
+    ok
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let task_id: i64 = 0
+    print("M7 hot-atom diffraction, task ") print(task_id) println("")
+    let vok = sk_selftest()
+    let e1 = exp_neg(1.0)
+    let eok = abs_f(e1 - 0.36787944117144233) < 0.000000000001 && abs_f(exp_neg(0.0) - 1.0) < 0.000000000001
+    print("VALIDATION selftest ")
+    if vok && eok { println("ok") } else { println("FAILED") }
+    if !(vok && eok) { println("M7_TASK_FAILED") return 0 }
+
+    let l: i64 = 256
+    var ok = true
+    var hx: [i64; 8] = [0; 8]
+    var hy: [i64; 8] = [0; 8]
+    var hw: [f64; 8] = [0.0; 8]
+    var rep: i64 = 0
+    while rep < 2 {
+        let r = task_id * 2 + rep
+        // 0-3: (1,0) landing, Poisson hops lam = 0.05, 0.1, 0.25, 0.5
+        hx[0] = 1  hy[0] = 0  hw[0] = 1.0
+        ok = hot_run(task_id, 0, r, l, 1, &hx, &hy, &hw, 0.05, 0, 0.10) && ok
+        ok = hot_run(task_id, 1, r, l, 1, &hx, &hy, &hw, 0.1, 0, 0.10) && ok
+        ok = hot_run(task_id, 2, r, l, 1, &hx, &hy, &hw, 0.25, 0, 0.10) && ok
+        ok = hot_run(task_id, 3, r, l, 1, &hx, &hy, &hw, 0.5, 0, 0.10) && ok
+        // 4: (1,1) landing, lam = 0.2
+        hx[0] = 1  hy[0] = 1  hw[0] = 1.0
+        ok = hot_run(task_id, 4, r, l, 1, &hx, &hy, &hw, 0.2, 0, 0.10) && ok
+        // 5: an ILLUSTRATIVE axis-aligned end-distance histogram (1..5 lattice
+        //    constants, mode at 2), not a fit to Lin & Jiang, no hops
+        hx[0] = 1  hx[1] = 2  hx[2] = 3  hx[3] = 4  hx[4] = 5
+        hy[0] = 0  hy[1] = 0  hy[2] = 0  hy[3] = 0  hy[4] = 0
+        hw[0] = 0.15  hw[1] = 0.45  hw[2] = 0.20  hw[3] = 0.15  hw[4] = 0.05
+        ok = hot_run(task_id, 5, r, l, 5, &hx, &hy, &hw, 0.0, 0, 0.10) && ok
+        // 6-8: nearest-neighbour exclusion to coverage 0.30
+        hx[0] = 1  hy[0] = 0  hw[0] = 1.0
+        ok = hot_run(task_id, 6, r, l, 1, &hx, &hy, &hw, 0.1, 1, 0.30) && ok
+        hx[0] = 1  hx[1] = 2  hx[2] = 3  hx[3] = 4  hx[4] = 5
+        hy[0] = 0  hy[1] = 0  hy[2] = 0  hy[3] = 0  hy[4] = 0
+        hw[0] = 0.15  hw[1] = 0.45  hw[2] = 0.20  hw[3] = 0.15  hw[4] = 0.05
+        ok = hot_run(task_id, 7, r, l, 5, &hx, &hy, &hw, 0.0, 1, 0.30) && ok
+        hx[0] = 1  hy[0] = 1  hw[0] = 1.0
+        ok = hot_run(task_id, 8, r, l, 1, &hx, &hy, &hw, 0.2, 1, 0.30) && ok
+        rep = rep + 1
+    }
+    if ok { print("M7_TASK_OK task=") } else { print("M7_TASK_FAILED task=") }
+    print(task_id) println("")
+    0
+}

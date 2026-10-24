@@ -1,0 +1,3172 @@
+//@ module document::pdf_text
+//! Bounded Sounio-owned PDF resource and font projection.
+
+use document::pdf_flatedecode::{
+    SounioPdfFlateInventory,
+    SOUNIO_PDF_OK,
+    SOUNIO_PDF_PAGE_CAPACITY,
+    sounio_pdf_flate_import,
+    sounio_pdf_expected_inventory,
+    sounio_pdf_loaded_byte,
+    sounio_pdf_object_dictionary_slice,
+    sounio_pdf_decode_flate_object,
+}
+use compress::inflate::{
+    SounioInflateResult,
+    SOUNIO_INFLATE_OK,
+}
+use crypto::sha256::{
+    SHA256State,
+    sha256_init,
+    sha256_update,
+    sha256_finalize,
+    sha256_digest_byte,
+}
+
+pub const SOUNIO_PDF_TEXT_OK: i64 = 0
+pub const SOUNIO_PDF_TEXT_ERR_BASE: i64 = 201
+pub const SOUNIO_PDF_TEXT_ERR_PAGE: i64 = 202
+pub const SOUNIO_PDF_TEXT_ERR_DICTIONARY: i64 = 203
+pub const SOUNIO_PDF_TEXT_ERR_RESOURCES: i64 = 204
+pub const SOUNIO_PDF_TEXT_ERR_PARENT: i64 = 205
+pub const SOUNIO_PDF_TEXT_ERR_CYCLE: i64 = 206
+pub const SOUNIO_PDF_TEXT_ERR_FONT_DICTIONARY: i64 = 207
+pub const SOUNIO_PDF_TEXT_ERR_FONT_BINDING: i64 = 208
+pub const SOUNIO_PDF_TEXT_ERR_CAPACITY: i64 = 209
+pub const SOUNIO_PDF_TEXT_ERR_FONT_OBJECT: i64 = 210
+pub const SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER: i64 = 211
+pub const SOUNIO_PDF_TEXT_ERR_TEXT_STATE: i64 = 212
+pub const SOUNIO_PDF_TEXT_ERR_FONT_SELECTION: i64 = 213
+pub const SOUNIO_PDF_TEXT_ERR_DIGEST: i64 = 214
+
+pub const SOUNIO_PDF_TEXT_FONT_CAPACITY: i64 = 256
+pub const SOUNIO_PDF_TEXT_BINDING_CAPACITY: i64 = 1024
+pub const SOUNIO_PDF_TEXT_PARENT_CAPACITY: i64 = 64
+pub const SOUNIO_PDF_TEXT_OPERATOR_CAPACITY: i64 = 128
+pub const SOUNIO_PDF_TEXT_OPERATOR_BYTES: i64 = 16
+pub const SOUNIO_PDF_TEXT_OBJECT_CAPACITY: i64 = 4096
+pub const SOUNIO_PDF_TEXT_SCALAR_CAPACITY: i64 = 65536
+pub const SOUNIO_PDF_TEXT_GRAPHICS_DEPTH: i64 = 128
+pub const SOUNIO_PDF_TEXT_FIXED_SCALE: i64 = 1000000
+pub const SOUNIO_PDF_TEXT_LINE_TOLERANCE: i64 = 5000000
+
+pub struct SounioPdfTextInventory {
+    pub error: i64,
+    pub base_error: i64,
+    pub base_expected: bool,
+    pub pages: i64,
+    pub direct_resources: i64,
+    pub indirect_resources: i64,
+    pub inherited_resources: i64,
+    pub max_resource_depth: i64,
+    pub font_bindings: i64,
+    pub unique_fonts: i64,
+    pub fonts_with_tounicode: i64,
+    pub fonts_without_tounicode: i64,
+    pub fonts_with_encoding: i64,
+    pub fonts_with_descendants: i64,
+    pub page_resource_object: [i64; 64],
+    pub page_resource_generation: [i64; 64],
+    pub page_resource_depth: [i64; 64],
+    pub binding_page: [i64; 1024],
+    pub binding_name_start: [i64; 1024],
+    pub binding_name_length: [i64; 1024],
+    pub binding_font_object: [i64; 1024],
+    pub binding_font_generation: [i64; 1024],
+    pub font_object: [i64; 256],
+    pub font_generation: [i64; 256],
+    pub font_subtype_start: [i64; 256],
+    pub font_subtype_length: [i64; 256],
+    pub font_base_name_start: [i64; 256],
+    pub font_base_name_length: [i64; 256],
+    pub font_encoding_kind: [i64; 256],
+    pub font_encoding_start: [i64; 256],
+    pub font_encoding_length: [i64; 256],
+    pub font_encoding_object: [i64; 256],
+    pub font_encoding_generation: [i64; 256],
+    pub font_tounicode_object: [i64; 256],
+    pub font_tounicode_generation: [i64; 256],
+    pub font_descendant_object: [i64; 256],
+    pub font_descendant_generation: [i64; 256],
+}
+
+pub struct SounioPdfOperatorCensus {
+    pub error: i64,
+    pub pages: i64,
+    pub decoded_bytes: i64,
+    pub comments: i64,
+    pub names: i64,
+    pub numbers: i64,
+    pub literal_strings: i64,
+    pub hexadecimal_strings: i64,
+    pub array_opens: i64,
+    pub array_closes: i64,
+    pub dictionary_opens: i64,
+    pub dictionary_closes: i64,
+    pub operator_tokens: i64,
+    pub distinct_operators: i64,
+    pub operator_length: [i64; 128],
+    pub operator_count: [i64; 128],
+    pub operator_bytes: [i64; 2048],
+}
+
+pub struct SounioPdfGlyphCodeCensus {
+    pub error: i64,
+    pub pages: i64,
+    pub text_objects: i64,
+    pub font_selections: i64,
+    pub text_matrices: i64,
+    pub character_spacings: i64,
+    pub text_show_strings: i64,
+    pub text_show_arrays: i64,
+    pub array_adjustments: i64,
+    pub glyph_codes: i64,
+    pub non_ascii_codes: i64,
+    pub max_operand_stack: i64,
+    pub font_glyph_codes: [i64; 256],
+    pub font_unique_codes: [i64; 256],
+    pub code_counts: [i64; 65536],
+}
+
+pub struct SounioPdfUnicodeCensus {
+    pub error: i64,
+    pub fonts: i64,
+    pub cmap_streams: i64,
+    pub codespace_ranges: i64,
+    pub bfchar_ranges: i64,
+    pub bfranges: i64,
+    pub cmap_entries: i64,
+    pub glyph_codes: i64,
+    pub macroman_scalars: i64,
+    pub cmap_scalars: i64,
+    pub non_ascii_scalars: i64,
+    pub private_use_scalars: i64,
+    pub font_macroman_scalars: [i64; 256],
+    pub font_cmap_scalars: [i64; 256],
+    pub font_unique_scalars: [i64; 256],
+}
+
+struct PdfTextUnicodeMaps {
+    present: [i64; 65536],
+    value: [i64; 65536],
+    cmap_streams: i64,
+    codespace_ranges: i64,
+    bfchar_ranges: i64,
+    bfranges: i64,
+    entries: i64,
+}
+
+pub struct SounioPdfTextProjection {
+    pub error: i64,
+    pub pages: i64,
+    pub text_objects: i64,
+    pub nonempty_objects: i64,
+    pub empty_objects: i64,
+    pub matrixless_objects: i64,
+    pub multiple_matrix_objects: i64,
+    pub show_operations: i64,
+    pub scalars: i64,
+    pub max_graphics_depth: i64,
+    pub object_page: [i64; 4096],
+    pub object_raw_x: [i64; 4096],
+    pub object_raw_y: [i64; 4096],
+    pub object_device_x: [i64; 4096],
+    pub object_device_y: [i64; 4096],
+    pub object_matrix_count: [i64; 4096],
+    pub object_show_count: [i64; 4096],
+    pub object_scalar_start: [i64; 4096],
+    pub object_scalar_count: [i64; 4096],
+    pub scalar_value: [i64; 65536],
+    pub scalar_font: [i64; 65536],
+}
+
+pub struct SounioPdfLineProjection {
+    pub error: i64,
+    pub pages: i64,
+    pub objects: i64,
+    pub lines: i64,
+    pub tolerance: i64,
+    pub max_line_spread: i64,
+    pub min_interline_gap: i64,
+    pub ambiguous_assignments: i64,
+    pub line_page: [i64; 4096],
+    pub line_anchor_y: [i64; 4096],
+    pub line_min_y: [i64; 4096],
+    pub line_max_y: [i64; 4096],
+    pub line_object_count: [i64; 4096],
+    pub object_line: [i64; 4096],
+}
+
+pub struct SounioPdfTextProjectionDigest {
+    pub error: i64,
+    pub serialized_bytes: i64,
+    pub bytes: [i64; 32],
+}
+
+struct PdfTextDigestBuilder {
+    state: SHA256State,
+    chunk: [u8; 256],
+    chunk_length: i64,
+    total_length: i64,
+    error: i64,
+}
+
+fn text_inventory_empty() -> SounioPdfTextInventory {
+    SounioPdfTextInventory {
+        error: SOUNIO_PDF_TEXT_OK,
+        base_error: 0,
+        base_expected: false,
+        pages: 0,
+        direct_resources: 0,
+        indirect_resources: 0,
+        inherited_resources: 0,
+        max_resource_depth: 0,
+        font_bindings: 0,
+        unique_fonts: 0,
+        fonts_with_tounicode: 0,
+        fonts_without_tounicode: 0,
+        fonts_with_encoding: 0,
+        fonts_with_descendants: 0,
+        page_resource_object: [0; 64],
+        page_resource_generation: [0; 64],
+        page_resource_depth: [0; 64],
+        binding_page: [0; 1024],
+        binding_name_start: [0; 1024],
+        binding_name_length: [0; 1024],
+        binding_font_object: [0; 1024],
+        binding_font_generation: [0; 1024],
+        font_object: [0; 256],
+        font_generation: [0; 256],
+        font_subtype_start: [0; 256],
+        font_subtype_length: [0; 256],
+        font_base_name_start: [0; 256],
+        font_base_name_length: [0; 256],
+        font_encoding_kind: [0; 256],
+        font_encoding_start: [0; 256],
+        font_encoding_length: [0; 256],
+        font_encoding_object: [0; 256],
+        font_encoding_generation: [0; 256],
+        font_tounicode_object: [0; 256],
+        font_tounicode_generation: [0; 256],
+        font_descendant_object: [0; 256],
+        font_descendant_generation: [0; 256],
+    }
+}
+
+fn text_operator_census_empty() -> SounioPdfOperatorCensus {
+    SounioPdfOperatorCensus {
+        error: SOUNIO_PDF_TEXT_OK,
+        pages: 0,
+        decoded_bytes: 0,
+        comments: 0,
+        names: 0,
+        numbers: 0,
+        literal_strings: 0,
+        hexadecimal_strings: 0,
+        array_opens: 0,
+        array_closes: 0,
+        dictionary_opens: 0,
+        dictionary_closes: 0,
+        operator_tokens: 0,
+        distinct_operators: 0,
+        operator_length: [0; 128],
+        operator_count: [0; 128],
+        operator_bytes: [0; 2048],
+    }
+}
+
+fn text_glyph_code_census_empty() -> SounioPdfGlyphCodeCensus {
+    SounioPdfGlyphCodeCensus {
+        error: SOUNIO_PDF_TEXT_OK,
+        pages: 0,
+        text_objects: 0,
+        font_selections: 0,
+        text_matrices: 0,
+        character_spacings: 0,
+        text_show_strings: 0,
+        text_show_arrays: 0,
+        array_adjustments: 0,
+        glyph_codes: 0,
+        non_ascii_codes: 0,
+        max_operand_stack: 0,
+        font_glyph_codes: [0; 256],
+        font_unique_codes: [0; 256],
+        code_counts: [0; 65536],
+    }
+}
+
+fn text_unicode_census_empty() -> SounioPdfUnicodeCensus {
+    SounioPdfUnicodeCensus {
+        error: SOUNIO_PDF_TEXT_OK,
+        fonts: 0,
+        cmap_streams: 0,
+        codespace_ranges: 0,
+        bfchar_ranges: 0,
+        bfranges: 0,
+        cmap_entries: 0,
+        glyph_codes: 0,
+        macroman_scalars: 0,
+        cmap_scalars: 0,
+        non_ascii_scalars: 0,
+        private_use_scalars: 0,
+        font_macroman_scalars: [0; 256],
+        font_cmap_scalars: [0; 256],
+        font_unique_scalars: [0; 256],
+    }
+}
+
+fn text_unicode_maps_empty() -> PdfTextUnicodeMaps {
+    PdfTextUnicodeMaps {
+        present: [0; 65536],
+        value: [0; 65536],
+        cmap_streams: 0,
+        codespace_ranges: 0,
+        bfchar_ranges: 0,
+        bfranges: 0,
+        entries: 0,
+    }
+}
+
+pub fn sounio_pdf_text_projection_empty() -> SounioPdfTextProjection {
+    SounioPdfTextProjection {
+        error: SOUNIO_PDF_TEXT_OK,
+        pages: 0,
+        text_objects: 0,
+        nonempty_objects: 0,
+        empty_objects: 0,
+        matrixless_objects: 0,
+        multiple_matrix_objects: 0,
+        show_operations: 0,
+        scalars: 0,
+        max_graphics_depth: 0,
+        object_page: [0; 4096],
+        object_raw_x: [0; 4096],
+        object_raw_y: [0; 4096],
+        object_device_x: [0; 4096],
+        object_device_y: [0; 4096],
+        object_matrix_count: [0; 4096],
+        object_show_count: [0; 4096],
+        object_scalar_start: [0; 4096],
+        object_scalar_count: [0; 4096],
+        scalar_value: [0; 65536],
+        scalar_font: [0; 65536],
+    }
+}
+
+pub fn sounio_pdf_line_projection_empty() -> SounioPdfLineProjection {
+    SounioPdfLineProjection {
+        error: SOUNIO_PDF_TEXT_OK,
+        pages: 0,
+        objects: 0,
+        lines: 0,
+        tolerance: SOUNIO_PDF_TEXT_LINE_TOLERANCE,
+        max_line_spread: 0,
+        min_interline_gap: 0,
+        ambiguous_assignments: 0,
+        line_page: [0; 4096],
+        line_anchor_y: [0; 4096],
+        line_min_y: [0; 4096],
+        line_max_y: [0; 4096],
+        line_object_count: [0; 4096],
+        object_line: [0; 4096],
+    }
+}
+
+fn text_digest_builder_empty() -> PdfTextDigestBuilder {
+    PdfTextDigestBuilder {
+        state: sha256_init(),
+        chunk: [0; 256],
+        chunk_length: 0,
+        total_length: 0,
+        error: SOUNIO_PDF_TEXT_OK,
+    }
+}
+
+fn text_digest_result_empty() -> SounioPdfTextProjectionDigest {
+    SounioPdfTextProjectionDigest {
+        error: SOUNIO_PDF_TEXT_OK,
+        serialized_bytes: 0,
+        bytes: [0; 32],
+    }
+}
+
+fn text_digest_push_byte(
+    builder: &!PdfTextDigestBuilder,
+    value: i64,
+) with Mut, Panic, Div {
+    if builder.error != SOUNIO_PDF_TEXT_OK { return }
+    if value < 0 || value > 255 {
+        builder.error = SOUNIO_PDF_TEXT_ERR_DIGEST
+        return
+    }
+    builder.chunk[builder.chunk_length as usize] = value as u8
+    builder.chunk_length = builder.chunk_length + 1
+    builder.total_length = builder.total_length + 1
+    if builder.chunk_length == 256 {
+        builder.state = sha256_update(builder.state, builder.chunk, 256)
+        builder.chunk_length = 0
+    }
+}
+
+fn text_digest_push_u64(
+    builder: &!PdfTextDigestBuilder,
+    value: i64,
+) with Mut, Panic, Div {
+    var shift: i64 = 56
+    while shift >= 0 {
+        text_digest_push_byte(builder, (value >> shift) & 255)
+        shift = shift - 8
+    }
+}
+
+fn text_digest_push_string(
+    builder: &!PdfTextDigestBuilder,
+    value: string,
+) with Mut, Panic, Div {
+    var at: i64 = 0
+    while at < str_len(value) {
+        text_digest_push_byte(builder, str_char_at(value, at))
+        at = at + 1
+    }
+}
+
+fn text_inflate_result_empty() -> SounioInflateResult {
+    SounioInflateResult {
+        bytes: [0; 262144],
+        error: SOUNIO_INFLATE_OK,
+        input_bytes: 0,
+        output_bytes: 0,
+        blocks: 0,
+        stored_blocks: 0,
+        fixed_blocks: 0,
+        dynamic_blocks: 0,
+        literals: 0,
+        copies: 0,
+        max_distance: 0,
+        checksum_match: false,
+    }
+}
+
+fn text_byte(inv: &SounioPdfFlateInventory, index: i64) -> i64
+with Panic, Div {
+    sounio_pdf_loaded_byte(inv, index)
+}
+
+fn text_is_whitespace(code: i64) -> bool {
+    code == 0 || code == 9 || code == 10 || code == 12 ||
+        code == 13 || code == 32
+}
+
+fn text_is_delimiter(code: i64) -> bool {
+    text_is_whitespace(code) || code == 40 || code == 41 ||
+        code == 60 || code == 62 || code == 91 || code == 93 ||
+        code == 123 || code == 125 || code == 47 || code == 37
+}
+
+fn text_skip_space(
+    inv: &SounioPdfFlateInventory,
+    limit: i64,
+    start: i64,
+) -> i64 with Panic, Div {
+    var pos = start
+    var again = true
+    while again {
+        again = false
+        while pos < limit && text_is_whitespace(text_byte(inv, pos)) {
+            pos = pos + 1
+        }
+        if pos < limit && text_byte(inv, pos) == 37 {
+            while pos < limit && text_byte(inv, pos) != 10 &&
+                text_byte(inv, pos) != 13 {
+                pos = pos + 1
+            }
+            again = true
+        }
+    }
+    pos
+}
+
+fn text_name_end(
+    inv: &SounioPdfFlateInventory,
+    limit: i64,
+    start: i64,
+) -> i64 with Panic, Div {
+    var pos = start
+    while pos < limit && !text_is_delimiter(text_byte(inv, pos)) {
+        pos = pos + 1
+    }
+    pos
+}
+
+fn text_name_matches(
+    inv: &SounioPdfFlateInventory,
+    limit: i64,
+    slash: i64,
+    name: string,
+) -> bool with Mut, Panic, Div {
+    if slash < 0 || slash >= limit || text_byte(inv, slash) != 47 {
+        return false
+    }
+    let n = str_len(name)
+    if slash + 1 + n > limit { return false }
+    var i: i64 = 0
+    while i < n {
+        if text_byte(inv, slash + 1 + i) != str_char_at(name, i) {
+            return false
+        }
+        i = i + 1
+    }
+    slash + 1 + n == limit ||
+        text_is_delimiter(text_byte(inv, slash + 1 + n))
+}
+
+fn text_find_dictionary_end(
+    inv: &SounioPdfFlateInventory,
+    limit: i64,
+    start: i64,
+) -> i64 with Panic, Div {
+    if start + 1 >= limit || text_byte(inv, start) != 60 ||
+        text_byte(inv, start + 1) != 60 {
+        return -1
+    }
+    var pos = start + 2
+    var depth: i64 = 1
+    var string_depth: i64 = 0
+    var escaped = false
+    while pos < limit {
+        let code = text_byte(inv, pos)
+        if string_depth > 0 {
+            if escaped {
+                escaped = false
+            } else {
+                if code == 92 { escaped = true }
+                else {
+                    if code == 40 { string_depth = string_depth + 1 }
+                    else { if code == 41 { string_depth = string_depth - 1 } }
+                }
+            }
+            pos = pos + 1
+        } else {
+            if code == 37 {
+                while pos < limit && text_byte(inv, pos) != 10 &&
+                    text_byte(inv, pos) != 13 {
+                    pos = pos + 1
+                }
+            } else {
+                if code == 40 {
+                    string_depth = 1
+                    pos = pos + 1
+                } else {
+                    if code == 60 && pos + 1 < limit &&
+                        text_byte(inv, pos + 1) == 60 {
+                        depth = depth + 1
+                        pos = pos + 2
+                    } else {
+                        if code == 62 && pos + 1 < limit &&
+                            text_byte(inv, pos + 1) == 62 {
+                            depth = depth - 1
+                            pos = pos + 2
+                            if depth == 0 { return pos }
+                        } else {
+                            if code == 60 {
+                                pos = pos + 1
+                                while pos < limit && text_byte(inv, pos) != 62 {
+                                    pos = pos + 1
+                                }
+                                if pos < limit { pos = pos + 1 }
+                            } else {
+                                pos = pos + 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    -1
+}
+
+fn text_find_key(
+    inv: &SounioPdfFlateInventory,
+    dict_start: i64,
+    dict_end: i64,
+    key: string,
+) -> (i64, i64, i64) with Mut, Panic, Div {
+    var pos = dict_start + 2
+    var depth: i64 = 1
+    var first: i64 = -1
+    var last: i64 = -1
+    var count: i64 = 0
+    while pos < dict_end - 2 {
+        let code = text_byte(inv, pos)
+        if code == 37 {
+            while pos < dict_end && text_byte(inv, pos) != 10 &&
+                text_byte(inv, pos) != 13 {
+                pos = pos + 1
+            }
+        } else {
+            if code == 40 {
+                var string_depth: i64 = 1
+                var escaped = false
+                pos = pos + 1
+                while pos < dict_end && string_depth > 0 {
+                    let c = text_byte(inv, pos)
+                    if escaped { escaped = false }
+                    else {
+                        if c == 92 { escaped = true }
+                        else {
+                            if c == 40 { string_depth = string_depth + 1 }
+                            else { if c == 41 { string_depth = string_depth - 1 } }
+                        }
+                    }
+                    pos = pos + 1
+                }
+            } else {
+                if code == 60 && pos + 1 < dict_end &&
+                    text_byte(inv, pos + 1) == 60 {
+                    depth = depth + 1
+                    pos = pos + 2
+                } else {
+                    if code == 62 && pos + 1 < dict_end &&
+                        text_byte(inv, pos + 1) == 62 {
+                        depth = depth - 1
+                        pos = pos + 2
+                    } else {
+                        if code == 60 {
+                            pos = pos + 1
+                            while pos < dict_end && text_byte(inv, pos) != 62 {
+                                pos = pos + 1
+                            }
+                            if pos < dict_end { pos = pos + 1 }
+                        } else {
+                            if code == 47 {
+                                let name_end = text_name_end(inv, dict_end, pos + 1)
+                                if depth == 1 &&
+                                    text_name_matches(inv, dict_end, pos, key) {
+                                    count = count + 1
+                                    last = text_skip_space(inv, dict_end, name_end)
+                                    if first < 0 { first = last }
+                                }
+                                pos = name_end
+                            } else {
+                                pos = pos + 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (first, last, count)
+}
+
+fn text_parse_uint(
+    inv: &SounioPdfFlateInventory,
+    limit: i64,
+    start: i64,
+) -> (i64, i64, i64) with Panic, Div {
+    var pos = text_skip_space(inv, limit, start)
+    var value: i64 = 0
+    var seen = false
+    while pos < limit {
+        let code = text_byte(inv, pos)
+        if code < 48 || code > 57 { break }
+        let digit = code - 48
+        if value > 922337203685477580 ||
+            (value == 922337203685477580 && digit > 7) {
+            return (0, 0, pos)
+        }
+        value = value * 10 + digit
+        seen = true
+        pos = pos + 1
+    }
+    (if seen { 1 } else { 0 }, value, pos)
+}
+
+fn text_parse_reference(
+    inv: &SounioPdfFlateInventory,
+    limit: i64,
+    start: i64,
+) -> (i64, i64, i64, i64) with Panic, Div {
+    let (ok_object, object, p1) = text_parse_uint(inv, limit, start)
+    let (ok_generation, generation, p2) = text_parse_uint(inv, limit, p1)
+    let pos = text_skip_space(inv, limit, p2)
+    if ok_object != 1 || ok_generation != 1 || pos >= limit ||
+        text_byte(inv, pos) != 82 ||
+        (pos + 1 < limit && !text_is_delimiter(text_byte(inv, pos + 1))) {
+        return (0, 0, 0, start)
+    }
+    (1, object, generation, pos + 1)
+}
+
+fn text_parse_reference_array_one(
+    inv: &SounioPdfFlateInventory,
+    limit: i64,
+    start: i64,
+) -> (i64, i64, i64, i64) with Panic, Div {
+    var pos = text_skip_space(inv, limit, start)
+    if pos >= limit || text_byte(inv, pos) != 91 {
+        return (0, 0, 0, start)
+    }
+    pos = text_skip_space(inv, limit, pos + 1)
+    let (ok, object, generation, after) =
+        text_parse_reference(inv, limit, pos)
+    if ok != 1 { return (0, 0, 0, start) }
+    pos = text_skip_space(inv, limit, after)
+    if pos >= limit || text_byte(inv, pos) != 93 {
+        return (0, 0, 0, start)
+    }
+    (1, object, generation, pos + 1)
+}
+
+fn text_direct_name_span(
+    inv: &SounioPdfFlateInventory,
+    limit: i64,
+    start: i64,
+) -> (i64, i64, i64, i64) with Panic, Div {
+    let slash = text_skip_space(inv, limit, start)
+    if slash >= limit || text_byte(inv, slash) != 47 {
+        return (0, 0, 0, start)
+    }
+    let after = text_name_end(inv, limit, slash + 1)
+    if after <= slash + 1 { return (0, 0, 0, start) }
+    (1, slash + 1, after - slash - 1, after)
+}
+
+fn text_resource_dictionary(
+    base: &SounioPdfFlateInventory,
+    page_object: i64,
+) -> (i64, i64, i64, i64, i64, i64)
+with Mut, Panic, Div {
+    var object = page_object
+    var generation: i64 = 0
+    var depth: i64 = 0
+    var visited: [i64; 64] = [0; 64]
+    while depth < SOUNIO_PDF_TEXT_PARENT_CAPACITY {
+        var seen: i64 = 0
+        while seen < depth {
+            if visited[seen as usize] == object {
+                return (SOUNIO_PDF_TEXT_ERR_CYCLE, 0, 0, 0, 0, depth)
+            }
+            seen = seen + 1
+        }
+        visited[depth as usize] = object
+        let slice = sounio_pdf_object_dictionary_slice(base, object, generation)
+        if slice.error != SOUNIO_PDF_OK {
+            return (SOUNIO_PDF_TEXT_ERR_PAGE, 0, 0, 0, 0, depth)
+        }
+        let (resources_pos, resources_last, resources_count) =
+            text_find_key(base, slice.dictionary_start,
+                slice.dictionary_end, "Resources")
+        if resources_count > 1 {
+            return (SOUNIO_PDF_TEXT_ERR_RESOURCES, 0, 0, 0, 0, depth)
+        }
+        if resources_count == 1 {
+            let pos = text_skip_space(base, slice.dictionary_end, resources_pos)
+            if pos + 1 < slice.dictionary_end && text_byte(base, pos) == 60 &&
+                text_byte(base, pos + 1) == 60 {
+                let end = text_find_dictionary_end(base, slice.dictionary_end, pos)
+                if end < 0 {
+                    return (SOUNIO_PDF_TEXT_ERR_DICTIONARY, 0, 0, 0, 0, depth)
+                }
+                return (SOUNIO_PDF_TEXT_OK, pos, end, 0, 0, depth)
+            }
+            let (ref_ok, resource_object, resource_generation, after) =
+                text_parse_reference(base, slice.dictionary_end, pos)
+            if ref_ok != 1 || after <= pos {
+                return (SOUNIO_PDF_TEXT_ERR_RESOURCES, 0, 0, 0, 0, depth)
+            }
+            let resource_slice = sounio_pdf_object_dictionary_slice(
+                base, resource_object, resource_generation)
+            if resource_slice.error != SOUNIO_PDF_OK {
+                return (SOUNIO_PDF_TEXT_ERR_RESOURCES, 0, 0, 0, 0, depth)
+            }
+            return (SOUNIO_PDF_TEXT_OK, resource_slice.dictionary_start,
+                resource_slice.dictionary_end, resource_object,
+                resource_generation, depth)
+        }
+        let (parent_pos, parent_last, parent_count) =
+            text_find_key(base, slice.dictionary_start,
+                slice.dictionary_end, "Parent")
+        if parent_count != 1 {
+            return (SOUNIO_PDF_TEXT_ERR_PARENT, 0, 0, 0, 0, depth)
+        }
+        let (parent_ok, parent_object, parent_generation, parent_after) =
+            text_parse_reference(base, slice.dictionary_end, parent_pos)
+        if parent_ok != 1 || parent_after <= parent_pos {
+            return (SOUNIO_PDF_TEXT_ERR_PARENT, 0, 0, 0, 0, depth)
+        }
+        object = parent_object
+        generation = parent_generation
+        depth = depth + 1
+    }
+    (SOUNIO_PDF_TEXT_ERR_CYCLE, 0, 0, 0, 0, depth)
+}
+
+fn text_font_dictionary(
+    base: &SounioPdfFlateInventory,
+    resource_start: i64,
+    resource_end: i64,
+) -> (i64, i64, i64) with Mut, Panic, Div {
+    let (font_pos, font_last, font_count) =
+        text_find_key(base, resource_start, resource_end, "Font")
+    if font_count != 1 {
+        return (SOUNIO_PDF_TEXT_ERR_FONT_DICTIONARY, 0, 0)
+    }
+    let pos = text_skip_space(base, resource_end, font_pos)
+    if pos + 1 < resource_end && text_byte(base, pos) == 60 &&
+        text_byte(base, pos + 1) == 60 {
+        let end = text_find_dictionary_end(base, resource_end, pos)
+        if end < 0 {
+            return (SOUNIO_PDF_TEXT_ERR_FONT_DICTIONARY, 0, 0)
+        }
+        return (SOUNIO_PDF_TEXT_OK, pos, end)
+    }
+    let (ref_ok, object, generation, after) =
+        text_parse_reference(base, resource_end, pos)
+    if ref_ok != 1 || after <= pos {
+        return (SOUNIO_PDF_TEXT_ERR_FONT_DICTIONARY, 0, 0)
+    }
+    let slice = sounio_pdf_object_dictionary_slice(base, object, generation)
+    if slice.error != SOUNIO_PDF_OK {
+        return (SOUNIO_PDF_TEXT_ERR_FONT_DICTIONARY, 0, 0)
+    }
+    (SOUNIO_PDF_TEXT_OK, slice.dictionary_start, slice.dictionary_end)
+}
+
+fn text_font_index(
+    inv: &SounioPdfTextInventory,
+    object: i64,
+    generation: i64,
+) -> i64 with Panic {
+    var i: i64 = 0
+    while i < inv.unique_fonts {
+        if inv.font_object[i as usize] == object &&
+            inv.font_generation[i as usize] == generation {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn text_record_font_object(
+    base: &SounioPdfFlateInventory,
+    object: i64,
+    generation: i64,
+    inv: &!SounioPdfTextInventory,
+) -> i64 with Mut, Panic, Div {
+    if text_font_index(inv, object, generation) >= 0 { return SOUNIO_PDF_TEXT_OK }
+    if inv.unique_fonts >= SOUNIO_PDF_TEXT_FONT_CAPACITY {
+        return SOUNIO_PDF_TEXT_ERR_CAPACITY
+    }
+    let slice = sounio_pdf_object_dictionary_slice(base, object, generation)
+    if slice.error != SOUNIO_PDF_OK {
+        return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT
+    }
+    let (type_pos, type_last, type_count) =
+        text_find_key(base, slice.dictionary_start, slice.dictionary_end, "Type")
+    if type_count != 1 ||
+        !text_name_matches(base, slice.dictionary_end,
+            text_skip_space(base, slice.dictionary_end, type_pos), "Font") {
+        return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT
+    }
+    let (subtype_pos, subtype_last, subtype_count) =
+        text_find_key(base, slice.dictionary_start,
+            slice.dictionary_end, "Subtype")
+    let (subtype_ok, subtype_start, subtype_length, subtype_after) =
+        text_direct_name_span(base, slice.dictionary_end, subtype_pos)
+    if subtype_count != 1 || subtype_ok != 1 {
+        return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT
+    }
+    let index = inv.unique_fonts
+    inv.font_object[index as usize] = object
+    inv.font_generation[index as usize] = generation
+    inv.font_subtype_start[index as usize] = subtype_start
+    inv.font_subtype_length[index as usize] = subtype_length
+
+    let (base_pos, base_last, base_count) =
+        text_find_key(base, slice.dictionary_start,
+            slice.dictionary_end, "BaseFont")
+    if base_count > 1 { return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT }
+    if base_count == 1 {
+        let (base_ok, base_start, base_length, base_after) =
+            text_direct_name_span(base, slice.dictionary_end, base_pos)
+        if base_ok != 1 { return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT }
+        inv.font_base_name_start[index as usize] = base_start
+        inv.font_base_name_length[index as usize] = base_length
+    }
+
+    let (encoding_pos, encoding_last, encoding_count) =
+        text_find_key(base, slice.dictionary_start,
+            slice.dictionary_end, "Encoding")
+    if encoding_count > 1 { return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT }
+    if encoding_count == 1 {
+        let (name_ok, name_start, name_length, name_after) =
+            text_direct_name_span(base, slice.dictionary_end, encoding_pos)
+        if name_ok == 1 {
+            inv.font_encoding_kind[index as usize] = 1
+            inv.font_encoding_start[index as usize] = name_start
+            inv.font_encoding_length[index as usize] = name_length
+        } else {
+            let (ref_ok, encoding_object, encoding_generation, ref_after) =
+                text_parse_reference(base, slice.dictionary_end, encoding_pos)
+            if ref_ok == 1 {
+                inv.font_encoding_kind[index as usize] = 2
+                inv.font_encoding_object[index as usize] = encoding_object
+                inv.font_encoding_generation[index as usize] = encoding_generation
+            } else {
+                let direct = text_skip_space(
+                    base, slice.dictionary_end, encoding_pos)
+                let direct_end = text_find_dictionary_end(
+                    base, slice.dictionary_end, direct)
+                if direct_end < 0 {
+                    return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT
+                }
+                inv.font_encoding_kind[index as usize] = 3
+                inv.font_encoding_start[index as usize] = direct
+                inv.font_encoding_length[index as usize] = direct_end - direct
+            }
+        }
+        inv.fonts_with_encoding = inv.fonts_with_encoding + 1
+    }
+
+    let (unicode_pos, unicode_last, unicode_count) =
+        text_find_key(base, slice.dictionary_start,
+            slice.dictionary_end, "ToUnicode")
+    if unicode_count > 1 { return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT }
+    if unicode_count == 1 {
+        let (unicode_ok, unicode_object, unicode_generation, unicode_after) =
+            text_parse_reference(base, slice.dictionary_end, unicode_pos)
+        if unicode_ok != 1 { return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT }
+        inv.font_tounicode_object[index as usize] = unicode_object
+        inv.font_tounicode_generation[index as usize] = unicode_generation
+        inv.fonts_with_tounicode = inv.fonts_with_tounicode + 1
+    } else {
+        inv.font_tounicode_object[index as usize] = -1
+        inv.fonts_without_tounicode = inv.fonts_without_tounicode + 1
+    }
+
+    let (descendant_pos, descendant_last, descendant_count) =
+        text_find_key(base, slice.dictionary_start,
+            slice.dictionary_end, "DescendantFonts")
+    if descendant_count > 1 { return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT }
+    if descendant_count == 1 {
+        let (descendant_ok, descendant_object, descendant_generation,
+            descendant_after) = text_parse_reference_array_one(
+                base, slice.dictionary_end, descendant_pos)
+        if descendant_ok != 1 { return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT }
+        inv.font_descendant_object[index as usize] = descendant_object
+        inv.font_descendant_generation[index as usize] = descendant_generation
+        inv.fonts_with_descendants = inv.fonts_with_descendants + 1
+    } else {
+        inv.font_descendant_object[index as usize] = -1
+    }
+
+    inv.unique_fonts = inv.unique_fonts + 1
+    SOUNIO_PDF_TEXT_OK
+}
+
+fn text_collect_font_bindings(
+    base: &SounioPdfFlateInventory,
+    page: i64,
+    font_start: i64,
+    font_end: i64,
+    inv: &!SounioPdfTextInventory,
+) -> i64 with Mut, Panic, Div {
+    var pos = text_skip_space(base, font_end, font_start + 2)
+    while pos < font_end - 2 {
+        if text_byte(base, pos) != 47 {
+            return SOUNIO_PDF_TEXT_ERR_FONT_BINDING
+        }
+        let name_start = pos + 1
+        let name_end = text_name_end(base, font_end, name_start)
+        if name_end <= name_start {
+            return SOUNIO_PDF_TEXT_ERR_FONT_BINDING
+        }
+        let value = text_skip_space(base, font_end, name_end)
+        let (ref_ok, object, generation, after) =
+            text_parse_reference(base, font_end, value)
+        if ref_ok != 1 || after <= value {
+            return SOUNIO_PDF_TEXT_ERR_FONT_BINDING
+        }
+        if inv.font_bindings >= SOUNIO_PDF_TEXT_BINDING_CAPACITY {
+            return SOUNIO_PDF_TEXT_ERR_CAPACITY
+        }
+        let binding = inv.font_bindings
+        inv.binding_page[binding as usize] = page
+        inv.binding_name_start[binding as usize] = name_start
+        inv.binding_name_length[binding as usize] = name_end - name_start
+        inv.binding_font_object[binding as usize] = object
+        inv.binding_font_generation[binding as usize] = generation
+        inv.font_bindings = inv.font_bindings + 1
+        let font_error = text_record_font_object(base, object, generation, inv)
+        if font_error != SOUNIO_PDF_TEXT_OK { return font_error }
+        pos = text_skip_space(base, font_end, after)
+    }
+    if pos != font_end - 2 { return SOUNIO_PDF_TEXT_ERR_FONT_BINDING }
+    SOUNIO_PDF_TEXT_OK
+}
+
+pub fn sounio_pdf_text_resource_import(
+    path: string,
+) -> SounioPdfTextInventory with IO, Mut, Panic, Div {
+    var result = text_inventory_empty()
+    let base = sounio_pdf_flate_import(path)
+    result.base_error = base.error
+    result.base_expected = sounio_pdf_expected_inventory(&base)
+    if base.error != SOUNIO_PDF_OK || !result.base_expected {
+        result.error = SOUNIO_PDF_TEXT_ERR_BASE
+        return result
+    }
+    result.pages = base.pages
+    var page: i64 = 0
+    while page < base.pages {
+        let page_object = base.page_objects[page as usize]
+        let (resource_error, resource_start, resource_end,
+            resource_object, resource_generation, resource_depth) =
+            text_resource_dictionary(&base, page_object)
+        if resource_error != SOUNIO_PDF_TEXT_OK {
+            result.error = resource_error
+            return result
+        }
+        result.page_resource_object[page as usize] = resource_object
+        result.page_resource_generation[page as usize] = resource_generation
+        result.page_resource_depth[page as usize] = resource_depth
+        if resource_object == 0 {
+            result.direct_resources = result.direct_resources + 1
+        } else {
+            result.indirect_resources = result.indirect_resources + 1
+        }
+        if resource_depth > 0 {
+            result.inherited_resources = result.inherited_resources + 1
+        }
+        if resource_depth > result.max_resource_depth {
+            result.max_resource_depth = resource_depth
+        }
+        let (font_error, font_start, font_end) =
+            text_font_dictionary(&base, resource_start, resource_end)
+        if font_error != SOUNIO_PDF_TEXT_OK {
+            result.error = font_error
+            return result
+        }
+        let binding_error = text_collect_font_bindings(
+            &base, page, font_start, font_end, &!result)
+        if binding_error != SOUNIO_PDF_TEXT_OK {
+            result.error = binding_error
+            return result
+        }
+        page = page + 1
+    }
+    result.error = SOUNIO_PDF_TEXT_OK
+    result
+}
+
+pub fn sounio_pdf_text_span_byte(
+    base: &SounioPdfFlateInventory,
+    start: i64,
+    length: i64,
+    index: i64,
+) -> i64 with Panic, Div {
+    if start < 0 || length < 0 || index < 0 || index >= length {
+        return -1
+    }
+    text_byte(base, start + index)
+}
+
+fn content_is_whitespace(code: i64) -> bool {
+    code == 0 || code == 9 || code == 10 || code == 12 ||
+        code == 13 || code == 32
+}
+
+fn content_is_delimiter(code: i64) -> bool {
+    content_is_whitespace(code) || code == 40 || code == 41 ||
+        code == 60 || code == 62 || code == 91 || code == 93 ||
+        code == 123 || code == 125 || code == 47 || code == 37
+}
+
+fn content_name_end(
+    content: &SounioInflateResult,
+    limit: i64,
+    start: i64,
+) -> i64 with Panic {
+    var pos = start
+    while pos < limit && !content_is_delimiter(content.bytes[pos as usize]) {
+        pos = pos + 1
+    }
+    pos
+}
+
+fn content_literal_end(
+    content: &SounioInflateResult,
+    limit: i64,
+    start: i64,
+) -> i64 with Panic {
+    if start >= limit || content.bytes[start as usize] != 40 { return -1 }
+    var pos = start + 1
+    var depth: i64 = 1
+    while pos < limit {
+        let code = content.bytes[pos as usize]
+        if code == 92 {
+            pos = pos + 1
+            if pos >= limit { return -1 }
+            if content.bytes[pos as usize] == 13 {
+                pos = pos + 1
+                if pos < limit && content.bytes[pos as usize] == 10 {
+                    pos = pos + 1
+                }
+            } else {
+                if content.bytes[pos as usize] == 10 { pos = pos + 1 }
+                else { pos = pos + 1 }
+            }
+        } else {
+            if code == 40 { depth = depth + 1 }
+            else {
+                if code == 41 {
+                    depth = depth - 1
+                    if depth == 0 { return pos + 1 }
+                }
+            }
+            pos = pos + 1
+        }
+    }
+    -1
+}
+
+fn content_hexadecimal_end(
+    content: &SounioInflateResult,
+    limit: i64,
+    start: i64,
+) -> i64 with Panic {
+    if start >= limit || content.bytes[start as usize] != 60 { return -1 }
+    var pos = start + 1
+    while pos < limit {
+        let code = content.bytes[pos as usize]
+        if code == 62 { return pos + 1 }
+        let hex = (code >= 48 && code <= 57) ||
+            (code >= 65 && code <= 70) || (code >= 97 && code <= 102)
+        if !hex && !content_is_whitespace(code) { return -1 }
+        pos = pos + 1
+    }
+    -1
+}
+
+fn content_number_end(
+    content: &SounioInflateResult,
+    limit: i64,
+    start: i64,
+) -> i64 with Panic {
+    var pos = start
+    if pos < limit && (content.bytes[pos as usize] == 43 ||
+        content.bytes[pos as usize] == 45) {
+        pos = pos + 1
+    }
+    var digits: i64 = 0
+    var dots: i64 = 0
+    while pos < limit {
+        let code = content.bytes[pos as usize]
+        if code >= 48 && code <= 57 {
+            digits = digits + 1
+            pos = pos + 1
+        } else {
+            if code == 46 && dots == 0 {
+                dots = 1
+                pos = pos + 1
+            } else { break }
+        }
+    }
+    if digits == 0 { return start }
+    if pos < limit && !content_is_delimiter(content.bytes[pos as usize]) {
+        return start
+    }
+    pos
+}
+
+fn content_operator_index(
+    content: &SounioInflateResult,
+    start: i64,
+    length: i64,
+    census: &SounioPdfOperatorCensus,
+) -> i64 with Panic {
+    var operator: i64 = 0
+    while operator < census.distinct_operators {
+        if census.operator_length[operator as usize] == length {
+            var same = true
+            var i: i64 = 0
+            while i < length {
+                if census.operator_bytes[(operator *
+                    SOUNIO_PDF_TEXT_OPERATOR_BYTES + i) as usize] !=
+                    content.bytes[(start + i) as usize] {
+                    same = false
+                }
+                i = i + 1
+            }
+            if same { return operator }
+        }
+        operator = operator + 1
+    }
+    -1
+}
+
+fn content_record_operator(
+    content: &SounioInflateResult,
+    start: i64,
+    length: i64,
+    census: &!SounioPdfOperatorCensus,
+) -> i64 with Mut, Panic {
+    if length <= 0 || length > SOUNIO_PDF_TEXT_OPERATOR_BYTES {
+        return SOUNIO_PDF_TEXT_ERR_CAPACITY
+    }
+    var operator = content_operator_index(content, start, length, census)
+    if operator < 0 {
+        if census.distinct_operators >= SOUNIO_PDF_TEXT_OPERATOR_CAPACITY {
+            return SOUNIO_PDF_TEXT_ERR_CAPACITY
+        }
+        operator = census.distinct_operators
+        census.operator_length[operator as usize] = length
+        var i: i64 = 0
+        while i < length {
+            census.operator_bytes[(operator *
+                SOUNIO_PDF_TEXT_OPERATOR_BYTES + i) as usize] =
+                content.bytes[(start + i) as usize]
+            i = i + 1
+        }
+        census.distinct_operators = census.distinct_operators + 1
+    }
+    census.operator_count[operator as usize] =
+        census.operator_count[operator as usize] + 1
+    census.operator_tokens = census.operator_tokens + 1
+    SOUNIO_PDF_TEXT_OK
+}
+
+fn content_scan_operators(
+    content: &SounioInflateResult,
+    census: &!SounioPdfOperatorCensus,
+) -> i64 with Mut, Panic {
+    let limit = content.output_bytes
+    var pos: i64 = 0
+    while pos < limit {
+        let code = content.bytes[pos as usize]
+        if content_is_whitespace(code) {
+            pos = pos + 1
+        } else {
+            if code == 37 {
+                census.comments = census.comments + 1
+                while pos < limit && content.bytes[pos as usize] != 10 &&
+                    content.bytes[pos as usize] != 13 {
+                    pos = pos + 1
+                }
+            } else {
+                if code == 47 {
+                    census.names = census.names + 1
+                    pos = content_name_end(content, limit, pos + 1)
+                } else {
+                    if code == 40 {
+                        let after = content_literal_end(content, limit, pos)
+                        if after < 0 { return SOUNIO_PDF_TEXT_ERR_DICTIONARY }
+                        census.literal_strings = census.literal_strings + 1
+                        pos = after
+                    } else {
+                        if code == 60 {
+                            if pos + 1 < limit &&
+                                content.bytes[(pos + 1) as usize] == 60 {
+                                census.dictionary_opens = census.dictionary_opens + 1
+                                pos = pos + 2
+                            } else {
+                                let after = content_hexadecimal_end(content, limit, pos)
+                                if after < 0 {
+                                    return SOUNIO_PDF_TEXT_ERR_DICTIONARY
+                                }
+                                census.hexadecimal_strings =
+                                    census.hexadecimal_strings + 1
+                                pos = after
+                            }
+                        } else {
+                            if code == 62 && pos + 1 < limit &&
+                                content.bytes[(pos + 1) as usize] == 62 {
+                                census.dictionary_closes =
+                                    census.dictionary_closes + 1
+                                pos = pos + 2
+                            } else {
+                                if code == 91 {
+                                    census.array_opens = census.array_opens + 1
+                                    pos = pos + 1
+                                } else {
+                                    if code == 93 {
+                                        census.array_closes = census.array_closes + 1
+                                        pos = pos + 1
+                                    } else {
+                                        let number_end = content_number_end(
+                                            content, limit, pos)
+                                        if number_end > pos {
+                                            census.numbers = census.numbers + 1
+                                            pos = number_end
+                                        } else {
+                                            let after = content_name_end(
+                                                content, limit, pos)
+                                            if after <= pos {
+                                                return SOUNIO_PDF_TEXT_ERR_DICTIONARY
+                                            }
+                                            let operator_error =
+                                                content_record_operator(
+                                                    content, pos, after - pos,
+                                                    census)
+                                            if operator_error !=
+                                                SOUNIO_PDF_TEXT_OK {
+                                                return operator_error
+                                            }
+                                            pos = after
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    SOUNIO_PDF_TEXT_OK
+}
+
+pub fn sounio_pdf_text_operator_census(
+    path: string,
+) -> SounioPdfOperatorCensus with IO, Mut, Panic, Div {
+    var census = text_operator_census_empty()
+    let base = sounio_pdf_flate_import(path)
+    if base.error != SOUNIO_PDF_OK || !sounio_pdf_expected_inventory(&base) {
+        census.error = SOUNIO_PDF_TEXT_ERR_BASE
+        return census
+    }
+    var content = text_inflate_result_empty()
+    var page: i64 = 0
+    while page < base.pages {
+        let decode_error = sounio_pdf_decode_flate_object(
+            &base, base.content_objects[page as usize],
+            base.content_generations[page as usize], &!content)
+        if decode_error != SOUNIO_PDF_OK {
+            census.error = SOUNIO_PDF_TEXT_ERR_BASE
+            return census
+        }
+        let scan_error = content_scan_operators(&content, &!census)
+        if scan_error != SOUNIO_PDF_TEXT_OK {
+            census.error = scan_error
+            return census
+        }
+        census.pages = census.pages + 1
+        census.decoded_bytes = census.decoded_bytes + content.output_bytes
+        page = page + 1
+    }
+    census.error = SOUNIO_PDF_TEXT_OK
+    census
+}
+
+fn content_token_is(
+    content: &SounioInflateResult,
+    start: i64,
+    length: i64,
+    expected: string,
+) -> bool with Mut, Panic {
+    if length != str_len(expected) { return false }
+    var i: i64 = 0
+    while i < length {
+        if content.bytes[(start + i) as usize] != str_char_at(expected, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn content_dictionary_end(
+    content: &SounioInflateResult,
+    limit: i64,
+    start: i64,
+) -> i64 with Panic {
+    if start + 1 >= limit || content.bytes[start as usize] != 60 ||
+        content.bytes[(start + 1) as usize] != 60 {
+        return -1
+    }
+    var pos = start + 2
+    var depth: i64 = 1
+    while pos < limit {
+        let code = content.bytes[pos as usize]
+        if code == 37 {
+            while pos < limit && content.bytes[pos as usize] != 10 &&
+                content.bytes[pos as usize] != 13 {
+                pos = pos + 1
+            }
+        } else {
+            if code == 40 {
+                let after = content_literal_end(content, limit, pos)
+                if after < 0 { return -1 }
+                pos = after
+            } else {
+                if code == 60 && pos + 1 < limit &&
+                    content.bytes[(pos + 1) as usize] == 60 {
+                    depth = depth + 1
+                    pos = pos + 2
+                } else {
+                    if code == 62 && pos + 1 < limit &&
+                        content.bytes[(pos + 1) as usize] == 62 {
+                        depth = depth - 1
+                        pos = pos + 2
+                        if depth == 0 { return pos }
+                    } else {
+                        if code == 60 {
+                            let after = content_hexadecimal_end(content, limit, pos)
+                            if after < 0 { return -1 }
+                            pos = after
+                        } else { pos = pos + 1 }
+                    }
+                }
+            }
+        }
+    }
+    -1
+}
+
+fn content_array_end(
+    content: &SounioInflateResult,
+    limit: i64,
+    start: i64,
+) -> i64 with Panic {
+    if start >= limit || content.bytes[start as usize] != 91 { return -1 }
+    var pos = start + 1
+    var depth: i64 = 1
+    while pos < limit {
+        let code = content.bytes[pos as usize]
+        if code == 37 {
+            while pos < limit && content.bytes[pos as usize] != 10 &&
+                content.bytes[pos as usize] != 13 {
+                pos = pos + 1
+            }
+        } else {
+            if code == 40 {
+                let after = content_literal_end(content, limit, pos)
+                if after < 0 { return -1 }
+                pos = after
+            } else {
+                if code == 60 && (pos + 1 >= limit ||
+                    content.bytes[(pos + 1) as usize] != 60) {
+                    let after = content_hexadecimal_end(content, limit, pos)
+                    if after < 0 { return -1 }
+                    pos = after
+                } else {
+                    if code == 91 {
+                        depth = depth + 1
+                        pos = pos + 1
+                    } else {
+                        if code == 93 {
+                            depth = depth - 1
+                            pos = pos + 1
+                            if depth == 0 { return pos }
+                        } else { pos = pos + 1 }
+                    }
+                }
+            }
+        }
+    }
+    -1
+}
+
+fn content_name_equals_pdf_span(
+    content: &SounioInflateResult,
+    content_start: i64,
+    content_length: i64,
+    base: &SounioPdfFlateInventory,
+    pdf_start: i64,
+    pdf_length: i64,
+) -> bool with Panic, Div {
+    if content_length != pdf_length { return false }
+    var i: i64 = 0
+    while i < content_length {
+        if content.bytes[(content_start + i) as usize] !=
+            text_byte(base, pdf_start + i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn content_font_for_name(
+    content: &SounioInflateResult,
+    name_start: i64,
+    name_length: i64,
+    page: i64,
+    base: &SounioPdfFlateInventory,
+    resources: &SounioPdfTextInventory,
+) -> i64 with Panic, Div {
+    var binding: i64 = 0
+    while binding < resources.font_bindings {
+        if resources.binding_page[binding as usize] == page &&
+            content_name_equals_pdf_span(
+                content, name_start, name_length, base,
+                resources.binding_name_start[binding as usize],
+                resources.binding_name_length[binding as usize]) {
+            return text_font_index(
+                resources,
+                resources.binding_font_object[binding as usize],
+                resources.binding_font_generation[binding as usize])
+        }
+        binding = binding + 1
+    }
+    -1
+}
+
+fn content_record_code(
+    code: i64,
+    font: i64,
+    census: &!SounioPdfGlyphCodeCensus,
+) -> i64 with Mut, Panic {
+    if code < 0 || code > 255 || font < 0 ||
+        font >= SOUNIO_PDF_TEXT_FONT_CAPACITY {
+        return SOUNIO_PDF_TEXT_ERR_FONT_SELECTION
+    }
+    let at = font * 256 + code
+    if census.code_counts[at as usize] == 0 {
+        census.font_unique_codes[font as usize] =
+            census.font_unique_codes[font as usize] + 1
+    }
+    census.code_counts[at as usize] = census.code_counts[at as usize] + 1
+    census.font_glyph_codes[font as usize] =
+        census.font_glyph_codes[font as usize] + 1
+    census.glyph_codes = census.glyph_codes + 1
+    if code > 127 { census.non_ascii_codes = census.non_ascii_codes + 1 }
+    SOUNIO_PDF_TEXT_OK
+}
+
+fn content_record_literal_codes(
+    content: &SounioInflateResult,
+    start: i64,
+    end: i64,
+    font: i64,
+    census: &!SounioPdfGlyphCodeCensus,
+) -> i64 with Mut, Panic {
+    if start >= end || content.bytes[start as usize] != 40 ||
+        content.bytes[(end - 1) as usize] != 41 {
+        return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+    }
+    var pos = start + 1
+    var depth: i64 = 1
+    while pos < end - 1 {
+        var code = content.bytes[pos as usize]
+        var emit = true
+        if code == 92 {
+            pos = pos + 1
+            if pos >= end - 1 { return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER }
+            code = content.bytes[pos as usize]
+            if code == 13 {
+                pos = pos + 1
+                if pos < end - 1 && content.bytes[pos as usize] == 10 {
+                    pos = pos + 1
+                }
+                emit = false
+            } else {
+                if code == 10 {
+                    pos = pos + 1
+                    emit = false
+                } else {
+                    if code == 110 { code = 10; pos = pos + 1 }
+                    else {
+                        if code == 114 { code = 13; pos = pos + 1 }
+                        else {
+                            if code == 116 { code = 9; pos = pos + 1 }
+                            else {
+                                if code == 98 { code = 8; pos = pos + 1 }
+                                else {
+                                    if code == 102 { code = 12; pos = pos + 1 }
+                                    else {
+                                        if code >= 48 && code <= 55 {
+                                            var value = code - 48
+                                            var digits: i64 = 1
+                                            pos = pos + 1
+                                            while digits < 3 && pos < end - 1 &&
+                                                content.bytes[pos as usize] >= 48 &&
+                                                content.bytes[pos as usize] <= 55 {
+                                                value = value * 8 +
+                                                    content.bytes[pos as usize] - 48
+                                                digits = digits + 1
+                                                pos = pos + 1
+                                            }
+                                            code = value
+                                        } else { pos = pos + 1 }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            if code == 40 { depth = depth + 1 }
+            else {
+                if code == 41 {
+                    depth = depth - 1
+                    if depth <= 0 { return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER }
+                }
+            }
+            if code == 13 {
+                code = 10
+                pos = pos + 1
+                if pos < end - 1 && content.bytes[pos as usize] == 10 {
+                    pos = pos + 1
+                }
+            } else { pos = pos + 1 }
+        }
+        if emit {
+            let record_error = content_record_code(code, font, census)
+            if record_error != SOUNIO_PDF_TEXT_OK { return record_error }
+        }
+    }
+    if depth != 1 { return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER }
+    SOUNIO_PDF_TEXT_OK
+}
+
+fn content_record_tj_array(
+    content: &SounioInflateResult,
+    start: i64,
+    end: i64,
+    font: i64,
+    census: &!SounioPdfGlyphCodeCensus,
+) -> i64 with Mut, Panic {
+    if start >= end || content.bytes[start as usize] != 91 ||
+        content.bytes[(end - 1) as usize] != 93 {
+        return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+    }
+    var pos = start + 1
+    while pos < end - 1 {
+        while pos < end - 1 &&
+            content_is_whitespace(content.bytes[pos as usize]) {
+            pos = pos + 1
+        }
+        if pos >= end - 1 { break }
+        let code = content.bytes[pos as usize]
+        if code == 40 {
+            let after = content_literal_end(content, end - 1, pos)
+            if after < 0 { return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER }
+            let record_error = content_record_literal_codes(
+                content, pos, after, font, census)
+            if record_error != SOUNIO_PDF_TEXT_OK { return record_error }
+            census.text_show_strings = census.text_show_strings + 1
+            pos = after
+        } else {
+            let after = content_number_end(content, end - 1, pos)
+            if after <= pos { return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER }
+            census.array_adjustments = census.array_adjustments + 1
+            pos = after
+        }
+    }
+    SOUNIO_PDF_TEXT_OK
+}
+
+fn content_types_are(
+    types: &[i64; 256],
+    count: i64,
+    expected: i64,
+) -> bool with Panic {
+    var i: i64 = 0
+    while i < count {
+        if types[i as usize] != expected { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn content_scan_glyph_codes(
+    content: &SounioInflateResult,
+    page: i64,
+    base: &SounioPdfFlateInventory,
+    resources: &SounioPdfTextInventory,
+    census: &!SounioPdfGlyphCodeCensus,
+) -> i64 with Mut, Panic, Div {
+    var types: [i64; 256] = [0; 256]
+    var starts: [i64; 256] = [0; 256]
+    var ends: [i64; 256] = [0; 256]
+    var stack: i64 = 0
+    var pos: i64 = 0
+    var in_text = false
+    var font: i64 = -1
+    let limit = content.output_bytes
+    while pos < limit {
+        let code = content.bytes[pos as usize]
+        if content_is_whitespace(code) { pos = pos + 1 }
+        else {
+            if code == 37 {
+                while pos < limit && content.bytes[pos as usize] != 10 &&
+                    content.bytes[pos as usize] != 13 { pos = pos + 1 }
+            } else {
+                if stack >= 256 { return SOUNIO_PDF_TEXT_ERR_CAPACITY }
+                if code == 47 {
+                    let after = content_name_end(content, limit, pos + 1)
+                    types[stack as usize] = 1
+                    starts[stack as usize] = pos + 1
+                    ends[stack as usize] = after
+                    stack = stack + 1
+                    pos = after
+                } else {
+                    if code == 40 {
+                        let after = content_literal_end(content, limit, pos)
+                        if after < 0 { return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER }
+                        types[stack as usize] = 3
+                        starts[stack as usize] = pos
+                        ends[stack as usize] = after
+                        stack = stack + 1
+                        pos = after
+                    } else {
+                        if code == 91 {
+                            let after = content_array_end(content, limit, pos)
+                            if after < 0 { return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER }
+                            types[stack as usize] = 4
+                            starts[stack as usize] = pos
+                            ends[stack as usize] = after
+                            stack = stack + 1
+                            pos = after
+                        } else {
+                            if code == 60 && pos + 1 < limit &&
+                                content.bytes[(pos + 1) as usize] == 60 {
+                                let after = content_dictionary_end(content, limit, pos)
+                                if after < 0 {
+                                    return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                }
+                                types[stack as usize] = 5
+                                starts[stack as usize] = pos
+                                ends[stack as usize] = after
+                                stack = stack + 1
+                                pos = after
+                            } else {
+                                if code == 60 {
+                                    let after = content_hexadecimal_end(content, limit, pos)
+                                    if after < 0 {
+                                        return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                    }
+                                    types[stack as usize] = 6
+                                    starts[stack as usize] = pos
+                                    ends[stack as usize] = after
+                                    stack = stack + 1
+                                    pos = after
+                                } else {
+                                    let number_end = content_number_end(content, limit, pos)
+                                    if number_end > pos {
+                                        types[stack as usize] = 2
+                                        starts[stack as usize] = pos
+                                        ends[stack as usize] = number_end
+                                        stack = stack + 1
+                                        pos = number_end
+                                    } else {
+                                        let after = content_name_end(content, limit, pos)
+                                        if after <= pos {
+                                            return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                        }
+                                        if stack > census.max_operand_stack {
+                                            census.max_operand_stack = stack
+                                        }
+                                        if content_token_is(content, pos, after - pos, "BT") {
+                                            if stack != 0 || in_text {
+                                                return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                            }
+                                            in_text = true
+                                            font = -1
+                                            census.text_objects = census.text_objects + 1
+                                        } else {
+                                            if content_token_is(content, pos, after - pos, "ET") {
+                                                if stack != 0 || !in_text {
+                                                    return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                                }
+                                                in_text = false
+                                                font = -1
+                                            } else {
+                                                if content_token_is(content, pos, after - pos, "Tf") {
+                                                    if !in_text || stack != 2 ||
+                                                        types[0] != 1 || types[1] != 2 {
+                                                        return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                                    }
+                                                    font = content_font_for_name(
+                                                        content, starts[0], ends[0] - starts[0],
+                                                        page, base, resources)
+                                                    if font < 0 {
+                                                        return SOUNIO_PDF_TEXT_ERR_FONT_SELECTION
+                                                    }
+                                                    census.font_selections =
+                                                        census.font_selections + 1
+                                                } else {
+                                                    if content_token_is(content, pos,
+                                                        after - pos, "Tm") {
+                                                        if !in_text || stack != 6 ||
+                                                            !content_types_are(&types, 6, 2) {
+                                                            return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                                        }
+                                                        census.text_matrices =
+                                                            census.text_matrices + 1
+                                                    } else {
+                                                        if content_token_is(content, pos,
+                                                            after - pos, "Tc") {
+                                                            if !in_text || stack != 1 ||
+                                                                types[0] != 2 {
+                                                                return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                                            }
+                                                            census.character_spacings =
+                                                                census.character_spacings + 1
+                                                        } else {
+                                                            if content_token_is(content, pos,
+                                                                after - pos, "Tj") {
+                                                                if !in_text || font < 0 ||
+                                                                    stack != 1 || types[0] != 3 {
+                                                                    return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                                                }
+                                                                let record_error =
+                                                                    content_record_literal_codes(
+                                                                        content, starts[0], ends[0],
+                                                                        font, census)
+                                                                if record_error !=
+                                                                    SOUNIO_PDF_TEXT_OK {
+                                                                    return record_error
+                                                                }
+                                                                census.text_show_strings =
+                                                                    census.text_show_strings + 1
+                                                            } else {
+                                                                if content_token_is(content, pos,
+                                                                    after - pos, "TJ") {
+                                                                    if !in_text || font < 0 ||
+                                                                        stack != 1 || types[0] != 4 {
+                                                                        return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                                                    }
+                                                                    let record_error =
+                                                                        content_record_tj_array(
+                                                                            content, starts[0],
+                                                                            ends[0], font, census)
+                                                                    if record_error !=
+                                                                        SOUNIO_PDF_TEXT_OK {
+                                                                        return record_error
+                                                                    }
+                                                                    census.text_show_arrays =
+                                                                        census.text_show_arrays + 1
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        stack = 0
+                                        pos = after
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if stack != 0 || in_text { return SOUNIO_PDF_TEXT_ERR_TEXT_STATE }
+    SOUNIO_PDF_TEXT_OK
+}
+
+pub fn sounio_pdf_text_glyph_code_census(
+    path: string,
+) -> SounioPdfGlyphCodeCensus with IO, Mut, Panic, Div {
+    var census = text_glyph_code_census_empty()
+    let base = sounio_pdf_flate_import(path)
+    if base.error != SOUNIO_PDF_OK || !sounio_pdf_expected_inventory(&base) {
+        census.error = SOUNIO_PDF_TEXT_ERR_BASE
+        return census
+    }
+    let resources = sounio_pdf_text_resource_import(path)
+    if resources.error != SOUNIO_PDF_TEXT_OK {
+        census.error = resources.error
+        return census
+    }
+    var content = text_inflate_result_empty()
+    var page: i64 = 0
+    while page < base.pages {
+        let decode_error = sounio_pdf_decode_flate_object(
+            &base, base.content_objects[page as usize],
+            base.content_generations[page as usize], &!content)
+        if decode_error != SOUNIO_PDF_OK {
+            census.error = SOUNIO_PDF_TEXT_ERR_BASE
+            return census
+        }
+        let scan_error = content_scan_glyph_codes(
+            &content, page, &base, &resources, &!census)
+        if scan_error != SOUNIO_PDF_TEXT_OK {
+            census.error = scan_error
+            return census
+        }
+        census.pages = census.pages + 1
+        page = page + 1
+    }
+    census.error = SOUNIO_PDF_TEXT_OK
+    census
+}
+
+fn text_macroman_unicode(code: i64) -> i64 with Panic {
+    if code < 0 || code > 255 { return -1 }
+    if code < 128 { return code }
+    let upper: [i64; 128] = [
+        0x00c4, 0x00c5, 0x00c7, 0x00c9, 0x00d1, 0x00d6, 0x00dc, 0x00e1,
+        0x00e0, 0x00e2, 0x00e4, 0x00e3, 0x00e5, 0x00e7, 0x00e9, 0x00e8,
+        0x00ea, 0x00eb, 0x00ed, 0x00ec, 0x00ee, 0x00ef, 0x00f1, 0x00f3,
+        0x00f2, 0x00f4, 0x00f6, 0x00f5, 0x00fa, 0x00f9, 0x00fb, 0x00fc,
+        0x2020, 0x00b0, 0x00a2, 0x00a3, 0x00a7, 0x2022, 0x00b6, 0x00df,
+        0x00ae, 0x00a9, 0x2122, 0x00b4, 0x00a8, 0x2260, 0x00c6, 0x00d8,
+        0x221e, 0x00b1, 0x2264, 0x2265, 0x00a5, 0x00b5, 0x2202, 0x2211,
+        0x220f, 0x03c0, 0x222b, 0x00aa, 0x00ba, 0x03a9, 0x00e6, 0x00f8,
+        0x00bf, 0x00a1, 0x00ac, 0x221a, 0x0192, 0x2248, 0x2206, 0x00ab,
+        0x00bb, 0x2026, 0x00a0, 0x00c0, 0x00c3, 0x00d5, 0x0152, 0x0153,
+        0x2013, 0x2014, 0x201c, 0x201d, 0x2018, 0x2019, 0x00f7, 0x25ca,
+        0x00ff, 0x0178, 0x2044, 0x20ac, 0x2039, 0x203a, 0xfb01, 0xfb02,
+        0x2021, 0x00b7, 0x201a, 0x201e, 0x2030, 0x00c2, 0x00ca, 0x00c1,
+        0x00cb, 0x00c8, 0x00cd, 0x00ce, 0x00cf, 0x00cc, 0x00d3, 0x00d4,
+        0xf8ff, 0x00d2, 0x00da, 0x00db, 0x00d9, 0x0131, 0x02c6, 0x02dc,
+        0x00af, 0x02d8, 0x02d9, 0x02da, 0x00b8, 0x02dd, 0x02db, 0x02c7
+    ]
+    upper[(code - 128) as usize]
+}
+
+fn content_hex_value(
+    content: &SounioInflateResult,
+    limit: i64,
+    start: i64,
+) -> (i64, i64, i64, i64) with Panic {
+    if start >= limit || content.bytes[start as usize] != 60 ||
+        (start + 1 < limit && content.bytes[(start + 1) as usize] == 60) {
+        return (0, 0, 0, start)
+    }
+    var pos = start + 1
+    var value: i64 = 0
+    var digits: i64 = 0
+    while pos < limit {
+        let code = content.bytes[pos as usize]
+        if code == 62 {
+            if digits <= 0 || digits > 8 || digits % 2 != 0 {
+                return (0, 0, 0, start)
+            }
+            return (1, value, digits, pos + 1)
+        }
+        if content_is_whitespace(code) { pos = pos + 1 }
+        else {
+            var digit: i64 = -1
+            if code >= 48 && code <= 57 { digit = code - 48 }
+            else {
+                if code >= 65 && code <= 70 { digit = code - 55 }
+                else { if code >= 97 && code <= 102 { digit = code - 87 } }
+            }
+            if digit < 0 { return (0, 0, 0, start) }
+            value = value * 16 + digit
+            digits = digits + 1
+            if digits > 8 { return (0, 0, 0, start) }
+            pos = pos + 1
+        }
+    }
+    (0, 0, 0, start)
+}
+
+fn content_integer_value(
+    content: &SounioInflateResult,
+    limit: i64,
+    start: i64,
+) -> (i64, i64, i64) with Panic {
+    let after = content_number_end(content, limit, start)
+    if after <= start { return (0, 0, start) }
+    var pos = start
+    var sign: i64 = 1
+    if content.bytes[pos as usize] == 45 { sign = -1; pos = pos + 1 }
+    else { if content.bytes[pos as usize] == 43 { pos = pos + 1 } }
+    var value: i64 = 0
+    while pos < after {
+        let code = content.bytes[pos as usize]
+        if code < 48 || code > 57 { return (0, 0, start) }
+        if value > 922337203685477580 ||
+            (value == 922337203685477580 && code - 48 > 7) {
+            return (0, 0, start)
+        }
+        value = value * 10 + code - 48
+        pos = pos + 1
+    }
+    (1, value * sign, after)
+}
+
+fn text_unicode_scalar_valid(value: i64) -> bool {
+    value >= 0 && value <= 0x10ffff && !(value >= 0xd800 && value <= 0xdfff)
+}
+
+fn text_cmap_target_scalar(value: i64, digits: i64) -> i64 {
+    if digits != 4 || !text_unicode_scalar_valid(value) { return -1 }
+    value
+}
+
+fn text_cmap_set(
+    maps: &!PdfTextUnicodeMaps,
+    font: i64,
+    code: i64,
+    scalar: i64,
+) -> i64 with Mut, Panic {
+    if font < 0 || font >= SOUNIO_PDF_TEXT_FONT_CAPACITY ||
+        code < 0 || code > 255 || !text_unicode_scalar_valid(scalar) {
+        return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT
+    }
+    let at = font * 256 + code
+    if maps.present[at as usize] != 0 {
+        return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT
+    }
+    maps.present[at as usize] = 1
+    maps.value[at as usize] = scalar
+    maps.entries = maps.entries + 1
+    SOUNIO_PDF_TEXT_OK
+}
+
+fn text_parse_cmap(
+    content: &SounioInflateResult,
+    font: i64,
+    maps: &!PdfTextUnicodeMaps,
+) -> i64 with Mut, Panic {
+    var pos: i64 = 0
+    var last_integer: i64 = 0
+    var integer_valid = false
+    var mode: i64 = 0
+    var remaining: i64 = 0
+    var tuple_count: i64 = 0
+    var tuple_value: [i64; 3] = [0; 3]
+    var tuple_digits: [i64; 3] = [0; 3]
+    let limit = content.output_bytes
+    while pos < limit {
+        let code = content.bytes[pos as usize]
+        if content_is_whitespace(code) { pos = pos + 1 }
+        else {
+            if code == 37 {
+                while pos < limit && content.bytes[pos as usize] != 10 &&
+                    content.bytes[pos as usize] != 13 { pos = pos + 1 }
+            } else {
+                if code == 47 {
+                    pos = content_name_end(content, limit, pos + 1)
+                    integer_valid = false
+                } else {
+                    if code == 60 && pos + 1 < limit &&
+                        content.bytes[(pos + 1) as usize] == 60 {
+                        let after = content_dictionary_end(content, limit, pos)
+                        if after < 0 { return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER }
+                        pos = after
+                        integer_valid = false
+                    } else {
+                        if code == 60 {
+                            let (hex_ok, value, digits, after) =
+                                content_hex_value(content, limit, pos)
+                            if hex_ok != 1 || mode == 0 || tuple_count >= 3 {
+                                return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                            }
+                            tuple_value[tuple_count as usize] = value
+                            tuple_digits[tuple_count as usize] = digits
+                            tuple_count = tuple_count + 1
+                            pos = after
+                            var needed: i64 = 2
+                            if mode == 3 { needed = 3 }
+                            if tuple_count == needed {
+                                if mode == 1 {
+                                    if tuple_digits[0] != 2 || tuple_digits[1] != 2 ||
+                                        tuple_value[0] != 0 || tuple_value[1] != 255 {
+                                        return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT
+                                    }
+                                    maps.codespace_ranges = maps.codespace_ranges + 1
+                                } else {
+                                    if mode == 2 {
+                                        if tuple_digits[0] != 2 {
+                                            return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT
+                                        }
+                                        let scalar = text_cmap_target_scalar(
+                                            tuple_value[1], tuple_digits[1])
+                                        let set_error = text_cmap_set(
+                                            maps, font, tuple_value[0], scalar)
+                                        if set_error != SOUNIO_PDF_TEXT_OK {
+                                            return set_error
+                                        }
+                                        maps.bfchar_ranges = maps.bfchar_ranges + 1
+                                    } else {
+                                        if tuple_digits[0] != 2 ||
+                                            tuple_digits[1] != 2 ||
+                                            tuple_value[1] < tuple_value[0] {
+                                            return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT
+                                        }
+                                        let scalar = text_cmap_target_scalar(
+                                            tuple_value[2], tuple_digits[2])
+                                        if scalar < 0 { return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT }
+                                        var source = tuple_value[0]
+                                        while source <= tuple_value[1] {
+                                            let set_error = text_cmap_set(
+                                                maps, font, source,
+                                                scalar + source - tuple_value[0])
+                                            if set_error != SOUNIO_PDF_TEXT_OK {
+                                                return set_error
+                                            }
+                                            source = source + 1
+                                        }
+                                        maps.bfranges = maps.bfranges + 1
+                                    }
+                                }
+                                remaining = remaining - 1
+                                tuple_count = 0
+                                if remaining < 0 {
+                                    return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                }
+                            }
+                        } else {
+                            let (integer_ok, integer, integer_after) =
+                                content_integer_value(content, limit, pos)
+                            if integer_ok == 1 {
+                                if mode != 0 {
+                                    return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                }
+                                last_integer = integer
+                                integer_valid = true
+                                pos = integer_after
+                            } else {
+                                let after = content_name_end(content, limit, pos)
+                                if after <= pos {
+                                    return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                }
+                                if content_token_is(content, pos, after - pos,
+                                    "begincodespacerange") {
+                                    if mode != 0 || !integer_valid || last_integer <= 0 {
+                                        return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                    }
+                                    mode = 1; remaining = last_integer; tuple_count = 0
+                                } else {
+                                    if content_token_is(content, pos, after - pos,
+                                        "beginbfchar") {
+                                        if mode != 0 || !integer_valid || last_integer <= 0 {
+                                            return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                        }
+                                        mode = 2; remaining = last_integer; tuple_count = 0
+                                    } else {
+                                        if content_token_is(content, pos, after - pos,
+                                            "beginbfrange") {
+                                            if mode != 0 || !integer_valid ||
+                                                last_integer <= 0 {
+                                                return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                            }
+                                            mode = 3; remaining = last_integer; tuple_count = 0
+                                        } else {
+                                            var ends_mode = false
+                                            if mode == 1 && content_token_is(
+                                                content, pos, after - pos,
+                                                "endcodespacerange") { ends_mode = true }
+                                            if mode == 2 && content_token_is(
+                                                content, pos, after - pos,
+                                                "endbfchar") { ends_mode = true }
+                                            if mode == 3 && content_token_is(
+                                                content, pos, after - pos,
+                                                "endbfrange") { ends_mode = true }
+                                            if ends_mode {
+                                                if remaining != 0 || tuple_count != 0 {
+                                                    return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                                }
+                                                mode = 0
+                                            } else {
+                                                if mode != 0 {
+                                                    return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                integer_valid = false
+                                pos = after
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if mode != 0 || remaining != 0 || tuple_count != 0 {
+        return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+    }
+    maps.cmap_streams = maps.cmap_streams + 1
+    SOUNIO_PDF_TEXT_OK
+}
+
+fn text_build_unicode_maps(
+    base: &SounioPdfFlateInventory,
+    resources: &SounioPdfTextInventory,
+    maps: &!PdfTextUnicodeMaps,
+) -> i64 with Mut, Panic, Div {
+    var cmap = text_inflate_result_empty()
+    var font: i64 = 0
+    while font < resources.unique_fonts {
+        let object = resources.font_tounicode_object[font as usize]
+        if object >= 0 {
+            let decode_error = sounio_pdf_decode_flate_object(
+                base, object,
+                resources.font_tounicode_generation[font as usize], &!cmap)
+            if decode_error != SOUNIO_PDF_OK {
+                return SOUNIO_PDF_TEXT_ERR_BASE
+            }
+            let parse_error = text_parse_cmap(&cmap, font, maps)
+            if parse_error != SOUNIO_PDF_TEXT_OK { return parse_error }
+        }
+        font = font + 1
+    }
+    SOUNIO_PDF_TEXT_OK
+}
+
+pub fn sounio_pdf_text_unicode_census(
+    path: string,
+) -> SounioPdfUnicodeCensus with IO, Mut, Panic, Div {
+    var census = text_unicode_census_empty()
+    let base = sounio_pdf_flate_import(path)
+    if base.error != SOUNIO_PDF_OK || !sounio_pdf_expected_inventory(&base) {
+        census.error = SOUNIO_PDF_TEXT_ERR_BASE
+        return census
+    }
+    let resources = sounio_pdf_text_resource_import(path)
+    if resources.error != SOUNIO_PDF_TEXT_OK {
+        census.error = resources.error
+        return census
+    }
+    let glyphs = sounio_pdf_text_glyph_code_census(path)
+    if glyphs.error != SOUNIO_PDF_TEXT_OK {
+        census.error = glyphs.error
+        return census
+    }
+    var maps = text_unicode_maps_empty()
+    let map_error = text_build_unicode_maps(&base, &resources, &!maps)
+    if map_error != SOUNIO_PDF_TEXT_OK {
+        census.error = map_error
+        return census
+    }
+    census.fonts = resources.unique_fonts
+    census.cmap_streams = maps.cmap_streams
+    census.codespace_ranges = maps.codespace_ranges
+    census.bfchar_ranges = maps.bfchar_ranges
+    census.bfranges = maps.bfranges
+    census.cmap_entries = maps.entries
+    var font: i64 = 0
+    while font < resources.unique_fonts {
+        var scalar_seen: [i64; 256] = [0; 256]
+        var scalar_values: [i64; 256] = [0; 256]
+        var scalar_count: i64 = 0
+        var code: i64 = 0
+        while code < 256 {
+            let count = glyphs.code_counts[(font * 256 + code) as usize]
+            if count > 0 {
+                let at = font * 256 + code
+                var scalar = text_macroman_unicode(code)
+                if maps.present[at as usize] == 1 {
+                    scalar = maps.value[at as usize]
+                    census.cmap_scalars = census.cmap_scalars + count
+                    census.font_cmap_scalars[font as usize] =
+                        census.font_cmap_scalars[font as usize] + count
+                } else {
+                    census.macroman_scalars = census.macroman_scalars + count
+                    census.font_macroman_scalars[font as usize] =
+                        census.font_macroman_scalars[font as usize] + count
+                }
+                if !text_unicode_scalar_valid(scalar) {
+                    census.error = SOUNIO_PDF_TEXT_ERR_FONT_OBJECT
+                    return census
+                }
+                if scalar > 127 { census.non_ascii_scalars =
+                    census.non_ascii_scalars + count }
+                if scalar >= 0xe000 && scalar <= 0xf8ff {
+                    census.private_use_scalars =
+                        census.private_use_scalars + count
+                }
+                var seen = false
+                var scalar_index: i64 = 0
+                while scalar_index < scalar_count {
+                    if scalar_values[scalar_index as usize] == scalar {
+                        seen = true
+                    }
+                    scalar_index = scalar_index + 1
+                }
+                if !seen {
+                    if scalar_count >= 256 {
+                        census.error = SOUNIO_PDF_TEXT_ERR_CAPACITY
+                        return census
+                    }
+                    scalar_values[scalar_count as usize] = scalar
+                    scalar_seen[scalar_count as usize] = 1
+                    scalar_count = scalar_count + 1
+                }
+                census.glyph_codes = census.glyph_codes + count
+            }
+            code = code + 1
+        }
+        census.font_unique_scalars[font as usize] = scalar_count
+        font = font + 1
+    }
+    census.error = SOUNIO_PDF_TEXT_OK
+    census
+}
+
+fn content_fixed_value(
+    content: &SounioInflateResult,
+    start: i64,
+    end: i64,
+) -> (i64, i64) with Panic {
+    if start >= end { return (0, 0) }
+    var pos = start
+    var sign: i64 = 1
+    if content.bytes[pos as usize] == 45 { sign = -1; pos = pos + 1 }
+    else { if content.bytes[pos as usize] == 43 { pos = pos + 1 } }
+    var integer: i64 = 0
+    var integer_digits: i64 = 0
+    while pos < end && content.bytes[pos as usize] >= 48 &&
+        content.bytes[pos as usize] <= 57 {
+        if integer > 9000000000000 {
+            return (0, 0)
+        }
+        integer = integer * 10 + content.bytes[pos as usize] - 48
+        integer_digits = integer_digits + 1
+        pos = pos + 1
+    }
+    var fraction: i64 = 0
+    var fraction_digits: i64 = 0
+    if pos < end && content.bytes[pos as usize] == 46 {
+        pos = pos + 1
+        while pos < end && content.bytes[pos as usize] >= 48 &&
+            content.bytes[pos as usize] <= 57 {
+            if fraction_digits >= 6 {
+                if content.bytes[pos as usize] != 48 { return (0, 0) }
+            } else {
+                fraction = fraction * 10 + content.bytes[pos as usize] - 48
+                fraction_digits = fraction_digits + 1
+            }
+            pos = pos + 1
+        }
+    }
+    if pos != end || (integer_digits == 0 && fraction_digits == 0) {
+        return (0, 0)
+    }
+    while fraction_digits < 6 {
+        fraction = fraction * 10
+        fraction_digits = fraction_digits + 1
+    }
+    if integer > 9223372036854 { return (0, 0) }
+    (1, sign * (integer * SOUNIO_PDF_TEXT_FIXED_SCALE + fraction))
+}
+
+fn text_fixed_mul(left: i64, right: i64) -> i64 with Div {
+    (left * right) / SOUNIO_PDF_TEXT_FIXED_SCALE
+}
+
+fn text_matrix_identity() -> [i64; 6] {
+    [SOUNIO_PDF_TEXT_FIXED_SCALE, 0, 0,
+        SOUNIO_PDF_TEXT_FIXED_SCALE, 0, 0]
+}
+
+fn text_matrix_concat(
+    left: &[i64; 6],
+    right: &[i64; 6],
+) -> [i64; 6] with Div, Panic {
+    [
+        text_fixed_mul(left[0], right[0]) +
+            text_fixed_mul(left[1], right[2]),
+        text_fixed_mul(left[0], right[1]) +
+            text_fixed_mul(left[1], right[3]),
+        text_fixed_mul(left[2], right[0]) +
+            text_fixed_mul(left[3], right[2]),
+        text_fixed_mul(left[2], right[1]) +
+            text_fixed_mul(left[3], right[3]),
+        text_fixed_mul(left[4], right[0]) +
+            text_fixed_mul(left[5], right[2]) + right[4],
+        text_fixed_mul(left[4], right[1]) +
+            text_fixed_mul(left[5], right[3]) + right[5]
+    ]
+}
+
+fn text_projection_scalar(
+    maps: &PdfTextUnicodeMaps,
+    font: i64,
+    code: i64,
+) -> i64 with Panic {
+    if font < 0 || font >= SOUNIO_PDF_TEXT_FONT_CAPACITY ||
+        code < 0 || code > 255 {
+        return -1
+    }
+    let at = font * 256 + code
+    if maps.present[at as usize] == 1 { return maps.value[at as usize] }
+    text_macroman_unicode(code)
+}
+
+fn text_projection_append_code(
+    maps: &PdfTextUnicodeMaps,
+    font: i64,
+    code: i64,
+    projection: &!SounioPdfTextProjection,
+) -> i64 with Mut, Panic {
+    if projection.scalars >= SOUNIO_PDF_TEXT_SCALAR_CAPACITY {
+        return SOUNIO_PDF_TEXT_ERR_CAPACITY
+    }
+    let scalar = text_projection_scalar(maps, font, code)
+    if !text_unicode_scalar_valid(scalar) {
+        return SOUNIO_PDF_TEXT_ERR_FONT_OBJECT
+    }
+    projection.scalar_value[projection.scalars as usize] = scalar
+    projection.scalar_font[projection.scalars as usize] = font
+    projection.scalars = projection.scalars + 1
+    SOUNIO_PDF_TEXT_OK
+}
+
+fn text_projection_append_literal(
+    content: &SounioInflateResult,
+    start: i64,
+    end: i64,
+    font: i64,
+    maps: &PdfTextUnicodeMaps,
+    projection: &!SounioPdfTextProjection,
+) -> i64 with Mut, Panic {
+    if start >= end || content.bytes[start as usize] != 40 ||
+        content.bytes[(end - 1) as usize] != 41 {
+        return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+    }
+    var pos = start + 1
+    var depth: i64 = 1
+    while pos < end - 1 {
+        var code = content.bytes[pos as usize]
+        var emit = true
+        if code == 92 {
+            pos = pos + 1
+            if pos >= end - 1 { return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER }
+            code = content.bytes[pos as usize]
+            if code == 13 {
+                pos = pos + 1
+                if pos < end - 1 && content.bytes[pos as usize] == 10 {
+                    pos = pos + 1
+                }
+                emit = false
+            } else {
+                if code == 10 { pos = pos + 1; emit = false }
+                else {
+                    if code == 110 { code = 10; pos = pos + 1 }
+                    else {
+                        if code == 114 { code = 13; pos = pos + 1 }
+                        else {
+                            if code == 116 { code = 9; pos = pos + 1 }
+                            else {
+                                if code == 98 { code = 8; pos = pos + 1 }
+                                else {
+                                    if code == 102 { code = 12; pos = pos + 1 }
+                                    else {
+                                        if code >= 48 && code <= 55 {
+                                            var value = code - 48
+                                            var digits: i64 = 1
+                                            pos = pos + 1
+                                            while digits < 3 && pos < end - 1 &&
+                                                content.bytes[pos as usize] >= 48 &&
+                                                content.bytes[pos as usize] <= 55 {
+                                                value = value * 8 +
+                                                    content.bytes[pos as usize] - 48
+                                                digits = digits + 1
+                                                pos = pos + 1
+                                            }
+                                            code = value
+                                        } else { pos = pos + 1 }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            if code == 40 { depth = depth + 1 }
+            else {
+                if code == 41 {
+                    depth = depth - 1
+                    if depth <= 0 { return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER }
+                }
+            }
+            if code == 13 {
+                code = 10
+                pos = pos + 1
+                if pos < end - 1 && content.bytes[pos as usize] == 10 {
+                    pos = pos + 1
+                }
+            } else { pos = pos + 1 }
+        }
+        if emit {
+            let append_error = text_projection_append_code(
+                maps, font, code, projection)
+            if append_error != SOUNIO_PDF_TEXT_OK { return append_error }
+        }
+    }
+    if depth != 1 { return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER }
+    SOUNIO_PDF_TEXT_OK
+}
+
+fn text_projection_append_array(
+    content: &SounioInflateResult,
+    start: i64,
+    end: i64,
+    font: i64,
+    maps: &PdfTextUnicodeMaps,
+    projection: &!SounioPdfTextProjection,
+) -> i64 with Mut, Panic {
+    if start >= end || content.bytes[start as usize] != 91 ||
+        content.bytes[(end - 1) as usize] != 93 {
+        return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+    }
+    var pos = start + 1
+    while pos < end - 1 {
+        while pos < end - 1 &&
+            content_is_whitespace(content.bytes[pos as usize]) {
+            pos = pos + 1
+        }
+        if pos >= end - 1 { break }
+        if content.bytes[pos as usize] == 40 {
+            let after = content_literal_end(content, end - 1, pos)
+            if after < 0 { return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER }
+            let append_error = text_projection_append_literal(
+                content, pos, after, font, maps, projection)
+            if append_error != SOUNIO_PDF_TEXT_OK { return append_error }
+            pos = after
+        } else {
+            let after = content_number_end(content, end - 1, pos)
+            if after <= pos { return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER }
+            pos = after
+        }
+    }
+    SOUNIO_PDF_TEXT_OK
+}
+
+fn text_projection_finish_object(
+    object: i64,
+    projection: &!SounioPdfTextProjection,
+) with Mut, Panic {
+    let count = projection.scalars -
+        projection.object_scalar_start[object as usize]
+    projection.object_scalar_count[object as usize] = count
+    if count > 0 { projection.nonempty_objects = projection.nonempty_objects + 1 }
+    else { projection.empty_objects = projection.empty_objects + 1 }
+    let matrices = projection.object_matrix_count[object as usize]
+    if matrices == 0 { projection.matrixless_objects = projection.matrixless_objects + 1 }
+    if matrices > 1 {
+        projection.multiple_matrix_objects =
+            projection.multiple_matrix_objects + 1
+    }
+}
+
+fn content_projection_scan(
+    content: &SounioInflateResult,
+    page: i64,
+    base: &SounioPdfFlateInventory,
+    resources: &SounioPdfTextInventory,
+    maps: &PdfTextUnicodeMaps,
+    projection: &!SounioPdfTextProjection,
+) -> i64 with Mut, Panic, Div {
+    var types: [i64; 256] = [0; 256]
+    var starts: [i64; 256] = [0; 256]
+    var ends: [i64; 256] = [0; 256]
+    var stack: i64 = 0
+    var graphics: [i64; 768] = [0; 768]
+    var graphics_depth: i64 = 0
+    var ctm = text_matrix_identity()
+    var in_text = false
+    var font: i64 = -1
+    var object: i64 = -1
+    var pos: i64 = 0
+    let limit = content.output_bytes
+    while pos < limit {
+        let code = content.bytes[pos as usize]
+        if content_is_whitespace(code) { pos = pos + 1 }
+        else {
+            if code == 37 {
+                while pos < limit && content.bytes[pos as usize] != 10 &&
+                    content.bytes[pos as usize] != 13 { pos = pos + 1 }
+            } else {
+                if stack >= 256 { return SOUNIO_PDF_TEXT_ERR_CAPACITY }
+                if code == 47 {
+                    let after = content_name_end(content, limit, pos + 1)
+                    types[stack as usize] = 1; starts[stack as usize] = pos + 1
+                    ends[stack as usize] = after; stack = stack + 1; pos = after
+                } else {
+                    if code == 40 {
+                        let after = content_literal_end(content, limit, pos)
+                        if after < 0 { return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER }
+                        types[stack as usize] = 3; starts[stack as usize] = pos
+                        ends[stack as usize] = after; stack = stack + 1; pos = after
+                    } else {
+                        if code == 91 {
+                            let after = content_array_end(content, limit, pos)
+                            if after < 0 { return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER }
+                            types[stack as usize] = 4; starts[stack as usize] = pos
+                            ends[stack as usize] = after; stack = stack + 1; pos = after
+                        } else {
+                            if code == 60 && pos + 1 < limit &&
+                                content.bytes[(pos + 1) as usize] == 60 {
+                                let after = content_dictionary_end(content, limit, pos)
+                                if after < 0 {
+                                    return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                }
+                                types[stack as usize] = 5; starts[stack as usize] = pos
+                                ends[stack as usize] = after; stack = stack + 1; pos = after
+                            } else {
+                                if code == 60 {
+                                    let after = content_hexadecimal_end(content, limit, pos)
+                                    if after < 0 {
+                                        return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                    }
+                                    types[stack as usize] = 6; starts[stack as usize] = pos
+                                    ends[stack as usize] = after; stack = stack + 1; pos = after
+                                } else {
+                                    let number_end = content_number_end(content, limit, pos)
+                                    if number_end > pos {
+                                        types[stack as usize] = 2
+                                        starts[stack as usize] = pos
+                                        ends[stack as usize] = number_end
+                                        stack = stack + 1; pos = number_end
+                                    } else {
+                                        let after = content_name_end(content, limit, pos)
+                                        if after <= pos {
+                                            return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                        }
+                                        if content_token_is(content, pos, after - pos, "q") {
+                                            if stack != 0 || graphics_depth >=
+                                                SOUNIO_PDF_TEXT_GRAPHICS_DEPTH {
+                                                return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                            }
+                                            var i: i64 = 0
+                                            while i < 6 {
+                                                graphics[(graphics_depth * 6 + i) as usize] =
+                                                    ctm[i as usize]
+                                                i = i + 1
+                                            }
+                                            graphics_depth = graphics_depth + 1
+                                            if graphics_depth > projection.max_graphics_depth {
+                                                projection.max_graphics_depth = graphics_depth
+                                            }
+                                        } else {
+                                            if content_token_is(content, pos, after - pos, "Q") {
+                                                if stack != 0 || graphics_depth <= 0 {
+                                                    return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                                }
+                                                graphics_depth = graphics_depth - 1
+                                                var i: i64 = 0
+                                                while i < 6 {
+                                                    ctm[i as usize] = graphics[
+                                                        (graphics_depth * 6 + i) as usize]
+                                                    i = i + 1
+                                                }
+                                            } else {
+                                                if content_token_is(content, pos,
+                                                    after - pos, "cm") {
+                                                    if stack != 6 ||
+                                                        !content_types_are(&types, 6, 2) {
+                                                        return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                                    }
+                                                    var matrix: [i64; 6] = [0; 6]
+                                                    var i: i64 = 0
+                                                    while i < 6 {
+                                                        let (fixed_ok, fixed) =
+                                                            content_fixed_value(content,
+                                                                starts[i as usize],
+                                                                ends[i as usize])
+                                                        if fixed_ok != 1 {
+                                                            return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                                        }
+                                                        matrix[i as usize] = fixed
+                                                        i = i + 1
+                                                    }
+                                                    ctm = text_matrix_concat(&matrix, &ctm)
+                                                } else {
+                                                    if content_token_is(content, pos,
+                                                        after - pos, "BT") {
+                                                        if stack != 0 || in_text ||
+                                                            projection.text_objects >=
+                                                                SOUNIO_PDF_TEXT_OBJECT_CAPACITY {
+                                                            return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                                        }
+                                                        object = projection.text_objects
+                                                        projection.text_objects =
+                                                            projection.text_objects + 1
+                                                        projection.object_page[object as usize] = page
+                                                        projection.object_scalar_start[
+                                                            object as usize] = projection.scalars
+                                                        in_text = true; font = -1
+                                                    } else {
+                                                        if content_token_is(content, pos,
+                                                            after - pos, "ET") {
+                                                            if stack != 0 || !in_text || object < 0 {
+                                                                return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                                            }
+                                                            text_projection_finish_object(
+                                                                object, projection)
+                                                            in_text = false; font = -1; object = -1
+                                                        } else {
+                                                            if content_token_is(content, pos,
+                                                                after - pos, "Tf") {
+                                                                if !in_text || stack != 2 ||
+                                                                    types[0] != 1 || types[1] != 2 {
+                                                                    return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                                                }
+                                                                font = content_font_for_name(
+                                                                    content, starts[0],
+                                                                    ends[0] - starts[0], page,
+                                                                    base, resources)
+                                                                if font < 0 {
+                                                                    return SOUNIO_PDF_TEXT_ERR_FONT_SELECTION
+                                                                }
+                                                            } else {
+                                                                if content_token_is(content, pos,
+                                                                    after - pos, "Tm") {
+                                                                    if !in_text || object < 0 ||
+                                                                        stack != 6 ||
+                                                                        !content_types_are(&types, 6, 2) {
+                                                                        return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                                                    }
+                                                                    var matrix: [i64; 6] = [0; 6]
+                                                                    var i: i64 = 0
+                                                                    while i < 6 {
+                                                                        let (fixed_ok, fixed) =
+                                                                            content_fixed_value(content,
+                                                                                starts[i as usize],
+                                                                                ends[i as usize])
+                                                                        if fixed_ok != 1 {
+                                                                            return SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+                                                                        }
+                                                                        matrix[i as usize] = fixed
+                                                                        i = i + 1
+                                                                    }
+                                                                    projection.object_raw_x[
+                                                                        object as usize] = matrix[4]
+                                                                    projection.object_raw_y[
+                                                                        object as usize] = matrix[5]
+                                                                    let device = text_matrix_concat(
+                                                                        &matrix, &ctm)
+                                                                    projection.object_device_x[
+                                                                        object as usize] = device[4]
+                                                                    projection.object_device_y[
+                                                                        object as usize] = device[5]
+                                                                    projection.object_matrix_count[
+                                                                        object as usize] =
+                                                                        projection.object_matrix_count[
+                                                                            object as usize] + 1
+                                                                } else {
+                                                                    if content_token_is(content, pos,
+                                                                        after - pos, "Tj") {
+                                                                        if !in_text || object < 0 ||
+                                                                            font < 0 || stack != 1 ||
+                                                                            types[0] != 3 {
+                                                                            return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                                                        }
+                                                                        let append_error =
+                                                                            text_projection_append_literal(
+                                                                                content, starts[0], ends[0],
+                                                                                font, maps, projection)
+                                                                        if append_error !=
+                                                                            SOUNIO_PDF_TEXT_OK {
+                                                                            return append_error
+                                                                        }
+                                                                        projection.object_show_count[
+                                                                            object as usize] =
+                                                                            projection.object_show_count[
+                                                                                object as usize] + 1
+                                                                        projection.show_operations =
+                                                                            projection.show_operations + 1
+                                                                    } else {
+                                                                        if content_token_is(content, pos,
+                                                                            after - pos, "TJ") {
+                                                                            if !in_text || object < 0 ||
+                                                                                font < 0 || stack != 1 ||
+                                                                                types[0] != 4 {
+                                                                                return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+                                                                            }
+                                                                            let append_error =
+                                                                                text_projection_append_array(
+                                                                                    content, starts[0],
+                                                                                    ends[0], font, maps,
+                                                                                    projection)
+                                                                            if append_error !=
+                                                                                SOUNIO_PDF_TEXT_OK {
+                                                                                return append_error
+                                                                            }
+                                                                            projection.object_show_count[
+                                                                                object as usize] =
+                                                                                projection.object_show_count[
+                                                                                    object as usize] + 1
+                                                                            projection.show_operations =
+                                                                                projection.show_operations + 1
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        stack = 0; pos = after
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if stack != 0 || in_text || graphics_depth != 0 {
+        return SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+    }
+    SOUNIO_PDF_TEXT_OK
+}
+
+pub fn sounio_pdf_text_project(
+    path: string,
+    projection: &!SounioPdfTextProjection,
+) -> i64 with IO, Mut, Panic, Div {
+    projection.error = SOUNIO_PDF_TEXT_OK
+    projection.pages = 0
+    projection.text_objects = 0
+    projection.nonempty_objects = 0
+    projection.empty_objects = 0
+    projection.matrixless_objects = 0
+    projection.multiple_matrix_objects = 0
+    projection.show_operations = 0
+    projection.scalars = 0
+    projection.max_graphics_depth = 0
+    let base = sounio_pdf_flate_import(path)
+    if base.error != SOUNIO_PDF_OK || !sounio_pdf_expected_inventory(&base) {
+        projection.error = SOUNIO_PDF_TEXT_ERR_BASE
+        return projection.error
+    }
+    let resources = sounio_pdf_text_resource_import(path)
+    if resources.error != SOUNIO_PDF_TEXT_OK {
+        projection.error = resources.error
+        return projection.error
+    }
+    var maps = text_unicode_maps_empty()
+    let map_error = text_build_unicode_maps(&base, &resources, &!maps)
+    if map_error != SOUNIO_PDF_TEXT_OK {
+        projection.error = map_error
+        return projection.error
+    }
+    var content = text_inflate_result_empty()
+    var page: i64 = 0
+    while page < base.pages {
+        let decode_error = sounio_pdf_decode_flate_object(
+            &base, base.content_objects[page as usize],
+            base.content_generations[page as usize], &!content)
+        if decode_error != SOUNIO_PDF_OK {
+            projection.error = SOUNIO_PDF_TEXT_ERR_BASE
+            return projection.error
+        }
+        let scan_error = content_projection_scan(
+            &content, page, &base, &resources, &maps, projection)
+        if scan_error != SOUNIO_PDF_TEXT_OK {
+            projection.error = scan_error
+            return projection.error
+        }
+        projection.pages = projection.pages + 1
+        page = page + 1
+    }
+    projection.error = SOUNIO_PDF_TEXT_OK
+    SOUNIO_PDF_TEXT_OK
+}
+
+fn text_abs(value: i64) -> i64 {
+    if value < 0 { 0 - value } else { value }
+}
+
+fn text_line_object_before(
+    left: i64,
+    right: i64,
+    text: &SounioPdfTextProjection,
+) -> bool with Panic {
+    let left_page = text.object_page[left as usize]
+    let right_page = text.object_page[right as usize]
+    if left_page != right_page { return left_page < right_page }
+    let left_y = text.object_device_y[left as usize]
+    let right_y = text.object_device_y[right as usize]
+    if left_y != right_y { return left_y > right_y }
+    let left_x = text.object_device_x[left as usize]
+    let right_x = text.object_device_x[right as usize]
+    if left_x != right_x { return left_x < right_x }
+    left < right
+}
+
+pub fn sounio_pdf_text_project_lines(
+    text: &SounioPdfTextProjection,
+    lines: &!SounioPdfLineProjection,
+) -> i64 with Mut, Panic {
+    lines.error = SOUNIO_PDF_TEXT_OK
+    lines.pages = text.pages
+    lines.objects = 0
+    lines.lines = 0
+    lines.tolerance = SOUNIO_PDF_TEXT_LINE_TOLERANCE
+    lines.max_line_spread = 0
+    lines.min_interline_gap = 0
+    lines.ambiguous_assignments = 0
+    if text.error != SOUNIO_PDF_TEXT_OK {
+        lines.error = text.error
+        return lines.error
+    }
+    var order: [i64; 4096] = [0; 4096]
+    var object: i64 = 0
+    while object < text.text_objects {
+        if text.object_scalar_count[object as usize] > 0 {
+            if lines.objects >= SOUNIO_PDF_TEXT_OBJECT_CAPACITY {
+                lines.error = SOUNIO_PDF_TEXT_ERR_CAPACITY
+                return lines.error
+            }
+            order[lines.objects as usize] = object
+            lines.objects = lines.objects + 1
+        }
+        object = object + 1
+    }
+
+    var order_at: i64 = 1
+    while order_at < lines.objects {
+        let key = order[order_at as usize]
+        var before = order_at - 1
+        while before >= 0 && text_line_object_before(
+            key, order[before as usize], text) {
+            order[(before + 1) as usize] = order[before as usize]
+            before = before - 1
+        }
+        order[(before + 1) as usize] = key
+        order_at = order_at + 1
+    }
+
+    order_at = 0
+    while order_at < lines.objects {
+        object = order[order_at as usize]
+        let page = text.object_page[object as usize]
+        let y = text.object_device_y[object as usize]
+        var matched = lines.lines - 1
+        var starts_line = lines.lines == 0
+        if !starts_line {
+            starts_line = lines.line_page[matched as usize] != page ||
+                lines.line_anchor_y[matched as usize] - y >
+                    SOUNIO_PDF_TEXT_LINE_TOLERANCE
+        }
+        if starts_line {
+            if lines.lines >= SOUNIO_PDF_TEXT_OBJECT_CAPACITY {
+                lines.error = SOUNIO_PDF_TEXT_ERR_CAPACITY
+                return lines.error
+            }
+            matched = lines.lines
+            lines.line_page[matched as usize] = page
+            lines.line_anchor_y[matched as usize] = y
+            lines.line_min_y[matched as usize] = y
+            lines.line_max_y[matched as usize] = y
+            lines.lines = lines.lines + 1
+        }
+        lines.object_line[object as usize] = matched
+        lines.line_object_count[matched as usize] =
+            lines.line_object_count[matched as usize] + 1
+        if y < lines.line_min_y[matched as usize] {
+            lines.line_min_y[matched as usize] = y
+        }
+        if y > lines.line_max_y[matched as usize] {
+            lines.line_max_y[matched as usize] = y
+        }
+        order_at = order_at + 1
+    }
+
+    var line: i64 = 0
+    var minimum: i64 = 9223372036854775807
+    while line < lines.lines {
+        let spread = lines.line_max_y[line as usize] -
+            lines.line_min_y[line as usize]
+        if spread > lines.max_line_spread { lines.max_line_spread = spread }
+        if line > 0 && lines.line_page[(line - 1) as usize] ==
+            lines.line_page[line as usize] {
+            let gap = text_abs(lines.line_anchor_y[(line - 1) as usize] -
+                lines.line_anchor_y[line as usize])
+            if gap < minimum { minimum = gap }
+            if gap <= SOUNIO_PDF_TEXT_LINE_TOLERANCE {
+                lines.ambiguous_assignments =
+                    lines.ambiguous_assignments + 1
+            }
+        }
+        line = line + 1
+    }
+    if minimum != 9223372036854775807 {
+        lines.min_interline_gap = minimum
+    }
+    if lines.ambiguous_assignments > 0 {
+        lines.error = SOUNIO_PDF_TEXT_ERR_TEXT_STATE
+        return lines.error
+    }
+    lines.error = SOUNIO_PDF_TEXT_OK
+    SOUNIO_PDF_TEXT_OK
+}
+
+pub fn sounio_pdf_text_projection_digest(
+    text: &SounioPdfTextProjection,
+    lines: &SounioPdfLineProjection,
+) -> SounioPdfTextProjectionDigest with Mut, Panic, Div {
+    var result = text_digest_result_empty()
+    if text.error != SOUNIO_PDF_TEXT_OK ||
+        lines.error != SOUNIO_PDF_TEXT_OK ||
+        text.text_objects < 0 ||
+        text.text_objects > SOUNIO_PDF_TEXT_OBJECT_CAPACITY ||
+        text.scalars < 0 ||
+        text.scalars > SOUNIO_PDF_TEXT_SCALAR_CAPACITY ||
+        lines.lines < 0 ||
+        lines.lines > SOUNIO_PDF_TEXT_OBJECT_CAPACITY ||
+        lines.pages != text.pages ||
+        lines.objects != text.nonempty_objects ||
+        lines.ambiguous_assignments != 0 {
+        result.error = SOUNIO_PDF_TEXT_ERR_DIGEST
+        return result
+    }
+
+    var counted_objects: i64 = 0
+    var object: i64 = 0
+    while object < text.text_objects {
+        let scalar_start = text.object_scalar_start[object as usize]
+        let scalar_count = text.object_scalar_count[object as usize]
+        if scalar_start < 0 || scalar_count < 0 ||
+            scalar_start + scalar_count > text.scalars {
+            result.error = SOUNIO_PDF_TEXT_ERR_DIGEST
+            return result
+        }
+        if scalar_count > 0 {
+            let object_line = lines.object_line[object as usize]
+            if object_line < 0 || object_line >= lines.lines ||
+                lines.line_page[object_line as usize] !=
+                    text.object_page[object as usize] {
+                result.error = SOUNIO_PDF_TEXT_ERR_DIGEST
+                return result
+            }
+            counted_objects = counted_objects + 1
+        }
+        object = object + 1
+    }
+    if counted_objects != lines.objects {
+        result.error = SOUNIO_PDF_TEXT_ERR_DIGEST
+        return result
+    }
+
+    var counted_line_objects: i64 = 0
+    var line: i64 = 0
+    while line < lines.lines {
+        if lines.line_object_count[line as usize] <= 0 ||
+            lines.line_min_y[line as usize] >
+                lines.line_max_y[line as usize] ||
+            lines.line_max_y[line as usize] -
+                lines.line_min_y[line as usize] > lines.tolerance {
+            result.error = SOUNIO_PDF_TEXT_ERR_DIGEST
+            return result
+        }
+        if line > 0 {
+            let previous_page = lines.line_page[(line - 1) as usize]
+            let page = lines.line_page[line as usize]
+            if page < previous_page ||
+                (page == previous_page &&
+                    lines.line_anchor_y[line as usize] >=
+                        lines.line_anchor_y[(line - 1) as usize]) {
+                result.error = SOUNIO_PDF_TEXT_ERR_DIGEST
+                return result
+            }
+        }
+        counted_line_objects = counted_line_objects +
+            lines.line_object_count[line as usize]
+        line = line + 1
+    }
+    if counted_line_objects != lines.objects {
+        result.error = SOUNIO_PDF_TEXT_ERR_DIGEST
+        return result
+    }
+
+    var builder = text_digest_builder_empty()
+    text_digest_push_string(&!builder, "SOUNIO_PDF_TEXT_PROJECTION_V1")
+    text_digest_push_byte(&!builder, 0)
+    text_digest_push_u64(&!builder, text.pages)
+    text_digest_push_u64(&!builder, text.text_objects)
+    text_digest_push_u64(&!builder, text.nonempty_objects)
+    text_digest_push_u64(&!builder, text.empty_objects)
+    text_digest_push_u64(&!builder, text.matrixless_objects)
+    text_digest_push_u64(&!builder, text.multiple_matrix_objects)
+    text_digest_push_u64(&!builder, text.show_operations)
+    text_digest_push_u64(&!builder, text.scalars)
+    text_digest_push_u64(&!builder, text.max_graphics_depth)
+    text_digest_push_u64(&!builder, lines.pages)
+    text_digest_push_u64(&!builder, lines.objects)
+    text_digest_push_u64(&!builder, lines.lines)
+    text_digest_push_u64(&!builder, lines.tolerance)
+    text_digest_push_u64(&!builder, lines.max_line_spread)
+    text_digest_push_u64(&!builder, lines.min_interline_gap)
+    text_digest_push_u64(&!builder, lines.ambiguous_assignments)
+
+    object = 0
+    while object < text.text_objects {
+        let scalar_count = text.object_scalar_count[object as usize]
+        var object_line: i64 = -1
+        if scalar_count > 0 {
+            object_line = lines.object_line[object as usize]
+        }
+        text_digest_push_u64(&!builder, object)
+        text_digest_push_u64(&!builder,
+            text.object_page[object as usize])
+        text_digest_push_u64(&!builder,
+            text.object_raw_x[object as usize])
+        text_digest_push_u64(&!builder,
+            text.object_raw_y[object as usize])
+        text_digest_push_u64(&!builder,
+            text.object_device_x[object as usize])
+        text_digest_push_u64(&!builder,
+            text.object_device_y[object as usize])
+        text_digest_push_u64(&!builder,
+            text.object_matrix_count[object as usize])
+        text_digest_push_u64(&!builder,
+            text.object_show_count[object as usize])
+        text_digest_push_u64(&!builder,
+            text.object_scalar_start[object as usize])
+        text_digest_push_u64(&!builder, scalar_count)
+        text_digest_push_u64(&!builder, object_line)
+        object = object + 1
+    }
+
+    var scalar: i64 = 0
+    while scalar < text.scalars {
+        text_digest_push_u64(&!builder,
+            text.scalar_value[scalar as usize])
+        text_digest_push_u64(&!builder,
+            text.scalar_font[scalar as usize])
+        scalar = scalar + 1
+    }
+
+    line = 0
+    while line < lines.lines {
+        text_digest_push_u64(&!builder, line)
+        text_digest_push_u64(&!builder,
+            lines.line_page[line as usize])
+        text_digest_push_u64(&!builder,
+            lines.line_anchor_y[line as usize])
+        text_digest_push_u64(&!builder,
+            lines.line_min_y[line as usize])
+        text_digest_push_u64(&!builder,
+            lines.line_max_y[line as usize])
+        text_digest_push_u64(&!builder,
+            lines.line_object_count[line as usize])
+        line = line + 1
+    }
+
+    if builder.error != SOUNIO_PDF_TEXT_OK {
+        result.error = builder.error
+        return result
+    }
+    if builder.chunk_length > 0 {
+        builder.state = sha256_update(builder.state, builder.chunk,
+            builder.chunk_length as i32)
+    }
+    let digest = sha256_finalize(builder.state)
+    var byte: i32 = 0
+    while byte < 32 {
+        let value = sha256_digest_byte(&digest, byte)
+        if value < 0 {
+            result.error = SOUNIO_PDF_TEXT_ERR_DIGEST
+            return result
+        }
+        result.bytes[byte as usize] = value
+        byte = byte + 1
+    }
+    result.serialized_bytes = builder.total_length
+    result.error = SOUNIO_PDF_TEXT_OK
+    result
+}

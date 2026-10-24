@@ -2,8 +2,8 @@
 topic_id: repo.docs.features.epistemic-tensor-core
 authority: historical
 audience: users
-last_validated: 2026-03-07
-validated_by: A6
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.features.epistemic-tensor-core
 -->
 
@@ -226,7 +226,7 @@ var b = epistemic_tensor_new(16, 16)
 var c = epistemic_tensor_new(16, 16)
 
 // Set data
-a.data[0] = 1.0f32
+a.data[0] = 1.0
 a.provenance[0] = atom_hash
 
 // Fused kernel

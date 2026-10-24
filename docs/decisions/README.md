@@ -2,7 +2,7 @@
 topic_id: repo.docs.decisions.readme
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-09-06
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.decisions.readme
 -->
@@ -54,6 +54,14 @@ Grounded in: commit, artifact, or empirical result
 | 005 | `algebra` keyword is compiler infrastructure | accepted | 2026-03-30 |
 | 006 | Self-hosting fixed-point as trust anchor | accepted | 2026-03-30 |
 | 007 | Madaros second-order compilation | experimental | 2026-07-12 |
+| 008 | Single semantic clock for language/library claims | accepted | 2026-08-06 |
+| 009 | Verified foreign reference oracles | accepted | 2026-09-04 |
+| 010 | Madaros region reclamation at function return | experimental | 2026-10-06 |
+| 011 | Boundary and scope of Mathlib in formal verification | accepted | 2026-09-24 |
+| 012 | Bridge `IrHyperMulO` to the native-v2 backend pipeline | experimental | 2026-09-24 |
+| 013 | Format printing with `{}` placeholders | accepted | 2026-10-22 |
+| 015 | Lexical structure (the thirteen rulings of D-33) | accepted | 2026-10-24 |
+| 016 | Epistemic merge, contradiction, typed zeros and provenance trust | accepted | 2026-10-24 |
 
 ## Files
 
@@ -64,6 +72,13 @@ Grounded in: commit, artifact, or empirical result
 - [ADR-005](./adr-005-algebra-keyword-compiler-infrastructure.md)
 - [ADR-006](./adr-006-fixed-point-trust-anchor.md)
 - [ADR-007](./adr-007-second-order-compilation.md)
+- [ADR-008](./adr-008-claim-oracle-semantic-clock.md)
+- [ADR-009](./adr-009-verified-foreign-reference.md)
+- [ADR-010](./adr-010-madaros-region-reclamation.md)
+- [ADR-013](./adr-013-format-printing.md)
+- [ADR-015](./adr-015-lexical-structure.md)
+- [ADR-016](./adr-016-epistemic-merge-and-provenance-trust.md)
+- [Claim-oracle inventory schema](./claim_oracle_inventory.schema.md)
 
 ## Related Docs
 

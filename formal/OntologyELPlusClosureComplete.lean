@@ -51,8 +51,15 @@ This file closes the completeness gap via the **canonical-model argument**:
    (generally strict) subset of the complete engine's.
 
 Self-contained modulo `OntologyELPlusClosureVerified`. No Mathlib. Zero
-sorry. No new axioms (the fixpoint search is constructive — `find_stable` is
-proved by induction on the missing-fact count, not by classical choice).
+sorry. No axiom declared in this file or its imports. The fixpoint search
+`find_stable` is an induction on the missing-fact count, with an explicit
+bound (`satFuel`), not an unbounded search. That does NOT make the proof
+choice-free: `#print axioms subBPlusC_iff` was reported (2026-10-05) as
+`propext`, `Classical.choice`, `Quot.sound` — Lean's three standard axioms,
+with `Classical.choice` in the closure. Which step pulls it in (a `by_cases`
+on a proposition, such as the one on `StableAt t k` in `find_stable`, or a
+core-library lemma) has not been isolated. The current footprint is printed by
+CI from `formal/AxiomReport.lean` (`scripts/ci/lean_axiom_report.sh`).
 -/
 
 import OntologyELPlusClosureVerified

@@ -8,7 +8,7 @@ description: "L0 epistemic core of Sounio: language identity, epistemic invarian
 ## Workflow
 
 1) Anchor on language identity
-- Read `docs/MV_CORE_CHECKLIST.md` first.
+- Read `docs/implementation/MV_CORE_CHECKLIST.md` first.
 - Confirm: explicit effects, epistemic integrity, and Sounio-native syntax.
 
 2) Epistemic invariants
@@ -23,7 +23,7 @@ description: "L0 epistemic core of Sounio: language identity, epistemic invarian
 - Use `.claude/commands/sounio-units.md` to keep unit syntax and checks consistent.
 
 ## References
-- `docs/MV_CORE_CHECKLIST.md`
+- `docs/implementation/MV_CORE_CHECKLIST.md`
 - `stdlib/epistemic/SEMANTICS.md`
 - `docs/spec/LANGUAGE_SPECIFICATION.md`
 - `.claude/commands/sounio-effects.md`

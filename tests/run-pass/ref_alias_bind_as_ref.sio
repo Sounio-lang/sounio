@@ -1,0 +1,86 @@
+//@ run-pass
+//@ requires: madaros
+// Regression test: `let zs = a` / `var zs = a`, where `a` is itself an
+// already reference-typed parameter (no explicit `&T` annotation on the
+// alias binding, and the RHS is a bare identifier rather than a literal
+// `&x` / `&!x` unary expression), must propagate the is_ref bit onto `zs`.
+//
+// Root cause: lower_let_stmt_finalize_ref's bind_as_ref computation in
+// self-hosted/ir/lower.sio only checked the let's own type annotation
+// (`let zs: &T = ...`) and whether the RHS was a literal `&x`/`&!x` unary
+// expression. Neither covers `let zs = a` where `a` is a bare identifier
+// that is ITSELF already reference-typed and unannotated. Without the
+// is_ref bit, every lookup_local_is_ref call site (IndexGet/Set,
+// FieldGet/Set, .len(), &self auto-ref, for-in-array,
+// struct_local_is_value_copyable, ...) treated the address `zs` holds as
+// an ordinary GC handle instead of dereferencing it first, silently
+// reading/writing through the wrong indirection level. See
+// docs/audit/REF_ALIAS_BIND_AS_REF_MISS_2026-09-22.md.
+
+struct Pair { x: i64, y: i64 }
+
+fn read_through_alias(a: &[i64; 2]) -> i64 with Mut, Panic, IO {
+    let zs = a
+    zs[0]
+}
+
+fn write_through_alias(a: &![i64; 3]) with Mut, Panic, IO {
+    var zs = a
+    zs[1] = 77
+}
+
+fn read_field_through_alias(p: &Pair) -> i64 with Mut, Panic, IO {
+    let q = p
+    q.x
+}
+
+// Same-name shadowing: `let a = a` rebinds `a` to a fresh local-stack slot
+// before the alias's is_ref bit can be computed. A naive post-bind
+// lookup_local_is_ref(rhs name) would find that fresh (non-ref) slot instead
+// of the outer, still-in-scope `a` it's meant to read, since lookup searches
+// newest-first -- silently losing is_ref specifically on the shadowing form.
+fn read_through_shadow_alias(a: &[i64; 2]) -> i64 with Mut, Panic, IO {
+    let a = a
+    a[0]
+}
+
+fn write_field_through_alias(p: &! Pair) with Mut, Panic, IO {
+    var q = p
+    q.y = 55
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    let xs: [i64; 2] = [42, 99]
+    if read_through_alias(&xs) != 42 {
+        println("ref_alias_bind_as_ref: FAIL (read through alias)")
+        return 1
+    }
+
+    var ys: [i64; 3] = [1, 2, 3]
+    write_through_alias(&! ys)
+    if ys[1] != 77 {
+        println("ref_alias_bind_as_ref: FAIL (write through alias)")
+        return 1
+    }
+
+    let pr: Pair = Pair { x: 11, y: 22 }
+    if read_field_through_alias(&pr) != 11 {
+        println("ref_alias_bind_as_ref: FAIL (read field through alias)")
+        return 1
+    }
+
+    if read_through_shadow_alias(&xs) != 42 {
+        println("ref_alias_bind_as_ref: FAIL (read through shadow alias)")
+        return 1
+    }
+
+    var pw: Pair = Pair { x: 1, y: 1 }
+    write_field_through_alias(&! pw)
+    if pw.y != 55 {
+        println("ref_alias_bind_as_ref: FAIL (write field through alias)")
+        return 1
+    }
+
+    println("ref_alias_bind_as_ref: PASS")
+    return 0
+}

@@ -1,0 +1,576 @@
+//! Sounio authority for admitting recovered U250 xclbin material.
+//!
+//! C++ emits facts only. This module owns identity, ABI, parity, and refusal.
+
+use hardware::pireus::model::{
+    PIREUS_RDF_TYPE, PIREUS_CLASS_ONTOLOGY_CLASS,
+}
+use hardware::pireus::u250_dual_card_admission::{
+    PIREUS_U250_LANGUAGE_SOUNIO,
+    PIREUS_U250_LANGUAGE_CPP,
+    PIREUS_U250_ROLE_SEMANTIC_AUTHORITY,
+    PIREUS_U250_ROLE_MATERIAL_PARITY,
+}
+use hardware::pireus::u250_fpga_kernel_artifact::{
+    PireusU250FpgaKernelArtifactResult,
+    PIREUS_U250_KERNEL_ARTIFACT_SAN_SCAN,
+    PIREUS_ARGUMENT_SAMPLES,
+    PIREUS_ARGUMENT_LUT,
+    PIREUS_ARGUMENT_HIST_OUT,
+    PIREUS_ARGUMENT_CATASTROPHE_OUT,
+    PIREUS_ARGUMENT_FLOPS_OUT,
+    PIREUS_ARTIFACT_HAS_BITS,
+    pireus_u250_fpga_kernel_artifact_matches_expected,
+    pireus_u250_fpga_kernel_artifact_store,
+}
+use hardware::pireus::u250_execution_engine::{
+    PireusU250ExecutionEngineResult,
+}
+use ontology::query::{
+    TripleStore, SparqlResult,
+    triple_store_add, triple_iri,
+    sparql_new, sparql_select, sparql_add_pattern, sparql_execute,
+    triple_pattern_new, queryterm_variable, queryterm_iri,
+}
+
+pub const PIREUS_U250_XCLBIN_RECEIPT_SCHEMA: i64 = 714000
+
+pub const PIREUS_CLASS_XCLBIN_MATERIAL_RECEIPT: i64 = 714001
+pub const PIREUS_CLASS_BITSTREAM_IDENTITY: i64 = 714002
+pub const PIREUS_CLASS_BITSTREAM_DIGEST: i64 = 714003
+pub const PIREUS_CLASS_XCLBIN_METADATA: i64 = 714004
+pub const PIREUS_CLASS_MATERIAL_MEMORY_BANK: i64 = 714005
+pub const PIREUS_CLASS_MATERIAL_PRODUCER: i64 = 714006
+
+pub const PIREUS_ARTIFACT_HAS_MATERIAL_RECEIPT: i64 = 714100
+pub const PIREUS_RECEIPT_HAS_DIGEST: i64 = 714101
+pub const PIREUS_RECEIPT_HAS_METADATA: i64 = 714102
+pub const PIREUS_RECEIPT_HAS_PRODUCER: i64 = 714103
+pub const PIREUS_ARGUMENT_HAS_MATERIAL_BANK: i64 = 714104
+
+pub const PIREUS_U250_XCLBIN_RECEIPT_SAN_SCAN_V0: i64 = 714200
+pub const PIREUS_U250_XCLBIN_BITS_SAN_SCAN: i64 = 714201
+pub const PIREUS_U250_XCLBIN_DIGEST_D30078C7: i64 = 714202
+pub const PIREUS_U250_XCLBIN_METADATA_SAN_SCAN: i64 = 714203
+pub const PIREUS_U250_MEMORY_BANK_1: i64 = 714204
+pub const PIREUS_U250_MATERIAL_PRODUCER_CPP: i64 = 714205
+
+pub const PIREUS_U250_XCLBIN_STATUS_AWAITING_MATERIAL: i64 = 714090
+pub const PIREUS_U250_XCLBIN_STATUS_PARITY_OPEN: i64 = 714091
+pub const PIREUS_U250_XCLBIN_STATUS_PARENT_REFUSED: i64 = 714092
+pub const PIREUS_U250_XCLBIN_STATUS_AUTHORITY_REFUSED: i64 = 714093
+pub const PIREUS_U250_XCLBIN_STATUS_ORDER_REFUSED: i64 = 714094
+pub const PIREUS_U250_XCLBIN_STATUS_MATERIAL_REFUSED: i64 = 714095
+pub const PIREUS_U250_XCLBIN_STATUS_IDENTITY_REFUSED: i64 = 714096
+pub const PIREUS_U250_XCLBIN_STATUS_ABI_REFUSED: i64 = 714097
+pub const PIREUS_U250_XCLBIN_STATUS_CAPABILITY_REFUSED: i64 = 714098
+pub const PIREUS_U250_XCLBIN_STATUS_CLAIM_REFUSED: i64 = 714099
+
+pub struct PireusU250XclbinMaterialRequest {
+    pub producer_language: i64,
+    pub producer_role: i64,
+    pub semantics_frozen: bool,
+    pub parity_open_requested: bool,
+    pub material_observed: bool,
+    pub bitstream_present: bool,
+    pub bitstream_digest_present: bool,
+    pub metadata_present: bool,
+    pub parent_semantics_matches: bool,
+    pub parent_freeze_matches: bool,
+    pub artifact_name_matches: bool,
+    pub artifact_size_bytes: i64,
+    pub digest_0: i64,
+    pub digest_1: i64,
+    pub digest_2: i64,
+    pub digest_3: i64,
+    pub digest_4: i64,
+    pub digest_5: i64,
+    pub digest_6: i64,
+    pub digest_7: i64,
+    pub xclbin_uuid_matches: bool,
+    pub kernel_symbol_matches: bool,
+    pub platform_matches: bool,
+    pub vitis_version_matches: bool,
+    pub requested_frequency_mhz: i64,
+    pub achieved_frequency_tenths_mhz: i64,
+    pub abi_argument_count: i64,
+    pub interface_binding_count: i64,
+    pub material_bank_binding_count: i64,
+    pub argument_order_matches: bool,
+    pub interface_mapping_matches: bool,
+    pub material_bank_mapping_matches: bool,
+    pub semantic_verdict_emitted_by_child: bool,
+    pub kernel_execution_observed: bool,
+    pub kernel_correctness_present: bool,
+    pub operation_capability_count: i64,
+    pub lowering_requested: bool,
+    pub performance_present: bool,
+    pub claim_ready_requested: bool,
+}
+
+pub struct PireusU250XclbinMaterialResult {
+    pub valid: bool,
+    pub status: i64,
+    pub schema: i64,
+    pub material_observed: bool,
+    pub bitstream_present: bool,
+    pub bitstream_digest_present: bool,
+    pub metadata_present: bool,
+    pub identity_matches: bool,
+    pub abi_matches: bool,
+    pub material_bank_mapping_matches: bool,
+    pub artifact_size_bytes: i64,
+    pub requested_frequency_mhz: i64,
+    pub achieved_frequency_tenths_mhz: i64,
+    pub abi_argument_count: i64,
+    pub interface_binding_count: i64,
+    pub material_bank_binding_count: i64,
+    pub artifact_parity_open: bool,
+    pub kernel_execution_observed: bool,
+    pub kernel_correctness_present: bool,
+    pub operation_capability_count: i64,
+    pub lowering_authorized: bool,
+    pub performance_present: bool,
+    pub claim_ready: bool,
+    pub authority_refused: bool,
+    pub order_refused: bool,
+    pub material_refused: bool,
+    pub identity_refused: bool,
+    pub abi_refused: bool,
+    pub capability_refused: bool,
+    pub failures: i64,
+}
+
+pub fn pireus_u250_xclbin_material_request(
+) -> PireusU250XclbinMaterialRequest {
+    PireusU250XclbinMaterialRequest {
+        producer_language: PIREUS_U250_LANGUAGE_SOUNIO,
+        producer_role: PIREUS_U250_ROLE_SEMANTIC_AUTHORITY,
+        semantics_frozen: false,
+        parity_open_requested: false,
+        material_observed: false,
+        bitstream_present: false,
+        bitstream_digest_present: false,
+        metadata_present: false,
+        parent_semantics_matches: true,
+        parent_freeze_matches: true,
+        artifact_name_matches: true,
+        artifact_size_bytes: 41112056,
+        digest_0: 0xd30078c7,
+        digest_1: 0xb2e8690a,
+        digest_2: 0xef892b4b,
+        digest_3: 0x6cf96af0,
+        digest_4: 0xf490b70e,
+        digest_5: 0x2b367e5e,
+        digest_6: 0x3679be04,
+        digest_7: 0xfcd4bdbf,
+        xclbin_uuid_matches: true,
+        kernel_symbol_matches: true,
+        platform_matches: true,
+        vitis_version_matches: true,
+        requested_frequency_mhz: 250,
+        achieved_frequency_tenths_mhz: 1352,
+        abi_argument_count: 8,
+        interface_binding_count: 8,
+        material_bank_binding_count: 5,
+        argument_order_matches: true,
+        interface_mapping_matches: true,
+        material_bank_mapping_matches: true,
+        semantic_verdict_emitted_by_child: false,
+        kernel_execution_observed: false,
+        kernel_correctness_present: false,
+        operation_capability_count: 0,
+        lowering_requested: false,
+        performance_present: false,
+        claim_ready_requested: false,
+    }
+}
+
+pub fn pireus_u250_xclbin_material_observation(
+) -> PireusU250XclbinMaterialRequest {
+    var request = pireus_u250_xclbin_material_request()
+    request.producer_language = PIREUS_U250_LANGUAGE_CPP
+    request.producer_role = PIREUS_U250_ROLE_MATERIAL_PARITY
+    request.semantics_frozen = true
+    request.parity_open_requested = true
+    request.material_observed = true
+    request.bitstream_present = true
+    request.bitstream_digest_present = true
+    request.metadata_present = true
+    request
+}
+
+fn u250xm_digest_matches(request: &PireusU250XclbinMaterialRequest) -> bool {
+    request.digest_0 == 0xd30078c7 &&
+        request.digest_1 == 0xb2e8690a &&
+        request.digest_2 == 0xef892b4b &&
+        request.digest_3 == 0x6cf96af0 &&
+        request.digest_4 == 0xf490b70e &&
+        request.digest_5 == 0x2b367e5e &&
+        request.digest_6 == 0x3679be04 &&
+        request.digest_7 == 0xfcd4bdbf
+}
+
+fn u250xm_identity_matches(
+    request: &PireusU250XclbinMaterialRequest,
+) -> bool {
+    request.parent_semantics_matches && request.parent_freeze_matches &&
+        request.artifact_name_matches &&
+        request.artifact_size_bytes == 41112056 &&
+        u250xm_digest_matches(request) && request.xclbin_uuid_matches &&
+        request.kernel_symbol_matches && request.platform_matches &&
+        request.vitis_version_matches &&
+        request.requested_frequency_mhz == 250 &&
+        request.achieved_frequency_tenths_mhz == 1352
+}
+
+fn u250xm_abi_matches(request: &PireusU250XclbinMaterialRequest) -> bool {
+    request.abi_argument_count == 8 &&
+        request.interface_binding_count == 8 &&
+        request.material_bank_binding_count == 5 &&
+        request.argument_order_matches && request.interface_mapping_matches &&
+        request.material_bank_mapping_matches
+}
+
+fn u250xm_capability_clean(
+    request: &PireusU250XclbinMaterialRequest,
+) -> bool {
+    !request.semantic_verdict_emitted_by_child &&
+        !request.kernel_execution_observed &&
+        !request.kernel_correctness_present &&
+        request.operation_capability_count == 0 &&
+        !request.lowering_requested && !request.performance_present
+}
+
+pub fn pireus_u250_xclbin_material_project(
+    parent: &PireusU250FpgaKernelArtifactResult,
+    request: &PireusU250XclbinMaterialRequest,
+) -> PireusU250XclbinMaterialResult with Mut {
+    let parent_valid = pireus_u250_fpga_kernel_artifact_matches_expected(parent)
+    let waiting = !request.material_observed
+    let authority_valid = if waiting {
+        request.producer_language == PIREUS_U250_LANGUAGE_SOUNIO &&
+            request.producer_role == PIREUS_U250_ROLE_SEMANTIC_AUTHORITY
+    } else {
+        request.producer_language == PIREUS_U250_LANGUAGE_CPP &&
+            request.producer_role == PIREUS_U250_ROLE_MATERIAL_PARITY
+    }
+    let order_valid = if waiting {
+        !request.semantics_frozen && !request.parity_open_requested
+    } else {
+        request.semantics_frozen && request.parity_open_requested
+    }
+    let material_valid = if waiting {
+        !request.bitstream_present && !request.bitstream_digest_present &&
+            !request.metadata_present
+    } else {
+        request.bitstream_present && request.bitstream_digest_present &&
+            request.metadata_present
+    }
+    let identity_valid = u250xm_identity_matches(request)
+    let abi_valid = u250xm_abi_matches(request)
+    let capability_clean = u250xm_capability_clean(request)
+
+    var failures: i64 = 0
+    if !parent_valid { failures = failures + 1 }
+    if !authority_valid { failures = failures + 1 }
+    if !order_valid { failures = failures + 1 }
+    if !material_valid { failures = failures + 1 }
+    if !identity_valid { failures = failures + 1 }
+    if !abi_valid { failures = failures + 1 }
+    if !capability_clean { failures = failures + 1 }
+    if request.claim_ready_requested { failures = failures + 1 }
+
+    var status = if waiting {
+        PIREUS_U250_XCLBIN_STATUS_AWAITING_MATERIAL
+    } else { PIREUS_U250_XCLBIN_STATUS_PARITY_OPEN }
+    if request.claim_ready_requested {
+        status = PIREUS_U250_XCLBIN_STATUS_CLAIM_REFUSED
+    }
+    if !capability_clean {
+        status = PIREUS_U250_XCLBIN_STATUS_CAPABILITY_REFUSED
+    }
+    if !abi_valid { status = PIREUS_U250_XCLBIN_STATUS_ABI_REFUSED }
+    if !identity_valid {
+        status = PIREUS_U250_XCLBIN_STATUS_IDENTITY_REFUSED
+    }
+    if !material_valid {
+        status = PIREUS_U250_XCLBIN_STATUS_MATERIAL_REFUSED
+    }
+    if !order_valid { status = PIREUS_U250_XCLBIN_STATUS_ORDER_REFUSED }
+    if !authority_valid {
+        status = PIREUS_U250_XCLBIN_STATUS_AUTHORITY_REFUSED
+    }
+    if !parent_valid { status = PIREUS_U250_XCLBIN_STATUS_PARENT_REFUSED }
+
+    let admitted = failures == 0 && !waiting
+    PireusU250XclbinMaterialResult {
+        valid: failures == 0,
+        status: status,
+        schema: PIREUS_U250_XCLBIN_RECEIPT_SCHEMA,
+        material_observed: request.material_observed,
+        bitstream_present: request.bitstream_present,
+        bitstream_digest_present: request.bitstream_digest_present,
+        metadata_present: request.metadata_present,
+        identity_matches: identity_valid,
+        abi_matches: abi_valid,
+        material_bank_mapping_matches: request.material_bank_mapping_matches,
+        artifact_size_bytes: request.artifact_size_bytes,
+        requested_frequency_mhz: request.requested_frequency_mhz,
+        achieved_frequency_tenths_mhz:
+            request.achieved_frequency_tenths_mhz,
+        abi_argument_count: request.abi_argument_count,
+        interface_binding_count: request.interface_binding_count,
+        material_bank_binding_count: request.material_bank_binding_count,
+        artifact_parity_open: admitted,
+        kernel_execution_observed: request.kernel_execution_observed,
+        kernel_correctness_present: request.kernel_correctness_present,
+        operation_capability_count: request.operation_capability_count,
+        lowering_authorized: false,
+        performance_present: request.performance_present,
+        claim_ready: false,
+        authority_refused: !authority_valid,
+        order_refused: !order_valid,
+        material_refused: !material_valid,
+        identity_refused: !identity_valid,
+        abi_refused: !abi_valid,
+        capability_refused: !capability_clean,
+        failures: failures,
+    }
+}
+
+pub fn pireus_u250_xclbin_waiting_matches_expected(
+    result: &PireusU250XclbinMaterialResult,
+) -> bool {
+    result.valid &&
+        result.status == PIREUS_U250_XCLBIN_STATUS_AWAITING_MATERIAL &&
+        result.schema == PIREUS_U250_XCLBIN_RECEIPT_SCHEMA &&
+        !result.material_observed && !result.bitstream_present &&
+        !result.bitstream_digest_present && !result.metadata_present &&
+        result.identity_matches && result.abi_matches &&
+        result.material_bank_mapping_matches &&
+        !result.artifact_parity_open && !result.kernel_execution_observed &&
+        !result.kernel_correctness_present &&
+        result.operation_capability_count == 0 &&
+        !result.lowering_authorized && !result.performance_present &&
+        !result.claim_ready && result.failures == 0
+}
+
+pub fn pireus_u250_xclbin_parity_matches_expected(
+    result: &PireusU250XclbinMaterialResult,
+) -> bool {
+    result.valid &&
+        result.status == PIREUS_U250_XCLBIN_STATUS_PARITY_OPEN &&
+        result.material_observed && result.bitstream_present &&
+        result.bitstream_digest_present && result.metadata_present &&
+        result.identity_matches && result.abi_matches &&
+        result.material_bank_mapping_matches &&
+        result.artifact_size_bytes == 41112056 &&
+        result.requested_frequency_mhz == 250 &&
+        result.achieved_frequency_tenths_mhz == 1352 &&
+        result.abi_argument_count == 8 &&
+        result.interface_binding_count == 8 &&
+        result.material_bank_binding_count == 5 &&
+        result.artifact_parity_open && !result.kernel_execution_observed &&
+        !result.kernel_correctness_present &&
+        result.operation_capability_count == 0 &&
+        !result.lowering_authorized && !result.performance_present &&
+        !result.claim_ready && result.failures == 0
+}
+
+fn u250xm_span_eq(
+    raw: string, start: i64, end: i64, expected: string,
+) -> bool with Mut, Panic {
+    let expected_len = str_len(expected)
+    if end - start != expected_len { return false }
+    var i: i64 = 0
+    while i < expected_len {
+        if str_char_at(raw, start + i) != str_char_at(expected, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn u250xm_line_count(raw: string, expected: string) -> i64
+with Mut, Panic {
+    let size = str_len(raw)
+    var count: i64 = 0
+    var start: i64 = 0
+    while start < size {
+        var end = start
+        while end < size && str_char_at(raw, end) != 10 { end = end + 1 }
+        var line_end = end
+        if line_end > start && str_char_at(raw, line_end - 1) == 13 {
+            line_end = line_end - 1
+        }
+        if u250xm_span_eq(raw, start, line_end, expected) {
+            count = count + 1
+        }
+        start = end + 1
+    }
+    count
+}
+
+fn u250xm_has_one(raw: string, expected: string) -> bool
+with Mut, Panic {
+    u250xm_line_count(raw, expected) == 1
+}
+
+fn u250xm_raw_probe_valid(raw: string) -> bool with Mut, Panic {
+    u250xm_has_one(raw,
+        "schema=pireus.u250.xclbin-material-probe.v0") &&
+        u250xm_has_one(raw, "producer_language=C++") &&
+        u250xm_has_one(raw, "producer_role=MATERIAL_PARITY") &&
+        u250xm_has_one(raw, "semantic_authority_language=Sounio") &&
+        u250xm_has_one(raw, "parent_semantics_sha256=e7d4a83e81c054a1d15808292d49fbcda6ea43a06dbf31469e7c4c81d51d3fe5") &&
+        u250xm_has_one(raw, "parent_freeze_sha256=89278d99fab89bc2b582958a27d2806775b0b13a1e8f258550924fc20e3dc05e") &&
+        u250xm_has_one(raw, "artifact_name=krnl_san_scan.hw.xclbin") &&
+        u250xm_has_one(raw, "artifact_size_bytes=41112056") &&
+        u250xm_has_one(raw, "artifact_sha256=d30078c7b2e8690aef892b4b6cf96af0f490b70e2b367e5e3679be04fcd4bdbf") &&
+        u250xm_has_one(raw, "xclbin_uuid=c50267ec-ae68-48a1-1559-3473f046689c") &&
+        u250xm_has_one(raw, "kernel=krnl_san_scan") &&
+        u250xm_has_one(raw, "platform=xilinx_u250_gen3x16_xdma_4_1_202210_1") &&
+        u250xm_has_one(raw, "vitis_version=2025.1") &&
+        u250xm_has_one(raw, "requested_frequency_mhz=250") &&
+        u250xm_has_one(raw, "achieved_frequency_tenths_mhz=1352") &&
+        u250xm_has_one(raw, "argument_count=8") &&
+        u250xm_has_one(raw, "argument_0=samples,M_AXI_GMEM0,bank1") &&
+        u250xm_has_one(raw, "argument_1=lut,M_AXI_GMEM1,bank1") &&
+        u250xm_has_one(raw, "argument_2=q_delta,S_AXI_CONTROL,none") &&
+        u250xm_has_one(raw, "argument_3=n_points,S_AXI_CONTROL,none") &&
+        u250xm_has_one(raw, "argument_4=n_samples,S_AXI_CONTROL,none") &&
+        u250xm_has_one(raw, "argument_5=hist_out,M_AXI_GMEM1,bank1") &&
+        u250xm_has_one(raw, "argument_6=catastrophe_out,M_AXI_GMEM1,bank1") &&
+        u250xm_has_one(raw, "argument_7=flops_out,M_AXI_GMEM1,bank1") &&
+        u250xm_has_one(raw, "interface_binding_count=8") &&
+        u250xm_has_one(raw, "material_bank_binding_count=5") &&
+        u250xm_has_one(raw, "toolchain_sha256=a1e020d492e3da5d2a994606dc7969a5ee64968b1eb388443635d0d205729f8f") &&
+        u250xm_has_one(raw, "hardware_sha256=6e106fbdc3b9ce6cd8795bc2229f7ac1a2d57c90321afe77cc18270d48e151a8") &&
+        u250xm_has_one(raw, "command_sha256=835e77c055184092c24616016ae85c347288dead3489a21c4204fdcfa31b4bc2") &&
+        u250xm_has_one(raw, "result_sha256=2d35e8ebaf5723b7d024299c1c21defe4b6e73dd7e8cb06a4455ac877c01060a") &&
+        u250xm_has_one(raw, "bitstream_present=true") &&
+        u250xm_has_one(raw, "bitstream_digest_present=true") &&
+        u250xm_has_one(raw, "metadata_present=true") &&
+        u250xm_has_one(raw, "probe_valid=true") &&
+        u250xm_has_one(raw, "semantic_verdict_emitted=false") &&
+        u250xm_has_one(raw, "classification_requested=false") &&
+        u250xm_has_one(raw, "kernel_execution_observed=false") &&
+        u250xm_has_one(raw, "kernel_correctness_present=false") &&
+        u250xm_has_one(raw, "performance_present=false") &&
+        u250xm_has_one(raw, "claim_ready=false")
+}
+
+pub fn pireus_u250_xclbin_material_ingest_text(
+    parent: &PireusU250FpgaKernelArtifactResult,
+    raw: string,
+) -> PireusU250XclbinMaterialResult with Mut, Panic {
+    if !u250xm_raw_probe_valid(raw) {
+        var refused = pireus_u250_xclbin_material_observation()
+        refused.metadata_present = false
+        return pireus_u250_xclbin_material_project(parent, &refused)
+    }
+    let observed = pireus_u250_xclbin_material_observation()
+    pireus_u250_xclbin_material_project(parent, &observed)
+}
+
+pub fn pireus_u250_xclbin_material_ingest_file(
+    parent: &PireusU250FpgaKernelArtifactResult,
+    raw_path: string,
+) -> PireusU250XclbinMaterialResult
+with IO, Mut, Panic, Alloc {
+    pireus_u250_xclbin_material_ingest_text(parent, read_file(raw_path))
+}
+
+fn u250xm_add_class(store: &TripleStore, class_id: i64) {
+    triple_store_add(store, triple_iri(
+        class_id, PIREUS_RDF_TYPE, PIREUS_CLASS_ONTOLOGY_CLASS))
+}
+
+fn u250xm_add_typed(store: &TripleStore, subject: i64, class_id: i64) {
+    triple_store_add(store, triple_iri(subject, PIREUS_RDF_TYPE, class_id))
+}
+
+pub fn pireus_u250_xclbin_material_store(
+    engine: &PireusU250ExecutionEngineResult,
+    parent: &PireusU250FpgaKernelArtifactResult,
+    result: &PireusU250XclbinMaterialResult,
+) -> TripleStore with Mut {
+    var store = pireus_u250_fpga_kernel_artifact_store(engine, parent)
+    if !pireus_u250_xclbin_parity_matches_expected(result) { return store }
+
+    u250xm_add_class(&store, PIREUS_CLASS_XCLBIN_MATERIAL_RECEIPT)
+    u250xm_add_class(&store, PIREUS_CLASS_BITSTREAM_IDENTITY)
+    u250xm_add_class(&store, PIREUS_CLASS_BITSTREAM_DIGEST)
+    u250xm_add_class(&store, PIREUS_CLASS_XCLBIN_METADATA)
+    u250xm_add_class(&store, PIREUS_CLASS_MATERIAL_MEMORY_BANK)
+    u250xm_add_class(&store, PIREUS_CLASS_MATERIAL_PRODUCER)
+    u250xm_add_typed(&store, PIREUS_U250_XCLBIN_RECEIPT_SAN_SCAN_V0,
+        PIREUS_CLASS_XCLBIN_MATERIAL_RECEIPT)
+    u250xm_add_typed(&store, PIREUS_U250_XCLBIN_BITS_SAN_SCAN,
+        PIREUS_CLASS_BITSTREAM_IDENTITY)
+    u250xm_add_typed(&store, PIREUS_U250_XCLBIN_DIGEST_D30078C7,
+        PIREUS_CLASS_BITSTREAM_DIGEST)
+    u250xm_add_typed(&store, PIREUS_U250_XCLBIN_METADATA_SAN_SCAN,
+        PIREUS_CLASS_XCLBIN_METADATA)
+    u250xm_add_typed(&store, PIREUS_U250_MEMORY_BANK_1,
+        PIREUS_CLASS_MATERIAL_MEMORY_BANK)
+    u250xm_add_typed(&store, PIREUS_U250_MATERIAL_PRODUCER_CPP,
+        PIREUS_CLASS_MATERIAL_PRODUCER)
+    triple_store_add(&store, triple_iri(PIREUS_U250_KERNEL_ARTIFACT_SAN_SCAN,
+        PIREUS_ARTIFACT_HAS_BITS, PIREUS_U250_XCLBIN_BITS_SAN_SCAN))
+    triple_store_add(&store, triple_iri(PIREUS_U250_KERNEL_ARTIFACT_SAN_SCAN,
+        PIREUS_ARTIFACT_HAS_MATERIAL_RECEIPT,
+        PIREUS_U250_XCLBIN_RECEIPT_SAN_SCAN_V0))
+    triple_store_add(&store, triple_iri(
+        PIREUS_U250_XCLBIN_RECEIPT_SAN_SCAN_V0,
+        PIREUS_RECEIPT_HAS_DIGEST, PIREUS_U250_XCLBIN_DIGEST_D30078C7))
+    triple_store_add(&store, triple_iri(
+        PIREUS_U250_XCLBIN_RECEIPT_SAN_SCAN_V0,
+        PIREUS_RECEIPT_HAS_METADATA, PIREUS_U250_XCLBIN_METADATA_SAN_SCAN))
+    triple_store_add(&store, triple_iri(
+        PIREUS_U250_XCLBIN_RECEIPT_SAN_SCAN_V0,
+        PIREUS_RECEIPT_HAS_PRODUCER, PIREUS_U250_MATERIAL_PRODUCER_CPP))
+    triple_store_add(&store, triple_iri(PIREUS_ARGUMENT_SAMPLES,
+        PIREUS_ARGUMENT_HAS_MATERIAL_BANK, PIREUS_U250_MEMORY_BANK_1))
+    triple_store_add(&store, triple_iri(PIREUS_ARGUMENT_LUT,
+        PIREUS_ARGUMENT_HAS_MATERIAL_BANK, PIREUS_U250_MEMORY_BANK_1))
+    triple_store_add(&store, triple_iri(PIREUS_ARGUMENT_HIST_OUT,
+        PIREUS_ARGUMENT_HAS_MATERIAL_BANK, PIREUS_U250_MEMORY_BANK_1))
+    triple_store_add(&store, triple_iri(PIREUS_ARGUMENT_CATASTROPHE_OUT,
+        PIREUS_ARGUMENT_HAS_MATERIAL_BANK, PIREUS_U250_MEMORY_BANK_1))
+    triple_store_add(&store, triple_iri(PIREUS_ARGUMENT_FLOPS_OUT,
+        PIREUS_ARGUMENT_HAS_MATERIAL_BANK, PIREUS_U250_MEMORY_BANK_1))
+    store
+}
+
+fn u250xm_query_object(
+    store: &TripleStore, subject: i64, predicate: i64,
+) -> SparqlResult with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 0)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_iri(subject), queryterm_iri(predicate),
+        queryterm_variable(0)))
+    sparql_execute(store, &query)
+}
+
+pub fn pireus_u250_query_material_receipts(
+    store: &TripleStore,
+) -> SparqlResult with Mut, Epistemic {
+    u250xm_query_object(store, PIREUS_U250_KERNEL_ARTIFACT_SAN_SCAN,
+        PIREUS_ARTIFACT_HAS_MATERIAL_RECEIPT)
+}
+
+pub fn pireus_u250_query_material_bank_bindings(
+    store: &TripleStore,
+) -> SparqlResult with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 0)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0),
+        queryterm_iri(PIREUS_ARGUMENT_HAS_MATERIAL_BANK),
+        queryterm_iri(PIREUS_U250_MEMORY_BANK_1)))
+    sparql_execute(store, &query)
+}

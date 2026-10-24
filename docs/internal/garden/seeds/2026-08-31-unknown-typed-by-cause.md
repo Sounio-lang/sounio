@@ -2,8 +2,8 @@
 topic_id: repo.docs.internal.garden.seeds.2026-08-31-unknown-typed-by-cause
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.garden.seeds.2026-08-31-unknown-typed-by-cause
 -->
 
@@ -75,7 +75,7 @@ don't-know-with-why.
   where *producer* identity lives and dies in the stack. The dead
   `source_id` socket found there (`check/epistemic.sio:225-245`) is the same
   shape of unwired organ this butterfly would need for causes.
-- [`FOUNDER_INTENT.md`](../../../FOUNDER_INTENT.md) — the erasure list, and
+- [`FOUNDER_INTENT.md`](../../../../FOUNDER_INTENT.md) — the erasure list, and
   the clinical domain where the cause decides the correct action (a missing
   creatinine that is `Unmeasured` says *order the test*; one that is
   `Withheld` says something else entirely).

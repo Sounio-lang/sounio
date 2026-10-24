@@ -2,8 +2,8 @@
 topic_id: repo.docs.internal.garden.seeds.2026-08-29-pharos-loss-ledger
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.garden.seeds.2026-08-29-pharos-loss-ledger
 -->
 
@@ -66,7 +66,7 @@ deliverable.
 
 ## Connections
 
-- [`FOUNDER_INTENT.md`](../../../FOUNDER_INTENT.md) — the recurring question
+- [`FOUNDER_INTENT.md`](../../../../FOUNDER_INTENT.md) — the recurring question
   and the erasure list this seed turns inward; also the evidence-label ladder
   this seed is subordinate to.
 - [`stdlib/eisa/core_v2.sio`](../../../../stdlib/eisa/core_v2.sio) — the

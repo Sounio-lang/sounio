@@ -1,0 +1,1458 @@
+//@ module document::pdf_flatedecode
+//! Bounded classic-xref PDF page-content reader with pure-Sounio FlateDecode.
+
+use crypto::sha256::{
+    SHA256State, SHA256Digest,
+    sha256_init, sha256_update, sha256_finalize,
+}
+use compress::inflate::{
+    SounioInflateInput, SounioInflateResult,
+    SOUNIO_INFLATE_OK,
+    SOUNIO_INFLATE_ERR_ADLER32,
+    SOUNIO_INFLATE_INPUT_CAPACITY,
+    sounio_inflate_zlib,
+}
+
+pub const SOUNIO_PDF_OK: i64 = 0
+pub const SOUNIO_PDF_ERR_FILE: i64 = 1
+pub const SOUNIO_PDF_ERR_LENGTH: i64 = 2
+pub const SOUNIO_PDF_ERR_HASH: i64 = 3
+pub const SOUNIO_PDF_ERR_HEADER: i64 = 4
+pub const SOUNIO_PDF_ERR_EOF: i64 = 5
+pub const SOUNIO_PDF_ERR_STARTXREF: i64 = 6
+pub const SOUNIO_PDF_ERR_XREF: i64 = 7
+pub const SOUNIO_PDF_ERR_XREF_CAPACITY: i64 = 8
+pub const SOUNIO_PDF_ERR_DUPLICATE_OBJECT: i64 = 9
+pub const SOUNIO_PDF_ERR_TRAILER: i64 = 10
+pub const SOUNIO_PDF_ERR_OBJECT: i64 = 11
+pub const SOUNIO_PDF_ERR_DICTIONARY: i64 = 12
+pub const SOUNIO_PDF_ERR_CATALOG: i64 = 13
+pub const SOUNIO_PDF_ERR_PAGE_TREE: i64 = 14
+pub const SOUNIO_PDF_ERR_PAGE_CYCLE: i64 = 15
+pub const SOUNIO_PDF_ERR_PAGE_COUNT: i64 = 16
+pub const SOUNIO_PDF_ERR_CONTENT_REF: i64 = 17
+pub const SOUNIO_PDF_ERR_FILTER: i64 = 18
+pub const SOUNIO_PDF_ERR_STREAM: i64 = 19
+pub const SOUNIO_PDF_ERR_CONTENT_CAPACITY: i64 = 20
+pub const SOUNIO_PDF_ERR_INFLATE_BASE: i64 = 100
+
+pub const SOUNIO_PDF_EXPECTED_BYTES: i64 = 3041713
+pub const SOUNIO_PDF_FILE_CAPACITY: i64 = 3200000
+pub const SOUNIO_PDF_OBJECT_CAPACITY: i64 = 6000
+pub const SOUNIO_PDF_PAGE_CAPACITY: i64 = 64
+pub const SOUNIO_PDF_PAGE_NODE_CAPACITY: i64 = 64
+pub const SOUNIO_PDF_TREE_DEPTH_CAPACITY: i64 = 32
+
+const PDF_FILE_WORDS: i64 = 400000
+const PDF_KIDS_CAPACITY: i64 = 64
+const PDF_STACK_CAPACITY: i64 = 128
+
+var SOUNIO_PDF_FILE_WORDS: [i64; 400000]
+
+struct PdfXref {
+    state: [i64; 6000],
+    offsets: [i64; 6000],
+    generations: [i64; 6000],
+    declared_size: i64,
+    in_use: i64,
+}
+
+pub struct SounioPdfFlateInventory {
+    pub error: i64,
+    pub total_bytes: i64,
+    pub digest_match: bool,
+    pub header_match: bool,
+    pub eof_match: bool,
+    pub xref_offset: i64,
+    pub xref_objects: i64,
+    pub declared_objects: i64,
+    pub root_object: i64,
+    pub root_generation: i64,
+    pub pages_root_object: i64,
+    pub pages_root_generation: i64,
+    pub page_tree_nodes: i64,
+    pub root_declared_pages: i64,
+    pub pages: i64,
+    pub content_streams: i64,
+    pub redundant_filter_entries: i64,
+    pub omitted_stream_endobj: i64,
+    pub direct_flate_streams: i64,
+    pub nonselected_flate_streams: i64,
+    pub oversized_nonselected_flate_streams: i64,
+    pub largest_direct_flate_length: i64,
+    pub selected_compressed_bytes: i64,
+    pub selected_decoded_bytes: i64,
+    pub inflate_blocks: i64,
+    pub inflate_stored_blocks: i64,
+    pub inflate_fixed_blocks: i64,
+    pub inflate_dynamic_blocks: i64,
+    pub inflate_literals: i64,
+    pub inflate_copies: i64,
+    pub max_distance: i64,
+    pub page_tree_objects: [i64; 64],
+    pub page_objects: [i64; 64],
+    pub content_objects: [i64; 64],
+    pub content_generations: [i64; 64],
+    pub compressed_lengths: [i64; 64],
+    pub decoded_lengths: [i64; 64],
+    pub content_digest_words: [i64; 512],
+    pub aggregate_digest_words: [i64; 8],
+}
+
+pub struct SounioPdfObjectSlice {
+    pub error: i64,
+    pub object: i64,
+    pub generation: i64,
+    pub dictionary_start: i64,
+    pub dictionary_end: i64,
+}
+
+fn pdf_inventory_empty() -> SounioPdfFlateInventory {
+    SounioPdfFlateInventory {
+        error: SOUNIO_PDF_OK,
+        total_bytes: 0,
+        digest_match: false,
+        header_match: false,
+        eof_match: false,
+        xref_offset: 0,
+        xref_objects: 0,
+        declared_objects: 0,
+        root_object: 0,
+        root_generation: 0,
+        pages_root_object: 0,
+        pages_root_generation: 0,
+        page_tree_nodes: 0,
+        root_declared_pages: 0,
+        pages: 0,
+        content_streams: 0,
+        redundant_filter_entries: 0,
+        omitted_stream_endobj: 0,
+        direct_flate_streams: 0,
+        nonselected_flate_streams: 0,
+        oversized_nonselected_flate_streams: 0,
+        largest_direct_flate_length: 0,
+        selected_compressed_bytes: 0,
+        selected_decoded_bytes: 0,
+        inflate_blocks: 0,
+        inflate_stored_blocks: 0,
+        inflate_fixed_blocks: 0,
+        inflate_dynamic_blocks: 0,
+        inflate_literals: 0,
+        inflate_copies: 0,
+        max_distance: 0,
+        page_tree_objects: [0; 64],
+        page_objects: [0; 64],
+        content_objects: [0; 64],
+        content_generations: [0; 64],
+        compressed_lengths: [0; 64],
+        decoded_lengths: [0; 64],
+        content_digest_words: [0; 512],
+        aggregate_digest_words: [0; 8],
+    }
+}
+
+fn pdf_object_slice_empty() -> SounioPdfObjectSlice {
+    SounioPdfObjectSlice {
+        error: SOUNIO_PDF_ERR_OBJECT,
+        object: 0,
+        generation: 0,
+        dictionary_start: 0,
+        dictionary_end: 0,
+    }
+}
+
+fn pdf_xref_empty() -> PdfXref {
+    PdfXref {
+        state: [0; 6000],
+        offsets: [0; 6000],
+        generations: [0; 6000],
+        declared_size: 0,
+        in_use: 0,
+    }
+}
+
+pub fn sounio_pdf_expected_sha256() -> string {
+    "9f31df15dd6827545702c5a0845f6e36e1889878cd0e534123bd70211e5c00a8"
+}
+
+fn pdf_byte(index: i64) -> i64 with Panic, Div {
+    if index < 0 || index >= SOUNIO_PDF_FILE_CAPACITY { return -1 }
+    let word = SOUNIO_PDF_FILE_WORDS[(index / 8) as usize]
+    (word >> ((index % 8) * 8)) & 255
+}
+
+fn pdf_is_whitespace(code: i64) -> bool {
+    code == 0 || code == 9 || code == 10 || code == 12 ||
+        code == 13 || code == 32
+}
+
+fn pdf_is_delimiter(code: i64) -> bool {
+    pdf_is_whitespace(code) || code == 40 || code == 41 ||
+        code == 60 || code == 62 || code == 91 || code == 93 ||
+        code == 123 || code == 125 || code == 47 || code == 37
+}
+
+fn pdf_skip_space(limit: i64, start: i64) -> i64 with Panic, Div {
+    var pos = start
+    var again = true
+    while again {
+        again = false
+        while pos < limit && pdf_is_whitespace(pdf_byte(pos)) {
+            pos = pos + 1
+        }
+        if pos < limit && pdf_byte(pos) == 37 {
+            while pos < limit && pdf_byte(pos) != 10 && pdf_byte(pos) != 13 {
+                pos = pos + 1
+            }
+            again = true
+        }
+    }
+    pos
+}
+
+fn pdf_match(limit: i64, start: i64, text: string) -> bool
+with Mut, Panic, Div {
+    let n = str_len(text)
+    if start < 0 || start + n > limit { return false }
+    var i: i64 = 0
+    while i < n {
+        if pdf_byte(start + i) != str_char_at(text, i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn pdf_token_match(limit: i64, start: i64, text: string) -> bool
+with Mut, Panic, Div {
+    if !pdf_match(limit, start, text) { return false }
+    let n = str_len(text)
+    let before_ok = start == 0 || pdf_is_delimiter(pdf_byte(start - 1))
+    let after_ok = start + n >= limit || pdf_is_delimiter(pdf_byte(start + n))
+    before_ok && after_ok
+}
+
+fn pdf_parse_uint(limit: i64, start: i64) -> (i64, i64, i64)
+with Panic, Div {
+    var pos = pdf_skip_space(limit, start)
+    var value: i64 = 0
+    var seen = false
+    while pos < limit {
+        let code = pdf_byte(pos)
+        if code < 48 || code > 57 { break }
+        let digit = code - 48
+        if value > 922337203685477580 ||
+            (value == 922337203685477580 && digit > 7) {
+            return (0, 0, pos)
+        }
+        value = value * 10 + digit
+        seen = true
+        pos = pos + 1
+    }
+    (if seen { 1 } else { 0 }, value, pos)
+}
+
+fn pdf_value_ended(limit: i64, after: i64) -> bool with Panic, Div {
+    let pos = pdf_skip_space(limit, after)
+    pos == limit - 2 || (pos < limit && pdf_byte(pos) == 47)
+}
+
+fn pdf_parse_direct_uint(limit: i64, start: i64) -> (i64, i64, i64)
+with Panic, Div {
+    let (ok, value, after) = pdf_parse_uint(limit, start)
+    if ok != 1 || !pdf_value_ended(limit, after) { return (0, 0, start) }
+    (1, value, after)
+}
+
+fn pdf_find_last(limit: i64, text: string) -> i64
+with Mut, Panic, Div {
+    let n = str_len(text)
+    var pos = limit - n
+    while pos >= 0 {
+        if pdf_match(limit, pos, text) { return pos }
+        pos = pos - 1
+    }
+    -1
+}
+
+fn pdf_digest_matches(digest: &SHA256Digest) -> bool with Panic {
+    let expected: [i64; 32] = [
+        0x9f, 0x31, 0xdf, 0x15, 0xdd, 0x68, 0x27, 0x54,
+        0x57, 0x02, 0xc5, 0xa0, 0x84, 0x5f, 0x6e, 0x36,
+        0xe1, 0x88, 0x98, 0x78, 0xcd, 0x0e, 0x53, 0x41,
+        0x23, 0xbd, 0x70, 0x21, 0x1e, 0x5c, 0x00, 0xa8
+    ]
+    var i: i64 = 0
+    while i < 32 {
+        if digest.bytes[i as usize] as i64 != expected[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn pdf_hash_file(size: i64) -> SHA256Digest with Mut, Panic, Div {
+    var state = sha256_init()
+    var pos: i64 = 0
+    while pos < size {
+        var window: [u8; 256] = [0; 256]
+        var count = size - pos
+        if count > 256 { count = 256 }
+        var i: i64 = 0
+        while i < count {
+            window[i as usize] = pdf_byte(pos + i) as u8
+            i = i + 1
+        }
+        state = sha256_update(state, window, count as i32)
+        pos = pos + count
+    }
+    sha256_finalize(state)
+}
+
+fn pdf_digest_word(digest: &SHA256Digest, word: i64) -> i64 with Panic {
+    let at = word * 4
+    ((digest.bytes[at as usize] as i64) << 24) |
+        ((digest.bytes[(at + 1) as usize] as i64) << 16) |
+        ((digest.bytes[(at + 2) as usize] as i64) << 8) |
+        (digest.bytes[(at + 3) as usize] as i64)
+}
+
+fn pdf_validate_envelope(size: i64, inv: &!SounioPdfFlateInventory) -> i64
+with Mut, Panic, Div {
+    if !pdf_match(size, 0, "%PDF-1.3") { return SOUNIO_PDF_ERR_HEADER }
+    inv.header_match = true
+    let eof = pdf_find_last(size, "%%EOF")
+    if eof < 0 { return SOUNIO_PDF_ERR_EOF }
+    var pos = eof + 5
+    while pos < size {
+        if !pdf_is_whitespace(pdf_byte(pos)) { return SOUNIO_PDF_ERR_EOF }
+        pos = pos + 1
+    }
+    inv.eof_match = true
+    let marker = pdf_find_last(eof, "startxref")
+    if marker < 0 { return SOUNIO_PDF_ERR_STARTXREF }
+    let (ok, offset, after) = pdf_parse_uint(eof, marker + 9)
+    if ok != 1 || offset < 0 || offset >= size || after <= marker + 9 {
+        return SOUNIO_PDF_ERR_STARTXREF
+    }
+    if !pdf_match(size, offset, "xref") { return SOUNIO_PDF_ERR_STARTXREF }
+    inv.xref_offset = offset
+    SOUNIO_PDF_OK
+}
+
+fn pdf_find_dictionary_end(limit: i64, start: i64) -> i64
+with Panic, Div {
+    if start + 1 >= limit || pdf_byte(start) != 60 || pdf_byte(start + 1) != 60 {
+        return -1
+    }
+    var pos = start + 2
+    var depth: i64 = 1
+    var string_depth: i64 = 0
+    var escaped = false
+    while pos < limit {
+        let code = pdf_byte(pos)
+        if string_depth > 0 {
+            if escaped {
+                escaped = false
+            } else {
+                if code == 92 { escaped = true }
+                else {
+                    if code == 40 { string_depth = string_depth + 1 }
+                    else { if code == 41 { string_depth = string_depth - 1 } }
+                }
+            }
+            pos = pos + 1
+        } else {
+            if code == 37 {
+                while pos < limit && pdf_byte(pos) != 10 && pdf_byte(pos) != 13 {
+                    pos = pos + 1
+                }
+            } else {
+                if code == 40 {
+                    string_depth = 1
+                    pos = pos + 1
+                } else {
+                    if code == 60 && pos + 1 < limit && pdf_byte(pos + 1) == 60 {
+                        depth = depth + 1
+                        pos = pos + 2
+                    } else {
+                        if code == 62 && pos + 1 < limit && pdf_byte(pos + 1) == 62 {
+                            depth = depth - 1
+                            pos = pos + 2
+                            if depth == 0 { return pos }
+                        } else {
+                            if code == 60 {
+                                pos = pos + 1
+                                while pos < limit && pdf_byte(pos) != 62 {
+                                    pos = pos + 1
+                                }
+                                if pos < limit { pos = pos + 1 }
+                            } else {
+                                pos = pos + 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    -1
+}
+
+fn pdf_name_end(limit: i64, start: i64) -> i64 with Panic, Div {
+    var pos = start
+    while pos < limit && !pdf_is_delimiter(pdf_byte(pos)) {
+        pos = pos + 1
+    }
+    pos
+}
+
+fn pdf_name_matches(limit: i64, slash: i64, name: string) -> bool
+with Mut, Panic, Div {
+    if slash < 0 || slash >= limit || pdf_byte(slash) != 47 { return false }
+    let n = str_len(name)
+    if slash + 1 + n > limit { return false }
+    var i: i64 = 0
+    while i < n {
+        if pdf_byte(slash + 1 + i) != str_char_at(name, i) { return false }
+        i = i + 1
+    }
+    slash + 1 + n == limit || pdf_is_delimiter(pdf_byte(slash + 1 + n))
+}
+
+fn pdf_find_key(
+    dict_start: i64,
+    dict_end: i64,
+    key: string,
+) -> (i64, i64, i64) with Mut, Panic, Div {
+    var pos = dict_start + 2
+    var depth: i64 = 1
+    var first: i64 = -1
+    var last: i64 = -1
+    var count: i64 = 0
+    while pos < dict_end - 2 {
+        let code = pdf_byte(pos)
+        if code == 37 {
+            while pos < dict_end && pdf_byte(pos) != 10 && pdf_byte(pos) != 13 {
+                pos = pos + 1
+            }
+        } else {
+            if code == 40 {
+                var string_depth: i64 = 1
+                var escaped = false
+                pos = pos + 1
+                while pos < dict_end && string_depth > 0 {
+                    let c = pdf_byte(pos)
+                    if escaped { escaped = false }
+                    else {
+                        if c == 92 { escaped = true }
+                        else {
+                            if c == 40 { string_depth = string_depth + 1 }
+                            else { if c == 41 { string_depth = string_depth - 1 } }
+                        }
+                    }
+                    pos = pos + 1
+                }
+            } else {
+                if code == 60 && pos + 1 < dict_end && pdf_byte(pos + 1) == 60 {
+                    depth = depth + 1
+                    pos = pos + 2
+                } else {
+                    if code == 62 && pos + 1 < dict_end && pdf_byte(pos + 1) == 62 {
+                        depth = depth - 1
+                        pos = pos + 2
+                    } else {
+                        if code == 60 {
+                            pos = pos + 1
+                            while pos < dict_end && pdf_byte(pos) != 62 {
+                                pos = pos + 1
+                            }
+                            if pos < dict_end { pos = pos + 1 }
+                        } else {
+                            if code == 47 {
+                                let name_end = pdf_name_end(dict_end, pos + 1)
+                                if depth == 1 && pdf_name_matches(dict_end, pos, key) {
+                                    count = count + 1
+                                    last = pdf_skip_space(dict_end, name_end)
+                                    if first < 0 {
+                                        first = last
+                                    }
+                                }
+                                pos = name_end
+                            } else {
+                                pos = pos + 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (first, last, count)
+}
+
+fn pdf_parse_reference(limit: i64, start: i64) -> (i64, i64, i64, i64)
+with Panic, Div {
+    let (ok_obj, object, p1) = pdf_parse_uint(limit, start)
+    let (ok_gen, generation, p2) = pdf_parse_uint(limit, p1)
+    let pos = pdf_skip_space(limit, p2)
+    if ok_obj != 1 || ok_gen != 1 || pos >= limit || pdf_byte(pos) != 82 ||
+        (pos + 1 < limit && !pdf_is_delimiter(pdf_byte(pos + 1))) {
+        return (0, 0, 0, start)
+    }
+    (1, object, generation, pos + 1)
+}
+
+fn pdf_direct_name_is(limit: i64, start: i64, name: string) -> bool
+with Mut, Panic, Div {
+    let pos = pdf_skip_space(limit, start)
+    pdf_name_matches(limit, pos, name)
+}
+
+fn pdf_parse_xref(
+    size: i64,
+    offset: i64,
+    xref: &!PdfXref,
+) -> (i64, i64, i64, i64, i64) with Mut, Panic, Div {
+    var pos = offset
+    if !pdf_match(size, pos, "xref") {
+        return (SOUNIO_PDF_ERR_XREF, 0, 0, 0, 0)
+    }
+    pos = pdf_skip_space(size, pos + 4)
+    while pos < size && !pdf_token_match(size, pos, "trailer") {
+        let (ok_first, first, p1) = pdf_parse_uint(size, pos)
+        let (ok_count, count, p2) = pdf_parse_uint(size, p1)
+        if ok_first != 1 || ok_count != 1 || count <= 0 ||
+            first < 0 || first + count > SOUNIO_PDF_OBJECT_CAPACITY {
+            return (SOUNIO_PDF_ERR_XREF_CAPACITY, 0, 0, 0, 0)
+        }
+        pos = p2
+        var i: i64 = 0
+        while i < count {
+            let object = first + i
+            let (ok_offset, object_offset, q1) = pdf_parse_uint(size, pos)
+            let (ok_generation, generation, q2) = pdf_parse_uint(size, q1)
+            let q3 = pdf_skip_space(size, q2)
+            if ok_offset != 1 || ok_generation != 1 || generation > 65535 ||
+                q3 >= size || (pdf_byte(q3) != 110 && pdf_byte(q3) != 102) ||
+                (q3 + 1 < size && !pdf_is_whitespace(pdf_byte(q3 + 1))) {
+                return (SOUNIO_PDF_ERR_XREF, 0, 0, 0, 0)
+            }
+            let mark_error = pdf_xref_mark(
+                xref, object, object_offset, generation,
+                if pdf_byte(q3) == 110 { 2 } else { 1 }, size)
+            if mark_error != SOUNIO_PDF_OK {
+                return (mark_error, 0, 0, 0, 0)
+            }
+            pos = pdf_skip_space(size, q3 + 1)
+            i = i + 1
+        }
+    }
+    if !pdf_token_match(size, pos, "trailer") {
+        return (SOUNIO_PDF_ERR_TRAILER, 0, 0, 0, 0)
+    }
+    pos = pdf_skip_space(size, pos + 7)
+    if pos + 1 >= size || pdf_byte(pos) != 60 || pdf_byte(pos + 1) != 60 {
+        return (SOUNIO_PDF_ERR_TRAILER, 0, 0, 0, 0)
+    }
+    let dict_end = pdf_find_dictionary_end(size, pos)
+    if dict_end < 0 { return (SOUNIO_PDF_ERR_TRAILER, 0, 0, 0, 0) }
+    let (size_pos, size_last, size_count) = pdf_find_key(pos, dict_end, "Size")
+    let (root_pos, root_last, root_count) = pdf_find_key(pos, dict_end, "Root")
+    let (prev_pos, prev_last, prev_count) = pdf_find_key(pos, dict_end, "Prev")
+    let (size_ok, declared_size, size_after) =
+        pdf_parse_direct_uint(dict_end, size_pos)
+    let (root_ok, root_object, root_generation, root_after) =
+        pdf_parse_reference(dict_end, root_pos)
+    if size_count != 1 || root_count != 1 || prev_count != 0 || prev_pos >= 0 ||
+        size_ok != 1 || root_ok != 1 || size_after <= size_pos ||
+        root_after <= root_pos || declared_size <= 0 ||
+        declared_size > SOUNIO_PDF_OBJECT_CAPACITY {
+        return (SOUNIO_PDF_ERR_TRAILER, 0, 0, 0, 0)
+    }
+    var object: i64 = 0
+    while object < SOUNIO_PDF_OBJECT_CAPACITY {
+        if object < declared_size {
+            if xref.state[object as usize] == 0 {
+                return (SOUNIO_PDF_ERR_XREF, 0, 0, 0, 0)
+            }
+        } else {
+            if xref.state[object as usize] != 0 {
+                return (SOUNIO_PDF_ERR_XREF, 0, 0, 0, 0)
+            }
+        }
+        object = object + 1
+    }
+    if root_object < 0 || root_object >= declared_size ||
+        xref.state[root_object as usize] != 2 ||
+        xref.generations[root_object as usize] != root_generation {
+        return (SOUNIO_PDF_ERR_TRAILER, 0, 0, 0, 0)
+    }
+    xref.declared_size = declared_size
+    (SOUNIO_PDF_OK, root_object, root_generation, pos, dict_end)
+}
+
+fn pdf_xref_mark(
+    xref: &!PdfXref,
+    object: i64,
+    offset: i64,
+    generation: i64,
+    state: i64,
+    size: i64,
+) -> i64 with Mut, Panic {
+    if object < 0 || object >= SOUNIO_PDF_OBJECT_CAPACITY ||
+        generation < 0 || generation > 65535 ||
+        (state != 1 && state != 2) {
+        return SOUNIO_PDF_ERR_XREF
+    }
+    if xref.state[object as usize] != 0 {
+        return SOUNIO_PDF_ERR_DUPLICATE_OBJECT
+    }
+    if state == 2 && (offset < 0 || offset >= size) {
+        return SOUNIO_PDF_ERR_XREF
+    }
+    xref.state[object as usize] = state
+    xref.offsets[object as usize] = offset
+    xref.generations[object as usize] = generation
+    if state == 2 { xref.in_use = xref.in_use + 1 }
+    SOUNIO_PDF_OK
+}
+
+fn pdf_object_dictionary(
+    size: i64,
+    xref: &PdfXref,
+    object: i64,
+    generation: i64,
+) -> (i64, i64, i64) with Mut, Panic, Div {
+    if object < 0 || object >= SOUNIO_PDF_OBJECT_CAPACITY ||
+        xref.state[object as usize] != 2 ||
+        xref.generations[object as usize] != generation {
+        return (SOUNIO_PDF_ERR_OBJECT, 0, 0)
+    }
+    let offset = xref.offsets[object as usize]
+    let (ok_obj, parsed_object, p1) = pdf_parse_uint(size, offset)
+    let (ok_gen, parsed_generation, p2) = pdf_parse_uint(size, p1)
+    let p3 = pdf_skip_space(size, p2)
+    if ok_obj != 1 || ok_gen != 1 || parsed_object != object ||
+        parsed_generation != generation || !pdf_token_match(size, p3, "obj") {
+        return (SOUNIO_PDF_ERR_OBJECT, 0, 0)
+    }
+    let dict_start = pdf_skip_space(size, p3 + 3)
+    if dict_start + 1 >= size || pdf_byte(dict_start) != 60 ||
+        pdf_byte(dict_start + 1) != 60 {
+        return (SOUNIO_PDF_ERR_DICTIONARY, 0, 0)
+    }
+    let dict_end = pdf_find_dictionary_end(size, dict_start)
+    if dict_end < 0 { return (SOUNIO_PDF_ERR_DICTIONARY, 0, 0) }
+    (SOUNIO_PDF_OK, dict_start, dict_end)
+}
+
+fn pdf_parse_ref_array(
+    limit: i64,
+    start: i64,
+    objects: &![i64; 64],
+    generations: &![i64; 64],
+) -> i64 with Mut, Panic, Div {
+    var pos = pdf_skip_space(limit, start)
+    if pos >= limit || pdf_byte(pos) != 91 { return -1 }
+    pos = pdf_skip_space(limit, pos + 1)
+    var count: i64 = 0
+    while pos < limit && pdf_byte(pos) != 93 {
+        if count >= PDF_KIDS_CAPACITY { return -1 }
+        let (ok, object, generation, after) =
+            pdf_parse_reference(limit, pos)
+        if ok != 1 || after <= pos { return -1 }
+        objects[count as usize] = object
+        generations[count as usize] = generation
+        count = count + 1
+        pos = pdf_skip_space(limit, after)
+    }
+    if pos >= limit || pdf_byte(pos) != 93 { return -1 }
+    count
+}
+
+fn pdf_mark_page_visit(visited: &![i64; 6000], object: i64) -> i64
+with Mut, Panic {
+    if object < 0 || object >= SOUNIO_PDF_OBJECT_CAPACITY {
+        return SOUNIO_PDF_ERR_PAGE_TREE
+    }
+    if visited[object as usize] != 0 { return SOUNIO_PDF_ERR_PAGE_CYCLE }
+    visited[object as usize] = 1
+    SOUNIO_PDF_OK
+}
+
+fn pdf_page_counts_match(declared: i64, actual: i64) -> bool {
+    declared >= 0 && declared == actual
+}
+
+fn pdf_filter_shape_admitted(
+    count: i64,
+    first_is_flate: bool,
+    last_is_flate: bool,
+) -> bool {
+    (count == 1 || count == 2) && first_is_flate && last_is_flate
+}
+
+fn pdf_content_length_error(length: i64) -> i64 {
+    if length <= 0 { return SOUNIO_PDF_ERR_STREAM }
+    if length > SOUNIO_INFLATE_INPUT_CAPACITY {
+        return SOUNIO_PDF_ERR_CONTENT_CAPACITY
+    }
+    SOUNIO_PDF_OK
+}
+
+fn pdf_plain_object_ends(size: i64, dict_end: i64) -> bool
+with Mut, Panic, Div {
+    let pos = pdf_skip_space(size, dict_end)
+    pdf_token_match(size, pos, "endobj")
+}
+
+fn pdf_node_index(inv: &SounioPdfFlateInventory, object: i64) -> i64
+with Panic {
+    var i: i64 = 0
+    while i < inv.page_tree_nodes {
+        if inv.page_tree_objects[i as usize] == object {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn pdf_walk_pages(
+    size: i64,
+    xref: &PdfXref,
+    root_object: i64,
+    root_generation: i64,
+    inv: &!SounioPdfFlateInventory,
+) -> i64 with Mut, Panic, Div {
+    var stack_object: [i64; 128] = [0; 128]
+    var stack_generation: [i64; 128] = [0; 128]
+    var stack_parent: [i64; 128] = [0; 128]
+    var stack_depth: [i64; 128] = [0; 128]
+    var visited: [i64; 6000] = [0; 6000]
+    var node_parent: [i64; 64] = [0; 64]
+    var node_declared: [i64; 64] = [0; 64]
+    var node_actual: [i64; 64] = [0; 64]
+    var page_parent: [i64; 64] = [0; 64]
+    var top: i64 = 1
+    stack_object[0] = root_object
+    stack_generation[0] = root_generation
+    stack_parent[0] = -1
+    stack_depth[0] = 0
+
+    while top > 0 {
+        top = top - 1
+        let object = stack_object[top as usize]
+        let generation = stack_generation[top as usize]
+        let expected_parent = stack_parent[top as usize]
+        let depth = stack_depth[top as usize]
+        if depth > SOUNIO_PDF_TREE_DEPTH_CAPACITY {
+            return SOUNIO_PDF_ERR_PAGE_TREE
+        }
+        let visit_error = pdf_mark_page_visit(&!visited, object)
+        if visit_error != SOUNIO_PDF_OK { return visit_error }
+        let (dict_error, dict_start, dict_end) =
+            pdf_object_dictionary(size, xref, object, generation)
+        if dict_error != SOUNIO_PDF_OK { return SOUNIO_PDF_ERR_PAGE_TREE }
+        if !pdf_plain_object_ends(size, dict_end) {
+            return SOUNIO_PDF_ERR_PAGE_TREE
+        }
+        let (type_pos, type_last, type_count) =
+            pdf_find_key(dict_start, dict_end, "Type")
+        if type_count != 1 { return SOUNIO_PDF_ERR_PAGE_TREE }
+
+        let (parent_pos, parent_last, parent_count) =
+            pdf_find_key(dict_start, dict_end, "Parent")
+        var parsed_parent: i64 = -1
+        if expected_parent < 0 {
+            if parent_count != 0 { return SOUNIO_PDF_ERR_PAGE_TREE }
+        } else {
+            let (parent_ok, parent_object, parent_generation, parent_after) =
+                pdf_parse_reference(dict_end, parent_pos)
+            if parent_count != 1 || parent_ok != 1 ||
+                parent_object != expected_parent || parent_generation != 0 ||
+                parent_after <= parent_pos ||
+                !pdf_value_ended(dict_end, parent_after) {
+                return SOUNIO_PDF_ERR_PAGE_TREE
+            }
+            parsed_parent = parent_object
+        }
+
+        if pdf_direct_name_is(dict_end, type_pos, "Pages") {
+            if inv.page_tree_nodes >= SOUNIO_PDF_PAGE_NODE_CAPACITY {
+                return SOUNIO_PDF_ERR_PAGE_TREE
+            }
+            let node_index = inv.page_tree_nodes
+            inv.page_tree_objects[node_index as usize] = object
+            node_parent[node_index as usize] = parsed_parent
+            let (count_pos, count_last, count_count) =
+                pdf_find_key(dict_start, dict_end, "Count")
+            let (count_ok, declared, count_after) =
+                pdf_parse_direct_uint(dict_end, count_pos)
+            if count_count != 1 || count_ok != 1 || declared < 0 ||
+                count_after <= count_pos {
+                return SOUNIO_PDF_ERR_PAGE_COUNT
+            }
+            node_declared[node_index as usize] = declared
+            if node_index == 0 { inv.root_declared_pages = declared }
+            inv.page_tree_nodes = inv.page_tree_nodes + 1
+            let (kids_pos, kids_last, kids_count) =
+                pdf_find_key(dict_start, dict_end, "Kids")
+            if kids_count != 1 { return SOUNIO_PDF_ERR_PAGE_TREE }
+            var kids: [i64; 64] = [0; 64]
+            var kid_generations: [i64; 64] = [0; 64]
+            let kid_count = pdf_parse_ref_array(
+                dict_end, kids_pos, &!kids, &!kid_generations)
+            if kid_count <= 0 || top + kid_count > PDF_STACK_CAPACITY {
+                return SOUNIO_PDF_ERR_PAGE_TREE
+            }
+            var i = kid_count - 1
+            while i >= 0 {
+                stack_object[top as usize] = kids[i as usize]
+                stack_generation[top as usize] = kid_generations[i as usize]
+                stack_parent[top as usize] = object
+                stack_depth[top as usize] = depth + 1
+                top = top + 1
+                i = i - 1
+            }
+        } else {
+            if !pdf_direct_name_is(dict_end, type_pos, "Page") {
+                return SOUNIO_PDF_ERR_PAGE_TREE
+            }
+            if inv.pages >= SOUNIO_PDF_PAGE_CAPACITY {
+                return SOUNIO_PDF_ERR_PAGE_TREE
+            }
+            let (contents_pos, contents_last, contents_count) =
+                pdf_find_key(dict_start, dict_end, "Contents")
+            let (contents_ok, contents_object, contents_generation, contents_after) =
+                pdf_parse_reference(dict_end, contents_pos)
+            if contents_count != 1 || contents_ok != 1 ||
+                contents_after <= contents_pos ||
+                !pdf_value_ended(dict_end, contents_after) {
+                return SOUNIO_PDF_ERR_CONTENT_REF
+            }
+            let page_index = inv.pages
+            inv.page_objects[page_index as usize] = object
+            inv.content_objects[page_index as usize] = contents_object
+            inv.content_generations[page_index as usize] = contents_generation
+            page_parent[page_index as usize] = parsed_parent
+            inv.pages = inv.pages + 1
+        }
+    }
+
+    var page: i64 = 0
+    while page < inv.pages {
+        var parent = page_parent[page as usize]
+        var steps: i64 = 0
+        var reached_root = false
+        while parent >= 0 && steps <= inv.page_tree_nodes {
+            let node = pdf_node_index(inv, parent)
+            if node < 0 { return SOUNIO_PDF_ERR_PAGE_TREE }
+            node_actual[node as usize] = node_actual[node as usize] + 1
+            if parent == root_object {
+                reached_root = true
+                parent = -1
+            } else {
+                parent = node_parent[node as usize]
+            }
+            steps = steps + 1
+        }
+        if !reached_root { return SOUNIO_PDF_ERR_PAGE_CYCLE }
+        page = page + 1
+    }
+    var node: i64 = 0
+    while node < inv.page_tree_nodes {
+        if !pdf_page_counts_match(
+            node_declared[node as usize], node_actual[node as usize]) {
+            return SOUNIO_PDF_ERR_PAGE_COUNT
+        }
+        node = node + 1
+    }
+    SOUNIO_PDF_OK
+}
+
+fn pdf_inflate_input_empty() -> SounioInflateInput {
+    SounioInflateInput { bytes: [0; 65536] }
+}
+
+fn pdf_inflate_result_empty() -> SounioInflateResult {
+    SounioInflateResult {
+        bytes: [0; 262144],
+        error: 0,
+        input_bytes: 0,
+        output_bytes: 0,
+        blocks: 0,
+        stored_blocks: 0,
+        fixed_blocks: 0,
+        dynamic_blocks: 0,
+        literals: 0,
+        copies: 0,
+        max_distance: 0,
+        checksum_match: false,
+    }
+}
+
+fn pdf_hash_inflate_result(result: &SounioInflateResult) -> SHA256Digest
+with Mut, Panic, Div {
+    var state = sha256_init()
+    var pos: i64 = 0
+    while pos < result.output_bytes {
+        var window: [u8; 256] = [0; 256]
+        var count = result.output_bytes - pos
+        if count > 256 { count = 256 }
+        var i: i64 = 0
+        while i < count {
+            window[i as usize] = result.bytes[(pos + i) as usize] as u8
+            i = i + 1
+        }
+        state = sha256_update(state, window, count as i32)
+        pos = pos + count
+    }
+    sha256_finalize(state)
+}
+
+fn pdf_aggregate_add(
+    state: SHA256State,
+    result: &SounioInflateResult,
+) -> SHA256State with Mut, Panic, Div {
+    var next = state
+    var prefix: [u8; 256] = [0; 256]
+    let n = result.output_bytes
+    prefix[0] = ((n >> 56) & 255) as u8
+    prefix[1] = ((n >> 48) & 255) as u8
+    prefix[2] = ((n >> 40) & 255) as u8
+    prefix[3] = ((n >> 32) & 255) as u8
+    prefix[4] = ((n >> 24) & 255) as u8
+    prefix[5] = ((n >> 16) & 255) as u8
+    prefix[6] = ((n >> 8) & 255) as u8
+    prefix[7] = (n & 255) as u8
+    next = sha256_update(next, prefix, 8)
+    var pos: i64 = 0
+    while pos < n {
+        var window: [u8; 256] = [0; 256]
+        var count = n - pos
+        if count > 256 { count = 256 }
+        var i: i64 = 0
+        while i < count {
+            window[i as usize] = result.bytes[(pos + i) as usize] as u8
+            i = i + 1
+        }
+        next = sha256_update(next, window, count as i32)
+        pos = pos + count
+    }
+    next
+}
+
+fn pdf_stream_payload(
+    size: i64,
+    xref: &PdfXref,
+    dict_end: i64,
+    length: i64,
+) -> (i64, i64, i64) with Mut, Panic, Div {
+    var pos = pdf_skip_space(size, dict_end)
+    if !pdf_token_match(size, pos, "stream") { return (0, 0, -1) }
+    pos = pos + 6
+    if pos >= size { return (0, 0, -1) }
+    if pdf_byte(pos) == 13 {
+        pos = pos + 1
+        if pos < size && pdf_byte(pos) == 10 { pos = pos + 1 }
+    } else {
+        if pdf_byte(pos) != 10 { return (0, 0, -1) }
+        pos = pos + 1
+    }
+    if length < 0 || pos + length > size { return (0, 0, -1) }
+    var after = pos + length
+    if after < size && pdf_byte(after) == 13 {
+        after = after + 1
+        if after < size && pdf_byte(after) == 10 { after = after + 1 }
+    } else {
+        if after < size && pdf_byte(after) == 10 { after = after + 1 }
+    }
+    if !pdf_token_match(size, after, "endstream") { return (0, 0, -1) }
+    let end_object = pdf_skip_space(size, after + 9)
+    if pdf_token_match(size, end_object, "endobj") {
+        return (pos, pos + length, 0)
+    }
+    var object: i64 = 0
+    while object < xref.declared_size {
+        if xref.state[object as usize] == 2 &&
+            xref.offsets[object as usize] == end_object {
+            return (pos, pos + length, 1)
+        }
+        object = object + 1
+    }
+    (0, 0, -1)
+}
+
+fn pdf_decode_selected_contents(
+    size: i64,
+    xref: &PdfXref,
+    inv: &!SounioPdfFlateInventory,
+) -> i64 with Mut, Panic, Div {
+    var input = pdf_inflate_input_empty()
+    var result = pdf_inflate_result_empty()
+    var aggregate = sha256_init()
+    var page: i64 = 0
+    while page < inv.pages {
+        let object = inv.content_objects[page as usize]
+        if object < 0 || object >= SOUNIO_PDF_OBJECT_CAPACITY ||
+            xref.state[object as usize] != 2 {
+            return SOUNIO_PDF_ERR_CONTENT_REF
+        }
+        let generation = inv.content_generations[page as usize]
+        if xref.generations[object as usize] != generation {
+            return SOUNIO_PDF_ERR_CONTENT_REF
+        }
+        let (dict_error, dict_start, dict_end) =
+            pdf_object_dictionary(size, xref, object, generation)
+        if dict_error != SOUNIO_PDF_OK { return SOUNIO_PDF_ERR_CONTENT_REF }
+        let (filter_pos, filter_last, filter_count) =
+            pdf_find_key(dict_start, dict_end, "Filter")
+        if !pdf_filter_shape_admitted(
+            filter_count,
+            pdf_direct_name_is(dict_end, filter_pos, "FlateDecode"),
+            pdf_direct_name_is(dict_end, filter_last, "FlateDecode")) {
+            return SOUNIO_PDF_ERR_FILTER
+        }
+        inv.redundant_filter_entries = inv.redundant_filter_entries +
+            filter_count - 1
+        let (length_pos, length_last, length_count) =
+            pdf_find_key(dict_start, dict_end, "Length")
+        let (length_ok, length, length_after) =
+            pdf_parse_direct_uint(dict_end, length_pos)
+        if length_count != 1 || length_ok != 1 ||
+            length_after <= length_pos {
+            return SOUNIO_PDF_ERR_STREAM
+        }
+        let length_error = pdf_content_length_error(length)
+        if length_error != SOUNIO_PDF_OK { return length_error }
+        let (payload_start, payload_end, omitted_endobj) =
+            pdf_stream_payload(size, xref, dict_end, length)
+        if payload_start <= 0 || payload_end - payload_start != length ||
+            omitted_endobj < 0 {
+            return SOUNIO_PDF_ERR_STREAM
+        }
+        inv.omitted_stream_endobj = inv.omitted_stream_endobj + omitted_endobj
+        var i: i64 = 0
+        while i < length {
+            input.bytes[i as usize] = pdf_byte(payload_start + i)
+            i = i + 1
+        }
+        sounio_inflate_zlib(&input, length, &!result)
+        if result.error != SOUNIO_INFLATE_OK {
+            return SOUNIO_PDF_ERR_INFLATE_BASE + result.error
+        }
+        inv.compressed_lengths[page as usize] = length
+        inv.decoded_lengths[page as usize] = result.output_bytes
+        inv.selected_compressed_bytes = inv.selected_compressed_bytes + length
+        inv.selected_decoded_bytes = inv.selected_decoded_bytes + result.output_bytes
+        inv.inflate_blocks = inv.inflate_blocks + result.blocks
+        inv.inflate_stored_blocks = inv.inflate_stored_blocks + result.stored_blocks
+        inv.inflate_fixed_blocks = inv.inflate_fixed_blocks + result.fixed_blocks
+        inv.inflate_dynamic_blocks = inv.inflate_dynamic_blocks + result.dynamic_blocks
+        inv.inflate_literals = inv.inflate_literals + result.literals
+        inv.inflate_copies = inv.inflate_copies + result.copies
+        if result.max_distance > inv.max_distance {
+            inv.max_distance = result.max_distance
+        }
+        let digest = pdf_hash_inflate_result(&result)
+        var word: i64 = 0
+        while word < 8 {
+            inv.content_digest_words[(page * 8 + word) as usize] =
+                pdf_digest_word(&digest, word)
+            word = word + 1
+        }
+        aggregate = pdf_aggregate_add(aggregate, &result)
+        inv.content_streams = inv.content_streams + 1
+        page = page + 1
+    }
+    let aggregate_digest = sha256_finalize(aggregate)
+    var word: i64 = 0
+    while word < 8 {
+        inv.aggregate_digest_words[word as usize] =
+            pdf_digest_word(&aggregate_digest, word)
+        word = word + 1
+    }
+    SOUNIO_PDF_OK
+}
+
+fn pdf_selected_content(inv: &SounioPdfFlateInventory, object: i64) -> bool
+with Panic {
+    var i: i64 = 0
+    while i < inv.pages {
+        if inv.content_objects[i as usize] == object { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn pdf_census_flate_streams(
+    size: i64,
+    xref: &PdfXref,
+    inv: &!SounioPdfFlateInventory,
+) with Mut, Panic, Div {
+    var object: i64 = 0
+    while object < xref.declared_size {
+        if xref.state[object as usize] == 2 {
+            let generation = xref.generations[object as usize]
+            let (dict_error, dict_start, dict_end) =
+                pdf_object_dictionary(size, xref, object, generation)
+            if dict_error == SOUNIO_PDF_OK {
+                let (filter_pos, filter_last, filter_count) =
+                    pdf_find_key(dict_start, dict_end, "Filter")
+                if (filter_count == 1 || filter_count == 2) &&
+                    pdf_direct_name_is(dict_end, filter_pos, "FlateDecode") &&
+                    pdf_direct_name_is(dict_end, filter_last, "FlateDecode") {
+                    inv.direct_flate_streams = inv.direct_flate_streams + 1
+                    let (length_pos, length_last, length_count) =
+                        pdf_find_key(dict_start, dict_end, "Length")
+                    let (length_ok, length, length_after) =
+                        pdf_parse_direct_uint(dict_end, length_pos)
+                    if length_count == 1 && length_ok == 1 &&
+                        length_after > length_pos {
+                        if length > inv.largest_direct_flate_length {
+                            inv.largest_direct_flate_length = length
+                        }
+                        if !pdf_selected_content(inv, object) {
+                            inv.nonselected_flate_streams =
+                                inv.nonselected_flate_streams + 1
+                            if length > SOUNIO_INFLATE_INPUT_CAPACITY {
+                                inv.oversized_nonselected_flate_streams =
+                                    inv.oversized_nonselected_flate_streams + 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        object = object + 1
+    }
+}
+
+pub fn sounio_pdf_flate_import(path: string) -> SounioPdfFlateInventory
+with IO, Mut, Panic, Div {
+    var inv = pdf_inventory_empty()
+    let size = file_size(path)
+    inv.total_bytes = size
+    if size <= 0 { inv.error = SOUNIO_PDF_ERR_FILE; return inv }
+    if size != SOUNIO_PDF_EXPECTED_BYTES || size > SOUNIO_PDF_FILE_CAPACITY {
+        inv.error = SOUNIO_PDF_ERR_LENGTH
+        return inv
+    }
+    let raw = read_file(path)
+    var word: i64 = 0
+    let words_used = (size + 7) / 8
+    while word < words_used {
+        SOUNIO_PDF_FILE_WORDS[word as usize] = 0
+        word = word + 1
+    }
+    var byte_pos: i64 = 0
+    while byte_pos < size {
+        var byte = raw[byte_pos as usize] as i64
+        if byte < 0 { byte = byte + 256 }
+        let word_at = byte_pos / 8
+        let shift = (byte_pos % 8) * 8
+        SOUNIO_PDF_FILE_WORDS[word_at as usize] =
+            SOUNIO_PDF_FILE_WORDS[word_at as usize] | (byte << shift)
+        byte_pos = byte_pos + 1
+    }
+    let digest = pdf_hash_file(size)
+    inv.digest_match = pdf_digest_matches(&digest)
+    if !inv.digest_match { inv.error = SOUNIO_PDF_ERR_HASH; return inv }
+    let envelope_error = pdf_validate_envelope(size, &!inv)
+    if envelope_error != SOUNIO_PDF_OK {
+        inv.error = envelope_error
+        return inv
+    }
+
+    var xref = pdf_xref_empty()
+    let (xref_error, root_object, root_generation, trailer_start, trailer_end) =
+        pdf_parse_xref(size, inv.xref_offset, &!xref)
+    if xref_error != SOUNIO_PDF_OK {
+        inv.error = xref_error
+        return inv
+    }
+    inv.xref_objects = xref.in_use
+    inv.declared_objects = xref.declared_size
+    inv.root_object = root_object
+    inv.root_generation = root_generation
+    if trailer_start <= 0 || trailer_end <= trailer_start {
+        inv.error = SOUNIO_PDF_ERR_TRAILER
+        return inv
+    }
+
+    let (catalog_error, catalog_start, catalog_end) =
+        pdf_object_dictionary(size, &xref, root_object, root_generation)
+    if catalog_error != SOUNIO_PDF_OK {
+        inv.error = SOUNIO_PDF_ERR_CATALOG
+        return inv
+    }
+    if !pdf_plain_object_ends(size, catalog_end) {
+        inv.error = SOUNIO_PDF_ERR_CATALOG
+        return inv
+    }
+    let (type_pos, type_last, type_count) =
+        pdf_find_key(catalog_start, catalog_end, "Type")
+    let (pages_pos, pages_last, pages_count) =
+        pdf_find_key(catalog_start, catalog_end, "Pages")
+    let (pages_ok, pages_object, pages_generation, pages_after) =
+        pdf_parse_reference(catalog_end, pages_pos)
+    if type_count != 1 ||
+        !pdf_direct_name_is(catalog_end, type_pos, "Catalog") ||
+        pages_count != 1 || pages_ok != 1 || pages_after <= pages_pos ||
+        !pdf_value_ended(catalog_end, pages_after) {
+        inv.error = SOUNIO_PDF_ERR_CATALOG
+        return inv
+    }
+    inv.pages_root_object = pages_object
+    inv.pages_root_generation = pages_generation
+    let tree_error = pdf_walk_pages(
+        size, &xref, pages_object, pages_generation, &!inv)
+    if tree_error != SOUNIO_PDF_OK {
+        inv.error = tree_error
+        return inv
+    }
+    let content_error = pdf_decode_selected_contents(size, &xref, &!inv)
+    if content_error != SOUNIO_PDF_OK {
+        inv.error = content_error
+        return inv
+    }
+    pdf_census_flate_streams(size, &xref, &!inv)
+    inv.error = SOUNIO_PDF_OK
+    inv
+}
+
+pub fn sounio_pdf_expected_inventory(
+    inv: &SounioPdfFlateInventory,
+) -> bool with Mut, Panic {
+    if inv.error != SOUNIO_PDF_OK || !inv.digest_match ||
+        !inv.header_match || !inv.eof_match ||
+        inv.total_bytes != 3041713 || inv.xref_offset != 2924864 ||
+        inv.xref_objects != 5833 || inv.declared_objects != 5834 ||
+        inv.root_object != 5525 || inv.root_generation != 0 ||
+        inv.pages_root_object != 5524 || inv.pages_root_generation != 0 ||
+        inv.page_tree_nodes != 4 || inv.root_declared_pages != 18 ||
+        inv.pages != 18 || inv.content_streams != 18 ||
+        inv.direct_flate_streams != 33 ||
+        inv.redundant_filter_entries != 18 ||
+        inv.omitted_stream_endobj != 18 ||
+        inv.nonselected_flate_streams != 15 ||
+        inv.oversized_nonselected_flate_streams != 5 ||
+        inv.largest_direct_flate_length != 446335 ||
+        inv.selected_compressed_bytes != 198152 ||
+        inv.selected_decoded_bytes != 1095453 ||
+        inv.inflate_blocks != 18 || inv.inflate_stored_blocks != 0 ||
+        inv.inflate_fixed_blocks != 0 || inv.inflate_dynamic_blocks != 18 ||
+        inv.inflate_literals != 22723 || inv.inflate_copies != 80561 ||
+        inv.max_distance != 32505 {
+        return false
+    }
+    let pages: [i64; 18] = [
+        1, 10, 18, 26, 29, 45, 97, 103, 106,
+        110, 126, 130, 133, 136, 139, 174, 183, 227
+    ]
+    let contents: [i64; 18] = [
+        4, 12, 20, 28, 31, 47, 99, 105, 109,
+        112, 128, 132, 135, 138, 141, 176, 186, 229
+    ]
+    let compressed: [i64; 18] = [
+        362, 4941, 11821, 11266, 12700, 13640, 16473, 15422, 15398,
+        8466, 11784, 11371, 9558, 12769, 14241, 10114, 14111, 3715
+    ]
+    let decoded: [i64; 18] = [
+        714, 22427, 65628, 66554, 70511, 66988, 98111, 93168, 93084,
+        36043, 64197, 69278, 56271, 75827, 72566, 46413, 82927, 14746
+    ]
+    var i: i64 = 0
+    while i < 18 {
+        if inv.page_objects[i as usize] != pages[i as usize] ||
+            inv.content_objects[i as usize] != contents[i as usize] ||
+            inv.content_generations[i as usize] != 0 ||
+            inv.compressed_lengths[i as usize] != compressed[i as usize] ||
+            inv.decoded_lengths[i as usize] != decoded[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    let aggregate: [i64; 8] = [
+        0x22954f01, 0x4433b91a, 0xeded376f, 0x74d023ff,
+        0xcaa35ff0, 0x8f81fd1a, 0x0c02e61c, 0xdadac526
+    ]
+    i = 0
+    while i < 8 {
+        if inv.aggregate_digest_words[i as usize] != aggregate[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+pub fn sounio_pdf_loaded_byte(
+    inv: &SounioPdfFlateInventory,
+    index: i64,
+) -> i64 with Panic, Div {
+    if inv.error != SOUNIO_PDF_OK || !inv.digest_match ||
+        inv.total_bytes != SOUNIO_PDF_EXPECTED_BYTES ||
+        index < 0 || index >= inv.total_bytes {
+        return -1
+    }
+    pdf_byte(index)
+}
+
+pub fn sounio_pdf_object_dictionary_slice(
+    inv: &SounioPdfFlateInventory,
+    object: i64,
+    generation: i64,
+) -> SounioPdfObjectSlice with Mut, Panic, Div {
+    var slice = pdf_object_slice_empty()
+    slice.object = object
+    slice.generation = generation
+    if inv.error != SOUNIO_PDF_OK || !inv.digest_match ||
+        object < 0 || object >= SOUNIO_PDF_OBJECT_CAPACITY {
+        return slice
+    }
+    var xref = pdf_xref_empty()
+    let (xref_error, root_object, root_generation, trailer_start, trailer_end) =
+        pdf_parse_xref(inv.total_bytes, inv.xref_offset, &!xref)
+    if xref_error != SOUNIO_PDF_OK || trailer_start <= 0 ||
+        trailer_end <= trailer_start || root_object != inv.root_object ||
+        root_generation != inv.root_generation ||
+        xref.declared_size != inv.declared_objects ||
+        xref.in_use != inv.xref_objects {
+        slice.error = SOUNIO_PDF_ERR_XREF
+        return slice
+    }
+    let (dict_error, dict_start, dict_end) =
+        pdf_object_dictionary(inv.total_bytes, &xref, object, generation)
+    if dict_error != SOUNIO_PDF_OK {
+        slice.error = dict_error
+        return slice
+    }
+    slice.dictionary_start = dict_start
+    slice.dictionary_end = dict_end
+    slice.error = SOUNIO_PDF_OK
+    slice
+}
+
+pub fn sounio_pdf_decode_flate_object(
+    inv: &SounioPdfFlateInventory,
+    object: i64,
+    generation: i64,
+    result: &!SounioInflateResult,
+) -> i64 with Mut, Panic, Div {
+    if inv.error != SOUNIO_PDF_OK || !inv.digest_match ||
+        object < 0 || object >= SOUNIO_PDF_OBJECT_CAPACITY {
+        return SOUNIO_PDF_ERR_OBJECT
+    }
+    var xref = pdf_xref_empty()
+    let (xref_error, root_object, root_generation, trailer_start, trailer_end) =
+        pdf_parse_xref(inv.total_bytes, inv.xref_offset, &!xref)
+    if xref_error != SOUNIO_PDF_OK || trailer_start <= 0 ||
+        trailer_end <= trailer_start || root_object != inv.root_object ||
+        root_generation != inv.root_generation ||
+        xref.declared_size != inv.declared_objects ||
+        xref.in_use != inv.xref_objects {
+        return SOUNIO_PDF_ERR_XREF
+    }
+    let (dict_error, dict_start, dict_end) =
+        pdf_object_dictionary(inv.total_bytes, &xref, object, generation)
+    if dict_error != SOUNIO_PDF_OK { return dict_error }
+    let (filter_pos, filter_last, filter_count) =
+        pdf_find_key(dict_start, dict_end, "Filter")
+    if !pdf_filter_shape_admitted(
+        filter_count,
+        pdf_direct_name_is(dict_end, filter_pos, "FlateDecode"),
+        pdf_direct_name_is(dict_end, filter_last, "FlateDecode")) {
+        return SOUNIO_PDF_ERR_FILTER
+    }
+    let (length_pos, length_last, length_count) =
+        pdf_find_key(dict_start, dict_end, "Length")
+    let (length_ok, length, length_after) =
+        pdf_parse_direct_uint(dict_end, length_pos)
+    if length_count != 1 || length_ok != 1 || length_after <= length_pos {
+        return SOUNIO_PDF_ERR_STREAM
+    }
+    let length_error = pdf_content_length_error(length)
+    if length_error != SOUNIO_PDF_OK { return length_error }
+    let (payload_start, payload_end, omitted_endobj) =
+        pdf_stream_payload(inv.total_bytes, &xref, dict_end, length)
+    if payload_start <= 0 || payload_end - payload_start != length ||
+        omitted_endobj < 0 {
+        return SOUNIO_PDF_ERR_STREAM
+    }
+    var input = pdf_inflate_input_empty()
+    var i: i64 = 0
+    while i < length {
+        input.bytes[i as usize] = pdf_byte(payload_start + i)
+        i = i + 1
+    }
+    sounio_inflate_zlib(&input, length, result)
+    if result.error != SOUNIO_INFLATE_OK {
+        return SOUNIO_PDF_ERR_INFLATE_BASE + result.error
+    }
+    SOUNIO_PDF_OK
+}
+
+pub fn sounio_pdf_negative_digest() -> bool with Mut, Panic, Div {
+    let saved = SOUNIO_PDF_FILE_WORDS[0]
+    SOUNIO_PDF_FILE_WORDS[0] = saved ^ 1
+    let digest = pdf_hash_file(SOUNIO_PDF_EXPECTED_BYTES)
+    SOUNIO_PDF_FILE_WORDS[0] = saved
+    !pdf_digest_matches(&digest)
+}
+
+pub fn sounio_pdf_negative_header() -> bool with Mut, Panic, Div {
+    let saved = SOUNIO_PDF_FILE_WORDS[0]
+    SOUNIO_PDF_FILE_WORDS[0] = saved ^ 1
+    var inv = pdf_inventory_empty()
+    let error = pdf_validate_envelope(16, &!inv)
+    SOUNIO_PDF_FILE_WORDS[0] = saved
+    error == SOUNIO_PDF_ERR_HEADER
+}
+
+pub fn sounio_pdf_negative_duplicate_xref() -> bool with Mut, Panic {
+    var xref = pdf_xref_empty()
+    let first = pdf_xref_mark(&!xref, 7, 1, 0, 2, 10)
+    let second = pdf_xref_mark(&!xref, 7, 2, 0, 2, 10)
+    first == SOUNIO_PDF_OK && second == SOUNIO_PDF_ERR_DUPLICATE_OBJECT
+}
+
+pub fn sounio_pdf_negative_page_cycle() -> bool with Mut, Panic {
+    var visited: [i64; 6000] = [0; 6000]
+    let first = pdf_mark_page_visit(&!visited, 3)
+    let second = pdf_mark_page_visit(&!visited, 3)
+    first == SOUNIO_PDF_OK && second == SOUNIO_PDF_ERR_PAGE_CYCLE
+}
+
+pub fn sounio_pdf_negative_page_count() -> bool {
+    !pdf_page_counts_match(8, 7)
+}
+
+pub fn sounio_pdf_negative_filter_conflict() -> bool {
+    !pdf_filter_shape_admitted(2, true, false)
+}
+
+pub fn sounio_pdf_negative_stream_capacity() -> bool {
+    pdf_content_length_error(SOUNIO_INFLATE_INPUT_CAPACITY + 1) ==
+        SOUNIO_PDF_ERR_CONTENT_CAPACITY
+}
+
+pub fn sounio_pdf_negative_inflate_propagation() -> bool
+with Mut, Panic, Div {
+    var input = pdf_inflate_input_empty()
+    let bytes: [i64; 13] = [
+        120, 156, 203, 72, 205, 201, 201, 7, 0, 6, 44, 2, 20
+    ]
+    var i: i64 = 0
+    while i < 13 {
+        input.bytes[i as usize] = bytes[i as usize]
+        i = i + 1
+    }
+    var result = pdf_inflate_result_empty()
+    sounio_inflate_zlib(&input, 13, &!result)
+    let mapped = SOUNIO_PDF_ERR_INFLATE_BASE + result.error
+    result.error == SOUNIO_INFLATE_ERR_ADLER32 &&
+        mapped == SOUNIO_PDF_ERR_INFLATE_BASE + SOUNIO_INFLATE_ERR_ADLER32
+}

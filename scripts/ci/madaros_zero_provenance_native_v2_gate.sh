@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Madaros-native compact zero-provenance smoke (sedenion + local f64 kinds).
-# Does NOT claim eisa::core_v2 combined import — that stays failclosed.
+# Combined eisa::core_v2 import is covered by madaros_zero_provenance_failclosed_gate.sh.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"

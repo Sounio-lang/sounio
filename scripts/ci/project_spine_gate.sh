@@ -4,6 +4,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 cd "$ROOT_DIR"
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
@@ -65,6 +67,11 @@ if [[ "$NEG_RC" -eq 0 ]]; then
   cat "$NEG_LOG" >&2
   fail "missing entry project unexpectedly passed"
 fi
+# rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+sounio_expect_failed_exit "$NEG_RC" "$NEG_LOG" || {
+  cat "$NEG_LOG" >&2
+  fail "missing entry project: not a clean refusal: $(sounio_refusal_reason)"
+}
 if ! grep -q "project entry not found:" "$NEG_LOG"; then
   cat "$NEG_LOG" >&2
   fail "missing entry project did not emit a project-entry diagnostic"

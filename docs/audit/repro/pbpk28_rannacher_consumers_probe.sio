@@ -1,0 +1,311 @@
+// docs/audit/repro/pbpk28_rannacher_consumers_probe.sio
+//
+// Before/after mass balance for every bolus-IV / depot consumer of
+// `pbpk28_full_cn_step`, at each consumer's production dt.
+//
+//   SHIPPED  — pbpk28_full_cn_step (CN + floors), trapezoidal AUC as the
+//              consumers compute it; eliminated mass booked as CL·AUC_trap
+//              (CN's own quadrature), so the residual is the floor-injected mass.
+//   RAN1/RAN2 — theta_pbpk28 Rannacher stepping, 1 or 2 start-up steps after
+//              the dose, ledger AUC (method quadrature), no floors.
+//   REF      — Rannacher-2 at dt = 0.001 h.
+//
+// Residual = M(T) + eliminated − administered − M(0)   (mg)
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::theta_pbpk28::*
+
+fn pr_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// x as m·10^e with 1 ≤ |m| < 10.
+fn pr_sci(x: f64) with IO, Mut, Div {
+    if x == 0.0 {
+        print("0")
+        return
+    }
+    var m = x
+    var e: i32 = 0
+    while pr_abs(m) >= 10.0 {
+        m = m / 10.0
+        e = e + 1
+    }
+    while pr_abs(m) < 1.0 {
+        m = m * 10.0
+        e = e - 1
+    }
+    print(m)
+    print("e")
+    print(e)
+}
+
+fn pr_min_state(s: PBPKState28) -> f64 with Mut {
+    var m = s.cv[0]
+    var i: i32 = 1
+    while i < 14 {
+        if s.cv[i] < m { m = s.cv[i] }
+        if s.ct[i] < m { m = s.ct[i] }
+        i = i + 1
+    }
+    return m
+}
+
+// ─── Closed-system repro: venlafaxine parent, CL = 0, 50 mg into blood ──────
+fn closed_system(dt: f64, nsteps: i32) with IO, Mut, Div, Panic {
+    var p = pbpk28_params_venlafaxine_parent()
+    p.cl_central = 0.0
+    var s_cn = pbpk28_state_zero()
+    s_cn.cv[0] = 50.0 / p.v_ref[0]
+    var s_off = s_cn
+    var s_be = s_cn
+    var s_r1 = s_cn
+    var s_r2 = s_cn
+    let m0 = pbpk28_total_mass(s_cn, p)
+    var l_off = pbpk28_ledger_zero()
+    var l_be = pbpk28_ledger_zero()
+    var l_r1 = pbpk28_ledger_zero()
+    var l_r2 = pbpk28_ledger_zero()
+    print("CLOSED|dt=")
+    print(dt)
+    print("|m0=")
+    println(m0)
+    var k: i32 = 0
+    while k < nsteps {
+        s_cn = pbpk28_full_cn_step(s_cn, p, 0.0, dt)
+        pbpk28_theta_step_mut(&!s_off, p, 0.0, dt, 0.5, &!l_off)
+        pbpk28_theta_step_mut(&!s_be, p, 0.0, dt, 1.0, &!l_be)
+        pbpk28_rannacher_step_mut(&!s_r1, p, 0.0, dt, k < 1, &!l_r1)
+        pbpk28_rannacher_step_mut(&!s_r2, p, 0.0, dt, k < 2, &!l_r2)
+        print("CLOSED_STEP|k=")
+        print(k + 1)
+        print("|M_shipped=")
+        print(pbpk28_total_mass(s_cn, p))
+        print("|M_cn_nofloor=")
+        print(pbpk28_total_mass(s_off, p))
+        print("|min_cn_nofloor=")
+        pr_sci(pr_min_state(s_off))
+        print("|M_be=")
+        print(pbpk28_total_mass(s_be, p))
+        print("|min_be=")
+        pr_sci(pr_min_state(s_be))
+        print("|M_ran1=")
+        print(pbpk28_total_mass(s_r1, p))
+        print("|min_ran1=")
+        pr_sci(pr_min_state(s_r1))
+        print("|M_ran2=")
+        print(pbpk28_total_mass(s_r2, p))
+        print("|min_ran2=")
+        pr_sci(pr_min_state(s_r2))
+        print("|res_ran2=")
+        pr_sci(pbpk28_ledger_residual(l_r2, s_r2, p, m0))
+        println("")
+        k = k + 1
+    }
+}
+
+// ─── Bolus IV (ep28 / Hessian / cumulants / MC / sweep / Sobol shape) ────────
+// Shipped consumer loop: CN + floors, trapezoid AUC, dt_use clipping at t_end.
+fn bolus_shipped(tag: string, p: PBPKParams28, dose: f64, dt: f64, t_end: f64) with IO, Mut, Div, Panic {
+    var st = pbpk28_state_zero()
+    st.cv[0] = dose / p.v_ref[0]
+    let m0 = pbpk28_total_mass(st, p)
+    var t = 0.0
+    var auc_b = 0.0
+    var auc_l = 0.0
+    var auc_k = 0.0
+    var cb_prev = st.cv[0]
+    var cl_prev = 0.0
+    var ck_prev = 0.0
+    var brain24 = 0.0
+    var got24 = false
+    var cmin = 0.0
+    while t < t_end {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        st = pbpk28_full_cn_step(st, p, 0.0, dt_use)
+        let cb = st.cv[0]
+        let cl = pbpk28_organ_average(st, p, 1)
+        let ck = pbpk28_organ_average(st, p, 2)
+        auc_b = auc_b + 0.5 * (cb_prev + cb) * dt_use
+        auc_l = auc_l + 0.5 * (cl_prev + cl) * dt_use
+        auc_k = auc_k + 0.5 * (ck_prev + ck) * dt_use
+        cb_prev = cb
+        cl_prev = cl
+        ck_prev = ck
+        t = t + dt_use
+        if got24 == false && t >= 24.0 {
+            brain24 = pbpk28_organ_average(st, p, 3)
+            got24 = true
+        }
+    }
+    let res = pbpk28_total_mass(st, p) + p.cl_central * auc_b - m0
+    print("BOLUS|")
+    print(tag)
+    print("|method=SHIPPED|dt=")
+    print(dt)
+    print("|auc_blood=")
+    print(auc_b)
+    print("|auc_liver=")
+    print(auc_l)
+    print("|auc_kidney=")
+    print(auc_k)
+    print("|c_brain24=")
+    pr_sci(brain24)
+    print("|mass_residual_mg=")
+    pr_sci(res)
+    print("|rel_residual=")
+    pr_sci(res / dose)
+    println("")
+}
+
+fn bolus_rannacher(tag: string, method: string, p: PBPKParams28, dose: f64, dt: f64, t_end: f64, nstart: i32) with IO, Mut, Div, Panic {
+    var st = pbpk28_state_zero()
+    st.cv[0] = dose / p.v_ref[0]
+    let m0 = pbpk28_total_mass(st, p)
+    var led = pbpk28_ledger_zero()
+    var t = 0.0
+    var brain24 = 0.0
+    var got24 = false
+    var k: i32 = 0
+    while t < t_end {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        pbpk28_rannacher_step_mut(&!st, p, 0.0, dt_use, k < nstart, &!led)
+        t = t + dt_use
+        k = k + 1
+        if got24 == false && t >= 24.0 {
+            brain24 = pbpk28_organ_average(st, p, 3)
+            got24 = true
+        }
+    }
+    let res = pbpk28_ledger_residual(led, st, p, m0)
+    print("BOLUS|")
+    print(tag)
+    print("|method=")
+    print(method)
+    print("|dt=")
+    print(dt)
+    print("|auc_blood=")
+    print(led.auc[0])
+    print("|auc_liver=")
+    print(led.auc[1])
+    print("|auc_kidney=")
+    print(led.auc[2])
+    print("|c_brain24=")
+    pr_sci(brain24)
+    print("|mass_residual_mg=")
+    pr_sci(res)
+    print("|rel_residual=")
+    pr_sci(res / dose)
+    print("|min_conc=")
+    pr_sci(led.min_conc)
+    print("|neg_mass_mg=")
+    pr_sci(led.neg_mass)
+    println("")
+}
+
+fn bolus_all(tag: string, p: PBPKParams28, dose: f64, dt: f64) with IO, Mut, Div, Panic {
+    bolus_shipped(tag, p, dose, dt, 168.0)
+    bolus_rannacher(tag, "RAN1", p, dose, dt, 168.0, 1)
+    bolus_rannacher(tag, "RAN2", p, dose, dt, 168.0, 2)
+}
+
+// ─── First-order depot (clinical validations: oral rapamycin, SC semaglutide) ─
+// rel = F·ka·A_depot (left point), A_depot -= ka·A_depot·dt, as the consumers do.
+fn depot_shipped(tag: string, p: PBPKParams28, dose: f64, ka: f64, f_bio: f64, dt: f64, t_end: f64) with IO, Mut, Div, Panic {
+    var st = pbpk28_state_zero()
+    var a = dose
+    var admin = 0.0
+    var auc_b = 0.0
+    var cb_prev = 0.0
+    var t = 0.0
+    while t < t_end {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        let rel = f_bio * ka * a
+        st = pbpk28_full_cn_step(st, p, rel, dt_use)
+        admin = admin + rel * dt_use
+        a = a - ka * a * dt_use
+        if a < 0.0 { a = 0.0 }
+        auc_b = auc_b + 0.5 * (cb_prev + st.cv[0]) * dt_use
+        cb_prev = st.cv[0]
+        t = t + dt_use
+    }
+    let res = pbpk28_total_mass(st, p) + p.cl_central * auc_b - admin
+    print("DEPOT|")
+    print(tag)
+    print("|method=SHIPPED|dt=")
+    print(dt)
+    print("|cb_end=")
+    pr_sci(st.cv[0])
+    print("|auc_blood=")
+    print(auc_b)
+    print("|administered=")
+    print(admin)
+    print("|mass_residual_mg=")
+    pr_sci(res)
+    print("|rel_residual=")
+    pr_sci(res / admin)
+    println("")
+}
+
+fn depot_rannacher(tag: string, method: string, p: PBPKParams28, dose: f64, ka: f64, f_bio: f64, dt: f64, t_end: f64, nstart: i32) with IO, Mut, Div, Panic {
+    var st = pbpk28_state_zero()
+    var led = pbpk28_ledger_zero()
+    var a = dose
+    var t = 0.0
+    var k: i32 = 0
+    while t < t_end {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        let rel = f_bio * ka * a
+        pbpk28_rannacher_step_mut(&!st, p, rel, dt_use, k < nstart, &!led)
+        a = a - ka * a * dt_use
+        if a < 0.0 { a = 0.0 }
+        t = t + dt_use
+        k = k + 1
+    }
+    let res = pbpk28_ledger_residual(led, st, p, 0.0)
+    print("DEPOT|")
+    print(tag)
+    print("|method=")
+    print(method)
+    print("|dt=")
+    print(dt)
+    print("|cb_end=")
+    pr_sci(st.cv[0])
+    print("|auc_blood=")
+    print(led.auc[0])
+    print("|administered=")
+    print(led.administered)
+    print("|mass_residual_mg=")
+    pr_sci(res)
+    print("|rel_residual=")
+    pr_sci(res / led.administered)
+    print("|min_conc=")
+    pr_sci(led.min_conc)
+    print("|neg_mass_mg=")
+    pr_sci(led.neg_mass)
+    println("")
+}
+
+fn depot_all(tag: string, p: PBPKParams28, dose: f64, ka: f64, f_bio: f64, dt: f64, t_end: f64) with IO, Mut, Div, Panic {
+    depot_shipped(tag, p, dose, ka, f_bio, dt, t_end)
+    depot_rannacher(tag, "RAN1", p, dose, ka, f_bio, dt, t_end, 1)
+    depot_rannacher(tag, "RAN2", p, dose, ka, f_bio, dt, t_end, 2)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    closed_system(0.5, 8)
+
+    let rapa = pbpk28_params_rapamycin()
+    let sema = pbpk28_params_semaglutide()
+    bolus_all("rapamycin_ep28_gum", rapa, 5.0, 0.05)
+    bolus_all("rapamycin_hessian_cumulants", rapa, 5.0, 0.1)
+    bolus_all("rapamycin_mc_sweep_sobol", rapa, 5.0, 0.5)
+    bolus_all("semaglutide_sobol", sema, 1.0, 0.5)
+    bolus_rannacher("rapamycin_ref", "RAN2", rapa, 5.0, 0.001, 168.0, 2)
+    bolus_rannacher("semaglutide_ref", "RAN2", sema, 1.0, 0.001, 168.0, 2)
+
+    depot_all("rapamycin_oral_clinical", rapa, 2.0, 0.5, 0.15, 0.05, 48.0)
+    depot_all("semaglutide_sc_clinical", sema, 1.0, 0.01155, 0.89, 0.05, 168.0)
+    depot_rannacher("rapamycin_oral_ref", "RAN2", rapa, 2.0, 0.5, 0.15, 0.001, 48.0, 2)
+    println("PROBE_DONE")
+    0
+}

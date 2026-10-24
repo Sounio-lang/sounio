@@ -19,11 +19,11 @@ fn native_byte_u8(b: i8) -> i64 {
     if x < 0 { x + 256 } else { x }
 }
 
-fn native_code_eq(a: CodeBuffer, b: CodeBuffer) -> bool {
+fn native_code_eq(a: CodeBuffer, b: CodeBuffer) -> bool with Mut, Panic, Div {
     if a.len != b.len { return false }
     var i = 0
     while i < a.len {
-        if native_byte_u8(a.bytes[i as usize]) != native_byte_u8(b.bytes[i as usize]) {
+        if native_byte_u8(code_buffer_read_i8(a, i)) != native_byte_u8(code_buffer_read_i8(b, i)) {
             return false
         }
         i = i + 1
@@ -40,12 +40,12 @@ fn native_test_emit_exit_bytes() -> bool with Mut, Panic, Div {
 
     // Expected: 48 c7 c0 3c 00 00 00 48 c7 c7 00 00 00 00 0f 05
     if !(buf.len == 16) { return false }
-    if !(native_byte_u8(buf.bytes[0]) == 0x48) { return false }
-    if !(native_byte_u8(buf.bytes[1]) == 0xc7) { return false }
-    if !(native_byte_u8(buf.bytes[2]) == 0xc0) { return false }
-    if !(native_byte_u8(buf.bytes[3]) == 60) { return false }
-    if !(native_byte_u8(buf.bytes[14]) == 0x0f) { return false }
-    if !(native_byte_u8(buf.bytes[15]) == 0x05) { return false }
+    if !(native_byte_u8(code_buffer_read_i8(buf, 0)) == 0x48) { return false }
+    if !(native_byte_u8(code_buffer_read_i8(buf, 1)) == 0xc7) { return false }
+    if !(native_byte_u8(code_buffer_read_i8(buf, 2)) == 0xc0) { return false }
+    if !(native_byte_u8(code_buffer_read_i8(buf, 3)) == 60) { return false }
+    if !(native_byte_u8(code_buffer_read_i8(buf, 14)) == 0x0f) { return false }
+    if !(native_byte_u8(code_buffer_read_i8(buf, 15)) == 0x05) { return false }
     true
 }
 
@@ -497,40 +497,68 @@ fn native_test_compile_strategy_propagates_to_codegen() -> i64 with Mut, Panic, 
 // ============================================================================
 // T14: strict FP modes keep source order; aggressive may commute float add/mul
 // ============================================================================
+fn native_snap_code(buf: CodeBuffer) -> [i64; 40] with Mut, Panic, Div {
+    var out: [i64; 40] = [-1; 40]
+    var i = 0
+    while i < buf.len && i < 40 {
+        out[i as usize] = code_buffer_read_byte(buf, i)
+        i = i + 1
+    }
+    out
+}
+
+fn native_snap_eq(a: [i64; 40], b: [i64; 40], len: i64) -> bool with Mut, Panic {
+    if len < 0 || len > 40 { return false }
+    var i = 0
+    while i < len {
+        if a[i as usize] != b[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
 fn native_test_float_strategy_changes_lowering() -> i64 with Mut, Panic, Div {
     let instr = ir_binop(2, 0, BinaryOp::OpAdd, 1)
-
     var standard = compiler_new()
     standard.current_strategy = IR_STRATEGY_STANDARD
-    standard.is_float_reg[0] = 1
-    standard.is_float_reg[1] = 1
+    NC_IS_FLOAT_REG[0] = 1
+    NC_IS_FLOAT_REG[1] = 1
     lower_ir_binop(&!standard, instr)
+    let std_len = standard.code.len
+    let std_f2 = NC_IS_FLOAT_REG[2]
+    let std_bytes = native_snap_code(standard.code)
 
     var precision = compiler_new()
     precision.current_strategy = IR_STRATEGY_PRECISION_PRESERVING
-    precision.is_float_reg[0] = 1
-    precision.is_float_reg[1] = 1
+    NC_IS_FLOAT_REG[0] = 1
+    NC_IS_FLOAT_REG[1] = 1
     lower_ir_binop(&!precision, instr)
+    let pre_len = precision.code.len
+    let pre_f2 = NC_IS_FLOAT_REG[2]
+    let pre_bytes = native_snap_code(precision.code)
 
     var aggressive = compiler_new()
     aggressive.current_strategy = IR_STRATEGY_AGGRESSIVE
-    aggressive.is_float_reg[0] = 1
-    aggressive.is_float_reg[1] = 1
+    NC_IS_FLOAT_REG[0] = 1
+    NC_IS_FLOAT_REG[1] = 1
     lower_ir_binop(&!aggressive, instr)
+    let agg_len = aggressive.code.len
+    let agg_f2 = NC_IS_FLOAT_REG[2]
+    let agg_bytes = native_snap_code(aggressive.code)
 
-    if standard.is_float_reg[2] != 1 { return 1 }
-    if precision.is_float_reg[2] != 1 { return 2 }
-    if aggressive.is_float_reg[2] != 1 { return 3 }
-    if !native_code_eq(standard.code, precision.code) { return 4 }
-    if native_code_eq(standard.code, aggressive.code) { return 5 }
-    if standard.code.len < 19 || aggressive.code.len < 19 { return 6 }
-
-    // strict/standard path: first load uses src1 (rbp-8), second load uses src2 (rbp-16)
-    if native_byte_u8(standard.code.bytes[3]) != 0xf8 { return 7 }
-    if native_byte_u8(standard.code.bytes[15]) != 0xf0 { return 8 }
-    // aggressive path: commuted add loads src2 first, then src1
-    if native_byte_u8(aggressive.code.bytes[3]) != 0xf0 { return 9 }
-    if native_byte_u8(aggressive.code.bytes[15]) != 0xf8 { return 10 }
+    if std_f2 != 1 { return 1 }
+    if pre_f2 != 1 { return 2 }
+    if agg_f2 != 1 { return 3 }
+    if std_len != pre_len || !native_snap_eq(std_bytes, pre_bytes, std_len) { return 4 }
+    if std_len == agg_len && native_snap_eq(std_bytes, agg_bytes, std_len) { return 5 }
+    if std_len < 19 || agg_len < 19 || std_len > 40 { return 6 }
+    // mov rax, [rbp-8] is 48 8B 45 F8; [rbp-16] is 48 8B 45 F0.
+    // Standard loads src1 then src2. Aggressive commutes the float add.
+    // Second disp is byte 12; byte 15 is the 0F of movq xmm, not the disp.
+    if std_bytes[3] != 0xf8 { return 7 }
+    if std_bytes[12] != 0xf0 { return 8 }
+    if agg_bytes[3] != 0xf0 { return 9 }
+    if agg_bytes[12] != 0xf8 { return 10 }
     0
 }
 
@@ -540,44 +568,26 @@ fn native_test_float_strategy_changes_lowering() -> i64 with Mut, Panic, Div {
 fn run_native_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
     let total: i64 = 15
-
     print("=== Native Backend Tests ===\n")
-
-    if native_test_emit_exit_bytes() { passed = passed + 1; print("  T01 OK (emit_exit bytes)\n") } else { print("  FAIL: T01 emit_exit bytes\n") }
-
-    if native_test_compile_simple() == 0 { passed = passed + 1; print("  T02 OK (simple function -> ELF)\n") } else { print("  FAIL: T02 compile simple function\n") }
-
-    if native_test_compile_arithmetic() == 0 { passed = passed + 1; print("  T03 OK (arithmetic -> ELF)\n") } else { print("  FAIL: T03 compile with arithmetic\n") }
-
-    if native_test_compile_call() == 0 { passed = passed + 1; print("  T04 OK (function calls -> ELF)\n") } else { print("  FAIL: T04 compile with function call\n") }
-
-    if native_test_compile_struct() == 0 { passed = passed + 1; print("  T05 OK (struct alloc+field -> ELF)\n") } else { print("  FAIL: T05 compile with struct\n") }
-
-    if native_test_compile_array() == 0 { passed = passed + 1; print("  T06 OK (array alloc+index -> ELF)\n") } else { print("  FAIL: T06 compile with array\n") }
-
-    if native_test_compile_get_arg_count() == 0 { passed = passed + 1; print("  T07 OK (get_arg_count -> ELF)\n") } else { print("  FAIL: T07 compile with get_arg_count\n") }
-
-    if native_test_compile_str_len() == 0 { passed = passed + 1; print("  T08 OK (str_len -> ELF)\n") } else { print("  FAIL: T08 compile with str_len\n") }
-
-    if native_test_compile_file_size() == 0 { passed = passed + 1; print("  T09 OK (file_size -> ELF)\n") } else { print("  FAIL: T09 compile with file_size\n") }
-
-    if native_test_dispatch_explicit_unimplemented() == 0 { passed = passed + 1; print("  T10 OK (explicit target fail-closed)\n") } else { print("  FAIL: T10 explicit target fail-closed\n") }
-
-    if native_test_dispatch_native_auto_resolves() == 0 { passed = passed + 1; print("  T11 OK (native-auto resolves)\n") } else { print("  FAIL: T11 native-auto resolves\n") }
-
-    if native_test_dispatch_matrix_normalization() == 0 { passed = passed + 1; print("  T12 OK (matrix normalization)\n") } else { print("  FAIL: T12 matrix normalization\n") }
-
-    if native_test_compile_strategy_propagates_to_codegen() == 0 { passed = passed + 1; print("  T13 OK (compile strategy reaches codegen)\n") } else { print("  FAIL: T13 compile strategy reaches codegen\n") }
-
-    if native_test_float_strategy_changes_lowering() == 0 { passed = passed + 1; print("  T14 OK (float strategy changes lowering)\n") } else { print("  FAIL: T14 float strategy changes lowering\n") }
-
-    if cgplan_run_tests() == 0 { passed = passed + 1; print("  T15 OK (codegen plan multiblock)\n") } else { print("  FAIL: T15 codegen plan multiblock\n") }
-
+    if native_test_emit_exit_bytes() { passed = passed + 1; print("  T01 OK (emit_exit bytes)\n") } else { print("  FAIL: T01\n") }
+    if native_test_compile_simple() == 0 { passed = passed + 1; print("  T02 OK (simple function -> ELF)\n") } else { print("  FAIL: T02\n") }
+    if native_test_compile_arithmetic() == 0 { passed = passed + 1; print("  T03 OK (arithmetic -> ELF)\n") } else { print("  FAIL: T03\n") }
+    if native_test_compile_call() == 0 { passed = passed + 1; print("  T04 OK (function calls -> ELF)\n") } else { print("  FAIL: T04\n") }
+    if native_test_compile_struct() == 0 { passed = passed + 1; print("  T05 OK (struct alloc+field -> ELF)\n") } else { print("  FAIL: T05\n") }
+    if native_test_compile_array() == 0 { passed = passed + 1; print("  T06 OK (array alloc+index -> ELF)\n") } else { print("  FAIL: T06\n") }
+    if native_test_compile_get_arg_count() == 0 { passed = passed + 1; print("  T07 OK (get_arg_count -> ELF)\n") } else { print("  FAIL: T07\n") }
+    if native_test_compile_str_len() == 0 { passed = passed + 1; print("  T08 OK (str_len -> ELF)\n") } else { print("  FAIL: T08\n") }
+    if native_test_compile_file_size() == 0 { passed = passed + 1; print("  T09 OK (file_size -> ELF)\n") } else { print("  FAIL: T09\n") }
+    if native_test_dispatch_explicit_unimplemented() == 0 { passed = passed + 1; print("  T10 OK (explicit target fail-closed)\n") } else { print("  FAIL: T10\n") }
+    if native_test_dispatch_native_auto_resolves() == 0 { passed = passed + 1; print("  T11 OK (native-auto resolves)\n") } else { print("  FAIL: T11\n") }
+    if native_test_dispatch_matrix_normalization() == 0 { passed = passed + 1; print("  T12 OK (matrix normalization)\n") } else { print("  FAIL: T12\n") }
+    if native_test_compile_strategy_propagates_to_codegen() == 0 { passed = passed + 1; print("  T13 OK (compile strategy -> codegen)\n") } else { print("  FAIL: T13\n") }
+    if native_test_float_strategy_changes_lowering() == 0 { passed = passed + 1; print("  T14 OK (float strategy changes lowering)\n") } else { print("  FAIL: T14\n") }
+    if cgplan_run_tests() == 0 { passed = passed + 1; print("  T15 OK (codegen plan multiblock)\n") } else { print("  FAIL: T15\n") }
     print("\nNative tests: ")
     print_int(passed)
     print("/")
     print_int(total)
     print(" passed\n")
-
     if passed == total { 0 } else { 1 }
 }

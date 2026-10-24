@@ -1,0 +1,160 @@
+// Incremental integer-only count TSV. Caller supplies byte chunks and row scratch.
+// No filesystem I/O, no IDs/header parser, no Alloc. See DYNAMIC_COUNT_TSV.md.
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
+pub struct DynamicCountTsv {
+ status:i64,samples:i64,max_count:i64,ready:bool,finished:bool,
+ rows:i64,position:i64,error_position:i64,columns:i64,value:i64,
+ has_digits:bool,pending_cr:bool,
+}
+pub struct DynamicCountTsvInfo {
+ pub status:i64,pub samples:i64,pub max_count:i64,pub row_ready:bool,
+ pub finished:bool,pub rows:i64,pub position:i64,pub error_position:i64,
+}
+pub struct DynamicCountTsvFeed {
+ pub status:i64,pub consumed:i64,pub row_ready:bool,pub finished:bool,
+ pub position:i64,pub error_position:i64,
+}
+pub struct DynamicCountMatrixAppend {pub status:i64,pub rows:i64}
+pub fn dynamic_count_tsv_new(samples:i64,max_count:i64)->DynamicCountTsv {
+ DynamicCountTsv{status:if samples<1 || max_count<0 {1} else {0},samples:samples,max_count:max_count,
+ ready:false,finished:false,rows:0,position:0,error_position:0,columns:0,value:0,has_digits:false,pending_cr:false}
+}
+pub fn dynamic_count_tsv_info(s:&DynamicCountTsv)->DynamicCountTsvInfo {
+ DynamicCountTsvInfo{status:s.status,samples:s.samples,max_count:s.max_count,row_ready:s.ready,
+ finished:s.finished,rows:s.rows,position:s.position,error_position:s.error_position}
+}
+pub fn dynamic_count_tsv_feed_slot()->DynamicCountTsvFeed {
+ DynamicCountTsvFeed{status:0,consumed:0,row_ready:false,finished:false,position:0,error_position:0}
+}
+fn dt_write(s:&DynamicCountTsv,out:&!DynamicCountTsvFeed,consumed:i64)->i64 with Mut {
+ out.status=s.status;out.consumed=consumed;out.row_ready=s.ready;out.finished=s.finished
+ out.position=s.position;out.error_position=s.error_position
+ s.status
+}
+fn dt_fail(s:&!DynamicCountTsv,status:i64) with Mut {
+ s.status=status;s.error_position=s.position;s.ready=false
+}
+fn dt_row(s:&DynamicCountTsv,row:&IntegerBuffer)->bool {
+ if integer_buffer_status(row)!=0 {return false}
+ integer_buffer_len(row)==s.samples
+}
+fn dt_field(s:&!DynamicCountTsv,row:&!IntegerBuffer)->bool with Mut {
+ if !s.has_digits {dt_fail(s,3);return false}
+ if s.columns>=s.samples {dt_fail(s,4);return false}
+ integer_buffer_set(row,s.columns,s.value)
+ s.columns=s.columns+1;s.value=0;s.has_digits=false
+ true
+}
+fn dt_complete(s:&!DynamicCountTsv)->bool with Mut {
+ if s.columns!=s.samples {dt_fail(s,4);return false}
+ if s.rows==9223372036854775807 {dt_fail(s,7);return false}
+ s.rows=s.rows+1;s.pending_cr=false;s.ready=true
+ true
+}
+pub fn dynamic_count_tsv_feed_into(s:&!DynamicCountTsv,row:&!IntegerBuffer,
+ bytes:&IntegerBuffer,start:i64,length:i64,out:&!DynamicCountTsvFeed)->i64 with Mut,Div,Panic {
+ if s.status!=0 {return dt_write(s,out,0)}
+ if !dt_row(s,row) {dt_fail(s,1);return dt_write(s,out,0)}
+ if integer_buffer_status(bytes)!=0 {dt_fail(s,1);return dt_write(s,out,0)}
+ let n=integer_buffer_len(bytes)
+ if start<0 || start>n || length<0 {dt_fail(s,2);return dt_write(s,out,0)}
+ // Sequential subtraction guard, never start+length before validation.
+ if length>n-start {dt_fail(s,2);return dt_write(s,out,0)}
+ if s.ready {return dt_write(s,out,0)}
+ if s.finished {
+  if length!=0 {dt_fail(s,6)}
+  return dt_write(s,out,0)
+ }
+ let quotient=s.max_count/10
+ let remainder=s.max_count%10
+ var used:i64=0
+ while used<length {
+  if s.ready {return dt_write(s,out,used)}
+  if s.position==9223372036854775807 {dt_fail(s,7);return dt_write(s,out,used)}
+  let byte=integer_buffer_at(bytes,start+used)
+  if byte<0 || byte>255 {dt_fail(s,3);return dt_write(s,out,used)}
+  if s.pending_cr {
+   if byte!=10 {dt_fail(s,3);return dt_write(s,out,used)}
+   if !dt_complete(s) {return dt_write(s,out,used)}
+  } else {
+   if byte>=48 && byte<=57 {
+    let digit=byte-48
+    if s.value>quotient {dt_fail(s,5);return dt_write(s,out,used)}
+    if s.value==quotient {if digit>remainder {dt_fail(s,5);return dt_write(s,out,used)}}
+    s.value=s.value*10+digit;s.has_digits=true
+   } else if byte==9 {
+    if s.columns>=s.samples-1 {dt_fail(s,4);return dt_write(s,out,used)}
+    if !dt_field(s,row) {return dt_write(s,out,used)}
+   } else if byte==10 || byte==13 {
+    if !dt_field(s,row) {return dt_write(s,out,used)}
+    if s.columns!=s.samples {dt_fail(s,4);return dt_write(s,out,used)}
+    if byte==13 {s.pending_cr=true}
+    else {if !dt_complete(s) {return dt_write(s,out,used)}}
+   } else {dt_fail(s,3);return dt_write(s,out,used)}
+  }
+  used=used+1;s.position=s.position+1
+ }
+ dt_write(s,out,used)
+}
+// Convenience adapter; canonical repeated-chunk callers reuse feed_slot + feed_into.
+pub fn dynamic_count_tsv_feed(s:&!DynamicCountTsv,row:&!IntegerBuffer,
+ bytes:&IntegerBuffer,start:i64,length:i64)->DynamicCountTsvFeed with Mut,Div,Panic {
+ var out=dynamic_count_tsv_feed_slot()
+ dynamic_count_tsv_feed_into(s,row,bytes,start,length,&!out)
+ out
+}
+pub fn dynamic_count_tsv_ack_row(s:&!DynamicCountTsv,row:&!IntegerBuffer)->bool with Mut {
+ if s.status!=0 {return false}
+ if !dt_row(s,row) {dt_fail(s,1);return false}
+ if !s.ready {return false}
+ var i:i64=0
+ while i<s.samples {integer_buffer_set(row,i,0);i=i+1}
+ s.ready=false;s.columns=0;s.value=0;s.has_digits=false
+ true
+}
+pub fn dynamic_count_tsv_finish_into(s:&!DynamicCountTsv,row:&!IntegerBuffer,out:&!DynamicCountTsvFeed)->i64 with Mut {
+ if s.status!=0 {return dt_write(s,out,0)}
+ if !dt_row(s,row) {dt_fail(s,1);return dt_write(s,out,0)}
+ if s.finished {return dt_write(s,out,0)}
+ // A ready row pauses EOF so an unconsumed caller suffix cannot be discarded.
+ if s.ready {return dt_write(s,out,0)}
+ if s.pending_cr {dt_fail(s,3);return dt_write(s,out,0)}
+ if s.has_digits || s.columns!=0 {
+  if !dt_field(s,row) {return dt_write(s,out,0)}
+  if !dt_complete(s) {return dt_write(s,out,0)}
+ }
+ s.finished=true
+ dt_write(s,out,0)
+}
+pub fn dynamic_count_tsv_finish(s:&!DynamicCountTsv,row:&!IntegerBuffer)->DynamicCountTsvFeed with Mut {
+ var out=dynamic_count_tsv_feed_slot()
+ dynamic_count_tsv_finish_into(s,row,&!out)
+ out
+}
+// Packed integer matrix append: no mutation until the entire completed row,
+// requested row offset, count limits and full destination capacity pass.
+pub fn dynamic_count_tsv_append_row(s:&DynamicCountTsv,row:&IntegerBuffer,
+ table:&!IntegerBuffer,rows:i64)->DynamicCountMatrixAppend with Mut,Div,Panic {
+ var out=DynamicCountMatrixAppend{status:6,rows:rows}
+ if s.status!=0 || !s.ready {return out}
+ if !dt_row(s,row) || integer_buffer_status(table)!=0 {out.status=1;return out}
+ if rows<0 {return out}
+ if rows==9223372036854775807 {out.status=7;return out}
+ let capacity=integer_buffer_len(table)/s.samples
+ if rows>=capacity {out.status=8;return out}
+ var i:i64=0
+ while i<s.samples {
+  let value=integer_buffer_at(row,i)
+  if value<0 || value>s.max_count {out.status=5;return out}
+  i=i+1
+ }
+ // rows<floor(table_length/samples) proves both products and all offsets.
+ let offset=rows*s.samples
+ i=0
+ while i<s.samples {
+  let value=integer_buffer_at(row,i)
+  integer_buffer_set(table,offset+i,value);i=i+1
+ }
+ out.status=0;out.rows=rows+1
+ out
+}

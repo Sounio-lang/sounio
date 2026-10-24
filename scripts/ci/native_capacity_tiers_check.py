@@ -18,6 +18,9 @@ SOURCES = [
     ("cgx", "self-hosted/native/codegen_x86_linux.sio"),
     ("cg", "self-hosted/native/codegen.sio"),
     ("ir", "self-hosted/ir/ir.sio"),
+    ("elf", "self-hosted/native/elf.sio"),
+    ("lower_ir", "self-hosted/native/lower_ir.sio"),
+    ("driver", "self-hosted/compiler/native_compile_driver.sio"),
 ]
 
 
@@ -53,6 +56,10 @@ def main():
     exp_legacy_elf = int(sys.argv[5])
     base_addr = int(sys.argv[6])
     exp_label = int(sys.argv[7])
+    exp_rodata = int(sys.argv[8])
+    exp_return_jumps = int(sys.argv[9])
+    exp_strtab = int(sys.argv[10])
+    exp_drv_label = int(sys.argv[11])
 
     loaded = []
     for _key, rel in SOURCES:
@@ -60,7 +67,7 @@ def main():
         if not path.is_file():
             fail("source_missing_%s" % rel.replace("/", "_"))
         loaded.append(path.read_text(encoding="utf-8"))
-    encode, frame, cgx, cg, irsrc = loaded
+    encode, frame, cgx, cg, irsrc, elfsrc, lowerir, driver = loaded
 
     # Tier 1: NC_BIG_CODE. Declarations stay literals; bound checks use the
     # accessor. Pinned together so a half-applied bump cannot ship.
@@ -173,8 +180,15 @@ def main():
          cgx, "apply_relocations_bound")
 
     # rc=19 (code buffer) and rc=20 (relocations) must both exist, distinctly.
-    rc19 = r"if nc\.code_overflow \%s\s*\n\s*return 19\s*\n\s*\%s" % (LB, RB)
-    rc20 = r"if nc\.reloc_overflow \%s\s*\n\s*return 20\s*\n\s*\%s" % (LB, RB)
+    # rc19 allows a diagnostic body between the brace and the return (matching
+    # the rc22/label_overflow precedent below) -- 2026-09-02: the branch now
+    # reports code_overflow_bytes_attempted so a capacity bump is sized against
+    # a measured number instead of a guess. rc20 stays bare; no diagnostic body
+    # has been added there yet.
+    rc19 = r"if nc\.code_overflow \%s(?:.|\n)*?return 19\s*\n\s*\%s" % (LB, RB)
+    # rc20 loosened the same way and for the same reason (2026-09-02):
+    # reloc_overflow_count_attempted is now reported before returning.
+    rc20 = r"if nc\.reloc_overflow \%s(?:.|\n)*?return 20\s*\n\s*\%s" % (LB, RB)
     if not re.search(rc19, cgx):
         fail("rc19_code_overflow_check_missing")
     if not re.search(rc20, cgx):
@@ -231,6 +245,30 @@ def main():
         if not re.search(needle, legacy):
             fail(reason)
 
+    # -- 5b. NC_BIG_RODATA (flat rodata: string/constant data) -- 2026-09-03,
+    # #2393. Same shape as the code/reloc/label tiers: fixed array + accessor
+    # + true attempted-count field + a distinct fail-closed rc (23). Unlike
+    # those three, the append sites here (native_v2_rodata_append_updated_tail,
+    # nc_rodata_add_ir_instr_name, nc_rodata_add_name_value,
+    # native_v2_rodata_append_byte_into) used to bound-check the write WITHOUT
+    # ever setting an overflow flag or refusing -- silent truncation, not a
+    # capacity refusal, first measured on self-hosted/compiler/main.sio
+    # (963,478 bytes needed against a 256 KiB cap). This tier proves the fix
+    # holds together, not that runtime data stays under the new cap.
+    tier("rodata_tier",
+         only(r"^pub var NC_BIG_RODATA: \[i8; ([0-9]+)\] = \[0; ([0-9]+)\]$",
+              frame, "nc_big_rodata_decl"),
+         only(accessor("nc_flat_rodata_capacity", "pub "), frame,
+              "nc_flat_rodata_capacity_accessor"),
+         exp_rodata)
+    if not re.search(r"pub rodata_overflow_bytes_attempted: i64,", frame):
+        fail("rodata_overflow_bytes_attempted_field_missing")
+    if not re.search(r"out\.rodata_overflow_bytes_attempted = 0", frame):
+        fail("rodata_overflow_bytes_attempted_not_initialised")
+    rc23 = r"if nc\.rodata_overflow_bytes_attempted > nc_flat_rodata_capacity\(\) \%s(?:.|\n)*?return 23\s*\n\s*\%s" % (LB, RB)
+    if not re.search(rc23, cgx):
+        fail("rc23_rodata_overflow_check_missing")
+
     # -- 6. the 0x400000 ELF LOAD BASE ADDRESS must survive as a literal ---
     # This is the trap: 4194304 is BOTH the retired 4 MiB ELF capacity and the
     # ELF load address. Every remaining occurrence must be a plain argument.
@@ -251,10 +289,128 @@ def main():
         if not arg_form.search(line):
             fail("elf_base_addr_unexpected_form")
 
+    check_1646(frame, cgx, cg, irsrc, elfsrc, lowerir, driver,
+               exp_return_jumps, exp_strtab, exp_drv_label)
+
     print("NATIVE_CAPACITY_TIERS_CHECK "
-          "code=%d reloc=%d elf=%d legacy_elf=%d label=%d base_addr_literals=%d "
-          "fail_closed=rc19/rc20/rc21/rc22 coherent=pass"
-          % (exp_code, exp_reloc, exp_elf, exp_legacy_elf, exp_label, len(occ)))
+          "code=%d reloc=%d elf=%d legacy_elf=%d label=%d rodata=%d base_addr_literals=%d "
+          "return_jumps=%d strtab=%d drv_label=%d "
+          "fail_closed=rc19/rc20/rc21/rc22/rc23/rc28/drv_rc6 coherent=pass"
+          % (exp_code, exp_reloc, exp_elf, exp_legacy_elf, exp_label, exp_rodata, len(occ),
+             exp_return_jumps, exp_strtab, exp_drv_label))
+
+
+def fn_body(name, subject, reason, visibility=""):
+    return only(r"^%sfn %s\((?:.|\n)*?^\%s$" % (visibility, name, RB), subject,
+                reason, re.MULTILINE).group(0)
+
+
+def check_1646(frame, cgx, cg, irsrc, elfsrc, lowerir, driver,
+               exp_return_jumps, exp_strtab, exp_drv_label):
+    ir_max = int(only(r"^pub let IR_MAX_INSTRS: i64 = ([0-9]+)\s*$", irsrc,
+                      "ir_max_instrs_decl_1646").group(1))
+    ir_max_vregs = int(only(r"^pub let IR_MAX_VREGS: i64 = ([0-9]+)\s*$", irsrc,
+                            "ir_max_vregs_decl").group(1))
+
+    # -- 10a. return-jump tier -------------------------------------------
+    tier("return_jump_tier",
+         only(r"^pub var NC_RETURN_JUMPS: \[i64; ([0-9]+)\] = \[0; ([0-9]+)\]$",
+              frame, "nc_return_jumps_decl"),
+         only(accessor("nc_return_jump_capacity", "pub "), frame,
+              "nc_return_jump_capacity_accessor"),
+         exp_return_jumps)
+    if exp_return_jumps < ir_max:
+        fail("return_jump_tier_%d_below_ir_max_instrs_%d" % (exp_return_jumps, ir_max))
+    for name, subject in (("frame", frame), ("codegen_x86_linux", cgx), ("codegen", cg)):
+        if re.search(r"return_jump_count\s*<\s*16\b", subject) or \
+           re.search(r"rj_i\s*<\s*16\b", subject):
+            fail("stray_return_jump_literal_bound_%s" % name)
+    rec = fn_body("record_return_jump_mut", frame, "record_return_jump_mut", "pub ")
+    if "nc_return_jump_capacity()" not in rec:
+        fail("record_return_jump_mut_not_using_accessor")
+    if not re.search(r"\%s\s*else\s*\%s\s*\(\*nc\)\.label_overflow = true" % (RB, LB), rec):
+        fail("record_return_jump_mut_missing_sentinel")
+    mir_arm = (r"if c\.return_jump_count < nc_return_jump_capacity\(\) \%s(?:.|\n)*?"
+               r"\%s\s*else\s*\%s(?:.|\n)*?c\.label_overflow = true" % (LB, RB, LB))
+    for name, subject in (("codegen_x86_linux", cgx), ("codegen", cg)):
+        if len(re.findall(mir_arm, subject)) != 1:
+            fail("mir_ret_arm_missing_sentinel_%s" % name)
+
+    # -- 10b. float-typing tier ------------------------------------------
+    fl = only(r"^pub var NC_IS_FLOAT_REG: \[i64; ([0-9]+)\] = \[0; ([0-9]+)\]$",
+              frame, "nc_is_float_reg_decl")
+    limit = int(only(r"^pub let NC_VREG_LIMIT: i64 = ([0-9]+)$", frame,
+                     "nc_vreg_limit_decl").group(1))
+    vals = set(int(g) for g in fl.groups())
+    vals.add(limit)
+    vals.add(ir_max_vregs)
+    if len(vals) != 1:
+        fail("float_typing_tier_not_ir_max_vregs_%s" % sorted(vals))
+    for name, subject in (("codegen_x86_linux", cgx), ("codegen", cg), ("lower_ir", lowerir),
+                          ("frame", frame)):
+        lines = subject.splitlines()
+        for i, line in enumerate(lines):
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            if "NC_MAX_VREGS" in line and ("NC_IS_FLOAT_REG[" in line or
+                                           ("NC_IS_FLOAT_REG[" in nxt and not line.strip().startswith("while"))):
+                fail("float_typing_bounded_by_nc_max_vregs_%s_line_%d" % (name, i + 1))
+            if line.strip().startswith("while") and "NC_MAX_VREGS" in line and "NC_IS_FLOAT_REG[" in nxt:
+                fail("float_typing_partial_reset_%s_line_%d" % (name, i + 1))
+
+    # -- 10c. string-table tier (elf.sio) --------------------------------
+    tier("strtab_tier",
+         only(r"^pub struct StringTable \%s\n    pub bytes: \[i8; ([0-9]+)\],$" % LB, elfsrc,
+              "string_table_bytes_decl"),
+         only(accessor("elf_strtab_capacity_bytes", "pub "), elfsrc,
+              "elf_strtab_capacity_accessor"),
+         exp_strtab)
+    for fn_name in ("string_table_add", "data_section_align", "data_section_add_f64"):
+        body = fn_body(fn_name, elfsrc, fn_name, "pub ")
+        if "elf_strtab_capacity_bytes()" not in body:
+            fail("%s_not_using_accessor" % fn_name)
+        if "ELF_STRTAB_OVERFLOW = 1" not in body:
+            fail("%s_missing_sentinel" % fn_name)
+        if re.search(r"<\s*8192\b", body):
+            fail("%s_stray_literal_bound" % fn_name)
+    f64 = fn_body("data_section_add_f64", elfsrc, "data_section_add_f64_body", "pub ")
+    guard = f64.find("if t.len + 8 > elf_strtab_capacity_bytes()")
+    bump = f64.find("t.len = t.len + 8")
+    if guard < 0 or bump < 0 or bump < guard:
+        fail("data_section_add_f64_len_advanced_before_guard")
+    rc28 = r"if ELF_STRTAB_OVERFLOW != 0 \%s(?:.|\n)*?return 28\s*\n\s*\%s" % (LB, RB)
+    if len(re.findall(rc28, cgx)) != 2:
+        fail("rc28_strtab_overflow_check_count_%d" % len(re.findall(rc28, cgx)))
+    fin = fn_body("finalize_compiled_elf", cgx, "finalize_compiled_elf", "pub ")
+    if "ELF_STRTAB_OVERFLOW != 0" not in fin or "nc.label_overflow" not in fin:
+        fail("finalize_compiled_elf_ignores_overflow")
+    if "ELF_STRTAB_OVERFLOW = 0" not in fn_body("compiler_new", frame, "compiler_new_1646", "pub "):
+        fail("strtab_overflow_not_reset_per_compile")
+
+    # -- 10d. driver label tier ------------------------------------------
+    drv_decls = re.findall(
+        r"^var DRV_LABEL_(?:OFFSETS|PATCH_OFFSETS|PATCH_IDS): "
+        r"\[i64; ([0-9]+)\] = \[0; ([0-9]+)\]$", driver, re.MULTILINE)
+    if len(drv_decls) != 3:
+        fail("drv_label_decl_count_%d" % len(drv_decls))
+    drv_acc = only(accessor("drv_label_capacity", ""), driver, "drv_label_capacity_accessor")
+    vals = set(int(v) for pair in drv_decls for v in pair)
+    vals.add(int(drv_acc.group(1)))
+    if vals != set([exp_drv_label]):
+        fail("drv_label_tier_expected_%d_got_%s" % (exp_drv_label, sorted(vals)))
+    for fn_name in ("drv_define_label", "drv_add_label_patch", "drv_patch_labels"):
+        body = fn_body(fn_name, driver, fn_name)
+        if "drv_label_capacity()" not in body:
+            fail("%s_not_using_accessor" % fn_name)
+        if not re.search(r"\%s\s*else\s*\%s\s*DRV_LABEL_OVERFLOW = 1" % (RB, LB), body):
+            fail("%s_missing_sentinel" % fn_name)
+        if re.search(r"<\s*1024\b", body):
+            fail("%s_stray_literal_bound" % fn_name)
+    if "DRV_LABEL_OFFSETS[lid as usize] >= 0" not in fn_body("drv_patch_labels", driver, "drv_patch_labels_target"):
+        fail("drv_patch_labels_patches_undefined_target")
+    if not re.search(r"if DRV_LABEL_OVERFLOW != 0 \%s(?:.|\n)*?return 6\s*\n\s*\%s" % (LB, RB), driver):
+        fail("drv_rc6_label_overflow_check_missing")
+    if "DRV_LABEL_OVERFLOW = 0" not in fn_body("drv_reset_codegen", driver, "drv_reset_codegen"):
+        fail("drv_label_overflow_not_reset")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,157 @@
+// examples/chemistry/rep_adiabatic_bug.sio
+//
+// Adiabatic ignition delay with the historical `reac - nu` reverse-rate
+// defect reintroduced, in Sounio.  Replaces benchmarks/chemistry/
+// rep_adiabatic_bug.py (CLAUDE.md 6.4: science in this repository is Sounio).
+//
+// One constant-volume RK4 integrator, parameterised by the reverse exponent
+// form (0 shipped, 2 the reported defect), using the module's own thermo
+// (g30_h_rt, g30_cp_r), rate constants (g30_kfwd_eff, g30_kc_all) and tables.
+// Form 0 is also cross-checked against the module's own g30_adiabatic_delay,
+// so the integrator written here is shown to match the module before it is
+// trusted to characterise the defect.  Two delay criteria are printed -- time
+// of max d[H2O]/dt and of max dT/dt -- because RESULTS.md 2.6 found they
+// disagree in sign at 1100 K and the README does not say which it used.
+//
+// Run:  SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run examples/chemistry/rep_adiabatic_bug.sio
+
+use chemistry::gri30_h2::*
+
+fn pi64(x: i64) with IO, Mut, Div, Panic {
+    if x < 0 { print("-"); pi64(0 - x) } else if x >= 10 { pi64(x / 10); print((x % 10) as i32) } else { print(x as i32) }
+}
+fn fabs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn ipow(x: f64, p: f64) -> f64 with Mut, Div, Panic {
+    var acc: f64 = 1.0
+    var n: i64 = p as i64
+    while n > 0 { acc = acc * x; n = n - 1 }
+    acc
+}
+fn rev_exp(f: i64, r: i64, s: i64) -> f64 with Mut, Div, Panic {
+    let i: i64 = r * (10 as i64) + s
+    if f == (0 as i64) { G30_PROD[i] } else if f == (1 as i64) { G30_REAC[i] + G30_NU[i] } else { G30_REAC[i] - G30_NU[i] }
+}
+
+// constant-volume RHS: returns dT/dt in out[10], dc/dt in out[0..9]
+fn uv_rhs_form(f: i64, t: f64, c: &[f64; 10], out: &![f64; 11]) with Mut, Div, Panic {
+    let kc: [f64; 29] = g30_kc_all(t)
+    var dc: [f64; 10] = [0.0; 10]
+    var r: i64 = 0
+    while r < (29 as i64) {
+        var m_eff: f64 = 0.0
+        var s: i64 = 0
+        while s < (10 as i64) { m_eff = m_eff + G30_EFF[r * (10 as i64) + s] * (*c)[s]; s = s + 1 }
+        let kf = g30_kfwd_eff(r, t, m_eff)
+        var fwd: f64 = kf
+        var rev: f64 = kf / kc[r]
+        s = 0
+        while s < (10 as i64) {
+            let i: i64 = r * (10 as i64) + s
+            if G30_REAC[i] > 0.0 { fwd = fwd * ipow((*c)[s], G30_REAC[i]) }
+            let p = rev_exp(f, r, s)
+            if p > 0.0 { rev = rev * ipow((*c)[s], p) }
+            s = s + 1
+        }
+        let rn = fwd - rev
+        s = 0
+        while s < (10 as i64) { dc[s] = dc[s] + G30_NU[r * (10 as i64) + s] * rn; s = s + 1 }
+        r = r + 1
+    }
+    var num: f64 = 0.0
+    var den: f64 = 0.0
+    var i: i64 = 0
+    while i < (10 as i64) {
+        num = num + (g30_h_rt(i, t) - 1.0) * dc[i]
+        den = den + (*c)[i] * (g30_cp_r(i, t) - 1.0)
+        (*out)[i] = dc[i]
+        i = i + 1
+    }
+    (*out)[10] = 0.0 - t * num / den
+}
+
+fn demo_init(t: f64, c: &![f64; 10]) with Mut, Div, Panic {
+    // g30_demo_init's own expression.  This line read 1.0 / (82.057 * t) and
+    // claimed to be "kept identical" to the module -- true when it was written,
+    // false the moment #2382 aligned g30_demo_init and left this copy behind.
+    // The two states then differed by 5.7e-06 while the cross-check below went
+    // on printing agreement, because the delays are insensitive to that at the
+    // printed resolution everywhere except the buggy form's dT/dt at 1100 K.
+    // A cross-check whose two sides charge different states is not one.
+    let m: f64 = 101325.0 / (8.31446261815324 * t) * 1.0e-6
+    var i: i64 = 0
+    while i < (10 as i64) { (*c)[i] = 0.0; i = i + 1 }
+    (*c)[0] = m * 0.02
+    (*c)[3] = m * 0.01
+    (*c)[8] = m * 0.97
+    (*c)[1] = 1.0e-11
+}
+
+// returns (t at max d[H2O]/dt, t at max dT/dt); (-1,-1) if no completed front
+fn delay_form(f: i64, t0: f64, dt: f64, max_steps: i64) -> (f64, f64) with Mut, Div, Panic {
+    var t: f64 = t0
+    var y: [f64; 10] = [0.0; 10]
+    demo_init(t0, &!y)
+    var yt: [f64; 10] = [0.0; 10]
+    var k1: [f64; 11] = [0.0; 11]
+    var k2: [f64; 11] = [0.0; 11]
+    var k3: [f64; 11] = [0.0; 11]
+    var k4: [f64; 11] = [0.0; 11]
+    var prev_h2o: f64 = y[5]
+    var prev_t: f64 = t
+    var best_h2o: f64 = 0.0
+    var best_h2o_t: f64 = 0.0 - 1.0
+    var best_dt: f64 = 0.0
+    var best_dt_t: f64 = 0.0 - 1.0
+    var done: bool = false
+    var s: i64 = 0
+    while s < max_steps && !done {
+        uv_rhs_form(f, t, &y, &!k1)
+        var i: i64 = 0
+        while i < (10 as i64) { yt[i] = y[i] + 0.5 * dt * k1[i]; i = i + 1 }
+        uv_rhs_form(f, t + 0.5 * dt * k1[10], &yt, &!k2)
+        i = 0
+        while i < (10 as i64) { yt[i] = y[i] + 0.5 * dt * k2[i]; i = i + 1 }
+        uv_rhs_form(f, t + 0.5 * dt * k2[10], &yt, &!k3)
+        i = 0
+        while i < (10 as i64) { yt[i] = y[i] + dt * k3[i]; i = i + 1 }
+        uv_rhs_form(f, t + dt * k3[10], &yt, &!k4)
+        i = 0
+        while i < (10 as i64) { y[i] = y[i] + dt / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]); i = i + 1 }
+        t = t + dt / 6.0 * (k1[10] + 2.0 * k2[10] + 2.0 * k3[10] + k4[10])
+        s = s + 1
+        let tnow: f64 = (s as f64) * dt
+        let rate_h2o = (y[5] - prev_h2o) / dt
+        let rate_t = (t - prev_t) / dt
+        prev_h2o = y[5]
+        prev_t = t
+        if rate_h2o > best_h2o { best_h2o = rate_h2o; best_h2o_t = tnow - 0.5 * dt }
+        if rate_t > best_dt { best_dt = rate_t; best_dt_t = tnow - 0.5 * dt }
+        if best_h2o_t > 0.0 && rate_h2o < 0.05 * best_h2o && tnow > 2.0 * best_h2o_t { done = true }
+    }
+    if done { (best_h2o_t, best_dt_t) } else { (0.0 - 1.0, 0.0 - 1.0) }
+}
+
+fn report(t0: f64, dt: f64, max_steps: i64) with IO, Mut, Div, Panic {
+    let (a_h2o, a_dt) = delay_form(0 as i64, t0, dt, max_steps)
+    let (b_h2o, b_dt) = delay_form(2 as i64, t0, dt, max_steps)
+    let (m_h2o, m_dt) = g30_adiabatic_delay(t0, dt, max_steps)     // the module's own integrator, shipped form
+    print("T0="); pi64(t0 as i64); println(" K")
+    print("  correct  (this file, form 0)  d[H2O]/dt-delay ns = "); pi64((a_h2o * 1.0e9) as i64); print("   dT/dt-delay ns = "); pi64((a_dt * 1.0e9) as i64); println("")
+    print("  module   (g30_adiabatic_delay) d[H2O]/dt-delay ns = "); pi64((m_h2o * 1.0e9) as i64); print("   dT/dt-delay ns = "); pi64((m_dt * 1.0e9) as i64); println("")
+    print("  reac-nu  (this file, form 2)  d[H2O]/dt-delay ns = "); pi64((b_h2o * 1.0e9) as i64); print("   dT/dt-delay ns = "); pi64((b_dt * 1.0e9) as i64); println("")
+    if a_h2o > 0.0 && b_h2o > 0.0 {
+        let e1 = (b_h2o - a_h2o) / a_h2o * 100000.0
+        let e2 = (b_dt - a_dt) / a_dt * 100000.0
+        print("  error x1e-3 percent: d[H2O]/dt criterion = "); pi64(e1 as i64); print("   dT/dt criterion = "); pi64(e2 as i64); println("")
+    } else { println("  no completed front within the horizon") }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let dt: f64 = 5.0e-9
+    let max_steps: i64 = 400000 as i64      // 2 ms horizon
+    println("REP_ADIABATIC_BUG (Sounio) -- 2% H2 / 1% O2 / 97% N2, H seed 1e-11 mol/cm3, dt = 5e-9 s")
+    println("README anchors: 0.1% at 1100 K, 8.6% at 2000 K (criterion unstated)")
+    report(1100.0, dt, max_steps)
+    report(2000.0, dt, max_steps)
+    0
+}

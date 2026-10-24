@@ -4,7 +4,7 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, pt_read_start, pt_read_end, parser_peek_ahead, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
+use parser::parser::{parser_at_kw, parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, pt_read_start, pt_read_end, parser_peek_ahead, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box, parser_name_at}
 use parser::types::*
 use parser::exprs::*
 use parser::stmts::*
@@ -55,6 +55,53 @@ pub fn items_reset_pure_fn_reg() with Mut {
     PURE_FN_CALL_DEPTH = 0
     PURE_FN_ACTIVE_SLOT = 0 - 1
     pure_fn_local_reset()
+}
+
+// 1 while parse_impl_item is parsing a method. A method is never reachable by the bare
+// `name()` this table folds (that needs `Type::name()` or `x.name()`), so it is not
+// recorded: recorded under its bare name it would shadow, or be mistaken for, a free
+// fn of the same name -- in its own module and, if `pub`, in every importer.
+var ITEMS_IN_IMPL: i64 = 0
+
+// #2661: SOUNIO_DISABLE_GLOBAL_INIT_IMPL_EXCLUSION=1 sets this to 1 and restores
+// ONLY the old recording of impl methods under their bare name in the pure-fn
+// constant-fold table (the exclusion #2603 introduced). Attribution knob, the
+// sibling of SOUNIO_DISABLE_GLOBAL_INIT_MODULE_SCOPE (mod.sio GVI_SCOPE_OFF);
+// the two are independent. Written from mod.sio (read_env needs IO, which
+// items_maybe_record_pure_fn_const does not have) before any item is parsed.
+var ITEMS_IMPL_EXCLUSION_OFF: i64 = 0
+
+pub fn items_set_impl_exclusion_off() with Mut {
+    ITEMS_IMPL_EXCLUSION_OFF = 1
+}
+
+// Fill GLOBAL_VAR_INIT_DEFS with the top-level definition names of the module whose
+// tokens are loaded, before it is parsed. A name is a top-level definition when
+// `fn` / `var` / `let` / `const` sits at brace depth 0 directly before an
+// identifier (`const fn` is caught at the `fn`). Called only when the side table
+// accumulates across modules (parse_items_preloaded); see ast_gvi_scope for why.
+pub fn items_gvi_prescan_defs(p: Parser, token_count: i64) with Mut, Panic, Div {
+    var depth: i64 = 0
+    var i: i64 = 0
+    while i < token_count {
+        let k = pt_read_kind(i)
+        if k == TokenKind::LBrace {
+            depth = depth + 1
+        } else if k == TokenKind::RBrace {
+            if depth > 0 {
+                depth = depth - 1
+            }
+        } else if depth == 0 && (k == TokenKind::Fn || k == TokenKind::Var || k == TokenKind::Let || k == TokenKind::Const) {
+            var j = i + 1
+            while j < token_count && pt_read_kind(j) == TokenKind::Newline {
+                j = j + 1
+            }
+            if j < token_count && pt_read_kind(j) == TokenKind::Ident {
+                ast_gvi_def_add(ast_name_hash(parser_name_at(p, j)))
+            }
+        }
+        i = i + 1
+    }
 }
 
 // The extern-block pending queue (#1547) was REMOVED here, 2026-08-23, in the
@@ -311,8 +358,9 @@ fn pure_fn_reg_record(
     params: &Option<Box<ParamList>>,
     body: &Block
 ) with Mut, Div {
-    // Already has any init words under this name — do not clobber.
-    if ast_global_var_init_count(name) != 0 {
+    // This module already has init words under this name — do not clobber. Scoped
+    // to the module being parsed: another module's same-named fn is a different fn.
+    if ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD) != 0 {
         return
     }
     var ph0: i64 = 0
@@ -460,23 +508,26 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
                 }
                 match (*e).args {
                     None => {
-                        // Zero-arg pure word under the function name.
-                        let c = ast_global_var_init_count((*callee).name)
+                        // Zero-arg pure word under the function name, in the module
+                        // that owns the callee (ast_gvi_scope), not "any module".
+                        let sc = ast_gvi_scope((*callee).name)
+                        let c = ast_gvi_count_in((*callee).name, sc)
                         if c == 1 {
-                            return (true, ast_global_var_init_nth((*callee).name, 0))
+                            return (true, ast_gvi_nth_in((*callee).name, sc, 0))
                         }
                         return (false, 0)
                     }
                     Some(_) => {
                         // Paramful pure: descriptor lives in GLOBAL_VAR_INIT multi-word.
-                        let c = ast_global_var_init_count((*callee).name)
+                        let sc = ast_gvi_scope((*callee).name)
+                        let c = ast_gvi_count_in((*callee).name, sc)
                         if c < 3 {
                             return (false, 0)
                         }
                         if PURE_FN_CALL_DEPTH >= 8 {
                             return (false, 0)
                         }
-                        let magic = ast_global_var_init_nth((*callee).name, 0)
+                        let magic = ast_gvi_nth_in((*callee).name, sc, 0)
                         // Decode descriptor.
                         var kind: i64 = 0
                         var op_i: i64 = 0
@@ -492,18 +543,18 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
                                 return (false, 0)
                             }
                             kind = 1
-                            op_i = ast_global_var_init_nth((*callee).name, 1)
-                            pc = ast_global_var_init_nth((*callee).name, 2)
-                            ph0 = ast_global_var_init_nth((*callee).name, 3)
-                            ph1 = ast_global_var_init_nth((*callee).name, 4)
+                            op_i = ast_gvi_nth_in((*callee).name, sc, 1)
+                            pc = ast_gvi_nth_in((*callee).name, sc, 2)
+                            ph0 = ast_gvi_nth_in((*callee).name, sc, 3)
+                            ph1 = ast_gvi_nth_in((*callee).name, sc, 4)
                         } else if magic == 0 - 900002 {
                             // ident: magic, pc, ph0
                             if c < 3 {
                                 return (false, 0)
                             }
                             kind = 2
-                            pc = ast_global_var_init_nth((*callee).name, 1)
-                            ph0 = ast_global_var_init_nth((*callee).name, 2)
+                            pc = ast_gvi_nth_in((*callee).name, sc, 1)
+                            ph0 = ast_gvi_nth_in((*callee).name, sc, 2)
                         } else if magic == 0 - 900003 {
                             // general: magic, pc, body_bits, ph0..ph3
                             // body_bits = StmtList* as i64 (Wave15a; not a REG index)
@@ -511,15 +562,18 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
                                 return (false, 0)
                             }
                             kind = 3
-                            pc = ast_global_var_init_nth((*callee).name, 1)
-                            body_bits = ast_global_var_init_nth((*callee).name, 2)
-                            ph0 = ast_global_var_init_nth((*callee).name, 3)
-                            ph1 = ast_global_var_init_nth((*callee).name, 4)
-                            ph2 = ast_global_var_init_nth((*callee).name, 5)
-                            ph3 = ast_global_var_init_nth((*callee).name, 6)
+                            pc = ast_gvi_nth_in((*callee).name, sc, 1)
+                            body_bits = ast_gvi_nth_in((*callee).name, sc, 2)
+                            ph0 = ast_gvi_nth_in((*callee).name, sc, 3)
+                            ph1 = ast_gvi_nth_in((*callee).name, sc, 4)
+                            ph2 = ast_gvi_nth_in((*callee).name, sc, 5)
+                            ph3 = ast_gvi_nth_in((*callee).name, sc, 6)
                         } else {
                             return (false, 0)
                         }
+                        // Lookups made while folding the callee's body resolve in the
+                        // callee's own module (restored below with the local env).
+                        let saved_eval_mod = GLOBAL_VAR_INIT_EVAL_MOD
                         // Save outer local env.
                         var saved_n = PURE_FN_LOCAL_N
                         var saved_h: [i64; 32] = [0; 32]
@@ -598,6 +652,7 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
                                 // Wave15a: body_bits is StmtList* stored as i64 in
                                 // GLOBAL_VAR_INIT (seed-safe). Walk pure return chain:
                                 // let-binders then final StmtExpr, with params bound.
+                                GLOBAL_VAR_INIT_EVAL_MOD = sc
                                 let body_ptr = body_bits as *mut StmtList
                                 if body_ptr != 0 as *mut StmtList {
                                     var bcur: *mut StmtList = body_ptr
@@ -649,6 +704,7 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
                                 }
                             }
                         }
+                        GLOBAL_VAR_INIT_EVAL_MOD = saved_eval_mod
                         PURE_FN_CALL_DEPTH = PURE_FN_CALL_DEPTH - 1
                         PURE_FN_ACTIVE_SLOT = 0 - 1
                         pure_fn_local_reset()
@@ -678,9 +734,10 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
         if lp.0 {
             return (true, lp.1)
         }
-        let c = ast_global_var_init_count((*e).name)
+        let sc = ast_gvi_scope((*e).name)
+        let c = ast_gvi_count_in((*e).name, sc)
         if c == 1 {
-            return (true, ast_global_var_init_nth((*e).name, 0))
+            return (true, ast_gvi_nth_in((*e).name, sc, 0))
         }
         return (false, 0)
     }
@@ -853,20 +910,27 @@ fn items_maybe_record_pure_fn_const(
     effects: &Option<Box<EffectList>>,
     body: &Block
 ) with Mut, Div {
+    if ITEMS_IN_IMPL == 1 && ITEMS_IMPL_EXCLUSION_OFF == 0 {
+        return
+    }
     match *effects {
         Some(_) => {
             return
         }
         None => {}
     }
-    // Already has init words (prior global of same name) — do not overwrite/extend.
-    if ast_global_var_init_count(name) != 0 {
+    // This module already has init words (prior global of same name) — do not
+    // overwrite/extend. Scoped to the module being parsed, see pure_fn_reg_record.
+    if ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD) != 0 {
         return
     }
+    // #2661 dump attribution: which kind of definition owns these words.
+    GVI_DUMP_ORIGIN = if ITEMS_IN_IMPL == 1 { 2 } else { 1 }
     match *params {
         Some(_) => {
             // Wave13e: pure paramful → body registry (call-site fold).
             pure_fn_reg_record(name, params, body)
+            GVI_DUMP_ORIGIN = 0
             return
         }
         None => {}
@@ -883,6 +947,7 @@ fn items_maybe_record_pure_fn_const(
         }
         None => {}
     }
+    GVI_DUMP_ORIGIN = 0
 }
 
 // Record a compile-time integer/float/bool global initializer for native BSS fill.
@@ -956,6 +1021,101 @@ fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
     }
 }
 
+// #2355: fold the initializer into BSS fill words when the parse-time folder
+// can; otherwise keep a closed expression for run-time evaluation at `main`'s
+// entry (ast_record_global_deferred_init). Before, every struct literal was
+// dropped here and the global's handle slot read as 0.
+//
+// Only a one-word slot is deferred: no annotation, or a plain named type. A
+// fixed-array global holds its elements inline in BSS and a multi-limb global
+// (i128/u128/i256/u256/f128/f256) holds several words, so one run-time store
+// would be wrong for both; they keep the old zero fill.
+fn items_global_init_deferrable(ty: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *ty {
+        Some(t) => {
+            if (*t).kind != TypeExprKind::TypeNamed { return false }
+            let tn = ast_path_prefix_name((*t).path, 0)
+            if name_eq(tn, make_name("i128")) || name_eq(tn, make_name("u128")) { return false }
+            if name_eq(tn, make_name("i256")) || name_eq(tn, make_name("u256")) { return false }
+            if name_eq(tn, make_name("f128")) || name_eq(tn, make_name("f256")) { return false }
+            true
+        }
+        None => true,
+    }
+}
+
+// Only a CLOSED initializer is deferred: one that names nothing -- literals,
+// struct / array / tuple literals, and unary, binary and cast operators over
+// those. The deferred expression is lowered at `main`'s entry, i.e. outside the
+// module that wrote it, where a bare callee or global name would resolve
+// against the merged program instead of the defining module (a private
+// `helper` would bind another module's `pub fn helper`; see
+// scripts/ci/madaros_global_init_identity_gate.sh, case `shadow`). An
+// initializer that names a fn or global keeps the previous behaviour.
+fn items_expr_is_closed(e: &Expr) -> bool with Mut, Panic, Div {
+    let k = (*e).kind
+    if k == ExprKind::ExprIntLit || k == ExprKind::ExprFloatLit || k == ExprKind::ExprBoolTrue
+        || k == ExprKind::ExprBoolFalse || k == ExprKind::ExprCharLit || k == ExprKind::ExprStringLit {
+        return true
+    }
+    if k == ExprKind::ExprUnary || k == ExprKind::ExprCast {
+        return items_opt_expr_is_closed(&(*e).left)
+    }
+    if k == ExprKind::ExprBinary {
+        return items_opt_expr_is_closed(&(*e).left) && items_opt_expr_is_closed(&(*e).right)
+    }
+    if k == ExprKind::ExprStructLit {
+        var cur = &(*e).fields
+        while true {
+            match *cur {
+                Some(fl) => {
+                    if !items_expr_is_closed(&(*fl).head.value) { return false }
+                    cur = &(*fl).tail
+                }
+                None => { break }
+            }
+        }
+        return true
+    }
+    if k == ExprKind::ExprArrayLit || k == ExprKind::ExprTupleLit {
+        match (*e).left {
+            Some(rv) => {
+                if !items_expr_is_closed(&(*rv)) { return false }
+                return items_opt_expr_is_closed(&(*e).right)
+            }
+            None => {}
+        }
+        var cur = &(*e).args
+        while true {
+            match *cur {
+                Some(al) => {
+                    if !items_expr_is_closed(&(*al).head) { return false }
+                    cur = &(*al).tail
+                }
+                None => { break }
+            }
+        }
+        return true
+    }
+    false
+}
+
+fn items_opt_expr_is_closed(opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(x) => items_expr_is_closed(&(*x)),
+        None => true,
+    }
+}
+
+fn items_record_global_init_or_defer(name: Name, init: Box<Expr>, deferrable: bool) with Mut, Panic, Div {
+    let before = ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD)
+    items_record_global_int_init(name, &(*init))
+    if deferrable && ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD) == before
+        && items_expr_is_closed(&(*init)) {
+        ast_record_global_deferred_init(name, init)
+    }
+}
+
 fn items_reverse_item_list_loop(
     current: Option<Box<ItemList>>,
     acc: Option<Box<ItemList>>,
@@ -1003,6 +1163,8 @@ fn items_reverse_item_list_loop(
 // name.len read back as 0x0100000000000000, E017 on the wrapper body, or a
 // native-checker segfault. Only scalar flags survive in globals here.)
 var EXTERN_BLOCK_ACTIVE: i64 = 0
+var CURRENT_DYNLINK_IDENTITY: [i8; 256] = [0; 256]
+var CURRENT_DYNLINK_IDENTITY_LEN: i64 = 0
 var EXTERN_BLOCK_VIS_KIND: i64 = 0
 
 fn ffi_name_path(name: Name, span: Span) -> Expr with Mut, Panic {
@@ -1158,6 +1320,31 @@ impl Parser {
             let vis_pair = p.parse_pub_visibility()
             p = vis_pair.0
             visibility = vis_pair.1
+        }
+
+        // `causal graph <name> { ... }` -- contextual, so it is matched by
+        // bytes rather than by keyword, and only when BOTH words are present.
+        // A variable or function named `causal` keeps working.
+        if parser_peek(p) == TokenKind::Ident {
+            let cg_w1 = p.current_name()
+            if cg_w1.len == 6
+                && cg_w1.buf[0] == (99 as i8)
+                && cg_w1.buf[1] == (97 as i8)
+                && cg_w1.buf[2] == (117 as i8)
+                && cg_w1.buf[3] == (115 as i8)
+                && cg_w1.buf[4] == (97 as i8)
+                && cg_w1.buf[5] == (108 as i8)
+                && parser_peek_ahead(p, 1) == TokenKind::Ident {
+                let cg_w2 = parser_name_at(p, p.pos + 1)
+                if cg_w2.len == 5
+                    && cg_w2.buf[0] == (103 as i8)
+                    && cg_w2.buf[1] == (114 as i8)
+                    && cg_w2.buf[2] == (97 as i8)
+                    && cg_w2.buf[3] == (112 as i8)
+                    && cg_w2.buf[4] == (104 as i8) {
+                    return parse_causal_graph_item(p, visibility)
+                }
+            }
         }
 
         // Handle optional 'linear' or 'affine' modifier
@@ -1476,11 +1663,13 @@ impl Parser {
         let ty_pair = p.parse_optional_type()
         p = ty_pair.0
         let global_ty: Option<Box<TypeExpr>> = ty_pair.1
+        ast_record_global_decl_type(name, &global_ty)
 
         p = p.expect(TokenKind::Eq)
         p = p.parse_expr()
         let init_let_box = parser_take_expr_box()
-        items_record_global_int_init(name, &(*init_let_box))
+        items_record_global_init_or_defer(name, init_let_box, items_global_init_deferrable(&global_ty))
+        ast_record_global_const_name(name)
         if parser_peek(p) == TokenKind::Semi {
             p = p.advance()
         }
@@ -1532,12 +1721,13 @@ impl Parser {
         let ty_pair = p.parse_optional_type()
         p = ty_pair.0
         let global_ty: Option<Box<TypeExpr>> = ty_pair.1
+        ast_record_global_decl_type(name, &global_ty)
 
         if parser_peek(p) == TokenKind::Eq {
             p = p.advance()
             p = p.parse_expr()
             let init_var_box = parser_take_expr_box()
-            items_record_global_int_init(name, &(*init_var_box))
+            items_record_global_init_or_defer(name, init_var_box, items_global_init_deferrable(&global_ty))
         }
         if parser_peek(p) == TokenKind::Semi {
             p = p.advance()
@@ -1669,7 +1859,15 @@ impl Parser {
 
         let span = p.span_from(start)
         // Wave10: register pure zero-arg const bodies for global element-list calls.
+        // The record carries whether another module may call this fn by its bare
+        // name: a private fn may not (ast_gvi_scope). Methods are not recorded.
+        if visibility_to_bool(visibility) {
+            GLOBAL_VAR_INIT_CUR_PUB = 1
+        } else {
+            GLOBAL_VAR_INIT_CUR_PUB = 0
+        }
         items_maybe_record_pure_fn_const(name, &params_opt, &effects_opt, &body)
+        GLOBAL_VAR_INIT_CUR_PUB = 1
         let fn_def = FnDef {
             name: name,
             params: params_opt,
@@ -1833,8 +2031,10 @@ impl Parser {
 
         while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
             let field_start = p.current_span()
+            var field_is_pub = false
             if parser_peek(p) == TokenKind::Pub {
                 p = p.advance()
+                field_is_pub = true
             }
             let field_name = p.current_name()
             p = p.expect_ident()
@@ -1843,7 +2043,7 @@ impl Parser {
             p = pair.0
             let field_ty = pair.1
 
-            let field = FieldDef { name: field_name, ty: field_ty, span: p.span_from(field_start) }
+            let field = FieldDef { name: field_name, ty: field_ty, is_pub: field_is_pub, span: p.span_from(field_start) }
 
             rev_fields_opt = Some(Box::new(FieldDefList { head: field, tail: rev_fields_opt }))
 
@@ -1938,8 +2138,10 @@ impl Parser {
                 p = p.advance()  // skip {
                 var rev_fields: Option<Box<FieldDefList>> = None
                 while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+                    var field_is_pub = false
                     if parser_peek(p) == TokenKind::Pub {
                         p = p.advance()
+                        field_is_pub = true
                     }
                     let f_name = p.current_name()
                     p = p.expect_ident()
@@ -1948,7 +2150,7 @@ impl Parser {
                     p = ty_pair.0
                     let f_ty = ty_pair.1
                     let f_span = p.span_from(v_start)
-                    let fdef = FieldDef { name: f_name, ty: f_ty, span: f_span }
+                    let fdef = FieldDef { name: f_name, ty: f_ty, is_pub: field_is_pub, span: f_span }
                     rev_fields = Some(Box::new(FieldDefList { head: fdef, tail: rev_fields }))
                     if parser_peek(p) == TokenKind::Comma {
                         p = p.advance()
@@ -1956,6 +2158,40 @@ impl Parser {
                 }
                 p = p.expect(TokenKind::RBrace)
                 v_fields = reverse_field_def_list_opt(rev_fields)
+            } else if parser_peek(p) == TokenKind::LParen {
+                // Tuple variant: Variant(Type1, Type2). Recorded as positional fields
+                // `_0`, `_1`, ... so the checker sees a payload-bearing variant and can
+                // refuse its construction with E264 (payload variants have no lowering
+                // in this compiler). Before this, the `(` was a parse error whose
+                // message printed raw token-kind integers.
+                p = p.advance()  // skip (
+                var rev_tfields: Option<Box<FieldDefList>> = None
+                var tidx: i64 = 0
+                while parser_peek(p) != TokenKind::RParen && parser_peek(p) != TokenKind::Eof {
+                    let ty_pair_t = p.parse_type()
+                    p = ty_pair_t.0
+                    let t_ty = ty_pair_t.1
+                    let t_name = if tidx == 0 { make_name("_0") }
+                        else if tidx == 1 { make_name("_1") }
+                        else if tidx == 2 { make_name("_2") }
+                        else if tidx == 3 { make_name("_3") }
+                        else if tidx == 4 { make_name("_4") }
+                        else if tidx == 5 { make_name("_5") }
+                        else if tidx == 6 { make_name("_6") }
+                        else { make_name("_7") }
+                    let t_span = p.span_from(v_start)
+                    let tdef = FieldDef { name: t_name, ty: t_ty, is_pub: true, span: t_span }
+                    rev_tfields = Some(Box::new(FieldDefList { head: tdef, tail: rev_tfields }))
+                    tidx = tidx + 1
+                    if parser_peek(p) == TokenKind::Comma {
+                        p = p.advance()
+                    } else if parser_peek(p) != TokenKind::RParen {
+                        // Malformed element list: stop and let expect(RParen) report it.
+                        break
+                    }
+                }
+                p = p.expect(TokenKind::RParen)
+                v_fields = reverse_field_def_list_opt(rev_tfields)
             }
 
             let v_span = p.span_from(v_start)
@@ -2055,7 +2291,9 @@ impl Parser {
                     // `false` here was an ABI mismatch (bool bits read as a Visibility) that
                     // corrupted the call and SIGSEGV'd on every impl method; it built only
                     // because the type error is a non-fatal warning. Methods default private.
+                    ITEMS_IN_IMPL = 1
                     let pair2 = p.parse_fn_item(method_visibility, false)
+                    ITEMS_IN_IMPL = 0
                     p = pair2.0
                     let method = pair2.1
                     rev_methods_opt = Some(Box::new(ItemList { head: method, tail: rev_methods_opt }))
@@ -2479,14 +2717,14 @@ impl Parser {
         let target_ty = target_pair.1
 
         var objective_name = empty_name()
-        if parser_peek(p) == TokenKind::Objective {
+        if parser_at_kw(p, TokenKind::Objective) {
             p = p.advance()
             objective_name = p.current_name()
             p = p.expect_ident()
         }
 
         var route_name = empty_name()
-        if parser_peek(p) == TokenKind::Route {
+        if parser_at_kw(p, TokenKind::Route) {
             p = p.advance()
             route_name = p.current_name()
             p = p.expect_ident()
@@ -2575,14 +2813,14 @@ impl Parser {
         let target_ty = target_pair.1
 
         var strategy_name = empty_name()
-        if parser_peek(p) == TokenKind::Strategy {
+        if parser_at_kw(p, TokenKind::Strategy) {
             p = p.advance()
             strategy_name = p.current_name()
             p = p.expect_ident()
         }
 
         var route_name = empty_name()
-        if parser_peek(p) == TokenKind::Route {
+        if parser_at_kw(p, TokenKind::Route) {
             p = p.advance()
             route_name = p.current_name()
             p = p.expect_ident()
@@ -2671,7 +2909,7 @@ impl Parser {
         let target_ty = target_pair.1
 
         var route_name = empty_name()
-        if parser_peek(p) == TokenKind::Route {
+        if parser_at_kw(p, TokenKind::Route) {
             p = p.advance()
             route_name = p.current_name()
             p = p.expect_ident()
@@ -2690,14 +2928,14 @@ impl Parser {
                 break
             }
 
-            if parser_peek(p) == TokenKind::Require {
+            if parser_at_kw(p, TokenKind::Require) {
                 let req_pair = p.parse_policy_requirement()
                 p = req_pair.0
                 rev_requirements_opt = Some(Box::new(PolicyRequirementList {
                     head: req_pair.1,
                     tail: rev_requirements_opt,
                 }))
-            } else if parser_peek(p) == TokenKind::MaxSteps {
+            } else if parser_at_kw(p, TokenKind::MaxSteps) {
                 p = p.advance()
                 if parser_peek(p) == TokenKind::IntLit {
                     max_steps = p.current().int_value
@@ -2707,7 +2945,7 @@ impl Parser {
                     p.error_count = p.error_count + 1
                     p = p.advance()
                 }
-            } else if parser_peek(p) == TokenKind::RollbackRoute {
+            } else if parser_at_kw(p, TokenKind::RollbackRoute) {
                 p = p.advance()
                 rollback_route_name = p.current_name()
                 p = p.expect_ident()
@@ -2783,7 +3021,7 @@ impl Parser {
         let target_ty = target_pair.1
 
         var route_name = empty_name()
-        if parser_peek(p) == TokenKind::Route {
+        if parser_at_kw(p, TokenKind::Route) {
             p = p.advance()
             route_name = p.current_name()
             p = p.expect_ident()
@@ -2801,14 +3039,14 @@ impl Parser {
                 break
             }
 
-            if parser_peek(p) == TokenKind::Require {
+            if parser_at_kw(p, TokenKind::Require) {
                 let req_pair = p.parse_policy_requirement()
                 p = req_pair.0
                 rev_requirements_opt = Some(Box::new(PolicyRequirementList {
                     head: req_pair.1,
                     tail: rev_requirements_opt,
                 }))
-            } else if parser_peek(p) == TokenKind::RollbackRoute {
+            } else if parser_at_kw(p, TokenKind::RollbackRoute) {
                 p = p.advance()
                 rollback_route_name = p.current_name()
                 p = p.expect_ident()
@@ -2989,7 +3227,7 @@ impl Parser {
                 break
             }
 
-            if parser_peek(p) == TokenKind::Objective {
+            if parser_at_kw(p, TokenKind::Objective) {
                 let obj_pair = p.parse_alternative_objective_def()
                 p = obj_pair.0
                 rev_objectives_opt = Some(Box::new(AlternativeObjectiveDefList {
@@ -3266,7 +3504,7 @@ impl Parser {
     fn parse_transition_step_def(self) -> (Parser, TransitionStepDef) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self
-        if parser_peek(p) == TokenKind::Step {
+        if parser_at_kw(p, TokenKind::Step) {
             p = p.advance()
         } else {
             p.had_error = true
@@ -3296,7 +3534,7 @@ impl Parser {
                 let value_box = parser_take_expr_box()
                 value_expr = *value_box
                 have_value = true
-            } else if parser_peek(p) == TokenKind::Require {
+            } else if parser_at_kw(p, TokenKind::Require) {
                 let req_pair = p.parse_policy_requirement()
                 p = req_pair.0
                 rev_requirements_opt = Some(Box::new(PolicyRequirementList {
@@ -3425,7 +3663,7 @@ impl Parser {
         let target_ty = target_pair.1
 
         var route_name = empty_name()
-        if parser_peek(p) == TokenKind::Route {
+        if parser_at_kw(p, TokenKind::Route) {
             p = p.advance()
             route_name = p.current_name()
             p = p.expect_ident()
@@ -3820,7 +4058,7 @@ impl Parser {
 
     fn parse_policy_requirement(self) -> (Parser, PolicyRequirement) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
-        var p = self.expect(TokenKind::Require)
+        var p = if parser_at_kw(self, TokenKind::Require) { self.advance() } else { self.expect(TokenKind::Require) }
 
         let metric_name = p.current_name()
         p = p.expect_ident()
@@ -4387,6 +4625,40 @@ impl Parser {
         let start = self.current_span()
         var p = self.advance()  // skip 'extern'
         if parser_peek(p) == TokenKind::StringLit { p = p.advance() }
+        // Optional library association: from "library_name" (byte-identity model for Fase 2/A+B)
+        var lib_identity_buf: [i8; 256] = [0; 256]
+        var lib_identity_len: i64 = 0
+        if parser_peek(p) == TokenKind::Ident {
+            let potential_from = p.current_name()
+            if potential_from.len == 4
+                && potential_from.buf[0] == (102 as i8)  // 'f'
+                && potential_from.buf[1] == (114 as i8)  // 'r'
+                && potential_from.buf[2] == (111 as i8)  // 'o'
+                && potential_from.buf[3] == (109 as i8)  // 'm'
+            {
+                p = p.advance()  // consume 'from'
+                if parser_peek(p) == TokenKind::StringLit {
+                    p = p.advance()  // consume library name string
+                    let lib_name = p.current_name()
+                    let raw_str = lib_name.buf
+                    let raw_len = lib_name.len
+                    var copy_len: i64 = 0
+                    if raw_len > 255 { copy_len = 255 } else { copy_len = raw_len }
+                    var k: i64 = 0
+                    while k < copy_len {
+                        lib_identity_buf[k as usize] = raw_str[k as usize]
+                        k = k + 1
+                    }
+                    lib_identity_len = copy_len
+                        CURRENT_DYNLINK_IDENTITY_LEN = copy_len
+                        var g_idx: i64 = 0
+                        while g_idx < copy_len {
+                            CURRENT_DYNLINK_IDENTITY[g_idx as usize] = lib_identity_buf[g_idx as usize]
+                            g_idx = g_idx + 1
+                        }
+                }
+            }
+        }
         if parser_peek(p) == TokenKind::LBrace {
             // Re-entrant brace form: consume '{', arm the block state, and
             // return the FIRST declaration's wrapper via the shared
@@ -4783,9 +5055,9 @@ fn parser_name_is_metrics(name: Name) -> bool with Panic, Div {
 }
 
 pub fn copy_string_list_to_name(seg: StringList) -> Name with Mut, Panic, Div {
-    var n = Name { buf: [0; 128], len: seg.head_len }
+    var n = Name { buf: [0; 384], len: seg.head_len }
     var i: i64 = 0
-    while i < seg.head_len && i < 128 {
+    while i < seg.head_len && i < 384 {
         n.buf[i] = seg.head_buf[i]
         i = i + 1
     }
@@ -4815,7 +5087,7 @@ fn name_eq_str(n: Name, s: [i8; 64], slen: i64) -> bool with Mut, Panic, Div {
 }
 
 fn make_short_name(s: [i8; 64], slen: i64) -> Name with Mut, Panic, Div {
-    var out = Name { buf: [0; 128], len: 0 }
+    var out = Name { buf: [0; 384], len: 0 }
     var i: i64 = 0
     while i < slen && i < 64 && i < 128 {
         out.buf[i as usize] = s[i as usize]
@@ -5511,6 +5783,122 @@ fn parse_study_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mu
 }
 
 // ============================================================
+// ============================================================
+// causal graph declaration parser (Madaros side of Sprint 20 Track CI)
+// ============================================================
+//
+//     causal graph mundo {
+//         hora -> hrv        // a directed cause
+//         fc  <-> hrv        // an unmeasured common cause
+//     }
+//
+// `causal` and `graph` are contextual: neither is a keyword, so no existing
+// program that uses either as an identifier changes meaning. The block records
+// itself into the CG_* registry in parser/ast.sio and the Item is dropped from
+// the stream, exactly as a claim is -- nothing resolves against a graph.
+fn parse_causal_graph_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    let start = p.current_span()
+    var pa = p.advance()
+    pa = pa.advance()
+    var name = empty_name()
+    if parser_peek(pa) == TokenKind::Ident {
+        name = pa.current_name()
+        pa = pa.expect_ident()
+    }
+    pa = pa.expect(TokenKind::LBrace)
+    CG_DECLARED = 1
+    var guard: i64 = 0
+    while parser_peek(pa) != TokenKind::RBrace && !parser_at_eof(pa) && guard < 4096 {
+        guard = guard + 1
+        if parser_peek(pa) == TokenKind::Newline || parser_peek(pa) == TokenKind::Semi || parser_peek(pa) == TokenKind::Comma {
+            pa = pa.advance()
+            continue
+        }
+        if parser_peek(pa) != TokenKind::Ident {
+            pa = pa.advance()
+            continue
+        }
+        let a_name = pa.current_name()
+        let a = ast_cg_intern_node(parser_cg_name_hash(a_name))
+        pa = pa.advance()
+        // `->` is one token. `<->` is not: the lexer splits it, and which way it
+        // splits depends on whether `<-` won the longest match, so both shapes
+        // are accepted rather than assuming one.
+        var directed: i64 = 0 - 1
+        if parser_peek(pa) == TokenKind::Arrow {
+            directed = 1
+            pa = pa.advance()
+        } else if parser_peek(pa) == TokenKind::LeftArrow && parser_peek_ahead(pa, 1) == TokenKind::Gt {
+            directed = 0
+            pa = pa.advance()
+            pa = pa.advance()
+        } else if parser_peek(pa) == TokenKind::Lt && parser_peek_ahead(pa, 1) == TokenKind::Arrow {
+            directed = 0
+            pa = pa.advance()
+            pa = pa.advance()
+        }
+        if directed >= 0 && parser_peek(pa) == TokenKind::Ident {
+            let b_name = pa.current_name()
+            let b = ast_cg_intern_node(parser_cg_name_hash(b_name))
+            ast_cg_add_edge(a, b, directed)
+            pa = pa.advance()
+        }
+    }
+    pa = pa.expect(TokenKind::RBrace)
+    let span = pa.span_from(start)
+
+    (pa, Item {
+        kind: ItemKind::ItemCausalGraph,
+        span: span,
+        visibility: visibility,
+        name: name,
+        fn_def: None,
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        policy_def: None,
+        acquisition_policy_def: None,
+        recourse_policy_def: None,
+        decision_policy_def: None,
+        deferral_policy_def: None,
+        transition_policy_def: None,
+        transition_protocol_def: None,
+        monitoring_policy_def: None,
+        alternative_policy_def: None,
+        alternative_frontier_def: None,
+        models_def: None,
+        validation_def: None,
+        audit_def: None,
+        use_path: empty_path(),
+        use_glob: false,
+        use_items: None,
+        effect_def: None,
+        session_decl: None,
+        trait_def: None,
+        algebra_def: None,
+        study_def: None,
+        ontology_def: None,
+    })
+}
+
+// FNV-1a, reduced modulo a prime each step. This MUST stay byte-identical to
+// indep_var_id in check/check.sio: a claim's variable ids are produced there and
+// looked up against the node ids produced here, and two hashes that agree today
+// but drift later would silently stop matching -- every claim would then name a
+// variable "not in the graph" instead of being discharged.
+pub fn parser_cg_name_hash(n: Name) -> i64 with Mut, Panic, Div {
+    var h: i64 = 2166136261
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        h = h ^ (n.buf[i as usize] as i64)
+        h = (h * 16777619) % 1073741789
+        i = i + 1
+    }
+    if h < 0 { h = 0 - h }
+    h
+}
+
 // Ontology declaration parser
 // ============================================================
 // Parses: ontology Name { class A; class B subclass_of A; disjoint X, Y }

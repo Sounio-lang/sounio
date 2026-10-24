@@ -14,7 +14,7 @@
 // Algorithms:
 //   sqrt   — Newton-Raphson (20 iterations)
 //   ln     — Range reduction to [0.5, 2) + artanh series
-//   exp    — Range reduction by ln2 + Taylor series (25 terms)
+//   exp    — Cody-Waite ln2 reduction + degree-13 polynomial, full f64 range (#846)
 //   sin    — Range reduction to [-pi, pi] + Taylor series (15 terms)
 //   cos    — Range reduction to [-pi, pi] + Taylor series (15 terms)
 //   atan   — Argument reduction + Taylor series
@@ -91,20 +91,19 @@ fn min_i32(a: i32, b: i32) -> i32 {
 // reduction is bit-deterministic and adds at worst ~30 multiplications
 // for f64-representable inputs.
 pub fn sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x != x { return x }
+    if x == 0.0 && x == 1.0 { return x }
+    // Preserve the existing nonpositive-input sentinel.
     if x <= 0.0 { return 0.0 }
+    if !is_finite(x) { return x }
     var v = x
-    var s = 1.0
-    while v < 1.0 {
-        v = v * 4.0
-        s = s * 2.0
-    }
+    var scale = 1.0
+    while v < 1.0 { v = v * 4.0; scale = scale * 0.5 }
+    while v >= 4.0 { v = v * 0.25; scale = scale * 2.0 }
     var y = v
-    var i = 0
-    while i < 20 {
-        y = 0.5 * (y + v / y)
-        i = i + 1
-    }
-    y / s
+    var i: i64 = 0
+    while i < 20 { y = 0.5 * (y + v / y); i = i + 1 }
+    y * scale
 }
 
 // =============================================================================
@@ -114,9 +113,14 @@ pub fn sqrt(x: f64) -> f64 with Mut, Div, Panic {
 // where m in [0.5, 2). Series: ln(m) = 2*(t + t^3/3 + t^5/5 + ...)
 // with t = (m-1)/(m+1)
 
-fn ln(x: f64) -> f64 with Mut, Div, Panic {
+fn ln_core(x: f64) -> f64 with Mut, Div {
     if x <= 0.0 { return 0.0 - 1.0e30 }
     if x == 1.0 { return 0.0 }
+    // +inf is the one input the halving loop below cannot reduce: inf / 2 == inf,
+    // so it never exits. For every finite x >= 2 the halving is exact and x / 2 < x.
+    // ln(+inf) = +inf, as C11 Annex F.10.3.7. The test uses only ordered compares,
+    // so NaN fails it and still propagates through the series as before.
+    if x / 2.0 == x { return x }
 
     // Range reduce to [0.5, 2)
     var m = x
@@ -147,65 +151,94 @@ fn ln(x: f64) -> f64 with Mut, Div, Panic {
     return ln_m + (e_val as f64) * ln2()
 }
 
+// Legacy policy preserved; checked callers can avoid its domain sentinel.
+pub fn ln(x: f64) -> f64 with Mut, Div, Panic { ln_core(x) }
+pub struct CheckedLog { pub status:i64, pub value:f64 }
+// 0 available, 1 nonpositive domain, 2 nonfinite input/result.
+pub fn ln_checked_into(x:f64,out:&!CheckedLog) -> i64 with Mut, Div {
+    out.status=2
+    out.value=0.0
+    if !is_finite(x) { return 2 }
+    if x <= 0.0 { out.status=1;return 1 }
+    let value=ln_core(x)
+    if !is_finite(value) { return 2 }
+    out.status=0
+    out.value=value
+    0
+}
+pub fn ln_checked(x:f64) -> CheckedLog with Mut, Div {
+    var out=CheckedLog{status:2,value:0.0}
+    let ignored=ln_checked_into(x,&!out)
+    out
+}
+
 // Common logarithm
-fn log10(x: f64) -> f64 with Mut, Div, Panic {
+pub fn log10(x: f64) -> f64 with Mut, Div, Panic {
     ln(x) / ln10()
 }
 
 // Base-2 logarithm
-fn log2(x: f64) -> f64 with Mut, Div, Panic {
+pub fn log2(x: f64) -> f64 with Mut, Div, Panic {
     ln(x) / ln2()
 }
 
 // =============================================================================
-// Exponential — range reduction + Taylor
+// Exponential — Cody–Waite ln2 reduction + degree-13 polynomial (#846)
 // =============================================================================
-// exp(x) = 2^k * exp(r) where r = x - k*ln2, |r| < ln2
+// exp(x) = 2^k * exp(r),  k = round(x / ln2),  r = x - k*ln2,  |r| <= ln2/2.
+//
+// ln2 is split into a high part (exactly representable times any |k| <= 1075)
+// and a low correction, so r carries no cancellation error. On |r| <= 0.3466
+// the degree-13 Taylor polynomial has truncation error < 4e-18 relative.
+// 2^k is assembled from the binary digits of |k| (no loop), split in two
+// halves so neither factor over/underflows before the final product; the
+// result is exact to a few ulp over the whole f64 domain:
+//   x > 709.78  -> +inf,   x < -745.13 -> 0,   NaN -> NaN.
+//
+// This is the shared exp that the per-module helpers listed in #846 delegate
+// to (`scripts/ci/stdlib_exp_helpers_gate.sh`). It is loop-free and therefore
+// effect-free, so helpers without an effect row can call it.
 
-fn exp(x: f64) -> f64 with Mut, Div, Panic {
-    if x > 500.0 { return 1.0e200 }
-    if x < -500.0 { return 0.0 }
+fn exp_pow2_bit(m: i64, bit: i64, f: f64) -> f64 {
+    if ((m / bit) % 2) != 0 { f } else { 1.0 }
+}
 
-    // Range reduce: find k such that r = x - k*ln2 is in [-ln2/2, ln2/2]
-    var k_f = x / ln2()
-    var k: i32 = 0
-    if k_f >= 0.0 {
-        k = k_f as i32
-    } else {
-        k = (k_f as i32) - 1
-    }
-    let r = x - (k as f64) * ln2()
+// 2^m for 0 <= m < 1024. The squares are built by multiplication (exact in
+// binary64), so no large decimal literal has to be parsed correctly.
+fn exp_pow2_pos(m: i64) -> f64 {
+    let p16 = 65536.0
+    let p32 = p16 * p16
+    let p64 = p32 * p32
+    let p128 = p64 * p64
+    let p256 = p128 * p128
+    let p512 = p256 * p256
+    let a = exp_pow2_bit(m, 1, 2.0) * exp_pow2_bit(m, 2, 4.0) * exp_pow2_bit(m, 4, 16.0)
+    let b = exp_pow2_bit(m, 8, 256.0) * exp_pow2_bit(m, 16, p16)
+    let c = exp_pow2_bit(m, 32, p32) * exp_pow2_bit(m, 64, p64)
+    let d = exp_pow2_bit(m, 128, p128) * exp_pow2_bit(m, 256, p256)
+    let e = exp_pow2_bit(m, 512, p512)
+    a * b * c * d * e
+}
 
-    // Taylor series for exp(r) where |r| < ln2
-    var sum = 1.0
-    var term = 1.0
-    var n = 1
-    while n < 25 {
-        term = term * r / (n as f64)
-        sum = sum + term
-        n = n + 1
-    }
+fn exp_pow2(m: i64) -> f64 {
+    if m >= 0 { exp_pow2_pos(m) } else { 1.0 / exp_pow2_pos(0 - m) }
+}
 
-    // Multiply by 2^k
-    var result = sum
-    if k >= 0 {
-        var i = 0
-        while i < k {
-            result = result * 2.0
-            i = i + 1
-        }
-    } else {
-        var i = 0
-        while i < (0 - k) {
-            result = result / 2.0
-            i = i + 1
-        }
-    }
-    return result
+pub fn exp(x: f64) -> f64 {
+    if x != x { return x }
+    if x > 709.782712893384 { return 1.0e308 * 10.0 }
+    if x < -745.1332191019412 { return 0.0 }
+    let q = x * 1.4426950408889634
+    let k: i64 = if q >= 0.0 { (q + 0.5) as i64 } else { (q - 0.5) as i64 }
+    let kf = k as f64
+    let r = (x - kf * 6.93147180369123816490e-01) - kf * 1.90821492927058770002e-10
+    let p = 1.0 + r * (1.0 + r * (0.5 + r * (1.6666666666666666e-01 + r * (4.1666666666666664e-02 + r * (8.3333333333333332e-03 + r * (1.3888888888888889e-03 + r * (1.9841269841269841e-04 + r * (2.4801587301587302e-05 + r * (2.7557319223985893e-06 + r * (2.7557319223985888e-07 + r * (2.5052108385441720e-08 + r * (2.0876756987868100e-09 + r * 1.6059043836821613e-10))))))))))))
+    let k1 = k / 2
+    p * exp_pow2(k1) * exp_pow2(k - k1)
 }
 
 // General power: x^n = exp(n * ln(x))
-fn pow(x: f64, n: f64) -> f64 with Mut, Div, Panic {
+pub fn pow(x: f64, n: f64) -> f64 with Mut, Div, Panic {
     if x == 0.0 {
         if n > 0.0 { return 0.0 }
         else { return 1.0e30 }
@@ -221,7 +254,7 @@ fn pow(x: f64, n: f64) -> f64 with Mut, Div, Panic {
 // =============================================================================
 
 // Cosine via Taylor series (range-reduced to [-pi, pi])
-fn cos(x: f64) -> f64 with Mut, Div, Panic {
+pub fn cos(x: f64) -> f64 with Mut, Div, Panic {
     var a = x
     let twopi = two_pi()
     while a >= twopi { a = a - twopi }
@@ -241,9 +274,28 @@ fn cos(x: f64) -> f64 with Mut, Div, Panic {
     return sum
 }
 
-// Sine via cos(x - pi/2)
-fn sin(x: f64) -> f64 with Mut, Div, Panic {
-    return cos(x - half_pi())
+// Direct sine series preserves relative accuracy near zero.
+pub fn sin(x: f64) -> f64 with Mut, Div, Panic {
+    var a = x
+    let twopi = two_pi()
+    while a > pi() { a = a - twopi }
+    while a < 0.0 - pi() { a = a + twopi }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n: i64 = 1
+    while n < 15 {
+        term = (0.0 - term) * a2 / ((2 * n) * (2 * n + 1)) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+pub fn is_finite(x: f64) -> bool {
+    if x != x { return false }
+    if x == 0.0 && x == 1.0 { return false }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    ax <= 1.7976931348623157e308
 }
 
 // Tangent
@@ -258,8 +310,15 @@ pub fn tan(x: f64) -> f64 with Mut, Div, Panic {
 // =============================================================================
 
 // atan via Taylor series with argument reduction
-// For |x| <= 1: atan(x) = x - x^3/3 + x^5/5 - x^7/7 + ...
-// For |x| > 1: atan(x) = pi/2 - atan(1/x)
+// For |x| > 1:            atan(x) = pi/2 - atan(1/x)   (sign-adjusted)
+// For tan(pi/8) < |x| <= 1: atan(x) = pi/4 + atan((x - 1)/(x + 1))
+// For |x| <= tan(pi/8):   atan(x) = x - x^3/3 + x^5/5 - x^7/7 + ...
+// The middle reduction (#2507): the series converges like |x|^(2k+1), so at
+// |x| = 1 forty terms left atan(1) = 0.779149 instead of pi/4 = 0.785398, and
+// derivatives taken through the body (hessian_of on lean_single) saw the
+// truncated polynomial: atan''(1) came out -40 instead of -0.5. With
+// |t| <= tan(pi/8) ~ 0.4142 the same forty terms are converged to the last
+// bit, for the value and for its derivatives.
 pub fn atan(x: f64) -> f64 with Mut, Div, Panic {
     if x > 1.0 {
         return half_pi() - atan(1.0 / x)
@@ -267,7 +326,13 @@ pub fn atan(x: f64) -> f64 with Mut, Div, Panic {
     if x < -1.0 {
         return 0.0 - half_pi() - atan(1.0 / x)
     }
-    // |x| <= 1: Taylor series
+    if x > 0.41421356237309503 {
+        return half_pi() / 2.0 + atan((x - 1.0) / (x + 1.0))
+    }
+    if x < -0.41421356237309503 {
+        return 0.0 - atan(0.0 - x)
+    }
+    // |x| <= tan(pi/8): Taylor series
     var sum = x
     var term = x
     let x2 = x * x
@@ -530,7 +595,7 @@ fn softplus(x: f64) -> f64 with Mut, Div, Panic {
 }
 
 // Log-sum-exp for two values: ln(exp(a) + exp(b))
-fn log_sum_exp(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+pub fn log_sum_exp(a: f64, b: f64) -> f64 with Mut, Div, Panic {
     let m = max(a, b)
     m + ln(exp(a - m) + exp(b - m))
 }

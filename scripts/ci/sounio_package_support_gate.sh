@@ -75,7 +75,7 @@ import sys
 
 root = Path(sys.argv[1])
 required = {
-    "docs/compiler/KNOWN_LIMITATIONS.md": [
+    "docs/compiler/MATURITY.md": [
         "Local `~/.sounio/registry/` only. No public registry.",
     ],
     "docs/ecosystem/REGISTRY_ARCHITECTURE.md": [

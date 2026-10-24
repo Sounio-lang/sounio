@@ -184,3 +184,80 @@ keyword existed. What they no longer describe is `Input` specifically:
 | `Knowledge[f64, Input]` | `error[E241]` (bare Ident, no comparison) | parses, provenance = `AstProvInput` |
 | `Knowledge<f64, Input>` | parse error (`Input` was `Ident`, `>` eaten as `CmpGt`) | parses |
 | `Knowledge[f64, Source]` | `error[E241]` | `error[E241]` (unchanged) |
+
+## Addendum 2026-09-01 — angle-form probes exist; source-built sister pin closes the angle-form half
+
+The 2026-08-23 "angle form is loud, bracket form is silent" addendum above
+referenced three probe files (`angle_source.sio`, `angle_literature.sio`,
+`angle_input.sio`) that **did not exist on disk at the time** — the addendum
+was a forward-pointing receipt of behaviour, not a record of files. This
+addendum grounds that claim: the three probe files are now in
+`docs/audit/probes/knowledge-annotation-parser-coverage-2026-08-19/`, and the
+source-built sister pin exercises them.
+
+### Files added (this branch)
+
+| Probe | Form | Empirical outcome, current main |
+|---|---|---|
+| `angle_source.sio` | `Knowledge<f64, Source>` | **parse fail** — Source is an Ident; the angle-form component loop refuses it before the bracket-form epsilon sink can swallow it. |
+| `angle_literature.sio` | `Knowledge<f64, Literature>` | **parse fail** — same path as Source. |
+| `angle_input.sio` | `Knowledge<f64, Input>` | **check OK** — `Input` is a lexer keyword (PR #2229, commit 1adec5e731); the angle-form path resolves it to `AstProvInput` via the construction arm added by the same ruling. |
+| `knowledge_angle_derived.sio` | `Knowledge<f64, Derived>` | **check OK** — pre-existing; `Derived` is a keyword since before the audit. |
+
+### Source-built cross-check matrix (current main, 2026-09-01)
+
+A fresh source-built Madaros was built against current main
+(`bash scripts/ci/build_modular_madaros.sh /tmp/madaros-source-built-main`,
+103192562-byte ELF, 2026-09-01). Cross-checked against the shipped
+`./bin/souc` (which was rebuilt from a newer tree than
+`/tmp/madaros-source-built`):
+
+```
+angle_source              shipped=parse failed   source-built-main=parse failed   AGREE
+angle_literature          shipped=parse failed   source-built-main=parse failed   AGREE
+angle_input               shipped=check: OK      source-built-main=check: OK      AGREE
+knowledge_angle_derived   shipped=check: OK      source-built-main=check: OK      AGREE
+intervention_angle_derived   shipped=check: OK   source-built-main=check: OK      AGREE
+intervention_bracket_only    shipped=parse failed source-built-main=parse failed AGREE
+intervention_bracket_derived shipped=parse failed source-built-main=parse failed AGREE
+validated_bracket_derived    shipped=parse failed source-built-main=parse failed AGREE
+```
+
+Both ELFs agree on every angle-form Knowledge probe, on every wrapper probe,
+and on the tripwire the previous addendum left open. The shipped ELF being
+newer than the audit's `2026-08-23` source-built does not change the
+agreement: the question is whether source-current and shipped-current agree,
+and they do.
+
+### Tripwire behaviour
+
+`scripts/dev/knowledge_annotation_parser_coverage_source_built.sh` now
+covers two halves:
+
+1. The wrapper bracket closure (PR #2108) — `intervention_bracket_only`,
+   `intervention_bracket_derived`, `validated_bracket_derived` must
+   parse-fail; `intervention_angle_derived` must check OK.
+2. The angle-form Knowledge closure (this addendum) —
+   `knowledge_angle_derived` and `angle_input` must check OK;
+   `angle_source` and `angle_literature` must parse-fail.
+
+Verified against the *older* `/tmp/madaros-source-built` (built 2026-08-23,
+before PR #2229), the pin **fails** on `angle_input` with the expected
+diagnostic (`expected check OK, got parse failed`) — the tripwire is live.
+Rebuilt against current main, the pin **passes**.
+
+The source-built pin does not retest bracket-form Knowledge probes
+(`source.sio`, `literature.sio`, `int_skip.sio`, `typo_ident.sio`,
+`derived_eps.sio`). Those are exercised by the shipped pin's dynamic mode
+and the Madaros Witness Gate; including them here would duplicate work
+without adding a cross-check the shipped pin already performs.
+
+### Why the previous addendum's `angle_input = parse fail` row is now stale
+
+The 2026-08-23 addendum was measured before PR #2229 (commit 1adec5e731)
+made `Input` a lexer keyword. The row at the time was correct. The
+behaviour moved under #2229; the row did not, until the 2026-08-27
+"Input" addendum above corrected the bracket-form case but left the
+angle-form row untouched. This addendum is the matching correction for
+the angle-form case, plus the receipts (probe files + source-built
+cross-check).

@@ -777,3 +777,31 @@ lean_lib «SounioFoMultimodFragment» where
 -- lane -- so it keeps its entry, or the file would sit in the tree unbuilt.
 @[default_target]
 lean_lib «SounioZDChi» where
+
+-- Catalysis-mechanism suite: independent Lean4 proof oracle for two
+-- enzyme-kinetics algebraic identities (enzyme conservation, Hill
+-- half-saturation). Pure Rat-field algebra; no Mathlib, no other
+-- Sounio-lean import — see file header for the dependency rationale.
+@[default_target]
+lean_lib «SounioCatalysisKinetics» where
+
+-- Surface microkinetics: site conservation as an iff, the dissociative
+-- (hydrogen) isotherm without square roots, and the proof that the
+-- dual-site Langmuir-Hinshelwood closed form IS the mechanism's
+-- quasi-equilibrium limit. Backs stdlib/chemistry/surface.sio.
+@[default_target]
+lean_lib «SounioSurfaceKinetics» where
+
+@[default_target]
+lean_lib «SounioPireusMultiProbePartitionV14» where
+
+@[default_target]
+lean_lib «SounioPireusMultiProbePartitionV14AxiomAudit» where
+
+-- Checked dynamic numerical storage: structural contract invariants.
+@[default_target]
+lean_lib «SounioNumericBuffer» where
+
+-- Exact rational sign check for the selected RODAS4 time coefficient.
+@[default_target]
+lean_lib «SounioRodas4TimeConsistency» where

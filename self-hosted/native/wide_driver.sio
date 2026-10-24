@@ -166,17 +166,19 @@ fn wide_copy_batch_relocs(
     var out = wide_relocs
     var i: i64 = 0
     while i < batch_relocs.count {
-        let r = batch_relocs.entries[i as usize]
-        let adjusted_offset = r.offset + batch_code_base
-        if r.kind.kind_code == 1 {
+        let adjusted_offset = NC_RELOC_OFFSET[i as usize] + batch_code_base
+        let r_kind = NC_RELOC_KIND[i as usize]
+        let r_tgt = NC_RELOC_TARGET[i as usize]
+        let r_fn = NC_RELOC_IS_FN[i as usize]
+        if r_kind == 1 {
             // Function call — target_index is global fn_id, keep as-is
-            out = wide_reloc_add(out, adjusted_offset, r.target.target_index, r.target.is_function, 1)
-        } else if r.kind.kind_code == 2 {
+            out = wide_reloc_add(out, adjusted_offset, r_tgt, r_fn, 1)
+        } else if r_kind == 2 {
             // Rodata reference — adjust target by cumulative rodata offset
-            out = wide_reloc_add(out, adjusted_offset, r.target.target_index + rodata_base_offset, 0, 2)
-        } else if r.kind.kind_code == 3 {
+            out = wide_reloc_add(out, adjusted_offset, r_tgt + rodata_base_offset, 0, 2)
+        } else if r_kind == 3 {
             // Data reference — target is absolute within .data, no adjustment needed
-            out = wide_reloc_add(out, adjusted_offset, r.target.target_index, 0, 3)
+            out = wide_reloc_add(out, adjusted_offset, r_tgt, 0, 3)
         }
         i = i + 1
     }
@@ -190,8 +192,8 @@ fn wide_copy_batch_relocs(
 fn wide_copy_batch_code(wide: WideCodeBuffer, batch: CodeBuffer) -> WideCodeBuffer with Mut, Panic {
     var out = wide
     var i: i64 = 0
-    while i < batch.len && out.len < 262144 {
-        out.bytes[out.len as usize] = batch.bytes[i as usize]
+    while i < batch.len && out.len < 262144 && i < nc_code_capacity_bytes() {
+        out.bytes[out.len as usize] = NC_BIG_CODE[i as usize]
         out.len = out.len + 1
         i = i + 1
     }
@@ -203,7 +205,7 @@ fn wide_copy_batch_code(wide: WideCodeBuffer, batch: CodeBuffer) -> WideCodeBuff
 // ============================================================================
 
 fn name_to_string(name: Name) -> string with Mut, Panic, Div {
-    var buf: [i8; 128] = name.buf
+    var buf: [i8; 384] = name.buf
     str_from_bytes(buf, name.len)
 }
 
@@ -248,7 +250,7 @@ fn wide_compile_and_emit(module: &IrModule, output_path: string) -> WideCompileR
         var fi = batch_start
         while fi < batch_end {
             let local_idx = fi - batch_start
-            let func = ir_fn_get(&module, fi as usize)
+            let func = ir_fn_get(module, fi as usize)
             let lowered = native_v2_lower_function_to_machine(func)
             let legal = native_v2_legalize_function(lowered)
             if legal.supported {
@@ -267,14 +269,14 @@ fn wide_compile_and_emit(module: &IrModule, output_path: string) -> WideCompileR
         var oi = batch_start
         while oi < batch_end {
             let local_idx = oi - batch_start
-            wide_fn_offsets[oi as usize] = nc.fn_offsets[local_idx as usize] + batch_code_base
+            wide_fn_offsets[oi as usize] = NC_FN_OFFSETS[local_idx as usize] + batch_code_base
             oi = oi + 1
         }
 
         // Record symbol names
         var si = batch_start
         while si < batch_end {
-            let fn_name = name_to_string(ir_fn_get(&module, si as usize).name)
+            let fn_name = name_to_string(ir_fn_get(module, si as usize).name)
             wide_symbols = wide_add_symbol(wide_symbols, fn_name, wide_fn_offsets[si as usize])
             si = si + 1
         }

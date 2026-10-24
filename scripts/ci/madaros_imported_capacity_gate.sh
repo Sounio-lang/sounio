@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 KEEP_WORK="${SOUNIO_MADAROS_IMPORTED_CAPACITY_GATE_KEEP:-0}"
 
 fail() {
@@ -117,9 +119,32 @@ printf 'use cap_dep::{dep0}\n' >"$BOUNDARY_MAIN"
 emit_local_chain "$BOUNDARY_MAIN" "$((HALF - 1))"
 printf 'fn main() -> i64 { return dep0() + local0() }\n' >>"$BOUNDARY_MAIN"
 
+# Compile via the raw ELF with a longer timeout than bin/madaros's default
+# 300s. This witness is ~IR_MAX_FUNCS live functions across two modules; under
+# CI load it has timed out at 300s (exit 124) after previously going green on
+# the same tree. The wrapper timeout is for ordinary builds, not this probe.
+compile_capacity_witness() {
+  local src="$1" out="$2" log="$3"
+  local stack_kb="${MADAROS_STACK_KB:-524288}"
+  set +e
+  (
+    # Match bin/madaros: raw ELF needs ~512 MiB stack or this probe SEGVs (rc=139).
+    if [[ "$stack_kb" == "0" ]]; then
+      ulimit -s unlimited 2>/dev/null || true
+    else
+      ulimit -s "$stack_kb" 2>/dev/null || true
+    fi
+    ulimit -v "${MADAROS_VMEM_LIMIT_KB:-33554432}" 2>/dev/null || true
+    exec timeout "${SOUNIO_MADAROS_IMPORTED_CAPACITY_TIMEOUT_SEC:-900}" \
+      "$MADAROS_ELF" "$src" -o "$out"
+  ) >"$log" 2>&1
+  local rc=$?
+  set -e
+  printf '%s' "$rc"
+}
+
 set +e
-MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$BOUNDARY_MAIN" -o "$BOUNDARY_OUT" >"$BOUNDARY_LOG" 2>&1
-boundary_compile_rc=$?
+boundary_compile_rc="$(compile_capacity_witness "$BOUNDARY_MAIN" "$BOUNDARY_OUT" "$BOUNDARY_LOG")"
 set -e
 
 if [[ "$boundary_compile_rc" -ne 0 ]]; then
@@ -142,8 +167,7 @@ emit_local_chain "$OVERFLOW_MAIN" "$((LOCALS_OVER - 1))"
 printf 'fn main() -> i64 { return dep0() + local0() }\n' >>"$OVERFLOW_MAIN"
 
 set +e
-MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$OVERFLOW_MAIN" -o "$OUT" >"$LOG" 2>&1
-compile_rc=$?
+compile_rc="$(compile_capacity_witness "$OVERFLOW_MAIN" "$OUT" "$LOG")"
 set -e
 
 if [[ "$compile_rc" -eq 0 ]]; then
@@ -154,6 +178,11 @@ if [[ "$compile_rc" -ge 128 ]]; then
   cat "$LOG" >&2
   fail "aggregate capacity witness terminated by signal rc=$compile_rc"
 fi
+# rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+sounio_expect_failed_exit "$compile_rc" "$LOG" || {
+  cat "$LOG" >&2
+  fail "aggregate capacity witness: not a clean refusal: $(sounio_refusal_reason)"
+}
 if [[ -e "$OUT" ]]; then
   cat "$LOG" >&2
   fail "aggregate capacity rejection left an output artifact: $OUT"

@@ -1,0 +1,70 @@
+// Automatic covering linear domains. Rendering reuses viz::axis exactly.
+use math::pure::{is_finite}
+use viz::axis::{axis_ticks}
+pub struct NiceAxis {
+    pub status: i64, pub lo: f64, pub hi: f64, pub step: f64, pub intervals: i64
+}
+// From the compiler-checked Darwin candidate; bounded decimal step family.
+fn nice_mantissa(m: f64) -> f64 {
+    if m <= 1.0 { 1.0 } else if m <= 2.0 { 2.0 }
+    else if m <= 2.5 { 2.5 } else if m <= 5.0 { 5.0 } else { 10.0 }
+}
+fn nice_ceil_step(raw: f64) -> f64 with Mut, Div {
+    if !is_finite(raw) || raw <= 0.0 { return 0.0 }
+    var m:f64=raw
+    var unit:f64=1.0
+    var guard:i64=0
+    while m >= 10.0 && guard < 324 { m=m/10.0;unit=unit*10.0;guard=guard+1 }
+    while m < 1.0 && guard < 648 { m=m*10.0;unit=unit/10.0;guard=guard+1 }
+    let step:f64=nice_mantissa(m)*unit
+    if !is_finite(step) || step <= 0.0 { return 0.0 }
+    step
+}
+fn nice_floor(v:f64) -> i64 {
+    let i:i64=v as i64
+    if (i as f64) > v { i-1 } else { i }
+}
+fn nice_ceil(v:f64) -> i64 {
+    let i:i64=v as i64
+    if (i as f64) < v { i+1 } else { i }
+}
+// 0 available, 1 invalid input, 2 representation limit, 3 duplicate labels,
+// 4 insufficient interval budget. Failure has intervals=0 and inactive bounds.
+pub fn axis_nice_cover(lo:f64, hi:f64, budget:i64) -> NiceAxis with Mut, Div {
+    var out=NiceAxis{status:1,lo:0.0,hi:0.0,step:0.0,intervals:0}
+    if !is_finite(lo) || !is_finite(hi) || hi <= lo || budget < 1 || budget > 8 { return out }
+    if budget == 1 && lo < 0.0 && hi > 0.0 { out.status=4;return out }
+    let span:f64=hi-lo
+    if !is_finite(span) || span <= 0.0 { out.status=2;return out }
+    var step:f64=nice_ceil_step(span/(budget as f64))
+    var attempt:i64=0
+    while attempt < 20 {
+        if step <= 0.0 || !is_finite(step) { out.status=2;return out }
+        let qlo:f64=lo/step
+        let qhi:f64=hi/step
+        // Exact integer indexing in binary64; also makes the integer cast safe.
+        if !is_finite(qlo) || !is_finite(qhi) || qlo < -9007199254740990.0 || qhi > 9007199254740990.0 {
+            out.status=2;return out
+        }
+        var first:i64=nice_floor(qlo)
+        var last:i64=nice_ceil(qhi)
+        var lower:f64=(first as f64)*step
+        var upper:f64=(last as f64)*step
+        // Outward correction: decimal multiplication must not exclude input.
+        if lower > lo { first=first-1;lower=(first as f64)*step }
+        if upper < hi { last=last+1;upper=(last as f64)*step }
+        if !is_finite(lower) || !is_finite(upper) || !is_finite(upper-lower) { out.status=2;return out }
+        let intervals:i64=last-first
+        if intervals >= 1 && intervals <= budget {
+            let ticks=axis_ticks(lower,upper,intervals)
+            if ticks.status != 0 { out.status=ticks.status;return out }
+            out.status=0;out.lo=lower;out.hi=upper;out.step=step;out.intervals=intervals
+            return out
+        }
+        // Strictly advance in the nice family, independent of rounding at a tie.
+        step=nice_ceil_step(step*1.125)
+        attempt=attempt+1
+    }
+    out.status=4
+    out
+}

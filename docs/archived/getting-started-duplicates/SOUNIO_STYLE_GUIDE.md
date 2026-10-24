@@ -2,8 +2,8 @@
 topic_id: repo.docs.archived.getting-started-duplicates.sounio-style-guide
 authority: archived
 audience: maintainers
-last_validated: 2026-03-07
-validated_by: A7
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.getting-started-duplicates.sounio-style-guide
 -->
 
@@ -17,7 +17,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.getti
 
 Sounio looks like Rust but has DIFFERENT syntax and semantics. This guide covers style, patterns, and conventions.
 
-**Full syntax ref**: [docs/LLM_PROGRAMMING_GUIDE.md](../LLM_PROGRAMMING_GUIDE.md)
+**Full syntax ref**: [docs/LLM_PROGRAMMING_GUIDE.md](../../guide/LLM_PROGRAMMING_GUIDE.md)
 
 ## 1. Basic Syntax
 

@@ -2,8 +2,8 @@
 topic_id: repo.docs.audit.madaros-native-v2-codegen-census-2026-06-19
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-native-v2-codegen-census-2026-06-19
 -->
 

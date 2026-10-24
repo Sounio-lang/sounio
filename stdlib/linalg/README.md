@@ -1,5 +1,43 @@
 # Linalg
 
+## Reusable factors and conditional inference
+
+QR/WLS factor entry points export pivoted upper R and original-order scales
+from the same checked fit; existing point-fit result layouts are preserved.
+See [factor contract](LEAST_SQUARES_FACTORS.md). The statistical layer adds
+conditional covariance/SE/Student intervals under an explicit precision model:
+[weighted inference](../stats/regression/WEIGHTED_INFERENCE.md). Final
+Forge15430:90/90, including every86prior fixture. Fixed source arrays do not
+establish measured speed or RSS superiority.
+
+
+## Checked rectangular least squares
+
+Positive-weight fitting is available through
+`linalg::weighted_least_squares::weighted_qr_least_squares`, with the same
+stride8 and bounded dimensions. The API scales before weighting and uses
+`sqrt(w)/sqrt(maxw)`; raw and normalized weighted residual norms are distinct.
+It validates positive finite weights and leaves the variance model unassessed.
+The shared Householder update preserves tiny top projections in the covered
+extreme-weight cases. Acceptance:15405,86/86, retaining83prior fixtures;
+previous-top control15406 retains84passes and fails two new numerical fixtures.
+See [weighted contract](WEIGHTED_LEAST_SQUARES.md) and
+[execution receipt](../../docs/plans/STATS_WEIGHTED_QR_EXECUTION_2026_10_19.md).
+
+`linalg::least_squares::qr_least_squares` provides borrowed column-pivoted
+Householder least squares for up to256rows and8explicit design columns.
+Physical row stride is8. Column equilibration, recomputed LASSQ norms,
+explicit rank/arithmetic statuses and bounded scratch storage are documented
+in [LEAST_SQUARES.md](LEAST_SQUARES.md).
+
+Native acceptance: Forge/Slurm15383,83/83 including all80previous fixtures;
+independent C++23 quadmath28cases plus real Canvas/SVG calibration consumer.
+An absolute-rank-cutoff fault control15384 compiles and fails the reference,
+retaining82passes. See the
+[execution receipt](../../docs/plans/STATS_MULTIVARIABLE_QR_EXECUTION_2026_10_18.md).
+This bounded full-column-rank solver does not certify every decomposition,
+BLAS path or historical performance claim elsewhere in this README.
+
 ## Overview
 
 High-performance linear algebra: matrices, vectors, decompositions (LU, QR, SVD), sparse operations, and **BLAS FFI acceleration**.

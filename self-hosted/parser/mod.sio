@@ -7,11 +7,34 @@ module parser::mod
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_new, parser_reset_last_errors, parser_reset_truncated_literals, parser_set_last_errors, parser_set_tokens, parser_truncated_literal_count, parser_truncated_literal_first_line, parser_truncated_literal_longest}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_new, parser_prescan_user_box, parser_reset_last_errors, parser_reset_truncated_literals, parser_set_last_errors, parser_set_tokens, parser_truncated_literal_count, parser_truncated_literal_first_line, parser_truncated_literal_longest}
 use parser::types::*
 use parser::exprs::*
 use parser::stmts::*
 use parser::items::*
+use io::env::{read_env}
+
+// SOUNIO_DISABLE_GLOBAL_INIT_IMPL_EXCLUSION=1 (#2661) restores only the recording of
+// impl methods under their bare name in the pure-fn constant-fold table (items.sio
+// ITEMS_IMPL_EXCLUSION_OFF). Unlike the module-scope switch (GVI_SCOPE_OFF, below), the exclusion acts in
+// EVERY compile, single-module included, so this is read at every parse entry point and
+// not only on the SUPPRESS_RESET != 0 path. Independent of
+// SOUNIO_DISABLE_GLOBAL_INIT_MODULE_SCOPE in both directions. Memoised like GVI_SCOPE_OFF.
+var GVI_IMPL_EXCL_CHECKED: i64 = 0
+
+fn parse_gvi_impl_exclusion_init() with IO, Mut, Panic, Div {
+    if GVI_IMPL_EXCL_CHECKED == 0 {
+        GVI_IMPL_EXCL_CHECKED = 1
+        if str_eq(read_env("SOUNIO_DISABLE_GLOBAL_INIT_IMPL_EXCLUSION"), "1") {
+            items_set_impl_exclusion_off()
+        }
+        // #2661: SOUNIO_DUMP_GLOBAL_INIT_TABLE=1 prints every word recorded in the
+        // constant-fold table, with its name and owner (ast.sio ast_gvi_dump_note).
+        if str_eq(read_env("SOUNIO_DUMP_GLOBAL_INIT_TABLE"), "1") {
+            ast_gvi_dump_enable()
+        }
+    }
+}
 
 fn parse_program_loop(mut_p: Parser) -> Program with Mut, IO, Panic, Div, Alloc {
     var p = mut_p
@@ -38,19 +61,33 @@ fn parse_program_loop(mut_p: Parser) -> Program with Mut, IO, Panic, Div, Alloc 
         // Claims are compile-time metadata: parse_claim_item already recorded
         // them in the AST claim registry, so drop them from the item stream.
         // Resolve/check/lower/codegen never observe ItemKind::ItemClaim.
-        if item.kind != ItemKind::ItemClaim {
+        if item.kind != ItemKind::ItemClaim && item.kind != ItemKind::ItemCausalGraph {
             rev_items_opt = Some(Box::new(ItemList { head: item, tail: rev_items_opt }))
         }
     }
 
+    if parser_truncated_literal_count() > 0 {
+        p.had_error = true
+        p.error_count = p.error_count + parser_truncated_literal_count()
+        print("error[E258]")
+        print(": ")
+        print_int(parser_truncated_literal_count())
+        print(" string literal(s) exceed Name capacity (384 bytes incl. quotes); first at line ")
+        print_int(parser_truncated_literal_first_line())
+        print(", longest ")
+        print_int(parser_truncated_literal_longest())
+        print(" bytes.\n")
+        print("   = note: refusing to compile rather than silently truncating string content\n")
+        print("   = help: split the literal, or raise Name capacity with matching IR name-pool stride\n")
+    }
     parser_set_last_errors(p.had_error, p.error_count)
-    // Silent data loss, said out loud. A string literal past Name's 128-byte
-    // buffer is cut at current_name() and the program runs on with the short
-    // one; before this the only way to notice was to compare the output by hand.
+    ast_gvi_dump_flush()
     Program { module_path: empty_path(), items: reverse_item_list_opt(rev_items_opt) }
 }
 
-fn parse_program(tokens: [Token; 2097152], token_count: i64) -> Program with Mut, IO, Panic, Div, Alloc {
+// #1156: by reference, see parser_set_tokens.
+fn parse_program(tokens: &[Token; 2097152], token_count: i64) -> Program with Mut, IO, Panic, Div, Alloc {
+    parse_gvi_impl_exclusion_init()
     parser_reset_last_errors()
     parser_reset_truncated_literals()
     var p = parser_new()
@@ -58,14 +95,17 @@ fn parse_program(tokens: [Token; 2097152], token_count: i64) -> Program with Mut
     // Load tokens into module-global parser storage.
     parser_set_tokens(tokens, token_count)
     p.token_count = token_count
+    parser_prescan_user_box(token_count)
     parse_program_loop(p)
 }
 
 pub fn parse_program_preloaded(token_count: i64) -> Program with Mut, IO, Panic, Div, Alloc {
+    parse_gvi_impl_exclusion_init()
     parser_reset_last_errors()
     parser_reset_truncated_literals()
     var p = parser_new()
     p.token_count = token_count
+    parser_prescan_user_box(token_count)
     let prog = parse_program_loop(p)
     prog
 }
@@ -86,28 +126,62 @@ fn parse_items_loop(mut_p: Parser) -> Option<Box<ItemList>> with Mut, IO, Panic,
         let item = result.1
         if p2.pos <= before_pos { p = p2.advance() } else { p = p2 }
         // See parse_program_loop: claims are metadata, dropped from the stream.
-        if item.kind != ItemKind::ItemClaim {
+        if item.kind != ItemKind::ItemClaim && item.kind != ItemKind::ItemCausalGraph {
             rev_items_opt = Some(Box::new(ItemList { head: item, tail: rev_items_opt }))
         }
     }
-    parser_set_last_errors(p.had_error, p.error_count)
+    // Refuse, do not truncate. A shortened string that still compiles is a lie
+    // (measured 2026-08-17: 128-char println printed 127 and exited 0). Raising
+    // Name to 384 covers self-host (max ~335); anything still past the cap is
+    // error[E258] and fails the build.
     if parser_truncated_literal_count() > 0 {
-        print("warning: ")
+        p.had_error = true
+        p.error_count = p.error_count + parser_truncated_literal_count()
+        print("error[E258]")
+        print(": ")
         print_int(parser_truncated_literal_count())
-        print(" string literal(s) TRUNCATED; first at line ")
+        print(" string literal(s) exceed Name capacity (384 bytes incl. quotes); first at line ")
         print_int(parser_truncated_literal_first_line())
         print(", longest ")
         print_int(parser_truncated_literal_longest())
-        print(" bytes. Name holds 128 including quotes, so the text past 126\n")
-        print("         characters is gone -- silently, at run time.\n")
+        print(" bytes.\n")
+        print("   = note: refusing to compile rather than silently truncating string content\n")
+        print("   = help: split the literal, or raise Name capacity with matching IR name-pool stride\n")
     }
-    // Silent data loss, said out loud. A string literal past Name's 128-byte
-    // buffer is cut at current_name() and the program runs on with the short
-    // one; before this the only way to notice was to compare the output by hand.
+    parser_set_last_errors(p.had_error, p.error_count)
+    ast_gvi_dump_flush()
     reverse_item_list_opt(rev_items_opt)
 }
 
+// SOUNIO_DISABLE_GLOBAL_INIT_MODULE_SCOPE=1 restores the previous bare-name RESOLUTION
+// behaviour: every module keeps serial 0, so the side table is one undifferentiated pool
+// again (ast_gvi_scope then reads the whole table). It exists so a suspected miscompile
+// can be attributed to the module scoping, and so the regression gate can prove its
+// fixtures still collide.
+//
+// It does NOT restore the table's CONTENTS to origin/main: the exclusion of impl methods
+// from the pure-fn constant-fold table (items.sio, ITEMS_IN_IMPL) is an independent
+// behavioural change and is tracked separately (#2661); this switch intentionally does
+// not disable it. Folding both deltas onto one switch would make a rollback more
+// complete but would destroy this knob's attribution power -- flipping it could no
+// longer tell the two changes apart.
+//
+// Memoised: read_env allocates and is never reclaimed.
+var GVI_SCOPE_OFF: i64 = 0
+var GVI_SCOPE_OFF_CHECKED: i64 = 0
+
+fn parse_gvi_scope_disabled() -> bool with IO, Mut, Panic, Div {
+    if GVI_SCOPE_OFF_CHECKED == 0 {
+        GVI_SCOPE_OFF_CHECKED = 1
+        if str_eq(read_env("SOUNIO_DISABLE_GLOBAL_INIT_MODULE_SCOPE"), "1") {
+            GVI_SCOPE_OFF = 1
+        }
+    }
+    GVI_SCOPE_OFF == 1
+}
+
 pub fn parse_items_preloaded(token_count: i64) -> Option<Box<ItemList>> with Mut, IO, Panic, Div, Alloc {
+    parse_gvi_impl_exclusion_init()
     parser_reset_last_errors()
     parser_reset_truncated_literals()
     if GLOBAL_VAR_INIT_SUPPRESS_RESET == 0 {
@@ -117,7 +191,22 @@ pub fn parse_items_preloaded(token_count: i64) -> Option<Box<ItemList>> with Mut
     }
     var p = parser_new()
     p.token_count = token_count
-    parse_items_loop(p)
+    parser_prescan_user_box(token_count)
+    if GLOBAL_VAR_INIT_SUPPRESS_RESET != 0 && !parse_gvi_scope_disabled() {
+        // The side table accumulates across modules: this parse is a NEW module.
+        // Give it its own serial so its records stay distinguishable from a
+        // same-named definition in another module (see ast_gvi_scope).
+        ast_global_var_init_begin_module()
+        items_gvi_prescan_defs(p, token_count)
+    }
+    let items = parse_items_loop(p)
+    if GLOBAL_VAR_INIT_AMBIG_COUNT > 0 {
+        print("warning[global_init_ambiguous]: ")
+        print_int(GLOBAL_VAR_INIT_AMBIG_COUNT)
+        print(" global initializer(s) name a fn or global that two or more other modules define; not folded (left zero)\n")
+        GLOBAL_VAR_INIT_AMBIG_COUNT = 0
+    }
+    items
 }
 
 // ============================================================
