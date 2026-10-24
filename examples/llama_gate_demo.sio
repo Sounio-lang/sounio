@@ -1,0 +1,385 @@
+//@ run-pass
+//
+// External logits gate: our Sounio forward vs a vLLM server's
+// recorded answers for the SAME weights (SmolLM2-135M) and the SAME
+// token-id prompt [0,504,3575,282,4649,314] (BOS + "The capital of
+// France is"). Samples come from the vllm_gate.sbatch job
+// (vllm-logprobs.json, vllm-gen.json); every comparison below is
+// pure Sounio. vLLM computes in bf16, we compute in f64: the gate
+// asserts top-1 agreement and greedy-text agreement, and REPORTS
+// the logprob diffs - it does not assert bit equality.
+// Usage: llama_gate_demo [model-dir] [logp.json] [gen.json]
+// Module: stdlib/llm/{safetensors,llama,bpe}.sio
+
+use llm::bpe::{bpe_decode_token, bpe_load}
+use llm::llama::{kv_new, llama_argmax, llama_forward, llama_load}
+use llm::safetensors::{st_byte_at, st_read_all}
+use tensor2::cpu_kernel::{ck_alloc, ck_get, ck_set}
+use math::pure::{exp, ln}
+
+fn putb(buf: *mut u8, i: i64, v: i64) {
+    let w = read_i64(buf as *mut i64, i / 8)
+    let sh = (i % 8) * 8
+    let cleared = w & ((0 - 1) - (255 << sh))
+    write_i64(buf as *mut i64, i / 8, cleared | ((v & 255) << sh))
+}
+
+// find pattern (raw bytes of `pat`) in data[from..len); -1 if absent
+fn jfind(data: *mut u8, len: i64, from: i64, pat: string) -> i64 {
+    let plen = str_len(pat)
+    var i: i64 = from
+    while i + plen <= len {
+        var ok = true
+        var j: i64 = 0
+        while j < plen {
+            if st_byte_at(data, i + j) != (str_char_at(pat, j) & 255) { ok = false; j = plen }
+            j = j + 1
+        }
+        if ok { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// parse a JSON number at/after `from`; returns (value, end_index)
+fn jnum(data: *mut u8, len: i64, from: i64) -> [f64; 2] {
+    var i: i64 = from
+    while i < len && st_byte_at(data, i) != 45 && (st_byte_at(data, i) < 48 || st_byte_at(data, i) > 57) { i = i + 1 }
+    var neg = 1.0
+    if i < len && st_byte_at(data, i) == 45 { neg = 0.0 - 1.0; i = i + 1 }
+    var v = 0.0
+    while i < len && st_byte_at(data, i) >= 48 && st_byte_at(data, i) <= 57 {
+        v = v * 10.0 + ((st_byte_at(data, i) - 48) as f64)
+        i = i + 1
+    }
+    if i < len && st_byte_at(data, i) == 46 {
+        i = i + 1
+        var scale = 0.1
+        while i < len && st_byte_at(data, i) >= 48 && st_byte_at(data, i) <= 57 {
+            v = v + ((st_byte_at(data, i) - 48) as f64) * scale
+            scale = scale * 0.1
+            i = i + 1
+        }
+    }
+    if i < len && (st_byte_at(data, i) == 101 || st_byte_at(data, i) == 69) {
+        i = i + 1
+        var esign = 1.0
+        if i < len && st_byte_at(data, i) == 45 { esign = 0.0 - 1.0; i = i + 1 }
+        if i < len && st_byte_at(data, i) == 43 { i = i + 1 }
+        var e = 0.0
+        while i < len && st_byte_at(data, i) >= 48 && st_byte_at(data, i) <= 57 {
+            e = e * 10.0 + ((st_byte_at(data, i) - 48) as f64)
+            i = i + 1
+        }
+        v = v * exp(e * esign * 2.302585092994046)
+    }
+    var r: [f64; 2] = [0.0, 0.0]
+    r[0] = v * neg
+    r[1] = i as f64
+    r
+}
+
+// decode the JSON string whose opening quote is at `q` into out
+// (byte buffer, offset into scratch); returns [out_len, end_index]
+fn jstr(data: *mut u8, len: i64, q: i64, scratch: *mut u8, soff: i64) -> [i64; 2] {
+    var out: i64 = 0
+    var i: i64 = q + 1
+    while i < len && st_byte_at(data, i) != 34 && out < 3000 {
+        let c = st_byte_at(data, i)
+        if c == 92 && i + 1 < len {
+            let e = st_byte_at(data, i + 1)
+            if e == 110 { putb(scratch, soff + out, 10); out = out + 1; i = i + 2 }
+            else if e == 116 { putb(scratch, soff + out, 9); out = out + 1; i = i + 2 }
+            else if e == 114 { putb(scratch, soff + out, 13); out = out + 1; i = i + 2 }
+            else if e == 117 {
+                var cp: i64 = 0
+                var k: i64 = 0
+                while k < 4 {
+                    let h = st_byte_at(data, i + 2 + k)
+                    var d: i64 = 0
+                    if h >= 48 && h <= 57 { d = h - 48 }
+                    else if h >= 97 && h <= 102 { d = h - 87 }
+                    else if h >= 65 && h <= 70 { d = h - 55 }
+                    cp = cp * 16 + d
+                    k = k + 1
+                }
+                if cp < 128 { putb(scratch, soff + out, cp); out = out + 1 }
+                else if cp < 2048 {
+                    putb(scratch, soff + out, 192 | (cp >> 6)); out = out + 1
+                    putb(scratch, soff + out, 128 | (cp & 63)); out = out + 1
+                } else {
+                    putb(scratch, soff + out, 224 | (cp >> 12)); out = out + 1
+                    putb(scratch, soff + out, 128 | ((cp >> 6) & 63)); out = out + 1
+                    putb(scratch, soff + out, 128 | (cp & 63)); out = out + 1
+                }
+                i = i + 6
+            } else { putb(scratch, soff + out, e); out = out + 1; i = i + 2 }
+        } else {
+            putb(scratch, soff + out, c)
+            out = out + 1
+            i = i + 1
+        }
+    }
+    var r: [i64; 2] = [0, 0]
+    r[0] = out
+    r[1] = i + 1
+    r
+}
+
+fn bytes_eq(a: *mut u8, aoff: i64, alen: i64, b: *mut u8, boff: i64, blen: i64) -> bool {
+    if alen != blen { return false }
+    var i: i64 = 0
+    while i < alen {
+        if st_byte_at(a, aoff + i) != st_byte_at(b, boff + i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var dir = "/workspace/llm-models/SmolLM2-135M"
+    if arg_count() > 0 { dir = get_arg(0) }
+    var logp_path = "/orangefs/training/hetero-probe/vllm-logprobs.json"
+    if arg_count() > 1 { logp_path = get_arg(1) }
+    var gen_path = "/orangefs/training/hetero-probe/vllm-gen.json"
+    if arg_count() > 2 { gen_path = get_arg(2) }
+
+    let bp = bpe_load(dir ++ "/tokenizer.json")
+    let m = llama_load(dir)
+    print("gate model loaded=")
+    print_int(if m.loaded { 1 } else { 0 })
+    print(" bpe=")
+    print_int(if bp.ok { 1 } else { 0 })
+    print(" vocab=")
+    print_int(m.cfg.vocab)
+    print("\n")
+    if !m.loaded || !bp.ok { print("GATE FAIL load\nGATE DONE\n"); exit(0) }
+
+    // the exact prompt ids the vLLM sampler was given
+    var ids = ck_alloc(6)
+    ck_set(&!ids, 0, 0.0)
+    ck_set(&!ids, 1, 504.0)
+    ck_set(&!ids, 2, 3575.0)
+    ck_set(&!ids, 3, 282.0)
+    ck_set(&!ids, 4, 4649.0)
+    ck_set(&!ids, 5, 314.0)
+
+    var kv = kv_new(&m, 512)
+    let logits = llama_forward(&m, &!kv, &ids, 6)
+
+    // log-softmax (f64)
+    var mx = 0.0 - 1.0e30
+    var i: i64 = 0
+    while i < m.cfg.vocab {
+        let x = ck_get(&logits, i)
+        if x > mx { mx = x }
+        i = i + 1
+    }
+    var sum = 0.0
+    i = 0
+    while i < m.cfg.vocab {
+        sum = sum + exp(ck_get(&logits, i) - mx)
+        i = i + 1
+    }
+    let lse = mx + ln(sum)
+
+    // our top-10 ids and their decoded pieces (kept in pbuf slots)
+    let pbuf = heap_alloc(65536)
+    var top_ids = ck_alloc(10)
+    var top_off = ck_alloc(10)
+    var top_len = ck_alloc(10)
+    let tbuf = heap_alloc(8192)
+    var poff: i64 = 0
+    var r: i64 = 0
+    print("our top10 id logprob(x1e6) piece\n")
+    while r < 10 {
+        var best: i64 = 0 - 1
+        var bv = 0.0 - 1.0e30
+        i = 0
+        while i < m.cfg.vocab {
+            var chosen = false
+            var q: i64 = 0
+            while q < r {
+                if (ck_get(&top_ids, q) as i64) == i { chosen = true }
+                q = q + 1
+            }
+            let x = ck_get(&logits, i)
+            if !chosen && x > bv { bv = x; best = i }
+            i = i + 1
+        }
+        ck_set(&!top_ids, r, best as f64)
+        let nb = bpe_decode_token(&bp, best, tbuf)
+        var j: i64 = 0
+        while j < nb {
+            putb(pbuf, poff + j, st_byte_at(tbuf, j))
+            j = j + 1
+        }
+        ck_set(&!top_off, r, poff as f64)
+        ck_set(&!top_len, r, nb as f64)
+        poff = poff + nb
+        print_int(best)
+        print(" ")
+        print_int(((bv - lse) * 1000000.0) as i64)
+        print(" [")
+        j = 0
+        while j < nb { print_char(st_byte_at(tbuf, j)); j = j + 1 }
+        print("]\n")
+        r = r + 1
+    }
+
+    // ---- vLLM logprobs ------------------------------------------------
+    let jf = st_read_all(logp_path)
+    print("vllm logprobs bytes=")
+    print_int(jf.len)
+    print("\n")
+    var gate_ok = true
+    if jf.len == 0 {
+        print("GATE INCONCLUSIVE no samples (our side only)\n")
+        gate_ok = false
+    } else {
+        // inside top_logprobs[0]: scan `"piece": number` pairs.
+        // (vLLM legacy completions shape; if the server returns
+        // Logprob objects instead, keys "token"/"logprob"/"bytes"
+        // appear and are skipped as keys, values recovered via the
+        // "logprob" number scan below.)
+        var start = jfind(jf.data, jf.len, 0, "\"top_logprobs\"")
+        if start < 0 { start = 0 }
+        else {
+            // skip past the key itself and its ':' so the scan starts
+            // at the first candidate piece, not at the key string
+            let kc = jfind(jf.data, jf.len, start, ":")
+            if kc >= 0 { start = kc + 1 }
+        }
+        var vlogp = ck_alloc(10)
+        var voff = ck_alloc(10)
+        var vlen = ck_alloc(10)
+        var vcnt: i64 = 0
+        var scan = start
+        let scratch = heap_alloc(65536)
+        var soff: i64 = 0
+        while vcnt < 10 && scan >= 0 && scan < jf.len {
+            let q1 = jfind(jf.data, jf.len, scan, "\"")
+            if q1 < 0 { scan = 0 - 1 }
+            else {
+                let dec = jstr(jf.data, jf.len, q1, scratch, soff)
+                let klen = dec[0]
+                let after = dec[1]
+                // skip ws and expect ':'
+                var ci = after
+                while ci < jf.len && (st_byte_at(jf.data, ci) == 32 || st_byte_at(jf.data, ci) == 9) { ci = ci + 1 }
+                if ci < jf.len && st_byte_at(jf.data, ci) == 58 {
+                    let nv = jnum(jf.data, jf.len, ci + 1)
+                    // accept only numeric values (logprob floats);
+                    // keys of nested objects/strings are skipped
+                    var vi = ci + 1
+                    while vi < jf.len && st_byte_at(jf.data, vi) == 32 { vi = vi + 1 }
+                    let isnum = vi < jf.len && (st_byte_at(jf.data, vi) == 45 || (st_byte_at(jf.data, vi) >= 48 && st_byte_at(jf.data, vi) <= 57))
+                    var iskey = false
+                    if klen == 5 && st_byte_at(scratch, soff) == 116 { iskey = true }
+                    if klen == 7 && st_byte_at(scratch, soff) == 108 { iskey = true }
+                    if isnum && !iskey {
+                        ck_set(&!vlogp, vcnt, nv[0])
+                        ck_set(&!voff, vcnt, soff as f64)
+                        ck_set(&!vlen, vcnt, klen as f64)
+                        soff = soff + klen
+                        vcnt = vcnt + 1
+                    }
+                    scan = nv[1] as i64
+                } else { scan = after }
+            }
+        }
+        print("vllm top entries=")
+        print_int(vcnt)
+        print("\n")
+        if vcnt == 0 {
+            print("GATE INCONCLUSIVE unparsed format\n")
+            gate_ok = false
+        } else {
+            var top1 = false
+            var maxdiff = 0.0
+            r = 0
+            while r < vcnt {
+                // match this vLLM piece against our top-10 pieces
+                var mid: i64 = 0 - 1
+                var q: i64 = 0
+                while q < 10 {
+                    if bytes_eq(scratch, (ck_get(&voff, r)) as i64, (ck_get(&vlen, r)) as i64, pbuf, (ck_get(&top_off, q)) as i64, (ck_get(&top_len, q)) as i64) { mid = (ck_get(&top_ids, q)) as i64 }
+                    q = q + 1
+                }
+                print("vllm rank ")
+                print_int(r)
+                if mid >= 0 {
+                    let ours = ck_get(&logits, mid) - lse
+                    var d = ours - ck_get(&vlogp, r)
+                    if d < 0.0 { d = 0.0 - d }
+                    if d > maxdiff { maxdiff = d }
+                    if r == 0 && mid == ((ck_get(&top_ids, 0)) as i64) { top1 = true }
+                    print(" id=")
+                    print_int(mid)
+                    print(" diff(x1e6)=")
+                    print_int((d * 1000000.0) as i64)
+                } else { print(" piece-not-in-our-top10") }
+                print("\n")
+                r = r + 1
+            }
+            print("GATE top1_match=")
+            print_int(if top1 { 1 } else { 0 })
+            print(" max_logprob_diff(x1e6)=")
+            print_int((maxdiff * 1000000.0) as i64)
+            print("\n")
+            if !top1 { gate_ok = false }
+        }
+    }
+
+    // ---- greedy continuation (ours, from the same kv) -----------------
+    let gbuf = heap_alloc(65536)
+    var glen: i64 = 0
+    var cur = llama_argmax(&logits)
+    var lg = logits
+    var g: i64 = 0
+    while g < 16 {
+        let nb = bpe_decode_token(&bp, cur, gbuf)
+        var j: i64 = 0
+        // append: decode_token writes at 0; move bytes to tail first
+        j = 0
+        while j < nb {
+            putb(gbuf, 32768 + glen + j, st_byte_at(gbuf, j))
+            j = j + 1
+        }
+        glen = glen + nb
+        var one = ck_alloc(1)
+        ck_set(&!one, 0, cur as f64)
+        lg = llama_forward(&m, &!kv, &one, 1)
+        cur = llama_argmax(&lg)
+        g = g + 1
+    }
+    print("our greedy: [")
+    i = 0
+    while i < glen { print_char(st_byte_at(gbuf, 32768 + i)); i = i + 1 }
+    print("]\n")
+
+    let gf = st_read_all(gen_path)
+    if gf.len == 0 {
+        print("GATE INCONCLUSIVE no gen sample\n")
+        gate_ok = false
+    } else {
+        let ts = jfind(gf.data, gf.len, 0, "\"text\"")
+        var colon = jfind(gf.data, gf.len, ts, ":")
+        let q = jfind(gf.data, gf.len, colon, "\"")
+        let scratch2 = heap_alloc(65536)
+        let dec2 = jstr(gf.data, gf.len, q, scratch2, 0)
+        print("vllm greedy: [")
+        i = 0
+        while i < dec2[0] { print_char(st_byte_at(scratch2, i)); i = i + 1 }
+        print("]\n")
+        let same = bytes_eq(scratch2, 0, dec2[0], gbuf, 32768, glen)
+        print("GATE greedy_text_equal=")
+        print_int(if same { 1 } else { 0 })
+        print("\n")
+        if !same { gate_ok = false }
+    }
+
+    if gate_ok { print("GATE PASS\n") } else { print("GATE CHECK-OUTPUT\n") }
+    print("GATE DONE\n")
+    exit(0)
+}

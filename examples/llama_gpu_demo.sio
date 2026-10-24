@@ -1,0 +1,154 @@
+//@ run-pass
+//
+// LLM on the heterogeneous runtime: SmolLM2-135M prefill with the seven
+// per-layer projections routed through rt_gemm_rect (GPU rows + CPU
+// remainder), attention/norms on CPU. Gate: logits vs the pure CPU f64
+// forward - max diff reported, argmax and the whole greedy continuation
+// must agree token for token (f32 device math vs f64 host math).
+// Usage: llama_gpu_demo [dir] [gemm-ptx] [cvt-ptx]
+// Modules: stdlib/llm/{llama,bpe}.sio, stdlib/hetero/runtime.sio
+
+use llm::bpe::{Bpe, bpe_decode_token, bpe_encode, bpe_load}
+use llm::llama::{kv_new, llama_argmax, llama_forward, llama_forward_rt, llama_load}
+use llm::safetensors::{st_byte_at}
+use hetero::runtime::{rt_gemm_rect, rt_open_full}
+use tensor2::cpu_kernel::{ck_alloc, ck_gemm, ck_get, ck_max_abs_diff, ck_set}
+
+fn putb(buf: *mut u8, i: i64, v: i64) {
+    let w = read_i64(buf as *mut i64, i / 8)
+    let sh = (i % 8) * 8
+    let cleared = w & ((0 - 1) - (255 << sh))
+    write_i64(buf as *mut i64, i / 8, cleared | ((v & 255) << sh))
+}
+
+fn print_tok(bp: &Bpe, id: i64, buf: *mut u8) with Mut, Panic, Div, Alloc, IO {
+    let nb = bpe_decode_token(bp, id, buf)
+    var j: i64 = 0
+    while j < nb {
+        print_char(st_byte_at(buf, j))
+        j = j + 1
+    }
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var dir = "/workspace/llm-models/SmolLM2-135M"
+    if arg_count() > 0 { dir = get_arg(0) }
+    var ptx = "stdlib/hetero/kernels/gemm_tiled_f32.ptx"
+    if arg_count() > 1 { ptx = get_arg(1) }
+    var cvt = "stdlib/hetero/kernels/cvt_f64_f32.ptx"
+    if arg_count() > 2 { cvt = get_arg(2) }
+
+    let rt = rt_open_full(ptx, "gemm_tiled_f32", cvt)
+    print("rt ready=")
+    print_int(if rt.ready { 1 } else { 0 })
+    print(" cvt=")
+    print_int(if rt.cvt_down != 0 { 1 } else { 0 })
+    print("\n")
+
+    let bp = bpe_load(dir ++ "/tokenizer.json")
+    var prompt = "The capital of France is Paris. It is the largest city in France and the capital of the"
+    let plen = str_len(prompt)
+    let pbuf = heap_alloc(plen + 16)
+    var i: i64 = 0
+    while i < plen {
+        putb(pbuf, i, str_char_at(prompt, i) & 255)
+        i = i + 1
+    }
+    let enc = bpe_encode(&bp, pbuf, plen)
+    let nseq = enc.len + 1
+    var ids = ck_alloc(nseq + 8)
+    ck_set(&!ids, 0, 0.0)
+    i = 0
+    while i < enc.len {
+        ck_set(&!ids, 1 + i, ck_get(&enc, i))
+        i = i + 1
+    }
+    print("prefill tokens=")
+    print_int(nseq)
+    print("\n")
+
+    let m = llama_load(dir)
+    print("loaded=")
+    print_int(if m.loaded { 1 } else { 0 })
+    print("\n")
+    if !m.loaded { print("GPUFWD FAIL\nGPUFWD DONE\n"); exit(0) }
+
+    // explicit probe: one projection-shaped GEMM through rt_gemm_rect
+    var px = ck_alloc(20 * m.cfg.hidden)
+    var pi: i64 = 0
+    while pi < 20 * m.cfg.hidden {
+        ck_set(&!px, pi, (((pi * 31 + 17) % 97) as f64) / 97.0 - 0.5)
+        pi = pi + 1
+    }
+    var po_g = ck_alloc(20 * m.cfg.hidden)
+    var po_c = ck_alloc(20 * m.cfg.hidden)
+    let pr = rt_gemm_rect(&rt, &px, &m.wq[0], &!po_g, 20, m.cfg.hidden, m.cfg.hidden, 20)
+    ck_gemm(&px, &m.wq[0], &!po_c, 20, m.cfg.hidden, m.cfg.hidden)
+    print("probe rect status=")
+    print_int(pr.status)
+    print(" gpu_rows=")
+    print_int(pr.gpu_rows)
+    print(" cpu_rows=")
+    print_int(pr.cpu_rows)
+    print(" ms(x1000)=")
+    print_int((pr.ms * 1000.0) as i64)
+    print(" diff(x1e6)=")
+    print_int((ck_max_abs_diff(&po_g, &po_c) * 1000000.0) as i64)
+    print("\n")
+    if pr.status != 0 || pr.gpu_rows == 0 { ok = false; print("FAIL probe (GPU did not run)\n") }
+
+    var kv1 = kv_new(&m, 512)
+    let la = llama_forward(&m, &!kv1, &ids, nseq)
+    var kv2 = kv_new(&m, 512)
+    let lb = llama_forward_rt(&m, &!kv2, &ids, nseq, &rt)
+    let d = ck_max_abs_diff(&la, &lb)
+    print("logits gpu-vs-cpu max_diff(x1e6)=")
+    print_int((d * 1000000.0) as i64)
+    print(" argmax_cpu=")
+    print_int(llama_argmax(&la))
+    print(" argmax_gpu=")
+    print_int(llama_argmax(&lb))
+    print("\n")
+    if llama_argmax(&la) != llama_argmax(&lb) { ok = false; print("FAIL argmax\n") }
+    if d > 1.0 { ok = false; print("FAIL diff\n") }
+
+    // greedy continuation on both paths must agree token for token
+    let dbuf = heap_alloc(8192)
+    var ga: [i64; 10] = [0; 10]
+    var gb: [i64; 10] = [0; 10]
+    var logits_a = la
+    var logits_b = lb
+    var g: i64 = 0
+    while g < 10 {
+        ga[g as usize] = llama_argmax(&logits_a)
+        gb[g as usize] = llama_argmax(&logits_b)
+        var oa = ck_alloc(1)
+        ck_set(&!oa, 0, (ga[g as usize]) as f64)
+        logits_a = llama_forward(&m, &!kv1, &oa, 1)
+        var ob = ck_alloc(1)
+        ck_set(&!ob, 0, (gb[g as usize]) as f64)
+        logits_b = llama_forward_rt(&m, &!kv2, &ob, 1, &rt)
+        g = g + 1
+    }
+    var same = true
+    g = 0
+    while g < 10 {
+        if ga[g as usize] != gb[g as usize] { same = false }
+        g = g + 1
+    }
+    print("gen cpu: [")
+    g = 0
+    while g < 10 { print_tok(&bp, ga[g as usize], dbuf); g = g + 1 }
+    print("]\ngen gpu: [")
+    g = 0
+    while g < 10 { print_tok(&bp, gb[g as usize], dbuf); g = g + 1 }
+    print("]\ngen tokens equal=")
+    print_int(if same { 1 } else { 0 })
+    print("\n")
+    if !same { ok = false; print("FAIL gen divergence\n") }
+
+    if ok { print("GPUFWD PASS\n") } else { print("GPUFWD FAIL\n") }
+    print("GPUFWD DONE\n")
+    exit(0)
+}
