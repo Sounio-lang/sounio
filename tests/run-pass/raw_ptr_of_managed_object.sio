@@ -1,0 +1,61 @@
+//@ run-pass
+//@ expect-stdout: RAW_PTR_OF_MANAGED_OK
+// `v as *mut T` over a managed object yields the address of its first field,
+// so `(*p).f` reads the object (#2966). Three sources: a Box<T> match payload
+// (private_fn_identity's ItemList walk), `&!s` of a struct local, and a
+// heap_alloc block, which already was plain memory.
+struct It { kind: i64, name: i64 }
+struct IL { head: It, tail: Option<Box<IL>> }
+struct S { a: i64, b: i64, c: i64 }
+
+fn il_ptr(opt: Option<Box<IL>>) -> *mut IL with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(l) => l as *mut IL
+        None => 0 as *mut IL
+    }
+}
+
+fn il_next(node: *mut IL) -> *mut IL with Mut, Panic, Div {
+    match (*node).tail {
+        Some(n) => n as *mut IL
+        None => 0 as *mut IL
+    }
+}
+
+fn walk(items: Option<Box<IL>>) -> i64 with Mut, Panic, Div, Alloc {
+    var acc: i64 = 0
+    var node = il_ptr(items)
+    while node != 0 as *mut IL {
+        acc = acc * 100 + (*node).head.kind * 10 + (*node).head.name
+        node = il_next(node)
+    }
+    acc
+}
+
+fn bump(p: *mut S) -> i64 with Mut, Panic, Div {
+    (*p).b = (*p).b + 5
+    (*p).a + (*p).b + (*p).c
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let l3 = IL { head: It { kind: 3, name: 4 }, tail: None }
+    let l2 = IL { head: It { kind: 2, name: 3 }, tail: Some(Box::new(l3)) }
+    let l1 = IL { head: It { kind: 1, name: 2 }, tail: Some(Box::new(l2)) }
+    let walked = walk(Some(Box::new(l1)))
+    var s = S { a: 1, b: 2, c: 3 }
+    let through_ref = bump((&!s) as *mut S)
+    let h = heap_alloc(64) as *mut S
+    (*h).a = 10
+    (*h).b = 20
+    (*h).c = 30
+    let through_heap = bump(h)
+    if walked == 122334 && through_ref == 11 && s.b == 7 && through_heap == 65 {
+        println("RAW_PTR_OF_MANAGED_OK")
+    } else {
+        println(walked)
+        println(through_ref)
+        println(s.b)
+        println(through_heap)
+    }
+    return 0
+}

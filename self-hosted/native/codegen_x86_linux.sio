@@ -1484,6 +1484,7 @@ fn native_v2_region_builtin_id(n: Name) -> i64 with Mut, Panic, Div {
     if name_eq(n, make_name("__rgn_exit_scalar")) { return 67 }
     if name_eq(n, make_name("__rgn_barrier")) { return 68 }
     if name_eq(n, make_name("__rgn_mark_all")) { return 69 }
+    if name_eq(n, make_name("__ptr_of_ref")) { return 72 }
     0
 }
 
@@ -6507,6 +6508,50 @@ fn emit_builtin_str_slice3(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     c
 }
 
+// __ptr_of_ref(v) -> raw pointer (lowering emits it for `v as *mut T` /
+// `v as *const T`). A raw pointer is dereferenced as plain memory: field i of
+// `*p` is the word at p + 8*i, which is how heap_alloc'd structs (the checker's
+// `*mut Checker`) are laid out. A managed reference (a Box payload, a struct
+// value) is a handle id below the handle capacity, whose fields start one
+// object header past its object base. Casting the handle itself made
+// `(*p).f` read the handle number as an address. So a handle becomes
+// object base + header; 0 and every word at or above the capacity (heap_alloc
+// results, stack cells, BSS and image addresses) pass through unchanged.
+// pfi_itemlist_ptr / pfi_itemlist_next in private_fn_identity.sio walk the AST
+// this way, and gen3 crashed in pfi_items (#2966).
+fn emit_builtin_ptr_of_ref_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_reg_reg(nc, 0, 7)                         // rax = v
+    nc_emit_test_rax_rax(nc)
+    let j_zero = (*nc).code.len
+    nc_emit_jz_rel32(nc)                                  // 0 -> 0
+    nc_emit_mov_rbx_rax(nc)
+    nc_emit_mov_rax_imm(nc, nc_handle_capacity())
+    nc_emit_cmp_rbx_rax(nc)
+    nc_emit_setae_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let j_raw = (*nc).code.len
+    nc_emit_jnz_rel32(nc)                                 // v >= capacity -> raw base
+    nc_emit_mov_rax_rbx(nc)
+    native_v2_resolve_handle_to_object_base_rax_into(nc)  // rax = object base
+    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size())
+    nc_emit_add_reg_reg(nc, 0, 1)                         // rax = base + header
+    nc_emit_ret(nc)
+    // v >= capacity: an unboxed object (arena, region or BSS) is addressed by
+    // its base, as the field loads read it ([v + 8*(4 + i)]), so it takes the
+    // same header step. The lowerer only calls this for a managed source.
+    let l_raw = (*nc).code.len
+    nc_patch_u32_le(nc, j_raw + 2, l_raw - (j_raw + 6))
+    nc_emit_mov_reg_reg(nc, 0, 7)                         // rax = v
+    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size())
+    nc_emit_add_reg_reg(nc, 0, 1)                         // rax = v + header
+    nc_emit_ret(nc)
+    let l_pass = (*nc).code.len
+    nc_patch_u32_le(nc, j_zero + 2, l_pass - (j_zero + 6))
+    nc_emit_mov_reg_reg(nc, 0, 7)                         // rax = v
+    nc_emit_ret(nc)
+}
+
 // ============================================================================
 // Packed byte arrays (#2966)
 // ============================================================================
@@ -6530,9 +6575,32 @@ fn native_v2_packed_array_payload_bytes(elem_count: i64) -> i64 {
     ((elem_count + 7) / 8) * 8
 }
 
+// A global array's reference is its BSS address V and the array paths take
+// base = V - header, so the descriptor word they read for the packed tag sits
+// before the global. For the first global that word lies below BSS_BASE_LINUX,
+// in the unmapped gap after the image (stdlib_deep_eigen: SIGSEGV reading
+// 0xfffffe0). A packed array is always a heap object, never a global, so a base
+// in [BSS_BASE_LINUX - header, BSS_BASE_LINUX) takes the word path without the
+// read. Emits lea <scratch>, [<base> + d]; cmp <scratch>, header; jb word and
+// returns the jb position to patch. modrm_lea: 0x82 = rax<-[rdx+d32],
+// 0x88 = rcx<-[rax+d32]; cmp_modrm: 0xf8 = rax, 0xf9 = rcx.
+fn nc_packed_tag_guard_disp() -> i64 { native_v2_object_header_size() - BSS_BASE_LINUX }
+
+fn nc_emit_packed_tag_guard_into(nc: &! NativeCompiler, modrm_lea: i64, cmp_modrm: i64) -> i64 with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8d); nc_emit_byte(nc, modrm_lea)
+    nc_emit_u32_le(nc, nc_packed_tag_guard_disp() & 0xFFFFFFFF)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, cmp_modrm)
+    nc_emit_byte(nc, native_v2_object_header_size())
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x82)
+    let j = (*nc).code.len - 2
+    nc_emit_u32_le(nc, 0)
+    j
+}
+
 // rdx = object base, rbx = element index. rax = element: the sign- or
 // zero-extended byte of a packed array, the word otherwise. Clobbers rcx.
 fn nc_emit_tagged_array_load_rdx_rbx_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    let j_guard = nc_emit_packed_tag_guard_into(nc, 0x82, 0xf8)
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x0a)   // mov rcx, [rdx]
     nc_emit_mov_rax_imm(nc, native_v2_packed_i8_descriptor())
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xc1)   // cmp rcx, rax
@@ -6542,6 +6610,8 @@ fn nc_emit_tagged_array_load_rdx_rbx_into(nc: &! NativeCompiler) with Mut, Panic
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xc1)   // cmp rcx, rax
     let j_u8 = (*nc).code.len
     nc_emit_jz_rel32(nc)
+    let l_word = (*nc).code.len
+    nc_patch_u32_le(nc, j_guard + 2, l_word - (j_guard + 6))
     nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
     nc_emit_add_reg_reg(nc, 3, 1)
     nc_emit_load_rax_mem_rdx_rbx8(nc)
@@ -6567,6 +6637,7 @@ fn nc_emit_tagged_array_load_rdx_rbx_into(nc: &! NativeCompiler) with Mut, Panic
 // rdx = object base, rbx = element index; stores temp `src` as a byte into a
 // packed array, as a word otherwise. Clobbers rax and rcx.
 fn nc_emit_tagged_array_store_rdx_rbx_into(nc: &! NativeCompiler, src: i64) with Mut, Panic, Div {
+    let j_guard = nc_emit_packed_tag_guard_into(nc, 0x82, 0xf8)
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x0a)   // mov rcx, [rdx]
     nc_emit_mov_rax_imm(nc, native_v2_packed_i8_descriptor())
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xc1)   // cmp rcx, rax
@@ -6576,6 +6647,8 @@ fn nc_emit_tagged_array_store_rdx_rbx_into(nc: &! NativeCompiler, src: i64) with
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xc1)   // cmp rcx, rax
     let j_b2 = (*nc).code.len
     nc_emit_jz_rel32(nc)
+    let l_word = (*nc).code.len
+    nc_patch_u32_le(nc, j_guard + 2, l_word - (j_guard + 6))
     nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
     nc_emit_add_reg_reg(nc, 3, 1)
     nc_core_load_temp_to_rax(nc, src)
@@ -6600,6 +6673,17 @@ fn nc_emit_tagged_array_store_rdx_rbx_into(nc: &! NativeCompiler, src: i64) with
 fn emit_array_bytes_copy_loop(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     var b = c.code
+    // nc_emit_packed_tag_guard_into, value form: rcx holds the count here, so
+    // the scratch is rax (lea rax, [rdx + d]; cmp rax, header; jb word).
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x8d); b = emit_byte(b, 0x82)
+    let gd = nc_packed_tag_guard_disp() & 0xFFFFFFFF
+    b = emit_byte(b, gd & 0xFF); b = emit_byte(b, (gd >> 8) & 0xFF)
+    b = emit_byte(b, (gd >> 16) & 0xFF); b = emit_byte(b, (gd >> 24) & 0xFF)
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x83); b = emit_byte(b, 0xf8)
+    b = emit_byte(b, native_v2_object_header_size())
+    let j_guard = b.len
+    b = emit_byte(b, 0x0f); b = emit_byte(b, 0x82)
+    b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0)   // jb word
     b = emit_byte(b, 0x48); b = emit_byte(b, 0x8b); b = emit_byte(b, 0x02)   // mov rax, [rdx]
     c.code = b
     c.code = emit_mov_reg_imm(c.code, 3, native_v2_packed_i8_descriptor())   // rbx = tag
@@ -6621,6 +6705,7 @@ fn emit_array_bytes_copy_loop(nc: NativeCompiler) -> NativeCompiler with Mut, Pa
     b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0)   // jz packed
     c.code = b
     // word layout: rbx = header words, load [rdx + rbx*8]
+    c.code = patch_u32_le(c.code, j_guard + 2, c.code.len - (j_guard + 6))
     c.code = emit_mov_reg_imm(c.code, 3, native_v2_object_header_size() / 8)
     c = emit_array_bytes_copy_loop_body(c, false)
     let j_done = c.code.len
@@ -9636,6 +9721,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 67 { emit_builtin_rgn_exit_scalar_into(nc); return }
     if builtin_id == 68 { emit_builtin_rgn_barrier_into(nc); return }
     if builtin_id == 69 { emit_builtin_rgn_mark_all_into(nc); return }
+    if builtin_id == 72 { emit_builtin_ptr_of_ref_into(nc); return }
     if builtin_id == 57 { emit_builtin_arena_reset_into(nc); return }
     if builtin_id == 58 { emit_builtin_panic_into(nc); return }
     if builtin_id == 59 { emit_builtin_untracked_counter_into(nc); return }
@@ -10209,6 +10295,7 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
 fn nc_core_emit_alloc_like_source_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_count: i64, src: i64) -> bool with Mut, Panic, Div {
     nc_core_load_temp_to_rax(nc, src)
     native_v2_resolve_handle_to_object_base_rax_into(nc)
+    let j_guard = nc_emit_packed_tag_guard_into(nc, 0x88, 0xf9)
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x08)   // mov rcx, [rax]
     nc_emit_mov_rax_imm(nc, native_v2_packed_i8_descriptor())
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xc1)   // cmp rcx, rax
@@ -10218,6 +10305,8 @@ fn nc_core_emit_alloc_like_source_into(nc: &! NativeCompiler, dst: i64, type_tag
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xc1)   // cmp rcx, rax
     let j_u8 = (*nc).code.len
     nc_emit_jz_rel32(nc)
+    let l_word = (*nc).code.len
+    nc_patch_u32_le(nc, j_guard + 2, l_word - (j_guard + 6))
     if !nc_core_emit_alloc_into(nc, dst, type_tag, elem_count) { return false }
     let j_done_word = (*nc).code.len
     nc_emit_jmp_rel32(nc)

@@ -16,6 +16,10 @@
 #      (Parser, Box<ExprList>): a Box<T> or Option<Box<T>> tuple slot was not
 #      typed at all, so Parser::parse_call_expr_box stored every later call
 #      argument's head as its label.
+#   4. `l as *mut ItemList` over a Box<T> (private_fn_identity's item walk)
+#      kept the handle, so `(*node).head.kind` read the handle number as an
+#      address. A raw-pointer cast of a managed object now yields the address
+#      of its first field (__ptr_of_ref), like heap_alloc memory.
 # Each witness surrounds the right struct with decoys that win the vote.
 # Madaros from main prints 3, 1055 and 3 (or 40300003); lean_single passes all.
 #
@@ -47,4 +51,5 @@ check deref_option_box_payload_typed DEREF_OPTION_PAYLOAD_OK
 check tuple_box_slot_typed TUPLE_BOX_SLOT_OK
 check tuple_slot_forward_method_typed TUPLE_SLOT_FORWARD_OK
 check deref_array_param_elem_typed DEREF_ARRAY_ELEM_OK
-echo "[madaros-typed-field-slots] PASS: tuple second struct slot, tuple Box/Option<Box> slot and deref'd Option<Box<T>> read the declared struct's fields"
+check raw_ptr_of_managed_object RAW_PTR_OF_MANAGED_OK
+echo "[madaros-typed-field-slots] PASS: tuple second struct slot, tuple Box/Option<Box> slot, deref'd Option<Box<T>> and raw-pointer casts read the declared struct's fields"

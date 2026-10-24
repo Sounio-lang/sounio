@@ -5637,6 +5637,13 @@ fn lower_apply_global_var_init(slot: &! IrFunction, name: Name) with Mut, Panic,
         (*slot).instr_count = j
     }
 }
+fn lower_opt_type_is_raw_ptr(ty_opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *ty_opt {
+        Some(ty) => (*ty).kind == TypeExprKind::TypeRawPtr,
+        None => false,
+    }
+}
+
 // Byte-element hint for the next array repeat literal: 0 none, 1 i8, 2 u8.
 // A struct-literal field or a `let` whose declared type is [i8; N] / [u8; N]
 // sets it right before lowering its initialiser; lower_array_repeat_literal_ref
@@ -35968,6 +35975,34 @@ impl Lowerer {
         }
     }
 
+    // The object a raw-pointer cast addresses and how to reach it: kind 1 the
+    // operand is a struct value (its handle or base), kind 2 a Box<T>, whose
+    // object holds the struct's reference in field 0 (lower_box_new). Kind 0
+    // (null operand): an integer-typed or unresolved source. `&s` / `&!s` name
+    // their operand, since native-v2 OpRef is the address of the handle slot.
+    fn opt_expr_managed_object_source(self, opt: &Option<Box<Expr>>) -> (*mut Expr, i64) with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(src) => {
+                var inner = src as *mut Expr
+                if (*inner).kind == ExprKind::ExprUnary && ((*inner).un_op == UnaryOp::OpRef || (*inner).un_op == UnaryOp::OpRefMut) {
+                    match (*inner).left {
+                        Some(op) => { inner = op as *mut Expr }
+                        None => { return (0 as *mut Expr, 0) }
+                    }
+                }
+                if (*inner).kind == ExprKind::ExprIntLit { return (0 as *mut Expr, 0) }
+                if (*inner).kind == ExprKind::ExprFieldAccess {
+                    if self.field_is_box_for_base_ref(&(*inner).left, (*inner).name) { return (inner, 2) }
+                }
+                let st = self.expr_receiver_struct_type_ref(&(*inner))
+                if st.len == 0 { return (0 as *mut Expr, 0) }
+                if ir_name_is_box(st) { return (inner, 2) }
+                (inner, 1)
+            }
+            None => (0 as *mut Expr, 0),
+        }
+    }
+
     fn lower_cast_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if lower_opt_type_is_hyper(&e.cast_type) {
             print("error: Hyper<...> values (e.g. Hyper<Octonion, f64>) are not implemented on the native CPU path of this engine\n")
@@ -35977,6 +36012,44 @@ impl Lowerer {
             var lo_hyper = self
             lowerer_mark_hard_error(&! lo_hyper)
             return (lo_hyper, 0)
+        }
+        // `v as *mut T` / `v as *const T` over a managed object: a raw pointer
+        // is dereferenced as plain memory ((*p).f = [p + 8*i], the heap_alloc
+        // convention), so the object's handle or base must become the address
+        // of its first field (__ptr_of_ref, native/codegen_x86_linux.sio).
+        // `&s` / `&!s` of a struct local is the stack slot holding the handle,
+        // so the object is the operand itself; a Box<T> is first unwrapped to
+        // the struct it holds. Integer-typed sources
+        // (heap_alloc results, pointer words kept in i64 globals or fields)
+        // and unresolved ones keep the identity cast.
+        if lower_opt_type_is_raw_ptr(&e.cast_type) {
+            let managed = self.opt_expr_managed_object_source(&e.left)
+            if managed.1 > 0 {
+                let msub = self.lower_expr_ref(&(*managed.0))
+                var lo_m = msub.0
+                var obj_reg = msub.1
+                if obj_reg < 0 { return (lo_m, obj_reg) }
+                // The raw pointer is a plain number to the region machinery:
+                // publish the object (and, for a Box, the box) as escaped, as
+                // the identity cast below does through the same barrier.
+                if lower_rgn_enabled() {
+                    let bid_pair = lo_m.rgn_cast_barrier_id()
+                    lo_m = bid_pair.0
+                    if bid_pair.1 >= 0 { lo_m = lo_m.rgn_emit_cast_escape(bid_pair.1, obj_reg) }
+                }
+                if managed.1 == 2 {
+                    let inner_pair = lo_m.fresh_reg()
+                    lo_m = inner_pair.0
+                    lo_m = lo_m.emit(ir_field_get(inner_pair.1, obj_reg, 0, ir_empty_name()))
+                    obj_reg = inner_pair.1
+                    if lower_rgn_enabled() {
+                        let bid_inner = lo_m.rgn_cast_barrier_id()
+                        lo_m = bid_inner.0
+                        if bid_inner.1 >= 0 { lo_m = lo_m.rgn_emit_cast_escape(bid_inner.1, obj_reg) }
+                    }
+                }
+                return lo_m.rgn_call("__ptr_of_ref", obj_reg, 0, 0, 1)
+            }
         }
         let sub = self.lower_opt_expr_ref(&e.left)
         var lo1 = sub.0

@@ -15,6 +15,10 @@
 #   2. A witness keeps 700,000 Name-like structs alive in the default 2 GiB
 #      arena. Word layout needs about 2.2 GB and stops at arena full (rc 181);
 #      packed it needs about 0.3 GB and prints the checksum.
+#   3. tests/run-pass/first_global_array_by_ref.sio indexes the first global
+#      (at BSS_BASE_LINUX) by reference. The tag read sits one header below the
+#      array, which for that global is unmapped; it must print
+#      FIRST_GLOBAL_ARRAY_REF_OK, not die with SIGSEGV (stdlib_deep_eigen).
 #
 # Usage: madaros_packed_bytes_gate.sh   (MADAROS_BIN = compiler under test,
 #                                        default bin/souc)
@@ -37,6 +41,12 @@ set +e
 sem_out="$("$WORK/sem.elf" 2>&1)"; sem_rc=$?
 set -e
 [[ "$sem_rc" -eq 0 && "$sem_out" == "PACKED_BYTES_OK" ]] || fail "semantics: rc=$sem_rc output=$(tr '\n' ' ' <<<"$sem_out")"
+
+build "$ROOT_DIR/tests/run-pass/first_global_array_by_ref.sio" "$WORK/first.elf"
+set +e
+first_out="$("$WORK/first.elf" 2>&1)"; first_rc=$?
+set -e
+[[ "$first_rc" -eq 0 && "$first_out" == "FIRST_GLOBAL_ARRAY_REF_OK" ]] || fail "first global by reference: rc=$first_rc output=$(tr '\n' ' ' <<<"$first_out")"
 
 cat >"$WORK/mem.sio" <<'SIO'
 struct Nm {
@@ -81,4 +91,4 @@ set -e
 [[ "$mem_rc" -eq 0 && "$mem_out" == "34650000" ]] \
   || fail "700k Name-like structs in 2 GiB: rc=$mem_rc output=$(head -n 2 <<<"$mem_out" | tr '\n' ' ') (181 = arena full: buffers not packed)"
 
-echo "[madaros-packed-bytes] PASS: byte-array semantics hold; 700k Name-like structs fit the default 2 GiB arena and sum to 34650000"
+echo "[madaros-packed-bytes] PASS: byte-array semantics hold; the first global indexes by reference; 700k Name-like structs fit the default 2 GiB arena and sum to 34650000"
