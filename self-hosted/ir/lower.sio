@@ -24654,6 +24654,7 @@ impl Lowerer {
         }
         if (*expr).kind == ExprKind::ExprMatch {
             var arm_cursor = &(*expr).arms
+            var saw_deref_arm = false
             while true {
                 match *arm_cursor {
                     Some(list) => {
@@ -24661,9 +24662,35 @@ impl Lowerer {
                         if body_ty.len > 0 {
                             return body_ty
                         }
+                        if (*list).head.body.kind == ExprKind::ExprUnary && (*list).head.body.un_op == UnaryOp::OpDeref {
+                            saw_deref_arm = true
+                        }
                         arm_cursor = &(*list).tail
                     }
                     _ => break
+                }
+            }
+            // `match o.tail { Some(r) => *r, None => .. }`: once lowered, the arm
+            // binding is out of scope and `*r` resolves to nothing. The value is
+            // the scrutinee's Option<Box<T>> payload, T. check.sio's
+            // `let rest1 = match (*args).tail { .. Some(r) => *r }` left rest1
+            // untyped and `rest1.head.path` read TypeExpr.span (gen2 SIGSEGV in
+            // checker_copy_string_list_to_name, #2966).
+            if saw_deref_arm {
+                match (*expr).left {
+                    Some(scrut) => {
+                        if (*scrut).kind == ExprKind::ExprFieldAccess {
+                            match (*scrut).left {
+                                Some(scrut_owner) => {
+                                    let owner_ty = self.expr_receiver_struct_type_ref(&(*scrut_owner))
+                                    let opt_inner = self.field_option_box_inner_type_for_struct(owner_ty, (*scrut).name)
+                                    if opt_inner.len > 0 { return opt_inner }
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+                    None => {}
                 }
             }
         }
@@ -29167,6 +29194,31 @@ impl Lowerer {
         }
         if raw_pointee.len > 0 {
             lo = lo.bind_local_raw_ptr(s.name)
+        }
+        // `let r = match x { .. => f(..) }` (or if / block): the arms' common
+        // struct types r, as `let r = f(..)` already is. Untyped, `r.params`
+        // went to the field vote: check.sio's
+        // `let params_pair = match (*fd).params { .. checker_collect_fn_params_mut(..) }`
+        // read MutParamsResult.count as `params`, so every FnSig of a method
+        // carried its parameter count as the params list (gen3 ud2 in
+        // fn_param_list_clone, #2966).
+        match s.ty {
+            Some(_) => {}
+            None => {
+                match s.expr {
+                    Some(rhs_ctl) => {
+                        if ((*rhs_ctl).kind == ExprKind::ExprMatch || (*rhs_ctl).kind == ExprKind::ExprIf || (*rhs_ctl).kind == ExprKind::ExprBlock)
+                            && lo.lookup_local_struct_type(s.name).len == 0 {
+                            let ctl_st = lo.expr_receiver_struct_type_ref(&(*rhs_ctl))
+                            if ctl_st.len > 0 && !ir_name_is_box(ctl_st)
+                                && lower_struct_layout_index_of(&(*lo.struct_layouts), ctl_st) >= 0 {
+                                lo = lo.bind_local_struct_type(s.name, ctl_st, false)
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
         }
         if fixed_array_len >= 0 {
             lo = lo.bind_local_fixed_array_len(s.name, fixed_array_len)

@@ -38,6 +38,8 @@
 #      reference to the raw payload (a `&!` write lands in it); a raw pointer
 #      local is never value-copied as an S (`(*h).s = p` stored 1). `&!(*p)`
 #      for an S with a fixed-array field is refused.
+#  10. `let r = match .. { .. => f(..) }` (and if) is typed by the arms' struct;
+#      untyped, `r.params` read `count` (check.sio's method FnSigs).
 # Each witness surrounds the right struct with decoys that win the vote.
 # Madaros from main prints 3, 1055 and 3 (or 40300003); lean_single passes all.
 #
@@ -75,6 +77,7 @@ check raw_ptr_field_deref_typed RAW_PTR_FIELD_DEREF_OK
 check raw_struct_whole_copy RAW_STRUCT_WHOLE_COPY_OK
 check string_array_store STRING_ARRAY_STORE_OK
 check raw_ref_alias RAW_REF_ALIAS_OK
+check let_match_struct_typed LET_MATCH_STRUCT_TYPED_OK
 
 cat >"$WORK/refuse.sio" <<'SIO'
 struct Seg { buf: [i8; 16], len: i64 }
