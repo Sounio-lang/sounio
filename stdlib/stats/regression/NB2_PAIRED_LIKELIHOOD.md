@@ -112,3 +112,160 @@ Slurm16828 additionally completed a full strict two-replicate grouped-model
 bootstrap and its independent C++ comparison, including RNG/hits, last counts
 and refitted dispersions. Fixed-alpha and incomplete-output controls were
 rejected. This closes the B2 smoke path, not the pending B199 qualification.
+
+## Additive checked ranking path (candidate)
+
+`nb2_log_probability_rank_difference_into` and
+`nb2_log_probability_mean_rank_difference_into` are ranking-specific entries.
+They validate the active counts and finite positive means, finite nonnegative
+alphas and exact-count range before attempting the same checked local increment
+primitives. A local result does not evaluate either individual full PMF:
+`first_status` and `second_status` are then 2 (not computed), not0. This includes
+local arithmetic unavailability; callers must inspect the main status. The
+existing full-difference APIs retain their individual PMF metadata contract.
+
+A local request outside the supported geometry (internal6) delegates to the
+entire existing full-difference route, preserving both alpha-dependent
+normalizers and its metadata. Arithmetic status 5 never becomes an available
+tie. Invalid input also delegates to that checked route, retaining its error
+precedence. The aggregate engine is shared with the full route, including its
+scaled compensated sum, range checks and failure handling. No statistical
+approximation or tolerance is introduced.
+
+The traced ranking aggregate counts only PMF callsites actually executed:
+zero for a local row, two for a full-fallback row, including failed prefixes.
+Profile candidate ranking uses this additive entry; final bootstrap comparison
+continues to use the full metadata entry. Observed-null initialization, fitting,
+weighted QR and random generation are unchanged. Selected concordance and
+performance acceptance for this candidate remain separate from the earlier
+correctness baseline.
+
+Focused Slurm 16912 completed checks, native execution and annotation markers for
+the new ranking status/metadata fixture, the ranking and original61-scalar/three-
+aggregate fixtures, the trace unit and both grouped B2 drivers. Both numerical
+routes passed the same independent fixed-point C++ comparator; both B2 outputs
+passed the independent profile-refit comparator. The traced B2 also retained its
+bitwise off/on assertions and actual counter checks. Its scientific output rows
+were byte-identical to corrected-compiler baseline16899. Recorded full-PMF row
+calls were6336 versus 12224 in that baseline, with the other nine recorded work
+counts unchanged. These are actual callsite counts on one fixed B2 input, not a
+runtime speedup or an extrapolation to B199. The separate B31 paired resource pilot is recorded below; broader
+qualification remains pending.
+
+The selected B31 resource pilot 16915 recompiles original full02 and the strict,
+replica-warmed, locally ranked candidate with the same corrected compiler
+SHA92d2108ef595c5382d582aa363df6e95dab907a554f039d5f8f008073e535c21.
+Its existing C++ analyzer reports154.05s versus 90.81s and maximum RSS 61568KiB
+versus 59364KiB; the before/after runtime ratio is1.69639907499174099779. Dataset,
+options and seed schedules were retained, and all scientific output rows,
+hits30/31, plus-one tail and final RNG were byte-identical. This is one whole-
+program B31 pair on one worker, combining the earlier strict/warm changes with
+local ranking; it does not isolate the ranking speedup, reach the 2x target or
+replace the pending B199 qualification. The untraced driver does not report
+uniform/proposal/work totals, and the analyzer explicitly leaves those counts
+unavailable. Nested preflight/status assertions passed before the timed pair.
+
+## Opt-in cached ranking fallback
+
+`Nb2CachedLikelihoodDifferenceSlot` contains two cached likelihood owners and
+one private difference core. It does not wrap a legacy difference slot with
+unused PMF children. The legacy slot retains two uncached likelihood owners;
+neither legacy scalar likelihood slots nor legacy difference slots acquire
+cache arrays. Both difference forms use the same checked local helper, domain
+validator, scaled/Kahan accumulation step and mean finish. The core holds reused
+scratch, result metadata and actual event counts; it adds one small managed
+owner per slot factory, never per row or comparison.
+
+The new `nb2_log_probability_rank_cached_difference_into` and aggregate/traced
+forms keep local results at zero PMF calls with child statuses 2 (not computed).
+Unsupported local geometry uses two complete cached PMFs, preserving both
+normalizers when alphas differ. A cached normalizer hit is still a full PMF call:
+the recorded row-PMF count is 2, not 0. Arithmetic unavailability, invalid-input
+precedence, failed-prefix accounting and far rounded-zero rejection remain
+checked. The final bootstrap comparison stays on the uncached full API.
+
+The cached-difference payload query reports 4096 array bytes; the profile's
+private-cache query reports 6144 array bytes for one objective and two ranking
+owners per search. Existing likelihood workspaces, the shared core, scalar
+controls, handles and other managed overhead are excluded from those payload
+queries and require resource measurement. Public cached-difference reset clears
+both caches and the reusable core. No QR factor, weight or fitted coefficient
+is cached. The old public difference snapshot remains unchanged.
+
+Named cache events now include the objective and cached ranking fallback. The
+final uncached bootstrap comparison and sampler remain outside their scope.
+Counters come from the actual first/second cached PMF flags, including failed
+prefixes, with checked aggregation and trace-limit handling. The original ten
+trace metric IDs and public trace snapshot do not change. Selected independent numerical, bitwise legacy-preservation and B2/RNG
+results are recorded below; broader qualification remains separate.
+
+Focused Slurm 16954 completed all thirteen selected native fixtures and their
+markers. Cached/legacy/ranking 61-scalar and three-aggregate outputs passed the
+independent comparator; cached/legacy 216-case outputs and exact Poisson-zero
+bits passed their C++ comparators. All B2 paths passed independent concordance
+and off/on/RNG assertions. Both refactored legacy output protocols were also
+byte-identical to the frozen pre-core outputs from 16936, not merely within a
+tolerance. The new status fixture covered invalid inputs, far rounded-zero
+unavailability, failed prefixes, reset, warm hits still reporting two PMFs and
+count 64 bypass.
+
+Slurm 16965 added eight independent far full-PMF comparisons, including unequal
+alphas, reversed arguments, changed means, counts 63/64 and a representable true
+contrast around -5e-201 whose rounded PMFs tie: status 5 remains unavailable. The
+positive native output and independent C++ 400 comparator passed. Two narrow
+mutants compiled and then failed natively: using the first alpha for the second
+PMF, and reporting zero PMF calls on cache hits. Neither control changes the
+accepted source.
+
+Whole-program pilot 16968 used original full02 versus the combined candidate,
+both recompiled with the same 92d compiler, fixed B31/n256/alpha0/case0 dataset,
+seed schedule and maxfits 64. The C++ analyzer found byte-identical scientific
+rows and reported 154.90s versus 76.45s, RSS 61568KiB versus 58900KiB and a ratio of
+2.02616088947024198825. This exceeds 2x only for that selected paired B31 run.
+It does not establish the full B199/three-pair/median target, an isolated cache
+speedup, assessed calibration or general superiority. Source, ELF, compiler
+and input manifests were verified; the untraced driver leaves work counters
+unavailable rather than deriving them from the fit budget.
+
+## Conservative availability after aggregate cancellation
+
+All full, ranking and cached-ranking aggregates share the same accumulation and
+finish engine. A new guard returns status5 with cleared value0 whenever nonzero
+rows were accumulated (`scale>0`) but the final binary64 scaled sum is0. The
+summation formula and floating-point operation order for nonzero sums are
+unchanged. Pointwise-equal row contrasts (`scale==0`) still return available0.
+
+This policy deliberately also rejects mixed nonzero rows whose mathematical sum
+is exactly0: this engine has no exact-sum certificate to distinguish that case
+from loss of a tiny contribution followed by cancellation. It is conservative
+availability, not an exact-summation algorithm, a sign certificate for nonzero
+results, or an interval/error-bound implementation. A trace can remain available
+while the numerical contrast is unavailable; it records actual calls made.
+
+Preserved scratch Slurm16996 reproduced status0/value0 on both92d and d74
+compilers for Poisson count-zero means [1e-300,2,1] versus [2e-300,1,2]. An
+independent C++23 exact-binary-rational analysis of the emitted input bits found
+a negative representable mean near -3.3333333333333334e-301. Reversing row order
+retained that nonzero contrast; the two-row exact-cancellation control returned0.
+Analysis16997 froze exact-numerator/raw-bit predicates before decimal formatting;
+the initial16996 auxiliary boolean classification is superseded by that analysis.
+The raw native sources, outputs and executable identities remain preserved.
+
+The new stdlib_scale_count_aggregate_cancellation fixture checks all six traced
+and untraced aggregate entries, reuse, invalid-size clearing, detached snapshot,
+public cache reset, reversed nonzero rows, mixed exact cancellation and pointwise
+zero. count_aggregate_cancellation_reference.cpp independently uses the analytic
+Poisson count-zero identity and exact rationals reconstructed from native bits;
+its --before mode requires the original false-zero witness. New-source native
+acceptance remains separate from preparation until the coordinated Slurm gate.
+
+Focused Slurm16998 completed all15 selected fixture checks, compilations, native
+runs and markers with compiler d74fbebe. The24 new traced/untraced rows passed
+the exact-rational rounding-cell oracle; preserved92d/d74 diagnostic outputs were
+independently confirmed as failing-before witnesses. Compiling the same new
+fixture against the frozen1132 pre-guard library succeeded, then its native
+assertion failed with exit1; the guarded library passed. Existing61-scalar/three-
+aggregate full/rank/cached concordance, both216-case likelihood outputs, exact
+Poisson-zero bits, eight far-fallback cases, three B2 paths and the two preserved
+legacy-output byte comparisons also passed. This selected gate preserves those
+boundaries; it is not full-suite, calibration or performance acceptance.

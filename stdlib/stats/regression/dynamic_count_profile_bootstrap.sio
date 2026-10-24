@@ -1,10 +1,11 @@
+use stats::regression::count_fit_trace::{CountFitTraceSlot,count_fit_trace_slot,count_fit_trace_status,count_fit_trace_note}
 use stats::regression::count_profile_embedding::{count_profile_embedding_validate,count_profile_embedding_warm}
 // ML profile-refit bootstrap. Positive-alpha range edges are unavailable.
 // Explicit budgets, no allocation, no omitted failed replicate or finite-validity claim.
 use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols}
 use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
-use stats::regression::dynamic_dispersion::{DispersionSearchOptions,dynamic_dispersion_workspace,dynamic_dispersion_fit,dynamic_dispersion_fit_seeded}
-use stats::regression::nb2_likelihood::{Nb2LikelihoodDifferenceSlot,nb2_likelihood_difference_slot,nb2_log_probability_difference_into,nb2_likelihood_difference_value,nb2_likelihood_difference_first_status,nb2_likelihood_difference_second_status,nb2_log_probability_mean_difference_into}
+use stats::regression::dynamic_dispersion::{DispersionSearchOptions,dynamic_dispersion_workspace,dynamic_dispersion_fit,dynamic_dispersion_fit_seeded,dynamic_dispersion_fit_traced,dynamic_dispersion_fit_seeded_traced}
+use stats::regression::nb2_likelihood::{Nb2LikelihoodDifferenceSlot,nb2_likelihood_difference_slot,nb2_log_probability_difference_into,nb2_likelihood_difference_value,nb2_likelihood_difference_first_status,nb2_likelihood_difference_second_status,nb2_log_probability_mean_difference_into,nb2_log_probability_mean_difference_traced_into}
 use stats::checked_count_sampling::{CountCursor,CountDrawValue,count_cursor_new,count_cursor_rng,count_draw_value,nb2_count_draw_into}
 use random::pcg64_core::{PcgState}
 use math::pure::{is_finite,sqrt,exp}
@@ -97,8 +98,8 @@ fn cpb_take_fit(progress:&!CountProfileBootstrapResult,limit:i64)->bool with Mut
  true
 }
 fn cpb_pair_mean(counts:&IntegerBuffer,first:&NumericBuffer,first_alpha:f64,
- second:&NumericBuffer,second_alpha:f64,n:i64,work:&!Nb2LikelihoodDifferenceSlot)->CPBLogMean with Mut,Div,Panic {
- let status=nb2_log_probability_mean_difference_into(counts,first,first_alpha,second,second_alpha,n,work)
+ second:&NumericBuffer,second_alpha:f64,n:i64,work:&!Nb2LikelihoodDifferenceSlot,trace_enabled:bool,trace:&!CountFitTraceSlot)->CPBLogMean with Mut,Div,Panic {
+ let status=if trace_enabled {nb2_log_probability_mean_difference_traced_into(counts,first,first_alpha,second,second_alpha,n,work,trace)}else{nb2_log_probability_mean_difference_into(counts,first,first_alpha,second,second_alpha,n,work)}
  let value:f64=nb2_likelihood_difference_value(work)
  CPBLogMean{status:status,value:value}
 }
@@ -122,8 +123,8 @@ pub fn dynamic_count_profile_bootstrap_nested_workspace(n:i64,p0:i64,p1:i64)->Co
 }
 fn cpb_compare_points(counts:&IntegerBuffer,null_means:&NumericBuffer,null_alpha:f64,
  alternative_means:&NumericBuffer,alternative_alpha:f64,n:i64,progress:&!CountProfileBootstrapResult,
- pmf_work:&!Nb2LikelihoodDifferenceSlot)->CPBComparison with Mut,Div,Panic {
- let paired=cpb_pair_mean(counts,null_means,null_alpha,alternative_means,alternative_alpha,n,pmf_work)
+ pmf_work:&!Nb2LikelihoodDifferenceSlot,trace_enabled:bool,trace:&!CountFitTraceSlot)->CPBComparison with Mut,Div,Panic {
+ let paired=cpb_pair_mean(counts,null_means,null_alpha,alternative_means,alternative_alpha,n,pmf_work,trace_enabled,trace)
  if paired.status!=0 {
   progress.failure_stage=3
   if nb2_likelihood_difference_first_status(pmf_work)==0 {
@@ -154,7 +155,7 @@ fn cpb_compare(null_design:&NumericBuffer,null_layout:&NumericMatrix,null_offset
  alternative_response:&!NumericBuffer,alternative_step:&!NumericBuffer,
  alternative_qr:&!NumericBuffer,alternative_stage:&!NumericBuffer,
  null_candidate_coefficients:&!NumericBuffer,null_candidate_means:&!NumericBuffer,null_candidate_eta:&!NumericBuffer,null_best_coefficients:&!NumericBuffer,null_best_means:&!NumericBuffer,null_best_eta:&!NumericBuffer,null_factor_r:&!NumericBuffer,null_factor_scales:&!NumericBuffer,null_permutation:&!IntegerBuffer,
- alternative_candidate_coefficients:&!NumericBuffer,alternative_candidate_means:&!NumericBuffer,alternative_candidate_eta:&!NumericBuffer,alternative_best_coefficients:&!NumericBuffer,alternative_best_means:&!NumericBuffer,alternative_best_eta:&!NumericBuffer,alternative_factor_r:&!NumericBuffer,alternative_factor_scales:&!NumericBuffer,alternative_permutation:&!IntegerBuffer,pmf_work:&!Nb2LikelihoodDifferenceSlot)->CPBComparison with Mut,Div,Panic {
+ alternative_candidate_coefficients:&!NumericBuffer,alternative_candidate_means:&!NumericBuffer,alternative_candidate_eta:&!NumericBuffer,alternative_best_coefficients:&!NumericBuffer,alternative_best_means:&!NumericBuffer,alternative_best_eta:&!NumericBuffer,alternative_factor_r:&!NumericBuffer,alternative_factor_scales:&!NumericBuffer,alternative_permutation:&!IntegerBuffer,pmf_work:&!Nb2LikelihoodDifferenceSlot,trace:&!CountFitTraceSlot)->CPBComparison with Mut,Div,Panic {
  progress.last_null_alpha=0.0
  progress.last_alternative_alpha=0.0
  let failed=CPBComparison{status:3,difference:0.0,lr:0.0,lr_available:false}
@@ -180,7 +181,7 @@ fn cpb_compare(null_design:&NumericBuffer,null_layout:&NumericMatrix,null_offset
  progress.last_alternative_alpha=fit1.alpha
  if !fit1.point_available || (!fit1.poisson_selected && (fit1.left_censored || fit1.right_censored)) {progress.failure_stage=2;return CPBComparison{status:12,difference:0.0,lr:0.0,lr_available:false}}
  if progress.failure_replica== -1 {progress.alpha_refitted=true;progress.observed_null_alpha=fit0.alpha;progress.observed_alternative_alpha=fit1.alpha;progress.generating_alpha=fit0.alpha}
- cpb_compare_points(counts,null_means,fit0.alpha,alternative_means,fit1.alpha,fit0.rows,progress,pmf_work)
+ cpb_compare_points(counts,null_means,fit0.alpha,alternative_means,fit1.alpha,fit0.rows,progress,pmf_work,false,trace)
 }
 
 fn cpb_compare_nested(null_design:&NumericBuffer,null_layout:&NumericMatrix,null_offsets:&NumericBuffer,
@@ -195,7 +196,7 @@ fn cpb_compare_nested(null_design:&NumericBuffer,null_layout:&NumericMatrix,null
  alternative_response:&!NumericBuffer,alternative_step:&!NumericBuffer,
  alternative_qr:&!NumericBuffer,alternative_stage:&!NumericBuffer,
  null_candidate_coefficients:&!NumericBuffer,null_candidate_means:&!NumericBuffer,null_candidate_eta:&!NumericBuffer,null_best_coefficients:&!NumericBuffer,null_best_means:&!NumericBuffer,null_best_eta:&!NumericBuffer,null_factor_r:&!NumericBuffer,null_factor_scales:&!NumericBuffer,null_permutation:&!IntegerBuffer,
- alternative_candidate_coefficients:&!NumericBuffer,alternative_candidate_means:&!NumericBuffer,alternative_candidate_eta:&!NumericBuffer,alternative_best_coefficients:&!NumericBuffer,alternative_best_means:&!NumericBuffer,alternative_best_eta:&!NumericBuffer,alternative_factor_r:&!NumericBuffer,alternative_factor_scales:&!NumericBuffer,alternative_permutation:&!IntegerBuffer,pmf_work:&!Nb2LikelihoodDifferenceSlot,embedding:&NumericBuffer,warm_start:&!NumericBuffer)->CPBComparison with Mut,Div,Panic {
+ alternative_candidate_coefficients:&!NumericBuffer,alternative_candidate_means:&!NumericBuffer,alternative_candidate_eta:&!NumericBuffer,alternative_best_coefficients:&!NumericBuffer,alternative_best_means:&!NumericBuffer,alternative_best_eta:&!NumericBuffer,alternative_factor_r:&!NumericBuffer,alternative_factor_scales:&!NumericBuffer,alternative_permutation:&!IntegerBuffer,pmf_work:&!Nb2LikelihoodDifferenceSlot,embedding:&NumericBuffer,warm_start:&!NumericBuffer,warm_null:bool,trace_enabled:bool,trace:&!CountFitTraceSlot)->CPBComparison with Mut,Div,Panic {
  progress.last_null_alpha=0.0
  progress.last_alternative_alpha=0.0
  let failed=CPBComparison{status:3,difference:0.0,lr:0.0,lr_available:false}
@@ -203,7 +204,12 @@ fn cpb_compare_nested(null_design:&NumericBuffer,null_layout:&NumericMatrix,null
   return CPBComparison{status:5,difference:0.0,lr:0.0,lr_available:false}
  }
  let search=DispersionSearchOptions{method:0,log_alpha_lower:options.log_alpha_lower,log_alpha_upper:options.log_alpha_upper,outer_tolerance:options.outer_tolerance,max_outer_evaluations:options.max_outer_evaluations,rcond:options.rcond,inner_iterations:options.inner_iterations,inner_tolerance:options.inner_tolerance,prior_active:false,prior_center:0.0,prior_variance:1.0,compute_curvature:false}
- let fit0=dynamic_dispersion_fit(null_design,null_layout,counts,null_offsets,null_initial,&search,null_coefficients,null_means,null_eta,null_candidate_coefficients,null_candidate_means,null_candidate_eta,null_best_coefficients,null_best_means,null_best_eta,null_weighted,null_response,null_step,null_qr,null_stage,null_factor_r,null_factor_scales,null_permutation)
+ // Only replica null fits are warmed; observed null and generating means stay cold.
+ if trace_enabled {
+  let role:i64=if warm_null {9}else{8}
+  if count_fit_trace_note(trace,role)!=0 {progress.failure_stage=10;return CPBComparison{status:4,difference:0.0,lr:0.0,lr_available:false}}
+ }
+ let fit0=if warm_null {if trace_enabled {dynamic_dispersion_fit_seeded_traced(null_design,null_layout,counts,null_offsets,null_initial,&search,null_coefficients,null_means,null_eta,null_candidate_coefficients,null_candidate_means,null_candidate_eta,null_best_coefficients,null_best_means,null_best_eta,null_weighted,null_response,null_step,null_qr,null_stage,null_factor_r,null_factor_scales,null_permutation,progress.generating_alpha,trace)}else{dynamic_dispersion_fit_seeded(null_design,null_layout,counts,null_offsets,null_initial,&search,null_coefficients,null_means,null_eta,null_candidate_coefficients,null_candidate_means,null_candidate_eta,null_best_coefficients,null_best_means,null_best_eta,null_weighted,null_response,null_step,null_qr,null_stage,null_factor_r,null_factor_scales,null_permutation,progress.generating_alpha)}}else{if trace_enabled {dynamic_dispersion_fit_traced(null_design,null_layout,counts,null_offsets,null_initial,&search,null_coefficients,null_means,null_eta,null_candidate_coefficients,null_candidate_means,null_candidate_eta,null_best_coefficients,null_best_means,null_best_eta,null_weighted,null_response,null_step,null_qr,null_stage,null_factor_r,null_factor_scales,null_permutation,trace)}else{dynamic_dispersion_fit(null_design,null_layout,counts,null_offsets,null_initial,&search,null_coefficients,null_means,null_eta,null_candidate_coefficients,null_candidate_means,null_candidate_eta,null_best_coefficients,null_best_means,null_best_eta,null_weighted,null_response,null_step,null_qr,null_stage,null_factor_r,null_factor_scales,null_permutation)}}
  progress.profile_evaluations=progress.profile_evaluations+fit0.evaluations
  progress.last_null_profile_status=fit0.profile_status
  progress.last_null_status=fit0.status
@@ -215,7 +221,8 @@ fn cpb_compare_nested(null_design:&NumericBuffer,null_layout:&NumericMatrix,null
  }
  let warm_status=count_profile_embedding_warm(embedding,null_coefficients,fit0.columns,numeric_matrix_cols(alternative_layout),warm_start)
  if warm_status!=0 {progress.failure_stage=9;return CPBComparison{status:13,difference:0.0,lr:0.0,lr_available:false}}
- let fit1=dynamic_dispersion_fit_seeded(alternative_design,alternative_layout,counts,alternative_offsets,warm_start,&search,alternative_coefficients,alternative_means,alternative_eta,alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_weighted,alternative_response,alternative_step,alternative_qr,alternative_stage,alternative_factor_r,alternative_factor_scales,alternative_permutation,fit0.alpha)
+ if trace_enabled {if count_fit_trace_note(trace,10)!=0 {progress.failure_stage=10;return CPBComparison{status:4,difference:0.0,lr:0.0,lr_available:false}}}
+ let fit1=if trace_enabled {dynamic_dispersion_fit_seeded_traced(alternative_design,alternative_layout,counts,alternative_offsets,warm_start,&search,alternative_coefficients,alternative_means,alternative_eta,alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_weighted,alternative_response,alternative_step,alternative_qr,alternative_stage,alternative_factor_r,alternative_factor_scales,alternative_permutation,fit0.alpha,trace)}else{dynamic_dispersion_fit_seeded(alternative_design,alternative_layout,counts,alternative_offsets,warm_start,&search,alternative_coefficients,alternative_means,alternative_eta,alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_weighted,alternative_response,alternative_step,alternative_qr,alternative_stage,alternative_factor_r,alternative_factor_scales,alternative_permutation,fit0.alpha)}
  progress.profile_evaluations=progress.profile_evaluations+fit1.evaluations
  progress.last_alternative_profile_status=fit1.profile_status
  progress.last_alternative_status=fit1.status
@@ -223,7 +230,7 @@ fn cpb_compare_nested(null_design:&NumericBuffer,null_layout:&NumericMatrix,null
  progress.last_alternative_alpha=fit1.alpha
  if !fit1.point_available || (!fit1.poisson_selected && (fit1.left_censored || fit1.right_censored)) {progress.failure_stage=2;return CPBComparison{status:12,difference:0.0,lr:0.0,lr_available:false}}
  if progress.failure_replica== -1 {progress.alpha_refitted=true;progress.observed_null_alpha=fit0.alpha;progress.observed_alternative_alpha=fit1.alpha;progress.generating_alpha=fit0.alpha}
- cpb_compare_points(counts,null_means,fit0.alpha,alternative_means,fit1.alpha,fit0.rows,progress,pmf_work)
+ cpb_compare_points(counts,null_means,fit0.alpha,alternative_means,fit1.alpha,fit0.rows,progress,pmf_work,trace_enabled,trace)
 }
 
 fn cpb_generate_replica(generating_means:&NumericBuffer,replicate_counts:&!IntegerBuffer,n:i64,
@@ -302,6 +309,7 @@ pub fn dynamic_count_profile_lrt_bootstrap(null_design:&NumericBuffer,null_layou
  null_candidate_coefficients:&!NumericBuffer,null_candidate_means:&!NumericBuffer,null_candidate_eta:&!NumericBuffer,null_best_coefficients:&!NumericBuffer,null_best_means:&!NumericBuffer,null_best_eta:&!NumericBuffer,null_factor_r:&!NumericBuffer,null_factor_scales:&!NumericBuffer,null_permutation:&!IntegerBuffer,
  alternative_candidate_coefficients:&!NumericBuffer,alternative_candidate_means:&!NumericBuffer,alternative_candidate_eta:&!NumericBuffer,alternative_best_coefficients:&!NumericBuffer,alternative_best_means:&!NumericBuffer,alternative_best_eta:&!NumericBuffer,alternative_factor_r:&!NumericBuffer,alternative_factor_scales:&!NumericBuffer,alternative_permutation:&!IntegerBuffer)->CountProfileBootstrapResult with Mut,Div,Panic {
  var out=cpb_empty(2,rng,options)
+ var trace=count_fit_trace_slot()
  let span=options.log_alpha_upper-options.log_alpha_lower
  if !is_finite(options.log_alpha_lower) || !is_finite(options.log_alpha_upper) || options.log_alpha_lower>=options.log_alpha_upper || !is_finite(span) ||
  !is_finite(options.outer_tolerance) || options.outer_tolerance<=0.0 || options.max_outer_evaluations<1 || options.replicates<1 ||
@@ -346,7 +354,7 @@ pub fn dynamic_count_profile_lrt_bootstrap(null_design:&NumericBuffer,null_layou
  null_qr,null_stage,alternative_coefficients,alternative_means,alternative_eta,
  alternative_weighted,alternative_response,alternative_step,alternative_qr,alternative_stage,
  null_candidate_coefficients,null_candidate_means,null_candidate_eta,null_best_coefficients,null_best_means,null_best_eta,null_factor_r,null_factor_scales,null_permutation,
- alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_factor_r,alternative_factor_scales,alternative_permutation,&!pmf_work)
+ alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_factor_r,alternative_factor_scales,alternative_permutation,&!pmf_work,&!trace)
  out.observed_mean_loglik_difference=observed.difference
  out.observed_signed_lr=observed.lr
  out.observed_lr_available=observed.lr_available
@@ -371,7 +379,7 @@ pub fn dynamic_count_profile_lrt_bootstrap(null_design:&NumericBuffer,null_layou
  null_qr,null_stage,alternative_coefficients,alternative_means,alternative_eta,
  alternative_weighted,alternative_response,alternative_step,alternative_qr,alternative_stage,
  null_candidate_coefficients,null_candidate_means,null_candidate_eta,null_best_coefficients,null_best_means,null_best_eta,null_factor_r,null_factor_scales,null_permutation,
- alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_factor_r,alternative_factor_scales,alternative_permutation,&!pmf_work)
+ alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_factor_r,alternative_factor_scales,alternative_permutation,&!pmf_work,&!trace)
   if trial.status!=0 {
    out.status=trial.status
    out.failure_mean_loglik_difference=trial.difference
@@ -388,7 +396,7 @@ pub fn dynamic_count_profile_lrt_bootstrap(null_design:&NumericBuffer,null_layou
 }
 
 // Strict opt-in checked binary64 embedding; extra caller-owned warm start.
-pub fn dynamic_count_profile_lrt_bootstrap_nested(null_design:&NumericBuffer,null_layout:&NumericMatrix,null_offsets:&NumericBuffer,
+fn cpb_nested_engine(null_design:&NumericBuffer,null_layout:&NumericMatrix,null_offsets:&NumericBuffer,
  null_initial:&NumericBuffer,alternative_design:&NumericBuffer,alternative_layout:&NumericMatrix,
  alternative_offsets:&NumericBuffer,alternative_initial:&NumericBuffer,
  observed_counts:&IntegerBuffer,options:&CountProfileBootstrapOptions,rng:PcgState,
@@ -401,8 +409,9 @@ pub fn dynamic_count_profile_lrt_bootstrap_nested(null_design:&NumericBuffer,nul
  alternative_response:&!NumericBuffer,alternative_step:&!NumericBuffer,
  alternative_qr:&!NumericBuffer,alternative_stage:&!NumericBuffer,
  null_candidate_coefficients:&!NumericBuffer,null_candidate_means:&!NumericBuffer,null_candidate_eta:&!NumericBuffer,null_best_coefficients:&!NumericBuffer,null_best_means:&!NumericBuffer,null_best_eta:&!NumericBuffer,null_factor_r:&!NumericBuffer,null_factor_scales:&!NumericBuffer,null_permutation:&!IntegerBuffer,
- alternative_candidate_coefficients:&!NumericBuffer,alternative_candidate_means:&!NumericBuffer,alternative_candidate_eta:&!NumericBuffer,alternative_best_coefficients:&!NumericBuffer,alternative_best_means:&!NumericBuffer,alternative_best_eta:&!NumericBuffer,alternative_factor_r:&!NumericBuffer,alternative_factor_scales:&!NumericBuffer,alternative_permutation:&!IntegerBuffer,embedding:&NumericBuffer,warm_start:&!NumericBuffer)->CountProfileBootstrapResult with Mut,Div,Panic {
+ alternative_candidate_coefficients:&!NumericBuffer,alternative_candidate_means:&!NumericBuffer,alternative_candidate_eta:&!NumericBuffer,alternative_best_coefficients:&!NumericBuffer,alternative_best_means:&!NumericBuffer,alternative_best_eta:&!NumericBuffer,alternative_factor_r:&!NumericBuffer,alternative_factor_scales:&!NumericBuffer,alternative_permutation:&!IntegerBuffer,embedding:&NumericBuffer,warm_start:&!NumericBuffer,trace_enabled:bool,trace:&!CountFitTraceSlot)->CountProfileBootstrapResult with Mut,Div,Panic {
  var out=cpb_empty(2,rng,options)
+ if trace_enabled {if count_fit_trace_status(trace)!=0 {out.status=4;out.failure_stage=10;return out}}
  let span=options.log_alpha_upper-options.log_alpha_lower
  if !is_finite(options.log_alpha_lower) || !is_finite(options.log_alpha_upper) || options.log_alpha_lower>=options.log_alpha_upper || !is_finite(span) ||
  !is_finite(options.outer_tolerance) || options.outer_tolerance<=0.0 || options.max_outer_evaluations<1 || options.replicates<1 ||
@@ -450,11 +459,15 @@ pub fn dynamic_count_profile_lrt_bootstrap_nested(null_design:&NumericBuffer,nul
  null_qr,null_stage,alternative_coefficients,alternative_means,alternative_eta,
  alternative_weighted,alternative_response,alternative_step,alternative_qr,alternative_stage,
  null_candidate_coefficients,null_candidate_means,null_candidate_eta,null_best_coefficients,null_best_means,null_best_eta,null_factor_r,null_factor_scales,null_permutation,
- alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_factor_r,alternative_factor_scales,alternative_permutation,&!pmf_work,embedding,warm_start)
+ alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_factor_r,alternative_factor_scales,alternative_permutation,&!pmf_work,embedding,warm_start,false,trace_enabled,trace)
  out.observed_mean_loglik_difference=observed.difference
  out.observed_signed_lr=observed.lr
  out.observed_lr_available=observed.lr_available
- if observed.status!=0 {out.status=observed.status;cpb_checkpoint(&!out,&cursor);return out}
+ if observed.status!=0 {
+  out.status=observed.status
+  if trace_enabled {if count_fit_trace_status(trace)!=0 {out.status=4;out.failure_stage=10}}
+  cpb_checkpoint(&!out,&cursor);return out
+ }
  out.observed_available=true
  var row:i64=0
  while row<n {
@@ -475,9 +488,10 @@ pub fn dynamic_count_profile_lrt_bootstrap_nested(null_design:&NumericBuffer,nul
  null_qr,null_stage,alternative_coefficients,alternative_means,alternative_eta,
  alternative_weighted,alternative_response,alternative_step,alternative_qr,alternative_stage,
  null_candidate_coefficients,null_candidate_means,null_candidate_eta,null_best_coefficients,null_best_means,null_best_eta,null_factor_r,null_factor_scales,null_permutation,
- alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_factor_r,alternative_factor_scales,alternative_permutation,&!pmf_work,embedding,warm_start)
+ alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_factor_r,alternative_factor_scales,alternative_permutation,&!pmf_work,embedding,warm_start,true,trace_enabled,trace)
   if trial.status!=0 {
    out.status=trial.status
+   if trace_enabled {if count_fit_trace_status(trace)!=0 {out.status=4;out.failure_stage=10}}
    out.failure_mean_loglik_difference=trial.difference
    out.failure_signed_lr=trial.lr
    out.failure_lr_available=trial.lr_available
@@ -489,4 +503,39 @@ pub fn dynamic_count_profile_lrt_bootstrap_nested(null_design:&NumericBuffer,nul
  }
  let summary_status=cpb_finish(&!out,options,&cursor)
  out
+}
+pub fn dynamic_count_profile_lrt_bootstrap_nested(null_design:&NumericBuffer,null_layout:&NumericMatrix,null_offsets:&NumericBuffer,
+ null_initial:&NumericBuffer,alternative_design:&NumericBuffer,alternative_layout:&NumericMatrix,
+ alternative_offsets:&NumericBuffer,alternative_initial:&NumericBuffer,
+ observed_counts:&IntegerBuffer,options:&CountProfileBootstrapOptions,rng:PcgState,
+ replicate_counts:&!IntegerBuffer,generating_means:&!NumericBuffer,
+ null_coefficients:&!NumericBuffer,null_means:&!NumericBuffer,null_eta:&!NumericBuffer,
+ null_weighted:&!NumericBuffer,null_response:&!NumericBuffer,null_step:&!NumericBuffer,
+ null_qr:&!NumericBuffer,null_stage:&!NumericBuffer,
+ alternative_coefficients:&!NumericBuffer,alternative_means:&!NumericBuffer,
+ alternative_eta:&!NumericBuffer,alternative_weighted:&!NumericBuffer,
+ alternative_response:&!NumericBuffer,alternative_step:&!NumericBuffer,
+ alternative_qr:&!NumericBuffer,alternative_stage:&!NumericBuffer,
+ null_candidate_coefficients:&!NumericBuffer,null_candidate_means:&!NumericBuffer,null_candidate_eta:&!NumericBuffer,null_best_coefficients:&!NumericBuffer,null_best_means:&!NumericBuffer,null_best_eta:&!NumericBuffer,null_factor_r:&!NumericBuffer,null_factor_scales:&!NumericBuffer,null_permutation:&!IntegerBuffer,
+ alternative_candidate_coefficients:&!NumericBuffer,alternative_candidate_means:&!NumericBuffer,alternative_candidate_eta:&!NumericBuffer,alternative_best_coefficients:&!NumericBuffer,alternative_best_means:&!NumericBuffer,alternative_best_eta:&!NumericBuffer,alternative_factor_r:&!NumericBuffer,alternative_factor_scales:&!NumericBuffer,alternative_permutation:&!IntegerBuffer,embedding:&NumericBuffer,warm_start:&!NumericBuffer)->CountProfileBootstrapResult with Mut,Div,Panic {
+ var trace=count_fit_trace_slot()
+ cpb_nested_engine(null_design,null_layout,null_offsets,null_initial,alternative_design,alternative_layout,alternative_offsets,alternative_initial,observed_counts,options,rng,replicate_counts,generating_means,null_coefficients,null_means,null_eta,null_weighted,null_response,null_step,null_qr,null_stage,alternative_coefficients,alternative_means,alternative_eta,alternative_weighted,alternative_response,alternative_step,alternative_qr,alternative_stage,null_candidate_coefficients,null_candidate_means,null_candidate_eta,null_best_coefficients,null_best_means,null_best_eta,null_factor_r,null_factor_scales,null_permutation,alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_factor_r,alternative_factor_scales,alternative_permutation,embedding,warm_start,false,&!trace)
+}
+
+// Trace counters accumulate across calls; reset is explicit and caller-owned.
+pub fn dynamic_count_profile_lrt_bootstrap_nested_traced(null_design:&NumericBuffer,null_layout:&NumericMatrix,null_offsets:&NumericBuffer,
+ null_initial:&NumericBuffer,alternative_design:&NumericBuffer,alternative_layout:&NumericMatrix,
+ alternative_offsets:&NumericBuffer,alternative_initial:&NumericBuffer,
+ observed_counts:&IntegerBuffer,options:&CountProfileBootstrapOptions,rng:PcgState,
+ replicate_counts:&!IntegerBuffer,generating_means:&!NumericBuffer,
+ null_coefficients:&!NumericBuffer,null_means:&!NumericBuffer,null_eta:&!NumericBuffer,
+ null_weighted:&!NumericBuffer,null_response:&!NumericBuffer,null_step:&!NumericBuffer,
+ null_qr:&!NumericBuffer,null_stage:&!NumericBuffer,
+ alternative_coefficients:&!NumericBuffer,alternative_means:&!NumericBuffer,
+ alternative_eta:&!NumericBuffer,alternative_weighted:&!NumericBuffer,
+ alternative_response:&!NumericBuffer,alternative_step:&!NumericBuffer,
+ alternative_qr:&!NumericBuffer,alternative_stage:&!NumericBuffer,
+ null_candidate_coefficients:&!NumericBuffer,null_candidate_means:&!NumericBuffer,null_candidate_eta:&!NumericBuffer,null_best_coefficients:&!NumericBuffer,null_best_means:&!NumericBuffer,null_best_eta:&!NumericBuffer,null_factor_r:&!NumericBuffer,null_factor_scales:&!NumericBuffer,null_permutation:&!IntegerBuffer,
+ alternative_candidate_coefficients:&!NumericBuffer,alternative_candidate_means:&!NumericBuffer,alternative_candidate_eta:&!NumericBuffer,alternative_best_coefficients:&!NumericBuffer,alternative_best_means:&!NumericBuffer,alternative_best_eta:&!NumericBuffer,alternative_factor_r:&!NumericBuffer,alternative_factor_scales:&!NumericBuffer,alternative_permutation:&!IntegerBuffer,embedding:&NumericBuffer,warm_start:&!NumericBuffer,trace:&!CountFitTraceSlot)->CountProfileBootstrapResult with Mut,Div,Panic {
+ cpb_nested_engine(null_design,null_layout,null_offsets,null_initial,alternative_design,alternative_layout,alternative_offsets,alternative_initial,observed_counts,options,rng,replicate_counts,generating_means,null_coefficients,null_means,null_eta,null_weighted,null_response,null_step,null_qr,null_stage,alternative_coefficients,alternative_means,alternative_eta,alternative_weighted,alternative_response,alternative_step,alternative_qr,alternative_stage,null_candidate_coefficients,null_candidate_means,null_candidate_eta,null_best_coefficients,null_best_means,null_best_eta,null_factor_r,null_factor_scales,null_permutation,alternative_candidate_coefficients,alternative_candidate_means,alternative_candidate_eta,alternative_best_coefficients,alternative_best_means,alternative_best_eta,alternative_factor_r,alternative_factor_scales,alternative_permutation,embedding,warm_start,true,trace)
 }

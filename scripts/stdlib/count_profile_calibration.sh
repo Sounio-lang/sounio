@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Bounded qualification orchestration; all numerical work is C++23 or Sounio.
 # No automatic submission: invoke INSIDE an authorized Slurm allocation only.
+# Nested campaigns use separate namespaces; old generated outputs remain reproducible.
+# CAL_WORK is read from actual result fields, never reconstructed from RNG.
 # Usage: COUNT_PROFILE_FUNCTIONAL_GATE_RECEIPT=/frozen/passing-receipt \
 #        MADAROS_RAW_BIN=/attested/current/compiler.elf \
 #        bash scripts/stdlib/count_profile_calibration.sh SOURCE_ROOT OUTPUT_ROOT pilot|qualification
@@ -15,10 +17,9 @@ mode=$3
 wall_budget=${COUNT_PROFILE_WALL_BUDGET_SECONDS:-86400}
 [[ $wall_budget =~ ^[1-9][0-9]{0,4}$ ]] && ((wall_budget<=86400)) || { echo "wall budget must be 1..86400" >&2; exit 64; }
 case "$mode" in pilot) B=31; cells=('16 .25'); target=16;; qualification) B=199; cells=('16 0' '16 .25' '16 1' '64 0' '64 .25' '64 1' '256 0' '256 .25' '256 1'); target=128;; *) exit 64;; esac
-: "${COUNT_PROFILE_FUNCTIONAL_GATE_RECEIPT:?Passing functional-gate receipt is required before qualification}"
-: "${MADAROS_RAW_BIN:?Attested current-source compiler is required}"
+[[ -n ${COUNT_PROFILE_FUNCTIONAL_GATE_RECEIPT:-} && -n ${MADAROS_RAW_BIN:-} ]] || { echo 'frozen functional receipt and attested compiler required' >&2; exit 65; }
 [[ -r "$COUNT_PROFILE_FUNCTIONAL_GATE_RECEIPT" && -x "$MADAROS_RAW_BIN" ]] || exit 65
-campaign="$output_root/${mode}_B${B}"
+campaign="$output_root/${mode}_nested_B${B}"
 mkdir -p "$campaign"/{tmp,cache,tools}
 exec 9>"$campaign/campaign.lock"
 flock -n 9 || { echo 'campaign already active' >&2; exit 75; }
@@ -42,18 +43,32 @@ actual=$(sha256sum "${gate[results_path]}"); [[ ${actual%% *} == ${gate[results_
 results=${gate[results_path]}
 awk -F '\t' 'NR==1 {if($0!="kind\tsource\texit_status")exit 1;next} NF!=3||$1==""||$2==""||$3!="0" {exit 1} END {if(NR<2)exit 1}' "$results" || { echo 'gate results malformed or nonzero' >&2; exit 65; }
 require_row(){ awk -F '\t' -v k="$1" -v s="$2" '$1==k&&$2==s {count++} END {exit count!=1}' "$results" || { echo "missing/duplicate gate result: $1 $2" >&2; exit 65; }; }
-for fixture in stdlib_deep_stats_count_profile_bootstrap stdlib_deep_stats_dynamic_robust stdlib_deep_stats_dynamic_robust_status stdlib_deep_stats_dynamic_robust_contrast stdlib_deep_count_dataset_status stdlib_deep_count_dataset_reference stdlib_deep_viz_scientific_document stdlib_deep_viz_count_diagnostics stdlib_deep_ode_diagnostic_observer; do
- for phase in check compile native marker; do require_row "$phase" "tests/run-pass/$fixture.sio"; done
+# CENTRAL gate labels are exact. Never accept an old full02 receipt merely
+# because somebody rebinds its source/compiler hashes to this newer tree.
+# Every count fixture in the canonical source is required, including cache controls.
+shopt -s nullglob
+count_fixtures=(tests/run-pass/stdlib_scale_count_*.sio)
+shopt -u nullglob
+((${#count_fixtures[@]}>0)) || { echo "canonical count fixture glob is empty" >&2; exit 65; }
+for fixture_path in "${count_fixtures[@]}"; do
+ for phase in check compile native stdout-marker; do require_row "$phase" "$fixture_path"; done
 done
-for pair in 'deep_stats_count_profile_bootstrap_reference:stdlib_deep_stats_count_profile_bootstrap' 'deep_stats_dynamic_robust_reference:stdlib_deep_stats_dynamic_robust' 'deep_stats_dynamic_robust_contrast_reference:stdlib_deep_stats_dynamic_robust_contrast' 'deep_count_dataset_reference:stdlib_deep_count_dataset_reference' 'deep_count_dataset_reference:viz_dynamic_count_workflow' 'deep_viz_scientific_document:stdlib_deep_viz_scientific_document' 'deep_viz_scientific_document:stdlib_deep_viz_count_diagnostics'; do require_row concordance "$pair"; done
-require_row mutant-rejection fixed-alpha
-for phase in check compile native; do require_row "$phase" examples/viz_dynamic_count_workflow.sio; done
+for fixture in stdlib_deep_stats_count_profile_nested stdlib_scale_normalization_into stdlib_scale_normalization_status; do
+ for phase in check compile native stdout-marker; do require_row "$phase" "tests/run-pass/$fixture.sio"; done
+done
+for stem in 'deep_stats_count_profile_bootstrap_reference:nested' 'deep_stats_count_profile_bootstrap_reference:nested-traced' count_likelihood_difference_reference count_dispersion_increment_reference normalization_into_reference 'count_likelihood_difference_reference:rank' 'count_likelihood_difference_reference:cached-rank' count_cached_rank_reference count_aggregate_cancellation_reference 'deep_stats_nb2_likelihood_reference:cached' 'deep_stats_count_profile_bootstrap_reference:cache' 'deep_stats_count_glm_reference:trace-control' 'deep_stats_count_increment_reference:trace-control'; do require_row concordance "$stem"; done
+for control in 'deep_stats_count_profile_bootstrap_reference:nested-fixed-alpha:expected=2:actual=2' 'deep_stats_count_profile_bootstrap_reference:nested-prefix:expected=2:actual=2' 'count_dispersion_increment_reference:orientation:expected=2:actual=2'; do require_row mutant-rejection "$control"; done
+
+require_row prepare scripts/lib/materialize_madaros_prebuilt.sh
+require_row input-hashes unchanged
+require_row input-catalog unchanged
+require_row compiler-hash unchanged
 sha256sum "$MADAROS_RAW_BIN" "$COUNT_PROFILE_FUNCTIONAL_GATE_RECEIPT" "${gate[results_path]}" >> "$manifest"
 if [[ -f "$campaign/INPUTS.sha256" ]]; then
  cmp "$manifest" "$campaign/INPUTS.sha256" || { echo 'Source/compiler/gate identity changed; use a new campaign root' >&2; exit 65; }
 else
  cp "$manifest" "$campaign/INPUTS.sha256"
- printf 'mode\t%s\nB\t%s\nbatch_size\t16\ntarget_per_cell\t%s\nmax_cumulative_wall_seconds\t%s\n' "$mode" "$B" "$target" "$wall_budget" > "$campaign/PROTOCOL.tsv"
+ printf 'mode\t%s\nentry_policy\tnested_traced\nB\t%s\nbatch_size\t16\nserial_processes\t1\ntarget_per_cell\t%s\nmax_cumulative_wall_seconds\t%s\n' "$mode" "$B" "$target" "$wall_budget" > "$campaign/PROTOCOL.tsv"
 fi
 rm "$manifest"
 # Accumulate wall budget across resumed invocations; this is operational timing,
@@ -89,7 +104,7 @@ for ((first=0; first<target; first+=16)); do
   mkdir "$batch"
   read -r generation_seed bootstrap_seed < <("$campaign/tools/count_profile_calibration" --seeds "$cell_index")
   [[ $generation_seed =~ ^[0-9]+$ && $bootstrap_seed =~ ^[0-9]+$ ]] || { echo "invalid C++ seed schedule" >&2; exit 65; }
-  "$campaign/tools/count_profile_calibration" --generate tests/run-pass/stdlib_deep_stats_count_profile_bootstrap.sio "$batch" "$n" "$alpha" "$B" 16 "$first" "$generation_seed" "$bootstrap_seed" > "$batch/generate.stdout" 2> "$batch/generate.stderr"
+  "$campaign/tools/count_profile_calibration" --generate-nested-traced tests/run-pass/stdlib_deep_stats_count_profile_bootstrap.sio "$batch" "$n" "$alpha" "$B" 16 "$first" "$generation_seed" "$bootstrap_seed" > "$batch/generate.stdout" 2> "$batch/generate.stderr"
   set +e
   /usr/bin/time -v -o "$batch/compile.resource" timeout --kill-after=30 "$remaining" bin/souc compile "$batch/driver.sio" -o "$batch/driver.elf" > "$batch/compile.stdout" 2> "$batch/compile.stderr"
   rc=$?
@@ -119,13 +134,13 @@ for ((first=0; first<target; first+=16)); do
   printf '%s\n' 'COUNT PROFILE CALIBRATION BATCH COMPLETE' >> "$batch/native.stdout"
   printf '0\n' > "$batch/native.status"
   sha256sum -c "$batch/ELF-before.sha256" > "$batch/ELF-after.verify"
-  "$campaign/tools/count_profile_calibration" --summarize "$B" 16 "$first" "$batch/native.stdout" > "$batch/summary.tsv" 2> "$batch/summary.stderr"
+  "$campaign/tools/count_profile_calibration" --summarize-nested-traced "$B" 16 "$first" "$batch/native.stdout" > "$batch/summary.tsv" 2> "$batch/summary.stderr"
   (cd "$batch" && find . -maxdepth 1 -type f ! -name FILES.sha256 ! -name READY ! -name resume-verify.log -print0 | sort -z | xargs -0 sha256sum > FILES.sha256)
   touch "$batch/READY"
   fi
  native_files=()
  for ((completed_first=0; completed_first<=first; completed_first+=16)); do native_files+=("$cell_dir/batch${completed_first}/native.stdout"); done
- "$campaign/tools/count_profile_calibration" --summarize "$B" 16 0 "${native_files[@]}" > "$cell_dir/summary.tsv" 2> "$cell_dir/summary.stderr"
+ "$campaign/tools/count_profile_calibration" --summarize-nested-traced "$B" 16 0 "${native_files[@]}" > "$cell_dir/summary.tsv" 2> "$cell_dir/summary.stderr"
  cell_index=$((cell_index+1))
  done
 done

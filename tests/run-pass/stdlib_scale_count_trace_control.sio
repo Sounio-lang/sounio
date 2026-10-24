@@ -1,0 +1,243 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: DEEP COUNT GLM PASS
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_at,numeric_buffer_set,numeric_buffer_close,numeric_matrix}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set,integer_buffer_close}
+use stats::regression::dynamic_count_glm::{dynamic_count_workspace,dynamic_count_fit_with_trace_control}
+use stats::regression::count_fit_trace::{count_fit_trace_bounded,count_fit_trace_status,count_fit_trace_metric}
+use math::pure::{ln_checked,is_finite}
+use io::sci_print::{println_f64_sci}
+fn cg_close(a:f64,b:f64,tol:f64)->bool {let e=if a>b {a-b}else{b-a} e<=tol}
+fn total_overflow_case()->bool with Alloc,Mut,Div,Panic {
+ var disabled_trace=count_fit_trace_bounded(-1)
+ let n:i64=4
+ let p:i64=1
+ let plan=dynamic_count_workspace(n,p)
+ var a=numeric_buffer_new(4,32)
+ let layout=numeric_matrix(4,n,p,1,1,0)
+ var counts=integer_buffer_new(n,32)
+ var offsets=numeric_buffer_new(n,32)
+ var initial=numeric_buffer_new(p,8)
+ var coefficients=numeric_buffer_new(p,8)
+ var means=numeric_buffer_new(n,32)
+ var eta=numeric_buffer_new(n,32)
+ var weighted=numeric_buffer_new(plan.design_elements,plan.design_elements*8)
+ var rhs=numeric_buffer_new(n,32)
+ var step=numeric_buffer_new(p,8)
+ var qr=numeric_buffer_new(plan.qr_elements,plan.qr_elements*8)
+ var stage=numeric_buffer_new(plan.stage_elements,plan.stage_elements*8)
+ let forced=ln_checked(5e307)
+ let active=ln_checked(2.0)
+ assert(forced.status==0 && active.status==0)
+ numeric_buffer_set(&!initial,0,active.value)
+ var i:i64=0
+ while i<4 {
+  numeric_buffer_set(&!a,i,if i==3 {1.0}else{0.0})
+  integer_buffer_set(&!counts,i,if i==3 {2}else{0})
+  numeric_buffer_set(&!offsets,i,if i==3 {0.0}else{forced.value})
+  i=i+1
+ }
+ let result=dynamic_count_fit_with_trace_control(&a,&layout,&counts,&offsets,&initial,0.0,0.0,100,1e-9,
+ &!coefficients,&!means,&!eta,&!weighted,&!rhs,&!step,&!qr,&!stage,false,&!disabled_trace)
+ assert(count_fit_trace_status(&disabled_trace)==2)
+ assert(count_fit_trace_metric(&disabled_trace,1)==0)
+ assert(result.status==0 && result.deviance_status==1 && result.total_deviance==0.0)
+ assert(is_finite(result.mean_deviance) && result.mean_deviance>1e307)
+ assert(cg_close(numeric_buffer_at(&coefficients,0),active.value,1e-8))
+ numeric_buffer_close(a);integer_buffer_close(counts);numeric_buffer_close(offsets)
+ numeric_buffer_close(initial);numeric_buffer_close(coefficients);numeric_buffer_close(means)
+ numeric_buffer_close(eta);numeric_buffer_close(weighted);numeric_buffer_close(rhs)
+ numeric_buffer_close(step);numeric_buffer_close(qr);numeric_buffer_close(stage)
+ true
+}
+// Frozen bootstrap replica1, seed7: the prior absolute-objective search stalled.
+// mode1 separately exercises q rounded1 with an independently tiny Fisher weight.
+fn paired_gain_regression(mode:i64)->bool with Alloc,IO,Mut,Div,Panic {
+ var disabled_trace=count_fit_trace_bounded(-1)
+ let n:i64=if mode==0 {16}else{8}
+ let p:i64=if mode==0 {2}else{1}
+ let plan=dynamic_count_workspace(n,p)
+ var a=numeric_buffer_new(n*p,n*p*8)
+ let layout=numeric_matrix(n*p,n,p,p,1,0)
+ var counts=integer_buffer_new(n,n*8)
+ var offsets=numeric_buffer_new(n,n*8)
+ var initial=numeric_buffer_new(p,p*8)
+ var coefficients=numeric_buffer_new(p,p*8)
+ var means=numeric_buffer_new(n,n*8)
+ var eta=numeric_buffer_new(n,n*8)
+ var weighted=numeric_buffer_new(plan.design_elements,plan.design_elements*8)
+ var rhs=numeric_buffer_new(n,n*8)
+ var step=numeric_buffer_new(p,p*8)
+ var qr=numeric_buffer_new(plan.qr_elements,plan.qr_elements*8)
+ var stage=numeric_buffer_new(plan.stage_elements,plan.stage_elements*8)
+ let recorded:[i64;16]=[8,7,8,10,5,11,6,3,6,7,13,8,9,9,5,8]
+ var i:i64=0
+ while i<n {
+  integer_buffer_set(&!counts,i,if mode==0 {recorded[i as usize]}else{8})
+  var j:i64=0
+  while j<p {
+   let value=if mode==0 {if i/8==j {1.0}else{0.0}}else{1.0}
+   numeric_buffer_set(&!a,i*p+j,value)
+   j=j+1
+  }
+  i=i+1
+ }
+ let first=ln_checked(if mode==0 {6.0}else{7.0})
+ assert(first.status==0)
+ numeric_buffer_set(&!initial,0,first.value)
+ if mode==0 {
+  let second=ln_checked(9.0)
+  assert(second.status==0)
+  numeric_buffer_set(&!initial,1,second.value)
+ }
+ let alpha:f64=if mode==0 {0.0}else{1e300}
+ let result=dynamic_count_fit_with_trace_control(&a,&layout,&counts,&offsets,&initial,alpha,0.0,100,1e-9,
+ &!coefficients,&!means,&!eta,&!weighted,&!rhs,&!step,&!qr,&!stage,false,&!disabled_trace)
+ assert(count_fit_trace_status(&disabled_trace)==2)
+ assert(count_fit_trace_metric(&disabled_trace,1)==0)
+ let report_status:i64=result.status
+ print("increment case: ");println(mode)
+ print("increment status: ");println(report_status)
+ assert(result.status==0 && result.score_norm<=1e-9 && result.step_norm<=1e-9)
+ var j:i64=0
+ while j<p {
+  let value:f64=numeric_buffer_at(&coefficients,j)
+  print("increment coefficient: ");println_f64_sci(value,15)
+  j=j+1
+ }
+ numeric_buffer_close(a);integer_buffer_close(counts);numeric_buffer_close(offsets)
+ numeric_buffer_close(initial);numeric_buffer_close(coefficients);numeric_buffer_close(means)
+ numeric_buffer_close(eta);numeric_buffer_close(weighted);numeric_buffer_close(rhs)
+ numeric_buffer_close(step);numeric_buffer_close(qr);numeric_buffer_close(stage)
+ true
+}
+
+fn main()->i32 with Alloc,IO,Mut,Div,Panic {
+ var disabled_trace=count_fit_trace_bounded(-1)
+ assert(dynamic_count_workspace(1073741824,1073741824).status==1)
+ let n:i64=512
+ let p:i64=12
+ let plan=dynamic_count_workspace(n,p)
+ assert(plan.status==0)
+ var a=numeric_buffer_new(n*p,n*p*8)
+ let layout=numeric_matrix(n*p,n,p,p,1,0)
+ var counts=integer_buffer_new(n,n*8)
+ var offsets=numeric_buffer_new(n,n*8)
+ var initial=numeric_buffer_new(p,p*8)
+ var coefficients=numeric_buffer_new(p,p*8)
+ var means=numeric_buffer_new(n,n*8)
+ var eta=numeric_buffer_new(n,n*8)
+ var weighted=numeric_buffer_new(plan.design_elements,plan.design_elements*8)
+ var rhs=numeric_buffer_new(n,n*8)
+ var step=numeric_buffer_new(p,p*8)
+ var qr=numeric_buffer_new(plan.qr_elements,plan.qr_elements*8)
+ var stage=numeric_buffer_new(plan.stage_elements,plan.stage_elements*8)
+ var i:i64=0
+ while i<n {
+  var j:i64=0
+  while j<p {numeric_buffer_set(&!a,i*p+j,if i%p==j {1.0}else{0.0}) j=j+1}
+  let variation=if (i/p)%2==0 {1}else{-1}
+  let count=i%p+2+variation
+  integer_buffer_set(&!counts,i,count)
+  numeric_buffer_set(&!offsets,i,0.0)
+  numeric_buffer_set(&!means,i,-777.0)
+  numeric_buffer_set(&!eta,i,-777.0)
+  i=i+1
+ }
+ var j:i64=0
+ while j<p {numeric_buffer_set(&!initial,j,0.0);numeric_buffer_set(&!coefficients,j,-777.0);j=j+1}
+ integer_buffer_set(&!counts,0,9007199254740993)
+ let too_large=dynamic_count_fit_with_trace_control(&a,&layout,&counts,&offsets,&initial,0.25,0.0,100,1e-9,
+ &!coefficients,&!means,&!eta,&!weighted,&!rhs,&!step,&!qr,&!stage,false,&!disabled_trace)
+ assert(count_fit_trace_status(&disabled_trace)==2)
+ assert(count_fit_trace_metric(&disabled_trace,1)==0)
+ assert(too_large.status==9)
+ assert(numeric_buffer_at(&coefficients,0)== -777.0 && numeric_buffer_at(&means,0)== -777.0 && numeric_buffer_at(&eta,0)== -777.0)
+ integer_buffer_set(&!counts,0,-1)
+ let negative=dynamic_count_fit_with_trace_control(&a,&layout,&counts,&offsets,&initial,0.25,0.0,100,1e-9,
+ &!coefficients,&!means,&!eta,&!weighted,&!rhs,&!step,&!qr,&!stage,false,&!disabled_trace)
+ assert(count_fit_trace_status(&disabled_trace)==2)
+ assert(count_fit_trace_metric(&disabled_trace,1)==0)
+ assert(negative.status==3 && numeric_buffer_at(&coefficients,0)== -777.0)
+ integer_buffer_set(&!counts,0,3)
+ let bad_alpha=dynamic_count_fit_with_trace_control(&a,&layout,&counts,&offsets,&initial,-0.1,0.0,100,1e-9,
+ &!coefficients,&!means,&!eta,&!weighted,&!rhs,&!step,&!qr,&!stage,false,&!disabled_trace)
+ assert(count_fit_trace_status(&disabled_trace)==2)
+ assert(count_fit_trace_metric(&disabled_trace,1)==0)
+ assert(bad_alpha.status==5 && numeric_buffer_at(&means,0)== -777.0)
+ let unfinished=dynamic_count_fit_with_trace_control(&a,&layout,&counts,&offsets,&initial,0.25,0.0,1,1e-9,
+ &!coefficients,&!means,&!eta,&!weighted,&!rhs,&!step,&!qr,&!stage,false,&!disabled_trace)
+ assert(count_fit_trace_status(&disabled_trace)==2)
+ assert(count_fit_trace_metric(&disabled_trace,1)==0)
+ assert(unfinished.status==7 && numeric_buffer_at(&coefficients,0)== -777.0)
+ var model:i64=0
+ while model<2 {
+  let alpha=if model==0 {0.0}else{0.25}
+  let log_offset=if model==0 {0.0}else{0.6931471805599453094}
+  i=0
+  while i<n {numeric_buffer_set(&!offsets,i,log_offset) i=i+1}
+  let result=dynamic_count_fit_with_trace_control(&a,&layout,&counts,&offsets,&initial,alpha,0.0,100,1e-9,
+  &!coefficients,&!means,&!eta,&!weighted,&!rhs,&!step,&!qr,&!stage,false,&!disabled_trace)
+ assert(count_fit_trace_status(&disabled_trace)==2)
+ assert(count_fit_trace_metric(&disabled_trace,1)==0)
+  print("count model: ");println(model)
+  print("count status: ");println(result.status)
+  assert(result.status==0 && result.rank==12 && result.df==500)
+  assert(result.poisson_limit==(model==0))
+  assert(result.alpha==alpha && !result.assumptions_assessed && result.inference_status==1)
+  assert(result.score_norm<=1e-9 && result.step_norm<=1e-9 && result.deviance_status==0)
+  assert(result.workspace_elements==plan.total_elements)
+  j=0
+  while j<p {
+   let rows=if j<8 {43}else{42}
+   let expected_mean=((rows*(j+2)+rows%2) as f64)/(rows as f64)
+   let logged=ln_checked(expected_mean)
+   assert(logged.status==0)
+   assert(cg_close(numeric_buffer_at(&coefficients,j),logged.value-log_offset,1e-7))
+   print("count coefficient: ");println_f64_sci(numeric_buffer_at(&coefficients,j),15)
+   j=j+1
+  }
+  i=0
+  while i<n {
+   let group=i%p
+   let rows=if group<8 {43}else{42}
+   let expected=((rows*(group+2)+rows%2) as f64)/(rows as f64)
+   assert(cg_close(numeric_buffer_at(&means,i),expected,1e-7))
+   let logged=ln_checked(expected)
+   assert(cg_close(numeric_buffer_at(&eta,i),logged.value,1e-7))
+   i=i+1
+  }
+  model=model+1
+ }
+ // A duplicate design column is rank failure, never a successful zero coefficient.
+ i=0
+ while i<n {let value=numeric_buffer_at(&a,i*p);numeric_buffer_set(&!a,i*p+1,value);i=i+1}
+ let old=numeric_buffer_at(&coefficients,0)
+ let rank=dynamic_count_fit_with_trace_control(&a,&layout,&counts,&offsets,&initial,0.25,0.0,100,1e-9,
+ &!coefficients,&!means,&!eta,&!weighted,&!rhs,&!step,&!qr,&!stage,false,&!disabled_trace)
+ assert(count_fit_trace_status(&disabled_trace)==2)
+ assert(count_fit_trace_metric(&disabled_trace,1)==0)
+ assert(rank.status==6 && numeric_buffer_at(&coefficients,0)==old)
+ // Restore full rank with a constant column; all-zero counts have no finite intercept MLE.
+ i=0
+ while i<n {
+  numeric_buffer_set(&!a,i*p,1.0)
+  numeric_buffer_set(&!a,i*p+1,if i%p==1 {1.0}else{0.0})
+  integer_buffer_set(&!counts,i,0)
+  i=i+1
+ }
+ let boundary=dynamic_count_fit_with_trace_control(&a,&layout,&counts,&offsets,&initial,0.25,0.0,100,1e-9,
+ &!coefficients,&!means,&!eta,&!weighted,&!rhs,&!step,&!qr,&!stage,false,&!disabled_trace)
+ assert(count_fit_trace_status(&disabled_trace)==2)
+ assert(count_fit_trace_metric(&disabled_trace,1)==0)
+ assert(boundary.status==8 && numeric_buffer_at(&coefficients,0)==old)
+ numeric_buffer_close(a);integer_buffer_close(counts);numeric_buffer_close(offsets)
+ numeric_buffer_close(initial);numeric_buffer_close(coefficients);numeric_buffer_close(means)
+ numeric_buffer_close(eta);numeric_buffer_close(weighted);numeric_buffer_close(rhs)
+ numeric_buffer_close(step);numeric_buffer_close(qr);numeric_buffer_close(stage)
+ assert(total_overflow_case())
+ assert(paired_gain_regression(0))
+ assert(paired_gain_regression(1))
+ println("DEEP COUNT GLM PASS")
+ 0
+}

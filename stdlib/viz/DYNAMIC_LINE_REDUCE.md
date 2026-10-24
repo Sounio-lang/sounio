@@ -56,3 +56,57 @@ runtime, then emits the selected provenance. The standalone C++23 checker uses
 independent integer bucket boundaries and map/set selection to compare every
 emitted index. These sources are prepared for central Slurm validation; source
 preparation alone is not a native execution or benchmark claim.
+
+## Reusable incremental state
+
+`line_reducer_init(xmin,xmax,buckets)` constructs an opaque state with fixed
+viewport and two independent private state records, once. `line_reduction_slot()`
+constructs the caller's reusable result. Neither processing path constructs a
+bucket or candidate array inside its sample/bucket loop: the four chronological
+candidates use a scalar sorting network and all bucket updates are fieldwise.
+The batch API retains its original signature, status precedence and full-output
+transactionality. This is a plumbing change, not a different selection policy.
+
+`line_reducer_feed_into(state,x,y,availability,indices,result)` preflights the
+entire chunk, then performs count and commit passes. Every selected index is an
+ordinal in the complete concatenated source. Only the FIRST `result.written`
+elements of the supplied output belong to this call. Drain them before the next
+call; a different output owner is permitted. Prior output prefixes are never
+read, rewritten or required. `required` is the exact LOCAL count needed for this
+call, not the lifetime count. `input_count` is the committed lifetime input count.
+The scalar queries `line_reducer_consumed` and `line_reducer_selected` report
+committed lifetime input and selected-index counts without rich snapshots.
+
+The current bucket is pending until the next bucket/gap or finish, so a valid
+feed can consume rows and write zero indices. Empty feeds preserve that bucket,
+gap continuity and the previous active X. Active X must remain nondecreasing
+across chunk boundaries and gaps. Inactive numeric payloads remain ignored.
+When a gap spans chunks, only its first global ordinal is emitted.
+
+`line_reducer_finish_into(state,indices,result)` drains the last bucket and
+closes the stream. It is idempotent: subsequent finishes write0 and require0.
+Feeding a closed stream returns7. Status5 reports global-ordinal overflow before
+addition. Existing statuses1/2/3/4/6 retain their owner/domain/payload/order/
+capacity meanings. An invalid initial viewport yields status2 on processing.
+
+A bad chunk or insufficient capacity does NOT consume any part of the chunk,
+change committed state or modify any destination element. Retry the same chunk
+with sufficient capacity; do not skip it. Private scratch and the explicit
+result may change on failure. A failed finish leaves the stream open and the
+output unchanged, allowing retry. Output suffixes are untouched on success.
+Future invalid chunks cannot revoke already drained output: validate a complete
+scientific document separately before painting when whole-document atomicity is
+required. Reducer output is for display, never substituted for statistical input.
+
+Memory beyond caller buffers is constant state, but the required selection can
+be linear in input length when there are many gap runs or separate segments.
+There is no claim that arbitrary input reduces to a fixed number of pixels.
+A streaming caller can bound retained output by draining local prefixes, with
+capacity retries explicit. Repeated one-row feeds reuse both private records.
+
+New native sources cover every two-chunk split of a tied/spiked/gapped dyadic
+fixture and compare all original indices with an independent C++23 map/set
+oracle. A separate legacy-API-only fixture checks every selected ordinal for
+2,000,001 alternating active/gap rows and emits a bounded checksum. Running the
+same source with the saved old reducer is a measured control; no arena failure
+or performance improvement is asserted before native evidence is available.
