@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.stdlib-sio-86.ci-followup-2026-10-24
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-sio-86.ci-followup-2026-10-24
+-->
+
 # SIO-86 CI follow-up: declare the boundary helper mutation effect
 
 PR3095 Full Test Suite at head6a27daf97949455bc8bca631111de485611071d6
