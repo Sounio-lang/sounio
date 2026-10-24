@@ -49,7 +49,6 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 | [D-30](#d-30) | Raízes precisas para o GC de handles | #1491 |
 | [D-31](#d-31) | Reborrow por parâmetro `&!` pode aliasar? | #1581 (resíduo) |
 | [D-32](#d-32) | `spawn {}` / `.await` / `async fn` no Madaros | #2604 (resíduo) |
-| [D-33](#d-33) | Estrutura léxica: 13 decisões que a medição de 2026-10-22 não pode tomar | [recibo léxico](../spec/2026-10/18-lexical-execution-receipt.md) |
 | [D-34](#d-34) | Primitiva intervalar certificada: as cinco decisões da proposta | [proposta](../proposals/CERTIFIED_INTERVAL_PRIMITIVE_2026-10-22.md) |
 
 ---
@@ -373,29 +372,6 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 - **Recomendação:** (b) agora (a recusa já é fail-closed, mas o E012 "this type has no field named" engana: aponta um campo inexistente em vez do recurso ausente), (a) quando o modelo de execução de `Async` for decidido.
 - **Teste discriminante:** `tests/run-pass/async_spawn.sio` imprime `spawn_basic: PASS` e `spawn_multiple: PASS` no Madaros (opção a), ou o Madaros o recusa com uma mensagem que nomeia `spawn`/`.await` (opção b). Hoje: Madaros `error[E012] … this type has no field named` (×8), `lean_single` `PASS`/`PASS`.
 - **Causa localizada:** `self-hosted/parser/exprs.sio` não tem nó de AST para `await` nem para `spawn` (`grep -n 'await' self-hosted/parser/exprs.sio` não encontra nada), então `.await` é lido como acesso a campo e o checker de `self-hosted/check/` levanta E012.
-
-<a id="d-33"></a>
-## D-33 — Estrutura léxica: 13 decisões
-
-- **Origem:** [recibo de execução léxica](../spec/2026-10/18-lexical-execution-receipt.md) (125 sondas nos dois engines e num Madaros compilado do fonte, 2026-10-22), regras `LEX-001`–`LEX-013` do [capítulo 01](../spec/2026-10/01-lexical-syntax-and-modules.md). Os defeitos que não dependem de decisão (fail-closed com localização) estão corrigidos à parte, no [PR #3016](https://github.com/Sounio-lang/sounio/pull/3016) (não mesclado quando esta seção foi escrita), e não estão aqui.
-- **Pergunta:** que comportamento léxico é normativo onde os engines divergem, ou onde os dois aceitam algo que não deveriam?
-- **Causa localizada:** Madaros `self-hosted/lexer/mod.sio`, `lex_source_to_globals`; `lean_single` `self-hosted/compiler/lean_single.sio`, `lex_all`; medido em `main` `27afa340`.
-
-| # | decisão | opções | recomendação | teste discriminante (sonda do recibo) |
-|---|---|---|---|---|
-| 1 | literal inteiro que não cabe no tipo | (a) recusar; (b) dar a volta | (a): hoje os dois engines dão a volta, `99999999999999999999` vira `7766279631452241919` | `int_huge`, `int_max_plus1`, `int_hex_over` recusados nos dois |
-| 2 | float com ponto inicial (`.5`) | (a) aceitar como 0,5; (b) recusar com diagnóstico | (b) agora, porque o `lean_single` calcula **0**; (a) quando os dois concordarem | `flt_leading_dot` |
-| 3 | conjunto de escapes | (a) fechado (`\n \t \r \0 \\ \" \'`, `\xHH`, `\u{…}`) e o resto recusado; (b) o atual | (a). Com o PR #3016 (recibo §4), o Madaros recusa o que está fora de `\n \t \r \0 \\ \"` `\xHH` (E274); falta decidir `\'` e `\u{…}` em strings, e se uma string pode conter NUL: hoje o Madaros para de imprimir no primeiro NUL e o `lean_single` imprime os três bytes de `"a\0b"` | `str_escape_hex`, `str_escape_nul`, `str_escape_unicode`, `str_escape_unknown` |
-| 4 | literais de caractere | valor de `'é'` (byte ou escalar Unicode); aspas de fechamento ausentes | escalar Unicode ou recusa para não-ASCII; aspas ausentes recusadas. **Bloqueio medido:** a recusa de aspas ausentes colide com lifetimes (`&'static str` existe na stdlib e hoje é lido como o caractere `s` seguido de `tatic`), então a sintaxe de lifetime precisa ser decidida junto | `chr_basic`, `chr_unknown_escape`, `chr_unclosed`, `chr_utf8` |
-| 5 | literais binário e octal | (a) implementar `0b`/`0o` no lexer vivo; (b) remover `BinLit`/`OctLit` | qualquer uma, menos o estado atual (os tipos de token existem e os literais não) | `int_bin`, `int_oct` |
-| 6 | sufixos de tipo (`5u8`) | como 5 | se recusados, o diagnóstico nomeia o literal, não "variável não declarada" | `int_suffix_u8`, `int_suffix_i32`, `flt_suffix` |
-| 7 | sufixos de unidade (`500_mg`) | parte da linguagem ou extensão do `lean_single` | decidir junto com as unidades | `lit_unit_suffix` |
-| 8 | separadores de dígitos | regra do Madaros (`_` só entre dígitos) | manter; o `lean_single` deve | `int_sep`, `int_sep_double`, `int_sep_trail`, `flt_sep` |
-| 9 | maximal munch de `<-`, `+-`, `&!` | (a) recusar `x<-1` sugerindo espaço; (b) remover `LeftArrow`/`PlusMinus` se nada usa; (c) separar no parser | medir o uso no corpus; (b) para o que não tem uso, (a) para o resto | `op_lt_neg`, `op_plus_neg`, `op_and_not` (e as variantes `_sp`) |
-| 10 | palavras reservadas | quais das 147 grafias | reservar só o que a gramática exige em posição de nome e listar. Hoje: nove no Madaros, nenhuma no `lean_single`; o `lean_single` aceita `affine`, `linear` e `study` como nomes e lê **0** (defeito em qualquer caso) | `kw_let_*` (50 grafias e 4 controles) |
-| 11 | identificadores | comprimento (sem limite, ou limite com recusa, nunca divisão); ASCII ou Unicode; `ε` e `⊥` do `lean_single` | limite com recusa; ASCII até haver decisão de Unicode | `id_long300`, `id_nonascii`, `id_epsilon` |
-| 12 | comentários de documentação | tokens ou comentários comuns | se comuns, remover os quatro tipos de token inalcançáveis | `cm_doc_line`, `cm_doc_block` |
-| 13 | lexer morto | remover `mod.sio` (código após `return tc` e os scanners só chamados por ele), `numparse.sio`, a metade morta de `tables.sio`; ou religar | remover, depois de portar o que 3–6 escolherem | — |
 
 <a id="d-34"></a>
 ## D-34 — Primitiva intervalar certificada: as cinco decisões
