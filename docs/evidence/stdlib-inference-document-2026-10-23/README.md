@@ -122,3 +122,19 @@ states; consult their actual receipts before making a calibration claim.
 Independent read-only review found no material blocker in the modified scratch
 reset/lifetime paths, exact P0 guard ordering, document/font/export code, or
 count/ODE integration. Static review does not replace native/backend evidence.
+
+## Final pilot and active B199 qualification
+
+[Final pilot receipts](qualification/final02-pilot/README.md) record the
+completed source-bound Slurm16488 B31 pilot:16/16 process/schema/bootstrap
+successes, maximum per-process RSS16000KiB, and independent C++ confirmation of
+the22 scientific lines shared with the original failed pilot. The16 outcomes
+contain0 rejections and a wide approximate Wilson95 interval; they establish
+neither nominal type-I error nor general calibration. Per-dataset isolation is
+explicit and is not conflated with the earlier same-driver allocation control.
+
+B199 qualification started after this pilot, under the remaining budget of the
+same22h allocation. Its first dataset completed with199 replicas. The campaign
+is still running; no aggregate qualification result or calibrated-inference
+flag is claimed. All results, including unavailable ones, remain in its own
+campaign namespace and receipts.
