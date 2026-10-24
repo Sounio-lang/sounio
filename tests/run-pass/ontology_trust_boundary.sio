@@ -1,0 +1,209 @@
+//@ run-pass
+//@ expect-stdout: TRUST_BOUNDARY_PASS
+// Bounded representation, preflight transactionality and unavailable closure.
+// Overflow/budget closures may retain partial improvements by contract.
+use ontology::trust_semiring::{trust_ann,trust_one,trust_zero,trust_times,trust_plus,trust_status,trust_signed,trust_inferred,trust_assumed}
+use ontology::elplus_trust::{trust_elplus_init,trust_elplus_seed,trust_elplus_fixpoint,trust_elplus_get}
+
+fn boundary_copy(src:&[i64;110808],dst:&![i64;110808]) with Mut,Div,Panic {
+    var k:i64=0
+    while k < 110808 { dst[k]=src[k] k=k+1 }
+}
+fn boundary_equal(a:&[i64;110808],b:&[i64;110808])->bool with Div,Panic {
+    var k:i64=0
+    while k < 110808 {
+        if a[k] != b[k] { return false }
+        k=k+1
+    }
+    true
+}
+fn boundary_reject(state:&![i64;110808],before:&[i64;110808],pack:&[i64;704],chains:&[i64;24],dims:&[i64;4],control:&![i64;4],budget:i64) with Mut,Div,Panic {
+    let rc=trust_elplus_fixpoint(state,pack,chains,dims,control,budget)
+    assert(rc == 1)
+    assert(control[0] == 1)
+    assert(control[1] == 0)
+    assert(control[2] == 0)
+    assert(control[3] == 0)
+    assert(boundary_equal(state,before))
+    let q=trust_elplus_get(state,control,0)
+    assert(trust_status(&q) == 1)
+}
+fn boundary_scalar() with Panic {
+    let big=trust_ann(9223372036854775807,9223372036854775807,9223372036854775807)
+    let one=trust_one()
+    let step=trust_ann(-1,1,1)
+    let zero=trust_zero()
+    let same=trust_times(&big,&one)
+    assert(trust_status(&same) == 0)
+    assert(trust_signed(&same) == 9223372036854775807)
+    assert(trust_inferred(&same) == 9223372036854775807)
+    assert(trust_assumed(&same) == 9223372036854775807)
+    let over=trust_times(&big,&step)
+    assert(trust_status(&over) == 2)
+    let absent=trust_times(&big,&zero)
+    assert(trust_status(&absent) == 0)
+    assert(trust_signed(&absent) == -1)
+    assert(trust_inferred(&absent) == -1)
+    assert(trust_assumed(&absent) == -1)
+    let bad=trust_ann(1,2,0)
+    assert(trust_status(&bad) == 1)
+    let left=trust_times(&bad,&zero)
+    let right=trust_times(&one,&bad)
+    let add=trust_plus(&bad,&one)
+    assert(trust_status(&left) == 1)
+    assert(trust_status(&right) == 1)
+    assert(trust_status(&add) == 1)
+    let low=trust_ann(-2,-1,-1)
+    assert(trust_status(&low) == 1)
+}
+
+fn main()->i32 with IO,Mut,Div,Panic {
+    boundary_scalar()
+    var state:[i64;110808]=[-1;110808]
+    var before:[i64;110808]=[-1;110808]
+    var pack:[i64;704]=[0;704]
+    var chains:[i64;24]=[0;24]
+    var dims:[i64;4]=[0;4]
+    var control:[i64;4]=[0;4]
+    pack[2]=1
+    var k:i64=192
+    while k < 704 { pack[k]=-1 k=k+1 }
+    dims[1]=3
+    dims[2]=3
+    assert(trust_elplus_init(&!state,3,2,0) == 0)
+    boundary_copy(&state,&!before)
+    // Every failed constructor leaves the entire prior array untouched.
+    assert(trust_elplus_init(&!state,0,0,0) == 1)
+    assert(boundary_equal(&state,&before))
+    assert(trust_elplus_init(&!state,65,2,0) == 1)
+    assert(boundary_equal(&state,&before))
+    assert(trust_elplus_init(&!state,3,-1,0) == 1)
+    assert(boundary_equal(&state,&before))
+    assert(trust_elplus_init(&!state,3,3,0) == 1)
+    assert(boundary_equal(&state,&before))
+    assert(trust_elplus_init(&!state,3,2,-1) == 1)
+    assert(boundary_equal(&state,&before))
+    assert(trust_elplus_init(&!state,3,2,9) == 1)
+    assert(boundary_equal(&state,&before))
+    assert(trust_elplus_seed(&!state,-1,0,0,0) == 1)
+    assert(boundary_equal(&state,&before))
+    assert(trust_elplus_seed(&!state,36936,0,0,0) == 1)
+    assert(boundary_equal(&state,&before))
+    assert(trust_elplus_seed(&!state,1,-2,-1,-1) == 1)
+    assert(boundary_equal(&state,&before))
+    assert(trust_elplus_seed(&!state,1,0,1,0) == 1)
+    assert(boundary_equal(&state,&before))
+    assert(trust_elplus_seed(&!state,1,-1,0,1) == 1)
+    assert(boundary_equal(&state,&before))
+    // Full state snapshot comparisons include inactive capacity words.
+    dims[1]=65
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    dims[1]=3
+    dims[2]=4
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    dims[2]=3
+    dims[3]=9
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    dims[3]=0
+    dims[0]=9
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    dims[0]=-1
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    dims[0]=0
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,-1)
+    pack[0]=-1
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    pack[0]=9223372036854775807
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    pack[0]=2
+    pack[64]=3
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    pack[64]=0
+    pack[128]=-1
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    pack[0]=0
+    pack[128]=0
+    // A mapped non-existential and a missing reverse mapping both reject.
+    dims[3]=1
+    pack[192]=0
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    pack[192]=-1
+    pack[0]=3
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    pack[0]=0
+    dims[0]=1
+    chains[0]=1
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    chains[0]=0
+    chains[8]=-1
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    chains[8]=0
+    chains[16]=1
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    chains[16]=0
+    dims[0]=0
+    dims[3]=0
+    state[110807]=-2
+    boundary_copy(&state,&!before)
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    state[110807]=-1
+    state[110805]=0
+    state[110806]=1
+    state[110807]=0
+    boundary_copy(&state,&!before)
+    boundary_reject(&!state,&before,&pack,&chains,&dims,&!control,2)
+    assert(trust_elplus_seed(&!state,36935,0,0,0) == 1)
+    assert(boundary_equal(&state,&before))
+    assert(trust_elplus_init(&!state,3,2,0) == 0)
+    boundary_copy(&state,&!before)
+    // Zero passes cannot certify even an already closed input.
+    assert(trust_elplus_fixpoint(&!state,&pack,&chains,&dims,&!control,0) == 3)
+    assert(control[0] == 3)
+    assert(control[1] == 0)
+    assert(control[2] == 0)
+    assert(control[3] == 0)
+    assert(boundary_equal(&state,&before))
+    let budget_query=trust_elplus_get(&state,&control,0)
+    assert(trust_status(&budget_query) == 3)
+    control[0]=0
+    let invalid_query=trust_elplus_get(&state,&control,-1)
+    let high_query=trust_elplus_get(&state,&control,36936)
+    assert(trust_status(&invalid_query) == 1)
+    assert(trust_status(&high_query) == 1)
+    var status:i64=1
+    while status <= 3 {
+        control[0]=status
+        let unavailable=trust_elplus_get(&state,&control,0)
+        assert(trust_status(&unavailable) == status)
+        status=status+1
+    }
+    // A genuine change on the sole pass requires another stability pass.
+    assert(trust_elplus_init(&!state,4,3,0) == 0)
+    dims[1]=4
+    dims[2]=4
+    pack[2]=0
+    pack[3]=1
+    assert(trust_elplus_seed(&!state,1,0,0,0) == 0)
+    assert(trust_elplus_seed(&!state,66,0,0,0) == 0)
+    assert(trust_elplus_fixpoint(&!state,&pack,&chains,&dims,&!control,1) == 3)
+    assert(control[0] == 3)
+    assert(control[1] == 1)
+    assert(control[2] > 0)
+    let partial_query=trust_elplus_get(&state,&control,2)
+    assert(trust_status(&partial_query) == 3)
+    // Conservative overflow rejects identity + MAX + inferred rule cost.
+    assert(trust_elplus_init(&!state,3,2,0) == 0)
+    dims[1]=3
+    dims[2]=3
+    pack[2]=1
+    pack[3]=0
+    assert(trust_elplus_seed(&!state,1,9223372036854775807,9223372036854775807,9223372036854775807) == 0)
+    assert(trust_elplus_fixpoint(&!state,&pack,&chains,&dims,&!control,4) == 2)
+    assert(control[0] == 2)
+    let overflow_query=trust_elplus_get(&state,&control,1)
+    assert(trust_status(&overflow_query) == 2)
+    k=0
+    while k < 110808 { assert(state[k] >= -1) k=k+1 }
+    println("TRUST_BOUNDARY_PASS")
+    0
+}

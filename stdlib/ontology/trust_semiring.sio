@@ -1,0 +1,71 @@
+// ADR-016 decision12; executable bounded representation of Trust.Ann.
+// -1 denotes mathematical +infinity; every finite count0..MAX_I64 is distinct.
+// status0 available,1 invalid input/well-formedness,2 finite count overflow,
+// 3 incomplete fixed-point budget. Unavailable values are never semiring zero.
+// Laws in formal/TrustSemiring.lean apply to available exact results. This
+// module does not claim a proof of the bounded implementation or its callers.
+pub struct TrustAnn {
+    signed_steps:i64,
+    inferred_steps:i64,
+    assumed_steps:i64,
+    status:i64,
+}
+
+pub fn trust_unavailable(status:i64) -> TrustAnn {
+    let code=if status >= 1 && status <= 3 { status } else { 1 }
+    TrustAnn{signed_steps:-1,inferred_steps:-1,assumed_steps:-1,status:code}
+}
+
+fn trust_le(a:i64,b:i64) -> bool { b == -1 || (a >= 0 && a <= b) }
+
+pub fn trust_ann(s:i64,i:i64,a:i64) -> TrustAnn {
+    if s < -1 || i < -1 || a < -1 { return trust_unavailable(1) }
+    if !trust_le(i,s) || !trust_le(a,i) { return trust_unavailable(1) }
+    TrustAnn{signed_steps:s,inferred_steps:i,assumed_steps:a,status:0}
+}
+
+pub fn trust_status(x:&TrustAnn) -> i64 { x.status }
+pub fn trust_signed(x:&TrustAnn) -> i64 { x.signed_steps }
+pub fn trust_inferred(x:&TrustAnn) -> i64 { x.inferred_steps }
+pub fn trust_assumed(x:&TrustAnn) -> i64 { x.assumed_steps }
+pub fn trust_zero() -> TrustAnn { trust_ann(-1,-1,-1) }
+pub fn trust_one() -> TrustAnn { trust_ann(0,0,0) }
+
+// A direct source at grade2 signed,1 inferred,0 assumed, with stated step cost.
+pub fn trust_source(grade:i64,steps:i64) -> TrustAnn {
+    if steps < 0 { return trust_unavailable(1) }
+    if grade == 2 { return trust_ann(steps,steps,steps) }
+    if grade == 1 { return trust_ann(-1,steps,steps) }
+    if grade == 0 { return trust_ann(-1,-1,steps) }
+    trust_unavailable(1)
+}
+
+fn trust_min(a:i64,b:i64) -> i64 {
+    if a == -1 { return b }
+    if b == -1 { return a }
+    if a < b { a } else { b }
+}
+
+// -2 is a private error marker. Guard subtraction cannot overflow because all
+// callers supply either infinity or nonnegative finite operands.
+fn trust_add(a:i64,b:i64) -> i64 {
+    if a == -1 || b == -1 { return -1 }
+    if a > 9223372036854775807 - b { return -2 }
+    a + b
+}
+
+pub fn trust_plus(x:&TrustAnn,y:&TrustAnn) -> TrustAnn {
+    if x.status != 0 { return trust_unavailable(x.status) }
+    if y.status != 0 { return trust_unavailable(y.status) }
+    trust_ann(trust_min(x.signed_steps,y.signed_steps),trust_min(x.inferred_steps,y.inferred_steps),trust_min(x.assumed_steps,y.assumed_steps))
+}
+
+pub fn trust_times(x:&TrustAnn,y:&TrustAnn) -> TrustAnn {
+    if x.status != 0 { return trust_unavailable(x.status) }
+    if y.status != 0 { return trust_unavailable(y.status) }
+    let s=trust_add(x.signed_steps,y.signed_steps)
+    let i=trust_add(x.inferred_steps,y.inferred_steps)
+    let a=trust_add(x.assumed_steps,y.assumed_steps)
+    if s == -2 || i == -2 || a == -2 { return trust_unavailable(2) }
+    trust_ann(s,i,a)
+}

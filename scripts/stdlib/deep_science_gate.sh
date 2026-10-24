@@ -557,6 +557,11 @@ rc=0
 # normalization_into_reference through the oracle queue above.)
 LN_BOUNDARY_OUT="$out/math-pure-ln-boundary" bash scripts/stdlib/math_pure_ln_boundary_gate.sh > "$out/math-pure-ln-boundary.log" 2>&1 || rc=$?
 record concordance math-pure-ln-boundary "$rc"
+
+# ADR-016 tropical trust and annotated dense EL+ exact-reference gate.
+rc=0
+TRUST_GATE_OUT="$out/ontology-trust" bash scripts/stdlib/ontology_trust_gate.sh > "$out/ontology-trust.stdout" 2> "$out/ontology-trust.stderr" || rc=$?
+record focused-gate ontology-trust "$rc"
 }
 
 # Both partitions remain mandatory in CI; standalone all preserves the original order.
