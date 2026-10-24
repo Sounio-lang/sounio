@@ -714,3 +714,21 @@ gradients between nodes.
 - Throughputs 2 and 1, total batch 9: shares 6 and 3.
 
 `TRAIN PASS`.
+
+## 24. A one-block GPT
+
+`examples/tiny_gpt_demo.sio` is one decoder block: embedding, causal
+attention, residual, ReLU FFN, residual, logits. Vocabulary 16, hidden
+8, sequence 8, one head, FFN width 16. The loss is the mean
+cross-entropy of the next token at the first seven positions of
+`0,1,2,3,4,5,6,7`. The gradient is a central finite difference. Adam
+is `learn::adam_f64`. The seed is the initial table, not a clock.
+
+OBSERVED on the workspace, two calls in one process, 125 s wall:
+
+- `nll_first` 2.772595, against ln 16 = 2.772589.
+- `nll_last` 0.000611, and the second call 0.000611.
+- `GPT PASS`.
+
+The smoke script type-checks this file and does not run it: the
+two-call process is over a minute.

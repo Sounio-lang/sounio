@@ -1,0 +1,234 @@
+//@ run-pass
+//
+// One decoder block, trained by central finite differences and Adam.
+// The seed is the deterministic initial table: a second call in this
+// process must print the same final loss. Sequence 0..7, cross-entropy
+// of the next token at the first 7 positions.
+// Usage: tiny_gpt_demo
+
+use learn::adam_f64::{AdamBuf, adam_new, adam_step}
+use math::pure::{exp, ln, sqrt}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+fn nparam() -> i64 { 768 }
+
+fn off_wq() -> i64 { 128 }
+fn off_wk() -> i64 { 192 }
+fn off_wv() -> i64 { 256 }
+fn off_wo() -> i64 { 320 }
+fn off_up() -> i64 { 384 }
+fn off_down() -> i64 { 512 }
+fn off_head() -> i64 { 640 }
+
+fn sh_h() -> i64 { 0 }
+fn sh_q() -> i64 { 64 }
+fn sh_k() -> i64 { 128 }
+fn sh_v() -> i64 { 192 }
+fn sh_ctx() -> i64 { 256 }
+fn sh_proj() -> i64 { 320 }
+fn sh_up() -> i64 { 384 }
+fn sh_logits() -> i64 { 400 }
+fn sh_scores() -> i64 { 424 }
+
+fn gemv(w: &CpuBuf, wo: i64, s: &!CpuBuf, xo: i64, yo: i64, k: i64, n: i64) with Mut, Panic {
+    var j: i64 = 0
+    while j < n {
+        var acc = 0.0
+        var i: i64 = 0
+        while i < k {
+            let xi = ck_get(s, xo + i)
+            let wij = ck_get(w, wo + i * n + j)
+            acc = acc + xi * wij
+            i = i + 1
+        }
+        ck_set(s, yo + j, acc)
+        j = j + 1
+    }
+}
+
+fn add_into(s: &!CpuBuf, dst: i64, src: i64, n: i64) with Mut, Panic {
+    var i: i64 = 0
+    while i < n {
+        let a = ck_get(s, dst + i)
+        let b = ck_get(s, src + i)
+        ck_set(s, dst + i, a + b)
+        i = i + 1
+    }
+}
+
+fn nll(p: &CpuBuf, s: &!CpuBuf) -> f64 with Mut, Div, Panic {
+    let scale = 1.0 / sqrt(8.0)
+    var t: i64 = 0
+    while t < 8 {
+        var d: i64 = 0
+        while d < 8 {
+            let e = ck_get(p, t * 8 + d)
+            ck_set(s, sh_h() + t * 8 + d, e)
+            d = d + 1
+        }
+        t = t + 1
+    }
+    t = 0
+    while t < 8 {
+        gemv(p, off_wq(), s, sh_h() + t * 8, sh_q() + t * 8, 8, 8)
+        gemv(p, off_wk(), s, sh_h() + t * 8, sh_k() + t * 8, 8, 8)
+        gemv(p, off_wv(), s, sh_h() + t * 8, sh_v() + t * 8, 8, 8)
+        t = t + 1
+    }
+    t = 0
+    while t < 8 {
+        var mx = 0.0 - 1000000000.0
+        var j: i64 = 0
+        while j <= t {
+            var dot = 0.0
+            var d: i64 = 0
+            while d < 8 {
+                let qv = ck_get(s, sh_q() + t * 8 + d)
+                let kv = ck_get(s, sh_k() + j * 8 + d)
+                dot = dot + qv * kv
+                d = d + 1
+            }
+            let sc = dot * scale
+            ck_set(s, sh_scores() + j, sc)
+            if sc > mx { mx = sc }
+            j = j + 1
+        }
+        var sum = 0.0
+        j = 0
+        while j <= t {
+            let e = exp(ck_get(s, sh_scores() + j) - mx)
+            ck_set(s, sh_scores() + j, e)
+            sum = sum + e
+            j = j + 1
+        }
+        var d2: i64 = 0
+        while d2 < 8 {
+            var acc = 0.0
+            j = 0
+            while j <= t {
+                let a = ck_get(s, sh_scores() + j) / sum
+                let vv = ck_get(s, sh_v() + j * 8 + d2)
+                acc = acc + a * vv
+                j = j + 1
+            }
+            ck_set(s, sh_ctx() + d2, acc)
+            d2 = d2 + 1
+        }
+        gemv(p, off_wo(), s, sh_ctx(), sh_proj(), 8, 8)
+        add_into(s, sh_h() + t * 8, sh_proj(), 8)
+        t = t + 1
+    }
+    t = 0
+    while t < 8 {
+        gemv(p, off_up(), s, sh_h() + t * 8, sh_up(), 8, 16)
+        var f: i64 = 0
+        while f < 16 {
+            let u = ck_get(s, sh_up() + f)
+            var r = u
+            if u < 0.0 { r = 0.0 }
+            ck_set(s, sh_up() + f, r)
+            f = f + 1
+        }
+        gemv(p, off_down(), s, sh_up(), sh_proj(), 16, 8)
+        add_into(s, sh_h() + t * 8, sh_proj(), 8)
+        t = t + 1
+    }
+    var acc = 0.0
+    t = 0
+    while t < 7 {
+        gemv(p, off_head(), s, sh_h() + t * 8, sh_logits(), 8, 16)
+        var mx2 = 0.0 - 1000000000.0
+        var k: i64 = 0
+        while k < 16 {
+            let z = ck_get(s, sh_logits() + k)
+            if z > mx2 { mx2 = z }
+            k = k + 1
+        }
+        var sm = 0.0
+        k = 0
+        while k < 16 {
+            sm = sm + exp(ck_get(s, sh_logits() + k) - mx2)
+            k = k + 1
+        }
+        let ztgt = ck_get(s, sh_logits() + (t + 1))
+        acc = acc + (0.0 - (ztgt - mx2 - ln(sm)))
+        t = t + 1
+    }
+    acc / 7.0
+}
+
+fn init_params(p: &!CpuBuf) with Mut {
+    var i: i64 = 0
+    while i < p.len {
+        let h = (i * 31 + 17) % 97
+        ck_set(p, i, ((h as f64) / 97.0 - 0.5) * 0.02)
+        i = i + 1
+    }
+}
+
+fn zero_adam(st: &!AdamBuf) with Mut {
+    var i: i64 = 0
+    while i < st.m.len {
+        ck_set(&!st.m, i, 0.0)
+        ck_set(&!st.v, i, 0.0)
+        i = i + 1
+    }
+    st.t = 0
+}
+
+fn fd_grad(p: &!CpuBuf, g: &!CpuBuf, s: &!CpuBuf) with Mut, Div, Panic {
+    let eps = 0.0001
+    var i: i64 = 0
+    while i < p.len {
+        let base = ck_get(p, i)
+        ck_set(p, i, base + eps)
+        let lp = nll(p, s)
+        ck_set(p, i, base - eps)
+        let lm = nll(p, s)
+        ck_set(p, i, base)
+        ck_set(g, i, (lp - lm) / (2.0 * eps))
+        i = i + 1
+    }
+}
+
+fn train() -> [f64; 2] with Alloc, Mut, Div, Panic {
+    var p = ck_alloc(nparam())
+    init_params(&!p)
+    var s = ck_alloc(448)
+    var g = ck_alloc(nparam())
+    var st = adam_new(nparam())
+    zero_adam(&!st)
+    let first = nll(&p, &!s)
+    var step: i64 = 0
+    while step < 12 {
+        fd_grad(&!p, &!g, &!s)
+        adam_step(&!p, &g, &!st, 0.15, 0.9, 0.999, 0.00000001)
+        step = step + 1
+    }
+    let last = nll(&p, &!s)
+    var r: [f64; 2] = [0.0, 0.0]
+    r[0] = first
+    r[1] = last
+    r
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    let a = train()
+    let b = train()
+    let ia = (a[1] * 1000000.0) as i64
+    let ib = (b[1] * 1000000.0) as i64
+    print("nll_first(x1e6)=")
+    print_int((a[0] * 1000000.0) as i64)
+    print("\n")
+    print("nll_last(x1e6)=")
+    print_int(ia)
+    print("\n")
+    print("nll_last_again(x1e6)=")
+    print_int(ib)
+    print("\n")
+    var ok = true
+    if a[0] < 2.2 || a[0] > 3.2 { ok = false; print("FAIL first not near ln 16\n") }
+    if a[1] >= a[0] { ok = false; print("FAIL loss did not fall\n") }
+    if ia != ib { ok = false; print("FAIL seed mismatch\n") }
+    if ok { print("GPT PASS\n") } else { print("GPT FAIL\n") }
+}
