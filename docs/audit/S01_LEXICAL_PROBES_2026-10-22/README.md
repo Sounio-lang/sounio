@@ -29,4 +29,4 @@ Raw material for the [lexical execution receipt](../../spec/2026-10/18-lexical-e
 probes whose exit status the change moves.
 
 These are measurements, not conformance tests: no probe asserts an expected outcome until
-the rulings in [`PENDING.md` D-33](../../decisions/PENDING.md#d-33) are made.
+the rulings in [ADR-015](../../decisions/adr-015-lexical-structure.md) (formerly `PENDING.md` D-33) are made.
