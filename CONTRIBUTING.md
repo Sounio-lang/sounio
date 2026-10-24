@@ -162,6 +162,27 @@ We follow a strict semantic and component-scoped commit convention. Commit messa
 - Throws TypeMismatch error when Knowledge[T, epsilon] violates required threshold
 ```
 
+### 5. Choosing and Claiming Work
+
+Work is planned on a project board (Notion; the maintainer grants access on request). The board mirrors three files in this repository, which remain the source of truth:
+
+- [`docs/planning/LANGUAGE_BACKLOG_2026-10-22.md`](docs/planning/LANGUAGE_BACKLOG_2026-10-22.md) — what is open, in priority order: **silent wrong values first**, then refusals without a location, then decisions owed, then capacity, then research.
+- [`docs/decisions/PENDING.md`](docs/decisions/PENDING.md) — decisions only the maintainer can take. Do not implement a choice that is still listed there.
+- [`docs/decisions/`](docs/decisions/README.md) — decisions already taken (ADRs). Each implementation row of an ADR is one board task with its own acceptance test.
+
+Rules for every contributor, human or automated:
+
+1. **Claim before you start.** Take a task in *Not started* whose blocking tasks are all *Done*, put your name on it and move it to *In progress*. Do not work on a task someone else has claimed.
+2. **Every task has an acceptance criterion** (a probe, a test, a byte-identical hash, a proof). A task is *Done* only when that criterion holds and the PR is merged.
+3. **Blocked?** Move the task to *Blocked* and say why on the task.
+4. **Open the PR, link it on the task, move the task to *In review*.**
+5. **Fix what you find.** A defect found while working is fixed in the same change, or recorded as a new board task. Please do not open GitHub issues for it.
+6. **Decisions are not taken in PRs.** If your change needs a semantic choice, stop and add it to `PENDING.md` with the question, the options and a discriminating test.
+
+### 6. Numbering ADRs
+
+ADR numbers are append-only and assigned at merge time. Before adding `adr-NNN-*.md`, check both `main` and the open pull requests for the next free number; the index in [`docs/decisions/README.md`](docs/decisions/README.md) lists numbers reserved by open PRs.
+
 ---
 
 ## Standard Library Structure
