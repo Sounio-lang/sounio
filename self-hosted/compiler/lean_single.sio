@@ -6142,6 +6142,17 @@ fn tc_rust_macro(tok: i64) with IO, Mut, Panic {
     tc_mark_failed()
 }
 
+// A parameter's name token: an identifier, `kernel` (TK=79), or `var`
+// (TK=12, the binding keyword, which Madaros accepts as a name) when a `:`
+// follows. Without the `var` case, `fn f(var: f64)` registered no parameter,
+// and every use of it read as 0 (tests/run-pass/rapamycin_epistemic_pbpk.sio:
+// rp3_fdiff_h's absolute step was 0).
+fn tk_is_param_name(p: i64) -> bool with Panic {
+    let k = TK[p as usize]
+    if k == 3 || k == 79 { return true }
+    return k == 12 && TK[(p + 1) as usize] == 43
+}
+
 fn scan_fn_param_type(fi: i64, arg_idx: i64) with IO, Mut, Panic, Div {
     SCAN_TY = 0
     SCAN_TY_HASH = 0
@@ -6152,7 +6163,7 @@ fn scan_fn_param_type(fi: i64, arg_idx: i64) with IO, Mut, Panic, Div {
     q = q + 1
     var idx: i64 = 0
     while TK[q as usize] != 7 && TK[q as usize] != 0 {
-        if TK[q as usize] == 3 || TK[q as usize] == 79 {
+        if tk_is_param_name(q) {
             q = q + 1
             if TK[q as usize] == 43 {
                 q = q + 1
@@ -7466,7 +7477,7 @@ fn fnsig_from_decl_name_tok(name_tok: i64) -> i64 with IO, Mut, Panic, Div {
     if TK[p as usize] == 6 {
         p = p + 1
         while TK[p as usize] != 7 && TK[p as usize] != 0 {
-            if TK[p as usize] == 3 || TK[p as usize] == 79 {
+            if tk_is_param_name(p) {
                 p = p + 1
                 if TK[p as usize] == 43 {
                     p = p + 1
@@ -10134,6 +10145,21 @@ fn ep_before_body_close() -> bool {
     return EP < CURRENT_BODY_CLOSE
 }
 
+// From just past a `[`, move EP to just past the `]` that closes it. The local
+// `[V; N]` initializer used to scan to the FIRST `]`, which inside
+// `[m.v[1]; 4]` is the index's: parsing resumed at `; 4]` and the stray `]`
+// was compiled as a statement that loads 0.
+fn skip_past_matching_bracket() with Mut, Panic {
+    var depth: i64 = 0
+    while ep_before_body_close() && TK[EP as usize] != 0 {
+        let k = TK[EP as usize]
+        if k == 42 && depth == 0 { EP = EP + 1; return }
+        if k == 41 || k == 6 || k == 8 { depth = depth + 1 }
+        if (k == 42 || k == 7 || k == 9) && depth > 0 { depth = depth - 1 }
+        EP = EP + 1
+    }
+}
+
 // ─── Emit helpers ───
 // mov rax, [rbp - 8*slot]
 fn emit_load_var(slot: i64) with Mut { em(0x48); em(0x8b); em(0x85); em32(0 - slot * 8) }
@@ -11669,9 +11695,10 @@ fn stabilize_return_agg_x86(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
 }
 
 // ─── Emit print("string") ───
-fn emit_print(tok: i64) with IO, Mut, Panic, Div {
-    let ss = TS[tok as usize] + 1
-    let se = TE[tok as usize] - 1
+// Print source bytes ss..se of the string literal at tok, decoding escapes.
+// braces == 1 is a piece of a format string: `{{` and `}}` print one brace
+// (compile_format_print).
+fn emit_print_src(tok: i64, ss: i64, se: i64, braces: i64) with IO, Mut, Panic, Div {
     var slen: i64 = 0
     var zi: i64 = 0
     while zi < 256 { SQW[zi as usize] = 0; zi = zi + 1 }
@@ -11679,7 +11706,9 @@ fn emit_print(tok: i64) with IO, Mut, Panic, Div {
     while si < se {
         let c = sb(si)
         var byte: i64 = c
-        if c == 92 && si + 1 < se {
+        if braces == 1 && (c == 123 || c == 125) && si + 1 < se && sb(si + 1) == c {
+            si = si + 2
+        } else if c == 92 && si + 1 < se {
             let c2 = sb(si + 1)
             if c2 == 120 && si + 3 < se {
                 let h1 = sb(si + 2)
@@ -11733,6 +11762,10 @@ fn emit_print(tok: i64) with IO, Mut, Panic, Div {
     em(0xba); em32(slen)
     em(0x0f); em(0x05)
     em(0x48); em(0x81); em(0xc4); em32(nq * 8)
+}
+
+fn emit_print(tok: i64) with IO, Mut, Panic, Div {
+    emit_print_src(tok, TS[tok as usize] + 1, TE[tok as usize] - 1, 0)
 }
 
 fn emit_print_cstr() with Mut {
@@ -16245,6 +16278,207 @@ fn flt_fill_bits(int_part: i64, frac: i64, denom_in: i64, exp: i64) with Mut, Di
     FLT_BITS_OK = 1
 }
 
+// A token that starts no expression reaches the last arm of compile_primary
+// (and compile_primary_a64), which consumes it and loads 0. That arm is
+// load-bearing for recovery: on 2026-10-22, 166 files in tests/, stdlib/ and
+// examples/ reached it and still compiled (trailing commas, `[x; N]` with a
+// char literal, `println()`, `var` used as a name, unary `+`), so refusing every
+// such token is a larger change than one arm. These cases, though, can only
+// mean a value the program then silently replaces with 0, and no file in the
+// tree relies on them: the keyword spellings the lexer classifies but that the
+// expression parser has no arm for (`linear` 62, `study` 71, `affine` 73), and
+// a leading-dot float such as `.5`. Refuse those, located, in Madaros's wording.
+// ─── print/println with a format and arguments ───
+// `println("x={} y={}", x, y)`: each `{}` prints the next argument exactly as
+// `print(arg)` would, `{{` and `}}` are literal braces, and the format must be
+// a string literal whose `{}` count equals the number of arguments. With one
+// argument nothing changes (`println("{}")` prints `{}`). The rule is the
+// Madaros rewrite's (self-hosted/parser/exprs.sio, fmt_print_kind); ADR-013.
+// Before it, everything after the format was dropped without a word.
+
+// The `{}` count of the format literal at tok; -3 for a specifier (`{:.1}`),
+// -1 for any other `{` that is neither `{}` nor `{{`, -2 for a `}` that is
+// not `}}`.
+fn fmt_count_placeholders_tok(tok: i64) -> i64 with Mut, Panic {
+    let end = TE[tok as usize] - 1
+    var i: i64 = TS[tok as usize] + 1
+    var n: i64 = 0
+    while i < end {
+        let c = sb(i)
+        if c == 92 {
+            i = i + 2
+        } else if c == 123 {
+            if i + 1 < end && sb(i + 1) == 123 { i = i + 2 }
+            else if i + 1 < end && sb(i + 1) == 125 { n = n + 1; i = i + 2 }
+            else if i + 1 < end && sb(i + 1) == 58 { return 0 - 3 }
+            else { return 0 - 1 }
+        } else if c == 125 {
+            if i + 1 < end && sb(i + 1) == 125 { i = i + 2 } else { return 0 - 2 }
+        } else {
+            i = i + 1
+        }
+    }
+    return n
+}
+
+// The arguments after the format literal at tok: commas at depth 0 before the
+// call's `)`, a trailing comma not counted.
+fn fmt_count_args_tok(tok: i64) -> i64 with Mut, Panic {
+    var p: i64 = tok + 1
+    var depth: i64 = 0
+    var n: i64 = 0
+    while p < TC {
+        let k = TK[p as usize]
+        if depth == 0 && k == 7 { return n }
+        if depth == 0 && k == 28 && TK[(p + 1) as usize] != 7 { n = n + 1 }
+        if k == 6 || k == 41 || k == 8 { depth = depth + 1 }
+        if (k == 7 || k == 42 || k == 9) && depth > 0 { depth = depth - 1 }
+        p = p + 1
+    }
+    return n
+}
+
+fn fmt_report_tok(tok: i64, holes: i64, n_args: i64) with IO, Mut, Panic {
+    print("error: format string at ")
+    print_src_loc_for_tok(tok)
+    if holes == 0 - 1 {
+        print(": `{` starts a placeholder, which is `{}` with nothing inside; write `{{` for a literal `{`\n")
+    } else if holes == 0 - 2 {
+        print(": unmatched `}`; write `}}` for a literal `}`\n")
+    } else if holes == 0 - 3 {
+        print(": format specifiers such as `{:.1}` are not supported; `{}` prints the value exactly as print does\n")
+    } else {
+        print(": ")
+        print_int(holes)
+        print(" `{}` placeholder(s) but ")
+        print_int(n_args)
+        print(" argument(s) after the format; each `{}` takes exactly one argument\n")
+    }
+    tc_mark_failed()
+}
+
+fn fmt_report_nonliteral(tok: i64) with IO, Mut, Panic {
+    print("error: format string at ")
+    print_src_loc_for_tok(tok)
+    print(": with more than one argument, the first argument of print/println is its format and must be a string literal\n")
+    tc_mark_failed()
+}
+
+// Leave EP on the `)` that closes the call whose format literal is at tok.
+fn fmt_skip_to_call_close(tok: i64) with Mut, Panic {
+    EP = tok + 1
+    var depth: i64 = 0
+    while EP < TC {
+        let k = TK[EP as usize]
+        if depth == 0 && k == 7 { return }
+        if k == 6 || k == 41 || k == 8 { depth = depth + 1 }
+        if (k == 7 || k == 42 || k == 9) && depth > 0 { depth = depth - 1 }
+        EP = EP + 1
+    }
+}
+
+// Print the value compile_or just left in rax/xmm0, as println does, without
+// the newline.
+fn fmt_emit_value_x86(name_tok: i64) with IO, Mut, Panic, Div {
+    if EXPR_TY == 13 {
+        tc_error_hard(name_tok, "printing f128 is not implemented; print `x as f64`")
+    }
+    if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+        tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
+    }
+    if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
+        emit_print_f64()
+    } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
+        emit_print_cstr()
+    } else {
+        emit_print_int()
+    }
+}
+
+fn fmt_emit_value_a64(name_tok: i64) with IO, Mut, Panic, Div {
+    if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+        tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
+    }
+    if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
+        emit_print_f64_a64()
+    } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
+        emit_print_cstr_a64()
+    } else {
+        emit_print_int_a64()
+    }
+}
+
+// EP is at the format literal and the next token is `,`. Leaves EP on the
+// call's `)`. a64 == 1 selects the aarch64 emitters.
+fn compile_format_print(name_tok: i64, newline: i64, a64: i64) with IO, Mut, Panic, Div {
+    let ft = EP
+    let holes = fmt_count_placeholders_tok(ft)
+    let n_args = fmt_count_args_tok(ft)
+    if holes < 0 || holes != n_args {
+        fmt_report_tok(ft, holes, n_args)
+        fmt_skip_to_call_close(ft)
+        return
+    }
+    let end = TE[ft as usize] - 1
+    var seg: i64 = TS[ft as usize] + 1
+    var i: i64 = seg
+    EP = ft + 1
+    while i < end {
+        let c = sb(i)
+        if c == 92 {
+            i = i + 2
+        } else if (c == 123 || c == 125) && sb(i + 1) == c {
+            i = i + 2
+        } else if c == 123 {
+            if i > seg {
+                if a64 == 1 { emit_print_a64_src(ft, seg, i, 1) } else { emit_print_src(ft, seg, i, 1) }
+            }
+            EP = EP + 1  // the `,` before this argument
+            if a64 == 1 {
+                compile_or_a64()
+                fmt_emit_value_a64(name_tok)
+            } else {
+                compile_or()
+                fmt_emit_value_x86(name_tok)
+            }
+            i = i + 2
+            seg = i
+        } else {
+            i = i + 1
+        }
+    }
+    if end > seg {
+        if a64 == 1 { emit_print_a64_src(ft, seg, end, 1) } else { emit_print_src(ft, seg, end, 1) }
+    }
+    if TK[EP as usize] == 28 && TK[(EP + 1) as usize] == 7 { EP = EP + 1 }
+    if newline == 1 {
+        if a64 == 1 { emit_print_nl_a64() } else { emit_print_nl() }
+    }
+}
+
+fn primary_fallback_refuses(tok: i64) -> bool with Panic, Mut {
+    let k = TK[tok as usize]
+    if k == 62 || k == 71 || k == 73 { return true }
+    if k == 50 {
+        let after = TE[tok as usize]
+        if after < SRC_LEN {
+            let d = SRC[after as usize] as i64
+            if d >= 48 && d <= 57 { return true }
+        }
+    }
+    return false
+}
+
+fn primary_fallback_report(tok: i64) with IO, Mut, Panic {
+    print("parse error: expected expression at ")
+    print_src_loc_for_tok(tok)
+    print(": found `")
+    var bad_i: i64 = TS[tok as usize]
+    while bad_i < TE[tok as usize] { print_char(SRC[bad_i as usize] as i64); bad_i = bad_i + 1 }
+    print("`\n")
+    tc_mark_failed()
+}
+
 fn compile_primary() with IO, Mut, Panic, Div {
     if tc_reject_rust_macro_at(EP) { }
     LAST_EXPR_IS_CLOSURE = 0
@@ -17172,7 +17406,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
         return
     }
     // Identifier or function call
-    if k == 3 || k == 79 {
+    // `var` lexes as TK=12 (the binding keyword) but is a legal name, as on
+    // Madaros (contextual, parser/patterns.sio): `let var = 5` binds it. Without
+    // this arm a use of it fell to the last arm and read as 0 -- including
+    // stdlib/epistemic/knightian.sio:309, whose p-box variance was 0.
+    if k == 3 || k == 79 || k == 12 {
         var ns: i64 = TS[EP as usize]
         var ne: i64 = TE[EP as usize]
         EP = EP + 1
@@ -17937,6 +18175,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 7 {
                     emit_print(EP); EP = EP + 1
+                } else if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 28 {
+                    compile_format_print(name_tok, 0, 0)
+                } else if fmt_count_args_tok(EP - 1) > 0 {
+                    fmt_report_nonliteral(EP)
+                    fmt_skip_to_call_close(EP - 1)
                 } else {
                     compile_or()
                     if EXPR_TY == 13 {
@@ -17965,6 +18208,16 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 7 {
                     emit_print(EP)
                     EP = EP + 1
+                    emit_print_nl()
+                } else if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 28 {
+                    compile_format_print(name_tok, 1, 0)
+                } else if fmt_count_args_tok(EP - 1) > 0 {
+                    fmt_report_nonliteral(EP)
+                    fmt_skip_to_call_close(EP - 1)
+                } else if TK[EP as usize] == 7 {
+                    // `println()` prints an empty line, as on Madaros. Without
+                    // this arm the `)` fell to compile_primary's last arm and
+                    // printed `0`.
                     emit_print_nl()
                 } else {
                     compile_or()
@@ -22462,6 +22715,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         return
     }
+    if primary_fallback_refuses(EP) { primary_fallback_report(EP) }
     EP = EP + 1
     em(0x31); em(0xc0)
     EXPR_IS_F64 = 0
@@ -30402,8 +30656,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             //  documented remaining gap, so this is no regression for them.)
             EP = EP + 1  // skip [
             let val_ep = EP                       // remember where the fill value V starts
-            while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
-            if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
+            skip_past_matching_bracket()
             let after_ep = EP
             var nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
@@ -37670,7 +37923,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             let param_tk = TK[p as usize]
             if param_tk == 7 { break }
             if param_tk == 0 { break }
-            if param_tk == 3 || param_tk == 79 {
+            if tk_is_param_name(p) {
                 let pns = TS[p as usize]
                 let pne = TE[p as usize]
                 if var_find_idx(pns, pne) >= 0 { tc_duplicate_param(p) }
@@ -38963,9 +39216,10 @@ fn emit_syscall6_a64(argc: i64) with Mut, Panic, Div {
 }
 
 // ─── ARM64 print("string") ───
-fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
-    let ss = TS[tok as usize] + 1
-    let se = TE[tok as usize] - 1
+// Print source bytes ss..se of the string literal at tok, decoding escapes.
+// braces == 1 is a piece of a format string: `{{` and `}}` print one brace
+// (compile_format_print).
+fn emit_print_a64_src(tok: i64, ss: i64, se: i64, braces: i64) with IO, Mut, Panic, Div {
     var slen: i64 = 0
     var zi: i64 = 0
     while zi < 256 { SQW[zi as usize] = 0; zi = zi + 1 }
@@ -38973,7 +39227,9 @@ fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
     while si < se {
         let c = sb(si)
         var byte: i64 = c
-        if c == 92 && si + 1 < se {
+        if braces == 1 && (c == 123 || c == 125) && si + 1 < se && sb(si + 1) == c {
+            si = si + 2
+        } else if c == 92 && si + 1 < se {
             let c2 = sb(si + 1)
             if c2 == 120 && si + 3 < se {
                 let h1 = sb(si + 2)
@@ -39048,6 +39304,10 @@ fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
         em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)  // movz x8, #64 (Linux write)
     }
     emit_syscall_a64()
+}
+
+fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
+    emit_print_a64_src(tok, TS[tok as usize] + 1, TE[tok as usize] - 1, 0)
 }
 
 fn emit_print_cstr_a64() with Mut {
@@ -41733,7 +41993,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         return
     }
     // Identifier or function call
-    if k == 3 || k == 79 {  // "kernel" lexes as TK=79 (the `kernel fn` GPU keyword), not TK=3; the x86 twin, compile_primary's identifier-dispatch check, already handles `k == 3 || k == 79`. Missing here, any bare use of the identifier "kernel" as a value (e.g. a parameter named kernel passed as a call argument) fell through this dispatch unrecognized on aarch64, leaving EXPR_TY/EXPR_TY_HASH at whatever the previous expression left them.
+    if k == 3 || k == 79 || k == 12 {  // `var` (TK=12) as a name: see compile_primary. "kernel" lexes as TK=79 (the `kernel fn` GPU keyword), not TK=3; the x86 twin, compile_primary's identifier-dispatch check, already handles `k == 3 || k == 79`. Missing here, any bare use of the identifier "kernel" as a value (e.g. a parameter named kernel passed as a call argument) fell through this dispatch unrecognized on aarch64, leaving EXPR_TY/EXPR_TY_HASH at whatever the previous expression left them.
         var ns: i64 = TS[EP as usize]
         var ne: i64 = TE[EP as usize]
         EP = EP + 1
@@ -42001,6 +42261,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1
                 if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 7 { emit_print_a64(EP); EP = EP + 1 }
+                else if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 28 { compile_format_print(name_tok, 0, 1) }
+                else if fmt_count_args_tok(EP - 1) > 0 { fmt_report_nonliteral(EP); fmt_skip_to_call_close(EP - 1) }
                 else {
                     compile_or_a64()
                     // See print's x86-64 twin for rationale (issue #633).
@@ -42025,6 +42287,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     emit_print_a64(EP)
                     EP = EP + 1
                     emit_print_nl_a64()
+                } else if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 28 {
+                    compile_format_print(name_tok, 1, 1)
+                } else if fmt_count_args_tok(EP - 1) > 0 {
+                    fmt_report_nonliteral(EP)
+                    fmt_skip_to_call_close(EP - 1)
+                } else if TK[EP as usize] == 7 {
+                    emit_print_nl_a64()  // `println()`: see the x86-64 twin
                 } else {
                     compile_or_a64()
                     // Observation boundary: println of Unobserved<T> is IO that collapses uncertainty
@@ -44215,6 +44484,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         }
         return
     }
+    if primary_fallback_refuses(EP) { primary_fallback_report(EP) }
     EP = EP + 1
     em32(0xD2800000)
     EXPR_IS_F64 = 0
@@ -46168,8 +46438,7 @@ fn compile_stmt_a64_body() with IO, Mut, Panic, Div {
         if has_eq == 1 && is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
             EP = EP + 1
             let a64_val_ep = EP
-            while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
-            if TK[EP as usize] == 42 { EP = EP + 1 }
+            skip_past_matching_bracket()
             let a64_after_ep = EP
             var nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
@@ -48385,7 +48654,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
             let param_tk = TK[p as usize]
             if param_tk == 7 { break }
             if param_tk == 0 { break }
-            if param_tk == 3 || param_tk == 79 {
+            if tk_is_param_name(p) {
                 let pns = TS[p as usize]; let pne = TE[p as usize]
                 var pslot: i64 = -1
                 if VAR_COUNT >= local_cap() {
