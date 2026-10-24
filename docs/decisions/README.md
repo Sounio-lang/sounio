@@ -60,6 +60,7 @@ Grounded in: commit, artifact, or empirical result
 | 011 | Boundary and scope of Mathlib in formal verification | accepted | 2026-09-24 |
 | 012 | Bridge `IrHyperMulO` to the native-v2 backend pipeline | experimental | 2026-09-24 |
 | 015 | Lexical structure (the thirteen rulings of D-33) | accepted | 2026-10-24 |
+| 016 | Epistemic merge, contradiction, typed zeros and provenance trust | accepted | 2026-10-24 |
 
 ## Files
 
@@ -74,6 +75,7 @@ Grounded in: commit, artifact, or empirical result
 - [ADR-009](./adr-009-verified-foreign-reference.md)
 - [ADR-010](./adr-010-madaros-region-reclamation.md)
 - [ADR-015](./adr-015-lexical-structure.md)
+- [ADR-016](./adr-016-epistemic-merge-and-provenance-trust.md)
 - [Claim-oracle inventory schema](./claim_oracle_inventory.schema.md)
 
 ## Related Docs

@@ -9,6 +9,7 @@ points here instead of restating a result it cannot regenerate.
 import OntologyELPlusClosureComplete
 import ElfLinker
 import TypeChecker
+import TrustSemiring
 
 -- EL+ saturation: complete and sound w.r.t. the derivation calculus `Der`.
 #print axioms Sounio.OntologyELPlus.subBPlusC_iff
@@ -33,3 +34,10 @@ import TypeChecker
 #print axioms Sounio.TypeChecker.knowledge_unwrap_sub
 #print axioms Sounio.TypeChecker.check_implies_infer
 #print axioms Sounio.TypeChecker.no_effect_leakage
+
+-- Provenance trust semiring (ADR-016 decision 12): tropical^3, and the rejected lexicographic design.
+#print axioms Trust.distrib
+#print axioms Trust.absorb
+#print axioms Trust.plus_idem
+#print axioms Trust.times_wf
+#print axioms Trust.lex_not_distrib
