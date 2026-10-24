@@ -172,7 +172,7 @@ done
 lr_data=tests/reference/data/count_profile_lr_20261024
 for stem in count_dispersion_increment_reference count_profile_lr_fixed_reference count_profile_lr_v10_reference count_likelihood_difference_reference; do
  rc=0
- timeout 180 g++ -std=c++23 -O2 -Wall -Wextra "tests/reference/$stem.cpp" -o "$out/$stem" > "$out/$stem.cpp.txt" 2>&1 || rc=$?
+ timeout 180 g++ -std=c++23 -O2 -Wall -Wextra "tests/reference/$stem.cpp" -lquadmath -o "$out/$stem" > "$out/$stem.cpp.txt" 2>&1 || rc=$?
  record cpp-compile "$stem" "$rc"
  [[ $rc == 0 ]] || continue
  rc=0
