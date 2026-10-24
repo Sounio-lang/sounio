@@ -15,6 +15,24 @@ implementation. Raw receipts retain failed and superseded attempts alongside
 accepted focused runs. A successful focused run does not establish a full corpus
 pass, merge acceptance, calibrated inference or a universal performance result.
 
+## Current accepted checkpoint: final three-pair measurement
+
+The current numerical acceptance is frozen source `6ffc1a5bd8eaebeef2d15ccced830bfbc832a648`, library NB2 SHA `7d3fd3f8603fdb23bce3e442795e26e869327f0547a90fab7ceda2edb25aafc2` and source-built compiler SHA `d74fbebe0ff442e8c77bec024d6d92325b83a98d3f1487caa1db59ef171a41e6`. Full gate17020 and nested pilot17026 passed, with prepared input catalog unchanged. The pilot has16/16 available datasets and16 complete traces; it is not completed inferential calibration.
+
+Final jobs17030/17031/17032 and independent C++ analysis17033 all completed0. Each pair used the same one-physical-core allocation, a2GiB memory reservation,45-minute job limit and1260-second native timeout. AB/BA/AB order alternated. All six executions preserved scientific stdout,180 hits out of199 replicates, plus-one p=.905 and final RNG state. Preflight and the historical single B199 pair are excluded.
+
+| Pair | Before seconds | After seconds | Before RSS KiB | After RSS KiB |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 956.85 | 467.35 | 373568 | 356004 |
+| 2 | 957.69 | 466.26 | 373568 | 356564 |
+| 3 | 959.81 | 465.63 | 373056 | 356884 |
+
+The C++ analyzer reports median elapsed957.69→466.26s and ratio of medians `2.05398275640200746357`. Maximum RSS373568→356884KiB passes the no-more-than5-percent regression target; the time target is also true. This is a source-bound whole-program measurement for n256/alpha0/case0/B199, not an isolated-kernel timing, causal superiority claim or population performance guarantee. The driver exposes final RNG/hits/B, not uniform/proposal totals. Historical B31 measurements were replayed independently in16995 without pooling.
+
+Bounded qualification job17048 was submitted only after root reviewed both actual target booleans. It actually started at2026-10-24T20:30:11Z with its original4GiB reservation unchanged. Its hard limit is23h45; the ledger conservatively reserves900 seconds for the earlier pilot and85500 for the round. Pilot elapsed110 seconds is separate from that allocation accounting. Submission does not imply start, completion or calibration. The old campaign remains separate and unavailable/partial outcomes are retained.
+
+The sections below retain earlier checkpoints and their original pending/failure descriptions as history; the current acceptance above supersedes their current-state wording. The [final performance bundle](performance-final03/README.txt), [C++ report](performance-final03/REPORT.tsv) and [qualification start bundle](qualification-round-start/SCOPE.txt) retain their own immutable source/receipt identities. Functional integration PR3075 and compiler PR3080 remain subject to their actual exact-head CI and merge queue states; successful native evidence is not a merge claim.
+
 ## Implemented and measured
 
 - **Paired NB2 likelihood:** checked local mean/dispersion increments preserve
