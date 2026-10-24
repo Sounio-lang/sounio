@@ -4,7 +4,7 @@ use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_bu
 // Workspace: m*p + m + 4*p doubles; caller budgets all owners explicitly.
 // Status:0success,1shape/workspace,2nonfinite input,3rank deficiency,
 // 4arithmetic range,5invalid rcond. x is changed only on success.
-use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_buffer_rotate_rows,numeric_buffer_status,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_get}
+use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_buffer_rotate_rows,numeric_buffer_status,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_at,numeric_matrix_fits}
 use math::pure::{is_finite,sqrt}
 use linalg::least_squares_scale::{least_squares_restore}
 pub struct DynamicLeastSquares {
@@ -46,6 +46,25 @@ pub fn dynamic_qr_workspace(rows:i64,columns:i64)->i64 with Div {
     if rows>(9223372036854775807-tail)/columns {return -1}
     return rows*columns+tail
 }
+// Public offsets for the successful fit's borrowed workspace. The association
+// expires on the next mutation/call, including a failed call; it is not a capability.
+pub struct DynamicQrWorkspaceLayout {
+ pub status:i64,pub total_elements:i64,pub factor_offset:i64,
+ pub response_offset:i64,pub scale_offset:i64,pub permutation_offset:i64,
+ pub solution_offset:i64,pub restored_offset:i64,
+}
+pub fn dynamic_qr_workspace_layout(rows:i64,columns:i64)->DynamicQrWorkspaceLayout with Div {
+ let need=dynamic_qr_workspace(rows,columns)
+ if need<0 {
+  return DynamicQrWorkspaceLayout{status:1,total_elements:0,factor_offset:0,
+   response_offset:0,scale_offset:0,permutation_offset:0,solution_offset:0,restored_offset:0}
+ }
+ let response=rows*columns
+ let scales=response+rows
+ DynamicQrWorkspaceLayout{status:0,total_elements:need,factor_offset:0,
+  response_offset:response,scale_offset:scales,permutation_offset:scales+columns,
+  solution_offset:scales+2*columns,restored_offset:scales+3*columns}
+}
 pub fn dynamic_qr_least_squares(a:&NumericBuffer,layout:&NumericMatrix,
     b:&NumericBuffer,x:&!NumericBuffer,work:&!NumericBuffer,rcond:f64)
     ->DynamicLeastSquares with Mut, Div, Panic {
@@ -60,6 +79,7 @@ pub fn dynamic_qr_least_squares(a:&NumericBuffer,layout:&NumericMatrix,
     if numeric_buffer_len(b)!=m || numeric_buffer_len(x)!=p ||
        numeric_buffer_len(work)<need {return out}
     if !is_finite(rcond) || rcond<0.0 || rcond>=1.0 {out.status=5;return out}
+    if !numeric_matrix_fits(a,layout) {return out}
     let cutoff=if rcond==0.0 {(m as f64)*2.2204460492503131e-16}else{rcond}
     if cutoff>=1.0 {out.status=5;return out}
     let rhs=m*p
@@ -81,19 +101,18 @@ pub fn dynamic_qr_least_squares(a:&NumericBuffer,layout:&NumericMatrix,
         var scale=0.0
         i=0
         while i<m {
-            let v=numeric_matrix_get(a,layout,i,j)
-            if v.status!=0 {return out}
-            if !is_finite(v.value) {out.status=2;return out}
-            if dqr_abs(v.value)>scale {scale=dqr_abs(v.value)}
+            let v=numeric_matrix_at(a,layout,i,j)
+            if !is_finite(v) {out.status=2;return out}
+            if dqr_abs(v)>scale {scale=dqr_abs(v)}
             i=i+1
         }
         numeric_buffer_set(work,scales+j,scale)
         numeric_buffer_set(work,pivots+j,j as f64)
         i=0
         while i<m {
-            let v=numeric_matrix_get(a,layout,i,j)
-            let z=if scale==0.0 {0.0}else{v.value/scale}
-            if v.value!=0.0 && z==0.0 {out.status=4;return out}
+            let v=numeric_matrix_at(a,layout,i,j)
+            let z=if scale==0.0 {0.0}else{v/scale}
+            if v!=0.0 && z==0.0 {out.status=4;return out}
             numeric_buffer_set(work,i*p+j,z)
             i=i+1
         }

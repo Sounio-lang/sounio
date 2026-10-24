@@ -96,6 +96,15 @@ when that status is 0. deviance_status is 0 available, 1 squared-deviance
 overflow/underflow, or 2 not computed. Every unavailable number is a zero
 placeholder, not a valid log probability or deviance.
 
+For count0 and alpha==0 (including negative zero), the full log probability is
+returned directly as `-mean` after normalizer and unit-diagnostic metadata have
+been populated and their required statuses checked. This exact Poisson boundary
+identity flips the sign bit of a validated positive binary64 mean; it does not
+round-trip through a square root and a reconstructed square. Residual and deviance
+metadata retain their independent primitive results: at the largest finite mean,
+the log probability remains finite while squared deviance is unavailable.
+No positive-count or positive-alpha evaluation is changed by this shortcut.
+
 When squared D overflows but its signed square root is finite, the implementation
 restores half-D as (abs(residual)*0.5)*abs(residual), rather than demanding that D
 itself be available. This can preserve a finite log probability. A nonzero
@@ -129,3 +138,22 @@ Compilation, actual execution, scalar concordance, theoretical truncation,
 floating-point accuracy and inferential calibration are separate claims.
 Only the coordinator's current-source central Slurm receipts establish the
 execution state. Alpha profiling remains a later integration step.
+
+## Exact Poisson-zero regression boundary
+
+A dedicated native fixture `stdlib_deep_poisson_zero_likelihood.sio` reports raw
+IEEE-754 input/output bits for ten means spanning minimum subnormal, twice that
+value, minimum normal, ordinary dyadics, 2, 10, 2^512 and the largest finite value.
+The standalone C++23 `deep_poisson_zero_likelihood_reference.cpp` compares those
+reports to the independent analytic sign-bit identity, checks availability and
+completion, and rejects missing or duplicate cases. Slot reuse, detached snapshots,
+negative-zero alpha and unchanged input-validation precedence are also asserted.
+
+Before this correction, Slurm16443 evaluated the unchanged scratch fixture against
+both the pre-slot and slot-refactored libraries: both completed its 20,000-iteration
+loop, then failed the final exact Poisson-zero assertion. Both reported a delta
+from -2 of +8.88178419700125e-16. Thus this is a separately identified pre-existing
+rounding defect, not evidence against slot equivalence. The original scratch
+fixture and all of its tolerances remain unchanged. The new exact-case correction
+and dedicated bitwise concordance fixture are prepared; central current-source
+execution and the wider numeric gates remain pending.
