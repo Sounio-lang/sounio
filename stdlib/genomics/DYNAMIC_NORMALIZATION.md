@@ -61,3 +61,77 @@ and its evidence records. No compiler, test or numerical oracle was executed
 locally by the implementation agent. Focused concordance does not establish a
 full-domain error bound, full corpus/CI acceptance, a complete RNA-seq model,
 a dispersion estimator, assessed composition assumptions or DESeq2 parity.
+
+## Reusable strided adapter
+
+The earlier API already accepts dynamic gene/sample counts. The additive
+`dynamic_median_ratio_size_factors_into` adapter changes the storage and result
+contract, preserving the estimator, eligibility, median and centering policies:
+
+```text
+dynamic_median_ratio_size_factors_workspace(G,S)
+  -> {status,genes,samples,numeric_elements,integer_elements,payload_bytes}
+dynamic_size_factors_slot() -> reusable result plus checked-log scratch
+dynamic_median_ratio_size_factors_into(counts,G,S,row_stride,col_stride,offset,
+  mode,factors,log_factors,work,anchors,slot) -> status
+```
+
+The caller owns all buffers. An active count is at
+`offset + gene*row_stride + sample*col_stride`. Nonnegative strides include
+repeated read-only views; padding is ignored. Bounds and products are checked
+before indexing, and all active counts are validated before ratio evaluation.
+The query reports2G+2S double elements andG integer anchors, together with
+checked payload bytes. Each eligible gene stores its positive integer anchor;
+zero identifies an excluded gene. There is no additional per-cell log cache or
+new8-sample/256-gene capacity limit.
+
+Construct `dynamic_size_factors_slot` once and reuse it. The adapter captures
+scalar log results from its one reusable CheckedLog child and propagates every
+checked-log failure as arithmetic status4. It does not allocate a checked-log
+result per gene/sample visit. Selection still returns one result per sample;
+no claim of zero allocations for the complete routine is made. Slot scalar
+getters expose status/used/excluded; `dynamic_size_factors_snapshot` creates an
+explicit detached metadata snapshot. Reusing/resetting the slot does not modify
+that snapshot.
+
+Statuses remain0success,1shape/layout/mode/budget,2negative active count,
+3no eligible ratios in a required sample,4arithmetic,5active count above2^53.
+Both public factor/log-factor buffers remain unchanged on failure; workspace,
+anchors and result metadata are scratch and may change. The old packed function,
+scalar workspace query and2G integer eligibility/anchor layout remain available
+through an adapter. It uses the same checked leaf path, so this change also
+removes repeated checked-log record construction from the legacy call.
+
+`normalization_into_reference.cpp` independently uses high-precision direct
+integer logarithms, sorted log-ratio medians and centering. Its five cases cover
+both zero policies, strided poisoned padding,513×17 dimensions, adjacent2^53
+counts and repeated views. Native factor/log results are also required to be
+bit-identical between the new and legacy adapters for those inputs. The status
+fixture covers malformed layouts/workspaces, exact-count boundaries and
+transactional failures. Neither comparison certifies biological assumptions.
+
+`profile_normalization_into.sh` is a Slurm-only paired whole-program harness.
+It compiles the unchanged20,000×512 legacy workload once per source variant,
+then alternates three pairs of fresh-process executions. It retains compile/run
+wall/user/system time, RSS, statuses and source/compiler/ELF/stdout hashes.
+It requires accepted markers and identical scientific stdout. Measurements are
+specific to that structured program and do not isolate the normalization kernel
+or certify general speed, peak memory or a global numerical error bound.
+
+The focused Slurm observation for this adapter (job16802) retained the same
+whole-program scientific stdout across all pairs:
+
+| Trial | Before wall seconds | After wall seconds | Before RSS KiB | After RSS KiB |
+|---|---:|---:|---:|---:|
+|1|35.48|35.69|79872|80384|
+|2|35.66|35.72|80384|80384|
+|3|35.50|35.65|80384|80384|
+
+These observations show no execution-time or RSS improvement for that structured
+workload. They support retaining the interface/storage/checking changes without
+claiming a measured speedup or memory reduction. The matrix and legacy scratch
+still dominate the caller-visible buffer contract; the new adapter'sG-integer
+anchors reduce the declared integer scratch requirement relative to the old2G
+layout, which remains available for compatibility. Complete artifacts are under
+`/scratch/sounio-stdlib-advanced-20261023/normalization_perf01` on the Slurm host;
+that scratch path is an execution receipt location rather than a portable input.
