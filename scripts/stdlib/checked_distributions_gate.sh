@@ -12,7 +12,7 @@ ulimit -s 524288
 id > "$OUT/identity.txt"
 sha256sum "$MADAROS_RAW_BIN" > "$OUT/compiler.sha256"
 sha256sum stdlib/stats/{distributions,checked_distributions}.sio \
- stdlib/special/{checked_gamma_beta,gamma}.sio stdlib/math/{pure,logarithmic}.sio \
+ stdlib/special/{checked_gamma_beta,gamma}.sio stdlib/math/{pure,logarithmic,dd64}.sio \
  tests/reference/checked_distributions_reference.cpp \
  tests/run-pass/stdlib_{checked_distributions,beta_uniform_baseline}.sio \
  tests/stdlib/stats/distributions_{invalid,underflow}_probe.sio \

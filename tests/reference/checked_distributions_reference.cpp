@@ -28,6 +28,18 @@ std::vector<Case> cases(){
  c.push_back({0,0,0,1,false,2048,1});c.push_back({1,0,1,2,false,1,3});c.push_back({2,0,1,.025,false,1,3});
  c.push_back({3,-1,2,.5,false,2048,1});c.push_back({4,1e6+1,2,.5,false,2048,5});c.push_back({4,2,3,.4,false,1,3});
  c.push_back({5,2,3,-.1,false,2048,1});c.push_back({5,2,3,.1,false,1,3});
+ for(auto ab:std::vector<std::pair<double,double>>{{8,8},{8,1e6},{1e6,8},{16,1e6},{1e6,16},{128,65536},{65536,128},{1e6,1e6},{999999.5,500000.25}}){
+  double total=ab.first+ab.second,mean=ab.first/total,sd=std::sqrt(mean*(ab.second/total)/(total+1));
+  for(double k:{-3.,-1.,0.,1.,3.}){double x=mean+k*sd;if(x>0&&x<1){c.push_back({3,ab.first,ab.second,x});c.push_back({4,ab.first,ab.second,x});}}
+  for(double k:{-.125001,-.124999,.124999,.125001}){double x=mean+k*std::min(mean,ab.second/total);if(x>0&&x<1){c.push_back({3,ab.first,ab.second,x});c.push_back({4,ab.first,ab.second,x});}}
+ }
+ for(double a:{7.999999,8.,8.000001,63.999999,64.,64.000001})
+  for(double ratio:{1023.999999,1024.,1024.000001}){
+   double b=a*ratio,total=a+b;
+   for(double factor:{1.-1e-12,1.,1.+1e-12}){double x=(a+2)/total*factor;c.push_back({4,a,b,x});c.push_back({4,b,a,1-x});}
+  }
+ c.push_back({4,8,1e6,8e-6,false,1,3});
+ c.push_back({4,1e6,8,1.-8e-6,false,1,3});
  return c;
 }
 std::string lit(double x){std::ostringstream s;s<<std::setprecision(17)<<std::scientific<<x;return s.str();}
@@ -47,7 +59,7 @@ fn tails(id:i64,normal:bool,a:f64,b:f64,x:f64,budget:i64) with IO,Mut,Div,Panic 
  print("ROW ");print(id);print(" ");print(r.status);print(" ")
  print(flag(r.cdf_available));print(" ");print(flag(r.sf_available));print(" ")
  print(flag(r.log_cdf_available));print(" ");print(flag(r.log_sf_available));print(" ")
- print(bit(r.cdf));print(" ");print(bit(r.sf));print(" ");print(bit(r.log_cdf));print(" ");print(bit(r.log_sf));print(" ");println(r.iterations)
+ print(bit(r.cdf));print(" ");print(bit(r.sf));print(" ");print(bit(r.log_cdf));print(" ");print(bit(r.log_sf));print(" ");print(r.iterations);print(" ");println(r.method)
 }
 fn quantile(id:i64,normal:bool,a:f64,b:f64,p:f64,upper:bool,budget:i64) with IO,Mut,Div,Panic {
  let r=if normal {normal_quantile_checked(a,b,p,upper,budget,1.0e-12)}else{beta_quantile_checked(a,b,p,upper,budget,1.0e-12)}
@@ -106,7 +118,7 @@ int main(int argc,char**argv){
  if(argc==2 && std::string(argv[1])=="--generate"){generate();return 0;}
  if(argc==3 && std::string(argv[1])=="--baseline"){std::ifstream f(argv[2]);std::string tag;std::int64_t bits;f>>tag>>bits;if(!f||tag!="BETA_UNIFORM_BITS")return 2;double v=from(bits);std::cout<<std::setprecision(17)<<"BEFORE_PUBLIC_BETA_UNIFORM "<<v<<" EXPECTED 1\n";return std::isfinite(v)&&std::abs(v-1)>1e-12?0:1;}
  if(argc!=2){std::cerr<<"usage: reference --generate | actual.stdout\n";return 2;}
- std::ifstream input(argv[1]);std::string line;auto c=cases();size_t next=0;bool controls=false,done=false;int errors=0;double maxlog=0,maxvalue=0;
+ std::ifstream input(argv[1]);std::string line;auto c=cases();size_t next=0;bool controls=false,done=false;int errors=0;double maxlog=0,maxvalue=0,maxcentrallog=0,maxcentralvalue=0;
  auto fail=[&](std::string s){std::cerr<<"FAIL row "<<next<<": "<<s<<"\n";errors++;};
  auto compare=[&](double actual,Q expected,bool logarithm){
   if(!std::isfinite(actual)||!boost::multiprecision::isfinite(expected)){fail("unexpected nonfinite");return;}
@@ -116,6 +128,11 @@ int main(int argc,char**argv){
   if(logarithm)maxlog=std::max(maxlog,scaled);else maxvalue=std::max(maxvalue,scaled);
   // Cancellation in canonical log-gamma is explicitly calibrated up to shapes 1e6.
   double limit=(c[next].a>=1000||c[next].b>=1000)?5e-8:2e-10;
+  Q mean=Q(c[next].a)/(Q(c[next].a)+Q(c[next].b));
+  Q other=Q(c[next].b)/(Q(c[next].a)+Q(c[next].b));
+  Q delta=abs(Q(c[next].x)-mean);
+  bool central=c[next].kind>=3 && c[next].kind<=4 && c[next].a>=8 && c[next].b>=8 && delta<=Q(.125)*std::min(mean,other);
+  if(central){limit=c[next].kind==3?5e-12:2e-11;if(logarithm)maxcentrallog=std::max(maxcentrallog,scaled);else maxcentralvalue=std::max(maxcentralvalue,scaled);}
   if(scaled>limit){std::ostringstream s;s<<"numeric discrepancy "<<std::setprecision(17)<<scaled<<" > "<<limit<<" actual "<<actual<<" expected "<<expected;fail(s.str());}
  };
  while(std::getline(input,line)){
@@ -137,8 +154,13 @@ int main(int argc,char**argv){
   }
   if(status!=v.expected){fail("unexpected status "+std::to_string(status)+" expected "+std::to_string(v.expected));}
   std::vector<std::int64_t> p;std::int64_t z;while(row>>z)p.push_back(z);
-  size_t fields=v.kind%3==0?4:v.kind%3==1?9:7;
+  size_t fields=v.kind%3==0?4:v.kind%3==1?10:7;
   if(p.size()!=fields){fail("wrong field count");next++;continue;}
+   if(v.kind==4){
+    bool lower_series=v.a>=8&&v.a<=64&&v.b>=1024*v.a&&v.x<.125&&(v.a+v.b)*v.x<=v.a+2;
+    bool upper_series=v.b>=8&&v.b<=64&&v.a>=1024*v.b&&1-v.x<.125&&(v.a+v.b)*(1-v.x)<=v.b+2;
+    if((lower_series||upper_series)!=(p[9]==5))fail("positive-series branch selection");
+   }
   if(status!=0){for(size_t k=0;k<(v.kind%3==1?4:2);k++)if(p[k]!=0)fail("failure exposes availability");next++;continue;}
   Q a(v.a),b(v.b),x(v.x);
   if(v.kind%3==0){
@@ -152,7 +174,7 @@ int main(int argc,char**argv){
    if(p[1])compare(from(p[5]),hi,false);else if(hi>=Q(std::numeric_limits<double>::denorm_min()))fail("representable sf unavailable");
    if(p[2])compare(from(p[6]),log(lo),true);else if(abs(log(lo))>=Q(std::numeric_limits<double>::denorm_min()))fail("representable logcdf unavailable");
    if(p[3])compare(from(p[7]),log(hi),true);else if(abs(log(hi))>=Q(std::numeric_limits<double>::denorm_min()))fail("representable logsf unavailable");
-   if(p[8]<0||p[8]>2*v.budget)fail("forward work bound");
+   if(p[8]<0||p[8]>v.budget)fail("forward work bound");
   }else{
    Q value;if(v.kind==2){boost::math::normal_distribution<Q>d(a,b);value=v.upper?quantile(complement(d,x)):quantile(d,x);}else{boost::math::beta_distribution<Q>d(a,b);value=v.upper?quantile(complement(d,x)):quantile(d,x);}
    if(!p[0]||!p[1])fail("quantile/witness unavailable");else{
@@ -167,6 +189,6 @@ int main(int argc,char**argv){
   next++;
  }
  if(!controls||!done||next!=c.size()){std::cerr<<"FAIL incomplete controls/rows "<<next<<"/"<<c.size()<<"\n";errors++;}
- std::cout<<std::setprecision(17)<<"ROWS "<<next<<" MAX_ABS_LOG_ERROR "<<maxlog<<" MAX_RELATIVE_VALUE_ERROR "<<maxvalue<<" ERRORS "<<errors<<"\n";
+ std::cout<<std::setprecision(17)<<"ROWS "<<next<<" MAX_ABS_LOG_ERROR "<<maxlog<<" MAX_RELATIVE_VALUE_ERROR "<<maxvalue<<" MAX_CENTRAL_ABS_LOG_ERROR "<<maxcentrallog<<" MAX_CENTRAL_RELATIVE_VALUE_ERROR "<<maxcentralvalue<<" ERRORS "<<errors<<"\n";
  return errors?1:0;
 }
