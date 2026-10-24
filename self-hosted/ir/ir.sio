@@ -1612,11 +1612,18 @@ pub fn ir_arena_report_violation() -> bool with IO, Mut, Panic, Div {
     // fn ids and every nid-keyed lowering side table then silently miss, so the
     // overflow is reported here -- the one place every compile route passes.
     if IR_NAME_POOL_OVERFLOW {
-        print("warning: IR name-id pool overflowed (")
+        print("error: IR name-id pool overflowed (")
         print_int(IR_NAME_POOL_COUNT)
         print(" of ")
-        print_int(IR_NAME_POOL_MAX)
-        print(" distinct names) -- names interned after this point lost their id\n")
+        // Effective cap, inlined (same rule as ir_name_pool_cap, which is
+        // defined below this function): the test-only limit when set and lower.
+        let eff_cap = if IR_NAME_POOL_LIMIT > 0 && IR_NAME_POOL_LIMIT < IR_NAME_POOL_MAX { IR_NAME_POOL_LIMIT } else { IR_NAME_POOL_MAX }
+        print_int(eff_cap)
+        print(" distinct names, ")
+        print_int(IR_NAME_POOL_BYTES_USED)
+        print(" name bytes) -- names interned after this point lost their id\n")
+        print("error: refusing to emit with blanked symbol names (IR name-id pool overflow)\n")
+        return true
     }
     if IR_ARENA_VIOLATION == 0 { return false }
     print("error: IR instruction arena contract violated (")
@@ -3845,7 +3852,17 @@ pub(crate) fn ir_empty_prof_counter_info() -> IrProfCounterInfo {
 //
 // Id 0 is always the empty name, so a zero-initialised IrInstr (BSS, ir_nop,
 // any `[ir_nop(); N]` fill) already reads as unnamed without touching the pool.
-pub let IR_NAME_POOL_MAX: i64 = 65536
+//
+// CAPACITY (raised 65536 -> 262144 ids): a self-compile of the compiler interns
+// ~28k functions plus every field, type and mangled method name, which can pass
+// 65536 distinct names. The pool used to give every name a fixed 384-byte slot,
+// so the byte buffer was sized id-cap * 384 and most of it held padding. Names
+// are now stored VARIABLE-LENGTH in a bump byte pool (IR_NAME_POOL_BUF, addressed
+// by IR_NAME_POOL_OFF[id-1] and IR_NAME_POOL_LEN[id-1]), so the same 24 MiB holds
+// 4x as many ids at the real average name length. Either limit -- the id cap or
+// the byte pool -- sets IR_NAME_POOL_OVERFLOW and makes ir_intern_name return 0;
+// ir_arena_report_violation turns that into a refused build.
+pub let IR_NAME_POOL_MAX: i64 = 262144
 
 // PARALLEL FLAT ARRAYS, NOT `[Name; N]`. A global whose element is a struct
 // containing an inline array is miscompiled — measured 2026-08-04 with a
@@ -3862,7 +3879,11 @@ pub let IR_NAME_POOL_MAX: i64 = 65536
 // stated so that ALL-ZERO IS THE CORRECT INITIAL STATE: ids are 1-based,
 // IR_NAME_POOL_COUNT counts what is stored, and an all-zero index means empty.
 var IR_NAME_POOL_BUF: [i8; 25165824]
-var IR_NAME_POOL_LEN: [i64; 65536]
+var IR_NAME_POOL_OFF: [i64; 262144]
+var IR_NAME_POOL_LEN: [i64; 262144]
+// Bump cursor into IR_NAME_POOL_BUF: the first free byte. All-zero is the
+// correct initial state (the pool starts empty).
+var IR_NAME_POOL_BYTES_USED: i64 = 0
 var IR_NAME_POOL_COUNT: i64 = 0
 // Set when the pool fills. Interning then returns 0 (the empty name), which is
 // wrong but VISIBLE — ir_name_pool_overflowed() lets a driver refuse rather
@@ -3871,6 +3892,24 @@ var IR_NAME_POOL_OVERFLOW: bool = false
 
 pub fn ir_name_pool_count() -> i64 {
     IR_NAME_POOL_COUNT
+}
+
+// TEST-ONLY soft limit on the id cap. 0 (the BSS default) means "use
+// IR_NAME_POOL_MAX"; a positive value lowers the cap to min(limit, MAX) so a
+// gate can force the overflow refusal with a tiny program instead of a real
+// >262144-distinct-name one. The driver sets it from SOUNIO_IR_NAME_POOL_LIMIT.
+var IR_NAME_POOL_LIMIT: i64 = 0
+
+pub fn ir_name_pool_set_limit(n: i64) with Mut {
+    IR_NAME_POOL_LIMIT = n
+}
+
+// Effective id cap: min(IR_NAME_POOL_LIMIT, IR_NAME_POOL_MAX) when a limit is set.
+pub fn ir_name_pool_cap() -> i64 with Mut {
+    if IR_NAME_POOL_LIMIT > 0 && IR_NAME_POOL_LIMIT < IR_NAME_POOL_MAX {
+        return IR_NAME_POOL_LIMIT
+    }
+    IR_NAME_POOL_MAX
 }
 
 pub fn ir_name_pool_overflowed() -> bool {
@@ -3883,9 +3922,9 @@ pub fn ir_name_pool_overflowed() -> bool {
 // thousand. A linear scan would be the product of those two numbers, so the
 // index is not an optimisation, it is what makes interning affordable at all.
 // Twice the pool size keeps the load factor at 50%.
-let IR_NAME_SLOTS: i64 = 131072
+let IR_NAME_SLOTS: i64 = 524288
 
-var IR_NAME_INDEX: [i64; 131072]
+var IR_NAME_INDEX: [i64; 524288]
 
 fn ir_name_hash(n: Name) -> i64 with Mut, Panic, Div {
     var h: i64 = 5381
@@ -3908,7 +3947,14 @@ pub fn ir_intern_name(n: Name) -> i64 with Mut, Panic, Div {
     while probes < IR_NAME_SLOTS {
         let id = IR_NAME_INDEX[slot as usize]
         if id == 0 {
-            if IR_NAME_POOL_COUNT >= IR_NAME_POOL_MAX {
+            if IR_NAME_POOL_COUNT >= ir_name_pool_cap() {
+                IR_NAME_POOL_OVERFLOW = true
+                return 0
+            }
+            // Byte pool full: refuse BEFORE touching any state, so a failed
+            // intern leaves the pool exactly as it was.
+            let stored_len = if n.len < 384 { n.len } else { 384 }
+            if IR_NAME_POOL_BYTES_USED + stored_len > 25165824 {
                 IR_NAME_POOL_OVERFLOW = true
                 return 0
             }
@@ -3933,25 +3979,33 @@ pub fn ir_intern_name(n: Name) -> i64 with Mut, Panic, Div {
 // id -> Name. Out of range reads as the empty name rather than trapping: an id
 // that escaped its pool is a bug, but blanking one symbol is survivable where a
 // panic in the middle of codegen is not.
+// Appends the name's bytes at the bump cursor and records (offset, length) for
+// the id. The caller has already checked that the bytes fit. Names longer than a
+// Name's 384-byte buffer cannot exist, but the length is clamped to 384 anyway
+// so the stored length always equals the number of bytes written.
 fn ir_name_pool_store(id: i64, n: Name) with Mut, Panic, Div {
-    let base = (id - 1) * 384
+    let nlen = if n.len < 384 { n.len } else { 384 }
+    let base = IR_NAME_POOL_BYTES_USED
     var i: i64 = 0
-    while i < n.len && i < 384 {
+    while i < nlen {
         IR_NAME_POOL_BUF[(base + i) as usize] = n.buf[i as usize]
         i = i + 1
     }
-    IR_NAME_POOL_LEN[(id - 1) as usize] = n.len
+    IR_NAME_POOL_OFF[(id - 1) as usize] = base
+    IR_NAME_POOL_LEN[(id - 1) as usize] = nlen
+    IR_NAME_POOL_BYTES_USED = base + nlen
 }
 
 // Compare without materialising the pooled Name: this runs on every probe of
 // every intern, which is the hot path of the whole pass.
 fn ir_name_pool_eq(id: i64, n: Name) -> bool with Mut, Panic, Div {
-    if IR_NAME_POOL_LEN[(id - 1) as usize] != n.len {
+    let nlen = if n.len < 384 { n.len } else { 384 }
+    if IR_NAME_POOL_LEN[(id - 1) as usize] != nlen {
         return false
     }
-    let base = (id - 1) * 384
+    let base = IR_NAME_POOL_OFF[(id - 1) as usize]
     var i: i64 = 0
-    while i < n.len && i < 384 {
+    while i < nlen {
         if IR_NAME_POOL_BUF[(base + i) as usize] != n.buf[i as usize] {
             return false
         }
@@ -3965,7 +4019,7 @@ pub fn ir_name_at(id: i64) -> Name with Mut, Panic, Div {
         return ir_empty_name()
     }
     var out = ir_empty_name()
-    let base = (id - 1) * 384
+    let base = IR_NAME_POOL_OFF[(id - 1) as usize]
     let n = IR_NAME_POOL_LEN[(id - 1) as usize]
     var i: i64 = 0
     while i < n && i < 384 {
