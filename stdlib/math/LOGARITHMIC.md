@@ -149,3 +149,21 @@ concordance, ULP/error characterization, boundary coverage, prior-consumer corpu
 and repository CI/merge remain pending. No correct-rounding, uniform ULP accuracy,
 formal proof, universal representability or comparative performance claim follows
 from the series length, successful typechecks or visible demonstrations.
+
+## Reusable checked results
+
+`math::pure::ln_checked_into` and this module's `log1p_checked_into`,
+`log1pmx_checked_into` and `log1p_phi_checked_into` accept one caller-owned
+`CheckedLog` and return its scalar status. Construct the slot once outside a
+row/iteration loop. Every call replaces both status and value; failures leave
+the corresponding unavailable status and positive-zero placeholder, including
+failures after a successful nested logarithm. Tiny log1p inputs preserve their
+signed zero; the quadratic kernels retain their documented positive-zero
+normalization. The algorithms, domains and status values match the by-value
+APIs, which remain as adapters owning one fresh result per invocation.
+
+The into call chain uses primitive temporaries and borrowed storage. This is
+a source property of these entrypoints, not a universal allocator or IEEE
+accuracy guarantee. The native slot fixture and independent direct-identity
+C++23 reference check selected values, raw bits, stale-state handling and
+repeated-call behavior. Resource claims require a separate execution receipt.

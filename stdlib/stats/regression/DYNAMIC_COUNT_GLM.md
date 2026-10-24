@@ -196,3 +196,17 @@ In the integrated full2 run (Slurm16139), this module's selected native fixture 
 The coordinator corrected that fixture contract and the focused slots_final rerun (Slurm16144) returned0 for its native slot program and independent analytic comparison. The retained million-draw PTRS reference/control also reported success with exact state/counter checks. These are compatibility and selected correctness observations, not a measured speed/RSS improvement, a universal error bound or a finite-sample calibration result. The final exact-index integration/CI gate remains separate.
 
 The consumer now creates one Nb2DevianceSlot per fit outside all evaluation/iteration loops. Row evaluations read scalar status/deviance getters; the numerical buffer workspace query and public fit signature are unchanged.
+
+## Reusable scalar intermediates
+
+Each fit retains one scalar dot-product slot and one balanced-product slot
+outside its row, iteration and local-gain loops. Conditional weights are
+scalar values with an internal failure sentinel; matrix reads after full
+input validation use the checked scalar accessor. The public fit signature,
+workspace query, arithmetic order and convergence controls are unchanged.
+
+Balanced products normalize six primitive mantissa/exponent pairs. Checked
+logarithms and NB2 private scratch use reusable slots through their hot call
+chains. This removes those per-observation result constructions; it does not
+claim the entire runtime or every public compatibility wrapper is allocation
+free. Native output concordance and measured RSS remain separate evidence.

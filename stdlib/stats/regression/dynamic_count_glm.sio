@@ -4,7 +4,7 @@
 use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_get,numeric_matrix_at}
 use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
 use linalg::dynamic_least_squares::{dynamic_qr_workspace,dynamic_qr_least_squares}
-use linalg::least_squares_scale::{least_squares_restore,least_squares_scaled_product}
+use linalg::least_squares_scale::{LeastSquaresNumber,least_squares_restore,least_squares_scaled_product_into}
 use stats::regression::nb2_deviance::{Nb2DevianceSlot,nb2_deviance_slot,nb2_deviance_into,nb2_deviance_slot_deviance_status,nb2_deviance_slot_deviance}
 use math::pure::{is_finite,exp,sqrt}
 pub struct DynamicCountWorkspace {
@@ -47,16 +47,18 @@ fn dc_empty(status:i64,n:i64,p:i64)->DynamicCountFit {
  deviance_status:2,score_norm:0.0,step_norm:0.0,rcond_used:0.0,
  workspace_elements:0,assumptions_assessed:false,inference_status:1}
 }
-fn dc_weight(mu:f64,alpha:f64)->DCNumber with Mut,Div,Panic {
+fn dc_weight(mu:f64,alpha:f64)->f64 with Mut,Div,Panic {
  var value=mu
  if alpha>0.0 {
   if mu>=1.0 {value=1.0/(alpha+1.0/mu)} else {value=mu/(1.0+alpha*mu)}
  }
- if !is_finite(value) || value<=0.0 {return DCNumber{status:4,value:0.0}}
- DCNumber{status:0,value:value}
+ if !is_finite(value) || value<=0.0 {return -1.0}
+ value
 }
-fn dc_dot(a:&NumericBuffer,layout:&NumericMatrix,beta:&NumericBuffer,
- beta_offset:i64,row:i64,p:i64)->DCNumber with Mut,Div,Panic {
+fn dc_dot_into(a:&NumericBuffer,layout:&NumericMatrix,beta:&NumericBuffer,
+ beta_offset:i64,row:i64,p:i64,out:&!DCNumber)->i64 with Mut,Div,Panic {
+ out.status=4
+ out.value=0.0
  var sum:f64=0.0
  var correction:f64=0.0
  var j:i64=0
@@ -64,26 +66,29 @@ fn dc_dot(a:&NumericBuffer,layout:&NumericMatrix,beta:&NumericBuffer,
   let entry=numeric_matrix_at(a,layout,row,j)
   let coefficient=numeric_buffer_at(beta,beta_offset+j)
   let term=entry*coefficient
-  if !is_finite(term) {return DCNumber{status:4,value:0.0}}
+  if !is_finite(term) {return 4}
   let adjusted=term-correction
   let next=sum+adjusted
   correction=(next-sum)-adjusted
   sum=next
   j=j+1
  }
- if !is_finite(sum) {return DCNumber{status:4,value:0.0}}
- DCNumber{status:0,value:sum}
+ if !is_finite(sum) {return 4}
+ out.status=0
+ out.value=sum
+ 0
 }
 fn dc_evaluate(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
  offsets:&NumericBuffer,stage:&!NumericBuffer,beta_offset:i64,
- mean_offset:i64,eta_offset:i64,n:i64,p:i64,alpha:f64,dev_work:&!Nb2DevianceSlot)->DCEvaluation with Mut,Div,Panic {
+ mean_offset:i64,eta_offset:i64,n:i64,p:i64,alpha:f64,dev_work:&!Nb2DevianceSlot,dot_work:&!DCNumber)->DCEvaluation with Mut,Div,Panic {
  var objective:f64=0.0
  var correction:f64=0.0
  var i:i64=0
  while i<n {
-  let fitted=dc_dot(a,layout,stage,beta_offset,i,p)
-  if fitted.status!=0 {return DCEvaluation{status:4,objective:0.0}}
-  let eta=fitted.value+numeric_buffer_at(offsets,i)
+  let fitted_status=dc_dot_into(a,layout,stage,beta_offset,i,p,dot_work)
+  if fitted_status!=0 {return DCEvaluation{status:4,objective:0.0}}
+  let fitted_value:f64=dot_work.value
+  let eta=fitted_value+numeric_buffer_at(offsets,i)
   if !is_finite(eta) {return DCEvaluation{status:4,objective:0.0}}
   let mu=exp(eta)
   if !is_finite(mu) || mu<=0.0 {return DCEvaluation{status:4,objective:0.0}}
@@ -112,7 +117,7 @@ fn dc_evaluate(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
 // d(ell)/dd=(s-W*d)/((1+d)*(1+q*d)), s=((y-mu)/mu)*W.
 // Integrating the compensated geometric series avoids cancellation at q~1.
 fn dc_local_loglik_gain(counts:&IntegerBuffer,stage:&NumericBuffer,
- current_start:i64,trial_start:i64,n:i64,alpha:f64)->DCEvaluation with Mut,Div,Panic {
+ current_start:i64,trial_start:i64,n:i64,alpha:f64,product_work:&!LeastSquaresNumber)->DCEvaluation with Mut,Div,Panic {
  var gain:f64=0.0
  var correction:f64=0.0
  var i:i64=0
@@ -126,7 +131,7 @@ fn dc_local_loglik_gain(counts:&IntegerBuffer,stage:&NumericBuffer,
    if dc_abs(d)>0.25 {return DCEvaluation{status:1,objective:0.0}}
    if d==0.0 {return DCEvaluation{status:4,objective:0.0}}
    let weight=dc_weight(mu,alpha)
-   if weight.status!=0 {return DCEvaluation{status:4,objective:0.0}}
+   if weight<0.0 {return DCEvaluation{status:4,objective:0.0}}
    var q:f64=0.0
    if alpha>0.0 {
     if mu>=1.0 {q=alpha/(alpha+1.0/mu)} else {
@@ -160,16 +165,18 @@ fn dc_local_loglik_gain(counts:&IntegerBuffer,stage:&NumericBuffer,
    let absolute_d=dc_abs(d)
    // |d|*A and |d|*B are bounded local coefficients; keep W and mu
    // separate in the balanced products to retain extreme conditional weights.
-   let first=least_squares_scaled_product(delta,weight.value,absolute_d*a,mu,1.0,1.0)
-   let second=least_squares_scaled_product(weight.value,absolute_d,absolute_d*b,1.0,1.0,1.0)
-   if first.status!=0 || second.status!=0 {return DCEvaluation{status:4,objective:0.0}}
-   if delta!=0.0 {if first.value==0.0 {return DCEvaluation{status:4,objective:0.0}}}
-   if second.value==0.0 {return DCEvaluation{status:4,objective:0.0}}
-   var signed_first=first.value
+   let first_status=least_squares_scaled_product_into(delta,weight,absolute_d*a,mu,1.0,1.0,product_work)
+   let first_value:f64=product_work.value
+   let second_status=least_squares_scaled_product_into(weight,absolute_d,absolute_d*b,1.0,1.0,1.0,product_work)
+   let second_value:f64=product_work.value
+   if first_status!=0 || second_status!=0 {return DCEvaluation{status:4,objective:0.0}}
+   if delta!=0.0 {if first_value==0.0 {return DCEvaluation{status:4,objective:0.0}}}
+   if second_value==0.0 {return DCEvaluation{status:4,objective:0.0}}
+   var signed_first=first_value
    if d<0.0 {signed_first= -signed_first}
-   let contribution=(signed_first-second.value)/(n as f64)
+   let contribution=(signed_first-second_value)/(n as f64)
    if !is_finite(contribution) {return DCEvaluation{status:4,objective:0.0}}
-   if signed_first!=second.value {if contribution==0.0 {return DCEvaluation{status:4,objective:0.0}}}
+   if signed_first!=second_value {if contribution==0.0 {return DCEvaluation{status:4,objective:0.0}}}
    let adjusted=contribution-correction
    let next=gain+adjusted
    correction=(next-gain)-adjusted
@@ -291,7 +298,9 @@ pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerB
   j=j+1
  }
  var dev_work=nb2_deviance_slot()
- var current=dc_evaluate(a,layout,counts,log_offsets,stage,0,current_mean,current_eta,n,p,alpha,&!dev_work)
+ var dot_work=DCNumber{status:4,value:0.0}
+ var product_work=LeastSquaresNumber{status:4,value:0.0}
+ var current=dc_evaluate(a,layout,counts,log_offsets,stage,0,current_mean,current_eta,n,p,alpha,&!dev_work,&!dot_work)
  if current.status!=0 {return dc_empty(4,n,p)}
  let normalized_layout=numeric_matrix(plan.design_elements,n,p,p,1,0)
  var iteration:i64=0
@@ -308,8 +317,8 @@ pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerB
    numeric_buffer_set(response,i,working)
    if dc_abs(working)>response_scale {response_scale=dc_abs(working)}
    let weight=dc_weight(mu,alpha)
-   if weight.status!=0 {return dc_empty(4,n,p)}
-   if weight.value>weight_scale {weight_scale=weight.value}
+   if weight<0.0 {return dc_empty(4,n,p)}
+   if weight>weight_scale {weight_scale=weight}
    i=i+1
   }
   if response_scale==0.0 {response_scale=1.0}
@@ -326,8 +335,9 @@ pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerB
     let delta=(integer_buffer_at(counts,i) as f64)-mu
     let working=numeric_buffer_at(response,i)
     let weight=dc_weight(mu,alpha)
+    if weight<0.0 {return dc_empty(4,n,p)}
     var score_residual=delta
-    if alpha>0.0 {score_residual=working*weight.value}
+    if alpha>0.0 {score_residual=working*weight}
     if !is_finite(score_residual) {return dc_empty(4,n,p)}
     if delta!=0.0 {if score_residual==0.0 {return dc_empty(4,n,p)}}
     let entry=numeric_matrix_at(a,layout,i,j)
@@ -352,7 +362,8 @@ pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerB
   while i<n {
    let mu=numeric_buffer_at(stage,current_mean+i)
    let weight=dc_weight(mu,alpha)
-   let factor=sqrt(weight.value)/root_weight
+   if weight<0.0 {return dc_empty(4,n,p)}
+   let factor=sqrt(weight)/root_weight
    if !is_finite(factor) || factor<=0.0 || factor>1.0 {return dc_empty(4,n,p)}
    let raw=numeric_buffer_at(response,i)
    let coordinate=raw/response_scale
@@ -390,11 +401,12 @@ pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerB
   var full_step:f64=0.0
   i=0
   while i<n {
-   let movement=dc_dot(a,layout,step,0,i,p)
-   if movement.status!=0 {return dc_empty(4,n,p)}
-   let scaled=dc_abs(movement.value)/(1.0+dc_abs(numeric_buffer_at(stage,current_eta+i)))
+   let movement_status=dc_dot_into(a,layout,step,0,i,p,&!dot_work)
+   if movement_status!=0 {return dc_empty(4,n,p)}
+   let movement_value:f64=dot_work.value
+   let scaled=dc_abs(movement_value)/(1.0+dc_abs(numeric_buffer_at(stage,current_eta+i)))
    if !is_finite(scaled) {return dc_empty(4,n,p)}
-   if movement.value!=0.0 {if scaled==0.0 {return dc_empty(4,n,p)}}
+   if movement_value!=0.0 {if scaled==0.0 {return dc_empty(4,n,p)}}
    if scaled>full_step {full_step=scaled}
    i=i+1
   }
@@ -437,9 +449,9 @@ pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerB
     numeric_buffer_set(stage,p+j,current_coefficient+fraction*increment_value)
     j=j+1
    }
-   let trial=dc_evaluate(a,layout,counts,log_offsets,stage,p,trial_mean,trial_eta,n,p,alpha,&!dev_work)
+   let trial=dc_evaluate(a,layout,counts,log_offsets,stage,p,trial_mean,trial_eta,n,p,alpha,&!dev_work,&!dot_work)
    if trial.status==0 {
-    let local_gain=dc_local_loglik_gain(counts,stage,current_mean,trial_mean,n,alpha)
+    let local_gain=dc_local_loglik_gain(counts,stage,current_mean,trial_mean,n,alpha,&!product_work)
     if local_gain.status==4 {return dc_empty(4,n,p)}
     var improves=trial.objective<=current.objective
     if local_gain.status==0 {improves=local_gain.objective>=0.0}

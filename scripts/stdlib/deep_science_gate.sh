@@ -110,6 +110,12 @@ for src in tests/reference/deep_*.cpp; do
           [[ "$rc" == "$expected" ]] || verified=1
           record oracle-control "$stem:$mode:expected=$expected:actual=$rc" "$verified"
         done ;;
+      deep_checked_log_slots_reference)
+        compare "$stem" stdlib_deep_checked_log_slots
+        rc=0
+        timeout 180 "$out/$stem" --conversion-selftest > "$out/$stem.conversion-selftest.stdout" 2> "$out/$stem.conversion-selftest.stderr" || rc=$?
+        record cpp-controls "$stem:conversion-selftest" "$rc" ;;
+      deep_poisson_zero_likelihood_reference) compare "$stem" stdlib_deep_poisson_zero_likelihood ;;
       deep_stats_count_profile_bootstrap_reference)
         compare "$stem" stdlib_deep_stats_count_profile_bootstrap
         rc=0
