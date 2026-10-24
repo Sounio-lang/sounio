@@ -210,6 +210,11 @@ for stem in count_dispersion_increment_reference count_profile_lr_fixed_referenc
  fi
 done
 
+# GUM Type-A sample-mean uncertainty: public consumer + C++23 concordance.
+rc=0
+bash tests/stdlib/metrology/type_a_gate.sh "$out/metrology-type-a" > "$out/metrology-type-a.stdout" 2> "$out/metrology-type-a.stderr" || rc=$?
+record focused-gate metrology-type-a "$rc"
+
 # Canonical bitmap data and actual native raster orientation, including clipping.
 native tests/run-pass/display_font_orientation.sio display_font_orientation
 rc=0
