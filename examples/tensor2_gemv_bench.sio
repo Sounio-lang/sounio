@@ -1,0 +1,78 @@
+//@ run-pass
+//
+// Micro-bench: ck_gemv vs ck_gemm (m=1) on the two decode-critical
+// shapes (lm_head 576x49152, gate 576x1536), plus a full-layer-shaped
+// projection (576x576). No wall clock in Sounio: time externally and
+// divide by reps. Checksums printed so the work cannot be elided.
+// Usage: tensor2_gemv_bench [reps]
+// Modules: stdlib/tensor2/cpu_kernel.sio
+
+use tensor2::cpu_kernel::{ck_alloc, ck_fill_pattern, ck_gemm, ck_gemv, ck_get}
+
+fn atoi(s: string) -> i64 {
+    var v: i64 = 0
+    var i: i64 = 0
+    while i < str_len(s) {
+        let c = str_char_at(s, i)
+        if c >= 48 && c <= 57 { v = v * 10 + (c - 48) }
+        i = i + 1
+    }
+    v
+}
+
+fn bench_shape(k: i64, n: i64, reps: i64, label: string) with IO, Mut, Panic, Div, Alloc {
+    var w = ck_alloc(k * n)
+    ck_fill_pattern(&!w)
+    var x = ck_alloc(k)
+    ck_fill_pattern(&!x)
+    var y = ck_alloc(n)
+    var y2 = ck_alloc(n)
+    // numeric cross-check first
+    ck_gemv(&w, &x, &!y, k, n)
+    ck_gemm(&x, &w, &!y2, 1, n, k)
+    var md = 0.0
+    var i: i64 = 0
+    while i < n {
+        var d = ck_get(&y, i) - ck_get(&y2, i)
+        if d < 0.0 { d = 0.0 - d }
+        if d > md { md = d }
+        i = i + 1
+    }
+    var r: i64 = 0
+    var acc = 0.0
+    while r < reps {
+        ck_gemv(&w, &x, &!y, k, n)
+        acc = acc + ck_get(&y, r % n)
+        r = r + 1
+    }
+    print(label)
+    print(" gemv done maxdiff(x1e9)=")
+    print_int((md * 1000000000.0) as i64)
+    print(" acc=")
+    print_int((acc * 1000.0) as i64)
+    print("\n")
+    r = 0
+    acc = 0.0
+    while r < reps {
+        ck_gemm(&x, &w, &!y2, 1, n, k)
+        acc = acc + ck_get(&y2, r % n)
+        r = r + 1
+    }
+    print(label)
+    print(" gemm done acc=")
+    print_int((acc * 1000.0) as i64)
+    print("\n")
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var reps: i64 = 100
+    if arg_count() > 0 { reps = atoi(get_arg(0)) }
+    print("GEMV BENCH reps=")
+    print_int(reps)
+    print("\n")
+    bench_shape(576, 49152, reps, "lm_head 576x49152")
+    bench_shape(576, 1536, reps * 10, "gate 576x1536")
+    bench_shape(576, 576, reps * 10, "qproj 576x576")
+    print("GEMV BENCH DONE\n")
+    exit(0)
+}

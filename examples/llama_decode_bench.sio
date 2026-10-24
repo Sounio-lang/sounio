@@ -1,0 +1,63 @@
+//@ run-pass
+//
+// Decode bench: fixed prompt ids (BOS + "The capital of France is"),
+// fixed greedy step count. No wall clock in Sounio - time the process
+// externally; load time is identical before/after, the delta is the
+// decode path. Prints the generated ids so a fast-but-wrong kernel
+// cannot hide.
+// Usage: llama_decode_bench [model-dir] [nsteps]
+// Modules: stdlib/llm/{llama,bpe}.sio
+
+use llm::llama::{kv_new, llama_argmax, llama_forward, llama_load}
+use tensor2::cpu_kernel::{ck_alloc, ck_set}
+
+fn atoi(s: string) -> i64 {
+    var v: i64 = 0
+    var i: i64 = 0
+    while i < str_len(s) {
+        let c = str_char_at(s, i)
+        if c >= 48 && c <= 57 { v = v * 10 + (c - 48) }
+        i = i + 1
+    }
+    v
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var dir = "/workspace/llm-models/SmolLM2-135M"
+    if arg_count() > 0 { dir = get_arg(0) }
+    var nsteps: i64 = 48
+    if arg_count() > 1 { nsteps = atoi(get_arg(1)) }
+
+    let m = llama_load(dir)
+    if !m.loaded { print("BENCH FAIL load\n"); exit(1) }
+    print("BENCH loaded\n")
+
+    var ids = ck_alloc(6)
+    ck_set(&!ids, 0, 0.0)
+    ck_set(&!ids, 1, 504.0)
+    ck_set(&!ids, 2, 3575.0)
+    ck_set(&!ids, 3, 282.0)
+    ck_set(&!ids, 4, 4649.0)
+    ck_set(&!ids, 5, 314.0)
+
+    var kv = kv_new(&m, 512)
+    var logits = llama_forward(&m, &!kv, &ids, 6)
+    print("BENCH prefill-done first-argmax=")
+    print_int(llama_argmax(&logits))
+    print("\n")
+
+    var g: i64 = 0
+    while g < nsteps {
+        let nxt = llama_argmax(&logits)
+        print_int(nxt)
+        print(" ")
+        var one = ck_alloc(1)
+        ck_set(&!one, 0, nxt as f64)
+        logits = llama_forward(&m, &!kv, &one, 1)
+        g = g + 1
+    }
+    print("\nBENCH DONE steps=")
+    print_int(nsteps)
+    print("\n")
+    exit(0)
+}

@@ -477,3 +477,43 @@ Servidor de pé em tmux `llm-serve` no workspace
 
 Aberto: sampling temperatura/top-p, GEMV m=1, decode via runtime
 GPU no serve, carga rápida, streaming SSE.
+
+## 16. GEMV m=1 para o decode — e o teto medido da codegen (2026-10-24, OBSERVED)
+
+`ck_gemv` (tensor2/cpu_kernel) ataca a forma do decode (m=1) sobre o
+layout transposto das projeções (`y[j] = sum_i x[i] * w[i*n+j]`):
+blocos de 8 colunas acumulam em locais sobre toda a contração e `y` é
+escrito uma vez — o `ck_gemm` m=1 fazia read-modify-write de `y` a
+cada `i` (3 acessos/MAC contra ~1). Roteado em `ll_proj` quando
+`rows == 1` e na projeção `lm_head`; formas largas seguem no GEMM de
+referência. Benchmarks: `examples/llama_decode_bench.sio` (decode
+greedy de contagem fixa, tempo externo) e
+`examples/tensor2_gemv_bench.sio` (shapes isolados).
+
+Provado, com números:
+
+- **Correção**: `ck_gemv` vs `ck_gemm` bit-exato (`max_diff = 0`) nos
+  shapes 576×49152 (lm_head), 576×1536 (gate) e 576×576 (qproj) —
+  mesma ordem de acumulação por coluna. Sequência greedy de 24 tokens
+  no modelo real idêntica antes/depois; `llama_smol_demo` PASS com
+  kv-vs-prefill `max_diff = 0`.
+- **Velocidade**: decode de 24 tokens (SmolLM2-135M, mesma máquina e
+  binário de bench): 336 s → 269/274 s de parede total; descontada a
+  carga (~68 s, idêntica), ≈11,2 → ≈8,5 s/token, **~1,3×**. Ganho
+  real, mas muito abaixo do que a redução de acessos sugeria — e a
+  causa foi medida, não chutada:
+- **O teto é da codegen, não do algoritmo.** Micro-bench isolado:
+  soma sequencial pura de 850M de `read_f64` levou 27,7 s de CPU
+  (~30M iterações/s); o padrão RMW do GEMM roda a ~24M MAC/s. Um loop
+  escalar f64 gerado pelo Madaros atual custa ~30 ns por iteração —
+  duas ordens de magnitude acima do custo de memória. Enquanto
+  `read_f64`/`write_f64` forem o único acesso (indexação direta de
+  ponteiro não typecheca) e a codegen não vetorizar, **nenhum kernel
+  CPU em Sounio passa de ~0,1 GFLOP/s**, qualquer que seja o shape do
+  loop. O próximo salto de decode é GPU (`llama_forward_rt` no serve)
+  ou codegen — registrado como insumo para as sessões do compilador,
+  não como defeito deste kernel.
+
+Aberto (inalterado): sampling, decode GPU no serve, carga rápida,
+SSE, KV paginado. O `llm serve` segue greedy sobre o caminho CPU —
+agora ~1,3× menos lento, com a lentidão restante atribuída e medida.

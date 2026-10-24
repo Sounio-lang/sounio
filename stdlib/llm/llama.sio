@@ -18,7 +18,7 @@
 // these same functions, not a new forward.
 
 use llm::safetensors::{StFile, st_find, st_load_f64, st_read_all, st_scan_bool, st_scan_f64, st_scan_i64}
-use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_gemm, ck_get, ck_set}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_gemm, ck_gemv, ck_get, ck_set}
 use math::pure::{cos, exp, pow, sin, sqrt}
 use hetero::cuda_exec::{CudaExec}
 use hetero::runtime::{Runtime, rt_gemm_rect}
@@ -269,11 +269,21 @@ fn ll_proj(rt: &Runtime, use_gpu: bool, x: &CpuBuf, w: &CpuBuf, out: &!CpuBuf, r
     if use_gpu && rt.ready {
         let r = rt_gemm_rect(rt, x, w, out, rows, outd, ind, rows)
         if r.status == 0 { return 0 }
-        ck_gemm(x, w, out, rows, outd, ind)
+        ll_cpu_proj(x, w, out, rows, outd, ind)
         return r.status
     }
-    ck_gemm(x, w, out, rows, outd, ind)
+    ll_cpu_proj(x, w, out, rows, outd, ind)
     0
+}
+
+// CPU projection arithmetic: the m=1 (decode) shape goes through the
+// dedicated GEMV; anything wider keeps the reference GEMM.
+fn ll_cpu_proj(x: &CpuBuf, w: &CpuBuf, out: &!CpuBuf, rows: i64, outd: i64, ind: i64) with Mut {
+    if rows == 1 {
+        ck_gemv(w, x, out, ind, outd)
+    } else {
+        ck_gemm(x, w, out, rows, outd, ind)
+    }
 }
 
 // Forward `ntok` tokens (ids as f64 in `tokens`) appended at kv.len.
@@ -408,7 +418,7 @@ fn ll_forward_impl(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Ru
     }
     let ln = ll_rmsnorm(&last, &m.final_norm, 1, hidden, m.cfg.eps)
     var logits = ck_alloc(m.cfg.vocab)
-    ck_gemm(&ln, &m.lm_head_t, &!logits, 1, m.cfg.vocab, hidden)
+    ck_gemv(&m.lm_head_t, &ln, &!logits, hidden, m.cfg.vocab)
     logits
 }
 
