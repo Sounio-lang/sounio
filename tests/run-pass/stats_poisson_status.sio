@@ -1,0 +1,78 @@
+//@ run-pass
+//@ expect-stdout: STATS_POISSON_STATUS_PASS
+use stats::regression::poisson::{PoissonFit,poisson_fit_offset}
+fn cleared(r:&PoissonFit,status:i64) with Mut,Div,Panic {
+ assert(r.status==status)
+ assert(r.df==0)
+ assert(!r.poisson_assumptions_assessed)
+ assert(r.deviance==0.0 && r.score_norm==0.0 && r.step_norm==0.0)
+ var i=0
+ while i<8 { assert(r.coefficients[i as usize]==0.0) i=i+1 }
+ i=0
+ while i<256 { assert(r.means[i as usize]==0.0) assert(r.linear_predictors[i as usize]==0.0) i=i+1 }
+}
+fn main()->i32 with IO,Mut,Div,Panic {
+ var a:[f64;2048]=[0.0;2048]
+ var y:[i64;256]=[0;256]
+ var o:[f64;256]=[0.0;256]
+ let nan=0.0/0.0
+ let badsize=poisson_fit_offset(&a,&y,&o,0,1,nan,0,nan)
+ cleared(&badsize,1)
+ assert(badsize.n==0 && badsize.p==1)
+ let wide=poisson_fit_offset(&a,&y,&o,257,1,0.0,100,1.0e-10)
+ cleared(&wide,1)
+ let badp=poisson_fit_offset(&a,&y,&o,2,3,0.0,100,1.0e-10)
+ cleared(&badp,1)
+ let rcond=poisson_fit_offset(&a,&y,&o,2,1,1.0,100,1.0e-10)
+ cleared(&rcond,5)
+ let iterations=poisson_fit_offset(&a,&y,&o,2,1,0.0,101,1.0e-10)
+ cleared(&iterations,5)
+ let tol=poisson_fit_offset(&a,&y,&o,2,1,0.0,100,1.0e-15)
+ cleared(&tol,5)
+ let nantol=poisson_fit_offset(&a,&y,&o,2,1,0.0,100,nan)
+ cleared(&nantol,5)
+ a[0]=nan y[0]=-1
+ let finite=poisson_fit_offset(&a,&y,&o,2,1,0.0,100,1.0e-10)
+ cleared(&finite,2)
+ a[0]=1.0 a[8]=1.0 o[1]=nan
+ let offset=poisson_fit_offset(&a,&y,&o,2,1,0.0,100,1.0e-10)
+ cleared(&offset,2)
+ o[1]=0.0
+ let negative=poisson_fit_offset(&a,&y,&o,2,1,0.0,100,1.0e-10)
+ cleared(&negative,6)
+ y[0]=0
+ let boundary=poisson_fit_offset(&a,&y,&o,2,1,0.0,100,1.0e-10)
+ cleared(&boundary,8)
+ a[1]=1.0 a[9]=1.0
+ let rank=poisson_fit_offset(&a,&y,&o,2,2,0.0,100,1.0e-10)
+ cleared(&rank,3)
+ assert(rank.rank==1)
+ y[0]=1 y[1]=8
+ let limit=poisson_fit_offset(&a,&y,&o,2,1,0.0,1,1.0e-10)
+ cleared(&limit,7)
+ assert(limit.iterations==1)
+ // A tiny accepted line-search fraction is not an iteration-budget extension
+ // or a convergence certificate. Highly uneven counts demand damping.
+ y[0]=0 y[1]=1000000000000
+ let damped=poisson_fit_offset(&a,&y,&o,2,1,0.0,1,1.0e-12)
+ cleared(&damped,7)
+ assert(damped.iterations==1)
+ // Identical exposure and one intercept: offset cancellation yields eta~0,
+ // with no clipping even though each supplied offset is above exp's range.
+ y[0]=1 y[1]=1 o[0]=1000.0 o[1]=1000.0
+ let largeoffset=poisson_fit_offset(&a,&y,&o,2,1,0.0,100,1.0e-10)
+ assert(largeoffset.status==0)
+ assert(largeoffset.means[0]>0.0)
+ // Poison outside the active row/column prefix must not affect the fit.
+ o[0]=0.0 o[1]=0.0 o[2]=nan a[1]=nan a[16]=nan y[2]=-1
+ let inactive=poisson_fit_offset(&a,&y,&o,2,1,0.0,100,1.0e-10)
+ assert(inactive.status==0)
+ assert(inactive.df==1 && inactive.rank==1)
+ // Finite but unrepresentable initial predictor, with no intercept direction
+ // available to absorb the fixed offset, must report arithmetic failure.
+ a[0]=1.0 a[8]=-1.0 o[0]=1000.0 o[1]=1000.0
+ let range=poisson_fit_offset(&a,&y,&o,2,1,0.0,100,1.0e-10)
+ cleared(&range,4)
+ println("STATS_POISSON_STATUS_PASS")
+ 0
+}

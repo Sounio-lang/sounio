@@ -1,0 +1,208 @@
+// LaNi5 desorption, four isotherms. Source: Kral et al., METAL 2025,
+// Zenodo 10.5281/zenodo.15395389, sheet "van hof plot 600_X", columns
+// LaNi5 DES. The sheet stores 1000/T and ln(P/P0). Fitting that column
+// recovers Table 2 of the paper (33.5 kJ/mol, 135.9 J/mol/K). Pressure in
+// bar is exp(y)/10, which is how 0.69 MPa absorption at 323 K is stored.
+// This is not the Gkanas cascade and not the 30.8/108 box.
+//
+// rho(a, b) from the residual covariance must equal the temperature-only
+// formula. That identity is the clock for the correlation. The published
+// Table 2 numbers are the clock for enthalpy, entropy and their bars.
+// Model A drops the covariance. Model B keeps it. The Monte Carlo of the
+// same line is the clock for the pressure variance (ADR-009).
+
+// The line variance is the uncertainty of the fitted mean. A new isotherm
+// adds the residual. ols_predict_var is that sum. It is not the independent-bars variance.
+use epistemic::regression::{ols_line, gum_var, reg_sqrt, ols_mean_var, ols_predict_var}
+use epistemic::claim_meet::{claim_meet}
+
+var R_GAS: f64 = 8.314462618
+var LN10: f64 = 2.302585092994046
+var T_HOT: f64 = 353.15
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_init() with Mut {
+    RNG_A = 314159265
+    RNG_B = 271828182
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_uniform() -> f64 with Mut, Div {
+    let r = rng_next()
+    (r % 10000) as f64 / 10000.0
+}
+
+fn rand_normal() -> f64 with Mut, Div {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_uniform(); j = j + 1 }
+    sum - 6.0
+}
+
+
+fn sample_var(intercept: f64, slope: f64, sa: f64, sb: f64, rho: f64, scale: f64, s_res: f64, x: f64, n: i64) -> f64 with Mut, Div {
+    var k: i64 = 0
+    var sum_n = 0.0
+    var sumsq_n = 0.0
+    let nf = n as f64
+    while k < n {
+        let z1 = rand_normal()
+        let z2 = rand_normal()
+        let z3 = rand_normal()
+        let a = intercept + sa * z1
+        let b = slope + sb * (rho * z1 + scale * z2)
+        let y = a + b * x + s_res * z3
+        let sample = exp(y - LN10)
+        sum_n = sum_n + sample
+        sumsq_n = sumsq_n + sample * sample
+        k = k + 1
+    }
+    let mean = sum_n / nf
+    sumsq_n / nf - mean * mean
+}
+
+fn near(actual: f64, expected: f64, tol: f64) -> bool {
+    let d = actual - expected
+    if d < 0.0 { return (0.0 - d) < tol }
+    d < tol
+}
+
+fn design_rho(x0: f64, x1: f64, x2: f64, x3: f64) -> f64 with Mut, Div {
+    let xb = (x0 + x1 + x2 + x3) / 4.0
+    let d0 = x0 - xb
+    let d1 = x1 - xb
+    let d2 = x2 - xb
+    let d3 = x3 - xb
+    let sxx = d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3
+    0.0 - xb / reg_sqrt(sxx / 4.0 + xb * xb)
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    var xs: [f64; 8] = [0.0; 8]
+    var ys: [f64; 8] = [0.0; 8]
+    xs[0] = 1.0 / 308.0
+    xs[1] = 1.0 / 323.0
+    xs[2] = 1.0 / 333.0
+    xs[3] = 1.0 / 343.0
+    ys[0] = 3.244933551495201
+    ys[1] = 3.9088103497550333
+    ys[2] = 4.2745529686763595
+    ys[3] = 4.571804492144291
+    let fit = ols_line(xs, ys, 4)
+    let rho_x = design_rho(xs[0], xs[1], xs[2], xs[3])
+    let d_h = 0.0 - R_GAS * fit.slope
+    let d_s = R_GAS * fit.intercept
+    let sig_h = R_GAS * reg_sqrt(fit.var_slope)
+    let sig_s = R_GAS * reg_sqrt(fit.var_intercept)
+    let x = 1.0 / T_HOT
+    let v_ln_ind = gum_var(1.0, x, fit.var_intercept, fit.var_slope, 0.0)
+    let v_ln_fit = gum_var(1.0, x, fit.var_intercept, fit.var_slope, fit.cov)
+    let v_ln_line = ols_mean_var(fit, x)
+    let v_ln_pred = ols_predict_var(fit, x)
+    let v_piv = ols_mean_var(fit, fit.xbar)
+    let u = fit.intercept + fit.slope * x - LN10
+    let p0 = exp(u)
+    let mean_ind = p0 * exp(0.5 * v_ln_ind)
+    let mean_fit = p0 * exp(0.5 * v_ln_fit)
+    let e_ind = exp(v_ln_ind)
+    let e_fit = exp(v_ln_fit)
+    let var_ind = p0 * p0 * e_ind * (e_ind - 1.0)
+    let var_fit = p0 * p0 * e_fit * (e_fit - 1.0)
+    let e_pred = exp(v_ln_pred)
+    let mean_pred = p0 * exp(0.5 * v_ln_pred)
+    let var_pred = p0 * p0 * e_pred * (e_pred - 1.0)
+    let meet = claim_meet(mean_ind, var_ind, mean_fit, var_fit)
+    let meet_obs = claim_meet(mean_fit, var_fit, mean_pred, var_pred)
+    rng_init()
+    let n: i64 = 4000
+    var i: i64 = 0
+    var sum = 0.0
+    var sumsq = 0.0
+    let sa = reg_sqrt(fit.var_intercept)
+    let sb = reg_sqrt(fit.var_slope)
+    var rho2 = fit.rho * fit.rho
+    if rho2 > 1.0 { rho2 = 1.0 }
+    let scale = reg_sqrt(1.0 - rho2)
+    while i < n {
+        let z1 = rand_normal()
+        let z2 = rand_normal()
+        let a = fit.intercept + sa * z1
+        let b = fit.slope + sb * (fit.rho * z1 + scale * z2)
+        let y = a + b * x
+        let sample = exp(y - LN10)
+        sum = sum + sample
+        sumsq = sumsq + sample * sample
+        i = i + 1
+    }
+    let mc_mean = sum / 4000.0
+    let mc_var = sumsq / 4000.0 - mc_mean * mc_mean
+    var gap_fit = mc_var - var_fit
+    var gap_ind = mc_var - var_ind
+    if gap_fit < 0.0 { gap_fit = 0.0 - gap_fit }
+    if gap_ind < 0.0 { gap_ind = 0.0 - gap_ind }
+    var move = var_ind - var_fit
+    if move < 0.0 { move = 0.0 - move }
+    let s_res = reg_sqrt(fit.s2)
+    let mc_new = sample_var(fit.intercept, fit.slope, sa, sb, fit.rho, scale, s_res, x, n)
+    var gap_new = mc_new - var_pred
+    var gap_new_line = mc_new - var_fit
+    if gap_new < 0.0 { gap_new = 0.0 - gap_new }
+    if gap_new_line < 0.0 { gap_new_line = 0.0 - gap_new_line }
+    var obs_move = var_pred - var_fit
+    if obs_move < 0.0 { obs_move = 0.0 - obs_move }
+    xs[0] = 0.0
+    ys[0] = 1.0
+    xs[1] = 1.0
+    ys[1] = 2.2
+    xs[2] = 2.0
+    ys[2] = 2.8
+    xs[3] = 3.0
+    ys[3] = 4.1
+    let g = ols_line(xs, ys, 4)
+    let g_gum = gum_var(1.0, 1.5, g.var_intercept, g.var_slope, g.cov)
+    let g_mean = ols_mean_var(g, 1.5)
+    let g_pred = ols_predict_var(g, 1.5)
+    print("dH ")
+    print_f64(d_h)
+    print(" dS ")
+    print_f64(d_s)
+    print(" rho ")
+    print_f64(0.0 - fit.rho)
+    print(" p ")
+    print_f64(p0)
+    print(" var_ind ")
+    print_f64(var_ind)
+    print(" line ")
+    print_f64(var_fit)
+    print(" pred ")
+    print_f64(var_pred)
+    print(" obs ")
+    print_f64(meet_obs.lo)
+    print(" .. ")
+    print_f64(meet_obs.hi)
+    print(" piv ")
+    print_f64(v_piv)
+    print(" shared ")
+    print_f64(meet.lo)
+    print(" .. ")
+    print_f64(meet.hi)
+    print("\n")
+    if near(d_h, 33500.0, 80.0) && near(d_s, 135.9, 0.15) && near(sig_h, 1355.0, 80.0) && near(sig_s, 4.16, 0.15) && near(fit.rho, rho_x, 0.000001) && (0.0 - fit.rho) > 0.99 && v_ln_fit * 20.0 < v_ln_ind && gap_fit < gap_ind && move > gap_fit && meet.shared && meet.excess > 1.0 && near(v_ln_line, v_ln_fit, 0.000000001) && near(v_piv, fit.s2 / fit.n, 0.000000001) && near(v_ln_pred, v_ln_line + fit.s2, 0.000000001) && gap_new < gap_new_line && obs_move > gap_new && meet_obs.shared && near(g_gum, g_mean, 0.000000001) && near(g_pred, g_mean + g.s2, 0.000000001) && g.s2 > 0.0 {
+        println("FIT_COVARIANCE_OK")
+        return 0
+    }
+    println("FIT_COVARIANCE_FAIL")
+    1
+}

@@ -2,7 +2,8 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/gate_artifact.sh"
 # RelocationTable capacity coherence.
 #
-# self-hosted/native/reloc.sio declares `entries: [Relocation; N]` and guards
+# self-hosted/native/reloc.sio declares the table storage (`entries: [Relocation; N]`,
+# or since the BSS move the parallel `NC_RELOC_*: [i64; N]` columns) and guards
 # every add_* with `count < reloc_table_capacity()`. Those two numbers are
 # written in different places and nothing in the language ties them together.
 #

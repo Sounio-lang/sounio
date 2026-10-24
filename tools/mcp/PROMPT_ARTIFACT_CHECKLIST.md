@@ -21,13 +21,13 @@ loops over stdio.
 | Resource pattern `sounio://errors/{error_code}` | `errors_catalog.py`, SDK resource read test, >=20 trace-backed entries | PASS |
 | Error catalogue does not invent codes | Unknown codes return "not promoted yet"; invalid codes return invalid-code doc | PASS |
 | Error -> Fix recipe | `tools/mcp/examples/llmloop_recipe.py`, 20 fixtures, pinned model and seed | PASS |
-| Benchmark >=80% convergence on 20 fixtures | `agent_logs/CC2_convergence.md`; latest focused pytest covers `>=0.8`, observed 20/20 | PASS |
+| Benchmark >=80% convergence on 20 fixtures | `artifacts/agent-logs/CC2_convergence.md`; latest focused pytest covers `>=0.8`, observed 20/20 | PASS |
 | Claude Code usage docs and subagent recipe | `tools/mcp/examples/claude_code_usage.md` | PASS |
 | Cursor rules file | `.cursor/rules/sounio.mdc` with glob, patterns, anti-patterns, planned docs link | PASS |
 | Root `CLAUDE.md` update | `CLAUDE.md` extended rather than replaced | PASS |
 | MCP Registry submission artefact | `tools/mcp/MCP_REGISTRY_PR_DRAFT.md` | PARTIAL: operator still needs to open external PR |
 | Q1 Python clean compile | `ruff check`, `mypy --strict` pass | PASS |
-| Q2 iterative convergence | `agent_logs/CC2_convergence.md` records 4 cycles | PASS |
+| Q2 iterative convergence | `artifacts/agent-logs/CC2_convergence.md` records 4 cycles | PASS |
 | Q3 adversarial self-critique | `tools/mcp/ADVERSARIAL_SELF_CRITIQUE.md` | PASS |
 | Q4 regression | `bash scripts/run_sio_test_suite.sh hello` passed 2/2 | PARTIAL: full `tests/run-pass` not run |
 | Q5 Sounio purity | `bin/souc check examples/hello.sio` and fixture benchmark | PASS |

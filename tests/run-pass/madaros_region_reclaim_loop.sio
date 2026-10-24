@@ -1,0 +1,46 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: REGION_RECLAIM_LOOP_OK
+//@ description: 3.6M RK2 steps build 14.4M >16 B structs; region reclamation keeps them under the 2^22 handle table
+// Before region reclamation every >16 B struct construction took a handle-table
+// slot for the life of the process, and this program died with
+// `madaros: handles full` (exit 182) after 2^22 / 4 steps. Here the garbage is
+// made inside `step` and `advance`, whose regions hand it back at return.
+// docs/audit/MADAROS_HANDLE_182_BBB_PER_CONSTRUCTION_DISPATCH_2026-09-26.md
+
+struct St { a: f64, b: f64, c: f64 }
+
+fn f(s: St) -> St { St { a: 0.0 - s.a, b: 0.0 - s.b, c: 0.0 - s.c } }
+
+fn axpy(x: St, y: St, h: f64) -> St { St { a: x.a + h * y.a, b: x.b + h * y.b, c: x.c + h * y.c } }
+
+fn step(s: St, h: f64) -> St {
+    let k1 = f(s)
+    let k2 = f(axpy(s, k1, 0.5 * h))
+    axpy(s, k2, h)
+}
+
+fn advance(s0: St, n: i64, h: f64) -> St with Mut {
+    var s = s0
+    var i: i64 = 0
+    while i < n {
+        s = step(s, h)
+        i = i + 1
+    }
+    s
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var s = St { a: 1.0, b: 2.0, c: 3.0 }
+    var k: i64 = 0
+    while k < 1200 {
+        s = advance(s, 3000, 0.000001)
+        k = k + 1
+    }
+    // dy/dt = -y over t = 3.6: y = y0 * exp(-3.6) = y0 * 0.0273237...
+    let ratio = s.a / 1.0
+    if ratio < 0.02732 || ratio > 0.02733 { return 1 }
+    if s.c / s.a < 2.9999 || s.c / s.a > 3.0001 { return 2 }
+    println("REGION_RECLAIM_LOOP_OK")
+    0
+}

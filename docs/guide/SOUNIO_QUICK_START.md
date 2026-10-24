@@ -2,8 +2,8 @@
 topic_id: repo.docs.guide.sounio-quick-start
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-quick-start
 -->
 
@@ -11,7 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-q
 
 > **Other guides**: [Scientists' Quick Start](../QUICK_START_GUIDE.md) | [General Getting Started](getting-started.md) | [Conservative contract](MINIMUM_VIABLE_SOUNIO.md)
 
-**TL;DR**: Sounio is NOT Rust. No semicolons. Effects required. `&!` not `&mut`. Study real `.sio` files.
+**TL;DR**: Sounio is NOT Rust. Effects are required. `&!` not `&mut`. `println` takes one argument. Study real `.sio` files. The committed prebuilt runs on Linux x86-64; Apple Silicon has a separate [native ARM64 route](../compiler/MADAROS_MACOS_ARM64.md).
 
 **Full syntax ref**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](LLM_PROGRAMMING_GUIDE.md)
 
@@ -21,7 +21,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-q
 |-------|------|--------|
 | Function | `fn add(a: i32) -> i32 { }` | `fn add(a: i32) -> i32 { }` |
 | Effects | N/A | `fn div(a: f64, b: f64) -> f64 with Div, Panic { a / b }` |
-| Variable | `let x = 5;` | `let x = 5` (no semicolon) |
+| Variable | `let x = 5;` | `let x = 5` (semicolon is accepted style, not a compile error) |
 | Mutable var | `let mut x = 5;` | `var x = 5` |
 | Arrays | `Vec<u8>` or `[u8; N]` | `[u8; N]` (fixed) + `Vec<i32>` (stdlib) |
 | Mutable ref | `&mut x` | `&!x` |
@@ -31,10 +31,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-q
 
 ## Must-Know Rules
 
-### 1. NO Semicolons
+### 1. Semicolons are style, not a compile error
 ```sio
-let x = 5        // ✅ correct
-// let x = 5;    // ❌ WRONG
+let x = 5        // preferred
+let y = 5;       // accepted. Measured 2026-08-20. Not a diagnostic.
 ```
 
 ### 2. Effects Are Required
@@ -51,16 +51,16 @@ var counter: i32 = 0
 increment(&!counter)
 ```
 
-### 4. No Unary Minus
+### 4. Unary Minus Works
 ```sio
-let neg = 0 - 42       // ✅ correct
-// let neg = -42        // ❌ WRONG
+let neg = -42          // ✅ works on literals, variables and arguments
+let flipped = -x       // ✅ no `0 - x` workaround needed
 ```
 
-### 5. Bit Shifts Use u8
+### 5. Bit Shifts Take a Plain Integer
 ```sio
-let shifted = byte >> 4u8     // ✅ correct
-// let shifted = byte >> 4    // ❌ WRONG
+let shifted = byte >> 4     // ✅ plain integer amount
+let masked = byte & 15
 ```
 
 ### 6. No Rust Macros
@@ -204,10 +204,8 @@ fill(&! buf)
 2. `&!` not `&mut`, `var` not `let mut`
 3. Effects declared (`with IO, Mut, Div, Panic`)
 4. No Rust macros — `assert()` not `assert!()`, `println()` not `println!()`
-5. No unary minus — `0 - x`
-6. Bit shifts use `u8` — `x >> 4u8`
-7. Array index cast — `arr[i as usize]`
-8. Named fn refs, not closure literals
+5. Array index cast — `arr[i as usize]`
+6. Named fn refs, not closure literals
 
 ## Real Sounio to Study
 

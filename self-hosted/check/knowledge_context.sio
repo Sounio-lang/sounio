@@ -2107,6 +2107,8 @@ pub fn knowledge_context_count_runtime_obligations_items(items: Option<Box<ItemL
 }
 
 pub struct KnowledgeRuntimeObligationDescriptor {
+    pub threshold_valid: bool,
+    pub threshold_kind: i64,
     pub found: bool,
     pub site_kind: i64,
     pub type_name: Name,
@@ -2121,6 +2123,8 @@ pub struct KnowledgeRuntimeObligationDescriptor {
 
 pub fn knowledge_context_empty_runtime_obligation_descriptor() -> KnowledgeRuntimeObligationDescriptor {
     KnowledgeRuntimeObligationDescriptor {
+        threshold_valid: false,
+        threshold_kind: 0,
         found: false,
         site_kind: 0,
         type_name: empty_name(),
@@ -2141,6 +2145,8 @@ pub fn knowledge_context_runtime_obligation_site_binding() -> i64 { 4 }
 
 fn knowledge_context_runtime_obligation_descriptor_from_constraint(site_kind: i64, inner_name: Name, constraint: KnowledgeConstraint, expr: Expr) -> KnowledgeRuntimeObligationDescriptor {
     KnowledgeRuntimeObligationDescriptor {
+        threshold_valid: false,
+        threshold_kind: 0,
         found: true,
         site_kind: site_kind,
         type_name: inner_name,
@@ -2488,8 +2494,82 @@ fn knowledge_context_first_runtime_obligation_from(root: Option<Box<ItemList> >,
     }
 }
 
+// GCD is restricted to positive registry scales, avoiding abs(i64::MIN).
+fn knowledge_context_scale_gcd(left: i64, right: i64) -> i64 with Mut, Div {
+    var a = left
+    var b = right
+    while b != 0 {
+        let remainder = a % b
+        a = b
+        b = remainder
+    }
+    a
+}
+
+// Enrich the obligation once the complete item/unit registry is available.
+// Numeric unit types in this frontend are f64. Integer fields retain i64;
+// no integer payload is reinterpreted as floating-point storage.
+fn knowledge_context_runtime_threshold(items: Option<Box<ItemList> >, input: KnowledgeRuntimeObligationDescriptor) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    var desc = input
+    if !desc.found { return desc }
+    let field_name = knowledge_context_find_struct_field_type(items, desc.type_name, desc.field_name)
+    let units = knowledge_context_collect_units(register_builtin_units(unit_registry_new()), items)
+    let field_unit_idx = units.find(field_name)
+    let float_field = ir_name_eq(field_name, make_name("f64")) || field_unit_idx >= 0
+    if desc.value_kind == KnowledgeConstraintValueKind::KnowledgeConstraintValueInt as i64 {
+        desc.threshold_kind = 1
+        if float_field {
+            // Large integers must not silently lose bits through f64 conversion.
+            if desc.int_value > 9007199254740992 || desc.int_value < -9007199254740992 { return desc }
+            desc.float_value = desc.int_value as f64
+            desc.threshold_kind = 2
+        }
+    } else if desc.value_kind == KnowledgeConstraintValueKind::KnowledgeConstraintValueFloat as i64 {
+        if !float_field { return desc }
+        desc.threshold_kind = 2
+    } else { return desc }
+    if desc.unit_name.len > 0 {
+        let target_idx = units.find(desc.unit_name)
+        if field_unit_idx < 0 || target_idx < 0 { return desc }
+        let field_dim = units.get_dim(field_unit_idx)
+        let target_dim = units.get_dim(target_idx)
+        if !unit_dim_compatible(field_dim, target_dim) { return desc }
+        if field_dim.scale_num <= 0 || field_dim.scale_den <= 0 || target_dim.scale_num <= 0 || target_dim.scale_den <= 0 { return desc }
+        // Cancel rational factors before entering f64; no i64 product can overflow.
+        var tn = target_dim.scale_num
+        var td = target_dim.scale_den
+        var field_num = field_dim.scale_num
+        var fd = field_dim.scale_den
+        let target_gcd = knowledge_context_scale_gcd(tn, td)
+        tn = tn / target_gcd
+        td = td / target_gcd
+        let field_gcd = knowledge_context_scale_gcd(field_num, fd)
+        field_num = field_num / field_gcd
+        fd = fd / field_gcd
+        let numer_gcd = knowledge_context_scale_gcd(tn, field_num)
+        tn = tn / numer_gcd
+        field_num = field_num / numer_gcd
+        let denom_gcd = knowledge_context_scale_gcd(fd, td)
+        fd = fd / denom_gcd
+        td = td / denom_gcd
+        // The f64 route requires exactly representable registry integer factors.
+        // Refuse an unsupported scale rather than silently changing its rational.
+        if tn > 9007199254740992 || field_num > 9007199254740992 || fd > 9007199254740992 || td > 9007199254740992 { return desc }
+        let ratio = (tn as f64 / field_num as f64) * (fd as f64 / td as f64)
+        desc.float_value = desc.float_value * ratio
+        desc.threshold_kind = 2
+    }
+    if desc.threshold_kind == 2 {
+        let bits = f64_to_bits(desc.float_value)
+        // Reject NaN/infinity rather than generating an ineffective comparison.
+        if ((bits >> 52) & 2047) == 2047 { return desc }
+    }
+    desc.threshold_valid = true
+    desc
+}
+
 pub fn knowledge_context_first_runtime_obligation_items(items: Option<Box<ItemList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
-    knowledge_context_first_runtime_obligation_from(items, items)
+    knowledge_context_runtime_threshold(items, knowledge_context_first_runtime_obligation_from(items, items))
 }
 
 fn knowledge_context_nth_direct_runtime_obligation_from_struct_lit(site_kind: i64, inner_name: Name, value_expr: Expr, constraints: Option<Box<KnowledgeConstraintList> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
@@ -2836,7 +2916,7 @@ pub fn knowledge_context_nth_runtime_obligation_items(items: Option<Box<ItemList
         return knowledge_context_empty_runtime_obligation_descriptor()
     }
     let cursor = knowledge_context_nth_runtime_obligation_from(items, items, target_index)
-    cursor.desc
+    knowledge_context_runtime_threshold(items, cursor.desc)
 }
 
 fn knowledge_context_stmt_has_static_value_constraint(stmt: Stmt, return_ty: Option<Box<TypeExpr> >) -> bool with Mut, Panic, Div, Alloc {

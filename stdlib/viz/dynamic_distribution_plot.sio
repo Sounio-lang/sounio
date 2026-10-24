@@ -1,0 +1,196 @@
+use math::pure::{is_finite}
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
+use display::canvas::{Canvas,canvas_fill_rect}
+use viz::dynamic_plot::{DynamicPlotSpec}
+use viz::scatter::{ScatterPoint,scatter_geometry,scatter_project}
+use viz::forest::{ForestRect,forest_clip_rect}
+pub struct DistributionCounts {pub status:i64,pub input_count:i64,pub masked:i64,pub empty:i64,pub painted:i64}
+pub struct DynamicBoxPolicy {pub width:i64,pub quantile_method:i64,pub whisker_policy:i64}
+fn dd_result(status:i64,n:i64)->DistributionCounts {DistributionCounts{status:status,input_count:n,masked:0,empty:0,painted:0}}
+fn dd_spec(s:&DynamicPlotSpec)->bool {
+ if !scatter_geometry(s.x,s.y,s.w,s.h) {return false}
+ if !is_finite(s.xmin) || !is_finite(s.xmax) || !is_finite(s.ymin) || !is_finite(s.ymax) {return false}
+ if s.xmin>=s.xmax || s.ymin>=s.ymax {return false}
+ if !is_finite(s.xmax-s.xmin) || !is_finite(s.ymax-s.ymin) {return false}
+ s.r>=0 && s.r<=255 && s.g>=0 && s.g<=255 && s.b>=0 && s.b<=255 && s.interval_kind==0 && s.level==0.0
+}
+fn dd_canvas(c:&Canvas)->bool {c.width>0 && c.height>0 && c.width<=1000000 && c.height<=1000000 && (c.pixels as i64)>0}
+fn dd_paint(c:&!Canvas,r:&ForestRect,s:&DynamicPlotSpec)->bool with Mut {
+ var left=r.x;var top=r.y;var right=r.x+r.w;var bottom=r.y+r.h
+ if left<0 {left=0};if top<0 {top=0};if right>c.width {right=c.width};if bottom>c.height {bottom=c.height}
+ if right<=left || bottom<=top {return false}
+ canvas_fill_rect(c,left,top,right-left,bottom-top,s.r,s.g,s.b)
+ true
+}
+fn dd_emit(r:&ForestRect,s:&DynamicPlotSpec,index:i64,part:i64) with IO {
+ let x:f64=(r.x as f64)-0.5;let y:f64=(r.y as f64)-0.5;let w:i64=r.w;let h:i64=r.h
+ let red:i64=s.r;let green:i64=s.g;let blue:i64=s.b
+ print("<rect data-distribution-index=\"");print(index);print("\" data-distribution-part=\"");print(part)
+ print("\" x=\"");print(x);print("\" y=\"");print(y);print("\" width=\"");print(w);print("\" height=\"");print(h)
+ print("\" fill=\"rgb(");print(red);print(",");print(green);print(",");print(blue);println(")\"/>")
+}
+fn dd_hist_rect(s:&DynamicPlotSpec,lo:f64,hi:f64,height:f64)->ForestRect with Div {
+ let empty=ForestRect{status:1,x:0,y:0,w:0,h:0}
+ if height==0.0 || hi<=s.xmin || lo>=s.xmax || height<=s.ymin || s.ymax<=0.0 {return empty}
+ let left=if lo<s.xmin {s.xmin}else{lo};let right=if hi>s.xmax {s.xmax}else{hi}
+ let base=if s.ymin>0.0 {s.ymin}else{0.0};let tip=if height>s.ymax {s.ymax}else{height}
+ let a=scatter_project(left,tip,s.xmin,s.xmax,s.ymin,s.ymax,s.x,s.y,s.w,s.h,true)
+ let b=scatter_project(right,base,s.xmin,s.xmax,s.ymin,s.ymax,s.x,s.y,s.w,s.h,true)
+ if a.status!=0 || b.status!=0 {return ForestRect{status:2,x:0,y:0,w:0,h:0}}
+ if b.x<=a.x || b.y<=a.y {return empty}
+ ForestRect{status:0,x:a.x,y:a.y,w:b.x-a.x,h:b.y-a.y}
+}
+fn dd_hist_check(s:&DynamicPlotSpec,edges:&NumericBuffer,heights:&NumericBuffer,a:&IntegerBuffer,kind:i64)->i64 with Mut,Div,Panic {
+ if !dd_spec(s) || kind<1 || kind>2 {return 1}
+ if numeric_buffer_status(edges)!=0 || numeric_buffer_status(heights)!=0 || integer_buffer_status(a)!=0 {return 2}
+ let n=numeric_buffer_len(heights)
+ if n>=9223372036854771704 {return 2}
+ if numeric_buffer_len(edges)!=n+1 || integer_buffer_len(a)!=n {return 2}
+ var i:i64=0
+ while i<=n {
+  let edge=numeric_buffer_at(edges,i)
+  if !is_finite(edge) {return 3}
+  if i>0 {if edge<=numeric_buffer_at(edges,i-1) {return 3}}
+  if i<n {
+   let flag=integer_buffer_at(a,i)
+   if flag!=0 && flag!=1 {return 3}
+   if flag==1 {
+    let height=numeric_buffer_at(heights,i)
+    if !is_finite(height) || height<0.0 {return 3}
+   }
+  }
+  i=i+1
+ }
+ i=0
+ while i<n {
+  if integer_buffer_at(a,i)==1 {
+   let rect=dd_hist_rect(s,numeric_buffer_at(edges,i),numeric_buffer_at(edges,i+1),numeric_buffer_at(heights,i))
+   if rect.status==2 {return 5}
+  }
+  i=i+1
+ }
+ 0
+}
+pub fn dynamic_histogram_canvas(c:&!Canvas,s:&DynamicPlotSpec,edges:&NumericBuffer,heights:&NumericBuffer,a:&IntegerBuffer,kind:i64)->DistributionCounts with Mut,Div,Panic {
+ let n=numeric_buffer_len(heights);let status=dd_hist_check(s,edges,heights,a,kind)
+ var result=dd_result(status,n)
+ if status!=0 {return result};if !dd_canvas(c) {result.status=1;return result}
+ var i:i64=0
+ while i<n {
+  if integer_buffer_at(a,i)==0 {result.masked=result.masked+1}else{
+   let rect=dd_hist_rect(s,numeric_buffer_at(edges,i),numeric_buffer_at(edges,i+1),numeric_buffer_at(heights,i))
+   if rect.status==1 {result.empty=result.empty+1}else{if dd_paint(c,&rect,s) {result.painted=result.painted+1}else{result.empty=result.empty+1}}
+  }
+  i=i+1
+ }
+ result
+}
+pub fn dynamic_histogram_svg(s:&DynamicPlotSpec,edges:&NumericBuffer,heights:&NumericBuffer,a:&IntegerBuffer,kind:i64)->DistributionCounts with IO,Mut,Div,Panic {
+ let n=numeric_buffer_len(heights);let status=dd_hist_check(s,edges,heights,a,kind)
+ var result=dd_result(status,n)
+ if status!=0 {return result}
+ print("<g data-dynamic-series=\"histogram\" data-height-kind=\"")
+ if kind==1 {print("count")}else{print("density")}
+ println("\" data-normalization=\"supplied\">")
+ var i:i64=0
+ while i<n {
+  if integer_buffer_at(a,i)==0 {result.masked=result.masked+1}else{
+   let rect=dd_hist_rect(s,numeric_buffer_at(edges,i),numeric_buffer_at(edges,i+1),numeric_buffer_at(heights,i))
+   if rect.status==1 {result.empty=result.empty+1}else{dd_emit(&rect,s,i,0);result.painted=result.painted+1}
+  }
+  i=i+1
+ }
+ println("</g>")
+ result
+}
+fn dd_group(s:&DynamicPlotSpec,group:f64,width:i64)->ScatterPoint with Div {
+ let u=(group-s.xmin)/(s.xmax-s.xmin)
+ if !is_finite(u) {return ScatterPoint{status:1,x:0,y:0}}
+ if u<0.0 {if u*(s.w as f64)< -(width as f64) {return ScatterPoint{status:1,x:0,y:0}}}
+ if u>1.0 {if (u-1.0)*(s.w as f64)>(width as f64) {return ScatterPoint{status:1,x:0,y:0}}}
+ scatter_project(group,s.ymin,s.xmin,s.xmax,s.ymin,s.ymax,s.x,s.y,s.w,s.h,false)
+}
+fn dd_box_rect(s:&DynamicPlotSpec,p:&DynamicBoxPolicy,group:f64,q1:f64,median:f64,q3:f64,lo:f64,hi:f64,part:i64)->ForestRect with Mut,Div {
+ let empty=ForestRect{status:1,x:0,y:0,w:0,h:0}
+ let center=dd_group(s,group,p.width)
+ if center.status==1 {return empty}
+ if center.status!=0 {return ForestRect{status:2,x:0,y:0,w:0,h:0}}
+ var low=lo;var high=hi
+ var left=center.x;var width:i64=1
+ if part==1 {low=lo;high=lo;left=center.x-p.width/4;width=p.width/2+1}
+ if part==2 {low=hi;high=hi;left=center.x-p.width/4;width=p.width/2+1}
+ if part==3 {low=q1;high=q1;left=center.x-p.width/2;width=p.width+1}
+ if part==4 {low=q3;high=q3;left=center.x-p.width/2;width=p.width+1}
+ if part==5 {low=q1;high=q3;left=center.x-p.width/2}
+ if part==6 {low=q1;high=q3;left=center.x+p.width/2}
+ if part==7 {low=median;high=median;left=center.x-p.width/2;width=p.width+1}
+ if high<s.ymin || low>s.ymax {return empty}
+ if low<s.ymin {low=s.ymin};if high>s.ymax {high=s.ymax}
+ let bottom=scatter_project(s.xmin,low,s.xmin,s.xmax,s.ymin,s.ymax,s.x,s.y,s.w,s.h,true)
+ let top=scatter_project(s.xmin,high,s.xmin,s.xmax,s.ymin,s.ymax,s.x,s.y,s.w,s.h,true)
+ if bottom.status!=0 || top.status!=0 {return ForestRect{status:2,x:0,y:0,w:0,h:0}}
+ forest_clip_rect(left,top.y,width,bottom.y-top.y+1,s.x,s.y,s.w,s.h)
+}
+fn dd_box_check(s:&DynamicPlotSpec,p:&DynamicBoxPolicy,group:&NumericBuffer,q1:&NumericBuffer,median:&NumericBuffer,q3:&NumericBuffer,lo:&NumericBuffer,hi:&NumericBuffer,a:&IntegerBuffer)->i64 with Mut,Div,Panic {
+ if !dd_spec(s) || p.width<4 || p.width>40 || p.width%2!=0 || p.quantile_method<1 || p.whisker_policy<1 {return 1}
+ if numeric_buffer_status(group)!=0 || numeric_buffer_status(q1)!=0 || numeric_buffer_status(median)!=0 || numeric_buffer_status(q3)!=0 || numeric_buffer_status(lo)!=0 || numeric_buffer_status(hi)!=0 || integer_buffer_status(a)!=0 {return 2}
+ let n=numeric_buffer_len(group)
+ if numeric_buffer_len(q1)!=n || numeric_buffer_len(median)!=n || numeric_buffer_len(q3)!=n || numeric_buffer_len(lo)!=n || numeric_buffer_len(hi)!=n || integer_buffer_len(a)!=n {return 2}
+ var i:i64=0
+ while i<n {
+  let flag=integer_buffer_at(a,i)
+  if flag!=0 && flag!=1 {return 3}
+  if flag==1 {
+   let gx=numeric_buffer_at(group,i);let a1=numeric_buffer_at(q1,i);let m=numeric_buffer_at(median,i)
+   let a3=numeric_buffer_at(q3,i);let lower=numeric_buffer_at(lo,i);let upper=numeric_buffer_at(hi,i)
+   if !is_finite(gx) || !is_finite(a1) || !is_finite(m) || !is_finite(a3) || !is_finite(lower) || !is_finite(upper) {return 3}
+   if lower>a1 || a1>m || m>a3 || a3>upper {return 3}
+   var part:i64=0
+   while part<8 {let rect=dd_box_rect(s,p,gx,a1,m,a3,lower,upper,part);if rect.status==2 {return 5};part=part+1}
+  }
+  i=i+1
+ }
+ 0
+}
+pub fn dynamic_box_canvas(c:&!Canvas,s:&DynamicPlotSpec,p:&DynamicBoxPolicy,group:&NumericBuffer,q1:&NumericBuffer,median:&NumericBuffer,q3:&NumericBuffer,lo:&NumericBuffer,hi:&NumericBuffer,a:&IntegerBuffer)->DistributionCounts with Mut,Div,Panic {
+ let n=numeric_buffer_len(group);let status=dd_box_check(s,p,group,q1,median,q3,lo,hi,a)
+ var result=dd_result(status,n)
+ if status!=0 {return result};if !dd_canvas(c) {result.status=1;return result}
+ var i:i64=0
+ while i<n {
+  if integer_buffer_at(a,i)==0 {result.masked=result.masked+1}else{
+   var parts:i64=0;var part:i64=0
+   while part<8 {
+    let rect=dd_box_rect(s,p,numeric_buffer_at(group,i),numeric_buffer_at(q1,i),numeric_buffer_at(median,i),numeric_buffer_at(q3,i),numeric_buffer_at(lo,i),numeric_buffer_at(hi,i),part)
+    if rect.status==0 {if dd_paint(c,&rect,s) {parts=parts+1}}
+    part=part+1
+   }
+   if parts==0 {result.empty=result.empty+1}else{result.painted=result.painted+1}
+  }
+  i=i+1
+ }
+ result
+}
+pub fn dynamic_box_svg(s:&DynamicPlotSpec,p:&DynamicBoxPolicy,group:&NumericBuffer,q1:&NumericBuffer,median:&NumericBuffer,q3:&NumericBuffer,lo:&NumericBuffer,hi:&NumericBuffer,a:&IntegerBuffer)->DistributionCounts with IO,Mut,Div,Panic {
+ let n=numeric_buffer_len(group);let status=dd_box_check(s,p,group,q1,median,q3,lo,hi,a)
+ var result=dd_result(status,n)
+ if status!=0 {return result}
+ let quantile:i64=p.quantile_method;let whisker:i64=p.whisker_policy
+ print("<g data-dynamic-series=\"supplied-box\" data-quantile-method=\"");print(quantile);print("\" data-whisker-policy=\"");print(whisker);println("\" data-interval-kind=\"none\">")
+ var i:i64=0
+ while i<n {
+  if integer_buffer_at(a,i)==0 {result.masked=result.masked+1}else{
+   var parts:i64=0;var part:i64=0
+   while part<8 {
+    let rect=dd_box_rect(s,p,numeric_buffer_at(group,i),numeric_buffer_at(q1,i),numeric_buffer_at(median,i),numeric_buffer_at(q3,i),numeric_buffer_at(lo,i),numeric_buffer_at(hi,i),part)
+    if rect.status==0 {dd_emit(&rect,s,i,part);parts=parts+1}
+    part=part+1
+   }
+   if parts==0 {result.empty=result.empty+1}else{result.painted=result.painted+1}
+  }
+  i=i+1
+ }
+ println("</g>")
+ result
+}

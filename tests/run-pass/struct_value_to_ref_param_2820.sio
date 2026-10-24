@@ -1,0 +1,72 @@
+//@ run-pass
+//@ description: #2820 -- a struct VALUE passed for a `&S` parameter is borrowed (both checkers accept it); Madaros passed the handle and the callee dereferenced it once too often
+//@ expect-stdout: 202
+//@ expect-stdout: 7
+//@ expect-stdout: 4
+//@ expect-stdout: 4
+//@ expect-stdout: 9
+//@ expect-stdout: 11
+//@ expect-stdout: 13
+//@ expect-stdout: STRUCT_VALUE_TO_REF_PARAM_2820_OK
+//
+// Reduced from stdlib/hardware/pireus/material_engine_admission.sio, which
+// calls `sha256_digest_byte(finalized, i)` with `finalized: SHA256Digest` and
+// `fn sha256_digest_byte(digest: &SHA256Digest, index: i32)`. lean_single
+// borrows the value; Madaros passed the struct handle itself, the callee read
+// it as a pointer to a handle, and the program died with SIGSEGV (rc=139) --
+// the material_engine_admission test's crash, inside SHA-256 with the IV word
+// 0x6a09e667 as the base address.
+
+struct D { bytes: [u8; 32] }
+struct W { a: i64, b: i64 }
+struct Outer { tag: i64, inner: W }
+
+fn get(d: &D, i: i32) -> i64 { d.bytes[i] as i64 }
+fn getw(w: &W) -> i64 { w.b }
+fn sum2(x: &W, k: i64, y: &W) -> i64 { x.a + x.b + k + y.a - y.a }
+
+impl W {
+    fn plus(self: &W, other: &W) -> i64 { self.a + other.b }
+}
+
+fn make() -> D with Mut {
+    var b: [u8; 32] = [0; 32]
+    b[0] = 202 as u8
+    b[1] = 7 as u8
+    D { bytes: b }
+}
+
+fn make_w() -> W { W { a: 5, b: 4 } }
+
+fn main() -> i64 with IO, Mut {
+    var fails: i64 = 0
+    let d = make()
+    let v0 = get(d, 0)
+    println(v0)
+    if v0 != 202 { fails = fails + 1 }
+    let v1 = get(&d, 1)
+    println(v1)
+    if v1 != 7 { fails = fails + 1 }
+    let w = W { a: 3, b: 4 }
+    let v2 = getw(w)
+    println(v2)
+    if v2 != 4 { fails = fails + 1 }
+    let mw = make_w()
+    let v3 = getw(mw)
+    println(v3)
+    if v3 != 4 { fails = fails + 1 }
+    let o = Outer { tag: 1, inner: W { a: 2, b: 7 } }
+    let inn = o.inner
+    let v4 = sum2(inn, 0, w)
+    println(v4)
+    if v4 != 9 { fails = fails + 1 }
+    let v5 = w.plus(inn)
+    println(v5 + 1)
+    if v5 != 10 { fails = fails + 1 }
+    let w13 = W { a: 0, b: 13 }
+    let v6 = getw(w13)
+    println(v6)
+    if v6 != 13 { fails = fails + 1 }
+    if fails == 0 { println("STRUCT_VALUE_TO_REF_PARAM_2820_OK") } else { println("STRUCT_VALUE_TO_REF_PARAM_2820_FAIL") }
+    fails
+}
