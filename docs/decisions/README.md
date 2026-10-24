@@ -57,6 +57,8 @@ Grounded in: commit, artifact, or empirical result
 | 008 | Single semantic clock for language/library claims | accepted | 2026-08-06 |
 | 009 | Verified foreign reference oracles | accepted | 2026-09-04 |
 | 010 | Madaros region reclamation at function return | experimental | 2026-10-06 |
+| 011 | Boundary and scope of Mathlib in formal verification | accepted | 2026-09-24 |
+| 012 | Bridge `IrHyperMulO` to the native-v2 backend pipeline | experimental | 2026-09-24 |
 
 ## Files
 
