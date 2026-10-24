@@ -35,7 +35,7 @@ Raw material: [`docs/audit/S01_LEXICAL_PROBES_2026-10-22/`](../../audit/S01_LEXI
 (`gen_probes.sh` writes the probes; `run_probes.sh` runs them, with
 `MADAROS_ELF=` selecting a specific Madaros binary; one TSV per column). The
 probes are measurements, not conformance tests: none asserts an outcome until
-the rulings of [`PENDING.md` D-33](../../decisions/PENDING.md#d-33) are made.
+the rulings of [ADR-015](../../decisions/adr-015-lexical-structure.md) (formerly `PENDING.md` D-33) are made.
 
 ## 1. Rule by rule
 

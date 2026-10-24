@@ -23,7 +23,7 @@ owning document records it closed with a receipt.
 
 | item | engine | owner |
 |---|---|---|
-| `.5` evaluates to 0 | lean_single | [receipt](../spec/2026-10/18-lexical-execution-receipt.md) §6, refused by PR #3019 (unmerged at the time of writing); ruling [D-33](../decisions/PENDING.md#d-33).2 decides whether it later means 0.5 |
+| `.5` evaluates to 0 | lean_single | [receipt](../spec/2026-10/18-lexical-execution-receipt.md) §6, refused by PR #3019 (unmerged at the time of writing); ruling [ADR-015](../decisions/adr-015-lexical-structure.md) item 2: refused now, 0.5 only once both engines agree |
 | `affine`, `linear`, `study` accepted as names, read as 0 | lean_single | receipt §6; refused by [PR #3019](https://github.com/Sounio-lang/sounio/pull/3019), unmerged at the time of writing; the seed's misreading of a local `study` had reached Madaros (`check.sio`, `active_study_has_hypothesis_outcome`) |
 | any token that starts no expression loads 0: `let var = 5; println(var)` prints 0, `println()` prints 0, `+a` is 0; reached by 166 files that compile today, including `stdlib/epistemic/knightian.sio:309` (p-box variance 0 under the seed) | lean_single | receipt §6, [`seed_fallback_sweep.tsv`](../audit/S01_LEXICAL_PROBES_2026-10-22/seed_fallback_sweep.tsv) |
 | integer literals that do not fit wrap (`99999999999999999999` → `7766279631452241919`) | both | receipt; D-33.1 |
