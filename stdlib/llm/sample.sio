@@ -1,0 +1,118 @@
+//! stdlib::llm::sample — seeded sampling over logits: temperature
+//! softmax + top-p (nucleus) with a xorshift64* PRNG.
+//!
+//! Deterministic by construction: the same seed always produces the
+//! same token sequence, which is what makes the distribution gates in
+//! examples/llama_sample_demo.sio falsifiable. temperature <= 0 is
+//! the greedy path (argmax), bit-identical to llama_argmax.
+//! Not cryptographic; the PRNG is for reproducible decoding only.
+
+use llm::llama::{llama_argmax}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+use math::pure::{exp}
+
+pub struct Rng {
+    pub state: i64,
+}
+
+pub fn rng_new(seed: i64) -> Rng {
+    var s = seed
+    if s == 0 { s = 2463534242 }
+    // splitmix-style scramble so small seeds decorrelate immediately
+    s = (s ^ (s >> 30)) * -4658895280553007687
+    s = (s ^ (s >> 27)) * -7046029284386353131
+    s = s ^ (s >> 31)
+    if s == 0 { s = 2463534242 }
+    Rng { state: s }
+}
+
+// next uniform in [0, 1) with 53 bits of granularity
+pub fn rng_f64(r: &!Rng) -> f64 with Mut {
+    var x = r.state
+    x = x ^ (x >> 12)
+    x = x ^ (x << 25)
+    x = x ^ (x >> 27)
+    r.state = x
+    let v = x * 2685821657736338717
+    // top 53 bits -> [0,1)
+    (((v >> 11) & 9007199254740991) as f64) / 9007199254740992.0
+}
+
+// Sample one token from `logits`.
+//   temp <= 0: argmax (greedy).
+//   top_p >= 1: full softmax. top_p < 1: nucleus - the smallest set
+//   of highest-probability tokens covering top_p of the mass, sampled
+//   renormalized. Selection is by repeated max-extraction, capped at
+//   8192 nucleus members (past that the tail is numerically zero for
+//   any sane top_p).
+pub fn sample_token(logits: &CpuBuf, temp: f64, top_p: f64, rng: &!Rng) -> i64 with Alloc, Mut, Panic, Div {
+    if temp <= 0.0 { return llama_argmax(logits) }
+    let n = logits.len
+    var mx = 0.0 - 1.0e30
+    var i: i64 = 0
+    while i < n {
+        let x = ck_get(logits, i) / temp
+        if x > mx { mx = x }
+        i = i + 1
+    }
+    var probs = ck_alloc(n)
+    var sum = 0.0
+    i = 0
+    while i < n {
+        let p = exp(ck_get(logits, i) / temp - mx)
+        ck_set(&!probs, i, p)
+        sum = sum + p
+        i = i + 1
+    }
+    if top_p >= 1.0 {
+        var u = rng_f64(rng) * sum
+        i = 0
+        var last: i64 = 0
+        while i < n {
+            let p = ck_get(&probs, i)
+            if p > 0.0 { last = i }
+            u = u - p
+            if u <= 0.0 { return i }
+            i = i + 1
+        }
+        return last
+    }
+    // nucleus: extract max repeatedly until coverage >= top_p * sum
+    var used = ck_alloc(n)
+    i = 0
+    while i < n { ck_set(&!used, i, 0.0); i = i + 1 }
+    let target = top_p * sum
+    var covered = 0.0
+    var members = ck_alloc(8192)
+    var nmem: i64 = 0
+    while covered < target && nmem < 8192 {
+        var best: i64 = 0 - 1
+        var bv = 0.0 - 1.0
+        i = 0
+        while i < n {
+            if ck_get(&used, i) == 0.0 {
+                let p = ck_get(&probs, i)
+                if p > bv { bv = p; best = i }
+            }
+            i = i + 1
+        }
+        if best < 0 { covered = target }
+        else {
+            ck_set(&!used, best, 1.0)
+            ck_set(&!members, nmem, best as f64)
+            nmem = nmem + 1
+            covered = covered + bv
+        }
+    }
+    var u2 = rng_f64(rng) * covered
+    var m: i64 = 0
+    var chosen = (ck_get(&members, 0)) as i64
+    while m < nmem {
+        let id = (ck_get(&members, m)) as i64
+        chosen = id
+        u2 = u2 - ck_get(&probs, id)
+        if u2 <= 0.0 { return id }
+        m = m + 1
+    }
+    chosen
+}

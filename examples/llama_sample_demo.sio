@@ -1,0 +1,200 @@
+//@ run-pass
+//
+// Sampling gates for llm::sample (seeded xorshift64*, temperature,
+// top-p), from cheap/exact to real-model:
+//   A distribution: empirical frequencies vs target softmax on
+//     synthetic 8-token logits, N=20000, temp=1 (max deviation)
+//   B top-p: nucleus of the same distribution at p=0.5 is {0,1};
+//     5000 draws must never leave it, renormalized freq checked
+//   C temperature: temp=2 flattens - empirical f0/f1 must move from
+//     1.6 toward sqrt(1.6)=1.265
+//   D real model, temp=0 sampler == greedy ids of the decode bench
+//   E real model determinism: same seed -> same 16 tokens twice;
+//     different seed -> at least one position differs
+// Usage: llama_sample_demo [model-dir]
+// Modules: stdlib/llm/{sample,llama}.sio
+
+use llm::llama::{kv_new, llama_forward, llama_load}
+use llm::sample::{rng_new, sample_token}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+fn synth_logits() -> CpuBuf with Alloc, Mut {
+    // ln of [0.4, 0.25, 0.15, 0.1, 0.05, 0.03, 0.015, 0.005]
+    var lg = ck_alloc(8)
+    ck_set(&!lg, 0, 0.0 - 0.9163)
+    ck_set(&!lg, 1, 0.0 - 1.3863)
+    ck_set(&!lg, 2, 0.0 - 1.8971)
+    ck_set(&!lg, 3, 0.0 - 2.3026)
+    ck_set(&!lg, 4, 0.0 - 2.9957)
+    ck_set(&!lg, 5, 0.0 - 3.5066)
+    ck_set(&!lg, 6, 0.0 - 4.1997)
+    ck_set(&!lg, 7, 0.0 - 5.2983)
+    lg
+}
+
+fn draw_counts(lg: &CpuBuf, temp: f64, top_p: f64, seed: i64, draws: i64) -> CpuBuf with Alloc, Mut, Panic, Div {
+    var counts = ck_alloc(8)
+    var i: i64 = 0
+    while i < 8 { ck_set(&!counts, i, 0.0); i = i + 1 }
+    var rng = rng_new(seed)
+    var d: i64 = 0
+    while d < draws {
+        let t = sample_token(lg, temp, top_p, &!rng)
+        let cur = ck_get(&counts, t)
+        ck_set(&!counts, t, cur + 1.0)
+        d = d + 1
+    }
+    counts
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var dir = "/workspace/llm-models/SmolLM2-135M"
+    if arg_count() > 0 { dir = get_arg(0) }
+
+    let lg = synth_logits()
+    var target = ck_alloc(8)
+    ck_set(&!target, 0, 0.4)
+    ck_set(&!target, 1, 0.25)
+    ck_set(&!target, 2, 0.15)
+    ck_set(&!target, 3, 0.1)
+    ck_set(&!target, 4, 0.05)
+    ck_set(&!target, 5, 0.03)
+    ck_set(&!target, 6, 0.015)
+    ck_set(&!target, 7, 0.005)
+
+    // A: distribution at temp=1
+    let ca = draw_counts(&lg, 1.0, 1.0, 12345, 20000)
+    var maxdev = 0.0
+    var i: i64 = 0
+    print("A empirical(x1e6): ")
+    while i < 8 {
+        let f = ck_get(&ca, i) / 20000.0
+        print_int((f * 1000000.0) as i64)
+        print(" ")
+        var dv = f - ck_get(&target, i)
+        if dv < 0.0 { dv = 0.0 - dv }
+        if dv > maxdev { maxdev = dv }
+        i = i + 1
+    }
+    print("\nA max_dev(x1e6)=")
+    print_int((maxdev * 1000000.0) as i64)
+    print("\n")
+    if maxdev > 0.015 { ok = false; print("FAIL A distribution\n") }
+
+    // B: top-p nucleus {0,1} renormalized to 0.6154/0.3846
+    let cb = draw_counts(&lg, 1.0, 0.5, 999, 5000)
+    var outside = 0.0
+    i = 2
+    while i < 8 { outside = outside + ck_get(&cb, i); i = i + 1 }
+    let f0 = ck_get(&cb, 0) / 5000.0
+    print("B outside-nucleus draws=")
+    print_int(outside as i64)
+    print(" f0(x1e6)=")
+    print_int((f0 * 1000000.0) as i64)
+    print("\n")
+    if outside > 0.0 { ok = false; print("FAIL B nucleus leak\n") }
+    if f0 < 0.575 || f0 > 0.655 { ok = false; print("FAIL B renormalized freq\n") }
+
+    // C: temp=2 flattens f0/f1 toward 1.265 (from 1.6)
+    let cc = draw_counts(&lg, 2.0, 1.0, 555, 20000)
+    let ratio = (ck_get(&cc, 0) / 20000.0) / (ck_get(&cc, 1) / 20000.0)
+    print("C f0/f1 at temp=2 (x1000)=")
+    print_int((ratio * 1000.0) as i64)
+    print("\n")
+    if ratio < 1.1 || ratio > 1.5 { ok = false; print("FAIL C temperature flattening\n") }
+
+    // real model
+    let m = llama_load(dir)
+    if !m.loaded { print("SAMPLE FAIL load\n"); exit(0) }
+    var ids = ck_alloc(6)
+    ck_set(&!ids, 0, 0.0)
+    ck_set(&!ids, 1, 504.0)
+    ck_set(&!ids, 2, 3575.0)
+    ck_set(&!ids, 3, 282.0)
+    ck_set(&!ids, 4, 4649.0)
+    ck_set(&!ids, 5, 314.0)
+
+    // D: temp=0 sampler == greedy bench ids
+    var expect = ck_alloc(8)
+    ck_set(&!expect, 0, 7042.0)
+    ck_set(&!expect, 1, 30.0)
+    ck_set(&!expect, 2, 657.0)
+    ck_set(&!expect, 3, 314.0)
+    ck_set(&!expect, 4, 260.0)
+    ck_set(&!expect, 5, 3995.0)
+    ck_set(&!expect, 6, 2240.0)
+    ck_set(&!expect, 7, 281.0)
+    var kv1 = kv_new(&m, 512)
+    var logits = llama_forward(&m, &!kv1, &ids, 6)
+    var rngd = rng_new(1)
+    var dmatch: i64 = 0
+    var g: i64 = 0
+    while g < 8 {
+        let nxt = sample_token(&logits, 0.0, 1.0, &!rngd)
+        if nxt == ((ck_get(&expect, g)) as i64) { dmatch = dmatch + 1 }
+        var one = ck_alloc(1)
+        ck_set(&!one, 0, nxt as f64)
+        logits = llama_forward(&m, &!kv1, &one, 1)
+        g = g + 1
+    }
+    print("D temp0==greedy matched=")
+    print_int(dmatch)
+    print("/8\n")
+    if dmatch != 8 { ok = false; print("FAIL D greedy equivalence\n") }
+
+    // E: determinism under sampling (temp 0.8, top_p 0.95)
+    var seqs = ck_alloc(32)
+    var run: i64 = 0
+    while run < 2 {
+        var kv = kv_new(&m, 512)
+        var lg2 = llama_forward(&m, &!kv, &ids, 6)
+        var rng = rng_new(777)
+        var s: i64 = 0
+        while s < 16 {
+            let nxt = sample_token(&lg2, 0.8, 0.95, &!rng)
+            ck_set(&!seqs, run * 16 + s, nxt as f64)
+            var one2 = ck_alloc(1)
+            ck_set(&!one2, 0, nxt as f64)
+            lg2 = llama_forward(&m, &!kv, &one2, 1)
+            s = s + 1
+        }
+        run = run + 1
+    }
+    var same: i64 = 0
+    i = 0
+    while i < 16 {
+        if ck_get(&seqs, i) == ck_get(&seqs, 16 + i) { same = same + 1 }
+        i = i + 1
+    }
+    print("E same-seed identical positions=")
+    print_int(same)
+    print("/16 seq:")
+    i = 0
+    while i < 16 { print_int((ck_get(&seqs, i)) as i64); print(" "); i = i + 1 }
+    print("\n")
+    if same != 16 { ok = false; print("FAIL E determinism\n") }
+
+    // E2: different seed differs somewhere
+    var kv3 = kv_new(&m, 512)
+    var lg3 = llama_forward(&m, &!kv3, &ids, 6)
+    var rng3 = rng_new(778)
+    var diffs: i64 = 0
+    var s3: i64 = 0
+    while s3 < 16 {
+        let nxt3 = sample_token(&lg3, 0.8, 0.95, &!rng3)
+        if nxt3 != ((ck_get(&seqs, s3)) as i64) { diffs = diffs + 1 }
+        var one3 = ck_alloc(1)
+        ck_set(&!one3, 0, nxt3 as f64)
+        lg3 = llama_forward(&m, &!kv3, &one3, 1)
+        s3 = s3 + 1
+    }
+    print("E2 other-seed differing positions=")
+    print_int(diffs)
+    print("/16\n")
+    if diffs == 0 { ok = false; print("FAIL E2 seed sensitivity\n") }
+
+    if ok { print("SAMPLE PASS\n") } else { print("SAMPLE FAIL\n") }
+    print("SAMPLE DONE\n")
+    exit(0)
+}
