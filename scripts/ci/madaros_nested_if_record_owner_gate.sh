@@ -20,6 +20,21 @@ sha256sum "$raw" > "$work/COMPILER.sha256"
 negative=tests/compile-fail/nested_if_incompatible_record_owner.sio
 sha256sum "${sources[@]}" "$negative" > "$work/INPUTS.sha256"
 printf 'kind\tsource\texit_status\n' > "$work/RESULTS.tsv"
+# Resource receipt: GNU time where installed; otherwise wall time from bash,
+# with peak RSS marked unavailable rather than invented. The gate verdict
+# depends only on the exit status, which both paths propagate unchanged.
+measured() {
+ local out=$1; shift
+ if [[ -x /usr/bin/time ]] && /usr/bin/time -f '' true 2>/dev/null; then
+  /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kib=%M\nexit_code=%x' -o "$out" "$@"
+ else
+  local start=$EPOCHREALTIME status=0
+  "$@" || status=$?
+  printf 'elapsed_seconds=%s\nmax_rss_kib=unavailable\nexit_code=%s\n' \
+   "$(awk -v a="$start" -v b="$EPOCHREALTIME" 'BEGIN{printf "%.2f", b-a}')" "$status" > "$out"
+  return "$status"
+ fi
+}
 for src in "${sources[@]}"; do
  name=$(basename "$src" .sio)
  expected=$(sed -nE 's|^//@ expect-stdout(-contains)?: ||p' "$src")
@@ -31,7 +46,7 @@ for src in "${sources[@]}"; do
  chmod +x "$work/$name.elf"
  sha256sum "$work/$name.elf" > "$work/$name.ELF.sha256"
  rc=0
- /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kib=%M\nexit_code=%x' -o "$work/$name.resource" timeout 60 "$work/$name.elf" > "$work/$name.stdout" 2> "$work/$name.stderr" || rc=$?
+ measured "$work/$name.resource" timeout 60 "$work/$name.elf" > "$work/$name.stdout" 2> "$work/$name.stderr" || rc=$?
  printf 'native\t%s\t%s\n' "$src" "$rc" >> "$work/RESULTS.tsv"
  [[ $rc == 0 ]] || { cat "$work/$name.stdout" "$work/$name.stderr" >&2; exit 1; }
  while IFS= read -r marker; do
