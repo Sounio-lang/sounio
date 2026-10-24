@@ -12,7 +12,8 @@ export SOUNIO_MADAROS_NOCACHE=1 SOUNIO_MADAROS_CACHE_READONLY=1
 ulimit -s 524288
 printf 'kind\tsource\texit_status\n' > "$out/RESULTS.tsv"
 sha256sum "$MADAROS_RAW_BIN" > "$out/COMPILER.sha256" || exit 65
-find stdlib tests -type f -print0 | sort -z | xargs -0 sha256sum > "$out/INPUTS.sha256" || exit 65
+# Bind compiler inputs, gate scripts, examples and followed bin payloads as well.
+find -L bin scripts self-hosted stdlib tests examples -type f -print0 | sort -z | xargs -0 sha256sum > "$out/INPUTS.sha256" || exit 65
 g++ --version > "$out/CXX_TOOLCHAIN.txt" || exit 65
 fail=0
 record() {
@@ -50,8 +51,19 @@ for src in tests/compile-fail/stdlib_deep_*.sio; do
     if [[ $rc != 1 ]] || ! grep -qi "$pattern" "$out/$name.check.txt"; then record negative "$src" 1
     else record negative "$src" 0; fi
 done
+rc=0
+timeout 120 bin/souc check tests/compile-fail/nested_if_incompatible_record_owner.sio > "$out/nested_if_incompatible_record_owner.check.txt" 2>&1 || rc=$?
+if [[ $rc == 1 ]] && grep -qi 'incompatible types' "$out/nested_if_incompatible_record_owner.check.txt"; then record negative tests/compile-fail/nested_if_incompatible_record_owner.sio 0
+else record negative tests/compile-fail/nested_if_incompatible_record_owner.sio 1; fi
 for src in tests/run-pass/stdlib_deep_*.sio; do native "$src" "$(basename "$src" .sio)"; done
-for name in stdlib_scale_normalization_into stdlib_scale_normalization_status; do native "tests/run-pass/$name.sio" "$name"; done
+for name in stdlib_scale_normalization_into stdlib_scale_normalization_status nested_if_record_owner nested_if_tuple_record_owner; do native "tests/run-pass/$name.sio" "$name"; done
+# The nonempty prefix is the required bounded count-inference contract.
+count_sources=(tests/run-pass/stdlib_scale_count_*.sio)
+if [[ ${#count_sources[@]} == 0 || ! -f ${count_sources[0]} ]]; then
+ record collection stdlib_scale_count_missing 1
+else
+ for src in "${count_sources[@]}"; do native "$src" "$(basename "$src" .sio)"; done
+fi
 # Legacy render paths are replayed in the canonical engine as well as the
 # Stage2 full suite: these names exposed nested-label and first-tick defects.
 for name in stats_inference_forest viz_bootstrap_forest viz_count_matrix_qc \
@@ -68,6 +80,12 @@ compare() {
     if [[ ! -f "$out/$fixture.stdout" ]]; then record concordance "$stem:missing-$fixture" 1; return; fi
     timeout 180 "$out/$stem" "$out/$fixture.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
     record concordance "$stem" "$rc"
+}
+compare_named() {
+    local stem=$1 fixture=$2 label=$3 rc=0
+    if [[ ! -f "$out/$fixture.stdout" ]]; then record concordance "$stem:$label:missing-$fixture" 1; return; fi
+    timeout 180 "$out/$stem" "$out/$fixture.stdout" > "$out/$stem.$label.stdout" 2> "$out/$stem.$label.stderr" || rc=$?
+    record concordance "$stem:$label" "$rc"
 }
 compare_mode() {
     local stem=$1 mode=$2 fixture=$3 rc=0
@@ -95,11 +113,17 @@ for src in tests/reference/deep_*.cpp; do
         record cpp-native "$stem" "$rc" ;;
       deep_stats_dispersion_reference) compare "$stem" stdlib_deep_genomics_shrinkage ;;
       deep_stats_multiple_testing_reference) compare "$stem" stdlib_deep_stats_multiple_testing ;;
-      deep_stats_count_glm_reference) compare "$stem" stdlib_deep_stats_count_glm ;;
-      deep_stats_nb2_likelihood_reference) compare "$stem" stdlib_deep_stats_nb2_likelihood ;;
+      deep_stats_count_glm_reference)
+        compare "$stem" stdlib_deep_stats_count_glm
+        compare_named "$stem" stdlib_scale_count_trace_control trace-control ;;
+      deep_stats_nb2_likelihood_reference)
+        compare "$stem" stdlib_deep_stats_nb2_likelihood
+        compare_named "$stem" stdlib_scale_count_cached_likelihood cached ;;
       deep_stats_count_fisher_reference) compare "$stem" stdlib_deep_stats_count_fisher ;;
       deep_stats_count_bootstrap_reference) compare "$stem" stdlib_deep_stats_count_bootstrap ;;
-      deep_stats_count_increment_reference) compare "$stem" stdlib_deep_stats_count_glm ;;
+      deep_stats_count_increment_reference)
+        compare "$stem" stdlib_deep_stats_count_glm
+        compare_named "$stem" stdlib_scale_count_trace_control trace-control ;;
       deep_nb2_slots_reference) compare "$stem" stdlib_deep_nb2_slots ;;
       deep_normalization_precision_reference)
         rc=0
@@ -132,7 +156,25 @@ for src in tests/reference/deep_*.cpp; do
         timeout 180 "$out/$stem" --mutant-fixed-alpha "$out/stdlib_deep_stats_count_profile_bootstrap.stdout" > "$out/$stem.fixed-mutant.stdout" 2> "$out/$stem.fixed-mutant.stderr" || rc=$?
         rejected=1
         [[ "$rc" != 2 ]] || rejected=0
-        record mutant-rejection "$stem:fixed-alpha:expected=2:actual=$rc" "$rejected" ;;
+        record mutant-rejection "$stem:fixed-alpha:expected=2:actual=$rc" "$rejected"
+        rc=0
+        timeout 180 "$out/$stem" --nested-single "$out/stdlib_scale_count_profile_nested_bootstrap.stdout" > "$out/$stem.nested.stdout" 2> "$out/$stem.nested.stderr" || rc=$?
+        record concordance "$stem:nested" "$rc"
+        rc=0
+        timeout 180 "$out/$stem" --nested-single "$out/stdlib_scale_count_profile_traced.stdout" > "$out/$stem.nested-traced.stdout" 2> "$out/$stem.nested-traced.stderr" || rc=$?
+        record concordance "$stem:nested-traced" "$rc"
+        rc=0
+        timeout 180 "$out/$stem" --nested-single "$out/stdlib_scale_count_profile_cache.stdout" > "$out/$stem.cache.stdout" 2> "$out/$stem.cache.stderr" || rc=$?
+        record concordance "$stem:cache" "$rc"
+        rc=0
+        timeout 180 "$out/$stem" --nested-mutant-fixed-alpha "$out/stdlib_scale_count_profile_nested_bootstrap.stdout" > "$out/$stem.nested-mutant.stdout" 2> "$out/$stem.nested-mutant.stderr" || rc=$?
+        rejected=1; [[ "$rc" != 2 ]] || rejected=0
+        record mutant-rejection "$stem:nested-fixed-alpha:expected=2:actual=$rc" "$rejected"
+        grep -v '^DEEP COUNT PROFILE NESTED BOOTSTRAP PASS$' "$out/stdlib_scale_count_profile_nested_bootstrap.stdout" > "$out/$stem.nested-prefix.txt"
+        rc=0
+        timeout 180 "$out/$stem" --nested-single "$out/$stem.nested-prefix.txt" > "$out/$stem.nested-prefix.stdout" 2> "$out/$stem.nested-prefix.stderr" || rc=$?
+        rejected=1; [[ "$rc" != 2 ]] || rejected=0
+        record mutant-rejection "$stem:nested-prefix:expected=2:actual=$rc" "$rejected" ;;
       deep_stats_dynamic_robust_reference) compare "$stem" stdlib_deep_stats_dynamic_robust ;;
       deep_stats_dynamic_robust_contrast_reference) compare "$stem" stdlib_deep_stats_dynamic_robust_contrast ;;
       deep_count_dataset_reference)
@@ -150,6 +192,18 @@ for src in tests/reference/deep_*.cpp; do
       deep_viz_forest) compare "$stem" stdlib_deep_viz_forest ;;
       deep_viz_axis_layout) compare "$stem" stdlib_deep_viz_axis_layout ;;
       deep_viz_fitted_axis) compare "$stem" stdlib_deep_viz_fitted_axis ;;
+      deep_viz_sized_scatter_reference)
+        rc=0
+        timeout 180 "$out/$stem" "$out/stdlib_deep_viz_sized_scatter.stdout" "$out/stdlib_deep_viz_scatter_footprint.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc" ;;
+      deep_viz_overlay_reference)
+        rc=0
+        timeout 180 "$out/$stem" --negative-selftest "$out/stdlib_deep_viz_overlay.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc" ;;
+      deep_viz_line_stream_reference)
+        rc=0
+        timeout 180 "$out/$stem" "$out/stdlib_deep_viz_line_stream.stdout" "$out/stdlib_deep_viz_reduce_runs.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc" ;;
       deep_viz_line_reduce) compare "$stem" stdlib_deep_viz_line_reduce_million ;;
       deep_viz_dynamic_plot) compare "$stem" stdlib_deep_viz_dynamic_plot ;;
       deep_viz_dynamic_fields) compare "$stem" stdlib_deep_viz_dynamic_fields ;;
@@ -187,10 +241,92 @@ if [[ $rc == 0 ]]; then
  record concordance font-canonical "$rc"
 fi
 
+lr_data=tests/reference/data/count_profile_lr_20261024
+for stem in count_dispersion_increment_reference count_profile_lr_fixed_reference count_profile_lr_v10_reference count_likelihood_difference_reference; do
+ rc=0
+ timeout 180 g++ -std=c++23 -O2 -Wall -Wextra "tests/reference/$stem.cpp" -lquadmath -o "$out/$stem" > "$out/$stem.cpp.txt" 2>&1 || rc=$?
+ record cpp-compile "$stem" "$rc"
+ [[ $rc == 0 ]] || continue
+ rc=0
+ case "$stem" in
+  count_dispersion_increment_reference) timeout 600 "$out/$stem" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$? ;;
+  count_profile_lr_fixed_reference) timeout 180 "$out/$stem" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$? ;;
+  count_profile_lr_v10_reference) timeout 180 "$out/$stem" "$lr_data/v10.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$? ;;
+  count_likelihood_difference_reference) timeout 180 "$out/$stem" --native "$out/stdlib_scale_count_likelihood_difference.stdout" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$? ;;
+ esac
+ record concordance "$stem" "$rc"
+ if [[ "$stem" == count_likelihood_difference_reference ]]; then
+  rc=0
+  timeout 180 "$out/$stem" --native "$out/stdlib_scale_count_rank_difference.stdout" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.rank.stdout" 2> "$out/$stem.rank.stderr" || rc=$?
+  record concordance "$stem:rank" "$rc"
+  rc=0
+  timeout 180 "$out/$stem" --native "$out/stdlib_scale_count_cached_rank_difference.stdout" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.cached-rank.stdout" 2> "$out/$stem.cached-rank.stderr" || rc=$?
+  record concordance "$stem:cached-rank" "$rc"
+ fi
+ if [[ "$stem" == count_dispersion_increment_reference || "$stem" == count_profile_lr_fixed_reference ]]; then
+  rc=0
+  if [[ "$stem" == count_profile_lr_fixed_reference ]]; then timeout 180 "$out/$stem" --mutant-sign "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.mutant.stdout" 2> "$out/$stem.mutant.stderr" || rc=$?
+  else timeout 180 "$out/$stem" --mutant-sign > "$out/$stem.mutant.stdout" 2> "$out/$stem.mutant.stderr" || rc=$?; fi
+  rejected=1; [[ "$rc" != 2 ]] || rejected=0
+  record mutant-rejection "$stem:orientation:expected=2:actual=$rc" "$rejected"
+ fi
+done
+rc=0
+timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/count_cached_rank_reference.cpp -lquadmath -o "$out/count_cached_rank_reference" > "$out/count_cached_rank_reference.cpp.txt" 2>&1 || rc=$?
+record cpp-compile count_cached_rank_reference "$rc"
+if [[ $rc == 0 ]]; then
+ rc=0
+ timeout 180 "$out/count_cached_rank_reference" "$out/stdlib_scale_count_cached_rank_far.stdout" > "$out/count_cached_rank_reference.concordance.stdout" 2> "$out/count_cached_rank_reference.concordance.stderr" || rc=$?
+ record concordance count_cached_rank_reference "$rc"
+fi
+rc=0
+timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/count_aggregate_cancellation_reference.cpp -o "$out/count_aggregate_cancellation_reference" > "$out/count_aggregate_cancellation_reference.cpp.txt" 2>&1 || rc=$?
+record cpp-compile count_aggregate_cancellation_reference "$rc"
+if [[ $rc == 0 ]]; then
+ rc=0
+ timeout 180 "$out/count_aggregate_cancellation_reference" "$out/stdlib_scale_count_aggregate_cancellation.stdout" > "$out/count_aggregate_cancellation_reference.concordance.stdout" 2> "$out/count_aggregate_cancellation_reference.concordance.stderr" || rc=$?
+ record concordance count_aggregate_cancellation_reference "$rc"
+fi
 rc=0
 timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/normalization_into_reference.cpp -o "$out/normalization_into_reference" > "$out/normalization_into_reference.cpp.txt" 2>&1 || rc=$?
 record cpp-compile normalization_into_reference "$rc"
 if [[ $rc == 0 ]]; then compare normalization_into_reference stdlib_scale_normalization_into; fi
+# Replay the frozen historical campaign asset through the real scientific renderer.
+# Missing/NA cells remain explicit; this is a report, never calibration acceptance.
+rc=0
+(cd examples/data && sha256sum -c count_profile_campaign_batch0_20261024.sha256) > "$out/campaign-asset.verify.txt" 2>&1 || rc=$?
+record input-asset count_profile_campaign_batch0_20261024 "$rc"
+asset_status=$rc
+if [[ $asset_status == 0 ]]; then
+ mkdir "$out/campaign-raw"
+ tar -xzf examples/data/count_profile_campaign_batch0_20261024.tar.gz -C "$out/campaign-raw" || asset_status=$?
+ record extract-asset count_profile_campaign_batch0_20261024 "$asset_status"
+ if [[ $asset_status == 0 ]]; then
+  (cd "$out/campaign-raw" && sha256sum -c RAW.sha256) > "$out/campaign-raw.verify.txt" 2>&1 || asset_status=$?
+  record input-asset campaign-raw "$asset_status"
+ fi
+fi
+rc=0
+stem=count_profile_campaign_report_reference
+timeout 180 g++ -std=c++23 -O2 -Wall -Wextra "tests/reference/$stem.cpp" -o "$out/$stem" > "$out/$stem.cpp.txt" 2>&1 || rc=$?
+record cpp-compile "$stem" "$rc"
+if [[ $rc == 0 && $asset_status == 0 ]]; then
+ rc=0
+ timeout 180 "$out/$stem" --parser-selftest > "$out/$stem.parser.stdout" 2> "$out/$stem.parser.stderr" || rc=$?
+ record cpp-controls "$stem:parser-selftest" "$rc"
+ rc=0
+ timeout 180 "$out/$stem" --emit "$out/campaign-raw" "$out/campaign-report.generated.sio" > "$out/$stem.emit.stdout" 2> "$out/$stem.emit.stderr" || rc=$?
+ record emit "$stem" "$rc"
+ if [[ $rc == 0 ]]; then
+  rc=0
+  cmp "$out/campaign-report.generated.sio" examples/viz_count_profile_campaign.sio > "$out/campaign-report.source-cmp.txt" 2>&1 || rc=$?
+  record source-replay "$stem" "$rc"
+ fi
+ native examples/viz_count_profile_campaign.sio viz_count_profile_campaign
+ rc=0
+ timeout 180 "$out/$stem" --negative-selftest "$out/campaign-raw" "$out/viz_count_profile_campaign.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+ record concordance "$stem" "$rc"
+fi
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"

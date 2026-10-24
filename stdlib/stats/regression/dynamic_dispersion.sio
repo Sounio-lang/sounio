@@ -1,3 +1,4 @@
+use stats::regression::count_fit_trace::{count_fit_trace_normalizer_note,CountFitTraceSlot,count_fit_trace_slot,count_fit_trace_status,count_fit_trace_note}
 // Dynamic full-likelihood log-dispersion profile / log-coordinate MAP.
 // No allocation. Explicit search bracket, initial beta and evaluation budget.
 // Global optimality and inferential calibration are never certified here.
@@ -5,8 +6,8 @@ use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_sta
 use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
 use linalg::dynamic_least_squares::{dynamic_qr_factorize}
 use linalg::least_squares_scale::{least_squares_scaled_product}
-use stats::regression::dynamic_count_glm::{dynamic_count_workspace,dynamic_count_fit}
-use stats::regression::nb2_likelihood::{Nb2LikelihoodSlot,nb2_likelihood_slot,nb2_log_probability_into,nb2_likelihood_slot_log_probability}
+use stats::regression::dynamic_count_glm::{dynamic_count_fit_with_trace_control,dynamic_count_workspace,dynamic_count_fit,dynamic_count_fit_traced}
+use stats::regression::nb2_likelihood::{Nb2CachedLikelihoodDifferenceSlot,nb2_cached_likelihood_difference_slot,nb2_log_probability_mean_rank_cached_difference_into,nb2_log_probability_mean_rank_cached_difference_traced_into,nb2_cached_likelihood_difference_value,Nb2CachedLikelihoodSlot,nb2_cached_likelihood_slot,nb2_log_probability_cached_into,nb2_cached_likelihood_slot_log_probability,nb2_cached_likelihood_normalizer_evaluated,nb2_cached_likelihood_cache_hit,nb2_cached_likelihood_cache_bypass,nb2_log_probability_mean_rank_difference_into,nb2_log_probability_mean_rank_difference_traced_into,Nb2LikelihoodDifferenceSlot,nb2_likelihood_difference_slot,nb2_log_probability_mean_difference_into,nb2_log_probability_mean_difference_traced_into,nb2_likelihood_difference_value,Nb2LikelihoodSlot,nb2_likelihood_slot,nb2_log_probability_into,nb2_likelihood_slot_log_probability}
 use math::pure::{is_finite,ln_checked,exp,sqrt}
 pub struct DispersionSearchOptions {
  pub method:i64, pub log_alpha_lower:f64, pub log_alpha_upper:f64,
@@ -100,12 +101,16 @@ fn dp_evaluate(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
  candidate_means:&!NumericBuffer,candidate_eta:&!NumericBuffer,
  weighted:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
  qr_work:&!NumericBuffer,count_stage:&!NumericBuffer,factor_r:&!NumericBuffer,
- factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer,pmf_work:&!Nb2LikelihoodSlot)->DPObjective with Mut,Div,Panic {
+ factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer,pmf_work:&!Nb2CachedLikelihoodSlot,trace_enabled:bool,trace:&!CountFitTraceSlot)->DPObjective with Mut,Div,Panic {
+ if trace_enabled {
+  if count_fit_trace_status(trace)!=0 {return dp_bad(7,count_fit_trace_status(trace))}
+  if count_fit_trace_note(trace,5)!=0 {return dp_bad(7,count_fit_trace_status(trace))}
+ }
  let n=numeric_matrix_rows(layout)
  let p=numeric_matrix_cols(layout)
- let fitted=dynamic_count_fit(a,layout,counts,offsets,initial,alpha,options.rcond,
+ let fitted=dynamic_count_fit_with_trace_control(a,layout,counts,offsets,initial,alpha,options.rcond,
  options.inner_iterations,options.inner_tolerance,candidate_coefficients,
- candidate_means,candidate_eta,weighted,response,step,qr_work,count_stage)
+ candidate_means,candidate_eta,weighted,response,step,qr_work,count_stage,trace_enabled,trace)
  if fitted.status!=0 {return dp_bad(1,fitted.status)}
  // Scaled compensated nonnegative sum of -logP. Do not form an overflowing
  // total or use a recursively rounded mean that can freeze at subnormal values.
@@ -114,9 +119,18 @@ fn dp_evaluate(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
  var correction:f64=0.0
  var i:i64=0
  while i<n {
-  let pmf_status=nb2_log_probability_into(integer_buffer_at(counts,i),numeric_buffer_at(candidate_means,i),alpha,pmf_work)
+  if trace_enabled {if count_fit_trace_note(trace,7)!=0 {return dp_bad(7,count_fit_trace_status(trace))}}
+  let pmf_status=nb2_log_probability_cached_into(integer_buffer_at(counts,i),numeric_buffer_at(candidate_means,i),alpha,pmf_work)
+  if trace_enabled {
+   let evaluated:bool=nb2_cached_likelihood_normalizer_evaluated(pmf_work)
+   let hit:bool=nb2_cached_likelihood_cache_hit(pmf_work)
+   let bypass:bool=nb2_cached_likelihood_cache_bypass(pmf_work)
+   if evaluated {if count_fit_trace_normalizer_note(trace,1)!=0 {return dp_bad(7,count_fit_trace_status(trace))}}
+   if hit {if count_fit_trace_normalizer_note(trace,2)!=0 {return dp_bad(7,count_fit_trace_status(trace))}}
+   if bypass {if count_fit_trace_normalizer_note(trace,3)!=0 {return dp_bad(7,count_fit_trace_status(trace))}}
+  }
   if pmf_status!=0 {return dp_bad(2,pmf_status)}
-  let log_probability=nb2_likelihood_slot_log_probability(pmf_work)
+  let log_probability=nb2_cached_likelihood_slot_log_probability(pmf_work)
   if !is_finite(log_probability) || log_probability>0.0 {return dp_bad(4,0)}
   let magnitude= -log_probability
   if magnitude>scale {
@@ -221,7 +235,38 @@ fn dp_evaluate(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
 // profile_status:0interior,1Poisson,2left edge,3right edge,4both range edges.
 // Curvature status:0available,1not requested,2boundary/resolution,3budget,
 // 4evaluation failure,5nonpositive,6inconsistent,7arithmetic.
-pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
+fn dp_evaluate_warm(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
+ offsets:&NumericBuffer,initial:&NumericBuffer,warm:&NumericBuffer,use_warm:bool,options:&DispersionSearchOptions,
+ alpha:f64,log_alpha:f64,candidate_coefficients:&!NumericBuffer,
+ candidate_means:&!NumericBuffer,candidate_eta:&!NumericBuffer,
+ weighted:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_work:&!NumericBuffer,count_stage:&!NumericBuffer,factor_r:&!NumericBuffer,
+ factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer,pmf_work:&!Nb2CachedLikelihoodSlot,trace_enabled:bool,trace:&!CountFitTraceSlot)->DPObjective with Mut,Div,Panic {
+ if use_warm {return dp_evaluate(a,layout,counts,offsets,warm,options,alpha,log_alpha,candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,qr_work,count_stage,factor_r,factor_scales,permutation,pmf_work,trace_enabled,trace)}
+ dp_evaluate(a,layout,counts,offsets,initial,options,alpha,log_alpha,candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,qr_work,count_stage,factor_r,factor_scales,permutation,pmf_work,trace_enabled,trace)
+}
+fn dp_candidate_rank(seeded:bool,prefer_equal:bool,objective:f64,best_objective:f64,
+ counts:&IntegerBuffer,best:&NumericBuffer,best_alpha:f64,candidate:&NumericBuffer,alpha:f64,
+ n:i64,work:&!Nb2CachedLikelihoodDifferenceSlot,trace_enabled:bool,trace:&!CountFitTraceSlot)->i64 with Mut,Div,Panic {
+ if !seeded {
+  if prefer_equal {if objective>=best_objective {return 1}} else {if objective>best_objective {return 1}}
+  return 0
+ }
+ if trace_enabled {if count_fit_trace_note(trace,6)!=0 {return -1}}
+ let status=if trace_enabled {nb2_log_probability_mean_rank_cached_difference_traced_into(counts,best,best_alpha,candidate,alpha,n,work,trace)}else{nb2_log_probability_mean_rank_cached_difference_into(counts,best,best_alpha,candidate,alpha,n,work)}
+ let gain:f64=nb2_cached_likelihood_difference_value(work)
+ if status!=0 {return -1}
+ if gain>0.0 {return 1}
+ if prefer_equal {if gain==0.0 {return 1}}
+ return 0
+}
+fn dp_rank_failed(n:i64,p:i64,method:i64,used:i64,trace:&CountFitTraceSlot)->DynamicDispersionFit {
+ var out=dp_empty(3,n,p,method)
+ out.evaluations=used;out.failure_stage=6;out.inner_status=5
+ if count_fit_trace_status(trace)!=0 {out.failure_stage=7;out.inner_status=count_fit_trace_status(trace)}
+ out
+}
+fn dp_fit_engine(a:&NumericBuffer,layout:&NumericMatrix,
  counts:&IntegerBuffer,offsets:&NumericBuffer,initial:&NumericBuffer,
  options:&DispersionSearchOptions,coefficients:&!NumericBuffer,
  means:&!NumericBuffer,eta:&!NumericBuffer,
@@ -230,10 +275,11 @@ pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
  best_means:&!NumericBuffer,best_eta:&!NumericBuffer,
  weighted:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
  qr_work:&!NumericBuffer,count_stage:&!NumericBuffer,factor_r:&!NumericBuffer,
- factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer)->DynamicDispersionFit with Mut,Div,Panic {
+ factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer,seed_active:bool,seed_alpha:f64,trace_enabled:bool,trace:&!CountFitTraceSlot)->DynamicDispersionFit with Mut,Div,Panic {
  let n=numeric_matrix_rows(layout)
  let p=numeric_matrix_cols(layout)
  if n<=p || p<1 {return dp_empty(1,n,p,options.method)}
+ if trace_enabled {if count_fit_trace_status(trace)!=0 {return dp_empty(4,n,p,options.method)}}
  let span=options.log_alpha_upper-options.log_alpha_lower
  if options.method<0 || options.method>1 || !is_finite(options.log_alpha_lower) ||
  !is_finite(options.log_alpha_upper) || !is_finite(span) || span<=0.0 ||
@@ -274,9 +320,15 @@ pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
  numeric_buffer_len(factor_r)!=plan.factor_r_elements ||
  numeric_buffer_len(factor_scales)!=plan.factor_scale_elements ||
  integer_buffer_len(permutation)!=plan.permutation_elements {return dp_empty(1,n,p,options.method)}
- let initial_cost=if options.prior_active {9}else{10}
+ if seed_active {
+  if options.method!=0 || options.prior_active || options.compute_curvature {return dp_empty(2,n,p,options.method)}
+  if !is_finite(seed_alpha) || seed_alpha<0.0 {return dp_empty(2,n,p,options.method)}
+  if seed_alpha>0.0 {if seed_alpha<lower_alpha || seed_alpha>upper_alpha {return dp_empty(2,n,p,options.method)}}
+ }
+ let initial_cost=(if options.prior_active {9}else{10})+(if seed_active {1}else{0})
  if options.max_outer_evaluations<initial_cost {return dp_empty(5,n,p,options.method)}
- var pmf_work=nb2_likelihood_slot()
+ var pmf_work=nb2_cached_likelihood_slot()
+ var pair_work=nb2_cached_likelihood_difference_slot()
  var used:i64=0
  var best_objective:f64=0.0
  var best_full:f64=0.0
@@ -287,6 +339,21 @@ pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
  var positive_best:f64=0.0
  var positive_index:i64=0
  var grid:[f64;9]=[0.0;9]
+ if seed_active {
+  var seed_log:f64=0.0
+  if seed_alpha>0.0 {
+   let logged=ln_checked(seed_alpha)
+   if logged.status!=0 {return dp_empty(4,n,p,options.method)}
+   seed_log=logged.value
+  }
+  used=used+1
+  let seed=dp_evaluate(a,layout,counts,offsets,initial,options,seed_alpha,seed_log,candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work,trace_enabled,trace)
+  if seed.status!=0 {var failed=dp_empty(3,n,p,options.method);failed.evaluations=used;failed.inner_status=seed.inner_status;failed.failure_stage=seed.failure_stage;return failed}
+  best_objective=seed.objective;best_full=seed.full_mean;best_logdet=seed.logdet
+  best_alpha=seed_alpha;best_log=seed_log;best_poisson=seed_alpha==0.0
+  dp_copy(candidate_coefficients,best_coefficients,p)
+  dp_copy(candidate_means,best_means,n);dp_copy(candidate_eta,best_eta,n)
+ }
  var i:i64=0
  while i<9 {
   var t=options.log_alpha_lower+(span/8.0)*(i as f64)
@@ -294,9 +361,9 @@ pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
   grid[i as usize]=t
   let alpha=exp(t)
   used=used+1
-  let candidate=dp_evaluate(a,layout,counts,offsets,initial,options,alpha,t,
+  let candidate=dp_evaluate_warm(a,layout,counts,offsets,initial,best_coefficients,seed_active,options,alpha,t,
  candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,
- qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work)
+ qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work,trace_enabled,trace)
   if candidate.status!=0 {
     var failed=dp_empty(3,n,p,options.method)
     failed.evaluations=used
@@ -304,30 +371,27 @@ pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
     failed.failure_stage=candidate.failure_stage
     return failed
    }
-  if i==0 {
-   best_objective=candidate.objective;best_full=candidate.full_mean;best_logdet=candidate.logdet
-   best_alpha=alpha;best_log=t
-   positive_best=candidate.objective;positive_index=i
-   dp_copy(candidate_coefficients,best_coefficients,p)
-   dp_copy(candidate_means,best_means,n)
-   dp_copy(candidate_eta,best_eta,n)
-  } else {
+  if i==0 {positive_best=candidate.objective;positive_index=0} else {
    if candidate.objective>positive_best {positive_best=candidate.objective;positive_index=i}
-   if candidate.objective>best_objective {
-    best_objective=candidate.objective;best_full=candidate.full_mean;best_logdet=candidate.logdet
-    best_alpha=alpha;best_log=t
-    dp_copy(candidate_coefficients,best_coefficients,p)
-   dp_copy(candidate_means,best_means,n)
-   dp_copy(candidate_eta,best_eta,n)
-   }
+  }
+  var candidate_rank:i64=1
+  if i!=0 || seed_active {
+   candidate_rank=dp_candidate_rank(seed_active,false,candidate.objective,best_objective,counts,best_means,best_alpha,candidate_means,alpha,n,&!pair_work,trace_enabled,trace)
+   if candidate_rank<0 {return dp_rank_failed(n,p,options.method,used,trace)}
+  }
+  if candidate_rank==1 {
+   best_objective=candidate.objective;best_full=candidate.full_mean;best_logdet=candidate.logdet
+   best_alpha=alpha;best_log=t;best_poisson=false
+   dp_copy(candidate_coefficients,best_coefficients,p)
+   dp_copy(candidate_means,best_means,n);dp_copy(candidate_eta,best_eta,n)
   }
   i=i+1
  }
  if !options.prior_active {
   used=used+1
-  let poisson=dp_evaluate(a,layout,counts,offsets,initial,options,0.0,0.0,
+  let poisson=dp_evaluate_warm(a,layout,counts,offsets,initial,best_coefficients,seed_active,options,0.0,0.0,
  candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,
- qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work)
+ qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work,trace_enabled,trace)
   if poisson.status!=0 {
     var failed=dp_empty(3,n,p,options.method)
     failed.evaluations=used
@@ -336,7 +400,9 @@ pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
     return failed
    }
   // Exact ties prefer the explicit Poisson candidate, never a hidden alpha floor.
-  if poisson.objective>=best_objective {
+  let poisson_rank=dp_candidate_rank(seed_active,true,poisson.objective,best_objective,counts,best_means,best_alpha,candidate_means,0.0,n,&!pair_work,trace_enabled,trace)
+  if poisson_rank<0 {return dp_rank_failed(n,p,options.method,used,trace)}
+  if poisson_rank==1 {
    best_objective=poisson.objective;best_full=poisson.full_mean;best_logdet=poisson.logdet
    best_alpha=0.0;best_log=0.0;best_poisson=true
    dp_copy(candidate_coefficients,best_coefficients,p)
@@ -351,6 +417,13 @@ pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
   right=grid[positive_index as usize]
   if positive_index<8 {right=grid[(positive_index+1) as usize]}
  }
+ if seed_active {if best_alpha==seed_alpha {if seed_alpha>0.0 {
+  var index:i64=0
+  while index<8 {
+   if best_log>=grid[index as usize] && best_log<=grid[(index+1) as usize] {left=grid[index as usize];right=grid[(index+1) as usize];break}
+   index=index+1
+  }
+ }}}
  let ratio:f64=0.6180339887498948482
  if right-left>options.outer_tolerance {
   var x1=right-ratio*(right-left)
@@ -361,9 +434,9 @@ pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
     return exhausted
    }
   used=used+1
-  let first=dp_evaluate(a,layout,counts,offsets,initial,options,exp(x1),x1,
+  let first=dp_evaluate_warm(a,layout,counts,offsets,initial,best_coefficients,seed_active,options,exp(x1),x1,
  candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,
- qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work)
+ qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work,trace_enabled,trace)
   if first.status!=0 {
     var failed=dp_empty(3,n,p,options.method)
     failed.evaluations=used
@@ -372,7 +445,9 @@ pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
     return failed
    }
   var f1=first.objective
-  if f1>best_objective {
+  let first_rank=dp_candidate_rank(seed_active,false,f1,best_objective,counts,best_means,best_alpha,candidate_means,exp(x1),n,&!pair_work,trace_enabled,trace)
+  if first_rank<0 {return dp_rank_failed(n,p,options.method,used,trace)}
+  if first_rank==1 {
    best_objective=f1;best_full=first.full_mean;best_logdet=first.logdet
    best_alpha=exp(x1);best_log=x1;best_poisson=false
    dp_copy(candidate_coefficients,best_coefficients,p)
@@ -385,9 +460,9 @@ pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
     return exhausted
    }
   used=used+1
-  let second=dp_evaluate(a,layout,counts,offsets,initial,options,exp(x2),x2,
+  let second=dp_evaluate_warm(a,layout,counts,offsets,initial,best_coefficients,seed_active,options,exp(x2),x2,
  candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,
- qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work)
+ qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work,trace_enabled,trace)
   if second.status!=0 {
     var failed=dp_empty(3,n,p,options.method)
     failed.evaluations=used
@@ -396,7 +471,9 @@ pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
     return failed
    }
   var f2=second.objective
-  if f2>best_objective {
+  let second_rank=dp_candidate_rank(seed_active,false,f2,best_objective,counts,best_means,best_alpha,candidate_means,exp(x2),n,&!pair_work,trace_enabled,trace)
+  if second_rank<0 {return dp_rank_failed(n,p,options.method,used,trace)}
+  if second_rank==1 {
    best_objective=f2;best_full=second.full_mean;best_logdet=second.logdet
    best_alpha=exp(x2);best_log=x2;best_poisson=false
    dp_copy(candidate_coefficients,best_coefficients,p)
@@ -421,9 +498,9 @@ pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
     return exhausted
    }
    used=used+1
-   let candidate=dp_evaluate(a,layout,counts,offsets,initial,options,exp(next),next,
+   let candidate=dp_evaluate_warm(a,layout,counts,offsets,initial,best_coefficients,seed_active,options,exp(next),next,
  candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,
- qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work)
+ qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work,trace_enabled,trace)
    if candidate.status!=0 {
     var failed=dp_empty(3,n,p,options.method)
     failed.evaluations=used
@@ -432,7 +509,9 @@ pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
     return failed
    }
    if replace_first {x1=next;f1=candidate.objective} else {x2=next;f2=candidate.objective}
-   if candidate.objective>best_objective {
+   let next_rank=dp_candidate_rank(seed_active,false,candidate.objective,best_objective,counts,best_means,best_alpha,candidate_means,exp(next),n,&!pair_work,trace_enabled,trace)
+  if next_rank<0 {return dp_rank_failed(n,p,options.method,used,trace)}
+  if next_rank==1 {
     best_objective=candidate.objective;best_full=candidate.full_mean;best_logdet=candidate.logdet
     best_alpha=exp(next);best_log=next;best_poisson=false
     dp_copy(candidate_coefficients,best_coefficients,p)
@@ -485,9 +564,9 @@ pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
       if index==3 {displacement= -half_h}
       let point=best_log+displacement
       used=used+1
-      let trial=dp_evaluate(a,layout,counts,offsets,initial,options,exp(point),point,
+      let trial=dp_evaluate_warm(a,layout,counts,offsets,initial,best_coefficients,seed_active,options,exp(point),point,
        candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,
-       qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work)
+       qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work,trace_enabled,trace)
       if trial.status!=0 {
        out.curvature_status=4
        out.inner_status=trial.inner_status
@@ -533,3 +612,61 @@ pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
  dp_copy(best_eta,eta,n)
  out
 }
+pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
+ counts:&IntegerBuffer,offsets:&NumericBuffer,initial:&NumericBuffer,
+ options:&DispersionSearchOptions,coefficients:&!NumericBuffer,
+ means:&!NumericBuffer,eta:&!NumericBuffer,
+ candidate_coefficients:&!NumericBuffer,candidate_means:&!NumericBuffer,
+ candidate_eta:&!NumericBuffer,best_coefficients:&!NumericBuffer,
+ best_means:&!NumericBuffer,best_eta:&!NumericBuffer,
+ weighted:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_work:&!NumericBuffer,count_stage:&!NumericBuffer,factor_r:&!NumericBuffer,
+ factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer)->DynamicDispersionFit with Mut,Div,Panic {
+ var trace=count_fit_trace_slot()
+ dp_fit_engine(a,layout,counts,offsets,initial,options,coefficients,means,eta,candidate_coefficients,candidate_means,candidate_eta,best_coefficients,best_means,best_eta,weighted,response,step,qr_work,count_stage,factor_r,factor_scales,permutation,false,0.0,false,&!trace)
+}
+
+// Opt-in ML seed, paired candidate ranking and validated warm starts. No global optimum certificate.
+pub fn dynamic_dispersion_fit_seeded(a:&NumericBuffer,layout:&NumericMatrix,
+ counts:&IntegerBuffer,offsets:&NumericBuffer,initial:&NumericBuffer,
+ options:&DispersionSearchOptions,coefficients:&!NumericBuffer,
+ means:&!NumericBuffer,eta:&!NumericBuffer,
+ candidate_coefficients:&!NumericBuffer,candidate_means:&!NumericBuffer,
+ candidate_eta:&!NumericBuffer,best_coefficients:&!NumericBuffer,
+ best_means:&!NumericBuffer,best_eta:&!NumericBuffer,
+ weighted:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_work:&!NumericBuffer,count_stage:&!NumericBuffer,factor_r:&!NumericBuffer,
+ factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer,seed_alpha:f64)->DynamicDispersionFit with Mut,Div,Panic {
+ var trace=count_fit_trace_slot()
+ dp_fit_engine(a,layout,counts,offsets,initial,options,coefficients,means,eta,candidate_coefficients,candidate_means,candidate_eta,best_coefficients,best_means,best_eta,weighted,response,step,qr_work,count_stage,factor_r,factor_scales,permutation,true,seed_alpha,false,&!trace)
+}
+
+// Caller-owned trace accumulates; no implicit reset.
+pub fn dynamic_dispersion_fit_traced(a:&NumericBuffer,layout:&NumericMatrix,
+ counts:&IntegerBuffer,offsets:&NumericBuffer,initial:&NumericBuffer,
+ options:&DispersionSearchOptions,coefficients:&!NumericBuffer,
+ means:&!NumericBuffer,eta:&!NumericBuffer,
+ candidate_coefficients:&!NumericBuffer,candidate_means:&!NumericBuffer,
+ candidate_eta:&!NumericBuffer,best_coefficients:&!NumericBuffer,
+ best_means:&!NumericBuffer,best_eta:&!NumericBuffer,
+ weighted:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_work:&!NumericBuffer,count_stage:&!NumericBuffer,factor_r:&!NumericBuffer,
+ factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer,trace:&!CountFitTraceSlot)->DynamicDispersionFit with Mut,Div,Panic {
+ dp_fit_engine(a,layout,counts,offsets,initial,options,coefficients,means,eta,candidate_coefficients,candidate_means,candidate_eta,best_coefficients,best_means,best_eta,weighted,response,step,qr_work,count_stage,factor_r,factor_scales,permutation,false,0.0,true,trace)
+}
+
+pub fn dynamic_dispersion_fit_seeded_traced(a:&NumericBuffer,layout:&NumericMatrix,
+ counts:&IntegerBuffer,offsets:&NumericBuffer,initial:&NumericBuffer,
+ options:&DispersionSearchOptions,coefficients:&!NumericBuffer,
+ means:&!NumericBuffer,eta:&!NumericBuffer,
+ candidate_coefficients:&!NumericBuffer,candidate_means:&!NumericBuffer,
+ candidate_eta:&!NumericBuffer,best_coefficients:&!NumericBuffer,
+ best_means:&!NumericBuffer,best_eta:&!NumericBuffer,
+ weighted:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_work:&!NumericBuffer,count_stage:&!NumericBuffer,factor_r:&!NumericBuffer,
+ factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer,seed_alpha:f64,trace:&!CountFitTraceSlot)->DynamicDispersionFit with Mut,Div,Panic {
+ dp_fit_engine(a,layout,counts,offsets,initial,options,coefficients,means,eta,candidate_coefficients,candidate_means,candidate_eta,best_coefficients,best_means,best_eta,weighted,response,step,qr_work,count_stage,factor_r,factor_scales,permutation,true,seed_alpha,true,trace)
+}
+
+// Fixed cache-array payload only: one objective owner and two ranking owners.
+pub fn dynamic_dispersion_private_cache_payload_bytes()->i64 {6144}

@@ -1,9 +1,11 @@
+use stats::regression::count_fit_trace::{CountFitTraceSlot,count_fit_trace_slot,count_fit_trace_status,count_fit_trace_note}
 // Dynamic fixed-dispersion NB2 / Poisson log-link Fisher scoring.
 // Borrowed design/counts/offsets and caller initialization. No implicit intercept.
 // Point fit only; no dispersion estimation or calibrated inference.
 use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_get,numeric_matrix_at}
 use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
 use linalg::dynamic_least_squares::{dynamic_qr_workspace,dynamic_qr_least_squares}
+use stats::regression::nb2_log_increment::{nb2_same_alpha_increment_into}
 use linalg::least_squares_scale::{LeastSquaresNumber,least_squares_restore,least_squares_scaled_product_into}
 use stats::regression::nb2_deviance::{Nb2DevianceSlot,nb2_deviance_slot,nb2_deviance_into,nb2_deviance_slot_deviance_status,nb2_deviance_slot_deviance}
 use math::pure::{is_finite,exp,sqrt}
@@ -124,59 +126,14 @@ fn dc_local_loglik_gain(counts:&IntegerBuffer,stage:&NumericBuffer,
  while i<n {
   let mu=numeric_buffer_at(stage,current_start+i)
   let trial=numeric_buffer_at(stage,trial_start+i)
-  let delta_mu=trial-mu
-  if delta_mu!=0.0 {
-   let d=delta_mu/mu
-   if !is_finite(d) {return DCEvaluation{status:1,objective:0.0}}
-   if dc_abs(d)>0.25 {return DCEvaluation{status:1,objective:0.0}}
-   if d==0.0 {return DCEvaluation{status:4,objective:0.0}}
-   let weight=dc_weight(mu,alpha)
-   if weight<0.0 {return DCEvaluation{status:4,objective:0.0}}
-   var q:f64=0.0
-   if alpha>0.0 {
-    if mu>=1.0 {q=alpha/(alpha+1.0/mu)} else {
-     let product=alpha*mu
-     q=product/(1.0+product)
-    }
-   }
-   if !is_finite(q) || q<0.0 || q>1.0 {return DCEvaluation{status:4,objective:0.0}}
-   var a:f64=1.0
-   var b:f64=0.5
-   var a_correction:f64=0.0
-   var b_correction:f64=0.0
-   var power:f64=1.0
-   var geometric:f64=1.0
-   var k:i64=1
-   while k<32 {
-    power=power*(-d)
-    geometric=1.0+q*geometric
-    let a_term=(power*geometric)/((k+1) as f64)-a_correction
-    let a_next=a+a_term
-    a_correction=(a_next-a)-a_term
-    a=a_next
-    let b_term=(power*geometric)/((k+2) as f64)-b_correction
-    let b_next=b+b_term
-    b_correction=(b_next-b)-b_term
-    b=b_next
-    k=k+1
-   }
-   if !is_finite(a) || !is_finite(b) || a<=0.0 || b<=0.0 {return DCEvaluation{status:4,objective:0.0}}
-   let delta=(integer_buffer_at(counts,i) as f64)-mu
-   let absolute_d=dc_abs(d)
-   // |d|*A and |d|*B are bounded local coefficients; keep W and mu
-   // separate in the balanced products to retain extreme conditional weights.
-   let first_status=least_squares_scaled_product_into(delta,weight,absolute_d*a,mu,1.0,1.0,product_work)
-   let first_value:f64=product_work.value
-   let second_status=least_squares_scaled_product_into(weight,absolute_d,absolute_d*b,1.0,1.0,1.0,product_work)
-   let second_value:f64=product_work.value
-   if first_status!=0 || second_status!=0 {return DCEvaluation{status:4,objective:0.0}}
-   if delta!=0.0 {if first_value==0.0 {return DCEvaluation{status:4,objective:0.0}}}
-   if second_value==0.0 {return DCEvaluation{status:4,objective:0.0}}
-   var signed_first=first_value
-   if d<0.0 {signed_first= -signed_first}
-   let contribution=(signed_first-second_value)/(n as f64)
+  if trial!=mu {
+   let status=nb2_same_alpha_increment_into(integer_buffer_at(counts,i),mu,trial,alpha,product_work)
+   let value:f64=product_work.value
+   if status==6 {return DCEvaluation{status:1,objective:0.0}}
+   if status!=0 {return DCEvaluation{status:4,objective:0.0}}
+   let contribution=value/(n as f64)
    if !is_finite(contribution) {return DCEvaluation{status:4,objective:0.0}}
-   if signed_first!=second_value {if contribution==0.0 {return DCEvaluation{status:4,objective:0.0}}}
+   if value!=0.0 {if contribution==0.0 {return DCEvaluation{status:4,objective:0.0}}}
    let adjusted=contribution-correction
    let next=gain+adjusted
    correction=(next-gain)-adjusted
@@ -194,14 +151,18 @@ fn dc_local_loglik_gain(counts:&IntegerBuffer,stage:&NumericBuffer,
 // 9 count exceeds exact binary64 integer range.
 // Outputs coeff/means/eta unchanged on every failure; scratch may change.
 // Caller supplies all initial coefficients. alpha0 is the exact Poisson branch.
-pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
+fn dc_fit_engine(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
  log_offsets:&NumericBuffer,initial_coefficients:&NumericBuffer,alpha:f64,rcond:f64,
  max_iterations:i64,tolerance:f64,coefficients:&!NumericBuffer,
  means:&!NumericBuffer,linear_predictors:&!NumericBuffer,
  weighted_design:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
- qr_workspace:&!NumericBuffer,stage:&!NumericBuffer)->DynamicCountFit with Mut,Div,Panic {
+ qr_workspace:&!NumericBuffer,stage:&!NumericBuffer,trace_enabled:bool,trace:&!CountFitTraceSlot)->DynamicCountFit with Mut,Div,Panic {
  let n=numeric_matrix_rows(layout)
  let p=numeric_matrix_cols(layout)
+ if trace_enabled {
+  if count_fit_trace_status(trace)!=0 {return dc_empty(4,n,p)}
+  if count_fit_trace_note(trace,1)!=0 {return dc_empty(4,n,p)}
+ }
  let plan=dynamic_count_workspace(n,p)
  if plan.status!=0 || numeric_matrix_status(layout)!=0 ||
  numeric_buffer_status(a)!=0 || integer_buffer_status(counts)!=0 ||
@@ -243,6 +204,7 @@ pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerB
  // Rank is established independently of the caller's initialization.
  i=0
  while i<n {numeric_buffer_set(response,i,0.0) i=i+1}
+ if trace_enabled {if count_fit_trace_note(trace,3)!=0 {return dc_empty(4,n,p)}}
  let rank_fit=dynamic_qr_least_squares(a,layout,response,step,qr_workspace,rcond)
  if rank_fit.status!=0 {
   var bad=dc_empty(if rank_fit.status==3 {6}else if rank_fit.status==5 {5}else{4},n,p)
@@ -305,6 +267,7 @@ pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerB
  let normalized_layout=numeric_matrix(plan.design_elements,n,p,p,1,0)
  var iteration:i64=0
  while iteration<max_iterations {
+  if trace_enabled {if count_fit_trace_note(trace,2)!=0 {return dc_empty(4,n,p)}}
   var response_scale:f64=0.0
   var weight_scale:f64=0.0
   i=0
@@ -384,6 +347,7 @@ pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerB
    }
    i=i+1
   }
+  if trace_enabled {if count_fit_trace_note(trace,4)!=0 {return dc_empty(4,n,p)}}
   let solved=dynamic_qr_least_squares(weighted_design,&normalized_layout,response,step,qr_workspace,rcond)
   if solved.status!=0 {
    var bad=dc_empty(if solved.status==3 {6}else{4},n,p)
@@ -486,4 +450,34 @@ pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerB
  var exhausted=dc_empty(7,n,p)
  exhausted.iterations=iteration
  exhausted
+}
+pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
+ log_offsets:&NumericBuffer,initial_coefficients:&NumericBuffer,alpha:f64,rcond:f64,
+ max_iterations:i64,tolerance:f64,coefficients:&!NumericBuffer,
+ means:&!NumericBuffer,linear_predictors:&!NumericBuffer,
+ weighted_design:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_workspace:&!NumericBuffer,stage:&!NumericBuffer)->DynamicCountFit with Mut,Div,Panic {
+ var trace=count_fit_trace_slot()
+ dc_fit_engine(a,layout,counts,log_offsets,initial_coefficients,alpha,rcond,max_iterations,tolerance,coefficients,means,linear_predictors,weighted_design,response,step,qr_workspace,stage,false,&!trace)
+}
+
+// Accumulates actual fit/IRLS/QR callsite counts in the caller-owned trace.
+pub fn dynamic_count_fit_traced(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
+ log_offsets:&NumericBuffer,initial_coefficients:&NumericBuffer,alpha:f64,rcond:f64,
+ max_iterations:i64,tolerance:f64,coefficients:&!NumericBuffer,
+ means:&!NumericBuffer,linear_predictors:&!NumericBuffer,
+ weighted_design:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_workspace:&!NumericBuffer,stage:&!NumericBuffer,trace:&!CountFitTraceSlot)->DynamicCountFit with Mut,Div,Panic {
+ dc_fit_engine(a,layout,counts,log_offsets,initial_coefficients,alpha,rcond,max_iterations,tolerance,coefficients,means,linear_predictors,weighted_design,response,step,qr_workspace,stage,true,trace)
+}
+
+// Fully checked numerical fit with explicit trace control. Disabled leaves the
+// caller trace untouched, including its status; no factory is called here.
+pub fn dynamic_count_fit_with_trace_control(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
+ log_offsets:&NumericBuffer,initial_coefficients:&NumericBuffer,alpha:f64,rcond:f64,
+ max_iterations:i64,tolerance:f64,coefficients:&!NumericBuffer,
+ means:&!NumericBuffer,linear_predictors:&!NumericBuffer,
+ weighted_design:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_workspace:&!NumericBuffer,stage:&!NumericBuffer,enabled:bool,trace:&!CountFitTraceSlot)->DynamicCountFit with Mut,Div,Panic {
+ dc_fit_engine(a,layout,counts,log_offsets,initial_coefficients,alpha,rcond,max_iterations,tolerance,coefficients,means,linear_predictors,weighted_design,response,step,qr_workspace,stage,enabled,trace)
 }
