@@ -1,0 +1,75 @@
+// NB2 moment dispersion from supplied means. See NB_DISPERSION.md.
+use math::pure::is_finite
+pub struct NbDispersion {
+ pub status:i64, pub n:i64, pub parameters_declared:i64, pub residual_df:i64,
+ pub alpha_signed:f64, pub alpha_nonnegative:f64, pub truncated:bool,
+ pub pearson_x2:f64, pub weight_sum:f64, pub nb_assumptions_assessed:bool,
+}
+fn nb_empty(status:i64,n:i64,parameters_declared:i64)->NbDispersion {
+ NbDispersion{status:status,n:n,parameters_declared:parameters_declared,residual_df:0,alpha_signed:0.0,alpha_nonnegative:0.0,truncated:false,pearson_x2:0.0,weight_sum:0.0,nb_assumptions_assessed:false}
+}
+pub fn nb2_moment_dispersion(counts:&[i64;256],means:&[f64;256],n:i64,parameters_declared:i64)->NbDispersion with Mut,Div,Panic {
+ if n<2 || n>256 || parameters_declared<0 || parameters_declared>=n { return nb_empty(1,n,parameters_declared) }
+ var i:i64=0
+ while i<n {
+  if !is_finite(means[i as usize]) { return nb_empty(2,n,parameters_declared) }
+  i=i+1
+ }
+ i=0
+ while i<n {
+  if means[i as usize]<=0.0 { return nb_empty(3,n,parameters_declared) }
+  i=i+1
+ }
+ i=0
+ while i<n {
+  if counts[i as usize]<0 { return nb_empty(4,n,parameters_declared) }
+  i=i+1
+ }
+ var moment:f64=0.0
+ var moment_correction:f64=0.0
+ var weight:f64=0.0
+ var weight_correction:f64=0.0
+ var pearson:f64=0.0
+ var pearson_correction:f64=0.0
+ i=0
+ while i<n {
+  let y=counts[i as usize] as f64
+  let mu=means[i as usize]
+  let difference=y-mu
+  let square=difference*difference
+  let mu_square=mu*mu
+  // A row's squared mean may underflow; the aggregate weight is checked below.
+  if !is_finite(difference) || !is_finite(square) || !is_finite(mu_square) { return nb_empty(5,n,parameters_declared) }
+  let moment_term=square-mu
+  // For zero counts the exact contribution is mu, even when mu*mu underflows.
+  // Positive integer counts keep the established arithmetic path.
+  var pearson_term=mu
+  if counts[i as usize]>0 { pearson_term=square/mu }
+  if !is_finite(moment_term) || !is_finite(pearson_term) { return nb_empty(5,n,parameters_declared) }
+  let moment_adjusted=moment_term-moment_correction
+  let moment_next=moment+moment_adjusted
+  moment_correction=(moment_next-moment)-moment_adjusted
+  moment=moment_next
+  let weight_adjusted=mu_square-weight_correction
+  let weight_next=weight+weight_adjusted
+  weight_correction=(weight_next-weight)-weight_adjusted
+  weight=weight_next
+  let pearson_adjusted=pearson_term-pearson_correction
+  let pearson_next=pearson+pearson_adjusted
+  pearson_correction=(pearson_next-pearson)-pearson_adjusted
+  pearson=pearson_next
+  if !is_finite(moment) || !is_finite(weight) || !is_finite(pearson) { return nb_empty(5,n,parameters_declared) }
+  i=i+1
+ }
+ if !is_finite(weight) || weight<=0.0 || !is_finite(moment) || !is_finite(pearson) { return nb_empty(5,n,parameters_declared) }
+ let residual_df=n-parameters_declared
+ if residual_df<1 { return nb_empty(6,n,parameters_declared) }
+ let raw=moment/weight
+ let scale=(n as f64)/(residual_df as f64)
+ let alpha=raw*scale
+ if !is_finite(raw) || !is_finite(scale) || !is_finite(alpha) { return nb_empty(5,n,parameters_declared) }
+ var nonnegative=alpha
+ var truncated=false
+ if alpha<0.0 { nonnegative=0.0 truncated=true }
+ NbDispersion{status:0,n:n,parameters_declared:parameters_declared,residual_df:residual_df,alpha_signed:alpha,alpha_nonnegative:nonnegative,truncated:truncated,pearson_x2:pearson,weight_sum:weight,nb_assumptions_assessed:false}
+}

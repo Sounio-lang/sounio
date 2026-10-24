@@ -1,0 +1,178 @@
+use math::pure::{is_finite}
+use io::sci_print::{print_f64_sci}
+use viz::scale::{ScaleSpec,scale_valid,scale_forward}
+use viz::scatter::{scatter_geometry}
+use viz::uncertainty::{uncertainty_domain}
+use viz::dynamic_plot::{DynamicPlotSpec,dynamic_line_canvas,dynamic_line_svg,dynamic_interval_canvas,dynamic_interval_svg}
+use viz::dynamic_line_reduce::{dynamic_line_reduce}
+use display::canvas::{Canvas}
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
+pub struct DynamicScaleResult {pub status:i64,pub n:i64,pub written:i64}
+pub struct DynamicScaledPlot {pub status:i64,pub plot:DynamicPlotSpec,pub raw_xmin:f64,pub raw_xmax:f64,pub raw_ymin:f64,pub raw_ymax:f64,pub x_scale:ScaleSpec,pub y_scale:ScaleSpec}
+pub struct DynamicScaledRender {pub status:i64,pub stage:i64,pub n:i64,pub required:i64,pub selected:i64,pub visible_primitives:i64}
+fn dsp_shape(x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer,tx:&NumericBuffer,ty:&NumericBuffer)->bool {
+ if numeric_buffer_status(x)!=0 || numeric_buffer_status(y)!=0 || integer_buffer_status(a)!=0 || numeric_buffer_status(tx)!=0 || numeric_buffer_status(ty)!=0 {return false}
+ let n=numeric_buffer_len(x)
+ numeric_buffer_len(y)==n && integer_buffer_len(a)==n && numeric_buffer_len(tx)==n && numeric_buffer_len(ty)==n
+}
+// Status0 success,1 scale,2 owner/shape,3 mask/raw payload,4 transform unavailable.
+// Masked output elements are left unchanged, never inspected or transformed.
+pub fn dynamic_scale_xy(x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer,tx:&!NumericBuffer,ty:&!NumericBuffer,xs:&ScaleSpec,ys:&ScaleSpec)->DynamicScaleResult with Mut,Div,Panic {
+ let n=numeric_buffer_len(x)
+ var result=DynamicScaleResult{status:1,n:n,written:0}
+ if !scale_valid(xs) || !scale_valid(ys) {return result}
+ result.status=2
+ if !dsp_shape(x,y,a,tx,ty) {return result}
+ var i:i64=0
+ while i<n {
+  let flag=integer_buffer_at(a,i)
+  result.status=3
+  if flag!=0 && flag!=1 {return result}
+  if flag==1 {
+   let vx=numeric_buffer_at(x,i);let vy=numeric_buffer_at(y,i)
+   if !is_finite(vx) || !is_finite(vy) {return result}
+   let transformed_x=scale_forward(vx,xs);let transformed_y=scale_forward(vy,ys)
+   result.status=4
+   if transformed_x.status!=0 || transformed_y.status!=0 {return result}
+  }
+  i=i+1
+ }
+ i=0
+ while i<n {
+  if integer_buffer_at(a,i)==1 {
+   let transformed_x=scale_forward(numeric_buffer_at(x,i),xs)
+   let transformed_y=scale_forward(numeric_buffer_at(y,i),ys)
+   let ignored_x=numeric_buffer_set(tx,i,transformed_x.value)
+   let ignored_y=numeric_buffer_set(ty,i,transformed_y.value)
+   result.written=result.written+1
+  }
+  i=i+1
+ }
+ result.status=0
+ result
+}
+pub fn dynamic_scale_intervals(x:&NumericBuffer,mean:&NumericBuffer,lower:&NumericBuffer,upper:&NumericBuffer,a:&IntegerBuffer,tx:&!NumericBuffer,tm:&!NumericBuffer,tl:&!NumericBuffer,tu:&!NumericBuffer,xs:&ScaleSpec,ys:&ScaleSpec)->DynamicScaleResult with Mut,Div,Panic {
+ let n=numeric_buffer_len(x)
+ var result=DynamicScaleResult{status:1,n:n,written:0}
+ if !scale_valid(xs) || !scale_valid(ys) {return result}
+ result.status=2
+ if !dsp_shape(x,mean,a,tx,tm) {return result}
+ if numeric_buffer_status(lower)!=0 || numeric_buffer_status(upper)!=0 || numeric_buffer_status(tl)!=0 || numeric_buffer_status(tu)!=0 {return result}
+ if numeric_buffer_len(lower)!=n || numeric_buffer_len(upper)!=n || numeric_buffer_len(tl)!=n || numeric_buffer_len(tu)!=n {return result}
+ var i:i64=0
+ while i<n {
+  let flag=integer_buffer_at(a,i)
+  result.status=3
+  if flag!=0 && flag!=1 {return result}
+  if flag==1 {
+   let vx=numeric_buffer_at(x,i);let vm=numeric_buffer_at(mean,i)
+   let lo=numeric_buffer_at(lower,i);let hi=numeric_buffer_at(upper,i)
+   if !is_finite(vx) || !is_finite(vm) || !is_finite(lo) || !is_finite(hi) || lo>vm || vm>hi {return result}
+   let xx=scale_forward(vx,xs);let mm=scale_forward(vm,ys)
+   let ll=scale_forward(lo,ys);let uu=scale_forward(hi,ys)
+   result.status=4
+   if xx.status!=0 || mm.status!=0 || ll.status!=0 || uu.status!=0 {return result}
+   if ll.value>mm.value || mm.value>uu.value {return result}
+  }
+  i=i+1
+ }
+ i=0
+ while i<n {
+  if integer_buffer_at(a,i)==1 {
+   let xx=scale_forward(numeric_buffer_at(x,i),xs);let mm=scale_forward(numeric_buffer_at(mean,i),ys)
+   let ll=scale_forward(numeric_buffer_at(lower,i),ys);let uu=scale_forward(numeric_buffer_at(upper,i),ys)
+   let ax=numeric_buffer_set(tx,i,xx.value);let am=numeric_buffer_set(tm,i,mm.value)
+   let al=numeric_buffer_set(tl,i,ll.value);let au=numeric_buffer_set(tu,i,uu.value)
+   result.written=result.written+1
+  }
+  i=i+1
+ }
+ result.status=0
+ result
+}
+pub fn dynamic_scaled_plot(raw:&DynamicPlotSpec,xs:&ScaleSpec,ys:&ScaleSpec)->DynamicScaledPlot with Mut,Div {
+ var out=DynamicScaledPlot{status:1,plot:*raw,raw_xmin:raw.xmin,raw_xmax:raw.xmax,raw_ymin:raw.ymin,raw_ymax:raw.ymax,x_scale:*xs,y_scale:*ys}
+ if !scatter_geometry(raw.x,raw.y,raw.w,raw.h) || !scale_valid(xs) || !scale_valid(ys) {return out}
+ if !is_finite(raw.xmin) || !is_finite(raw.xmax) || !is_finite(raw.ymin) || !is_finite(raw.ymax) {return out}
+ if raw.xmin>raw.xmax || raw.ymin>raw.ymax {return out}
+ let xmin=scale_forward(raw.xmin,xs);let xmax=scale_forward(raw.xmax,xs)
+ let ymin=scale_forward(raw.ymin,ys);let ymax=scale_forward(raw.ymax,ys)
+ if xmin.status!=0 || xmax.status!=0 || ymin.status!=0 || ymax.status!=0 {out.status=4;return out}
+ if !uncertainty_domain(xmin.value,xmax.value,ymin.value,ymax.value) {out.status=4;return out}
+ // Distinct raw endpoints must remain distinct after the chosen transform.
+ if raw.xmin<raw.xmax {if xmin.value>=xmax.value {out.status=4;return out}}
+ if raw.ymin<raw.ymax {if ymin.value>=ymax.value {out.status=4;return out}}
+ out.plot.xmin=xmin.value;out.plot.xmax=xmax.value;out.plot.ymin=ymin.value;out.plot.ymax=ymax.value
+ out.status=0
+ out
+}
+fn dsp_prepare_line(s:&DynamicScaledPlot,x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer,tx:&!NumericBuffer,ty:&!NumericBuffer,indices:&!IntegerBuffer,buckets:i64)->DynamicScaledRender with Mut,Div,Panic {
+ var out=DynamicScaledRender{status:1,stage:0,n:numeric_buffer_len(x),required:0,selected:0,visible_primitives:0}
+ if s.status!=0 {return out}
+ // Reconstruct from raw endpoints/specs to reject inconsistent public metadata.
+ var raw=s.plot;raw.xmin=s.raw_xmin;raw.xmax=s.raw_xmax;raw.ymin=s.raw_ymin;raw.ymax=s.raw_ymax
+ let checked=dynamic_scaled_plot(&raw,&s.x_scale,&s.y_scale)
+ if checked.status!=0 {return out}
+ if checked.plot.xmin!=s.plot.xmin || checked.plot.xmax!=s.plot.xmax || checked.plot.ymin!=s.plot.ymin || checked.plot.ymax!=s.plot.ymax {return out}
+ out.stage=1
+ let scaled=dynamic_scale_xy(x,y,a,tx,ty,&s.x_scale,&s.y_scale)
+ out.status=scaled.status
+ if scaled.status!=0 {return out}
+ out.stage=2
+ let reduced=dynamic_line_reduce(tx,ty,a,s.plot.xmin,s.plot.xmax,buckets,indices)
+ out.status=reduced.status;out.required=reduced.required;out.selected=reduced.written
+ if reduced.status!=0 {return out}
+ out.stage=3
+ out
+}
+fn dsp_metadata(s:&DynamicScaledPlot,id:i64) with IO,Mut {
+ let xm:i64=s.x_scale.mode;let ym:i64=s.y_scale.mode
+ let xc:f64=s.x_scale.constant;let yc:f64=s.y_scale.constant
+ print("<metadata data-scaled-plot-id=\"");print(id);print("\" data-x-scale=\"");print(xm);print("\" data-y-scale=\"");print(ym)
+ print("\" data-x-scale-constant=\"");print_f64_sci(xc,15);print("\" data-y-scale-constant=\"");print_f64_sci(yc,15);println("\"/>")
+}
+pub fn dynamic_scaled_line_canvas(c:&!Canvas,s:&DynamicScaledPlot,x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer,tx:&!NumericBuffer,ty:&!NumericBuffer,indices:&!IntegerBuffer,buckets:i64)->DynamicScaledRender with Mut,Div,Panic {
+ var out=dsp_prepare_line(s,x,y,a,tx,ty,indices,buckets)
+ if out.status!=0 {return out}
+ let rendered=dynamic_line_canvas(c,&s.plot,tx,ty,a,indices,out.selected)
+ out.status=rendered.status;out.visible_primitives=rendered.visible_primitives
+ out
+}
+pub fn dynamic_scaled_line_svg(s:&DynamicScaledPlot,x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer,tx:&!NumericBuffer,ty:&!NumericBuffer,indices:&!IntegerBuffer,buckets:i64,id:i64)->DynamicScaledRender with IO,Mut,Div,Panic {
+ var out=dsp_prepare_line(s,x,y,a,tx,ty,indices,buckets)
+ if out.status!=0 {return out}
+ let rendered=dynamic_line_svg(&s.plot,tx,ty,a,indices,out.selected,id)
+ out.status=rendered.status;out.visible_primitives=rendered.visible_primitives
+ if rendered.status==0 {dsp_metadata(s,id)}
+ out
+}
+fn dsp_prepare_intervals(s:&DynamicScaledPlot,x:&NumericBuffer,mean:&NumericBuffer,lower:&NumericBuffer,upper:&NumericBuffer,a:&IntegerBuffer,tx:&!NumericBuffer,tm:&!NumericBuffer,tl:&!NumericBuffer,tu:&!NumericBuffer)->DynamicScaledRender with Mut,Div,Panic {
+ var out=DynamicScaledRender{status:1,stage:0,n:numeric_buffer_len(x),required:0,selected:0,visible_primitives:0}
+ if s.status!=0 {return out}
+ var raw=s.plot;raw.xmin=s.raw_xmin;raw.xmax=s.raw_xmax;raw.ymin=s.raw_ymin;raw.ymax=s.raw_ymax
+ let checked=dynamic_scaled_plot(&raw,&s.x_scale,&s.y_scale)
+ if checked.status!=0 {return out}
+ if checked.plot.xmin!=s.plot.xmin || checked.plot.xmax!=s.plot.xmax || checked.plot.ymin!=s.plot.ymin || checked.plot.ymax!=s.plot.ymax {return out}
+ out.stage=1
+ let scaled=dynamic_scale_intervals(x,mean,lower,upper,a,tx,tm,tl,tu,&s.x_scale,&s.y_scale)
+ out.status=scaled.status
+ if scaled.status!=0 {return out}
+ out.selected=scaled.n;out.required=scaled.n;out.stage=3
+ out
+}
+pub fn dynamic_scaled_interval_canvas(c:&!Canvas,s:&DynamicScaledPlot,x:&NumericBuffer,mean:&NumericBuffer,lower:&NumericBuffer,upper:&NumericBuffer,a:&IntegerBuffer,tx:&!NumericBuffer,tm:&!NumericBuffer,tl:&!NumericBuffer,tu:&!NumericBuffer)->DynamicScaledRender with Mut,Div,Panic {
+ var out=dsp_prepare_intervals(s,x,mean,lower,upper,a,tx,tm,tl,tu)
+ if out.status!=0 {return out}
+ let rendered=dynamic_interval_canvas(c,&s.plot,tx,tm,tl,tu,a)
+ out.status=rendered.status;out.visible_primitives=rendered.visible_primitives
+ out
+}
+pub fn dynamic_scaled_interval_svg(s:&DynamicScaledPlot,x:&NumericBuffer,mean:&NumericBuffer,lower:&NumericBuffer,upper:&NumericBuffer,a:&IntegerBuffer,tx:&!NumericBuffer,tm:&!NumericBuffer,tl:&!NumericBuffer,tu:&!NumericBuffer,id:i64)->DynamicScaledRender with IO,Mut,Div,Panic {
+ var out=dsp_prepare_intervals(s,x,mean,lower,upper,a,tx,tm,tl,tu)
+ if out.status!=0 {return out}
+ let rendered=dynamic_interval_svg(&s.plot,tx,tm,tl,tu,a,id)
+ out.status=rendered.status;out.visible_primitives=rendered.visible_primitives
+ if rendered.status==0 {dsp_metadata(s,id)}
+ out
+}

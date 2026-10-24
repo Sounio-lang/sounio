@@ -1,0 +1,1172 @@
+// gpu::erdos90_hc_smoke_emit — K-AXI emitter for Erdős Option-B parallel HC smoke.
+// Uses a module-global KaxiAsmBuf to avoid 2 MiB struct pass-by-value corruption.
+
+use gpu::kaxi_backend::{KaxiAsmBuf, KaxiTxnStream, kaxi_asm_char_to_str, kaxi_asm_new, kaxi_assemble_ref}
+
+let HC_PN: i64 = 25
+let HC_STRIDE: i64 = 8
+let HC_NBR_OFF: i64 = 29
+let HC_MEM_OFF: i64 = 229
+let HC_OUT_OFF: i64 = 429
+let HC_LCG_MUL: i64 = 16807
+let HC_LCG_PRIME: i64 = 2147483647
+
+var HC_ASM: KaxiAsmBuf = kaxi_asm_new()
+var HC_SEQ: i64 = 0
+// Scratch buffer for emission: 2 MiB KaxiAsmBuf global indexing corrupts past ~128 bytes in large bundles.
+var HC_SCRATCH: [i8; 262144] = [0; 262144]
+var HC_SCRATCH_LEN: i64 = 0
+
+fn hc_reset() with Mut {
+    HC_ASM.len = 0
+    HC_SCRATCH_LEN = 0
+}
+
+fn hc_scratch_push_byte(c: i64) with Mut, Panic {
+    if HC_SCRATCH_LEN >= 0 && HC_SCRATCH_LEN < 262144 {
+        HC_SCRATCH[HC_SCRATCH_LEN as usize] = c as i8
+        HC_SCRATCH_LEN = HC_SCRATCH_LEN + 1
+    }
+}
+
+fn hc_scratch_to_local_buf() -> KaxiAsmBuf with Mut, Panic {
+    var buf: KaxiAsmBuf = kaxi_asm_new()
+    var i: i64 = 0
+    while i < HC_SCRATCH_LEN && i < 2097152 {
+        buf.data[i as usize] = HC_SCRATCH[i as usize]
+        i = i + 1
+    }
+    buf.len = HC_SCRATCH_LEN
+    return buf
+}
+
+fn hc_scratch_flush_to_asm() with Mut, Panic {
+    HC_ASM = hc_scratch_to_local_buf()
+}
+
+fn hc_push_byte(b: i8) with Mut, Panic {
+    hc_scratch_push_byte(b as i64)
+}
+
+fn hc_push_byte_i64(c: i64) with Mut, Panic {
+    hc_scratch_push_byte(c)
+}
+
+fn hc_push_u64_dec(n: i64) with Mut, Panic, Div {
+    var v = n
+    if v < 0 {
+        hc_push_ch(45)
+        v = 0 - v
+    }
+    if v < 10 {
+        hc_push_ch(48 + v)
+        return
+    }
+    var stack: [i64; 24] = [0; 24]
+    var depth: i64 = 0
+    while v >= 10 {
+        stack[depth as usize] = v % 10
+        depth = depth + 1
+        v = v / 10
+    }
+    hc_push_ch(48 + v)
+    var d = depth - 1
+    while d >= 0 {
+        hc_push_ch(48 + stack[d as usize])
+        d = d - 1
+    }
+}
+
+fn hc_push_str(s: string) with Mut, Panic, Div, Alloc {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        hc_push_byte_i64(str_char_at(s, i))
+        i = i + 1
+    }
+}
+
+fn hc_push_ch(c: i64) with Mut, Panic {
+    hc_push_byte_i64(c)
+}
+
+fn hc_push_comma_r() with Mut, Panic {
+    hc_push_ch(44)
+    hc_push_ch(32)
+    hc_push_ch(114)
+}
+
+fn hc_push_imm_eq() with Mut, Panic {
+    hc_push_ch(44)
+    hc_push_ch(32)
+    hc_push_ch(105)
+    hc_push_ch(109)
+    hc_push_ch(109)
+    hc_push_ch(61)
+}
+
+fn hc_push_seq_eq() with Mut, Panic {
+    hc_push_ch(44)
+    hc_push_ch(32)
+    hc_push_ch(115)
+    hc_push_ch(101)
+    hc_push_ch(113)
+    hc_push_ch(61)
+}
+
+fn hc_push_tok_add_r() with Mut, Panic {
+    hc_push_ch(97)
+    hc_push_ch(100)
+    hc_push_ch(100)
+    hc_push_ch(32)
+    hc_push_ch(114)
+}
+
+fn hc_push_tok_sub_r() with Mut, Panic {
+    hc_push_ch(115)
+    hc_push_ch(117)
+    hc_push_ch(98)
+    hc_push_ch(32)
+    hc_push_ch(114)
+}
+
+fn hc_push_tok_mul_r() with Mut, Panic {
+    hc_push_ch(109)
+    hc_push_ch(117)
+    hc_push_ch(108)
+    hc_push_ch(32)
+    hc_push_ch(114)
+}
+
+fn hc_push_tok_div_r() with Mut, Panic {
+    hc_push_ch(100)
+    hc_push_ch(105)
+    hc_push_ch(118)
+    hc_push_ch(32)
+    hc_push_ch(114)
+}
+
+fn hc_push_tok_load_imm_r() with Mut, Panic {
+    hc_push_ch(108)
+    hc_push_ch(111)
+    hc_push_ch(97)
+    hc_push_ch(100)
+    hc_push_ch(95)
+    hc_push_ch(105)
+    hc_push_ch(109)
+    hc_push_ch(109)
+    hc_push_ch(32)
+    hc_push_ch(114)
+}
+
+fn hc_push_var125() with Mut, Panic {
+    hc_push_ch(44)
+    hc_push_ch(32)
+    hc_push_ch(118)
+    hc_push_ch(97)
+    hc_push_ch(114)
+    hc_push_ch(61)
+    hc_push_ch(43)
+    hc_push_ch(49)
+    hc_push_ch(50)
+    hc_push_ch(46)
+    hc_push_ch(53)
+    hc_push_ch(37)
+    hc_push_ch(44)
+    hc_push_ch(32)
+    hc_push_ch(115)
+    hc_push_ch(101)
+    hc_push_ch(113)
+    hc_push_ch(61)
+}
+
+fn hc_push_var625() with Mut, Panic {
+    hc_push_ch(44)
+    hc_push_ch(32)
+    hc_push_ch(118)
+    hc_push_ch(97)
+    hc_push_ch(114)
+    hc_push_ch(61)
+    hc_push_ch(43)
+    hc_push_ch(54)
+    hc_push_ch(50)
+    hc_push_ch(46)
+    hc_push_ch(53)
+    hc_push_ch(37)
+    hc_push_ch(44)
+    hc_push_ch(32)
+    hc_push_ch(115)
+    hc_push_ch(101)
+    hc_push_ch(113)
+    hc_push_ch(61)
+}
+
+fn hc_push_var750() with Mut, Panic {
+    hc_push_ch(44)
+    hc_push_ch(32)
+    hc_push_ch(118)
+    hc_push_ch(97)
+    hc_push_ch(114)
+    hc_push_ch(61)
+    hc_push_ch(43)
+    hc_push_ch(55)
+    hc_push_ch(53)
+    hc_push_ch(46)
+    hc_push_ch(48)
+    hc_push_ch(37)
+    hc_push_ch(44)
+    hc_push_ch(32)
+    hc_push_ch(115)
+    hc_push_ch(101)
+    hc_push_ch(113)
+    hc_push_ch(61)
+}
+
+fn hc_push_var0() with Mut, Panic {
+    hc_push_ch(44)
+    hc_push_ch(32)
+    hc_push_ch(118)
+    hc_push_ch(97)
+    hc_push_ch(114)
+    hc_push_ch(61)
+    hc_push_ch(43)
+    hc_push_ch(48)
+    hc_push_ch(37)
+    hc_push_ch(44)
+    hc_push_ch(32)
+    hc_push_ch(115)
+    hc_push_ch(101)
+    hc_push_ch(113)
+    hc_push_ch(61)
+}
+
+fn hc_push_tok_load_global_r() with Mut, Panic {
+    hc_push_ch(108)
+    hc_push_ch(111)
+    hc_push_ch(97)
+    hc_push_ch(100)
+    hc_push_ch(95)
+    hc_push_ch(103)
+    hc_push_ch(108)
+    hc_push_ch(111)
+    hc_push_ch(98)
+    hc_push_ch(97)
+    hc_push_ch(108)
+    hc_push_ch(32)
+    hc_push_ch(114)
+}
+
+fn hc_push_tok_store_global_r() with Mut, Panic {
+    hc_push_ch(115)
+    hc_push_ch(116)
+    hc_push_ch(111)
+    hc_push_ch(114)
+    hc_push_ch(101)
+    hc_push_ch(95)
+    hc_push_ch(103)
+    hc_push_ch(108)
+    hc_push_ch(111)
+    hc_push_ch(98)
+    hc_push_ch(97)
+    hc_push_ch(108)
+    hc_push_ch(32)
+    hc_push_ch(114)
+}
+
+fn hc_push_addr_r() with Mut, Panic {
+    hc_push_ch(44)
+    hc_push_ch(32)
+    hc_push_ch(97)
+    hc_push_ch(100)
+    hc_push_ch(100)
+    hc_push_ch(114)
+    hc_push_ch(61)
+    hc_push_ch(114)
+}
+
+fn hc_push_setp_eq_hdr() with Mut, Panic {
+    hc_push_ch(115)
+    hc_push_ch(101)
+    hc_push_ch(116)
+    hc_push_ch(112)
+    hc_push_ch(46)
+    hc_push_ch(101)
+    hc_push_ch(113)
+    hc_push_ch(32)
+    hc_push_ch(112)
+}
+
+fn hc_push_setp_ne_hdr() with Mut, Panic {
+    hc_push_ch(115)
+    hc_push_ch(101)
+    hc_push_ch(116)
+    hc_push_ch(112)
+    hc_push_ch(46)
+    hc_push_ch(110)
+    hc_push_ch(101)
+    hc_push_ch(32)
+    hc_push_ch(112)
+}
+
+fn hc_push_setp_gt_hdr() with Mut, Panic {
+    hc_push_ch(115)
+    hc_push_ch(101)
+    hc_push_ch(116)
+    hc_push_ch(112)
+    hc_push_ch(46)
+    hc_push_ch(103)
+    hc_push_ch(116)
+    hc_push_ch(32)
+    hc_push_ch(112)
+}
+
+fn hc_push_tok_selp_r() with Mut, Panic {
+    hc_push_ch(115)
+    hc_push_ch(101)
+    hc_push_ch(108)
+    hc_push_ch(112)
+    hc_push_ch(32)
+    hc_push_ch(114)
+}
+
+fn hc_push_pred_p() with Mut, Panic {
+    hc_push_ch(44)
+    hc_push_ch(32)
+    hc_push_ch(112)
+    hc_push_ch(114)
+    hc_push_ch(101)
+    hc_push_ch(100)
+    hc_push_ch(61)
+    hc_push_ch(112)
+}
+
+fn hc_push_ret_seq() with Mut, Panic {
+    hc_push_ch(114)
+    hc_push_ch(101)
+    hc_push_ch(116)
+    hc_push_ch(32)
+    hc_push_ch(115)
+    hc_push_ch(101)
+    hc_push_ch(113)
+    hc_push_ch(61)
+}
+
+fn hc_append_add(dst: i64, src_a: i64, src_b: i64, seq: i64) with Mut, Panic, Div, Alloc {
+    hc_push_tok_add_r()
+    hc_push_u64_dec(dst)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_a)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_b)
+    hc_push_var125()
+    hc_push_u64_dec(seq)
+    hc_push_byte(10)
+}
+
+fn hc_append_sub(dst: i64, src_a: i64, src_b: i64, seq: i64) with Mut, Panic, Div, Alloc {
+    hc_push_tok_sub_r()
+    hc_push_u64_dec(dst)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_a)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_b)
+    hc_push_var125()
+    hc_push_u64_dec(seq)
+    hc_push_byte(10)
+}
+
+fn hc_append_mul(dst: i64, src_a: i64, src_b: i64, seq: i64) with Mut, Panic, Div, Alloc {
+    hc_push_tok_mul_r()
+    hc_push_u64_dec(dst)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_a)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_b)
+    hc_push_var625()
+    hc_push_u64_dec(seq)
+    hc_push_byte(10)
+}
+
+fn hc_append_div(dst: i64, src_a: i64, src_b: i64, seq: i64) with Mut, Panic, Div, Alloc {
+    hc_push_tok_div_r()
+    hc_push_u64_dec(dst)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_a)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_b)
+    hc_push_var750()
+    hc_push_u64_dec(seq)
+    hc_push_byte(10)
+}
+
+fn hc_append_load_global(dst: i64, addr_reg: i64, seq: i64) with Mut, Panic, Div, Alloc {
+    hc_push_tok_load_global_r()
+    hc_push_u64_dec(dst)
+    hc_push_byte_i64(44)
+    hc_push_byte_i64(32)
+    hc_push_byte_i64(97)
+    hc_push_byte_i64(100)
+    hc_push_byte_i64(100)
+    hc_push_byte_i64(114)
+    hc_push_byte_i64(61)
+    hc_push_byte_i64(114)
+    hc_push_u64_dec(addr_reg)
+    hc_push_seq_eq()
+    hc_push_u64_dec(seq)
+    hc_push_byte(10)
+}
+
+fn hc_append_store_global(src: i64, addr_reg: i64, seq: i64) with Mut, Panic, Div, Alloc {
+    hc_push_tok_store_global_r()
+    hc_push_u64_dec(src)
+    hc_push_byte_i64(44)
+    hc_push_byte_i64(32)
+    hc_push_byte_i64(97)
+    hc_push_byte_i64(100)
+    hc_push_byte_i64(100)
+    hc_push_byte_i64(114)
+    hc_push_byte_i64(61)
+    hc_push_byte_i64(114)
+    hc_push_u64_dec(addr_reg)
+    hc_push_seq_eq()
+    hc_push_u64_dec(seq)
+    hc_push_byte(10)
+}
+
+fn hc_append_setp_eq(dst_pred: i64, src_a: i64, src_b: i64, seq: i64) with Mut, Panic, Div, Alloc {
+    hc_push_setp_eq_hdr()
+    hc_push_u64_dec(dst_pred)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_a)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_b)
+    hc_push_seq_eq()
+    hc_push_u64_dec(seq)
+    hc_push_byte(10)
+}
+
+fn hc_append_setp_ne(dst_pred: i64, src_a: i64, src_b: i64, seq: i64) with Mut, Panic, Div, Alloc {
+    hc_push_setp_ne_hdr()
+    hc_push_u64_dec(dst_pred)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_a)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_b)
+    hc_push_seq_eq()
+    hc_push_u64_dec(seq)
+    hc_push_byte(10)
+}
+
+fn hc_append_setp_gt(dst_pred: i64, src_a: i64, src_b: i64, seq: i64) with Mut, Panic, Div, Alloc {
+    hc_push_setp_gt_hdr()
+    hc_push_u64_dec(dst_pred)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_a)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_b)
+    hc_push_seq_eq()
+    hc_push_u64_dec(seq)
+    hc_push_byte(10)
+}
+
+fn hc_append_selp(dst: i64, src_a: i64, src_b: i64, pred: i64, seq: i64) with Mut, Panic, Div, Alloc {
+    hc_push_tok_selp_r()
+    hc_push_u64_dec(dst)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_a)
+    hc_push_comma_r()
+    hc_push_u64_dec(src_b)
+    hc_push_pred_p()
+    hc_push_u64_dec(pred)
+    hc_push_seq_eq()
+    hc_push_u64_dec(seq)
+    hc_push_byte(10)
+}
+
+fn hc_append_ret(seq: i64) with Mut, Panic, Div, Alloc {
+    hc_push_ret_seq()
+    hc_push_u64_dec(seq)
+    hc_push_byte(10)
+}
+
+fn hc_push_load_imm(r: i64, imm: i64, seq: i64) with Mut, Panic, Div, Alloc {
+    hc_push_tok_load_imm_r()
+    hc_push_u64_dec(r)
+    hc_push_imm_eq()
+    hc_push_u64_dec(imm)
+    hc_push_seq_eq()
+    hc_push_u64_dec(seq)
+    hc_push_byte(10)
+}
+
+fn hc_push_mul_var0(dst: i64, a: i64, b: i64, seq: i64) with Mut, Panic, Div, Alloc {
+    hc_push_tok_mul_r()
+    hc_push_u64_dec(dst)
+    hc_push_comma_r()
+    hc_push_u64_dec(a)
+    hc_push_comma_r()
+    hc_push_u64_dec(b)
+    hc_push_var0()
+    hc_push_u64_dec(seq)
+    hc_push_byte(10)
+}
+
+fn hc_push_add_var0(dst: i64, a: i64, b: i64, seq: i64) with Mut, Panic, Div, Alloc {
+    hc_push_tok_add_r()
+    hc_push_u64_dec(dst)
+    hc_push_comma_r()
+    hc_push_u64_dec(a)
+    hc_push_comma_r()
+    hc_push_u64_dec(b)
+    hc_push_var0()
+    hc_push_u64_dec(seq)
+    hc_push_byte(10)
+}
+
+fn hc_seq() -> i64 with Mut {
+    let s = HC_SEQ
+    HC_SEQ = HC_SEQ + 1
+    return s
+}
+
+fn hc_mod(dst: i64, src: i64, divisor: i64, q: i64, prod: i64) with Mut, Panic, Div, Alloc {
+    hc_push_load_imm(q, divisor, hc_seq())
+    hc_append_div( q, src, q, hc_seq())
+    hc_push_load_imm(prod, divisor, hc_seq())
+    hc_append_mul( prod, q, prod, hc_seq())
+    hc_append_sub( dst, src, prod, hc_seq())
+}
+
+fn hc_lcg(rng: i64, t: i64, q: i64, prod: i64) with Mut, Panic, Div, Alloc {
+    hc_push_load_imm(t, HC_LCG_MUL, hc_seq())
+    hc_append_mul( t, rng, t, hc_seq())
+    hc_mod(rng, t, HC_LCG_PRIME, q, prod)
+}
+
+fn hc_vertex_half_edges(vtx: i64, mem_base: i64, active_pred: i64, half_sum: i64) with Mut, Panic, Div, Alloc {
+    var nb: i64 = 0
+    while nb < HC_STRIDE {
+        hc_push_load_imm(10, HC_NBR_OFF, hc_seq())
+        hc_push_load_imm(11, HC_STRIDE, hc_seq())
+        hc_append_mul( 12, vtx, 11, hc_seq())
+        hc_append_add( 10, 10, 12, hc_seq())
+        hc_push_load_imm(11, nb, hc_seq())
+        hc_append_add( 10, 10, 11, hc_seq())
+        hc_append_load_global( 13, 10, hc_seq())
+        hc_append_add( 14, mem_base, 13, hc_seq())
+        hc_append_load_global( 15, 14, hc_seq())
+        hc_push_load_imm(16, 1, hc_seq())
+        hc_append_setp_eq(1, 15, 16, hc_seq())
+        hc_push_load_imm(17, 1, hc_seq())
+        hc_push_load_imm(18, 0, hc_seq())
+        hc_append_selp( 21, 17, 18, 1, hc_seq())
+        hc_append_selp( 22, 21, 18, active_pred, hc_seq())
+        hc_append_add( half_sum, half_sum, 22, hc_seq())
+        nb = nb + 1
+    }
+}
+
+fn hc_mem_deg(vtx: i64, mem_base: i64, deg_out: i64) with Mut, Panic, Div, Alloc {
+    hc_push_load_imm(deg_out, 0, hc_seq())
+    var nb: i64 = 0
+    while nb < HC_STRIDE {
+        hc_push_load_imm(10, HC_NBR_OFF, hc_seq())
+        hc_push_load_imm(11, HC_STRIDE, hc_seq())
+        hc_append_mul( 12, vtx, 11, hc_seq())
+        hc_append_add( 10, 10, 12, hc_seq())
+        hc_push_load_imm(11, nb, hc_seq())
+        hc_append_add( 10, 10, 11, hc_seq())
+        hc_append_load_global( 13, 10, hc_seq())
+        hc_append_add( 14, mem_base, 13, hc_seq())
+        hc_append_load_global( 15, 14, hc_seq())
+        hc_push_load_imm(16, 1, hc_seq())
+        hc_append_setp_eq(2, 15, 16, hc_seq())
+        hc_push_load_imm(17, 1, hc_seq())
+        hc_push_load_imm(18, 0, hc_seq())
+        hc_append_selp( 19, 17, 18, 2, hc_seq())
+        hc_append_add( deg_out, deg_out, 19, hc_seq())
+        nb = nb + 1
+    }
+}
+
+fn hc_adj(m: i64, c: i64, adj_out: i64) with Mut, Panic, Div, Alloc {
+    hc_push_load_imm(adj_out, 0, hc_seq())
+    var nb: i64 = 0
+    while nb < HC_STRIDE {
+        hc_push_load_imm(10, HC_NBR_OFF, hc_seq())
+        hc_push_load_imm(11, HC_STRIDE, hc_seq())
+        hc_append_mul( 12, m, 11, hc_seq())
+        hc_append_add( 10, 10, 12, hc_seq())
+        hc_push_load_imm(11, nb, hc_seq())
+        hc_append_add( 10, 10, 11, hc_seq())
+        hc_append_load_global( 13, 10, hc_seq())
+        hc_append_setp_eq(3, 13, c, hc_seq())
+        hc_push_load_imm(14, 1, hc_seq())
+        hc_append_selp( 15, 14, adj_out, 3, hc_seq())
+        hc_append_add( adj_out, adj_out, 15, hc_seq())
+        nb = nb + 1
+    }
+}
+
+fn hc_one_step(rng: i64, mem_base: i64) with Mut, Panic, Div, Alloc {
+    hc_lcg(rng, 30, 31, 29)
+    hc_mod(23, rng, HC_PN, 31, 30)
+    hc_lcg(rng, 30, 31, 29)
+    hc_mod(24, rng, HC_PN, 31, 30)
+    hc_append_add( 25, mem_base, 23, hc_seq())
+    hc_append_load_global( 26, 25, hc_seq())
+    hc_append_add( 27, mem_base, 24, hc_seq())
+    hc_append_load_global( 28, 27, hc_seq())
+    hc_push_load_imm(6, 1, hc_seq())
+    hc_push_load_imm(7, 0, hc_seq())
+    hc_append_setp_eq(4, 26, 6, hc_seq())
+    hc_append_setp_eq(5, 28, 7, hc_seq())
+    hc_append_setp_ne(6, 23, 24, hc_seq())
+    hc_mem_deg(23, mem_base, 32)
+    hc_mem_deg(24, mem_base, 33)
+    hc_adj(23, 24, 34)
+    hc_append_sub( 35, 33, 34, hc_seq())
+    hc_append_sub( 35, 35, 32, hc_seq())
+    hc_append_setp_gt(7, 35, 7, hc_seq())
+    hc_push_load_imm(36, 1, hc_seq())
+    hc_push_load_imm(37, 0, hc_seq())
+    hc_append_selp( 38, 36, 37, 4, hc_seq())
+    hc_append_selp( 38, 38, 37, 5, hc_seq())
+    hc_append_selp( 38, 38, 37, 6, hc_seq())
+    hc_append_selp( 38, 38, 37, 7, hc_seq())
+    hc_append_setp_ne(38, 38, 37, hc_seq())
+    hc_append_selp( 39, 7, 26, 38, hc_seq())
+    hc_append_store_global( 39, 25, hc_seq())
+    hc_append_selp( 40, 6, 28, 38, hc_seq())
+    hc_append_store_global( 40, 27, hc_seq())
+}
+
+fn hc_total_edges(mem_base: i64, edges_out: i64) with Mut, Panic, Div, Alloc {
+    hc_push_load_imm(edges_out, 0, hc_seq())
+    hc_push_load_imm(6, 1, hc_seq())
+    var vtx: i64 = 0
+    while vtx < HC_PN {
+        hc_push_load_imm(7, vtx, hc_seq())
+        hc_append_add( 8, mem_base, 7, hc_seq())
+        hc_append_load_global( 9, 8, hc_seq())
+        hc_append_setp_eq(0, 9, 6, hc_seq())
+        hc_vertex_half_edges(7, mem_base, 0, edges_out)
+        vtx = vtx + 1
+    }
+    hc_push_load_imm(18, 2, hc_seq())
+    hc_append_div( edges_out, edges_out, 18, hc_seq())
+}
+
+// Gate-required prologue bytes (no hc_push_ch bursts — avoids large-bundle literal corruption).
+let HC_HDR_LEN: i64 = 69
+
+fn hc_hdr_byte(i: i64) -> i64 {
+    if i == 0 { return 59 }
+    if i == 1 { return 32 }
+    if i == 2 { return 69 }
+    if i == 3 { return 114 }
+    if i == 4 { return 100 }
+    if i == 5 { return 111 }
+    if i == 6 { return 115 }
+    if i == 7 { return 57 }
+    if i == 8 { return 48 }
+    if i == 9 { return 32 }
+    if i == 10 { return 115 }
+    if i == 11 { return 109 }
+    if i == 12 { return 111 }
+    if i == 13 { return 107 }
+    if i == 14 { return 101 }
+    if i == 15 { return 58 }
+    if i == 16 { return 32 }
+    if i == 17 { return 112 }
+    if i == 18 { return 97 }
+    if i == 19 { return 114 }
+    if i == 20 { return 97 }
+    if i == 21 { return 108 }
+    if i == 22 { return 108 }
+    if i == 23 { return 101 }
+    if i == 24 { return 108 }
+    if i == 25 { return 32 }
+    if i == 26 { return 108 }
+    if i == 27 { return 105 }
+    if i == 28 { return 116 }
+    if i == 29 { return 101 }
+    if i == 30 { return 32 }
+    if i == 31 { return 72 }
+    if i == 32 { return 67 }
+    if i == 33 { return 32 }
+    if i == 34 { return 112 }
+    if i == 35 { return 114 }
+    if i == 36 { return 111 }
+    if i == 37 { return 112 }
+    if i == 38 { return 111 }
+    if i == 39 { return 115 }
+    if i == 40 { return 101 }
+    if i == 41 { return 114 }
+    if i == 42 { return 10 }
+    if i == 43 { return 103 }
+    if i == 44 { return 101 }
+    if i == 45 { return 116 }
+    if i == 46 { return 95 }
+    if i == 47 { return 116 }
+    if i == 48 { return 105 }
+    if i == 49 { return 100 }
+    if i == 50 { return 32 }
+    if i == 51 { return 114 }
+    if i == 52 { return 48 }
+    if i == 53 { return 44 }
+    if i == 54 { return 32 }
+    if i == 55 { return 118 }
+    if i == 56 { return 97 }
+    if i == 57 { return 114 }
+    if i == 58 { return 61 }
+    if i == 59 { return 48 }
+    if i == 60 { return 37 }
+    if i == 61 { return 44 }
+    if i == 62 { return 32 }
+    if i == 63 { return 115 }
+    if i == 64 { return 101 }
+    if i == 65 { return 113 }
+    if i == 66 { return 61 }
+    if i == 67 { return 48 }
+    if i == 68 { return 10 }
+    return 0
+}
+
+fn hc_emit_header_comments() with Mut, Panic, Div, Alloc {
+    // Generic K-AXI header expected by kretikos structural validation.
+    hc_push_str("; K-AXI epistemic kernel assembly")
+    hc_push_byte(10)
+    hc_append_hdr_range(0, HC_HDR_LEN)
+}
+
+fn hc_emit_get_tid_line() with Mut, Panic {
+}
+
+let HC_BOOT_LEN: i64 = 213
+
+fn hc_boot_byte(i: i64) -> i64 {
+    if i == 0 { return 108 }
+    if i == 1 { return 111 }
+    if i == 2 { return 97 }
+    if i == 3 { return 100 }
+    if i == 4 { return 95 }
+    if i == 5 { return 105 }
+    if i == 6 { return 109 }
+    if i == 7 { return 109 }
+    if i == 8 { return 32 }
+    if i == 9 { return 114 }
+    if i == 10 { return 49 }
+    if i == 11 { return 44 }
+    if i == 12 { return 32 }
+    if i == 13 { return 105 }
+    if i == 14 { return 109 }
+    if i == 15 { return 109 }
+    if i == 16 { return 61 }
+    if i == 17 { return 50 }
+    if i == 18 { return 53 }
+    if i == 19 { return 44 }
+    if i == 20 { return 32 }
+    if i == 21 { return 115 }
+    if i == 22 { return 101 }
+    if i == 23 { return 113 }
+    if i == 24 { return 61 }
+    if i == 25 { return 49 }
+    if i == 26 { return 10 }
+    if i == 27 { return 108 }
+    if i == 28 { return 111 }
+    if i == 29 { return 97 }
+    if i == 30 { return 100 }
+    if i == 31 { return 95 }
+    if i == 32 { return 105 }
+    if i == 33 { return 109 }
+    if i == 34 { return 109 }
+    if i == 35 { return 32 }
+    if i == 36 { return 114 }
+    if i == 37 { return 50 }
+    if i == 38 { return 44 }
+    if i == 39 { return 32 }
+    if i == 40 { return 105 }
+    if i == 41 { return 109 }
+    if i == 42 { return 109 }
+    if i == 43 { return 61 }
+    if i == 44 { return 50 }
+    if i == 45 { return 50 }
+    if i == 46 { return 57 }
+    if i == 47 { return 44 }
+    if i == 48 { return 32 }
+    if i == 49 { return 115 }
+    if i == 50 { return 101 }
+    if i == 51 { return 113 }
+    if i == 52 { return 61 }
+    if i == 53 { return 50 }
+    if i == 54 { return 10 }
+    if i == 55 { return 109 }
+    if i == 56 { return 117 }
+    if i == 57 { return 108 }
+    if i == 58 { return 32 }
+    if i == 59 { return 114 }
+    if i == 60 { return 51 }
+    if i == 61 { return 44 }
+    if i == 62 { return 32 }
+    if i == 63 { return 114 }
+    if i == 64 { return 48 }
+    if i == 65 { return 44 }
+    if i == 66 { return 32 }
+    if i == 67 { return 114 }
+    if i == 68 { return 49 }
+    if i == 69 { return 44 }
+    if i == 70 { return 32 }
+    if i == 71 { return 118 }
+    if i == 72 { return 97 }
+    if i == 73 { return 114 }
+    if i == 74 { return 61 }
+    if i == 75 { return 43 }
+    if i == 76 { return 48 }
+    if i == 77 { return 37 }
+    if i == 78 { return 44 }
+    if i == 79 { return 32 }
+    if i == 80 { return 115 }
+    if i == 81 { return 101 }
+    if i == 82 { return 113 }
+    if i == 83 { return 61 }
+    if i == 84 { return 51 }
+    if i == 85 { return 10 }
+    if i == 86 { return 97 }
+    if i == 87 { return 100 }
+    if i == 88 { return 100 }
+    if i == 89 { return 32 }
+    if i == 90 { return 114 }
+    if i == 91 { return 52 }
+    if i == 92 { return 44 }
+    if i == 93 { return 32 }
+    if i == 94 { return 114 }
+    if i == 95 { return 50 }
+    if i == 96 { return 44 }
+    if i == 97 { return 32 }
+    if i == 98 { return 114 }
+    if i == 99 { return 51 }
+    if i == 100 { return 44 }
+    if i == 101 { return 32 }
+    if i == 102 { return 118 }
+    if i == 103 { return 97 }
+    if i == 104 { return 114 }
+    if i == 105 { return 61 }
+    if i == 106 { return 43 }
+    if i == 107 { return 48 }
+    if i == 108 { return 37 }
+    if i == 109 { return 44 }
+    if i == 110 { return 32 }
+    if i == 111 { return 115 }
+    if i == 112 { return 101 }
+    if i == 113 { return 113 }
+    if i == 114 { return 61 }
+    if i == 115 { return 52 }
+    if i == 116 { return 10 }
+    if i == 117 { return 108 }
+    if i == 118 { return 111 }
+    if i == 119 { return 97 }
+    if i == 120 { return 100 }
+    if i == 121 { return 95 }
+    if i == 122 { return 105 }
+    if i == 123 { return 109 }
+    if i == 124 { return 109 }
+    if i == 125 { return 32 }
+    if i == 126 { return 114 }
+    if i == 127 { return 49 }
+    if i == 128 { return 48 }
+    if i == 129 { return 44 }
+    if i == 130 { return 32 }
+    if i == 131 { return 105 }
+    if i == 132 { return 109 }
+    if i == 133 { return 109 }
+    if i == 134 { return 61 }
+    if i == 135 { return 51 }
+    if i == 136 { return 44 }
+    if i == 137 { return 32 }
+    if i == 138 { return 115 }
+    if i == 139 { return 101 }
+    if i == 140 { return 113 }
+    if i == 141 { return 61 }
+    if i == 142 { return 53 }
+    if i == 143 { return 10 }
+    if i == 144 { return 108 }
+    if i == 145 { return 111 }
+    if i == 146 { return 97 }
+    if i == 147 { return 100 }
+    if i == 148 { return 95 }
+    if i == 149 { return 103 }
+    if i == 150 { return 108 }
+    if i == 151 { return 111 }
+    if i == 152 { return 98 }
+    if i == 153 { return 97 }
+    if i == 154 { return 108 }
+    if i == 155 { return 32 }
+    if i == 156 { return 114 }
+    if i == 157 { return 49 }
+    if i == 158 { return 49 }
+    if i == 159 { return 44 }
+    if i == 160 { return 32 }
+    if i == 161 { return 97 }
+    if i == 162 { return 100 }
+    if i == 163 { return 100 }
+    if i == 164 { return 114 }
+    if i == 165 { return 61 }
+    if i == 166 { return 114 }
+    if i == 167 { return 49 }
+    if i == 168 { return 48 }
+    if i == 169 { return 44 }
+    if i == 170 { return 32 }
+    if i == 171 { return 115 }
+    if i == 172 { return 101 }
+    if i == 173 { return 113 }
+    if i == 174 { return 61 }
+    if i == 175 { return 54 }
+    if i == 176 { return 10 }
+    if i == 177 { return 97 }
+    if i == 178 { return 100 }
+    if i == 179 { return 100 }
+    if i == 180 { return 32 }
+    if i == 181 { return 114 }
+    if i == 182 { return 50 }
+    if i == 183 { return 50 }
+    if i == 184 { return 44 }
+    if i == 185 { return 32 }
+    if i == 186 { return 114 }
+    if i == 187 { return 49 }
+    if i == 188 { return 49 }
+    if i == 189 { return 44 }
+    if i == 190 { return 32 }
+    if i == 191 { return 114 }
+    if i == 192 { return 48 }
+    if i == 193 { return 44 }
+    if i == 194 { return 32 }
+    if i == 195 { return 118 }
+    if i == 196 { return 97 }
+    if i == 197 { return 114 }
+    if i == 198 { return 61 }
+    if i == 199 { return 43 }
+    if i == 200 { return 49 }
+    if i == 201 { return 50 }
+    if i == 202 { return 46 }
+    if i == 203 { return 53 }
+    if i == 204 { return 37 }
+    if i == 205 { return 44 }
+    if i == 206 { return 32 }
+    if i == 207 { return 115 }
+    if i == 208 { return 101 }
+    if i == 209 { return 113 }
+    if i == 210 { return 61 }
+    if i == 211 { return 55 }
+    if i == 212 { return 10 }
+    return 0
+}
+
+fn hc_append_boot_range(start: i64, n: i64) with Mut, Panic {
+    var i: i64 = 0
+    while i < n {
+        hc_push_byte_i64(hc_boot_byte(start + i))
+        i = i + 1
+    }
+}
+
+fn hc_append_hdr_range(start: i64, n: i64) with Mut, Panic {
+    var i: i64 = 0
+    while i < n {
+        hc_push_byte_i64(hc_hdr_byte(start + i))
+        i = i + 1
+    }
+}
+
+fn hc_emit_bootstrap_blob() with Mut, Panic {
+    hc_append_boot_range(0, HC_BOOT_LEN)
+}
+
+pub fn kaxi_emit_erdos90_hc_smoke_build() with Mut, Panic, Div, Alloc {
+    hc_reset()
+    HC_SEQ = 0
+    hc_emit_header_comments()
+    hc_emit_get_tid_line()
+    hc_emit_bootstrap_blob()
+    HC_SEQ = 8
+    hc_one_step(22, 4)
+    hc_total_edges(4, 19)
+    hc_push_load_imm(20, HC_OUT_OFF, hc_seq())
+    hc_append_add(21, 20, 0, hc_seq())
+    hc_append_store_global(19, 21, hc_seq())
+    hc_append_ret(hc_seq())
+    hc_push_byte(10)
+    hc_push_ch(59)
+    hc_push_ch(32)
+    hc_push_ch(101)
+    hc_push_ch(110)
+    hc_push_ch(100)
+    hc_push_byte(10)
+}
+
+pub fn kaxi_emit_erdos90_hc_smoke_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    kaxi_emit_erdos90_hc_smoke_build()
+    hc_scratch_to_local_buf()
+}
+
+pub fn kaxi_hc_smoke_asm_byte_at(i: i64) -> i64 {
+    if i >= 0 && i < HC_SCRATCH_LEN {
+        return HC_SCRATCH[i as usize] as i64
+    }
+    if i >= 0 && i < HC_ASM.len {
+        return HC_ASM.data[i as usize] as i64
+    }
+    return 0
+}
+
+pub fn kaxi_hc_smoke_asm_len() -> i64 {
+    HC_SCRATCH_LEN + HC_ASM.len
+}
+
+pub fn kaxi_hc_smoke_test_bootstrap_only() with Mut, Panic, Div, Alloc {
+    hc_reset()
+    HC_SEQ = 0
+    hc_push_ch(59)
+    hc_push_ch(32)
+    hc_push_ch(75)
+    hc_push_ch(45)
+    hc_push_ch(65)
+    hc_push_ch(88)
+    hc_push_ch(73)
+    hc_push_ch(32)
+    hc_push_ch(107)
+    hc_push_ch(101)
+    hc_push_ch(114)
+    hc_push_ch(110)
+    hc_push_ch(101)
+    hc_push_ch(108)
+    hc_push_ch(32)
+    hc_push_ch(97)
+    hc_push_ch(115)
+    hc_push_ch(115)
+    hc_push_ch(101)
+    hc_push_ch(109)
+    hc_push_ch(98)
+    hc_push_ch(108)
+    hc_push_ch(121)
+    hc_push_byte(10)
+    hc_push_load_imm(1, 25, 1)
+    hc_push_load_imm(2, 229, 2)
+    hc_push_mul_var0(3, 0, 1, 3)
+    hc_push_add_var0(4, 2, 3, 4)
+    hc_push_load_imm(10, 3, 5)
+    hc_append_load_global(11, 10, 6)
+    hc_append_add(22, 11, 0, 7)
+}
+
+pub fn kaxi_hc_smoke_test_boot_init_only() with Mut, Panic, Div, Alloc {
+    hc_reset()
+    HC_SEQ = 0
+    hc_emit_bootstrap_blob()
+}
+
+pub fn kaxi_hc_smoke_test_load_global_only() with Mut, Panic, Div, Alloc {
+    hc_reset()
+    hc_append_load_global(11, 10, 6)
+}
+
+pub fn kaxi_hc_smoke_test_addr_rng_only() with Mut, Panic, Div, Alloc {
+    hc_reset()
+    hc_emit_bootstrap_blob()
+}
+
+pub fn kaxi_hc_smoke_test_boot_line5_only() with Mut, Panic {
+    hc_reset()
+    var i: i64 = 144
+    while i < 177 {
+        hc_push_byte_i64(hc_boot_byte(i))
+        i = i + 1
+    }
+}
+
+pub fn kaxi_hc_smoke_test_boot_seg2_only() with Mut, Panic {
+    hc_reset()
+    hc_append_boot_range(117, HC_BOOT_LEN - 117)
+}
+
+pub fn kaxi_hc_smoke_test_boot_seg1_then_seg2() with Mut, Panic {
+    hc_reset()
+    hc_append_boot_range(0, 117)
+    hc_append_boot_range(117, HC_BOOT_LEN - 117)
+}
+
+pub fn kaxi_emit_erdos90_count_only_build() with Mut, Panic, Div, Alloc {
+    hc_reset()
+    HC_SEQ = 0
+    hc_emit_header_comments()
+    hc_emit_bootstrap_blob()
+    HC_SEQ = 8
+    hc_total_edges(4, 19)
+    hc_push_load_imm(20, HC_OUT_OFF, hc_seq())
+    hc_append_add(21, 20, 0, hc_seq())
+    hc_append_store_global(19, 21, hc_seq())
+    hc_append_ret(hc_seq())
+}
+
+pub fn kaxi_hc_smoke_test_boot_after144() with Mut, Panic {
+    hc_reset()
+    var p: i64 = 0
+    while p < 144 {
+        hc_push_byte_i64(hc_boot_byte(p))
+        p = p + 1
+    }
+    var i: i64 = 144
+    while i < 177 {
+        hc_push_byte_i64(hc_boot_byte(i))
+        i = i + 1
+    }
+}
+
+pub fn kaxi_hc_smoke_test_header_only() with Mut, Panic {
+    hc_reset()
+    hc_push_ch(59)
+    hc_push_ch(32)
+    hc_push_ch(75)
+    hc_push_ch(45)
+    hc_push_ch(65)
+    hc_push_ch(88)
+    hc_push_ch(73)
+    hc_push_ch(32)
+    hc_push_ch(107)
+    hc_push_ch(101)
+    hc_push_ch(114)
+    hc_push_ch(110)
+    hc_push_ch(101)
+    hc_push_ch(108)
+    hc_push_ch(32)
+    hc_push_ch(97)
+    hc_push_ch(115)
+    hc_push_ch(115)
+    hc_push_ch(101)
+    hc_push_ch(109)
+    hc_push_ch(98)
+    hc_push_ch(108)
+    hc_push_ch(121)
+}
+
+pub fn kaxi_hc_smoke_asm_print_stdout() with IO, Mut, Panic, Div, Alloc {
+    var i: i64 = 0
+    var line: string = ""
+    let n = HC_SCRATCH_LEN
+    while i < n {
+        let ch = HC_SCRATCH[i as usize] as i64
+        if ch == 10 {
+            println(line)
+            line = ""
+        } else {
+            line = str_concat(line, kaxi_asm_char_to_str(ch))
+        }
+        i = i + 1
+    }
+    if str_len(line) > 0 { println(line) }
+}
+
+pub fn kaxi_hc_smoke_assemble() -> KaxiTxnStream with Mut, Panic, Div, Alloc {
+    var buf = hc_scratch_to_local_buf()
+    kaxi_assemble_ref(&!buf)
+}

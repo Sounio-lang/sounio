@@ -471,19 +471,36 @@ same order, returns the count rejected at `alpha`): Bonferroni and Holm control 
 FWER, Benjamini-Hochberg the FDR. Validated: p=0.01..0.05 → Bonferroni/Holm reject
 1, BH rejects all 5. (Library module — validation in `examples/stats/`.)
 
-### `stats::permutation` — two-sample permutation test
+### `stats::permutation` — checked two-sample randomization test
 
-`pub fn perm_test_means(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, iters: i32, seed: i64) -> f64 with Mut, Div, Panic`
-— distribution-free test of a location difference: p = (1 + #{|Δ*|≥|Δ_obs|})/(iters+1)
-over `iters` random relabellings (inline LCG, deterministic in `seed`). The mean
-bootstrap CI already lives in `stats::epistemic::bootstrap`. Validated: separated
-groups → p<0.05; identical → p>0.2.
+`permutation_means(&x, nx, &y, ny, iters, seed, exact) -> PermutationResult`
+provides explicit status, observed mean difference, method, tail count,
+draw count, normalized seed and Monte Carlo diagnostics.
+The null requires exchangeable pooled labels or the corresponding valid
+randomization design; equality of means alone does not establish it.
+Assumptions are unassessed.
 
-> **Codegen caveat (#852):** these two are library modules with external tests
-> (`examples/stats/*_test.sio`) rather than inline `main` tests — a routine with
-> big local arrays, or an in-module test harness making many nested calls while
-> arrays are live, triggers a silent native-codegen crash. The public functions
-> are structured around it (no big callee arrays; inlined loops).
+- Full enumeration visits choose(nx+ny,nx) labelings, up to 65536, and returns
+  hits/draws. "Exact" describes enumeration, not exact real arithmetic.
+- Monte Carlo uses bounded seeded partial Fisher-Yates with rejection-mapped
+  indices and returns (hits+1)/(draws+1).
+- The nominal Wilson 95% interval describes the uncorrected hit probability,
+  not uncertainty in the mean difference or probability of the null.
+- Fixed capacities: nx+ny <= 256; Monte Carlo 1..100000 draws.
+  Anchored/scaled compensated sums replace unscaled accumulation.
+- `perm_test_means` retains the scalar signature, delegating to Monte Carlo;
+  invalid/unavailable input returns the ambiguous compatibility sentinel 1.0.
+
+Current evidence: Slurm 14974, 32/32 focused tests, including 14 C++23
+reference cases and the existing legacy example. Before 14961: 27 pass, one
+unit-scaling regression fails after compilation.
+See [contract](PERMUTATION.md) and
+[receipt](../../docs/plans/STATS_PERMUTATION_EXECUTION_2026_10_17.md).
+
+Historical codegen warning #852 described earlier array/call paths. The current
+permutation snapshot passes its imported helper calls and bounded native
+fixtures; this does not establish a general compiler fix or certify unrelated
+multiple-testing implementations.
 
 ### `stats::summary_inference` — inference from summary statistics
 
@@ -638,6 +655,63 @@ for binned counts, both against χ²(k−1−ddof), where `ddof` counts paramete
 estimated from the data. Validated: O={10,20,30,40} vs E=25 → χ²=20, G=21.288,
 df=3, p≈1.7e−4; perfect fit → χ²=G=0, p=1.
 
+### Checked median Levene / Brown-Forsythe
+
+`stats::brown_forsythe::brown_forsythe(&a,na,&b,nb)` implements two-group
+median-centered absolute-deviation ANOVA,with F(1,na+nb-2) reference p.
+Two finite selected prefixes,2..100 each. Result carries status,sizes,dof,
+F,p,reference_approximate and mean absolute deviations in common scale units.
+Zero within-deviation variation is unavailable; no variance floor is invented.
+The public by-value legacy levene_test adapter now returns this checked result
+instead of bucket p/Beta confidence.
+
+The two scratch buffers are reused. Shared bounded finite heapsort also serves
+Shapiro and legacy ordering. F/beta private exponential helpers delegate to
+the canonical full-range exponential,with native subnormal/underflow regressions.
+Only the named parameter domains/procedures are certified by the receipt.
+No exact finite-sample reference,independence/shape assessment,variance-ratio CI
+or posterior confidence follows. AD/KS legacy heuristics remain uncertified.
+See [BROWN_FORSYTHE.md](BROWN_FORSYTHE.md) and execution receipt.
+
+### Checked Shapiro-Wilk / Royston
+
+`stats::shapiro_wilk::shapiro_wilk(&x,n)` computes W, independently retained
+1-W, p, status, n, calibration, p_approximate and has_ties for3..100 complete
+finite values. It uses Royston normal-order coefficient corrections, analytic
+n=3 calibration and approximate branches4..11/12..100. Input is not mutated.
+Scaled compensated projection norms and fixed-buffer heapsort replace the
+legacy pedagogical weights, p buckets and Beta-confidence conversion.
+The public by-value legacy shapiro_wilk_test adapter delegates to this result.
+
+Read status before inference: invalid size/data, constant samples and arithmetic
+failures are unavailable; calibration failure preserves W but not p.
+No independence/tie correction, censoring, posterior probability, residual
+type-I calibration or uniform approximation accuracy is claimed.
+The OLS assessment adds shapiro with a separate status; its residual screen
+and synthetic Q-Q figure explicitly retain these calibration limitations.
+See [SHAPIRO_WILK.md](SHAPIRO_WILK.md) and its execution receipt.
+
+### Checked residual heteroscedasticity and model assessments
+
+`stats::heteroscedasticity::koenker_bp_simple(&residuals,&x,n)`:
+studentized Koenker LM=n*auxiliary R-squared, intercept plus one variance
+predictor, asymptotic chi-square(1) survival. Finite selected data, 3<=n<=100.
+Scaled compensated scalar passes, no auxiliary sample arrays. Read status
+before payload: invalid request, nonfinite data, constant predictor/constant
+squared residuals and arithmetic failure are unavailable, with zero sentinels.
+No inference on homoscedasticity follows from an unavailable or large p value.
+
+`stats::regression::assessments::assess_simple_linear(&x,&y,n)` fits stable
+simple OLS once and returns its fit plus checked Jarque-Bera/Koenker residual
+summaries, each with independent status. No aggregate posterior or pass flag.
+The public by-value `stats::epistemic::assumptions::breusch_pagan_test`
+adapter now delegates to checked Koenker instead of bucketed tails/Beta.
+Other private legacy assumption heuristics remain uncertified.
+
+See [HETEROSCEDASTICITY.md](HETEROSCEDASTICITY.md) and the execution receipt.
+This is one variance predictor and asymptotic inference only, not multivariate
+variance modeling, finite-sample calibration or an independence assessment.
+
 ### `stats::normality` — Jarque-Bera omnibus normality test
 
 | Function | Signature |
@@ -646,8 +720,15 @@ df=3, p≈1.7e−4; perfect fit → χ²=G=0, p=1.
 
 The moment-based (skewness + kurtosis) complement to the visual `qq_normal`
 check: reports sample skewness, kurtosis (normal=3) and excess, the Jarque-Bera
-statistic `JB = n/6·(S²+(K−3)²/4) ~ χ²(2)`, and its closed-form p = e^{−JB/2}.
-Validated: {2,4,4,4,5,5,7,9} → S=0.6563, K=2.7813, JB=0.5902, p=0.7445.
+statistic `JB = n/6·(S²+(K−3)²/4)`, and asymptotic chi-square(2) tail
+`p = exp(-JB/2)`. Read `status` before using any numerical field: invalid size,
+nonfinite input, constant observations and arithmetic failure are unavailable,
+with zero payload sentinels. `n` and `asymptotic` identify the request/reference.
+Scaled compensated moments support tiny/large units and representable offsets.
+This does not assess sampling independence or calibrate small-sample inference;
+a large p is not posterior confidence in normality. See [NORMALITY.md](NORMALITY.md).
+Reference: {2,4,4,4,5,5,7,9} → S=0.65625, K=2.78125,
+JB=0.5901692708333333, p=0.7444685763913046.
 
 ### `stats::km` — Kaplan-Meier survival summaries
 
@@ -1123,6 +1204,23 @@ The deterministic resampling estimator of a statistic's bias and standard error
 from the n leave-one-out recomputations. Validated: mean of {1..5} → SE=0.7071,
 bias 0; the ÷n variance is bias-corrected back to the unbiased ÷(n−1) value
 (θ̂=2, jackknife estimate 2.5, bias −0.5, SE 1.0458).
+
+### `stats::bayesian::psis_loo` — Pareto-smoothed importance-sampling LOO
+
+| Function | Signature |
+|---|---|
+| `psis_loo_i` | `pub fn psis_loo_i(ll: &[f64; 16384], s: i64, out: &![f64; 4]) with Mut, Div, Panic` |
+| `psis_gpdfit` | `pub fn psis_gpdfit(x: &[f64; 16384], n: i64, out: &![f64; 4]) with Mut, Div, Panic` |
+| `psis_lse` / `psis_log1p` / `psis_expm1` / `psis_sort` | log-sum-exp, cancellation-free `log(1+x)` and `exp(x)-1`, index-carrying heap sort |
+
+Pointwise PSIS-LOO for one observation from its S log-likelihood draws (S ≤ 16384):
+`out = [elpd_loo_i, lpd_i, Pareto k_i, threshold]`, with k_i = 1e300 when not
+estimable and the estimate reliable for k_i < min(1 − 1/log10 S, 0.7). Follows the
+R package `loo`; the caller loops over observations. Validated against an
+independent C++ transcription of `loo` to ≤5e-9 relative (Pareto ratios with
+k = 0.5 and 1.2, S = 200 and 400, and the unsmoothed S = 16 case).
+References: Vehtari, Gelman & Gabry (2017) Stat Comput 27:1413; Vehtari et al.
+(2024) JMLR 25(72); Zhang & Stephens (2009) Technometrics 51:316.
 
 ### `stats::rng` — Park-Miller MINSTD generator
 

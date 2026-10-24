@@ -1,0 +1,382 @@
+// stdlib/http/post.sio — HTTP/1.1 over one TCP connection.
+//
+// Linux x86-64 only: socket 41, connect 42, write 1, read 0, close 3.
+// The Madaros native backend has no dynamic linker, so this uses the
+// syscall6 builtin instead of an extern "C" socket.
+//
+// Several requests may ride one socket. A read that runs past the end of
+// a Content-Length frame keeps the tail for the next response. The
+// exchange fails if a frame is missing, the tail exceeds 1024 bytes, or
+// the message would pass 131072 bytes. One connection at a time: the
+// tail lives in a process global.
+
+var HTTP_ADDR: [i8; 16] = [0; 16]
+var HTTP_RECV: [i8; 1024] = [0; 1024]
+var HTTP_HOLD: [i8; 1024] = [0; 1024]
+var HTTP_HOLD_N: i64 = 0
+
+fn http_addr(a: i64, b: i64, c: i64, d: i64, port: i64) with Mut {
+    var i: i64 = 0
+    while i < 16 {
+        HTTP_ADDR[i as usize] = 0
+        i = i + 1
+    }
+    HTTP_ADDR[0] = 2
+    HTTP_ADDR[2] = (port / 256) as i8
+    HTTP_ADDR[3] = (port % 256) as i8
+    HTTP_ADDR[4] = a as i8
+    HTTP_ADDR[5] = b as i8
+    HTTP_ADDR[6] = c as i8
+    HTTP_ADDR[7] = d as i8
+}
+
+fn dec_i64(n: i64) -> string with Mut, Panic, Div {
+    if n == 0 { return "0" }
+    var neg: i64 = 0
+    var m = n
+    if m < 0 {
+        neg = 1
+        m = 0 - m
+    }
+    var result = ""
+    while m > 0 {
+        let d = m % 10
+        result = str_concat(str_slice("0123456789", d, d + 1), result)
+        m = m / 10
+    }
+    if neg == 1 { return str_concat("-", result) }
+    result
+}
+
+fn host_text(a: i64, b: i64, c: i64, d: i64) -> string with Mut, Panic, Div {
+    var s = dec_i64(a)
+    s = str_concat(s, ".")
+    s = str_concat(s, dec_i64(b))
+    s = str_concat(s, ".")
+    s = str_concat(s, dec_i64(c))
+    s = str_concat(s, ".")
+    s = str_concat(s, dec_i64(d))
+    s
+}
+
+fn conn_token(last: i64) -> string {
+    if last == 1 { return "close" }
+    "keep-alive"
+}
+
+fn write_all(fd: i64, request: string) -> i64 with IO, Mut, Div, Panic {
+    var off: i64 = 0
+    let n = str_len(request)
+    while off < n {
+        var chunk = request
+        if off > 0 { chunk = str_slice(request, off, n) }
+        let wrote = syscall6(1, fd, chunk, n - off, 0, 0, 0)
+        if wrote <= 0 { return -1 }
+        off = off + wrote
+    }
+    0
+}
+
+fn take_packed(nread: i64) -> string with Mut, Div, Panic {
+    var boxed: [i8; 1024] = [0; 1024]
+    var i: i64 = 0
+    while i < nread {
+        boxed[i as usize] = HTTP_RECV[i as usize]
+        i = i + 1
+    }
+    str_from_bytes(boxed, nread)
+}
+
+fn hold_load() -> string with Mut, Div, Panic {
+    let n = HTTP_HOLD_N
+    HTTP_HOLD_N = 0
+    if n <= 0 { return "" }
+    var boxed: [i8; 1024] = [0; 1024]
+    var i: i64 = 0
+    while i < n {
+        boxed[i as usize] = HTTP_HOLD[i as usize]
+        i = i + 1
+    }
+    str_from_bytes(boxed, n)
+}
+
+fn hold_save(acc: string, need: i64) -> i64 with Mut, Div, Panic {
+    let extra = str_len(acc) - need
+    if extra < 0 { return -1 }
+    if extra > 1024 { return -1 }
+    var i: i64 = 0
+    while i < extra {
+        let c = str_char_at(acc, (need + i) as usize) as i64
+        HTTP_HOLD[i as usize] = c as i8
+        i = i + 1
+    }
+    HTTP_HOLD_N = extra
+    0
+}
+
+fn header_end(response: string) -> i64 with Mut, Div, Panic {
+    let n = str_len(response)
+    var i: i64 = 0
+    while i + 3 < n {
+        let c0 = str_char_at(response, i as usize) as i64
+        let c1 = str_char_at(response, (i + 1) as usize) as i64
+        let c2 = str_char_at(response, (i + 2) as usize) as i64
+        let c3 = str_char_at(response, (i + 3) as usize) as i64
+        if c0 == 13 {
+            if c1 == 10 {
+                if c2 == 13 {
+                    if c3 == 10 { return i + 4 }
+                }
+            }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn lower_ascii(c: i64) -> i64 {
+    if c >= 65 {
+        if c <= 90 { return c + 32 }
+    }
+    c
+}
+
+fn is_content_length_at(response: string, i: i64) -> i64 with Mut, Div, Panic {
+    let pat = "content-length:"
+    var k: i64 = 0
+    while k < 15 {
+        let c = lower_ascii(str_char_at(response, (i + k) as usize) as i64)
+        let p = str_char_at(pat, k as usize) as i64
+        if c != p { return 0 }
+        k = k + 1
+    }
+    1
+}
+
+fn content_length_before(response: string, hend: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i + 15 <= hend {
+        if is_content_length_at(response, i) == 1 {
+            var k = i + 15
+            while k < hend {
+                let c = str_char_at(response, k as usize) as i64
+                if c != 32 {
+                    if c != 9 { break }
+                }
+                k = k + 1
+            }
+            var v: i64 = 0
+            var digits: i64 = 0
+            while k < hend {
+                let d = str_char_at(response, k as usize) as i64
+                if d < 48 { break }
+                if d > 57 { break }
+                v = v * 10 + (d - 48)
+                digits = digits + 1
+                k = k + 1
+            }
+            if digits > 0 { return v }
+            return -1
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn framed_len(response: string) -> i64 with Mut, Div, Panic {
+    let hend = header_end(response)
+    if hend < 0 { return -1 }
+    let cl = content_length_before(response, hend)
+    if cl < 0 { return -1 }
+    let need = hend + cl
+    if str_len(response) >= need { return need }
+    -1
+}
+
+fn read_framed(fd: i64) -> string with IO, Mut, Div, Panic {
+    var acc = hold_load()
+    var done = ""
+    var found: i64 = 0
+    while found == 0 {
+        let need = framed_len(acc)
+        if need >= 0 {
+            if hold_save(acc, need) < 0 { return "" }
+            done = str_slice(acc, 0, need)
+            found = 1
+        } else {
+            let total = str_len(acc)
+            if total >= 131072 { return "" }
+            let room = 131072 - total
+            var want: i64 = 1024
+            if room < want { want = room }
+            let nread = syscall6(0, fd, &! HTTP_RECV, want, 0, 0, 0)
+            if nread <= 0 { return "" }
+            acc = str_concat(acc, take_packed(nread))
+        }
+    }
+    done
+}
+
+pub struct HttpConn {
+    pub fd: i64,
+}
+
+pub struct HttpReply {
+    pub status: i64,
+    pub content_length: i64,
+    pub body: string,
+}
+
+fn reply_fail() -> HttpReply {
+    HttpReply { status: 0, content_length: -1, body: "" }
+}
+
+fn reply_of(raw: string) -> HttpReply with Mut, Div, Panic {
+    if str_len(raw) == 0 { return reply_fail() }
+    let status = http_status(raw)
+    let hend = header_end(raw)
+    if hend < 0 { return reply_fail() }
+    let cl = content_length_before(raw, hend)
+    let body = str_slice(raw, hend, str_len(raw))
+    if status < 100 { return reply_fail() }
+    if cl < 0 { return reply_fail() }
+    if str_len(body) != cl { return reply_fail() }
+    HttpReply { status: status, content_length: cl, body: body }
+}
+
+fn http_status(response: string) -> i64 with Mut, Div, Panic {
+    let n = str_len(response)
+    var i: i64 = 0
+    while i < n {
+        let c = str_char_at(response, i as usize) as i64
+        if c == 32 {
+            var k = i + 1
+            var v: i64 = 0
+            var digits: i64 = 0
+            while k < n {
+                let d = str_char_at(response, k as usize) as i64
+                if d < 48 { break }
+                if d > 57 { break }
+                v = v * 10 + (d - 48)
+                digits = digits + 1
+                k = k + 1
+            }
+            if digits == 3 { return v }
+            return 0
+        }
+        if c == 10 { return 0 }
+        i = i + 1
+    }
+    0
+}
+
+pub fn http_body(response: string) -> string with Mut, Div, Panic {
+    let hend = header_end(response)
+    if hend < 0 { return "" }
+    str_slice(response, hend, str_len(response))
+}
+
+pub fn http_open(a: i64, b: i64, c: i64, d: i64, port: i64) -> HttpConn with IO, Mut, Div, Panic {
+    HTTP_HOLD_N = 0
+    http_addr(a, b, c, d, port)
+    let fd = syscall6(41, 2, 1, 0, 0, 0, 0)
+    if fd < 0 { return HttpConn { fd: -1 } }
+    let rc = syscall6(42, fd, &! HTTP_ADDR, 16, 0, 0, 0)
+    if rc < 0 {
+        syscall6(3, fd, 0, 0, 0, 0, 0)
+        return HttpConn { fd: -1 }
+    }
+    HttpConn { fd: fd }
+}
+
+pub fn http_close(conn: HttpConn) -> i64 with IO, Mut {
+    HTTP_HOLD_N = 0
+    if conn.fd < 0 { return 0 }
+    syscall6(3, conn.fd, 0, 0, 0, 0, 0)
+}
+
+pub fn http_recv(conn: HttpConn) -> HttpReply with IO, Mut, Div, Panic {
+    if conn.fd < 0 { return reply_fail() }
+    reply_of(read_framed(conn.fd))
+}
+
+pub fn http_send_get(conn: HttpConn, a: i64, b: i64, c: i64, d: i64, path: string, last: i64) -> i64 with IO, Mut, Div, Panic {
+    if conn.fd < 0 { return -1 }
+    var req = str_concat("GET ", path)
+    req = str_concat(req, " HTTP/1.1\r\nHost: ")
+    req = str_concat(req, host_text(a, b, c, d))
+    req = str_concat(req, "\r\nConnection: ")
+    req = str_concat(req, conn_token(last))
+    req = str_concat(req, "\r\n\r\n")
+    write_all(conn.fd, req)
+}
+
+pub fn http_send_post(conn: HttpConn, a: i64, b: i64, c: i64, d: i64, path: string, extra: string, body: string, last: i64) -> i64 with IO, Mut, Div, Panic {
+    if conn.fd < 0 { return -1 }
+    var req = str_concat("POST ", path)
+    req = str_concat(req, " HTTP/1.1\r\nHost: ")
+    req = str_concat(req, host_text(a, b, c, d))
+    req = str_concat(req, "\r\nContent-Length: ")
+    req = str_concat(req, dec_i64(str_len(body)))
+    req = str_concat(req, "\r\nConnection: ")
+    req = str_concat(req, conn_token(last))
+    req = str_concat(req, "\r\n")
+    req = str_concat(req, extra)
+    req = str_concat(req, "\r\n")
+    req = str_concat(req, body)
+    write_all(conn.fd, req)
+}
+
+pub fn http_send_shots(conn: HttpConn, a: i64, b: i64, c: i64, d: i64, shots: i64, qir: string, last: i64) -> i64 with IO, Mut, Div, Panic {
+    var extra = str_concat("X-Shots: ", dec_i64(shots))
+    extra = str_concat(extra, "\r\n")
+    http_send_post(conn, a, b, c, d, "/shots", extra, qir, last)
+}
+
+pub fn http_get(a: i64, b: i64, c: i64, d: i64, port: i64, path: string) -> HttpReply with IO, Mut, Div, Panic {
+    let conn = http_open(a, b, c, d, port)
+    if conn.fd < 0 { return reply_fail() }
+    if http_send_get(conn, a, b, c, d, path, 1) < 0 {
+        http_close(conn)
+        return reply_fail()
+    }
+    let reply = http_recv(conn)
+    http_close(conn)
+    reply
+}
+
+pub fn http_post(a: i64, b: i64, c: i64, d: i64, port: i64, path: string, extra: string, body: string) -> HttpReply with IO, Mut, Div, Panic {
+    let conn = http_open(a, b, c, d, port)
+    if conn.fd < 0 { return reply_fail() }
+    if http_send_post(conn, a, b, c, d, path, extra, body, 1) < 0 {
+        http_close(conn)
+        return reply_fail()
+    }
+    let reply = http_recv(conn)
+    http_close(conn)
+    reply
+}
+
+pub fn http_shots(a: i64, b: i64, c: i64, d: i64, port: i64, shots: i64, qir: string) -> HttpReply with IO, Mut, Div, Panic {
+    let conn = http_open(a, b, c, d, port)
+    if conn.fd < 0 { return reply_fail() }
+    if http_send_shots(conn, a, b, c, d, shots, qir, 1) < 0 {
+        http_close(conn)
+        return reply_fail()
+    }
+    let reply = http_recv(conn)
+    http_close(conn)
+    reply
+}
+
+pub fn http_exchange(a: i64, b: i64, c: i64, d: i64, port: i64, request: string) -> string with IO, Mut, Div, Panic {
+    let conn = http_open(a, b, c, d, port)
+    if conn.fd < 0 { return "" }
+    if write_all(conn.fd, request) < 0 {
+        http_close(conn)
+        return ""
+    }
+    let raw = read_framed(conn.fd)
+    http_close(conn)
+    raw
+}

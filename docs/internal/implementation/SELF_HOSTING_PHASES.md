@@ -2,8 +2,8 @@
 topic_id: repo.docs.internal.implementation.self-hosting-phases
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.self-hosting-phases
 -->
 
@@ -360,7 +360,7 @@ User Source Code
 
 ## References
 
-- **FFI Specification**: [Runtime FFI Guide](./RUNTIME_FFI.md)
-- **Bytecode Spec**: [Bytecode Format](./BYTECODE_SPEC.md)
-- **Self-Hosting Plan**: [Original Plan](../crates/souc/src/compiler_loader.rs) (comments)
-- **Validation Tests**: [Test Suite](../crates/souc/tests/self_hosting_validation.rs)
+- **FFI Specification**: Runtime FFI Guide
+- **Bytecode Spec**: Bytecode Format
+- **Self-Hosting Plan**: Original Plan (in `crates/souc/src/compiler_loader.rs`, since removed)
+- **Validation Tests**: Test Suite

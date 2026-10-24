@@ -2,8 +2,8 @@
 topic_id: repo.docs.compiler.technical-report
 authority: repo_only
 audience: contributors
-last_validated: 2026-03-07
-validated_by: A4
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.technical-report
 -->
 
@@ -689,7 +689,7 @@ octonion_matmul/16x16     time: [57.6 µs 59.0 µs 60.4 µs]
 | Moufang tests | `crates/souc/tests/integration_octonion_moufang.rs` |
 | Numerical tests | `crates/souc/tests/integration_octonion_numerical.rs` |
 | Benchmarks | `benches/compiler/octonion_benchmark.rs` |
-| One-shot reproduction script | `scripts/paper/reproduce_octonion_preprint.sh` |
+| One-shot reproduction script | `scripts/archive/reproduce_octonion_preprint.sh` |
 
 ---
 

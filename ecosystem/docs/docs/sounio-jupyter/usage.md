@@ -781,6 +781,6 @@ This is a heading.
 ## Next Steps
 
 - [**Overview**](overview.md) — Architecture and features
-- [**Sounio Language Guide**](https://github.com/sounio-org/sounio/docs/LLM_PROGRAMMING_GUIDE.md) — Learn Sounio syntax
+- [**Sounio Language Guide**](https://github.com/sounio-org/sounio/blob/main/docs/guide/LLM_PROGRAMMING_GUIDE.md) — Learn Sounio syntax
 - [**sounio-py Guide**](../sounio-py/quickstart.md) — Python integration
 - [**Examples**](https://github.com/sounio-org/sounio/tree/main/ecosystem/sounio-jupyter/examples) — Example notebooks

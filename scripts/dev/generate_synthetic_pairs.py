@@ -100,14 +100,6 @@ def inject_println_macro(code: str):
     return broken, "no_macros"
 
 
-def inject_unary_minus(code: str):
-    """Replace `0 - N` patterns with `-N` (Rust style unary minus)."""
-    broken = re.sub(r'\b0\s*-\s*(\d+\.?\d*)\b', r'-\1', code)
-    if broken == code:
-        return None
-    return broken, "no_unary_minus"
-
-
 def inject_missing_effect(code: str):
     """Remove `with IO` from fn main declarations."""
     if "fn main() with IO" not in code and "fn main() with " not in code:
@@ -129,7 +121,6 @@ INJECTORS = [
     inject_mut_ref,
     inject_assert_macro,
     inject_println_macro,
-    inject_unary_minus,
     inject_missing_effect,
 ]
 

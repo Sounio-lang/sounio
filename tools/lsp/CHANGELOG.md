@@ -105,7 +105,7 @@ re-probe shows `textDocument/codeLens` returns
 `METHOD_NOT_FOUND`, consistent with `resolveProvider: false`.
 
 No code change; phantom finding documented in
-`agent_logs/CC1_parity_patches_convergence.md`.
+`artifacts/agent-logs/CC1_parity_patches_convergence.md`.
 
 ### Patch #3 — `inlayHint/resolve` returns the hint, not null
 

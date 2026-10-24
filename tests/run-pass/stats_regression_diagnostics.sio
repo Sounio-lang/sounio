@@ -1,0 +1,86 @@
+//@ run-pass
+//@ expect-stdout: OLS_DIAGNOSTICS_OK
+use stats::regression::ols::{ols_fit_simple, ols_influence_simple}
+use stats::regression::linear::{fit_simple_linear_regression, fit_linear_regression_epistemic, linear_slope_ci}
+fn main() with IO, Mut, Div, Panic {
+    var x: [f64;100]=[0.0;100]
+    var y: [f64;100]=[0.0;100]
+    var i: i64=0
+    while i < 8 {
+        x[i as usize]=i as f64
+        y[i as usize]=2.0+3.0*(i as f64)
+        i=i+1
+    }
+    y[1]=y[1]+0.5
+    y[4]=y[4]-0.25
+    y[7]=y[7]+2.0
+    let fit=ols_fit_simple(&x,&y,8)
+    println("core")
+    assert(fit.status == 0)
+    assert(fit.inference_status == 0)
+    let influence=ols_influence_simple(&x,&y,8)
+    println("influence")
+    assert(influence.status == 0)
+    assert(influence.valid_count == 8)
+    assert(influence.dffits[7] > 1.0)
+    let model=fit_simple_linear_regression(x,y,8)
+    println("adapter")
+    assert(model.fit_status == 0)
+    assert(model.inference_status == 0)
+    let (lo,hi)=linear_slope_ci(&model)
+    assert(lo < model.coefficients[1] && hi > model.coefficients[1])
+    assert(hi-model.coefficients[1] > 2.44*model.std_errors[1])
+    assert(hi-model.coefficients[1] < 2.45*model.std_errors[1])
+    let knowledge=fit_linear_regression_epistemic(x,y,8)
+    println("epistemic")
+    assert(knowledge.provenance.diagnostics.dffits_valid_count == 8)
+    assert(knowledge.provenance.assumptions.assessment_status == 1)
+    assert(knowledge.confidence.alpha == 1.0)
+    assert(knowledge.variance_status == 0 && knowledge.variance > 0.0)
+    var large_y:[f64;100]=[0.0;100]
+    var small_y:[f64;100]=[0.0;100]
+    i=0
+    while i < 8 {
+        large_y[i as usize]=y[i as usize]*1.0e200
+        small_y[i as usize]=y[i as usize]*1.0e-200
+        i=i+1
+    }
+    let large_variance=fit_linear_regression_epistemic(x,large_y,8)
+    let small_variance=fit_linear_regression_epistemic(x,small_y,8)
+    assert(large_variance.value.fit_status == 0 && large_variance.variance_status == 5)
+    assert(small_variance.value.fit_status == 0 && small_variance.variance_status == 5)
+    assert(large_variance.variance == 0.0 && small_variance.variance == 0.0)
+    assert(knowledge.provenance.diagnostics.dffits[7] > 1.0)
+    assert(ols_fit_simple(&x,&y,2).status == 1)
+    assert(ols_fit_simple(&x,&y,101).status == 1)
+    assert(ols_influence_simple(&x,&y,3).status == 1)
+    var zero:[f64;100]=[0.0;100]
+    assert(ols_fit_simple(&zero,&y,8).status == 3)
+    let constant=ols_fit_simple(&x,&zero,8)
+    assert(constant.status == 0 && constant.inference_status == 4)
+    assert(!constant.r_squared_defined)
+    let no_variance=ols_influence_simple(&x,&zero,8)
+    assert(no_variance.status == 4 && no_variance.valid_count == 0)
+    var perfect:[f64;100]=[0.0;100]
+    perfect[0]=0.0;perfect[1]=1.0;perfect[2]=2.0;perfect[3]=3.0
+    let exact=ols_fit_simple(&perfect,&perfect,4)
+    assert(exact.status == 0 && exact.inference_status == 4)
+    let invalid=fit_simple_linear_regression(zero,y,8)
+    assert(invalid.fit_status == 3 && invalid.p_values[1] == 1.0)
+    var deleted_y:[f64;100]=[0.0;100]
+    deleted_y[0]=0.0;deleted_y[1]=1.0;deleted_y[2]=2.0;deleted_y[3]=4.0
+    let deleted_exact=ols_influence_simple(&perfect,&deleted_y,4)
+    assert(deleted_exact.status == 6 && deleted_exact.dffits_status[3] == 8)
+    var unique_x:[f64;100]=[0.0;100]
+    unique_x[3]=1.0
+    let leverage_one=ols_influence_simple(&unique_x,&perfect,4)
+    assert(leverage_one.status == 6 && leverage_one.dffits_status[3] == 7)
+    var huge=1.0e308
+    let inf=huge*10.0
+    y[2]=inf
+    assert(ols_fit_simple(&x,&y,8).status == 2)
+    y[2]=inf-inf
+    assert(ols_fit_simple(&x,&y,8).status == 2)
+    println("OLS_DIAGNOSTICS_OK")
+    0
+}

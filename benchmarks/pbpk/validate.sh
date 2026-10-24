@@ -21,7 +21,8 @@ echo ""
 # 1. Run causal intervention benchmark
 echo "[1/3] Running PBPK causal intervention benchmark..."
 cd "$ROOT_DIR"
-cargo run --release --bin souc -- run benchmarks/pbpk/causal_intervention.sio \
+export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+./bin/souc run benchmarks/pbpk/causal_intervention.sio \
     2>&1 | tee "$RESULTS_DIR/causal_intervention_output.txt"
 echo ""
 

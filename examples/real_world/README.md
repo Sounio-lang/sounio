@@ -2,8 +2,8 @@
 topic_id: repo.examples.real-world.readme
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.real-world.readme
 -->
 
@@ -204,5 +204,5 @@ Try modifying the examples:
 
 For questions or issues:
 - GitHub: https://github.com/anthropics/sounio
-- Documentation: docs/LLM_PROGRAMMING_GUIDE.md
+- Documentation: docs/guide/LLM_PROGRAMMING_GUIDE.md
 - Syntax reference: docs/MINIMUM_VIABLE_SOUNIO.md

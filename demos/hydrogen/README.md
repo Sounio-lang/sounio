@@ -1,7 +1,6 @@
 # demos/hydrogen — Metal-Hydride Hydrogen Compression, Uncertainty-Quantified
 
-A Sounio demonstration written for **Dr. Emmanuel Stamatakis** (NCSR Demokritos,
-Integrated Hydrogen Laboratory / H2Lab; CYRUS S.A.).
+A Sounio demonstration written for **Dr. Emmanuel Stamatakis**.
 
 It takes the single-stage core of the metal-hydride (MH) thermal compression
 concept he has published on for a decade — and shows what Sounio adds on top of
@@ -11,7 +10,14 @@ reproducibility living inside the language itself**, not in an external toolbox.
 ## Run
 
 ```bash
-bin/souc run demos/hydrogen/mh7_reliability.sio                         # 7-stage HRS reliability (flagship)
+bin/souc run demos/hydrogen/mh7_coupled_ceiling.sio                     # 7-stage cascade ceiling from measured Table 3, nothing fitted
+bin/souc run demos/hydrogen/mh7_kinetic_band.sio                        # eqs. 9-10 on S6->S7, declared box on the missing constants
+bin/souc run demos/hydrogen/sofc_hydride_optimum.sio                   # compressor delivery scored as SOFC electricity per heat
+bin/souc run demos/hydrogen/sofc_mh_coupling.sio                        # Yiotis/Stubos heat balance on the seven-stage machine
+bin/souc run demos/hydrogen/sofc_mh_design.sio                          # longest cascade whose heat the cell can cover
+bin/souc run demos/hydrogen/sofc_mh_frontier.sio                        # voltage and temperature that maximise autonomous delivery pressure
+bin/souc run demos/hydrogen/sofc_species_covariance.sio                # H2/H2O Knowledge keeps species, validity, and GUM variance across the cell
+bin/souc run demos/hydrogen/mh7_reliability.sio                         # 7-stage HRS reliability (fitted surrogate, see below)
 bin/souc run demos/hydrogen/trieres_chain.sio                           # TRIERES valley: dispensed EUR/kg p-box
 bin/souc run demos/hydrogen/valley_chain_epistemic.sio                  # composed twin: subsurface -> compressor -> dispenser
 bin/souc run demos/hydrogen/mh_stage_uq.sio                              # stage model
@@ -19,16 +25,134 @@ bin/souc run demos/hydrogen/mh_cascade_uq.sio                            # casca
 bin/souc run demos/hydrogen/bayes_pilot.sio                              # value of pilot data (IDM)
 bin/souc run demos/hydrogen/hub_chain.sio                                # full chain: delivered EUR/kg
 bin/souc run demos/hydrogen/methanation_logk_gate.sio                   # methanation log-K gate
-SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/uhs_brine_calcite.sio  # UHS H2-brine-calcite network (lean_single only, see below)
-SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/site_screening.sio     # epistemic UHS site screening, sourced Greek sites (lean_single only)
+bin/souc run demos/hydrogen/uhs_brine_calcite.sio                       # UHS H2-brine-calcite network
+bin/souc run demos/hydrogen/site_screening.sio                          # epistemic UHS site screening, sourced Greek sites
 ```
 
 Deterministic (seeded xorshift PRNG): every run prints the same numbers and
-ends with `MH_STAGE_UQ_OK` / `MH_CASCADE_UQ_OK`. All demos run on the default
-Madaros engine as well as lean_single. (Historical note: the cascade imports
-`stdlib/epistemic/pce.sio`, which calls libm through `extern "C"`; until
-#1550 the Madaros native path dropped all but the first extern decl and
-mis-evaluated the exp/log builtins — issue #1547, fixed.)
+ends with its `*_OK` marker (`MH_STAGE_UQ_OK`, `MH_CASCADE_UQ_OK`, ...).
+(Historical note: the cascade imports `stdlib/epistemic/pce.sio`, which calls
+libm through `extern "C"`; until #1550 the Madaros native path dropped all but
+the first extern decl and mis-evaluated the exp/log builtins — issue #1547,
+fixed.)
+Until 2026-10-06 the cascade's Monte Carlo block also differed on Madaros
+(MC mean P3 368.005190 vs 367.339816): `p = p * mh_exp(..) * rand_gaussian(..)`
+called the RNG twice per stage because the FO product rule re-lowered its
+operands. Fixed; Madaros now prints byte-identical output, pinned by
+`tests/run-pass/fo_product_rule_call_evaluated_once.sio`.
+
+### Engine status, measured
+
+Measured 2026-10-06 with `bin/souc run`, 900 s timeout, Madaros **built from
+source** (`make build-madaros`; the committed `bin/madaros-linux-x86_64` dates
+from 2026-09-15 and lags it) against `SOUNIO_SOUC_ENGINE=lean_single`.
+"Same output" means the program's stdout is byte-identical on both engines.
+Wall time is the whole `souc run`, so the Madaros column includes compiling
+(about 4 s for a small demo, 30–50 s for the two that import
+`chemistry::kinetics`); runs were four at a time on a shared node, so read the
+times as ±30 %.
+
+| demo | Madaros | lean_single | same output | wall Madaros | wall lean_single |
+|---|---|---|---|---|---|
+| `bayes_pilot` | OK | OK | yes | 5 s | 1 s |
+| `caprock_integrity_v2` | OK | OK | yes | 6 s | 8 s |
+| `caprock_seal_pbox` | OK | OK | yes | 4 s | 2 s |
+| `hub_chain` | OK | OK | yes | 8 s | 26 s |
+| `methanation_logk_gate` | OK | OK | yes | 5 s | 1 s |
+| `mh7_coupled_ceiling` | OK | OK | yes | 4 s | 1 s |
+| `mh7_reliability` | OK | OK | yes | 8 s | 3 s |
+| `mh_cascade_uq` | OK | OK | yes (re-measured after merging main's FO product-rule fix; before it the three Monte Carlo lines differed) | 6 s | 2 s |
+| `mh_stage_uq` | OK | OK | yes | 5 s | 1 s |
+| `site_screening` | OK | OK | yes | 55 s | 62 s |
+| `smr_h2_lcoh` | OK | OK | yes | 5 s | 3 s |
+| `sobol_voi` | OK | OK | yes | 5 s | 4 s |
+| `trieres_chain` | OK | OK | yes | 11 s | 27 s |
+| `uhs_brine_calcite` | OK | OK | yes | 37 s | 7 s |
+| `valley_chain_epistemic` | OK | OK | yes | 16 s | 59 s |
+| `vanthoff_gate` | OK | OK | yes | 6 s | 1 s |
+
+Before 2026-10-06 the two subsurface demos did not run on Madaros:
+on the source-built Madaros both stopped at type-check (`E175` x2,
+`chemistry::kinetics` calling `plot::line::line_plot` / `plot::bar::bar_chart`,
+which were private), and on the committed ELF both stopped at run time with a
+bare `madaros: arena full` (exit 181) — `uhs_brine_calcite` after printing
+`H2 = NON-FINITE` at 25 °C, `site_screening` at its first site. lean_single
+took 61 s and 678 s for them. The cause and the fix are in the
+`uhs_brine_calcite` section below ("Engine coverage"); the same change made
+`site_screening` about 10x faster on lean_single, with byte-identical output.
+
+Most of `site_screening`'s 55 s on Madaros is compiling: the run itself
+measured 16 s (lean_single compiles it in a few seconds). To show it live, compile once (`bin/souc compile demos/hydrogen/site_screening.sio -o
+site_screening.elf`) and run the ELF. Profiled by timestamping every output
+line: after the fix no single section dominates (the slowest line takes under
+1 s); the remaining cost is ~150 short calibrated-law runs plus the corner
+p-boxes, spread evenly.
+
+`examples/hydrogen/mhhc_corner_pbox.sio` (the 128-corner box over the
+seven-stage compressor) **terminates, but takes about two hours** on Madaros;
+it is not a live demo. Measured 2026-10-06 on Madaros built from source:
+corners 0–69 took 3600 s in one process on a loaded 8-CPU host, and corners
+70–127, split into four processes, took 1585, 1223, 326 and 322 s, about
+7000 s of single-core time in all. Every one of the 128 corners reached
+cyclic steady state: 64 in 4 fixed-point sweeps, 32 in 6, and 32 in 16 (the
+high-σ corners from 64 up, the slowest at 381 s each). The 900 s sweep timed
+out on both engines; a single uninterrupted 128-corner run was not completed
+here (the pod running it restarted), and lean_single, about 4x slower than
+Madaros on the sibling `mhhc_cascade` (217 s vs 51 s), was not timed. The
+file now prints one line per corner, so a run in progress no longer looks
+like a hang.
+
+## The physics-grounded replacement (`mh7_coupled_ceiling.sio`) — the cascade's ceiling from measured Table 3, nothing fitted
+
+Added 2026-10-04. `mh7_reliability.sio` below reproduces the paper's ratios by
+fitting to them, and its README section says why that form is wrong. This file
+is what the measured Table 3 supports **without any fitted parameter**:
+
+```bash
+bin/souc run demos/hydrogen/mh7_coupled_ceiling.sio      # ends MH7_COUPLED_CEILING_OK (both engines, ~3 s)
+g++ -std=c++23 -O2 -o mh7x demos/hydrogen/tools/mh7_ceiling_crosscheck.cpp && ./mh7x   # independent cross-check
+```
+
+Under flat plateaus (the σ→0, Y→0 limit of the paper's eq. 11), a cascade
+coupled through interconnectors is bounded by one number, the desorption
+plateau of its **last** stage at T_hot, provided every coupling
+P_des,i(T_hot) > P_abs,i+1(T_cold) is feasible. The free per-stage ratios do
+not multiply.
+
+| case | T_hot | ceiling P_des,7 (bar) | paper COMSOL (bar) | paper/ceiling | ratio-chain product |
+|---|---|---|---|---|---|
+| 1 | 80 °C | 561.55 | 374.0 | 0.666 | 6640 |
+| 2 | 90 °C | 670.55 | 483.2 | 0.721 | 29029 |
+| 3 | 100 °C | 793.13 | 606.4 | 0.765 | 117263 |
+| 4 | 105 °C | 859.72 | 682.0 | 0.793 | 229245 |
+| 5 | 110 °C | 929.93 | 742.0 | 0.798 | 440394 |
+| 6 | 120 °C | 1081.55 | 830.0 | 0.767 | 1546278 |
+
+What follows from Table 3 alone, checked mechanically in the file:
+
+- all 36 couplings (6 links × 6 cases) are thermodynamically feasible;
+- the bottleneck link is **S6 → S7 in every case** (driving force
+  ln P_des,6/P_abs,7 = 0.140 at 80 °C, 0.803 at 120 °C);
+- the ceiling orders the paper's delivered pressures in **15/15** case pairs,
+  and the S6 → S7 driving force orders its cycle times (shorter as the drive
+  rises) in **15/15** pairs.
+
+What it does **not** claim: the delivered pressure. The COMSOL output sits at
+67–80 % of the ceiling, and that ratio is not monotone, so the ceiling orders
+the cases without predicting the kinetic gap. The gap belongs to eqs. 9–11,
+whose constants (C_a, C_d, E_a, E_d, σ_s, σ_0, Y) the paper does not publish.
+
+**Two questions this raises for the authors** (printed in sections D and E):
+
+1. The text gives 180 bar (80 °C) and 365 bar (120 °C) at the *third*
+   coupling. By the paper's own Step 3, coupling 1 is S1 → S2, so the third is
+   S3 → S4, but S3 desorbs at only 101.5 bar at 80 °C under Table 3. Either
+   the figure counts couplings differently, or the S3 plateau slope is large.
+2. A ±1 kJ/mol ΔH error at fixed ΔS moves the 80 °C ceiling by ×1.41, while
+   the same error compensated through ΔS (as a van 't Hoff fit couples them)
+   moves it by ×1.02 at an illustrative 60 °C pivot. The covariance of each
+   van 't Hoff fit is the single number per stage that would bound the
+   ceiling honestly.
 
 ## The flagship (`mh7_reliability.sio`) — the seven-stage HRS compressor he co-authored, reliability-quantified
 
@@ -674,19 +798,60 @@ comparison-arguable and labeled unproven. Second, the house engine's
 per-step GUM propagator has its own caveats — the band scales with dt
 and does not accumulate, sub-1e-6 σ values hit a sqrt-convergence floor
 (flagged ENGINE-FLOOR), and at 90 °C the J² amplification diverges, so
-the band is **refused** there rather than printed. All of this is
+the band is **refused** there rather than printed. The refusal accepts a
+band only when every printed σ is finite and positive: the engine hands
+the diverged variance back as 0.0 on some lean_single seeds and as NaN on
+others, and a NaN used to slip past the old `<= 0` test and hang the digit
+printer (fixed 2026-09-15). All of this is
 labeled E1–E6 in the file header (E6: lean_single aliases returned
 arrays across calls, so the demo extracts every run's scalars before the
 next call — do not refactor it to collect-then-print).
 
-Engine coverage: **lean_single only** — on current main, Madaros fails
-"visibility preflight" on *any* `chemistry::kinetics` import (reproduced
-with the repo's own `tests/stdlib/chemistry/test_kinetics_epistemic_ensemble.sio`;
-pre-existing blocker, not from this demo). Run:
+**On the 90 °C column (corrected 2026-10-04).** The 0.000 % loss at 90 °C
+is the k_m = 0 slot read back, not a test of the abstract's "negligible
+above ~70 °C". An earlier revision of the demo printed it as "consistent
+with the abstract's qualitative claim", which was circular; it now prints
+"A2: NOT TESTED HERE". Only the paper's own rate law (slot S2) can test A2.
 
-```bash
-SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/uhs_brine_calcite.sio
-```
+Engine coverage: **both engines, byte-identical output** (since
+2026-10-06; see the engine table at the top). The history, because each step
+hid the next:
+
+1. Until 2026-10-04 Madaros stopped in native lowering at stdlib/plot
+   (`cannot safely lower print/println argument with unresolved scalar kind`).
+   Binding the struct-field string to a typed local fixed that.
+2. Madaros then enforced module privacy, and `chemistry::kinetics` calls
+   `plot::line::line_plot` and `plot::bar::bar_chart`, which were private
+   (`E175` x2, both subsurface demos). They are `pub` now, and
+   `bar_chart_horizontal` reads its string fields into typed locals for the
+   same lowering reason as step 1.
+3. The run then stopped at `madaros: arena full` (exit 181). That is the
+   **generated program's** runtime heap, not the compiler's: Madaros's native
+   runtime bump-allocates every aggregate value from one fixed ~2 GiB arena
+   that is never reclaimed. `simulate_general_epistemic` built about two
+   hundred 32 KiB `MatNM` values per RK4 step (an 8x1 matrix plus
+   `matnm_set` copies in every `general_dc`, and an nsp x nsp Jacobian matrix
+   with one `matnm_set` per entry), so the arena lasted a few hundred steps
+   and this demo needs thousands. Minimal repro: a 32 KiB struct rebuilt by
+   value 100000 times in a loop (`scripts/ci/arena_full_diagnostic_gate.sh`).
+   The simulator now reads `nu` once into a stack `[f64; 64]` and writes
+   every per-step quantity through hoisted `&!` buffers, operation for
+   operation as before; it also skips the Jacobian when every k-uncertainty
+   and the variance are zero, which is exact under bounds it checks (the
+   value-only corner runs). Same fix, same wall, as `chemistry::catalysis`
+   on 2026-09-15.
+4. The `H2 = NON-FINITE` that the committed ELF prints at 25 °C is not
+   produced by a Madaros built from current source (`H2 = 9.881639 mmol`,
+   matching lean_single); it was a codegen defect fixed on main (#2771).
+
+The allocation wall itself is still there for other programs. Its message is
+no longer bare: it now names the size of the allocation that did not fit
+(32800 bytes is a `MatNM`), the 2 GiB limit, and the fix.
+`test_kinetics_gri_mech` hit the same wall through a `MatNM` in
+`simulate_big_crn_gri`'s step loop and got the same rewrite (D06, closed
+2026-10-06). `test_kinetics_gri_mech`, `test_kinetics_core`,
+`test_kinetics_deep_stdlib` and `test_kinetics_epistemic_ensemble` exit 0 on
+both engines with identical output (measured 2026-10-06).
 
 Suite coverage: `tests/run-pass/uhs_brine_calcite_selftest.sio` pins the
 25 °C trajectory and band against an independent Python delta-method
@@ -818,8 +983,8 @@ replica, τ-monotonicity across the 285 d step bracket), and the
 field-calibration path (inverse-calibration pins for Lehen and
 Lobodice, Tyne bridge arithmetic, CTMI scan at Tyne's 50.7 °C, and the
 KMF lower edge above 100× the falsified lab anchor)
-(`SITE_SCREENING_SELFTEST_OK`). lean_single only
-(same Madaros chemistry-import blocker as the network demo).
+(`SITE_SCREENING_SELFTEST_OK`). Both engines, identical output
+(measured 2026-10-06; see the engine table at the top).
 
 ## The stdlib modules (new, reusable)
 

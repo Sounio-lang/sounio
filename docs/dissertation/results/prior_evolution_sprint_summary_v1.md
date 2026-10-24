@@ -2,8 +2,8 @@
 topic_id: repo.docs.dissertation.results.prior-evolution-sprint-summary-v1
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.results.prior-evolution-sprint-summary-v1
 -->
 
@@ -44,6 +44,8 @@ All 4 deliverables landed. Gate suite entry: `pbpk28_mc_prior_family_sweep` adde
 > lean_single and has not been reproduced under the project's default engine.
 
 ---
+
+> **SUPERSEDED 2026-09-26: floor-biased PBPK28 numbers.** Every PBPK28 simulation number on this page was computed through `pbpk28_full_cn_step`, whose negativity floors injected mass into the 5 mg bolus: AUC_blood was +28% at dt = 0.05 h, +52% at 0.1 h and +140% at 0.5 h against the exact Dose/CL = 0.403226 mg·h/L. The same floors created parameter dependence that is not in the model, e.g. Kp sensitivities and Hessian entries. Conclusions drawn from these numbers may not hold. Regenerated results: [`prior_evolution_sprint_summary_v3.md`](prior_evolution_sprint_summary_v3.md). Audit: `docs/audit/PBPK28_CN_RANNACHER_MASS_BALANCE_2026-09-26.md`.
 
 ## Headline Numbers by Dissertation Section
 

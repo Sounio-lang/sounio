@@ -81,6 +81,18 @@ let SOUNIO_RUNTIME_VERSION_MAJOR: i64 = 1
 let SOUNIO_RUNTIME_VERSION_MINOR: i64 = 0
 let SOUNIO_RUNTIME_VERSION_PATCH: i64 = 0
 pub let IR_FLOAT_REG_MARKER_FLAG: i64 = 64064
+// Opcode-scoped provenance on IrAlloc produced ONLY by builtin measure lowering.
+// This is not a float-register marker, a field-layout guess or a type certificate.
+pub let IR_MEASURE_CONSTRUCTOR_FLAG: i64 = 64065
+// Opcode-scoped ownership provenance for compiler-generated region calls.
+// Neither marker is the floating result marker; call ABI remains unchanged.
+pub let IR_RGN_FRAME_ENTER_FLAG: i64 = 64066
+pub let IR_RGN_FRAME_SCALAR_EXIT_FLAG: i64 = 64067
+// Compiler-owned address provenance. Other targets retain imm_i64's legacy
+// absolute BSS address; PIE targets relocate it instead of guessing by value.
+pub let IR_BSS_ADDRESS_FLAG: i64 = 64068
+// Box wrappers have a resettable lifetime distinct from value aggregates.
+pub let IR_BOX_ALLOC_FLAG: i64 = 64069
 pub let IR_XOR_TWIST_CAYLEY_DICKSON_SIGN: i64 = 1
 pub let IR_XOR_CANDIDATE_AUTO: i64 = 0
 pub let IR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE: i64 = 1
@@ -808,6 +820,7 @@ pub fn ir_strategy_name(s: i64) -> string {
 // address of a temporary and the load returns that pointer as the first field.
 // Measured, isolated, and kept as a reproduction in
 // tests/known_failures/lean_single_global_aggregate_store.sio.
+// (Fixed in the seed by #1655; this layout stays because it is also far cheaper.)
 //
 // Global arrays of SCALARS are fine, so every field gets its own. Measured under
 // the seed: i64 OK, f64 OK, i8 OK, enum BROKEN, Option<Box<_>> segfaults --
@@ -816,6 +829,12 @@ pub fn ir_strategy_name(s: i64) -> string {
 //
 // It is also much cheaper than the array it replaces: ~112 MB of scalars for a
 // million instructions, against 2 GB of reserved [IrInstr; 4096] per module.
+// 4194304 instruction slots. A self-compile that gets past IR_MAX_INSTRS used
+// to fill 4194285 of 4194304, of which ~2.2M was live and ~2.0M was abandoned
+// by ir_region_grow_slot copying a non-tail region to the bump top. The next
+// doubling then missed by 8 slots. Abandoned ranges now go on a first-fit
+// hole list (ir_arena_push_hole / ir_arena_take_hole) so live demand (~2.2M)
+// fits without raising this cap or IR_MAX_INSTRS.
 pub var IR_A_OP: [i64; 4194304] = [0; 4194304]
 pub var IR_A_DST: [i64; 4194304] = [0; 4194304]
 pub var IR_A_SRC1: [i64; 4194304] = [0; 4194304]
@@ -840,7 +859,16 @@ pub var IR_A_NAME_LEN: [i64; 4194304] = [0; 4194304]
 pub var IR_A_ARG_BASE: [i64; 4194304] = [0; 4194304]
 
 // Byte pool for instruction names, and a flat pool for call-argument registers.
-pub var IR_NAME_POOL: [i8; 4194304] = [0; 4194304]
+//
+// Capacity bump 4194304 -> 8388608 (PR #2667): the "Madaros Current-Source f64
+// Lowering" CI gate self-compiles the whole compiler (self-hosted/compiler/main.sio)
+// and started refusing to emit ("IR instruction arena contract violated (name
+// pool exhausted...) fill 4194304 of 4194304") as the codebase's total size grew
+// across many concurrently-landing PRs -- exactly at 100% capacity, not from any
+// single change. Same remedy class already used for the sibling instruction-arena
+// capacity noted in ir_arena_report_usage's comment above ("Measured 2026-08-30:
+// at 1048576 and at 2097152 the compile exhausts; raise the pool").
+pub var IR_NAME_POOL: [i8; 8388608] = [0; 8388608]
 // RENAMED from IR_NAME_POOL_LEN. main declares `var IR_NAME_POOL_LEN:
 // [i64; 65536]` for interned per-id lengths; this lane declared a SCALAR of
 // the same name as the arena byte cursor. Two globals, one name, different
@@ -851,7 +879,7 @@ pub var IR_NAME_POOL: [i8; 4194304] = [0; 4194304]
 // cross-module call of arity >= 5 miscompiled; replacing the intern calls
 // with literal 0 fixed it, hoisting them out of the struct literal did not.
 pub var IR_A_NAME_BYTES_USED: i64 = 0
-pub fn ir_name_pool_capacity() -> i64 { 4194304 }
+pub fn ir_name_pool_capacity() -> i64 { 8388608 }
 
 pub var IR_ARG_POOL: [i64; 262144] = [0; 262144]
 pub var IR_ARG_POOL_LEN: i64 = 0
@@ -968,7 +996,15 @@ pub fn ir_arena_store(at: i64, instr: IrInstr) with Mut, Panic, Div {
     ir_arena_store_scalars(at, instr)
     // main interned IrInstr.name -> name_id; the arena stores bytes.
     ir_arena_put_name(at, ir_name_at(instr.name_id))
-    ir_arena_store_args(at, instr.call_args, instr.arg_count)
+    if instr.op == IrOpcode::IrCallSret {
+        // sret's explicit arguments are a contiguous vreg span at field_idx,
+        // not call_args. The ordinary pool writer treated its absent list as
+        // lost arguments, cleared arg_count and silently dropped every value.
+        IR_A_ARG_COUNT[at as usize] = instr.arg_count
+        IR_A_ARG_BASE[at as usize] = 0
+    } else {
+        ir_arena_store_args(at, instr.call_args, instr.arg_count)
+    }
 }
 
 // Store an instruction whose argument list did not survive ir_arena_load, taking
@@ -1150,6 +1186,68 @@ pub var IR_REGION_STATE: [i64; 16640] = [0; 16640]
 // Bisected: 8189 live slots compile, 8190 and 8191 do not.
 pub fn ir_region_table_capacity() -> i64 { 16640 }
 
+// Abandoned instruction ranges from non-tail ir_region_grow_slot copies.
+// First-fit, coalesced. A full table drops the hole (same leak as before).
+pub let IR_HOLE_MAX: i64 = 4096
+pub var IR_HOLE_BASE: [i64; 4096] = [0; 4096]
+pub var IR_HOLE_CAP: [i64; 4096] = [0; 4096]
+pub var IR_HOLE_COUNT: i64 = 0
+
+fn ir_arena_push_hole(base: i64, cap: i64) with Mut, Panic, Div {
+    if base < 0 { return }
+    if cap <= 0 { return }
+    var b = base
+    var c = cap
+    var i: i64 = 0
+    while i < IR_HOLE_COUNT {
+        let hb = IR_HOLE_BASE[i as usize]
+        let hc = IR_HOLE_CAP[i as usize]
+        if hb + hc == b {
+            b = hb
+            c = hc + c
+            IR_HOLE_COUNT = IR_HOLE_COUNT - 1
+            IR_HOLE_BASE[i as usize] = IR_HOLE_BASE[IR_HOLE_COUNT as usize]
+            IR_HOLE_CAP[i as usize] = IR_HOLE_CAP[IR_HOLE_COUNT as usize]
+            i = 0
+        } else if b + c == hb {
+            c = c + hc
+            IR_HOLE_COUNT = IR_HOLE_COUNT - 1
+            IR_HOLE_BASE[i as usize] = IR_HOLE_BASE[IR_HOLE_COUNT as usize]
+            IR_HOLE_CAP[i as usize] = IR_HOLE_CAP[IR_HOLE_COUNT as usize]
+            i = 0
+        } else {
+            i = i + 1
+        }
+    }
+    if IR_HOLE_COUNT >= IR_HOLE_MAX { return }
+    IR_HOLE_BASE[IR_HOLE_COUNT as usize] = b
+    IR_HOLE_CAP[IR_HOLE_COUNT as usize] = c
+    IR_HOLE_COUNT = IR_HOLE_COUNT + 1
+}
+
+fn ir_arena_take_hole(want: i64) -> i64 with Mut, Panic, Div {
+    if want <= 0 { return 0 - 1 }
+    var i: i64 = 0
+    while i < IR_HOLE_COUNT {
+        let hc = IR_HOLE_CAP[i as usize]
+        if hc >= want {
+            let hb = IR_HOLE_BASE[i as usize]
+            let rem = hc - want
+            if rem > 0 {
+                IR_HOLE_BASE[i as usize] = hb + want
+                IR_HOLE_CAP[i as usize] = rem
+            } else {
+                IR_HOLE_COUNT = IR_HOLE_COUNT - 1
+                IR_HOLE_BASE[i as usize] = IR_HOLE_BASE[IR_HOLE_COUNT as usize]
+                IR_HOLE_CAP[i as usize] = IR_HOLE_CAP[IR_HOLE_COUNT as usize]
+            }
+            return hb
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
 // ============================================================================
 // IrCapacities: ONE object for all coupled capacity constants.
 // ============================================================================
@@ -1312,6 +1410,7 @@ pub fn ir_instr_arena_init() -> i64 with Mut, Panic, Div {
     }
     IR_ARENA_TOP = 0
     IR_REGION_COUNT = 0
+    IR_HOLE_COUNT = 0
     IR_ARENA_VIOLATION = 0
     // Slot 0 is the quarantine, so a zero-initialised handle addresses scratch.
     IR_QUARANTINE_BASE = 0
@@ -1343,14 +1442,18 @@ pub fn ir_instr_arena_alloc(cap: i64, out: &! IrInstrRegion) -> i64 with Mut, Pa
     // quarantine region unreserved. Init is idempotent-by-count here.
     if IR_REGION_COUNT == 0 { ir_instr_arena_init() }
     if IR_REGION_COUNT >= ir_region_table_capacity() { return IR_ARENA_ERR_REGIONS }
-    if IR_ARENA_TOP + cap > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
+    var base = ir_arena_take_hole(cap)
+    if base < 0 {
+        if IR_ARENA_TOP + cap > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
+        base = IR_ARENA_TOP
+        IR_ARENA_TOP = IR_ARENA_TOP + cap
+    }
     let slot = IR_REGION_COUNT
-    IR_REGION_BASE[slot as usize] = IR_ARENA_TOP
+    IR_REGION_BASE[slot as usize] = base
     IR_REGION_CAP[slot as usize] = cap
     IR_REGION_LEN[slot as usize] = 0
     IR_REGION_GEN[slot as usize] = IR_REGION_GEN[slot as usize] + 1
     IR_REGION_STATE[slot as usize] = IR_REGION_LIVE
-    IR_ARENA_TOP = IR_ARENA_TOP + cap
     IR_REGION_COUNT = slot + 1
     (*out).slot = slot
     (*out).generation = IR_REGION_GEN[slot as usize]
@@ -1706,16 +1809,28 @@ fn ir_region_grow_slot(slot: i64, want: i64) -> i64 with Mut, Panic, Div {
     if want <= IR_REGION_CAP[slot as usize] { return IR_ARENA_OK }
     var grown = IR_REGION_CAP[slot as usize] * 2
     if grown < want { grown = want }
-    if IR_ARENA_TOP + grown > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
     let old_base = IR_REGION_BASE[slot as usize]
+    // The tail region owns the entire suffix. Extend it in place rather than
+    // stranding every previous doubling; no other region can occupy this range.
+    if old_base + IR_REGION_CAP[slot as usize] == IR_ARENA_TOP {
+        if grown > ir_instr_arena_capacity() - old_base { return IR_ARENA_ERR_CAPACITY }
+        IR_ARENA_TOP = old_base + grown
+        IR_REGION_CAP[slot as usize] = grown
+        return IR_ARENA_OK
+    }
+    var new_base = ir_arena_take_hole(grown)
+    if new_base < 0 {
+        if grown > ir_instr_arena_capacity() - IR_ARENA_TOP { return IR_ARENA_ERR_CAPACITY }
+        new_base = IR_ARENA_TOP
+        IR_ARENA_TOP = new_base + grown
+    }
     let len = IR_REGION_LEN[slot as usize]
-    let new_base = IR_ARENA_TOP
     var i: i64 = 0
     while i < len {
         ir_arena_copy_slot(new_base + i, old_base + i)
         i = i + 1
     }
-    IR_ARENA_TOP = new_base + grown
+    ir_arena_push_hole(old_base, IR_REGION_CAP[slot as usize])
     IR_REGION_BASE[slot as usize] = new_base
     IR_REGION_CAP[slot as usize] = grown
     IR_ARENA_OK
@@ -1816,20 +1931,10 @@ pub fn ir_region_reserve(r: &! IrInstrRegion, want: i64) -> i64 with Mut, Panic,
     let slot = (*r).slot
     if IR_REGION_STATE[slot as usize] == IR_REGION_SEALED { return IR_ARENA_ERR_SEALED }
     if want <= IR_REGION_CAP[slot as usize] { return IR_ARENA_OK }
-    var grown = IR_REGION_CAP[slot as usize] * 2
-    if grown < want { grown = want }
-    if IR_ARENA_TOP + grown > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
-    let old_base = IR_REGION_BASE[slot as usize]
-    let len = IR_REGION_LEN[slot as usize]
-    let new_base = IR_ARENA_TOP
-    var i: i64 = 0
-    while i < len {
-        ir_arena_copy_slot(new_base + i, old_base + i)
-        i = i + 1
-    }
-    IR_ARENA_TOP = new_base + grown
-    IR_REGION_BASE[slot as usize] = new_base
-    IR_REGION_CAP[slot as usize] = grown
+    let rc = ir_region_grow_slot(slot, want)
+    if rc != IR_ARENA_OK { return rc }
+    // Preserve the checked API's generation boundary even for in-place growth:
+    // copied handles must still be explicitly refreshed by their owner.
     IR_REGION_GEN[slot as usize] = IR_REGION_GEN[slot as usize] + 1
     (*r).generation = IR_REGION_GEN[slot as usize]
     IR_ARENA_OK
@@ -1998,7 +2103,8 @@ pub struct IrFunction {
     pub param_count: i64,
     pub param_regs: [i64; 64],
     pub compile_strategy: i64,
-    pub returns_float: i64,        // 1 = declared return type is f64; used by native core value tracking
+    pub returns_float: i64,        // -2 fn value returning f64; 1 scalar f64; 2 flat f64 array/all-f64 tuple; 3..1023 nested f64 array rank+1; >=1024 tuple mask
+    pub return_kn_value_float: i64, // -1 non-Knowledge; 0 integer; 1 float; 2 Knowledge with unsupported T
     pub return_struct_name: Name,  // Named return type, used by native field layout recovery
     // #1475: element count of a WORD-SCALAR fixed-array return type ([i64;4], [f64;8], ...),
     // else -1. Lets `var a = make_arr()` (no annotation) learn the length that
@@ -2023,6 +2129,12 @@ pub struct IrFunction {
     // in a name-keyed side table, so two same-named fns or a table capacity
     // can never swap or drop the semantic ABI.
     pub f128_param_mask: i64,
+    // #2820: bit i set <=> declared param i is `&S` / `&!S` for a named,
+    // non-primitive pointee (i < 62). The checker accepts a struct VALUE for such
+    // a parameter (an implicit borrow), and lean_single passes it as one; the
+    // call site reads this to borrow the value instead of passing its handle,
+    // which the callee would dereference one level too many (SIGSEGV).
+    pub ref_struct_param_mask: i64,
     // #1669: which vregs live in an xmm. This used to be smuggled through the
     // instruction stream as IrNop + IR_FLOAT_REG_MARKER_FLAG -- a fact with
     // FUNCTION lifetime stored in a slot with PASS lifetime. compact_nops deleted
@@ -3538,6 +3650,25 @@ pub struct StructFieldEntry {
     // resolves to a REGISTERED struct layout, which no primitive name does.
     // Ported onto main's interned-id representation (was `Name` on the PR).
     pub named_type_name_id: i64,
+    // 1 when the field's DECLARED type is a word scalar (f64/f32, an integer,
+    // bool). This is a REPRESENTATION classification only: the slot is one
+    // machine word that is not itself an aggregate slot or a pointer-typed
+    // field, so a copy of the containing struct copies the word's bits
+    // instead of following it. It is NOT proof that the word cannot carry a
+    // reference: `p as i64` and bits_to_f64 can put a handle id or heap
+    // address into an integer or f64 slot. Consumers that need "never a
+    // reference" must check the runtime bits (region reclamation does: the
+    // exit escape scan runs every such slot through __rgn_barrier) or refuse
+    // the slot (rgn_copy_cost refuses integer slots outright). Only
+    // registration paths that see the declaration set it; the path that seeds
+    // a layout from a struct literal's values leaves it 0, because its
+    // is_float is a guess about the value expression.
+    pub decl_word_scalar: i64,
+    // Element count of a `[T; N]` field, or 0 when the field is not a fixed
+    // array. Unlike word_scalar_array_len, this is set for struct elements too:
+    // a `heap_alloc` payload inlines the array, so a later field's raw offset
+    // has to skip N words (or N bytes, packed) rather than one handle slot.
+    pub fixed_array_len: i64,
 }
 
 pub struct StructLayoutEntry {
@@ -3578,7 +3709,7 @@ pub struct StructLayoutTable {
 }
 
 pub fn empty_struct_field_entry() -> StructFieldEntry {
-    StructFieldEntry { name_id: 0, index: 0, is_float: 0, elem_type_name_id: 0, word_scalar_array_len: 0, named_type_name_id: 0 }
+    StructFieldEntry { name_id: 0, index: 0, is_float: 0, elem_type_name_id: 0, word_scalar_array_len: 0, named_type_name_id: 0, decl_word_scalar: 0, fixed_array_len: 0 }
 }
 
 pub fn empty_struct_layout_entry() -> StructLayoutEntry {
@@ -4030,7 +4161,7 @@ pub fn ir_mark_float_reg(reg: i64) -> IrInstr {
     }
 }
 
-fn ir_empty_instr() -> IrInstr {
+pub fn ir_empty_instr() -> IrInstr {
     ir_instr_new(IrOpcode::IrNop)
 }
 
@@ -5331,6 +5462,12 @@ pub fn ir_alloc(dst: i64, type_id: i64) -> IrInstr {
     }
 }
 
+pub fn ir_alloc_box(dst: i64, type_id: i64) -> IrInstr with Mut {
+    var instr = ir_alloc(dst, type_id)
+    instr.imm_flags = IR_BOX_ALLOC_FLAG
+    instr
+}
+
 // ir_alloc_array: like ir_alloc, but additionally records the LOGICAL element
 // count of an array literal so codegen can stamp it into the object header
 // `flags` slot (which IrArrayLen reads back). The count is parked in `field_idx`
@@ -5339,6 +5476,14 @@ pub fn ir_alloc(dst: i64, type_id: i64) -> IrInstr {
 // form (used by every struct/tuple/box/scalar alloc and by ~35 callers across
 // other modules) is left untouched, so those allocs keep field_idx = -1 and
 // codegen clamps that to flags = 0. type_id still carries the payload BYTES.
+// Canonical measure allocation: metadata only, same allocation ABI as ir_alloc.
+// Consumers must require IrAlloc AND the exact flag; no bit-test permission.
+pub fn ir_alloc_measure(dst: i64) -> IrInstr {
+    var instr = ir_alloc(dst, 0)
+    instr.imm_flags = IR_MEASURE_CONSTRUCTOR_FLAG
+    instr
+}
+
 pub fn ir_alloc_array(dst: i64, type_id: i64, elem_count: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrAlloc)
     IrInstr {
@@ -5383,6 +5528,124 @@ pub fn ir_phi(dst: i64) -> IrInstr {
 
 // Word/bit split for float_reg_bits. 32 bits per word keeps every mask positive.
 pub fn ir_float_bits_capacity() -> i64 { 2048 }
+// Hard ceiling for fresh_reg. Must equal NC_VREG_LIMIT in native/frame.sio.
+// Past the legacy 2048-entry tables, float ids used to be dropped and unary
+// negation compiled as integer `neg rax`. This larger value is the final IR
+// ceiling; lowering raises a hard error before exceeding it.
+pub let IR_MAX_VREGS: i64 = 16384
+
+// Shared boundary contract for every lowering, optimization, cache, and native
+// consumer. The growth form avoids addition overflow before comparing.
+pub fn ir_reg_count_is_valid(reg_count: i64) -> bool {
+    reg_count >= 0 && reg_count <= IR_MAX_VREGS
+}
+
+pub fn ir_reg_count_can_grow(reg_count: i64, added: i64) -> bool {
+    added >= 0 && reg_count >= 0 && reg_count <= IR_MAX_VREGS - added
+}
+
+fn ir_reg_operand_is_valid(reg: i64, reg_count: i64) -> bool {
+    reg == IR_INVALID_REG || (reg >= 0 && reg < reg_count && reg < IR_MAX_VREGS)
+}
+
+fn ir_reg_span_is_valid(base: i64, width: i64, reg_count: i64) -> bool {
+    base >= 0 && width >= 1 && base <= reg_count - width && base <= IR_MAX_VREGS - width
+}
+
+// Validate the declared register count and every register reference before a
+// native backend derives a stack offset from it. This is intentionally shared
+// by the legacy and native-v2 entry points, including cached SOIR input.
+pub fn ir_function_regs_are_valid(f: &IrFunction) -> bool with Mut, Panic, Div {
+    if !ir_reg_count_is_valid((*f).reg_count) { return false }
+    if (*f).instr_count < 0 || (*f).instr_count > IR_MAX_INSTRS { return false }
+    if (*f).param_count < 0 || (*f).param_count > 64 { return false }
+    var pi: i64 = 0
+    while pi < (*f).param_count {
+        if !ir_reg_span_is_valid((*f).param_regs[pi as usize], 1, (*f).reg_count) { return false }
+        pi = pi + 1
+    }
+    if (*f).is_sret == 1 && !ir_reg_span_is_valid((*f).sret_dest_reg, 1, (*f).reg_count) { return false }
+    var i: i64 = 0
+    while i < (*f).instr_count {
+        let slot = ir_region_slot_r((*f).region, i)
+        let op = IR_A_OP[slot as usize] as IrOpcode
+        if !ir_reg_operand_is_valid(IR_A_DST[slot as usize], (*f).reg_count) { return false }
+        if !ir_reg_operand_is_valid(IR_A_SRC1[slot as usize], (*f).reg_count) { return false }
+        if op != IrOpcode::IrWideShrLimb && op != IrOpcode::IrWideShr &&
+            !ir_reg_operand_is_valid(IR_A_SRC2[slot as usize], (*f).reg_count) { return false }
+        // Optional register fields use IR_INVALID_REG as their sentinel, but
+        // the operands below are semantic inputs for their opcodes. Accepting
+        // the sentinel here lets native lowering materialize a fabricated zero.
+        let dst_is_required = op == IrOpcode::IrLoadImm ||
+            op == IrOpcode::IrLoadFloat || op == IrOpcode::IrLoadBool ||
+            op == IrOpcode::IrLoadString || op == IrOpcode::IrIntToFloat ||
+            op == IrOpcode::IrFloatToInt || op == IrOpcode::IrCopy ||
+            op == IrOpcode::IrBinOp || op == IrOpcode::IrUnaryOp ||
+            op == IrOpcode::IrFieldGet || op == IrOpcode::IrIndexGet ||
+            op == IrOpcode::IrArrayLen || op == IrOpcode::IrAlloc ||
+            op == IrOpcode::IrPhi || op == IrOpcode::IrLoadGlobal ||
+            op == IrOpcode::IrLoadFnRef
+        if dst_is_required &&
+            !ir_reg_span_is_valid(IR_A_DST[slot as usize], 1, (*f).reg_count) { return false }
+        let src1_is_required = op == IrOpcode::IrIntToFloat ||
+            op == IrOpcode::IrFloatToInt || op == IrOpcode::IrCopy ||
+            op == IrOpcode::IrBinOp || op == IrOpcode::IrUnaryOp ||
+            op == IrOpcode::IrReturn || op == IrOpcode::IrReturnSret ||
+            op == IrOpcode::IrBranchTrue || op == IrOpcode::IrBranchFalse ||
+            op == IrOpcode::IrFieldGet || op == IrOpcode::IrFieldSet ||
+            op == IrOpcode::IrIndexGet || op == IrOpcode::IrIndexSet ||
+            op == IrOpcode::IrArrayLen || op == IrOpcode::IrStoreGlobal ||
+            op == IrOpcode::IrStorePtr || op == IrOpcode::IrCallIndirect ||
+            op == IrOpcode::IrCallSret
+        if src1_is_required &&
+            !ir_reg_span_is_valid(IR_A_SRC1[slot as usize], 1, (*f).reg_count) { return false }
+        let src2_is_required = op == IrOpcode::IrBinOp ||
+            op == IrOpcode::IrFieldSet || op == IrOpcode::IrIndexGet ||
+            op == IrOpcode::IrIndexSet || op == IrOpcode::IrStorePtr
+        if src2_is_required &&
+            !ir_reg_span_is_valid(IR_A_SRC2[slot as usize], 1, (*f).reg_count) { return false }
+        let imm_i64_is_reg = op == IrOpcode::IrIndexSet ||
+            op == IrOpcode::IrAdmitAction || op == IrOpcode::IrDeferAction ||
+            op == IrOpcode::IrPlanAcquisition || op == IrOpcode::IrPlanRecourse ||
+            op == IrOpcode::IrProposeAlternatives || op == IrOpcode::IrCommitAlternative ||
+            op == IrOpcode::IrObserveTransition || op == IrOpcode::IrRollbackTransition
+        if imm_i64_is_reg &&
+            !ir_reg_span_is_valid(IR_A_IMM_I64[slot as usize], 1, (*f).reg_count) { return false }
+        let arg_count = IR_A_ARG_COUNT[slot as usize]
+        if arg_count < 0 || arg_count > 64 { return false }
+        // IrCallSret stores its first explicit argument in field_idx and the
+        // remaining arguments in the contiguous register span that follows.
+        // It does not use the ordinary pooled argument list.
+        if op == IrOpcode::IrCallSret && arg_count > 0 &&
+            !ir_reg_span_is_valid(IR_A_FIELD_IDX[slot as usize], arg_count, (*f).reg_count) { return false }
+        let limbs = IR_A_IMM_I64[slot as usize]
+        let is_wide_binary = op == IrOpcode::IrWideAdd || op == IrOpcode::IrWideSub ||
+            op == IrOpcode::IrWideMul || op == IrOpcode::IrWideDiv || op == IrOpcode::IrWideMod ||
+            op == IrOpcode::IrWideCmp || op == IrOpcode::IrWideDivFull || op == IrOpcode::IrWideModFull
+        let is_wide_shift = op == IrOpcode::IrWideShrLimb || op == IrOpcode::IrWideShr
+        if (is_wide_binary || is_wide_shift) &&
+            !ir_reg_span_is_valid(IR_A_SRC1[slot as usize], limbs, (*f).reg_count) { return false }
+        if is_wide_binary &&
+            !ir_reg_span_is_valid(IR_A_SRC2[slot as usize], if op == IrOpcode::IrWideDiv || op == IrOpcode::IrWideMod { 1 } else { limbs }, (*f).reg_count) { return false }
+        var dst_width = limbs
+        if op == IrOpcode::IrWideCmp { dst_width = 1 }
+        if op == IrOpcode::IrWideMul { dst_width = limbs + 2 }
+        if op == IrOpcode::IrWideDivFull || op == IrOpcode::IrWideModFull { dst_width = limbs * 3 }
+        if (is_wide_binary || is_wide_shift) &&
+            !ir_reg_span_is_valid(IR_A_DST[slot as usize], dst_width, (*f).reg_count) { return false }
+        if op != IrOpcode::IrCallSret {
+            var k: i64 = 0
+            while k < arg_count {
+                // Counted arguments are required operands; unlike optional
+                // src/dst fields, IR_INVALID_REG is not a valid placeholder.
+                if !ir_reg_span_is_valid(ir_arena_arg_at(slot, k), 1, (*f).reg_count) { return false }
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+    true
+}
 
 // Counts float marks for vregs above the cap, where the bitset cannot represent
 // them and codegen's fixpoint is the only channel. Visible rather than fatal --
@@ -5597,6 +5860,7 @@ pub fn ir_empty_function() -> IrFunction {
         param_regs: [IR_INVALID_REG; 64],
         compile_strategy: IR_STRATEGY_STANDARD,
         returns_float: 0,
+        return_kn_value_float: -1,
         return_struct_name: ir_empty_name(),
         return_fixed_array_len: 0 - 1,
         prof_counter_id: -1,
@@ -5606,6 +5870,7 @@ pub fn ir_empty_function() -> IrFunction {
         bss_size: 0,
         first_param_is_ref: 0,
         f128_param_mask: 0,
+        ref_struct_param_mask: 0,
         float_reg_bits: [0; 64],
     }
 }
@@ -5651,6 +5916,7 @@ pub fn ir_reset_function_in_place(f: &! IrFunction, name: Name) with Mut, Panic,
     }
     (*f).compile_strategy = IR_STRATEGY_STANDARD
     (*f).returns_float = 0
+    (*f).return_kn_value_float = -1
     (*f).return_struct_name = ir_empty_name()
     (*f).return_fixed_array_len = 0 - 1
     (*f).prof_counter_id = -1
@@ -5770,6 +6036,25 @@ pub fn ir_function_name_at(m: &IrModule, i: i64) -> Name with Mut, Panic, Div {
     (*chunk).entries[(i % 512) as usize].name
 }
 
+// Stage A (docs/audit/MADAROS_SELF_COMPILE_PROFILE_DISPATCH_2026-09-27.md): equality of
+// function i's name against `name`, compared in place. ir_fn_get + ir_name_eq copy an
+// IrFunction (~1.9 KB) and two Names per probe; this reads the length first and then
+// only the bytes needed. Same result as ir_name_eq(ir_function_name_at(m, i), name),
+// including an out-of-range slot reading as the empty name.
+pub fn ir_fn_name_eq_at(m: &IrModule, i: i64, name: &Name) -> bool with Mut, Panic, Div {
+    let chunk = ir_fn_table_chunk_at((*m).functions, i)
+    if chunk == (0 as *mut IrFunctionChunk) { return (*name).len == 0 }
+    let slot = (i % 512) as usize
+    let len = (*chunk).entries[slot].name.len
+    if len != (*name).len { return false }
+    var k: i64 = 0
+    while k < len {
+        if (*chunk).entries[slot].name.buf[k] != (*name).buf[k] { return false }
+        k = k + 1
+    }
+    true
+}
+
 pub fn ir_fn_instr_count(m: &IrModule, i: i64) -> i64 with Mut, Panic, Div {
     let chunk = ir_fn_table_chunk_at((*m).functions, i)
     if chunk == (0 as *mut IrFunctionChunk) { return 0 }
@@ -5879,6 +6164,12 @@ pub let BSS_INIT_STRING_MAGIC: i64 = 0 - 800001
 // uses raw IndexGet (label_id=2) at BSS_BASE+off with no header.
 pub let IR_NATIVE_V2_OBJECT_HEADER_SIZE: i64 = 32
 
+pub fn ir_load_bss_address(dst: i64, absolute_address: i64) -> IrInstr {
+    var instr = ir_load_imm(dst, absolute_address)
+    instr.imm_flags = IR_BSS_ADDRESS_FLAG
+    instr
+}
+
 pub fn bss_name_hash(n: Name) -> i64 with Div {
     var hash: i64 = 5381
     var i = 0
@@ -5949,6 +6240,3 @@ pub fn ir_module_add_export(module: IrModule, name: Name) -> IrModule with Mut, 
     m
 }
 
-pub fn ir_forbidden_law_mask(algebra_tag: i64, strategy: i64) -> i64 {
-    0
-}

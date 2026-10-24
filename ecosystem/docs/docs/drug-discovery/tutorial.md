@@ -721,4 +721,4 @@ Optimization didn't find a dose. Try:
 - [**API Reference**](reference.md) — Detailed function/type reference
 - [**sounio-py Integration**](../sounio-py/quickstart.md) — Call pipeline from Python
 - [**Jupyter Notebooks**](../sounio-jupyter/usage.md) — Interactive pipeline development
-- [**Sounio Language**](https://github.com/sounio-org/sounio/docs/LLM_PROGRAMMING_GUIDE.md) — Learn Sounio
+- [**Sounio Language**](https://github.com/sounio-org/sounio/blob/main/docs/guide/LLM_PROGRAMMING_GUIDE.md) — Learn Sounio
