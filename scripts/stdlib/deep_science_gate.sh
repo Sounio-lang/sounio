@@ -65,6 +65,12 @@ compare() {
     timeout 180 "$out/$stem" "$out/$fixture.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
     record concordance "$stem" "$rc"
 }
+compare_mode() {
+    local stem=$1 mode=$2 fixture=$3 rc=0
+    if [[ ! -f "$out/$fixture.stdout" ]]; then record concordance "$stem:$mode:missing-$fixture" 1; return; fi
+    timeout 180 "$out/$stem" "$mode" "$out/$fixture.stdout" > "$out/$stem.$fixture.concordance.stdout" 2> "$out/$stem.$fixture.concordance.stderr" || rc=$?
+    record concordance "$stem:$mode" "$rc"
+}
 emit() {
     local stem=$1 suffix=$2 mode=$3 rc=0
     if [[ -n "$mode" ]]; then timeout 180 "$out/$stem" "$mode" > "$out/$stem$suffix.sio" 2> "$out/$stem$suffix.emitter.stderr" || rc=$?
@@ -125,6 +131,9 @@ for src in tests/reference/deep_*.cpp; do
         record mutant-rejection "$stem:fixed-alpha:expected=2:actual=$rc" "$rejected" ;;
       deep_stats_dynamic_robust_reference) compare "$stem" stdlib_deep_stats_dynamic_robust ;;
       deep_stats_dynamic_robust_contrast_reference) compare "$stem" stdlib_deep_stats_dynamic_robust_contrast ;;
+      deep_viz_scientific_document)
+        compare "$stem" stdlib_deep_viz_scientific_document
+        compare_mode "$stem" --count stdlib_deep_viz_count_diagnostics ;;
       deep_stats_dispersion_profile_reference) compare "$stem" stdlib_deep_stats_dispersion_profile ;;
       deep_summaries_reference) compare "$stem" stdlib_deep_summaries ;;
       deep_qr_factor_reference) compare "$stem" stdlib_deep_qr_factor ;;
@@ -156,6 +165,17 @@ for src in tests/reference/deep_*.cpp; do
       *) record unregistered-oracle "$stem" 1 ;;
     esac
 done
+# Canonical bitmap data and actual native raster orientation, including clipping.
+native tests/run-pass/display_font_orientation.sio display_font_orientation
+rc=0
+timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/display_font_orientation_reference.cpp -o "$out/display_font_orientation_reference" > "$out/display_font_orientation_reference.cpp.txt" 2>&1 || rc=$?
+record cpp-compile display_font_orientation_reference "$rc"
+if [[ $rc == 0 ]]; then
+ rc=0
+ timeout 180 "$out/display_font_orientation_reference" --canonical tests/reference/data/font8x8_basic.h "$out/display_font_orientation.stdout" > "$out/display_font_orientation_reference.concordance.stdout" 2> "$out/display_font_orientation_reference.concordance.stderr" || rc=$?
+ record concordance font-canonical "$rc"
+fi
+
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"

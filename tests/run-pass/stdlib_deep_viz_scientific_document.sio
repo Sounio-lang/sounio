@@ -1,0 +1,104 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: STDLIB_DEEP_VIZ_SCIENTIFIC_DOCUMENT_PASS
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_close}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set,integer_buffer_close}
+use viz::scientific_document::{ScientificDocumentText,scientific_two_panel_plan,scientific_document_svg,scientific_document_canvas}
+use display::canvas::{Canvas,canvas_clear}
+// Optional exact native-raster export; Linux fixture only. Read once, no env logging.
+fn scientific_canvas_dump_enabled()->bool with IO,Mut,Div,Panic {
+ let data=read_file("/proc/self/environ")
+ let wanted="SOUNIO_VIZ_CANVAS_DUMP=1"
+ let wanted_len=str_len(wanted)
+ var size:i64=0;var found_end=false
+ while size<1048575 {
+  if data[size as usize]==0 {
+   if data[(size+1) as usize]==0 {found_end=true;break}
+  }
+  size=size+1
+ }
+ if !found_end {return false}
+ var at:i64=0
+ while at<size {
+  var end=at
+  while end<size {if data[end as usize]==0 {break};end=end+1}
+  if end-at==wanted_len {
+   var same=true;var j:i64=0
+   while j<wanted_len {
+    if data[(at+j) as usize]!=(str_char_at(wanted,j) as i8) {same=false}
+    j=j+1
+   }
+   if same {return true}
+  }
+  at=end+1
+ }
+ false
+}
+fn scientific_canvas_run(start:i64,length:i64,color:i64) with IO {
+ print("CANVAS_RUN ");print(start);print(" ");print(length);print(" ");println(color)
+}
+fn scientific_canvas_dump(c:&Canvas) with IO,Mut,Div,Panic {
+ if !scientific_canvas_dump_enabled() {return}
+ let width:i64=c.width;let height:i64=c.height
+ assert(width>0 && width<=4096 && height>0 && height<=4096)
+ let total:i64=width*height
+ assert(total<=16777216 && (c.pixels as i64)>0)
+ print("CANVAS_SIZE ");print(width);print(" ");println(height)
+ var start:i64=0;var color:i64=read_i64(c.pixels,0);var i:i64=1
+ while i<total {
+  let next:i64=read_i64(c.pixels,i)
+  if next!=color {scientific_canvas_run(start,i-start,color);start=i;color=next}
+  i=i+1
+ }
+ scientific_canvas_run(start,total-start,color)
+ println("CANVAS_END")
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ var x=numeric_buffer_new(1025,8200);var observed=numeric_buffer_new(1025,8200)
+ var residual=numeric_buffer_new(1025,8200);var flags=integer_buffer_new(1025,8200)
+ var i:i64=0
+ while i<1025 {
+  let a=numeric_buffer_set(&!x,i,1.0+(i%3) as f64)
+  let b=numeric_buffer_set(&!observed,i,1.0+(i%3) as f64)
+  let d=numeric_buffer_set(&!residual,i,(i%3) as f64-1.0)
+  let e=integer_buffer_set(&!flags,i,1);i=i+1
+ }
+ let chars:[i8;168]=[67,111,117,110,116,115,32,38,32,102,105,116,32,60,100,101,99,108,97,114,101,100,62,32,34,120,34,32,39,121,39,120,61,102,105,116,116,101,100,32,99,111,117,110,116,59,32,121,61,111,98,115,101,114,118,101,100,32,99,111,117,110,116,120,61,102,105,116,116,101,100,32,99,111,117,110,116,59,32,121,61,115,105,103,110,101,100,32,100,101,118,105,97,110,99,101,32,114,101,115,105,100,117,97,108,32,40,49,41,68,101,115,99,114,105,112,116,105,118,101,59,32,115,117,112,112,108,105,101,100,32,97,108,112,104,97,59,32,110,111,32,67,73,59,32,97,115,115,117,109,112,116,105,111,110,115,32,117,110,97,115,115,101,115,115,101,100,46]
+ var bytes=integer_buffer_new(168,168*8)
+ var bi:i64=0
+ while bi<168 {let written=integer_buffer_set(&!bytes,bi,chars[bi as usize] as i64);bi=bi+1}
+ let text=ScientificDocumentText{title_start:0,title_len:31,left_start:31,left_len:32,right_start:63,right_len:46,footer_start:109,footer_len:59}
+
+ let plan=scientific_two_panel_plan(1280,480,0.0,4.0,0.0,4.0,0.0,4.0,-2.0,2.0)
+ assert(plan.status==0)
+ let bad=scientific_two_panel_plan(640,359,0.0,4.0,0.0,4.0,0.0,4.0,-2.0,2.0)
+ assert(bad.status!=0)
+ let pixels=heap_alloc(1280*480*8) as *mut i64
+ assert((pixels as i64)>0)
+ var canvas=Canvas{pixels:pixels,width:1280,height:480}
+ canvas_clear(&!canvas,7,8,9)
+ let changed=numeric_buffer_set(&!residual,1024,0.0/0.0)
+ println("ZERO_SVG_BEGIN")
+ let rejected=scientific_document_svg(&plan,&text,&bytes,&x,&observed,&flags,&x,&residual,&flags)
+ println("ZERO_SVG_END")
+ assert(rejected.status==23)
+ let refused=scientific_document_canvas(&!canvas,&plan,&text,&bytes,&x,&observed,&flags,&x,&residual,&flags)
+ assert(refused.status==23)
+ i=0
+ while i<1280*480 {assert(read_i64(canvas.pixels,i)==(7*65536+8*256+9));i=i+1}
+ let restored=numeric_buffer_set(&!residual,1024,0.0)
+ let painted=scientific_document_canvas(&!canvas,&plan,&text,&bytes,&x,&observed,&flags,&x,&residual,&flags)
+ assert(painted.status==0 && painted.left_painted==1025 && painted.right_painted==1025)
+ let lx:i64=plan.left.x;let ly:i64=plan.left.y;let w:i64=plan.left.w;let h:i64=plan.left.h;let rx:i64=plan.right.x
+ print("DOC_GEOMETRY ");print(lx);print(" ");print(ly);print(" ");print(w);print(" ");print(h);print(" ");println(rx)
+ let px=lx+w/4;let py=ly+h-h/4
+ let center:i64=read_i64(canvas.pixels,py*1280+px)
+ print("DOC_PIXEL ");print(px);print(" ");print(py);print(" ");println(center)
+ let emitted=scientific_document_svg(&plan,&text,&bytes,&x,&observed,&flags,&x,&residual,&flags)
+ assert(emitted.status==0 && emitted.left_painted==1025 && emitted.right_painted==1025)
+ scientific_canvas_dump(&canvas)
+ heap_free(canvas.pixels as *mut i8)
+ numeric_buffer_close(x);numeric_buffer_close(observed);numeric_buffer_close(residual);integer_buffer_close(flags);integer_buffer_close(bytes)
+ println("STDLIB_DEEP_VIZ_SCIENTIFIC_DOCUMENT_PASS")
+ 0
+}
