@@ -1,3 +1,4 @@
+use stats::regression::count_fit_trace::{CountFitTraceSlot,count_fit_trace_status,count_fit_trace_add,count_fit_trace_incomplete}
 // Full scalar NB2/Poisson log PMF via an alpha-dependent saturated normalizer.
 // Reusable private workspaces preserve legacy formulas and staged availability.
 use math::pure::{CheckedLog,is_finite,ln_checked_into}
@@ -356,12 +357,12 @@ pub struct Nb2LikelihoodDifference {
 }
 pub struct Nb2LikelihoodDifferenceSlot {
  first:Nb2LikelihoodSlot,second:Nb2LikelihoodSlot,product:LeastSquaresNumber,log_work:CheckedLog,
- status:i64,value:f64,first_status:i64,second_status:i64,local_increment:bool,
+ status:i64,value:f64,first_status:i64,second_status:i64,local_increment:bool,full_calls:i64,aggregate_full_calls:i64,
 }
 pub fn nb2_likelihood_difference_slot()->Nb2LikelihoodDifferenceSlot {
  Nb2LikelihoodDifferenceSlot{first:nb2_likelihood_slot(),second:nb2_likelihood_slot(),
  product:LeastSquaresNumber{status:4,value:0.0},log_work:CheckedLog{status:2,value:0.0},status:5,value:0.0,
- first_status:2,second_status:2,local_increment:false}
+ first_status:2,second_status:2,local_increment:false,full_calls:0,aggregate_full_calls:0}
 }
 pub fn nb2_likelihood_difference_status(s:&Nb2LikelihoodDifferenceSlot)->i64 {s.status}
 pub fn nb2_likelihood_difference_value(s:&Nb2LikelihoodDifferenceSlot)->f64 {s.value}
@@ -374,8 +375,11 @@ pub fn nb2_likelihood_difference_snapshot(s:&Nb2LikelihoodDifferenceSlot)->Nb2Li
 pub fn nb2_log_probability_difference_into(count:i64,first_mean:f64,first_alpha:f64,
  second_mean:f64,second_alpha:f64,s:&!Nb2LikelihoodDifferenceSlot)->i64 with Mut,Div,Panic {
  s.status=5;s.value=0.0;s.first_status=2;s.second_status=2;s.local_increment=false
+ s.full_calls=0
+ s.full_calls=s.full_calls+1
  let first_status=nb2_log_probability_into(count,first_mean,first_alpha,&!s.first)
  let first_value:f64=s.first.result.log_probability
+ s.full_calls=s.full_calls+1
  let second_status=nb2_log_probability_into(count,second_mean,second_alpha,&!s.second)
  let second_value:f64=s.second.result.log_probability
  s.first_status=first_status;s.second_status=second_status
@@ -415,6 +419,7 @@ pub fn nb2_log_probability_difference_into(count:i64,first_mean:f64,first_alpha:
 
 pub fn nb2_log_probability_mean_difference_into(counts:&IntegerBuffer,first:&NumericBuffer,first_alpha:f64,
  second:&NumericBuffer,second_alpha:f64,n:i64,work:&!Nb2LikelihoodDifferenceSlot)->i64 with Mut,Div,Panic {
+ work.aggregate_full_calls=0;work.full_calls=0
  work.status=5;work.value=0.0;work.first_status=2;work.second_status=2;work.local_increment=false
  if n<1 {work.status=1;return 1}
  if integer_buffer_status(counts)!=0 || numeric_buffer_status(first)!=0 || numeric_buffer_status(second)!=0 {work.status=1;return 1}
@@ -429,6 +434,10 @@ pub fn nb2_log_probability_mean_difference_into(counts:&IntegerBuffer,first:&Num
  while i<n {
   let status=nb2_log_probability_difference_into(integer_buffer_at(counts,i),numeric_buffer_at(first,i),first_alpha,numeric_buffer_at(second,i),second_alpha,work)
   let value:f64=nb2_likelihood_difference_value(work)
+  // Sum the hooks placed at the actual PMF callsites, including a failed row.
+  if work.full_calls<0 || work.full_calls>2 {work.aggregate_full_calls= -1;work.status=5;work.value=0.0;work.local_increment=false;return 5}
+  if work.full_calls>9223372036854775807-work.aggregate_full_calls {work.aggregate_full_calls= -1;work.status=5;work.value=0.0;work.local_increment=false;return 5}
+  work.aggregate_full_calls=work.aggregate_full_calls+work.full_calls
   if !work.local_increment {all_local=false}
   if work.first_status!=0 {first_status=work.first_status}
   if work.second_status!=0 {second_status=work.second_status}
@@ -457,4 +466,24 @@ pub fn nb2_log_probability_mean_difference_into(counts:&IntegerBuffer,first:&Num
  work.status=0;work.value=value;work.local_increment=all_local
  work.first_status=first_status;work.second_status=second_status
  return 0
+}
+
+// No factory here: the caller shares one trace across the aggregate.
+pub fn nb2_log_probability_mean_difference_traced_into(counts:&IntegerBuffer,first:&NumericBuffer,first_alpha:f64,
+ second:&NumericBuffer,second_alpha:f64,n:i64,work:&!Nb2LikelihoodDifferenceSlot,
+ trace:&!CountFitTraceSlot)->i64 with Mut,Div,Panic {
+ if count_fit_trace_status(trace)!=0 {
+  work.status=5;work.value=0.0;work.first_status=2;work.second_status=2;work.local_increment=false
+  work.full_calls=0;work.aggregate_full_calls=0
+  return 5
+ }
+ let status=nb2_log_probability_mean_difference_into(counts,first,first_alpha,second,second_alpha,n,work)
+ let calls:i64=work.aggregate_full_calls
+ if calls<0 {
+  let unavailable=count_fit_trace_incomplete(trace)
+  work.status=5;work.value=0.0;work.local_increment=false
+  return 5
+ }
+ if count_fit_trace_add(trace,7,calls)!=0 {work.status=5;work.value=0.0;work.local_increment=false;return 5}
+ return status
 }

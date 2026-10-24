@@ -1,3 +1,4 @@
+use stats::regression::count_fit_trace::{CountFitTraceSlot,count_fit_trace_slot,count_fit_trace_status,count_fit_trace_note}
 // Dynamic fixed-dispersion NB2 / Poisson log-link Fisher scoring.
 // Borrowed design/counts/offsets and caller initialization. No implicit intercept.
 // Point fit only; no dispersion estimation or calibrated inference.
@@ -150,14 +151,18 @@ fn dc_local_loglik_gain(counts:&IntegerBuffer,stage:&NumericBuffer,
 // 9 count exceeds exact binary64 integer range.
 // Outputs coeff/means/eta unchanged on every failure; scratch may change.
 // Caller supplies all initial coefficients. alpha0 is the exact Poisson branch.
-pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
+fn dc_fit_engine(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
  log_offsets:&NumericBuffer,initial_coefficients:&NumericBuffer,alpha:f64,rcond:f64,
  max_iterations:i64,tolerance:f64,coefficients:&!NumericBuffer,
  means:&!NumericBuffer,linear_predictors:&!NumericBuffer,
  weighted_design:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
- qr_workspace:&!NumericBuffer,stage:&!NumericBuffer)->DynamicCountFit with Mut,Div,Panic {
+ qr_workspace:&!NumericBuffer,stage:&!NumericBuffer,trace_enabled:bool,trace:&!CountFitTraceSlot)->DynamicCountFit with Mut,Div,Panic {
  let n=numeric_matrix_rows(layout)
  let p=numeric_matrix_cols(layout)
+ if trace_enabled {
+  if count_fit_trace_status(trace)!=0 {return dc_empty(4,n,p)}
+  if count_fit_trace_note(trace,1)!=0 {return dc_empty(4,n,p)}
+ }
  let plan=dynamic_count_workspace(n,p)
  if plan.status!=0 || numeric_matrix_status(layout)!=0 ||
  numeric_buffer_status(a)!=0 || integer_buffer_status(counts)!=0 ||
@@ -199,6 +204,7 @@ pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerB
  // Rank is established independently of the caller's initialization.
  i=0
  while i<n {numeric_buffer_set(response,i,0.0) i=i+1}
+ if trace_enabled {if count_fit_trace_note(trace,3)!=0 {return dc_empty(4,n,p)}}
  let rank_fit=dynamic_qr_least_squares(a,layout,response,step,qr_workspace,rcond)
  if rank_fit.status!=0 {
   var bad=dc_empty(if rank_fit.status==3 {6}else if rank_fit.status==5 {5}else{4},n,p)
@@ -261,6 +267,7 @@ pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerB
  let normalized_layout=numeric_matrix(plan.design_elements,n,p,p,1,0)
  var iteration:i64=0
  while iteration<max_iterations {
+  if trace_enabled {if count_fit_trace_note(trace,2)!=0 {return dc_empty(4,n,p)}}
   var response_scale:f64=0.0
   var weight_scale:f64=0.0
   i=0
@@ -340,6 +347,7 @@ pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerB
    }
    i=i+1
   }
+  if trace_enabled {if count_fit_trace_note(trace,4)!=0 {return dc_empty(4,n,p)}}
   let solved=dynamic_qr_least_squares(weighted_design,&normalized_layout,response,step,qr_workspace,rcond)
   if solved.status!=0 {
    var bad=dc_empty(if solved.status==3 {6}else{4},n,p)
@@ -442,4 +450,23 @@ pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerB
  var exhausted=dc_empty(7,n,p)
  exhausted.iterations=iteration
  exhausted
+}
+pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
+ log_offsets:&NumericBuffer,initial_coefficients:&NumericBuffer,alpha:f64,rcond:f64,
+ max_iterations:i64,tolerance:f64,coefficients:&!NumericBuffer,
+ means:&!NumericBuffer,linear_predictors:&!NumericBuffer,
+ weighted_design:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_workspace:&!NumericBuffer,stage:&!NumericBuffer)->DynamicCountFit with Mut,Div,Panic {
+ var trace=count_fit_trace_slot()
+ dc_fit_engine(a,layout,counts,log_offsets,initial_coefficients,alpha,rcond,max_iterations,tolerance,coefficients,means,linear_predictors,weighted_design,response,step,qr_workspace,stage,false,&!trace)
+}
+
+// Accumulates actual fit/IRLS/QR callsite counts in the caller-owned trace.
+pub fn dynamic_count_fit_traced(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
+ log_offsets:&NumericBuffer,initial_coefficients:&NumericBuffer,alpha:f64,rcond:f64,
+ max_iterations:i64,tolerance:f64,coefficients:&!NumericBuffer,
+ means:&!NumericBuffer,linear_predictors:&!NumericBuffer,
+ weighted_design:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_workspace:&!NumericBuffer,stage:&!NumericBuffer,trace:&!CountFitTraceSlot)->DynamicCountFit with Mut,Div,Panic {
+ dc_fit_engine(a,layout,counts,log_offsets,initial_coefficients,alpha,rcond,max_iterations,tolerance,coefficients,means,linear_predictors,weighted_design,response,step,qr_workspace,stage,true,trace)
 }

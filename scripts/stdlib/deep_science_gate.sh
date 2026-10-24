@@ -51,8 +51,12 @@ for src in tests/compile-fail/stdlib_deep_*.sio; do
     if [[ $rc != 1 ]] || ! grep -qi "$pattern" "$out/$name.check.txt"; then record negative "$src" 1
     else record negative "$src" 0; fi
 done
+rc=0
+timeout 120 bin/souc check tests/compile-fail/nested_if_incompatible_record_owner.sio > "$out/nested_if_incompatible_record_owner.check.txt" 2>&1 || rc=$?
+if [[ $rc == 1 ]] && grep -qi 'incompatible types' "$out/nested_if_incompatible_record_owner.check.txt"; then record negative tests/compile-fail/nested_if_incompatible_record_owner.sio 0
+else record negative tests/compile-fail/nested_if_incompatible_record_owner.sio 1; fi
 for src in tests/run-pass/stdlib_deep_*.sio; do native "$src" "$(basename "$src" .sio)"; done
-for name in stdlib_scale_normalization_into stdlib_scale_normalization_status stdlib_scale_count_likelihood_difference stdlib_scale_count_profile_nested_bootstrap; do native "tests/run-pass/$name.sio" "$name"; done
+for name in stdlib_scale_normalization_into stdlib_scale_normalization_status stdlib_scale_count_likelihood_difference stdlib_scale_count_profile_nested_bootstrap stdlib_scale_count_fit_trace stdlib_scale_count_profile_traced nested_if_record_owner nested_if_tuple_record_owner; do native "tests/run-pass/$name.sio" "$name"; done
 # Legacy render paths are replayed in the canonical engine as well as the
 # Stage2 full suite: these names exposed nested-label and first-tick defects.
 for name in stats_inference_forest viz_bootstrap_forest viz_count_matrix_qc \
@@ -137,6 +141,9 @@ for src in tests/reference/deep_*.cpp; do
         rc=0
         timeout 180 "$out/$stem" --nested-single "$out/stdlib_scale_count_profile_nested_bootstrap.stdout" > "$out/$stem.nested.stdout" 2> "$out/$stem.nested.stderr" || rc=$?
         record concordance "$stem:nested" "$rc"
+        rc=0
+        timeout 180 "$out/$stem" --nested-single "$out/stdlib_scale_count_profile_traced.stdout" > "$out/$stem.nested-traced.stdout" 2> "$out/$stem.nested-traced.stderr" || rc=$?
+        record concordance "$stem:nested-traced" "$rc"
         rc=0
         timeout 180 "$out/$stem" --nested-mutant-fixed-alpha "$out/stdlib_scale_count_profile_nested_bootstrap.stdout" > "$out/$stem.nested-mutant.stdout" 2> "$out/$stem.nested-mutant.stderr" || rc=$?
         rejected=1; [[ "$rc" != 2 ]] || rejected=0
