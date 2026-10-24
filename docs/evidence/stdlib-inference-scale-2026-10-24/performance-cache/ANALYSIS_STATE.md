@@ -62,3 +62,17 @@ comparison. No numerical source/compiler changed. Final03's stdlib input
 manifest and preflight remain valid; its three pairs remain unqueued pending
 the replacement gate and the bounded-pilot checkpoint. Old readiness receipt65
 is retained without post-hoc rebinding. Summary16995 remains held/unexecuted.
+
+Replacement fullgate17020 subsequently completed0:0 with prepare0, input-hashes0,
+full input-catalog unchanged0 and compiler-hash0. Source6ffc1a5b, compiler d74.
+Root accepted bounded qualification pilot17026 (16datasets, all available and
+trace-exact) before authorizing final03 measurements. Because completed17026 had
+already expired from the Slurm controller, literal afterok:17026 was rejected
+without creating a pair. Checkpoint17029 verifies preserved pilot COMPLETED0:0,
+fullgate/preflight0 and source/compiler guards, with no numerical execution.
+Final03 pairs are17030 AB ->17031 BA ->17032 AB ->17033 six-row C++ analysis,
+serial afterok from that checkpoint. Summary16995 is now afterany17033 and
+released; it remains unexecuted at this checkpoint. Old pending16989/90/91 were
+cancelled only as SUPERSEDED_UNEXECUTED after preserving held-state records.
+Final03 three-pair performance acceptance remains pending actual six complete
+rows and the unchanged C++ analyzer; no preflight/historical pair is reused.

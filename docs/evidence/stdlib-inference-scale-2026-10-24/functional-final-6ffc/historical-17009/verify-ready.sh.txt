@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Operational only: verifies actual evidence. Never manufactures a receipt.
+set -euo pipefail
+[[ $# == 1 ]] || exit 64
+receipt=$1
+base=/scratch/sounio-stdlib-inference-scale-20261024
+run=$base/combined_final_cache02
+src=$run/source
+compiler=$base/compiler_effectbridge01/artifacts/madaros.elf
+[[ -r "$receipt" && -x "$compiler" && -f "$run/artifacts/STATUS" ]] || exit 65
+[[ $(cat "$run/artifacts/STATUS") == 0 ]] || exit 65
+[[ $(cat "$base/compiler_effectbridge01/guard_retry01/STATUS") == COMPLETE ]] || exit 65
+grep -Fxq 'Submitted batch job 17009' "$run/SUBMISSION.txt" || exit 65
+[[ $(cat "$run/SOURCE_HEAD") == 956c6b26a5ebe18ea8910aad2b72b57952078598 ]] || exit 65
+# Pin the guard and its executable discriminator, not merely an older cached tree.
+expected_guard=7d3fd3f8603fdb23bce3e442795e26e869327f0547a90fab7ceda2edb25aafc2
+expected_fixture=71532629a2b8c8f95793c42a68703991f22e7d4c3be6a310367f3774b46c9b7f
+expected_cpp=9fc2da0bd53063816970390a49527f7dcb470faf1adb1ecf2f136ce5d00b28ff
+actual_guard=$(sha256sum "$src/stdlib/stats/regression/nb2_likelihood.sio")
+actual_fixture=$(sha256sum "$src/tests/run-pass/stdlib_scale_count_aggregate_cancellation.sio")
+actual_cpp=$(sha256sum "$src/tests/reference/count_aggregate_cancellation_reference.cpp")
+[[ ${actual_guard%% *} == "$expected_guard" && ${actual_fixture%% *} == "$expected_fixture" && ${actual_cpp%% *} == "$expected_cpp" ]] || exit 65
+csha=$(sha256sum "$compiler");csha=${csha%% *}
+[[ "$csha" == d74fbebe0ff442e8c77bec024d6d92325b83a98d3f1487caa1db59ef171a41e6 ]] || exit 65
+declare -A gate=()
+while IFS='=' read -r key value || [[ -n ${key:-} ]]; do
+ case "$key" in format|status|compiler_sha256|canonical_inputs_sha256|canonical_inputs_path|results_sha256|results_path) ;; *) exit 65;; esac
+ [[ -n "$value" && ! -v gate[$key] ]] || exit 65
+ gate[$key]=$value
+done < "$receipt"
+[[ ${#gate[@]} == 7 && ${gate[format]} == stdlib-advanced-functional-v1 && ${gate[status]} == 0 ]] || exit 65
+[[ ${gate[compiler_sha256]} == "$csha" && -f ${gate[canonical_inputs_path]} && -f ${gate[results_path]} ]] || exit 65
+[[ $(realpath "${gate[results_path]}") == "$run/artifacts/RESULTS.tsv" ]] || exit 65
+msha=$(sha256sum "${gate[canonical_inputs_path]}");rsha=$(sha256sum "${gate[results_path]}")
+[[ ${msha%% *} == ${gate[canonical_inputs_sha256]} && ${rsha%% *} == ${gate[results_sha256]} ]] || exit 65
+cd "$src"
+manifest=$(mktemp /tmp/nested-qualification-inputs.XXXXXX)
+trap 'rm -f "$manifest"' EXIT
+find -L bin scripts self-hosted stdlib tests examples -type f -print0 | sort -z | xargs -0 sha256sum > "$manifest"
+cmp "$manifest" "${gate[canonical_inputs_path]}" || exit 65
+results=${gate[results_path]}
+awk -F '\t' 'NR==1 {if($0!="kind\tsource\texit_status")exit 1;next} NF!=3||$1==""||$2==""||$3!="0" {exit 1} END {if(NR<2)exit 1}' "$results" || exit 65
+require_row(){ awk -F '\t' -v k="$1" -v s="$2" '$1==k&&$2==s {count++} END {exit count!=1}' "$results" || { echo "missing/duplicate required row: $1 $2" >&2;exit 65;}; }
+shopt -s nullglob
+fixtures=(tests/run-pass/stdlib_scale_count_*.sio)
+((${#fixtures[@]}>0)) || exit 65
+for fixture in "${fixtures[@]}" tests/run-pass/stdlib_deep_stats_count_profile_nested.sio tests/run-pass/stdlib_scale_normalization_into.sio tests/run-pass/stdlib_scale_normalization_status.sio;do
+ for phase in check compile native stdout-marker;do require_row "$phase" "$fixture";done
+done
+for stem in 'deep_stats_count_profile_bootstrap_reference:nested' 'deep_stats_count_profile_bootstrap_reference:nested-traced' count_likelihood_difference_reference count_dispersion_increment_reference normalization_into_reference 'count_likelihood_difference_reference:rank' 'count_likelihood_difference_reference:cached-rank' count_cached_rank_reference count_aggregate_cancellation_reference 'deep_stats_nb2_likelihood_reference:cached' 'deep_stats_count_profile_bootstrap_reference:cache' 'deep_stats_count_glm_reference:trace-control' 'deep_stats_count_increment_reference:trace-control';do require_row concordance "$stem";done
+for control in 'deep_stats_count_profile_bootstrap_reference:nested-fixed-alpha:expected=2:actual=2' 'deep_stats_count_profile_bootstrap_reference:nested-prefix:expected=2:actual=2' 'count_dispersion_increment_reference:orientation:expected=2:actual=2';do require_row mutant-rejection "$control";done
+for phase in check compile native stdout-marker; do require_row "$phase" tests/run-pass/stdlib_scale_count_aggregate_cancellation.sio; done
+require_row input-hashes unchanged
+require_row compiler-hash unchanged
+printf 'ACTUAL_FINAL_GATE_READY source=956c6b26a5ebe18ea8910aad2b72b57952078598 job=17009 compiler=%s\n' "$csha"
