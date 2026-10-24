@@ -20,6 +20,8 @@
 #      kept the handle, so `(*node).head.kind` read the handle number as an
 #      address. A raw-pointer cast of a managed object now yields the address
 #      of its first field (__ptr_of_ref), like heap_alloc memory.
+#      `*p` as a whole struct is that object again (base = p - header), and
+#      `let p = f(...)` with f returning `*mut T` types p as T (pfi_child).
 # Each witness surrounds the right struct with decoys that win the vote.
 # Madaros from main prints 3, 1055 and 3 (or 40300003); lean_single passes all.
 #

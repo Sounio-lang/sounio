@@ -1718,6 +1718,10 @@ pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>, module_id: i64) 
 // Native source-lowering return payloads, keyed by exact interned function
 // name. Keep the declared IR return name unchanged; this is not SOIR metadata.
 var LOWER_OPTION_BOX_RETURN_INNER: [i64; 65537] = [0; 65537]
+// Interned pointee of a fn whose declared return type is `*mut S` / `*const S`
+// (0 otherwise). `let p = f(...)` binds S from it, as a `p: *mut S` parameter
+// and `let p = e as *mut S` already do, so `*p` and `(*p).f` resolve against S.
+var LOWER_RAW_PTR_RETURN_PTE: [i64; 65537] = [0; 65537]
 
 // The LAST named-struct slot of a function's tuple return type when it is not
 // also the first (the first is IrFunction.return_struct_name's tuple sentinel),
@@ -1828,6 +1832,17 @@ fn lower_record_option_box_return(name: Name, rt: &Option<Box<TypeExpr>>) with M
         None => {}
     }
     LOWER_OPTION_BOX_RETURN_INNER[nid as usize] = inner_id
+    var raw_pte: i64 = 0
+    match *rt {
+        Some(ty) => {
+            if (*ty).kind == TypeExprKind::TypeRawPtr {
+                let pte = lower_opt_type_named_name(&(*ty).inner)
+                if pte.len > 0 { raw_pte = ir_intern_name(pte) }
+            }
+        }
+        None => {}
+    }
+    LOWER_RAW_PTR_RETURN_PTE[nid as usize] = raw_pte
 }
 
 // `let pair = f(...)` / `c.m(...)`: also record the tuple's last named-struct
@@ -1938,6 +1953,7 @@ pub fn lower_fn_tuple_arr_reset() with Mut {
         LOWER_TUPLE_BOX_SLOT1[oi as usize] = 0
         LOWER_TUPLE_BOX_INNER[oi as usize] = 0
         LOWER_TUPLE_BOX_KIND[oi as usize] = 0
+        LOWER_RAW_PTR_RETURN_PTE[oi as usize] = 0
         oi = oi + 1
     }
     LOWER_HOF_TRANSPARENT_COUNT = 0
@@ -28964,6 +28980,23 @@ impl Lowerer {
         if raw_pointee.len <= 0 {
             match s.expr {
                 Some(rhs_raw) => {
+                    if (*rhs_raw).kind == ExprKind::ExprCall {
+                        match (*rhs_raw).left {
+                            Some(raw_callee) => {
+                                let raw_callee_name = lo.expr_to_callee_name_ref(&(*raw_callee))
+                                if raw_callee_name.len > 0 {
+                                    let raw_fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, raw_callee_name)
+                                    if raw_fn_id >= 0 && raw_fn_id < lo.module.fn_count {
+                                        let raw_nid = ir_intern_name(ir_fn_get(&(*lo.module), raw_fn_id as usize).name)
+                                        if raw_nid > 0 && raw_nid <= 65536 && LOWER_RAW_PTR_RETURN_PTE[raw_nid as usize] > 0 {
+                                            raw_pointee = ir_name_at(LOWER_RAW_PTR_RETURN_PTE[raw_nid as usize])
+                                        }
+                                    }
+                                }
+                            }
+                            None => {}
+                        }
+                    }
                     if (*rhs_raw).kind == ExprKind::ExprCast {
                         match (*rhs_raw).cast_type {
                             Some(ct) => {
@@ -36157,6 +36190,37 @@ impl Lowerer {
             let dst_reg = dst_pair.1
             lo_wide = lo_wide.emit(ir_wide_sub(dst_reg, zero_reg, operand_pair.1, limbs))
             return (lo_wide, dst_reg)
+        }
+        // `*p` with p a raw `*mut S` / `*const S` (S a struct, p neither a
+        // reference nor a Box): p is the address of S's first field (a
+        // heap_alloc payload, or __ptr_of_ref of a managed object), so the
+        // struct value is the unboxed base p - header, which field reads
+        // resolve as [base + header + 8*i]. The scalar OpDeref below loaded word
+        // 0 instead and handed field 0 on as the struct: `pfi_expr(*p)` in
+        // pfi_child read a Name's bytes as an Expr reference (gen3 SIGSEGV in
+        // pfi_expr_ptr, #2966).
+        if e.un_op == UnaryOp::OpDeref {
+            match e.left {
+                Some(raw_operand) => {
+                    if (*raw_operand).kind == ExprKind::ExprIdent && !self.lookup_local_is_ref((*raw_operand).name) {
+                        let raw_pointee = self.lookup_local_struct_type((*raw_operand).name)
+                        if raw_pointee.len > 0 && !ir_name_is_box(raw_pointee)
+                            && !self.lookup_local_struct_type_is_array_elem((*raw_operand).name)
+                            && lower_struct_layout_index_of(&(*self.struct_layouts), raw_pointee) >= 0 {
+                            let p_pair = self.lower_opt_expr_ref(&e.left)
+                            var lo_p = p_pair.0
+                            if p_pair.1 < 0 { return (lo_p, p_pair.1) }
+                            let hdr_pair = lo_p.emit_i64_const(32)
+                            lo_p = hdr_pair.0
+                            let base_pair = lo_p.fresh_reg()
+                            lo_p = base_pair.0
+                            lo_p = lo_p.emit(ir_binop(base_pair.1, p_pair.1, BinaryOp::OpSub, hdr_pair.1))
+                            return (lo_p, base_pair.1)
+                        }
+                    }
+                }
+                None => {}
+            }
         }
         // BSS aggregate &GG / &!GG: native-v2 OpRef is LEA of a stack slot, and
         // ref_array_* then does load[slot] → resolve_handle → +object_header.
