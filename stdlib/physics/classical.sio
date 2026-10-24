@@ -2,75 +2,86 @@
 
 module physics::classical
 
-use units::{quantity_new, dim_mass, dim_acceleration, dim_velocity, dim_energy, dim_add_exp, UnitDim, Quantity};
+use units::lib::*
+use math::pure::{is_finite}
+use physics::uncertainty::{PhysicsScalarResult,physics_input4,physics_scalar_unavailable,physics_product3,physics_sum3,physics_scalar}
+
 
 fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 fn check_near(a: f64, b: f64, tol: f64) -> bool { abs_f64(a - b) < tol }
 
-fn dim_force() -> UnitDim { dim_add_exp(dim_mass(), dim_acceleration()) }
 
-pub fn classical_force(mass: &Quantity, acc: &Quantity) -> Quantity {
-    let f_val = mass.value * acc.value;
-    let abs_m = abs_f64(mass.value);
-    let abs_a = abs_f64(acc.value);
-    let rel_um = if abs_m != 0.0 { mass.uncertainty / abs_m } else { 0.0 };
-    let rel_ua = if abs_a != 0.0 { acc.uncertainty / abs_a } else { 0.0 };
-    let sum_rel2 = rel_um*rel_um + rel_ua*rel_ua;
-    let rel_uf = if sum_rel2 <= 0.0 { 0.0 } else {
-        var y = sum_rel2; var i = 0; while i < 30 { y = 0.5 * (y + sum_rel2 / y); i = i + 1; } y
-    };
-    let abs_f = abs_f64(f_val);
-    units::quantity_new(f_val, abs_f * rel_uf, dim_force())
+
+// Independent first-order GUM, exact supplied time, explicit availability.
+pub fn classical_force_checked(mass:&Quantity,acc:&Quantity)->PhysicsScalarResult with Mut,Div,Panic {
+ let status=physics_input4(mass.value,mass.uncertainty,acc.value,acc.uncertainty)
+ if status!=0 {return physics_scalar_unavailable(status)}
+ if !dim_eq(mass.dim,dim_mass()) || !dim_eq(acc.dim,dim_acceleration()) {return physics_scalar_unavailable(5)}
+ if mass.value<0.0 {return physics_scalar_unavailable(2)}
+ let value=physics_product3(mass.value,acc.value,1.0,false)
+ let hm=physics_product3(acc.value,mass.uncertainty,1.0,true)
+ let ha=physics_product3(mass.value,acc.uncertainty,1.0,true)
+ if value.status!=0 || hm.status!=0 || ha.status!=0 {return physics_scalar_unavailable(4)}
+ physics_scalar(value.value,hm.value,ha.value,0.0,0.0)
+}
+pub fn classical_ke_checked(mass:&Quantity,vel:&Quantity)->PhysicsScalarResult with Mut,Div,Panic {
+ let status=physics_input4(mass.value,mass.uncertainty,vel.value,vel.uncertainty)
+ if status!=0 {return physics_scalar_unavailable(status)}
+ if !dim_eq(mass.dim,dim_mass()) || !dim_eq(vel.dim,dim_velocity()) {return physics_scalar_unavailable(5)}
+ if mass.value<0.0 {return physics_scalar_unavailable(2)}
+ let halfv=0.5*vel.value
+ if halfv==0.0 && vel.value!=0.0 && mass.uncertainty!=0.0 {return physics_scalar_unavailable(4)}
+ let value=physics_product3(mass.value,vel.value,halfv,false)
+ let hm=physics_product3(halfv,vel.value,mass.uncertainty,true)
+ let hv=physics_product3(mass.value,vel.value,vel.uncertainty,true)
+ if value.status!=0 || hm.status!=0 || hv.status!=0 {return physics_scalar_unavailable(4)}
+ physics_scalar(value.value,hm.value,hv.value,0.0,0.0)
+}
+pub fn classical_pos_checked(s0:f64,us0:f64,v0:f64,uv0:f64,a:f64,ua:f64,t:f64)->PhysicsScalarResult with Mut,Div,Panic {
+ let first=physics_input4(s0,us0,v0,uv0)
+ let second=physics_input4(a,ua,t,0.0)
+ if first==1 || second==1 {return physics_scalar_unavailable(1)}
+ if first!=0 || second!=0 {return physics_scalar_unavailable(3)}
+ let vt=physics_product3(v0,t,1.0,false)
+ let at=physics_product3(a,t,0.5*t,false)
+ let hv=physics_product3(t,uv0,1.0,true)
+ let ha=physics_product3(t,0.5*t,ua,true)
+ if t!=0.0 && 0.5*t==0.0 && ua!=0.0 {return physics_scalar_unavailable(4)}
+ if vt.status!=0 || at.status!=0 || hv.status!=0 || ha.status!=0 {return physics_scalar_unavailable(4)}
+ let value=physics_sum3(s0,vt.value,at.value)
+ if value.status!=0 {return physics_scalar_unavailable(4)}
+ physics_scalar(value.value,us0,hv.value,ha.value,0.0)
 }
 
-pub fn classical_ke(mass: &Quantity, vel: &Quantity) -> Quantity {
-    let v2 = vel.value * vel.value;
-    let ke_val = 0.5 * mass.value * v2;
-    let abs_m = abs_f64(mass.value);
-    let abs_v = abs_f64(vel.value);
-    let rel_um = if abs_m != 0.0 { mass.uncertainty / abs_m } else { 0.0 };
-    let rel_uv = if abs_v != 0.0 { vel.uncertainty / abs_v } else { 0.0 };
-    let rel_uke = rel_um + 2.0 * rel_uv;
-    let abs_ke = abs_f64(ke_val);
-    units::quantity_new(ke_val, abs_ke * rel_uke, dim_energy())
-}
+pub fn classical_force(mass:&Quantity,acc:&Quantity)->Quantity with Mut,Div,Panic {let r=classical_force_checked(mass,acc) assert(r.status==0) quantity_new(r.value,r.standard_uncertainty,dim_force())}
 
-pub fn classical_pos(s0: f64, us0: f64, v0: f64, uv0: f64, a: f64, ua: f64, t: f64) -> (f64, f64) {
-    let s = s0 + v0*t + 0.5*a*t*t;
-    let abs_t = abs_f64(t);
-    (s, us0 + uv0*abs_t + 0.5*ua*t*t)
-}
+pub fn classical_ke(mass:&Quantity,vel:&Quantity)->Quantity with Mut,Div,Panic {let r=classical_ke_checked(mass,vel) assert(r.status==0) quantity_new(r.value,r.standard_uncertainty,dim_energy())}
 
-pub fn newton_second_force_from_components(mass_val: f64, mass_std: f64, acc_val: f64, acc_std: f64) -> Quantity {
-    let f_val = mass_val * acc_val;
-    let var_f = mass_val*mass_val * (acc_std*acc_std) + acc_val*acc_val * (mass_std*mass_std);
-    let std_f = if var_f <= 0.0 { 0.0 } else {
-        var y = var_f; var i = 0; while i < 30 { y = 0.5*(y + var_f / y); i = i+1; } y
-    };
-    units::quantity_new(f_val, std_f, dim_force())
-}
+pub fn classical_pos(s0:f64,us0:f64,v0:f64,uv0:f64,a:f64,ua:f64,t:f64)->(f64,f64) with Mut,Div,Panic {let r=classical_pos_checked(s0,us0,v0,uv0,a,ua,t) assert(r.status==0); (r.value,r.standard_uncertainty)}
 
-pub fn test_newton_force_basic() -> bool {
-    let m = units::quantity_new(2.0, 0.01, dim_mass());
-    let a = units::quantity_new(3.0, 0.02, dim_acceleration());
+pub fn newton_second_force_from_components(mass_val:f64,mass_std:f64,acc_val:f64,acc_std:f64)->Quantity with Mut,Div,Panic {let m=quantity_new(mass_val,mass_std,dim_mass()) let a=quantity_new(acc_val,acc_std,dim_acceleration()) classical_force(&m,&a)}
+
+pub fn test_newton_force_basic() -> bool with Mut,Div,Panic {
+    let m = quantity_new(2.0, 0.01, dim_mass());
+    let a = quantity_new(3.0, 0.02, dim_acceleration());
     let f = classical_force(&m, &a);
     check_near(f.value, 6.0, 0.1)
 }
 
-pub fn test_ke() -> bool {
-    let m = units::quantity_new(2.0, 0.0, dim_mass());
-    let v = units::quantity_new(3.0, 0.0, dim_velocity());
+pub fn test_ke() -> bool with Mut,Div,Panic {
+    let m = quantity_new(2.0, 0.0, dim_mass());
+    let v = quantity_new(3.0, 0.0, dim_velocity());
     let ke = classical_ke(&m, &v);
     check_near(ke.value, 9.0, 1e-9)
 }
 
-pub fn test_position_kinematics() -> bool {
+pub fn test_position_kinematics() -> bool with Mut,Div,Panic {
     let s0 = 0.0; let us0 = 0.0; let v0 = 1.0; let uv0 = 0.0; let a = 0.5; let ua = 0.0;
     let (s, _) = classical_pos(s0, us0, v0, uv0, a, ua, 2.0);
     check_near(s, 3.0, 1e-9)
 }
 
-pub fn test_force_components() -> bool {
+pub fn test_force_components() -> bool with Mut,Div,Panic {
     let f = newton_second_force_from_components(2.0, 0.01, 3.0, 0.02);
     check_near(f.value, 6.0, 0.1)
 }
@@ -84,7 +95,7 @@ pub fn pos_3d(s0: [f64; 3], v0: [f64; 3], a: [f64; 3], t: f64) -> [f64; 3] {
     ]
 }
 
-pub fn test_pos_3d() -> bool {
+pub fn test_pos_3d() -> bool with Mut,Div,Panic {
     let s = pos_3d([0.0,0.0,0.0], [1.0,0.0,0.0], [0.5,0.0,0.0], 2.0);
     check_near(s[0], 3.0, 1e-9)
 }
