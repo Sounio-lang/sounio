@@ -47,6 +47,7 @@ The founder took these decisions on 2026-10-24.
 3. The threshold is an **explicit policy** on the type or the call (`consistency: En(k)`); the default `En(1.0)` is stated here and is never hidden in the runtime.
 4. Birge expansion of the combined uncertainty exists only as an explicit policy (`consistency: Birge`) and is recorded in provenance. It is a modelling choice about the cause of the disagreement, so the programmer makes it, not the language.
 5. Accepting inconsistent sources and returning a narrower interval than either input is never done.
+6. Because `E_n` depends on measured values, the refusal of `meet` is in general a **run-time contract**, not a compile-time check. It becomes a static guarantee only through the typestate of decision 11, where a certificate proves the consistency predicate over a certified enclosure.
 
 ### 4. Resolving a `Contest<T>`
 
@@ -122,6 +123,32 @@ The ontological `⊥` (empty concept) belongs to concept types (decision 1.4), n
 5. The lexicographic "pick the best derivation" design is rejected: it is not distributive. The counterexample is `Trust.lex_not_distrib` in the same file.
 6. The ontology runs under the open-world assumption, so independence is never derivable from it alone. A signed certificate that states its chain is **complete** closes the world for that chain; only then can independence be proven. Without it, decision 5.5 applies.
 
+## Prior art and claimed contribution
+
+An adversarial prior-art search on 2026-10-24 tried to kill each part of this ADR. Every mechanism below already exists and is cited, not claimed.
+
+| mechanism | prior art |
+|---|---|
+| a value carried with its GUM budget as a type; correlation arising from shared inputs tracked by persistent identifiers | GUM Tree Calculator (Hall 2022); METAS UncLib; `Uncertain<T>` (Bornholt, Mytkowicz, McKinley, ASPLOS 2014) |
+| `n_eff = 1ᵀR⁻¹1`; `E_n` (ISO 13528) and the Birge ratio as consistency tests | standard statistics and metrology; analyst-side calculators |
+| the statistical remedies for Peelle's puzzle: normalisation as an explicit parameter, covariance at the estimate, iterated reweighting, log-normal encoding of relative uncertainty, log-normal above a relative-uncertainty threshold | D'Agostini 1994; Chiba & Smith 1991; Lachaume 2021; Walton et al., *Sci. Rep.* 2025; AMC Technical Brief 88 (2019) |
+| contradiction as the top of an information order; retraction of a premise from a contradiction | Fitting, bilattice logic programming; LVars (Kuper et al., POPL 2014); propagators with a truth-maintenance system (Radul & Sussman; Radul 2009) |
+| dependently typed typestate with evidence-carrying transitions | Idris `ST` |
+| untrusted search, small certified checker | SMTCoq (Ekici et al. 2016) |
+| bounds on float expressions proven by interval computation inside a proof checker | Melquiond 2008; Martin-Dorel & Melquiond 2015 |
+| tropical provenance; trust conditions over provenance | Green, Karvounarakis, Tannen 2007; Green et al., VLDB 2007 |
+| the product of tropical semirings | standard algebra; the Lean file is a machine check, not a discovery |
+
+**Claimed contribution.** Each of these is, in current practice, a choice the analyst makes or a check that runs and reports at execution time. This ADR makes them **obligations the language imposes**:
+
+1. fusion split into a `meet` that refuses (with location and both provenances) and a `contest` that always succeeds and carries the conflict, with the consistency threshold as an explicit type- or call-level policy;
+2. the physical dimension of an uncertainty component, already tracked by the unit system, selecting the additive or multiplicative error model, with positivity as a support refinement selecting the log-domain or nuisance-parameter route, so that Peelle's puzzle cannot arise silently;
+3. contradiction lifted from a run-time state to a static typestate, so that `Knowledge<T>` cannot hold a contradiction by construction, and the exit from `Contest<T>` untypable without a certificate of identifiability (in particular, refused with two sources and no further evidence);
+4. partial correlation declared by a shared method class, and `n_eff` as an interval under unknown provenance;
+5. ranked trust levels as a provenance semiring, which the VLDB 2007 work left as future work.
+
+No search found a precedent for these as language-level obligations; absence after a bounded search is not proof of absence. Not yet checked: GUM Tree Calculator and METAS UncLib documentation on relative uncertainty in full, Neudecker et al. 2014 in full, Radul's thesis in full, Plaid and the original Strom & Yemini typestate papers, IEEE 1788, and knowledge-fusion / truth-discovery literature.
+
 ## Consequences
 
 - Decision 11 depends on D-34 (Marco 0): dependent proofs over floating-point values are sound only over a certified enclosure. Marco 0 is now on the critical path of this ADR.
@@ -144,3 +171,15 @@ Not started. Proposed order: the trust semiring in the ontology runtime (decisio
 - Peelle R. W. (1987), "Peelle's Pertinent Puzzle", ORNL memorandum. Chiba S., Smith D. L. (1991), ANL/NDM-121.
 - ISO 13528 (normalised error `E_n`). Birge R. T. (1932), *Physical Review* 40.
 - Beal S. L. (2001), "Ways to fit a PK model with some data below the quantification limit", *J. Pharmacokinet. Pharmacodyn.* 28.
+- Hall B. D. (2022), "The uncertain number: a data model for measurement", IMEKO TC6 M4Dconf, Berlin. https://www.m4dconf2022.ptb.de/fileadmin/documents/m4dconf2022/Material/Paper/IMEKOTC6-M4Dconf-2022-P17-HALL.pdf
+- Bornholt J., Mytkowicz T., McKinley K. S. (2014), "Uncertain<T>: a first-order type for uncertain data", ASPLOS.
+- D'Agostini G. (1994), "On the use of the covariance matrix to fit correlated data", *Nucl. Instrum. Methods A* 346, 306–311. https://doi.org/10.1016/0168-9002(94)90719-6
+- Chiba S., Smith D. L. (1991), OSTI report. https://doi.org/10.2172/5881035
+- Lachaume R. (2021), "Bias-free model fitting of correlated data in interferometry", arXiv:2104.07082.
+- Walton N. A. W. et al. (2025), "Understanding Peelle's Pertinent Puzzle bias in generalized least squares regression through eigenspectrum analysis", *Sci. Rep.* 15, 40885. https://doi.org/10.1038/s41598-025-24706-0
+- Analytical Methods Committee (2019), AMCTB No. 88, "Why do we need the uncertainty factor?", *Anal. Methods*.
+- Kuper L., Turon A., Krishnaswami N. R., Newton R. R. (2014), "Freeze after writing: quasi-deterministic parallel programming with LVars", POPL.
+- Radul A., Sussman G. J., "Revised report on the propagator model", MIT; Radul A. (2009), *Propagation Networks*, PhD thesis, MIT. https://dspace.mit.edu/handle/1721.1/49525
+- Ekici B. et al. (2016), "Extending SMTCoq, a certified checker for SMT", arXiv:1606.05947.
+- Melquiond G. (2008), "Proving bounds on real-valued functions with computations", IJCAR. Martin-Dorel É., Melquiond G. (2015), *J. Autom. Reasoning* 57(3), 187–217. https://doi.org/10.1007/s10817-015-9350-4
+- Green T. J., Karvounarakis G., Ives Z. G., Tannen V. (2007), "Update exchange with mappings and provenance", VLDB.
