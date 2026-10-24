@@ -10,6 +10,7 @@ import OntologyELPlusClosureComplete
 import ElfLinker
 import TypeChecker
 import TrustSemiring
+import EpistemicSafety
 
 -- EL+ saturation: complete and sound w.r.t. the derivation calculus `Der`.
 #print axioms Sounio.OntologyELPlus.subBPlusC_iff
@@ -41,3 +42,10 @@ import TrustSemiring
 #print axioms Trust.plus_idem
 #print axioms Trust.times_wf
 #print axioms Trust.lex_not_distrib
+
+-- Epistemic safety of the minimal Knowledge/Contest calculus (ADR-016 decisions 2 and 4).
+#print axioms Epi.safety
+#print axioms Epi.meet_no_silent
+#print axioms Epi.meet_refuses
+#print axioms Epi.resolve_identifiable
+#print axioms Epi.resolve_refuses_both

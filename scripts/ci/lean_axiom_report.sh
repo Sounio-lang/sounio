@@ -35,7 +35,7 @@ run_report() {
   [[ "$want" == "$got" ]] || fail "$dir/AxiomReport.lean: $want #print axioms commands, $got results"
 }
 
-run_report "$REPO_ROOT/formal" OntologyELPlusClosureComplete ElfLinker TypeChecker TrustSemiring
+run_report "$REPO_ROOT/formal" OntologyELPlusClosureComplete ElfLinker TypeChecker TrustSemiring EpistemicSafety
 run_report "$REPO_ROOT/formal/lean4" SounioHydrogenPbox SounioGradedModal
 
 if grep -q 'sorryAx' "$REPORT"; then

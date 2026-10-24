@@ -164,6 +164,7 @@ Not started. Proposed order: the trust semiring in the ontology runtime (decisio
 ## Grounded in
 
 - `formal/TrustSemiring.lean` (built by the `formal/` Lake package).
+- `formal/EpistemicSafety.lean`: a minimal certified-layer calculus (`Knowledge`, `Contest`, `meet`, `contest`, `resolve`) with explicit refusals, and its theorems: a well-typed `Knowledge` term never evaluates to a contradiction (`safety`); a successful `meet` implies its inputs intersect (`meet_no_silent`); disjoint inputs refuse (`meet_refuses`); resolution succeeds only when the evidence is compatible with exactly one side (`resolve_identifiable`, `resolve_refuses_both`). `#print axioms`: `propext` only. The statistical layer (`E_n`) is not yet in the calculus.
 - `docs/audit/EPISTEMIC_MERGE_2026-10-24/peelle.cpp` and its README.
 - Belnap N. D. (1977), "A useful four-valued logic". Ginsberg M. L. (1988), "Multivalued logics: a uniform approach to reasoning in AI", *Computational Intelligence* 4.
 - Green T. J., Karvounarakis G., Tannen V. (2007), "Provenance semirings", PODS.
