@@ -51,6 +51,7 @@ for src in tests/compile-fail/stdlib_deep_*.sio; do
     else record negative "$src" 0; fi
 done
 for src in tests/run-pass/stdlib_deep_*.sio; do native "$src" "$(basename "$src" .sio)"; done
+for name in stdlib_scale_normalization_into stdlib_scale_normalization_status; do native "tests/run-pass/$name.sio" "$name"; done
 # Legacy render paths are replayed in the canonical engine as well as the
 # Stage2 full suite: these names exposed nested-label and first-tick defects.
 for name in stats_inference_forest viz_bootstrap_forest viz_count_matrix_qc \
@@ -59,11 +60,20 @@ for name in stats_inference_forest viz_bootstrap_forest viz_count_matrix_qc \
     viz_permutation_mc viz_axis_first_tick_guard; do
     native "tests/run-pass/$name.sio" "$name"
 done
+for name in viz_dynamic_count_workflow viz_dynamic_ode_diagnostics; do
+    native "examples/$name.sio" "$name"
+done
 compare() {
     local stem=$1 fixture=$2 rc=0
     if [[ ! -f "$out/$fixture.stdout" ]]; then record concordance "$stem:missing-$fixture" 1; return; fi
     timeout 180 "$out/$stem" "$out/$fixture.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
     record concordance "$stem" "$rc"
+}
+compare_mode() {
+    local stem=$1 mode=$2 fixture=$3 rc=0
+    if [[ ! -f "$out/$fixture.stdout" ]]; then record concordance "$stem:$mode:missing-$fixture" 1; return; fi
+    timeout 180 "$out/$stem" "$mode" "$out/$fixture.stdout" > "$out/$stem.$fixture.concordance.stdout" 2> "$out/$stem.$fixture.concordance.stderr" || rc=$?
+    record concordance "$stem:$mode" "$rc"
 }
 emit() {
     local stem=$1 suffix=$2 mode=$3 rc=0
@@ -125,6 +135,15 @@ for src in tests/reference/deep_*.cpp; do
         record mutant-rejection "$stem:fixed-alpha:expected=2:actual=$rc" "$rejected" ;;
       deep_stats_dynamic_robust_reference) compare "$stem" stdlib_deep_stats_dynamic_robust ;;
       deep_stats_dynamic_robust_contrast_reference) compare "$stem" stdlib_deep_stats_dynamic_robust_contrast ;;
+      deep_count_dataset_reference)
+        compare "$stem" stdlib_deep_count_dataset_reference
+        compare_mode "$stem" --workflow viz_dynamic_count_workflow ;;
+      deep_viz_scientific_document)
+        compare "$stem" stdlib_deep_viz_scientific_document
+        compare_mode "$stem" --count stdlib_deep_viz_count_diagnostics ;;
+      deep_ode_diagnostic_observer_reference)
+        compare "$stem" stdlib_deep_ode_diagnostic_observer
+        compare_mode "$stem" --figure viz_dynamic_ode_diagnostics ;;
       deep_stats_dispersion_profile_reference) compare "$stem" stdlib_deep_stats_dispersion_profile ;;
       deep_summaries_reference) compare "$stem" stdlib_deep_summaries ;;
       deep_qr_factor_reference) compare "$stem" stdlib_deep_qr_factor ;;
@@ -156,6 +175,22 @@ for src in tests/reference/deep_*.cpp; do
       *) record unregistered-oracle "$stem" 1 ;;
     esac
 done
+
+# Canonical bitmap data and actual native raster orientation, including clipping.
+native tests/run-pass/display_font_orientation.sio display_font_orientation
+rc=0
+timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/display_font_orientation_reference.cpp -o "$out/display_font_orientation_reference" > "$out/display_font_orientation_reference.cpp.txt" 2>&1 || rc=$?
+record cpp-compile display_font_orientation_reference "$rc"
+if [[ $rc == 0 ]]; then
+ rc=0
+ timeout 180 "$out/display_font_orientation_reference" --canonical tests/reference/data/font8x8_basic.h "$out/display_font_orientation.stdout" > "$out/display_font_orientation_reference.concordance.stdout" 2> "$out/display_font_orientation_reference.concordance.stderr" || rc=$?
+ record concordance font-canonical "$rc"
+fi
+
+rc=0
+timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/normalization_into_reference.cpp -o "$out/normalization_into_reference" > "$out/normalization_into_reference.cpp.txt" 2>&1 || rc=$?
+record cpp-compile normalization_into_reference "$rc"
+if [[ $rc == 0 ]]; then compare normalization_into_reference stdlib_scale_normalization_into; fi
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"
