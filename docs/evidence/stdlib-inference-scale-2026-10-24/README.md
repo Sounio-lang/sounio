@@ -147,3 +147,11 @@ projection. The failing-before witness, exact pixel/geometry controls, unchanged
 radius1 legacy replay, zero-output preflight failures and three report mutants
 are retained. This is execution plus agent visual inspection, not human approval
 or calibration.
+
+## Final cache integration and compiler self-check scopes
+
+Commit `82b4316a20` adds separate cached ranking owners and a shared private difference core. Full-PMF fallbacks preserve signed contrast/status semantics, all normalizer metadata and the two-call contract on cache hits. Counts 0 through 63 use exact alpha-bit keys; count 64 and above bypass the bounded cache. The legacy scalar and difference owners retain their lightweight storage. New native controls and independent C++ far-PMF concordance are mandatory in both the central gate and the qualification receipt contract.
+
+The selected B31 pilot16968 measured 154.90s before and 76.45s after, preserving scientific rows and RNG state (ratio 2.02616088947024198825 from the C++ analyzer). This is one selected pilot, not a B199 three-pair result. B199 preflight job16982 and the final central gate16984 are pending at this ledger checkpoint. The latter is bound to frozen source `257fb0d0a25abef4633bcbe7ac8163f1b2a9983d` and depends on the fresh compiler build16983 from updated main. No calibration or final performance acceptance follows from submission.
+
+`combined-owner-viz-precache/` preserves passing full gate16933 on source `8d4da7665c`, before the final cache change. `compiler-selfcheck-scopes/` preserves baseline16973, the discarded effect-copy attempt16976, isolated borrow bridge16979 and integrated passing self-check16981. The baseline reproduced the same five errors with old and owner-corrected compilers; the final narrow source repair declares already-used effects and moves the existing raw-pointer cast inside a private borrowed bridge. The checker criteria and expected gen2 rung remain unchanged.
