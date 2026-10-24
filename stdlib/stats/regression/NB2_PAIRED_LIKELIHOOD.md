@@ -226,3 +226,35 @@ It does not establish the full B199/three-pair/median target, an isolated cache
 speedup, assessed calibration or general superiority. Source, ELF, compiler
 and input manifests were verified; the untraced driver leaves work counters
 unavailable rather than deriving them from the fit budget.
+
+## Conservative availability after aggregate cancellation
+
+All full, ranking and cached-ranking aggregates share the same accumulation and
+finish engine. A new guard returns status5 with cleared value0 whenever nonzero
+rows were accumulated (`scale>0`) but the final binary64 scaled sum is0. The
+summation formula and floating-point operation order for nonzero sums are
+unchanged. Pointwise-equal row contrasts (`scale==0`) still return available0.
+
+This policy deliberately also rejects mixed nonzero rows whose mathematical sum
+is exactly0: this engine has no exact-sum certificate to distinguish that case
+from loss of a tiny contribution followed by cancellation. It is conservative
+availability, not an exact-summation algorithm, a sign certificate for nonzero
+results, or an interval/error-bound implementation. A trace can remain available
+while the numerical contrast is unavailable; it records actual calls made.
+
+Preserved scratch Slurm16996 reproduced status0/value0 on both92d and d74
+compilers for Poisson count-zero means [1e-300,2,1] versus [2e-300,1,2]. An
+independent C++23 exact-binary-rational analysis of the emitted input bits found
+a negative representable mean near -3.3333333333333334e-301. Reversing row order
+retained that nonzero contrast; the two-row exact-cancellation control returned0.
+Analysis16997 froze exact-numerator/raw-bit predicates before decimal formatting;
+the initial16996 auxiliary boolean classification is superseded by that analysis.
+The raw native sources, outputs and executable identities remain preserved.
+
+The new stdlib_scale_count_aggregate_cancellation fixture checks all six traced
+and untraced aggregate entries, reuse, invalid-size clearing, detached snapshot,
+public cache reset, reversed nonzero rows, mixed exact cancellation and pointwise
+zero. count_aggregate_cancellation_reference.cpp independently uses the analytic
+Poisson count-zero identity and exact rationals reconstructed from native bits;
+its --before mode requires the original false-zero witness. New-source native
+acceptance remains separate from preparation until the coordinated Slurm gate.

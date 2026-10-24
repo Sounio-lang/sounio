@@ -280,6 +280,14 @@ if [[ $rc == 0 ]]; then
  record concordance count_cached_rank_reference "$rc"
 fi
 rc=0
+timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/count_aggregate_cancellation_reference.cpp -o "$out/count_aggregate_cancellation_reference" > "$out/count_aggregate_cancellation_reference.cpp.txt" 2>&1 || rc=$?
+record cpp-compile count_aggregate_cancellation_reference "$rc"
+if [[ $rc == 0 ]]; then
+ rc=0
+ timeout 180 "$out/count_aggregate_cancellation_reference" "$out/stdlib_scale_count_aggregate_cancellation.stdout" > "$out/count_aggregate_cancellation_reference.concordance.stdout" 2> "$out/count_aggregate_cancellation_reference.concordance.stderr" || rc=$?
+ record concordance count_aggregate_cancellation_reference "$rc"
+fi
+rc=0
 timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/normalization_into_reference.cpp -o "$out/normalization_into_reference" > "$out/normalization_into_reference.cpp.txt" 2>&1 || rc=$?
 record cpp-compile normalization_into_reference "$rc"
 if [[ $rc == 0 ]]; then compare normalization_into_reference stdlib_scale_normalization_into; fi
