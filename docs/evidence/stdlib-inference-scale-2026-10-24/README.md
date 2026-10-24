@@ -114,3 +114,36 @@ count/ODE workflows and the new numerical/normalization contracts. This is the
 combined functional gate; later tracing and marker-sizing code require their
 own renewed acceptance. Neither this gate nor the earlier B31 performance pilots
 establish calibration or the B1992x target.
+
+## Record owner, validated instrumentation and readable campaign figure
+
+`compiler-record-owner/` retains a discriminating compiler regression and its
+fix. A nested-if binding lost the nominal record owner; inline field projection
+could read an adjacent boolean as alpha, while a typed borrowed helper read the
+correct unchanged record. Saving the incorrect inline alpha was a diagnostic,
+**not a scientific fix**. The recursive owner join now requires compatible known
+layouts from both arms. Original failing witnesses pass with compiler92d2108e;
+Slurm16899 runs the original unannotated traced/untraced B2 programs and checks
+both against independent C++. Slurm16913 passes the composed current-source f64
+compiler gate, including the permanent owner witnesses and incompatible-type
+rejection. Failed invocations and superseded diagnostics remain labelled.
+
+The ten original work metrics count actual fit/IRLS/QR/profile/rank and full-PMF
+API callsites. They are not a flop count or an inferred sampler cost. The B2
+original passes equality off/on, resets, bounded failures, snapshots and actual
+RNG checks. OpsTraced16903 and final-summary16910 validate the traced generator,
+its work rows, unavailable bounded traces, old-receipt rejection and unchanged
+legacy generated datasets. They do not manufacture a passing final CENTRAL
+receipt or constitute a completed qualification campaign.
+
+`campaign-report/` binds the frozen original seven READY first batches, missing
+cell masks, the portable raw asset, native scientific coordinates, SVG and actual
+Canvas PNG. Count classifications and elapsed-time medians are independently
+checked before projection. The graphic states partial/unassessed status and
+includes early termination in unavailable-class times. The opt-in sized scatter
+API accepts square radii1..4; the report uses radius3. The shared conservative
+edge guard fixes valid marker footprints previously discarded before integer
+projection. The failing-before witness, exact pixel/geometry controls, unchanged
+radius1 legacy replay, zero-output preflight failures and three report mutants
+are retained. This is execution plus agent visual inspection, not human approval
+or calibration.
