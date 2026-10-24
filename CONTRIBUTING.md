@@ -183,6 +183,14 @@ Rules for every contributor, human or automated:
 
 ADR numbers are append-only and assigned at merge time. Before adding `adr-NNN-*.md`, check both `main` and the open pull requests for the next free number; the index in [`docs/decisions/README.md`](docs/decisions/README.md) lists numbers reserved by open PRs.
 
+### 7. Changelog fragments and release trains
+
+Do not edit `CHANGELOG.md`. If your PR touches the compiler, runtime, stdlib or CI scripts, add `changelog.d/<slug>.<kind>.md`, a single paragraph written for release notes. Use `kind=internal` when nothing is user-visible. Kinds and examples are in [`changelog.d/README.md`](changelog.d/README.md). The Impact job checks this.
+
+Choose the kind carefully: it decides which release can carry your change. A change that makes existing programs fail to compile, or changes what they do, is `breaking` and waits for the next major. A change that makes a program refuse instead of printing a wrong number is `refusal` and may ship in a minor. A change to a printed number is `numerical` or `numerical-correction`, judged by the epistemic consistency test of [ADR-018](docs/decisions/adr-018-release-cycle-and-versioning.md) §3.
+
+Releases are feature trains with a freeze date (see [`docs/RELEASE_POLICY.md`](docs/RELEASE_POLICY.md)). After the freeze, a fix reaches the release branch only if it carries the label `backport:X.Y`.
+
 ---
 
 ## Standard Library Structure
