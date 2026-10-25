@@ -1,0 +1,55 @@
+//@ run-pass
+//@ expect-stdout: STDLIB_DP54_DENSE_EVENTS_PASS
+use ode::checked64::{Ode64Result,solve_dp54_64}
+use ode::checked_dp54::{dp54_dense_init,dp54_dense_close,dp54_dense_value,dp54_dense_derivative,dp54_dense_domain,dp54_default_limits,solve_dp54_dense64}
+use ode::solver::{default_options}
+var RHS_CALLS:i64=0
+fn constant_rhs(t:f64,y:&[f64;64],dy:&![f64;64]) with Mut,Div,Panic {RHS_CALLS=RHS_CALLS+1;var i:i64=0;while i<64 {dy[i]=1.0;i=i+1}}
+fn polynomial_rhs(t:f64,y:&[f64;64],dy:&![f64;64]) with Mut,Div,Panic {RHS_CALLS=RHS_CALLS+1;var i:i64=0;while i<64 {dy[i]=4.0*t*t*t;i=i+1}}
+fn decay_rhs(t:f64,y:&[f64;64],dy:&![f64;64]) with Mut,Div,Panic {RHS_CALLS=RHS_CALLS+1;var i:i64=0;while i<64 {dy[i]=-y[i];i=i+1}}
+fn two_rhs(t:f64,y:&[f64;64],dy:&![f64;64]) with Mut,Div,Panic {RHS_CALLS=RHS_CALLS+1;var i:i64=0;while i<64 {dy[i]=2.0;i=i+1}}
+fn short_rhs(t:f64,y:&[f64;64],dy:&![f64;64]) with Mut,Div,Panic {RHS_CALLS=RHS_CALLS+1;dy[0]=1.0}
+fn staged_short_rhs(t:f64,y:&[f64;64],dy:&![f64;64]) with Mut,Div,Panic {RHS_CALLS=RHS_CALLS+1;dy[0]=1.0;if t==0.0 {dy[1]=1.0}}
+fn emit(name:string,x:f64) with IO {print("DP54_VALUE ");print(name);print(" ");print_int(f64_to_bits(x));println("")}
+fn meta(name:string,r:&Ode64Result) with IO,Mut,Panic {assert(r.nfeval==RHS_CALLS);print("DP54_META ");print(name);print(" ");print_int(r.status);print(" ");print_int(r.steps);print(" ");print_int(r.attempts);print(" ");print_int(r.nfeval);print(" ");print_int(r.nreject);print(" ");print_int(RHS_CALLS);println("")}
+fn constant_case() with IO,Mut,Div,Panic {
+ RHS_CALLS=0;let y:[f64;64]=[0.0;64];var opts=default_options();opts.dt_init=0.125;opts.dt_max=0.125
+ var dense=dp54_dense_init()
+ let r=solve_dp54_dense64(constant_rhs,&y,1,0.0,0.5,opts,dp54_default_limits(),&!dense)
+ print("TRACE_CONSTANT ");print_int(r.status);print(" ");print_int(r.steps);print(" ");print_int(r.attempts);print(" ");print_int(r.nfeval);print(" ");print_int(RHS_CALLS);print(" ");print_int(f64_to_bits(r.state[0]));println("")
+ assert(r.status==0&&r.steps==4&&r.attempts==4&&r.nfeval==25)
+ meta("constant",&r);emit("constant.end",r.state[0])
+ let d=dp54_dense_domain(&dense);assert(d.status==0);emit("constant.t0",d.t0);emit("constant.t1",d.t1)
+ let x=dp54_dense_value(&dense,0.4,0);let v=dp54_dense_derivative(&dense,0.4,0);assert(x.status==0&&v.status==0);emit("constant.interior",x.value);emit("constant.slope",v.value)
+ assert(dp54_dense_value(&dense,0.0,0).status==3);assert(dp54_dense_value(&dense,0.4,1).status==3)
+ assert(RHS_CALLS==r.nfeval);dp54_dense_close(dense)
+}
+fn polynomial_case() with IO,Mut,Div,Panic {
+ RHS_CALLS=0;let y:[f64;64]=[0.0;64];var opts=default_options();opts.dt_init=1.0;opts.dt_max=1.0;opts.rtol=0.01
+ var dense=dp54_dense_init();let r=solve_dp54_dense64(polynomial_rhs,&y,1,0.0,1.0,opts,dp54_default_limits(),&!dense)
+ assert(r.status==0&&r.steps==1&&r.nfeval==7);meta("polynomial",&r)
+ let points:[f64;7]=[0.0,0.2,0.3,0.5,0.8,8.0/9.0,1.0]
+ var i:i64=0;while i<7 {let x=dp54_dense_value(&dense,points[i],0);let v=dp54_dense_derivative(&dense,points[i],0);assert(x.status==0&&v.status==0);print("DP54_POINT ");print_int(i);print(" ");print_int(f64_to_bits(points[i]));print(" ");print_int(f64_to_bits(x.value));print(" ");print_int(f64_to_bits(v.value));println("");i=i+1}
+ assert(RHS_CALLS==7);dp54_dense_close(dense)
+}
+fn rejection_restart_case() with IO,Mut,Div,Panic {
+ RHS_CALLS=0;let y:[f64;64]=[1.0;64];var opts=default_options();opts.dt_init=1.0;opts.dt_max=1.0;opts.rtol=1e-10;opts.atol=1e-12
+ var dense=dp54_dense_init();let r=solve_dp54_dense64(decay_rhs,&y,1,0.0,1.0,opts,dp54_default_limits(),&!dense)
+ assert(r.status==0&&r.nreject>0&&r.nfeval==1+6*r.attempts);meta("rejection",&r);emit("decay.end",r.state[0])
+ let d=dp54_dense_domain(&dense);let t=d.t0+0.5*(d.t1-d.t0);let x=dp54_dense_value(&dense,t,0);let v=dp54_dense_derivative(&dense,t,0);assert(x.status==0&&v.status==0);emit("decay.midtime",t);emit("decay.mid",x.value);emit("decay.slope",v.value)
+ RHS_CALLS=0;opts.dt_init=0.125;opts.dt_max=0.125
+ let restart=solve_dp54_64(two_rhs,&r.state,1,1.0,1.125,opts)
+ assert(restart.status==0&&restart.steps==1&&restart.nfeval==7);meta("restart",&restart);emit("restart.end",restart.state[0]);dp54_dense_close(dense)
+}
+fn refusal_case(kind:i64) with IO,Mut,Div,Panic {
+ RHS_CALLS=0;let y:[f64;64]=[0.0;64];var opts=default_options();opts.dt_init=0.125;opts.dt_max=0.125
+ var limits=dp54_default_limits();var dense=dp54_dense_init()
+ if kind<2 {limits.max_rhs=kind;let r=solve_dp54_dense64(constant_rhs,&y,1,0.0,0.125,opts,limits,&!dense);assert(r.status==1&&r.steps==0&&r.nfeval==kind);meta(if kind==0 {"budget0"}else{"budget1"},&r)}
+ if kind==2 {let r=solve_dp54_dense64(short_rhs,&y,2,0.0,0.125,opts,limits,&!dense);assert(r.status==4&&r.steps==0&&r.nfeval==1);meta("partial",&r)}
+ if kind==3 {let r=solve_dp54_dense64(staged_short_rhs,&y,2,0.0,0.125,opts,limits,&!dense);assert(r.status==4&&r.steps==0&&r.nfeval==2);meta("staged_partial",&r)}
+ assert(dp54_dense_domain(&dense).status==3);dp54_dense_close(dense)
+}
+fn main()->i32 with IO,Mut,Div,Panic {
+ constant_case();polynomial_case();rejection_restart_case();refusal_case(0);refusal_case(1);refusal_case(2);refusal_case(3)
+ println("STDLIB_DP54_DENSE_EVENTS_PASS");0
+}

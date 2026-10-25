@@ -253,6 +253,13 @@ rc=0
 MADAROS_RAW_BIN="$MADAROS_RAW_BIN" bash scripts/stdlib/fem_poisson_gate.sh "$out/fem-poisson" > "$out/fem-poisson.gate.stdout" 2> "$out/fem-poisson.gate.stderr" || rc=$?
 record focused-gate fem-poisson "$rc"
 
+# DP5(4) FSAL, quartic dense output and event contracts: actual native + C++.
+# Optional DP54_SEED_BIN selects a second independently receipted engine.
+rc=0
+DP54_GATE_OUTPUT="$out/dp54-focused" MADAROS_RAW_BIN="$MADAROS_RAW_BIN" \
+ timeout 900 bash scripts/stdlib/dp54_dense_events_gate.sh > "$out/dp54-focused.stdout" 2> "$out/dp54-focused.stderr" || rc=$?
+record focused-gate dp54-dense-events "$rc"
+
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"

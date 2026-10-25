@@ -5,7 +5,7 @@
 This increment repairs checked termination in `ode::solver` and adds
 `ode::checked64::{solve_dp54_64,solve_verlet64}`. The latter is an explicitly
 transitional fixed-capacity interface: active dimension1..64, borrowed fixed arrays,
-typed callbacks, no allocation. It is not the promised dynamic-buffer API.
+typed callbacks and bounded storage. It is not the dynamic-buffer API.
 
 Focused library/status checks and native status/generic witnesses passed through
 the central Slurm gates, including job16055. Numerical reference acceptance and
@@ -59,9 +59,21 @@ Inactive input/output cells are ignored by the solver, and result inactive cells
 are zero. Callbacks must respect their declared active dimension and destination.
 
 The result exposes status,n,t_final,steps,attempts,nfeval,nreject,state[64].
-Status conventions are the same as above. Seven callback evaluations per complete
-trial; failed intermediate trials can have fewer. There is no FSAL reuse, event
-finding, dense output, history, stiffness detection or inferred accuracy certificate.
+The original import and result layout remain available. The implementation now
+resides in ode::checked_dp54, re-exported through ode::checked64. FSAL reuses the
+accepted endpoint derivative and retains the base derivative across rejected
+trials. For complete trials, nfeval=1+6*attempts; failed intermediate trials count
+only calls actually made. Each new solve starts a fresh cache. RHS behavior must
+remain stationary during a solve; changing equations requires a stop and new solve.
+
+The new checked_dp54 module also exposes caller-owned linear Dp54Dense64 and
+Dp54Event64 records, quartic dense value/derivative queries, explicit callback/root
+budgets and bracketed sign-change events. Status5 is intentional terminal-event
+success, recognized by dp54_is_terminal_event; it does not change the legacy
+meaning of status0 (the actual requested endpoint). Status6 means root-iteration
+budget exhaustion. See ../../docs/evidence/stdlib-SIO-174/README.md for the exact
+API, zero/direction policy, status and qualification boundaries. There is no
+trajectory history, stiffness detection or inferred global accuracy certificate.
 
 Error control uses the maximum over active components of
 abs(embedded_defect)/(atol+rtol*max(abs(old),abs(trial))). Every trial state,
@@ -69,15 +81,23 @@ callback result, tolerance denominator and normalized error must be finite.
 A trial is accepted only when this norm<=1. Safety-scaled fifth-order control
 is bounded by the supplied shrink/growth factors. Rejection cannot increase
 the next trial. Finite representable endpoint advancement is checked each time.
-Both directions are supported with positive step-size magnitudes.
+Both directions are supported with positive step-size magnitudes. Each trial
+uses its actual represented endpoint difference, requires ordered distinct
+interior stage times and verifies that start+h reaches the candidate endpoint.
+A final unresolved sliver may be redistributed into two representable steps,
+each within the caller step cap; the solver never stamps a time it did not reach.
 
 Unrepresentable intermediate coordinates, stage combinations or tolerance scales
 return4 conservatively, even if a rearranged exact expression could be finite.
 Floating-point cancellation in the embedded defect is not independently bounded.
 Passing local tolerance is not a proof of a global error bound.
 
-Storage is seven64-component derivative arrays plus a64-component trial array
-and the result state, all bounded on the stack; no trajectory growth.
+Working storage is seven64-component derivative arrays plus a64-component trial
+array and the result state. Dense records contain eight64-component arrays; event
+records contain one state array. The legacy wrapper constructs a bounded dummy
+dense record too. There is no trajectory growth or new source-level array
+construction inside the step loop; this is not a universal allocator/compiler
+storage guarantee.
 
 ## Velocity Verlet
 
