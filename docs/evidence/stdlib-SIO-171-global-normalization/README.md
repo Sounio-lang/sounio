@@ -11,7 +11,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdli
 
 Based on published integration3c7c8073411a7e7254d0d9424f59f8e49eb49180 in a
 separate worktree. Job17578 and its source remain immutable and do not validate
-this increment. Source/references and final qualification are pending review.
+this increment. Source/references were reviewed by the coordinator before the final allocated
+qualification. Publication and human/integrated review remain separate.
 
 CountNormalization is a sealed owner constructed only by the existing canonical
 CSR median-log-ratio estimator in explicit mode0 or1. It retains factors/logs,
@@ -67,7 +68,63 @@ A further live-main constructed-owner field-read control was rejected with E259
 by both check paths in Slurm17585; the final gate requires actual compile
 refusal with E259, not a filename match, parse/type failure or check-only result.
 
-The final expanded gate, source/toolchain closure and six-fixture regression
-replay remain pending. No full final qualification is inferred from the prototype.
+## Final allocated qualification
+
+Slurm17586 COMPLETED0:0 in4m15s on closed source07 at
+ ef4c670cf4e8f9f938c97040fa8503790b5c8df2. The submission requested1CPU,
+4GiB and15min; scheduler accounting allocated2CPUs. Raw modular compiler SHA256
+ a292cc263f3734b1ad6f17a2e6179b8a7874ef3e76d8f5fdfea6859290baf5d3 and
+bootstrap seed13003a8b9b1bf4bfc64ad8d13eb0795d722888fabef5bbb2913b4f7b83bb454b
+were explicitly pinned. These are existing source-built compiler dependencies,
+not a claim that this feature rebuilt the compiler.
+
+Both engines passed checks of all three libraries and the fixture, native
+execution and independent C++23 reference16/64/8. Both actual live-private-field
+compile attempts returned exactly1 with E259 and no nonempty ELF. The unchanged
+six-fixture pipeline gate passed both engines, independent references and its
+four real output counterfactuals. Original unused-helper seed-check acceptance
+remains documented and is not relabeled as refusal or a universal privacy proof.
+
+The identical equality-assertion-free consumer passed against production source
+and the independent oracle. An actually compiled and successfully executed
+local-recompute implementation then failed that oracle with exact code2 and
+message global normalization mismatch: factor. Generated consumer and complete
+mutated stdlib catalogs were frozen before compilation and verified at the end;
+compiler/import failures cannot satisfy this numerical mutant.
+
+Full2117-entry workspace-to-worker source verification passed before and after
+execution. Gate source catalog, generated mutation source, raw compilers and all
+emitted executables passed final checks. Runtime receipts include process timing
+and RSS but no paired performance improvement claim is made.
+
+## Public entrypoints
+
+- count_normalization_workspace and count_normalization_new create the checked
+  reference owner from canonical CSR and transferred sample IDs; its factor/log
+  and reference metadata accessors are read-only, and close consumes the owner.
+- count_pipeline_workspace_global and count_pipeline_new_global request the
+  worker variant; count_pipeline_prepare_global borrows the sealed owner and
+  accepts the same explicit design/exposure/initial/contrast declarations.
+- count_pipeline_normalization_scope returns -1 before preparation,0 for local
+  normalization and1 for a global reference. Reference genes/used/excluded are
+  unavailable before phase1. CountGeneReport has additive scope/reference fields;
+  this change makes no stable external struct-ABI promise.
+
+## Compact custody
+
+final07-text.tar.gz is1656768bytes, SHA256
+6db7ef4e979233f23c5eb6b08c476ab499aa3a8474f140b97768f6232854ebd4.
+A fresh independent extraction verified408 internal hashes, all seven qualified
+changed source/helper inputs, the original unused-helper fixture and acceptance
+receipt,12 prior-fixture native exits, the specific successful-runtime numerical
+mutant rejection and both2117-entry outer source verifications.
+
+The packet retains changed source versions, complete input catalogs, preserved
+failed development receipts, job scripts/accounting, actual output/reference
+receipts and artifact hashes. Repeated full unchanged stdlib snapshots and ELF
+payloads are excluded; the complete source reconstructs from the pinned base and
+feature commits, and original executables remain on the worker. FILES.sha256
+binds the final reviewed source and compact custody. Prepared final06 remains
+unsubmitted; final07 was submitted once.
 
 Tracking: [SIO-171](https://app.notion.com/p/4033f37f93718146a307f9f9616058c7).
