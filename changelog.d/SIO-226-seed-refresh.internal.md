@@ -1,0 +1,1 @@
+The private-field bootstrap fix now ships its matching lean_single fixed-point seed and source-bound generation receipt. Receipt emission, validation and the wrong-source control use Node.js for metadata while preserving the existing schema and SHA/MD5 checks; canonical compiler self-reproduction and deterministic native compilation remain required.
