@@ -252,7 +252,7 @@ fn ph_trial(s:&PhononState,w:&!NumericBuffer,h:f64,mode:i64)->i64 with Mut,Div,P
 fn ph_result(s:&PhononState,status:i64)->PhononResult {
  PhononResult{status:status,t_final:if is_finite(s.t) {s.t}else{0.0},steps:0,nfeval:0,uncertainty_model:2,first_order:true}
 }
-// Candidate validation finishes before this short, allocation-free commit.
+// Candidate validation finishes before this short commit.
 fn ph_commit_candidate(s:&!PhononState,scratch:&NumericBuffer) with Mut,Div,Panic {
  // Commit only after the entire candidate is finite and concentrations >=0.
  let width=s.k+1
@@ -415,4 +415,45 @@ pub fn phonon_from_legacy_factor(values:NumericBuffer,factor:NumericBuffer,raw:&
   }
  }
  PhononState{values:destination_values,factor:destination_factor,params:params,n:n,k:k,t:t0,status:code}
+}
+
+// Inventory is concentration integrated over the one-dimensional site length,
+// not organ mass: no cross-sectional area or blood/plasma convention is assumed.
+pub struct PhononBalance {pub status:i64,pub minimum:f64,pub inventory:f64,pub inventory_rate:f64,pub boundary_flux:f64,pub reaction_rate:f64,pub residual:f64}
+fn ph_balance_unavailable(code:i64)->PhononBalance {PhononBalance{status:code,minimum:0.0,inventory:0.0,inventory_rate:0.0,boundary_flux:0.0,reaction_rate:0.0,residual:0.0}}
+pub fn phonon_balance_checked(s:&PhononState)->PhononBalance with Mut,Div,Panic {
+ if s.status!=0 {return ph_balance_unavailable(s.status)}
+ let p=s.params
+ let boundary=ph_boundary(&p,s.t)
+ if boundary.status!=0 {return ph_balance_unavailable(boundary.status)}
+ var minimum=numeric_buffer_at(&s.values,0)
+ var sum:f64=0.0;var sum_correction:f64=0.0
+ var rate:f64=0.0;var rate_correction:f64=0.0
+ var reaction:f64=0.0;var reaction_correction:f64=0.0
+ var i:i64=0
+ while i<s.n {
+  let here=numeric_buffer_at(&s.values,i)
+  if here<minimum {minimum=here}
+  let point=ph_site(s,&s.values,i,false,&boundary)
+  if point.status!=0 {return ph_balance_unavailable(point.status)}
+  let adjusted=here-sum_correction;let next=sum+adjusted
+  sum_correction=(next-sum)-adjusted;sum=next
+  let adjusted_rate=point.rhs-rate_correction;let next_rate=rate+adjusted_rate
+  rate_correction=(next_rate-rate)-adjusted_rate;rate=next_rate
+  let xi=if s.n==1 {0.5}else{(i as f64)/((s.n-1) as f64)}
+  let zone=if s.n==1 {1.0}else{2.0*(1.0+(p.zonation-1.0)*xi)/(p.zonation+1.0)}
+  let source=p.k_release*(p.c_tissue/p.kp-here)-p.cl_site*zone*p.fu*here
+  let adjusted_reaction=source-reaction_correction;let next_reaction=reaction+adjusted_reaction
+  reaction_correction=(next_reaction-reaction)-adjusted_reaction;reaction=next_reaction
+  i=i+1
+ }
+ let inventory=p.dx*sum
+ let inventory_rate=p.dx*rate
+ let reaction_rate=p.dx*reaction
+ let first=numeric_buffer_at(&s.values,0)
+ let last=numeric_buffer_at(&s.values,s.n-1)
+ let boundary_flux=p.v_blood*(boundary.value-last)+(p.d_eff/p.dx)*(boundary.value-first)
+ let residual=inventory_rate-boundary_flux-reaction_rate
+ if !is_finite(minimum)||!is_finite(inventory)||!is_finite(inventory_rate)||!is_finite(reaction_rate)||!is_finite(boundary_flux)||!is_finite(residual) {return ph_balance_unavailable(4)}
+ PhononBalance{status:0,minimum:minimum,inventory:inventory,inventory_rate:inventory_rate,boundary_flux:boundary_flux,reaction_rate:reaction_rate,residual:residual}
 }
