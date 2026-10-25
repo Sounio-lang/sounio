@@ -781,3 +781,24 @@ Gate. Job 17500, partition `bench`, node `gpuorangefs-r770-proxmox`, SmolLM2-135
 The MMA module loaded (`mma=1`). The measured steps have M of 1 and of 6, so they used the skinny kernel. The tensor-core kernel is the dispatch for a tile-aligned M of 16 or more; this gate does not exercise it.
 
 The device prefill of the six prompt tokens, outside the per-token window, took 74747954 ns.
+
+
+## 27. Decode captured as a CUDA graph (2026-10-25, OBSERVED)
+
+Job 17500 left a correct on-device decode at 0.0737 s/token, and the seven timed steps were flat. The next cut captures that M=1 body once and replays it.
+
+The legacy NULL stream cannot be captured, so launches that belong to the graph go to a non-blocking stream (`cuStreamCreate` with flag 1). `cuStreamBeginCapture` / `cuStreamEndCapture` / `cuGraphInstantiateWithFlags` / `cuGraphLaunch` sit next to `ce_launch_raw`. Each captured launch keeps its own argument cells, so a later launch does not overwrite an earlier node's parameters.
+
+What still changes on every token stays outside the graph. The host writes the RoPE angles for the current position with `math::pure` and uploads that small table. The position itself lives in the device symbol `g_pos`. The eager prefill passes the position as a kernel argument. The captured decode passes −1, and the kernel then loads `g_pos`, which is updated before each replay. The prefill (M=6) is not part of the graph. The first decode step captures; the timed steps only replay. `llm serve` takes the same split: a prompt longer than one token stays eager, and each generated token replays.
+
+M=1 GEMM is one thread per output column. A tile of A is staged in shared memory and reused across the columns. M above 1 keeps the previous skinny kernel.
+
+Gate. Job 17506, partition `bench`, node `gpuorangefs-r770-proxmox`, SmolLM2-135M, ids 0, 504, 3575, 282, 4649, 314. The clock is `date +%s%N` on the job script.
+
+- Prefill argmax, CPU and device: 7042.
+- Greedy continuation, eight tokens, both paths: 7042, 30, 657, 314, 260, 3995, 2240, 281.
+- Maximum absolute logit difference on that prefill: 3.37e-5 (33715 at a scale of 1e9).
+- The timed lines print `GRAPH=1`.
+- After one warm step (the capture), seven replays span 122755231 ns, which is 0.0175 s/token. The threshold for this cut is 0.010 s. The measured step is under the 0.0737 s of job 17500 and above 0.010 s. The threshold is not moved. This cut does not pass it.
+
+The node returned to idle.

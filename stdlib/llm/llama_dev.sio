@@ -7,7 +7,7 @@ extern "C" {
     fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
 }
 
-use hetero::cuda_exec::{ce_alloc, ce_d2h, ce_function, ce_h2d, ce_module_log, ce_sync}
+use hetero::cuda_exec::{ce_alloc, ce_capture_begin, ce_capture_end, ce_d2h, ce_function, ce_graph_exec, ce_h2d, ce_last, ce_module_global, ce_module_log, ce_stream_create, ce_sync}
 use hetero::probe_cuda::{pb_cstr}
 use hetero::runtime::{Runtime}
 use llm::llama::{Llama}
@@ -63,13 +63,27 @@ var G_MAXTOK: i64 = 8
 var G_MAXSEQ: i64 = 512
 var G_BUMP: i64 = 0
 var G_BUMP_AT: i64 = 0
+var G_CAP: i64 = 0
+var G_CAP_AT: i64 = 0
+var G_CAPTURING: i64 = 0
 var G_CU_LAUNCH: i64 = 0
 var G_C64: i64 = 0
 var G_S64: i64 = 0
 var G_COS_HOST: i64 = 0
 var G_SIN_HOST: i64 = 0
+var G_STREAM: i64 = 0
+var G_LAUNCH_STREAM: i64 = 0
+var G_GRAPH: i64 = 0
+var G_GRAPH_LAUNCH: i64 = 0
+var G_POS: i64 = 0
+var G_POS_HOST: i64 = 0
 
 pub fn dev_ready() -> i64 { G_READY }
+
+pub fn dev_graph() -> i64 {
+    if G_GRAPH != 0 { return 1 }
+    0
+}
 
 fn dev_launch_init(rt: &Runtime) with Alloc, Mut, Panic {
     if G_BUMP == 0 { G_BUMP = heap_alloc(4096) as i64 }
@@ -77,9 +91,21 @@ fn dev_launch_init(rt: &Runtime) with Alloc, Mut, Panic {
         let raw = dlsym(rt.exec.cuda, pb_cstr("cuLaunchKernel"))
         G_CU_LAUNCH = raw as i64
     }
+    if G_CAP == 0 { G_CAP = heap_alloc(2097152) as i64 }
+    if G_STREAM == 0 { G_STREAM = ce_stream_create(&rt.exec) }
+    if G_GRAPH_LAUNCH == 0 {
+        let raw = dlsym(rt.exec.cuda, pb_cstr("cuGraphLaunch"))
+        G_GRAPH_LAUNCH = raw as i64
+    }
 }
 
 fn scratch(n: i64) -> *mut u8 with Mut {
+    if G_CAPTURING != 0 {
+        let p = G_CAP + G_CAP_AT
+        let n8 = ((n + 7) / 8) * 8
+        G_CAP_AT = G_CAP_AT + n8
+        return p as *mut u8
+    }
     let p = G_BUMP + G_BUMP_AT
     G_BUMP_AT = G_BUMP_AT + n
     p as *mut u8
@@ -96,8 +122,8 @@ fn launch_n(rt: &Runtime, func: i64, grid: i64, block: i64, p: *mut u8) -> i32 w
     if g < 1 { g = 1 }
     if G_CU_LAUNCH == 0 { return -1 }
     let f = G_CU_LAUNCH as fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
-    let st = f(func, g, 1, 1, block, 1, 1, 0, 0, p as i64, 0)
-    G_BUMP_AT = 0
+    let st = f(func, g, 1, 1, block, 1, 1, 0, G_LAUNCH_STREAM, p as i64, 0)
+    if G_CAPTURING == 0 { G_BUMP_AT = 0 }
     if !rt.ready && st == 0 { return st }
     st
 }
@@ -279,10 +305,91 @@ fn dev_fail() -> CpuBuf with Alloc, Mut {
     empty
 }
 
+fn dev_rope_table(rt: &Runtime, dh: i64, theta: f64) -> i32 with Alloc, Mut, Panic, Div {
+    let half = dh / 2
+    if half > 64 || half < 1 || G_C64 == 0 { return -1 }
+    var pos: i64 = 0
+    while pos < G_MAXSEQ {
+        var i: i64 = 0
+        while i < half {
+            let ang = (pos as f64) * pow(theta, (0.0 - (2.0 * (i as f64))) / (dh as f64))
+            write_f64(G_COS_HOST as *mut f64, pos * half + i, cos(ang))
+            write_f64(G_SIN_HOST as *mut f64, pos * half + i, sin(ang))
+            i = i + 1
+        }
+        pos = pos + 1
+    }
+    let n = G_MAXSEQ * half
+    if ce_h2d(&rt.exec, G_C64, G_COS_HOST as *mut u8, n * 8) != 0 { return -1 }
+    if ce_h2d(&rt.exec, G_S64, G_SIN_HOST as *mut u8, n * 8) != 0 { return -1 }
+    if dev_cvt(rt, rt.cvt_down, G_C64, G_COS, n) != 0 { return -1 }
+    if dev_cvt(rt, rt.cvt_down, G_S64, G_SIN, n) != 0 { return -1 }
+    0
+}
+
+fn dev_kernels(m: &Llama, rt: &Runtime, ntok: i64, pos_arg: i64) -> i32 with Alloc, Mut, Panic {
+    let hidden = m.cfg.hidden
+    let inter = m.cfg.inter
+    let dh = m.cfg.head_dim
+    let heads = m.cfg.heads
+    let kv_heads = m.cfg.kv_heads
+    let qdim = heads * dh
+    let kvdim = kv_heads * dh
+    let rep = heads / kv_heads
+    let layers = m.cfg.layers as i64
+    let eps_bits = f64_to_f32_bits(m.cfg.eps)
+    let scale_bits = f64_to_f32_bits(1.0 / sqrt_dh(dh))
+    var st: i32 = dev_embed(rt, G_EMBED, G_IDS, G_X, hidden, ntok)
+    var li: i64 = 0
+    while li < layers {
+        st = st | dev_rmsnorm(rt, G_X, G_INN[li as usize], G_H, hidden, ntok, eps_bits)
+        st = st | dev_gemm(rt, G_H, G_WQ[li as usize], G_Q, ntok, qdim, hidden)
+        st = st | dev_gemm(rt, G_H, G_WK[li as usize], G_K, ntok, kvdim, hidden)
+        st = st | dev_gemm(rt, G_H, G_WV[li as usize], G_V, ntok, kvdim, hidden)
+        st = st | dev_bias(rt, G_Q, G_QB[li as usize], ntok, qdim)
+        st = st | dev_bias(rt, G_K, G_KB[li as usize], ntok, kvdim)
+        st = st | dev_bias(rt, G_V, G_VB[li as usize], ntok, kvdim)
+        st = st | dev_rope(rt, G_Q, G_COS, G_SIN, ntok, heads, dh)
+        st = st | dev_rope(rt, G_K, G_COS, G_SIN, ntok, kv_heads, dh)
+        st = st | dev_kvw(rt, G_KVC_K[li as usize], G_K, pos_arg, kvdim, ntok)
+        st = st | dev_kvw(rt, G_KVC_V[li as usize], G_V, pos_arg, kvdim, ntok)
+        st = st | dev_attn(rt, G_Q, G_KVC_K[li as usize], G_KVC_V[li as usize], G_ATT, heads, rep, dh, pos_arg, ntok, kvdim, scale_bits)
+        st = st | dev_gemm(rt, G_ATT, G_WO[li as usize], G_O, ntok, hidden, qdim)
+        st = st | dev_add(rt, G_X, G_O, ntok * hidden)
+        st = st | dev_rmsnorm(rt, G_X, G_POST[li as usize], G_H, hidden, ntok, eps_bits)
+        st = st | dev_gemm(rt, G_H, G_GATE[li as usize], G_G, ntok, inter, hidden)
+        st = st | dev_gemm(rt, G_H, G_UP[li as usize], G_U, ntok, inter, hidden)
+        st = st | dev_swiglu(rt, G_G, G_U, G_ACT, ntok * inter)
+        st = st | dev_gemm(rt, G_ACT, G_DOWN[li as usize], G_O, ntok, hidden, inter)
+        st = st | dev_add(rt, G_X, G_O, ntok * hidden)
+        li = li + 1
+    }
+    let last = G_X + (ntok - 1) * hidden * 4
+    st = st | dev_rmsnorm(rt, last, G_FNORM, G_H, hidden, 1, eps_bits)
+    st = st | dev_gemm(rt, G_H, G_LM, G_LOGF, 1, m.cfg.vocab, hidden)
+    st = st | dev_cvt(rt, rt.cvt_up, G_LOGF, G_LOGD, m.cfg.vocab)
+    st
+}
+
+fn dev_capture(m: &Llama, rt: &Runtime) -> i64 with Alloc, Mut, Panic {
+    if ce_sync(&rt.exec) != 0 { return 0 }
+    let b = ce_capture_begin(&rt.exec, G_STREAM)
+    if b != 0 { return 0 }
+    G_LAUNCH_STREAM = G_STREAM
+    G_CAPTURING = 1
+    G_CAP_AT = 0
+    let k = dev_kernels(m, rt, 1, 0 - 1)
+    G_CAPTURING = 0
+    G_LAUNCH_STREAM = 0
+    let g = ce_capture_end(&rt.exec, G_STREAM)
+    if k != 0 || g == 0 { return 0 }
+    ce_graph_exec(&rt.exec, g)
+}
+
 pub fn dev_open(m: &Llama, rt: &Runtime, ops_ptx: string, skinny_ptx: string, mma_ptx: string) -> i64 with Alloc, Mut, Panic, Div, IO {
     if !rt.ready || rt.cvt_down == 0 { return 0 }
     dev_launch_init(rt)
-    if G_CU_LAUNCH == 0 || G_BUMP == 0 { return 0 }
+    if G_CU_LAUNCH == 0 || G_BUMP == 0 || G_CAP == 0 || G_STREAM == 0 || G_GRAPH_LAUNCH == 0 { return 0 }
     if (m.cfg.layers as i64) > 32 { return 0 }
     let ops = read_file(ops_ptx)
     let skinny = read_file(skinny_ptx)
@@ -290,6 +397,8 @@ pub fn dev_open(m: &Llama, rt: &Runtime, ops_ptx: string, skinny_ptx: string, mm
     let mop = ce_module_log(&rt.exec, pb_cstr(ops))
     let msk = ce_module_log(&rt.exec, pb_cstr(skinny))
     if mop == 0 || msk == 0 { return 0 }
+    G_POS = ce_module_global(&rt.exec, mop, "g_pos")
+    if G_POS == 0 { return 0 }
     G_RMS = dev_load_fn(rt, mop, "rmsnorm_f32")
     G_ROPE = dev_load_fn(rt, mop, "rope_f32")
     G_KVW = dev_load_fn(rt, mop, "kv_write_f32")
@@ -346,17 +455,21 @@ pub fn dev_open(m: &Llama, rt: &Runtime, ops_ptx: string, skinny_ptx: string, mm
     G_U = dev_alloc_f32(rt, mt * inter)
     G_ACT = dev_alloc_f32(rt, mt * inter)
     G_IDS = ce_alloc(&rt.exec, mt * 8)
-    G_COS = dev_alloc_f32(rt, mt * (dh / 2))
-    G_SIN = dev_alloc_f32(rt, mt * (dh / 2))
-    var cos_host = ck_alloc(mt * 64)
-    var sin_host = ck_alloc(mt * 64)
+    let half = dh / 2
+    if half > 64 || half < 1 { return 0 }
+    let ntab = G_MAXSEQ * half
+    G_COS = dev_alloc_f32(rt, ntab)
+    G_SIN = dev_alloc_f32(rt, ntab)
+    var cos_host = ck_alloc(ntab)
+    var sin_host = ck_alloc(ntab)
     G_COS_HOST = cos_host.data as i64
     G_SIN_HOST = sin_host.data as i64
-    G_C64 = ce_alloc(&rt.exec, mt * 64 * 8)
-    G_S64 = ce_alloc(&rt.exec, mt * 64 * 8)
+    G_C64 = ce_alloc(&rt.exec, ntab * 8)
+    G_S64 = ce_alloc(&rt.exec, ntab * 8)
+    G_POS_HOST = heap_alloc(8) as i64
     G_LOGF = dev_alloc_f32(rt, m.cfg.vocab)
     G_LOGD = ce_alloc(&rt.exec, m.cfg.vocab * 8)
-    if G_X == 0 || G_IDS == 0 || G_LOGD == 0 { return 0 }
+    if G_X == 0 || G_IDS == 0 || G_LOGD == 0 || G_POS == 0 || G_COS == 0 { return 0 }
     let sy = ce_sync(&rt.exec)
     if sy != 0 { return 0 }
     G_KVLEN = 0
@@ -365,13 +478,13 @@ pub fn dev_open(m: &Llama, rt: &Runtime, ops_ptx: string, skinny_ptx: string, mm
     print_int(m.cfg.layers as i64)
     print(" mma=")
     print_int(if G_MMA != 0 { 1 } else { 0 })
-    print("\n")
+    print(" graph=0\n")
     1
 }
 
 fn upload_cis(rt: &Runtime, rows: i64, dh: i64, pos0: i64, theta: f64) -> i32 with Alloc, Mut, Panic, Div {
     let half = dh / 2
-    if half > 64 || G_C64 == 0 { return -1 }
+    if half > 64 || half < 1 || G_C64 == 0 { return -1 }
     var r: i64 = 0
     while r < rows {
         let pos = pos0 + r
@@ -392,60 +505,46 @@ fn upload_cis(rt: &Runtime, rows: i64, dh: i64, pos0: i64, theta: f64) -> i32 wi
     0
 }
 
-fn dev_forward_chunk(m: &Llama, rt: &Runtime, tokens: &CpuBuf, ntok: i64) -> CpuBuf with Alloc, Mut, Panic, Div {
-    let hidden = m.cfg.hidden
-    let inter = m.cfg.inter
-    let dh = m.cfg.head_dim
-    let heads = m.cfg.heads
-    let kv_heads = m.cfg.kv_heads
-    let qdim = heads * dh
-    let kvdim = kv_heads * dh
-    let rep = heads / kv_heads
-    let layers = m.cfg.layers as i64
+fn dev_set_pos(rt: &Runtime, pos: i64) -> i32 with Alloc, Mut, Panic {
+    write_i64(G_POS_HOST as *mut i64, 0, pos)
+    ce_h2d(&rt.exec, G_POS, G_POS_HOST as *mut u8, 4)
+}
+
+fn dev_replay(rt: &Runtime) -> i32 with Alloc, Mut, Panic {
+    let f = G_GRAPH_LAUNCH as fn(i64, i64) -> i32
+    let st = f(G_GRAPH, G_STREAM)
+    if st != 0 { return st }
+    ce_sync(&rt.exec)
+}
+
+fn dev_forward_chunk(m: &Llama, rt: &Runtime, tokens: &CpuBuf, ntok: i64) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
     let pos0 = G_KVLEN
     if ntok < 1 || ntok > G_MAXTOK || pos0 + ntok > G_MAXSEQ { return dev_fail() }
     if ce_h2d(&rt.exec, G_IDS, tokens.data as *mut u8, ntok * 8) != 0 { return dev_fail() }
-    let eps_bits = f64_to_f32_bits(m.cfg.eps)
-    let scale_bits = f64_to_f32_bits(1.0 / sqrt_dh(dh))
-    if upload_cis(rt, ntok, dh, pos0, m.cfg.theta) != 0 { return dev_fail() }
-    var st: i32 = dev_embed(rt, G_EMBED, G_IDS, G_X, hidden, ntok)
-    var li: i64 = 0
-    while li < layers {
-        st = st | dev_rmsnorm(rt, G_X, G_INN[li as usize], G_H, hidden, ntok, eps_bits)
-        st = st | dev_gemm(rt, G_H, G_WQ[li as usize], G_Q, ntok, qdim, hidden)
-        st = st | dev_gemm(rt, G_H, G_WK[li as usize], G_K, ntok, kvdim, hidden)
-        st = st | dev_gemm(rt, G_H, G_WV[li as usize], G_V, ntok, kvdim, hidden)
-        st = st | dev_bias(rt, G_Q, G_QB[li as usize], ntok, qdim)
-        st = st | dev_bias(rt, G_K, G_KB[li as usize], ntok, kvdim)
-        st = st | dev_bias(rt, G_V, G_VB[li as usize], ntok, kvdim)
-        st = st | dev_rope(rt, G_Q, G_COS, G_SIN, ntok, heads, dh)
-        st = st | dev_rope(rt, G_K, G_COS, G_SIN, ntok, kv_heads, dh)
-        st = st | dev_kvw(rt, G_KVC_K[li as usize], G_K, pos0, kvdim, ntok)
-        st = st | dev_kvw(rt, G_KVC_V[li as usize], G_V, pos0, kvdim, ntok)
-        st = st | dev_attn(rt, G_Q, G_KVC_K[li as usize], G_KVC_V[li as usize], G_ATT, heads, rep, dh, pos0, ntok, kvdim, scale_bits)
-        st = st | dev_gemm(rt, G_ATT, G_WO[li as usize], G_O, ntok, hidden, qdim)
-        st = st | dev_add(rt, G_X, G_O, ntok * hidden)
-        st = st | dev_rmsnorm(rt, G_X, G_POST[li as usize], G_H, hidden, ntok, eps_bits)
-        st = st | dev_gemm(rt, G_H, G_GATE[li as usize], G_G, ntok, inter, hidden)
-        st = st | dev_gemm(rt, G_H, G_UP[li as usize], G_U, ntok, inter, hidden)
-        st = st | dev_swiglu(rt, G_G, G_U, G_ACT, ntok * inter)
-        st = st | dev_gemm(rt, G_ACT, G_DOWN[li as usize], G_O, ntok, hidden, inter)
-        st = st | dev_add(rt, G_X, G_O, ntok * hidden)
-        li = li + 1
+    if upload_cis(rt, ntok, m.cfg.head_dim, pos0, m.cfg.theta) != 0 { return dev_fail() }
+    if dev_set_pos(rt, pos0) != 0 { return dev_fail() }
+    if ce_sync(&rt.exec) != 0 { return dev_fail() }
+    if ntok == 1 {
+        if G_GRAPH == 0 {
+            G_GRAPH = dev_capture(m, rt)
+            print(" capture_status=")
+            print_int(ce_last())
+            print("\n")
+            if G_GRAPH == 0 { return dev_fail() }
+        }
+        print("GRAPH=1\n")
+        if dev_replay(rt) != 0 { return dev_fail() }
+    } else {
+        if dev_kernels(m, rt, ntok, pos0) != 0 { return dev_fail() }
+        if ce_sync(&rt.exec) != 0 { return dev_fail() }
     }
-    let last = G_X + (ntok - 1) * hidden * 4
-    st = st | dev_rmsnorm(rt, last, G_FNORM, G_H, hidden, 1, eps_bits)
-    st = st | dev_gemm(rt, G_H, G_LM, G_LOGF, 1, m.cfg.vocab, hidden)
-    st = st | dev_cvt(rt, rt.cvt_up, G_LOGF, G_LOGD, m.cfg.vocab)
-    if st != 0 { return dev_fail() }
     var host = ck_alloc(m.cfg.vocab)
     if ce_d2h(&rt.exec, host.data as *mut u8, G_LOGD, m.cfg.vocab * 8) != 0 { return dev_fail() }
-    if ce_sync(&rt.exec) != 0 { return dev_fail() }
     G_KVLEN = pos0 + ntok
     host
 }
 
-pub fn llama_forward_dev(m: &Llama, rt: &Runtime, tokens: &CpuBuf, ntok: i64) -> CpuBuf with Alloc, Mut, Panic, Div {
+pub fn llama_forward_dev(m: &Llama, rt: &Runtime, tokens: &CpuBuf, ntok: i64) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
     if G_READY == 0 || ntok < 1 { return dev_fail() }
     if ntok <= G_MAXTOK { return dev_forward_chunk(m, rt, tokens, ntok) }
     var off: i64 = 0
