@@ -838,3 +838,22 @@ Gate. Job 17557, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `
 - After one warm step, seven forwards span 300957314 ns, which is 0.0430 s/token. The threshold is 0.005 s. The measured step is under the 0.0581 s of job 17553 and above both the 0.0175 s of job 17506 and the 0.005 s threshold. Effective traffic is about 13 GB/s. The threshold is not moved. This cut does not pass it.
 
 The node returned to idle.
+
+
+## 30. One lean kernel per layer (2026-10-25, OBSERVED)
+
+Job 17557 kept every weight read inside one launch and matched the CPU tokens at 0.0430 s/token. `.maxnreg 64` on that fat entry was the spill. The grid barrier also forbade launching more blocks than fit at once, and the GEMV itself does not need a cross-block reduction.
+
+The decode is no longer one launch of all 30 layers. Each layer is one launch and the head is another: 31 launches on one stream, one context sync at the end, no device-to-host copy in between. The prefill of six tokens is six passes of that same kernel, with the KV cache growing. The GEMV is M=1: four coalesced columns per thread (`ld.global.cs.v4.f32`), four accumulators, and eight K addresses computed before those loads. There is no `.maxnreg`. RoPE, attention, the residual and SwiGLU stay in the layer launch. The grid barrier runs only before a phase that needs the whole vector. The block still syncs after RoPE and before attention. After the module loads, the host calls `cuOccupancyMaxActiveBlocksPerMultiprocessor` and launches `occupancy × 58` blocks of 128 threads. That is the resident grid, and not more. If the occupancy is 0, or the module does not load, the measured step fails. The graph and the 0.0430 s kernel are not fallbacks.
+
+Gate. Job 17583, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. Partition `bench` still has no nodes, so the job was pinned on `gpu-orangefs`. SmolLM2-135M, ids 0, 504, 3575, 282, 4649, 314. The clock is `date +%s%N` on the job script.
+
+- The driver reported `occ=12` for the layer and the head. The launch was 696 blocks of 128 threads.
+- Prefill argmax, CPU and device: 7042.
+- Greedy continuation, eight tokens, both paths: 7042, 30, 657, 314, 260, 3995, 2240, 281.
+- Maximum absolute logit difference on that prefill: 3.69e-5 (the program printed 36926 at a scale of 1e9).
+- The timed lines print `RESIDENT=1`.
+- The device prefill of the six prompt tokens took 224820637 ns. That span has no threshold.
+- After one warm step, seven forwards span 424803544 ns, which is 0.0607 s/token. The threshold is 0.005 s. The measured step is above the 0.0430 s of job 17557 and above the 0.0175 s of job 17506. Occupancy 12 is real, and most of those blocks own no column: a projection of width 576 has 144 working threads. The extra blocks only wait on the barrier. The threshold is not moved. This cut does not pass it.
+
+The node returned to idle.
