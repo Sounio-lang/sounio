@@ -11,6 +11,7 @@ mkdir -p "$out"/{tmp,cache}
 trap 'rc=$?; printf "%s\n" "$rc" > "$out/STATUS"' EXIT
 cd "$root"
 export SOUNIO_STDLIB_PATH="$root/stdlib" SOUNIO_SOUC_ENGINE=madaros SOUNIO_MADAROS_NOCACHE=1 SOUNIO_MADAROS_CACHE_READONLY=1 SOUNIO_MADAROS_CACHE="$out/cache" TMPDIR="$out/tmp"
+export SOUC_BIN="$MADAROS_RAW_BIN"
 source scripts/lib/resolve_souc.sh
 sounio_require_souc
 ulimit -s 524288
@@ -18,7 +19,7 @@ sha256sum "$MADAROS_RAW_BIN" > "$out/COMPILER.sha256"
 sha256sum stdlib/math/fft.sio stdlib/math/fft_checked.sio tests/run-pass/math_fft_checked.sio tests/reference/math_fft_reference.cpp tests/stdlib/fft/*.sio scripts/stdlib/math_fft_checked_gate.sh > "$out/INPUTS.sha256"
 printf 'phase\texit_status\n' > "$out/RESULTS.tsv"
 step(){ local name=$1;shift;local rc=0;"$@" > "$out/$name.stdout" 2> "$out/$name.stderr" || rc=$?;printf '%s\t%s\n' "$name" "$rc" >> "$out/RESULTS.tsv";return "$rc"; }
-build(){ local name=$1 src=$2;step "$name.check" timeout 180 "$SOUC_BIN" check "$src";step "$name.compile" timeout 180 "$SOUC_BIN" compile "$src" -o "$out/$name.elf";sha256sum "$out/$name.elf" >> "$out/ELFS.sha256"; }
+build(){ local name=$1 src=$2;step "$name.check" timeout 180 "$SOUC_BIN" check "$src";step "$name.compile" timeout 180 "$SOUC_BIN" compile "$src" -o "$out/$name.elf";chmod +x "$out/$name.elf";sha256sum "$out/$name.elf" >> "$out/ELFS.sha256"; }
 run(){ local name=$1 elf=$2;step "$name.native" /usr/bin/time -f 'elapsed_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M\nexit_code=%x' -o "$out/$name.resource" timeout 180 "$elf"; }
 step library.check timeout 180 "$SOUC_BIN" check stdlib/math/fft_checked.sio
 build checked tests/run-pass/math_fft_checked.sio
@@ -69,5 +70,14 @@ if [[ -n "$baseline" ]];then
   done
  done
 fi
+if [[ -n ${SEED_RAW_BIN:-} ]];then
+ [[ -x "$SEED_RAW_BIN" ]]
+ sha256sum "$SEED_RAW_BIN" > "$out/SEED_COMPILER.sha256"
+ step strict-seed.compile timeout 180 "$SEED_RAW_BIN" tests/run-pass/math_fft_checked.sio "$out/strict-seed.elf"
+ chmod +x "$out/strict-seed.elf";sha256sum "$out/strict-seed.elf" >> "$out/ELFS.sha256"
+ run strict-seed "$out/strict-seed.elf"
+ step strict-seed.concordance "$out/reference" "$out/strict-seed.native.stdout"
+fi
+step compiler_integrity sha256sum -c "$out/COMPILER.sha256"
 step input_integrity sha256sum -c "$out/INPUTS.sha256"
 printf 'FFT_GATE_PASS\n'

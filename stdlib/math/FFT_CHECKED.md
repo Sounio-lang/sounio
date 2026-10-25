@@ -79,3 +79,46 @@ tar -xzf tests/stdlib/fft/evidence/receipts.tar.gz -C /tmp/sounio-fft-receipts
 ```
 
 Focused native success and a seed compatibility check do not imply full-corpus CI, publication, merge, or human acceptance.
+
+## Main-7ce refresh and current-seed execution
+
+The original implementation commit `71926dfa328c` and its historical receipts
+remain intact. A merge brings this branch onto main
+`7ce5eddeef78c76c7e744150ed9c169c53a3d3b0`; the FFT implementation, public
+caller, benchmark inputs and C++ numerical reference remain byte-identical.
+The c21-to-7ce upstream delta contains only the reliability workflow and its
+changelog fragment. Earlier incoming a2a-to-c21 changes include the refreshed
+seed and release policy; no new compiler build is claimed here.
+
+Slurm **17308** reran the focused gate using the explicitly reused c21
+source-built Madaros SHA
+`a292cc263f3734b1ad6f17a2e6179b8a7874ef3e76d8f5fdfea6859290baf5d3`
+and the current shipped c21 seed SHA
+`8956946def36004d11ec4eca0d20c75c1e7d3d0b17ee0f0a1fdda9cd6ec0e4cc`.
+Unlike the historical compile-only seed check, this replay compiled **and ran**
+the complete public caller through that seed, then applied the same C++23
+6184-row coefficient/Parseval/roundtrip/convolution oracle. Both engines and
+all numerical checks passed. The gate also confirmed the expected old
+capacity continuation exit42, corrected assertion exit1, valid legacy calls,
+specific oracle rejections11/13, and unchanged source/compiler hashes.
+Final gate STATUS was0. An inherited hostile `SOUC_BIN=/bin/false` was
+explicitly overridden by the gate raw-compiler pin.
+
+The repeated-4096 process observations were freshly repeated in AB/BA/AB
+order. A includes on-demand legacy twiddles; B includes checked-plan setup.
+These are whole-program observations, not isolated-kernel measurements or
+a general speed/RSS bound:
+
+| Pair and order | A elapsed / RSS | B elapsed / RSS |
+|---|---|---|
+| 1: A then B | 2.39 s / 1080 KiB | 0.77 s / 1080 KiB |
+| 2: B then A | 2.39 s / 1636 KiB | 0.77 s / 1084 KiB |
+| 3: A then B | 2.39 s / 1612 KiB | 0.77 s / 1628 KiB |
+
+New compact receipts are
+[`main7ce-receipts.tar.gz`](../../tests/stdlib/fft/evidence/main7ce-receipts.tar.gz),
+SHA256 `34bbde72633e45a7d3f08a5aa33ca8d553222a4fd94e197505cef9fc5bb45fa4`.
+They contain actual outputs, controls, resources, exact gate/input/compiler
+identities and an extraction-verified manifest, without ELFs or a second
+source tree. The original archive and its original checksum are unchanged.
+This focused replay does not imply full-corpus or GitHub CI success.
