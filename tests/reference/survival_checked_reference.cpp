@@ -34,7 +34,7 @@ std::vector<Cohort> cases(bool scale){
   for(int k=0;k<censored;k++){c.push_back({double(j==4?6:j+1),0,int(index%2)});++index;}
  }
  r.push_back(std::move(c));
- }return r;}
+ }Cohort rare;for(int i=0;i<100000;i++)rare.push_back({i<99998?1.:2.,i<99998,i==99999?0:1});r.push_back(std::move(rare));return r;}
  std::vector<Cohort> r={ {},{{0,1,0}},{{1,0,1}},{{1,1,0},{1,1,1}},{{1,0,0},{1,0,1}},
  {{1,1,0},{3,1,0},{5,1,0},{2,1,1},{4,1,1},{6,1,1}},
  {{1,1,0},{2,1,0},{3,1,0},{1,1,1},{2,1,1},{3,1,1}},
@@ -136,7 +136,13 @@ fn row(id:i64) with IO,Alloc,Mut,Div,Panic {
  std::cout<<"   else if i<"<<cursor<<" {numeric_buffer_set(&!times,i,"<<lit(j==4?6:j+1)<<");integer_buffer_set(&!event,i,0)}\n";
  }
  std::cout<<"   else {integer_buffer_set(&!event,i,0)}\n   i=i+1\n  }\n }\n";
- }}
+ }
+ std::cout<<R"SIO( if id==4 {
+  var i:i64=0
+  while i<n {numeric_buffer_set(&!times,i,if i<n-2 {1.0}else{2.0});integer_buffer_set(&!event,i,if i<n-2 {1}else{0});integer_buffer_set(&!group,i,if i==n-1 {0}else{1});i=i+1}
+ }
+)SIO";
+ }
  else for(std::size_t id=0;id<cs.size();id++){std::cout<<" if id=="<<id<<" {\n";if(cs[id].size()==1001){std::cout<<" var i:i64=0\n while i<n {numeric_buffer_set(&!times,i,if i<"<<(id==27?500:501)<<" {1.0}else{2.0});integer_buffer_set(&!event,i,if i<"<<(id==27?500:501)<<" {1}else{0});integer_buffer_set(&!group,i,i%2);i=i+1}\n";}else for(std::size_t i=0;i<cs[id].size();i++){auto x=cs[id][i];std::cout<<" numeric_buffer_set(&!times,"<<i<<","<<lit(x.t)<<");integer_buffer_set(&!event,"<<i<<","<<x.e<<");integer_buffer_set(&!group,"<<i<<","<<x.g<<")\n";}std::cout<<" }\n";}
  std::cout<<R"SIO( let r=survival_checked(&times,&event,&group,n,0.05,&!order,&!curves,&!counts,320000000,80000000,100000,100000,1.0e-13)
  assert(r.status==0)
@@ -192,12 +198,12 @@ int verify(const std::vector<Cohort>&cs,const char*file,bool scale){
    std::array<std::int64_t,16>a{};for(auto&x:a)s>>x;
    if(!s){fail(label+" parse");continue;}++summary[id];
    if(a[0]!=0||a[1]!=std::int64_t(cs[id].size())||a[2]!=std::int64_t(r.rows.size())||a[3]!=r.deaths||a[4]!=r.censored||a[5]!=std::int64_t(cs[id].size())-r.group1||a[6]!=r.group1||a[14]!=std::int64_t(cs[id].size())||(cs[id].size()>1&&a[13]<=0))fail(label+" metadata");
-   for(int g=0;g<3;g++){bool ambiguous=scale&&id>=2&&g==0;
+   for(int g=0;g<3;g++){bool ambiguous=scale&&id>=2&&id<4&&g==0;
    if(a[7+2*g]!=(ambiguous?false:r.median[g])){fail(label+" median availability");}
    if(!ambiguous&&r.median[g]&&dbl(a[8+2*g])!=r.med[g]){fail(label+" median time");}}
    if(!cs[id].empty()&&a[15]<=0)fail(label+" kernel work");
   }else if(kind=="MEDIAN_STATUS"){
-   for(int g=0;g<3;g++){int code=-1;s>>code;if(code!=((scale&&id>=2&&g==0)?5:(r.median[g]?0:1)))fail(label+" boundary classification");}++median_status[id];
+   for(int g=0;g<3;g++){int code=-1;s>>code;if(code!=((scale&&id>=2&&id<4&&g==0)?5:(r.median[g]?0:1)))fail(label+" boundary classification");}++median_status[id];
   }else if(kind=="LOGRANK"){
    std::array<std::int64_t,15>a{};for(auto&x:a)s>>x;if(!s){fail(label+" parse");continue;}++lr[id];
    if(a[0]!=(r.lr?0:5)||a[1]!=r.lr||a[2]!=r.observed1||a[12]!=r.hr)fail(label+" metadata");
@@ -274,7 +280,17 @@ int tail_verify(const char*file){
  if(!complete||std::count(seen.begin(),seen.end(),true)!=int(cases.size())){std::cerr<<"SURVIVAL_TAIL_INCOMPLETE_OUTPUT\n";return 10;}
  std::cout<<std::setprecision(17)<<"SURVIVAL_TAIL_REFERENCE_ROWS "<<cases.size()<<" ERRORS "<<errors<<" MAX_RELATIVE_LOG "<<maxrelative<<" MAX_ABSOLUTE_LOG "<<maxabsolute<<'\n';return errors?1:0;
 }
+int verify_score(const char*file){
+ auto r=reference(cases(true).back());std::ifstream in(file);std::string line;bool found=false,complete=false;int errors=0;
+ while(std::getline(in,line)){if(line=="RARE_GROUP_SCORE_ONLY_COMPLETE"){complete=true;continue;}std::istringstream s(line);std::string kind;int id=-1;s>>kind>>id;if(kind!="LOGRANK"||id!=4)continue;std::array<std::int64_t,15>a{};for(auto&x:a)s>>x;if(!s)return 10;found=true;
+ N score_error=abs(N(dbl(a[4]))-r.score),log_error=abs(N(dbl(a[11]))-r.lp);
+ std::cout<<std::setprecision(30)<<"RARE_GROUP_SCORE actual="<<dbl(a[4])<<" reference="<<r.score<<" absolute_error="<<score_error<<" logtail_error="<<log_error<<'\n';
+ if(score_error>N("5e-12")||log_error>N("3e-11")+abs(r.lp)*N("2e-15")){std::cerr<<"RARE_GROUP_SCORE_OR_LOGTAIL_MISMATCH\n";errors++;}
+ }
+ return found&&complete?(errors?1:0):10;
+}
 int main(int argc,char**argv){try{
+ if(argc==3&&std::string(argv[1])=="--score")return verify_score(argv[2]);
  if(argc==2&&std::string(argv[1])=="--generate-tail"){tail_generate();return 0;}
  if(argc==3&&std::string(argv[1])=="--tail")return tail_verify(argv[2]);
  if(argc==2&&std::string(argv[1])=="--generate"){generate(cases(false),false);return 0;}
