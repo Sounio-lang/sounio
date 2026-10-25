@@ -28,7 +28,7 @@ Sounio is an epistemic systems language created by **Demetrios Chiuratto Agourak
 
 A measurement has a value and an uncertainty. A quantity has a dimension. A computation has effects. Sounio makes these distinctions part of the program so that scientific assumptions can be inspected alongside the calculation.
 
-Explore the [scientific examples](https://github.com/Sounio-lang/sounio/tree/main/examples), the [standard library](https://github.com/Sounio-lang/sounio/tree/main/stdlib) and the [science hub](https://www.souniolang.org/science). Each application should be assessed against executable evidence for the current source revision.
+Explore the [scientific examples](https://github.com/Sounio-lang/sounio/tree/main/examples), the [standard library](https://github.com/Sounio-lang/sounio/tree/main/stdlib) and the [science hub](https://www.souniolang.org/science). For the language-level guide, read [units and uncertainty in Sounio](https://www.souniolang.org/learn/language/units-and-uncertainty/) — dimensional analysis and GUM uncertainty propagation. Each application should be assessed against executable evidence for the current source revision.
 
 ## A scientific library across disciplines
 

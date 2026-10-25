@@ -66,7 +66,7 @@ research and artifact-backed workflows, but not "everything in the source tree i
 - 🚧 Advanced or alternate-build features such as LLVM, SMT, and LSP remain profile-dependent
 - 📋 Public docs should still track the exact artifact and gate behind each claim
 
-See [Current State](../README.md#current-state) for details.
+See [Honest Status](../README.md#honest-status) for details.
 
 ### How does Sounio compare to Rust?
 
