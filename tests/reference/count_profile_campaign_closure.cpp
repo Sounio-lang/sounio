@@ -144,4 +144,3 @@ static void report(const fs::path& root,const fs::path& out){
  cases.flush();cells.flush();md.flush();require(bool(cases)&&bool(cells)&&bool(md),"complete report write");
 }
 int main(int argc,char** argv){try{require(argc==3,"usage: CAMPAIGN_ROOT FRESH_REPORT_ROOT");require(!fs::exists(argv[2]),"fresh output required");report(fs::path(argv[1]),fs::path(argv[2]));return 0;}catch(const std::exception& e){std::cerr<<"COUNT_PROFILE_CAMPAIGN_CLOSURE_REJECT "<<e.what()<<'\n';return 2;}}
-

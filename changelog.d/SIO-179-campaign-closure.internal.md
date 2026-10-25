@@ -1,2 +1,1 @@
 An exhausted NB2 profile-bootstrap campaign now has a C++23 receipt reconciler and report-only qualification gate. The report retains planned identities and seeds, completed model refusals, process timeouts, and unattempted observations; it reports conditional Monte Carlo summaries and missing-outcome bounds without asserting completed calibration. No production numerical code or calibration-assessed flag changes.
-

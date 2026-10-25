@@ -3,7 +3,7 @@ topic_id: repo.docs.evidence.stdlib-sio-179.readme
 authority: repo_only
 audience: users
 last_validated: 2026-10-25
-validated_by: Slurm17537 C++23 campaign closure gate
+validated_by: Slurm17538 C++23 campaign closure gate
 source_of_truth: docs/evidence/stdlib-SIO-179/campaign-17048-closure-text.tar.gz
 -->
 
@@ -30,18 +30,24 @@ under the massive stdlib epic. Publication and merge are separate review steps.
   d74fbebe0ff442e8c77bec024d6d92325b83a98d3f1487caa1db59ef171a41e6.
 - Original functional receipt SHA256:
   c415632ec6a64d57060e1ec2c62b16443d626c1e7cd5ad9645b2be07abfabfe3.
-- Report-only qualification job **17537**, Slurm UID1000, 1 CPU/2 GiB:
+- Report-only qualification job **17538**, Slurm UID1000, 1 CPU/2 GiB:
   COMPLETED, exit 0:0, elapsed 00:00:04.
 - Report executable SHA256:
   146f4b87f5a19e8e9a56c507f66ce5fdf7ab83a8b046a46d1c91edc624d1b678.
   Its ELF stays on the worker.
 
-Job 17537 verified the full original campaign input catalog, including its
+Job 17538 verified the full original campaign input catalog, including its
 absolute compiler/functional receipt/result inputs, before and after reporting.
 Every READY batch's original FILES manifest passed. The snapshot's selected raw
 text inputs and the new C++/shell sources also passed final hash checks.
 This closes the missing final catalog check left by the timeout; it does not
 turn the original campaign into a successful or current-main numerical run.
+
+The final gate seals every selected original output path and content hash before
+copying, compares the copied raw catalog exactly, then regenerates and compares
+the original catalog after all report executions and controls. This includes
+individual records from the unfinished batch that have no READY manifest. The
+C++ executable is hashed before its first execution and verified afterward.
 
 ## Reconciled observations
 
@@ -91,9 +97,9 @@ Original roots:
 - Frozen source:
   /scratch/sounio-stdlib-inference-scale-20261024/combined_final_cache04/source
 - Report-only source:
-  /scratch/sounio-stdlib-inference-scale-20261024/SIO179-closure/source02
+  /scratch/sounio-stdlib-inference-scale-20261024/SIO179-closure/source03
 - Report-only output:
-  /scratch/sounio-stdlib-inference-scale-20261024/SIO179-closure/report02
+  /scratch/sounio-stdlib-inference-scale-20261024/SIO179-closure/report03
 
 Six mutations of actual copied receipts were rejected with exit 2 and their exact
 expected diagnostics: missing declared cell, changed denominator, wrong seed,
@@ -107,11 +113,19 @@ The final harness expects that exact diagnostic. Original17536 sources, result,
 failure status and diagnostic are retained in the archive; they are not counted
 as a passing gate.
 
+The earlier full report-only pass17537 remains separate. Root review required
+stronger output custody;17538 adds the original-output pre/copy/post seal and
+pre-execution executable hash. The cases, cell summaries and narrative report are
+byte-identical across these two passes. A seventh control appends a marker to
+case6 stdout from the unfinished batch in an extracted copy only; its selected
+output catalog differs with cmp exit1, proving the custody mismatch is detected.
+The actual original campaign is never modified.
+
 ## Compact custody
 
 campaign-17048-closure-text.tar.gz is a deterministic text-only packet:
-**1,359,037 bytes**, SHA256
-c8f95320c7f31ddc2dfd41e0f2be4813f874338aaf3f6ee063299f3be7333115.
+**1,575,782 bytes**, SHA256
+3a5b5dfb580c2043035a3060311085bb4ff1c79b1e5e96747b223b75cf9dff2d.
 
 It contains original selected case stdout/stderr/status/resources, dataset
 metadata and generated driver text; full original INPUTS catalog; original
@@ -127,4 +141,3 @@ After extraction, sha256sum -c FILES.sha256 verifies packet contents. The
 standalone C++23 reader can reproduce reports from its raw directory without
 sampling or fitting. The full gate additionally requires the original frozen
 source and external binaries to reverify the historical execution custody.
-
