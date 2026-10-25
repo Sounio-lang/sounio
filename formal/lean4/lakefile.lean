@@ -805,3 +805,10 @@ lean_lib «SounioNumericBuffer» where
 -- Exact rational sign check for the selected RODAS4 time coefficient.
 @[default_target]
 lean_lib «SounioRodas4TimeConsistency» where
+
+-- SIO-178 finite exact-rational frame; hardware RD/RU binding remains unproved.
+@[default_target]
+lean_lib «SounioIntervalFinite» where
+
+@[default_target]
+lean_lib «SounioIntervalFiniteAxiomAudit» where
