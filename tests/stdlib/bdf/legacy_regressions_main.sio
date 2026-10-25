@@ -1,0 +1,69 @@
+fn legacy_zero(t:f64,y:&Vec64,n:i32,out:&!Vec64) with Mut,Div,Panic {
+ var i:i32=0
+ while i<n {out.data[i]=0.0;i=i+1}
+}
+fn legacy_square(t:f64,y:&Vec64,n:i32,out:&!Vec64) with Mut,Div,Panic {
+ var i:i32=0
+ while i<n {out.data[i]=y.data[i]*y.data[i];i=i+1}
+}
+fn legacy_partial(t:f64,y:&Vec64,n:i32,out:&!Vec64) with Mut,Div,Panic {out.data[0]=0.0}
+fn legacy_one(t:f64,y:&Vec64,n:i32,out:&!Vec64) with Mut,Div,Panic {
+ var i:i32=0
+ while i<n {out.data[i]=1.0;i=i+1}
+}
+fn legacy_coupled(t:f64,y:&Vec64,n:i32,out:&!Vec64) with Mut,Div,Panic {
+ out.data[0]= -y.data[0]+y.data[1];out.data[1]= -y.data[1]
+}
+fn main()->i32 with Mut,Div,Panic,IO {
+ var matrix=Mat64{data:[0.0;4096]}
+ var vector=Vec64{data:[0.0;64]}
+ vector.data[0]=1.0
+ gauss_solve_64(&!matrix,&!vector,1)
+ let singular_ok=vector.data[0]==1.0
+ var predicted=Vec64{data:[0.0;64]}
+ var history=Vec64{data:[0.0;64]}
+ history.data[0]=2.0e-8
+ var result=Newton64Result{y:Vec64{data:[0.0;64]},jac:Mat64{data:[0.0;4096]},converged:false,iters:0,fevals:0,jevals:0}
+ bdf64_newton_solve(legacy_square,1.0,&predicted,&history,1.0,1,1.0e-17,1,&!result)
+ let tolerance_ok= !result.converged
+ history.data[0]=0.0
+ bdf64_newton_solve(legacy_partial,1.0,&predicted,&history,1.0,2,1.0e-10,2,&!result)
+ let partial_ok= !result.converged
+ var solution=BDF64Solution{times:[0.0;256],values:Mat64{data:[0.0;4096]},variances:Mat64{data:[0.0;4096]},n_steps:0,n_dims:0,n_accepted:0,n_rejected:0,n_function_evals:0,success:false}
+ solve_bdf64(legacy_zero,&predicted,1,0.0,1.0e-16,1.0e-20,1.0e-8,1.0e-8,&!solution)
+ let last:i32=solution.n_steps-1
+ let endpoint_ok=solution.success && last>=0 && solution.times[last]==1.0e-16
+ let sv:f64=vector.data[0]
+ let endpoint:f64=if last>=0 {solution.times[last]} else {-1.0}
+ println("LEGACY {} {} {} {} {} {}",singular_ok,tolerance_ok,partial_ok,endpoint_ok,sv,endpoint)
+ assert(singular_ok)
+ assert(tolerance_ok)
+ assert(partial_ok)
+ assert(endpoint_ok)
+ solve_bdf64(legacy_one,&predicted,1,0.0,0.001,0.0001,1.0e-6,0.0,&!solution)
+ assert(solution.success && solution.n_steps==64)
+ assert(solution.times[63]==0.001)
+ let value:f64=solution.values.data[63*64]
+ assert(value>0.000999999999 && value<0.001000000001)
+ let steps:i32=solution.n_steps
+ let tb:i64=f64_to_bits(solution.times[63])
+ let yb:i64=f64_to_bits(value)
+ println("LEGACY_TRACE {} {} {}",steps,tb,yb)
+ var uncertain=Vec64{data:[0.0;64]}
+ uncertain.data[0]=1.0;uncertain.data[1]=1.0
+ predicted.data[0]=1.0;predicted.data[1]=1.0
+ solve_bdf64_gum(legacy_coupled,&predicted,&uncertain,2,0.0,0.001,0.00001,1.0e-5,1.0e-5,&!solution)
+ assert(!solution.success)
+ assert(solution.n_accepted==0)
+ println("GUM_COUPLED_REFUSED")
+ var errors=Vec64{data:[0.0;64]}
+ var zero_state=Vec64{data:[0.0;64]}
+ errors.data[0]=1.0e-100
+ let tiny=b64_error_norm(&errors,&zero_state,&zero_state,1,1.0e-100,0.0)
+ errors.data[0]=1.0e200;errors.data[1]=1.0e200
+ let large=b64_error_norm(&errors,&zero_state,&zero_state,2,1.0,0.0)
+ let tiny_bits:i64=f64_to_bits(tiny);let large_bits:i64=f64_to_bits(large)
+ println("LEGACY_NORM {} {}",tiny_bits,large_bits)
+ println("BDF_LEGACY_PASS")
+ 0
+}
