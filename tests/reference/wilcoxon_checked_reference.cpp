@@ -220,6 +220,8 @@ int main(int argc,char**argv){auto c=cases();if(argc==2&&std::string(argv[1])=="
     bool log_available=logged==0||rounded_log!=0;
     N magnitude=abs(logged);N log_limit=magnitude<N(1)?magnitude*N("3e-10"):N("3e-10");
     N quantization=N(std::numeric_limits<double>::denorm_min())/2;if(log_limit<quantization)log_limit=quantization;
+    if((av&&(val(ab)<0||val(ab)>1))||(al&&val(alb)>0))fail("normal probability/log bounds "+context);
+    if(alt==0&&!r.w.empty()&&r.z==0&&(!av||!al||val(ab)!=1||val(alb)!=0))fail("nonempty balanced normal endpoint "+context);
     if(status||al!=log_available||av!=(rounded>0)||iterations<0||iterations>4096||(av&&(!std::isfinite(val(ab))||abs(N(val(ab))-expected)>expected*N("3e-10")))||(al&&(!std::isfinite(val(alb))||abs(N(val(alb))-logged)>log_limit))||(al&&val(alb)==0&&logged!=0))fail("explicit normal approximation "+context+" alt="+std::to_string(alt));
    }
    if(!std::getline(in,line))return 6;
@@ -237,6 +239,6 @@ int main(int argc,char**argv){auto c=cases();if(argc==2&&std::string(argv[1])=="
    if(la&&(!std::isfinite(val(lb))||abs(Q(val(lb))-logged)>std::max(Q("3e-12"),Q(abs(logged)*Q("2e-15")))))fail("log probability "+context+" alt="+std::to_string(alt));
   }
  }
- if(!std::getline(in,line)||line!="WILCOXON_ROWS_COMPLETE "+std::to_string(c.size())||std::getline(in,line))return 10;
+ if(!std::getline(in,line)||line!="WILCOXON_ROWS_COMPLETE "+std::to_string(c.size())||std::getline(in,line)){std::cerr<<"WILCOXON_REFERENCE_INCOMPLETE_OUTPUT\n";return 10;}
  std::cout<<"WILCOXON_REFERENCE_ROWS "<<c.size()<<" ZERO_POLICIES 2 ALTERNATIVES 3 ERRORS "<<errors<<'\n';return errors?1:0;
 }

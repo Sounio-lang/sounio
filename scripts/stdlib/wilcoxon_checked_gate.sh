@@ -5,7 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="${1:?usage: wilcoxon_checked_gate.sh OUTPUT_DIRECTORY}"
 : "${MADAROS_RAW_BIN:?explicit source-built compiler required}"
 [[ -z "${SOUNIO_SOUC_BIN:-}" ]] || { echo 'raw SOUNIO_SOUC_BIN override would bypass declared engine routing' >&2;exit 64; }
-mkdir -p "$OUT";OUT="$(cd "$OUT" && pwd)"
+mkdir -p "$(dirname "$OUT")"
+if ! mkdir "$OUT";then echo "fresh output directory required: $OUT" >&2;exit 65;fi
+OUT="$(cd "$OUT" && pwd)"
 cd "$ROOT"
 export SOUNIO_STDLIB_PATH="$ROOT/stdlib"
 ulimit -s 524288
@@ -86,15 +88,24 @@ awk '$1=="EXACT"&&$2==25&&$3==0&&$4==2 {$10=0} {print}' "$OUT/modern.native.stdo
 awk '$1=="EXACT"&&$2==0&&$3==0&&$4==0 {$18=2} {print}' "$OUT/modern.native.stdout" > "$OUT/mutant_method.stdout"
 awk '$1=="EXACT"&&$2==0&&$3==0&&$4==0 {$12=1} {print}' "$OUT/modern.native.stdout" > "$OUT/mutant_denominator.stdout"
 sed '/^WILCOXON_ROWS_COMPLETE /d' "$OUT/modern.native.stdout" > "$OUT/mutant_missing.stdout"
-for mutant in numerator high_limb underflow logtail method denominator missing;do
- if "$OUT/wilcoxon_checked.reference" "$OUT/mutant_$mutant.stdout" > "$OUT/mutant_$mutant.verify.stdout" 2> "$OUT/mutant_$mutant.verify.stderr";then
-  echo "oracle accepted $mutant mutant" >&2;exit 1
- fi
-done
+reject_mutant() {
+ local name="$1" reference="$2" expected_code="$3" diagnostic="$4"
+ set +e
+ "$reference" "$OUT/mutant_$name.stdout" > "$OUT/mutant_$name.verify.stdout" 2> "$OUT/mutant_$name.verify.stderr"
+ local code=$?;echo "$code" > "$OUT/mutant_$name.verify.exit"
+ set -e
+ [[ "$code" == "$expected_code" ]] || { echo "wrong rejection for $name: expected=$expected_code actual=$code" >&2;return 1; }
+ grep -Fq -- "$diagnostic" "$OUT/mutant_$name.verify.stderr" || { echo "missing specific rejection diagnostic: $name" >&2;return 1; }
+}
+reject_mutant numerator "$OUT/wilcoxon_checked.reference" 1 'exact integer numerator cohort=0 zero=0 alt=0'
+reject_mutant high_limb "$OUT/wilcoxon_checked.reference" 1 'exact integer numerator cohort=23 zero=0 alt=0'
+reject_mutant underflow "$OUT/wilcoxon_checked.reference" 1 'dyadic binary64/availability cohort=26 zero=0 alt=2'
+reject_mutant logtail "$OUT/wilcoxon_checked.reference" 1 'representable log erased to zero cohort=25 zero=0 alt=2'
+reject_mutant method "$OUT/wilcoxon_checked.reference" 1 'exact metadata cohort=0 zero=0 alt=0'
+reject_mutant denominator "$OUT/wilcoxon_checked.reference" 1 'exact metadata cohort=0 zero=0 alt=0'
+reject_mutant missing "$OUT/wilcoxon_checked.reference" 10 WILCOXON_REFERENCE_INCOMPLETE_OUTPUT
 awk '$1=="SORT"&&$2==1000 {$6=0} {print}' "$OUT/sort.native.stdout" > "$OUT/mutant_sort.stdout"
-if "$OUT/numeric_index_sort.reference" "$OUT/mutant_sort.stdout" > "$OUT/mutant_sort.verify.stdout" 2> "$OUT/mutant_sort.verify.stderr";then
- echo 'oracle accepted sort mutant' >&2;exit 1
-fi
+reject_mutant sort "$OUT/numeric_index_sort.reference" 6 'NUMERIC_INDEX_SORT_DIGEST_MISMATCH n=1000'
 sha256sum -c "$OUT/inputs.sha256" > "$OUT/inputs.verify.stdout"
 sha256sum -c "$OUT/compiler.sha256" > "$OUT/compiler.verify.stdout"
 sha256sum -c "$OUT/reference.sha256" > "$OUT/reference.verify.stdout"

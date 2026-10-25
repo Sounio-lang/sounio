@@ -75,7 +75,7 @@ fn main()->i32 with IO,Alloc,Mut,Div,Panic {
   std::vector<std::int64_t> indices(static_cast<std::size_t>(n));std::iota(indices.begin(),indices.end(),0);
   std::sort(indices.begin(),indices.end(),[=](auto a,auto b){auto x=(n-a)%97,y=(n-b)%97;return x<y||(x==y&&a<b);});
   std::int64_t expected=0;for(auto index:indices)expected=(expected*65599+index)%1000000007;
-  if(digest!=expected)return 6;
+  if(digest!=expected){std::cerr<<"NUMERIC_INDEX_SORT_DIGEST_MISMATCH n="<<n<<"\n";return 6;}
  }
  if(!done||row!=sizes.size())return 7;
  std::cout<<"NUMERIC_INDEX_SORT_REFERENCE_PASS rows="<<row<<" max_n=1000000 native_order_and_permutation_assertions\n";
