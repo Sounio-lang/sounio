@@ -11,16 +11,19 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 HARNESS="$ROOT_DIR/scripts/dev/run_sio_test_suite_v2.sh"
+HARNESS_CASE="$ROOT_DIR/scripts/dev/sio_test_case.sh"
 HELLO="$ROOT_DIR/tests/run-pass/hello.sio"
 REAL_ONE="$ROOT_DIR/tests/run-pass/struct_array_elem_method_dispatch.sio"
 
 fail() { echo "TEST_SUITE_ANNOTATION_SELFTEST_FAIL: $*" >&2; exit 1; }
 
 [[ -f "$HARNESS" ]] || fail "harness missing: $HARNESS"
+[[ -f "$HARNESS_CASE" ]] || fail "test-case module missing: $HARNESS_CASE"
 [[ -f "$HELLO" ]] || fail "hello fixture missing"
 [[ -f "$REAL_ONE" ]] || fail "control fixture missing: $REAL_ONE"
 
 bash -n "$HARNESS"
+bash -n "$HARNESS_CASE"
 
 # Shape check: payload extraction must stay parameter-expansion, not quoted =~.
 # The previous vacuous-regex bug made every expect-stdout assertion match
@@ -28,9 +31,9 @@ bash -n "$HARNESS"
 if grep -nE '\[\[ "\$line" =~ "//@ expect-stdout-contains:\\ ' "$HARNESS" >/dev/null; then
     fail "expect-stdout-contains extraction uses quoted =~ (vacuous-regex shape)"
 fi
-grep -Fq 'expect-stdout-contains: "*' "$HARNESS" \
+grep -Fq 'expect-stdout-contains: "*' "$HARNESS_CASE" \
     || fail "harness does not prefix-match //@ expect-stdout-contains:"
-grep -Fq 'unknown annotation:' "$HARNESS" \
+grep -Fq 'unknown annotation:' "$HARNESS_CASE" \
     || fail "harness does not fail closed on unknown expect-* keys"
 
 TMP="$(mktemp -d /tmp/sounio-ann-selftest.XXXXXX)"
@@ -189,5 +192,14 @@ printf '%s\n' "$TMP/vendor_nosidecar.sio" > "$TMP/list_vendor_nosidecar.txt"
 expect_rc 1 "$TMP/vendor_nosidecar.log" run_list "$TMP/list_vendor_nosidecar.txt"
 grep -Fq "requires: vendor-material but no .args sidecar" "$TMP/vendor_nosidecar.log" \
     || fail "vendor-material test without a sidecar did not fail"
+
+# --- 10. CI job scaling is bounded and reversible ---
+printf '%s\n' "$HELLO" > "$TMP/list_ci_jobs.txt"
+CI=true SOUNIO_TEST_JOBS_CAP=2 bash "$HARNESS" --test-list "$TMP/list_ci_jobs.txt" --jobs 1 >"$TMP/ci-capped.log" 2>&1
+grep -Fq 'Parallel jobs: 2' "$TMP/ci-capped.log" \
+    || fail "CI job cap was not applied"
+CI=true SOUNIO_TEST_JOBS_DYNAMIC=0 bash "$HARNESS" --test-list "$TMP/list_ci_jobs.txt" --jobs 1 >"$TMP/ci-fixed.log" 2>&1
+grep -Fq 'Parallel jobs: 1' "$TMP/ci-fixed.log" \
+    || fail "dynamic job opt-out did not restore exact --jobs"
 
 echo "TEST_SUITE_ANNOTATION_SELFTEST_PASS"

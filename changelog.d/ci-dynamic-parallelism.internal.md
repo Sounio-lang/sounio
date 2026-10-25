@@ -1,0 +1,1 @@
+CI test execution now scales with available CPU and memory instead of always running four jobs. Parallelism remains capped at eight jobs, includes a memory guard and an explicit opt-out, and is covered by the annotation harness self-test.
