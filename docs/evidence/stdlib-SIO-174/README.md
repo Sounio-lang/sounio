@@ -107,9 +107,13 @@ a sign-change bracket to imply a root.
 
 An undirected initial zero is recorded immediately when included. A directed
 initial zero waits for the first accepted segment to establish orientation.
-Set include_initial=false to suppress a known zero on restart. Exact endpoint
-zeros are recorded once; the following segment does not duplicate the same
-time. An identically zero event records only the included initial zero.
+Set include_initial=false to suppress a known zero on restart. An exact endpoint
+zero reached from a nonzero start value is recorded once; the following segment
+does not duplicate the same time. Segments whose endpoint event values are both
+zero are not resolved. An included undirected initial zero is still recorded
+before stepping; a directed initial zero needs a nonzero endpoint to establish
+orientation. Thus an undirected identically zero event records only its included
+initial zero, while a directed identically zero event remains unresolved.
 Strict endpoint sign changes trigger bisection on the actual quartic state.
 The receipt exposes the actual ordered time bracket and endpoint event values.
 An exact zero collapses the bracket. Otherwise refinement chooses a known
