@@ -1,0 +1,139 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: GENOMICS_GLOBAL_NORMALIZATION_PASS
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_set,numeric_buffer_close}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set}
+use genomics::count_csr::{CountCSR,count_csr_build,count_csr_close}
+use genomics::count_identities::{CountIdentities,count_identities_build,count_identities_close}
+use genomics::count_normalization::{CountNormalization,count_normalization_workspace,count_normalization_new,count_normalization_status,count_normalization_reference_genes,count_normalization_used,count_normalization_excluded,count_normalization_close}
+use genomics::count_pipeline::{CountPipeline,count_pipeline_workspace,count_pipeline_workspace_global,count_pipeline_new,count_pipeline_new_global,count_pipeline_prepare,count_pipeline_prepare_global,count_pipeline_point_batch_seeded,count_pipeline_point_done,count_pipeline_phase,count_pipeline_status,count_pipeline_normalization_scope,count_pipeline_normalization_reference_genes,count_pipeline_normalization_used,count_pipeline_normalization_excluded,count_pipeline_join_comparisons,count_pipeline_factor,count_pipeline_offset,count_pipeline_value,count_pipeline_close}
+use genomics::count_pipeline_report::{count_gene_report_slot,count_pipeline_report_into}
+use stats::regression::dynamic_dispersion::{DispersionSearchOptions}
+use io::sci_print::{println_f64_sci}
+fn ids(n:i64,prefix:i64,rotation:i64,duplicate:bool)->CountIdentities with Alloc,Mut,Div,Panic {
+ var bytes=integer_buffer_new(n*2,n*16);var offsets=integer_buffer_new(n+1,(n+1)*8)
+ var order=integer_buffer_new(n,n*8);var groups=integer_buffer_new(n,n*8)
+ var i:i64=0
+ while i<n {integer_buffer_set(&!offsets,i,i*2);integer_buffer_set(&!bytes,i*2,prefix);integer_buffer_set(&!bytes,i*2+1,if duplicate {65}else{65+(i+rotation)%n});i=i+1}
+ integer_buffer_set(&!offsets,n,n*2)
+ count_identities_build(bytes,offsets,order,groups,0,10000)
+}
+fn count(g:i64,s:i64,zeros:bool)->i64 with Div {
+ if zeros && (g==5 || (g==0 && s==0)) {return 0}
+ let multiple=if g<3 {if s%2==0 {1}else{2}}else{if s==0 {1}else{if s==1 {8}else{if s==2 {4}else{16}}}}
+ (g+1)*4*multiple
+}
+fn csr(rows:i64,part:i64,rotation:i64,zeros:bool)->CountCSR with Alloc,Mut,Div,Panic {
+ let n:i64=4
+ var offsets=integer_buffer_new(rows+1,(rows+1)*8)
+ var columns=integer_buffer_new(rows*n,rows*n*8);var values=integer_buffer_new(rows*n,rows*n*8)
+ var i:i64=0
+ while i<rows {
+  let global=if part<0 {i}else{if part<2 {part*3+i}else{2*i+part-2}}
+  integer_buffer_set(&!offsets,i,i*n);var j:i64=0
+  while j<n {integer_buffer_set(&!columns,i*n+j,j);integer_buffer_set(&!values,i*n+j,count(global,(j+rotation)%n,zeros));j=j+1};i=i+1
+ }
+ integer_buffer_set(&!offsets,rows,rows*n)
+ count_csr_build(rows,n,rows*n,offsets,columns,values,0)
+}
+fn options()->DispersionSearchOptions {
+ DispersionSearchOptions{method:0,log_alpha_lower: -6.0,log_alpha_upper:1.0,outer_tolerance:1e-3,max_outer_evaluations:32,rcond:0.0,inner_iterations:64,inner_tolerance:1e-8,prior_active:false,prior_center:0.0,prior_variance:1.0,compute_curvature:false}
+}
+fn worker(part:i64,rotation:i64,zeros:bool,global:bool,budget_delta:i64)->CountPipeline with Alloc,Mut,Div,Panic {
+ let rows=if part<0 {6}else{3}
+ let query=if global {count_pipeline_workspace_global(rows,4,1,0)}else{count_pipeline_workspace(rows,4,1,0)}
+ if global {count_pipeline_new_global(csr(rows,part,rotation,zeros),ids(rows,71,0,false),ids(4,83,rotation,false),1,options(),query.payload_bytes+budget_delta)}
+ else {count_pipeline_new(csr(rows,part,rotation,zeros),ids(rows,71,0,false),ids(4,83,rotation,false),1,options(),query.payload_bytes+budget_delta)}
+}
+fn run_part(part:i64,zero_case:i64,mode:i64,normalization:&CountNormalization,full:&CountPipeline,metadata:&CountIdentities,design:&NumericBuffer,exposure:&NumericBuffer,initial:&NumericBuffer,contrast:&NumericBuffer)->i64 with IO,Alloc,Mut,Div,Panic {
+ let zeros=zero_case==1;var j:i64=0
+    let rotation=(part+3)%4;var w=worker(part,rotation,zeros,true,0)
+    assert(count_pipeline_status(&w)==0 && count_pipeline_normalization_scope(&w)== -1)
+    var report=count_gene_report_slot();assert(count_pipeline_report_into(&w,0,&!report)==0 && report.normalization_scope== -1 && report.reference_genes==0)
+    assert(count_pipeline_prepare_global(&!w,normalization,metadata,design,exposure,initial,contrast,10000,true,true)==0)
+    assert(count_pipeline_normalization_scope(&w)==1 && count_pipeline_normalization_reference_genes(&w)==6)
+    assert(count_pipeline_normalization_used(&w)==count_normalization_used(normalization))
+    assert(count_pipeline_report_into(&w,0,&!report)==0 && report.normalization_scope==1 && report.reference_genes==6)
+    println("CASE {} {} {} {} {}",zero_case,mode,part,count_pipeline_normalization_used(&w),count_pipeline_normalization_excluded(&w))
+    j=0;while j<4 {
+     let sample=(j+rotation)%4
+     assert(count_pipeline_factor(&w,j)==count_pipeline_factor(full,(sample+2)%4))
+     assert(count_pipeline_offset(&w,j)==count_pipeline_offset(full,(sample+2)%4))
+     println("SAMPLE {}",sample);print("FACTOR ");println_f64_sci(count_pipeline_factor(&w,j),15)
+     print("OFFSET ");println_f64_sci(count_pipeline_offset(&w,j),15);j=j+1
+    }
+    // Only two small genuine point fits per normalization case; other partitions test prepare.
+    if part<2 {
+     assert(count_pipeline_point_batch_seeded(&!w,1,0.0)==0 && count_pipeline_point_done(&w)==1)
+     print("MEAN ");println_f64_sci(count_pipeline_value(&w,0,0),15)
+    }
+    assert(count_pipeline_prepare_global(&!w,normalization,metadata,design,exposure,initial,contrast,10000,true,true)==1)
+    count_pipeline_close(w);0
+}
+fn scenario(zero_case:i64,mode:i64,metadata:&CountIdentities,design:&NumericBuffer,exposure:&!NumericBuffer,initial:&NumericBuffer,contrast:&NumericBuffer)->i64 with IO,Alloc,Mut,Div,Panic {
+ let zeros=zero_case==1;let q=count_normalization_workspace(6,4)
+   // Reference order differs from metadata and each worker.
+   let reference=csr(6,-1,2,zeros)
+   let normalization=count_normalization_new(&reference,ids(4,83,2,false),mode,q.peak_payload_bytes)
+   assert(count_normalization_status(&normalization)==0)
+   assert(count_normalization_reference_genes(&normalization)==6)
+   assert(count_normalization_used(&normalization)+count_normalization_excluded(&normalization)==6)
+   var full=worker(-1,2,zeros,false,0)
+   assert(count_pipeline_prepare(&!full,metadata,design,exposure,initial,contrast,mode,10000,true,true)==0)
+   assert(run_part(0,zero_case,mode,&normalization,&full,metadata,design,exposure,initial,contrast)==0)
+   assert(run_part(1,zero_case,mode,&normalization,&full,metadata,design,exposure,initial,contrast)==0)
+   assert(run_part(2,zero_case,mode,&normalization,&full,metadata,design,exposure,initial,contrast)==0)
+   assert(run_part(3,zero_case,mode,&normalization,&full,metadata,design,exposure,initial,contrast)==0)
+   // Discover actual combined join work, then require one-less refusal on a fresh owner.
+   var measured=worker(0,0,zeros,true,0)
+   assert(count_pipeline_prepare_global(&!measured,&normalization,metadata,design,exposure,initial,contrast,10000,true,true)==0)
+   let joins=count_pipeline_join_comparisons(&measured);assert(joins>1)
+   var tight=worker(0,0,zeros,true,0)
+   assert(count_pipeline_prepare_global(&!tight,&normalization,metadata,design,exposure,initial,contrast,joins-1,true,true)==34)
+   assert(count_pipeline_phase(&tight)==0 && count_pipeline_normalization_scope(&tight)== -1 && count_pipeline_normalization_reference_genes(&tight)==0)
+   assert(count_pipeline_join_comparisons(&tight)<=joins-1)
+   assert(count_pipeline_prepare_global(&!tight,&normalization,metadata,design,exposure,initial,contrast,joins,true,true)==0)
+   count_pipeline_close(tight);count_pipeline_close(measured)
+   let missing=count_normalization_new(&reference,ids(4,84,2,false),mode,q.peak_payload_bytes)
+   var refused=worker(0,0,zeros,true,0)
+   assert(count_pipeline_prepare_global(&!refused,&missing,metadata,design,exposure,initial,contrast,10000,true,true)==36)
+   assert(count_pipeline_phase(&refused)==0 && count_pipeline_normalization_scope(&refused)== -1)
+   // Failed late exposure may alter private scratch but must publish neither factors nor metadata.
+   numeric_buffer_set(exposure,3,1000.0)
+   assert(count_pipeline_prepare_global(&!refused,&normalization,metadata,design,exposure,initial,contrast,10000,true,true)==4)
+   assert(count_pipeline_phase(&refused)==0 && count_pipeline_normalization_used(&refused)==0)
+   numeric_buffer_set(exposure,3,0.0)
+   assert(count_pipeline_prepare_global(&!refused,&normalization,metadata,design,exposure,initial,contrast,10000,true,true)==0)
+   count_pipeline_close(refused);count_normalization_close(missing)
+   count_pipeline_close(full);count_normalization_close(normalization);count_csr_close(reference)
+ 0
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ var design=numeric_buffer_new(4,32);var exposure=numeric_buffer_new(4,32)
+ var initial=numeric_buffer_new(1,8);var contrast=numeric_buffer_new(1,8)
+ var j:i64=0
+ // Metadata rotation1; exposure is a nonzero exact-binary value for each sample.
+ while j<4 {numeric_buffer_set(&!design,j,1.0);numeric_buffer_set(&!exposure,j,(((j+1)%4) as f64)*0.25);j=j+1}
+ numeric_buffer_set(&!initial,0,2.0);numeric_buffer_set(&!contrast,0,1.0)
+ let metadata=ids(4,83,1,false)
+ let q=count_normalization_workspace(6,4)
+ let local_query=count_pipeline_workspace(3,4,1,0);let global_query=count_pipeline_workspace_global(3,4,1,0)
+ assert(q.status==0 && local_query.status==0 && global_query.status==0)
+ println("PAYLOAD {} {} {} {} {}",local_query.payload_bytes,global_query.payload_bytes,q.retained_payload_bytes,q.scratch_payload_bytes,q.peak_payload_bytes)
+ assert(scenario(0,0,&metadata,&design,&!exposure,&initial,&contrast)==0)
+ assert(scenario(0,1,&metadata,&design,&!exposure,&initial,&contrast)==0)
+ assert(scenario(1,0,&metadata,&design,&!exposure,&initial,&contrast)==0)
+ assert(scenario(1,1,&metadata,&design,&!exposure,&initial,&contrast)==0)
+ let source=csr(6,-1,0,false)
+ let bad_budget=count_normalization_new(&source,ids(4,83,0,false),0,q.peak_payload_bytes-1);assert(count_normalization_status(&bad_budget)==1)
+ let bad_mode=count_normalization_new(&source,ids(4,83,0,false),2,q.peak_payload_bytes);assert(count_normalization_status(&bad_mode)==1)
+ let bad_ids=count_normalization_new(&source,ids(4,83,0,true),0,q.peak_payload_bytes);assert(count_normalization_status(&bad_ids)==2)
+ var invalid_worker=worker(0,0,false,true, -1);assert(count_pipeline_status(&invalid_worker)==1)
+ var guarded=worker(0,0,false,true,0)
+ assert(count_pipeline_prepare_global(&!guarded,&bad_budget,&metadata,&design,&exposure,&initial,&contrast,10000,true,true)==2 && count_pipeline_phase(&guarded)==0)
+ assert(count_pipeline_prepare(&!guarded,&metadata,&design,&exposure,&initial,&contrast,0,10000,true,true)==1)
+ count_pipeline_close(guarded);count_pipeline_close(invalid_worker)
+ count_normalization_close(bad_budget);count_normalization_close(bad_mode);count_normalization_close(bad_ids);count_csr_close(source)
+ count_identities_close(metadata);numeric_buffer_close(design);numeric_buffer_close(exposure);numeric_buffer_close(initial);numeric_buffer_close(contrast)
+ println("GENOMICS_GLOBAL_NORMALIZATION_PASS");0
+}

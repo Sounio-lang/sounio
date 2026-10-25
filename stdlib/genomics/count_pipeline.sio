@@ -3,6 +3,7 @@
 // Conditional plug-in Fisher/Wald outputs; no finite-sample calibration claim.
 use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_new,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_buffer_close,numeric_matrix}
 use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+use genomics::count_normalization::{CountNormalization,count_normalization_status,count_normalization_reference_genes,count_normalization_mode,count_normalization_used,count_normalization_excluded,count_normalization_factor,count_normalization_log,count_normalization_join_into}
 use genomics::count_csr::{CountCSR,count_csr_status,count_csr_rows,count_csr_samples,count_csr_row_start,count_csr_column,count_csr_stored_value,count_csr_at,count_csr_size_factors_into,count_csr_close}
 use genomics::count_identities::{CountIdentities,count_identities_status,count_identities_count,count_identities_unique,count_identities_join_into,count_identities_id_length,count_identities_id_byte,count_identities_close}
 use genomics::dynamic_normalization::{DynamicSizeFactorsSlot,dynamic_size_factors_slot,dynamic_size_factors_slot_genes_used,dynamic_size_factors_slot_genes_excluded,dynamic_median_ratio_size_factors_workspace}
@@ -14,7 +15,7 @@ use special::checked_gamma_beta::{gamma_pq_checked}
 use math::pure::{is_finite,ln_checked,exp,CheckedLog,ln_checked_into}
 pub struct CountPipelineWorkspace {pub status:i64,pub genes:i64,pub samples:i64,pub columns:i64,pub numeric_elements:i64,pub integer_elements:i64,pub payload_bytes:i64}
 fn cp_add(a:i64,b:i64)->i64 {if a<0 || b<0 || b>1152921504606846463-a {return -1};a+b}
-pub fn count_pipeline_workspace(g:i64,n:i64,p:i64,method:i64)->CountPipelineWorkspace with Mut,Div {
+fn cp_workspace(g:i64,n:i64,p:i64,method:i64,local_normalization:bool)->CountPipelineWorkspace with Mut,Div {
  let bad=CountPipelineWorkspace{status:1,genes:g,samples:n,columns:p,numeric_elements:0,integer_elements:0,payload_bytes:0}
  if g<3 || g>1000000 || n<2 || n>1000000 || p<1 || p>=n || p>1024 {return bad}
  let norm=dynamic_median_ratio_size_factors_workspace(g,n)
@@ -29,7 +30,7 @@ pub fn count_pipeline_workspace(g:i64,n:i64,p:i64,method:i64)->CountPipelineWork
  numeric=cp_add(numeric,p)
  numeric=cp_add(numeric,n)
  numeric=cp_add(numeric,n)
- numeric=cp_add(numeric,norm.numeric_elements)
+ numeric=cp_add(numeric,if local_normalization {norm.numeric_elements}else{0})
  numeric=cp_add(numeric,dp.count_design_elements)
  numeric=cp_add(numeric,n)
  numeric=cp_add(numeric,p)
@@ -74,7 +75,7 @@ pub fn count_pipeline_workspace(g:i64,n:i64,p:i64,method:i64)->CountPipelineWork
  numeric=cp_add(numeric,g)
  var integer:i64=0
  integer=cp_add(integer,n)
- integer=cp_add(integer,norm.integer_elements)
+ integer=cp_add(integer,if local_normalization {norm.integer_elements}else{0})
  integer=cp_add(integer,n)
  integer=cp_add(integer,n)
  integer=cp_add(integer,dp.permutation_elements)
@@ -87,13 +88,16 @@ pub fn count_pipeline_workspace(g:i64,n:i64,p:i64,method:i64)->CountPipelineWork
  if total<0 {return bad}
  CountPipelineWorkspace{status:0,genes:g,samples:n,columns:p,numeric_elements:numeric,integer_elements:integer,payload_bytes:total*8}
 }
+// Global query omits only normalization work and anchors; transferred inputs excluded.
+pub fn count_pipeline_workspace(g:i64,n:i64,p:i64,method:i64)->CountPipelineWorkspace with Mut,Div {cp_workspace(g,n,p,method,true)}
+pub fn count_pipeline_workspace_global(g:i64,n:i64,p:i64,method:i64)->CountPipelineWorkspace with Mut,Div {cp_workspace(g,n,p,method,false)}
 pub linear struct CountPipeline {
  csr:CountCSR,gene_ids:CountIdentities,sample_ids:CountIdentities,
  g:i64,n:i64,p:i64,status:i64,phase:i64,point_next:i64,refit_next:i64,eligible:i64,
  options:DispersionSearchOptions,layout:NumericMatrix,normalization:DynamicSizeFactorsSlot,
  prior_status:i64,prior_a0:f64,prior_a1:f64,prior_variance:f64,
  point_evaluations:i64,refit_evaluations:i64,tail_iterations:i64,
- normalization_mode:i64,join_comparisons:i64,model_declared:bool,independence_declared:bool,
+ normalization_mode:i64,normalization_scope:i64,reference_genes:i64,normalization_used:i64,normalization_excluded:i64,join_comparisons:i64,model_declared:bool,independence_declared:bool,
  payload_bytes:i64,log_work:CheckedLog,
  design:NumericBuffer,
  offsets:NumericBuffer,
@@ -235,10 +239,10 @@ fn cp_initialize(w:&!CountPipeline)->i64 with Mut,Panic {
 }
 // Counts and original-order unique IDs transfer ownership even on refusal.
 // max_bytes covers newly allocated buffer payload only, excluding transferred input.
-pub fn count_pipeline_new(csr:CountCSR,gene_ids:CountIdentities,sample_ids:CountIdentities,
- p:i64,options:DispersionSearchOptions,max_bytes:i64)->CountPipeline with Alloc,Mut,Div,Panic {
+fn cp_new(csr:CountCSR,gene_ids:CountIdentities,sample_ids:CountIdentities,
+ p:i64,options:DispersionSearchOptions,max_bytes:i64,local_normalization:bool)->CountPipeline with Alloc,Mut,Div,Panic {
  var g=count_csr_rows(&csr);var n=count_csr_samples(&csr)
- let query=count_pipeline_workspace(g,n,p,options.method)
+ let query=cp_workspace(g,n,p,options.method,local_normalization)
  var code:i64=0
  if query.status!=0 || max_bytes<0 || max_bytes>9223372036854771704 || query.payload_bytes>max_bytes {code=1}
  if count_csr_status(&csr)!=0 || count_identities_status(&gene_ids)!=0 || count_identities_status(&sample_ids)!=0 ||
@@ -255,7 +259,7 @@ pub fn count_pipeline_new(csr:CountCSR,gene_ids:CountIdentities,sample_ids:Count
  status:code,phase:0,point_next:0,refit_next:0,eligible:0,options:options,
  layout:numeric_matrix(if code==0 {n*p}else{0},n,if code==0 {p}else{0},if code==0 {p}else{0},1,0),
  normalization:dynamic_size_factors_slot(),prior_status: -1,prior_a0:0.0,prior_a1:0.0,prior_variance:0.0,
- point_evaluations:0,refit_evaluations:0,tail_iterations:0,normalization_mode: -1,join_comparisons:0,
+ point_evaluations:0,refit_evaluations:0,tail_iterations:0,normalization_mode: -1,normalization_scope:if local_normalization {0}else{1},reference_genes:0,normalization_used:0,normalization_excluded:0,join_comparisons:0,
  model_declared:false,independence_declared:false,payload_bytes:if code==0 {query.payload_bytes}else{0},
  log_work:CheckedLog{status:2,value:0.0},
  design:numeric_buffer_new(if code==0 {n*p}else{0},if code==0 {max_bytes}else{0}),
@@ -264,7 +268,7 @@ pub fn count_pipeline_new(csr:CountCSR,gene_ids:CountIdentities,sample_ids:Count
  contrast:numeric_buffer_new(if code==0 {p}else{0},if code==0 {max_bytes}else{0}),
  factors:numeric_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
  norm_logs:numeric_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
- norm_work:numeric_buffer_new(if code==0 {norm.numeric_elements}else{0},if code==0 {max_bytes}else{0}),
+ norm_work:numeric_buffer_new(if code==0 && local_normalization {norm.numeric_elements}else{0},if code==0 {max_bytes}else{0}),
  weighted:numeric_buffer_new(if code==0 {dp.count_design_elements}else{0},if code==0 {max_bytes}else{0}),
  response:numeric_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
  step:numeric_buffer_new(if code==0 {p}else{0},if code==0 {max_bytes}else{0}),
@@ -308,7 +312,7 @@ pub fn count_pipeline_new(csr:CountCSR,gene_ids:CountIdentities,sample_ids:Count
  by:numeric_buffer_new(if code==0 {g}else{0},if code==0 {max_bytes}else{0}),
  adjust_stage:numeric_buffer_new(if code==0 {g}else{0},if code==0 {max_bytes}else{0}),
  counts:integer_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
- norm_anchors:integer_buffer_new(if code==0 {norm.integer_elements}else{0},if code==0 {max_bytes}else{0}),
+ norm_anchors:integer_buffer_new(if code==0 && local_normalization {norm.integer_elements}else{0},if code==0 {max_bytes}else{0}),
  join_stage:integer_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
  join_order:integer_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
  profile_permutation:integer_buffer_new(if code==0 {dp.permutation_elements}else{0},if code==0 {max_bytes}else{0}),
@@ -321,19 +325,21 @@ pub fn count_pipeline_new(csr:CountCSR,gene_ids:CountIdentities,sample_ids:Count
  let initialized=cp_initialize(&!w)
  w
 }
+pub fn count_pipeline_new(csr:CountCSR,gene_ids:CountIdentities,sample_ids:CountIdentities,p:i64,options:DispersionSearchOptions,max_bytes:i64)->CountPipeline with Alloc,Mut,Div,Panic {cp_new(csr,gene_ids,sample_ids,p,options,max_bytes,true)}
+pub fn count_pipeline_new_global(csr:CountCSR,gene_ids:CountIdentities,sample_ids:CountIdentities,p:i64,options:DispersionSearchOptions,max_bytes:i64)->CountPipeline with Alloc,Mut,Div,Panic {cp_new(csr,gene_ids,sample_ids,p,options,max_bytes,false)}
 // Preparation joins sample byte IDs explicitly; no positional fallback.
 // Metadata design is row-major. exposure is a supplied log offset in metadata order.
 // Initial coefficients and contrast are explicit; no inferred intercept.
-pub fn count_pipeline_prepare(w:&!CountPipeline,metadata_ids:&CountIdentities,
+fn cp_prepare_inputs(w:&!CountPipeline,metadata_ids:&CountIdentities,
  design:&NumericBuffer,log_exposure:&NumericBuffer,initial:&NumericBuffer,contrast:&NumericBuffer,
- normalization_mode:i64,join_byte_budget:i64,model_declared:bool,independence_declared:bool)->i64 with Mut,Div,Panic {
+ join_byte_budget:i64)->i64 with Mut,Div,Panic {
  if w.status!=0 || w.phase!=0 {return 1}
  let n=w.n;let p=w.p
  if numeric_buffer_status(design)!=0 || numeric_buffer_status(log_exposure)!=0 ||
  numeric_buffer_status(initial)!=0 || numeric_buffer_status(contrast)!=0 ||
  numeric_buffer_len(design)!=n*p || numeric_buffer_len(log_exposure)!=n ||
  numeric_buffer_len(initial)!=p || numeric_buffer_len(contrast)!=p || count_identities_count(metadata_ids)!=n {return 2}
- if normalization_mode<0 || normalization_mode>1 || join_byte_budget<0 || join_byte_budget>9223372036854775807-w.join_comparisons {return 2}
+ if join_byte_budget<0 || join_byte_budget>9223372036854775807-w.join_comparisons {return 2}
  var i:i64=0
  while i<n*p {if !is_finite(numeric_buffer_at(design,i)) {return 3};i=i+1}
  i=0;while i<n {if !is_finite(numeric_buffer_at(log_exposure,i)) {return 3};i=i+1}
@@ -341,9 +347,11 @@ pub fn count_pipeline_prepare(w:&!CountPipeline,metadata_ids:&CountIdentities,
  let joined=count_identities_join_into(&w.sample_ids,metadata_ids,0,join_byte_budget,&!w.join_stage,&!w.join_order)
  w.join_comparisons=w.join_comparisons+joined.comparisons
  if joined.status!=0 {return 10+joined.status}
- let normalized=count_csr_size_factors_into(&w.csr,normalization_mode,&!w.factors,&!w.norm_logs,&!w.norm_work,&!w.norm_anchors,&!w.normalization)
- if normalized!=0 {return 20+normalized}
- i=0
+ 0
+}
+fn cp_prepare_finish(w:&!CountPipeline,design:&NumericBuffer,log_exposure:&NumericBuffer,initial:&NumericBuffer,contrast:&NumericBuffer,normalization_mode:i64,model_declared:bool,independence_declared:bool)->i64 with Mut,Div,Panic {
+ let n=w.n;let p=w.p
+ var i:i64=0
  while i<n {
   let from=integer_buffer_at(&w.join_order,i)
   let combined=numeric_buffer_at(log_exposure,from)+numeric_buffer_at(&w.norm_logs,i)
@@ -356,6 +364,42 @@ pub fn count_pipeline_prepare(w:&!CountPipeline,metadata_ids:&CountIdentities,
  i=0;while i<p {numeric_buffer_set(&!w.initial,i,numeric_buffer_at(initial,i));numeric_buffer_set(&!w.contrast,i,numeric_buffer_at(contrast,i));i=i+1}
  w.normalization_mode=normalization_mode;w.model_declared=model_declared;w.independence_declared=independence_declared
  w.phase=1;0
+}
+pub fn count_pipeline_prepare(w:&!CountPipeline,metadata_ids:&CountIdentities,
+ design:&NumericBuffer,log_exposure:&NumericBuffer,initial:&NumericBuffer,contrast:&NumericBuffer,
+ normalization_mode:i64,join_byte_budget:i64,model_declared:bool,independence_declared:bool)->i64 with Mut,Div,Panic {
+ if w.status!=0 || w.phase!=0 || w.normalization_scope!=0 {return 1}
+ if normalization_mode<0 || normalization_mode>1 {return 2}
+ let ready=cp_prepare_inputs(w,metadata_ids,design,log_exposure,initial,contrast,join_byte_budget)
+ if ready!=0 {return ready}
+ let normalized=count_csr_size_factors_into(&w.csr,normalization_mode,&!w.factors,&!w.norm_logs,&!w.norm_work,&!w.norm_anchors,&!w.normalization)
+ if normalized!=0 {return 20+normalized}
+ w.reference_genes=w.g;w.normalization_used=dynamic_size_factors_slot_genes_used(&w.normalization);w.normalization_excluded=dynamic_size_factors_slot_genes_excluded(&w.normalization)
+ cp_prepare_finish(w,design,log_exposure,initial,contrast,normalization_mode,model_declared,independence_declared)
+}
+// The per-call byte budget is shared by metadata and normalization cohort joins.
+// No factor/offset getter is available until the final phase1 publication.
+pub fn count_pipeline_prepare_global(w:&!CountPipeline,normalization:&CountNormalization,metadata_ids:&CountIdentities,
+ design:&NumericBuffer,log_exposure:&NumericBuffer,initial:&NumericBuffer,contrast:&NumericBuffer,
+ join_byte_budget:i64,model_declared:bool,independence_declared:bool)->i64 with Mut,Div,Panic {
+ if w.status!=0 || w.phase!=0 || w.normalization_scope!=1 {return 1}
+ if count_normalization_status(normalization)!=0 {return 2}
+ let before=w.join_comparisons
+ let ready=cp_prepare_inputs(w,metadata_ids,design,log_exposure,initial,contrast,join_byte_budget)
+ if ready!=0 {return ready}
+ let remaining=join_byte_budget-(w.join_comparisons-before)
+ let joined=count_normalization_join_into(normalization,&w.sample_ids,remaining,&!w.join_stage,&!w.counts)
+ w.join_comparisons=w.join_comparisons+joined.comparisons
+ if joined.status!=0 {return 30+joined.status}
+ var i:i64=0
+ while i<w.n {
+  let from=integer_buffer_at(&w.counts,i)
+  numeric_buffer_set(&!w.factors,i,count_normalization_factor(normalization,from))
+  numeric_buffer_set(&!w.norm_logs,i,count_normalization_log(normalization,from));i=i+1
+ }
+ w.reference_genes=count_normalization_reference_genes(normalization)
+ w.normalization_used=count_normalization_used(normalization);w.normalization_excluded=count_normalization_excluded(normalization)
+ cp_prepare_finish(w,design,log_exposure,initial,contrast,count_normalization_mode(normalization),model_declared,independence_declared)
 }
 fn cp_load(w:&!CountPipeline,row:i64)->i64 with Mut,Div,Panic {
  var i:i64=0
@@ -557,8 +601,11 @@ pub fn count_pipeline_point_evaluations(w:&CountPipeline)->i64 {w.point_evaluati
 pub fn count_pipeline_refit_evaluations(w:&CountPipeline)->i64 {w.refit_evaluations}
 pub fn count_pipeline_tail_iterations(w:&CountPipeline)->i64 {w.tail_iterations}
 pub fn count_pipeline_payload_bytes(w:&CountPipeline)->i64 {w.payload_bytes}
-pub fn count_pipeline_normalization_used(w:&CountPipeline)->i64 {dynamic_size_factors_slot_genes_used(&w.normalization)}
-pub fn count_pipeline_normalization_excluded(w:&CountPipeline)->i64 {dynamic_size_factors_slot_genes_excluded(&w.normalization)}
+pub fn count_pipeline_normalization_scope(w:&CountPipeline)->i64 {if w.status==0 && w.phase>=1 {w.normalization_scope}else{-1}}
+pub fn count_pipeline_normalization_reference_genes(w:&CountPipeline)->i64 {if w.status==0 && w.phase>=1 {w.reference_genes}else{0}}
+pub fn count_pipeline_normalization_used(w:&CountPipeline)->i64 {if w.status==0 && w.phase>=1 {w.normalization_used}else{0}}
+pub fn count_pipeline_normalization_excluded(w:&CountPipeline)->i64 {if w.status==0 && w.phase>=1 {w.normalization_excluded}else{0}}
+pub fn count_pipeline_join_comparisons(w:&CountPipeline)->i64 {w.join_comparisons}
 pub fn count_pipeline_gene_id_length(w:&CountPipeline,row:i64)->i64 with Panic {count_identities_id_length(&w.gene_ids,row)}
 pub fn count_pipeline_gene_id_byte(w:&CountPipeline,row:i64,position:i64)->i64 with Panic {count_identities_id_byte(&w.gene_ids,row,position)}
 pub fn count_pipeline_value(w:&CountPipeline,row:i64,column:i64)->f64 with Panic {assert(w.status==0 && row>=0 && row<w.g && column>=0 && column<24);cp_v(w,row,column)}
@@ -592,7 +639,7 @@ pub fn count_pipeline_design(w:&CountPipeline,sample:i64,column:i64)->f64 with P
 pub fn count_pipeline_close(w:CountPipeline) with Alloc {
  let CountPipeline{csr,gene_ids,sample_ids,g,n,p,status,phase,point_next,refit_next,eligible,options,layout,normalization,
  prior_status,prior_a0,prior_a1,prior_variance,point_evaluations,refit_evaluations,tail_iterations,
- normalization_mode,join_comparisons,model_declared,independence_declared,payload_bytes,log_work,
+ normalization_mode,normalization_scope,reference_genes,normalization_used,normalization_excluded,join_comparisons,model_declared,independence_declared,payload_bytes,log_work,
  design,offsets,initial,contrast,factors,norm_logs,norm_work,weighted,response,step,qr,count_stage,coefficients,means,eta,candidate_coefficients,candidate_means,candidate_eta,best_coefficients,best_means,best_eta,profile_r,profile_scales,covariance,standard_errors,fisher_r,fisher_scales,outer_scales,solve,influences,covariance_stage,training_means,training_alpha,training_variance,mapped_log,mapped_variance,outlier_flags,jacobian,shrink_response,increment,shrink_qr,shrink_stage,values,point_beta,final_beta,pvalues,bh,by,adjust_stage,counts,norm_anchors,join_stage,join_order,profile_permutation,fisher_permutation,eligible_rows,metadata,available,adjust_indices}=w
  count_csr_close(csr);count_identities_close(gene_ids);count_identities_close(sample_ids)
  numeric_buffer_close(design)
