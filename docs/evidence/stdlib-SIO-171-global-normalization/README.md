@@ -49,7 +49,23 @@ pipeline fixtures in both engines remain required regression checks.
 
 Development Slurm17579: library modules checked on modular a292; fixture failed
 because a cast bound to the right modulo operand. Only fixture parentheses were
-corrected. Further prototype/final results are pending; no new native acceptance
-or measurement is inferred from source preparation.
+corrected. Slurm17580 checked the library modules in both engines but refused owners closed
+inside fixture loops in the bootstrap checker. Moving their lifetime into small
+functions preserved the algorithm; Slurm17582 then passed all source checks but
+failed strict C++ compilation on misleading indentation. That formatting was
+corrected without changing the reference estimator.
+
+Slurm17584 COMPLETED0:0 in22s: both native engines and the independent C++23
+reference passed16 scenarios,64 sample bindings and8 actual point-fit means.
+The original unused-helper private-field control was rejected by modular a292
+with E259 but accepted by seed13003 check. Its original source is retained as
+unused-helper-check.sio; the exact stdout/status will remain in final custody.
+This is an explicit compiler check-path limitation, not a pass for that control.
+A further live-main constructed-owner field-read control was rejected with E259
+by both check paths in Slurm17585; the final gate requires actual compile
+refusal with E259, not a filename match, parse/type failure or check-only result.
+
+The final expanded gate, source/toolchain closure and six-fixture regression
+replay remain pending. No full final qualification is inferred from the prototype.
 
 Tracking: [SIO-171](https://app.notion.com/p/4033f37f93718146a307f9f9616058c7).

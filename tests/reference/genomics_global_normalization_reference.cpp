@@ -27,7 +27,8 @@ struct Reader{std::ifstream in;explicit Reader(const char* p):in(p){need(bool(in
  Q scalar(const char* key){std::string s=line(),prefix=std::string(key)+" ";need(s.starts_with(prefix),"scalar key/order");return number(s.substr(prefix.size()));}
 };
 int main(int argc,char**argv){try{
- if(argc!=2)return 64;Reader reader(argv[1]);auto payload=reader.ints("PAYLOAD",5);
+ if(argc!=2)return 64;
+ Reader reader(argv[1]);auto payload=reader.ints("PAYLOAD",5);
  need(payload[0]-payload[1]==8*(3*3+2*4),"exact omitted worker normalization scratch");need(payload[2]==8*2*4&&payload[3]==8*(3*6+2*4)&&payload[4]==payload[2]+payload[3],"global owner retained/scratch/peak query");
  int samples=0,means=0;
  for(int zeros=0;zeros<2;++zeros)for(int mode=0;mode<2;++mode){auto expected=reference(zeros!=0,mode);for(int part=0;part<4;++part){auto row=reader.ints("CASE",5);need(row[0]==zeros&&row[1]==mode&&row[2]==part&&row[3]==expected.used&&row[4]==expected.excluded,"global reference population metadata");int rotation=(part+3)%4;for(int j=0;j<4;++j){int sample=(j+rotation)%4;auto id=reader.ints("SAMPLE",1);need(id[0]==sample,"byte cohort permutation binding");close(reader.scalar("FACTOR"),expected.factors[sample],"factor");close(reader.scalar("OFFSET"),expected.logs[sample]+Q(sample)/4,"exposure added exactly once");++samples;}

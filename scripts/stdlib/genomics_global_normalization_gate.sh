@@ -35,9 +35,9 @@ for engine in madaros lean_single;do
  phase "$engine.native" /usr/bin/time -v timeout 180 "$OUT/$engine.elf"
  phase "$engine.reference" "$OUT/reference.elf" "$OUT/$engine.native.stdout"
  code=0
- SOUNIO_SOUC_ENGINE="$engine" bin/souc check tests/compile-fail/genomics_normalization_private.sio > "$OUT/$engine.private.stdout" 2> "$OUT/$engine.private.stderr" || code=$?
+ SOUNIO_SOUC_ENGINE="$engine" bin/souc compile tests/compile-fail/genomics_normalization_private.sio -o "$OUT/$engine.private.elf" > "$OUT/$engine.private.stdout" 2> "$OUT/$engine.private.stderr" || code=$?
  echo "$code" > "$OUT/$engine.private.exit"
- [[ $code != 0 ]] && grep -Eiq 'private' "$OUT/$engine.private.stdout" "$OUT/$engine.private.stderr"
+ [[ $code != 0 ]] && grep -Eq 'error\[E259\]' "$OUT/$engine.private.stdout" "$OUT/$engine.private.stderr"
 done
 # Remove only equality assertions from the consumer, then require its clean
 # production execution/oracle PASS. That identical consumer discriminates an
