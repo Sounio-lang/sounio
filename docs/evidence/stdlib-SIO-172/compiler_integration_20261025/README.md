@@ -20,11 +20,18 @@ needed no conflict resolution; the Linux CI registration is additive.
 
 ## Existing science and tests are byte-identical
 
-EXISTING_SCIENCE_TESTS.sha256 records all8583 tracked stdlib/test files before
+EXISTING_SCIENCE_TESTS.sha256 inside integration-receipts.tar.gz records all8583 tracked stdlib/test files before
 the integration. Every entry verifies after the merge. Existing production
 sources, physical parameters, expected numerical values, refusal cases,
 tolerances, test annotations and known-failure baseline are unchanged.
 The only incoming test files are the new private-borrow regressions.
+
+The large manifest and full merged01 text receipt are preserved losslessly in
+integration-receipts.tar.gz with an internal MANIFEST.sha256. Extraction and
+both internal hashes were verified before removing the duplicate visible files.
+The archive SHA256 is published beside it; ARCHIVE_CHECK.txt records the check.
+Raw originals also remain on the worker at:
+ /scratch/sounio-stdlib-inference-scale-20261024/SIO172integration/archive02/raw.
 
 The complete raw verification output remains in the remote workspace;
 VERIFIED_EXISTING.txt records its SHA256, the manifest identity and the all-OK
