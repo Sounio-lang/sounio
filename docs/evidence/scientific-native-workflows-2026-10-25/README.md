@@ -9,10 +9,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.scien
 
 # Native scientific workflows: computation to four figures
 
-The retained four-workflow qualification is complete for the frozen gate06
-composition. Current-main integration is being qualified separately. Source,
-compiler and actual artifact identities are recorded below. No release, merge,
-calibration or universal backend-equivalence claim is made.
+The four-workflow qualification is complete for the retained gate06 composition
+and the separately frozen current-main integration. Source, compiler and actual
+artifact identities are recorded below. No release, merge, calibration or
+universal backend-equivalence claim is made.
 
 The producer examples and their precise scientific limits are described in
 [the example guide](../../../examples/science_native/README.md). The independent
@@ -79,6 +79,38 @@ not establish whole-corpus acceptance, calibration or universal backend identity
 ## Current-main integration
 
 The retained gate06 was run on the dependency composition described above.
-Refreshing this branch onto remote main `8eca8e0c086bbd074485bbfd8716accc4063ef1c`
-and replaying from a new frozen source is a separate qualification step. Its
-receipt will be recorded below; old evidence will not be relabeled as a new run.
+Remote main `8eca8e0c086bbd074485bbfd8716accc4063ef1c` was merged without
+conflicts into this own branch at `c9946adb216887a85a15c1168d76cea1e5a935d4`.
+The 39 upstream stdlib visibility/effect edits and upstream cleanup were preserved.
+The public gate was then made portable to arbitrary Linux CI UIDs and records
+the actual process identity; the Slurm submission separately asserts UID1000.
+This two-file gate/guide correction is commit
+`7c5b2cbcae7862950e41b09ebc06c9c0ff744d4a`.
+
+The final frozen replay is Slurm **17534**, `COMPLETED`, `0:0`, `00:00:58`,
+worker root `/scratch/sounio-stdlib-inference-scale-20261024/SIO273-main02`.
+All four cases passed check/compile/native/C++ science and geometry/actual Canvas
+PNG-PPM roundtrip in both engines. Ten specific changed-input controls per engine
+were rejected as required. The complete staged source and both expected compiler
+pins verified before/after. A separately fetched manifest also matches every
+staged file against the committed workspace tree. The first current-main replay
+17533 passed too; its separate receipt retains the original UID-restricted gate.
+
+`current-main-evidence.tar.gz`, **362623 bytes**, SHA-256
+`c6be4c3fe51b841d6e32687ca1bc1cb0b33e675274d52b82ea8f3e1e25088a1b`,
+contains the new replay receipts, complete source catalog, compiler/ELF identities,
+positive/control diagnostics and explicit output-reuse checks. Every current
+native stdout, PNG and SVG was compared byte-for-byte to the corresponding
+retained gate06 artifact and is identical. The first bundle therefore preserves
+those exact payload/image bytes without duplicating all outputs in this second
+bundle. Current native ELF identities remain distinct measurements. Original
+current outputs and ELFs remain intact on the worker. Both bundle manifests were
+independently extracted and verified after copying to the workspace.
+
+`QUALIFIED_RUNTIME.sha256` identifies the current consumer/reference/gate inputs.
+`GATE06_RUNTIME.sha256` preserves the original runtime hashes, including the old
+UID-restricted gate; it is historical and is not a check against the current tree.
+The example scientific sources, numerical verifier and production calculation
+bodies were not changed for the portability correction. The documentation registry
+check passed without regenerating committed governance snapshots. These focused
+passes remain separate from the coordinator's full composed runner and GitHub CI.
