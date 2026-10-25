@@ -421,6 +421,8 @@ var RESOLVE_TY_HASH: i64 = 0
 var LEX_ERROR_LINE: i64 = 0
 var LEX_ERROR_KIND: i64 = 0
 var LEX_ERROR_BYTE: i64 = 0
+var LEX_ERROR_COL: i64 = 0
+var LEX_ERROR_TOK: i64 = 0
 var MATCH_SCRUT_TY: i64 = 0
 var MATCH_SCRUT_HASH: i64 = 0
 
@@ -8494,6 +8496,8 @@ fn lex_all() with IO, Mut, Panic, Div {
     TC = 0
     LEX_ERROR_LINE = 0
     LEX_ERROR_KIND = 0
+    LEX_ERROR_COL = 0
+    LEX_ERROR_TOK = 0
     var p: i64 = 0
     var cur_line: i64 = 1
     while p < SRC_LEN && TC + 1 < token_capacity() {
@@ -8516,7 +8520,13 @@ fn lex_all() with IO, Mut, Panic, Div {
         // String literal
         if c == 34 {
             let s = p; p = p + 1
-            while p < SRC_LEN && sb(p) != 34 {
+            let str_line = cur_line
+            var str_col: i64 = 1
+            var cb: i64 = s - 1
+            while cb >= 0 && sb(cb) != 10 && sb(cb) != 2 { str_col = str_col + 1; cb = cb - 1 }
+            // A string ends at its closing quote, at a file-boundary marker
+            // (\x01), at the generated prelude, or at end of file (SIO-266).
+            while p < SRC_LEN && sb(p) != 34 && sb(p) != 1 && !(LMR_PRELUDE_SRC_START >= 0 && s < LMR_PRELUDE_SRC_START && p >= LMR_PRELUDE_SRC_START) {
                 let sc = sb(p)
                 if sc == 10 { cur_line = cur_line + 1 }
                 if sc == 92 {
@@ -8553,8 +8563,16 @@ fn lex_all() with IO, Mut, Panic, Div {
                 }
                 p = p + 1
             }
-            if p < SRC_LEN && sb(p) == 34 { p = p + 1 }
-            TK[TC as usize] = 5; TS[TC as usize] = s; TE[TC as usize] = p; TL[TC as usize] = cur_line; TC = TC + 1; continue
+            if p < SRC_LEN && sb(p) == 34 { p = p + 1 } else if LEX_ERROR_LINE == 0 {
+                // SIO-266: no closing quote before end of file. Without this,
+                // the string swallows the rest of the module (closing braces
+                // included) and Pass 0b reports only `unbalanced braces`.
+                LEX_ERROR_LINE = str_line
+                LEX_ERROR_COL = str_col
+                LEX_ERROR_KIND = 5
+                LEX_ERROR_TOK = TC
+            }
+            TK[TC as usize] = 5; TS[TC as usize] = s; TE[TC as usize] = p; TL[TC as usize] = str_line; TC = TC + 1; continue
         }
         // Number (decimal or hex 0x...)
         if c >= 48 && c <= 57 {
@@ -52082,6 +52100,15 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     if precheck_temporal_window_conflict() != 0 { return 1 }
     lex_all()
     if LEX_ERROR_LINE != 0 {
+        if LEX_ERROR_KIND == 5 {
+            // SIO-266: same code and wording as Madaros E273, at the opening quote.
+            print("error[E273]: unterminated string literal at ")
+            print_src_loc_for_tok(LEX_ERROR_TOK)
+            print(":")
+            print_int(LEX_ERROR_COL)
+            print("\n")
+            return 1
+        }
         print("lex error line ")
         print_int(LEX_ERROR_LINE)
         print(": ")
