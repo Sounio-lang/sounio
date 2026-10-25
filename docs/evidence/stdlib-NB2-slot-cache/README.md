@@ -115,3 +115,39 @@ Archive bytes: 425803.
 SHA256: 7188eec9dfa90117e9e2402e81f06a43d29615a30020c485e35dbbb9794289a7.
 
 No public push, PR, main integration or merge is established by these receipts.
+
+## Provenance-hardened replay
+
+Slurm17448/perf02 reruns all 24 native measurements with the same numerical ELFs.
+It finishes successfully only after these additional checks:
+
+- The before kernel has the exact main7ce SHA256
+  26b0d7332c7f9c25d37e4c7993ddf0e43f9491c72caadfa9ee896ef2656f7d56.
+- The measured after kernel equals the canonical kernel beside the gate.
+- Both frozen compiler manifests are identical, contain exactly the two
+  expected a292/895 pins, and pass actual file checksum verification in each
+  source root before and after measurement.
+- Frozen before/after benchmark callers are identical. The canonical callers
+  have identical bodies from line 4 onward; their corrected first 3 test
+  annotation lines are explicitly outside this body identity check.
+- SOURCE.sha256 and ELFS.sha256 both pass final checksum verification after
+  every native measurement. The paired stdout identity checks still apply.
+
+This replay reuses the already qualified numerical binaries. It does not claim
+a fresh compiler or numeric executable build for annotation-only source changes.
+Old packets and their receipts remain unchanged.
+
+| Compiler / workload | Replay median CPU before/after ratio | Replay maximum RSS before / after, KiB |
+|---|---|---|
+| Modular / repeated | 1.796992 | 3608 / 3612 |
+| lean_single / repeated | 2.154185 | 4108 / 4108 |
+| Modular / interleaved control | 1.000000 | 3608 / 3612 |
+| lean_single / interleaved control | 1.000000 | 4108 / 4108 |
+
+All 48 measurements across the original and hardened paired runs remain
+workload-specific observations, without a statistical-confidence claim.
+The new evidence02.tar.gz contains the exact hardened gate/canonical source
+inputs, native stdout/resources and initial/final checksum-verification records.
+It is 113930 bytes; SHA256
+3c028d459d53333d0f9b34b7f3098ff13a9255a6d9b6bb04f055d63de74758a1.
+The internal manifest and the visible external checksum were verified.

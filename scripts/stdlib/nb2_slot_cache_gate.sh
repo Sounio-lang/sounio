@@ -16,9 +16,28 @@ out="$NB2_CACHE_OUTPUT"
 trap 's=$?;echo "$s">"$out/STATUS"' EXIT
 ulimit -s 524288
 ulimit -c 0
+kernel=stdlib/stats/regression/nb2_likelihood.sio
+cmp "$NB2_CACHE_AFTER_ROOT/source/$kernel" "$ROOT/$kernel"
+printf '%s  %s\n' 26b0d7332c7f9c25d37e4c7993ddf0e43f9491c72caadfa9ee896ef2656f7d56 "$NB2_CACHE_BEFORE_ROOT/source/$kernel" | sha256sum -c - >"$out/BASELINE_KERNEL.verify.txt"
+cmp "$NB2_CACHE_BEFORE_ROOT/out/COMPILERS.sha256" "$NB2_CACHE_AFTER_ROOT/out/COMPILERS.sha256"
+for base in "$NB2_CACHE_BEFORE_ROOT" "$NB2_CACHE_AFTER_ROOT";do
+ mapfile -t pins < "$base/out/COMPILERS.sha256"
+ [[ ${#pins[@]} == 2 ]]
+ [[ "${pins[0]%% *}" == a292cc263f3734b1ad6f17a2e6179b8a7874ef3e76d8f5fdfea6859290baf5d3 ]]
+ [[ "${pins[1]%% *}" == 8956946def36004d11ec4eca0d20c75c1e7d3d0b17ee0f0a1fdda9cd6ec0e4cc ]]
+ (cd "$base/source";sha256sum -c "$base/out/COMPILERS.sha256") >>"$out/COMPILER_PINS.verify.initial.txt"
+done
+# The corrected stdout annotation is the sole difference from frozen callers.
+for scenario in profile_main control_main;do
+ caller="tests/stdlib/nb2_slot_cache/$scenario.sio"
+ cmp "$NB2_CACHE_BEFORE_ROOT/source/$caller" "$NB2_CACHE_AFTER_ROOT/source/$caller"
+ cmp <(tail -n +4 "$ROOT/$caller") <(tail -n +4 "$NB2_CACHE_AFTER_ROOT/source/$caller")
+done
 sha256sum "$ROOT/tests/reference/nb2_slot_cache_reference.cpp" "$0" \
  "$NB2_CACHE_BEFORE_ROOT/source/stdlib/stats/regression/nb2_likelihood.sio" \
- "$NB2_CACHE_AFTER_ROOT/source/stdlib/stats/regression/nb2_likelihood.sio" > "$out/SOURCE.sha256"
+ "$NB2_CACHE_AFTER_ROOT/source/stdlib/stats/regression/nb2_likelihood.sio" \
+ "$ROOT/$kernel" "$ROOT/tests/stdlib/nb2_slot_cache/"{profile_main,control_main}.sio \
+ "$NB2_CACHE_BEFORE_ROOT/out/COMPILERS.sha256" "$NB2_CACHE_AFTER_ROOT/out/COMPILERS.sha256" > "$out/SOURCE.sha256"
 id>"$out/identity.txt"
 g++ --version>"$out/compiler.txt"
 g++ -std=c++23 -O2 -Wall -Wextra -Werror "$ROOT/tests/reference/nb2_slot_cache_reference.cpp" -lquadmath -o "$out/reference" >"$out/build.stdout" 2>"$out/build.stderr"
@@ -46,5 +65,10 @@ for engine in madaros lean_single;do
  done
 done
 "$out/reference" --perf "$out/samples.tsv">"$out/performance.stdout" 2>"$out/performance.stderr"
+sha256sum -c "$out/SOURCE.sha256">"$out/SOURCE.verify.final.txt"
+sha256sum -c "$out/ELFS.sha256">"$out/ELFS.verify.final.txt"
+for base in "$NB2_CACHE_BEFORE_ROOT" "$NB2_CACHE_AFTER_ROOT";do
+ (cd "$base/source";sha256sum -c "$base/out/COMPILERS.sha256") >>"$out/COMPILER_PINS.verify.final.txt"
+done
 sha256sum "$out/reference" "$out"/*.stdout "$out"/*.time.txt "$out/samples.tsv">"$out/ARTIFACTS.sha256"
 echo NB2_SLOT_CACHE_PAIRED_GATE_PASS
