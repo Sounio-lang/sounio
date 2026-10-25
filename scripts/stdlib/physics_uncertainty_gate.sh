@@ -25,6 +25,7 @@ compile() {
  record compile "$name" "$rc";[[ $rc == 0 ]] || return "$rc"
  chmod +x "$out/$name.elf"
  sha256sum "$src" "$out/$name.elf" > "$out/$name.identities"
+ sha256sum "$out/$name.elf" >> "$out/ELFS.sha256"
 }
 native() {
  local src=$1 name=$2 marker=$3 rc=0
@@ -44,6 +45,7 @@ native stdlib/physics/sr.sio sr 'SR CHECKED ALL PASS'
 native tests/run-pass/physics_sr_compton.sio compton 'PHYSICS_SR_COMPTON_PASS'
 timeout 180 g++ -std=c++23 -O2 -Wall -Wextra -Werror tests/reference/physics_uncertainty_reference.cpp -o "$out/reference" > "$out/reference.compile.txt" 2>&1
 record cpp-compile reference 0
+sha256sum "$out/reference" >> "$out/ELFS.sha256"
 for mode in checked legacy factor;do
  timeout 30 "$out/reference" "$mode" "$out/$mode.stdout" > "$out/$mode.reference.stdout" 2> "$out/$mode.reference.stderr"
  record concordance "$mode" 0
@@ -86,5 +88,6 @@ done
 sha256sum -c "$out/COMPILER.sha256" > "$out/COMPILER.verify.txt"
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt"
 sha256sum -c "$out/GATE.sha256" > "$out/GATE.verify.txt"
+sha256sum -c "$out/ELFS.sha256" > "$out/ELFS.verify.txt"
 printf 'PHYSICS_UNCERTAINTY_GATE_PASS\n' | tee "$out/FINAL.txt"
 find "$out" -type f ! -name ARTIFACTS.sha256 -print0 | sort -z | xargs -0 sha256sum > "$out/ARTIFACTS.sha256"

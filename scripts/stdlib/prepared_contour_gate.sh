@@ -28,10 +28,12 @@ for src in stdlib_deep_viz_dynamic_contour stdlib_deep_viz_contour_predicate viz
  phase "$src.check" "$SOUC_BIN" check "tests/run-pass/$src.sio"
  phase "$src.compile" "$SOUC_BIN" compile "tests/run-pass/$src.sio" -o "$OUT/$src.elf"
  chmod +x "$OUT/$src.elf";sha256sum "$OUT/$src.elf" > "$OUT/$src.elf.sha256"
+ cat "$OUT/$src.elf.sha256" >> "$OUT/ELFS.sha256"
  phase "$src.native" /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kib=%M\nexit_code=%x' -o "$OUT/$src.resource" timeout 120 "$OUT/$src.elf"
 done
 for ref in prepared_contour_reference deep_viz_dynamic_contour deep_viz_contour_predicate;do
  phase "$ref.build" g++ -std=c++23 -O2 -Wall -Wextra "tests/reference/$ref.cpp" -o "$OUT/$ref"
+ sha256sum "$OUT/$ref" >> "$OUT/ELFS.sha256"
  case "$ref" in prepared_contour_reference) native=viz_prepared_contour;;deep_viz_dynamic_contour)native=stdlib_deep_viz_dynamic_contour;;*)native=stdlib_deep_viz_contour_predicate;;esac
  if [[ $ref == prepared_contour_reference ]];then phase "$ref.concordance" "$OUT/$ref" "$OUT/$native.native.stdout" "$OUT/prepared-canvas.ppm";else phase "$ref.concordance" "$OUT/$ref" "$OUT/$native.native.stdout";fi
 done
@@ -52,7 +54,9 @@ for kind in geometry completion level;do
 done
 if [[ -n ${SOUNIO_SEED_COMPILER:-} ]];then
  phase strict-seed "$SOUNIO_SEED_COMPILER" tests/run-pass/viz_prepared_contour.sio "$OUT/strict-seed.elf"
+ sha256sum "$OUT/strict-seed.elf" >> "$OUT/ELFS.sha256"
  sha256sum "$SOUNIO_SEED_COMPILER" > "$OUT/SEED_COMPILER.sha256"
 fi
 phase inputs-unchanged sha256sum -c "$OUT/INPUTS.sha256"
+phase executables-unchanged sha256sum -c "$OUT/ELFS.sha256"
 echo PREPARED_CONTOUR_GATE_PASS

@@ -22,15 +22,17 @@ build_both(){
  step "$name.check" timeout 180 bin/souc check "$src"
  step "$name.compile" timeout 180 bin/souc compile "$src" -o "$out/$name.elf"
  chmod +x "$out/$name.elf"
+ sha256sum "$out/$name.elf" >> "$out/ELFS.sha256"
  step "$name.native" /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kib=%M\nexit_code=%x' -o "$out/$name.resource" timeout 300 "$out/$name.elf"
  step "$name.seed-compile" timeout 180 "$SEED_RAW_BIN" "$src" "$out/$name.seed.elf"
  chmod +x "$out/$name.seed.elf"
+ sha256sum "$out/$name.seed.elf" >> "$out/ELFS.sha256"
  step "$name.seed-native" /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kib=%M\nexit_code=%x' -o "$out/$name.seed.resource" timeout 300 "$out/$name.seed.elf"
- sha256sum "$out/$name.elf" "$out/$name.seed.elf" >> "$out/ELFS.sha256"
 }
 for stem in genomics_named_stream genomics_count_identity;do
  step "$stem.build" g++ -std=c++23 -O2 -Wall -Wextra -Werror "tests/reference/${stem}_reference.cpp" -o "$out/$stem.reference"
  sha256sum "$out/$stem.reference" >> "$out/REFERENCES.sha256"
+ sha256sum "$out/$stem.reference" >> "$out/ELFS.sha256"
 done
 build_both slot tests/stdlib/genomics_counts/named_slot.sio
 build_both smoke tests/stdlib/genomics_counts/named_smoke.sio
@@ -65,4 +67,5 @@ sed '/^NAMED_BENCH_PASS$/d' "$out/bench100000.native.stdout" > "$out/mutant-comp
 rc=0;step mutant-completion "$out/genomics_named_stream.reference" --verify 100000 "$out/mutant-completion.input" || rc=$?
 [[ $rc == 9 ]]
 step unchanged sha256sum -c "$out/INPUTS.sha256"
+step executable-integrity sha256sum -c "$out/ELFS.sha256"
 echo NAMED_STREAM_GATE_PASS
