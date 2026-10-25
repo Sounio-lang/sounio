@@ -1,47 +1,56 @@
 use math::pure::{is_finite}
 pub struct ContourSign {pub status:i64,pub sign:i64}
-struct ContourDyadic {sig:i64,exponent:i64,sign:i64}
-fn contour_dyadic(value:f64)->ContourDyadic with Mut,Div {
- if value==0.0 {return ContourDyadic{sig:0,exponent:0,sign:0}}
+pub struct ContourSignSlot {
+ pub status:i64,pub sign:i64,
+ sig:[i64;5],exponent:[i64;5],polarity:[i64;5],
+ positive:[i64;180],negative:[i64;180],product:[i64;6]
+}
+pub fn contour_sign_slot()->ContourSignSlot {
+ ContourSignSlot{status:1,sign:0,sig:[0;5],exponent:[0;5],polarity:[0;5],positive:[0;180],negative:[0;180],product:[0;6]}
+}
+fn contour_dyadic_into(value:f64,index:i64,s:&!ContourSignSlot) with Mut,Div,Panic {
+ s.sig[index as usize]=0;s.exponent[index as usize]=0;s.polarity[index as usize]=0
+ if value==0.0 {return}
  var v=if value<0.0 {-value}else{value}
  var exponent:i64=0
  while v>=2.0 {v=v/2.0;exponent=exponent+1}
  while v<1.0 {v=v*2.0;exponent=exponent-1}
- ContourDyadic{sig:(v*4503599627370496.0) as i64,exponent:exponent-52,sign:if value<0.0 {-1}else{1}}
+ s.sig[index as usize]=(v*4503599627370496.0) as i64
+ s.exponent[index as usize]=exponent-52;s.polarity[index as usize]=if value<0.0 {-1}else{1}
 }
-fn contour_product(a:&ContourDyadic,b:&ContourDyadic,coefficient:i64,positive:&![i64;180],negative:&![i64;180]) with Mut,Div,Panic {
- if a.sig==0 || b.sig==0 {return}
+fn contour_product(ai:i64,bi:i64,coefficient:i64,s:&!ContourSignSlot) with Mut,Div,Panic {
+ let asig=s.sig[ai as usize];let bsig=s.sig[bi as usize]
+ if asig==0 || bsig==0 {return}
  let radix:i64=16777216
- let aa:[i64;3]=[a.sig%radix,(a.sig/radix)%radix,a.sig/281474976710656]
- let bb:[i64;3]=[b.sig%radix,(b.sig/radix)%radix,b.sig/281474976710656]
- var product:[i64;6]=[0;6]
+ var reset:i64=0
+ while reset<6 {s.product[reset as usize]=0;reset=reset+1}
  var i:i64=0
  while i<3 {
   var j:i64=0
-  while j<3 {product[(i+j) as usize]=product[(i+j) as usize]+aa[i as usize]*bb[j as usize];j=j+1}
+  while j<3 {s.product[(i+j) as usize]=s.product[(i+j) as usize]+(if i==0 {asig%radix}else if i==1 {(asig/radix)%radix}else{asig/281474976710656})*(if j==0 {bsig%radix}else if j==1 {(bsig/radix)%radix}else{bsig/281474976710656});j=j+1}
   i=i+1
  }
  i=0
- while i<5 {let carry=product[i as usize]/radix;product[i as usize]=product[i as usize]%radix;product[(i+1) as usize]=product[(i+1) as usize]+carry;i=i+1}
- let shift=a.exponent+b.exponent+2252
+ while i<5 {let carry=s.product[i as usize]/radix;s.product[i as usize]=s.product[i as usize]%radix;s.product[(i+1) as usize]=s.product[(i+1) as usize]+carry;i=i+1}
+ let shift=s.exponent[ai as usize]+s.exponent[bi as usize]+2252
  let offset=shift/24
  let remainder=shift%24
  var factor:i64=1
  i=0
  while i<remainder {factor=factor*2;i=i+1}
- let sign=a.sign*b.sign*coefficient
+ let sign=s.polarity[ai as usize]*s.polarity[bi as usize]*coefficient
  i=0
  while i<6 {
-  let digit=product[i as usize]
+  let digit=s.product[i as usize]
   if digit!=0 {
    let scaled=digit*factor
    let index=offset+i
    assert(index>=0 && index<180)
-   if sign>0 {positive[index as usize]=positive[index as usize]+scaled%radix}else{negative[index as usize]=negative[index as usize]+scaled%radix}
+   if sign>0 {s.positive[index as usize]=s.positive[index as usize]+scaled%radix}else{s.negative[index as usize]=s.negative[index as usize]+scaled%radix}
    let high=scaled/radix
    if high!=0 {
     assert(index+1<180)
-    if sign>0 {positive[(index+1) as usize]=positive[(index+1) as usize]+high}else{negative[(index+1) as usize]=negative[(index+1) as usize]+high}
+    if sign>0 {s.positive[(index+1) as usize]=s.positive[(index+1) as usize]+high}else{s.negative[(index+1) as usize]=s.negative[(index+1) as usize]+high}
    }
   }
   i=i+1
@@ -49,28 +58,37 @@ fn contour_product(a:&ContourDyadic,b:&ContourDyadic,coefficient:i64,positive:&!
 }
 // Exact sign of (a-level)(c-level)-(b-level)(d-level) for finite f64 inputs.
 // a,b,c,d follow bottom-left,bottom-right,top-right,top-left ordering.
-pub fn contour_saddle_sign(a:f64,b:f64,c:f64,d:f64,level:f64)->ContourSign with Mut,Div,Panic {
- if !is_finite(a) || !is_finite(b) || !is_finite(c) || !is_finite(d) || !is_finite(level) {return ContourSign{status:1,sign:0}}
- let aa=contour_dyadic(a);let bb=contour_dyadic(b);let cc=contour_dyadic(c);let dd=contour_dyadic(d);let ll=contour_dyadic(level)
- var positive:[i64;180]=[0;180];var negative:[i64;180]=[0;180]
- contour_product(&aa,&cc,1,&!positive,&!negative)
- contour_product(&bb,&dd,-1,&!positive,&!negative)
- contour_product(&ll,&aa,-1,&!positive,&!negative)
- contour_product(&ll,&cc,-1,&!positive,&!negative)
- contour_product(&ll,&bb,1,&!positive,&!negative)
- contour_product(&ll,&dd,1,&!positive,&!negative)
+pub fn contour_saddle_sign_into(a:f64,b:f64,c:f64,d:f64,level:f64,s:&!ContourSignSlot)->i64 with Mut,Div,Panic {
+ s.status=1;s.sign=0
+ if !is_finite(a) || !is_finite(b) || !is_finite(c) || !is_finite(d) || !is_finite(level) {return s.status}
+ contour_dyadic_into(a,0,s);contour_dyadic_into(b,1,s);contour_dyadic_into(c,2,s);contour_dyadic_into(d,3,s);contour_dyadic_into(level,4,s)
+ var reset:i64=0
+ while reset<180 {s.positive[reset as usize]=0;s.negative[reset as usize]=0;reset=reset+1}
+ contour_product(0,2,1,s)
+ contour_product(1,3,-1,s)
+ contour_product(4,0,-1,s)
+ contour_product(4,2,-1,s)
+ contour_product(4,1,1,s)
+ contour_product(4,3,1,s)
+ s.status=0
  var i:i64=0
  while i<179 {
-  let p=positive[i as usize]/16777216;let n=negative[i as usize]/16777216
-  positive[i as usize]=positive[i as usize]%16777216;negative[i as usize]=negative[i as usize]%16777216
-  positive[(i+1) as usize]=positive[(i+1) as usize]+p;negative[(i+1) as usize]=negative[(i+1) as usize]+n
+  let p=s.positive[i as usize]/16777216;let n=s.negative[i as usize]/16777216
+  s.positive[i as usize]=s.positive[i as usize]%16777216;s.negative[i as usize]=s.negative[i as usize]%16777216
+  s.positive[(i+1) as usize]=s.positive[(i+1) as usize]+p;s.negative[(i+1) as usize]=s.negative[(i+1) as usize]+n
   i=i+1
  }
  i=179
  while i>=0 {
-  if positive[i as usize]>negative[i as usize] {return ContourSign{status:0,sign:1}}
-  if positive[i as usize]<negative[i as usize] {return ContourSign{status:0,sign:-1}}
+  if s.positive[i as usize]>s.negative[i as usize] {s.sign=1;return 0}
+  if s.positive[i as usize]<s.negative[i as usize] {s.sign= -1;return 0}
   i=i-1
  }
- ContourSign{status:0,sign:0}
+ 0
+}
+
+pub fn contour_saddle_sign(a:f64,b:f64,c:f64,d:f64,level:f64)->ContourSign with Mut,Div,Panic {
+ var work=contour_sign_slot()
+ let ignored=contour_saddle_sign_into(a,b,c,d,level,&!work)
+ ContourSign{status:work.status,sign:work.sign}
 }

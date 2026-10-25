@@ -6,32 +6,36 @@ use display::canvas::{Canvas}
 use display::canvas_ext::{PixelScissor,canvas_draw_line_aa_scissored}
 use viz::dynamic_plot::{DynamicPlotSpec}
 use viz::scatter::{scatter_geometry}
-use viz::uncertainty::{uncertainty_domain,uncertainty_segment,uncertainty_raster_segment}
-use viz::contour_predicate::{contour_saddle_sign}
+use viz::uncertainty::{UncertaintySegmentSlot,uncertainty_segment_slot,uncertainty_domain,uncertainty_segment_into,uncertainty_raster_segment_into}
+use viz::contour_predicate::{ContourSignSlot,contour_sign_slot,contour_saddle_sign_into}
 pub struct DynamicContourResult {pub status:i64,pub input_cells:i64,pub work_required:i64,pub segments_required:i64,pub painted:i64,pub masked_cells:i64,pub flat_cells:i64,pub degenerate_segments:i64}
 struct ContourPoint {status:i64,x:f64,y:f64}
-struct ContourCell {status:i64,n:i64,flat:i64,degenerate:i64,ax:[f64;2],ay:[f64;2],bx:[f64;2],by:[f64;2]}
+struct ContourCell {status:i64,n:i64,flat:i64,degenerate:i64,predicate_used:i64,ax:[f64;2],ay:[f64;2],bx:[f64;2],by:[f64;2],values:[f64;4],xx:[f64;4],yy:[f64;4],crossed:[i64;4],points_x:[f64;4],points_y:[f64;4],point:ContourPoint,saddle:ContourSignSlot}
+fn cc_slot()->ContourCell {
+ ContourCell{status:0,n:0,flat:0,degenerate:0,predicate_used:0,ax:[0.0;2],ay:[0.0;2],bx:[0.0;2],by:[0.0;2],values:[0.0;4],xx:[0.0;4],yy:[0.0;4],crossed:[0;4],points_x:[0.0;4],points_y:[0.0;4],point:ContourPoint{status:2,x:0.0,y:0.0},saddle:contour_sign_slot()}
+}
 fn cc_add(cell:&!ContourCell,ax:f64,ay:f64,bx:f64,by:f64) with Mut,Panic {
  if ax==bx && ay==by {cell.degenerate=cell.degenerate+1;return}
  assert(cell.n<2)
  let i=cell.n as usize
  cell.ax[i]=ax;cell.ay[i]=ay;cell.bx[i]=bx;cell.by[i]=by;cell.n=cell.n+1
 }
-fn cc_edge(edge:i64,xlo:f64,xhi:f64,ylo:f64,yhi:f64,values:&[f64;4],level:f64)->ContourPoint with Mut,Div,Panic {
- let xx:[f64;4]=[xlo,xhi,xhi,xlo];let yy:[f64;4]=[ylo,ylo,yhi,yhi]
+fn cc_edge_into(edge:i64,xlo:f64,xhi:f64,ylo:f64,yhi:f64,level:f64,cell:&!ContourCell)->i64 with Mut,Div,Panic {
+ cell.point.status=2;cell.point.x=0.0;cell.point.y=0.0
  let next=(edge+1)%4
- let a=values[edge as usize];let b=values[next as usize]
- if a==level {return ContourPoint{status:0,x:xx[edge as usize],y:yy[edge as usize]}}
- if b==level {return ContourPoint{status:0,x:xx[next as usize],y:yy[next as usize]}}
+ let a=cell.values[edge as usize];let b=cell.values[next as usize]
+ if a==level {cell.point.status=0;cell.point.x=cell.xx[edge as usize];cell.point.y=cell.yy[edge as usize];return 0}
+ if b==level {cell.point.status=0;cell.point.x=cell.xx[next as usize];cell.point.y=cell.yy[next as usize];return 0}
  var denominator=b-a;var numerator=level-a
  if !is_finite(denominator) {denominator=b*0.5-a*0.5;numerator=level*0.5-a*0.5}
- if denominator==0.0 || !is_finite(denominator) || !is_finite(numerator) {return ContourPoint{status:2,x:0.0,y:0.0}}
+ if denominator==0.0 || !is_finite(denominator) || !is_finite(numerator) {return 2}
  let t=numerator/denominator
- if !is_finite(t) || t<0.0 || t>1.0 {return ContourPoint{status:2,x:0.0,y:0.0}}
- let x=xx[edge as usize]+t*(xx[next as usize]-xx[edge as usize])
- let y=yy[edge as usize]+t*(yy[next as usize]-yy[edge as usize])
- if !is_finite(x) || !is_finite(y) {return ContourPoint{status:2,x:0.0,y:0.0}}
- ContourPoint{status:0,x:x,y:y}
+ if !is_finite(t) || t<0.0 || t>1.0 {return 2}
+ let x=cell.xx[edge as usize]+t*(cell.xx[next as usize]-cell.xx[edge as usize])
+ let y=cell.yy[edge as usize]+t*(cell.yy[next as usize]-cell.yy[edge as usize])
+ if !is_finite(x) || !is_finite(y) {return 2}
+ cell.point.status=0;cell.point.x=x;cell.point.y=y
+ 0
 }
 fn cc_nonflat(b:&NumericBuffer,m:&NumericMatrix,row:i64,col:i64,level:f64)->bool {
  let a=numeric_matrix_get(b,m,row,col);let c=numeric_matrix_get(b,m,row+1,col+1)
@@ -43,118 +47,134 @@ fn cc_owns(edge:i64,row:i64,col:i64,cols:i64,b:&NumericBuffer,m:&NumericMatrix,m
  if edge==3 {if col>0 {if integer_buffer_at(mask,row*(cols-1)+col-1)==1 {if cc_nonflat(b,m,row,col-1,level) {return false}}}}
  true
 }
-fn cc_cell(xs:&NumericBuffer,ys:&NumericBuffer,b:&NumericBuffer,m:&NumericMatrix,mask:&IntegerBuffer,row:i64,col:i64,level:f64)->ContourCell with Mut,Div,Panic {
- var cell=ContourCell{status:0,n:0,flat:0,degenerate:0,ax:[0.0;2],ay:[0.0;2],bx:[0.0;2],by:[0.0;2]}
+fn cc_cell_into(xs:&NumericBuffer,ys:&NumericBuffer,b:&NumericBuffer,m:&NumericMatrix,mask:&IntegerBuffer,row:i64,col:i64,level:f64,cell:&!ContourCell)->i64 with Mut,Div,Panic {
+ cell.status=0;cell.n=0;cell.flat=0;cell.degenerate=0;cell.predicate_used=0
  let va=numeric_matrix_get(b,m,row,col);let vb=numeric_matrix_get(b,m,row,col+1)
  let vc=numeric_matrix_get(b,m,row+1,col+1);let vd=numeric_matrix_get(b,m,row+1,col)
- let values:[f64;4]=[va.value,vb.value,vc.value,vd.value]
+ cell.values[0]=va.value;cell.values[1]=vb.value;cell.values[2]=vc.value;cell.values[3]=vd.value
  let xlo=numeric_buffer_at(xs,col);let xhi=numeric_buffer_at(xs,col+1)
  let ylo=numeric_buffer_at(ys,row);let yhi=numeric_buffer_at(ys,row+1)
- let xx:[f64;4]=[xlo,xhi,xhi,xlo];let yy:[f64;4]=[ylo,ylo,yhi,yhi]
- if va.value==level && vb.value==level && vc.value==level && vd.value==level {cell.flat=1;return cell}
+ cell.xx[0]=xlo;cell.xx[1]=xhi;cell.xx[2]=xhi;cell.xx[3]=xlo
+ cell.yy[0]=ylo;cell.yy[1]=ylo;cell.yy[2]=yhi;cell.yy[3]=yhi
+ if va.value==level && vb.value==level && vc.value==level && vd.value==level {cell.flat=1;return cell.status}
  var flat_count:i64=0;var flat_edge:i64= -1
  var edge:i64=0
  while edge<4 {
   let next=(edge+1)%4
-  if values[edge as usize]==level {if values[next as usize]==level {
+  if cell.values[edge as usize]==level {if cell.values[next as usize]==level {
    flat_count=flat_count+1;flat_edge=edge
-   if cc_owns(edge,row,col,numeric_buffer_len(xs),b,m,mask,level) {cc_add(&!cell,xx[edge as usize],yy[edge as usize],xx[next as usize],yy[next as usize])}
+   if cc_owns(edge,row,col,numeric_buffer_len(xs),b,m,mask,level) {cc_add(cell,cell.xx[edge as usize],cell.yy[edge as usize],cell.xx[next as usize],cell.yy[next as usize])}
   }}
   edge=edge+1
  }
  if flat_count>0 {
   if flat_count==1 {
    let opposite=(flat_edge+2)%4;let next=(opposite+1)%4
-   let a=values[opposite as usize];let c=values[next as usize]
+   let a=cell.values[opposite as usize];let c=cell.values[next as usize]
    if (a<level && c>level) || (a>level && c<level) {
-    let point=cc_edge(opposite,xlo,xhi,ylo,yhi,&values,level)
-    if point.status!=0 {cell.status=2;return cell}
-    if flat_edge==0 {cc_add(&!cell,point.x,point.y,point.x,ylo)}
-    if flat_edge==2 {cc_add(&!cell,point.x,point.y,point.x,yhi)}
-    if flat_edge==1 {cc_add(&!cell,point.x,point.y,xhi,point.y)}
-    if flat_edge==3 {cc_add(&!cell,point.x,point.y,xlo,point.y)}
+    let point_status=cc_edge_into(opposite,xlo,xhi,ylo,yhi,level,cell)
+    if point_status!=0 {cell.status=2;return cell.status}
+    if flat_edge==0 {cc_add(cell,cell.point.x,cell.point.y,cell.point.x,ylo)}
+    if flat_edge==2 {cc_add(cell,cell.point.x,cell.point.y,cell.point.x,yhi)}
+    if flat_edge==1 {cc_add(cell,cell.point.x,cell.point.y,xhi,cell.point.y)}
+    if flat_edge==3 {cc_add(cell,cell.point.x,cell.point.y,xlo,cell.point.y)}
    }
   }
-  return cell
+  return cell.status
  }
- var crossed:[i64;4]=[0;4];var count:i64=0
+ var count:i64=0
  edge=0
  while edge<4 {
   let next=(edge+1)%4
-  let high=values[edge as usize]>=level;let next_high=values[next as usize]>=level
-  if high!=next_high {crossed[count as usize]=edge;count=count+1}
+  let high=cell.values[edge as usize]>=level;let next_high=cell.values[next as usize]>=level
+  if high!=next_high {cell.crossed[count as usize]=edge;count=count+1}
   edge=edge+1
  }
- if count==0 {return cell}
- var points_x:[f64;4]=[0.0;4];var points_y:[f64;4]=[0.0;4]
+ if count==0 {return cell.status}
  var i:i64=0
  while i<count {
-  let point=cc_edge(crossed[i as usize],xlo,xhi,ylo,yhi,&values,level)
-  if point.status!=0 {cell.status=2;return cell}
-  points_x[i as usize]=point.x;points_y[i as usize]=point.y
+  let point_status=cc_edge_into(cell.crossed[i as usize],xlo,xhi,ylo,yhi,level,cell)
+  if point_status!=0 {cell.status=2;return cell.status}
+  cell.points_x[i as usize]=cell.point.x;cell.points_y[i as usize]=cell.point.y
   i=i+1
  }
- if count==2 {cc_add(&!cell,points_x[0],points_y[0],points_x[1],points_y[1]);return cell}
- if count!=4 {cell.status=2;return cell}
- let saddle=contour_saddle_sign(va.value,vb.value,vc.value,vd.value,level)
- if saddle.status!=0 {cell.status=2;return cell}
- if saddle.sign>0 {cc_add(&!cell,points_x[0],points_y[0],points_x[1],points_y[1]);cc_add(&!cell,points_x[2],points_y[2],points_x[3],points_y[3])}
- if saddle.sign<0 {cc_add(&!cell,points_x[0],points_y[0],points_x[3],points_y[3]);cc_add(&!cell,points_x[1],points_y[1],points_x[2],points_y[2])}
- if saddle.sign==0 {cc_add(&!cell,points_x[0],points_y[0],points_x[2],points_y[2]);cc_add(&!cell,points_x[1],points_y[1],points_x[3],points_y[3])}
- cell
+ if count==2 {cc_add(cell,cell.points_x[0],cell.points_y[0],cell.points_x[1],cell.points_y[1]);return cell.status}
+ if count!=4 {cell.status=2;return cell.status}
+ cell.predicate_used=1
+ let saddle_status=contour_saddle_sign_into(va.value,vb.value,vc.value,vd.value,level,&!cell.saddle)
+ if saddle_status!=0 {cell.status=2;return cell.status}
+ if cell.saddle.sign>0 {cc_add(cell,cell.points_x[0],cell.points_y[0],cell.points_x[1],cell.points_y[1]);cc_add(cell,cell.points_x[2],cell.points_y[2],cell.points_x[3],cell.points_y[3])}
+ if cell.saddle.sign<0 {cc_add(cell,cell.points_x[0],cell.points_y[0],cell.points_x[3],cell.points_y[3]);cc_add(cell,cell.points_x[1],cell.points_y[1],cell.points_x[2],cell.points_y[2])}
+ if cell.saddle.sign==0 {cc_add(cell,cell.points_x[0],cell.points_y[0],cell.points_x[2],cell.points_y[2]);cc_add(cell,cell.points_x[1],cell.points_y[1],cell.points_x[3],cell.points_y[3])}
+ cell.status
+}
+// Reusable preparation scratch. No owned input pointers escape a call.
+pub struct PreparedContourWork {
+ pub status:i64,pub input_cells:i64,pub work_required:i64,pub segments_required:i64,
+ pub painted:i64,pub masked_cells:i64,pub flat_cells:i64,pub degenerate_segments:i64,
+ pub cell_evaluations:i64,pub predicate_evaluations:i64,pub levels_required:i64,pub capacity_known:bool,
+ cell:ContourCell,segment:UncertaintySegmentSlot,scissor:PixelScissor
+}
+pub fn prepared_contour_work()->PreparedContourWork {
+ PreparedContourWork{status:1,input_cells:0,work_required:0,segments_required:0,painted:0,masked_cells:0,flat_cells:0,degenerate_segments:0,cell_evaluations:0,predicate_evaluations:0,levels_required:0,capacity_known:false,cell:cc_slot(),segment:uncertainty_segment_slot(),scissor:PixelScissor{left:0,top:0,right:0,bottom:0}}
 }
 fn cc_preflight(s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffer,b:&NumericBuffer,m:&NumericMatrix,mask:&IntegerBuffer,levels:&NumericBuffer,maxwork:i64,maxsegments:i64)->DynamicContourResult with Mut,Div,Panic {
- var out=DynamicContourResult{status:1,input_cells:0,work_required:0,segments_required:0,painted:0,masked_cells:0,flat_cells:0,degenerate_segments:0}
- if !scatter_geometry(s.x,s.y,s.w,s.h) || !uncertainty_domain(s.xmin,s.xmax,s.ymin,s.ymax) {return out}
- if s.xmin>=s.xmax || s.ymin>=s.ymax || s.r<0 || s.r>255 || s.g<0 || s.g>255 || s.b<0 || s.b>255 || s.interval_kind!=0 || s.level!=0.0 || maxwork<0 || maxsegments<0 {return out}
+ var out=prepared_contour_work()
+ let ignored=cc_preflight_into(s,xs,ys,b,m,mask,levels,maxwork,maxsegments,&!out)
+ DynamicContourResult{status:out.status,input_cells:out.input_cells,work_required:out.work_required,segments_required:out.segments_required,painted:out.painted,masked_cells:out.masked_cells,flat_cells:out.flat_cells,degenerate_segments:out.degenerate_segments}
+}
+fn cc_preflight_into(s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffer,b:&NumericBuffer,m:&NumericMatrix,mask:&IntegerBuffer,levels:&NumericBuffer,maxwork:i64,maxsegments:i64,out:&!PreparedContourWork)->i64 with Mut,Div,Panic {
+ out.status=1;out.input_cells=0;out.work_required=0;out.segments_required=0;out.painted=0;out.masked_cells=0;out.flat_cells=0;out.degenerate_segments=0;out.cell_evaluations=0;out.predicate_evaluations=0;out.levels_required=0;out.capacity_known=false
+ if !scatter_geometry(s.x,s.y,s.w,s.h) || !uncertainty_domain(s.xmin,s.xmax,s.ymin,s.ymax) {return out.status}
+ if s.xmin>=s.xmax || s.ymin>=s.ymax || s.r<0 || s.r>255 || s.g<0 || s.g>255 || s.b<0 || s.b>255 || s.interval_kind!=0 || s.level!=0.0 || maxwork<0 || maxsegments<0 {return out.status}
  out.status=2
- if numeric_buffer_status(xs)!=0 || numeric_buffer_status(ys)!=0 || numeric_buffer_status(b)!=0 || numeric_matrix_status(m)!=0 || integer_buffer_status(mask)!=0 || numeric_buffer_status(levels)!=0 {return out}
+ if numeric_buffer_status(xs)!=0 || numeric_buffer_status(ys)!=0 || numeric_buffer_status(b)!=0 || numeric_matrix_status(m)!=0 || integer_buffer_status(mask)!=0 || numeric_buffer_status(levels)!=0 {return out.status}
  let cols=numeric_buffer_len(xs);let rows=numeric_buffer_len(ys);let nl=numeric_buffer_len(levels)
- if cols<2 || rows<2 || nl<1 {return out}
- if numeric_matrix_rows(m)!=rows || numeric_matrix_cols(m)!=cols {return out}
- if rows-1>9223372036854775807/(cols-1) {return out}
+ if cols<2 || rows<2 || nl<1 {return out.status}
+ if numeric_matrix_rows(m)!=rows || numeric_matrix_cols(m)!=cols {return out.status}
+ if rows-1>9223372036854775807/(cols-1) {return out.status}
  let cells=(rows-1)*(cols-1)
- if integer_buffer_len(mask)!=cells {return out}
+ if integer_buffer_len(mask)!=cells {return out.status}
  out.input_cells=cells;out.status=6
- if nl>9223372036854775807/cells {out.work_required= -1;return out}
+ if nl>9223372036854775807/cells {out.work_required= -1;return out.status}
  out.work_required=cells*nl
- if out.work_required>maxwork || out.work_required>4611686018427387903 {return out}
+ if out.work_required>maxwork || out.work_required>4611686018427387903 {return out.status}
  out.status=3
  var i:i64=0
  while i<cols {
   let value=numeric_buffer_at(xs,i)
-  if !is_finite(value) {return out}
-  if i>0 {if value<=numeric_buffer_at(xs,i-1) {return out}}
+  if !is_finite(value) {return out.status}
+  if i>0 {if value<=numeric_buffer_at(xs,i-1) {return out.status}}
   i=i+1
  }
  i=0
  while i<rows {
   let value=numeric_buffer_at(ys,i)
-  if !is_finite(value) {return out}
-  if i>0 {if value<=numeric_buffer_at(ys,i-1) {return out}}
+  if !is_finite(value) {return out.status}
+  if i>0 {if value<=numeric_buffer_at(ys,i-1) {return out.status}}
   i=i+1
  }
- if !is_finite(numeric_buffer_at(xs,cols-1)-numeric_buffer_at(xs,0)) || !is_finite(numeric_buffer_at(ys,rows-1)-numeric_buffer_at(ys,0)) {return out}
+ if !is_finite(numeric_buffer_at(xs,cols-1)-numeric_buffer_at(xs,0)) || !is_finite(numeric_buffer_at(ys,rows-1)-numeric_buffer_at(ys,0)) {return out.status}
  i=0
  while i<nl {
   let value=numeric_buffer_at(levels,i)
-  if !is_finite(value) {return out}
-  if i>0 {if value<=numeric_buffer_at(levels,i-1) {return out}}
+  if !is_finite(value) {return out.status}
+  if i>0 {if value<=numeric_buffer_at(levels,i-1) {return out.status}}
   i=i+1
  }
  let last=numeric_matrix_get(b,m,rows-1,cols-1)
- if last.status!=0 {out.status=2;return out}
+ if last.status!=0 {out.status=2;return out.status}
  var row:i64=0
  var masked:i64=0
  while row<rows-1 {
   var col:i64=0
   while col<cols-1 {
    let flag=integer_buffer_at(mask,row*(cols-1)+col)
-   if flag!=0 && flag!=1 {return out}
+   if flag!=0 && flag!=1 {return out.status}
    if flag==0 {masked=masked+1}else{
     let a=numeric_matrix_get(b,m,row,col);let c=numeric_matrix_get(b,m,row+1,col+1)
     let d=numeric_matrix_get(b,m,row+1,col);let e=numeric_matrix_get(b,m,row,col+1)
-    if !is_finite(a.value) || !is_finite(c.value) || !is_finite(d.value) || !is_finite(e.value) {return out}
+    if !is_finite(a.value) || !is_finite(c.value) || !is_finite(d.value) || !is_finite(e.value) {return out.status}
    }
    col=col+1
   }
@@ -168,15 +188,17 @@ fn cc_preflight(s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffer,b:&Numeri
    var col:i64=0
    while col<cols-1 {
     if integer_buffer_at(mask,row*(cols-1)+col)==1 {
-     let cell=cc_cell(xs,ys,b,m,mask,row,col,numeric_buffer_at(levels,li))
+     let cell_status=cc_cell_into(xs,ys,b,m,mask,row,col,numeric_buffer_at(levels,li),&!out.cell)
+     out.cell_evaluations=out.cell_evaluations+1
+     out.predicate_evaluations=out.predicate_evaluations+out.cell.predicate_used
      out.status=5
-     if cell.status!=0 {return out}
-     if cell.n>9223372036854775807-required {return out}
-     required=required+cell.n;flats=flats+cell.flat;degenerate=degenerate+cell.degenerate
+     if cell_status!=0 {return out.status}
+     if out.cell.n>9223372036854775807-required {return out.status}
+     required=required+out.cell.n;flats=flats+out.cell.flat;degenerate=degenerate+out.cell.degenerate
      var segment:i64=0
-     while segment<cell.n {
-      let clipped=uncertainty_segment(cell.ax[segment as usize],cell.ay[segment as usize],cell.bx[segment as usize],cell.by[segment as usize],s.xmin,s.xmax,s.ymin,s.ymax,s.x,s.y,s.w,s.h)
-      if clipped.status==2 {return out}
+     while segment<out.cell.n {
+      let clipped_status=uncertainty_segment_into(out.cell.ax[segment as usize],out.cell.ay[segment as usize],out.cell.bx[segment as usize],out.cell.by[segment as usize],s.xmin,s.xmax,s.ymin,s.ymax,s.x,s.y,s.w,s.h,&!out.segment)
+      if clipped_status==2 {return out.status}
       segment=segment+1
      }
     }
@@ -186,13 +208,16 @@ fn cc_preflight(s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffer,b:&Numeri
   }
   li=li+1
  }
- out.masked_cells=masked;out.flat_cells=flats;out.degenerate_segments=degenerate;out.segments_required=required
+ out.masked_cells=masked;out.flat_cells=flats;out.degenerate_segments=degenerate;out.segments_required=required;out.levels_required=nl;out.capacity_known=true
  out.status=7
- if required>maxsegments {return out}
+ if required>maxsegments {return out.status}
  out.status=0
- out
+ 0
 }
 pub fn dynamic_contour_canvas(c:&!Canvas,s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffer,b:&NumericBuffer,m:&NumericMatrix,mask:&IntegerBuffer,levels:&NumericBuffer,maxwork:i64,maxsegments:i64)->DynamicContourResult with Mut,Div,Panic {
+ var cell=cc_slot()
+ var projection=uncertainty_segment_slot()
+ var raster_work=uncertainty_segment_slot()
  var out=cc_preflight(s,xs,ys,b,m,mask,levels,maxwork,maxsegments)
  if out.status!=0 {return out}
  if c.width<1 || c.height<1 || c.width>1000000 || c.height>1000000 || (c.pixels as i64)<=0 {out.status=1;return out}
@@ -207,13 +232,13 @@ pub fn dynamic_contour_canvas(c:&!Canvas,s:&DynamicPlotSpec,xs:&NumericBuffer,ys
    var col:i64=0
    while col<cols-1 {
     if integer_buffer_at(mask,row*(cols-1)+col)==1 {
-     let cell=cc_cell(xs,ys,b,m,mask,row,col,numeric_buffer_at(levels,li))
+     let ignored=cc_cell_into(xs,ys,b,m,mask,row,col,numeric_buffer_at(levels,li),&!cell)
      var segment:i64=0
      while segment<cell.n {
-      let clipped=uncertainty_segment(cell.ax[segment as usize],cell.ay[segment as usize],cell.bx[segment as usize],cell.by[segment as usize],s.xmin,s.xmax,s.ymin,s.ymax,s.x,s.y,s.w,s.h)
-      if clipped.status==0 {
-       let raster=uncertainty_raster_segment(clipped.x0,clipped.y0,clipped.x1,clipped.y1,sc.left,sc.top,sc.right,sc.bottom)
-       if raster.status==0 {canvas_draw_line_aa_scissored(c,&sc,raster.x0,raster.y0,raster.x1,raster.y1,s.r,s.g,s.b);out.painted=out.painted+1}
+      let clipped_status=uncertainty_segment_into(cell.ax[segment as usize],cell.ay[segment as usize],cell.bx[segment as usize],cell.by[segment as usize],s.xmin,s.xmax,s.ymin,s.ymax,s.x,s.y,s.w,s.h,&!projection)
+      if clipped_status==0 {
+       let raster_status=uncertainty_raster_segment_into(projection.x0,projection.y0,projection.x1,projection.y1,sc.left,sc.top,sc.right,sc.bottom,&!raster_work)
+       if raster_status==0 {canvas_draw_line_aa_scissored(c,&sc,raster_work.x0,raster_work.y0,raster_work.x1,raster_work.y1,s.r,s.g,s.b);out.painted=out.painted+1}
       }
       segment=segment+1
      }
@@ -227,6 +252,8 @@ pub fn dynamic_contour_canvas(c:&!Canvas,s:&DynamicPlotSpec,xs:&NumericBuffer,ys
  out
 }
 pub fn dynamic_contour_svg(s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffer,b:&NumericBuffer,m:&NumericMatrix,mask:&IntegerBuffer,levels:&NumericBuffer,maxwork:i64,maxsegments:i64,id:i64)->DynamicContourResult with IO,Mut,Div,Panic {
+ var cell=cc_slot()
+ var projection=uncertainty_segment_slot()
  var out=cc_preflight(s,xs,ys,b,m,mask,levels,maxwork,maxsegments)
  if out.status!=0 {return out}
  if id<0 {out.status=1;return out}
@@ -243,12 +270,12 @@ pub fn dynamic_contour_svg(s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffe
    while col<cols-1 {
     let index=row*(cols-1)+col
     if integer_buffer_at(mask,index)==1 {
-     let cell=cc_cell(xs,ys,b,m,mask,row,col,numeric_buffer_at(levels,li))
+     let ignored=cc_cell_into(xs,ys,b,m,mask,row,col,numeric_buffer_at(levels,li),&!cell)
      var segment:i64=0
      while segment<cell.n {
-      let clipped=uncertainty_segment(cell.ax[segment as usize],cell.ay[segment as usize],cell.bx[segment as usize],cell.by[segment as usize],s.xmin,s.xmax,s.ymin,s.ymax,s.x,s.y,s.w,s.h)
-      if clipped.status==0 {
-       let ax:i64=clipped.x0;let ay:i64=clipped.y0;let bx:i64=clipped.x1;let by:i64=clipped.y1
+      let clipped_status=uncertainty_segment_into(cell.ax[segment as usize],cell.ay[segment as usize],cell.bx[segment as usize],cell.by[segment as usize],s.xmin,s.xmax,s.ymin,s.ymax,s.x,s.y,s.w,s.h,&!projection)
+      if clipped_status==0 {
+       let ax:i64=projection.x0;let ay:i64=projection.y0;let bx:i64=projection.x1;let by:i64=projection.y1
        print("<line data-contour-cell=\"");print(index);print("\" data-contour-level-index=\"");print(li);print("\" data-contour-branch=\"");print(segment)
        print("\" data-contour-level=\"");print_f64_sci(numeric_buffer_at(levels,li),15)
        print("\" x1=\"");print(ax);print("\" y1=\"");print(ay);print("\" x2=\"");print(bx);print("\" y2=\"");print(by)
@@ -266,4 +293,168 @@ pub fn dynamic_contour_svg(s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffe
  }
  println("</g>")
  out
+}
+
+// A viewport-bound snapshot owns integer endpoint/provenance records and levels.
+// Neither input buffers nor a borrowed DynamicPlotSpec are retained.
+pub linear struct PreparedContour {
+ data:*mut i64,levels:*mut f64,segment_capacity:i64,level_capacity:i64,
+ bytes:i64,status:i64,ready:bool,generation:i64,n:i64,nlevels:i64,
+ x:i64,y:i64,w:i64,h:i64,xmin:f64,xmax:f64,ymin:f64,ymax:f64,
+ r:i64,g:i64,b:i64,input_cells:i64,work_required:i64,
+ masked:i64,flat:i64,degenerate:i64
+}
+pub struct PreparedContourSegment {
+ pub status:i64,pub x0:i64,pub y0:i64,pub x1:i64,pub y1:i64,
+ pub cell:i64,pub level_index:i64,pub branch:i64
+}
+pub fn prepared_contour_segment_slot()->PreparedContourSegment {
+ PreparedContourSegment{status:2,x0:0,y0:0,x1:0,y1:0,cell:0,level_index:0,branch:0}
+}
+// Payload budgets exclude allocator metadata and reusable work-record storage.
+pub fn prepared_contour_new(segments:i64,levels:i64,max_bytes:i64)->PreparedContour with Alloc,Mut,Div {
+ var code:i64=1;var data=0 as *mut i64;var lv=0 as *mut f64;var bytes:i64=0
+ var sc:i64=0;var lc:i64=0
+ if segments>=0 && levels>=0 && max_bytes>=0 && max_bytes<=9223372036854771704 {
+  if levels<=max_bytes/8 {
+   let level_bytes=levels*8
+   if segments<=(max_bytes-level_bytes)/64 {
+    code=0
+    if segments>0 {
+     let p=heap_alloc(segments*64)
+     if (p as i64)<=0 {code=3}else{data=p as *mut i64;sc=segments;bytes=segments*64}
+    }
+    if code==0 {if levels>0 {
+     let p=heap_alloc(level_bytes)
+     if (p as i64)<=0 {code=3}else{lv=p as *mut f64;lc=levels;bytes=bytes+level_bytes}
+    }}
+   }else{code=2}
+  }else{code=2}
+ }
+ PreparedContour{data:data,levels:lv,segment_capacity:sc,level_capacity:lc,bytes:bytes,status:code,ready:false,generation:0,n:0,nlevels:0,x:0,y:0,w:0,h:0,xmin:0.0,xmax:0.0,ymin:0.0,ymax:0.0,r:0,g:0,b:0,input_cells:0,work_required:0,masked:0,flat:0,degenerate:0}
+}
+pub fn prepared_contour_close(p:PreparedContour) with Alloc {
+ let PreparedContour{data,levels,segment_capacity,level_capacity,bytes,status,ready,generation,n,nlevels,x,y,w,h,xmin,xmax,ymin,ymax,r,g,b,input_cells,work_required,masked,flat,degenerate}=p
+ if (data as i64)>0 {heap_free(data as *mut i8)}
+ if (levels as i64)>0 {heap_free(levels as *mut i8)}
+}
+pub fn prepared_contour_status(p:&PreparedContour)->i64 {p.status}
+pub fn prepared_contour_ready(p:&PreparedContour)->bool {p.ready}
+pub fn prepared_contour_bytes(p:&PreparedContour)->i64 {p.bytes}
+pub fn prepared_contour_len(p:&PreparedContour)->i64 {p.n}
+pub fn prepared_contour_generation(p:&PreparedContour)->i64 {p.generation}
+pub fn prepared_contour_levels(p:&PreparedContour)->i64 {p.nlevels}
+pub fn prepared_contour_segment_into(p:&PreparedContour,index:i64,out:&!PreparedContourSegment)->i64 with Mut {
+ out.status=2;out.x0=0;out.y0=0;out.x1=0;out.y1=0;out.cell=0;out.level_index=0;out.branch=0
+ if p.status!=0 || !p.ready || index<0 || index>=p.n {return 2}
+ let offset=index*8
+ out.x0=read_i64(p.data,offset);out.y0=read_i64(p.data,offset+1)
+ out.x1=read_i64(p.data,offset+2);out.y1=read_i64(p.data,offset+3)
+ out.cell=read_i64(p.data,offset+4);out.level_index=read_i64(p.data,offset+5)
+ out.branch=read_i64(p.data,offset+6);out.status=read_i64(p.data,offset+7)
+ out.status
+}
+// Complete validation/count/projection precedes writes. Capacity failure reports
+// exact required segment and level counts through work and leaves p unchanged.
+pub fn prepared_contour_prepare_into(p:&!PreparedContour,s:&DynamicPlotSpec,
+ xs:&NumericBuffer,ys:&NumericBuffer,b:&NumericBuffer,m:&NumericMatrix,
+ mask:&IntegerBuffer,levels:&NumericBuffer,maxwork:i64,out:&!PreparedContourWork)->i64 with Mut,Div,Panic {
+ let checked=cc_preflight_into(s,xs,ys,b,m,mask,levels,maxwork,9223372036854775807,out)
+ if checked!=0 {return checked}
+ if p.status!=0 {out.status=2;return 2}
+ if p.generation==9223372036854775807 {out.status=1;return 1}
+ let nl=numeric_buffer_len(levels)
+ if out.segments_required>p.segment_capacity || nl>p.level_capacity {out.status=7;return 7}
+ let cols=numeric_buffer_len(xs);let rows=numeric_buffer_len(ys)
+ var position:i64=0;var li:i64=0
+ while li<nl {
+  var row:i64=0
+  while row<rows-1 {
+   var col:i64=0
+   while col<cols-1 {
+    let index=row*(cols-1)+col
+    if integer_buffer_at(mask,index)==1 {
+     let ignored=cc_cell_into(xs,ys,b,m,mask,row,col,numeric_buffer_at(levels,li),&!out.cell)
+     out.cell_evaluations=out.cell_evaluations+1
+     out.predicate_evaluations=out.predicate_evaluations+out.cell.predicate_used
+     var segment:i64=0
+     while segment<out.cell.n {
+      let ignored=uncertainty_segment_into(out.cell.ax[segment as usize],out.cell.ay[segment as usize],out.cell.bx[segment as usize],out.cell.by[segment as usize],s.xmin,s.xmax,s.ymin,s.ymax,s.x,s.y,s.w,s.h,&!out.segment)
+      let offset=position*8
+      write_i64(p.data,offset,out.segment.x0);write_i64(p.data,offset+1,out.segment.y0)
+      write_i64(p.data,offset+2,out.segment.x1);write_i64(p.data,offset+3,out.segment.y1)
+      write_i64(p.data,offset+4,index);write_i64(p.data,offset+5,li)
+      write_i64(p.data,offset+6,segment);write_i64(p.data,offset+7,out.segment.status)
+      position=position+1;segment=segment+1
+     }
+    }
+    col=col+1
+   }
+   row=row+1
+  }
+  li=li+1
+ }
+ li=0
+ while li<nl {write_f64(p.levels,li,numeric_buffer_at(levels,li));li=li+1}
+ p.x=s.x;p.y=s.y;p.w=s.w;p.h=s.h
+ p.xmin=s.xmin;p.xmax=s.xmax;p.ymin=s.ymin;p.ymax=s.ymax
+ p.r=s.r;p.g=s.g;p.b=s.b;p.n=position;p.nlevels=nl
+ p.input_cells=out.input_cells;p.work_required=out.work_required
+ p.masked=out.masked_cells;p.flat=out.flat_cells;p.degenerate=out.degenerate_segments
+ p.generation=p.generation+1;p.ready=true;out.status=0
+ 0
+}
+fn cc_export_reset(p:&PreparedContour,out:&!PreparedContourWork) with Mut {
+ out.status=1;out.input_cells=p.input_cells;out.work_required=p.work_required
+ out.segments_required=p.n;out.painted=0;out.masked_cells=p.masked
+ out.flat_cells=p.flat;out.degenerate_segments=p.degenerate
+ out.cell_evaluations=0;out.predicate_evaluations=0;out.levels_required=p.nlevels;out.capacity_known=p.ready
+}
+pub fn prepared_contour_canvas_into(c:&!Canvas,p:&PreparedContour,out:&!PreparedContourWork)->i64 with Mut,Div,Panic {
+ cc_export_reset(p,out)
+ if p.status!=0 || !p.ready {return 1}
+ if c.width<1 || c.height<1 || c.width>1000000 || c.height>1000000 || (c.pixels as i64)<=0 {return 1}
+ var left=p.x;var top=p.y;var right=p.x+p.w;var bottom=p.y+p.h
+ if left<0 {left=0};if top<0 {top=0};if right>=c.width {right=c.width-1};if bottom>=c.height {bottom=c.height-1}
+ out.scissor.left=left;out.scissor.top=top;out.scissor.right=right;out.scissor.bottom=bottom
+ var i:i64=0
+ while i<p.n {
+  let offset=i*8
+  if read_i64(p.data,offset+7)==0 {
+   let clipped=uncertainty_raster_segment_into(read_i64(p.data,offset),read_i64(p.data,offset+1),read_i64(p.data,offset+2),read_i64(p.data,offset+3),left,top,right,bottom,&!out.segment)
+   if clipped==0 {
+    canvas_draw_line_aa_scissored(c,&out.scissor,out.segment.x0,out.segment.y0,out.segment.x1,out.segment.y1,p.r,p.g,p.b)
+    out.painted=out.painted+1
+   }
+  }
+  i=i+1
+ }
+ out.status=0
+ 0
+}
+pub fn prepared_contour_svg_into(p:&PreparedContour,id:i64,out:&!PreparedContourWork)->i64 with IO,Mut,Div,Panic {
+ cc_export_reset(p,out)
+ if p.status!=0 || !p.ready || id<0 {return 1}
+ let x:f64=(p.x as f64)-0.5;let y:f64=(p.y as f64)-0.5
+ let width:i64=p.w+1;let height:i64=p.h+1
+ print("<defs><clipPath clipPathUnits=\"userSpaceOnUse\" id=\"contour-clip-");print(id);print("\"><rect x=\"");print(x);print("\" y=\"");print(y);print("\" width=\"");print(width);print("\" height=\"");print(height);println("\"/></clipPath></defs>")
+ print("<g data-dynamic-series=\"bilinear-contour\" data-classification=\"high-ge-level\" data-saddle=\"exact-dyadic\" clip-path=\"url(#contour-clip-");print(id);println(")\">")
+ let red:i64=p.r;let green:i64=p.g;let blue:i64=p.b
+ var i:i64=0
+ while i<p.n {
+  let offset=i*8
+  if read_i64(p.data,offset+7)==0 {
+   let ax:i64=read_i64(p.data,offset);let ay:i64=read_i64(p.data,offset+1)
+   let bx:i64=read_i64(p.data,offset+2);let by:i64=read_i64(p.data,offset+3)
+   let index:i64=read_i64(p.data,offset+4);let li:i64=read_i64(p.data,offset+5);let segment:i64=read_i64(p.data,offset+6)
+   print("<line data-contour-cell=\"");print(index);print("\" data-contour-level-index=\"");print(li);print("\" data-contour-branch=\"");print(segment)
+   print("\" data-contour-level=\"");print_f64_sci(read_f64(p.levels,li),15)
+   print("\" x1=\"");print(ax);print("\" y1=\"");print(ay);print("\" x2=\"");print(bx);print("\" y2=\"");print(by)
+   print("\" stroke=\"rgb(");print(red);print(",");print(green);print(",");print(blue);println(")\" stroke-width=\"1\" stroke-linecap=\"round\"/>")
+   out.painted=out.painted+1
+  }
+  i=i+1
+ }
+ println("</g>");out.status=0
+ 0
 }
