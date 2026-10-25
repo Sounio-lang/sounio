@@ -147,3 +147,29 @@ utility, not a runtime dependency of the palette library. C++ image probes used
 the worker default stack; the final complete gate uses the stack limit above.
 Original immutable worker runs remain under
 `/scratch/sounio-stdlib-inference-scale-20261024/SIO176-{data01,full07,image-isolated01,png-decode01,custody03}`.
+
+### Strict-seed runtime follow-up (Slurm 17303)
+
+The `strict-seed.elf` already compiled in final gate 17296 was subsequently
+executed, without recompilation or numerical-source changes, on Slurm 17303.
+Native execution, the same positive whole-figure C++ reference, actual Canvas
+export/lossless roundtrip, independent PNG/native/primary full-raster comparison,
+and frozen-input verification all returned 0. Seed compilation alone was not
+used as runtime evidence. The seed remains the pinned current-c21 source seed
+`8956946d…`, separately from source-built Madaros `a292cc26…`.
+
+The complete native stdout SHA256 is
+`4a81531842ffb7dfb29bf38ebd1f71db7d73bf72f653328fbb9a2695ad32244a`;
+the actual PNG SHA256 is
+`18105fcf3193e6c3b216b99aad4c41cd2761aa5aaf0c731f146cd1b793417db4`.
+Both match the preceding source-built-Madaros execution byte-for-byte. All
+345600 pixels were checked, including background, rather than only present
+pixel records. One complete-program observation was 0.27 seconds and 5684 KiB
+GNU-time maximum RSS; this is not a general benchmark or human visual approval.
+
+Compact replay receipts (including the compressed actual stdout, launcher,
+binary/input identities, specific results and full-raster diagnostics) are in
+`seed-runtime-receipts.tar.gz`, SHA256
+`484fb16fc19b506d369d80ba9bc9f4b30a2c8f1b325c23d4a0f784c06311cf12`.
+No ELF or duplicate source tree is bundled. Original final07 receipts remain
+unchanged.
