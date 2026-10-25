@@ -260,6 +260,11 @@ DP54_GATE_OUTPUT="$out/dp54-focused" MADAROS_RAW_BIN="$MADAROS_RAW_BIN" \
  timeout 900 bash scripts/stdlib/dp54_dense_events_gate.sh > "$out/dp54-focused.stdout" 2> "$out/dp54-focused.stderr" || rc=$?
 record focused-gate dp54-dense-events "$rc"
 
+# Prepared viewport-bound contour geometry and independent native pixel/oracle controls.
+rc=0
+timeout 900 env MADAROS_RAW_BIN="$MADAROS_RAW_BIN" bash scripts/stdlib/prepared_contour_gate.sh "$out/prepared-contour" > "$out/prepared-contour.gate.stdout" 2> "$out/prepared-contour.gate.stderr" || rc=$?
+record focused-gate prepared-contour "$rc"
+
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"
