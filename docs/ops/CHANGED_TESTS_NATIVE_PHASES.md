@@ -3,7 +3,7 @@ topic_id: repo.docs.ops.changed-tests-native-phases
 authority: repo_only
 audience: users
 last_validated: 2026-10-25
-validated_by: devpass-SIO-281-operational
+validated_by: devpass-SIO-281-operational-Slurm17596
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ops.changed-tests-native-phases
 -->
 
@@ -100,7 +100,39 @@ actual compiler/native xfail/exit handling, unique concurrent
 outputs, and compiler identity/mode refusals.
 
 Operational controls are separate from execution of the original scientific
-fixtures and from hosted CI acceptance. The source checkpoint contains no claim
-that the new path has reproduced or cured the hosted timeout. A focused replay
-also does not qualify the entire ChangedTests corpus or the separate SIO-185
-Stdlib Reliability E2E caller.
+fixtures and from hosted CI acceptance. A focused replay does not qualify the
+entire ChangedTests corpus or the separate SIO-185 Stdlib Reliability E2E caller.
+
+## Focused native replay
+
+Slurm 17596 completed with status 0:0 in 47 seconds using source
+`95b010b0e3cd3b765b2acc0a7dd25cf643e9bd0a`, the unchanged 3c7 stdlib/original
+two fixtures, and the a292 raw compiler above. The real harness used this
+protocol with one worker and reported Pass 2, Fail 0, Skip 0. Each fixture
+compiled once and executed its retained ELF with status zero in both phases;
+compile and native budgets remained 30 seconds each.
+
+The job requested one CPU, 4 GiB, and ten minutes. Slurm allocated two CPUs due
+to core/SMT granularity, with one task and CPUsPerTask 1. The harness took
+45.19 seconds and reported max RSS 1765384 KiB. These are resource observations,
+not a performance improvement comparison.
+
+Both native ELF hashes matched the retained serial diagnostic 17588 artifacts:
+outlier `5f1fe1b8e004a6c7e2339a7881d2287e16ce46827d1fca1db8151d013ba8ea78`
+and prior `2feed102e54bf24d0b715b98b3d739af50cbee67c15c9e8b4824358f50cbedfd`.
+The 2095-entry source catalog, compiler, 48 operational tool/dependency entries,
+ELF hashes, and ELF identities passed before/after checks and an independent
+final custody verification. Both expected native completion markers were present.
+
+The text receipt packet, excluding executable payloads, is retained at
+`/workspace/.tmp/SIO281-native-replay01/receipts-text.tar.gz`: 288272 bytes,
+SHA-256 `7145fa7ef07a265b05066f5aed6ded731953ae6b913e114f63c3c8e330431fa5`.
+Its 108 metadata files passed transfer verification. Operational controls are in
+`/workspace/.tmp/SIO281-checkpoint02-text.tar.gz`: 50916 bytes,
+SHA-256 `e6a7ecc4d3a4966eab6a604847ccf6bce9caf12ce2516356df9d9c9990a460c4`.
+The final 26-case selftest passed; six focused controls reproduced masked
+failures with the earlier e8fb checkpoint and ordinary failures after the fix.
+
+This serial replay passed. It did not reproduce the hosted 124 or establish
+concurrency, numerical wrong-return, or f64 lowering causality. Hosted acceptance
+remains a separate check.
