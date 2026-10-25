@@ -46,6 +46,9 @@ int main(int argc,char**argv) {
  if(argc==2&&std::string(argv[1])=="--version"){std::cout<<"Madaros v0.80.0 -- the Sounio self-hosted compiler\n";return 0;}
  if(argc!=4||std::string(argv[2])!="-o")return 93;
  kind=f::path(argv[1]).stem().string();
+ if(kind.ends_with("_known"))kind.resize(kind.size()-6);
+ if(kind.ends_with("_vacuous"))kind.resize(kind.size()-8);
+ if(kind=="compile_xfail")kind="bad_rc";
  line("STUB_CALL_LOG",kind+" "+argv[3]);
  if(kind=="compile_timeout")std::this_thread::sleep_for(std::chrono::seconds(35));
  if(kind=="missing")return 0;
@@ -53,7 +56,9 @@ int main(int argc,char**argv) {
  f::copy_file(argv[0],argv[3],f::copy_options::overwrite_existing);
  const auto runtime=(kind=="xfail"||kind=="xfail_wrong")?"native_failure":kind=="xfail_timeout"?"native_timeout":kind=="compiler_marker"?"marker_missing":kind;
  std::ofstream(std::string(argv[3])+".mode")<<runtime<<"\n";
- if(kind=="source_mutate"){std::ofstream(argv[1],std::ios::app)<<"// changed during synthetic compile\n";}
+ if(kind=="source_mutate"||kind=="source_mutate_bad_rc"){std::ofstream(argv[1],std::ios::app)<<"// changed during synthetic compile\n";}
+ if(kind=="source_mutate_bad_rc")return 7;
+ if(kind=="error0_no_colon"){std::cerr<<"error[E259] in synthetic metadata fixture\n";return 0;}
  if(kind=="error0"){std::cerr<<"error[E900]: synthetic compiler diagnostic\n";return 0;}
  if(kind=="bad_rc"){std::cerr<<"compiler deliberately returns7 after emitting ELF\n";return 7;}
  if(kind=="compiler_marker")std::cout<<"PHASE_NATIVE_OK\n";
@@ -68,7 +73,7 @@ make_case() {
  local name=$1;shift
  { printf '%s\n' '//@ run-pass' '//@ requires: madaros' '//@ expect-stdout: PHASE_NATIVE_OK';printf '%s\n' "$@";printf '%s\n' '// SYNTHETIC_METADATA_ONLY fixture; not scientific Sounio.'; } > "$T/tests/run-pass/$name.sio"
 }
-for name in good missing badelf bad_rc error0 compiler_marker marker_missing mutate source_mutate concurrent0 concurrent1 concurrent2 concurrent3;do make_case "$name";done
+for name in good missing badelf bad_rc error0 error0_no_colon compiler_marker marker_missing mutate source_mutate concurrent0 concurrent1 concurrent2 concurrent3;do make_case "$name";done
 make_case compile_timeout
 make_case native_timeout '//@ timeout: 1'
 make_case xfail '//@ known-failure' '//@ xfail-exit: 7' '//@ xfail-expect: PHASE_EXPECTED_FAILURE'
@@ -100,22 +105,40 @@ invoke() {
 invoke legacy-good 0 0 tests/run-pass/good.sio
 # Before control: the unchanged wrapper masks compiler rc7 if an ELF was emitted.
 invoke legacy-rc-mask 0 0 tests/run-pass/bad_rc.sio
+for name in badelf_known mutate_known source_mutate_known source_mutate_bad_rc_known error0_no_colon_known;do
+ make_case "$name" '//@ known-failure' '//@ xfail-exit: 1'
+done
+make_case preflight_target '//@ known-failure' '//@ xfail-exit: 65'
+ln -s preflight_target.sio "$T/tests/run-pass/preflight_known.sio"
+make_case badelf_vacuous
+printf '%s\n' tests/run-pass/badelf_vacuous.sio > "$T/tests/vacuous_expect_baseline.txt"
+make_case compile_xfail '//@ known-failure' '//@ xfail-exit: 7' '//@ xfail-expect: compiler deliberately returns7'
 invoke split-good changed-tests-v1 0 tests/run-pass/good.sio
-for name in missing badelf bad_rc error0 compiler_marker marker_missing mutate source_mutate;do
+for name in missing badelf bad_rc error0 error0_no_colon compiler_marker marker_missing mutate source_mutate;do
  invoke "$name" changed-tests-v1 1 "tests/run-pass/$name.sio"
 done
+for name in preflight_known badelf_known mutate_known source_mutate_known source_mutate_bad_rc_known error0_no_colon_known badelf_vacuous;do
+ invoke "$name" changed-tests-v1 1 "tests/run-pass/$name.sio"
+ grep -q '"status":"fail","category":"fail"' "$WORK/$name/results/result_1.json"
+done
+invoke compile-xfail changed-tests-v1 0 tests/run-pass/compile_xfail.sio
+grep -q '"status":"xfail"' "$WORK/compile-xfail/results/result_1.json"
 invoke xfail changed-tests-v1 0 tests/run-pass/xfail.sio
 invoke xfail-wrong changed-tests-v1 1 tests/run-pass/xfail_wrong.sio
 invoke native-timeout changed-tests-v1 1 tests/run-pass/native_timeout.sio
 invoke xfail-timeout changed-tests-v1 0 tests/run-pass/xfail_timeout.sio
 invoke concurrent changed-tests-v1 0 tests/run-pass/concurrent0.sio tests/run-pass/concurrent1.sio tests/run-pass/concurrent2.sio tests/run-pass/concurrent3.sio
 invoke compile-timeout changed-tests-v1 1 tests/run-pass/compile_timeout.sio
-for label in missing badelf bad_rc error0 source_mutate compile-timeout;do
+for label in missing badelf bad_rc error0 error0_no_colon source_mutate compile-timeout preflight_known badelf_known source_mutate_known source_mutate_bad_rc_known error0_no_colon_known badelf_vacuous;do
  [[ ! -s $WORK/$label/native.calls ]] || { echo "invalid compile was executed: $label" >&2;exit 1; }
 done
-for label in legacy-good legacy-rc-mask split-good missing badelf bad_rc error0 compiler_marker marker_missing mutate source_mutate xfail xfail-wrong native-timeout xfail-timeout compile-timeout;do
+for label in legacy-good legacy-rc-mask split-good missing badelf bad_rc error0 error0_no_colon compiler_marker marker_missing mutate source_mutate xfail xfail-wrong native-timeout xfail-timeout compile-timeout;do
  [[ $(wc -l < "$WORK/$label/compile.calls") == 1 ]]
 done
+for label in badelf_known mutate_known source_mutate_known source_mutate_bad_rc_known error0_no_colon_known badelf_vacuous compile-xfail;do
+ [[ $(wc -l < "$WORK/$label/compile.calls") == 1 ]]
+done
+[[ ! -s $WORK/preflight_known/compile.calls ]]
 [[ $(wc -l < "$WORK/concurrent/compile.calls") == 4 && $(wc -l < "$WORK/concurrent/native.calls") == 4 ]]
 [[ $(find "$WORK/concurrent/phases" -mindepth 1 -maxdepth 1 -type d | wc -l) == 4 ]]
 grep -q 'phase=native' "$WORK/native-timeout/results/result_1.json"

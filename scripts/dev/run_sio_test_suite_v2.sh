@@ -626,6 +626,7 @@ run_test() {
     local output=""
     local exit_code=0
     local test_output=""
+    local native_infrastructure_failure=false
     local start_time end_time
     
     start_time=$(date +%s)
@@ -641,7 +642,7 @@ run_test() {
             fi
         else
             if [[ "${SOUNIO_TEST_NATIVE_PHASES:-0}" == changed-tests-v1 ]]; then
-                local phase_dir phase_name
+                local phase_dir phase_name phase_kind=infrastructure
                 phase_dir=$(mktemp -d "$SOUNIO_TEST_NATIVE_PHASE_OUT/test-$idx.XXXXXX")
                 if [[ -z "$phase_dir" || ! -d "$phase_dir" ]]; then
                     exit_code=125
@@ -652,6 +653,11 @@ run_test() {
                       "$SOUNIO_PHASE_RAW_BIN" "$SOUNIO_TEST_PHASE_COMPILER_SHA256" \
                       "$file" "$timeout_val" "$phase_dir" 2>&1) || exit_code=$?
                     phase_name=$(cat "$phase_dir/RESULT.phase" 2>/dev/null) || phase_name=preflight
+                    phase_kind=$(cat "$phase_dir/RESULT.kind" 2>/dev/null) || phase_kind=infrastructure
+                fi
+                if [[ "$phase_kind" != compiler && "$phase_kind" != native ]]; then
+                    native_infrastructure_failure=true
+                    [[ $exit_code -ne 0 ]] || exit_code=125
                 fi
                 raw_exit=$exit_code
                 if [[ $exit_code -eq 124 ]]; then
@@ -811,6 +817,16 @@ run_test() {
 
     end_time=$(date +%s)
     local duration=$((end_time - start_time))
+
+    # Infrastructure is never a tolerated failure in the explicit protocol.
+    # Only raw compiler or native outcomes retain the existing xfail rules.
+    if $native_infrastructure_failure; then
+        is_known_failure=false
+        is_vacuous_baseline=false
+        is_flaky=false
+        exit_code=1
+        test_output="native phase infrastructure failure ($phase_name): $test_output"
+    fi
 
     # A manifest entry that pinned its failure mode (path|substring) only covers a
     # failure whose test_output matches; anything else is a fresh fail, not a repeat

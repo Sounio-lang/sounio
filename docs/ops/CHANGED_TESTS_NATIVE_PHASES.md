@@ -52,28 +52,35 @@ in the same working directory and exported environment/stdlib context.
 The modular wrapper currently ignores a raw nonzero status if a nonempty output
 exists. Direct invocation in this restricted protocol preserves the actual
 compiler status; it does not repair the wrapper for other callers. A compiler
-error diagnostic with status zero is also refused.
+error diagnostic with status zero is also refused, including Madaros coded
+errors with or without a colon after the error code.
 
 ## Execution and evidence
 
 Every test receives a new unique directory. Compilation must produce a regular,
 nonempty, non-symlink x86_64 ELF. The helper makes it executable, records its
 SHA-256 and device/inode/size/mode, and runs that same path once. Compiler and
-entry-source hashes are checked before native execution and afterwards; ELF
+entry-source hashes are checked after every compilation attempt, including
+nonzero statuses and timeouts, before native execution and afterwards; ELF
 hash and identity are checked after execution. Imported sources are covered by
 the caller's frozen source catalog, not by the entry-source hash alone.
 
 Each directory retains command/context records, compile/native logs and statuses,
 phase timestamps, compiler/source/ELF hashes, ELF header, and integrity receipts.
 `RESULT.phase` and `RESULT.status` identify the terminal phase and status.
+`RESULT.kind` distinguishes actual compiler/native outcomes from infrastructure.
 The compiler budget is a fixed 30 seconds and the native timeout is passed from
 the existing harness parser. GNU timeout receives a five-second kill grace for
 each phase; this grace does not expand the productive phase budget.
 
 Native stdout alone satisfies run-pass stdout markers. Compiler logs remain
 available in diagnostics and the existing known-failure matching path.
-Existing exit/xfail evaluation remains in the harness. A failed compile, missing
-ELF, or integrity failure cannot execute the program as a successful run-pass.
+Existing exit/xfail evaluation remains in the harness for actual compiler or
+native outcomes after integrity verification. Preflight, compiler protocol,
+artifact validation, and integrity failures are ordinary FAIL even if the test
+is listed as known-failure, xfail, vacuous baseline, or flaky. A failed compile,
+missing ELF, or integrity failure cannot execute the program as a successful
+run-pass.
 
 When `SOUNIO_MADAROS_F64_LOWERING_GATE_DIR` is set, the gate creates
 `changed-tests-native-phases/` below it so the existing caller artifact upload
@@ -87,7 +94,9 @@ operational fakecompiler that copies an ELF; it compiles no scientific Sounio.
 It checks legacy routing and the existing wrapper status-mask behavior, one
 compile per test, distinct phase timeouts, invalid/missing ELF refusal,
 raw failure even with an emitted ELF, error-with-status-zero refusal,
-native-only markers, source/ELF mutation, xfail/exit handling, unique concurrent
+native-only markers, source/ELF mutation even alongside a compiler failure,
+non-maskable infrastructure failures in known-failure/vacuous tests,
+actual compiler/native xfail/exit handling, unique concurrent
 outputs, and compiler identity/mode refusals.
 
 Operational controls are separate from execution of the original scientific
