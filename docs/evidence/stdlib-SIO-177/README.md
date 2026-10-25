@@ -100,3 +100,9 @@ The decision was initially numbered018 on the a2a44 base. Remote main c21b0e1
 subsequently assigned018 to release trains. This PR renumbers D34 to ADR019 and
 preserves the historical archives as originally produced; their contents are not
 rewritten. The branch incorporates c21 main for the new release/seed baseline.
+
+## Replay after remote-main synchronization
+
+Feature merge commit8850fc1f1426 incorporates remote main c21b0e139830ca4949f80cba62887a8922a972d7. Upstream reserved ADR018 for release/versioning, so this feature is now ADR019; earlier compressed historical receipts retain their original numbering. Slurm17199 replayed the structural contract with the new CI-source compiler SHA256 a292cc263f3734b1ad6f17a2e6179b8a7874ef3e76d8f5fdfea6859290baf5d3 and passed all864 bit-exact reference rows, numerical mutation8, truncation9, private-field compile refusal1 and source/compiler integrity checks. contract-c21-17199-text.tar.gz contains the compact text receipts, excluding executable binaries.
+
+Compiler custody: GitHub main run40144792765, Witness job121024346990, artifact12580970584, source c21. Artifact ZIP digest e3eaa0099eb039094c47afdcc3f3e22a90a6bf8a2432d0b5d4e867c486feb211 and ELF digest were checked. All5295 input hashes and tracked paths match the exact Git source archive/catalog. The completed Witness log records source-tracking seed and modular12579-function construction. The previous full Deep Science replay17135 remains scoped to the earlier snapshot/compiler;17199 is the focused current-main replay, not another complete Deep Science run.
