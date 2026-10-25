@@ -820,3 +820,21 @@ Gate. Job 17553, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `
 - After one warm step, seven forwards span 406812284 ns, which is 0.0581 s/token. The threshold is 0.005 s. The measured step is above the 0.0175 s of job 17506 and above 0.005 s. Effective traffic is about 9 GB/s against a 300 GB/s ceiling of 1.8 ms. The threshold is not moved. This cut does not pass it.
 
 The node returned to idle.
+
+
+## 29. Streaming the resident GEMV (2026-10-25, OBSERVED)
+
+Job 17553 read each weight once and matched the CPU tokens, at 0.0581 s/token, about 9 GB/s. The ceiling for 540 MB at 300 GB/s is 1.8 ms. The threshold stays 0.005 s. The miss was the inner loop: four columns per thread, 32 live accumulators, and a chain of addresses, so the next load waited on the previous one. Eight warps per SM do not fill the L4.
+
+The same single launch still does the prefill and the decode, M from 1 to 8. Each thread owns one column. Sixteen addresses along K are computed before any of those loads, then issued together. The B value is reused across the M rows, so each weight element is still read once. At most eight accumulators are live, one per row. The entry carries `.maxnreg 64`, placed between the parameter list and the body, which is the form this driver's assembler accepts. The grid is 116 blocks of 128 threads: two blocks on each of the 58 SMs, which is what fits under that cap with margin. A larger grid is not launched. The sense-reversing grid barrier is unchanged. The block still waits after RoPE before copying K, and again before attention. `llama_forward` on the CPU is unchanged. If the module does not load, the measured step fails. The graph is not a fallback.
+
+Gate. Job 17557, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. Partition `bench` still has no nodes, so the job was pinned on `gpu-orangefs`, as in job 17553. SmolLM2-135M, ids 0, 504, 3575, 282, 4649, 314. The clock is `date +%s%N` on the job script.
+
+- Prefill argmax, CPU and device: 7042.
+- Greedy continuation, eight tokens, both paths: 7042, 30, 657, 314, 260, 3995, 2240, 281.
+- Maximum absolute logit difference on that prefill: 3.69e-5 (the program printed 36926 at a scale of 1e9).
+- The timed lines print `RESIDENT=1`.
+- The device prefill of the six prompt tokens took 45636532 ns. That span has no threshold.
+- After one warm step, seven forwards span 300957314 ns, which is 0.0430 s/token. The threshold is 0.005 s. The measured step is under the 0.0581 s of job 17553 and above both the 0.0175 s of job 17506 and the 0.005 s threshold. Effective traffic is about 13 GB/s. The threshold is not moved. This cut does not pass it.
+
+The node returned to idle.
