@@ -45,11 +45,11 @@ fi
 **hard fail** with reason prefix `known_blocker_resolved_update_manifest`. The
 founder’s intuition is correct for this file.
 
-### 1.2 `scripts/dev/run_sio_test_suite_v2.sh` — emits `status=xpas`, then swallows it
+### 1.2 `scripts/dev/run_sio_test_suite.sh` — emits `status=xpas`, then swallows it
 
 On `origin/main`, when `exit_code == 0` and `//@ known-failure` is set:
 
-```517:519:scripts/dev/run_sio_test_suite_v2.sh
+```517:519:scripts/dev/run_sio_test_suite.sh
         if $is_known_failure; then
             status="xpas"
             category="known-failure"
@@ -57,7 +57,7 @@ On `origin/main`, when `exit_code == 0` and `//@ known-failure` is set:
 
 Aggregation on `origin/main`:
 
-```709:713:scripts/dev/run_sio_test_suite_v2.sh
+```709:713:scripts/dev/run_sio_test_suite.sh
         xpas)
             ((PASS++))
             if [[ "$VERBOSE" == "1" ]]; then
@@ -67,7 +67,7 @@ Aggregation on `origin/main`:
 
 Exit policy on `origin/main`:
 
-```863:871:scripts/dev/run_sio_test_suite_v2.sh
+```863:871:scripts/dev/run_sio_test_suite.sh
 if [[ $FAIL -gt 0 ]]; then
     ...
     exit 1
@@ -245,7 +245,7 @@ now, (C) warn-only. This dispatch recommends **A**.
 | artifact | where | on `origin/main`? |
 |---|---|---|
 | Measurement + cross-tab (22 Madaros XPAS, 8 lean) | `docs/audit/KNOWN_FAILURE_XPAS_SIGNAL_2026-08-18.md` | **no** (untracked on grok-cli3 worktree) |
-| Harness XPAS count + announce + `SOUNIO_XPAS_FATAL` | dirty `scripts/dev/run_sio_test_suite_v2.sh` | **no** |
+| Harness XPAS count + announce + `SOUNIO_XPAS_FATAL` | dirty `scripts/dev/run_sio_test_suite.sh` | **no** |
 | `known_failure_madaros_recheck.sh` | untracked on grok-cli3 | **no** |
 | Wire from `madaros_changed_tests_gate.sh` | dirty on grok-cli3 | **no** |
 | Partial tag classification (drop / requires: madaros) | dirty test files on grok-cli3 | **no** |

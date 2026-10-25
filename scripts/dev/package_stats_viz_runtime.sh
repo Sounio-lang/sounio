@@ -15,7 +15,7 @@ files=(
     scripts/lib
     scripts/dev/build_stats_viz_bundle.sh
     scripts/run_sio_test_suite.sh
-    scripts/dev/run_sio_test_suite.sh scripts/dev/run_sio_test_suite_v2.sh
+    scripts/dev/run_sio_test_suite.sh
     scripts/ci/souc-native-wrapper.sh
     stdlib
     tests/reference/statistical_interval_reference.cpp

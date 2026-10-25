@@ -89,7 +89,7 @@ lean_single probes used the in-tree fixed-point seed `bin/souc-lean-single-x86_6
 
 ## The finding that conditions every other number in this repo
 
-`scripts/dev/run_sio_test_suite.sh` is a symlink to `run_sio_test_suite_v2.sh`, which at
+`scripts/dev/run_sio_test_suite.sh` at
 lines 312–316 writes:
 
 ```bash

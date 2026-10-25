@@ -10,7 +10,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-HARNESS="$ROOT_DIR/scripts/dev/run_sio_test_suite_v2.sh"
+HARNESS="$ROOT_DIR/scripts/dev/run_sio_test_suite.sh"
 HELLO="$ROOT_DIR/tests/run-pass/hello.sio"
 REAL_ONE="$ROOT_DIR/tests/run-pass/struct_array_elem_method_dispatch.sio"
 

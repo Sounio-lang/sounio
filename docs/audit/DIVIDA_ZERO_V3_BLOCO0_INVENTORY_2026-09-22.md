@@ -91,17 +91,17 @@ vezes sobre o mesmo fato precisa mostrar o rastro, não só o resultado final:
   alvo nominal (`scripts/dev/run_sio_test_suite.sh`) como se fosse outro arquivo de
   texto e apliquei `grep` nele diretamente — mas **é um symlink** (`120000` no
   `git ls-tree`, confirmado tanto em `main` quanto em `pr-2622-recheck`), apontando para
-  `run_sio_test_suite_v2.sh`. Eu nunca segui o link; concluí que o job `slow-lane`
+  `run_sio_test_suite.sh`. Eu nunca segui o link; concluí que o job `slow-lane`
   chamava "o v1, sem qualquer noção de `requires: slow`" — falso. (Apontado em revisão,
   `discussion_r4071219101`'s review body, "Correct wrapper call chain...".)
 - **Estado real, verificado agora seguindo a cadeia completa** (`git ls-tree`, `readlink`,
   `git show`, em `main` `69b7fe7546e8` e em `pr-2622-recheck` = #2622 `35513cf80f22…`):
   `scripts/run_sio_test_suite.sh` → `exec` → `scripts/dev/run_sio_test_suite.sh`
-  (symlink) → `run_sio_test_suite_v2.sh`. Ou seja, o job `slow-lane` do `ci.yml` de
+  (symlink) → `run_sio_test_suite.sh`. Ou seja, o job `slow-lane` do `ci.yml` de
   #2622, ao rodar `bash scripts/run_sio_test_suite.sh --format junit --jobs 4`, **chega
   em v2**, não em algum "v1" sem seletor. Em `main`, esse mesmo v2 já suporta
   `--test-list` mas **não** tem nenhuma ocorrência de `slow` (`grep -n slow
-  scripts/dev/run_sio_test_suite_v2.sh` → vazio) — o seletor `requires: slow`
+  scripts/dev/run_sio_test_suite.sh` → vazio) — o seletor `requires: slow`
   (linha ~461, gated por `SOUNIO_SLOW_TESTS_AVAILABLE`) é adicionado pelo próprio
   #2622. Logo: o job **consome** `SOUNIO_SLOW_TESTS_AVAILABLE` normalmente (a variável
   não é lida por um script morto); o único defeito real é a ausência de `--test-list`
@@ -175,7 +175,7 @@ abaixo elevou para cinco):
      dois pontos — inclusive **zero espaços entre `//@` e `requires`**, o que nenhum
      outro consumidor aceita. Este é um script de recheck secundário, não o executor
      principal da suíte.
-   - `scripts/dev/run_sio_test_suite_v2.sh` (linhas 363–364, 419, 426) — **este sim é o
+   - `scripts/dev/run_sio_test_suite.sh` (linhas 363–364, 419, 426) — **este sim é o
      executor real**: um `case` em shell casa a substring literal `//@ requires`
      (espaço único obrigatório entre `//@` e `requires`, sem flexibilidade — é texto
      literal num padrão glob, não regex), extrai o valor com
@@ -196,7 +196,7 @@ abaixo elevou para cinco):
    deste Bloco 0.
 5. (Apontado em revisão, `discussion_r4071474651`.) Mesmo com a gramática correta do
    valor (item 4), `grep` sobre o arquivo inteiro ainda não é equivalente ao parser real,
-   porque o loop de anotações de `run_sio_test_suite_v2.sh` (linhas 315–316) **para de
+   porque o loop de anotações de `run_sio_test_suite.sh` (linhas 315–316) **para de
    ler na primeira linha que não seja `//@ <algo>`, `// <algo>` (com espaço obrigatório
    após as barras) ou em branco** — ele só escaneia o bloco de cabeçalho inicial do
    arquivo, não o arquivo inteiro. `tests/run-pass/global_array_len1_index.sio` tem
@@ -270,21 +270,21 @@ não a substituem nem criam novas.
 Atualizado (apontado em revisão, `Sounio-lang/sounio#2637`'s review body, "Update next
 step to collect isolated-S evidence"): a formulação original — "localizar o mecanismo
 real de seleção `slow`" — ficou obsoleta assim que §2.2 acima já localizou o mecanismo
-completo (wrapper → symlink → `run_sio_test_suite_v2.sh`, seletor `requires: slow`
+completo (wrapper → symlink → `run_sio_test_suite.sh`, seletor `requires: slow`
 existente, único defeito é o `ci.yml` de #2622 não passar `--test-list`). Repetir essa
 frase mandaria a próxima lane refazer uma investigação já concluída.
 
 Bloco 1 (§6.1–§6.3 do plano v3): com o mecanismo já identificado, o próximo passo
 concreto é **produzir a evidência que falta**, não mais procurá-la — construir/usar a
 lista de testes anotados `//@ requires: slow` como `--test-list` e rodar
-`scripts/dev/run_sio_test_suite_v2.sh --test-list <arquivo-S>` (caminho relativo à raiz
+`scripts/dev/run_sio_test_suite.sh --test-list <arquivo-S>` (caminho relativo à raiz
 do repositório — corrigido após revisão, `discussion_r4071539724`'s review body, que
 apontou o caminho anterior como não executável de fora de `scripts/dev/`) isoladamente
 (com `SOUNIO_SLOW_TESTS_AVAILABLE=1`).
 
 **Correção sobre a base e o compilador do comando** (apontado em revisão,
 `discussion_r4071578676`): o comando acima **não é reprodutível a partir da base deste
-documento** (`main`, `69b7fe7546e8`) — §2.2 já estabeleceu que o `run_sio_test_suite_v2.sh`
+documento** (`main`, `69b7fe7546e8`) — §2.2 já estabeleceu que o `run_sio_test_suite.sh`
 de `main` não tem nenhum ramo `requires: slow`; rodá-lo ali faria cada teste
 `requires: slow` cair no ramo `*)` de "unknown requires" (linha 459, verificado nesta
 sessão) e falhar por um motivo alheio ao que se quer medir. O comando só é significativo a partir
@@ -296,7 +296,7 @@ candidata específica. Comando completo:
 ```
 git checkout 35513cf80f22886ce66b583e33b05c2f456aeaff  # ou worktree dedicado — não main
 SOUNIO_TEST_SOUC_BIN=<stage2 de #2622> SOUNIO_SLOW_TESTS_AVAILABLE=1 \
-  scripts/dev/run_sio_test_suite_v2.sh --test-list <arquivo-S>
+  scripts/dev/run_sio_test_suite.sh --test-list <arquivo-S>
 ```
 para obter uma execução de **S sozinho** com seu
 próprio resultado — o que a alegação "zero falhas" de #2622 (plano v3 §3) ainda não tem

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Refuses a test file that the suite would silently skip.
 #
-# scripts/dev/run_sio_test_suite_v2.sh executes a file only if it carries one of
+# scripts/dev/run_sio_test_suite.sh executes a file only if it carries one of
 # the mode annotations, and skips it — reporting "no-annotation" — otherwise. A
 # file sitting in tests/run-pass/ or tests/compile-fail/ with no //@ line
 # therefore looks like coverage and runs nothing.
@@ -19,7 +19,7 @@
 # that every test must run, it is that a skip must be DECLARED rather than
 # accidental.
 #
-# Scope deliberately mirrors the harness. run_sio_test_suite_v2.sh globs
+# Scope deliberately mirrors the harness. run_sio_test_suite.sh globs
 # "$ROOT_DIR"/tests/run-pass/*.sio and .../compile-fail/*.sio — a single level,
 # no recursion — so files in subdirectories (tests/run-pass/fixtures/,
 # tests/run-pass/d3_openslice_len/) are imported leaves and multi-module parts
@@ -42,7 +42,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-# Kept in sync with the case arms in run_sio_test_suite_v2.sh: the four mode
+# Kept in sync with the case arms in run_sio_test_suite.sh: the four mode
 # annotations that make a file execute, plus the two that declare a skip.
 ANNOT_RE='^//@ *(run-pass|compile-fail|check-only|typecheck-fail|ignore|known-failure)'
 
@@ -66,7 +66,7 @@ scan_dir() {
   return "$fail"
 }
 
-# Kept in sync with the header loop in run_sio_test_suite_v2.sh: same three
+# Kept in sync with the header loop in run_sio_test_suite.sh: same three
 # line shapes, a bare `//` included. Prints `file:line: text` per late line.
 late_annotations() {
   awk '

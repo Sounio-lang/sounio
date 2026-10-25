@@ -11,7 +11,7 @@
 # returns early at `if TARGET_ARCH == 1`, before its own gate.
 #
 # The divergence grew unseen because nothing ever ran the suite against
-# --target aarch64-linux. scripts/dev/run_sio_test_suite_v2.sh has no concept
+# --target aarch64-linux. scripts/dev/run_sio_test_suite.sh has no concept
 # of a target, and tests/selfhost/aarch64_compile/ carries 4 cases whose only
 # assertion is that `file` reports an aarch64 ELF — an assertion that cannot,
 # by construction, notice a wrongly accepted program.
@@ -128,7 +128,7 @@ export _SOUNIO_CC_FATAL_RE _SOUNIO_CC_SUCCESS_RE _SOUNIO_CC_VERDICT_FAIL_RE
 # 257 PARITY verdicts in which two targets of the WRONG engine agreed about a
 # check the fixture never asked lean_single to have. That is coverage on paper.
 #
-# The semantics mirror scripts/dev/run_sio_test_suite_v2.sh:417-459, including
+# The semantics mirror scripts/dev/run_sio_test_suite.sh:417-459, including
 # its rule that an unrecognised value must not fall through silently -- a typo
 # like `requires: madros` would otherwise re-admit the whole class.
 #
