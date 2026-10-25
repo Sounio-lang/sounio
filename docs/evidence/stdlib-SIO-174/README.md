@@ -230,3 +230,25 @@ the mistaken distant-tail classification before the <=cap guard.
 Full12/job17318 was an empty packet caused by a failed transfer and is explicitly
 INVALID_STAGE, not numerical/compiler evidence. Historical packets and ELFs
 remain untouched; no quota was changed or historical artifact removed.
+
+## Central deep-science registration
+
+The shared deep-science runner invokes the focused DP5(4) gate before its final
+input/compiler hash verification. The focused output directory is fresh and
+nested under the central output; its nonzero exit is recorded as a central
+failure. The optional DP54_SEED_BIN enables a second engine; MADAROS_RAW_BIN is
+explicitly forwarded. This registration changes no mathematical source or test
+expectations.
+
+Slurm job17388 executed the exact extracted central block, with actual raw
+Madaros a292 and seed895. Both engines ran all six positive programs and their
+C++ concordance, nine changed-output controls and three private/linear refusal
+probes. The outer focused-gate row is zero, and sacct records COMPLETED0:0 in26s.
+Raw refusal/control rows are intentionally exit1 and are checked as rejections,
+not reported as passing numerical executions. Source/compiler/generated-input
+hash checks pass. This is the focused block's execution, not a claim that the
+whole central corpus or GitHub CI has completed on this tip.
+
+Compact receipt: `central-registration.receipts.tar.gz`, with source/compiler
+identities, exact block and record function, actual outputs, resources and a
+verified extraction manifest; no ELF or full source payload is included.
