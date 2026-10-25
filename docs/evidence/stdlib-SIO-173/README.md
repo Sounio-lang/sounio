@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.stdlib-sio-173.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-sio-173.readme
+-->
+
 # SIO-173: checked FEM and geometric Poisson multigrid
 
 This increment supplies actual-size, caller-owned numerical solvers and repairs the existing bounded FEM/multigrid implementations. It does not claim a general unstructured FEM package, arbitrary boundary conditions, certified error bounds or cross-backend qualification.
