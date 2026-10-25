@@ -225,6 +225,51 @@ rc=0
 timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/normalization_into_reference.cpp -o "$out/normalization_into_reference" > "$out/normalization_into_reference.cpp.txt" 2>&1 || rc=$?
 record cpp-compile normalization_into_reference "$rc"
 if [[ $rc == 0 ]]; then compare normalization_into_reference stdlib_scale_normalization_into; fi
+# Dynamic named counts, byte-exact identities/joins and validated CSR.
+# Child receipt separates bootstrap numerical support from canonical privacy.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" SEED_RAW_BIN="${SEED_RAW_BIN:-$repo/bin/souc-lean-single-x86_64}" timeout 1200 bash scripts/stdlib/genomics_count_identity_gate.sh "$out/genomics-count-identities" > "$out/genomics-count-identities.gate.stdout" 2> "$out/genomics-count-identities.gate.stderr" || rc=$?
+record focused-gate genomics-count-identities "$rc"
+
+# Reusable named results: canonical framing across all chunk sizes and long streams.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" SEED_RAW_BIN="${SEED_RAW_BIN:-$repo/bin/souc-lean-single-x86_64}" timeout 600 bash scripts/stdlib/genomics_named_stream_gate.sh "$out/genomics-named-stream" > "$out/genomics-named-stream.gate.stdout" 2> "$out/genomics-named-stream.gate.stderr" || rc=$?
+record focused-gate genomics-named-stream "$rc"
+
+# Conditional exact signed ranks, explicit approximation, counted scratch
+# and independent C++ integer/tail controls execute in both compiler engines.
+rc=0
+timeout 1200 bash scripts/stdlib/wilcoxon_checked_gate.sh "$out/wilcoxon_checked" > "$out/wilcoxon_checked.focused.stdout" 2> "$out/wilcoxon_checked.focused.stderr" || rc=$?
+record focused-gate wilcoxon_checked "$rc"
+
+# Full pooled/group right-censored risk curves, checked logrank tails,
+# and independently qualified median boundaries execute in both engines.
+rc=0
+timeout 1200 bash scripts/stdlib/survival_checked_gate.sh "$out/survival_checked" > "$out/survival_checked.focused.stdout" 2> "$out/survival_checked.focused.stderr" || rc=$?
+record focused-gate survival_checked "$rc"
+
+# Checked FEM / Poisson manufactured solutions, legacy imports and work controls.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" bash scripts/stdlib/fem_poisson_gate.sh "$out/fem-poisson" > "$out/fem-poisson.gate.stdout" 2> "$out/fem-poisson.gate.stderr" || rc=$?
+record focused-gate fem-poisson "$rc"
+
+# DP5(4) FSAL, quartic dense output and event contracts: actual native + C++.
+# Optional DP54_SEED_BIN selects a second independently receipted engine.
+rc=0
+DP54_GATE_OUTPUT="$out/dp54-focused" MADAROS_RAW_BIN="$MADAROS_RAW_BIN" \
+ timeout 900 bash scripts/stdlib/dp54_dense_events_gate.sh > "$out/dp54-focused.stdout" 2> "$out/dp54-focused.stderr" || rc=$?
+record focused-gate dp54-dense-events "$rc"
+
+# Prepared viewport-bound contour geometry and independent native pixel/oracle controls.
+rc=0
+timeout 900 env MADAROS_RAW_BIN="$MADAROS_RAW_BIN" bash scripts/stdlib/prepared_contour_gate.sh "$out/prepared-contour" > "$out/prepared-contour.gate.stdout" 2> "$out/prepared-contour.gate.stderr" || rc=$?
+record focused-gate prepared-contour "$rc"
+
+# Canonical palette primary data, actual Canvas/SVG colors and strict controls.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" bash scripts/stdlib/canonical_palette_gate.sh "$out/canonical-palettes" > "$out/canonical-palettes.gate.stdout" 2> "$out/canonical-palettes.gate.stderr" || rc=$?
+record focused-gate canonical-palettes "$rc"
+
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"

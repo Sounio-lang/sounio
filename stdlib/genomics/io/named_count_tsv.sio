@@ -1,0 +1,131 @@
+// Dynamic named-table framing over the canonical exact integer token parser.
+// Header: an ignored corner label then exactly samples byte-exact sample IDs.
+// Rows: nonempty feature ID then exactly samples nonnegative i64 counts.
+// Caller scratch is invalid while a row/token is partial or status != 0.
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_set}
+use genomics::io::count_tsv::{CountTsvState,CountTsvFeed,count_tsv_new,count_tsv_feed_slot,count_tsv_feed_into,count_tsv_ack_row}
+pub struct NamedCountTsv {
+ status:i64,samples:i64,max_id_bytes:i64,position:i64,error_position:i64,
+ header:bool,column:i64,id_len:i64,rows:i64,kind:i64,event_index:i64,
+ pending_cr:bool,finished:bool,number:CountTsvState,feed_work:CountTsvFeed,byte_work:[i64;256],
+}
+pub struct NamedCountFeed {
+ pub status:i64,pub consumed:i64,pub kind:i64,pub index:i64,pub id_len:i64,
+ pub rows:i64,pub header_complete:bool,pub finished:bool,
+ pub position:i64,pub error_position:i64,
+}
+pub fn named_count_tsv_new(samples:i64,max_id_bytes:i64)->NamedCountTsv {
+ NamedCountTsv{status:if samples<1 || samples>9223372036854771704/8 || max_id_bytes<1 || max_id_bytes>9223372036854771704/8 {1}else{0},
+ samples:samples,max_id_bytes:max_id_bytes,position:0,error_position:0,header:true,column:0,id_len:0,rows:0,kind:0,event_index:0,pending_cr:false,finished:false,number:count_tsv_new(1),feed_work:count_tsv_feed_slot(),byte_work:[0;256]}
+}
+pub fn named_count_tsv_feed_slot()->NamedCountFeed {
+ NamedCountFeed{status:0,consumed:0,kind:0,index:0,id_len:0,rows:0,header_complete:false,finished:false,position:0,error_position:0}
+}
+fn nt_result_into(s:&NamedCountTsv,used:i64,out:&!NamedCountFeed)->i64 with Mut {
+ out.status=s.status;out.consumed=used;out.kind=s.kind;out.index=s.event_index
+ out.id_len=s.id_len;out.rows=s.rows;out.header_complete=!s.header;out.finished=s.finished
+ out.position=s.position;out.error_position=s.error_position;s.status
+}
+fn nt_fail(s:&!NamedCountTsv,code:i64) with Mut {
+ s.status=code;s.error_position=s.position;s.kind=0
+}
+fn nt_buffers(s:&NamedCountTsv,id:&IntegerBuffer,counts:&IntegerBuffer)->bool {
+ integer_buffer_status(id)==0 && integer_buffer_status(counts)==0 && integer_buffer_len(id)>=s.max_id_bytes && integer_buffer_len(counts)>=s.samples
+}
+// Complete a header/ID/count field. Tabs inside numeric framing are represented
+// by LF to the one-sample canonical parser; decimal validation is never copied.
+fn nt_separator(s:&!NamedCountTsv,end_row:bool,counts:&!IntegerBuffer)->bool with Mut,Div,Panic {
+ if s.header {
+  if end_row && s.column!=s.samples {nt_fail(s,4);return false}
+  if !end_row && s.column>=s.samples {nt_fail(s,4);return false}
+  if s.column>0 && s.id_len==0 {nt_fail(s,3);return false}
+  if s.column==0 {
+   s.column=1;s.id_len=0
+  }else {
+   s.kind=1;s.event_index=s.column-1
+   if end_row {s.header=false;s.column=0}else{s.column=s.column+1}
+  }
+  return true
+ }
+ if s.column==0 {
+  if end_row {nt_fail(s,4);return false}
+  if s.id_len==0 {nt_fail(s,3);return false}
+  s.column=1;return true
+ }
+ if end_row && s.column!=s.samples {nt_fail(s,4);return false}
+ if !end_row && s.column>=s.samples {nt_fail(s,4);return false}
+ s.byte_work[0]=10
+ let code=count_tsv_feed_into(&!s.number,&s.byte_work,1,&!s.feed_work)
+ if code!=0 {nt_fail(s,code);return false}
+ if !s.feed_work.row_ready {nt_fail(s,6);return false}
+ let value=s.number.row[0]
+ integer_buffer_set(counts,s.column-1,value)
+ let acknowledged=count_tsv_ack_row(&!s.number)
+ if !acknowledged {nt_fail(s,6);return false}
+ if end_row {
+  if s.rows==9223372036854775807 {nt_fail(s,7);return false}
+  s.kind=2;s.event_index=s.rows;s.rows=s.rows+1;s.column=0
+ }else{s.column=s.column+1}
+ true
+}
+pub fn named_count_tsv_feed_into(s:&!NamedCountTsv,bytes:&[i64;256],length:i64,
+ id:&!IntegerBuffer,counts:&!IntegerBuffer,out:&!NamedCountFeed)->i64 with Mut,Div,Panic {
+ if s.status!=0 {return nt_result_into(s,0,out)}
+ if !nt_buffers(s,id,counts) {nt_fail(s,1);return nt_result_into(s,0,out)}
+ if length<0 || length>256 {nt_fail(s,2);return nt_result_into(s,0,out)}
+ if s.kind!=0 {return nt_result_into(s,0,out)}
+ if s.finished {if length>0 {nt_fail(s,6)};return nt_result_into(s,0,out)}
+ var used:i64=0
+ while used<length && s.kind==0 {
+  if s.position==9223372036854775807 {nt_fail(s,7);return nt_result_into(s,used,out)}
+  let b=bytes[used as usize]
+  if b<0 || b>255 {nt_fail(s,3);return nt_result_into(s,used,out)}
+  if s.pending_cr {
+   if b!=10 {nt_fail(s,3);return nt_result_into(s,used,out)}
+   s.pending_cr=false
+   if !nt_separator(s,true,counts) {return nt_result_into(s,used,out)}
+  }else if b==13 {
+   if s.column!=s.samples {nt_fail(s,4);return nt_result_into(s,used,out)}
+   s.pending_cr=true
+  }else if b==9 || b==10 {
+   if !nt_separator(s,b==10,counts) {return nt_result_into(s,used,out)}
+  }else if s.header || s.column==0 {
+   if b==0 {nt_fail(s,3);return nt_result_into(s,used,out)}
+   if s.id_len>=s.max_id_bytes {nt_fail(s,8);return nt_result_into(s,used,out)}
+   integer_buffer_set(id,s.id_len,b);s.id_len=s.id_len+1
+  }else {
+   s.byte_work[0]=b
+   let code=count_tsv_feed_into(&!s.number,&s.byte_work,1,&!s.feed_work)
+   if code!=0 {nt_fail(s,code);return nt_result_into(s,used,out)}
+   if s.feed_work.row_ready {nt_fail(s,6);return nt_result_into(s,used,out)}
+  }
+  used=used+1;s.position=s.position+1
+ }
+ nt_result_into(s,used,out)
+}
+pub fn named_count_tsv_ack(s:&!NamedCountTsv)->bool with Mut {
+ if s.status!=0 || s.kind==0 {return false}
+ s.kind=0;s.id_len=0;true
+}
+pub fn named_count_tsv_finish_into(s:&!NamedCountTsv,id:&IntegerBuffer,counts:&!IntegerBuffer,out:&!NamedCountFeed)->i64 with Mut,Div,Panic {
+ if s.status!=0 {return nt_result_into(s,0,out)}
+ if !nt_buffers(s,id,counts) {nt_fail(s,1);return nt_result_into(s,0,out)}
+ if s.kind!=0 || s.finished {return nt_result_into(s,0,out)}
+ if s.pending_cr {nt_fail(s,3);return nt_result_into(s,0,out)}
+ if s.header || s.column!=0 || s.id_len!=0 {
+  if !nt_separator(s,true,counts) {return nt_result_into(s,0,out)}
+ }
+ s.finished=true;nt_result_into(s,0,out)
+}
+
+// Snapshot APIs retain their original signatures and detached result behavior.
+pub fn named_count_tsv_feed(s:&!NamedCountTsv,bytes:&[i64;256],length:i64,id:&!IntegerBuffer,counts:&!IntegerBuffer)->NamedCountFeed with Mut,Div,Panic {
+ var out=named_count_tsv_feed_slot()
+ let code=named_count_tsv_feed_into(s,bytes,length,id,counts,&!out)
+ out
+}
+pub fn named_count_tsv_finish(s:&!NamedCountTsv,id:&IntegerBuffer,counts:&!IntegerBuffer)->NamedCountFeed with Mut,Div,Panic {
+ var out=named_count_tsv_feed_slot()
+ let code=named_count_tsv_finish_into(s,id,counts,&!out)
+ out
+}

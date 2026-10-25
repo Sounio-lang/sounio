@@ -1,0 +1,72 @@
+// Checked scalar-to-canonical-RGB8 policy. Color is not a data-availability claim.
+use math::pure::{is_finite}
+use io::sci_print::{print_f64_sci}
+use viz::colormap_data::{palette_lut_rgb8}
+pub struct PaletteScale {
+ palette:i64,minimum:f64,maximum:f64,under:i64,over:i64,missing:i64,
+ constant_index:i64,status:i64
+}
+pub struct PaletteSample {
+ pub status:i64,pub rgb:i64,pub index:i64,pub classification:i64
+}
+pub fn palette_sample_slot()->PaletteSample {PaletteSample{status:1,rgb:0,index:-1,classification:-1}}
+pub fn palette_scale(palette:i64,minimum:f64,maximum:f64,under:i64,over:i64,missing:i64,constant_index:i64)->PaletteScale with Mut {
+ var status:i64=1
+ if palette>=1 && palette<=4 && is_finite(minimum) && is_finite(maximum) && minimum<=maximum && under>=0 && under<=16777215 && over>=0 && over<=16777215 && missing>=0 && missing<=16777215 && constant_index>=0 && constant_index<=255 {status=0}
+ PaletteScale{palette:palette,minimum:minimum,maximum:maximum,under:under,over:over,missing:missing,constant_index:constant_index,status:status}
+}
+pub fn palette_scale_defaults(palette:i64,minimum:f64,maximum:f64)->PaletteScale with Mut {
+ palette_scale(palette,minimum,maximum,palette_lut_rgb8(palette,0),palette_lut_rgb8(palette,255),8421504,128)
+}
+pub fn palette_scale_status(s:&PaletteScale)->i64 {s.status}
+pub fn palette_scale_id(s:&PaletteScale)->i64 {s.palette}
+pub fn palette_scale_min(s:&PaletteScale)->f64 {s.minimum}
+pub fn palette_scale_max(s:&PaletteScale)->f64 {s.maximum}
+pub fn palette_scale_constant_index(s:&PaletteScale)->i64 {s.constant_index}
+// Classes: 0 listed bin, 1 finite under, 2 finite over, 3 masked/missing,
+// 4 constant-domain declared value. Index -1 for configured special colors.
+// Status 0 color available, 1 invalid scale, 2 numeric normalization failure,
+// 3 active nonfinite datum. Failed payloads are cleared, never a fabricated bin0.
+pub fn palette_map_into(s:&PaletteScale,value:f64,available:bool,out:&!PaletteSample)->i64 with Mut,Div {
+ out.status=1;out.rgb=0;out.index=-1;out.classification=-1
+ if s.status!=0 {return 1}
+ if !available {out.status=0;out.rgb=s.missing;out.classification=3;return 0}
+ if !is_finite(value) {out.status=3;return 3}
+ if value<s.minimum {out.status=0;out.rgb=s.under;out.classification=1;return 0}
+ if value>s.maximum {out.status=0;out.rgb=s.over;out.classification=2;return 0}
+ if s.minimum==s.maximum {
+  out.status=0;out.index=s.constant_index;out.rgb=palette_lut_rgb8(s.palette,s.constant_index);out.classification=4
+  return 0
+ }
+ let span=s.maximum-s.minimum
+ let t=if is_finite(span) {(value-s.minimum)/span}else{(value*0.5-s.minimum*0.5)/(s.maximum*0.5-s.minimum*0.5)}
+ if !is_finite(t) || t<0.0 || t>1.0 {out.status=2;return 2}
+ let index=if t==1.0 {255}else{(t*256.0) as i64}
+ if index<0 || index>255 {out.status=2;return 2}
+ out.index=index;out.rgb=palette_lut_rgb8(s.palette,index);out.classification=0;out.status=0
+ 0
+}
+// Legacy normalized convenience: endpoints clamp including infinities; NaN uses
+// the documented opaque gray missing color. Checked data APIs reject active NaN.
+pub fn palette_normalized_rgb8(palette:i64,t:f64)->i64 {
+ if palette<1 || palette>4 {return -1}
+ if t!=t {return 8421504}
+ if t<=0.0 {return palette_lut_rgb8(palette,0)}
+ if t>=1.0 {return palette_lut_rgb8(palette,255)}
+ palette_lut_rgb8(palette,(t*256.0) as i64)
+}
+pub fn palette_name_svg(palette:i64) with IO {
+ if palette==1 {print("viridis")}else if palette==2 {print("plasma")}else if palette==3 {print("inferno")}else if palette==4 {print("magma")}else{print("invalid")}
+}
+// Attributes only; caller validates the scale before emitting any SVG bytes.
+pub fn palette_policy_metadata_svg(s:&PaletteScale) with IO,Mut,Div,Panic {
+ print(" data-palette-source=\"BIDS/colormap@bc549477db0c12b54a5928087552ad2cf274980f\" data-palette-rgb8=\"floor-255-channel\" data-palette-bins=\"floor-256-t-endpoint-255\" data-color-min=\"")
+ print_f64_sci(s.minimum,15);print("\" data-color-max=\"");print_f64_sci(s.maximum,15)
+ let under:i64=s.under;let over:i64=s.over;let missing:i64=s.missing;let constant:i64=s.constant_index
+ print("\" data-under-rgb8=\"");print(under);print("\" data-over-rgb8=\"");print(over);print("\" data-missing-rgb8=\"");print(missing);print("\" data-constant-bin=\"");print(constant);print("\"")
+}
+
+pub fn palette_metadata_svg(s:&PaletteScale) with IO,Mut,Div,Panic {
+ print(" data-palette=\"");palette_name_svg(s.palette);print("\"")
+ palette_policy_metadata_svg(s)
+}
