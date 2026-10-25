@@ -114,10 +114,8 @@ for name in "${tests[@]}"; do files+=("tests/run-pass/$name.sio"); done
 for path in "${files[@]}"; do
     [[ -e "$src/$path" ]] || { echo "Missing source: $path" >&2; exit 1; }
 done
-# mkdir refuses an existing target. A failed copy leaves no PACKAGE_READY marker.
 mkdir -m 700 -- "$dest"
 tar -C "$src" -cf - -- "${files[@]}" | tar -C "$dest" -xf -
-# Normalize the legacy suite alias to a regular file in the standalone package.
 if [[ -L "$dest/scripts/dev/run_sio_test_suite.sh" ]]; then
     cp --remove-destination -- "$src/scripts/dev/run_sio_test_suite.sh" "$dest/scripts/dev/run_sio_test_suite.sh"
 fi
