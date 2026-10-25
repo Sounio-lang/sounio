@@ -557,6 +557,11 @@ rc=0
 # normalization_into_reference through the oracle queue above.)
 LN_BOUNDARY_OUT="$out/math-pure-ln-boundary" bash scripts/stdlib/math_pure_ln_boundary_gate.sh > "$out/math-pure-ln-boundary.log" 2>&1 || rc=$?
 record concordance math-pure-ln-boundary "$rc"
+
+# Checked FEM / Poisson manufactured solutions, legacy imports and work controls.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" bash scripts/stdlib/fem_poisson_gate.sh "$out/fem-poisson" > "$out/fem-poisson.gate.stdout" 2> "$out/fem-poisson.gate.stderr" || rc=$?
+record focused-gate fem-poisson "$rc"
 }
 
 # Both partitions remain mandatory in CI; standalone all preserves the original order.
