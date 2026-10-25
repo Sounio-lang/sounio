@@ -1956,6 +1956,45 @@ pub var GLOBAL_DECL_TYPE_TYPES: [i64; 4096] = [0; 4096]
 pub var GLOBAL_DECL_TYPE_COUNT: i64 = 0
 pub var GLOBAL_DECL_TYPE_OVERFLOW: i64 = 0
 
+// #2966: for `var G: Option<Box<T>>` the recorded type above is `Option`, which
+// names no layout, so `var cur = G; match cur { Some(n) => (*n).next }` left
+// `n` untyped and `next` went to the untyped field vote (FO_INLINE_HEAD:
+// FoInlineNode.next read as `def`). The payload T is kept here, parallel to
+// GLOBAL_DECL_TYPE_HASHES (0 = none, -1 = ambiguous across modules).
+pub var GLOBAL_DECL_OPT_INNER: [i64; 4096] = [0; 4096]
+
+fn ast_name_is_ascii(n: Name, s0: i64, s1: i64, s2: i64, len: i64) -> bool {
+    n.len == len && (n.buf[0] as i64) == s0 && (n.buf[1] as i64) == s1 && (n.buf[2] as i64) == s2
+}
+
+// Hash of T for `Option<Box<T>>` (T a capitalised named type), else 0.
+fn ast_option_box_inner_hash(t: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if (*t).kind != TypeExprKind::TypeNamed || (*t).path.seg_count <= 0 { return 0 }
+    // "Option": O=79 p=112 t=116, length 6
+    if !ast_name_is_ascii(ast_path_prefix_name((*t).path, 0), 79, 112, 116, 6) { return 0 }
+    match (*t).type_args {
+        Some(a) => {
+            let bx = &(*a).head
+            if (*bx).kind != TypeExprKind::TypeNamed || (*bx).path.seg_count <= 0 { return 0 }
+            // "Box": B=66 o=111 x=120, length 3
+            if !ast_name_is_ascii(ast_path_prefix_name((*bx).path, 0), 66, 111, 120, 3) { return 0 }
+            match (*bx).type_args {
+                Some(b) => {
+                    let inner = &(*b).head
+                    if (*inner).kind != TypeExprKind::TypeNamed || (*inner).path.seg_count != 1 { return 0 }
+                    let n = ast_path_prefix_name((*inner).path, 0)
+                    if n.len <= 0 { return 0 }
+                    let c0 = n.buf[0] as i64
+                    if c0 < 65 || c0 > 90 { return 0 }
+                    ast_name_hash(n)
+                }
+                None => 0,
+            }
+        }
+        None => 0,
+    }
+}
+
 pub fn ast_record_global_decl_type(name: Name, ty: &Option<Box<TypeExpr>>) with Mut, Panic, Div {
     match *ty {
         Some(t) => {
@@ -1967,11 +2006,15 @@ pub fn ast_record_global_decl_type(name: Name, ty: &Option<Box<TypeExpr>>) with 
             if c0 < 65 || c0 > 90 { return }
             let h = ast_name_hash(name)
             let th = ast_name_hash(tn)
+            let ih = ast_option_box_inner_hash(&(*t))
             var k: i64 = 0
             while k < GLOBAL_DECL_TYPE_COUNT {
                 if GLOBAL_DECL_TYPE_HASHES[k as usize] == h {
                     if GLOBAL_DECL_TYPE_TYPES[k as usize] != th {
                         GLOBAL_DECL_TYPE_TYPES[k as usize] = 0 - 1
+                    }
+                    if GLOBAL_DECL_OPT_INNER[k as usize] != ih {
+                        GLOBAL_DECL_OPT_INNER[k as usize] = 0 - 1
                     }
                     return
                 }
@@ -1983,6 +2026,7 @@ pub fn ast_record_global_decl_type(name: Name, ty: &Option<Box<TypeExpr>>) with 
             }
             GLOBAL_DECL_TYPE_HASHES[GLOBAL_DECL_TYPE_COUNT as usize] = h
             GLOBAL_DECL_TYPE_TYPES[GLOBAL_DECL_TYPE_COUNT as usize] = th
+            GLOBAL_DECL_OPT_INNER[GLOBAL_DECL_TYPE_COUNT as usize] = ih
             GLOBAL_DECL_TYPE_COUNT = GLOBAL_DECL_TYPE_COUNT + 1
         }
         None => {}
@@ -2001,6 +2045,22 @@ pub fn ast_global_decl_type_hash_of(name: Name) -> i64 with Div {
             let th = GLOBAL_DECL_TYPE_TYPES[k as usize]
             if th < 0 { return 0 }
             return th
+        }
+        k = k + 1
+    }
+    0
+}
+
+// Hash of T recorded for `var name: Option<Box<T>>`, or 0 (none / ambiguous).
+pub fn ast_global_decl_opt_inner_hash_of(name: Name) -> i64 with Div {
+    if GLOBAL_DECL_TYPE_COUNT <= 0 { return 0 }
+    let h = ast_name_hash(name)
+    var k: i64 = 0
+    while k < GLOBAL_DECL_TYPE_COUNT {
+        if GLOBAL_DECL_TYPE_HASHES[k as usize] == h {
+            let ih = GLOBAL_DECL_OPT_INNER[k as usize]
+            if ih < 0 { return 0 }
+            return ih
         }
         k = k + 1
     }

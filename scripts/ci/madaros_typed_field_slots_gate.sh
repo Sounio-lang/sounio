@@ -40,6 +40,13 @@
 #      for an S with a fixed-array field is refused.
 #  10. `let r = match .. { .. => f(..) }` (and if) is typed by the arms' struct;
 #      untyped, `r.params` read `count` (check.sio's method FnSigs).
+#  11. `var cur = &(*h).items` (a reference to an Option<Box<T>> field) types
+#      the binding of `match *cur { Some(n) => .. }`; untyped, `(*n).head.expr`
+#      had no vote majority and hashed to another word (fo_inline_note).
+#  12. `var cur = HEAD` with a global `var HEAD: Option<Box<T>>` types the
+#      `Some(node)` binding; untyped, `(*node).next` read Link.def.
+#  13. `var t = h.table` with `table: Box<T>` types `t` as Box<T>; untyped,
+#      `(*t).depth[1] = ..` stored into another field (fo_bind tables).
 # Each witness surrounds the right struct with decoys that win the vote.
 # Madaros from main prints 3, 1055 and 3 (or 40300003); lean_single passes all.
 #
@@ -78,6 +85,9 @@ check raw_struct_whole_copy RAW_STRUCT_WHOLE_COPY_OK
 check string_array_store STRING_ARRAY_STORE_OK
 check raw_ref_alias RAW_REF_ALIAS_OK
 check let_match_struct_typed LET_MATCH_STRUCT_TYPED_OK
+check ref_option_local_match_typed REF_OPTION_LOCAL_MATCH_TYPED_OK
+check global_option_list_match_typed GLOBAL_OPTION_LIST_MATCH_TYPED_OK
+check box_field_local_typed BOX_FIELD_LOCAL_TYPED_OK
 
 cat >"$WORK/refuse.sio" <<'SIO'
 struct Seg { buf: [i8; 16], len: i64 }

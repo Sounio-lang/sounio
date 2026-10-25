@@ -24615,6 +24615,26 @@ impl Lowerer {
         found
     }
 
+    // #2966: payload layout of `var G: Option<Box<T>>` (T recorded by the parser,
+    // see GLOBAL_DECL_OPT_INNER), or -1. Same uniqueness rule as above.
+    fn global_option_box_inner_layout(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        let ih = ast_global_decl_opt_inner_hash_of(name)
+        if ih == 0 { return 0 - 1 }
+        if self.lookup_local(name) >= 0 { return 0 - 1 }
+        var found: i64 = 0 - 1
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ast_name_hash((*self.struct_layouts).entries[si as usize].type_name) == ih {
+                if found >= 0 && !ir_name_eq((*self.struct_layouts).entries[found as usize].type_name, (*self.struct_layouts).entries[si as usize].type_name) {
+                    return 0 - 1
+                }
+                if found < 0 { found = si }
+            }
+            si = si + 1
+        }
+        found
+    }
+
     fn expr_receiver_struct_type_ref(self, expr: &Expr) -> Name with Mut, Panic, Div, Alloc {
         if (*expr).kind == ExprKind::ExprIdent {
             let local_st = self.lookup_local_struct_type((*expr).name)
@@ -28649,6 +28669,11 @@ impl Lowerer {
             Some(rhs) => {
                 if (*rhs).kind == ExprKind::ExprIdent {
                     option_payload_layout = lower_lookup_box_inner_layout(self.locals, self.scope_depth, (*rhs).name)
+                    if option_payload_layout < 0 {
+                        // `var cur = FO_INLINE_HEAD` with `var FO_INLINE_HEAD:
+                        // Option<Box<FoInlineNode>>` (#2966).
+                        option_payload_layout = self.global_option_box_inner_layout((*rhs).name)
+                    }
                     has_option_payload = option_payload_layout >= 0
                 } else if (*rhs).kind == ExprKind::ExprUnary && (*rhs).un_op == UnaryOp::OpDeref {
                     // `var cur = *params` with `params: &Option<Box<T>>`: the copy
@@ -28662,6 +28687,35 @@ impl Lowerer {
                     match (*rhs).left {
                         Some(operand) => {
                             if (*operand).kind == ExprKind::ExprIdent && !ir_name_is_box(self.lookup_local_struct_type((*operand).name)) {
+                                option_payload_layout = lower_lookup_box_inner_layout(self.locals, self.scope_depth, (*operand).name)
+                                has_option_payload = option_payload_layout >= 0
+                            }
+                        }
+                        None => {}
+                    }
+                } else if (*rhs).kind == ExprKind::ExprUnary && ((*rhs).un_op == UnaryOp::OpRef || (*rhs).un_op == UnaryOp::OpRefMut) {
+                    // `var bc = &(*fd).body.stmts` / `&!x`: a reference to an
+                    // Option<Box<T>> carries the same payload layout, so a later
+                    // `match *bc { Some(bl) => (*bl).head.expr }` types `bl`.
+                    // Without it `bl` fell to the untyped vote; `expr` has no
+                    // majority across structs, so it hashed to word 37 and the
+                    // whole-program compile read garbage (#2966,
+                    // Lowerer_fo_inline_note).
+                    match (*rhs).left {
+                        Some(operand) => {
+                            if (*operand).kind == ExprKind::ExprFieldAccess {
+                                match (*operand).left {
+                                    Some(owner) => {
+                                        let owner_type = self.expr_receiver_struct_type_ref(&(*owner))
+                                        let inner = self.field_option_box_inner_type_for_struct(owner_type, (*operand).name)
+                                        if inner.len > 0 {
+                                            option_payload_layout = lower_struct_layout_index_of(&(*self.struct_layouts), inner)
+                                            has_option_payload = option_payload_layout >= 0
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            } else if (*operand).kind == ExprKind::ExprIdent && !ir_name_is_box(self.lookup_local_struct_type((*operand).name)) {
                                 option_payload_layout = lower_lookup_box_inner_layout(self.locals, self.scope_depth, (*operand).name)
                                 has_option_payload = option_payload_layout >= 0
                             }
@@ -30136,7 +30190,22 @@ impl Lowerer {
                         // the index by name" — the same route the explicit `(*p).f`
                         // form takes, and the only route the layout table can offer:
                         // it stores the declared name "Box", not the inner T.
-                        let bxl = lower_struct_layout_index_of(&(*lo.struct_layouts), lo.expr_first_arg_struct_name_ref(&(*expr_box)))
+                        var bxl = lower_struct_layout_index_of(&(*lo.struct_layouts), lo.expr_first_arg_struct_name_ref(&(*expr_box)))
+                        if bxl < 0 {
+                            // That by-name route is the untyped vote: `var fb0 =
+                            // lo.fo_bind` then `(*fb0).depth[i] = ..` stored into
+                            // another struct's `depth` slot in the whole-program
+                            // compile (#2966). The field declaration names T
+                            // (elem_type_name_id of a Box<T> field), so use it.
+                            match (*expr_box).left {
+                                Some(bx_owner) => {
+                                    let bx_owner_ty = lo.expr_receiver_struct_type_ref(&(*bx_owner))
+                                    let bx_inner = lo.field_box_inner_type_for_struct(bx_owner_ty, (*expr_box).name)
+                                    if bx_inner.len > 0 { bxl = lower_struct_layout_index_of(&(*lo.struct_layouts), bx_inner) }
+                                }
+                                None => {}
+                            }
+                        }
                         lo = lo.bind_local_box_inner_layout(s.name, bxl)
                     } else {
                         if lower_aggregate_diag_enabled() { print("lower_agg: bind-from-field NOT pointer class\n") }
@@ -37479,11 +37548,27 @@ impl Lowerer {
         match (*e).left {
             Some(scrut_expr) => { if (*scrut_expr).kind == ExprKind::ExprIdent {
                     payload_layout = lower_option_payload_for_local(self.locals, self.scope_depth, (*scrut_expr).name)
+                    // A local copied from an Option<Box<T>> global (`var cur =
+                    // FO_INLINE_HEAD`) is not typed `Option`, but carries the
+                    // payload layout the let path recorded (#2966).
+                    if payload_layout < 0 && self.lookup_local((*scrut_expr).name) >= 0 && !ir_name_is_box(self.lookup_local_struct_type((*scrut_expr).name)) {
+                        payload_layout = lower_lookup_box_inner_layout(self.locals, self.scope_depth, (*scrut_expr).name)
+                    }
                 } else if (*scrut_expr).kind == ExprKind::ExprUnary && (*scrut_expr).un_op == UnaryOp::OpDeref {
                     match (*scrut_expr).left {
                         Some(source) => {
                             if (*source).kind == ExprKind::ExprIdent {
                                 payload_layout = lower_option_payload_for_local(self.locals, self.scope_depth, (*source).name)
+                                // `match *cur` with `cur = &(*h).items`: a reference
+                                // local is not typed `Option`, but the let path
+                                // recorded the field's Option<Box<T>> payload layout
+                                // on it. Without this the binding stayed an untyped
+                                // Box and `(*n).head.expr` fell to the untyped vote
+                                // (#2966, Lowerer_fo_inline_note). A Box source
+                                // derefs to its payload, not to an Option.
+                                if payload_layout < 0 && !ir_name_is_box(self.lookup_local_struct_type((*source).name)) {
+                                    payload_layout = lower_lookup_box_inner_layout(self.locals, self.scope_depth, (*source).name)
+                                }
                             }
                         }
                         None => {}
