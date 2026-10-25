@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Linux Slurm worker, UID1000. This gate never rebuilds or copies the compiler.
+# Native Linux replay; qualification jobs record Slurm UID1000. This gate never rebuilds or copies the compiler.
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 out=${PHYSICS_UNCERTAINTY_OUT:-${1:-}}
-[[ $(id -u) == 1000 && $(uname -s) == Linux ]] || { echo 'requires Linux worker UID1000' >&2; exit 64; }
+[[ $(uname -s) == Linux ]] || { echo 'requires Linux worker' >&2; exit 64; }
 [[ $out == /* && -x ${MADAROS_RAW_BIN:?set explicit source-built compiler} ]] || exit 64
 mkdir -p "$out"
 [[ -z $(find "$out" -mindepth 1 -maxdepth 1 -print -quit) ]] || { echo 'refusing nonempty output directory' >&2; exit 65; }
+id > "$out/IDENTITY.txt"
 cd "$repo"
 export SOUNIO_STDLIB_PATH="$repo/stdlib" SOUNIO_SOUC_ENGINE=madaros
 export SOUNIO_MADAROS_NOCACHE=1 SOUNIO_MADAROS_CACHE_READONLY=1

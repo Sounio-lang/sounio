@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Bounded64 production-import numerical/contract gate. Run on a UID1000 Linux worker.
+# Bounded64 production-import numerical/contract gate. Native Linux replay; qualification jobs record UID1000.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-[[ $(uname -s) == Linux && $(id -u) == 1000 ]] || { echo 'Linux UID1000 worker required' >&2; exit 2; }
+[[ $(uname -s) == Linux ]] || { echo 'Linux worker required' >&2; exit 2; }
 : "${MADAROS_RAW_BIN:?absolute verified modular compiler required}"
 : "${DP54_GATE_OUTPUT:?new absolute output directory required}"
 [[ $MADAROS_RAW_BIN == /* && -x $MADAROS_RAW_BIN && $DP54_GATE_OUTPUT == /* ]] || exit 2
 [[ ! -e $DP54_GATE_OUTPUT ]] || { echo 'output must not exist' >&2; exit 2; }
 mkdir -p "$DP54_GATE_OUTPUT"
 out=$DP54_GATE_OUTPUT
+id > "$out/IDENTITY.txt"
 ulimit -s 524288
 ulimit -c 0
 export LC_ALL=C LANG=C SOUNIO_STDLIB_PATH="$PWD/stdlib"
