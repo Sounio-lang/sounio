@@ -275,28 +275,32 @@ pub fn phonon_step_checked(s:&!PhononState,scratch:&!NumericBuffer,h:f64)->Phono
  let next=s.t+h
  if !is_finite(next) {out.status=4;return out}
  if next<=s.t {out.status=6;return out}
+ let used_h=next-s.t
+ if !is_finite(used_h) {out.status=4;return out}
+ let midpoint=s.t+0.5*used_h
+ if midpoint<=s.t||midpoint>=next {out.status=6;return out}
  let limit=ph_limit(s)
  if limit.status!=0 {out.status=limit.status;return out}
- if h>limit.value {out.status=2;return out}
+ if used_h>limit.value {out.status=2;return out}
  var code=ph_rhs_stage(s,scratch,s.t,0,false)
  out.nfeval=1
  if code!=0 {out.status=code;return out}
- code=ph_trial(s,scratch,h,0)
+ code=ph_trial(s,scratch,used_h,0)
  if code!=0 {out.status=code;return out}
- code=ph_rhs_stage(s,scratch,s.t+0.5*h,1,true)
+ code=ph_rhs_stage(s,scratch,midpoint,1,true)
  out.nfeval=2
  if code!=0 {out.status=code;return out}
- code=ph_trial(s,scratch,h,1)
+ code=ph_trial(s,scratch,used_h,1)
  if code!=0 {out.status=code;return out}
- code=ph_rhs_stage(s,scratch,s.t+0.5*h,2,true)
+ code=ph_rhs_stage(s,scratch,midpoint,2,true)
  out.nfeval=3
  if code!=0 {out.status=code;return out}
- code=ph_trial(s,scratch,h,2)
+ code=ph_trial(s,scratch,used_h,2)
  if code!=0 {out.status=code;return out}
  code=ph_rhs_stage(s,scratch,next,3,true)
  out.nfeval=4
  if code!=0 {out.status=code;return out}
- code=ph_trial(s,scratch,h,3)
+ code=ph_trial(s,scratch,used_h,3)
  if code!=0 {out.status=code;return out}
  ph_commit_candidate(s,scratch)
  s.t=next;out.status=0;out.t_final=next;out.steps=1;out
@@ -318,14 +322,21 @@ pub fn phonon_simulate_checked(s:&!PhononState,scratch:&!NumericBuffer,t_end:f64
  if limit.status!=0 {out.status=limit.status;return out}
  while s.t<t_end && out.steps<max_steps {
   let remaining=t_end-s.t
-  let h=ph_min(remaining,ph_min(dt,limit.value))
-  let next=if h==remaining {t_end}else{s.t+h}
-  if next<=s.t {out.status=6;return out}
+  var h=ph_min(remaining,ph_min(dt,limit.value))
+  let candidate=s.t+h
+  if candidate<t_end && remaining<=limit.value {
+   let trailing_midpoint=candidate+0.5*(t_end-candidate)
+   let full_target=s.t+remaining
+   let full_span=full_target-s.t
+   let full_midpoint=s.t+0.5*full_span
+   if (trailing_midpoint<=candidate||trailing_midpoint>=t_end) && full_target==t_end && full_midpoint>s.t && full_midpoint<full_target && full_span<=limit.value {h=remaining}
+  }
+  let next=s.t+h
+  if next<=s.t||next>t_end {out.status=6;return out}
   let result=phonon_step_checked(s,scratch,h)
   out.nfeval=out.nfeval+result.nfeval
   out.t_final=s.t
   if result.status!=0 {out.status=result.status;return out}
-  if h==remaining {s.t=t_end;out.t_final=t_end}
   out.steps=out.steps+1
  }
  if s.t<t_end {out.status=5}else{out.status=0}

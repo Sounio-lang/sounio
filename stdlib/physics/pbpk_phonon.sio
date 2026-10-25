@@ -39,10 +39,7 @@ fn pc_accumulate(scratch:&NumericBuffer,average:&!NumericBuffer,n:i64,k:i64,h:f6
   let a=numeric_buffer_at(scratch,ia)
   let b=numeric_buffer_at(scratch,ib)
   let c=numeric_buffer_at(scratch,ic)
-  let y2=before+(h*a)*0.5
-  let y3=before+(h*b)*0.5
-  let y4=before+h*c
-  let increment=h*(before/6.0+y2/3.0+y3/3.0+y4/6.0)
+  let increment=h*(before+(h/6.0)*(a+b+c))
   let previous=numeric_buffer_at(average,col)
   let value=previous+increment
   if !is_finite(increment)||!is_finite(value) {return 4}
@@ -99,11 +96,24 @@ pub fn phonon_liver_cycle_checked(s:&!PhononState,scratch:&!NumericBuffer,averag
  if numeric_buffer_status(average)!=0||numeric_buffer_len(average)<2*width {out.status=3;return out}
  let p=phonon_parameters(s)
  if p.f_heart<=0.0 {out.status=2;return out}
- let duration=1.0/p.f_heart
+ let requested_duration=1.0/p.f_heart
  let start=phonon_state_time(s)
- let target=start+duration
- if !is_finite(duration)||!is_finite(target) {out.status=4;return out}
+ let target=start+requested_duration
+ if !is_finite(requested_duration)||!is_finite(target) {out.status=4;return out}
  if target<=start {out.status=6;return out}
+ let duration=target-start
+ if !is_finite(duration) {out.status=4;return out}
+ // A rounded deterministic window is reported and normalized as integrated.
+ // An uncertain period needs a representable nominal period for its derivative.
+ if duration!=requested_duration {
+  var source:i64=0
+  while source<k {
+   let frequency=phonon_factor_entry(s,n+8,source)
+   if frequency.status!=0 {out.status=frequency.status;return out}
+   if frequency.value!=0.0 {out.status=6;return out}
+   source=source+1
+  }
+ }
  let limit=phonon_time_limit(s)
  if limit.status!=0 {out.status=limit.status;return out}
  var col:i64=0
@@ -111,13 +121,24 @@ pub fn phonon_liver_cycle_checked(s:&!PhononState,scratch:&!NumericBuffer,averag
  while phonon_state_time(s)<target && out.steps<max_steps {
   let before_time=phonon_state_time(s)
   let remaining=target-before_time
-  let h=pc_min(remaining,pc_min(max_step,limit.value))
+  var h=pc_min(remaining,pc_min(max_step,limit.value))
+  let candidate=before_time+h
+  if candidate<target && remaining<=limit.value {
+   let trailing_midpoint=candidate+0.5*(target-candidate)
+   let full_target=before_time+remaining
+   let full_span=full_target-before_time
+   let full_midpoint=before_time+0.5*full_span
+   if (trailing_midpoint<=candidate||trailing_midpoint>=target) && full_target==target && full_midpoint>before_time && full_midpoint<full_target && full_span<=limit.value {h=remaining}
+  }
+  let next=before_time+h
+  if next<=before_time||next>target {out.status=6;return out}
   let prior=pc_previous(s,average)
   if prior!=0 {out.status=prior;return out}
   let step=phonon_step_checked(s,scratch,h)
   out.duration=phonon_state_time(s)-start
   if step.status!=0 {out.status=step.status;return out}
-  let code=pc_accumulate(scratch,average,n,k,h)
+  let used_h=phonon_state_time(s)-before_time
+  let code=pc_accumulate(scratch,average,n,k,used_h)
   if code!=0 {out.status=code;return out}
   out.steps=out.steps+1
  }
