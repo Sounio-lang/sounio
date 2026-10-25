@@ -802,3 +802,21 @@ Gate. Job 17506, partition `bench`, node `gpuorangefs-r770-proxmox`, SmolLM2-135
 - After one warm step (the capture), seven replays span 122755231 ns, which is 0.0175 s/token. The threshold for this cut is 0.010 s. The measured step is under the 0.0737 s of job 17500 and above 0.010 s. The threshold is not moved. This cut does not pass it.
 
 The node returned to idle.
+
+
+## 28. One kernel for the whole forward (2026-10-25, OBSERVED)
+
+Job 17506 replayed a graph of about 500 nodes at 0.0175 s/token. The two M=1 GEMMs tried on that cut, one reloading A and one staging a tile of A in shared memory, landed on the same number, so the floor was the graph, not the inner loop. SmolLM2-135M resident as f32 is about 540 MB. At the L4's 300 GB/s that traffic is 1.8 ms if each weight is read once. The threshold for this cut is 0.005 s/token, about three times that ceiling and three times under the graph.
+
+One launch does the prefill and the decode, for M from 1 to 8. The host passes the token ids and, at the end, reads the f64 logits of the last position. There is no device-to-host copy in between. Each thread owns a stripe of four columns and walks K, so each element of B is loaded once and reused across the M rows. The K loop is unrolled by four. N and K of this model are multiples of four. The grid is 58 blocks of 256 threads, one block per SM of the L4, which is what lets a software grid barrier return. A sense-reversing atomic barrier separates the phases that need the whole vector: after the embedding, and inside each layer around the RMSNorm, the QKV projection, the attention, the output projection, the post-norm, the gate and up projections, the SwiGLU, the down projection and the residual. Block 0 owns the RMSNorm, the RoPE, the KV write, the attention, the residual and the SwiGLU. Every block owns the GEMV. A CTA barrier sits after the RoPE and before the KV copy, and again after the copy and before the attention, so one warp does not copy a K element another warp has not rotated yet. The RoPE table for 512 positions is built once at upload with `math::pure` and stays resident. The kernel indexes `(position + row)`. The host does not recompute a sine or a cosine on the measured step. The logits are converted to f64 in the kernel. `llama_forward` on the CPU is unchanged and is the reference. If this module does not load, `dev_open` returns 0 and the measured step fails. The graph of job 17506 is not a fallback.
+
+Gate. Job 17553, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. Partition `bench` has no nodes after the reboot of this node at 2026-10-25T13:21:10Z (the node came back in `gpu-orangefs` only), so the job was pinned on `gpu-orangefs` with the same resources as job 17506. SmolLM2-135M, ids 0, 504, 3575, 282, 4649, 314. The clock is `date +%s%N` on the job script.
+
+- Prefill argmax, CPU and device: 7042.
+- Greedy continuation, eight tokens, both paths: 7042, 30, 657, 314, 260, 3995, 2240, 281.
+- Maximum absolute logit difference on that prefill: 3.68e-5 (the program printed 36789 at a scale of 1e9).
+- The timed lines print `RESIDENT=1`.
+- The device prefill of the six prompt tokens took 82773670 ns. That span has no threshold.
+- After one warm step, seven forwards span 406812284 ns, which is 0.0581 s/token. The threshold is 0.005 s. The measured step is above the 0.0175 s of job 17506 and above 0.005 s. Effective traffic is about 9 GB/s against a 300 GB/s ceiling of 1.8 ms. The threshold is not moved. This cut does not pass it.
+
+The node returned to idle.
