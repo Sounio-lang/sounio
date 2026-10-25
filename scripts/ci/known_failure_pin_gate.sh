@@ -11,7 +11,7 @@
 # `outside_mask=9` literature failure was still accepted with any other mask
 # or a crash under `--filter`.
 #
-# scripts/dev/run_sio_test_suite.sh now reads two pins from the test itself
+# scripts/dev/run_sio_test_suite_v2.sh now reads two pins from the test itself
 # and enforces them in every mode:
 #   //@ xfail-expect: TEXT   (repeatable) TEXT must occur in the full output
 #   //@ xfail-exit: N        the raw souc exit code must be N (124 = timeout)
@@ -37,7 +37,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
-HARNESS="$ROOT_DIR/scripts/dev/run_sio_test_suite.sh"
+HARNESS="$ROOT_DIR/scripts/dev/run_sio_test_suite_v2.sh"
 BASELINE="$ROOT_DIR/tests/known_failures/unpinned_inline_known_failures.txt"
 
 # Leading annotation header, exactly as the harness reads it.
@@ -51,7 +51,7 @@ header_lines() {
   done < "$1"
 }
 
-# The files run_sio_test_suite.sh enumerates when given no --test-list.
+# The files run_sio_test_suite_v2.sh enumerates when given no --test-list.
 suite_files() {
   shopt -s nullglob
   local f

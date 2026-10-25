@@ -80,7 +80,7 @@ echo "[4/4] Running test suite..."
 # Known platform-specific skips:
 #   gpu_vec_add.sio      -- requires CUDA device (exit 139 on CPU-only hosts)
 #   gtt_if_arm_union.sio -- ARM-specific codegen path (skip on x86-only hosts)
-SUITE_OUT=$(bash scripts/dev/run_sio_test_suite.sh 2>&1 || true)
+SUITE_OUT=$(bash scripts/dev/run_sio_test_suite_v2.sh 2>&1 || true)
 FAILS=$(echo "$SUITE_OUT" | grep "^  FAIL" | grep -v "gpu_vec_add\|gtt_if_arm_union" || true)
 echo "$SUITE_OUT" | tail -6
 if [ -z "$FAILS" ]; then

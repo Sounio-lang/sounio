@@ -3,7 +3,7 @@
 #
 # Two CI incidents, one mechanism: a verdict-carrying pipeline under
 # `set -o pipefail` lost its writer to an early-exiting reader.
-#   * scripts/dev/run_sio_test_suite.sh:434 (then-line) logged
+#   * scripts/dev/run_sio_test_suite_v2.sh:434 (then-line) logged
 #     "echo: write error: Broken pipe" in a run whose single failure was a
 #     "missing error" flake on a test that passes elsewhere -- `grep -q`
 #     exits on first match, closes the pipe, and the flushing `echo` fails
@@ -20,7 +20,7 @@
 #   3. SHAPE BAN   -- the guarded files no longer contain the racy shapes.
 set -uo pipefail
 
-HARNESS="scripts/dev/run_sio_test_suite.sh"
+HARNESS="scripts/dev/run_sio_test_suite_v2.sh"
 PROBE="scripts/ci/madaros_ir_capacity_probe.sh"
 
 fail() { echo "SIGPIPE_HYGIENE_GATE_FAIL: $*" >&2; exit 1; }

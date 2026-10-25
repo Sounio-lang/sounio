@@ -106,6 +106,6 @@ what the wrong answer is, in the first-order uncertainty path.
 
 Three entry points to the same compiler bytes behave differently — the `bin/souc`
 wrapper, the raw ELF CLI, and the harness. Counts here come from the harness
-(`run_sio_test_suite.sh`) and from the gates' own scripts, not from
+(`run_sio_test_suite_v2.sh`) and from the gates' own scripts, not from
 hand-rolled invocations. See ENGINE_DIVERGENCE_CORPUS_2026-08-30 for what that
 trap looks like.

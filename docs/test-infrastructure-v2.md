@@ -15,19 +15,19 @@ Enhanced test suite runner with parallel execution, JUnit XML output, and new te
 
 ```bash
 # Run all tests with parallel execution (default: use all CPUs)
-bash scripts/dev/run_sio_test_suite.sh
+bash scripts/dev/run_sio_test_suite_v2.sh
 
 # Control parallelism
-bash scripts/dev/run_sio_test_suite.sh --jobs 8
+bash scripts/dev/run_sio_test_suite_v2.sh --jobs 8
 
 # Generate JUnit XML for CI integration
-bash scripts/dev/run_sio_test_suite.sh --format junit
+bash scripts/dev/run_sio_test_suite_v2.sh --format junit
 
 # Filter tests by name
-bash scripts/dev/run_sio_test_suite.sh --filter "kernel"
+bash scripts/dev/run_sio_test_suite_v2.sh --filter "kernel"
 
 # Verbose output
-bash scripts/dev/run_sio_test_suite.sh --verbose
+bash scripts/dev/run_sio_test_suite_v2.sh --verbose
 ```
 
 ## Test Annotations
@@ -92,7 +92,7 @@ Compatible with Jenkins, GitLab CI, GitHub Actions, Azure DevOps, CircleCI:
 
 ```bash
 # Generate JUnit output
-bash scripts/dev/run_sio_test_suite.sh --format junit
+bash scripts/dev/run_sio_test_suite_v2.sh --format junit
 
 # Output file location (default: ./test-results.xml)
 export SOUNIO_TEST_JUNIT_FILE=/path/to/results.xml

@@ -959,7 +959,7 @@ echo "PASS: gen2 == gen3  md5=$GEN2"
     || echo "WARN: guarded sites > 0"
 
 # Step 5: test suite
-bash scripts/dev/run_sio_test_suite.sh
+bash scripts/dev/run_sio_test_suite_v2.sh
 ```
 
 **Expected outputs:**

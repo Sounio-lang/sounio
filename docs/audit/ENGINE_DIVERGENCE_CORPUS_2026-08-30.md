@@ -95,7 +95,7 @@ it *is* the seed. Green CI on these 112 therefore says nothing whatever about th
 compiler `bin/souc` invokes by default.
 
 Confirmed against the real harness rather than by inference:
-`run_sio_test_suite.sh --filter-exact async_basic.sio` with
+`run_sio_test_suite_v2.sh --filter-exact async_basic.sio` with
 `SOUNIO_TEST_SOUC_BIN=<stage2>` reports **Pass: 1**, while `bin/souc check` on the
 same file under Madaros reports `error[E012] this type has no field named`.
 
@@ -113,7 +113,7 @@ Do not compare across them; the binary is not the only variable.
 
     bin/souc check           (wrapper, ENGINE=lean_single)  -> OK
     SOUNIO_SOUC_BIN=<elf> check   (raw CLI, same bytes)     -> error[E221]: no main
-    run_sio_test_suite.sh (harness, SOUNIO_TEST_SOUC_BIN) -> Pass
+    run_sio_test_suite_v2.sh (harness, SOUNIO_TEST_SOUC_BIN) -> Pass
 
 The middle row is the same binary as the first and reports "no main" on a file
 that *has* `fn main`. An earlier draft of this note read that as a third engine

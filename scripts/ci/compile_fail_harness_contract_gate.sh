@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Positive-control contract for compile-fail harness behaviour in
-# scripts/dev/run_sio_test_suite.sh:
+# scripts/dev/run_sio_test_suite_v2.sh:
 #   matching diagnostic  → accept
 #   wrong diagnostic     → reject
 #   SEGV / signal        → reject (never a valid compile-fail)
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RUNNER="$ROOT_DIR/scripts/dev/run_sio_test_suite.sh"
+RUNNER="$ROOT_DIR/scripts/dev/run_sio_test_suite_v2.sh"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sounio-compile-fail-contract.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 

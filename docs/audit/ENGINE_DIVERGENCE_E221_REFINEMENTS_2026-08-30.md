@@ -70,7 +70,7 @@ under Madaros. A first pass suggested nine of ten did not match, but that
 measurement was wrong: the check was case-sensitive while the patterns are
 lowercase (`type mismatch`) and the diagnostics are capitalised (`Type
 mismatch`). Anyone re-deriving this should match the way
-`scripts/dev/run_sio_test_suite.sh` matches, not with `grep -F`.
+`scripts/dev/run_sio_test_suite_v2.sh` matches, not with `grep -F`.
 
 ## What a stale binary cost
 

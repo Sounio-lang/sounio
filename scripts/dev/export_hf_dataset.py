@@ -20,7 +20,7 @@ TEST_DIRS = [
 ]
 # The full suite's external known-failure manifest. A test listed here does
 # not currently pass even without a `//@ known-failure` annotation in its
-# source; see scripts/dev/run_sio_test_suite.sh (KNOWN_FAILURES_FILE).
+# source; see scripts/dev/run_sio_test_suite_v2.sh (KNOWN_FAILURES_FILE).
 KNOWN_FAILURES_MANIFEST = ROOT / "tests" / "known_failures" / "hardened_diagnostics_full_suite.txt"
 
 
@@ -129,7 +129,7 @@ def build_summary(stem: str, annotations: dict[str, list[str]], comments: list[s
 def load_known_failure_manifest(path: Path = KNOWN_FAILURES_MANIFEST) -> dict[str, str]:
     """Map repo-relative test path -> pinned failure pattern ("" if none).
 
-    Parsed as run_sio_test_suite.sh parses it: `#` starts a comment, blank
+    Parsed as run_sio_test_suite_v2.sh parses it: `#` starts a comment, blank
     lines are skipped, and an entry is `path` or `path|pattern`.
     """
     pinned: dict[str, str] = {}

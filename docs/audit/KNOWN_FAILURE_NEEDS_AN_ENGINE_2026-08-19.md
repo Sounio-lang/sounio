@@ -52,7 +52,7 @@ The two run-pass files really execute on Madaros. They are not the same as each 
 
 ## `requires: lean_single` does not exist
 
-`scripts/dev/run_sio_test_suite.sh` accepts `requires: gpu|llvm|madaros` only. Any other token is a hard fail, not a skip. No `requires: lean_single`, `requires: lean`, or `requires: seed` anywhere in the tree.
+`scripts/dev/run_sio_test_suite_v2.sh` accepts `requires: gpu|llvm|madaros` only. Any other token is a hard fail, not a skip. No `requires: lean_single`, `requires: lean`, or `requires: seed` anywhere in the tree.
 
 It is also the **wrong** tool for the 17. Those tags already say "keep as a Madaros regression guard until fixed-point rebootstrap". `requires: lean_single` would skip them on Madaros and drop the E218/E010 guard. `requires:` answers *may this test run*. The missing annotation answers *on which engine is this failure claimed*.
 
