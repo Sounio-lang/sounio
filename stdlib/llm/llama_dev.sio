@@ -78,6 +78,11 @@ var G_GRAPH_LAUNCH: i64 = 0
 var G_POS: i64 = 0
 var G_POS_HOST: i64 = 0
 var G_FWD: i64 = 0
+var G_LAYER: i64 = 0
+var G_HEAD: i64 = 0
+var G_OCC: i64 = 0
+var G_OCC_HEAD: i64 = 0
+var G_CU_OCC: i64 = 0
 var G_RES_POS: i64 = 0
 var G_BAR_C: i64 = 0
 var G_BAR_S: i64 = 0
@@ -424,6 +429,24 @@ fn dev_pack(rt: &Runtime, m: &Llama) -> i32 with Alloc, Mut, Panic {
     ce_h2d(&rt.exec, G_TAB, G_TAB_HOST as *mut u8, n * 8)
 }
 
+fn dev_query_occ(rt: &Runtime, func: i64) -> i64 with Alloc, Mut, Panic {
+    if func == 0 { return 0 }
+    if G_CU_OCC == 0 {
+        let raw = dlsym(rt.exec.cuda, pb_cstr("cuOccupancyMaxActiveBlocksPerMultiprocessor"))
+        G_CU_OCC = raw as i64
+    }
+    if G_CU_OCC == 0 { return 0 }
+    let buf = heap_alloc(8)
+    write_i64(buf as *mut i64, 0, 0)
+    let f = G_CU_OCC as fn(*mut u8, i64, i32, i64) -> i32
+    let st = f(buf, func, 128, 0)
+    if st != 0 { return 0 }
+    let n = read_i64(buf as *mut i64, 0)
+    if n < 1 { return 0 }
+    if n > 16 { return 0 }
+    n
+}
+
 pub fn dev_open(m: &Llama, rt: &Runtime, ops_ptx: string, skinny_ptx: string, mma_ptx: string, res_ptx: string) -> i64 with Alloc, Mut, Panic, Div, IO {
     if !rt.ready || rt.cvt_down == 0 { return 0 }
     dev_launch_init(rt)
@@ -437,11 +460,16 @@ pub fn dev_open(m: &Llama, rt: &Runtime, ops_ptx: string, skinny_ptx: string, mm
     let msk = ce_module_log(&rt.exec, pb_cstr(skinny))
     let mres = ce_module_log(&rt.exec, pb_cstr(res))
     if mop == 0 || msk == 0 || mres == 0 { return 0 }
-    G_FWD = dev_load_fn(rt, mres, "fwd_resident")
+    G_LAYER = dev_load_fn(rt, mres, "layer_m1")
+    G_HEAD = dev_load_fn(rt, mres, "head_m1")
     G_RES_POS = ce_module_global(&rt.exec, mres, "g_pos")
     G_BAR_C = ce_module_global(&rt.exec, mres, "g_bar_count")
     G_BAR_S = ce_module_global(&rt.exec, mres, "g_bar_sense")
-    if G_FWD == 0 || G_RES_POS == 0 || G_BAR_C == 0 || G_BAR_S == 0 { return 0 }
+    if G_LAYER == 0 || G_HEAD == 0 || G_RES_POS == 0 || G_BAR_C == 0 || G_BAR_S == 0 { return 0 }
+    G_OCC = dev_query_occ(rt, G_LAYER)
+    G_OCC_HEAD = dev_query_occ(rt, G_HEAD)
+    if G_OCC < 1 || G_OCC_HEAD < 1 { return 0 }
+    G_FWD = G_LAYER
     G_POS = ce_module_global(&rt.exec, mop, "g_pos")
     if G_POS == 0 { return 0 }
     G_RMS = dev_load_fn(rt, mop, "rmsnorm_f32")
@@ -522,7 +550,8 @@ pub fn dev_open(m: &Llama, rt: &Runtime, ops_ptx: string, skinny_ptx: string, mm
         if m.vb[bi as usize].len > 0 { return 0 }
         bi = bi + 1
     }
-    if hidden % 16 != 0 || inter % 16 != 0 || qdim % 16 != 0 || kvdim % 16 != 0 { return 0 }
+    if hidden % 8 != 0 || inter % 8 != 0 || qdim % 8 != 0 || kvdim % 8 != 0 || m.cfg.vocab % 4 != 0 { return 0 }
+    if m.cfg.heads > 128 || m.cfg.heads < 1 || m.cfg.kv_heads < 1 { return 0 }
     if dev_rope_table(rt, dh, m.cfg.theta) != 0 { return 0 }
     G_TAB = ce_alloc(&rt.exec, 400 * 8)
     G_TAB_HOST = heap_alloc(3200) as i64
@@ -536,7 +565,11 @@ pub fn dev_open(m: &Llama, rt: &Runtime, ops_ptx: string, skinny_ptx: string, mm
     print_int(m.cfg.layers as i64)
     print(" mma=")
     print_int(if G_MMA != 0 { 1 } else { 0 })
-    print(" resident=1\n")
+    print(" resident=1 occ=")
+    print_int(G_OCC)
+    print(" head_occ=")
+    print_int(G_OCC_HEAD)
+    print("\n")
     1
 }
 
@@ -575,13 +608,15 @@ fn dev_replay(rt: &Runtime) -> i32 with Alloc, Mut, Panic {
     ce_sync(&rt.exec)
 }
 
-fn dev_resident_launch(m: &Llama, rt: &Runtime, ntok: i64, pos: i64) -> i32 with Alloc, Mut, Panic {
-    if G_FWD == 0 || G_TAB == 0 || G_RES_POS == 0 { return -1 }
+fn dev_set_res_pos(rt: &Runtime, pos: i64) -> i32 with Alloc, Mut, Panic {
     write_i64(G_POS_HOST as *mut i64, 0, 0)
     if ce_h2d(&rt.exec, G_BAR_C, G_POS_HOST as *mut u8, 4) != 0 { return -1 }
     if ce_h2d(&rt.exec, G_BAR_S, G_POS_HOST as *mut u8, 4) != 0 { return -1 }
     write_i64(G_POS_HOST as *mut i64, 0, pos)
-    if ce_h2d(&rt.exec, G_RES_POS, G_POS_HOST as *mut u8, 4) != 0 { return -1 }
+    ce_h2d(&rt.exec, G_RES_POS, G_POS_HOST as *mut u8, 4)
+}
+
+fn dev_launch_layer(m: &Llama, rt: &Runtime, li: i64, embed_on: i64, ids: i64) -> i32 with Alloc, Mut, Panic {
     let hidden = m.cfg.hidden
     let inter = m.cfg.inter
     let dh = m.cfg.head_dim
@@ -589,43 +624,83 @@ fn dev_resident_launch(m: &Llama, rt: &Runtime, ntok: i64, pos: i64) -> i32 with
     let kvdim = m.cfg.kv_heads * dh
     let eps_bits = f64_to_f32_bits(m.cfg.eps)
     let scale_bits = f64_to_f32_bits(1.0 / sqrt_dh(dh))
-    let params = scratch(208)
-    write_i64(params as *mut i64, 0, argcell(G_TAB) as i64)
-    write_i64(params as *mut i64, 1, argcell(G_X) as i64)
-    write_i64(params as *mut i64, 2, argcell(G_H) as i64)
-    write_i64(params as *mut i64, 3, argcell(G_Q) as i64)
-    write_i64(params as *mut i64, 4, argcell(G_K) as i64)
-    write_i64(params as *mut i64, 5, argcell(G_V) as i64)
-    write_i64(params as *mut i64, 6, argcell(G_ATT) as i64)
-    write_i64(params as *mut i64, 7, argcell(G_O) as i64)
-    write_i64(params as *mut i64, 8, argcell(G_G) as i64)
-    write_i64(params as *mut i64, 9, argcell(G_U) as i64)
-    write_i64(params as *mut i64, 10, argcell(G_ACT) as i64)
-    write_i64(params as *mut i64, 11, argcell(G_LOGF) as i64)
-    write_i64(params as *mut i64, 12, argcell(G_LOGD) as i64)
-    write_i64(params as *mut i64, 13, argcell(G_IDS) as i64)
-    write_i64(params as *mut i64, 14, argcell(ntok) as i64)
-    write_i64(params as *mut i64, 15, argcell(hidden) as i64)
-    write_i64(params as *mut i64, 16, argcell(inter) as i64)
-    write_i64(params as *mut i64, 17, argcell(qdim) as i64)
-    write_i64(params as *mut i64, 18, argcell(kvdim) as i64)
-    write_i64(params as *mut i64, 19, argcell(m.cfg.heads) as i64)
-    write_i64(params as *mut i64, 20, argcell(m.cfg.kv_heads) as i64)
-    write_i64(params as *mut i64, 21, argcell(dh) as i64)
-    write_i64(params as *mut i64, 22, argcell(m.cfg.layers as i64) as i64)
-    write_i64(params as *mut i64, 23, argcell(m.cfg.vocab) as i64)
-    write_i64(params as *mut i64, 24, argcell(eps_bits) as i64)
-    write_i64(params as *mut i64, 25, argcell(scale_bits) as i64)
-    launch_n(rt, G_FWD, 116, 128, params)
+    let params = scratch(280)
+    write_i64(params as *mut i64, 0, argcell(G_X) as i64)
+    write_i64(params as *mut i64, 1, argcell(G_H) as i64)
+    write_i64(params as *mut i64, 2, argcell(G_Q) as i64)
+    write_i64(params as *mut i64, 3, argcell(G_K) as i64)
+    write_i64(params as *mut i64, 4, argcell(G_V) as i64)
+    write_i64(params as *mut i64, 5, argcell(G_ATT) as i64)
+    write_i64(params as *mut i64, 6, argcell(G_O) as i64)
+    write_i64(params as *mut i64, 7, argcell(G_G) as i64)
+    write_i64(params as *mut i64, 8, argcell(G_U) as i64)
+    write_i64(params as *mut i64, 9, argcell(G_ACT) as i64)
+    write_i64(params as *mut i64, 10, argcell(G_WQ[li as usize]) as i64)
+    write_i64(params as *mut i64, 11, argcell(G_WK[li as usize]) as i64)
+    write_i64(params as *mut i64, 12, argcell(G_WV[li as usize]) as i64)
+    write_i64(params as *mut i64, 13, argcell(G_WO[li as usize]) as i64)
+    write_i64(params as *mut i64, 14, argcell(G_GATE[li as usize]) as i64)
+    write_i64(params as *mut i64, 15, argcell(G_UP[li as usize]) as i64)
+    write_i64(params as *mut i64, 16, argcell(G_DOWN[li as usize]) as i64)
+    write_i64(params as *mut i64, 17, argcell(G_INN[li as usize]) as i64)
+    write_i64(params as *mut i64, 18, argcell(G_POST[li as usize]) as i64)
+    write_i64(params as *mut i64, 19, argcell(G_KVC_K[li as usize]) as i64)
+    write_i64(params as *mut i64, 20, argcell(G_KVC_V[li as usize]) as i64)
+    write_i64(params as *mut i64, 21, argcell(G_COS) as i64)
+    write_i64(params as *mut i64, 22, argcell(G_SIN) as i64)
+    write_i64(params as *mut i64, 23, argcell(G_EMBED) as i64)
+    write_i64(params as *mut i64, 24, argcell(ids) as i64)
+    write_i64(params as *mut i64, 25, argcell(embed_on) as i64)
+    write_i64(params as *mut i64, 26, argcell(hidden) as i64)
+    write_i64(params as *mut i64, 27, argcell(inter) as i64)
+    write_i64(params as *mut i64, 28, argcell(qdim) as i64)
+    write_i64(params as *mut i64, 29, argcell(kvdim) as i64)
+    write_i64(params as *mut i64, 30, argcell(m.cfg.heads) as i64)
+    write_i64(params as *mut i64, 31, argcell(m.cfg.kv_heads) as i64)
+    write_i64(params as *mut i64, 32, argcell(dh) as i64)
+    write_i64(params as *mut i64, 33, argcell(eps_bits) as i64)
+    write_i64(params as *mut i64, 34, argcell(scale_bits) as i64)
+    launch_n(rt, G_LAYER, G_OCC * 58, 128, params)
+}
+
+fn dev_launch_head(m: &Llama, rt: &Runtime) -> i32 with Alloc, Mut, Panic {
+    let hidden = m.cfg.hidden
+    let eps_bits = f64_to_f32_bits(m.cfg.eps)
+    let params = scratch(64)
+    write_i64(params as *mut i64, 0, argcell(G_X) as i64)
+    write_i64(params as *mut i64, 1, argcell(G_H) as i64)
+    write_i64(params as *mut i64, 2, argcell(G_FNORM) as i64)
+    write_i64(params as *mut i64, 3, argcell(G_LM) as i64)
+    write_i64(params as *mut i64, 4, argcell(G_LOGD) as i64)
+    write_i64(params as *mut i64, 5, argcell(hidden) as i64)
+    write_i64(params as *mut i64, 6, argcell(m.cfg.vocab) as i64)
+    write_i64(params as *mut i64, 7, argcell(eps_bits) as i64)
+    launch_n(rt, G_HEAD, G_OCC_HEAD * 58, 128, params)
 }
 
 fn dev_forward_chunk(m: &Llama, rt: &Runtime, tokens: &CpuBuf, ntok: i64) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
     let pos0 = G_KVLEN
     if ntok < 1 || ntok > G_MAXTOK || pos0 + ntok > G_MAXSEQ { return dev_fail() }
-    if G_FWD == 0 { return dev_fail() }
+    if G_LAYER == 0 || G_HEAD == 0 || G_OCC < 1 || G_OCC_HEAD < 1 { return dev_fail() }
     if ce_h2d(&rt.exec, G_IDS, tokens.data as *mut u8, ntok * 8) != 0 { return dev_fail() }
-    print("RESIDENT=1\n")
-    if dev_resident_launch(m, rt, ntok, pos0) != 0 { return dev_fail() }
+    print("RESIDENT=1 occ=")
+    print_int(G_OCC)
+    print("\n")
+    let layers = m.cfg.layers as i64
+    var t: i64 = 0
+    while t < ntok {
+        if dev_set_res_pos(rt, pos0 + t) != 0 { return dev_fail() }
+        let ids = G_IDS + t * 8
+        var li: i64 = 0
+        while li < layers {
+            var emb: i64 = 0
+            if li == 0 { emb = 1 }
+            if dev_launch_layer(m, rt, li, emb, ids) != 0 { return dev_fail() }
+            li = li + 1
+        }
+        if dev_launch_head(m, rt) != 0 { return dev_fail() }
+        t = t + 1
+    }
     if ce_sync(&rt.exec) != 0 { return dev_fail() }
     var host = ck_alloc(m.cfg.vocab)
     if ce_d2h(&rt.exec, host.data as *mut u8, G_LOGD, m.cfg.vocab * 8) != 0 { return dev_fail() }
