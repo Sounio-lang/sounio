@@ -5858,101 +5858,129 @@ fn lowerer_preseed_one_item_mut(
     // pass an aggregate by value into a large frame: the walk lives in a small
     // frame and hands each item here BY REFERENCE (`&Item`, `&Name` -- 8-byte
     // pointer args, which pass correctly regardless of this frame's size).
+    //
+    // Early returns, one level deep (#2966). The former nested
+    // `if kind == ItemFn { if !skip { let fd = ..; if fd != 0 {..} if fd == 0 {..} } }
+    // else if kind == ItemImpl {..}` was miscompiled by lean_single: for a
+    // `use` item (and for `algebra` / `effect` declarations) control reached
+    // the `fd == 0` block without passing either enclosing test (traced: T4
+    // printed, T1/T2 not), so gen1 gave every such item an empty BSS slot that
+    // gen2 does not. The fn ids then differ from gen2's and gen2 != gen3.
+    // The two bodies now live in their own functions.
     let kind = head.kind
     let name = head.name
-    if kind == ItemKind::ItemFn {
-        if !ir_name_eq(name, *skip_name) {
-            let fd = item_fn_def_ptr(head)
-            if fd != (0 as *mut FnDef) {
-                    let fn_id_sig = lowerer_find_or_add_fn_id_mut(lo, name)
-                    if fn_id_sig >= 0 {
-                        let strategy_sig = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
-                        var module_box_sig = (*lo).module
-                        var fn_slot_sig = ir_fn_get(&(*module_box_sig), fn_id_sig as usize)
-                        fn_slot_sig.compile_strategy = strategy_sig
-                        fn_slot_sig.returns_float = lower_opt_return_float_code(&(*fd).return_type)
-                        fn_slot_sig.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
-                        fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
-                        fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
-                        lower_record_option_box_return(fn_slot_sig.name, &(*fd).return_type)
-                        fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
-                        fn_slot_sig.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
-                        fn_slot_sig.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
-                        fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
-                        if strategy_sig == IR_STRATEGY_INSTRUMENTED {
-                            fn_slot_sig.param_count = fn_slot_sig.param_count + 1
-                            if fn_slot_sig.prof_counter_id < 0 {
-                                let ctr_idx_sig = (*module_box_sig).prof_counter_count
-                                if ctr_idx_sig < 64 {
-                                    (*module_box_sig).prof_counters[ctr_idx_sig as usize] = IrProfCounterInfo {
-                                        fn_id: fn_id_sig,
-                                        fn_name: name,
-                                        counter_id: ctr_idx_sig,
-                                    }
-                                    (*module_box_sig).prof_counter_count = ctr_idx_sig + 1
-                                    fn_slot_sig.prof_counter_id = ctr_idx_sig
-                                } else {
-                                    lo.error_count = lo.error_count + 1
-                                    lo.had_error = true
-                                    lower_note_error(2810, (*lo.current_func).name)
-                                }
-                            }
-                        }
-                        if fn_slot_sig.region.slot < 0 { ir_function_alloc_region(&! fn_slot_sig) }
-                        ir_fn_set(&! (*module_box_sig), fn_id_sig as usize, fn_slot_sig)
-                        (*lo).module = module_box_sig
-                    }
-                    let fn_id_ps = lowerer_find_or_add_fn_id_mut(lo, name)
-                    if fn_id_ps >= 0 {
-                        if (*fd).is_kernel {
-                            { var mbox_k = (*lo).module
-                            var slot_k = ir_fn_get(&(*mbox_k), fn_id_ps as usize)
-                            slot_k.compile_strategy = 6
-                            ir_fn_set(&! (*mbox_k), fn_id_ps as usize, slot_k)
-                            (*lo).module = mbox_k }
-                        }
-                        if !(*fd).is_kernel && head.visibility.kind != VISIBILITY_PRIVATE {
-                            { var mbox_e = (*lo).module
-                            var slot_e = ir_fn_get(&(*mbox_e), fn_id_ps as usize)
-                            slot_e.compile_strategy = 7
-                            ir_fn_set(&! (*mbox_e), fn_id_ps as usize, slot_e)
-                            (*lo).module = mbox_e }
-                            let exp_count = (*(*lo).module).export_count
-                            if exp_count < 64 {
-                                (*(*lo).module).export_names[exp_count as usize] = name
-                                (*(*lo).module).export_count = exp_count + 1
-                            }
-                        }
-                    }
-            }
-            if fd == (0 as *mut FnDef) {
-                    let bss_fn_id = lowerer_find_or_add_fn_id_mut(lo, name)
-                    if bss_fn_id >= 0 {
-                        lowerer_record_global_type_mut(lo, bss_fn_id, &head.type_alias_ty)
-                        var mbox2 = (*lo).module
-                        var bss_slot = ir_fn_get(&(*mbox2), bss_fn_id as usize)
-                        let bss_size = lower_typeexpr_byte_size(&head.type_alias_ty)
-                        let bss_off = (*mbox2).bss_total_size + ir_bss_packed_header_pad(lower_typeexpr_bss_elem_size(&head.type_alias_ty), bss_size)
-                        let aligned_size = ((bss_size + 7) / 8) * 8
-                        bss_slot.compile_strategy = 99
-                        bss_slot.param_count = bss_off
-                        bss_slot.bss_size = bss_size
-                        bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
-                        lower_apply_global_var_init(&! bss_slot, name)
-                        if bss_slot.region.slot < 0 { ir_function_alloc_region(&! bss_slot) }
-                        ir_fn_set(&! (*mbox2), bss_fn_id as usize, bss_slot)
-                        (*mbox2).bss_total_size = bss_off + aligned_size
-                        (*lo).module = mbox2
-                    }
-            }
-        }
-    } else if kind == ItemKind::ItemImpl {
+    if kind == ItemKind::ItemImpl {
         match head.impl_def {
             Some(id) => {
                 lowerer_preseed_impl_method_summaries_mut(lo, name, &(*id).methods, *skip_name)
             }
             None => {}
         }
+        return
+    }
+    if kind != ItemKind::ItemFn { return }
+    if ir_name_eq(name, *skip_name) { return }
+    let fd = item_fn_def_ptr(head)
+    if fd == (0 as *mut FnDef) {
+        lowerer_preseed_bss_global_item_mut(lo, head, name)
+        return
+    }
+    lowerer_preseed_fn_item_signature_mut(lo, head, name, fd)
+}
+
+// A top-level fn's signature slot (lowerer_preseed_one_item_mut).
+fn lowerer_preseed_fn_item_signature_mut(
+    lo: &! Lowerer,
+    head: &Item,
+    name: Name,
+    fd: *mut FnDef
+) with Mut, Panic, Div, Alloc, IO {
+    let fn_id_sig = lowerer_find_or_add_fn_id_mut(lo, name)
+    if fn_id_sig >= 0 {
+        let strategy_sig = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
+        var module_box_sig = (*lo).module
+        var fn_slot_sig = ir_fn_get(&(*module_box_sig), fn_id_sig as usize)
+        fn_slot_sig.compile_strategy = strategy_sig
+        fn_slot_sig.returns_float = lower_opt_return_float_code(&(*fd).return_type)
+        fn_slot_sig.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
+        fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
+        fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+        lower_record_option_box_return(fn_slot_sig.name, &(*fd).return_type)
+        fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
+        fn_slot_sig.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+        fn_slot_sig.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
+        fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
+        if strategy_sig == IR_STRATEGY_INSTRUMENTED {
+            fn_slot_sig.param_count = fn_slot_sig.param_count + 1
+            if fn_slot_sig.prof_counter_id < 0 {
+                let ctr_idx_sig = (*module_box_sig).prof_counter_count
+                if ctr_idx_sig < 64 {
+                    (*module_box_sig).prof_counters[ctr_idx_sig as usize] = IrProfCounterInfo {
+                        fn_id: fn_id_sig,
+                        fn_name: name,
+                        counter_id: ctr_idx_sig,
+                    }
+                    (*module_box_sig).prof_counter_count = ctr_idx_sig + 1
+                    fn_slot_sig.prof_counter_id = ctr_idx_sig
+                } else {
+                    lo.error_count = lo.error_count + 1
+                    lo.had_error = true
+                    lower_note_error(2810, (*lo.current_func).name)
+                }
+            }
+        }
+        if fn_slot_sig.region.slot < 0 { ir_function_alloc_region(&! fn_slot_sig) }
+        ir_fn_set(&! (*module_box_sig), fn_id_sig as usize, fn_slot_sig)
+        (*lo).module = module_box_sig
+    }
+    let fn_id_ps = lowerer_find_or_add_fn_id_mut(lo, name)
+    if fn_id_ps >= 0 {
+        if (*fd).is_kernel {
+            { var mbox_k = (*lo).module
+            var slot_k = ir_fn_get(&(*mbox_k), fn_id_ps as usize)
+            slot_k.compile_strategy = 6
+            ir_fn_set(&! (*mbox_k), fn_id_ps as usize, slot_k)
+            (*lo).module = mbox_k }
+        }
+        if !(*fd).is_kernel && head.visibility.kind != VISIBILITY_PRIVATE {
+            { var mbox_e = (*lo).module
+            var slot_e = ir_fn_get(&(*mbox_e), fn_id_ps as usize)
+            slot_e.compile_strategy = 7
+            ir_fn_set(&! (*mbox_e), fn_id_ps as usize, slot_e)
+            (*lo).module = mbox_e }
+            let exp_count = (*(*lo).module).export_count
+            if exp_count < 64 {
+                (*(*lo).module).export_names[exp_count as usize] = name
+                (*(*lo).module).export_count = exp_count + 1
+            }
+        }
+    }
+}
+
+// A module-level global's BSS slot (lowerer_preseed_one_item_mut): an ItemFn
+// with no fn_def.
+fn lowerer_preseed_bss_global_item_mut(
+    lo: &! Lowerer,
+    head: &Item,
+    name: Name
+) with Mut, Panic, Div, Alloc, IO {
+    let bss_fn_id = lowerer_find_or_add_fn_id_mut(lo, name)
+    if bss_fn_id >= 0 {
+        lowerer_record_global_type_mut(lo, bss_fn_id, &head.type_alias_ty)
+        var mbox2 = (*lo).module
+        var bss_slot = ir_fn_get(&(*mbox2), bss_fn_id as usize)
+        let bss_size = lower_typeexpr_byte_size(&head.type_alias_ty)
+        let bss_off = (*mbox2).bss_total_size + ir_bss_packed_header_pad(lower_typeexpr_bss_elem_size(&head.type_alias_ty), bss_size)
+        let aligned_size = ((bss_size + 7) / 8) * 8
+        bss_slot.compile_strategy = 99
+        bss_slot.param_count = bss_off
+        bss_slot.bss_size = bss_size
+        bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
+        lower_apply_global_var_init(&! bss_slot, name)
+        if bss_slot.region.slot < 0 { ir_function_alloc_region(&! bss_slot) }
+        ir_fn_set(&! (*mbox2), bss_fn_id as usize, bss_slot)
+        (*mbox2).bss_total_size = bss_off + aligned_size
+        (*lo).module = mbox2
     }
 }
 
