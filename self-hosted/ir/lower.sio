@@ -24947,6 +24947,21 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprIf {
             return self.opt_block_tail_is_float_ref(&(*e).block) || self.opt_expr_result_is_float_ref(&(*e).else_expr)
         }
+        if (*e).kind == ExprKind::ExprMatch {
+            var current = &(*e).arms
+            while true {
+                match *current {
+                    Some(list) => {
+                        if self.expr_result_is_float_ref(&(*list).head.body) {
+                            return true
+                        }
+                        current = &(*list).tail
+                    }
+                    None => break,
+                }
+            }
+            return false
+        }
         if (*e).kind == ExprKind::ExprBlock {
             return self.opt_block_tail_is_float_ref(&(*e).block)
         }
@@ -24963,6 +24978,9 @@ impl Lowerer {
     }
 
     fn block_tail_is_float_ref(self, blk: &Block) -> bool with Mut, Panic, Div, Alloc {
+        var lo = self
+        let saved_local_count = (*lo.locals).count
+        lo.scope_depth = lo.scope_depth + 1
         var current = &(*blk).stmts
         var result = false
         while true {
@@ -24970,15 +24988,29 @@ impl Lowerer {
                 Some(list) => {
                     let stmt_ref = &(*list).head
                     if stmt_ref.kind == StmtKind::StmtExpr {
-                        result = self.opt_expr_result_is_float_ref(&stmt_ref.expr)
+                        result = lo.opt_expr_result_is_float_ref(&stmt_ref.expr)
                     } else {
                         result = false
+                        if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
+                            let local_is_float = match stmt_ref.ty {
+                                Some(_) => lower_opt_type_is_f64(&stmt_ref.ty),
+                                None => lo.opt_expr_result_is_float_ref(&stmt_ref.expr),
+                            }
+                            if (*lo.locals).count >= 4096 {
+                                (*lo.locals).count = saved_local_count
+                                lowerer_mark_hard_error(&!lo)
+                                return false
+                            }
+                            lowerer_bind_local_mut(&!lo, stmt_ref.name, IR_INVALID_REG, false)
+                            lo = lo.bind_local_scalar_kind(stmt_ref.name, if local_is_float { 2 } else { 0 })
+                        }
                     }
                     current = &(*list).tail
                 }
                 _ => break
             }
         }
+        (*lo.locals).count = saved_local_count
         result
     }
 
@@ -36436,6 +36468,7 @@ impl Lowerer {
     }
 
     fn lower_match_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let res_is_float = self.expr_result_is_float_ref(e)
         var payload_layout: i64 = 0 - 1
         match (*e).left {
             Some(scrut_expr) => { if (*scrut_expr).kind == ExprKind::ExprIdent {
@@ -36484,6 +36517,9 @@ impl Lowerer {
         LOWER_MATCH_SCRUT_IS_REF = saved_scrut_is_ref
         lo = lo.emit(ir_load_imm(res, 0))
         lo = lo.emit(ir_label(l_end))
+        if res_is_float {
+            lo = lo.emit(ir_mark_float_reg(res))
+        }
         (lo, res)
     }
 
