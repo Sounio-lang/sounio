@@ -32,7 +32,7 @@ source/conversion attribution rather than copying a new native result.
 
 ## Final focused gate
 
-Slurm **17277**, `SIO176-full06`, completed `0:0`, focused `STATUS=0`:
+Slurm **17296**, `SIO176-full07`, completed `0:0`, focused `STATUS=0`:
 
 - Nine production library checks passed, including shared renderers and existing
   epiviz/field Canvas consumers.
@@ -59,7 +59,9 @@ The raw source-built compiler SHA is
 provided from CI run 40144792765 / artifact 12580970584 /
 Witness job 121024346990. The additional current c21 seed SHA is
 `8956946def36004d11ec4eca0d20c75c1e7d3d0b17ee0f0a1fdda9cd6ec0e4cc`.
-The gate records the raw compiler, launcher, seed and native executable hashes
+The final gate forces SOUC_BIN to the pinned raw compiler before the canonical
+resolver, preventing an inherited divergent SOUC_BIN from overriding the pin.
+It records the raw compiler, selected entrypoint, seed and native executable hashes
 separately. These were Slurm CPU runs as uid 1000; the final focused gate used a
 524288-KiB stack. There was no Mac/workspace compiler or numerical run.
 
@@ -116,8 +118,8 @@ The final gate fixes the paths and additionally requires the specific messages
 listed above. Earlier compile attempts (typed scalar printing, fixture scope)
 and the transient DNS preparation error are preserved at their original paths.
 
-`receipts.tar.gz` is **403526 bytes**, SHA-256
-`b211e33df81cbfbe19bbe483c88409972dfd1b54927abd98342de7d820ba2ddf`.
+`receipts.tar.gz` is **404107 bytes**, SHA-256
+`2c1670e9afc995852b9381509248d56a4cd217ee63f33a0b91461f410ec67783`.
 It contains compact results/statuses, hashes, resources, native output,
 concordance/control receipts, the native PNG/SVG, independent decode samples,
 isolated-image evidence and historical diagnostics. No ELF, cache, duplicated
@@ -144,4 +146,4 @@ The PNG decoder links the already installed Linux `libz.so.1`; it is a reference
 utility, not a runtime dependency of the palette library. C++ image probes used
 the worker default stack; the final complete gate uses the stack limit above.
 Original immutable worker runs remain under
-`/scratch/sounio-stdlib-inference-scale-20261024/SIO176-{data01,full06,image-isolated01,png-decode01,custody02}`.
+`/scratch/sounio-stdlib-inference-scale-20261024/SIO176-{data01,full07,image-isolated01,png-decode01,custody03}`.

@@ -8,7 +8,7 @@ mkdir -p "$out";out=$(cd "$out" && pwd)
 cd "$repo"
 : "${MADAROS_RAW_BIN:?explicit pinned source-built compiler required}"
 [[ -x $MADAROS_RAW_BIN ]] || exit 64
-export MADAROS_RAW_BIN
+export MADAROS_RAW_BIN SOUC_BIN="$MADAROS_RAW_BIN"
 source scripts/lib/resolve_souc.sh;sounio_require_souc
 export SOUNIO_STDLIB_PATH="$repo/stdlib" SOUNIO_MADAROS_NOCACHE=1 SOUNIO_MADAROS_CACHE_READONLY=1 SOUNIO_MADAROS_CACHE="$out/cache" TMPDIR="$out/tmp"
 mkdir -p "$TMPDIR" "$SOUNIO_MADAROS_CACHE"
