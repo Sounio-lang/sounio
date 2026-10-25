@@ -37,3 +37,9 @@ Node available for root joint jobs:
 /scratch/sounio-stdlib-inference-scale-20261024/SIO226-seed01/tools/node
 Worker and text evidence details are in README. Claims are in canonical state
 /tmp/sounio-coord/2493585255 through /workspace/sounio/bin/sounio-coord.
+
+Post-run metadata-only follow-up0278b06b89 restores DEL(U+007F) escaping and
+adds a concrete path fixture. Metadata tests and the full provenance leg rerun
+PASS on the workspace with unchanged source/seed/receipt bytes. Separate logs
+and metadata identities are in metadata-followup; native17539 is not rerun or
+relabeled. The original staged catalog therefore describes its earlier writer.

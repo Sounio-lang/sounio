@@ -94,3 +94,20 @@ complete generation hashes, the old and final receipts, the private-field
 matrix and submission/terminal records. It was independently extracted and its
 internal manifest verified after copying to the workspace. The archive contains
 no ELF or toolchain payload; full generation artifacts remain on the worker.
+
+## DEL metadata compatibility follow-up
+
+Root review found that the prior ASCII JSON format also escapes DEL, U+007F.
+Commit `0278b06b896d108e0dc01a14f86b715236f82cd3` extends the metadata writer's
+escape range from U+0080 to U+007F and adds a real DEL-containing path fixture.
+The metadata tests and full provenance leg, including the wrong-source control,
+were rerun and pass; the real current receipt has an exact ASCII JSON roundtrip.
+These operational checks execute on the workspace and are recorded separately
+in `metadata-followup/`. No native compilation was performed there.
+
+The compiler source, installed seed and real SeedReceipt bytes are unchanged
+from17539. Its source catalog describes the earlier metadata writer; the two
+metadata files changed by this follow-up have separate current identity hashes.
+The native M1/M2/M3 and privacy evidence remains the17539 run, while the metadata
+format correction has the new fixture/provenance checks. No scientific or
+compiler generation result is relabeled as a new run.
