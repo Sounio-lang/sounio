@@ -173,3 +173,18 @@ binary/input identities, specific results and full-raster diagnostics) are in
 `484fb16fc19b506d369d80ba9bc9f4b30a2c8f1b325c23d4a0f784c06311cf12`.
 No ELF or duplicate source tree is bundled. Original final07 receipts remain
 unchanged.
+
+### Deep-science registration (Slurm 17304)
+
+The additive `focused-gate canonical-palettes` block in
+`scripts/stdlib/deep_science_gate.sh` was extracted verbatim together with its
+`record` function and executed on Slurm 17304, with a fresh child output
+directory and the explicit pinned raw compiler. Its recorded status and child
+gate status were both 0, including actual native/C++/full-PNG concordance,
+three specific mutant rejections, and unchanged input hashes. This directed
+registration replay does not claim execution of the entire central corpus or
+GitHub CI. It adds no compiler build or existing-block changes.
+
+Compact exact-block/job/child-result receipts are in
+`central-receipts.tar.gz`, SHA256
+`b5d1d173586faf7b77ce6ed4d74ffcbbd4ac859730177b3d070f202024908ad4`.
