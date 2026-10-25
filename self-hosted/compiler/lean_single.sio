@@ -420,6 +420,7 @@ var RESOLVE_TY: i64 = 0
 var RESOLVE_TY_HASH: i64 = 0
 var LEX_ERROR_LINE: i64 = 0
 var LEX_ERROR_KIND: i64 = 0
+var LEX_ERROR_BYTE: i64 = 0
 var MATCH_SCRUT_TY: i64 = 0
 var MATCH_SCRUT_HASH: i64 = 0
 
@@ -6901,10 +6902,12 @@ fn stmt_is_deref_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
     if TK[(p0 + 3) as usize] != 7 { return false }  // )
     var p = p0 + 4
     var saw_index: i64 = 0
+    var fields: i64 = 0
     while p < TC {
         if TK[p as usize] == 50 {                   // . field
             if TK[(p + 1) as usize] != 3 { return false }
             p = p + 2
+            fields = fields + 1
             continue
         }
         if TK[p as usize] == 41 {                   // [ … ]
@@ -6919,7 +6922,11 @@ fn stmt_is_deref_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
             continue
         }
         if TK[p as usize] == 16 {                   // =
-            if saw_index == 0 { return false }
+            // Without an index, three or more field hops: `(*c).a.b.c = v`. One and
+            // two hops have their own handlers, dispatched earlier; three fell to the
+            // generic path and lost the store (self-hosted/check/mod.sio:876-882,
+            // 918, 935, 948, 969: the ontology kernel's counts and profile flags).
+            if saw_index == 0 && fields < 3 { return false }
             if p < p0 + 6 { return false }
             // Two terminal forms: `. field =` stores into a field, `] =` stores into an
             // array ELEMENT. The element form is the one ir/opt_cleanup.sio uses for its
@@ -6953,10 +6960,12 @@ fn stmt_is_ident_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
     if TK[(p0 + 1) as usize] != 50 { return false } // must start with `. field`, not `[`
     var p = p0 + 1
     var saw_index: i64 = 0
+    var fields: i64 = 0
     while p < TC {
         if TK[p as usize] == 50 {                   // . field
             if TK[(p + 1) as usize] != 3 { return false }
             p = p + 2
+            fields = fields + 1
             continue
         }
         if TK[p as usize] == 41 {                   // [ … ]
@@ -6971,7 +6980,10 @@ fn stmt_is_ident_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
             continue
         }
         if TK[p as usize] == 16 {                   // =
-            if saw_index == 0 { return false }
+            // As the deref twin: three or more field hops with no index
+            // (`s.builder.func.abi = abi`, self-hosted/hlir/lower.sio:524-1993) had no
+            // handler and lost the store.
+            if saw_index == 0 && fields < 3 { return false }
             if p < p0 + 3 { return false }
             // Same two terminal forms as the deref twin: `. field =` (field of an element)
             // and `] =` (the element itself).
@@ -6995,12 +7007,25 @@ fn stmt_is_ident_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
 // this predicate accepts the whole chain grammar rather than a single shape.
 // Base address: load the root, add the inner field offsets (inline), then LOAD the pointer
 // stored in the final inner field — that is the deref the `(* )` spells.
+// `(*(*name).field…)<chain>`: the same root spelled with an explicit inner deref,
+// `(*(*lo).struct_layouts).count = n` (self-hosted/ir/lower.sio:4989, 5002, 5013,
+// 5574, 7107). It had no handler and lost the store.
+fn deref_inner_root_explicit(p0: i64) -> bool with Panic, Mut {
+    return TK[p0 as usize] == 6 && TK[(p0 + 1) as usize] == 19 && TK[(p0 + 2) as usize] == 6
+        && TK[(p0 + 3) as usize] == 19 && TK[(p0 + 4) as usize] == 3 && TK[(p0 + 5) as usize] == 7
+        && TK[(p0 + 6) as usize] == 50
+}
+
 fn stmt_is_deref_inner_root_store(p0: i64) -> bool with Panic, Mut {
     if TK[p0 as usize] != 6 { return false }        // (
     if TK[(p0 + 1) as usize] != 19 { return false } // *
-    if TK[(p0 + 2) as usize] != 3 { return false }  // simple-name root
-    if TK[(p0 + 3) as usize] != 50 { return false } // `.` — NOT the (*name) forms
     var p = p0 + 3
+    if deref_inner_root_explicit(p0) {
+        p = p0 + 6
+    } else {
+        if TK[(p0 + 2) as usize] != 3 { return false }  // simple-name root
+        if TK[(p0 + 3) as usize] != 50 { return false } // `.` — NOT the (*name) forms
+    }
     while p < TC && TK[p as usize] == 50 && TK[(p + 1) as usize] == 3 {
         p = p + 2
     }
@@ -8679,6 +8704,15 @@ fn lex_all() with IO, Mut, Panic, Div {
             if src_match(s, l, "None") { k = 58 }
             if src_match(s, l, "Ok") { k = 59 }
             if src_match(s, l, "Err") { k = 60 }
+            // `Act::None`: a user enum's variant, not Option's None. As a keyword
+            // it broke the match arm (`Act::None => input,` compiled `input`
+            // and then `,` as an expression). `Option::None`/`Result::Ok` keep
+            // the keyword, which is how lean_single implements them.
+            if k >= 57 && k <= 60 && TC >= 2 && TK[(TC - 1) as usize] == 51 && TK[(TC - 2) as usize] == 3 {
+                let pq = TS[(TC - 2) as usize]
+                let pl = TE[(TC - 2) as usize] - pq
+                if !src_match(pq, pl, "Option") && !src_match(pq, pl, "Result") { k = 3 }
+            }
             TK[TC as usize] = k; TS[TC as usize] = s; TE[TC as usize] = p; TL[TC as usize] = cur_line; TC = TC + 1; continue
         }
         // Two-char operators
@@ -8772,9 +8806,81 @@ fn lex_all() with IO, Mut, Panic, Div {
             LEX_ERROR_LINE = cur_line
             LEX_ERROR_KIND = 1
         }
+        // An ASCII byte that no rule above consumes. It used to be skipped,
+        // which changed the program instead of refusing it: `1 $ 2` printed
+        // 1, and a character literal vanished, so `[' '; 120]` filled with 0
+        // and `let c = 'b'` read the identifier `b`. lean_single has no
+        // character literals (Madaros does; its source uses none), so they
+        // are refused. `'` before an identifier with no closing quote is a
+        // lifetime (`&'static`) and is still skipped. So is `@`, the unit
+        // annotation of a type (`v: f64@L`, stdlib/darwin_pbpk): lean_single
+        // has no units and drops the annotation, which loses a check but not
+        // a value.
+        if c > 32 && c < 128 && c != 64 && LEX_ERROR_LINE == 0 {
+            if c == 39 {
+                var is_char_lit: i64 = 0
+                if p + 2 < SRC_LEN && sb(p + 1) != 92 && sb(p + 2) == 39 { is_char_lit = 1 }
+                if p + 1 < SRC_LEN && sb(p + 1) == 92 {
+                    var q: i64 = p + 2
+                    while q < SRC_LEN && q < p + 6 && sb(q) != 39 && sb(q) != 10 { q = q + 1 }
+                    if q < SRC_LEN && sb(q) == 39 { is_char_lit = 1 }
+                }
+                // A lifetime is `'` and an identifier with no quote after it.
+                // Anything else is refused: a quoted run such as `'ab'` used to
+                // drop both quotes and read the identifier `ab`, and a `'` before
+                // no identifier (`''`, `'12'`, the close of `'a b'`) vanished.
+                var lt_end: i64 = p + 1
+                let lt_c0 = if p + 1 < SRC_LEN { sb(p + 1) } else { 0 }
+                let lt_start = (lt_c0 >= 65 && lt_c0 <= 90) || (lt_c0 >= 97 && lt_c0 <= 122) || lt_c0 == 95
+                if lt_start {
+                    while lt_end < SRC_LEN && ((sb(lt_end) >= 65 && sb(lt_end) <= 90) || (sb(lt_end) >= 97 && sb(lt_end) <= 122) || (sb(lt_end) >= 48 && sb(lt_end) <= 57) || sb(lt_end) == 95) { lt_end = lt_end + 1 }
+                    if lt_end < SRC_LEN && sb(lt_end) == 39 { is_char_lit = 1 }
+                }
+                if is_char_lit == 1 {
+                    LEX_ERROR_LINE = cur_line
+                    LEX_ERROR_KIND = 3
+                } else if !lt_start {
+                    LEX_ERROR_LINE = cur_line
+                    LEX_ERROR_KIND = 4
+                    LEX_ERROR_BYTE = c
+                }
+            } else {
+                LEX_ERROR_LINE = cur_line
+                LEX_ERROR_KIND = 4
+                LEX_ERROR_BYTE = c
+            }
+        }
         p = p + 1
     }
     TK[TC as usize] = 0; TL[TC as usize] = cur_line; TC = TC + 1
+    lex_enum_variant_names()
+}
+
+// A variant of a user enum may be called None, Some, Ok or Err. The lexer makes
+// those words keywords (TK 57-60), so `enum Act { None, Neg }` declared no
+// variant named None and `Act::None` (made an identifier in lex_all) named
+// nothing. Inside an enum body, a keyword in variant position is a name.
+fn lex_enum_variant_names() with Mut, Panic {
+    var i: i64 = 0
+    while i + 2 < TC {
+        if TK[i as usize] == 47 && TK[(i + 1) as usize] == 3 && TK[(i + 2) as usize] == 8 {
+            var j: i64 = i + 3
+            var depth: i64 = 1
+            var at_variant: i64 = 1
+            while j < TC && depth > 0 {
+                let k = TK[j as usize]
+                if depth == 1 && at_variant == 1 && k >= 57 && k <= 60 { TK[j as usize] = 3 }
+                if k == 8 || k == 6 || k == 41 { depth = depth + 1 }
+                if k == 9 || k == 7 || k == 42 { depth = depth - 1 }
+                at_variant = 0
+                if depth == 1 && k == 28 { at_variant = 1 }
+                j = j + 1
+            }
+            i = j
+        } else {
+            i = i + 1
+        }
+    }
 }
 
 // ─── Variable lookup ───
@@ -16456,19 +16562,33 @@ fn compile_format_print(name_tok: i64, newline: i64, a64: i64) with IO, Mut, Pan
     }
 }
 
-fn primary_fallback_refuses(tok: i64) -> bool with Panic, Mut {
-    let k = TK[tok as usize]
-    if k == 62 || k == 71 || k == 73 { return true }
-    if k == 50 {
-        let after = TE[tok as usize]
-        if after < SRC_LEN {
-            let d = SRC[after as usize] as i64
-            if d >= 48 && d <= 57 { return true }
-        }
+// A one-argument print builtin (print_int, print_f64) given more arguments.
+// The rest used to be dropped: `print_f64(x, 16)` printed 6 decimals, as
+// `print_f64(x)` does. Refused, as Madaros refuses it; EP is left on the `)`.
+// print_f64_n(x, decimals) is the lean_single builtin that takes a precision.
+fn builtin_one_arg_refuse_rest(name_tok: i64) with IO, Mut, Panic {
+    if TK[EP as usize] != 28 { return }
+    var extra: i64 = 0
+    var depth: i64 = 0
+    while EP < TC {
+        let k = TK[EP as usize]
+        if depth == 0 && k == 7 { break }
+        if depth == 0 && k == 28 && TK[(EP + 1) as usize] != 7 { extra = extra + 1 }
+        if k == 6 || k == 41 || k == 8 { depth = depth + 1 }
+        if (k == 7 || k == 42 || k == 9) && depth > 0 { depth = depth - 1 }
+        EP = EP + 1
     }
-    return false
+    tc_wrong_arity_hard(name_tok, 1, 1 + extra)
 }
 
+// compile_primary's last arm: the token starts no expression. It used to load
+// 0 and move on, so the program compiled and computed something else: `.5` was
+// 0; `affine`, `linear`, `study` and `var` read as names were 0; `println()`
+// printed 0; `+5` was 0; a block `{ ... }` dropped the rest of the function;
+// an unsupported assignment dropped the write. Each of those now has its own
+// handling or refusal, and a tree-wide sweep with this report in place finds
+// no program that compiles and still reaches it (only compile-fail tests and
+// programs Madaros alone accepts). So every token that gets here is refused.
 fn primary_fallback_report(tok: i64) with IO, Mut, Panic {
     print("parse error: expected expression at ")
     print_src_loc_for_tok(tok)
@@ -17133,6 +17253,39 @@ fn compile_primary() with IO, Mut, Panic, Div {
         return
     }
     // Parenthesized expression or tuple literal
+    // `{ stmts; tail }` as a value: the tail's value, or unit. A `{` here used
+    // to fall to the last arm and load 0, and the block's statements were then
+    // compiled as if they followed it; its `}` closed the enclosing body, so
+    // everything after a standalone block was dropped (a statement `{ ... }`
+    // silently deleted the rest of the function).
+    if k == 8 {
+        EP = EP + 1
+        LAST_STMT_HAS_VALUE = 0
+        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+        if TK[EP as usize] == 9 { EP = EP + 1 }
+        if LAST_STMT_HAS_VALUE == 1 {
+            EXPR_TY = LAST_STMT_TY
+            EXPR_TY_HASH = LAST_STMT_TY_HASH
+            if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+        } else {
+            em(0x31); em(0xc0)
+            EXPR_IS_F64 = 0
+            EXPR_TY = 5
+            EXPR_TY_HASH = 0
+        }
+        return
+    }
+    // `()`: the unit value, typed as the aarch64 twin types it
+    // (compile_primary_a64). compile_or used to be handed the `)`, which fell to
+    // the last arm below; `return ()` loaded 0 by accident.
+    if k == 6 && TK[(EP + 1) as usize] == 7 {
+        EP = EP + 2
+        em(0x31); em(0xc0)
+        EXPR_IS_F64 = 0
+        EXPR_TY = 5
+        EXPR_TY_HASH = 0
+        return
+    }
     if k == 6 {
         let paren_open = EP
         EP = EP + 1
@@ -18252,9 +18405,15 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 return
             }
-            // Check for print_int(expr)
-            if src_match(ns, ne - ns, "print_int") {
+            // Check for print_int(expr). print_int, print_f64, print_f64_n and
+            // print_char are builtins only when the program defines no function
+            // of that name, as print/println already were: a user's
+            // `fn print_f64(x: f64, decimals: i64)` was never called, its second
+            // argument was dropped, and the value printed with 6 decimals
+            // (examples/cayley_dickson_*.sio). Madaros calls the user's function.
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_int") {
                 EP = EP + 1; compile_or()
+                builtin_one_arg_refuse_rest(name_tok)
                 // Observation boundary: printing Unobserved<T> is IO that collapses uncertainty
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                     tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
@@ -18267,8 +18426,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 return
             }
             // Check for print_f64(expr)
-            if src_match(ns, ne - ns, "print_f64") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_f64") {
                 EP = EP + 1; compile_or()
+                builtin_one_arg_refuse_rest(name_tok)
                 // Observation boundary: printing Unobserved<T> is IO that collapses uncertainty
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                     tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
@@ -18280,7 +18440,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 return
             }
-            if src_match(ns, ne - ns, "print_f64_n") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_f64_n") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 2, 0)
@@ -18317,7 +18477,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
-            if src_match(ns, ne - ns, "print_char") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_char") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
@@ -22715,7 +22875,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         return
     }
-    if primary_fallback_refuses(EP) { primary_fallback_report(EP) }
+    primary_fallback_report(EP)
     EP = EP + 1
     em(0x31); em(0xc0)
     EXPR_IS_F64 = 0
@@ -29879,12 +30039,18 @@ fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
     var name_tok = EP
     var chain_start = EP + 1
     var root_inner: i64 = 0   // 1 = `(*name.field…)` root: deref of a pointer FIELD
+    var inner_start = EP + 3  // first `.` of the inner field chain
     if TK[EP as usize] == 6 {
         name_tok = EP + 2
         chain_start = EP + 4
-        if TK[(EP + 3) as usize] == 50 {
+        if deref_inner_root_explicit(EP) {
+            // `(*(*name).field…)` is `(*name.field…)` with the root's deref spelled out.
+            name_tok = EP + 4
+            inner_start = EP + 6
+        }
+        if TK[inner_start as usize] == 50 && (inner_start == EP + 6 || TK[(EP + 3) as usize] == 50) {
             root_inner = 1
-            var rp = EP + 3
+            var rp = inner_start
             while rp < TC && TK[rp as usize] == 50 && TK[(rp + 1) as usize] == 3 {
                 rp = rp + 2
             }
@@ -29970,7 +30136,7 @@ fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
     // offsets, then LOAD the pointer stored in the final inner field. That load is the deref
     // the `(* )` spells, and it is what no existing predicate was willing to emit.
     if root_inner == 1 {
-        var ip = name_tok + 1
+        var ip = inner_start
         var inner_off: i64 = 0
         var inner_bad: i64 = 0
         while inner_bad == 0 && TK[ip as usize] == 50 {
@@ -33397,7 +33563,17 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     }
 
     // Expression statement
+    let expr_stmt_start = EP
     compile_or()
+    // An assignment whose target matched none of the shapes above. It used to
+    // be compiled as an expression statement: the target was evaluated as a
+    // value, the `=` fell to compile_primary's last arm, and the write was
+    // dropped (`ws[1].text[2] = 77` left the element 0). Refused instead.
+    if TK[EP as usize] == 16 {
+        tc_error_hard(expr_stmt_start, "lean_single cannot compile an assignment to this target; it would have dropped the write")
+        while ep_before_body_close() && TK[EP as usize] != 0 && TL[EP as usize] == TL[expr_stmt_start as usize] { EP = EP + 1 }
+        return
+    }
     LAST_STMT_HAS_VALUE = 1
     LAST_STMT_TY = EXPR_TY
     LAST_STMT_TY_HASH = EXPR_TY_HASH
@@ -41302,6 +41478,24 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         return
     }
     // Parenthesized
+    // `{ stmts; tail }` as a value: see compile_primary.
+    if k == 8 {
+        EP = EP + 1
+        LAST_STMT_HAS_VALUE = 0
+        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+        if TK[EP as usize] == 9 { EP = EP + 1 }
+        if LAST_STMT_HAS_VALUE == 1 {
+            EXPR_TY = LAST_STMT_TY
+            EXPR_TY_HASH = LAST_STMT_TY_HASH
+            if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+        } else {
+            em32(0xD2800000)  // movz x0, #0
+            EXPR_IS_F64 = 0
+            EXPR_TY = 5
+            EXPR_TY_HASH = 0
+        }
+        return
+    }
     if k == 6 {
         EP = EP + 1
         // Unit literal `()`: nothing to compile. Without this, compile_or_a64 ran on
@@ -42320,8 +42514,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 return
             }
-            if src_match(ns, ne - ns, "print_int") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_int") {
                 EP = EP + 1; compile_or_a64()
+                builtin_one_arg_refuse_rest(name_tok)
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                     tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
                 }
@@ -42329,7 +42524,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 emit_print_int_a64()
                 em32(0xD2800000); EXPR_IS_F64 = 0; EXPR_TY = 5; return
             }
-            if src_match(ns, ne - ns, "print_char") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_char") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
@@ -42345,8 +42540,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 }
                 EXPR_IS_F64 = 0; EXPR_TY = 5; return
             }
-            if src_match(ns, ne - ns, "print_f64") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_f64") {
                 EP = EP + 1; compile_or_a64()
+                builtin_one_arg_refuse_rest(name_tok)
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                     tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
                 }
@@ -42354,7 +42550,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 emit_print_f64_a64()
                 em32(0xD2800000); EXPR_IS_F64 = 0; EXPR_TY = 5; return
             }
-            if src_match(ns, ne - ns, "print_f64_n") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_f64_n") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 2, 0)
@@ -44484,7 +44680,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         }
         return
     }
-    if primary_fallback_refuses(EP) { primary_fallback_report(EP) }
+    primary_fallback_report(EP)
     EP = EP + 1
     em32(0xD2800000)
     EXPR_IS_F64 = 0
@@ -51891,6 +52087,14 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         print(": ")
         if LEX_ERROR_KIND == 2 {
             print("invalid escape sequence\n")
+        } else if LEX_ERROR_KIND == 3 {
+            print("character literals are not supported by lean_single; write the byte value, e.g. `32 as u8` for ' '\n")
+        } else if LEX_ERROR_KIND == 4 {
+            print("Unexpected character `")
+            print_char(LEX_ERROR_BYTE)
+            print("` (byte ")
+            print_int(LEX_ERROR_BYTE)
+            print(")\n")
         } else {
             print("Unexpected character\n")
         }
