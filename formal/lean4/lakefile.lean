@@ -812,3 +812,10 @@ lean_lib «SounioIntervalExtended» where
 
 @[default_target]
 lean_lib «SounioIntervalExtendedAxiomAudit» where
+
+-- Exact unbounded rational multiplication/division and fresh axiom audit.
+@[default_target]
+lean_lib «SounioIntervalExtendedMulDiv» where
+
+@[default_target]
+lean_lib «SounioIntervalExtendedMulDivAxiomAudit» where
