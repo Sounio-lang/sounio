@@ -135,6 +135,29 @@ Warp agents can read this workspace's Notion pages through Notion's hosted MCP s
 
 Checked on 24 October 2026: Warp connected to Notion MCP 1.2.0 over Streamable HTTP. A new shell still read `~/.warp/.mcp.json`, and a second search for `Sounio` still returned workspace pages.
 
+## Muse Code in Warp
+
+Muse Code is Meta's terminal coding agent. A Muse Code subscription is billed only while `muse` is signed in with that Meta account. It is not a model in Warp Agent Mode, and it does not draw on Warp credits. A Model API key created separately is pay-as-you-go and takes priority over the browser session, so do not export `META_API_KEY` if the run should stay on the subscription.
+
+Install and sign in from a normal terminal, not Agent Mode (`⌘I` toggles the mode):
+
+```sh
+curl -fsSL https://dev.meta.ai/install.sh | sh
+muse --version
+muse login
+```
+
+The installer puts `muse` in `~/.local/bin`. `muse login` opens a browser device-code page and stores the credential in `~/.config/muse/auth.json`. Reopen the same prompt with `/login` inside an interactive session. `muse usage` shows the plan tier and the current window. Interactive work is `muse` in the project directory. One headless prompt is `muse exec`. Recent Warp builds detect `muse` as a CLI agent; the plan still lives in the CLI login, not in Warp's model picker.
+
+For a Sounio change, give Muse its own `warp/` worktree and claim the files with `bin/sounio-coord` before it edits. Do not point it at another agent's checkout. After the run, inspect the diff and run `./bin/souc` yourself. Muse must not commit unless asked.
+
+Checked on 25 October 2026, Darwin arm64, Muse Code 1.4.13, plan **Muse Code Power Usage**:
+
+1. `muse login` saved the credential and reported Model API access verified.
+2. `muse exec --reasoning-effort minimal` returned `muse-ok`. `muse usage` then showed the Power Usage tier, with the 5-hour window still at 0%.
+3. A bounded coding run on branch `warp/muse-workflow-validate` added `sign_i64` in `stdlib/cmp/lib.sio` and three assertions in `tests/stdlib/cmp/test_cmp_stdlib.sio`. The prompt allowed only those two files. Muse edited nothing else and did not commit. The window then read 1%.
+4. `./bin/souc check` and `./bin/souc run` on that test exited 126. This checkout resolved `bin/madaros-linux-x86_64`, which cannot execute here, and `artifacts/self-hosted/madaros-arm64-macos` was absent. The committed `artifacts/self-hosted/souc-self-hosted-arm64-macos` is the old `mini_native` seed, not the Madaros launcher; after ad-hoc signing it started and then rejected lines that already existed, with confidence-gate errors. `CMP_STDLIB_OK` was not observed. A passing run still needs the native artifact in [Madaros on macOS arm64](docs/compiler/MADAROS_MACOS_ARM64.md), or a Linux x86-64 host.
+
 ## Develop with Sounio
 
 Start with a reproducible issue, a focused example or a documented compiler limit. See [CONTRIBUTING.md](https://github.com/Sounio-lang/sounio/blob/main/CONTRIBUTING.md) for contribution guidance.
