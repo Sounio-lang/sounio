@@ -24,6 +24,39 @@ ancestry. Incorporated remote main is
 `7ce5eddeef78c76c7e744150ed9c169c53a3d3b0`. No main merge or release is implied.
 SIO-167's additive Gamma-prefix helper is not imported and is not a dependency.
 
+## Current-main and cache consolidation
+
+The historical base/receipts above remain preserved. The current branch merges
+remote main8eca8e0c086bbd074485bbfd8716accc4063ef1c in2577a16c20390f7c23227097f8081c2fb09d289e
+and the independently reviewed cache71512e9b9bd61bf51b1a7a5bd5f0c0cf3a11f418
+inffd8d90d6dda032585e9d241daf22c769ee3566e. The cache is published separately
+as Draft[PR3153](https://github.com/Sounio-lang/sounio/pull/3153).
+Upstream visibility/effect corrections and removed files are preserved.
+No compiler rebuilt from this current main is claimed: the external c21
+a292/895 pins remain explicit execution dependencies.
+
+The scale caller and all24 recursively imported standard-library modules are
+byte-identical to the closed experimental combined_after20 composition. The
+same comparison passes for all30 files in the six-fixture import closure.
+Consequently the original17456/17472 actual20k point-only evidence remains
+applicable to those identical numerical sources, with its original executable
+and per-shard normalization scope. It is not relabeled as a new20k run.
+
+The strengthened public gate now catalogs the entire stdlib and routing helper
+set, detects added/removed inputs, records terminal status, and verifies source,
+compiler and generated executable hashes after execution. Slurm17535 completed0:0 in3m28s on the frozen current-main/cache composition.
+All twelve native executions, five reference comparisons per engine, and four
+actual-output counterfactuals passed. Complete source catalogs, compiler pins
+and generated executable hashes verified at the end; STATUS0 and the final
+SIO171_CURRENT_MAIN_COMPOSED_GATE_PASS marker are retained.
+
+The compact consolidation28-text.tar.gz is433850 bytes, SHA256
+99f9efd2382caba1ccba7ad081316d7e2a47600c10b8403b48efbad904c72ffd.
+Its independently rechecked internal manifest includes the exact gate, frozen
+source/engine/ELF receipts, full scientific stdout, reference outcomes, mutant
+refusals, import-closure comparisons and terminal Slurm receipt. It excludes
+executables; raw originals remain under SIO171/consolidation28.
+
 ## Compiler and actual native qualification
 
 All heavy work below ran in allocated UID1000 Slurm jobs on cpu-ops, one requested

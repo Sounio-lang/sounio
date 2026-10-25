@@ -9,6 +9,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdli
 
 # SIO-171 frozen review handoff
 
+Historical snapshot below: publication/composition authorization was subsequently
+received from the coordinator. Cache3153 is now published at exact71512e9;
+current-main/cache composition isffd8d90, and fresh qualification17535 completed0:0 in3m28s (STATUS0/full gatePASS).
+See README current-main consolidation for the superseding receipts.
+
 Implementation and numerical evidence are prepared; publication and dependency
 composition remain pending the required coordinator review. The coordinator and
 KS agent reported framework `Bad Request`; this was not treated as approval.
@@ -94,3 +99,18 @@ Curated compressed raw text, original failures, source/compiler/ELF hashes and
 controllers are in this directory and FILES.sha256. Worker root:
 `/scratch/sounio-stdlib-inference-scale-20261024/SIO171`.
 Draft review description: `/workspace/.tmp/SIO171-PR-DRAFT.txt`.
+
+## Consolidation handoff after recovery
+
+Cache PR3153 published scientific715 with header-only89bf followup. Main8eca
+and cache were composed in own171branch, preserving upstream changes.
+Focused current-main/cache17535 passed both engines and C++23; complete source,
+compiler and generated executable catalogs verify. Scale caller +24 imported
+stdlib files match original20k composition exactly. No new20k campaign run.
+
+Root owns the remaining shared central registration/full integration and final
+publication review. The incoming canonical claims will be released after this
+review commit. Latest branch HEAD is authoritative for this docs-only followup.
+
+Notion171 and cache4043f37f93718192bf16fdb0c3513086 carry current status;
+DraftPRs remain In progress, and Done requires human merge.
