@@ -4,7 +4,7 @@ authority: repo_only
 audience: users
 last_validated: 2026-10-25
 validated_by: Slurm17538 C++23 campaign closure gate
-source_of_truth: docs/evidence/stdlib-SIO-179/campaign-17048-closure-text.tar.gz
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-sio-179.readme
 -->
 
 # SIO-179: exhausted profile-bootstrap campaign closure

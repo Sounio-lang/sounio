@@ -4,7 +4,7 @@ authority: repo_only
 audience: users
 last_validated: 2026-10-25
 validated_by: Slurm17538 report-only gate
-source_of_truth: docs/evidence/stdlib-SIO-179/README.md
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-sio-179.handoff
 -->
 
 # SIO-179 handoff
