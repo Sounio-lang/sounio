@@ -14,7 +14,7 @@
 // HELPER FUNCTIONS
 // ============================================================================
 
-use math::pure::{exp}
+use math::pure::{exp,is_finite,ln_checked}
 
 fn abs_f64(x: f64) -> f64 {
     if x < 0.0 { return 0.0 - x }
@@ -67,25 +67,25 @@ fn pow_1_5(x: f64) -> f64 with Mut, Div {
 // ============================================================================
 
 // Configuration for ODE solvers
-struct ODEOptions {
+pub struct ODEOptions {
     /// Relative tolerance (default: 1e-4)
-    rtol: f64,
+    pub rtol: f64,
     /// Absolute tolerance (default: 1e-7)
-    atol: f64,
+    pub atol: f64,
     /// Initial step size (0 = auto)
-    dt_init: f64,
+    pub dt_init: f64,
     /// Minimum step size
-    dt_min: f64,
+    pub dt_min: f64,
     /// Maximum step size
-    dt_max: f64,
+    pub dt_max: f64,
     /// Maximum number of steps
-    max_steps: i64,
+    pub max_steps: i64,
     /// Safety factor for step control (default: 0.9)
-    safety: f64,
+    pub safety: f64,
     /// Maximum step growth factor (default: 10.0)
-    max_growth: f64,
+    pub max_growth: f64,
     /// Minimum step shrink factor (default: 0.2)
-    min_shrink: f64
+    pub min_shrink: f64
 }
 
 // Default solver options - good for most problems
@@ -138,34 +138,34 @@ pub fn fast_options() -> ODEOptions {
 // ============================================================================
 
 // Result from ODE solver
-struct SolverODESolution {
+pub struct SolverODESolution {
     /// Whether integration succeeded
-    success: bool,
+    pub success: bool,
     /// Number of steps taken
-    nsteps: i64,
+    pub nsteps: i64,
     /// Number of function evaluations
-    nfeval: i64,
+    pub nfeval: i64,
     /// Number of rejected steps
-    nreject: i64,
+    pub nreject: i64,
     /// Final time reached
-    t_final: f64,
+    pub t_final: f64,
     /// Final solution value
-    u_final: f64,
-    /// Termination message code (0 = success, 1 = max steps, 2 = step too small)
-    status: i64
+    pub u_final: f64,
+    /// 0 complete,1 attempt budget,2 no progress,3 invalid request,4 arithmetic
+    pub status: i64
 }
 
 // Solution for vector ODE (up to 3 components)
-struct ODESolutionVec3 {
-    success: bool,
-    nsteps: i64,
-    nfeval: i64,
-    nreject: i64,
-    t_final: f64,
-    u1_final: f64,
-    u2_final: f64,
-    u3_final: f64,
-    status: i64
+pub struct ODESolutionVec3 {
+    pub success: bool,
+    pub nsteps: i64,
+    pub nfeval: i64,
+    pub nreject: i64,
+    pub t_final: f64,
+    pub u1_final: f64,
+    pub u2_final: f64,
+    pub u3_final: f64,
+    pub status: i64
 }
 
 // ============================================================================
@@ -292,81 +292,74 @@ fn rk45_step_exp_decay(u: f64, t: f64, dt: f64) -> RK45StepResult {
 }
 
 // Compute optimal step size based on error
-fn compute_optimal_step(dt: f64, err_norm: f64, opts: ODEOptions) -> f64 {
-    if err_norm <= 0.0 {
-        return dt * opts.max_growth
-    }
-    let factor = opts.safety * pow_1_5(1.0 / err_norm)
-    let factor_limited = max_f64(opts.min_shrink, min_f64(opts.max_growth, factor))
-    return dt * factor_limited
+fn compute_optimal_step(dt:f64,err_norm:f64,opts:ODEOptions)->f64 with Mut,Div {
+ var factor=opts.max_growth
+ if err_norm>0.0 {
+  let logged=ln_checked(err_norm)
+  if logged.status!=0 {return 0.0}
+  factor=opts.safety*exp(-0.2*logged.value)
+ }
+ factor=max_f64(opts.min_shrink,min_f64(opts.max_growth,factor))
+ dt*factor
 }
 
 // Solve exponential decay ODE using RK45
-pub fn solve_rk45_exp_decay(u0: f64, t_start: f64, t_end: f64, opts: ODEOptions) -> SolverODESolution with Mut, Div {
-    var u = u0
-    var t = t_start
 
-    // Initialize step size
-    var dt = opts.dt_init
-    if dt <= 0.0 {
-        let f0 = abs_f64(ode_exp_decay(u0, t_start))
-        let scale = opts.atol + opts.rtol * abs_f64(u0)
-        let dt_est = scale / max_f64(f0, 0.0000000001)
-        dt = min_f64(0.01 * (t_end - t_start), dt_est)
-    }
-    dt = max_f64(opts.dt_min, min_f64(opts.dt_max, dt))
+fn solver_scalar_result(status:i64,t:f64,u:f64,steps:i64,evals:i64,rejects:i64)->SolverODESolution {
+ SolverODESolution{success:status==0,nsteps:steps,nfeval:evals,nreject:rejects,t_final:t,u_final:u,status:status}
+}
+fn solver_invalid()->SolverODESolution {solver_scalar_result(3,0.0,0.0,0,0,0)}
+fn solver_fixed_valid(u:f64,t0:f64,t1:f64,steps:i64)->bool {
+ steps>0 && steps<=1000000 && is_finite(u) && is_finite(t0) && is_finite(t1)
+}
 
-    var nsteps: i64 = 0
-    var nfeval: i64 = 1
-    var nreject: i64 = 0
-    var status: i64 = 0
-
-    while t < t_end && nsteps < opts.max_steps {
-        // Don't overshoot
-        let dt_use = if t + dt > t_end { t_end - t } else { dt }
-
-        // Take step
-        let result = rk45_step_exp_decay(u, t, dt_use)
-        nfeval = nfeval + 7
-
-        // Error norm
-        let scale = opts.atol + opts.rtol * max_f64(abs_f64(u), abs_f64(result.u_new))
-        let err_norm = result.err / scale
-
-        if err_norm <= 1.0 {
-            // Accept step
-            t = t + dt_use
-            u = result.u_new
-            nsteps = nsteps + 1
-            dt = compute_optimal_step(dt_use, err_norm, opts)
-        } else {
-            // Reject step
-            nreject = nreject + 1
-            dt = compute_optimal_step(dt_use, err_norm, opts)
-        }
-
-        // Enforce limits
-        dt = max_f64(opts.dt_min, min_f64(opts.dt_max, dt))
-
-        // Check for step size too small
-        if dt < opts.dt_min * 2.0 {
-            status = 2
-        }
-    }
-
-    if nsteps >= opts.max_steps {
-        status = 1
-    }
-
-    return SolverODESolution {
-        success: t >= t_end - opts.dt_min,
-        nsteps: nsteps,
-        nfeval: nfeval,
-        nreject: nreject,
-        t_final: t,
-        u_final: u,
-        status: status
-    }
+pub fn solve_rk45_exp_decay(u0:f64,t_start:f64,t_end:f64,opts:ODEOptions)->SolverODESolution with Mut,Div {
+ if !is_finite(u0) || !is_finite(t_start) || !is_finite(t_end) || t_end<t_start ||
+ !is_finite(opts.rtol) || !is_finite(opts.atol) || opts.rtol<0.0 || opts.atol<=0.0 ||
+ !is_finite(opts.dt_init) || opts.dt_init<0.0 || !is_finite(opts.dt_min) || opts.dt_min<=0.0 ||
+ !is_finite(opts.dt_max) || opts.dt_max<opts.dt_min ||
+ !is_finite(opts.safety) || opts.safety<=0.0 || opts.safety>=1.0 ||
+ !is_finite(opts.max_growth) || opts.max_growth<1.0 ||
+ !is_finite(opts.min_shrink) || opts.min_shrink<=0.0 || opts.min_shrink>=1.0 ||
+ opts.max_steps<1 || opts.max_steps>1000000 {return solver_invalid()}
+ if t_start==t_end {return solver_scalar_result(0,t_start,u0,0,0,0)}
+ let span=t_end-t_start
+ if !is_finite(span) {return solver_scalar_result(4,t_start,u0,0,0,0)}
+ var dt=opts.dt_init
+ if dt==0.0 {dt=span*0.01}
+ dt=max_f64(opts.dt_min,min_f64(opts.dt_max,dt))
+ var t=t_start
+ var u=u0
+ var steps:i64=0
+ var rejects:i64=0
+ var attempts:i64=0
+ while t<t_end && attempts<opts.max_steps {
+  let remaining=t_end-t
+  let h=min_f64(dt,remaining)
+  let next=if h==remaining {t_end} else {t+h}
+  if !is_finite(next) || !is_finite(h) {return solver_scalar_result(4,t,u,steps,attempts*7,rejects)}
+  if next<=t || h<=0.0 {return solver_scalar_result(2,t,u,steps,attempts*7,rejects)}
+  let result=rk45_step_exp_decay(u,t,h)
+  attempts=attempts+1
+  let scale=opts.atol+opts.rtol*max_f64(abs_f64(u),abs_f64(result.u_new))
+  if !is_finite(result.u_new) || !is_finite(result.err) || !is_finite(scale) || scale<=0.0 {
+   return solver_scalar_result(4,t,u,steps,attempts*7,rejects)
+  }
+  let err=result.err/scale
+  if !is_finite(err) {return solver_scalar_result(4,t,u,steps,attempts*7,rejects)}
+  if err<=1.0 {
+   t=next;u=result.u_new;steps=steps+1
+   let proposal=compute_optimal_step(h,err,opts)
+   dt=if is_finite(proposal) {max_f64(opts.dt_min,min_f64(opts.dt_max,proposal))} else {opts.dt_max}
+  } else {
+   rejects=rejects+1
+   let reduced=compute_optimal_step(h,err,opts)
+   if h<=opts.dt_min || reduced>=h || reduced<=0.0 {return solver_scalar_result(2,t,u,steps,attempts*7,rejects)}
+   dt=max_f64(opts.dt_min,reduced)
+  }
+ }
+ if t<t_end {return solver_scalar_result(1,t,u,steps,attempts*7,rejects)}
+ solver_scalar_result(0,t,u,steps,attempts*7,rejects)
 }
 
 // ============================================================================
@@ -383,27 +376,24 @@ fn rk4_step_exp_decay(u: f64, t: f64, dt: f64) -> f64 {
 }
 
 // Solve exponential decay using fixed-step RK4
-pub fn solve_rk4_exp_decay(u0: f64, t_start: f64, t_end: f64, n_steps: i64) -> SolverODESolution with Mut, Div {
-    let dt = (t_end - t_start) / (n_steps as f64)
-    var u = u0
-    var t = t_start
-    var i: i64 = 0
-
-    while i < n_steps {
-        u = rk4_step_exp_decay(u, t, dt)
-        t = t + dt
-        i = i + 1
-    }
-
-    return SolverODESolution {
-        success: true,
-        nsteps: n_steps,
-        nfeval: n_steps * 4,
-        nreject: 0,
-        t_final: t,
-        u_final: u,
-        status: 0
-    }
+pub fn solve_rk4_exp_decay(u0:f64,t_start:f64,t_end:f64,n_steps:i64)->SolverODESolution with Mut,Div {
+ if !solver_fixed_valid(u0,t_start,t_end,n_steps) {return solver_invalid()}
+ if t_start==t_end {return solver_scalar_result(0,t_start,u0,0,0,0)}
+ let span=t_end-t_start
+ if !is_finite(span) {return solver_scalar_result(4,t_start,u0,0,0,0)}
+ var u=u0
+ var t=t_start
+ var i:i64=0
+ while i<n_steps {
+  let next=if i+1==n_steps {t_end} else {t_start+span*(((i+1) as f64)/(n_steps as f64))}
+  let dt=next-t
+  if !is_finite(next) || !is_finite(dt) {return solver_scalar_result(4,t,u,i,i*4,0)}
+  if (span>0.0 && next<=t) || (span<0.0 && next>=t) {return solver_scalar_result(2,t,u,i,i*4,0)}
+  let candidate=rk4_step_exp_decay(u,t,dt)
+  if !is_finite(candidate) {return solver_scalar_result(4,t,u,i,(i+1)*4,0)}
+  u=candidate;t=next;i=i+1
+ }
+ solver_scalar_result(0,t,u,i,i*4,0)
 }
 
 // ============================================================================
@@ -412,10 +402,10 @@ pub fn solve_rk4_exp_decay(u0: f64, t_start: f64, t_end: f64, n_steps: i64) -> S
 
 // State for 3-component ODE system
 pub struct State3 {
-    u1: f64,
-    u2: f64,
-    u3: f64,
-    t: f64
+    pub u1: f64,
+    pub u2: f64,
+    pub u3: f64,
+    pub t: f64
 }
 
 // Derivative for 3-component system
@@ -426,14 +416,14 @@ struct Deriv3 {
 }
 
 // Parameters for 3-compartment PK model
-struct SolverPKParams3 {
-    ka: f64,   // Absorption rate (gut -> central)
-    ke: f64,   // Elimination rate (central -> eliminated)
-    k12: f64,  // Transfer rate (central -> peripheral)
-    k21: f64   // Transfer rate (peripheral -> central)
+pub struct SolverPKParams3 {
+    pub ka: f64,   // Absorption rate (gut -> central)
+    pub ke: f64,   // Elimination rate (central -> eliminated)
+    pub k12: f64,  // Transfer rate (central -> peripheral)
+    pub k21: f64   // Transfer rate (peripheral -> central)
 }
 
-fn solver_default_pk3_params() -> SolverPKParams3 {
+pub fn solver_default_pk3_params() -> SolverPKParams3 {
     return SolverPKParams3 {
         ka: 1.5,
         ke: 0.1,
@@ -487,33 +477,35 @@ fn solver_rk4_step_pk3(s: State3, dt: f64, p: SolverPKParams3) -> State3 {
     return State3 {
         u1: s.u1 + (dt / 6.0) * (k1.du1 + 2.0*k2.du1 + 2.0*k3.du1 + k4.du1),
         u2: s.u2 + (dt / 6.0) * (k1.du2 + 2.0*k2.du2 + 2.0*k3.du2 + k4.du2),
-        u3: s.u3 + (dt / 6.0) * (k1.du3 + 2.0*k3.du3 + 2.0*k3.du3 + k4.du3),
+        u3: s.u3 + (dt / 6.0) * (k1.du3 + 2.0*k2.du3 + 2.0*k3.du3 + k4.du3),
         t: s.t + dt
     }
 }
 
 // Solve 3-compartment PK model with RK4
-pub fn solve_pk3_rk4(s0: State3, p: SolverPKParams3, t_end: f64, n_steps: i64) -> ODESolutionVec3 with Mut, Div {
-    let dt = (t_end - s0.t) / (n_steps as f64)
-    var s = s0
-    var i: i64 = 0
-
-    while i < n_steps {
-        s = solver_rk4_step_pk3(s, dt, p)
-        i = i + 1
-    }
-
-    return ODESolutionVec3 {
-        success: true,
-        nsteps: n_steps,
-        nfeval: n_steps * 4,
-        nreject: 0,
-        t_final: s.t,
-        u1_final: s.u1,
-        u2_final: s.u2,
-        u3_final: s.u3,
-        status: 0
-    }
+pub fn solve_pk3_rk4(s0:State3,p:SolverPKParams3,t_end:f64,n_steps:i64)->ODESolutionVec3 with Mut,Div {
+ var out=ODESolutionVec3{success:false,nsteps:0,nfeval:0,nreject:0,t_final:0.0,u1_final:0.0,u2_final:0.0,u3_final:0.0,status:3}
+ if !solver_fixed_valid(s0.u1,s0.t,t_end,n_steps) || !is_finite(s0.u2) || !is_finite(s0.u3) ||
+ !is_finite(p.ka) || !is_finite(p.ke) || !is_finite(p.k12) || !is_finite(p.k21) ||
+ p.ka<0.0 || p.ke<0.0 || p.k12<0.0 || p.k21<0.0 {return out}
+ out.t_final=s0.t;out.u1_final=s0.u1;out.u2_final=s0.u2;out.u3_final=s0.u3
+ let span=t_end-s0.t
+ if !is_finite(span) {out.status=4;return out}
+ var s=s0
+ var i:i64=0
+ while i<n_steps && s.t!=t_end {
+  let next=if i+1==n_steps {t_end} else {s0.t+span*(((i+1) as f64)/(n_steps as f64))}
+  let dt=next-s.t
+  if !is_finite(next) || !is_finite(dt) {out.status=4;return out}
+  if (span>0.0 && next<=s.t) || (span<0.0 && next>=s.t) {out.status=2;return out}
+  let candidate=solver_rk4_step_pk3(s,dt,p)
+  out.nfeval=(i+1)*4
+  if !is_finite(candidate.u1) || !is_finite(candidate.u2) || !is_finite(candidate.u3) {out.status=4;return out}
+  s=candidate;s.t=next;i=i+1
+  out.nsteps=i;out.t_final=s.t;out.u1_final=s.u1;out.u2_final=s.u2;out.u3_final=s.u3
+ }
+ out.success=true;out.status=0
+ out
 }
 
 // ============================================================================
@@ -527,28 +519,24 @@ fn backward_euler_step_exp_decay(u: f64, dt: f64, k: f64) -> f64 {
 }
 
 // Solve exponential decay using Backward Euler (L-stable for stiff)
-pub fn solve_bdf1_exp_decay(u0: f64, t_start: f64, t_end: f64, n_steps: i64) -> SolverODESolution with Mut, Div {
-    let k = 0.1  // Decay constant
-    let dt = (t_end - t_start) / (n_steps as f64)
-    var u = u0
-    var t = t_start
-    var i: i64 = 0
-
-    while i < n_steps {
-        u = backward_euler_step_exp_decay(u, dt, k)
-        t = t + dt
-        i = i + 1
-    }
-
-    return SolverODESolution {
-        success: true,
-        nsteps: n_steps,
-        nfeval: n_steps,
-        nreject: 0,
-        t_final: t,
-        u_final: u,
-        status: 0
-    }
+pub fn solve_bdf1_exp_decay(u0:f64,t_start:f64,t_end:f64,n_steps:i64)->SolverODESolution with Mut,Div {
+ if !solver_fixed_valid(u0,t_start,t_end,n_steps) {return solver_invalid()}
+ if t_start==t_end {return solver_scalar_result(0,t_start,u0,0,0,0)}
+ let span=t_end-t_start
+ if !is_finite(span) {return solver_scalar_result(4,t_start,u0,0,0,0)}
+ var u=u0
+ var t=t_start
+ var i:i64=0
+ while i<n_steps {
+  let next=if i+1==n_steps {t_end} else {t_start+span*(((i+1) as f64)/(n_steps as f64))}
+  let dt=next-t
+  if !is_finite(next) || !is_finite(dt) {return solver_scalar_result(4,t,u,i,i*1,0)}
+  if (span>0.0 && next<=t) || (span<0.0 && next>=t) {return solver_scalar_result(2,t,u,i,i*1,0)}
+  let candidate=backward_euler_step_exp_decay(u,dt,0.1)
+  if !is_finite(candidate) {return solver_scalar_result(4,t,u,i,(i+1)*1,0)}
+  u=candidate;t=next;i=i+1
+ }
+ solver_scalar_result(0,t,u,i,i*1,0)
 }
 
 // ============================================================================
@@ -560,11 +548,11 @@ fn solver_exp_approx(x: f64) -> f64 with Mut, Div {
     exp(x)
 }
 
-pub fn solver_exp_decay_analytical(u0: f64, k: f64, t: f64) -> f64 {
+pub fn solver_exp_decay_analytical(u0: f64, k: f64, t: f64) -> f64 with Mut, Div {
     return u0 * solver_exp_approx(0.0 - k * t)
 }
 
-pub fn exp_decay_analytical(u0: f64, k: f64, t: f64) -> f64 {
+pub fn exp_decay_analytical(u0: f64, k: f64, t: f64) -> f64 with Mut, Div {
     return solver_exp_decay_analytical(u0, k, t)
 }
 

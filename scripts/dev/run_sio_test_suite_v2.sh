@@ -853,6 +853,7 @@ run_test() {
     json="$json}"
     echo "$json" > "$output_file"
     if [[ -n "${SOUNIO_TEST_RESULTS_DIR:-}" ]]; then
+        printf '%s\n' "$output" > "$SOUNIO_TEST_RESULTS_DIR/result_$idx.log"
         cp "$output_file" "$SOUNIO_TEST_RESULTS_DIR/"
     fi
 }

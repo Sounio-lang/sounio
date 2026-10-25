@@ -7,10 +7,11 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_MAX_VREGS, IR_FLOAT_REG_MARKER_FLAG, IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_AUTO, ir_reg_count_is_valid, ir_function_regs_are_valid, ir_xor_convolution_s, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_MAX_VREGS, IR_FLOAT_REG_MARKER_FLAG, IR_BOX_ALLOC_FLAG, IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_AUTO, ir_reg_count_is_valid, ir_function_regs_are_valid, ir_xor_convolution_s, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC}
 use native::encode::*
 use native::elf::*
 use native::aarch64::*
+use native::codegen_arm64_macos::{compile_arm64_macos_to_file}
 use native::macho::*
 use native::reloc::*
 use native::frame::*
@@ -89,6 +90,11 @@ var NC_IEEE_F64_SABOTAGE: i64 = 0
 // the pre-41fae115e dynlink stub `call [rip+GOT]; ret`, which enters the
 // callee with rsp%16 == 0 instead of 8. Never set outside the witness gates.
 var NC_DYNLINK_THUNK_SABOTAGE: i64 = 0
+// Like the lowering diagnostics, configuration is fixed for this process.
+// read_env allocates in the aggregate pool; never poll it per emitted body.
+var NC_RGN_ENV_CHECKED: i64 = 0
+var NC_WIDE_ENV_CHECKED: i64 = 0
+var NC_IEEE_ENV_CHECKED: i64 = 0
 
 fn nc_note_label_overflow(nc: &! NativeCompiler) with Mut, Panic {
     (*nc).label_overflow = true
@@ -823,6 +829,23 @@ pub fn native_target_source_string(source_id: i64) -> string {
 }
 
 fn native_host_probe_target() -> string with IO, Mut, Panic, Div {
+    // Darwin shells do not normally export HOSTTYPE/OSTYPE. Probe the host
+    // instead of silently falling back to Linux when these variables are empty.
+    // Guard the Darwin syscall by a Darwin-only system file.
+    if file_size("/System/Library/CoreServices/SystemVersion.plist") > 0 {
+        // Packed int32 MIB { CTL_HW=6, HW_MACHINE=1 }.
+        var host_mib: [i8; 8] = [0; 8]
+        host_mib[0] = 6
+        host_mib[4] = 1
+        var host_machine: [i8; 64] = [0; 64]
+        var host_size: i64 = 64
+        if syscall6(202, &! host_mib, 2, &! host_machine, &! host_size, 0, 0) == 0 {
+            if host_machine[0] == 97 as i8 && host_machine[1] == 114 as i8 {
+                return "aarch64-macos"
+            }
+            if host_machine[0] == 120 as i8 { return "x86_64-macos" }
+        }
+    }
     let host_type = read_env("HOSTTYPE")
     let os_type = read_env("OSTYPE")
 
@@ -1288,6 +1311,23 @@ fn name_is_heap_free(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+fn name_is_heap_realloc(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 12 { return false }
+    if n.buf[0] != 104 as i8 { return false }
+    if n.buf[1] != 101 as i8 { return false }
+    if n.buf[2] != 97 as i8 { return false }
+    if n.buf[3] != 112 as i8 { return false }
+    if n.buf[4] != 95 as i8 { return false }
+    if n.buf[5] != 114 as i8 { return false }
+    if n.buf[6] != 101 as i8 { return false }
+    if n.buf[7] != 97 as i8 { return false }
+    if n.buf[8] != 108 as i8 { return false }
+    if n.buf[9] != 108 as i8 { return false }
+    if n.buf[10] != 111 as i8 { return false }
+    if n.buf[11] != 99 as i8 { return false }
+    true
+}
+
 fn name_ref_is_print_int(n: &Name) -> bool with Mut, Panic, Div {
     if (*n).len != 9 { return false }
     if (*n).buf[0] != 112 as i8 { return false }
@@ -1358,6 +1398,7 @@ fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_is_assert(*name) { return 21 }
     if name_is_heap_alloc(*name) { return 23 }
     if name_is_heap_free(*name) { return 24 }
+    if name_is_heap_realloc(*name) { return 71 }
     if name_is_malloc(*name) { return 23 }
     if name_is_free(*name) { return 24 }
     if name_is_arena_mark(*name) { return 56 }
@@ -1470,6 +1511,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_str_from_bytes((*func).name) { return 22 }
     if name_is_heap_alloc((*func).name) { return 23 }
     if name_is_heap_free((*func).name) { return 24 }
+    if name_is_heap_realloc((*func).name) { return 71 }
     if name_is_syscall6((*func).name) { return 27 }
     if name_is_malloc((*func).name) { return 23 }
     if name_is_free((*func).name) { return 24 }
@@ -3059,7 +3101,17 @@ fn nc_emit_bt_rax_imm8(nc: &! NativeCompiler, bit_pos: i64) with Mut, Panic, Div
 }
 
 fn nc_refresh_rgn_sabotage() with IO, Mut, Panic, Div {
-    NC_DYNLINK_THUNK_SABOTAGE = if str_eq(read_env("SOUNIO_SABOTAGE_DYNLINK_THUNK_CALLRET"), "1") { 1 } else { 0 }
+    if NC_RGN_ENV_CHECKED == 1 { return }
+    NC_RGN_ENV_CHECKED = 1
+    // Keep the allocating read out of an assignment's if-expression: the
+    // source-tracking bootstrap's generated host re-evaluated this condition.
+    // One captured read is required independently of that lowering path.
+    let dynlink_flag = read_env("SOUNIO_SABOTAGE_DYNLINK_THUNK_CALLRET")
+    if str_eq(dynlink_flag, "1") {
+        NC_DYNLINK_THUNK_SABOTAGE = 1
+    } else {
+        NC_DYNLINK_THUNK_SABOTAGE = 0
+    }
     let v = read_env("SOUNIO_RGN_BARRIER_SABOTAGE")
     NC_RGN_SABOTAGE = 0
     if str_len(v) == 0 { return }
@@ -3076,6 +3128,8 @@ fn nc_refresh_rgn_sabotage() with IO, Mut, Panic, Div {
 }
 
 fn nc_refresh_wide_mul_sabotage() with IO, Mut, Panic, Div {
+    if NC_WIDE_ENV_CHECKED == 1 { return }
+    NC_WIDE_ENV_CHECKED = 1
     if str_eq(read_env("SOUNIO_WIDE_MUL_SABOTAGE"), "1") {
         NC_WIDE_MUL_SABOTAGE = 1
     } else {
@@ -3084,6 +3138,8 @@ fn nc_refresh_wide_mul_sabotage() with IO, Mut, Panic, Div {
 }
 
 fn nc_refresh_ieee_f64_sabotage() with IO, Mut, Panic, Div {
+    if NC_IEEE_ENV_CHECKED == 1 { return }
+    NC_IEEE_ENV_CHECKED = 1
     if str_eq(read_env("SOUNIO_SABOTAGE_IEEE_F64_SPECIAL"), "1") {
         NC_IEEE_F64_SABOTAGE = 1
         lower_ir_set_ieee_f64_sabotage(1)
@@ -3640,6 +3696,12 @@ fn native_v2_emit_gc_empty_frame_reset(nc: NativeCompiler) -> NativeCompiler wit
 //   raw pointer ≥ capacity      → already an object base (unboxed small value)
 // Unboxed ≤16 B value structs return the raw object base so they never consume
 // a handle-table slot; field load/store must accept both encodings.
+//
+// Handle 0 is not in that range. Entry 0 is empty, so a lookup returns object
+// base 0 and the caller's field load reads address 0x20 (header + field 0).
+// An occupied slot whose object_base is also 0 is the same null. The check is
+// only on the table path: a raw pointer never consults the table, so the
+// compiler's field lookups of unboxed values pay the original instruction stream.
 fn native_v2_resolve_handle_to_object_base_rax(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     c.code = emit_mov_rbx_rax(c.code)
@@ -3658,14 +3720,31 @@ fn native_v2_resolve_handle_to_object_base_rax(nc: NativeCompiler) -> NativeComp
     c.code = emit_mov_reg_reg(c.code, 3, 7)
     c.code = emit_add_rax_rbx(c.code)
     c.code = emit_load_rax_mem_rax_disp32(c.code, native_v2_handle_entry_field_object_base())
+    c.code = emit_test_rax_rax(c.code)
+    let empty_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
     let done_jmp = c.code.len
     c.code = emit_jmp_rel32(c.code)
+
+    let refuse = c.code.len
+    c.code = patch_u32_le(c.code, empty_jz + 2, refuse - (empty_jz + 6))
+    c.code = emit_ud2(c.code)
 
     let raw_target = c.code.len
     c.code = patch_u32_le(c.code, raw_jnz + 2, raw_target - (raw_jnz + 6))
     c.code = emit_mov_rax_rbx(c.code)
     let done_target = c.code.len
     c.code = patch_u32_le(c.code, done_jmp + 1, done_target - (done_jmp + 5))
+    // Both paths leave the object base in rax. A null here is an empty handle
+    // slot; a raw pointer cannot be null (it compared >= the threshold). Do not
+    // return it for a later field store (gen3 SIGSEGV, issue #2966).
+    c.code = emit_test_rax_rax(c.code)
+    let live_jnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+    c.code = emit_exit(c.code, native_v2_null_object_base_exit_code())
+    c.code = emit_ud2(c.code)
+    let live_target = c.code.len
+    c.code = patch_u32_le(c.code, live_jnz + 2, live_target - (live_jnz + 6))
     c
 }
 
@@ -3686,14 +3765,30 @@ fn native_v2_resolve_handle_to_object_base_rax_into(nc: &! NativeCompiler) with 
     nc_emit_mov_reg_reg(nc, 3, 7)
     nc_emit_add_rax_rbx(nc)
     nc_emit_load_rax_mem_rax_disp32(nc, native_v2_handle_entry_field_object_base())
+    nc_emit_test_rax_rax(nc)
+    let empty_jz = (*nc).code.len
+    nc_emit_jz_rel32(nc)
     let done_jmp = (*nc).code.len
     nc_emit_jmp_rel32(nc)
+
+    let refuse = (*nc).code.len
+    nc_patch_u32_le(nc, empty_jz + 2, refuse - (empty_jz + 6))
+    nc_emit_ud2(nc)
 
     let raw_target = (*nc).code.len
     nc_patch_u32_le(nc, raw_jnz + 2, raw_target - (raw_jnz + 6))
     nc_emit_mov_rax_rbx(nc)
     let done_target = (*nc).code.len
     nc_patch_u32_le(nc, done_jmp + 1, done_target - (done_jmp + 5))
+    // Keep in lockstep with the by-value resolver above. Exit, then ud2 so a
+    // failed syscall cannot fall into the caller's field store.
+    nc_emit_test_rax_rax(nc)
+    let live_jnz = (*nc).code.len
+    nc_emit_jnz_rel32(nc)
+    nc_emit_exit_code(nc, native_v2_null_object_base_exit_code())
+    nc_emit_ud2(nc)
+    let live_target = (*nc).code.len
+    nc_patch_u32_le(nc, live_jnz + 2, live_target - (live_jnz + 6))
 }
 
 fn nc_flat_data_prepare_into(nc: &! NativeCompiler) with Mut, Panic, Div {
@@ -4343,6 +4438,75 @@ fn emit_builtin_heap_free_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_xor_rax_rax(nc)
     nc_emit_ret(nc)
     nc_patch_u32_le(nc, null_patch, done_offset - (null_patch + 4))
+}
+
+// heap_realloc(ptr, new_n) -> payload. Same header as heap_alloc: the
+// page-rounded mapping length lives at ptr-8. Growth uses mremap so the
+// bytes already written stay put. A null ptr is a fresh alloc.
+fn emit_builtin_heap_realloc_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_test_rdi_rdi(nc)
+    let null_jz = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x84)
+    nc_emit_u32_le(nc, 0)
+
+    // r8 = page_round_up(new_n + 8), same arithmetic as heap_alloc.
+    nc_emit_byte(nc, 0x49)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xf0)
+    nc_emit_byte(nc, 0x49)
+    nc_emit_byte(nc, 0x81)
+    nc_emit_byte(nc, 0xc0)
+    nc_emit_u32_le(nc, 4103)
+    nc_emit_byte(nc, 0x4d)
+    nc_emit_byte(nc, 0x85)
+    nc_emit_byte(nc, 0xc0)
+    let overflow_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x8e)
+    nc_emit_u32_le(nc, 0)
+    nc_emit_byte(nc, 0x49)
+    nc_emit_byte(nc, 0x81)
+    nc_emit_byte(nc, 0xe0)
+    nc_emit_u32_le(nc, -4096)
+
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xef)
+    nc_emit_byte(nc, 8)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x37)
+    nc_emit_byte(nc, 0x4c)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xc2)
+    nc_emit_mov_r10_imm32(nc, 1)
+    nc_emit_mov_rax_imm(nc, 25)
+    nc_emit_syscall(nc)
+    nc_emit_test_rax_rax(nc)
+    let mremap_fail = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x88)
+    nc_emit_u32_le(nc, 0)
+    nc_emit_byte(nc, 0x4c)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0x00)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xc0)
+    nc_emit_byte(nc, 8)
+    nc_emit_ret(nc)
+
+    let fresh = (*nc).code.len
+    nc_emit_mov_reg_reg(nc, 7, 6)
+    emit_builtin_heap_alloc_into(nc)
+
+    let fail_offset = (*nc).code.len
+    nc_emit_xor_rax_rax(nc)
+    nc_emit_ret(nc)
+    nc_patch_u32_le(nc, null_jz, fresh - (null_jz + 4))
+    nc_patch_u32_le(nc, overflow_patch, fail_offset - (overflow_patch + 4))
+    nc_patch_u32_le(nc, mremap_fail, fail_offset - (mremap_fail + 4))
 }
 
 fn nc_alloc_diag_append_ascii_into(nc: &! NativeCompiler, text: string) with Mut, Panic, Div {
@@ -5009,7 +5173,7 @@ fn emit_builtin_write_offset64_into(nc: &! NativeCompiler) with Mut, Panic, Div 
 // __arena_mark() -> i64: the Box-arena bump cursor, read straight out of the
 // RuntimeContext. Read-only, so nothing can go wrong here.
 fn emit_builtin_arena_mark_into(nc: &! NativeCompiler) with Mut, Panic, Div {
-    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_box_heap_cursor())
     nc_emit_ret(nc)
 }
 
@@ -5029,8 +5193,38 @@ fn emit_builtin_arena_reset_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     rgn_emit_load_ctx(nc, 8)
     rgn_emit_mark_all_escaped(nc, 8)
     nc_emit_mov_reg_reg(nc, 0, 7)
-    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
+    nc_emit_test_rax_rax(nc)
+    let nonzero_mark = (*nc).code.len
+    nc_emit_jnz_rel32(nc)
+    // A mark taken before lazy Box-pool initialization denotes its empty base.
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_box_heap_base())
+    nc_patch_u32_le(nc, nonzero_mark + 2, (*nc).code.len - (nonzero_mark + 6))
+    nc_emit_mov_reg_reg(nc, 2, 0)
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_box_heap_base())
+    nc_emit_mov_rbx_rax(nc)
+    nc_emit_mov_reg_reg(nc, 0, 2)
+    nc_emit_cmp_rax_rbx(nc)
+    nc_emit_setb_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let below_base = (*nc).code.len
+    nc_emit_jnz_rel32(nc)
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_box_heap_cursor())
+    nc_emit_mov_rbx_rax(nc)
+    nc_emit_mov_reg_reg(nc, 0, 2)
+    nc_emit_cmp_rax_rbx(nc)
+    nc_emit_seta_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let above_cursor = (*nc).code.len
+    nc_emit_jnz_rel32(nc)
+    nc_emit_mov_reg_reg(nc, 0, 2)
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_box_heap_cursor())
     nc_emit_ret(nc)
+    let invalid = (*nc).code.len
+    nc_patch_u32_le(nc, below_base + 2, invalid - (below_base + 6))
+    nc_patch_u32_le(nc, above_cursor + 2, invalid - (above_cursor + 6))
+    nc_emit_exit_code(nc, 183) // invalid reset token; never rewind aggregate storage
 }
 
 // ============================================================================
@@ -9126,6 +9320,7 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_str_from_bytes(name) { return 22 }
     if name_is_heap_alloc(name) { return 23 }
     if name_is_heap_free(name) { return 24 }
+    if name_is_heap_realloc(name) { return 71 }
     if name_is___sounio_seq_push(name) { return 51 }
     if name_is___sounio_seq_push_scalar(name) { return 70 }
     if name_is___sounio_seq_get(name) { return 52 }
@@ -9242,6 +9437,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 22 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_from_bytes((*nc))); return }
     if builtin_id == 23 { emit_builtin_heap_alloc_into(nc); return }
     if builtin_id == 24 { emit_builtin_heap_free_into(nc); return }
+    if builtin_id == 71 { emit_builtin_heap_realloc_into(nc); return }
     if builtin_id == 25 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
     if builtin_id == 26 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
     if builtin_id == 27 { emit_builtin_syscall6_into(nc); return }
@@ -9939,6 +10135,65 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
     let done_target = (*nc).code.len
     nc_patch_u32_le(nc, done_jmp + 1, done_target - (done_jmp + 5))
     nc_core_store_rax_to_temp(nc, dst)
+    true
+}
+
+// Reuse the checked allocator/handle ABI, but temporarily select the Box pool.
+// The aggregate heap cursor and region-GC domain are restored before returning.
+fn nc_core_emit_box_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_count: i64) -> bool with Mut, Panic, Div {
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_box_heap_base())
+    nc_emit_test_rax_rax(nc)
+    let initialized = (*nc).code.len
+    nc_emit_jnz_rel32(nc)
+    nc_emit_mov_rax_imm(nc, 9)
+    nc_emit_mov_rdi_imm(nc, 0)
+    nc_emit_mov_reg_imm(nc, 6, nc_heap_arena_bytes())
+    nc_emit_mov_reg_imm(nc, 2, 3)
+    nc_emit_mov_r10_imm32(nc, 34)
+    nc_emit_mov_r8_imm32(nc, -1)
+    nc_emit_mov_r9_imm32(nc, 0)
+    nc_emit_syscall(nc)
+    nc_emit_mov_reg_reg(nc, 2, 0)
+    nc_emit_mov_reg_imm(nc, 3, -4095)
+    nc_emit_cmp_rax_rbx(nc)
+    nc_emit_setae_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let mmap_failed = (*nc).code.len
+    nc_emit_jnz_rel32(nc)
+    nc_emit_mov_reg_reg(nc, 0, 2)
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_box_heap_base())
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_box_heap_cursor())
+    nc_emit_mov_reg_imm(nc, 1, nc_heap_arena_bytes())
+    nc_emit_add_reg_reg(nc, 0, 1)
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_box_heap_limit())
+    nc_patch_u32_le(nc, initialized + 2, (*nc).code.len - (initialized + 6))
+
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_base())
+    nc_emit_push_rax(nc)
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
+    nc_emit_push_rax(nc)
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_limit())
+    nc_emit_push_rax(nc)
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_box_heap_base())
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_base())
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_box_heap_cursor())
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_box_heap_limit())
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_limit())
+    if !nc_core_emit_alloc_into(nc, dst, type_tag, elem_count) { return false }
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_box_heap_cursor())
+    nc_emit_pop_rax(nc)
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_limit())
+    nc_emit_pop_rax(nc)
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
+    nc_emit_pop_rax(nc)
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_base())
+    let done = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+    nc_core_emit_alloc_fail_into(nc, mmap_failed, 181, native_v2_alloc_size_from_tag(type_tag) + native_v2_object_header_size())
+    nc_patch_u32_le(nc, done + 1, (*nc).code.len - (done + 5))
     true
 }
 
@@ -11356,8 +11611,11 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             // -1 default, which we clamp to 0 so non-array objects keep flags = 0.
             let alloc_elem_count_raw = IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize]
             let alloc_elem_count = if alloc_elem_count_raw < 0 { 0 } else { alloc_elem_count_raw }
-            if !nc_core_emit_alloc_into(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize], alloc_elem_count) {
-                return false
+            let alloc_slot = ir_region_slot_r((*func).region, i)
+            if IR_A_IMM_FLAGS[alloc_slot as usize] == IR_BOX_ALLOC_FLAG {
+                if !nc_core_emit_box_alloc_into(nc, IR_A_DST[alloc_slot as usize], IR_A_IMM_I64[alloc_slot as usize], alloc_elem_count) { return false }
+            } else {
+                if !nc_core_emit_alloc_into(nc, IR_A_DST[alloc_slot as usize], IR_A_IMM_I64[alloc_slot as usize], alloc_elem_count) { return false }
             }
         } else if instr_op == IrOpcode::IrCall && NC_RGN_BARRIER_SLOT >= 0
             && IR_A_FN_ID[(ir_region_slot_r((*func).region, (i))) as usize] == NC_RGN_BARRIER_SLOT
@@ -13418,6 +13676,45 @@ fn emit_entry_trampoline_split_into(nc: &! NativeCompiler, main_fn_index: i64) w
 //   - array-repeat `[V; N]` (instr_count == 0, bss_size > elem): rep stosq/stosb
 // f64 values are stored as IEEE-754 bit patterns (same path as i64 words).
 // hyper_algebra_kind: 1=u8, 17=i8 (both physical size 1), 8=qword.
+fn nc_emit_global_zero_stores_into(nc: &! NativeCompiler, base: i64, bytes: i64) with Mut, Panic, Div {
+    if bytes <= 0 { return }
+    nc_emit_mov_rax_imm(nc, 0)
+    nc_emit_mov_rdi_imm(nc, base)
+    nc_emit_mov_reg_imm(nc, 1, bytes)
+    nc_emit_byte(nc, 0xf3)
+    nc_emit_byte(nc, 0xaa)
+}
+
+// The ELF writer maps this BSS as private anonymous zero-backed memory.
+// Keep this zero operation at its original initializer position. Only discard
+// complete interior pages; partial pages and a denied syscall use stores.
+fn nc_emit_global_zero_bss_into(nc: &! NativeCompiler, base: i64, bytes: i64) with Mut, Panic, Div {
+    let first = ((base + 4095) / 4096) * 4096
+    let last = ((base + bytes) / 4096) * 4096
+    if last <= first {
+        nc_emit_global_zero_stores_into(nc, base, bytes)
+        return
+    }
+    nc_emit_mov_rax_imm(nc, 28)
+    nc_emit_mov_rdi_imm(nc, first)
+    nc_emit_mov_reg_imm(nc, 6, last - first)
+    nc_emit_mov_reg_imm(nc, 2, 4)
+    nc_emit_syscall(nc)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x88)
+    let failed = (*nc).code.len
+    nc_emit_u32_le(nc, 0)
+    nc_emit_global_zero_stores_into(nc, base, first - base)
+    nc_emit_global_zero_stores_into(nc, last, base + bytes - last)
+    nc_emit_byte(nc, 0xe9)
+    let done = (*nc).code.len
+    nc_emit_u32_le(nc, 0)
+    nc_patch_u32_le(nc, failed, (*nc).code.len - failed - 4)
+    nc_emit_global_zero_stores_into(nc, base, bytes)
+    nc_patch_u32_le(nc, done, (*nc).code.len - done - 4)
+}
+
 fn emit_global_var_inits_into(nc: &! NativeCompiler, module: &IrModule) with Mut, Panic, Div {
     var fi: i64 = 0
     while fi < (*module).fn_count {
@@ -13479,6 +13776,8 @@ fn emit_global_var_inits_into(nc: &! NativeCompiler, module: &IrModule) with Mut
                 nc_emit_mov_rax_imm(nc, init_val)
                 nc_emit_mov_reg_imm(nc, 3, abs_addr)
                 nc_emit_store_rax_mem_rbx_disp32(nc, 0)
+            } else if total > 0 && init_val == 0 {
+                nc_emit_global_zero_bss_into(nc, abs_addr, total)
             } else if total > 0 {
                 // Array-repeat fill. DF=0 (ascending) is the process default.
                 // rax = fill value, rdi = dest, rcx = element count.
@@ -14787,6 +15086,9 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     if target_spec.matrix_mode < 0 {
         return 10
     }
+    if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_MACOS() {
+        return compile_arm64_macos_to_file(module, output_path)
+    }
     if !(target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_LINUX()) {
         return 11
     }
@@ -14799,6 +15101,7 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     var compile_ok = true
     var bss_count: i64 = 0
     var empty_stub_refusal_count: i64 = 0
+    let arena_trace_enabled = str_len(read_env("SOUNIO_NV2_ARENA_TRACE")) > 0
     while fi < (*module).fn_count {
         // Per-function Box-arena window: everything compile_ir_function_v2_
         // from_ir_into Box-allocates (machine-IR scratch, reg lists, …) is
@@ -14811,7 +15114,7 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         // whole module (measured: +11.5 GiB VmSize during this loop on the
         // eisa_evm merged compile).
         let cg_arena_mark = __arena_mark()
-        if str_len(read_env("SOUNIO_NV2_ARENA_TRACE")) > 0 && fi % 25 == 0 {
+        if arena_trace_enabled && fi % 25 == 0 {
             print("nv2_arena_cursor ")
             print_int(cg_arena_mark)
             print("\n")

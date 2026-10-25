@@ -420,6 +420,7 @@ var RESOLVE_TY: i64 = 0
 var RESOLVE_TY_HASH: i64 = 0
 var LEX_ERROR_LINE: i64 = 0
 var LEX_ERROR_KIND: i64 = 0
+var LEX_ERROR_BYTE: i64 = 0
 var MATCH_SCRUT_TY: i64 = 0
 var MATCH_SCRUT_HASH: i64 = 0
 
@@ -1453,6 +1454,44 @@ fn bss_alloc_aligned(bytes: i64) -> i64 with Mut, Panic, Div {
     let aligned = (bytes + 7) / 8 * 8
     let off = GL_BSS_SIZE
     GL_BSS_SIZE = GL_BSS_SIZE + aligned
+    return off
+}
+
+// Per-function pool for the BSS copies of by-value aggregate arguments
+// (materialize_aggregate_expr_a64). Each use used to get its own unique BSS
+// block, so a 2 MiB struct passed at N call sites cost N * 2 MiB. Measured on
+// main.sio for aarch64-macos: 655 such temporaries = 1.37 GB, of which only
+// ~0.22 GB is ever live at once (one per statement). A Mach-O image has to fit
+// between its code and the dyld shared region (~2.0 GB), so this matters there.
+//
+// Scope: macOS only (TARGET_OS == 2). A temporary lives from its
+// materialization until the end of the statement that created it;
+// compile_stmt_a64 releases the slots it took on exit, so sibling statements
+// reuse them and an enclosing statement's live temporaries are never touched.
+// Slot k is reused only when it is large enough, otherwise a fresh block is
+// taken and recorded, so the pool never hands out too little storage.
+var A64_TMP_ADDR: [i64; 64] = [0; 64]
+var A64_TMP_SIZE: [i64; 64] = [0; 64]
+var A64_TMP_N: i64 = 0
+var A64_TMP_CUR: i64 = 0
+var A64_TMP_FN: i64 = -1
+
+fn a64_stmt_temp_alloc(bytes: i64) -> i64 with Mut, Panic, Div {
+    if TARGET_OS != 2 { return bss_alloc_aligned(bytes) }
+    if A64_TMP_FN != CURRENT_FN {
+        A64_TMP_FN = CURRENT_FN
+        A64_TMP_N = 0
+        A64_TMP_CUR = 0
+    }
+    let need = (bytes + 7) / 8 * 8
+    let k = A64_TMP_CUR
+    if k >= 64 { return bss_alloc_aligned(bytes) }
+    A64_TMP_CUR = k + 1
+    if k < A64_TMP_N && A64_TMP_SIZE[k as usize] >= need { return A64_TMP_ADDR[k as usize] }
+    let off = bss_alloc_aligned(bytes)
+    A64_TMP_ADDR[k as usize] = off
+    A64_TMP_SIZE[k as usize] = need
+    if k >= A64_TMP_N { A64_TMP_N = k + 1 }
     return off
 }
 
@@ -2634,6 +2673,14 @@ var FN_FRAME_SIZE: [i64; 65536] = [0; 65536]
 var LAST_EXPR_IS_CLOSURE: i64 = 0
 // Scratch globals for float scientific exponent (avoids extra locals in compile_primary)
 var FL_SCI_SCRATCH: i64 = 0
+var FLT_BITS_OK: i64 = 0
+var FLT_DEN: [i64; 48] = [0; 48]
+var FLT_SRC: [i64; 48] = [0; 48]
+var FLT_REM: [i64; 48] = [0; 48]
+var FLT_DLEN: i64 = 1
+var FLT_SLEN: i64 = 1
+var FLT_RLEN: i64 = 1
+var FLT_BITS: i64 = 0
 var FL_SCI_NEG: i64 = 0
 var FL_FRAC_DIGITS: i64 = 0
 var LAST_STMT_HAS_VALUE: i64 = 0
@@ -3421,7 +3468,11 @@ fn copy_array_into_local_slot_a64(slot: i64, ty_hash: i64) with Mut, Panic, Div 
 
 fn bind_struct_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic, Div {
     let si = st_find(ty_hash)
-    if si < 0 && knowledge_hash_is(ty_hash) == false {
+    let nslots = struct_like_nslots(ty_hash)
+    // Synthetic tuples have a layout-cache row but no nominal struct-table
+    // entry. Retaining the return pointer aliases the callee's reusable return
+    // buffer: a second fresh_reg() rewrites the first tuple's register number.
+    if nslots <= 0 {
         let slot = var_add(ns, ne)
         if slot < 0 { return }
         emit_store_var_a64(slot)
@@ -3430,7 +3481,6 @@ fn bind_struct_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic
         VAR_TY_HASH[vix as usize] = ty_hash
         return
     }
-    let nslots = struct_like_nslots(ty_hash)
     var base: i64 = 0
     var spill_addr: i64 = 0
     let spill = nslots * 8 >= local_bss_spill_bytes()
@@ -3444,7 +3494,7 @@ fn bind_struct_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic
     NEXT_SLOT = NEXT_SLOT + 1
     var linear_flag: i64 = 0
     var affine_flag: i64 = 0
-    if knowledge_hash_is(ty_hash) == false { linear_flag = ST_LINEAR[si as usize]; affine_flag = ST_AFFINE[si as usize] }
+    if si >= 0 { linear_flag = ST_LINEAR[si as usize]; affine_flag = ST_AFFINE[si as usize] }
     var out_ty: i64 = 0
     if knowledge_hash_is(ty_hash) == false { out_ty = 6 }
     if local_meta_add(ns, ne, ptr_slot, 0, 0, 8, 0, 0, 0, 0, linear_flag, 0, out_ty, ty_hash) < 0 {
@@ -3559,7 +3609,7 @@ fn materialize_aggregate_expr_a64() with Mut, Panic, Div {
         let nslots = struct_like_nslots(EXPR_TY_HASH)
         if nslots <= 0 { return }
         if nslots * 8 >= local_bss_spill_bytes() {
-            let tmp_addr = GL_BSS_BASE + bss_alloc_aligned(nslots * 8)
+            let tmp_addr = GL_BSS_BASE + a64_stmt_temp_alloc(nslots * 8)
             em32(0xAA0003EA)  // mov x10, x0
             emit_image_addr_a64(tmp_addr)
             emit_copy_agg_to_ptr_a64(EXPR_TY, EXPR_TY_HASH)
@@ -4122,7 +4172,13 @@ fn arr_ty_hash_for_elem_type(alen: i64, esiz: i64, elem_ty: i64, elem_hash: i64)
         // literal from a function declared to return a 2-D array was reported as
         // a type mismatch.
         if elem_ty == 8 { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
-        if elem_ty == 0 && st_find(elem_hash) >= 0 { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
+        // Preserve nominal identity even before the struct declaration is
+        // visited. The forward-type pass resolves this side-table entry later.
+        // ARM64 needs forward nominal identity for its by-value array copies.
+        // The x86 summary/monomorphization ABI still uses the legacy scalar
+        // encoding for unresolved generic elements; promoting those entries
+        // here changes its generated struct-return layout (rc139 at runtime).
+        if elem_ty == 0 && (TARGET_ARCH == 1 || st_find(elem_hash) >= 0) { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
         // Knowledge<T> element (kind=7, negative hash): preserve the element hash in
         // the side table so `arr[i]` recovers its Knowledge type. The by-value
         // struct-array machinery already sizes it via struct_like_nslots()==3.
@@ -4823,6 +4879,7 @@ fn struct_like_nslots(ty_hash: i64) -> i64 with Panic, Div, Mut {
     if ty_hash >= 1000000007 && ty_hash < 1000001007 { return ty_hash - 1000000007 }
     let si = st_find(ty_hash)
     if si >= 0 { return st_total_size(si) / 8 }
+    if tup_cache_lookup(ty_hash) >= 0 { return tup_total_slots_true(ty_hash) }
     return 0
 }
 
@@ -5510,6 +5567,368 @@ fn tc_linear_violation(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     return 0
 }
 
+// Chemical reaction literals: compile-time mass and charge balance.
+//
+//     reaction sulfate_reduction {
+//         4 H2(aq) + H+ + SO4-- -> HS- + 4 H2O
+//     }
+//
+// reaction is a soft keyword, following the unit precedent: it is recognised
+// in Pass 0a, where the balance is checked, and skipped by code generation.
+// Everywhere else it remains an ordinary identifier.
+//
+// E188 checks mass balance element by element.
+// E189 checks total charge balance.
+// E190 rejects unknown element symbols instead of treating them as zero.
+//
+// This deliberately checks conservation only. It does not claim that a
+// reaction is thermodynamically favourable, elementary, or kinetically sound.
+//
+// Species syntax:
+//   * optional positive integer stoichiometric coefficient
+//   * one- or two-letter element symbols with numeric subscripts
+//   * optional phase suffix (aq), (g), (s), or (l)
+//   * parenthesised multiplier groups, e.g. Ca(OH)2
+//   * trailing + / - repeated for charge multiplicity
+//
+// A + or - is charge iff it is lexically adjacent to the preceding token.
+var RX_LEFT:     [i64; 128] = [0; 128]
+var RX_RIGHT:    [i64; 128] = [0; 128]
+var RX_SYM_TS:   [i64; 128] = [0; 128]
+var RX_SYM_TE:   [i64; 128] = [0; 128]
+var RX_CHARGE_L: i64 = 0
+var RX_CHARGE_R: i64 = 0
+var RX_ERR:      i64 = 0
+
+fn rx_print_src(ps: i64, pe: i64) with IO, Mut, Panic {
+    var i: i64 = ps
+    while i < pe { print_char(sb(i)); i = i + 1 }
+}
+
+fn rx_elem_id_1(p: i64) -> i64 with Panic, Mut {
+    if src_match(p, 1, "H") { return 1 }
+    if src_match(p, 1, "B") { return 5 }
+    if src_match(p, 1, "C") { return 6 }
+    if src_match(p, 1, "N") { return 7 }
+    if src_match(p, 1, "O") { return 8 }
+    if src_match(p, 1, "F") { return 9 }
+    if src_match(p, 1, "P") { return 15 }
+    if src_match(p, 1, "S") { return 16 }
+    if src_match(p, 1, "K") { return 19 }
+    if src_match(p, 1, "V") { return 23 }
+    if src_match(p, 1, "Y") { return 39 }
+    if src_match(p, 1, "I") { return 53 }
+    if src_match(p, 1, "W") { return 74 }
+    if src_match(p, 1, "U") { return 92 }
+    return 0
+}
+
+fn rx_elem_id_2a(p: i64) -> i64 with Panic, Mut {
+    if src_match(p, 2, "He") { return 2 }
+    if src_match(p, 2, "Li") { return 3 }
+    if src_match(p, 2, "Be") { return 4 }
+    if src_match(p, 2, "Ne") { return 10 }
+    if src_match(p, 2, "Na") { return 11 }
+    if src_match(p, 2, "Mg") { return 12 }
+    if src_match(p, 2, "Al") { return 13 }
+    if src_match(p, 2, "Si") { return 14 }
+    if src_match(p, 2, "Cl") { return 17 }
+    if src_match(p, 2, "Ar") { return 18 }
+    if src_match(p, 2, "Ca") { return 20 }
+    if src_match(p, 2, "Sc") { return 21 }
+    if src_match(p, 2, "Ti") { return 22 }
+    if src_match(p, 2, "Cr") { return 24 }
+    if src_match(p, 2, "Mn") { return 25 }
+    if src_match(p, 2, "Fe") { return 26 }
+    if src_match(p, 2, "Co") { return 27 }
+    if src_match(p, 2, "Ni") { return 28 }
+    if src_match(p, 2, "Cu") { return 29 }
+    if src_match(p, 2, "Zn") { return 30 }
+    if src_match(p, 2, "Ga") { return 31 }
+    if src_match(p, 2, "Ge") { return 32 }
+    if src_match(p, 2, "As") { return 33 }
+    if src_match(p, 2, "Se") { return 34 }
+    if src_match(p, 2, "Br") { return 35 }
+    if src_match(p, 2, "Kr") { return 36 }
+    if src_match(p, 2, "Rb") { return 37 }
+    if src_match(p, 2, "Sr") { return 38 }
+    if src_match(p, 2, "Zr") { return 40 }
+    if src_match(p, 2, "Nb") { return 41 }
+    if src_match(p, 2, "Mo") { return 42 }
+    if src_match(p, 2, "Tc") { return 43 }
+    if src_match(p, 2, "Ru") { return 44 }
+    if src_match(p, 2, "Rh") { return 45 }
+    if src_match(p, 2, "Pd") { return 46 }
+    if src_match(p, 2, "Ag") { return 47 }
+    if src_match(p, 2, "Cd") { return 48 }
+    if src_match(p, 2, "In") { return 49 }
+    if src_match(p, 2, "Sn") { return 50 }
+    if src_match(p, 2, "Sb") { return 51 }
+    if src_match(p, 2, "Te") { return 52 }
+    if src_match(p, 2, "Xe") { return 54 }
+    if src_match(p, 2, "Cs") { return 55 }
+    if src_match(p, 2, "Ba") { return 56 }
+    if src_match(p, 2, "La") { return 57 }
+    if src_match(p, 2, "Ce") { return 58 }
+    if src_match(p, 2, "Pr") { return 59 }
+    if src_match(p, 2, "Nd") { return 60 }
+    if src_match(p, 2, "Pm") { return 61 }
+    if src_match(p, 2, "Sm") { return 62 }
+    if src_match(p, 2, "Eu") { return 63 }
+    if src_match(p, 2, "Gd") { return 64 }
+    return 0
+}
+
+fn rx_elem_id_2b(p: i64) -> i64 with Panic, Mut {
+    if src_match(p, 2, "Tb") { return 65 }
+    if src_match(p, 2, "Dy") { return 66 }
+    if src_match(p, 2, "Ho") { return 67 }
+    if src_match(p, 2, "Er") { return 68 }
+    if src_match(p, 2, "Tm") { return 69 }
+    if src_match(p, 2, "Yb") { return 70 }
+    if src_match(p, 2, "Lu") { return 71 }
+    if src_match(p, 2, "Hf") { return 72 }
+    if src_match(p, 2, "Ta") { return 73 }
+    if src_match(p, 2, "Re") { return 75 }
+    if src_match(p, 2, "Os") { return 76 }
+    if src_match(p, 2, "Ir") { return 77 }
+    if src_match(p, 2, "Pt") { return 78 }
+    if src_match(p, 2, "Au") { return 79 }
+    if src_match(p, 2, "Hg") { return 80 }
+    if src_match(p, 2, "Tl") { return 81 }
+    if src_match(p, 2, "Pb") { return 82 }
+    if src_match(p, 2, "Bi") { return 83 }
+    if src_match(p, 2, "Po") { return 84 }
+    if src_match(p, 2, "At") { return 85 }
+    if src_match(p, 2, "Rn") { return 86 }
+    if src_match(p, 2, "Fr") { return 87 }
+    if src_match(p, 2, "Ra") { return 88 }
+    if src_match(p, 2, "Ac") { return 89 }
+    if src_match(p, 2, "Th") { return 90 }
+    if src_match(p, 2, "Pa") { return 91 }
+    if src_match(p, 2, "Np") { return 93 }
+    if src_match(p, 2, "Pu") { return 94 }
+    if src_match(p, 2, "Am") { return 95 }
+    if src_match(p, 2, "Cm") { return 96 }
+    if src_match(p, 2, "Bk") { return 97 }
+    if src_match(p, 2, "Cf") { return 98 }
+    if src_match(p, 2, "Es") { return 99 }
+    if src_match(p, 2, "Fm") { return 100 }
+    if src_match(p, 2, "Md") { return 101 }
+    if src_match(p, 2, "No") { return 102 }
+    if src_match(p, 2, "Lr") { return 103 }
+    if src_match(p, 2, "Rf") { return 104 }
+    if src_match(p, 2, "Db") { return 105 }
+    if src_match(p, 2, "Sg") { return 106 }
+    if src_match(p, 2, "Bh") { return 107 }
+    if src_match(p, 2, "Hs") { return 108 }
+    if src_match(p, 2, "Mt") { return 109 }
+    if src_match(p, 2, "Ds") { return 110 }
+    if src_match(p, 2, "Rg") { return 111 }
+    if src_match(p, 2, "Cn") { return 112 }
+    if src_match(p, 2, "Nh") { return 113 }
+    if src_match(p, 2, "Fl") { return 114 }
+    if src_match(p, 2, "Mc") { return 115 }
+    if src_match(p, 2, "Lv") { return 116 }
+    if src_match(p, 2, "Ts") { return 117 }
+    if src_match(p, 2, "Og") { return 118 }
+    return 0
+}
+
+fn rx_elem_id(p: i64, l: i64) -> i64 with Panic, Mut {
+    if l == 1 { return rx_elem_id_1(p) }
+    if l == 2 {
+        let a = rx_elem_id_2a(p)
+        if a != 0 { return a }
+        return rx_elem_id_2b(p)
+    }
+    return 0
+}
+
+fn rx_unknown_element(tok: i64, name_tok: i64, ps: i64, pe: i64) with IO, Mut, Panic {
+    print("error[E190]: unknown element symbol `")
+    rx_print_src(ps, pe)
+    print("` in reaction `")
+    rx_print_src(TS[name_tok as usize], TE[name_tok as usize])
+    print("` at ")
+    print_src_loc_for_tok(tok)
+    print(" (bundle line ")
+    print_int(TL[tok as usize])
+    print(")\n")
+    tc_mark_failed()
+    RX_ERR = 1
+}
+
+fn rx_add_formula(ps: i64, pe: i64, mult: i64, side: i64, tok: i64, name_tok: i64) with IO, Mut, Panic {
+    var i: i64 = ps
+    while i < pe {
+        let c0 = sb(i)
+        if c0 < 65 || c0 > 90 {
+            var bad_end: i64 = i + 1
+            while bad_end < pe && sb(bad_end) >= 97 && sb(bad_end) <= 122 { bad_end = bad_end + 1 }
+            rx_unknown_element(tok, name_tok, i, bad_end)
+            return
+        }
+        var slen: i64 = 1
+        if i + 1 < pe && sb(i + 1) >= 97 && sb(i + 1) <= 122 { slen = 2 }
+        let id = rx_elem_id(i, slen)
+        if id == 0 {
+            rx_unknown_element(tok, name_tok, i, i + slen)
+            return
+        }
+        var j: i64 = i + slen
+        var cnt: i64 = 0
+        var saw: i64 = 0
+        while j < pe && sb(j) >= 48 && sb(j) <= 57 {
+            cnt = cnt * 10 + (sb(j) - 48)
+            saw = 1
+            j = j + 1
+        }
+        if saw == 0 { cnt = 1 }
+        if RX_SYM_TE[id as usize] == 0 {
+            RX_SYM_TS[id as usize] = i
+            RX_SYM_TE[id as usize] = i + slen
+        }
+        if side == 0 { RX_LEFT[id as usize] = RX_LEFT[id as usize] + cnt * mult }
+        else { RX_RIGHT[id as usize] = RX_RIGHT[id as usize] + cnt * mult }
+        i = j
+    }
+}
+
+fn rx_parse_side(start: i64, stop: i64, side: i64, name_tok: i64) with IO, Mut, Panic {
+    var p: i64 = start
+    while p < stop {
+        var coeff: i64 = 1
+        if TK[p as usize] == 4 {
+            coeff = TV[p as usize]
+            if coeff < 1 {
+                tc_linear_violation(p, "reaction stoichiometric coefficient must be a positive integer")
+                RX_ERR = 1
+                return
+            }
+            p = p + 1
+        }
+        if p >= stop || TK[p as usize] != 3 {
+            tc_linear_violation(p, "expected a chemical species in reaction body")
+            RX_ERR = 1
+            return
+        }
+        rx_add_formula(TS[p as usize], TE[p as usize], coeff, side, p, name_tok)
+        if RX_ERR == 1 { return }
+        p = p + 1
+        while p + 2 < stop && TK[p as usize] == 6 && TK[(p + 1) as usize] == 3 && TK[(p + 2) as usize] == 7 {
+            let gs = TS[(p + 1) as usize]
+            let ge = TE[(p + 1) as usize]
+            var gmult: i64 = 1
+            var after: i64 = p + 3
+            if after < stop && TK[after as usize] == 4 { gmult = TV[after as usize]; after = after + 1 }
+            let is_phase = (gmult == 1) && (src_match(gs, ge - gs, "aq") || src_match(gs, ge - gs, "g") || src_match(gs, ge - gs, "s") || src_match(gs, ge - gs, "l"))
+            if is_phase == false {
+                rx_add_formula(gs, ge, coeff * gmult, side, p + 1, name_tok)
+                if RX_ERR == 1 { return }
+            }
+            p = after
+        }
+        var chg: i64 = 0
+        while p < stop && TS[p as usize] == TE[(p - 1) as usize] && (TK[p as usize] == 17 || TK[p as usize] == 18 || TK[p as usize] == 74) {
+            if TK[p as usize] == 17 { chg = chg + 1 }
+            if TK[p as usize] == 74 { chg = chg + 2 }
+            if TK[p as usize] == 18 { chg = chg - 1 }
+            p = p + 1
+        }
+        if side == 0 { RX_CHARGE_L = RX_CHARGE_L + coeff * chg }
+        else { RX_CHARGE_R = RX_CHARGE_R + coeff * chg }
+        if p < stop {
+            if TK[p as usize] == 17 { p = p + 1 }
+            else {
+                tc_linear_violation(p, "expected `+` between species in reaction body")
+                RX_ERR = 1
+                return
+            }
+        }
+    }
+}
+
+fn rx_check_decl(kw: i64) -> i64 with IO, Mut, Panic {
+    let name_tok = kw + 1
+    let body = kw + 3
+    var depth: i64 = 1
+    var close: i64 = 0 - 1
+    var arrow: i64 = 0 - 1
+    var q: i64 = body
+    while q < TC {
+        if TK[q as usize] == 8 { depth = depth + 1 }
+        if TK[q as usize] == 9 {
+            depth = depth - 1
+            if depth == 0 { close = q; break }
+        }
+        if TK[q as usize] == 10 && depth == 1 && arrow < 0 { arrow = q }
+        q = q + 1
+    }
+    if close < 0 {
+        tc_linear_violation(kw, "unterminated `reaction` declaration")
+        return TC
+    }
+    if arrow < 0 {
+        tc_linear_violation(kw, "reaction body needs `->` separating reactants from products")
+        return close + 1
+    }
+    var i: i64 = 0
+    while i < 128 {
+        RX_LEFT[i as usize] = 0
+        RX_RIGHT[i as usize] = 0
+        RX_SYM_TS[i as usize] = 0
+        RX_SYM_TE[i as usize] = 0
+        i = i + 1
+    }
+    RX_CHARGE_L = 0
+    RX_CHARGE_R = 0
+    RX_ERR = 0
+    rx_parse_side(body, arrow, 0, name_tok)
+    if RX_ERR == 1 { return close + 1 }
+    rx_parse_side(arrow + 1, close, 1, name_tok)
+    if RX_ERR == 1 { return close + 1 }
+    i = 1
+    while i < 128 {
+        if RX_LEFT[i as usize] != RX_RIGHT[i as usize] {
+            print("error[E188]: reaction `")
+            rx_print_src(TS[name_tok as usize], TE[name_tok as usize])
+            print("` does not balance for element ")
+            rx_print_src(RX_SYM_TS[i as usize], RX_SYM_TE[i as usize])
+            print(" at ")
+            print_src_loc_for_tok(name_tok)
+            print(" (bundle line ")
+            print_int(TL[name_tok as usize])
+            print(")\n")
+            print("  = note: element ")
+            rx_print_src(RX_SYM_TS[i as usize], RX_SYM_TE[i as usize])
+            print(": left ")
+            print_int(RX_LEFT[i as usize])
+            print(", right ")
+            print_int(RX_RIGHT[i as usize])
+            print("\n")
+            tc_mark_failed()
+        }
+        i = i + 1
+    }
+    if RX_CHARGE_L != RX_CHARGE_R {
+        print("error[E189]: reaction `")
+        rx_print_src(TS[name_tok as usize], TE[name_tok as usize])
+        print("` does not balance in charge at ")
+        print_src_loc_for_tok(name_tok)
+        print(" (bundle line ")
+        print_int(TL[name_tok as usize])
+        print(")\n")
+        print("  = note: charge left ")
+        print_int(RX_CHARGE_L)
+        print(", right ")
+        print_int(RX_CHARGE_R)
+        print("\n")
+        tc_mark_failed()
+    }
+    return close + 1
+}
+
 fn tc_arity_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     print("error: ")
     print(msg)
@@ -5724,6 +6143,17 @@ fn tc_rust_macro(tok: i64) with IO, Mut, Panic {
     tc_mark_failed()
 }
 
+// A parameter's name token: an identifier, `kernel` (TK=79), or `var`
+// (TK=12, the binding keyword, which Madaros accepts as a name) when a `:`
+// follows. Without the `var` case, `fn f(var: f64)` registered no parameter,
+// and every use of it read as 0 (tests/run-pass/rapamycin_epistemic_pbpk.sio:
+// rp3_fdiff_h's absolute step was 0).
+fn tk_is_param_name(p: i64) -> bool with Panic {
+    let k = TK[p as usize]
+    if k == 3 || k == 79 { return true }
+    return k == 12 && TK[(p + 1) as usize] == 43
+}
+
 fn scan_fn_param_type(fi: i64, arg_idx: i64) with IO, Mut, Panic, Div {
     SCAN_TY = 0
     SCAN_TY_HASH = 0
@@ -5734,7 +6164,7 @@ fn scan_fn_param_type(fi: i64, arg_idx: i64) with IO, Mut, Panic, Div {
     q = q + 1
     var idx: i64 = 0
     while TK[q as usize] != 7 && TK[q as usize] != 0 {
-        if TK[q as usize] == 3 || TK[q as usize] == 79 {
+        if tk_is_param_name(q) {
             q = q + 1
             if TK[q as usize] == 43 {
                 q = q + 1
@@ -6127,6 +6557,10 @@ fn tc_wrong_arity_hard(tok: i64, expected: i64, got: i64) -> i64 with IO, Mut, P
     print_int(expected)
     print(" got ")
     print_int(got)
+    // Name the module: the bare line number was ambiguous across a bundle of
+    // ~80 modules, which made a name-only fn_find mis-resolution hard to locate.
+    print(" at ")
+    print_src_loc_for_tok(tok)
     print("\n")
     tc_mark_failed()
     // Honor a wrong-arity call even inside an imported function body. The
@@ -6352,13 +6786,13 @@ fn stmt_is_deref_field_array_store(p0: i64) -> bool with Panic, Mut {
 
 // (*<complex-expr>).field[idx] = expr — indexed field store through a deref whose base is an
 // arbitrary parenthesized expression (e.g. (*(*c).w).data[i]). Discriminated from the
-// simple-name form by TK[p0+2]==6 (the inner is itself parenthesized). Paren-matches the
+// simple-name form by matching the whole outer dereference. The inner base may
+// start with a name (`(*lo.big).regs[i]`) as well as another parenthesis. Paren-matches the
 // outer ( to locate .field[ ... ] = . Handled by compile_deref_complex_field_array_store_x86,
 // which evaluates the base with compile_or (so any nesting works).
 fn stmt_is_deref_complex_field_array_store(p0: i64) -> bool with Panic, Mut {
     if TK[p0 as usize] != 6 { return false }        // (
     if TK[(p0 + 1) as usize] != 19 { return false } // *
-    if TK[(p0 + 2) as usize] != 6 { return false }  // ( — parenthesized (complex) inner base
     var p = p0 + 1
     var pdepth: i64 = 1
     while p < TC && pdepth > 0 {
@@ -6440,6 +6874,27 @@ fn stmt_is_deref_field_field_array_store(p0: i64) -> bool with Panic, Mut {
 // Discriminated from the already-handled shapes by requiring BOTH an index in the chain
 // and a trailing `. ident` immediately before the `=` (the handled forms end in `]` or
 // contain no index at all), so this predicate is disjoint from all of them.
+// A bracket after a borrowed identifier is an element borrow unless its own
+// top-level contents contain a range. Previously every &array[index] entered
+// the slice parser, which consumed past ']' and could produce a corrupt AST
+// reference in the native compiler rather than a diagnostic that stopped emit.
+fn borrow_bracket_has_range(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 41 { return false }
+    var bracket: i64 = 1
+    var paren: i64 = 0
+    var p = p0 + 1
+    while p < TC && bracket > 0 {
+        let token = TK[p as usize]
+        if token == 41 { bracket = bracket + 1 }
+        if token == 42 { bracket = bracket - 1 }
+        if token == 6 { paren = paren + 1 }
+        if token == 7 { paren = paren - 1 }
+        if bracket == 1 && paren == 0 && (token == 63 || token == 64) { return true }
+        p = p + 1
+    }
+    false
+}
+
 fn stmt_is_deref_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
     if TK[p0 as usize] != 6 { return false }        // (
     if TK[(p0 + 1) as usize] != 19 { return false } // *
@@ -6447,10 +6902,12 @@ fn stmt_is_deref_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
     if TK[(p0 + 3) as usize] != 7 { return false }  // )
     var p = p0 + 4
     var saw_index: i64 = 0
+    var fields: i64 = 0
     while p < TC {
         if TK[p as usize] == 50 {                   // . field
             if TK[(p + 1) as usize] != 3 { return false }
             p = p + 2
+            fields = fields + 1
             continue
         }
         if TK[p as usize] == 41 {                   // [ … ]
@@ -6465,7 +6922,11 @@ fn stmt_is_deref_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
             continue
         }
         if TK[p as usize] == 16 {                   // =
-            if saw_index == 0 { return false }
+            // Without an index, three or more field hops: `(*c).a.b.c = v`. One and
+            // two hops have their own handlers, dispatched earlier; three fell to the
+            // generic path and lost the store (self-hosted/check/mod.sio:876-882,
+            // 918, 935, 948, 969: the ontology kernel's counts and profile flags).
+            if saw_index == 0 && fields < 3 { return false }
             if p < p0 + 6 { return false }
             // Two terminal forms: `. field =` stores into a field, `] =` stores into an
             // array ELEMENT. The element form is the one ir/opt_cleanup.sio uses for its
@@ -6499,10 +6960,12 @@ fn stmt_is_ident_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
     if TK[(p0 + 1) as usize] != 50 { return false } // must start with `. field`, not `[`
     var p = p0 + 1
     var saw_index: i64 = 0
+    var fields: i64 = 0
     while p < TC {
         if TK[p as usize] == 50 {                   // . field
             if TK[(p + 1) as usize] != 3 { return false }
             p = p + 2
+            fields = fields + 1
             continue
         }
         if TK[p as usize] == 41 {                   // [ … ]
@@ -6517,7 +6980,10 @@ fn stmt_is_ident_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
             continue
         }
         if TK[p as usize] == 16 {                   // =
-            if saw_index == 0 { return false }
+            // As the deref twin: three or more field hops with no index
+            // (`s.builder.func.abi = abi`, self-hosted/hlir/lower.sio:524-1993) had no
+            // handler and lost the store.
+            if saw_index == 0 && fields < 3 { return false }
             if p < p0 + 3 { return false }
             // Same two terminal forms as the deref twin: `. field =` (field of an element)
             // and `] =` (the element itself).
@@ -6541,12 +7007,25 @@ fn stmt_is_ident_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
 // this predicate accepts the whole chain grammar rather than a single shape.
 // Base address: load the root, add the inner field offsets (inline), then LOAD the pointer
 // stored in the final inner field — that is the deref the `(* )` spells.
+// `(*(*name).field…)<chain>`: the same root spelled with an explicit inner deref,
+// `(*(*lo).struct_layouts).count = n` (self-hosted/ir/lower.sio:4989, 5002, 5013,
+// 5574, 7107). It had no handler and lost the store.
+fn deref_inner_root_explicit(p0: i64) -> bool with Panic, Mut {
+    return TK[p0 as usize] == 6 && TK[(p0 + 1) as usize] == 19 && TK[(p0 + 2) as usize] == 6
+        && TK[(p0 + 3) as usize] == 19 && TK[(p0 + 4) as usize] == 3 && TK[(p0 + 5) as usize] == 7
+        && TK[(p0 + 6) as usize] == 50
+}
+
 fn stmt_is_deref_inner_root_store(p0: i64) -> bool with Panic, Mut {
     if TK[p0 as usize] != 6 { return false }        // (
     if TK[(p0 + 1) as usize] != 19 { return false } // *
-    if TK[(p0 + 2) as usize] != 3 { return false }  // simple-name root
-    if TK[(p0 + 3) as usize] != 50 { return false } // `.` — NOT the (*name) forms
     var p = p0 + 3
+    if deref_inner_root_explicit(p0) {
+        p = p0 + 6
+    } else {
+        if TK[(p0 + 2) as usize] != 3 { return false }  // simple-name root
+        if TK[(p0 + 3) as usize] != 50 { return false } // `.` — NOT the (*name) forms
+    }
     while p < TC && TK[p as usize] == 50 && TK[(p + 1) as usize] == 3 {
         p = p + 2
     }
@@ -7023,7 +7502,7 @@ fn fnsig_from_decl_name_tok(name_tok: i64) -> i64 with IO, Mut, Panic, Div {
     if TK[p as usize] == 6 {
         p = p + 1
         while TK[p as usize] != 7 && TK[p as usize] != 0 {
-            if TK[p as usize] == 3 || TK[p as usize] == 79 {
+            if tk_is_param_name(p) {
                 p = p + 1
                 if TK[p as usize] == 43 {
                     p = p + 1
@@ -7357,6 +7836,9 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
         let elem_ty = type_name_kind(ens, ene)
         var elem_hash: i64 = 0
         if elem_ty == 6 || elem_ty == 7 { elem_hash = gl_name_hash(ens, ene) }
+        if TARGET_ARCH == 1 && elem_ty == 0 && tok_is_unsigned_int_name(p) == 0 {
+            elem_hash = gl_name_hash(ens, ene)
+        }
         SCAN_TY = 8
         if src_match(ens, ene - ens, "i8") {
             SCAN_TY_ESIZ = 1
@@ -8222,6 +8704,15 @@ fn lex_all() with IO, Mut, Panic, Div {
             if src_match(s, l, "None") { k = 58 }
             if src_match(s, l, "Ok") { k = 59 }
             if src_match(s, l, "Err") { k = 60 }
+            // `Act::None`: a user enum's variant, not Option's None. As a keyword
+            // it broke the match arm (`Act::None => input,` compiled `input`
+            // and then `,` as an expression). `Option::None`/`Result::Ok` keep
+            // the keyword, which is how lean_single implements them.
+            if k >= 57 && k <= 60 && TC >= 2 && TK[(TC - 1) as usize] == 51 && TK[(TC - 2) as usize] == 3 {
+                let pq = TS[(TC - 2) as usize]
+                let pl = TE[(TC - 2) as usize] - pq
+                if !src_match(pq, pl, "Option") && !src_match(pq, pl, "Result") { k = 3 }
+            }
             TK[TC as usize] = k; TS[TC as usize] = s; TE[TC as usize] = p; TL[TC as usize] = cur_line; TC = TC + 1; continue
         }
         // Two-char operators
@@ -8315,9 +8806,81 @@ fn lex_all() with IO, Mut, Panic, Div {
             LEX_ERROR_LINE = cur_line
             LEX_ERROR_KIND = 1
         }
+        // An ASCII byte that no rule above consumes. It used to be skipped,
+        // which changed the program instead of refusing it: `1 $ 2` printed
+        // 1, and a character literal vanished, so `[' '; 120]` filled with 0
+        // and `let c = 'b'` read the identifier `b`. lean_single has no
+        // character literals (Madaros does; its source uses none), so they
+        // are refused. `'` before an identifier with no closing quote is a
+        // lifetime (`&'static`) and is still skipped. So is `@`, the unit
+        // annotation of a type (`v: f64@L`, stdlib/darwin_pbpk): lean_single
+        // has no units and drops the annotation, which loses a check but not
+        // a value.
+        if c > 32 && c < 128 && c != 64 && LEX_ERROR_LINE == 0 {
+            if c == 39 {
+                var is_char_lit: i64 = 0
+                if p + 2 < SRC_LEN && sb(p + 1) != 92 && sb(p + 2) == 39 { is_char_lit = 1 }
+                if p + 1 < SRC_LEN && sb(p + 1) == 92 {
+                    var q: i64 = p + 2
+                    while q < SRC_LEN && q < p + 6 && sb(q) != 39 && sb(q) != 10 { q = q + 1 }
+                    if q < SRC_LEN && sb(q) == 39 { is_char_lit = 1 }
+                }
+                // A lifetime is `'` and an identifier with no quote after it.
+                // Anything else is refused: a quoted run such as `'ab'` used to
+                // drop both quotes and read the identifier `ab`, and a `'` before
+                // no identifier (`''`, `'12'`, the close of `'a b'`) vanished.
+                var lt_end: i64 = p + 1
+                let lt_c0 = if p + 1 < SRC_LEN { sb(p + 1) } else { 0 }
+                let lt_start = (lt_c0 >= 65 && lt_c0 <= 90) || (lt_c0 >= 97 && lt_c0 <= 122) || lt_c0 == 95
+                if lt_start {
+                    while lt_end < SRC_LEN && ((sb(lt_end) >= 65 && sb(lt_end) <= 90) || (sb(lt_end) >= 97 && sb(lt_end) <= 122) || (sb(lt_end) >= 48 && sb(lt_end) <= 57) || sb(lt_end) == 95) { lt_end = lt_end + 1 }
+                    if lt_end < SRC_LEN && sb(lt_end) == 39 { is_char_lit = 1 }
+                }
+                if is_char_lit == 1 {
+                    LEX_ERROR_LINE = cur_line
+                    LEX_ERROR_KIND = 3
+                } else if !lt_start {
+                    LEX_ERROR_LINE = cur_line
+                    LEX_ERROR_KIND = 4
+                    LEX_ERROR_BYTE = c
+                }
+            } else {
+                LEX_ERROR_LINE = cur_line
+                LEX_ERROR_KIND = 4
+                LEX_ERROR_BYTE = c
+            }
+        }
         p = p + 1
     }
     TK[TC as usize] = 0; TL[TC as usize] = cur_line; TC = TC + 1
+    lex_enum_variant_names()
+}
+
+// A variant of a user enum may be called None, Some, Ok or Err. The lexer makes
+// those words keywords (TK 57-60), so `enum Act { None, Neg }` declared no
+// variant named None and `Act::None` (made an identifier in lex_all) named
+// nothing. Inside an enum body, a keyword in variant position is a name.
+fn lex_enum_variant_names() with Mut, Panic {
+    var i: i64 = 0
+    while i + 2 < TC {
+        if TK[i as usize] == 47 && TK[(i + 1) as usize] == 3 && TK[(i + 2) as usize] == 8 {
+            var j: i64 = i + 3
+            var depth: i64 = 1
+            var at_variant: i64 = 1
+            while j < TC && depth > 0 {
+                let k = TK[j as usize]
+                if depth == 1 && at_variant == 1 && k >= 57 && k <= 60 { TK[j as usize] = 3 }
+                if k == 8 || k == 6 || k == 41 { depth = depth + 1 }
+                if k == 9 || k == 7 || k == 42 { depth = depth - 1 }
+                at_variant = 0
+                if depth == 1 && k == 28 { at_variant = 1 }
+                j = j + 1
+            }
+            i = j
+        } else {
+            i = i + 1
+        }
+    }
 }
 
 // ─── Variable lookup ───
@@ -9688,6 +10251,21 @@ fn ep_before_body_close() -> bool {
     return EP < CURRENT_BODY_CLOSE
 }
 
+// From just past a `[`, move EP to just past the `]` that closes it. The local
+// `[V; N]` initializer used to scan to the FIRST `]`, which inside
+// `[m.v[1]; 4]` is the index's: parsing resumed at `; 4]` and the stray `]`
+// was compiled as a statement that loads 0.
+fn skip_past_matching_bracket() with Mut, Panic {
+    var depth: i64 = 0
+    while ep_before_body_close() && TK[EP as usize] != 0 {
+        let k = TK[EP as usize]
+        if k == 42 && depth == 0 { EP = EP + 1; return }
+        if k == 41 || k == 6 || k == 8 { depth = depth + 1 }
+        if (k == 42 || k == 7 || k == 9) && depth > 0 { depth = depth - 1 }
+        EP = EP + 1
+    }
+}
+
 // ─── Emit helpers ───
 // mov rax, [rbp - 8*slot]
 fn emit_load_var(slot: i64) with Mut { em(0x48); em(0x8b); em(0x85); em32(0 - slot * 8) }
@@ -10629,6 +11207,46 @@ fn emit_global_agg_repeat_fill_x86(gi: i64) with Mut, Panic, Div {
     em(0x75); em(0xf0)                                             // jnz loop (-16)
 }
 
+// Only used for an ELF anonymous BSS range whose initializer must write zero.
+// Partial pages use stores so adjacent globals are never discarded.
+fn emit_global_zero_stores_x86(base: i64, bytes: i64) with Mut, Panic, Div {
+    if bytes <= 0 { return }
+    em(0x31); em(0xc0)
+    em(0x48); em(0xbf); em64(base)
+    em(0x48); em(0xb9); em64(bytes)
+    em(0xf3); em(0xaa)
+}
+
+fn emit_global_zero_bss_x86(base: i64, bytes: i64) with Mut, Panic, Div {
+    let first = ((base + 4095) / 4096) * 4096
+    let last = ((base + bytes) / 4096) * 4096
+    if last <= first {
+        emit_global_zero_stores_x86(base, bytes)
+        return
+    }
+    // Linux MADV_DONTNEED on private anonymous BSS restores zero pages at the
+    // SAME initializer position, including writes from earlier initializers.
+    // It neither unmaps the addresses nor changes capacity or object lifetime.
+    em(0xb8); em32(28)
+    em(0x48); em(0xbf); em64(first)
+    em(0x48); em(0xbe); em64(last - first)
+    em(0xba); em32(4)
+    em(0x0f); em(0x05)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x88)
+    let failed = CL
+    em32(0)
+    emit_global_zero_stores_x86(base, first - base)
+    emit_global_zero_stores_x86(last, base + bytes - last)
+    em(0xe9)
+    let done = CL
+    em32(0)
+    patch32(failed, CL)
+    // Seccomp, unsupported kernels, etc.: preserve the original zero writes.
+    emit_global_zero_stores_x86(base, bytes)
+    patch32(done, CL)
+}
+
 fn emit_global_inits_x86() with IO, Mut, Panic, Div {
     emit_global_agg_slots_x86()
     var p: i64 = 0
@@ -10721,6 +11339,7 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
                     // Array repeat initializer: [V; N]
                     if gi_arr >= 0 {
                         p = p + 1                              // skip [
+                        let repeat_zero = TK[p as usize] == 4 && TV[p as usize] == 0 && TK[(p + 1) as usize] == 27
                         EP = p
                         compile_or()                           // value V in rax
                         p = EP
@@ -10732,6 +11351,8 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
                         let alen = GL[(gi_arr * 4 + 3) as usize]
                         if GL_AGG_NSL[gi_arr as usize] > 0 {
                             emit_global_agg_repeat_fill_x86(gi_arr)
+                        } else if alen > 0 && repeat_zero {
+                            emit_global_zero_bss_x86(base, alen * esiz)
                         } else if alen > 0 {
                             em(0x48); em(0xbf); em64(base)         // mov rdi, base
                             em(0x48); em(0xb9); em64(alen)         // mov rcx, alen
@@ -11180,9 +11801,10 @@ fn stabilize_return_agg_x86(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
 }
 
 // ─── Emit print("string") ───
-fn emit_print(tok: i64) with IO, Mut, Panic, Div {
-    let ss = TS[tok as usize] + 1
-    let se = TE[tok as usize] - 1
+// Print source bytes ss..se of the string literal at tok, decoding escapes.
+// braces == 1 is a piece of a format string: `{{` and `}}` print one brace
+// (compile_format_print).
+fn emit_print_src(tok: i64, ss: i64, se: i64, braces: i64) with IO, Mut, Panic, Div {
     var slen: i64 = 0
     var zi: i64 = 0
     while zi < 256 { SQW[zi as usize] = 0; zi = zi + 1 }
@@ -11190,7 +11812,9 @@ fn emit_print(tok: i64) with IO, Mut, Panic, Div {
     while si < se {
         let c = sb(si)
         var byte: i64 = c
-        if c == 92 && si + 1 < se {
+        if braces == 1 && (c == 123 || c == 125) && si + 1 < se && sb(si + 1) == c {
+            si = si + 2
+        } else if c == 92 && si + 1 < se {
             let c2 = sb(si + 1)
             if c2 == 120 && si + 3 < se {
                 let h1 = sb(si + 2)
@@ -11244,6 +11868,10 @@ fn emit_print(tok: i64) with IO, Mut, Panic, Div {
     em(0xba); em32(slen)
     em(0x0f); em(0x05)
     em(0x48); em(0x81); em(0xc4); em32(nq * 8)
+}
+
+fn emit_print(tok: i64) with IO, Mut, Panic, Div {
+    emit_print_src(tok, TS[tok as usize] + 1, TE[tok as usize] - 1, 0)
 }
 
 fn emit_print_cstr() with Mut {
@@ -14794,7 +15422,9 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
     let rns = TS[EP as usize]
     let rne = TE[EP as usize]
     EP = EP + 1
-    if TK[EP as usize] == 41 {
+    let borrow_index_vi = var_find_idx(rns, rne)
+    let borrow_is_seq = borrow_index_vi >= 0 && VAR_TY[borrow_index_vi as usize] == 12
+    if TK[EP as usize] == 41 && (borrow_is_seq || borrow_bracket_has_range(EP)) {
         // &seq[i] single-element borrow on a Seq receiver: the element value (for a
         // struct inner that value is a heap pointer to the materialized struct, i.e.
         // already &Inner). Returns a reference to the inner type. Handled before the
@@ -15256,6 +15886,719 @@ fn tc_reject_rust_macro_at(p0: i64) -> bool with IO, Mut, Panic {
     return true
 }
 
+
+fn flt_pow5(n: i64) -> i64 with Mut {
+    var p: i64 = 1
+    var i: i64 = 0
+    while i < n {
+        p = p * 5
+        i = i + 1
+    }
+    p
+}
+fn flt_pow10(n: i64) -> i64 with Mut {
+    var p: i64 = 1
+    var i: i64 = 0
+    while i < n {
+        p = p * 10
+        i = i + 1
+    }
+    p
+}
+fn flt_pow2(n: i64) -> i64 with Mut {
+    var p: i64 = 1
+    var i: i64 = 0
+    while i < n {
+        p = p * 2
+        i = i + 1
+    }
+    p
+}
+fn flt_small_bits(q: i64) -> i64 with Mut, Div {
+    if q == 0 { return 0 }
+    var n = q
+    var width: i64 = 0
+    while n > 0 {
+        n = n / 2
+        width = width + 1
+    }
+    var mant = q
+    var i = width
+    while i < 53 {
+        mant = mant * 2
+        i = i + 1
+    }
+    let field = (width - 1) + 1023
+    let frac = mant - 4503599627370496
+    field * 4503599627370496 + frac
+}
+fn flt_sig_bits(sig: i64, exp10: i64) -> i64 with Mut, Div, Panic {
+    if sig == 0 { return 0 }
+    if exp10 >= 0 {
+        let p = flt_pow10(exp10)
+        if p > 0 && sig <= 9223372036854775807 / p {
+            let q = sig * p
+            if q < 9007199254740992 { return flt_small_bits(q) }
+        }
+    } else {
+        let p = flt_pow10(0 - exp10)
+        if p > 0 && sig % p == 0 {
+            let q = sig / p
+            if q < 9007199254740992 { return flt_small_bits(q) }
+        }
+    }
+    var num: i64 = sig
+    var den: i64 = 1
+    var bin_exp: i64 = exp10
+    if exp10 >= 0 {
+        let p5 = flt_pow5(exp10)
+        if p5 <= 0 || sig > 9223372036854775807 / p5 { return 0 - 1 }
+        num = sig * p5
+    } else {
+        den = flt_pow5(0 - exp10)
+    }
+    var den_bits: i64 = 0
+    var t = den
+    while t > 1 {
+        t = t / 2
+        den_bits = den_bits + 1
+    }
+    let shift = 80 + den_bits
+    var qbit: [i64; 256] = [0; 256]
+    var nq: i64 = 0
+    var rem: i64 = 0
+    var num_bits: i64 = 0
+    t = num
+    while t > 0 {
+        t = t / 2
+        num_bits = num_bits + 1
+    }
+    if num_bits + shift >= 256 { return 0 - 1 }
+    var i: i64 = num_bits - 1
+    while i >= 0 {
+        let bit = (num / flt_pow2(i)) % 2
+        rem = rem * 2 + bit
+        if rem >= den {
+            rem = rem - den
+            qbit[nq as usize] = 1
+        } else {
+            qbit[nq as usize] = 0
+        }
+        nq = nq + 1
+        i = i - 1
+    }
+    i = 0
+    while i < shift {
+        rem = rem * 2
+        if rem >= den {
+            rem = rem - den
+            qbit[nq as usize] = 1
+        } else {
+            qbit[nq as usize] = 0
+        }
+        nq = nq + 1
+        i = i + 1
+    }
+    var top: i64 = 0
+    while top < nq && qbit[top as usize] == 0 { top = top + 1 }
+    if top == nq { return 0 }
+    var mant: i64 = 0
+    var k: i64 = 0
+    while k < 53 && top + k < nq {
+        mant = mant * 2 + qbit[(top + k) as usize]
+        k = k + 1
+    }
+    while k < 53 {
+        mant = mant * 2
+        k = k + 1
+    }
+    var round_bit: i64 = 0
+    if top + 53 < nq { round_bit = qbit[(top + 53) as usize] }
+    var sticky: i64 = 0
+    if rem != 0 { sticky = 1 }
+    var s: i64 = top + 54
+    while s < nq {
+        if qbit[s as usize] != 0 { sticky = 1 }
+        s = s + 1
+    }
+    if round_bit == 1 && (sticky == 1 || (mant % 2) == 1) { mant = mant + 1 }
+    var exp_bump: i64 = 0
+    if mant >= 9007199254740992 {
+        mant = mant / 2
+        exp_bump = 1
+    }
+    let exp_unbiased = bin_exp - shift + (nq - top - 1) + exp_bump
+    if exp_unbiased > 1023 { return 9218868437227405312 }
+    if exp_unbiased < -1022 { return 0 }
+    let field = exp_unbiased + 1023
+    let frac = mant - 4503599627370496
+    field * 4503599627370496 + frac
+}
+fn flt_den_clear() with Mut {
+    var i: i64 = 0
+    while i < 48 { FLT_DEN[i as usize] = 0; i = i + 1 }
+    FLT_DLEN = 1
+}
+fn flt_src_clear() with Mut {
+    var i: i64 = 0
+    while i < 48 { FLT_SRC[i as usize] = 0; i = i + 1 }
+    FLT_SLEN = 1
+}
+fn flt_rem_clear() with Mut {
+    var i: i64 = 0
+    while i < 48 { FLT_REM[i as usize] = 0; i = i + 1 }
+    FLT_RLEN = 1
+}
+fn flt_den_set(v: i64) with Mut, Div {
+    flt_den_clear()
+    var x = v
+    var n: i64 = 0
+    while x > 0 {
+        FLT_DEN[n as usize] = x % 1073741824
+        x = x / 1073741824
+        n = n + 1
+    }
+    if n == 0 { n = 1 }
+    FLT_DLEN = n
+}
+fn flt_src_set(v: i64) with Mut, Div {
+    flt_src_clear()
+    var x = v
+    var n: i64 = 0
+    while x > 0 {
+        FLT_SRC[n as usize] = x % 1073741824
+        x = x / 1073741824
+        n = n + 1
+    }
+    if n == 0 { n = 1 }
+    FLT_SLEN = n
+}
+fn flt_den_copy_to_rem() with Mut {
+    var i: i64 = 0
+    while i < 48 { FLT_REM[i as usize] = FLT_DEN[i as usize]; i = i + 1 }
+    FLT_RLEN = FLT_DLEN
+}
+fn flt_rem_mul(m: i64) -> bool with Mut, Div {
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < FLT_RLEN {
+        let v = FLT_REM[i as usize] * m + carry
+        FLT_REM[i as usize] = v % 1073741824
+        carry = v / 1073741824
+        i = i + 1
+    }
+    while carry > 0 {
+        if FLT_RLEN >= 48 { return false }
+        FLT_REM[FLT_RLEN as usize] = carry % 1073741824
+        carry = carry / 1073741824
+        FLT_RLEN = FLT_RLEN + 1
+    }
+    return true
+}
+fn flt_rem_shl15() -> bool with Mut, Div {
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < FLT_RLEN {
+        let v = FLT_REM[i as usize] * 32768 + carry
+        FLT_REM[i as usize] = v % 1073741824
+        carry = v / 1073741824
+        i = i + 1
+    }
+    if carry > 0 {
+        if FLT_RLEN >= 48 { return false }
+        FLT_REM[FLT_RLEN as usize] = carry
+        FLT_RLEN = FLT_RLEN + 1
+    }
+    return true
+}
+fn flt_den_add_rem() -> bool with Mut {
+    var carry: i64 = 0
+    var i: i64 = 0
+    var n = FLT_DLEN
+    if FLT_RLEN > n { n = FLT_RLEN }
+    while i < n || carry > 0 {
+        if i >= 48 { return false }
+        var dv: i64 = 0
+        var rv: i64 = 0
+        if i < FLT_DLEN { dv = FLT_DEN[i as usize] }
+        if i < FLT_RLEN { rv = FLT_REM[i as usize] }
+        let v = dv + rv + carry
+        FLT_DEN[i as usize] = v % 1073741824
+        carry = v / 1073741824
+        i = i + 1
+    }
+    FLT_DLEN = i
+    if FLT_DLEN == 0 { FLT_DLEN = 1 }
+    return true
+}
+fn flt_src_copy_to_rem() with Mut {
+    var i: i64 = 0
+    while i < 48 { FLT_REM[i as usize] = FLT_SRC[i as usize]; i = i + 1 }
+    FLT_RLEN = FLT_SLEN
+}
+fn flt_den_mul_i64(m: i64) -> bool with Mut, Div {
+    if m < 0 { return false }
+    if m < 32768 { return flt_den_mul(m) }
+    var i: i64 = 0
+    while i < 48 { FLT_SRC[i as usize] = FLT_DEN[i as usize]; i = i + 1 }
+    FLT_SLEN = FLT_DLEN
+    flt_den_clear()
+    FLT_DEN[0] = 0
+    var left = m
+    var shifts: i64 = 0
+    while left > 0 {
+        let chunk = left % 32768
+        left = left / 32768
+        flt_src_copy_to_rem()
+        if chunk == 0 {
+            var z: i64 = 0
+            while z < FLT_RLEN { FLT_REM[z as usize] = 0; z = z + 1 }
+        } else {
+            if flt_rem_mul(chunk) == false { return false }
+        }
+        var s: i64 = 0
+        while s < shifts {
+            if flt_rem_shl15() == false { return false }
+            s = s + 1
+        }
+        if flt_den_add_rem() == false { return false }
+        shifts = shifts + 1
+    }
+    return true
+}
+fn flt_den_mul(m: i64) -> bool with Mut, Div {
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < FLT_DLEN {
+        let v = FLT_DEN[i as usize] * m + carry
+        FLT_DEN[i as usize] = v % 1073741824
+        carry = v / 1073741824
+        i = i + 1
+    }
+    while carry > 0 {
+        if FLT_DLEN >= 48 { return false }
+        FLT_DEN[FLT_DLEN as usize] = carry % 1073741824
+        carry = carry / 1073741824
+        FLT_DLEN = FLT_DLEN + 1
+    }
+    return true
+}
+fn flt_src_mul(m: i64) -> bool with Mut, Div {
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < FLT_SLEN {
+        let v = FLT_SRC[i as usize] * m + carry
+        FLT_SRC[i as usize] = v % 1073741824
+        carry = v / 1073741824
+        i = i + 1
+    }
+    while carry > 0 {
+        if FLT_SLEN >= 48 { return false }
+        FLT_SRC[FLT_SLEN as usize] = carry % 1073741824
+        carry = carry / 1073741824
+        FLT_SLEN = FLT_SLEN + 1
+    }
+    return true
+}
+fn flt_src_shl(bits: i64) -> bool with Mut, Div {
+    var left = bits
+    while left >= 30 {
+        if FLT_SLEN >= 47 { return false }
+        var i = FLT_SLEN
+        while i > 0 {
+            FLT_SRC[i as usize] = FLT_SRC[(i - 1) as usize]
+            i = i - 1
+        }
+        FLT_SRC[0] = 0
+        FLT_SLEN = FLT_SLEN + 1
+        left = left - 30
+    }
+    if left == 0 { return true }
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < FLT_SLEN {
+        let v = FLT_SRC[i as usize] * flt_pow2(left) + carry
+        FLT_SRC[i as usize] = v % 1073741824
+        carry = v / 1073741824
+        i = i + 1
+    }
+    if carry > 0 {
+        if FLT_SLEN >= 48 { return false }
+        FLT_SRC[FLT_SLEN as usize] = carry
+        FLT_SLEN = FLT_SLEN + 1
+    }
+    return true
+}
+fn flt_limb_bitlen(which: i64) -> i64 with Mut, Div {
+    var n = if which == 0 { FLT_DLEN } else { FLT_SLEN }
+    var i = n - 1
+    var found: i64 = 0
+    while i > 0 && found == 0 {
+        let limb = if which == 0 { FLT_DEN[i as usize] } else { FLT_SRC[i as usize] }
+        if limb != 0 { found = 1 } else { i = i - 1 }
+    }
+    var v = if which == 0 { FLT_DEN[i as usize] } else { FLT_SRC[i as usize] }
+    var b: i64 = 0
+    while v > 0 { v = v / 2; b = b + 1 }
+    if b == 0 { return 0 }
+    return i * 30 + b
+}
+fn flt_src_bit(i: i64) -> i64 with Mut, Div {
+    let limb = i / 30
+    let off = i % 30
+    return (FLT_SRC[limb as usize] / flt_pow2(off)) % 2
+}
+fn flt_rem_ge_den() -> bool with Mut {
+    var k = FLT_RLEN
+    if FLT_DLEN > k { k = FLT_DLEN }
+    k = k - 1
+    while k > 0 && FLT_REM[k as usize] == FLT_DEN[k as usize] { k = k - 1 }
+    return FLT_REM[k as usize] >= FLT_DEN[k as usize]
+}
+fn flt_rem_sub_den() with Mut {
+    var borrow: i64 = 0
+    var k: i64 = 0
+    while k < FLT_DLEN || borrow > 0 {
+        var dv: i64 = 0
+        if k < FLT_DLEN { dv = FLT_DEN[k as usize] }
+        var rv = FLT_REM[k as usize] - dv - borrow
+        if rv < 0 { rv = rv + 1073741824; borrow = 1 } else { borrow = 0 }
+        FLT_REM[k as usize] = rv
+        k = k + 1
+    }
+}
+fn flt_rem_shl_add(bit: i64) with Mut, Div {
+    var cout = bit
+    var k: i64 = 0
+    while k < FLT_RLEN {
+        let v = FLT_REM[k as usize] * 2 + cout
+        FLT_REM[k as usize] = v % 1073741824
+        cout = v / 1073741824
+        k = k + 1
+    }
+    if cout > 0 {
+        FLT_REM[FLT_RLEN as usize] = cout
+        FLT_RLEN = FLT_RLEN + 1
+    }
+}
+fn flt_wide_bits(sig: i64, exp10: i64) -> i64 with Mut, Div, Panic {
+    if sig == 0 { return 0 }
+    if exp10 > 400 || exp10 < 0 - 400 { return 0 - 1 }
+    var shift: i64 = 0
+    var bin_exp = exp10
+    if exp10 >= 0 {
+        flt_den_set(1)
+        var i: i64 = 0
+        while i < exp10 {
+            if flt_den_mul(5) == false { return 0 - 1 }
+            i = i + 1
+        }
+        if flt_den_mul_i64(sig) == false { return 0 - 1 }
+        var j: i64 = 0
+        while j < 48 { FLT_SRC[j as usize] = FLT_DEN[j as usize]; j = j + 1 }
+        FLT_SLEN = FLT_DLEN
+        flt_den_set(1)
+        shift = 0
+    } else {
+        flt_den_set(1)
+        var e = 0 - exp10
+        var i: i64 = 0
+        while i < e {
+            if flt_den_mul(5) == false { return 0 - 1 }
+            i = i + 1
+        }
+        let den_bits = flt_limb_bitlen(0)
+        shift = den_bits + 60
+        flt_src_set(sig)
+        if flt_src_shl(shift) == false { return 0 - 1 }
+    }
+    flt_rem_clear()
+    let bl = flt_limb_bitlen(1)
+    var idx = bl - 1
+    var seen: i64 = 0
+    var mant: i64 = 0
+    var got: i64 = 0
+    var round_bit: i64 = 0
+    var sticky: i64 = 0
+    var after: i64 = 0
+    while idx >= 0 {
+        flt_rem_shl_add(flt_src_bit(idx))
+        var q: i64 = 0
+        if flt_rem_ge_den() {
+            flt_rem_sub_den()
+            q = 1
+        }
+        if seen == 0 {
+            if q == 1 { seen = 1; mant = 1; got = 1 }
+        } else {
+            after = after + 1
+            if after <= 52 { mant = mant * 2 + q; got = got + 1 }
+            else if after == 53 { round_bit = q }
+            else if q == 1 { sticky = 1 }
+        }
+        idx = idx - 1
+    }
+    var k: i64 = 0
+    while k < FLT_RLEN {
+        if FLT_REM[k as usize] != 0 { sticky = 1 }
+        k = k + 1
+    }
+    if seen == 0 { return 0 }
+    if round_bit == 1 && (sticky == 1 || (mant % 2) == 1) { mant = mant + 1 }
+    var exp_bump: i64 = 0
+    if mant >= 9007199254740992 { mant = mant / 2; exp_bump = 1 }
+    let exp_unbiased = bin_exp + after - shift + exp_bump
+    if exp_unbiased > 1023 { return 9218868437227405312 }
+    if exp_unbiased < 0 - 1022 { return 0 - 1 }
+    while got < 53 { mant = mant * 2; got = got + 1 }
+    let field = exp_unbiased + 1023
+    let frac = mant - 4503599627370496
+    return field * 4503599627370496 + frac
+}
+fn flt_fill_bits(int_part: i64, frac: i64, denom_in: i64, exp: i64) with Mut, Div, Panic {
+    FLT_BITS_OK = 0
+    FLT_BITS = 0
+    var denom = denom_in
+    if denom <= 0 { denom = 1 }
+    var d: i64 = 0
+    var den = denom
+    while den > 1 {
+        if den % 10 != 0 { return }
+        den = den / 10
+        d = d + 1
+    }
+    let exp10 = exp - d
+    if int_part < 0 || frac < 0 { return }
+    if int_part > 0 && denom > 9223372036854775807 / int_part { return }
+    let sig = int_part * denom + frac
+    if sig < 0 { return }
+    var bits: i64 = 0 - 1
+    if exp10 <= 22 && exp10 >= 0 - 22 {
+        bits = flt_sig_bits(sig, exp10)
+    }
+    if bits < 0 {
+        bits = flt_wide_bits(sig, exp10)
+    }
+    if bits < 0 { return }
+    FLT_BITS = bits
+    FLT_BITS_OK = 1
+}
+
+// A token that starts no expression reaches the last arm of compile_primary
+// (and compile_primary_a64), which consumes it and loads 0. That arm is
+// load-bearing for recovery: on 2026-10-22, 166 files in tests/, stdlib/ and
+// examples/ reached it and still compiled (trailing commas, `[x; N]` with a
+// char literal, `println()`, `var` used as a name, unary `+`), so refusing every
+// such token is a larger change than one arm. These cases, though, can only
+// mean a value the program then silently replaces with 0, and no file in the
+// tree relies on them: the keyword spellings the lexer classifies but that the
+// expression parser has no arm for (`linear` 62, `study` 71, `affine` 73), and
+// a leading-dot float such as `.5`. Refuse those, located, in Madaros's wording.
+// ─── print/println with a format and arguments ───
+// `println("x={} y={}", x, y)`: each `{}` prints the next argument exactly as
+// `print(arg)` would, `{{` and `}}` are literal braces, and the format must be
+// a string literal whose `{}` count equals the number of arguments. With one
+// argument nothing changes (`println("{}")` prints `{}`). The rule is the
+// Madaros rewrite's (self-hosted/parser/exprs.sio, fmt_print_kind); ADR-013.
+// Before it, everything after the format was dropped without a word.
+
+// The `{}` count of the format literal at tok; -3 for a specifier (`{:.1}`),
+// -1 for any other `{` that is neither `{}` nor `{{`, -2 for a `}` that is
+// not `}}`.
+fn fmt_count_placeholders_tok(tok: i64) -> i64 with Mut, Panic {
+    let end = TE[tok as usize] - 1
+    var i: i64 = TS[tok as usize] + 1
+    var n: i64 = 0
+    while i < end {
+        let c = sb(i)
+        if c == 92 {
+            i = i + 2
+        } else if c == 123 {
+            if i + 1 < end && sb(i + 1) == 123 { i = i + 2 }
+            else if i + 1 < end && sb(i + 1) == 125 { n = n + 1; i = i + 2 }
+            else if i + 1 < end && sb(i + 1) == 58 { return 0 - 3 }
+            else { return 0 - 1 }
+        } else if c == 125 {
+            if i + 1 < end && sb(i + 1) == 125 { i = i + 2 } else { return 0 - 2 }
+        } else {
+            i = i + 1
+        }
+    }
+    return n
+}
+
+// The arguments after the format literal at tok: commas at depth 0 before the
+// call's `)`, a trailing comma not counted.
+fn fmt_count_args_tok(tok: i64) -> i64 with Mut, Panic {
+    var p: i64 = tok + 1
+    var depth: i64 = 0
+    var n: i64 = 0
+    while p < TC {
+        let k = TK[p as usize]
+        if depth == 0 && k == 7 { return n }
+        if depth == 0 && k == 28 && TK[(p + 1) as usize] != 7 { n = n + 1 }
+        if k == 6 || k == 41 || k == 8 { depth = depth + 1 }
+        if (k == 7 || k == 42 || k == 9) && depth > 0 { depth = depth - 1 }
+        p = p + 1
+    }
+    return n
+}
+
+fn fmt_report_tok(tok: i64, holes: i64, n_args: i64) with IO, Mut, Panic {
+    print("error: format string at ")
+    print_src_loc_for_tok(tok)
+    if holes == 0 - 1 {
+        print(": `{` starts a placeholder, which is `{}` with nothing inside; write `{{` for a literal `{`\n")
+    } else if holes == 0 - 2 {
+        print(": unmatched `}`; write `}}` for a literal `}`\n")
+    } else if holes == 0 - 3 {
+        print(": format specifiers such as `{:.1}` are not supported; `{}` prints the value exactly as print does\n")
+    } else {
+        print(": ")
+        print_int(holes)
+        print(" `{}` placeholder(s) but ")
+        print_int(n_args)
+        print(" argument(s) after the format; each `{}` takes exactly one argument\n")
+    }
+    tc_mark_failed()
+}
+
+fn fmt_report_nonliteral(tok: i64) with IO, Mut, Panic {
+    print("error: format string at ")
+    print_src_loc_for_tok(tok)
+    print(": with more than one argument, the first argument of print/println is its format and must be a string literal\n")
+    tc_mark_failed()
+}
+
+// Leave EP on the `)` that closes the call whose format literal is at tok.
+fn fmt_skip_to_call_close(tok: i64) with Mut, Panic {
+    EP = tok + 1
+    var depth: i64 = 0
+    while EP < TC {
+        let k = TK[EP as usize]
+        if depth == 0 && k == 7 { return }
+        if k == 6 || k == 41 || k == 8 { depth = depth + 1 }
+        if (k == 7 || k == 42 || k == 9) && depth > 0 { depth = depth - 1 }
+        EP = EP + 1
+    }
+}
+
+// Print the value compile_or just left in rax/xmm0, as println does, without
+// the newline.
+fn fmt_emit_value_x86(name_tok: i64) with IO, Mut, Panic, Div {
+    if EXPR_TY == 13 {
+        tc_error_hard(name_tok, "printing f128 is not implemented; print `x as f64`")
+    }
+    if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+        tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
+    }
+    if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
+        emit_print_f64()
+    } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
+        emit_print_cstr()
+    } else {
+        emit_print_int()
+    }
+}
+
+fn fmt_emit_value_a64(name_tok: i64) with IO, Mut, Panic, Div {
+    if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+        tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
+    }
+    if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
+        emit_print_f64_a64()
+    } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
+        emit_print_cstr_a64()
+    } else {
+        emit_print_int_a64()
+    }
+}
+
+// EP is at the format literal and the next token is `,`. Leaves EP on the
+// call's `)`. a64 == 1 selects the aarch64 emitters.
+fn compile_format_print(name_tok: i64, newline: i64, a64: i64) with IO, Mut, Panic, Div {
+    let ft = EP
+    let holes = fmt_count_placeholders_tok(ft)
+    let n_args = fmt_count_args_tok(ft)
+    if holes < 0 || holes != n_args {
+        fmt_report_tok(ft, holes, n_args)
+        fmt_skip_to_call_close(ft)
+        return
+    }
+    let end = TE[ft as usize] - 1
+    var seg: i64 = TS[ft as usize] + 1
+    var i: i64 = seg
+    EP = ft + 1
+    while i < end {
+        let c = sb(i)
+        if c == 92 {
+            i = i + 2
+        } else if (c == 123 || c == 125) && sb(i + 1) == c {
+            i = i + 2
+        } else if c == 123 {
+            if i > seg {
+                if a64 == 1 { emit_print_a64_src(ft, seg, i, 1) } else { emit_print_src(ft, seg, i, 1) }
+            }
+            EP = EP + 1  // the `,` before this argument
+            if a64 == 1 {
+                compile_or_a64()
+                fmt_emit_value_a64(name_tok)
+            } else {
+                compile_or()
+                fmt_emit_value_x86(name_tok)
+            }
+            i = i + 2
+            seg = i
+        } else {
+            i = i + 1
+        }
+    }
+    if end > seg {
+        if a64 == 1 { emit_print_a64_src(ft, seg, end, 1) } else { emit_print_src(ft, seg, end, 1) }
+    }
+    if TK[EP as usize] == 28 && TK[(EP + 1) as usize] == 7 { EP = EP + 1 }
+    if newline == 1 {
+        if a64 == 1 { emit_print_nl_a64() } else { emit_print_nl() }
+    }
+}
+
+// A one-argument print builtin (print_int, print_f64) given more arguments.
+// The rest used to be dropped: `print_f64(x, 16)` printed 6 decimals, as
+// `print_f64(x)` does. Refused, as Madaros refuses it; EP is left on the `)`.
+// print_f64_n(x, decimals) is the lean_single builtin that takes a precision.
+fn builtin_one_arg_refuse_rest(name_tok: i64) with IO, Mut, Panic {
+    if TK[EP as usize] != 28 { return }
+    var extra: i64 = 0
+    var depth: i64 = 0
+    while EP < TC {
+        let k = TK[EP as usize]
+        if depth == 0 && k == 7 { break }
+        if depth == 0 && k == 28 && TK[(EP + 1) as usize] != 7 { extra = extra + 1 }
+        if k == 6 || k == 41 || k == 8 { depth = depth + 1 }
+        if (k == 7 || k == 42 || k == 9) && depth > 0 { depth = depth - 1 }
+        EP = EP + 1
+    }
+    tc_wrong_arity_hard(name_tok, 1, 1 + extra)
+}
+
+// compile_primary's last arm: the token starts no expression. It used to load
+// 0 and move on, so the program compiled and computed something else: `.5` was
+// 0; `affine`, `linear`, `study` and `var` read as names were 0; `println()`
+// printed 0; `+5` was 0; a block `{ ... }` dropped the rest of the function;
+// an unsupported assignment dropped the write. Each of those now has its own
+// handling or refusal, and a tree-wide sweep with this report in place finds
+// no program that compiles and still reaches it (only compile-fail tests and
+// programs Madaros alone accepts). So every token that gets here is refused.
+fn primary_fallback_report(tok: i64) with IO, Mut, Panic {
+    print("parse error: expected expression at ")
+    print_src_loc_for_tok(tok)
+    print(": found `")
+    var bad_i: i64 = TS[tok as usize]
+    while bad_i < TE[tok as usize] { print_char(SRC[bad_i as usize] as i64); bad_i = bad_i + 1 }
+    print("`\n")
+    tc_mark_failed()
+}
+
 fn compile_primary() with IO, Mut, Panic, Div {
     if tc_reject_rust_macro_at(EP) { }
     LAST_EXPR_IS_CLOSURE = 0
@@ -15318,10 +16661,15 @@ fn compile_primary() with IO, Mut, Panic, Div {
         let fl_denom = TD[EP as usize]
         // Gen 19: _suffix unit annotation (e.g. 9.8_m)
         let flit_uh = TU[EP as usize]
-        // Store exponent info in globals to avoid extra locals shifting compile_primary's frame
-        if TX[EP as usize] >= 0 { FL_SCI_SCRATCH = TX[EP as usize]; FL_SCI_NEG = 0 }
-        else { FL_SCI_SCRATCH = 0 - TX[EP as usize]; FL_SCI_NEG = 1 }
+        let fl_exp = TX[EP as usize]
+        flt_fill_bits(fl_int, fl_frac, fl_denom, fl_exp)
         EP = EP + 1
+        if FLT_BITS_OK == 1 {
+            em(0x48); em(0xb8); em64(FLT_BITS)
+            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)  // movq xmm0, rax
+        } else {
+        if fl_exp >= 0 { FL_SCI_SCRATCH = fl_exp; FL_SCI_NEG = 0 }
+        else { FL_SCI_SCRATCH = 0 - fl_exp; FL_SCI_NEG = 1 }
         // mov rax, int_part; cvtsi2sd xmm0, rax
         em(0x48); em(0xb8); em64(fl_int)
         em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)
@@ -15353,6 +16701,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         // movq rax, xmm0 — store f64 bits in rax
         em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+        }
         EXPR_IS_F64 = 1
         EXPR_TY = 2
         // PR-7: track f64 literal for compile-time predicate checking
@@ -15904,6 +17253,39 @@ fn compile_primary() with IO, Mut, Panic, Div {
         return
     }
     // Parenthesized expression or tuple literal
+    // `{ stmts; tail }` as a value: the tail's value, or unit. A `{` here used
+    // to fall to the last arm and load 0, and the block's statements were then
+    // compiled as if they followed it; its `}` closed the enclosing body, so
+    // everything after a standalone block was dropped (a statement `{ ... }`
+    // silently deleted the rest of the function).
+    if k == 8 {
+        EP = EP + 1
+        LAST_STMT_HAS_VALUE = 0
+        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+        if TK[EP as usize] == 9 { EP = EP + 1 }
+        if LAST_STMT_HAS_VALUE == 1 {
+            EXPR_TY = LAST_STMT_TY
+            EXPR_TY_HASH = LAST_STMT_TY_HASH
+            if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+        } else {
+            em(0x31); em(0xc0)
+            EXPR_IS_F64 = 0
+            EXPR_TY = 5
+            EXPR_TY_HASH = 0
+        }
+        return
+    }
+    // `()`: the unit value, typed as the aarch64 twin types it
+    // (compile_primary_a64). compile_or used to be handed the `)`, which fell to
+    // the last arm below; `return ()` loaded 0 by accident.
+    if k == 6 && TK[(EP + 1) as usize] == 7 {
+        EP = EP + 2
+        em(0x31); em(0xc0)
+        EXPR_IS_F64 = 0
+        EXPR_TY = 5
+        EXPR_TY_HASH = 0
+        return
+    }
     if k == 6 {
         let paren_open = EP
         EP = EP + 1
@@ -16177,7 +17559,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
         return
     }
     // Identifier or function call
-    if k == 3 || k == 79 {
+    // `var` lexes as TK=12 (the binding keyword) but is a legal name, as on
+    // Madaros (contextual, parser/patterns.sio): `let var = 5` binds it. Without
+    // this arm a use of it fell to the last arm and read as 0 -- including
+    // stdlib/epistemic/knightian.sio:309, whose p-box variance was 0.
+    if k == 3 || k == 79 || k == 12 {
         var ns: i64 = TS[EP as usize]
         var ne: i64 = TE[EP as usize]
         EP = EP + 1
@@ -16942,6 +18328,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 7 {
                     emit_print(EP); EP = EP + 1
+                } else if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 28 {
+                    compile_format_print(name_tok, 0, 0)
+                } else if fmt_count_args_tok(EP - 1) > 0 {
+                    fmt_report_nonliteral(EP)
+                    fmt_skip_to_call_close(EP - 1)
                 } else {
                     compile_or()
                     if EXPR_TY == 13 {
@@ -16970,6 +18361,16 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 7 {
                     emit_print(EP)
                     EP = EP + 1
+                    emit_print_nl()
+                } else if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 28 {
+                    compile_format_print(name_tok, 1, 0)
+                } else if fmt_count_args_tok(EP - 1) > 0 {
+                    fmt_report_nonliteral(EP)
+                    fmt_skip_to_call_close(EP - 1)
+                } else if TK[EP as usize] == 7 {
+                    // `println()` prints an empty line, as on Madaros. Without
+                    // this arm the `)` fell to compile_primary's last arm and
+                    // printed `0`.
                     emit_print_nl()
                 } else {
                     compile_or()
@@ -17004,9 +18405,15 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 return
             }
-            // Check for print_int(expr)
-            if src_match(ns, ne - ns, "print_int") {
+            // Check for print_int(expr). print_int, print_f64, print_f64_n and
+            // print_char are builtins only when the program defines no function
+            // of that name, as print/println already were: a user's
+            // `fn print_f64(x: f64, decimals: i64)` was never called, its second
+            // argument was dropped, and the value printed with 6 decimals
+            // (examples/cayley_dickson_*.sio). Madaros calls the user's function.
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_int") {
                 EP = EP + 1; compile_or()
+                builtin_one_arg_refuse_rest(name_tok)
                 // Observation boundary: printing Unobserved<T> is IO that collapses uncertainty
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                     tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
@@ -17019,8 +18426,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 return
             }
             // Check for print_f64(expr)
-            if src_match(ns, ne - ns, "print_f64") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_f64") {
                 EP = EP + 1; compile_or()
+                builtin_one_arg_refuse_rest(name_tok)
                 // Observation boundary: printing Unobserved<T> is IO that collapses uncertainty
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                     tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
@@ -17032,7 +18440,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 return
             }
-            if src_match(ns, ne - ns, "print_f64_n") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_f64_n") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 2, 0)
@@ -17069,7 +18477,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
-            if src_match(ns, ne - ns, "print_char") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_char") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
@@ -21384,13 +22792,25 @@ fn compile_primary() with IO, Mut, Panic, Div {
                             let fl_int = TV[CONST_TOK_IDX[ci as usize] as usize]
                             let fl_frac = TF[CONST_TOK_IDX[ci as usize] as usize]
                             let fl_denom = TD[CONST_TOK_IDX[ci as usize] as usize]
+                            let fl_exp = TX[CONST_TOK_IDX[ci as usize] as usize]
+                            flt_fill_bits(fl_int, fl_frac, fl_denom, fl_exp)
+                            if FLT_BITS_OK == 1 {
+                                em(0x48); em(0xb8); em64(FLT_BITS)
+                                if CONST_NEG[ci as usize] != 0 {
+                                    em(0x48); em(0x0f); em(0xba); em(0xf8); em(63)  // btc rax, 63
+                                }
+                                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)  // movq xmm0, rax
+                                EXPR_TY = 2
+                                EXPR_TY_HASH = 0
+                                EXPR_IS_F64 = 1
+                            } else {
                             var fl_sci: i64 = 0
                             var fl_sci_neg: i64 = 0
-                            if TX[CONST_TOK_IDX[ci as usize] as usize] >= 0 {
-                                fl_sci = TX[CONST_TOK_IDX[ci as usize] as usize]
+                            if fl_exp >= 0 {
+                                fl_sci = fl_exp
                                 fl_sci_neg = 0
                             } else {
-                                fl_sci = 0 - TX[CONST_TOK_IDX[ci as usize] as usize]
+                                fl_sci = 0 - fl_exp
                                 fl_sci_neg = 1
                             }
                             em(0x48); em(0xb8); em64(fl_int)
@@ -21427,6 +22847,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                             EXPR_TY = 2
                             EXPR_TY_HASH = 0
                             EXPR_IS_F64 = 1
+                            }
                         } else {
                             if CONST_FOUND_VAL == 0 { em(0x31); em(0xc0) }
                             else { em(0x48); em(0xb8); em64(CONST_FOUND_VAL) }
@@ -21454,6 +22875,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         return
     }
+    primary_fallback_report(EP)
     EP = EP + 1
     em(0x31); em(0xc0)
     EXPR_IS_F64 = 0
@@ -27235,6 +28657,73 @@ fn compile_field_array_array_store_x86() with IO, Mut, Panic, Div {
     }
 }
 
+fn compile_deref_complex_field_array_store_a64() with IO, Mut, Panic, Div {
+    EP = EP + 2  // skip outer ( *
+    compile_or_a64()  // inner expr -> base pointer in rax
+    let base_ty = EXPR_TY
+    let base_hash = EXPR_TY_HASH
+    if TK[EP as usize] == 7 { EP = EP + 1 }  // skip outer )
+    if type_is_pointer_like(base_ty, base_hash) == false {
+        tc_error(EP, "indexed field store through deref requires pointer base")
+        return
+    }
+    let inner_ty = ptr_hash_inner_ty(base_hash)
+    let inner_hash = ptr_hash_inner_hash(base_hash)
+    if inner_ty != 6 {
+        tc_error(EP, "field access through pointer/ref requires struct pointee")
+        return
+    }
+    let si = st_find(inner_hash)
+    if si < 0 {
+        tc_error(EP, "unknown field access")
+        return
+    }
+    emit_push_a64()  // push base pointer
+    if TK[EP as usize] == 50 { EP = EP + 1 }  // skip .
+    let field_tok = EP
+    let fns = TS[EP as usize]
+    let fne = TE[EP as usize]
+    let fh = gl_name_hash(fns, fne)
+    EP = EP + 1  // skip field name
+    if TK[EP as usize] == 41 { EP = EP + 1 }  // skip [
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(field_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    compile_or_a64()  // index in rax
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // as usize
+    if TK[EP as usize] == 42 { EP = EP + 1 }  // ]
+    if TK[EP as usize] == 16 { EP = EP + 1 }  // =
+    emit_push_a64()  // push index
+    compile_or_a64()  // rhs in rax
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    ST_QUERY_NS = fns
+    ST_QUERY_NE = fne
+    let foff = st_field_offset(si, fh)
+    let fty = st_field_ty(si, fh)
+    let fhash = st_field_hash(si, fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if fty != 8 {
+        tc_error(field_tok, "indexed field store requires array field")
+        emit_pop_x1_a64(); emit_pop_x0_a64()
+        return
+    }
+    if ty_eq(arr_hash_elem_ty(fhash), arr_hash_elem_hash(fhash), rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    materialize_aggregate_array_element_a64(fhash)
+    em32(0xAA0003EA)  // x10 = rhs
+    emit_pop_x1_a64()  // index
+    emit_pop_x0_a64()  // base pointer
+    if foff != 0 { emit_imm64_reg_a64(11, foff); em32(0x8B0B0000) }
+    if arr_hash_esiz(fhash) == 8 {
+        em32(0xF821780A)
+    } else {
+        em32(0x3821680A)
+    }
+}
+
 fn compile_field_array_store_a64() with IO, Mut, Panic, Div {
     let name_tok = EP
     let ns = TS[EP as usize]; let ne = TE[EP as usize]
@@ -27631,7 +29120,13 @@ fn materialize_aggregate_array_element_x86(array_hash: i64) with Mut, Panic, Div
 }
 
 fn materialize_aggregate_array_element_a64(array_hash: i64) with Mut, Panic, Div {
-    let elem_hash = arr_hash_elem_hash(array_hash)
+    // Use the RHS's nominal type when a forward/imported array declaration
+    // carries only an unresolved element kind. Storing the borrowed RHS pointer
+    // makes all entries assigned by one helper alias its reused parameter cell.
+    var elem_hash = arr_hash_elem_hash(array_hash)
+    if elem_hash == 0 && type_is_struct_like(EXPR_TY, EXPR_TY_HASH) {
+        elem_hash = EXPR_TY_HASH
+    }
     if elem_hash == 0 { return }
     let elem_nslots = struct_like_nslots(elem_hash)
     if elem_nslots <= 0 { return }
@@ -28544,12 +30039,18 @@ fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
     var name_tok = EP
     var chain_start = EP + 1
     var root_inner: i64 = 0   // 1 = `(*name.field…)` root: deref of a pointer FIELD
+    var inner_start = EP + 3  // first `.` of the inner field chain
     if TK[EP as usize] == 6 {
         name_tok = EP + 2
         chain_start = EP + 4
-        if TK[(EP + 3) as usize] == 50 {
+        if deref_inner_root_explicit(EP) {
+            // `(*(*name).field…)` is `(*name.field…)` with the root's deref spelled out.
+            name_tok = EP + 4
+            inner_start = EP + 6
+        }
+        if TK[inner_start as usize] == 50 && (inner_start == EP + 6 || TK[(EP + 3) as usize] == 50) {
             root_inner = 1
-            var rp = EP + 3
+            var rp = inner_start
             while rp < TC && TK[rp as usize] == 50 && TK[(rp + 1) as usize] == 3 {
                 rp = rp + 2
             }
@@ -28635,7 +30136,7 @@ fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
     // offsets, then LOAD the pointer stored in the final inner field. That load is the deref
     // the `(* )` spells, and it is what no existing predicate was willing to emit.
     if root_inner == 1 {
-        var ip = name_tok + 1
+        var ip = inner_start
         var inner_off: i64 = 0
         var inner_bad: i64 = 0
         while inner_bad == 0 && TK[ip as usize] == 50 {
@@ -29066,6 +30567,23 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // Skip semicolons
     if k == 27 { EP = EP + 1; return }
 
+    // Skip reaction declarations. Pass 0a performs the balance check; a
+    // reaction declaration emits no runtime code. The keyword remains soft:
+    // only reaction NAME { ... } is treated as a declaration.
+    if k == 3 && EP + 2 < TC && src_match(TS[EP as usize], TE[EP as usize] - TS[EP as usize], "reaction") && TK[(EP + 1) as usize] == 3 && TK[(EP + 2) as usize] == 8 {
+        EP = EP + 2
+        var rx_depth: i64 = 0
+        while EP < TC && TK[EP as usize] != 0 {
+            if TK[EP as usize] == 8 { rx_depth = rx_depth + 1 }
+            if TK[EP as usize] == 9 {
+                rx_depth = rx_depth - 1
+                if rx_depth == 0 { EP = EP + 1; return }
+            }
+            EP = EP + 1
+        }
+        return
+    }
+
     // Skip unit declarations (top-level only; Gen 19)
     // Soft keyword: only treat `unit` as a declaration when followed by an ident
     // (the unit name). `let unit = x` / `unit.w` / `unit + 1` are ordinary ident use.
@@ -29304,8 +30822,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             //  documented remaining gap, so this is no regression for them.)
             EP = EP + 1  // skip [
             let val_ep = EP                       // remember where the fill value V starts
-            while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
-            if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
+            skip_past_matching_bracket()
             let after_ep = EP
             var nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
@@ -32046,7 +33563,17 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     }
 
     // Expression statement
+    let expr_stmt_start = EP
     compile_or()
+    // An assignment whose target matched none of the shapes above. It used to
+    // be compiled as an expression statement: the target was evaluated as a
+    // value, the `=` fell to compile_primary's last arm, and the write was
+    // dropped (`ws[1].text[2] = 77` left the element 0). Refused instead.
+    if TK[EP as usize] == 16 {
+        tc_error_hard(expr_stmt_start, "lean_single cannot compile an assignment to this target; it would have dropped the write")
+        while ep_before_body_close() && TK[EP as usize] != 0 && TL[EP as usize] == TL[expr_stmt_start as usize] { EP = EP + 1 }
+        return
+    }
     LAST_STMT_HAS_VALUE = 1
     LAST_STMT_TY = EXPR_TY
     LAST_STMT_TY_HASH = EXPR_TY_HASH
@@ -34739,6 +36266,16 @@ fn resolve_type_deep(ty: i64, ty_hash: i64) with Mut, Panic, Div {
 }
 
 fn resolve_forward_struct_types() with Mut, Panic, Div {
+    // Array element metadata must survive forward declarations too. Without
+    // this, storing a Name into [Name;N] retained the caller's temporary pointer
+    // instead of making the by-value copy, so later calls rewrote earlier names.
+    var fix_ai: i64 = 0
+    while TARGET_ARCH == 1 && fix_ai < EXT_ARR_COUNT {
+        resolve_type_deep(EXT_ARR_ELEM_TY[fix_ai as usize], EXT_ARR_ELEM_HASH[fix_ai as usize])
+        EXT_ARR_ELEM_TY[fix_ai as usize] = RESOLVE_TY
+        EXT_ARR_ELEM_HASH[fix_ai as usize] = RESOLVE_TY_HASH
+        fix_ai = fix_ai + 1
+    }
     var fix_si: i64 = 0
     while fix_si < ST_COUNT {
         var fix_fi: i64 = 0
@@ -34973,6 +36510,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if pass0a_depth == 0 && TK[p as usize] == 2 {
             tc_error_hard(p, "return outside function body is invalid module item")
             p = p + 1
+            continue
+        }
+        // Chemical reaction declaration: reaction NAME { lhs -> rhs }.
+        // Validate conservation here, alongside the unit declaration pass.
+        if pass0a_depth == 0 && p + 2 < TC && TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "reaction") && TK[(p + 1) as usize] == 3 && TK[(p + 2) as usize] == 8 {
+            p = rx_check_decl(p)
             continue
         }
         // Gen 19: unit NAME;  or  unit NAME = SCALE * BASE_UNIT;
@@ -36556,7 +38099,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             let param_tk = TK[p as usize]
             if param_tk == 7 { break }
             if param_tk == 0 { break }
-            if param_tk == 3 || param_tk == 79 {
+            if tk_is_param_name(p) {
                 let pns = TS[p as usize]
                 let pne = TE[p as usize]
                 if var_find_idx(pns, pne) >= 0 { tc_duplicate_param(p) }
@@ -37805,6 +39348,11 @@ fn write_macho_x86(output: string) -> i64 with IO, Mut, Panic, Div {
 fn emit_syscall_a64() with Mut {
     if TARGET_OS == 2 {
         em32(0xD4001001)  // svc #0x80 (macOS)
+        // Darwin reports a failed syscall with the carry flag set and a POSITIVE errno
+        // in x0; every caller below tests `x0 <= 0` / `x0 < 0` as on Linux (negative
+        // errno). Normalise: carry clear -> keep x0, carry set -> x0 = -x0.
+        em32(0x54000043)  // b.cc +8 (skip the neg)
+        em32(0xCB0003E0)  // neg x0, x0   (sub x0, xzr, x0)
     } else {
         em32(0xD4000001)  // svc #0 (Linux)
     }
@@ -37827,13 +39375,27 @@ fn emit_syscall6_a64(argc: i64) with Mut, Panic, Div {
     if argc >= 6 { em32(0xF94003E4 | ((((argc - 6) * 16) / 8) << 10)) }  // ldr x4  (a5)
     if argc >= 7 { em32(0xF94003E5 | ((((argc - 7) * 16) / 8) << 10)) }  // ldr x5  (a6)
     emit_syscall_a64()
+    if TARGET_OS == 2 {
+        // Darwin fork's child indicator is the second syscall result (x1).
+        em32(0xF1000A1F)
+        let not_fork = CL
+        em32(0x54000001)
+        em32(0xF100001F)
+        let fork_error = CL
+        em32(0x5400000B)
+        em32(0xF100003F)
+        em32(0x9A8013E0) // csel x0,xzr,x0,ne
+        patch_branch_a64(not_fork, CL)
+        patch_branch_a64(fork_error, CL)
+    }
     emit_drop_call_args_a64(argc)
 }
 
 // ─── ARM64 print("string") ───
-fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
-    let ss = TS[tok as usize] + 1
-    let se = TE[tok as usize] - 1
+// Print source bytes ss..se of the string literal at tok, decoding escapes.
+// braces == 1 is a piece of a format string: `{{` and `}}` print one brace
+// (compile_format_print).
+fn emit_print_a64_src(tok: i64, ss: i64, se: i64, braces: i64) with IO, Mut, Panic, Div {
     var slen: i64 = 0
     var zi: i64 = 0
     while zi < 256 { SQW[zi as usize] = 0; zi = zi + 1 }
@@ -37841,7 +39403,9 @@ fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
     while si < se {
         let c = sb(si)
         var byte: i64 = c
-        if c == 92 && si + 1 < se {
+        if braces == 1 && (c == 123 || c == 125) && si + 1 < se && sb(si + 1) == c {
+            si = si + 2
+        } else if c == 92 && si + 1 < se {
             let c2 = sb(si + 1)
             if c2 == 120 && si + 3 < se {
                 let h1 = sb(si + 2)
@@ -37916,6 +39480,10 @@ fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
         em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)  // movz x8, #64 (Linux write)
     }
     emit_syscall_a64()
+}
+
+fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
+    emit_print_a64_src(tok, TS[tok as usize] + 1, TE[tok as usize] - 1, 0)
 }
 
 fn emit_print_cstr_a64() with Mut {
@@ -38403,6 +39971,78 @@ fn emit_read_line_a64() with Mut, Panic, Div {
 }
 
 fn emit_read_file_a64() with Mut, Panic {
+    var env_return_patch: i64 = -1
+    if TARGET_OS == 2 {
+        // io::env uses the procfs NUL-delimited representation. Darwin has no
+        // procfs: synthesize it from the process's argv-adjacent envp instead.
+        // Keep the existing read_file contract (an mmap-backed, zero-filled
+        // buffer, including bytes after the first NUL).
+        let env_path = "/proc/self/environ"
+        var env_miss: [i64; 19] = [0; 19]
+        var env_i: i64 = 0
+        while env_i <= str_len(env_path) {
+            em32(0x39400009 | (env_i << 10))  // ldrb w9, [x0,#i]
+            var env_ch: i64 = 0
+            if env_i < str_len(env_path) { env_ch = str_char_at(env_path, env_i) }
+            em32(0x7100013F | (env_ch << 10)) // cmp w9,#ch
+            env_miss[env_i as usize] = CL
+            em32(0x54000001) // b.ne ordinary_file
+            env_i = env_i + 1
+        }
+        em32(0xD2800000)
+        emit_imm64_reg_a64(1, 0x400001)
+        em32(0xD2800062)
+        emit_imm64_reg_a64(3, 0x1002)
+        emit_imm64_reg_a64(4, -1)
+        em32(0xD2800005)
+        emit_imm64_reg_a64(16, 197)
+        emit_syscall_a64()
+        em32(0xF100001F)
+        let env_map_fail = CL
+        em32(0x5400000D) // b.le allocation_failure
+        em32(0xAA0003EB) // x11 = destination; x0 remains the returned base
+        emit_push_a64() // preserve mmap base across the argc/argv loads
+        emit_load_abs_qword_a64(GL_BSS_BASE - 16)
+        em32(0xAA0003EC) // x12 = argc excluding program name
+        emit_load_abs_qword_a64(GL_BSS_BASE - 8)
+        em32(0x8B0C0C09) // add x9,x0,x12,lsl #3
+        em32(0x91002129) // argv null -> first env pointer
+        // Recover the destination from x11; use x10 for input strings.
+        let env_entry = CL
+        em32(0xF840852A) // ldr x10,[x9],#8
+        let env_done = CL
+        em32(0xB400000A) // cbz x10,done
+        let env_copy = CL
+        em32(0x3840154C) // ldrb w12,[x10],#1
+        em32(0x3800156C) // strb w12,[x11],#1
+        em32(0x7100019F) // cmp w12,#0
+        let env_copy_back = CL
+        em32(0x54000001)
+        patch_branch_a64(env_copy_back, env_copy)
+        let env_next = CL
+        em32(0x14000000)
+        patch_branch_a64(env_next, env_entry)
+        let env_end = CL
+        em32_at(env_done, 0xB400000A | (((env_end - env_done) / 4) << 5))
+        em32(0x3900017F) // final NUL at [x11]
+        emit_pop_x0_a64()
+        env_return_patch = CL
+        em32(0x14000000)
+        patch_branch_a64(env_map_fail, CL)
+        em32(0xD2800020) // exit(1) on allocation failure
+        emit_imm64_reg_a64(16, 1)
+        emit_syscall_a64()
+        env_i = 0
+        while env_i <= str_len(env_path) {
+            patch_branch_a64(env_miss[env_i as usize], CL)
+            env_i = env_i + 1
+        }
+    }
+    emit_read_file_ordinary_a64()
+    if env_return_patch >= 0 { patch_branch_a64(env_return_patch, CL) }
+}
+
+fn emit_read_file_ordinary_a64() with Mut, Panic {
     // x0 = path (C string pointer)
     emit_push_a64()
     if TARGET_OS == 2 {
@@ -39385,9 +41025,15 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         let fl_int = TV[EP as usize]
         let fl_frac = TF[EP as usize]
         let fl_denom = TD[EP as usize]
-        if TX[EP as usize] >= 0 { FL_SCI_SCRATCH = TX[EP as usize]; FL_SCI_NEG = 0 }
-        else { FL_SCI_SCRATCH = 0 - TX[EP as usize]; FL_SCI_NEG = 1 }
+        let fl_exp = TX[EP as usize]
+        flt_fill_bits(fl_int, fl_frac, fl_denom, fl_exp)
         EP = EP + 1
+        if FLT_BITS_OK == 1 {
+            emit_imm64_a64(FLT_BITS)
+            em32(0x9E670000)  // fmov d0, x0
+        } else {
+        if fl_exp >= 0 { FL_SCI_SCRATCH = fl_exp; FL_SCI_NEG = 0 }
+        else { FL_SCI_SCRATCH = 0 - fl_exp; FL_SCI_NEG = 1 }
         emit_imm64_a64(fl_int)
         em32(0x9E620000)  // scvtf d0, x0
         if fl_frac > 0 {
@@ -39415,6 +41061,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             }
         }
         em32(0x9E660000)  // fmov x0, d0
+        }
         EXPR_IS_F64 = 1
         EXPR_TY = 2
         // PR-7: track the f64 literal for compile-time predicate checking.
@@ -39831,8 +41478,39 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         return
     }
     // Parenthesized
+    // `{ stmts; tail }` as a value: see compile_primary.
+    if k == 8 {
+        EP = EP + 1
+        LAST_STMT_HAS_VALUE = 0
+        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+        if TK[EP as usize] == 9 { EP = EP + 1 }
+        if LAST_STMT_HAS_VALUE == 1 {
+            EXPR_TY = LAST_STMT_TY
+            EXPR_TY_HASH = LAST_STMT_TY_HASH
+            if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+        } else {
+            em32(0xD2800000)  // movz x0, #0
+            EXPR_IS_F64 = 0
+            EXPR_TY = 5
+            EXPR_TY_HASH = 0
+        }
+        return
+    }
     if k == 6 {
         EP = EP + 1
+        // Unit literal `()`: nothing to compile. Without this, compile_or_a64 ran on
+        // the `)` and left EXPR_TY at the previous expression's type, so
+        // `return ()` in a unit fn failed "return type does not match function
+        // signature" on every aarch64 target (x86 was unaffected). Mirror the bare
+        // `return` path: x0 = 0, unit type.
+        if TK[EP as usize] == 7 {
+            EP = EP + 1
+            em32(0xD2800000)  // movz x0, #0
+            EXPR_IS_F64 = 0
+            EXPR_TY = 5
+            EXPR_TY_HASH = 0
+            return
+        }
         compile_or_a64()
         if TK[EP as usize] == 28 {
             // Tuple literal `(e0, e1, …, eN)` — a64 port of the x86 twin
@@ -40025,7 +41703,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         let rns = TS[EP as usize]
         let rne = TE[EP as usize]
         EP = EP + 1
-        if TK[EP as usize] == 41 {
+        if TK[EP as usize] == 41 && borrow_bracket_has_range(EP) {
             EP = EP + 1
             let start_slot = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
@@ -40192,7 +41870,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             let lvi_for_box = var_find_idx(rns, rne)
             var lhash_for_box: i64 = 0
             if lvi_for_box >= 0 { lhash_for_box = VAR_TY_HASH[lvi_for_box as usize] }
-            if lalen > 0 || lty == 6 || lty == 8 || (lty == 11 && box_hash_is(lhash_for_box)) { emit_load_var_a64(slot) }
+            // A field borrow through a reference starts from its pointee,
+            // not the local stack cell containing the reference. Taking the
+            // latter's address made &r.items read an unrelated stack word.
+            if lalen > 0 || lty == 6 || lty == 8 || (lty == 10 && TK[EP as usize] == 50) || (lty == 11 && box_hash_is(lhash_for_box)) { emit_load_var_a64(slot) }
             else { emit_lea_var_a64(slot) }
         }
         else {
@@ -40506,7 +42187,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         return
     }
     // Identifier or function call
-    if k == 3 || k == 79 {  // "kernel" lexes as TK=79 (the `kernel fn` GPU keyword), not TK=3; the x86 twin, compile_primary's identifier-dispatch check, already handles `k == 3 || k == 79`. Missing here, any bare use of the identifier "kernel" as a value (e.g. a parameter named kernel passed as a call argument) fell through this dispatch unrecognized on aarch64, leaving EXPR_TY/EXPR_TY_HASH at whatever the previous expression left them.
+    if k == 3 || k == 79 || k == 12 {  // `var` (TK=12) as a name: see compile_primary. "kernel" lexes as TK=79 (the `kernel fn` GPU keyword), not TK=3; the x86 twin, compile_primary's identifier-dispatch check, already handles `k == 3 || k == 79`. Missing here, any bare use of the identifier "kernel" as a value (e.g. a parameter named kernel passed as a call argument) fell through this dispatch unrecognized on aarch64, leaving EXPR_TY/EXPR_TY_HASH at whatever the previous expression left them.
         var ns: i64 = TS[EP as usize]
         var ne: i64 = TE[EP as usize]
         EP = EP + 1
@@ -40774,6 +42455,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1
                 if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 7 { emit_print_a64(EP); EP = EP + 1 }
+                else if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 28 { compile_format_print(name_tok, 0, 1) }
+                else if fmt_count_args_tok(EP - 1) > 0 { fmt_report_nonliteral(EP); fmt_skip_to_call_close(EP - 1) }
                 else {
                     compile_or_a64()
                     // See print's x86-64 twin for rationale (issue #633).
@@ -40798,6 +42481,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     emit_print_a64(EP)
                     EP = EP + 1
                     emit_print_nl_a64()
+                } else if TK[EP as usize] == 5 && TK[(EP + 1) as usize] == 28 {
+                    compile_format_print(name_tok, 1, 1)
+                } else if fmt_count_args_tok(EP - 1) > 0 {
+                    fmt_report_nonliteral(EP)
+                    fmt_skip_to_call_close(EP - 1)
+                } else if TK[EP as usize] == 7 {
+                    emit_print_nl_a64()  // `println()`: see the x86-64 twin
                 } else {
                     compile_or_a64()
                     // Observation boundary: println of Unobserved<T> is IO that collapses uncertainty
@@ -40824,8 +42514,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 return
             }
-            if src_match(ns, ne - ns, "print_int") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_int") {
                 EP = EP + 1; compile_or_a64()
+                builtin_one_arg_refuse_rest(name_tok)
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                     tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
                 }
@@ -40833,7 +42524,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 emit_print_int_a64()
                 em32(0xD2800000); EXPR_IS_F64 = 0; EXPR_TY = 5; return
             }
-            if src_match(ns, ne - ns, "print_char") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_char") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
@@ -40849,8 +42540,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 }
                 EXPR_IS_F64 = 0; EXPR_TY = 5; return
             }
-            if src_match(ns, ne - ns, "print_f64") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_f64") {
                 EP = EP + 1; compile_or_a64()
+                builtin_one_arg_refuse_rest(name_tok)
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                     tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
                 }
@@ -40858,7 +42550,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 emit_print_f64_a64()
                 em32(0xD2800000); EXPR_IS_F64 = 0; EXPR_TY = 5; return
             }
-            if src_match(ns, ne - ns, "print_f64_n") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_f64_n") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 2, 0)
@@ -42937,6 +44629,16 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         let ci = CONST_FOUND_IDX
                         if CONST_TYPE[ci as usize] == 2 && CONST_TOK_IDX[ci as usize] >= 0 {
                             let ct = CONST_TOK_IDX[ci as usize]
+                            flt_fill_bits(TV[ct as usize], TF[ct as usize], TD[ct as usize], TX[ct as usize])
+                            if FLT_BITS_OK == 1 {
+                                emit_imm64_a64(FLT_BITS)
+                                if CONST_NEG[ci as usize] != 0 {
+                                    emit_imm64_reg_a64(1, -9223372036854775808)
+                                    em32(0xCA010000)  // eor x0, x0, x1  sign bit
+                                }
+                                em32(0x9E670000)  // fmov d0, x0
+                                EXPR_TY = 2; EXPR_TY_HASH = 0; EXPR_IS_F64 = 1
+                            } else {
                             emit_imm64_a64(TV[ct as usize])
                             em32(0x9E620000)  // scvtf d0, x0
                             if TF[ct as usize] > 0 {
@@ -42964,6 +44666,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                             if CONST_NEG[ci as usize] != 0 { em32(0x1E614000) }
                             em32(0x9E660000)  // fmov x0, d0
                             EXPR_TY = 2; EXPR_TY_HASH = 0; EXPR_IS_F64 = 1
+                            }
                         } else {
                             emit_imm64_reg_a64(0, CONST_FOUND_VAL)  // x0 = const value
                             EXPR_TY = 1; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
@@ -42977,6 +44680,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         }
         return
     }
+    primary_fallback_report(EP)
     EP = EP + 1
     em32(0xD2800000)
     EXPR_IS_F64 = 0
@@ -43106,7 +44810,13 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 let elem_hash = arr_hash_elem_hash(inner_hash)
                 LAST_ALEN = arr_hash_alen(inner_hash)
                 if esiz == 8 {
-                    em32(0x8B090C00)  // add x0, x0, x9, lsl #3  (element address)
+                    // Aggregate elements are pointer-per-slot, just like the
+                    // x86 #1678 path: borrow the object, not its pointer cell.
+                    if (elem_ty == 6 || elem_ty == 7 || elem_ty == 8) && elem_hash != 0 {
+                        em32(0xF8697800) // ldr x0,[x0,x9,lsl #3]
+                    } else {
+                        em32(0x8B090C00) // add x0,x0,x9,lsl #3
+                    }
                 } else {
                     em32(0x8B090000)  // add x0, x0, x9          (esiz=1 byte)
                 }
@@ -44378,7 +46088,7 @@ fn emit_h_chain_a64(d1: i64, d2: i64, h: i64, sj: i64, sk: i64) -> i64 with IO, 
 // ─── ARM64 additive ───
 fn compile_additive_a64() with IO, Mut, Panic, Div {
     compile_multiplicative_a64()
-    while TK[EP as usize] == 17 || TK[EP as usize] == 18 {
+    while TK[EP as usize] == 17 || TK[EP as usize] == 18 || TK[EP as usize] == 74 {
         let op_tok = EP
         let op = TK[EP as usize]
         let add_left_uns = expr_unsigned_now()
@@ -44438,7 +46148,11 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         // this branch the else path below emits `add x0, x1, x0` — ADDING the two
         // string POINTERS as integers, yielding a garbage address that prints junk.
         // (The str_concat BUILTIN worked; only the `+` OPERATOR was missing this.)
-        if op == 17 && left_ty == 3 && right_ty == 3 {
+        // `++` (token 74) on strings is the same concatenation as `+`; the loop
+        // above never consumed token 74 on this target, so `f("a" ++ g())` was
+        // parsed as three arguments (E006) and `let t = "a" ++ g()` silently
+        // kept only the left operand.
+        if (op == 17 || op == 74) && left_ty == 3 && right_ty == 3 {
             let cc_slot_b = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(cc_slot_b)   // rhs (x0) → slot B
@@ -44450,6 +46164,13 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
             EXPR_IS_F64 = 0
             EXPR_TY = 3
             EXPR_TY_HASH = 0
+            B7_TOP = b7_prev_a
+            continue
+        }
+        if op == 74 {
+            // Array `++` has an x86 lowering (rep movsq) but no a64 one. Falling
+            // through would emit `add x0, x1, x0` over two pointers.
+            tc_error_hard(op_tok, "`++` on non-string operands is not supported on aarch64")
             B7_TOP = b7_prev_a
             continue
         }
@@ -44741,7 +46462,16 @@ fn compile_or_a64() with IO, Mut, Panic, Div {
 }
 
 // ─── ARM64 statement compiler ───
+// Statement scope for the temporary pool above: slots taken while compiling a
+// statement (including nested ones) are released when it ends.
 fn compile_stmt_a64() with IO, Mut, Panic, Div {
+    let pool_saved = A64_TMP_CUR
+    let pool_fn = CURRENT_FN
+    compile_stmt_a64_body()
+    if A64_TMP_FN == pool_fn && CURRENT_FN == pool_fn { A64_TMP_CUR = pool_saved }
+}
+
+fn compile_stmt_a64_body() with IO, Mut, Panic, Div {
     let k = TK[EP as usize]
     LAST_STMT_HAS_VALUE = 0
     // #888: a store through a shared `&T` is refused before any handler runs.
@@ -44904,8 +46634,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         if has_eq == 1 && is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
             EP = EP + 1
             let a64_val_ep = EP
-            while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
-            if TK[EP as usize] == 42 { EP = EP + 1 }
+            skip_past_matching_bracket()
             let a64_after_ep = EP
             var nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
@@ -45651,6 +47380,10 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // (*name).field[idx] = expr  (explicit-deref store into a struct array field)
     if stmt_is_deref_field_array_store(EP) {
         compile_deref_field_array_store_a64()
+        return
+    }
+    if stmt_is_deref_complex_field_array_store(EP) {
+        compile_deref_complex_field_array_store_a64()
         return
     }
     // (*ARRAY_PTR)[idx] = expr
@@ -47117,7 +48850,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
             let param_tk = TK[p as usize]
             if param_tk == 7 { break }
             if param_tk == 0 { break }
-            if param_tk == 3 || param_tk == 79 {
+            if tk_is_param_name(p) {
                 let pns = TS[p as usize]; let pne = TE[p as usize]
                 var pslot: i64 = -1
                 if VAR_COUNT >= local_cap() {
@@ -47544,6 +49277,29 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         em32(0x91002029)  // add x9, x1, #8
         emit_image_addr_reg_a64(10, argv_addr)
         em32(0xF9000149)  // str x9, [x10]
+        // Darwin's initial stack is capped at ~64 MiB. Compiler item walks
+        // require the same 512 MiB virtual reservation as the Linux launcher.
+        // argv remains on the original stack; save it above before switching.
+        emit_imm64_reg_a64(0, 0)
+        emit_imm64_reg_a64(1, 536887296) // 512 MiB + one 16 KiB guard page
+        emit_imm64_reg_a64(2, 3)
+        emit_imm64_reg_a64(3, 0x1002)
+        emit_imm64_reg_a64(4, -1)
+        emit_imm64_reg_a64(5, 0)
+        emit_imm64_reg_a64(16, 197)
+        em32(0xD4001001)
+        em32(0x54000043) // b.cc +8
+        em32(0xD4200000) // mmap failure: do not enter main
+        em32(0xAA0003F3) // mov x19,x0 (mapping base)
+        emit_imm64_reg_a64(1, 16384)
+        emit_imm64_reg_a64(2, 0)
+        emit_imm64_reg_a64(16, 74) // mprotect(base, guard_size, PROT_NONE)
+        em32(0xD4001001)
+        em32(0x54000043)
+        em32(0xD4200000)
+        emit_imm64_reg_a64(9, 536887296)
+        em32(0x8B090269) // add x9,x19,x9
+        em32(0x9100013F) // mov sp,x9 (16-byte aligned mapping end)
         let mrel = (FN_OFF[main_fn as usize] - CL) / 4
         em32(0x94000000 | (mrel & 0x3FFFFFF))
         emit_imm64_reg_a64(16, 1)
@@ -50331,6 +52087,14 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         print(": ")
         if LEX_ERROR_KIND == 2 {
             print("invalid escape sequence\n")
+        } else if LEX_ERROR_KIND == 3 {
+            print("character literals are not supported by lean_single; write the byte value, e.g. `32 as u8` for ' '\n")
+        } else if LEX_ERROR_KIND == 4 {
+            print("Unexpected character `")
+            print_char(LEX_ERROR_BYTE)
+            print("` (byte ")
+            print_int(LEX_ERROR_BYTE)
+            print(")\n")
         } else {
             print("Unexpected character\n")
         }

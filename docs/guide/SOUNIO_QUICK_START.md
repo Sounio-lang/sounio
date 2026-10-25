@@ -11,7 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-q
 
 > **Other guides**: [Scientists' Quick Start](../QUICK_START_GUIDE.md) | [General Getting Started](getting-started.md) | [Conservative contract](MINIMUM_VIABLE_SOUNIO.md)
 
-**TL;DR**: Sounio is NOT Rust. No semicolons. Effects required. `&!` not `&mut`. Study real `.sio` files.
+**TL;DR**: Sounio is NOT Rust. Effects are required. `&!` not `&mut`. `println` takes one argument. Study real `.sio` files. The committed prebuilt runs on Linux x86-64; Apple Silicon has a separate [native ARM64 route](../compiler/MADAROS_MACOS_ARM64.md).
 
 **Full syntax ref**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](LLM_PROGRAMMING_GUIDE.md)
 
@@ -21,7 +21,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-q
 |-------|------|--------|
 | Function | `fn add(a: i32) -> i32 { }` | `fn add(a: i32) -> i32 { }` |
 | Effects | N/A | `fn div(a: f64, b: f64) -> f64 with Div, Panic { a / b }` |
-| Variable | `let x = 5;` | `let x = 5` (no semicolon) |
+| Variable | `let x = 5;` | `let x = 5` (semicolon is accepted style, not a compile error) |
 | Mutable var | `let mut x = 5;` | `var x = 5` |
 | Arrays | `Vec<u8>` or `[u8; N]` | `[u8; N]` (fixed) + `Vec<i32>` (stdlib) |
 | Mutable ref | `&mut x` | `&!x` |
@@ -31,10 +31,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-q
 
 ## Must-Know Rules
 
-### 1. NO Semicolons
+### 1. Semicolons are style, not a compile error
 ```sio
-let x = 5        // ✅ correct
-// let x = 5;    // ❌ WRONG
+let x = 5        // preferred
+let y = 5;       // accepted. Measured 2026-08-20. Not a diagnostic.
 ```
 
 ### 2. Effects Are Required

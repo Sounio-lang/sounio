@@ -233,7 +233,7 @@ pub fn spec_report_cap_overflow() -> bool with IO {
     } else if SPEC_CAP_OVERFLOW_CODE == 4 {
         print("a compilation unit supports at most 64 emitted generic struct specializations")
     } else if SPEC_CAP_OVERFLOW_CODE == 7 {
-        print("at most 1024 distinct lowercase `use` module segments (SPEC_USE_MODULE_HASH)")
+        print("at most 4096 module-scoped lowercase `use` suffixes (SPEC_USE_MODULE_HASH)")
     } else {
         print("an internal fixed-capacity specializer table was exhausted")
     }
@@ -317,11 +317,12 @@ fn spec_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic, Di
 // specialize_generics_multi and SPEC_CURRENT_MODULE_ID's own comments for
 // how that id is threaded through the discovery scan.
 let SPEC_USE_MODULE_SEG_MAX: i64 = 384
+let SPEC_USE_MODULE_CAP: i64 = 4096
 var SPEC_USE_MODULE_COUNT: i64 = 0
-var SPEC_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
-var SPEC_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
-var SPEC_USE_MODULE_MODULE_ID: [i64; 1024] = [0 - 1; 1024]
-var SPEC_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
+var SPEC_USE_MODULE_HASH: [i64; 4096] = [0; 4096]
+var SPEC_USE_MODULE_LEN: [i64; 4096] = [0; 4096]
+var SPEC_USE_MODULE_MODULE_ID: [i64; 4096] = [0 - 1; 4096]
+var SPEC_USE_MODULE_BUF: [i8; 1572864] = [0; 1572864]
 
 // The module id spec_call_expr_callee_name's qualifier validation checks
 // registry entries against. -1 (the default) means "unscoped": every
@@ -628,7 +629,7 @@ fn spec_use_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
     if spec_use_module_known(module_id, n) {
         return
     }
-    if SPEC_USE_MODULE_COUNT >= 1024 {
+    if SPEC_USE_MODULE_COUNT >= SPEC_USE_MODULE_CAP {
         // Review comment 4089532579 (round 3, finding A) asked check.sio's
         // sibling registry and this one to stay consistent on overflow:
         // refuse loudly via the existing spec_mark_cap_overflow/
@@ -1491,6 +1492,7 @@ fn spec_name_to_path(n: Name) -> AstPath {
     }
 }
 
+struct SpecTypeStage { ty: TypeExpr }
 fn spec_subst_type(te: TypeExpr, ctx: i64, targs: Option<Box<TypeExprList>>) -> TypeExpr with Mut, Panic, Div, Alloc {
     if ctx == 0 - 1 { return te }
     if te.kind == TypeExprKind::TypeNamed && te.path.seg_count == 1 {
@@ -1499,26 +1501,30 @@ fn spec_subst_type(te: TypeExpr, ctx: i64, targs: Option<Box<TypeExprList>>) -> 
             return spec_type_args_nth(targs, idx)
         }
     }
-    var out = te
-    out.inner = spec_subst_type_opt(te.inner, ctx, targs)
-    out.type_args = spec_subst_type_list_opt(te.type_args, ctx, targs)
+    // The nested fn(T)->T case must retain BOTH substituted fields across
+    // recursive calls. Use the same heap-staged mutation spine as Expr/Stmt;
+    // writes on a large by-value TypeExpr local were lost by the bootstrap.
+    let out = heap_alloc(32768) as *mut SpecTypeStage
+    (*out).ty = te
+    (*out).ty.inner = spec_subst_type_opt(te.inner, ctx, targs)
+    (*out).ty.type_args = spec_subst_type_list_opt(te.type_args, ctx, targs)
 
     // Local generic struct with (now concrete) args -> mangled instance name.
-    if out.kind == TypeExprKind::TypeNamed && out.path.seg_count == 1 {
-        match out.type_args {
+    if (*out).ty.kind == TypeExprKind::TypeNamed && (*out).ty.path.seg_count == 1 {
+        match (*out).ty.type_args {
             Some(al) => {
-                let base = spec_path_single_name(out.path)
+                let base = spec_path_single_name((*out).ty.path)
                 let st_idx = spec_struct_table_find(base)
                 if st_idx >= 0 && spec_type_args_count(Some(al)) == spec_struct_table_tp_count(st_idx) {
                     let mangled = spec_get_or_create_struct_instance(st_idx, base, Some(al))
-                    out.path = spec_name_to_path(mangled)
-                    out.type_args = None
+                    (*out).ty.path = spec_name_to_path(mangled)
+                    (*out).ty.type_args = None
                 }
             }
             None => {}
         }
     }
-    out
+    (*out).ty
 }
 
 fn spec_subst_type_opt(opt: Option<Box<TypeExpr>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<TypeExpr>> with Mut, Panic, Div, Alloc {
@@ -1961,12 +1967,125 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
 // itself OR on its callee ident — the parser stamps both).
 // ============================================================
 
-fn spec_call_expr_type_args(e: Expr) -> Option<Box<TypeExprList>> with Mut, Panic, Div {
+struct SpecInferredScalarArgs {
+    type0: Option<Box<TypeExpr>>,
+    type1: Option<Box<TypeExpr>>,
+    type2: Option<Box<TypeExpr>>,
+    type3: Option<Box<TypeExpr>>,
+}
+fn spec_inferred_scalar_at(p: *mut SpecInferredScalarArgs, index: i64) -> Option<Box<TypeExpr>> with Mut, Panic, Div {
+    if index == 0 { return (*p).type0 }
+    if index == 1 { return (*p).type1 }
+    if index == 2 { return (*p).type2 }
+    (*p).type3
+}
+
+// Infer only syntactically proven scalar arguments. In particular, do not
+// stop at a fn(T)->T parameter: a later plain T argument can determine it.
+// No checking/effects/linear consumption is repeated during this AST pass.
+fn spec_inferred_named_scalar(spelling: string) -> TypeExpr with Mut, Panic, Div, Alloc {
+    var ty = dummy_type_expr()
+    ty.kind = TypeExprKind::TypeNamed
+    ty.path = spec_name_to_path(make_name(spelling))
+    ty
+}
+fn spec_literal_scalar_type(e: &Expr) -> TypeExpr with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprIntLit { return spec_inferred_named_scalar("i64") }
+    if (*e).kind == ExprKind::ExprFloatLit { return spec_inferred_named_scalar("f64") }
+    if (*e).kind == ExprKind::ExprBoolTrue || (*e).kind == ExprKind::ExprBoolFalse {
+        return spec_inferred_named_scalar("bool")
+    }
+    if (*e).kind == ExprKind::ExprCast {
+        match (*e).cast_type {
+            Some(cast) => {
+                if spec_type_arg_is_scalar(*cast) { return *cast }
+            }
+            None => {}
+        }
+    }
+    if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+        match (*e).left { Some(inner) => return spec_literal_scalar_type(&(*inner)), None => {} }
+    }
+    dummy_type_expr()
+}
+
+fn spec_infer_call_type_args(e: Expr) -> Option<Box<TypeExprList>> with Mut, Panic, Div, Alloc {
+    let slot = spec_generic_table_find(spec_call_expr_callee_name(e))
+    if slot < 0 || SPEC_GF_IS_METHOD[slot as usize] { return None }
+    let count = spec_generic_table_tp_count(slot)
+    if count <= 0 || count > 4 { return None }
+    let ctx = spec_ctx_from_fn_slot(slot)
+    let inferred = heap_alloc(4096) as *mut SpecInferredScalarArgs
+    (*inferred).type0 = None
+    (*inferred).type1 = None
+    (*inferred).type2 = None
+    (*inferred).type3 = None
+    match spec_generic_table_fd(slot) {
+        Some(fd) => {
+            var params = &(*fd).params
+            var args = &e.args
+            while true {
+                match *params {
+                    Some(p) => {
+                        match *args {
+                            Some(a) => {
+                                let formal = &(*p).head.ty
+                                if (*formal).kind == TypeExprKind::TypeNamed && (*formal).path.seg_count == 1 {
+                                    let index = spec_ctx_tp_index(ctx, ast_name_hash(spec_path_single_name((*formal).path)))
+                                    if index >= 0 {
+                                        let actual = spec_literal_scalar_type(&(*a).head)
+                                        if spec_type_arg_is_scalar(actual) {
+                                            match spec_inferred_scalar_at(inferred, index) {
+                                                Some(previous) => {
+                                                    let old = spec_name_to_string(spec_path_single_name((*previous).path))
+                                                    let new = spec_name_to_string(spec_path_single_name(actual.path))
+                                                    if !str_eq(old, new) { return None }
+                                                }
+                                                None => {}
+                                            }
+                                            let found = Some(Box::new(actual))
+                                            if index == 0 { (*inferred).type0 = found }
+                                            if index == 1 { (*inferred).type1 = found }
+                                            if index == 2 { (*inferred).type2 = found }
+                                            if index == 3 { (*inferred).type3 = found }
+                                        }
+                                    }
+                                }
+                                args = &(*a).tail
+                            }
+                            None => break,
+                        }
+                        params = &(*p).tail
+                    }
+                    None => break,
+                }
+            }
+        }
+        None => return None,
+    }
+    var result: Option<Box<TypeExprList>> = None
+    var i = count - 1
+    while i >= 0 {
+        match spec_inferred_scalar_at(inferred, i) {
+            Some(ty) => { result = Some(Box::new(TypeExprList { head: *ty, tail: result })) }
+            None => return None,
+        }
+        i = i - 1
+    }
+    result
+}
+
+fn spec_call_expr_type_args(e: Expr) -> Option<Box<TypeExprList>> with Mut, Panic, Div, Alloc {
     match e.type_args {
         Some(args) => Some(args)
         None => {
             match e.left {
-                Some(callee) => (*callee).type_args
+                Some(callee) => {
+                    match (*callee).type_args {
+                        Some(args) => Some(args),
+                        None => spec_infer_call_type_args(e),
+                    }
+                }
                 None => None
             }
         }
@@ -2678,79 +2797,106 @@ fn spec_dce_hash_insert(marks: &! [i64; 16384], count: &! i64, h: i64) -> bool w
     false
 }
 
+// Bare callee of an ExprCall, read through a borrow.
+//
+// spec_call_expr_callee_name takes Expr by value. A by-value copy of a call
+// node drops `left` (the callee box) in this compiler, so the name comes back
+// empty and the mark set never records the function the body actually calls.
+// into_acc then filters that callee out and body lowering reports an ident
+// miss (lower.sio report_error_at 15349) while lowering the caller. Measured
+// on the fixed-point gate after #2968: orbit_is_contested, two misses, module 7.
+fn spec_dce_bare_callee_name(e: &Expr) -> Name with Mut, Panic, Div {
+    if (*e).kind != ExprKind::ExprCall {
+        return empty_name()
+    }
+    match (*e).left {
+        None => empty_name()
+        Some(callee) => {
+            if (*callee).kind == ExprKind::ExprIdent {
+                (*callee).name
+            } else if (*callee).kind == ExprKind::ExprPath && (*callee).path.seg_count == 1 {
+                spec_path_single_name((*callee).path)
+            } else {
+                empty_name()
+            }
+        }
+    }
+}
+
 // Walk an expression tree; insert callee / method name hashes into `marks`.
-fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
-    if e.kind == ExprKind::ExprCall {
-        let callee = spec_call_expr_callee_name(e)
+// `&Expr`, not Expr: the caller's callee box must still be there when we hash it.
+fn spec_dce_scan_expr(e: &Expr, marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
+    if (*e).kind == ExprKind::ExprCall {
+        let callee = spec_dce_bare_callee_name(e)
         if !name_is_empty(callee) {
             var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(callee))
         }
-    } else if e.kind == ExprKind::ExprMethodCall {
-        if !name_is_empty(e.name) {
-            var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(e.name))
+    } else if (*e).kind == ExprKind::ExprMethodCall {
+        if !name_is_empty((*e).name) {
+            var _ins = spec_dce_hash_insert(marks, count, ast_name_hash((*e).name))
         }
-    } else if e.kind == ExprKind::ExprIdent {
+    } else if (*e).kind == ExprKind::ExprIdent {
         // First-class fn refs (`call_it(square, x)`, `let f = square`) are
         // ExprIdent, not ExprCall. Without marking the name, spec_dce deletes
         // the target function and LoadFnRef binds to a stale/wrong fn_id.
-        if !name_is_empty(e.name) {
-            var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(e.name))
+        if !name_is_empty((*e).name) {
+            var _ins = spec_dce_hash_insert(marks, count, ast_name_hash((*e).name))
         }
-    } else if e.kind == ExprKind::ExprPath {
-        if e.path.seg_count == 1 {
-            let n = spec_path_single_name(e.path)
+    } else if (*e).kind == ExprKind::ExprPath {
+        if (*e).path.seg_count == 1 {
+            let n = spec_path_single_name((*e).path)
             if !name_is_empty(n) {
                 var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(n))
             }
-        } else if e.path.seg_count >= 2 && e.path.segments.head_len > 0 {
+        } else if (*e).path.seg_count >= 2 && (*e).path.segments.head_len > 0 {
             // `mod::f(..)` / `a::mod::f(..)`: keep the free fn `f` alive. The
             // lowerer resolves module-qualified calls to the terminal name
             // (lower.sio LOWER_USE_MODULE_HASH); unmarked, `f` was deleted here
             // and the call became a body-less ud2 stub. Uppercase roots
             // (Type::method, Enum::Variant) are left as they were.
-            let c0 = (e.path.segments.head_buf[0] as i64) & 255
+            let c0 = ((*e).path.segments.head_buf[0] as i64) & 255
             if !(c0 >= 65 && c0 <= 90) {
-                let n = spec_string_list_last_name(e.path.segments)
+                let n = spec_string_list_last_name((*e).path.segments)
                 if !name_is_empty(n) {
                     var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(n))
                 }
             }
         }
     }
-    match e.left {
-        Some(b) => spec_dce_scan_expr(*b, marks, count)
+    match (*e).left {
+        Some(b) => spec_dce_scan_expr(&(*b), marks, count)
         None => {}
     }
-    match e.right {
-        Some(b) => spec_dce_scan_expr(*b, marks, count)
+    match (*e).right {
+        Some(b) => spec_dce_scan_expr(&(*b), marks, count)
         None => {}
     }
-    match e.else_expr {
-        Some(b) => spec_dce_scan_expr(*b, marks, count)
+    match (*e).else_expr {
+        Some(b) => spec_dce_scan_expr(&(*b), marks, count)
         None => {}
     }
-    match e.closure_body {
-        Some(b) => spec_dce_scan_expr(*b, marks, count)
+    match (*e).closure_body {
+        Some(b) => spec_dce_scan_expr(&(*b), marks, count)
         None => {}
     }
-    match e.block {
+    match (*e).block {
         Some(b) => spec_dce_scan_block(*b, marks, count)
         None => {}
     }
-    match e.handler_block {
+    match (*e).handler_block {
         Some(b) => spec_dce_scan_block(*b, marks, count)
         None => {}
     }
-    match e.args {
+    match (*e).args {
         Some(list) => {
-            spec_dce_scan_expr((*list).head, marks, count)
+            spec_dce_scan_expr(&(*list).head, marks, count)
             var cur = (*list).tail
             var going = true
             while going {
                 match cur {
                     None => { going = false }
                     Some(rest) => {
-                        spec_dce_scan_expr((*rest).head, marks, count)
+                        spec_dce_scan_expr(&(*rest).head, marks, count)
                         cur = (*rest).tail
                     }
                 }
@@ -2758,13 +2904,13 @@ fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 16384], count: &! i64) with Mut, 
         }
         None => {}
     }
-    match e.arms {
+    match (*e).arms {
         Some(list) => {
             match (*list).head.guard {
-                Some(g) => spec_dce_scan_expr(*g, marks, count)
+                Some(g) => spec_dce_scan_expr(&(*g), marks, count)
                 None => {}
             }
-            spec_dce_scan_expr((*list).head.body, marks, count)
+            spec_dce_scan_expr(&(*list).head.body, marks, count)
             var cur = (*list).tail
             var going = true
             while going {
@@ -2772,10 +2918,10 @@ fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 16384], count: &! i64) with Mut, 
                     None => { going = false }
                     Some(rest) => {
                         match (*rest).head.guard {
-                            Some(g) => spec_dce_scan_expr(*g, marks, count)
+                            Some(g) => spec_dce_scan_expr(&(*g), marks, count)
                             None => {}
                         }
-                        spec_dce_scan_expr((*rest).head.body, marks, count)
+                        spec_dce_scan_expr(&(*rest).head.body, marks, count)
                         cur = (*rest).tail
                     }
                 }
@@ -2783,16 +2929,16 @@ fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 16384], count: &! i64) with Mut, 
         }
         None => {}
     }
-    match e.fields {
+    match (*e).fields {
         Some(list) => {
-            spec_dce_scan_expr((*list).head.value, marks, count)
+            spec_dce_scan_expr(&(*list).head.value, marks, count)
             var cur = (*list).tail
             var going = true
             while going {
                 match cur {
                     None => { going = false }
                     Some(rest) => {
-                        spec_dce_scan_expr((*rest).head.value, marks, count)
+                        spec_dce_scan_expr(&(*rest).head.value, marks, count)
                         cur = (*rest).tail
                     }
                 }
@@ -3060,11 +3206,11 @@ fn spec_dce_scan_block(b: Block, marks: &! [i64; 16384], count: &! i64) with Mut
                     }
                 }
                 match (*list).head.expr {
-                    Some(ex) => spec_dce_scan_expr(*ex, marks, count)
+                    Some(ex) => spec_dce_scan_expr(&(*ex), marks, count)
                     None => {}
                 }
                 match (*list).head.target {
-                    Some(ex) => spec_dce_scan_expr(*ex, marks, count)
+                    Some(ex) => spec_dce_scan_expr(&(*ex), marks, count)
                     None => {}
                 }
                 cur = (*list).tail

@@ -514,6 +514,26 @@ fn tk_is_item_keyword_lower(k: TokenKind) -> bool {
         || k == TokenKind::DeferralPolicyLower
 }
 
+// The fallback arm of parse_prefix used to set had_error and return in
+// silence, so `let x = @y` failed with no line and no reason. Same wording
+// family as Parser::expect, same 20-message cap.
+pub fn parser_report_expected_expression(pos: i64, error_count: i64) with Mut, IO, Panic, Div {
+    if error_count > 20 {
+        return
+    }
+    print("parse error: expected expression at line ")
+    if pos >= 0 && pos < 2097152 {
+        print_int(PT_LINE[pos as usize])
+        print(":")
+        print_int(PT_COL[pos as usize])
+        print(": found ")
+        print(tk_display_name(pt_read_kind(pos)))
+        print("\n")
+    } else {
+        print("unknown\n")
+    }
+}
+
 pub fn pt_read_kind(idx: i64) -> TokenKind with Mut, Panic, Div {
     if idx >= 0 && idx < 2097152 {
         let code = PT_KIND_CODE[idx as usize]
@@ -2057,11 +2077,20 @@ impl Parser {
                 print_int(PT_LINE[p.pos as usize])
                 print(":")
                 print_int(PT_COL[p.pos as usize])
-                print(" expected=")
+                // Names, not numbers: `kind as i64` is a TokenKind discriminant
+                // while PT_KIND_CODE holds a flat lexer code for literals and
+                // operators, so the two raw numbers came from different
+                // numberings (docs/spec/2026-10 LEX-001). Both are kept in the
+                // brackets, labelled, for tools that read them.
+                print(": expected ")
+                print(tk_display_name(kind))
+                print(", found ")
+                print(tk_display_name(p.peek()))
+                print(" [expected kind=")
                 print_int(kind as i64)
-                print(" actual=")
+                print(", found code=")
                 print_int(PT_KIND_CODE[p.pos as usize])
-                print("\n")
+                print("]\n")
             } else {
                 print("unknown\n")
             }
@@ -2118,6 +2147,19 @@ impl Parser {
             Span::new(start.file_id, start.start, PT_END[self.pos as usize])
         } else {
             Span::new(start.file_id, start.start, start.end)
+        }
+    }
+
+    // Same end rule as span_from, but the start byte is a scalar. Expr.span on
+    // the native runtime can be arena index 0 with a null payload; reading
+    // start.file_id then SIGSEGVs at address 0x20 (slot 4). That is the Gen3
+    // preflight crash, in parse_expr_bp, on the first binary operator of
+    // main.sio. Token tables are already live at that point.
+    fn span_from_off(self: Parser, start_off: i64) -> Span with Panic, Div {
+        if self.pos < self.token_count {
+            Span::new(0, start_off, PT_END[self.pos as usize])
+        } else {
+            Span::new(0, start_off, start_off)
         }
     }
 

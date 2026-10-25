@@ -162,6 +162,44 @@ We follow a strict semantic and component-scoped commit convention. Commit messa
 - Throws TypeMismatch error when Knowledge[T, epsilon] violates required threshold
 ```
 
+### 5. Choosing and Claiming Work
+
+Work is planned on a project board (Notion; the maintainer grants access on request). The board mirrors three files in this repository, which remain the source of truth:
+
+- [`docs/planning/LANGUAGE_BACKLOG_2026-10-22.md`](docs/planning/LANGUAGE_BACKLOG_2026-10-22.md) — what is open, in priority order: **silent wrong values first**, then refusals without a location, then decisions owed, then capacity, then research.
+- [`docs/decisions/PENDING.md`](docs/decisions/PENDING.md) — decisions only the maintainer can take. Do not implement a choice that is still listed there.
+- [`docs/decisions/`](docs/decisions/README.md) — decisions already taken (ADRs). Each implementation row of an ADR is one board task with its own acceptance test.
+
+Each card carries these fields:
+
+- **Agent**: who owns it. One of Claude, Codex, Cursor, Warp, Kimi, Grok PM, Nightly Audit, or Human. A card with Agent = Human is a decision that only the maintainer can take.
+- **Train**: the release it ships in, `3.0`, `3.1` or `Backlog` (see [ADR-018](docs/decisions/adr-018-release-cycle-and-versioning.md)).
+- **Epic**: the parent EPIC card. Themes such as Bootstrap gen7, Marco 0 or the AI track are EPIC cards, not fields.
+- **Acceptance**: the criterion that makes the card *Done*.
+
+`Milestone` and `Bot` are deprecated; do not set them on new cards.
+
+Rules for every contributor, human or automated:
+
+1. **Claim before you start.** Take a task in *Not started* whose blocking tasks are all *Done*. Set **Agent** to yourself, move the card to *In progress*, and record the same claim with `bin/sounio-coord claim`. A card may be *In progress* only when Agent is set. Do not work on a task someone else has claimed. Before pushing to a branch that had a commit in the last 24 hours, message its author on the coord bus.
+2. **Every task has an acceptance criterion** (a probe, a test, a byte-identical hash, a proof). A task is *Done* only when that criterion holds and the PR is merged.
+3. **Blocked?** Move the task to *Blocked* and say why on the task.
+4. **Open the PR, link it on the task, move the task to *In review*.** A draft PR keeps the task *In progress*; it moves to *In review* when the PR leaves draft. When the PR merges, the task is *Done*.
+5. **Fix what you find.** A defect found while working is fixed in the same change, or recorded as a new board task. Please do not open GitHub issues for it.
+6. **Decisions are not taken in PRs.** If your change needs a semantic choice, stop and add it to `PENDING.md` with the question, the options and a discriminating test.
+
+### 6. Numbering ADRs
+
+ADR numbers are append-only and assigned at merge time. Before adding `adr-NNN-*.md`, check both `main` and the open pull requests for the next free number; the index in [`docs/decisions/README.md`](docs/decisions/README.md) lists numbers reserved by open PRs.
+
+### 7. Changelog fragments and release trains
+
+Do not edit `CHANGELOG.md`. If your PR touches the compiler, runtime, stdlib or CI scripts, add `changelog.d/<slug>.<kind>.md`, a single paragraph written for release notes. Use `kind=internal` when nothing is user-visible. Kinds and examples are in [`changelog.d/README.md`](changelog.d/README.md). The Impact job checks this.
+
+Choose the kind carefully: it decides which release can carry your change. A change that makes existing programs fail to compile, or changes what they do, is `breaking` and waits for the next major. A change that makes a program refuse instead of printing a wrong number is `refusal` and may ship in a minor. A change to a printed number is `numerical` or `numerical-correction`, judged by the epistemic consistency test of [ADR-018](docs/decisions/adr-018-release-cycle-and-versioning.md) §3.
+
+Releases are feature trains with a freeze date (see [`docs/RELEASE_POLICY.md`](docs/RELEASE_POLICY.md)). After the freeze, a fix reaches the release branch only if it carries the label `backport:X.Y`.
+
 ---
 
 ## Standard Library Structure

@@ -50,10 +50,11 @@ use resolve::scope::*
 
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_native_driver::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming_for_target, compile_multimodule_llvm}
-use private_fn_identity::{module_struct_identity_check}
-use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, module_frontend_compile_imported_to_file}
+use module_frontend::{module_frontend_identity_pass}
+use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, module_frontend_compile_imported_to_file, module_frontend_compile_imported_to_file_for_target}
 use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult, module_frontend_import_files_from_source, ImportPathList}
 use module_frontend::{ModuleClosure, module_frontend_collect_ast_closure_into}
+use check::check::{checker_swap_darwin_math}
 use module_parse::{ImportList, load_module_file, extract_imports_from_ast, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use claim_executor::{claim_executor_verify}
@@ -1852,9 +1853,12 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
     }
 
     if closure.node_count == 1 && closure.edge_count == 0 {
-        programs[0].items = specialize_generics(programs[0].items)
+        // Preserve the specialized list itself. The bootstrap drops nested
+        // field-in-array stores, so writing programs[0].items here discarded
+        // a correctly specialized fn(T)->T before preflight typechecking it.
+        let single_specialized_items = specialize_generics(programs[0].items)
         let single_verdict = module_frontend_check_items_with_source_context(
-            programs[0].items,
+            single_specialized_items,
             source_path
         )
         // Round 12 (review comment 4100990481): a named-item-terminal
@@ -1882,8 +1886,12 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
     // is merged into ONE type by the checker and the lowering (false E046/E012,
     // or one layout for both). Refuse it up front with a diagnostic naming both
     // modules. Identical copies stay accepted.
-    if !module_struct_identity_check(&! programs, closure.node_count) {
-        print("run_check_mode: same-named structs differ across modules\n")
+    // #2773 + KL-21: same struct names and same-named/imported pub fns must be
+    // resolved exactly as compilation resolves them, otherwise check rejects a
+    // program that compiles (this path used to run the struct check only, so an
+    // imported `pub fn measure` still bound to the builtin here).
+    if !module_frontend_identity_pass(&! programs, closure.paths, closure.node_count) {
+        print("run_check_mode: module identity pass failed\n")
         return false
     }
 
@@ -2993,8 +3001,40 @@ fn native_v2_wait_exit_code(status: i64) -> i64 {
     128 + (status & 127)
 }
 
-fn native_v2_run_elf_and_exit(path: string, args: ArgList, flag_index: i64) with IO, Mut, Panic, Div {
-    syscall6(90, path, 493, 0, 0, 0, 0)
+fn native_v2_spawn_argv(path: string, macos: bool) -> i64 with IO, Mut, Panic, Div {
+    let fork_nr: i64 = if macos { 2 } else { 57 }
+    let exit_nr: i64 = if macos { 1 } else { 60 }
+    let wait_nr: i64 = if macos { 7 } else { 61 }
+    let pid = syscall6(fork_nr, 0, 0, 0, 0, 0, 0)
+    if pid < 0 { return 127 }
+    if pid == 0 {
+        syscall6(59, path as i64, &! NV2_RUN_ARGV, &! NV2_RUN_ENVP, 0, 0, 0)
+        syscall6(exit_nr, 127, 0, 0, 0, 0, 0)
+        return 127
+    }
+    var status: i64 = 0
+    if syscall6(wait_nr, pid, &! status, 0, 0, 0, 0) < 0 { return 127 }
+    native_v2_wait_exit_code(status)
+}
+
+fn native_v2_run_elf_and_exit(path: string, args: ArgList, flag_index: i64, macos: bool) with IO, Mut, Panic, Div {
+    let chmod_nr: i64 = if macos { 15 } else { 90 }
+    let exit_nr: i64 = if macos { 1 } else { 60 }
+    if syscall6(chmod_nr, path, 493, 0, 0, 0, 0) < 0 {
+        panic("native run: chmod failed")
+    }
+    NV2_RUN_ENVP[0] = 0
+    if macos {
+        NV2_RUN_ARGV[0] = "/usr/bin/codesign" as i64
+        NV2_RUN_ARGV[1] = "-s" as i64
+        NV2_RUN_ARGV[2] = "-" as i64
+        NV2_RUN_ARGV[3] = "-f" as i64
+        NV2_RUN_ARGV[4] = path as i64
+        NV2_RUN_ARGV[5] = 0
+        if native_v2_spawn_argv("/usr/bin/codesign", true) != 0 {
+            panic("native run: ad-hoc codesign failed")
+        }
+    }
     NV2_RUN_ARGV[0] = path as i64
     var argv_len: i64 = 1
     var passthrough: bool = false
@@ -3012,21 +3052,7 @@ fn native_v2_run_elf_and_exit(path: string, args: ArgList, flag_index: i64) with
     NV2_RUN_ARGV[argv_len as usize] = 0
     NV2_RUN_ENVP[0] = 0
 
-    let pid = syscall6(57, 0, 0, 0, 0, 0, 0)
-    if pid < 0 {
-        print("native_v2_compile: run fork failed\n")
-        syscall6(60, 127, 0, 0, 0, 0, 0)
-        return
-    }
-    if pid == 0 {
-        syscall6(59, path as i64, &! NV2_RUN_ARGV, &! NV2_RUN_ENVP, 0, 0, 0)
-        syscall6(60, 127, 0, 0, 0, 0, 0)
-        return
-    }
-
-    var status: i64 = 0
-    syscall6(61, pid, &! status, 0, 0, 0, 0)
-    syscall6(60, native_v2_wait_exit_code(status), 0, 0, 0, 0, 0)
+    syscall6(exit_nr, native_v2_spawn_argv(path, macos), 0, 0, 0, 0, 0)
 }
 
 // Bridge: real .sio SOURCE -> multimodule front-half -> IrModule -> native-v2 -> ELF.
@@ -3042,6 +3068,12 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     // wrote a.out — the root of the "writes no file at the requested path" report.
     let out_positional = compiler_mode_positional_arg(args, flag_index, 1, "a.out")
     let out_path = compiler_mode_output_path(args, out_positional)
+    // Visibility preflight also typechecks. Give it the same scoped target
+    // capability as the actual compile, without relaxing Linux/check defaults.
+    let requested_target = compiler_mode_option_string(args, "-t", "--target", "native")
+    let explicit_target = (compiler_mode_has_flag(args, "-t") || compiler_mode_has_flag(args, "--target")) && requested_target != "native" && requested_target != "native-auto"
+    let preflight_target = native_resolve_target(requested_target, "auto", explicit_target)
+    let previous_math = checker_swap_darwin_math(preflight_target.arch_id == ARCH_AARCH64() && preflight_target.os_id == OS_MACOS())
     if !compiler_preflight_source_input(source_path) {
         panic("native-v2-compile failed: source not readable")
     }
@@ -3060,7 +3092,8 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     // single-module programs. MultiModuleIrResult.module is now Box<IrModule>
     // (no densify at the legacy load API); prefer this file route for large IR.
     let optimize = compiler_mode_has_flag(args, "-O") || compiler_mode_has_flag(args, "--optimize")
-    let rc = module_frontend_compile_imported_to_file(source_path, out_path, optimize)
+    let rc = module_frontend_compile_imported_to_file_for_target(source_path, out_path, optimize, requested_target, explicit_target)
+    let _restored_math = checker_swap_darwin_math(previous_math)
     if rc != 0 {
         print("native_v2_compile: front-half/backend failed rc=")
         print_int(rc as i64)
@@ -3071,7 +3104,8 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     print(out_path)
     print("\n")
     if execute_after_compile {
-        native_v2_run_elf_and_exit(out_path, args, flag_index)
+        let run_spec = native_resolve_target(requested_target, "auto", explicit_target)
+        native_v2_run_elf_and_exit(out_path, args, flag_index, run_spec.os_id == OS_MACOS())
     }
 }
 
@@ -8149,9 +8183,11 @@ fn compiler_main_test_native_v2_runtime_context_handles() -> bool {
     if runtime_context_field_descriptor_table() != 48 { return false }
     if runtime_context_field_gc_state() != 120 { return false }
     if runtime_context_field_collector_epoch() != 168 { return false }
-    // #1680: 998e230b7 appended slots after collector_epoch (globals / PE / Win64
-    // IAT support); the context is 248 bytes, and the offsets above are unchanged.
-    runtime_context_size() == 248
+    if runtime_context_field_box_heap_base() != 248 { return false }
+    if runtime_context_field_box_heap_cursor() != 256 { return false }
+    if runtime_context_field_box_heap_limit() != 264 { return false }
+    // Append-only extension; all prior fields retain their offsets.
+    runtime_context_size() == 272
 }
 
 fn compiler_main_test_native_v2_descriptor_table_blob() -> bool with Mut, Panic, Div, Alloc {

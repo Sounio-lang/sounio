@@ -1,0 +1,96 @@
+// Shared linear scientific-axis semantics for Canvas and SVG.
+// Explicit interval count; no automatic "nice" ticks or log transform.
+use math::pure::{is_finite}
+
+pub struct AxisLabel { pub text: [i8; 32], pub n: i64 }
+pub struct AxisTicks { pub values: [f64; 9], pub n: i64, pub status: i64 }
+
+// Six significant decimal digits, scientific notation, ASCII, round half up.
+// Bounded normalization covers binary64 subnormals through maximum finite.
+pub fn axis_label(value: f64) -> AxisLabel with Mut, Div {
+    var out = AxisLabel { text: [0; 32], n: 0 }
+    if !is_finite(value) { return out }
+    if value == 0.0 { out.text[0] = 48; out.n = 1; return out }
+    var v = value
+    if v < 0.0 { out.text[0] = 45; out.n = 1; v = 0.0 - v }
+    var exponent: i64 = 0
+    while v >= 10.0 && exponent < 309 { v = v / 10.0; exponent = exponent + 1 }
+    while v < 1.0 && exponent > 0 - 324 { v = v * 10.0; exponent = exponent - 1 }
+    var digits: i64 = (v * 100000.0 + 0.5) as i64
+    if digits >= 1000000 { digits = 100000; exponent = exponent + 1 }
+    var divisor: i64 = 100000
+    var i: i64 = 0
+    while i < 6 {
+        let d = digits / divisor
+        out.text[out.n as usize] = (48 + d) as i8
+        out.n = out.n + 1
+        digits = digits - d * divisor
+        if i == 0 { out.text[out.n as usize] = 46; out.n = out.n + 1 }
+        divisor = divisor / 10
+        i = i + 1
+    }
+    out.text[out.n as usize] = 101; out.n = out.n + 1
+    if exponent < 0 { out.text[out.n as usize] = 45; exponent = 0 - exponent }
+    else { out.text[out.n as usize] = 43 }
+    out.n = out.n + 1
+    if exponent >= 100 {
+        out.text[out.n as usize] = (48 + exponent / 100) as i8
+        out.n = out.n + 1
+    }
+    if exponent >= 10 {
+        out.text[out.n as usize] = (48 + (exponent / 10) % 10) as i8
+        out.n = out.n + 1
+    }
+    out.text[out.n as usize] = (48 + exponent % 10) as i8
+    out.n = out.n + 1
+    out
+}
+
+fn axis_labels_equal(a: &AxisLabel, b: &AxisLabel) -> bool with Mut {
+    if a.n != b.n { return false }
+    var i: i64 = 0
+    while i < a.n {
+        if a.text[i as usize] != b.text[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+// status 0=valid, 1=invalid domain/count, 2=unrepresentable or duplicate ticks,
+// 3=adjacent values indistinguishable at the label precision.
+// Invalid plans have n=0. Endpoints are exact inputs.
+pub fn axis_ticks(lo: f64, hi: f64, intervals: i64) -> AxisTicks with Mut, Div {
+    var out = AxisTicks { values: [0.0; 9], n: 0, status: 1 }
+    if !is_finite(lo) || !is_finite(hi) || hi <= lo { return out }
+    if intervals < 1 || intervals > 8 { return out }
+    var i: i64 = 0
+    while i <= intervals {
+        let f: f64 = (i as f64) / (intervals as f64)
+        // Opposite signs: weighted interpolation avoids overflow in hi-lo.
+        var v: f64 = if lo < 0.0 && hi > 0.0 { lo * (1.0 - f) + hi * f }
+                     else { lo + (hi - lo) * f }
+        if i == 0 { v = lo }
+        if i == intervals { v = hi }
+        if !is_finite(v) { out.status = 2; return out }
+        if i > 0 {
+            let previous: f64 = out.values[(i - 1) as usize]
+            if v <= previous { out.status = 2; return out }
+            let a = axis_label(previous)
+            let b = axis_label(v)
+            if axis_labels_equal(&a, &b) { out.status = 3; return out }
+        }
+        out.values[i as usize] = v
+        i = i + 1
+    }
+    out.n = intervals + 1
+    out.status = 0
+    out
+}
+
+// Shared integer placement: x increases rightward; y increases upward.
+// Extent is the endpoint distance (not the number of covered pixels).
+pub fn axis_offset(index: i64, intervals: i64, extent: i64) -> i64 with Div {
+    if intervals < 1 || intervals > 8 || index < 0 || index > intervals { return 0 }
+    if extent < 1 || extent > 1000000 { return 0 }
+    index * extent / intervals
+}

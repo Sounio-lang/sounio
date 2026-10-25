@@ -202,6 +202,10 @@ var PFI_LEFT_TOTAL: i64 = 0
 // 1 while builtin_shadow_apply_items runs: pfi_mangle then spells the
 // generated name `<name>__user` instead of `<name>__m<module>`.
 var PFI_MANGLE_USER: i64 = 0
+// 1 while builtin_shadow_apply_items applies its renames: that pass renames a
+// real fn of ANY plain visibility (private or pub), unlike the two phases of
+// private_fn_identity_apply, which each own one visibility.
+var PFI_ANY_VIS: i64 = 0
 var BSH_OFF: i64 = 0
 var BSH_OFF_CHECKED: i64 = 0
 
@@ -213,6 +217,22 @@ var PFI_OFF_CHECKED: i64 = 0
 // always uses (PFI_CUR_MOD, 1).
 var PFI_T_TGT: [i64; 512]
 var PFI_T_DEF: [i64; 512]
+// KL-21 pub residual. `builtin_shadow_apply_items` now also renames an
+// intercepted `pub fn <name>` to `<name>__user` (measured 2026-10-23: no
+// `pub fn` named like an intercepted builtin exists in stdlib/ or
+// self-hosted/, so the compiler's own build is untouched). Importers still
+// spell <name>, so the pub phase rebinds them here. PFI_T_USER marks the
+// entries whose target spelling is `__user` rather than `__m<idx>`: two
+// different names must not share the user suffix, but one builtin-shadow name
+// is by definition one definer.
+var PFI_T_USER: [i64; 512]
+let PFI_BSH_MAX: i64 = 64
+var PFI_BSH_BUF: [i8; 24576]
+var PFI_BSH_LEN: [i64; 64]
+var PFI_BSH_HASH: [i64; 64]
+var PFI_BSH_DEF: [i64; 64]
+var PFI_BSH_COUNT: i64 = 0
+var PFI_BSH_ANY: i64 = 0
 
 // 0 = private phase, 1 = pub phase (#2773).
 var PFI_PHASE: i64 = 0
@@ -454,11 +474,122 @@ fn pfi_item_real_fn(it: Item) -> bool with Mut, Panic, Div {
     true
 }
 
+// Diagnostic breadcrumb, off unless SOUNIO_TRACE_BUILTIN_SHADOW=1: prints what
+// the builtin-shadow census recorded and how the pub phase rebinds importers.
+var BSH_TRACE_CHECKED: i64 = 0
+var BSH_TRACE_ON: i64 = 0
+fn bsh_trace() -> bool with IO, Mut, Panic, Div {
+    if BSH_TRACE_CHECKED == 0 {
+        BSH_TRACE_CHECKED = 1
+        if str_eq(read_env("SOUNIO_TRACE_BUILTIN_SHADOW"), "1") { BSH_TRACE_ON = 1 }
+    }
+    BSH_TRACE_ON == 1
+}
+
+// KL-21 pub residual. `<name>__user` -> `<name>` when the suffix is present,
+// empty otherwise. `builtin_shadow_apply_items` renames the intercepted pub fn
+// to the suffixed spelling; this recovers the base name the importers still use.
+fn bsh_strip_user_suffix(n: Name) -> Name with Mut, Panic, Div {
+    if n.len <= 6 { return empty_name() }
+    let s = n.len - 6
+    if n.buf[(s + 0) as usize] != 95 as i8 { return empty_name() }   // '_'
+    if n.buf[(s + 1) as usize] != 95 as i8 { return empty_name() }
+    if n.buf[(s + 2) as usize] != 117 as i8 { return empty_name() }  // 'u'
+    if n.buf[(s + 3) as usize] != 115 as i8 { return empty_name() }  // 's'
+    if n.buf[(s + 4) as usize] != 101 as i8 { return empty_name() }  // 'e'
+    if n.buf[(s + 5) as usize] != 114 as i8 { return empty_name() }  // 'r'
+    Name { buf: n.buf, len: s }
+}
+
+fn pfi_bsh_name_eq(k: i64, n: Name) -> bool with Mut, Panic, Div {
+    if PFI_BSH_LEN[k as usize] != n.len { return false }
+    var z: i64 = 0
+    while z < n.len {
+        if PFI_BSH_BUF[(k * 384 + z) as usize] != n.buf[z as usize] { return false }
+        z = z + 1
+    }
+    true
+}
+
+fn pfi_bsh_add(n: Name, mod_idx: i64) -> bool with IO, Mut, Panic, Div, Alloc {
+    if n.len <= 0 || n.len > 384 { return true }
+    var k: i64 = 0
+    while k < PFI_BSH_COUNT {
+        if PFI_BSH_DEF[k as usize] == mod_idx && pfi_bsh_name_eq(k, n) { return true }
+        k = k + 1
+    }
+    if PFI_BSH_COUNT >= PFI_BSH_MAX { return false }
+    let idx = PFI_BSH_COUNT
+    PFI_BSH_HASH[idx as usize] = ast_name_hash(n)
+    PFI_BSH_LEN[idx as usize] = n.len
+    PFI_BSH_DEF[idx as usize] = mod_idx
+    var i: i64 = 0
+    while i < n.len {
+        PFI_BSH_BUF[(idx * 384 + i) as usize] = n.buf[i as usize]
+        i = i + 1
+    }
+    PFI_BSH_COUNT = idx + 1
+    PFI_BSH_ANY = 1
+    if bsh_trace() {
+        print("[bsh] census: base=")
+        pfi_print_name(n)
+        print(" definer_mod=")
+        print_int(mod_idx)
+        print("\n")
+    }
+    true
+}
+
+fn pfi_bsh_name(k: i64) -> Name with Mut, Panic, Div, Alloc {
+    var buf: [i8; 384] = [0; 384]
+    let len = PFI_BSH_LEN[k as usize]
+    var i: i64 = 0
+    while i < len {
+        buf[i as usize] = PFI_BSH_BUF[(k * 384 + i) as usize]
+        i = i + 1
+    }
+    Name { buf: buf, len: len }
+}
+
+fn pfi_bsh_def_count(n: Name) -> i64 with Mut, Panic, Div {
+    var c: i64 = 0
+    var k: i64 = 0
+    while k < PFI_BSH_COUNT {
+        if pfi_bsh_name_eq(k, n) { c = c + 1 }
+        k = k + 1
+    }
+    c
+}
+
+// Does module `x` import `n` from module `d` (by name, or through a glob)?
+fn pfi_bsh_imports_from(items: Option<Box<ItemList> >, x: i64, n: Name, d: i64) -> bool with Mut, Panic, Div, Alloc {
+    var ord: i64 = 0
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if (*list).head.kind == ItemKind::ItemUse {
+                    if pfi_use_target(x, ord) == d {
+                        if (*list).head.use_glob { return true }
+                        if pfi_import_list_has((*list).head.use_items, n) { return true }
+                        if pfi_use_named(x, ord) && name_eq(ir_path_last_name((*list).head.use_path), n) { return true }
+                    }
+                    ord = ord + 1
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    false
+}
+
 // Note every symbol module `mod_idx` puts into the IR function table: every
 // top-level fn item (real, extern, kernel, BSS global) and every impl method
 // under its mangled `Type_method` name. `main` is skipped: it is never renamed and
 // every module may have one.
-fn pfi_census_items(items: Option<Box<ItemList> >, mod_idx: i64) -> bool with Mut, Panic, Div {
+fn pfi_census_items(items: Option<Box<ItemList> >, mod_idx: i64) -> bool with IO, Mut, Panic, Div, Alloc {
     var cur = items
     var going = true
     while going {
@@ -466,9 +597,29 @@ fn pfi_census_items(items: Option<Box<ItemList> >, mod_idx: i64) -> bool with Mu
             None => { going = false }
             Some(list) => {
                 if (*list).head.kind == ItemKind::ItemFn {
+                    if bsh_trace() {
+                        print("[bsh] census item mod=")
+                        print_int(mod_idx)
+                        print(" name=")
+                        pfi_print_name((*list).head.name)
+                        print(" vis=")
+                        print_int((*list).head.visibility.kind)
+                        print("\n")
+                    }
                     if !name_is_empty((*list).head.name) && !name_eq((*list).head.name, make_name("main")) {
                         if !pfi_census_note(ast_name_hash((*list).head.name), mod_idx) {
                             return false
+                        }
+                        // KL-21: a PUB fn the builtin shadow renamed carries the
+                        // `__user` suffix; record (base, definer) for the rebind.
+                        // Only pub: a private `fn measure` is renamed in its own
+                        // module too, and a glob importer of that module must not
+                        // be rebound to a symbol it cannot see.
+                        if (*list).head.visibility.kind == 1 {
+                            let bsh_base = bsh_strip_user_suffix((*list).head.name)
+                            if !name_is_empty(bsh_base) && bsh_name_is_intercepted_builtin(bsh_base) {
+                                if !pfi_bsh_add(bsh_base, mod_idx) { return false }
+                            }
                         }
                     }
                 } else if (*list).head.kind == ItemKind::ItemImpl {
@@ -572,6 +723,17 @@ fn pfi_mangle(n: Name, mod_idx: i64) -> Name with Mut, Panic, Div, Alloc {
     make_name(str_concat(base, suffix))
 }
 
+// The mangled spelling for table entry `idx`. Entries added by the builtin-shadow
+// rebind carry PFI_T_USER=1 and spell `__user`; every other entry spells
+// `__m<target module>` via pfi_mangle.
+fn pfi_mangle_entry(idx: i64) -> Name with Mut, Panic, Div, Alloc {
+    let saved = PFI_MANGLE_USER
+    if PFI_T_USER[idx as usize] == 1 { PFI_MANGLE_USER = 1 }
+    let m = pfi_mangle(pfi_table_name(idx), PFI_T_TGT[idx as usize])
+    PFI_MANGLE_USER = saved
+    m
+}
+
 // Exact comparison of table slot `idx` with `n` (full bytes).
 fn pfi_table_eq(idx: i64, n: Name) -> bool with Mut, Panic, Div {
     if PFI_T_LEN[idx as usize] != n.len { return false }
@@ -640,6 +802,7 @@ fn pfi_table_add(programs: &! [Program; 256], count: i64, n: Name, mod_idx: i64,
     PFI_T_REASON[idx as usize] = 0
     PFI_T_TGT[idx as usize] = mod_idx
     PFI_T_DEF[idx as usize] = 1
+    PFI_T_USER[idx as usize] = 0
     let base = idx * 384
     var k: i64 = 0
     while k < n.len {
@@ -708,7 +871,7 @@ fn pfi_build_table(programs: &! [Program; 256], count: i64, items: Option<Box<It
 
 // Pub phase: add `n` -> `n__m<tgt>` to this module's table. is_def = 1 when the
 // entry renames this module's OWN plain-pub definition (tgt == PFI_CUR_MOD).
-fn pfi_table_add_pub(n: Name, tgt: i64, is_def: i64) with Mut, Panic, Div, Alloc {
+fn pfi_table_add_pub(n: Name, tgt: i64, is_def: i64, user: i64) with Mut, Panic, Div, Alloc {
     if pfi_table_find_name(n) >= 0 { return }
     if PFI_T_COUNT >= PFI_T_MAX {
         PFI_T_OVERFLOW = 1
@@ -721,6 +884,7 @@ fn pfi_table_add_pub(n: Name, tgt: i64, is_def: i64) with Mut, Panic, Div, Alloc
     PFI_T_REASON[idx as usize] = 0
     PFI_T_TGT[idx as usize] = tgt
     PFI_T_DEF[idx as usize] = is_def
+    PFI_T_USER[idx as usize] = user
     let base = idx * 384
     var k: i64 = 0
     while k < n.len {
@@ -1216,14 +1380,14 @@ fn pfi_rename_expr_node(p: *mut Expr) with Mut, Panic, Div, Alloc {
     if (*p).kind == ExprKind::ExprIdent {
         let idx = pfi_table_find_name((*p).name)
         if pfi_entry_rewritable(idx) {
-            let m = pfi_mangle((*p).name, PFI_T_TGT[idx as usize])
+            let m = pfi_mangle_entry(idx)
             if m.len > 0 { (*p).name = m }
         }
     } else if (*p).kind == ExprKind::ExprPath && (*p).path.seg_count == 1 {
         let single = Name { buf: (*p).path.segments.head_buf, len: (*p).path.segments.head_len }
         let idx = pfi_table_find_name(single)
         if pfi_entry_rewritable(idx) {
-            let m = pfi_mangle(single, PFI_T_TGT[idx as usize])
+            let m = pfi_mangle_entry(idx)
             if m.len > 0 {
                 (*p).path = AstPath {
                     segments: StringList { head_buf: m.buf, head_len: m.len, tail: None },
@@ -1250,14 +1414,14 @@ fn pfi_rename_args_head(node: *mut ExprList) with Mut, Panic, Div, Alloc {
     if (*node).head.kind == ExprKind::ExprIdent {
         let idx = pfi_table_find_name((*node).head.name)
         if pfi_entry_rewritable(idx) {
-            let m = pfi_mangle((*node).head.name, PFI_T_TGT[idx as usize])
+            let m = pfi_mangle_entry(idx)
             if m.len > 0 { (*node).head.name = m }
         }
     } else if (*node).head.kind == ExprKind::ExprPath && (*node).head.path.seg_count == 1 {
         let single = Name { buf: (*node).head.path.segments.head_buf, len: (*node).head.path.segments.head_len }
         let idx = pfi_table_find_name(single)
         if pfi_entry_rewritable(idx) {
-            let m = pfi_mangle(single, PFI_T_TGT[idx as usize])
+            let m = pfi_mangle_entry(idx)
             if m.len > 0 {
                 (*node).head.path = AstPath {
                     segments: StringList { head_buf: m.buf, head_len: m.len, tail: None },
@@ -1280,9 +1444,11 @@ fn pfi_rename_args_head(node: *mut ExprList) with Mut, Panic, Div, Alloc {
 
 // The definition: Item.name and FnDef.name. Private phase: private real fns.
 // Pub phase: this module's own plain-pub real fn whose entry renames it.
-fn pfi_rename_item_def(node: *mut ItemList) with Mut, Panic, Div, Alloc {
+fn pfi_rename_item_def(node: *mut ItemList) with IO, Mut, Panic, Div, Alloc {
     if (*node).head.kind != ItemKind::ItemFn { return }
-    if PFI_PHASE == 1 {
+    if PFI_ANY_VIS == 1 {
+        if (*node).head.visibility.kind != 0 && (*node).head.visibility.kind != 1 { return }
+    } else if PFI_PHASE == 1 {
         if (*node).head.visibility.kind != 1 { return }
     } else {
         if (*node).head.visibility.kind != 0 { return }
@@ -1293,7 +1459,7 @@ fn pfi_rename_item_def(node: *mut ItemList) with Mut, Panic, Div, Alloc {
     if PFI_T_UNSAFE[idx as usize] != 0 { return }
     if PFI_T_DEF[idx as usize] != 1 { return }
     if PFI_T_TGT[idx as usize] != PFI_CUR_MOD { return }
-    let m = pfi_mangle((*node).head.name, PFI_CUR_MOD)
+    let m = pfi_mangle_entry(idx)
     if m.len <= 0 { return }
     (*node).head.name = m
     let fdp = pfi_fn_def_ptr((*node).head.fn_def)
@@ -1301,6 +1467,13 @@ fn pfi_rename_item_def(node: *mut ItemList) with Mut, Panic, Div, Alloc {
         (*fdp).name = m
     }
     PFI_RENAMED_TOTAL = PFI_RENAMED_TOTAL + 1
+    if bsh_trace() {
+        print("[bsh] shadow renamed=")
+        pfi_print_name(m)
+        print(" vis=")
+        print_int((*node).head.visibility.kind)
+        print("\n")
+    }
     if PFI_PHASE == 1 {
         PFI_PUB_RENAMED = PFI_PUB_RENAMED + 1
     }
@@ -1318,7 +1491,7 @@ fn pfi_rewrite_use(node: *mut ItemList, ord: i64) with Mut, Panic, Div, Alloc {
         while ip != 0 as *mut ImportItemList {
             let idx = pfi_table_find_name((*ip).head)
             if idx >= 0 && PFI_T_UNSAFE[idx as usize] == 0 && PFI_T_DEF[idx as usize] == 0 && PFI_T_TGT[idx as usize] == tgt {
-                let m = pfi_mangle((*ip).head, tgt)
+                let m = pfi_mangle_entry(idx)
                 if m.len > 0 { (*ip).head = m }
             }
             ip = pfi_importlist_next(ip)
@@ -1329,7 +1502,7 @@ fn pfi_rewrite_use(node: *mut ItemList, ord: i64) with Mut, Panic, Div, Alloc {
         let last = ir_path_last_name((*node).head.use_path)
         let idx2 = pfi_table_find_name(last)
         if idx2 >= 0 && PFI_T_UNSAFE[idx2 as usize] == 0 && PFI_T_DEF[idx2 as usize] == 0 && PFI_T_TGT[idx2 as usize] == tgt {
-            let m2 = pfi_mangle(last, tgt)
+            let m2 = pfi_mangle_entry(idx2)
             if m2.len > 0 {
                 let sp = pfi_sl_ptr((*node).head.use_path.segments.tail)
                 pfi_sl_set_last(sp, m2)
@@ -1812,13 +1985,13 @@ fn pfi_pub_module(programs: &! [Program; 256], count: i64, x: i64) -> bool with 
                     print("`) is already a symbol, or does not fit.\n")
                     return false
                 }
-                pfi_table_add_pub(n, x, 1)
+                pfi_table_add_pub(n, x, 1, 0)
             }
         } else if !pfi_items_define_name(prog.items, n) {
             let t = pfi_resolve_import(programs, prog.items, x, k, n)
             if t == 0 - 2 { return false }
             if t >= 0 && t != d1 {
-                pfi_table_add_pub(n, t, 0)
+                pfi_table_add_pub(n, t, 0, 0)
             }
         }
         var qi: i64 = 0
@@ -1835,6 +2008,50 @@ fn pfi_pub_module(programs: &! [Program; 256], count: i64, x: i64) -> bool with 
             qi = qi + 1
         }
         k = k + 1
+    }
+    // KL-21: rebind importers of a pub fn the builtin shadow renamed to
+    // `<base>__user`. Only an unambiguous definer is rebound: with two modules
+    // defining the same intercepted name, the same-name pub phase above has
+    // already renamed them `__m<idx>`, and this table must not fight it.
+    var bsh_k: i64 = 0
+    while bsh_k < PFI_BSH_COUNT {
+        let bsh_base = pfi_bsh_name(bsh_k)
+        let bsh_d = PFI_BSH_DEF[bsh_k as usize]
+        if bsh_trace() {
+            print("[bsh] mod=")
+            print_int(x)
+            print(" base=")
+            pfi_print_name(bsh_base)
+            print(" definer_mod=")
+            print_int(bsh_d)
+            print(" definers=")
+            print_int(pfi_bsh_def_count(bsh_base))
+            print(" imports_definer=")
+            if pfi_bsh_imports_from(prog.items, x, bsh_base, bsh_d) { print("1") } else { print("0") }
+            print("\n")
+        }
+        // Two loaded modules exporting the same intercepted name: the renames
+        // cannot be told apart at a bare call site, and the builtin is
+        // intercepted before any user signature, so fail closed with the real
+        // cause instead of letting the call type as Knowledge. Only when this
+        // module actually imports the name: merely loading both modules is fine
+        // (the pub phase renames the second `X__user` apart).
+        if pfi_bsh_def_count(bsh_base) > 1 && pfi_bsh_imports_from(prog.items, x, bsh_base, bsh_d) {
+            print("error[builtin_shadow]: `")
+            pfi_print_name(bsh_base)
+            print("` is exported by more than one loaded module and\n")
+            print("  ")
+            pfi_print_module(programs, x)
+            print(" imports it, but a bare call can only bind to one of them -- the\n")
+            print("  compiler's builtin is intercepted first. Rename one of the functions.\n")
+            return false
+        }
+        if x != bsh_d && pfi_bsh_def_count(bsh_base) == 1 {
+            if pfi_bsh_imports_from(prog.items, x, bsh_base, bsh_d) {
+                pfi_table_add_pub(bsh_base, bsh_d, 0, 1)
+            }
+        }
+        bsh_k = bsh_k + 1
     }
     if PFI_T_OVERFLOW != 0 {
         pfi_pub_capacity("more than 512 same-named pub fns to rebind in one module")
@@ -1855,7 +2072,7 @@ fn pfi_pub_module(programs: &! [Program; 256], count: i64, x: i64) -> bool with 
             print("  means the pub fn of ")
             pfi_print_module(programs, tgt)
             print(", which must be renamed to `")
-            let g = pfi_mangle(n2, tgt)
+            let g = pfi_mangle_entry(i)
             if g.len > 0 { pfi_print_name(g) } else { print("<too long>") }
             print("`,\n")
             if PFI_T_REASON[i as usize] == PFI_R_GEN_SHADOWED {
@@ -1899,7 +2116,16 @@ fn pfi_pub_phase(programs: &! [Program; 256], count: i64) -> bool with IO, Mut, 
         pfi_pub_capacity("more than 512 same-named pub fns")
         return false
     }
-    if PFI_PC_COUNT == 0 { return true }
+    if bsh_trace() {
+        print("[bsh] pub_phase: pc=")
+        print_int(PFI_PC_COUNT)
+        print(" bsh=")
+        print_int(PFI_BSH_COUNT)
+        print(" um_valid=")
+        print_int(PFI_UM_VALID)
+        print("\n")
+    }
+    if PFI_PC_COUNT == 0 && PFI_BSH_COUNT == 0 { return true }
     if PFI_UM_OVERFLOW != 0 {
         pfi_pub_capacity("the `use` map is full (32768 items)")
         return false
@@ -1963,6 +2189,8 @@ pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64
     PFI_LEFT_TOTAL = 0
     PFI_SK_COUNT = 0
     PFI_T_COUNT = 0
+    PFI_BSH_COUNT = 0
+    PFI_BSH_ANY = 0
 
     var i: i64 = 0
     while i < count && i < 256 {
@@ -1975,7 +2203,20 @@ pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64
         }
         i = i + 1
     }
-    if PFI_DUP_ANY == 0 {
+    if bsh_trace() {
+        print("[bsh] apply: count=")
+        print_int(count)
+        print(" dup_any=")
+        print_int(PFI_DUP_ANY)
+        print(" bsh_any=")
+        print_int(PFI_BSH_ANY)
+        print(" bsh_count=")
+        print_int(PFI_BSH_COUNT)
+        print(" um_valid=")
+        print_int(PFI_UM_VALID)
+        print("\n")
+    }
+    if PFI_DUP_ANY == 0 && PFI_BSH_ANY == 0 {
         PFI_UM_VALID = 0
         return 0
     }
@@ -2358,25 +2599,37 @@ pub fn module_struct_identity_check(programs: &! [Program; 256], count: i64) -> 
 // would have emitted the builtin. Measured on the shipped Madaros for 65 names;
 // see docs/compiler/KNOWN_LIMITATIONS.md (KL-21).
 //
-// THE FIX. A module's own PRIVATE definition shadows the builtin inside that
-// module. Right after a module is parsed (load_module_file), every private real
-// fn whose name is an intercepted builtin is renamed to `<name>__user`, together
-// with every reference to it in that module, reusing the private_fn_identity
-// walkers (same in-place rewrite, same refusal rules). Neither the checker nor
-// the lowerer then sees the builtin spelling, so the user function is called.
-// Other modules are untouched: a private fn is not visible to them, and they keep
-// the builtin.
+// THE FIX. A module's own definition shadows the builtin inside that module.
+// Right after a module is parsed (load_module_file), every real fn whose name is
+// an intercepted builtin -- private or plain `pub` -- is renamed to
+// `<name>__user`, together with every reference to it in that module, reusing the
+// private_fn_identity walkers (same in-place rewrite, same refusal rules).
+// Neither the checker nor the lowerer then sees the builtin spelling, so the user
+// function is called.
+//
+// A private fn is not visible to other modules, and they keep the builtin. A
+// `pub` fn is: private_fn_identity_apply records every (base name, definer) pair
+// this pass produced and, in the #2773 pub phase, rebinds each importer that
+// spells the base name in a `use` item -- by name or through a glob -- to the
+// renamed symbol, through the same PFI_T table (PFI_T_USER marks the entries that
+// spell `__user` instead of `__m<idx>`). A module that calls the name without
+// importing it still gets the builtin.
 //
 // REFUSED (fail closed, error[builtin_shadow]): the same shapes
 // private_fn_identity cannot prove -- a local, parameter or pattern spelled like
 // the fn, or a bare value use in a match-arm body / struct-literal field -- and a
 // generated name that already exists. The message says to rename the function.
 //
-// NOT COVERED: `pub fn measure` keeps today's behaviour (the builtin wins at
-// bare-name call sites). Renaming an exported fn would break importers that
-// spell it. Documented in KNOWN_LIMITATIONS.
+// NOT COVERED: the lean_single seed (unchanged -- a fix there needs a seed
+// refresh). Two *loaded* modules exporting the same intercepted name and an
+// importer of it cannot be told apart at a bare call site, so the pub phase
+// refuses with error[builtin_shadow] instead of letting the call type as
+// `Knowledge`; merely loading both is fine (the second `__user` name is renamed
+// apart by the same-name rule). Documented in KNOWN_LIMITATIONS.
 //
 // OFF SWITCH: SOUNIO_DISABLE_BUILTIN_SHADOW=1.
+// TRACE: SOUNIO_TRACE_BUILTIN_SHADOW=1 prints what this pass renamed, what the
+// identity census recorded, and how the pub phase rebound each importer.
 
 fn bsh_disabled() -> bool with IO, Mut, Panic, Div {
     if BSH_OFF_CHECKED == 0 {
@@ -2485,7 +2738,7 @@ pub fn builtin_shadow_apply_items(items: Option<Box<ItemList> >) -> i64 with IO,
         match cur {
             None => { going = false }
             Some(list) => {
-                if pfi_item_real_fn((*list).head) && (*list).head.visibility.kind == 0 {
+                if pfi_item_real_fn((*list).head) && ((*list).head.visibility.kind == 0 || (*list).head.visibility.kind == 1) {
                     if bsh_name_is_intercepted_builtin((*list).head.name) {
                         if pfi_table_find_name((*list).head.name) < 0 && PFI_T_COUNT < PFI_T_MAX {
                             let n = (*list).head.name
@@ -2494,6 +2747,15 @@ pub fn builtin_shadow_apply_items(items: Option<Box<ItemList> >) -> i64 with IO,
                             PFI_T_LEN[idx as usize] = n.len
                             PFI_T_UNSAFE[idx as usize] = 0
                             PFI_T_REASON[idx as usize] = 0
+                            // These entries ARE definitions in this module (PFI_CUR_MOD
+                            // is 0 for every module this pass runs on) and spell
+                            // `__user`. Without DEF/TGT the #2773 guards in
+                            // pfi_rename_item_def would skip the definition and leave
+                            // only its references renamed -- `use of undeclared
+                            // variable <name>__user`.
+                            PFI_T_TGT[idx as usize] = 0
+                            PFI_T_DEF[idx as usize] = 1
+                            PFI_T_USER[idx as usize] = 1
                             var k: i64 = 0
                             while k < n.len {
                                 PFI_T_BUF[(idx * 384 + k) as usize] = n.buf[k as usize]
@@ -2539,7 +2801,9 @@ pub fn builtin_shadow_apply_items(items: Option<Box<ItemList> >) -> i64 with IO,
     }
     let before = PFI_RENAMED_TOTAL
     PFI_MODE = 1
+    PFI_ANY_VIS = 1
     pfi_items(items)
+    PFI_ANY_VIS = 0
     PFI_MODE = 0
     PFI_MANGLE_USER = 0
     PFI_T_COUNT = 0

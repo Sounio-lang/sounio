@@ -7,19 +7,22 @@ validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.cookbook
 -->
 
-> **Status**: Production | **Last validated**: 2026-04-12 | **Source**: `tests/run-pass/`
+> **Status**: mixed | **Last validated**: unvalidated except the hello below | **Source**: `examples/hello.sio`
 
 # Sounio Cookbook
 
-Task-oriented recipes. Every example is derived from or verified against `tests/run-pass/`.
+Task-oriented recipes. A block that names a `tests/run-pass/` file was not re-run on 2026-10-15. Do not treat an uncited block as the contract. The current walkthrough is [guide/getting-started.md](guide/getting-started.md).
 
 ---
 
 ## Hello World
 
+Same program as `examples/hello.sio`. `souc run` executes it on Linux x86-64. Measured 2026-10-15.
+
 ```sio
-fn main() with IO {
-    println("Hello, Sounio!")
+fn main() -> i32 with IO {
+    println("Hello, Sounio")
+    return 0
 }
 ```
 

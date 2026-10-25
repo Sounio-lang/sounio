@@ -21,9 +21,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.quick-start-gu
 > canonical `epistemic::knowledge` API. `mul_epistemic` and `fuse_measurements`
 > are part of `epistemic::lib` but are not exercised by that test
 > (`fuse_measurements` is private; `mul_epistemic` is public but untested).
-> `with_confidence` operators and
-> units-as-type-parameters are aspirational in source and absent from the
-> checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
+> `with_confidence` operators are not the checked public surface.
+> Derived unit annotations are closed on the ledger (KL-13). Default Madaros
+> still rejects `let d: m = 100.0` with `error[E001]` (#2752). `print` and
+> `println` take one argument; `println("...", a, b)` is `error[E010]`.
 
 > **Other guides**: [LLM Quick Start](guide/SOUNIO_QUICK_START.md) (for AI assistants) | [General Getting Started](guide/getting-started.md) | [Conservative contract](guide/MINIMUM_VIABLE_SOUNIO.md)
 
@@ -69,29 +70,22 @@ use epistemic::knowledge::{
 }
 
 fn main() -> i32 with IO, Mut, Div, Panic {
-    // Every measurement knows its uncertainty (canonical free-fn form).
     let temperature = ep_measured(25.5, 0.3)
     let pressure = ep_measured(101.3, 0.5)
-
-    // Multiplication propagates variance (GUM δ-method, uncorrelated).
     let combined = ep_mul(&temperature, &pressure)
-
-    println("Temperature: {} ± {} (conf {}/1000)",
-            ep_val(&temperature), ep_std(&temperature),
-            ep_confidence(&temperature))
-    println("Pressure: {} ± {} (conf {}/1000)",
-            ep_val(&pressure), ep_std(&pressure),
-            ep_confidence(&pressure))
-    println("Combined: {} ± {} (conf {}/1000)",
-            ep_val(&combined), ep_std(&combined),
-            ep_confidence(&combined))
-
-    0
+    print("combined = ")
+    print_f64(ep_val(&combined))
+    print(" std = ")
+    print_f64(ep_std(&combined))
+    println("")
+    return 0
 }
 ```
 
-3. **Run it**:
+3. **Run it** on Linux x86-64. The committed `bin/souc` is a Linux ELF and does not run on macOS.
 ```bash
+export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
+bin/souc check hello_uncertainty.sio
 bin/souc run hello_uncertainty.sio
 ```
 
@@ -114,10 +108,9 @@ use epistemic::knowledge::{ep_is_credible, ep_confidence}
 
 // Only proceed if we are confident enough (integer threshold 950 ≈ 95%).
 if ep_is_credible(&concentration, 950) {
-    administer_drug(concentration)
+    println("credible")
 } else {
-    println("Warning: Low confidence (current: {}/1000)", ep_confidence(&concentration))
-    request_more_measurements()
+    println("low confidence")
 }
 ```
 
@@ -133,7 +126,7 @@ fn calculate_auc(dose: Epistemic, clearance: Epistemic) -> Epistemic with IO, Di
     let auc = ep_div(&dose, &clearance)
 
     if !ep_is_credible(&auc, 800) {
-        println("Warning: AUC low confidence ({}/1000)", ep_confidence(&auc))
+        println("AUC low confidence")
     }
 
     return auc

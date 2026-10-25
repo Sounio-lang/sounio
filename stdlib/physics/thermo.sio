@@ -1,17 +1,11 @@
-// stdlib/physics/thermo.sio — Thermodynamics (real E2E, no stubs)
-//
-// Real implementations:
-// - Ideal gas law PV = nRT with propagation
-// - First law DeltaU = Q - W
-// - Carnot efficiency
-// - Entropy change for ideal gas isothermal
-// - Boltzmann entropy S = k ln W (simple)
-//
-// All real formulas + GUM unc.
+// Legacy thermodynamic helpers with a checked isothermal entropy adapter.
+// Only isothermal_entropy delegates to the checked independent first-order model.
+// Other uncertainty formulas below remain legacy, not general GUM certification.
+// See ENTROPY.md for units, statuses and model limits.
 
 module physics::thermo
+use physics::entropy::{isothermal_entropy_independent}
 
-use units::{quantity_new, dim_energy, dim_pressure, dim_volume, Quantity};
 use constants::physical::{gas_constant_approx, boltzmann_constant_approx};
 
 fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
@@ -83,14 +77,12 @@ fn thermo_pow(x: f64, p: f64) -> f64 with Mut, Div, Panic {
     thermo_exp(p * thermo_ln(x))
 }
 
-// Real constants from stdlib
-let R: f64 = gas_constant_approx();
-let KB: f64 = boltzmann_constant_approx();
+// Load shared constants in consumers; avoid imported dynamic global initializers.
 
 // Ideal gas law: P V = n R T   solve for e.g. P
 pub fn ideal_gas_p(n: f64, un: f64, t: f64, ut: f64, v: f64, uv: f64) -> (f64, f64) {
     if v <= 0.0 { return (0.0, 0.0); }
-    let p_val = n * R * t / v;
+    let p_val = n * gas_constant_approx() * t / v;
     // p ~ n t / v
     let rel_un = if n != 0.0 { un / n } else { 0.0 };
     let rel_ut = if t != 0.0 { ut / t } else { 0.0 };
@@ -101,7 +93,7 @@ pub fn ideal_gas_p(n: f64, un: f64, t: f64, ut: f64, v: f64, uv: f64) -> (f64, f
 }
 
 // First law: Delta U = Q - W   (sign convention work by system)
-pub fn first_law_delta_u(q: f64, uq: f64, w: f64, uw: f64) -> (f64, f64) {
+pub fn first_law_delta_u(q: f64, uq: f64, w: f64, uw: f64) -> (f64, f64) with Mut, Div {
     let du_val = q - w;
     let sumv = uq*uq + uw*uw;
     let udu = if sumv <= 0.0 { 0.0 } else {
@@ -122,45 +114,32 @@ pub fn carnot_efficiency(th: f64, uth: f64, tc: f64, utc: f64) -> (f64, f64) {
     (eta_val, u_eta)
 }
 
-// Isothermal entropy change for ideal gas Delta S = n R ln(Vf/Vi)
-pub fn isothermal_entropy(n: f64, un: f64, vf: f64, uvf: f64, vi: f64, uvi: f64) -> (f64, f64) {
-    if vi <= 0.0 || vf <= 0.0 { return (0.0, 0.0); }
-    // Real E2E: DeltaS = nR ln(Vf/Vi). ln approx with series for E2E no external
-    let ratio = vf / vi;
-    let ln_ratio = {
-        let z = (ratio-1.0)/(ratio+1.0);
-        var sum = z; var term = z; var k=1;
-        while k < 15 {
-            term = term * z * z;
-            sum = sum + term / (2.0*(k as f64) + 1.0);
-            k = k + 1;
-        }
-        2.0 * sum
-    };
-    let s_val = n * R * ln_ratio;
-    let rel_un = if n!=0.0 { un/n } else {0.0};
-    let rel_uv = if vf != vi { (uvf/vf + uvi/vi) } else {0.0};
-    let us = abs_f64(s_val) * (rel_un + rel_uv);
-    (s_val, us)
+// Compatibility adapter: independent first-order standard uncertainties.
+// Amount in mol, both volumes in the same unit; output entropy in J/K.
+// Negative uncertainty sentinel means unavailable; prefer the typed core.
+pub fn isothermal_entropy(n:f64,un:f64,vf:f64,uvf:f64,vi:f64,uvi:f64)->(f64,f64) with Mut,Div,Panic {
+ let result=isothermal_entropy_independent(n,un,vf,uvf,vi,uvi)
+ if result.status!=0 {return (0.0,-1.0)}
+ return (result.delta_s,result.standard_uncertainty)
 }
 
 // Boltzmann S = k ln W
 
-pub fn boltzmann_entropy(w: f64, uw: f64) -> (f64, f64) {
-    if w <= 1.0 { return (0.0, 0.0); }
-    // Real: S = k ln(W). ln computed via Taylor for this E2E impl (around 1, but use series for w>1)
-    let lnw = {
-        let z = (w - 1.0) / (w + 1.0);
-        var sum = z; var term = z; var k = 1;
-        while k < 20 {
-            term = term * z * z;
-            sum = sum + term / (2.0 * (k as f64) + 1.0);
-            k = k + 1;
-        }
-        2.0 * sum
-    };
-    let s_val = KB * lnw;
-    let us = KB * (uw / w);
+pub fn boltzmann_entropy(w: f64, uw: f64) -> (f64, f64) with Mut, Div {
+    if w <= 1.0 { return (0.0, 0.0) }
+    // S = k ln(W). Series on (w-1)/(w+1); a block expression is not a reliable tail here.
+    let z = (w - 1.0) / (w + 1.0)
+    var sum = z
+    var term = z
+    var k: i64 = 1
+    while k < 20 {
+        term = term * z * z
+        sum = sum + term / (2.0 * (k as f64) + 1.0)
+        k = k + 1
+    }
+    let lnw = 2.0 * sum
+    let s_val = boltzmann_constant_approx() * lnw
+    let us = boltzmann_constant_approx() * (uw / w)
     (s_val, us)
 }
 
@@ -187,8 +166,8 @@ pub fn isobaric_work(P: f64, uP: f64, V1: f64, uV1: f64, V2: f64, uV2: f64) -> (
 
 // DEEPER: Heat capacity at const volume for ideal gas (monoatomic 3/2 nR)
 pub fn cv_mono(n: f64, un: f64) -> (f64, f64) {
-    let cv_val = 1.5 * n * R;
-    let ucv = 1.5 * un * R;
+    let cv_val = 1.5 * n * gas_constant_approx();
+    let ucv = 1.5 * un * gas_constant_approx();
     (cv_val, ucv)
 }
 
@@ -199,7 +178,7 @@ pub fn test_ideal_gas() -> bool {
     check_near(p, 103932.5, 200.0) && up > 0.0
 }
 
-pub fn test_first_law() -> bool {
+pub fn test_first_law() -> bool with Mut, Div {
     let (du, udu) = first_law_delta_u(100.0, 1.0, 40.0, 2.0);
     check_near(du, 60.0, 0.1) && udu > 2.0
 }
@@ -209,7 +188,7 @@ pub fn test_carnot() -> bool {
     check_near(eta, 0.5, 0.01) && ueta > 0.0
 }
 
-pub fn test_boltzmann() -> bool {
+pub fn test_boltzmann() -> bool with Mut, Div {
     let (s, us) = boltzmann_entropy(2.0, 0.0);
     check_near(s, 9.569e-24, 1e-26)
 }

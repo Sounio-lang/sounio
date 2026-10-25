@@ -73,13 +73,63 @@ case "$GIT_COMMON_DIR" in
   *) GIT_COMMON_DIR="$(cd "$WORKTREE/$GIT_COMMON_DIR" && pwd -P)" ;;
 esac
 
-REPO_KEY="$(printf '%s' "$GIT_COMMON_DIR" | cksum | awk '{print $1}')"
-STATE_DIR="${SOUNIO_COORD_DIR:-${TMPDIR:-/tmp}/sounio-coord/$REPO_KEY}"
+# The repository identity is the normalised `origin` URL, so every clone of
+# the same repository (not only the worktrees of one clone) shares one bus.
+# Without an `origin`, fall back to the shared Git directory.
+normalize_origin() {
+  local url="$1"
+  url="${url%/}"
+  url="${url%.git}"
+  case "$url" in
+    *://*) url="${url#*://}"; url="${url#*@}" ;;   # https://[user@]host/owner/repo
+    *@*:*) url="${url#*@}"; url="${url/://}" ;;     # git@host:owner/repo
+  esac
+  printf '%s' "$url" | tr '[:upper:]' '[:lower:]'
+}
+ORIGIN_URL="$(git -C "$WORKTREE" remote get-url origin 2>/dev/null || true)"
+LEGACY_REPO_KEY="$(printf '%s' "$GIT_COMMON_DIR" | cksum | awk '{print $1}')"
+if [[ -n "$ORIGIN_URL" ]]; then
+  REPO_IDENTITY="$(normalize_origin "$ORIGIN_URL")"
+else
+  REPO_IDENTITY="$GIT_COMMON_DIR"
+fi
+REPO_KEY="$(printf '%s' "$REPO_IDENTITY" | cksum | awk '{print $1}')"
+# A fixed per-user location: TMPDIR differs between applications on macOS,
+# which used to give each tool its own invisible bus.
+STATE_DIR="${SOUNIO_COORD_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/sounio-coord/$REPO_KEY}"
 CLAIMS_DIR="$STATE_DIR/claims"
 MESSAGES_DIR="$STATE_DIR/messages"
 ACKS_DIR="$STATE_DIR/message-acks"
 EVENT_LOG="$STATE_DIR/events.log"
 mkdir -p "$CLAIMS_DIR" "$MESSAGES_DIR" "$ACKS_DIR"
+
+# One-time, idempotent migration from the old TMPDIR-based locations of this
+# clone. Existing files are never overwritten (cp -n).
+migrate_legacy_state() {
+  [[ -z "${SOUNIO_COORD_DIR:-}" ]] || return 0
+  local marker="$STATE_DIR/.migrated-$LEGACY_REPO_KEY" base legacy sub
+  [[ -e "$marker" ]] && return 0
+  local bases=("${TMPDIR:-/tmp}" /tmp)
+  if command -v getconf >/dev/null 2>&1; then
+    base="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || true)"
+    [[ -n "$base" ]] && bases+=("$base")
+  fi
+  local seen=" "
+  for base in "${bases[@]}"; do
+    legacy="${base%/}/sounio-coord/$LEGACY_REPO_KEY"
+    [[ -d "$legacy" ]] || continue
+    legacy="$(cd "$legacy" && pwd -P)"
+    [[ "$legacy" != "$STATE_DIR" && "$seen" != *" $legacy "* ]] || continue
+    seen+="$legacy "
+    for sub in claims messages message-acks; do
+      [[ -d "$legacy/$sub" ]] || continue
+      cp -n "$legacy/$sub"/* "$STATE_DIR/$sub/" 2>/dev/null || true
+    done
+    [[ -f "$legacy/events.log" ]] && cat "$legacy/events.log" >> "$STATE_DIR/events.log"
+  done
+  : > "$marker"
+}
+migrate_legacy_state
 
 NOW_EPOCH="$(date +%s)"
 NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -185,6 +235,7 @@ load_claim() {
   C_LAST_EPOCH=0
   C_TTL=0
   C_INTENT=''
+  C_SHARED=0
   C_FILES=()
 
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -200,6 +251,7 @@ load_claim() {
       last_seen_epoch=*) C_LAST_EPOCH="${line#last_seen_epoch=}" ;;
       ttl_seconds=*) C_TTL="${line#ttl_seconds=}" ;;
       intent=*) C_INTENT="${line#intent=}" ;;
+      shared_worktree=*) C_SHARED="${line#shared_worktree=}" ;;
       file=*) C_FILES+=("${line#file=}") ;;
     esac
   done < "$claim_file"
@@ -260,6 +312,7 @@ write_claim() {
     printf 'last_seen_epoch=%s\n' "$C_LAST_EPOCH"
     printf 'ttl_seconds=%s\n' "$C_TTL"
     printf 'intent=%s\n' "$C_INTENT"
+    [[ "${C_SHARED:-0}" == 1 ]] && printf 'shared_worktree=1\n'
     for file in "${C_FILES[@]}"; do
       [[ -n "$file" ]] && printf 'file=%s\n' "$file"
     done
@@ -350,6 +403,19 @@ worktree_in_list() {
   return 1
 }
 
+# Two agents in one worktree, or on one branch, interleave commits even when
+# their files are disjoint. Detached HEADs never collide by branch.
+# Uses the claim loaded by load_claim; sets PLACE_KIND and PLACE_VALUE.
+place_conflict() {
+  local agent="$1" worktree="$2" branch="$3"
+  [[ "${SHARED_WORKTREE:-0}" == 1 || "${C_SHARED:-0}" == 1 ]] && return 1
+  [[ "$C_AGENT" == "$agent" ]] && return 1
+  if [[ "$C_WORKTREE" == "$worktree" ]]; then PLACE_KIND=worktree; PLACE_VALUE="$C_WORKTREE"; return 0; fi
+  case "$branch" in ""|HEAD|detached*) return 1 ;; esac
+  if [[ "$C_BRANCH" == "$branch" ]]; then PLACE_KIND=branch; PLACE_VALUE="$C_BRANCH"; return 0; fi
+  return 1
+}
+
 claim_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' intent='' ttl="${SOUNIO_COORD_TTL_SECONDS:-14400}"
   local file claim_file existing old_file new_file conflict=0
@@ -361,6 +427,7 @@ claim_command() {
       --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
       --intent) require_arg "$1" "$2"; intent="$2"; shift 2 ;;
       --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
+      --shared-worktree) SHARED_WORKTREE=1; shift ;;
       --files)
         shift
         while (($#)); do files+=("$(normalize_path "$1")"); shift; done
@@ -400,8 +467,13 @@ claim_command() {
         fi
       done
     done
+    if place_conflict "$agent" "$WORKTREE" "$(current_branch)"; then
+      printf 'CONFLICT existing_claim=%s agent=%s lane=%s %s=%s requested_by=%s requested_lane=%s (pass --shared-worktree if intended)\n' \
+        "$C_ID" "$C_AGENT" "$C_LANE" "$PLACE_KIND" "$PLACE_VALUE" "$agent" "$lane" >&2
+      conflict=1
+    fi
   done
-  ((conflict == 0)) || die "requested file set overlaps an active claim"
+  ((conflict == 0)) || die "requested files, worktree or branch overlap an active claim"
 
   C_AGENT="$agent"
   C_LANE="$lane"
@@ -413,6 +485,7 @@ claim_command() {
   C_LAST_EPOCH="$NOW_EPOCH"
   C_TTL="$ttl"
   C_INTENT="$intent"
+  C_SHARED="${SHARED_WORKTREE:-0}"
   C_FILES=("${files[@]}")
   C_ID="$(claim_id_for "$agent" "$lane")"
   write_claim "$claim_file"
@@ -435,6 +508,7 @@ scope_command() {
       --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
       --intent) require_arg "$1" "$2"; intent="$2"; shift 2 ;;
       --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
+      --shared-worktree) SHARED_WORKTREE=1; shift ;;
       --files)
         shift
         while (($#)); do files+=("$(normalize_path "$1")"); shift; done
@@ -507,8 +581,13 @@ scope_command() {
         fi
       done
     done
+    if place_conflict "$agent" "$WORKTREE" "$(current_branch)"; then
+      printf 'CONFLICT existing_claim=%s agent=%s lane=%s %s=%s requested_by=%s requested_lane=%s (pass --shared-worktree if intended)\n' \
+        "$C_ID" "$C_AGENT" "$C_LANE" "$PLACE_KIND" "$PLACE_VALUE" "$agent" "$lane" >&2
+      conflict=1
+    fi
   done
-  ((conflict == 0)) || die "requested file set overlaps an active claim"
+  ((conflict == 0)) || die "requested files, worktree or branch overlap an active claim"
 
   C_ID="$requested_id"
   C_AGENT="$agent"
@@ -521,6 +600,7 @@ scope_command() {
   C_LAST_EPOCH="$NOW_EPOCH"
   C_TTL="$ttl"
   C_INTENT="$intent"
+  C_SHARED="${SHARED_WORKTREE:-0}"
   C_FILES=("${merged_files[@]}")
   write_claim "$claim_file"
   append_event "$event"
@@ -604,6 +684,7 @@ send_command() {
       --kind) require_arg "$1" "$2"; kind="$2"; shift 2 ;;
       --message) require_arg "$1" "$2"; message="$2"; shift 2 ;;
       --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
+      --shared-worktree) SHARED_WORKTREE=1; shift ;;
       -h|--help) usage; return 0 ;;
       *) die "unknown send option: $1" ;;
     esac
@@ -814,6 +895,7 @@ status_command() {
       load_claim "$other_file"
       claim_expired && continue
       second_files=("${C_FILES[@]}")
+      local second_agent="$C_AGENT" second_wt="$C_WORKTREE" second_br="$C_BRANCH" second_shared="${C_SHARED:-0}"
       load_claim "$existing"
       first_files=("${C_FILES[@]}")
       local_conflict=0
@@ -822,6 +904,7 @@ status_command() {
           if paths_overlap "$file" "$wt"; then local_conflict=1; fi
         done
       done
+      if SHARED_WORKTREE="$second_shared" place_conflict "$second_agent" "$second_wt" "$second_br"; then local_conflict=1; fi
       if ((local_conflict)); then
         load_claim "$existing"
         printf 'CONFLICT claim_id=%s agent=%s lane=%s with_claim=%s\n' \
