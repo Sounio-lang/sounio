@@ -41,6 +41,7 @@ done
 step cpp.toolchain "${CXX:-g++}" --version
 step cpp.compile timeout 180 "${CXX:-g++}" -std=c++23 -O2 -Wall -Wextra -Werror tests/reference/math_numdiff_reference.cpp -o "$out/reference"
 sha256sum "$out/reference" > "$out/REFERENCE.sha256"
+sha256sum "$out/reference" >> "$out/ELFS.sha256"
 step concordance "$out/reference" "$out/checked.native.stdout"
 step roots.concordance "$out/reference" --roots "$out/roots-after.native.stdout"
 build nonconvergence tests/stdlib/numdiff/vector_nonconvergence.sio
@@ -75,9 +76,11 @@ if [[ -n ${NUMDIFF_SEED_BIN:-} ]];then
  step seed.caller-check timeout 180 "$NUMDIFF_SEED_BIN" tests/run-pass/math_numdiff_checked.sio "$out/seed-check.elf"
  chmod +x "$out/seed-check.elf"
  sha256sum "$out/seed-check.elf" > "$out/SEED_ELF.sha256"
+ cat "$out/SEED_ELF.sha256" >> "$out/ELFS.sha256"
  run strict-seed "$out/seed-check.elf"
  step strict-seed.concordance "$out/reference" "$out/strict-seed.native.stdout"
 fi
 step compiler_integrity sha256sum -c "$out/COMPILER.sha256"
 step input_integrity sha256sum -c "$out/INPUTS.sha256"
+step executable_integrity sha256sum -c "$out/ELFS.sha256"
 printf 'NUMDIFF_GATE_PASS\n'

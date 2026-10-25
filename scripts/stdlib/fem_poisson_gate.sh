@@ -38,6 +38,7 @@ native(){ step "$1.native" /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kib=%M\
 step reference-toolchain g++ --version
 step reference-build g++ -std=c++23 -O2 -Wall -Wextra -Werror tests/reference/fem_poisson_reference.cpp -lquadmath -o "$out/reference"
 sha256sum "$out/reference" > "$out/REFERENCE.sha256"
+sha256sum "$out/reference" >> "$out/ELFS.sha256"
 build fem tests/run-pass/fem_poisson_checked.sio;native fem
 step fem.concordance "$out/reference" "$out/fem.native.stdout"
 build poisson tests/stdlib/fem_poisson/poisson_main.sio;native poisson
@@ -86,4 +87,5 @@ if [[ -n "$before" ]];then
 fi
 step input-integrity sha256sum -c "$out/INPUTS.sha256"
 step compiler-integrity sha256sum -c "$out/COMPILER.sha256"
+step executable-integrity sha256sum -c "$out/ELFS.sha256"
 echo FEM_POISSON_GATE_PASS

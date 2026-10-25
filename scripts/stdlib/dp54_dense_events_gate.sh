@@ -37,8 +37,10 @@ run_phase() {
  return "$rc"
 }
 run_phase cpp reference compile g++ -std=c++23 -O2 -Wall -Wextra -Werror tests/reference/dp54_dense_events_reference.cpp -o "$out/reference"
+sha256sum "$out/reference" >> "$out/ELFS.sha256"
 run_phase cpp reference selftest "$out/reference" selftest
 run_phase cpp legacy compile g++ -std=c++23 -O2 -Wall -Wextra -pedantic tests/reference/deep_ode_reference.cpp -o "$out/emitter"
+sha256sum "$out/emitter" >> "$out/ELFS.sha256"
 "$out/emitter" > "$out/legacy_reference.sio"
 sha256sum "$out/legacy_reference.sio" > "$out/GENERATED.sha256"
 positive() {
@@ -53,10 +55,11 @@ positive() {
  ! grep -Eiq 'error\[E[0-9]+\]|typecheck:.*failed|parse error' "$out/$engine.$name."{check,compile}.{stdout,stderr}
  [[ -s $out/$engine.$name.elf ]]
  chmod +x "$out/$engine.$name.elf"
+ sha256sum "$out/$engine.$name.elf" > "$out/$engine.$name.ELF.sha256"
+ cat "$out/$engine.$name.ELF.sha256" >> "$out/ELFS.sha256"
  run_phase "$engine" "$name" native /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kib=%M\nexit_code=%x' -o "$out/$engine.$name.resource" timeout 120 "$out/$engine.$name.elf"
  grep -Fxq "$marker" "$out/$engine.$name.native.stdout"
  awk -F= '$1=="elapsed_seconds"&&$2>15{exit 1}$1=="max_rss_kib"&&$2>131072{exit 1}' "$out/$engine.$name.resource"
- sha256sum "$out/$engine.$name.elf" > "$out/$engine.$name.ELF.sha256"
 }
 for engine in "${engines[@]}"; do
  positive "$engine" core tests/run-pass/stdlib_dp54_dense_events.sio STDLIB_DP54_DENSE_EVENTS_PASS
@@ -104,4 +107,5 @@ done
 sha256sum -c "$out/SOURCE.sha256" > "$out/SOURCE.verify.txt"
 sha256sum -c "$out/COMPILERS.sha256" > "$out/COMPILERS.verify.txt"
 sha256sum -c "$out/GENERATED.sha256" > "$out/GENERATED.verify.txt"
+run_phase integrity executables unchanged sha256sum -c "$out/ELFS.sha256"
 echo DP54_DENSE_EVENTS_GATE_PASS | tee "$out/FINAL.txt"

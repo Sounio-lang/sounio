@@ -21,6 +21,7 @@ sha256sum stdlib/stats/{checked_survival,logrank,checked_distributions}.sio stdl
 g++ --version > "$OUT/reference.compiler.txt"
 /usr/bin/time -v g++ -std=c++23 -O2 -Wall -Wextra tests/reference/survival_checked_reference.cpp -o "$OUT/reference" > "$OUT/reference.compile.stdout" 2> "$OUT/reference.compile.stderr"
 sha256sum "$OUT/reference" > "$OUT/reference.sha256"
+sha256sum "$OUT/reference" >> "$OUT/ELFS.sha256"
 no_diagnostics() {
  if grep -Eq '^error:|error\[E' "$1" "$2";then echo "compiler diagnostics: $1" >&2;return 1;fi
 }
@@ -33,6 +34,7 @@ run_fixture() {
   /usr/bin/time -v env SOUNIO_SOUC_ENGINE="$engine" bin/souc compile "$src" -o "$OUT/$name.$engine.elf" > "$OUT/$name.$engine.compile.stdout" 2> "$OUT/$name.$engine.compile.stderr"
   no_diagnostics "$OUT/$name.$engine.compile.stdout" "$OUT/$name.$engine.compile.stderr"
   chmod +x "$OUT/$name.$engine.elf";sha256sum "$OUT/$name.$engine.elf" > "$OUT/$name.$engine.elf.sha256"
+  cat "$OUT/$name.$engine.elf.sha256" >> "$OUT/ELFS.sha256"
   set +e
   /usr/bin/time -v timeout 900 "$OUT/$name.$engine.elf" > "$OUT/$name.$engine.native.stdout" 2> "$OUT/$name.$engine.native.stderr"
   local code=$?;echo "$code" > "$OUT/$name.$engine.native.exit"
@@ -120,4 +122,5 @@ reject missing '' 10 SURVIVAL_REFERENCE_INCOMPLETE_OUTPUT
 sha256sum -c "$OUT/inputs.sha256" > "$OUT/inputs.verify.stdout"
 sha256sum -c "$OUT/compiler.sha256" > "$OUT/compiler.verify.stdout"
 sha256sum -c "$OUT/reference.sha256" > "$OUT/reference.verify.stdout"
+sha256sum -c "$OUT/ELFS.sha256" > "$OUT/ELFS.verify.txt"
 printf 'SURVIVAL_CHECKED_GATE_PASS\n' | tee "$OUT/gate.result"

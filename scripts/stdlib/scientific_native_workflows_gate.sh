@@ -35,10 +35,12 @@ b7478d10e2ccfdb22128867e137f16f55b687e9c225065e91bcbd6bb9e6c0352  tests/referenc
 DATA
 phase primary assets hash sha256sum --check "$out/PRIMARY_DATA.sha256"
 phase cpp reference compile g++ -std=c++23 -O2 -ffp-contract=off -Wall -Wextra -Werror tests/reference/scientific_native_workflows.cpp -o "$out/reference"
+sha256sum "$out/reference" >> "$out/ELFS.sha256"
 # The existing exporter chooses zlib or its bounded stored-deflate fallback.
 zlib_flags=()
 if printf '#include <zlib.h>\n' | g++ -x c++ -E - >/dev/null 2>&1;then zlib_flags=(-lz);fi
 phase cpp canvas-export compile g++ -std=c++23 -O2 -Wall -Wextra -Werror tests/reference/scientific_canvas_export.cpp "${zlib_flags[@]}" -o "$out/canvas-export"
+sha256sum "$out/canvas-export" >> "$out/ELFS.sha256"
 primary=tests/reference/data/canonical_palettes/BIDS-colormaps.py.txt
 for engine in "${engines[@]}";do
  for spec in 'poisson_field poisson SCIENTIFIC_POISSON_COMPLETE' 'normalization normalization SCIENTIFIC_NORMALIZATION_COMPLETE' 'survival survival SCIENTIFIC_SURVIVAL_COMPLETE' 'dp54_event dp54 SCIENTIFIC_DP54_COMPLETE';do
@@ -55,6 +57,7 @@ for engine in "${engines[@]}";do
   ! grep -Eiq 'error\[E[0-9]+\]|typecheck:.*failed|parse error' "$out/$engine.$name."{check,compile}.{stdout,stderr}
   [[ -s "$out/$engine.$name.elf" ]];chmod +x "$out/$engine.$name.elf"
   sha256sum "$out/$engine.$name.elf" > "$out/$engine.$name.ELF.sha256"
+  cat "$out/$engine.$name.ELF.sha256" >> "$out/ELFS.sha256"
   phase "$engine" "$name" native /usr/bin/time -f 'elapsed_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M\nexit_code=%x' -o "$out/$engine.$name.resource" timeout 180 "$out/$engine.$name.elf"
   grep -Fxq "<!-- $marker -->" "$out/$engine.$name.native.stdout"
   phase "$engine" "$name" concordance timeout 180 "$out/reference" "--$mode" "$primary" "$out/$engine.$name.native.stdout" "$out/$engine.$name.actual-canvas.ppm"
@@ -76,4 +79,5 @@ for engine in "${engines[@]}";do
 done
 phase integrity inputs unchanged sha256sum --check "$out/INPUTS.sha256"
 phase integrity compilers unchanged sha256sum --check "$out/COMPILERS.sha256"
+phase integrity executables unchanged sha256sum -c "$out/ELFS.sha256"
 printf '%s\n' SCIENTIFIC_NATIVE_WORKFLOWS_GATE_PASS | tee "$out/FINAL.txt"

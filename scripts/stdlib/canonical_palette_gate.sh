@@ -34,6 +34,7 @@ printf '%s\n' 'ddad3698f5129ceb1792a445371286c08bc9080298e657b3054aea19c9659ef9 
 phase decompressed bash -c 'cd "$1" && sha256sum -c DECOMPRESSED.sha256' _ "$out"
 gzip -dc tests/stdlib/canonical_palettes/legacy-approx-baseline.stdout.gz > "$out/historical-approx.stdout"
 phase reference.build g++ -std=c++23 -O2 -Wall -Wextra tests/reference/canonical_palette_reference.cpp -o "$out/reference"
+sha256sum "$out/reference" >> "$out/ELFS.sha256"
 phase primary-concordance "$out/reference" --sources "$primary/BIDS-colormaps.py.txt" "$out/Matplotlib-cm-listed.py.txt"
 "$out/reference" --emit-lut "$primary/BIDS-colormaps.py.txt" > "$out/generated-data.sio"
 phase generated-data cmp "$out/generated-data.sio" stdlib/viz/colormap_data.sio
@@ -43,6 +44,7 @@ for src in tests/stdlib/canonical_palettes/legacy_palette_witness.sio tests/stdl
  phase "$name.check" "$SOUC_BIN" check "$src"
  phase "$name.compile" "$SOUC_BIN" compile "$src" -o "$out/$name.elf"
  chmod +x "$out/$name.elf";sha256sum "$out/$name.elf" > "$out/$name.elf.sha256"
+ cat "$out/$name.elf.sha256" >> "$out/ELFS.sha256"
  phase "$name.native" /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kib=%M\nexit_code=%x' -o "$out/$name.resource" timeout 180 "$out/$name.elf"
 done
 phase canonical-concordance "$out/reference" --legacy "$primary/BIDS-colormaps.py.txt" "$out/legacy_palette_witness.native.stdout"
@@ -52,12 +54,15 @@ phase figure-concordance "$out/reference" --figure "$primary/BIDS-colormaps.py.t
 zlib_flag=()
 if printf '#include <zlib.h>\n' | g++ -x c++ -E - >/dev/null 2>&1;then zlib_flag=(-lz);fi
 phase canvas-export.build g++ -std=c++23 -O2 -Wall -Wextra tests/reference/scientific_canvas_export.cpp "${zlib_flag[@]}" -o "$out/canvas-export"
+sha256sum "$out/canvas-export" >> "$out/ELFS.sha256"
 phase canvas-export "$out/canvas-export" "$out/actual-canvas.ppm.rle" "$out/roundtrip-canvas.ppm" "$out/actual-canvas.png"
 phase canvas-export.lossless cmp "$out/actual-canvas.ppm" "$out/roundtrip-canvas.ppm"
 phase png-decoder.build g++ -std=c++23 -O2 -Wall -Wextra tests/stdlib/canonical_palettes/png_decode_reference.cpp -l:libz.so.1 -o "$out/png-decoder"
+sha256sum "$out/png-decoder" >> "$out/ELFS.sha256"
 ldd "$out/png-decoder" > "$out/png-decoder.dependencies.txt"
 phase png-native-primary "$out/png-decoder" "$primary/BIDS-colormaps.py.txt" tests/reference/data/font8x8_basic.h "$out/viz_canonical_palettes.native.stdout" "$out/actual-canvas.png" "$out/actual-canvas.ppm"
 phase legacy-field-reference.build g++ -std=c++23 -O2 -Wall -Wextra tests/reference/deep_viz_dynamic_fields.cpp -o "$out/field-reference"
+sha256sum "$out/field-reference" >> "$out/ELFS.sha256"
 phase legacy-field-concordance "$out/field-reference" "$out/stdlib_deep_viz_dynamic_fields.native.stdout"
 # Mutated copies are non-native controls, preserved separately from the source.
 for mutant in rgb missing text;do
@@ -74,7 +79,9 @@ for mutant in rgb missing text;do
 done
 if [[ -n ${SOUNIO_SEED_COMPILER:-} ]];then
  phase strict-seed "$SOUNIO_SEED_COMPILER" tests/run-pass/viz_canonical_palettes.sio "$out/strict-seed.elf"
+ sha256sum "$out/strict-seed.elf" >> "$out/ELFS.sha256"
  sha256sum "$SOUNIO_SEED_COMPILER" > "$out/SEED_COMPILER.sha256"
 fi
 phase inputs-unchanged sha256sum -c "$out/INPUTS.sha256"
+phase executables-unchanged sha256sum -c "$out/ELFS.sha256"
 echo CANONICAL_PALETTE_GATE_PASS

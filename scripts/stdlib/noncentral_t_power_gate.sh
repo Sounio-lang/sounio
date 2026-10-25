@@ -20,6 +20,7 @@ g++ --version > "$OUT/reference.compiler.txt"
 for name in noncentral_t noncentral_t_power gamma_log_prefix; do
  /usr/bin/time -v g++ -std=c++23 -O2 -Wall -Wextra "tests/reference/${name}_reference.cpp" -o "$OUT/$name.reference" > "$OUT/$name.reference.compile.stdout" 2> "$OUT/$name.reference.compile.stderr"
  sha256sum "$OUT/$name.reference" >> "$OUT/reference.sha256"
+ sha256sum "$OUT/$name.reference" >> "$OUT/ELFS.sha256"
  "$OUT/$name.reference" --generate > "$OUT/$name.generated.sio"
 done
 no_diagnostics() {
@@ -35,6 +36,7 @@ run_fixture() {
  no_diagnostics "$OUT/$name.compile.stdout" "$OUT/$name.compile.stderr"
  chmod +x "$OUT/$name.elf"
  sha256sum "$OUT/$name.elf" > "$OUT/$name.elf.sha256"
+ cat "$OUT/$name.elf.sha256" >> "$OUT/ELFS.sha256"
  set +e
  /usr/bin/time -v timeout 180 "$OUT/$name.elf" > "$OUT/$name.native.stdout" 2> "$OUT/$name.native.stderr"
  local code=$?
@@ -70,4 +72,5 @@ for mutant in minimum forward; do
   echo "oracle accepted $mutant mutant" >&2;exit 1
  fi
 done
+sha256sum -c "$OUT/ELFS.sha256" > "$OUT/ELFS.verify.txt"
 printf 'NONCENTRAL_T_POWER_GATE_PASS\n' | tee "$OUT/gate.result"

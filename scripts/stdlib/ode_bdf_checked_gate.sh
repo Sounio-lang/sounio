@@ -24,6 +24,7 @@ fi
 build checked tests/run-pass/ode_bdf_checked.sio
 step checked.native /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kib=%M\nexit_code=%x' -o "$out/checked.resource" timeout 180 "$out/checked.elf"
 step cpp-build g++ -std=c++23 -O2 -Wall -Wextra -Werror tests/reference/ode_bdf_reference.cpp -lquadmath -o "$out/reference"
+sha256sum "$out/reference" >> "$out/ELFS.sha256"
 step concordance "$out/reference" "$out/checked.native.stdout"
 sed '1s/^BDF 0 1 0 /BDF 0 1 1 /' "$out/checked.native.stdout" > "$out/wrong.stdout"
 rc=0;"$out/reference" "$out/wrong.stdout" > "$out/wrong.check.stdout" 2> "$out/wrong.check.stderr" || rc=$?
@@ -46,6 +47,7 @@ build factor-layout tests/stdlib/bdf/factor_layout_refusal.sio
 step factor-layout.native timeout 90 "$out/factor-layout.elf"
 step factor-layout.marker grep -Fx FACTOR_LAYOUT_REFUSAL_PASS "$out/factor-layout.native.stdout"
 step deep-factor.cpp g++ -std=c++23 -O2 -Wall -Wextra tests/reference/deep_factor_reference.cpp -lquadmath -o "$out/factor-reference"
+sha256sum "$out/factor-reference" >> "$out/ELFS.sha256"
 step deep-factor.emit "$out/factor-reference"
 cp "$out/deep-factor.emit.stdout" "$out/factor-generated.sio"
 build deep-factor "$out/factor-generated.sio"
@@ -60,4 +62,5 @@ if [[ -n "$before" ]];then
 fi
 step source-integrity sha256sum -c "$out/INPUTS.sha256"
 step compiler-integrity sha256sum -c "$out/COMPILER.sha256"
+step executable-integrity sha256sum -c "$out/ELFS.sha256"
 echo BDF_GATE_PASS

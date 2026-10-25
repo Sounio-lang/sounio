@@ -37,6 +37,7 @@ build legacy-valid "$out/legacy-valid.sio"
 run legacy-valid "$out/legacy-valid.elf"
 step legacy-valid.marker grep -Fx FFT_LEGACY_VALID_PASS "$out/legacy-valid.native.stdout"
 step cpp.compile timeout 180 "${CXX:-g++}" -std=c++23 -O2 -Wall -Wextra -Werror tests/reference/math_fft_reference.cpp -o "$out/reference"
+sha256sum "$out/reference" >> "$out/ELFS.sha256"
 step concordance "$out/reference" "$out/checked.native.stdout"
 sed '2s/.*/999/' "$out/checked.native.stdout" > "$out/mutated-value.stdout"
 rc=0;"$out/reference" "$out/mutated-value.stdout" > "$out/mutated-value.check.stdout" 2> "$out/mutated-value.check.stderr" || rc=$?
@@ -80,4 +81,5 @@ if [[ -n ${SEED_RAW_BIN:-} ]];then
 fi
 step compiler_integrity sha256sum -c "$out/COMPILER.sha256"
 step input_integrity sha256sum -c "$out/INPUTS.sha256"
+step executable_integrity sha256sum -c "$out/ELFS.sha256"
 printf 'FFT_GATE_PASS\n'

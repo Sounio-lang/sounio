@@ -20,6 +20,7 @@ sha256sum stdlib/stats/{distributions,checked_distributions}.sio \
 g++ --version > "$OUT/reference.compiler.txt"
 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/checked_distributions_reference.cpp -o "$OUT/reference" > "$OUT/reference.compile.stdout" 2> "$OUT/reference.compile.stderr"
 sha256sum "$OUT/reference" > "$OUT/reference.sha256"
+sha256sum "$OUT/reference" >> "$OUT/ELFS.sha256"
 "$OUT/reference" --generate > "$OUT/generated.sio"
 run_fixture() {
  local source="$1" name="$2" expected="$3"
@@ -27,6 +28,7 @@ run_fixture() {
  /usr/bin/time -v bin/souc compile "$source" -o "$OUT/$name.elf" > "$OUT/$name.compile.stdout" 2> "$OUT/$name.compile.stderr"
  chmod +x "$OUT/$name.elf"
  sha256sum "$OUT/$name.elf" > "$OUT/$name.elf.sha256"
+ cat "$OUT/$name.elf.sha256" >> "$OUT/ELFS.sha256"
  set +e
  /usr/bin/time -v timeout 120 "$OUT/$name.elf" > "$OUT/$name.native.stdout" 2> "$OUT/$name.native.stderr"
  local code=$?
@@ -50,4 +52,5 @@ for mutant in status missing duplicate value; do
   echo "oracle accepted $mutant mutant" >&2;exit 1
  fi
 done
+sha256sum -c "$OUT/ELFS.sha256" > "$OUT/ELFS.verify.txt"
 printf 'CHECKED_DISTRIBUTIONS_GATE_PASS\n' | tee "$OUT/gate.result"

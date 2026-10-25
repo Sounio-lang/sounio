@@ -24,6 +24,7 @@ g++ --version > "$OUT/reference.compiler.txt"
 for name in wilcoxon_checked numeric_index_sort;do
  /usr/bin/time -v g++ -std=c++23 -O2 -Wall -Wextra "tests/reference/${name}_reference.cpp" -o "$OUT/$name.reference" > "$OUT/$name.reference.compile.stdout" 2> "$OUT/$name.reference.compile.stderr"
  sha256sum "$OUT/$name.reference" >> "$OUT/reference.sha256"
+ sha256sum "$OUT/$name.reference" >> "$OUT/ELFS.sha256"
 done
 no_diagnostics() {
  if grep -Eq '^error:|error\[E' "$1" "$2";then echo "compiler diagnostics: $1" >&2;return 1;fi
@@ -36,6 +37,7 @@ run_fixture() {
  /usr/bin/time -v env SOUNIO_SOUC_ENGINE=lean_single bin/souc compile "$src" -o "$OUT/$name.seed.elf" > "$OUT/$name.seed.compile.stdout" 2> "$OUT/$name.seed.compile.stderr"
  no_diagnostics "$OUT/$name.seed.compile.stdout" "$OUT/$name.seed.compile.stderr"
  chmod +x "$OUT/$name.seed.elf";sha256sum "$OUT/$name.seed.elf" > "$OUT/$name.seed.elf.sha256"
+ cat "$OUT/$name.seed.elf.sha256" >> "$OUT/ELFS.sha256"
  set +e
  /usr/bin/time -v timeout 600 "$OUT/$name.seed.elf" > "$OUT/$name.seed.native.stdout" 2> "$OUT/$name.seed.native.stderr"
  local code=$?;echo "$code" > "$OUT/$name.seed.native.exit"
@@ -44,6 +46,7 @@ run_fixture() {
  /usr/bin/time -v env SOUNIO_SOUC_ENGINE=madaros bin/souc compile "$src" -o "$OUT/$name.elf" > "$OUT/$name.compile.stdout" 2> "$OUT/$name.compile.stderr"
  no_diagnostics "$OUT/$name.compile.stdout" "$OUT/$name.compile.stderr"
  chmod +x "$OUT/$name.elf";sha256sum "$OUT/$name.elf" > "$OUT/$name.elf.sha256"
+ cat "$OUT/$name.elf.sha256" >> "$OUT/ELFS.sha256"
  set +e
  /usr/bin/time -v timeout 600 "$OUT/$name.elf" > "$OUT/$name.native.stdout" 2> "$OUT/$name.native.stderr"
  code=$?;echo "$code" > "$OUT/$name.native.exit"
@@ -109,4 +112,5 @@ reject_mutant sort "$OUT/numeric_index_sort.reference" 6 'NUMERIC_INDEX_SORT_DIG
 sha256sum -c "$OUT/inputs.sha256" > "$OUT/inputs.verify.stdout"
 sha256sum -c "$OUT/compiler.sha256" > "$OUT/compiler.verify.stdout"
 sha256sum -c "$OUT/reference.sha256" > "$OUT/reference.verify.stdout"
+sha256sum -c "$OUT/ELFS.sha256" > "$OUT/ELFS.verify.txt"
 printf 'WILCOXON_CHECKED_GATE_PASS\n' | tee "$OUT/gate.result"

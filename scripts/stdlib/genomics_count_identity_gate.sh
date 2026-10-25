@@ -38,6 +38,7 @@ step reference-toolchain g++ --version
 for stem in genomics_count_identity genomics_count_scale genomics_id genomics_id_coalesce genomics_token count_tsv normalization_into;do
  step "$stem.reference-build" g++ -std=c++23 -O2 -Wall -Wextra -Werror "tests/reference/${stem}_reference.cpp" -o "$out/$stem.reference"
  sha256sum "$out/$stem.reference" >> "$out/REFERENCES.sha256"
+ sha256sum "$out/$stem.reference" >> "$out/ELFS.sha256"
 done
 build_both token-slot tests/stdlib/genomics_counts/token_main.sio
 build_both named-smoke tests/stdlib/genomics_counts/named_smoke.sio
@@ -123,4 +124,5 @@ step inputs-integrity sha256sum -c "$out/INPUTS.sha256"
 step compilers-integrity sha256sum -c "$out/COMPILERS.sha256"
 step references-integrity sha256sum -c "$out/REFERENCES.sha256"
 step callers-integrity sha256sum -c "$out/CALLERS.sha256"
+step executable-integrity sha256sum -c "$out/ELFS.sha256"
 printf 'GENOMICS_COUNT_IDENTITY_GATE_PASS\n'
