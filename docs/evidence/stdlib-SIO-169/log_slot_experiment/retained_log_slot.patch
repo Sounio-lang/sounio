@@ -1,0 +1,88 @@
+diff --git a/stdlib/stats/checked_survival.sio b/stdlib/stats/checked_survival.sio
+index db47cab570..4ea74a5270 100644
+--- a/stdlib/stats/checked_survival.sio
++++ b/stdlib/stats/checked_survival.sio
+@@ -5,8 +5,8 @@
+ use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+ use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
+ use collections::numeric_index_sort::{numeric_index_sort_checked}
+-use math::pure::{is_finite,sqrt,ln_checked,exp}
+-use math::logarithmic::{log1p_checked}
++use math::pure::{CheckedLog,is_finite,sqrt,ln_checked_into,exp}
++use math::logarithmic::{log1p_checked_into}
+ use stats::checked_distributions::{normal_quantile_checked}
+ 
+ // Three records per pooled distinct time: pooled, group0, group1.
+@@ -120,7 +120,7 @@ fn sv_median_status(s:&SVState)->i64 {if s.median_available {0}else{if s.median_
+ fn sv_inf()->f64 {1.0e308*10.0}
+ // No update on pure censoring. Terminal all-death Greenwood/log-log CI is
+ // unavailable, rather than substituting a finite sum for a singular formula.
+-fn sv_step(s:&!SVState,time:f64,deaths:i64)->i64 with Mut,Div,Panic {
++fn sv_step(s:&!SVState,time:f64,deaths:i64,log_work:&!CheckedLog)->i64 with Mut,Div,Panic {
+  if deaths==0 {return 0}
+  if s.risk<deaths || s.risk<=0 || s.terminal {return 4}
+  sv_median_step(s,time,deaths)
+@@ -130,9 +130,9 @@ fn sv_step(s:&!SVState,time:f64,deaths:i64)->i64 with Mut,Div,Panic {
+  s.hazard_c=(hn-s.hazard)-h;s.hazard=hn
+  if deaths==s.risk {s.terminal=true;s.log_s= -sv_inf()}
+  else {
+-  let l=log1p_checked(-ratio)
+-  if l.status!=0 {return 4}
+-  let adjust=l.value-s.log_c
++  let code=log1p_checked_into(-ratio,log_work)
++  if code!=0 {return 4}
++  let adjust=log_work.value-s.log_c
+   let next=s.log_s+adjust
+   s.log_c=(next-s.log_s)-adjust;s.log_s=next
+   let term=ratio/((s.risk-deaths) as f64)
+@@ -143,7 +143,7 @@ fn sv_step(s:&!SVState,time:f64,deaths:i64)->i64 with Mut,Div,Panic {
+  0
+ }
+ fn sv_emit(s:&SVState,time:f64,deaths:i64,censored:i64,z:f64,record:i64,
+- curves:&!NumericBuffer,counts:&!IntegerBuffer) with Mut,Div,Panic {
++ curves:&!NumericBuffer,counts:&!IntegerBuffer,log_work:&!CheckedLog) with Mut,Div,Panic {
+  let nb=record*8;let ib=record*4
+  var k:i64=0
+  while k<8 {numeric_buffer_set(curves,nb+k,0.0);k=k+1}
+@@ -166,11 +166,11 @@ fn sv_emit(s:&SVState,time:f64,deaths:i64,censored:i64,z:f64,record:i64,
+     numeric_buffer_set(curves,nb+4,se);flags=flags+8
+    }
+    if s.log_s<0.0 && s.greenwood>0.0 {
+-    let ell=ln_checked(-s.log_s)
++    let code=ln_checked_into(-s.log_s,log_work)
+     let width=z*(root/(-s.log_s))
+-    if ell.status==0 && is_finite(width) {
+-     let outer_lower=exp(ell.value+width)
+-     let outer_upper=exp(ell.value-width)
++    if code==0 && is_finite(width) {
++     let outer_lower=exp(log_work.value+width)
++     let outer_upper=exp(log_work.value-width)
+      let lower=exp(-outer_lower)
+      let upper=exp(-outer_upper)
+      // Underflow/overflow in either composition is not a fabricated endpoint.
+@@ -221,6 +221,8 @@ pub fn survival_checked(times:&NumericBuffer,event:&IntegerBuffer,group:&Integer
+  let sorted=numeric_index_sort_checked(times,n,order,sort_budget)
+  r.sort_comparisons=sorted.comparisons;r.sort_swaps=sorted.swaps
+  if sorted.status!=0 {r.status=sorted.status;return r}
++ // One canonical logarithm result slot for the entire risk walk.
++ var log_work=CheckedLog{status:0,value:0.0}
+  var pooled=sv_state(n);var s0=sv_state(n-group1);var s1=sv_state(group1)
+  var score:f64=0.0;var score_c:f64=0.0;var expected:f64=0.0;var expected_c:f64=0.0
+  var expected0:f64=0.0;var expected0_c:f64=0.0
+@@ -258,12 +260,12 @@ pub fn survival_checked(times:&NumericBuffer,event:&IntegerBuffer,group:&Integer
+    variance_c=(next_v-variance)-adjusted_v;variance=next_v
+   }
+   observed1=observed1+d1
+-  let st=sv_step(&!pooled,time,deaths);let st0=sv_step(&!s0,time,d0);let st1=sv_step(&!s1,time,d1)
++  let st=sv_step(&!pooled,time,deaths,&!log_work);let st0=sv_step(&!s0,time,d0,&!log_work);let st1=sv_step(&!s1,time,d1,&!log_work)
+   if st!=0 || st0!=0 || st1!=0 {r.status=4;return r}
+   let record=r.rows*3
+-  sv_emit(&pooled,time,deaths,censored,critical.value,record,curves,counts)
+-  sv_emit(&s0,time,d0,c0,critical.value,record+1,curves,counts)
+-  sv_emit(&s1,time,d1,c1,critical.value,record+2,curves,counts)
++  sv_emit(&pooled,time,deaths,censored,critical.value,record,curves,counts,&!log_work)
++  sv_emit(&s0,time,d0,c0,critical.value,record+1,curves,counts,&!log_work)
++  sv_emit(&s1,time,d1,c1,critical.value,record+2,curves,counts,&!log_work)
+   pooled.risk=pooled.risk-deaths-censored;s0.risk=s0.risk-d0-c0;s1.risk=s1.risk-d1-c1
+   r.rows=r.rows+1;r.deaths=r.deaths+deaths;r.censored=r.censored+censored;r.risk_visits=r.risk_visits+(j-i)
+   i=j
