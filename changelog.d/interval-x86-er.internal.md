@@ -1,0 +1,1 @@
+Add a test-only C++23 EVEX scalar/ZMM directed arithmetic witness against MPFR IEEE-format emulation, including strict FP-environment refusals, actual instruction checks and one million finite-input cases per format/operation. This is reference groundwork for D-34; it introduces no Sounio interval arithmetic/backend and carries no certification label.
