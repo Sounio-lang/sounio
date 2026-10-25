@@ -108,7 +108,8 @@ a sign-change bracket to imply a root.
 An undirected initial zero is recorded immediately when included. A directed
 initial zero waits for the first accepted segment to establish orientation.
 Set include_initial=false to suppress a known zero on restart. An exact endpoint
-zero reached from a nonzero start value is recorded once; the following segment
+zero reached from a nonzero start value is recorded once when its direction
+passes the filter; the following segment
 does not duplicate the same time. Segments whose endpoint event values are both
 zero are not resolved. An included undirected initial zero is still recorded
 before stepping; a directed initial zero needs a nonzero endpoint to establish
