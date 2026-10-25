@@ -3,7 +3,15 @@
 set -uo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 out=${STDLIB_DEEP_OUT:?set STDLIB_DEEP_OUT to a dedicated artifact directory}
-[[ "$out" == /* && -f "${MADAROS_RAW_BIN:?set MADAROS_RAW_BIN}" ]] || exit 64
+[[ "$out" == /* && -x "${MADAROS_RAW_BIN:?set MADAROS_RAW_BIN}" ]] || exit 64
+[[ -z "${SOUNIO_SOUC_BIN:-}" ]] || { echo "explicit raw override bypasses engine routing" >&2; exit 64; }
+MADAROS_RAW_BIN=$(readlink -f "$MADAROS_RAW_BIN") || exit 64
+export MADAROS_RAW_BIN
+SEED_RAW_BIN=$(readlink -f "${SEED_RAW_BIN:-$repo/bin/souc-lean-single-x86_64}") || exit 64
+[[ -x "$SEED_RAW_BIN" ]] || exit 64
+export SEED_RAW_BIN
+out=$(realpath -m "$out") || exit 64
+case "$out/" in "$repo/stdlib/"*|"$repo/tests/"*|"$repo/examples/"*|"$repo/scripts/stdlib/"*|"$repo/scripts/lib/"*) echo "output overlaps input catalog" >&2; exit 64;; esac
 mkdir -p "$out" || exit 65
 [[ -z "$(find "$out" -mindepth 1 -maxdepth 1 -print -quit)" ]] || { echo "refusing nonempty output directory" >&2; exit 65; }
 cd "$repo" || exit 65
@@ -11,10 +19,17 @@ export SOUNIO_STDLIB_PATH="$repo/stdlib" SOUNIO_SOUC_ENGINE=madaros
 export SOUNIO_MADAROS_NOCACHE=1 SOUNIO_MADAROS_CACHE_READONLY=1
 ulimit -s 524288
 printf 'kind\tsource\texit_status\n' > "$out/RESULTS.tsv"
-sha256sum "$MADAROS_RAW_BIN" > "$out/COMPILER.sha256" || exit 65
-find stdlib tests -type f -print0 | sort -z | xargs -0 sha256sum > "$out/INPUTS.sha256" || exit 65
+sha256sum "$MADAROS_RAW_BIN" "$SEED_RAW_BIN" bin/souc-lean-single-x86_64 > "$out/COMPILER.sha256" || exit 65
+# Include callers, routing, the runner and every focused gate. Rebuild the
+# catalog after execution so added or removed files cannot escape sha256sum -c.
+write_inputs() {
+    find stdlib tests examples scripts/stdlib scripts/lib -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+    sha256sum bin/souc bin/madaros bin/souc-lean-single-x86_64 scripts/ci/souc-native-wrapper.sh
+}
+write_inputs > "$out/INPUTS.sha256" || exit 65
 g++ --version > "$out/CXX_TOOLCHAIN.txt" || exit 65
 fail=0
+positive_diagnostics() { grep -Eq '^[[:space:]]*error:|^[[:space:]]*error\[E' "$1"; }
 record() {
     printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$out/RESULTS.tsv"
     [[ "$3" == 0 ]] || fail=1
@@ -22,12 +37,15 @@ record() {
 native() {
     local src=$1 name=$2 rc=0
     timeout 180 bin/souc check "$src" > "$out/$name.check.txt" 2>&1 || rc=$?
+    if [[ $rc == 0 ]] && positive_diagnostics "$out/$name.check.txt"; then rc=1; fi
     record check "$src" "$rc"
     [[ $rc == 0 ]] || return
     timeout 240 bin/souc compile "$src" -o "$out/$name.elf" > "$out/$name.compile.txt" 2>&1 || rc=$?
+    if [[ $rc == 0 ]] && positive_diagnostics "$out/$name.compile.txt"; then rc=1; fi
     record compile "$src" "$rc"
     [[ $rc == 0 ]] || return
     sha256sum "$src" "$out/$name.elf" > "$out/$name.identities"
+    cat "$out/$name.identities" >> "$out/NATIVE_ELFS.sha256"
     /usr/bin/time -f 'elapsed_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M\nexit_code=%x' -o "$out/$name.resource" timeout 300 "$out/$name.elf" > "$out/$name.stdout" 2> "$out/$name.stderr" || rc=$?
     record native "$src" "$rc"
     if [[ $rc == 0 ]]; then
@@ -87,6 +105,7 @@ for src in tests/reference/deep_*.cpp; do
     timeout 180 g++ -std=c++23 -O2 -Wall -Wextra "$src" -lquadmath -o "$out/$stem" > "$out/$stem.cpp.txt" 2>&1 || rc=$?
     record cpp-compile "$src" "$rc"
     [[ $rc == 0 ]] || continue
+    sha256sum "$out/$stem" >> "$out/REFERENCE_ELFS.sha256"
     case "$stem" in
       deep_ode_reference|deep_special_reference|deep_ode_dynamic_reference|deep_factor_reference|deep_svd_reference|deep_ros4_reference|deep_kde_reference|deep_dynamic_count_tsv_reference|deep_numeric_select_reference)
         emit "$stem" "" "" ;;
@@ -193,6 +212,7 @@ for stem in count_dispersion_increment_reference count_profile_lr_fixed_referenc
  timeout 180 g++ -std=c++23 -O2 -Wall -Wextra "tests/reference/$stem.cpp" -lquadmath -o "$out/$stem" > "$out/$stem.cpp.txt" 2>&1 || rc=$?
  record cpp-compile "$stem" "$rc"
  [[ $rc == 0 ]] || continue
+ sha256sum "$out/$stem" >> "$out/REFERENCE_ELFS.sha256"
  rc=0
  case "$stem" in
   count_dispersion_increment_reference) timeout 600 "$out/$stem" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$? ;;
@@ -216,6 +236,7 @@ rc=0
 timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/display_font_orientation_reference.cpp -o "$out/display_font_orientation_reference" > "$out/display_font_orientation_reference.cpp.txt" 2>&1 || rc=$?
 record cpp-compile display_font_orientation_reference "$rc"
 if [[ $rc == 0 ]]; then
+ sha256sum "$out/display_font_orientation_reference" >> "$out/REFERENCE_ELFS.sha256"
  rc=0
  timeout 180 "$out/display_font_orientation_reference" --canonical tests/reference/data/font8x8_basic.h "$out/display_font_orientation.stdout" > "$out/display_font_orientation_reference.concordance.stdout" 2> "$out/display_font_orientation_reference.concordance.stderr" || rc=$?
  record concordance font-canonical "$rc"
@@ -224,7 +245,10 @@ fi
 rc=0
 timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/normalization_into_reference.cpp -o "$out/normalization_into_reference" > "$out/normalization_into_reference.cpp.txt" 2>&1 || rc=$?
 record cpp-compile normalization_into_reference "$rc"
-if [[ $rc == 0 ]]; then compare normalization_into_reference stdlib_scale_normalization_into; fi
+if [[ $rc == 0 ]]; then
+ sha256sum "$out/normalization_into_reference" >> "$out/REFERENCE_ELFS.sha256"
+ compare normalization_into_reference stdlib_scale_normalization_into
+fi
 # Checked BDF1 numerical concordance and refusal controls use actual native rows.
 rc=0
 timeout 300 bash scripts/stdlib/ode_bdf_checked_gate.sh "$out/checked-bdf" > "$out/checked-bdf.gate.stdout" 2> "$out/checked-bdf.gate.stderr" || rc=$?
@@ -265,7 +289,7 @@ record focused-gate fem-poisson "$rc"
 # DP5(4) FSAL, quartic dense output and event contracts: actual native + C++.
 # Optional DP54_SEED_BIN selects a second independently receipted engine.
 rc=0
-DP54_GATE_OUTPUT="$out/dp54-focused" MADAROS_RAW_BIN="$MADAROS_RAW_BIN" \
+DP54_GATE_OUTPUT="$out/dp54-focused" DP54_SEED_BIN="$SEED_RAW_BIN" MADAROS_RAW_BIN="$MADAROS_RAW_BIN" \
  timeout 900 bash scripts/stdlib/dp54_dense_events_gate.sh > "$out/dp54-focused.stdout" 2> "$out/dp54-focused.stderr" || rc=$?
 record focused-gate dp54-dense-events "$rc"
 
@@ -279,6 +303,40 @@ rc=0
 MADAROS_RAW_BIN="$MADAROS_RAW_BIN" bash scripts/stdlib/canonical_palette_gate.sh "$out/canonical-palettes" > "$out/canonical-palettes.gate.stdout" 2> "$out/canonical-palettes.gate.stderr" || rc=$?
 record focused-gate canonical-palettes "$rc"
 
+# Checked transforms, finite differences, physical uncertainty and distributions.
+rc=0
+timeout 900 bash scripts/stdlib/math_fft_checked_gate.sh "$out/math-fft" > "$out/math-fft.gate.stdout" 2> "$out/math-fft.gate.stderr" || rc=$?
+record focused-gate math-fft "$rc"
+rc=0
+NUMDIFF_SEED_BIN="$SEED_RAW_BIN" timeout 900 bash scripts/stdlib/math_numdiff_checked_gate.sh "$out/math-numdiff" > "$out/math-numdiff.gate.stdout" 2> "$out/math-numdiff.gate.stderr" || rc=$?
+record focused-gate math-numdiff "$rc"
+rc=0
+timeout 600 bash scripts/stdlib/physics_uncertainty_gate.sh "$out/physics-uncertainty" > "$out/physics-uncertainty.gate.stdout" 2> "$out/physics-uncertainty.gate.stderr" || rc=$?
+record focused-gate physics-uncertainty "$rc"
+rc=0
+timeout 900 bash scripts/stdlib/checked_distributions_gate.sh "$out/checked-distributions" > "$out/checked-distributions.gate.stdout" 2> "$out/checked-distributions.gate.stderr" || rc=$?
+record focused-gate checked-distributions "$rc"
+
+# Genomics batch fit/prior/refit/tests/FDR/report: both native engines + C++23.
+rc=0
+timeout 1200 bash scripts/stdlib/genomics_batch_gate.sh "$out/genomics_batch" > "$out/genomics_batch.focused.stdout" 2> "$out/genomics_batch.focused.stderr" || rc=$?
+record focused-gate genomics_batch "$rc"
+
+# Four real scientific producers, shared renderers and actual exported pixels.
+rc=0
+SCIENCE_NATIVE_OUTPUT="$out/scientific-native-workflows" SCIENCE_NATIVE_SEED_BIN="$SEED_RAW_BIN" MADAROS_RAW_BIN="$MADAROS_RAW_BIN" timeout 1200 bash scripts/stdlib/scientific_native_workflows_gate.sh > "$out/scientific-native-workflows.gate.stdout" 2> "$out/scientific-native-workflows.gate.stderr" || rc=$?
+record focused-gate scientific-native-workflows "$rc"
+
+rc=0
+write_inputs > "$out/INPUTS.final.sha256" || rc=$?
+if [[ $rc == 0 ]]; then cmp "$out/INPUTS.sha256" "$out/INPUTS.final.sha256" > "$out/INPUTS.catalog-cmp.txt" 2>&1 || rc=$?; fi
+record input-catalog unchanged "$rc"
+rc=0
+sha256sum -c "$out/NATIVE_ELFS.sha256" > "$out/NATIVE_ELFS.verify.txt" 2>&1 || rc=$?
+record native-artifact-hashes unchanged "$rc"
+rc=0
+sha256sum -c "$out/REFERENCE_ELFS.sha256" > "$out/REFERENCE_ELFS.verify.txt" 2>&1 || rc=$?
+record reference-artifact-hashes unchanged "$rc"
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"
