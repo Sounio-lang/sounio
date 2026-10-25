@@ -23,7 +23,7 @@ sha256sum "$MADAROS_RAW_BIN" "$SEED_RAW_BIN" bin/souc-lean-single-x86_64 > "$out
 # Include callers, routing, the runner and every focused gate. Rebuild the
 # catalog after execution so added or removed files cannot escape sha256sum -c.
 write_inputs() {
-    find stdlib tests examples scripts/stdlib scripts/lib -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+    find stdlib tests examples scripts/stdlib scripts/lib -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum || return $?
     sha256sum bin/souc bin/madaros bin/souc-lean-single-x86_64 scripts/ci/souc-native-wrapper.sh
 }
 write_inputs > "$out/INPUTS.sha256" || exit 65
