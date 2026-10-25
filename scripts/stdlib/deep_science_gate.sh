@@ -23,8 +23,10 @@ sha256sum "$MADAROS_RAW_BIN" "$SEED_RAW_BIN" bin/souc-lean-single-x86_64 > "$out
 # Include callers, routing, the runner and every focused gate. Rebuild the
 # catalog after execution so added or removed files cannot escape sha256sum -c.
 write_inputs() {
-    find stdlib tests examples scripts/stdlib scripts/lib -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum || return $?
-    sha256sum bin/souc bin/madaros bin/souc-lean-single-x86_64 scripts/ci/souc-native-wrapper.sh
+    find stdlib tests examples scripts/stdlib scripts/lib \( -type f -o -type l \) -print0 | LC_ALL=C sort -z | xargs -0 sha256sum || return $?
+    sha256sum bin/souc bin/madaros bin/souc-lean-single-x86_64 scripts/ci/souc-native-wrapper.sh \
+      docs/evidence/stdlib-SIO-172/before_variance/variance_witness.sio \
+      docs/evidence/stdlib-SIO-172/before_variance/phonon_original.sio
 }
 write_inputs > "$out/INPUTS.sha256" || exit 65
 g++ --version > "$out/CXX_TOOLCHAIN.txt" || exit 65
@@ -331,6 +333,28 @@ record focused-gate scientific-native-workflows "$rc"
 rc=0
 INTERVAL_CONTRACT_OUT="$out/interval-contract" timeout 240 bash scripts/stdlib/interval_contract_gate.sh > "$out/interval-contract.gate.stdout" 2> "$out/interval-contract.gate.stderr" || rc=$?
 record focused-gate interval-contract "$rc"
+
+# Phonon means/covariance, transport and original production-import controls.
+rc=0
+PHONON_GATE_OUTPUT="$out/phonon-factor" timeout 600 bash scripts/stdlib/phonon_factor_gate.sh > "$out/phonon-factor.gate.stdout" 2> "$out/phonon-factor.gate.stderr" || rc=$?
+record focused-gate phonon-factor "$rc"
+
+# Every child seals native programs and C++ oracles before first use. Repeat
+# those checks after all children, so later phases cannot mutate an earlier ELF.
+: > "$out/CHILD_ELFS.verify.txt"
+for child in checked-bdf noncentral_t_power genomics-count-identities genomics-named-stream \
+ wilcoxon_checked survival_checked fem-poisson dp54-focused prepared-contour canonical-palettes \
+ math-fft math-numdiff physics-uncertainty checked-distributions genomics_batch \
+ scientific-native-workflows interval-contract phonon-factor; do
+ rc=0
+ if [[ -s "$out/$child/ELFS.sha256" ]]; then
+  sha256sum -c "$out/$child/ELFS.sha256" >> "$out/CHILD_ELFS.verify.txt" 2>&1 || rc=$?
+ else
+  printf 'missing child executable manifest: %s\n' "$child" >> "$out/CHILD_ELFS.verify.txt"
+  rc=1
+ fi
+ record child-artifact-hashes "$child" "$rc"
+done
 
 rc=0
 write_inputs > "$out/INPUTS.final.sha256" || rc=$?
