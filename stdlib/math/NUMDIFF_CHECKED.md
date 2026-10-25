@@ -85,7 +85,7 @@ NUMDIFF_SEED_BIN=/optional/shipped/lean-single.elf \
   /optional/frozen/pre-repair-numdiff.sio
 ```
 
-The canonical resolver selects the supplied raw compiler directly, avoiding unused prebuilt materialization or bundled compiler copies. The optional baseline exercises actual before/after controls. Optional seed checking uses the seed's raw SRC OUT ABI, compiles the complete executable caller/import closure and does not execute the generated seed ELF.
+The canonical resolver selects the supplied raw compiler directly, avoiding unused prebuilt materialization or bundled compiler copies. The optional baseline exercises actual before/after controls. Optional seed qualification uses the seed's raw SRC OUT ABI, compiles and executes the complete caller/import closure, then applies the same C++23 numerical reference to its actual output. Historical compile-only evidence remains identified separately below.
 
 ### Executed acceptance
 
@@ -111,3 +111,39 @@ tar -xzf tests/stdlib/numdiff/evidence/receipts.tar.gz -C /tmp/sounio-numdiff-re
 ```
 
 This increment does not claim a current-main compiler rebuild, full-corpus CI, release, merge or human acceptance.
+
+### Main-7ce refresh and actual current-seed execution
+
+The branch now merges main
+`7ce5eddeef78c76c7e744150ed9c169c53a3d3b0`; the approved numerical modules,
+public caller and C++ reference remain byte-identical to `e012464accf0`.
+The c21-to-7ce upstream change is limited to the reliability workflow and its
+fragment. Earlier incoming a2a-to-c21 changes bring the refreshed shipped seed
+and release policy; no new compiler build is represented by this replay.
+
+Slurm **17310** reran the focused gate with source-built Madaros SHA256
+`a292cc263f3734b1ad6f17a2e6179b8a7874ef3e76d8f5fdfea6859290baf5d3`
+and current c21 seed SHA256
+`8956946def36004d11ec4eca0d20c75c1e7d3d0b17ee0f0a1fdda9cd6ec0e4cc`.
+Both compiled **and executed** the full public caller, and both passed the same
+C++ reference: 10 analytic scalar cases, all 5253 matrix entries, actual
+callback accounting and the one-million-call checksum. Root controls,
+transactional nonconvergence controls, invalid legacy steps/counts and
+specific comparator rejections11/13 also passed. Frozen old source still
+exhibited the root failure and negative-step continuation; these statuses
+are retained separately from gate acceptance. Final gate STATUS was0, with
+source/compiler integrity checks passing. A hostile inherited
+`SOUC_BIN=/bin/false` was replaced by the explicit raw compiler pin.
+
+One complete-caller process observation was 2.31 seconds / 1080 KiB maximum
+RSS with Madaros and 5.46 seconds / 2076 KiB with the seed. These are single
+whole-program observations, not an engine-performance comparison, isolated
+kernel measurement, or guarantee for arbitrary callback allocations.
+
+New compact receipts are
+[`main7ce-receipts.tar.gz`](../../tests/stdlib/numdiff/evidence/main7ce-receipts.tar.gz),
+SHA256 `3d660d99a9e1a3eae469d6c35055fb2d60ca46be5e9ebd5e116a271d3eaf92a9`.
+The extraction-verified manifest covers actual native outputs, controls,
+resources and exact gate/input/executable identities. No ELF or second source
+tree is embedded; the original archive and checksum remain unchanged.
+Focused acceptance does not imply full-corpus or GitHub CI success.

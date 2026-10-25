@@ -71,9 +71,13 @@ fi
 if [[ -n ${NUMDIFF_SEED_BIN:-} ]];then
  [[ -x $NUMDIFF_SEED_BIN ]] || exit 78
  sha256sum "$NUMDIFF_SEED_BIN" > "$out/SEED_COMPILER.sha256"
- # This seed uses raw SRC OUT CLI; a check compiles but does not run the ELF.
+ # This seed uses raw SRC OUT CLI; runtime is independently checked below.
  step seed.caller-check timeout 180 "$NUMDIFF_SEED_BIN" tests/run-pass/math_numdiff_checked.sio "$out/seed-check.elf"
+ chmod +x "$out/seed-check.elf"
  sha256sum "$out/seed-check.elf" > "$out/SEED_ELF.sha256"
+ run strict-seed "$out/seed-check.elf"
+ step strict-seed.concordance "$out/reference" "$out/strict-seed.native.stdout"
 fi
+step compiler_integrity sha256sum -c "$out/COMPILER.sha256"
 step input_integrity sha256sum -c "$out/INPUTS.sha256"
 printf 'NUMDIFF_GATE_PASS\n'
