@@ -1,0 +1,95 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: GENOMICS_BATCH_GUARDS_PASS
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_close}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set}
+use genomics::count_csr::{count_csr_build}
+use genomics::count_identities::{CountIdentities,count_identities_build,count_identities_close}
+use genomics::count_pipeline::{CountPipeline,count_pipeline_workspace,count_pipeline_new,count_pipeline_prepare,count_pipeline_point_batch,count_pipeline_point_batch_seeded,count_pipeline_point_done,count_pipeline_shrink,count_pipeline_refit_batch,count_pipeline_adjust,count_pipeline_status,count_pipeline_phase,count_pipeline_eligible,count_pipeline_prior_status,count_pipeline_prior_a0,count_pipeline_prior_a1,count_pipeline_prior_variance,count_pipeline_point_evaluations,count_pipeline_refit_evaluations,count_pipeline_value,count_pipeline_gene_status,count_pipeline_adjusted,count_pipeline_factor,count_pipeline_offset,count_pipeline_coefficient_available,count_pipeline_coefficient,count_pipeline_close}
+use genomics::count_pipeline_report::{count_gene_report_slot,count_pipeline_report_into,count_pipeline_write_tsv}
+use stats::regression::dynamic_dispersion::{DispersionSearchOptions}
+use io::sci_print::{println_f64_sci}
+fn make_ids(n:i64,prefix:i64,reverse:bool)->CountIdentities with Alloc,Mut,Div,Panic {
+ var bytes=integer_buffer_new(n*5,n*40)
+ var offsets=integer_buffer_new(n+1,(n+1)*8)
+ var order=integer_buffer_new(n,n*8);var groups=integer_buffer_new(n,n*8)
+ var i:i64=0
+ while i<n {
+  let j=if reverse {n-1-i}else{i}
+  integer_buffer_set(&!offsets,i,i*5)
+  integer_buffer_set(&!bytes,i*5,prefix)
+  integer_buffer_set(&!bytes,i*5+1,65+j/17576)
+  integer_buffer_set(&!bytes,i*5+2,65+(j/676)%26)
+  integer_buffer_set(&!bytes,i*5+3,65+(j/26)%26)
+  integer_buffer_set(&!bytes,i*5+4,65+j%26);i=i+1
+ }
+ integer_buffer_set(&!offsets,n,n*5)
+ count_identities_build(bytes,offsets,order,groups,0,10000000)
+}
+fn guard_options(curvature:bool)->DispersionSearchOptions {DispersionSearchOptions{method:0,log_alpha_lower: -10.0,log_alpha_upper:2.0,outer_tolerance:1e-5,max_outer_evaluations:128,rcond:0.0,inner_iterations:100,inner_tolerance:1e-8,prior_active:false,prior_center:0.0,prior_variance:1.0,compute_curvature:curvature}}
+fn guard_owner(curvature:bool,max_bytes:i64)->CountPipeline with Alloc,Mut,Div,Panic {
+ let g:i64=8;let n:i64=12
+ var offsets=integer_buffer_new(g+1,(g+1)*8);var columns=integer_buffer_new(g*n,g*n*8);var values=integer_buffer_new(g*n,g*n*8)
+ var i:i64=0;while i<g {integer_buffer_set(&!offsets,i,i*n);var j:i64=0;while j<n {
+  let noise=if i==0 {0}else{((j*7+i*3)%11)-5}
+  var y=(i+1)*20+noise*(i+1);if j>=6 {y=y+(i+1)*10};if i==7 {y=0}
+  integer_buffer_set(&!columns,i*n+j,j);integer_buffer_set(&!values,i*n+j,y);j=j+1
+ };i=i+1};integer_buffer_set(&!offsets,g,g*n)
+ let csr=count_csr_build(g,n,g*n,offsets,columns,values,0)
+ count_pipeline_new(csr,make_ids(g,71,false),make_ids(n,83,false),2,guard_options(curvature),max_bytes)
+}
+fn guard_prepare(w:&!CountPipeline,declared:bool,missing:bool,budget:i64)->i64 with Alloc,Mut,Div,Panic {
+ let n:i64=12;let p:i64=2
+ let metadata=make_ids(n,if missing {84}else{83},true)
+ var design=numeric_buffer_new(n*p,n*p*8);var exposure=numeric_buffer_new(n,n*8)
+ var initial=numeric_buffer_new(p,p*8);var contrast=numeric_buffer_new(p,p*8)
+ var i:i64=0;while i<n {let original=n-1-i;numeric_buffer_set(&!design,i*p,1.0);numeric_buffer_set(&!design,i*p+1,if original>=6 {1.0}else{0.0});numeric_buffer_set(&!exposure,i,0.0);i=i+1}
+ numeric_buffer_set(&!initial,0,3.0);numeric_buffer_set(&!initial,1,0.0)
+ numeric_buffer_set(&!contrast,0,0.0);numeric_buffer_set(&!contrast,1,1.0)
+ let result=count_pipeline_prepare(w,&metadata,&design,&exposure,&initial,&contrast,1,budget,declared,declared)
+ count_identities_close(metadata);numeric_buffer_close(design);numeric_buffer_close(exposure);numeric_buffer_close(initial);numeric_buffer_close(contrast)
+ result
+}
+fn guard_run(curvature:bool,declared:bool,tail_budget:i64)->bool with IO,Alloc,Mut,Div,Panic {
+ let query=count_pipeline_workspace(8,12,2,0)
+ var w=guard_owner(curvature,query.payload_bytes)
+ assert(count_pipeline_status(&w)==0 && count_pipeline_phase(&w)==0)
+ assert(!count_pipeline_coefficient_available(&w,0,false) && !count_pipeline_coefficient_available(&w,0,true))
+ assert(guard_prepare(&!w,declared,true,100000)==16 && count_pipeline_phase(&w)==0)
+ assert(guard_prepare(&!w,declared,false,-1)==2 && count_pipeline_phase(&w)==0)
+ assert(guard_prepare(&!w,declared,false,100000)==0 && count_pipeline_phase(&w)==1)
+ assert(count_pipeline_point_batch(&!w,0)==1 && count_pipeline_phase(&w)==1)
+ if !curvature {assert(count_pipeline_point_batch_seeded(&!w,8,10.0)==1 && count_pipeline_point_done(&w)==0)}
+ assert(count_pipeline_point_batch(&!w,8)==0 && count_pipeline_phase(&w)==2)
+ let shrunk=count_pipeline_shrink(&!w,0.05,1.0,0.0,100,1e-8,2.0)
+ if curvature {assert(shrunk==0)}else{assert(shrunk==8 && count_pipeline_eligible(&w)==0)}
+ assert(count_pipeline_refit_batch(&!w,8,tail_budget,2e-14)==0)
+ assert(count_pipeline_adjust(&!w)==0)
+ var row:i64=0;var fitted:i64=0
+ while row<8 {
+  if count_pipeline_coefficient_available(&w,row,true) {
+   fitted=fitted+1
+   if !declared {assert(count_pipeline_gene_status(&w,row,9)==6)}
+   else if tail_budget==1 {assert(count_pipeline_gene_status(&w,row,9)==3)}
+  }
+  assert(count_pipeline_value(&w,row,18)==0.0 && count_pipeline_value(&w,row,19)==0.0)
+  assert(count_pipeline_adjusted(&w,row,1)==1.0 && count_pipeline_adjusted(&w,row,2)==1.0)
+  row=row+1
+ }
+ if curvature {assert(fitted==4)}else{assert(fitted==0)}
+ println("GUARD_CASE {} {} {} {}",curvature,declared,tail_budget,fitted)
+ count_pipeline_close(w);true
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let query=count_pipeline_workspace(8,12,2,0)
+ let refused=guard_owner(true,query.payload_bytes-1)
+ assert(count_pipeline_status(&refused)==1);count_pipeline_close(refused)
+ assert(count_pipeline_workspace(2,12,2,0).status==1)
+ assert(count_pipeline_workspace(8,2,2,0).status==1)
+ assert(count_pipeline_workspace(1000001,12,2,0).status==1)
+ assert(count_pipeline_workspace(8,12,2,2).status==1)
+ assert(guard_run(true,false,10000))
+ assert(guard_run(true,true,1))
+ assert(guard_run(false,true,10000))
+ println("GENOMICS_BATCH_GUARDS_PASS");0
+}

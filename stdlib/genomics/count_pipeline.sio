@@ -1,0 +1,639 @@
+// Stateful CSR count pipeline. One retained numerical workspace per owner.
+// Working Gaussian dispersion prior + genuine penalized NB2 profile refits.
+// Conditional plug-in Fisher/Wald outputs; no finite-sample calibration claim.
+use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_new,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_buffer_close,numeric_matrix}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+use genomics::count_csr::{CountCSR,count_csr_status,count_csr_rows,count_csr_samples,count_csr_row_start,count_csr_column,count_csr_stored_value,count_csr_size_factors_into,count_csr_close}
+use genomics::count_identities::{CountIdentities,count_identities_status,count_identities_count,count_identities_unique,count_identities_join_into,count_identities_id_length,count_identities_id_byte,count_identities_close}
+use genomics::dynamic_normalization::{DynamicSizeFactorsSlot,dynamic_size_factors_slot,dynamic_size_factors_slot_genes_used,dynamic_size_factors_slot_genes_excluded,dynamic_median_ratio_size_factors_workspace}
+use genomics::dispersion_shrinkage::{dispersion_shrinkage_workspace,dispersion_shrinkage_fit_prefix}
+use stats::regression::dynamic_dispersion::{DispersionSearchOptions,DynamicDispersionFit,dynamic_dispersion_workspace,dynamic_dispersion_fit,dynamic_dispersion_fit_seeded}
+use stats::regression::dynamic_count_fisher::{dynamic_count_fisher_workspace,dynamic_count_fit_fisher,dynamic_count_fisher_contrast}
+use stats::dynamic_multiple_testing::{dynamic_adjust_pvalues,dynamic_adjust_by}
+use special::checked_gamma_beta::{gamma_pq_checked}
+use math::pure::{is_finite,ln_checked,exp,CheckedLog,ln_checked_into}
+pub struct CountPipelineWorkspace {pub status:i64,pub genes:i64,pub samples:i64,pub columns:i64,pub numeric_elements:i64,pub integer_elements:i64,pub payload_bytes:i64}
+fn cp_add(a:i64,b:i64)->i64 {if a<0 || b<0 || b>1152921504606846463-a {return -1};a+b}
+pub fn count_pipeline_workspace(g:i64,n:i64,p:i64,method:i64)->CountPipelineWorkspace with Mut,Div {
+ let bad=CountPipelineWorkspace{status:1,genes:g,samples:n,columns:p,numeric_elements:0,integer_elements:0,payload_bytes:0}
+ if g<3 || g>1000000 || n<2 || n>1000000 || p<1 || p>=n || p>1024 {return bad}
+ let norm=dynamic_median_ratio_size_factors_workspace(g,n)
+ let dp=dynamic_dispersion_workspace(n,p,method)
+ let fw=dynamic_count_fisher_workspace(n,p)
+ let sh=dispersion_shrinkage_workspace(g)
+ if norm.status!=0 || dp.status!=0 || fw.status!=0 || sh.status!=0 {return bad}
+ var numeric:i64=0
+ numeric=cp_add(numeric,n*p)
+ numeric=cp_add(numeric,n)
+ numeric=cp_add(numeric,p)
+ numeric=cp_add(numeric,p)
+ numeric=cp_add(numeric,n)
+ numeric=cp_add(numeric,n)
+ numeric=cp_add(numeric,norm.numeric_elements)
+ numeric=cp_add(numeric,dp.count_design_elements)
+ numeric=cp_add(numeric,n)
+ numeric=cp_add(numeric,p)
+ numeric=cp_add(numeric,dp.qr_elements)
+ numeric=cp_add(numeric,dp.count_stage_elements)
+ numeric=cp_add(numeric,p)
+ numeric=cp_add(numeric,n)
+ numeric=cp_add(numeric,n)
+ numeric=cp_add(numeric,p)
+ numeric=cp_add(numeric,n)
+ numeric=cp_add(numeric,n)
+ numeric=cp_add(numeric,p)
+ numeric=cp_add(numeric,n)
+ numeric=cp_add(numeric,n)
+ numeric=cp_add(numeric,dp.factor_r_elements)
+ numeric=cp_add(numeric,dp.factor_scale_elements)
+ numeric=cp_add(numeric,fw.square_elements)
+ numeric=cp_add(numeric,p)
+ numeric=cp_add(numeric,fw.square_elements)
+ numeric=cp_add(numeric,p)
+ numeric=cp_add(numeric,p)
+ numeric=cp_add(numeric,p)
+ numeric=cp_add(numeric,fw.square_elements)
+ numeric=cp_add(numeric,fw.square_elements)
+ numeric=cp_add(numeric,g)
+ numeric=cp_add(numeric,g)
+ numeric=cp_add(numeric,g)
+ numeric=cp_add(numeric,g)
+ numeric=cp_add(numeric,g)
+ numeric=cp_add(numeric,g)
+ numeric=cp_add(numeric,sh.jacobian_elements)
+ numeric=cp_add(numeric,sh.response_elements)
+ numeric=cp_add(numeric,sh.increment_elements)
+ numeric=cp_add(numeric,sh.qr_elements)
+ numeric=cp_add(numeric,sh.stage_elements)
+ numeric=cp_add(numeric,g*24)
+ numeric=cp_add(numeric,g*p)
+ numeric=cp_add(numeric,g*p)
+ numeric=cp_add(numeric,g)
+ numeric=cp_add(numeric,g)
+ numeric=cp_add(numeric,g)
+ numeric=cp_add(numeric,g)
+ var integer:i64=0
+ integer=cp_add(integer,n)
+ integer=cp_add(integer,norm.integer_elements)
+ integer=cp_add(integer,n)
+ integer=cp_add(integer,n)
+ integer=cp_add(integer,dp.permutation_elements)
+ integer=cp_add(integer,p)
+ integer=cp_add(integer,g)
+ integer=cp_add(integer,g*12)
+ integer=cp_add(integer,g)
+ integer=cp_add(integer,g)
+ let total=cp_add(numeric,integer)
+ if total<0 {return bad}
+ CountPipelineWorkspace{status:0,genes:g,samples:n,columns:p,numeric_elements:numeric,integer_elements:integer,payload_bytes:total*8}
+}
+pub linear struct CountPipeline {
+ csr:CountCSR,gene_ids:CountIdentities,sample_ids:CountIdentities,
+ g:i64,n:i64,p:i64,status:i64,phase:i64,point_next:i64,refit_next:i64,eligible:i64,
+ options:DispersionSearchOptions,layout:NumericMatrix,normalization:DynamicSizeFactorsSlot,
+ prior_status:i64,prior_a0:f64,prior_a1:f64,prior_variance:f64,
+ point_evaluations:i64,refit_evaluations:i64,tail_iterations:i64,
+ normalization_mode:i64,join_comparisons:i64,model_declared:bool,independence_declared:bool,
+ payload_bytes:i64,log_work:CheckedLog,
+ design:NumericBuffer,
+ offsets:NumericBuffer,
+ initial:NumericBuffer,
+ contrast:NumericBuffer,
+ factors:NumericBuffer,
+ norm_logs:NumericBuffer,
+ norm_work:NumericBuffer,
+ weighted:NumericBuffer,
+ response:NumericBuffer,
+ step:NumericBuffer,
+ qr:NumericBuffer,
+ count_stage:NumericBuffer,
+ coefficients:NumericBuffer,
+ means:NumericBuffer,
+ eta:NumericBuffer,
+ candidate_coefficients:NumericBuffer,
+ candidate_means:NumericBuffer,
+ candidate_eta:NumericBuffer,
+ best_coefficients:NumericBuffer,
+ best_means:NumericBuffer,
+ best_eta:NumericBuffer,
+ profile_r:NumericBuffer,
+ profile_scales:NumericBuffer,
+ covariance:NumericBuffer,
+ standard_errors:NumericBuffer,
+ fisher_r:NumericBuffer,
+ fisher_scales:NumericBuffer,
+ outer_scales:NumericBuffer,
+ solve:NumericBuffer,
+ influences:NumericBuffer,
+ covariance_stage:NumericBuffer,
+ training_means:NumericBuffer,
+ training_alpha:NumericBuffer,
+ training_variance:NumericBuffer,
+ mapped_log:NumericBuffer,
+ mapped_variance:NumericBuffer,
+ outlier_flags:NumericBuffer,
+ jacobian:NumericBuffer,
+ shrink_response:NumericBuffer,
+ increment:NumericBuffer,
+ shrink_qr:NumericBuffer,
+ shrink_stage:NumericBuffer,
+ values:NumericBuffer,
+ point_beta:NumericBuffer,
+ final_beta:NumericBuffer,
+ pvalues:NumericBuffer,
+ bh:NumericBuffer,
+ by:NumericBuffer,
+ adjust_stage:NumericBuffer,
+ counts:IntegerBuffer,
+ norm_anchors:IntegerBuffer,
+ join_stage:IntegerBuffer,
+ join_order:IntegerBuffer,
+ profile_permutation:IntegerBuffer,
+ fisher_permutation:IntegerBuffer,
+ eligible_rows:IntegerBuffer,
+ metadata:IntegerBuffer,
+ available:IntegerBuffer,
+ adjust_indices:IntegerBuffer,
+}
+fn cp_v(w:&CountPipeline,row:i64,col:i64)->f64 with Panic {numeric_buffer_at(&w.values,row*24+col)}
+fn cp_set(w:&!CountPipeline,row:i64,col:i64,value:f64) with Mut,Panic {numeric_buffer_set(&!w.values,row*24+col,value)}
+fn cp_m(w:&CountPipeline,row:i64,col:i64)->i64 with Panic {integer_buffer_at(&w.metadata,row*12+col)}
+fn cp_mark(w:&!CountPipeline,row:i64,col:i64,value:i64) with Mut,Panic {integer_buffer_set(&!w.metadata,row*12+col,value)}
+fn cp_storage_ok(w:&CountPipeline)->bool {
+ if numeric_buffer_status(&w.design)!=0 {return false}
+ if numeric_buffer_status(&w.offsets)!=0 {return false}
+ if numeric_buffer_status(&w.initial)!=0 {return false}
+ if numeric_buffer_status(&w.contrast)!=0 {return false}
+ if numeric_buffer_status(&w.factors)!=0 {return false}
+ if numeric_buffer_status(&w.norm_logs)!=0 {return false}
+ if numeric_buffer_status(&w.norm_work)!=0 {return false}
+ if numeric_buffer_status(&w.weighted)!=0 {return false}
+ if numeric_buffer_status(&w.response)!=0 {return false}
+ if numeric_buffer_status(&w.step)!=0 {return false}
+ if numeric_buffer_status(&w.qr)!=0 {return false}
+ if numeric_buffer_status(&w.count_stage)!=0 {return false}
+ if numeric_buffer_status(&w.coefficients)!=0 {return false}
+ if numeric_buffer_status(&w.means)!=0 {return false}
+ if numeric_buffer_status(&w.eta)!=0 {return false}
+ if numeric_buffer_status(&w.candidate_coefficients)!=0 {return false}
+ if numeric_buffer_status(&w.candidate_means)!=0 {return false}
+ if numeric_buffer_status(&w.candidate_eta)!=0 {return false}
+ if numeric_buffer_status(&w.best_coefficients)!=0 {return false}
+ if numeric_buffer_status(&w.best_means)!=0 {return false}
+ if numeric_buffer_status(&w.best_eta)!=0 {return false}
+ if numeric_buffer_status(&w.profile_r)!=0 {return false}
+ if numeric_buffer_status(&w.profile_scales)!=0 {return false}
+ if numeric_buffer_status(&w.covariance)!=0 {return false}
+ if numeric_buffer_status(&w.standard_errors)!=0 {return false}
+ if numeric_buffer_status(&w.fisher_r)!=0 {return false}
+ if numeric_buffer_status(&w.fisher_scales)!=0 {return false}
+ if numeric_buffer_status(&w.outer_scales)!=0 {return false}
+ if numeric_buffer_status(&w.solve)!=0 {return false}
+ if numeric_buffer_status(&w.influences)!=0 {return false}
+ if numeric_buffer_status(&w.covariance_stage)!=0 {return false}
+ if numeric_buffer_status(&w.training_means)!=0 {return false}
+ if numeric_buffer_status(&w.training_alpha)!=0 {return false}
+ if numeric_buffer_status(&w.training_variance)!=0 {return false}
+ if numeric_buffer_status(&w.mapped_log)!=0 {return false}
+ if numeric_buffer_status(&w.mapped_variance)!=0 {return false}
+ if numeric_buffer_status(&w.outlier_flags)!=0 {return false}
+ if numeric_buffer_status(&w.jacobian)!=0 {return false}
+ if numeric_buffer_status(&w.shrink_response)!=0 {return false}
+ if numeric_buffer_status(&w.increment)!=0 {return false}
+ if numeric_buffer_status(&w.shrink_qr)!=0 {return false}
+ if numeric_buffer_status(&w.shrink_stage)!=0 {return false}
+ if numeric_buffer_status(&w.values)!=0 {return false}
+ if numeric_buffer_status(&w.point_beta)!=0 {return false}
+ if numeric_buffer_status(&w.final_beta)!=0 {return false}
+ if numeric_buffer_status(&w.pvalues)!=0 {return false}
+ if numeric_buffer_status(&w.bh)!=0 {return false}
+ if numeric_buffer_status(&w.by)!=0 {return false}
+ if numeric_buffer_status(&w.adjust_stage)!=0 {return false}
+ if integer_buffer_status(&w.counts)!=0 {return false}
+ if integer_buffer_status(&w.norm_anchors)!=0 {return false}
+ if integer_buffer_status(&w.join_stage)!=0 {return false}
+ if integer_buffer_status(&w.join_order)!=0 {return false}
+ if integer_buffer_status(&w.profile_permutation)!=0 {return false}
+ if integer_buffer_status(&w.fisher_permutation)!=0 {return false}
+ if integer_buffer_status(&w.eligible_rows)!=0 {return false}
+ if integer_buffer_status(&w.metadata)!=0 {return false}
+ if integer_buffer_status(&w.available)!=0 {return false}
+ if integer_buffer_status(&w.adjust_indices)!=0 {return false}
+ true
+}
+fn cp_initialize(w:&!CountPipeline)->i64 with Mut,Panic {
+ if w.status!=0 {return w.status}
+ if !cp_storage_ok(w) {w.status=4;return 4}
+ var i:i64=0
+ while i<w.g {var j:i64=0
+  while j<24 {cp_set(w,i,j,0.0);j=j+1}
+  j=0;while j<12 {cp_mark(w,i,j,-1);j=j+1}
+  j=0;while j<w.p {numeric_buffer_set(&!w.point_beta,i*w.p+j,0.0);numeric_buffer_set(&!w.final_beta,i*w.p+j,0.0);j=j+1}
+  integer_buffer_set(&!w.available,i,0);numeric_buffer_set(&!w.pvalues,i,1.0)
+  numeric_buffer_set(&!w.bh,i,1.0);numeric_buffer_set(&!w.by,i,1.0);i=i+1
+ };0
+}
+// Counts and original-order unique IDs transfer ownership even on refusal.
+// max_bytes covers newly allocated buffer payload only, excluding transferred input.
+pub fn count_pipeline_new(csr:CountCSR,gene_ids:CountIdentities,sample_ids:CountIdentities,
+ p:i64,options:DispersionSearchOptions,max_bytes:i64)->CountPipeline with Alloc,Mut,Div,Panic {
+ var g=count_csr_rows(&csr);var n=count_csr_samples(&csr)
+ let query=count_pipeline_workspace(g,n,p,options.method)
+ var code:i64=0
+ if query.status!=0 || max_bytes<0 || max_bytes>9223372036854771704 || query.payload_bytes>max_bytes {code=1}
+ if count_csr_status(&csr)!=0 || count_identities_status(&gene_ids)!=0 || count_identities_status(&sample_ids)!=0 ||
+ count_identities_count(&gene_ids)!=g || count_identities_unique(&gene_ids)!=g ||
+ count_identities_count(&sample_ids)!=n || count_identities_unique(&sample_ids)!=n {code=2}
+ if options.prior_active {code=3}
+ if code!=0 {g=0;n=0}
+ let dp=dynamic_dispersion_workspace(n,p,options.method)
+ let fw=dynamic_count_fisher_workspace(n,p)
+ let norm=dynamic_median_ratio_size_factors_workspace(g,n)
+ let sh=dispersion_shrinkage_workspace(g)
+ var w=CountPipeline{csr:csr,gene_ids:gene_ids,sample_ids:sample_ids,g:g,n:n,p:p,
+ status:code,phase:0,point_next:0,refit_next:0,eligible:0,options:options,
+ layout:numeric_matrix(if code==0 {n*p}else{0},n,if code==0 {p}else{0},if code==0 {p}else{0},1,0),
+ normalization:dynamic_size_factors_slot(),prior_status: -1,prior_a0:0.0,prior_a1:0.0,prior_variance:0.0,
+ point_evaluations:0,refit_evaluations:0,tail_iterations:0,normalization_mode: -1,join_comparisons:0,
+ model_declared:false,independence_declared:false,payload_bytes:if code==0 {query.payload_bytes}else{0},
+ log_work:CheckedLog{status:2,value:0.0},
+ design:numeric_buffer_new(if code==0 {n*p}else{0},if code==0 {max_bytes}else{0}),
+ offsets:numeric_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
+ initial:numeric_buffer_new(if code==0 {p}else{0},if code==0 {max_bytes}else{0}),
+ contrast:numeric_buffer_new(if code==0 {p}else{0},if code==0 {max_bytes}else{0}),
+ factors:numeric_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
+ norm_logs:numeric_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
+ norm_work:numeric_buffer_new(if code==0 {norm.numeric_elements}else{0},if code==0 {max_bytes}else{0}),
+ weighted:numeric_buffer_new(if code==0 {dp.count_design_elements}else{0},if code==0 {max_bytes}else{0}),
+ response:numeric_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
+ step:numeric_buffer_new(if code==0 {p}else{0},if code==0 {max_bytes}else{0}),
+ qr:numeric_buffer_new(if code==0 {dp.qr_elements}else{0},if code==0 {max_bytes}else{0}),
+ count_stage:numeric_buffer_new(if code==0 {dp.count_stage_elements}else{0},if code==0 {max_bytes}else{0}),
+ coefficients:numeric_buffer_new(if code==0 {p}else{0},if code==0 {max_bytes}else{0}),
+ means:numeric_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
+ eta:numeric_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
+ candidate_coefficients:numeric_buffer_new(if code==0 {p}else{0},if code==0 {max_bytes}else{0}),
+ candidate_means:numeric_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
+ candidate_eta:numeric_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
+ best_coefficients:numeric_buffer_new(if code==0 {p}else{0},if code==0 {max_bytes}else{0}),
+ best_means:numeric_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
+ best_eta:numeric_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
+ profile_r:numeric_buffer_new(if code==0 {dp.factor_r_elements}else{0},if code==0 {max_bytes}else{0}),
+ profile_scales:numeric_buffer_new(if code==0 {dp.factor_scale_elements}else{0},if code==0 {max_bytes}else{0}),
+ covariance:numeric_buffer_new(if code==0 {fw.square_elements}else{0},if code==0 {max_bytes}else{0}),
+ standard_errors:numeric_buffer_new(if code==0 {p}else{0},if code==0 {max_bytes}else{0}),
+ fisher_r:numeric_buffer_new(if code==0 {fw.square_elements}else{0},if code==0 {max_bytes}else{0}),
+ fisher_scales:numeric_buffer_new(if code==0 {p}else{0},if code==0 {max_bytes}else{0}),
+ outer_scales:numeric_buffer_new(if code==0 {p}else{0},if code==0 {max_bytes}else{0}),
+ solve:numeric_buffer_new(if code==0 {p}else{0},if code==0 {max_bytes}else{0}),
+ influences:numeric_buffer_new(if code==0 {fw.square_elements}else{0},if code==0 {max_bytes}else{0}),
+ covariance_stage:numeric_buffer_new(if code==0 {fw.square_elements}else{0},if code==0 {max_bytes}else{0}),
+ training_means:numeric_buffer_new(if code==0 {g}else{0},if code==0 {max_bytes}else{0}),
+ training_alpha:numeric_buffer_new(if code==0 {g}else{0},if code==0 {max_bytes}else{0}),
+ training_variance:numeric_buffer_new(if code==0 {g}else{0},if code==0 {max_bytes}else{0}),
+ mapped_log:numeric_buffer_new(if code==0 {g}else{0},if code==0 {max_bytes}else{0}),
+ mapped_variance:numeric_buffer_new(if code==0 {g}else{0},if code==0 {max_bytes}else{0}),
+ outlier_flags:numeric_buffer_new(if code==0 {g}else{0},if code==0 {max_bytes}else{0}),
+ jacobian:numeric_buffer_new(if code==0 {sh.jacobian_elements}else{0},if code==0 {max_bytes}else{0}),
+ shrink_response:numeric_buffer_new(if code==0 {sh.response_elements}else{0},if code==0 {max_bytes}else{0}),
+ increment:numeric_buffer_new(if code==0 {sh.increment_elements}else{0},if code==0 {max_bytes}else{0}),
+ shrink_qr:numeric_buffer_new(if code==0 {sh.qr_elements}else{0},if code==0 {max_bytes}else{0}),
+ shrink_stage:numeric_buffer_new(if code==0 {sh.stage_elements}else{0},if code==0 {max_bytes}else{0}),
+ values:numeric_buffer_new(if code==0 {g*24}else{0},if code==0 {max_bytes}else{0}),
+ point_beta:numeric_buffer_new(if code==0 {g*p}else{0},if code==0 {max_bytes}else{0}),
+ final_beta:numeric_buffer_new(if code==0 {g*p}else{0},if code==0 {max_bytes}else{0}),
+ pvalues:numeric_buffer_new(if code==0 {g}else{0},if code==0 {max_bytes}else{0}),
+ bh:numeric_buffer_new(if code==0 {g}else{0},if code==0 {max_bytes}else{0}),
+ by:numeric_buffer_new(if code==0 {g}else{0},if code==0 {max_bytes}else{0}),
+ adjust_stage:numeric_buffer_new(if code==0 {g}else{0},if code==0 {max_bytes}else{0}),
+ counts:integer_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
+ norm_anchors:integer_buffer_new(if code==0 {norm.integer_elements}else{0},if code==0 {max_bytes}else{0}),
+ join_stage:integer_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
+ join_order:integer_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0}),
+ profile_permutation:integer_buffer_new(if code==0 {dp.permutation_elements}else{0},if code==0 {max_bytes}else{0}),
+ fisher_permutation:integer_buffer_new(if code==0 {p}else{0},if code==0 {max_bytes}else{0}),
+ eligible_rows:integer_buffer_new(if code==0 {g}else{0},if code==0 {max_bytes}else{0}),
+ metadata:integer_buffer_new(if code==0 {g*12}else{0},if code==0 {max_bytes}else{0}),
+ available:integer_buffer_new(if code==0 {g}else{0},if code==0 {max_bytes}else{0}),
+ adjust_indices:integer_buffer_new(if code==0 {g}else{0},if code==0 {max_bytes}else{0}),
+ }
+ let initialized=cp_initialize(&!w)
+ w
+}
+// Preparation joins sample byte IDs explicitly; no positional fallback.
+// Metadata design is row-major. exposure is a supplied log offset in metadata order.
+// Initial coefficients and contrast are explicit; no inferred intercept.
+pub fn count_pipeline_prepare(w:&!CountPipeline,metadata_ids:&CountIdentities,
+ design:&NumericBuffer,log_exposure:&NumericBuffer,initial:&NumericBuffer,contrast:&NumericBuffer,
+ normalization_mode:i64,join_byte_budget:i64,model_declared:bool,independence_declared:bool)->i64 with Mut,Div,Panic {
+ if w.status!=0 || w.phase!=0 {return 1}
+ let n=w.n;let p=w.p
+ if numeric_buffer_status(design)!=0 || numeric_buffer_status(log_exposure)!=0 ||
+ numeric_buffer_status(initial)!=0 || numeric_buffer_status(contrast)!=0 ||
+ numeric_buffer_len(design)!=n*p || numeric_buffer_len(log_exposure)!=n ||
+ numeric_buffer_len(initial)!=p || numeric_buffer_len(contrast)!=p || count_identities_count(metadata_ids)!=n {return 2}
+ if normalization_mode<0 || normalization_mode>1 || join_byte_budget<0 || join_byte_budget>9223372036854775807-w.join_comparisons {return 2}
+ var i:i64=0
+ while i<n*p {if !is_finite(numeric_buffer_at(design,i)) {return 3};i=i+1}
+ i=0;while i<n {if !is_finite(numeric_buffer_at(log_exposure,i)) {return 3};i=i+1}
+ i=0;while i<p {if !is_finite(numeric_buffer_at(initial,i)) || !is_finite(numeric_buffer_at(contrast,i)) {return 3};i=i+1}
+ let joined=count_identities_join_into(&w.sample_ids,metadata_ids,0,join_byte_budget,&!w.join_stage,&!w.join_order)
+ w.join_comparisons=w.join_comparisons+joined.comparisons
+ if joined.status!=0 {return 10+joined.status}
+ let normalized=count_csr_size_factors_into(&w.csr,normalization_mode,&!w.factors,&!w.norm_logs,&!w.norm_work,&!w.norm_anchors,&!w.normalization)
+ if normalized!=0 {return 20+normalized}
+ i=0
+ while i<n {
+  let from=integer_buffer_at(&w.join_order,i)
+  let combined=numeric_buffer_at(log_exposure,from)+numeric_buffer_at(&w.norm_logs,i)
+  let exposure=exp(combined)
+  if !is_finite(combined) || !is_finite(exposure) || exposure<=0.0 {return 4}
+  numeric_buffer_set(&!w.offsets,i,combined)
+  var j:i64=0;while j<p {numeric_buffer_set(&!w.design,i*p+j,numeric_buffer_at(design,from*p+j));j=j+1}
+  i=i+1
+ }
+ i=0;while i<p {numeric_buffer_set(&!w.initial,i,numeric_buffer_at(initial,i));numeric_buffer_set(&!w.contrast,i,numeric_buffer_at(contrast,i));i=i+1}
+ w.normalization_mode=normalization_mode;w.model_declared=model_declared;w.independence_declared=independence_declared
+ w.phase=1;0
+}
+fn cp_load(w:&!CountPipeline,row:i64)->i64 with Mut,Div,Panic {
+ var i:i64=0
+ while i<w.n {integer_buffer_set(&!w.counts,i,0);i=i+1}
+ let end=count_csr_row_start(&w.csr,row+1)
+ i=count_csr_row_start(&w.csr,row)
+ while i<end {
+  let value=count_csr_stored_value(&w.csr,i)
+  if value>9007199254740992 {return 5}
+  integer_buffer_set(&!w.counts,count_csr_column(&w.csr,i),value);i=i+1
+ }
+ var mean:f64=0.0;var correction:f64=0.0;i=0
+ while i<w.n {
+  let y=integer_buffer_at(&w.counts,i)
+  let term=((y as f64)/exp(numeric_buffer_at(&w.offsets,i)))/(w.n as f64)
+  if !is_finite(term) || (y>0 && term==0.0) {return 4}
+  let adjusted=term-correction;let next=mean+adjusted
+  correction=(next-mean)-adjusted;mean=next;i=i+1
+ }
+ if !is_finite(mean) {return 4}
+ cp_set(w,row,0,mean);0
+}
+fn cp_profile(w:&!CountPipeline,options:&DispersionSearchOptions)->DynamicDispersionFit with Mut,Div,Panic {
+ dynamic_dispersion_fit(&w.design,&w.layout,&w.counts,&w.offsets,&w.initial,options,
+ &!w.coefficients,&!w.means,&!w.eta,&!w.candidate_coefficients,&!w.candidate_means,&!w.candidate_eta,
+ &!w.best_coefficients,&!w.best_means,&!w.best_eta,&!w.weighted,&!w.response,&!w.step,&!w.qr,&!w.count_stage,
+ &!w.profile_r,&!w.profile_scales,&!w.profile_permutation)
+}
+fn cp_profile_seeded(w:&!CountPipeline,options:&DispersionSearchOptions,seed_alpha:f64)->DynamicDispersionFit with Mut,Div,Panic {
+ dynamic_dispersion_fit_seeded(&w.design,&w.layout,&w.counts,&w.offsets,&w.initial,options,
+ &!w.coefficients,&!w.means,&!w.eta,&!w.candidate_coefficients,&!w.candidate_means,&!w.candidate_eta,
+ &!w.best_coefficients,&!w.best_means,&!w.best_eta,&!w.weighted,&!w.response,&!w.step,&!w.qr,&!w.count_stage,
+ &!w.profile_r,&!w.profile_scales,&!w.profile_permutation,seed_alpha)
+}
+// A batch advances at most max_genes consecutive rows. Failures remain in place.
+// Stored options are immutable; completed rows are never silently re-evaluated.
+fn cp_point_batch(w:&!CountPipeline,max_genes:i64,seeded:bool,seed_alpha:f64)->i64 with Mut,Div,Panic {
+ if w.status!=0 || w.phase!=1 || max_genes<1 {return 1}
+ if seeded {
+  if w.options.method!=0 || w.options.compute_curvature || !is_finite(seed_alpha) || seed_alpha<0.0 {return 1}
+  if seed_alpha>0.0 {if seed_alpha<exp(w.options.log_alpha_lower) || seed_alpha>exp(w.options.log_alpha_upper) {return 1}}
+ }
+ var spent:i64=0
+ while w.point_next<w.g && spent<max_genes {
+  let row=w.point_next
+  let loaded=cp_load(w,row)
+  if loaded!=0 {cp_mark(w,row,0,100+loaded)}
+  else {
+   let options=w.options
+   let fitted=if seeded {cp_profile_seeded(w,&options,seed_alpha)}else{cp_profile(w,&options)}
+   w.point_evaluations=w.point_evaluations+fitted.evaluations
+   cp_mark(w,row,0,fitted.status);cp_mark(w,row,1,fitted.profile_status)
+   cp_mark(w,row,2,fitted.evaluations);cp_mark(w,row,3,fitted.curvature_status)
+   cp_set(w,row,20,if fitted.left_censored {1.0}else{0.0});cp_set(w,row,21,if fitted.right_censored {1.0}else{0.0})
+   cp_set(w,row,22,fitted.curvature_h);cp_set(w,row,23,fitted.curvature_half_h)
+   if fitted.status==0 && fitted.point_available {
+    cp_set(w,row,1,fitted.alpha);cp_set(w,row,2,fitted.log_alpha)
+    cp_set(w,row,3,fitted.objective_mean);cp_set(w,row,4,fitted.full_log_likelihood_mean)
+    var j:i64=0;while j<w.p {numeric_buffer_set(&!w.point_beta,row*w.p+j,numeric_buffer_at(&w.coefficients,j));j=j+1}
+    cp_mark(w,row,4,0)
+    if fitted.local_curvature_available && fitted.alpha>0.0 && fitted.log_alpha_available &&
+     fitted.log_alpha_variance>0.0 && is_finite(fitted.log_alpha_variance) && cp_v(w,row,0)>0.0 &&
+     !fitted.left_censored && !fitted.right_censored && !fitted.boundary_candidate {
+     let k=w.eligible
+     numeric_buffer_set(&!w.training_means,k,cp_v(w,row,0))
+     numeric_buffer_set(&!w.training_alpha,k,fitted.alpha)
+     numeric_buffer_set(&!w.training_variance,k,fitted.log_alpha_variance)
+     integer_buffer_set(&!w.eligible_rows,k,row)
+     cp_set(w,row,5,fitted.log_alpha_variance);cp_mark(w,row,4,1);w.eligible=k+1
+    }
+   }
+  }
+  w.point_next=row+1;spent=spent+1
+ }
+ if w.point_next==w.g {w.phase=2}
+ 0
+}
+pub fn count_pipeline_point_batch(w:&!CountPipeline,max_genes:i64)->i64 with Mut,Div,Panic {cp_point_batch(w,max_genes,false,0.0)}
+// Explicit opt-in to the existing seeded ML/warm-start numerical algorithm.
+// Only point-only ML (compute_curvature=false); the seed is not an accepted fit.
+// Canonical search still evaluates all candidates and reports actual evaluations.
+pub fn count_pipeline_point_batch_seeded(w:&!CountPipeline,max_genes:i64,seed_alpha:f64)->i64 with Mut,Div,Panic {cp_point_batch(w,max_genes,true,seed_alpha)}
+// The Gaussian component estimates only a working log-dispersion prior.
+// All numerically eligible rows participate; no silent trim or pseudo-variance floor.
+pub fn count_pipeline_shrink(w:&!CountPipeline,a0:f64,a1:f64,rcond:f64,
+ max_iterations:i64,tolerance:f64,outlier_sigma:f64)->i64 with Mut,Div,Panic {
+ if w.status!=0 || w.phase!=2 {return 1}
+ if w.eligible<3 {w.prior_status=8;w.phase=3;return 8}
+ let fitted=dispersion_shrinkage_fit_prefix(&w.training_means,&w.training_alpha,&w.training_variance,w.eligible,
+ a0,a1,rcond,max_iterations,tolerance,outlier_sigma,&!w.mapped_log,&!w.mapped_variance,&!w.outlier_flags,
+ &!w.jacobian,&!w.shrink_response,&!w.increment,&!w.shrink_qr,&!w.shrink_stage)
+ w.prior_status=fitted.status
+ if fitted.status==0 {
+  w.prior_a0=fitted.a0;w.prior_a1=fitted.a1;w.prior_variance=fitted.prior_log_variance
+  var k:i64=0
+  while k<w.eligible {
+   let row=integer_buffer_at(&w.eligible_rows,k)
+   cp_set(w,row,6,numeric_buffer_at(&w.mapped_log,k));cp_set(w,row,7,numeric_buffer_at(&w.mapped_variance,k))
+   cp_mark(w,row,10,if numeric_buffer_at(&w.outlier_flags,k)>0.0 {1}else{0})
+   // Compute the same positive trend a0+a1/mean; refusal if this representation fails.
+   let trend=fitted.a0+fitted.a1/cp_v(w,row,0)
+   ln_checked_into(trend,&!w.log_work)
+   if w.log_work.status!=0 || !is_finite(trend) || trend<=0.0 {cp_mark(w,row,4,2)}
+   else {cp_set(w,row,8,w.log_work.value)}
+   k=k+1
+  }
+ }
+ w.phase=3;fitted.status
+}
+fn cp_infer(w:&!CountPipeline,row:i64,alpha:f64,tail_budget:i64,tail_tolerance:f64) with Mut,Div,Panic {
+ let options=w.options
+ let fisher=dynamic_count_fit_fisher(&w.design,&w.layout,&w.counts,&w.offsets,&w.initial,
+ alpha,true,w.model_declared,w.independence_declared,options.rcond,options.inner_iterations,options.inner_tolerance,
+ &!w.coefficients,&!w.means,&!w.eta,&!w.covariance,&!w.standard_errors,&!w.weighted,&!w.response,&!w.step,
+ &!w.qr,&!w.count_stage,&!w.fisher_r,&!w.fisher_scales,&!w.fisher_permutation,&!w.outer_scales,&!w.solve,&!w.influences,&!w.covariance_stage)
+ cp_mark(w,row,7,fisher.covariance_status)
+ if fisher.fit.status!=0 {cp_mark(w,row,5,200+fisher.fit.status);return}
+ var j:i64=0;while j<w.p {numeric_buffer_set(&!w.final_beta,row*w.p+j,numeric_buffer_at(&w.coefficients,j));j=j+1}
+ let contrast=dynamic_count_fisher_contrast(&fisher,&w.coefficients,&w.contrast,&w.fisher_r,&w.fisher_scales,&w.fisher_permutation,&w.outer_scales,&!w.solve)
+ cp_mark(w,row,8,contrast.status)
+ if contrast.status!=0 {return}
+ cp_set(w,row,13,contrast.estimate);cp_set(w,row,14,contrast.standard_error)
+ if !w.model_declared || !w.independence_declared {cp_mark(w,row,9,6);return}
+ if !is_finite(contrast.standard_error) || contrast.standard_error<=0.0 {cp_mark(w,row,9,4);return}
+ let z=contrast.estimate/contrast.standard_error
+ let squared=(z*0.5)*z
+ if !is_finite(z) || !is_finite(squared) || (z!=0.0 && squared<2.2250738585072014e-308) {cp_mark(w,row,9,4);return}
+ cp_set(w,row,15,z)
+ let tail=gamma_pq_checked(0.5,squared,tail_budget,tail_tolerance)
+ w.tail_iterations=w.tail_iterations+tail.iterations;cp_mark(w,row,9,tail.status)
+ if tail.status!=0 {return}
+ if tail.upper_available {numeric_buffer_set(&!w.pvalues,row,tail.upper);cp_set(w,row,16,tail.upper);cp_set(w,row,18,1.0);integer_buffer_set(&!w.available,row,1)}
+ if tail.log_upper_available {cp_set(w,row,17,tail.log_upper);cp_set(w,row,19,1.0)}
+}
+// Positive working prior -> actual penalized NB2/Cox-Reid log-alpha profile.
+// Boundary tau2=0 -> fixed point prior alpha=trend. High outlier -> unshrunk point alpha.
+// Noneligible rows and unavailable prior/refit/tests retain their IDs and p=1 family slot.
+pub fn count_pipeline_refit_batch(w:&!CountPipeline,max_genes:i64,tail_budget:i64,tail_tolerance:f64)->i64 with Mut,Div,Panic {
+ if w.status!=0 || w.phase!=3 || max_genes<1 || tail_budget<1 || tail_budget>1000000 ||
+ !is_finite(tail_tolerance) || tail_tolerance<1.7763568394002505e-15 || tail_tolerance>1e-4 {return 1}
+ var spent:i64=0
+ while w.refit_next<w.g && spent<max_genes {
+  let row=w.refit_next
+  if w.prior_status!=0 || cp_m(w,row,4)!=1 {cp_mark(w,row,5,300)}
+  else {
+   let loaded=cp_load(w,row)
+   if loaded!=0 {cp_mark(w,row,5,100+loaded)}
+   else {
+    var alpha=cp_v(w,row,1)
+    var ready=true
+    if cp_m(w,row,10)==1 {cp_mark(w,row,11,3);cp_mark(w,row,5,0)}
+    else if w.prior_variance==0.0 {alpha=exp(cp_v(w,row,8));cp_mark(w,row,11,2);cp_mark(w,row,5,0)}
+    else {
+     var options=w.options
+     options.prior_active=true;options.prior_center=cp_v(w,row,8);options.prior_variance=w.prior_variance;options.compute_curvature=false
+     let fitted=cp_profile(w,&options)
+     w.refit_evaluations=w.refit_evaluations+fitted.evaluations
+     cp_mark(w,row,11,1);cp_mark(w,row,5,fitted.status);cp_mark(w,row,6,fitted.evaluations)
+     if fitted.status!=0 || !fitted.point_available {ready=false}
+     else if fitted.left_censored || fitted.right_censored || fitted.boundary_candidate {cp_mark(w,row,5,301);ready=false}
+     else {alpha=fitted.alpha;cp_set(w,row,11,fitted.objective_mean);cp_set(w,row,12,fitted.full_log_likelihood_mean)}
+    }
+    if ready {
+     if !is_finite(alpha) || alpha<=0.0 {cp_mark(w,row,5,4)}
+     else {
+      ln_checked_into(alpha,&!w.log_work)
+      if w.log_work.status!=0 {cp_mark(w,row,5,4)}
+      else {cp_set(w,row,9,alpha);cp_set(w,row,10,w.log_work.value);cp_infer(w,row,alpha,tail_budget,tail_tolerance)}
+     }
+    }
+   }
+  }
+  w.refit_next=row+1;spent=spent+1
+ }
+ if w.refit_next==w.g {w.phase=4}
+ 0
+}
+pub fn count_pipeline_adjust(w:&!CountPipeline)->i64 with Mut,Div,Panic {
+ if w.status!=0 || w.phase!=4 {return 1}
+ let bh=dynamic_adjust_pvalues(&w.pvalues,&w.available,w.g,1,&!w.bh,&!w.adjust_indices,&!w.adjust_stage)
+ if bh.status!=0 {return bh.status}
+ let by=dynamic_adjust_by(&w.pvalues,&w.available,w.g,&!w.by,&!w.adjust_indices,&!w.adjust_stage)
+ if by.status!=0 {return by.status}
+ w.phase=5;0
+}
+pub fn count_pipeline_status(w:&CountPipeline)->i64 {w.status}
+pub fn count_pipeline_phase(w:&CountPipeline)->i64 {w.phase}
+pub fn count_pipeline_genes(w:&CountPipeline)->i64 {w.g}
+pub fn count_pipeline_samples(w:&CountPipeline)->i64 {w.n}
+pub fn count_pipeline_columns(w:&CountPipeline)->i64 {w.p}
+pub fn count_pipeline_point_done(w:&CountPipeline)->i64 {w.point_next}
+pub fn count_pipeline_refit_done(w:&CountPipeline)->i64 {w.refit_next}
+pub fn count_pipeline_eligible(w:&CountPipeline)->i64 {w.eligible}
+pub fn count_pipeline_prior_status(w:&CountPipeline)->i64 {w.prior_status}
+pub fn count_pipeline_prior_a0(w:&CountPipeline)->f64 {w.prior_a0}
+pub fn count_pipeline_prior_a1(w:&CountPipeline)->f64 {w.prior_a1}
+pub fn count_pipeline_prior_variance(w:&CountPipeline)->f64 {w.prior_variance}
+pub fn count_pipeline_point_evaluations(w:&CountPipeline)->i64 {w.point_evaluations}
+pub fn count_pipeline_refit_evaluations(w:&CountPipeline)->i64 {w.refit_evaluations}
+pub fn count_pipeline_tail_iterations(w:&CountPipeline)->i64 {w.tail_iterations}
+pub fn count_pipeline_payload_bytes(w:&CountPipeline)->i64 {w.payload_bytes}
+pub fn count_pipeline_normalization_used(w:&CountPipeline)->i64 {dynamic_size_factors_slot_genes_used(&w.normalization)}
+pub fn count_pipeline_normalization_excluded(w:&CountPipeline)->i64 {dynamic_size_factors_slot_genes_excluded(&w.normalization)}
+pub fn count_pipeline_gene_id_length(w:&CountPipeline,row:i64)->i64 with Panic {count_identities_id_length(&w.gene_ids,row)}
+pub fn count_pipeline_gene_id_byte(w:&CountPipeline,row:i64,position:i64)->i64 with Panic {count_identities_id_byte(&w.gene_ids,row,position)}
+pub fn count_pipeline_value(w:&CountPipeline,row:i64,column:i64)->f64 with Panic {assert(w.status==0 && row>=0 && row<w.g && column>=0 && column<24);cp_v(w,row,column)}
+pub fn count_pipeline_gene_status(w:&CountPipeline,row:i64,column:i64)->i64 with Panic {assert(w.status==0 && row>=0 && row<w.g && column>=0 && column<12);cp_m(w,row,column)}
+pub fn count_pipeline_adjusted(w:&CountPipeline,row:i64,method:i64)->f64 with Panic {assert(w.status==0 && row>=0 && row<w.g && (method==1 || method==2));if method==1 {numeric_buffer_at(&w.bh,row)}else{numeric_buffer_at(&w.by,row)}}
+pub fn count_pipeline_coefficient_available(w:&CountPipeline,row:i64,refitted:bool)->bool with Panic {
+ if w.status!=0 || row<0 || row>=w.g {return false}
+ if refitted {return cp_m(w,row,5)==0 && cp_m(w,row,7)>=0}
+ cp_m(w,row,0)==0 && cp_m(w,row,4)>=0
+}
+pub fn count_pipeline_coefficient(w:&CountPipeline,row:i64,column:i64,refitted:bool)->f64 with Panic {assert(count_pipeline_coefficient_available(w,row,refitted) && column>=0 && column<w.p);if refitted {numeric_buffer_at(&w.final_beta,row*w.p+column)}else{numeric_buffer_at(&w.point_beta,row*w.p+column)}}
+pub fn count_pipeline_factor(w:&CountPipeline,sample:i64)->f64 with Panic {assert(w.status==0 && w.phase>=1 && sample>=0 && sample<w.n);numeric_buffer_at(&w.factors,sample)}
+pub fn count_pipeline_offset(w:&CountPipeline,sample:i64)->f64 with Panic {assert(w.status==0 && w.phase>=1 && sample>=0 && sample<w.n);numeric_buffer_at(&w.offsets,sample)}
+pub fn count_pipeline_close(w:CountPipeline) with Alloc {
+ let CountPipeline{csr,gene_ids,sample_ids,g,n,p,status,phase,point_next,refit_next,eligible,options,layout,normalization,
+ prior_status,prior_a0,prior_a1,prior_variance,point_evaluations,refit_evaluations,tail_iterations,
+ normalization_mode,join_comparisons,model_declared,independence_declared,payload_bytes,log_work,
+ design,offsets,initial,contrast,factors,norm_logs,norm_work,weighted,response,step,qr,count_stage,coefficients,means,eta,candidate_coefficients,candidate_means,candidate_eta,best_coefficients,best_means,best_eta,profile_r,profile_scales,covariance,standard_errors,fisher_r,fisher_scales,outer_scales,solve,influences,covariance_stage,training_means,training_alpha,training_variance,mapped_log,mapped_variance,outlier_flags,jacobian,shrink_response,increment,shrink_qr,shrink_stage,values,point_beta,final_beta,pvalues,bh,by,adjust_stage,counts,norm_anchors,join_stage,join_order,profile_permutation,fisher_permutation,eligible_rows,metadata,available,adjust_indices}=w
+ count_csr_close(csr);count_identities_close(gene_ids);count_identities_close(sample_ids)
+ numeric_buffer_close(design)
+ numeric_buffer_close(offsets)
+ numeric_buffer_close(initial)
+ numeric_buffer_close(contrast)
+ numeric_buffer_close(factors)
+ numeric_buffer_close(norm_logs)
+ numeric_buffer_close(norm_work)
+ numeric_buffer_close(weighted)
+ numeric_buffer_close(response)
+ numeric_buffer_close(step)
+ numeric_buffer_close(qr)
+ numeric_buffer_close(count_stage)
+ numeric_buffer_close(coefficients)
+ numeric_buffer_close(means)
+ numeric_buffer_close(eta)
+ numeric_buffer_close(candidate_coefficients)
+ numeric_buffer_close(candidate_means)
+ numeric_buffer_close(candidate_eta)
+ numeric_buffer_close(best_coefficients)
+ numeric_buffer_close(best_means)
+ numeric_buffer_close(best_eta)
+ numeric_buffer_close(profile_r)
+ numeric_buffer_close(profile_scales)
+ numeric_buffer_close(covariance)
+ numeric_buffer_close(standard_errors)
+ numeric_buffer_close(fisher_r)
+ numeric_buffer_close(fisher_scales)
+ numeric_buffer_close(outer_scales)
+ numeric_buffer_close(solve)
+ numeric_buffer_close(influences)
+ numeric_buffer_close(covariance_stage)
+ numeric_buffer_close(training_means)
+ numeric_buffer_close(training_alpha)
+ numeric_buffer_close(training_variance)
+ numeric_buffer_close(mapped_log)
+ numeric_buffer_close(mapped_variance)
+ numeric_buffer_close(outlier_flags)
+ numeric_buffer_close(jacobian)
+ numeric_buffer_close(shrink_response)
+ numeric_buffer_close(increment)
+ numeric_buffer_close(shrink_qr)
+ numeric_buffer_close(shrink_stage)
+ numeric_buffer_close(values)
+ numeric_buffer_close(point_beta)
+ numeric_buffer_close(final_beta)
+ numeric_buffer_close(pvalues)
+ numeric_buffer_close(bh)
+ numeric_buffer_close(by)
+ numeric_buffer_close(adjust_stage)
+ integer_buffer_close(counts)
+ integer_buffer_close(norm_anchors)
+ integer_buffer_close(join_stage)
+ integer_buffer_close(join_order)
+ integer_buffer_close(profile_permutation)
+ integer_buffer_close(fisher_permutation)
+ integer_buffer_close(eligible_rows)
+ integer_buffer_close(metadata)
+ integer_buffer_close(available)
+ integer_buffer_close(adjust_indices)
+}
