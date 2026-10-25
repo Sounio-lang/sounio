@@ -52,6 +52,11 @@ for src in tests/compile-fail/stdlib_deep_*.sio; do
 done
 for src in tests/run-pass/stdlib_deep_*.sio; do native "$src" "$(basename "$src" .sio)"; done
 for name in stdlib_scale_normalization_into stdlib_scale_normalization_status stdlib_scale_count_likelihood_difference stdlib_scale_count_profile_nested_bootstrap; do native "tests/run-pass/$name.sio" "$name"; done
+# ADR-016 tropical trust and annotated dense EL+ exact-reference gate.
+rc=0
+TRUST_GATE_OUT="$out/ontology-trust" bash scripts/stdlib/ontology_trust_gate.sh > "$out/ontology-trust.stdout" 2> "$out/ontology-trust.stderr" || rc=$?
+record focused-gate ontology-trust "$rc"
+
 # Legacy render paths are replayed in the canonical engine as well as the
 # Stage2 full suite: these names exposed nested-label and first-tick defects.
 for name in stats_inference_forest viz_bootstrap_forest viz_count_matrix_qc \
