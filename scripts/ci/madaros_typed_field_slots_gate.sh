@@ -51,6 +51,9 @@
 #      Box<T>; untyped, `(*first).head` skipped the Box read (SIGILL).
 #  15. `var s: S` with no initializer (local or global) gets zeroed storage
 #      for its `[T; N]` fields; it held handle 0 (string_table_new, SIGILL).
+#  16. A `*mut S` tuple slot (`let m = f(..)` with f returning `(*mut S, i64)`)
+#      is read as the raw payload: `(*m.0).f` and `&(*m.0)` (gen2 lowered the
+#      cast operand of item_fn_def_ptr as a constant; ud2 here).
 # Each witness surrounds the right struct with decoys that win the vote.
 # Madaros from main prints 3, 1055 and 3 (or 40300003); lean_single passes all.
 #
@@ -94,6 +97,7 @@ check global_option_list_match_typed GLOBAL_OPTION_LIST_MATCH_TYPED_OK
 check box_field_local_typed BOX_FIELD_LOCAL_TYPED_OK
 check let_match_some_payload_typed LET_MATCH_SOME_PAYLOAD_TYPED_OK
 check uninit_struct_array_field UNINIT_STRUCT_ARRAY_FIELD_OK
+check tuple_raw_slot_deref TUPLE_RAW_SLOT_OK
 
 cat >"$WORK/refuse.sio" <<'SIO'
 struct Seg { buf: [i8; 16], len: i64 }

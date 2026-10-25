@@ -1791,6 +1791,10 @@ var LOWER_TUPLE_LAST_STRUCT_SLOT1: [i64; 262145] = [0; 262145]
 var LOWER_TUPLE_LAST_STRUCT_NAME: [i64; 262145] = [0; 262145]
 // The LAST tuple slot holding Box<T> or Option<Box<T>>, same keying: slot + 1
 // (0 = none), T's interned name, and 1 = Box / 2 = Option<Box>.
+// A tuple with neither records its LAST raw-pointer slot (`*mut S` /
+// `*const S`) the same way, kind 3 with S: `let m = f(..)` returning
+// `(*mut Expr, i64)` then reads `*m.0` and `&(*m.0)` as the raw payload it is
+// (lowerer_tuple_raw_slot_pointee).
 var LOWER_TUPLE_BOX_SLOT1: [i64; 262145] = [0; 262145]
 var LOWER_TUPLE_BOX_INNER: [i64; 262145] = [0; 262145]
 var LOWER_TUPLE_BOX_KIND: [i64; 262145] = [0; 262145]
@@ -1824,6 +1828,32 @@ fn lower_type_list_box_at(opt: &Option<Box<TypeExprList>>, k: i64) -> (i64, Name
     }
 }
 
+// Last slot whose type is a raw pointer to a named type, or best.
+fn lower_type_list_last_raw_slot(opt: &Option<Box<TypeExprList>>, idx: i64, best: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            var b = best
+            if (*list).head.kind == TypeExprKind::TypeRawPtr && lower_opt_type_named_name(&(*list).head.inner).len > 0 { b = idx }
+            lower_type_list_last_raw_slot(&(*list).tail, idx + 1, b)
+        }
+        None => best,
+    }
+}
+
+// Pointee name of raw-pointer slot k, or empty.
+fn lower_type_list_raw_pointee_at(opt: &Option<Box<TypeExprList>>, k: i64) -> Name with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            if k <= 0 {
+                if (*list).head.kind == TypeExprKind::TypeRawPtr { return lower_opt_type_named_name(&(*list).head.inner) }
+                return ir_empty_name()
+            }
+            lower_type_list_raw_pointee_at(&(*list).tail, k - 1)
+        }
+        None => ir_empty_name(),
+    }
+}
+
 fn lower_type_list_last_struct_slot(opt: &Option<Box<TypeExprList>>, idx: i64, best: i64) -> i64 with Mut, Panic, Div {
     match *opt {
         Some(list) => {
@@ -1843,7 +1873,18 @@ fn lower_record_tuple_last_box(nid: i64, rt: &Option<Box<TypeExpr>>) with Mut, P
         Some(te) => {
             if (*te).kind != TypeExprKind::TypeTuple { return }
             let slot = lower_type_list_last_box_slot(&(*te).type_args, 0, 0 - 1)
-            if slot < 0 { return }
+            if slot < 0 {
+                let rslot = lower_type_list_last_raw_slot(&(*te).type_args, 0, 0 - 1)
+                if rslot < 0 { return }
+                let pte = lower_type_list_raw_pointee_at(&(*te).type_args, rslot)
+                if pte.len <= 0 { return }
+                let rid = ir_intern_name(pte)
+                if rid <= 0 { return }
+                LOWER_TUPLE_BOX_SLOT1[nid as usize] = rslot + 1
+                LOWER_TUPLE_BOX_INNER[nid as usize] = rid
+                LOWER_TUPLE_BOX_KIND[nid as usize] = 3
+                return
+            }
             let kb = lower_type_list_box_at(&(*te).type_args, slot)
             if kb.0 == 0 || kb.1.len <= 0 { return }
             let sid = ir_intern_name(kb.1)
@@ -15434,6 +15475,27 @@ impl Lowerer {
         (0, 0 - 1)
     }
 
+    // `t.K` where slot K of tuple local `t` is a recorded raw pointer `*mut S`
+    // (kind 3, lower_record_tuple_last_box): S, else empty. Untyped, `*t.K`
+    // loaded word 0 of the object and `&(*t.K)` handed the raw payload to a
+    // `&S` callee one header late -- gen2 lowered `fd as *mut FnDef` with a
+    // constant for `fd`, since opt_expr_managed_object_source returns
+    // `(*mut Expr, i64)` and its caller read `&(*managed.0)` (#2966).
+    fn tuple_raw_slot_pointee(self, operand: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*operand).kind != ExprKind::ExprFieldAccess { return ir_empty_name() }
+        let k = lower_name_tuple_index((*operand).name)
+        if k < 0 { return ir_empty_name() }
+        match (*operand).left {
+            Some(tb) => {
+                if (*tb).kind != ExprKind::ExprIdent { return ir_empty_name() }
+                let tbx = self.lookup_local_tuple_box((*tb).name, k)
+                if tbx.0 != 3 || tbx.1 < 0 || tbx.1 >= (*self.struct_layouts).count { return ir_empty_name() }
+                (*self.struct_layouts).entries[tbx.1 as usize].type_name
+            }
+            None => ir_empty_name(),
+        }
+    }
+
     fn bind_local_tuple_struct2(self, name: Name, layout_idx: i64, slot: i64) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
         if layout_idx < 0 { return lo }
@@ -24922,6 +24984,9 @@ impl Lowerer {
                         return ost
                     }
                     if (*operand).kind == ExprKind::ExprFieldAccess {
+                        // `*t.K` -- a tuple slot recorded as `*mut S`.
+                        let tuple_raw = self.tuple_raw_slot_pointee(&(*operand))
+                        if tuple_raw.len > 0 { return tuple_raw }
                         match (*operand).left {
                             Some(owner) => {
                                 let owner_type = self.expr_receiver_struct_type_ref(&(*owner))
@@ -30197,7 +30262,13 @@ impl Lowerer {
                                     // bind the payload layout the way `let b = Box::new(..)` and
                                     // an Option<Box<T>>-returning call do.
                                     let tbx = lo.lookup_local_tuple_box((*tb).name, tsi)
-                                    if tbx.0 > 0 && tbx.1 >= 0 && tbx.1 < (*lo.struct_layouts).count {
+                                    // A raw-pointer slot (kind 3) binds `x` as a raw local
+                                    // over S, as `let x: *mut S = pair.K` would.
+                                    if tbx.0 == 3 && tbx.1 >= 0 && tbx.1 < (*lo.struct_layouts).count {
+                                        lo = lo.bind_local_struct_type(s.name, (*lo.struct_layouts).entries[tbx.1 as usize].type_name, false)
+                                        lo = lo.bind_local_raw_ptr(s.name)
+                                    }
+                                    if (tbx.0 == 1 || tbx.0 == 2) && tbx.1 >= 0 && tbx.1 < (*lo.struct_layouts).count {
                                         if tbx.0 == 1 {
                                             lo = lo.bind_local_struct_type(s.name, make_name("Box"), false)
                                         }
@@ -35751,6 +35822,7 @@ impl Lowerer {
                 // and the field read went through that (check phase: a 0
                 // Visibility handle in visibility_allows_access, gen3 ud2, #2966).
                 if (*operand).kind == ExprKind::ExprFieldAccess {
+                    if self.tuple_raw_slot_pointee(&(*operand)).len > 0 { return true }
                     match (*operand).left {
                         Some(raw_owner) => {
                             let raw_owner_type = self.expr_receiver_struct_type_ref(&(*raw_owner))
