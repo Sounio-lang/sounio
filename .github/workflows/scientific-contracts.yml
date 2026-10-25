@@ -1,0 +1,91 @@
+name: Scientific Contracts
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/scientific-contracts.yml'
+      - 'formal/lean4/SounioInterval*.lean'
+      - 'formal/lean4/lakefile.lean'
+      - 'formal/lean4/lean-toolchain'
+      - 'scripts/ci/interval_extended_lean_gate.sh'
+      - 'scripts/ci/interval_muldiv_lean_gate.sh'
+      - 'scripts/ci/interval_finite_axiom_inventory.mjs'
+      - 'scripts/ci/interval_extended_axiom_inventory.mjs'
+      - 'scripts/ci/interval_muldiv_axiom_inventory.mjs'
+      - 'scripts/ci/private_field_borrow_gate.sh'
+      - 'scripts/ci/seed_receipt_metadata_test.mjs'
+      - 'scripts/ci/seed_receipt_provenance_gate.sh'
+      - 'scripts/dev/write_seed_receipt.mjs'
+      - 'self-hosted/compiler/lean_single.sio'
+      - 'bin/souc-lean-single-x86_64*'
+      - 'tests/multimodule/private_field_borrow/**'
+      - 'tests/compile-fail/private_field_borrow_checked.sio'
+      - 'tests/run-pass/private_field_borrow_public.sio'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  interval-proofs:
+    name: Exact interval proofs and mutation controls
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned Lean toolchain
+        run: |
+          set -euo pipefail
+          elan_bin=$(command -v elan || true)
+          if [[ -z "$elan_bin" ]]; then
+            curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh |
+              sh -s -- -y --no-modify-path --default-toolchain none
+            elan_bin="$HOME/.elan/bin/elan"
+          fi
+          dirname "$elan_bin" >> "$GITHUB_PATH"
+          "$elan_bin" toolchain install "$(cat formal/lean4/lean-toolchain)"
+      - name: Exact addition and subtraction with forty fresh audits
+        run: bash scripts/ci/interval_extended_lean_gate.sh "$RUNNER_TEMP/interval-extended"
+      - name: Exact multiplication and division with fifty-three fresh audits
+        run: bash scripts/ci/interval_muldiv_lean_gate.sh "$RUNNER_TEMP/interval-muldiv"
+      - name: Retain proof and mutant receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interval-proof-receipts
+          path: |
+            ${{ runner.temp }}/interval-extended
+            ${{ runner.temp }}/interval-muldiv
+          if-no-files-found: error
+
+  private-field-contract:
+    name: Private-field compiler contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check committed seed provenance
+        env:
+          SOUNIO_CANONICAL_SOUC: ${{ github.workspace }}/bin/souc-lean-single-x86_64
+          SOUNIO_SEED_ELF: ${{ github.workspace }}/bin/souc-lean-single-x86_64
+          SOUNIO_SEED_RECEIPT_REQUIRED: '1'
+        run: bash scripts/ci/canonical_compiler_gate.sh
+      - name: Exercise private-field refusals and public witnesses
+        env:
+          SOUNIO_PRIVATE_COMPILER: ${{ github.workspace }}/bin/souc-lean-single-x86_64
+          SOUNIO_PRIVATE_OUTPUT: ${{ runner.temp }}/private-field-borrow
+          SOUNIO_PRIVATE_EXTRA172_ROOT: ${{ github.workspace }}
+        run: bash scripts/ci/private_field_borrow_gate.sh
+      - name: Retain compiler contract receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-field-contract-receipts
+          path: ${{ runner.temp }}/private-field-borrow
+          if-no-files-found: error

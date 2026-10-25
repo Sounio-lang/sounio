@@ -19,7 +19,8 @@ human review and main merge remain separate gates.
 The branch starts at remote main8eca8e0c086bbd074485bbfd8716accc4063ef1c
 and includes main26c2a7a7e23c957acadb311d373d7d7f1d07e9b6, preserving KL4,
 ADR020 and the V0-E.4.1 refusal classifier. It also preserves the reviewed
-finite/extended rational interval proofs from Draft3158. The final joint source
+finite/extended rational interval proofs from Draft3158 and the exact product/
+division model from Draft3164. The final joint source
 HEAD is recorded in the frozen execution packet, never inferred from a compiler.
 
 The modular raw compiler is the independently sourced ELF with SHA256
@@ -32,7 +33,10 @@ Its refreshed tracked seed has SHA256
 and the matching committed SeedReceipt. The private-field source/seed/metadata
 package from Draft3119 is imported by selected paths. Its CI workflow edit is
 excluded because .github/workflows/ci.yml belongs to another active lane.
-No private-field CI step is claimed to have been imported.
+The separate scientific-contracts.yml workflow now invokes the private-field
+contract and both interval proof gates directly; it does not modify the leased
+ci.yml. Local workflow references, YAML parsing and the unchanged ratchet pass;
+the new hosted jobs are not yet qualified.
 
 The planned joint bootstrap uses old G0 SHA256
 8956946def36004d11ec4eca0d20c75c1e7d3d0b17ee0f0a1fdda9cd6ec0e4cc
@@ -78,6 +82,8 @@ These are separately receipted jobs, not results of the pending joint run:
 | Historical calibration closure, Draft3156 | 17538 | Available-only descriptive report, original interrupted output and mutation controls |
 | Refreshed compiler seed, Draft3119 | 17539 | Fresh fixed point, canonical/provenance/private-field checks; separate from current integration |
 | Unbounded rational + / - / neg, Draft3158 | 17545 | Forty new Lean theorems plus thirty-two preserved finite theorems; conditional outward premises |
+| Unbounded rational multiplication/division, Draft3164 | 17573 | Fifty-three fresh Lean audits and twelve mathematical mutant refusals; unchanged finite/additive dependencies |
+| Syscall witness controls | 17575 | Six actual operational C++ controls, no scientific computation; requested one CPU, scheduler allocated two |
 | Child executable custody | metadata controls only | Sixteen scripts audited; intact/tampered/missing artifact cases, no scientific execution claim |
 
 The original 20000-gene/512-sample jobs17456/17472 qualify only the byte-preserved
@@ -94,7 +100,9 @@ one model refusal,one timeout and745 not started. Descriptive available-only
 intervals cannot establish family calibration. No reset or resubmission is
 authorized by this consolidation.
 
-The interval structural contract is not an IEEE interval primitive. Exact Lean
+The interval structural contract is not an IEEE interval primitive. General
+rational enclosure for all four operations now has its own proof receipt;
+general tightness and emitted IEEE instructions remain outside that result. Exact Lean
 set enclosure, a separate C++ ISA witness and proof assumptions do not establish
 frontend/IR/optimizer/backend implementation, RISC-V/RVV/PTX agreement, literal
 rounding, uncertain control flow or a complete uncertainty/provenance feature.
@@ -102,7 +110,10 @@ rounding, uncertain control flow or a complete uncertainty/provenance feature.
 ## Joint execution state
 
 The final source freeze, joint Slurm receipt and fresh full E2E results are
-pending. The controller will retain source/head/catalogs, phase statuses,
+pending. The sealed REVIEW03 controller has SHA256
+e1ae46b4456092ea92de3955caf44277f9bdb5b4ad6889d05f454ef5f881965e.
+Its17 synthetic controls and the6 actual syscall controls passed; obsolete
+REVIEW01/02 remain preserved and will not execute. The controller will retain source/head/catalogs, phase statuses,
 runtime/toolchain and artifact hashes, logs and a terminal workspace comparison.
 It runs in a durable host tmux controller with one recorded submission attempt,
 one CPU,4GiB and a75-minute hard limit; no quota change, historical deletion,
