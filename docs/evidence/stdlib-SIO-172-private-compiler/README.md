@@ -64,7 +64,8 @@ are retained separately for before and after.
 | matrix03/job17373 | Reachable private borrow/store before cases accepted; exact original phonon program accepted and ELF retained; negative programs never executed |
 | after04/job17374 | Patched source builds host,Stage2,Stage3 with identical full SHA13003a8b9b1bf4bfc64ad8d13eb0795d722888fabef5bbb2913b4f7b83bb454b; payload fixed point and smokes pass |
 | qual05/job17376 | Stronger valid same-module/impl/ref/deref/nested public controls pass before and after |
-| final08/job17379 | Final paired matrix and committed gate source, with optional exact original phonon source/library hashes |
+| final08/job17379 | Final paired matrix with exact original phonon source/library hashes |
+| final09/job17382 | Reviewed complete source manifest and EXIT status trap; focused gate passes, real old-compiler negative control fails with recorded status1 |
 
 Fresh before Stage2 is bit-identical to the committed895 seed. This is an actual
 source reproduction, not relabeling the old binary as a new build. Its full MD5
@@ -147,7 +148,9 @@ Build the compiler with scripts/ci/selfhost_host_gate.sh and forced source
 bootstrap. Then run scripts/ci/private_field_borrow_gate.sh with an absolute
 SOUNIO_PRIVATE_COMPILER pointing to the freshly built Stage2 and a new absolute
 SOUNIO_PRIVATE_OUTPUT. The gate hashes source/compiler and verifies them after
-the run. SOUNIO_PRIVATE_EXTRA172_ROOT optionally names the frozen scientific
+the run; an EXIT trap records STATUS.txt on both pass and failure. The manifest
+covers the legacy fixtures and their imported module as well as the new cases.
+SOUNIO_PRIVATE_EXTRA172_ROOT optionally names the frozen scientific
 source packet for the exact historical phonon negative; compiler CI does not
 require or import that feature branch.
 
