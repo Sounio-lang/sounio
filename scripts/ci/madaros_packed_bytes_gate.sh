@@ -23,6 +23,9 @@
 #      by reference, str_from_bytes), and write_file from one writes
 #      exactly its bytes (gen3 wrote the 160 MB NC_BIG_ELF this way and read
 #      every 8th byte off the end of BSS).
+#   5. `x as i8` is the sign-extended low byte (cast_i8_sign_extends.sio), so
+#      `CODE[i] == (0x89 as i8)` holds; gen2 compared opcode bytes that way and
+#      left every relocation in gen3 unpatched.
 #
 # Usage: madaros_packed_bytes_gate.sh   (MADAROS_BIN = compiler under test,
 #                                        default bin/souc)
@@ -57,6 +60,12 @@ set +e
 gbh_out="$("$WORK/gbh.elf" 2>&1)"; gbh_rc=$?
 set -e
 [[ "$gbh_rc" -eq 0 && "$gbh_out" == "GLOBAL_BYTE_ARRAY_HEADER_OK" ]] || fail "packed byte globals by reference / str_from_bytes: rc=$gbh_rc output=$(tr '\n' ' ' <<<"$gbh_out")"
+
+build "$ROOT_DIR/tests/run-pass/cast_i8_sign_extends.sio" "$WORK/ci8.elf"
+set +e
+ci8_out="$("$WORK/ci8.elf" 2>&1)"; ci8_rc=$?
+set -e
+[[ "$ci8_rc" -eq 0 && "$ci8_out" == "CAST_I8_OK" ]] || fail "x as i8 must be the sign-extended low byte: rc=$ci8_rc output=$(tr '\n' ' ' <<<"$ci8_out")"
 
 # write_file from a packed byte global: the gen3 path (NC_BIG_ELF). The file
 # must hold exactly the bytes written, not every 8th one.
@@ -126,4 +135,4 @@ set -e
 [[ "$mem_rc" -eq 0 && "$mem_out" == "34650000" ]] \
   || fail "700k Name-like structs in 2 GiB: rc=$mem_rc output=$(head -n 2 <<<"$mem_out" | tr '\n' ' ') (181 = arena full: buffers not packed)"
 
-echo "[madaros-packed-bytes] PASS: byte-array semantics hold; the first global indexes by reference; packed byte globals carry a header (by reference, str_from_bytes, write_file); 700k Name-like structs fit the default 2 GiB arena and sum to 34650000"
+echo "[madaros-packed-bytes] PASS: byte-array semantics hold; the first global indexes by reference; packed byte globals carry a header (by reference, str_from_bytes, write_file); x as i8 sign-extends; 700k Name-like structs fit the default 2 GiB arena and sum to 34650000"

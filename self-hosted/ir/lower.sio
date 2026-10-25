@@ -8442,6 +8442,18 @@ fn lowerer_lower_program_items_mut(
 }
 
 // Sprint 87: helpers for ExprCast type-aware lowering
+// `as i8` target (a plain `i8`, not a path or a pointer).
+fn lower_cast_type_is_i8(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *ct {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeNamed { return false }
+            let seg = (*te).path.segments
+            seg.head_len == 2 && (seg.head_buf[0] as i64) == 105 && (seg.head_buf[1] as i64) == 56
+        }
+        None => false,
+    }
+}
+
 fn lower_cast_type_is_f64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
     // Accepts f32 as well -- see lower_type_expr_is_f64. `as f32` matched neither
     // this nor the integer classifier, so a float source fell through to the
@@ -36754,6 +36766,24 @@ impl Lowerer {
             let dst = p.1
             (lo2.emit(ir_float_to_int(dst, src_reg)), dst)
         } else {
+            if lower_cast_type_is_i8(&e.cast_type) {
+                // `x as i8` is the sign-extended low byte, as on lean_single. The
+                // identity cast left `0x89 as i8` at 137 while an `[i8; N]` element
+                // reads back sign-extended (-119), so `NC_BIG_CODE[p - 2] ==
+                // (0x89 as i8)` never held for an opcode byte >= 0x80:
+                // apply_relocations_into skipped every RIP-relative and call site
+                // and gen3 ran its entry trampoline with zero displacements
+                // (SIGSEGV on `mov %rax, 0x0(%rip)`, #2966).
+                let sh_pair = lo1.emit_i64_const(56)
+                var lo_i8 = sh_pair.0
+                let shl_pair = lo_i8.fresh_reg()
+                lo_i8 = shl_pair.0
+                lo_i8 = lo_i8.emit(ir_binop(shl_pair.1, src_reg, BinaryOp::OpShl, sh_pair.1))
+                let sar_pair = lo_i8.fresh_reg()
+                lo_i8 = sar_pair.0
+                lo_i8 = lo_i8.emit(ir_binop(sar_pair.1, shl_pair.1, BinaryOp::OpShr, sh_pair.1))
+                return (lo_i8, sar_pair.1)
+            }
             (lo1, src_reg)
         }
     }
