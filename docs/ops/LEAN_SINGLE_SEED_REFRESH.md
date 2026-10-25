@@ -279,7 +279,7 @@ artifacts/seed-refresh/SeedReceipt.latest.json   # stable pointer
 ```
 
 Schema: `docs/ops/SEED_RECEIPT.schema.json`  
-Emitter: `scripts/dev/write_seed_receipt.py`  
+Emitter: `scripts/dev/write_seed_receipt.mjs`
 Validate later:
 
 ```bash
@@ -446,7 +446,7 @@ binary path).
 | path | role |
 |---|---|
 | `scripts/dev/refresh_lean_seed.sh` | print / check / stage / execute / verify-receipt driver |
-| `scripts/dev/write_seed_receipt.py` | emit + validate SeedReceipt (JSON + human .txt) |
+| `scripts/dev/write_seed_receipt.mjs` | emit + validate SeedReceipt (JSON + human .txt) |
 | `docs/ops/SEED_RECEIPT.schema.json` | SeedReceipt schema v1 |
 | `scripts/dev/slurm_srun_minimal.sh` | supported Slurm launch (`srun` only) |
 | `scripts/dev/souc-build-lock.sh` | pod serialisation if local-locked |
@@ -460,3 +460,12 @@ binary path).
 ---
 
 *End of recipe. Default command remains `--print`. No rebuild was run to author this.*
+
+## Metadata runtime
+
+The receipt writer/checker and the provenance gate use Node.js for JSON, file
+hashes and identity bookkeeping. Their receipt schema, SHA/MD5 precedence and
+fixed-point checks are unchanged. Compiler derivation, canonical self-reproduction
+and determinism still execute the actual raw Sounio compilers. The former Python
+writer remains unmodified as historical source; active recipe callers use the
+Node entrypoint. No Python numeric or auxiliary execution is required.
