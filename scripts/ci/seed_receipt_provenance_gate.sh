@@ -62,7 +62,7 @@ SEED="${SOUNIO_SEED_ELF:-${SOUNIO_CANONICAL_SOUC:-$SEED_DEFAULT}}"
 RECEIPT_DEFAULT="$ROOT_DIR/bin/souc-lean-single-x86_64.SeedReceipt.json"
 RECEIPT="${SOUNIO_SEED_RECEIPT_PATH:-$RECEIPT_DEFAULT}"
 REQUIRED="${SOUNIO_SEED_RECEIPT_REQUIRED:-0}"
-CHECKER="$ROOT_DIR/scripts/dev/write_seed_receipt.py"
+CHECKER="$ROOT_DIR/scripts/dev/write_seed_receipt.mjs"
 EVENT_NAME="${CI_EVENT_NAME:-${GITHUB_EVENT_NAME:-}}"
 BASE_SHA="${CI_BASE_SHA:-}"
 HEAD_SHA="${CI_HEAD_SHA:-HEAD}"
@@ -80,50 +80,29 @@ run_mutant_control() {
   local work mutant
   work="$(mktemp -d /tmp/sounio-seed-prov-mutant.XXXXXX)"
   # Structurally valid receipt that LIES about source.sha256.
-  mutant="$(python3 - "$work" "$SRC" "$SEED" <<'PY'
-import hashlib, json, sys
-from pathlib import Path
-work, src_p, seed_p = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
-
-def digest(p):
-    data = p.read_bytes()
-    return hashlib.md5(data).hexdigest(), hashlib.sha256(data).hexdigest(), len(data)
-
-s_md5, s_sha, s_b = digest(src_p)
-k_md5, k_sha, k_b = digest(seed_p)
-lie = "a" * 64
-assert lie != s_sha
-receipt = {
-    "schema": "sounio.SeedReceipt",
-    "schema_version": 1,
-    "receipt_utc": "1970-01-01T00:00:00Z",
-    "source": {"path": str(src_p), "sha256": lie, "md5": s_md5, "bytes": s_b},
-    "input_seed": {"path": str(seed_p), "sha256": k_sha, "md5": k_md5, "bytes": k_b, "role": "g0"},
-    "generations": [
-        {"gen": "g0", "gen_index": 0, "md5": k_md5, "sha256": k_sha, "path": "g0"},
-        {"gen": "g1", "gen_index": 1, "md5": k_md5, "sha256": k_sha, "path": "g1"},
-        {"gen": "g2", "gen_index": 2, "md5": k_md5, "sha256": k_sha, "path": "g2"},
-    ],
-    "fixed_point": {
-        "criterion": "md5(g_k)==md5(g_{k+1})",
-        "k": 1, "k_plus_1": 2,
-        "gk_label": "g1", "gk_plus1_label": "g2",
-        "gk_md5": k_md5, "gk_plus1_md5": k_md5,
-        "gk_sha256": k_sha, "gk_plus1_sha256": k_sha,
-        "md5_equal": True, "sha256_equal": True, "verified": True,
-    },
-    "output_seed": {"path": str(seed_p), "sha256": k_sha, "md5": k_md5, "bytes": k_b},
-    "environment": {"placement": "unknown"},
-    "checks": {},
-    "limits": {"provenance_note": "mutant"},
-}
-path = work / "mutant_wrong_source.json"
-path.write_text(json.dumps(receipt, indent=2) + "\n")
-print(path)
-PY
+  mutant="$(node --input-type=module - "$work" "$SRC" "$SEED" <<'JS_MUTANT'
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+const [work, src, seed] = process.argv.slice(2);
+const digest = p => { const b=fs.readFileSync(p);return {path:p,md5:crypto.createHash('md5').update(b).digest('hex'),sha256:crypto.createHash('sha256').update(b).digest('hex'),bytes:b.length}; };
+const s=digest(src), k=digest(seed), lie='a'.repeat(64);
+if(lie===s.sha256)throw new Error('mutant source digest equals actual source');
+const receipt={
+ schema:'sounio.SeedReceipt',schema_version:1,receipt_utc:'1970-01-01T00:00:00Z',
+ source:{path:src,sha256:lie,md5:s.md5,bytes:s.bytes},
+ input_seed:{...k,role:'g0'},
+ generations:[0,1,2].map(i=>({gen:'g'+i,gen_index:i,md5:k.md5,sha256:k.sha256,path:'g'+i})),
+ fixed_point:{criterion:'md5(g_k)==md5(g_{k+1})',k:1,k_plus_1:2,gk_label:'g1',gk_plus1_label:'g2',gk_md5:k.md5,gk_plus1_md5:k.md5,gk_sha256:k.sha256,gk_plus1_sha256:k.sha256,md5_equal:true,sha256_equal:true,verified:true},
+ output_seed:{...k},environment:{placement:'unknown'},checks:{},limits:{provenance_note:'mutant'}
+};
+const output=path.join(work,'mutant_wrong_source.json');
+fs.writeFileSync(output,JSON.stringify(receipt,null,2)+'\n');
+console.log(output);
+JS_MUTANT
 )"
   set +e
-  python3 "$CHECKER" --check-against-tree "$mutant" --source "$SRC" --seed-elf "$SEED" \
+  node "$CHECKER" --check-against-tree "$mutant" --source "$SRC" --seed-elf "$SEED" \
     >"$work/mutant.out" 2>&1
   local rc=$?
   set -e
@@ -211,7 +190,7 @@ fi
 
 # ── Receipt present: hard provenance check ─────────────────────────────────
 note "checking $RECEIPT against source=$SRC seed=$SEED"
-if ! python3 "$CHECKER" --check-against-tree "$RECEIPT" --source "$SRC" --seed-elf "$SEED"; then
+if ! node "$CHECKER" --check-against-tree "$RECEIPT" --source "$SRC" --seed-elf "$SEED"; then
   die "committed SeedReceipt does not match the tree (see checker output above).
   Either refresh the seed+receipt together, or remove a stale receipt.
   Recipe: docs/ops/LEAN_SINGLE_SEED_REFRESH.md"

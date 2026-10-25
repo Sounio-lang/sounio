@@ -60,7 +60,7 @@ GATE="scripts/ci/canonical_compiler_gate.sh"
 VERIFY="scripts/ci/verify_lean_seed.sh"
 SRUN="scripts/dev/slurm_srun_minimal.sh"
 LOCK="scripts/dev/souc-build-lock.sh"
-RECEIPT_PY="scripts/dev/write_seed_receipt.py"
+RECEIPT_JS="scripts/dev/write_seed_receipt.mjs"
 RECEIPT_OUT_DEFAULT="artifacts/seed-refresh"
 
 # OrangeFS is visible on compute nodes; /workspace is not.
@@ -369,8 +369,8 @@ emit_seed_receipt() {
   #   _canon_status _verify_status  (pass|fail|skip)
   local out_dir="${1:-$RECEIPT_OUT}"
   mkdir -p "$out_dir"
-  [[ -f "$RECEIPT_PY" ]] || die "missing $RECEIPT_PY"
-  python3 "$RECEIPT_PY" \
+  [[ -f "$RECEIPT_JS" ]] || die "missing $RECEIPT_JS"
+  node "$RECEIPT_JS" \
     --out-dir "$out_dir" \
     --gens-tsv "$_gens_tsv" \
     --source "$_source" \
@@ -615,8 +615,8 @@ run_verify_receipt() {
   local p="${VERIFY_RECEIPT_PATH:-}"
   [[ -n "$p" ]] || die "--verify-receipt requires a path"
   [[ -f "$p" ]] || die "receipt not found: $p"
-  [[ -f "$RECEIPT_PY" ]] || die "missing $RECEIPT_PY"
-  python3 "$RECEIPT_PY" --verify-receipt "$p"
+  [[ -f "$RECEIPT_JS" ]] || die "missing $RECEIPT_JS"
+  node "$RECEIPT_JS" --verify-receipt "$p"
 }
 
 # ── argv ────────────────────────────────────────────────────────────────────
