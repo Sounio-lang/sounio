@@ -4,7 +4,7 @@ authority: repo_only
 audience: users
 last_validated: 2026-10-25
 validated_by: Node metadata selftest
-source_of_truth: scripts/stdlib/test_emit_stdlib_e2e_result.mjs
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-sio-275.readme
 -->
 
 # SIO-275: stdlib E2E JSON metadata in Node
