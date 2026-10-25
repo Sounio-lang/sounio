@@ -4,7 +4,8 @@
 // score equations and outer profile stationary points independently of IRLS/QR.
 // The existing qualified C++ direct-Gram working-prior model is reused below.
 // Scope: case0 zero prior and --prior G12/N16 positive-prior ML fixture.
-// CR and additional failure/outlier routes require further frozen fixtures.
+// --outlier reuses the positive-prior input with outlier_sigma=1.
+// CR and additional failure routes require further frozen fixtures.
 #define main sio171_existing_prior_main
 #include "deep_stats_dispersion_reference.cpp"
 #undef main
@@ -15,7 +16,7 @@
 #include <sstream>
 namespace batch {
 int G = 8, N = 12;
-bool prior_case = false, original_prior_marker = false;
+bool prior_case = false, original_prior_marker = false, outlier_case = false;
 Q upper = 2;
 using Row = std::array<Q, 16>;
 Q q(const char *s) { return strtoflt128(s, nullptr); }
@@ -251,7 +252,10 @@ Model expected() {
   m.eligible = int(ids.size());
   require(m.eligible == (prior_case ? 11 : 4), "frozen eligible set");
   m.prior = fit(means, alpha, variance, prior_case ? q(".01") : q(".05"),
-                prior_case ? Q(10) : Q(1), 2);
+                prior_case ? Q(10) : Q(1), outlier_case ? Q(1) : Q(2));
+  if (outlier_case)
+    require(std::count(m.prior.flags.begin(), m.prior.flags.end(), 1) == 2,
+            "frozen two high-dispersion outliers");
   require(prior_case ? m.prior.prior > 0 : m.prior.prior == 0,
           "frozen prior variance class");
   for (size_t k = 0; k < ids.size(); ++k) {
@@ -493,7 +497,8 @@ void validate(const Model &m, std::string path) {
       close(x, k == 0 ? a.bh : a.by, "TSV adjustment consistency", 0, 0);
     }
   }
-  r.literal(prior_case && !original_prior_marker ? "GENOMICS_BATCH_PRIOR_PASS"
+  r.literal(outlier_case ? "GENOMICS_BATCH_OUTLIER_PASS" :
+            prior_case && !original_prior_marker ? "GENOMICS_BATCH_PRIOR_PASS"
                                                  : "GENOMICS_BATCH_PASS");
   std::string tail;
   require(!std::getline(r.in, tail), "trailing native rows");
@@ -504,9 +509,11 @@ int main(int argc, char **argv) {
   try {
     int first = 1;
     if (argc > 1 && (std::string(argv[1]) == "--prior" ||
-                     std::string(argv[1]) == "--prior-original-marker")) {
+                     std::string(argv[1]) == "--prior-original-marker" ||
+                     std::string(argv[1]) == "--outlier")) {
       batch::original_prior_marker =
           std::string(argv[1]) == "--prior-original-marker";
+      batch::outlier_case = std::string(argv[1]) == "--outlier";
       batch::prior_case = true;
       batch::G = 12;
       batch::N = 16;

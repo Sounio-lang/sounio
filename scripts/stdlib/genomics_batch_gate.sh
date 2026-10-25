@@ -18,7 +18,7 @@ sha256sum stdlib/genomics/{count_pipeline,count_pipeline_report,count_csr,count_
  stdlib/linalg/dynamic_least_squares.sio stdlib/stats/regression/{dynamic_dispersion,dynamic_count_fisher,dynamic_count_glm}.sio \
  stdlib/stats/dynamic_multiple_testing.sio stdlib/special/checked_gamma_beta.sio \
  tests/reference/{genomics_batch_independent_reference,dispersion_shrinkage_active_reference,deep_stats_dispersion_reference}.cpp \
- tests/run-pass/stdlib_genomics_batch_pipeline{,_prior,_guards}.sio \
+ tests/run-pass/stdlib_genomics_batch_pipeline{,_prior,_guards,_outlier}.sio \
  tests/run-pass/stdlib_dispersion_shrinkage_prefix.sio tests/run-pass/stdlib_deep_genomics_shrinkage.sio \
  scripts/stdlib/genomics_batch_gate.sh > "$OUT/inputs.sha256"
 g++ --version > "$OUT/reference.compiler.txt"
@@ -50,11 +50,13 @@ run_fixture() {
 run_fixture tests/run-pass/stdlib_genomics_batch_pipeline.sio pipeline GENOMICS_BATCH_PASS
 run_fixture tests/run-pass/stdlib_genomics_batch_pipeline_prior.sio prior GENOMICS_BATCH_PRIOR_PASS
 run_fixture tests/run-pass/stdlib_genomics_batch_pipeline_guards.sio guards GENOMICS_BATCH_GUARDS_PASS
+run_fixture tests/run-pass/stdlib_genomics_batch_pipeline_outlier.sio outlier GENOMICS_BATCH_OUTLIER_PASS
 run_fixture tests/run-pass/stdlib_dispersion_shrinkage_prefix.sio prefix DISPERSION_PREFIX_PASS
 run_fixture tests/run-pass/stdlib_deep_genomics_shrinkage.sio legacy_shrink 'DEEP DISPERSION PASS'
 for engine in lean_single madaros;do
  "$OUT/genomics_batch_independent" "$OUT/pipeline.$engine.native.stdout" > "$OUT/pipeline.$engine.verify.stdout" 2> "$OUT/pipeline.$engine.verify.stderr"
  "$OUT/genomics_batch_independent" --prior "$OUT/prior.$engine.native.stdout" > "$OUT/prior.$engine.verify.stdout" 2> "$OUT/prior.$engine.verify.stderr"
+ "$OUT/genomics_batch_independent" --outlier "$OUT/outlier.$engine.native.stdout" > "$OUT/outlier.$engine.verify.stdout" 2> "$OUT/outlier.$engine.verify.stderr"
  "$OUT/dispersion_shrinkage_active" "$OUT/prefix.$engine.native.stdout" > "$OUT/prefix.$engine.verify.stdout" 2> "$OUT/prefix.$engine.verify.stderr"
  "$OUT/deep_stats_dispersion" "$OUT/legacy_shrink.$engine.native.stdout" > "$OUT/legacy_shrink.$engine.verify.stdout" 2> "$OUT/legacy_shrink.$engine.verify.stderr"
 done

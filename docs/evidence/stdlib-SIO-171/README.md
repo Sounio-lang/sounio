@@ -83,6 +83,32 @@ engine. The production prefix hashes are
 `1ccc7dbdfb335811e09613c97dbe5bbde72b2ce2f82a9aec027c27bd92467197`
 and `0271cc4d1b0c139ba7de659a61ef862feab83ec915ed21e8750321fce2944769`.
 
+## Counter bounds and high-outlier follow-up
+
+Slurm17441/source15 completed0:0 in3m27s with the full dual-engine gate plus
+an additional G12×N16 fixture that changes only outlier_sigma from2 to1. Two
+high-dispersion rows use the unshrunk point alpha and refit route3; nine retain
+the genuine positive-prior profile route. The independent reference extension
+passes sigma1 to its existing Gaussian model, with no formula or tolerance
+change. Its source SHA256 is
+`723bd047dace3ffcf4679cf74df335d72950e95ccaaae5d6befaa9f85db8656b`.
+All original modes retain their original flags and markers.
+
+Slurm17443/source16 completed0:0 in3m28s, repeating the six-fixture gate on both
+engines and checking constructor refusal before aggregate counter overflow.
+The per-gene profile cap must be positive and G*cap must fit signed i64; this
+is a representability bound, not an arbitrary optimizer cap. An explicit g>0
+branch precedes MAX/g. A valid zero-row CSR and valid empty gene-ID owner are
+refused as pipeline shape1 and closed safely. A positive family with capMAX
+is refused as controls3. The maintained pipeline source is SHA256
+`3c7c8594f4a22d48f02ef73c59e10fb54cf9e4f29f89ac3a4de3fd8a0ea97c64`.
+
+During17443, an unrelated C++ pilot-verifier source was added to source16. No
+selected gate input changed and that file was neither imported nor compiled by
+the gate; its before/after input manifest verifies unchanged. This selected-input
+qualification is retained honestly, without calling the entire source16 catalog
+immutable. Final publication will use a fresh closed source catalog.
+
 ## Scale status and honest limits
 
 The full20k×512 CSR holder allocates10,506,992 bytes of new pipeline buffer
@@ -90,8 +116,12 @@ payload, excluding the transferred CSR/IDs. Two actual256-row point-only pilots
 on this full holder completed: unseeded17404 native18:19.18, peak597432KiB and
 8192 objective evaluations; named canonical seeded/warm-start17412 native10:59.32,
 peak592572KiB and8448 evaluations. These timings include full normalization and
-holder construction. They are two single observations, not a universal speed
-claim, and no performance ratio is inferred without numerical concordance.
+holder construction. Slurm17446 independently checked all actual256 rows against
+binary128 analytic normalized group coefficients and exact Poisson alpha0;
+maximum differences between the two printed coefficient streams were0. Its C++
+calculation gives an elapsed ratio0.59982896340908677 and RSS ratio0.991865182983168
+(seed/unseeded). There is no representative memory improvement. These are two
+single observations, not a universal speed claim or binary64-bit equality proof.
 Neither256-row result closes the20k actual-fit acceptance condition.
 
 The scaling program uses **one shared executable** and a separately hashed
@@ -129,8 +159,9 @@ spurious0 compiler option in17425;17426 then established the original argument
 transport refused before scientific work. The benchmark now uses qualified
 file input; the earlier outcomes have not been relabeled numerical passes.
 
-The authoritative immutable worker root is
+The source packets and raw receipts remain under the worker root
 `/scratch/sounio-stdlib-inference-scale-20261024/SIO171`. No historical artifacts
-were deleted and no shared quota was changed. Text archives preserve raw
-compiler whitespace and scientific outputs. `FILES.sha256` covers local
+were deleted and no shared quota was changed. `followup-text.tar.gz` retains17441/17443, the off-tree outlier witness17438,
+and the actual256 numerical/metrics verifier17446 plus its exact numerical
+refusal control. Text archives preserve raw compiler whitespace and scientific outputs. `FILES.sha256` covers local
 custody and the relevant maintained source files.

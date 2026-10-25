@@ -91,7 +91,9 @@ used for fitting.
 
 `max_genes` controls batch progression, not statistical multiplicity.
 `max_outer_evaluations` counts each canonical profile's objective evaluations.
-The owner reports the sum actually performed for point and penalized refit
+The constructor requires a positive per-gene evaluation cap whose product with G
+is representable in signed i64, before allocating scratch. The owner reports
+the sum actually performed for point and penalized refit
 profiles. Gamma-tail iterations have a separate counter and budget; those units
 are never mixed. Inner iteration caps, local curvature stopping tolerances and
 outer search intervals are numerical controls, not accuracy certificates.
