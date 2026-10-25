@@ -1,0 +1,1 @@
+Extend the exact rational interval-set formalization with four-corner multiplication, sign/pole reciprocal hulls, division, finite-model concordance and conditional outward enclosure statements, plus a scoped fresh-kernel, axiom-footprint and semantic-regression gate. This remains separate from IEEE or backend certification.
