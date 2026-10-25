@@ -278,4 +278,4 @@ Analyzing `lean_single.sio` (~630KB, ~200K tokens):
 
 - `llm-offload.sh` — Multi-model consensus (API-based)
 - `scripts/sounio-lint.sh` — Local linting (no quota)
-- `scripts/resolve-souc.sh` — Compiler resolution
+- `scripts/lib/resolve_souc.sh` — Compiler resolution
