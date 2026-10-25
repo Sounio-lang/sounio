@@ -176,3 +176,7 @@ no source snapshot, compiler receipt, or other lane's artifact was removed.
 
 This evidence establishes the focused native contract. Stage2/seed full-suite CI,
 PR review, and human merge remain separate checkpoints.
+
+## Current seed compatibility replay
+
+[CI repair and current compiler receipts](ci_repair_20261025/README.md) record the c21 main sync, preserved current-seed before diagnostics, explicit fixture/tuple typing and NaN/positive-infinity class verification. The original numerical receipts above remain unchanged.
