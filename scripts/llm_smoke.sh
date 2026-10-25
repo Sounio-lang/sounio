@@ -21,6 +21,8 @@ examples/llama_load_bench.sio
 examples/llm_serve.sio
 examples/llama_sample_demo.sio
 examples/llama_gpu_decode_bench.sio
+examples/llama_dev_bench.sio
+stdlib/llm/llama_dev.sio
 examples/llama_kv_paged_demo.sio
 stdlib/llm/serve.sio
 stdlib/learn/adam_f64.sio

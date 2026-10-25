@@ -1,0 +1,214 @@
+// bf16 tensor-core GEMM, C[M,N] = A[M,K] * B[K,N], f32 accumulate.
+// One warp owns a 16x8 output tile. A is row-major, B is row-major in
+// global memory and is presented to mma.sync as the column-major
+// fragment (K contiguous in the fragment, which is how .col reads it).
+.version 7.8
+.target sm_80
+.address_size 64
+
+.visible .entry gemm_mma_bf16(
+    .param .u64 param_A,
+    .param .u64 param_B,
+    .param .u64 param_C,
+    .param .s32 param_M,
+    .param .s32 param_N,
+    .param .s32 param_K
+)
+{
+    .reg .f32 %c<4>;
+    .reg .f32 %d<4>;
+    .reg .f32 %f<8>;
+    .reg .b32 %a<4>;
+    .reg .b32 %b<2>;
+    .reg .b16 %h<4>;
+    .reg .pred %p<4>;
+    .reg .b32 %r<24>;
+    .reg .b64 %rd<8>;
+
+    ld.param.u64 %rd0, [param_A];
+    ld.param.u64 %rd1, [param_B];
+    ld.param.u64 %rd2, [param_C];
+    ld.param.s32 %r1, [param_M];
+    ld.param.s32 %r2, [param_N];
+    ld.param.s32 %r3, [param_K];
+
+    mov.u32 %r4, %laneid;
+    shr.u32 %r5, %r4, 2;
+    and.b32 %r6, %r4, 3;
+    // 1D grid: one warp per 16x8 tile. blockDim must be 32.
+    mov.u32 %r18, %ctaid.x;
+    add.u32 %r19, %r2, 7;
+    shr.u32 %r19, %r19, 3;
+    div.u32 %r8, %r18, %r19;
+    rem.u32 %r7, %r18, %r19;
+    mul.lo.u32 %r9, %r8, 16;
+    mul.lo.u32 %r10, %r7, 8;
+
+    mov.f32 %c0, 0f00000000;
+    mov.f32 %c1, 0f00000000;
+    mov.f32 %c2, 0f00000000;
+    mov.f32 %c3, 0f00000000;
+
+    mov.u32 %r11, 0;
+KLOOP:
+    setp.ge.u32 %p0, %r11, %r3;
+    @%p0 bra STORE;
+
+    // A row-major fragment. a0/a1 cover rows [0,8), a2/a3 rows [8,16).
+    // Within a register, two consecutive K elements.
+    add.u32 %r12, %r9, %r5;
+    mul.lo.u32 %r13, %r6, 2;
+    add.u32 %r14, %r11, %r13;
+    mul.lo.u32 %r15, %r12, %r3;
+    add.u32 %r15, %r15, %r14;
+    cvt.u64.u32 %rd3, %r15;
+    mul.lo.u64 %rd3, %rd3, 4;
+    add.u64 %rd3, %rd0, %rd3;
+    ld.global.f32 %f0, [%rd3];
+    ld.global.f32 %f1, [%rd3+4];
+    cvt.rn.bf16.f32 %h0, %f0;
+    cvt.rn.bf16.f32 %h1, %f1;
+    mov.b32 %a0, {%h0, %h1};
+
+    add.u32 %r14, %r14, 8;
+    mul.lo.u32 %r15, %r12, %r3;
+    add.u32 %r15, %r15, %r14;
+    cvt.u64.u32 %rd3, %r15;
+    mul.lo.u64 %rd3, %rd3, 4;
+    add.u64 %rd3, %rd0, %rd3;
+    ld.global.f32 %f0, [%rd3];
+    ld.global.f32 %f1, [%rd3+4];
+    cvt.rn.bf16.f32 %h0, %f0;
+    cvt.rn.bf16.f32 %h1, %f1;
+    mov.b32 %a1, {%h0, %h1};
+
+    add.u32 %r12, %r12, 8;
+    mul.lo.u32 %r13, %r6, 2;
+    add.u32 %r14, %r11, %r13;
+    mul.lo.u32 %r15, %r12, %r3;
+    add.u32 %r15, %r15, %r14;
+    cvt.u64.u32 %rd3, %r15;
+    mul.lo.u64 %rd3, %rd3, 4;
+    add.u64 %rd3, %rd0, %rd3;
+    ld.global.f32 %f0, [%rd3];
+    ld.global.f32 %f1, [%rd3+4];
+    cvt.rn.bf16.f32 %h0, %f0;
+    cvt.rn.bf16.f32 %h1, %f1;
+    mov.b32 %a2, {%h0, %h1};
+
+    add.u32 %r14, %r14, 8;
+    mul.lo.u32 %r15, %r12, %r3;
+    add.u32 %r15, %r15, %r14;
+    cvt.u64.u32 %rd3, %r15;
+    mul.lo.u64 %rd3, %rd3, 4;
+    add.u64 %rd3, %rd0, %rd3;
+    ld.global.f32 %f0, [%rd3];
+    ld.global.f32 %f1, [%rd3+4];
+    cvt.rn.bf16.f32 %h0, %f0;
+    cvt.rn.bf16.f32 %h1, %f1;
+    mov.b32 %a3, {%h0, %h1};
+
+    // B column-major fragment: group %r5 is the column in the 8-wide tile,
+    // qthread %r6 walks K in pairs.
+    add.u32 %r16, %r10, %r5;
+    mul.lo.u32 %r13, %r6, 2;
+    add.u32 %r14, %r11, %r13;
+    mul.lo.u32 %r15, %r14, %r2;
+    add.u32 %r15, %r15, %r16;
+    cvt.u64.u32 %rd3, %r15;
+    mul.lo.u64 %rd3, %rd3, 4;
+    add.u64 %rd3, %rd1, %rd3;
+    ld.global.f32 %f0, [%rd3];
+    add.u32 %r17, %r14, 1;
+    mul.lo.u32 %r15, %r17, %r2;
+    add.u32 %r15, %r15, %r16;
+    cvt.u64.u32 %rd4, %r15;
+    mul.lo.u64 %rd4, %rd4, 4;
+    add.u64 %rd4, %rd1, %rd4;
+    ld.global.f32 %f1, [%rd4];
+    cvt.rn.bf16.f32 %h0, %f0;
+    cvt.rn.bf16.f32 %h1, %f1;
+    mov.b32 %b0, {%h0, %h1};
+
+    add.u32 %r14, %r14, 8;
+    mul.lo.u32 %r15, %r14, %r2;
+    add.u32 %r15, %r15, %r16;
+    cvt.u64.u32 %rd3, %r15;
+    mul.lo.u64 %rd3, %rd3, 4;
+    add.u64 %rd3, %rd1, %rd3;
+    ld.global.f32 %f0, [%rd3];
+    add.u32 %r17, %r14, 1;
+    mul.lo.u32 %r15, %r17, %r2;
+    add.u32 %r15, %r15, %r16;
+    cvt.u64.u32 %rd4, %r15;
+    mul.lo.u64 %rd4, %rd4, 4;
+    add.u64 %rd4, %rd1, %rd4;
+    ld.global.f32 %f1, [%rd4];
+    cvt.rn.bf16.f32 %h0, %f0;
+    cvt.rn.bf16.f32 %h1, %f1;
+    mov.b32 %b1, {%h0, %h1};
+
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32
+        {%d0, %d1, %d2, %d3},
+        {%a0, %a1, %a2, %a3},
+        {%b0, %b1},
+        {%c0, %c1, %c2, %c3};
+    mov.f32 %c0, %d0;
+    mov.f32 %c1, %d1;
+    mov.f32 %c2, %d2;
+    mov.f32 %c3, %d3;
+
+    add.u32 %r11, %r11, 16;
+    bra KLOOP;
+
+STORE:
+    // D layout: c0 (quad, qthread), c1 (quad, qthread+4),
+    // c2 (quad+8, qthread), c3 (quad+8, qthread+4).
+    add.u32 %r12, %r9, %r5;
+    add.u32 %r16, %r10, %r6;
+    setp.ge.u32 %p0, %r12, %r1;
+    setp.ge.or.u32 %p0, %r16, %r2, %p0;
+    @%p0 bra S1;
+    mul.lo.u32 %r15, %r12, %r2;
+    add.u32 %r15, %r15, %r16;
+    cvt.u64.u32 %rd3, %r15;
+    mul.lo.u64 %rd3, %rd3, 4;
+    add.u64 %rd3, %rd2, %rd3;
+    st.global.f32 [%rd3], %c0;
+S1:
+    add.u32 %r16, %r16, 4;
+    setp.ge.u32 %p0, %r12, %r1;
+    setp.ge.or.u32 %p0, %r16, %r2, %p0;
+    @%p0 bra S2;
+    mul.lo.u32 %r15, %r12, %r2;
+    add.u32 %r15, %r15, %r16;
+    cvt.u64.u32 %rd3, %r15;
+    mul.lo.u64 %rd3, %rd3, 4;
+    add.u64 %rd3, %rd2, %rd3;
+    st.global.f32 [%rd3], %c1;
+S2:
+    add.u32 %r12, %r12, 8;
+    sub.u32 %r16, %r16, 4;
+    setp.ge.u32 %p0, %r12, %r1;
+    setp.ge.or.u32 %p0, %r16, %r2, %p0;
+    @%p0 bra S3;
+    mul.lo.u32 %r15, %r12, %r2;
+    add.u32 %r15, %r15, %r16;
+    cvt.u64.u32 %rd3, %r15;
+    mul.lo.u64 %rd3, %rd3, 4;
+    add.u64 %rd3, %rd2, %rd3;
+    st.global.f32 [%rd3], %c2;
+S3:
+    add.u32 %r16, %r16, 4;
+    setp.ge.u32 %p0, %r12, %r1;
+    setp.ge.or.u32 %p0, %r16, %r2, %p0;
+    @%p0 bra DONE;
+    mul.lo.u32 %r15, %r12, %r2;
+    add.u32 %r15, %r15, %r16;
+    cvt.u64.u32 %rd3, %r15;
+    mul.lo.u64 %rd3, %rd3, 4;
+    add.u64 %rd3, %rd2, %rd3;
+    st.global.f32 [%rd3], %c3;
+DONE:
+    ret;
+}
