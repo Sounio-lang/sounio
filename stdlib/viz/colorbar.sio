@@ -1,0 +1,114 @@
+// Shared horizontal canonical colorbar. Integer 8-pixel text-cell layout.
+use viz::colormap_data::{palette_lut_rgb8}
+use viz::palette::{PaletteScale,palette_scale_status,palette_scale_id,palette_scale_min,palette_scale_max,palette_scale_constant_index,palette_metadata_svg,palette_name_svg}
+use viz::axis::{axis_label}
+use viz::scatter::{scatter_geometry}
+use display::canvas::{Canvas,canvas_fill_rect,canvas_draw_char}
+pub struct ColorBarSpec {
+ pub x:i64,pub y:i64,pub w:i64,pub h:i64,pub document_w:i64,pub document_h:i64,
+ pub text_rgb:i64,pub show_name:bool
+}
+pub struct ColorBarWork {
+ pub status:i64,pub painted_steps:i64,pub painted_labels:i64,
+ lower:[i8;32],upper:[i8;32],nlo:i64,nhi:i64,lo_x:i64,hi_x:i64,label_y:i64,constant:bool
+}
+pub fn colorbar_work()->ColorBarWork {
+ ColorBarWork{status:1,painted_steps:0,painted_labels:0,lower:[0;32],upper:[0;32],nlo:0,nhi:0,lo_x:0,hi_x:0,label_y:0,constant:false}
+}
+fn cb_name_len(palette:i64)->i64 {if palette==1 || palette==3 {7}else if palette==2 {6}else{5}}
+fn cb_name_char(palette:i64,index:i64)->i64 {
+ if palette==1 {str_char_at("viridis",index) as i64}else if palette==2 {str_char_at("plasma",index) as i64}else if palette==3 {str_char_at("inferno",index) as i64}else{str_char_at("magma",index) as i64}
+}
+fn cb_check(s:&ColorBarSpec,scale:&PaletteScale,out:&!ColorBarWork)->i64 with Mut,Div {
+ out.status=1;out.painted_steps=0;out.painted_labels=0;out.nlo=0;out.nhi=0
+ if palette_scale_status(scale)!=0 || !scatter_geometry(s.x,s.y,s.w,s.h) {return 1}
+ if s.document_w<1 || s.document_w>1000000 || s.document_h<1 || s.document_h>1000000 || s.text_rgb<0 || s.text_rgb>16777215 {return 1}
+ out.status=3
+ if s.x<0 || s.y<0 || s.x+s.w>=s.document_w || s.y+s.h>=s.document_h {return 3}
+ out.constant=palette_scale_min(scale)==palette_scale_max(scale)
+ if !out.constant {if s.w+1<256 {out.status=6;return 6}}
+ let lo=axis_label(palette_scale_min(scale));let hi=axis_label(palette_scale_max(scale))
+ if lo.n<1 || lo.n>32 || hi.n<1 || hi.n>32 {out.status=4;return 4}
+ out.nlo=lo.n;out.nhi=hi.n
+ var i:i64=0;var equal=lo.n==hi.n
+ while i<lo.n {out.lower[i as usize]=lo.text[i as usize];i=i+1}
+ i=0
+ while i<hi.n {out.upper[i as usize]=hi.text[i as usize];if i<lo.n {if hi.text[i as usize]!=lo.text[i as usize] {equal=false}};i=i+1}
+ if !out.constant {if equal {out.status=4;return 4}}
+ out.lo_x=(if out.constant {s.x+s.w/2}else{s.x})-out.nlo*4
+ out.hi_x=s.x+s.w-out.nhi*4;out.label_y=s.y+s.h+9
+ if out.lo_x<0 || out.lo_x+out.nlo*8>s.document_w || out.label_y+8>s.document_h {return 3}
+ if !out.constant {
+  if out.hi_x<out.lo_x+out.nlo*8+2 || out.hi_x+out.nhi*8>s.document_w {return 3}
+ }
+ if s.show_name {if s.y<12 || s.x+cb_name_len(palette_scale_id(scale))*8>s.document_w {return 3}}
+ out.status=0
+ 0
+}
+pub fn colorbar_validate(s:&ColorBarSpec,scale:&PaletteScale,out:&!ColorBarWork)->i64 with Mut,Div {cb_check(s,scale,out)}
+
+pub fn colorbar_canvas_into(c:&!Canvas,s:&ColorBarSpec,scale:&PaletteScale,out:&!ColorBarWork)->i64 with Mut,Div {
+ let code=cb_check(s,scale,out)
+ if code!=0 {return code}
+ if c.width!=s.document_w || c.height!=s.document_h || (c.pixels as i64)<=0 {out.status=1;return 1}
+ let steps=if out.constant {1}else{256};let palette=palette_scale_id(scale)
+ var i:i64=0
+ while i<steps {
+  let bin:i64=if out.constant {palette_scale_constant_index(scale)}else{i}
+  let rgb=palette_lut_rgb8(palette,bin)
+  let left=s.x+i*(s.w+1)/steps;let right=s.x+(i+1)*(s.w+1)/steps
+  canvas_fill_rect(c,left,s.y,right-left,s.h+1,(rgb>>16)&255,(rgb>>8)&255,rgb&255)
+  out.painted_steps=out.painted_steps+1;i=i+1
+ }
+ let rgb=s.text_rgb
+ i=0
+ while i<out.nlo {canvas_draw_char(c,out.lower[i as usize] as i64,out.lo_x+i*8,out.label_y,(rgb>>16)&255,(rgb>>8)&255,rgb&255);i=i+1}
+ out.painted_labels=1
+ if !out.constant {
+  i=0
+  while i<out.nhi {canvas_draw_char(c,out.upper[i as usize] as i64,out.hi_x+i*8,out.label_y,(rgb>>16)&255,(rgb>>8)&255,rgb&255);i=i+1}
+  out.painted_labels=2
+ }
+ if s.show_name {
+  i=0
+  while i<cb_name_len(palette) {canvas_draw_char(c,cb_name_char(palette,i),s.x+i*8,s.y-12,(rgb>>16)&255,(rgb>>8)&255,rgb&255);i=i+1}
+  out.painted_labels=out.painted_labels+1
+ }
+ 0
+}
+fn cb_svg_text_open(x:i64,y:i64,width:i64,rgb:i64) with IO {
+ let baseline:i64=y+7;let red:i64=(rgb>>16)&255;let green:i64=(rgb>>8)&255;let blue:i64=rgb&255
+ print("<text x=\"");print(x);print("\" y=\"");print(baseline);print("\" font-family=\"monospace\" font-size=\"8\" textLength=\"");print(width)
+ print("\" lengthAdjust=\"spacingAndGlyphs\" fill=\"rgb(");print(red);print(",");print(green);print(",");print(blue);print(")\">")
+}
+pub fn colorbar_svg_into(s:&ColorBarSpec,scale:&PaletteScale,out:&!ColorBarWork)->i64 with IO,Mut,Div,Panic {
+ let code=cb_check(s,scale,out)
+ if code!=0 {return code}
+ print("<g data-dynamic-series=\"canonical-colorbar\" data-orientation=\"increasing-left-to-right\" data-constant-domain=\"")
+ if out.constant {print("true")}else{print("false")};print("\"");palette_metadata_svg(scale);println(">")
+ let steps=if out.constant {1}else{256};let palette=palette_scale_id(scale)
+ var i:i64=0
+ while i<steps {
+  let bin:i64=if out.constant {palette_scale_constant_index(scale)}else{i}
+  let rgb=palette_lut_rgb8(palette,bin)
+  let left=s.x+i*(s.w+1)/steps;let right=s.x+(i+1)*(s.w+1)/steps
+  let x:f64=(left as f64)-0.5;let y:f64=(s.y as f64)-0.5;let width:i64=right-left;let height:i64=s.h+1
+  let red:i64=(rgb>>16)&255;let green:i64=(rgb>>8)&255;let blue:i64=rgb&255
+  print("<rect data-colorbar-step=\"");print(i);print("\" data-palette-index=\"");print(bin);print("\" x=\"");print(x);print("\" y=\"");print(y);print("\" width=\"");print(width);print("\" height=\"");print(height)
+  print("\" fill=\"rgb(");print(red);print(",");print(green);print(",");print(blue);println(")\"/>")
+  out.painted_steps=out.painted_steps+1;i=i+1
+ }
+ cb_svg_text_open(out.lo_x,out.label_y,out.nlo*8,s.text_rgb)
+ i=0
+ while i<out.nlo {let ch:i64=out.lower[i as usize] as i64;print_char(ch);i=i+1}
+ println("</text>");out.painted_labels=1
+ if !out.constant {
+  cb_svg_text_open(out.hi_x,out.label_y,out.nhi*8,s.text_rgb)
+  i=0
+  while i<out.nhi {let ch:i64=out.upper[i as usize] as i64;print_char(ch);i=i+1}
+  println("</text>");out.painted_labels=2
+ }
+ if s.show_name {cb_svg_text_open(s.x,s.y-12,cb_name_len(palette)*8,s.text_rgb);palette_name_svg(palette);println("</text>");out.painted_labels=out.painted_labels+1}
+ println("</g>")
+ 0
+}
