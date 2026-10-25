@@ -7,7 +7,7 @@ scientific-model calibration, or a universal contour performance claim.
 
 ## Final acceptance
 
-Slurm **17201**, `SIO175-full05`, completed `0:0` with gate `STATUS=0`.
+Slurm **17210**, `SIO175-full06`, completed `0:0` with gate `STATUS=0`.
 The explicit raw compiler SHA is
 `a292cc263f3734b1ad6f17a2e6179b8a7874ef3e76d8f5fdfea6859290baf5d3`,
 provided from current-main CI run 40144792765, artifact 12580970584,
@@ -30,8 +30,9 @@ scratch and is not substituted for this current-main compiler result.
   emitting zero bytes.
 - Coordinate, captured-level, and missing-completion mutant copies were each
   rejected with exit 1. They are explicitly non-native controls.
-- Strict seed import-closure compilation passed. Seed SHA:
-  `53b64a871490a6daf64fb2e56d62482c590b00d9f0ec94f0d621cefc2b341fd2`.
+- The additional c21 seed import-closure compilation passed using the supplied
+`SIO166/source14/bin/souc-lean-single-x86_64`. Seed SHA:
+  `8956946def36004d11ec4eca0d20c75c1e7d3d0b17ee0f0a1fdda9cd6ec0e4cc`.
 - The full functional input hash check passed unchanged.
 
 The fixture's complete native nonzero pixel stream is decoded to a PPM after
@@ -44,7 +45,7 @@ its diagnostic text nodes are retained. No SVG redraw generated the Canvas image
 
 ## Before/after observations
 
-Slurm **17196**, `SIO175-bench03`, completed `0:0` with benchmark `STATUS=0`.
+Slurm **17211**, `SIO175-bench04`, completed `0:0` with benchmark `STATUS=0`.
 For each grid the actual order was **AB / BA / AB**, where A is original c21
 source and B is the prepared implementation. Both used the same compiler above,
 the same sampled linear field and quarter-grid isovalue, the same 257² Canvas,
@@ -53,12 +54,12 @@ exports, not an isolated kernel. No statistics were calculated on a reduced fiel
 
 | Cells per side | Original elapsed seconds, pairs 1/2/3 | Prepared elapsed seconds, pairs 1/2/3 | Original peak KiB, pairs 1/2/3 | Prepared peak KiB, pairs 1/2/3 |
 | --- | --- | --- | --- | --- |
-| 256 | 0.36 / 0.32 / 0.33 | 0.11 / 0.11 / 0.13 | 328192 / 328192 / 328192 | 14344 / 13832 / 14344 |
-| 1024 | unavailable: exit 182 in all three | 1.73 / 1.71 / 1.72 | 744448 / 744448 / 744960 at failure | 214024 / 214024 / 213504 |
+| 256 | 0.33 / 0.36 / 0.38 | 0.12 / 0.12 / 0.12 | 328192 / 328192 / 328192 | 2048 / 2048 / 2048 |
+| 1024 | unavailable: exit 182 in all three | 1.81 / 1.80 / 1.81 | 744448 / 744960 / 744960 at failure | 17408 / 17408 / 17408 |
 
 Each original 1024² process reports `madaros: handles full (allocation of 64
 bytes)` at the existing 4,194,304 managed-object limit. Failed process times
-(0.87 seconds each) are preserved as failure receipts, **not speed comparisons**.
+(0.88 / 0.87 / 0.86 seconds) are preserved as failure receipts, **not speed comparisons**.
 No arena limit was raised. The original 256² runs completed and their actual SVG
 geometry passed the same independent checker as the new path.
 
@@ -71,6 +72,14 @@ saddle coverage; this benchmark does not measure a saddle-dense grid. Independen
 C++ exact rational quarter-grid projection/provenance matched every successful
 benchmark SVG. Large-grid Canvas checksums are preserved as observations; the
 independent full Canvas pixel oracle is the smaller functional fixture above.
+
+An intermediate prepared implementation still allocated per-corner NumericValue
+records and recorded 214024 / 214024 / 213504 KiB on 1024². The final scalar-corner
+closure checks numeric_matrix_fits before every possible matrix access path;
+malformed storage returns status 2 before the work check, without painting or
+changing the prior capture. The intermediate receipts are retained in the
+archive history. These are separate source-version observations, not paired
+algorithm timing or a general memory bound.
 
 ## Replay and custody
 
@@ -90,8 +99,8 @@ benchmark geometry independently. The archived worker prepare/dispatch scripts
 record the observed source and compiler locations; replay must select available
 worker paths, not assume those retained paths exist elsewhere.
 
-`receipts.tar.gz` is **395030 bytes**, SHA-256
-`941269dd81b6413b56fa02ad0e3b0693dc2a9e6cf31695cf37b9ffc024dd79c0`.
+`receipts.tar.gz` is **396164 bytes**, SHA-256
+`33a345c6938d7e6d02f2c5566833c3d14722db50964ac01091cd7a4ff569074a`.
 It contains compact functional/benchmark results, compiler/input hashes,
 resources, native stdout, C++ outcomes, controls, source hashes, previews and
 scheduler receipts. No ELF, cache or full source archive is included. Its internal
@@ -104,9 +113,9 @@ tar -xzf receipts.tar.gz -C /fresh/receipt-directory
 ```
 
 Original worker paths remain immutable:
-`/scratch/sounio-stdlib-inference-scale-20261024/SIO175-full05`,
-`SIO175-bench03`, and `SIO175-custody02`. Earlier attempts are retained separately;
+`/scratch/sounio-stdlib-inference-scale-20261024/SIO175-full06`,
+`SIO175-bench04`, and `SIO175-custody03`. Earlier attempts are retained separately;
 check01/check02 integration argument/linear-close diagnostics are included in the
 archive history. An initial custody attempt used the host's disabled accounting
-client; custody02 captures actual worker accounting instead and preserves that
+client; the final custody captures actual worker accounting instead and preserves that
 operational error. No numerical acceptance criterion was relaxed.

@@ -1,6 +1,6 @@
 use math::pure::{is_finite}
 use io::sci_print::{print_f64_sci}
-use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_get}
+use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_fits,numeric_matrix_at}
 use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
 use display::canvas::{Canvas}
 use display::canvas_ext::{PixelScissor,canvas_draw_line_aa_scissored}
@@ -37,10 +37,10 @@ fn cc_edge_into(edge:i64,xlo:f64,xhi:f64,ylo:f64,yhi:f64,level:f64,cell:&!Contou
  cell.point.status=0;cell.point.x=x;cell.point.y=y
  0
 }
-fn cc_nonflat(b:&NumericBuffer,m:&NumericMatrix,row:i64,col:i64,level:f64)->bool {
- let a=numeric_matrix_get(b,m,row,col);let c=numeric_matrix_get(b,m,row+1,col+1)
- let d=numeric_matrix_get(b,m,row+1,col);let e=numeric_matrix_get(b,m,row,col+1)
- a.value!=level || c.value!=level || d.value!=level || e.value!=level
+fn cc_nonflat(b:&NumericBuffer,m:&NumericMatrix,row:i64,col:i64,level:f64)->bool with Panic {
+ let a=numeric_matrix_at(b,m,row,col);let c=numeric_matrix_at(b,m,row+1,col+1)
+ let d=numeric_matrix_at(b,m,row+1,col);let e=numeric_matrix_at(b,m,row,col+1)
+ a!=level || c!=level || d!=level || e!=level
 }
 fn cc_owns(edge:i64,row:i64,col:i64,cols:i64,b:&NumericBuffer,m:&NumericMatrix,mask:&IntegerBuffer,level:f64)->bool with Mut,Panic {
  if edge==0 {if row>0 {if integer_buffer_at(mask,(row-1)*(cols-1)+col)==1 {if cc_nonflat(b,m,row-1,col,level) {return false}}}}
@@ -49,14 +49,14 @@ fn cc_owns(edge:i64,row:i64,col:i64,cols:i64,b:&NumericBuffer,m:&NumericMatrix,m
 }
 fn cc_cell_into(xs:&NumericBuffer,ys:&NumericBuffer,b:&NumericBuffer,m:&NumericMatrix,mask:&IntegerBuffer,row:i64,col:i64,level:f64,cell:&!ContourCell)->i64 with Mut,Div,Panic {
  cell.status=0;cell.n=0;cell.flat=0;cell.degenerate=0;cell.predicate_used=0
- let va=numeric_matrix_get(b,m,row,col);let vb=numeric_matrix_get(b,m,row,col+1)
- let vc=numeric_matrix_get(b,m,row+1,col+1);let vd=numeric_matrix_get(b,m,row+1,col)
- cell.values[0]=va.value;cell.values[1]=vb.value;cell.values[2]=vc.value;cell.values[3]=vd.value
+ let va=numeric_matrix_at(b,m,row,col);let vb=numeric_matrix_at(b,m,row,col+1)
+ let vc=numeric_matrix_at(b,m,row+1,col+1);let vd=numeric_matrix_at(b,m,row+1,col)
+ cell.values[0]=va;cell.values[1]=vb;cell.values[2]=vc;cell.values[3]=vd
  let xlo=numeric_buffer_at(xs,col);let xhi=numeric_buffer_at(xs,col+1)
  let ylo=numeric_buffer_at(ys,row);let yhi=numeric_buffer_at(ys,row+1)
  cell.xx[0]=xlo;cell.xx[1]=xhi;cell.xx[2]=xhi;cell.xx[3]=xlo
  cell.yy[0]=ylo;cell.yy[1]=ylo;cell.yy[2]=yhi;cell.yy[3]=yhi
- if va.value==level && vb.value==level && vc.value==level && vd.value==level {cell.flat=1;return cell.status}
+ if va==level && vb==level && vc==level && vd==level {cell.flat=1;return cell.status}
  var flat_count:i64=0;var flat_edge:i64= -1
  var edge:i64=0
  while edge<4 {
@@ -101,7 +101,7 @@ fn cc_cell_into(xs:&NumericBuffer,ys:&NumericBuffer,b:&NumericBuffer,m:&NumericM
  if count==2 {cc_add(cell,cell.points_x[0],cell.points_y[0],cell.points_x[1],cell.points_y[1]);return cell.status}
  if count!=4 {cell.status=2;return cell.status}
  cell.predicate_used=1
- let saddle_status=contour_saddle_sign_into(va.value,vb.value,vc.value,vd.value,level,&!cell.saddle)
+ let saddle_status=contour_saddle_sign_into(va,vb,vc,vd,level,&!cell.saddle)
  if saddle_status!=0 {cell.status=2;return cell.status}
  if cell.saddle.sign>0 {cc_add(cell,cell.points_x[0],cell.points_y[0],cell.points_x[1],cell.points_y[1]);cc_add(cell,cell.points_x[2],cell.points_y[2],cell.points_x[3],cell.points_y[3])}
  if cell.saddle.sign<0 {cc_add(cell,cell.points_x[0],cell.points_y[0],cell.points_x[3],cell.points_y[3]);cc_add(cell,cell.points_x[1],cell.points_y[1],cell.points_x[2],cell.points_y[2])}
@@ -132,6 +132,7 @@ fn cc_preflight_into(s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffer,b:&N
  let cols=numeric_buffer_len(xs);let rows=numeric_buffer_len(ys);let nl=numeric_buffer_len(levels)
  if cols<2 || rows<2 || nl<1 {return out.status}
  if numeric_matrix_rows(m)!=rows || numeric_matrix_cols(m)!=cols {return out.status}
+ if !numeric_matrix_fits(b,m) {return out.status}
  if rows-1>9223372036854775807/(cols-1) {return out.status}
  let cells=(rows-1)*(cols-1)
  if integer_buffer_len(mask)!=cells {return out.status}
@@ -162,8 +163,6 @@ fn cc_preflight_into(s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffer,b:&N
   if i>0 {if value<=numeric_buffer_at(levels,i-1) {return out.status}}
   i=i+1
  }
- let last=numeric_matrix_get(b,m,rows-1,cols-1)
- if last.status!=0 {out.status=2;return out.status}
  var row:i64=0
  var masked:i64=0
  while row<rows-1 {
@@ -172,9 +171,9 @@ fn cc_preflight_into(s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffer,b:&N
    let flag=integer_buffer_at(mask,row*(cols-1)+col)
    if flag!=0 && flag!=1 {return out.status}
    if flag==0 {masked=masked+1}else{
-    let a=numeric_matrix_get(b,m,row,col);let c=numeric_matrix_get(b,m,row+1,col+1)
-    let d=numeric_matrix_get(b,m,row+1,col);let e=numeric_matrix_get(b,m,row,col+1)
-    if !is_finite(a.value) || !is_finite(c.value) || !is_finite(d.value) || !is_finite(e.value) {return out.status}
+    let a=numeric_matrix_at(b,m,row,col);let c=numeric_matrix_at(b,m,row+1,col+1)
+    let d=numeric_matrix_at(b,m,row+1,col);let e=numeric_matrix_at(b,m,row,col+1)
+    if !is_finite(a) || !is_finite(c) || !is_finite(d) || !is_finite(e) {return out.status}
    }
    col=col+1
   }

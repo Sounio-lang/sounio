@@ -61,6 +61,11 @@ Earlier errors do not invent a capacity estimate. All prepare failures leave the
 owner's previous capture, levels, generation, and readiness unchanged. Work is
 scratch and may change on failure.
 
+Storage-fit failure returns status 2 before the work-budget check. Precedence
+between simultaneous invalid inputs is not a scientific availability guarantee.
+After the layout fits its buffer, checked scalar matrix accessors fetch corners;
+no NumericValue snapshot is created per corner.
+
 Inputs require increasing finite grid axes and contour levels, a checked strided
 matrix, a 0/1 row-major cell mask, finite corners of every active cell, finite
 spans, and a nonconstant plot domain. Masked-only values may be nonfinite. The
