@@ -8,7 +8,7 @@ mkdir -p "$OUT";OUT=$(cd "$OUT" && pwd)
 cd "$ROOT"
 : "${MADAROS_RAW_BIN:?explicit pinned raw compiler path required}"
 [[ -x $MADAROS_RAW_BIN ]] || { echo "raw compiler not executable" >&2;exit 64; }
-export MADAROS_RAW_BIN
+export MADAROS_RAW_BIN SOUC_BIN="$MADAROS_RAW_BIN"
 source scripts/lib/resolve_souc.sh
 sounio_require_souc
 export SOUNIO_STDLIB_PATH="$ROOT/stdlib"
@@ -36,13 +36,20 @@ for ref in prepared_contour_reference deep_viz_dynamic_contour deep_viz_contour_
  if [[ $ref == prepared_contour_reference ]];then phase "$ref.concordance" "$OUT/$ref" "$OUT/$native.native.stdout" "$OUT/prepared-canvas.ppm";else phase "$ref.concordance" "$OUT/$ref" "$OUT/$native.native.stdout";fi
 done
 # One-pixel perturbation and lost completion are negative copies, never native.
-sed '0,/x1="50"/s/x1="50"/x1="51"/' "$OUT/viz_prepared_contour.native.stdout" > "$OUT/geometry-mutant.stdout"
-[[ $(sha256sum "$OUT/geometry-mutant.stdout" | cut -d' ' -f1) != $(sha256sum "$OUT/viz_prepared_contour.native.stdout" | cut -d' ' -f1) ]]
-if phase geometry-mutant "$OUT/prepared_contour_reference" "$OUT/geometry-mutant.stdout";then echo 'geometry mutant accepted' >&2;exit 1;fi
-sed '/PREPARED_CONTOUR_PASS/d' "$OUT/viz_prepared_contour.native.stdout" > "$OUT/completion-mutant.stdout"
-if phase completion-mutant "$OUT/prepared_contour_reference" "$OUT/completion-mutant.stdout";then echo 'completion mutant accepted' >&2;exit 1;fi
-sed 's/data-contour-level="0.00000000000000e+00"/data-contour-level="1.00000000000000e+00"/g' "$OUT/viz_prepared_contour.native.stdout" > "$OUT/level-mutant.stdout"
-if phase level-mutant "$OUT/prepared_contour_reference" "$OUT/level-mutant.stdout";then echo 'level provenance mutant accepted' >&2;exit 1;fi
+sed '0,/x1="50"/s/x1="50"/x1="51"/' "$OUT/viz_prepared_contour.native.stdout" > "$OUT/geometry-mutant.input.stdout"
+[[ $(sha256sum "$OUT/geometry-mutant.input.stdout" | cut -d' ' -f1) != $(sha256sum "$OUT/viz_prepared_contour.native.stdout" | cut -d' ' -f1) ]]
+if phase geometry-mutant "$OUT/prepared_contour_reference" "$OUT/geometry-mutant.input.stdout";then echo 'geometry mutant accepted' >&2;exit 1;fi
+sed '/PREPARED_CONTOUR_PASS/d' "$OUT/viz_prepared_contour.native.stdout" > "$OUT/completion-mutant.input.stdout"
+if phase completion-mutant "$OUT/prepared_contour_reference" "$OUT/completion-mutant.input.stdout";then echo 'completion mutant accepted' >&2;exit 1;fi
+sed 's/data-contour-level="0.00000000000000e+00"/data-contour-level="1.00000000000000e+00"/g' "$OUT/viz_prepared_contour.native.stdout" > "$OUT/level-mutant.input.stdout"
+if phase level-mutant "$OUT/prepared_contour_reference" "$OUT/level-mutant.input.stdout";then echo 'level provenance mutant accepted' >&2;exit 1;fi
+for kind in geometry completion level;do
+ [[ -s $OUT/$kind-mutant.input.stdout ]]
+ if cmp -s "$OUT/$kind-mutant.input.stdout" "$OUT/viz_prepared_contour.native.stdout";then echo "vacuous $kind mutation" >&2;exit 1;fi
+ case "$kind" in geometry)reason='exact saddle/flat-edge/T/L/ownership geometry';;completion)reason='completion';;level)reason='captured contour level changed after input reuse';;esac
+ phase "$kind-mutant-diagnostic" grep -Fxq "$reason" "$OUT/$kind-mutant.stderr"
+ sha256sum "$OUT/$kind-mutant.input.stdout" > "$OUT/$kind-mutant.input.sha256"
+done
 if [[ -n ${SOUNIO_SEED_COMPILER:-} ]];then
  phase strict-seed "$SOUNIO_SEED_COMPILER" tests/run-pass/viz_prepared_contour.sio "$OUT/strict-seed.elf"
  sha256sum "$SOUNIO_SEED_COMPILER" > "$OUT/SEED_COMPILER.sha256"
