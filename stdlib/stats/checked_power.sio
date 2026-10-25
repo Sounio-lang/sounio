@@ -3,7 +3,7 @@
 // Two-sided power is invariant under sign(d). No shifted-t fallback is used.
 use math::pure::{is_finite,ln_checked,exp,sqrt}
 use math::logarithmic::{log1p_checked}
-use stats::noncentral_t::{noncentral_t_tails_checked,noncentral_t_quantile_checked}
+use stats::noncentral_t::{CheckedNctTails,noncentral_t_tails_checked,noncentral_t_quantile_checked}
 
 pub struct CheckedPower {
  pub status:i64,pub value:f64,pub log_value:f64,pub value_available:bool,pub log_available:bool,
@@ -42,6 +42,24 @@ fn cp_from_log(log_value:f64)->CheckedPower with Mut,Div,Panic {
  out.value_available=value>0.0 && is_finite(value)
  out
 }
+// Preserve measured work even when a completed intermediate cannot be used.
+fn cp_attach_work(out:&!CheckedPower,work:&CheckedPower) with Mut {
+ out.critical=work.critical;out.critical_available=work.critical_available
+ out.critical_evaluations=work.critical_evaluations;out.cdf_evaluations=work.cdf_evaluations
+ out.mixture_terms=work.mixture_terms;out.quadrature_evaluations=work.quadrature_evaluations
+ out.truncation_evaluations=work.truncation_evaluations
+}
+fn cp_refuse(work:&CheckedPower,status:i64)->CheckedPower with Mut {
+ var out=cp_empty(status)
+ cp_attach_work(&!out,work)
+ out
+}
+fn cp_tail_work(work:&!CheckedPower,tail:&CheckedNctTails) with Mut {
+ work.cdf_evaluations=work.cdf_evaluations+1
+ work.mixture_terms=work.mixture_terms+tail.mixture_terms
+ work.quadrature_evaluations=work.quadrature_evaluations+tail.quadrature_evaluations
+ work.truncation_evaluations=work.truncation_evaluations+tail.truncation_evaluations
+}
 fn cp_power(d:f64,n:i64,alpha:f64,two_sided:bool,per_group:bool,budget:i64,tol:f64)->CheckedPower with Mut,Div,Panic {
  let status=cp_controls(d,n,alpha,budget,tol)
  if status!=0 {return cp_empty(status)}
@@ -60,48 +78,45 @@ fn cp_power(d:f64,n:i64,alpha:f64,two_sided:bool,per_group:bool,budget:i64,tol:f
  let tail=if two_sided {alpha*0.5}else{alpha}
  if tail<=0.0 {return cp_empty(5)}
  let critical=noncentral_t_quantile_checked(df,0.0,tail,true,budget,tol)
- if critical.status!=0 || !critical.available {var out=cp_empty(if critical.status!=0 {critical.status}else{5});out.critical_evaluations=critical.evaluations;return out}
+ var work=cp_empty(0)
+ work.critical_evaluations=critical.evaluations
+ if critical.status!=0 || !critical.available {return cp_refuse(&work,if critical.status!=0 {critical.status}else{5})}
+ work.critical=critical.value;work.critical_available=true
  let upper=noncentral_t_tails_checked(critical.value,df,delta,budget,tol)
- if upper.status!=0 {var out=cp_empty(upper.status);out.critical_evaluations=critical.evaluations;out.cdf_evaluations=1;return out}
+ cp_tail_work(&!work,&upper)
+ if upper.status!=0 {return cp_refuse(&work,upper.status)}
  var out=cp_empty(0)
  if !two_sided {
   out.value=upper.sf;out.value_available=upper.sf_available
   out.log_value=upper.log_sf;out.log_available=upper.log_sf_available
  }else{
   let lower=noncentral_t_tails_checked(-critical.value,df,delta,budget,tol)
-  if lower.status!=0 {var failed=cp_empty(lower.status);failed.critical_evaluations=critical.evaluations;failed.cdf_evaluations=2;return failed}
-  if !upper.log_cdf_available || !lower.log_cdf_available {return cp_empty(5)}
+  cp_tail_work(&!work,&lower)
+  if lower.status!=0 {return cp_refuse(&work,lower.status)}
+  if !upper.log_cdf_available || !lower.log_cdf_available {return cp_refuse(&work,5)}
   // Non-rejection is F(c)-F(-c). Compute its positive difference in log
   // space when rejection is large; this avoids adding a rounded unit SF.
   let rejection_log=if upper.log_sf_available {cp_logadd(upper.log_sf,lower.log_cdf)}else{0.0}
   if upper.log_sf_available && rejection_log<= -0.1053605156578263 {
    out=cp_from_log(rejection_log)
   }else{
-   if lower.log_cdf>=upper.log_cdf {return cp_empty(5)}
+   if lower.log_cdf>=upper.log_cdf {return cp_refuse(&work,5)}
    let ratio=exp(lower.log_cdf-upper.log_cdf)
-   if ratio>=0.9999 {return cp_empty(5)}
+   if ratio>=0.9999 {return cp_refuse(&work,5)}
    let logged=log1p_checked(-ratio)
-   if logged.status!=0 {return cp_empty(4)}
+   if logged.status!=0 {return cp_refuse(&work,4)}
    let nonrejection_log=upper.log_cdf+logged.value
    let nonrejection=exp(nonrejection_log)
-   if !is_finite(nonrejection) || nonrejection<0.0 || nonrejection>=1.0 {return cp_empty(4)}
+   if !is_finite(nonrejection) || nonrejection<0.0 || nonrejection>=1.0 {return cp_refuse(&work,4)}
    out.value=1.0-nonrejection;out.value_available=true
    if nonrejection>0.0 {
     let log_power=log1p_checked(-nonrejection)
-    if log_power.status!=0 {return cp_empty(4)}
+    if log_power.status!=0 {return cp_refuse(&work,4)}
     out.log_value=log_power.value;out.log_available=true
    }
   }
-  out.cdf_evaluations=2
-  out.mixture_terms=lower.mixture_terms
-  out.quadrature_evaluations=lower.quadrature_evaluations
-  out.truncation_evaluations=lower.truncation_evaluations
  }
- if !two_sided {out.cdf_evaluations=1}
- out.critical=critical.value;out.critical_available=true;out.critical_evaluations=critical.evaluations
- out.mixture_terms=out.mixture_terms+upper.mixture_terms
- out.quadrature_evaluations=out.quadrature_evaluations+upper.quadrature_evaluations
- out.truncation_evaluations=out.truncation_evaluations+upper.truncation_evaluations
+ cp_attach_work(&!out,&work)
  out
 }
 pub fn power_onesample_checked(d:f64,n:i64,alpha:f64,two_sided:bool,budget:i64,tol:f64)->CheckedPower with Mut,Div,Panic {cp_power(d,n,alpha,two_sided,false,budget,tol)}
