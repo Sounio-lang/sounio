@@ -9,6 +9,7 @@
 #include "deep_stats_dispersion_reference.cpp"
 #undef main
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <numeric>
 #include <sstream>
@@ -146,14 +147,26 @@ Model expected() {
       if (prior_case) {
         int base = (i + 1) * 20, noise = ((j * 7 + i * 3) % 17) - 8;
         // Fixture uses f64 sqrt and truncates the positive product to i64.
-        // These bounded products are separated from integer boundaries;
-        // retain the full fixture formula, with truncation after
-        // multiplication.
+        // Some products land on integer boundaries (base100, multiplier.7).
+        // Audit the actual C++ f64 truncation against binary128 for every
+        // frozen base/multiplier; never silently change the fixture counts.
         Q multiplier = i % 4 == 0   ? q(".7")
                        : i % 4 == 1 ? q("1.5")
                        : i % 4 == 2 ? Q(1)
                                     : Q(2);
         int amplitude = base / 30 + int(sqrtq(Q(base)) * multiplier);
+        volatile double base64 = base;
+        volatile double multiplier64 = i % 4 == 0   ? .7
+                                       : i % 4 == 1 ? 1.5
+                                       : i % 4 == 2 ? 1.0
+                                                    : 2.0;
+        double product64 = std::sqrt(base64) * multiplier64;
+        int amplitude64 = base / 30 + int(product64);
+        require(amplitude64 == amplitude,
+                "frozen f64/binary128 amplitude agreement");
+        if (j == 0)
+          std::printf("AMPLITUDE_AUDIT %d %d %d\n", base, amplitude64,
+                      amplitude);
         count = std::max(0, base + noise * amplitude);
         if (j >= N / 2)
           count *= 2;
@@ -334,6 +347,16 @@ void close(Q a, Q e, std::string field, Q rel, Q abs) {
     throw std::runtime_error(field + ": actual=" + av + " independent=" + ev);
   }
 }
+void probability_close(Q actual, Q expected, const std::string &field) {
+  require(actual >= 0 && actual <= 1 && expected >= 0 && expected <= 1,
+          "probability bounds");
+  if (expected > 0)
+    require(actual > 0, "positive reference probability must stay positive");
+  // Zero absolute floor prevents a small positive tail/BH/BY being accepted
+  // as zero or with an arbitrarily large relative error. Frozen tails are
+  // within the finite binary64 range; underflow is not claimed here.
+  close(actual, expected, field, q(".0002"), 0);
+}
 std::vector<std::string> split(std::string s) {
   std::vector<std::string> v;
   std::istringstream in(s);
@@ -399,14 +422,18 @@ void validate(const Model &m, std::string path) {
         rel = q("2e-10");
         abs = q("2e-10");
       }
+      if (j == 16) {
+        probability_close(a.v[j], e.v[j], "raw probability");
+        continue;
+      }
       close(a.v[j], e.v[j],
             "gene " + std::to_string(i) + " value " + std::to_string(j), rel,
             abs);
     }
     a.bh = r.number("BH ");
     a.by = r.number("BY ");
-    close(a.bh, e.bh, "full family BH", q(".0002"), q("2e-6"));
-    close(a.by, e.by, "full family BY", q(".0002"), q("2e-6"));
+    probability_close(a.bh, e.bh, "full family BH");
+    probability_close(a.by, e.by, "full family BY");
   }
   require(evals == wp && refits == wr, "actual work sums");
   r.literal("#model=NB2_log_link;dispersion_prior=Gaussian_working;alpha=plug_"
