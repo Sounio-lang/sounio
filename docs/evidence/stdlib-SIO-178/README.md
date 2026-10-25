@@ -89,7 +89,7 @@ only the standard Lean foundations:
 
 No sorryAx, Lean.trustCompiler, custom arithmetic/enclosure axiom, admit or
 native_decide is accepted. The closed rational checks use decide +kernel.
-check_axiom_inventory.mjs validates TEXT of the actual Lean output, exact theorem
+scripts/ci/interval_finite_axiom_inventory.mjs validates TEXT of the actual Lean output, exact theorem
 coverage and the explicit primitive-premise inventory; Lean checks the proofs.
 Its nine negative controls reject missing/duplicate rows, omitted premise
 inventory, forbidden/custom axioms and source escape constructs.
@@ -135,6 +135,36 @@ workspace lacks /usr/bin/time; build02 exposed missing core Rat theorem/instance
 names; build05 reached successful Lean checks but lacked Node on its bounded
 PATH. These are not theorem passes. The final script selects the exact binaries.
 
+## CI integration and source inventory
+
+The existing Lean Proofs CI job now invokes
+`scripts/ci/interval_finite_lean_gate.sh`. The text guard was moved, not duplicated,
+from this evidence directory to
+`scripts/ci/interval_finite_axiom_inventory.mjs`. The portable gate resolves the
+actual toolchain behind an elan launcher, requires Lean 4.33.0 at the pinned
+commit, records actual Lean/Lake/runtime-library hashes, builds the two scoped
+targets, and unconditionally checks the model source and generates a fresh axiom
+audit. It checks exact coverage of 32 theorems, all nine negative guard controls,
+and unchanged source hashes. No prior evidence log is accepted as an audit input.
+A zero-theorem source/audit pair cannot satisfy the required cardinality.
+
+The scoped gate was executed in the remote workspace with the official pinned
+toolchain; all recorded phases exit zero. This is an execution of the checked-in
+CI command, not a claim that the GitHub job or every default target has run on
+this change. Compact receipts are in `ci-integration.receipts.tar.gz`.
+
+The administrative global inventory generator now uses Node instead of embedded
+Python. It preserves tracked-file selection, Unicode word boundaries,
+comment/string blanking, declaration-prefix matching, line numbers and generated
+Markdown. Seven parser controls cover nested comments, escaped strings, Unicode,
+modifiers, newline preservation and path ordering. On unchanged base
+`7ce5eddeef78c76c7e744150ed9c169c53a3d3b0`, its generated inventory is byte-identical
+to that base's tracked inventory. The current inventory changes only the number
+of scanned Lean files, 316 to 318; 59 declared axioms, 741 native_decide uses and
+zero sorry occurrences are unchanged. Those global counts are source-text
+metadata, separate from this model's fresh kernel audit and foundational axioms.
+No Python was executed for this migration or comparison.
+
 ## Reproduction and boundaries still open
 
 With the verified toolchain's bin directory on PATH, from formal/lean4:
@@ -148,8 +178,8 @@ lake env lean SounioIntervalFiniteAxiomAudit.lean > AUDIT_STDOUT
 Then, from the repository root, use a Node runtime for text checks only:
 
 ~~~sh
-node docs/evidence/stdlib-SIO-178/check_axiom_inventory.mjs --selftest
-node docs/evidence/stdlib-SIO-178/check_axiom_inventory.mjs \
+node scripts/ci/interval_finite_axiom_inventory.mjs --selftest
+node scripts/ci/interval_finite_axiom_inventory.mjs \
   formal/lean4/SounioIntervalFinite.lean AUDIT_STDOUT
 ~~~
 
