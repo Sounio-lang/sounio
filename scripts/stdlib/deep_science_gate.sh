@@ -231,6 +231,11 @@ rc=0
 MADAROS_RAW_BIN="$MADAROS_RAW_BIN" SEED_RAW_BIN="${SEED_RAW_BIN:-$repo/bin/souc-lean-single-x86_64}" timeout 1200 bash scripts/stdlib/genomics_count_identity_gate.sh "$out/genomics-count-identities" > "$out/genomics-count-identities.gate.stdout" 2> "$out/genomics-count-identities.gate.stderr" || rc=$?
 record focused-gate genomics-count-identities "$rc"
 
+# Reusable named results: canonical framing across all chunk sizes and long streams.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" SEED_RAW_BIN="${SEED_RAW_BIN:-$repo/bin/souc-lean-single-x86_64}" timeout 600 bash scripts/stdlib/genomics_named_stream_gate.sh "$out/genomics-named-stream" > "$out/genomics-named-stream.gate.stdout" 2> "$out/genomics-named-stream.gate.stderr" || rc=$?
+record focused-gate genomics-named-stream "$rc"
+
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"
