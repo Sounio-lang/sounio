@@ -1,0 +1,140 @@
+// Actual terminal-event solve; only the solver-owned final dense segment is drawn.
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_at,numeric_buffer_status,numeric_buffer_close}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set,integer_buffer_status,integer_buffer_close}
+use ode::solver::{default_options}
+use ode::checked_dp54::{dp54_dense_init,dp54_dense_close,dp54_dense_domain,dp54_dense_value,dp54_dense_derivative,dp54_event_init,dp54_event_close,dp54_event_info,dp54_default_limits,dp54_default_event_options,solve_dp54_event64}
+use viz::dynamic_plot::{DynamicPlotSpec,dynamic_line_canvas,dynamic_line_svg}
+use viz::axis::{axis_ticks,axis_label}
+use viz::axis_layout::{AxisLabelPlan,axis_fit_labels}
+use viz::scale::{ScaleSpec}
+use display::canvas::{Canvas,canvas_clear,canvas_draw_char,canvas_fill_rect}
+var RHS_CALLS:i64=0
+var EVENT_CALLS:i64=0
+fn decay(t:f64,y:&[f64;64],dy:&![f64;64]) with Mut,Div,Panic {RHS_CALLS=RHS_CALLS+1;dy[0]= -0.5*y[0]}
+fn threshold(t:f64,y:&[f64;64])->f64 with Mut,Div,Panic {EVENT_CALLS=EVENT_CALLS+1;y[0]-0.4}
+fn text(c:&!Canvas,x:i64,y:i64,s:string) with IO,Mut {
+ var i:i64=0
+ while i<str_len(s) {canvas_draw_char(c,str_char_at(s,i) as i64,x+8*i,y,235,240,245);i=i+1}
+ print("<text x=\"");print(x);print("\" y=\"");print(y+7);print("\" fill=\"rgb(235,240,245)\" font-family=\"monospace\" font-size=\"8\" textLength=\"");print(str_len(s)*8);print("\" lengthAdjust=\"spacingAndGlyphs\">");var j:i64=0
+ while j<str_len(s) {
+  let ch:i64=str_char_at(s,j) as i64
+  if ch==38 {print("&amp;")}else if ch==60 {print("&lt;")}else if ch==62 {print("&gt;")}else if ch==34 {print("&quot;")}else if ch==39 {print("&apos;")}else{print_char(ch)}
+  j=j+1
+ }
+ println("</text>")
+}
+// The same half-open integer pixel rectangle is used by both exports.
+fn rule(c:&!Canvas,x:i64,y:i64,w:i64,h:i64) with IO,Mut {
+ canvas_fill_rect(c,x,y,w,h,180,190,200)
+ let px:f64=(x as f64)-0.5;let py:f64=(y as f64)-0.5
+ print("<rect data-science-rule=\"1\" x=\"");print(px);print("\" y=\"");print(py);print("\" width=\"");print(w);print("\" height=\"");print(h);println("\" fill=\"rgb(180,190,200)\"/>")
+}
+fn dump(c:&Canvas) with IO,Mut,Div {
+ println("<!-- CANVAS_RLE 1480 800 -->")
+ var row:i64=0
+ while row<c.height {
+  var left:i64=0
+  while left<c.width {
+   let rgb:i64=read_i64(c.pixels,row*c.width+left)
+   var right=left+1
+   while right<c.width {
+    if read_i64(c.pixels,row*c.width+right)!=rgb {break}
+    right=right+1
+   }
+   println("<!-- PIX {} {} {} {} -->",row,left,right-left,rgb)
+   left=right
+  }
+  row=row+1
+ }
+ println("<!-- CANVAS_RLE_END -->")
+}
+fn axis(c:&!Canvas,plan:&AxisLabelPlan,lo:f64,hi:f64,vertical:bool) with IO,Mut,Div,Panic {
+ let ticks=axis_ticks(lo,hi,plan.intervals)
+ var i:i64=0
+ while i<plan.n {
+  let px:i64=plan.tick_x[i as usize];let py:i64=plan.tick_y[i as usize]
+  let tx:i64=plan.text_x[i as usize];let ty:i64=plan.text_y[i as usize]
+  let label=axis_label(ticks.values[i as usize])
+  if i>0 {
+   let ax:i64=plan.tick_x[(i-1) as usize];let ay:i64=plan.tick_y[(i-1) as usize]
+   if vertical {rule(c,px,py,1,ay-py+1)}else{rule(c,ax,ay,px-ax+1,1)}
+  }
+  if vertical {rule(c,px-4,py,5,1)}else{rule(c,px,py,1,5)}
+  let length:i64=label.n*8
+  print("<text x=\"");print(tx);print("\" y=\"");print(ty+7);print("\" fill=\"rgb(235,240,245)\" font-family=\"monospace\" font-size=\"8\" textLength=\"");print(length);print("\" lengthAdjust=\"spacingAndGlyphs\">")
+  var j:i64=0
+  while j<label.n {let ch:i64=label.text[j as usize] as i64;canvas_draw_char(c,ch,tx+8*j,ty,235,240,245);print_char(ch);j=j+1}
+  println("</text>");i=i+1
+ }
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ var dense=dp54_dense_init();var event=dp54_event_init()
+ var options=default_options();options.rtol=1e-10;options.atol=1e-12;options.dt_init=0.05;options.dt_max=0.05;options.max_steps=1000
+ var limits=dp54_default_limits();limits.max_rhs=10000;limits.max_event=100000;limits.max_root_iterations=10000
+ var event_options=dp54_default_event_options();event_options.direction= -1;event_options.terminal=true;event_options.include_initial=false;event_options.root_atol=1e-11
+ let y0:[f64;64]=[1.0;64]
+ let solved=solve_dp54_event64(decay,threshold,&y0,1,0.0,4.0,options,limits,event_options,&!dense,&!event)
+ let domain=dp54_dense_domain(&dense);let found=dp54_event_info(&event)
+ var code:i64=0
+ if solved.status!=5 || domain.status!=0 || !found.found || !found.bracket_ready || found.status!=0 || domain.t0>=domain.t1 {code=1}
+ var times=numeric_buffer_new(65,520);var values=numeric_buffer_new(65,520);var derivatives=numeric_buffer_new(65,520)
+ var mask=integer_buffer_new(65,520);var indices=integer_buffer_new(65,520)
+ if numeric_buffer_status(&times)!=0 || numeric_buffer_status(&values)!=0 || numeric_buffer_status(&derivatives)!=0 || integer_buffer_status(&mask)!=0 || integer_buffer_status(&indices)!=0 {code=1}
+ var i:i64=0
+ if code==0 {
+  while i<65 {
+   let t=if i==64 {domain.t1}else{domain.t0+((i as f64)/64.0)*(domain.t1-domain.t0)}
+   let value=dp54_dense_value(&dense,t,0);let slope=dp54_dense_derivative(&dense,t,0)
+   if value.status!=0 || slope.status!=0 {code=1}
+   numeric_buffer_set(&!times,i,t);numeric_buffer_set(&!values,i,value.value);numeric_buffer_set(&!derivatives,i,slope.value)
+   integer_buffer_set(&!mask,i,1);integer_buffer_set(&!indices,i,i);i=i+1
+  }
+ }
+ let left=DynamicPlotSpec{x:112,y:112,w:512,h:512,xmin:domain.t0,xmax:domain.t1,ymin:0.39,ymax:0.44,r:70,g:180,b:235,interval_kind:0,level:0.0}
+ let right=DynamicPlotSpec{x:816,y:112,w:512,h:512,xmin:domain.t0,xmax:domain.t1,ymin: -0.22,ymax: -0.195,r:235,g:130,b:70,interval_kind:0,level:0.0}
+ let linear_scale=ScaleSpec{mode:0,constant:1.0}
+ let xa=axis_fit_labels(domain.t0,domain.t1,3,false,112,624,512,1480,800,&linear_scale)
+ let xb=axis_fit_labels(domain.t0,domain.t1,3,false,816,624,512,1480,800,&linear_scale)
+ let ya=axis_fit_labels(0.39,0.44,3,true,112,112,512,1480,800,&linear_scale)
+ let yb=axis_fit_labels(-0.22,-0.195,3,true,816,112,512,1480,800,&linear_scale)
+ if xa.status!=0 || xb.status!=0 || ya.status!=0 || yb.status!=0 {code=1}
+ let pixels=heap_alloc(1480*800*8) as *mut i64
+ if (pixels as i64)<=0 {code=1}
+ if code==0 {
+  var canvas=Canvas{pixels:pixels,width:1480,height:800};canvas_clear(&!canvas,12,16,22)
+  let a=dynamic_line_canvas(&!canvas,&left,&times,&values,&mask,&indices,65);code=a.status
+  if code==0 {let b=dynamic_line_canvas(&!canvas,&right,&times,&derivatives,&mask,&indices,65);code=b.status}
+  if code==0 {
+   println("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1480\" height=\"800\" viewBox=\"0 0 1480 800\">")
+   println("<rect width=\"1480\" height=\"800\" fill=\"rgb(12,16,22)\"/>")
+   let a=dynamic_line_svg(&left,&times,&values,&mask,&indices,65,7201);code=a.status
+   if code==0 {let b=dynamic_line_svg(&right,&times,&derivatives,&mask,&indices,65,7202);code=b.status}
+   text(&!canvas,112,24,"Checked DP5(4) terminal event: real retained quartic dense segment")
+   text(&!canvas,112,48,"dy/dt=-0.5y; y(0)=1; decreasing crossing y=0.4; 65 dense queries without new RHS calls")
+   text(&!canvas,112,72,"Dense state y(t), restricted to the final accepted segment")
+   text(&!canvas,816,72,"Derivative of the retained quartic dense polynomial")
+   text(&!canvas,112,92,"state (dimensionless)");text(&!canvas,816,92,"state / time unit")
+   axis(&!canvas,&xa,domain.t0,domain.t1,false);axis(&!canvas,&xb,domain.t0,domain.t1,false)
+   axis(&!canvas,&ya,0.39,0.44,true);axis(&!canvas,&yb,-0.22,-0.195,true)
+   text(&!canvas,264,656,"time (arbitrary units)");text(&!canvas,968,656,"time (arbitrary units)")
+   text(&!canvas,112,704,"Only the final retained segment is shown; no fabricated dense solution history or uncertainty interval")
+   text(&!canvas,112,728,"Terminal endpoint uses the original accepted-step polynomial coordinate, capped at the localized event")
+   text(&!canvas,112,752,"Numerical tolerances and event bracket are computational criteria, not statistical coverage guarantees")
+   let t0b:i64=f64_to_bits(domain.t0);let t1b:i64=f64_to_bits(domain.t1);let teb:i64=f64_to_bits(found.time)
+   let lob:i64=f64_to_bits(found.bracket_lo);let hib:i64=f64_to_bits(found.bracket_hi)
+   let status:i64=solved.status;let rhs:i64=solved.nfeval;let ev:i64=found.n_event_eval;let root:i64=found.n_root_iter
+   let rhs_actual:i64=RHS_CALLS;let ev_actual:i64=EVENT_CALLS
+   println("<!-- DP54_META {} {} {} {} {} {} {} {} {} {} {} -->",status,t0b,t1b,teb,lob,hib,rhs,ev,root,rhs_actual,ev_actual)
+   let glb:i64=f64_to_bits(found.g_lo);let ghb:i64=f64_to_bits(found.g_hi)
+   let gvb:i64=f64_to_bits(found.value);let finalb:i64=f64_to_bits(solved.state[0])
+   println("<!-- DP54_BRACKET {} {} {} {} -->",glb,ghb,gvb,finalb)
+   i=0
+   while i<65 {let tb:i64=f64_to_bits(numeric_buffer_at(&times,i));let yb:i64=f64_to_bits(numeric_buffer_at(&values,i));let db:i64=f64_to_bits(numeric_buffer_at(&derivatives,i));println("<!-- DENSE {} {} {} {} -->",i,tb,yb,db);i=i+1}
+   if code==0 {println("<!-- SCIENTIFIC_DP54_COMPLETE -->")};println("</svg>");if code==0 {dump(&canvas)}
+  }
+ }
+ if (pixels as i64)>0 {heap_free(pixels as *mut i8)}
+ numeric_buffer_close(times);numeric_buffer_close(values);numeric_buffer_close(derivatives);integer_buffer_close(mask);integer_buffer_close(indices)
+ dp54_dense_close(dense);dp54_event_close(event)
+ if code==0 {0}else{1}
+}

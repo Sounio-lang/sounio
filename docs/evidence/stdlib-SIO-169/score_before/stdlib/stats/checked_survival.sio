@@ -1,0 +1,285 @@
+// Dynamic ordinary right-censoring only. No left entry, weights, competing risks,
+// Cox model, or automatic repair of near-equal measurement times.
+// One indexed sort; one pooled distinct-time walk. At a tied time all deaths
+// use the risk set BEFORE any deaths/censoring at that time are removed.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
+use collections::numeric_index_sort::{numeric_index_sort_checked}
+use math::pure::{is_finite,sqrt,ln_checked,exp}
+use math::logarithmic::{log1p_checked}
+use stats::checked_distributions::{normal_quantile_checked}
+
+// Three records per pooled distinct time: pooled, group0, group1.
+// Numeric stride8: time,S,logS,Greenwood sum,SE,CI lower,CI upper,Nelson-Aalen.
+// Integer stride4: risk before removals,deaths,censoring,availability flags.
+// Flags:1 S,2 logS,4 Greenwood,8 SE,16 log-log CI,32 cumulative hazard.
+// Rows outside an absent/exhausted group's observed follow-up have flags0;
+// stale numerical slots are zeroed, not silently extrapolated past censoring.
+use special::checked_gamma_beta::{gamma_pq_checked}
+
+pub struct CheckedLogRankTail {
+ pub status:i64,pub p:f64,pub log_p:f64,pub p_available:bool,pub log_p_available:bool,pub iterations:i64,
+}
+// Asymptotic two-sided N(0,1) tail = Q(1/2,z^2/2). Direct canonical
+// gamma upper/log-upper avoids both 1-P and subtract-ln2/add-ln2 cancellation.
+// Tiny nonzero z whose squared argument is subnormal/unrepresented is refused.
+pub fn logrank_tail_checked(z:f64,budget:i64,tol:f64)->CheckedLogRankTail with Mut,Div,Panic {
+ var r=CheckedLogRankTail{status:1,p:0.0,log_p:0.0,p_available:false,log_p_available:false,iterations:0}
+ if !is_finite(z) || !is_finite(tol) {r.status=2;return r}
+ if budget<1 || budget>1000000 || tol<1.7763568394002505e-15 || tol>1.0e-4 {return r}
+ if z==0.0 {r.status=0;r.p=1.0;r.p_available=true;r.log_p_available=true;return r}
+ let square=(0.5*z)*z
+ if !is_finite(square) || square<2.2250738585072014e-308 {r.status=5;return r}
+ let tail=gamma_pq_checked(0.5,square,budget,tol)
+ r.status=tail.status;r.iterations=tail.iterations
+ if tail.status==0 {r.p=tail.upper;r.p_available=tail.upper_available;r.log_p=tail.log_upper;r.log_p_available=tail.log_upper_available}
+ r
+}
+
+pub struct SurvivalWorkspace {
+ pub status:i64,pub n:i64,pub order_len:i64,pub curve_len:i64,pub count_len:i64,pub payload_bytes:i64,
+}
+pub struct CheckedLogRank {
+ pub status:i64,pub available:bool,pub observed1:i64,pub expected1:f64,pub score:f64,pub variance:f64,
+ pub z:f64,pub chi2:f64,pub p:f64,pub log_p:f64,pub p_available:bool,pub log_p_available:bool,
+ pub oe_ratio:f64,pub oe_ratio_available:bool,pub kernel_iterations:i64,
+}
+pub struct CheckedSurvival {
+ pub status:i64,pub n:i64,pub rows:i64,pub deaths:i64,pub censored:i64,pub group0:i64,pub group1:i64,
+ pub median:f64,pub median_available:bool,pub median_status:i64,pub median0:f64,pub median0_available:bool,pub median0_status:i64,pub median1:f64,pub median1_available:bool,pub median1_status:i64,
+ pub sort_comparisons:i64,pub sort_swaps:i64,pub risk_visits:i64,pub critical_evaluations:i64,pub payload_bytes:i64,
+ pub logrank:CheckedLogRank,
+}
+struct SVState {
+ risk:i64,log_s:f64,log_c:f64,greenwood:f64,greenwood_c:f64,hazard:f64,hazard_c:f64,
+ terminal:bool,median:f64,median_available:bool,median_ambiguous:bool,exact_num:i64,exact_den:i64,exact_available:bool,s_lower:f64,s_upper:f64,
+}
+pub fn survival_workspace(n:i64,max_bytes:i64)->SurvivalWorkspace with Mut {
+ var r=SurvivalWorkspace{status:1,n:n,order_len:0,curve_len:0,count_len:0,payload_bytes:0}
+ if n<0 || max_bytes<0 {return r}
+ if n>1000000 {r.status=5;return r}
+ r.order_len=n;r.curve_len=24*n;r.count_len=12*n;r.payload_bytes=296*n
+ if r.payload_bytes>max_bytes {r.status=6;return r}
+ r.status=0;r
+}
+fn sv_lr_empty(status:i64)->CheckedLogRank {
+ CheckedLogRank{status:status,available:false,observed1:0,expected1:0.0,score:0.0,variance:0.0,z:0.0,chi2:0.0,
+ p:0.0,log_p:0.0,p_available:false,log_p_available:false,oe_ratio:0.0,oe_ratio_available:false,kernel_iterations:0}
+}
+fn sv_empty(status:i64,n:i64)->CheckedSurvival {
+ CheckedSurvival{status:status,n:n,rows:0,deaths:0,censored:0,group0:0,group1:0,
+ median:0.0,median_available:false,median_status:1,median0:0.0,median0_available:false,median0_status:1,median1:0.0,median1_available:false,median1_status:1,
+ sort_comparisons:0,sort_swaps:0,risk_visits:0,critical_evaluations:0,payload_bytes:0,logrank:sv_lr_empty(5)}
+}
+fn sv_state(risk:i64)->SVState {
+ SVState{risk:risk,log_s:0.0,log_c:0.0,greenwood:0.0,greenwood_c:0.0,hazard:0.0,hazard_c:0.0,
+ terminal:false,median:0.0,median_available:false,median_ambiguous:false,exact_num:1,exact_den:1,exact_available:true,s_lower:1.0,s_upper:1.0}
+}
+// These guards classify a median boundary independently of log evaluation.
+// Exact reduced i64 fractions are preferred. After their checked size limit,
+// positive IEEE operations are widened at each divide/product; overlap with
+// one half is explicitly ambiguous, never nudged by an equality epsilon.
+fn sv_gcd(a:i64,b:i64)->i64 with Mut,Div,Panic {
+ var x=a;var y=b
+ while y>0 {let next=x%y;x=y;y=next}
+ x
+}
+fn sv_down(x:f64)->f64 {
+ let next=x*0.99999999999999911182158029987476766109466552734375-(2.2250738585072014e-308*2.220446049250313e-16)
+ if next>0.0 {next}else{0.0}
+}
+fn sv_up(x:f64)->f64 {
+ let next=x*1.00000000000000088817841970012523233890533447265625+(2.2250738585072014e-308*2.220446049250313e-16)
+ if next<1.0 {next}else{1.0}
+}
+fn sv_median_step(s:&!SVState,time:f64,deaths:i64) with Mut,Div,Panic {
+ if s.median_available || s.median_ambiguous || deaths==0 {return}
+ let remain=s.risk-deaths
+ if remain==0 {s.exact_num=0;s.exact_den=1;s.exact_available=true;s.s_lower=0.0;s.s_upper=0.0}
+ else {
+  let fraction=(remain as f64)/(s.risk as f64)
+  s.s_lower=sv_down(s.s_lower*sv_down(fraction));s.s_upper=sv_up(s.s_upper*sv_up(fraction))
+  if s.exact_available {
+   let initial=sv_gcd(remain,s.risk)
+   var a=remain/initial;var b=s.risk/initial;var num=s.exact_num;var den=s.exact_den
+   let cancel_num=sv_gcd(num,b);num=num/cancel_num;b=b/cancel_num
+   let cancel_den=sv_gcd(den,a);den=den/cancel_den;a=a/cancel_den
+   if num>9223372036854775807/a || den>9223372036854775807/b {s.exact_available=false}
+   else {s.exact_num=num*a;s.exact_den=den*b}
+  }
+ }
+ var crossed=false
+ if s.exact_available {crossed=s.exact_num<=s.exact_den/2}
+ else {
+  if s.s_upper<=0.5 {crossed=true}
+  else {if s.s_lower<=0.5 {s.median_ambiguous=true}}
+ }
+ if crossed {s.median=time;s.median_available=true}
+}
+fn sv_median_status(s:&SVState)->i64 {if s.median_available {0}else{if s.median_ambiguous {5}else{1}}}
+fn sv_inf()->f64 {1.0e308*10.0}
+// No update on pure censoring. Terminal all-death Greenwood/log-log CI is
+// unavailable, rather than substituting a finite sum for a singular formula.
+fn sv_step(s:&!SVState,time:f64,deaths:i64)->i64 with Mut,Div,Panic {
+ if deaths==0 {return 0}
+ if s.risk<deaths || s.risk<=0 || s.terminal {return 4}
+ sv_median_step(s,time,deaths)
+ let ratio=(deaths as f64)/(s.risk as f64)
+ let h=ratio-s.hazard_c
+ let hn=s.hazard+h
+ s.hazard_c=(hn-s.hazard)-h;s.hazard=hn
+ if deaths==s.risk {s.terminal=true;s.log_s= -sv_inf()}
+ else {
+  let l=log1p_checked(-ratio)
+  if l.status!=0 {return 4}
+  let adjust=l.value-s.log_c
+  let next=s.log_s+adjust
+  s.log_c=(next-s.log_s)-adjust;s.log_s=next
+  let term=ratio/((s.risk-deaths) as f64)
+  let ga=term-s.greenwood_c
+  let gn=s.greenwood+ga
+  s.greenwood_c=(gn-s.greenwood)-ga;s.greenwood=gn
+ }
+ 0
+}
+fn sv_emit(s:&SVState,time:f64,deaths:i64,censored:i64,z:f64,record:i64,
+ curves:&!NumericBuffer,counts:&!IntegerBuffer) with Mut,Div,Panic {
+ let nb=record*8;let ib=record*4
+ var k:i64=0
+ while k<8 {numeric_buffer_set(curves,nb+k,0.0);k=k+1}
+ numeric_buffer_set(curves,nb,time)
+ integer_buffer_set(counts,ib,s.risk);integer_buffer_set(counts,ib+1,deaths);integer_buffer_set(counts,ib+2,censored)
+ var flags:i64=0
+ if s.risk>0 {
+  flags=34
+  numeric_buffer_set(curves,nb+2,s.log_s);numeric_buffer_set(curves,nb+7,s.hazard)
+  if s.terminal {flags=flags+1}
+  else {
+   let survival=exp(s.log_s)
+   if survival>0.0 && is_finite(survival) {
+    numeric_buffer_set(curves,nb+1,survival);flags=flags+1
+   }
+   numeric_buffer_set(curves,nb+3,s.greenwood);flags=flags+4
+   let root=sqrt(s.greenwood)
+   let se=survival*root
+   if survival>0.0 && is_finite(se) && (se>0.0 || s.greenwood==0.0) {
+    numeric_buffer_set(curves,nb+4,se);flags=flags+8
+   }
+   if s.log_s<0.0 && s.greenwood>0.0 {
+    let ell=ln_checked(-s.log_s)
+    let width=z*(root/(-s.log_s))
+    if ell.status==0 && is_finite(width) {
+     let outer_lower=exp(ell.value+width)
+     let outer_upper=exp(ell.value-width)
+     let lower=exp(-outer_lower)
+     let upper=exp(-outer_upper)
+     // Underflow/overflow in either composition is not a fabricated endpoint.
+     if outer_lower>0.0 && is_finite(outer_lower) && outer_upper>0.0 && is_finite(outer_upper) && lower>0.0 && upper>0.0 && is_finite(lower) && is_finite(upper) && lower<=upper && upper<=1.0 {
+      numeric_buffer_set(curves,nb+5,lower);numeric_buffer_set(curves,nb+6,upper);flags=flags+16
+     }
+    }
+   }
+  }
+ }
+ integer_buffer_set(counts,ib+3,flags)
+}
+// All shape/options/data preflight runs before scratch/output writes. Sort or
+// critical-quantile refusal preserves output buffers (sort scratch may change).
+// No aliasing among input/output owners. Performed work is retained on refusals.
+// Critical budget follows Normal quantile: forward evaluations, each with its
+// own inner cap; worst-case work is quadratic. Tail budget is Gamma iterations.
+// These units have separate counters and are NEVER added/subtracted together.
+// The two-sided asymptotic logrank tail is a separate checked result: variance0
+// or absent groups means unavailable, not an invented null p=1.
+pub fn survival_checked(times:&NumericBuffer,event:&IntegerBuffer,group:&IntegerBuffer,n:i64,alpha:f64,
+ order:&!IntegerBuffer,curves:&!NumericBuffer,counts:&!IntegerBuffer,max_bytes:i64,sort_budget:i64,critical_budget:i64,tail_budget:i64,tol:f64)->CheckedSurvival with Mut,Div,Panic {
+ var r=sv_empty(1,n)
+ if !is_finite(alpha) || !is_finite(tol) {r.status=2;return r}
+ if alpha<=0.0 || alpha>=1.0 || sort_budget<0 || critical_budget<1 || critical_budget>1000000 || tail_budget<1 || tail_budget>1000000 || tol<1.7763568394002505e-15 || tol>1.0e-4 {return r}
+ let workspace=survival_workspace(n,max_bytes)
+ r.payload_bytes=workspace.payload_bytes
+ if workspace.status!=0 {r.status=workspace.status;return r}
+ if numeric_buffer_status(times)!=0 || integer_buffer_status(event)!=0 || integer_buffer_status(group)!=0 || integer_buffer_status(order)!=0 || numeric_buffer_status(curves)!=0 || integer_buffer_status(counts)!=0 {return r}
+ if numeric_buffer_len(times)<n || integer_buffer_len(event)<n || integer_buffer_len(group)<n || integer_buffer_len(order)<n || numeric_buffer_len(curves)<workspace.curve_len || integer_buffer_len(counts)<workspace.count_len {return r}
+ var i:i64=0
+ var group1:i64=0
+ while i<n {
+  let t=numeric_buffer_at(times,i);let e=integer_buffer_at(event,i);let g=integer_buffer_at(group,i)
+  if !is_finite(t) {r.status=2;return r}
+  if t<0.0 || (e!=0 && e!=1) || (g!=0 && g!=1) {return r}
+  group1=group1+g;i=i+1
+ }
+ r.group1=group1;r.group0=n-group1
+ if n==0 {r.status=0;return r}
+ let half_alpha=alpha*0.5
+ if half_alpha==0.0 {r.status=5;return r}
+ let critical=normal_quantile_checked(0.0,1.0,half_alpha,true,critical_budget,tol)
+ r.critical_evaluations=critical.iterations
+ if critical.status!=0 || !critical.available || !is_finite(critical.value) || critical.value<=0.0 {
+  r.status=if critical.status==0 {5}else{critical.status};return r
+ }
+ let sorted=numeric_index_sort_checked(times,n,order,sort_budget)
+ r.sort_comparisons=sorted.comparisons;r.sort_swaps=sorted.swaps
+ if sorted.status!=0 {r.status=sorted.status;return r}
+ var pooled=sv_state(n);var s0=sv_state(n-group1);var s1=sv_state(group1)
+ var score:f64=0.0;var score_c:f64=0.0;var expected:f64=0.0;var expected_c:f64=0.0
+ var variance:f64=0.0;var variance_c:f64=0.0;var observed1:i64=0
+ i=0
+ while i<n {
+  let original=integer_buffer_at(order,i)
+  let time=numeric_buffer_at(times,original)
+  var j=i
+  var d0:i64=0;var d1:i64=0;var c0:i64=0;var c1:i64=0
+  while j<n {
+   let at=integer_buffer_at(order,j)
+   if numeric_buffer_at(times,at)!=time {break}
+   let e=integer_buffer_at(event,at);let g=integer_buffer_at(group,at)
+   if e==1 {if g==0 {d0=d0+1}else{d1=d1+1}}
+   else {if g==0 {c0=c0+1}else{c1=c1+1}}
+   j=j+1
+  }
+  let deaths=d0+d1;let censored=c0+c1
+  let nf=pooled.risk as f64;let fraction=(s1.risk as f64)/nf
+  let e=(deaths as f64)*fraction
+  let adjusted_e=e-expected_c;let next_e=expected+adjusted_e
+  expected_c=(next_e-expected)-adjusted_e;expected=next_e
+  let adjusted_u=((d1 as f64)-e)-score_c;let next_u=score+adjusted_u
+  score_c=(next_u-score)-adjusted_u;score=next_u
+  if pooled.risk>1 {
+   let v=(deaths as f64)*fraction*((s0.risk as f64)/nf)*((pooled.risk-deaths) as f64)/((pooled.risk-1) as f64)
+   let adjusted_v=v-variance_c;let next_v=variance+adjusted_v
+   variance_c=(next_v-variance)-adjusted_v;variance=next_v
+  }
+  observed1=observed1+d1
+  let st=sv_step(&!pooled,time,deaths);let st0=sv_step(&!s0,time,d0);let st1=sv_step(&!s1,time,d1)
+  if st!=0 || st0!=0 || st1!=0 {r.status=4;return r}
+  let record=r.rows*3
+  sv_emit(&pooled,time,deaths,censored,critical.value,record,curves,counts)
+  sv_emit(&s0,time,d0,c0,critical.value,record+1,curves,counts)
+  sv_emit(&s1,time,d1,c1,critical.value,record+2,curves,counts)
+  pooled.risk=pooled.risk-deaths-censored;s0.risk=s0.risk-d0-c0;s1.risk=s1.risk-d1-c1
+  r.rows=r.rows+1;r.deaths=r.deaths+deaths;r.censored=r.censored+censored;r.risk_visits=r.risk_visits+(j-i)
+  i=j
+ }
+ r.median=pooled.median;r.median_available=pooled.median_available;r.median_status=sv_median_status(&pooled)
+ r.median0=s0.median;r.median0_available=s0.median_available;r.median0_status=sv_median_status(&s0);r.median1=s1.median;r.median1_available=s1.median_available;r.median1_status=sv_median_status(&s1)
+ var lr=sv_lr_empty(5)
+ lr.observed1=observed1;lr.expected1=expected;lr.score=score;lr.variance=variance
+ let observed0=r.deaths-observed1
+ let expected0=(r.deaths as f64)-expected
+ if expected>0.0 && expected0>0.0 && observed0>0 {
+  let ratio=((observed1 as f64)/expected)/((observed0 as f64)/expected0)
+  if is_finite(ratio) {lr.oe_ratio=ratio;lr.oe_ratio_available=true}
+ }
+ if variance>0.0 && r.group0>0 && r.group1>0 {
+  let z=score/sqrt(variance)
+  let square=z*z
+  if is_finite(z) && is_finite(square) {
+   lr.z=z;lr.chi2=square;lr.available=true
+   let tail=logrank_tail_checked(z,tail_budget,tol)
+   lr.kernel_iterations=tail.iterations
+   lr.status=tail.status;lr.p=tail.p;lr.p_available=tail.p_available;lr.log_p=tail.log_p;lr.log_p_available=tail.log_p_available
+  } else {lr.status=4}
+ }
+ r.logrank=lr;r.status=0;r
+}
