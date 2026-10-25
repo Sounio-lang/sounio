@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -106,6 +107,11 @@ def fail(code: int, msg: str) -> None:
     sys.exit(code)
 
 
+def id_fingerprint(value: str) -> str:
+    """Short digest so a duplicate can be located without logging the id."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
 def check_schema(header: list[str]) -> None:
     if header != SCHEMA_COLUMNS:
         diff_missing = set(SCHEMA_COLUMNS) - set(header)
@@ -132,8 +138,7 @@ def check_ranges(rows: Iterable[dict[str, str]]) -> list[dict[str, str]]:
     materialised = []
     for row_idx, row in enumerate(rows):
         if row.get("sex") not in ("M", "F"):
-            fail(2, f"row {row_idx}: sex must be 'M' or 'F', got "
-                    f"{row.get('sex')!r}")
+            fail(2, f"row {row_idx}: sex must be 'M' or 'F'")
         for bound in RANGE_BOUNDS:
             value = parse_value(bound.name, row[bound.name],
                                 bound.integer)
@@ -200,8 +205,11 @@ def check_uniqueness(rows: list[dict[str, str]]) -> None:
     counts = Counter(ids)
     duplicates = [pid for pid, n in counts.items() if n > 1]
     if duplicates:
-        fail(1, f"duplicate patient_ids: {duplicates[:5]}"
-                f"{'...' if len(duplicates) > 5 else ''}")
+        shown = duplicates[:5]
+        fingerprints = ", ".join(id_fingerprint(pid) for pid in shown)
+        more = " ..." if len(duplicates) > 5 else ""
+        fail(1, f"duplicate patient_id count={len(duplicates)} "
+                f"sha256_12={fingerprints}{more}")
 
 
 def main() -> None:

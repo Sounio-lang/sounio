@@ -102,17 +102,21 @@ function parseYaml(yamlStr: string): Record<string, unknown> {
   return result;
 }
 
+function escapeYamlDoubleQuoted(value: unknown): string {
+  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
 function toYamlString(obj: Record<string, unknown>): string {
   const lines: string[] = [];
   for (const [key, value] of Object.entries(obj)) {
     if (typeof value === 'string') {
-      lines.push(`${key}: "${value.replace(/"/g, '\\"')}"`);
+      lines.push(`${key}: "${escapeYamlDoubleQuoted(value)}"`);
     } else if (typeof value === 'boolean' || typeof value === 'number') {
       lines.push(`${key}: ${value}`);
     } else if (Array.isArray(value)) {
       lines.push(`${key}:`);
       for (const item of value) {
-        lines.push(`  - "${item}"`);
+        lines.push(`  - "${escapeYamlDoubleQuoted(item)}"`);
       }
     }
   }

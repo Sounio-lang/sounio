@@ -4,6 +4,7 @@ import { readFile, access } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequestGuard, searchResultsForLocale, urlMatchesLocale } from '../src/lib/search-state.mjs';
+import { htmlVisibleText } from './html-visible-text.mjs';
 
 const website = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const repository = path.dirname(website);
@@ -18,7 +19,7 @@ const hash = source => createHash('sha256').update(source).digest('hex');
 const prefix = locale => locale === 'en' ? '' : `/${locale}`;
 
 function visibleText(html) {
-  return html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+  return htmlVisibleText(html, { collapseWhitespace: true });
 }
 
 function homepageIssues(html, locale) {

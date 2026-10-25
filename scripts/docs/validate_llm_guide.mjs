@@ -202,14 +202,33 @@ function snippetIssues(parsed, file, examples, sources, requireComplete = false)
       const firstLine = Math.max(snippet.contextStart, exampleMarkerIndex - quarantineContextLines);
       const matchingMarker = parsed.quarantines.some(marker => marker.id === snippet.id && marker.line > firstLine && marker.line < snippet.line - 1);
       if (!matchingMarker) errors.push(`${file}:${snippet.line}: unexpected-failure example ${snippet.id} requires quarantine marker in adjacent preceding context`);
-      const context = parsed.prose.split('\n').slice(firstLine, exampleMarkerIndex).join('\n')
-        .replace(/<([A-Za-z][\w:-]*)\b(?=[^>]*\b(?:hidden(?:\s|=|>)|aria-hidden\s*=\s*["']true["']|style\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden)))[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
-      const displayed = withoutInlineCode(context).replace(/<[^>]*>/g, '').replace(/[*_]/g, '').replace(/\s+/g, ' ');
+      const context = stripHiddenElements(parsed.prose.split('\n').slice(firstLine, exampleMarkerIndex).join('\n'));
+      const displayed = stripHtmlTags(withoutInlineCode(context)).replace(/[*_]/g, '').replace(/\s+/g, ' ');
       if (!/\bnot a working(?: or confirmed-refusal)? recipe\b/i.test(displayed)) errors.push(`${file}:${snippet.line}: unexpected-failure example ${snippet.id} requires a visible quarantine warning before code saying "not a working recipe" or "not a working or confirmed-refusal recipe"`);
     }
   }
   if (requireComplete) for (const exampleId of examples.keys()) if (!seen.has(exampleId)) errors.push(`${file}: missing atlas example ${exampleId}`);
   return errors;
+}
+
+function stripHtmlTags(text) {
+  let current = text;
+  let previous;
+  do {
+    previous = current;
+    current = current.replace(/<[^>]*>/g, '');
+  } while (current !== previous);
+  return current;
+}
+
+function stripHiddenElements(text) {
+  let current = text;
+  let previous;
+  do {
+    previous = current;
+    current = current.replace(/<([A-Za-z][\w:-]*)\b(?=[^>]*\b(?:hidden(?:\s|=|>)|aria-hidden\s*=\s*["']true["']|style\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden)))[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
+  } while (current !== previous);
+  return current;
 }
 
 function withoutInlineCode(text) {
@@ -325,7 +344,7 @@ function headingIds(prose) {
     const setext = index + 1 < lines.length && /^ {0,3}(?:=+|-+)[ \t]*$/.test(lines[index + 1]) && line.trim() && !/^\s*(?:[-+*>]|\d+[.)])\s/.test(line);
     if (!heading && !setext) continue;
     const title = unescapeMarkdown(heading ? heading[1] : line.trim()).replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1');
-    const slug = title.toLowerCase().replace(/<[^>]*>/g, '').replace(/[^\p{L}\p{M}\p{N}\s_-]/gu, '').replace(/\s/g, '-');
+    const slug = stripHtmlTags(title.toLowerCase()).replace(/[^\p{L}\p{M}\p{N}\s_-]/gu, '').replace(/\s/g, '-');
     let candidate = slug;
     let occurrence = counts.get(slug) ?? 0;
     while (ids.has(candidate)) candidate = `${slug}-${++occurrence}`;

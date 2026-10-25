@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { buildScientistPrompt, buildScientistIntakeReceipt, buildScientistImplementationPrompt, validateScientistIntake, scientistLanguages, scientistFields, scientistFieldLimit, validateScientistCatalog } from '../src/lib/scientist-prompt.mjs';
 import { contextPack, renderPack, validateCatalog } from '../../scripts/docs/sounio_task_context.mjs';
 import { checkScientistBehavior } from './check-scientist-behavior.mjs';
+import { htmlVisibleText } from './html-visible-text.mjs';
 
 const website = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const repository = path.dirname(website);
@@ -167,7 +168,7 @@ for (const locale of ['en', 'pt', 'el', 'zh', 'zh-hk', 'ja', 'es']) {
   const language = scientistLanguages.includes(locale) ? locale : 'en';
   try {
     const html = await readFile(path.join(site, prefix, 'scientist/index.html'), 'utf8');
-    const visible = html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<[^>]*>/g, ' ');
+    const visible = htmlVisibleText(html);
     for (const field of ['title', 'intro', 'boundary', 'privacy', 'copy', 'download']) if (!visible.includes(copy[language][field])) errors.push(`${locale}: missing scientist ${field}`);
     if ((html.match(/<h1\b/g) ?? []).length !== 1) errors.push(`${locale}: invalid primary heading`);
     for (const entry of catalog.workflows) if (!new RegExp(`<option\\b[^>]*\\bvalue="${entry.id}"(?:\\s|>)`).test(html)) errors.push(`${locale}: missing workflow ${entry.id}`);

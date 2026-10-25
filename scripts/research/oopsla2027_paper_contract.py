@@ -40,8 +40,13 @@ CITE_RE = re.compile(r"\|\s*(R[0-9]+)\s*\|\s*`([A-Za-z0-9_]+)`\s*\|")
 # The two lists are zipped positionally, and a length mismatch is a failure
 # rather than a truncation: silently dropping the tail is exactly how a paper
 # ends up citing a rung it no longer supports.
+# Possessive quantifiers: `\s*;?\s*` inside `+` backtracks across every split
+# of whitespace and an optional semicolon. Each alternative consumes its run
+# and does not give it back, so a long gap fails in linear time. The second
+# alternative is the no-semicolon form (`A` `B`); the first is `A`; `B`.
 MULTI_CITE_RE = re.compile(
-    r"\|\s*(R[0-9]+(?:\s*,\s*R[0-9]+)+)\s*\|\s*((?:`[A-Za-z0-9_]+`\s*;?\s*)+)\|")
+    r"\|\s*+(R[0-9]++(?:\s*+,\s*+R[0-9]++)++)\s*+\|\s*+"
+    r"((?:`[A-Za-z0-9_]++`(?:\s*+;\s*+|\s*+))++)\|")
 
 
 def multi_citations(paper: str) -> tuple[dict[str, str], bool]:
