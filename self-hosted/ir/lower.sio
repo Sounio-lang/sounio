@@ -4110,8 +4110,8 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                         lowerer_record_global_type_mut(lo, bss_fn_id, &head.type_alias_ty)
                                         var mbox2 = (*lo).module
                                         var bss_slot = ir_fn_get(&(*mbox2), bss_fn_id as usize)
-                                        let bss_off = (*mbox2).bss_total_size
                                         let bss_size = lower_typeexpr_byte_size(&head.type_alias_ty)
+                                        let bss_off = (*mbox2).bss_total_size + ir_bss_packed_header_pad(lower_typeexpr_bss_elem_size(&head.type_alias_ty), bss_size)
                                         let aligned_size = ((bss_size + 7) / 8) * 8
                                         bss_slot.compile_strategy = 99
                                         bss_slot.param_count = bss_off
@@ -5031,8 +5031,8 @@ fn lowerer_preseed_external_bss_globals_mut(
                                     lowerer_record_global_type_mut(lo, bss_fn_id, &head.type_alias_ty)
                                     var mbox = (*lo).module
                                     var bss_slot = ir_fn_get(&(*mbox), bss_fn_id as usize)
-                                    let bss_off = (*mbox).bss_total_size
                                     let bss_size = lower_typeexpr_byte_size(&head.type_alias_ty)
+                                    let bss_off = (*mbox).bss_total_size + ir_bss_packed_header_pad(lower_typeexpr_bss_elem_size(&head.type_alias_ty), bss_size)
                                     let aligned_size = ((bss_size + 7) / 8) * 8
                                     bss_slot.compile_strategy = IR_STRATEGY_BSS_GLOBAL
                                     bss_slot.param_count = bss_off
@@ -5890,8 +5890,8 @@ fn lowerer_preseed_one_item_mut(
                         lowerer_record_global_type_mut(lo, bss_fn_id, &head.type_alias_ty)
                         var mbox2 = (*lo).module
                         var bss_slot = ir_fn_get(&(*mbox2), bss_fn_id as usize)
-                        let bss_off = (*mbox2).bss_total_size
                         let bss_size = lower_typeexpr_byte_size(&head.type_alias_ty)
+                        let bss_off = (*mbox2).bss_total_size + ir_bss_packed_header_pad(lower_typeexpr_bss_elem_size(&head.type_alias_ty), bss_size)
                         let aligned_size = ((bss_size + 7) / 8) * 8
                         bss_slot.compile_strategy = 99
                         bss_slot.param_count = bss_off
@@ -6441,6 +6441,7 @@ fn ir_fast_summary_preseed_items_seed_owned(
                                         var bss_slot = ir_empty_function()
                                         bss_slot.name = name
                                         bss_slot.compile_strategy = IR_STRATEGY_BSS_GLOBAL
+                                        bss_mod.bss_total_size = bss_mod.bss_total_size + ir_bss_packed_header_pad(lower_typeexpr_bss_elem_size(&item.type_alias_ty), bss_size)
                                         bss_slot.param_count = bss_mod.bss_total_size
                                         bss_slot.bss_size = bss_size
                                         bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
@@ -6564,6 +6565,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 var bss_slot = ir_empty_function()
                                 bss_slot.name = name
                                 bss_slot.compile_strategy = IR_STRATEGY_BSS_GLOBAL
+                                bss_mod.bss_total_size = bss_mod.bss_total_size + ir_bss_packed_header_pad(lower_typeexpr_bss_elem_size(&item.type_alias_ty), bss_size)
                                 bss_slot.param_count = bss_mod.bss_total_size
                                 bss_slot.bss_size = bss_size
                                 bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
@@ -31105,6 +31107,39 @@ impl Lowerer {
         }
     }
 
+    // A global ARRAY named as the buffer of write_file / str_from_bytes reaches
+    // the builtin as an object base, V - header, the form every raw heap object
+    // has. Its plain rvalue is the data address V (what `G[i]` indexes from), and
+    // the builtin took that as the object base: it read the first data word as
+    // the descriptor and then every 8th byte, 32 bytes late (gen3 SIGSEGV in
+    // write_file on NC_BIG_ELF, #2966). Returns reg -1 when `e` is not such a
+    // global. Builtins only: an implicit borrow `f(G)` of a `&[T; N]` parameter
+    // hands the callee V on purpose (native_v2_ref_array_resolve_base_rax_into
+    // subtracts the header for a BSS address itself).
+    fn lower_global_array_arg_base_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if e.kind != ExprKind::ExprIdent { return (self, 0 - 1) }
+        if self.lookup_local(e.name) >= 0 { return (self, 0 - 1) }
+        let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, e.name)
+        if fn_id < 0 || fn_id >= self.module.fn_count { return (self, 0 - 1) }
+        if ir_fn_get(&(*self.module), fn_id as usize).compile_strategy != IR_STRATEGY_BSS_GLOBAL { return (self, 0 - 1) }
+        let gsize = ir_fn_get(&(*self.module), fn_id as usize).bss_size
+        let hyper_kind = ir_fn_get(&(*self.module), fn_id as usize).hyper_algebra_kind
+        let global_elem_kind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
+        if !lower_global_kind_is_array_base(global_elem_kind) && !ir_bss_packed_header_needed(hyper_kind, gsize) {
+            return (self, 0 - 1)
+        }
+        let bss_off = ir_fn_get(&(*self.module), fn_id as usize).param_count
+        let pair = self.fresh_reg()
+        var lo = pair.0
+        let dst = pair.1
+        lo = lo.emit(ir_load_bss_address(dst, BSS_BASE_LINUX + bss_off - IR_NATIVE_V2_OBJECT_HEADER_SIZE))
+        if global_elem_kind == LOWER_GLOBAL_ELEM_F64 {
+            lo = lo.emit(ir_mark_float_reg(dst))
+            lo = lo.bind_reg_array_elem_float(dst)
+        }
+        (lo, dst)
+    }
+
     // Lower an expression to a native-v2 GC array handle (for str_from_bytes /
     // write_file buffer args). Strips & / &! (OpRef is LEA of the handle slot)
     // and loads once from a ref-typed local/param slot so both `buf` and `&buf`
@@ -31133,7 +31168,9 @@ impl Lowerer {
                 return (lo1, dst)
             }
         }
-        self.lower_expr_ref(e)
+        let gpair = self.lower_global_array_arg_base_ref(e)
+        if gpair.1 >= 0 { return gpair }
+        gpair.0.lower_expr_ref(e)
     }
 
     // Like lower_expr_args_ref, but argument `buf_arg_idx` is forced through the

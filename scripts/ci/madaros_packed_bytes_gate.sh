@@ -19,6 +19,10 @@
 #      (at BSS_BASE_LINUX) by reference. The tag read sits one header below the
 #      array, which for that global is unmapped; it must print
 #      FIRST_GLOBAL_ARRAY_REF_OK, not die with SIGSEGV (stdlib_deep_eigen).
+#   4. Packed byte globals carry an object header (global_byte_array_header.sio:
+#      by reference, str_from_bytes), and write_file from one writes
+#      exactly its bytes (gen3 wrote the 160 MB NC_BIG_ELF this way and read
+#      every 8th byte off the end of BSS).
 #
 # Usage: madaros_packed_bytes_gate.sh   (MADAROS_BIN = compiler under test,
 #                                        default bin/souc)
@@ -47,6 +51,37 @@ set +e
 first_out="$("$WORK/first.elf" 2>&1)"; first_rc=$?
 set -e
 [[ "$first_rc" -eq 0 && "$first_out" == "FIRST_GLOBAL_ARRAY_REF_OK" ]] || fail "first global by reference: rc=$first_rc output=$(tr '\n' ' ' <<<"$first_out")"
+
+build "$ROOT_DIR/tests/run-pass/global_byte_array_header.sio" "$WORK/gbh.elf"
+set +e
+gbh_out="$("$WORK/gbh.elf" 2>&1)"; gbh_rc=$?
+set -e
+[[ "$gbh_rc" -eq 0 && "$gbh_out" == "GLOBAL_BYTE_ARRAY_HEADER_OK" ]] || fail "packed byte globals by reference / str_from_bytes: rc=$gbh_rc output=$(tr '\n' ' ' <<<"$gbh_out")"
+
+# write_file from a packed byte global: the gen3 path (NC_BIG_ELF). The file
+# must hold exactly the bytes written, not every 8th one.
+cat >"$WORK/wf.sio" <<SIO
+var PAD: [i64; 4] = [0; 4]
+var OUTBUF: [i8; 4096] = [0; 4096]
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 26 {
+        OUTBUF[i as usize] = (65 + i) as i8
+        i = i + 1
+    }
+    let n = write_file("$WORK/wf.bin", OUTBUF, 26)
+    print_int(n)
+    println("")
+    return 0
+}
+SIO
+build "$WORK/wf.sio" "$WORK/wf.elf"
+set +e
+wf_out="$("$WORK/wf.elf" 2>&1)"; wf_rc=$?
+set -e
+[[ "$wf_rc" -eq 0 && "$wf_out" == "26" && "$(cat "$WORK/wf.bin" 2>/dev/null)" == "ABCDEFGHIJKLMNOPQRSTUVWXYZ" ]] \
+  || fail "write_file from a packed byte global: rc=$wf_rc output=$wf_out file=$(od -An -c "$WORK/wf.bin" 2>/dev/null | head -2 | tr '\n' ' ')"
 
 cat >"$WORK/mem.sio" <<'SIO'
 struct Nm {
@@ -91,4 +126,4 @@ set -e
 [[ "$mem_rc" -eq 0 && "$mem_out" == "34650000" ]] \
   || fail "700k Name-like structs in 2 GiB: rc=$mem_rc output=$(head -n 2 <<<"$mem_out" | tr '\n' ' ') (181 = arena full: buffers not packed)"
 
-echo "[madaros-packed-bytes] PASS: byte-array semantics hold; the first global indexes by reference; 700k Name-like structs fit the default 2 GiB arena and sum to 34650000"
+echo "[madaros-packed-bytes] PASS: byte-array semantics hold; the first global indexes by reference; packed byte globals carry a header (by reference, str_from_bytes, write_file); 700k Name-like structs fit the default 2 GiB arena and sum to 34650000"

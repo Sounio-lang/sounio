@@ -7,7 +7,7 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_MAX_VREGS, IR_FLOAT_REG_MARKER_FLAG, IR_BOX_ALLOC_FLAG, IR_ALLOC_PACKED_I8, IR_ALLOC_PACKED_U8, IR_ALLOC_LIKE_SOURCE, IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_AUTO, ir_reg_count_is_valid, ir_function_regs_are_valid, ir_xor_convolution_s, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_MAX_VREGS, IR_FLOAT_REG_MARKER_FLAG, IR_BOX_ALLOC_FLAG, IR_ALLOC_PACKED_I8, IR_ALLOC_PACKED_U8, IR_ALLOC_LIKE_SOURCE, IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_AUTO, ir_reg_count_is_valid, ir_function_regs_are_valid, ir_xor_convolution_s, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC, ir_bss_packed_header_needed}
 use native::encode::*
 use native::elf::*
 use native::aarch64::*
@@ -6579,9 +6579,10 @@ fn native_v2_packed_array_payload_bytes(elem_count: i64) -> i64 {
 // base = V - header, so the descriptor word they read for the packed tag sits
 // before the global. For the first global that word lies below BSS_BASE_LINUX,
 // in the unmapped gap after the image (stdlib_deep_eigen: SIGSEGV reading
-// 0xfffffe0). A packed array is always a heap object, never a global, so a base
-// in [BSS_BASE_LINUX - header, BSS_BASE_LINUX) takes the word path without the
-// read. Emits lea <scratch>, [<base> + d]; cmp <scratch>, header; jb word and
+// 0xfffffe0). A packed byte-array global has its own header inside BSS
+// (ir_bss_packed_header_needed, emit_packed_global_headers_into), so a base in
+// [BSS_BASE_LINUX - header, BSS_BASE_LINUX) is never packed and takes the word
+// path without the read. Emits lea <scratch>, [<base> + d]; cmp <scratch>, header; jb word and
 // returns the jb position to patch. modrm_lea: 0x82 = rax<-[rdx+d32],
 // 0x88 = rcx<-[rax+d32]; cmp_modrm: 0xf8 = rax, 0xf9 = rcx.
 fn nc_packed_tag_guard_disp() -> i64 { native_v2_object_header_size() - BSS_BASE_LINUX }
@@ -14112,11 +14113,34 @@ fn emit_global_var_inits_into(nc: &! NativeCompiler, module: &IrModule) with Mut
     }
 }
 
+// Stamp the object header lowering reserved in front of each packed byte-array
+// global (ir_bss_packed_header_needed): descriptor, payload size, flags 0,
+// handle 0. BSS is zero at entry, so only the first two words are written.
+// With it a global read through V - header (callees, write_file,
+// str_from_bytes) takes the byte path, as a packed heap array does.
+fn emit_packed_global_headers_into(nc: &! NativeCompiler, module: &IrModule) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        let func = ir_fn_get(&(*module), fi as usize)
+        if func.compile_strategy == IR_STRATEGY_BSS_GLOBAL && ir_bss_packed_header_needed(func.hyper_algebra_kind, func.bss_size) {
+            let header_addr = BSS_BASE_LINUX + func.param_count - native_v2_object_header_size()
+            let desc = if func.hyper_algebra_kind == 17 { native_v2_packed_i8_descriptor() } else { native_v2_packed_u8_descriptor() }
+            nc_emit_mov_reg_imm(nc, 3, header_addr)
+            nc_emit_mov_rax_imm(nc, desc)
+            nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_descriptor_id())
+            nc_emit_mov_rax_imm(nc, ((func.bss_size + 7) / 8) * 8)
+            nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_payload_size())
+        }
+        fi = fi + 1
+    }
+}
+
 fn emit_entry_trampoline_with_global_inits_into(nc: &! NativeCompiler, module: &IrModule, main_fn_index: i64) with Mut, Panic, Div {
     emit_entry_trampoline_mmap_into(nc)
     emit_entry_trampoline_context_into(nc)
     emit_entry_trampoline_heap_args_into(nc)
     emit_entry_trampoline_avx_metadata_into(nc)
+    emit_packed_global_headers_into(nc, module)
     emit_global_var_inits_into(nc, module)
     emit_entry_trampoline_call_exit_into(nc, main_fn_index)
 }
