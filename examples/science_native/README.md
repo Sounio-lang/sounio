@@ -48,7 +48,9 @@ pinned repository paths; these examples do not duplicate those assets.
 
 ## Worker replay
 
-Run the checked-in gate on a Linux UID1000 Slurm worker, from the source tree:
+Run the checked-in gate on a Linux worker, from the source tree. The retained
+qualification jobs use Slurm UID1000; the public gate records the actual user
+and does not require a particular UID, so Linux CI runners can invoke it:
 
 ~~~sh
 export MADAROS_RAW_BIN=/absolute/path/to/verified/madaros.elf

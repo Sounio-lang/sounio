@@ -3,13 +3,14 @@
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo"
-[[ $(uname -s) == Linux && $(id -u) == 1000 ]] || { echo 'Linux UID1000 worker required' >&2;exit 2; }
+[[ $(uname -s) == Linux ]] || { echo 'Linux worker required' >&2;exit 2; }
 : "${MADAROS_RAW_BIN:?verified absolute source-built compiler required}"
 : "${SCIENCE_NATIVE_OUTPUT:?new absolute output directory required}"
 out=$SCIENCE_NATIVE_OUTPUT
 [[ $MADAROS_RAW_BIN == /* && -x $MADAROS_RAW_BIN && $out == /* && ! -e $out && ! -L $out ]] || exit 2
 mkdir -p "$out"
 trap 'rc=$?;printf "%s\n" "$rc" > "$out/STATUS"' EXIT
+id > "$out/IDENTITY.txt"
 ulimit -s 524288;ulimit -c 0
 unset SOUNIO_SOUC_BIN SOUC_NATIVE_BIN
 export SOUC_BIN="$MADAROS_RAW_BIN" SOUNIO_SOUC_ENGINE=madaros
