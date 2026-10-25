@@ -376,7 +376,7 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 <a id="d-34"></a>
 ## D-34 — Primitiva intervalar certificada: decisões aceitas
 
-- **Resolvido em 2026-10-24:** pacote recomendado aprovado por Demetrios Agourakis; contrato em [ADR-018](adr-018-certified-intervals.md). Implementação e qualificação seguem em SIO-177/SIO-178. A tabela abaixo preserva as alternativas consideradas.
+- **Resolvido em 2026-10-24:** pacote recomendado aprovado por Demetrios Agourakis; contrato em [ADR-019](adr-019-certified-intervals.md). Implementação e qualificação seguem em SIO-177/SIO-178. A tabela abaixo preserva as alternativas consideradas.
 - **Origem:** [proposta](../proposals/CERTIFIED_INTERVAL_PRIMITIVE_2026-10-22.md) (2026-10-22).
 - **Pergunta:** como a incerteza estatística `u` e o envelope rigoroso `e` convivem no `Knowledge`, e quais alvos entram no Marco 0?
 - **Causa localizada:** nenhuma no código: hoje a propagação do `Knowledge` não carrega termo de arredondamento (`self-hosted/check/epistemic.sio`, `self-hosted/ir/lower.sio`; medido em `main` `27afa340`), então nenhuma opção muda o comportamento atual.

@@ -1,13 +1,13 @@
 <!-- docs:meta
-topic_id: repo.docs.decisions.adr-018-certified-intervals
+topic_id: repo.docs.decisions.adr-019-certified-intervals
 authority: repo_only
 audience: users
 last_validated: unvalidated
 validated_by: none
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.decisions.adr-018-certified-intervals
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.decisions.adr-019-certified-intervals
 -->
 
-# ADR-018: Certified interval arithmetic and separate statistical uncertainty
+# ADR-019: Certified interval arithmetic and separate statistical uncertainty
 
 - Status: accepted design; implementation and qualification in progress
 - Decision date: 2026-10-24

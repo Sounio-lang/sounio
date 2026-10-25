@@ -62,7 +62,8 @@ Grounded in: commit, artifact, or empirical result
 | 013 | Format printing with `{}` placeholders | accepted | 2026-10-22 |
 | 015 | Lexical structure (the thirteen rulings of D-33) | accepted | 2026-10-24 |
 | 016 | Epistemic merge, contradiction, typed zeros and provenance trust | accepted | 2026-10-24 |
-| 018 | Certified intervals and separate statistical uncertainty | accepted design; implementation in progress | 2026-10-24 |
+| 018 | Release trains, editions and the compatibility contract | accepted | 2026-10-24 |
+| 019 | Certified intervals and separate statistical uncertainty | accepted design; implementation in progress | 2026-10-24 |
 
 Reserved by open pull requests (not yet on `main`):
 
@@ -71,7 +72,7 @@ Reserved by open pull requests (not yet on `main`):
 | 014 | `&&` and `\|\|` short-circuit | #3046 |
 | 017 | Single authority for IR memory effects (`ir::effects`) | #2686 (renumbered from a colliding 013) |
 
-The next free number is **019**.
+The next free number is **020**.
 
 ## Files
 
@@ -90,7 +91,8 @@ The next free number is **019**.
 - [ADR-013](./adr-013-format-printing.md)
 - [ADR-015](./adr-015-lexical-structure.md)
 - [ADR-016](./adr-016-epistemic-merge-and-provenance-trust.md)
-- [ADR-018](./adr-018-certified-intervals.md)
+- [ADR-018](./adr-018-release-cycle-and-versioning.md)
+- [ADR-019](./adr-019-certified-intervals.md)
 - [Claim-oracle inventory schema](./claim_oracle_inventory.schema.md)
 
 ## Related Docs

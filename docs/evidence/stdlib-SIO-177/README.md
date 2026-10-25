@@ -9,7 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdli
 
 # SIO-177 first increment: decision and structural contract
 
-Base: remote main a2a44df195bb8caf3fb07cbc9517275b29325e94. ADR018 records the
+Base: remote main a2a44df195bb8caf3fb07cbc9517275b29325e94. ADR019 records the
 maintainer-approved D34 package. `epistemic::interval_contract` is an explicit
 structural implementation with private endpoints and status; it is not the
 `Interval<F>` compiler primitive and exposes no arithmetic operators.
@@ -74,7 +74,7 @@ implemented by this increment. SIO178 still owes directed arithmetic/backends,
 FP-environment checks, million-case per-operation qualification and Lean proofs.
 Existing `data::interval`, `verify::interval` and private `epistemic::interval_ieee`
 are distinct legacy representations, not aliases of this contract or certified
-implementations of ADR018; some use round-to-nearest endpoint arithmetic. This
+implementations of ADR019; some use round-to-nearest endpoint arithmetic. This
 increment does not promote their containment claims or change their API behavior.
 
 ## Engine and CI routing
@@ -95,3 +95,8 @@ ELF retains SHA256f3f94c6b5c1f7bc1da0aef1a114a32ad465e42d2e2864ae1598910e6b013e4
 Compact aggregate/child text receipts are in ci-replay-text.tar.gz. This run is
 scoped to main a2a44 plus this interval-contract increment; it does not include
 PR3102/3103/3104 or the BDF/numdiff branches. Remote CI still reruns on the new head.
+
+The decision was initially numbered018 on the a2a44 base. Remote main c21b0e1
+subsequently assigned018 to release trains. This PR renumbers D34 to ADR019 and
+preserves the historical archives as originally produced; their contents are not
+rewritten. The branch incorporates c21 main for the new release/seed baseline.

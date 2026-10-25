@@ -54,7 +54,7 @@ artifacts. Existing qualification campaign17048 is retained, not duplicated.
 | SIO-174 | Dynamic DP54 FSAL/dense/events | Reuse accepted-step FSAL only, quartic dense output, bracketed events and root/progress budget, actual RHS counts. Rosenbrock dense extension outside package. |
 | SIO-175 | Prepared shared contour geometry | Caller-owned segments/cell-level-branch provenance, exact capacity, preserve saddle/shared-edge/mask topology and transactional failure; Canvas/SVG consume identical geometry;256-square and1024-square dual export. |
 | SIO-176 | Checked color scales/canonical LUTs | Authoritative licensed256-entry tables, domain/under/over/missing policy including constant domains; raster/SVG/colorbars agree; no per-cell owner allocation. Keep legacy approximations explicit. |
-| SIO-177 | Interval ABI/frontend/IR and separate e/u | ADR018; no implicit folding or point-Jacobian certified fallback; FP-state effect barriers/opaque kernels; exact host-independent literals; uncertain branch refusal. Structural contract alone is not the primitive. |
+| SIO-177 | Interval ABI/frontend/IR and separate e/u | ADR019; no implicit folding or point-Jacobian certified fallback; FP-state effect barriers/opaque kernels; exact host-independent literals; uncertain branch refusal. Structural contract alone is not the primitive. |
 | SIO-178 | EVEX/RISC-V/RVV/PTX and Lean qualification | Depends on177; no YMM ER/FTZ/approx; one million deterministic cases per format/operation plus edges/mutants; bit identity across targets; sorry-free enclosure proofs with rounding axioms explicitly NOT ESTABLISHED against bit model. |
 | SIO-179 | Qualification, resource regressions and custody | Finish existing NB2 campaign with per-cell denominators, seeds, failures, MC uncertainty and timeouts; pilots separate; immutable compiler/catalog checks before/after; no automatic assessed/calibrated labels. |
 
@@ -81,7 +81,7 @@ kernel or physical/clinical calibration is implied by this programme.
 
 ## Current execution state
 
-- Accepted design: ADR018, with historical D34 alternatives retained.
+- Accepted design: ADR019, with historical D34 alternatives retained.
 - First reviewed PR deliveries:162 ([3102](https://github.com/Sounio-lang/sounio/pull/3102)),163 ([3104](https://github.com/Sounio-lang/sounio/pull/3104)),165 ([3103](https://github.com/Sounio-lang/sounio/pull/3103)); fresh-tip CI/human review remain separate.
 - In progress:164 differentiation,166 BDF,167 noncentral-t/power,172 phonon transport;177 has first structural/ADR increment in [3101](https://github.com/Sounio-lang/sounio/pull/3101), with compiler integration still pending.
 - Other packages: approved scope, not yet implemented by this wave.
