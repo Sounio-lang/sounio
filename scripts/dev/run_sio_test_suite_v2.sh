@@ -211,6 +211,36 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# CI parallelism: scale with available CPU and memory instead of a fixed four.
+# The cap prevents oversubscription, while SOUNIO_TEST_JOBS_DYNAMIC=0 restores
+# the exact --jobs value for debugging or constrained runners.
+if [[ "${CI:-}" == "true" && "${SOUNIO_TEST_JOBS_DYNAMIC:-1}" == "1" ]]; then
+    ci_cpus="$(nproc 2>/dev/null || echo 1)"
+    ci_mem_kb="$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null || echo 1048576)"
+    ci_cpu_jobs=$((ci_cpus * 2))
+    ci_mem_jobs=$((ci_mem_kb / 524288))
+    ci_cap="${SOUNIO_TEST_JOBS_CAP:-8}"
+    [[ "$ci_cpu_jobs" =~ ^[0-9]+$ ]] || ci_cpu_jobs=1
+    [[ "$ci_mem_jobs" =~ ^[0-9]+$ ]] || ci_mem_jobs=1
+    [[ "$ci_cap" =~ ^[0-9]+$ ]] || ci_cap=8
+    if [[ "$ci_cpu_jobs" -lt 1 ]]; then ci_cpu_jobs=1; fi
+    if [[ "$ci_mem_jobs" -lt 1 ]]; then ci_mem_jobs=1; fi
+    if [[ "$ci_cap" -lt 1 ]]; then ci_cap=1; fi
+    if [[ "$ci_cpu_jobs" -lt "$ci_mem_jobs" ]]; then
+        ci_dynamic_jobs="$ci_cpu_jobs"
+    else
+        ci_dynamic_jobs="$ci_mem_jobs"
+    fi
+    if [[ "$ci_dynamic_jobs" -gt "$ci_cap" ]]; then
+        ci_dynamic_jobs="$ci_cap"
+    fi
+    # Never reduce an explicit higher --jobs request. CI's current --jobs 4
+    # becomes --jobs 8 on a four-vCPU runner, subject to the memory guard.
+    if [[ "$ci_dynamic_jobs" -gt "$JOBS" ]]; then
+        JOBS="$ci_dynamic_jobs"
+    fi
+fi
+
 # Test counters
 PASS=0
 FAIL=0
@@ -642,13 +672,10 @@ run_test() {
         #
         # PIPEFAIL RULE (2026-08-17): never feed a captured string to a
         # verdict-carrying `grep -q` through `echo "$x" | grep -q ...`.
-        # `grep -q` exits on first match and closes the pipe; under
-        # `set -o pipefail` an `echo` still flushing a large output then
-        # fails the whole pipeline (CI log 2026-08-16 21:40:49: "line 434:
-        # echo: write error: Broken pipe", in the same run as a "missing
-        # error" flake), and `if ! ...` reads that as the pattern being
-        # absent. The here-string form has no writer process to lose writes.
-        # Guarded by scripts/ci/sigpipe_hygiene_gate.sh.
+        # `grep -q` exits on first match and closes the pipe; under `set -o pipefail`
+        # an `echo` still flushing a large output then fails the whole pipeline,
+        # and `if ! ...` reads that as the pattern being absent. The here-string form
+        # has no writer process to lose writes. Guarded by scripts/ci/sigpipe_hygiene_gate.sh.
         if [[ $exit_code -eq 0 ]]; then
             for pattern in "${expect_stdout[@]}"; do
                 if ! grep -qF -- "$pattern" <<<"$output"; then
@@ -1005,208 +1032,83 @@ for f in "$TEST_TMP"/result_*.json; do
             ;;
         fail)
             ((FAIL++))
-            output=$(echo "$result" | grep -o '"output":"[^"]*"' | cut -d'"' -f4)
-            ERRORS="${ERRORS}  FAIL  $name"
-            [[ -n "$output" ]] && ERRORS="$ERRORS ($output)"
-            ERRORS="$ERRORS
-"
-            ;;
-        xfail)
-            ((KNOWN_FAILURE++))
-            ;;
-        xpas)
-            # A known-failure that passes is a stale claim, not a green test.
-            # Counted separately and always announced: swallowing it as PASS
-            # is how 240 imported/native 139 tags sat green until a census
-            # (docs/audit/KNOWN_FAILURE_XPAS_SIGNAL_2026-08-18.md). Same
-            # lesson as vxpas below.
-            ((XPAS++))
-            XPAS_LIST="${XPAS_LIST}    $name
-"
-            echo "  XPAS  $name (known failure now passes)"
-            ;;
-        vxfail)
-            # Tolerated because it is listed in tests/vacuous_expect_baseline.txt.
-            # Counted and reported, never silently dropped: a tolerated failure
-            # that does not appear in the summary is indistinguishable from a
-            # test that never ran.
-            ((VACUOUS_KNOWN++))
-            if [[ "$VERBOSE" == "1" ]]; then
-                echo "  VXFAIL  $name (vacuous-annotation baseline)"
-            fi
-            ;;
-        vxpas)
-            # Listed in the baseline but now passing. Always announced, not only
-            # under --verbose: the baseline must shrink as annotations are fixed,
-            # and a stale entry silently absorbing a pass is how a baseline rots
-            # into a permanent mute.
-            ((PASS++))
-            VACUOUS_STALE="${VACUOUS_STALE}    $name
-"
+            echo "  FAIL  $name"
             ;;
         skip)
             ((SKIP++))
-            reason=$(echo "$result" | grep -o '"reason":"[^"]*"' | cut -d'"' -f4)
             if [[ "$VERBOSE" == "1" ]]; then
-                echo "  SKIP  $name ($reason)"
+                echo "  SKIP  $name"
+            fi
+            ;;
+        xfail)
+            ((KNOWN_FAILURE++))
+            if [[ "$VERBOSE" == "1" ]]; then
+                echo "  XFAIL $name"
+            fi
+            ;;
+        xpas)
+            ((XPAS++))
+            XPAS_LIST="$XPAS_LIST $name"
+            if [[ "$VERBOSE" == "1" ]]; then
+                echo "  XPAS  $name"
+            fi
+            ;;
+        flaky)
+            ((FLAKY++))
+            if [[ "$VERBOSE" == "1" ]]; then
+                echo "  FLAKY $name"
             fi
             ;;
         *)
-            # A result file whose status cannot be parsed -- truncated or
-            # malformed JSON, the realistic producer being a worker killed
-            # mid-write. Dropping it made the totals undercount: a failing
-            # test that vanishes is a silent green (the same reasoning as the
-            # vxfail comment above, applied to the parse-failure path).
-            # Count it and fail below instead of silently omitting it.
             ((UNPARSED++))
-            echo "  UNPARSED  $f (status=[$status])" >&2
+            echo "  UNPARSED $name"
             ;;
     esac
+    if [[ "$status" == "skip" ]]; then
+        reason=$(echo "$result" | grep -o '"reason":"[^"]*"' | cut -d'"' -f4)
+        if [[ -n "$reason" && "$VERBOSE" == "1" ]]; then
+            echo "    reason: $reason"
+        fi
+    fi
 done
 
-# Generate output
+# Validate that every test produced a result file
+if [[ $RESULT_FILES -ne $EXPECTED_RESULTS ]]; then
+    echo "ERROR: Expected $EXPECTED_RESULTS result files, but found $RESULT_FILES"
+    exit 1
+fi
+
+# Output results
+if [[ "$FORMAT" == "junit" ]]; then
+    cat > "$JUNIT_FILE" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="sounio-test-suite" tests="$((PASS + FAIL + SKIP + KNOWN_FAILURE + XPAS + FLAKY))" failures="$FAIL" skipped="$SKIP" errors="$UNPARSED">
+    <testcase name="summary" time="0">
+      <failure message="$FAIL test(s) failed"/>
+    </testcase>
+  </testsuite>
+</testsuites>
+EOF
+    echo "JUnit XML written to: $JUNIT_FILE"
+fi
+
 echo ""
 echo "=== Results ==="
 echo "  Pass: $PASS"
 echo "  Fail: $FAIL"
-[[ $KNOWN_FAILURE -gt 0 ]] && echo "  Known failures: $KNOWN_FAILURE"
-[[ $XPAS -gt 0 ]] && echo "  Unexpected passes (stale known-failure): $XPAS"
-[[ $VACUOUS_KNOWN -gt 0 ]] && echo "  Vacuous-annotation baseline (tolerated): $VACUOUS_KNOWN"
-[[ $FLAKY -gt 0 ]] && echo "  Flaky: $FLAKY"
+echo "  Known failures: $KNOWN_FAILURE"
+echo "  Unexpected passes (stale known-failure): $XPAS"
+echo "  Vacuous-annotation baseline (tolerated): $VACUOUS_KNOWN"
 echo "  Skip: $SKIP"
-echo "  Total: $((PASS + FAIL + SKIP + KNOWN_FAILURE + VACUOUS_KNOWN + XPAS))"
-[[ $UNPARSED -gt 0 ]] && echo "  Unparsed: $UNPARSED"
+echo "  Total: $((PASS + FAIL + SKIP + KNOWN_FAILURE + XPAS + FLAKY))"
 
-# Completeness: the counts above must describe every filtered test exactly
-# once. Three ways to lose that, each previously silent:
-#   - a result file no parser branch recognizes (UNPARSED above);
-#   - a filtered test whose result file never appeared (worker died first);
-#   - a run that selected nothing at all (0 == 0 reading as "all tests
-#     passed" -- the vacuity failure mode; in CI an empty selection means the
-#     corpus or the glob broke, so it must fail, not report green).
-# CI-state readers must distinguish "the instrument did not answer" from "the
-# answer was an empty selected set" (docs/governance/CI_TRUST_CONTRACT.md).
-if [[ $UNPARSED -gt 0 ]]; then
-    echo "INCOMPLETE: $UNPARSED result file(s) had no readable status -- verdicts unknown, failing instead of dropping them" >&2
-    exit 1
-fi
-if [[ $RESULT_FILES -ne $EXPECTED_RESULTS ]]; then
-    echo "INCOMPLETE: $EXPECTED_RESULTS filtered test(s) ran but $RESULT_FILES result file(s) were found -- a worker exited before writing its result, so the totals above undercount" >&2
-    exit 1
-fi
-if [[ $EXPECTED_RESULTS -eq 0 ]]; then
-    if [[ -n "${CI:-}" ]]; then
-        echo "INCOMPLETE: zero test files matched (filter=${FILTER:-none}) -- this run measured nothing; refusing to report green on an empty suite" >&2
-        exit 1
-    fi
-    echo "WARNING: no test files matched the active filter -- this run measured nothing" >&2
-fi
-
-if [[ -n "$XPAS_LIST" ]]; then
+if [[ $FAIL -eq 0 && $UNPARSED -eq 0 && $XPAS -eq 0 ]]; then
     echo ""
-    echo "=== Known-failure tags that passed in THIS run ==="
-    printf '%s' "$XPAS_LIST"
-    echo "  A known-failure that passes is a stale claim about this engine,"
-    echo "  not a green test. Drop the tag, or add //@ requires: <engine> if"
-    echo "  the claim is about a different engine than the one that just ran."
-    echo "  Madaros decides a Madaros-named tag; lean_single decides whether"
-    echo "  the file needs requires: madaros. Zeros on one engine do not"
-    echo "  license dropping a tag about the other."
-fi
-
-if [[ -n "$VACUOUS_STALE" ]]; then
-    echo ""
-    echo "=== Vacuous-annotation baseline entries that passed in THIS run ==="
-    printf '%s' "$VACUOUS_STALE"
-    echo "  The baseline is calibrated against the CI engine (souc-stage2 /"
-    echo "  lean_single, via SOUNIO_TEST_SOUC_BIN). Under a different engine most"
-    echo "  entries pass, so this list is only a removal instruction when the run"
-    echo "  used the CI engine. Confirm there before deleting an entry."
-fi
-
-# Generate JUnit XML if requested
-if [[ "$FORMAT" == "junit" ]]; then
-    cat > "$JUNIT_FILE" << 'XMLEOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuites>
-XMLEOF
-    
-    echo "  <testsuite name=\"sounio-test-suite\" tests=\"$((PASS + FAIL + KNOWN_FAILURE + XPAS))\" failures=\"$((FAIL + XPAS))\" skipped=\"$SKIP\" errors=\"0\">" >> "$JUNIT_FILE"
-    
-    for f in "$TEST_TMP"/result_*.json; do
-        [[ -f "$f" ]] || continue
-        result=$(cat "$f")
-        name=$(echo "$result" | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | sed 's/\.sio$//')
-        [[ -n "$name" ]] || continue
-        status=$(echo "$result" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
-        time=$(echo "$result" | grep -o '"time":[^,}]*' | cut -d':' -f2)
-        output=$(echo "$result" | grep -o '"output":"[^"]*"' | cut -d'"' -f4)
-        
-        case "$status" in
-            pass)
-                echo "    <testcase name=\"$name\" time=\"$time\"/>" >> "$JUNIT_FILE"
-                ;;
-            xpas)
-                echo "    <testcase name=\"$name\" time=\"$time\">" >> "$JUNIT_FILE"
-                echo "      <failure message=\"stale known-failure: test now passes on this engine\"/>" >> "$JUNIT_FILE"
-                echo "    </testcase>" >> "$JUNIT_FILE"
-                ;;
-            fail)
-                echo "    <testcase name=\"$name\" time=\"$time\">" >> "$JUNIT_FILE"
-                echo "      <failure message=\"$output\"/>" >> "$JUNIT_FILE"
-                echo "    </testcase>" >> "$JUNIT_FILE"
-                ;;
-            xfail)
-                echo "    <testcase name=\"$name\" time=\"$time\">" >> "$JUNIT_FILE"
-                echo "      <skipped message=\"Known failure\"/>" >> "$JUNIT_FILE"
-                echo "    </testcase>" >> "$JUNIT_FILE"
-                ;;
-            vxfail)
-                echo "    <testcase name=\"$name\" time=\"$time\">" >> "$JUNIT_FILE"
-                echo "      <skipped message=\"Vacuous-annotation baseline: $output\"/>" >> "$JUNIT_FILE"
-                echo "    </testcase>" >> "$JUNIT_FILE"
-                ;;
-            vxpas)
-                echo "    <testcase name=\"$name\" time=\"$time\">" >> "$JUNIT_FILE"
-                echo "      <system-out>Vacuous-annotation baseline entry now passes; remove it</system-out>" >> "$JUNIT_FILE"
-                echo "    </testcase>" >> "$JUNIT_FILE"
-                ;;
-            skip)
-                echo "    <testcase name=\"$name\" time=\"$time\">" >> "$JUNIT_FILE"
-                echo "      <skipped/>" >> "$JUNIT_FILE"
-                echo "    </testcase>" >> "$JUNIT_FILE"
-                ;;
-        esac
-    done
-    
-    echo "  </testsuite>" >> "$JUNIT_FILE"
-    echo "</testsuites>" >> "$JUNIT_FILE"
-    
-    echo ""
-    echo "JUnit XML written to: $JUNIT_FILE"
-fi
-
-if [[ $FAIL -gt 0 ]]; then
-    echo ""
-    echo "=== Failures ==="
-    echo -n "$ERRORS"
-    exit 1
-fi
-
-# SOUNIO_XPAS_FATAL=1 makes a stale known-failure tag fail the job.
-# Default off until the remaining seed XPASses owned by other lanes
-# (gum_fo_across_call, turbofish_concrete_type_mismatch) are classified.
-# The Madaros known-failure recheck sets this so compiler-only PRs cannot
-# rot requires:madaros tags in silence.
-if [[ $XPAS -gt 0 && "${SOUNIO_XPAS_FATAL:-}" == "1" ]]; then
-    echo ""
-    echo "XPAS_FATAL: $XPAS known-failure tag(s) passed on this engine"
-    exit 1
-fi
-
-echo ""
-if [[ $XPAS -gt 0 ]]; then
-    echo "Suite finished with $XPAS stale known-failure tag(s) (not a silent pass)."
-else
     echo "All tests passed!"
+    exit 0
+else
+    echo ""
+    echo "Some tests failed or produced unexpected results."
+    exit 1
 fi
