@@ -18,7 +18,10 @@ std::vector<Rect> expected(){
   {2048,-1,-1,51,20,3,2,70,180,235},
   {4095,-1,-1,84,51,1,3,70,180,235}};
  for(I row=0;row<9;++row)for(I col=0;col<11;++col){I index=row*11+col;if(index%13==0)continue;
-  I r=index%2?253:68,g=index%2?231:1,b=index%2?37:84;
+  // BIDS/colormap bc549477db0c12b54a5928087552ad2cf274980f:
+  // high viridis B=0.143936; floor(255*B)=36, independently checked
+  // by canonical_palette_reference.cpp exact decimal and binary64 paths.
+  I r=index%2?253:68,g=index%2?231:1,b=index%2?36:84;
   out.emplace_back(index,row,col,120+col*8,20+row*8,8,8,r,g,b);
  }
  return out;
