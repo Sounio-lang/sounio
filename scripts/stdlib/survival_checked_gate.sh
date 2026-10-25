@@ -65,13 +65,14 @@ for engine in lean_single madaros;do
 done
 cat > "$OUT/medical_nonfinite.generated.sio" <<'SIO'
 use medical::survival::{make_event}
-fn main()->i32 with Panic {
+fn main()->i32 with IO,Panic {
+ println("MEDICAL_NONFINITE_BEFORE_CALL")
  let e=make_event(1.0e308*10.0,true)
  if e.time>0.0 {0}else{2}
 }
 SIO
 run_fixture "$OUT/medical_nonfinite.generated.sio" medical_nonfinite 1
-for engine in lean_single madaros;do grep -qi 'assert' "$OUT/medical_nonfinite.$engine.native.stderr";done
+for engine in lean_single madaros;do grep -qx MEDICAL_NONFINITE_BEFORE_CALL "$OUT/medical_nonfinite.$engine.native.stdout";done
 # Public legacy undefined outputs refuse; all dynamic availability stays explicit.
 for condition in 'n=257' 'e[0]=2' 'g[0]=1';do
  case "$condition" in
@@ -81,17 +82,18 @@ for condition in 'n=257' 'e[0]=2' 'g[0]=1';do
  esac
  cat > "$OUT/$name.generated.sio" <<SIO
 use stats::logrank::{logrank}
-fn main()->i32 with Alloc,Mut,Div,Panic {
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
  var t:[f64;256]=[1.0;256];var e:[i64;256]=[1;256];var g:[i64;256]=[1;256]
  var n:i32=2
  g[0]=0
  $condition
+ println("LEGACY_REJECTION_BEFORE_CALL_$name")
  let r=logrank(&t,&e,&g,n)
  if r.p>0.0 {0}else{2}
 }
 SIO
  run_fixture "$OUT/$name.generated.sio" "$name" 1
- for engine in lean_single madaros;do grep -qi 'assert' "$OUT/$name.$engine.native.stderr";done
+ for engine in lean_single madaros;do grep -qx "LEGACY_REJECTION_BEFORE_CALL_$name" "$OUT/$name.$engine.native.stdout";done
 done
 awk '$1=="CURVE"&&$2==5&&$3==0&&$4==0 {$5=0} {print}' "$OUT/small.madaros.native.stdout" > "$OUT/mutant_risk.stdout"
 awk '$1=="CURVE"&&$2==5&&$3==0&&$4==0 {$14=0} {print}' "$OUT/small.madaros.native.stdout" > "$OUT/mutant_ci.stdout"
