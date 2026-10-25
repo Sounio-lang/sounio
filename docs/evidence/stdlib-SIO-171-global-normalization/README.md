@@ -34,7 +34,9 @@ global-reference TSV adds an explicit normalization-scope header.
 Resource queries describe allocated buffer payload only, excluding transferred
 CSR/identity inputs, owner metadata, allocator overhead and process RSS. Building
 a global owner still needs a global CSR plus temporary O(G+S) canonical scratch;
-scratch closes before the retained O(S) factor/log owner returns. This is not
+scratch closes before the retained O(S) factor/log owner returns. The owner is reused by borrowed access within one process; transport or import
+across the original independent Slurm array processes is not implemented or
+qualified. This is not
 an out-of-core algorithm, median-of-medians approximation, universal RSS/speed
 claim, global empirical-prior/FDR qualification or a new20k calibration campaign.
 

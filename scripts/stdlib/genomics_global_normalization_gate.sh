@@ -37,7 +37,7 @@ for engine in madaros lean_single;do
  code=0
  SOUNIO_SOUC_ENGINE="$engine" bin/souc compile tests/compile-fail/genomics_normalization_private.sio -o "$OUT/$engine.private.elf" > "$OUT/$engine.private.stdout" 2> "$OUT/$engine.private.stderr" || code=$?
  echo "$code" > "$OUT/$engine.private.exit"
- [[ $code != 0 ]] && grep -Eq 'error\[E259\]' "$OUT/$engine.private.stdout" "$OUT/$engine.private.stderr"
+ [[ $code == 1 && ! -s "$OUT/$engine.private.elf" ]] && grep -Eq 'error\[E259\]' "$OUT/$engine.private.stdout" "$OUT/$engine.private.stderr"
 done
 # Remove only equality assertions from the consumer, then require its clean
 # production execution/oracle PASS. That identical consumer discriminates an
@@ -54,6 +54,12 @@ const a=' var i:i64=0\n while i<w.n {\n  let from=integer_buffer_at(&w.counts,i)
 if(!s.includes(a))throw Error('global copy source');
 s=s.replace(a,' let recomputed=count_csr_size_factors_into(&w.csr,count_normalization_mode(normalization),&!w.factors,&!w.norm_logs,&!w.norm_work,&!w.norm_anchors,&!w.normalization)\n if recomputed!=0 {return 20+recomputed}');fs.writeFileSync(model,s);
 NODE
+mutation_inputs() {
+ find "$OUT/mutation/stdlib" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+ sha256sum "$OUT/mutation/consumer.sio"
+}
+mutation_inputs > "$OUT/MUTATION_INPUTS.sha256"
+phase mutation-source-initial sha256sum -c "$OUT/MUTATION_INPUTS.sha256"
 phase control.compile env SOUNIO_SOUC_ENGINE=madaros bin/souc compile "$OUT/mutation/consumer.sio" -o "$OUT/control.elf"
 no_diagnostics "$OUT/control.compile.stdout" "$OUT/control.compile.stderr"
 chmod +x "$OUT/control.elf";sha256sum "$OUT/control.elf" >> "$OUT/ELFS.sha256"
@@ -70,6 +76,9 @@ echo "$code" > "$OUT/mutant.reference.exit"
 # Regression replay of all six established fixtures, both engines + independent refs.
 phase existing-six bash scripts/stdlib/genomics_batch_gate.sh "$OUT/existing-six"
 inputs > "$OUT/SOURCE.final.sha256";cmp "$OUT/SOURCE.sha256" "$OUT/SOURCE.final.sha256"
+mutation_inputs > "$OUT/MUTATION_INPUTS.final.sha256"
+cmp "$OUT/MUTATION_INPUTS.sha256" "$OUT/MUTATION_INPUTS.final.sha256"
+phase mutation-source-final sha256sum -c "$OUT/MUTATION_INPUTS.sha256"
 phase source-final sha256sum -c "$OUT/SOURCE.sha256"
 phase compilers-final sha256sum -c "$OUT/COMPILERS.sha256"
 phase elfs-final sha256sum -c "$OUT/ELFS.sha256"
