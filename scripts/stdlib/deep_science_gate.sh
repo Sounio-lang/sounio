@@ -327,6 +327,11 @@ rc=0
 SCIENCE_NATIVE_OUTPUT="$out/scientific-native-workflows" SCIENCE_NATIVE_SEED_BIN="$SEED_RAW_BIN" MADAROS_RAW_BIN="$MADAROS_RAW_BIN" timeout 1200 bash scripts/stdlib/scientific_native_workflows_gate.sh > "$out/scientific-native-workflows.gate.stdout" 2> "$out/scientific-native-workflows.gate.stderr" || rc=$?
 record focused-gate scientific-native-workflows "$rc"
 
+# ADR-019 structural shape contract; directed arithmetic is not qualified here.
+rc=0
+INTERVAL_CONTRACT_OUT="$out/interval-contract" timeout 240 bash scripts/stdlib/interval_contract_gate.sh > "$out/interval-contract.gate.stdout" 2> "$out/interval-contract.gate.stderr" || rc=$?
+record focused-gate interval-contract "$rc"
+
 rc=0
 write_inputs > "$out/INPUTS.final.sha256" || rc=$?
 if [[ $rc == 0 ]]; then cmp "$out/INPUTS.sha256" "$out/INPUTS.final.sha256" > "$out/INPUTS.catalog-cmp.txt" 2>&1 || rc=$?; fi
