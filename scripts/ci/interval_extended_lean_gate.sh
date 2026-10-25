@@ -17,6 +17,7 @@ phase() {
 cd "$ROOT"
 id > "$OUT/identity.txt"
 sha256sum formal/lean4/{SounioIntervalFinite,SounioIntervalFiniteAxiomAudit,SounioIntervalExtended,SounioIntervalExtendedAxiomAudit}.lean formal/lean4/{lakefile.lean,lean-toolchain} scripts/ci/interval_{finite_axiom_inventory,extended_axiom_inventory}.mjs scripts/ci/interval_extended_lean_gate.sh > "$OUT/SOURCE.sha256"
+[[ -s "$OUT/SOURCE.sha256" ]] || { echo "empty source manifest" >&2;exit 65; }
 printf '%s  %s\n' 17cf45617ddf5aacbcafe8a553cc6b6cd02bb5bfa12eb14103950438fddc172b formal/lean4/SounioIntervalFinite.lean fb2abaecb5c45f6110195ef03a2414199d21e8269431c68bcbbca205f7ea75a6 formal/lean4/SounioIntervalFiniteAxiomAudit.lean 68b816784f992312bec5ad27235a0f8c36797ba5e0b84cfa3af2603d08ea0200 scripts/ci/interval_finite_axiom_inventory.mjs > "$OUT/FINITE_DEPENDENCY.sha256"
 phase finite-source-identity sha256sum -c "$OUT/FINITE_DEPENDENCY.sha256"
 [[ "$(cat formal/lean4/lean-toolchain)" == leanprover/lean4:v4.33.0 ]]
@@ -28,7 +29,8 @@ export PATH="$PREFIX/bin:$PATH"
 grep -Eq '^Lean \(version 4\.33\.0,.*commit d8b18978322de05a8f3dba51ef03cf5461676c17,' "$OUT/LEAN_VERSION"
 printf '%s  %s\n' e8baaa71855a616dc351028f3ad2200051b0671f423a1696a100e809302d5550 "$LEAN" 60330ab6f07dce20f3fa9ebb08e8b984ea9549eac172afeb15d9d2227060e2b3 "$LAKE" > "$OUT/TOOLCHAIN_BINARIES.sha256"
 phase toolchain-pin sha256sum -c "$OUT/TOOLCHAIN_BINARIES.sha256"
-find "$PREFIX/lib/lean" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > "$OUT/TOOLCHAIN_LIBRARIES.sha256"
+find "$PREFIX/lib/lean" -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum > "$OUT/TOOLCHAIN_LIBRARIES.sha256"
+[[ -s "$OUT/TOOLCHAIN_LIBRARIES.sha256" ]] || { echo "empty toolchain library manifest" >&2;exit 65; }
 NODE="$(command -v node)"
 sha256sum "$NODE" > "$OUT/NODE.sha256"
 printf '%s\n' 'scope=Rat plus infinite endpoints, finite-rational membership, exact and conditional-outward addition/subtraction; general multiplication/division and IEEE linkage NOT ESTABLISHED' > "$OUT/SCOPE.txt"

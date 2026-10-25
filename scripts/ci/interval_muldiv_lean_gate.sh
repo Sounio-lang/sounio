@@ -16,12 +16,14 @@ phase() {
 cd "$ROOT"
 id > "$OUT/identity.txt"
 sha256sum formal/lean4/{SounioIntervalFinite,SounioIntervalFiniteAxiomAudit,SounioIntervalExtended,SounioIntervalExtendedAxiomAudit,SounioIntervalExtendedMulDiv,SounioIntervalExtendedMulDivAxiomAudit}.lean formal/lean4/{lakefile.lean,lean-toolchain} scripts/ci/interval_{finite_axiom_inventory,extended_axiom_inventory,muldiv_axiom_inventory}.mjs scripts/ci/{interval_extended_lean_gate,interval_muldiv_lean_gate}.sh scripts/ci/axiom_inventory_source.mjs > "$OUT/SOURCE.sha256"
+[[ -s "$OUT/SOURCE.sha256" ]] || { echo "empty source manifest" >&2;exit 65; }
 printf '%s  %s\n' b1eb2fdd6e623528d3c2064574e63137b782ed8da2a138253d044dc239a4a838 formal/lean4/SounioIntervalExtended.lean 7db7099327adad37db0635320f3eb029feb2d26ba390ed24045ca831481d0288 formal/lean4/SounioIntervalExtendedAxiomAudit.lean > "$OUT/ADDITIVE_SOURCE.sha256"
 phase frozen-additive-source sha256sum -c "$OUT/ADDITIVE_SOURCE.sha256"
 # The parent gate checks exact Lean4.33.0 binaries and libraries, finite32 identity,
 # fresh finite/additive source and audits, and its four actual semantic mutants.
 phase additive-dependency bash scripts/ci/interval_extended_lean_gate.sh "$OUT/additive"
 PREFIX="$(cat "$OUT/additive/TOOLCHAIN_BINARIES.sha256" | head -n1 | sed 's/^[^ ]*  //;s@/bin/lean$@@')"
+[[ -n "$PREFIX" && -x "$PREFIX/bin/lake" ]] || { echo "missing verified Lean prefix" >&2;exit 65; }
 LAKE="$PREFIX/bin/lake"
 NODE="$(command -v node)"
 cd formal/lean4
