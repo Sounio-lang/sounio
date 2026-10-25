@@ -285,4 +285,4 @@ Apparent volume in which a drug distributes. Typical unit: `L` or `L/kg`.
 
 ---
 
-*For implementation details, see the [Language Guide](LLM_PROGRAMMING_GUIDE.md).*
+*For implementation details, see the [Language Guide](guide/LLM_PROGRAMMING_GUIDE.md).*

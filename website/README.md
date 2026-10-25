@@ -1,6 +1,6 @@
 # Sounio Website
 
-Astro 5 site for **https://www.souniolang.org** — documentation, tutorials, blog, and multilingual navigation.
+Astro 6 site for **https://www.souniolang.org** — documentation, tutorials, blog, and multilingual navigation.
 
 ## Requirements
 
@@ -81,7 +81,7 @@ Dark-first brand navy (`#0B1E3A`), gold accents (`#D6B35A`), glass surfaces — 
 
 Examples: `CustomCursor.tsx` (desktop-only; disabled when `prefers-reduced-motion: reduce`), `KineticText.tsx`, `MCQBlock.tsx`, `AudienceSelector.tsx`, `RenderPreview.astro`.
 
-Homepage demos live under `src/components/home/` (code examples, charts, dissertation viewer, etc.). Legacy WebGPU experiments are archived under `src/components/_archive/`.
+Homepage demos live under `src/components/home/` (code examples, charts, dissertation viewer, etc.).
 
 ### Contributing to styles
 
