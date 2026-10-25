@@ -195,11 +195,15 @@ grep -Fq "requires: vendor-material but no .args sidecar" "$TMP/vendor_nosidecar
 
 # --- 10. CI job scaling is bounded and reversible ---
 printf '%s\n' "$HELLO" > "$TMP/list_ci_jobs.txt"
-CI=true SOUNIO_TEST_JOBS_CAP=2 bash "$HARNESS" --test-list "$TMP/list_ci_jobs.txt" --jobs 1 >"$TMP/ci-capped.log" 2>&1
+CI=true SOUNIO_TEST_JOBS_DYNAMIC=1 SOUNIO_TEST_CI_CPUS=4 SOUNIO_TEST_CI_MEM_KB=4194304 SOUNIO_TEST_JOBS_CAP=2 bash "$HARNESS" --test-list "$TMP/list_ci_jobs.txt" --jobs 1 >"$TMP/ci-capped.log" 2>&1
 grep -Fq 'Parallel jobs: 2' "$TMP/ci-capped.log" \
     || fail "CI job cap was not applied"
 CI=true SOUNIO_TEST_JOBS_DYNAMIC=0 bash "$HARNESS" --test-list "$TMP/list_ci_jobs.txt" --jobs 1 >"$TMP/ci-fixed.log" 2>&1
 grep -Fq 'Parallel jobs: 1' "$TMP/ci-fixed.log" \
     || fail "dynamic job opt-out did not restore exact --jobs"
+# An implicit host-CPU default must still obey the memory bound.
+CI=true SOUNIO_TEST_JOBS_DYNAMIC=1 SOUNIO_TEST_CI_CPUS=16 SOUNIO_TEST_CI_MEM_KB=2097152 bash "$HARNESS" --test-list "$TMP/list_ci_jobs.txt" >"$TMP/ci-implicit.log" 2>&1
+grep -Fq 'Parallel jobs: 4' "$TMP/ci-implicit.log" \
+    || fail "implicit job count bypassed the memory bound"
 
 echo "TEST_SUITE_ANNOTATION_SELFTEST_PASS"

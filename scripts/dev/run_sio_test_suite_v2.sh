@@ -163,6 +163,8 @@ FILTER_MODE="contains"
 VERBOSE=""
 FORMAT="text"
 JOBS="${SOUNIO_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+JOBS_EXPLICIT=0
+if [[ -n "${SOUNIO_TEST_JOBS:-}" ]]; then JOBS_EXPLICIT=1; fi
 LIST_TESTS=0
 TEST_LIST_FILE=""
 
@@ -193,6 +195,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --jobs)
             JOBS="$2"
+            JOBS_EXPLICIT=1
             shift 2
             ;;
         --list-tests)
@@ -215,8 +218,8 @@ done
 # The cap prevents oversubscription, while SOUNIO_TEST_JOBS_DYNAMIC=0 restores
 # the exact --jobs value for debugging or constrained runners.
 if [[ "${CI:-}" == "true" && "${SOUNIO_TEST_JOBS_DYNAMIC:-1}" == "1" ]]; then
-    ci_cpus="$(nproc 2>/dev/null || echo 1)"
-    ci_mem_kb="$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null || echo 1048576)"
+    ci_cpus="${SOUNIO_TEST_CI_CPUS:-$(nproc 2>/dev/null || echo 1)}"
+    ci_mem_kb="${SOUNIO_TEST_CI_MEM_KB:-$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null || echo 1048576)}"
     ci_cpu_jobs=$((ci_cpus * 2))
     ci_mem_jobs=$((ci_mem_kb / 524288))
     ci_cap="${SOUNIO_TEST_JOBS_CAP:-8}"
@@ -234,9 +237,10 @@ if [[ "${CI:-}" == "true" && "${SOUNIO_TEST_JOBS_DYNAMIC:-1}" == "1" ]]; then
     if [[ "$ci_dynamic_jobs" -gt "$ci_cap" ]]; then
         ci_dynamic_jobs="$ci_cap"
     fi
-    # Never reduce an explicit higher --jobs request. CI's current --jobs 4
-    # becomes --jobs 8 on a four-vCPU runner, subject to the memory guard.
-    if [[ "$ci_dynamic_jobs" -gt "$JOBS" ]]; then
+    # Implicit nproc defaults must not bypass the memory guard. Preserve a
+    # higher count only when the caller explicitly requested it. CI's current
+    # --jobs 4 becomes --jobs 8 on a four-vCPU runner when memory permits.
+    if [[ "$JOBS_EXPLICIT" -eq 0 ]] || [[ "$ci_dynamic_jobs" -gt "$JOBS" ]]; then
         JOBS="$ci_dynamic_jobs"
     fi
 fi
