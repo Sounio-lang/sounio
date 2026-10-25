@@ -225,6 +225,12 @@ rc=0
 timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/normalization_into_reference.cpp -o "$out/normalization_into_reference" > "$out/normalization_into_reference.cpp.txt" 2>&1 || rc=$?
 record cpp-compile normalization_into_reference "$rc"
 if [[ $rc == 0 ]]; then compare normalization_into_reference stdlib_scale_normalization_into; fi
+# Conditional exact signed ranks, explicit approximation, counted scratch
+# and independent C++ integer/tail controls execute in both compiler engines.
+rc=0
+timeout 1200 bash scripts/stdlib/wilcoxon_checked_gate.sh "$out/wilcoxon_checked" > "$out/wilcoxon_checked.focused.stdout" 2> "$out/wilcoxon_checked.focused.stderr" || rc=$?
+record focused-gate wilcoxon_checked "$rc"
+
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"
