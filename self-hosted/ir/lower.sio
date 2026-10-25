@@ -7633,6 +7633,7 @@ fn lowerer_emit_deferred_global_inits_mut(lo: &! Lowerer) with Mut, Panic, Div, 
                     if slots > 0 {
                         let dst = lowerer_fresh_reg_mut(lo)
                         (*lo) = (*lo).emit(ir_alloc(dst, (*lo).aggregate_storage_bytes(slots)))
+                        (*lo) = (*lo).emit_zero_array_fields(dst, st, slots)
                         (*lo) = (*lo).emit(ir_store_global(dst, slot.param_count, slot.name))
                     }
                 }
@@ -8127,6 +8128,32 @@ fn lowerer_lower_impl_methods_mut(
 // (lower_function_is_transparent_hof) only sees a callee whose body has
 // already been lowered and flushed, and lowering inserts parameter copies, so
 // it never matched and every capture read as 0.
+
+// True when some arm is `Some(x) => x`: the match yields the Option's payload.
+fn lower_match_arm_returns_some_binding(arms: &Option<Box<MatchArmList>>) -> bool with Mut, Panic, Div, Alloc {
+    var cur = arms
+    while true {
+        match *cur {
+            Some(list) => {
+                let pat = &(*list).head.pattern
+                if (*pat).kind == PatternKind::PatEnum && ir_name_is_some(ir_path_last_name((*pat).path))
+                    && (*list).head.body.kind == ExprKind::ExprIdent {
+                    match (*pat).sub_patterns {
+                        Some(sp) => {
+                            if (*sp).head.kind == PatternKind::PatBinding && ir_name_eq((*sp).head.name, (*list).head.body.name) {
+                                return true
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                cur = &(*list).tail
+            }
+            None => break
+        }
+    }
+    false
+}
 
 fn lower_hof_transparent_known(n: Name) -> bool with Mut, Panic, Div {
     let h = fo_name_hash(n)
@@ -14357,6 +14384,44 @@ impl Lowerer {
     // assigned an aggregate — and native_v2_resolve_handle_to_object_base_rax_into
     // treats 0 as a handle-table INDEX, so an unguarded copy would dereference
     // whatever entry 0 holds. Trading an aliasing bug for a segfault is not a fix.
+    // `var s: S` with no initializer (local or global) allocates the struct but
+    // left every word-scalar `[T; N]` field as handle 0, so `s.bytes[i] = ..`
+    // trapped on the null handle. lean_single lays the array inline and zeroed.
+    // Allocate each such field as `[0; N]` would (packed for i8/u8), so the
+    // declared struct is usable as written (#2966: string_table_new, every gen2
+    // `build` trapped in nc_flat_data_prepare_into).
+    fn emit_zero_array_fields(self, dst_reg: i64, type_name: Name, slot_count: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var i: i64 = 0
+        while i < slot_count && i < 128 {
+            let pos = lo.struct_layout_field_pos(type_name, i)
+            let arr_len = lo.struct_layout_pos_array_len(pos)
+            if arr_len > 0 {
+                let fname = lo.struct_layout_pos_field_name(pos)
+                let si = pos / 128
+                let sfi = pos - si * 128
+                let elem = ir_name_at((*lo.struct_layouts).entries[si as usize].fields[sfi as usize].elem_type_name_id)
+                let pair_arr = lo.fresh_reg()
+                lo = pair_arr.0
+                let arr_reg = pair_arr.1
+                var alloc_instr = ir_alloc_array(arr_reg, lo.aggregate_storage_bytes(arr_len), arr_len)
+                if ir_name_eq(elem, make_name("i8")) {
+                    alloc_instr.label_id = IR_ALLOC_PACKED_I8
+                } else if ir_name_eq(elem, make_name("u8")) {
+                    alloc_instr.label_id = IR_ALLOC_PACKED_U8
+                }
+                lo = lo.emit(alloc_instr)
+                if lo.struct_layout_pos_is_float(pos) == 2 {
+                    lo = lo.emit(ir_mark_float_reg(arr_reg))
+                    lo = lo.bind_reg_array_elem_float(arr_reg)
+                }
+                lo = lo.emit(ir_field_set(dst_reg, i, arr_reg, fname))
+            }
+            i = i + 1
+        }
+        lo
+    }
+
     fn emit_struct_value_copy_deep(self, src_reg: i64, type_name: Name, slot_count: i64, depth: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
@@ -28909,6 +28974,7 @@ impl Lowerer {
                         lo = uninit_pair.0
                         let uninit_dst = uninit_pair.1
                         lo = lo.emit(ir_alloc(uninit_dst, lo.aggregate_storage_bytes(st_slot_count)))
+                        lo = lo.emit_zero_array_fields(uninit_dst, st_name, st_slot_count)
                         lo = lo.bind_local_struct_type(s.name, st_name, false)
                         bind_reg = uninit_dst
                     }
@@ -29307,6 +29373,32 @@ impl Lowerer {
                             if ctl_st.len > 0 && !ir_name_is_box(ctl_st)
                                 && lower_struct_layout_index_of(&(*lo.struct_layouts), ctl_st) >= 0 {
                                 lo = lo.bind_local_struct_type(s.name, ctl_st, false)
+                            }
+                            // `let first = match (*fd).params { Some(pl) => pl, None => .. }`:
+                            // the value is the Box payload itself. Untyped, `(*first).head`
+                            // took the generic deref instead of the Box field-0 read
+                            // (gen3 ud2 in lower_fn_def_is_transparent_hof_ast, #2966).
+                            if (*rhs_ctl).kind == ExprKind::ExprMatch && lo.lookup_local_struct_type(s.name).len == 0
+                                && lower_match_arm_returns_some_binding(&(*rhs_ctl).arms) {
+                                match (*rhs_ctl).left {
+                                    Some(sb_scrut) => {
+                                        if (*sb_scrut).kind == ExprKind::ExprFieldAccess {
+                                            match (*sb_scrut).left {
+                                                Some(sb_owner) => {
+                                                    let sb_owner_ty = lo.expr_receiver_struct_type_ref(&(*sb_owner))
+                                                    let sb_inner = lo.field_option_box_inner_type_for_struct(sb_owner_ty, (*sb_scrut).name)
+                                                    let sb_layout = lower_struct_layout_index_of(&(*lo.struct_layouts), sb_inner)
+                                                    if sb_inner.len > 0 && sb_layout >= 0 {
+                                                        lo = lo.bind_local_struct_type(s.name, make_name("Box"), false)
+                                                        lo = lo.bind_local_box_inner_layout(s.name, sb_layout)
+                                                    }
+                                                }
+                                                None => {}
+                                            }
+                                        }
+                                    }
+                                    None => {}
+                                }
                             }
                         }
                     }

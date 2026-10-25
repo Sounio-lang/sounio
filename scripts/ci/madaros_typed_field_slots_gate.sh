@@ -47,6 +47,10 @@
 #      `Some(node)` binding; untyped, `(*node).next` read Link.def.
 #  13. `var t = h.table` with `table: Box<T>` types `t` as Box<T>; untyped,
 #      `(*t).depth[1] = ..` stored into another field (fo_bind tables).
+#  14. `let first = match h.list { Some(pl) => pl, .. }` types `first` as
+#      Box<T>; untyped, `(*first).head` skipped the Box read (SIGILL).
+#  15. `var s: S` with no initializer (local or global) gets zeroed storage
+#      for its `[T; N]` fields; it held handle 0 (string_table_new, SIGILL).
 # Each witness surrounds the right struct with decoys that win the vote.
 # Madaros from main prints 3, 1055 and 3 (or 40300003); lean_single passes all.
 #
@@ -88,6 +92,8 @@ check let_match_struct_typed LET_MATCH_STRUCT_TYPED_OK
 check ref_option_local_match_typed REF_OPTION_LOCAL_MATCH_TYPED_OK
 check global_option_list_match_typed GLOBAL_OPTION_LIST_MATCH_TYPED_OK
 check box_field_local_typed BOX_FIELD_LOCAL_TYPED_OK
+check let_match_some_payload_typed LET_MATCH_SOME_PAYLOAD_TYPED_OK
+check uninit_struct_array_field UNINIT_STRUCT_ARRAY_FIELD_OK
 
 cat >"$WORK/refuse.sio" <<'SIO'
 struct Seg { buf: [i8; 16], len: i64 }
