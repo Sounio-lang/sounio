@@ -138,6 +138,8 @@ grep    -E '^ffi_' "$WORK/backend_all.txt" | sed -E 's/^ffi_//' | sort -u > "$WO
 grep -v -E '^ffi_' "$WORK/backend_all.txt"                      | sort -u > "$WORK/backend_plain.txt"
 
 # --- parser side -----------------------------------------------------------
+# Names are matched as `make_name("x")` or as the literal argument of
+# name_eq_lit / ir_name_eq_lit, which replaced `name_eq(n, make_name("x"))`.
 # extern_name_has_ffi_intrinsic decides which declarations get a forwarding
 # body. A name it wraps without a backend arm compiles to a call into nothing;
 # a name it does NOT wrap while the checker binds ffi_<name> is a dead binding.
@@ -149,8 +151,8 @@ awk '
     inside && /^}/                      { inside = 0 }
     inside                              { print }
 ' "$PARSER" \
-  | grep -oE 'make_name\("[a-z_0-9]+"\)' \
-  | sed -E 's/^make_name\("//; s/"\)$//' \
+  | grep -oE '(make_name\(|_lit\([^"]*)"[a-z_0-9]+"' \
+  | sed -E 's/.*"([a-z_0-9]+)"$/\1/' \
   | sort -u > "$WORK/parser_ffi.txt"
 
 # --- checker ffi binding side ----------------------------------------------
@@ -161,8 +163,8 @@ awk '
     inside && /^}/                                 { inside = 0 }
     inside                                         { print }
 ' "$CHECK" \
-  | grep -oE 'make_name\("ffi_[a-z_0-9]+"\)' \
-  | sed -E 's/^make_name\("ffi_//; s/"\)$//' \
+  | grep -oE '(make_name\(|_lit\([^"]*)"ffi_[a-z_0-9]+"' \
+  | sed -E 's/.*"ffi_([a-z_0-9]+)"$/\1/' \
   | sort -u > "$WORK/checker_ffi.txt"
 
 # --- checker side ----------------------------------------------------------
@@ -171,8 +173,8 @@ awk '
     inside && /^}/                       { inside = 0 }
     inside                               { print }
 ' "$CHECK" \
-  | grep -oE 'make_name\("[a-z_0-9]+"\)' \
-  | sed -E 's/^make_name\("//; s/"\)$//' \
+  | grep -oE '(make_name\(|_lit\([^"]*)"[a-z_0-9]+"' \
+  | sed -E 's/.*"([a-z_0-9]+)"$/\1/' \
   | sort -u > "$WORK/checker.txt"
 
 sort -u "$WORK/backend_plain.txt" "$WORK/parser_ffi.txt" > "$WORK/backend.txt"
