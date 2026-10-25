@@ -77,13 +77,13 @@ int main(int argc,char**argv){
  bool legacy=argc==3&&std::string(argv[1])=="--legacy";if(argc!=2&&!legacy)return 2;
  std::ifstream file(argv[legacy?2:1]);std::string line;auto pv=powers();auto sv=sizes();auto tv=quantiles();size_t pi=0,si=0,qi=0;bool done=false;int errors=0;double maxpower=0,maxquantile=0;
  auto fail=[&](std::string x){std::cerr<<"FAIL "<<x<<"\n";errors++;};
- while(std::getline(file,line)){
+ while(std::getline(file,line)){if(errors)return 1;
   if(line.rfind("LEGACY_POWER_COMPLETE ",0)==0){done=line=="LEGACY_POWER_COMPLETE "+std::to_string(pv.size());continue;}
   if(line.rfind("POWER_COMPLETE ",0)==0){done=line=="POWER_COMPLETE "+std::to_string(pv.size())+" "+std::to_string(sv.size())+" "+std::to_string(tv.size());continue;}
   std::istringstream in(line);std::string tag;size_t id;int status=0;in>>tag>>id;if(!legacy)in>>status;std::vector<std::int64_t>b;std::int64_t bit;while(in>>bit)b.push_back(bit);
   if(legacy||tag=="PROW"){
-   if((legacy&&tag!="LROW")||id!=pi||pi>=pv.size()||b.size()!=(legacy?1:11)){fail("power row shape");continue;}auto c=pv[pi++];if(status!=0){fail("power status "+std::to_string(status)+" id "+std::to_string(id));continue;}Q expected=power(c.d,c.n,c.alpha,c.two,c.per);double actual=val(b[legacy?0:2]);double error=abs((Q(actual)-expected)/expected).convert_to<double>();maxpower=std::max(maxpower,error);if(error>2e-8){std::ostringstream s;s<<std::setprecision(17)<<"power "<<id<<" actual "<<actual<<" expected "<<expected<<" relative "<<error;fail(s.str());}
-   if(!legacy){if(!b[0]||!b[1])fail("power availability");if(abs(Q(val(b[3]))-log(expected))>Q(2e-8))fail("power log");if(c.d<0&&!c.two&&!(actual<c.alpha))fail("negative directional power");}
+   if((legacy&&tag!="LROW")||id!=pi||pi>=pv.size()||b.size()!=(legacy?1:11)){fail("power row shape");continue;}auto c=pv[pi++];if(status!=0){fail("power status "+std::to_string(status)+" id "+std::to_string(id));continue;}Q expected=power(c.d,c.n,c.alpha,c.two,c.per);double actual=val(b[legacy?0:2]);double error=abs((Q(actual)-expected)/expected).convert_to<double>();maxpower=std::max(maxpower,error);if(!std::isfinite(actual)||error>2e-8){std::ostringstream s;s<<std::setprecision(17)<<"power "<<id<<" actual "<<actual<<" expected "<<expected<<" relative "<<error;fail(s.str());}
+   if(!legacy){if(!b[0]||!b[1])fail("power availability");if(!std::isfinite(val(b[3]))||abs(Q(val(b[3]))-log(expected))>Q(2e-8))fail("power log");if(c.d==0){if(b[4])fail("null power invents critical");}else{R df=c.per?R(2*c.n-2):R(c.n-1);boost::math::students_t_distribution<R> cd(df);R exact=quantile(complement(cd,c.two?R(c.alpha)/2:R(c.alpha)));if(!b[4]||!std::isfinite(val(b[5]))||abs(R(val(b[5]))-exact)>R(2e-8)*std::max(R(1),abs(exact)))fail("critical value");if(b[6]<=0||b[6]>4096||b[7]<=0||b[7]>2)fail("power evaluation counters");}if(c.d<0&&!c.two&&!(actual<c.alpha))fail("negative directional power");}
   }else if(tag=="SROW"){
    if(id!=si||si>=sv.size()||b.size()!=12){fail("size row shape");continue;}auto c=sv[si++];if(status!=c.status){fail("size status "+std::to_string(id)+" got "+std::to_string(status)+" expected "+std::to_string(c.status));continue;}
    if(b[10]<0||b[10]>c.budget)fail("size work");
@@ -96,7 +96,7 @@ int main(int argc,char**argv){
   }else if(tag=="QROW"){
    if(id!=qi||qi>=tv.size()||b.size()!=7){fail("quantile shape");continue;}auto c=tv[qi++];if(status!=0){fail("quantile status "+std::to_string(id)+" got "+std::to_string(status));continue;}
    boost::math::non_central_t_distribution<R>d(R(c.df),R(c.delta));R expected=c.upper?quantile(complement(d,R(c.p))):quantile(d,R(c.p));double actual=val(b[2]);R scale=abs(expected);if(scale<1)scale=1;double error=(abs(R(actual)-expected)/scale).convert_to<double>();maxquantile=std::max(maxquantile,error);
-   if(!b[0]||!b[1]||error>2e-8)fail("quantile value/witness");if(!(val(b[3])<=actual&&actual<=val(b[4])))fail("quantile bracket");if(std::abs(val(b[5])-std::log(c.p))>2e-11)fail("quantile target residual");if(b[6]<0||b[6]>4096)fail("quantile work");
+   if(!b[0]||!b[1]||!std::isfinite(actual)||error>2e-8)fail("quantile value/witness");R observed=c.upper?cdf(complement(d,R(actual))):cdf(d,R(actual));if(!std::isfinite(val(b[5]))||abs(R(val(b[5]))-log(observed))>R(2e-8))fail("actual quantile forward-tail witness");if(!(val(b[3])<=actual&&actual<=val(b[4])))fail("quantile bracket");if(std::abs(val(b[5])-std::log(c.p))>2e-11)fail("quantile target residual");if(b[6]<0||b[6]>4096)fail("quantile work");
   }else fail("unexpected output");
  }
  if(!done||pi!=pv.size()||(!legacy&&(si!=sv.size()||qi!=tv.size())))fail("incomplete");
