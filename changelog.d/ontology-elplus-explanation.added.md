@@ -1,0 +1,1 @@
+Added proof-carrying EL+ reasoning through `ontology::elplus_explain`. The closure records first-derivation witnesses for all eight completion rules and reconstructs ordered proof DAGs for subsumption and role-edge queries. Independent validation covers all twelve rule/seed types on Madaros and lean_single, while the legacy ontology engine remains unchanged.

@@ -1,0 +1,177 @@
+//@ run-pass
+//@ expect-stdout: ONTOLOGY_ELPLUS_EXPLANATION_OK
+// Proof-carrying EL+ closure on the SNOMED-flavoured TBox. The Boolean
+// answers and reconstructed derivations are checked independently in
+// scripts/ci/ontology_elplus_explanation_oracle.py.
+
+use ontology::elplus_explain::{elplus_seed, elplus_role_closure, elplus_fixpoint_traced, elplus_trace_new, elplus_explanation_new, elplus_explain_subsumption, elplus_explain_edge, elplus_subsumes_dense, elplus_edge_dense}
+
+fn has_rule(out: &ELPlusExplanation, rule: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < out.count {
+        if out.rule[i as usize] == rule { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn emit_steps(out: &ELPlusExplanation) with IO, Mut, Div, Panic {
+    var i: i64 = 0
+    while i < out.count {
+        print("STEP ")
+        print_int(out.kind[i as usize])
+        print(" ")
+        print_int(out.from[i as usize])
+        print(" ")
+        print_int(out.rule[i as usize])
+        print(" ")
+        print_int(out.witness[i as usize])
+        print("\n")
+        i = i + 1
+    }
+}
+
+fn valid_trace(out: &ELPlusExplanation, count: i64, kind: i64, from: i64, rule: i64) -> bool with Mut, Div, Panic {
+    if count <= 0 || out.count != count { return false }
+    if out.kind[(count - 1) as usize] != kind { return false }
+    if out.from[(count - 1) as usize] != from { return false }
+    if out.rule[(count - 1) as usize] != rule { return false }
+    has_rule(out, rule)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var ckind: [i64; 64] = [0; 64]
+    var carg1: [i64; 64] = [0; 64]
+    var carg2: [i64; 64] = [0; 64]
+    var i: i64 = 0
+    while i < 8 { carg1[i] = i; i = i + 1 }
+    ckind[8] = 1
+    ckind[9] = 2
+    carg1[9] = 2
+    carg2[9] = 0
+    ckind[10] = 3
+    carg1[10] = 1
+    carg2[10] = 9
+    ckind[11] = 3
+    carg1[11] = 2
+    carg2[11] = 3
+    ckind[12] = 3
+    carg1[12] = 1
+    carg2[12] = 2
+    ckind[13] = 3
+    carg1[13] = 0
+    carg2[13] = 9
+    ckind[14] = 3
+    carg1[14] = 0
+    carg2[14] = 3
+    ckind[15] = 3
+    carg1[15] = 0
+    carg2[15] = 2
+    ckind[16] = 2
+    carg1[16] = 1
+    carg2[16] = 0
+
+    var exid: [i64; 512] = [0; 512]
+    i = 0
+    while i < 512 { exid[i] = 0 - 1; i = i + 1 }
+    i = 0
+    while i <= 16 {
+        if ckind[i] == 3 { exid[carg1[i] * 64 + carg2[i]] = i }
+        i = i + 1
+    }
+
+    var pack: [i64; 704] = [0; 704]
+    i = 0
+    while i < 64 {
+        pack[i] = ckind[i]
+        pack[64 + i] = carg1[i]
+        pack[128 + i] = carg2[i]
+        i = i + 1
+    }
+    i = 0
+    while i < 512 { pack[192 + i] = exid[i]; i = i + 1 }
+
+    var rclos: [bool; 64] = [false; 64]
+    rclos[1 * 8 + 0] = true
+    elplus_role_closure(&!rclos, 3)
+    var chains: [i64; 24] = [0; 24]
+    chains[0] = 1
+    chains[8] = 2
+    chains[16] = 0
+    var dims: [i64; 4] = [0; 4]
+    dims[0] = 1
+    dims[1] = 17
+    dims[2] = 12
+    dims[3] = 3
+
+    var s: [bool; 4096] = [false; 4096]
+    elplus_seed(&!s, 17, 8)
+    s[4 * 64 + 0] = true
+    s[0 * 64 + 1] = true
+    s[2 * 64 + 3] = true
+    s[4 * 64 + 10] = true
+    s[2 * 64 + 11] = true
+    s[7 * 64 + 1] = true
+    s[7 * 64 + 5] = true
+    s[6 * 64 + 0] = true
+    var r: [bool; 32768] = [false; 32768]
+    var trace = elplus_trace_new()
+    let rounds = elplus_fixpoint_traced(&!s, &!r, &pack, &rclos, &chains, &dims, &!trace)
+    if rounds <= 0 { return 1 }
+
+    if !elplus_subsumes_dense(&s, 4, 1) { return 2 }
+    if !elplus_subsumes_dense(&s, 4, 13) { return 3 }
+    if !elplus_subsumes_dense(&s, 4, 14) { return 4 }
+    if !elplus_subsumes_dense(&s, 4, 16) { return 5 }
+    if !elplus_edge_dense(&r, 0, 4, 3) { return 6 }
+
+    var out = elplus_explanation_new()
+
+    println("TRACE_TRANSITIVE_BEGIN")
+    let n_trans = elplus_explain_subsumption(&s, &r, &pack, &trace, &!out, 4, 1)
+    if !valid_trace(&out, n_trans, 0, 4 * 64 + 1, 3) { return 10 }
+    emit_steps(&out)
+    println("TRACE_TRANSITIVE_END")
+
+    println("TRACE_ROLESUB_BEGIN")
+    let n_rolesub = elplus_explain_subsumption(&s, &r, &pack, &trace, &!out, 4, 13)
+    if !valid_trace(&out, n_rolesub, 0, 4 * 64 + 13, 11) { return 11 }
+    if !has_rule(&out, 9) { return 12 }
+    emit_steps(&out)
+    println("TRACE_ROLESUB_END")
+
+    println("TRACE_COMPOSE_BEGIN")
+    let n_comp = elplus_explain_subsumption(&s, &r, &pack, &trace, &!out, 4, 14)
+    if !valid_trace(&out, n_comp, 0, 4 * 64 + 14, 11) { return 13 }
+    if !has_rule(&out, 10) { return 14 }
+    emit_steps(&out)
+    println("TRACE_COMPOSE_END")
+
+    println("TRACE_CONJ_BEGIN")
+    let n_conj = elplus_explain_subsumption(&s, &r, &pack, &trace, &!out, 4, 16)
+    if !valid_trace(&out, n_conj, 0, 4 * 64 + 16, 6) { return 15 }
+    emit_steps(&out)
+    println("TRACE_CONJ_END")
+
+    println("TRACE_EDGE_BEGIN")
+    let n_edge = elplus_explain_edge(&s, &r, &pack, &trace, &!out, 0, 4, 3)
+    if !valid_trace(&out, n_edge, 1, (0 * 64 + 4) * 64 + 3, 10) { return 16 }
+    emit_steps(&out)
+    println("TRACE_EDGE_END")
+
+    println("TRACE_CONJ_ELIM_BEGIN")
+    let n_ce = elplus_explain_subsumption(&s, &r, &pack, &trace, &!out, 9, 0)
+    if !valid_trace(&out, n_ce, 0, 9 * 64 + 0, 5) { return 17 }
+    emit_steps(&out)
+    println("TRACE_CONJ_ELIM_END")
+
+    println("TRACE_TOP_BEGIN")
+    let n_top = elplus_explain_subsumption(&s, &r, &pack, &trace, &!out, 4, 8)
+    if !valid_trace(&out, n_top, 0, 4 * 64 + 8, 2) { return 18 }
+    emit_steps(&out)
+    println("TRACE_TOP_END")
+
+    if elplus_explain_subsumption(&s, &r, &pack, &trace, &!out, 3, 1) != 0 { return 19 }
+    println("ONTOLOGY_ELPLUS_EXPLANATION_OK")
+    return 0
+}

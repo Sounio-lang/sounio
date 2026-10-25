@@ -1,0 +1,809 @@
+//! stdlib/ontology/elplus_explain.sio
+//!
+//! Proof-carrying role-aware EL+ closure, isolated from the legacy engine.
+//!
+//! Role-aware EL+ boolean closure, packaged from the verified
+//! ontology-frontiers research line (round 8 demo
+//! examples/ontology_elplus_closure_demo.sio; round 9 real-data
+//! integration artifacts/ontology-frontiers/real-data/scale/).
+//!
+//! Model: a finite concept universe of interned EL+ concepts
+//! (atom | top | conjunction | existential restriction), described by a
+//! parallel-array concept table:
+//!
+//!   ckind[c]  0 atom, 1 top, 2 conjunction, 3 existential
+//!   carg1[c]  atom id (atom) | first conjunct (conj) | role (ex)
+//!   carg2[c]  second conjunct (conj) | filler base concept (ex)
+//!
+//! Relations, all flattened Boolean arrays (row-major):
+//!
+//!   S[c*64+d]           subsumption pairs over the universe
+//!   R[(r*64+c)*64+f]    role edges (r, C, f): C <= ex r.f, f base
+//!   rclos[r*8+s]        role-hierarchy closure (reflexive + transitive)
+//!   exid[r*64+f]        interned id of ex r.f, or -1 if not in universe
+//!
+//! This module contains the DENSE proof-carrying variant only. The legacy
+//! dense and sparse engines remain in `ontology::elplus`, so importing this
+//! module does not pull in the sparse workspace matrices or alter their code
+//! layout. `elplus_fixpoint_traced` iterates all 8 completion rules to a
+//! genuine fixpoint over capacities of 64 concepts, 8 roles, and 8 chains.
+//!
+//! Formal companions (Lean 4, verified):
+//!   - formal/OntologyELPlus.lean                 (EL+ syntax/semantics,
+//!     9-rule deductive system, der_sound, incoherentP_empty)
+//!   - formal/OntologyELPlusClosureComplete.lean  (crStep / closeSatF;
+//!     subBPlusC_iff / conflictBPlusC_iff: the boolean fixpoint coincides
+//!     with the deductive system over conceptUniv, both directions)
+//!
+//! The 8 completion rules mirrored here (crStep generators):
+//!   transitivity on S; conjElim; conjIntro; stoR (C <= ex r.D becomes
+//!   edge (r,C,D)); Rmono (edge (r,C,D) and D <= D' give (r,C,D'));
+//!   roleSub (edge (r,C,D) and r <=* s give (s,C,D)); roleComp (edges
+//!   (r1,C,D) and (r2,D,E) with chain r1 o r2 <= r3 give (r3,C,E));
+//!   RtoS (edge (r,C,D) gives C <= ex r.D).
+//!
+//! NOTE (compiler limitations, see
+//! artifacts/ontology-frontiers/compiler-repros/REPORT.md): arrays of
+//! structs and arrays without splat initialization segfault at runtime,
+//! and `where` refinement clauses do not parse, so everything is modelled
+//! with parallel primitive arrays with splat init and runtime checks.
+//!
+//! NOTE: use NAMED imports (`use ontology::elplus_explain::{...}`). The qualified
+//! form (`use ontology::elplus_explain; elplus_explain::f(...)`) miscompiles on the
+//! current Madaros imported-module native lane (see
+//! docs/compiler/KNOWN_LIMITATIONS.md).
+//!
+//! Repair integration: `elplus_derive_conflicts` derives the mapping-pair
+//! conflict relation from a closed dense EL+ matrix, and the O(1) accessors
+//! `elplus_subsumes_dense` / `elplus_edge_dense` expose both Boolean answers
+//! and their proof-carrying counterparts.
+
+// ── Dense variant capacities ─────────────────────────────────────────────
+// Maximum number of interned concepts (atoms + top + conjs + existentials).
+pub const ELPLUS_MAXC: i64 = 64
+// Maximum number of roles.
+pub const ELPLUS_MAXR: i64 = 8
+// Maximum number of composition chains r1 o r2 <= r3.
+pub const ELPLUS_MAXCH: i64 = 8
+
+/// Role-hierarchy closure: seed reflexivity, then transitive saturation
+/// over the stated cells of rclos.  Existing stated cells are kept.
+///
+/// # Parameters
+/// - `rclos`: flattened 8 x 8 role matrix (mutated in place).
+/// - `nr`: number of roles (0 <= nr <= 8).
+///
+/// # Complexity
+/// O(nr^3) per pass, at most nr passes.
+pub fn elplus_role_closure(rclos: &![bool; 64], nr: i64) with Mut, Div, Panic {
+    var r: i64 = 0
+    while r < nr {
+        rclos[r * ELPLUS_MAXR + r] = true
+        r = r + 1
+    }
+    var changed = true
+    var a: i64 = 0
+    var b: i64 = 0
+    var d: i64 = 0
+    while changed {
+        changed = false
+        a = 0
+        while a < nr {
+            b = 0
+            while b < nr {
+                if rclos[a * ELPLUS_MAXR + b] {
+                    d = 0
+                    while d < nr {
+                        if rclos[b * ELPLUS_MAXR + d] {
+                            if !rclos[a * ELPLUS_MAXR + d] {
+                                rclos[a * ELPLUS_MAXR + d] = true
+                                changed = true
+                            }
+                        }
+                        d = d + 1
+                    }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+    }
+}
+
+/// Initialise a subsumption matrix: every cell false, then reflexivity
+/// and the top axiom (c <= top for every concept c).
+///
+/// # Parameters
+/// - `s`: flattened 64 x 64 matrix (mutated in place).
+/// - `nc`: number of interned concepts (0 <= nc <= 64).
+/// - `top`: id of the top concept (0 <= top < nc).
+///
+/// # Complexity
+/// O(64^2)
+pub fn elplus_seed(s: &![bool; 4096], nc: i64, top: i64) with Mut, Div, Panic {
+    var a: i64 = 0
+    while a < ELPLUS_MAXC {
+        var b: i64 = 0
+        while b < ELPLUS_MAXC {
+            s[a * ELPLUS_MAXC + b] = false
+            b = b + 1
+        }
+        a = a + 1
+    }
+    var c: i64 = 0
+    while c < nc {
+        s[c * ELPLUS_MAXC + c] = true
+        s[c * ELPLUS_MAXC + top] = true
+        c = c + 1
+    }
+}
+
+/// The 8-rule EL+ completion step iterated to a genuine fixpoint
+/// (executable mirror of crStep / closeSatF).  S must be seeded (see
+/// `elplus_seed`) with the stated inclusions before the call; R is fully
+/// derived here (pass it splat-false).  Returns the number of rounds
+/// taken.  Terminates: the matrices are finite and cells only flip
+/// false -> true.
+///
+/// # Parameters
+/// - `s`: flattened 64 x 64 subsumption matrix (mutated in place).
+/// - `r`: flattened 8 x 64 x 64 role-edge cube (mutated in place);
+///   index (role*64 + source)*64 + filler.
+/// - `ckind`, `carg1`, `carg2`: concept table (see module header).
+/// - `exid`: r*64 + f -> interned id of ex r.f, or -1 if absent; rules
+///   that would create a non-interned existential are skipped (this is
+///   the `conceptUniv` restriction of the Lean development).
+/// - `rclos`: role-hierarchy closure (from `elplus_role_closure`).
+/// - `ch1`, `ch2`, `ch3`, `nchain`: composition chains
+///   ch1[k] o ch2[k] <= ch3[k] (0 <= nchain <= 8).
+/// - `nc`: number of interned concepts (0 <= nc <= 64).
+/// - `nb`: number of base concepts (fillers range over 0..nb-1).
+/// - `nr`: number of roles (0 <= nr <= 8).
+///
+/// # Complexity
+/// O(rounds * (nc^3 + nr*nc^2*nb + nr^2*nc*nb + nchain*nc*nb^2)); with
+/// the 64/8 capacities this is bounded and intended for small TBoxes.
+///
+/// # References
+/// - formal/OntologyELPlusClosureComplete.lean, theorems
+///   `closeSatF_trans` ... `closeSatF_RtoS` (fixpoint is closed under
+///   every rule) and `subBPlusC_iff` / `conflictBPlusC_iff` (the boolean
+///   closure IS the deductive relation over conceptUniv).
+/// Proof-carrying closure metadata. Each derived cell records the completion
+/// rule and witness used when it first became true. Because cells only flip
+/// false -> true, these parent links form a finite derivation DAG.
+///
+/// Rule ids: 0 stated, 1 reflexive, 2 top, 3 transitivity, 4/5 conjunction
+/// elimination, 6 conjunction introduction, 7 stoR, 8 Rmono, 9 roleSub,
+/// 10 roleComp, 11 RtoS. Role-hierarchy/composition leaves refer to the
+/// already-closed role relation supplied by the caller.
+pub struct ELPlusTrace {
+    pub srule: [i64; 4096],
+    pub swit: [i64; 4096],
+    pub rrule: [i64; 32768],
+    pub rwit: [i64; 32768],
+    pub chains: [i64; 24],
+}
+
+pub fn elplus_trace_new() -> ELPlusTrace {
+    ELPlusTrace {
+        srule: [0; 4096],
+        swit: [0; 4096],
+        rrule: [0; 32768],
+        rwit: [0; 32768],
+        chains: [0; 24],
+    }
+}
+
+/// A reconstructed derivation in topological order: premises precede the
+/// cells they justify. `kind=0` is subsumption (from=a*64+b); `kind=1` is
+/// a role edge (from=(role*64+source)*64+filler).
+pub const ELPLUS_EXPLAIN_MAX: i64 = 128
+
+pub struct ELPlusExplanation {
+    pub kind: [i64; 128],
+    pub from: [i64; 128],
+    pub rule: [i64; 128],
+    pub witness: [i64; 128],
+    pub count: i64,
+}
+
+pub fn elplus_explanation_new() -> ELPlusExplanation {
+    ELPlusExplanation {
+        kind: [0; 128],
+        from: [0; 128],
+        rule: [0; 128],
+        witness: [0; 128],
+        count: 0,
+    }
+}
+
+/// Proof-carrying counterpart of `elplus_fixpoint_packed`. The Boolean
+/// closure is identical; `trace` additionally receives first-derivation
+/// metadata for `elplus_explain_subsumption` and `elplus_explain_edge`.
+pub fn elplus_fixpoint_traced(
+    s: &![bool; 4096],
+    r: &![bool; 32768],
+    pack: &[i64; 704],
+    rclos: &[bool; 64],
+    chains: &[i64; 24],
+    dims: &[i64; 4],
+    trace: &!ELPlusTrace
+) -> i64 with Mut, Div, Panic {
+    var ckind: [i64; 64] = [0; 64]
+    var carg1: [i64; 64] = [0; 64]
+    var carg2: [i64; 64] = [0; 64]
+    var exid: [i64; 512] = [0; 512]
+    var ch1: [i64; 8] = [0; 8]
+    var ch2: [i64; 8] = [0; 8]
+    var ch3: [i64; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 64 {
+        ckind[i] = pack[i]
+        carg1[i] = pack[64 + i]
+        carg2[i] = pack[128 + i]
+        i = i + 1
+    }
+    i = 0
+    while i < 512 {
+        exid[i] = pack[192 + i]
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        ch1[i] = chains[i]
+        ch2[i] = chains[8 + i]
+        ch3[i] = chains[16 + i]
+        trace.chains[i] = chains[i]
+        trace.chains[8 + i] = chains[8 + i]
+        trace.chains[16 + i] = chains[16 + i]
+        i = i + 1
+    }
+    var nchain: i64 = dims[0]
+    var nc: i64 = dims[1]
+    var nb: i64 = dims[2]
+    var nr: i64 = dims[3]
+
+    // Seed proof leaves from the caller's stated/seeded matrix. The top
+    // concept is identified structurally (ckind=1), matching elplus_seed.
+    var top: i64 = 0 - 1
+    i = 0
+    while i < 64 {
+        if top < 0 && ckind[i] == 1 { top = i }
+        i = i + 1
+    }
+    i = 0
+    while i < 4096 {
+        trace.srule[i] = 0
+        trace.swit[i] = i
+        if s[i] {
+            let a0 = i / ELPLUS_MAXC
+            let b0 = i % ELPLUS_MAXC
+            if a0 == b0 {
+                trace.srule[i] = 1
+            } else if top >= 0 && b0 == top {
+                trace.srule[i] = 2
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < 32768 {
+        trace.rrule[i] = 0
+        trace.rwit[i] = i
+        i = i + 1
+    }
+
+    var changed = true
+    var rounds: i64 = 0
+    var a: i64 = 0
+    var k: i64 = 0
+    var d: i64 = 0
+    var c: i64 = 0
+    var rr: i64 = 0
+    var ss: i64 = 0
+    var f: i64 = 0
+    var d2: i64 = 0
+    var f2: i64 = 0
+    var x: i64 = 0
+    var idx: i64 = 0
+    var r1: i64 = 0
+    var r2: i64 = 0
+    var r3: i64 = 0
+    while changed {
+        changed = false
+        rounds = rounds + 1
+
+        // (T) transitivity on S
+        a = 0
+        while a < nc {
+            k = 0
+            while k < nc {
+                if s[a * ELPLUS_MAXC + k] {
+                    d = 0
+                    while d < nc {
+                        if s[k * ELPLUS_MAXC + d] && !s[a * ELPLUS_MAXC + d] {
+                            s[a * ELPLUS_MAXC + d] = true
+                            trace.srule[a * ELPLUS_MAXC + d] = 3
+                            trace.swit[a * ELPLUS_MAXC + d] = k
+                            changed = true
+                        }
+                        d = d + 1
+                    }
+                }
+                k = k + 1
+            }
+            a = a + 1
+        }
+
+        // (CE) conjunction elimination and (CI) introduction (kind 2)
+        a = 0
+        while a < nc {
+            d = 0
+            while d < nc {
+                if ckind[d] == 2 {
+                    if s[a * ELPLUS_MAXC + d] {
+                        if !s[a * ELPLUS_MAXC + carg1[d]] {
+                            s[a * ELPLUS_MAXC + carg1[d]] = true
+                            trace.srule[a * ELPLUS_MAXC + carg1[d]] = 4
+                            trace.swit[a * ELPLUS_MAXC + carg1[d]] = d
+                            changed = true
+                        }
+                        if !s[a * ELPLUS_MAXC + carg2[d]] {
+                            s[a * ELPLUS_MAXC + carg2[d]] = true
+                            trace.srule[a * ELPLUS_MAXC + carg2[d]] = 5
+                            trace.swit[a * ELPLUS_MAXC + carg2[d]] = d
+                            changed = true
+                        }
+                    }
+                    if s[a * ELPLUS_MAXC + carg1[d]] && s[a * ELPLUS_MAXC + carg2[d]] {
+                        if !s[a * ELPLUS_MAXC + d] {
+                            s[a * ELPLUS_MAXC + d] = true
+                            trace.srule[a * ELPLUS_MAXC + d] = 6
+                            trace.swit[a * ELPLUS_MAXC + d] = d
+                            changed = true
+                        }
+                    }
+                }
+                d = d + 1
+            }
+            a = a + 1
+        }
+
+        // (S2R) stoR: C <= ex r.D becomes edge (r, C, D)
+        a = 0
+        while a < nc {
+            d = 0
+            while d < nc {
+                if ckind[d] == 3 && s[a * ELPLUS_MAXC + d] {
+                    idx = (carg1[d] * ELPLUS_MAXC + a) * ELPLUS_MAXC + carg2[d]
+                    if !r[idx] {
+                        r[idx] = true
+                        trace.rrule[idx] = 7
+                        trace.rwit[idx] = d
+                        changed = true
+                    }
+                }
+                d = d + 1
+            }
+            a = a + 1
+        }
+
+        // (RM) Rmono: edge (r,C,D) and D <= D' give (r,C,D'), D' base
+        rr = 0
+        while rr < nr {
+            c = 0
+            while c < nc {
+                f = 0
+                while f < nb {
+                    if r[(rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] {
+                        d2 = 0
+                        while d2 < nb {
+                            if s[f * ELPLUS_MAXC + d2] && exid[rr * ELPLUS_MAXC + d2] >= 0 {
+                                idx = (rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + d2
+                                if !r[idx] {
+                                    r[idx] = true
+                                    trace.rrule[idx] = 8
+                                    trace.rwit[idx] = f * ELPLUS_MAXC + d2
+                                    changed = true
+                                }
+                            }
+                            d2 = d2 + 1
+                        }
+                    }
+                    f = f + 1
+                }
+                c = c + 1
+            }
+            rr = rr + 1
+        }
+
+        // (RS) roleSub: edge (r,C,D) and r <=* s (rclos) give (s,C,D)
+        rr = 0
+        while rr < nr {
+            ss = 0
+            while ss < nr {
+                if rclos[rr * ELPLUS_MAXR + ss] {
+                    c = 0
+                    while c < nc {
+                        f = 0
+                        while f < nb {
+                            if r[(rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] && exid[ss * ELPLUS_MAXC + f] >= 0 {
+                                idx = (ss * ELPLUS_MAXC + c) * ELPLUS_MAXC + f
+                                if !r[idx] {
+                                    r[idx] = true
+                                    trace.rrule[idx] = 9
+                                    trace.rwit[idx] = rr
+                                    changed = true
+                                }
+                            }
+                            f = f + 1
+                        }
+                        c = c + 1
+                    }
+                }
+                ss = ss + 1
+            }
+            rr = rr + 1
+        }
+
+        // (RC) roleComp: edges (r1,C,D) and (r2,D,E) with chain
+        // r1 o r2 <= r3 give (r3,C,E)
+        k = 0
+        while k < nchain {
+            r1 = ch1[k]
+            r2 = ch2[k]
+            r3 = ch3[k]
+            c = 0
+            while c < nc {
+                f = 0
+                while f < nb {
+                    if r[(r1 * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] {
+                        f2 = 0
+                        while f2 < nb {
+                            if r[(r2 * ELPLUS_MAXC + f) * ELPLUS_MAXC + f2] && exid[r3 * ELPLUS_MAXC + f2] >= 0 {
+                                idx = (r3 * ELPLUS_MAXC + c) * ELPLUS_MAXC + f2
+                                if !r[idx] {
+                                    r[idx] = true
+                                    trace.rrule[idx] = 10
+                                    trace.rwit[idx] = k * ELPLUS_MAXC + f
+                                    changed = true
+                                }
+                            }
+                            f2 = f2 + 1
+                        }
+                    }
+                    f = f + 1
+                }
+                c = c + 1
+            }
+            k = k + 1
+        }
+
+        // (R2S) RtoS: edge (r,C,D) gives C <= ex r.D
+        rr = 0
+        while rr < nr {
+            c = 0
+            while c < nc {
+                f = 0
+                while f < nb {
+                    if r[(rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] {
+                        x = exid[rr * ELPLUS_MAXC + f]
+                        if x >= 0 && !s[c * ELPLUS_MAXC + x] {
+                            s[c * ELPLUS_MAXC + x] = true
+                            trace.srule[c * ELPLUS_MAXC + x] = 11
+                            trace.swit[c * ELPLUS_MAXC + x] = (rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + f
+                            changed = true
+                        }
+                    }
+                    f = f + 1
+                }
+                c = c + 1
+            }
+            rr = rr + 1
+        }
+    }
+    return rounds
+}
+
+fn elplus_explain_emit(out: &!ELPlusExplanation, kind: i64, from: i64, rule: i64, witness: i64) -> i64 with Mut, Div, Panic {
+    if out.count >= ELPLUS_EXPLAIN_MAX { return 0 - 1 }
+    out.kind[out.count as usize] = kind
+    out.from[out.count as usize] = from
+    out.rule[out.count as usize] = rule
+    out.witness[out.count as usize] = witness
+    out.count = out.count + 1
+    return out.count
+}
+
+/// Recursive reconstruction over the first-derivation DAG. Eight parameters
+/// are deliberate: this module's native lane rejects imported 9+-parameter
+/// calls, so role chains live in ELPlusTrace rather than another parameter.
+fn elplus_explain_fact(
+    s: &[bool; 4096],
+    r: &[bool; 32768],
+    pack: &[i64; 704],
+    trace: &ELPlusTrace,
+    out: &!ELPlusExplanation,
+    kind: i64,
+    a: i64,
+    b: i64
+) -> i64 with Mut, Div, Panic {
+    if kind == 0 {
+        let cell = a * ELPLUS_MAXC + b
+        if !s[cell] { return 0 - 2 }
+        let rule = trace.srule[cell]
+        if rule <= 2 {
+            return elplus_explain_emit(out, 0, cell, rule, trace.swit[cell])
+        }
+        if rule == 3 {
+            let mid = trace.swit[cell]
+            var rc = elplus_explain_fact(s, r, pack, trace, out, 0, a, mid)
+            if rc < 0 { return rc }
+            rc = elplus_explain_fact(s, r, pack, trace, out, 0, mid, b)
+            if rc < 0 { return rc }
+            return elplus_explain_emit(out, 0, cell, rule, mid)
+        }
+        if rule == 4 || rule == 5 {
+            let d = trace.swit[cell]
+            let rc = elplus_explain_fact(s, r, pack, trace, out, 0, a, d)
+            if rc < 0 { return rc }
+            return elplus_explain_emit(out, 0, cell, rule, d)
+        }
+        if rule == 6 {
+            let d = trace.swit[cell]
+            var rc = elplus_explain_fact(s, r, pack, trace, out, 0, a, pack[64 + d])
+            if rc < 0 { return rc }
+            rc = elplus_explain_fact(s, r, pack, trace, out, 0, a, pack[128 + d])
+            if rc < 0 { return rc }
+            return elplus_explain_emit(out, 0, cell, rule, d)
+        }
+        if rule == 11 {
+            let edge = trace.swit[cell]
+            let rc = elplus_explain_fact(s, r, pack, trace, out, 1, edge / ELPLUS_MAXC, edge % ELPLUS_MAXC)
+            if rc < 0 { return rc }
+            return elplus_explain_emit(out, 0, cell, rule, edge)
+        }
+        return 0 - 3
+    }
+
+    let cell = a * ELPLUS_MAXC + b
+    if !r[cell] { return 0 - 2 }
+    let rule = trace.rrule[cell]
+    if rule <= 0 {
+        return elplus_explain_emit(out, 1, cell, rule, trace.rwit[cell])
+    }
+    if rule == 7 {
+        let d = trace.rwit[cell]
+        let rc = elplus_explain_fact(s, r, pack, trace, out, 0, a % ELPLUS_MAXC, d)
+        if rc < 0 { return rc }
+        return elplus_explain_emit(out, 1, cell, rule, d)
+    }
+    if rule == 8 {
+        let w = trace.rwit[cell]
+        let oldf = w / ELPLUS_MAXC
+        let newf = w % ELPLUS_MAXC
+        var rc = elplus_explain_fact(s, r, pack, trace, out, 1, a, oldf)
+        if rc < 0 { return rc }
+        rc = elplus_explain_fact(s, r, pack, trace, out, 0, oldf, newf)
+        if rc < 0 { return rc }
+        return elplus_explain_emit(out, 1, cell, rule, w)
+    }
+    if rule == 9 {
+        let oldrole = trace.rwit[cell]
+        let rc = elplus_explain_fact(s, r, pack, trace, out, 1, oldrole * ELPLUS_MAXC + (a % ELPLUS_MAXC), b)
+        if rc < 0 { return rc }
+        return elplus_explain_emit(out, 1, cell, rule, oldrole)
+    }
+    if rule == 10 {
+        let w = trace.rwit[cell]
+        let chain = w / ELPLUS_MAXC
+        let mid = w % ELPLUS_MAXC
+        let r1 = trace.chains[chain]
+        let r2 = trace.chains[8 + chain]
+        var rc = elplus_explain_fact(s, r, pack, trace, out, 1, r1 * ELPLUS_MAXC + (a % ELPLUS_MAXC), mid)
+        if rc < 0 { return rc }
+        rc = elplus_explain_fact(s, r, pack, trace, out, 1, r2 * ELPLUS_MAXC + mid, b)
+        if rc < 0 { return rc }
+        return elplus_explain_emit(out, 1, cell, rule, w)
+    }
+    return 0 - 3
+}
+
+/// Reconstruct why a closed subsumption cell is true. Returns the number of
+/// proof steps, 0 if the cell is false, or a negative error for malformed
+/// provenance / an explanation exceeding ELPLUS_EXPLAIN_MAX.
+pub fn elplus_explain_subsumption(
+    s: &[bool; 4096],
+    r: &[bool; 32768],
+    pack: &[i64; 704],
+    trace: &ELPlusTrace,
+    out: &!ELPlusExplanation,
+    a: i64,
+    b: i64
+) -> i64 with Mut, Div, Panic {
+    out.count = 0
+    if !s[a * ELPLUS_MAXC + b] { return 0 }
+    return elplus_explain_fact(s, r, pack, trace, out, 0, a, b)
+}
+
+/// Reconstruct why a closed role edge (role, source, filler) is true, with
+/// the same return convention as `elplus_explain_subsumption`.
+pub fn elplus_explain_edge(
+    s: &[bool; 4096],
+    r: &[bool; 32768],
+    pack: &[i64; 704],
+    trace: &ELPlusTrace,
+    out: &!ELPlusExplanation,
+    role: i64,
+    c: i64,
+    f: i64
+) -> i64 with Mut, Div, Panic {
+    out.count = 0
+    if !r[(role * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] { return 0 }
+    return elplus_explain_fact(s, r, pack, trace, out, 1, role * ELPLUS_MAXC + c, f)
+}
+
+/// Count the set cells of a subsumption matrix (restricted to the
+/// nc x nc used region).
+///
+/// # Complexity
+/// O(nc^2)
+pub fn elplus_s_count(s: &[bool; 4096], nc: i64) -> i64 with Div, Panic {
+    var n: i64 = 0
+    var a: i64 = 0
+    while a < nc {
+        var b: i64 = 0
+        while b < nc {
+            if s[a * ELPLUS_MAXC + b] {
+                n = n + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    return n
+}
+
+/// Count the set cells of the role-edge cube (restricted to the used
+/// nr x nc x nb region).
+///
+/// # Complexity
+/// O(nr*nc*nb)
+pub fn elplus_r_count(r: &[bool; 32768], nr: i64, nc: i64, nb: i64) -> i64 with Div, Panic {
+    var n: i64 = 0
+    var rr: i64 = 0
+    while rr < nr {
+        var c: i64 = 0
+        while c < nc {
+            var f: i64 = 0
+            while f < nb {
+                if r[(rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] {
+                    n = n + 1
+                }
+                f = f + 1
+            }
+            c = c + 1
+        }
+        rr = rr + 1
+    }
+    return n
+}
+
+/// Dense closure query: does concept `a` subsume to concept `b` in a
+/// CLOSED dense subsumption matrix (output of `elplus_fixpoint`)?
+/// Dense counterpart of `elplus_subsumes_sparse`; read-only accessor so
+/// adapters (e.g. ontology::biomedical::snomed) never reimplement the
+/// row-major indexing.
+///
+/// # Complexity
+/// O(1)
+pub fn elplus_subsumes_dense(s: &[bool; 4096], a: i64, b: i64) -> bool with Div, Panic {
+    return s[a * ELPLUS_MAXC + b]
+}
+
+/// Dense role-edge query: does concept `c` have a derived role edge
+/// (role, c, f) in the CLOSED dense role-edge cube (output of
+/// `elplus_fixpoint`)?  Dense counterpart of `elplus_edge_sparse`.
+///
+/// # Complexity
+/// O(1)
+pub fn elplus_edge_dense(r: &[bool; 32768], role: i64, c: i64, f: i64) -> bool with Div, Panic {
+    return r[(role * ELPLUS_MAXC + c) * ELPLUS_MAXC + f]
+}
+
+/// DERIVE conflict between two concepts from a closed subsumption matrix
+/// and an atomic disjointness matrix: conflict(a, b) iff there exist
+/// d1, d2 with s[a][d1], s[b][d2] and disj[d1][d2].
+///
+/// # References
+/// - formal/OntologyELPlusClosureComplete.lean, theorem
+///   `conflictBPlusC_iff`: this boolean oracle IS the deductive
+///   conflict relation.
+///
+/// # Complexity
+/// O(nc^2)
+pub fn elplus_conflict(s: &[bool; 4096], disj: &[bool; 4096], nc: i64, a: i64, b: i64) -> bool with Div, Panic {
+    var hit = false
+    var d1: i64 = 0
+    while d1 < nc {
+        if s[a * ELPLUS_MAXC + d1] {
+            var d2: i64 = 0
+            while d2 < nc {
+                if s[b * ELPLUS_MAXC + d2] && disj[d1 * ELPLUS_MAXC + d2] {
+                    hit = true
+                }
+                d2 = d2 + 1
+            }
+        }
+        d1 = d1 + 1
+    }
+    return hit
+}
+
+// ── Repair-integration exports ─────────────────────────────────────────
+// Mapping-pair matrices use the same 256 stride as
+// ontology::closure::derive_conflicts, so the repair module
+// (ontology::repair) plugs into the EL+-derived oracle unchanged.
+
+// Maximum number of candidate mappings for conflict derivation.
+const ELPLUS_MAXM: i64 = 256
+
+/// DERIVE the conflict relation between candidate mappings from a CLOSED
+/// EL+ subsumption matrix (output of `elplus_fixpoint`) and a
+/// disjointness matrix over the interned concept universe — the
+/// role-aware counterpart of ontology::closure::derive_conflicts.
+///
+/// Mapping k asserts entity `ent[k]` under concept `cls[k]`.  Mappings
+/// a, b conflict iff they assert the SAME entity and
+/// `elplus_conflict(s, disj, nc, cls[a], cls[b])`, i.e. their asserted
+/// concepts reach a disjoint pair through the EL+ closure (roles
+/// included: existential targets produced by stoR/RtoS/Rmono/roleSub/
+/// roleComp participate via the interned concept rows of `s`).
+///
+/// The result is symmetric: `conf_pair[a * 256 + b]` and
+/// `conf_pair[b * 256 + a]` are both set (diagonal excluded).
+///
+/// # Parameters
+/// - `conf_pair`: flattened m x m output matrix (fully overwritten).
+/// - `m`: number of mappings (0 <= m <= 256).
+/// - `ent`: entity id asserted by each mapping (index < m used).
+/// - `cls`: concept id under which each mapping asserts its entity.
+/// - `s`: closed EL+ subsumption matrix (from `elplus_fixpoint`).
+/// - `disj`: disjointness matrix over the interned universe (symmetric).
+/// - `nc`: number of interned concepts (0 <= nc <= 64).
+///
+/// # Complexity
+/// O(m^2 * nc^2)
+///
+/// # References
+/// - formal/OntologyELPlusClosureComplete.lean, theorem
+///   `conflictBPlusC_iff`: the boolean conflict oracle IS the deductive
+///   conflict relation over conceptUniv.
+pub fn elplus_derive_conflicts(
+    conf_pair: &![bool; 65536],
+    m: i64,
+    ent: &[i64; 256],
+    cls: &[i64; 256],
+    s: &[bool; 4096],
+    disj: &[bool; 4096],
+    nc: i64
+) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < m {
+        var j: i64 = 0
+        while j < m {
+            conf_pair[i * ELPLUS_MAXM + j] = false
+            if i != j {
+                if ent[i] == ent[j] {
+                    if elplus_conflict(s, disj, nc, cls[i], cls[j]) {
+                        conf_pair[i * ELPLUS_MAXM + j] = true
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
