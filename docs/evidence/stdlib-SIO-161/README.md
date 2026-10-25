@@ -110,10 +110,13 @@ rounding, uncertain control flow or a complete uncertainty/provenance feature.
 ## Joint execution state
 
 The final source freeze, joint Slurm receipt and fresh full E2E results are
-pending. The sealed REVIEW03 controller has SHA256
-e1ae46b4456092ea92de3955caf44277f9bdb5b4ad6889d05f454ef5f881965e.
-Its17 synthetic controls and the6 actual syscall controls passed; obsolete
-REVIEW01/02 remain preserved and will not execute. The controller will retain source/head/catalogs, phase statuses,
+pending. The sealed REVIEW04 controller has SHA256
+58a09ea215d11de7a2c0158f8d5dcd62124673f662b7687ee55037959bfd3b52.
+Its17 synthetic controls pass; its syscall observer is unchanged from the6
+actual controls in17575. The first REVIEW03 freeze refused the Git default
+output buffer before staging; REVIEW04 explicitly bounds that metadata buffer
+at64MiB and read all24468 tracked paths/1303399 bytes with a complete terminator.
+The failed attempt and obsolete controllers remain preserved and will not execute. The controller will retain source/head/catalogs, phase statuses,
 runtime/toolchain and artifact hashes, logs and a terminal workspace comparison.
 It runs in a durable host tmux controller with one recorded submission attempt,
 one CPU,4GiB and a75-minute hard limit; no quota change, historical deletion,
