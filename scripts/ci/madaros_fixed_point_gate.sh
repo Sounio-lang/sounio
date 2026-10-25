@@ -292,6 +292,17 @@ else
     else
       reached run
 
+      # gen2 == gen3 needs gen1 and gen2 to lower the same source the same way.
+      # Diagnostic only (the rung verdicts are unchanged): it names, minutes
+      # after gen2 exists, a construct lean_single and Madaros compile
+      # differently, which gen3 would otherwise show as an unexplained byte
+      # difference two hours later (#2966).
+      if bash "$ROOT_DIR/scripts/ci/madaros_gen1_gen2_ir_parity_gate.sh" "$MADAROS" "$GEN2" >"$WORK/ir_parity.log" 2>&1; then
+        echo "           ir_parity: $(tail -1 "$WORK/ir_parity.log")"
+      else
+        echo "           ir_parity: $(tail -1 "$WORK/ir_parity.log" | cut -c1-400)"
+      fi
+
       # ── rung: gen3 ──────────────────────────────────────────────────────────
       echo "[rung gen3] gen2 compiles $SRC"
       # The symbol map names the function at a gen3 crash (gen3 --version), the

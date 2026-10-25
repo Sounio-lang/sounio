@@ -168,6 +168,44 @@ fn empty_lower_fo_bind_table() -> LowerFoBindTable {
     }
 }
 
+// An element-wise copy of the FO bind table in fresh storage (#2966). The
+// inline-variance paths save the table, let the callee body rebind rows keyed
+// by name, and put the saved table back. They saved it as `let s = *lo.fo_bind`,
+// but on Madaros that copy shares the array fields with the original (the
+// `let v = *p` alias), so the body's row writes showed through the "saved" copy
+// and the restore restored nothing. lean_single copies, so gen1 restored and
+// gen2 did not: a caller's local kept a callee parameter's sensitivity (same
+// name, `y`), and gen2 emitted different variance code from gen1. The callee
+// body now runs on this copy and the original Box is put back unchanged.
+fn lower_fo_bind_table_clone(src: &LowerFoBindTable) -> Box<LowerFoBindTable> with Mut, Panic, Div, Alloc {
+    var t = empty_lower_fo_bind_table()
+    var i: i64 = 0
+    while i < 128 {
+        t.names[i as usize] = (*src).names[i as usize]
+        t.resid[i as usize] = (*src).resid[i as usize]
+        t.depth[i as usize] = (*src).depth[i as usize]
+        i = i + 1
+    }
+    var k: i64 = 0
+    while k < 4096 {
+        t.sens[k as usize] = (*src).sens[k as usize]
+        k = k + 1
+    }
+    Box::new(t)
+}
+
+// `let s = (*lo.big).so_bind_hess` shares the array on Madaros for the same
+// reason; this is a copy in fresh storage.
+fn lower_hess_rows_copy(src: &[i64; 576]) -> [i64; 576] with Mut, Panic, Div {
+    var out: [i64; 576] = [-1; 576]
+    var i: i64 = 0
+    while i < 576 {
+        out[i as usize] = (*src)[i as usize]
+        i = i + 1
+    }
+    out
+}
+
 // #1706 (KL-11): a pure f64 helper the variance lowering may re-lower inline at
 // a call site, so first-order sensitivities cross the call through the callee's
 // actual arithmetic instead of the narrow transfer-kind table. One node per
@@ -20361,9 +20399,10 @@ impl Lowerer {
                 }
             }
         }
-        let saved_bind = *lo.fo_bind
+        let saved_bind_box = lo.fo_bind
+        lo.fo_bind = lower_fo_bind_table_clone(&(*saved_bind_box))
         let saved_bind_count = lo.fo_bind_count
-        let saved_hess_rows = (*lo.big).so_bind_hess
+        let saved_hess_rows = lower_hess_rows_copy(&(*lo.big).so_bind_hess)
         let saved_locals = (*lo.locals).count
         lo.scope_depth = lo.scope_depth + 1
         FO_INLINE_DEPTH = FO_INLINE_DEPTH + 1
@@ -20416,7 +20455,7 @@ impl Lowerer {
         FO_INLINE_DEPTH = FO_INLINE_DEPTH - 1
         lo.scope_depth = lo.scope_depth - 1
         (*lo.locals).count = saved_locals
-        lo.fo_bind = Box::new(saved_bind)
+        lo.fo_bind = saved_bind_box
         lo.fo_bind_count = saved_bind_count
         var bigr = lo.big
         (*bigr).so_bind_hess = saved_hess_rows
@@ -21668,9 +21707,10 @@ impl Lowerer {
             FO_STEP_SENS[i as usize] = sens[i as usize]
             i = i + 1
         }
-        let saved_bind = *lo.fo_bind
+        let saved_bind_box = lo.fo_bind
+        lo.fo_bind = lower_fo_bind_table_clone(&(*saved_bind_box))
         let saved_bind_count = lo.fo_bind_count
-        let saved_hess_rows = (*lo.big).so_bind_hess
+        let saved_hess_rows = lower_hess_rows_copy(&(*lo.big).so_bind_hess)
         let saved_locals = (*lo.locals).count
         let saved_carry = FO_STEP_CARRY
         lo.scope_depth = lo.scope_depth + 1
@@ -21837,7 +21877,7 @@ impl Lowerer {
         lo = lo.emit(ir_label(l_end))
         lo.scope_depth = lo.scope_depth - 1
         (*lo.locals).count = saved_locals
-        lo.fo_bind = Box::new(saved_bind)
+        lo.fo_bind = saved_bind_box
         lo.fo_bind_count = saved_bind_count
         var bigr = lo.big
         (*bigr).so_bind_hess = saved_hess_rows
@@ -22215,9 +22255,10 @@ impl Lowerer {
         }
         // Bind the parameters in a fresh scope; the FO bind rows are keyed by
         // name only, so they are saved and restored around the body.
-        let saved_bind = *lo.fo_bind
+        let saved_bind_box = lo.fo_bind
+        lo.fo_bind = lower_fo_bind_table_clone(&(*saved_bind_box))
         let saved_bind_count = lo.fo_bind_count
-        let saved_hess_rows = (*lo.big).so_bind_hess
+        let saved_hess_rows = lower_hess_rows_copy(&(*lo.big).so_bind_hess)
         let saved_locals = (*lo.locals).count
         lo.scope_depth = lo.scope_depth + 1
         FO_INLINE_STACK[FO_INLINE_DEPTH as usize] = id
@@ -22447,7 +22488,7 @@ impl Lowerer {
         FO_INLINE_DEPTH = FO_INLINE_DEPTH - 1
         lo.scope_depth = lo.scope_depth - 1
         (*lo.locals).count = saved_locals
-        lo.fo_bind = Box::new(saved_bind)
+        lo.fo_bind = saved_bind_box
         lo.fo_bind_count = saved_bind_count
         var bigr = lo.big
         (*bigr).so_bind_hess = saved_hess_rows
