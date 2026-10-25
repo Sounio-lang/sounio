@@ -248,6 +248,11 @@ rc=0
 timeout 1200 bash scripts/stdlib/survival_checked_gate.sh "$out/survival_checked" > "$out/survival_checked.focused.stdout" 2> "$out/survival_checked.focused.stderr" || rc=$?
 record focused-gate survival_checked "$rc"
 
+# Checked FEM / Poisson manufactured solutions, legacy imports and work controls.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" bash scripts/stdlib/fem_poisson_gate.sh "$out/fem-poisson" > "$out/fem-poisson.gate.stdout" 2> "$out/fem-poisson.gate.stderr" || rc=$?
+record focused-gate fem-poisson "$rc"
+
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"

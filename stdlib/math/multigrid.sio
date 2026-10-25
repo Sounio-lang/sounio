@@ -1,3 +1,5 @@
+use math::pure::{sqrt,is_finite}
+use linalg::least_squares_scale::{LeastSquaresNumber,least_squares_scaled_product_into}
 // stdlib/math/multigrid.sio — Geometric multigrid solvers
 //
 // Pure Sounio implementations:
@@ -18,15 +20,12 @@
 // Helpers (prefixed mg_ to avoid collisions)
 // =============================================================================
 
-fn mg_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+pub fn mg_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 fn mg_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
 
 fn mg_sqrt(x: f64) -> f64 with Panic, Mut, Div {
-    if x <= 0.0 { return 0.0 }
-    var y = x
-    var i = 0
-    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
-    y
+    assert(is_finite(x) && x>=0.0)
+    sqrt(x)
 }
 
 // =============================================================================
@@ -40,17 +39,17 @@ fn mg_sqrt(x: f64) -> f64 with Panic, Mut, Div {
 //   max_cycles: maximum outer iterations
 //   tol:        convergence tolerance (L2 residual norm)
 //   omega:      relaxation weight for Jacobi (typically 2/3)
-struct MGConfig { n_levels: i32, nu1: i32, nu2: i32, max_cycles: i32, tol: f64, omega: f64 }
+pub struct MGConfig { pub n_levels: i32, pub nu1: i32, pub nu2: i32, pub max_cycles: i32, pub tol: f64, pub omega: f64 }
 
 // Result of a multigrid solve.
 //   u:             solution values on the finest grid
 //   iterations:    number of cycles performed
 //   residual_norm: final L2 residual norm
 //   converged:     whether tol was reached
-struct MGResult { u: [f64; 4096], iterations: i32, residual_norm: f64, converged: bool }
+pub struct MGResult { pub u: [f64; 4096], pub iterations: i32, pub residual_norm: f64, pub converged: bool }
 
 // A single multigrid grid level (used internally for scratch storage).
-struct MGGrid { u: [f64; 4096], f: [f64; 4096], r: [f64; 4096], n: i32 }
+pub struct MGGrid { pub u: [f64; 4096], pub f: [f64; 4096], pub r: [f64; 4096], pub n: i32 }
 
 // =============================================================================
 // Utility: default configuration
@@ -58,7 +57,9 @@ struct MGGrid { u: [f64; 4096], f: [f64; 4096], r: [f64; 4096], n: i32 }
 
 // Populate config with sensible defaults for a given number of levels.
 // nu1=2 pre-smooth, nu2=2 post-smooth, max_cycles=100, tol=1e-10, omega=2/3.
-fn mg_default_config(n_levels: i32, config: &!MGConfig) with Panic, Mut {
+pub fn mg_default_config(n_levels: i32, config: &!MGConfig) with Panic, Mut {
+ assert(n_levels>=1 && n_levels<=12)
+
     config.n_levels = n_levels
     config.nu1 = 2
     config.nu2 = 2
@@ -76,7 +77,9 @@ fn mg_default_config(n_levels: i32, config: &!MGConfig) with Panic, Mut {
 // Coarse grid has n_coarse = n_fine/2 intervals (n_coarse+1 points).
 // Interior: coarse[i] = 0.25*fine[2i-1] + 0.5*fine[2i] + 0.25*fine[2i+1]
 // Boundary: coarse[0] = fine[0], coarse[n_c] = fine[n_f]
-fn mg_restrict_1d(fine: &[f64; 4096], n_fine: i32, coarse: &![f64; 4096]) with Panic, Div, Mut {
+pub fn mg_restrict_1d(fine: &[f64; 4096], n_fine: i32, coarse: &![f64; 4096]) with Panic, Div, Mut {
+ assert(n_fine>=2 && n_fine<=4094 && n_fine%2==0)
+
     let n_coarse = n_fine / 2
 
     // Boundary points
@@ -97,7 +100,9 @@ fn mg_restrict_1d(fine: &[f64; 4096], n_fine: i32, coarse: &![f64; 4096]) with P
 // Fine grid has n_fine = 2*n_coarse intervals.
 // Coincident points: fine[2i] = coarse[i]
 // Midpoints:         fine[2i+1] = 0.5*(coarse[i] + coarse[i+1])
-fn mg_prolongate_1d(coarse: &[f64; 4096], n_coarse: i32, fine: &![f64; 4096]) with Div, Panic, Mut {
+pub fn mg_prolongate_1d(coarse: &[f64; 4096], n_coarse: i32, fine: &![f64; 4096]) with Div, Panic, Mut {
+ assert(n_coarse>=1 && n_coarse<=2047)
+
     // Coincident points
     var i = 0
     while i <= n_coarse {
@@ -121,8 +126,10 @@ fn mg_prolongate_1d(coarse: &[f64; 4096], n_coarse: i32, fine: &![f64; 4096]) wi
 // Performs nu sweeps. h = 1/n is the mesh spacing. omega is the damping
 // parameter (2/3 for optimal high-frequency damping).
 // Update: u_new[i] = omega * (u[i-1] + u[i+1] + h^2*f[i]) / 2  +  (1-omega)*u[i]
-fn mg_smooth_jacobi_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
+pub fn mg_smooth_jacobi_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
                        h: f64, omega: f64, nu: i32) with Panic, Mut, Div {
+ assert(n>=2 && n<=4095 && is_finite(h) && h>0.0 && is_finite(h*h) && h*h>0.0 && is_finite(omega) && omega>0.0 && omega<=1.0 && nu>=0 && nu<=1000000)
+
     let h2 = h * h
     var sweep = 0
     while sweep < nu {
@@ -149,8 +156,10 @@ fn mg_smooth_jacobi_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
 // Red = odd indices, black = even indices.
 // Update: u[i] = (u[i-1] + u[i+1] + h^2*f[i]) / 2
 // Performs nu full red-black sweeps.
-fn mg_smooth_gs_rb_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
+pub fn mg_smooth_gs_rb_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
                       h: f64, nu: i32) with Panic, Mut, Div {
+ assert(n>=2 && n<=4095 && is_finite(h) && h>0.0 && is_finite(h*h) && h*h>0.0 && nu>=0 && nu<=1000000)
+
     let h2 = h * h
     var sweep = 0
     while sweep < nu {
@@ -185,8 +194,10 @@ fn mg_smooth_gs_rb_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
 // Compute residual for 1D Poisson: r[i] = f[i] - (-u[i-1] + 2*u[i] - u[i+1])/h^2
 // for interior points. r[0] = r[n] = 0 (boundary residual is zero for
 // homogeneous Dirichlet BCs).
-fn mg_residual_1d(u: &[f64; 4096], f: &[f64; 4096], n: i32,
+pub fn mg_residual_1d(u: &[f64; 4096], f: &[f64; 4096], n: i32,
                   h: f64, r: &![f64; 4096]) with Panic, Mut, Div {
+ assert(n>=2 && n<=4095 && is_finite(h) && h>0.0 && is_finite(h*h) && h*h>0.0)
+
     let h2 = h * h
     r[0] = 0.0
     r[n] = 0.0
@@ -201,15 +212,11 @@ fn mg_residual_1d(u: &[f64; 4096], f: &[f64; 4096], n: i32,
 
 // L2 norm of the residual on a 1D grid with n intervals:
 // ||r||_2 = sqrt(h * sum_{i=1}^{n-1} r[i]^2)
-fn mg_residual_norm_1d(r: &[f64; 4096], n: i32) -> f64 with Panic, Mut, Div {
-    let h = 1.0 / (n as f64)
-    var sum = 0.0
-    var i = 1
-    while i < n {
-        sum = sum + r[i] * r[i]
-        i = i + 1
-    }
-    mg_sqrt(h * sum)
+pub fn mg_residual_norm_1d(r: &[f64; 4096], n: i32) -> f64 with Panic, Mut, Div {
+ assert(n>=2 && n<=4095)
+ var scale:f64=0.0;var sum:f64=1.0;var i:i32=1
+ while i<n {let x=mg_abs(r[i]);assert(is_finite(x));if x>0.0 {if x>scale {let q=scale/x;sum=1.0+sum*q*q;scale=x}else{let q=x/scale;sum=sum+q*q}};i=i+1}
+ let value=scale*sqrt(sum/(n as f64));assert(is_finite(value) && (scale==0.0 || value>0.0));value
 }
 
 // =============================================================================
@@ -221,8 +228,10 @@ fn mg_residual_norm_1d(r: &[f64; 4096], n: i32) -> f64 with Panic, Mut, Div {
 //   -u[i-1] + 2*u[i] - u[i+1] = h^2 * f[i],  i = 1..n-1
 // with u[0] = u[n] = 0 (homogeneous Dirichlet).
 // Tridiagonal: a[i] = -1, b[i] = 2, c[i] = -1, d[i] = h^2*f[i].
-fn mg_coarse_solve_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
+pub fn mg_coarse_solve_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
                       h: f64) with Panic, Mut, Div {
+ assert(n>=2 && n<=4095 && is_finite(h) && h>0.0 && is_finite(h*h) && h*h>0.0)
+
     let h2 = h * h
     let m = n - 1  // number of interior unknowns
 
@@ -279,8 +288,10 @@ fn mg_coarse_solve_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
 //   4. If at coarsest level, direct solve; otherwise recurse
 //   5. Prolongate coarse correction and add to u
 //   6. Post-smooth nu2 sweeps of red-black GS
-fn mg_vcycle_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
+pub fn mg_vcycle_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
                 h: f64, config: &MGConfig, level: i32) with Panic, Mut, Div {
+ assert(n>=2 && n<=4095 && n%2==0 && config.n_levels>=1 && config.n_levels<=12 && level>=0 && level<=12 && config.nu1>=0 && config.nu1<=100 && config.nu2>=0 && config.nu2<=100)
+
     // Base case: coarsest level or grid too small — direct solve
     if level >= config.n_levels - 1 {
         mg_coarse_solve_1d(u, f, n, h)
@@ -384,9 +395,11 @@ fn mg_wcycle_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
 // n is the number of intervals (must be a power of 2).
 // Iterates V-cycles until the residual norm drops below config.tol
 // or max_cycles is reached.
-fn mg_solve_poisson_1d(f_rhs: fn(f64) -> f64 with Mut, Div, Panic,
+pub fn mg_solve_poisson_1d(f_rhs: fn(f64) -> f64 with Mut, Div, Panic,
                        n: i32, config: &MGConfig,
                        result: &!MGResult) with Mut, Div, Panic {
+ assert(n>=2 && n<=2048 && config.max_cycles>=0 && config.max_cycles<=1000000 && is_finite(config.tol) && config.tol>0.0);var size=n;while size>2 {assert(size%2==0);size=size/2}
+
     let h = 1.0 / (n as f64)
 
     // Initialize solution to zero
@@ -438,7 +451,7 @@ fn mg_solve_poisson_1d(f_rhs: fn(f64) -> f64 with Mut, Div, Panic,
 
 // Convert 2D grid index (i, j) to flat array index.
 // Grid has (nx+1) columns, so point (i, j) is at i*(nx+1) + j.
-fn mg_idx2d(i: i32, j: i32, nx: i32) -> i32 {
+pub fn mg_idx2d(i: i32, j: i32, nx: i32) -> i32 {
     i * (nx + 1) + j
 }
 
@@ -453,8 +466,10 @@ fn mg_idx2d(i: i32, j: i32, nx: i32) -> i32 {
 //   corners (1/16): fine[2i-1,2j-1], fine[2i-1,2j+1], fine[2i+1,2j-1], fine[2i+1,2j+1]
 //   edges   (1/8):  fine[2i,2j-1], fine[2i,2j+1], fine[2i-1,2j], fine[2i+1,2j]
 //   center  (1/4):  fine[2i,2j]
-fn mg_restrict_2d(fine: &[f64; 4096], nx_f: i32, ny_f: i32,
+pub fn mg_restrict_2d(fine: &[f64; 4096], nx_f: i32, ny_f: i32,
                   coarse: &![f64; 4096]) with Panic, Div, Mut {
+ assert(nx_f>=2 && nx_f<=62 && ny_f>=2 && ny_f<=62 && nx_f%2==0 && ny_f%2==0 && (nx_f+1)*(ny_f+1)<=4096)
+
     let nx_c = nx_f / 2
     let ny_c = ny_f / 2
 
@@ -563,9 +578,11 @@ fn mg_prolongate_2d(coarse: &[f64; 4096], nx_c: i32, ny_c: i32,
 // Jacobi update:
 //   u_new = omega * [(u_L+u_R)/hx^2 + (u_D+u_U)/hy^2 + f] / (2/hx^2 + 2/hy^2)
 //         + (1 - omega) * u_old
-fn mg_smooth_jacobi_2d(u: &![f64; 4096], f: &[f64; 4096],
+pub fn mg_smooth_jacobi_2d(u: &![f64; 4096], f: &[f64; 4096],
                        nx: i32, ny: i32, hx: f64, hy: f64,
                        omega: f64, nu: i32) with Panic, Mut, Div {
+ assert(nx>=2 && nx<=62 && ny>=2 && ny<=62 && (nx+1)*(ny+1)<=4096 && is_finite(hx) && hx>0.0 && is_finite(hy) && hy>0.0 && is_finite(hx*hx) && hx*hx>0.0 && is_finite(hy*hy) && hy*hy>0.0 && is_finite(omega) && omega>0.0 && omega<=1.0 && nu>=0 && nu<=1000000)
+
     let hx2 = hx * hx
     let hy2 = hy * hy
     let diag = 2.0 / hx2 + 2.0 / hy2
@@ -671,9 +688,11 @@ fn mg_smooth_gs_rb_2d(u: &![f64; 4096], f: &[f64; 4096],
 // r[i,j] = f[i,j] + (u[i-1,j] - 2*u[i,j] + u[i+1,j])/hx^2
 //                   + (u[i,j-1] - 2*u[i,j] + u[i,j+1])/hy^2
 // Boundary residual is zero.
-fn mg_residual_2d(u: &[f64; 4096], f: &[f64; 4096],
+pub fn mg_residual_2d(u: &[f64; 4096], f: &[f64; 4096],
                   nx: i32, ny: i32, hx: f64, hy: f64,
                   r: &![f64; 4096]) with Panic, Mut, Div {
+ assert(nx>=2 && nx<=62 && ny>=2 && ny<=62 && (nx+1)*(ny+1)<=4096 && is_finite(hx) && hx>0.0 && is_finite(hy) && hy>0.0 && is_finite(hx*hx) && hx*hx>0.0 && is_finite(hy*hy) && hy*hy>0.0)
+
     let hx2 = hx * hx
     let hy2 = hy * hy
 
@@ -710,20 +729,14 @@ fn mg_residual_2d(u: &[f64; 4096], f: &[f64; 4096],
 
 // L2 norm of the 2D residual:
 // ||r||_2 = sqrt(hx*hy * sum_{interior} r[i,j]^2)
-fn mg_residual_norm_2d(r: &[f64; 4096], nx: i32, ny: i32,
+pub fn mg_residual_norm_2d(r: &[f64; 4096], nx: i32, ny: i32,
                        hx: f64, hy: f64) -> f64 with Panic, Mut, Div {
-    var sum = 0.0
-    var i = 1
-    while i < ny {
-        var j = 1
-        while j < nx {
-            let val = r[mg_idx2d(i, j, nx)]
-            sum = sum + val * val
-            j = j + 1
-        }
-        i = i + 1
-    }
-    mg_sqrt(hx * hy * sum)
+ assert(nx>=2 && nx<=62 && ny>=2 && ny<=62 && (nx+1)*(ny+1)<=4096 && is_finite(hx) && hx>0.0 && is_finite(hy) && hy>0.0)
+ var scale:f64=0.0;var sum:f64=1.0;var y:i32=1
+ while y<ny {var x:i32=1;while x<nx {let v=mg_abs(r[y*(nx+1)+x]);assert(is_finite(v));if v>0.0 {if v>scale {let q=scale/v;sum=1.0+sum*q*q;scale=v}else{let q=v/scale;sum=sum+q*q}};x=x+1};y=y+1}
+ var out=LeastSquaresNumber{status:4,value:0.0}
+ let code=least_squares_scaled_product_into(scale,sqrt(sum),sqrt(hx),1.0/sqrt(hy),1.0,1.0,&!out)
+ assert(code==0 && (scale==0.0 || out.value>0.0));out.value
 }
 
 // =============================================================================
@@ -925,7 +938,9 @@ fn mg_solve_poisson_2d(f_rhs: fn(f64, f64) -> f64 with Mut, Div, Panic,
 // Given residuals[0..n-1], returns the geometric mean of
 //   residuals[k+1] / residuals[k] for k = 0..n-2.
 // A value near 0.1 indicates rapid convergence; near 1.0 indicates stalling.
-fn mg_convergence_factor(residuals: &[f64; 256], n: i32) -> f64 with Panic, Mut, Div {
+pub fn mg_convergence_factor(residuals: &[f64; 256], n: i32) -> f64 with Panic, Mut, Div {
+ assert(n>=2 && n<=256)
+
     if n < 2 { return 0.0 }
 
     // Compute product of ratios, then take (n-1)-th root.
