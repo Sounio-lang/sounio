@@ -114,6 +114,13 @@ before consuming them. Every valid row contains separate point, curvature,
 prior-eligibility, refit, covariance, contrast and tail statuses and independent
 p/log-p availability. Numeric payload0 when unavailable is not an estimate.
 
+After a successful report call, point log-alpha is available exactly when
+`report.status==0 && report.point_available && report.point_alpha>0`. A selected
+Poisson point has alpha0 and unavailable log-alpha payload0. A positive alpha1
+has a valid log-alpha0; never infer availability from `point_log_alpha!=0`.
+An invalid report call preserves old flags and payloads, so the status check
+is required even for this derived condition.
+
 For scientific diagnostic consumers, `count_pipeline_count` reads the original
 validated CSR as i64, and `count_pipeline_sample_id_length/byte` preserve original
 count-column byte labels. `count_pipeline_design` reads the aligned design only

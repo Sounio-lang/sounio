@@ -141,14 +141,71 @@ family. Shared full-shard ELF SHA256 is
 scaling source SHA256 is
 `567e87e48278061d1d7d24ccdc93f3266d05b949057444949307a42cf44a0c86`.
 
-**Pending:** actual1000-row pilot17432, then complete20k row coverage under the
-root-coordinated maximum8 concurrent jobs and20GiB host headroom. The independent
+Actual1000-row baseline17432 completed0:0 in39m51s; the native process took
+39:50.16 and peaked at221040KiB. Its independent checker accepted all1000 IDs,
+the complete original range and33000 actual objective evaluations.
+
+The experimental20k cached point-coverage run below is complete.
+**Pending:** required source/HEAD review, explicit dependency integration,
+central registration and publication. The experiment is not silently adopted. The independent
 scale checker requires all20 actual reports and the exact20k ID/range union;
 its separately labeled partial mode requires a complete1000-row shard. Its
 synthetic parser controls17424 are preparation only and certify no native fits.
 The scale workload is point-only ML on a declared repeated-within-group count
 fixture. It does not qualify a full20k curvature, empirical-prior, FDR, bootstrap
 or RNA-seq-calibration analysis. These pending conditions remain open.
+
+## Separately pinned cache combination experiment
+
+The branch itself does not yet contain the proposed NB2 cache dependency. Root
+approved the numerical kernel at cache commit e16f4b898e, while final gate/branch
+publication review remained pending for71512e9b9b. Root's coordinator then
+reported a framework Bad Request error. That state has not been treated as
+approval, and neither peer branches nor their active claims were modified.
+
+Read-only experimental sources combined_before20/combined_after20 were created
+from Git9dad84e1's entire stdlib plus the current frozen callers. Exactly one
+stdlib manifest entry differs: nb2_likelihood.sio, originalSHA26b0d7332c... versus
+approved candidateSHA0a8c94b40820764f95d67ea9b03b30216bef6ad82de7cdc1228368922b991e92.
+This is an experimental source composition, not a feature merge or publication.
+
+Slurm17453 completed0:0 in7m12s: both compiler engines ran the entire six-fixture
+gate before and after, all C++ numerical checks passed, and all twelve native
+scientific stdout streams were byte-identical. The eight affected pipeline
+executables were distinct before/after; pure-shrinkage callers need not change.
+Both stdlib manifests and compiler pins verified before/after. A separate public
+slot-copy/mutate/reuse witness17450 passed on both engines, before/after.
+
+The combined experiment's actual1000-row pilot17454 passed independent C++
+validation with33000 evaluations and the same complete native stdout as the
+baseline. Native elapsed was17:06.87 and peak220860KiB. C++23/binary128 timing
+calculation17464 gives candidate/baseline elapsed0.42962395822873783 and peak
+ratio0.999185667752443. These are two observations of the declared repeated-input
+point-only workload; there is no representative memory benefit or general
+RNA-seq speed claim.
+
+Actual twenty-shard coverage completed as Slurm array17456, limited to seven
+simultaneous1CPU/4GiB processes, sharing one frozen executable and source tree.
+Each start preserves a conservative48GiB host-available-memory guard for the
+seven requested4GiB caps plus20GiB headroom. Each shard independently verifies
+its input/executable hashes and its1000 original global IDs. Global verifier
+17472 completed0:0 in1s after every shard succeeded. It accepted exactly20
+reports,20000 unique original gene IDs,512 samples and660000 reported objective
+evaluations, with marker GENOMICS_BATCH_SCALE_INDEPENDENT_FULL20K_PASS. Both
+stdlib and executable final manifests verified. Interim C++17480 had accepted13
+reports/13000 genes/429000 evaluations and remains preserved as partial. The
+final result closes actual20k point coverage for this experimental composition,
+not a silently different branch or a full20k empirical-prior/inference analysis.
+
+`actual20k-experiment-text.tar.gz` contains all20 actual native reports and their
+individual independent C++ checks, process timing/RSS, input/executable hashes,
+submitted controllers and final global verification. Controller17471 was
+cancelled while still pending because it expected an incorrect completion-marker
+name; replacement17472 used the checker's actual FULL20K_PASS marker. No
+numerical source or report was changed by that controller correction.
+
+The cached workload remains point-only with per-shard normalization. No empirical
+prior, bootstrap or full-family inference at20k is claimed.
 
 ## Custody and preserved failures
 
@@ -168,7 +225,9 @@ file input; the earlier outcomes have not been relabeled numerical passes.
 
 The source packets and raw receipts remain under the worker root
 `/scratch/sounio-stdlib-inference-scale-20261024/SIO171`. No historical artifacts
-were deleted and no shared quota was changed. `followup-text.tar.gz` retains17441/17443, the off-tree outlier witness17438,
+were deleted and no shared quota was changed. `combined-experiment-text.tar.gz` retains the separately labeled cache combination
+and completed baseline/candidate1000 pilots, manifests and timing calculation.
+`followup-text.tar.gz` retains17441/17443, the off-tree outlier witness17438,
 and the actual256 numerical/metrics verifier17446 plus its exact numerical
 refusal control. Text archives preserve raw compiler whitespace and scientific outputs. `FILES.sha256` covers local
 custody and the relevant maintained source files.
