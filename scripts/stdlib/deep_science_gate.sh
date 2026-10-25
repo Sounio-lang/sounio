@@ -30,6 +30,24 @@ write_inputs() {
 }
 write_inputs > "$out/INPUTS.sha256" || exit 65
 g++ --version > "$out/CXX_TOOLCHAIN.txt" || exit 65
+# Bind the actual compiler helpers and their dynamic runtime dependencies.
+cxx_manifest() {
+    local tool resolved
+    for tool in "$(command -v g++)" "$(g++ -print-prog-name=cc1plus)" \
+      "$(g++ -print-prog-name=collect2)" "$(g++ -print-prog-name=as)" \
+      "$(g++ -print-prog-name=ld)" "$(g++ -print-file-name=libstdc++.so)" \
+      "$(g++ -print-file-name=libgcc_s.so.1)" "$(g++ -print-file-name=libquadmath.so.0)"; do
+        if [[ "$tool" != */* ]]; then tool=$(command -v "$tool") || return 1; fi
+        resolved=$(readlink -f "$tool") || return 1
+        [[ -f "$resolved" ]] || return 1
+        printf '%s\n' "$resolved"
+        ldd "$resolved" > "$out/.cxx-ldd" 2>&1 || return 1
+        if grep -q 'not found' "$out/.cxx-ldd"; then return 1; fi
+        awk '/=> \// {print $3} /^[[:space:]]*\// {print $1}' "$out/.cxx-ldd"
+    done | LC_ALL=C sort -u | xargs -r sha256sum
+}
+cxx_manifest > "$out/CXX_RUNTIME.sha256" || exit 65
+[[ -s "$out/CXX_RUNTIME.sha256" ]] || exit 65
 fail=0
 positive_diagnostics() { grep -Eq '^[[:space:]]*error:|^[[:space:]]*error\[E' "$1"; }
 record() {
@@ -372,5 +390,8 @@ record input-hashes unchanged "$rc"
 rc=0
 sha256sum -c "$out/COMPILER.sha256" > "$out/COMPILER.verify.txt" 2>&1 || rc=$?
 record compiler-hash unchanged "$rc"
+rc=0
+sha256sum -c "$out/CXX_RUNTIME.sha256" > "$out/CXX_RUNTIME.verify.txt" 2>&1 || rc=$?
+record cxx-runtime-hashes unchanged "$rc"
 printf '%s\n' "$fail" > "$out/STATUS"
 exit "$fail"

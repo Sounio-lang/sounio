@@ -1,0 +1,1 @@
+Consolidate the scientific stdlib on current remote main, register eighteen focused native gates with source/compiler/executable custody, preserve explicit scale/campaign limits, and prepare a fresh complete E2E receipt without reusing historical measurements.
