@@ -1,151 +1,131 @@
-// stdlib/physics/pbpk_phonon.sio
-// Coupling: 1D Phonon Lattice ↔ PBPK-14 Compartmental Model
-//
-// Multi-scale strategy:
-//   PBPK runs at ~minutes timescale (14 compartments, well-stirred)
-//   Phonon lattice runs at ~milliseconds (64 sites in liver sinusoid)
-//
-// At each PBPK evaluation of the liver compartment:
-//   1. Set lattice boundary from PBPK portal + arterial concentrations
-//   2. Run the lattice for one cardiac cycle (~0.83s at 72 bpm)
-//   3. Average the outflow concentration and variance over the cycle
-//   4. Return: (cycle_avg_venous_C, cycle_avg_variance)
-//
-// The correction = phonon_outflow - well_stirred_outflow.
-// This quantifies the microcirculation discreteness effect.
-
-// Import phonon lattice functions (same directory)
-// In practice these are linked at compile time; shown here for clarity.
-
-// --- Cycle-averaged liver clearance via phonon lattice ---
-fn phonon_liver_cycle(
-    c_portal: f64,
-    c_arterial: f64,
-    c_tissue: f64,
-    base_params: &[f64; 64],
-    lattice: &!PhononState
-) -> f64 with Mut, Div, Panic {
-    // Update boundary concentrations in params
-    var params: [f64; 64] = [0.0; 64]
-    var k: i64 = 0
-    while k < 64 {
-        params[k] = base_params[k]
-        k = k + 1
-    }
-    params[PP_C_PORTAL] = c_portal
-    params[PP_C_HA] = c_arterial
-    params[PP_C_TISSUE] = c_tissue
-
-    // Run lattice for one cardiac cycle
-    let f_heart = params[PP_F_HEART]
-    let t_cycle = if f_heart > 0.0 { 1.0 / f_heart } else { 0.833 }
-
-    // Timestep: CFL for diffusion + advection stability
-    let dx = params[PP_DX]
-    let d_eff = params[PP_D_EFF]
-    let v_bl = params[PP_V_BLOOD]
-    let dt_diff = if d_eff > 0.0 { 0.4 * dx * dx / d_eff } else { 1.0e-4 }
-    let dt_adv = if v_bl > 0.0 { 0.8 * dx / v_bl } else { 1.0e-4 }
-    let dt_cfl = if dt_diff < dt_adv { dt_diff } else { dt_adv }
-    let dt = if dt_cfl < 1.0e-4 { dt_cfl } else { 1.0e-4 }
-
-    // Accumulate outflow over the cycle for averaging
-    var outflow_sum: f64 = 0.0
-    var n_samples: i64 = 0
-    var t: f64 = 0.0
-
-    while t < t_cycle {
-        let step_dt = if t + dt > t_cycle { t_cycle - t } else { dt }
-        phonon_rk4_step(t, lattice, &params, step_dt)
-        outflow_sum = outflow_sum + phonon_outflow_concentration(lattice)
-        n_samples = n_samples + 1
-        t = t + step_dt
-    }
-
-    if n_samples > 0 {
-        outflow_sum / (n_samples as f64)
-    } else {
-        c_portal  // fallback
-    }
+// Cycle averaging over the checked SI lattice. The same latent factor basis is
+// integrated through every nominal RK4 stage, preserving covariance across time.
+// This kernel makes no blood/plasma calibration or compartment-partition choice.
+use physics::phonon_factor::{PhononState,phonon_state_status,phonon_state_n,phonon_state_rank,phonon_state_time,phonon_parameters,phonon_concentration,phonon_factor_entry,phonon_time_limit,phonon_step_checked}
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+use math::pure::{is_finite,sqrt}
+pub struct PhononCycleResult {pub status:i64,pub mean:f64,pub standard_uncertainty:f64,pub variance:f64,pub duration:f64,pub steps:i64,pub uncertainty_model:i64,pub first_order:bool}
+fn pc_empty(status:i64)->PhononCycleResult {PhononCycleResult{status:status,mean:0.0,standard_uncertainty:0.0,variance:0.0,duration:0.0,steps:0,uncertainty_model:2,first_order:true}}
+fn pc_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn pc_min(a:f64,b:f64)->f64 {if a<b {a}else{b}}
+fn pc_previous(s:&PhononState,average:&!NumericBuffer)->i64 with Mut,Div,Panic {
+ let n:i64=phonon_state_n(s)
+ let k:i64=phonon_state_rank(s)
+ let width:i64=k+1
+ let x=phonon_concentration(s,n-1)
+ if x.status!=0 {return x.status}
+ numeric_buffer_set(average,width,x.value)
+ var col:i64=0
+ while col<k {
+  let f=phonon_factor_entry(s,n-1,col)
+  if f.status!=0 {return f.status}
+  numeric_buffer_set(average,width+col+1,f.value);col=col+1
+ }
+ 0
 }
-
-// --- Cycle-averaged outflow variance ---
-fn phonon_liver_cycle_variance(
-    c_portal: f64,
-    c_arterial: f64,
-    c_tissue: f64,
-    base_params: &[f64; 64],
-    lattice: &!PhononState
-) -> f64 with Mut, Div, Panic {
-    var params: [f64; 64] = [0.0; 64]
-    var k: i64 = 0
-    while k < 64 {
-        params[k] = base_params[k]
-        k = k + 1
-    }
-    params[PP_C_PORTAL] = c_portal
-    params[PP_C_HA] = c_arterial
-    params[PP_C_TISSUE] = c_tissue
-
-    let f_heart = params[PP_F_HEART]
-    let t_cycle = if f_heart > 0.0 { 1.0 / f_heart } else { 0.833 }
-    let dx = params[PP_DX]
-    let d_eff = params[PP_D_EFF]
-    let v_bl = params[PP_V_BLOOD]
-    let dt_diff = if d_eff > 0.0 { 0.4 * dx * dx / d_eff } else { 1.0e-4 }
-    let dt_adv = if v_bl > 0.0 { 0.8 * dx / v_bl } else { 1.0e-4 }
-    let dt_cfl = if dt_diff < dt_adv { dt_diff } else { dt_adv }
-    let dt = if dt_cfl < 1.0e-4 { dt_cfl } else { 1.0e-4 }
-
-    var var_sum: f64 = 0.0
-    var n_samples: i64 = 0
-    var t: f64 = 0.0
-
-    while t < t_cycle {
-        let step_dt = if t + dt > t_cycle { t_cycle - t } else { dt }
-        phonon_rk4_step(t, lattice, &params, step_dt)
-        var_sum = var_sum + phonon_outflow_variance(lattice)
-        n_samples = n_samples + 1
-        t = t + step_dt
-    }
-
-    if n_samples > 0 {
-        var_sum / (n_samples as f64)
-    } else {
-        0.0
-    }
+// Augmented RK4 quadrature: integral'=outflow (and each outflow sensitivity).
+// The successful lattice step leaves k1..k4 in its caller-owned scratch.
+fn pc_accumulate(scratch:&NumericBuffer,average:&!NumericBuffer,n:i64,k:i64,h:f64)->i64 with Mut,Div,Panic {
+ let width:i64=k+1
+ let length:i64=n*width
+ let outlet:i64=(n-1)*width
+ var col:i64=0
+ while col<width {
+  let ia:i64=outlet+col
+  let ib:i64=length+ia
+  let ic:i64=2*length+ia
+  let ip:i64=width+col
+  let before=numeric_buffer_at(average,ip)
+  let a=numeric_buffer_at(scratch,ia)
+  let b=numeric_buffer_at(scratch,ib)
+  let c=numeric_buffer_at(scratch,ic)
+  let y2=before+(h*a)*0.5
+  let y3=before+(h*b)*0.5
+  let y4=before+h*c
+  let increment=h*(before/6.0+y2/3.0+y3/3.0+y4/6.0)
+  let previous=numeric_buffer_at(average,col)
+  let value=previous+increment
+  if !is_finite(increment)||!is_finite(value) {return 4}
+  numeric_buffer_set(average,col,value);col=col+1
+ }
+ 0
 }
-
-// --- The phonon correction ---
-// Compares phonon-resolved outflow to well-stirred prediction
-fn phonon_correction(
-    c_liver_wellstirred: f64,
-    kp_liver: f64,
-    c_portal: f64,
-    c_arterial: f64,
-    phonon_params: &[f64; 64],
-    lattice: &!PhononState
-) -> f64 with Mut, Div, Panic {
-    // Well-stirred venous concentration
-    let c_venous_ws = c_liver_wellstirred / kp_liver
-
-    // Phonon-resolved venous concentration (cycle-averaged)
-    let c_tissue_approx = c_liver_wellstirred  // use well-stirred as tissue estimate
-    let c_venous_phonon = phonon_liver_cycle(
-        c_portal, c_arterial, c_tissue_approx, phonon_params, lattice
-    )
-
-    // Correction = phonon - well_stirred
-    c_venous_phonon - c_venous_ws
+fn pc_finish(s:&PhononState,average:&!NumericBuffer,k:i64,duration:f64)->PhononCycleResult with Mut,Div,Panic {
+ var out=pc_empty(0)
+ let n:i64=phonon_state_n(s)
+ let width:i64=k+1
+ let parameters=phonon_parameters(s)
+ let endpoint=phonon_concentration(s,n-1)
+ if endpoint.status!=0 {return pc_empty(endpoint.status)}
+ let raw_mean=numeric_buffer_at(average,0)
+ out.mean=raw_mean/duration
+ if !is_finite(out.mean) {return pc_empty(4)}
+ numeric_buffer_set(average,0,out.mean)
+ // Leibniz endpoint and normalization derivative for T=1/f_heart.
+ let boundary=(endpoint.value-out.mean)/duration
+ if !is_finite(boundary) {return pc_empty(4)}
+ var scale:f64=0.0
+ var sum:f64=1.0
+ var col:i64=1
+ while col<width {
+  let raw=numeric_buffer_at(average,col)
+  let source=phonon_factor_entry(s,n+8,col-1)
+  if source.status!=0 {return pc_empty(source.status)}
+  let dT=(0.0-source.value/parameters.f_heart)/parameters.f_heart
+  if !is_finite(dT)||(source.value!=0.0&&dT==0.0) {return pc_empty(4)}
+  let value=raw/duration+boundary*dT
+  if !is_finite(value) {return pc_empty(4)}
+  numeric_buffer_set(average,col,value)
+  let x=pc_abs(value)
+  if x>0.0 {if x>scale {let r=scale/x;sum=1.0+sum*r*r;scale=x}else{let r=x/scale;sum=sum+r*r}}
+  col=col+1
+ }
+ let u=scale*sqrt(sum)
+ let variance=u*u
+ if !is_finite(u)||!is_finite(variance)||(u!=0.0&&variance==0.0) {return pc_empty(4)}
+ out.standard_uncertainty=u;out.variance=variance;out.duration=duration;out
 }
-
-// --- Initialize lattice with uniform concentration ---
-fn phonon_init_uniform(state: &!PhononState, c_init: f64, var_init: f64) with Mut {
-    var i: i64 = 0
-    while i < PHONON_N {
-        state.values[i] = c_init
-        state.variances[i] = var_init
-        i = i + 1
-    }
-    state.n = PHONON_N
+// average length>=2*(k+1). On success first row is (mean, mean-factor columns).
+// A nonzero process-noise model is not inferred: this is deterministic forcing
+// with a fixed declared joint initial/parameter factor.
+pub fn phonon_liver_cycle_checked(s:&!PhononState,scratch:&!NumericBuffer,average:&!NumericBuffer,max_step:f64,max_steps:i64)->PhononCycleResult with Mut,Div,Panic {
+ var out=pc_empty(phonon_state_status(s))
+ if out.status!=0 {return out}
+ let n:i64=phonon_state_n(s)
+ let k:i64=phonon_state_rank(s)
+ let width:i64=k+1
+ if !is_finite(max_step) {out.status=1;return out}
+ if max_step<=0.0||max_steps<1||max_steps>1000000 {out.status=2;return out}
+ if numeric_buffer_status(average)!=0||numeric_buffer_len(average)<2*width {out.status=3;return out}
+ let p=phonon_parameters(s)
+ if p.f_heart<=0.0 {out.status=2;return out}
+ let duration=1.0/p.f_heart
+ let start=phonon_state_time(s)
+ let target=start+duration
+ if !is_finite(duration)||!is_finite(target) {out.status=4;return out}
+ if target<=start {out.status=6;return out}
+ let limit=phonon_time_limit(s)
+ if limit.status!=0 {out.status=limit.status;return out}
+ var col:i64=0
+ while col<2*width {numeric_buffer_set(average,col,0.0);col=col+1}
+ while phonon_state_time(s)<target && out.steps<max_steps {
+  let before_time=phonon_state_time(s)
+  let remaining=target-before_time
+  let h=pc_min(remaining,pc_min(max_step,limit.value))
+  let prior=pc_previous(s,average)
+  if prior!=0 {out.status=prior;return out}
+  let step=phonon_step_checked(s,scratch,h)
+  out.duration=phonon_state_time(s)-start
+  if step.status!=0 {out.status=step.status;return out}
+  let code=pc_accumulate(scratch,average,n,k,h)
+  if code!=0 {out.status=code;return out}
+  out.steps=out.steps+1
+ }
+ if phonon_state_time(s)<target {out.status=5;return out}
+ let complete=pc_finish(s,average,k,duration)
+ if complete.status!=0 {out.status=complete.status;return out}
+ out.mean=complete.mean;out.standard_uncertainty=complete.standard_uncertainty;out.variance=complete.variance
+ out.duration=duration;out.status=0;out
 }
+// Compatibility names now require the protected factor state and reusable work.
+pub fn phonon_liver_cycle(s:&!PhononState,scratch:&!NumericBuffer,average:&!NumericBuffer,max_step:f64,max_steps:i64)->PhononCycleResult with Mut,Div,Panic {phonon_liver_cycle_checked(s,scratch,average,max_step,max_steps)}
