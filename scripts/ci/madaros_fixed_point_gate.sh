@@ -73,7 +73,12 @@ export SOUNIO_NV2_ARENA_GIB="${SOUNIO_NV2_ARENA_GIB:-64}"
 # 64 GiB mapping and move the ELF load base to 0x4000000, which leaves 192 MB
 # for the image below BSS_BASE_LINUX (gen2 is 127 MB; 2^27 would leave 7 MB)
 # (scripts/ci/madaros_handle_capacity_gate.sh).
-export SOUNIO_NV2_HANDLE_LOG2="${SOUNIO_NV2_HANDLE_LOG2:-26}"
+# 2^26 then ran out in gen3 itself (9ed0b7bd, proof 40152465186): gen3 got
+# past check and lowered 32 modules before `handles full` (rc 182). 2^27 is
+# the largest the layout allows: the image starts at 0x8000000 and must end
+# below BSS_BASE_LINUX (0x10000000); the gen2 image spans ~124 MiB, so ~4 MiB is
+# left, and native_v2_write_min_elf64_to_file refuses (rc 29) if it is crossed.
+export SOUNIO_NV2_HANDLE_LOG2="${SOUNIO_NV2_HANDLE_LOG2:-27}"
 
 # ── receipt reuse ─────────────────────────────────────────────────────────────
 # gen2 and gen3 are two full self-compiles (~40 min in CI, in swap). Their
