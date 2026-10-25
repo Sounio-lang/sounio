@@ -1,0 +1,1 @@
+Add checked classical and relativistic APIs for independent standard uncertainties and declared signed covariance factors. Results expose first-order model tags, standard uncertainties and coupled energy/momentum covariance; factor adapters retain initial correlations and zero-nominal sensitivities.
