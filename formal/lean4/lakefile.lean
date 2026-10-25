@@ -798,3 +798,17 @@ lean_lib «SounioNumericBuffer» where
 -- Exact rational sign check for the selected RODAS4 time coefficient.
 @[default_target]
 lean_lib «SounioRodas4TimeConsistency» where
+
+-- Reviewed finite rational interval dependency from PR3118, unchanged.
+@[default_target]
+lean_lib «SounioIntervalFinite» where
+
+@[default_target]
+lean_lib «SounioIntervalFiniteAxiomAudit» where
+
+-- Exact rational intervals with infinite endpoints: additive set increment.
+@[default_target]
+lean_lib «SounioIntervalExtended» where
+
+@[default_target]
+lean_lib «SounioIntervalExtendedAxiomAudit» where
