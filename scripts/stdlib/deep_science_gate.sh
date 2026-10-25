@@ -26,7 +26,8 @@ write_inputs() {
     find stdlib tests examples scripts/stdlib scripts/lib \( -type f -o -type l \) -print0 | LC_ALL=C sort -z | xargs -0 sha256sum || return $?
     sha256sum bin/souc bin/madaros bin/souc-lean-single-x86_64 scripts/ci/souc-native-wrapper.sh \
       docs/evidence/stdlib-SIO-172/before_variance/variance_witness.sio \
-      docs/evidence/stdlib-SIO-172/before_variance/phonon_original.sio
+      docs/evidence/stdlib-SIO-172/before_variance/phonon_original.sio \
+      docs/evidence/stdlib-SIO-174/before/callback_time.sio
 }
 write_inputs > "$out/INPUTS.sha256" || exit 65
 g++ --version > "$out/CXX_TOOLCHAIN.txt" || exit 65
