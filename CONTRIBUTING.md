@@ -170,12 +170,21 @@ Work is planned on a project board (Notion; the maintainer grants access on requ
 - [`docs/decisions/PENDING.md`](docs/decisions/PENDING.md) — decisions only the maintainer can take. Do not implement a choice that is still listed there.
 - [`docs/decisions/`](docs/decisions/README.md) — decisions already taken (ADRs). Each implementation row of an ADR is one board task with its own acceptance test.
 
+Each card carries these fields:
+
+- **Agent**: who owns it. One of Claude, Codex, Cursor, Warp, Kimi, Grok PM, Nightly Audit, or Human. A card with Agent = Human is a decision that only the maintainer can take.
+- **Train**: the release it ships in, `3.0`, `3.1` or `Backlog` (see [ADR-018](docs/decisions/adr-018-release-cycle-and-versioning.md)).
+- **Epic**: the parent EPIC card. Themes such as Bootstrap gen7, Marco 0 or the AI track are EPIC cards, not fields.
+- **Acceptance**: the criterion that makes the card *Done*.
+
+`Milestone` and `Bot` are deprecated; do not set them on new cards.
+
 Rules for every contributor, human or automated:
 
-1. **Claim before you start.** Take a task in *Not started* whose blocking tasks are all *Done*, put your name on it and move it to *In progress*. Do not work on a task someone else has claimed.
+1. **Claim before you start.** Take a task in *Not started* whose blocking tasks are all *Done*. Set **Agent** to yourself, move the card to *In progress*, and record the same claim with `bin/sounio-coord claim`. A card may be *In progress* only when Agent is set. Do not work on a task someone else has claimed. Before pushing to a branch that had a commit in the last 24 hours, message its author on the coord bus.
 2. **Every task has an acceptance criterion** (a probe, a test, a byte-identical hash, a proof). A task is *Done* only when that criterion holds and the PR is merged.
 3. **Blocked?** Move the task to *Blocked* and say why on the task.
-4. **Open the PR, link it on the task, move the task to *In review*.**
+4. **Open the PR, link it on the task, move the task to *In review*.** A draft PR keeps the task *In progress*; it moves to *In review* when the PR leaves draft. When the PR merges, the task is *Done*.
 5. **Fix what you find.** A defect found while working is fixed in the same change, or recorded as a new board task. Please do not open GitHub issues for it.
 6. **Decisions are not taken in PRs.** If your change needs a semantic choice, stop and add it to `PENDING.md` with the question, the options and a discriminating test.
 
