@@ -64,3 +64,9 @@ the actual nonempty E2E on the final scientific integration, with fresh JSON and
 its own source/compiler/job receipts. This standalone change does not claim that
 the full stdlib suite is green, qualify the timeout policy or reuse the old
 committed JSON as current output.
+
+The selftest also runs from an extracted source packet without a .git directory:
+it checks a pinned SHA256 of the unchanged runner prefix/suffix. Supply the
+historical fixture through STDLIB_E2E_JSON_FIXTURE when that artifact is outside
+the extracted source tree. Its SHA256 is checked before parsing, so an arbitrary
+JSON document cannot substitute for the declared historical fixture.

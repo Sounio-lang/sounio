@@ -5,7 +5,8 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from 'no
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync, execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { decodeDetail, makeDocument, stringifyDocument, timestampUtc } from './emit_stdlib_e2e_result.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -74,8 +75,9 @@ test('UTC timestamp fraction compatibility', () => {
   assert.equal(timestampUtc(new Date('2026-10-25T20:01:02.000Z')), '2026-10-25T20:01:02Z');
 });
 test('committed historical JSON exact text roundtrip is a fixture only', () => {
-  const historicalPath = join(root, 'artifacts/stdlib/stdlib_e2e_result.v1.json');
+  const historicalPath = process.env.STDLIB_E2E_JSON_FIXTURE || join(root, 'artifacts/stdlib/stdlib_e2e_result.v1.json');
   const text = readFileSync(historicalPath, 'utf8');
+  assert.equal(createHash('sha256').update(text).digest('hex'), 'c02d2ac60c5d2a6ec8b8161e7f1d244ccf47412db3e9943c283493cdac551fe2');
   const historical = JSON.parse(text);
   const tsv = historical.results.map(r => record(r.status, r.test_path, r.mode, r.reason, r.owner, r.unblock_condition, String(r.exit_code), encode(r.detail_excerpt))).join('\n');
   const result = makeDocument(tsv, historical.context, historical.totals, historical.generated_at_utc);
@@ -84,7 +86,6 @@ test('committed historical JSON exact text roundtrip is a fixture only', () => {
 });
 test('runner changes only the emit_json function body', () => {
   const path = 'scripts/stdlib/run_stdlib_e2e.sh';
-  const before = execFileSync('git', ['show', '8eca8e0c086bbd074485bbfd8716accc4063ef1c:' + path], { cwd: root, encoding: 'utf8' });
   const after = readFileSync(join(root, path), 'utf8');
   const strip = text => {
     const start = text.indexOf('\nemit_json() {');
@@ -92,7 +93,9 @@ test('runner changes only the emit_json function body', () => {
     assert.ok(start > 0 && end > start);
     return text.slice(0, start) + text.slice(end);
   };
-  assert.equal(strip(after), strip(before));
+  // Pinned from the unchanged prefix/suffix of main8eca, so an extracted
+  // source packet needs no .git directory or subprocess for this assertion.
+  assert.equal(createHash('sha256').update(strip(after)).digest('hex'), 'ea9386ef7929b8177d7978aa7f97fd0821b0cfdaa8587fac2be27bdf16485ef9');
   assert.ok(!after.includes('python3'));
 });
 test('CLI emits fresh JSON and rejects invalid UTF8 without output', () => {
