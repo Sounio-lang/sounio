@@ -52,7 +52,8 @@ try {
    if(e.type==='0') {segments.push(objects.get(e.sha256));files++;}
    segments.push(Buffer.alloc((512-e.size%512)%512));
   }
-  need(Number.isSafeInteger(a.trailing_zero_bytes)&&a.trailing_zero_bytes>=1024&&a.trailing_zero_bytes<=128*1024*1024,'trailer size');
+  need(Number.isSafeInteger(a.tar_bytes)&&a.tar_bytes>0&&a.tar_bytes<=128*1024*1024,'tar byte bound');
+  need(Number.isSafeInteger(a.trailing_zero_bytes)&&a.trailing_zero_bytes>=1024&&a.trailing_zero_bytes<=a.tar_bytes&&a.trailing_zero_bytes<=128*1024*1024,'trailer size');
   segments.push(Buffer.alloc(a.trailing_zero_bytes));
   const proc=spawn('git',['show',commit+':'+gitpath],{stdio:['ignore','pipe','pipe']});
   let stderr='';proc.stderr.on('data',b=>{stderr+=b;});

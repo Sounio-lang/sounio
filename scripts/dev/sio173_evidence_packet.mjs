@@ -120,7 +120,7 @@ export async function loadPacket(filename) {
  need(index.entries.filter(e=>e.type==='0').length===1142&&objects.size===301,'SIO173 census mismatch');
  for(const a of index.archives) {
   need(Number.isSafeInteger(a.tar_bytes)&&a.tar_bytes<=MAX_TAR&&a.tar_bytes>0,'tar byte bound');
-  need(Number.isSafeInteger(a.trailing_zero_bytes)&&a.trailing_zero_bytes>=1024&&a.trailing_zero_bytes%512===0,'tar terminator bound');
+  need(Number.isSafeInteger(a.trailing_zero_bytes)&&a.trailing_zero_bytes>=1024&&a.trailing_zero_bytes<=a.tar_bytes&&a.trailing_zero_bytes<=MAX_TAR&&a.trailing_zero_bytes%512===0,'tar terminator bound');
   need(/^[a-f0-9]{64}$/.test(a.tar_sha256),'tar digest');
   const digest=createHash('sha256');let bytes=0;
   for(const e of index.entries.filter(e=>e.archive===a.name)) {
@@ -172,6 +172,7 @@ async function testPacket(filename,output) {
  const cases=[
   ['tampered-object','object content tamper',(i,o)=>{const key=[...o.keys()].find(k=>o.get(k).length>0),b=Buffer.from(o.get(key));b[0]^=1;o.set(key,b);}],
   ['missing-object','missing object',(i,o)=>o.delete(o.keys().next().value)],
+  ['oversized-trailer','tar terminator bound',i=>{i.archives[0].trailing_zero_bytes=2**40;}],
   ['unsafe-alias','unsafe path',i=>{i.entries.find(e=>e.type==='0').name='../escape';}],
   ['duplicate-alias','duplicate alias',i=>{i.entries.push({...i.entries.find(e=>e.type==='0')});}],
   ['duplicate-object','duplicate tar path',()=>{}],
@@ -189,12 +190,15 @@ async function testPacket(filename,output) {
    raw.fill(32,148,156);const sum=raw.reduce((n,v)=>n+v,0);raw.write(sum.toString(8).padStart(6,'0')+'\0 ',148,8);chunks.push(raw);
   }
   chunks.push(Buffer.alloc(1024));const file=path.join(output,name+'.tar.gz');fs.writeFileSync(file,gzipSync(Buffer.concat(chunks),{level:9}));
-  let message='';try{await loadPacket(file);}catch(error){message=error.message;}
+  const alloc=Buffer.alloc;let message='',largeRequests=0;
+  Buffer.alloc=function(size,...args){if(size>MAX_TAR){largeRequests++;throw Error('test intercepted oversized allocation');}return alloc(size,...args);};
+  try{await loadPacket(file);}catch(error){message=error.message;}finally{Buffer.alloc=alloc;}
+  need(largeRequests===0,'negative control reached oversized allocation: '+name);
   need(message.includes(diagnostic),'negative control did not specifically refuse '+name+': '+message);
-  results.push({name,refused:true,diagnostic:message,sha256:await hashFile(file)});
+  results.push({name,refused:true,diagnostic:message,large_allocation_attempts:largeRequests,sha256:await hashFile(file)});
  }
  fs.writeFileSync(path.join(output,'RESULTS.json'),JSON.stringify(results,null,2)+'\n');
- console.log('SIO173_SIX_ACTUAL_PACKET_CONTROLS_PASS');
+ console.log('SIO173_SEVEN_ACTUAL_PACKET_CONTROLS_PASS');
 }
 
 function selftest() {
