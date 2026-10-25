@@ -65,7 +65,7 @@ unchanged Rounding primitive premises and outward_contains theorem. Those wrappe
 are outward exact hull enclosures, not a theorem about emitted opcode shape;
 the IEEE/hardware binding remains explicitly NOT ESTABLISHED.
 
-## Actual verification and pending gates
+## Actual verification
 
 - Slurm17549 preserved a development proof failure: simp_all cleared True-bound
   hypotheses in the endpoint-conversion helper. Explicit cases corrected the
@@ -77,16 +77,28 @@ the IEEE/hardware binding remains explicitly NOT ESTABLISHED.
   outward wrappers, division non-strengthening and exact zero-divisor decoration.
   Slurm17555 exposed min/max rfl-after-split and premature zeroPoint unfolding in
   those new proof scripts. Proofs were corrected; the algorithms were unchanged.
-- Final validation is pending a closed fresh six-target Lake/source/axiom gate,
-  full source/toolchain identity and twelve actual mathematical source mutants.
-  No successful53-theorem or final expanded-gate result is claimed yet.
+- Slurm17573 COMPLETED0:0 in6m09s from closed source05 at candidate
+  dd9821ac6d036c926e4de9f41a61c03f2c98868e. Fresh six-target build/source/audits
+  passed: original finite32, original additive40 and all53 new theorems. The53
+  fresh axiom rows use only propext, Classical.choice and Quot.sound. The11
+  new guard controls and12 actual semantic mutants passed; each mutant exited1
+  with a mathematical error inside the specified theorem range. Source scanner
+  found zero axioms, native_decide uses or sorry holes in the new model.
+- Final source, Lean/lake binaries, complete toolchain libraries and Node identity
+  checks passed. Outer closed16-file source verification passed before and after
+  the gate. The submission requested one CPU and4GiB with15min limit; Slurm
+  allocated2CPUs due to scheduler allocation granularity. This is a proof job,
+  with no numerical calibration campaign.
 
 The first attempted final04 staging failed before any Slurm job submission:
 source-directory creation was delayed, the tar extraction reported missing
 source04, and sbatch reported Unable to open file. Worker exec/runtime acquisition
-latency is under read-only diagnosis by the coordinator's designated lane.
-There is no duplicate submission or claim that the preparation failure measures
-mathematical behavior. Future staging must finish and verify before submission.
+latency was diagnosed read-only by the coordinator's designated lane.
+No host process, service or quota was changed by this lane. Primary transport
+recovered before the successful final05 staging; all dependent steps then reached
+terminal success serially and the complete source manifest verified before the
+single final submission. There was no duplicate submission or claim that the
+preparation failure measured mathematical behavior.
 
 ## Qualification contract
 
@@ -101,7 +113,33 @@ positive/negative reciprocal touching sides, the zero-point pole, division
 zero-decoration policy, both infinite singleton pairs, negative-infinite product
 sign, the infinite reciprocal closure endpoint and finite reciprocal ordering.
 
-Tracking: [MulDiv followup](https://app.notion.com/p/4043f37f937181ecb782f7e9e105fb1e)
+## Custody and limits
+
+The compact text packet final05-text.tar.gz contains261 internally hashed input
+and receipt files: closed source05, preserved source01/02/03 development failures
+and successful probe, job scripts and terminal accounting, complete fresh audits,
+all semantic mutants/diagnostics and initial/final identity receipts. It includes
+no compiled proof artifacts or toolchain binaries. Packet size893613bytes;
+SHA256 f20f2a54ec15c08f8b0071609af8d03dee29e2a516cb011deccfedea25688700.
+Fresh extraction verified all261 internal hashes and equality of six models/audits
+and two new helpers with the working tree. The independent inspection counted53
+allowed axiom rows and confirmed all12 exact mathematical target errors.
+
+FILES.sha256 binds the final reviewed source and receipt files. The older
+CANDIDATE_FILES.sha256 records the pre-run checkpoint and its pending README; its
+README line is historical and is not a verification manifest for this closure.
+Global source inventory changed only320→322 Lean files versus the additive
+increment, retaining59 declared axioms,741 historical native_decide occurrences
+and zero sorry holes. This mechanical global census is separate from the fresh
+53-theorem kernel audit. No workflow or compiler source changed.
+
+The finite-codomain Rounding premises are assumed contracts, not established
+IEEE primitive implementations; in particular a future hardware binding must
+cover finite overflow to infinity. This increment proves exact rational set
+operations and their conditional outward enclosure, with general tightness,
+primitive bits, compiler IR/opcodes and hardware qualification still open.
+
+Tracking: [SIO-277 MulDiv followup](https://app.notion.com/p/4043f37f937181ecb782f7e9e105fb1e)
 under [SIO-178](https://app.notion.com/p/4033f37f93718110967acf47f65cbe51).
 This card and the parent programme remain incomplete until their actual gates
 and human review criteria hold. No main merge, auto-merge, enqueue, quota change
