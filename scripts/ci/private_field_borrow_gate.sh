@@ -8,13 +8,20 @@ cd "$(dirname "$0")/../.."
 [[ ! -e $SOUNIO_PRIVATE_OUTPUT ]]
 mkdir -p "$SOUNIO_PRIVATE_OUTPUT"
 out=$SOUNIO_PRIVATE_OUTPUT
+record_status() { local status=$?; printf '%s\n' "$status" > "$out/STATUS.txt"; }
+trap record_status EXIT
 export LC_ALL=C LANG=C
 ulimit -s 524288
 ulimit -c 0
 sha256sum "$SOUNIO_PRIVATE_COMPILER" > "$out/COMPILER.sha256"
 find self-hosted/compiler/lean_single.sio scripts/ci/private_field_borrow_gate.sh \
  tests/multimodule/private_field_borrow tests/compile-fail/private_field_borrow_checked.sio \
- tests/run-pass/private_field_borrow_public.sio stdlib -type f -print0 |
+ tests/run-pass/private_field_borrow_public.sio \
+ tests/run-pass/lean_nested_deref_store_public.sio \
+ tests/compile-fail/private_field_read_cross_module_1386.sio \
+ tests/compile-fail/private_field_write_cross_module_1386.sio \
+ tests/compile-fail/private_field_forge_cross_module_1386.sio \
+ tests/compile-fail/fixtures/capability_token_1386.sio stdlib -type f -print0 |
  sort -z | xargs -0 sha256sum > "$out/SOURCE.sha256"
 printf 'target\tcase\tcompile\texpectation\n' > "$out/RESULTS.tsv"
 compile() {
