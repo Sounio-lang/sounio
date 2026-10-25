@@ -248,7 +248,8 @@ void tail_generate(){
 fn yes(x:bool)->i64 {if x {1}else{0}}
 fn row(id:i64,z:f64,budget:i64,tol:f64) with IO,Mut,Div,Panic {
  let r=logrank_tail_checked(z,budget,tol)
- println("TAIL {} {} {} {} {} {} {}",id,r.status,yes(r.p_available),yes(r.log_p_available),f64_to_bits(r.p),f64_to_bits(r.log_p),r.iterations)
+ let pb:i64=f64_to_bits(r.p);let lb:i64=f64_to_bits(r.log_p)
+ println("TAIL {} {} {} {} {} {} {}",id,r.status,yes(r.p_available),yes(r.log_p_available),pb,lb,r.iterations)
 }
 fn main()->i32 with IO,Mut,Div,Panic {
 )SIO";

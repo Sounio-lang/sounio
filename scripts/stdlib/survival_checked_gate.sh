@@ -63,6 +63,15 @@ for engine in lean_single madaros;do
  grep -qx 'ALL PASS' "$OUT/legacy_module.$engine.native.stdout"
  grep -qx MEDICAL_SURVIVAL_OK "$OUT/medical_api.$engine.native.stdout"
 done
+cat > "$OUT/medical_nonfinite.generated.sio" <<'SIO'
+use medical::survival::{make_event}
+fn main()->i32 with Panic {
+ let e=make_event(1.0e308*10.0,true)
+ if e.time>0.0 {0}else{2}
+}
+SIO
+run_fixture "$OUT/medical_nonfinite.generated.sio" medical_nonfinite 1
+for engine in lean_single madaros;do grep -qi 'assert' "$OUT/medical_nonfinite.$engine.native.stderr";done
 # Public legacy undefined outputs refuse; all dynamic availability stays explicit.
 for condition in 'n=257' 'e[0]=2' 'g[0]=1';do
  case "$condition" in
