@@ -562,13 +562,13 @@ record concordance math-pure-ln-boundary "$rc"
 rc=0
 bash tests/stdlib/metrology/type_a_gate.sh "$out/metrology-type-a" > "$out/metrology-type-a.stdout" 2> "$out/metrology-type-a.stderr" || rc=$?
 record focused-gate metrology-type-a "$rc"
-}
 
-# Both partitions remain mandatory in CI; standalone all preserves the original order.
-if [[ "$group" == all || "$group" == core ]]; then run_core; fi
-if [[ "$group" == all || "$group" == integration ]]; then run_integration; fi
-if [[ "$group" == reference-controls ]]; then run_reference_controls; fi
-printf '%s\n' "$group" > "$out/GROUP"
+# Dynamic named counts, byte-exact identities/joins and validated CSR.
+# Child receipt separates bootstrap numerical support from canonical privacy.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" SEED_RAW_BIN="${SEED_RAW_BIN:-$repo/bin/souc-lean-single-x86_64}" timeout 1200 bash scripts/stdlib/genomics_count_identity_gate.sh "$out/genomics-count-identities" > "$out/genomics-count-identities.gate.stdout" 2> "$out/genomics-count-identities.gate.stderr" || rc=$?
+record focused-gate genomics-count-identities "$rc"
+}
 
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
