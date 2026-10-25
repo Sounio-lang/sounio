@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.scientific-native-workflows-2026-10-25.handoff
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.scientific-native-workflows-2026-10-25.handoff
+-->
+
 # SIO-273 four native scientific workflows handoff
 
 Notion: https://app.notion.com/p/4043f37f93718106bd04d063f20df465
