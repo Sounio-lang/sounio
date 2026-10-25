@@ -9,7 +9,7 @@ import {fileURLToPath} from 'node:url';
 const truth = v => v !== null && v !== undefined && v !== false && v !== 0 && v !== '' && (!Array.isArray(v) || v.length !== 0) && (typeof v !== 'object' || Array.isArray(v) || Object.keys(v).length !== 0);
 const lower = v => (v || '').toLowerCase();
 const pyString = v => v === true ? 'True' : v === false ? 'False' : v == null ? 'None' : String(v);
-export const asciiJSON = v => JSON.stringify(v, null, 2).replace(/[\u0080-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0')) + '\n';
+export const asciiJSON = v => JSON.stringify(v, null, 2).replace(/[\u007f-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0')) + '\n';
 export function digestFile(p) {
   const b = fs.readFileSync(p);
   return {path: p, sha256: crypto.createHash('sha256').update(b).digest('hex'), md5: crypto.createHash('md5').update(b).digest('hex'), bytes: b.length};

@@ -15,6 +15,8 @@ const historicText=fs.readFileSync(historical,'utf8'), historic=JSON.parse(histo
 assert.deepEqual(receiptInternalErrors(historic),[]);
 // Existing receipt remains exactly compatible with the prior ASCII JSON format.
 assert.equal(asciiJSON(historic),historicText);
+// The previous ensure_ascii format also escapes ASCII DEL in paths/labels.
+assert.equal(asciiJSON({path: 'seed\x7fvalue'}), '{\n  \"path\": \"seed\\u007fvalue\"\n}\n');
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'seed-metadata-test-'));
 try {
  const src=path.join(tmp,'source.txt'), inp=path.join(tmp,'input.bin'), out=path.join(tmp,'output.bin');
