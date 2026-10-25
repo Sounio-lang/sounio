@@ -1,0 +1,1 @@
+Added a unified Cayley–Dickson tower API with canonical higher-level embeddings, split/join operations, and recursive-doubling multiplication. The public implementation is validated against the XOR/sign product and an independent exact-integer oracle through 64 dimensions, including embedding, conjugation, power-associativity, and 283,584 basis associators.

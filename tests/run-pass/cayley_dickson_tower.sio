@@ -1,0 +1,73 @@
+//@ run-pass
+//@ expect-stdout: CAYLEY_DICKSON_TOWER_OK
+// Unified Cayley-Dickson tower contracts, checked at levels 1..6 (2..64 dims).
+// Coefficients are small integers exactly representable in f64, so cd_eq is an
+// exact algebraic comparison here rather than a floating tolerance assertion.
+
+use algebra::cayley_dickson::*
+
+fn tower_vec(bits: i32, seed: i32) -> CDElement with Mut, Panic, Div {
+    let n = 1 << bits
+    var x = cd_zero(bits)
+    var i: i32 = 0
+    while i < n {
+        let coeff = (i * 17 + seed * 11 + bits * 7) % 7 - 3
+        x.c[i as usize] = coeff as f64
+        i = i + 1
+    }
+    x
+}
+
+fn check_level(bits: i32) -> i32 with Mut, Panic, Div {
+    let x = tower_vec(bits, 2)
+    let y = tower_vec(bits, 5)
+    if cd_level(&x) != bits { return 10 }
+
+    // Splitting and joining are exact inverses at every seam.
+    let halves = cd_split(x)
+    if !cd_eq(cd_join(halves.low, halves.high, bits), x) { return 11 }
+
+    // Conjugation respects the seam: conj(a,b) = (conj(a), -b).
+    let seam_conj = cd_join(cd_conj(halves.low), cd_scale(halves.high, 0.0 - 1.0), bits)
+    if !cd_eq(cd_conj(x), seam_conj) { return 12 }
+
+    // The independent recursive-doubling product equals the XOR/sign product.
+    let direct = cd_mul(x, y)
+    if !cd_eq(cd_mul_doubling(x, y), direct) { return 20 }
+
+    // Cayley-Dickson algebras remain power-associative at every tower level.
+    let xx = cd_mul(x, x)
+    if !cd_eq(cd_mul(xx, x), cd_mul(x, xx)) { return 21 }
+
+    if bits < 6 {
+        // The lower algebra embeds with a zero upper half, and the embedding is
+        // multiplicative: eta(xy) = eta(x)eta(y).
+        let ex = cd_embed(x, bits + 1)
+        let ey = cd_embed(y, bits + 1)
+        let embedded = cd_split(ex)
+        if !cd_eq(embedded.low, x) { return 30 }
+        if !cd_eq(embedded.high, cd_zero(bits)) { return 31 }
+        if !cd_eq(cd_join(embedded.low, embedded.high, bits + 1), ex) { return 32 }
+        if !cd_eq(cd_mul(ex, ey), cd_embed(direct, bits + 1)) { return 33 }
+        if !cd_eq(cd_mul_doubling(ex, ey), cd_mul(ex, ey)) { return 34 }
+    }
+    0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var bits: i32 = 1
+    while bits <= 6 {
+        let verdict = check_level(bits)
+        if verdict != 0 {
+            print("CAYLEY_DICKSON_TOWER_FAIL level=")
+            print_int(bits)
+            print(" code=")
+            print_int(verdict)
+            print("\n")
+            return verdict
+        }
+        bits = bits + 1
+    }
+    println("CAYLEY_DICKSON_TOWER_OK levels=6 max_dim=64")
+    return 0
+}
