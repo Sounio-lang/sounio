@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.stdlib-nb2-slot-cache.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-nb2-slot-cache.readme
+-->
+
 # Exact one-entry NB2 slot memoization experiment
 
 The reusable scalar NB2 slot can retain one successful result keyed by the exact triple
