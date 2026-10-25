@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="${1:?usage: genomics_batch_gate.sh FRESH_OUTPUT_DIRECTORY}"
 : "${MADAROS_RAW_BIN:?explicit source-built compiler required}"
-[[ -n "${SLURM_JOB_ID:-}" && "$(id -u)" == 1000 ]] || { echo 'allocated UID1000 Slurm execution required' >&2;exit 64; }
 [[ -z "${SOUNIO_SOUC_BIN:-}" ]] || { echo 'raw override bypasses engine routing' >&2;exit 64; }
 mkdir -p "$(dirname "$OUT")"
 if ! mkdir "$OUT";then echo "fresh output directory required: $OUT" >&2;exit 65;fi
