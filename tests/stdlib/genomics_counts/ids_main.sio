@@ -1,0 +1,134 @@
+// Packed fixtures use | only as a fixture separator, never as a production parser.
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+use genomics::count_identities::{CountIdentities,count_identities_payload,count_identities_build,count_identities_close,count_identities_status,count_identities_count,count_identities_unique,count_identities_comparisons,count_identities_group_of_original,count_identities_sorted_original,count_identities_id_length,count_identities_id_byte,count_identities_join_into}
+fn ids_fixture(text:string,policy:i64,budget:i64)->CountIdentities with Alloc,Mut,Div,Panic {
+ let length=str_len(text);var n:i64=0;var total:i64=0;var i:i64=0
+ if length>0 {n=1}
+ while i<length {if str_char_at(text,i)==124 {n=n+1}else{total=total+1};i=i+1}
+ var bytes=integer_buffer_new(total,total*8);var offsets=integer_buffer_new(n+1,(n+1)*8)
+ var order=integer_buffer_new(n,n*8);var groups=integer_buffer_new(n,n*8)
+ integer_buffer_set(&!offsets,0,0)
+ var index:i64=0;var position:i64=0;i=0
+ while i<length {
+  var b:i64=str_char_at(text,i) as i64
+  // Normalize only the string fixture adapter: seed char loads are signed.
+  if b<0 {b=b+256}
+  if b==124 {index=index+1;let ignored:i64=integer_buffer_set(&!offsets,index,position)}
+  else {integer_buffer_set(&!bytes,position,b);position=position+1}
+  i=i+1
+ }
+ if n>0 {integer_buffer_set(&!offsets,n,position)}
+ count_identities_build(bytes,offsets,order,groups,policy,budget)
+}
+fn ids_invalid_byte(value:i64) with Alloc,Mut,Div,Panic {
+ var bytes=integer_buffer_new(1,8);var offsets=integer_buffer_new(2,16)
+ var order=integer_buffer_new(1,8);var groups=integer_buffer_new(1,8)
+ integer_buffer_set(&!bytes,0,value);integer_buffer_set(&!offsets,0,0);integer_buffer_set(&!offsets,1,1)
+ let ids=count_identities_build(bytes,offsets,order,groups,0,100)
+ assert(count_identities_status(&ids)==2 && count_identities_count(&ids)==0 && count_identities_id_byte(&ids,0,0)==-1)
+ count_identities_close(ids)
+}
+fn ids_hex(d:i64)->i64 {if d<10 {48+d}else{87+d}}
+fn ids_large()->CountIdentities with Alloc,Mut,Div,Panic {
+ let n:i64=4097
+ var bytes=integer_buffer_new(n*8,n*64);var offsets=integer_buffer_new(n+1,(n+1)*8)
+ var order=integer_buffer_new(n,n*8);var groups=integer_buffer_new(n,n*8)
+ var i:i64=0
+ while i<n {
+  integer_buffer_set(&!offsets,i,i*8)
+  integer_buffer_set(&!bytes,i*8,103);integer_buffer_set(&!bytes,i*8+1,101)
+  integer_buffer_set(&!bytes,i*8+2,110);integer_buffer_set(&!bytes,i*8+3,101)
+  let index=n-1-i
+  integer_buffer_set(&!bytes,i*8+4,ids_hex((index/4096)%16))
+  integer_buffer_set(&!bytes,i*8+5,ids_hex((index/256)%16))
+  integer_buffer_set(&!bytes,i*8+6,ids_hex((index/16)%16))
+  integer_buffer_set(&!bytes,i*8+7,ids_hex(index%16));i=i+1
+ }
+ integer_buffer_set(&!offsets,n,n*8)
+ count_identities_build(bytes,offsets,order,groups,0,4000000)
+}
+fn ids_single_bytes()->CountIdentities with Alloc,Mut,Div,Panic {
+ let n:i64=252
+ var bytes=integer_buffer_new(n,n*8);var offsets=integer_buffer_new(n+1,(n+1)*8)
+ var order=integer_buffer_new(n,n*8);var groups=integer_buffer_new(n,n*8)
+ var b:i64=1;var i:i64=0
+ while b<=255 {
+  if b!=9 && b!=10 && b!=13 {integer_buffer_set(&!bytes,i,b);integer_buffer_set(&!offsets,i,i);i=i+1}
+  b=b+1
+ }
+ assert(i==n);integer_buffer_set(&!offsets,n,n)
+ count_identities_build(bytes,offsets,order,groups,0,100000)
+}
+fn ids_emit(ids:&CountIdentities,case_id:i64) with IO,Mut,Div,Panic {
+ let status:i64=count_identities_status(ids);let n:i64=count_identities_count(ids)
+ let unique:i64=count_identities_unique(ids);let compared:i64=count_identities_comparisons(ids)
+ println("ID_CASE {} {} {} {} {}",case_id,status,n,unique,compared)
+ var i:i64=0
+ while i<n {
+  let group:i64=count_identities_group_of_original(ids,i);let sorted:i64=count_identities_sorted_original(ids,i)
+  let length:i64=count_identities_id_length(ids,i)
+  println("ID_ROW {} {} {} {} {}",case_id,i,group,sorted,length)
+  var j:i64=0
+  while j<length {let b:i64=count_identities_id_byte(ids,i,j);println("ID_BYTE {} {} {} {}",case_id,i,j,b);j=j+1}
+  assert(count_identities_id_byte(ids,i,length)==-1);i=i+1
+ }
+ assert(count_identities_id_length(ids,-1)==-1 && count_identities_sorted_original(ids,n)==-1)
+}
+fn ids_join_tests() with Alloc,Mut,Div,Panic,IO {
+ let left=ids_fixture("geneC|geneA|geneB",0,1000)
+ let right=ids_fixture("geneB|geneC|geneA",0,1000)
+ let missing=ids_fixture("geneC|geneA|geneZ",0,1000)
+ let duplicate=ids_fixture("geneB|geneB",1,1000)
+ let empty=ids_fixture("",0,0)
+ var out=integer_buffer_new(4,32);var scratch=integer_buffer_new(4,32)
+ var i:i64=0;while i<4 {integer_buffer_set(&!out,i,99);i=i+1}
+ let joined=count_identities_join_into(&left,&right,0,1000,&!scratch,&!out)
+ assert(joined.status==0 && joined.matched==3 && joined.missing==0 && integer_buffer_at(&out,3)==99)
+ i=0;while i<3 {let value:i64=integer_buffer_at(&out,i);println("ID_JOIN {} {}",i,value);integer_buffer_set(&!out,i,77);i=i+1}
+ let refused=count_identities_join_into(&missing,&right,0,1000,&!scratch,&!out)
+ assert(refused.status==6)
+ i=0;while i<3 {assert(integer_buffer_at(&out,i)==77);i=i+1}
+ let capped=count_identities_join_into(&left,&right,0,1,&!scratch,&!out)
+ assert(capped.status==4 && capped.comparisons==1)
+ i=0;while i<3 {assert(integer_buffer_at(&out,i)==77);i=i+1}
+ let ambiguous=count_identities_join_into(&left,&duplicate,1,1000,&!scratch,&!out)
+ assert(ambiguous.status==5)
+ let absent=count_identities_join_into(&missing,&right,1,1000,&!scratch,&!out)
+ assert(absent.status==0 && absent.matched==2 && absent.missing==1)
+ i=0;while i<3 {let value:i64=integer_buffer_at(&out,i);println("ID_MISSING {} {}",i,value);i=i+1}
+ let none=count_identities_join_into(&empty,&right,0,0,&!scratch,&!out)
+ assert(none.status==0 && none.matched==0 && none.comparisons==0)
+ let no_right=count_identities_join_into(&left,&empty,1,0,&!scratch,&!out)
+ assert(no_right.status==0 && no_right.missing==3)
+ i=0;while i<3 {assert(integer_buffer_at(&out,i)==-1);i=i+1}
+ count_identities_close(left);count_identities_close(right);count_identities_close(missing);count_identities_close(duplicate);count_identities_close(empty)
+ integer_buffer_close(out);integer_buffer_close(scratch)
+}
+fn main()->i32 with Alloc,Mut,Div,Panic,IO {
+ let empty=ids_fixture("",0,0)
+ assert(count_identities_status(&empty)==0 && count_identities_count(&empty)==0 && count_identities_unique(&empty)==0)
+ ids_emit(&empty,0);count_identities_close(empty)
+ let ids=ids_fixture("geneB|geneA|geneB| GeneA|genea|é|é|with space|GeneA",1,10000)
+ assert(count_identities_status(&ids)==0 && count_identities_unique(&ids)==8)
+ ids_emit(&ids,1);count_identities_close(ids)
+ let rejected=ids_fixture("geneB|geneA|geneB",0,10000)
+ assert(count_identities_status(&rejected)==3 && count_identities_group_of_original(&rejected,0)==-1)
+ count_identities_close(rejected)
+ let capped=ids_fixture("abc|abd",0,0)
+ assert(count_identities_status(&capped)==4 && count_identities_comparisons(&capped)==0)
+ count_identities_close(capped)
+ let bad_empty=ids_fixture("a||b",1,1000)
+ assert(count_identities_status(&bad_empty)==2);count_identities_close(bad_empty)
+ ids_invalid_byte(0);ids_invalid_byte(9);ids_invalid_byte(10);ids_invalid_byte(13);ids_invalid_byte(-1);ids_invalid_byte(256)
+ assert(count_identities_payload(9223372036854775807,1).status==1 && count_identities_payload(1,9223372036854775807).status==1)
+ let large=ids_large()
+ assert(count_identities_status(&large)==0 && count_identities_count(&large)==4097 && count_identities_unique(&large)==4097)
+ ids_emit(&large,2);count_identities_close(large)
+ let single=ids_single_bytes()
+ assert(count_identities_status(&single)==0 && count_identities_unique(&single)==252)
+ ids_emit(&single,3);count_identities_close(single)
+ ids_join_tests()
+ println("ID_REFUSALS duplicate3 budget4 byte2 empty2 join_missing6 join_budget4 ambiguous5")
+ println("COUNT_IDENTITIES_PASS")
+ 0
+}
