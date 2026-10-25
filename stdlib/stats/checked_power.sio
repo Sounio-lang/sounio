@@ -1,0 +1,191 @@
+// Genuine noncentral-t rejection probabilities and checked minimum-n search.
+// One-sided means the right-tail alternative; signed d keeps its direction.
+// Two-sided power is invariant under sign(d). No shifted-t fallback is used.
+use math::pure::{is_finite,ln_checked,exp,sqrt}
+use math::logarithmic::{log1p_checked}
+use stats::noncentral_t::{CheckedNctTails,noncentral_t_tails_checked,noncentral_t_quantile_checked}
+
+pub struct CheckedPower {
+ pub status:i64,pub value:f64,pub log_value:f64,pub value_available:bool,pub log_available:bool,
+ pub critical:f64,pub critical_available:bool,pub critical_evaluations:i64,pub cdf_evaluations:i64,
+ pub mixture_terms:i64,pub quadrature_evaluations:i64,pub truncation_evaluations:i64,
+}
+pub struct CheckedSampleSize {
+ pub status:i64,pub n:i64,pub available:bool,pub candidate_n:i64,
+ pub previous_power:f64,pub power:f64,pub previous_available:bool,pub power_available:bool,
+ pub at_domain_boundary:bool,pub verified:bool,pub decision_margin:f64,pub evaluations:i64,pub cap:i64,
+}
+fn cp_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn cp_options(budget:i64,tol:f64)->bool {budget>=1 && budget<=1000000 && tol>=1.7763568394002505e-15 && tol<=1.0e-4}
+fn cp_empty(status:i64)->CheckedPower {
+ CheckedPower{status:status,value:0.0,log_value:0.0,value_available:false,log_available:false,
+ critical:0.0,critical_available:false,critical_evaluations:0,cdf_evaluations:0,
+ mixture_terms:0,quadrature_evaluations:0,truncation_evaluations:0}
+}
+fn cp_controls(d:f64,n:i64,alpha:f64,budget:i64,tol:f64)->i64 {
+ if !is_finite(d) || !is_finite(alpha) || !is_finite(tol) {return 2}
+ if n<2 || alpha<=0.0 || alpha>=1.0 || !cp_options(budget,tol) {return 1}
+ if n>1000000 {return 5}
+ 0
+}
+fn cp_logadd(a:f64,b:f64)->f64 with Mut,Div,Panic {
+ let larger=if a>b {a}else{b}
+ let smaller=if a>b {b}else{a}
+ larger+log1p_checked(exp(smaller-larger)).value
+}
+fn cp_from_log(log_value:f64)->CheckedPower with Mut,Div,Panic {
+ if !is_finite(log_value) || log_value>0.0 {return cp_empty(4)}
+ let value=exp(log_value)
+ var out=cp_empty(0)
+ out.log_value=log_value;out.log_available=true
+ out.value=if value>0.0 && is_finite(value) {value}else{0.0}
+ out.value_available=value>0.0 && is_finite(value)
+ out
+}
+// Preserve measured work even when a completed intermediate cannot be used.
+fn cp_attach_work(out:&!CheckedPower,work:&CheckedPower) with Mut {
+ out.critical=work.critical;out.critical_available=work.critical_available
+ out.critical_evaluations=work.critical_evaluations;out.cdf_evaluations=work.cdf_evaluations
+ out.mixture_terms=work.mixture_terms;out.quadrature_evaluations=work.quadrature_evaluations
+ out.truncation_evaluations=work.truncation_evaluations
+}
+fn cp_refuse(work:&CheckedPower,status:i64)->CheckedPower with Mut {
+ var out=cp_empty(status)
+ cp_attach_work(&!out,work)
+ out
+}
+fn cp_tail_work(work:&!CheckedPower,tail:&CheckedNctTails) with Mut {
+ work.cdf_evaluations=work.cdf_evaluations+1
+ work.mixture_terms=work.mixture_terms+tail.mixture_terms
+ work.quadrature_evaluations=work.quadrature_evaluations+tail.quadrature_evaluations
+ work.truncation_evaluations=work.truncation_evaluations+tail.truncation_evaluations
+}
+fn cp_power(d:f64,n:i64,alpha:f64,two_sided:bool,per_group:bool,budget:i64,tol:f64)->CheckedPower with Mut,Div,Panic {
+ let status=cp_controls(d,n,alpha,budget,tol)
+ if status!=0 {return cp_empty(status)}
+ if d==0.0 {
+  let logged=ln_checked(alpha)
+  if logged.status!=0 {return cp_empty(4)}
+  var out=cp_empty(0)
+  out.value=alpha;out.value_available=true;out.log_value=logged.value;out.log_available=true
+  return out
+ }
+ let nf=n as f64
+ let df=if per_group {2.0*nf-2.0}else{nf-1.0}
+ let effect=if two_sided {cp_abs(d)}else{d}
+ let delta=effect*sqrt(if per_group {nf*0.5}else{nf})
+ if !is_finite(delta) || cp_abs(delta)>128.0 {return cp_empty(5)}
+ let tail=if two_sided {alpha*0.5}else{alpha}
+ if tail<=0.0 {return cp_empty(5)}
+ let critical=noncentral_t_quantile_checked(df,0.0,tail,true,budget,tol)
+ var work=cp_empty(0)
+ work.critical_evaluations=critical.evaluations
+ if critical.status!=0 || !critical.available {return cp_refuse(&work,if critical.status!=0 {critical.status}else{5})}
+ work.critical=critical.value;work.critical_available=true
+ let upper=noncentral_t_tails_checked(critical.value,df,delta,budget,tol)
+ cp_tail_work(&!work,&upper)
+ if upper.status!=0 {return cp_refuse(&work,upper.status)}
+ var out=cp_empty(0)
+ if !two_sided {
+  out.value=upper.sf;out.value_available=upper.sf_available
+  out.log_value=upper.log_sf;out.log_available=upper.log_sf_available
+ }else{
+  let lower=noncentral_t_tails_checked(-critical.value,df,delta,budget,tol)
+  cp_tail_work(&!work,&lower)
+  if lower.status!=0 {return cp_refuse(&work,lower.status)}
+  if !upper.log_cdf_available || !lower.log_cdf_available {return cp_refuse(&work,5)}
+  // Non-rejection is F(c)-F(-c). Compute its positive difference in log
+  // space when rejection is large; this avoids adding a rounded unit SF.
+  let rejection_log=if upper.log_sf_available {cp_logadd(upper.log_sf,lower.log_cdf)}else{0.0}
+  if upper.log_sf_available && rejection_log<= -0.1053605156578263 {
+   out=cp_from_log(rejection_log)
+  }else{
+   if lower.log_cdf>=upper.log_cdf {return cp_refuse(&work,5)}
+   let ratio=exp(lower.log_cdf-upper.log_cdf)
+   if ratio>=0.9999 {return cp_refuse(&work,5)}
+   let logged=log1p_checked(-ratio)
+   if logged.status!=0 {return cp_refuse(&work,4)}
+   let nonrejection_log=upper.log_cdf+logged.value
+   let nonrejection=exp(nonrejection_log)
+   if !is_finite(nonrejection) || nonrejection<0.0 || nonrejection>=1.0 {return cp_refuse(&work,4)}
+   out.value=1.0-nonrejection;out.value_available=true
+   if nonrejection>0.0 {
+    let log_power=log1p_checked(-nonrejection)
+    if log_power.status!=0 {return cp_refuse(&work,4)}
+    out.log_value=log_power.value;out.log_available=true
+   }
+  }
+ }
+ cp_attach_work(&!out,&work)
+ out
+}
+pub fn power_onesample_checked(d:f64,n:i64,alpha:f64,two_sided:bool,budget:i64,tol:f64)->CheckedPower with Mut,Div,Panic {cp_power(d,n,alpha,two_sided,false,budget,tol)}
+pub fn power_twosample_checked(d:f64,n:i64,alpha:f64,two_sided:bool,budget:i64,tol:f64)->CheckedPower with Mut,Div,Panic {cp_power(d,n,alpha,two_sided,true,budget,tol)}
+fn cp_size_empty(status:i64,evaluations:i64,cap:i64)->CheckedSampleSize {
+ CheckedSampleSize{status:status,n:0,available:false,candidate_n:0,previous_power:0.0,power:0.0,
+ previous_available:false,power_available:false,at_domain_boundary:false,verified:false,
+ decision_margin:0.0,evaluations:evaluations,cap:cap}
+}
+fn cp_minimum(d:f64,target:f64,alpha:f64,two_sided:bool,per_group:bool,cap:i64,budget:i64,tol:f64)->CheckedSampleSize with Mut,Div,Panic {
+ let status=cp_controls(d,2,alpha,budget,tol)
+ if status!=0 {return cp_size_empty(status,0,cap)}
+ if !is_finite(target) {return cp_size_empty(2,0,cap)}
+ if target<=0.0 || target>=1.0 || cap<2 {return cp_size_empty(1,0,cap)}
+ if cap>1000000 {return cp_size_empty(5,0,cap)}
+ // Exact stochastic bound for the right-sided wrong-direction alternative.
+ if !two_sided && d<0.0 && target>=alpha {return cp_size_empty(7,0,cap)}
+ if d==0.0 && target>alpha {return cp_size_empty(7,0,cap)}
+ let initial=cp_power(d,2,alpha,two_sided,per_group,budget,tol)
+ var evaluations:i64=1
+ if initial.status!=0 || !initial.value_available {return cp_size_empty(if initial.status!=0 {initial.status}else{5},evaluations,cap)}
+ if initial.value>=target {
+  if d!=0.0 && initial.value-target<=16.0*tol {return cp_size_empty(5,evaluations,cap)}
+  var result=cp_size_empty(0,evaluations,cap)
+  result.n=2;result.candidate_n=2;result.available=true;result.at_domain_boundary=true;result.verified=true
+  result.power=initial.value;result.power_available=true;result.decision_margin=initial.value-target
+  return result
+ }
+ // Monotone increasing search is restricted to the correctly directed
+ // alternative (two-sided uses abs(d)); no guessed n for negative effects.
+ if !two_sided && d<0.0 {return cp_size_empty(5,evaluations,cap)}
+ var lo:i64=2
+ var hi:i64=2
+ var low_power=initial.value
+ var high_power=initial.value
+ var found=false
+ while !found && hi<cap && evaluations<budget {
+  let next=if hi>cap/2 {cap}else{hi*2}
+  let sample=cp_power(d,next,alpha,two_sided,per_group,budget,tol)
+  evaluations=evaluations+1
+  if sample.status!=0 || !sample.value_available {return cp_size_empty(if sample.status!=0 {sample.status}else{5},evaluations,cap)}
+  hi=next;high_power=sample.value
+  if high_power>=target {found=true}else{lo=hi;low_power=high_power}
+ }
+ if !found {
+  var result=cp_size_empty(if hi==cap {6}else{3},evaluations,cap)
+  result.candidate_n=hi;result.power=high_power;result.power_available=true
+  return result
+ }
+ while hi-lo>1 && evaluations<budget {
+  let midpoint=lo+(hi-lo)/2
+  let sample=cp_power(d,midpoint,alpha,two_sided,per_group,budget,tol)
+  evaluations=evaluations+1
+  if sample.status!=0 || !sample.value_available {return cp_size_empty(if sample.status!=0 {sample.status}else{5},evaluations,cap)}
+  if sample.value>=target {hi=midpoint;high_power=sample.value}else{lo=midpoint;low_power=sample.value}
+ }
+ if hi-lo!=1 {return cp_size_empty(3,evaluations,cap)}
+ if !(low_power<target && high_power>=target) {return cp_size_empty(5,evaluations,cap)}
+ let left_margin=target-low_power
+ let right_margin=high_power-target
+ let margin=if left_margin<right_margin {left_margin}else{right_margin}
+ // A conservative decision guard around numerical equality is not an accuracy
+ // certificate; boundary targets remain explicitly unavailable.
+ if margin<=16.0*tol {return cp_size_empty(5,evaluations,cap)}
+ var result=cp_size_empty(0,evaluations,cap)
+ result.n=hi;result.available=true;result.candidate_n=hi;result.verified=true
+ result.previous_power=low_power;result.previous_available=true;result.power=high_power;result.power_available=true
+ result.decision_margin=margin
+ result
+}
+pub fn n_for_power_onesample_checked(d:f64,target:f64,alpha:f64,two_sided:bool,cap:i64,budget:i64,tol:f64)->CheckedSampleSize with Mut,Div,Panic {cp_minimum(d,target,alpha,two_sided,false,cap,budget,tol)}
+pub fn n_for_power_twosample_checked(d:f64,target:f64,alpha:f64,two_sided:bool,cap:i64,budget:i64,tol:f64)->CheckedSampleSize with Mut,Div,Panic {cp_minimum(d,target,alpha,two_sided,true,cap,budget,tol)}
