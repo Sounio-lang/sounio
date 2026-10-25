@@ -55,8 +55,20 @@ silently narrowing the run.
 
 ## Verifying that no gate was dropped
 
-The gates a workflow invokes are a set, so a change to `ci.yml` can be checked
-by comparing that set before and after:
+This is already enforced, and the enforcement is worth knowing about before
+touching `ci.yml`.
+
+`scripts/ci/gate_workflow_reference_ratchet.sh` freezes the number of gate
+scripts that no workflow names. All 300 gate scripts `ci.yml` invokes are named
+by `ci.yml` alone — none of them appears in another workflow — so removing one
+from `ci.yml` makes it unnamed, the frozen count rises, and the ratchet fails.
+A restructure that drops a gate cannot pass quietly.
+
+`scripts/dev/check_workflow_script_refs.sh` covers the other direction: every
+`scripts/...` path a workflow names must exist and be executable.
+
+As a cross-check while restructuring, the set comparison is still worth running,
+because it names the specific gates rather than only counting them:
 
 ```bash
 git show origin/main:.github/workflows/ci.yml | grep -oE 'scripts/[a-z0-9_/.-]+\.(sh|py)' | sort -u > /tmp/before
@@ -64,6 +76,6 @@ grep -oE 'scripts/[a-z0-9_/.-]+\.(sh|py)' .github/workflows/ci.yml | sort -u > /
 comm -23 /tmp/before /tmp/after   # must be empty
 ```
 
-This is how the reconciliation that introduced these layers was checked: main
+That is how the reconciliation that introduced these layers was checked: main
 invoked 303 gate scripts and the layered workflow still invokes 303, with an
 empty difference.
