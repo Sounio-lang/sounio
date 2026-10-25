@@ -1,0 +1,99 @@
+//@ run-pass
+//@ expect-stdout: PHONON_FACTOR_STATUS_PASS
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_set,numeric_buffer_close}
+use physics::phonon_factor::*
+use physics::pbpk_phonon::{phonon_liver_cycle_checked}
+fn zeros(n:i64)->NumericBuffer with Alloc,Mut,Div,Panic {var b=numeric_buffer_new(n,n*8);var i:i64=0;while i<n {assert(numeric_buffer_set(&!b,i,0.0)==0);i=i+1};b}
+fn base_params()->PhononParams {PhononParams{d_eff:0.0,dx:1.0,k_release:1.0,cl_site:0.0,fu:0.1,kp:1.0,c_portal:0.0,c_ha:0.0,f_heart:1.0,a_portal:0.0,a_ha:0.0,phi_ha:0.0,c_tissue:0.0,v_blood:0.0,zonation:1.0}}
+fn emit(name:string,x:f64) with IO {print("PHONON_VALUE ");print(name);print(" ");print_int(f64_to_bits(x));println("")}
+fn status(name:string,code:i64) with IO {print("PHONON_STATUS ");print(name);print(" ");print_int(code);println("")}
+fn result(name:string,r:PhononResult) with IO,Panic {assert(r.uncertainty_model==2 && r.first_order);status(name,r.status)}
+fn constructor_case(kind:i64) with Alloc,IO,Mut,Div,Panic {
+ let n:i64=if kind==1 {0}else{if kind==2 {65}else{1}}
+ let k:i64=if kind==3 {9223372036854775807}else{if kind==4||kind==7 {1}else{0}}
+ let flen:i64=if kind==4 {15}else{if kind==7 {16}else{0}}
+ var values=zeros(n);var factor=zeros(flen)
+ let nan:f64=bits_to_f64(9221120237041090560)
+ if kind==5 {numeric_buffer_set(&!values,0,-1.0)}
+ if kind==6 {numeric_buffer_set(&!values,0,nan)}
+ if kind==7 {numeric_buffer_set(&!factor,9,nan)}
+ var p=base_params()
+ if kind==8 {p.kp=0.0}
+ if kind==9 {p.dx=0.0}
+ if kind==10 {p.v_blood=-1.0}
+ if kind==11 {p.fu=1.1}
+ if kind==12 {p.a_ha=1.1}
+ if kind==13 {p.zonation=0.0}
+ if kind==14 {p.f_heart=-1.0}
+ let s=phonon_from_factor(values,factor,p,k,0.0)
+ print("PHONON_STATUS ctor.");print_int(kind);print(" ");print_int(phonon_state_status(&s));println("")
+ let unavailable=phonon_concentration(&s,0)
+ assert(unavailable.status!=0 && unavailable.value==0.0)
+ phonon_close(s)
+}
+fn atomic_case() with Alloc,IO,Mut,Div,Panic {
+ var values=zeros(1);numeric_buffer_set(&!values,0,1.0)
+ var factor=zeros(16);numeric_buffer_set(&!factor,0,0.1)
+ var s=phonon_from_factor(values,factor,base_params(),1,0.0);assert(phonon_state_status(&s)==0)
+ var work=zeros(10);var small_work=zeros(9);var small_average=zeros(3)
+ let nan:f64=bits_to_f64(9221120237041090560);let inf:f64=bits_to_f64(9218868437227405312)
+ let a=phonon_simulate_checked(&!s,&!work,1.0,0.0,10,0);result("zero_dt",a)
+ let b=phonon_simulate_checked(&!s,&!work,1.0,-0.01,10,0);result("negative_dt",b)
+ let c=phonon_simulate_checked(&!s,&!work,1.0,nan,10,0);result("nan_dt",c)
+ let d=phonon_simulate_checked(&!s,&!work,inf,0.01,10,0);result("infinite_target",d)
+ let e=phonon_simulate_checked(&!s,&!work,1.0,0.01,0,0);result("invalid_budget",e)
+ let f=phonon_simulate_checked(&!s,&!work,1.0,0.01,10,1);result("explicit_Q",f)
+ let g=phonon_simulate_checked(&!s,&!small_work,1.0,0.01,10,0);result("scratch",g)
+ let h=phonon_step_checked(&!s,&!work,0.0);result("zero_step",h)
+ let i=phonon_step_checked(&!s,&!work,0.6);result("unsafe_step",i)
+ let j=phonon_step_checked(&!s,&!work,nan);result("nan_step",j)
+ let k=phonon_simulate_checked(&!s,&!work,-1.0,0.01,10,0);result("backward",k)
+ let l=phonon_liver_cycle_checked(&!s,&!work,&!small_average,0.01,10);status("cycle_scratch",l.status)
+ let x=phonon_concentration(&s,0);let v=phonon_covariance(&s,0,0);let sf=phonon_factor_entry(&s,0,0)
+ assert(x.status==0&&v.status==0&&sf.status==0)
+ emit("guard.atomic.mean",x.value);emit("guard.atomic.variance",v.value);emit("guard.atomic.factor",sf.value);emit("guard.atomic.time",phonon_state_time(&s))
+ phonon_close(s);numeric_buffer_close(work);numeric_buffer_close(small_work);numeric_buffer_close(small_average)
+}
+fn progress_case() with Alloc,IO,Mut,Div,Panic {
+ var values=zeros(1);numeric_buffer_set(&!values,0,1.0)
+ let factor=zeros(0)
+ var s=phonon_from_factor(values,factor,base_params(),0,1e20);assert(phonon_state_status(&s)==0)
+ var work=zeros(5)
+ let r=phonon_simulate_checked(&!s,&!work,1e20+65536.0,1.0,10,0);result("progress",r)
+ emit("guard.progress.time",phonon_state_time(&s));let x=phonon_concentration(&s,0);assert(x.status==0);emit("guard.progress.mean",x.value)
+ phonon_close(s);numeric_buffer_close(work)
+}
+fn budget_case() with Alloc,IO,Mut,Div,Panic {
+ var values=zeros(1);numeric_buffer_set(&!values,0,1.0)
+ let factor=zeros(0)
+ var s=phonon_from_factor(values,factor,base_params(),0,0.0);assert(phonon_state_status(&s)==0)
+ var work=zeros(5)
+ let r=phonon_simulate_checked(&!s,&!work,1.0,0.001,1,0);result("budget",r)
+ assert(r.steps==1&&r.nfeval==4)
+ emit("guard.budget.time",phonon_state_time(&s));let x=phonon_concentration(&s,0);assert(x.status==0);emit("guard.budget.mean",x.value)
+ phonon_close(s);numeric_buffer_close(work)
+}
+fn tiny_time_case() with Alloc,IO,Mut,Div,Panic {
+ var values=zeros(1);numeric_buffer_set(&!values,0,1.0)
+ let factor=zeros(0)
+ var s=phonon_from_factor(values,factor,base_params(),0,0.0);assert(phonon_state_status(&s)==0)
+ var work=zeros(5)
+ let r=phonon_simulate_checked(&!s,&!work,1e-20,1e-21,20,0);result("tiny_time",r)
+ emit("guard.tiny.steps",r.steps as f64);emit("guard.tiny.nfeval",r.nfeval as f64);emit("guard.tiny.time",phonon_state_time(&s));let x=phonon_concentration(&s,0);assert(x.status==0);emit("guard.tiny.mean",x.value)
+ phonon_close(s);numeric_buffer_close(work)
+}
+fn cycle_invalid_case() with Alloc,IO,Mut,Div,Panic {
+ var values=zeros(1);numeric_buffer_set(&!values,0,1.0)
+ let factor=zeros(0);var p=base_params();p.f_heart=0.0
+ var s=phonon_from_factor(values,factor,p,0,0.0);assert(phonon_state_status(&s)==0)
+ var work=zeros(5);var average=zeros(2)
+ let a=phonon_liver_cycle_checked(&!s,&!work,&!average,0.001,10);status("cycle_zero_frequency",a.status)
+ let b=phonon_liver_cycle_checked(&!s,&!work,&!average,0.0,10);status("cycle_zero_step",b.status)
+ emit("guard.cycle_invalid.time",phonon_state_time(&s))
+ phonon_close(s);numeric_buffer_close(work);numeric_buffer_close(average)
+}
+fn main()->i32 with Alloc,IO,Mut,Div,Panic {
+ var kind:i64=1;while kind<=14 {constructor_case(kind);kind=kind+1}
+ atomic_case();progress_case();budget_case();tiny_time_case();cycle_invalid_case()
+ println("PHONON_FACTOR_STATUS_PASS");0
+}
