@@ -1,0 +1,1 @@
+Four executable scientific examples now connect the production Poisson, CSR normalization, Kaplan–Meier and DP54 event APIs to native Canvas and SVG figures. An independent C++23 gate checks scientific values, figure geometry, pixels, export roundtrips and specific corrupted-output controls; each example documents its scientific and uncertainty limits.
