@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Run in a frozen source packet on a Slurm worker, under UID1000.
+# Native Linux replay; retained qualification jobs record Slurm UID1000.
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$root"
 : "${PHONON_GATE_OUTPUT:?select a new empty output directory}"
 : "${MADAROS_RAW_BIN:?pin a verified absolute compiler ELF}"
 [[ $MADAROS_RAW_BIN == /* && -x $MADAROS_RAW_BIN ]]
-[[ $(id -u) == 1000 ]]
+[[ $(uname -s) == Linux ]]
 [[ ! -e $PHONON_GATE_OUTPUT ]] || { echo 'output must not exist' >&2;exit 2; }
 mkdir -p "$PHONON_GATE_OUTPUT";out=$(cd "$PHONON_GATE_OUTPUT" && pwd)
+id > "$out/IDENTITY.txt"
 export SOUNIO_STDLIB_PATH="$root/stdlib" SOUNIO_MADAROS_NOCACHE=1 SOUNIO_MADAROS_CACHE_READONLY=1
 ulimit -s 524288
 ulimit -c 0
@@ -23,9 +24,11 @@ for name in core si status;do
  timeout 180 bin/souc check "$src" >"$out/$name.check.stdout" 2>"$out/$name.check.stderr"
  timeout 240 bin/souc compile "$src" -o "$out/$name.elf" >"$out/$name.compile.stdout" 2>"$out/$name.compile.stderr"
  chmod +x "$out/$name.elf";sha256sum "$out/$name.elf">"$out/$name.ELF.sha256"
+ cat "$out/$name.ELF.sha256" >> "$out/ELFS.sha256"
  /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kib=%M\nexit_code=%x' -o "$out/$name.resource" timeout 120 "$out/$name.elf" >"$out/$name.native.stdout" 2>"$out/$name.native.stderr"
 done
 timeout 180 g++ -std=c++23 -O2 -Wall -Wextra -Werror tests/reference/phonon_factor_reference.cpp -o "$out/reference" >"$out/cpp.stdout" 2>"$out/cpp.stderr"
+sha256sum "$out/reference" >> "$out/ELFS.sha256"
 "$out/reference" selftest > "$out/selftest.stdout"
 for mode in core si status;do
  "$out/reference" "$mode" "$out/$mode.native.stdout" >"$out/$mode.reference.stdout" 2>"$out/$mode.reference.stderr"
@@ -42,7 +45,11 @@ sha256sum "$src" docs/evidence/stdlib-SIO-172/before_variance/phonon_original.si
 timeout 180 bin/souc check "$src" >"$out/before.check.stdout" 2>"$out/before.check.stderr"
 timeout 240 bin/souc compile "$src" -o "$out/before.elf" >"$out/before.compile.stdout" 2>"$out/before.compile.stderr"
 chmod +x "$out/before.elf";sha256sum "$out/before.elf">"$out/before.ELF.sha256"
+cat "$out/before.ELF.sha256" >> "$out/ELFS.sha256"
 timeout 30 "$out/before.elf" >"$out/before.native.stdout" 2>"$out/before.native.stderr"
 grep -Eq '^LEGACY_WRONG_VARIANCE_RHS_WITNESS$' "$out/before.native.stdout"
 sha256sum -c "$out/SOURCE.sha256">"$out/SOURCE.verify.txt"
+sha256sum -c "$out/BEFORE.sha256" > "$out/BEFORE.verify.txt"
+sha256sum -c "$out/COMPILER.sha256" > "$out/COMPILER.verify.txt"
+sha256sum -c "$out/ELFS.sha256" > "$out/ELFS.verify.txt"
 echo 'PHONON_FACTOR_GATE_PASS'
