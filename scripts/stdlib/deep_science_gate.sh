@@ -557,6 +557,13 @@ rc=0
 # normalization_into_reference through the oracle queue above.)
 LN_BOUNDARY_OUT="$out/math-pure-ln-boundary" bash scripts/stdlib/math_pure_ln_boundary_gate.sh > "$out/math-pure-ln-boundary.log" 2>&1 || rc=$?
 record concordance math-pure-ln-boundary "$rc"
+
+# DP5(4) FSAL, quartic dense output and event contracts: actual native + C++.
+# Optional DP54_SEED_BIN selects a second independently receipted engine.
+rc=0
+DP54_GATE_OUTPUT="$out/dp54-focused" MADAROS_RAW_BIN="$MADAROS_RAW_BIN" \
+ timeout 900 bash scripts/stdlib/dp54_dense_events_gate.sh > "$out/dp54-focused.stdout" 2> "$out/dp54-focused.stderr" || rc=$?
+record focused-gate dp54-dense-events "$rc"
 }
 
 # Both partitions remain mandatory in CI; standalone all preserves the original order.
