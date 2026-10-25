@@ -1,0 +1,1 @@
+CI now reports fast, deep and exhaustive qualification as separate checks. `Fast PR Gate` requires the cheap jobs, `Deep Compiler Gate` requires the compiler qualification set, and `CI Decision` stays the single verdict. Each layer fails when a job it covers did not succeed, and fails again if a job is dropped from that layer's `needs`, so a layer cannot pass by checking less.
