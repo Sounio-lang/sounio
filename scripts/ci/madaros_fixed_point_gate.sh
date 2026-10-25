@@ -33,7 +33,7 @@
 # short and when it goes further — a ratchet, so ground gained cannot be lost
 # silently and ground gained is not absorbed silently either.
 #
-# The default is `run`. History of the ratchet, each step a recorded gain:
+# The default is `gen3`. History of the ratchet, each step a recorded gain:
 #   - `none` when written: measured 2026-08-04 against origin/main 40116b661d,
 #     gen1 reported 3635 errors on main.sio and never reached lowering.
 #   - `check` as of 2026-08-05: `madaros check self-hosted/compiler/main.sio`
@@ -44,6 +44,11 @@
 #     (self-hosted/ir/lower.sio): before, arg_list_get read ArgList.len from a
 #     legacy-hash slot and gen2 SIGSEGV'd on --version. See the field-idx /
 #     ArgList-offset fix for the full root cause.
+#   - `gen3` as of 2026-10-25 (PR #3046, f078496f, proof 40182398198): gen2
+#     compiles main.sio to a gen3 ELF with rc 0 (Merged IR: 15028 functions).
+#     gen3 is not yet a fixed point: its payload differs from gen2's and
+#     `gen3 --version` dies with SIGSEGV, so gen2 still miscompiles part of
+#     its own source. That is the next wall.
 #
 # The historical wall was named and loud, which is the point of the whole line:
 #
@@ -122,7 +127,7 @@ if [[ -z "${_MADAROS_FP_INNER:-}" && -n "${SOUNIO_MADAROS_CACHE:-}" && -x "${MAD
       # Absolute paths are used as given; relative ones resolve from ROOT_DIR.
       if [[ "$_fp_src" == /* ]]; then _fp_src_path="$_fp_src"; else _fp_src_path="$ROOT_DIR/$_fp_src"; fi
       if [[ -f "$_fp_src_path" ]]; then sha256sum "$_fp_src_path" | cut -c1-64; else echo "src-missing"; fi
-      echo "expect=${SOUNIO_MADAROS_FP_EXPECT:-run}"
+      echo "expect=${SOUNIO_MADAROS_FP_EXPECT:-gen3}"
       echo "min_into_acc_done=${SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE:-40}"
     } | sha256sum | cut -c1-64
   )"
@@ -150,7 +155,7 @@ fi
 gate_name "madaros_fixed_point"
 
 SRC="${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}"
-EXPECT="${SOUNIO_MADAROS_FP_EXPECT:-run}"
+EXPECT="${SOUNIO_MADAROS_FP_EXPECT:-gen3}"
 MIN_INTO_ACC_DONE="${SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE:-40}"
 MADAROS="${MADAROS_BIN:-}"
 IR_MAX_FUNCS="$(sed -nE 's/^pub let IR_MAX_FUNCS: i64 = ([0-9]+).*$/\1/p' self-hosted/ir/ir.sio | head -1)"
@@ -289,7 +294,9 @@ else
 
       # ── rung: gen3 ──────────────────────────────────────────────────────────
       echo "[rung gen3] gen2 compiles $SRC"
-      souc_compile "$GEN2" "$SRC" "$GEN3" >"$WORK/gen3.log" 2>&1
+      # The symbol map names the function at a gen3 crash (gen3 --version), the
+      # way gen2.map does for gen2.
+      ( export SOUNIO_NV2_SYMBOL_MAP="$GEN3.map"; souc_compile "$GEN2" "$SRC" "$GEN3" ) >"$WORK/gen3.log" 2>&1
       GEN3_RC=$?
       echo "           rc=$GEN3_RC"
       if [[ "$GEN3_RC" -ne 0 || ! -s "$GEN3" ]]; then
