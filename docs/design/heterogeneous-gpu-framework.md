@@ -755,3 +755,29 @@ OBSERVED, workspace, canonical prompt, five next-token terms:
 
 A third step raised the loss (6.92). The run stops at two. The smoke
 script type-checks the file and does not run it.
+
+
+## 26. On-device forward (2026-10-25, OBSERVED)
+
+The path that uploaded an activation, ran one projection and copied the vector back measured 0.496 s/token on job 17039. The forward in this section keeps the weights, the KV cache and the activations on the L4. The host receives the logits of the last position and nothing else in between.
+
+A decode step, and a prefill of at most eight tokens, runs as follows.
+
+- RMSNorm, one block per row. The reciprocal square root is `rsqrt.approx` plus two Newton steps, in f32.
+- GEMM. For M of 1 to 16, one skinny launch: each column reads its element of B once and reuses it across the rows. For M of 16 or more, when M, N and K are multiples of the tensor-core tile, the kernel is `mma.sync.aligned.m16n8k16` with bf16 operands and an f32 accumulator. Any other shape uses the skinny kernel in chunks of 16 rows. The bf16 file is converted to resident f32 once, at upload.
+- RoPE angles are computed on the host with `math::pure`, so they match the CPU forward, and then uploaded. The rotation is a device kernel.
+- Causal attention is one launch per head: the score, the softmax and the AV product. The score matrix stays in shared memory.
+- Residual, SwiGLU, the output projection, and the same contract on all 30 layers. The LM head runs once, on the last row.
+
+`llama_forward` is unchanged. `llm serve` calls `llama_forward_dev` once `dev_open` has succeeded. Each request calls `dev_reset`, so the device KV cache does not cross requests.
+
+Gate. Job 17500, partition `bench`, node `gpuorangefs-r770-proxmox`, SmolLM2-135M, token ids 0, 504, 3575, 282, 4649, 314. The clock is `date +%s%N` on the job script, one stamp per line.
+
+- Prefill argmax, CPU and device: 7042.
+- Greedy continuation, eight tokens, both paths: 7042, 30, 657, 314, 260, 3995, 2240, 281.
+- Maximum absolute logit difference on that prefill: 3.37e-5 (the program printed 33715 at a scale of 1e9).
+- After one warm step, seven forwards span 515629394 ns, which is 0.0737 s/token. The threshold is 0.100 s. An earlier binary on the same prompt, with attention on a single thread per head and a fresh driver lookup on every launch, measured 0.1067 s/token (job 17499, 746740015 ns over the same seven forwards). That binary did not meet the threshold. Job 17500 is the cut that did.
+
+The MMA module loaded (`mma=1`). The measured steps have M of 1 and of 6, so they used the skinny kernel. The tensor-core kernel is the dispatch for a tile-aligned M of 16 or more; this gate does not exercise it.
+
+The device prefill of the six prompt tokens, outside the per-token window, took 74747954 ns.

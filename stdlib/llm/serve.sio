@@ -28,6 +28,7 @@ use llm::bpe::{Bpe, bpe_decode_token, bpe_encode}
 use hetero::cuda_exec::{CudaExec}
 use hetero::runtime::{Runtime}
 use llm::llama::{KvCache, Llama, kv_free, kv_new, llama_forward, llama_forward_rt}
+use llm::llama_dev::{dev_open, dev_ready, dev_reset, llama_forward_dev}
 use llm::sample::{rng_new, sample_token}
 use llm::safetensors::{st_byte_at}
 use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_free, ck_get, ck_set}
@@ -330,6 +331,9 @@ fn sv_err_body(buf: *mut u8, msg: string) -> i64 with Mut {
 
 // Handle one connection. Returns 0 normally, -1 on transport failure.
 fn sv_fwd(m: &Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Runtime) -> CpuBuf with Alloc, Mut, Panic, Div {
+    if dev_ready() != 0 {
+        return llama_forward_dev(m, rt, tokens, ntok)
+    }
     if rt.ready {
         return llama_forward_rt(m, kv, tokens, ntok, rt)
     }
@@ -486,6 +490,7 @@ fn sv_handle(lib: &NwLib, m: &Llama, bp: &Bpe, fd: i64, model_name: string, req_
     var cap: i64 = nids + max_tokens + 8
     if cap > 4096 { cap = 4096 }
     if nids + max_tokens > cap { max_tokens = cap - nids }
+    if dev_ready() != 0 { dev_reset() }
     var kv = kv_new(m, cap)
     var logits = sv_fwd(m, &!kv, &ids, nids, rt)
     let text = heap_alloc(65536)
@@ -588,6 +593,12 @@ pub fn llm_serve_rt(m: &Llama, bp: &Bpe, port: i64, model_name: string, rt: &Run
     if !lib.ok { return 0 - 1 }
     let srv = nw_listen(&lib, port)
     if srv < 0 { return 0 - 2 }
+    if rt.ready && dev_ready() == 0 {
+        let opened = dev_open(m, rt, "stdlib/hetero/kernels/llama_f32.ptx", "stdlib/hetero/kernels/gemm_skinny_f32.ptx", "stdlib/hetero/kernels/gemm_mma_bf16.ptx")
+        print("dev=")
+        print_int(opened)
+        print("\n")
+    }
     print("llm serve listening port=")
     print_int(port)
     print(" model=")

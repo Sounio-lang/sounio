@@ -1,0 +1,144 @@
+//@ run-pass
+//
+// On-device forward. The host receives last-position logits only.
+// Wall time is taken outside this process: GPU_DECODE_BEGIN/END
+// bracket the forwards after one warm step. The warm step is the
+// first of the eight greedy tokens and is not inside that window.
+// Usage: llama_dev_bench [dir] [gemm-ptx] [cvt-ptx] [ops-ptx] [skinny-ptx] [mma-ptx]
+
+use llm::llama::{kv_new, llama_argmax, llama_forward, llama_load}
+use llm::llama_dev::{dev_open, dev_reset, llama_forward_dev}
+use hetero::runtime::{rt_open_full}
+use tensor2::cpu_kernel::{ck_alloc, ck_free, ck_get, ck_max_abs_diff, ck_set}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var dir = "/workspace/llm-models/SmolLM2-135M"
+    if arg_count() > 0 { dir = get_arg(0) }
+    var gemm = "stdlib/hetero/kernels/gemm_tiled_f32.ptx"
+    if arg_count() > 1 { gemm = get_arg(1) }
+    var cvt = "stdlib/hetero/kernels/cvt_f64_f32.ptx"
+    if arg_count() > 2 { cvt = get_arg(2) }
+    var ops = "stdlib/hetero/kernels/llama_f32.ptx"
+    if arg_count() > 3 { ops = get_arg(3) }
+    var skinny = "stdlib/hetero/kernels/gemm_skinny_f32.ptx"
+    if arg_count() > 4 { skinny = get_arg(4) }
+    var mma = "stdlib/hetero/kernels/gemm_mma_bf16.ptx"
+    if arg_count() > 5 { mma = get_arg(5) }
+    let nsteps: i64 = 8
+
+    let m = llama_load(dir)
+    print("loaded=")
+    print_int(if m.loaded { 1 } else { 0 })
+    print("\n")
+    if !m.loaded { print("DEV FAIL\n"); exit(1) }
+
+    var rt = rt_open_full(gemm, "gemm_tiled_f32", cvt)
+    print("rt_ready=")
+    print_int(if rt.ready { 1 } else { 0 })
+    print("\n")
+    if !rt.ready { print("DEV FAIL\n"); exit(1) }
+    let opened = dev_open(&m, &rt, ops, skinny, mma)
+    print("DEV_OPEN_DONE ")
+    print_int(opened)
+    print("\n")
+    if opened == 0 { print("DEV FAIL\n"); exit(1) }
+
+    var ids = ck_alloc(6)
+    ck_set(&!ids, 0, 0.0)
+    ck_set(&!ids, 1, 504.0)
+    ck_set(&!ids, 2, 3575.0)
+    ck_set(&!ids, 3, 282.0)
+    ck_set(&!ids, 4, 4649.0)
+    ck_set(&!ids, 5, 314.0)
+    var cpu_ids = ck_alloc(nsteps)
+
+    print("CPU_PREFILL_BEGIN\n")
+    var kv = kv_new(&m, 64)
+    var la = llama_forward(&m, &!kv, &ids, 6)
+    let cpu_pre = llama_argmax(&la)
+    print("CPU_PREFILL_END argmax=")
+    print_int(cpu_pre)
+    print("\n")
+
+    print("CPU_DECODE_BEGIN\n")
+    var g: i64 = 0
+    while g < nsteps {
+        let nxt = llama_argmax(&la)
+        ck_set(&!cpu_ids, g, nxt as f64)
+        print("CPU_STEP ")
+        print_int(g)
+        print(" id=")
+        print_int(nxt)
+        print("\n")
+        var one = ck_alloc(1)
+        ck_set(&!one, 0, nxt as f64)
+        ck_free(&la)
+        la = llama_forward(&m, &!kv, &one, 1)
+        ck_free(&one)
+        g = g + 1
+    }
+    ck_free(&la)
+    print("CPU_DECODE_END\n")
+
+    var kv2 = kv_new(&m, 64)
+    var lc = llama_forward(&m, &!kv2, &ids, 6)
+
+    dev_reset()
+    print("GPU_PREFILL_BEGIN\n")
+    var lb = llama_forward_dev(&m, &rt, &ids, 6)
+    let gpu_pre = llama_argmax(&lb)
+    print("GPU_PREFILL_END argmax=")
+    print_int(gpu_pre)
+    print("\n")
+
+    let dpre = ck_max_abs_diff(&lc, &lb)
+    ck_free(&lc)
+    print("logit_diff_x1e9=")
+    print_int((dpre * 1000000000.0) as i64)
+    print("\n")
+
+    var ok: i64 = 1
+    if cpu_pre != 7042 || gpu_pre != 7042 { ok = 0 }
+
+    let warm = llama_argmax(&lb)
+    print("GPU_WARM id=")
+    print_int(warm)
+    print(" cpu=")
+    print_int(ck_get(&cpu_ids, 0) as i64)
+    print("\n")
+    if warm != (ck_get(&cpu_ids, 0) as i64) { ok = 0 }
+    var ow = ck_alloc(1)
+    ck_set(&!ow, 0, warm as f64)
+    ck_free(&lb)
+    lb = llama_forward_dev(&m, &rt, &ow, 1)
+    ck_free(&ow)
+
+    print("GPU_DECODE_BEGIN\n")
+    g = 1
+    while g < nsteps {
+        let nxt = llama_argmax(&lb)
+        print("GPU_STEP ")
+        print_int(g)
+        print(" id=")
+        print_int(nxt)
+        print(" cpu=")
+        print_int(ck_get(&cpu_ids, g) as i64)
+        print("\n")
+        if nxt != (ck_get(&cpu_ids, g) as i64) { ok = 0 }
+        var one = ck_alloc(1)
+        ck_set(&!one, 0, nxt as f64)
+        ck_free(&lb)
+        lb = llama_forward_dev(&m, &rt, &one, 1)
+        ck_free(&one)
+        g = g + 1
+    }
+    ck_free(&lb)
+    print("GPU_DECODE_END\n")
+
+    if ok == 1 {
+        print("DEV PASS\n")
+        exit(0)
+    }
+    print("DEV FAIL\n")
+    exit(1)
+}

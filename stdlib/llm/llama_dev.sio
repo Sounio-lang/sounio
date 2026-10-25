@@ -1,0 +1,467 @@
+// On-device Llama forward. Weights are uploaded once. A decode step
+// and a short prefill run RMSNorm, GEMM, RoPE, causal attention,
+// residual and SwiGLU without copying activations back to the host.
+// The host receives the last-position logits only.
+
+extern "C" {
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+}
+
+use hetero::cuda_exec::{ce_alloc, ce_d2h, ce_function, ce_h2d, ce_module_log, ce_sync}
+use hetero::probe_cuda::{pb_cstr}
+use hetero::runtime::{Runtime}
+use llm::llama::{Llama}
+use math::pure::{cos, pow, sin}
+use tensor2::convert::{f64_to_f32_bits}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_free, ck_get, ck_set}
+
+var G_READY: i64 = 0
+var G_SKINNY: i64 = 0
+var G_MMA: i64 = 0
+var G_RMS: i64 = 0
+var G_ROPE: i64 = 0
+var G_KVW: i64 = 0
+var G_ATTN: i64 = 0
+var G_ADD: i64 = 0
+var G_BIAS: i64 = 0
+var G_SWI: i64 = 0
+var G_EMB: i64 = 0
+var G_EMBED: i64 = 0
+var G_LM: i64 = 0
+var G_FNORM: i64 = 0
+var G_WQ: [i64; 32] = [0; 32]
+var G_WK: [i64; 32] = [0; 32]
+var G_WV: [i64; 32] = [0; 32]
+var G_WO: [i64; 32] = [0; 32]
+var G_GATE: [i64; 32] = [0; 32]
+var G_UP: [i64; 32] = [0; 32]
+var G_DOWN: [i64; 32] = [0; 32]
+var G_INN: [i64; 32] = [0; 32]
+var G_POST: [i64; 32] = [0; 32]
+var G_QB: [i64; 32] = [0; 32]
+var G_KB: [i64; 32] = [0; 32]
+var G_VB: [i64; 32] = [0; 32]
+var G_KVC_K: [i64; 32] = [0; 32]
+var G_KVC_V: [i64; 32] = [0; 32]
+var G_X: i64 = 0
+var G_H: i64 = 0
+var G_Q: i64 = 0
+var G_K: i64 = 0
+var G_V: i64 = 0
+var G_ATT: i64 = 0
+var G_O: i64 = 0
+var G_G: i64 = 0
+var G_U: i64 = 0
+var G_ACT: i64 = 0
+var G_IDS: i64 = 0
+var G_COS: i64 = 0
+var G_SIN: i64 = 0
+var G_LOGF: i64 = 0
+var G_LOGD: i64 = 0
+var G_KVLEN: i64 = 0
+var G_MAXTOK: i64 = 8
+var G_MAXSEQ: i64 = 512
+var G_BUMP: i64 = 0
+var G_BUMP_AT: i64 = 0
+var G_CU_LAUNCH: i64 = 0
+var G_C64: i64 = 0
+var G_S64: i64 = 0
+var G_COS_HOST: i64 = 0
+var G_SIN_HOST: i64 = 0
+
+pub fn dev_ready() -> i64 { G_READY }
+
+fn dev_launch_init(rt: &Runtime) with Alloc, Mut, Panic {
+    if G_BUMP == 0 { G_BUMP = heap_alloc(4096) as i64 }
+    if G_CU_LAUNCH == 0 {
+        let raw = dlsym(rt.exec.cuda, pb_cstr("cuLaunchKernel"))
+        G_CU_LAUNCH = raw as i64
+    }
+}
+
+fn scratch(n: i64) -> *mut u8 with Mut {
+    let p = G_BUMP + G_BUMP_AT
+    G_BUMP_AT = G_BUMP_AT + n
+    p as *mut u8
+}
+
+fn argcell(v: i64) -> *mut u8 with Mut {
+    let cell = scratch(8)
+    write_i64(cell as *mut i64, 0, v)
+    cell
+}
+
+fn launch_n(rt: &Runtime, func: i64, grid: i64, block: i64, p: *mut u8) -> i32 with Alloc, Mut, Panic {
+    var g = grid
+    if g < 1 { g = 1 }
+    if G_CU_LAUNCH == 0 { return -1 }
+    let f = G_CU_LAUNCH as fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    let st = f(func, g, 1, 1, block, 1, 1, 0, 0, p as i64, 0)
+    G_BUMP_AT = 0
+    if !rt.ready && st == 0 { return st }
+    st
+}
+
+fn dev_cvt(rt: &Runtime, func: i64, din: i64, dout: i64, count: i64) -> i32 with Alloc, Mut, Panic {
+    let params = scratch(24)
+    write_i64(params as *mut i64, 0, argcell(din) as i64)
+    write_i64(params as *mut i64, 1, argcell(dout) as i64)
+    write_i64(params as *mut i64, 2, argcell(count) as i64)
+    let grid = (count + 255) / 256
+    launch_n(rt, func, grid, 256, params)
+}
+
+fn dev_upload(rt: &Runtime, src: &CpuBuf) -> i64 with Alloc, Mut, Panic, Div {
+    if src.len <= 0 { return 0 }
+    let n = src.len
+    let d64 = ce_alloc(&rt.exec, n * 8)
+    let d32 = ce_alloc(&rt.exec, n * 4)
+    if d64 == 0 || d32 == 0 { return 0 }
+    if ce_h2d(&rt.exec, d64, src.data as *mut u8, n * 8) != 0 { return 0 }
+    if dev_cvt(rt, rt.cvt_down, d64, d32, n) != 0 { return 0 }
+    d32
+}
+
+fn dev_load_fn(rt: &Runtime, module: i64, name: string) -> i64 with Alloc, Mut, Panic {
+    ce_function(&rt.exec, module, name)
+}
+
+fn dev_skinny(rt: &Runtime, a: i64, b: i64, c: i64, m: i64, n: i64, k: i64) -> i32 with Alloc, Mut, Panic {
+    let params = scratch(48)
+    write_i64(params as *mut i64, 0, argcell(a) as i64)
+    write_i64(params as *mut i64, 1, argcell(b) as i64)
+    write_i64(params as *mut i64, 2, argcell(c) as i64)
+    write_i64(params as *mut i64, 3, argcell(m) as i64)
+    write_i64(params as *mut i64, 4, argcell(n) as i64)
+    write_i64(params as *mut i64, 5, argcell(k) as i64)
+    let grid = (n + 127) / 128
+    launch_n(rt, G_SKINNY, grid, 128, params)
+}
+
+fn dev_mma(rt: &Runtime, a: i64, b: i64, c: i64, m: i64, n: i64, k: i64) -> i32 with Alloc, Mut, Panic {
+    let params = scratch(48)
+    write_i64(params as *mut i64, 0, argcell(a) as i64)
+    write_i64(params as *mut i64, 1, argcell(b) as i64)
+    write_i64(params as *mut i64, 2, argcell(c) as i64)
+    write_i64(params as *mut i64, 3, argcell(m) as i64)
+    write_i64(params as *mut i64, 4, argcell(n) as i64)
+    write_i64(params as *mut i64, 5, argcell(k) as i64)
+    let tiles_n = (n + 7) / 8
+    let tiles_m = (m + 15) / 16
+    launch_n(rt, G_MMA, tiles_m * tiles_n, 32, params)
+}
+
+fn dev_gemm(rt: &Runtime, a: i64, b: i64, c: i64, m: i64, n: i64, k: i64) -> i32 with Alloc, Mut, Panic {
+    if m >= 16 && G_MMA != 0 && (m % 16) == 0 && (k % 16) == 0 && (n % 8) == 0 {
+        return dev_mma(rt, a, b, c, m, n, k)
+    }
+    var row: i64 = 0
+    while row < m {
+        var rows = m - row
+        if rows > 16 { rows = 16 }
+        let aa = a + row * k * 4
+        let cc = c + row * n * 4
+        let st = dev_skinny(rt, aa, b, cc, rows, n, k)
+        if st != 0 { return st }
+        row = row + rows
+    }
+    0
+}
+
+fn dev_rmsnorm(rt: &Runtime, x: i64, w: i64, y: i64, d: i64, rows: i64, eps_bits: i64) -> i32 with Alloc, Mut, Panic {
+    let params = scratch(48)
+    write_i64(params as *mut i64, 0, argcell(x) as i64)
+    write_i64(params as *mut i64, 1, argcell(w) as i64)
+    write_i64(params as *mut i64, 2, argcell(y) as i64)
+    write_i64(params as *mut i64, 3, argcell(d) as i64)
+    write_i64(params as *mut i64, 4, argcell(eps_bits) as i64)
+    launch_n(rt, G_RMS, rows, 256, params)
+}
+
+fn dev_rope(rt: &Runtime, x: i64, cos_p: i64, sin_p: i64, rows: i64, heads: i64, dh: i64) -> i32 with Alloc, Mut, Panic {
+    let params = scratch(48)
+    write_i64(params as *mut i64, 0, argcell(x) as i64)
+    write_i64(params as *mut i64, 1, argcell(cos_p) as i64)
+    write_i64(params as *mut i64, 2, argcell(sin_p) as i64)
+    write_i64(params as *mut i64, 3, argcell(rows) as i64)
+    write_i64(params as *mut i64, 4, argcell(heads) as i64)
+    write_i64(params as *mut i64, 5, argcell(dh) as i64)
+    let n = rows * heads * (dh / 2)
+    let grid = (n + 127) / 128
+    launch_n(rt, G_ROPE, grid, 128, params)
+}
+
+fn dev_kvw(rt: &Runtime, dst: i64, src: i64, pos: i64, dim: i64, rows: i64) -> i32 with Alloc, Mut, Panic {
+    let params = scratch(40)
+    write_i64(params as *mut i64, 0, argcell(dst) as i64)
+    write_i64(params as *mut i64, 1, argcell(src) as i64)
+    write_i64(params as *mut i64, 2, argcell(pos) as i64)
+    write_i64(params as *mut i64, 3, argcell(dim) as i64)
+    write_i64(params as *mut i64, 4, argcell(rows) as i64)
+    let n = rows * dim
+    let grid = (n + 127) / 128
+    launch_n(rt, G_KVW, grid, 128, params)
+}
+
+fn dev_attn(rt: &Runtime, q: i64, k: i64, v: i64, o: i64, heads: i64, rep: i64, dh: i64, pos0: i64, ntok: i64, kvdim: i64, scale_bits: i64) -> i32 with Alloc, Mut, Panic {
+    let params = scratch(88)
+    write_i64(params as *mut i64, 0, argcell(q) as i64)
+    write_i64(params as *mut i64, 1, argcell(k) as i64)
+    write_i64(params as *mut i64, 2, argcell(v) as i64)
+    write_i64(params as *mut i64, 3, argcell(o) as i64)
+    write_i64(params as *mut i64, 4, argcell(heads) as i64)
+    write_i64(params as *mut i64, 5, argcell(rep) as i64)
+    write_i64(params as *mut i64, 6, argcell(dh) as i64)
+    write_i64(params as *mut i64, 7, argcell(pos0) as i64)
+    write_i64(params as *mut i64, 8, argcell(ntok) as i64)
+    write_i64(params as *mut i64, 9, argcell(kvdim) as i64)
+    write_i64(params as *mut i64, 10, argcell(scale_bits) as i64)
+    launch_n(rt, G_ATTN, ntok * heads, 128, params)
+}
+
+fn dev_add(rt: &Runtime, dst: i64, src: i64, n: i64) -> i32 with Alloc, Mut, Panic {
+    let params = scratch(24)
+    write_i64(params as *mut i64, 0, argcell(dst) as i64)
+    write_i64(params as *mut i64, 1, argcell(src) as i64)
+    write_i64(params as *mut i64, 2, argcell(n) as i64)
+    let grid = (n + 127) / 128
+    launch_n(rt, G_ADD, grid, 128, params)
+}
+
+fn dev_bias(rt: &Runtime, x: i64, b: i64, rows: i64, d: i64) -> i32 with Alloc, Mut, Panic {
+    if b == 0 { return 0 }
+    let params = scratch(32)
+    write_i64(params as *mut i64, 0, argcell(x) as i64)
+    write_i64(params as *mut i64, 1, argcell(b) as i64)
+    write_i64(params as *mut i64, 2, argcell(rows) as i64)
+    write_i64(params as *mut i64, 3, argcell(d) as i64)
+    let n = rows * d
+    let grid = (n + 127) / 128
+    launch_n(rt, G_BIAS, grid, 128, params)
+}
+
+fn dev_swiglu(rt: &Runtime, g: i64, u: i64, y: i64, n: i64) -> i32 with Alloc, Mut, Panic {
+    let params = scratch(32)
+    write_i64(params as *mut i64, 0, argcell(g) as i64)
+    write_i64(params as *mut i64, 1, argcell(u) as i64)
+    write_i64(params as *mut i64, 2, argcell(y) as i64)
+    write_i64(params as *mut i64, 3, argcell(n) as i64)
+    let grid = (n + 127) / 128
+    launch_n(rt, G_SWI, grid, 128, params)
+}
+
+fn dev_embed(rt: &Runtime, table: i64, ids: i64, y: i64, hidden: i64, ntok: i64) -> i32 with Alloc, Mut, Panic {
+    let params = scratch(40)
+    write_i64(params as *mut i64, 0, argcell(table) as i64)
+    write_i64(params as *mut i64, 1, argcell(ids) as i64)
+    write_i64(params as *mut i64, 2, argcell(y) as i64)
+    write_i64(params as *mut i64, 3, argcell(hidden) as i64)
+    write_i64(params as *mut i64, 4, argcell(ntok) as i64)
+    let n = ntok * hidden
+    let grid = (n + 127) / 128
+    launch_n(rt, G_EMB, grid, 128, params)
+}
+
+fn dev_alloc_f32(rt: &Runtime, n: i64) -> i64 with Alloc, Mut, Panic {
+    ce_alloc(&rt.exec, n * 4)
+}
+
+pub fn dev_reset() with Mut { G_KVLEN = 0 }
+
+fn sqrt_dh(dh: i64) -> f64 {
+    if dh == 64 { return 8.0 }
+    if dh == 128 { return 11.313708498984761 }
+    8.0
+}
+
+fn dev_fail() -> CpuBuf with Alloc, Mut {
+    var empty = ck_alloc(1)
+    empty
+}
+
+pub fn dev_open(m: &Llama, rt: &Runtime, ops_ptx: string, skinny_ptx: string, mma_ptx: string) -> i64 with Alloc, Mut, Panic, Div, IO {
+    if !rt.ready || rt.cvt_down == 0 { return 0 }
+    dev_launch_init(rt)
+    if G_CU_LAUNCH == 0 || G_BUMP == 0 { return 0 }
+    if (m.cfg.layers as i64) > 32 { return 0 }
+    let ops = read_file(ops_ptx)
+    let skinny = read_file(skinny_ptx)
+    if str_len(ops) == 0 || str_len(skinny) == 0 { return 0 }
+    let mop = ce_module_log(&rt.exec, pb_cstr(ops))
+    let msk = ce_module_log(&rt.exec, pb_cstr(skinny))
+    if mop == 0 || msk == 0 { return 0 }
+    G_RMS = dev_load_fn(rt, mop, "rmsnorm_f32")
+    G_ROPE = dev_load_fn(rt, mop, "rope_f32")
+    G_KVW = dev_load_fn(rt, mop, "kv_write_f32")
+    G_ATTN = dev_load_fn(rt, mop, "attn_f32")
+    G_ADD = dev_load_fn(rt, mop, "add_f32")
+    G_BIAS = dev_load_fn(rt, mop, "bias_f32")
+    G_SWI = dev_load_fn(rt, mop, "swiglu_f32")
+    G_EMB = dev_load_fn(rt, mop, "embed_f32")
+    G_SKINNY = dev_load_fn(rt, msk, "gemm_skinny_f32")
+    if G_RMS == 0 || G_SKINNY == 0 || G_ATTN == 0 || G_EMB == 0 { return 0 }
+    let mma_src = read_file(mma_ptx)
+    if str_len(mma_src) > 0 {
+        let mm = ce_module_log(&rt.exec, pb_cstr(mma_src))
+        if mm != 0 { G_MMA = dev_load_fn(rt, mm, "gemm_mma_bf16") }
+    }
+    let hidden = m.cfg.hidden
+    let inter = m.cfg.inter
+    let dh = m.cfg.head_dim
+    let qdim = m.cfg.heads * dh
+    let kvdim = m.cfg.kv_heads * dh
+    let mt = G_MAXTOK
+    let ms = G_MAXSEQ
+    G_EMBED = dev_upload(rt, &m.embed)
+    G_LM = dev_upload(rt, &m.lm_head_t)
+    G_FNORM = dev_upload(rt, &m.final_norm)
+    if G_EMBED == 0 || G_LM == 0 || G_FNORM == 0 { return 0 }
+    var li: i64 = 0
+    while li < (m.cfg.layers as i64) {
+        G_WQ[li as usize] = dev_upload(rt, &m.wq[li as usize])
+        G_WK[li as usize] = dev_upload(rt, &m.wk[li as usize])
+        G_WV[li as usize] = dev_upload(rt, &m.wv[li as usize])
+        G_WO[li as usize] = dev_upload(rt, &m.wo[li as usize])
+        G_GATE[li as usize] = dev_upload(rt, &m.gate[li as usize])
+        G_UP[li as usize] = dev_upload(rt, &m.up[li as usize])
+        G_DOWN[li as usize] = dev_upload(rt, &m.down[li as usize])
+        G_INN[li as usize] = dev_upload(rt, &m.in_norm[li as usize])
+        G_POST[li as usize] = dev_upload(rt, &m.post_norm[li as usize])
+        if m.qb[li as usize].len > 0 { G_QB[li as usize] = dev_upload(rt, &m.qb[li as usize]) }
+        if m.kb[li as usize].len > 0 { G_KB[li as usize] = dev_upload(rt, &m.kb[li as usize]) }
+        if m.vb[li as usize].len > 0 { G_VB[li as usize] = dev_upload(rt, &m.vb[li as usize]) }
+        G_KVC_K[li as usize] = dev_alloc_f32(rt, ms * kvdim)
+        G_KVC_V[li as usize] = dev_alloc_f32(rt, ms * kvdim)
+        if G_WQ[li as usize] == 0 || G_KVC_K[li as usize] == 0 { return 0 }
+        li = li + 1
+    }
+    G_X = dev_alloc_f32(rt, mt * hidden)
+    G_H = dev_alloc_f32(rt, mt * hidden)
+    G_Q = dev_alloc_f32(rt, mt * qdim)
+    G_K = dev_alloc_f32(rt, mt * kvdim)
+    G_V = dev_alloc_f32(rt, mt * kvdim)
+    G_ATT = dev_alloc_f32(rt, mt * qdim)
+    G_O = dev_alloc_f32(rt, mt * hidden)
+    G_G = dev_alloc_f32(rt, mt * inter)
+    G_U = dev_alloc_f32(rt, mt * inter)
+    G_ACT = dev_alloc_f32(rt, mt * inter)
+    G_IDS = ce_alloc(&rt.exec, mt * 8)
+    G_COS = dev_alloc_f32(rt, mt * (dh / 2))
+    G_SIN = dev_alloc_f32(rt, mt * (dh / 2))
+    var cos_host = ck_alloc(mt * 64)
+    var sin_host = ck_alloc(mt * 64)
+    G_COS_HOST = cos_host.data as i64
+    G_SIN_HOST = sin_host.data as i64
+    G_C64 = ce_alloc(&rt.exec, mt * 64 * 8)
+    G_S64 = ce_alloc(&rt.exec, mt * 64 * 8)
+    G_LOGF = dev_alloc_f32(rt, m.cfg.vocab)
+    G_LOGD = ce_alloc(&rt.exec, m.cfg.vocab * 8)
+    if G_X == 0 || G_IDS == 0 || G_LOGD == 0 { return 0 }
+    let sy = ce_sync(&rt.exec)
+    if sy != 0 { return 0 }
+    G_KVLEN = 0
+    G_READY = 1
+    print("dev_open layers=")
+    print_int(m.cfg.layers as i64)
+    print(" mma=")
+    print_int(if G_MMA != 0 { 1 } else { 0 })
+    print("\n")
+    1
+}
+
+fn upload_cis(rt: &Runtime, rows: i64, dh: i64, pos0: i64, theta: f64) -> i32 with Alloc, Mut, Panic, Div {
+    let half = dh / 2
+    if half > 64 || G_C64 == 0 { return -1 }
+    var r: i64 = 0
+    while r < rows {
+        let pos = pos0 + r
+        var i: i64 = 0
+        while i < half {
+            let ang = (pos as f64) * pow(theta, (0.0 - (2.0 * (i as f64))) / (dh as f64))
+            write_f64(G_COS_HOST as *mut f64, r * half + i, cos(ang))
+            write_f64(G_SIN_HOST as *mut f64, r * half + i, sin(ang))
+            i = i + 1
+        }
+        r = r + 1
+    }
+    let n = rows * half
+    if ce_h2d(&rt.exec, G_C64, G_COS_HOST as *mut u8, n * 8) != 0 { return -1 }
+    if ce_h2d(&rt.exec, G_S64, G_SIN_HOST as *mut u8, n * 8) != 0 { return -1 }
+    if dev_cvt(rt, rt.cvt_down, G_C64, G_COS, n) != 0 { return -1 }
+    if dev_cvt(rt, rt.cvt_down, G_S64, G_SIN, n) != 0 { return -1 }
+    0
+}
+
+fn dev_forward_chunk(m: &Llama, rt: &Runtime, tokens: &CpuBuf, ntok: i64) -> CpuBuf with Alloc, Mut, Panic, Div {
+    let hidden = m.cfg.hidden
+    let inter = m.cfg.inter
+    let dh = m.cfg.head_dim
+    let heads = m.cfg.heads
+    let kv_heads = m.cfg.kv_heads
+    let qdim = heads * dh
+    let kvdim = kv_heads * dh
+    let rep = heads / kv_heads
+    let layers = m.cfg.layers as i64
+    let pos0 = G_KVLEN
+    if ntok < 1 || ntok > G_MAXTOK || pos0 + ntok > G_MAXSEQ { return dev_fail() }
+    if ce_h2d(&rt.exec, G_IDS, tokens.data as *mut u8, ntok * 8) != 0 { return dev_fail() }
+    let eps_bits = f64_to_f32_bits(m.cfg.eps)
+    let scale_bits = f64_to_f32_bits(1.0 / sqrt_dh(dh))
+    if upload_cis(rt, ntok, dh, pos0, m.cfg.theta) != 0 { return dev_fail() }
+    var st: i32 = dev_embed(rt, G_EMBED, G_IDS, G_X, hidden, ntok)
+    var li: i64 = 0
+    while li < layers {
+        st = st | dev_rmsnorm(rt, G_X, G_INN[li as usize], G_H, hidden, ntok, eps_bits)
+        st = st | dev_gemm(rt, G_H, G_WQ[li as usize], G_Q, ntok, qdim, hidden)
+        st = st | dev_gemm(rt, G_H, G_WK[li as usize], G_K, ntok, kvdim, hidden)
+        st = st | dev_gemm(rt, G_H, G_WV[li as usize], G_V, ntok, kvdim, hidden)
+        st = st | dev_bias(rt, G_Q, G_QB[li as usize], ntok, qdim)
+        st = st | dev_bias(rt, G_K, G_KB[li as usize], ntok, kvdim)
+        st = st | dev_bias(rt, G_V, G_VB[li as usize], ntok, kvdim)
+        st = st | dev_rope(rt, G_Q, G_COS, G_SIN, ntok, heads, dh)
+        st = st | dev_rope(rt, G_K, G_COS, G_SIN, ntok, kv_heads, dh)
+        st = st | dev_kvw(rt, G_KVC_K[li as usize], G_K, pos0, kvdim, ntok)
+        st = st | dev_kvw(rt, G_KVC_V[li as usize], G_V, pos0, kvdim, ntok)
+        st = st | dev_attn(rt, G_Q, G_KVC_K[li as usize], G_KVC_V[li as usize], G_ATT, heads, rep, dh, pos0, ntok, kvdim, scale_bits)
+        st = st | dev_gemm(rt, G_ATT, G_WO[li as usize], G_O, ntok, hidden, qdim)
+        st = st | dev_add(rt, G_X, G_O, ntok * hidden)
+        st = st | dev_rmsnorm(rt, G_X, G_POST[li as usize], G_H, hidden, ntok, eps_bits)
+        st = st | dev_gemm(rt, G_H, G_GATE[li as usize], G_G, ntok, inter, hidden)
+        st = st | dev_gemm(rt, G_H, G_UP[li as usize], G_U, ntok, inter, hidden)
+        st = st | dev_swiglu(rt, G_G, G_U, G_ACT, ntok * inter)
+        st = st | dev_gemm(rt, G_ACT, G_DOWN[li as usize], G_O, ntok, hidden, inter)
+        st = st | dev_add(rt, G_X, G_O, ntok * hidden)
+        li = li + 1
+    }
+    let last = G_X + (ntok - 1) * hidden * 4
+    st = st | dev_rmsnorm(rt, last, G_FNORM, G_H, hidden, 1, eps_bits)
+    st = st | dev_gemm(rt, G_H, G_LM, G_LOGF, 1, m.cfg.vocab, hidden)
+    st = st | dev_cvt(rt, rt.cvt_up, G_LOGF, G_LOGD, m.cfg.vocab)
+    if st != 0 { return dev_fail() }
+    var host = ck_alloc(m.cfg.vocab)
+    if ce_d2h(&rt.exec, host.data as *mut u8, G_LOGD, m.cfg.vocab * 8) != 0 { return dev_fail() }
+    if ce_sync(&rt.exec) != 0 { return dev_fail() }
+    G_KVLEN = pos0 + ntok
+    host
+}
+
+pub fn llama_forward_dev(m: &Llama, rt: &Runtime, tokens: &CpuBuf, ntok: i64) -> CpuBuf with Alloc, Mut, Panic, Div {
+    if G_READY == 0 || ntok < 1 { return dev_fail() }
+    if ntok <= G_MAXTOK { return dev_forward_chunk(m, rt, tokens, ntok) }
+    var off: i64 = 0
+    var last = dev_fail()
+    while off < ntok {
+        var n = ntok - off
+        if n > G_MAXTOK { n = G_MAXTOK }
+        var chunk = ck_alloc(n)
+        var i: i64 = 0
+        while i < n {
+            ck_set(&!chunk, i, ck_get(tokens, off + i))
+            i = i + 1
+        }
+        ck_free(&last)
+        last = dev_forward_chunk(m, rt, &chunk, n)
+        off = off + n
+    }
+    last
+}
