@@ -28,8 +28,11 @@ scratch and is not substituted for this current-main compiler result.
   exact capacity refusal, late invalid data preserving the capture, closed input
   owners and mutated source spec/levels before export, and an invalid SVG ID
   emitting zero bytes.
-- Coordinate, captured-level, and missing-completion mutant copies were each
-  rejected with exit 1. They are explicitly non-native controls.
+- Historical coordinate, captured-level, and missing-completion controls returned
+  exit 1, but their log redirection truncated their input copies. Those controls
+  were vacuous and are retracted as discrimination evidence. Positive native and
+  C++ concordance remain valid. The repaired follow-up separates input/log paths
+  and requires each specific diagnostic. Fresh acceptance is recorded below.
 - The additional c21 seed import-closure compilation passed using the supplied
 `SIO166/source14/bin/souc-lean-single-x86_64`. Seed SHA:
   `8956946def36004d11ec4eca0d20c75c1e7d3d0b17ee0f0a1fdda9cd6ec0e4cc`.
@@ -42,6 +45,31 @@ separated branches, T/L shapes, shared-edge verticals, and clipped diagonal are
 visible. This is a renderer regression diagram, not a publication-layout example.
 `preview/actual-native.svg` is the actual emitted SVG section of the fixture;
 its diagnostic text nodes are retained. No SVG redraw generated the Canvas image.
+
+## Repaired mutation-control qualification
+
+Slurm **17295**, `SIO175-controls-v3`, completed with focused `STATUS=0` and
+specific non-vacuous controls. Each input is a nonempty changed copy, its path is
+distinct from stdout/stderr logs, and the preserved input SHA is captured after
+verification. Geometry is rejected with `exact saddle/flat-edge/T/L/ownership geometry`,
+level provenance with `captured contour level changed after input reuse`, and
+completion with `completion`. Each C++ exit is 1; each exact diagnostic check is 0.
+All four library checks, three native fixtures, positive C++ concordances, current
+seed compilation and input hashes also pass. The portable gate now explicitly
+sets SOUC_BIN to MADAROS_RAW_BIN before the resolver, making the actual executable
+and compiler hash identical even in an inherited environment.
+
+No production kernel, arithmetic, capacity policy, geometric expectation or
+benchmark dataset changed. The four production-source hashes compare identical
+to the original receipt. The original `receipts.tar.gz` (SHA
+`33a345c6938d7e6d02f2c5566833c3d14722db50964ac01091cd7a4ff569074a`)
+remains byte-identical and historical; its old three controls are retracted, not
+retroactively relabeled. New control acceptance is in the separate
+`controls-receipts-v2.tar.gz`, **143596 bytes**, SHA
+`d9e51e70783b6e9255997b43ec65df9d3dddae77c9e2a74eb413bfaa9306627f`.
+Its manifest passed before packing and after extraction; it includes the actual
+three mutated inputs, exact rejection receipts and source-unchanged comparison.
+Original worker path: `/scratch/sounio-stdlib-inference-scale-20261024/SIO175-controls-custody-v2`.
 
 ## Before/after observations
 
