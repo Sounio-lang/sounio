@@ -114,6 +114,12 @@ before consuming them. Every valid row contains separate point, curvature,
 prior-eligibility, refit, covariance, contrast and tail statuses and independent
 p/log-p availability. Numeric payload0 when unavailable is not an estimate.
 
+For scientific diagnostic consumers, `count_pipeline_count` reads the original
+validated CSR as i64, and `count_pipeline_sample_id_length/byte` preserve original
+count-column byte labels. `count_pipeline_design` reads the aligned design only
+after prepare. These scalar readers do not clone or transfer the consumed linear
+inputs, and count-column order remains distinct from the supplied metadata order.
+
 `count_pipeline_write_tsv` requires phase5 and emits all original gene rows.
 Identifiers are hex-encoded original bytes, with no truncation or UTF-8
 normalization. `NA` denotes unavailable scientific values; unavailable tests

@@ -100,7 +100,7 @@ The per-gene profile cap must be positive and G*cap must fit signed i64; this
 is a representability bound, not an arbitrary optimizer cap. An explicit g>0
 branch precedes MAX/g. A valid zero-row CSR and valid empty gene-ID owner are
 refused as pipeline shape1 and closed safely. A positive family with capMAX
-is refused as controls3. The maintained pipeline source is SHA256
+is refused as controls3. The pipeline source qualified in17443 is SHA256
 `3c7c8594f4a22d48f02ef73c59e10fb54cf9e4f29f89ac3a4de3fd8a0ea97c64`.
 
 During17443, an unrelated C++ pilot-verifier source was added to source16. No
@@ -108,6 +108,13 @@ selected gate input changed and that file was neither imported nor compiled by
 the gate; its before/after input manifest verifies unchanged. This selected-input
 qualification is retained honestly, without calling the entire source16 catalog
 immutable. Final publication will use a fresh closed source catalog.
+
+Slurm17452/source19 completed0:0 in22s, strict checking and executing both engines
+with four scalar readers for original counts, sample byte IDs and the aligned
+design. The fixture checks count-column order against reversed metadata order.
+Its complete scientific stdout is byte-identical to the previous corresponding
+engine result in17443. Source19 was closed before submission; no files were
+added during this run. `reader19-text.tar.gz` retains these receipts.
 
 ## Scale status and honest limits
 
