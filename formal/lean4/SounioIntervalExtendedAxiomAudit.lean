@@ -1,0 +1,43 @@
+import SounioIntervalExtended
+#print axioms Sounio.IntervalExtended.make_contains
+#print axioms Sounio.IntervalExtended.lower_add
+#print axioms Sounio.IntervalExtended.upper_add
+#print axioms Sounio.IntervalExtended.lower_neg
+#print axioms Sounio.IntervalExtended.upper_neg
+#print axioms Sounio.IntervalExtended.add_contains
+#print axioms Sounio.IntervalExtended.neg_contains
+#print axioms Sounio.IntervalExtended.sub_contains
+#print axioms Sounio.IntervalExtended.span_has_member
+#print axioms Sounio.IntervalExtended.empty_iff_no_member
+#print axioms Sounio.IntervalExtended.nonempty_add
+#print axioms Sounio.IntervalExtended.neg_empty
+#print axioms Sounio.IntervalExtended.add_empty_left
+#print axioms Sounio.IntervalExtended.add_empty_right
+#print axioms Sounio.IntervalExtended.sub_empty_left
+#print axioms Sounio.IntervalExtended.sub_empty_right
+#print axioms Sounio.IntervalExtended.entire_contains
+#print axioms Sounio.IntervalExtended.empty_has_no_member
+#print axioms Sounio.IntervalExtended.negative_infinity_not_member
+#print axioms Sounio.IntervalExtended.positive_infinity_not_member
+#print axioms Sounio.IntervalExtended.empty_endpoints
+#print axioms Sounio.IntervalExtended.entire_endpoints
+#print axioms Sounio.IntervalExtended.ofFinite_contains
+#print axioms Sounio.IntervalExtended.finite_add_concordance
+#print axioms Sounio.IntervalExtended.outward_contains
+#print axioms Sounio.IntervalExtended.addRounded_contains
+#print axioms Sounio.IntervalExtended.subRounded_contains
+#print axioms Sounio.IntervalExtended.meet_rank_left
+#print axioms Sounio.IntervalExtended.meet_rank_right
+#print axioms Sounio.IntervalExtended.cap_rank
+#print axioms Sounio.IntervalExtended.cap_empty_rank
+#print axioms Sounio.IntervalExtended.add_decoration_left
+#print axioms Sounio.IntervalExtended.add_decoration_right
+#print axioms Sounio.IntervalExtended.sub_decoration_left
+#print axioms Sounio.IntervalExtended.sub_decoration_right
+#print axioms Sounio.IntervalExtended.positive_ray_sum
+#print axioms Sounio.IntervalExtended.negative_ray_sum
+#print axioms Sounio.IntervalExtended.opposite_rays_sum
+#print axioms Sounio.IntervalExtended.same_side_ray_difference
+#print axioms Sounio.IntervalExtended.reversed_finite_empty
+#check Sounio.IntervalFinite.Rounding.rd_le
+#check Sounio.IntervalFinite.Rounding.le_ru
