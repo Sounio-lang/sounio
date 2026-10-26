@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 BASE = Path(__file__).resolve().parents[1]
-PIN = "fa4fb62f1f8a5d57a40374ef4ad839718caa171b902fb115cc85247191ca8cc0"
+PIN = "4d80cdd850de93779542aa15e237b74748dcb6472b233a973cbe04eeac8ec25f"
 
 def digest(raw):
     return hashlib.sha256(raw).hexdigest()

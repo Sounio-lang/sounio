@@ -53,6 +53,8 @@ def profile_initialize(model_config, load_config, quant_config=None):
         host_bytes=memory,cuda_allocated_delta_bytes=torch.cuda.memory_allocated()-before,
         checkpoint_tensors_loaded=False,serving_accepted=False,
         meta_parameter_devices_only=True,tensors=tensors)
+    import lean_resident
+    report["lean_resident"]=lean_resident.estimate_anonymous_peak(tensors)
     out=Path("/scratch/pireus/receipts")/("meta-model-"+report["job"]+"-"+report["rank"]+".json")
     with out.open("x") as stream:
         json.dump(report,stream,indent=2)

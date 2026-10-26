@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 
-SOURCE_SHA256 = "fa4fb62f1f8a5d57a40374ef4ad839718caa171b902fb115cc85247191ca8cc0"
+SOURCE_SHA256 = "4d80cdd850de93779542aa15e237b74748dcb6472b233a973cbe04eeac8ec25f"
 ANCHOR = """                with comm.change_state(enable=True):
                     next_ids, logits = runner.decode(next_ids, batch)
 """
