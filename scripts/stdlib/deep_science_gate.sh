@@ -425,6 +425,13 @@ run_oracle_batch() {
 }
 run_oracle_batch
 
+# Arrow IPC is Madaros-only (lean_single has no bits_to_f64). The full suite
+# skips these fixtures via //@ requires: madaros. This job already holds the
+# fresh Madaros ELF, so the gate runs here without a workflow-file edit.
+arrow_rc=0
+bash "$repo/scripts/arrow_ipc_gate.sh" > "$out/arrow-ipc-gate.log" 2>&1 || arrow_rc=$?
+record arrow-gate scripts/arrow_ipc_gate.sh "$arrow_rc"
+
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"
