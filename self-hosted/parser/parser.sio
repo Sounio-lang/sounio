@@ -384,11 +384,28 @@ pub fn parser_span_int_literal_overflow(start: i64, end: i64) -> bool with Mut, 
     // cannot decide: i64 MAX is 19 digits and u64 MAX is 20.)
     // Decimal, 19 or 20 significant digits. Accumulating 19 digits in i64 is NOT
     // safe — 9999999999999999999 exceeds i64 MAX and wraps negative, which made
-    // an earlier version of this test accept 99999999999999999999. So: branch on
-    // the first digit, then accumulate at most 18 digits (always < 10^18, exact)
-    // and compare the last digit separately.
+    // an earlier version of this test accept 99999999999999999999. So: the first
+    // significant digit branches, the next 18 are accumulated (always < 10^18,
+    // exact), and any digit past the 19th is read separately. 1844674407370955161
+    // is 2^64/10 and 922337203685477580 is 2^63/10, both exactly 18 digits.
+    // value = first digit * 10^k + the rest. Comparing the whole run at once
+    // would need 19 or 20 digits in an i64, which overflows; split this way each
+    // part stays below 2^63 and every comparison is exact.
+    // Both remaining cases split the value as <two digits> * 10^18 + <18 digits>,
+    // because 18 digits never overflow i64 (999999999999999999 < 2^63-1) while 19
+    // of them can: 19999999999999999999 was the case an earlier cut of this test
+    // accumulated straight past i64 MIN.
     let d0 = cursor_source_byte(first_sig)
     var i2 = first_sig + 1
+    var d1 = d0
+    var skip = true
+    while i2 < end && skip {          // `_` inside the literal is not a digit
+        let c1 = cursor_source_byte(i2)
+        if c1 == (95 as i8) { i2 = i2 + 1; continue }
+        d1 = c1
+        skip = false
+    }
+    i2 = i2 + 1
     var acc: i64 = 0
     var got: i64 = 0
     while i2 < end && got < 18 {
@@ -399,71 +416,21 @@ pub fn parser_span_int_literal_overflow(start: i64, end: i64) -> bool with Mut, 
         got = got + 1
         i2 = i2 + 1
     }
-    while i2 < end && cursor_source_byte(i2) == (95 as i8) { i2 = i2 + 1 }
-    let last = cursor_source_byte(i2)
+    let lead2 = ((d0 - (48 as i8)) as i64) * 10 + ((d1 - (48 as i8)) as i64)
     if count == 20 {
-        // 2^64 = 18446744073709551616: a leading 2 or more is already past it.
-        if d0 > (49 as i8) { return true }
-        if acc != 844674407370955161 { return acc > 844674407370955161 }
-        return last >= (54 as i8)
+        // 2^64 = 18 * 10^18 + 446744073709551616.
+        if lead2 > 18 { return true }
+        if lead2 < 18 { return false }
+        return acc >= 446744073709551616
     }
-    // 19 digits. 2^63 = 9223372036854775808, i64 MAX = ...807.
-    if d0 < (57 as i8) { return false }
-    if acc != 223372036854775808 { return false }   // below 2^63, or in the band
-    if last == (56 as i8) {
-        // Exactly 2^63: the one spelling i64 cannot hold that the corpus needs,
-        // because `-9223372036854775808` (i64 MIN) is a prefix minus over a value
-        // that does fit. Refuse only when no prefix minus absorbs the sign.
-        return !parser_prefix_minus_before(start)
-    }
-    false
-}
-
-// Token-index form, kept for the parser call sites.
-
-
-
-// The one width-dependent spelling the corpus needs preserved: i64 MIN.
-// `-9223372036854775808` is how stdlib and the f128/f256 oracle tables write it
-// (27 sites), and it parses because the minus is a PREFIX operator applied to a
-// value that itself fits. Decide it from the wrapped accumulator: a 19-digit
-// literal landing exactly on i64 MIN is 2^63. The `-9223372036854775807 - 1`
-// idiom already used in main.sio and enir/canonical.sio writes the constant
-// without quoting a value that does not fit.
-
-// The minus before a literal is a prefix operator (so `-2^63` spells i64 MIN)
-// unless the byte before it can already end a value, which makes it the binary
-// subtraction operator. Read from the source, not from a token kind list, so the
-// test cannot go stale when the lexer's kind numbers move.
-fn parser_prefix_minus_before(start: i64) -> bool with Mut, Panic {
-    var i = start - 1
-    while i >= 0 {
-        let c = cursor_source_byte(i)
-        if c == (32 as i8) || c == (9 as i8) || c == (10 as i8) || c == (13 as i8) {
-            i = i - 1
-            continue
-        }
-        if c != (45 as i8) { return false }
-        break
-    }
-    if i < 0 { return false }
-    i = i - 1
-    while i >= 0 {
-        let c2 = cursor_source_byte(i)
-        if c2 == (32 as i8) || c2 == (9 as i8) || c2 == (10 as i8) || c2 == (13 as i8) {
-            i = i - 1
-            continue
-        }
-        break
-    }
-    if i < 0 { return true }
-    let before = cursor_source_byte(i)
-    let ends_value = (before >= (48 as i8) && before <= (57 as i8)) ||
-        (before >= (65 as i8) && before <= (90 as i8)) ||
-        (before >= (97 as i8) && before <= (122 as i8)) || before == (95 as i8) ||
-        before == (41 as i8) || before == (93 as i8)
-    !ends_value
-}
+    // 19 digits. 2^63 = 92 * 10^18 + 23372036854775808, so only a literal that
+    // starts 92 and lands on that tail is 2^63; i64 MAX is 2^63-1, one below.
+    if lead2 != 92 { return false }
+    if acc != 23372036854775808 { return false }
+    // Exactly 2^63: the one value i64 cannot hold that the corpus still writes,
+    // because `-9223372036854775808` (i64 MIN) is a prefix minus over a value
+    // that does fit. Refuse only when no prefix minus absorbs the sign bit.
+    !parser_prefix_minus_before(start)}
 
 
 

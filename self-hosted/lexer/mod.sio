@@ -135,6 +135,24 @@ var LEXER_LEX_ERROR_LINE: i64 = 0
 var LEXER_LEX_ERROR_COL: i64 = 0
 var LEXER_LEX_ERROR_BYTE: i64 = 0
 
+// True when the digit run starting at `start` is a float's fraction rather than
+// an integer: the byte before it is a `.` that a number's digits or a hex
+// mantissa just ended at.
+fn parser_float_fraction_tail(start: i64, end: i64) -> bool with Mut, Panic {
+    if start < 1 { return false }
+    // Directly after a `.` these digits are a fraction, of a decimal float
+    // (`3.14…`) or of a C99 hex float (`0x1.<digits>p+0`, whose hex token stops
+    // at the dot). Member access writes `x.field`, so the byte before a `.` there
+    // is an identifier character, never a digit or a closing quote/bracket.
+    if cursor_source_byte(start - 1) != (46 as i8) { return false }
+    let b0 = cursor_source_byte(start - 2)
+    let after_digit = (b0 >= (48 as i8) && b0 <= (57 as i8)) ||
+        (b0 >= (65 as i8) && b0 <= (70 as i8)) || (b0 >= (97 as i8) && b0 <= (102 as i8)) ||
+        b0 == (41 as i8) || b0 == (93 as i8) || b0 == (34 as i8) || b0 == (39 as i8)
+    after_digit
+}
+
+
 pub fn lexer_reset_lex_error() with Mut {
     LEXER_LEX_ERROR_KIND = 0
     LEXER_LEX_ERROR_LINE = 0
@@ -1071,9 +1089,24 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                 // branch: is_float_token is already set when a `.digit` or an
                 // exponent was consumed, so `3.14159265358979323846` — how stdlib
                 // writes pi, in ~370 places — never reaches this test.
-                if parser_span_int_literal_overflow(start, pos) {
-                    lexer_mark_lex_error(6, line, start_col, start)
-                    break
+                //
+                // The remaining hole is a C99 hex float with a fraction:
+                // `0x1.0000000000000800000000000000000000001p+0` ends its hex
+                // token at the `.`, so the 37 fraction digits arrive here as a
+                // separate decimal token and look like a huge integer. The sign
+                // that says otherwise is the `p`/`P` exponent right after them:
+                // no integer literal is followed by that, and `x.field` digits are
+                // not preceded by a radix point that follows a hex literal.
+                // Same refusal as the hex path, on the integer branch only.
+                // is_float_token already excludes `3.14…` and `1e30`; the case it
+                // cannot exclude is the digit run that *follows* a dot when that
+                // run is itself long (`3.<40 digits>`), because the lexer splits a
+                // float's fraction into its own token before deciding.
+                if !parser_float_fraction_tail(start, pos) {
+                    if parser_span_int_literal_overflow(start, pos) {
+                        lexer_mark_lex_error(6, line, start_col, start)
+                        break
+                    }
                 }
                 tc = lexer_push_flat(tc, 124, start, pos, line, start_col, value)
             }
