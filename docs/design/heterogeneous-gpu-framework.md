@@ -988,3 +988,25 @@ A Metal binary archive on the M5 Max, dumped through the Metal framework, is 127
 
 This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
 
+
+
+## 37. The IADD3 register byte (2026-10-26, OBSERVED)
+
+Constants fold, and the allocator renames. A store of one immediate against a store of another, at opt-level 0, changed the immediate and left the store on R0. Naming the add's destination r3 or r5 produced identical cubins. The register number is not the PTX name.
+
+Memory operands do not fold. sub.u32 of two loaded words, default optimisation, is IADD3 R7, R0, -R7, RZ against IADD3 R7, -R0, R7, RZ. Two bytes differ. At opt-level 0 the same subtract is IADD3 R0, R0, -R2, RZ against IADD3 R0, R2, -R0, RZ, and the two bytes are 00 02 against 02 00. Byte 2 of the instruction is the destination: 0 for R0, 7 for R7. Byte 3 is source 0 and byte 4 is source 1: 0 for R0, 2 for R2, 7 for R7. The negate is not that byte. On the tight kernel, moving the negate from source 1 onto source 0 changes byte 7 from 0x80 to 0x00 and byte 9 from 0xe0 to 0xe1.
+
+The probe loads 10 and 3. The unpatched image must store 7. The two negate bytes, written as measured, must store 3 - 10 as a u32, which is 4294967289. A third image sets only the destination byte from 7 to 0. The store still names R7. R7 then still holds the second load, so the stored word must be 3.
+
+Gate. Job 17767, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-per-task=4. The node was idle at submit. Binary md5 7ec42d72df5b8b6351c0daed478a7b73.
+
+- SUB_DST=7, SUB_LOAD=1, SUB=7.
+- SUB_SWAP=4294967289.
+- SUB_DEST_LOAD=1, SUB_DEST_LAUNCH=0, SUB_DEST_SYNC=0, SUB_DEST=3.
+- The earlier stamp, FFMA, shuffle, barrier, 128-bit load and cache byte still match. SILICON PASS, EXIT:0.
+
+The node is idle.
+
+metal-objdump does not read the M5 binary archive: it is not a Mach-O. The two archives still contain no raw immediate. The AGX table stays empty. Job 12798 still holds dl380.
+
+This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
