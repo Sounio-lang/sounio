@@ -338,13 +338,15 @@ pub fn parser_int_literal_overflow(idx: i64) -> bool with Mut, Panic {
         else if b1 == (98 as i8) || b1 == (66 as i8) { base = 2; digits_from = start + 2 }
         else if b1 == (111 as i8) || b1 == (79 as i8) { base = 8; digits_from = start + 2 }
     }
-    // Count significant digits: separators and leading zeros carry no width.
-    // Width alone decides here: 17+ hex digits, 65+ binary, 23+ octal, 21+
-    // decimal. Deliberately no [i8; 20] table of 2^64 ASCII digits: a hand-copied
-    // one silently drifted from the value it claimed to describe and refused
-    // 18446744073709551615 (u64 MAX), which no rule in ADR-015 asks for.
+    // Count significant digits (separators and leading zeros carry no width),
+    // remembering the last digit of the boundary prefixes the comparisons below
+    // need. No hand-copied ASCII table of 2^63 or 2^64 anywhere: a [i8; 20] of
+    // the latter silently drifted from the constant it claimed to encode and
+    // refused 18446744073709551615, u64 MAX.
     var seen = false
     var count: i64 = 0
+    var prefix: i64 = 0           // first 19 significant digits, as a value
+    var at20: i64 = 0             // the 20th significant digit, if reached
     var i = digits_from
     while i < end {
         let c = cursor_source_byte(i)
@@ -352,14 +354,15 @@ pub fn parser_int_literal_overflow(idx: i64) -> bool with Mut, Panic {
             i = i + 1
             continue
         }
-        // Hex digits must be read as hex: the earlier version tested every base
-        // against '0'..'9' only, so 0x1FFFFFFFFFFFFFFFF stopped at the first 'F'
-        // and counted one digit, accepting a 65-bit literal.
+        // Hex digits are hex: the first version tested '0'..'9' for every base,
+        // so 0x1FFFFFFFFFFFFFFFF stopped at the first 'F' and counted one digit.
         var d: i64 = 0
+        var is_digit = true
         if c >= (48 as i8) && c <= (57 as i8) { d = (c - (48 as i8)) as i64 }
         else if base == 16 && c >= (97 as i8) && c <= (102 as i8) { d = (c - (87 as i8)) as i64 }
         else if base == 16 && c >= (65 as i8) && c <= (70 as i8) { d = (c - (55 as i8)) as i64 }
-        else { break }
+        else { is_digit = false }
+        if !is_digit { break }   // a suffix (`5u8`) ends the number
         if !seen {
             if d == 0 {
                 i = i + 1
@@ -368,42 +371,27 @@ pub fn parser_int_literal_overflow(idx: i64) -> bool with Mut, Panic {
             seen = true
         }
         count = count + 1
+        if count <= 19 { prefix = prefix * 10 + d }
+        if count == 20 { at20 = d }
         i = i + 1
     }
     if !seen { return false }
+    // Non-decimal bases decide on digit count alone: 16 hex digits is exactly
+    // u64 MAX, 64 binary and 22 octal likewise.
     if base == 16 { return count > 16 }
     if base == 2 { return count > 64 }
     if base == 8 { return count > 22 }
-    // Decimal. 19 digits cannot reach 2^64 (9999999999999999999 < 2^64), so a
-    // 19-digit literal is never "wider than u64"; whether it passed i64 MAX is
-    // the checker's band, except for exactly 2^63 which
-    // `parser_int_literal_is_exactly_i64_min` reports. For 20 digits, compare the
-    // first 19 against 2^64/10 (1844674407370955161), a constant that fits i64,
-    // then the 20th against `6`: equal-or-above is 2^64 and up.
     if count > 20 { return true }
     if count < 20 { return false }
-    var prefix: i64 = 0
-    var walked: i64 = 0
-    var w = digits_from
-    var skipped = false
-    while w < end && walked < 19 {
-        let cc = cursor_source_byte(w)
-        if cc == (95 as i8) { w = w + 1; continue }
-        if cc < (48 as i8) || cc > (57 as i8) { break }
-        if !skipped {
-            if cc == (48 as i8) { w = w + 1; continue }
-            skipped = true
-        }
-        prefix = prefix * 10 + ((cc - (48 as i8)) as i64)
-        walked = walked + 1
-        w = w + 1
-    }
+    // 20 significant digits straddle u64 MAX (18446744073709551615) and 2^64
+    // (18446744073709551616), so the width alone cannot decide: compare the
+    // first 19 digits against 2^64 / 10, a value that fits i64, then the 20th
+    // against 6. No ASCII table of the bound is involved.
     let CEIL_19: i64 = 1844674407370955161
-    if prefix > CEIL_19 { return true }
-    if prefix < CEIL_19 { return false }
-    let last = cursor_source_byte(w)
-    last >= (54 as i8)
+    if prefix != CEIL_19 { return prefix > CEIL_19 }
+    at20 >= 6
 }
+
 
 
 // The one width-dependent spelling the corpus needs preserved: i64 MIN.
