@@ -1,0 +1,1259 @@
+// stdlib/arrow/lib.sio — native Apache Arrow IPC (stream and file)
+//
+// Low-level little-endian Arrow IPC, written in Sounio. No C++ Arrow
+// library and no FFI. Metadata is FlatBuffers V4/V5 (org.apache.arrow.flatbuf),
+// framed the way pyarrow writes it:
+//
+//   stream:  [continuation 0xFFFFFFFF][meta size][meta pad8][body pad8]...
+//            EOS is continuation + meta size 0
+//   file:    "ARROW1" + 2 zero bytes, schema message, one record batch,
+//            footer flatbuffer, int32 footer size, "ARROW1"
+//
+// Bounds (fail closed, status -7, rather than truncate):
+//   8 fields, 16 rows, field names <= 32 bytes, string/binary cells <= 32 bytes
+//   IPC byte buffer 8192, flatbuffer builder 4096, record-batch body 4096
+//
+// Types: Null, Int (8/16/32/64, signed or unsigned), FloatingPoint
+// (half / single raw bits / double), Binary, Utf8, Bool.
+// Not in this codec: dictionaries, nested types, compression, V1–V3 metadata.
+//
+// Status: 0 ok, -1 overflow, -2 bad magic, -3 bad framing, -4 unsupported,
+// -5 truncated, -6 malformed flatbuffer, -7 over capacity, -8 shape mismatch.
+//
+// Reference: Apache Arrow Columnar specification (IPC stream and file),
+// https://arrow.apache.org/docs/format/Columnar.html
+
+use arrow::flatbuf::{
+    FbBuilder,
+    FbBytes,
+    fb_bytes_new,
+    fb_create_string,
+    fb_end_object,
+    fb_end_vector,
+    fb_finish,
+    fb_new,
+    fb_place_u8,
+    fb_slot_i16,
+    fb_slot_i32,
+    fb_slot_i64,
+    fb_slot_off,
+    fb_slot_u8,
+    fb_start_object,
+    fb_start_vector,
+    fb_uoffset_rel,
+}
+
+pub fn arrow_type_null() -> i64 { 1 }
+pub fn arrow_type_int() -> i64 { 2 }
+pub fn arrow_type_float() -> i64 { 3 }
+pub fn arrow_type_binary() -> i64 { 4 }
+pub fn arrow_type_utf8() -> i64 { 5 }
+pub fn arrow_type_bool() -> i64 { 6 }
+
+pub struct ArrowSchema {
+    pub n_fields: i64,
+    pub name_bytes: [u8; 256],
+    pub name_lens: [i64; 8],
+    pub nullable: [i64; 8],
+    pub type_tag: [i64; 8],
+    pub bit_width: [i64; 8],
+    pub is_signed: [i64; 8],
+    pub precision: [i64; 8],
+}
+
+pub struct ArrowBatch {
+    pub n_rows: i64,
+    pub n_cols: i64,
+    pub values: [i64; 128],
+    pub nulls: [i64; 128],
+    pub str_bytes: [u8; 4096],
+    pub str_lens: [i64; 128],
+}
+
+pub struct ArrowBuf {
+    pub data: [u8; 8192],
+    pub len: i64,
+}
+
+struct Scratch {
+    body: [u8; 4096],
+    body_len: i64,
+    boff: [i64; 32],
+    blen: [i64; 32],
+    nbuf: i64,
+    nlen: [i64; 8],
+    nnull: [i64; 8],
+    nnode: i64,
+}
+
+struct MsgSpan {
+    start: i64,
+    meta_total: i64,
+    body_len: i64,
+    status: i64,
+}
+
+struct IpcMsg {
+    version: i64,
+    header_type: i64,
+    header_pos: i64,
+    body_len: i64,
+}
+
+pub fn arrow_schema_new() -> ArrowSchema {
+    ArrowSchema {
+        n_fields: 0,
+        name_bytes: [0; 256],
+        name_lens: [0; 8],
+        nullable: [0; 8],
+        type_tag: [0; 8],
+        bit_width: [0; 8],
+        is_signed: [0; 8],
+        precision: [0; 8],
+    }
+}
+
+pub fn arrow_batch_new() -> ArrowBatch {
+    ArrowBatch {
+        n_rows: 0,
+        n_cols: 0,
+        values: [0; 128],
+        nulls: [0; 128],
+        str_bytes: [0; 4096],
+        str_lens: [0; 128],
+    }
+}
+
+pub fn arrow_buf_new() -> ArrowBuf {
+    ArrowBuf { data: [0; 8192], len: 0 }
+}
+
+fn scratch_new() -> Scratch {
+    Scratch {
+        body: [0; 4096],
+        body_len: 0,
+        boff: [0; 32],
+        blen: [0; 32],
+        nbuf: 0,
+        nlen: [0; 8],
+        nnull: [0; 8],
+        nnode: 0,
+    }
+}
+
+fn msg_fail(code: i64) -> MsgSpan {
+    MsgSpan { start: 0, meta_total: 0, body_len: 0, status: code }
+}
+
+fn at(col: i64, row: i64) -> i64 { col * 16 + row }
+
+fn str_base(col: i64, row: i64) -> i64 { (col * 16 + row) * 32 }
+
+fn flag01(v: i64) -> i64 {
+    if v != 0 { 1 } else { 0 }
+}
+
+fn lo(v: i64) -> i64 {
+    let x = v & 255
+    if x < 0 { x + 256 } else { x }
+}
+
+fn pad8(n: i64) -> i64 with Div, Panic {
+    if n < 0 { return 0 }
+    let m = n % 8
+    if m == 0 { 0 } else { 8 - m }
+}
+
+/// Append one field. `name` is copied, max 32 bytes.
+/// `type_tag` is arrow_type_*. Int uses `bit_width` and `is_signed`.
+/// Float uses `precision` (0 half, 1 single, 2 double).
+pub fn arrow_schema_add(
+    s: &!ArrowSchema,
+    name: string,
+    nullable: i64,
+    type_tag: i64,
+    bit_width: i64,
+    is_signed: i64,
+    precision: i64,
+) -> i64 with Mut, Panic {
+    if s.n_fields >= 8 { return -7 }
+    let n = str_len(name)
+    if n > 32 { return -7 }
+    let col = s.n_fields
+    s.name_lens[col as usize] = n
+    var i: i64 = 0
+    while i < n {
+        var ch = name[i as usize] as i64
+        if ch < 0 { ch = ch + 256 }
+        s.name_bytes[(col * 32 + i) as usize] = (ch as i32) as u8
+        i = i + 1
+    }
+    s.nullable[col as usize] = flag01(nullable)
+    s.type_tag[col as usize] = type_tag
+    s.bit_width[col as usize] = bit_width
+    s.is_signed[col as usize] = flag01(is_signed)
+    s.precision[col as usize] = precision
+    s.n_fields = col + 1
+    0
+}
+
+/// Set row and column counts. Both must already fit the fixed caps.
+pub fn arrow_batch_shape(b: &!ArrowBatch, rows: i64, cols: i64) -> i64 with Mut {
+    if rows < 0 || rows > 16 { return -7 }
+    if cols < 0 || cols > 8 { return -7 }
+    b.n_rows = rows
+    b.n_cols = cols
+    0
+}
+
+fn cell_ok(col: i64, row: i64) -> i64 {
+    if col < 0 || col >= 8 { return 0 }
+    if row < 0 || row >= 16 { return 0 }
+    1
+}
+
+pub fn arrow_batch_set_i64(b: &!ArrowBatch, col: i64, row: i64, val: i64, is_null: i64) -> i64 with Mut, Panic {
+    if cell_ok(col, row) == 0 { return -7 }
+    let id = at(col, row)
+    b.values[id as usize] = val
+    b.nulls[id as usize] = flag01(is_null)
+    0
+}
+
+/// Store the IEEE-754 bit pattern of `val` (double column).
+pub fn arrow_batch_set_f64(b: &!ArrowBatch, col: i64, row: i64, val: f64, is_null: i64) -> i64 with Mut, Panic {
+    arrow_batch_set_i64(b, col, row, f64_to_bits(val), is_null)
+}
+
+pub fn arrow_batch_set_bool(b: &!ArrowBatch, col: i64, row: i64, val: i64, is_null: i64) -> i64 with Mut, Panic {
+    arrow_batch_set_i64(b, col, row, flag01(val), is_null)
+}
+
+/// Copy a UTF-8 or binary cell. Longer than 32 bytes returns -7.
+pub fn arrow_batch_set_str(b: &!ArrowBatch, col: i64, row: i64, text: string, is_null: i64) -> i64 with Mut, Panic {
+    if cell_ok(col, row) == 0 { return -7 }
+    let n = str_len(text)
+    let nul = flag01(is_null)
+    if nul == 0 && n > 32 { return -7 }
+    let id = at(col, row)
+    let base = str_base(col, row)
+    var store: i64 = n
+    if nul != 0 { store = 0 }
+    var i: i64 = 0
+    while i < store {
+        var ch = text[i as usize] as i64
+        if ch < 0 { ch = ch + 256 }
+        b.str_bytes[(base + i) as usize] = (ch as i32) as u8
+        i = i + 1
+    }
+    b.str_lens[id as usize] = store
+    b.nulls[id as usize] = nul
+    0
+}
+
+pub fn arrow_batch_is_null(b: &ArrowBatch, col: i64, row: i64) -> i64 with Panic {
+    if cell_ok(col, row) == 0 { return 1 }
+    b.nulls[at(col, row) as usize]
+}
+
+pub fn arrow_batch_i64(b: &ArrowBatch, col: i64, row: i64) -> i64 with Panic {
+    if cell_ok(col, row) == 0 { return 0 }
+    b.values[at(col, row) as usize]
+}
+
+pub fn arrow_batch_f64(b: &ArrowBatch, col: i64, row: i64) -> f64 with Panic {
+    bits_to_f64(arrow_batch_i64(b, col, row))
+}
+
+pub fn arrow_batch_str_len(b: &ArrowBatch, col: i64, row: i64) -> i64 with Panic {
+    if cell_ok(col, row) == 0 { return 0 }
+    b.str_lens[at(col, row) as usize]
+}
+
+pub fn arrow_batch_str_byte(b: &ArrowBatch, col: i64, row: i64, i: i64) -> i64 with Panic {
+    if cell_ok(col, row) == 0 { return 0 }
+    if i < 0 || i >= 32 { return 0 }
+    let v = b.str_bytes[(str_base(col, row) + i) as usize] as i64
+    if v < 0 { v + 256 } else { v }
+}
+
+fn schema_ok(schema: &ArrowSchema) -> i64 with Panic {
+    if schema.n_fields < 0 || schema.n_fields > 8 { return -7 }
+    var c: i64 = 0
+    while c < schema.n_fields {
+        let t = schema.type_tag[c as usize]
+        if t < 1 || t > 6 { return -4 }
+        if t == 2 {
+            let w = schema.bit_width[c as usize]
+            if w != 8 && w != 16 && w != 32 && w != 64 { return -4 }
+        }
+        if t == 3 {
+            let p = schema.precision[c as usize]
+            if p < 0 || p > 2 { return -4 }
+        }
+        c = c + 1
+    }
+    0
+}
+
+fn buf_push(out: &!ArrowBuf, v: i64) -> i64 with Mut, Panic {
+    if out.len >= 8192 { return -1 }
+    out.data[out.len as usize] = (lo(v) as i32) as u8
+    out.len = out.len + 1
+    0
+}
+
+fn buf_push_i32(out: &!ArrowBuf, v: i64) -> i64 with Mut, Panic {
+    if buf_push(out, v) != 0 { return -1 }
+    if buf_push(out, v >> 8) != 0 { return -1 }
+    if buf_push(out, v >> 16) != 0 { return -1 }
+    buf_push(out, v >> 24)
+}
+
+fn buf_append_fb(out: &!ArrowBuf, b: &FbBuilder) -> i64 with Mut, Panic {
+    let n = 4096 - b.head
+    var i: i64 = 0
+    while i < n {
+        let v = b.data[(b.head + i) as usize] as i64
+        var x = v
+        if x < 0 { x = x + 256 }
+        if buf_push(out, x) != 0 { return -1 }
+        i = i + 1
+    }
+    0
+}
+
+fn buf_append_body(out: &!ArrowBuf, sc: &Scratch) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < sc.body_len {
+        let v = sc.body[i as usize] as i64
+        var x = v
+        if x < 0 { x = x + 256 }
+        if buf_push(out, x) != 0 { return -1 }
+        i = i + 1
+    }
+    0
+}
+
+fn push_magic(out: &!ArrowBuf) -> i64 with Mut, Panic {
+    if buf_push(out, 65) != 0 { return -1 }
+    if buf_push(out, 82) != 0 { return -1 }
+    if buf_push(out, 82) != 0 { return -1 }
+    if buf_push(out, 79) != 0 { return -1 }
+    if buf_push(out, 87) != 0 { return -1 }
+    buf_push(out, 49)
+}
+
+fn load_name(schema: &ArrowSchema, col: i64, dst: &!FbBytes) with Mut, Panic {
+    var n = schema.name_lens[col as usize]
+    if n > 32 { n = 32 }
+    if n < 0 { n = 0 }
+    dst.len = n
+    var i: i64 = 0
+    while i < n {
+        dst.data[i as usize] = schema.name_bytes[(col * 32 + i) as usize]
+        i = i + 1
+    }
+}
+
+fn build_type(b: &!FbBuilder, schema: &ArrowSchema, col: i64) -> i64 with Mut, Panic, Div {
+    let tag = schema.type_tag[col as usize]
+    if tag == 1 || tag == 4 || tag == 5 || tag == 6 {
+        if fb_start_object(b, 0) != 0 { return -1 }
+        return fb_end_object(b)
+    }
+    if tag == 2 {
+        if fb_start_object(b, 2) != 0 { return -1 }
+        if fb_slot_u8(b, 1, schema.is_signed[col as usize], 0) != 0 { return -1 }
+        if fb_slot_i32(b, 0, schema.bit_width[col as usize], 0) != 0 { return -1 }
+        return fb_end_object(b)
+    }
+    if tag == 3 {
+        if fb_start_object(b, 1) != 0 { return -1 }
+        if fb_slot_i16(b, 0, schema.precision[col as usize], 0) != 0 { return -1 }
+        return fb_end_object(b)
+    }
+    -4
+}
+
+fn build_field(b: &!FbBuilder, schema: &ArrowSchema, col: i64) -> i64 with Mut, Panic, Div {
+    let ty = build_type(b, schema, col)
+    if ty < 0 { return ty }
+    var name = fb_bytes_new()
+    load_name(schema, col, &!name)
+    let ns = fb_create_string(b, &name)
+    if ns < 0 { return -1 }
+    if fb_start_object(b, 7) != 0 { return -1 }
+    if fb_slot_off(b, 3, ty, 0) != 0 { return -1 }
+    if fb_slot_u8(b, 2, schema.type_tag[col as usize], 0) != 0 { return -1 }
+    if fb_slot_u8(b, 1, schema.nullable[col as usize], 0) != 0 { return -1 }
+    if fb_slot_off(b, 0, ns, 0) != 0 { return -1 }
+    fb_end_object(b)
+}
+
+fn build_schema(b: &!FbBuilder, schema: &ArrowSchema) -> i64 with Mut, Panic, Div {
+    var offs: [i64; 8] = [0; 8]
+    var c: i64 = 0
+    while c < schema.n_fields {
+        let off = build_field(b, schema, c)
+        if off < 0 { return off }
+        offs[c as usize] = off
+        c = c + 1
+    }
+    if fb_start_vector(b, 4, schema.n_fields, 4) != 0 { return -1 }
+    var i: i64 = schema.n_fields - 1
+    while i >= 0 {
+        if fb_uoffset_rel(b, offs[i as usize]) != 0 { return -1 }
+        i = i - 1
+    }
+    let vec = fb_end_vector(b)
+    if vec < 0 { return -1 }
+    if fb_start_object(b, 4) != 0 { return -1 }
+    if fb_slot_off(b, 1, vec, 0) != 0 { return -1 }
+    fb_end_object(b)
+}
+
+fn build_message(b: &!FbBuilder, header_type: i64, header: i64, body_len: i64) -> i64 with Mut, Panic, Div {
+    if fb_start_object(b, 5) != 0 { return -1 }
+    if fb_slot_i64(b, 3, body_len, 0) != 0 { return -1 }
+    if fb_slot_off(b, 2, header, 0) != 0 { return -1 }
+    if fb_slot_u8(b, 1, header_type, 0) != 0 { return -1 }
+    if fb_slot_i16(b, 0, 4, 0) != 0 { return -1 }
+    fb_end_object(b)
+}
+
+fn sc_push(sc: &!Scratch, v: i64) -> i64 with Mut, Panic {
+    if sc.body_len >= 4096 { return -1 }
+    sc.body[sc.body_len as usize] = (lo(v) as i32) as u8
+    sc.body_len = sc.body_len + 1
+    0
+}
+
+fn sc_push_le(sc: &!Scratch, v: i64, width: i64) -> i64 with Mut, Panic {
+    if width >= 1 {
+        if sc_push(sc, v) != 0 { return -1 }
+    }
+    if width >= 2 {
+        if sc_push(sc, v >> 8) != 0 { return -1 }
+    }
+    if width >= 4 {
+        if sc_push(sc, v >> 16) != 0 { return -1 }
+        if sc_push(sc, v >> 24) != 0 { return -1 }
+    }
+    if width >= 8 {
+        if sc_push(sc, v >> 32) != 0 { return -1 }
+        if sc_push(sc, v >> 40) != 0 { return -1 }
+        if sc_push(sc, v >> 48) != 0 { return -1 }
+        if sc_push(sc, v >> 56) != 0 { return -1 }
+    }
+    0
+}
+
+fn sc_pad8(sc: &!Scratch) -> i64 with Mut, Panic, Div {
+    let extra = pad8(sc.body_len)
+    var i: i64 = 0
+    while i < extra {
+        if sc_push(sc, 0) != 0 { return -1 }
+        i = i + 1
+    }
+    0
+}
+
+fn sc_note(sc: &!Scratch, off: i64, len: i64) -> i64 with Mut, Panic {
+    if sc.nbuf >= 32 { return -1 }
+    sc.boff[sc.nbuf as usize] = off
+    sc.blen[sc.nbuf as usize] = len
+    sc.nbuf = sc.nbuf + 1
+    0
+}
+
+fn count_nulls(batch: &ArrowBatch, col: i64) -> i64 with Panic {
+    var n: i64 = 0
+    var r: i64 = 0
+    while r < batch.n_rows {
+        if batch.nulls[at(col, r) as usize] != 0 { n = n + 1 }
+        r = r + 1
+    }
+    n
+}
+
+fn push_bits(sc: &!Scratch, batch: &ArrowBatch, col: i64, kind: i64) -> i64 with Mut, Panic, Div {
+    if kind == 0 {
+        if count_nulls(batch, col) == 0 {
+            return sc_note(sc, sc.body_len, 0)
+        }
+    }
+    let start = sc.body_len
+    var r: i64 = 0
+    var cur: i64 = 0
+    var bit: i64 = 0
+    while r < batch.n_rows {
+        let id = at(col, r)
+        var setb: i64 = 0
+        if kind == 0 {
+            if batch.nulls[id as usize] == 0 { setb = 1 }
+        } else {
+            if batch.nulls[id as usize] == 0 && batch.values[id as usize] != 0 { setb = 1 }
+        }
+        if setb != 0 { cur = cur | (1 << bit) }
+        bit = bit + 1
+        if bit == 8 {
+            if sc_push(sc, cur) != 0 { return -1 }
+            cur = 0
+            bit = 0
+        }
+        r = r + 1
+    }
+    if bit != 0 {
+        if sc_push(sc, cur) != 0 { return -1 }
+    }
+    let logical = sc.body_len - start
+    if sc_note(sc, start, logical) != 0 { return -1 }
+    sc_pad8(sc)
+}
+
+fn value_width(schema: &ArrowSchema, col: i64) -> i64 with Panic {
+    let tag = schema.type_tag[col as usize]
+    if tag == 2 {
+        let w = schema.bit_width[col as usize]
+        if w == 8 { return 1 }
+        if w == 16 { return 2 }
+        if w == 32 { return 4 }
+        if w == 64 { return 8 }
+        return -4
+    }
+    if tag == 3 {
+        let p = schema.precision[col as usize]
+        if p == 0 { return 2 }
+        if p == 1 { return 4 }
+        if p == 2 { return 8 }
+        return -4
+    }
+    -4
+}
+
+fn push_fixed(sc: &!Scratch, schema: &ArrowSchema, batch: &ArrowBatch, col: i64) -> i64 with Mut, Panic, Div {
+    let width = value_width(schema, col)
+    if width < 0 { return width }
+    let start = sc.body_len
+    var r: i64 = 0
+    while r < batch.n_rows {
+        var v: i64 = 0
+        if batch.nulls[at(col, r) as usize] == 0 {
+            v = batch.values[at(col, r) as usize]
+        }
+        if sc_push_le(sc, v, width) != 0 { return -1 }
+        r = r + 1
+    }
+    let logical = sc.body_len - start
+    if sc_note(sc, start, logical) != 0 { return -1 }
+    sc_pad8(sc)
+}
+
+fn push_utf8(sc: &!Scratch, batch: &ArrowBatch, col: i64) -> i64 with Mut, Panic, Div {
+    let start = sc.body_len
+    if sc_push_le(sc, 0, 4) != 0 { return -1 }
+    var acc: i64 = 0
+    var r: i64 = 0
+    while r < batch.n_rows {
+        if batch.nulls[at(col, r) as usize] == 0 {
+            let n = batch.str_lens[at(col, r) as usize]
+            if n < 0 || n > 32 { return -7 }
+            acc = acc + n
+        }
+        if sc_push_le(sc, acc, 4) != 0 { return -1 }
+        r = r + 1
+    }
+    let logical = sc.body_len - start
+    if sc_note(sc, start, logical) != 0 { return -1 }
+    if sc_pad8(sc) != 0 { return -1 }
+    let dstart = sc.body_len
+    var row: i64 = 0
+    while row < batch.n_rows {
+        if batch.nulls[at(col, row) as usize] == 0 {
+            let n = batch.str_lens[at(col, row) as usize]
+            let base = str_base(col, row)
+            var k: i64 = 0
+            while k < n {
+                let v = batch.str_bytes[(base + k) as usize] as i64
+                var x = v
+                if x < 0 { x = x + 256 }
+                if sc_push(sc, x) != 0 { return -1 }
+                k = k + 1
+            }
+        }
+        row = row + 1
+    }
+    let dlen = sc.body_len - dstart
+    if sc_note(sc, dstart, dlen) != 0 { return -1 }
+    sc_pad8(sc)
+}
+
+fn emit_col(sc: &!Scratch, schema: &ArrowSchema, batch: &ArrowBatch, col: i64) -> i64 with Mut, Panic, Div {
+    let tag = schema.type_tag[col as usize]
+    var nulls = count_nulls(batch, col)
+    if tag == 1 { nulls = batch.n_rows }
+    if sc.nnode >= 8 { return -1 }
+    sc.nlen[sc.nnode as usize] = batch.n_rows
+    sc.nnull[sc.nnode as usize] = nulls
+    sc.nnode = sc.nnode + 1
+    if tag == 1 { return 0 }
+    if push_bits(sc, batch, col, 0) != 0 { return -1 }
+    if tag == 6 { return push_bits(sc, batch, col, 1) }
+    if tag == 4 || tag == 5 { return push_utf8(sc, batch, col) }
+    push_fixed(sc, schema, batch, col)
+}
+
+fn place_le_i32(b: &!FbBuilder, v: i64) -> i64 with Mut, Panic {
+    if fb_place_u8(b, v >> 24) != 0 { return -1 }
+    if fb_place_u8(b, v >> 16) != 0 { return -1 }
+    if fb_place_u8(b, v >> 8) != 0 { return -1 }
+    fb_place_u8(b, v)
+}
+
+fn place_le_i64(b: &!FbBuilder, v: i64) -> i64 with Mut, Panic {
+    if fb_place_u8(b, v >> 56) != 0 { return -1 }
+    if fb_place_u8(b, v >> 48) != 0 { return -1 }
+    if fb_place_u8(b, v >> 40) != 0 { return -1 }
+    if fb_place_u8(b, v >> 32) != 0 { return -1 }
+    if fb_place_u8(b, v >> 24) != 0 { return -1 }
+    if fb_place_u8(b, v >> 16) != 0 { return -1 }
+    if fb_place_u8(b, v >> 8) != 0 { return -1 }
+    fb_place_u8(b, v)
+}
+
+fn build_record_batch(b: &!FbBuilder, sc: &Scratch, n_rows: i64) -> i64 with Mut, Panic, Div {
+    if fb_start_vector(b, 16, sc.nnode, 8) != 0 { return -1 }
+    var i: i64 = sc.nnode - 1
+    while i >= 0 {
+        if place_le_i64(b, sc.nnull[i as usize]) != 0 { return -1 }
+        if place_le_i64(b, sc.nlen[i as usize]) != 0 { return -1 }
+        i = i - 1
+    }
+    let nodes = fb_end_vector(b)
+    if nodes < 0 { return -1 }
+    if fb_start_vector(b, 16, sc.nbuf, 8) != 0 { return -1 }
+    i = sc.nbuf - 1
+    while i >= 0 {
+        if place_le_i64(b, sc.blen[i as usize]) != 0 { return -1 }
+        if place_le_i64(b, sc.boff[i as usize]) != 0 { return -1 }
+        i = i - 1
+    }
+    let bufs = fb_end_vector(b)
+    if bufs < 0 { return -1 }
+    if fb_start_object(b, 5) != 0 { return -1 }
+    if fb_slot_off(b, 2, bufs, 0) != 0 { return -1 }
+    if fb_slot_off(b, 1, nodes, 0) != 0 { return -1 }
+    if fb_slot_i64(b, 0, n_rows, 0) != 0 { return -1 }
+    fb_end_object(b)
+}
+
+fn emit_message(out: &!ArrowBuf, b: &FbBuilder, sc: &Scratch) -> MsgSpan with Mut, Panic, Div {
+    if b.err != 0 { return msg_fail(-1) }
+    let meta_len = 4096 - b.head
+    let pad = pad8(meta_len)
+    let start = out.len
+    if buf_push_i32(out, -1) != 0 { return msg_fail(-1) }
+    if buf_push_i32(out, meta_len + pad) != 0 { return msg_fail(-1) }
+    if buf_append_fb(out, b) != 0 { return msg_fail(-1) }
+    var p: i64 = 0
+    while p < pad {
+        if buf_push(out, 0) != 0 { return msg_fail(-1) }
+        p = p + 1
+    }
+    if buf_append_body(out, sc) != 0 { return msg_fail(-1) }
+    MsgSpan {
+        start: start,
+        meta_total: 8 + meta_len + pad,
+        body_len: sc.body_len,
+        status: 0,
+    }
+}
+
+fn write_schema_into(out: &!ArrowBuf, schema: &ArrowSchema) -> i64 with Mut, Panic, Div {
+    var b = fb_new()
+    let sc_off = build_schema(&!b, schema)
+    if sc_off < 0 { return -1 }
+    let msg = build_message(&!b, 1, sc_off, 0)
+    if msg < 0 { return -1 }
+    if fb_finish(&!b, msg) != 0 { return -1 }
+    let empty = scratch_new()
+    let span = emit_message(out, &b, &empty)
+    span.status
+}
+
+fn write_batch_into(out: &!ArrowBuf, schema: &ArrowSchema, batch: &ArrowBatch) -> MsgSpan with Mut, Panic, Div {
+    var sc = scratch_new()
+    var c: i64 = 0
+    while c < schema.n_fields {
+        let rc = emit_col(&!sc, schema, batch, c)
+        if rc != 0 { return msg_fail(rc) }
+        c = c + 1
+    }
+    var b = fb_new()
+    let rb = build_record_batch(&!b, &sc, batch.n_rows)
+    if rb < 0 { return msg_fail(-1) }
+    let msg = build_message(&!b, 3, rb, sc.body_len)
+    if msg < 0 { return msg_fail(-1) }
+    if fb_finish(&!b, msg) != 0 { return msg_fail(-1) }
+    emit_message(out, &b, &sc)
+}
+
+fn place_block(b: &!FbBuilder, offset: i64, meta_len: i64, body_len: i64) -> i64 with Mut, Panic {
+    if place_le_i64(b, body_len) != 0 { return -1 }
+    if place_le_i32(b, 0) != 0 { return -1 }
+    if place_le_i32(b, meta_len) != 0 { return -1 }
+    place_le_i64(b, offset)
+}
+
+fn write_footer_into(out: &!ArrowBuf, schema: &ArrowSchema, span: MsgSpan) -> i64 with Mut, Panic, Div {
+    var b = fb_new()
+    let sc_off = build_schema(&!b, schema)
+    if sc_off < 0 { return -1 }
+    if fb_start_vector(&!b, 24, 0, 8) != 0 { return -1 }
+    let dicts = fb_end_vector(&!b)
+    if dicts < 0 { return -1 }
+    if fb_start_vector(&!b, 24, 1, 8) != 0 { return -1 }
+    if place_block(&!b, span.start, span.meta_total, span.body_len) != 0 { return -1 }
+    let blocks = fb_end_vector(&!b)
+    if blocks < 0 { return -1 }
+    if fb_start_object(&!b, 5) != 0 { return -1 }
+    if fb_slot_off(&!b, 3, blocks, 0) != 0 { return -1 }
+    if fb_slot_off(&!b, 2, dicts, 0) != 0 { return -1 }
+    if fb_slot_off(&!b, 1, sc_off, 0) != 0 { return -1 }
+    if fb_slot_i16(&!b, 0, 4, 0) != 0 { return -1 }
+    let foot = fb_end_object(&!b)
+    if foot < 0 { return -1 }
+    if fb_finish(&!b, foot) != 0 { return -1 }
+    let foot_len = 4096 - b.head
+    if buf_append_fb(out, &b) != 0 { return -1 }
+    if buf_push_i32(out, foot_len) != 0 { return -1 }
+    push_magic(out)
+}
+
+fn shape_ok(schema: &ArrowSchema, batch: &ArrowBatch) -> i64 with Panic {
+    let sk = schema_ok(schema)
+    if sk != 0 { return sk }
+    if batch.n_rows < 0 || batch.n_rows > 16 { return -7 }
+    if batch.n_cols < 0 || batch.n_cols > 8 { return -7 }
+    if schema.n_fields != batch.n_cols { return -8 }
+    0
+}
+
+/// Write one Arrow IPC file into `out` (magic, schema, one batch, footer, magic).
+pub fn arrow_ipc_write_file(schema: &ArrowSchema, batch: &ArrowBatch, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {
+    let sk = shape_ok(schema, batch)
+    if sk != 0 { return sk }
+    out.len = 0
+    if push_magic(out) != 0 { return -1 }
+    if buf_push(out, 0) != 0 { return -1 }
+    if buf_push(out, 0) != 0 { return -1 }
+    if write_schema_into(out, schema) != 0 { return -1 }
+    let span = write_batch_into(out, schema, batch)
+    if span.status != 0 { return span.status }
+    write_footer_into(out, schema, span)
+}
+
+/// Write one Arrow IPC stream into `out` (schema, one batch, EOS).
+pub fn arrow_ipc_write_stream(schema: &ArrowSchema, batch: &ArrowBatch, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {
+    let sk = shape_ok(schema, batch)
+    if sk != 0 { return sk }
+    out.len = 0
+    if write_schema_into(out, schema) != 0 { return -1 }
+    let span = write_batch_into(out, schema, batch)
+    if span.status != 0 { return span.status }
+    if buf_push_i32(out, -1) != 0 { return -1 }
+    buf_push_i32(out, 0)
+}
+
+/// Write an Arrow IPC file to `path`. Returns 0, or a negative status.
+pub fn arrow_ipc_write_path(path: string, schema: &ArrowSchema, batch: &ArrowBatch) -> i64 with IO, Mut, Panic, Div {
+    var out = arrow_buf_new()
+    let rc = arrow_ipc_write_file(schema, batch, &!out)
+    if rc != 0 { return rc }
+    let n = write_file(path, out.data, out.len)
+    if n != out.len { return -1 }
+    0
+}
+
+fn ab_u8(buf: &ArrowBuf, off: i64) -> i64 with Panic {
+    if off < 0 || off >= buf.len { return 0 }
+    let v = buf.data[off as usize] as i64
+    if v < 0 { v + 256 } else { v }
+}
+
+fn ab_u16(buf: &ArrowBuf, off: i64) -> i64 with Panic {
+    ab_u8(buf, off) | (ab_u8(buf, off + 1) << 8)
+}
+
+fn ab_u32(buf: &ArrowBuf, off: i64) -> i64 with Panic {
+    ab_u8(buf, off) | (ab_u8(buf, off + 1) << 8) | (ab_u8(buf, off + 2) << 16) | (ab_u8(buf, off + 3) << 24)
+}
+
+fn ab_i32(buf: &ArrowBuf, off: i64) -> i64 with Panic {
+    let u = ab_u32(buf, off)
+    if u >= 2147483648 { u - 4294967296 } else { u }
+}
+
+fn ab_i64(buf: &ArrowBuf, off: i64) -> i64 with Panic {
+    ab_u8(buf, off)
+        | (ab_u8(buf, off + 1) << 8)
+        | (ab_u8(buf, off + 2) << 16)
+        | (ab_u8(buf, off + 3) << 24)
+        | (ab_u8(buf, off + 4) << 32)
+        | (ab_u8(buf, off + 5) << 40)
+        | (ab_u8(buf, off + 6) << 48)
+        | (ab_u8(buf, off + 7) << 56)
+}
+
+fn ab_field(buf: &ArrowBuf, table: i64, field_id: i64) -> i64 with Panic, Div {
+    if table < 0 || table + 4 > buf.len { return 0 }
+    // Signed distance. Positive when the vtable sits below the table.
+    // Negative when a shared vtable (pyarrow dedups them) sits above it.
+    let soff = ab_i32(buf, table)
+    if soff == 0 { return 0 }
+    let vt = table - soff
+    if vt < 0 || vt + 4 > buf.len { return 0 }
+    let vts = ab_u16(buf, vt)
+    if vts < 4 { return 0 }
+    let need = 4 + 2 * (field_id + 1)
+    if need > vts || vt + need > buf.len { return 0 }
+    ab_u16(buf, vt + 4 + 2 * field_id)
+}
+
+fn ab_indirect(buf: &ArrowBuf, pos: i64) -> i64 with Panic {
+    if pos < 0 || pos + 4 > buf.len { return -1 }
+    pos + ab_u32(buf, pos)
+}
+
+fn is_arrow1(buf: &ArrowBuf, off: i64) -> i64 with Panic {
+    if off < 0 || off + 6 > buf.len { return 0 }
+    if ab_u8(buf, off) != 65 { return 0 }
+    if ab_u8(buf, off + 1) != 82 { return 0 }
+    if ab_u8(buf, off + 2) != 82 { return 0 }
+    if ab_u8(buf, off + 3) != 79 { return 0 }
+    if ab_u8(buf, off + 4) != 87 { return 0 }
+    if ab_u8(buf, off + 5) != 49 { return 0 }
+    1
+}
+
+fn read_name(buf: &ArrowBuf, field_pos: i64, schema: &!ArrowSchema, col: i64) -> i64 with Mut, Panic {
+    let sp = ab_indirect(buf, field_pos)
+    if sp < 0 || sp + 4 > buf.len { return -6 }
+    let n = ab_u32(buf, sp)
+    if n > 32 { return -7 }
+    if sp + 4 + n > buf.len { return -5 }
+    schema.name_lens[col as usize] = n
+    var i: i64 = 0
+    while i < n {
+        let by = ab_u8(buf, sp + 4 + i)
+        schema.name_bytes[(col * 32 + i) as usize] = (by as i32) as u8
+        i = i + 1
+    }
+    0
+}
+
+fn read_field(buf: &ArrowBuf, table: i64, schema: &!ArrowSchema, col: i64) -> i64 with Mut, Panic, Div {
+    if ab_field(buf, table, 4) != 0 { return -4 }
+    let ch = ab_field(buf, table, 5)
+    if ch != 0 {
+        let cv = ab_indirect(buf, table + ch)
+        if cv < 0 || cv + 4 > buf.len { return -6 }
+        if ab_u32(buf, cv) != 0 { return -4 }
+    }
+    let name_off = ab_field(buf, table, 0)
+    if name_off == 0 {
+        schema.name_lens[col as usize] = 0
+    } else {
+        let rc = read_name(buf, table + name_off, schema, col)
+        if rc != 0 { return rc }
+    }
+    let null_off = ab_field(buf, table, 1)
+    if null_off == 0 {
+        schema.nullable[col as usize] = 0
+    } else {
+        schema.nullable[col as usize] = flag01(ab_u8(buf, table + null_off))
+    }
+    let tt = ab_field(buf, table, 2)
+    if tt == 0 { return -6 }
+    let tag = ab_u8(buf, table + tt)
+    schema.type_tag[col as usize] = tag
+    schema.bit_width[col as usize] = 0
+    schema.is_signed[col as usize] = 0
+    schema.precision[col as usize] = 0
+    if tag == 1 || tag == 4 || tag == 5 || tag == 6 { return 0 }
+    let toff = ab_field(buf, table, 3)
+    if toff == 0 { return -6 }
+    let tp = ab_indirect(buf, table + toff)
+    if tp < 0 { return -6 }
+    if tag == 2 {
+        let woff = ab_field(buf, tp, 0)
+        if woff != 0 { schema.bit_width[col as usize] = ab_i32(buf, tp + woff) }
+        let soff = ab_field(buf, tp, 1)
+        if soff != 0 { schema.is_signed[col as usize] = flag01(ab_u8(buf, tp + soff)) }
+        return 0
+    }
+    if tag == 3 {
+        let poff = ab_field(buf, tp, 0)
+        if poff != 0 { schema.precision[col as usize] = ab_u16(buf, tp + poff) }
+        return 0
+    }
+    -4
+}
+
+fn read_schema_at(buf: &ArrowBuf, table: i64, schema: &!ArrowSchema) -> i64 with Mut, Panic, Div {
+    let endian_off = ab_field(buf, table, 0)
+    if endian_off != 0 {
+        if ab_u16(buf, table + endian_off) != 0 { return -4 }
+    }
+    let foff = ab_field(buf, table, 1)
+    if foff == 0 {
+        schema.n_fields = 0
+        return 0
+    }
+    let vec = ab_indirect(buf, table + foff)
+    if vec < 0 || vec + 4 > buf.len { return -6 }
+    let n = ab_u32(buf, vec)
+    if n > 8 { return -7 }
+    var c: i64 = 0
+    while c < n {
+        let ep = vec + 4 + 4 * c
+        if ep + 4 > buf.len { return -5 }
+        let fp = ab_indirect(buf, ep)
+        if fp < 0 { return -6 }
+        let rc = read_field(buf, fp, schema, c)
+        if rc != 0 { return rc }
+        c = c + 1
+    }
+    schema.n_fields = n
+    0
+}
+
+fn read_message_at(buf: &ArrowBuf, meta_at: i64, view: &!IpcMsg) -> i64 with Mut, Panic, Div {
+    if meta_at < 0 || meta_at + 4 > buf.len { return -5 }
+    let root = ab_u32(buf, meta_at)
+    let table = meta_at + root
+    if table < 0 || table + 4 > buf.len { return -6 }
+    let voff = ab_field(buf, table, 0)
+    if voff == 0 { return -4 }
+    view.version = ab_u16(buf, table + voff)
+    if view.version != 3 && view.version != 4 { return -4 }
+    let hofft = ab_field(buf, table, 1)
+    if hofft == 0 { return -6 }
+    view.header_type = ab_u8(buf, table + hofft)
+    let hoff = ab_field(buf, table, 2)
+    if hoff == 0 { return -6 }
+    view.header_pos = ab_indirect(buf, table + hoff)
+    if view.header_pos < 0 { return -6 }
+    let boff = ab_field(buf, table, 3)
+    if boff == 0 {
+        view.body_len = 0
+    } else {
+        view.body_len = ab_i64(buf, table + boff)
+    }
+    0
+}
+
+fn batch_clear(batch: &!ArrowBatch) with Mut, Panic {
+    var i: i64 = 0
+    while i < 128 {
+        batch.values[i as usize] = 0
+        batch.nulls[i as usize] = 0
+        batch.str_lens[i as usize] = 0
+        i = i + 1
+    }
+    batch.n_rows = 0
+    batch.n_cols = 0
+}
+
+fn mark_validity(buf: &ArrowBuf, body_at: i64, voff: i64, vlen: i64, batch: &!ArrowBatch, col: i64, rows: i64) -> i64 with Mut, Panic, Div {
+    var r: i64 = 0
+    while r < rows {
+        var is_null: i64 = 0
+        if vlen != 0 {
+            let byte_i = r / 8
+            if byte_i < 0 || byte_i >= vlen { return -5 }
+            let bit = r % 8
+            let by = ab_u8(buf, body_at + voff + byte_i)
+            if ((by >> bit) & 1) == 0 { is_null = 1 }
+        }
+        batch.nulls[at(col, r) as usize] = is_null
+        r = r + 1
+    }
+    0
+}
+
+fn read_fixed(buf: &ArrowBuf, body_at: i64, voff: i64, vlen: i64, schema: &ArrowSchema, batch: &!ArrowBatch, col: i64) -> i64 with Mut, Panic, Div {
+    let width = value_width(schema, col)
+    if width < 0 { return width }
+    if voff < 0 || vlen < 0 { return -6 }
+    if voff + vlen > 8192 { return -5 }
+    let rows = batch.n_rows
+    if vlen < rows * width { return -5 }
+    let signed = schema.is_signed[col as usize]
+    var r: i64 = 0
+    while r < rows {
+        if batch.nulls[at(col, r) as usize] == 0 {
+            let pos = body_at + voff + r * width
+            var v: i64 = 0
+            if width == 1 {
+                v = ab_u8(buf, pos)
+                if signed != 0 && v >= 128 { v = v - 256 }
+            } else if width == 2 {
+                v = ab_u16(buf, pos)
+                if signed != 0 && v >= 32768 { v = v - 65536 }
+            } else if width == 4 {
+                v = ab_u32(buf, pos)
+                if signed != 0 && v >= 2147483648 { v = v - 4294967296 }
+            } else {
+                v = ab_i64(buf, pos)
+            }
+            batch.values[at(col, r) as usize] = v
+        }
+        r = r + 1
+    }
+    0
+}
+
+fn read_bools(buf: &ArrowBuf, body_at: i64, voff: i64, vlen: i64, batch: &!ArrowBatch, col: i64) -> i64 with Mut, Panic, Div {
+    var r: i64 = 0
+    while r < batch.n_rows {
+        var bitv: i64 = 0
+        if batch.nulls[at(col, r) as usize] == 0 {
+            let byte_i = r / 8
+            if vlen == 0 || byte_i >= vlen { return -5 }
+            let by = ab_u8(buf, body_at + voff + byte_i)
+            bitv = (by >> (r % 8)) & 1
+        }
+        batch.values[at(col, r) as usize] = bitv
+        r = r + 1
+    }
+    0
+}
+
+fn read_utf8(buf: &ArrowBuf, body_at: i64, ooff: i64, olen: i64, doff: i64, dlen: i64, batch: &!ArrowBatch, col: i64) -> i64 with Mut, Panic, Div {
+    let rows = batch.n_rows
+    if olen < (rows + 1) * 4 { return -5 }
+    var r: i64 = 0
+    while r < rows {
+        let a = ab_i32(buf, body_at + ooff + r * 4)
+        let bend = ab_i32(buf, body_at + ooff + (r + 1) * 4)
+        let n = bend - a
+        if batch.nulls[at(col, r) as usize] != 0 {
+            batch.str_lens[at(col, r) as usize] = 0
+        } else {
+            if n < 0 || n > 32 { return -7 }
+            if a < 0 || a + n > dlen { return -5 }
+            let base = str_base(col, r)
+            var k: i64 = 0
+            while k < n {
+                let by = ab_u8(buf, body_at + doff + a + k)
+                batch.str_bytes[(base + k) as usize] = (by as i32) as u8
+                k = k + 1
+            }
+            batch.str_lens[at(col, r) as usize] = n
+        }
+        r = r + 1
+    }
+    0
+}
+
+fn take_buf(offs: &[i64; 32], lens: &[i64; 32], nb: i64, bi: i64, body_len: i64) -> i64 with Panic {
+    if bi < 0 || bi >= nb { return -6 }
+    let off = offs[bi as usize]
+    let len = lens[bi as usize]
+    if off < 0 || len < 0 || off + len > body_len { return -5 }
+    0
+}
+
+fn decode_batch(buf: &ArrowBuf, table: i64, body_at: i64, body_len: i64, schema: &ArrowSchema, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {
+    if ab_field(buf, table, 3) != 0 { return -4 }
+    let loff = ab_field(buf, table, 0)
+    var rows: i64 = 0
+    if loff != 0 { rows = ab_i64(buf, table + loff) }
+    if rows < 0 || rows > 16 { return -7 }
+    let noff = ab_field(buf, table, 1)
+    if noff == 0 { return -6 }
+    let nv = ab_indirect(buf, table + noff)
+    if nv < 0 || nv + 4 > buf.len { return -6 }
+    let nn = ab_u32(buf, nv)
+    if nn != schema.n_fields { return -8 }
+    var c: i64 = 0
+    while c < nn {
+        let np = nv + 4 + 16 * c
+        if np + 16 > buf.len { return -5 }
+        if ab_i64(buf, np) != rows { return -6 }
+        c = c + 1
+    }
+    let boff = ab_field(buf, table, 2)
+    if boff == 0 { return -6 }
+    let bv = ab_indirect(buf, table + boff)
+    if bv < 0 || bv + 4 > buf.len { return -6 }
+    let nb = ab_u32(buf, bv)
+    if nb > 32 { return -7 }
+    var offs: [i64; 32] = [0; 32]
+    var lens: [i64; 32] = [0; 32]
+    var b: i64 = 0
+    while b < nb {
+        let bp = bv + 4 + 16 * b
+        if bp + 16 > buf.len { return -5 }
+        offs[b as usize] = ab_i64(buf, bp)
+        lens[b as usize] = ab_i64(buf, bp + 8)
+        b = b + 1
+    }
+    batch_clear(batch)
+    batch.n_rows = rows
+    batch.n_cols = schema.n_fields
+    var bi: i64 = 0
+    var col: i64 = 0
+    while col < schema.n_fields {
+        let tag = schema.type_tag[col as usize]
+        if tag == 1 {
+            var r: i64 = 0
+            while r < rows {
+                batch.nulls[at(col, r) as usize] = 1
+                r = r + 1
+            }
+        } else {
+            if take_buf(&offs, &lens, nb, bi, body_len) != 0 { return -5 }
+            let voff = offs[bi as usize]
+            let vlen = lens[bi as usize]
+            bi = bi + 1
+            let vr = mark_validity(buf, body_at, voff, vlen, batch, col, rows)
+            if vr != 0 { return vr }
+            if tag == 6 {
+                if take_buf(&offs, &lens, nb, bi, body_len) != 0 { return -5 }
+                let rc = read_bools(buf, body_at, offs[bi as usize], lens[bi as usize], batch, col)
+                if rc != 0 { return rc }
+                bi = bi + 1
+            } else if tag == 4 || tag == 5 {
+                if take_buf(&offs, &lens, nb, bi, body_len) != 0 { return -5 }
+                let ooff = offs[bi as usize]
+                let olen = lens[bi as usize]
+                bi = bi + 1
+                if take_buf(&offs, &lens, nb, bi, body_len) != 0 { return -5 }
+                let rc = read_utf8(buf, body_at, ooff, olen, offs[bi as usize], lens[bi as usize], batch, col)
+                if rc != 0 { return rc }
+                bi = bi + 1
+            } else {
+                if take_buf(&offs, &lens, nb, bi, body_len) != 0 { return -5 }
+                let rc = read_fixed(buf, body_at, offs[bi as usize], lens[bi as usize], schema, batch, col)
+                if rc != 0 { return rc }
+                bi = bi + 1
+            }
+        }
+        col = col + 1
+    }
+    if bi != nb { return -6 }
+    0
+}
+
+fn zero_batch(schema: &ArrowSchema, batch: &!ArrowBatch) with Mut, Panic {
+    batch_clear(batch)
+    batch.n_cols = schema.n_fields
+    batch.n_rows = 0
+}
+
+fn msize_match(meta: i64) -> i64 {
+    meta - 8
+}
+
+fn read_file_buf(buf: &ArrowBuf, schema: &!ArrowSchema, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {
+    if buf.len < 10 { return -2 }
+    if is_arrow1(buf, 0) == 0 { return -2 }
+    if is_arrow1(buf, buf.len - 6) == 0 { return -2 }
+    let fsize = ab_i32(buf, buf.len - 10)
+    if fsize <= 0 { return -2 }
+    let foff = buf.len - 10 - fsize
+    if foff < 8 { return -2 }
+    let root = ab_u32(buf, foff)
+    let ft = foff + root
+    if ft < 0 || ft + 4 > buf.len { return -6 }
+    let voff = ab_field(buf, ft, 0)
+    if voff == 0 { return -4 }
+    let ver = ab_u16(buf, ft + voff)
+    if ver != 3 && ver != 4 { return -4 }
+    let soff = ab_field(buf, ft, 1)
+    if soff == 0 { return -6 }
+    let st = ab_indirect(buf, ft + soff)
+    if st < 0 { return -6 }
+    let rc = read_schema_at(buf, st, schema)
+    if rc != 0 { return rc }
+    let boff = ab_field(buf, ft, 3)
+    if boff == 0 {
+        zero_batch(schema, batch)
+        return 0
+    }
+    let bv = ab_indirect(buf, ft + boff)
+    if bv < 0 || bv + 4 > buf.len { return -6 }
+    let nb = ab_u32(buf, bv)
+    if nb > 1 { return -7 }
+    if nb == 0 {
+        zero_batch(schema, batch)
+        return 0
+    }
+    let bp = bv + 4
+    if bp + 24 > buf.len { return -5 }
+    let offset = ab_i64(buf, bp)
+    let meta = ab_i32(buf, bp + 8)
+    let body = ab_i64(buf, bp + 16)
+    if offset < 0 || meta < 8 { return -6 }
+    if offset + meta < 0 || offset + meta + body > buf.len { return -5 }
+    if ab_i32(buf, offset) != -1 { return -3 }
+    if ab_i32(buf, offset + 4) != msize_match(meta) { return -3 }
+    var msg = IpcMsg { version: 0, header_type: 0, header_pos: 0, body_len: 0 }
+    let rc2 = read_message_at(buf, offset + 8, &!msg)
+    if rc2 != 0 { return rc2 }
+    if msg.header_type != 3 { return -4 }
+    if msg.body_len != body { return -3 }
+    decode_batch(buf, msg.header_pos, offset + meta, body, schema, batch)
+}
+
+fn read_stream_buf(buf: &ArrowBuf, schema: &!ArrowSchema, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {
+    var pos: i64 = 0
+    var saw_schema: i64 = 0
+    var saw_batch: i64 = 0
+    while pos + 8 <= buf.len {
+        let cont = ab_i32(buf, pos)
+        let msize = ab_i32(buf, pos + 4)
+        if cont == 0 || (cont == -1 && msize == 0) {
+            if saw_schema == 0 { return -6 }
+            return 0
+        }
+        if cont != -1 { return -3 }
+        if msize < 0 || pos + 8 + msize > buf.len { return -5 }
+        var msg = IpcMsg { version: 0, header_type: 0, header_pos: 0, body_len: 0 }
+        let rc = read_message_at(buf, pos + 8, &!msg)
+        if rc != 0 { return rc }
+        let body_at = pos + 8 + msize
+        if msg.body_len < 0 || body_at + msg.body_len > buf.len { return -5 }
+        if msg.header_type == 1 {
+            let rc2 = read_schema_at(buf, msg.header_pos, schema)
+            if rc2 != 0 { return rc2 }
+            saw_schema = 1
+        } else if msg.header_type == 3 {
+            if saw_schema == 0 { return -6 }
+            if saw_batch != 0 { return -7 }
+            let rc3 = decode_batch(buf, msg.header_pos, body_at, msg.body_len, schema, batch)
+            if rc3 != 0 { return rc3 }
+            saw_batch = 1
+        } else {
+            return -4
+        }
+        pos = body_at + msg.body_len
+    }
+    if saw_schema == 0 { return -6 }
+    if saw_batch == 0 { zero_batch(schema, batch) }
+    0
+}
+
+/// Read a file buffer (leading "ARROW1") or a stream buffer.
+/// One record batch. A second batch returns -7.
+pub fn arrow_ipc_read(buf: &ArrowBuf, schema: &!ArrowSchema, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {
+    batch_clear(batch)
+    schema.n_fields = 0
+    if buf.len >= 6 && is_arrow1(buf, 0) != 0 {
+        return read_file_buf(buf, schema, batch)
+    }
+    read_stream_buf(buf, schema, batch)
+}

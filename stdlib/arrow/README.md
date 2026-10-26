@@ -1,0 +1,57 @@
+# stdlib/arrow
+
+Native Apache Arrow IPC, written in Sounio. Metadata is FlatBuffers
+(`org.apache.arrow.flatbuf`, metadata versions V4 and V5). The stream and
+file encapsulations match the Arrow columnar IPC format that pyarrow reads.
+
+This is not the Arrow C Data Interface. `dataframe::arrow_available` stays
+false; that hook is a separate FFI surface.
+
+## Caps
+
+Fail closed (status `-7`) rather than truncate:
+
+- 8 fields, 16 rows, one record batch
+- field names and string/binary cells at most 32 bytes
+- IPC buffer 8192 bytes, record-batch body 4096 bytes
+
+## Types
+
+Null, Int (8/16/32/64, signed or unsigned), FloatingPoint (half and single
+are raw bits in the low part of the cell; double is IEEE-754), Binary, Utf8,
+Bool. Dictionaries, nested children, compression, and big-endian schemas
+return `-4`.
+
+## Status
+
+`0` ok, `-1` overflow, `-2` bad magic, `-3` bad framing, `-4` unsupported,
+`-5` truncated, `-6` malformed, `-7` over capacity, `-8` shape mismatch.
+
+## Example
+
+```sounio
+use arrow::lib::{
+    arrow_batch_new, arrow_batch_set_i64, arrow_batch_shape, arrow_buf_new,
+    arrow_ipc_read, arrow_ipc_write_stream, arrow_schema_add, arrow_schema_new,
+    arrow_type_int,
+}
+
+fn main() -> i32 with Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    let _a = arrow_schema_add(&!schema, "id", 0, arrow_type_int(), 64, 1, 0)
+    var batch = arrow_batch_new()
+    let _b = arrow_batch_shape(&!batch, 1, 1)
+    let _c = arrow_batch_set_i64(&!batch, 0, 0, 7, 0)
+    var buf = arrow_buf_new()
+    let _w = arrow_ipc_write_stream(&schema, &batch, &!buf)
+    var schema2 = arrow_schema_new()
+    var batch2 = arrow_batch_new()
+    let rc = arrow_ipc_read(&buf, &!schema2, &!batch2)
+    if rc != 0 { return 1 }
+    0
+}
+```
+
+`arrow_ipc_write_file` adds the `ARROW1` magic and footer. `arrow_ipc_read`
+accepts either form. `arrow_ipc_write_path` writes the file form with
+`write_file`.
