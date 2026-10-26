@@ -1,0 +1,60 @@
+//@ run-pass
+//@ expect-stdout: FEM_CHECKED_PASS
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_at,numeric_buffer_close}
+use math::fem_checked::{fem1d_workspace,fem1d_solve_into}
+fn fem_case(n:i64,mode:i64) with Alloc,Mut,Div,Panic,IO {
+ let shape=fem1d_workspace(n)
+ assert(shape.status==0 && shape.payload_bytes==40*n)
+ var nodes=numeric_buffer_new(n,n*8)
+ var ea=numeric_buffer_new(n-1,(n-1)*8)
+ var load=numeric_buffer_new(n-1,(n-1)*8)
+ var answer=numeric_buffer_new(n,n*8)
+ var diag=numeric_buffer_new(n,n*8)
+ var upper=numeric_buffer_new(n,n*8)
+ var rhs=numeric_buffer_new(n,n*8)
+ var trial=numeric_buffer_new(n,n*8)
+ var i:i64=0
+ while i<n {
+  let t=(i as f64)/((n-1) as f64)
+  numeric_buffer_set(&!nodes,i,if mode==1 {t*t}else{t})
+  numeric_buffer_set(&!answer,i,99.0)
+  if i<n-1 {
+   numeric_buffer_set(&!ea,i,if mode==2 {1.0e-150}else{2.0})
+   numeric_buffer_set(&!load,i,if mode==2 {1.0e-150}else{4.0})
+  }
+  i=i+1
+ }
+ let left=if mode==2 {-1.0}else{1.0}
+ let right=if mode==2 {2.0}else{3.0}
+ let solved=fem1d_solve_into(&nodes,&ea,&load,left,right,n-1,&!answer,&!diag,&!upper,&!rhs,&!trial)
+ assert(solved.status==0 && solved.assembled==n-1 && solved.eliminated==n-1)
+ i=0
+ while i<n {
+  let xb:i64=f64_to_bits(numeric_buffer_at(&nodes,i));let ub:i64=f64_to_bits(numeric_buffer_at(&answer,i))
+  println("FEM {} {} {} {}",mode,i,xb,ub);i=i+1
+ }
+ let res:i64=f64_to_bits(solved.residual_max)
+ println("FEM_WORK {} {} {} {} {}",mode,n,solved.assembled,solved.eliminated,res)
+ let before:i64=f64_to_bits(numeric_buffer_at(&answer,1))
+ numeric_buffer_set(&!ea,0,0.0)
+ let refused=fem1d_solve_into(&nodes,&ea,&load,left,right,n-1,&!answer,&!diag,&!upper,&!rhs,&!trial)
+ assert(refused.status==2 && f64_to_bits(numeric_buffer_at(&answer,1))==before)
+ numeric_buffer_set(&!ea,0,-1.0)
+ let nonspd=fem1d_solve_into(&nodes,&ea,&load,left,right,n-1,&!answer,&!diag,&!upper,&!rhs,&!trial)
+ assert(nonspd.status==2 && f64_to_bits(numeric_buffer_at(&answer,1))==before)
+ numeric_buffer_set(&!ea,0,1.0)
+ let capped=fem1d_solve_into(&nodes,&ea,&load,left,right,n-2,&!answer,&!diag,&!upper,&!rhs,&!trial)
+ assert(capped.status==3 && f64_to_bits(numeric_buffer_at(&answer,1))==before)
+ let first_node=numeric_buffer_at(&nodes,0)
+ numeric_buffer_set(&!nodes,1,first_node)
+ let repeated=fem1d_solve_into(&nodes,&ea,&load,left,right,n-1,&!answer,&!diag,&!upper,&!rhs,&!trial)
+ assert(repeated.status==2 && f64_to_bits(numeric_buffer_at(&answer,1))==before)
+ println("FEM_REFUSALS {} 2 2 3 2",mode)
+ numeric_buffer_close(nodes);numeric_buffer_close(ea);numeric_buffer_close(load);numeric_buffer_close(answer)
+ numeric_buffer_close(diag);numeric_buffer_close(upper);numeric_buffer_close(rhs);numeric_buffer_close(trial)
+}
+fn main()->i32 with Alloc,Mut,Div,Panic,IO {
+ fem_case(3,0);fem_case(17,1);fem_case(257,2)
+ println("FEM_CHECKED_PASS")
+ 0
+}

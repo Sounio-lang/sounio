@@ -1,0 +1,1 @@
+A checked structural binary64 interval API now distinguishes invalid inputs from empty intervals, canonicalizes signed zeros and decorations, and provides explicit three-state comparison and hull. ADR-019 records the approved directed-arithmetic design; this increment does not implement or certify the compiler primitive or arithmetic backends.

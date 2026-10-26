@@ -30,7 +30,7 @@ fn main()->i32 with IO,Mut,Div,Panic {
  std::cout<<R"SIO( var options=default_options()
  options.rtol=1.0e-10;options.atol=1.0e-12
  let full=solve_dp54_64(decay_rhs,&initial,64,0.0,1.0,options)
- assert(full.status==0 && full.n==64 && full.t_final==1.0 && full.nfeval==7*full.attempts)
+ assert(full.status==0 && full.n==64 && full.t_final==1.0 && full.nfeval==1+6*full.attempts)
  var i:i64=0
  while i<64 {assert(close(full.state[i as usize],expected[i as usize],1.0e-8));i=i+1}
  initial[0]=1.0;initial[1]=0.0

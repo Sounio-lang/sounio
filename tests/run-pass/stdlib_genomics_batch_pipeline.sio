@@ -1,0 +1,108 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: GENOMICS_BATCH_PASS
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_close}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set}
+use genomics::count_csr::{count_csr_build}
+use genomics::count_identities::{CountIdentities,count_identities_build,count_identities_close}
+use genomics::count_pipeline::{count_pipeline_workspace,count_pipeline_new,count_pipeline_prepare,count_pipeline_point_batch,count_pipeline_shrink,count_pipeline_refit_batch,count_pipeline_adjust,count_pipeline_status,count_pipeline_phase,count_pipeline_eligible,count_pipeline_prior_status,count_pipeline_prior_a0,count_pipeline_prior_a1,count_pipeline_prior_variance,count_pipeline_point_evaluations,count_pipeline_refit_evaluations,count_pipeline_value,count_pipeline_gene_status,count_pipeline_adjusted,count_pipeline_factor,count_pipeline_offset,count_pipeline_count,count_pipeline_design,count_pipeline_sample_id_length,count_pipeline_sample_id_byte,count_pipeline_coefficient_available,count_pipeline_coefficient,count_pipeline_close}
+use genomics::count_pipeline_report::{count_gene_report_slot,count_pipeline_report_into,count_pipeline_write_tsv}
+use stats::regression::dynamic_dispersion::{DispersionSearchOptions}
+use io::sci_print::{println_f64_sci}
+fn make_ids(n:i64,prefix:i64,reverse:bool)->CountIdentities with Alloc,Mut,Div,Panic {
+ var bytes=integer_buffer_new(n*5,n*40)
+ var offsets=integer_buffer_new(n+1,(n+1)*8)
+ var order=integer_buffer_new(n,n*8);var groups=integer_buffer_new(n,n*8)
+ var i:i64=0
+ while i<n {
+  let j=if reverse {n-1-i}else{i}
+  integer_buffer_set(&!offsets,i,i*5)
+  integer_buffer_set(&!bytes,i*5,prefix)
+  integer_buffer_set(&!bytes,i*5+1,65+j/17576)
+  integer_buffer_set(&!bytes,i*5+2,65+(j/676)%26)
+  integer_buffer_set(&!bytes,i*5+3,65+(j/26)%26)
+  integer_buffer_set(&!bytes,i*5+4,65+j%26);i=i+1
+ }
+ integer_buffer_set(&!offsets,n,n*5)
+ count_identities_build(bytes,offsets,order,groups,0,10000000)
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let g:i64=8;let n:i64=12;let p:i64=2
+ var offsets=integer_buffer_new(g+1,(g+1)*8)
+ var columns=integer_buffer_new(g*n,g*n*8)
+ var values=integer_buffer_new(g*n,g*n*8)
+ var i:i64=0
+ while i<g {
+  integer_buffer_set(&!offsets,i,i*n)
+  var j:i64=0
+  while j<n {
+   let noise=if i==0 {0}else{((j*7+i*3)%11)-5}
+   var y=(i+1)*20+noise*(i+1)
+   if j>=6 {y=y+(i+1)*10}
+   if i==7 {y=0}
+   integer_buffer_set(&!columns,i*n+j,j)
+   integer_buffer_set(&!values,i*n+j,y);j=j+1
+  };i=i+1
+ }
+ integer_buffer_set(&!offsets,g,g*n)
+ let csr=count_csr_build(g,n,g*n,offsets,columns,values,0)
+ let genes=make_ids(g,71,false);let samples=make_ids(n,83,false);let metadata=make_ids(n,83,true)
+ let options=DispersionSearchOptions{method:0,log_alpha_lower: -10.0,log_alpha_upper:2.0,outer_tolerance:1e-5,max_outer_evaluations:128,rcond:0.0,inner_iterations:100,inner_tolerance:1e-8,prior_active:false,prior_center:0.0,prior_variance:1.0,compute_curvature:true}
+ let query=count_pipeline_workspace(g,n,p,0)
+ assert(query.status==0)
+ var w=count_pipeline_new(csr,genes,samples,p,options,query.payload_bytes)
+ assert(count_pipeline_status(&w)==0)
+ assert(count_pipeline_count(&w,0,0)==20 && count_pipeline_count(&w,0,11)==30)
+ assert(count_pipeline_sample_id_length(&w,0)==5 && count_pipeline_sample_id_byte(&w,0,4)==65 && count_pipeline_sample_id_byte(&w,11,4)==76)
+ assert(!count_pipeline_coefficient_available(&w,0,false))
+ assert(!count_pipeline_coefficient_available(&w,0,true))
+ var report=count_gene_report_slot()
+ assert(count_pipeline_report_into(&w,0,&!report)==0 && !report.point_available && !report.refit_available)
+ var design=numeric_buffer_new(n*p,n*p*8)
+ var exposure=numeric_buffer_new(n,n*8)
+ var initial=numeric_buffer_new(p,p*8);var contrast=numeric_buffer_new(p,p*8)
+ i=0;while i<n {
+  let original=n-1-i
+  numeric_buffer_set(&!design,i*p,1.0)
+  numeric_buffer_set(&!design,i*p+1,if original>=6 {1.0}else{0.0})
+  numeric_buffer_set(&!exposure,i,0.0);i=i+1
+ }
+ numeric_buffer_set(&!initial,0,3.0);numeric_buffer_set(&!initial,1,0.0)
+ numeric_buffer_set(&!contrast,0,0.0);numeric_buffer_set(&!contrast,1,1.0)
+ let prep=count_pipeline_prepare(&!w,&metadata,&design,&exposure,&initial,&contrast,1,1000000,true,true)
+ println("PREP {}",prep);assert(prep==0)
+ assert(count_pipeline_design(&w,0,0)==1.0 && count_pipeline_design(&w,0,1)==0.0 && count_pipeline_design(&w,11,1)==1.0)
+ assert(count_pipeline_point_batch(&!w,3)==0)
+ assert(count_pipeline_point_batch(&!w,g)==0)
+ assert(count_pipeline_phase(&w)==2)
+ println("ELIGIBLE {}",count_pipeline_eligible(&w))
+ let shrunk=count_pipeline_shrink(&!w,0.05,1.0,0.0,100,1e-8,2.0)
+ println("SHRINK {}",shrunk)
+ assert(count_pipeline_refit_batch(&!w,g,10000,2e-14)==0)
+ assert(count_pipeline_adjust(&!w)==0)
+ println("WORK {} {}",count_pipeline_point_evaluations(&w),count_pipeline_refit_evaluations(&w))
+ print("PRIOR_A0 ");println_f64_sci(count_pipeline_prior_a0(&w),15)
+ print("PRIOR_A1 ");println_f64_sci(count_pipeline_prior_a1(&w),15)
+ print("PRIOR_VAR ");println_f64_sci(count_pipeline_prior_variance(&w),15)
+ i=0;while i<n {
+  println("SAMPLE {}",i)
+  print("FACTOR ");println_f64_sci(count_pipeline_factor(&w,i),15)
+  print("OFFSET ");println_f64_sci(count_pipeline_offset(&w,i),15);i=i+1
+ }
+ i=0;while i<g {
+  println("GENE {}",i)
+  var j:i64=0;while j<12 {println("STATUS {} {}",j,count_pipeline_gene_status(&w,i,j));j=j+1}
+  j=0;while j<24 {println("VALUE {}",j);print("V ");println_f64_sci(count_pipeline_value(&w,i,j),15);j=j+1}
+  print("BH ");println_f64_sci(count_pipeline_adjusted(&w,i,1),15)
+  print("BY ");println_f64_sci(count_pipeline_adjusted(&w,i,2),15);i=i+1
+ }
+ assert(!count_pipeline_coefficient_available(&w,7,false))
+ assert(!count_pipeline_coefficient_available(&w,7,true))
+ assert(count_pipeline_report_into(&w,7,&!report)==0 && !report.point_available && !report.refit_available && !report.p_available)
+ assert(count_pipeline_report_into(&w,g,&!report)==1 && report.status==1)
+ assert(count_pipeline_write_tsv(&w)==0)
+ count_pipeline_close(w)
+ count_identities_close(metadata)
+ numeric_buffer_close(design);numeric_buffer_close(exposure);numeric_buffer_close(initial);numeric_buffer_close(contrast)
+ println("GENOMICS_BATCH_PASS");0
+}

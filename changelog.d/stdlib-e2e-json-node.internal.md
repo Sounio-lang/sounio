@@ -1,0 +1,1 @@
+Stdlib E2E JSON metadata is now emitted by Node instead of an embedded Python helper. The existing v1 schema, result and ignore projections, base64/UTF-8 detail behavior, exact decimal integer tokens, and runner selection/check/run/timeout policies are preserved. Metadata selftests distinguish the historical JSON format fixture from a newly executed E2E measurement.

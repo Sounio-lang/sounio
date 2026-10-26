@@ -1,0 +1,2 @@
+Record failed joint17578 (315pass/99fail/213skip;17of18focused children), separate DP54 supplement17589, old-source3c7 full-Git replay17597 running at the documentation checkpoint and compact text-only custody. Preserve staging omissions, hosted-contract versus full-CI distinctions and separate global-normalization qualification; no scientific code or measurement changes.
+Retain separate SIO281 phase/control custody and bounded two-fixture native replay 17596; hosted status 124 causality and full CI acceptance remain unestablished.

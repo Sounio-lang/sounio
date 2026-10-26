@@ -134,3 +134,7 @@ The gate is fail-closed:
 - non-zero exit on missing/malformed status JSON,
 - non-zero exit on `not_run`,
 - non-zero exit when science gate is missing, malformed, or not `pass`.
+
+## Named genomics counts and validated CSR (SIO-170)
+
+The original reliability snapshot above remains dated as stated. The named-table and sparse-count APIs added by SIO-170 are documented in [Named counts, identities and CSR](../../stdlib/genomics/COUNT_IDENTITIES_CSR.md), with source/compiler/job-scoped qualification in [SIO-170 evidence](../evidence/stdlib-SIO-170/README.md). They add dynamic header/feature framing over the existing exact integer parser, byte-exact duplicate policies and joins, checked integer coalescence and CSR normalization through the existing estimator core. The canonical compiler qualifies the private-owner contract; committed-seed numerical compatibility is recorded separately from its accepted private-read limitation. This entry does not refresh the older inventory or claim all sprint PRs are integrated.

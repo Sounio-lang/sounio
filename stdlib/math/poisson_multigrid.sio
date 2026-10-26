@@ -1,0 +1,169 @@
+// Unit-square five-point -Laplacian, zero Dirichlet, geometric V-cycle.
+// Actual-size caller buffers; no per-cycle allocation or fixed-grid fallback.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+use math::pure::{is_finite}
+pub struct PoissonWorkspace {pub status:i64,pub intervals:i64,pub levels:i64,pub finest_len:i64,pub packed_len:i64,pub payload_bytes:i64}
+pub struct PoissonOptions {pub atol:f64,pub rtol:f64,pub max_cycles:i64,pub pre_sweeps:i64,pub post_sweeps:i64,pub max_point_work:i64}
+pub struct PoissonResult {pub status:i64,pub cycles:i64,pub point_work:i64,pub setup_points:i64,pub updates:i64,pub residual_evaluations:i64,pub restricted:i64,pub prolonged:i64,pub coarse_solves:i64,pub residual_max:f64,pub tolerance:f64}
+fn pm_power_two(n:i64)->bool with Div {
+ if n<2 || n>1048576 {return false}
+ var m=n
+ while m>2 {if m%2!=0 {return false};m=m/2}
+ true
+}
+pub fn poisson_workspace(intervals:i64)->PoissonWorkspace with Mut,Div {
+ var out=PoissonWorkspace{status:1,intervals:intervals,levels:0,finest_len:0,packed_len:0,payload_bytes:0}
+ if !pm_power_two(intervals) {return out}
+ var n=intervals
+ while n>=2 {out.packed_len=out.packed_len+(n+1)*(n+1);out.levels=out.levels+1;n=n/2}
+ out.finest_len=(intervals+1)*(intervals+1)
+ out.payload_bytes=(3*out.packed_len+out.finest_len)*8
+ out.status=0;out
+}
+fn pm_buffer(b:&NumericBuffer,n:i64)->bool {numeric_buffer_status(b)==0 && numeric_buffer_len(b)==n}
+fn pm_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn pm_charge(r:&!PoissonResult,o:&PoissonOptions)->bool with Mut {
+ if r.point_work>=o.max_point_work {return false}
+ r.point_work=r.point_work+1;true
+}
+fn pm_smooth(n:i64,offset:i64,u:&!NumericBuffer,f:&NumericBuffer,sweeps:i64,o:&PoissonOptions,r:&!PoissonResult)->i64 with Mut,Div,Panic {
+ let side=n+1;let h2=1.0/((n as f64)*(n as f64))
+ var sweep:i64=0
+ while sweep<sweeps {
+  var color:i64=0
+  while color<2 {
+   var y:i64=1
+   while y<n {
+    var x:i64=1
+    while x<n {
+     if (x+y)%2==color {
+      if !pm_charge(r,o) {return 3}
+      let index=offset+y*side+x
+      let horizontal=0.25*numeric_buffer_at(u,index-1)+0.25*numeric_buffer_at(u,index+1)
+      let vertical=0.25*numeric_buffer_at(u,index-side)+0.25*numeric_buffer_at(u,index+side)
+      let value=(horizontal+vertical)+0.25*h2*numeric_buffer_at(f,index)
+      if !is_finite(value) {return 4}
+      numeric_buffer_set(u,index,value);r.updates=r.updates+1
+     }
+     x=x+1
+    }
+    y=y+1
+   }
+   color=color+1
+  }
+  sweep=sweep+1
+ }
+ 0
+}
+fn pm_residual(n:i64,offset:i64,u:&NumericBuffer,f:&NumericBuffer,residual:&!NumericBuffer,o:&PoissonOptions,r:&!PoissonResult)->i64 with Mut,Div,Panic {
+ let side=n+1;let factor=(n as f64)*(n as f64)
+ var maximum:f64=0.0;var y:i64=1
+ while y<n {
+  var x:i64=1
+  while x<n {
+   if !pm_charge(r,o) {return 3}
+   let index=offset+y*side+x;let value=numeric_buffer_at(u,index)
+   let horizontal=(value-numeric_buffer_at(u,index-1))+(value-numeric_buffer_at(u,index+1))
+   let vertical=(value-numeric_buffer_at(u,index-side))+(value-numeric_buffer_at(u,index+side))
+   let result=numeric_buffer_at(f,index)-(horizontal+vertical)*factor
+   if !is_finite(result) {return 4}
+   numeric_buffer_set(residual,index,result);r.residual_evaluations=r.residual_evaluations+1
+   if pm_abs(result)>maximum {maximum=pm_abs(result)}
+   x=x+1
+  }
+  y=y+1
+ }
+ r.residual_max=maximum;0
+}
+fn pm_cycle(n:i64,offset:i64,u:&!NumericBuffer,f:&!NumericBuffer,residual:&!NumericBuffer,o:&PoissonOptions,r:&!PoissonResult)->i64 with Mut,Div,Panic {
+ if n==2 {
+  if !pm_charge(r,o) {return 3}
+  let value=numeric_buffer_at(f,offset+4)/16.0
+  if !is_finite(value) {return 4}
+  numeric_buffer_set(u,offset+4,value);r.coarse_solves=r.coarse_solves+1;r.updates=r.updates+1
+  return 0
+ }
+ let smooth=pm_smooth(n,offset,u,f,o.pre_sweeps,o,r)
+ if smooth!=0 {return smooth}
+ let res=pm_residual(n,offset,u,f,residual,o,r)
+ if res!=0 {return res}
+ let side=n+1;let coarse=n/2;let cs=coarse+1;let next=offset+side*side
+ // Reset every coarse value and boundary before reuse; finest borders stay zero.
+ var i:i64=0
+ while i<cs*cs {numeric_buffer_set(u,next+i,0.0);numeric_buffer_set(f,next+i,0.0);numeric_buffer_set(residual,next+i,0.0);r.setup_points=r.setup_points+1;i=i+1}
+ var y:i64=1
+ while y<coarse {
+  var x:i64=1
+  while x<coarse {
+   if !pm_charge(r,o) {return 3}
+   let center=offset+(2*y)*side+2*x
+   let axes=(numeric_buffer_at(residual,center-1)+numeric_buffer_at(residual,center+1))+(numeric_buffer_at(residual,center-side)+numeric_buffer_at(residual,center+side))
+   let corners=(numeric_buffer_at(residual,center-side-1)+numeric_buffer_at(residual,center-side+1))+(numeric_buffer_at(residual,center+side-1)+numeric_buffer_at(residual,center+side+1))
+   let value=0.25*numeric_buffer_at(residual,center)+0.125*axes+0.0625*corners
+   if !is_finite(value) {return 4}
+   numeric_buffer_set(f,next+y*cs+x,value);r.restricted=r.restricted+1;x=x+1
+  }
+  y=y+1
+ }
+ let child=pm_cycle(coarse,next,u,f,residual,o,r)
+ if child!=0 {return child}
+ y=1
+ while y<n {
+  var x:i64=1
+  while x<n {
+   if !pm_charge(r,o) {return 3}
+   let ci=next+(y/2)*cs+x/2
+   var correction=numeric_buffer_at(u,ci)
+   if y%2==0 && x%2!=0 {correction=0.5*correction+0.5*numeric_buffer_at(u,ci+1)}
+   if y%2!=0 && x%2==0 {correction=0.5*correction+0.5*numeric_buffer_at(u,ci+cs)}
+   if y%2!=0 && x%2!=0 {correction=(0.25*correction+0.25*numeric_buffer_at(u,ci+1))+(0.25*numeric_buffer_at(u,ci+cs)+0.25*numeric_buffer_at(u,ci+cs+1))}
+   let index=offset+y*side+x;let value=numeric_buffer_at(u,index)+correction
+   if !is_finite(value) {return 4}
+   numeric_buffer_set(u,index,value);r.prolonged=r.prolonged+1;x=x+1
+  }
+  y=y+1
+ }
+ pm_smooth(n,offset,u,f,o.post_sweeps,o,r)
+}
+// Output commits only on convergence. Work scratch retains partial iterations.
+// Status0converged,1layout/options,2nonfinite/nonzero-boundary RHS,
+// 3cycle/point budget,4arithmetic. Point budget covers stencil operations;
+// setup_points separately counts packed initialization/reset visits.
+pub fn poisson_solve_into(rhs:&NumericBuffer,intervals:i64,solution:&!NumericBuffer,
+ work_u:&!NumericBuffer,work_f:&!NumericBuffer,work_r:&!NumericBuffer,o:&PoissonOptions)->PoissonResult with Mut,Div,Panic {
+ var r=PoissonResult{status:1,cycles:0,point_work:0,setup_points:0,updates:0,residual_evaluations:0,restricted:0,prolonged:0,coarse_solves:0,residual_max:0.0,tolerance:0.0}
+ let shape=poisson_workspace(intervals)
+ if shape.status!=0 || !pm_buffer(rhs,shape.finest_len) || !pm_buffer(solution,shape.finest_len) || !pm_buffer(work_u,shape.packed_len) || !pm_buffer(work_f,shape.packed_len) || !pm_buffer(work_r,shape.packed_len) {return r}
+ if !is_finite(o.atol) || o.atol<=0.0 || !is_finite(o.rtol) || o.rtol<0.0 || o.max_cycles<0 || o.max_cycles>1000000 || o.pre_sweeps<1 || o.pre_sweeps>100 || o.post_sweeps<1 || o.post_sweeps>100 || o.max_point_work<0 {return r}
+ let side=intervals+1
+ var magnitude:f64=0.0;var i:i64=0
+ while i<shape.finest_len {
+  let value=numeric_buffer_at(rhs,i)
+  if !is_finite(value) {r.status=2;return r}
+  let y=i/side;let x=i%side
+  if (x==0 || y==0 || x==intervals || y==intervals) && value!=0.0 {r.status=2;return r}
+  if pm_abs(value)>magnitude {magnitude=pm_abs(value)}
+  i=i+1
+ }
+ r.tolerance=o.atol+o.rtol*magnitude
+ if !is_finite(r.tolerance) || r.tolerance<=0.0 {r.status=4;return r}
+ i=0
+ while i<shape.packed_len {
+  numeric_buffer_set(work_u,i,0.0);numeric_buffer_set(work_r,i,0.0)
+  let value=if i<shape.finest_len {numeric_buffer_at(rhs,i)}else{0.0}
+  numeric_buffer_set(work_f,i,value);r.setup_points=r.setup_points+1;i=i+1
+ }
+ var code=pm_residual(intervals,0,work_u,work_f,work_r,o,&!r)
+ if code!=0 {r.status=code;return r}
+ while r.residual_max>r.tolerance && r.cycles<o.max_cycles {
+  code=pm_cycle(intervals,0,work_u,work_f,work_r,o,&!r)
+  if code!=0 {r.status=code;return r}
+  r.cycles=r.cycles+1
+  code=pm_residual(intervals,0,work_u,work_f,work_r,o,&!r)
+  if code!=0 {r.status=code;return r}
+ }
+ if r.residual_max>r.tolerance {r.status=3;return r}
+ i=0
+ while i<shape.finest_len {numeric_buffer_set(solution,i,numeric_buffer_at(work_u,i));i=i+1}
+ r.status=0;r
+}

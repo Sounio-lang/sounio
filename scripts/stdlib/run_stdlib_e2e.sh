@@ -260,81 +260,9 @@ emit_json() {
   fi
   mkdir -p "$(dirname "$out_path")"
 
-  python3 - "$RESULTS_FILE" "$out_path" "$PASS" "$FAIL" "$SKIP" "$ROOT_DIR" "$SOUC_BIN" "$SOUNIO_STDLIB_PATH" "$FILTER" <<'PY'
-import base64
-import datetime
-import json
-import pathlib
-import sys
-
-results_path = pathlib.Path(sys.argv[1])
-out_path = pathlib.Path(sys.argv[2])
-pass_count = int(sys.argv[3])
-fail_count = int(sys.argv[4])
-skip_count = int(sys.argv[5])
-root_dir = sys.argv[6]
-souc_bin = sys.argv[7]
-stdlib_path = sys.argv[8]
-filter_value = sys.argv[9]
-
-def decode_field(raw: str) -> str:
-    if not raw:
-        return ""
-    return base64.b64decode(raw.encode("ascii")).decode("utf-8", errors="replace")
-
-results = []
-ignored = []
-for line in results_path.read_text(encoding="utf-8").splitlines():
-    if not line:
-        continue
-    parts = line.split("\t")
-    if len(parts) != 8:
-        continue
-    status, test_path, mode, reason, owner, unblock, exit_code, detail_b64 = parts
-    detail = decode_field(detail_b64)
-    row = {
-        "status": status,
-        "test_path": test_path,
-        "mode": mode,
-        "reason": reason,
-        "owner": owner,
-        "unblock_condition": unblock,
-        "exit_code": int(exit_code),
-        "detail_excerpt": detail,
-    }
-    results.append(row)
-    if mode == "ignore":
-        ignored.append(
-            {
-                "test_path": test_path,
-                "reason": reason,
-                "owner": owner,
-                "unblock_condition": unblock,
-            }
-        )
-
-obj = {
-    "schema": "sounio.stdlib.e2e.result.v1",
-    "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
-    "command": "bash scripts/stdlib/run_stdlib_e2e.sh",
-    "context": {
-        "root_dir": root_dir,
-        "souc_bin": souc_bin,
-        "stdlib_path": stdlib_path,
-        "filter": filter_value,
-    },
-    "totals": {
-        "pass": pass_count,
-        "fail": fail_count,
-        "skip": skip_count,
-        "total": pass_count + fail_count + skip_count,
-    },
-    "results": results,
-    "failures": [r for r in results if r["status"] == "fail"],
-    "ignored": ignored,
-}
-out_path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
-PY
+  node "$ROOT_DIR/scripts/stdlib/emit_stdlib_e2e_result.mjs" \
+    "$RESULTS_FILE" "$out_path" "$PASS" "$FAIL" "$SKIP" \
+    "$ROOT_DIR" "$SOUC_BIN" "$SOUNIO_STDLIB_PATH" "$FILTER"
 }
 
 echo "=== Stdlib E2E Test Suite ==="

@@ -1,0 +1,1 @@
+Deduplicate SIO173 textual evidence by content hash while preserving all original file aliases, tar headers and Git archive identities, with independent byte-for-byte verification and bounded readers.
