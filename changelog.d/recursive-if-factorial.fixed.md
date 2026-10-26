@@ -1,0 +1,1 @@
+A recursive `i64` function whose body is an `if`/`else` used as a value, such as `fn f(n: i64) -> i64 { if n <= 1 { 1 } else { n * f(n - 1) } }`, now returns the integer product. `f(19)` and `f(20)` were silently wrong (`25617217285033984` and `45284158381054464`); both factorials fit in `i64`.
