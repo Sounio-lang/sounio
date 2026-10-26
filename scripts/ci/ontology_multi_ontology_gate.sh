@@ -87,11 +87,25 @@ DATA_FOR=(
 )
 
 TMP_DIR="$(mktemp -d /tmp/ontology-multi-gate.XXXXXX)"
-trap 'rm -rf "$TMP_DIR"' EXIT
+cleanup() {
+    if [[ "${ONTOLOGY_MULTI_KEEP_LOGS:-0}" == 1 || "${FAIL:-0}" -gt 0 ]]; then
+        printf '[ontology-multi] logs: %s\n' "$TMP_DIR" >&2
+    else
+        rm -rf "$TMP_DIR"
+    fi
+}
+trap cleanup EXIT
 
 PASS=0
 FAIL=0
 SKIP=0
+PREP_FAIL=0
+PREPARED_DRIVERS=()
+
+write_verdict() {
+    local name="$1" verdict="$2" tmp="$TMP_DIR/$1.verdict.tmp.$$"
+    printf '%s\n' "$verdict" > "$tmp" && mv -f -- "$tmp" "$TMP_DIR/$name.verdict"
+}
 
 recipe_for() {   # driver basename -> "files|recipe", or non-zero if unlisted
     local want="$1" e n f r
@@ -196,15 +210,9 @@ gate_file() {
 
     if [[ ! -f "$src" ]]; then
         printf '[ontology-multi] FAIL: %s (missing file: %s)\n' "$name" "$rel" >&2
-        FAIL=$((FAIL + 1))
-        return
+        write_verdict "$name" FAIL || return 1
+        return 1
     fi
-
-    ensure_data "$name"
-    case $? in
-        1) SKIP=$((SKIP + 1)); return ;;
-        2) FAIL=$((FAIL + 1)); return ;;
-    esac
 
     # (a) souc check — exit code unreliable, grep stdout.
     local check_log="$TMP_DIR/$name.check.log"
@@ -226,29 +234,230 @@ gate_file() {
     fi
 
     if [[ "$problems" -eq 0 ]]; then
-        PASS=$((PASS + 1))
         printf '[ontology-multi] OK:   %s\n' "$rel"
+        write_verdict "$name" PASS || return 1
     else
-        FAIL=$((FAIL + 1))
         printf '[ontology-multi] FAIL: %s (%d problem(s))\n' "$rel" "$problems" >&2
+        write_verdict "$name" FAIL || return 1
+        return 1
     fi
+}
+
+resolve_jobs() {
+    local cpus memory_bytes memory_current host_memory_bytes memory_jobs jobs
+    if [[ -n "${ONTOLOGY_MULTI_JOBS:-}" ]]; then
+        [[ "$ONTOLOGY_MULTI_JOBS" =~ ^[1-9][0-9]*$ ]] || {
+            echo "[ontology-multi] ERROR: ONTOLOGY_MULTI_JOBS must be a positive integer" >&2
+            return 2
+        }
+        printf '%s\n' "$ONTOLOGY_MULTI_JOBS"
+        return 0
+    fi
+    cpus="$(nproc 2>/dev/null || echo 1)"
+    if [[ -r /sys/fs/cgroup/memory.max ]]; then
+        read -r memory_bytes < /sys/fs/cgroup/memory.max
+        if [[ "$memory_bytes" == max ]]; then
+            memory_bytes="$(awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo)"
+        elif [[ "$memory_bytes" =~ ^[0-9]+$ && -r /sys/fs/cgroup/memory.current ]]; then
+            read -r memory_current < /sys/fs/cgroup/memory.current
+            if [[ "$memory_current" =~ ^[0-9]+$ && "$memory_current" -lt "$memory_bytes" ]]; then
+                memory_bytes=$((memory_bytes - memory_current))
+            else
+                memory_bytes=1
+            fi
+        else
+            [[ "$memory_bytes" =~ ^[0-9]+$ ]] || memory_bytes=""
+        fi
+    elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+        read -r memory_bytes < /sys/fs/cgroup/memory/memory.limit_in_bytes
+        memory_current=0
+        [[ ! -r /sys/fs/cgroup/memory/memory.usage_in_bytes ]] \
+            || read -r memory_current < /sys/fs/cgroup/memory/memory.usage_in_bytes
+        if [[ "$memory_bytes" =~ ^[0-9]+$ && "$memory_current" =~ ^[0-9]+$ && "$memory_current" -lt "$memory_bytes" ]]; then
+            memory_bytes=$((memory_bytes - memory_current))
+            host_memory_bytes="$(awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo)"
+            if [[ "$host_memory_bytes" =~ ^[1-9][0-9]*$ ]]; then
+                if (( memory_bytes > host_memory_bytes )); then
+                    memory_bytes="$host_memory_bytes"
+                fi
+            else
+                memory_bytes=1
+            fi
+        else
+            memory_bytes=1
+        fi
+    else
+        memory_bytes="$(awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo)"
+    fi
+    [[ "$cpus" =~ ^[1-9][0-9]*$ ]] || cpus=1
+    [[ "$memory_bytes" =~ ^[1-9][0-9]*$ ]] || memory_bytes=$((4 * 1024 * 1024 * 1024))
+    memory_jobs=$((memory_bytes / (4 * 1024 * 1024 * 1024)))
+    (( memory_jobs > 0 )) || memory_jobs=1
+    jobs=2
+    (( jobs > cpus )) && jobs="$cpus"
+    (( jobs > memory_jobs )) && jobs="$memory_jobs"
+    printf '%s\n' "$jobs"
+}
+
+collect_verdicts() {
+    local rel name verdict
+    PASS=0
+    FAIL="$PREP_FAIL"
+    for rel in "${PREPARED_DRIVERS[@]}"; do
+        name="$(basename "$rel" .sio)"
+        if [[ ! -f "$TMP_DIR/$name.verdict" ]]; then
+            printf '[ontology-multi] FAIL: %s produced no verdict\n' "$name" >&2
+            FAIL=$((FAIL + 1))
+            continue
+        fi
+        if cmp -s "$TMP_DIR/$name.verdict" <(printf 'PASS\n'); then
+            PASS=$((PASS + 1))
+        elif cmp -s "$TMP_DIR/$name.verdict" <(printf 'FAIL\n'); then
+            FAIL=$((FAIL + 1))
+        else
+            printf '[ontology-multi] FAIL: %s produced a malformed verdict file\n' "$name" >&2
+            FAIL=$((FAIL + 1))
+        fi
+    done
+    [[ "$FAIL" -eq 0 ]]
+}
+
+run_drivers() {
+    local jobs active=0 worker_failed=0 rel name data_rc
+    jobs="$(resolve_jobs)" || return $?
+    PREPARED_DRIVERS=()
+    PREP_FAIL=0
+    SKIP=0
+
+    # Fetching and generation may write shared data, so this preflight remains serial.
+    for rel in "${DRIVERS[@]}"; do
+        name="$(basename "$rel" .sio)"
+        if [[ ! -f "$ROOT_DIR/$rel" ]]; then
+            printf '[ontology-multi] FAIL: %s (missing file: %s)\n' "$name" "$rel" >&2
+            PREP_FAIL=$((PREP_FAIL + 1))
+            continue
+        fi
+        data_rc=0
+        ensure_data "$name" || data_rc=$?
+        case "$data_rc" in
+            0) PREPARED_DRIVERS+=("$rel") ;;
+            1) SKIP=$((SKIP + 1)) ;;
+            2) PREP_FAIL=$((PREP_FAIL + 1)) ;;
+        esac
+    done
+
+    printf '[ontology-multi] workers=%s\n' "$jobs"
+    for rel in "${PREPARED_DRIVERS[@]}"; do
+        gate_file "$rel" &
+        active=$((active + 1))
+        if (( active >= jobs )); then
+            if ! wait -n; then worker_failed=1; fi
+            active=$((active - 1))
+        fi
+    done
+    while (( active > 0 )); do
+        if ! wait -n; then worker_failed=1; fi
+        active=$((active - 1))
+    done
+    collect_verdicts || true
+    (( worker_failed == 0 )) || echo "[ontology-multi] at least one worker exited unsuccessfully" >&2
+    printf '[ontology-multi] results: %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
+    [[ "$FAIL" -eq 0 && "$worker_failed" -eq 0 ]]
+}
+
+selftest() {
+    local original_tmp="$TMP_DIR" rc
+    TMP_DIR="$(mktemp -d /tmp/ontology-multi-selftest.XXXXXX)"
+    ROOT_DIR="$TMP_DIR/repo"
+    DATA_DIR="$TMP_DIR/data"
+    mkdir -p "$ROOT_DIR/fixtures" "$DATA_DIR"
+    DRIVERS=(fixtures/one.sio fixtures/two.sio)
+    DATA_FOR=()
+    : > "$ROOT_DIR/fixtures/one.sio"
+    : > "$ROOT_DIR/fixtures/two.sio"
+    SOUC_BIN="$TMP_DIR/souc"
+    cat > "$SOUC_BIN" <<'MOCK'
+#!/usr/bin/env bash
+case "$1" in
+    check) echo 'check: OK' ;;
+    run)
+        if [[ "${ONTOLOGY_MULTI_SABOTAGE:-0}" == 1 && "$2" == *two.sio ]]; then
+            echo 'NOT PASS'
+        else
+            echo 'ALL PASS'
+        fi
+        ;;
+esac
+MOCK
+    chmod +x "$SOUC_BIN"
+    RUN_TIMEOUT=5
+    ONTOLOGY_MULTI_NO_FETCH=1
+
+    ONTOLOGY_MULTI_JOBS=1 run_drivers \
+        || { echo "[ontology-multi] selftest failed with one worker" >&2; return 1; }
+    [[ "$PASS" == 2 && "$FAIL" == 0 ]] \
+        || { echo "[ontology-multi] selftest did not pass with one worker" >&2; return 1; }
+
+    ONTOLOGY_MULTI_JOBS=2 run_drivers \
+        || { echo "[ontology-multi] selftest failed with two workers" >&2; return 1; }
+    [[ "$PASS" == 2 && "$FAIL" == 0 ]] \
+        || { echo "[ontology-multi] selftest did not pass with two workers" >&2; return 1; }
+
+    DRIVERS=(fixtures/one.sio)
+    DATA_FOR=("one|missing.txt|none")
+    rm "$ROOT_DIR/fixtures/one.sio"
+    ONTOLOGY_MULTI_JOBS=1 run_drivers && rc=0 || rc=$?
+    [[ "$rc" != 0 && "$FAIL" -gt 0 && "$SKIP" == 0 ]] \
+        || { echo "[ontology-multi] selftest skipped a missing driver source" >&2; return 1; }
+    : > "$ROOT_DIR/fixtures/one.sio"
+    DRIVERS=(fixtures/one.sio fixtures/two.sio)
+    DATA_FOR=()
+
+    ONTOLOGY_MULTI_JOBS=2 ONTOLOGY_MULTI_SABOTAGE=1 run_drivers && rc=0 || rc=$?
+    [[ "$rc" != 0 && "$FAIL" -gt 0 ]] \
+        || { echo "[ontology-multi] selftest accepted a sabotaged driver" >&2; return 1; }
+
+    write_verdict one PASS
+    write_verdict two PASS
+    rm -f "$TMP_DIR/one.verdict"
+    collect_verdicts && rc=0 || rc=$?
+    [[ "$rc" != 0 ]] \
+        || { echo "[ontology-multi] selftest accepted a missing verdict" >&2; return 1; }
+    write_verdict one PASS
+    write_verdict two PASS
+    printf 'BROKEN\n' > "$TMP_DIR/two.verdict"
+    collect_verdicts && rc=0 || rc=$?
+    [[ "$rc" != 0 ]] \
+        || { echo "[ontology-multi] selftest accepted an invalid verdict" >&2; return 1; }
+
+    write_verdict one PASS
+    write_verdict two PASS
+    printf 'PASS\nBROKEN' > "$TMP_DIR/two.verdict"
+    collect_verdicts && rc=0 || rc=$?
+    [[ "$rc" != 0 ]] \
+        || { echo "[ontology-multi] selftest accepted trailing verdict data" >&2; return 1; }
+
+    ONTOLOGY_MULTI_JOBS=invalid resolve_jobs >/dev/null 2>&1 && {
+        echo "[ontology-multi] selftest accepted an invalid worker count" >&2
+        return 1
+    }
+    FAIL=0
+    TMP_DIR="$original_tmp"
+    rm -rf "$TMP_DIR" "$original_tmp"
+    echo "[ontology-multi] SELFTEST PASS"
 }
 
 echo "[ontology-multi] souc=$SOUC_BIN"
 echo "[ontology-multi] drivers=${#DRIVERS[@]} run_timeout=${RUN_TIMEOUT}s"
+
+if [[ "${1:-}" == "--selftest" ]]; then
+    selftest
+    exit $?
+fi
 
 if [[ ! -x "$SOUC_BIN" ]]; then
     echo "[ontology-multi] ERROR: souc wrapper not executable: $SOUC_BIN" >&2
     exit 1
 fi
 
-for rel in "${DRIVERS[@]}"; do
-    gate_file "$rel"
-done
-
-printf '[ontology-multi] results: %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
-
-if [[ "$FAIL" -gt 0 ]]; then
-    exit 1
-fi
-exit 0
+run_drivers
