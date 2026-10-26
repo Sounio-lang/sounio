@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.stdlib-sio-161.e2e17602-fullgit-node
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-sio-161.e2e17602-fullgit-node
+-->
+
 # Full Git Node E2E — actual job17602
 
 The complete fresh measurement is valid; the suite fails. Exactly627unique frozen-census rows:317pass (274run-pass,43check-only),97fail (56check-failed,20run-timeout,21run-failed),213skip. Original runner returned1 and Slurm17602 is FAILED1:0,22:47,2026-10-26T02:30:04Z..02:52:51Z. ALL_STATUS1 is the honest suite-failure outcome; every other phase, custody footer and independent reproduction returned0. This is not a full-suite pass or full scientific qualification.
