@@ -1082,3 +1082,29 @@ Gate. Job 17813, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-
 The node is idle.
 
 The negate bit is bit 63 and this assembler does not form it. AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 41. The whole IADD3 word, negate included (2026-10-26, OBSERVED)
+
+Section 40 built only the low 8 bytes of an add and left the schedule half in the slot. The negate bit was not formed.
+
+`atlas_iadd3_lo` now sets bit 63 when negate is requested. That bit is byte 7 equal to 128. `atlas_iadd3_hi` builds the other 8 bytes. Two schedule rows exist in the corpus, byte 13 equal to 0xca and to 0xc6. `atlas_stg_lo` builds the low half of STG.E from the address register and the data register.
+
+Job 17817 wrote the add R7, R0, R7 with the 0xc6 schedule into the subtract slot. The loads were 10 and 3. The stored word was 3, the second load, still sitting in R7. The add did not commit. 0xc6 is not a substitute for 0xca in this slot. The threshold of that experiment is not a sum.
+
+The same words with byte 13 equal to 0xca, which is the schedule already measured on this slot:
+
+- R7, R0, R7, no negate. 10 + 3 = 13.
+- R7, R0, R0, negate on source 1. 10 - 10 = 0. The negate bit was formed by the assembler.
+- STG.E [R4], R0 built by `atlas_stg_lo(4, 0)`. The subtract still writes R7. The store reads R0, which holds 10.
+
+Gate. Job 17819, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-per-task=4. The node was idle at submit. Binary md5 9702f778de0dc1c7431aa11d2c58436f.
+
+- ADD_BYTE=202, ADD_LOAD=1, ADD_SYNC=0, ADD=13.
+- NEG_BYTE=128, NEG_LOAD=1, NEG_SYNC=0, NEG=0.
+- STG_ASM=0, STGASM_LOAD=1, STGASM_SYNC=0, STGASM=10.
+- ASM=20 and the earlier field patches still match. SILICON PASS, EXIT:0.
+
+The node is idle.
+
+AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
