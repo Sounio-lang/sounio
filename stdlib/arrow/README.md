@@ -71,8 +71,9 @@ is compressed on its own and prefixed with the uncompressed length, or with
 RLE blocks, and compressed blocks. Literals may be raw, RLE, or Huffman,
 including the four-stream form. Sequence tables may be predefined, RLE, or
 FSE-compressed when the table log is at most 6. A repeated table, or an FSE
-log above 6, returns `-4`. An LZ4 frame must end on its end marker, and a
-content checksum on that frame is checked. A Zstandard content-checksum
+log above 6, returns `-4`. An LZ4 frame must end on its end marker. Its header checksum covers the
+content-size field when that flag is set, and a content checksum on that
+frame is checked. A Zstandard content-checksum
 flag requires the 4-byte trailer to be present. Big-endian schemas return `-4`.
 
 ## Status
