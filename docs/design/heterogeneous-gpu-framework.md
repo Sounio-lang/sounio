@@ -1108,3 +1108,22 @@ Gate. Job 17819, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-
 The node is idle.
 
 AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 42. The optimized immediate move is IMAD.MOV (2026-10-26, OBSERVED)
+
+An optimized `mov.u32` is not opcode `02 78`. ptxas 12.8.61 at default opt emits `IMAD.MOV.U32 Rd, RZ, RZ, imm`, opcode bytes `24 74`, destination at byte 2, byte 3 equal to 255, the immediate at bytes 4–7. Opcode `02 78` is the opt-level 0 form. Its own schedule row is `00 0f 00 00 00 de 3f 00`.
+
+`atlas_mov_imm_lo` matches that opt-level 0 low word. Splicing it over the subtract slot does not deliver the immediate. Job 17831 used the `e2 0f` schedule row and stored 0. Job 17833 kept the low word and used the subtract slot's `0xca` schedule; the store returned 3, the second load, still sitting in R7. The move did not commit. Binary md5 of that run: 19ebdaae4a5a44ba2ce45170618fb443. The node was idle afterwards.
+
+`atlas_imad_mov_lo(5, 42)` builds the whole low word `24 74 05 ff 2a 00 00 00`. The specimen in the container was immediate 7, destination R5. 42 was not in that cubin. The schedule half of the slot is left as the cubin had it, `ff 00 8e 07 00 e2 0f 00`, which is the half the following `STG.E [R2.64], R5` was compiled against.
+
+Gate. Job 17846, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-per-task=4. The node was idle at submit. Binary md5 e177a37bc1bc1865344378fac8d50adf.
+
+- IMAD_IMM=42, IMAD_LOAD=1, IMAD_SYNC=0, IMAD=42.
+- MOV_SLOT=3, the opt-level 0 opcode in the subtract slot, recorded and not treated as a pass.
+- ADD=13, NEG=0, STGASM=10, ASM=20 and the earlier field patches still match. SILICON PASS, EXIT:0.
+
+The node is idle.
+
+AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
