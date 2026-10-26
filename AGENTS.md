@@ -97,8 +97,8 @@ Hello-world and the checks this environment is built around:
 - `./bin/souc --version`
 - `./bin/souc check examples/hello.sio`
 - `./bin/souc run examples/hello.sio` prints `Hello, Sounio`
-- `make lint`
 - `make test-madaros-identity`
-- `bash scripts/run_sio_test_suite.sh` for the full suite
+- `python3 scripts/dev/sounio-lint.py --errors-only <file.sio>` (the linter takes one file)
+- `bash scripts/run_sio_test_suite.sh` for the full suite. The harness prints `engine=lean_single` when `artifacts/self-hosted/madaros` is absent. That line names the local rebuild it did not find. The suite still invokes `./bin/souc`, which runs the materialized prebuilt.
 
 Library files under `stdlib/` and `examples/` are checked with `./bin/souc check`. `./bin/souc run` is for programs that define `main`. Formal proofs under `formal/` use the Lean toolchain in `formal/lean-toolchain` and are separate from this compiler setup. No long-running service is required.
