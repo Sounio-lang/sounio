@@ -82,6 +82,10 @@ def main() -> None:
 
     schema, got = batches(Path("/tmp/sounio_arrow_scalars.arrows"))
     batch = got[0]
+    try:
+        batch.validate(full=True)
+    except Exception as exc:
+        raise SystemExit(f"FAIL scalar validate {exc}") from exc
 
     def values(name: str) -> list:
         col = batch.column(name)
@@ -95,9 +99,9 @@ def main() -> None:
 
     if str(schema.field("d32").type) != "date32[day]" or values("d32") != [19000, None]:
         raise SystemExit(f"FAIL d32 {schema.field('d32').type} {values('d32')}")
-    if str(schema.field("d64").type) != "date64[ms]" or values("d64") != [5, -9]:
+    if str(schema.field("d64").type) != "date64[ms]" or values("d64") != [432000000, -777600000]:
         raise SystemExit(f"FAIL d64 {schema.field('d64').type} {values('d64')}")
-    if str(schema.field("t32").type) != "time32[ms]" or values("t32") != [1000, -8]:
+    if str(schema.field("t32").type) != "time32[ms]" or values("t32") != [1000, 86399999]:
         raise SystemExit(f"FAIL t32 {schema.field('t32').type} {values('t32')}")
     if str(schema.field("t64").type) != "time64[ns]" or values("t64") != [7, 8]:
         raise SystemExit(f"FAIL t64 {schema.field('t64').type} {values('t64')}")
