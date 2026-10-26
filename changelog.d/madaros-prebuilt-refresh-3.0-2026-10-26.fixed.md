@@ -1,0 +1,1 @@
+The release/3.0 Madaros prebuilt is rebuilt from release/3.0 source (218bae534, with the #3210 and #3221 backports). The previous prebuilt dated from 9c64b2d6 (2026-10-11) and miscompiled `let r = &o.field` when an imported struct had a field of the same name.
