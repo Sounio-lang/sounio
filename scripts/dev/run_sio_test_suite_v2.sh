@@ -238,13 +238,22 @@ available_memory_bytes() {
             awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo
         fi
     elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
-        local limit current
+        local limit current host_memory
         read -r limit < /sys/fs/cgroup/memory/memory.limit_in_bytes
         current=0
         [[ ! -r /sys/fs/cgroup/memory/memory.usage_in_bytes ]] \
             || read -r current < /sys/fs/cgroup/memory/memory.usage_in_bytes
         if [[ "$limit" =~ ^[0-9]+$ && "$current" =~ ^[0-9]+$ && "$current" -lt "$limit" ]]; then
-            printf '%s\n' "$((limit - current))"
+            host_memory="$(awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo)"
+            if [[ "$host_memory" =~ ^[1-9][0-9]*$ ]]; then
+                local remaining=$((limit - current))
+                if (( remaining > host_memory )); then
+                    remaining="$host_memory"
+                fi
+                printf '%s\n' "$remaining"
+            else
+                printf '1\n'
+            fi
         else
             printf '1\n'
         fi

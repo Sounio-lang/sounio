@@ -244,7 +244,7 @@ gate_file() {
 }
 
 resolve_jobs() {
-    local cpus memory_bytes memory_current memory_jobs jobs
+    local cpus memory_bytes memory_current host_memory_bytes memory_jobs jobs
     if [[ -n "${ONTOLOGY_MULTI_JOBS:-}" ]]; then
         [[ "$ONTOLOGY_MULTI_JOBS" =~ ^[1-9][0-9]*$ ]] || {
             echo "[ontology-multi] ERROR: ONTOLOGY_MULTI_JOBS must be a positive integer" >&2
@@ -275,6 +275,14 @@ resolve_jobs() {
             || read -r memory_current < /sys/fs/cgroup/memory/memory.usage_in_bytes
         if [[ "$memory_bytes" =~ ^[0-9]+$ && "$memory_current" =~ ^[0-9]+$ && "$memory_current" -lt "$memory_bytes" ]]; then
             memory_bytes=$((memory_bytes - memory_current))
+            host_memory_bytes="$(awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo)"
+            if [[ "$host_memory_bytes" =~ ^[1-9][0-9]*$ ]]; then
+                if (( memory_bytes > host_memory_bytes )); then
+                    memory_bytes="$host_memory_bytes"
+                fi
+            else
+                memory_bytes=1
+            fi
         else
             memory_bytes=1
         fi
