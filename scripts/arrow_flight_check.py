@@ -37,7 +37,7 @@ def parse_protobuf(buf: bytes) -> list[tuple[int, object]]:
         field = tag >> 3
         wire = tag & 7
         if wire == 0:
-            val, i = _varint(buf, i)
+            val, i = _varint_value(buf, i)
             fields.append((field, val))
         elif wire == 2:
             ln, i = _varint(buf, i)
@@ -72,6 +72,25 @@ def _varint(buf: bytes, i: int) -> tuple[int, int]:
         shift += 7
 
 
+def _varint_value(buf: bytes, i: int) -> tuple[int, int]:
+    shift = 0
+    val = 0
+    for n in range(10):
+        if i >= len(buf):
+            raise SystemExit("FAIL bad varint")
+        b = buf[i]
+        i += 1
+        if n == 9 and b > 1:
+            raise SystemExit("FAIL bad varint")
+        val |= (b & 0x7F) << shift
+        if b < 128:
+            return val, i
+        if n == 9:
+            raise SystemExit("FAIL bad varint")
+        shift += 7
+    raise SystemExit("FAIL bad varint")
+
+
 def flight_parts(frame: bytes) -> dict:
     parts = {"desc": None, "header": None, "meta": None, "body": None}
     for field, val in parse_protobuf(frame):
@@ -90,7 +109,9 @@ def to_ipc(parts_list: list[dict]) -> bytes:
     blob = b""
     for part in parts_list:
         header = part["header"]
-        if header is None:
+        if not header:
+            if part["body"]:
+                raise SystemExit("FAIL empty header with a body")
             continue
         body = part["body"] if part["body"] is not None else b""
         if len(body) % 8 != 0:
@@ -187,8 +208,40 @@ def _reject_truncated_protobuf() -> None:
     _reject_short(b"\x0dabc")
 
 
+def _varint_limits() -> None:
+    _val, end = _varint_value(bytes.fromhex("808080808001"), 0)
+    if end != 6:
+        raise SystemExit("FAIL six-byte varint")
+    try:
+        _varint(bytes.fromhex("808080808001"), 0)
+    except SystemExit as exc:
+        if "bad varint" not in str(exc):
+            raise
+    else:
+        raise SystemExit("FAIL long tag accepted")
+    try:
+        _varint_value(bytes.fromhex("80808080808080808002"), 0)
+    except SystemExit as exc:
+        if "bad varint" not in str(exc):
+            raise
+    else:
+        raise SystemExit("FAIL varint overflow accepted")
+    _ten, end = _varint_value(bytes.fromhex("80808080808080808001"), 0)
+    if end != 10:
+        raise SystemExit("FAIL ten-byte varint")
+
+
+def _empty_header_ipc() -> None:
+    if to_ipc([{"header": b"", "body": None}]) != b"":
+        raise SystemExit("FAIL empty header emitted eos")
+    if to_ipc([{"header": None, "body": None}]) != b"":
+        raise SystemExit("FAIL absent header emitted eos")
+
+
 def main() -> None:
     _reject_truncated_protobuf()
+    _varint_limits()
+    _empty_header_ipc()
     if len(sys.argv) != 5:
         raise SystemExit(
             "usage: arrow_flight_check.py <do_put> <put_result> <exchange_client> <exchange_server>"

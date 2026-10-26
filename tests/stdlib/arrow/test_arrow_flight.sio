@@ -15,6 +15,7 @@ use arrow::lib::{
     arrow_cursor_new,
     arrow_ipc_next,
     arrow_ipc_open,
+    arrow_ipc_view,
     arrow_ipc_stream_begin,
     arrow_ipc_stream_end,
     arrow_ipc_stream_push,
@@ -468,6 +469,155 @@ fn test_bounds() -> i64 with Mut, Panic, Div {
     0
 }
 
+fn ub(buf: &ArrowBuf, at: i64) -> i64 with Panic {
+    var b = buf.data[at as usize] as i64
+    if b < 0 { b = b + 256 }
+    b
+}
+
+fn u16le(buf: &ArrowBuf, at: i64) -> i64 with Panic {
+    ub(buf, at) | (ub(buf, at + 1) << 8)
+}
+
+fn u32le(buf: &ArrowBuf, at: i64) -> i64 with Panic {
+    ub(buf, at) | (ub(buf, at + 1) << 8) | (ub(buf, at + 2) << 16) | (ub(buf, at + 3) << 24)
+}
+
+fn i32le(buf: &ArrowBuf, at: i64) -> i64 with Panic {
+    let u = u32le(buf, at)
+    if u >= 2147483648 { u - 4294967296 } else { u }
+}
+
+fn push_var(dst: &!ArrowBuf, v: i64) -> i64 with Mut, Panic {
+    var x = v
+    var more: i64 = 1
+    while more == 1 {
+        var b = x & 127
+        x = x >> 7
+        if x != 0 { b = b | 128 } else { more = 0 }
+        if pushb(dst, b) != 0 { return -1 }
+    }
+    0
+}
+
+fn push_repeat(dst: &!ArrowBuf, v: i64, n: i64) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < n {
+        if pushb(dst, v) != 0 { return -1 }
+        i = i + 1
+    }
+    0
+}
+
+fn wrap_grpc(payload: &ArrowBuf, out: &!ArrowBuf) -> i64 with Mut, Panic {
+    out.len = 0
+    if pushb(out, 0) != 0 { return -1 }
+    if pushb(out, (payload.len >> 24) & 255) != 0 { return -1 }
+    if pushb(out, (payload.len >> 16) & 255) != 0 { return -1 }
+    if pushb(out, (payload.len >> 8) & 255) != 0 { return -1 }
+    if pushb(out, payload.len & 255) != 0 { return -1 }
+    copy_span(out, payload, 0, payload.len)
+}
+
+fn push_trunc_header(dst: &!ArrowBuf) -> i64 with Mut, Panic {
+    if pushb(dst, 16) != 0 { return -1 }
+    if push_repeat(dst, 0, 3) != 0 { return -1 }
+    if pushb(dst, 10) != 0 { return -1 }
+    if pushb(dst, 0) != 0 { return -1 }
+    if pushb(dst, 16) != 0 { return -1 }
+    if pushb(dst, 0) != 0 { return -1 }
+    if pushb(dst, 20) != 0 { return -1 }
+    if pushb(dst, 0) != 0 { return -1 }
+    if pushb(dst, 4) != 0 { return -1 }
+    if pushb(dst, 0) != 0 { return -1 }
+    if pushb(dst, 8) != 0 { return -1 }
+    if push_repeat(dst, 0, 3) != 0 { return -1 }
+    if pushb(dst, 12) != 0 { return -1 }
+    if push_repeat(dst, 0, 3) != 0 { return -1 }
+    if pushb(dst, 1) != 0 { return -1 }
+    if push_repeat(dst, 0, 15) != 0 { return -1 }
+    pushb(dst, 4)
+}
+
+fn header_type_at(buf: &ArrowBuf, meta: i64) -> i64 with Panic {
+    let root = u32le(buf, meta)
+    let table = meta + root
+    let soff = i32le(buf, table)
+    let vt = table - soff
+    let foff = u16le(buf, vt + 6)
+    table + foff
+}
+
+fn test_wire() -> i64 with Mut, Panic, Div {
+    var none = flight_desc_new()
+    var got = flight_desc_new()
+    var back = arrow_buf_new()
+    var meta = flight_meta_new()
+    var skip = arrow_buf_new()
+    if pushb(&!skip, 0) != 0 { return 240 }
+    if push_repeat(&!skip, 0, 3) != 0 { return 241 }
+    if pushb(&!skip, 7) != 0 { return 242 }
+    if pushb(&!skip, 32) != 0 { return 243 }
+    if push_repeat(&!skip, 128, 5) != 0 { return 244 }
+    if pushb(&!skip, 1) != 0 { return 245 }
+    if do_exchange_read(&skip, &!got, &!back, &!meta) != 0 { return 246 }
+    if meta.n != 1 || back.len != 0 { return 247 }
+    var over = arrow_buf_new()
+    if pushb(&!over, 0) != 0 { return 248 }
+    if push_repeat(&!over, 0, 3) != 0 { return 249 }
+    if pushb(&!over, 11) != 0 { return 250 }
+    if pushb(&!over, 32) != 0 { return 251 }
+    if push_repeat(&!over, 128, 9) != 0 { return 252 }
+    if pushb(&!over, 2) != 0 { return 253 }
+    if do_exchange_read(&over, &!got, &!back, &!meta) != -6 { return 254 }
+    var ten = arrow_buf_new()
+    if pushb(&!ten, 0) != 0 { return 255 }
+    if push_repeat(&!ten, 0, 3) != 0 { return 256 }
+    if pushb(&!ten, 11) != 0 { return 257 }
+    if pushb(&!ten, 32) != 0 { return 258 }
+    if push_repeat(&!ten, 128, 9) != 0 { return 259 }
+    if pushb(&!ten, 1) != 0 { return 260 }
+    if do_exchange_read(&ten, &!got, &!back, &!meta) != 0 { return 261 }
+    var trunc_pay = arrow_buf_new()
+    if pushb(&!trunc_pay, 18) != 0 { return 262 }
+    if pushb(&!trunc_pay, 37) != 0 { return 263 }
+    if push_trunc_header(&!trunc_pay) != 0 { return 264 }
+    if trunc_pay.len != 39 { return 265 }
+    var trunc = arrow_buf_new()
+    if wrap_grpc(&trunc_pay, &!trunc) != 0 { return 266 }
+    if do_exchange_read(&trunc, &!got, &!back, &!meta) != -6 { return 267 }
+    var schema = arrow_schema_new()
+    if fill_id(&!schema) != 0 { return 268 }
+    var batch = arrow_batch_new()
+    if arrow_batch_shape(&!batch, 1, 1) != 0 { return 269 }
+    if arrow_batch_set_i64(&!batch, 0, 0, 30, 0) != 0 { return 270 }
+    var ipc = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!ipc) != 0 { return 271 }
+    if arrow_ipc_stream_push(&schema, &batch, &!ipc) != 0 { return 272 }
+    if arrow_ipc_stream_end(&!ipc) != 0 { return 273 }
+    let schema_view = arrow_ipc_view(&ipc, 0)
+    if schema_view.status != 0 || schema_view.header_type != 1 { return 274 }
+    let batch_at = 8 + schema_view.meta_size + schema_view.body_len
+    let batch_view = arrow_ipc_view(&ipc, batch_at)
+    if batch_view.status != 0 || batch_view.header_type != 3 { return 275 }
+    if batch_view.body_len <= 0 || batch_view.body_len % 8 != 0 { return 276 }
+    let type_at = header_type_at(&ipc, batch_at + 8)
+    if ub(&ipc, type_at) != 3 { return 277 }
+    ipc.data[type_at as usize] = 1 as u8
+    var pay = arrow_buf_new()
+    if pushb(&!pay, 18) != 0 { return 278 }
+    if push_var(&!pay, batch_view.meta_size) != 0 { return 279 }
+    if copy_span(&!pay, &ipc, batch_at + 8, batch_view.meta_size) != 0 { return 280 }
+    if pushb(&!pay, 194) != 0 { return 281 }
+    if pushb(&!pay, 62) != 0 { return 282 }
+    if push_var(&!pay, batch_view.body_len) != 0 { return 283 }
+    if copy_span(&!pay, &ipc, batch_at + 8 + batch_view.meta_size, batch_view.body_len) != 0 { return 284 }
+    var frame = arrow_buf_new()
+    if wrap_grpc(&pay, &!frame) != 0 { return 285 }
+    if do_exchange_read(&frame, &!got, &!back, &!meta) != -3 { return 286 }
+    0
+}
+
 fn main() -> i32 with IO, Mut, Panic, Div {
     let a = test_desc()
     if a != 0 {
@@ -509,6 +659,12 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     if g != 0 {
         print("FAIL bounds ")
         println(g)
+        return 1
+    }
+    let h = test_wire()
+    if h != 0 {
+        print("FAIL wire ")
+        println(h)
         return 1
     }
     println("FLIGHT_IPC_OK")
