@@ -14,7 +14,7 @@
 #   //@ contract-adjustment: X  tracks rewritten active-contract tests
 #
 # Usage:
-#   bash scripts/stdlib/run_stdlib_e2e.sh [--filter PATTERN] [--verbose] [--json-out PATH]
+#   bash scripts/stdlib/run_stdlib_e2e.sh [--filter PATTERN] [--verbose] [--json-out PATH] [--artifacts-dir ABS_FRESH_PATH]
 #   bash scripts/stdlib/run_stdlib_e2e.sh PATTERN --verbose
 
 set -euo pipefail
@@ -29,6 +29,7 @@ sounio_require_souc
 # Stdlib path is mandatory for E2E tests.
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
+ARTIFACTS_DIR=""
 FILTER=""
 VERBOSE=0
 JSON_OUT="${STDLIB_E2E_JSON_OUT:-}"
@@ -37,7 +38,7 @@ RUN_ALL_RUN_PASS="${STDLIB_E2E_RUN_ALL_RUN_PASS:-1}"
 
 usage() {
   cat <<'USAGE'
-Usage: bash scripts/stdlib/run_stdlib_e2e.sh [--filter PATTERN] [--verbose] [--json-out PATH]
+Usage: bash scripts/stdlib/run_stdlib_e2e.sh [--filter PATTERN] [--verbose] [--json-out PATH] [--artifacts-dir ABS_FRESH_PATH]
 USAGE
 }
 
@@ -63,6 +64,14 @@ while [[ $# -gt 0 ]]; do
       JSON_OUT="$2"
       shift 2
       ;;
+    --artifacts-dir)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "error: --artifacts-dir requires an absolute fresh path" >&2
+        exit 2
+      fi
+      ARTIFACTS_DIR="$2"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -84,6 +93,30 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+DIAGNOSTICS_HELPER="$ROOT_DIR/scripts/stdlib/stdlib_e2e_diagnostics.mjs"
+if [[ -n "$ARTIFACTS_DIR" ]]; then
+  node "$DIAGNOSTICS_HELPER" init "$ARTIFACTS_DIR" "$ROOT_DIR" "$SOUC_BIN" "$SOUNIO_STDLIB_PATH" || exit 65
+fi
+
+# Called only in the opt-in command substitution. The raw file preserves bytes
+# that Bash command substitution removes (NUL and trailing newlines).
+capture_command() (
+  local rel="$1" phase="$2" log rc=0
+  shift 2
+  log="$(node "$DIAGNOSTICS_HELPER" begin "$ARTIFACTS_DIR" "$rel" "$phase" "$@")" || exit 65
+  set -o noclobber
+  exec 9> "$log" || exit 65
+  "$@" >&9 2>&1 9>&- || rc=$?
+  exec 9>&-
+  node "$DIAGNOSTICS_HELPER" finish "$ARTIFACTS_DIR" "$rel" "$phase" "$rc" || exit 65
+  cat -- "$log" || exit 65
+  exit "$rc"
+)
+
+verify_capture() {
+  node "$DIAGNOSTICS_HELPER" verify "$ARTIFACTS_DIR" "$1" "$2" "$3" || exit 65
+}
 
 PASS=0
 FAIL=0
@@ -178,7 +211,12 @@ run_test() {
 
   local output
   local exit_code=0
-  output=$("$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
+  if [[ -n "$ARTIFACTS_DIR" ]]; then
+    output=$(capture_command "$relpath" check "$SOUC_BIN" check "$file") || exit_code=$?
+    verify_capture "$relpath" check "$exit_code"
+  else
+    output=$("$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
+  fi
   if [[ $exit_code -ne 0 ]]; then
     local excerpt
     excerpt="$(head -6 <<< "$output")"
@@ -212,9 +250,19 @@ run_test() {
 
   exit_code=0
   if command -v timeout >/dev/null 2>&1; then
-    output=$(timeout "${RUN_TIMEOUT_SEC}s" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
+    if [[ -n "$ARTIFACTS_DIR" ]]; then
+      output=$(capture_command "$relpath" run timeout "${RUN_TIMEOUT_SEC}s" "$SOUC_BIN" run "$file") || exit_code=$?
+      verify_capture "$relpath" run "$exit_code"
+    else
+      output=$(timeout "${RUN_TIMEOUT_SEC}s" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
+    fi
   else
-    output=$("$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
+    if [[ -n "$ARTIFACTS_DIR" ]]; then
+      output=$(capture_command "$relpath" run "$SOUC_BIN" run "$file") || exit_code=$?
+      verify_capture "$relpath" run "$exit_code"
+    else
+      output=$("$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
+    fi
   fi
   if [[ $exit_code -ne 0 ]]; then
     local excerpt
@@ -281,6 +329,10 @@ echo "  Pass: $PASS"
 echo "  Fail: $FAIL"
 echo "  Skip: $SKIP"
 echo "  Total: $((PASS + FAIL + SKIP))"
+
+if [[ -n "$ARTIFACTS_DIR" ]]; then
+  node "$DIAGNOSTICS_HELPER" finalize "$ARTIFACTS_DIR" || exit 65
+fi
 
 emit_json "$JSON_OUT"
 
