@@ -4501,6 +4501,38 @@ fn lowerer_flush_current_func_mut(lo: &! Lowerer) with Mut, Panic, Div {
     (*lo).current_func_loaded = false
 }
 
+// Write the declared return-float code onto the module slot before the body
+// is lowered. Call sites and expr_result_is_float_ref read
+// ir_fn_get(module).returns_float, not current_func. Preseed fills the slot,
+// and the body path corrects only current_func (from `-> i64` / `-> f64`);
+// the slot is not flushed until the function ends. A direct self-call inside
+// an if/else used as a value therefore saw the preseed code. For
+// `fn f(n: i64) -> i64 { if n <= 1 { 1 } else { n * f(n - 1) } }` that code
+// was 1, so the call was stamped IR_FLOAT_REG_MARKER_FLAG and the multiply
+// was emitted as mulsd of cvtsi2sd(n) and a bitcast of the i64 result. The
+// bit pattern equals the integer product only while the product is < 2^53,
+// so f(18) is right and f(19)/f(20) are silently wrong. An early return
+// lowers the self-call after a path whose preseed code stayed 0.
+// Patch this one field: replacing the whole slot with current_func would
+// drop preseed fields that have not been copied across yet.
+fn lowerer_publish_current_returns_float_mut(lo: &! Lowerer, fn_id: i64) with Mut, Panic, Div {
+    if !(*lo).current_func_loaded || fn_id < 0 {
+        return
+    }
+    var cur = (*lo).current_func
+    let code = (*cur).returns_float
+    (*lo).current_func = cur
+    var module_box = (*lo).module
+    if fn_id >= (*module_box).fn_count {
+        (*lo).module = module_box
+        return
+    }
+    var slot = ir_fn_get(&(*module_box), fn_id as usize)
+    slot.returns_float = code
+    ir_fn_set(&! (*module_box), fn_id as usize, slot)
+    (*lo).module = module_box
+}
+
 fn lowerer_preseed_fn_signature_mut(
     lo: &! Lowerer,
     name: Name,
@@ -7507,6 +7539,10 @@ fn lowerer_lower_fn_item_mut(
     (*strategy_func_box).ref_struct_param_mask = lower_ref_struct_param_mask_of(&fd.params)
     lowerer_sco_strategy_trace(name, (*strategy_func_box).compile_strategy)
     (*lo).current_func = strategy_func_box
+    // Before params and the body. A recursive call in this body reads the
+    // module slot, which still holds the preseed returns_float until the
+    // end-of-function flush. See lowerer_publish_current_returns_float_mut.
+    lowerer_publish_current_returns_float_mut(lo, fn_id)
 
     // #1547: an extern "C" declaration has no body. Flush it now as an
     // instr_count == 0 stub (keeping the returns_float metadata computed
