@@ -1010,3 +1010,27 @@ The node is idle.
 metal-objdump does not read the M5 binary archive: it is not a Mach-O. The two archives still contain no raw immediate. The AGX table stays empty. Job 12798 still holds dl380.
 
 This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 38. Source, store and the small load offset (2026-10-26, OBSERVED)
+
+Section 37 showed that byte 2 of IADD3 is the destination. The same subtract kernel names the other operands.
+
+IADD3 R7, R0, -R7, RZ has byte 4 equal to 7, the second source. The two loads are LDG.E R0, [R2] and LDG.E R7, [R2+4]. Byte 2 is 0 and 7. Byte 3 is 2 on both, the address register. Byte 5 is 0 and 4, the displacement. One other byte, at position 13, also differs between those two loads. The store is STG.E [R4], R7. Byte 4 is 7. An earlier store, STG.E [R2], R5, matches this word except byte 3 (2 against 4) and byte 4 (5 against 7).
+
+Three images, each changing one byte of the kernel that stores 7 for inputs 10 and 3.
+
+- Source 1 set from 7 to 0. The subtract is R0 minus R0. The stored word must be 0.
+- The store's data byte set from 7 to 0. The subtract still writes R7. The store reads R0, which still holds the first load. The stored word must be 10.
+- The second load's displacement byte set from 4 to 0, and byte 13 left alone. Both loads read the first word. The stored word must be 0.
+
+Gate. Job 17790, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-per-task=4. The node was idle at submit. Binary md5 93a5c8b4e4bdddf6ead76cc5a68df98c.
+
+- SRC_BYTE=0, SRC_LOAD=1, SRC_SYNC=0, SRC=0.
+- STG_BYTE=0, STG_LOAD=1, STG_SYNC=0, STG=10.
+- OFF_BYTE=0, OFF_LOAD=1, OFF_SYNC=0, OFF=0.
+- SUB=7, SUB_SWAP=4294967289 and SUB_DEST=3 still hold. The earlier stamp, FFMA, shuffle, barrier, 128-bit load and cache byte still match. SILICON PASS, EXIT:0.
+
+The node is idle.
+
+This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
