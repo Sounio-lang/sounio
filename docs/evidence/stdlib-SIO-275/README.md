@@ -70,3 +70,13 @@ it checks a pinned SHA256 of the unchanged runner prefix/suffix. Supply the
 historical fixture through STDLIB_E2E_JSON_FIXTURE when that artifact is outside
 the extracted source tree. Its SHA256 is checked before parsing, so an arbitrary
 JSON document cannot substitute for the declared historical fixture.
+
+## Integration measurement
+
+The first allocated integration measurement17578 produced fresh valid JSON for
+all627 selected test paths:315 pass,99 fail,213 skip, runner status1. This is
+a failed measured suite, not a pass inferred from the historical fixture. Its
+selected source packet omitted tracked Pireus data inputs, so it is not treated
+as a complete repository-input baseline. A separate full tracked-tree replay
+uses unchanged source3c7 and the original runner policies; its result remains
+pending until reconciled. The integration epic retains both receipts separately.
