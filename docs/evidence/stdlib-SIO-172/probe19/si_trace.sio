@@ -1,0 +1,65 @@
+//@ run-pass
+//@ expect-stdout: PHONON_SI_PARITY_PASS
+// Authoritative production parity: direct SI inputs versus the legacy ng/mL
+// joint-factor import. No missing Quantity facade or copied transport kernel.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_set,numeric_buffer_close}
+use physics::phonon_factor::*
+use physics::phonon::{rapamycin_phonon_params}
+use units::lib::{quantity_new,dim_concentration,dim_eq}
+fn zeros(n:i64)->NumericBuffer with Alloc,Mut,Div,Panic {
+ var b=numeric_buffer_new(n,n*8);var i:i64=0
+ while i<n {assert(numeric_buffer_set(&!b,i,0.0)==0);i=i+1};b
+}
+fn vector(prefix:string,i:i64,x:f64) with IO {print("PHONON_VALUE ");print(prefix);print(".");print_int(i);print(" ");print_int(f64_to_bits(x));println("")}
+fn covariance(prefix:string,i:i64,j:i64,x:f64) with IO {print("PHONON_VALUE ");print(prefix);print(".");print_int(i);print(".");print_int(j);print(" ");print_int(f64_to_bits(x));println("")}
+fn main()->i32 with Alloc,IO,Mut,Div,Panic {
+ // Quantity nominals carry explicit SI concentration dimensions; all declared
+ // uncertainty is in the signed joint factors below, including parameter rows.
+ println("SI_BEFORE_QUANTITIES")
+ let q0=quantity_new(1e-5,0.0,dim_concentration())
+ let q1=quantity_new(1.2e-5,0.0,dim_concentration())
+ let q2=quantity_new(8e-6,0.0,dim_concentration())
+ assert(dim_eq(q0.dim,dim_concentration()))
+ var si_values=zeros(3)
+ numeric_buffer_set(&!si_values,0,q0.value);numeric_buffer_set(&!si_values,1,q1.value);numeric_buffer_set(&!si_values,2,q2.value)
+ var si_factor=zeros(18)
+ numeric_buffer_set(&!si_factor,0,0.2e-6);numeric_buffer_set(&!si_factor,1,0.3e-6);numeric_buffer_set(&!si_factor,2,-0.1e-6)
+ numeric_buffer_set(&!si_factor,3,1e-11);numeric_buffer_set(&!si_factor,5,0.001)
+ numeric_buffer_set(&!si_factor,9,0.1e-6);numeric_buffer_set(&!si_factor,10,-0.2e-6);numeric_buffer_set(&!si_factor,15,0.3e-6);numeric_buffer_set(&!si_factor,16,1e-6)
+ println("SI_BEFORE_DIRECT_CTOR")
+ var direct=phonon_from_factor(si_values,si_factor,phonon_default_si_params(),1,0.0)
+ println("SI_AFTER_DIRECT_CTOR")
+ var raw_values=zeros(3)
+ numeric_buffer_set(&!raw_values,0,10.0);numeric_buffer_set(&!raw_values,1,12.0);numeric_buffer_set(&!raw_values,2,8.0)
+ var raw_factor=zeros(18)
+ numeric_buffer_set(&!raw_factor,0,0.2);numeric_buffer_set(&!raw_factor,1,0.3);numeric_buffer_set(&!raw_factor,2,-0.1)
+ numeric_buffer_set(&!raw_factor,3,1e-11);numeric_buffer_set(&!raw_factor,5,0.001)
+ numeric_buffer_set(&!raw_factor,9,0.1);numeric_buffer_set(&!raw_factor,10,-0.2);numeric_buffer_set(&!raw_factor,15,0.3);numeric_buffer_set(&!raw_factor,16,1e-6)
+ println("SI_BEFORE_RAW_DEFAULTS")
+ let raw=rapamycin_phonon_params()
+ println("SI_AFTER_RAW_DEFAULTS")
+ println("SI_BEFORE_LEGACY_CTOR")
+ var legacy=phonon_from_legacy_factor(raw_values,raw_factor,&raw,1,0.0)
+ println("SI_AFTER_LEGACY_CTOR")
+ assert(phonon_state_status(&direct)==0 && phonon_state_status(&legacy)==0)
+ var direct_work=zeros(30);var legacy_work=zeros(30)
+ println("SI_BEFORE_DIRECT_SIM")
+ let a=phonon_simulate_checked(&!direct,&!direct_work,0.01,0.0001,200,0)
+ println("SI_AFTER_DIRECT_SIM")
+ let b=phonon_simulate_checked(&!legacy,&!legacy_work,0.01,0.0001,200,0)
+ println("SI_AFTER_LEGACY_SIM")
+ assert(a.status==0 && b.status==0)
+ println("SI_BEFORE_OUTPUTS")
+ var i:i64=0
+ while i<3 {
+  let x=phonon_concentration(&direct,i);let y=phonon_concentration(&legacy,i);assert(x.status==0&&y.status==0)
+  vector("si.direct",i,x.value);vector("si.legacy",i,y.value)
+  let f=phonon_factor_entry(&direct,i,0);let g=phonon_factor_entry(&legacy,i,0);assert(f.status==0&&g.status==0)
+  vector("si.direct.factor",i,f.value);vector("si.legacy.factor",i,g.value)
+  var j:i64=0
+  while j<3 {let c=phonon_covariance(&direct,i,j);let d=phonon_covariance(&legacy,i,j);assert(c.status==0&&d.status==0);covariance("si.direct.cov",i,j,c.value);covariance("si.legacy.cov",i,j,d.value);j=j+1}
+  i=i+1
+ }
+ phonon_close(direct);phonon_close(legacy);numeric_buffer_close(direct_work);numeric_buffer_close(legacy_work)
+ println("PHONON_SI_PARITY_PASS");0
+}

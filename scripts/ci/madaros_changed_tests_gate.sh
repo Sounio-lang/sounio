@@ -228,9 +228,17 @@ for path in "${selected[@]}"; do
   fi
 done
 
+phase_parent="${SOUNIO_MADAROS_F64_LOWERING_GATE_DIR:-$work_dir}/changed-tests-native-phases"
+[[ "$phase_parent" == /* && ! -e "$phase_parent" && ! -L "$phase_parent" ]] || fail "phase_output_not_fresh"
+mkdir -p "$phase_parent"
+
 SOUNIO_MADAROS_AVAILABLE=1 \
 SOUNIO_SOUC_RAW_MODE=modular \
 SOUNIO_TEST_SOUC_BIN="$MADAROS_BIN" \
+SOUNIO_TEST_NATIVE_PHASES=changed-tests-v1 \
+SOUNIO_TEST_PHASE_COMPILER="$MADAROS_BIN" \
+SOUNIO_TEST_PHASE_COMPILER_SHA256="$compiler_sha256" \
+SOUNIO_TEST_NATIVE_PHASE_OUT="$phase_parent" \
   bash "$ROOT_DIR/scripts/run_sio_test_suite.sh" \
     --test-list "$test_list" \
     --jobs "${SOUNIO_TEST_JOBS:-4}"

@@ -1,0 +1,11 @@
+#include <bit>
+#include <cstdint>
+#include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <limits>
+int main(int argc,char**argv){if(argc!=2)return 2;std::vector<double>input={0.0,-(0.0),std::ldexp(1.0,-1074),-(std::ldexp(1.0,-1074)),std::ldexp(1.0,-1073),-(std::ldexp(1.0,-1073)),3.0*std::ldexp(1.0,-1074),-(3.0*std::ldexp(1.0,-1074)),std::ldexp(1.0,-1022)-std::ldexp(1.0,-1074),-(std::ldexp(1.0,-1022)-std::ldexp(1.0,-1074)),std::ldexp(1.0,-1022),-(std::ldexp(1.0,-1022)),2.0*std::ldexp(1.0,-1022),-(2.0*std::ldexp(1.0,-1022)),std::ldexp(1.0,-1000),-(std::ldexp(1.0,-1000)),std::ldexp(1.0,-100),-(std::ldexp(1.0,-100)),std::ldexp(1.0,-1),-(std::ldexp(1.0,-1)),1.0-std::ldexp(1.0,-53),-(1.0-std::ldexp(1.0,-53)),1.0,-(1.0),1.0+std::ldexp(1.0,-52),-(1.0+std::ldexp(1.0,-52)),2.0,-(2.0),2.0-std::ldexp(1.0,-52),-(2.0-std::ldexp(1.0,-52)),1024.0,-(1024.0),std::ldexp(1.0,1000),-(std::ldexp(1.0,1000)),std::ldexp(1.0,1023),-(std::ldexp(1.0,1023)),(2.0-std::ldexp(1.0,-52))*std::ldexp(1.0,1023),-((2.0-std::ldexp(1.0,-52))*std::ldexp(1.0,1023))};std::ifstream f(argv[1]);int count=0,markers=0;for(std::string line;std::getline(f,line);){if(line=="ADJACENT_PASS"){++markers;continue;}std::istringstream s(line);std::string tag,extra;int id;std::int64_t xb,db,yb;if(!(s>>tag>>id>>xb>>db>>yb)||tag!="ADJ"||id!=count||(s>>extra))return 3;double x=std::bit_cast<double>(std::uint64_t(xb)),d=std::bit_cast<double>(std::uint64_t(db));auto expected_input=std::bit_cast<std::uint64_t>(input.at(std::size_t(id)/2));if(std::uint64_t(xb)!=expected_input){std::cerr<<"INPUT_PARSE_MISMATCH id="<<id<<" native="<<std::hex<<std::uint64_t(xb)<<" expected="<<expected_input<<'\n';return 4;}double expected=std::nextafter(x,d>0?std::numeric_limits<double>::infinity():-std::numeric_limits<double>::infinity());if(std::bit_cast<std::uint64_t>(expected)!=std::uint64_t(yb)){std::cerr<<"ADJACENT_MISMATCH id="<<id<<" x="<<std::hexfloat<<x<<" d="<<d<<" expected="<<expected<<" actual="<<std::bit_cast<double>(std::uint64_t(yb))<<'\n';return 5;}++count;}if(markers!=1||std::size_t(count)!=2*input.size())return 6;std::cout<<"ADJACENT_CPP23_PASS cases="<<count<<" input_bits=verified nextafter=bitexact\n";return 0;}

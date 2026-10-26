@@ -3,7 +3,15 @@
 set -uo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 out=${STDLIB_DEEP_OUT:?set STDLIB_DEEP_OUT to a dedicated artifact directory}
-[[ "$out" == /* && -f "${MADAROS_RAW_BIN:?set MADAROS_RAW_BIN}" ]] || exit 64
+[[ "$out" == /* && -x "${MADAROS_RAW_BIN:?set MADAROS_RAW_BIN}" ]] || exit 64
+[[ -z "${SOUNIO_SOUC_BIN:-}" ]] || { echo "explicit raw override bypasses engine routing" >&2; exit 64; }
+MADAROS_RAW_BIN=$(readlink -f "$MADAROS_RAW_BIN") || exit 64
+export MADAROS_RAW_BIN
+SEED_RAW_BIN=$(readlink -f "${SEED_RAW_BIN:-$repo/bin/souc-lean-single-x86_64}") || exit 64
+[[ -x "$SEED_RAW_BIN" ]] || exit 64
+export SEED_RAW_BIN
+out=$(realpath -m "$out") || exit 64
+case "$out/" in "$repo/stdlib/"*|"$repo/tests/"*|"$repo/examples/"*|"$repo/scripts/stdlib/"*|"$repo/scripts/lib/"*) echo "output overlaps input catalog" >&2; exit 64;; esac
 mkdir -p "$out" || exit 65
 [[ -z "$(find "$out" -mindepth 1 -maxdepth 1 -print -quit)" ]] || { echo "refusing nonempty output directory" >&2; exit 65; }
 cd "$repo" || exit 65
@@ -12,9 +20,36 @@ export SOUNIO_MADAROS_NOCACHE=1 SOUNIO_MADAROS_CACHE_READONLY=1
 ulimit -s 524288
 printf 'kind\tsource\texit_status\n' > "$out/RESULTS.tsv"
 mkdir -p "$out/result-rows" || exit 65
-sha256sum "$MADAROS_RAW_BIN" > "$out/COMPILER.sha256" || exit 65
-find stdlib tests -type f -print0 | sort -z | xargs -0 sha256sum > "$out/INPUTS.sha256" || exit 65
+sha256sum "$MADAROS_RAW_BIN" "$SEED_RAW_BIN" bin/souc-lean-single-x86_64 > "$out/COMPILER.sha256" || exit 65
+# Include callers, routing, the runner and every focused gate. Rebuild the
+# catalog after execution so added or removed files cannot escape sha256sum -c.
+write_inputs() {
+    find stdlib tests examples scripts/stdlib scripts/lib \( -type f -o -type l \) -print0 | LC_ALL=C sort -z | xargs -0 sha256sum || return $?
+    sha256sum bin/souc bin/madaros bin/souc-lean-single-x86_64 scripts/ci/souc-native-wrapper.sh \
+      docs/evidence/stdlib-SIO-172/before_variance/variance_witness.sio \
+      docs/evidence/stdlib-SIO-172/before_variance/phonon_original.sio \
+      docs/evidence/stdlib-SIO-174/before/callback_time.sio
+}
+write_inputs > "$out/INPUTS.sha256" || exit 65
 g++ --version > "$out/CXX_TOOLCHAIN.txt" || exit 65
+# Bind the actual compiler helpers and their dynamic runtime dependencies.
+cxx_manifest() {
+    local tool resolved
+    for tool in "$(command -v g++)" "$(g++ -print-prog-name=cc1plus)" \
+      "$(g++ -print-prog-name=collect2)" "$(g++ -print-prog-name=as)" \
+      "$(g++ -print-prog-name=ld)" "$(g++ -print-file-name=libstdc++.so)" \
+      "$(g++ -print-file-name=libgcc_s.so.1)" "$(g++ -print-file-name=libquadmath.so.0)"; do
+        if [[ "$tool" != */* ]]; then tool=$(command -v "$tool") || return 1; fi
+        resolved=$(readlink -f "$tool") || return 1
+        [[ -f "$resolved" ]] || return 1
+        printf '%s\n' "$resolved"
+        ldd "$resolved" > "$out/.cxx-ldd" 2>&1 || return 1
+        if grep -q 'not found' "$out/.cxx-ldd"; then return 1; fi
+        awk '/=> \// {print $3} /^[[:space:]]*\// {print $1}' "$out/.cxx-ldd"
+    done | LC_ALL=C sort -u | xargs -r sha256sum
+}
+cxx_manifest > "$out/CXX_RUNTIME.sha256" || exit 65
+[[ -s "$out/CXX_RUNTIME.sha256" ]] || exit 65
 fail=0
 record() {
     local tmp
@@ -77,15 +112,20 @@ resolve_jobs() {
     printf '%s\n' "$jobs"
 }
 jobs="$(resolve_jobs)" || { echo "invalid STDLIB_DEEP_JOBS (expected a positive integer)" >&2; exit 64; }
+positive_diagnostics() { grep -Eq '^[[:space:]]*error:|^[[:space:]]*error\[E' "$1"; }
 native() {
     local src=$1 name=$2 rc=0
     timeout 180 bin/souc check "$src" > "$out/$name.check.txt" 2>&1 || rc=$?
+    if [[ $rc == 0 ]] && positive_diagnostics "$out/$name.check.txt"; then rc=1; fi
     record check "$src" "$rc"
     [[ $rc == 0 ]] || return
     timeout 240 bin/souc compile "$src" -o "$out/$name.elf" > "$out/$name.compile.txt" 2>&1 || rc=$?
+    if [[ $rc == 0 ]] && positive_diagnostics "$out/$name.compile.txt"; then rc=1; fi
     record compile "$src" "$rc"
     [[ $rc == 0 ]] || return
-    sha256sum "$src" "$out/$name.elf" > "$out/$name.identities"
+    sha256sum "$src" "$out/$name.elf" > "$out/$name.identities" || { record native-artifact-seal "$src" 1; return; }
+    # Each parallel worker owns its pre-execution manifest; aggregate after join.
+    sha256sum "$out/$name.elf" > "$out/$name.native-elf.sha256" || { record native-artifact-seal "$src" 1; return; }
     /usr/bin/time -f 'elapsed_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M\nexit_code=%x' -o "$out/$name.resource" timeout 300 "$out/$name.elf" > "$out/$name.stdout" 2> "$out/$name.stderr" || rc=$?
     record native "$src" "$rc"
     if [[ $rc == 0 ]]; then
@@ -189,6 +229,10 @@ compile_cpp() {
     timeout 180 g++ -std=c++23 -O2 -Wall -Wextra "$src" ${extra:+$extra} \
         -o "$out/$stem" > "$out/$stem.cpp.txt" 2>&1 || rc=$?
     record cpp-compile "$src" "$rc"
+    if [[ $rc == 0 ]]; then
+        sha256sum "$out/$stem" >> "$out/REFERENCE_ELFS.sha256" \
+            || record reference-artifact-seal "$src" 1
+    fi
 }
 
 # Build every independent oracle before starting native fixture work or comparisons.
@@ -425,12 +469,134 @@ run_oracle_batch() {
 }
 run_oracle_batch
 
+# Checked BDF1 numerical concordance and refusal controls use actual native rows.
+rc=0
+timeout 300 bash scripts/stdlib/ode_bdf_checked_gate.sh "$out/checked-bdf" > "$out/checked-bdf.gate.stdout" 2> "$out/checked-bdf.gate.stderr" || rc=$?
+record focused-gate checked-bdf "$rc"
+# Genuine NCT tails, power and minimum-n: own generated native/strict-seed
+# fixtures plus independent C++23 actual-output oracles and rejected mutants.
+rc=0
+timeout 900 bash scripts/stdlib/noncentral_t_power_gate.sh "$out/noncentral_t_power" > "$out/noncentral_t_power.focused.stdout" 2> "$out/noncentral_t_power.focused.stderr" || rc=$?
+record focused-gate noncentral_t_power "$rc"
+# Dynamic named counts, byte-exact identities/joins and validated CSR.
+# Child receipt separates bootstrap numerical support from canonical privacy.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" SEED_RAW_BIN="${SEED_RAW_BIN:-$repo/bin/souc-lean-single-x86_64}" timeout 1200 bash scripts/stdlib/genomics_count_identity_gate.sh "$out/genomics-count-identities" > "$out/genomics-count-identities.gate.stdout" 2> "$out/genomics-count-identities.gate.stderr" || rc=$?
+record focused-gate genomics-count-identities "$rc"
+
+# Reusable named results: canonical framing across all chunk sizes and long streams.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" SEED_RAW_BIN="${SEED_RAW_BIN:-$repo/bin/souc-lean-single-x86_64}" timeout 600 bash scripts/stdlib/genomics_named_stream_gate.sh "$out/genomics-named-stream" > "$out/genomics-named-stream.gate.stdout" 2> "$out/genomics-named-stream.gate.stderr" || rc=$?
+record focused-gate genomics-named-stream "$rc"
+
+# Conditional exact signed ranks, explicit approximation, counted scratch
+# and independent C++ integer/tail controls execute in both compiler engines.
+rc=0
+timeout 1200 bash scripts/stdlib/wilcoxon_checked_gate.sh "$out/wilcoxon_checked" > "$out/wilcoxon_checked.focused.stdout" 2> "$out/wilcoxon_checked.focused.stderr" || rc=$?
+record focused-gate wilcoxon_checked "$rc"
+
+# Full pooled/group right-censored risk curves, checked logrank tails,
+# and independently qualified median boundaries execute in both engines.
+rc=0
+timeout 1200 bash scripts/stdlib/survival_checked_gate.sh "$out/survival_checked" > "$out/survival_checked.focused.stdout" 2> "$out/survival_checked.focused.stderr" || rc=$?
+record focused-gate survival_checked "$rc"
+
+# Checked FEM / Poisson manufactured solutions, legacy imports and work controls.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" bash scripts/stdlib/fem_poisson_gate.sh "$out/fem-poisson" > "$out/fem-poisson.gate.stdout" 2> "$out/fem-poisson.gate.stderr" || rc=$?
+record focused-gate fem-poisson "$rc"
+
+# DP5(4) FSAL, quartic dense output and event contracts: actual native + C++.
+# Optional DP54_SEED_BIN selects a second independently receipted engine.
+rc=0
+DP54_GATE_OUTPUT="$out/dp54-focused" DP54_SEED_BIN="$SEED_RAW_BIN" MADAROS_RAW_BIN="$MADAROS_RAW_BIN" \
+ timeout 900 bash scripts/stdlib/dp54_dense_events_gate.sh > "$out/dp54-focused.stdout" 2> "$out/dp54-focused.stderr" || rc=$?
+record focused-gate dp54-dense-events "$rc"
+
+# Prepared viewport-bound contour geometry and independent native pixel/oracle controls.
+rc=0
+timeout 900 env MADAROS_RAW_BIN="$MADAROS_RAW_BIN" bash scripts/stdlib/prepared_contour_gate.sh "$out/prepared-contour" > "$out/prepared-contour.gate.stdout" 2> "$out/prepared-contour.gate.stderr" || rc=$?
+record focused-gate prepared-contour "$rc"
+
+# Canonical palette primary data, actual Canvas/SVG colors and strict controls.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" bash scripts/stdlib/canonical_palette_gate.sh "$out/canonical-palettes" > "$out/canonical-palettes.gate.stdout" 2> "$out/canonical-palettes.gate.stderr" || rc=$?
+record focused-gate canonical-palettes "$rc"
+
+# Checked transforms, finite differences, physical uncertainty and distributions.
+rc=0
+timeout 900 bash scripts/stdlib/math_fft_checked_gate.sh "$out/math-fft" > "$out/math-fft.gate.stdout" 2> "$out/math-fft.gate.stderr" || rc=$?
+record focused-gate math-fft "$rc"
+rc=0
+NUMDIFF_SEED_BIN="$SEED_RAW_BIN" timeout 900 bash scripts/stdlib/math_numdiff_checked_gate.sh "$out/math-numdiff" > "$out/math-numdiff.gate.stdout" 2> "$out/math-numdiff.gate.stderr" || rc=$?
+record focused-gate math-numdiff "$rc"
+rc=0
+timeout 600 bash scripts/stdlib/physics_uncertainty_gate.sh "$out/physics-uncertainty" > "$out/physics-uncertainty.gate.stdout" 2> "$out/physics-uncertainty.gate.stderr" || rc=$?
+record focused-gate physics-uncertainty "$rc"
+rc=0
+timeout 900 bash scripts/stdlib/checked_distributions_gate.sh "$out/checked-distributions" > "$out/checked-distributions.gate.stdout" 2> "$out/checked-distributions.gate.stderr" || rc=$?
+record focused-gate checked-distributions "$rc"
+
+# Genomics batch fit/prior/refit/tests/FDR/report: both native engines + C++23.
+rc=0
+timeout 1200 bash scripts/stdlib/genomics_batch_gate.sh "$out/genomics_batch" > "$out/genomics_batch.focused.stdout" 2> "$out/genomics_batch.focused.stderr" || rc=$?
+record focused-gate genomics_batch "$rc"
+
+# Four real scientific producers, shared renderers and actual exported pixels.
+rc=0
+SCIENCE_NATIVE_OUTPUT="$out/scientific-native-workflows" SCIENCE_NATIVE_SEED_BIN="$SEED_RAW_BIN" MADAROS_RAW_BIN="$MADAROS_RAW_BIN" timeout 1200 bash scripts/stdlib/scientific_native_workflows_gate.sh > "$out/scientific-native-workflows.gate.stdout" 2> "$out/scientific-native-workflows.gate.stderr" || rc=$?
+record focused-gate scientific-native-workflows "$rc"
+
+# ADR-019 structural shape contract; directed arithmetic is not qualified here.
+rc=0
+INTERVAL_CONTRACT_OUT="$out/interval-contract" timeout 240 bash scripts/stdlib/interval_contract_gate.sh > "$out/interval-contract.gate.stdout" 2> "$out/interval-contract.gate.stderr" || rc=$?
+record focused-gate interval-contract "$rc"
+
+# Phonon means/covariance, transport and original production-import controls.
+rc=0
+PHONON_GATE_OUTPUT="$out/phonon-factor" timeout 600 bash scripts/stdlib/phonon_factor_gate.sh > "$out/phonon-factor.gate.stdout" 2> "$out/phonon-factor.gate.stderr" || rc=$?
+record focused-gate phonon-factor "$rc"
+
+# Every child seals native programs and C++ oracles before first use. Repeat
+# those checks after all children, so later phases cannot mutate an earlier ELF.
+: > "$out/CHILD_ELFS.verify.txt"
+for child in checked-bdf noncentral_t_power genomics-count-identities genomics-named-stream \
+ wilcoxon_checked survival_checked fem-poisson dp54-focused prepared-contour canonical-palettes \
+ math-fft math-numdiff physics-uncertainty checked-distributions genomics_batch \
+ scientific-native-workflows interval-contract phonon-factor; do
+ rc=0
+ if [[ -s "$out/$child/ELFS.sha256" ]]; then
+  sha256sum -c "$out/$child/ELFS.sha256" >> "$out/CHILD_ELFS.verify.txt" 2>&1 || rc=$?
+ else
+  printf 'missing child executable manifest: %s\n' "$child" >> "$out/CHILD_ELFS.verify.txt"
+  rc=1
+ fi
+ record child-artifact-hashes "$child" "$rc"
+done
+
+rc=0
+cat "$out"/*.native-elf.sha256 > "$out/NATIVE_ELFS.sha256" 2> "$out/NATIVE_ELFS.catalog.stderr" || rc=$?
+record native-artifact-catalog joined "$rc"
+rc=0
+write_inputs > "$out/INPUTS.final.sha256" || rc=$?
+if [[ $rc == 0 ]]; then cmp "$out/INPUTS.sha256" "$out/INPUTS.final.sha256" > "$out/INPUTS.catalog-cmp.txt" 2>&1 || rc=$?; fi
+record input-catalog unchanged "$rc"
+rc=0
+sha256sum -c "$out/NATIVE_ELFS.sha256" > "$out/NATIVE_ELFS.verify.txt" 2>&1 || rc=$?
+record native-artifact-hashes unchanged "$rc"
+rc=0
+sha256sum -c "$out/REFERENCE_ELFS.sha256" > "$out/REFERENCE_ELFS.verify.txt" 2>&1 || rc=$?
+record reference-artifact-hashes unchanged "$rc"
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"
 rc=0
 sha256sum -c "$out/COMPILER.sha256" > "$out/COMPILER.verify.txt" 2>&1 || rc=$?
 record compiler-hash unchanged "$rc"
+
+rc=0
+sha256sum -c "$out/CXX_RUNTIME.sha256" > "$out/CXX_RUNTIME.verify.txt" 2>&1 || rc=$?
+record cxx-runtime-hashes unchanged "$rc"
 
 results_tmp="$out/RESULTS.tsv.tmp"
 {

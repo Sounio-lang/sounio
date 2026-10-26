@@ -1,0 +1,1 @@
+The genomics batch qualification gate now catalogs all standard-library and routing-helper inputs, requires an executable explicit Madaros override, records terminal status, and verifies compiler and generated executable hashes after the native runs.
