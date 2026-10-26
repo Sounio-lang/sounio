@@ -2,7 +2,7 @@
 topic_id: repo.changelog-fragments
 authority: repo_only
 audience: contributors
-last_validated: 2026-10-24
+last_validated: 2026-10-26
 validated_by: scripts/ci/changelog_fragment_gate.sh --selftest
 source_of_truth: docs/decisions/adr-018-release-cycle-and-versioning.md
 -->
@@ -14,6 +14,8 @@ Do not edit `CHANGELOG.md` in a pull request. Add a fragment here instead. Every
 ## When a fragment is required
 
 When the PR touches anything that the Impact classifier counts as compiler, runtime or stdlib. CI scripts count too. The `Changelog fragment gate` step of the Impact job enforces this for PRs opened after 2026-10-25T03:00Z.
+
+For those PRs the gate also refuses a hand edit to `CHANGELOG.md`, or renaming it away, regardless of when the PR was opened — the release manager assembles `CHANGELOG.md` from fragments at release time, and a release-assembly PR touches no compiler, runtime or stdlib path, so it is not bound here. A fragment added by rename or copy counts the same as one added outright, and every added fragment must carry content at the head commit: an empty file satisfies the census while saying nothing.
 
 ## Name
 
