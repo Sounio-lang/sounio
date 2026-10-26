@@ -8,6 +8,7 @@ import sitemap from '@astrojs/sitemap';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import githubDarkTheme from '@shikijs/themes/github-dark';
+import { HREFLANG, isIndexableSitemapUrl, sitemapLinks } from './src/lib/seo-locales.mjs';
 
 // Real Shiki grammar for Sounio (`sio` code fences). Previously ```sio blocks
 // were relabeled as ```rust before highlighting (see git history of
@@ -56,17 +57,13 @@ export default defineConfig({
   integrations: [
     react(),
     sitemap({
+      filter: (page) => isIndexableSitemapUrl(page),
+      serialize(item) {
+        return { ...item, links: sitemapLinks(item.url) };
+      },
       i18n: {
         defaultLocale: 'en',
-        locales: {
-          en: 'en',
-          pt: 'pt-BR',
-          el: 'el',
-          zh: 'zh-CN',
-          ja: 'ja',
-          es: 'es',
-          'zh-hk': 'zh-HK',
-        },
+        locales: HREFLANG,
       },
     }),
     mdx({
