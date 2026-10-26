@@ -26,6 +26,12 @@
 #      to earn the pre-cutoff exemption; a set-but-malformed value fails
 #      closed instead of being string-compared into an accidental exemption.
 #
+# The CHANGELOG.md audit runs with rename detection DISABLED: with it on,
+# `git diff --name-only` reports only the destination of a rename, so
+# renaming CHANGELOG.md into changelog.d/ would hide the source path from
+# the audit. With it off, a rename appears as delete+add and both paths are
+# audited. The ACR fragment census keeps rename detection, on purpose.
+#
 # Usage:
 #   changelog_fragment_gate.sh            # reads CI env (see below)
 #   changelog_fragment_gate.sh --selftest
@@ -41,8 +47,9 @@ CREATED_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
 
 # decide <needs:true|false> <created_at> <added paths, newline-separated> <changed paths, newline-separated>
 # `added` is the ACR-filtered fragment census; `changed` is the full
-# base...head path list (all diff filters). Prints a verdict line;
-# returns 0 on pass, 1 on fail.
+# base...head path list (all diff filters, rename detection disabled so a
+# renamed-away CHANGELOG.md still names its source path). Prints a verdict
+# line; returns 0 on pass, 1 on fail.
 decide() {
   local needs=$1 created=$2 added=$3 changed=$4 path kind n=0 bad=""
   while IFS= read -r path; do
@@ -130,6 +137,9 @@ selftest() {
   check fail "compiler PR edits CHANGELOG.md, no fragment" true $new 'self-hosted/x.sio' $'CHANGELOG.md\nself-hosted/x.sio'
   check fail "old PR still cannot edit CHANGELOG.md" true  $old 'changelog.d/fix-x.fixed.md' $'CHANGELOG.md\nchangelog.d/fix-x.fixed.md'
   check pass "release assembly edits CHANGELOG.md"   false $new $'CHANGELOG.md\nchangelog.d/a.fixed.md' $'CHANGELOG.md\nchangelog.d/a.fixed.md'
+  # The audit sees delete+add with rename detection off, so a CHANGELOG.md
+  # renamed INTO a fragment still names its source path and is refused.
+  check fail "CHANGELOG.md renamed into a fragment"  true  $new 'changelog.d/archive.fixed.md' $'CHANGELOG.md\nchangelog.d/archive.fixed.md'
   # Hardening: malformed PR_CREATED_AT fails closed (no exemption).
   check fail "malformed created_at, no exemption"    true  'Oct 20 2026' 'self-hosted/x.sio' 'self-hosted/x.sio'
   check fail "offset created_at, no exemption"       true  '2026-10-20T00:00:00+00:00' 'self-hosted/x.sio' 'self-hosted/x.sio'
@@ -175,7 +185,7 @@ selftest() {
   rm -rf "$repo"
 
   if (( fails )); then echo "CHANGELOG_FRAGMENT_SELFTEST_FAIL failures=$fails"; return 1; fi
-  echo "CHANGELOG_FRAGMENT_SELFTEST_PASS cases=22"
+  echo "CHANGELOG_FRAGMENT_SELFTEST_PASS cases=23"
 }
 
 if [[ "${1:-}" == "--selftest" ]]; then selftest; exit; fi
@@ -196,7 +206,7 @@ if ! added=$(git diff --name-only --diff-filter=ACR "$base...$head" 2>"$diff_err
   rm -f "$diff_err"
   exit 3
 fi
-if ! changed=$(git diff --name-only "$base...$head" 2>"$diff_err"); then
+if ! changed=$(git -c diff.renames=false diff --name-only "$base...$head" 2>"$diff_err"); then
   echo "CHANGELOG_FRAGMENT_FAIL git diff $base...$head failed -- cannot audit CHANGELOG.md:" >&2
   sed 's/^/  git: /' "$diff_err" >&2
   rm -f "$diff_err"
