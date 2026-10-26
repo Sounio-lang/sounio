@@ -6,7 +6,7 @@
 use hetero::cuda_exec::{
     ce_alloc, ce_arg, ce_d2h, ce_function, ce_h2d, ce_launch_raw, ce_module_image, ce_open, ce_sync,
 }
-use hetero::silicon::image::{si_bar, si_cache, si_fma, si_ldg, si_shfl, si_stamp, si_sub}
+use hetero::silicon::image::{si_bar, si_cache, si_fma, si_fma_dest0, si_ldg, si_shfl, si_stamp, si_sub}
 use hetero::silicon::sched::{arch_agx, arch_rdna, arch_sm89}
 
 fn img_byte(data: *mut u8, off: i64) -> i64 with Div {
@@ -39,6 +39,8 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     let sub3 = si_sub(arch, 3)
     let sub4 = si_sub(arch, 4)
     let sub5 = si_sub(arch, 5)
+    let sub6 = si_sub(arch, 6)
+    let fdest = si_fma_dest0(arch, addend)
     let rdna = si_stamp(arch_rdna(), imm)
     let agx = si_stamp(arch_agx(), imm)
     print("RDNA ok=")
@@ -60,6 +62,8 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     if !sub3.ok { print("SILICON FAIL\n"); exit(1) }
     if !sub4.ok { print("SILICON FAIL\n"); exit(1) }
     if !sub5.ok { print("SILICON FAIL\n"); exit(1) }
+    if !sub6.ok { print("SILICON FAIL\n"); exit(1) }
+    if !fdest.ok { print("SILICON FAIL\n"); exit(1) }
     let got = img_u32(img.ptr, 1428)
     print("BYTES=")
     print_int(got)
@@ -117,6 +121,16 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     if img_byte(sub5.ptr, 1493) != 0 { print("SILICON FAIL\n"); exit(1) }
     print("OFF_BYTE=")
     print_int(img_byte(sub5.ptr, 1493))
+    print("\n")
+    if img_byte(sub6.ptr, 1555) != 2 { print("SILICON FAIL\n"); exit(1) }
+    if img_byte(sub6.ptr, 1556) != 7 { print("SILICON FAIL\n"); exit(1) }
+    print("ADDR_BYTE=")
+    print_int(img_byte(sub6.ptr, 1555))
+    print("\n")
+    if img_byte(fdest.ptr, 1506) != 0 { print("SILICON FAIL\n"); exit(1) }
+    if img_u32(fdest.ptr, 1508) != addend { print("SILICON FAIL\n"); exit(1) }
+    print("FDEST_BYTE=")
+    print_int(img_byte(fdest.ptr, 1506))
     print("\n")
     let exec = ce_open()
     if !exec.ok { print("NOCUDA\n"); exit(2) }
@@ -456,6 +470,78 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     print_int(s5)
     print("\n")
     if s5 != 0 { print("SILICON FAIL\n"); exit(1) }
+
+    let hin6 = heap_alloc(8)
+    write_i64(hin6 as *mut i64, 0, 10 + 3 * 4294967296)
+    let din6 = ce_alloc(&exec, 8)
+    let dout6 = ce_alloc(&exec, 4)
+    let hz = heap_alloc(8)
+    write_i64(hz as *mut i64, 0, 0)
+    if ce_h2d(&exec, din6, hin6, 8) != 0 { print("SILICON FAIL\n"); exit(1) }
+    if ce_h2d(&exec, dout6, hz, 4) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let m6 = ce_module_image(&exec, sub6.ptr, sub6.nbytes)
+    print("ADDR_LOAD=")
+    print_int(if m6 != 0 { 1 } else { 0 })
+    print("\n")
+    if m6 == 0 { print("SILICON FAIL\n"); exit(1) }
+    let f6 = ce_function(&exec, m6, "stamp")
+    if f6 == 0 { print("SILICON FAIL\n"); exit(1) }
+    let p6 = heap_alloc(16)
+    write_i64(p6 as *mut i64, 0, ce_arg(din6) as i64)
+    write_i64(p6 as *mut i64, 1, ce_arg(dout6) as i64)
+    if ce_launch_raw(&exec, f6, 1, 1, p6) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let syn6 = ce_sync(&exec)
+    print("ADDR_SYNC=")
+    print_int(syn6 as i64)
+    print("\n")
+    if syn6 != 0 { print("SILICON FAIL\n"); exit(1) }
+    let ho_in = heap_alloc(8)
+    let ho_out = heap_alloc(8)
+    write_i64(ho_in as *mut i64, 0, 0)
+    write_i64(ho_out as *mut i64, 0, 0)
+    if ce_d2h(&exec, ho_in, din6, 8) != 0 { print("SILICON FAIL\n"); exit(1) }
+    if ce_d2h(&exec, ho_out, dout6, 4) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let packed = read_i64(ho_in as *mut i64, 0)
+    let ain = packed & 4294967295
+    let ain1 = (packed >> 32) & 4294967295
+    let aout = read_i64(ho_out as *mut i64, 0) & 4294967295
+    print("ADDR_IN=")
+    print_int(ain)
+    print("\n")
+    print("ADDR_IN1=")
+    print_int(ain1)
+    print("\n")
+    print("ADDR_OUT=")
+    print_int(aout)
+    print("\n")
+    if ain != 7 { print("SILICON FAIL\n"); exit(1) }
+    if ain1 != 3 { print("SILICON FAIL\n"); exit(1) }
+    if aout != 0 { print("SILICON FAIL\n"); exit(1) }
+
+    let md = ce_module_image(&exec, fdest.ptr, fdest.nbytes)
+    print("FDEST_LOAD=")
+    print_int(if md != 0 { 1 } else { 0 })
+    print("\n")
+    if md == 0 { print("SILICON FAIL\n"); exit(1) }
+    let fd = ce_function(&exec, md, "stamp")
+    if fd == 0 { print("SILICON FAIL\n"); exit(1) }
+    let dd = ce_alloc(&exec, 4)
+    let pd = heap_alloc(8)
+    write_i64(pd as *mut i64, 0, ce_arg(dd) as i64)
+    if ce_launch_raw(&exec, fd, 1, 1, pd) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let synd = ce_sync(&exec)
+    print("FDEST_SYNC=")
+    print_int(synd as i64)
+    print("\n")
+    if synd != 0 { print("SILICON FAIL\n"); exit(1) }
+    let hod = heap_alloc(8)
+    write_i64(hod as *mut i64, 0, 0)
+    if ce_d2h(&exec, hod, dd, 4) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let fdv = read_i64(hod as *mut i64, 0) & 4294967295
+    print("FDEST=")
+    print_int(fdv)
+    print("\n")
+    if fdv != 1073741824 { print("SILICON FAIL\n"); exit(1) }
 
     print("SILICON PASS\n")
     exit(0)

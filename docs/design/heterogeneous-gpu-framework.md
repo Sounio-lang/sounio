@@ -1034,3 +1034,20 @@ Gate. Job 17790, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-
 The node is idle.
 
 This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 39. Store address and the FFMA destination (2026-10-26, OBSERVED)
+
+The subtract kernel keeps the input pointer in R2 and the output pointer in R4. Its store is STG.E [R4], R7. Byte 3 of that instruction is 4. The FFMA that stores 2.0 times 1.0 plus the addend is FFMA R5, R5, R0, imm. Byte 2 is 5, the same slot as the IADD3 destination.
+
+Two images. The store's address byte is set from 4 to 2. The output buffer is cleared first. The input words are 10 and 3. R2 still holds the input pointer, so the result 7 must land on the first input word, the second input word must stay 3, and the output must stay 0. The FFMA image keeps the addend at 5.0 and sets byte 2 from 5 to 0. The multiply-add writes R0. The store still reads R5, which the mov before the FFMA set to 2.0. The stored bits must be 1073741824.
+
+Gate. Job 17797, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Job 17793 held the CPUs on that node and did not hold the GPU. This job shared the node and did not cancel 17793. Binary md5 b0ff6cd3f5bbf107914527eae89bdbdd.
+
+- ADDR_LOAD=1, ADDR_SYNC=0, ADDR_IN=7, ADDR_IN1=3, ADDR_OUT=0.
+- FDEST_LOAD=1, FDEST_SYNC=0, FDEST=1073741824.
+- The earlier stamp, FFMA 7.0, shuffle, barrier, 128-bit load, cache byte, subtract, negate swap, destination 3, source 0, store data 10 and load offset 0 still match. SILICON PASS, EXIT:0.
+
+17793 was still running after this job ended. The node was not idle.
+
+This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
