@@ -28840,20 +28840,29 @@ impl Lowerer {
         // Gated on fo_nchan > 0 so a program that never calls measure() pays
         // nothing; a `let` is never reassigned and needs no slot.
         //
-        // Also gated on the local not being an integer/bool (scalar_kind 1), which
-        // carries no measurement variance. The kind is recorded by the metadata
-        // pass, so that runs first. Without this, one channel anywhere in a
-        // function (an `if` assigning an integer counter is enough) gave every
-        // integer `var` sens slots, and since #2827 also a residual slot that each
-        // loop head and each assignment rewrites: obo_elplus_driver.sio, which has
-        // no f64 at all, compiled to 385 KB instead of 189 KB and ran 2.2x slower.
-        lo = lo.lower_let_stmt_type_metadata_ref(s, reg, rhs_array_elem_is_float)
-        if is_mut && lo.fo_nchan > 0 && !bind_as_ref && fixed_array_len < 0
-            && lo.lookup_local_scalar_kind(s.name) != 1 {
+        // Not for a `var` initialised with an integer or bool literal
+        // (`var k: i64 = 0`, `var n_fail = 0`, `var done = false`): it carries no
+        // variance and nothing above bound it to any. One channel anywhere in the
+        // function (an `if` that bumps an integer counter is enough) used to give
+        // every such counter sens slots, and since #2827 a residual slot that each
+        // loop head and assignment rewrites: obo_elplus_driver.sio, which has no
+        // f64, compiled to 385 KB instead of 156 KB and ran 2.2x slower. The test
+        // is on the literal, not on the declared type, because an integer bound to
+        // a variance-carrying RHS still needs private slots across a back-edge.
+        var rhs_is_int_or_bool_lit = false
+        match s.expr {
+            Some(rhs_lit) => {
+                rhs_is_int_or_bool_lit = (*rhs_lit).kind == ExprKind::ExprIntLit
+                    || (*rhs_lit).kind == ExprKind::ExprBoolTrue
+                    || (*rhs_lit).kind == ExprKind::ExprBoolFalse
+            }
+            None => {}
+        }
+        if is_mut && lo.fo_nchan > 0 && !bind_as_ref && fixed_array_len < 0 && !rhs_is_int_or_bool_lit {
             lo = lo.alloc_variance_slot_for_local(s.name)
             lo = lo.fo_alloc_sens_slots_for_local(s.name)
         }
-        lo
+        lo.lower_let_stmt_type_metadata_ref(s, reg, rhs_array_elem_is_float)
     }
 
     // `[r0, r1, r2]` whose elements are f64 LOCALS (or calls, fields, indexes the
