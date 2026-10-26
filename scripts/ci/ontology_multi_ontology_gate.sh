@@ -256,7 +256,9 @@ resolve_jobs() {
     cpus="$(nproc 2>/dev/null || echo 1)"
     if [[ -r /sys/fs/cgroup/memory.max ]]; then
         read -r memory_bytes < /sys/fs/cgroup/memory.max
-        if [[ "$memory_bytes" =~ ^[0-9]+$ && -r /sys/fs/cgroup/memory.current ]]; then
+        if [[ "$memory_bytes" == max ]]; then
+            memory_bytes="$(awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo)"
+        elif [[ "$memory_bytes" =~ ^[0-9]+$ && -r /sys/fs/cgroup/memory.current ]]; then
             read -r memory_current < /sys/fs/cgroup/memory.current
             if [[ "$memory_current" =~ ^[0-9]+$ && "$memory_current" -lt "$memory_bytes" ]]; then
                 memory_bytes=$((memory_bytes - memory_current))
@@ -300,20 +302,14 @@ collect_verdicts() {
             FAIL=$((FAIL + 1))
             continue
         fi
-        if [[ "$(wc -l < "$TMP_DIR/$name.verdict")" != 1 ]]; then
+        if cmp -s "$TMP_DIR/$name.verdict" <(printf 'PASS\n'); then
+            PASS=$((PASS + 1))
+        elif cmp -s "$TMP_DIR/$name.verdict" <(printf 'FAIL\n'); then
+            FAIL=$((FAIL + 1))
+        else
             printf '[ontology-multi] FAIL: %s produced a malformed verdict file\n' "$name" >&2
             FAIL=$((FAIL + 1))
-            continue
         fi
-        IFS= read -r verdict < "$TMP_DIR/$name.verdict" || verdict=""
-        case "$verdict" in
-            PASS) PASS=$((PASS + 1)) ;;
-            FAIL) FAIL=$((FAIL + 1)) ;;
-            *)
-                printf '[ontology-multi] FAIL: %s produced invalid verdict: %q\n' "$name" "$verdict" >&2
-                FAIL=$((FAIL + 1))
-                ;;
-        esac
     done
     [[ "$FAIL" -eq 0 ]]
 }
@@ -328,6 +324,11 @@ run_drivers() {
     # Fetching and generation may write shared data, so this preflight remains serial.
     for rel in "${DRIVERS[@]}"; do
         name="$(basename "$rel" .sio)"
+        if [[ ! -f "$ROOT_DIR/$rel" ]]; then
+            printf '[ontology-multi] FAIL: %s (missing file: %s)\n' "$name" "$rel" >&2
+            PREP_FAIL=$((PREP_FAIL + 1))
+            continue
+        fi
         data_rc=0
         ensure_data "$name" || data_rc=$?
         case "$data_rc" in
@@ -394,18 +395,39 @@ MOCK
     [[ "$PASS" == 2 && "$FAIL" == 0 ]] \
         || { echo "[ontology-multi] selftest did not pass with two workers" >&2; return 1; }
 
+    DRIVERS=(fixtures/one.sio)
+    DATA_FOR=("one|missing.txt|none")
+    rm "$ROOT_DIR/fixtures/one.sio"
+    ONTOLOGY_MULTI_JOBS=1 run_drivers && rc=0 || rc=$?
+    [[ "$rc" != 0 && "$FAIL" -gt 0 && "$SKIP" == 0 ]] \
+        || { echo "[ontology-multi] selftest skipped a missing driver source" >&2; return 1; }
+    : > "$ROOT_DIR/fixtures/one.sio"
+    DRIVERS=(fixtures/one.sio fixtures/two.sio)
+    DATA_FOR=()
+
     ONTOLOGY_MULTI_JOBS=2 ONTOLOGY_MULTI_SABOTAGE=1 run_drivers && rc=0 || rc=$?
     [[ "$rc" != 0 && "$FAIL" -gt 0 ]] \
         || { echo "[ontology-multi] selftest accepted a sabotaged driver" >&2; return 1; }
 
+    write_verdict one PASS
+    write_verdict two PASS
     rm -f "$TMP_DIR/one.verdict"
     collect_verdicts && rc=0 || rc=$?
     [[ "$rc" != 0 ]] \
         || { echo "[ontology-multi] selftest accepted a missing verdict" >&2; return 1; }
+    write_verdict one PASS
+    write_verdict two PASS
     printf 'BROKEN\n' > "$TMP_DIR/two.verdict"
     collect_verdicts && rc=0 || rc=$?
     [[ "$rc" != 0 ]] \
         || { echo "[ontology-multi] selftest accepted an invalid verdict" >&2; return 1; }
+
+    write_verdict one PASS
+    write_verdict two PASS
+    printf 'PASS\nBROKEN' > "$TMP_DIR/two.verdict"
+    collect_verdicts && rc=0 || rc=$?
+    [[ "$rc" != 0 ]] \
+        || { echo "[ontology-multi] selftest accepted trailing verdict data" >&2; return 1; }
 
     ONTOLOGY_MULTI_JOBS=invalid resolve_jobs >/dev/null 2>&1 && {
         echo "[ontology-multi] selftest accepted an invalid worker count" >&2

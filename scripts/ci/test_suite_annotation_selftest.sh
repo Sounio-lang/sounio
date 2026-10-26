@@ -64,7 +64,7 @@ run_job_probe() {
         "${env_args[@]}" \
         CI=1 \
         bash "$HARNESS" --test-list "$TMP/list_jobs.txt" "${harness_args[@]}"
-    grep -Fq "Parallel jobs: $expected" "$log" \
+    grep -Fxq "Parallel jobs: $expected" "$log" \
         || fail "expected Parallel jobs: $expected; got $(grep -F 'Parallel jobs:' "$log" | tail -1)"
 }
 

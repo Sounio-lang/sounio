@@ -34,7 +34,9 @@ resolve_jobs() {
     cpus="$(nproc 2>/dev/null || echo 1)"
     if [[ -r /sys/fs/cgroup/memory.max ]]; then
         read -r memory_bytes < /sys/fs/cgroup/memory.max
-        if [[ "$memory_bytes" =~ ^[0-9]+$ && -r /sys/fs/cgroup/memory.current ]]; then
+        if [[ "$memory_bytes" == max ]]; then
+            memory_bytes="$(awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo)"
+        elif [[ "$memory_bytes" =~ ^[0-9]+$ && -r /sys/fs/cgroup/memory.current ]]; then
             read -r memory_current < /sys/fs/cgroup/memory.current
             if [[ "$memory_current" =~ ^[0-9]+$ && "$memory_current" -lt "$memory_bytes" ]]; then
                 memory_bytes=$((memory_bytes - memory_current))

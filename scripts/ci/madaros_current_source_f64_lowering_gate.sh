@@ -110,11 +110,13 @@ wait_knowledge_runtime() {
     fi
     read -r pid < "$gate_dir/worker.pid"
     if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]] || ! kill -0 "$pid" 2>/dev/null; then
+      [[ -f "$receipt" ]] && break
       echo "[madaros-f64-lowering] FAIL: knowledge-runtime worker ended without a receipt" >&2
       [[ ! -f "$gate_dir/worker.log" ]] || cat "$gate_dir/worker.log" >&2
       return 1
     fi
     if (( SECONDS - started >= timeout_seconds )); then
+      [[ -f "$receipt" ]] && break
       echo "[madaros-f64-lowering] FAIL: timed out waiting for knowledge-runtime receipt" >&2
       [[ ! -f "$gate_dir/worker.log" ]] || cat "$gate_dir/worker.log" >&2
       return 1
