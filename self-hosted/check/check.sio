@@ -7868,154 +7868,13 @@ fn checker_check_call_fields(c: *mut Checker, callee: Option<Box<Expr> >, args: 
 }
 
 fn checker_check_opt_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // Follow the Option handle, then use the full in-place checker. A raw
+    // *mut Expr is the Box object, whose word 0 is tag 8, not ExprBinary.
+    // The short field dispatcher that used to live here never resolved a
+    // builtin or a method, and it typed m + m as E004 instead of Correlated.
     match opt {
         None => ty_unit()
-        Some(e) => {
-            if checker_expr_depth_exceeded((*c).expr_depth) {
-                checker_report_error_at_inplace(c, (*e).span, 61, (*c).expr_depth, MAX_EXPR_DEPTH, 0)
-                return ty_error()
-            }
-            (*c).expr_depth = (*c).expr_depth + 1
-            var result = ty_error()
-            if (*e).kind == ExprKind::ExprIntLit {
-                (*c).last_literal_int = (*e).int_val
-                (*c).last_literal_kind = 1
-                result = ty_i64()
-            } else if (*e).kind == ExprKind::ExprFloatLit {
-                (*c).last_literal_float = (*e).float_val
-                (*c).last_literal_kind = 2
-                result = ty_f64()
-            } else if (*e).kind == ExprKind::ExprBoolTrue || (*e).kind == ExprKind::ExprBoolFalse {
-                result = ty_bool()
-            } else if (*e).kind == ExprKind::ExprStringLit {
-                result = ty_string()
-            } else if (*e).kind == ExprKind::ExprCharLit {
-                result = ty_char()
-            } else if (*e).kind == ExprKind::ExprDsepProof {
-                result = ty_dsep_proof()
-            } else if (*e).kind == ExprKind::ExprIdent {
-                result = checker_check_ident_named(c, (*e).name, (*e).span)
-            } else if (*e).kind == ExprKind::ExprPath {
-                result = checker_check_ident_named(c, checker_copy_string_list_to_name((*e).path.segments), (*e).span)
-            } else if (*e).kind == ExprKind::ExprBinary {
-                result = checker_check_binary_fields(c, (*e).span, (*e).left, (*e).right, (*e).bin_op)
-            } else if (*e).kind == ExprKind::ExprUnary {
-                result = checker_check_unary_fields(c, (*e).span, (*e).un_op, (*e).left)
-            } else if (*e).kind == ExprKind::ExprFieldAccess {
-                result = checker_check_field_fields(c, (*e).span, (*e).left, (*e).name)
-            } else if (*e).kind == ExprKind::ExprIndex {
-                result = checker_check_index_fields(c, (*e).span, (*e).left, (*e).right)
-            } else if (*e).kind == ExprKind::ExprMethodCall {
-                let _recv = checker_check_opt_expr_inplace(c, (*e).left)
-                checker_check_call_args_matched(c, (*e).args)
-                let sig_id = checker_fn_sigs_find_inplace(c, (*e).name)
-                if sig_id >= 0 {
-                    result = fn_sig_table_get((*c).fn_sigs, sig_id).return_type
-                } else if len_method_supported(_recv) && name_matches_str3((*e).name, 108, 101, 110) {
-                    result = ty_i64()
-                } else {
-                    checker_report_undeclared_inplace(c, (*e).span, (*e).name)
-                    result = ty_error()
-                }
-            } else if (*e).kind == ExprKind::ExprCall {
-                result = checker_check_call_fields(c, (*e).left, (*e).args, (*e).span)
-            } else if (*e).kind == ExprKind::ExprIf {
-                result = checker_check_if_fields(c, (*e).span, (*e).left, (*e).block, (*e).else_expr)
-            } else if (*e).kind == ExprKind::ExprWhile {
-                result = checker_check_while_fields(c, (*e).span, (*e).left, (*e).block)
-            } else if (*e).kind == ExprKind::ExprLoop {
-                if (*c).loop_depth >= MAX_LOOP_DEPTH {
-                    checker_report_error_at_inplace(c, (*e).span, 62, (*c).loop_depth, MAX_LOOP_DEPTH, 0)
-                    result = ty_error()
-                } else {
-                    (*c).loop_depth = (*c).loop_depth + 1
-                    let _body = checker_check_opt_block_inplace(c, (*e).block)
-                    (*c).loop_depth = (*c).loop_depth - 1
-                    result = ty_unit()
-                }
-            } else if (*e).kind == ExprKind::ExprBlock {
-                result = checker_check_opt_block_inplace(c, (*e).block)
-            } else if (*e).kind == ExprKind::ExprReturn {
-                result = checker_check_return_fields(c, (*e).span, (*e).left)
-            } else if (*e).kind == ExprKind::ExprBreak {
-                if (*c).loop_depth == 0 {
-                    checker_report_error_at_inplace(c, (*e).span, 44, 0, 0, 0)
-                }
-                result = ty_never()
-            } else if (*e).kind == ExprKind::ExprContinue {
-                if (*c).loop_depth == 0 {
-                    checker_report_error_at_inplace(c, (*e).span, 45, 0, 0, 0)
-                }
-                result = ty_never()
-            } else if (*e).kind == ExprKind::ExprRange {
-                let left_ty = checker_check_opt_expr_inplace(c, (*e).left)
-                let right_ty = checker_check_opt_expr_inplace(c, (*e).right)
-                if !is_error_or_unknown(left_ty) && !is_integer_type(left_ty) {
-                    checker_report_mismatch_inplace(c, (*e).span, 55, ty_i64(), left_ty)
-                }
-                if !is_error_or_unknown(right_ty) && !is_integer_type(right_ty) {
-                    checker_report_mismatch_inplace(c, (*e).span, 55, ty_i64(), right_ty)
-                }
-                result = ty_unit()
-            } else if (*e).kind == ExprKind::ExprArrayLit {
-                match (*e).left {
-                    Some(_) => {
-                        match (*e).right {
-                            Some(count_e) => {
-                                let elem_ty = checker_check_opt_expr_inplace(c, (*e).left)
-                                let count_ty = checker_check_opt_expr_inplace(c, (*e).right)
-                                if !is_error_or_unknown(count_ty) && !is_integer_type(count_ty) {
-                                    checker_report_mismatch_inplace(c, (*count_e).span, 20, ty_i64(), count_ty)
-                                    result = ty_array(elem_ty, 0)
-                                } else if (*count_e).kind != ExprKind::ExprIntLit {
-                                    checker_report_error_at_inplace(c, (*count_e).span, 20, 0, 0, 0)
-                                    result = ty_array(elem_ty, 0)
-                                } else {
-                                    result = ty_array(elem_ty, (*count_e).int_val)
-                                }
-                            }
-                            None => {
-                                let counted = checker_check_expr_list_reboxed(c, (*e).args)
-                                result = ty_array(counted.0, counted.1)
-                            }
-                        }
-                    }
-                    None => {
-                        let counted = checker_check_expr_list_reboxed(c, (*e).args)
-                        result = ty_array(counted.0, counted.1)
-                    }
-                }
-            } else if (*e).kind == ExprKind::ExprTupleLit {
-                result = checker_tuple_type_reboxed(c, (*e).args)
-            } else if (*e).kind == ExprKind::ExprStructLit {
-                checker_check_struct_fields_reboxed(c, (*e).fields)
-                result = ty_named(checker_copy_string_list_to_name((*e).path.segments))
-            } else if (*e).kind == ExprKind::ExprCast {
-                let src_ty = checker_check_opt_expr_inplace(c, (*e).left)
-                result = src_ty
-            } else if (*e).kind == ExprKind::ExprMatch {
-                let scrut_ty = checker_check_opt_expr_inplace(c, (*e).left)
-                result = checker_check_match_arms_reboxed(c, (*e).arms, scrut_ty)
-            } else if (*e).kind == ExprKind::ExprClosure {
-                result = checker_check_opt_expr_inplace(c, (*e).closure_body)
-            } else if (*e).kind == ExprKind::ExprForIn {
-                let _iter = checker_check_opt_expr_inplace(c, (*e).left)
-                type_env_push_scope_mut(&!(*c).env)
-                type_env_bind_mut(&!(*c).env, (*e).name, ty_i64(), false)
-                (*c).loop_depth = (*c).loop_depth + 1
-                let _body = checker_check_opt_block_inplace(c, (*e).block)
-                (*c).loop_depth = (*c).loop_depth - 1
-                type_env_pop_scope_mut(&!(*c).env)
-                result = ty_unit()
-            } else {
-                checker_note_kind_tag_miss(c, (*e).kind as i64)
-                result = ty_error()
-            }
-            if (*c).expr_depth > 0 {
-                (*c).expr_depth = (*c).expr_depth - 1
-            }
-            result
-        }
+        Some(e) => checker_check_expr_inplace(c, *e)
     }
 }
 
@@ -8373,10 +8232,7 @@ fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     // Call the *mut tail (returns only TypeEntry) — NOT the by-value bridge, whose
     // (Checker, TypeEntry) return became a 12MB local held across this fn's recursion
     // → N-deep stack overflow on deeply-nested exprs. The tail is non-recursive.
-    // Pass the address. A second by-value copy of Expr drops left and
-    // right, so m + m is no longer two idents and the Correlated refusal
-    // becomes a plain E004.
-    checker_check_binary_with_operand_types_inplace(c, &e, narrowed_left_f, narrowed_right_f)
+    checker_check_binary_with_operand_types_inplace(c, e, narrowed_left_f, narrowed_right_f)
 }
 
 
@@ -8746,16 +8602,16 @@ fn checker_finish_binary_units_inplace(c: *mut Checker, span: Span, op: BinaryOp
 // This exists ONLY to widen the E245 lowering exemption to match
 // lower_binary_expr_ref's OpAdd arm, which handles both this and the
 // same-slot case below; it emits no diagnostic of its own.
-fn checker_is_knowledge_ident_add(e: &Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> bool with Mut, Panic, Div {
-    if (*e).bin_op != BinaryOp::OpAdd {
+fn checker_is_knowledge_ident_add(e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> bool with Mut, Panic, Div {
+    if e.bin_op != BinaryOp::OpAdd {
         return false
     }
     if !is_knowledge_type(left_ty) || !is_knowledge_type(right_ty) {
         return false
     }
-    match (*e).left {
+    match e.left {
         Some(lbox) => {
-            match (*e).right {
+            match e.right {
                 Some(rbox) => (*lbox).kind == ExprKind::ExprIdent && (*rbox).kind == ExprKind::ExprIdent,
                 None => false,
             }
@@ -8774,9 +8630,9 @@ fn checker_is_knowledge_ident_add(e: &Expr, left_ty: TypeEntry, right_ty: TypeEn
 // lowering refusals for them), with `with Correlated` declared, on OpAdd
 // specifically -- the only Knowledge (x) Knowledge combination lower.sio's
 // lower_binary_expr_ref has a lowering for (see its R6 Correlated comment).
-fn checker_check_correlated_on_binary_inplace(c: *mut Checker, e: &Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
-    let is_arith = (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub
-        || (*e).bin_op == BinaryOp::OpMul || (*e).bin_op == BinaryOp::OpDiv || (*e).bin_op == BinaryOp::OpRem
+fn checker_check_correlated_on_binary_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+        || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
     if !is_arith {
         return false
     }
@@ -8792,9 +8648,9 @@ fn checker_check_correlated_on_binary_inplace(c: *mut Checker, e: &Expr, left_ty
         need = true
         shared_name = make_name("force")
     } else {
-        match (*e).left {
+        match e.left {
             Some(lbox) => {
-                match (*e).right {
+                match e.right {
                     Some(rbox) => {
                         if (*lbox).kind == ExprKind::ExprIdent && (*rbox).kind == ExprKind::ExprIdent {
                             if name_eq((*lbox).name, (*rbox).name) {
@@ -8815,40 +8671,40 @@ fn checker_check_correlated_on_binary_inplace(c: *mut Checker, e: &Expr, left_ty
         let corr_id: i64 = 29
         has_effect = has_effect_id((*c).current_effects, (*c).current_effect_count, corr_id)
         if !has_effect {
-            checker_report_error_at_inplace(c, (*e).span, 236, 0, 0, 0)
+            checker_report_error_at_inplace(c, e.span, 236, 0, 0, 0)
             print("   = shared binding ")
             e035_print_ident(shared_name)
             print("\n   = help: add `with Correlated` — operands share a slot; GUM independence does not hold\n")
         }
     }
-    same_slot_identity && has_effect && (*e).bin_op == BinaryOp::OpAdd
+    same_slot_identity && has_effect && e.bin_op == BinaryOp::OpAdd
 }
 
-fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: &Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let correlated_same_slot_add = checker_check_correlated_on_binary_inplace(c, e, left_ty, right_ty)
     if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
-        let is_cmp = (*e).bin_op == BinaryOp::OpEq || (*e).bin_op == BinaryOp::OpNe
-            || (*e).bin_op == BinaryOp::OpLt || (*e).bin_op == BinaryOp::OpLe
-            || (*e).bin_op == BinaryOp::OpGt || (*e).bin_op == BinaryOp::OpGe
+        let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
+            || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
+            || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
         let observe = has_effect_id((*c).current_effects, (*c).current_effect_count, 13)
         if !is_cmp || !observe {
-            checker_report_error_at_inplace(c, (*e).span, 36, 0, 0, 0)
+            checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
             return ty_error()
         }
         if is_error_or_unknown(left_ty) || is_error_or_unknown(right_ty) {
-            checker_report_mismatch_inplace(c, (*e).span, 4, left_ty, right_ty)
+            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
             return ty_error()
         }
         let l = if left_ty.kind == TypeKind::TyUnobserved { ty_i64() } else { left_ty }
         let r = if right_ty.kind == TypeKind::TyUnobserved { ty_i64() } else { right_ty }
         if !checker_unobserved_cast_allowed(left_ty, l, observe) || !checker_unobserved_cast_allowed(right_ty, r, observe) {
-            checker_report_mismatch_inplace(c, (*e).span, 4, left_ty, right_ty)
+            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
             return ty_error()
         }
-        checker_check_binary_op_types_inplace(c, (*e).span, (*e).bin_op, l, r)
+        checker_check_binary_op_types_inplace(c, e.span, e.bin_op, l, r)
         return ty_bool()
     }
-    checker_check_binary_op_types_inplace(c, (*e).span, (*e).bin_op, left_ty, right_ty)
+    checker_check_binary_op_types_inplace(c, e.span, e.bin_op, left_ty, right_ty)
     // Feature B: Invariant<T,G> comparability gate. Two invariant observables may be
     // added/compared/ratioed only if the (conservative Homeo-default) frame relation
     // lies in the intersection of their groups — i.e. both must be Homeo-group until a
@@ -8856,11 +8712,11 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: &Expr, le
     let inv_l = invariant_group_rank_of_type(left_ty)
     let inv_r = invariant_group_rank_of_type(right_ty)
     if inv_l > 0 && inv_r > 0 {
-        let inv_combine = (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub
-            || (*e).bin_op == BinaryOp::OpMul || (*e).bin_op == BinaryOp::OpDiv || (*e).bin_op == BinaryOp::OpRem
-            || (*e).bin_op == BinaryOp::OpEq || (*e).bin_op == BinaryOp::OpNe
-            || (*e).bin_op == BinaryOp::OpLt || (*e).bin_op == BinaryOp::OpLe
-            || (*e).bin_op == BinaryOp::OpGt || (*e).bin_op == BinaryOp::OpGe
+        let inv_combine = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+            || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
+            || e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
+            || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
+            || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
         // Same frame (Invariant<T,G,F> with matching F) ⇒ the relating transform is the
         // identity (DiffInf ∈ every group) ⇒ comparable at any group. Otherwise fall
         // back to the conservative cross-frame default (only Homeo-group comparable).
@@ -8872,7 +8728,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: &Expr, le
             equiv_record_invariant(inv_l, inv_r, if same_frame { 1 } else { 0 }, comparable)
         }
         if inv_combine && !same_frame && !invariant_comparable_default_ranks(inv_l, inv_r) {
-            checker_report_mismatch_inplace(c, (*e).span, 4, left_ty, right_ty)
+            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
         }
     }
     // Hypercomplex operands (Octonion/Sedenion/Quaternion/Clifford) are validated by the
@@ -8907,20 +8763,20 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: &Expr, le
     // checks below remain authoritative even when epsilon bounds differ.
     let knowledge_ident_add = checker_is_knowledge_ident_add(e, left_ty, right_ty)
     if !both_hyper && !either_cond_indep && !knowledge_ident_add && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !compat_numeric_ignoring_units(left_ty, right_ty) {
-        let is_arith = (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub
-            || (*e).bin_op == BinaryOp::OpMul || (*e).bin_op == BinaryOp::OpDiv || (*e).bin_op == BinaryOp::OpRem
-        let is_cmp = (*e).bin_op == BinaryOp::OpEq || (*e).bin_op == BinaryOp::OpNe
-            || (*e).bin_op == BinaryOp::OpLt || (*e).bin_op == BinaryOp::OpLe
-            || (*e).bin_op == BinaryOp::OpGt || (*e).bin_op == BinaryOp::OpGe
+        let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+            || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
+        let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
+            || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
+            || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
         if is_arith || is_cmp {
-            checker_report_mismatch_inplace(c, (*e).span, 4, left_ty, right_ty)
+            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
         }
     }
     if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
         let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
         let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
         if left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
-            let hc = check_hyper_binary(*c, (*e).span, (*e).bin_op, left_inner, right_inner)
+            let hc = check_hyper_binary(*c, e.span, e.bin_op, left_inner, right_inner)
             checker_store_from_value(c, hc.0)
         }
         // Knowledge (x) Knowledge arithmetic typechecks here but has no lowering:
@@ -8933,9 +8789,9 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: &Expr, le
         // wrongly. The mixed Knowledge/scalar forms are already refused above,
         // and lean_single implements all of this correctly -- see #1706.
         let kk_both = is_knowledge_type(left_ty) && is_knowledge_type(right_ty)
-        let kk_arith = (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub
-            || (*e).bin_op == BinaryOp::OpMul || (*e).bin_op == BinaryOp::OpDiv
-            || (*e).bin_op == BinaryOp::OpRem
+        let kk_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+            || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv
+            || e.bin_op == BinaryOp::OpRem
         // Hypercomplex inners take the check_hyper_binary path above, so spare them
         // rather than refuse on an untested guess. Measured caveat: this guard is
         // narrower than it looks. `Knowledge<Octonion>` built from the
@@ -8945,7 +8801,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: &Expr, le
         // checker itself classifies as TyHyper, and that case remains unmeasured.
         let kk_hyper = left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper
         if kk_both && kk_arith && !kk_hyper && !correlated_same_slot_add && !checker_is_knowledge_ident_add(e, left_ty, right_ty) {
-            checker_report_error_at_inplace(c, (*e).span, 245, 0, 0, 0)
+            checker_report_error_at_inplace(c, e.span, 245, 0, 0, 0)
         }
         // Third axis of anti-garbling (formal/lean4/EpistemicEffectsNSA.lean §J-§K). The
         // product's variance is propagated by the GUM shortcut Var(x*y) = |y|^2 Var x +
@@ -8956,19 +8812,19 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: &Expr, le
         // 4, true first-order variance 8, with disjoint sources and no re-association). So a
         // Knowledge<Hyper<Sedenion|Clifford, _>> product would fabricate precision that NS
         // (E230) cannot see. Refuse it: E251. Addition is unaffected (no norm identity).
-        if kk_both && kk_hyper && (*e).bin_op == BinaryOp::OpMul
+        if kk_both && kk_hyper && e.bin_op == BinaryOp::OpMul
             && (left_inner.algebra_kind >= 4 || right_inner.algebra_kind >= 4) {
-            checker_report_error_at_inplace(c, (*e).span, 251, 0, 0, 0)
+            checker_report_error_at_inplace(c, e.span, 251, 0, 0, 0)
         }
-        var knowledge_result = knowledge_binary_result((*e).bin_op, left_ty, right_ty, (*c).ns_table)
+        var knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, (*c).ns_table)
         if knowledge_result.kind == TypeKind::TyError {
-            checker_report_error_at_inplace(c, (*e).span, 36, 0, 0, 0)
+            checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
         }
         // W4: the union above may have exhausted the interning table. That
         // saturates to unknown, which is sound but turns every later E230 into
         // an unexplained refusal -- so say it out loud, once per overflow event.
         if ns_table_overflow_take(&!(*(*c).ns_table)) {
-            checker_report_error_at_inplace(c, (*e).span, 179, 0, 0, 0)
+            checker_report_error_at_inplace(c, e.span, 179, 0, 0, 0)
         }
         // N3: anti-garbling gate. An independence-assuming op over operands whose
         // noise-symbol sets are not provably disjoint understates variance -- E230.
@@ -8977,39 +8833,39 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: &Expr, le
         // gate polices; correlated_same_slot_add also overrides the epsilon below
         // from the independent-quadrature default to the correlated-linear one, so
         // a static read of the result type agrees with what lowering computes.
-        if checker_ns_should_refuse((*c).ns_table, (*e).bin_op, left_ty, right_ty) && !correlated_same_slot_add {
-            checker_report_error_at_inplace(c, (*e).span, 230, 0, 0, 0)
+        if checker_ns_should_refuse((*c).ns_table, e.bin_op, left_ty, right_ty) && !correlated_same_slot_add {
+            checker_report_error_at_inplace(c, e.span, 230, 0, 0, 0)
         }
         if correlated_same_slot_add {
             knowledge_result.knowledge_epsilon = knowledge_same_slot_add_variance(left_ty)
         }
-        let final_result = checker_finish_binary_inplace(c, (*e).span, (*e).bin_op, left_ty, right_ty, knowledge_result)
-        if (*e).bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
+        let final_result = checker_finish_binary_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_result)
+        if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
             let final_inner = if final_result.kind == TypeKind::TyKnowledge {
                 knowledge_inner(final_result)
             } else {
                 final_result
             }
             if final_inner.kind == TypeKind::TyHyper {
-                let rh = (*c).record_hyper_expr((*e).span, final_inner.algebra_kind, 1, true)
+                let rh = (*c).record_hyper_expr(e.span, final_inner.algebra_kind, 1, true)
                 checker_store_from_value(c, rh)
             }
         }
         return final_result
     }
     if left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper {
-        let hr = check_hyper_binary(*c, (*e).span, (*e).bin_op, left_ty, right_ty)
+        let hr = check_hyper_binary(*c, e.span, e.bin_op, left_ty, right_ty)
         checker_store_from_value(c, hr.0)
         let typed_result = hr.1
-        let final_result = checker_finish_binary_inplace(c, (*e).span, (*e).bin_op, left_ty, right_ty, typed_result)
-        if (*e).bin_op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
-            let rh = (*c).record_hyper_expr((*e).span, final_result.algebra_kind, 1, false)
+        let final_result = checker_finish_binary_inplace(c, e.span, e.bin_op, left_ty, right_ty, typed_result)
+        if e.bin_op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
+            let rh = (*c).record_hyper_expr(e.span, final_result.algebra_kind, 1, false)
             checker_store_from_value(c, rh)
         }
         return final_result
     }
-    var result = binary_result_type((*e).bin_op, left_ty, right_ty)
-    if result.kind == TypeKind::TyError && ((*e).bin_op == BinaryOp::OpEq || (*e).bin_op == BinaryOp::OpNe) {
+    var result = binary_result_type(e.bin_op, left_ty, right_ty)
+    if result.kind == TypeKind::TyError && (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe) {
         let l_enum = left_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, left_ty.name) >= 0
         let r_enum = right_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, right_ty.name) >= 0
         if (l_enum && is_numeric_type(right_ty)) || (is_numeric_type(left_ty) && r_enum) {
@@ -9019,28 +8875,28 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: &Expr, le
     // Type-directed == lift (warn-only): boolean equality on the stdlib uncertain
     // scalar (a struct literally named "Epistemic") ignores uncertainty. Result
     // stays bool — no semantic change. "Epistemic" = E p i s t e m i c (9 chars).
-    if result.kind == TypeKind::TyBool && ((*e).bin_op == BinaryOp::OpEq || (*e).bin_op == BinaryOp::OpNe) {
+    if result.kind == TypeKind::TyBool && (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe) {
         let l_ep = left_ty.kind == TypeKind::TyNamed && name_matches_str9(left_ty.name, 69, 112, 105, 115, 116, 101, 109, 105, 99)
         let r_ep = right_ty.kind == TypeKind::TyNamed && name_matches_str9(right_ty.name, 69, 112, 105, 115, 116, 101, 109, 105, 99)
         if l_ep || r_ep {
-            checker_report_warning_at_mut(c, (*e).span, 43, 0, 0, 0)
+            checker_report_warning_at_mut(c, e.span, 43, 0, 0, 0)
         }
     }
     if result.kind == TypeKind::TyError && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) {
-        checker_report_mismatch_inplace(c, (*e).span, 4, left_ty, right_ty)
+        checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
     }
-    if (*e).bin_op == BinaryOp::OpDiv {
-        let denom_pair = checker_eval_const_int_opt_expr_mut(c, (*e).right)
+    if e.bin_op == BinaryOp::OpDiv {
+        let denom_pair = checker_eval_const_int_opt_expr_mut(c, e.right)
         if denom_pair.0 != 0 && denom_pair.1 == 0 {
-            checker_report_error_at_inplace(c, (*e).span, 56, 0, 0, 0)
+            checker_report_error_at_inplace(c, e.span, 56, 0, 0, 0)
         }
-    } else if (*e).bin_op == BinaryOp::OpRem {
-        let denom_pair = checker_eval_const_int_opt_expr_mut(c, (*e).right)
+    } else if e.bin_op == BinaryOp::OpRem {
+        let denom_pair = checker_eval_const_int_opt_expr_mut(c, e.right)
         if denom_pair.0 != 0 && denom_pair.1 == 0 {
-            checker_report_error_at_inplace(c, (*e).span, 57, 0, 0, 0)
+            checker_report_error_at_inplace(c, e.span, 57, 0, 0, 0)
         }
     }
-    checker_finish_binary_inplace(c, (*e).span, (*e).bin_op, left_ty, right_ty, result)
+    checker_finish_binary_inplace(c, e.span, e.bin_op, left_ty, right_ty, result)
 }
 
 fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -27723,7 +27579,7 @@ impl Checker {
                 || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv
                 || e.bin_op == BinaryOp::OpRem
             let kk_hyper = left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper
-            if kk_both && kk_arith && !kk_hyper && !correlated_same_slot_add && !checker_is_knowledge_ident_add(&e, left_ty, right_ty) {
+            if kk_both && kk_arith && !kk_hyper && !correlated_same_slot_add && !checker_is_knowledge_ident_add(e, left_ty, right_ty) {
                 c = c.report_error_at(e.span, 245, 0, 0, 0)
             }
             var knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, c.ns_table)
