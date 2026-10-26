@@ -28807,11 +28807,21 @@ impl Lowerer {
         //
         // Gated on fo_nchan > 0 so a program that never calls measure() pays
         // nothing; a `let` is never reassigned and needs no slot.
-        if is_mut && lo.fo_nchan > 0 && !bind_as_ref && fixed_array_len < 0 {
+        //
+        // Also gated on the local not being an integer/bool (scalar_kind 1), which
+        // carries no measurement variance. The kind is recorded by the metadata
+        // pass, so that runs first. Without this, one channel anywhere in a
+        // function (an `if` assigning an integer counter is enough) gave every
+        // integer `var` sens slots, and since #2827 also a residual slot that each
+        // loop head and each assignment rewrites: obo_elplus_driver.sio, which has
+        // no f64 at all, compiled to 385 KB instead of 189 KB and ran 2.2x slower.
+        lo = lo.lower_let_stmt_type_metadata_ref(s, reg, rhs_array_elem_is_float)
+        if is_mut && lo.fo_nchan > 0 && !bind_as_ref && fixed_array_len < 0
+            && lo.lookup_local_scalar_kind(s.name) != 1 {
             lo = lo.alloc_variance_slot_for_local(s.name)
             lo = lo.fo_alloc_sens_slots_for_local(s.name)
         }
-        lo.lower_let_stmt_type_metadata_ref(s, reg, rhs_array_elem_is_float)
+        lo
     }
 
     // `[r0, r1, r2]` whose elements are f64 LOCALS (or calls, fields, indexes the
