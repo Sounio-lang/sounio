@@ -915,3 +915,21 @@ Gate. Job 17669, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `
 - After one warm step, seven forwards span 31181338 ns, which is 0.00445 s/token. The seven gaps sit between 3.0 ms and 5.2 ms. The threshold is 0.0018 s. The measured step is under the 0.00464 s of job 17633 and above 0.0018 s. Effective traffic is 121 GB/s. The per-thread fence and the five block-local barriers were not the 4.6 ms. The threshold is not moved. This cut does not pass it.
 
 Job 17669 completed in 47 s and released the allocation. Job 17670, a different job, then took the node.
+
+
+## 34. Eight B rows in flight (2026-10-26, OBSERVED)
+
+Job 17669 removed the per-thread fence and four grid barriers and moved from 0.00464 s to 0.00445 s/token. The logits did not change. The barrier was not the 4.5 ms. In `gemv_split` the four `ld.global.cs.v4.f32` were consumed by sixteen `fma`s before the next group's addresses existed. On the head each thread owns 48 columns and a K slice of 10 rows, so that load-use chain repeats. The ceiling for 540 MB at 300 GB/s stays 1.8 ms. That is the threshold of this cut.
+
+`gemv_split` now copies each B row with `cp.async.cg.shared.global` of 16 bytes into a CTA buffer of `8 * 256 * 16` bytes. Eight groups are committed before the first `fma`. `cp.async.wait_group 4` releases the first four rows, `wait_group 0` releases the next four, and each ready row is read with `ld.shared.v4.f32`. A stays a cached `ld.global.ca.f32`, four values at a time. The copy is not issued for `k >= k1`. A slice shorter than eight rows, and the tail of a longer slice, still uses the one-row load. The rest of the launch is the kernel of job 17669: one token, grid 58 by 256, warp attention, three partial regions, the thread-0 fence. There is no `.maxnreg`. If the module does not load, the measured step fails. The 0.00445 s kernel is not a fallback.
+
+Gate. Job 17691, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. Partition `bench` still has no nodes, so the job was pinned on `gpu-orangefs`. Job 17688 held the node; this job waited and did not cancel it. SmolLM2-135M, ids 0, 504, 3575, 282, 4649, 314. The clock is `date +%s%N` on the job script.
+
+- The timed lines print `RESIDENT=1 grid=58`.
+- Prefill argmax, CPU and device: 7042.
+- Greedy continuation, eight tokens, both paths: 7042, 30, 657, 314, 260, 3995, 2240, 281.
+- Maximum absolute logit difference on that prefill: 1.69e-5 (the program printed 16936 at a scale of 1e9). That span has no threshold. It is the same difference jobs 17633 and 17669 printed.
+- The device prefill of the six prompt tokens took 23218168 ns. That span has no threshold.
+- After one warm step, seven forwards span 33124293 ns, which is 0.00473 s/token. The seven gaps sit between 3.3 ms and 5.2 ms. The threshold is 0.0018 s. The measured step is above the 0.00445 s of job 17669 and above 0.0018 s. Effective traffic is 114 GB/s. The trip through shared memory did not fill the HBM. The threshold is not moved. This cut does not pass it.
+
+Job 17691 completed and released the allocation. A later job then held the node.
