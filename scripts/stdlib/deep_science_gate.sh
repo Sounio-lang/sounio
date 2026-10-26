@@ -446,8 +446,13 @@ if [[ "$arrow_rc" == 0 ]]; then
     if ! grep -qx 'Required pyarrow: 26.0.0' "$log" \
         || ! grep -qx 'SPEC_PYARROW_OK' "$log" \
         || ! grep -qx 'EXT_PYARROW_OK' "$log" \
+        || ! grep -qx 'ARROW_IPC_OK' "$log" \
+        || ! grep -qx 'CODEC_OK' "$log" \
+        || ! grep -qx 'ARROW_SPEC_OK' "$log" \
+        || ! grep -qx 'ARROW_EXT_OK' "$log" \
+        || ! grep -qx 'FLIGHT_IPC_OK' "$log" \
         || [[ "$ok_n" != 2 ]]; then
-        echo "FAIL arrow gate missing pyarrow oracle markers" >> "$log"
+        echo "FAIL arrow gate missing oracle markers" >> "$log"
         arrow_rc=1
     fi
     if grep -qx 'PYARROW_SKIP' "$log" \

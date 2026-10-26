@@ -75,20 +75,22 @@ def _varint(buf: bytes, i: int) -> tuple[int, int]:
 def _varint_value(buf: bytes, i: int) -> tuple[int, int]:
     shift = 0
     val = 0
-    for n in range(10):
+    for _ in range(9):
         if i >= len(buf):
             raise SystemExit("FAIL bad varint")
         b = buf[i]
         i += 1
-        if n == 9 and b > 1:
-            raise SystemExit("FAIL bad varint")
         val |= (b & 0x7F) << shift
         if b < 128:
             return val, i
-        if n == 9:
-            raise SystemExit("FAIL bad varint")
         shift += 7
-    raise SystemExit("FAIL bad varint")
+    if i >= len(buf):
+        raise SystemExit("FAIL bad varint")
+    last = buf[i]
+    i += 1
+    if last > 1:
+        raise SystemExit("FAIL bad varint")
+    return val | (last << shift), i
 
 
 def flight_parts(frame: bytes) -> dict:
