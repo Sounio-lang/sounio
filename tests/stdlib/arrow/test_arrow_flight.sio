@@ -588,6 +588,20 @@ fn header_type_at(buf: &ArrowBuf, meta: i64) -> i64 with Panic {
     table + foff
 }
 
+fn set_u16(buf: &!ArrowBuf, at: i64, v: i64) with Mut, Panic {
+    buf.data[at as usize] = ((v & 255) as i32) as u8
+    buf.data[(at + 1) as usize] = (((v >> 8) & 255) as i32) as u8
+}
+
+fn set_u64_one(buf: &!ArrowBuf, at: i64) with Mut, Panic {
+    buf.data[at as usize] = 1 as u8
+    var i: i64 = 1
+    while i < 8 {
+        buf.data[(at + i) as usize] = 0 as u8
+        i = i + 1
+    }
+}
+
 fn test_wire() -> i64 with Mut, Panic, Div {
     var none = flight_desc_new()
     var got = flight_desc_new()
@@ -691,6 +705,55 @@ fn test_wire() -> i64 with Mut, Panic, Div {
     var tagged_meta = flight_meta_new()
     if do_exchange_write(&none, &tagged_ipc, &tagged_meta, 0, &!written) != 0 { return 311 }
     if do_exchange_read(&written, &!got, &!back, &!meta) != 0 { return 312 }
+    meta.n = 0
+    var aligned = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!aligned) != 0 { return 313 }
+    if arrow_ipc_stream_push(&schema, &batch, &!aligned) != 0 { return 314 }
+    if arrow_ipc_stream_end(&!aligned) != 0 { return 315 }
+    let aligned_schema = arrow_ipc_view(&aligned, 0)
+    if aligned_schema.status != 0 { return 316 }
+    let aligned_batch_at = 8 + aligned_schema.meta_size
+    let aligned_batch = arrow_ipc_view(&aligned, aligned_batch_at)
+    if aligned_batch.status != 0 || aligned_batch.header_type != 3 { return 317 }
+    let batch_root = u32le(&aligned, aligned_batch_at + 8)
+    let batch_table = aligned_batch_at + 8 + batch_root
+    let batch_vt = batch_table - i32le(&aligned, batch_table)
+    let batch_body = u16le(&aligned, batch_vt + 10)
+    if batch_body <= 0 { return 318 }
+    set_u64_one(&!aligned, batch_table + batch_body)
+    if do_exchange_write(&none, &aligned, &meta, 0, &!written) != -3 { return 319 }
+    var grown = arrow_buf_new()
+    if copy_span(&!grown, &aligned, 8, aligned_schema.meta_size) != 0 { return 320 }
+    let grown_root = u32le(&grown, 0)
+    let grown_vt = grown_root - i32le(&grown, grown_root)
+    set_u16(&!grown, grown_vt + 2, 65535)
+    if header_frame(&grown, &!bad_frame) != 0 { return 321 }
+    if do_exchange_read(&bad_frame, &!got, &!back, &!meta) != -6 { return 322 }
+    if ipc_header(&grown, &!stream) != 0 { return 323 }
+    if do_exchange_write(&none, &stream, &meta, 0, &!written) != -6 { return 324 }
+    grown.len = 0
+    if copy_span(&!grown, &aligned, 8, aligned_schema.meta_size) != 0 { return 325 }
+    let schema_root = u32le(&grown, 0)
+    let schema_vt = schema_root - i32le(&grown, schema_root)
+    let schema_hoff = u16le(&grown, schema_vt + 8)
+    let schema_rel = u32le(&grown, schema_root + schema_hoff)
+    let schema_target = schema_root + schema_hoff + schema_rel
+    let schema_pvt = schema_target - i32le(&grown, schema_target)
+    if u16le(&grown, schema_pvt) < 8 { return 326 }
+    let schema_field = u16le(&grown, schema_pvt + 6)
+    if schema_field + 4 <= 4 { return 327 }
+    set_u16(&!grown, schema_pvt + 2, 4)
+    if header_frame(&grown, &!bad_frame) != 0 { return 328 }
+    if do_exchange_read(&bad_frame, &!got, &!back, &!meta) != -6 { return 329 }
+    if ipc_header(&grown, &!stream) != 0 { return 330 }
+    if do_exchange_write(&none, &stream, &meta, 0, &!written) != -6 { return 331 }
+    bad.len = 0
+    if push_hex(&!bad, "140000000e001800040006000800000014000000100000000400010004000000fcffffff04000400040000000100000000100000") != 0 { return 332 }
+    if bad.len != 52 { return 333 }
+    if header_frame(&bad, &!bad_frame) != 0 { return 334 }
+    if do_exchange_read(&bad_frame, &!got, &!back, &!meta) != -6 { return 335 }
+    if ipc_header(&bad, &!stream) != 0 { return 336 }
+    if do_exchange_write(&none, &stream, &meta, 0, &!written) != -6 { return 337 }
     0
 }
 

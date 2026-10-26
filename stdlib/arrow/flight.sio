@@ -347,6 +347,7 @@ fn flight_write(desc: &FlightDesc, ipc: &ArrowBuf, meta: &FlightMeta, out: &!Arr
         if view.header_type == 1 && first == 0 { return -6 }
         if view.header_type != 1 && view.header_type != 2 && view.header_type != 3 { return -4 }
         if view.header_type == 1 && view.body_len != 0 { return -3 }
+        if view.body_len % 8 != 0 { return -3 }
         let fit_rc = message_in_header(ipc, pos + 8, view.meta_size)
         if fit_rc != 0 { return fit_rc }
         if fi >= 9 { return -7 }
@@ -668,8 +669,89 @@ fn declared_body(buf: &ArrowBuf, at: i64, n: i64) -> i64 with Panic {
     body
 }
 
+fn header_limit(buf: &ArrowBuf, at: i64, n: i64) -> i64 with Panic {
+    var lim = n
+    var trimmed: i64 = 0
+    while trimmed < 7 && lim > 0 {
+        let b = hdr_u8(buf, at, lim - 1, n)
+        if b != 0 { return lim }
+        lim = lim - 1
+        trimmed = trimmed + 1
+    }
+    lim
+}
+
+fn slot_width_ok(buf: &ArrowBuf, at: i64, vt: i64, vts: i64, obj: i64, slot: i64, width: i64, n: i64) -> i64 with Panic {
+    let pos = vt + 4 + slot * 2
+    if pos + 2 > vt + vts { return 0 }
+    let off = hdr_u16(buf, at, pos, n)
+    if off < 0 { return -6 }
+    if off == 0 { return 0 }
+    if off + width > obj { return -6 }
+    0
+}
+
+fn payload_fields_ok(buf: &ArrowBuf, at: i64, vt: i64, vts: i64, obj: i64, kind: i64, n: i64) -> i64 with Panic {
+    if kind == 1 {
+        if slot_width_ok(buf, at, vt, vts, obj, 0, 2, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 1, 4, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 2, 4, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 3, 4, n) != 0 { return -6 }
+        return 0
+    }
+    if kind == 2 {
+        if slot_width_ok(buf, at, vt, vts, obj, 0, 8, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 1, 4, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 2, 1, n) != 0 { return -6 }
+        return 0
+    }
+    if kind == 3 {
+        if slot_width_ok(buf, at, vt, vts, obj, 0, 8, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 1, 4, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 2, 4, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 3, 4, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 4, 4, n) != 0 { return -6 }
+        return 0
+    }
+    0
+}
+
+fn kv_string_ok(buf: &ArrowBuf, at: i64, kv: i64, vt: i64, vts: i64, obj: i64, slot: i64, n: i64) -> i64 with Panic {
+    let pos = vt + 4 + slot * 2
+    if pos + 2 > vt + vts { return 0 }
+    let off = hdr_u16(buf, at, pos, n)
+    if off < 0 { return -6 }
+    if off == 0 { return 0 }
+    if off + 4 > obj { return -6 }
+    if kv + off + 4 > n { return -6 }
+    let rel = hdr_u32(buf, at, kv + off, n)
+    if rel <= 0 { return -6 }
+    let s = kv + off + rel
+    if s < 0 || s + 4 > n { return -6 }
+    let slen = hdr_u32(buf, at, s, n)
+    if slen < 0 || slen > n { return -6 }
+    if s + 4 + slen + 1 > n { return -6 }
+    0
+}
+
+fn kv_table_ok(buf: &ArrowBuf, at: i64, kv: i64, n: i64, lim: i64) -> i64 with Panic {
+    if kv < 0 || kv + 4 > n { return -6 }
+    let soff = hdr_i32(buf, at, kv, n)
+    if soff == 0 || soff == -1 { return -6 }
+    let vt = kv - soff
+    if vt < 0 || vt + 4 > n { return -6 }
+    let vts = hdr_u16(buf, at, vt, n)
+    if vts < 4 || vt + vts > n { return -6 }
+    let obj = hdr_u16(buf, at, vt + 2, n)
+    if obj < 4 || kv + obj > lim { return -6 }
+    if kv_string_ok(buf, at, kv, vt, vts, obj, 0, n) != 0 { return -6 }
+    if kv_string_ok(buf, at, kv, vt, vts, obj, 1, n) != 0 { return -6 }
+    0
+}
+
 fn message_in_header(buf: &ArrowBuf, at: i64, n: i64) -> i64 with Panic {
     if n < 8 || at < 0 { return -6 }
+    let lim = header_limit(buf, at, n)
     let root = hdr_u32(buf, at, 0, n)
     if root < 4 || root + 4 > n { return -6 }
     let soff = hdr_i32(buf, at, root, n)
@@ -678,18 +760,22 @@ fn message_in_header(buf: &ArrowBuf, at: i64, n: i64) -> i64 with Panic {
     if vt < 0 || vt + 4 > n { return -6 }
     let vts = hdr_u16(buf, at, vt, n)
     if vts < 4 || vt + vts > n { return -6 }
+    let obj = hdr_u16(buf, at, vt + 2, n)
+    if obj < 4 || root + obj > lim { return -6 }
     if vts < 6 { return -6 }
     let voff = hdr_u16(buf, at, vt + 4, n)
-    if voff <= 0 || root + voff + 2 > n { return -6 }
+    if voff <= 0 || voff + 2 > obj || root + voff + 2 > n { return -6 }
     let version = hdr_u16(buf, at, root + voff, n)
     if version < 0 { return -6 }
     if version != 3 && version != 4 { return -4 }
     if vts < 8 { return -6 }
     let toff = hdr_u16(buf, at, vt + 6, n)
-    if toff <= 0 || root + toff + 1 > n { return -6 }
+    if toff <= 0 || toff + 1 > obj || root + toff + 1 > n { return -6 }
+    let htype = hdr_u8(buf, at, root + toff, n)
+    if htype < 0 { return -6 }
     if vts < 10 { return -6 }
     let hoff = hdr_u16(buf, at, vt + 8, n)
-    if hoff <= 0 || root + hoff + 4 > n { return -6 }
+    if hoff <= 0 || hoff + 4 > obj || root + hoff + 4 > n { return -6 }
     let rel = hdr_u32(buf, at, root + hoff, n)
     if rel <= 0 { return -6 }
     let target = root + hoff + rel
@@ -700,16 +786,19 @@ fn message_in_header(buf: &ArrowBuf, at: i64, n: i64) -> i64 with Panic {
     if pvt < 0 || pvt + 4 > n { return -6 }
     let pvts = hdr_u16(buf, at, pvt, n)
     if pvts < 4 || pvt + pvts > n { return -6 }
+    let pobj = hdr_u16(buf, at, pvt + 2, n)
+    if pobj < 4 || target + pobj > lim { return -6 }
+    if payload_fields_ok(buf, at, pvt, pvts, pobj, htype, n) != 0 { return -6 }
     if vts >= 12 {
         let boff = hdr_u16(buf, at, vt + 10, n)
         if boff < 0 { return -6 }
-        if boff > 0 && root + boff + 8 > n { return -6 }
+        if boff > 0 && (boff + 8 > obj || root + boff + 8 > n) { return -6 }
     }
     if vts >= 14 {
         let moff = hdr_u16(buf, at, vt + 12, n)
         if moff < 0 { return -6 }
         if moff > 0 {
-            if root + moff + 4 > n { return -6 }
+            if moff + 4 > obj || root + moff + 4 > n { return -6 }
             let mrel = hdr_u32(buf, at, root + moff, n)
             if mrel <= 0 { return -6 }
             let vec = root + moff + mrel
@@ -717,6 +806,14 @@ fn message_in_header(buf: &ArrowBuf, at: i64, n: i64) -> i64 with Panic {
             let count = hdr_u32(buf, at, vec, n)
             if count < 0 || count > n { return -6 }
             if vec + 4 + count * 4 > n { return -6 }
+            var ei: i64 = 0
+            while ei < count {
+                let epos = vec + 4 + 4 * ei
+                let erel = hdr_u32(buf, at, epos, n)
+                if erel <= 0 { return -6 }
+                if kv_table_ok(buf, at, epos + erel, n, lim) != 0 { return -6 }
+                ei = ei + 1
+            }
         }
     }
     0
