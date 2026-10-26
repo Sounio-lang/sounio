@@ -336,14 +336,15 @@ pub fn parser_span_int_literal_overflow(start: i64, end: i64) -> bool with Mut, 
         else if b1 == (111 as i8) || b1 == (79 as i8) { base = 8; digits_from = start + 2 }
     }
     // Count significant digits (separators and leading zeros carry no width),
-    // remembering the last digit of the boundary prefixes the comparisons below
-    // need. No hand-copied ASCII table of 2^63 or 2^64 anywhere: a [i8; 20] of
-    // the latter silently drifted from the constant it claimed to encode and
-    // refused 18446744073709551615, u64 MAX.
+    // and remember where they start: the boundary tests below read at most 18
+    // digits at a time so no accumulation can wrap. No hand-copied ASCII table
+    // of 2^63 or 2^64 anywhere — a [i8; 20] of the latter silently drifted from
+    // the constant it claimed to encode and refused u64 MAX, and a 19-digit
+    // accumulator overflows i64 and came back negative, which made an earlier
+    // version accept 99999999999999999999.
     var seen = false
     var count: i64 = 0
-    var prefix: i64 = 0           // first 19 significant digits, as a value
-    var at20: i64 = 0             // the 20th significant digit, if reached
+    var first_sig = digits_from   // position of the first significant digit
     var i = digits_from
     while i < end {
         let c = cursor_source_byte(i)
@@ -366,10 +367,9 @@ pub fn parser_span_int_literal_overflow(start: i64, end: i64) -> bool with Mut, 
                 continue
             }
             seen = true
+            first_sig = i
         }
         count = count + 1
-        if count <= 19 { prefix = prefix * 10 + d }
-        if count == 20 { at20 = d }
         i = i + 1
     }
     if !seen { return false }
@@ -380,26 +380,43 @@ pub fn parser_span_int_literal_overflow(start: i64, end: i64) -> bool with Mut, 
     if base == 8 { return count > 22 }
     if count > 20 { return true }
     if count < 19 { return false }
-    if count == 19 {
-        // 19 digits straddle i64 MAX, and the two readings of ADR-015 row 1
-        // disagree on what to do there: the corpus writes i64 MIN as
-        // -9223372036854775808 in 27 sites and writes values like
-        // 18446744073709551615 as annotated u64 in 6. So only 2^63 itself is
-        // refused, and only where no prefix minus absorbs the sign bit; the rest
-        // of the band waits for the checker's ruling. `prefix` already holds the
-        // first 19 significant digits accumulated in i64, so 2^63 is recognisable
-        // as the wrapped value landing exactly on i64 MIN — the same idiom
-        // main.sio and enir/canonical.sio use for that constant.
-        if prefix != 0 - 9223372036854775807 - 1 { return false }
+    // (19 and 20 significant digits are the only bands where the width alone
+    // cannot decide: i64 MAX is 19 digits and u64 MAX is 20.)
+    // Decimal, 19 or 20 significant digits. Accumulating 19 digits in i64 is NOT
+    // safe — 9999999999999999999 exceeds i64 MAX and wraps negative, which made
+    // an earlier version of this test accept 99999999999999999999. So: branch on
+    // the first digit, then accumulate at most 18 digits (always < 10^18, exact)
+    // and compare the last digit separately.
+    let d0 = cursor_source_byte(first_sig)
+    var i2 = first_sig + 1
+    var acc: i64 = 0
+    var got: i64 = 0
+    while i2 < end && got < 18 {
+        let cc = cursor_source_byte(i2)
+        if cc == (95 as i8) { i2 = i2 + 1; continue }
+        if cc < (48 as i8) || cc > (57 as i8) { break }
+        acc = acc * 10 + ((cc - (48 as i8)) as i64)
+        got = got + 1
+        i2 = i2 + 1
+    }
+    while i2 < end && cursor_source_byte(i2) == (95 as i8) { i2 = i2 + 1 }
+    let last = cursor_source_byte(i2)
+    if count == 20 {
+        // 2^64 = 18446744073709551616: a leading 2 or more is already past it.
+        if d0 > (49 as i8) { return true }
+        if acc != 844674407370955161 { return acc > 844674407370955161 }
+        return last >= (54 as i8)
+    }
+    // 19 digits. 2^63 = 9223372036854775808, i64 MAX = ...807.
+    if d0 < (57 as i8) { return false }
+    if acc != 223372036854775808 { return false }   // below 2^63, or in the band
+    if last == (56 as i8) {
+        // Exactly 2^63: the one spelling i64 cannot hold that the corpus needs,
+        // because `-9223372036854775808` (i64 MIN) is a prefix minus over a value
+        // that does fit. Refuse only when no prefix minus absorbs the sign.
         return !parser_prefix_minus_before(start)
     }
-    // 20 significant digits straddle u64 MAX (18446744073709551615) and 2^64
-    // (18446744073709551616), so the width alone cannot decide: compare the
-    // first 19 digits against 2^64 / 10, a value that fits i64, then the 20th
-    // against 6. No ASCII table of the bound is involved.
-    let CEIL_19: i64 = 1844674407370955161
-    if prefix != CEIL_19 { return prefix > CEIL_19 }
-    at20 >= 6
+    false
 }
 
 // Token-index form, kept for the parser call sites.
