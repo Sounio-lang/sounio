@@ -915,3 +915,27 @@ Gate. Job 17669, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `
 - After one warm step, seven forwards span 31181338 ns, which is 0.00445 s/token. The seven gaps sit between 3.0 ms and 5.2 ms. The threshold is 0.0018 s. The measured step is under the 0.00464 s of job 17633 and above 0.0018 s. Effective traffic is 121 GB/s. The per-thread fence and the five block-local barriers were not the 4.6 ms. The threshold is not moved. This cut does not pass it.
 
 Job 17669 completed in 47 s and released the allocation. Job 17670, a different job, then took the node.
+
+
+## 34. An sm_89 image written in Sounio (2026-10-26, OBSERVED)
+
+Job 17669 is the fastest resident forward that matches the tokens, at 0.00445 s/token. That kernel is still PTX text. The driver compiles it. This cut does not replace that kernel and does not move the 0.0018 s ceiling.
+
+The generator is a Sounio program. It writes an ELF image for sm_89 from bytes measured once. ptxas 12.8.61 and nvdisasm 12.8.55 produced three cubins of the same stamp kernel, differing by the immediate 0x89abcdef, 0x00000001 and 0x11223344. Each file is 2600 bytes. The only bytes that changed were file offsets 1428 through 1431, and those bytes were the immediate, little-endian. ELF e_machine is 190. e_flags is 5834073. `.text.stamp` is 256 bytes at offset 1408. The second instruction is `IMAD.MOV.U32 R5, RZ, RZ, imm`, and the immediate is byte 4 of that instruction.
+
+`sm89_stamp_image` copies the measured container and writes the immediate at offset 1428. The value in the probe is 0x01020304 (16909060). It was not one of the three specimens. The RDNA encoder and the AGX encoder return an empty image. No field has been measured on those machines. `ce_module_image` checks the ELF magic and passes the pointer to `cuModuleLoadData`. The probe does not call ptxas.
+
+Gate. Job 17714, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. Partition `bench` still has no nodes, so the job was pinned on `gpu-orangefs`. The node was idle at submit. Binary md5 `25c74fc128324e5aff396c77b8045544`.
+
+- `SM89 nbytes=2600 ok=1`. `RDNA` and `AGX` report `ok=0`.
+- `BYTES=16909060`.
+- `LOAD=1`, `FUNC=1`, `LAUNCH=0`.
+- `STAMP=16909060`.
+- The program printed `SILICON PASS` and the script printed `EXIT:0`.
+
+Job 17713 printed the same stamp and then did not return. The script killed it at the timeout (`EXIT:124`). Job 17714 is the same image with `exit(0)` after the pass. The node is idle after 17714.
+
+This cut does not run SmolLM2. The load, the fma, the store, the barrier and the shuffle do not yet have an isolated field. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+A Metal specimen on the M5 Max compiled to AIR (`air64_v29`). That is not the GPU encoding. The AGX table stays empty.
+

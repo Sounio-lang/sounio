@@ -1,0 +1,79 @@
+// The stamp image is built here. ptxas is not invoked.
+// Immediate 0x01020304 was not one of the three specimens.
+// BYTES checks the patched field. LOAD/STAMP run when libcuda is present.
+
+use hetero::cuda_exec::{
+    ce_alloc, ce_arg, ce_d2h, ce_function, ce_launch_raw, ce_module_image, ce_open, ce_sync,
+}
+use hetero::silicon::image::{si_stamp}
+use hetero::silicon::sched::{arch_agx, arch_rdna, arch_sm89}
+
+fn img_byte(data: *mut u8, off: i64) -> i64 with Div {
+    (read_i64(data as *mut i64, off / 8) >> ((off % 8) * 8)) & 255
+}
+
+fn img_u32(data: *mut u8, off: i64) -> i64 with Div {
+    img_byte(data, off) + img_byte(data, off + 1) * 256 + img_byte(data, off + 2) * 65536 + img_byte(data, off + 3) * 16777216
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    let imm: i64 = 16909060
+    let img = si_stamp(arch_sm89(), imm)
+    let rdna = si_stamp(arch_rdna(), imm)
+    let agx = si_stamp(arch_agx(), imm)
+    print("SM89 nbytes=")
+    print_int(img.nbytes)
+    print(" ok=")
+    print_int(if img.ok { 1 } else { 0 })
+    print("\n")
+    print("RDNA nbytes=")
+    print_int(rdna.nbytes)
+    print(" ok=")
+    print_int(if rdna.ok { 1 } else { 0 })
+    print("\n")
+    print("AGX nbytes=")
+    print_int(agx.nbytes)
+    print(" ok=")
+    print_int(if agx.ok { 1 } else { 0 })
+    print("\n")
+    if !img.ok { print("SILICON FAIL\n"); exit(1) }
+    if rdna.ok { print("SILICON FAIL\n"); exit(1) }
+    if agx.ok { print("SILICON FAIL\n"); exit(1) }
+    let got = img_u32(img.ptr, 1428)
+    print("BYTES=")
+    print_int(got)
+    print("\n")
+    if got != imm { print("SILICON FAIL\n"); exit(1) }
+    let exec = ce_open()
+    if !exec.ok { print("NOCUDA\n"); exit(2) }
+    let m = ce_module_image(&exec, img.ptr, img.nbytes)
+    print("LOAD=")
+    print_int(if m != 0 { 1 } else { 0 })
+    print("\n")
+    if m == 0 { print("SILICON FAIL\n"); exit(1) }
+    let f = ce_function(&exec, m, "stamp")
+    print("FUNC=")
+    print_int(if f != 0 { 1 } else { 0 })
+    print("\n")
+    if f == 0 { print("SILICON FAIL\n"); exit(1) }
+    let d = ce_alloc(&exec, 4)
+    if d == 0 { print("SILICON FAIL\n"); exit(1) }
+    let params = heap_alloc(8)
+    write_i64(params as *mut i64, 0, ce_arg(d) as i64)
+    let st = ce_launch_raw(&exec, f, 1, 1, params)
+    print("LAUNCH=")
+    print_int(st as i64)
+    print("\n")
+    if st != 0 { print("SILICON FAIL\n"); exit(1) }
+    if ce_sync(&exec) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let host = heap_alloc(8)
+    write_i64(host as *mut i64, 0, 0)
+    if ce_d2h(&exec, host, d, 4) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let stamped = read_i64(host as *mut i64, 0) & 4294967295
+    print("STAMP=")
+    print_int(stamped)
+    print("\n")
+    if stamped != imm { print("SILICON FAIL\n"); exit(1) }
+    print("SILICON PASS\n")
+    exit(0)
+}
