@@ -895,3 +895,23 @@ Gate. Job 17633, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `
 - After one warm step, seven forwards span 32483054 ns, which is 0.00464 s/token. The seven gaps sit between 3.3 ms and 4.9 ms. They do not climb with the cache. The threshold is 0.005 s. The measured step is under the 0.0424 s of job 17616, under the 0.0175 s of job 17506, and under 0.005 s. Effective traffic is 116 GB/s. The 1.8 ms ceiling is still below this step. The threshold is not moved. This cut passes it.
 
 The node returned to idle.
+
+
+## 33. A grid barrier only where the SMs cross (2026-10-26, OBSERVED)
+
+Job 17633 passed 0.005 s/token at 0.00464 s, 116 GB/s. The ceiling for 540 MB at 300 GB/s is 1.8 ms. That is the threshold of this cut.
+
+The kernel had 14 grid barriers inside the 30-layer loop and three more in the head, about 420 per token. Each one opened with `membar.gl` on every thread. Q, K, V, O, gate, up and down have N at most 1536. The reduction strides columns by `58 * 256 * 4`, so only block 0 writes those vectors. The grid barrier after those reductions published nothing to the other SMs.
+
+The barrier that remains starts with the block `bar.sync`. Thread 0 then does one `membar.gl` and the atomic arrival. The last arriver writes the sense. The other threads wait on the volatile load. There is no per-thread `membar.gl`. Four grid barriers in the layer become a block `bar.sync` on block 0 only: after the QKV reductions, after the O reduction, after the gate and up reductions, and after the down reduction. The other blocks skip to the next grid barrier and do not touch the partial buffer in between. The grid barrier after the f64 head reduction is gone. The host `ce_sync` waits for the kernel. `ATTS`, the RMS publications, the split barriers and the head split stay. The block barriers after RoPE and after the warp attention stay. If the module does not load, or a barrier does not return, the measured step fails. The 0.00464 s kernel is not a fallback.
+
+Gate. Job 17669, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. Partition `bench` still has no nodes, so the job was pinned on `gpu-orangefs`. The node was idle at submit. SmolLM2-135M, ids 0, 504, 3575, 282, 4649, 314. The clock is `date +%s%N` on the job script.
+
+- The timed lines print `RESIDENT=1 grid=58`.
+- Prefill argmax, CPU and device: 7042.
+- Greedy continuation, eight tokens, both paths: 7042, 30, 657, 314, 260, 3995, 2240, 281.
+- Maximum absolute logit difference on that prefill: 1.69e-5 (the program printed 16936 at a scale of 1e9). That span has no threshold. It is the same difference job 17633 printed.
+- The device prefill of the six prompt tokens took 21926800 ns. That span has no threshold.
+- After one warm step, seven forwards span 31181338 ns, which is 0.00445 s/token. The seven gaps sit between 3.0 ms and 5.2 ms. The threshold is 0.0018 s. The measured step is under the 0.00464 s of job 17633 and above 0.0018 s. Effective traffic is 121 GB/s. The per-thread fence and the five block-local barriers were not the 4.6 ms. The threshold is not moved. This cut does not pass it.
+
+Job 17669 completed in 47 s and released the allocation. Job 17670, a different job, then took the node.

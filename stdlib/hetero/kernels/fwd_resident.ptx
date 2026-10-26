@@ -1,6 +1,7 @@
 // One launch per token. Grid is 58 blocks of 256 threads, one per SM.
 // Each block owns a slice of K and writes a partial. Q, K and V use three
-// partial regions and one grid barrier around the three reductions.
+// partial regions. A grid barrier fences from thread 0 after the block
+// barrier. Reductions that only block 0 consumes use a block barrier.
 // Attention is one warp per head. No .maxnreg.
 .version 7.8
 .target sm_80
@@ -396,12 +397,12 @@ EMB:
     add.u32 %r23, %r23, %r24;
     bra EMB;
 EMBSKIP:
-    membar.gl;
     bar.sync 0;
     mov.u32 %r28, %tid.x;
     setp.ne.u32 %p0, %r28, 0;
     @%p0 bra $gs1;
     ld.shared.u32 %r28, [lsense];
+    membar.gl;
     mov.u64 %rd14, g_bar_count;
     atom.global.add.u32 %r31, [%rd14], 1;
     mov.u32 %r29, %nctaid.x;
@@ -410,7 +411,6 @@ EMBSKIP:
     @%p1 bra $gw1;
     mov.u32 %r30, 0;
     st.global.u32 [g_bar_count], %r30;
-    membar.gl;
     st.global.u32 [g_bar_sense], %r28;
     bra $gd1;
 $gw1:
@@ -506,12 +506,12 @@ $nwa:
 $nwda:
 
 RMS1S:
-    membar.gl;
     bar.sync 0;
     mov.u32 %r28, %tid.x;
     setp.ne.u32 %p0, %r28, 0;
     @%p0 bra $gs2;
     ld.shared.u32 %r28, [lsense];
+    membar.gl;
     mov.u64 %rd14, g_bar_count;
     atom.global.add.u32 %r31, [%rd14], 1;
     mov.u32 %r29, %nctaid.x;
@@ -520,7 +520,6 @@ RMS1S:
     @%p1 bra $gw2;
     mov.u32 %r30, 0;
     st.global.u32 [g_bar_count], %r30;
-    membar.gl;
     st.global.u32 [g_bar_sense], %r28;
     bra $gd2;
 $gw2:
@@ -572,12 +571,12 @@ $gs2:
     st.param.b32 [_pk], %r1;
     st.param.b32 [_ps], %r9;
     call gemv_split, (_pa, _pb, _pp, _pn, _pk, _ps);
-    membar.gl;
     bar.sync 0;
     mov.u32 %r28, %tid.x;
     setp.ne.u32 %p0, %r28, 0;
     @%p0 bra $gs3;
     ld.shared.u32 %r28, [lsense];
+    membar.gl;
     mov.u64 %rd14, g_bar_count;
     atom.global.add.u32 %r31, [%rd14], 1;
     mov.u32 %r29, %nctaid.x;
@@ -586,7 +585,6 @@ $gs2:
     @%p1 bra $gw3;
     mov.u32 %r30, 0;
     st.global.u32 [g_bar_count], %r30;
-    membar.gl;
     st.global.u32 [g_bar_sense], %r28;
     bra $gd3;
 $gw3:
@@ -613,35 +611,10 @@ $gs3:
     st.param.b32 [_pn], %r4;
     st.param.b32 [_ps], %r9;
     call gemv_reduce, (_pp, _pc, _pn, _ps);
-    membar.gl;
-    bar.sync 0;
-    mov.u32 %r28, %tid.x;
-    setp.ne.u32 %p0, %r28, 0;
-    @%p0 bra $gs4;
-    ld.shared.u32 %r28, [lsense];
-    mov.u64 %rd14, g_bar_count;
-    atom.global.add.u32 %r31, [%rd14], 1;
-    mov.u32 %r29, %nctaid.x;
-    sub.u32 %r29, %r29, 1;
-    setp.ne.u32 %p1, %r31, %r29;
-    @%p1 bra $gw4;
-    mov.u32 %r30, 0;
-    st.global.u32 [g_bar_count], %r30;
-    membar.gl;
-    st.global.u32 [g_bar_sense], %r28;
-    bra $gd4;
-$gw4:
-    ld.volatile.global.u32 %r30, [g_bar_sense];
-    setp.ne.u32 %p1, %r30, %r28;
-    @%p1 bra $gw4;
-$gd4:
-    xor.b32 %r28, %r28, 1;
-    st.shared.u32 [lsense], %r28;
-$gs4:
-    bar.sync 0;
 
     setp.ne.u32 %p0, %r11, 0;
     @%p0 bra ATTS;
+    bar.sync 0;
     mov.u64 %rd16, g_pos;
     ld.global.u32 %r30, [%rd16];
     shr.u32 %r31, %r7, 1;
@@ -970,12 +943,12 @@ HDONE:
     bar.sync 0;
 
 ATTS:
-    membar.gl;
     bar.sync 0;
     mov.u32 %r28, %tid.x;
     setp.ne.u32 %p0, %r28, 0;
     @%p0 bra $gs9;
     ld.shared.u32 %r28, [lsense];
+    membar.gl;
     mov.u64 %rd14, g_bar_count;
     atom.global.add.u32 %r31, [%rd14], 1;
     mov.u32 %r29, %nctaid.x;
@@ -984,7 +957,6 @@ ATTS:
     @%p1 bra $gw9;
     mov.u32 %r30, 0;
     st.global.u32 [g_bar_count], %r30;
-    membar.gl;
     st.global.u32 [g_bar_sense], %r28;
     bra $gd9;
 $gw9:
@@ -1010,12 +982,12 @@ $gs9:
     st.param.b32 [_pk], %r3;
     st.param.b32 [_ps], %r9;
     call gemv_split, (_pa, _pb, _pp, _pn, _pk, _ps);
-    membar.gl;
     bar.sync 0;
     mov.u32 %r28, %tid.x;
     setp.ne.u32 %p0, %r28, 0;
     @%p0 bra $gs10;
     ld.shared.u32 %r28, [lsense];
+    membar.gl;
     mov.u64 %rd14, g_bar_count;
     atom.global.add.u32 %r31, [%rd14], 1;
     mov.u32 %r29, %nctaid.x;
@@ -1024,7 +996,6 @@ $gs9:
     @%p1 bra $gw10;
     mov.u32 %r30, 0;
     st.global.u32 [g_bar_count], %r30;
-    membar.gl;
     st.global.u32 [g_bar_sense], %r28;
     bra $gd10;
 $gw10:
@@ -1041,35 +1012,10 @@ $gs10:
     st.param.b32 [_pn], %r1;
     st.param.b32 [_ps], %r9;
     call gemv_reduce, (_pp, _pc, _pn, _ps);
-    membar.gl;
-    bar.sync 0;
-    mov.u32 %r28, %tid.x;
-    setp.ne.u32 %p0, %r28, 0;
-    @%p0 bra $gs11;
-    ld.shared.u32 %r28, [lsense];
-    mov.u64 %rd14, g_bar_count;
-    atom.global.add.u32 %r31, [%rd14], 1;
-    mov.u32 %r29, %nctaid.x;
-    sub.u32 %r29, %r29, 1;
-    setp.ne.u32 %p1, %r31, %r29;
-    @%p1 bra $gw11;
-    mov.u32 %r30, 0;
-    st.global.u32 [g_bar_count], %r30;
-    membar.gl;
-    st.global.u32 [g_bar_sense], %r28;
-    bra $gd11;
-$gw11:
-    ld.volatile.global.u32 %r30, [g_bar_sense];
-    setp.ne.u32 %p1, %r30, %r28;
-    @%p1 bra $gw11;
-$gd11:
-    xor.b32 %r28, %r28, 1;
-    st.shared.u32 [lsense], %r28;
-$gs11:
-    bar.sync 0;
 
     setp.ne.u32 %p0, %r11, 0;
     @%p0 bra RMS2S;
+    bar.sync 0;
     mov.u32 %r23, %r10;
 $ad1:
     setp.ge.u32 %p1, %r23, %r1;
@@ -1167,12 +1113,12 @@ $nwb:
 $nwdb:
 
 RMS2S:
-    membar.gl;
     bar.sync 0;
     mov.u32 %r28, %tid.x;
     setp.ne.u32 %p0, %r28, 0;
     @%p0 bra $gs12;
     ld.shared.u32 %r28, [lsense];
+    membar.gl;
     mov.u64 %rd14, g_bar_count;
     atom.global.add.u32 %r31, [%rd14], 1;
     mov.u32 %r29, %nctaid.x;
@@ -1181,7 +1127,6 @@ RMS2S:
     @%p1 bra $gw12;
     mov.u32 %r30, 0;
     st.global.u32 [g_bar_count], %r30;
-    membar.gl;
     st.global.u32 [g_bar_sense], %r28;
     bra $gd12;
 $gw12:
@@ -1220,12 +1165,12 @@ $gs12:
     st.param.b32 [_pk], %r1;
     st.param.b32 [_ps], %r9;
     call gemv_split, (_pa, _pb, _pp, _pn, _pk, _ps);
-    membar.gl;
     bar.sync 0;
     mov.u32 %r28, %tid.x;
     setp.ne.u32 %p0, %r28, 0;
     @%p0 bra $gs13;
     ld.shared.u32 %r28, [lsense];
+    membar.gl;
     mov.u64 %rd14, g_bar_count;
     atom.global.add.u32 %r31, [%rd14], 1;
     mov.u32 %r29, %nctaid.x;
@@ -1234,7 +1179,6 @@ $gs12:
     @%p1 bra $gw13;
     mov.u32 %r30, 0;
     st.global.u32 [g_bar_count], %r30;
-    membar.gl;
     st.global.u32 [g_bar_sense], %r28;
     bra $gd13;
 $gw13:
@@ -1256,35 +1200,10 @@ $gs13:
     st.param.b32 [_pn], %r2;
     st.param.b32 [_ps], %r9;
     call gemv_reduce, (_pp, _pc, _pn, _ps);
-    membar.gl;
-    bar.sync 0;
-    mov.u32 %r28, %tid.x;
-    setp.ne.u32 %p0, %r28, 0;
-    @%p0 bra $gs14;
-    ld.shared.u32 %r28, [lsense];
-    mov.u64 %rd14, g_bar_count;
-    atom.global.add.u32 %r31, [%rd14], 1;
-    mov.u32 %r29, %nctaid.x;
-    sub.u32 %r29, %r29, 1;
-    setp.ne.u32 %p1, %r31, %r29;
-    @%p1 bra $gw14;
-    mov.u32 %r30, 0;
-    st.global.u32 [g_bar_count], %r30;
-    membar.gl;
-    st.global.u32 [g_bar_sense], %r28;
-    bra $gd14;
-$gw14:
-    ld.volatile.global.u32 %r30, [g_bar_sense];
-    setp.ne.u32 %p1, %r30, %r28;
-    @%p1 bra $gw14;
-$gd14:
-    xor.b32 %r28, %r28, 1;
-    st.shared.u32 [lsense], %r28;
-$gs14:
-    bar.sync 0;
 
     setp.ne.u32 %p0, %r11, 0;
     @%p0 bra SWS;
+    bar.sync 0;
     mov.u32 %r23, %r10;
 SW:
     setp.ge.u32 %p1, %r23, %r2;
@@ -1306,12 +1225,12 @@ SW:
     add.u32 %r23, %r23, 256;
     bra SW;
 SWS:
-    membar.gl;
     bar.sync 0;
     mov.u32 %r28, %tid.x;
     setp.ne.u32 %p0, %r28, 0;
     @%p0 bra $gs17;
     ld.shared.u32 %r28, [lsense];
+    membar.gl;
     mov.u64 %rd14, g_bar_count;
     atom.global.add.u32 %r31, [%rd14], 1;
     mov.u32 %r29, %nctaid.x;
@@ -1320,7 +1239,6 @@ SWS:
     @%p1 bra $gw17;
     mov.u32 %r30, 0;
     st.global.u32 [g_bar_count], %r30;
-    membar.gl;
     st.global.u32 [g_bar_sense], %r28;
     bra $gd17;
 $gw17:
@@ -1346,12 +1264,12 @@ $gs17:
     st.param.b32 [_pk], %r2;
     st.param.b32 [_ps], %r9;
     call gemv_split, (_pa, _pb, _pp, _pn, _pk, _ps);
-    membar.gl;
     bar.sync 0;
     mov.u32 %r28, %tid.x;
     setp.ne.u32 %p0, %r28, 0;
     @%p0 bra $gs18;
     ld.shared.u32 %r28, [lsense];
+    membar.gl;
     mov.u64 %rd14, g_bar_count;
     atom.global.add.u32 %r31, [%rd14], 1;
     mov.u32 %r29, %nctaid.x;
@@ -1360,7 +1278,6 @@ $gs17:
     @%p1 bra $gw18;
     mov.u32 %r30, 0;
     st.global.u32 [g_bar_count], %r30;
-    membar.gl;
     st.global.u32 [g_bar_sense], %r28;
     bra $gd18;
 $gw18:
@@ -1377,35 +1294,10 @@ $gs18:
     st.param.b32 [_pn], %r1;
     st.param.b32 [_ps], %r9;
     call gemv_reduce, (_pp, _pc, _pn, _ps);
-    membar.gl;
-    bar.sync 0;
-    mov.u32 %r28, %tid.x;
-    setp.ne.u32 %p0, %r28, 0;
-    @%p0 bra $gs19;
-    ld.shared.u32 %r28, [lsense];
-    mov.u64 %rd14, g_bar_count;
-    atom.global.add.u32 %r31, [%rd14], 1;
-    mov.u32 %r29, %nctaid.x;
-    sub.u32 %r29, %r29, 1;
-    setp.ne.u32 %p1, %r31, %r29;
-    @%p1 bra $gw19;
-    mov.u32 %r30, 0;
-    st.global.u32 [g_bar_count], %r30;
-    membar.gl;
-    st.global.u32 [g_bar_sense], %r28;
-    bra $gd19;
-$gw19:
-    ld.volatile.global.u32 %r30, [g_bar_sense];
-    setp.ne.u32 %p1, %r30, %r28;
-    @%p1 bra $gw19;
-$gd19:
-    xor.b32 %r28, %r28, 1;
-    st.shared.u32 [lsense], %r28;
-$gs19:
-    bar.sync 0;
 
     setp.ne.u32 %p0, %r11, 0;
     @%p0 bra ADDS;
+    bar.sync 0;
     mov.u32 %r23, %r10;
 $ad2:
     setp.ge.u32 %p1, %r23, %r1;
@@ -1423,12 +1315,12 @@ $ad2:
 $ad2D:
 
 ADDS:
-    membar.gl;
     bar.sync 0;
     mov.u32 %r28, %tid.x;
     setp.ne.u32 %p0, %r28, 0;
     @%p0 bra $gs20;
     ld.shared.u32 %r28, [lsense];
+    membar.gl;
     mov.u64 %rd14, g_bar_count;
     atom.global.add.u32 %r31, [%rd14], 1;
     mov.u32 %r29, %nctaid.x;
@@ -1437,7 +1329,6 @@ ADDS:
     @%p1 bra $gw20;
     mov.u32 %r30, 0;
     st.global.u32 [g_bar_count], %r30;
-    membar.gl;
     st.global.u32 [g_bar_sense], %r28;
     bra $gd20;
 $gw20:
@@ -1535,12 +1426,12 @@ $nwh:
 $nwdh:
 
 HRMS:
-    membar.gl;
     bar.sync 0;
     mov.u32 %r28, %tid.x;
     setp.ne.u32 %p0, %r28, 0;
     @%p0 bra $gs21;
     ld.shared.u32 %r28, [lsense];
+    membar.gl;
     mov.u64 %rd14, g_bar_count;
     atom.global.add.u32 %r31, [%rd14], 1;
     mov.u32 %r29, %nctaid.x;
@@ -1549,7 +1440,6 @@ HRMS:
     @%p1 bra $gw21;
     mov.u32 %r30, 0;
     st.global.u32 [g_bar_count], %r30;
-    membar.gl;
     st.global.u32 [g_bar_sense], %r28;
     bra $gd21;
 $gw21:
@@ -1574,12 +1464,12 @@ $gs21:
     st.param.b32 [_pk], %r1;
     st.param.b32 [_ps], %r9;
     call gemv_split, (_pa, _pb, _pp, _pn, _pk, _ps);
-    membar.gl;
     bar.sync 0;
     mov.u32 %r28, %tid.x;
     setp.ne.u32 %p0, %r28, 0;
     @%p0 bra $gs22;
     ld.shared.u32 %r28, [lsense];
+    membar.gl;
     mov.u64 %rd14, g_bar_count;
     atom.global.add.u32 %r31, [%rd14], 1;
     mov.u32 %r29, %nctaid.x;
@@ -1588,7 +1478,6 @@ $gs21:
     @%p1 bra $gw22;
     mov.u32 %r30, 0;
     st.global.u32 [g_bar_count], %r30;
-    membar.gl;
     st.global.u32 [g_bar_sense], %r28;
     bra $gd22;
 $gw22:
@@ -1605,32 +1494,5 @@ $gs22:
     st.param.b32 [_pn], %r9;
     st.param.b32 [_ps], %r9;
     call gemv_reduce_f64, (_pp, _pc, _pn, _ps);
-    membar.gl;
-    bar.sync 0;
-    mov.u32 %r28, %tid.x;
-    setp.ne.u32 %p0, %r28, 0;
-    @%p0 bra $gs23;
-    ld.shared.u32 %r28, [lsense];
-    mov.u64 %rd14, g_bar_count;
-    atom.global.add.u32 %r31, [%rd14], 1;
-    mov.u32 %r29, %nctaid.x;
-    sub.u32 %r29, %r29, 1;
-    setp.ne.u32 %p1, %r31, %r29;
-    @%p1 bra $gw23;
-    mov.u32 %r30, 0;
-    st.global.u32 [g_bar_count], %r30;
-    membar.gl;
-    st.global.u32 [g_bar_sense], %r28;
-    bra $gd23;
-$gw23:
-    ld.volatile.global.u32 %r30, [g_bar_sense];
-    setp.ne.u32 %p1, %r30, %r28;
-    @%p1 bra $gw23;
-$gd23:
-    xor.b32 %r28, %r28, 1;
-    st.shared.u32 [lsense], %r28;
-$gs23:
-    bar.sync 0;
-
     ret;
 }
