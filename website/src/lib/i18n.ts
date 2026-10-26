@@ -55,6 +55,24 @@ export function getLocaleFromUrl(url: URL): Locale {
 }
 
 /**
+ * Ensure an internal page path ends with `/`.
+ * Idempotent. Skips external and protocol-relative URLs, and any path whose
+ * last segment has a file extension. A query string or hash stays attached
+ * after the slash: `/proof#fixed-point` becomes `/proof/#fixed-point`.
+ */
+export function withPageTrailingSlash(path: string): string {
+  if (!path.startsWith('/') || path.startsWith('//')) return path;
+  const splitAt = path.search(/[?#]/);
+  const base = splitAt === -1 ? path : path.slice(0, splitAt);
+  const suffix = splitAt === -1 ? '' : path.slice(splitAt);
+  if (base === '' || base === '/') return `/${suffix}`;
+  const lastSegment = base.slice(base.lastIndexOf('/') + 1);
+  if (lastSegment.includes('.')) return path;
+  if (base.endsWith('/')) return path;
+  return `${base}/${suffix}`;
+}
+
+/**
  * Get the path for a different locale
  */
 export function getLocalizedPath(path: string, locale: Locale): string {
@@ -63,10 +81,10 @@ export function getLocalizedPath(path: string, locale: Locale): string {
 
   // Don't prefix default locale
   if (locale === defaultLocale) {
-    return cleanPath || '/';
+    return withPageTrailingSlash(cleanPath || '/');
   }
 
-  return `/${locale}${cleanPath}`;
+  return withPageTrailingSlash(`/${locale}${cleanPath}`);
 }
 
 /**

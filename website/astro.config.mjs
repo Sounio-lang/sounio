@@ -72,7 +72,8 @@ export default defineConfig({
       filter: (page) => {
         const url = new URL(page);
         const path = url.pathname;
-        return !path.match(/^\/(pt\/|el\/|zh\/|ja\/|es\/|zh-hk\/)?(docs|showcases|blog|changelog|registry)(\/|$)/);
+        // Anchored at the start so /about/roadmap/ stays in the sitemap.
+        return !path.match(/^\/(pt\/|el\/|zh\/|ja\/|es\/|zh-hk\/)?(docs|showcases|blog|changelog|registry|manifesto|roadmap|platform)(\/|$)/);
       },
     }),
     mdx({
@@ -106,17 +107,4 @@ export default defineConfig({
 
   // Enable view transitions for smooth page navigation
   prefetch: true,
-
-  // /platform permanently redirects to /language#compiler.
-  // Hash fragments are client-side only; the 308 targets /language.
-  // The stub page at platform.astro adds the #compiler fragment via JS.
-  redirects: {
-    '/platform': { status: 308, destination: '/language' },
-    '/pt/platform': { status: 308, destination: '/pt/language' },
-    '/el/platform': { status: 308, destination: '/el/language' },
-    '/zh/platform': { status: 308, destination: '/zh/language' },
-    '/ja/platform': { status: 308, destination: '/ja/language' },
-    '/es/platform': { status: 308, destination: '/es/language' },
-    '/zh-hk/platform': { status: 308, destination: '/zh-hk/language' },
-  },
 });

@@ -6,7 +6,6 @@ const root = path.resolve(process.cwd());
 const requiredRoutes = [
   'src/pages/index.astro',
   'src/pages/language.astro',
-  'src/pages/platform.astro',
   'src/pages/science/index.astro',
   'src/pages/science/[slug].astro',
   'src/pages/learn/index.astro',
@@ -21,25 +20,24 @@ const requiredRoutes = [
   'src/pages/releases/index.astro',
 ];
 
+// Legacy paths are permanent redirects in vercel.json, not Astro meta-refresh stubs.
+const localePrefixes = ['', '/pt', '/el', '/zh', '/ja', '/es', '/zh-hk'];
+const requiredVercelRedirects = localePrefixes.flatMap((prefix) => [
+  [`${prefix}/manifesto`, `${prefix}/about/vision/`],
+  [`${prefix}/roadmap`, `${prefix}/about/roadmap/`],
+  [`${prefix}/platform`, `${prefix}/language/`],
+  [`${prefix}/changelog`, `${prefix}/releases/`],
+  [`${prefix}/registry`, `${prefix}/packages/`],
+  [`${prefix}/registry/:name`, `${prefix}/packages/`],
+  [`${prefix}/docs/:path*`, `${prefix}/learn/:path*/`],
+  [`${prefix}/showcases`, `${prefix}/science/`],
+  [`${prefix}/showcases/:slug`, `${prefix}/science/:slug/`],
+  [`${prefix}/blog`, `${prefix}/insights/`],
+]);
+
 const redirectContracts = [
-  { file: 'src/pages/docs/index.astro', needle: '/learn' },
-  { file: 'src/pages/docs/[...slug].astro', needle: '/learn/' },
-  { file: 'src/pages/showcases/[slug].astro', needle: '/science/' },
-  { file: 'src/pages/registry/index.astro', needle: '/packages' },
   { file: 'src/pages/registry/[name].astro', needle: '/packages/' },
-  { file: 'src/pages/blog/index.astro', needle: '/insights' },
-  { file: 'src/pages/manifesto.astro', needle: '/about/vision' },
-  { file: 'src/pages/roadmap.astro', needle: '/about/roadmap' },
-  { file: 'src/pages/changelog.astro', needle: '/releases' },
-  { file: 'src/pages/[lang]/docs/index.astro', needle: '/learn' },
-  { file: 'src/pages/[lang]/docs/[...slug].astro', needle: '/learn/' },
-  { file: 'src/pages/[lang]/showcases/[slug].astro', needle: '/science/' },
-  { file: 'src/pages/[lang]/registry/index.astro', needle: '/packages' },
   { file: 'src/pages/[lang]/registry/[name].astro', needle: '/packages/' },
-  { file: 'src/pages/[lang]/blog/index.astro', needle: '/insights' },
-  { file: 'src/pages/[lang]/manifesto.astro', needle: '/about/vision' },
-  { file: 'src/pages/[lang]/roadmap.astro', needle: '/about/roadmap' },
-  { file: 'src/pages/[lang]/changelog.astro', needle: '/releases' },
 ];
 
 async function exists(rel) {
@@ -69,6 +67,25 @@ async function run() {
     } catch {
       errors.push(`Unable to read redirect contract file: ${contract.file}`);
     }
+  }
+
+  try {
+    const vercel = JSON.parse(await readFile(path.join(root, 'vercel.json'), 'utf8'));
+    const pairs = new Set(
+      (vercel.redirects ?? []).map((entry) => `${entry.source} -> ${entry.destination}`)
+    );
+    for (const [source, destination] of requiredVercelRedirects) {
+      if (!pairs.has(`${source} -> ${destination}`)) {
+        errors.push(`Missing permanent redirect in vercel.json: ${source} -> ${destination}`);
+      }
+    }
+    for (const entry of vercel.redirects ?? []) {
+      if (entry.permanent !== true) {
+        errors.push(`Redirect is not permanent: ${entry.source}`);
+      }
+    }
+  } catch (error) {
+    errors.push(`Unable to read vercel.json redirects: ${error instanceof Error ? error.message : error}`);
   }
 
   if (errors.length > 0) {
