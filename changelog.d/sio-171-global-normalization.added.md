@@ -1,0 +1,1 @@
+Add a sealed global-reference count-normalization owner and sample-ID checked pipeline reuse path with reduced per-worker normalization scratch; preserve the local estimator and public API. Qualification is recorded separately from the prior point-only scale experiment.

@@ -1,0 +1,63 @@
+// Sealed reusable reference-population normalization. Raw factors cannot be imported.
+// Numerical work delegates only to the canonical CSR median-log-ratio estimator.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_status,numeric_buffer_at,numeric_buffer_close}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_status,integer_buffer_close}
+use genomics::count_csr::{CountCSR,count_csr_status,count_csr_rows,count_csr_samples,count_csr_size_factors_into}
+use genomics::count_identities::{CountIdentities,IdJoinResult,count_identities_status,count_identities_count,count_identities_unique,count_identities_join_into,count_identities_close}
+use genomics::dynamic_normalization::{dynamic_median_ratio_size_factors_workspace,dynamic_size_factors_slot,dynamic_size_factors_snapshot}
+pub struct CountNormalizationWorkspace {pub status:i64,pub reference_genes:i64,pub samples:i64,pub retained_payload_bytes:i64,pub scratch_payload_bytes:i64,pub peak_payload_bytes:i64}
+// Allocated buffer payload only; transferred IDs, owner metadata and RSS excluded.
+pub fn count_normalization_workspace(g:i64,n:i64)->CountNormalizationWorkspace with Div {
+ let bad=CountNormalizationWorkspace{status:1,reference_genes:g,samples:n,retained_payload_bytes:0,scratch_payload_bytes:0,peak_payload_bytes:0}
+ let norm=dynamic_median_ratio_size_factors_workspace(g,n)
+ if norm.status!=0 {return bad}
+ let retained=n*16
+ if retained>9223372036854771704-norm.payload_bytes {return bad}
+ CountNormalizationWorkspace{status:0,reference_genes:g,samples:n,retained_payload_bytes:retained,scratch_payload_bytes:norm.payload_bytes,peak_payload_bytes:retained+norm.payload_bytes}
+}
+pub linear struct CountNormalization {
+ sample_ids:CountIdentities,factors:NumericBuffer,logs:NumericBuffer,
+ status:i64,reference_genes:i64,samples:i64,mode:i64,used:i64,excluded:i64,retained_payload_bytes:i64,
+}
+// Borrows counts and transfers IDs even on refusal. Scratch is closed before return.
+// No caller-supplied factors, slot setters, pseudocounts or implicit mode fallback.
+pub fn count_normalization_new(csr:&CountCSR,sample_ids:CountIdentities,mode:i64,max_bytes:i64)->CountNormalization with Alloc,Mut,Div,Panic {
+ let g=count_csr_rows(csr);let n=count_csr_samples(csr)
+ let query=count_normalization_workspace(g,n)
+ var code:i64=0
+ if query.status!=0 || mode<0 || mode>1 || max_bytes<0 || max_bytes>9223372036854771704 || query.peak_payload_bytes>max_bytes {code=1}
+ if count_csr_status(csr)!=0 || count_identities_status(&sample_ids)!=0 || count_identities_count(&sample_ids)!=n || count_identities_unique(&sample_ids)!=n {code=2}
+ let norm=dynamic_median_ratio_size_factors_workspace(g,n)
+ var factors=numeric_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0})
+ var logs=numeric_buffer_new(if code==0 {n}else{0},if code==0 {max_bytes}else{0})
+ var work=numeric_buffer_new(if code==0 {norm.numeric_elements}else{0},if code==0 {max_bytes}else{0})
+ var anchors=integer_buffer_new(if code==0 {norm.integer_elements}else{0},if code==0 {max_bytes}else{0})
+ var slot=dynamic_size_factors_slot()
+ if code==0 {
+  if numeric_buffer_status(&factors)!=0 || numeric_buffer_status(&logs)!=0 || numeric_buffer_status(&work)!=0 || integer_buffer_status(&anchors)!=0 {code=3}
+ }
+ if code==0 {let fitted=count_csr_size_factors_into(csr,mode,&!factors,&!logs,&!work,&!anchors,&!slot);if fitted!=0 {code=20+fitted}}
+ let result=dynamic_size_factors_snapshot(&slot)
+ numeric_buffer_close(work);integer_buffer_close(anchors)
+ CountNormalization{sample_ids:sample_ids,factors:factors,logs:logs,status:code,reference_genes:g,samples:n,mode:mode,
+ used:if code==0 {result.genes_used}else{0},excluded:if code==0 {result.genes_excluded}else{0},retained_payload_bytes:if code==0 {query.retained_payload_bytes}else{0}}
+}
+pub fn count_normalization_status(w:&CountNormalization)->i64 {w.status}
+pub fn count_normalization_reference_genes(w:&CountNormalization)->i64 {if w.status==0 {w.reference_genes}else{0}}
+pub fn count_normalization_samples(w:&CountNormalization)->i64 {if w.status==0 {w.samples}else{0}}
+pub fn count_normalization_mode(w:&CountNormalization)->i64 {if w.status==0 {w.mode}else{-1}}
+pub fn count_normalization_used(w:&CountNormalization)->i64 {if w.status==0 {w.used}else{0}}
+pub fn count_normalization_excluded(w:&CountNormalization)->i64 {if w.status==0 {w.excluded}else{0}}
+pub fn count_normalization_retained_payload(w:&CountNormalization)->i64 {w.retained_payload_bytes}
+pub fn count_normalization_factor(w:&CountNormalization,sample:i64)->f64 with Panic {assert(w.status==0 && sample>=0 && sample<w.samples);numeric_buffer_at(&w.factors,sample)}
+pub fn count_normalization_log(w:&CountNormalization,sample:i64)->f64 with Panic {assert(w.status==0 && sample>=0 && sample<w.samples);numeric_buffer_at(&w.logs,sample)}
+// Equal cardinality plus unique complete left->right byte-ID join establishes exact cohort.
+// Output mapping commits only on success, using caller-retained scratch.
+pub fn count_normalization_join_into(w:&CountNormalization,samples:&CountIdentities,budget:i64,scratch:&!IntegerBuffer,out:&!IntegerBuffer)->IdJoinResult with Mut,Panic {
+ if w.status!=0 || count_identities_count(samples)!=w.samples {return IdJoinResult{status:2,matched:0,missing:0,comparisons:0}}
+ count_identities_join_into(samples,&w.sample_ids,0,budget,scratch,out)
+}
+pub fn count_normalization_close(w:CountNormalization) with Alloc {
+ let CountNormalization{sample_ids,factors,logs,status,reference_genes,samples,mode,used,excluded,retained_payload_bytes}=w
+ count_identities_close(sample_ids);numeric_buffer_close(factors);numeric_buffer_close(logs)
+}

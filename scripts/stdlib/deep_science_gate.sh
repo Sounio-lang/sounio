@@ -358,13 +358,18 @@ rc=0
 PHONON_GATE_OUTPUT="$out/phonon-factor" timeout 600 bash scripts/stdlib/phonon_factor_gate.sh > "$out/phonon-factor.gate.stdout" 2> "$out/phonon-factor.gate.stderr" || rc=$?
 record focused-gate phonon-factor "$rc"
 
+# Global-reference normalization reuse: in-process workers, both engines + C++23.
+rc=0
+timeout 900 bash scripts/stdlib/genomics_global_normalization_gate.sh "$out/genomics-global-normalization" > "$out/genomics-global-normalization.gate.stdout" 2> "$out/genomics-global-normalization.gate.stderr" || rc=$?
+record focused-gate genomics-global-normalization "$rc"
+
 # Every child seals native programs and C++ oracles before first use. Repeat
 # those checks after all children, so later phases cannot mutate an earlier ELF.
 : > "$out/CHILD_ELFS.verify.txt"
 for child in checked-bdf noncentral_t_power genomics-count-identities genomics-named-stream \
  wilcoxon_checked survival_checked fem-poisson dp54-focused prepared-contour canonical-palettes \
  math-fft math-numdiff physics-uncertainty checked-distributions genomics_batch \
- scientific-native-workflows interval-contract phonon-factor; do
+ scientific-native-workflows interval-contract phonon-factor genomics-global-normalization; do
  rc=0
  if [[ -s "$out/$child/ELFS.sha256" ]]; then
   sha256sum -c "$out/$child/ELFS.sha256" >> "$out/CHILD_ELFS.verify.txt" 2>&1 || rc=$?
