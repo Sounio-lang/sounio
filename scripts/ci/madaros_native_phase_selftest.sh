@@ -8,6 +8,7 @@ T=$WORK/tree
 mkdir -p "$T/scripts/dev" "$T/scripts/ci" "$T/scripts/lib" "$T/tests/run-pass" "$T/stdlib"
 trap 'code=$?;printf "%s\n" "$code" > "$WORK/STATUS";echo "operational_receipts=$WORK"' EXIT
 cp "$ROOT/scripts/dev/run_sio_test_suite_v2.sh" "$T/scripts/dev/"
+cp "$ROOT/scripts/dev/sio_test_case.sh" "$T/scripts/dev/"
 ln -s run_sio_test_suite_v2.sh "$T/scripts/dev/run_sio_test_suite.sh"
 cp "$ROOT/scripts/run_sio_test_suite.sh" "$T/scripts/"
 cp "$ROOT/scripts/ci/souc-native-wrapper.sh" "$T/scripts/ci/"
