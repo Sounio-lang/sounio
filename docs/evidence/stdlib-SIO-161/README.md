@@ -254,3 +254,41 @@ attempt packet, verification receipt and internal fragment. Focused passes,
 source parity, green hosted contracts, tree-only custody and an interrupted
 partial attempt remain distinct from full-suite
 acceptance and human review/main merge.
+
+## Hosted replay of PR head26ecd
+
+Main CI40248656923 ended **CANCELLED**. The provider annotation explicitly
+reports the Deep Science job exceeded45m0s, matching the configured bound.
+CI Decision then failed its required-deep check; cancellation is not a pass.
+The job ran00:25:59Z–01:11:16Z, replay00:26:34Z–01:11:12Z.
+
+The PR head is26ecd3cd1bea2a70b7166f85c32c676d1d01b099; actual tested GitHub
+merge is54e02c8f1f755f322b3e262a1f3bddb18df627f7 over maina886ce9bdb9b6b9ca4f748028fca0248bfa9f125.
+Its source-bound compiler ELF is
+b30def13149e1d95d07dde2cf107a82c7bc99e8ec8c910d8b7f6098f5ef8d2c9,
+not the a292 pin of the separate Slurm qualifications. The workflow and four
+relevant scripts were matched to the tested compiler input catalog.
+
+F64 succeeded: ChangedTests12 pass/0 fail/0 skip, including one compile-fail.
+Eleven positive split receipts record compile0/native0/result0 with independent
+30s/30s limits. The additional17 known failures remain known, not new passes.
+This observation does not assign the result solely to phase separation: both
+the tested merge/compiler and protocol differ from the earlier hosted failure.
+
+Deep retained509 completed rows with status0 and15/18 focused children. It
+entered child16 scientific-native-workflows; its inner subphase is unknown
+because the existing nonrecursive upload omitted child directories. Interval17
+and phonon18 did not complete, and final custody/STATUS were not reached. The
+separate global3170 increment is absent from this tested source, not a19th
+unreached child. Eighteen calls and the required-completion guard are preserved.
+
+The compact hosted26ecd-terminal-text.tar.gz is1272198 bytes, SHA256
+22df6d903d9d50119beaea3b003e4b50ea5b1772febd6aa004b8cb4b31ee9adf;
+324 included hashes passed fresh extraction. It contains the report, cancellation
+annotation, prefix records, selected phase receipts and source/compiler catalog.
+The11 positive receipts were retrieved as303 text members by HTTP ranges,
+without downloading the84MB artifact/ELF ZIP. No ELF or source bulk is included.
+
+A reviewable text-only recursive collector and parent start/finish ledger are
+being prepared for the active CI-workflow owner. No deadline, tolerance, gate
+selection or CI decision rule is changed by this custody update.
