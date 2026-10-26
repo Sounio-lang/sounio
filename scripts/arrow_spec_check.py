@@ -6,6 +6,23 @@ from decimal import Decimal
 from pathlib import Path
 
 
+def check_decimal(schema, batch, name: str, type_s: str, want: list) -> None:
+    field = schema.field(name).type
+    if str(field) != type_s or field.precision < 1:
+        raise SystemExit(f"FAIL {name} type {field}")
+    got = batch.column(name).to_pylist()
+    if got != want:
+        raise SystemExit(f"FAIL {name} {got}")
+    for value in got:
+        if value is None:
+            continue
+        digits = len(value.as_tuple().digits)
+        if digits > field.precision or value.as_tuple().exponent != -field.scale:
+            raise SystemExit(
+                f"FAIL {name} precision digits={digits} precision={field.precision} scale={field.scale}"
+            )
+
+
 def main() -> None:
     try:
         import pyarrow as pa
@@ -84,13 +101,23 @@ def main() -> None:
         raise SystemExit(f"FAIL t32 {schema.field('t32').type} {values('t32')}")
     if str(schema.field("t64").type) != "time64[ns]" or values("t64") != [7, 8]:
         raise SystemExit(f"FAIL t64 {schema.field('t64').type} {values('t64')}")
-    if batch.column("dec64").to_pylist() != [Decimal("-0.42"), Decimal("0.42")]:
-        raise SystemExit(f"FAIL dec64 {batch.column('dec64').to_pylist()}")
-    if batch.column("dec128").to_pylist() != [
-        Decimal("13610771366776895768476177004545508.5872"),
-        Decimal("6405838452101818886974504219670769.8022"),
-    ]:
-        raise SystemExit(f"FAIL dec128 {batch.column('dec128').to_pylist()}")
+    check_decimal(
+        schema,
+        batch,
+        "dec64",
+        "decimal64(10, 2)",
+        [Decimal("-0.42"), Decimal("0.42")],
+    )
+    check_decimal(
+        schema,
+        batch,
+        "dec128",
+        "decimal128(38, 4)",
+        [
+            Decimal("6432940189538350054795618879031647.8768"),
+            Decimal("6405838452101818886974504219670769.8022"),
+        ],
+    )
     if batch.column("f32").to_pylist() != [-1.0, 1.0]:
         raise SystemExit(f"FAIL f32 {batch.column('f32').to_pylist()}")
     if str(schema.field("iym").type) != "month_interval":
