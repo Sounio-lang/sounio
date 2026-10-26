@@ -1,0 +1,726 @@
+// stdlib/arrow/flight.sio — Arrow Flight DoPut and DoExchange data frames
+//
+// The payloads are encapsulated IPC messages from the columnar spec:
+// https://arrow.apache.org/docs/format/Columnar.html#format-ipc
+//
+//   continuation 0xFFFFFFFF
+//   metadata_size (FlatBuffer Message plus padding)
+//   metadata_flatbuffer
+//   padding to 8 bytes
+//   message body (multiple of 8)
+//
+// DoPut and DoExchange (Flight.proto) carry that Message as FlightData:
+//   data_header = the metadata bytes (metadata_size of them, padding included)
+//   data_body   = the message body
+// A schema message has no body. End-of-stream is not a FlightData frame.
+//
+// Each frame is a gRPC message: 1 uncompressed-flag byte, a big-endian
+// int32 length, then the protobuf. This is not an HTTP/2 or socket server.
+// DoPut's reply is a stream of PutResult frames. DoExchange is FlightData
+// in both directions; the descriptor is optional on a reply.
+//
+// Caps: 9 frames, descriptor path of 4 components of 32 bytes or a 64-byte
+// command, 32 bytes of app_metadata per frame. Overflow is -1, over
+// capacity is -7, a compressed gRPC flag is -4.
+
+use arrow::lib::{
+    ArrowBuf,
+    arrow_ipc_view,
+}
+
+pub struct FlightDesc {
+    pub kind: i64,
+    pub n_path: i64,
+    pub path_bytes: [u8; 128],
+    pub path_lens: [i64; 4],
+    pub cmd: [u8; 64],
+    pub cmd_len: i64,
+}
+
+/// Per-frame app_metadata. On write, `n == 0` omits every field.
+/// On read, `n` is the number of frames and `lens[i] == 0` means that frame had none.
+pub struct FlightMeta {
+    pub n: i64,
+    pub lens: [i64; 9],
+    pub bytes: [u8; 288],
+}
+
+struct RawBuf {
+    data: [u8; 160],
+    len: i64,
+}
+
+struct PbInt {
+    val: i64,
+    pos: i64,
+    status: i64,
+}
+
+struct FlightSlice {
+    desc_at: i64,
+    desc_len: i64,
+    header_at: i64,
+    header_len: i64,
+    meta_at: i64,
+    meta_len: i64,
+    body_at: i64,
+    body_len: i64,
+    status: i64,
+}
+
+pub fn flight_desc_new() -> FlightDesc {
+    FlightDesc {
+        kind: 0,
+        n_path: 0,
+        path_bytes: [0; 128],
+        path_lens: [0; 4],
+        cmd: [0; 64],
+        cmd_len: 0,
+    }
+}
+
+pub fn flight_meta_new() -> FlightMeta {
+    FlightMeta {
+        n: 0,
+        lens: [0; 9],
+        bytes: [0; 288],
+    }
+}
+
+fn u8_at(buf: &ArrowBuf, off: i64) -> i64 with Panic {
+    let v = buf.data[off as usize] as i64
+    if v < 0 { v + 256 } else { v }
+}
+
+fn push_u8(out: &!ArrowBuf, v: i64) -> i64 with Mut, Panic {
+    if out.len >= 8192 { return -1 }
+    var x = v & 255
+    if x < 0 { x = x + 256 }
+    out.data[out.len as usize] = (x as i32) as u8
+    out.len = out.len + 1
+    0
+}
+
+fn store_u8(out: &!ArrowBuf, at: i64, v: i64) -> i64 with Mut, Panic {
+    if at < 0 || at >= out.len { return -6 }
+    var x = v & 255
+    if x < 0 { x = x + 256 }
+    out.data[at as usize] = (x as i32) as u8
+    0
+}
+
+fn push_le_i32(out: &!ArrowBuf, v: i64) -> i64 with Mut, Panic {
+    if push_u8(out, v) != 0 { return -1 }
+    if push_u8(out, v >> 8) != 0 { return -1 }
+    if push_u8(out, v >> 16) != 0 { return -1 }
+    push_u8(out, v >> 24)
+}
+
+fn be_u32(buf: &ArrowBuf, at: i64) -> i64 with Panic {
+    u8_at(buf, at) << 24 | u8_at(buf, at + 1) << 16 | u8_at(buf, at + 2) << 8 | u8_at(buf, at + 3)
+}
+
+fn copy_bytes(src: &ArrowBuf, at: i64, n: i64, dst: &!ArrowBuf) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < n {
+        if push_u8(dst, u8_at(src, at + i)) != 0 { return -1 }
+        i = i + 1
+    }
+    0
+}
+
+/// Append one path component. Sets `kind` to path (1). At most 4 components, 32 bytes each.
+pub fn flight_desc_add_path(d: &!FlightDesc, text: string) -> i64 with Mut, Panic {
+    if d.n_path >= 4 { return -7 }
+    let n = str_len(text)
+    if n < 0 || n > 32 { return -7 }
+    let base = d.n_path * 32
+    var i: i64 = 0
+    while i < n {
+        var ch = text[i as usize] as i64
+        if ch < 0 { ch = ch + 256 }
+        d.path_bytes[(base + i) as usize] = (ch as i32) as u8
+        i = i + 1
+    }
+    d.path_lens[d.n_path as usize] = n
+    d.n_path = d.n_path + 1
+    d.kind = 1
+    0
+}
+
+/// Set an opaque command. Sets `kind` to command (2). At most 64 bytes.
+pub fn flight_desc_set_cmd(d: &!FlightDesc, text: string) -> i64 with Mut, Panic {
+    let n = str_len(text)
+    if n < 0 || n > 64 { return -7 }
+    var i: i64 = 0
+    while i < n {
+        var ch = text[i as usize] as i64
+        if ch < 0 { ch = ch + 256 }
+        d.cmd[i as usize] = (ch as i32) as u8
+        i = i + 1
+    }
+    d.cmd_len = n
+    d.kind = 2
+    0
+}
+
+/// Store app_metadata for frame `i`. Raises `n` so it covers `i`.
+pub fn flight_meta_set(m: &!FlightMeta, i: i64, text: string) -> i64 with Mut, Panic {
+    if i < 0 || i >= 9 { return -7 }
+    let n = str_len(text)
+    if n < 0 || n > 32 { return -7 }
+    let base = i * 32
+    var k: i64 = 0
+    while k < n {
+        var ch = text[k as usize] as i64
+        if ch < 0 { ch = ch + 256 }
+        m.bytes[(base + k) as usize] = (ch as i32) as u8
+        k = k + 1
+    }
+    m.lens[i as usize] = n
+    if m.n < i + 1 { m.n = i + 1 }
+    0
+}
+
+fn raw_push(r: &!RawBuf, v: i64) -> i64 with Mut, Panic {
+    if r.len >= 160 { return -1 }
+    var x = v & 255
+    if x < 0 { x = x + 256 }
+    r.data[r.len as usize] = (x as i32) as u8
+    r.len = r.len + 1
+    0
+}
+
+fn raw_varint(r: &!RawBuf, v: i64) -> i64 with Mut, Panic {
+    if v < 0 { return -6 }
+    var n = v
+    while n > 127 {
+        if raw_push(r, (n & 127) | 128) != 0 { return -1 }
+        n = n >> 7
+    }
+    raw_push(r, n)
+}
+
+fn encode_desc(desc: &FlightDesc, raw: &!RawBuf) -> i64 with Mut, Panic {
+    raw.len = 0
+    if desc.kind != 1 && desc.kind != 2 { return -6 }
+    if raw_varint(raw, 8) != 0 { return -1 }
+    if raw_varint(raw, desc.kind) != 0 { return -1 }
+    if desc.kind == 2 {
+        if desc.cmd_len < 0 || desc.cmd_len > 64 { return -7 }
+        if raw_varint(raw, 18) != 0 { return -1 }
+        if raw_varint(raw, desc.cmd_len) != 0 { return -1 }
+        var i: i64 = 0
+        while i < desc.cmd_len {
+            if raw_push(raw, desc.cmd[i as usize] as i64) != 0 { return -1 }
+            i = i + 1
+        }
+        return 0
+    }
+    var p: i64 = 0
+    while p < desc.n_path {
+        let n = desc.path_lens[p as usize]
+        if n < 0 || n > 32 { return -7 }
+        if raw_varint(raw, 26) != 0 { return -1 }
+        if raw_varint(raw, n) != 0 { return -1 }
+        let base = p * 32
+        var i: i64 = 0
+        while i < n {
+            if raw_push(raw, desc.path_bytes[(base + i) as usize] as i64) != 0 { return -1 }
+            i = i + 1
+        }
+        p = p + 1
+    }
+    0
+}
+
+/// Write the FlightDescriptor protobuf (no gRPC frame) into `out`.
+pub fn flight_desc_encode(desc: &FlightDesc, out: &!ArrowBuf) -> i64 with Mut, Panic {
+    var raw = RawBuf { data: [0; 160], len: 0 }
+    let rc = encode_desc(desc, &!raw)
+    if rc != 0 { return rc }
+    out.len = 0
+    var i: i64 = 0
+    while i < raw.len {
+        if push_u8(out, raw.data[i as usize] as i64) != 0 { return -1 }
+        i = i + 1
+    }
+    0
+}
+
+fn push_varint(out: &!ArrowBuf, v: i64) -> i64 with Mut, Panic {
+    if v < 0 { return -6 }
+    var n = v
+    while n > 127 {
+        if push_u8(out, (n & 127) | 128) != 0 { return -1 }
+        n = n >> 7
+    }
+    push_u8(out, n)
+}
+
+fn grpc_begin(out: &!ArrowBuf) -> i64 with Mut, Panic {
+    let start = out.len
+    var i: i64 = 0
+    while i < 5 {
+        if push_u8(out, 0) != 0 { return -1 }
+        i = i + 1
+    }
+    start
+}
+
+fn grpc_end(out: &!ArrowBuf, start: i64) -> i64 with Mut, Panic {
+    let n = out.len - (start + 5)
+    if n < 0 || n > 8192 { return -6 }
+    if store_u8(out, start, 0) != 0 { return -6 }
+    if store_u8(out, start + 1, n >> 24) != 0 { return -6 }
+    if store_u8(out, start + 2, n >> 16) != 0 { return -6 }
+    if store_u8(out, start + 3, n >> 8) != 0 { return -6 }
+    store_u8(out, start + 4, n)
+}
+
+fn write_raw_field(out: &!ArrowBuf, field_key: i64, raw: &RawBuf) -> i64 with Mut, Panic {
+    if push_varint(out, field_key) != 0 { return -1 }
+    if push_varint(out, raw.len) != 0 { return -1 }
+    var i: i64 = 0
+    while i < raw.len {
+        if push_u8(out, raw.data[i as usize] as i64) != 0 { return -1 }
+        i = i + 1
+    }
+    0
+}
+
+fn write_slice_field(out: &!ArrowBuf, field_key: i64, src: &ArrowBuf, at: i64, n: i64) -> i64 with Mut, Panic {
+    if n < 0 { return -6 }
+    if push_varint(out, field_key) != 0 { return -1 }
+    if push_varint(out, n) != 0 { return -1 }
+    copy_bytes(src, at, n, out)
+}
+
+fn write_meta_field(out: &!ArrowBuf, meta: &FlightMeta, frame: i64) -> i64 with Mut, Panic {
+    let n = meta.lens[frame as usize]
+    if n < 0 || n > 32 { return -7 }
+    if n == 0 { return 0 }
+    if push_varint(out, 26) != 0 { return -1 }
+    if push_varint(out, n) != 0 { return -1 }
+    let base = frame * 32
+    var i: i64 = 0
+    while i < n {
+        if push_u8(out, meta.bytes[(base + i) as usize] as i64) != 0 { return -1 }
+        i = i + 1
+    }
+    0
+}
+
+fn write_desc_only(desc: &FlightDesc, meta: &FlightMeta, out: &!ArrowBuf) -> i64 with Mut, Panic {
+    var raw = RawBuf { data: [0; 160], len: 0 }
+    let rc = encode_desc(desc, &!raw)
+    if rc != 0 { return rc }
+    out.len = 0
+    let start = grpc_begin(out)
+    if start < 0 { return -1 }
+    if write_raw_field(out, 10, &raw) != 0 { return -1 }
+    if meta.n > 0 {
+        if meta.n != 1 { return -8 }
+        if write_meta_field(out, meta, 0) != 0 { return -1 }
+    }
+    grpc_end(out, start)
+}
+
+fn flight_write(desc: &FlightDesc, ipc: &ArrowBuf, meta: &FlightMeta, out: &!ArrowBuf, include_desc: i64) -> i64 with Mut, Panic, Div {
+    if ipc.len == 0 {
+        if include_desc == 0 { return -6 }
+        return write_desc_only(desc, meta, out)
+    }
+    out.len = 0
+    var pos: i64 = 0
+    var fi: i64 = 0
+    var first: i64 = 1
+    while true {
+        let view = arrow_ipc_view(ipc, pos)
+        if view.status == 1 { break }
+        if view.status != 0 { return view.status }
+        if first == 1 && view.header_type != 1 { return -6 }
+        if view.header_type == 2 { return -4 }
+        if view.header_type != 1 && view.header_type != 3 { return -4 }
+        if view.header_type == 1 && view.body_len != 0 { return -3 }
+        if fi >= 9 { return -7 }
+        if meta.n > 0 && fi >= meta.n { return -8 }
+        let start = grpc_begin(out)
+        if start < 0 { return -1 }
+        if first == 1 && include_desc != 0 {
+            var raw = RawBuf { data: [0; 160], len: 0 }
+            let rc = encode_desc(desc, &!raw)
+            if rc != 0 { return rc }
+            if write_raw_field(out, 10, &raw) != 0 { return -1 }
+        }
+        if write_slice_field(out, 18, ipc, pos + 8, view.meta_size) != 0 { return -1 }
+        if meta.n > 0 {
+            if write_meta_field(out, meta, fi) != 0 { return -1 }
+        }
+        if view.header_type == 3 {
+            if write_slice_field(out, 8002, ipc, pos + 8 + view.meta_size, view.body_len) != 0 { return -1 }
+        }
+        if grpc_end(out, start) != 0 { return -1 }
+        pos = pos + 8 + view.meta_size + view.body_len
+        fi = fi + 1
+        first = 0
+    }
+    if fi == 0 { return -6 }
+    if meta.n > 0 && meta.n != fi { return -8 }
+    0
+}
+
+/// DoPut client stream. `ipc` is an IPC stream (schema first). The descriptor is required.
+/// `meta.n == 0` omits app_metadata; otherwise it must equal the number of IPC messages.
+pub fn do_put_write(desc: &FlightDesc, ipc: &ArrowBuf, meta: &FlightMeta, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {
+    if desc.kind != 1 && desc.kind != 2 { return -6 }
+    if ipc.len < 8 { return -6 }
+    flight_write(desc, ipc, meta, out, 1)
+}
+
+/// DoExchange side of a stream. `include_desc` is 1 to put the descriptor on the first frame.
+/// An empty `ipc` with a descriptor writes one descriptor-only frame (a command open).
+pub fn do_exchange_write(desc: &FlightDesc, ipc: &ArrowBuf, meta: &FlightMeta, include_desc: i64, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {
+    if include_desc != 0 && desc.kind != 1 && desc.kind != 2 { return -6 }
+    flight_write(desc, ipc, meta, out, include_desc)
+}
+
+fn pb_varint_at(buf: &ArrowBuf, pos: i64, end: i64) -> PbInt with Panic {
+    var shift: i64 = 0
+    var val: i64 = 0
+    var p = pos
+    while p < end && shift <= 28 {
+        let b = u8_at(buf, p)
+        p = p + 1
+        val = val | ((b & 127) << shift)
+        if (b & 128) == 0 {
+            return PbInt { val: val, pos: p, status: 0 }
+        }
+        shift = shift + 7
+    }
+    PbInt { val: 0, pos: pos, status: -6 }
+}
+
+fn slice_absent() -> FlightSlice {
+    FlightSlice {
+        desc_at: 0,
+        desc_len: -1,
+        header_at: 0,
+        header_len: -1,
+        meta_at: 0,
+        meta_len: -1,
+        body_at: 0,
+        body_len: -1,
+        status: 0,
+    }
+}
+
+fn parse_flight_data(buf: &ArrowBuf, start: i64, end: i64) -> FlightSlice with Panic {
+    var s = slice_absent()
+    var pos = start
+    while pos < end {
+        let tag = pb_varint_at(buf, pos, end)
+        if tag.status != 0 {
+            s.status = tag.status
+            return s
+        }
+        if tag.val == 0 {
+            s.status = -6
+            return s
+        }
+        let wire = tag.val & 7
+        let field = tag.val >> 3
+        pos = tag.pos
+        if wire == 2 {
+            let ln = pb_varint_at(buf, pos, end)
+            if ln.status != 0 {
+                s.status = ln.status
+                return s
+            }
+            if ln.val < 0 || ln.pos + ln.val > end {
+                s.status = -5
+                return s
+            }
+            if field == 1 {
+                if s.desc_len >= 0 {
+                    s.status = -6
+                    return s
+                }
+                s.desc_at = ln.pos
+                s.desc_len = ln.val
+            } else if field == 2 {
+                if s.header_len >= 0 {
+                    s.status = -6
+                    return s
+                }
+                s.header_at = ln.pos
+                s.header_len = ln.val
+            } else if field == 3 {
+                if s.meta_len >= 0 {
+                    s.status = -6
+                    return s
+                }
+                s.meta_at = ln.pos
+                s.meta_len = ln.val
+            } else if field == 1000 {
+                if s.body_len >= 0 {
+                    s.status = -6
+                    return s
+                }
+                s.body_at = ln.pos
+                s.body_len = ln.val
+            }
+            pos = ln.pos + ln.val
+        } else if wire == 0 {
+            let v = pb_varint_at(buf, pos, end)
+            if v.status != 0 {
+                s.status = v.status
+                return s
+            }
+            pos = v.pos
+        } else if wire == 1 {
+            if pos + 8 > end {
+                s.status = -5
+                return s
+            }
+            pos = pos + 8
+        } else if wire == 5 {
+            if pos + 4 > end {
+                s.status = -5
+                return s
+            }
+            pos = pos + 4
+        } else {
+            s.status = -6
+            return s
+        }
+    }
+    s
+}
+
+fn take_meta(buf: &ArrowBuf, at: i64, n: i64, meta: &!FlightMeta, frame: i64) -> i64 with Mut, Panic {
+    if n < 0 { return 0 }
+    if n > 32 { return -7 }
+    if frame < 0 || frame >= 9 { return -7 }
+    let base = frame * 32
+    var i: i64 = 0
+    while i < n {
+        meta.bytes[(base + i) as usize] = (u8_at(buf, at + i) as i32) as u8
+        i = i + 1
+    }
+    meta.lens[frame as usize] = n
+    0
+}
+
+fn parse_desc(buf: &ArrowBuf, start: i64, end: i64, desc: &!FlightDesc) -> i64 with Mut, Panic {
+    desc.kind = 0
+    desc.n_path = 0
+    desc.cmd_len = 0
+    var pos = start
+    var saw_type: i64 = 0
+    while pos < end {
+        let tag = pb_varint_at(buf, pos, end)
+        if tag.status != 0 { return tag.status }
+        if tag.val == 0 { return -6 }
+        let wire = tag.val & 7
+        let field = tag.val >> 3
+        pos = tag.pos
+        if wire == 0 {
+            let v = pb_varint_at(buf, pos, end)
+            if v.status != 0 { return v.status }
+            if field == 1 {
+                if v.val != 1 && v.val != 2 { return -4 }
+                desc.kind = v.val
+                saw_type = 1
+            }
+            pos = v.pos
+        } else if wire == 2 {
+            let ln = pb_varint_at(buf, pos, end)
+            if ln.status != 0 { return ln.status }
+            if ln.val < 0 || ln.pos + ln.val > end { return -5 }
+            if field == 2 {
+                if ln.val > 64 { return -7 }
+                var i: i64 = 0
+                while i < ln.val {
+                    desc.cmd[i as usize] = (u8_at(buf, ln.pos + i) as i32) as u8
+                    i = i + 1
+                }
+                desc.cmd_len = ln.val
+            } else if field == 3 {
+                if desc.n_path >= 4 { return -7 }
+                if ln.val > 32 { return -7 }
+                let base = desc.n_path * 32
+                var i: i64 = 0
+                while i < ln.val {
+                    desc.path_bytes[(base + i) as usize] = (u8_at(buf, ln.pos + i) as i32) as u8
+                    i = i + 1
+                }
+                desc.path_lens[desc.n_path as usize] = ln.val
+                desc.n_path = desc.n_path + 1
+            }
+            pos = ln.pos + ln.val
+        } else {
+            return -6
+        }
+    }
+    if saw_type == 0 { return -6 }
+    if desc.kind == 2 && desc.n_path != 0 { return -6 }
+    if desc.kind == 1 && desc.cmd_len != 0 { return -6 }
+    0
+}
+
+fn encapsulate(dst: &!ArrowBuf, src: &ArrowBuf, header_at: i64, header_len: i64, body_at: i64, body_len: i64) -> i64 with Mut, Panic, Div {
+    if header_len < 0 { return -6 }
+    var body = body_len
+    if body < 0 { body = 0 }
+    if body % 8 != 0 { return -3 }
+    let rem = header_len % 8
+    var pad: i64 = 0
+    if rem != 0 { pad = 8 - rem }
+    if push_le_i32(dst, -1) != 0 { return -1 }
+    if push_le_i32(dst, header_len + pad) != 0 { return -1 }
+    if copy_bytes(src, header_at, header_len, dst) != 0 { return -1 }
+    var i: i64 = 0
+    while i < pad {
+        if push_u8(dst, 0) != 0 { return -1 }
+        i = i + 1
+    }
+    copy_bytes(src, body_at, body, dst)
+}
+
+fn flight_read(buf: &ArrowBuf, desc: &!FlightDesc, ipc: &!ArrowBuf, meta: &!FlightMeta, require_desc: i64) -> i64 with Mut, Panic, Div {
+    desc.kind = 0
+    desc.n_path = 0
+    desc.cmd_len = 0
+    meta.n = 0
+    ipc.len = 0
+    var pos: i64 = 0
+    var fi: i64 = 0
+    var wrote: i64 = 0
+    while pos < buf.len {
+        if fi >= 9 { return -7 }
+        if pos + 5 > buf.len { return -5 }
+        let flag = u8_at(buf, pos)
+        if flag != 0 { return -4 }
+        let n = be_u32(buf, pos + 1)
+        if n < 0 || pos + 5 + n > buf.len { return -5 }
+        let frame_at = pos + 5
+        let frame_end = frame_at + n
+        let slice = parse_flight_data(buf, frame_at, frame_end)
+        if slice.status != 0 { return slice.status }
+        if slice.desc_len >= 0 {
+            if fi != 0 { return -4 }
+            let rc = parse_desc(buf, slice.desc_at, slice.desc_at + slice.desc_len, desc)
+            if rc != 0 { return rc }
+        }
+        if fi == 0 && require_desc != 0 && slice.desc_len < 0 { return -6 }
+        if fi == 0 && require_desc != 0 && slice.header_len < 0 { return -6 }
+        if slice.meta_len > 32 { return -7 }
+        if slice.meta_len >= 0 {
+            let rc = take_meta(buf, slice.meta_at, slice.meta_len, meta, fi)
+            if rc != 0 { return rc }
+        }
+        if slice.header_len >= 0 {
+            if slice.body_len >= 0 && slice.header_len == 0 { return -6 }
+            let rc = encapsulate(ipc, buf, slice.header_at, slice.header_len, slice.body_at, slice.body_len)
+            if rc != 0 { return rc }
+            wrote = 1
+        } else if slice.body_len > 0 {
+            return -6
+        }
+        fi = fi + 1
+        pos = frame_end
+    }
+    meta.n = fi
+    if wrote != 0 {
+        if push_le_i32(ipc, -1) != 0 { return -1 }
+        if push_le_i32(ipc, 0) != 0 { return -1 }
+    }
+    if require_desc != 0 && fi == 0 { return -6 }
+    0
+}
+
+/// Read a DoPut client stream back into an IPC stream plus the descriptor and per-frame metadata.
+pub fn do_put_read(buf: &ArrowBuf, desc: &!FlightDesc, ipc: &!ArrowBuf, meta: &!FlightMeta) -> i64 with Mut, Panic, Div {
+    flight_read(buf, desc, ipc, meta, 1)
+}
+
+/// Read one direction of a DoExchange. The first frame's descriptor is optional.
+pub fn do_exchange_read(buf: &ArrowBuf, desc: &!FlightDesc, ipc: &!ArrowBuf, meta: &!FlightMeta) -> i64 with Mut, Panic, Div {
+    flight_read(buf, desc, ipc, meta, 0)
+}
+
+/// Append one DoPut PutResult frame. An empty string is an empty protobuf.
+pub fn put_result_write(text: string, out: &!ArrowBuf) -> i64 with Mut, Panic {
+    let n = str_len(text)
+    if n < 0 || n > 32 { return -7 }
+    let start = grpc_begin(out)
+    if start < 0 { return -1 }
+    if n > 0 {
+        if push_varint(out, 10) != 0 { return -1 }
+        if push_varint(out, n) != 0 { return -1 }
+        var i: i64 = 0
+        while i < n {
+            var ch = text[i as usize] as i64
+            if ch < 0 { ch = ch + 256 }
+            if push_u8(out, ch) != 0 { return -1 }
+            i = i + 1
+        }
+    }
+    grpc_end(out, start)
+}
+
+/// Read a stream of PutResult frames into `meta`.
+pub fn put_result_read(buf: &ArrowBuf, meta: &!FlightMeta) -> i64 with Mut, Panic {
+    meta.n = 0
+    var pos: i64 = 0
+    var fi: i64 = 0
+    while pos < buf.len {
+        if fi >= 9 { return -7 }
+        if pos + 5 > buf.len { return -5 }
+        if u8_at(buf, pos) != 0 { return -4 }
+        let n = be_u32(buf, pos + 1)
+        if n < 0 || pos + 5 + n > buf.len { return -5 }
+        let frame_at = pos + 5
+        let frame_end = frame_at + n
+        var p = frame_at
+        var saw: i64 = 0
+        while p < frame_end {
+            let tag = pb_varint_at(buf, p, frame_end)
+            if tag.status != 0 { return tag.status }
+            if tag.val == 0 { return -6 }
+            let wire = tag.val & 7
+            let field = tag.val >> 3
+            p = tag.pos
+            if wire == 2 {
+                let ln = pb_varint_at(buf, p, frame_end)
+                if ln.status != 0 { return ln.status }
+                if ln.val < 0 || ln.pos + ln.val > frame_end { return -5 }
+                if field == 1 {
+                    if saw != 0 { return -6 }
+                    let rc = take_meta(buf, ln.pos, ln.val, meta, fi)
+                    if rc != 0 { return rc }
+                    saw = 1
+                }
+                p = ln.pos + ln.val
+            } else if wire == 0 {
+                let v = pb_varint_at(buf, p, frame_end)
+                if v.status != 0 { return v.status }
+                p = v.pos
+            } else if wire == 1 {
+                if p + 8 > frame_end { return -5 }
+                p = p + 8
+            } else if wire == 5 {
+                if p + 4 > frame_end { return -5 }
+                p = p + 4
+            } else {
+                return -6
+            }
+        }
+        if saw == 0 { meta.lens[fi as usize] = 0 }
+        fi = fi + 1
+        pos = frame_end
+    }
+    meta.n = fi
+    0
+}

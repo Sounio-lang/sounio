@@ -24,8 +24,8 @@
 // Status: 0 ok, -1 overflow, -2 bad magic, -3 bad framing, -4 unsupported,
 // -5 truncated, -6 malformed flatbuffer, -7 over capacity, -8 shape mismatch.
 //
-// Reference: Apache Arrow Columnar specification (IPC stream and file),
-// https://arrow.apache.org/docs/format/Columnar.html
+// Reference: Apache Arrow Columnar specification, IPC
+// https://arrow.apache.org/docs/format/Columnar.html#format-ipc
 
 use arrow::flatbuf::{
     FbBuilder,
@@ -93,6 +93,17 @@ pub struct ArrowCursor {
     pub pos: i64,
     pub index: i64,
     pub n_blocks: i64,
+}
+
+/// One encapsulated IPC message at `pos`.
+/// `status` 1 is end-of-stream (`0xFFFFFFFF` then metadata length 0, or a bare 0 continuation).
+/// `meta_size` is the spec's metadata_size and includes the FlatBuffer padding.
+pub struct ArrowIpcView {
+    pub cont: i64,
+    pub meta_size: i64,
+    pub body_len: i64,
+    pub header_type: i64,
+    pub status: i64,
 }
 
 struct Scratch {
@@ -1455,6 +1466,45 @@ pub fn arrow_ipc_next(buf: &ArrowBuf, schema: &ArrowSchema, cur: &!ArrowCursor, 
         return -4
     }
     1
+}
+
+/// Describe the encapsulated message at `pos` (continuation, metadata_size, body).
+pub fn arrow_ipc_view(buf: &ArrowBuf, pos: i64) -> ArrowIpcView with Mut, Panic, Div {
+    if pos < 0 || pos > buf.len {
+        return ArrowIpcView { cont: 0, meta_size: 0, body_len: 0, header_type: 0, status: -5 }
+    }
+    if pos == buf.len {
+        return ArrowIpcView { cont: -1, meta_size: 0, body_len: 0, header_type: 0, status: 1 }
+    }
+    if pos + 8 > buf.len {
+        return ArrowIpcView { cont: 0, meta_size: 0, body_len: 0, header_type: 0, status: -5 }
+    }
+    let cont = ab_i32(buf, pos)
+    let msize = ab_i32(buf, pos + 4)
+    if cont == 0 || (cont == -1 && msize == 0) {
+        return ArrowIpcView { cont: cont, meta_size: 0, body_len: 0, header_type: 0, status: 1 }
+    }
+    if cont != -1 {
+        return ArrowIpcView { cont: cont, meta_size: msize, body_len: 0, header_type: 0, status: -3 }
+    }
+    if msize < 0 || pos + 8 + msize > buf.len {
+        return ArrowIpcView { cont: cont, meta_size: msize, body_len: 0, header_type: 0, status: -5 }
+    }
+    var msg = IpcMsg { version: 0, header_type: 0, header_pos: 0, body_len: 0 }
+    let rc = read_message_at(buf, pos + 8, &!msg)
+    if rc != 0 {
+        return ArrowIpcView { cont: cont, meta_size: msize, body_len: 0, header_type: 0, status: rc }
+    }
+    if msg.body_len < 0 || pos + 8 + msize + msg.body_len > buf.len {
+        return ArrowIpcView { cont: cont, meta_size: msize, body_len: msg.body_len, header_type: msg.header_type, status: -5 }
+    }
+    ArrowIpcView {
+        cont: cont,
+        meta_size: msize,
+        body_len: msg.body_len,
+        header_type: msg.header_type,
+        status: 0,
+    }
 }
 
 /// Read a file buffer (leading "ARROW1") or a stream buffer.

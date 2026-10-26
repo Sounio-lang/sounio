@@ -1,0 +1,278 @@
+// DoPut and DoExchange frames around encapsulated IPC messages.
+// https://arrow.apache.org/docs/format/Columnar.html#format-ipc
+
+use arrow::lib::{
+    ArrowBuf,
+    ArrowSchema,
+    arrow_batch_i64,
+    arrow_batch_new,
+    arrow_batch_set_i64,
+    arrow_batch_shape,
+    arrow_buf_new,
+    arrow_cursor_new,
+    arrow_ipc_next,
+    arrow_ipc_open,
+    arrow_ipc_stream_begin,
+    arrow_ipc_stream_end,
+    arrow_ipc_stream_push,
+    arrow_schema_add,
+    arrow_schema_new,
+    arrow_type_int,
+}
+
+use arrow::flight::{
+    FlightDesc,
+    FlightMeta,
+    do_exchange_read,
+    do_exchange_write,
+    do_put_read,
+    do_put_write,
+    flight_desc_add_path,
+    flight_desc_encode,
+    flight_desc_new,
+    flight_desc_set_cmd,
+    flight_meta_new,
+    flight_meta_set,
+    put_result_read,
+    put_result_write,
+}
+
+fn eq_bytes(buf: &ArrowBuf, pat: &[i64; 16], n: i64) -> i64 with Panic {
+    if buf.len != n { return 0 }
+    var i: i64 = 0
+    while i < n {
+        let v = buf.data[i as usize] as i64
+        var b = v
+        if b < 0 { b = b + 256 }
+        if b != pat[i as usize] { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+fn meta_is(meta: &FlightMeta, i: i64, text: string) -> i64 with Panic {
+    let n = str_len(text)
+    if meta.lens[i as usize] != n { return 0 }
+    var k: i64 = 0
+    while k < n {
+        var want = text[k as usize] as i64
+        if want < 0 { want = want + 256 }
+        let gotv = meta.bytes[(i * 32 + k) as usize] as i64
+        var got = gotv
+        if got < 0 { got = got + 256 }
+        if got != want { return 0 }
+        k = k + 1
+    }
+    1
+}
+
+fn cmd_is(desc: &FlightDesc, text: string) -> i64 with Panic {
+    let n = str_len(text)
+    if desc.cmd_len != n { return 0 }
+    var i: i64 = 0
+    while i < n {
+        var want = text[i as usize] as i64
+        if want < 0 { want = want + 256 }
+        let gotv = desc.cmd[i as usize] as i64
+        var got = gotv
+        if got < 0 { got = got + 256 }
+        if got != want { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+fn test_desc() -> i64 with Mut, Panic {
+    var desc = flight_desc_new()
+    if flight_desc_add_path(&!desc, "data") != 0 { return 10 }
+    if flight_desc_add_path(&!desc, "id") != 0 { return 11 }
+    var buf = arrow_buf_new()
+    if flight_desc_encode(&desc, &!buf) != 0 { return 12 }
+    var path: [i64; 16] = [8, 1, 26, 4, 100, 97, 116, 97, 26, 2, 105, 100, 0, 0, 0, 0]
+    if eq_bytes(&buf, &path, 12) == 0 { return 13 }
+    var cmd = flight_desc_new()
+    if flight_desc_set_cmd(&!cmd, "query") != 0 { return 14 }
+    if flight_desc_encode(&cmd, &!buf) != 0 { return 15 }
+    var query: [i64; 16] = [8, 2, 18, 5, 113, 117, 101, 114, 121, 0, 0, 0, 0, 0, 0, 0]
+    if eq_bytes(&buf, &query, 9) == 0 { return 16 }
+    0
+}
+
+fn fill_id(schema: &!ArrowSchema) -> i64 with Mut, Panic {
+    arrow_schema_add(schema, "id", 0, arrow_type_int(), 64, 1, 0)
+}
+
+fn test_put() -> i64 with IO, Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if fill_id(&!schema) != 0 { return 20 }
+    var b0 = arrow_batch_new()
+    var b1 = arrow_batch_new()
+    if arrow_batch_shape(&!b0, 2, 1) != 0 { return 21 }
+    if arrow_batch_shape(&!b1, 1, 1) != 0 { return 22 }
+    if arrow_batch_set_i64(&!b0, 0, 0, 1, 0) != 0 { return 23 }
+    if arrow_batch_set_i64(&!b0, 0, 1, 2, 0) != 0 { return 24 }
+    if arrow_batch_set_i64(&!b1, 0, 0, 30, 0) != 0 { return 25 }
+    var ipc = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!ipc) != 0 { return 26 }
+    if arrow_ipc_stream_push(&schema, &b0, &!ipc) != 0 { return 27 }
+    if arrow_ipc_stream_push(&schema, &b1, &!ipc) != 0 { return 28 }
+    if arrow_ipc_stream_end(&!ipc) != 0 { return 29 }
+    var desc = flight_desc_new()
+    if flight_desc_add_path(&!desc, "data") != 0 { return 30 }
+    if flight_desc_add_path(&!desc, "id") != 0 { return 31 }
+    var meta = flight_meta_new()
+    var out = arrow_buf_new()
+    if do_put_write(&desc, &ipc, &meta, &!out) != 0 { return 32 }
+    let n = write_file("/tmp/sounio_flight_do_put.bin", out.data, out.len)
+    if n != out.len { return 33 }
+    var got_desc = flight_desc_new()
+    var back = arrow_buf_new()
+    var got_meta = flight_meta_new()
+    if do_put_read(&out, &!got_desc, &!back, &!got_meta) != 0 { return 34 }
+    if got_desc.kind != 1 { return 35 }
+    if got_desc.n_path != 2 { return 36 }
+    if got_desc.path_lens[0] != 4 { return 37 }
+    if got_desc.path_lens[1] != 2 { return 38 }
+    if got_meta.n != 3 { return 39 }
+    var schema2 = arrow_schema_new()
+    var batch = arrow_batch_new()
+    var cur = arrow_cursor_new()
+    if arrow_ipc_open(&back, &!schema2, &!cur) != 0 { return 40 }
+    if schema2.n_fields != 1 { return 41 }
+    if arrow_ipc_next(&back, &schema2, &!cur, &!batch) != 0 { return 42 }
+    if arrow_batch_i64(&batch, 0, 0) != 1 { return 43 }
+    if arrow_batch_i64(&batch, 0, 1) != 2 { return 44 }
+    if arrow_ipc_next(&back, &schema2, &!cur, &!batch) != 0 { return 45 }
+    if arrow_batch_i64(&batch, 0, 0) != 30 { return 46 }
+    if arrow_ipc_next(&back, &schema2, &!cur, &!batch) != 1 { return 47 }
+    var one = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!one) != 0 { return 48 }
+    if arrow_ipc_stream_push(&schema, &b1, &!one) != 0 { return 49 }
+    if arrow_ipc_stream_end(&!one) != 0 { return 50 }
+    if flight_meta_set(&!meta, 0, "hi") != 0 { return 51 }
+    if flight_meta_set(&!meta, 1, "yo") != 0 { return 52 }
+    if do_put_write(&desc, &one, &meta, &!out) != 0 { return 53 }
+    if do_put_read(&out, &!got_desc, &!back, &!got_meta) != 0 { return 54 }
+    if got_meta.n != 2 { return 55 }
+    if meta_is(&got_meta, 0, "hi") == 0 { return 56 }
+    if meta_is(&got_meta, 1, "yo") == 0 { return 57 }
+    0
+}
+
+fn test_put_result() -> i64 with IO, Mut, Panic {
+    var out = arrow_buf_new()
+    if put_result_write("ok", &!out) != 0 { return 60 }
+    if put_result_write("", &!out) != 0 { return 61 }
+    let n = write_file("/tmp/sounio_flight_put_result.bin", out.data, out.len)
+    if n != out.len { return 62 }
+    var meta = flight_meta_new()
+    if put_result_read(&out, &!meta) != 0 { return 63 }
+    if meta.n != 2 { return 64 }
+    if meta_is(&meta, 0, "ok") == 0 { return 65 }
+    if meta.lens[1] != 0 { return 66 }
+    0
+}
+
+fn test_exchange() -> i64 with IO, Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if fill_id(&!schema) != 0 { return 70 }
+    var ipc = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!ipc) != 0 { return 71 }
+    if arrow_ipc_stream_end(&!ipc) != 0 { return 72 }
+    var desc = flight_desc_new()
+    if flight_desc_set_cmd(&!desc, "query") != 0 { return 73 }
+    var meta = flight_meta_new()
+    var client = arrow_buf_new()
+    if do_exchange_write(&desc, &ipc, &meta, 1, &!client) != 0 { return 74 }
+    let nc = write_file("/tmp/sounio_flight_exchange_client.bin", client.data, client.len)
+    if nc != client.len { return 75 }
+    var got = flight_desc_new()
+    var back = arrow_buf_new()
+    var got_meta = flight_meta_new()
+    if do_exchange_read(&client, &!got, &!back, &!got_meta) != 0 { return 76 }
+    if got.kind != 2 { return 77 }
+    if cmd_is(&got, "query") == 0 { return 78 }
+    var schema2 = arrow_schema_new()
+    var batch = arrow_batch_new()
+    var cur = arrow_cursor_new()
+    if arrow_ipc_open(&back, &!schema2, &!cur) != 0 { return 79 }
+    if arrow_ipc_next(&back, &schema2, &!cur, &!batch) != 1 { return 80 }
+    var row = arrow_batch_new()
+    if arrow_batch_shape(&!row, 1, 1) != 0 { return 81 }
+    if arrow_batch_set_i64(&!row, 0, 0, 7, 0) != 0 { return 82 }
+    var server_ipc = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!server_ipc) != 0 { return 83 }
+    if arrow_ipc_stream_push(&schema, &row, &!server_ipc) != 0 { return 84 }
+    if arrow_ipc_stream_end(&!server_ipc) != 0 { return 85 }
+    var server = arrow_buf_new()
+    var none = flight_desc_new()
+    if do_exchange_write(&none, &server_ipc, &meta, 0, &!server) != 0 { return 86 }
+    let ns = write_file("/tmp/sounio_flight_exchange_server.bin", server.data, server.len)
+    if ns != server.len { return 87 }
+    if do_exchange_read(&server, &!got, &!back, &!got_meta) != 0 { return 88 }
+    if got.kind != 0 { return 89 }
+    if arrow_ipc_open(&back, &!schema2, &!cur) != 0 { return 90 }
+    if arrow_ipc_next(&back, &schema2, &!cur, &!batch) != 0 { return 91 }
+    if arrow_batch_i64(&batch, 0, 0) != 7 { return 92 }
+    var empty = arrow_buf_new()
+    empty.len = 0
+    if do_exchange_write(&desc, &empty, &meta, 1, &!client) != 0 { return 93 }
+    if do_exchange_read(&client, &!got, &!back, &!got_meta) != 0 { return 94 }
+    if got.kind != 2 { return 95 }
+    if back.len != 0 { return 96 }
+    0
+}
+
+fn test_reject() -> i64 with Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if fill_id(&!schema) != 0 { return 100 }
+    var ipc = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!ipc) != 0 { return 101 }
+    if arrow_ipc_stream_end(&!ipc) != 0 { return 102 }
+    var desc = flight_desc_new()
+    var meta = flight_meta_new()
+    var out = arrow_buf_new()
+    if do_put_write(&desc, &ipc, &meta, &!out) != -6 { return 103 }
+    if flight_desc_set_cmd(&!desc, "query") != 0 { return 104 }
+    if do_put_write(&desc, &ipc, &meta, &!out) != 0 { return 105 }
+    out.data[0] = 1 as u8
+    var got = flight_desc_new()
+    var back = arrow_buf_new()
+    if do_put_read(&out, &!got, &!back, &!meta) != -4 { return 106 }
+    0
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let a = test_desc()
+    if a != 0 {
+        print("FAIL desc ")
+        println(a)
+        return 1
+    }
+    let b = test_put()
+    if b != 0 {
+        print("FAIL put ")
+        println(b)
+        return 1
+    }
+    let c = test_put_result()
+    if c != 0 {
+        print("FAIL result ")
+        println(c)
+        return 1
+    }
+    let d = test_exchange()
+    if d != 0 {
+        print("FAIL exchange ")
+        println(d)
+        return 1
+    }
+    let e = test_reject()
+    if e != 0 {
+        print("FAIL reject ")
+        println(e)
+        return 1
+    }
+    println("FLIGHT_IPC_OK")
+    0
+}

@@ -35,4 +35,12 @@ if ! python3 -c 'import pyarrow' >/dev/null 2>&1; then
 fi
 
 python3 scripts/arrow_ipc_check.py "$FILE_OUT" "$STREAM_OUT" "$MULTI_FILE" "$MULTI_STREAM"
+
+echo "== arrow flight do_put / do_exchange =="
+"$SOUC" run tests/stdlib/arrow/test_arrow_flight.sio
+python3 scripts/arrow_flight_check.py \
+  /tmp/sounio_flight_do_put.bin \
+  /tmp/sounio_flight_put_result.bin \
+  /tmp/sounio_flight_exchange_client.bin \
+  /tmp/sounio_flight_exchange_server.bin
 echo "ARROW_IPC_GATE_OK"

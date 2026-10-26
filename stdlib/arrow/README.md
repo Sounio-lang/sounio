@@ -61,3 +61,22 @@ fn main() -> i32 with Mut, Panic, Div {
 `arrow_ipc_write_file` adds the `ARROW1` magic and footer. `arrow_ipc_read`
 accepts either form. `arrow_ipc_write_path` writes the file form with
 `write_file`.
+
+## DoPut and DoExchange
+
+`arrow::flight` wraps those encapsulated messages as Arrow Flight data
+frames. The layout of each message is the [IPC encapsulated format](https://arrow.apache.org/docs/format/Columnar.html#format-ipc):
+continuation `0xFFFFFFFF`, `metadata_size` (the FlatBuffer `Message` plus
+padding), the metadata, then the body. A schema message has no body.
+End-of-stream is not a Flight frame.
+
+`do_put_write` turns an IPC stream into a DoPut client stream: the first
+`FlightData` carries the descriptor and the schema `Message`, and each
+following frame is one record batch (`data_header` plus `data_body`).
+`put_result_write` is the DoPut reply. `do_exchange_write` is the same
+`FlightData` sequence in either direction; a reply omits the descriptor,
+and an empty IPC buffer with a descriptor is a command-only open.
+
+Frames are uncompressed gRPC messages (one flag byte, a big-endian length,
+then the protobuf). This is not an HTTP/2 server. At most 9 frames. A
+compressed flag returns `-4`.
