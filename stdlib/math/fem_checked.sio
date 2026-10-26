@@ -1,0 +1,113 @@
+// Checked piecewise-linear 1D FEM for -(EA uprime)prime=q on ordered nodes.
+// Piecewise constant EA/q; exact strong Dirichlet elimination, caller scratch.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+use math::pure::{is_finite}
+use linalg::least_squares_scale::{LeastSquaresNumber,least_squares_scaled_product_into}
+pub struct FEM1DWorkspace {pub status:i64,pub n:i64,pub vector_len:i64,pub payload_bytes:i64}
+pub struct FEM1DResult {pub status:i64,pub n:i64,pub assembled:i64,pub eliminated:i64,pub residual_max:f64,pub min_pivot:f64}
+pub fn fem1d_workspace(n:i64)->FEM1DWorkspace with Div {
+ if n<2 || n>9223372036854771704/40 {return FEM1DWorkspace{status:1,n:n,vector_len:0,payload_bytes:0}}
+ FEM1DWorkspace{status:0,n:n,vector_len:n,payload_bytes:n*40}
+}
+fn fc_vector(b:&NumericBuffer,n:i64)->bool {numeric_buffer_status(b)==0 && numeric_buffer_len(b)==n}
+fn fc_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn fc_load_into(q:f64,h:f64,out:&!LeastSquaresNumber)->i64 with Mut,Div,Panic {
+ let product=q*h
+ let value=0.5*product
+ if is_finite(product) && is_finite(value) && (q==0.0 || value!=0.0) {out.status=0;out.value=value;return 0}
+ let code=least_squares_scaled_product_into(q,h,1.0,2.0,1.0,1.0,out)
+ if code!=0 || (q!=0.0 && out.value==0.0) {out.status=4;return 4}
+ 0
+}
+// Status0available,1layout/options,2domain/nonpositive stiffness/pivot,
+// 3element budget,4nonfinite arithmetic. Output changes only after full success.
+// diag/upper/rhs/trial are four distinct caller-owned length-n scratch buffers.
+pub fn fem1d_solve_into(nodes:&NumericBuffer,ea:&NumericBuffer,load:&NumericBuffer,
+ left:f64,right:f64,max_elements:i64,solution:&!NumericBuffer,
+ diag:&!NumericBuffer,upper:&!NumericBuffer,rhs:&!NumericBuffer,trial:&!NumericBuffer)->FEM1DResult with Mut,Div,Panic {
+ var load_slot=LeastSquaresNumber{status:4,value:0.0}
+ let n=numeric_buffer_len(nodes)
+ var out=FEM1DResult{status:1,n:n,assembled:0,eliminated:0,residual_max:0.0,min_pivot:0.0}
+ if fem1d_workspace(n).status!=0 || !fc_vector(nodes,n) || !fc_vector(ea,n-1) || !fc_vector(load,n-1) || !fc_vector(solution,n) || !fc_vector(diag,n) || !fc_vector(upper,n) || !fc_vector(rhs,n) || !fc_vector(trial,n) || max_elements<0 {return out}
+ if n-1>max_elements {out.status=3;return out}
+ out.status=2
+ if !is_finite(left) || !is_finite(right) {return out}
+ var i:i64=0
+ while i<n {if !is_finite(numeric_buffer_at(nodes,i)) {return out};i=i+1}
+ i=0
+ while i<n-1 {
+  let h=numeric_buffer_at(nodes,i+1)-numeric_buffer_at(nodes,i)
+  if !is_finite(h) || h<=0.0 || !is_finite(numeric_buffer_at(ea,i)) || numeric_buffer_at(ea,i)<=0.0 || !is_finite(numeric_buffer_at(load,i)) {return out}
+  i=i+1
+ }
+ i=0
+ while i<n {numeric_buffer_set(diag,i,0.0);numeric_buffer_set(upper,i,0.0);numeric_buffer_set(rhs,i,0.0);i=i+1}
+ out.status=4
+ i=0
+ while i<n-1 {
+  let h=numeric_buffer_at(nodes,i+1)-numeric_buffer_at(nodes,i)
+  let k=numeric_buffer_at(ea,i)/h
+  if fc_load_into(numeric_buffer_at(load,i),h,&!load_slot)!=0 {return out}
+  let f=load_slot.value
+  if !is_finite(k) || k<=0.0 || !is_finite(f) {return out}
+  let d0=numeric_buffer_at(diag,i)+k;let d1=numeric_buffer_at(diag,i+1)+k
+  let f0=numeric_buffer_at(rhs,i)+f;let f1=numeric_buffer_at(rhs,i+1)+f
+  if !is_finite(d0) || !is_finite(d1) || !is_finite(f0) || !is_finite(f1) {return out}
+  numeric_buffer_set(diag,i,d0);numeric_buffer_set(diag,i+1,d1)
+  numeric_buffer_set(upper,i,-k);numeric_buffer_set(rhs,i,f0);numeric_buffer_set(rhs,i+1,f1)
+  out.assembled=out.assembled+1;i=i+1
+ }
+ if n>2 {
+  let first=numeric_buffer_at(rhs,1)-numeric_buffer_at(upper,0)*left
+  if !is_finite(first) {return out}
+  numeric_buffer_set(rhs,1,first)
+  let last=numeric_buffer_at(rhs,n-2)-numeric_buffer_at(upper,n-2)*right
+  if !is_finite(last) {return out}
+  numeric_buffer_set(rhs,n-2,last)
+ }
+ numeric_buffer_set(diag,0,1.0);numeric_buffer_set(diag,n-1,1.0)
+ numeric_buffer_set(rhs,0,left);numeric_buffer_set(rhs,n-1,right)
+ numeric_buffer_set(upper,0,0.0);numeric_buffer_set(upper,n-2,0.0)
+ out.min_pivot=1.0
+ i=1
+ while i<n {
+  let previous=numeric_buffer_at(diag,i-1)
+  if !is_finite(previous) || previous<=0.0 {out.status=2;return out}
+  let multiplier=numeric_buffer_at(upper,i-1)/previous
+  let pivot=numeric_buffer_at(diag,i)-multiplier*numeric_buffer_at(upper,i-1)
+  let value=numeric_buffer_at(rhs,i)-multiplier*numeric_buffer_at(rhs,i-1)
+  if !is_finite(multiplier) || !is_finite(pivot) || !is_finite(value) {return out}
+  if pivot<=0.0 {out.status=2;return out}
+  if pivot<out.min_pivot {out.min_pivot=pivot}
+  numeric_buffer_set(diag,i,pivot);numeric_buffer_set(rhs,i,value)
+  out.eliminated=out.eliminated+1;i=i+1
+ }
+ i=n-1
+ while i>=0 {
+  var value=numeric_buffer_at(rhs,i)
+  if i<n-1 {value=value-numeric_buffer_at(upper,i)*numeric_buffer_at(trial,i+1)}
+  value=value/numeric_buffer_at(diag,i)
+  if !is_finite(value) {return out}
+  numeric_buffer_set(trial,i,value);i=i-1
+ }
+ // Recompute the assembled physical interior residual, not the modified system.
+ i=1
+ while i<n-1 {
+  let hl=numeric_buffer_at(nodes,i)-numeric_buffer_at(nodes,i-1)
+  let hr=numeric_buffer_at(nodes,i+1)-numeric_buffer_at(nodes,i)
+  let fluxl=(numeric_buffer_at(ea,i-1)/hl)*(numeric_buffer_at(trial,i)-numeric_buffer_at(trial,i-1))
+  let fluxr=(numeric_buffer_at(ea,i)/hr)*(numeric_buffer_at(trial,i+1)-numeric_buffer_at(trial,i))
+  if fc_load_into(numeric_buffer_at(load,i-1),hl,&!load_slot)!=0 {return out}
+  let left_load=load_slot.value
+  if fc_load_into(numeric_buffer_at(load,i),hr,&!load_slot)!=0 {return out}
+  let force=left_load+load_slot.value
+  let residual=fc_abs((fluxl-fluxr)-force)
+  if !is_finite(fluxl) || !is_finite(fluxr) || !is_finite(force) || !is_finite(residual) {return out}
+  if residual>out.residual_max {out.residual_max=residual}
+  i=i+1
+ }
+ i=0
+ while i<n {numeric_buffer_set(solution,i,numeric_buffer_at(trial,i));i=i+1}
+ out.status=0
+ out
+}

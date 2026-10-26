@@ -55,6 +55,25 @@ fn fft_sqrt(x: f64) -> f64 with Mut, Div, Panic {
 
 // =============================================================================
 // Bit reversal
+// Legacy fixed-array calls reject unsupported active prefixes before mutation.
+fn fft_count_valid(n:i32)->bool with Mut,Div {
+    if n<1 || n>4096 {return false}
+    var q=n
+    while q>1 {if q%2!=0 {return false};q=q/2}
+    true
+}
+fn fft_prefix_valid(re:&[f64;4096],im:&[f64;4096],n:i32)->bool with Mut,Div,Panic {
+    if !fft_count_valid(n) {return false}
+    var i:i32=0
+    while i<n {
+        let a=re[i]
+        let b=im[i]
+        if a!=a || b!=b {return false}
+        if a>1.7976931348623157e308 || a<0.0-1.7976931348623157e308 || b>1.7976931348623157e308 || b<0.0-1.7976931348623157e308 {return false}
+        i=i+1
+    }
+    true
+}
 // =============================================================================
 
 // Reverse the lowest `bits` bits of index i.
@@ -104,6 +123,7 @@ fn bit_reverse_permute(re: &![f64; 4096], im: &![f64; 4096], n: i32) with Mut, D
 // n must be a power of 2, max 4096.
 // After call: re + i*im contains the DFT.
 fn fft(re: &![f64; 4096], im: &![f64; 4096], n: i32) with Mut, Div, Panic {
+    assert(fft_prefix_valid(re,im,n))
     bit_reverse_permute(re, im, n)
 
     // Butterfly passes
@@ -145,6 +165,7 @@ fn fft(re: &![f64; 4096], im: &![f64; 4096], n: i32) with Mut, Div, Panic {
 
 // In-place inverse FFT via conjugation trick: IFFT(x) = conj(FFT(conj(x))) / N.
 fn ifft(re: &![f64; 4096], im: &![f64; 4096], n: i32) with Mut, Div, Panic {
+    assert(fft_prefix_valid(re,im,n))
     // Conjugate input
     var i = 0
     while i < n { im[i] = 0.0 - im[i]; i = i + 1 }
@@ -172,6 +193,8 @@ fn fft_convolve(a_re: &[f64; 4096], a_im: &[f64; 4096],
                 b_re: &[f64; 4096], b_im: &[f64; 4096],
                 out_re: &![f64; 4096], out_im: &![f64; 4096],
                 n: i32) with Mut, Div, Panic {
+    assert(fft_prefix_valid(a_re,a_im,n))
+    assert(fft_prefix_valid(b_re,b_im,n))
     // Copy a into output buffers (work arrays)
     var i = 0
     while i < n {
@@ -212,6 +235,7 @@ fn fft_convolve(a_re: &[f64; 4096], a_im: &[f64; 4096],
 // Stores |X[k]|^2 in out[0..n-1].
 fn power_spectrum(re: &[f64; 4096], im: &[f64; 4096],
                   out: &![f64; 4096], n: i32) with Mut, Div, Panic {
+    assert(fft_prefix_valid(re,im,n))
     // Copy input to work arrays
     var wr: [f64; 4096] = [0.0; 4096]
     var wi: [f64; 4096] = [0.0; 4096]
@@ -235,6 +259,15 @@ fn power_spectrum(re: &[f64; 4096], im: &[f64; 4096],
 // out_re[0..n/2] and out_im[0..n/2].
 fn fft_real(input: &[f64; 4096], out_re: &![f64; 2048],
             out_im: &![f64; 2048], n: i32) with Mut, Div, Panic {
+    assert(fft_count_valid(n))
+    // 4096 real samples need 2049 bins; this legacy output holds only 2048.
+    assert(n/2+1<=2048)
+    var checked:i32=0
+    while checked<n {
+        let value=input[checked]
+        assert(value==value && value<=1.7976931348623157e308 && value>=0.0-1.7976931348623157e308)
+        checked=checked+1
+    }
     // Pack real input as complex: re = input, im = 0
     var wr: [f64; 4096] = [0.0; 4096]
     var wi: [f64; 4096] = [0.0; 4096]
@@ -270,6 +303,7 @@ fn is_power_of_2(n: i32) -> bool with Mut, Div, Panic {
 // Find smallest power of 2 >= n.
 fn next_power_of_2(n: i32) -> i32 with Mut, Div, Panic {
     if n <= 1 { return 1 }
+    if n>1073741824 {return 0}
     var p = 1
     while p < n { p = p * 2 }
     p
