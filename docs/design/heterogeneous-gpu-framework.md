@@ -1051,3 +1051,34 @@ Gate. Job 17797, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-
 17793 was still running after this job ended. The node was not idle.
 
 This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 40. An sm_89 atlas, and one assembled add (2026-10-26, OBSERVED)
+
+The corpus is 1328 instructions from 43 cubins, read with nvdisasm 12.8.55. Thirty-one families. Bytes 0 and 1 stay fixed inside a family. Bytes 13 and 14 move inside that family and are the schedule. The assembler writes the opcode and the fields, and leaves the schedule bytes of the slot it replaces.
+
+| family | bytes 0, 1 | fields |
+| --- | --- | --- |
+| MOV rr | 02 72 | dst at 2, src at 4, RZ is 255 |
+| MOV imm | 02 78 | dst at 2, u32 at 4 |
+| IMAD.MOV imm | 24 74 | dst at 2, u32 at 4, byte 3 is 255 |
+| IMAD.MOV c[] | 24 76 | dst at 2, constant offset/4 at 5 |
+| LDG.E | 81 79 | dst at 2, address at 3, displacement at 5, byte 4 is 4 |
+| STG.E | 86 79 | address at 3, data at 4, displacement at 5 |
+| IADD3 rr | 10 72 | dst at 2, src0 at 3, src1 at 4, negate-src1 is 128 at byte 7 |
+| IADD3 imm | 10 78 | dst at 2, src at 3, immediate at 4 |
+| SHFL.BFLY | 89 7f | dst at 2, src at 3, delta shifted 5 at byte 6 |
+| BAR.SYNC | 1d 7b | id shifted 6 at byte 6 |
+| S2R tid | 19 79 | dst at 2 |
+| EXIT | 4d 79 | schedule only |
+
+`atlas_iadd3_lo(7, 0, 0, 0)` builds `10 72 07 00 00 00 00 00`. That word is not one of the specimens. The specimens with no negate are `R0, R0, R2` and `R7, R0, R7`. This one is `R7, R0, R0`. It replaces the subtract in the kernel whose loads are 10 and 3. The schedule half of that slot stays. The sum is 20.
+
+Gate. Job 17813, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-per-task=4. The node was idle at submit. Binary md5 576acd012f4080061fe9aa9c04b4e72b.
+
+- ASM_DST=7, ASM_LOAD=1, ASM_SYNC=0, ASM=20.
+- The earlier field patches still match. SILICON PASS, EXIT:0.
+
+The node is idle.
+
+The negate bit is bit 63 and this assembler does not form it. AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
