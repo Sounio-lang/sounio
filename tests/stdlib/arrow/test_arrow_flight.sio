@@ -107,6 +107,22 @@ fn pushb(dst: &!ArrowBuf, v: i64) -> i64 with Mut, Panic {
     0
 }
 
+fn push_hex(dst: &!ArrowBuf, text: string) -> i64 with Mut, Panic {
+    let n = str_len(text)
+    var i: i64 = 0
+    while i + 1 < n {
+        var h0 = text[i as usize] as i64
+        var h1 = text[(i + 1) as usize] as i64
+        if h0 < 0 { h0 = h0 + 256 }
+        if h1 < 0 { h1 = h1 + 256 }
+        if h0 >= 97 { h0 = h0 - 87 } else { h0 = h0 - 48 }
+        if h1 >= 97 { h1 = h1 - 87 } else { h1 = h1 - 48 }
+        if pushb(dst, h0 * 16 + h1) != 0 { return -1 }
+        i = i + 2
+    }
+    0
+}
+
 fn copy_span(dst: &!ArrowBuf, src: &ArrowBuf, at: i64, n: i64) -> i64 with Mut, Panic {
     var i: i64 = 0
     while i < n {
@@ -509,6 +525,21 @@ fn push_repeat(dst: &!ArrowBuf, v: i64, n: i64) -> i64 with Mut, Panic {
     0
 }
 
+fn ipc_header(header: &ArrowBuf, out: &!ArrowBuf) -> i64 with Mut, Panic {
+    out.len = 0
+    if push_repeat(out, 255, 4) != 0 { return -1 }
+    let rem = header.len % 8
+    var pad: i64 = 0
+    if rem != 0 { pad = 8 - rem }
+    let msize = header.len + pad
+    if pushb(out, msize & 255) != 0 { return -1 }
+    if pushb(out, (msize >> 8) & 255) != 0 { return -1 }
+    if pushb(out, (msize >> 16) & 255) != 0 { return -1 }
+    if pushb(out, (msize >> 24) & 255) != 0 { return -1 }
+    if copy_span(out, header, 0, header.len) != 0 { return -1 }
+    push_repeat(out, 0, pad)
+}
+
 fn wrap_grpc(payload: &ArrowBuf, out: &!ArrowBuf) -> i64 with Mut, Panic {
     out.len = 0
     if pushb(out, 0) != 0 { return -1 }
@@ -517,6 +548,14 @@ fn wrap_grpc(payload: &ArrowBuf, out: &!ArrowBuf) -> i64 with Mut, Panic {
     if pushb(out, (payload.len >> 8) & 255) != 0 { return -1 }
     if pushb(out, payload.len & 255) != 0 { return -1 }
     copy_span(out, payload, 0, payload.len)
+}
+
+fn header_frame(header: &ArrowBuf, out: &!ArrowBuf) -> i64 with Mut, Panic {
+    var pay = arrow_buf_new()
+    if pushb(&!pay, 18) != 0 { return -1 }
+    if push_var(&!pay, header.len) != 0 { return -1 }
+    if copy_span(&!pay, header, 0, header.len) != 0 { return -1 }
+    wrap_grpc(&pay, out)
 }
 
 fn push_trunc_header(dst: &!ArrowBuf) -> i64 with Mut, Panic {
@@ -615,6 +654,28 @@ fn test_wire() -> i64 with Mut, Panic, Div {
     var frame = arrow_buf_new()
     if wrap_grpc(&pay, &!frame) != 0 { return 285 }
     if do_exchange_read(&frame, &!got, &!back, &!meta) != -3 { return 286 }
+    var bad = arrow_buf_new()
+    if push_hex(&!bad, "140000000e001800040006000800000014000000100000000400010004000000fcffffff04000400aabbcc") != 0 { return 287 }
+    if bad.len != 43 { return 288 }
+    var bad_frame = arrow_buf_new()
+    if header_frame(&bad, &!bad_frame) != 0 { return 289 }
+    if do_exchange_read(&bad_frame, &!got, &!back, &!meta) != -6 { return 290 }
+    bad.len = 0
+    if push_hex(&!bad, "0e0000000a0010000400060008000a0000000400010000000000") != 0 { return 291 }
+    if bad.len != 26 { return 292 }
+    if header_frame(&bad, &!bad_frame) != 0 { return 293 }
+    if do_exchange_read(&bad_frame, &!got, &!back, &!meta) != -6 { return 294 }
+    var stream = arrow_buf_new()
+    if ipc_header(&bad, &!stream) != 0 { return 295 }
+    var written = arrow_buf_new()
+    if do_exchange_write(&none, &stream, &meta, 0, &!written) != -6 { return 296 }
+    bad.len = 0
+    if push_hex(&!bad, "0e0000000a0010000400060008000a000000040001000400000000000000") != 0 { return 297 }
+    if bad.len != 30 { return 298 }
+    if header_frame(&bad, &!bad_frame) != 0 { return 299 }
+    if do_exchange_read(&bad_frame, &!got, &!back, &!meta) != -6 { return 300 }
+    if ipc_header(&bad, &!stream) != 0 { return 301 }
+    if do_exchange_write(&none, &stream, &meta, 0, &!written) != -6 { return 302 }
     0
 }
 

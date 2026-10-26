@@ -36,6 +36,8 @@ def parse_protobuf(buf: bytes) -> list[tuple[int, object]]:
         tag, i = _varint(buf, i)
         field = tag >> 3
         wire = tag & 7
+        if field < 1 or field > 536870911:
+            raise SystemExit("FAIL protobuf field")
         if wire == 0:
             val, i = _varint_value(buf, i)
             fields.append((field, val))
@@ -233,6 +235,22 @@ def _varint_limits() -> None:
         raise SystemExit("FAIL ten-byte varint")
 
 
+def _reject_field(buf: bytes) -> None:
+    try:
+        parse_protobuf(buf)
+    except SystemExit as exc:
+        if "protobuf field" not in str(exc):
+            raise
+        return
+    raise SystemExit("FAIL illegal protobuf field accepted")
+
+
+def _field_limits() -> None:
+    _reject_field(bytes.fromhex("0200"))
+    _reject_field(bytes.fromhex("828080801000"))
+    parse_protobuf(bytes.fromhex("faffffff0f00"))
+
+
 def _empty_header_ipc() -> None:
     if to_ipc([{"header": b"", "body": None}]) != b"":
         raise SystemExit("FAIL empty header emitted eos")
@@ -243,6 +261,7 @@ def _empty_header_ipc() -> None:
 def main() -> None:
     _reject_truncated_protobuf()
     _varint_limits()
+    _field_limits()
     _empty_header_ipc()
     if len(sys.argv) != 5:
         raise SystemExit(

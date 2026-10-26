@@ -347,6 +347,8 @@ fn flight_write(desc: &FlightDesc, ipc: &ArrowBuf, meta: &FlightMeta, out: &!Arr
         if view.header_type == 1 && first == 0 { return -6 }
         if view.header_type != 1 && view.header_type != 2 && view.header_type != 3 { return -4 }
         if view.header_type == 1 && view.body_len != 0 { return -3 }
+        let fit_rc = message_in_header(ipc, pos + 8, view.meta_size)
+        if fit_rc != 0 { return fit_rc }
         if fi >= 9 { return -7 }
         if meta.n > 0 && fi >= meta.n { return -8 }
         let start = grpc_begin(out)
@@ -689,13 +691,24 @@ fn message_in_header(buf: &ArrowBuf, at: i64, n: i64) -> i64 with Panic {
     let hoff = hdr_u16(buf, at, vt + 8, n)
     if hoff <= 0 || root + hoff + 4 > n { return -6 }
     let rel = hdr_u32(buf, at, root + hoff, n)
-    if rel < 0 { return -6 }
+    if rel <= 0 { return -6 }
     let target = root + hoff + rel
     if target < 0 || target + 4 > n { return -6 }
+    let psoff = hdr_i32(buf, at, target, n)
+    if psoff == 0 || psoff == -1 { return -6 }
+    let pvt = target - psoff
+    if pvt < 0 || pvt + 4 > n { return -6 }
+    let pvts = hdr_u16(buf, at, pvt, n)
+    if pvts < 4 || pvt + pvts > n { return -6 }
     if vts >= 12 {
         let boff = hdr_u16(buf, at, vt + 10, n)
         if boff < 0 { return -6 }
         if boff > 0 && root + boff + 8 > n { return -6 }
+    }
+    if vts >= 14 {
+        let moff = hdr_u16(buf, at, vt + 12, n)
+        if moff < 0 { return -6 }
+        if moff > 0 && root + moff + 4 > n { return -6 }
     }
     0
 }
