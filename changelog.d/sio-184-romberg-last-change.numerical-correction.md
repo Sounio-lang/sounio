@@ -1,0 +1,1 @@
+Romberg integration now retains its last measured diagonal-table change as the error estimate when its iteration budget ends without convergence, rather than reporting a spurious zero; the analysis consumer imports analysis::lib, with original assertions and convergence policy preserved.
