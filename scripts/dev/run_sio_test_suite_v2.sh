@@ -157,6 +157,29 @@ fi
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
+# Explicit protocol used only by the ChangedTests gate. Legacy callers keep run.
+if [[ "${SOUNIO_TEST_NATIVE_PHASES:-0}" != 0 ]]; then
+    _native_phase_refuse() { echo "NATIVE_PHASE_REFUSE $1" >&2;exit 2; }
+    [[ "$SOUNIO_TEST_NATIVE_PHASES" == changed-tests-v1 ]] || _native_phase_refuse unsupported_mode
+    [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || _native_phase_refuse unsupported_host
+    [[ "${SOUNIO_SOUC_RAW_MODE:-}" == modular && "$SOUNIO_ENGINE_KIND" == explicit ]] \
+      || _native_phase_refuse requires_explicit_raw_modular
+    [[ -n "${SOUNIO_TEST_PHASE_COMPILER:-}" && "${SOUNIO_TEST_PHASE_COMPILER_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] \
+      || _native_phase_refuse missing_recorded_compiler
+    SOUNIO_PHASE_RAW_BIN=$(readlink -f "$SOUNIO_TEST_PHASE_COMPILER") \
+      || _native_phase_refuse compiler_path
+    _phase_selected=$(readlink -f "$SOUNIO_ENGINE_ELF") || _native_phase_refuse selected_compiler_path
+    _phase_routed=$(readlink -f "${SOUNIO_SOUC_BIN:-}") || _native_phase_refuse routed_compiler_path
+    [[ "$SOUNIO_PHASE_RAW_BIN" == "$_phase_selected" && "$SOUNIO_PHASE_RAW_BIN" == "$_phase_routed" \
+      && -f "$SOUNIO_PHASE_RAW_BIN" && -x "$SOUNIO_PHASE_RAW_BIN" \
+      && "$(head -c 4 "$SOUNIO_PHASE_RAW_BIN")" == $'\177ELF' ]] || _native_phase_refuse compiler_binding_mismatch
+    _phase_digest=$(sha256sum "$SOUNIO_PHASE_RAW_BIN") || _native_phase_refuse compiler_hash_unavailable
+    [[ "${_phase_digest%% *}" == "$SOUNIO_TEST_PHASE_COMPILER_SHA256" ]] || _native_phase_refuse compiler_hash_mismatch
+    [[ "${SOUNIO_TEST_NATIVE_PHASE_OUT:-}" == /* && -d "$SOUNIO_TEST_NATIVE_PHASE_OUT" \
+      && ! -L "$SOUNIO_TEST_NATIVE_PHASE_OUT" ]] || _native_phase_refuse invalid_phase_output
+    unset _phase_selected _phase_routed _phase_digest
+fi
+
 # Parse arguments
 FILTER=""
 FILTER_MODE="contains"
@@ -603,6 +626,7 @@ run_test() {
     local output=""
     local exit_code=0
     local test_output=""
+    local native_infrastructure_failure=false
     local start_time end_time
     
     start_time=$(date +%s)
@@ -617,23 +641,56 @@ run_test() {
                 test_output="check exited $exit_code"
             fi
         else
-            output=$(timeout "$timeout_val" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
-            raw_exit=$exit_code
-            if [[ $exit_code -eq 124 ]]; then
-                test_output="run timed out after ${timeout_val}s"
-            elif [[ $exit_code -ne 0 ]]; then
-                # Keep the numeric verdict AND a snippet of compiler/program
-                # output. "run exited 1" alone hid compile-fail vs main().
-                # No pipeline: pipefail + head -c would fail on long output.
-                raw="${output//$'\n'/ | }"
-                if ((${#raw} > 160)); then
-                    snippet="${raw: -160}"
+            if [[ "${SOUNIO_TEST_NATIVE_PHASES:-0}" == changed-tests-v1 ]]; then
+                local phase_dir phase_name phase_kind=infrastructure
+                phase_dir=$(mktemp -d "$SOUNIO_TEST_NATIVE_PHASE_OUT/test-$idx.XXXXXX")
+                if [[ -z "$phase_dir" || ! -d "$phase_dir" ]]; then
+                    exit_code=125
+                    output="NATIVE_PHASE_REFUSE phase_directory"
+                    phase_name=preflight
                 else
-                    snippet="$raw"
+                    output=$(bash "$ROOT_DIR/scripts/lib/native_test_phases.sh" \
+                      "$SOUNIO_PHASE_RAW_BIN" "$SOUNIO_TEST_PHASE_COMPILER_SHA256" \
+                      "$file" "$timeout_val" "$phase_dir" 2>&1) || exit_code=$?
+                    phase_name=$(cat "$phase_dir/RESULT.phase" 2>/dev/null) || phase_name=preflight
+                    phase_kind=$(cat "$phase_dir/RESULT.kind" 2>/dev/null) || phase_kind=infrastructure
                 fi
-                test_output="run exited $exit_code"
-                if [[ -n "$snippet" ]]; then
-                    test_output="$test_output | $snippet"
+                if [[ "$phase_kind" != compiler && "$phase_kind" != native ]]; then
+                    native_infrastructure_failure=true
+                    [[ $exit_code -ne 0 ]] || exit_code=125
+                fi
+                raw_exit=$exit_code
+                if [[ $exit_code -eq 124 ]]; then
+                    if [[ "$phase_name" == compile ]]; then
+                        test_output="compile timed out after 30s (phase=compile)"
+                    else
+                        test_output="run timed out after ${timeout_val}s (phase=$phase_name)"
+                    fi
+                elif [[ $exit_code -ne 0 ]]; then
+                    raw="${output//$'\n'/ | }"
+                    if (("${#raw}" > 160)); then snippet="${raw: -160}";else snippet="$raw";fi
+                    test_output="run exited $exit_code (phase=$phase_name)"
+                    [[ -z "$snippet" ]] || test_output="$test_output | $snippet"
+                fi
+            else
+                output=$(timeout "$timeout_val" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
+                raw_exit=$exit_code
+                if [[ $exit_code -eq 124 ]]; then
+                    test_output="run timed out after ${timeout_val}s"
+                elif [[ $exit_code -ne 0 ]]; then
+                    # Keep the numeric verdict AND a snippet of compiler/program
+                    # output. "run exited 1" alone hid compile-fail vs main().
+                    # No pipeline: pipefail + head -c would fail on long output.
+                    raw="${output//$'\n'/ | }"
+                    if ((${#raw} > 160)); then
+                        snippet="${raw: -160}"
+                    else
+                        snippet="$raw"
+                    fi
+                    test_output="run exited $exit_code"
+                    if [[ -n "$snippet" ]]; then
+                        test_output="$test_output | $snippet"
+                    fi
                 fi
             fi
         fi
@@ -649,9 +706,13 @@ run_test() {
         # error" flake), and `if ! ...` reads that as the pattern being
         # absent. The here-string form has no writer process to lose writes.
         # Guarded by scripts/ci/sigpipe_hygiene_gate.sh.
+        local marker_output="$output"
+        if [[ "${SOUNIO_TEST_NATIVE_PHASES:-0}" == changed-tests-v1 && -n "${phase_dir:-}" && -f "$phase_dir/native.log" ]]; then
+            marker_output=$(cat "$phase_dir/native.log")
+        fi
         if [[ $exit_code -eq 0 ]]; then
             for pattern in "${expect_stdout[@]}"; do
-                if ! grep -qF -- "$pattern" <<<"$output"; then
+                if ! grep -qF -- "$pattern" <<<"$marker_output"; then
                     exit_code=1
                     test_output="missing stdout: $pattern"
                     break
@@ -659,7 +720,7 @@ run_test() {
             done
             if [[ $exit_code -eq 0 ]]; then
                 for pattern in "${expect_stdout_contains[@]}"; do
-                    if ! grep -qF -- "$pattern" <<<"$output"; then
+                    if ! grep -qF -- "$pattern" <<<"$marker_output"; then
                         exit_code=1
                         test_output="missing stdout contains: $pattern"
                         break
@@ -756,6 +817,16 @@ run_test() {
 
     end_time=$(date +%s)
     local duration=$((end_time - start_time))
+
+    # Infrastructure is never a tolerated failure in the explicit protocol.
+    # Only raw compiler or native outcomes retain the existing xfail rules.
+    if $native_infrastructure_failure; then
+        is_known_failure=false
+        is_vacuous_baseline=false
+        is_flaky=false
+        exit_code=1
+        test_output="native phase infrastructure failure ($phase_name): $test_output"
+    fi
 
     # A manifest entry that pinned its failure mode (path|substring) only covers a
     # failure whose test_output matches; anything else is a fresh fail, not a repeat
