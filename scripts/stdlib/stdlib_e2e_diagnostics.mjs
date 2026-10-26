@@ -29,6 +29,31 @@ function phase(c, rel, name) {
   if (!c.sources.some(x=>x.path===path.join(c.root,rel))) throw Error('case outside initial source census');
   return path.join(out,rel,name);
 }
+function verifyAllCaptures(c) {
+  let count=0;
+  function visit(dir) {
+    const rel=path.relative(out,dir).split(path.sep).join('/');
+    const match=/^(tests\/stdlib\/.+\.sio)\/(check|run)$/.exec(rel);
+    if(match) {
+      const expectedDir=phase(c,match[1],match[2]);
+      if(expectedDir!==dir) throw Error('phase directory mismatch');
+      const names=fs.readdirSync(dir).sort();
+      if(JSON.stringify(names)!==JSON.stringify(['combined.output','result.json','start.json'])) throw Error('unfinished or unexpected phase files: '+rel);
+      const raw=path.join(dir,'combined.output');regular(raw);
+      const start=read(path.join(dir,'start.json')), result=read(path.join(dir,'result.json'));
+      if(start.source.path!==path.join(c.root,match[1])||!Array.isArray(start.command)||start.command.length===0||start.test_path!==match[1]||start.phase!==match[2]||result.test_path!==start.test_path||result.phase!==start.phase||JSON.stringify(result.command)!==JSON.stringify(start.command)||result.started_at_utc!==start.started_at_utc||JSON.stringify(result.source)!==JSON.stringify(start.source)||result.combined_output.path!==raw||!Number.isInteger(result.exit_code)||result.exit_code<0||result.exit_code>255) throw Error('terminal phase receipt mismatch: '+rel);
+      same(start.source);same(result.combined_output);count++;
+      return;
+    }
+    for(const name of fs.readdirSync(dir)) {
+      const child=path.join(dir,name), st=fs.lstatSync(child);
+      if(st.isSymbolicLink()) throw Error('symlink in capture tree: '+child);
+      if(st.isDirectory()) visit(child);
+      else if(!(dir===out&&name==='capture.json'&&st.isFile())) throw Error('unexpected capture file: '+child);
+    }
+  }
+  visit(out);return count;
+}
 function walk(root, found=[]) { for(const d of fs.readdirSync(root,{withFileTypes:true})) { const p=path.join(root,d.name); if(d.isDirectory()) walk(p,found); else if(d.isFile()&&p.endsWith('.sio')) found.push(identity(p)); else if(d.isSymbolicLink()) { /* source symlinks are bound by their resolved file identity below */ if(p.endsWith('.sio')) found.push(identity(p)); } } return found; }
 try {
   if(op==='init') {
@@ -60,6 +85,7 @@ try {
     const c=control(); c.callers.forEach(same); c.sources.forEach(same);
     const now=walk(path.join(c.root,'tests/stdlib')).sort((a,b)=>a.path.localeCompare(b.path));
     if(JSON.stringify(now)!==JSON.stringify(c.sources)) throw Error('test source census changed');
-    put(path.join(out,'complete.json'),{schema:c.schema,completed_at_utc:utc(),source_and_caller_identity_unchanged:true,selection_and_results:'See unchanged schema-v1 E2E result; capture is supplemental operational metadata.'});
+    const captured_phases=verifyAllCaptures(c);
+    put(path.join(out,'complete.json'),{schema:c.schema,captured_phases,completed_at_utc:utc(),source_and_caller_identity_unchanged:true,selection_and_results:'See unchanged schema-v1 E2E result; capture is supplemental operational metadata.'});
   } else throw Error(`unknown operation: ${op}`);
 } catch(e) { console.error(`error: E2E artifact capture: ${e.message}`); process.exitCode=65; }

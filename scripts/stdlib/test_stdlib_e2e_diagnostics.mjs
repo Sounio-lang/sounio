@@ -16,6 +16,7 @@ fs.writeFileSync(fake,`#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$INVOCATIONS"
 name="\${2##*/}"
 if [[ "$1" == check ]]; then
+  if [[ "$name" == b_late.sio && -n "$LATE_MUTATE_LOG" ]]; then printf "later-case-mutation\\n" >> "$LATE_MUTATE_LOG"; fi
   if [[ -n "$SABOTAGE_CAPTURE_LOG" ]]; then rm -- "$SABOTAGE_CAPTURE_LOG"; if [[ -n "$SABOTAGE_SYMLINK_TARGET" ]]; then ln -s -- "$SABOTAGE_SYMLINK_TARGET" "$SABOTAGE_CAPTURE_LOG"; fi; fi
   if [[ "$name" == banner.sio ]]; then
     for ((i=1;i<=12;i++)); do echo "banner $i"; done
@@ -37,7 +38,7 @@ esac
 const cases={banner:'//@ check-only\n',exit65:'//@ check-only\n',ok:'//@ run-pass\n//@ expect-stdout: expected\n',rc1:'//@ run-pass\n',rc124:'//@ run-pass\n',rc139:'//@ run-pass\n',missing:'//@ run-pass\n//@ expect-stdout: absent\n',bytes:'//@ run-pass\n',ignored:'//@ ignore known\n//@ ignore-owner: test\n//@ ignore-unblock: fixed\n',plain:''};
 for(const [n,h] of Object.entries(cases))fs.writeFileSync(path.join(root,'tests/stdlib/nested',n+'.sio'),h+'fn main() {}\n');
 const inv=path.join(tmp,'invocations');
-const env={...process.env,SOUC_BIN:fake,INVOCATIONS:inv,SOUNIO_STDLIB_PATH:path.join(root,'stdlib'),STDLIB_E2E_RUN_TIMEOUT_SEC:'30',SABOTAGE_CAPTURE_LOG:'',SABOTAGE_SYMLINK_TARGET:''};
+const env={...process.env,SOUC_BIN:fake,INVOCATIONS:inv,SOUNIO_STDLIB_PATH:path.join(root,'stdlib'),STDLIB_E2E_RUN_TIMEOUT_SEC:'30',SABOTAGE_CAPTURE_LOG:'',SABOTAGE_SYMLINK_TARGET:'',LATE_MUTATE_LOG:''};
 let n=0;function check(name,fn){fn();console.log(`PASS ${++n} ${name}`);}
 function run(extra=[],envExtra={}){return spawnSync('bash',[path.join(root,'scripts/stdlib/run_stdlib_e2e.sh'),'--verbose',...extra],{env:{...env,...envExtra},encoding:'utf8'});}
 function json(p){return JSON.parse(fs.readFileSync(p,'utf8'));}
@@ -76,4 +77,6 @@ check('raw log symlink substitution is metadata refusal',()=>{const broken=path.
 check('intermediate symlink refuses before outside-directory creation',()=>{const attack=path.join(tmp,'intermediate-link'),outside=path.join(tmp,'outside');fs.mkdirSync(outside);assert.equal(helper('init',attack,root,fake,path.join(root,'stdlib')).status,0);fs.symlinkSync(outside,path.join(attack,'tests'));const r=helper('begin',attack,'tests/stdlib/nested/ok.sio','check',fake,'check',path.join(root,'tests/stdlib/nested/ok.sio'));assert.equal(r.status,65);assert.match(r.stderr,/unsafe directory/);assert.deepEqual(fs.readdirSync(outside),[]);});
 check('changed raw bytes refused',()=>{fs.appendFileSync(path.join(log('ok'),'combined.output'),'tampered');assert.equal(helper('verify',out,'tests/stdlib/nested/ok.sio','run','0').status,65);});
 check('changed source refused at footer',()=>{fs.appendFileSync(path.join(root,'tests/stdlib/nested/ok.sio'),'// changed\n');assert.equal(helper('finalize',out).status,65);});
+check('zero selected cases explicitly completes zero capture phases',()=>{const empty=path.join(tmp,'zero-selected');const r=run(['--filter','no-selected-case','--artifacts-dir',empty]);assert.equal(r.status,0);assert.equal(json(path.join(empty,'complete.json')).captured_phases,0);});
+check('later selected case mutation of earlier raw output fails terminal65',()=>{const cases=path.join(root,'tests/stdlib/terminal');fs.mkdirSync(cases);for(const name of ['a_first.sio','b_late.sio'])fs.writeFileSync(path.join(cases,name),'//@ check-only\nfn main() {}\n');const capture=path.join(tmp,'terminal-rehash'),result=path.join(tmp,'terminal-rehash.json'),earlier=path.join(capture,'tests/stdlib/terminal/a_first.sio/check/combined.output');const r=run(['--filter','terminal/','--json-out',result,'--artifacts-dir',capture],{LATE_MUTATE_LOG:earlier});assert.equal(r.status,65);assert.match(r.stderr,/identity changed/);assert.match(fs.readFileSync(earlier,'utf8'),/later-case-mutation/);assert(fs.existsSync(path.join(capture,'tests/stdlib/terminal/b_late.sio/check/result.json')));assert(!fs.existsSync(result));assert(!fs.existsSync(path.join(capture,'complete.json')));fs.writeFileSync(path.join(tmp,'LATE_MUTATION_ACTUAL.json'),JSON.stringify({scope:'Operational fake later-selected-case mutation; no compiler/science execution',status:r.status,stdout:r.stdout,stderr:r.stderr,fresh_result_exists:fs.existsSync(result),complete_exists:fs.existsSync(path.join(capture,'complete.json')),earlier_receipt:json(path.join(capture,'tests/stdlib/terminal/a_first.sio/check/result.json')),later_receipt:json(path.join(capture,'tests/stdlib/terminal/b_late.sio/check/result.json')),earlier_raw_after_b64:fs.readFileSync(earlier).toString('base64')},null,2)+'\n');});
 console.log(`PASS ${n} metadata controls; fixtures retained at ${tmp}`);
