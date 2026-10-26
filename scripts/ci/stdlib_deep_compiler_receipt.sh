@@ -144,6 +144,47 @@ verify() {
  [[ "$(cat "$artifact/BUILD_KEY")" == "$actual_key" ]] || fail 'compiler build key mismatch'
  printf 'STDLIB_DEEP_COMPILER_RECEIPT_VERIFIED %s %s\n' "$expected" "$actual_key"
 }
+
+verify_reuse() {
+ local repo="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+ local workflow="${SOUNIO_REUSE_WORKFLOW:-$repo/.github/workflows/ci.yml}"
+ [[ -f "$workflow" ]] || fail "workflow is missing: $workflow"
+ python3 - "$workflow" <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path, encoding='utf-8').read()
+def job(job_id):
+    match = re.search(r'^  ' + re.escape(job_id) + r':\s*\n(.*?)(?=^  [a-z0-9-]+:\s*$|\Z)', text, re.M | re.S)
+    if not match:
+        raise SystemExit(f'missing job: {job_id}')
+    return match.group(1)
+def require(condition, message):
+    if not condition:
+        raise SystemExit(message)
+witness = job('madaros-witness-gate')
+require(witness.count('bash scripts/ci/build_modular_madaros.sh') == 1,
+        'Witness must build exactly one Madaros artifact')
+require('current-source-madaros-${{ github.run_id }}-${{ github.sha }}' in witness,
+        'Witness must publish the content-addressed artifact')
+for job_id, consumer in [
+    ('madaros-current-source-deref-f64', 'madaros_current_source_f64_lowering_gate.sh'),
+    ('stdlib-deep-science', 'deep_science_gate.sh'),
+    ('gate-wave-0', 'run_gate_list.sh wave0'),
+]:
+    body = job(job_id)
+    require('madaros-witness-gate' in body, f'{job_id} must depend on the Witness producer')
+    require('actions/download-artifact@v4' in body, f'{job_id} must download the shared artifact')
+    require('stdlib_deep_compiler_receipt.sh verify' in body,
+            f'{job_id} must verify the downloaded compiler')
+    require('bash scripts/ci/build_modular_madaros.sh' not in body,
+            f'{job_id} must not rebuild the compiler')
+    verify_pos = body.index('stdlib_deep_compiler_receipt.sh verify')
+    run_pos = body.index(consumer)
+    require(verify_pos < run_pos, f'{job_id} must verify before executing {consumer}')
+print('RECEIPT_WORKFLOW_REUSE_PASS')
+PY
+}
+
 selftest() {
  # An isolated disposable Git fixture; no project index/ref is changed.
  local repo="$work/fixture" artifact="$work/artifact" sha control rc compiler base_key changed_key value
@@ -214,6 +255,18 @@ PY
   printf 'RECEIPT_TAMPER_REJECTED %s\n' "$control"
  done
  "$script" verify "$repo" "$artifact" "$sha" > "$work/final-verify.log"
+ cp "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/.github/workflows/ci.yml" "$work/real-workflow.yml"
+ SOUNIO_REUSE_WORKFLOW="$work/real-workflow.yml" verify_reuse "$repo"
+ python3 - "$work/real-workflow.yml" "$work/missing-verify.yml" <<'PY'
+import sys
+text = open(sys.argv[1], encoding='utf-8').read()
+text = text.replace('bash scripts/ci/stdlib_deep_compiler_receipt.sh verify', 'bash scripts/ci/stdlib_deep_compiler_receipt.sh MISSING')
+open(sys.argv[2], 'w', encoding='utf-8').write(text)
+PY
+ rc=0
+ SOUNIO_REUSE_WORKFLOW="$work/missing-verify.yml" verify_reuse "$repo" >"$work/missing-reuse.log" 2>&1 || rc=$?
+ [[ "$rc" != 0 ]] || fail 'workflow without verification was accepted'
+ printf 'RECEIPT_WORKFLOW_REUSE_PASS\n'
  printf 'STDLIB_DEEP_COMPILER_RECEIPT_SELFTEST_PASS\n'
 }
 case ${1:-} in
@@ -221,5 +274,6 @@ case ${1:-} in
  verify) [[ $# == 4 ]] || fail 'verify REPO ARTIFACT_DIR EXPECTED_SHA'; verify "$2" "$3" "$4" ;;
  key) [[ $# == 7 ]] || fail 'key SOURCE_SHA ENGINE TARGET BOOTSTRAP_SHA TOOLCHAIN_SHA INPUTS_SHA'; key "$2" "$3" "$4" "$5" "$6" "$7" ;;
  selftest) selftest ;;
+ workflow) verify_reuse ;;
  *) fail 'expected prepare, verify or selftest' ;;
 esac
