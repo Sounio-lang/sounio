@@ -96,13 +96,40 @@ legacy Python-suite parity or historical178-assertion denominator is claimed.
 
 ## Native execution checkpoint
 
-A bounded Slurm wire validation is prepared, not submitted at this checkpoint.
-It will copy the existing hello fixture byte-for-byte, use external a292 and
-pinned Node22, exercise check/compile/run/project, strict receipts and a
-nonconclusive-policy refusal. Python-deny shims must record zero invocations.
-Source, compiler, runtime and retained artifacts require before/after custody.
-Only an actual source/job receipt can qualify this layer. A prepared packet
-authorizes no full E2E resubmission. New measurements must declare their new
-source rather than borrow old3c7 evidence.
+Slurm **17600 completed0:0 in13s**, using exact source checkpoint
+`b81b5bcf447e441e9cb45806d7451c6b104882ec`, raw a292 and Node22.22.2.
+All159 controls and six strict source/project check/compile/run routes passed.
+The direct candidate was UNKNOWN21; the wrapper refused1 before dispatching a
+build and emitted neither an ELF nor a requested final receipt. Two controlled
+Python-deny probes returned125 in a separate225-byte log; the runtime guard log
+was empty. This covers the guarded names and observed wrapper routes, not a
+whole-system execve/language audit.
+
+Body/final-integrity/aggregate statuses were0. The2109 tracked source files,
+six fixtures, Node/raw binaries, seven Node runtime dependencies and45 wrapper
+tools/libraries plus two helpers passed before/after checks. Only the exact two
+expected materialized prebuilt artifacts were admitted separately. Terminal
+workspace/catalog comparison matched cleanb81. Requested1CPU/4GiB; allocated
+two logical CPUs/4GiB by scheduler granularity on cpuops-t560-proxmox.
+
+The two retained compile ELFs have SHA256
+`eed608a000135801a8dbaf3a8607c2934af4e34eac91b2765023d5fe29594531`.
+Run receipts verified against that identical retained content; temporary run
+paths were removed by the unchanged wrapper and are not claimed retained.
+
+`native17600-custody.tar.gz`:947001 bytes, SHA256
+`86abba40ffdb4ffd93393f4855c34ebd94e793ad5c5a9d07566aef5685dbbe77`.
+The153-entry text packet excludes source bulk and ELF payloads. Fresh extraction
+passed FILES verification and offline reproduction. The coordinator independently
+rehashed all2109 files against cleanGitb81 (SHA256/blob/mode), recomputed seven
+canonical receipt identities, checked hello source binding and actual raw routes,
+and verified the negative never dispatched build. Its separate receipt is
+`ROOT_NATIVE_VERIFICATION.json`. The first independent verifier incorrectly
+expected a final receipt on strict refusal; that verifier assumption was corrected,
+with no production change and no rerun.
+
+This qualifies bounded operational native wire only. It does not replace the
+incomplete17597 measurement or qualify a full scientific/E2E corpus. New full
+measurements require their own composed source and complete fresh census.
 
 Draft for human review; no main merge, auto-merge or queue.
