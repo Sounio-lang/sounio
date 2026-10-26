@@ -116,7 +116,7 @@ pub struct ArrowSchema {
     pub meta_n: [i64; 8],
     pub meta_k: [u8; 1024],
     pub meta_kl: [i64; 32],
-    pub meta_v: [u8; 1536],
+    pub meta_v: [u8; 4096],
     pub meta_vl: [i64; 32],
     pub smeta_n: i64,
     pub smeta_k: [u8; 128],
@@ -269,7 +269,7 @@ pub fn arrow_schema_new() -> ArrowSchema {
         meta_n: [0; 8],
         meta_k: [0; 1024],
         meta_kl: [0; 32],
-        meta_v: [0; 1536],
+        meta_v: [0; 4096],
         meta_vl: [0; 32],
         smeta_n: 0,
         smeta_k: [0; 128],
@@ -552,9 +552,9 @@ pub fn arrow_field_add_meta(s: &!ArrowSchema, node: i64, key: string, val: strin
     if n >= 4 { return -7 }
     let nk = str_len(key)
     let nv = str_len(val)
-    if nk > 32 || nv > 48 { return -7 }
+    if nk > 32 || nv > 128 { return -7 }
     let basek = (node * 4 + n) * 32
-    let basev = (node * 4 + n) * 48
+    let basev = (node * 4 + n) * 128
     var i: i64 = 0
     while i < nk {
         var ch = key[i as usize] as i64
@@ -575,11 +575,96 @@ pub fn arrow_field_add_meta(s: &!ArrowSchema, node: i64, key: string, val: strin
     0
 }
 
-/// Extension type keys on a field. Empty metadata is allowed.
+fn meta_key_eq(s: &ArrowSchema, node: i64, i: i64, key: string) -> i64 with Panic {
+    let n = str_len(key)
+    if s.meta_kl[(node * 4 + i) as usize] != n { return 0 }
+    var k: i64 = 0
+    while k < n {
+        var want = key[k as usize] as i64
+        if want < 0 { want = want + 256 }
+        let gotv = s.meta_k[((node * 4 + i) * 32 + k) as usize] as i64
+        var got = gotv
+        if got < 0 { got = got + 256 }
+        if got != want { return 0 }
+        k = k + 1
+    }
+    1
+}
+
+fn field_meta_find(s: &ArrowSchema, node: i64, key: string) -> i64 with Panic {
+    let n = s.meta_n[node as usize]
+    var i: i64 = 0
+    while i < n {
+        if meta_key_eq(s, node, i, key) != 0 { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn field_meta_write(s: &!ArrowSchema, node: i64, slot: i64, val: &[u8; 128], nv: i64) with Mut, Panic {
+    s.meta_vl[(node * 4 + slot) as usize] = nv
+    let basev = (node * 4 + slot) * 128
+    var i: i64 = 0
+    while i < nv {
+        s.meta_v[(basev + i) as usize] = val[i as usize]
+        i = i + 1
+    }
+}
+
+pub fn arrow_field_set_extension_buf(s: &!ArrowSchema, node: i64, name: string, metadata: &[u8; 128], nmeta: i64) -> i64 with Mut, Panic {
+    if node < 0 || node >= s.n_nodes { return -6 }
+    if nmeta < 0 || nmeta > 128 { return -7 }
+    let name_at = field_meta_find(s, node, "ARROW:extension:name")
+    if name_at < 0 {
+        let a = arrow_field_add_meta(s, node, "ARROW:extension:name", name)
+        if a != 0 { return a }
+    } else {
+        let nn = str_len(name)
+        if nn > 128 { return -7 }
+        var i: i64 = 0
+        while i < nn {
+            var ch = name[i as usize] as i64
+            if ch < 0 { ch = ch + 256 }
+            s.meta_v[((node * 4 + name_at) * 128 + i) as usize] = (ch as i32) as u8
+            i = i + 1
+        }
+        s.meta_vl[(node * 4 + name_at) as usize] = nn
+    }
+    let slot = field_meta_find(s, node, "ARROW:extension:metadata")
+    if slot < 0 {
+        if s.meta_n[node as usize] >= 4 { return -7 }
+        let i = s.meta_n[node as usize]
+        let key = "ARROW:extension:metadata"
+        let nk = str_len(key)
+        var k: i64 = 0
+        while k < nk {
+            var ch = key[k as usize] as i64
+            if ch < 0 { ch = ch + 256 }
+            s.meta_k[((node * 4 + i) * 32 + k) as usize] = (ch as i32) as u8
+            k = k + 1
+        }
+        s.meta_kl[(node * 4 + i) as usize] = nk
+        field_meta_write(s, node, i, metadata, nmeta)
+        s.meta_n[node as usize] = i + 1
+        return 0
+    }
+    field_meta_write(s, node, slot, metadata, nmeta)
+    0
+}
+
+/// Extension type keys on a field. An existing key is replaced. Empty metadata is allowed.
 pub fn arrow_field_set_extension(s: &!ArrowSchema, node: i64, name: string, metadata: string) -> i64 with Mut, Panic {
-    let a = arrow_field_add_meta(s, node, "ARROW:extension:name", name)
-    if a != 0 { return a }
-    arrow_field_add_meta(s, node, "ARROW:extension:metadata", metadata)
+    var raw: [u8; 128] = [0; 128]
+    let n = str_len(metadata)
+    if n > 128 { return -7 }
+    var i: i64 = 0
+    while i < n {
+        var ch = metadata[i as usize] as i64
+        if ch < 0 { ch = ch + 256 }
+        raw[i as usize] = (ch as i32) as u8
+        i = i + 1
+    }
+    arrow_field_set_extension_buf(s, node, name, &raw, n)
 }
 
 pub fn arrow_schema_set_feature(s: &!ArrowSchema, feature: i64) -> i64 with Mut {
@@ -892,7 +977,7 @@ fn build_field_meta(b: &!FbBuilder, schema: &ArrowSchema, col: i64) -> i64 with 
         }
         k = 0
         while k < nv {
-            val.data[k as usize] = schema.meta_v[((col * 4 + i) * 48 + k) as usize]
+            val.data[k as usize] = schema.meta_v[((col * 4 + i) * 128 + k) as usize]
             k = k + 1
         }
         let off = build_one_kv(b, &key, &val)
@@ -2149,11 +2234,11 @@ fn read_field_meta(buf: &ArrowBuf, table: i64, schema: &!ArrowSchema, col: i64) 
             }
         }
         if voff != 0 {
-            nv = read_str_into(buf, kp + voff, &!scratch, 0, 48)
+            nv = read_str_into(buf, kp + voff, &!scratch, 0, 128)
             if nv < 0 { return nv }
             var c: i64 = 0
             while c < nv {
-                schema.meta_v[((col * 4 + i) * 48 + c) as usize] = scratch[c as usize]
+                schema.meta_v[((col * 4 + i) * 128 + c) as usize] = scratch[c as usize]
                 c = c + 1
             }
         }

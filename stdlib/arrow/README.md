@@ -47,6 +47,23 @@ Custom metadata round-trips on the field, the schema, and the schema message.
 The file footer copies the schema message metadata. Extension types are the
 keys `ARROW:extension:name` and `ARROW:extension:metadata`.
 
+## Canonical extensions
+
+`arrow::ext` builds the [canonical extension types](https://arrow.apache.org/docs/format/CanonicalExtensions.html). Each setter checks the storage layout, then writes the extension name and the metadata string. `arrow_ext_check` reads that metadata back and checks it against the storage.
+
+| Name | Storage |
+| --- | --- |
+| `arrow.uuid` | `FixedSizeBinary(16)`, empty metadata |
+| `arrow.json` | Utf8, LargeUtf8, or Utf8View; empty metadata or `{}` |
+| `arrow.bool8` | signed `Int8`; `0` is false and any other value is true |
+| `arrow.opaque` | any storage; metadata `{"type_name":"...","vendor_name":"..."}` |
+| `arrow.fixed_shape_tensor` | `FixedSizeList` whose size is the product of `shape` |
+| `arrow.variable_shape_tensor` | struct fields `data` (a list) and `shape` (a fixed-size list) |
+| `arrow.parquet.variant` | struct with non-null binary `metadata` and `value` and/or `typed_value` |
+| `arrow.timestamp_with_offset` | struct `timestamp` (UTC) then `offset_minutes` (`Int16`) |
+
+Tensor metadata uses the same compact JSON pyarrow writes (`shape`, then `permutation`, then `dim_names`). At most 4 dimensions. An extension name outside this list is kept and `arrow_ext_check` accepts it.
+
 `arrow_batch_set_codec` selects lz4-frame or zstd body compression. Set
 feature `COMPRESSED_BODY` before the schema message is written. Each buffer
 is compressed on its own and prefixed with the uncompressed length, or with
