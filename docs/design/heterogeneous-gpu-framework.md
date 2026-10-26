@@ -857,3 +857,23 @@ Gate. Job 17583, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `
 - After one warm step, seven forwards span 424803544 ns, which is 0.0607 s/token. The threshold is 0.005 s. The measured step is above the 0.0430 s of job 17557 and above the 0.0175 s of job 17506. Occupancy 12 is real, and most of those blocks own no column: a projection of width 576 has 144 working threads. The extra blocks only wait on the barrier. The threshold is not moved. This cut does not pass it.
 
 The node returned to idle.
+
+
+## 31. K split across the 58 SMs (2026-10-26, OBSERVED)
+
+Job 17583 asked the driver for occupancy and launched `12 × 58 = 696` blocks. A projection of width 576 has 144 threads with a column, and the rest waited on the barrier. That step was 0.0607 s/token. The ceiling for 540 MB at 300 GB/s is still 1.8 ms. The threshold stays 0.005 s.
+
+This cut does not ask occupancy. The grid is 58 blocks of 256 threads, one block per SM. Each GEMV gives block `b` the rows of K in `[b * span, min(K, (b + 1) * span))`, with `span = ceil(K / 58)`. A thread owns four coalesced columns and four accumulators, and writes `partial[b, col]`. A grid barrier follows. Every block then sums the 58 partials of its own column stripe into the destination. A slice that starts past K writes zeros. There is no `atomicAdd` and no `.maxnreg`. The partial buffer is `58 * 49152` f32, about 11 MB, allocated once.
+
+One launch is one token, M=1. The prefill of six tokens is six of those launches, and the KV cache grows. The thirty layers and the head run inside the launch. The host syncs once after the token, and does not copy a vector back in between. The block still syncs after RoPE and before the KV copy, and again before attention. If the module does not load, or the barrier does not return, the measured step fails. The graph of job 17506 and the 0.0430 s kernel of job 17557 are not fallbacks.
+
+Gate. Job 17616, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. Partition `bench` still has no nodes, so the job was pinned on `gpu-orangefs`. Jobs 17613 and 17614 held the node; this job waited and did not cancel them. SmolLM2-135M, ids 0, 504, 3575, 282, 4649, 314. The clock is `date +%s%N` on the job script.
+
+- The timed lines print `RESIDENT=1 grid=58`.
+- Prefill argmax, CPU and device: 7042.
+- Greedy continuation, eight tokens, both paths: 7042, 30, 657, 314, 260, 3995, 2240, 281.
+- Maximum absolute logit difference on that prefill: 1.60e-5 (the program printed 16026 at a scale of 1e9). That span has no threshold.
+- The device prefill of the six prompt tokens took 96452947 ns. That span has no threshold.
+- After one warm step, seven forwards span 296776154 ns, which is 0.0424 s/token. The gaps between the seven `RESIDENT=1 grid=58` lines and the end of the window run from 31.5 ms to 51.5 ms as the cache grows, so the mean is not one slow step. The threshold is 0.005 s. The measured step is under the 0.0607 s of job 17583, next to the 0.0430 s of job 17557, and above the 0.0175 s of job 17506. Effective traffic is 12.7 GB/s against the 1.8 ms ceiling. The threshold is not moved. This cut does not pass it.
+
+The node returned to idle.
