@@ -1,3 +1,6 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: ARROW_EXT_OK
 // Canonical Arrow extension types.
 // https://arrow.apache.org/docs/format/CanonicalExtensions.html
 
@@ -222,7 +225,135 @@ fn test_struct_ext() -> i64 with IO, Mut, Panic, Div {
     0
 }
 
+fn test_review() with IO, Mut, Panic, Div {
+    var s = arrow_schema_new()
+    assert(arrow_schema_add(&!s, "t", 1, arrow_type_fixed_list(), 0, 0, 0) == 0)
+    assert(arrow_schema_set_extra(&!s, 0, 10, 0) == 0)
+    assert(arrow_schema_add_child(&!s, 0, "item", 1, arrow_type_int(), 32, 1, 0) == 1)
+    assert(arrow_field_set_extension(&!s, 0, "arrow.fixed_shape_tensor", " { \"dim_names\" : [\"a\\\"b\", \"c\\\\d\"], \"permutation\": [1, 0], \"shape\": [2, 5] } ") == 0)
+    assert(arrow_ext_check(&!s, 0) == 0)
+    assert(arrow_field_set_extension(&!s, 0, "arrow.fixed_shape_tensor", "{\"shape\":[2,5],\"permutation\":[0,0]}") == 0)
+    assert(arrow_ext_check(&!s, 0) == -6)
+    assert(arrow_field_set_extension(&!s, 0, "arrow.fixed_shape_tensor", "{\"shape\":[2,5],\"dim_names\":[\"a\\q\",\"b\"]}") == 0)
+    assert(arrow_ext_check(&!s, 0) == -6)
+    assert(arrow_field_set_extension(&!s, 0, "arrow.fixed_shape_tensor", "{\"shape\":[18446744073709551618,5]}") == 0)
+    assert(arrow_ext_check(&!s, 0) == -6)
+    assert(arrow_field_set_extension(&!s, 0, "arrow.fixed_shape_tensor", "{\"shape\":[02,5]}") == 0)
+    assert(arrow_ext_check(&!s, 0) == -6)
+    var shape: [i64; 4] = [2, 5, 0, 0]
+    var perm: [i64; 4] = [1, 0, 0, 0]
+    var names: [u8; 64] = [0; 64]
+    var lens: [i64; 4] = [0; 4]
+    put_name(&!names, &!lens, 0, "a\"b\n")
+    put_name(&!names, &!lens, 1, "c\\d\t")
+    assert(arrow_ext_set_fixed_tensor(&!s, 0, &shape, 2, &perm, 2, &names, &lens, 2) == 0)
+    assert(arrow_ext_meta_is(&s, 0, "{\"shape\":[2,5],\"permutation\":[1,0],\"dim_names\":[\"a\\\"b\\u000a\",\"c\\\\d\\u0009\"]}") == 1)
+    assert(arrow_ext_check(&!s, 0) == 0)
+    var buf = arrow_buf_new()
+    assert(arrow_ipc_stream_begin(&s, &!buf) == 0)
+    assert(arrow_ipc_stream_end(&!buf) == 0)
+    var got = arrow_schema_new()
+    var batch = arrow_batch_new()
+    assert(arrow_ipc_read(&buf, &!got, &!batch) == 0)
+    assert(arrow_ext_check(&!got, 0) == 0)
+    assert(write_file("/tmp/sounio_arrow_ext_escaped.arrows", buf.data, buf.len) == buf.len)
+    lens[0] = -1
+    assert(arrow_ext_set_fixed_tensor(&!s, 0, &shape, 2, &perm, 0, &names, &lens, 2) == -7)
+    lens[0] = 17
+    assert(arrow_ext_set_fixed_tensor(&!s, 0, &shape, 2, &perm, 0, &names, &lens, 2) == -7)
+    lens[0] = 65
+    assert(arrow_ext_set_fixed_tensor(&!s, 0, &shape, 2, &perm, 0, &names, &lens, 2) == -7)
+
+    var v = arrow_schema_new()
+    assert(arrow_schema_add(&!v, "v", 1, arrow_type_struct(), 0, 0, 0) == 0)
+    assert(arrow_schema_add_child(&!v, 0, "data", 1, arrow_type_list(), 0, 0, 0) == 1)
+    assert(arrow_schema_add_child(&!v, 1, "item", 1, arrow_type_int(), 32, 1, 0) == 2)
+    assert(arrow_schema_add_child(&!v, 0, "shape", 0, arrow_type_fixed_list(), 0, 0, 0) == 3)
+    assert(arrow_schema_set_extra(&!v, 3, 2, 0) == 0)
+    assert(arrow_schema_add_child(&!v, 3, "item", 0, arrow_type_int(), 32, 1, 0) == 4)
+    var uniform: [i64; 4] = [9223372036854775807, -1, 0, 0]
+    assert(arrow_ext_set_var_tensor(&!v, 0, &perm, 0, &names, &lens, 0, &uniform, 2) == 0)
+    assert(arrow_ext_meta_is(&v, 0, "{\"uniform_shape\":[9223372036854775807,null]}") == 1)
+    assert(arrow_ext_check(&!v, 0) == 0)
+    lens[0] = 65
+    assert(arrow_ext_set_var_tensor(&!v, 0, &perm, 0, &names, &lens, 2, &uniform, 0) == -7)
+    lens[0] = -1
+    assert(arrow_ext_set_var_tensor(&!v, 0, &perm, 0, &names, &lens, 2, &uniform, 0) == -7)
+    lens[0] = 17
+    assert(arrow_ext_set_var_tensor(&!v, 0, &perm, 0, &names, &lens, 2, &uniform, 0) == -7)
+    lens[0] = 4
+    assert(arrow_ext_set_var_tensor(&!v, 0, &perm, 2, &names, &lens, 2, &uniform, 0) == 0)
+    assert(arrow_ext_check(&!v, 0) == 0)
+    assert(arrow_field_set_extension(&!v, 0, "arrow.variable_shape_tensor", "{ ") == 0)
+    assert(arrow_ext_check(&!v, 0) == -6)
+    assert(arrow_field_set_extension(&!v, 0, "arrow.variable_shape_tensor", " { \"uniform_shape\" : [400, null], \"dim_names\" : [\"a\\\"b\", \"c\\\\d\"] } ") == 0)
+    assert(arrow_ext_check(&!v, 0) == 0)
+    v.type_tag[4] = arrow_type_utf8()
+    assert(arrow_ext_set_var_tensor(&!v, 0, &perm, 0, &names, &lens, 0, &uniform, 0) == -6)
+    assert(arrow_ext_check(&!v, 0) == -6)
+    v.type_tag[4] = arrow_type_int()
+    v.is_signed[4] = 0
+    assert(arrow_ext_check(&!v, 0) == -6)
+    v.is_signed[4] = 1
+    v.bit_width[4] = 64
+    assert(arrow_ext_check(&!v, 0) == -6)
+    v.bit_width[4] = 32
+    v.n_nodes = 4
+    assert(arrow_ext_check(&!v, 0) == -6)
+    v.n_nodes = 5
+    assert(arrow_schema_add_child(&!v, 3, "extra", 0, arrow_type_int(), 32, 1, 0) == 5)
+    assert(arrow_ext_check(&!v, 0) == -6)
+
+    var o = arrow_schema_new()
+    assert(arrow_schema_add(&!o, "o", 1, arrow_type_utf8(), 0, 0, 0) == 0)
+    assert(arrow_field_set_extension(&!o, 0, "arrow.json", " \n{ \t }\r ") == 0)
+    assert(arrow_ext_check(&!o, 0) == 0)
+    assert(arrow_field_set_extension(&!o, 0, "arrow.json", "{} true") == 0)
+    assert(arrow_ext_check(&!o, 0) == -6)
+    assert(arrow_field_set_extension(&!o, 0, "arrow.opaque", " { \"vendor_name\": \"PostGIS\", \"future\": {\"x\": [true, null, -1.2e+3]}, \"type_name\": \"geometry\" } ") == 0)
+    assert(arrow_ext_check(&!o, 0) == 0)
+    assert(arrow_field_set_extension(&!o, 0, "arrow.opaque", "{\"vendor_name\":\"a\",\"type_name\":123}") == 0)
+    assert(arrow_ext_check(&!o, 0) == -6)
+    assert(arrow_field_set_extension(&!o, 0, "arrow.opaque", "{\"vendor_name\":\"a\",\"type_name\":\"b\",}") == 0)
+    assert(arrow_ext_check(&!o, 0) == -6)
+    assert(arrow_ext_set_opaque(&!o, 0, "a\n", "b\t") == 0)
+    assert(arrow_ext_meta_is(&o, 0, "{\"type_name\":\"a\\u000a\",\"vendor_name\":\"b\\u0009\"}") == 1)
+    assert(arrow_ext_check(&!o, 0) == 0)
+    var control: i64 = 0
+    lens[0] = 1
+    lens[1] = 1
+    while control < 32 {
+        names[0] = (control as i32) as u8
+        assert(arrow_ext_set_fixed_tensor(&!s, 0, &shape, 2, &perm, 0, &names, &lens, 2) == 0)
+        assert(arrow_ext_check(&!s, 0) == 0)
+        var slot: i64 = 0
+        while slot < s.meta_n[0] {
+            var k: i64 = 0
+            while k < s.meta_vl[slot as usize] {
+                assert((s.meta_v[(slot * 128 + k) as usize] as i64) >= 32)
+                k = k + 1
+            }
+            slot = slot + 1
+        }
+        control = control + 1
+    }
+
+    var p = arrow_schema_new()
+    assert(arrow_schema_add(&!p, "p", 1, arrow_type_struct(), 0, 0, 0) == 0)
+    assert(arrow_ext_set_variant(&!p, 0) == -6)
+    assert(arrow_field_set_extension(&!p, 0, "arrow.parquet.variant", "") == 0)
+    assert(arrow_ext_check(&!p, 0) == -6)
+    assert(arrow_schema_add_child(&!p, 0, "metadata", 0, arrow_type_binary(), 0, 0, 0) == 1)
+    assert(arrow_ext_set_variant(&!p, 0) == -6)
+    assert(arrow_schema_add_child(&!p, 0, "typed_value", 1, arrow_type_int(), 32, 1, 0) == 2)
+    assert(arrow_ext_set_variant(&!p, 0) == 0)
+    assert(arrow_ext_check(&!p, 0) == 0)
+    p.type_tag[2] = arrow_type_null()
+    assert(arrow_ext_check(&!p, 0) == -6)
+}
+
 fn main() -> i32 with IO, Mut, Panic, Div {
+    test_review()
     let a = test_simple()
     if a != 0 {
         print("FAIL simple ")

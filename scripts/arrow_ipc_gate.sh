@@ -11,6 +11,10 @@ cd "$REPO_ROOT"
 export SOUNIO_STDLIB_PATH="$PWD/stdlib"
 SOUC="${SOUC:-./bin/souc}"
 
+if [[ "${ARROW_REQUIRE_PYARROW:-0}" == 1 ]]; then
+  python3 -c 'import pyarrow, pyarrow.ipc, pyarrow.flight; print("Required pyarrow:", pyarrow.__version__)'
+fi
+
 FILE_OUT="/tmp/sounio_arrow_ipc.arrow"
 STREAM_OUT="/tmp/sounio_arrow_ipc.arrows"
 MULTI_FILE="/tmp/sounio_arrow_ipc_multi.arrow"

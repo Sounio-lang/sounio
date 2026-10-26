@@ -49,6 +49,11 @@ def main() -> None:
     if batch.column("t").storage.to_pylist() != [[1, 2, 3, 4, 5, 6]]:
         raise SystemExit("FAIL tensor values")
 
+    with pa.memory_map("/tmp/sounio_arrow_ext_escaped.arrows", "r") as src:
+        escaped = ipc.open_stream(src).schema.field("t").type
+    if list(escaped.dim_names) != ['a"b\n', "c\\d\t"]:
+        raise SystemExit(f"FAIL escaped dim names {escaped.dim_names}")
+
     schema, _batch = load(Path("/tmp/sounio_arrow_ext_struct.arrows"))
     variant = schema.field("p").metadata
     if variant.get(b"ARROW:extension:name") != b"arrow.parquet.variant":
