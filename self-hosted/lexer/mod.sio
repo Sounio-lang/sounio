@@ -15,7 +15,7 @@ use lexer::numparse::*
 use lexer::tables::*
 use lexer::token::{TokenKind}
 use parser::ast::*
-use parser::parser::{parser_set_token_at, parser_set_token_flat, parser_set_token_int_value, parser_set_token_scalar, parser_set_last_errors}
+use parser::parser::{parser_set_token_at, parser_set_token_flat, parser_set_token_int_value, parser_set_token_scalar, parser_set_last_errors, parser_span_int_literal_overflow}
 use parser::mod::{parse_items_preloaded}
 
 // Maximum tokens per file (2097152) — use literal not constant: boot4 leaves let globals at 0.
@@ -128,7 +128,8 @@ pub fn lexer_report_token_overflow_if_any() -> bool with IO, Mut {
 //
 // LEXER_LEX_ERROR_KIND: 0 = none, 1 = unexpected character, 2 = unterminated
 // block comment, 3 = unterminated string literal, 4 = invalid escape sequence
-// in a string literal, 5 = invalid escape sequence in a character literal.
+// in a string literal, 5 = invalid escape sequence in a character literal,
+// 6 = integer literal wider than any 64-bit integer type (ADR-015 row 1).
 var LEXER_LEX_ERROR_KIND: i64 = 0
 var LEXER_LEX_ERROR_LINE: i64 = 0
 var LEXER_LEX_ERROR_COL: i64 = 0
@@ -204,6 +205,12 @@ pub fn lexer_report_lex_error_if_any(path: string) -> bool with IO, Mut {
         print("error[E273]: unterminated string literal")
         lexer_print_location(path)
         print("  = note: no closing `\"` before end of file\n")
+    } else if LEXER_LEX_ERROR_KIND == 6 {
+        print("error[E275]: integer literal does not fit any 64-bit integer type")
+        lexer_print_location(path)
+        print("  = note: the digits were previously wrapped into the value, so\n")
+        print("          `99999999999999999999` compiled as 7766279631452241919\n")
+        print("  = help: write it as a float (`...e0`) or keep it within 2^64-1\n")
     } else {
         let in_char = LEXER_LEX_ERROR_KIND == 5
         print("error[E274]: invalid escape sequence `\\")
@@ -992,6 +999,15 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                     pos = pos + 1
                     col = col + 1
                 }
+                // ADR-015 row 1, refused HERE rather than at each parse site:
+                // every consumer of the wrapped value (expressions, patterns,
+                // attribute payloads, array lengths in types.sio — 27 call sites
+                // read int_value) goes through this emit. A hex literal past 16
+                // digits fits no 64-bit type.
+                if parser_span_int_literal_overflow(start, pos) {
+                    lexer_mark_lex_error(6, line, start_col, start)
+                    break
+                }
                 tc = lexer_push_flat(tc, 129, start, pos, line, start_col, value)
                 if tc < 0 { break }
                 continue
@@ -1040,6 +1056,13 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
             if is_float_token {
                 tc = lexer_push_flat(tc, 125, start, pos, line, start_col, 0)
             } else {
+                // Same refusal as the hex path above. The float branch is
+                // exempt: `3.14159265358979323846` is a mantissa, not an integer,
+                // and stdlib writes pi and 2pi that way in ~370 places.
+                if parser_span_int_literal_overflow(start, pos) {
+                    lexer_mark_lex_error(6, line, start_col, start)
+                    break
+                }
                 tc = lexer_push_flat(tc, 124, start, pos, line, start_col, value)
             }
             if tc < 0 { break }

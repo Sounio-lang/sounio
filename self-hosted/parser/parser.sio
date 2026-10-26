@@ -324,10 +324,7 @@ pub fn parser_last_error_count() -> i64 {
 //
 // Reads the token's own source bytes: the accumulated value is already wrapped
 // by the time the parser sees it, so only the spelling tells the truth.
-pub fn parser_int_literal_overflow(idx: i64) -> bool with Mut, Panic {
-    if idx < 0 || idx >= 2097152 { return false }
-    let start = PT_START[idx as usize]
-    let end = PT_END[idx as usize]
+pub fn parser_span_int_literal_overflow(start: i64, end: i64) -> bool with Mut, Panic {
     if end <= start + 1 { return false }
     var base: i64 = 10
     var digits_from = start
@@ -382,7 +379,20 @@ pub fn parser_int_literal_overflow(idx: i64) -> bool with Mut, Panic {
     if base == 2 { return count > 64 }
     if base == 8 { return count > 22 }
     if count > 20 { return true }
-    if count < 20 { return false }
+    if count < 19 { return false }
+    if count == 19 {
+        // 19 digits straddle i64 MAX, and the two readings of ADR-015 row 1
+        // disagree on what to do there: the corpus writes i64 MIN as
+        // -9223372036854775808 in 27 sites and writes values like
+        // 18446744073709551615 as annotated u64 in 6. So only 2^63 itself is
+        // refused, and only where no prefix minus absorbs the sign bit; the rest
+        // of the band waits for the checker's ruling. `prefix` already holds the
+        // first 19 significant digits accumulated in i64, so 2^63 is recognisable
+        // as the wrapped value landing exactly on i64 MIN — the same idiom
+        // main.sio and enir/canonical.sio use for that constant.
+        if prefix != 0 - 9223372036854775807 - 1 { return false }
+        return !parser_prefix_minus_before(start)
+    }
     // 20 significant digits straddle u64 MAX (18446744073709551615) and 2^64
     // (18446744073709551616), so the width alone cannot decide: compare the
     // first 19 digits against 2^64 / 10, a value that fits i64, then the 20th
@@ -391,6 +401,8 @@ pub fn parser_int_literal_overflow(idx: i64) -> bool with Mut, Panic {
     if prefix != CEIL_19 { return prefix > CEIL_19 }
     at20 >= 6
 }
+
+// Token-index form, kept for the parser call sites.
 
 
 
@@ -401,28 +413,6 @@ pub fn parser_int_literal_overflow(idx: i64) -> bool with Mut, Panic {
 // literal landing exactly on i64 MIN is 2^63. The `-9223372036854775807 - 1`
 // idiom already used in main.sio and enir/canonical.sio writes the constant
 // without quoting a value that does not fit.
-fn parser_int_literal_is_exactly_i64_min(idx: i64) -> bool with Mut, Panic {
-    let start = PT_START[idx as usize]
-    let end = PT_END[idx as usize]
-    var seen = false
-    var count: i64 = 0
-    var acc: i64 = 0
-    var i = start
-    while i < end {
-        let c = cursor_source_byte(i)
-        if c == (95 as i8) { i = i + 1; continue }
-        if c < (48 as i8) || c > (57 as i8) { break }
-        if !seen {
-            if c == (48 as i8) { i = i + 1; continue }
-            seen = true
-        }
-        count = count + 1
-        acc = acc * 10 + ((c - (48 as i8)) as i64)
-        i = i + 1
-    }
-    if count != 19 { return false }
-    acc == 0 - 9223372036854775807 - 1
-}
 
 // The minus before a literal is a prefix operator (so `-2^63` spells i64 MIN)
 // unless the byte before it can already end a value, which makes it the binary
@@ -458,12 +448,12 @@ fn parser_prefix_minus_before(start: i64) -> bool with Mut, Panic {
     !ends_value
 }
 
-// Refuse when no 64-bit type holds the value, or when it is exactly 2^63 and no
-// prefix minus is there to absorb the sign bit. The (i64 MAX, u64 MAX] band is
-// left to the checker: choosing inside it needs the declared type.
+// The parser-side predicate, kept so parse_int_literal and the attribute sites
+// still refuse; the lexer now refuses first, so this is the safety net for a
+// literal that reaches a parser without passing through the emitting lexer.
 pub fn parser_int_literal_must_be_refused(idx: i64) -> bool with Mut, Panic {
-    if parser_int_literal_overflow(idx) { return true }
-    parser_int_literal_is_exactly_i64_min(idx) && !parser_prefix_minus_before(PT_START[idx as usize])
+    if idx < 0 || idx >= 2097152 { return false }
+    parser_span_int_literal_overflow(PT_START[idx as usize], PT_END[idx as usize])
 }
 
 
