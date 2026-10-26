@@ -1,0 +1,1 @@
+`units::lib` adds `dim_rate()` and `dim_volume_rate()` for inverse-time and volume-per-time dimension tags. PBPK quantity callers can use these constructors without changing stored magnitudes, uncertainties, or clinical parameters.
