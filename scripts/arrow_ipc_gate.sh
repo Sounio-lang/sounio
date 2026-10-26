@@ -36,6 +36,11 @@ fi
 
 python3 scripts/arrow_ipc_check.py "$FILE_OUT" "$STREAM_OUT" "$MULTI_FILE" "$MULTI_STREAM"
 
+echo "== arrow spec schema / batch / dict / compression =="
+"$SOUC" run tests/stdlib/arrow/test_arrow_codec.sio
+"$SOUC" run tests/stdlib/arrow/test_arrow_spec.sio
+python3 scripts/arrow_spec_check.py
+
 echo "== arrow flight do_put / do_exchange =="
 "$SOUC" run tests/stdlib/arrow/test_arrow_flight.sio
 python3 scripts/arrow_flight_check.py \

@@ -11,22 +11,49 @@ false; that hook is a separate FFI surface.
 
 Fail closed (status `-7`) rather than truncate:
 
-- 8 fields, 16 rows per batch
-- 8 record-batch blocks in one file; a stream holds as many as fit in the buffer
-- field names and string/binary cells at most 32 bytes
+- 8 flattened field nodes (roots and children together), 16 slots per node
+- 16 rows at the root of a batch; a list child holds at most 16 values
+- 8 record-batch blocks and 4 dictionary blocks in one file
+- 4 dictionaries, 16 values each, value type has no children
+- 4 custom-metadata pairs at each of field, schema, and message; keys ≤ 32 bytes, values ≤ 48
+- field names, time zones, and string/binary cells at most 32 bytes
 - IPC buffer 8192 bytes, record-batch body 4096 bytes
 
 `arrow_ipc_read` reads one batch and returns `-7` when another batch is present.
 `arrow_ipc_open` then `arrow_ipc_next` walk every batch (`0` = a batch, `1` = end).
+`arrow_ipc_open_ex` / `arrow_ipc_next_ex` also load dictionary batches.
 `arrow_ipc_file_begin` / `arrow_ipc_file_push` / `arrow_ipc_file_end` and the
-matching `arrow_ipc_stream_*` calls write those batches.
+matching `arrow_ipc_stream_*` calls write those batches. `*_push_dict` writes
+a `DictionaryBatch`.
 
 ## Types
 
-Null, Int (8/16/32/64, signed or unsigned), FloatingPoint (half and single
-are raw bits in the low part of the cell; double is IEEE-754), Binary, Utf8,
-Bool. Dictionaries, nested children, compression, and big-endian schemas
-return `-4`.
+Every built-in type in `Schema.fbs`: null, int, floating point, binary, utf8,
+bool, decimal, date, time, timestamp, interval, list, struct, union, fixed-size
+binary, fixed-size list, map, duration, large binary, large utf8, large list,
+run-end encoded, binary view, utf8 view, list view, and large list view.
+Half and single floats stay raw bits. Decimal and interval values wider than
+8 bytes live in the string cell. Nested fields are a pre-order depth-first
+flatten: each node has a length and null count, and each buffer's `length`
+is the logical size, not the padding.
+
+A field may carry a dictionary id. The record batch then stores index buffers.
+Dictionary value batches are separate messages (`isDelta` appends; a second
+non-delta for the same id is replacement). A file rejects replacement. A
+stream that replaces a dictionary must set feature `DICTIONARY_REPLACEMENT`
+on the schema before `stream_begin`.
+
+Custom metadata round-trips on the field, the schema, and the schema message.
+The file footer copies the schema message metadata. Extension types are the
+keys `ARROW:extension:name` and `ARROW:extension:metadata`.
+
+`arrow_batch_set_codec` selects lz4-frame or zstd body compression. Set
+feature `COMPRESSED_BODY` before the schema message is written. Each buffer
+is compressed on its own and prefixed with the uncompressed length, or with
+`-1` when the payload is left uncompressed. Zstd decode accepts raw blocks,
+RLE blocks, and compressed blocks whose literals are raw or RLE and whose
+sequence tables are predefined or RLE. Huffman literals and FSE-compressed
+sequence tables return `-4`. Big-endian schemas return `-4`.
 
 ## Status
 
