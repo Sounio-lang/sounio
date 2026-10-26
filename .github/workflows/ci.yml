@@ -38,6 +38,7 @@ jobs:
       clinical: ${{ steps.classify.outputs.clinical }}
       sio: ${{ steps.classify.outputs.sio }}
       full: ${{ steps.classify.outputs.full }}
+      exhaustive: ${{ steps.layers.outputs.exhaustive }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,8 +50,24 @@ jobs:
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
         run: bash scripts/ci/classify_ci_impact.sh
+      - id: layers
+        name: Select exhaustive qualification
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FULL_IMPACT: ${{ steps.classify.outputs.full }}
+        run: |
+          # Unknown surfaces and CI edits retain full qualification even on PRs.
+          if [[ "$EVENT_NAME" != pull_request || "$FULL_IMPACT" == true ]]; then
+            echo 'exhaustive=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'exhaustive=false' >> "$GITHUB_OUTPUT"
+          fi
       - name: Classifier self-test
         run: bash scripts/ci/impact_ci_selftest.sh
+      # The layered aggregators and the evaluator must agree about which
+      # jobs each layer contains; this parses ci.yml and fails if they drift.
+      - name: CI layer contract
+        run: python3 scripts/ci/test_ci_layers.py
       # ADR-018 §4: a PR that changes the compiler, runtime or stdlib adds a
       # changelog.d/<slug>.<kind>.md fragment (kind=internal when nothing is
       # user-visible). Pull requests only: a merge group carries diffs that
@@ -2425,6 +2442,8 @@ jobs:
       - website
       - r6-corpus-sweep
       - slow-lane
+      - fast-pr-gate
+      - deep-compiler-gate
     runs-on: ubuntu-24.04
     timeout-minutes: 10  # #2443: measured max 1.5 min over the same window
     steps:
@@ -2442,3 +2461,55 @@ jobs:
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: bash scripts/ci/stdlib_deep_ci_decision.sh
+
+  # Layered qualification. Each aggregator requires every job in its layer to
+  # have succeeded. evaluate_ci_decision.py fails closed when the `needs` set
+  # does not match the layer exactly, so a layer cannot pass by omitting a job:
+  # dropping one from `needs` is a failure, not a smaller check.
+  #
+  # FAST and DEEP in scripts/ci/evaluate_ci_decision.py are the source of truth
+  # for membership; the needs lists below must match them exactly.
+  fast-pr-gate:
+    name: Fast PR Gate
+    if: always()
+    needs:
+      - impact
+      - contracts
+      - gate-wave-0
+      - sounio-lint
+      - website
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require every selected fast job
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          CI_LAYER: fast
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          NIGHTLY_INPUT: ${{ inputs.nightly }}
+        run: python3 scripts/ci/evaluate_ci_decision.py
+
+  deep-compiler-gate:
+    name: Deep Compiler Gate
+    if: always()
+    needs:
+      - impact
+      - native-selfhost-linux-x86_64
+      - source-bootstrap-selfhost-linux-x86_64
+      - madaros-current-source-deref-f64
+      - native-selfhost-macos-arm64
+      - full-test-suite
+      - madaros-witness-gate
+      - lean-proofs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require every selected deep job
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          CI_LAYER: deep
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          NIGHTLY_INPUT: ${{ inputs.nightly }}
+        run: python3 scripts/ci/evaluate_ci_decision.py
