@@ -145,6 +145,136 @@ class Protocol(unittest.TestCase):
             resident.close()
 
 
+class Budget(unittest.TestCase):
+    # Reported by the operator for pilot-20261024f. Not remeasured here.
+    LOAD_HEADROOM_BYTES = 69_500_000_000
+    GENERATE_HEADROOM_BYTES = 72_000_000_000
+    MEASURED_PARKED_BYTES = 77108124672
+    MEASURED_FORWARD_SECONDS = 9.09
+
+    def test_default_budget_is_50e9_and_keeps_the_margin(self):
+        self.assertEqual(lean_resident.DEFAULT_BUDGET_BYTES, 50_000_000_000)
+        self.assertEqual(lean_resident.MARGIN_BYTES, 10 * GIB)
+        self.assertEqual(lean_resident.budget_bytes(), 50_000_000_000)
+        for headroom in (self.LOAD_HEADROOM_BYTES, self.GENERATE_HEADROOM_BYTES):
+            self.assertTrue(lean_resident.headroom_keeps_margin(
+                headroom, lean_resident.DEFAULT_BUDGET_BYTES))
+        previous = os.environ.get("PIREUS_LEAN_RESIDENT_BUDGET_BYTES")
+        os.environ["PIREUS_LEAN_RESIDENT_BUDGET_BYTES"] = "123"
+        try:
+            self.assertEqual(lean_resident.budget_bytes(), 123)
+        finally:
+            if previous is None:
+                os.environ.pop("PIREUS_LEAN_RESIDENT_BUDGET_BYTES", None)
+            else:
+                os.environ["PIREUS_LEAN_RESIDENT_BUDGET_BYTES"] = previous
+        with self.assertRaises(ValueError):
+            lean_resident.headroom_keeps_margin(-1, 0)
+
+    def test_archived_prefix_and_accounted_peak(self):
+        experts = checkpoint_experts()
+        plan = lean_resident.select_resident_plan(experts, 50_000_000_000)
+        self.assertEqual(plan["resident_layer_count"], 21)
+        self.assertEqual(plan["resident_layers"][0], "llm.layers.2")
+        self.assertEqual(plan["resident_layers"][-1], "llm.layers.22")
+        self.assertEqual(plan["mmap_layers"][0], "llm.layers.23")
+        self.assertEqual(plan["mmap_layers"][-1], "llm.layers.41")
+        self.assertEqual(plan["resident_bytes"], 42681237504)
+        self.assertEqual(plan["parked_bytes"], 34426847232)
+        self.assertEqual(plan["staging_slots"], 2)
+        self.assertEqual(plan["staging_copies"], 2)
+        self.assertEqual(plan["staging_capacity_bytes"], 1811939328)
+        self.assertEqual(plan["staging_bytes"], 7247757312)
+        self.assertEqual(plan["accounted_bytes"], 49928994816)
+        self.assertLessEqual(plan["accounted_bytes"], plan["budget_bytes"])
+        self.assertEqual(plan["resident_bytes"] + plan["parked_bytes"],
+                         sum(item["bytes"] for item in experts))
+        self.assertTrue(lean_resident.headroom_keeps_margin(
+            self.LOAD_HEADROOM_BYTES, plan["accounted_bytes"]))
+        ordered = []
+        for item in experts:
+            key = lean_resident.layer_key(item["name"])
+            if key not in ordered:
+                ordered.append(key)
+        ordered.sort(key=lean_resident._layer_sort_key)
+        previous = -1
+        for budget in range(0, 80_000_000_000, 1_000_000_000):
+            try:
+                chosen = lean_resident.select_resident_plan(experts, budget)
+            except ValueError:
+                continue
+            count = chosen["resident_layer_count"]
+            self.assertGreaterEqual(count, previous)
+            self.assertEqual(chosen["resident_layers"], ordered[:count])
+            self.assertEqual(chosen["mmap_layers"], ordered[count:])
+            self.assertLessEqual(chosen["staging_slots"], 2)
+            self.assertEqual(chosen["accounted_bytes"],
+                             chosen["resident_bytes"] + chosen["staging_bytes"])
+            previous = count
+        self.assertEqual(
+            lean_resident.select_resident_plan(experts, 50_000_000_000), plan)
+        ratio = plan["parked_bytes"] / sum(item["bytes"] for item in experts)
+        seconds = self.MEASURED_FORWARD_SECONDS * ratio
+        print(json.dumps(dict(
+            evidence="archived-rank1-checkpoint-scaled-by-job-17675-effective-rate",
+            resident_layer_count=plan["resident_layer_count"],
+            resident_bytes=plan["resident_bytes"],
+            parked_bytes=plan["parked_bytes"],
+            staging_bytes=plan["staging_bytes"],
+            accounted_bytes=plan["accounted_bytes"],
+            estimated_forward_seconds=round(seconds, 3),
+            measured_forward_seconds=self.MEASURED_FORWARD_SECONDS,
+            measured_parked_bytes=self.MEASURED_PARKED_BYTES,
+        ), sort_keys=True))
+
+    def test_nothing_and_everything(self):
+        parameters = [dict(name="llm.layers.2.mlp.experts.w13_weight", bytes=1000)]
+        with self.assertRaises(ValueError):
+            lean_resident.select_resident_plan(parameters, budget=10)
+        held = lean_resident.select_resident_plan(parameters, budget=1000)
+        self.assertEqual(held["resident_layer_count"], 1)
+        self.assertEqual(held["parked_bytes"], 0)
+        self.assertEqual(held["staging_bytes"], 0)
+        self.assertEqual(held["accounted_bytes"], 1000)
+
+    def test_small_budget_keeps_two_slot_staging_inside_the_cap(self):
+        # Six layers of 10 bytes. All-resident is 60, over the budget.
+        # One resident layer plus two slots of pinned and device slabs is 50.
+        parameters = [dict(name="llm.layers.%d.mlp.experts.w13_weight" % index, bytes=10)
+                      for index in range(6)]
+        plan = lean_resident.select_resident_plan(parameters, budget=55, align=1)
+        self.assertEqual(plan["resident_layer_count"], 1)
+        self.assertEqual(plan["mmap_layer_count"], 5)
+        self.assertEqual(plan["staging_slots"], 2)
+        self.assertEqual(plan["staging_capacity_bytes"], 10)
+        self.assertEqual(plan["staging_bytes"], 40)
+        self.assertEqual(plan["accounted_bytes"], 50)
+        self.assertLessEqual(plan["accounted_bytes"], 55)
+        with self.assertRaises(ValueError):
+            lean_resident.prefetch_trace(["a"], slots=3)
+
+
+class Prefetch(unittest.TestCase):
+    def test_copy_of_the_next_layer_starts_before_compute_ends(self):
+        layers = ["L%d" % index for index in range(5)]
+        events = lean_resident.prefetch_trace(layers)
+        self.assertTrue({event[2] for event in events} <= {0, 1})
+
+        def at(kind, layer):
+            return next(index for index, event in enumerate(events)
+                        if event[0] == kind and event[1] == layer)
+
+        for index, layer in enumerate(layers):
+            self.assertLess(at("copy_end", layer), at("compute_begin", layer))
+            self.assertLess(at("compute_begin", layer), at("compute_end", layer))
+            self.assertEqual(events[at("copy_begin", layer)][2], index % 2)
+            if index + 1 < len(layers):
+                self.assertLess(at("copy_begin", layers[index + 1]), at("compute_end", layer))
+            if index >= 2:
+                self.assertLess(at("compute_end", layers[index - 2]), at("copy_begin", layer))
+        self.assertEqual(lean_resident.prefetch_trace([]), [])
+
+
 class Wiring(unittest.TestCase):
     def test_offline_generate_is_opt_in_and_the_guard_stays(self):
         runtime = Path(__file__).resolve().parent
@@ -166,6 +296,16 @@ class Wiring(unittest.TestCase):
         serve = (runtime / "serve_rank.sh").read_text()
         self.assertIn("--reserve-gib 33", serve)
         self.assertNotIn("PIREUS_LEAN_RESIDENT", serve)
+        self.assertIn("commit_residency", generate)
+        self.assertNotIn("os.posix_fadvise", (runtime / "lean_resident.py").read_text())
+        self.assertIn("select_resident_plan", profile)
+        pilot = (ROOT / "pilot.py").read_text()
+        self.assertIn(
+            'launch_cell_stage(target, "generate", "offline-generate",\n'
+            '                                             target / "offline-bundle.json", 240)',
+            pilot)
+        self.assertIn("promotion_threshold_percent=5", pilot)
+        self.assertIn("total_proposals", pilot)
 
 
 if __name__ == "__main__":

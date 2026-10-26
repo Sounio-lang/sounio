@@ -55,6 +55,7 @@ def profile_initialize(model_config, load_config, quant_config=None):
         meta_parameter_devices_only=True,tensors=tensors)
     import lean_resident
     report["lean_resident"]=lean_resident.estimate_anonymous_peak(tensors)
+    report["lean_resident_plan"]=lean_resident.select_resident_plan(tensors)
     out=Path("/scratch/pireus/receipts")/("meta-model-"+report["job"]+"-"+report["rank"]+".json")
     with out.open("x") as stream:
         json.dump(report,stream,indent=2)

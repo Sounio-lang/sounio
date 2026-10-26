@@ -112,9 +112,7 @@ def load_worker_and_cache(server_args, rank):
     assert worker.tokenizer is None
     if os.environ.get("PIREUS_LEAN_RESIDENT") == "1":
         import lean_resident
-        info = lean_resident.status(worker.model_runner.model)
-        if info["anonymous_expert_bytes"] != 0 or info["parked_bytes"] < lean_resident.MINIMUM_PARKED_BYTES:
-            raise RuntimeError("routed experts were not parked off anonymous memory")
+        info = lean_resident.commit_residency(worker.model_runner.model)
         emit("OFFLINE_LEAN_RESIDENT", **info)
     release_loading_temporaries(worker.model_runner.model,"after_weight_load")
     worker.alloc_memory_pool()

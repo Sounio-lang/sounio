@@ -250,7 +250,7 @@ def run_pilot(root):
             call("tokenized_cycle.py", "accept-encode", "--run", target, "--receipts", *receipts)
             call("tokenized_cycle.py", "pack-offline", "--run", target)
             generated_job = launch_cell_stage(target, "generate", "offline-generate",
-                                             target / "offline-bundle.json", 120)
+                                             target / "offline-bundle.json", 240)
             collect(target, generated_job, offline=True)
             call("tokenized_cycle.py", "accept-offline", "--run", target, "--worker-dir", target / "worker")
             call("tokenized_cycle.py", "pack-decode", "--run", target)
