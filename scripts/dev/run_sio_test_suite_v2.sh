@@ -272,7 +272,7 @@ if [[ -n "${CI:-}" && "${SOUNIO_TEST_JOBS_DYNAMIC:-1}" != "0" ]]; then
     fi
     MEMORY_JOBS=$((MEMORY_BYTES / (2 * 1024 * 1024 * 1024)))
     (( MEMORY_JOBS > 0 )) || MEMORY_JOBS=1
-    SCALED_JOBS="$CPU_COUNT"
+    SCALED_JOBS=$((2 * CPU_COUNT))
     (( SCALED_JOBS > MEMORY_JOBS )) && SCALED_JOBS="$MEMORY_JOBS"
     (( SCALED_JOBS > JOBS_CAP )) && SCALED_JOBS="$JOBS_CAP"
     if (( JOBS_CLI_SET == 1 && JOBS > SCALED_JOBS )); then

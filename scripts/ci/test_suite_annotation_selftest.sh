@@ -102,10 +102,16 @@ MOCK
 chmod +x "$TMP/mock-souc"
 printf '%s\n' "$HELLO" > "$TMP/list_jobs.txt"
 run_job_probe 1 "$TMP/jobs_low_memory.log" \
+    SOUNIO_TEST_CPU_COUNT=4 \
+    SOUNIO_TEST_JOBS=4 \
     SOUNIO_TEST_MEMORY_BYTES=$((2 * 1024 * 1024 * 1024))
-run_job_probe 2 "$TMP/jobs_low_cpu.log" \
+run_job_probe 4 "$TMP/jobs_low_cpu.log" \
     SOUNIO_TEST_CPU_COUNT=2 \
     SOUNIO_TEST_MEMORY_BYTES=$((8 * 1024 * 1024 * 1024))
+run_job_probe 8 "$TMP/jobs_four_cpu.log" \
+    SOUNIO_TEST_CPU_COUNT=4 \
+    SOUNIO_TEST_JOBS=4 \
+    SOUNIO_TEST_MEMORY_BYTES=$((16 * 1024 * 1024 * 1024))
 run_job_probe 4 "$TMP/jobs_implicit_default.log" \
     SOUNIO_TEST_MEMORY_BYTES=$((8 * 1024 * 1024 * 1024))
 run_job_probe 8 "$TMP/jobs_default_cap.log" \
