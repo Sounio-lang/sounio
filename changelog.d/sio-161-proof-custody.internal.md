@@ -1,0 +1,1 @@
+Reject empty proof-custody manifests and missing verified Lean prefixes, and include the original DP54 callback-time witness in the scientific input catalog; preserve numerical algorithms, proof models and frozen execution receipts.
