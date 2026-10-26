@@ -339,9 +339,12 @@ pub fn parser_int_literal_overflow(idx: i64) -> bool with Mut, Panic {
         else if b1 == (111 as i8) || b1 == (79 as i8) { base = 8; digits_from = start + 2 }
     }
     // Count significant digits: separators and leading zeros carry no width.
+    // Width alone decides here: 17+ hex digits, 65+ binary, 23+ octal, 21+
+    // decimal. Deliberately no [i8; 20] table of 2^64 ASCII digits: a hand-copied
+    // one silently drifted from the value it claimed to describe and refused
+    // 18446744073709551615 (u64 MAX), which no rule in ADR-015 asks for.
     var seen = false
     var count: i64 = 0
-    var first_digit: i64 = 0
     var i = digits_from
     while i < end {
         let c = cursor_source_byte(i)
@@ -349,16 +352,20 @@ pub fn parser_int_literal_overflow(idx: i64) -> bool with Mut, Panic {
             i = i + 1
             continue
         }
-        // A type suffix (`5u8`, and `i`/`f` in the older spelling) is part of the
-        // token's span; it is not a digit and ends the number.
-        if c < (48 as i8) || c > (57 as i8) { break }
+        // Hex digits must be read as hex: the earlier version tested every base
+        // against '0'..'9' only, so 0x1FFFFFFFFFFFFFFFF stopped at the first 'F'
+        // and counted one digit, accepting a 65-bit literal.
+        var d: i64 = 0
+        if c >= (48 as i8) && c <= (57 as i8) { d = (c - (48 as i8)) as i64 }
+        else if base == 16 && c >= (97 as i8) && c <= (102 as i8) { d = (c - (87 as i8)) as i64 }
+        else if base == 16 && c >= (65 as i8) && c <= (70 as i8) { d = (c - (55 as i8)) as i64 }
+        else { break }
         if !seen {
-            if c == (48 as i8) {
+            if d == 0 {
                 i = i + 1
                 continue
             }
             seen = true
-            first_digit = (c - (48 as i8)) as i64
         }
         count = count + 1
         i = i + 1
@@ -366,66 +373,73 @@ pub fn parser_int_literal_overflow(idx: i64) -> bool with Mut, Panic {
     if !seen { return false }
     if base == 16 { return count > 16 }
     if base == 2 { return count > 64 }
-    if base == 8 {
-        if count > 22 { return true }
-        if count < 22 { return false }
-        return first_digit >= 2
-    }
+    if base == 8 { return count > 22 }
+    // Decimal. 19 digits cannot reach 2^64 (9999999999999999999 < 2^64), so a
+    // 19-digit literal is never "wider than u64"; whether it passed i64 MAX is
+    // the checker's band, except for exactly 2^63 which
+    // `parser_int_literal_is_exactly_i64_min` reports. For 20 digits, compare the
+    // first 19 against 2^64/10 (1844674407370955161), a constant that fits i64,
+    // then the 20th against `6`: equal-or-above is 2^64 and up.
     if count > 20 { return true }
     if count < 20 { return false }
-    // Exactly 20 decimal digits: 18446744073709551616 is 2^64, the first value
-    // no 64-bit type holds. Compare the spelling digit by digit.
-    // ASCII for 18446744073709551616 (2^64), re-derived from 2**64 so a typo
-    // here cannot silently accept a literal no 64-bit type holds.
-    var ceil: [i8; 20] = [
-        49, 56, 52, 52, 54, 55, 52, 52, 48, 55,
-        51, 55, 48, 57, 53, 53, 49, 54, 49, 54
-    ]
-    // count == 20 here, so there are exactly 20 significant digits before any
-    // suffix. Walk them against the ceiling and decide at the first difference;
-    // twenty equal digits means the value IS 2^64, which no 64-bit type holds.
-    var j: i64 = 0
-    var k = digits_from
-    var started = false
-    var over = false
-    var done = false
-    while k < end && !done {
-        let c = cursor_source_byte(k)
-        if c == (95 as i8) {
-            k = k + 1
-            continue
+    var prefix: i64 = 0
+    var walked: i64 = 0
+    var w = digits_from
+    var skipped = false
+    while w < end && walked < 19 {
+        let cc = cursor_source_byte(w)
+        if cc == (95 as i8) { w = w + 1; continue }
+        if cc < (48 as i8) || cc > (57 as i8) { break }
+        if !skipped {
+            if cc == (48 as i8) { w = w + 1; continue }
+            skipped = true
         }
-        if c < (48 as i8) || c > (57 as i8) { break }
-        if !started {
-            if c == (48 as i8) {
-                k = k + 1
-                continue
-            }
-            started = true
-        }
-        if c > ceil[j as usize] {
-            over = true
-            done = true
-        } else if c < ceil[j as usize] {
-            over = false
-            done = true
-        } else if j == 19 {
-            // Equal through the twentieth digit: the value IS 2^64.
-            over = true
-            done = true
-        }
-        j = j + 1
-        k = k + 1
+        prefix = prefix * 10 + ((cc - (48 as i8)) as i64)
+        walked = walked + 1
+        w = w + 1
     }
-    over
+    let CEIL_19: i64 = 1844674407370955161
+    if prefix > CEIL_19 { return true }
+    if prefix < CEIL_19 { return false }
+    let last = cursor_source_byte(w)
+    last >= (54 as i8)
 }
 
-// A literal whose value is exactly 2^63 is the one width-dependent spelling the
-// corpus needs preserved: `-9223372036854775808` is how i64 MIN is written in
-// stdlib and in the oracle tables of tests/run-pass (28 sites), and it only
-// parses because the minus is a PREFIX operator applied to a value that itself
-// fits. Read the byte before the digits to tell that `-` from the binary one in
-// `0 - 9223372036854775808`.
+
+// The one width-dependent spelling the corpus needs preserved: i64 MIN.
+// `-9223372036854775808` is how stdlib and the f128/f256 oracle tables write it
+// (27 sites), and it parses because the minus is a PREFIX operator applied to a
+// value that itself fits. Decide it from the wrapped accumulator: a 19-digit
+// literal landing exactly on i64 MIN is 2^63. The `-9223372036854775807 - 1`
+// idiom already used in main.sio and enir/canonical.sio writes the constant
+// without quoting a value that does not fit.
+fn parser_int_literal_is_exactly_i64_min(idx: i64) -> bool with Mut, Panic {
+    let start = PT_START[idx as usize]
+    let end = PT_END[idx as usize]
+    var seen = false
+    var count: i64 = 0
+    var acc: i64 = 0
+    var i = start
+    while i < end {
+        let c = cursor_source_byte(i)
+        if c == (95 as i8) { i = i + 1; continue }
+        if c < (48 as i8) || c > (57 as i8) { break }
+        if !seen {
+            if c == (48 as i8) { i = i + 1; continue }
+            seen = true
+        }
+        count = count + 1
+        acc = acc * 10 + ((c - (48 as i8)) as i64)
+        i = i + 1
+    }
+    if count != 19 { return false }
+    acc == 0 - 9223372036854775807 - 1
+}
+
+// The minus before a literal is a prefix operator (so `-2^63` spells i64 MIN)
+// unless the byte before it can already end a value, which makes it the binary
+// subtraction operator. Read from the source, not from a token kind list, so the
+// test cannot go stale when the lexer's kind numbers move.
 fn parser_prefix_minus_before(start: i64) -> bool with Mut, Panic {
     var i = start - 1
     while i >= 0 {
@@ -449,79 +463,22 @@ fn parser_prefix_minus_before(start: i64) -> bool with Mut, Panic {
     }
     if i < 0 { return true }
     let before = cursor_source_byte(i)
-    let is_ident_char = (before >= (48 as i8) && before <= (57 as i8)) ||
+    let ends_value = (before >= (48 as i8) && before <= (57 as i8)) ||
         (before >= (65 as i8) && before <= (90 as i8)) ||
-        (before >= (97 as i8) && before <= (122 as i8)) || before == (95 as i8)
-    if is_ident_char { return false }
-    if before == (41 as i8) || before == (93 as i8) { return false }  // ')' or ']'
-    true
+        (before >= (97 as i8) && before <= (122 as i8)) || before == (95 as i8) ||
+        before == (41 as i8) || before == (93 as i8)
+    !ends_value
 }
 
-// The refusal predicate the parser calls: either no 64-bit type holds the value,
-// or it is exactly 2^63 written where no prefix minus can absorb the sign bit.
+// Refuse when no 64-bit type holds the value, or when it is exactly 2^63 and no
+// prefix minus is there to absorb the sign bit. The (i64 MAX, u64 MAX] band is
+// left to the checker: choosing inside it needs the declared type.
 pub fn parser_int_literal_must_be_refused(idx: i64) -> bool with Mut, Panic {
     if parser_int_literal_overflow(idx) { return true }
-    if idx < 0 || idx >= 2097152 { return false }
-    let start = PT_START[idx as usize]
-    let end = PT_END[idx as usize]
-    var seen = false
-    var count: i64 = 0
-    var i = start
-    while i < end {
-        let c = cursor_source_byte(i)
-        if c == (95 as i8) {
-            i = i + 1
-            continue
-        }
-        if c < (48 as i8) || c > (57 as i8) { break }
-        if !seen {
-            if c == (48 as i8) {
-                i = i + 1
-                continue
-            }
-            seen = true
-        }
-        count = count + 1
-        i = i + 1
-    }
-    if count != 19 { return false }
-    // 9223372036854775808: the only 19-digit spelling that is not a value some
-    // 64-bit type holds, so compare it exactly rather than by width.
-    // ASCII for 9223372036854775808 (2^63), derived from the arithmetic, not
-    // typed from memory: a wrong byte here silently accepts or refuses a value.
-    var dig: [i8; 19] = [
-        57, 50, 50, 51, 51, 55, 50, 48, 51, 54,
-        56, 53, 52, 55, 55, 53, 56, 48, 56
-    ]
-    var j: i64 = 0
-    var k = start
-    var started = false
-    while k < end && j < 19 {
-        let c2 = cursor_source_byte(k)
-        if c2 == (95 as i8) {
-            k = k + 1
-            continue
-        }
-        if c2 < (48 as i8) || c2 > (57 as i8) { break }
-        if !started {
-            if c2 == (48 as i8) {
-                k = k + 1
-                continue
-            }
-            started = true
-        }
-        if c2 != dig[j as usize] { return false }
-        j = j + 1
-        k = k + 1
-    }
-    if j != 19 { return false }
-    !parser_prefix_minus_before(start)
+    parser_int_literal_is_exactly_i64_min(idx) && !parser_prefix_minus_before(PT_START[idx as usize])
 }
 
-// One-call form for the sites that read `p.current().int_value` without going
-// through parse_int_literal (attribute payloads and the study-value helpers in
-// items.sio). Call it while `p` still points AT the literal; it returns the same
-// position with the refusal recorded, so the wrapped value never reaches the AST.
+
 pub fn parser_refuse_wide_int_literal_at(p0: Parser) -> Parser with Mut, IO, Panic, Div {
     var p = p0
     if !parser_int_literal_must_be_refused(p.pos) {
