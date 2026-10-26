@@ -1,55 +1,20 @@
-// stdlib/time/instant — Monotonic clock instant
-//
-// Uses POSIX clock_gettime with CLOCK_MONOTONIC for elapsed-time measurement.
-// Instant values are opaque; only meaningful as pairs for elapsed computation.
-
-// Duration struct (inlined to avoid cross-module deps)
-struct Duration {
-    secs: i64,
-    nanos: i32
+// Linux monotonic clock backed by the checked native platform ABI.
+// Instants are process-local, opaque, and carry explicit acquisition status.
+use ffi::platform::{Platform,PlatformValue,platform_call}
+pub struct Instant {ticks:i64,status:i64}
+pub fn instant_now(p:&Platform)->Instant with IO {
+    let r=platform_call(p,30,0,0,0,0)
+    return Instant {ticks:r.value,status:r.status}
 }
-
-struct Instant {
-    secs: i64,
-    nanos: i32
+pub fn instant_status(t:&Instant)->i64 {t.status}
+pub fn instant_elapsed_ns(start:&Instant,end:&Instant)->PlatformValue {
+    if start.status!=0 {return PlatformValue {value:0,status:start.status}}
+    if end.status!=0 {return PlatformValue {value:0,status:end.status}}
+    if end.ticks<start.ticks {return PlatformValue {value:0,status:22}}
+    return PlatformValue {value:end.ticks-start.ticks,status:0}
 }
-
-// Returns a stub Instant. Libc time/clock FFI is not yet linked in native mode.
-// Use this for relative elapsed-time comparisons only (secs will differ between calls
-// once native clock support is wired in).
-fn instant_now() -> Instant {
-    Instant { secs: 0, nanos: 0 }
-}
-
-fn instant_elapsed(start: Instant, end: Instant) -> Duration with Mut {
-    var secs = end.secs - start.secs
-    var nanos: i64 = end.nanos as i64 - start.nanos as i64
-    if nanos < 0 {
-        secs = secs - 1
-        nanos = nanos + 1000000000
-    }
-    Duration { secs: secs, nanos: nanos as i32 }
-}
-
-fn instant_elapsed_ns(start: Instant, end: Instant) -> i64 with Mut {
-    let d = instant_elapsed(start, end)
-    d.secs * 1000000000 + d.nanos as i64
-}
-
-fn instant_elapsed_ms(start: Instant, end: Instant) -> i64 with Mut, Div, Panic {
-    let ns = instant_elapsed_ns(start, end)
-    ns / 1000000
-}
-
-fn main() -> i32 with IO, Mut {
-    let t0 = instant_now()
-    let t1 = instant_now()
-    let d  = instant_elapsed(t0, t1)
-    if d.secs >= 0 {
-        println("instant_now: PASS")
-        println("instant_elapsed: PASS")
-        return 0
-    }
-    println("instant_elapsed: FAIL")
-    return 1
+pub fn instant_elapsed_ms(start:&Instant,end:&Instant)->PlatformValue with Div,Panic {
+    let r=instant_elapsed_ns(start,end)
+    if r.status!=0 {return r}
+    return PlatformValue {value:r.value/1000000,status:0}
 }
