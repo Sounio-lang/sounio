@@ -415,7 +415,7 @@ SU(2):             2×2 unitary matrices
 
 - [01_hello_quaternion.sio](../../examples/qnn/01_hello_quaternion.sio)
 - [02_basic_linear.sio](../../examples/qnn/02_basic_linear.sio)
-- [qnn_mnist.sio](../../examples/qnn/qnn_mnist.sio) - Full training example (example removed from repo)
+- `qnn_mnist.sio` — full training example (removed from the repo)
 
 ---
 
