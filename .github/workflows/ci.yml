@@ -993,12 +993,13 @@ jobs:
 
   madaros-current-source-deref-f64:
     name: Madaros Current-Source f64 Lowering
-    needs: impact
+    needs: [impact, madaros-witness-gate]
     outputs:
       rung_outcome: ${{ steps.rung.outcome }}
-      # 'true' once the compiler build step has started. A job that fails
-      # before it (Set up job, action download, toolchain/cache setup) has
-      # measured nothing about the compiler; see fixed-point-regression-alert.
+      # 'true' once the receipt-verified compiler is in hand. A job that fails
+      # before it (Set up job, action download, toolchain/cache setup, artifact
+      # download, receipt verify) has measured nothing about the compiler; see
+      # fixed-point-regression-alert.
       compiler_reached: ${{ steps.compiler-reached.outputs.reached }}
     # `stdlib` is here for a measured reason: 7 files in main.sio's own import
     # closure live under stdlib/compiler/ontology/ and classify as stdlib, not
@@ -1100,14 +1101,26 @@ jobs:
           sudo mkswap /mnt/swapfile-gen2
           sudo swapon /mnt/swapfile-gen2
           echo "--- after"; free -m; swapon --show
-      - name: Mark that the compiler build was reached
-        id: compiler-reached
-        run: echo "reached=true" >> "$GITHUB_OUTPUT"
       - name: Explicit AST expression-kind consumers reference real variants
         run: |
           c++ -std=c++23 -O2 -Wall -Wextra -Werror scripts/ci/ast_expr_kind_surface.cpp -o /tmp/madaros-ast-expr-surface
           /tmp/madaros-ast-expr-surface "$PWD"
-      - name: Build Madaros once and run current-source f64 lowering gates
+      - name: Receive the verified current-source Madaros artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: current-source-madaros-${{ github.run_id }}-${{ github.sha }}
+          path: ${{ runner.temp }}/stdlib-deep-compiler
+      - name: Verify the downloaded compiler before use
+        run: |
+          bash scripts/ci/stdlib_deep_compiler_receipt.sh verify \
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP/stdlib-deep-compiler" "$GITHUB_SHA"
+          mkdir -p "$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR"
+          cp "$RUNNER_TEMP/stdlib-deep-compiler/madaros.elf" "$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR/madaros"
+          chmod 755 "$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR/madaros"
+      - name: Mark that the verified compiler was reached
+        id: compiler-reached
+        run: echo "reached=true" >> "$GITHUB_OUTPUT"
+      - name: Run current-source f64 lowering gates with the verified compiler
         run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
       - name: Start self-hosted knowledge runtime thresholds asynchronously
         if: runner.environment == 'self-hosted'
@@ -1121,7 +1134,8 @@ jobs:
           SOUNIO_MADAROS_RECORD_OWNER_GATE_DIR: /tmp/sounio-madaros-current-source-f64-lowering/nested-record-owner-workflow
         run: bash scripts/ci/madaros_nested_if_record_owner_gate.sh
       # SCO gates require a compiler from this exact source, not the shipping prebuilt.
-      # The modular content-addressed cache reuses the compiler built above.
+      # The steps above use the receipt-verified ELF. This stack still builds into
+      # its own path; the content-addressed cache can satisfy that build.
       - name: Validate the SCO compiler stack contract
         run: bash scripts/ci/sco_stack_contract.sh
       - name: SCO source-built runtime and strategy coverage
@@ -1172,8 +1186,9 @@ jobs:
       # The three gates this branch added alongside its compiler fixes. Each
       # guards one of them and was written as "a named gate" -- but naming a
       # gate means a workflow runs it, and none did, which is exactly what
-      # gate_workflow_reference_ratchet.sh refuses. They reuse the ELF the
-      # build step above already kept (KEEP=1) and add no build of their own.
+      # gate_workflow_reference_ratchet.sh refuses. They reuse the receipt-verified
+      # ELF the verify step placed in the gate directory (KEEP=1) and add no
+      # build of their own.
       - name: Method calls resolve through a reference receiver
         env:
           SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
@@ -2170,7 +2185,7 @@ jobs:
 
   gate-wave-0:
     name: Gate Wave 0
-    needs: impact
+    needs: [impact, madaros-witness-gate]
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -2178,10 +2193,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Materialize the committed Madaros prebuilt
         run: bash scripts/lib/materialize_madaros_prebuilt.sh
-      - name: Build Madaros from this PR's own source
+      - name: Receive the verified current-source Madaros artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: current-source-madaros-${{ github.run_id }}-${{ github.sha }}
+          path: ${{ runner.temp }}/stdlib-deep-compiler
+      - name: Verify the downloaded compiler before use
         run: |
-          ulimit -s 1048576 2>/dev/null || true
-          bash scripts/ci/build_modular_madaros.sh /tmp/madaros-wave0.elf
+          bash scripts/ci/stdlib_deep_compiler_receipt.sh verify \
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP/stdlib-deep-compiler" "$GITHUB_SHA"
+          cp "$RUNNER_TEMP/stdlib-deep-compiler/madaros.elf" /tmp/madaros-wave0.elf
+          chmod 755 /tmp/madaros-wave0.elf
+      - name: Verify the unified producer/consumer wiring
+        run: bash scripts/ci/stdlib_deep_compiler_receipt.sh workflow
       # First four of the 472 gate scripts that no workflow named (frozen count:
       # scripts/ci/gate_workflow_reference.frozen). Picked from the PASS
       # bucket of a from-source gate sweep, for the incident each one would
@@ -2364,13 +2388,14 @@ jobs:
   # is given. "Required gate skipped" had been traded for "required gate not
   # counted".
   # The self-compile rung runs post-merge only (see its step). When it goes red
-  # on main -- or the job fails after reaching the compiler build, e.g. the
-  # build itself or a gate before the rung breaks, so the rung never ran --
-  # open (or bump) one issue so the regression is visible without anyone
-  # watching the Actions tab. A job that fails BEFORE the build step (Set up
-  # job, action download, toolchain/cache setup; run 36848177901 opened #2742
-  # that way) has measured nothing about the compiler: it still fails the
-  # normal CI decision, but it is not reported as a self-compile regression.
+  # on main -- or the job fails after the receipt-verified compiler is in hand,
+  # e.g. a gate before the rung breaks, so the rung never ran -- open (or bump)
+  # one issue so the regression is visible without anyone watching the Actions
+  # tab. A job that fails BEFORE that mark (Set up job, action download,
+  # toolchain/cache setup, artifact download, receipt verify; run 36848177901
+  # opened #2742 that way) has measured nothing about the compiler: it still
+  # fails the normal CI decision, but it is not reported as a self-compile
+  # regression.
   # `cancelled` is deliberately NOT an alert: the concurrency group cancels a
   # superseded main run whenever the next merge lands, and the newer run
   # carries the verdict.

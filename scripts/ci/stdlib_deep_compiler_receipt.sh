@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # Current-run compiler transfer; hashes bind the tracked input bytes, not a
 # complete-consumption proof. Never execute a downloaded compiler before verify.
+# `workflow` checks that ci.yml has one Witness Gate producer and that every
+# current-source consumer depends on it, verifies the receipt, and does not
+# build another ELF.
 set -euo pipefail
 export LC_ALL=C
 fail() { printf 'STDLIB_DEEP_RECEIPT_FAIL: %s\n' "$*" >&2; exit 65; }
 script=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
+root=$(cd "$(dirname "$script")/../.." && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/stdlib-deep-receipt.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 check_revision() {
@@ -107,11 +111,245 @@ selftest() {
   printf 'RECEIPT_TAMPER_REJECTED %s\n' "$control"
  done
  "$script" verify "$repo" "$artifact" "$sha" > "$work/final-verify.log"
+ run_workflow "$root/.github/workflows/ci.yml"
  printf 'STDLIB_DEEP_COMPILER_RECEIPT_SELFTEST_PASS\n'
+}
+artifact_name_re='^[[:space:]]+name:[[:space:]]+current-source-madaros-\$\{\{[[:space:]]*github\.run_id[[:space:]]*\}\}-\$\{\{[[:space:]]*github\.sha[[:space:]]*\}\}[[:space:]]*$'
+producer_job=madaros-witness-gate
+consumer_jobs=(madaros-current-source-deref-f64 stdlib-deep-science gate-wave-0)
+scan_job_body() {
+ local blob=$1 mode= line uploads=0 downloads=0 upload_at=0 download_at=0 verify_at=0 prepare_at=0 build_runs=0 unattached=0 n=0
+ while IFS= read -r line; do
+  n=$((n + 1))
+  [[ "$line" =~ ^[[:space:]]*# ]] && continue
+  if [[ "$line" =~ ^[[:space:]]{6}-[[:space:]] ]]; then
+   mode=
+   [[ "$line" == *"actions/upload-artifact@"* ]] && mode=upload
+   [[ "$line" == *"actions/download-artifact@"* ]] && mode=download
+  fi
+  [[ "$line" =~ ^[[:space:]]+uses:[[:space:]]+actions/upload-artifact@ ]] && mode=upload
+  [[ "$line" =~ ^[[:space:]]+uses:[[:space:]]+actions/download-artifact@ ]] && mode=download
+  if [[ "$line" =~ $artifact_name_re ]]; then
+   case "$mode" in
+    upload) uploads=$((uploads + 1)); upload_at=$n ;;
+    download) downloads=$((downloads + 1)); download_at=$n ;;
+    *) unattached=1 ;;
+   esac
+   mode=
+  fi
+  [[ "$verify_at" == 0 && "$line" == *"stdlib_deep_compiler_receipt.sh verify"* ]] && verify_at=$n
+  [[ "$prepare_at" == 0 && "$line" == *"stdlib_deep_compiler_receipt.sh prepare"* ]] && prepare_at=$n
+  [[ "$line" == *"build_modular_madaros.sh"* && "$line" != *"hashFiles("* ]] && build_runs=$((build_runs + 1))
+ done <<<"$blob"
+ printf '%s %s %s %s %s %s %s %s\n' "$uploads" "$downloads" "$upload_at" "$download_at" "$verify_at" "$prepare_at" "$build_runs" "$unattached"
+}
+needs_has() {
+ local text=$1 id=$2
+ [[ "$text" =~ (^|[^A-Za-z0-9_-])${id}([^A-Za-z0-9_-]|$) ]]
+}
+workflow_problems() {
+ local file=$1 line job= in_jobs=0 in_needs=0 id rest flag consumer
+ local -a problems=()
+ local -A body=() needs_text=() if_text=()
+ [[ -f "$file" ]] || { printf 'workflow-missing %s\n' "$file"; return 0; }
+ while IFS= read -r line || [[ -n "$line" ]]; do
+  if [[ "$line" =~ ^[^[:space:]#] ]]; then
+   if [[ "$line" == "jobs:" ]]; then in_jobs=1; job=; continue; fi
+   in_jobs=0
+   job=
+   continue
+  fi
+  [[ "$in_jobs" == 1 ]] || continue
+  if [[ "$line" =~ ^\ \ ([A-Za-z0-9_-]+):[[:space:]]*$ ]]; then
+   job=${BASH_REMATCH[1]}
+   body[$job]=
+   needs_text[$job]=
+   if_text[$job]=
+   in_needs=0
+   continue
+  fi
+  [[ -n "$job" ]] || continue
+  body[$job]+=$line$'\n'
+  if [[ "$line" =~ ^\ \ \ \ needs:[[:space:]]*(.*)$ ]]; then
+   rest=${BASH_REMATCH[1]}
+   needs_text[$job]=$rest
+   if [[ -z "$rest" ]]; then in_needs=1; else in_needs=0; fi
+   continue
+  fi
+  if [[ "$in_needs" == 1 ]]; then
+   if [[ "$line" =~ ^\ \ \ \ \ \ -\ ([A-Za-z0-9_-]+)[[:space:]]*$ ]]; then
+    needs_text[$job]+=" ${BASH_REMATCH[1]}"
+    continue
+   fi
+   in_needs=0
+  fi
+  if [[ -z "${if_text[$job]}" && "$line" =~ ^\ \ \ \ if:[[:space:]]*(.*)$ ]]; then
+   if_text[$job]=${BASH_REMATCH[1]}
+  fi
+ done < "$file"
+ [[ -n "${body[$producer_job]:-}" ]] || problems+=("missing-producer $producer_job")
+ local uploads downloads upload_at download_at verify_at prepare_at build_runs unattached blob known=0
+ local producer_flags='' consumer_flags artifact_path='path: ${{ runner.temp }}/stdlib-deep-compiler'
+ if [[ -n "${body[$producer_job]:-}" ]]; then
+  blob=${body[$producer_job]}
+  read -r uploads downloads upload_at download_at verify_at prepare_at build_runs unattached < <(scan_job_body "$blob")
+  [[ "$uploads" == 1 && "$downloads" == 0 && "$unattached" == 0 ]] || problems+=("upload-count $producer_job uploads=$uploads downloads=$downloads unattached=$unattached")
+  [[ "$unattached" == 0 ]] || problems+=("artifact-unattached $producer_job")
+  [[ "$build_runs" -ge 1 ]] || problems+=("producer-build $producer_job")
+  [[ "$prepare_at" -gt 0 && "$upload_at" -gt "$prepare_at" ]] || problems+=("prepare-before-upload $producer_job")
+  [[ "$blob" == *"$artifact_path"* ]] || problems+=("download-path $producer_job")
+  [[ -n "${if_text[$producer_job]:-}" && "${if_text[$producer_job]}" != *"always()"* ]] || problems+=("producer-if $producer_job")
+  producer_flags=$(grep -oE 'needs\.impact\.outputs\.[a-z0-9_]+' <<<"${if_text[$producer_job]:-}" | sort -u || true)
+  [[ -n "$producer_flags" ]] || problems+=("producer-if $producer_job")
+ fi
+ for consumer in "${consumer_jobs[@]}"; do
+  [[ -n "${body[$consumer]:-}" ]] || { problems+=("missing-consumer $consumer"); continue; }
+  needs_has "${needs_text[$consumer]:-}" "$producer_job" || problems+=("needs-producer $consumer")
+  blob=${body[$consumer]}
+  read -r uploads downloads upload_at download_at verify_at prepare_at build_runs unattached < <(scan_job_body "$blob")
+  [[ "$uploads" == 0 && "$downloads" == 1 && "$unattached" == 0 ]] || problems+=("download-count $consumer uploads=$uploads downloads=$downloads unattached=$unattached")
+  [[ "$unattached" == 0 ]] || problems+=("artifact-unattached $consumer")
+  [[ "$build_runs" == 0 ]] || problems+=("consumer-rebuilds $consumer")
+  [[ "$download_at" -gt 0 && "$verify_at" -gt "$download_at" ]] || problems+=("verify-after-download $consumer")
+  [[ "$blob" =~ stdlib_deep_compiler_receipt\.sh[[:space:]]+verify[[:space:]]*\\?[[:space:]]*\"\$GITHUB_WORKSPACE\"[[:space:]]*\"\$RUNNER_TEMP/stdlib-deep-compiler\"[[:space:]]*\"\$GITHUB_SHA\" ]] || problems+=("verify-arguments $consumer")
+  [[ "$blob" == *"$artifact_path"* ]] || problems+=("download-path $consumer")
+  [[ -n "${if_text[$consumer]:-}" ]] || problems+=("consumer-if $consumer")
+  [[ "${if_text[$consumer]:-}" != *"always()"* ]] || problems+=("consumer-always $consumer")
+  consumer_flags=$(grep -oE 'needs\.impact\.outputs\.[a-z0-9_]+' <<<"${if_text[$consumer]:-}" | sort -u || true)
+  [[ -n "$consumer_flags" ]] || problems+=("consumer-if $consumer")
+  while IFS= read -r flag; do
+   [[ -n "$flag" ]] || continue
+   grep -Fxq "$flag" <<<"$producer_flags" || problems+=("impact-subset $consumer $flag")
+  done <<<"$consumer_flags"
+ done
+ for id in "${!body[@]}"; do
+  known=0
+  [[ "$id" == "$producer_job" ]] && known=1
+  for consumer in "${consumer_jobs[@]}"; do [[ "$id" == "$consumer" ]] && known=1; done
+  [[ "$known" == 1 ]] && continue
+  read -r uploads downloads upload_at download_at verify_at prepare_at build_runs unattached < <(scan_job_body "${body[$id]}")
+  [[ "$uploads" == 0 && "$downloads" == 0 && "$unattached" == 0 ]] || problems+=("unexpected-transfer $id uploads=$uploads downloads=$downloads unattached=$unattached")
+ done
+ if grep -q 'SOUNIO_MADAROS_F64_LOWERING_BUILD' "$file"; then problems+=("builder-override $file"); fi
+ if ((${#problems[@]} > 0)); then printf '%s\n' "${problems[@]}"; fi
+}
+expect_workflow_problem() {
+ local file=$1 token=$2 problems
+ problems=$(workflow_problems "$file")
+ grep -q "$token" <<<"$problems" || fail "workflow control accepted $token: ${problems:-<none>}"
+ printf 'RECEIPT_WORKFLOW_CONTROL_REJECTED %s\n' "$token"
+}
+workflow_controls() {
+ local base="$work/wf-good.yml" bad
+ mkdir -p "$work"
+ cat >"$base" <<'EOF'
+name: fixture
+on: push
+jobs:
+  madaros-witness-gate:
+    needs: impact
+    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
+    steps:
+      - name: Build
+        run: bash scripts/ci/build_modular_madaros.sh /tmp/madaros-ci.elf
+      - name: Bind
+        run: bash scripts/ci/stdlib_deep_compiler_receipt.sh prepare \
+            "$GITHUB_WORKSPACE" /tmp/madaros-ci.elf "$RUNNER_TEMP/stdlib-deep-compiler" "$GITHUB_SHA"
+      - name: Transfer
+        uses: actions/upload-artifact@v4
+        with:
+          name: current-source-madaros-${{ github.run_id }}-${{ github.sha }}
+          path: ${{ runner.temp }}/stdlib-deep-compiler/
+  madaros-current-source-deref-f64:
+    needs: [impact, madaros-witness-gate]
+    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true'
+    steps:
+      - name: Receive
+        uses: actions/download-artifact@v4
+        with:
+          name: current-source-madaros-${{ github.run_id }}-${{ github.sha }}
+          path: ${{ runner.temp }}/stdlib-deep-compiler
+      - name: Verify
+        run: bash scripts/ci/stdlib_deep_compiler_receipt.sh verify \
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP/stdlib-deep-compiler" "$GITHUB_SHA"
+  stdlib-deep-science:
+    needs: [impact, madaros-witness-gate]
+    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true'
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: current-source-madaros-${{ github.run_id }}-${{ github.sha }}
+          path: ${{ runner.temp }}/stdlib-deep-compiler
+      - name: Verify
+        run: bash scripts/ci/stdlib_deep_compiler_receipt.sh verify "$GITHUB_WORKSPACE" "$RUNNER_TEMP/stdlib-deep-compiler" "$GITHUB_SHA"
+  gate-wave-0:
+    needs: [impact, madaros-witness-gate]
+    if: needs.impact.outputs.full == 'true'
+    steps:
+      - name: Receive
+        uses: actions/download-artifact@v4
+        with:
+          name: current-source-madaros-${{ github.run_id }}-${{ github.sha }}
+          path: ${{ runner.temp }}/stdlib-deep-compiler
+      - name: Verify
+        run: |
+          bash scripts/ci/stdlib_deep_compiler_receipt.sh verify \
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP/stdlib-deep-compiler" "$GITHUB_SHA"
+  unrelated:
+    needs: impact
+    if: needs.impact.outputs.website == 'true'
+    steps:
+      - name: Build something else
+        run: bash scripts/ci/build_modular_madaros.sh /tmp/other.elf
+EOF
+ local good
+ good=$(workflow_problems "$base")
+ [[ -z "$good" ]] || fail "workflow control rejected the good fixture: $good"
+ printf 'RECEIPT_WORKFLOW_CONTROL_ACCEPTED good\n'
+ bad="$work/wf-needs.yml"
+ sed 's/needs: \[impact, madaros-witness-gate\]/needs: impact/' "$base" >"$bad"
+ # The sed above rewrites every consumer. One missing edge is enough.
+ expect_workflow_problem "$bad" needs-producer
+ bad="$work/wf-verify.yml"
+ awk 'BEGIN{skip=0} /madaros-current-source-deref-f64/{skip=1} skip && /stdlib_deep_compiler_receipt.sh verify/{skip=0; next} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-after-download
+ bad="$work/wf-rebuild.yml"
+ awk 'BEGIN{arm=0} /^  gate-wave-0:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{print; print "          bash scripts/ci/build_modular_madaros.sh /tmp/madaros-wave0.elf"; arm=0; next} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" consumer-rebuilds
+ bad="$work/wf-second-upload.yml"
+ awk 'BEGIN{arm=0} /^  unrelated:/{arm=1} arm && /build_modular_madaros.sh/{print; print "      - uses: actions/upload-artifact@v4"; print "        with:"; print "          name: current-source-madaros-${{ github.run_id }}-${{ github.sha }}"; print "          path: ${{ runner.temp }}/stdlib-deep-compiler/"; arm=0; next} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" unexpected-transfer
+ bad="$work/wf-subset.yml"
+ sed "s/if: needs.impact.outputs.full == 'true'/if: needs.impact.outputs.website == 'true'/" "$base" >"$bad"
+ expect_workflow_problem "$bad" impact-subset
+ bad="$work/wf-always.yml"
+ sed 's/if: needs.impact.outputs.full/if: always() \&\& needs.impact.outputs.full/' "$base" >"$bad"
+ expect_workflow_problem "$bad" consumer-always
+ bad="$work/wf-unattached.yml"
+ sed 's/uses: actions\/upload-artifact@v4/uses: actions\/checkout@v4/' "$base" >"$bad"
+ expect_workflow_problem "$bad" artifact-unattached
+ bad="$work/wf-missing.yml"
+ awk 'BEGIN{drop=0} /^  gate-wave-0:/{drop=1} drop && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ && !/^  gate-wave-0:/{drop=0} drop{next} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" missing-consumer
+}
+run_workflow() {
+ local target=${1:-$root/.github/workflows/ci.yml} problems sabotaged
+ bash "$root/scripts/ci/madaros_current_source_f64_lowering_gate.sh" --resolve-compiler-selftest \
+  || fail 'preplaced compiler contract failed'
+ workflow_controls
+ problems=$(workflow_problems "$target")
+ [[ -z "$problems" ]] || fail "workflow wiring mismatch: $problems"
+ sabotaged="$work/ci-sabotaged.yml"
+ sed '/^  gate-wave-0:$/,/^  [A-Za-z0-9_-]*:/ s/needs: \[impact, madaros-witness-gate\]/needs: impact/' "$target" >"$sabotaged"
+ problems=$(workflow_problems "$sabotaged")
+ grep -q 'needs-producer gate-wave-0' <<<"$problems" || fail "real workflow sabotage was not rejected: ${problems:-<none>}"
+ printf 'RECEIPT_WORKFLOW_REAL_SABOTAGE_REJECTED needs-producer\n'
+ printf 'STDLIB_DEEP_COMPILER_RECEIPT_WORKFLOW_PASS\n'
 }
 case ${1:-} in
  prepare) [[ $# == 5 ]] || fail 'prepare REPO COMPILER ABSOLUTE_ARTIFACT_DIR EXPECTED_SHA'; prepare "$2" "$3" "$4" "$5" ;;
  verify) [[ $# == 4 ]] || fail 'verify REPO ARTIFACT_DIR EXPECTED_SHA'; verify "$2" "$3" "$4" ;;
  selftest) selftest ;;
- *) fail 'expected prepare, verify or selftest' ;;
+ workflow) [[ $# == 1 || $# == 2 ]] || fail 'workflow [WORKFLOW_YML]'; run_workflow "${2:-$root/.github/workflows/ci.yml}" ;;
+ *) fail 'expected prepare, verify, selftest or workflow' ;;
 esac

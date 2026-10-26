@@ -138,33 +138,140 @@ wait_knowledge_runtime() {
   echo "[madaros-f64-lowering] knowledge-runtime receipt: PASS"
 }
 
+# A directory that already holds only an executable `madaros` is the CI path:
+# Witness Gate built the compiler, the receipt was verified, and this job
+# copied that ELF here. Anything else already in the directory is leftover
+# state. SOUNIO_MADAROS_F64_LOWERING_BUILD overrides the builder for the
+# resolve-compiler selftest; CI must not set it.
+prepare_compiler() {
+  local created=0 preplaced=0 extra build_cmd
+  compiler_origin=built
+  if [[ -n "${SOUNIO_MADAROS_F64_LOWERING_GATE_DIR:-}" ]]; then
+    WORK="$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR"
+    if [[ -d "$WORK" && -f "$WORK/madaros" && -s "$WORK/madaros" && -x "$WORK/madaros" && ! -L "$WORK/madaros" ]]; then
+      extra="$(find "$WORK" -mindepth 1 -maxdepth 1 ! -name madaros -print -quit)"
+      if [[ -n "$extra" ]]; then
+        fail "refusing existing gate directory: $WORK"
+      fi
+      preplaced=1
+    elif [[ -e "$WORK" ]]; then
+      fail "refusing existing gate directory: $WORK"
+    else
+      mkdir "$WORK" || fail "could not create gate directory: $WORK"
+      created=1
+    fi
+  else
+    WORK="$(mktemp -d /tmp/sounio-madaros-f64-lowering.XXXXXX)"
+    created=1
+  fi
+
+  MADAROS_ELF="${SOUNIO_MADAROS_F64_LOWERING_GATE_BIN:-$WORK/madaros}"
+  if [[ "$KEEP_WORK" != "1" && "$created" == 1 ]]; then
+    trap 'rm -rf "$WORK"' EXIT
+  fi
+
+  if [[ -n "${SOUNIO_MADAROS_F64_LOWERING_GATE_BIN:-}" ]]; then
+    compiler_origin=supplied
+  elif [[ "$preplaced" == 1 ]]; then
+    compiler_origin=preplaced
+    echo "[madaros-f64-lowering] using pre-placed compiler: $MADAROS_ELF"
+  else
+    build_cmd="${SOUNIO_MADAROS_F64_LOWERING_BUILD:-$ROOT_DIR/scripts/ci/build_modular_madaros.sh}"
+    compiler_origin=built
+    if ! bash "$build_cmd" "$MADAROS_ELF" >"$WORK/build.log" 2>&1; then
+      tail -n 80 "$WORK/build.log" >&2 || true
+      fail "current-source Madaros build failed"
+    fi
+  fi
+  [[ -f "$MADAROS_ELF" && -s "$MADAROS_ELF" && -x "$MADAROS_ELF" && ! -L "$MADAROS_ELF" ]] \
+    || fail "Madaros is missing or not executable: $MADAROS_ELF"
+}
+
+resolve_compiler_selftest() {
+  local tmp stub rc out
+  tmp="$(mktemp -d /tmp/sounio-f64-resolve-selftest.XXXXXX)"
+  # EXIT runs after this function's locals are gone. The path has to live in a
+  # global so a failing assertion still deletes the fixture.
+  SOUNIO_F64_RESOLVE_SELFTEST_TMP=$tmp
+  trap 'rm -rf "$SOUNIO_F64_RESOLVE_SELFTEST_TMP"' EXIT
+  stub="$tmp/build.sh"
+  cat >"$stub" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+printf 'built\n' > "$(dirname "$1")/build.marker"
+printf '#!/bin/sh\nexit 0\n' > "$1"
+chmod 755 "$1"
+EOF
+  chmod 755 "$stub"
+  mkdir -p "$tmp/pre"
+  printf '#!/bin/sh\nexit 0\n' > "$tmp/pre/madaros"
+  chmod 755 "$tmp/pre/madaros"
+  rc=0
+  out="$(SOUNIO_MADAROS_F64_LOWERING_GATE_DIR="$tmp/pre" \
+    SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP=1 \
+    SOUNIO_MADAROS_F64_LOWERING_BUILD="$stub" \
+    bash "${BASH_SOURCE[0]}" --resolve-compiler-only)" || rc=$?
+  [[ "$rc" == 0 ]] || fail "preplaced compiler was refused ($rc): $out"
+  grep -q 'RESOLVED preplaced' <<<"$out" || fail "preplaced marker missing: $out"
+  [[ ! -e "$tmp/pre/build.marker" ]] || fail "preplaced compiler was rebuilt"
+  mkdir -p "$tmp/dirty"
+  printf '#!/bin/sh\nexit 0\n' > "$tmp/dirty/madaros"
+  chmod 755 "$tmp/dirty/madaros"
+  echo x > "$tmp/dirty/extra"
+  rc=0
+  SOUNIO_MADAROS_F64_LOWERING_GATE_DIR="$tmp/dirty" \
+    SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP=1 \
+    bash "${BASH_SOURCE[0]}" --resolve-compiler-only >"$tmp/dirty.log" 2>&1 || rc=$?
+  [[ "$rc" == 1 ]] || fail "contaminated directory was accepted ($rc)"
+  grep -q 'refusing existing gate directory' "$tmp/dirty.log" || fail "contaminated directory lacked refusal"
+  rc=0
+  out="$(SOUNIO_MADAROS_F64_LOWERING_GATE_DIR="$tmp/fresh" \
+    SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP=1 \
+    SOUNIO_MADAROS_F64_LOWERING_BUILD="$stub" \
+    bash "${BASH_SOURCE[0]}" --resolve-compiler-only)" || rc=$?
+  [[ "$rc" == 0 ]] || fail "fresh build path failed ($rc): $out"
+  grep -q 'RESOLVED built' <<<"$out" || fail "fresh build marker missing: $out"
+  [[ -f "$tmp/fresh/build.marker" ]] || fail "fresh directory did not call the builder"
+  printf '#!/bin/sh\nexit 0\n' > "$tmp/supplied"
+  chmod 755 "$tmp/supplied"
+  rc=0
+  out="$(SOUNIO_MADAROS_F64_LOWERING_GATE_DIR="$tmp/supplied-work" \
+    SOUNIO_MADAROS_F64_LOWERING_GATE_BIN="$tmp/supplied" \
+    SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP=1 \
+    SOUNIO_MADAROS_F64_LOWERING_BUILD="$stub" \
+    bash "${BASH_SOURCE[0]}" --resolve-compiler-only)" || rc=$?
+  [[ "$rc" == 0 ]] || fail "supplied compiler was refused ($rc): $out"
+  grep -q 'RESOLVED supplied' <<<"$out" || fail "supplied marker missing: $out"
+  [[ ! -e "$tmp/supplied-work/build.marker" ]] || fail "supplied compiler was rebuilt"
+  mkdir -p "$tmp/link"
+  ln -s "$tmp/supplied" "$tmp/link/madaros"
+  rc=0
+  SOUNIO_MADAROS_F64_LOWERING_GATE_DIR="$tmp/link" \
+    SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP=1 \
+    bash "${BASH_SOURCE[0]}" --resolve-compiler-only >"$tmp/link.log" 2>&1 || rc=$?
+  [[ "$rc" == 1 ]] || fail "symlinked compiler was accepted ($rc)"
+  grep -q 'refusing existing gate directory' "$tmp/link.log" || fail "symlink lacked refusal"
+  printf '#!/bin/bash\nexit 3\n' > "$tmp/failbuild"
+  chmod 755 "$tmp/failbuild"
+  rc=0
+  SOUNIO_MADAROS_F64_LOWERING_GATE_DIR="$tmp/fail" \
+    SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP=1 \
+    SOUNIO_MADAROS_F64_LOWERING_BUILD="$tmp/failbuild" \
+    bash "${BASH_SOURCE[0]}" --resolve-compiler-only >"$tmp/fail.log" 2>&1 || rc=$?
+  [[ "$rc" == 1 ]] || fail "failed builder was accepted ($rc)"
+  grep -q 'current-source Madaros build failed' "$tmp/fail.log" || fail "failed builder lacked diagnostic"
+  echo "[madaros-f64-lowering] resolve-compiler selftest PASS"
+}
+
 case "${1:-}" in
   --knowledge-runtime-worker) knowledge_runtime_worker; exit $? ;;
   --start-knowledge-runtime) start_knowledge_runtime; exit $? ;;
   --wait-knowledge-runtime) wait_knowledge_runtime; exit $? ;;
+  --resolve-compiler-selftest) resolve_compiler_selftest; exit $? ;;
+  --resolve-compiler-only) prepare_compiler; printf 'RESOLVED %s\n' "$compiler_origin"; exit 0 ;;
 esac
 
-if [[ -n "${SOUNIO_MADAROS_F64_LOWERING_GATE_DIR:-}" ]]; then
-  WORK="$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR"
-  [[ ! -e "$WORK" ]] || fail "refusing existing gate directory: $WORK"
-  mkdir "$WORK" || fail "could not create gate directory: $WORK"
-else
-  WORK="$(mktemp -d /tmp/sounio-madaros-f64-lowering.XXXXXX)"
-fi
-
-MADAROS_ELF="${SOUNIO_MADAROS_F64_LOWERING_GATE_BIN:-$WORK/madaros}"
-
-if [[ "$KEEP_WORK" != "1" ]]; then
-  trap 'rm -rf "$WORK"' EXIT
-fi
-
-if [[ -z "${SOUNIO_MADAROS_F64_LOWERING_GATE_BIN:-}" ]]; then
-  if ! bash "$ROOT_DIR/scripts/ci/build_modular_madaros.sh" "$MADAROS_ELF" >"$WORK/build.log" 2>&1; then
-    tail -n 80 "$WORK/build.log" >&2 || true
-    fail "current-source Madaros build failed"
-  fi
-fi
-[[ -x "$MADAROS_ELF" ]] || fail "Madaros is missing or not executable: $MADAROS_ELF"
+prepare_compiler
 
 SOUNIO_MADAROS_DEREF_F64_GATE_BIN="$MADAROS_ELF" \
 SOUNIO_MADAROS_DEREF_F64_GATE_DIR="$WORK/deref" \
