@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Logical check of the spec IPC files written by test_arrow_spec.sio."""
 
-import sys
 from pathlib import Path
 
 

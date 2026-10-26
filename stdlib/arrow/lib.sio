@@ -794,6 +794,8 @@ fn schema_ok(schema: &ArrowSchema) -> i64 with Panic {
     var c: i64 = 0
     while c < schema.n_nodes {
         let t = schema.type_tag[c as usize]
+        let nl = schema.name_lens[c as usize]
+        if nl < 0 || nl > 32 { return -7 }
         if t < 1 || t > 26 { return -4 }
         if t == 2 || t == 9 {
             let w = schema.bit_width[c as usize]
@@ -2120,8 +2122,18 @@ pub fn arrow_ipc_write_path(path: string, schema: &ArrowSchema, batch: &ArrowBat
     0
 }
 
+fn cap_ok(buf: &ArrowBuf) -> i64 {
+    if buf.len < 0 || buf.len > 8192 { return -7 }
+    0
+}
+
+fn fit(buf: &ArrowBuf, off: i64, n: i64) -> i64 {
+    if off < 0 || n < 0 || off + n > buf.len || off + n > 8192 { return 0 }
+    1
+}
+
 fn ab_u8(buf: &ArrowBuf, off: i64) -> i64 with Panic {
-    if off < 0 || off >= buf.len { return 0 }
+    if off < 0 || off >= buf.len || off >= 8192 { return 0 }
     let v = buf.data[off as usize] as i64
     if v < 0 { v + 256 } else { v }
 }
@@ -2151,23 +2163,40 @@ fn ab_i64(buf: &ArrowBuf, off: i64) -> i64 with Panic {
 }
 
 fn ab_field(buf: &ArrowBuf, table: i64, field_id: i64) -> i64 with Panic, Div {
-    if table < 0 || table + 4 > buf.len { return 0 }
+    if fit(buf, table, 4) == 0 { return -1 }
     // Signed distance. Positive when the vtable sits below the table.
     // Negative when a shared vtable (pyarrow dedups them) sits above it.
+    // Zero is not a vtable. A short vtable means this field is absent.
+    // A vtable or field slot outside this buffer is malformed, not absent.
     let soff = ab_i32(buf, table)
-    if soff == 0 { return 0 }
+    if soff == 0 { return -1 }
     let vt = table - soff
-    if vt < 0 || vt + 4 > buf.len { return 0 }
+    if fit(buf, vt, 4) == 0 { return -1 }
     let vts = ab_u16(buf, vt)
-    if vts < 4 { return 0 }
+    if vts < 4 || fit(buf, vt, vts) == 0 { return -1 }
     let need = 4 + 2 * (field_id + 1)
-    if need > vts || vt + need > buf.len { return 0 }
+    if need > vts { return 0 }
+    if fit(buf, vt, need) == 0 { return -1 }
     ab_u16(buf, vt + 4 + 2 * field_id)
 }
 
 fn ab_indirect(buf: &ArrowBuf, pos: i64) -> i64 with Panic {
-    if pos < 0 || pos + 4 > buf.len { return -1 }
-    pos + ab_u32(buf, pos)
+    if fit(buf, pos, 4) == 0 { return -1 }
+    let rel = ab_u32(buf, pos)
+    let t = pos + rel
+    if fit(buf, t, 4) == 0 { return -1 }
+    t
+}
+
+fn load_meta(src: &ArrowBuf, at: i64, n: i64, dst: &!ArrowBuf) -> i64 with Mut, Panic {
+    if at < 0 || n < 8 || at + n > src.len || n > 8192 { return -5 }
+    var i: i64 = 0
+    while i < n {
+        dst.data[i as usize] = src.data[(at + i) as usize]
+        i = i + 1
+    }
+    dst.len = n
+    0
 }
 
 fn is_arrow1(buf: &ArrowBuf, off: i64) -> i64 with Panic {
@@ -2213,6 +2242,7 @@ fn read_str_into(buf: &ArrowBuf, pos: i64, dst: &![u8; 1536], at: i64, maxn: i64
 
 fn read_field_meta(buf: &ArrowBuf, table: i64, schema: &!ArrowSchema, col: i64) -> i64 with Mut, Panic, Div {
     let off = ab_field(buf, table, 6)
+    if off < 0 { return -6 }
     if off == 0 { return 0 }
     let vec = ab_indirect(buf, table + off)
     if vec < 0 || vec + 4 > buf.len { return -6 }
@@ -2226,6 +2256,7 @@ fn read_field_meta(buf: &ArrowBuf, table: i64, schema: &!ArrowSchema, col: i64) 
         if kp < 0 { return -6 }
         let koff = ab_field(buf, kp, 0)
         let voff = ab_field(buf, kp, 1)
+        if koff < 0 || voff < 0 { return -6 }
         var nk: i64 = 0
         var nv: i64 = 0
         if koff != 0 {
@@ -2256,6 +2287,7 @@ fn read_field_meta(buf: &ArrowBuf, table: i64, schema: &!ArrowSchema, col: i64) 
 
 fn read_meta4(buf: &ArrowBuf, table: i64, field_id: i64, keys: &![u8; 128], kl: &![i64; 4], vals: &![u8; 192], vl: &![i64; 4]) -> i64 with Mut, Panic, Div {
     let off = ab_field(buf, table, field_id)
+    if off < 0 { return -6 }
     if off == 0 { return 0 }
     let vec = ab_indirect(buf, table + off)
     if vec < 0 || vec + 4 > buf.len { return -6 }
@@ -2269,6 +2301,7 @@ fn read_meta4(buf: &ArrowBuf, table: i64, field_id: i64, keys: &![u8; 128], kl: 
         if kp < 0 { return -6 }
         let koff = ab_field(buf, kp, 0)
         let voff = ab_field(buf, kp, 1)
+        if koff < 0 || voff < 0 { return -6 }
         var nk: i64 = 0
         var nv: i64 = 0
         if koff != 0 {
@@ -2300,37 +2333,69 @@ fn read_type_body(buf: &ArrowBuf, tp: i64, schema: &!ArrowSchema, col: i64, tag:
     if tag == 2 || tag == 9 {
         var woff = ab_field(buf, tp, 0)
         if tag == 9 { woff = ab_field(buf, tp, 1) }
-        if woff != 0 { schema.bit_width[col as usize] = ab_i32(buf, tp + woff) }
+        if woff < 0 { return -6 }
+        if woff != 0 {
+            if fit(buf, tp + woff, 4) == 0 { return -6 }
+            schema.bit_width[col as usize] = ab_i32(buf, tp + woff)
+        }
         if tag == 9 && schema.bit_width[col as usize] == 0 { schema.bit_width[col as usize] = 32 }
         if tag == 2 {
             let soff = ab_field(buf, tp, 1)
-            if soff != 0 { schema.is_signed[col as usize] = flag01(ab_u8(buf, tp + soff)) }
+            if soff < 0 { return -6 }
+            if soff != 0 {
+                if fit(buf, tp + soff, 1) == 0 { return -6 }
+                schema.is_signed[col as usize] = flag01(ab_u8(buf, tp + soff))
+            }
         } else {
             let uoff = ab_field(buf, tp, 0)
-            if uoff != 0 { schema.precision[col as usize] = ab_u16(buf, tp + uoff) }
+            if uoff < 0 { return -6 }
+            if uoff != 0 {
+                if fit(buf, tp + uoff, 2) == 0 { return -6 }
+                schema.precision[col as usize] = ab_u16(buf, tp + uoff)
+            }
         }
         return 0
     }
     if tag == 3 || tag == 8 || tag == 11 || tag == 18 {
         let poff = ab_field(buf, tp, 0)
-        if poff != 0 { schema.precision[col as usize] = ab_u16(buf, tp + poff) }
+        if poff < 0 { return -6 }
+        if poff != 0 {
+            if fit(buf, tp + poff, 2) == 0 { return -6 }
+            schema.precision[col as usize] = ab_u16(buf, tp + poff)
+        }
         if tag == 18 && poff == 0 { schema.precision[col as usize] = 1 }
         return 0
     }
     if tag == 7 {
         let poff = ab_field(buf, tp, 0)
-        if poff != 0 { schema.precision[col as usize] = ab_i32(buf, tp + poff) }
+        if poff < 0 { return -6 }
+        if poff != 0 {
+            if fit(buf, tp + poff, 4) == 0 { return -6 }
+            schema.precision[col as usize] = ab_i32(buf, tp + poff)
+        }
         let soff = ab_field(buf, tp, 1)
-        if soff != 0 { schema.scale[col as usize] = ab_i32(buf, tp + soff) }
+        if soff < 0 { return -6 }
+        if soff != 0 {
+            if fit(buf, tp + soff, 4) == 0 { return -6 }
+            schema.scale[col as usize] = ab_i32(buf, tp + soff)
+        }
         let woff = ab_field(buf, tp, 2)
-        if woff != 0 { schema.bit_width[col as usize] = ab_i32(buf, tp + woff) }
-        else { schema.bit_width[col as usize] = 128 }
+        if woff < 0 { return -6 }
+        if woff != 0 {
+            if fit(buf, tp + woff, 4) == 0 { return -6 }
+            schema.bit_width[col as usize] = ab_i32(buf, tp + woff)
+        } else { schema.bit_width[col as usize] = 128 }
         return 0
     }
     if tag == 10 {
         let uoff = ab_field(buf, tp, 0)
-        if uoff != 0 { schema.precision[col as usize] = ab_u16(buf, tp + uoff) }
+        if uoff < 0 { return -6 }
+        if uoff != 0 {
+            if fit(buf, tp + uoff, 2) == 0 { return -6 }
+            schema.precision[col as usize] = ab_u16(buf, tp + uoff)
+        }
         let zoff = ab_field(buf, tp, 1)
+        if zoff < 0 { return -6 }
         if zoff != 0 {
             var scratch: [u8; 1536] = [0; 1536]
             let n = read_str_into(buf, tp + zoff, &!scratch, 0, 32)
@@ -2346,13 +2411,18 @@ fn read_type_body(buf: &ArrowBuf, tp: i64, schema: &!ArrowSchema, col: i64, tag:
     }
     if tag == 14 {
         let moff = ab_field(buf, tp, 0)
-        if moff != 0 { schema.extra[col as usize] = ab_u16(buf, tp + moff) }
+        if moff < 0 { return -6 }
+        if moff != 0 {
+            if fit(buf, tp + moff, 2) == 0 { return -6 }
+            schema.extra[col as usize] = ab_u16(buf, tp + moff)
+        }
         let ioff = ab_field(buf, tp, 1)
+        if ioff < 0 { return -6 }
         if ioff != 0 {
             let vec = ab_indirect(buf, tp + ioff)
             if vec < 0 || vec + 4 > buf.len { return -6 }
             let n = ab_u32(buf, vec)
-            if n > 4 { return -7 }
+            if n > 4 || fit(buf, vec, 4 + 4 * n) == 0 { return -6 }
             var i: i64 = 0
             while i < n {
                 schema.union_ids[(col * 4 + i) as usize] = ab_i32(buf, vec + 4 + 4 * i)
@@ -2364,12 +2434,20 @@ fn read_type_body(buf: &ArrowBuf, tp: i64, schema: &!ArrowSchema, col: i64, tag:
     }
     if tag == 15 || tag == 16 {
         let woff = ab_field(buf, tp, 0)
-        if woff != 0 { schema.extra[col as usize] = ab_i32(buf, tp + woff) }
+        if woff < 0 { return -6 }
+        if woff != 0 {
+            if fit(buf, tp + woff, 4) == 0 { return -6 }
+            schema.extra[col as usize] = ab_i32(buf, tp + woff)
+        }
         return 0
     }
     if tag == 17 {
         let koff = ab_field(buf, tp, 0)
-        if koff != 0 { schema.extra[col as usize] = flag01(ab_u8(buf, tp + koff)) }
+        if koff < 0 { return -6 }
+        if koff != 0 {
+            if fit(buf, tp + koff, 1) == 0 { return -6 }
+            schema.extra[col as usize] = flag01(ab_u8(buf, tp + koff))
+        }
         return 0
     }
     0
@@ -2394,6 +2472,7 @@ fn read_field(buf: &ArrowBuf, table: i64, schema: &!ArrowSchema, parent: i64) ->
         schema.n_child[parent as usize] = schema.n_child[parent as usize] + 1
     }
     let name_off = ab_field(buf, table, 0)
+    if name_off < 0 { return -6 }
     if name_off == 0 {
         schema.name_lens[col as usize] = 0
     } else {
@@ -2401,48 +2480,70 @@ fn read_field(buf: &ArrowBuf, table: i64, schema: &!ArrowSchema, parent: i64) ->
         if rc != 0 { return rc }
     }
     let null_off = ab_field(buf, table, 1)
+    if null_off < 0 { return -6 }
     if null_off == 0 {
         schema.nullable[col as usize] = 0
     } else {
+        if fit(buf, table + null_off, 1) == 0 { return -6 }
         schema.nullable[col as usize] = flag01(ab_u8(buf, table + null_off))
     }
     let tt = ab_field(buf, table, 2)
-    if tt == 0 { return -6 }
+    if tt <= 0 { return -6 }
+    if fit(buf, table + tt, 1) == 0 { return -6 }
     let tag = ab_u8(buf, table + tt)
     if tag < 1 || tag > 26 { return -4 }
     schema.type_tag[col as usize] = tag
     let toff = ab_field(buf, table, 3)
-    if toff == 0 { return -6 }
+    if toff <= 0 { return -6 }
     let tp = ab_indirect(buf, table + toff)
     if tp < 0 { return -6 }
     let tr = read_type_body(buf, tp, schema, col, tag)
     if tr != 0 { return tr }
     let doff = ab_field(buf, table, 4)
+    if doff < 0 { return -6 }
     if doff != 0 {
         let dp = ab_indirect(buf, table + doff)
         if dp < 0 { return -6 }
         let idoff = ab_field(buf, dp, 0)
-        if idoff != 0 { schema.dict_id[col as usize] = ab_i64(buf, dp + idoff) }
-        else { schema.dict_id[col as usize] = 0 }
+        if idoff < 0 { return -6 }
+        if idoff != 0 {
+            if fit(buf, dp + idoff, 8) == 0 { return -6 }
+            schema.dict_id[col as usize] = ab_i64(buf, dp + idoff)
+        } else { schema.dict_id[col as usize] = 0 }
         schema.dict_width[col as usize] = 32
         schema.dict_signed[col as usize] = 1
         let ioff = ab_field(buf, dp, 1)
+        if ioff < 0 { return -6 }
         if ioff != 0 {
             let ip = ab_indirect(buf, dp + ioff)
             if ip < 0 { return -6 }
             let woff = ab_field(buf, ip, 0)
-            if woff != 0 { schema.dict_width[col as usize] = ab_i32(buf, ip + woff) }
+            if woff < 0 { return -6 }
+            if woff != 0 {
+                if fit(buf, ip + woff, 4) == 0 { return -6 }
+                schema.dict_width[col as usize] = ab_i32(buf, ip + woff)
+            }
             let soff = ab_field(buf, ip, 1)
-            if soff != 0 { schema.dict_signed[col as usize] = flag01(ab_u8(buf, ip + soff)) }
+            if soff < 0 { return -6 }
+            if soff != 0 {
+                if fit(buf, ip + soff, 1) == 0 { return -6 }
+                schema.dict_signed[col as usize] = flag01(ab_u8(buf, ip + soff))
+            }
         }
         let ooff = ab_field(buf, dp, 2)
-        if ooff != 0 { schema.dict_ordered[col as usize] = flag01(ab_u8(buf, dp + ooff)) }
+        if ooff < 0 { return -6 }
+        if ooff != 0 {
+            if fit(buf, dp + ooff, 1) == 0 { return -6 }
+            schema.dict_ordered[col as usize] = flag01(ab_u8(buf, dp + ooff))
+        }
     }
     let ch = ab_field(buf, table, 5)
+    if ch < 0 { return -6 }
     if ch != 0 {
         let cv = ab_indirect(buf, table + ch)
         if cv < 0 || cv + 4 > buf.len { return -6 }
         let nc = ab_u32(buf, cv)
+        if nc > 8 || fit(buf, cv, 4 + 4 * nc) == 0 { return -6 }
         var i: i64 = 0
         while i < nc {
             let ep = cv + 4 + 4 * i
@@ -2463,15 +2564,19 @@ fn read_schema_at(buf: &ArrowBuf, table: i64, schema: &!ArrowSchema) -> i64 with
     schema.features = 0
     schema.endian = 0
     let endian_off = ab_field(buf, table, 0)
+    if endian_off < 0 { return -6 }
     if endian_off != 0 {
+        if fit(buf, table + endian_off, 2) == 0 { return -6 }
         schema.endian = ab_u16(buf, table + endian_off)
         if schema.endian != 0 { return -4 }
     }
     let foff = ab_field(buf, table, 1)
+    if foff < 0 { return -6 }
     if foff != 0 {
         let vec = ab_indirect(buf, table + foff)
         if vec < 0 || vec + 4 > buf.len { return -6 }
         let n = ab_u32(buf, vec)
+        if n > 8 || fit(buf, vec, 4 + 4 * n) == 0 { return -6 }
         var c: i64 = 0
         while c < n {
             let ep = vec + 4 + 4 * c
@@ -2488,10 +2593,12 @@ fn read_schema_at(buf: &ArrowBuf, table: i64, schema: &!ArrowSchema) -> i64 with
     if mn < 0 { return mn }
     schema.smeta_n = mn
     let feat = ab_field(buf, table, 3)
+    if feat < 0 { return -6 }
     if feat != 0 {
         let fv = ab_indirect(buf, table + feat)
         if fv < 0 || fv + 4 > buf.len { return -6 }
         let n = ab_u32(buf, fv)
+        if n > 4 || fit(buf, fv, 4 + 8 * n) == 0 { return -6 }
         var i: i64 = 0
         while i < n {
             let id = ab_i64(buf, fv + 4 + 8 * i)
@@ -2504,26 +2611,31 @@ fn read_schema_at(buf: &ArrowBuf, table: i64, schema: &!ArrowSchema) -> i64 with
 }
 
 fn read_message_at(buf: &ArrowBuf, meta_at: i64, view: &!IpcMsg) -> i64 with Mut, Panic, Div {
-    if meta_at < 0 || meta_at + 4 > buf.len { return -5 }
+    if fit(buf, meta_at, 4) == 0 { return -5 }
     let root = ab_u32(buf, meta_at)
+    if root < 4 { return -6 }
     let table = meta_at + root
-    if table < 0 || table + 4 > buf.len { return -6 }
+    if fit(buf, table, 4) == 0 { return -6 }
     let voff = ab_field(buf, table, 0)
-    if voff == 0 { return -4 }
+    if voff <= 0 { return -6 }
+    if fit(buf, table + voff, 2) == 0 { return -6 }
     view.version = ab_u16(buf, table + voff)
     if view.version != 3 && view.version != 4 { return -4 }
     let hofft = ab_field(buf, table, 1)
-    if hofft == 0 { return -6 }
+    if hofft <= 0 { return -6 }
+    if fit(buf, table + hofft, 1) == 0 { return -6 }
     view.header_type = ab_u8(buf, table + hofft)
     let hoff = ab_field(buf, table, 2)
-    if hoff == 0 { return -6 }
+    if hoff <= 0 { return -6 }
     view.header_pos = ab_indirect(buf, table + hoff)
     view.table = table
     if view.header_pos < 0 { return -6 }
     let boff = ab_field(buf, table, 3)
+    if boff < 0 { return -6 }
     if boff == 0 {
         view.body_len = 0
     } else {
+        if fit(buf, table + boff, 8) == 0 { return -6 }
         view.body_len = ab_i64(buf, table + boff)
     }
     0
@@ -2743,14 +2855,17 @@ fn read_views(buf: &ArrowBuf, body_at: i64, voff: i64, vlen: i64, doff: i64, dle
     0
 }
 
-fn decode_node(buf: &ArrowBuf, body_at: i64, body_len: i64, offs: &[i64; 32], lens: &[i64; 32], nb: i64, nlen: &[i64; 8], nn: i64, vcnt: &[i64; 8], nvc: i64, schema: &ArrowSchema, batch: &!ArrowBatch, node: i64, indices: i64, w: &!DecWalk) -> i64 with Mut, Panic, Div {
+fn decode_node(buf: &ArrowBuf, body_at: i64, body_len: i64, offs: &[i64; 32], lens: &[i64; 32], nb: i64, nlen: &[i64; 8], nnull: &[i64; 8], nn: i64, vcnt: &[i64; 8], nvc: i64, schema: &ArrowSchema, batch: &!ArrowBatch, node: i64, indices: i64, w: &!DecWalk) -> i64 with Mut, Panic, Div {
     if w.ni >= nn { return -6 }
     let rows = nlen[w.ni as usize]
+    let nc = nnull[w.ni as usize]
     w.ni = w.ni + 1
+    if nc < -1 || nc > rows { return -6 }
     if rows < 0 || rows > 16 { return -7 }
     batch.node_len[node as usize] = rows
     if indices != 0 && schema.dict_id[node as usize] >= 0 {
         if pull(offs, lens, nb, body_len, w) != 0 { return -5 }
+        if nc > 0 && w.len == 0 { return -6 }
         let vr = mark_validity(buf, body_at, w.off, w.len, batch, node, rows)
         if vr != 0 { return vr }
         if pull(offs, lens, nb, body_len, w) != 0 { return -5 }
@@ -2801,6 +2916,7 @@ fn decode_node(buf: &ArrowBuf, body_at: i64, body_len: i64, offs: &[i64; 32], le
         }
     } else if tag != 22 {
         if pull(offs, lens, nb, body_len, w) != 0 { return -5 }
+        if nc > 0 && w.len == 0 { return -6 }
         let vr = mark_validity(buf, body_at, w.off, w.len, batch, node, rows)
         if vr != 0 { return vr }
         if tag == 6 {
@@ -2857,7 +2973,7 @@ fn decode_node(buf: &ArrowBuf, body_at: i64, body_len: i64, offs: &[i64; 32], le
     var i: i64 = 0
     while i < schema.n_nodes {
         if schema.parent[i as usize] == node {
-            let rc = decode_node(buf, body_at, body_len, offs, lens, nb, nlen, nn, vcnt, nvc, schema, batch, i, indices, w)
+            let rc = decode_node(buf, body_at, body_len, offs, lens, nb, nlen, nnull, nn, vcnt, nvc, schema, batch, i, indices, w)
             if rc != 0 { return rc }
         }
         i = i + 1
@@ -2918,62 +3034,75 @@ fn inflate_body(src: &ArrowBuf, body_at: i64, offs: &![i64; 32], lens: &![i64; 3
     0
 }
 
-fn decode_batch(buf: &ArrowBuf, table: i64, body_at: i64, body_len: i64, schema: &ArrowSchema, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {
+fn decode_batch(meta: &ArrowBuf, table: i64, body: &ArrowBuf, body_at: i64, body_len: i64, schema: &ArrowSchema, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {
     var codec: i64 = 0
-    let coff = ab_field(buf, table, 3)
+    let coff = ab_field(meta, table, 3)
+    if coff < 0 { return -6 }
     if coff != 0 {
-        let cp = ab_indirect(buf, table + coff)
+        let cp = ab_indirect(meta, table + coff)
         if cp < 0 { return -6 }
-        let cbyte = ab_field(buf, cp, 0)
+        let cbyte = ab_field(meta, cp, 0)
+        if cbyte < 0 { return -6 }
         if cbyte == 0 { codec = 1 }
-        else { codec = ab_u8(buf, cp + cbyte) + 1 }
+        else {
+            if fit(meta, cp + cbyte, 1) == 0 { return -6 }
+            codec = ab_u8(meta, cp + cbyte) + 1
+        }
         if codec != 1 && codec != 2 { return -4 }
     }
-    let loff = ab_field(buf, table, 0)
+    let loff = ab_field(meta, table, 0)
+    if loff < 0 { return -6 }
     var rows: i64 = 0
-    if loff != 0 { rows = ab_i64(buf, table + loff) }
+    if loff != 0 {
+        if fit(meta, table + loff, 8) == 0 { return -6 }
+        rows = ab_i64(meta, table + loff)
+    }
     if rows < 0 || rows > 16 { return -7 }
-    let noff = ab_field(buf, table, 1)
-    if noff == 0 { return -6 }
-    let nv = ab_indirect(buf, table + noff)
-    if nv < 0 || nv + 4 > buf.len { return -6 }
-    let nn = ab_u32(buf, nv)
+    let noff = ab_field(meta, table, 1)
+    if noff <= 0 { return -6 }
+    let nv = ab_indirect(meta, table + noff)
+    if nv < 0 || nv + 4 > meta.len { return -6 }
+    let nn = ab_u32(meta, nv)
     if nn > 8 { return -7 }
+    if fit(meta, nv, 4 + 16 * nn) == 0 { return -5 }
     var nlen: [i64; 8] = [0; 8]
+    var nnull: [i64; 8] = [0; 8]
     var c: i64 = 0
     while c < nn {
         let np = nv + 4 + 16 * c
-        if np + 16 > buf.len { return -5 }
-        nlen[c as usize] = ab_i64(buf, np)
+        nlen[c as usize] = ab_i64(meta, np)
+        nnull[c as usize] = ab_i64(meta, np + 8)
         c = c + 1
     }
-    let boff = ab_field(buf, table, 2)
-    if boff == 0 { return -6 }
-    let bv = ab_indirect(buf, table + boff)
-    if bv < 0 || bv + 4 > buf.len { return -6 }
-    let nb = ab_u32(buf, bv)
+    let boff = ab_field(meta, table, 2)
+    if boff <= 0 { return -6 }
+    let bv = ab_indirect(meta, table + boff)
+    if bv < 0 || bv + 4 > meta.len { return -6 }
+    let nb = ab_u32(meta, bv)
     if nb > 32 { return -7 }
+    if fit(meta, bv, 4 + 16 * nb) == 0 { return -5 }
     var offs: [i64; 32] = [0; 32]
     var lens: [i64; 32] = [0; 32]
     var b: i64 = 0
     while b < nb {
         let bp = bv + 4 + 16 * b
-        if bp + 16 > buf.len { return -5 }
-        offs[b as usize] = ab_i64(buf, bp)
-        lens[b as usize] = ab_i64(buf, bp + 8)
+        offs[b as usize] = ab_i64(meta, bp)
+        lens[b as usize] = ab_i64(meta, bp + 8)
         b = b + 1
     }
     var vcnt: [i64; 8] = [0; 8]
     var nvc: i64 = 0
-    let voff = ab_field(buf, table, 4)
+    let voff = ab_field(meta, table, 4)
+    if voff < 0 { return -6 }
     if voff != 0 {
-        let vv = ab_indirect(buf, table + voff)
-        if vv < 0 || vv + 4 > buf.len { return -6 }
-        nvc = ab_u32(buf, vv)
+        let vv = ab_indirect(meta, table + voff)
+        if vv < 0 || vv + 4 > meta.len { return -6 }
+        nvc = ab_u32(meta, vv)
         if nvc > 8 { return -7 }
+        if fit(meta, vv, 4 + 8 * nvc) == 0 { return -5 }
         var i: i64 = 0
         while i < nvc {
-            vcnt[i as usize] = ab_i64(buf, vv + 4 + 8 * i)
+            vcnt[i as usize] = ab_i64(meta, vv + 4 + 8 * i)
             i = i + 1
         }
     }
@@ -2984,9 +3113,9 @@ fn decode_batch(buf: &ArrowBuf, table: i64, body_at: i64, body_len: i64, schema:
     var plain = arrow_buf_new()
     var src_body = body_at
     var src_len = body_len
-    var srcp = buf
+    var srcp = body
     if codec != 0 {
-        let ir = inflate_body(buf, body_at, &!offs, &!lens, nb, codec, &!plain)
+        let ir = inflate_body(body, body_at, &!offs, &!lens, nb, codec, &!plain)
         if ir != 0 { return ir }
         src_body = 0
         src_len = plain.len
@@ -2996,7 +3125,7 @@ fn decode_batch(buf: &ArrowBuf, table: i64, body_at: i64, body_len: i64, schema:
     var i: i64 = 0
     while i < schema.n_nodes {
         if schema.parent[i as usize] < 0 {
-            let rc = decode_node(srcp, src_body, src_len, &offs, &lens, nb, &nlen, nn, &vcnt, nvc, schema, batch, i, 1, &!w)
+            let rc = decode_node(srcp, src_body, src_len, &offs, &lens, nb, &nlen, &nnull, nn, &vcnt, nvc, schema, batch, i, 1, &!w)
             if rc != 0 { return rc }
         }
         i = i + 1
@@ -3015,7 +3144,7 @@ fn msize_match(meta: i64) -> i64 {
     meta - 8
 }
 
-fn open_footer(buf: &ArrowBuf) -> FooterView with Panic, Div {
+fn open_footer(buf: &ArrowBuf, window: &!ArrowBuf) -> FooterView with Mut, Panic, Div {
     if buf.len < 10 { return FooterView { table: 0, status: -2 } }
     if is_arrow1(buf, 0) == 0 { return FooterView { table: 0, status: -2 } }
     if is_arrow1(buf, buf.len - 6) == 0 { return FooterView { table: 0, status: -2 } }
@@ -3023,19 +3152,22 @@ fn open_footer(buf: &ArrowBuf) -> FooterView with Panic, Div {
     if fsize <= 0 { return FooterView { table: 0, status: -2 } }
     let foff = buf.len - 10 - fsize
     if foff < 8 { return FooterView { table: 0, status: -2 } }
-    let root = ab_u32(buf, foff)
-    let ft = foff + root
-    if ft < 0 || ft + 4 > buf.len { return FooterView { table: 0, status: -6 } }
-    let voff = ab_field(buf, ft, 0)
-    if voff == 0 { return FooterView { table: 0, status: -4 } }
-    let ver = ab_u16(buf, ft + voff)
+    if load_meta(buf, foff, fsize, window) != 0 { return FooterView { table: 0, status: -5 } }
+    let root = ab_u32(window, 0)
+    if root < 4 { return FooterView { table: 0, status: -6 } }
+    let ft = root
+    if fit(window, ft, 4) == 0 { return FooterView { table: 0, status: -6 } }
+    let voff = ab_field(window, ft, 0)
+    if voff <= 0 { return FooterView { table: 0, status: -6 } }
+    if fit(window, ft + voff, 2) == 0 { return FooterView { table: 0, status: -6 } }
+    let ver = ab_u16(window, ft + voff)
     if ver != 3 && ver != 4 { return FooterView { table: 0, status: -4 } }
     FooterView { table: ft, status: 0 }
 }
 
 fn footer_schema(buf: &ArrowBuf, ft: i64, schema: &!ArrowSchema) -> i64 with Mut, Panic, Div {
     let soff = ab_field(buf, ft, 1)
-    if soff == 0 { return -6 }
+    if soff <= 0 { return -6 }
     let st = ab_indirect(buf, ft + soff)
     if st < 0 { return -6 }
     let rc = read_schema_at(buf, st, schema)
@@ -3048,6 +3180,7 @@ fn footer_schema(buf: &ArrowBuf, ft: i64, schema: &!ArrowSchema) -> i64 with Mut
 
 fn footer_ndict(buf: &ArrowBuf, ft: i64) -> i64 with Panic, Div {
     let boff = ab_field(buf, ft, 2)
+    if boff < 0 { return -6 }
     if boff == 0 { return 0 }
     let bv = ab_indirect(buf, ft + boff)
     if bv < 0 || bv + 4 > buf.len { return -6 }
@@ -3056,6 +3189,7 @@ fn footer_ndict(buf: &ArrowBuf, ft: i64) -> i64 with Panic, Div {
 
 fn footer_nblocks(buf: &ArrowBuf, ft: i64) -> i64 with Panic, Div {
     let boff = ab_field(buf, ft, 3)
+    if boff < 0 { return -6 }
     if boff == 0 { return 0 }
     let bv = ab_indirect(buf, ft + boff)
     if bv < 0 || bv + 4 > buf.len { return -6 }
@@ -3064,7 +3198,7 @@ fn footer_nblocks(buf: &ArrowBuf, ft: i64) -> i64 with Panic, Div {
 
 fn footer_block_at(buf: &ArrowBuf, ft: i64, index: i64) -> BlockLoc with Panic, Div {
     let boff = ab_field(buf, ft, 3)
-    if boff == 0 { return BlockLoc { offset: 0, meta: 0, body: 0, status: -6 } }
+    if boff <= 0 { return BlockLoc { offset: 0, meta: 0, body: 0, status: -6 } }
     let bv = ab_indirect(buf, ft + boff)
     if bv < 0 || bv + 4 > buf.len { return BlockLoc { offset: 0, meta: 0, body: 0, status: -6 } }
     let nb = ab_u32(buf, bv)
@@ -3084,30 +3218,33 @@ fn decode_framed(buf: &ArrowBuf, offset: i64, meta: i64, body: i64, schema: &Arr
     if offset + meta < 0 || offset + meta + body > buf.len { return -5 }
     if ab_i32(buf, offset) != -1 { return -3 }
     if ab_i32(buf, offset + 4) != msize_match(meta) { return -3 }
+    var window = arrow_buf_new()
+    if load_meta(buf, offset + 8, meta - 8, &!window) != 0 { return -5 }
     var msg = IpcMsg { version: 0, header_type: 0, header_pos: 0, body_len: 0, table: 0 }
-    let rc2 = read_message_at(buf, offset + 8, &!msg)
+    let rc2 = read_message_at(&window, 0, &!msg)
     if rc2 != 0 { return rc2 }
     if msg.header_type != 3 { return -4 }
     if msg.body_len != body { return -3 }
-    decode_batch(buf, msg.header_pos, offset + meta, body, schema, batch)
+    decode_batch(&window, msg.header_pos, buf, offset + meta, body, schema, batch)
 }
 
 fn read_file_buf(buf: &ArrowBuf, schema: &!ArrowSchema, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {
-    let foot = open_footer(buf)
+    var window = arrow_buf_new()
+    let foot = open_footer(buf, &!window)
     if foot.status != 0 { return foot.status }
-    let rc = footer_schema(buf, foot.table, schema)
+    let rc = footer_schema(&window, foot.table, schema)
     if rc != 0 { return rc }
-    let nd = footer_ndict(buf, foot.table)
+    let nd = footer_ndict(&window, foot.table)
     if nd < 0 { return nd }
     if nd > 0 { return -4 }
-    let nb = footer_nblocks(buf, foot.table)
+    let nb = footer_nblocks(&window, foot.table)
     if nb < 0 { return nb }
     if nb > 1 { return -7 }
     if nb == 0 {
         zero_batch(schema, batch)
         return 0
     }
-    let blk = footer_block_at(buf, foot.table, 0)
+    let blk = footer_block_at(&window, foot.table, 0)
     if blk.status != 0 { return blk.status }
     decode_framed(buf, blk.offset, blk.meta, blk.body, schema, batch)
 }
@@ -3119,29 +3256,33 @@ fn read_stream_buf(buf: &ArrowBuf, schema: &!ArrowSchema, batch: &!ArrowBatch) -
     while pos + 8 <= buf.len {
         let cont = ab_i32(buf, pos)
         let msize = ab_i32(buf, pos + 4)
-        if cont == 0 || (cont == -1 && msize == 0) {
+        if (cont == -1 && msize == 0) || (cont == 0 && msize == 0) {
             if saw_schema == 0 { return -6 }
+            if saw_batch == 0 { zero_batch(schema, batch) }
             return 0
         }
         if cont != -1 { return -3 }
         if msize < 0 || pos + 8 + msize > buf.len { return -5 }
+        var window = arrow_buf_new()
+        if load_meta(buf, pos + 8, msize, &!window) != 0 { return -5 }
         var msg = IpcMsg { version: 0, header_type: 0, header_pos: 0, body_len: 0, table: 0 }
-        let rc = read_message_at(buf, pos + 8, &!msg)
+        let rc = read_message_at(&window, 0, &!msg)
         if rc != 0 { return rc }
         let body_at = pos + 8 + msize
         if msg.body_len < 0 || body_at + msg.body_len > buf.len { return -5 }
         if msg.header_type == 1 {
+            if saw_schema != 0 { return -6 }
             if msg.body_len != 0 { return -3 }
-            let rc2 = read_schema_at(buf, msg.header_pos, schema)
+            let rc2 = read_schema_at(&window, msg.header_pos, schema)
             if rc2 != 0 { return rc2 }
-            let mn = read_meta4(buf, msg.table, 4, &!schema.mmeta_k, &!schema.mmeta_kl, &!schema.mmeta_v, &!schema.mmeta_vl)
+            let mn = read_meta4(&window, msg.table, 4, &!schema.mmeta_k, &!schema.mmeta_kl, &!schema.mmeta_v, &!schema.mmeta_vl)
             if mn < 0 { return mn }
             schema.mmeta_n = mn
             saw_schema = 1
         } else if msg.header_type == 3 {
             if saw_schema == 0 { return -6 }
             if saw_batch != 0 { return -7 }
-            let rc3 = decode_batch(buf, msg.header_pos, body_at, msg.body_len, schema, batch)
+            let rc3 = decode_batch(&window, msg.header_pos, buf, body_at, msg.body_len, schema, batch)
             if rc3 != 0 { return rc3 }
             saw_batch = 1
         } else {
@@ -3161,20 +3302,22 @@ fn read_stream_buf(buf: &ArrowBuf, schema: &!ArrowSchema, batch: &!ArrowBatch) -
 /// Read the schema and position `cur` on the first record batch.
 /// A file with a non-empty dictionary-batch list returns -4.
 pub fn arrow_ipc_open(buf: &ArrowBuf, schema: &!ArrowSchema, cur: &!ArrowCursor) -> i64 with Mut, Panic, Div {
+    if cap_ok(buf) != 0 { return -7 }
     schema.n_fields = 0
     cur.kind = 0
     cur.pos = 0
     cur.index = 0
     cur.n_blocks = 0
+    var window = arrow_buf_new()
     if buf.len >= 6 && is_arrow1(buf, 0) != 0 {
-        let foot = open_footer(buf)
+        let foot = open_footer(buf, &!window)
         if foot.status != 0 { return foot.status }
-        let rc = footer_schema(buf, foot.table, schema)
+        let rc = footer_schema(&window, foot.table, schema)
         if rc != 0 { return rc }
-        let nd = footer_ndict(buf, foot.table)
+        let nd = footer_ndict(&window, foot.table)
         if nd < 0 { return nd }
         if nd > 0 { return -4 }
-        let nb = footer_nblocks(buf, foot.table)
+        let nb = footer_nblocks(&window, foot.table)
         if nb < 0 { return nb }
         cur.kind = 1
         cur.n_blocks = nb
@@ -3185,16 +3328,17 @@ pub fn arrow_ipc_open(buf: &ArrowBuf, schema: &!ArrowSchema, cur: &!ArrowCursor)
     let msize = ab_i32(buf, 4)
     if cont != -1 { return -3 }
     if msize <= 0 || 8 + msize > buf.len { return -5 }
+    if load_meta(buf, 8, msize, &!window) != 0 { return -5 }
     var msg = IpcMsg { version: 0, header_type: 0, header_pos: 0, body_len: 0, table: 0 }
-    let rc = read_message_at(buf, 8, &!msg)
+    let rc = read_message_at(&window, 0, &!msg)
     if rc != 0 { return rc }
     if msg.header_type != 1 { return -6 }
     if msg.body_len != 0 { return -3 }
     let body_at = 8 + msize
     if body_at > buf.len { return -5 }
-    let rc2 = read_schema_at(buf, msg.header_pos, schema)
+    let rc2 = read_schema_at(&window, msg.header_pos, schema)
     if rc2 != 0 { return rc2 }
-    let mn = read_meta4(buf, msg.table, 4, &!schema.mmeta_k, &!schema.mmeta_kl, &!schema.mmeta_v, &!schema.mmeta_vl)
+    let mn = read_meta4(&window, msg.table, 4, &!schema.mmeta_k, &!schema.mmeta_kl, &!schema.mmeta_v, &!schema.mmeta_vl)
     if mn < 0 { return mn }
     schema.mmeta_n = mn
     cur.kind = 2
@@ -3204,11 +3348,13 @@ pub fn arrow_ipc_open(buf: &ArrowBuf, schema: &!ArrowSchema, cur: &!ArrowCursor)
 
 /// Fill `batch` with the next record batch. Returns 0 when a batch was read, 1 at the end.
 pub fn arrow_ipc_next(buf: &ArrowBuf, schema: &ArrowSchema, cur: &!ArrowCursor, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {
+    if cap_ok(buf) != 0 { return -7 }
     if cur.kind == 1 {
         if cur.index >= cur.n_blocks { return 1 }
-        let foot = open_footer(buf)
+        var window = arrow_buf_new()
+        let foot = open_footer(buf, &!window)
         if foot.status != 0 { return foot.status }
-        let blk = footer_block_at(buf, foot.table, cur.index)
+        let blk = footer_block_at(&window, foot.table, cur.index)
         if blk.status != 0 { return blk.status }
         let rc = decode_framed(buf, blk.offset, blk.meta, blk.body, schema, batch)
         if rc != 0 { return rc }
@@ -3220,29 +3366,35 @@ pub fn arrow_ipc_next(buf: &ArrowBuf, schema: &ArrowSchema, cur: &!ArrowCursor, 
         let pos = cur.pos
         let cont = ab_i32(buf, pos)
         let msize = ab_i32(buf, pos + 4)
-        if cont == 0 || (cont == -1 && msize == 0) {
+        if (cont == -1 && msize == 0) || (cont == 0 && msize == 0) {
             cur.pos = buf.len
             return 1
         }
         if cont != -1 { return -3 }
         if msize < 0 || pos + 8 + msize > buf.len { return -5 }
+        var window = arrow_buf_new()
+        if load_meta(buf, pos + 8, msize, &!window) != 0 { return -5 }
         var msg = IpcMsg { version: 0, header_type: 0, header_pos: 0, body_len: 0, table: 0 }
-        let rc = read_message_at(buf, pos + 8, &!msg)
+        let rc = read_message_at(&window, 0, &!msg)
         if rc != 0 { return rc }
         let body_at = pos + 8 + msize
         if msg.body_len < 0 || body_at + msg.body_len > buf.len { return -5 }
         cur.pos = body_at + msg.body_len
         if msg.header_type == 3 {
-            return decode_batch(buf, msg.header_pos, body_at, msg.body_len, schema, batch)
+            return decode_batch(&window, msg.header_pos, buf, body_at, msg.body_len, schema, batch)
         }
         return -4
+    }
+    if cur.pos < buf.len {
+        if buf.len - cur.pos == 4 && ab_i32(buf, cur.pos) == 0 { return 1 }
+        return -5
     }
     1
 }
 
 fn footer_dict_at(buf: &ArrowBuf, ft: i64, index: i64) -> BlockLoc with Panic, Div {
     let boff = ab_field(buf, ft, 2)
-    if boff == 0 { return BlockLoc { offset: 0, meta: 0, body: 0, status: -6 } }
+    if boff <= 0 { return BlockLoc { offset: 0, meta: 0, body: 0, status: -6 } }
     let bv = ab_indirect(buf, ft + boff)
     if bv < 0 || bv + 4 > buf.len { return BlockLoc { offset: 0, meta: 0, body: 0, status: -6 } }
     let nb = ab_u32(buf, bv)
@@ -3331,28 +3483,38 @@ fn ingest_dict(buf: &ArrowBuf, offset: i64, meta: i64, body: i64, schema: &Arrow
     if offset + meta + body > buf.len { return -5 }
     if ab_i32(buf, offset) != -1 { return -3 }
     if ab_i32(buf, offset + 4) != meta - 8 { return -3 }
+    var window = arrow_buf_new()
+    if load_meta(buf, offset + 8, meta - 8, &!window) != 0 { return -5 }
     var msg = IpcMsg { version: 0, header_type: 0, header_pos: 0, body_len: 0, table: 0 }
-    let rc = read_message_at(buf, offset + 8, &!msg)
+    let rc = read_message_at(&window, 0, &!msg)
     if rc != 0 { return rc }
     if msg.header_type != 2 { return -4 }
     if msg.body_len != body { return -3 }
     let hp = msg.header_pos
     var id: i64 = 0
-    let idoff = ab_field(buf, hp, 0)
-    if idoff != 0 { id = ab_i64(buf, hp + idoff) }
+    let idoff = ab_field(&window, hp, 0)
+    if idoff < 0 { return -6 }
+    if idoff != 0 {
+        if fit(&window, hp + idoff, 8) == 0 { return -6 }
+        id = ab_i64(&window, hp + idoff)
+    }
     var delta: i64 = 0
-    let doff = ab_field(buf, hp, 2)
-    if doff != 0 { delta = flag01(ab_u8(buf, hp + doff)) }
-    let data = ab_field(buf, hp, 1)
-    if data == 0 { return -6 }
-    let rb = ab_indirect(buf, hp + data)
+    let doff = ab_field(&window, hp, 2)
+    if doff < 0 { return -6 }
+    if doff != 0 {
+        if fit(&window, hp + doff, 1) == 0 { return -6 }
+        delta = flag01(ab_u8(&window, hp + doff))
+    }
+    let data = ab_field(&window, hp, 1)
+    if data <= 0 { return -6 }
+    let rb = ab_indirect(&window, hp + data)
     if rb < 0 { return -6 }
     let node = find_dict_node(schema, id)
     if node < 0 { return -6 }
     var tmp = arrow_schema_new()
     copy_value_schema(schema, node, &!tmp)
     var got = arrow_batch_new()
-    let dr = decode_batch(buf, rb, offset + meta, body, &tmp, &!got)
+    let dr = decode_batch(&window, rb, buf, offset + meta, body, &tmp, &!got)
     if dr != 0 { return dr }
     let slot = dict_slot(dicts, id, delta)
     if slot < 0 { return slot }
@@ -3365,21 +3527,22 @@ pub fn arrow_ipc_open_ex(buf: &ArrowBuf, schema: &!ArrowSchema, cur: &!ArrowCurs
     let rc = arrow_ipc_open(buf, schema, cur)
     if rc != -4 { return rc }
     if buf.len < 6 || is_arrow1(buf, 0) == 0 { return rc }
-    let foot = open_footer(buf)
+    var window = arrow_buf_new()
+    let foot = open_footer(buf, &!window)
     if foot.status != 0 { return foot.status }
-    let rs = footer_schema(buf, foot.table, schema)
+    let rs = footer_schema(&window, foot.table, schema)
     if rs != 0 { return rs }
-    let nd = footer_ndict(buf, foot.table)
+    let nd = footer_ndict(&window, foot.table)
     if nd < 0 { return nd }
     var i: i64 = 0
     while i < nd {
-        let blk = footer_dict_at(buf, foot.table, i)
+        let blk = footer_dict_at(&window, foot.table, i)
         if blk.status != 0 { return blk.status }
         let dr = ingest_dict(buf, blk.offset, blk.meta, blk.body, schema, dicts)
         if dr != 0 { return dr }
         i = i + 1
     }
-    let nb = footer_nblocks(buf, foot.table)
+    let nb = footer_nblocks(&window, foot.table)
     if nb < 0 { return nb }
     cur.kind = 1
     cur.index = 0
@@ -3389,19 +3552,23 @@ pub fn arrow_ipc_open_ex(buf: &ArrowBuf, schema: &!ArrowSchema, cur: &!ArrowCurs
 
 /// Like `arrow_ipc_next`, and a stream dictionary message is stored in `dicts` then skipped.
 pub fn arrow_ipc_next_ex(buf: &ArrowBuf, schema: &ArrowSchema, cur: &!ArrowCursor, batch: &!ArrowBatch, dicts: &!ArrowDicts) -> i64 with Mut, Panic, Div {
+    if cap_ok(buf) != 0 { return -7 }
     if cur.kind == 1 { return arrow_ipc_next(buf, schema, cur, batch) }
     if cur.kind != 2 { return -6 }
     while cur.pos + 8 <= buf.len {
         let pos = cur.pos
         let cont = ab_i32(buf, pos)
         let msize = ab_i32(buf, pos + 4)
-        if cont == 0 || (cont == -1 && msize == 0) {
+        if (cont == -1 && msize == 0) || (cont == 0 && msize == 0) {
             cur.pos = buf.len
             return 1
         }
         if cont != -1 { return -3 }
+        if msize < 0 || pos + 8 + msize > buf.len { return -5 }
+        var window = arrow_buf_new()
+        if load_meta(buf, pos + 8, msize, &!window) != 0 { return -5 }
         var msg = IpcMsg { version: 0, header_type: 0, header_pos: 0, body_len: 0, table: 0 }
-        let rc = read_message_at(buf, pos + 8, &!msg)
+        let rc = read_message_at(&window, 0, &!msg)
         if rc != 0 { return rc }
         let body_at = pos + 8 + msize
         if msg.body_len < 0 || body_at + msg.body_len > buf.len { return -5 }
@@ -3411,15 +3578,19 @@ pub fn arrow_ipc_next_ex(buf: &ArrowBuf, schema: &ArrowSchema, cur: &!ArrowCurso
             let dr = ingest_dict(buf, pos, meta, msg.body_len, schema, dicts)
             if dr != 0 { return dr }
         } else if msg.header_type == 3 {
-            let mn = read_meta4(buf, msg.table, 4, &!batch.mmeta_k, &!batch.mmeta_kl, &!batch.mmeta_v, &!batch.mmeta_vl)
+            let mn = read_meta4(&window, msg.table, 4, &!batch.mmeta_k, &!batch.mmeta_kl, &!batch.mmeta_v, &!batch.mmeta_vl)
             if mn < 0 { return mn }
-            let dr = decode_batch(buf, msg.header_pos, body_at, msg.body_len, schema, batch)
+            let dr = decode_batch(&window, msg.header_pos, buf, body_at, msg.body_len, schema, batch)
             if dr != 0 { return dr }
             batch.mmeta_n = mn
             return 0
         } else {
             return -4
         }
+    }
+    if cur.pos < buf.len {
+        if buf.len - cur.pos == 4 && ab_i32(buf, cur.pos) == 0 { return 1 }
+        return -5
     }
     1
 }
@@ -3442,6 +3613,9 @@ pub fn arrow_dict_str_byte(dicts: &ArrowDicts, slot: i64, row: i64, i: i64) -> i
 
 /// Describe the encapsulated message at `pos` (continuation, metadata_size, body).
 pub fn arrow_ipc_view(buf: &ArrowBuf, pos: i64) -> ArrowIpcView with Mut, Panic, Div {
+    if cap_ok(buf) != 0 {
+        return ArrowIpcView { cont: 0, meta_size: 0, body_len: 0, header_type: 0, status: -7 }
+    }
     if pos < 0 || pos > buf.len {
         return ArrowIpcView { cont: 0, meta_size: 0, body_len: 0, header_type: 0, status: -5 }
     }
@@ -3449,11 +3623,14 @@ pub fn arrow_ipc_view(buf: &ArrowBuf, pos: i64) -> ArrowIpcView with Mut, Panic,
         return ArrowIpcView { cont: -1, meta_size: 0, body_len: 0, header_type: 0, status: 1 }
     }
     if pos + 8 > buf.len {
+        if buf.len - pos == 4 && ab_i32(buf, pos) == 0 {
+            return ArrowIpcView { cont: 0, meta_size: 0, body_len: 0, header_type: 0, status: 1 }
+        }
         return ArrowIpcView { cont: 0, meta_size: 0, body_len: 0, header_type: 0, status: -5 }
     }
     let cont = ab_i32(buf, pos)
     let msize = ab_i32(buf, pos + 4)
-    if cont == 0 || (cont == -1 && msize == 0) {
+    if (cont == -1 && msize == 0) || (cont == 0 && msize == 0) {
         return ArrowIpcView { cont: cont, meta_size: 0, body_len: 0, header_type: 0, status: 1 }
     }
     if cont != -1 {
@@ -3462,8 +3639,12 @@ pub fn arrow_ipc_view(buf: &ArrowBuf, pos: i64) -> ArrowIpcView with Mut, Panic,
     if msize < 0 || pos + 8 + msize > buf.len {
         return ArrowIpcView { cont: cont, meta_size: msize, body_len: 0, header_type: 0, status: -5 }
     }
+    var window = arrow_buf_new()
+    if load_meta(buf, pos + 8, msize, &!window) != 0 {
+        return ArrowIpcView { cont: cont, meta_size: msize, body_len: 0, header_type: 0, status: -5 }
+    }
     var msg = IpcMsg { version: 0, header_type: 0, header_pos: 0, body_len: 0, table: 0 }
-    let rc = read_message_at(buf, pos + 8, &!msg)
+    let rc = read_message_at(&window, 0, &!msg)
     if rc != 0 {
         return ArrowIpcView { cont: cont, meta_size: msize, body_len: 0, header_type: 0, status: rc }
     }
@@ -3482,6 +3663,7 @@ pub fn arrow_ipc_view(buf: &ArrowBuf, pos: i64) -> ArrowIpcView with Mut, Panic,
 /// Read a file buffer (leading "ARROW1") or a stream buffer.
 /// One record batch. A second batch returns -7.
 pub fn arrow_ipc_read(buf: &ArrowBuf, schema: &!ArrowSchema, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {
+    if cap_ok(buf) != 0 { return -7 }
     batch_clear(batch)
     schema.n_fields = 0
     if buf.len >= 6 && is_arrow1(buf, 0) != 0 {

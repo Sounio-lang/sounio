@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Native Arrow IPC gate. Default compiler is Madaros via ./bin/souc.
+# Stdlib Deep Science runs this script with MADAROS_RAW_BIN set to the
+# compiler built from the pull request. The full suite skips the fixtures
+# on lean_single because they carry //@ requires: madaros.
 # The Sounio test round-trips file and stream IPC, including a pyarrow 26
 # fixture embedded as hex. This script then checks the bytes on disk and,
 # when pyarrow imports, compares the logical columns.
@@ -29,13 +32,10 @@ test -f "$STREAM_OUT"
 test -f "$MULTI_FILE"
 test -f "$MULTI_STREAM"
 
-# Prefer an already-importable pyarrow. This VM keeps a newer numpy+pyarrow
-# under /tmp/pyarrow-pkgs because the system numpy is too old for pyarrow 26.
-# Set the path before Python starts so numpy is not imported from the system.
-if ! python3 -c 'import pyarrow' >/dev/null 2>&1; then
-  if [ -d /tmp/pyarrow-pkgs ]; then
-    export PYTHONPATH="/tmp/pyarrow-pkgs${PYTHONPATH:+:$PYTHONPATH}"
-  fi
+# Pyarrow comes from the caller's environment. Set ARROW_PYARROW_PATH only
+# when that directory is one the caller trusts; a shared temp tree is not.
+if [[ -n "${ARROW_PYARROW_PATH:-}" ]]; then
+  export PYTHONPATH="${ARROW_PYARROW_PATH}${PYTHONPATH:+:$PYTHONPATH}"
 fi
 
 python3 scripts/arrow_ipc_check.py "$FILE_OUT" "$STREAM_OUT" "$MULTI_FILE" "$MULTI_STREAM"
