@@ -155,12 +155,57 @@ stage across five failed fixtures. Their missing-file admission/lineage guards
 are real; the truncated logs do not establish each recorded first failure cause.
 Exact paths and the UID1000 read-only existence probe remain in the audit packet.
 
-Slurm17597 is a separately submitted **full tracked Git-source E2E replay**,
-reported running at this documentation checkpoint. Its fixed source is original
-3c7c8073411a7e7254d0d9424f59f8e49eb49180, including omitted tracked inputs.
-It does not execute later rootdd3b82c7be756f283f396a6df68ac5d9b585efe5, rename
-17578's measurement or establish acceptance while running. Its owner maintains
-submission/status custody separately; this documentation task submitted no job.
+Slurm17597 is an **interrupted partial full-Git E2E attempt**, not a new627-test
+baseline. Its fixed source was original3c7c8073411a7e7254d0d9424f59f8e49eb49180:
+24468 Git blobs/modes,15 symlinks, no gitlinks and922928729 bytes were verified
+before submission, including the17 omitted inputs and10159 unchanged prior
+entries. The complete tree also restored executable tools/science_boundary,
+which changed the operational path beyond those17 data files. The existing
+wrapper invoked Python attestation in auto mode. No later root source was run.
+
+Root directed a graceful stop under ADR009. The exact command
+`scancel --full --signal=TERM 17597` returned0 at2026-10-26T00:28:42Z;
+Slurm records **FAILED0:15 after19m34s**, ending00:28:43Z. Only472 original TSV
+rows remain, SHA256
+406360020d2ca3932bba60508de0c6cc29994be9901f417e343dd296bac05ddd.
+No final JSON was emitted. There is no valid complete627 measurement or full
+metadata reproduction, no old-row merge, synthetic completion, fallback or
+resubmission. The original17578 counts remain a distinct selected-input result.
+
+The first observed Python process was PID852789, evaluating the XOR material
+matching fixture with --compiler naming the external a292 .ready ELF. Its
+observed Slurm elapsed17:00 and recorded Start00:09:09 imply00:26:09Z at
+second resolution; no separate wall-clock stamp was captured at that first
+observation, and this is not evidence of the first-ever invocation. The exact
+process line and timing qualification remain in the stop packet.
+
+Post-stop regular-byte checks passed for all24453 tracked regular files.
+Workspace-only analysis of the harvested physical inventory also matched all
+24468 tracked modes and15 symlink targets/Git blob hashes. The strict path
+census nevertheless **failed**:24470 physical entries include two additional
+files, bin/madaros-linux-x86_64 and bin/.madaros-linux-x86_64.verified. The
+extra ELF is125051232 bytes, SHA256
+125c25703ac4062fc6befb7acf77e945abb13405f0adb5ab09fbc5a8d4b5b29f;
+the stamp is124 bytes. They remain preserved outside Git; no files were deleted
+to force a pass. The strict source-before/after helper could not produce its
+post-catalog after the failed path census. Engines/Node/runtime/CXX/packet
+hash checks passed, separately from this nonzero census result.
+
+Frozen bin/souc and bin/madaros unconditionally call the prebuilt materializer
+even with an explicit raw override. That helper locally decompresses the
+tracked .gz and verifies its tracked125c hash; no external download is established.
+Static resolution prefers MADAROS_RAW_BIN, and captured check/attestation
+commands name a292. These facts do not constitute a per-case execve audit;
+unchanged pin hashes alone do not prove the compiler actually selected for
+every E2E case, and the extra ELF alone does not prove it was executed. The
+whole-tools activation and incidental materialization are confounds, not a
+qualified canonical baseline. Any permitted future replay must replace prohibited
+auxiliaries, bind the actual raw route and bind the exact expected materialized
+files. Default materialization/provenance remains intact; novel paths must
+still fail closed.
+No Sounio tests, wrappers, attestors or scientific execution ran after stop;
+only the authorized read-only metadata harvest and workspace analysis followed.
+The separate SIO282 port and any future execution need their own receipts.
 
 Imported PR3167/e2cce2752796389a1b283a46def5de94fa9630ca provides lossless
 evidence storage/readers, a tree/storage change without new numerical execution.
@@ -194,15 +239,18 @@ payloads do not mean their bytes are included.
 | e2e99-source-audit-text.tar.gz |86653|dc55b5d66848ae1339a432de7d2441a01182fd5dba15bd0266e47851b6522d7b|
 | native-phases17596-text.tar.gz |288272|7145fa7ef07a265b05066f5aed6ded731953ae6b913e114f63c3c8e330431fa5|
 | native-phases-checkpoint02-text.tar.gz |50916|e6a7ecc4d3a4966eab6a604847ccf6bce9caf12ce2516356df9d9c9990a460c4|
+| e2e17597-stopped-text.tar.gz |5245791|eae1515e1a53f151dd7e57b1eac823a2a4878209663db711b850e4c5719b326c|
 
 Before copying, fresh extraction verified284 joint compact entries,18 terminal
 host entries,14 audit entries and306 available DP54 artifact entries. Fresh
 SIO281 extraction additionally verified108 replay receipt entries and852
-checkpoint02 entries. Fourteen
+checkpoint02 entries. The stopped17597 packet additionally verified120 included
+text/catalog/metadata members, with no source bulk or ELF payload. Fourteen
 DP54 executable payload entries are intentionally absent from the compact packet;
 their original worker receipt remains preserved. No included mismatch, ELF payload
 or source archive was found. CUSTODY_VERIFICATION.json records checks/identities;
-FILES.sha256 covers this README, six unchanged packets, verification receipt and
-internal fragment. Focused passes, source parity, green hosted contracts,
-tree-only custody and an in-flight replay remain distinct from full-suite
+FILES.sha256 covers this README, six unchanged packets, the separate stopped
+attempt packet, verification receipt and internal fragment. Focused passes,
+source parity, green hosted contracts, tree-only custody and an interrupted
+partial attempt remain distinct from full-suite
 acceptance and human review/main merge.
