@@ -21,8 +21,38 @@ if [[ -n "${ARROW_PYARROW_PATH:-}" ]]; then
   export PYTHONPATH="${ARROW_PYARROW_PATH}${PYTHONPATH:+:$PYTHONPATH}"
 fi
 
+prove_pyarrow_absence() {
+  local rc=0
+  local out
+  set +e
+  out=$(env -u PYTHONPATH -u PYTHONHOME ARROW_REQUIRE_PYARROW=1 python3 -S -c '
+import importlib.util
+import os
+from pathlib import Path
+os.environ["ARROW_REQUIRE_PYARROW"] = "1"
+spec = importlib.util.spec_from_file_location("arrow_ipc_check", "scripts/arrow_ipc_check.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+mod.try_pyarrow(Path("unused-file"), Path("unused-stream"), None)
+' 2>&1)
+  rc=$?
+  set -e
+  if [[ "$rc" == 0 || "$out" == *PYARROW_SKIP* || "$out" != *"pyarrow required"* ]]; then
+    echo "FAIL pyarrow absence control rc=$rc"
+    printf '%s\n' "$out"
+    exit 1
+  fi
+  echo "pyarrow absence control: required import failed closed"
+}
+
 if [[ "${ARROW_REQUIRE_PYARROW:-0}" == 1 ]]; then
-  python3 -c 'import pyarrow, pyarrow.ipc, pyarrow.flight; print("Required pyarrow:", pyarrow.__version__)'
+  ver=$(python3 -c 'import pyarrow, pyarrow.ipc, pyarrow.flight; print(pyarrow.__version__)')
+  if [[ "$ver" != "26.0.0" ]]; then
+    echo "FAIL required pyarrow version ${ver}"
+    exit 1
+  fi
+  echo "Required pyarrow: ${ver}"
+  prove_pyarrow_absence
 fi
 
 FILE_OUT="/tmp/sounio_arrow_ipc.arrow"

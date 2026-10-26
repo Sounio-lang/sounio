@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Logical check of the spec IPC files written by test_arrow_spec.sio."""
 
+import os
 from pathlib import Path
 
 
@@ -9,6 +10,8 @@ def main() -> None:
         import pyarrow as pa
         import pyarrow.ipc as ipc
     except ImportError:
+        if os.environ.get("ARROW_REQUIRE_PYARROW") == "1":
+            raise SystemExit("FAIL pyarrow required but not importable")
         print("SPEC_PYARROW_SKIP")
         return
 

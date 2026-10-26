@@ -7,6 +7,7 @@ a FlightData or PutResult protobuf. data_header is the IPC Message metadata
 (metadata_size bytes, padding included). data_body is the message body.
 """
 
+import os
 import struct
 import sys
 from pathlib import Path
@@ -141,6 +142,8 @@ def try_pyarrow(put_ipc: bytes, client_ipc: bytes, server_ipc: bytes) -> None:
         import pyarrow.flight as flight
         import pyarrow.ipc as ipc
     except ImportError:
+        if os.environ.get("ARROW_REQUIRE_PYARROW") == "1":
+            raise SystemExit("FAIL pyarrow required but not importable")
         print("PYARROW_SKIP")
         return
     desc = flight.FlightDescriptor.deserialize(bytes.fromhex("08011a04646174611a026964"))
