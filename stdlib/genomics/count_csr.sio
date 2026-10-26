@@ -1,0 +1,108 @@
+// Validated canonical nonnegative integer CSR. Owners prevent post-validation
+// payload mutation. Sorted input is required; duplicate policy is explicit.
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+pub struct CountCsrPayload {pub status:i64,pub rows:i64,pub samples:i64,pub capacity:i64,pub payload_bytes:i64}
+pub linear struct CountCSR {offsets:IntegerBuffer,columns:IntegerBuffer,values:IntegerBuffer,rows:i64,samples:i64,nnz:i64,status:i64,coalesced:i64}
+pub fn count_csr_payload(rows:i64,samples:i64,capacity:i64)->CountCsrPayload with Div {
+ var p=CountCsrPayload{status:1,rows:rows,samples:samples,capacity:capacity,payload_bytes:0}
+ let limit=9223372036854771704/8
+ if rows<0 || samples<1 || capacity<0 || rows>=limit {return p}
+ if capacity>(limit-rows-1)/2 {return p}
+ p.payload_bytes=(rows+1+2*capacity)*8;p.status=0;p
+}
+// Status0available,1shape/options,2bad offsets/column/value,3duplicates refused,
+// 4coalesced integer overflow. Zero entries are removed explicitly.
+fn cc_validate(out:&!CountCSR,rows:i64,samples:i64,nnz:i64,duplicate_policy:i64)->i64 with Mut,Div,Panic {
+ if count_csr_payload(rows,samples,nnz).status!=0 || duplicate_policy<0 || duplicate_policy>1 {return out.status}
+ if integer_buffer_status(&out.offsets)!=0 || integer_buffer_status(&out.columns)!=0 || integer_buffer_status(&out.values)!=0 {return out.status}
+ if integer_buffer_len(&out.offsets)!=rows+1 || integer_buffer_len(&out.columns)<nnz || integer_buffer_len(&out.values)<nnz {return out.status}
+ out.status=2
+ if integer_buffer_at(&out.offsets,0)!=0 || integer_buffer_at(&out.offsets,rows)!=nnz {return out.status}
+ var row:i64=0
+ var start:i64=0
+ while row<rows {
+  let end=integer_buffer_at(&out.offsets,row+1)
+  if end<start || end>nnz {return out.status}
+  var previous:i64= -1;var at=start
+  while at<end {
+   let column=integer_buffer_at(&out.columns,at)
+   if column<0 || column>=samples || column<previous || integer_buffer_at(&out.values,at)<0 {return out.status}
+   if column==previous && duplicate_policy==0 {out.status=3;return out.status}
+   previous=column;at=at+1
+  }
+  start=end;row=row+1
+ }
+ // Compact within the moved owners; invalid result owners remain closeable and
+ // never expose an available view of partly coalesced input.
+ row=0;start=0
+ var written:i64=0
+ while row<rows {
+  let end=integer_buffer_at(&out.offsets,row+1)
+  integer_buffer_set(&!out.offsets,row,written)
+  var at=start
+  while at<end {
+   let column=integer_buffer_at(&out.columns,at)
+   var total=integer_buffer_at(&out.values,at)
+   at=at+1
+   while at<end {
+    if integer_buffer_at(&out.columns,at)!=column {break}
+    let value=integer_buffer_at(&out.values,at)
+    if value>9223372036854775807-total {out.status=4;return out.status}
+    total=total+value;out.coalesced=out.coalesced+1;at=at+1
+   }
+   if total>0 {
+    integer_buffer_set(&!out.columns,written,column);integer_buffer_set(&!out.values,written,total);written=written+1
+   }
+  }
+  start=end;row=row+1
+ }
+ integer_buffer_set(&!out.offsets,rows,written)
+ out.nnz=written;out.status=0;0
+}
+pub fn count_csr_build(rows:i64,samples:i64,nnz:i64,offsets:IntegerBuffer,columns:IntegerBuffer,values:IntegerBuffer,duplicate_policy:i64)->CountCSR with Mut,Div,Panic {
+ var out=CountCSR{offsets:offsets,columns:columns,values:values,rows:rows,samples:samples,nnz:0,status:1,coalesced:0}
+ let code=cc_validate(&!out,rows,samples,nnz,duplicate_policy)
+ out
+}
+pub fn count_csr_status(c:&CountCSR)->i64 {c.status}
+pub fn count_csr_rows(c:&CountCSR)->i64 {c.rows}
+pub fn count_csr_samples(c:&CountCSR)->i64 {c.samples}
+pub fn count_csr_nnz(c:&CountCSR)->i64 {c.nnz}
+pub fn count_csr_coalesced(c:&CountCSR)->i64 {c.coalesced}
+pub fn count_csr_row_start(c:&CountCSR,row:i64)->i64 with Panic {
+ if c.status!=0 || row<0 || row>c.rows {return -1}
+ integer_buffer_at(&c.offsets,row)
+}
+pub fn count_csr_column(c:&CountCSR,index:i64)->i64 with Panic {
+ if c.status!=0 || index<0 || index>=c.nnz {return -1}
+ integer_buffer_at(&c.columns,index)
+}
+pub fn count_csr_stored_value(c:&CountCSR,index:i64)->i64 with Panic {
+ if c.status!=0 || index<0 || index>=c.nnz {return -1}
+ integer_buffer_at(&c.values,index)
+}
+// -1 is an unavailable accessor, never a valid nonnegative count.
+pub fn count_csr_at(c:&CountCSR,row:i64,sample:i64)->i64 with Mut,Div,Panic {
+ if c.status!=0 || row<0 || row>=c.rows || sample<0 || sample>=c.samples {return -1}
+ var low=integer_buffer_at(&c.offsets,row)
+ var high=integer_buffer_at(&c.offsets,row+1)
+ while low<high {
+  let middle=low+(high-low)/2
+  let column=integer_buffer_at(&c.columns,middle)
+  if column<sample {low=middle+1}else{high=middle}
+ }
+ let end=integer_buffer_at(&c.offsets,row+1)
+ if low<end {if integer_buffer_at(&c.columns,low)==sample {return integer_buffer_at(&c.values,low)}}
+ 0
+}
+pub fn count_csr_close(c:CountCSR) with Alloc {
+ let CountCSR{offsets,columns,values,rows,samples,nnz,status,coalesced}=c
+ integer_buffer_close(offsets);integer_buffer_close(columns);integer_buffer_close(values)
+}
+
+use collections::numeric_buffer::{NumericBuffer}
+use genomics::dynamic_normalization::{DynamicSizeFactorsSlot,dynamic_median_ratio_size_factors_csr_into}
+pub fn count_csr_size_factors_into(c:&CountCSR,mode:i64,factors:&!NumericBuffer,logs:&!NumericBuffer,work:&!NumericBuffer,anchors:&!IntegerBuffer,out:&!DynamicSizeFactorsSlot)->i64 with Mut,Div,Panic {
+ let rows=if c.status==0 {c.rows}else{-1}
+ dynamic_median_ratio_size_factors_csr_into(&c.values,&c.offsets,&c.columns,rows,c.samples,mode,factors,logs,work,anchors,out)
+}

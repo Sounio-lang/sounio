@@ -1,0 +1,146 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: PREPARED_CONTOUR_PASS
+//@ expect-stdout: data-saddle="exact-dyadic"
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_close,numeric_matrix}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set,integer_buffer_close}
+use display::canvas::{Canvas,canvas_clear}
+use viz::dynamic_plot::{DynamicPlotSpec}
+use viz::dynamic_contour::{prepared_contour_new,prepared_contour_close,prepared_contour_work,prepared_contour_prepare_into,prepared_contour_canvas_into,prepared_contour_svg_into,prepared_contour_generation,prepared_contour_len,prepared_contour_bytes,prepared_contour_status,prepared_contour_ready,prepared_contour_segment_slot,prepared_contour_segment_into}
+fn contour_case(c:&!Canvas,id:i64) with IO,Alloc,Mut,Div,Panic {
+ let wide=id>=6 && id<=8
+ let cols:i64=if wide {3}else{2}
+ var xs=numeric_buffer_new(cols,24);var ys=numeric_buffer_new(2,16)
+ var data=numeric_buffer_new(6,48);var levels=numeric_buffer_new(1,8)
+ var mask=integer_buffer_new(cols-1,16)
+ var i:i64=0
+ while i<cols {let a=numeric_buffer_set(&!xs,i,i as f64);i=i+1}
+ let y0=numeric_buffer_set(&!ys,0,0.0);let y1=numeric_buffer_set(&!ys,1,1.0)
+ let level=numeric_buffer_set(&!levels,0,0.0)
+ i=0
+ while i<6 {let a=numeric_buffer_set(&!data,i,0.0);i=i+1}
+ i=0
+ while i<cols-1 {let a=integer_buffer_set(&!mask,i,if id==7 && i==0 {0}else{1});i=i+1}
+ if wide {
+  let a=numeric_buffer_set(&!data,0,if id==8 {0.0}else{1.0})
+  let b=numeric_buffer_set(&!data,2,1.0)
+  let d=numeric_buffer_set(&!data,3,if id==8 {0.0}else{1.0})
+  let e=numeric_buffer_set(&!data,5,1.0)
+ }else{
+  var a:f64=1.0;var b:f64= -1.0;var d:f64= -1.0;var e:f64=1.0
+  if id==1 {a=3.0;e=3.0}
+  if id==2 {b= -3.0;d= -3.0}
+  if id==3 {a=0.0;b=0.0;e=1.0;d= -1.0}
+  if id==4 {a=0.0;b=0.0;e=1.0;d=0.0}
+  if id==5 {a=0.0;b=0.0;e=0.0;d=0.0}
+  if id==9 {a=0.0;b= -1.0;e= -1.0;d= -1.0}
+  if id==10 {a= -1.0;b=1.0;e=1.0;d= -1.0}
+  let sa=numeric_buffer_set(&!data,0,a);let sb=numeric_buffer_set(&!data,1,b)
+  let sc=numeric_buffer_set(&!data,4,e);let sd=numeric_buffer_set(&!data,3,d)
+ }
+ let matrix=numeric_matrix(6,2,cols,3,1,0)
+ var spec=DynamicPlotSpec{x:20+id*80,y:20,w:60,h:60,xmin:0.0,xmax:(cols-1) as f64,ymin:0.0,ymax:1.0,r:70,g:180,b:235,interval_kind:0,level:0.0}
+ var owner=prepared_contour_new(4,1,264)
+ var query=prepared_contour_new(0,0,0)
+ var work=prepared_contour_work()
+ assert(prepared_contour_status(&owner)==0 && prepared_contour_bytes(&owner)==264)
+ let too_little=prepared_contour_prepare_into(&!owner,&spec,&xs,&ys,&data,&matrix,&mask,&levels,0,&!work)
+ assert(too_little==6 && !prepared_contour_ready(&owner) && prepared_contour_generation(&owner)==0)
+ let needed=prepared_contour_prepare_into(&!query,&spec,&xs,&ys,&data,&matrix,&mask,&levels,20,&!work)
+ assert(needed==7 && work.capacity_known && work.levels_required==1)
+ let expected:i64=work.segments_required
+ let prepared=prepared_contour_prepare_into(&!owner,&spec,&xs,&ys,&data,&matrix,&mask,&levels,20,&!work)
+ assert(prepared==0 && work.capacity_known && prepared_contour_generation(&owner)==1)
+ assert(prepared_contour_len(&owner)==expected)
+ let flat:i64=work.flat_cells;let degenerate:i64=work.degenerate_segments;let masked:i64=work.masked_cells
+ let oversized_layout=numeric_matrix(100,2,cols,20,1,0)
+ let bad_storage=prepared_contour_prepare_into(&!owner,&spec,&xs,&ys,&data,&oversized_layout,&mask,&levels,20,&!work)
+ assert(bad_storage==2 && !work.capacity_known && prepared_contour_generation(&owner)==1 && prepared_contour_len(&owner)==expected)
+ var two_levels=numeric_buffer_new(2,16)
+ let lv0=numeric_buffer_set(&!two_levels,0,0.0);let lv1=numeric_buffer_set(&!two_levels,1,0.5)
+ let rejected_levels=prepared_contour_prepare_into(&!owner,&spec,&xs,&ys,&data,&matrix,&mask,&two_levels,40,&!work)
+ assert(rejected_levels==7 && work.capacity_known && work.levels_required==2 && prepared_contour_generation(&owner)==1 && prepared_contour_len(&owner)==expected)
+ numeric_buffer_close(two_levels)
+ // Late invalid input refuses atomically, leaving generation and old geometry.
+ let invalid=numeric_buffer_set(&!data,if wide {5}else{4},0.0/0.0)
+ let failed=prepared_contour_prepare_into(&!owner,&spec,&xs,&ys,&data,&matrix,&mask,&levels,20,&!work)
+ assert(failed==3 && prepared_contour_generation(&owner)==1 && prepared_contour_len(&owner)==expected)
+ // A detached capture does not retain raw inputs or the caller's spec record.
+ let changed=numeric_buffer_set(&!levels,0,10.0)
+ spec.x=0;spec.y=0;spec.r=255;spec.g=0;spec.b=0
+ numeric_buffer_close(xs);numeric_buffer_close(ys);numeric_buffer_close(data);numeric_buffer_close(levels);integer_buffer_close(mask)
+ var sample=prepared_contour_segment_slot()
+ if expected>0 {
+  let found=prepared_contour_segment_into(&owner,0,&!sample)
+  assert(found==0 && sample.level_index==0)
+ }
+ let out_of_range=prepared_contour_segment_into(&owner,expected,&!sample)
+ assert(out_of_range==2 && sample.x0==0 && sample.cell==0)
+ println("PREPARED_REJECT_BEGIN")
+ let rejected=prepared_contour_svg_into(&owner,-1,&!work)
+ assert(rejected==1 && work.painted==0)
+ println("PREPARED_REJECT_END")
+ let drawn=prepared_contour_canvas_into(c,&owner,&!work)
+ assert(drawn==0 && work.painted==expected && work.cell_evaluations==0 && work.predicate_evaluations==0)
+ let emitted=prepared_contour_svg_into(&owner,id,&!work)
+ assert(emitted==0 && work.painted==expected && work.cell_evaluations==0 && work.predicate_evaluations==0)
+ print("CONTOUR_CASE ");print(id);print(" ");print(expected);print(" ");print(expected);print(" ");print(flat);print(" ");print(degenerate);print(" ");println(masked)
+ prepared_contour_close(query);prepared_contour_close(owner)
+}
+fn clipped_case(c:&!Canvas,outside:bool) with IO,Alloc,Mut,Div,Panic {
+ var xs=numeric_buffer_new(2,16);var ys=numeric_buffer_new(2,16)
+ var data=numeric_buffer_new(4,32);var levels=numeric_buffer_new(1,8)
+ var mask=integer_buffer_new(1,8)
+ let a=numeric_buffer_set(&!xs,0,0.0);let b=numeric_buffer_set(&!xs,1,1.0)
+ let d=numeric_buffer_set(&!ys,0,0.0);let e=numeric_buffer_set(&!ys,1,1.0)
+ let f=numeric_buffer_set(&!levels,0,0.0);let g=integer_buffer_set(&!mask,0,1)
+ let v0=numeric_buffer_set(&!data,0,if outside {-0.125}else{-1.0})
+ let v1=numeric_buffer_set(&!data,1,if outside {0.875}else{0.0})
+ let v2=numeric_buffer_set(&!data,2,if outside {-0.125}else{0.0})
+ let v3=numeric_buffer_set(&!data,3,if outside {0.875}else{1.0})
+ let m=numeric_matrix(4,2,2,2,1,0)
+ let spec=DynamicPlotSpec{x:20,y:120,w:60,h:60,xmin:0.25,xmax:0.75,ymin:0.25,ymax:0.75,r:70,g:180,b:235,interval_kind:0,level:0.0}
+ var p=prepared_contour_new(1,1,72);var w=prepared_contour_work();var segment=prepared_contour_segment_slot()
+ let code=prepared_contour_prepare_into(&!p,&spec,&xs,&ys,&data,&m,&mask,&levels,1,&!w)
+ assert(code==0 && prepared_contour_len(&p)==1)
+ let visible=prepared_contour_segment_into(&p,0,&!segment)
+ if outside {assert(visible==1 && segment.x0==0 && segment.y0==0)}else{
+  assert(visible==0 && segment.x0==80 && segment.y0==180 && segment.x1==20 && segment.y1==120)
+ }
+ let generation:i64=prepared_contour_generation(&p)
+ var i:i64=0
+ while i<128 {
+  let code=prepared_contour_prepare_into(&!p,&spec,&xs,&ys,&data,&m,&mask,&levels,1,&!w)
+  assert(code==0);i=i+1
+ }
+ assert(prepared_contour_generation(&p)==generation+128)
+ let draw=prepared_contour_canvas_into(c,&p,&!w)
+ assert(draw==0 && w.painted==(if outside {0}else{1}))
+ let svg=prepared_contour_svg_into(&p,if outside {13}else{12},&!w)
+ assert(svg==0 && w.painted==(if outside {0}else{1}))
+ numeric_buffer_close(xs);numeric_buffer_close(ys);numeric_buffer_close(data);numeric_buffer_close(levels);integer_buffer_close(mask);prepared_contour_close(p)
+}
+
+fn main() with IO,Alloc,Mut,Div,Panic {
+ let pixels=heap_alloc(920*200*8) as *mut i64
+ assert((pixels as i64)>0)
+ var canvas=Canvas{pixels:pixels,width:920,height:200}
+ canvas_clear(&!canvas,0,0,0)
+ println("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"920\" height=\"200\" viewBox=\"0 0 920 200\">")
+ var i:i64=0
+ while i<11 {contour_case(&!canvas,i);i=i+1}
+ clipped_case(&!canvas,false);clipped_case(&!canvas,true)
+ println("</svg>")
+ var y:i64=0
+ while y<200 {
+  var x:i64=0
+  while x<920 {
+   let color:i64=read_i64(canvas.pixels,y*920+x)
+   if color!=0 {print("CONTOUR_PIXEL ");print(x);print(" ");print(y);print(" ");println(color)}
+   x=x+1
+  }
+  y=y+1
+ }
+ heap_free(canvas.pixels as *mut i8)
+ println("PREPARED_CONTOUR_PASS")
+}

@@ -1,0 +1,58 @@
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_at,numeric_buffer_close}
+use math::poisson_multigrid::{PoissonOptions,poisson_workspace,poisson_solve_into}
+fn poisson_case(n:i64) with Alloc,Mut,Div,Panic,IO {
+ let shape=poisson_workspace(n)
+ assert(shape.status==0)
+ let side=n+1
+ var rhs=numeric_buffer_new(shape.finest_len,shape.finest_len*8)
+ var answer=numeric_buffer_new(shape.finest_len,shape.finest_len*8)
+ var work_u=numeric_buffer_new(shape.packed_len,shape.packed_len*8)
+ var work_f=numeric_buffer_new(shape.packed_len,shape.packed_len*8)
+ var work_r=numeric_buffer_new(shape.packed_len,shape.packed_len*8)
+ var y:i64=0
+ while y<=n {
+  var x:i64=0
+  while x<=n {
+   let xx=(x as f64)/(n as f64);let yy=(y as f64)/(n as f64)
+   let f=if x==0 || y==0 || x==n || y==n {0.0}else{2.0*(xx*(1.0-xx)+yy*(1.0-yy))}
+   numeric_buffer_set(&!rhs,y*side+x,f);numeric_buffer_set(&!answer,y*side+x,99.0)
+   x=x+1
+  }
+  y=y+1
+ }
+ var o=PoissonOptions{atol:1.0e-10,rtol:0.0,max_cycles:80,pre_sweeps:3,post_sweeps:3,max_point_work:100000000}
+ let fit=poisson_solve_into(&rhs,n,&!answer,&!work_u,&!work_f,&!work_r,&o)
+ assert(fit.status==0 && fit.residual_max<=fit.tolerance)
+ var i:i64=0
+ while i<shape.finest_len {
+  let ub:i64=f64_to_bits(numeric_buffer_at(&answer,i))
+  println("MG {} {} {}",n,i,ub);i=i+1
+ }
+ let rb:i64=f64_to_bits(fit.residual_max)
+ let cycles:i64=fit.cycles;let work:i64=fit.point_work;let updates:i64=fit.updates;let residuals:i64=fit.residual_evaluations
+ let restricted:i64=fit.restricted;let prolonged:i64=fit.prolonged;let coarse:i64=fit.coarse_solves;let setup:i64=fit.setup_points
+ println("MG_WORK {} {} {} {} {} {} {} {} {} {} {} {}",n,cycles,work,updates,residuals,restricted,prolonged,coarse,setup,rb,shape.packed_len,shape.payload_bytes)
+ let before:i64=f64_to_bits(numeric_buffer_at(&answer,side+1))
+ o.max_cycles=0
+ let capped=poisson_solve_into(&rhs,n,&!answer,&!work_u,&!work_f,&!work_r,&o)
+ assert(capped.status==3 && f64_to_bits(numeric_buffer_at(&answer,side+1))==before)
+ o.max_cycles=80;o.max_point_work=0
+ let budget=poisson_solve_into(&rhs,n,&!answer,&!work_u,&!work_f,&!work_r,&o)
+ assert(budget.status==3 && budget.point_work==0 && f64_to_bits(numeric_buffer_at(&answer,side+1))==before)
+ o.max_point_work=(n-1)*(n-1)+(if n==2 {0}else{7})
+ let late=poisson_solve_into(&rhs,n,&!answer,&!work_u,&!work_f,&!work_r,&o)
+ assert(late.status==3 && late.point_work==o.max_point_work && late.updates==(if n==2 {0}else{7}) && f64_to_bits(numeric_buffer_at(&answer,side+1))==before)
+ let late_work:i64=late.point_work;let late_updates:i64=late.updates
+ println("MG_LATE {} {} {}",n,late_work,late_updates)
+ numeric_buffer_set(&!rhs,0,1.0)
+ let boundary=poisson_solve_into(&rhs,n,&!answer,&!work_u,&!work_f,&!work_r,&o)
+ assert(boundary.status==2 && boundary.setup_points==0 && f64_to_bits(numeric_buffer_at(&answer,side+1))==before)
+ println("MG_REFUSALS {} 3 3 2",n)
+ numeric_buffer_close(rhs);numeric_buffer_close(answer);numeric_buffer_close(work_u);numeric_buffer_close(work_f);numeric_buffer_close(work_r)
+}
+fn main()->i32 with Alloc,Mut,Div,Panic,IO {
+ assert(poisson_workspace(0).status==1 && poisson_workspace(1).status==1 && poisson_workspace(3).status==1)
+ poisson_case(2);poisson_case(8);poisson_case(16);poisson_case(32);poisson_case(256)
+ println("POISSON_CHECKED_PASS")
+ 0
+}

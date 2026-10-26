@@ -1,0 +1,167 @@
+// Checked right-censored KM curves and pointwise log-log confidence limits.
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_at,numeric_buffer_status,numeric_buffer_close}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set,integer_buffer_at,integer_buffer_status,integer_buffer_close}
+use stats::checked_survival::{survival_workspace,survival_checked}
+use viz::dynamic_plot::{DynamicPlotSpec,dynamic_line_canvas,dynamic_line_svg,dynamic_interval_canvas,dynamic_interval_svg}
+use display::canvas::{Canvas,canvas_clear,canvas_draw_char,canvas_fill_rect}
+fn text(c:&!Canvas,x:i64,y:i64,s:string) with IO,Mut {
+ var i:i64=0
+ while i<str_len(s) {canvas_draw_char(c,str_char_at(s,i) as i64,x+8*i,y,235,240,245);i=i+1}
+ print("<text x=\"");print(x);print("\" y=\"");print(y+7);print("\" fill=\"rgb(235,240,245)\" font-family=\"monospace\" font-size=\"8\" textLength=\"");print(str_len(s)*8);print("\" lengthAdjust=\"spacingAndGlyphs\">");var j:i64=0
+ while j<str_len(s) {
+  let ch:i64=str_char_at(s,j) as i64
+  if ch==38 {print("&amp;")}else if ch==60 {print("&lt;")}else if ch==62 {print("&gt;")}else if ch==34 {print("&quot;")}else if ch==39 {print("&apos;")}else{print_char(ch)}
+  j=j+1
+ }
+ println("</text>")
+}
+// The same half-open integer pixel rectangle is used by both exports.
+fn rule(c:&!Canvas,x:i64,y:i64,w:i64,h:i64) with IO,Mut {
+ canvas_fill_rect(c,x,y,w,h,180,190,200)
+ let px:f64=(x as f64)-0.5;let py:f64=(y as f64)-0.5
+ print("<rect data-science-rule=\"1\" x=\"");print(px);print("\" y=\"");print(py);print("\" width=\"");print(w);print("\" height=\"");print(h);println("\" fill=\"rgb(180,190,200)\"/>")
+}
+fn dump(c:&Canvas) with IO,Mut,Div {
+ println("<!-- CANVAS_RLE 1480 800 -->")
+ var row:i64=0
+ while row<c.height {
+  var left:i64=0
+  while left<c.width {
+   let rgb:i64=read_i64(c.pixels,row*c.width+left)
+   var right=left+1
+   while right<c.width {
+    if read_i64(c.pixels,row*c.width+right)!=rgb {break}
+    right=right+1
+   }
+   println("<!-- PIX {} {} {} {} -->",row,left,right-left,rgb)
+   left=right
+  }
+  row=row+1
+ }
+ println("<!-- CANVAS_RLE_END -->")
+}
+fn axes(c:&!Canvas,x:i64) with IO,Mut,Div {
+ rule(c,x,112,1,513);rule(c,x,624,513,1)
+ var i:i64=0
+ while i<5 {
+  let a=if i==0 {"0"}else if i==1 {"3"}else if i==2 {"6"}else if i==3 {"9"}else{"12"}
+  let b=if i==0 {"0"}else if i==1 {"0.25"}else if i==2 {"0.5"}else if i==3 {"0.75"}else{"1"}
+  text(c,x+128*i-str_len(a)*4,636,a);text(c,x-8-str_len(b)*8,620-128*i,b);i=i+1
+ }
+ text(c,x+152,656,"follow-up time (arbitrary units)")
+ text(c,x,92,"survival probability")
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let shape=survival_workspace(24,100000)
+ var times=numeric_buffer_new(24,192);var event=integer_buffer_new(24,192);var groups=integer_buffer_new(24,192)
+ var order=integer_buffer_new(24,192);var curves=numeric_buffer_new(shape.curve_len,shape.curve_len*8);var counts=integer_buffer_new(shape.count_len,shape.count_len*8)
+ // Each plot buffer has an explicit bounded active index list. Tail mask0 is
+ // absence; it does not introduce fictitious survival or confidence values.
+ var lx=numeric_buffer_new(49,392);var ly=numeric_buffer_new(49,392);var lm=integer_buffer_new(49,392);var li=integer_buffer_new(49,392)
+ var rx=numeric_buffer_new(49,392);var ry=numeric_buffer_new(49,392);var rm=integer_buffer_new(49,392);var ri=integer_buffer_new(49,392)
+ var bx=numeric_buffer_new(24,192);var bm=numeric_buffer_new(24,192);var blo=numeric_buffer_new(24,192);var bhi=numeric_buffer_new(24,192);var ba=integer_buffer_new(24,192)
+ var cx=numeric_buffer_new(24,192);var cm=numeric_buffer_new(24,192);var clo=numeric_buffer_new(24,192);var chi=numeric_buffer_new(24,192);var ca=integer_buffer_new(24,192)
+ var code:i64=0
+ if shape.status!=0 || numeric_buffer_status(&times)!=0 || numeric_buffer_status(&curves)!=0 || integer_buffer_status(&event)!=0 || integer_buffer_status(&groups)!=0 || integer_buffer_status(&order)!=0 || integer_buffer_status(&counts)!=0 || numeric_buffer_status(&lx)!=0 || numeric_buffer_status(&ly)!=0 || integer_buffer_status(&lm)!=0 || integer_buffer_status(&li)!=0 || numeric_buffer_status(&rx)!=0 || numeric_buffer_status(&ry)!=0 || integer_buffer_status(&rm)!=0 || integer_buffer_status(&ri)!=0 || numeric_buffer_status(&bx)!=0 || numeric_buffer_status(&bm)!=0 || numeric_buffer_status(&blo)!=0 || numeric_buffer_status(&bhi)!=0 || integer_buffer_status(&ba)!=0 || numeric_buffer_status(&cx)!=0 || numeric_buffer_status(&cm)!=0 || numeric_buffer_status(&clo)!=0 || numeric_buffer_status(&chi)!=0 || integer_buffer_status(&ca)!=0 {code=1}
+ var i:i64=0
+ if code==0 {
+  while i<24 {
+   numeric_buffer_set(&!times,i,((i/2)+1) as f64)
+   integer_buffer_set(&!groups,i,i%2)
+   integer_buffer_set(&!event,i,if i%2==0 {if i%6==0 {0}else{1}}else{if i%8==1 {0}else{1}})
+   i=i+1
+  }
+ }
+ // The kernel commits curves only after preflight. Available curve/CI fields
+ // are selected independently using its returned flags, including at S=0/1.
+ let fit=survival_checked(&times,&event,&groups,24,0.05,&!order,&!curves,&!counts,100000,10000,100000,100000,1e-13)
+ if fit.status!=0 {code=fit.status}
+ let rows:i64=fit.rows
+ var nleft:i64=1;var nright:i64=1;var previous0:f64=1.0;var previous1:f64=1.0
+ if code==0 {
+  i=0
+  while i<49 {integer_buffer_set(&!lm,i,0);integer_buffer_set(&!rm,i,0);integer_buffer_set(&!li,i,i);integer_buffer_set(&!ri,i,i);i=i+1}
+  i=0
+  while i<24 {integer_buffer_set(&!ba,i,0);integer_buffer_set(&!ca,i,0);i=i+1}
+  numeric_buffer_set(&!lx,0,0.0);numeric_buffer_set(&!ly,0,1.0);integer_buffer_set(&!lm,0,1);integer_buffer_set(&!li,0,0)
+  numeric_buffer_set(&!rx,0,0.0);numeric_buffer_set(&!ry,0,1.0);integer_buffer_set(&!rm,0,1);integer_buffer_set(&!ri,0,0)
+  i=0
+  while i<rows {
+   let a=(3*i+1)*8;let b=(3*i+2)*8
+   let af=integer_buffer_at(&counts,(3*i+1)*4+3);let bf=integer_buffer_at(&counts,(3*i+2)*4+3)
+   let t=numeric_buffer_at(&curves,a)
+   if (af&1)!=0 {
+    let s=numeric_buffer_at(&curves,a+1)
+    numeric_buffer_set(&!lx,nleft,t);numeric_buffer_set(&!ly,nleft,previous0);integer_buffer_set(&!lm,nleft,1);integer_buffer_set(&!li,nleft,nleft);nleft=nleft+1
+    numeric_buffer_set(&!lx,nleft,t);numeric_buffer_set(&!ly,nleft,s);integer_buffer_set(&!lm,nleft,1);integer_buffer_set(&!li,nleft,nleft);nleft=nleft+1;previous0=s
+   }
+   if (bf&1)!=0 {
+    let s=numeric_buffer_at(&curves,b+1)
+    numeric_buffer_set(&!rx,nright,t);numeric_buffer_set(&!ry,nright,previous1);integer_buffer_set(&!rm,nright,1);integer_buffer_set(&!ri,nright,nright);nright=nright+1
+    numeric_buffer_set(&!rx,nright,t);numeric_buffer_set(&!ry,nright,s);integer_buffer_set(&!rm,nright,1);integer_buffer_set(&!ri,nright,nright);nright=nright+1;previous1=s
+   }
+   if (af&16)!=0 {
+    numeric_buffer_set(&!bx,i,t);numeric_buffer_set(&!bm,i,numeric_buffer_at(&curves,a+1));numeric_buffer_set(&!blo,i,numeric_buffer_at(&curves,a+5));numeric_buffer_set(&!bhi,i,numeric_buffer_at(&curves,a+6));integer_buffer_set(&!ba,i,1)
+   }
+   if (bf&16)!=0 {
+    numeric_buffer_set(&!cx,i,t);numeric_buffer_set(&!cm,i,numeric_buffer_at(&curves,b+1));numeric_buffer_set(&!clo,i,numeric_buffer_at(&curves,b+5));numeric_buffer_set(&!chi,i,numeric_buffer_at(&curves,b+6));integer_buffer_set(&!ca,i,1)
+   }
+   i=i+1
+  }
+ }
+ // The ordered-line API requires a provenance index for each source gap run,
+ // including the first masked trailing slot. It emits no mark or extrapolation.
+ if nleft<49 {integer_buffer_set(&!li,nleft,nleft);nleft=nleft+1}
+ if nright<49 {integer_buffer_set(&!ri,nright,nright);nright=nright+1}
+ let left=DynamicPlotSpec{x:112,y:112,w:512,h:512,xmin:0.0,xmax:12.0,ymin:0.0,ymax:1.0,r:70,g:180,b:235,interval_kind:0,level:0.0}
+ let right=DynamicPlotSpec{x:816,y:112,w:512,h:512,xmin:0.0,xmax:12.0,ymin:0.0,ymax:1.0,r:235,g:130,b:70,interval_kind:0,level:0.0}
+ // Kind1 is the shared IR confidence-interval category; these are POINTWISE
+ // asymptotic Greenwood/log-log limits, not prediction or simultaneous bands.
+ let left_ci=DynamicPlotSpec{x:112,y:112,w:512,h:512,xmin:0.0,xmax:12.0,ymin:0.0,ymax:1.0,r:70,g:180,b:235,interval_kind:1,level:0.95}
+ let right_ci=DynamicPlotSpec{x:816,y:112,w:512,h:512,xmin:0.0,xmax:12.0,ymin:0.0,ymax:1.0,r:235,g:130,b:70,interval_kind:1,level:0.95}
+ let pixels=heap_alloc(1480*800*8) as *mut i64
+ if (pixels as i64)<=0 {code=1}
+ if code==0 {
+  var canvas=Canvas{pixels:pixels,width:1480,height:800};canvas_clear(&!canvas,12,16,22)
+  let first=dynamic_interval_canvas(&!canvas,&left_ci,&bx,&bm,&blo,&bhi,&ba);code=first.status
+  if code==0 {let second=dynamic_interval_canvas(&!canvas,&right_ci,&cx,&cm,&clo,&chi,&ca);code=second.status}
+  if code==0 {let series=dynamic_line_canvas(&!canvas,&left,&lx,&ly,&lm,&li,nleft);code=series.status}
+  if code==0 {let series=dynamic_line_canvas(&!canvas,&right,&rx,&ry,&rm,&ri,nright);code=series.status}
+  if code==0 {
+   println("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1480\" height=\"800\" viewBox=\"0 0 1480 800\">")
+   println("<rect width=\"1480\" height=\"800\" fill=\"rgb(12,16,22)\"/>")
+   let first=dynamic_interval_svg(&left_ci,&bx,&bm,&blo,&bhi,&ba,7101);code=first.status
+   if code==0 {let second=dynamic_interval_svg(&right_ci,&cx,&cm,&clo,&chi,&ca,7102);code=second.status}
+   if code==0 {let series=dynamic_line_svg(&left,&lx,&ly,&lm,&li,nleft,7103);code=series.status}
+   if code==0 {let series=dynamic_line_svg(&right,&rx,&ry,&rm,&ri,nright,7104);code=series.status}
+   text(&!canvas,112,24,"Checked Kaplan-Meier survival with explicit pointwise confidence intervals")
+   text(&!canvas,112,48,"Synthetic right-censored observations; tied events are processed before censoring removals")
+   text(&!canvas,112,72,"Group 0: 12 observations; blue step curve and CI")
+   text(&!canvas,816,72,"Group 1: 12 observations; orange step curve and CI")
+   axes(&!canvas,112);axes(&!canvas,816)
+   text(&!canvas,112,704,"Vertical intervals: nominal 95% POINTWISE asymptotic Greenwood / log-log confidence limits")
+   text(&!canvas,112,728,"Unavailable limits at singular boundary transforms are masked; survival remains independently available")
+   text(&!canvas,112,752,"Independent censoring assumptions are unassessed; no simultaneous-band or finite-sample coverage claim")
+   let deaths:i64=fit.deaths;let censored:i64=fit.censored
+   println("<!-- SURVIVAL_META {} {} {} {} {} -->",rows,deaths,censored,nleft,nright)
+   i=0
+   while i<24 {let tb:i64=f64_to_bits(numeric_buffer_at(&times,i));let ev:i64=integer_buffer_at(&event,i);let gr:i64=integer_buffer_at(&groups,i);println("<!-- SAMPLE {} {} {} {} -->",i,tb,ev,gr);i=i+1}
+   i=0
+   while i<rows*3 {
+    let risk:i64=integer_buffer_at(&counts,4*i);let dead:i64=integer_buffer_at(&counts,4*i+1);let censor:i64=integer_buffer_at(&counts,4*i+2);let available:i64=integer_buffer_at(&counts,4*i+3)
+    println("<!-- RISK {} {} {} {} {} -->",i,risk,dead,censor,available)
+    var column:i64=0
+    while column<8 {let bits:i64=f64_to_bits(numeric_buffer_at(&curves,8*i+column));println("<!-- CURVE {} {} {} -->",i,column,bits);column=column+1}
+    i=i+1
+   }
+   if code==0 {println("<!-- SCIENTIFIC_SURVIVAL_COMPLETE -->")};println("</svg>");if code==0 {dump(&canvas)}
+  }
+ }
+ if (pixels as i64)>0 {heap_free(pixels as *mut i8)}
+ numeric_buffer_close(times);integer_buffer_close(event);integer_buffer_close(groups);integer_buffer_close(order);numeric_buffer_close(curves);integer_buffer_close(counts)
+ numeric_buffer_close(lx);numeric_buffer_close(ly);integer_buffer_close(lm);integer_buffer_close(li)
+ numeric_buffer_close(rx);numeric_buffer_close(ry);integer_buffer_close(rm);integer_buffer_close(ri)
+ numeric_buffer_close(bx);numeric_buffer_close(bm);numeric_buffer_close(blo);numeric_buffer_close(bhi);integer_buffer_close(ba)
+ numeric_buffer_close(cx);numeric_buffer_close(cm);numeric_buffer_close(clo);numeric_buffer_close(chi);integer_buffer_close(ca)
+ if code==0 {0}else{1}
+}
