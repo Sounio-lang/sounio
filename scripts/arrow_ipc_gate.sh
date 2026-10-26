@@ -13,13 +13,17 @@ SOUC="${SOUC:-./bin/souc}"
 
 FILE_OUT="/tmp/sounio_arrow_ipc.arrow"
 STREAM_OUT="/tmp/sounio_arrow_ipc.arrows"
-rm -f "$FILE_OUT" "$STREAM_OUT"
+MULTI_FILE="/tmp/sounio_arrow_ipc_multi.arrow"
+MULTI_STREAM="/tmp/sounio_arrow_ipc_multi.arrows"
+rm -f "$FILE_OUT" "$STREAM_OUT" "$MULTI_FILE" "$MULTI_STREAM"
 
 echo "== arrow ipc (madaros) =="
 "$SOUC" run tests/stdlib/arrow/test_arrow_ipc.sio
 
 test -f "$FILE_OUT"
 test -f "$STREAM_OUT"
+test -f "$MULTI_FILE"
+test -f "$MULTI_STREAM"
 
 # Prefer an already-importable pyarrow. This VM keeps a newer numpy+pyarrow
 # under /tmp/pyarrow-pkgs because the system numpy is too old for pyarrow 26.
@@ -30,5 +34,5 @@ if ! python3 -c 'import pyarrow' >/dev/null 2>&1; then
   fi
 fi
 
-python3 scripts/arrow_ipc_check.py "$FILE_OUT" "$STREAM_OUT"
+python3 scripts/arrow_ipc_check.py "$FILE_OUT" "$STREAM_OUT" "$MULTI_FILE" "$MULTI_STREAM"
 echo "ARROW_IPC_GATE_OK"

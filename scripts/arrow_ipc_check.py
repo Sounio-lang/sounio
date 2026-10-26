@@ -26,7 +26,43 @@ def structural(path: Path, kind: str) -> None:
             raise SystemExit(f"FAIL missing {name} in {path}")
 
 
-def try_pyarrow(file_path: Path, stream_path: Path) -> None:
+def framing(path: Path, kind: str) -> None:
+    data = path.read_bytes()
+    if kind == "file":
+        if not data.startswith(b"ARROW1") or not data.endswith(b"ARROW1"):
+            raise SystemExit(f"FAIL magic {path}")
+    else:
+        if data[:4] != b"\xff\xff\xff\xff":
+            raise SystemExit(f"FAIL continuation {path}")
+        if not data.endswith(b"\xff\xff\xff\xff\x00\x00\x00\x00"):
+            raise SystemExit(f"FAIL eos {path}")
+
+
+def check_multi(ipc, file_path: Path, stream_path: Path) -> None:
+    import pyarrow as pa
+
+    expect = [[1, 2], [30]]
+
+    def batches(path: Path, kind: str) -> list:
+        with pa.memory_map(str(path), "r") as src:
+            if kind == "file":
+                reader = ipc.open_file(src)
+                return [reader.get_batch(i).column(0).to_pylist() for i in range(reader.num_record_batches)]
+            reader = ipc.open_stream(src)
+            out = []
+            try:
+                while True:
+                    out.append(reader.read_next_batch().column(0).to_pylist())
+            except StopIteration:
+                return out
+
+    for path, kind in ((file_path, "file"), (stream_path, "stream")):
+        got = batches(path, kind)
+        if got != expect:
+            raise SystemExit(f"FAIL pyarrow multi {path}: {got}")
+
+
+def try_pyarrow(file_path: Path, stream_path: Path, multi: tuple[Path, Path] | None) -> None:
     try:
         import pyarrow as pa
         import pyarrow.ipc as ipc
@@ -56,18 +92,29 @@ def try_pyarrow(file_path: Path, stream_path: Path) -> None:
 
     load(file_path, "file")
     load(stream_path, "stream")
+    if multi is not None:
+        check_multi(ipc, multi[0], multi[1])
     print("PYARROW_OK")
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: arrow_ipc_check.py <file.arrow> <stream.arrows>")
+    if len(sys.argv) not in (3, 5):
+        raise SystemExit(
+            "usage: arrow_ipc_check.py <file.arrow> <stream.arrows> [<multi.arrow> <multi.arrows>]"
+        )
     file_path = Path(sys.argv[1])
     stream_path = Path(sys.argv[2])
     structural(file_path, "file")
     structural(stream_path, "stream")
+    multi = None
+    if len(sys.argv) == 5:
+        multi_file = Path(sys.argv[3])
+        multi_stream = Path(sys.argv[4])
+        framing(multi_file, "file")
+        framing(multi_stream, "stream")
+        multi = (multi_file, multi_stream)
     print("STRUCT_OK")
-    try_pyarrow(file_path, stream_path)
+    try_pyarrow(file_path, stream_path, multi)
 
 
 if __name__ == "__main__":

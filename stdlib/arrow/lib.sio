@@ -10,8 +10,12 @@
 //            footer flatbuffer, int32 footer size, "ARROW1"
 //
 // Bounds (fail closed, status -7, rather than truncate):
-//   8 fields, 16 rows, field names <= 32 bytes, string/binary cells <= 32 bytes
-//   IPC byte buffer 8192, flatbuffer builder 4096, record-batch body 4096
+//   8 fields, 16 rows per batch, field names <= 32 bytes,
+//   string/binary cells <= 32 bytes, 8 record-batch blocks in one file.
+//   A stream may hold as many batches as fit in the 8192-byte IPC buffer.
+//   IPC byte buffer 8192, flatbuffer builder 4096, record-batch body 4096.
+// `arrow_ipc_read` still accepts one batch and returns -7 when another is present.
+// `arrow_ipc_open` / `arrow_ipc_next` walk every batch.
 //
 // Types: Null, Int (8/16/32/64, signed or unsigned), FloatingPoint
 // (half / single raw bits / double), Binary, Utf8, Bool.
@@ -75,6 +79,22 @@ pub struct ArrowBuf {
     pub len: i64,
 }
 
+/// Record-batch locations collected while writing an IPC file. At most 8.
+pub struct ArrowSpans {
+    pub n: i64,
+    pub start: [i64; 8],
+    pub meta: [i64; 8],
+    pub body: [i64; 8],
+}
+
+/// Position in a stream or file. `arrow_ipc_next` returns 0 for a batch and 1 at the end.
+pub struct ArrowCursor {
+    pub kind: i64,
+    pub pos: i64,
+    pub index: i64,
+    pub n_blocks: i64,
+}
+
 struct Scratch {
     body: [u8; 4096],
     body_len: i64,
@@ -98,6 +118,18 @@ struct IpcMsg {
     header_type: i64,
     header_pos: i64,
     body_len: i64,
+}
+
+struct FooterView {
+    table: i64,
+    status: i64,
+}
+
+struct BlockLoc {
+    offset: i64,
+    meta: i64,
+    body: i64,
+    status: i64,
 }
 
 pub fn arrow_schema_new() -> ArrowSchema {
@@ -126,6 +158,19 @@ pub fn arrow_batch_new() -> ArrowBatch {
 
 pub fn arrow_buf_new() -> ArrowBuf {
     ArrowBuf { data: [0; 8192], len: 0 }
+}
+
+pub fn arrow_spans_new() -> ArrowSpans {
+    ArrowSpans {
+        n: 0,
+        start: [0; 8],
+        meta: [0; 8],
+        body: [0; 8],
+    }
+}
+
+pub fn arrow_cursor_new() -> ArrowCursor {
+    ArrowCursor { kind: 0, pos: 0, index: 0, n_blocks: 0 }
 }
 
 fn scratch_new() -> Scratch {
@@ -706,15 +751,19 @@ fn place_block(b: &!FbBuilder, offset: i64, meta_len: i64, body_len: i64) -> i64
     place_le_i64(b, offset)
 }
 
-fn write_footer_into(out: &!ArrowBuf, schema: &ArrowSchema, span: MsgSpan) -> i64 with Mut, Panic, Div {
+fn write_footer_into(out: &!ArrowBuf, schema: &ArrowSchema, spans: &ArrowSpans) -> i64 with Mut, Panic, Div {
     var b = fb_new()
     let sc_off = build_schema(&!b, schema)
     if sc_off < 0 { return -1 }
     if fb_start_vector(&!b, 24, 0, 8) != 0 { return -1 }
     let dicts = fb_end_vector(&!b)
     if dicts < 0 { return -1 }
-    if fb_start_vector(&!b, 24, 1, 8) != 0 { return -1 }
-    if place_block(&!b, span.start, span.meta_total, span.body_len) != 0 { return -1 }
+    if fb_start_vector(&!b, 24, spans.n, 8) != 0 { return -1 }
+    var bi: i64 = spans.n - 1
+    while bi >= 0 {
+        if place_block(&!b, spans.start[bi as usize], spans.meta[bi as usize], spans.body[bi as usize]) != 0 { return -1 }
+        bi = bi - 1
+    }
     let blocks = fb_end_vector(&!b)
     if blocks < 0 { return -1 }
     if fb_start_object(&!b, 5) != 0 { return -1 }
@@ -740,30 +789,80 @@ fn shape_ok(schema: &ArrowSchema, batch: &ArrowBatch) -> i64 with Panic {
     0
 }
 
-/// Write one Arrow IPC file into `out` (magic, schema, one batch, footer, magic).
-pub fn arrow_ipc_write_file(schema: &ArrowSchema, batch: &ArrowBatch, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {
-    let sk = shape_ok(schema, batch)
+/// Start an IPC file: magic, padding, schema message. Does not write a batch.
+pub fn arrow_ipc_file_begin(schema: &ArrowSchema, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {
+    let sk = schema_ok(schema)
     if sk != 0 { return sk }
     out.len = 0
     if push_magic(out) != 0 { return -1 }
     if buf_push(out, 0) != 0 { return -1 }
     if buf_push(out, 0) != 0 { return -1 }
-    if write_schema_into(out, schema) != 0 { return -1 }
+    write_schema_into(out, schema)
+}
+
+/// Append one record batch. More than 8 batches returns -7.
+pub fn arrow_ipc_file_push(schema: &ArrowSchema, batch: &ArrowBatch, out: &!ArrowBuf, spans: &!ArrowSpans) -> i64 with Mut, Panic, Div {
+    let sk = shape_ok(schema, batch)
+    if sk != 0 { return sk }
+    if spans.n >= 8 { return -7 }
     let span = write_batch_into(out, schema, batch)
     if span.status != 0 { return span.status }
-    write_footer_into(out, schema, span)
+    let i = spans.n
+    spans.start[i as usize] = span.start
+    spans.meta[i as usize] = span.meta_total
+    spans.body[i as usize] = span.body_len
+    spans.n = i + 1
+    0
+}
+
+/// Finish an IPC file: footer, footer size, magic. `spans.n` may be 0.
+pub fn arrow_ipc_file_end(schema: &ArrowSchema, out: &!ArrowBuf, spans: &ArrowSpans) -> i64 with Mut, Panic, Div {
+    write_footer_into(out, schema, spans)
+}
+
+/// Start an IPC stream with the schema message.
+pub fn arrow_ipc_stream_begin(schema: &ArrowSchema, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {
+    let sk = schema_ok(schema)
+    if sk != 0 { return sk }
+    out.len = 0
+    write_schema_into(out, schema)
+}
+
+/// Append one record batch to a stream started by `arrow_ipc_stream_begin`.
+pub fn arrow_ipc_stream_push(schema: &ArrowSchema, batch: &ArrowBatch, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {
+    let sk = shape_ok(schema, batch)
+    if sk != 0 { return sk }
+    let span = write_batch_into(out, schema, batch)
+    span.status
+}
+
+/// End a stream with the continuation / zero-length EOS marker.
+pub fn arrow_ipc_stream_end(out: &!ArrowBuf) -> i64 with Mut, Panic {
+    if buf_push_i32(out, -1) != 0 { return -1 }
+    buf_push_i32(out, 0)
+}
+
+/// Write one Arrow IPC file into `out` (magic, schema, one batch, footer, magic).
+pub fn arrow_ipc_write_file(schema: &ArrowSchema, batch: &ArrowBatch, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {
+    let sk = shape_ok(schema, batch)
+    if sk != 0 { return sk }
+    let rc = arrow_ipc_file_begin(schema, out)
+    if rc != 0 { return rc }
+    var spans = arrow_spans_new()
+    let rc2 = arrow_ipc_file_push(schema, batch, out, &!spans)
+    if rc2 != 0 { return rc2 }
+    arrow_ipc_file_end(schema, out, &spans)
 }
 
 /// Write one Arrow IPC stream into `out` (schema, one batch, EOS).
 pub fn arrow_ipc_write_stream(schema: &ArrowSchema, batch: &ArrowBatch, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {
     let sk = shape_ok(schema, batch)
     if sk != 0 { return sk }
-    out.len = 0
-    if write_schema_into(out, schema) != 0 { return -1 }
-    let span = write_batch_into(out, schema, batch)
-    if span.status != 0 { return span.status }
-    if buf_push_i32(out, -1) != 0 { return -1 }
-    buf_push_i32(out, 0)
+    let rc = arrow_ipc_stream_begin(schema, out)
+    if rc != 0 { return rc }
+    let rc2 = arrow_ipc_stream_push(schema, batch, out)
+    if rc2 != 0 { return rc2 }
+    arrow_ipc_stream_end(out)
 }
 
 /// Write an Arrow IPC file to `path`. Returns 0, or a negative status.
@@ -1158,45 +1257,64 @@ fn msize_match(meta: i64) -> i64 {
     meta - 8
 }
 
-fn read_file_buf(buf: &ArrowBuf, schema: &!ArrowSchema, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {
-    if buf.len < 10 { return -2 }
-    if is_arrow1(buf, 0) == 0 { return -2 }
-    if is_arrow1(buf, buf.len - 6) == 0 { return -2 }
+fn open_footer(buf: &ArrowBuf) -> FooterView with Panic, Div {
+    if buf.len < 10 { return FooterView { table: 0, status: -2 } }
+    if is_arrow1(buf, 0) == 0 { return FooterView { table: 0, status: -2 } }
+    if is_arrow1(buf, buf.len - 6) == 0 { return FooterView { table: 0, status: -2 } }
     let fsize = ab_i32(buf, buf.len - 10)
-    if fsize <= 0 { return -2 }
+    if fsize <= 0 { return FooterView { table: 0, status: -2 } }
     let foff = buf.len - 10 - fsize
-    if foff < 8 { return -2 }
+    if foff < 8 { return FooterView { table: 0, status: -2 } }
     let root = ab_u32(buf, foff)
     let ft = foff + root
-    if ft < 0 || ft + 4 > buf.len { return -6 }
+    if ft < 0 || ft + 4 > buf.len { return FooterView { table: 0, status: -6 } }
     let voff = ab_field(buf, ft, 0)
-    if voff == 0 { return -4 }
+    if voff == 0 { return FooterView { table: 0, status: -4 } }
     let ver = ab_u16(buf, ft + voff)
-    if ver != 3 && ver != 4 { return -4 }
+    if ver != 3 && ver != 4 { return FooterView { table: 0, status: -4 } }
+    FooterView { table: ft, status: 0 }
+}
+
+fn footer_schema(buf: &ArrowBuf, ft: i64, schema: &!ArrowSchema) -> i64 with Mut, Panic, Div {
+    let doff = ab_field(buf, ft, 2)
+    if doff != 0 {
+        let dv = ab_indirect(buf, ft + doff)
+        if dv < 0 || dv + 4 > buf.len { return -6 }
+        if ab_u32(buf, dv) != 0 { return -4 }
+    }
     let soff = ab_field(buf, ft, 1)
     if soff == 0 { return -6 }
     let st = ab_indirect(buf, ft + soff)
     if st < 0 { return -6 }
-    let rc = read_schema_at(buf, st, schema)
-    if rc != 0 { return rc }
+    read_schema_at(buf, st, schema)
+}
+
+fn footer_nblocks(buf: &ArrowBuf, ft: i64) -> i64 with Panic, Div {
     let boff = ab_field(buf, ft, 3)
-    if boff == 0 {
-        zero_batch(schema, batch)
-        return 0
-    }
+    if boff == 0 { return 0 }
     let bv = ab_indirect(buf, ft + boff)
     if bv < 0 || bv + 4 > buf.len { return -6 }
+    ab_u32(buf, bv)
+}
+
+fn footer_block_at(buf: &ArrowBuf, ft: i64, index: i64) -> BlockLoc with Panic, Div {
+    let boff = ab_field(buf, ft, 3)
+    if boff == 0 { return BlockLoc { offset: 0, meta: 0, body: 0, status: -6 } }
+    let bv = ab_indirect(buf, ft + boff)
+    if bv < 0 || bv + 4 > buf.len { return BlockLoc { offset: 0, meta: 0, body: 0, status: -6 } }
     let nb = ab_u32(buf, bv)
-    if nb > 1 { return -7 }
-    if nb == 0 {
-        zero_batch(schema, batch)
-        return 0
+    if index < 0 || index >= nb { return BlockLoc { offset: 0, meta: 0, body: 0, status: -6 } }
+    let bp = bv + 4 + 24 * index
+    if bp + 24 > buf.len { return BlockLoc { offset: 0, meta: 0, body: 0, status: -5 } }
+    BlockLoc {
+        offset: ab_i64(buf, bp),
+        meta: ab_i32(buf, bp + 8),
+        body: ab_i64(buf, bp + 16),
+        status: 0,
     }
-    let bp = bv + 4
-    if bp + 24 > buf.len { return -5 }
-    let offset = ab_i64(buf, bp)
-    let meta = ab_i32(buf, bp + 8)
-    let body = ab_i64(buf, bp + 16)
+}
+
+fn decode_framed(buf: &ArrowBuf, offset: i64, meta: i64, body: i64, schema: &ArrowSchema, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {
     if offset < 0 || meta < 8 { return -6 }
     if offset + meta < 0 || offset + meta + body > buf.len { return -5 }
     if ab_i32(buf, offset) != -1 { return -3 }
@@ -1207,6 +1325,23 @@ fn read_file_buf(buf: &ArrowBuf, schema: &!ArrowSchema, batch: &!ArrowBatch) -> 
     if msg.header_type != 3 { return -4 }
     if msg.body_len != body { return -3 }
     decode_batch(buf, msg.header_pos, offset + meta, body, schema, batch)
+}
+
+fn read_file_buf(buf: &ArrowBuf, schema: &!ArrowSchema, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {
+    let foot = open_footer(buf)
+    if foot.status != 0 { return foot.status }
+    let rc = footer_schema(buf, foot.table, schema)
+    if rc != 0 { return rc }
+    let nb = footer_nblocks(buf, foot.table)
+    if nb < 0 { return nb }
+    if nb > 1 { return -7 }
+    if nb == 0 {
+        zero_batch(schema, batch)
+        return 0
+    }
+    let blk = footer_block_at(buf, foot.table, 0)
+    if blk.status != 0 { return blk.status }
+    decode_framed(buf, blk.offset, blk.meta, blk.body, schema, batch)
 }
 
 fn read_stream_buf(buf: &ArrowBuf, schema: &!ArrowSchema, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {
@@ -1245,6 +1380,81 @@ fn read_stream_buf(buf: &ArrowBuf, schema: &!ArrowSchema, batch: &!ArrowBatch) -
     if saw_schema == 0 { return -6 }
     if saw_batch == 0 { zero_batch(schema, batch) }
     0
+}
+
+/// Read the schema and position `cur` on the first record batch.
+/// A file with a non-empty dictionary-batch list returns -4.
+pub fn arrow_ipc_open(buf: &ArrowBuf, schema: &!ArrowSchema, cur: &!ArrowCursor) -> i64 with Mut, Panic, Div {
+    schema.n_fields = 0
+    cur.kind = 0
+    cur.pos = 0
+    cur.index = 0
+    cur.n_blocks = 0
+    if buf.len >= 6 && is_arrow1(buf, 0) != 0 {
+        let foot = open_footer(buf)
+        if foot.status != 0 { return foot.status }
+        let rc = footer_schema(buf, foot.table, schema)
+        if rc != 0 { return rc }
+        let nb = footer_nblocks(buf, foot.table)
+        if nb < 0 { return nb }
+        cur.kind = 1
+        cur.n_blocks = nb
+        return 0
+    }
+    if buf.len < 8 { return -5 }
+    let cont = ab_i32(buf, 0)
+    let msize = ab_i32(buf, 4)
+    if cont != -1 { return -3 }
+    if msize <= 0 || 8 + msize > buf.len { return -5 }
+    var msg = IpcMsg { version: 0, header_type: 0, header_pos: 0, body_len: 0 }
+    let rc = read_message_at(buf, 8, &!msg)
+    if rc != 0 { return rc }
+    if msg.header_type != 1 { return -6 }
+    let body_at = 8 + msize
+    if msg.body_len < 0 || body_at + msg.body_len > buf.len { return -5 }
+    let rc2 = read_schema_at(buf, msg.header_pos, schema)
+    if rc2 != 0 { return rc2 }
+    cur.kind = 2
+    cur.pos = body_at + msg.body_len
+    0
+}
+
+/// Fill `batch` with the next record batch. Returns 0 when a batch was read, 1 at the end.
+pub fn arrow_ipc_next(buf: &ArrowBuf, schema: &ArrowSchema, cur: &!ArrowCursor, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {
+    if cur.kind == 1 {
+        if cur.index >= cur.n_blocks { return 1 }
+        let foot = open_footer(buf)
+        if foot.status != 0 { return foot.status }
+        let blk = footer_block_at(buf, foot.table, cur.index)
+        if blk.status != 0 { return blk.status }
+        let rc = decode_framed(buf, blk.offset, blk.meta, blk.body, schema, batch)
+        if rc != 0 { return rc }
+        cur.index = cur.index + 1
+        return 0
+    }
+    if cur.kind != 2 { return -6 }
+    while cur.pos + 8 <= buf.len {
+        let pos = cur.pos
+        let cont = ab_i32(buf, pos)
+        let msize = ab_i32(buf, pos + 4)
+        if cont == 0 || (cont == -1 && msize == 0) {
+            cur.pos = buf.len
+            return 1
+        }
+        if cont != -1 { return -3 }
+        if msize < 0 || pos + 8 + msize > buf.len { return -5 }
+        var msg = IpcMsg { version: 0, header_type: 0, header_pos: 0, body_len: 0 }
+        let rc = read_message_at(buf, pos + 8, &!msg)
+        if rc != 0 { return rc }
+        let body_at = pos + 8 + msize
+        if msg.body_len < 0 || body_at + msg.body_len > buf.len { return -5 }
+        cur.pos = body_at + msg.body_len
+        if msg.header_type == 3 {
+            return decode_batch(buf, msg.header_pos, body_at, msg.body_len, schema, batch)
+        }
+        return -4
+    }
+    1
 }
 
 /// Read a file buffer (leading "ARROW1") or a stream buffer.

@@ -11,9 +11,15 @@ false; that hook is a separate FFI surface.
 
 Fail closed (status `-7`) rather than truncate:
 
-- 8 fields, 16 rows, one record batch
+- 8 fields, 16 rows per batch
+- 8 record-batch blocks in one file; a stream holds as many as fit in the buffer
 - field names and string/binary cells at most 32 bytes
 - IPC buffer 8192 bytes, record-batch body 4096 bytes
+
+`arrow_ipc_read` reads one batch and returns `-7` when another batch is present.
+`arrow_ipc_open` then `arrow_ipc_next` walk every batch (`0` = a batch, `1` = end).
+`arrow_ipc_file_begin` / `arrow_ipc_file_push` / `arrow_ipc_file_end` and the
+matching `arrow_ipc_stream_*` calls write those batches.
 
 ## Types
 

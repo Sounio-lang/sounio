@@ -1,1 +1,1 @@
-`arrow::lib` reads and writes Apache Arrow IPC streams and files in native Sounio: FlatBuffers metadata for one record batch of null, int, floating-point, binary, utf8, and bool columns.
+`arrow::lib` reads and writes Apache Arrow IPC streams and files in native Sounio: FlatBuffers metadata for null, int, floating-point, binary, utf8, and bool columns. Several record batches can be written and walked one batch at a time. `arrow_ipc_read` still accepts a single batch and returns -7 when another batch is present.
