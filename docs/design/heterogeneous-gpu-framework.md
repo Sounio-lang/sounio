@@ -966,3 +966,25 @@ Two AIR files from the M5 Max, metal 32023.921, are 3312 bytes and differ in 7. 
 
 This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
 
+
+
+## 36. The 128-bit load and the cache byte (2026-10-26, OBSERVED)
+
+Section 35 patched fields that already sat inside an instruction. This cut asks where a vector load keeps its address, and whether the cache mode is a byte.
+
+ptxas 12.8.61, `--opt-level 0`, sm_89. A `ld.global.cs.v4.f32` at `+0`, `+16` and `+32` does not put the displacement in the load. The `+0` kernel has no add. `+16` against `+32` differs by one byte, file offset 1652, and that byte is the displacement: `0x10` and `0x20`. The instruction is `IADD3 R2, P0, R4, imm, RZ`. The load that follows is `LDG.E.EF.128`, with no displacement of its own. The four cache modifiers on a scalar load, same registers `R0` and `[R2]`, stay on one instruction at the same program counter. `cs` disassembles as `LDG.E.EF` and the byte at file offset 1754 is `0x0e`. `lu` is `LDG.E.LU` and that byte is `0x3e`. `ca` (`LDG.E.STRONG.SM`) and `cg` (`LDG.E.STRONG.GPU`) also change the previous byte, `0x19` to `0xb9` and `0xf9`. There is no formula past those four rows.
+
+The probe copies the `+16` container and writes displacement 48 (`0x30`). That value was not a specimen. The input words are `100 + i`. A 16-byte load from offset 48 must return 112, 113, 114, 115. Offset 16 would have returned 104 through 107, and offset 32 would have returned 108 through 111. The cache image is the `cs` container with byte 1754 set to `0x3e`. It loads the word 42. The same word coming back shows that the encoding is accepted. It does not show that the cache policy changed.
+
+Gate. Job 17757, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The node was idle at submit. Binary md5 `16cfdc7c2e952fc59016b86e39cd94cf`.
+
+- `LDG_IMM=48`, `LDG_LOAD=1`, `LDG=112 113 114 115`.
+- `CACHE_BYTE=62`, `CACHE_LOAD=1`, `CACHE_LAUNCH=0`, `CACHE_SYNC=0`, `CACHE=42`.
+- The mov, the FFMA 7.0, the shuffle and the barrier still match. `SILICON PASS`, `EXIT:0`.
+
+The node is idle.
+
+A Metal binary archive on the M5 Max, dumped through the Metal framework, is 12768 bytes for each of two immediates. 595 bytes differ, in 49 groups, including hash text. The four-byte group is again `c8080901` against `d81c2929`, the same non-identity word the AIR file held. The AGX table stays empty. Job 12798 still holds `dl380`, so the R9700 was not used.
+
+This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+

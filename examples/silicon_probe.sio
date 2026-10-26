@@ -4,9 +4,9 @@
 // run before the driver. LOAD/STAMP run when libcuda is present.
 
 use hetero::cuda_exec::{
-    ce_alloc, ce_arg, ce_d2h, ce_function, ce_launch_raw, ce_module_image, ce_open, ce_sync,
+    ce_alloc, ce_arg, ce_d2h, ce_function, ce_h2d, ce_launch_raw, ce_module_image, ce_open, ce_sync,
 }
-use hetero::silicon::image::{si_bar, si_fma, si_shfl, si_stamp}
+use hetero::silicon::image::{si_bar, si_cache, si_fma, si_ldg, si_shfl, si_stamp}
 use hetero::silicon::sched::{arch_agx, arch_rdna, arch_sm89}
 
 fn img_byte(data: *mut u8, off: i64) -> i64 with Div {
@@ -31,6 +31,8 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     let sh = si_shfl(arch, 4)
     let bar_insn = si_bar(arch, 1, 0)
     let bar_both = si_bar(arch, 1, 1)
+    let ldg = si_ldg(arch, 48)
+    let cache = si_cache(arch, 62)
     let rdna = si_stamp(arch_rdna(), imm)
     let agx = si_stamp(arch_agx(), imm)
     print("RDNA ok=")
@@ -44,6 +46,8 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     if !img.ok { print("SILICON FAIL\n"); exit(1) }
     if !fma.ok { print("SILICON FAIL\n"); exit(1) }
     if !sh.ok { print("SILICON FAIL\n"); exit(1) }
+    if !ldg.ok { print("SILICON FAIL\n"); exit(1) }
+    if !cache.ok { print("SILICON FAIL\n"); exit(1) }
     let got = img_u32(img.ptr, 1428)
     print("BYTES=")
     print_int(got)
@@ -70,6 +74,16 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     print("\n")
     if mbyte != 32 { print("SILICON FAIL\n"); exit(1) }
     if img_byte(bar_insn.ptr, 2506) != 16 { print("SILICON FAIL\n"); exit(1) }
+    let ldisp = img_u32(ldg.ptr, 1652)
+    print("LDG_IMM=")
+    print_int(ldisp)
+    print("\n")
+    if ldisp != 48 { print("SILICON FAIL\n"); exit(1) }
+    let cbyte = img_byte(cache.ptr, 1754)
+    print("CACHE_BYTE=")
+    print_int(cbyte)
+    print("\n")
+    if cbyte != 62 { print("SILICON FAIL\n"); exit(1) }
     let exec = ce_open()
     if !exec.ok { print("NOCUDA\n"); exit(2) }
 
@@ -172,6 +186,89 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     print("\n")
     if bg1 != 16909060 { print("SILICON FAIL\n"); exit(1) }
 
+
+    let ml = ce_module_image(&exec, ldg.ptr, ldg.nbytes)
+    print("LDG_LOAD=")
+    print_int(if ml != 0 { 1 } else { 0 })
+    print("\n")
+    if ml == 0 { print("SILICON FAIL\n"); exit(1) }
+    let fl = ce_function(&exec, ml, "stamp")
+    if fl == 0 { print("SILICON FAIL\n"); exit(1) }
+    let din = ce_alloc(&exec, 64)
+    let dout = ce_alloc(&exec, 16)
+    if din == 0 { print("SILICON FAIL\n"); exit(1) }
+    if dout == 0 { print("SILICON FAIL\n"); exit(1) }
+    let hin = heap_alloc(64)
+    var wi: i64 = 0
+    while wi < 8 {
+        let lo = 100 + wi * 2
+        let hiw = 101 + wi * 2
+        write_i64(hin as *mut i64, wi, lo + hiw * 4294967296)
+        wi = wi + 1
+    }
+    if ce_h2d(&exec, din, hin, 64) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let pl = heap_alloc(16)
+    write_i64(pl as *mut i64, 0, ce_arg(din) as i64)
+    write_i64(pl as *mut i64, 1, ce_arg(dout) as i64)
+    if ce_launch_raw(&exec, fl, 1, 1, pl) != 0 { print("SILICON FAIL\n"); exit(1) }
+    if ce_sync(&exec) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let hol = heap_alloc(16)
+    write_i64(hol as *mut i64, 0, 0)
+    write_i64(hol as *mut i64, 1, 0)
+    if ce_d2h(&exec, hol, dout, 16) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let lw0 = read_i64(hol as *mut i64, 0)
+    let lw1 = read_i64(hol as *mut i64, 1)
+    let l0 = lw0 & 4294967295
+    let l1 = (lw0 >> 32) & 4294967295
+    let l2 = lw1 & 4294967295
+    let l3 = (lw1 >> 32) & 4294967295
+    print("LDG=")
+    print_int(l0)
+    print(" ")
+    print_int(l1)
+    print(" ")
+    print_int(l2)
+    print(" ")
+    print_int(l3)
+    print("\n")
+    if l0 != 112 { print("SILICON FAIL\n"); exit(1) }
+    if l1 != 113 { print("SILICON FAIL\n"); exit(1) }
+    if l2 != 114 { print("SILICON FAIL\n"); exit(1) }
+    if l3 != 115 { print("SILICON FAIL\n"); exit(1) }
+
+    let mc = ce_module_image(&exec, cache.ptr, cache.nbytes)
+    print("CACHE_LOAD=")
+    print_int(if mc != 0 { 1 } else { 0 })
+    print("\n")
+    if mc == 0 { print("SILICON FAIL\n"); exit(1) }
+    let fc = ce_function(&exec, mc, "stamp")
+    if fc == 0 { print("SILICON FAIL\n"); exit(1) }
+    let cin = ce_alloc(&exec, 4)
+    let cout = ce_alloc(&exec, 4)
+    let hcin = heap_alloc(8)
+    write_i64(hcin as *mut i64, 0, 42)
+    if ce_h2d(&exec, cin, hcin, 4) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let pc = heap_alloc(16)
+    write_i64(pc as *mut i64, 0, ce_arg(cin) as i64)
+    write_i64(pc as *mut i64, 1, ce_arg(cout) as i64)
+    let cl = ce_launch_raw(&exec, fc, 1, 1, pc)
+    print("CACHE_LAUNCH=")
+    print_int(cl as i64)
+    print("\n")
+    if cl != 0 { print("SILICON FAIL\n"); exit(1) }
+    let csyn = ce_sync(&exec)
+    print("CACHE_SYNC=")
+    print_int(csyn as i64)
+    print("\n")
+    if csyn != 0 { print("SILICON FAIL\n"); exit(1) }
+    let hcout = heap_alloc(8)
+    write_i64(hcout as *mut i64, 0, 0)
+    if ce_d2h(&exec, hcout, cout, 4) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let cgot = read_i64(hcout as *mut i64, 0) & 4294967295
+    print("CACHE=")
+    print_int(cgot)
+    print("\n")
+    if cgot != 42 { print("SILICON FAIL\n"); exit(1) }
 
     print("SILICON PASS\n")
     exit(0)
