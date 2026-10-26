@@ -1,11 +1,12 @@
-// The stamp image is built here. ptxas is not invoked.
-// Immediate 0x01020304 was not one of the three specimens.
-// BYTES checks the patched field. LOAD/STAMP run when libcuda is present.
+// Images are built here. ptxas is not invoked.
+// Mov immediate 0x01020304, FFMA addend 5.0 and SHFL delta 4
+// were not copied from a second specimen file. The byte checks
+// run before the driver. LOAD/STAMP run when libcuda is present.
 
 use hetero::cuda_exec::{
     ce_alloc, ce_arg, ce_d2h, ce_function, ce_launch_raw, ce_module_image, ce_open, ce_sync,
 }
-use hetero::silicon::image::{si_stamp}
+use hetero::silicon::image::{si_bar, si_fma, si_shfl, si_stamp}
 use hetero::silicon::sched::{arch_agx, arch_rdna, arch_sm89}
 
 fn img_byte(data: *mut u8, off: i64) -> i64 with Div {
@@ -16,55 +17,70 @@ fn img_u32(data: *mut u8, off: i64) -> i64 with Div {
     img_byte(data, off) + img_byte(data, off + 1) * 256 + img_byte(data, off + 2) * 65536 + img_byte(data, off + 3) * 16777216
 }
 
+fn lane_xor4(i: i64) -> i64 {
+    if (i & 4) == 0 { return i + 4 }
+    i - 4
+}
+
 fn main() with IO, Mut, Panic, Div, Alloc {
+    let arch = arch_sm89()
     let imm: i64 = 16909060
-    let img = si_stamp(arch_sm89(), imm)
+    let addend: i64 = 1084227584
+    let img = si_stamp(arch, imm)
+    let fma = si_fma(arch, addend)
+    let sh = si_shfl(arch, 4)
+    let bar_insn = si_bar(arch, 1, 0)
+    let bar_both = si_bar(arch, 1, 1)
     let rdna = si_stamp(arch_rdna(), imm)
     let agx = si_stamp(arch_agx(), imm)
-    print("SM89 nbytes=")
-    print_int(img.nbytes)
-    print(" ok=")
-    print_int(if img.ok { 1 } else { 0 })
-    print("\n")
-    print("RDNA nbytes=")
-    print_int(rdna.nbytes)
-    print(" ok=")
+    print("RDNA ok=")
     print_int(if rdna.ok { 1 } else { 0 })
     print("\n")
-    print("AGX nbytes=")
-    print_int(agx.nbytes)
-    print(" ok=")
+    print("AGX ok=")
     print_int(if agx.ok { 1 } else { 0 })
     print("\n")
-    if !img.ok { print("SILICON FAIL\n"); exit(1) }
     if rdna.ok { print("SILICON FAIL\n"); exit(1) }
     if agx.ok { print("SILICON FAIL\n"); exit(1) }
+    if !img.ok { print("SILICON FAIL\n"); exit(1) }
+    if !fma.ok { print("SILICON FAIL\n"); exit(1) }
+    if !sh.ok { print("SILICON FAIL\n"); exit(1) }
     let got = img_u32(img.ptr, 1428)
     print("BYTES=")
     print_int(got)
     print("\n")
     if got != imm { print("SILICON FAIL\n"); exit(1) }
+    let fbits = img_u32(fma.ptr, 1508)
+    print("FMA_BITS=")
+    print_int(fbits)
+    print("\n")
+    if fbits != addend { print("SILICON FAIL\n"); exit(1) }
+    let sbyte = img_byte(sh.ptr, 1478)
+    print("SHFL_BYTE=")
+    print_int(sbyte)
+    print("\n")
+    if sbyte != 128 { print("SILICON FAIL\n"); exit(1) }
+    let bbyte = img_byte(bar_insn.ptr, 1430)
+    print("BAR_BYTE=")
+    print_int(bbyte)
+    print("\n")
+    if bbyte != 64 { print("SILICON FAIL\n"); exit(1) }
+    let mbyte = img_byte(bar_both.ptr, 2506)
+    print("BAR_META=")
+    print_int(mbyte)
+    print("\n")
+    if mbyte != 32 { print("SILICON FAIL\n"); exit(1) }
+    if img_byte(bar_insn.ptr, 2506) != 16 { print("SILICON FAIL\n"); exit(1) }
     let exec = ce_open()
     if !exec.ok { print("NOCUDA\n"); exit(2) }
+
     let m = ce_module_image(&exec, img.ptr, img.nbytes)
-    print("LOAD=")
-    print_int(if m != 0 { 1 } else { 0 })
-    print("\n")
     if m == 0 { print("SILICON FAIL\n"); exit(1) }
     let f = ce_function(&exec, m, "stamp")
-    print("FUNC=")
-    print_int(if f != 0 { 1 } else { 0 })
-    print("\n")
     if f == 0 { print("SILICON FAIL\n"); exit(1) }
     let d = ce_alloc(&exec, 4)
-    if d == 0 { print("SILICON FAIL\n"); exit(1) }
     let params = heap_alloc(8)
     write_i64(params as *mut i64, 0, ce_arg(d) as i64)
-    let st = ce_launch_raw(&exec, f, 1, 1, params)
-    print("LAUNCH=")
-    print_int(st as i64)
-    print("\n")
-    if st != 0 { print("SILICON FAIL\n"); exit(1) }
+    if ce_launch_raw(&exec, f, 1, 1, params) != 0 { print("SILICON FAIL\n"); exit(1) }
     if ce_sync(&exec) != 0 { print("SILICON FAIL\n"); exit(1) }
     let host = heap_alloc(8)
     write_i64(host as *mut i64, 0, 0)
@@ -74,6 +90,89 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     print_int(stamped)
     print("\n")
     if stamped != imm { print("SILICON FAIL\n"); exit(1) }
+
+    let mf = ce_module_image(&exec, fma.ptr, fma.nbytes)
+    print("FMA_LOAD=")
+    print_int(if mf != 0 { 1 } else { 0 })
+    print("\n")
+    if mf == 0 { print("SILICON FAIL\n"); exit(1) }
+    let ff = ce_function(&exec, mf, "stamp")
+    if ff == 0 { print("SILICON FAIL\n"); exit(1) }
+    let df = ce_alloc(&exec, 4)
+    let pf = heap_alloc(8)
+    write_i64(pf as *mut i64, 0, ce_arg(df) as i64)
+    if ce_launch_raw(&exec, ff, 1, 1, pf) != 0 { print("SILICON FAIL\n"); exit(1) }
+    if ce_sync(&exec) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let hf = heap_alloc(8)
+    write_i64(hf as *mut i64, 0, 0)
+    if ce_d2h(&exec, hf, df, 4) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let fgot = read_i64(hf as *mut i64, 0) & 4294967295
+    print("FMA=")
+    print_int(fgot)
+    print("\n")
+    if fgot != 1088421888 { print("SILICON FAIL\n"); exit(1) }
+
+    let ms = ce_module_image(&exec, sh.ptr, sh.nbytes)
+    print("SHFL_LOAD=")
+    print_int(if ms != 0 { 1 } else { 0 })
+    print("\n")
+    if ms == 0 { print("SILICON FAIL\n"); exit(1) }
+    let fs = ce_function(&exec, ms, "stamp")
+    if fs == 0 { print("SILICON FAIL\n"); exit(1) }
+    let ds = ce_alloc(&exec, 128)
+    let ps = heap_alloc(8)
+    write_i64(ps as *mut i64, 0, ce_arg(ds) as i64)
+    if ce_launch_raw(&exec, fs, 1, 32, ps) != 0 { print("SILICON FAIL\n"); exit(1) }
+    if ce_sync(&exec) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let hs = heap_alloc(128)
+    var z: i64 = 0
+    while z < 16 { write_i64(hs as *mut i64, z, 0); z = z + 1 }
+    if ce_d2h(&exec, hs, ds, 128) != 0 { print("SILICON FAIL\n"); exit(1) }
+    var lane: i64 = 0
+    while lane < 32 {
+        let word = lane / 2
+        let half = lane % 2
+        let packed = read_i64(hs as *mut i64, word)
+        var gotl = packed & 4294967295
+        if half == 1 { gotl = (packed >> 32) & 4294967295 }
+        if gotl != lane_xor4(lane) {
+            print("SHFL_FAIL lane=")
+            print_int(lane)
+            print(" got=")
+            print_int(gotl)
+            print("\n")
+            exit(1)
+        }
+        lane = lane + 1
+    }
+    print("SHFL=4\n")
+
+    let mb1 = ce_module_image(&exec, bar_both.ptr, bar_both.nbytes)
+    print("BAR_META_LOAD=")
+    print_int(if mb1 != 0 { 1 } else { 0 })
+    print("\n")
+    if mb1 == 0 { print("SILICON FAIL\n"); exit(1) }
+    let fb1 = ce_function(&exec, mb1, "stamp")
+    if fb1 == 0 { print("SILICON FAIL\n"); exit(1) }
+    let db1 = ce_alloc(&exec, 4)
+    let pb1 = heap_alloc(8)
+    write_i64(pb1 as *mut i64, 0, ce_arg(db1) as i64)
+    let lst1 = ce_launch_raw(&exec, fb1, 1, 1, pb1)
+    print("BAR_META_LAUNCH=")
+    print_int(lst1 as i64)
+    print("\n")
+    if lst1 != 0 { print("SILICON FAIL\n"); exit(1) }
+    if ce_sync(&exec) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let hb1 = heap_alloc(8)
+    write_i64(hb1 as *mut i64, 0, 0)
+    if ce_d2h(&exec, hb1, db1, 4) != 0 { print("SILICON FAIL\n"); exit(1) }
+    let bg1 = read_i64(hb1 as *mut i64, 0) & 4294967295
+    print("BAR1=")
+    print_int(bg1)
+    print("\n")
+    if bg1 != 16909060 { print("SILICON FAIL\n"); exit(1) }
+
+
     print("SILICON PASS\n")
     exit(0)
 }

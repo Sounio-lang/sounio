@@ -939,3 +939,30 @@ This cut does not run SmolLM2. The load, the fma, the store, the barrier and the
 
 A Metal specimen on the M5 Max compiled to AIR (`air64_v29`). That is not the GPU encoding. The AGX table stays empty.
 
+
+
+## 35. Three sm_89 fields, measured by difference (2026-10-26, OBSERVED)
+
+Section 34 patched one mov immediate. This cut asks which other bytes are a field. The specimen assembler is ptxas 12.8.61, target sm_89. The probe does not call it.
+
+An FFMA whose addend is 3.0, against the same FFMA with addend 4.0, produces two cubins of 2728 bytes. One byte differs, inside the u32 at file offset 1508. That u32 is the f32 encoding itself: 0x40400000 and 0x40800000. A uniform shuffle was deleted by the assembler: the two cubins were identical. Keeping the lane id, and storing at `out[tid]`, delta 1 against delta 4 differs by one byte at file offset 1478, 0x20 against 0x80. Delta 2 on the non-indexed form wrote 0x40 in that same byte of its SHFL instruction. The byte is `delta << 5`. `BAR.SYNC` ids 0, 1, 2 and 3 move two bytes. File offset 1430 is 0x00, 0x40, 0x80, 0xc0, which is `id << 6`. File offset 2506, outside `.text`, is 0x10, 0x20, 0x30, 0x40, which is `(id + 1) << 4`. Swapping which register is stored moved the mov immediates and left the store register field where it was. A global load at offset 0 against the same load at offset 4 differs in 9 bytes, and the register assignment moved. Those two are not encoded.
+
+The probe writes an FFMA addend of 5.0, bits 0x40A00000 (1084227584). That value was not a specimen. The instruction is `2.0 * 1.0 + addend`, so the stored word must be 7.0, bits 0x40E00000 (1088421888). The shuffle image is the delta-1 container with byte 1478 set to 0x80. Thirty-two lanes run, and lane `i` must store `i xor 4`. The barrier image patches both measured bytes to the id-1 specimen.
+
+Job 17739 launched the barrier with only the text byte patched. The module loaded, the launch returned 0, and `ce_sync` returned 715. The next `cuModuleLoadData` also returned 715. That context does not survive the instruction. Job 17740 does not launch that image.
+
+Gate. Job 17740, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. Partition `bench` still has no nodes, so the job was pinned on `gpu-orangefs`. The node was idle at submit. Binary md5 `bb0474f66878ca6c0385190724b6799f`.
+
+- `BYTES=16909060` and `STAMP=16909060`.
+- `FMA_BITS=1084227584`, `FMA_LOAD=1`, `FMA=1088421888`.
+- `SHFL_BYTE=128`, `SHFL_LOAD=1`, `SHFL=4`.
+- `BAR_BYTE=64`, `BAR_META=32`, `BAR_META_LOAD=1`, `BAR_META_LAUNCH=0`, `BAR1=16909060`.
+- `RDNA ok=0`, `AGX ok=0`.
+- The program printed `SILICON PASS` and the script printed `EXIT:0`.
+
+The node is idle.
+
+Two AIR files from the M5 Max, metal 32023.921, are 3312 bytes and differ in 7. The four-byte group at file offset 2862 is `c8080901` against `d81c2929`, which is not the source immediate. The AGX table stays empty. The R9700 was not used. Job 12798 still holds `dl380`.
+
+This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
