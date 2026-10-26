@@ -58,9 +58,11 @@ fn main() -> i32 with Mut, Panic, Div {
 }
 ```
 
-`arrow_ipc_write_file` adds the `ARROW1` magic and footer. `arrow_ipc_read`
-accepts either form. `arrow_ipc_write_path` writes the file form with
-`write_file`.
+`arrow_ipc_write_file` adds the `ARROW1` magic and footer. The embedded
+stream ends with the spec EOS marker (`0xFFFFFFFF` then metadata length 0)
+before that footer, the same marker `arrow_ipc_stream_end` writes.
+`arrow_ipc_read` accepts either form. `arrow_ipc_write_path` writes the
+file form with `write_file`.
 
 ## DoPut and DoExchange
 

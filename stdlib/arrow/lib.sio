@@ -6,8 +6,9 @@
 //
 //   stream:  [continuation 0xFFFFFFFF][meta size][meta pad8][body pad8]...
 //            EOS is continuation + meta size 0
-//   file:    "ARROW1" + 2 zero bytes, schema message, one record batch,
-//            footer flatbuffer, int32 footer size, "ARROW1"
+//   file:    "ARROW1" + 2 zero bytes, the same encapsulated stream
+//            (schema, record batches, EOS), footer flatbuffer,
+//            int32 footer size, "ARROW1"
 //
 // Bounds (fail closed, status -7, rather than truncate):
 //   8 fields, 16 rows per batch, field names <= 32 bytes,
@@ -826,8 +827,16 @@ pub fn arrow_ipc_file_push(schema: &ArrowSchema, batch: &ArrowBatch, out: &!Arro
     0
 }
 
-/// Finish an IPC file: footer, footer size, magic. `spans.n` may be 0.
+/// Continuation `0xFFFFFFFF` and a zero metadata length. Spec end-of-stream.
+fn write_eos(out: &!ArrowBuf) -> i64 with Mut, Panic {
+    if buf_push_i32(out, -1) != 0 { return -1 }
+    buf_push_i32(out, 0)
+}
+
+/// Finish an IPC file: EOS, footer, footer size, magic. `spans.n` may be 0.
+/// The EOS marker is the end of the embedded stream, before the footer.
 pub fn arrow_ipc_file_end(schema: &ArrowSchema, out: &!ArrowBuf, spans: &ArrowSpans) -> i64 with Mut, Panic, Div {
+    if write_eos(out) != 0 { return -1 }
     write_footer_into(out, schema, spans)
 }
 
@@ -849,11 +858,10 @@ pub fn arrow_ipc_stream_push(schema: &ArrowSchema, batch: &ArrowBatch, out: &!Ar
 
 /// End a stream with the continuation / zero-length EOS marker.
 pub fn arrow_ipc_stream_end(out: &!ArrowBuf) -> i64 with Mut, Panic {
-    if buf_push_i32(out, -1) != 0 { return -1 }
-    buf_push_i32(out, 0)
+    write_eos(out)
 }
 
-/// Write one Arrow IPC file into `out` (magic, schema, one batch, footer, magic).
+/// Write one Arrow IPC file into `out` (magic, schema, one batch, EOS, footer, magic).
 pub fn arrow_ipc_write_file(schema: &ArrowSchema, batch: &ArrowBatch, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {
     let sk = shape_ok(schema, batch)
     if sk != 0 { return sk }

@@ -5,11 +5,26 @@ import sys
 from pathlib import Path
 
 
+def file_eos_before_footer(data: bytes) -> bool:
+    """Spec file layout: embedded stream EOS, then the footer flatbuffer."""
+    if len(data) < 18 or not data.startswith(b"ARROW1") or not data.endswith(b"ARROW1"):
+        return False
+    fsize = int.from_bytes(data[-10:-6], "little", signed=True)
+    if fsize <= 0:
+        return False
+    eos_at = len(data) - 10 - fsize - 8
+    if eos_at < 8:
+        return False
+    return data[eos_at : eos_at + 8] == b"\xff\xff\xff\xff\x00\x00\x00\x00"
+
+
 def structural(path: Path, kind: str) -> None:
     data = path.read_bytes()
     if kind == "file":
         if not data.startswith(b"ARROW1") or not data.endswith(b"ARROW1"):
             raise SystemExit(f"FAIL magic {path}")
+        if not file_eos_before_footer(data):
+            raise SystemExit(f"FAIL eos before footer {path}")
     else:
         if data[:4] != b"\xff\xff\xff\xff":
             raise SystemExit(f"FAIL continuation {path}")
@@ -31,6 +46,8 @@ def framing(path: Path, kind: str) -> None:
     if kind == "file":
         if not data.startswith(b"ARROW1") or not data.endswith(b"ARROW1"):
             raise SystemExit(f"FAIL magic {path}")
+        if not file_eos_before_footer(data):
+            raise SystemExit(f"FAIL eos before footer {path}")
     else:
         if data[:4] != b"\xff\xff\xff\xff":
             raise SystemExit(f"FAIL continuation {path}")

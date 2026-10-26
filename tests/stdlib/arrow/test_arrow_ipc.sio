@@ -163,6 +163,34 @@ fn has_bytes(buf: &ArrowBuf, pat: &[i64; 8], n: i64) -> i64 with Panic {
     0
 }
 
+fn u8_at(buf: &ArrowBuf, i: i64) -> i64 with Panic {
+    let v = buf.data[i as usize] as i64
+    if v < 0 { return v + 256 }
+    v
+}
+
+fn le_i32(buf: &ArrowBuf, i: i64) -> i64 with Panic {
+    let b0 = u8_at(buf, i)
+    let b1 = u8_at(buf, i + 1)
+    let b2 = u8_at(buf, i + 2)
+    let b3 = u8_at(buf, i + 3)
+    var n = b0 + (b1 * 256) + (b2 * 65536) + (b3 * 16777216)
+    if b3 >= 128 { n = n - 4294967296 }
+    n
+}
+
+/// The 8 bytes immediately before the footer are continuation + metadata length 0.
+fn eos_before_footer(buf: &ArrowBuf) -> i64 with Panic {
+    if buf.len < 18 { return 0 }
+    let fsize = le_i32(buf, buf.len - 10)
+    if fsize <= 0 { return 0 }
+    let eos_at = buf.len - 10 - fsize - 8
+    if eos_at < 0 { return 0 }
+    if le_i32(buf, eos_at) != -1 { return 0 }
+    if le_i32(buf, eos_at + 4) != 0 { return 0 }
+    1
+}
+
 fn check_wire(buf: &ArrowBuf) -> i64 with Panic {
     if buf.len < 10 { return 90 }
     if buf.data[0] != 65 as u8 { return 91 }
@@ -174,6 +202,7 @@ fn check_wire(buf: &ArrowBuf) -> i64 with Panic {
     let end = buf.len - 6
     if buf.data[end as usize] != 65 as u8 { return 92 }
     if buf.data[(end + 5) as usize] != 49 as u8 { return 92 }
+    if eos_before_footer(buf) == 0 { return 99 }
     // continuation
     var cont: [i64; 8] = [255, 255, 255, 255, 0, 0, 0, 0]
     if has_bytes(buf, &cont, 4) == 0 { return 93 }
@@ -427,6 +456,7 @@ fn round_multi() -> i64 with IO, Mut, Panic, Div {
     if arrow_ipc_file_push(&schema, &b0, &!buf, &!spans) != 0 { return 233 }
     if arrow_ipc_file_push(&schema, &b1, &!buf, &!spans) != 0 { return 234 }
     if arrow_ipc_file_end(&schema, &!buf, &spans) != 0 { return 235 }
+    if eos_before_footer(&buf) == 0 { return 255 }
     if arrow_ipc_read(&buf, &!schema2, &!got) != -7 { return 236 }
     if arrow_ipc_open(&buf, &!schema2, &!cur) != 0 { return 237 }
     if arrow_ipc_next(&buf, &schema2, &!cur, &!got) != 0 { return 238 }
@@ -447,6 +477,7 @@ fn round_multi() -> i64 with IO, Mut, Panic, Div {
     var empty_spans = arrow_spans_new()
     if arrow_ipc_file_begin(&schema, &!buf) != 0 { return 247 }
     if arrow_ipc_file_end(&schema, &!buf, &empty_spans) != 0 { return 248 }
+    if eos_before_footer(&buf) == 0 { return 256 }
     if arrow_ipc_read(&buf, &!schema2, &!got) != 0 { return 249 }
     if got.n_rows != 0 { return 250 }
     if arrow_ipc_stream_begin(&schema, &!buf) != 0 { return 251 }
