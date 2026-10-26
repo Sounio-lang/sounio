@@ -53,9 +53,9 @@ pub struct ProofContext {
 
     clause_prop_ids: [i64; 64],
     clause_start: [i32; 64],
-    clause_len: [i32; 64],
+    pub clause_len: [i32; 64],
     clause_data: [i64; 256],
-    clause_count: i32,
+    pub clause_count: i32,
     clause_data_count: i32,
 }
 
@@ -263,11 +263,15 @@ pub fn and_intro(ctx: &!ProofContext, p_id: i64, q_id: i64, result_prop_id: i64)
 }
 
 fn or_intro_left(ctx: &!ProofContext, p_id: i64, result_prop_id: i64) -> i64 with Mut {
-    return ctx_proof(ctx, 4, result_prop_id, p_id, 0, ctx_get_proof_mut(ctx, p_id).confidence)
+    // E038: the confidence read takes &!ctx, so it must finish before ctx_proof
+    // takes it again. Same shape as impl_elim below.
+    let p_conf = ctx_get_proof_mut(ctx, p_id).confidence
+    return ctx_proof(ctx, 4, result_prop_id, p_id, 0, p_conf)
 }
 
 fn or_intro_right(ctx: &!ProofContext, q_id: i64, result_prop_id: i64) -> i64 with Mut {
-    return ctx_proof(ctx, 5, result_prop_id, q_id, 0, ctx_get_proof_mut(ctx, q_id).confidence)
+    let q_conf = ctx_get_proof_mut(ctx, q_id).confidence
+    return ctx_proof(ctx, 5, result_prop_id, q_id, 0, q_conf)
 }
 
 fn impl_elim(ctx: &!ProofContext, impl_id: i64, arg_id: i64, result_prop_id: i64) -> i64 with Mut {
@@ -350,7 +354,9 @@ fn clause_prop_from_lits(ctx: &!ProofContext, lits: &[i64; 16], n: i32) -> i64 w
     var cur = lit_to_prop(ctx, lits[0])
     var i: i32 = 1
     while i < n {
-        cur = ctx_prop(ctx, prop_or(cur, lit_to_prop(ctx, lits[i])))
+        // E038: lit_to_prop takes &!ctx, so bind it before ctx_prop re-borrows.
+        let lit_prop = lit_to_prop(ctx, lits[i])
+        cur = ctx_prop(ctx, prop_or(cur, lit_prop))
         i = i + 1
     }
     return cur
@@ -361,7 +367,9 @@ fn prop_from_lits(ctx: &!ProofContext, lits: &[i64; 16], n: i32) -> i64 with Mut
     var cur = lit_to_prop(ctx, lits[0])
     var i: i32 = 1
     while i < n {
-        cur = ctx_prop(ctx, prop_or(cur, lit_to_prop(ctx, lits[i])))
+        // E038: lit_to_prop takes &!ctx, so bind it before ctx_prop re-borrows.
+        let lit_prop = lit_to_prop(ctx, lits[i])
+        cur = ctx_prop(ctx, prop_or(cur, lit_prop))
         i = i + 1
     }
     return cur
@@ -456,18 +464,24 @@ pub fn to_cnf(ctx: &!ProofContext, prop_id: i64) -> i64 with Mut {
         return prop_id
     }
     if p.tag == 4 {
-        let rew = ctx_prop(ctx, prop_or(ctx_prop(ctx, prop_not(p.left_id)), p.right_id))
+        // E038: three sequential ctx_prop calls, each borrowing ctx once.
+        let neg_left = ctx_prop(ctx, prop_not(p.left_id))
+        let rew = ctx_prop(ctx, prop_or(neg_left, p.right_id))
         return to_cnf(ctx, rew)
     }
     if p.tag == 5 {
         let inner = ctx_get_prop_mut(ctx, p.left_id)
         if inner.tag == 5 { return to_cnf(ctx, inner.left_id) }
         if inner.tag == 2 {
-            let rew = ctx_prop(ctx, prop_or(ctx_prop(ctx, prop_not(inner.left_id)), ctx_prop(ctx, prop_not(inner.right_id))))
+            let neg_l = ctx_prop(ctx, prop_not(inner.left_id))
+            let neg_r = ctx_prop(ctx, prop_not(inner.right_id))
+            let rew = ctx_prop(ctx, prop_or(neg_l, neg_r))
             return to_cnf(ctx, rew)
         }
         if inner.tag == 3 {
-            let rew = ctx_prop(ctx, prop_and(ctx_prop(ctx, prop_not(inner.left_id)), ctx_prop(ctx, prop_not(inner.right_id))))
+            let neg_l = ctx_prop(ctx, prop_not(inner.left_id))
+            let neg_r = ctx_prop(ctx, prop_not(inner.right_id))
+            let rew = ctx_prop(ctx, prop_and(neg_l, neg_r))
             return to_cnf(ctx, rew)
         }
     }
@@ -845,11 +859,13 @@ pub fn tactic_or(ctx: &!ProofContext, goal: i64, tac1: i64, tac2: i64) -> i64 wi
 
 pub fn tactic_then(ctx: &!ProofContext, goal: i64, tac1_result: i64, tac2_fn_id: i64) -> i64 with Mut, Div {
     if tac1_result >= 0 {
-        if prop_matches_mut(ctx, ctx_get_proof_mut(ctx, tac1_result).prop_id, goal) { return tac1_result }
+        // E038: bind the prop id first; both reads want &!ctx.
+        let tac1_prop = ctx_get_proof_mut(ctx, tac1_result).prop_id
+        if prop_matches_mut(ctx, tac1_prop, goal) { return tac1_result }
     }
     return run_tactic(ctx, goal, tac2_fn_id)
 }
 
-fn main() -> i64 {
+pub fn main() -> i64 {
     return 0
 }
