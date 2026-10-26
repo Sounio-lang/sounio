@@ -24,9 +24,12 @@ use arrow::lib::{
     arrow_ipc_next,
     arrow_ipc_open,
     arrow_ipc_read,
+    arrow_batch_set_codec,
+    arrow_codec_lz4,
     arrow_ipc_stream_begin,
     arrow_ipc_stream_end,
     arrow_ipc_stream_push,
+    arrow_ipc_view,
     arrow_ipc_write_file,
     arrow_ipc_write_stream,
     arrow_spans_new,
@@ -487,6 +490,44 @@ fn round_multi() -> i64 with IO, Mut, Panic, Div {
     0
 }
 
+fn round_edges() -> i64 with Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    var i: i64 = 0
+    while i < 8 {
+        if arrow_schema_add(&!schema, "c", 0, arrow_type_int(), 32, 1, 0) != 0 { return 260 }
+        i = i + 1
+    }
+    if arrow_schema_add(&!schema, "c", 0, arrow_type_int(), 32, 1, 0) != -7 { return 261 }
+    var one = arrow_schema_new()
+    var batch = arrow_batch_new()
+    if arrow_schema_add(&!one, "id", 0, arrow_type_int(), 64, 1, 0) != 0 { return 262 }
+    if arrow_batch_shape(&!batch, 1, 1) != 0 { return 263 }
+    if arrow_batch_set_i64(&!batch, 0, 0, 4, 0) != 0 { return 264 }
+    if arrow_batch_set_codec(&!batch, arrow_codec_lz4()) != 0 { return 265 }
+    var buf = arrow_buf_new()
+    if arrow_ipc_stream_begin(&one, &!buf) != 0 { return 266 }
+    if arrow_ipc_stream_push(&one, &batch, &!buf) != -4 { return 267 }
+    if arrow_batch_set_codec(&!batch, 0) != 0 { return 268 }
+    if arrow_ipc_stream_begin(&one, &!buf) != 0 { return 269 }
+    if arrow_ipc_stream_push(&one, &batch, &!buf) != 0 { return 270 }
+    if arrow_ipc_stream_end(&!buf) != 0 { return 271 }
+    let view = arrow_ipc_view(&buf, 0)
+    if view.status != 0 || view.header_type != 1 { return 272 }
+    let eos = arrow_ipc_view(&buf, buf.len)
+    if eos.status != 1 { return 273 }
+    let short = arrow_ipc_view(&buf, buf.len - 1)
+    if short.status != -5 { return 274 }
+    let full = buf.len
+    buf.len = 4
+    var schema2 = arrow_schema_new()
+    var got = arrow_batch_new()
+    if arrow_ipc_read(&buf, &!schema2, &!got) == 0 { return 275 }
+    buf.len = full
+    if arrow_ipc_read(&buf, &!schema2, &!got) != 0 { return 276 }
+    if arrow_batch_i64(&got, 0, 0) != 4 { return 277 }
+    0
+}
+
 fn main() -> i32 with IO, Mut, Panic, Div {
     let a = round_file()
     if a != 0 {
@@ -528,6 +569,12 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     if g != 0 {
         print("FAIL multi ")
         println(g)
+        return 1
+    }
+    let h = round_edges()
+    if h != 0 {
+        print("FAIL edges ")
+        println(h)
         return 1
     }
     println("ARROW_IPC_OK")

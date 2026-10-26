@@ -7,6 +7,10 @@
 // Literals may be raw, RLE, or Huffman (one stream or four). Sequence
 // tables may be predefined, RLE, or FSE-compressed with a table log of
 // at most 6. A repeated table, or an FSE log above 6, returns -4.
+// An LZ4 frame must end on its end marker. When the content-checksum
+// flag is set, that checksum is xxHash32 of the decoded bytes. A
+// Zstandard content-checksum flag requires the 4-byte trailer to be
+// present; the trailer value is not checked.
 
 pub struct CodecBuf {
     pub data: [u8; 4096],
@@ -215,10 +219,14 @@ pub fn codec_decompress_lz4(src: &[u8; 4096], n: i64, dst: &!CodecBuf) -> i64 wi
     if c_at(src, p) != cu8(sum >> 8) { return -6 }
     p = p + 1
     dst.len = 0
+    var ended: i64 = 0
     while p + 4 <= n {
         let rawsz = c_at(src, p) + (c_at(src, p + 1) << 8) + (c_at(src, p + 2) << 16) + (c_at(src, p + 3) << 24)
         p = p + 4
-        if rawsz == 0 { return 0 }
+        if rawsz == 0 {
+            ended = 1
+            break
+        }
         let uncomp = (rawsz >> 31) & 1
         let sz = rawsz & 2147483647
         if sz < 0 || p + sz > n { return -6 }
@@ -235,6 +243,14 @@ pub fn codec_decompress_lz4(src: &[u8; 4096], n: i64, dst: &!CodecBuf) -> i64 wi
         p = p + sz
         if (flg & 16) != 0 { p = p + 4 }
     }
+    if ended == 0 { return -6 }
+    if (flg & 4) != 0 {
+        if p + 4 > n { return -6 }
+        let want = c_at(src, p) + (c_at(src, p + 1) << 8) + (c_at(src, p + 2) << 16) + (c_at(src, p + 3) << 24)
+        if want != xxh32(&dst.data, dst.len) { return -6 }
+        p = p + 4
+    }
+    if p != n { return -6 }
     0
 }
 
@@ -1357,9 +1373,20 @@ fn zstd_compressed(src: &[u8; 4096], at: i64, n: i64, dst: &!CodecBuf) -> i64 wi
         var ll_code = ll.rle
         var of_code = oftab.rle
         var ml_code = ml.rle
-        if ll.rle < 0 { ll_code = ll.sym[st_ll as usize] }
-        if oftab.rle < 0 { of_code = oftab.sym[st_of as usize] }
-        if ml.rle < 0 { ml_code = ml.sym[st_ml as usize] }
+        if ll.rle < 0 {
+            if st_ll < 0 || st_ll >= 64 { return -6 }
+            ll_code = ll.sym[st_ll as usize]
+        }
+        if oftab.rle < 0 {
+            if st_of < 0 || st_of >= 64 { return -6 }
+            of_code = oftab.sym[st_of as usize]
+        }
+        if ml.rle < 0 {
+            if st_ml < 0 || st_ml >= 64 { return -6 }
+            ml_code = ml.sym[st_ml as usize]
+        }
+        if ll_code < 0 || ll_code > 35 { return -6 }
+        if ml_code < 0 || ml_code > 52 { return -6 }
         if of_code < 0 || of_code > 31 { return -4 }
         let extra = br_read(src, &!br, of_code)
         let off_val = (1 << of_code) + extra
@@ -1375,14 +1402,17 @@ fn zstd_compressed(src: &[u8; 4096], at: i64, n: i64, dst: &!CodecBuf) -> i64 wi
             if ll.rle < 0 {
                 let add = br_read(src, &!br, ll.nbits[st_ll as usize])
                 st_ll = ll.base[st_ll as usize] + add
+                if st_ll < 0 || st_ll >= 64 { return -6 }
             }
             if ml.rle < 0 {
                 let add = br_read(src, &!br, ml.nbits[st_ml as usize])
                 st_ml = ml.base[st_ml as usize] + add
+                if st_ml < 0 || st_ml >= 64 { return -6 }
             }
             if oftab.rle < 0 {
                 let add = br_read(src, &!br, oftab.nbits[st_of as usize])
                 st_of = oftab.base[st_of as usize] + add
+                if st_of < 0 || st_of >= 64 { return -6 }
             }
             if br.err != 0 { return -6 }
         }
@@ -1483,7 +1513,14 @@ pub fn codec_decompress_zstd(src: &[u8; 4096], n: i64, dst: &!CodecBuf) -> i64 w
             if dst.len < before { return -6 }
             p = p + bsz
         }
-        if last != 0 { return 0 }
+        if last != 0 {
+            if (fhd & 4) != 0 {
+                if p + 4 > n { return -6 }
+                p = p + 4
+            }
+            if p != n { return -6 }
+            return 0
+        }
     }
     -6
 }
