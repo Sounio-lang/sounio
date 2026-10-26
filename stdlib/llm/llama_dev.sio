@@ -547,9 +547,11 @@ pub fn dev_open(m: &Llama, rt: &Runtime, ops_ptx: string, skinny_ptx: string, mm
         bi = bi + 1
     }
     if hidden % 8 != 0 || inter % 8 != 0 || qdim % 8 != 0 || kvdim % 8 != 0 || m.cfg.vocab % 4 != 0 { return 0 }
-    if m.cfg.heads > 128 || m.cfg.heads < 1 || m.cfg.kv_heads < 1 { return 0 }
+    if dh != 64 { return 0 }
+    if m.cfg.heads > 16 || m.cfg.heads < 1 || m.cfg.kv_heads < 1 { return 0 }
+    if m.cfg.heads % m.cfg.kv_heads != 0 { return 0 }
     if dev_rope_table(rt, dh, m.cfg.theta) != 0 { return 0 }
-    G_PART = ce_alloc(&rt.exec, 58 * m.cfg.vocab * 4)
+    G_PART = ce_alloc(&rt.exec, 58 * m.cfg.vocab * 4 * 3)
     G_TAB = ce_alloc(&rt.exec, 400 * 8)
     G_TAB_HOST = heap_alloc(3200) as i64
     if G_PART == 0 || G_TAB == 0 || G_TAB_HOST == 0 { return 0 }
@@ -618,7 +620,8 @@ fn dev_launch_token(m: &Llama, rt: &Runtime, ids: i64) -> i32 with Alloc, Mut, P
     let kvdim = m.cfg.kv_heads * dh
     let eps_bits = f64_to_f32_bits(m.cfg.eps)
     let scale_bits = f64_to_f32_bits(1.0 / sqrt_dh(dh))
-    let params = scratch(200)
+    let part_bytes = 58 * m.cfg.vocab * 4
+    let params = scratch(216)
     write_i64(params as *mut i64, 0, argcell(G_TAB) as i64)
     write_i64(params as *mut i64, 1, argcell(G_X) as i64)
     write_i64(params as *mut i64, 2, argcell(G_H) as i64)
@@ -631,19 +634,21 @@ fn dev_launch_token(m: &Llama, rt: &Runtime, ids: i64) -> i32 with Alloc, Mut, P
     write_i64(params as *mut i64, 9, argcell(G_U) as i64)
     write_i64(params as *mut i64, 10, argcell(G_ACT) as i64)
     write_i64(params as *mut i64, 11, argcell(G_PART) as i64)
-    write_i64(params as *mut i64, 12, argcell(G_LOGD) as i64)
-    write_i64(params as *mut i64, 13, argcell(ids) as i64)
-    write_i64(params as *mut i64, 14, argcell(hidden) as i64)
-    write_i64(params as *mut i64, 15, argcell(inter) as i64)
-    write_i64(params as *mut i64, 16, argcell(qdim) as i64)
-    write_i64(params as *mut i64, 17, argcell(kvdim) as i64)
-    write_i64(params as *mut i64, 18, argcell(m.cfg.heads) as i64)
-    write_i64(params as *mut i64, 19, argcell(m.cfg.kv_heads) as i64)
-    write_i64(params as *mut i64, 20, argcell(dh) as i64)
-    write_i64(params as *mut i64, 21, argcell(m.cfg.layers as i64) as i64)
-    write_i64(params as *mut i64, 22, argcell(m.cfg.vocab) as i64)
-    write_i64(params as *mut i64, 23, argcell(eps_bits) as i64)
-    write_i64(params as *mut i64, 24, argcell(scale_bits) as i64)
+    write_i64(params as *mut i64, 12, argcell(G_PART + part_bytes) as i64)
+    write_i64(params as *mut i64, 13, argcell(G_PART + part_bytes * 2) as i64)
+    write_i64(params as *mut i64, 14, argcell(G_LOGD) as i64)
+    write_i64(params as *mut i64, 15, argcell(ids) as i64)
+    write_i64(params as *mut i64, 16, argcell(hidden) as i64)
+    write_i64(params as *mut i64, 17, argcell(inter) as i64)
+    write_i64(params as *mut i64, 18, argcell(qdim) as i64)
+    write_i64(params as *mut i64, 19, argcell(kvdim) as i64)
+    write_i64(params as *mut i64, 20, argcell(m.cfg.heads) as i64)
+    write_i64(params as *mut i64, 21, argcell(m.cfg.kv_heads) as i64)
+    write_i64(params as *mut i64, 22, argcell(dh) as i64)
+    write_i64(params as *mut i64, 23, argcell(m.cfg.layers as i64) as i64)
+    write_i64(params as *mut i64, 24, argcell(m.cfg.vocab) as i64)
+    write_i64(params as *mut i64, 25, argcell(eps_bits) as i64)
+    write_i64(params as *mut i64, 26, argcell(scale_bits) as i64)
     launch_n(rt, G_FWD, 58, 256, params)
 }
 

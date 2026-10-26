@@ -877,3 +877,21 @@ Gate. Job 17616, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `
 - After one warm step, seven forwards span 296776154 ns, which is 0.0424 s/token. The gaps between the seven `RESIDENT=1 grid=58` lines and the end of the window run from 31.5 ms to 51.5 ms as the cache grows, so the mean is not one slow step. The threshold is 0.005 s. The measured step is under the 0.0607 s of job 17583, next to the 0.0430 s of job 17557, and above the 0.0175 s of job 17506. Effective traffic is 12.7 GB/s against the 1.8 ms ceiling. The threshold is not moved. This cut does not pass it.
 
 The node returned to idle.
+
+
+## 32. Attention on one warp per head (2026-10-26, OBSERVED)
+
+Job 17616 split K across 58 SMs and matched the CPU tokens at 0.0424 s/token. The seven timed gaps rose from 31.5 ms to 51.5 ms, about 3.3 ms for each extra token of context. The only work that grows with the position is attention. It ran on block 0, and only on the nine threads with `tid < heads`. Each of those threads walked `d = 0..63` with a dependent global load, three times, for every past position, on all 30 layers. Nine chains cannot hide L2 latency. The other 57 blocks waited on the grid barrier for that walk. The GEMV was not the slope.
+
+This cut keeps one launch per token and the grid of 58 blocks of 256 threads. It does not ask occupancy and it does not set `.maxnreg`. Attention on block 0 is one warp per head. Warps 0–7 take heads 0–7, and warp 0 takes head 8 on the next pass. Each lane holds two elements of Q (`dh = 64`), reads coalesced K, and a `shfl.sync.down` sums the dot. The max, the exponential and the sum recompute that dot. The V pass writes the head. Grouped-query attention is unchanged: head `h` reads KV head `h / 3`. The block barrier after RoPE and before the KV copy stays, and another block barrier sits after attention so warp 0 finishes head 8 before the grid barrier. Q, K and V write three distinct partial regions, `58 * 49152` f32 each, so the three splits share one grid barrier and the three reductions share the next. Gate and up do the same. The K loop of the split computes four addresses before the four vector loads. If the module does not load, or the barrier does not return, the measured step fails. The graph and the 0.0424 s kernel are not fallbacks.
+
+Gate. Job 17633, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. Partition `bench` still has no nodes, so the job was pinned on `gpu-orangefs`. Job 17632 held the node; this job waited and did not cancel it. SmolLM2-135M, ids 0, 504, 3575, 282, 4649, 314. The clock is `date +%s%N` on the job script.
+
+- The timed lines print `RESIDENT=1 grid=58`.
+- Prefill argmax, CPU and device: 7042.
+- Greedy continuation, eight tokens, both paths: 7042, 30, 657, 314, 260, 3995, 2240, 281.
+- Maximum absolute logit difference on that prefill: 1.69e-5 (the program printed 16936 at a scale of 1e9). That span has no threshold.
+- The device prefill of the six prompt tokens took 23428724 ns. That span has no threshold.
+- After one warm step, seven forwards span 32483054 ns, which is 0.00464 s/token. The seven gaps sit between 3.3 ms and 4.9 ms. They do not climb with the cache. The threshold is 0.005 s. The measured step is under the 0.0424 s of job 17616, under the 0.0175 s of job 17506, and under 0.005 s. Effective traffic is 116 GB/s. The 1.8 ms ceiling is still below this step. The threshold is not moved. This cut passes it.
+
+The node returned to idle.
