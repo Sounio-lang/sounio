@@ -107,7 +107,7 @@ This status snapshot was reconciled against `main` at `06f927dbca57` on 22 Octob
 
 ## Compiler evolution note
 
-The 2026 preprint ([doi:10.22541/au.177067589.93635741/v1](https://doi.org/10.22541/au.177067589.93635741/v1)) describes a Rust-based compiler (v0.100.0) with Cranelift and LLVM backends. That compiler is now retired. The current compiler is **Madaros** (v0.80.0), self-hosted in Sounio, emitting native x86-64 ELF without LLVM. Cranelift and the v0.100.0 architecture are not part of the current codebase. Version numbering restarted at v0.1.0 for the self-hosted implementation; the preprint remains a historical design record, not a description of the current system.
+The 2026 preprint ([doi:10.22541/au.177067589.93635741/v1](https://doi.org/10.22541/au.177067589.93635741/v1)) describes a Rust-based compiler (v0.100.0) with Cranelift and LLVM backends. That compiler is now retired. The current compiler is **Madaros**, self-hosted in Sounio, emitting native x86-64 ELF without LLVM. Cranelift and the v0.100.0 architecture are not part of the current codebase. Version numbering restarted at v0.1.0 for the self-hosted implementation; the preprint remains a historical design record, not a description of the current system.
 
 ## Research and design
 

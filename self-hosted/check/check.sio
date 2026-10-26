@@ -11189,7 +11189,7 @@ fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_inf
             // KL-13: TyF64/TyI64 kind match must still enforce unit brands —
             // otherwise `takes_f64(t_k)` with `t_k: K` skips the boundary.
             if arg_ty.kind == TypeKind::TyF64 || arg_ty.kind == TypeKind::TyI64 {
-                checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+                checker_check_call_arg_unit_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
             }
             return
         }
@@ -11205,7 +11205,7 @@ fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_inf
             checker_check_call_arg_borrow_boundary_inplace(c, arg_expr, param_info.ty, call_span)
             checker_check_call_arg_refinement_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
             checker_check_call_arg_knowledge_boundary_inplace(c, arg_ty, param_info.ty, call_span)
-            checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+            checker_check_call_arg_unit_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
             checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
         }
     }
@@ -11323,7 +11323,7 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
         let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
         // KL-13: primitive kind match still enforces unit brands on f64/i64.
         if has_param_info && primitive_exact && (arg_ty.kind == TypeKind::TyF64 || arg_ty.kind == TypeKind::TyI64) {
-            checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+            checker_check_call_arg_unit_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
         }
         if has_param_info && !primitive_exact {
             if !checker_call_arg_types_compatible_inplace(c, arg_expr, arg_ty, param_info.ty) {
@@ -11333,7 +11333,7 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
                 checker_check_call_arg_borrow_boundary_inplace(c, arg_expr, param_info.ty, call_span)
                 checker_check_call_arg_refinement_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
                 checker_check_call_arg_knowledge_boundary_inplace(c, arg_ty, param_info.ty, call_span)
-                checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+                checker_check_call_arg_unit_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
                 checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
             }
         }
@@ -13501,7 +13501,7 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
     }
 }
 
-fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     let expected_ty = call_ref_inner_or_self(param_ty)
     let provided_ty = call_ref_inner_or_self(arg_ty)
     let expected_unit = expected_ty.unit_id
@@ -13515,6 +13515,14 @@ fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_ty: TypeEnt
     // KL-13: unit-tagged argument into a bare (unit_id < 0) parameter is a
     // call-boundary loss — refuse; require an explicit cast.
     if provided_unit >= 0 && expected_unit < 0 {
+        let t = (*c).report_unit_call_mismatch(call_span, provided_unit, expected_unit)
+        checker_store_from_value(c, t)
+        return
+    }
+    // D-24 (ADR-020): the symmetric hole. A dimensionless value flowing into
+    // a unit-bearing parameter was silently accepted; it is an error on both
+    // engines. Pure literal expressions keep adopting the parameter unit.
+    if provided_unit < 0 && expected_unit >= 0 && !checker_expr_is_unitless_literal_like(arg_expr) {
         let t = (*c).report_unit_call_mismatch(call_span, provided_unit, expected_unit)
         checker_store_from_value(c, t)
         return
@@ -22499,6 +22507,33 @@ fn checker_expected_accepts_int_literal(actual_ty: TypeEntry, expected_ty: TypeE
 // f64 and adopted NOTHING, so `let x: f32 = 1.5` and passing 1.5 to an f32
 // parameter both rejected. That is what forced `as f32` everywhere -- and the
 // as-f32 lowering was silently truncating (see tests/witness_matrix w4b).
+// D-24 (ADR-020): a pure literal expression is born dimensionless and adopts
+// the unit of the parameter it flows into. Anything else dimensionless -- a
+// variable, a cast, a computed ratio -- carries no unit to adopt from.
+fn checker_expr_is_unitless_literal_like(e: Expr) -> bool {
+    if e.kind == ExprKind::ExprIntLit || e.kind == ExprKind::ExprFloatLit {
+        return true
+    }
+    if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
+        match e.left {
+            Some(inner) => return checker_expr_is_unitless_literal_like(*inner)
+            None => return false
+        }
+    }
+    if e.kind == ExprKind::ExprBinary {
+        let l = match e.left {
+            Some(inner) => checker_expr_is_unitless_literal_like(*inner)
+            None => false
+        }
+        let r = match e.right {
+            Some(inner) => checker_expr_is_unitless_literal_like(*inner)
+            None => false
+        }
+        return l && r
+    }
+    false
+}
+
 fn checker_expr_is_float_literal_like(e: Expr) -> bool {
     if e.kind == ExprKind::ExprFloatLit {
         return true
@@ -31171,7 +31206,7 @@ impl Checker {
         }
     }
 
-    fn check_call_arg_unit_boundary(self, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn check_call_arg_unit_boundary(self, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         let expected_ty = call_ref_inner_or_self(param_ty)
         let provided_ty = call_ref_inner_or_self(arg_ty)
         if is_error_or_unknown(expected_ty) || is_error_or_unknown(provided_ty) {
@@ -31179,6 +31214,11 @@ impl Checker {
         }
         // KL-13: refuse unit-tagged args into bare f64/i64 parameters.
         if provided_ty.unit_id >= 0 && expected_ty.unit_id < 0 {
+            return self.report_unit_call_mismatch(call_span, provided_ty.unit_id, expected_ty.unit_id)
+        }
+        // D-24 (ADR-020): dimensionless value into a unit-bearing parameter
+        // is an error; pure literal expressions keep adopting the unit.
+        if provided_ty.unit_id < 0 && expected_ty.unit_id >= 0 && !checker_expr_is_unitless_literal_like(arg_expr) {
             return self.report_unit_call_mismatch(call_span, provided_ty.unit_id, expected_ty.unit_id)
         }
         // KL-13b: distinct unit_ids with the same dimension vector are compatible
@@ -31295,7 +31335,7 @@ impl Checker {
                         c = c.check_call_arg_borrow_boundary(arg_expr, param_info.ty, call_span)
                         c = c.check_call_arg_refinement_boundary(arg_expr, arg_ty, param_info.ty, call_span)
                         c = c.check_call_arg_knowledge_boundary(arg_ty, param_info.ty, call_span)
-                        c = c.check_call_arg_unit_boundary(arg_ty, param_info.ty, call_span)
+                        c = c.check_call_arg_unit_boundary(arg_expr, arg_ty, param_info.ty, call_span)
                         c = c.ontology_boundary_check_call_arg_contract(arg_ty, param_info.ty, call_span)
                     }
                 }
