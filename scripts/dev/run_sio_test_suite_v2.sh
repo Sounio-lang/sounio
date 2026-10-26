@@ -225,15 +225,29 @@ available_memory_bytes() {
     if [[ -n "${SOUNIO_TEST_MEMORY_BYTES:-}" ]]; then
         printf '%s\n' "$SOUNIO_TEST_MEMORY_BYTES"
     elif [[ -r /sys/fs/cgroup/memory.max ]]; then
-        local limit
+        local limit current
         read -r limit < /sys/fs/cgroup/memory.max
         if [[ "$limit" =~ ^[0-9]+$ ]]; then
-            printf '%s\n' "$limit"
+            current=0
+            if [[ -r /sys/fs/cgroup/memory.current ]]; then
+                read -r current < /sys/fs/cgroup/memory.current
+            fi
+            [[ "$current" =~ ^[0-9]+$ ]] || current=0
+            (( current < limit )) && printf '%s\n' "$((limit - current))" || printf '1\n'
         else
             awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo
         fi
     elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
-        cat /sys/fs/cgroup/memory/memory.limit_in_bytes
+        local limit current
+        read -r limit < /sys/fs/cgroup/memory/memory.limit_in_bytes
+        current=0
+        [[ ! -r /sys/fs/cgroup/memory/memory.usage_in_bytes ]] \
+            || read -r current < /sys/fs/cgroup/memory/memory.usage_in_bytes
+        if [[ "$limit" =~ ^[0-9]+$ && "$current" =~ ^[0-9]+$ && "$current" -lt "$limit" ]]; then
+            printf '%s\n' "$((limit - current))"
+        else
+            printf '1\n'
+        fi
     else
         awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo
     fi
