@@ -45,8 +45,12 @@ def parse_protobuf(buf: bytes) -> list[tuple[int, object]]:
             fields.append((field, buf[i : i + ln]))
             i += ln
         elif wire == 1:
+            if i + 8 > len(buf):
+                raise SystemExit("FAIL protobuf length past end")
             i += 8
         elif wire == 5:
+            if i + 4 > len(buf):
+                raise SystemExit("FAIL protobuf length past end")
             i += 4
         else:
             raise SystemExit(f"FAIL protobuf wire {wire}")
@@ -164,14 +168,20 @@ def try_pyarrow(put_ipc: bytes, client_ipc: bytes, server_ipc: bytes) -> None:
     print("PYARROW_OK")
 
 
-def _reject_truncated_protobuf() -> None:
+def _reject_short(buf: bytes) -> None:
     try:
-        parse_protobuf(b"\x12\x08abc")
+        parse_protobuf(buf)
     except SystemExit as exc:
         if "protobuf length past end" not in str(exc):
             raise
         return
     raise SystemExit("FAIL truncated protobuf accepted")
+
+
+def _reject_truncated_protobuf() -> None:
+    _reject_short(b"\x12\x08abc")
+    _reject_short(b"\x09abc")
+    _reject_short(b"\x0dabc")
 
 
 def main() -> None:

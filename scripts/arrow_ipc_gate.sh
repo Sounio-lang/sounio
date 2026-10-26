@@ -14,6 +14,13 @@ cd "$REPO_ROOT"
 export SOUNIO_STDLIB_PATH="$PWD/stdlib"
 SOUC="${SOUC:-./bin/souc}"
 
+# Pyarrow comes from the caller's environment. Set ARROW_PYARROW_PATH only
+# when that directory is one the caller trusts; a shared temp tree is not.
+# The required-import preflight and the later checkers must see the same path.
+if [[ -n "${ARROW_PYARROW_PATH:-}" ]]; then
+  export PYTHONPATH="${ARROW_PYARROW_PATH}${PYTHONPATH:+:$PYTHONPATH}"
+fi
+
 if [[ "${ARROW_REQUIRE_PYARROW:-0}" == 1 ]]; then
   python3 -c 'import pyarrow, pyarrow.ipc, pyarrow.flight; print("Required pyarrow:", pyarrow.__version__)'
 fi
@@ -31,12 +38,6 @@ test -f "$FILE_OUT"
 test -f "$STREAM_OUT"
 test -f "$MULTI_FILE"
 test -f "$MULTI_STREAM"
-
-# Pyarrow comes from the caller's environment. Set ARROW_PYARROW_PATH only
-# when that directory is one the caller trusts; a shared temp tree is not.
-if [[ -n "${ARROW_PYARROW_PATH:-}" ]]; then
-  export PYTHONPATH="${ARROW_PYARROW_PATH}${PYTHONPATH:+:$PYTHONPATH}"
-fi
 
 python3 scripts/arrow_ipc_check.py "$FILE_OUT" "$STREAM_OUT" "$MULTI_FILE" "$MULTI_STREAM"
 

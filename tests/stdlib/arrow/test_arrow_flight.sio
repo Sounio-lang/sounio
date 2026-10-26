@@ -85,6 +85,36 @@ fn cmd_is(desc: &FlightDesc, text: string) -> i64 with Panic {
     1
 }
 
+fn be4(buf: &ArrowBuf, at: i64) -> i64 with Panic {
+    var b0 = buf.data[at as usize] as i64
+    if b0 < 0 { b0 = b0 + 256 }
+    var b1 = buf.data[(at + 1) as usize] as i64
+    if b1 < 0 { b1 = b1 + 256 }
+    var b2 = buf.data[(at + 2) as usize] as i64
+    if b2 < 0 { b2 = b2 + 256 }
+    var b3 = buf.data[(at + 3) as usize] as i64
+    if b3 < 0 { b3 = b3 + 256 }
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+}
+
+fn pushb(dst: &!ArrowBuf, v: i64) -> i64 with Mut, Panic {
+    if dst.len >= 8192 { return -1 }
+    var x = v
+    if x < 0 { x = x + 256 }
+    dst.data[dst.len as usize] = (x as i32) as u8
+    dst.len = dst.len + 1
+    0
+}
+
+fn copy_span(dst: &!ArrowBuf, src: &ArrowBuf, at: i64, n: i64) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < n {
+        if pushb(dst, src.data[(at + i) as usize] as i64) != 0 { return -1 }
+        i = i + 1
+    }
+    0
+}
+
 fn test_desc() -> i64 with Mut, Panic {
     var desc = flight_desc_new()
     if flight_desc_add_path(&!desc, "data") != 0 { return 10 }
@@ -288,6 +318,60 @@ fn test_reject() -> i64 with Mut, Panic, Div {
     0
 }
 
+fn test_gap() -> i64 with Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if fill_id(&!schema) != 0 { return 130 }
+    var batch = arrow_batch_new()
+    if arrow_batch_shape(&!batch, 1, 1) != 0 { return 131 }
+    if arrow_batch_set_i64(&!batch, 0, 0, 30, 0) != 0 { return 132 }
+    var ipc = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!ipc) != 0 { return 133 }
+    if arrow_ipc_stream_push(&schema, &batch, &!ipc) != 0 { return 134 }
+    if arrow_ipc_stream_end(&!ipc) != 0 { return 135 }
+    var desc = flight_desc_new()
+    if flight_desc_set_cmd(&!desc, "query") != 0 { return 136 }
+    var meta = flight_meta_new()
+    var out = arrow_buf_new()
+    if do_put_write(&desc, &ipc, &meta, &!out) != 0 { return 137 }
+    if out.len < 5 { return 138 }
+    let n0 = be4(&out, 1)
+    if n0 < 0 || 5 + n0 >= out.len { return 139 }
+    var spliced = arrow_buf_new()
+    if copy_span(&!spliced, &out, 0, 5 + n0) != 0 { return 140 }
+    if pushb(&!spliced, 0) != 0 { return 141 }
+    if pushb(&!spliced, 0) != 0 { return 142 }
+    if pushb(&!spliced, 0) != 0 { return 143 }
+    if pushb(&!spliced, 0) != 0 { return 144 }
+    if pushb(&!spliced, 6) != 0 { return 145 }
+    if pushb(&!spliced, 18) != 0 { return 146 }
+    if pushb(&!spliced, 0) != 0 { return 147 }
+    if pushb(&!spliced, 26) != 0 { return 148 }
+    if pushb(&!spliced, 2) != 0 { return 149 }
+    if pushb(&!spliced, 97) != 0 { return 150 }
+    if pushb(&!spliced, 98) != 0 { return 151 }
+    if copy_span(&!spliced, &out, 5 + n0, out.len - (5 + n0)) != 0 { return 152 }
+    var got = flight_desc_new()
+    var back = arrow_buf_new()
+    var got_meta = flight_meta_new()
+    if do_put_read(&spliced, &!got, &!back, &!got_meta) != 0 { return 153 }
+    if got_meta.n != 3 { return 154 }
+    if meta_is(&got_meta, 1, "ab") == 0 { return 155 }
+    var schema2 = arrow_schema_new()
+    var cur = arrow_cursor_new()
+    var got_batch = arrow_batch_new()
+    if arrow_ipc_open(&back, &!schema2, &!cur) != 0 { return 156 }
+    if arrow_ipc_next(&back, &schema2, &!cur, &!got_batch) != 0 { return 157 }
+    if arrow_batch_i64(&got_batch, 0, 0) != 30 { return 158 }
+    if arrow_ipc_next(&back, &schema2, &!cur, &!got_batch) != 1 { return 159 }
+    meta.n = 1
+    meta.lens[0] = 33
+    if do_put_write(&desc, &ipc, &meta, &!out) != -7 { return 160 }
+    var empty = arrow_buf_new()
+    empty.len = 0
+    if do_exchange_write(&desc, &empty, &meta, 1, &!out) != -7 { return 161 }
+    0
+}
+
 fn main() -> i32 with IO, Mut, Panic, Div {
     let a = test_desc()
     if a != 0 {
@@ -317,6 +401,12 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     if e != 0 {
         print("FAIL reject ")
         println(e)
+        return 1
+    }
+    let f = test_gap()
+    if f != 0 {
+        print("FAIL gap ")
+        println(f)
         return 1
     }
     println("FLIGHT_IPC_OK")
