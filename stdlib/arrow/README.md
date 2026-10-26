@@ -68,9 +68,10 @@ Tensor metadata uses the same compact JSON pyarrow writes (`shape`, then `permut
 feature `COMPRESSED_BODY` before the schema message is written. Each buffer
 is compressed on its own and prefixed with the uncompressed length, or with
 `-1` when the payload is left uncompressed. Zstd decode accepts raw blocks,
-RLE blocks, and compressed blocks whose literals are raw or RLE and whose
-sequence tables are predefined or RLE. Huffman literals and FSE-compressed
-sequence tables return `-4`. Big-endian schemas return `-4`.
+RLE blocks, and compressed blocks. Literals may be raw, RLE, or Huffman,
+including the four-stream form. Sequence tables may be predefined, RLE, or
+FSE-compressed when the table log is at most 6. A repeated table, or an FSE
+log above 6, returns `-4`. Big-endian schemas return `-4`.
 
 ## Status
 
