@@ -43,8 +43,8 @@ Memory budgets are explicit and separate:
 - max_index_bytes covers the four exact-key identity payloads. Each decoded
   key byte becomes two encoded byte values stored in the existing integer
   byte pool. `count_identities_payload` supplies the checked payload query.
-- max_graph_bytes covers16 bytes/token metadata,8 bytes/physical row,
-  four8-byte arrays per distinct key plus one offset sentinel, and
+- max_graph_bytes covers 16 bytes/token metadata, 8 bytes/physical row,
+  four 8-byte arrays per distinct key plus one offset sentinel, and
  8 bytes/Parent occurrence for adjacency.
 - max_byte_comparisons counts encoded byte-pair comparisons in the existing
   identity sort. Validation scans and the failure-only cycle witness walk
@@ -74,7 +74,7 @@ this module does not claim the later VCF4.4/4.5 profiles.
 The existing exact-byte identity index uses separate private namespaces for
 CHROM block names and record IDs. Equal hashes are never accepted as equal
 identities. No case folding or Unicode normalization occurs on identifiers.
-The index budget includes identity payloads plus24 bytes/source-token
+The index budget includes identity payloads plus 24 bytes/source-token
 metadata; header and reusable record byte budgets are separate.
 
 `VcfDocumentReport` returns status, reason, zero-based record and byte
@@ -91,7 +91,7 @@ Statuses retain lexical/header errors and use22 for ordering/identity,
 separate from document validation. It borrows an owned `DynamicFasta` and
 one VCF record. Each of its two scratch buffers has max_scratch_bytes payload.
 The exact first FASTA header token identifies the contig. Missing contigs
-return95; multiple matching FASTA IDs refuse with22.
+return95; multiple matching FASTA IDs refuse with 22.
 
 `dynamic_fasta_copy_range` appends a checked zero-based sequence window
 without copying the entire contig. Bounds and reservation failures preserve

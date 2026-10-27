@@ -279,8 +279,15 @@ void incremental_check(const fs::path& input){
  std::cout<<"ARROW_INCREMENTAL_CPP_OK\n";
 }
 
+void incremental_dictionary_check(const fs::path& input){
+ auto s=stream(input);need(s.batches.size()==2,"incremental dictionary batches");
+ texts(s.batches[0]->column(0),{"A","B","C","B"},"incremental dictionary0");
+ texts(s.batches[1]->column(0),{"D","C","E","A"},"incremental dictionary1");
+ std::cout<<"ARROW_INCREMENTAL_DICTIONARY_CPP_OK\n";
+}
 int main(int argc,char** argv){
  try{version();if(argc==2&&std::string_view(argv[1])=="--version")return 0;
+  if(argc==3&&std::string_view(argv[1])=="--check-incremental-dictionary"){incremental_dictionary_check(argv[2]);return 0;}
   if(argc==3&&std::string_view(argv[1])=="--write-incremental"){incremental_write(argv[2]);return 0;}
   if(argc==3&&std::string_view(argv[1])=="--check-incremental"){incremental_check(argv[2]);return 0;}
   if(argc==4&&std::string_view(argv[1])=="--write-id-mutant"){mutant(argv[2],argv[3]);return 0;}

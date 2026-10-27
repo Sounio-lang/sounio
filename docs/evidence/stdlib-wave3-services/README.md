@@ -79,12 +79,12 @@ Receipt root:
 `/scratch/sounio-stdlib-wave3-20261027/services/systems-01/results`.
 `RESULTS.tsv` records every phase; source, compiler/runtime and executable
 hashes have final verification files. The linked platform library was the
-root lane's separately qualified ABI100–111 library from Slurm18125.
+root lane's separately qualified ABI100–111 library from Slurm 18125.
 This lane does not alter the shared C++ platform implementation.
 
 PollSet registers stable logical socket IDs with interests and caller tags.
 A wait polls all registrations against one absolute monotonic deadline;
-no events returns count0/status0. Closed IDs yield flag16. Owners remain
+no events returns count0/status 0. Closed IDs yield flag16. Owners remain
 responsible for socket lifetime. A close during a blocked wait need not wake
 the wait before an event or deadline. Callers serialize registration, wait
 and event reads; the three event-field ABI reads are not an atomic concurrent
@@ -94,7 +94,7 @@ and bounded snapshot overhead are separate.
 TCP helpers retain the absolute deadline across partial transfers and expose
 completed byte counts on errors. Read-exact appends into the caller buffer;
 early EOF returns status61 (ENODATA) and the retained count. A timeout returns
-status110. UDP destinations are explicit IPv4/port values; zero-length
+status 110. UDP destinations are explicit IPv4/port values; zero-length
 datagrams remain datagrams and sender address/port describe the consumed
 packet, including truncated packets.
 
@@ -108,11 +108,11 @@ that compaction preserves other live tasks.
 
 Slurm **18138** completed with status 0. The streaming fixture, existing byte
 buffer fixture and existing native-file fixture each checked, compiled and
-ran: nine phases passed. `CSV_STREAM_OK` confirms refill sizes 1 through17
+ran: nine phases passed. `CSV_STREAM_OK` confirms refill sizes 1 through 17
 produce identical BOM, doubled-quote, quoted-newline, trailing-empty-field
 and UTF-8 results. Controls reject malformed EOF, stray/post-quote bytes,
 bare CR, width mismatch, malformed UTF-8 per field and field-budget overflow.
-A 257-byte field passes without the legacy64-byte convenience cap.
+A 257-byte field passes without the legacy 64-byte convenience cap.
 
 Receipt root:
 `/scratch/sounio-stdlib-wave3-20261027/services/csv-stream-01/results`.
@@ -123,17 +123,17 @@ functions. The caller reuses or closes each owned row. Field access is checked
 and field-copy appends unescaped bytes into a caller-owned buffer.
 
 The stream returns its first record, so callers may treat it as the header.
-Expected width0 learns the first record's width; subsequent records must
+Expected width 0 learns the first record's width; subsequent records must
 match. Only an initial UTF-8 BOM is stripped. No normalization or implicit
 case folding occurs. Syntax and budget errors are terminal and hide the
-incomplete row; EOF is status1. UTF-8 is validated per field, preventing
+incomplete row; EOF is status 1. UTF-8 is validated per field, preventing
 a lead byte in one field and a continuation byte in another from combining.
 
 ## Incremental JSON writer receipt
 
-Slurm **18143** completed with status0. The new writer fixture and existing
+Slurm **18143** completed with status 0. The new writer fixture and existing
 owned DOM fixture each checked, compiled and ran: six phases passed.
-`JSON_WRITER_OK` covers output chunks1 through7, nested objects/arrays,
+`JSON_WRITER_OK` covers output chunks 1 through 7, nested objects/arrays,
 i64 minimum/maximum, exact exponent tokens, UTF-8 and embedded NUL, quote,
 backslash and newline escaping. The independent existing DOM parser reads
 the produced files and recovers the original values.
@@ -153,11 +153,11 @@ claim. Existing scientific JSON paths remain available.
 
 ## Incremental Arrow C++/Sounio concordance
 
-Slurm **18152** completed with status0. It repeated all five legacy producers,
-all30 required C++ groups and the logical-mutant control, then qualified
-100 batches of16 i64 rows per stream in both directions. Each stream exceeds
-8192 bytes. Sounio read the official SDK producer with refill sizes1 and17;
-the SDK read the Sounio producer and validated all1600 values. Missing EOS
+Slurm **18152** completed with status 0. It repeated all five legacy producers,
+all 30 required C++ groups and the logical-mutant control, then qualified
+100 batches of 16 i64 rows per stream in both directions. Each stream exceeds
+8192 bytes. Sounio read the official SDK producer with refill sizes 1 and 17;
+the SDK read the Sounio producer and validated all 1600 values. Missing EOS
 bytes and trailing bytes were rejected. The Sounio fixture also retains its
 standalone self-produced stream check; the cross-language gate additionally
 requires `ARROW_NATIVE_CPP_READ_OK`.
@@ -170,7 +170,7 @@ logs. `INCREMENTAL.sha256`, `PLATFORM.sha256` and input custody have final
 rechecks. Required markers: `ARROW_NATIVE_STREAM_OK`,
 `ARROW_INCREMENTAL_CPP_OK`, `ARROW_INCREMENTAL_BIDIRECTIONAL_OK`.
 
-Job18146 passed the legacy gate then lacked the SDK dependency search path
+Job 18146 passed the legacy gate then lacked the SDK dependency search path
 for its later C++ producer invocation. Corrected job18148 passed both
 directions; job18152 repeated final-source qualification after making the
 default fixture independent of optional external fixture files. No numeric
@@ -178,7 +178,7 @@ inputs, producer assertions, legacy case groups or SDK version changed.
 
 ## Separate genomic semantic receipts
 
-Slurm **18161** completed with status0 for the new GFF graph fixture and
+Slurm **18161** completed with status 0 for the new GFF graph fixture and
 existing dynamic-GFF fixture: six check/compile/native phases. Coverage:
 forward Parents, multipart IDs, percent-decoded scalar/list boundaries,
 UTF-8 exact identities, no implicit normalization, incompatible multipart
@@ -188,12 +188,12 @@ Cycle errors include representative rows for an actual edge on a cycle.
 
 Receipt:
 `/scratch/sounio-stdlib-wave3-20261027/services/gff-graph-04/results`.
-Initial jobs18153/18154 exposed linear-owner control-flow/projection issues
+Initial jobs 18153/18154 exposed linear-owner control-flow/projection issues
 in the new module. The implementation now consumes resources in explicit
-branches and uses borrowed helper access. Job18155 passed before the
-additional cycle-edge witness;18161 qualified that final witness.
+branches and uses borrowed helper access. Job 18155 passed before the
+additional cycle-edge witness; 18161 qualified that final witness.
 
-Slurm **18160** completed with status0 for new VCF document/REF validation
+Slurm **18160** completed with status 0 for new VCF document/REF validation
 plus existing VCF core, VCF header and dynamic FASTA: twelve phases.
 Coverage: empty document, repeated POS, contiguous CHROM blocks, reopened
 CHROM, global/within-row duplicate IDs, missing terminal LF, Unicode
@@ -203,7 +203,7 @@ and failure-preserving window append.
 
 Receipt:
 `/scratch/sounio-stdlib-wave3-20261027/services/vcf-document-02/results`.
-Job18156 preserved a parse failure from a reserved local identifier;18160
+Job 18156 preserved a parse failure from a reserved local identifier; 18160
 uses the corrected name with the same test cases and passed. Source,
 compiler/runtime and executable hashes have final verification files in
 both final receipt roots.
@@ -212,3 +212,32 @@ Public contracts and limits:
 `stdlib/genomics/io/SEMANTIC_VALIDATION.md`. These are separate semantic
 layers. Ontology membership, genomic random-access indexing, variant
 normalization and SV/breakend resolution are not inferred.
+
+## Durable Arrow gate and dictionary-state receipt
+
+Slurm **18172** completed with status 0 running the versioned
+`scripts/arrow_ipc_gate.sh` entrypoint. It now requires all original
+30 case groups and five producers, the logical mutant, both 100-batch
+cross-language paths, and a native dictionary stream with an initial
+three-value dictionary followed by a two-value delta. The one-byte-refill
+reader preserves all five dictionary values; official C++26 verifies both
+logical batches independently.
+
+Receipt root:
+`/scratch/sounio-stdlib-wave3-20261027/services/arrow-durable-04/results/gate`.
+The gate requires `STDLIB_PLATFORM_LIBRARY` to identify the exact
+`libstdlib_platform.so`, places its directory first in the loader search,
+hashes it in `PLATFORM.sha256` and rechecks it afterward. Native reader,
+file, byte-buffer and platform-loader source dependencies are included in
+the input manifest. Existing source/compiler/executable/SDK-library/artifact
+rechecks remain mandatory.
+
+The path-only relocator retains the original 20-output legacy audit and has
+a separate five-output native mode. Both record original/derived hashes and
+reverse-substitution byte equality. No assertions, case markers or numeric
+inputs are changed. Jobs 18165,18166 and18171 passed earlier durable-gate
+iterations;18172 qualifies the final loader-path and dependency-custody
+version. The gate itself now emits
+`ARROW_INCREMENTAL_DICTIONARY_CPP_OK` and
+`ARROW_INCREMENTAL_BIDIRECTIONAL_OK`, so future callers cannot omit these
+adapter checks while obtaining `ARROW_CPP_GATE_OK`.

@@ -4,8 +4,8 @@ use ffi::platform::{Platform,platform_open,platform_status,platform_close}
 use io::native_file::{native_file_open,native_file_status,native_file_close,native_file_seek}
 use io::buffered_reader::{buffered_reader_new}
 use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_close}
-use arrow::lib::{arrow_schema_new,arrow_schema_add,arrow_type_int,arrow_batch_new,arrow_batch_shape,arrow_batch_set_i64,arrow_batch_i64,arrow_dicts_new}
-use arrow::native_stream::{arrow_stream_reader_new,arrow_stream_reader_open,arrow_stream_reader_next,arrow_stream_reader_close,arrow_stream_writer_new,arrow_stream_writer_begin,arrow_stream_writer_push,arrow_stream_writer_finish,arrow_stream_writer_close}
+use arrow::lib::{arrow_schema_new,arrow_schema_add,arrow_schema_set_dict,arrow_type_utf8,arrow_type_int,arrow_batch_new,arrow_batch_shape,arrow_batch_set_i64,arrow_batch_set_str,arrow_batch_i64,arrow_dict_str_byte,arrow_dicts_new}
+use arrow::native_stream::{arrow_stream_reader_new,arrow_stream_reader_open,arrow_stream_reader_next,arrow_stream_reader_close,arrow_stream_writer_new,arrow_stream_writer_begin,arrow_stream_writer_push,arrow_stream_writer_push_dict,arrow_stream_writer_finish,arrow_stream_writer_close}
 fn path_bytes(text:string)->ByteBuffer with Alloc,Mut,Div,Panic {
  var b=byte_buffer_new(1024)
  var i:i64=0
@@ -36,6 +36,56 @@ fn read_stream(p:&Platform,path:string,chunk:i64,expected_end:i64) with IO,Alloc
  }
  assert(n==100 && code==expected_end)
  assert(arrow_stream_reader_next(p,&!reader,&schema,&!dicts,&!batch)==expected_end)
+ assert(arrow_stream_reader_close(p,reader)==0)
+}
+fn dictionary_stream(p:&Platform,path:string) with IO,Alloc,Mut,Div,Panic {
+ var schema=arrow_schema_new()
+ assert(arrow_schema_add(&!schema,"s",1,arrow_type_utf8(),0,0,0)==0)
+ assert(arrow_schema_set_dict(&!schema,0,0,32,1,0)==0)
+ let name=path_bytes(path)
+ let file=native_file_open(p,&name,1)
+ byte_buffer_close(name)
+ var writer=arrow_stream_writer_new(file)
+ assert(arrow_stream_writer_begin(p,&!writer,&schema)==0)
+ var values=arrow_batch_new()
+ assert(arrow_batch_shape(&!values,3,1)==0)
+ assert(arrow_batch_set_str(&!values,0,0,"A",0)==0)
+ assert(arrow_batch_set_str(&!values,0,1,"B",0)==0)
+ assert(arrow_batch_set_str(&!values,0,2,"C",0)==0)
+ assert(arrow_stream_writer_push_dict(p,&!writer,&schema,0,0,&values)==0)
+ var batch=arrow_batch_new()
+ assert(arrow_batch_shape(&!batch,4,1)==0)
+ assert(arrow_batch_set_i64(&!batch,0,0,0,0)==0)
+ assert(arrow_batch_set_i64(&!batch,0,1,1,0)==0)
+ assert(arrow_batch_set_i64(&!batch,0,2,2,0)==0)
+ assert(arrow_batch_set_i64(&!batch,0,3,1,0)==0)
+ assert(arrow_stream_writer_push(p,&!writer,&schema,&batch)==0)
+ assert(arrow_batch_shape(&!values,2,1)==0)
+ assert(arrow_batch_set_str(&!values,0,0,"D",0)==0)
+ assert(arrow_batch_set_str(&!values,0,1,"E",0)==0)
+ assert(arrow_stream_writer_push_dict(p,&!writer,&schema,0,1,&values)==0)
+ assert(arrow_batch_set_i64(&!batch,0,0,3,0)==0)
+ assert(arrow_batch_set_i64(&!batch,0,1,2,0)==0)
+ assert(arrow_batch_set_i64(&!batch,0,2,4,0)==0)
+ assert(arrow_batch_set_i64(&!batch,0,3,0,0)==0)
+ assert(arrow_stream_writer_push(p,&!writer,&schema,&batch)==0)
+ assert(arrow_stream_writer_finish(p,&!writer)==0)
+ assert(arrow_stream_writer_close(p,writer)==0)
+ let input=path_bytes(path)
+ let source=native_file_open(p,&input,0)
+ byte_buffer_close(input)
+ var reader=arrow_stream_reader_new(buffered_reader_new(source,1,1))
+ var got_schema=arrow_schema_new()
+ var dictionaries=arrow_dicts_new()
+ var got=arrow_batch_new()
+ assert(arrow_stream_reader_open(p,&!reader,&!got_schema,&!dictionaries)==0)
+ assert(arrow_stream_reader_next(p,&!reader,&got_schema,&!dictionaries,&!got)==0)
+ assert(dictionaries.n==1 && dictionaries.n_rows[0]==3)
+ assert(arrow_dict_str_byte(&dictionaries,0,1,0)==66)
+ assert(arrow_stream_reader_next(p,&!reader,&got_schema,&!dictionaries,&!got)==0)
+ assert(dictionaries.n_rows[0]==5 && arrow_dict_str_byte(&dictionaries,0,3,0)==68 && arrow_dict_str_byte(&dictionaries,0,4,0)==69)
+ assert(arrow_batch_i64(&got,0,0)==3 && arrow_batch_i64(&got,0,2)==4)
+ assert(arrow_stream_reader_next(p,&!reader,&got_schema,&!dictionaries,&!got)==1)
  assert(arrow_stream_reader_close(p,reader)==0)
 }
 fn main()->i32 with IO,Alloc,Mut,Div,Panic {
@@ -77,6 +127,7 @@ fn main()->i32 with IO,Alloc,Mut,Div,Panic {
   read_stream(&p,"/tmp/sounio_wave3_arrow_cpp.stream.trailing",7,0-3)
   println("ARROW_NATIVE_CPP_READ_OK")
  }
+ dictionary_stream(&p,"/tmp/sounio_wave3_arrow_dictionary.stream")
  platform_close(p)
  println("ARROW_NATIVE_STREAM_OK")
  0

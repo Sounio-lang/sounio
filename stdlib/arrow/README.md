@@ -135,9 +135,16 @@ compressed flag returns `-4`.
 ## Independent C++ interoperability gate
 
 Run `scripts/arrow_ipc_gate.sh` (the compatibility entrypoint) or
-`scripts/arrow_cpp_gate.sh` with an official Arrow **26.0.0** C++ SDK:
-`ARROW_CPP_PREFIX=/absolute/sdk/root MADAROS_RAW_BIN=/absolute/current/raw
-scripts/arrow_ipc_gate.sh`. The prefix contains `usr/include` and
+`scripts/arrow_cpp_gate.sh` with an official Arrow **26.0.0** C++ SDK and a qualified native platform library:
+
+```bash
+ARROW_CPP_PREFIX=/absolute/sdk/root \
+STDLIB_PLATFORM_LIBRARY=/absolute/runtime/libstdlib_platform.so \
+MADAROS_RAW_BIN=/absolute/current/raw \
+scripts/arrow_ipc_gate.sh
+```
+
+The prefix contains `usr/include` and
 `usr/lib/x86_64-linux-gnu`. The SDK must provide IPC, Flight, JSON,
 LZ4-frame and Zstandard support. A missing SDK fails; acceptance does not
 install or fall back to Python.
@@ -159,8 +166,16 @@ the judge must reject that changed value.
 Set `STDLIB_ARROW_OUT` to a new absolute, literal-safe output directory.
 Receipts record source, derived fixture, compiler, executable, bound library
 and generated artifact hashes, phase exit statuses and final hash rechecks.
-The old Python files remain historical sources for the preservation inventory;
+The native platform library is resolved through its declared directory, hashed
+before execution and rechecked afterward. Set `NODE` to an absolute Node
+executable when it is not on PATH. The old Python files remain historical
+sources for the preservation inventory;
 the acceptance entrypoint never executes them.
+
+The gate also requires the incremental native adapter: 100 batches cross the
+SDK boundary in both directions, and a dictionary delta persists across
+refills and is independently read by C++26. These controls are mandatory in
+the versioned gate, including its compatibility entrypoint.
 
 This gate qualifies the covered interoperability cases. Existing capacity and
 codec limits above remain part of the API.
@@ -174,7 +189,7 @@ between calls. Writers expose begin/push/push_dict/finish; close is explicit.
 Reader close releases its buffered file. Writer close returns POSIX errno
 and reports22 if a successful finish did not occur.
 
-Messages retain the8192-byte framing and4096-byte body caps and all existing
+Messages retain the 8192-byte framing and 4096-byte body caps and all existing
 batch/schema/dictionary limits. Total stream length and batch count have no
 additional cap. This is the IPC stream encapsulation; seekable Arrow files
 with footers remain on the existing file API. The adapter requires EOS and
