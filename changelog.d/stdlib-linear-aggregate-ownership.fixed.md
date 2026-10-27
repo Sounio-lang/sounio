@@ -1,0 +1,1 @@
+Treat arrays, tuples, owning wrappers and enum payloads containing a linear value as linear, while preserving borrowing through references, slices and raw pointers. Apply the same classification to both checker paths.

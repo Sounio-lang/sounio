@@ -4352,17 +4352,94 @@ fn checker_const_int_bind_unknown_inplace(c: *mut Checker, name: Name) with Mut,
     checker_const_int_bind_raw_inplace(c, name, 0, 0)
 }
 
-fn checker_is_linear_type_inplace(c: *mut Checker, ty: TypeEntry) -> bool with Mut, Panic, Div {
+// Owning aggregates inherit linearity from their values. References, slices and
+// raw pointers borrow storage, so their pointee does not make the handle linear.
+// Track nominal ancestors to terminate recursive Box/list metadata types; a
+// depth exhaustion is conservative, never permission to copy a hidden owner.
+fn checker_type_contains_linear_owner(
+    structs: *mut StructTable, enums: *mut EnumTable, fn_sigs: *mut FnSigTable,
+    ty: TypeEntry, seen: *mut [Name; 64], depth: i64,
+) -> bool with Mut, Panic, Div {
+    if depth >= 64 { return true }
+    (*seen)[depth as usize] = empty_name()
+    if ty.kind == TypeKind::TyRef || ty.kind == TypeKind::TyRefMut
+        || ty.kind == TypeKind::TySlice || ty.kind == TypeKind::TySliceMut
+        || ty.kind == TypeKind::TyRawPtr { return false }
+    if ty.kind == TypeKind::TyFn {
+        if ty.fn_sig_id >= 0 {
+            return fn_sig_table_get(fn_sigs, ty.fn_sig_id).is_linear_closure
+        }
+        return false
+    }
+    if ty.kind == TypeKind::TyArray && ty.array_size == 0 { return false }
     if ty.kind == TypeKind::TyNamed {
-        let idx = struct_table_find((*c).structs, ty.name)
+        let idx = struct_table_find(structs, ty.name)
+        if idx >= 0 && (*structs).entries[idx].is_linear { return true }
+        var i: i64 = 0
+        while i < depth {
+            if name_eq((*seen)[i as usize], ty.name) { return false }
+            i = i + 1
+        }
+        (*seen)[depth as usize] = ty.name
         if idx >= 0 {
-            return (*(*c).structs).entries[idx].is_linear
+            var fields = (*structs).entries[idx].fields
+            while true {
+                match fields {
+                    Some(list) => {
+                        if checker_type_contains_linear_owner(structs, enums, fn_sigs, (*list).head.ty, seen, depth + 1) { return true }
+                        fields = (*list).tail
+                    }
+                    None => break
+                }
+            }
+        }
+        let eidx = enum_table_find(enums, ty.name)
+        if eidx >= 0 {
+            var variants = (*enums).entries[eidx as usize].variants
+            while true {
+                match variants {
+                    Some(variant) => {
+                        var fields = (*variant).head.fields
+                        while true {
+                            match fields {
+                                Some(field) => {
+                                    if checker_type_contains_linear_owner(structs, enums, fn_sigs, (*field).head.ty, seen, depth + 1) { return true }
+                                    fields = (*field).tail
+                                }
+                                None => break
+                            }
+                        }
+                        variants = (*variant).tail
+                    }
+                    None => break
+                }
+            }
         }
     }
-    if ty.kind == TypeKind::TyFn && ty.fn_sig_id >= 0 {
-        return fn_sig_table_get((*c).fn_sigs, ty.fn_sig_id).is_linear_closure
+    match ty.inner {
+        Some(inner) => {
+            if checker_type_contains_linear_owner(structs, enums, fn_sigs, *inner, seen, depth + 1) { return true }
+        }
+        None => {}
+    }
+    if ty.kind == TypeKind::TyTuple {
+        var elems = ty.tuple_elems
+        while true {
+            match elems {
+                Some(elem) => {
+                    if checker_type_contains_linear_owner(structs, enums, fn_sigs, (*elem).head, seen, depth + 1) { return true }
+                    elems = (*elem).tail
+                }
+                None => break
+            }
+        }
     }
     false
+}
+
+fn checker_is_linear_type_inplace(c: *mut Checker, ty: TypeEntry) -> bool with Mut, Panic, Div {
+    var seen: [Name; 64] = [empty_name(); 64]
+    checker_type_contains_linear_owner((*c).structs, (*c).enums, (*c).fn_sigs, ty, &!seen as *mut [Name; 64], 0)
 }
 
 // ---- collect phase, true *mut (the crash is HERE, in collect, not check) ----
@@ -27251,16 +27328,8 @@ impl Checker {
     }
 
     fn is_linear_type(self, ty: TypeEntry) -> bool with Mut, Panic, Div {
-        if ty.kind == TypeKind::TyNamed {
-            let idx = struct_table_find(self.structs, ty.name)
-            if idx >= 0 {
-                return (*self.structs).entries[idx].is_linear
-            }
-        }
-        if ty.kind == TypeKind::TyFn && ty.fn_sig_id >= 0 {
-            return fn_sig_table_get(self.fn_sigs, ty.fn_sig_id).is_linear_closure
-        }
-        false
+        var seen: [Name; 64] = [empty_name(); 64]
+        checker_type_contains_linear_owner(self.structs, self.enums, self.fn_sigs, ty, &!seen as *mut [Name; 64], 0)
     }
 
     fn check_expr_stmt(self, s: Stmt) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
