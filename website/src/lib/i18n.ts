@@ -104,9 +104,9 @@ export function getPathWithoutLocalePrefix(pathname: string): string {
 }
 
 /**
- * BCP 47 tag for Open Graph (aligned with @astrojs/sitemap i18n mapping).
- * The short URL prefix `pt` maps to Brazilian Portuguese because astro.config.mjs
- * already publishes `pt-BR` in the sitemap locale table.
+ * Open Graph locale (underscore form). hreflang and html lang use the
+ * hyphenated tags in seo-locales.mjs (pt-BR, zh-CN, zh-HK), which are the
+ * tags the sitemap publishes. The short URL prefix stays `pt` / `zh` / `zh-hk`.
  */
 export function ogLocaleTag(locale: Locale): string {
   const map: Record<Locale, string> = {
