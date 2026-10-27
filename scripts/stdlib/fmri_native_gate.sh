@@ -60,7 +60,10 @@ ldd "$out/reference" > "$out/BOUND_LIBRARIES.txt"
 ! grep -q 'not found' "$out/BOUND_LIBRARIES.txt"
 awk '/=> \// {print $3} /^[[:space:]]*\// {print $1}' "$out/BOUND_LIBRARIES.txt" | LC_ALL=C sort -u | xargs -r sha256sum > "$out/BOUND_LIBRARIES.sha256"
 fixture="$root/tests/fixtures/fmri"
-phase reference mutants 30 "$out/reference" --mutants "$fixture/tiny_real_slice_nifti1.nii" "$fixture/tiny_real_slice_nifti2.nii" "$fixture/tiny_real_motion.tsv" "$out/cases"
+phase reference mutants 30 "$out/reference" --mutants "$fixture/tiny_real_slice_nifti1.nii" "$fixture/tiny_real_slice_nifti2.nii" "$fixture/tiny_real_motion.tsv" "$fixture/tiny_atlas_labels_nifti1.nii" "$fixture/tiny_index_config.v1.tsv" "$out/cases"
+while IFS=$'\t' read -r name expected;do
+ phase "$name" config 30 "$out/reference" --sounio-config "$out/cases/$name/config.tsv"
+done < "$out/cases/PLAN.tsv"
 "$node" --input-type=module - "$root" "$out" <<'JS'
 import fs from 'node:fs';import assert from 'node:assert/strict';import crypto from 'node:crypto';
 const [root,out]=process.argv.slice(2),test=root+'/tests/stdlib/fmri/test_pipeline_real_e2e.sio';
@@ -71,9 +74,15 @@ const records=[];
 for(const line of fs.readFileSync(out+'/cases/PLAN.tsv','utf8').trimEnd().split('\n')){
  const [name,rc,...extra]=line.split('\t');assert.equal(extra.length,0);assert.match(name,/^[a-z-]+$/);assert.match(rc,/^[0-9]+$/);
  let derived=text;const substitutions=[];
- for(const [from,to]of [['tests/fixtures/fmri/tiny_real_slice_nifti1.nii',out+'/cases/'+name+'/a.nii'],['tests/fixtures/fmri/tiny_real_slice_nifti2.nii',out+'/cases/'+name+'/b.nii'],['tests/fixtures/fmri/tiny_real_motion.tsv',out+'/cases/'+name+'/motion.tsv']]){
+ for(const [from,to]of [['tests/fixtures/fmri/tiny_real_slice_nifti1.nii',out+'/cases/'+name+'/a.nii'],['tests/fixtures/fmri/tiny_real_slice_nifti2.nii',out+'/cases/'+name+'/b.nii'],['tests/fixtures/fmri/tiny_real_motion.tsv',out+'/cases/'+name+'/motion.tsv'],['tests/fixtures/fmri/tiny_atlas_labels_nifti1.nii',out+'/cases/'+name+'/atlas.nii']]){
   const a='"'+from+'"',b='"'+to+'"';assert.equal(derived.split(a).length-1,1);assert(!derived.includes(b));derived=derived.replace(a,b);substitutions.push({from:a,to:b});
  }
+ const begin='// FMRI_CONFIG_BEGIN\n',end='// FMRI_CONFIG_END\n';
+ assert.equal(derived.split(begin).length,2);assert.equal(derived.split(end).length,2);
+ const from=derived.slice(derived.indexOf(begin)+begin.length,derived.indexOf(end));
+ const expression=fs.readFileSync(out+'/'+name+'.config.log','utf8').trim();
+ assert.match(expression,/^fmri_index_config_new\([^\r\n;{}]+\)$/);
+ const to='    let config = '+expression+'\n';derived=derived.replace(from,to);substitutions.push({from,to});
  let reverse=derived;for(const {from,to}of substitutions.toReversed()){reverse=reverse.replace(to,from);}
  assert(Buffer.from(reverse).equals(original));
  const target=out+'/cases/'+name+'/test.sio';fs.writeFileSync(target,derived,{flag:'wx'});
@@ -91,17 +100,17 @@ while IFS=$'\t' read -r name expected;do
  actual=0;phase "$name" native 120 "$case_dir/program.elf" || actual=$?
  [[ "$actual" == "$expected" ]] || { echo "$name expected=$expected actual=$actual" >&2;exit 1; }
  if [[ "$expected" == 0 ]];then
-  phase "$name" cpp 30 "$out/reference" --check "$case_dir/a.nii" "$case_dir/b.nii" "$case_dir/motion.tsv" "$out/$name.native.log"
+  phase "$name" cpp 30 "$out/reference" --check "$case_dir/a.nii" "$case_dir/b.nii" "$case_dir/motion.tsv" "$case_dir/atlas.nii" "$case_dir/config.tsv" "$out/$name.native.log"
  else
   ! grep -q SCIENCE_FMRI_OK "$out/$name.native.log"
-  rejected=0;phase "$name" reference-refusal 30 "$out/reference" --validate "$case_dir/a.nii" "$case_dir/b.nii" "$case_dir/motion.tsv" || rejected=$?
+  rejected=0;phase "$name" reference-refusal 30 "$out/reference" --validate "$case_dir/a.nii" "$case_dir/b.nii" "$case_dir/motion.tsv" "$case_dir/atlas.nii" "$case_dir/config.tsv" || rejected=$?
   [[ "$rejected" == 2 ]]
  fi
  count=$((count+1))
 done < "$out/cases/PLAN.tsv"
 [[ "$count" -ge 10 ]]
 phase oracle mutate 30 "$out/reference" --wrong-output "$out/baseline.native.log" "$out/wrong-output.log"
-r=0;phase oracle reject-wrong-value 30 "$out/reference" --check "$out/cases/baseline/a.nii" "$out/cases/baseline/b.nii" "$out/cases/baseline/motion.tsv" "$out/wrong-output.log" || r=$?
+r=0;phase oracle reject-wrong-value 30 "$out/reference" --check "$out/cases/baseline/a.nii" "$out/cases/baseline/b.nii" "$out/cases/baseline/motion.tsv" "$out/cases/baseline/atlas.nii" "$out/cases/baseline/config.tsv" "$out/wrong-output.log" || r=$?
 [[ "$r" == 1 ]] && grep -Fq 'numerical mismatch' "$out/oracle.reject-wrong-value.log"
 # Resource ownership and reused result availability are separate regressions.
 for test in test_native_binary_reader test_native_metrics_reuse;do

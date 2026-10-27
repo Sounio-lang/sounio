@@ -1,11 +1,53 @@
 // Bounded native paired-image QC: uint8 NIfTI-1/2, <=4096 samples/image,
 // <=500 matching timepoints. Motion TSV has tx,ty,tz,rx,ry,rz and <=9 dp.
-// Atlas coverage and a composite uncertainty index require additional inputs.
+// Index-aligned atlas and explicit versioned weights/scales are required.
 use fmri::nifti::{NiftiFileBuffer,NiftiHeader,nifti_file_buffer_new,nifti_header_new,nifti_read_file_buffer_into,nifti_parse_header_buffer_into}
 use ffi::platform::{platform_open,platform_close}
 use collections::byte_buffer::{byte_buffer_new,byte_buffer_push,byte_buffer_close}
 use data::native_csv::{native_csv_open,native_csv_status,native_csv_next,native_csv_f64_9dp,native_csv_close}
 use math::pure::{sqrt,ln,tanh,is_finite}
+
+pub let FMRI_INDEX_WEIGHTED_MEAN_V1:i64=1
+pub let FMRI_COVERAGE_LABELED_VOXELS:i64=1
+pub let FMRI_COVERAGE_PRESENT_REGIONS:i64=2
+pub let FMRI_ALIGNMENT_VOXEL_INDEX:i64=1
+pub struct FmriIndexConfig {
+ pub weights:[f64;5],
+ pub scales:[f64;5],
+ pub coverage_mode:i64,
+ pub expected_regions:i64,
+ pub alignment_policy:i64,
+ pub formula:i64,
+}
+pub fn fmri_index_config_new(weights:[f64;5],scales:[f64;5],coverage_mode:i64,expected_regions:i64,alignment_policy:i64,formula:i64)->FmriIndexConfig {
+ FmriIndexConfig {weights:weights,scales:scales,coverage_mode:coverage_mode,
+ expected_regions:expected_regions,alignment_policy:alignment_policy,formula:formula}
+}
+pub struct FmriNativeInputs {
+ pub image_a:&NiftiFileBuffer,
+ pub header_a:&NiftiHeader,
+ pub image_b:&NiftiFileBuffer,
+ pub header_b:&NiftiHeader,
+ pub motion:&NiftiFileBuffer,
+ pub atlas:&NiftiFileBuffer,
+ pub atlas_header:&NiftiHeader,
+}
+pub fn fmri_index_config_status(c:&FmriIndexConfig)->i64 with Mut,Div,Panic {
+ if c.formula!=FMRI_INDEX_WEIGHTED_MEAN_V1 || c.alignment_policy!=FMRI_ALIGNMENT_VOXEL_INDEX {return 22}
+ if c.coverage_mode!=FMRI_COVERAGE_LABELED_VOXELS && c.coverage_mode!=FMRI_COVERAGE_PRESENT_REGIONS {return 22}
+ if c.expected_regions<1 || c.expected_regions>255 {return 22}
+ var maximum:f64=0.0
+ var i:i64=0
+ while i<5 {
+  let w=c.weights[i as usize]
+  let s=c.scales[i as usize]
+  if !is_finite(w) || !is_finite(s) || w<0.0 || s<=0.0 {return 22}
+  if w>maximum {maximum=w}
+  i=i+1
+ }
+ if maximum<=0.0 {return 22}
+ 0
+}
 
 pub struct FmriNativeMetrics {
  pub status:i64,
@@ -21,11 +63,18 @@ pub struct FmriNativeMetrics {
  pub fc_status:i64,
  pub fc_ci_width:f64,
  pub ci_status:i64,
+ pub atlas_labeled_voxels:i64,
+ pub atlas_present_regions:i64,
+ pub atlas_coverage_ratio:f64,
+ pub atlas_status:i64,
+ pub uncertainty_score:f64,
+ pub index_status:i64,
 }
 pub fn fmri_native_metrics_new()->FmriNativeMetrics {
  FmriNativeMetrics {status:22,nframes:0,fd_mean:0.0,fd_max:0.0,scrub_fraction:0.0,
  tsnr_median:0.0,tsnr_status:1,dvars_median:0.0,dvars_status:1,
- fc_r:0.0,fc_status:1,fc_ci_width:0.0,ci_status:1}
+ fc_r:0.0,fc_status:1,fc_ci_width:0.0,ci_status:1,
+ atlas_labeled_voxels:0,atlas_present_regions:0,atlas_coverage_ratio:0.0,atlas_status:1,uncertainty_score:0.0,index_status:1}
 }
 fn pr_abs(x:f64)->f64 {if x<0.0 {0.0-x} else {x}}
 fn fmri_shape(b:&NiftiFileBuffer,h:&NiftiHeader)->i64 with Div {
@@ -113,7 +162,8 @@ fn fmri_motion_stats(b:&NiftiFileBuffer,nt:i64)->FmriMotionStats with IO,Alloc,M
  var sum:f64=0.0
  var maximum:f64=0.0
  var scrubbed:i64=0
- while code==0 && native_csv_next(&!csv) {
+ while code==0 {
+  if !native_csv_next(&!csv) {break}
   var current:[f64;6]=[0.0;6]
   var col:i64=0
   while col<6 {
@@ -151,7 +201,8 @@ fn fmri_median(data:&![f64;4096],n:i64)->f64 with Mut,Div,Panic {
  while i<n {
   let x=data[i as usize]
   var j=i
-  while j>0 && data[(j-1) as usize]>x {
+  while j>0 {
+   if data[(j-1) as usize]<=x {break}
    data[j as usize]=data[(j-1) as usize]
    j=j-1
   }
@@ -242,23 +293,101 @@ fn fmri_fc(a:&NiftiFileBuffer,ha:&NiftiHeader,b:&NiftiFileBuffer,hb:&NiftiHeader
   out.ci_status=0
  }
 }
-pub fn fmri_calculate_native(a:&NiftiFileBuffer,ha:&NiftiHeader,b:&NiftiFileBuffer,hb:&NiftiHeader,motion:&NiftiFileBuffer,out:&!FmriNativeMetrics)->i64 with IO,Alloc,Mut,Div,Panic {
+fn fmri_atlas_coverage(b:&NiftiFileBuffer,h:&NiftiHeader,image:&NiftiHeader,c:&FmriIndexConfig,out:&!FmriNativeMetrics)->i64 with Mut,Div,Panic {
+ if h.datatype!=2 || h.bitpix!=8 || h.nt!=1 {return 24}
+ if h.nx!=image.nx || h.ny!=image.ny || h.nz!=image.nz {return 24}
+ let n=image.nx*image.ny*image.nz
+ if n<=0 || n>4096 || h.vox_offset<0 || h.vox_offset>b.len {return 24}
+ if n>b.len-h.vox_offset {return 24}
+ var seen:[bool;256]=[false;256]
+ var labeled:i64=0
+ var regions:i64=0
+ var i:i64=0
+ while i<n {
+  let label=b.data[(h.vox_offset+i) as usize] as i64
+  if label>c.expected_regions {return 24}
+  if label>0 {
+   labeled=labeled+1
+   if !seen[label as usize] {seen[label as usize]=true;regions=regions+1}
+  }
+  i=i+1
+ }
+ out.atlas_labeled_voxels=labeled
+ out.atlas_present_regions=regions
+ if c.coverage_mode==FMRI_COVERAGE_LABELED_VOXELS {
+  out.atlas_coverage_ratio=(labeled as f64)/(n as f64)
+ } else {
+  out.atlas_coverage_ratio=(regions as f64)/(c.expected_regions as f64)
+ }
+ out.atlas_status=0
+ 0
+}
+fn fmri_configured_index(c:&FmriIndexConfig,out:&!FmriNativeMetrics)->i64 with Mut,Div,Panic {
+ if c.weights[2]>0.0 {
+  if out.tsnr_status!=0 || out.tsnr_median<=0.0 {return 1}
+ }
+ if c.weights[3]>0.0 {if out.ci_status!=0 {return 1}}
+ var values:[f64;5]=[out.fd_mean,out.dvars_median,0.0,out.fc_ci_width,1.0-out.atlas_coverage_ratio]
+ if out.tsnr_status==0 {
+  if out.tsnr_median>0.0 {values[2]=1.0/out.tsnr_median}
+ }
+ var maximum:f64=0.0
+ var i:i64=0
+ while i<5 {if c.weights[i as usize]>maximum {maximum=c.weights[i as usize]};i=i+1}
+ var numerator:f64=0.0
+ var denominator:f64=0.0
+ i=0
+ while i<5 {
+  let w=c.weights[i as usize]
+  if w>0.0 {
+   let v=values[i as usize]
+   let fraction=w/maximum
+   let scaled=v/c.scales[i as usize]
+   if !is_finite(fraction) || !is_finite(scaled) {out.index_status=2;return 25}
+   if fraction==0.0 {out.index_status=2;return 25}
+   if v!=0.0 && scaled==0.0 {out.index_status=2;return 25}
+   let term=fraction*scaled
+   if !is_finite(term) {out.index_status=2;return 25}
+   if scaled!=0.0 && term==0.0 {out.index_status=2;return 25}
+   numerator=numerator+term
+   denominator=denominator+fraction
+   if !is_finite(numerator) {out.index_status=2;return 25}
+  }
+  i=i+1
+ }
+ let result=numerator/denominator
+ if !is_finite(result) {out.index_status=2;return 25}
+ if numerator!=0.0 && result==0.0 {out.index_status=2;return 25}
+ out.uncertainty_score=result
+ out.index_status=0
+ 0
+}
+
+pub fn fmri_calculate_native(input:&FmriNativeInputs,config:&FmriIndexConfig,out:&!FmriNativeMetrics)->i64 with IO,Alloc,Mut,Div,Panic {
  out.status=22;out.nframes=0
  out.fd_mean=0.0;out.fd_max=0.0;out.scrub_fraction=0.0
  out.tsnr_median=0.0;out.tsnr_status=1;out.dvars_median=0.0;out.dvars_status=1
  out.fc_r=0.0;out.fc_status=1;out.fc_ci_width=0.0;out.ci_status=1
- let na=fmri_shape(a,ha)
- let nb=fmri_shape(b,hb)
- if na==0 || na!=nb || ha.nx!=hb.nx || ha.ny!=hb.ny || ha.nz!=hb.nz || ha.nt!=hb.nt {return 22}
- let m=fmri_motion_stats(motion,ha.nt)
+ out.atlas_labeled_voxels=0;out.atlas_present_regions=0;out.atlas_coverage_ratio=0.0;out.atlas_status=1
+ out.uncertainty_score=0.0;out.index_status=1
+ if fmri_index_config_status(config)!=0 {out.status=25;return 25}
+ let na=fmri_shape(input.image_a,input.header_a)
+ let nb=fmri_shape(input.image_b,input.header_b)
+ if na==0 || na!=nb || input.header_a.nx!=input.header_b.nx || input.header_a.ny!=input.header_b.ny || input.header_a.nz!=input.header_b.nz || input.header_a.nt!=input.header_b.nt {return 22}
+ let m=fmri_motion_stats(input.motion,input.header_a.nt)
  if m.status!=0 {return m.status}
- out.nframes=ha.nt;out.fd_mean=m.mean;out.fd_max=m.maximum;out.scrub_fraction=m.scrub
- fmri_tsnr(a,ha,na,out)
- fmri_dvars(a,ha,na,out)
- fmri_fc(a,ha,b,hb,na,out)
+ let atlas_status=fmri_atlas_coverage(input.atlas,input.atlas_header,input.header_a,config,out)
+ if atlas_status!=0 {out.status=24;return 24}
+ out.nframes=input.header_a.nt;out.fd_mean=m.mean;out.fd_max=m.maximum;out.scrub_fraction=m.scrub
+ fmri_tsnr(input.image_a,input.header_a,na,out)
+ fmri_dvars(input.image_a,input.header_a,na,out)
+ fmri_fc(input.image_a,input.header_a,input.image_b,input.header_b,na,out)
+ let index_status=fmri_configured_index(config,out)
+ if index_status==25 {out.status=25;return 25}
  out.status=0
  0
 }
+
 fn fmri_emit_metric(name:string,value:f64) with IO {
  print("SCIENCE_METRIC fmri ");print(name);print(" ");println(value)
  print("FMRI_BITS ");print(name);print(" ");print_int(f64_to_bits(value));print("\n")
@@ -266,19 +395,27 @@ fn fmri_emit_metric(name:string,value:f64) with IO {
 fn fmri_emit_unavailable(name:string,reason:string) with IO {
  print("SCIENCE_UNAVAILABLE fmri ");print(name);print(" ");println(reason)
 }
-pub fn run_fmri_pipeline_gate(path_a:string,path_b:string,path_motion:string)->i32 with IO,Alloc,Mut,Div,Panic {
+pub fn run_fmri_pipeline_gate(path_a:string,path_b:string,path_motion:string,path_atlas:string,config:&FmriIndexConfig)->i32 with IO,Alloc,Mut,Div,Panic {
+ if fmri_index_config_status(config)!=0 {return 17}
  var a=nifti_file_buffer_new()
  var b=nifti_file_buffer_new()
  var motion=nifti_file_buffer_new()
+ var atlas=nifti_file_buffer_new()
  if nifti_read_file_buffer_into(path_a,&!a)!=0 {return 10}
  if nifti_read_file_buffer_into(path_b,&!b)!=0 {return 11}
  if nifti_read_file_buffer_into(path_motion,&!motion)!=0 {return 12}
+ if nifti_read_file_buffer_into(path_atlas,&!atlas)!=0 {return 16}
  var ha=nifti_header_new()
  var hb=nifti_header_new()
+ var hatlas=nifti_header_new()
  if nifti_parse_header_buffer_into(&a,&!ha)!=0 {return 13}
  if nifti_parse_header_buffer_into(&b,&!hb)!=0 {return 14}
+ if nifti_parse_header_buffer_into(&atlas,&!hatlas)!=0 {return 16}
+ let inputs=FmriNativeInputs {image_a:&a,header_a:&ha,image_b:&b,header_b:&hb,motion:&motion,atlas:&atlas,atlas_header:&hatlas}
  var out=fmri_native_metrics_new()
- let status=fmri_calculate_native(&a,&ha,&b,&hb,&motion,&!out)
+ let status=fmri_calculate_native(&inputs,config,&!out)
+ if status==24 {return 16}
+ if status==25 {return 17}
  if status!=0 {return 15}
  fmri_emit_metric("nifti1_status",1.0)
  fmri_emit_metric("nifti2_status",1.0)
@@ -289,7 +426,9 @@ pub fn run_fmri_pipeline_gate(path_a:string,path_b:string,path_motion:string)->i
  if out.dvars_status==0 {fmri_emit_metric("qc_dvars_median",out.dvars_median)}
  if out.fc_status==0 {fmri_emit_metric("fc_r",out.fc_r)} else {fmri_emit_unavailable("fc_r","zero_global_signal_variance")}
  if out.ci_status==0 {fmri_emit_metric("fc_ci_width",out.fc_ci_width)} else {fmri_emit_unavailable("fc_ci_width","insufficient_or_constant_timepoints")}
- fmri_emit_unavailable("atlas_coverage_ratio","atlas_input_required")
- fmri_emit_unavailable("uncertainty_score","index_definition_required")
+ fmri_emit_metric("atlas_labeled_voxels",out.atlas_labeled_voxels as f64)
+ fmri_emit_metric("atlas_present_regions",out.atlas_present_regions as f64)
+ fmri_emit_metric("atlas_coverage_ratio",out.atlas_coverage_ratio)
+ if out.index_status==0 {fmri_emit_metric("uncertainty_score",out.uncertainty_score)} else {fmri_emit_unavailable("uncertainty_score","required_metric_unavailable")}
  0
 }

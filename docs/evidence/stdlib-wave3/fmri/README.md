@@ -61,3 +61,61 @@ effect was rejected with E035. Source inventory, compiler/runtime, all generated
 ELFs, derived files and actual dynamic-library hashes verified at completion.
 All three original test function bodies and assertions are retained; only the
 documented effect rows and explanatory header comment changed.
+
+## Explicit atlas and index configuration
+
+The user superseded the initial three-input API with a mandatory atlas and
+explicit index configuration. The 17-case receipts above apply to the earlier
+API only. The expanded API is being qualified separately; those old receipts
+do not certify its new call signature or calculations.
+
+The candidate call is
+run_fmri_pipeline_gate(image_a, image_b, motion, atlas, &config).
+The caller constructs FmriIndexConfig with fmri_index_config_new(weights,
+scales, coverage_mode, expected_regions, alignment_policy, formula). Each of
+weights and scales contains five f64 values in this exact order: FD mean,
+DVARS median, inverse temporal SNR, Fisher-z interval width, uncovered fraction.
+All fields are mandatory; the library supplies no implicit weights or scales.
+
+Version 1 computes sum((w/max(w)) * feature/scale) / sum(w/max(w)).
+Weights must be finite and nonnegative, at least one must be positive, and
+every scale must be finite and positive. Intermediate overflow and nonzero
+values lost to underflow are refused. An unavailable tSNR or interval makes
+the index unavailable only when its corresponding weight is positive. The
+output key uncertainty_score is retained for compatibility, but this configured
+scalar is not a calibrated probability or a clinically validated uncertainty
+estimate. It is not restricted to the range zero to one. The fixture's explicit
+coefficients test the mechanism and are not production defaults.
+
+The required uint8 atlas has one timepoint and exactly the images' spatial
+dimensions. Zero denotes background; positive integer labels must be within
+1..expected_regions, with expected_regions in 1..255. Coverage mode 1 is the
+number of labeled spatial voxels divided by all spatial voxels. Mode 2 is the
+number of distinct positive labels present divided by expected_regions.
+The pipeline also emits both counts. Required alignment policy 1 is an
+explicit caller assertion of voxel-index alignment: this bounded path does
+not infer registration or validate an atlas against world-space transforms.
+
+Formula 1 and the two coverage modes are explicitly versioned. The public
+pipeline returns 16 for an invalid or unreadable atlas and 17 for an invalid
+configuration or unrepresentable index arithmetic. Missing required component
+metrics produce required_metric_unavailable rather than a fabricated number.
+The low-level calculation resets all prior result fields on every call.
+
+Slurm18448 generated the binary atlas from the pinned NIfTI fixture and wrote
+its nine-row configuration TSV using C++23. Slurm18466 compiled both the old
+and expanded independent C++23 references, reproduced every original mutation,
+and verified that the first17 cases retain byte-identical image/motion inputs
+and the same expected native exits. All47 expanded configuration/atlas cases
+matched the C++ input acceptance/refusal contract; every syntactically valid
+configuration emitted a constructor, including semantic-invalid cases that
+must reach the Sounio validator. Source, executable and generated-file guards
+passed. This is a reference/generator result, not expanded Sounio acceptance.
+
+The first expanded Sounio check and compile passed (18456), then the native
+program signaled132 before metrics. Stage diagnostics18457 localized the
+boundary to reference-valued struct field access. Standalone original
+regression18458 failed its unchanged p.b.x assertion while direct leaf(&b)
+worked. Diagnostic18459 printed the erroneous chained value and showed that
+forwarding leaf(p.b) still reads the correct value. The compiler repair and
+full47-case Sounio/C++ replay remain required; the failed witnesses are retained.
