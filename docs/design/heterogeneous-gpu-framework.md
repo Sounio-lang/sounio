@@ -1254,3 +1254,27 @@ This is not an A5000 run and not a V100 run. The f64 rate of the L4 is not the r
 Gate. Job 18084, node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 a46e89b064041643bfde8eb7cc5cc63c. SILICON PASS, EXIT:0. The node is idle.
 
 The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 49. Both halves of the f64 multiply (2026-10-27, OBSERVED)
+
+Job 18084 stored the bits of 10.0. That product is `0x4024000000000000`. The low 32 bits are 0, so a store of only the high half would have looked the same.
+
+`atlas_mov_imm_lo` now forms an immediate whose top 16 bits are at least 32768. The sign of that half is written as `(hi - 65536) * 2^48`, the same adjustment the IMAD immediate already used. The four moves in front of `DMUL` were replaced:
+
+- R2, R3 hold 1.1, bits `0x3ff199999999999a`. The low half `0x9999999a` is the case the old formula could not form.
+- R4, R5 hold 2.3, bits `0x4002666666666666`.
+
+The IEEE product of those two values is `0x40043d70a3d70a3d`. The low 32 bits are `0xa3d70a3d`.
+
+Job 18090, on the L4, the sm_86 image:
+
+- AMP86=42 still.
+- DMUL_LOAD=1, DMUL=4612879472328641085, DMUL_LO=2748779069.
+- image rc=209, VOLTA_LOAD=0.
+
+The A5000 is still inside job 17498. There is still no V100. This is the sm_86 `DMUL` word, executed on the L4, with both halves of the product nonzero in the sense that the low half of the product is not zero. The low half of each factor was also nonzero.
+
+Gate. Node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 b61ff06bd9e6ad3c99b4819de663cc5d. SILICON PASS, EXIT:0. The node is idle.
+
+The 0.0018 s threshold is not moved. This cut does not pass it.
