@@ -1,0 +1,98 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: UNICODE_COLLATION_CODEPOINTS_OK
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_push,integer_buffer_len,integer_buffer_get,integer_buffer_close}
+use text::utf8::{utf8_text_new,utf8_text_append_scalar,utf8_text_byte_len,utf8_text_scalar_len,utf8_text_close}
+use text::collation::{unicode_collator_root,unicode_collation_key,unicode_collation_key_codepoints,unicode_collation_key_status,unicode_collation_key_len,unicode_collation_key_at,unicode_collation_key_compare,unicode_collation_key_close}
+fn raw_pair(a:i64,b:i64)->IntegerBuffer with Alloc,Mut,Div,Panic {
+ var values=integer_buffer_new(0,16)
+ assert(integer_buffer_push(&!values,a)==0)
+ assert(integer_buffer_push(&!values,b)==0)
+ values
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let collator=unicode_collator_root(0,3,false,false)
+ // Exact original official failure: chunk413 row39. No replacement characters.
+ let left=raw_pair(0x0378,0x0062)
+ let right=raw_pair(0xD800,0x0021)
+ let a=unicode_collation_key_codepoints(&collator,&left,8192,8192)
+ let b=unicode_collation_key_codepoints(&collator,&right,8192,8192)
+ assert(unicode_collation_key_status(&a)==0 && unicode_collation_key_status(&b)==0)
+ let order=unicode_collation_key_compare(&a,&b)
+ assert(order.status==0 && order.order==0-1)
+ assert(integer_buffer_get(&right,0).value==0xD800)
+ unicode_collation_key_close(a)
+ unicode_collation_key_close(b)
+ let small=unicode_collation_key_codepoints(&collator,&left,0,8192)
+ assert(unicode_collation_key_status(&small)==2 && unicode_collation_key_len(&small)==0)
+ assert(integer_buffer_len(&left)==2 && integer_buffer_get(&left,0).value==0x0378)
+ unicode_collation_key_close(small)
+ integer_buffer_close(left)
+ integer_buffer_close(right)
+ let negative=raw_pair(0-1,65)
+ let beyond=raw_pair(0x110000,65)
+ let n=unicode_collation_key_codepoints(&collator,&negative,8192,0)
+ let o=unicode_collation_key_codepoints(&collator,&beyond,8192,8192)
+ assert(unicode_collation_key_status(&n)==5 && unicode_collation_key_len(&n)==0)
+ assert(unicode_collation_key_status(&o)==5 && unicode_collation_key_len(&o)==0)
+ assert(integer_buffer_get(&negative,0).value==0-1)
+ assert(integer_buffer_get(&beyond,0).value==0x110000)
+ unicode_collation_key_close(n)
+ unicode_collation_key_close(o)
+ integer_buffer_close(negative)
+ integer_buffer_close(beyond)
+ var strict=utf8_text_new(8)
+ assert(utf8_text_append_scalar(&!strict,65)==0)
+ assert(utf8_text_append_scalar(&!strict,0xD800)==5)
+ assert(utf8_text_scalar_len(&strict)==1 && utf8_text_byte_len(&strict)==1)
+ utf8_text_close(strict)
+ // Adjacent surrogate codepoint values stay separate, never a UTF16 pair decode.
+ let raw=raw_pair(0xD800,0xDC00)
+ let identical=unicode_collator_root(0,5,false,false)
+ let key=unicode_collation_key_codepoints(&identical,&raw,8192,8192)
+ assert(unicode_collation_key_status(&key)==0)
+ let length=unicode_collation_key_len(&key)
+ assert(length>=2)
+ assert(unicode_collation_key_at(&key,length-2).value==0xD800+2)
+ assert(unicode_collation_key_at(&key,length-1).value==0xDC00+2)
+ unicode_collation_key_close(key)
+ integer_buffer_close(raw)
+ var points=integer_buffer_new(0,64)
+ var text=utf8_text_new(32)
+ var i:i64=0
+ while i<6 {
+  let cp=if i==0 {97} else if i==1 {769} else if i==2 {65534} else if i==3 {98} else if i==4 {768} else {0}
+  assert(integer_buffer_push(&!points,cp)==0)
+  assert(utf8_text_append_scalar(&!text,cp)==0)
+  i=i+1
+ }
+ var root:i64=0
+ while root<2 {
+  var strength:i64=1
+  while strength<=5 {
+   var shifted:i64=0
+   while shifted<2 {
+    var backwards:i64=0
+    while backwards<2 {
+     let c=unicode_collator_root(root,strength,shifted==1,backwards==1)
+     let codepoints=unicode_collation_key_codepoints(&c,&points,8192,8192)
+     let utf8=unicode_collation_key(&c,&text,8192,8192)
+     assert(unicode_collation_key_status(&codepoints)==0 && unicode_collation_key_status(&utf8)==0)
+     let parity=unicode_collation_key_compare(&codepoints,&utf8)
+     assert(parity.status==0 && parity.order==0)
+     unicode_collation_key_close(codepoints)
+     unicode_collation_key_close(utf8)
+     backwards=backwards+1
+    }
+    shifted=shifted+1
+   }
+   strength=strength+1
+  }
+  root=root+1
+ }
+ integer_buffer_close(points)
+ utf8_text_close(text)
+ print("UNICODE_COLLATION_CODEPOINTS_OK\n")
+ 0
+}
+

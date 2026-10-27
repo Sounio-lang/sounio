@@ -5,7 +5,7 @@
 // floor(max_work_bytes/12)*8 integer bytes plus *4 encoded bytes. Allocator pages,
 // compiler aggregate metadata, and caller-owned input/output are outside this budget.
 // Status0 OK,1 config/form,2 budget,3 alloc,4 bounds,5 UTF8,6 corrupt/versioned data.
-use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_status,integer_buffer_len,integer_buffer_get,integer_buffer_set,integer_buffer_push,integer_buffer_resize,integer_buffer_close}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_status,integer_buffer_len,integer_buffer_get,integer_buffer_set,integer_buffer_push,integer_buffer_reserve,integer_buffer_resize,integer_buffer_close}
 use collections::byte_buffer::{byte_buffer_new,byte_buffer_close}
 use text::utf8::{Utf8Text,utf8_text_status,utf8_text_byte_len,utf8_text_next,utf8_text_append_bytes,utf8_encode_append}
 use text::ucd_data::{UnicodeData,unicode_data,unicode_data_status,ucd_property,ucd_property_value,ucd_decimal_value,ucd_mapping,ucd_field,ucd_compose}
@@ -125,3 +125,42 @@ pub fn unicode_normalize_append(input:&Utf8Text,form:i64,max_work_bytes:i64,out:
  status
 }
 
+
+// Low-level UCD codepoint transform for UCA's full codepoint domain.
+// Values0..10FFFF are accepted, including surrogate codepoint values as inert
+// CCC0 cells. No UTF8 encoding occurs; the Utf8Text API remains scalar-strict.
+// Appends atomically to a separate checked IntegerBuffer. Work payload <=budget.
+// Input/output payloads are outside the scratch budget; out owns its result budget.
+pub fn unicode_normalize_codepoints_append(input:&IntegerBuffer,form:i64,max_work_bytes:i64,out:&!IntegerBuffer)->i64 with Alloc,Mut,Div,Panic {
+ if form<0 || form>3 || max_work_bytes<0 || max_work_bytes>9223372036854771704 {return 1}
+ if integer_buffer_status(input)!=0 {return integer_buffer_status(input)}
+ if integer_buffer_status(out)!=0 {return integer_buffer_status(out)}
+ let n=integer_buffer_len(input)
+ var i:i64=0
+ while i<n {
+  let cp=integer_buffer_get(input,i).value
+  if cp<0 || cp>1114111 {return 5}
+  i=i+1
+ }
+ let data=unicode_data()
+ if unicode_data_status(&data)!=0 {return 6}
+ let property=ucd_property(&data,"Canonical_Combining_Class")
+ if property<0 {return 6}
+ var work=integer_buffer_new(0,(max_work_bytes/8)*8)
+ var status=integer_buffer_status(&work)
+ i=0
+ while status==0 && i<n {
+  status=normalize_decompose(&data,&!work,integer_buffer_get(input,i).value,form>=2,0)
+  i=i+1
+ }
+ if status==0 {status=normalize_order(&data,property,&!work)}
+ if status==0 && form%2==0 {status=normalize_compose(&data,property,&!work)}
+ let count=integer_buffer_len(&work)
+ let old=integer_buffer_len(out)
+ if status==0 && count>9223372036854775807-old {status=2}
+ if status==0 {status=integer_buffer_reserve(out,old+count)}
+ i=0
+ while status==0 && i<count {assert(integer_buffer_push(out,integer_buffer_get(&work,i).value)==0);i=i+1}
+ integer_buffer_close(work)
+ status
+}
