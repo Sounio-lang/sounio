@@ -54,3 +54,18 @@ effects. Prob remains required for Monte Carlo APIs, including deterministic
 seeded sampling. All four Monte Carlo entrypoints explicitly require a positive
 sample count. klibanoff_compose_with_active exposes composition of the existing
 certainty-equivalent operator and active EFE calculation.
+
+Slurm 18275 preserved three original source refusals: private scientific API,
+mixed integer/floating multiplication in systems::lyapunov_estimate, and mutable
+push calls on readonly sequence arrays in darwin. Explicit array initialization
+also proved necessary for SystemState's nested x array. Slurm 18277 then passed
+check, compile and native execution of the unchanged original systems and darwin
+tests, with final input, stdlib and compiler hash verification. System dimensions,
+Euler formulas, loop bounds and test tolerances remain unchanged. Darwin uses
+the existing persistent concatenation operator for its private sequence helpers;
+the original runtime control exercises the public complement operation only.
+
+The science visibility candidate passes check but still fails native emission:
+trace 18278 identifies measurement_add with reg_count18 and a binop referencing
+register122. This compiler refusal remains open and is not covered by the two
+native passes above.
