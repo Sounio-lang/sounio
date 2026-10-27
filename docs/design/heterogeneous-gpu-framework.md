@@ -1342,3 +1342,110 @@ The A5000 is still inside job 17498. There is still no V100.
 Gate. Node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 d40c2ca0734fcbaf5c68a9e3aefc710c. SILICON PASS, EXIT:0. The node is idle.
 
 The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 53. An sm_89 image that reads no cubin (2026-10-27, OBSERVED)
+
+Sounio allocates 2600 bytes and writes the ELF. The probe does not open a cubin. `e_machine` is 190. `e_flags` is `0x590559`. The entry is `stamp`. One parameter. The register count is 8, written by `atlas_shi_info` at file `0x330` and at file `0x96f`.
+
+The first body loaded the pointer with `IMAD.MOV` from `c[0][0x160]`, moved 42 into R5 afterwards, and padded the section with `EXIT`. Job 18279. md5 `038cb4b304550246538ed0e7be1446d6`. `OWN_LOAD=1`. The output word was not cleared. `OWN=1073741824`, the bits of 2.0.
+
+Job 18297 used that same image and cleared the word to 0 before launch. md5 `f13571c4e3b087233a6ce772914e413b`. `OWN=1073741824` again. The kernel wrote 2.0. The cleared 0 did not remain.
+
+The text was then put in the order whose atlas words match a kernel that has stored 42: `IMAD.MOV` R1 from `c[0][0x28]`, `IMAD.MOV` R5 of 42, `MOV` R2 from `c[0][0x160]`, `ULDC.64` UR4 from `c[0][0x118]` at stall 1 yield 1, `MOV` R3 from `c[0][0x164]`, `STG.E` of R5, `EXIT`, then the `BRA` and `NOP` bytes that fill the 256-byte section. The word was cleared first.
+
+Job 18304. The node was idle. md5 `0e31e400e6c96c1508a22ddce69a04cf`. `OWN_LOAD=1`, `OWN=42`, `EXIT:0`. The cleared word became 42.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+## 54. The mnemonic list of the resident forward (2026-10-27, OBSERVED as a list)
+
+`nvdisasm` 12.8.55 on the cubin from `ptxas` 12.8.61 of `stdlib/hetero/kernels/fwd_resident.ptx` at `a50f6285db`, target `sm_89`, entry `token_m1`. Eighty-one mnemonics. This list is the atlas scope. A name with no device number is not an encoder.
+
+The opcode column is the low 16 bits of the first instruction of that mnemonic in this cubin, printed as the disassembler's word. It is the specimen, not a proof.
+
+Job 18304's 42 is the only number this ELF has stored. It shows that `IMAD.MOV` of the immediate 42 reached `STG.E` through the pointer this body loaded with `MOV` from `c[0][0x160]` and `c[0][0x164]`. The other names are not proven here.
+
+- 242 `7c10` IADD3
+- 184 `7a02` MOV
+- 167 `7624` IMAD.MOV.U32
+- 141 `8947` BRA
+- 135 `7825` IMAD.WIDE.U32
+- 123 `2223` FFMA
+- 122 `7981` LDG.E
+- 104 `8221` FADD
+- 89 `7c82` UMOV
+- 77 `7a0c` ISETP.GE.U32.AND
+- 57 `720c` ISETP.NE.U32.AND
+- 52 `7a24` IMAD
+- 48 `7820` FMUL
+- 46 `7945` BSSY
+- 46 `7941` BSYNC
+- 42 `7944` CALL.REL.NOINC
+- 41 `7b1d` BAR.SYNC.DEFER
+- 39 `7986` STG.E
+- 35 `7812` LOP3.LUT
+- 24 `7984` LDS
+- 24 `2824` IMAD.IADD
+- 23 `7ab9` ULDC.64
+- 23 `7ab9` ULDC
+- 22 `8388` STS
+- 22 `781c` PLOP3.LUT
+- 20 `7919` S2R
+- 20 `7948` WARPSYNC
+- 17 `7981` LDG.E.64
+- 16 `7f89` SHFL.DOWN
+- 15 `7946` YIELD
+- 14 `7890` UIADD3
+- 12 `7992` MEMBAR.SC.GPU
+- 12 `79ab` ERRBAR
+- 12 `798f` CCTL.IVALL
+- 12 `79a8` ATOMG.E.ADD.STRONG.GPU
+- 12 `7981` LDG.E.STRONG.SYS
+- 12 `780c` ISETP.LE.U32.OR
+- 12 `7981` LDG.E.EF.128
+- 12 `7981` LDG.E.STRONG.SM
+- 11 `7308` MUFU.RCP
+- 11 `2824` IMAD.SHL.U32
+- 10 `7224` IMAD.MOV
+- 10 `7227` IMAD.HI.U32
+- 10 `7219` SHF.L.U32
+- 9 `7950` RET.REL.NODEC
+- 8 `720c` ISETP.GT.U32.AND
+- 8 `7918` NOP
+- 7 `7819` SHF.R.U32.HI
+- 7 `7805` CS2R
+- 6 `780b` FSETP.GEU.AND
+- 6 `7207` SEL
+- 6 `7589` SHFL.IDX
+- 6 `7811` LEA
+- 6 `7e24` IMAD.U32
+- 5 `7302` FCHK
+- 5 `7b06` I2F.U32.RP
+- 5 `7305` F2I.FTZ.U32.TRUNC.NTZ
+- 5 `7947` BRA.DIV
+- 4 `7308` MUFU.RSQ
+- 4 `780b` FSETP.NEU.FTZ.AND
+- 4 `720c` ISETP.GE.AND
+- 4 `7310` F2F.F64.F32
+- 4 `7986` STG.E.64
+- 3 `7a0c` ISETP.LT.U32.AND
+- 3 `7899` USHF.R.U32.HI
+- 3 `7a45` I2FP.F32.S32
+- 3 `7208` FSEL
+- 3 `7308` MUFU.EX2
+- 3 `720c` ISETP.NE.AND
+- 2 `780b` FSETP.GTU.FTZ.AND
+- 2 `7221` FADD.FTZ
+- 2 `7986` STG.E.128
+- 1 `7311` F2I.F64.TRUNC
+- 1 `8209` FMNMX
+- 1 `794d` EXIT
+- 1 `780c` ISETP.GT.U32.OR
+- 1 `780c` ISETP.GT.AND
+- 1 `7223` FFMA.RZ
+- 1 `7223` FFMA.RP
+- 1 `7223` FFMA.RM
+- 1 `7217` IMNMX.U32
+
+The 0.0018 s threshold is not moved. This list does not pass it.
