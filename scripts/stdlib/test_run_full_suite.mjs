@@ -21,11 +21,13 @@ test('file partitions isolate relative outputs and refuse omitted cases',()=>{
    assert.ifError(result.error);
    return {result,report:JSON.parse(fs.readFileSync(path.join(out,'RESULT.json'),'utf8'))};
   };
-  const positive=run('positive');
+  const external=path.join(tmp,'private-workers');
+  const positive=run('positive',{STDLIB_FULL_WORKER_DIR:external});
   assert.equal(positive.result.status,0,positive.result.stderr);
   assert.deepEqual(positive.report.totals,{pass:2,fail:0,skip:0,total:2});
   assert.deepEqual(positive.report.selection_errors,[]);
   assert.equal(new Set(positive.report.context.worker_roots).size,2);
+  assert(positive.report.context.worker_roots.every(p=>p.startsWith(external+path.sep)));
   assert.equal(fs.existsSync(path.join(root,'case-output.txt')),false);
   for(const worker of positive.report.context.worker_roots)assert(fs.readFileSync(path.join(worker,'case-output.txt'),'utf8').endsWith('.sio'));
   const omitted=run('omitted',{OMIT_A:'1'});

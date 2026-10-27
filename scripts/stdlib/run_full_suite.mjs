@@ -31,11 +31,17 @@ const prefixes=partition==='file'?paths:directoryPrefixes;
 // Per-file execution gets one private archived tree per worker: relative output
 // files cannot collide, and source mutation is checked in every copy.
 if(partition==='file'&&fs.existsSync(path.join(root,'.git')))throw Error('file partition requires a fresh source archive, not a Git worktree');
+const externalWorkers=process.env.STDLIB_FULL_WORKER_DIR||'';
+if(partition==='file'&&externalWorkers){
+ if(!path.isAbsolute(externalWorkers)||externalWorkers===root||root.startsWith(externalWorkers+path.sep)||externalWorkers.startsWith(root+path.sep))throw Error('external worker directory must be absolute and outside the source tree');
+ fs.mkdirSync(externalWorkers);
+}
+const workerBase=externalWorkers||path.join(output,'workers');
 const workerCount=Math.min(jobs,prefixes.length),workerRoots=[];
 const copyInvariants=partition==='file'?[...initial,...walk(path.join(root,'stdlib'),false).filter(p=>p.endsWith('.sio')).map(p=>({path:path.relative(root,p),sha256:hash(p)}))]:[];
 for(let i=0;i<workerCount;i++){
  if(partition!=='file'){workerRoots.push(root);continue;}
- const copy=path.join(output,'workers',String(i));fs.mkdirSync(path.dirname(copy),{recursive:true});
+ const copy=path.join(workerBase,String(i));fs.mkdirSync(path.dirname(copy),{recursive:true});
  fs.cpSync(root,copy,{recursive:true,mode:fs.constants.COPYFILE_FICLONE,filter:p=>p!==output&&!p.startsWith(output+path.sep)});
  for(const input of copyInvariants)if(hash(path.join(copy,input.path))!==input.sha256)throw Error('worker copy differs: '+input.path);
  workerRoots.push(copy);
