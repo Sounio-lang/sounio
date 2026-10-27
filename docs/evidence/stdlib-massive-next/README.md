@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.stdlib-massive-next.readme
+authority: repo_only
+audience: users
+last_validated: 2026-10-27
+validated_by: devpass
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-massive-next.readme
+-->
+
 # Stdlib follow-through: 2026-10-27
 
 Source baseline: main 77ac662f9be1c477c796b946a0be21fd34f783cb.
