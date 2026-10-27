@@ -1,0 +1,85 @@
+use parser::ast::*;
+use compiler::module_parse::{load_module_file}
+use compiler::private_fn_identity::{private_fn_identity_apply,pfi_use_map_reset,pfi_use_map_module_begin,pfi_use_map_note}
+use check::specializer::{specialize_generics_multi,spec_append_item_lists,spec_unsound_poison_detected}
+fn return_name(items:Option<Box<ItemList>>,name:Name)->Name with Mut,Panic,Div {
+ var cursor=items
+ while true {match cursor {
+  Some(node)=>{
+   if (*node).head.kind==ItemKind::ItemFn && name_eq((*node).head.name,name) {
+    match (*node).head.fn_def {Some(fd)=>{match (*fd).return_type {Some(t)=>return Name{buf:(*t).path.segments.head_buf,len:(*t).path.segments.head_len},None=>{}}},None=>{}}
+   }
+   cursor=(*node).tail
+  }
+  None=>return make_name("")
+ }}
+ make_name("")
+}
+fn parameter_name(items:Option<Box<ItemList>>,name:Name)->Name with Mut,Panic,Div {
+ var cursor=items
+ while true {match cursor {
+  Some(node)=>{
+   if (*node).head.kind==ItemKind::ItemFn && name_eq((*node).head.name,name) {
+    match (*node).head.fn_def {Some(fd)=>{match (*fd).params {Some(p)=>return Name{buf:(*p).head.ty.path.segments.head_buf,len:(*p).head.ty.path.segments.head_len},None=>{}}},None=>{}}
+   }
+   cursor=(*node).tail
+  }
+  None=>return make_name("")
+ }}
+ make_name("")
+}
+
+fn main()->i32 with IO,Mut,Alloc,Panic,Div {
+ let a=load_module_file("tests/fixtures/wave3_generic_enum/module_owner/a.sio")
+ let b=load_module_file("tests/fixtures/wave3_generic_enum/module_owner/b.sio")
+ let facade=load_module_file("tests/fixtures/wave3_generic_enum/module_owner/facade.sio")
+ let consumer=load_module_file("tests/fixtures/wave3_generic_enum/module_owner/qualified_consumer.sio")
+ var programs:[Program;256]=[Program{module_path:empty_path(),items:None};256]
+ programs[0]=consumer;programs[1]=a;programs[2]=b;programs[3]=facade
+ pfi_use_map_reset()
+ pfi_use_map_module_begin(0);pfi_use_map_note(0,3,false)
+ pfi_use_map_module_begin(1)
+ pfi_use_map_module_begin(2)
+ pfi_use_map_module_begin(3);pfi_use_map_note(3,1,false)
+ assert(private_fn_identity_apply(&!programs,4)>=0-1)
+ let merged=spec_append_item_lists(programs[0].items,spec_append_item_lists(programs[1].items,spec_append_item_lists(programs[2].items,programs[3].items)))
+ let specialized=specialize_generics_multi(merged,&!programs,4)
+ assert(!spec_unsound_poison_detected())
+ let first=return_name(specialized,make_name("make_a"))
+ let second=return_name(specialized,make_name("make_b"))
+ assert(first.len>0 && second.len>0)
+ assert(name_eq(parameter_name(specialized,make_name("qualified")),first))
+ assert(!name_eq(first,second))
+ var owner_a=false
+ var owner_b=false
+ var cursor=specialized
+ while true {match cursor {
+  Some(node)=>{
+   let it=(*node).head
+   if it.kind==ItemKind::ItemEnum {
+    if name_eq(it.name,first) {assert(it.origin_module_id==1);owner_a=true}
+    if name_eq(it.name,second) {assert(it.origin_module_id==2);owner_b=true}
+   }
+   cursor=(*node).tail
+  }
+  None=>break
+ }}
+ assert(owner_a && owner_b)
+ // A private dependency is not an exported canonical namespace.
+ let hidden_facade=load_module_file("tests/fixtures/wave3_generic_enum/module_owner/facade_private.sio")
+ let hidden_consumer=load_module_file("tests/fixtures/wave3_generic_enum/module_owner/qualified_private_consumer.sio")
+ programs[0]=hidden_consumer
+ programs[3]=hidden_facade
+ pfi_use_map_reset()
+ pfi_use_map_module_begin(0);pfi_use_map_note(0,3,false)
+ pfi_use_map_module_begin(1)
+ pfi_use_map_module_begin(2)
+ pfi_use_map_module_begin(3);pfi_use_map_note(3,1,false)
+ assert(private_fn_identity_apply(&!programs,4)>=0-1)
+ let hidden_merged=spec_append_item_lists(programs[0].items,spec_append_item_lists(programs[1].items,spec_append_item_lists(programs[2].items,programs[3].items)))
+ let hidden_result=specialize_generics_multi(hidden_merged,&!programs,4)
+ assert(spec_unsound_poison_detected())
+
+ println("GENERIC_ENUM_QUALIFIED_REEXPORT_AST_OK")
+ 0
+}

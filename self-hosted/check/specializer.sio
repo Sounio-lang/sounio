@@ -5009,6 +5009,59 @@ fn spec_enum_use_qualifier_matches(it:Item,owner:i64,ordinal:i64,path:AstPath)->
     }
     false
 }
+// A canonical qualifier can name the defining module behind a public facade.
+// Follow only public exports of this exact terminal name; hidden dependencies
+// must not become namespaces just because the loader happened to load them.
+fn spec_enum_qualified_export_seen(owner:i64,path:AstPath,seen:*mut [bool;256])->i64 with Mut,Panic,Div,Alloc {
+    if owner<0 || owner>=SPEC_ENUM_PROGRAM_COUNT || owner>=256 {return 0-2}
+    if (*seen)[owner as usize] {return 0-1}
+    (*seen)[owner as usize]=true
+    let name=spec_string_list_last_name(path.segments)
+    var out:i64=0-1
+    var ordinal:i64=0
+    var cursor=spec_enum_module_items(owner)
+    while true {match cursor {
+        Some(node)=>{
+            let it=(*node).head
+            if it.kind==ItemKind::ItemUse {
+                if (it.visibility.kind==1 || it.visibility.kind==2) && spec_enum_use_has_name(it,owner,ordinal,name) {
+                    let target=pfi_use_target(owner,ordinal)
+                    if target>=0 {
+                        if spec_enum_use_qualifier_matches(it,owner,ordinal,path) {
+                            out=spec_enum_slot_merge(out,spec_enum_lookup_export(target,name))
+                        }
+                        out=spec_enum_slot_merge(out,spec_enum_qualified_export_seen(target,path,seen))
+                    }
+                }
+                ordinal=ordinal+1
+            }
+            cursor=(*node).tail
+        }
+        None=>break
+    }}
+    out
+}
+fn spec_enum_qualified_from_imports(owner:i64,path:AstPath)->i64 with Mut,Panic,Div,Alloc {
+    let seen=heap_alloc(4096) as *mut [bool;256]
+    var i:i64=0
+    while i<256 {(*seen)[i as usize]=false;i=i+1}
+    var out:i64=0-1
+    var ordinal:i64=0
+    var cursor=spec_enum_module_items(owner)
+    while true {match cursor {
+        Some(node)=>{
+            if (*node).head.kind==ItemKind::ItemUse {
+                let target=pfi_use_target(owner,ordinal)
+                if target>=0 {out=spec_enum_slot_merge(out,spec_enum_qualified_export_seen(target,path,seen))}
+                ordinal=ordinal+1
+            }
+            cursor=(*node).tail
+        }
+        None=>break
+    }}
+    out
+}
+
 fn spec_enum_resolve_path_slot(path:AstPath)->i64 with Mut,Panic,Div,Alloc {
     let terminal=spec_string_list_last_name(path.segments)
     var template_present=false
@@ -5046,6 +5099,7 @@ fn spec_enum_resolve_path_slot(path:AstPath)->i64 with Mut,Panic,Div,Alloc {
         }
         None=>break
     }}
+    if out==0-1 {out=spec_enum_qualified_from_imports(owner,path)}
     if out==0-1 {return 0-2}
     out
 }
