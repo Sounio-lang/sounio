@@ -42,3 +42,12 @@ Completely zero p/s/t CEs are removed as a semantic normalization. The original 
 
 Run `ICU_PREFIX=... tools/unicode/check_collation_data.sh /absolute/new/output` under Slurm to regenerate twice, compare the committed asset, verify source hashes, run conformance and reject bad implementations. This data gate does not qualify Sounio native collation or bundled locale tailorings.
 
+
+## CLDR49 rule parser preparation
+
+`cldr49-source.tar.gz` contains the pinned selected official CLDR49 sources and license, extracted from the official core.zip identified above. It includes all135 collation XML files;169 entries include private, proposed and short variants. The AST preserves variant and default-type identity.
+
+`cldr_generate.cpp` is currently a strict intermediate rule parser and inventory tool. It does not yet produce production tailoring weights. Unsupported grammar, unknown settings and invalid supported-setting values fail explicitly. `cldr_oracle.cpp` is test-only ICU79.1 validation: it reconstructs rules from the AST and checks exact sort-key equality against the original source rules on318,628 probes across all169 entries. It exports no ICU-derived production CE data.
+
+Slurm18359 passed the complete standalone parser/oracle/source-hash gate. Run `ICU_PREFIX=... tools/unicode/check_cldr_ast.sh /absolute/new/output` under Slurm to reproduce it. Own CE/rank construction, locale/import resolution, reorder/case/radical metadata and Sounio native locale conformance remain explicit pending work.
+
