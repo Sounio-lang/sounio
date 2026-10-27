@@ -1,0 +1,46 @@
+//@ run-pass
+//@ expect-stdout: GFF_GRAPH_OK
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_close}
+use genomics::io::dynamic_gff::{dynamic_gff_parse,dynamic_gff_status,dynamic_gff_close}
+use genomics::io::gff_graph::{gff_validate_graph}
+fn bytes(text:string)->ByteBuffer with Alloc,Mut,Div,Panic {
+ var b=byte_buffer_new(8192)
+ var i:i64=0
+ while i<str_len(text) {assert(byte_buffer_push(&!b,(str_char_at(text,i) as i64) & 255)==0);i=i+1}
+ return b
+}
+fn check(text:string,status:i64,reason:i64,nodes:i64,edges:i64) with Alloc,Mut,Div,Panic {
+ let b=bytes(text)
+ let d=dynamic_gff_parse(&b,16384)
+ assert(dynamic_gff_status(&d)==0)
+ let r=gff_validate_graph(&d,8192,65536,65536,1000000)
+ assert(r.status==status && r.reason==reason)
+ if status==0 {assert(r.nodes==nodes && r.edges==edges)}
+ if reason==5 {assert(r.row>=0 && r.related_row>=0)}
+ dynamic_gff_close(d)
+ byte_buffer_close(b)
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ check("##gff-version 3\nchr1\tx\tmRNA\t2\t9\t.\t+\t.\tID=t;Parent=g\nchr1\tx\tgene\t1\t10\t.\t+\t.\tID=g\nchr1\tx\texon\t2\t3\t.\t+\t.\tParent=t\n",0,0,2,1)
+ check("##gff-version 3\nchr1\tx\tgene\t1\t3\t.\t+\t.\tID=g%41\nchr1\tx\tmRNA\t10\t20\t.\t+\t.\tID=t;Parent=gA\nchr1\tx\tmRNA\t30\t40\t.\t+\t.\tID=t;Parent=g%41\n",0,0,2,2)
+ check("##gff-version 3\nchr1\tx\tgene\t1\t3\t.\t+\t.\tID=a%2Cb\nchr1\tx\tmRNA\t2\t3\t.\t+\t.\tID=t;Parent=a%2Cb\n",0,0,2,1)
+ check("##gff-version 3\nchr1\tx\tgene\t1\t3\t.\t+\t.\tID=α\nchr1\tx\tmRNA\t2\t3\t.\t+\t.\tID=t;Parent=%CE%B1\n",0,0,2,1)
+ check("##gff-version 3\nchr1\tx\tgene\t1\t3\t.\t+\t.\tID=g\nchr1\tx\tmRNA\t2\t3\t.\t+\t.\tID=g\n",22,3,0,0)
+ check("##gff-version 3\nchr1\tx\tmRNA\t1\t3\t.\t+\t.\tID=t;Parent=missing\n",95,4,0,0)
+ check("##gff-version 3\nchr1\tx\tgene\t1\t3\t.\t+\t.\tID=a;Parent=a\n",22,5,0,0)
+ check("##gff-version 3\nchr1\tx\tgene\t1\t3\t.\t+\t.\tID=a;Parent=b\nchr1\tx\tgene\t1\t3\t.\t+\t.\tID=b;Parent=a\n",22,5,0,0)
+ check("##gff-version 3\nchr1\tx\tgene\t1\t3\t.\t+\t.\tID=a;ID=b\n",22,2,0,0)
+ check("##gff-version 3\nchr1\tx\tgene\t1\t3\t.\t+\t.\tID=a,b\n",22,2,0,0)
+ check("##gff-version 3\nchr1\tx\texon\t1\t3\t.\t+\t.\t.\n",0,0,0,0)
+ // Canonically equivalent Unicode spellings remain byte-distinct identities.
+ check("##gff-version 3\nchr1\tx\tgene\t1\t3\t.\t+\t.\tID=é\nchr1\tx\tmRNA\t1\t3\t.\t+\t.\tID=t;Parent=é\n",95,4,0,0)
+ let b=bytes("##gff-version 3\nchr1\tx\tgene\t1\t3\t.\t+\t.\tID=a\nchr1\tx\tmRNA\t1\t3\t.\t+\t.\tID=b;Parent=a\n")
+ let d=dynamic_gff_parse(&b,16384)
+ assert(gff_validate_graph(&d,8192,0,65536,1000).status==105)
+ assert(gff_validate_graph(&d,8192,65536,0,1000).status==105)
+ let limited=gff_validate_graph(&d,8192,65536,65536,0)
+ assert(limited.status==105 && limited.reason==7)
+ dynamic_gff_close(d);byte_buffer_close(b)
+ println("GFF_GRAPH_OK")
+ 0
+}

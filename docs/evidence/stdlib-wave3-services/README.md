@@ -175,3 +175,40 @@ for its later C++ producer invocation. Corrected job18148 passed both
 directions; job18152 repeated final-source qualification after making the
 default fixture independent of optional external fixture files. No numeric
 inputs, producer assertions, legacy case groups or SDK version changed.
+
+## Separate genomic semantic receipts
+
+Slurm **18161** completed with status0 for the new GFF graph fixture and
+existing dynamic-GFF fixture: six check/compile/native phases. Coverage:
+forward Parents, multipart IDs, percent-decoded scalar/list boundaries,
+UTF-8 exact identities, no implicit normalization, incompatible multipart
+rows, missing Parents, self/multi-node cycles, duplicate reserved attributes,
+scalar-ID lists, anonymous leaves and index/graph/comparison budgets.
+Cycle errors include representative rows for an actual edge on a cycle.
+
+Receipt:
+`/scratch/sounio-stdlib-wave3-20261027/services/gff-graph-04/results`.
+Initial jobs18153/18154 exposed linear-owner control-flow/projection issues
+in the new module. The implementation now consumes resources in explicit
+branches and uses borrowed helper access. Job18155 passed before the
+additional cycle-edge witness;18161 qualified that final witness.
+
+Slurm **18160** completed with status0 for new VCF document/REF validation
+plus existing VCF core, VCF header and dynamic FASTA: twelve phases.
+Coverage: empty document, repeated POS, contiguous CHROM blocks, reopened
+CHROM, global/within-row duplicate IDs, missing terminal LF, Unicode
+identity separation, index/comparison budget, FASTA window bounds,
+case-folded concrete bases, literal N, mismatched/absent/ambiguous references,
+and failure-preserving window append.
+
+Receipt:
+`/scratch/sounio-stdlib-wave3-20261027/services/vcf-document-02/results`.
+Job18156 preserved a parse failure from a reserved local identifier;18160
+uses the corrected name with the same test cases and passed. Source,
+compiler/runtime and executable hashes have final verification files in
+both final receipt roots.
+
+Public contracts and limits:
+`stdlib/genomics/io/SEMANTIC_VALIDATION.md`. These are separate semantic
+layers. Ontology membership, genomic random-access indexing, variant
+normalization and SV/breakend resolution are not inferred.

@@ -1,0 +1,321 @@
+// Separate GFF3 ID/Parent graph validator over a lexically validated DynamicGff.
+// Reuses the exact-byte CountIdentities index. Percent-decoded keys are encoded
+// as two ASCII hex bytes per byte internally, preserving arbitrary opaque bytes.
+// No hash-only identity, Unicode normalization, ontology or containment claim.
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_len,byte_buffer_get,byte_buffer_clear,byte_buffer_close}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_status,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+use genomics::io::dynamic_gff::{DynamicGff,dynamic_gff_status,dynamic_gff_len,dynamic_gff_field}
+use genomics::count_identities::{CountIdentities,count_identities_payload,count_identities_build,count_identities_status,count_identities_unique,count_identities_comparisons,count_identities_group_of_original,count_identities_close}
+pub struct GffGraphReport {pub status:i64,pub reason:i64,pub row:i64,pub related_row:i64,pub nodes:i64,pub edges:i64,pub comparisons:i64}
+struct GffPack {bytes:i64,tokens:i64,parents:i64}
+struct GffDecoded {value:i64,next:i64,status:i64}
+linear struct GffGraphWork {ids:CountIdentities,meta:IntegerBuffer,row_group:IntegerBuffer,representative:IntegerBuffer,degree:IntegerBuffer,offsets:IntegerBuffer,queue:IntegerBuffer,children:IntegerBuffer,a:ByteBuffer,b:ByteBuffer,tokens:i64,rows:i64,unique:i64}
+fn gg_report(status:i64,reason:i64,row:i64,related:i64)->GffGraphReport {GffGraphReport {status:status,reason:reason,row:row,related_row:related,nodes:0,edges:0,comparisons:0}}
+fn gg_byte(b:&ByteBuffer,i:i64)->i64 {byte_buffer_get(b,i).value}
+fn gg_hex(c:i64)->i64 {if c>=48 && c<=57 {return c-48};if c>=65 && c<=70 {return c-55};if c>=97 && c<=102 {return c-87};return 0-1}
+fn gg_decode(b:&ByteBuffer,i:i64,end:i64)->GffDecoded {
+ if i>=end {return GffDecoded {value:0,next:i,status:22}}
+ let c=gg_byte(b,i)
+ if c!=37 {return GffDecoded {value:c,next:i+1,status:0}}
+ if end-i<3 {return GffDecoded {value:0,next:i,status:22}}
+ let hi=gg_hex(gg_byte(b,i+1));let lo=gg_hex(gg_byte(b,i+2))
+ if hi<0 || lo<0 {return GffDecoded {value:0,next:i,status:22}}
+ return GffDecoded {value:hi*16+lo,next:i+3,status:0}
+}
+fn gg_digit(n:i64)->i64 {if n<10 {return 48+n};return 87+n}
+fn gg_tag(b:&ByteBuffer,start:i64,end:i64,name:string)->bool with Mut {
+ var i=start;var j:i64=0
+ while i<end {
+  let c=gg_decode(b,i,end)
+  if c.status!=0 || c.value!=str_char_at(name,j) {return false}
+  i=c.next;j=j+1
+ }
+ return j==str_len(name)
+}
+fn gg_same_decoded(a:&ByteBuffer,b:&ByteBuffer)->bool with Mut {
+ var i:i64=0;var j:i64=0
+ while i<byte_buffer_len(a) && j<byte_buffer_len(b) {
+  let x=gg_decode(a,i,byte_buffer_len(a));let y=gg_decode(b,j,byte_buffer_len(b))
+  if x.status!=0 || y.status!=0 || x.value!=y.value {return false}
+  i=x.next;j=y.next
+ }
+ return i==byte_buffer_len(a) && j==byte_buffer_len(b)
+}
+fn gg_key(b:&ByteBuffer,start:i64,end:i64,kind:i64,row:i64,emit:bool,pool:&!IntegerBuffer,offsets:&!IntegerBuffer,meta:&!IntegerBuffer,count:&!GffPack)->i64 with Mut,Div,Panic {
+ if start>=end {return 22}
+ let token=count.tokens
+ if token>4611686018427387902 {return 75}
+ if emit {
+  assert(integer_buffer_set(meta,token*2,kind)==0)
+  assert(integer_buffer_set(meta,token*2+1,row)==0)
+  assert(integer_buffer_set(offsets,token,count.bytes)==0)
+ }
+ var i=start
+ while i<end {
+  let c=gg_decode(b,i,end)
+  if c.status!=0 {return c.status}
+  if count.bytes>9223372036854775805 {return 75}
+  if emit {
+   assert(integer_buffer_set(pool,count.bytes,gg_digit(c.value/16))==0)
+   assert(integer_buffer_set(pool,count.bytes+1,gg_digit(c.value%16))==0)
+  }
+  count.bytes=count.bytes+2
+  i=c.next
+ }
+ count.tokens=count.tokens+1
+ if kind==1 {count.parents=count.parents+1}
+ if emit {assert(integer_buffer_set(offsets,count.tokens,count.bytes)==0)}
+ return 0
+}
+fn gg_pack_row(d:&DynamicGff,row:i64,attrs:&!ByteBuffer,emit:bool,pool:&!IntegerBuffer,offsets:&!IntegerBuffer,meta:&!IntegerBuffer,count:&!GffPack)->i64 with Alloc,Mut,Div,Panic {
+ byte_buffer_clear(attrs)
+ let copied=dynamic_gff_field(d,row,8,attrs)
+ if copied!=0 {return copied}
+ let n=byte_buffer_len(attrs)
+ if n==1 && gg_byte(attrs,0)==46 {return 0}
+ var start:i64=0
+ var seen_id=false;var seen_parent=false
+ while start<n {
+  var end=start
+  while end<n && gg_byte(attrs,end)!=59 {end=end+1}
+  var equal=start
+  while equal<end && gg_byte(attrs,equal)!=61 {equal=equal+1}
+  if equal>=end {return 22}
+  if gg_tag(attrs,start,equal,"ID") {
+   if seen_id {return 22}
+   seen_id=true
+   var i=equal+1
+   while i<end {if gg_byte(attrs,i)==44 {return 22};i=i+1}
+   let code=gg_key(attrs,equal+1,end,0,row,emit,pool,offsets,meta,count)
+   if code!=0 {return code}
+  } else if gg_tag(attrs,start,equal,"Parent") {
+   if seen_parent {return 22}
+   seen_parent=true
+   var first=equal+1;var i=first
+   while i<=end {
+    if i==end || gg_byte(attrs,i)==44 {
+     let code=gg_key(attrs,first,i,1,row,emit,pool,offsets,meta,count)
+     if code!=0 {return code}
+     first=i+1
+    }
+    i=i+1
+   }
+  }
+  start=end+1
+ }
+ return 0
+}
+fn gg_compatible(d:&DynamicGff,left:i64,right:i64,w:&!GffGraphWork)->i64 with Alloc,Mut,Div,Panic {
+ var field:i64=0
+ while field<3 {
+  let column=if field==0 {0} else if field==1 {2} else {6}
+  byte_buffer_clear(&!w.a);byte_buffer_clear(&!w.b)
+  let a=dynamic_gff_field(d,left,column,&!w.a)
+  if a!=0 {return a}
+  let b=dynamic_gff_field(d,right,column,&!w.b)
+  if b!=0 {return b}
+  if !gg_same_decoded(&w.a,&w.b) {return 22}
+  field=field+1
+ }
+ return 0
+}
+fn gg_remaining_parent(w:&GffGraphWork,child:i64)->i64 with Mut,Panic {
+ var token:i64=0
+ while token<w.tokens {
+  if integer_buffer_at(&w.meta,token*2)==1 {
+   let row=integer_buffer_at(&w.meta,token*2+1)
+   if integer_buffer_at(&w.row_group,row)==child {
+    let parent=count_identities_group_of_original(&w.ids,token)
+    if integer_buffer_at(&w.degree,parent)>0 {return parent}
+   }
+  }
+  token=token+1
+ }
+ return 0-1
+}
+fn gg_validate(d:&DynamicGff,w:&!GffGraphWork)->GffGraphReport with Alloc,Mut,Div,Panic {
+ var i:i64=0
+ while i<w.rows {assert(integer_buffer_set(&!w.row_group,i,0-1)==0);i=i+1}
+ i=0
+ while i<w.unique {
+  assert(integer_buffer_set(&!w.representative,i,0-1)==0)
+  assert(integer_buffer_set(&!w.degree,i,0)==0)
+  assert(integer_buffer_set(&!w.offsets,i,0)==0)
+  i=i+1
+ }
+ assert(integer_buffer_set(&!w.offsets,w.unique,0)==0)
+ i=0
+ while i<w.tokens {
+  if integer_buffer_at(&w.meta,i*2)==0 {
+   let row=integer_buffer_at(&w.meta,i*2+1)
+   let group=count_identities_group_of_original(&w.ids,i)
+   assert(group>=0)
+   assert(integer_buffer_set(&!w.row_group,row,group)==0)
+   let representative=integer_buffer_at(&w.representative,group)
+   if representative<0 {assert(integer_buffer_set(&!w.representative,group,row)==0)}
+   else {
+    let code=gg_compatible(d,representative,row,w)
+    if code!=0 {return gg_report(code,3,row,representative)}
+   }
+  }
+  i=i+1
+ }
+ var edges:i64=0
+ i=0
+ while i<w.tokens {
+  if integer_buffer_at(&w.meta,i*2)==1 {
+   let row=integer_buffer_at(&w.meta,i*2+1)
+   let parent=count_identities_group_of_original(&w.ids,i)
+   if integer_buffer_at(&w.representative,parent)<0 {return gg_report(95,4,row,0-1)}
+   let child=integer_buffer_at(&w.row_group,row)
+   if child>=0 {
+    let n=integer_buffer_at(&w.offsets,parent+1)
+    assert(integer_buffer_set(&!w.offsets,parent+1,n+1)==0)
+    let degree=integer_buffer_at(&w.degree,child)
+    assert(integer_buffer_set(&!w.degree,child,degree+1)==0)
+    edges=edges+1
+   }
+  }
+  i=i+1
+ }
+ i=0
+ while i<w.unique {
+  let next=integer_buffer_at(&w.offsets,i)+integer_buffer_at(&w.offsets,i+1)
+  assert(integer_buffer_set(&!w.offsets,i+1,next)==0)
+  assert(integer_buffer_set(&!w.queue,i,integer_buffer_at(&w.offsets,i))==0)
+  i=i+1
+ }
+ i=0
+ while i<w.tokens {
+  if integer_buffer_at(&w.meta,i*2)==1 {
+   let row=integer_buffer_at(&w.meta,i*2+1)
+   let child=integer_buffer_at(&w.row_group,row)
+   if child>=0 {
+    let parent=count_identities_group_of_original(&w.ids,i)
+    let at=integer_buffer_at(&w.queue,parent)
+    assert(integer_buffer_set(&!w.children,at,child)==0)
+    assert(integer_buffer_set(&!w.queue,parent,at+1)==0)
+   }
+  }
+  i=i+1
+ }
+ var tail:i64=0;var nodes:i64=0
+ i=0
+ while i<w.unique {
+  if integer_buffer_at(&w.representative,i)>=0 {
+   nodes=nodes+1
+   if integer_buffer_at(&w.degree,i)==0 {assert(integer_buffer_set(&!w.queue,tail,i)==0);tail=tail+1}
+  }
+  i=i+1
+ }
+ var head:i64=0
+ while head<tail {
+  let parent=integer_buffer_at(&w.queue,head)
+  head=head+1
+  var edge=integer_buffer_at(&w.offsets,parent)
+  let end=integer_buffer_at(&w.offsets,parent+1)
+  while edge<end {
+   let child=integer_buffer_at(&w.children,edge)
+   let degree=integer_buffer_at(&w.degree,child)-1
+   assert(integer_buffer_set(&!w.degree,child,degree)==0)
+   if degree==0 {assert(integer_buffer_set(&!w.queue,tail,child)==0);tail=tail+1}
+   edge=edge+1
+  }
+ }
+ if head!=nodes {
+  i=0
+  while i<w.unique {
+   if integer_buffer_at(&w.representative,i)>=0 && integer_buffer_at(&w.degree,i)>0 {
+    // Following a deterministic residual parent for unique hops enters a cycle.
+    var node=i;var step:i64=0
+    while step<w.unique {node=gg_remaining_parent(w,node);assert(node>=0);step=step+1}
+    let parent=gg_remaining_parent(w,node)
+    assert(parent>=0)
+    return gg_report(22,5,integer_buffer_at(&w.representative,node),integer_buffer_at(&w.representative,parent))
+   }
+   i=i+1
+  }
+ }
+ var report=gg_report(0,0,0-1,0-1)
+ report.nodes=nodes;report.edges=edges
+ return report
+}
+fn gg_storage_available(w:&GffGraphWork)->bool {
+ return integer_buffer_status(&w.row_group)==0 && integer_buffer_status(&w.representative)==0 && integer_buffer_status(&w.degree)==0 && integer_buffer_status(&w.offsets)==0 && integer_buffer_status(&w.queue)==0 && integer_buffer_status(&w.children)==0
+}
+fn gg_close(w:GffGraphWork) with Alloc {
+ let GffGraphWork {ids,meta,row_group,representative,degree,offsets,queue,children,a,b,tokens,rows,unique}=w
+ count_identities_close(ids);integer_buffer_close(meta);integer_buffer_close(row_group)
+ integer_buffer_close(representative);integer_buffer_close(degree);integer_buffer_close(offsets)
+ integer_buffer_close(queue);integer_buffer_close(children);byte_buffer_close(a);byte_buffer_close(b)
+}
+// Budgets: each of two scratch buffers <=max_attribute_bytes; packed exact-key
+// index <=max_index_bytes; token/CSR/Kahn payload <=max_graph_bytes. Comparisons
+// are actual byte-pair comparisons in the reused identity sort, not validation scans.
+pub fn gff_validate_graph(d:&DynamicGff,max_attribute_bytes:i64,max_index_bytes:i64,max_graph_bytes:i64,max_byte_comparisons:i64)->GffGraphReport with Alloc,Mut,Div,Panic {
+ if dynamic_gff_status(d)!=0 {return gg_report(dynamic_gff_status(d),1,0-1,0-1)}
+ if max_attribute_bytes<0 || max_index_bytes<0 || max_graph_bytes<0 || max_byte_comparisons<0 {return gg_report(22,6,0-1,0-1)}
+ var attrs=byte_buffer_new(max_attribute_bytes)
+ var empty_a=integer_buffer_new(0,0);var empty_b=integer_buffer_new(0,0);var empty_c=integer_buffer_new(0,0)
+ var count=GffPack {bytes:0,tokens:0,parents:0}
+ var row:i64=0;var code:i64=0
+ let rows=dynamic_gff_len(d)
+ while row<rows {
+  code=gg_pack_row(d,row,&!attrs,false,&!empty_a,&!empty_b,&!empty_c,&!count)
+  if code!=0 {break}
+  row=row+1
+ }
+ integer_buffer_close(empty_a);integer_buffer_close(empty_b);integer_buffer_close(empty_c)
+ let payload=count_identities_payload(count.bytes,count.tokens)
+ if code==0 && (payload.status!=0 || payload.payload_bytes>max_index_bytes || count.tokens>max_graph_bytes/16) {code=105}
+ if code!=0 {byte_buffer_close(attrs);return gg_report(code,if code==105 {6} else {2},row,0-1)} else {
+ var pool=integer_buffer_new(count.bytes,count.bytes*8)
+ var offsets=integer_buffer_new(count.tokens+1,(count.tokens+1)*8)
+ let order=integer_buffer_new(count.tokens,count.tokens*8)
+ let groups=integer_buffer_new(count.tokens,count.tokens*8)
+ var meta=integer_buffer_new(count.tokens*2,count.tokens*16)
+ let allocated=integer_buffer_status(&pool)==0 && integer_buffer_status(&offsets)==0 && integer_buffer_status(&order)==0 && integer_buffer_status(&groups)==0 && integer_buffer_status(&meta)==0
+ var emitted=GffPack {bytes:0,tokens:0,parents:0}
+ if allocated {
+  assert(integer_buffer_set(&!offsets,0,0)==0)
+  row=0
+  while row<rows {
+   code=gg_pack_row(d,row,&!attrs,true,&!pool,&!offsets,&!meta,&!emitted)
+   if code!=0 {break}
+   row=row+1
+  }
+ } else {code=12}
+ let ids=count_identities_build(pool,offsets,order,groups,1,max_byte_comparisons)
+ let ids_status=count_identities_status(&ids)
+ let comparisons=count_identities_comparisons(&ids)
+ if code==0 && ids_status!=0 {code=if ids_status==4 {105} else {22}}
+ let unique=count_identities_unique(&ids)
+ var words:i64=0
+ if code==0 {
+  if unique>9223372036854771704/32 || rows>9223372036854771704/8 {code=105}
+  else {
+   let available=max_graph_bytes/8
+   if count.tokens>available/2 {code=105}
+   else {
+    words=count.tokens*2
+    if rows>available-words {code=105} else {words=words+rows}
+    if code==0 {if unique>(available-words)/4 {code=105} else {words=words+unique*4}}
+    if code==0 {if count.parents>=available-words {code=105} else {words=words+count.parents+1}}
+   }
+  }
+ }
+ if code!=0 {
+  count_identities_close(ids);integer_buffer_close(meta);byte_buffer_close(attrs)
+  var report=gg_report(code,if ids_status==4 {7} else {6},row,0-1)
+  report.comparisons=comparisons
+  return report
+ } else {
+ var work=GffGraphWork {ids:ids,meta:meta,row_group:integer_buffer_new(rows,rows*8),representative:integer_buffer_new(unique,unique*8),degree:integer_buffer_new(unique,unique*8),offsets:integer_buffer_new(unique+1,(unique+1)*8),queue:integer_buffer_new(unique,unique*8),children:integer_buffer_new(count.parents,count.parents*8),a:attrs,b:byte_buffer_new(max_attribute_bytes),tokens:count.tokens,rows:rows,unique:unique}
+ var report=gg_report(12,6,0-1,0-1)
+ if gg_storage_available(&work) {report=gg_validate(d,&!work)}
+ report.comparisons=comparisons
+ gg_close(work)
+ return report
+ }
+ }
+}

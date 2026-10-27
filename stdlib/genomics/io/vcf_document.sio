@@ -1,0 +1,219 @@
+// Separate VCF4.3 document and reference-concordance validation.
+// Exact-byte CountIdentities detects CHROM-block re-entry and global record IDs.
+// Numeric POS may repeat and must not decrease inside a CHROM block.
+// The reference function compares concrete one-based REF windows; no variant
+// normalization, structural-variant resolution, Unicode normalization or liftover.
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_status,byte_buffer_len,byte_buffer_get,byte_buffer_push,byte_buffer_clear,byte_buffer_close}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_status,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+use genomics::count_identities::{count_identities_payload,count_identities_build,count_identities_status,count_identities_count,count_identities_comparisons,count_identities_group_of_original,count_identities_sorted_original,count_identities_close}
+use genomics::io::vcf::{vcf_record_summary_43}
+use genomics::io::vcf_header::{VcfHeader,vcf_header_parse,vcf_header_status,vcf_header_data_offset,vcf_header_validate_record,vcf_header_close}
+use genomics::io::dynamic_fasta::{DynamicFasta,dynamic_fasta_status,dynamic_fasta_len,dynamic_fasta_header,dynamic_fasta_record,dynamic_fasta_copy_range}
+pub struct VcfDocumentReport {pub status:i64,pub reason:i64,pub record:i64,pub error_offset:i64,pub related_record:i64,pub records:i64,pub comparisons:i64}
+pub struct VcfReferenceReport {pub status:i64,pub contig:i64,pub position:i64,pub mismatch_offset:i64}
+struct VdRange {start:i64,end:i64,status:i64}
+struct VdCount {bytes:i64,tokens:i64,records:i64}
+fn vd_byte(b:&ByteBuffer,i:i64)->i64 {byte_buffer_get(b,i).value}
+fn vd_code(c:i64)->i64 {if c==2 {105} else if c==3 {12} else if c!=0 {22} else {0}}
+fn vd_report(status:i64,reason:i64,record:i64,offset:i64,related:i64,records:i64)->VcfDocumentReport {VcfDocumentReport {status:status,reason:reason,record:record,error_offset:offset,related_record:related,records:records,comparisons:0}}
+fn vd_range(b:&ByteBuffer,start:i64,end:i64,column:i64)->VdRange with Mut {
+ var at=start;var field:i64=0;var i=start
+ while i<=end {
+  if i==end || vd_byte(b,i)==9 {
+   if field==column {return VdRange {start:at,end:i,status:0}}
+   at=i+1;field=field+1
+  }
+  i=i+1
+ }
+ return VdRange {start:0,end:0,status:22}
+}
+fn vd_same(b:&ByteBuffer,a:i64,end:i64,other:i64,stop:i64)->bool with Mut {
+ if end-a!=stop-other {return false}
+ var i:i64=0
+ while i<end-a {if vd_byte(b,a+i)!=vd_byte(b,other+i) {return false};i=i+1}
+ return true
+}
+fn vd_key(input:&ByteBuffer,start:i64,end:i64,kind:i64,record:i64,emit:bool,pool:&!IntegerBuffer,offsets:&!IntegerBuffer,meta:&!IntegerBuffer,count:&!VdCount)->i64 with Mut,Panic {
+ let n=end-start
+ if n<=0 || count.bytes>9223372036854775805-n || count.tokens>3074457345618258601 {return 75}
+ let token=count.tokens
+ if emit {
+  assert(integer_buffer_set(offsets,token,count.bytes)==0)
+  assert(integer_buffer_set(meta,token*3,kind)==0)
+  assert(integer_buffer_set(meta,token*3+1,record)==0)
+  assert(integer_buffer_set(meta,token*3+2,start)==0)
+  assert(integer_buffer_set(pool,count.bytes,if kind==0 {67} else {73})==0)
+  assert(integer_buffer_set(pool,count.bytes+1,58)==0)
+ }
+ count.bytes=count.bytes+2
+ var i=start
+ while i<end {
+  if emit {assert(integer_buffer_set(pool,count.bytes,vd_byte(input,i))==0)}
+  count.bytes=count.bytes+1
+  i=i+1
+ }
+ count.tokens=count.tokens+1
+ if emit {assert(integer_buffer_set(offsets,count.tokens,count.bytes)==0)}
+ return 0
+}
+fn vd_scan(input:&ByteBuffer,h:&VcfHeader,row:&!ByteBuffer,emit:bool,pool:&!IntegerBuffer,offsets:&!IntegerBuffer,meta:&!IntegerBuffer,count:&!VdCount,ploidy:i64)->VcfDocumentReport with Alloc,Mut,Div,Panic {
+ let n=byte_buffer_len(input)
+ var at=vcf_header_data_offset(h)
+ var previous_chrom:i64=0-1;var previous_end:i64=0
+ var previous_pos:i64=0
+ while at<n {
+  let start=at
+  while at<n && vd_byte(input,at)!=10 {at=at+1}
+  if at==n {return vd_report(22,1,count.records,start,0-1,count.records)}
+  var end=at
+  if end>start && vd_byte(input,end-1)==13 {end=end-1}
+  let next=at+1
+  byte_buffer_clear(row)
+  var i=start
+  while i<next {
+   let code=byte_buffer_push(row,vd_byte(input,i))
+   if code!=0 {return vd_report(vd_code(code),6,count.records,start,0-1,count.records)}
+   i=i+1
+  }
+  let checked=vcf_header_validate_record(h,row,ploidy)
+  if checked!=0 {return vd_report(checked,1,count.records,start,0-1,count.records)}
+  let summary=vcf_record_summary_43(row)
+  let chrom=vd_range(input,start,end,0)
+  let same=previous_chrom>=0 && vd_same(input,chrom.start,chrom.end,previous_chrom,previous_end)
+  if same {
+   if summary.position<previous_pos {return vd_report(22,2,count.records,start,count.records-1,count.records)}
+  } else {
+   let code=vd_key(input,chrom.start,chrom.end,0,count.records,emit,pool,offsets,meta,count)
+   if code!=0 {return vd_report(code,6,count.records,start,0-1,count.records)}
+  }
+  let ids=vd_range(input,start,end,2)
+  if !(ids.end-ids.start==1 && vd_byte(input,ids.start)==46) {
+   var first=ids.start;i=first
+   while i<=ids.end {
+    if i==ids.end || vd_byte(input,i)==59 {
+     let code=vd_key(input,first,i,1,count.records,emit,pool,offsets,meta,count)
+     if code!=0 {return vd_report(code,6,count.records,first,0-1,count.records)}
+     first=i+1
+    }
+    i=i+1
+   }
+  }
+  previous_chrom=chrom.start;previous_end=chrom.end;previous_pos=summary.position
+  count.records=count.records+1
+  at=next
+ }
+ return vd_report(0,0,0-1,0,0-1,count.records)
+}
+// Payload budgets are separate: owned header context, reusable record bytes,
+// and exact identity index plus24 bytes/source-token metadata.
+pub fn vcf_validate_document(input:&ByteBuffer,max_header_bytes:i64,max_record_bytes:i64,max_index_bytes:i64,info_ploidy:i64,max_byte_comparisons:i64)->VcfDocumentReport with Alloc,Mut,Div,Panic {
+ if max_record_bytes<0 || max_index_bytes<0 || info_ploidy<0 || max_byte_comparisons<0 {return vd_report(22,6,0-1,0,0-1,0)}
+ let header=vcf_header_parse(input,max_header_bytes)
+ var row=byte_buffer_new(max_record_bytes)
+ var a=integer_buffer_new(0,0);var b=integer_buffer_new(0,0);var c=integer_buffer_new(0,0)
+ var count=VdCount {bytes:0,tokens:0,records:0}
+ var report=vd_report(vcf_header_status(&header),1,0-1,0,0-1,0)
+ if report.status==0 {report=vd_scan(input,&header,&!row,false,&!a,&!b,&!c,&!count,info_ploidy)}
+ integer_buffer_close(a);integer_buffer_close(b);integer_buffer_close(c)
+ let payload=count_identities_payload(count.bytes,count.tokens)
+ if report.status==0 {
+  if count.tokens>max_index_bytes/24 || payload.status!=0 {report=vd_report(105,6,0-1,0,0-1,count.records)}
+  else if payload.payload_bytes>max_index_bytes-count.tokens*24 {report=vd_report(105,6,0-1,0,0-1,count.records)}
+ }
+ if report.status!=0 {
+  vcf_header_close(header);byte_buffer_close(row)
+  return report
+ } else {
+  var pool=integer_buffer_new(count.bytes,count.bytes*8)
+  var offsets=integer_buffer_new(count.tokens+1,(count.tokens+1)*8)
+  let order=integer_buffer_new(count.tokens,count.tokens*8)
+  let groups=integer_buffer_new(count.tokens,count.tokens*8)
+  var meta=integer_buffer_new(count.tokens*3,count.tokens*24)
+  var emitted=VdCount {bytes:0,tokens:0,records:0}
+  let allocated=integer_buffer_status(&pool)==0 && integer_buffer_status(&offsets)==0 && integer_buffer_status(&order)==0 && integer_buffer_status(&groups)==0 && integer_buffer_status(&meta)==0
+  if allocated {
+   assert(integer_buffer_set(&!offsets,0,0)==0)
+   report=vd_scan(input,&header,&!row,true,&!pool,&!offsets,&!meta,&!emitted,info_ploidy)
+  } else {report=vd_report(12,6,0-1,0,0-1,count.records)}
+  vcf_header_close(header);byte_buffer_close(row)
+  let ids=count_identities_build(pool,offsets,order,groups,1,max_byte_comparisons)
+  let status=count_identities_status(&ids)
+  report.comparisons=count_identities_comparisons(&ids)
+  if report.status==0 && status!=0 {report.status=if status==4 {105} else {22};report.reason=if status==4 {7} else {6}}
+  if report.status==0 {
+   var i:i64=1
+   while i<count_identities_count(&ids) {
+    let previous=count_identities_sorted_original(&ids,i-1)
+    let current=count_identities_sorted_original(&ids,i)
+    if count_identities_group_of_original(&ids,previous)==count_identities_group_of_original(&ids,current) {
+     let kind=integer_buffer_at(&meta,current*3)
+     report.status=22;report.reason=if kind==0 {3} else {4}
+     report.record=integer_buffer_at(&meta,current*3+1)
+     report.error_offset=integer_buffer_at(&meta,current*3+2)
+     report.related_record=integer_buffer_at(&meta,previous*3+1)
+     break
+    }
+    i=i+1
+   }
+  }
+  count_identities_close(ids);integer_buffer_close(meta)
+  return report
+ }
+}
+fn vr_report(status:i64,contig:i64,position:i64,mismatch:i64)->VcfReferenceReport {VcfReferenceReport {status:status,contig:contig,position:position,mismatch_offset:mismatch}}
+fn vr_upper(c:i64)->i64 {if c>=97 && c<=122 {return c-32};return c}
+fn vr_header_matches(header:&ByteBuffer,record:&ByteBuffer,chrom:VdRange)->bool with Mut {
+ var end:i64=0
+ while end<byte_buffer_len(header) && vd_byte(header,end)!=32 && vd_byte(header,end)!=9 {end=end+1}
+ if end!=chrom.end-chrom.start {return false}
+ var i:i64=0
+ while i<end {if vd_byte(header,i)!=vd_byte(record,chrom.start+i) {return false};i=i+1}
+ return true
+}
+// Each of the two reusable scratch buffers has max_scratch_bytes payload.
+// FASTA identifiers use the exact first header token. Ambiguous matches refuse.
+// REF N is literal N, not an ambiguity wildcard. Base comparison folds ASCII case.
+pub fn vcf_record_validate_reference(record:&ByteBuffer,fasta:&DynamicFasta,max_scratch_bytes:i64)->VcfReferenceReport with Alloc,Mut,Div,Panic {
+ let summary=vcf_record_summary_43(record)
+ if summary.status!=0 {return vr_report(summary.status,0-1,summary.position,0-1)}
+ if dynamic_fasta_status(fasta)!=0 {return vr_report(dynamic_fasta_status(fasta),0-1,summary.position,0-1)}
+ if max_scratch_bytes<0 {return vr_report(22,0-1,summary.position,0-1)}
+ let n=byte_buffer_len(record)
+ let chrom=vd_range(record,0,n,0)
+ let reference=vd_range(record,0,n,3)
+ var header=byte_buffer_new(max_scratch_bytes)
+ var actual=byte_buffer_new(max_scratch_bytes)
+ var contig_id:i64=0-1;var id:i64=0;var code:i64=0
+ while id<dynamic_fasta_len(fasta) {
+  byte_buffer_clear(&!header)
+  code=dynamic_fasta_header(fasta,id,&!header)
+  if code!=0 {break}
+  if vr_header_matches(&header,record,chrom) {
+   if contig_id>=0 {code=22;break}
+   contig_id=id
+  }
+  id=id+1
+ }
+ var report=vr_report(code,contig_id,summary.position,0-1)
+ if code==0 {
+  if contig_id<0 {report.status=95}
+  else {
+   let span=dynamic_fasta_record(fasta,contig_id)
+   let length=reference.end-reference.start
+   if summary.position<1 || summary.position-1>span.bases || length>span.bases-(summary.position-1) {report.status=22}
+   else {
+    code=dynamic_fasta_copy_range(fasta,contig_id,summary.position-1,length,&!actual)
+    if code!=0 {report.status=code}
+    else {
+     var i:i64=0
+     while i<length {
+      if vr_upper(vd_byte(record,reference.start+i))!=vd_byte(&actual,i) {report.status=22;report.mismatch_offset=i;break}
+      i=i+1
+     }
+    }
+   }
+  }
+ }
+ byte_buffer_close(header);byte_buffer_close(actual)
+ return report
+}

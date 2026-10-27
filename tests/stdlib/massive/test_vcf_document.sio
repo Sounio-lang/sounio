@@ -1,0 +1,59 @@
+//@ run-pass
+//@ expect-stdout: VCF_DOCUMENT_OK
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_get,byte_buffer_len,byte_buffer_close}
+use genomics::io::dynamic_fasta::{dynamic_fasta_parse,dynamic_fasta_status,dynamic_fasta_copy_range,dynamic_fasta_close}
+use genomics::io::vcf_document::{vcf_validate_document,vcf_record_validate_reference}
+fn bytes(text:string)->ByteBuffer with Alloc,Mut,Div,Panic {
+ var b=byte_buffer_new(8192)
+ var i:i64=0
+ while i<str_len(text) {assert(byte_buffer_push(&!b,(str_char_at(text,i) as i64) & 255)==0);i=i+1}
+ return b
+}
+fn document(text:string,status:i64,reason:i64,records:i64) with Alloc,Mut,Div,Panic {
+ let input=bytes(text)
+ let r=vcf_validate_document(&input,16384,4096,65536,2,1000000)
+ assert(r.status==status && r.reason==reason)
+ if status==0 {assert(r.records==records)}
+ byte_buffer_close(input)
+}
+fn reference(fasta:string,record:string,status:i64,mismatch:i64) with Alloc,Mut,Div,Panic {
+ let input=bytes(fasta)
+ let f=dynamic_fasta_parse(&input,16384)
+ assert(dynamic_fasta_status(&f)==0)
+ let v=bytes(record)
+ let r=vcf_record_validate_reference(&v,&f,4096)
+ assert(r.status==status && r.mismatch_offset==mismatch)
+ byte_buffer_close(v);dynamic_fasta_close(f);byte_buffer_close(input)
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ document("##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",0,0,0)
+ document("##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t1\tr1\tA\tG\t.\tPASS\t.\nchr1\t2\tr2;alias\tC\tT\t.\tPASS\t.\nchr1\t2\t.\tC\tA\t.\tPASS\t.\nchr2\t1\tr3\tT\tG\t.\tPASS\t.\n",0,0,4)
+ document("##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t2\ta\tA\tG\t.\tPASS\t.\nchr1\t1\tb\tA\tT\t.\tPASS\t.\n",22,2,0)
+ document("##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t1\ta\tA\tG\t.\tPASS\t.\nchr2\t1\tb\tA\tT\t.\tPASS\t.\nchr1\t2\tc\tC\tG\t.\tPASS\t.\n",22,3,0)
+ document("##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t1\ta;alias\tA\tG\t.\tPASS\t.\nchr1\t2\talias\tC\tT\t.\tPASS\t.\n",22,4,0)
+ document("##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t1\ta;a\tA\tG\t.\tPASS\t.\n",22,4,0)
+ document("##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t1\ta\tA\tG\t.\tPASS\t.",22,1,0)
+ document("##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t1\té\tA\tG\t.\tPASS\t.\nchr1\t2\té\tC\tT\t.\tPASS\t.\n",0,0,2)
+ reference(">chr1 description\nacgtN acgta\n>chr2\nTT\n","chr1\t2\t.\tCGT\tC\t.\tPASS\t.\n",0,0-1)
+ reference(">chr1\nACGTN\n","chr1\t2\t.\tCGA\tC\t.\tPASS\t.\n",22,2)
+ reference(">chr1\nACGTN\n","chr1\t5\t.\tN\tA\t.\tPASS\t.\n",0,0-1)
+ reference(">chr1\nACGTN\n","chr1\t1\t.\tN\tA\t.\tPASS\t.\n",22,0)
+ reference(">chr1\nACGTN\n","chr1\t5\t.\tNA\tA\t.\tPASS\t.\n",22,0-1)
+ reference(">chr1\nACGTN\n","chrX\t1\t.\tA\tG\t.\tPASS\t.\n",95,0-1)
+ reference(">chr1 first\nACGTN\n>chr1 second\nACGTN\n","chr1\t1\t.\tA\tG\t.\tPASS\t.\n",22,0-1)
+ let source=bytes(">chr1\nacgtn\n")
+ let f=dynamic_fasta_parse(&source,16384)
+ var out=byte_buffer_new(16)
+ assert(dynamic_fasta_copy_range(&f,0,1,3,&!out)==0)
+ assert(byte_buffer_len(&out)==3 && byte_buffer_get(&out,0).value==67 && byte_buffer_get(&out,2).value==84)
+ assert(dynamic_fasta_copy_range(&f,0,100,1,&!out)==22 && byte_buffer_len(&out)==3)
+ assert(dynamic_fasta_copy_range(&f,0,5,0,&!out)==0)
+ byte_buffer_close(out);dynamic_fasta_close(f);byte_buffer_close(source)
+ let limited=bytes("##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t1\ta\tA\tG\t.\tPASS\t.\nchr1\t2\tb\tC\tT\t.\tPASS\t.\n")
+ assert(vcf_validate_document(&limited,16384,4096,0,2,1000).status==105)
+ let work=vcf_validate_document(&limited,16384,4096,65536,2,0)
+ assert(work.status==105 && work.reason==7)
+ byte_buffer_close(limited)
+ println("VCF_DOCUMENT_OK")
+ 0
+}
