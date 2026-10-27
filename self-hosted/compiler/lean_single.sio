@@ -5185,6 +5185,99 @@ fn tc_error_hard(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     return 0
 }
 
+// ADR-015 row 1 (E275), lean_single half: refuse an integer literal that fits
+// no 64-bit integer type instead of wrapping it. The shared parser refuses the
+// same set (parser_span_int_literal_overflow), with the same message text, so
+// one fixture pattern pins both engines.
+//
+// Returns 0 = fits some 64-bit type; 1 = wider than 2^64-1; 2 = exactly 2^63,
+// which the caller refuses unless a prefix minus absorbs the sign bit.
+//
+// Deliberately no hand-copied ASCII tables of 2^63/2^64: one drifted from the
+// constant it claimed to encode and refused u64 MAX. And no 19- or 20-digit
+// accumulation: that overflows i64 and lands on a negative number, which made an
+// earlier cut of the shared test accept 99999999999999999999. Split instead as
+// <2 digits> * 10^18 + <18 digits>; 10^18-1 < 2^63, so each part is exact.
+fn lit_int_width_class(s: i64, e: i64) -> i64 with Mut, Panic {
+    if e <= s { return 0 }
+    var base: i64 = 10
+    var dfrom = s
+    if sb(s) == 48 && s + 1 < e && (sb(s + 1) == 120 || sb(s + 1) == 88) {
+        base = 16
+        dfrom = s + 2
+    }
+    // Significant digits: leading zeros carry no width. Separators are handled by
+    // the shared lexer's own scan, which never reaches here with `_` inside.
+    var first = dfrom
+    while first < e && sb(first) == 48 { first = first + 1 }
+    let digits = e - first
+    if digits <= 0 { return 0 }              // the literal is zero
+    if base == 16 {
+        if digits > 16 { return 1 }
+        return 0
+    }
+    if digits > 20 { return 1 }
+    if digits < 19 { return 0 }
+    if first + 1 >= e { return 0 }
+    let lead2 = (sb(first) - 48) * 10 + (sb(first + 1) - 48)
+    var acc: i64 = 0
+    var walked: i64 = 0
+    var i = first + 2
+    while i < e && walked < 18 {
+        let c = sb(i)
+        if c < 48 || c > 57 { break }
+        acc = acc * 10 + (c - 48)
+        walked = walked + 1
+        i = i + 1
+    }
+    if digits == 20 {
+        // 2^64 = 18 * 10^18 + 446744073709551616.
+        if lead2 != 18 {
+            if lead2 > 18 { return 1 }
+            return 0
+        }
+        if acc >= 446744073709551616 { return 1 }
+        return 0
+    }
+    // 19 digits. 2^63 = 92 * 10^18 + 23372036854775808; i64 MAX is one below it,
+    // and nothing else with 19 digits is a boundary this half of the rule decides.
+    if lead2 != 92 { return 0 }
+    if acc != 23372036854775808 { return 0 }
+    2
+}
+
+// Digits that are not an integer at all: `.5` or `5e9` continues a float, and
+// the fraction of a C99 hex float reaches here as its own decimal token
+// (`0x1.0000000000000800000000000000000000001p+0` has 37 of them), because the
+// hex token stops at the `.`. `p`/`P` right after the run is what says so.
+fn lit_is_float_tail(start: i64, end: i64) -> bool with Mut, Panic {
+    let nx = sb(end)
+    if nx == 101 || nx == 69 { return true }                     // decimal exponent
+    let after = sb(end + 1)
+    if nx == 46 && after >= 48 && after <= 57 { return true }    // `.digit`
+    if nx != 112 && nx != 80 { return false }                     // not a p-exponent
+    // A C99 hex float is `0x<hex>[.<hex>]p<exp>`. Its mantissa never carries a
+    // `.` here (the hex token stops at one), and no integer is followed by `p`,
+    // so a `.` anywhere around this run of digits can only mean a float fraction.
+    if start > 0 && sb(start - 1) == 46 { return true }
+    false
+}
+
+
+// The minus before the literal being lexed now is a prefix operator (so
+// `-9223372036854775808` spells i64 MIN, and the literal itself fits) unless
+// the token before that minus can already end a value, which makes it the
+// binary subtraction operator. Uses token kinds, because the shared lexer has
+// them in hand: IntLit 4, Ident 5, FloatLit 53, `)` 7, `]` 42, and Minus is 18.
+fn lit_prefix_minus_is_unary() -> bool with Mut, Panic {
+    if TC < 1 { return true }
+    if TK[(TC - 1) as usize] != 18 { return false }
+    if TC < 2 { return true }
+    let k = TK[(TC - 2) as usize]
+    if k == 4 || k == 5 || k == 53 || k == 7 || k == 42 { return false }
+    true
+}
+
 // #2751: the wording follows Madaros' E001 for the same refusal ("this binding
 // expects a different type"), so one fixture pattern pins both engines.
 fn tc_let_unit_mismatch(tok: i64) -> i64 with IO, Mut, Panic {
@@ -7729,7 +7822,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                                 }
                                 if pp < TC && TK[pp as usize] == 53 {
                                     var fbv = TV[pp as usize]
-                                    if pred_neg == 1 { fbv = fbv | 0 - 9223372036854775808 }  // flip sign bit
+                                    if pred_neg == 1 { fbv = fbv | 0x8000000000000000 }  // flip sign bit (i64 MIN bit pattern)
                                     // PR-7: capture fractional parts for rational comparison
                                     SCAN_PRED_BOUND_FRAC = TF[pp as usize]
                                     SCAN_PRED_BOUND_DENOM = TD[pp as usize]
@@ -7761,7 +7854,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                                             }
                                             if pp < TC && TK[pp as usize] == 53 {
                                                 var fbv2 = TV[pp as usize]
-                                                if pred_neg2 == 1 { fbv2 = fbv2 | 0 - 9223372036854775808 }
+                                                if pred_neg2 == 1 { fbv2 = fbv2 | 0x8000000000000000 }
                                                 // PR-7: capture fractional parts for second bound
                                                 SCAN_PRED_BOUND2_FRAC = TF[pp as usize]
                                                 SCAN_PRED_BOUND2_DENOM = TD[pp as usize]
@@ -8592,8 +8685,30 @@ fn lex_all() with IO, Mut, Panic, Div {
                     else if h >= 65 && h <= 70 { v = v * 16 + h - 55; p = p + 1 }
                     else { hx = 0 }
                 }
+                // ADR-015 row 1: refuse a hex literal wider than 64 bits before
+                // the wrapped value reaches the token table. A trailing `p` makes
+                // it a C99 hex-float (`0x1…p-80`), whose mantissa is not an
+                // integer at all — the shared parser guards the same case with
+                // parser_hex_float_tail_ahead before calling parse_int_literal.
+                if !lit_is_float_tail(s, p) && lit_int_width_class(s, p) == 1 {
+                    tc_error_hard(TC, "E275: integer literal does not fit any 64-bit integer type")
+                }
             } else {
                 while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 { v = v * 10 + sb(p) - 48; p = p + 1 }
+                // ADR-015 row 1: same refusal for the decimal spelling. Class 2
+                // (exactly 2^63) is refused only when the minus before it is not
+                // a prefix operator, because `-9223372036854775808` is how the
+                // corpus writes i64 MIN and the literal itself does fit.
+                // A `.`+digit or `e`/`E` tail makes this a float: its integer part
+                // is a mantissa, not a value any integer type must hold (the shared
+                // parser does not need this test because the lexer has already
+                // decided the token kind by then).
+                if !lit_is_float_tail(s, p) {
+                    let width_class = lit_int_width_class(s, p)
+                    if width_class == 1 || (width_class == 2 && !lit_prefix_minus_is_unary()) {
+                        tc_error_hard(TC, "E275: integer literal does not fit any 64-bit integer type")
+                    }
+                }
             }
             // Check for float: digits.digits (dot followed by digit, not .field)
             // When integer part is zero, leading fractional zeros are absorbed
