@@ -1,0 +1,108 @@
+//@ run-pass
+//@ expect-stdout: BIDI_ADVERSARIAL_OK
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_close}
+use text::utf8::{Utf8Text,utf8_text_from_bytes,utf8_text_close,utf8_encode_append}
+use text::unicode_bidi::{unicode_bidi_resolve,unicode_bidi_status,unicode_bidi_scalar_len,unicode_bidi_visual_len,unicode_bidi_paragraph_count,unicode_bidi_paragraph,unicode_bidi_codepoint,unicode_bidi_level,unicode_bidi_byte_offset,unicode_bidi_logical_to_visual,unicode_bidi_visual_to_logical,unicode_bidi_close,unicode_bidi_line_reorder,unicode_bidi_line_status,unicode_bidi_line_level,unicode_bidi_line_visual_to_logical,unicode_bidi_line_close,unicode_bidi_mirroring}
+fn bidi_owned_text(bytes:ByteBuffer)->Utf8Text with Alloc,Mut,Div,Panic {
+ let text=utf8_text_from_bytes(&bytes,4096)
+ byte_buffer_close(bytes)
+ text
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ var encoded=byte_buffer_new(4096)
+ assert(utf8_encode_append(&!encoded,97)==0)
+ let text=bidi_owned_text(encoded)
+ let bad_mode=unicode_bidi_resolve(&text,4,4096,16384)
+ assert(unicode_bidi_status(&bad_mode)==1 && unicode_bidi_scalar_len(&bad_mode)==0)
+ unicode_bidi_close(bad_mode)
+ let bad_result=unicode_bidi_resolve(&text,0,95,4160)
+ assert(unicode_bidi_status(&bad_result)==2 && unicode_bidi_visual_len(&bad_result)==0)
+ unicode_bidi_close(bad_result)
+ let bad_work=unicode_bidi_resolve(&text,0,96,4159)
+ assert(unicode_bidi_status(&bad_work)==2 && unicode_bidi_paragraph_count(&bad_work)==0)
+ unicode_bidi_close(bad_work)
+ let exact=unicode_bidi_resolve(&text,0,96,4160)
+ utf8_text_close(text)
+ assert(unicode_bidi_status(&exact)==0 && unicode_bidi_level(&exact,0).value==0)
+ assert(unicode_bidi_level(&exact,1).status==4)
+ unicode_bidi_close(exact)
+ // Strict UTF8 failure stays a valid, empty, explicitly closeable result.
+ var malformed=byte_buffer_new(1)
+ assert(byte_buffer_push(&!malformed,255)==0)
+ let invalid=bidi_owned_text(malformed)
+ let rejected=unicode_bidi_resolve(&invalid,2,4096,16384)
+ assert(unicode_bidi_status(&rejected)==5 && unicode_bidi_scalar_len(&rejected)==0)
+ unicode_bidi_close(rejected);utf8_text_close(invalid)
+ // Embedded NUL is a real retained source scalar, removed only by X9's map.
+ var with_nul=byte_buffer_new(4096)
+ assert(utf8_encode_append(&!with_nul,97)==0)
+ assert(utf8_encode_append(&!with_nul,0)==0)
+ assert(utf8_encode_append(&!with_nul,0x05D0)==0)
+ let nul_text=bidi_owned_text(with_nul)
+ let nul=unicode_bidi_resolve(&nul_text,0,4096,16384)
+ utf8_text_close(nul_text)
+ assert(unicode_bidi_status(&nul)==0 && unicode_bidi_scalar_len(&nul)==3)
+ assert(unicode_bidi_codepoint(&nul,1).value==0 && unicode_bidi_level(&nul,1).value==0-1)
+ assert(unicode_bidi_logical_to_visual(&nul,1).value==0-1 && unicode_bidi_visual_len(&nul)==2)
+ assert(unicode_bidi_byte_offset(&nul,2).value==2)
+ unicode_bidi_close(nul)
+ // P1 resets base selection at paragraph boundaries and treats CRLF as one newline.
+ var multi=byte_buffer_new(4096)
+ assert(utf8_encode_append(&!multi,97)==0);assert(utf8_encode_append(&!multi,10)==0)
+ assert(utf8_encode_append(&!multi,0x05D0)==0);assert(utf8_encode_append(&!multi,13)==0)
+ assert(utf8_encode_append(&!multi,10)==0);assert(utf8_encode_append(&!multi,98)==0)
+ let multi_text=bidi_owned_text(multi)
+ let paragraphs=unicode_bidi_resolve(&multi_text,2,4096,16384)
+ utf8_text_close(multi_text)
+ assert(unicode_bidi_status(&paragraphs)==0 && unicode_bidi_paragraph_count(&paragraphs)==3)
+ let p0=unicode_bidi_paragraph(&paragraphs,0)
+ let p1=unicode_bidi_paragraph(&paragraphs,1)
+ let p2=unicode_bidi_paragraph(&paragraphs,2)
+ assert(p0.start==0 && p0.end==2 && p0.base==0)
+ assert(p1.start==2 && p1.end==5 && p1.base==1)
+ assert(p2.start==5 && p2.end==6 && p2.base==0)
+ let crossed=unicode_bidi_line_reorder(&paragraphs,1,3,4096)
+ assert(unicode_bidi_line_status(&crossed)==4);unicode_bidi_line_close(crossed)
+ let split_crlf=unicode_bidi_line_reorder(&paragraphs,2,4,4096)
+ assert(unicode_bidi_line_status(&split_crlf)==4);unicode_bidi_line_close(split_crlf)
+ unicode_bidi_close(paragraphs)
+ // Explicit line L1 must use stored pre-L1 levels; a trailing neutral resets to base0.
+ var line_bytes=byte_buffer_new(4096)
+ assert(utf8_encode_append(&!line_bytes,0x05D0)==0);assert(utf8_encode_append(&!line_bytes,32)==0)
+ assert(utf8_encode_append(&!line_bytes,0x05D1)==0);assert(utf8_encode_append(&!line_bytes,97)==0)
+ let line_text=bidi_owned_text(line_bytes)
+ let paragraph=unicode_bidi_resolve(&line_text,0,4096,16384)
+ utf8_text_close(line_text)
+ assert(unicode_bidi_status(&paragraph)==0 && unicode_bidi_level(&paragraph,1).value==1)
+ let under=unicode_bidi_line_reorder(&paragraph,0,2,111)
+ assert(unicode_bidi_line_status(&under)==2);unicode_bidi_line_close(under)
+ let line=unicode_bidi_line_reorder(&paragraph,0,2,112)
+ unicode_bidi_close(paragraph)
+ assert(unicode_bidi_line_status(&line)==0)
+ assert(unicode_bidi_line_level(&line,0).value==1 && unicode_bidi_line_level(&line,1).value==0)
+ assert(unicode_bidi_line_visual_to_logical(&line,0).value==0 && unicode_bidi_line_visual_to_logical(&line,1).value==1)
+ unicode_bidi_line_close(line)
+ // UAX9 max_depth125 is a normative algorithm constant, not an input cap.
+ var depth_bytes=byte_buffer_new(4096)
+ var i:i64=0
+ while i<300 {assert(utf8_encode_append(&!depth_bytes,0x202B)==0);i=i+1}
+ assert(utf8_encode_append(&!depth_bytes,0x05D0)==0)
+ i=0
+ while i<300 {assert(utf8_encode_append(&!depth_bytes,0x202C)==0);i=i+1}
+ let depth_text=bidi_owned_text(depth_bytes)
+ let deep=unicode_bidi_resolve(&depth_text,0,100000,100000)
+ utf8_text_close(depth_text)
+ assert(unicode_bidi_status(&deep)==0 && unicode_bidi_scalar_len(&deep)==601)
+ assert(unicode_bidi_level(&deep,300).value==125)
+ assert(unicode_bidi_visual_len(&deep)==1 && unicode_bidi_visual_to_logical(&deep,0).value==300)
+ unicode_bidi_close(deep)
+ // Unicode18 mirror mappings can change UTF8/UTF16 width; keep scalar identities.
+ let mirror=unicode_bidi_mirroring(0x221D,1)
+ let reverse=unicode_bidi_mirroring(0x1DB10,1)
+ let even=unicode_bidi_mirroring(0x221D,0)
+ assert(mirror.status==0 && mirror.mirror_glyph && mirror.codepoint==0x1DB10)
+ assert(reverse.status==0 && reverse.mirror_glyph && reverse.codepoint==0x221D)
+ assert(even.status==0 && !even.mirror_glyph && even.codepoint==0x221D)
+ println("BIDI_ADVERSARIAL_OK")
+ 0
+}

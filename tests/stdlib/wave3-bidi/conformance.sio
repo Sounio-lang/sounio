@@ -1,0 +1,106 @@
+//@ run-pass
+//@ expect-stdout: BIDI_NATIVE_CONFORMANCE_OK
+//@ timeout: 3600
+// Complete generated official chunks use data/current.bin in isolated working dirs.
+use ffi::platform::{platform_open,platform_status,platform_close}
+use io::native_file::{native_file_open,native_file_status,native_file_read,native_file_close}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_reserve,byte_buffer_get,byte_buffer_len,byte_buffer_close}
+use text::utf8::{utf8_text_from_bytes,utf8_text_status,utf8_text_close,utf8_encode_append}
+use text::unicode_bidi::{unicode_bidi_resolve,unicode_bidi_status,unicode_bidi_scalar_len,unicode_bidi_visual_len,unicode_bidi_paragraph_count,unicode_bidi_paragraph,unicode_bidi_level,unicode_bidi_visual_to_logical,unicode_bidi_logical_to_visual,unicode_bidi_close}
+fn bidi_fixture_u32(b:&ByteBuffer,at:i64)->i64 with Panic {
+ let n=byte_buffer_len(b)
+ assert(at>=0 && at<=n && n-at>=4)
+ byte_buffer_get(b,at).value+byte_buffer_get(b,at+1).value*256+byte_buffer_get(b,at+2).value*65536+byte_buffer_get(b,at+3).value*16777216
+}
+fn bidi_fixture_case(b:&ByteBuffer,start:i64)->i64 with IO,Alloc,Mut,Div,Panic {
+ let n=bidi_fixture_u32(b,start)
+ let mode=bidi_fixture_u32(b,start+4)
+ let base=bidi_fixture_u32(b,start+8)
+ let order=bidi_fixture_u32(b,start+12)
+ let kind=bidi_fixture_u32(b,start+16)
+ let source_line=bidi_fixture_u32(b,start+20)
+ assert(mode<=2 && base<=1 && order<=n)
+ let end=start+24+n*8+order*4
+ assert(end<=byte_buffer_len(b))
+ var encoded=byte_buffer_new(n*4)
+ assert(byte_buffer_reserve(&!encoded,n*4)==0)
+ var i:i64=0
+ while i<n {assert(utf8_encode_append(&!encoded,bidi_fixture_u32(b,start+24+i*4))==0);i=i+1}
+ let text=utf8_text_from_bytes(&encoded,n*4)
+ byte_buffer_close(encoded)
+ assert(utf8_text_status(&text)==0)
+ let result=unicode_bidi_resolve(&text,mode,n*56+40,n*104+4056)
+ // The result must own all data and survive destruction of the input.
+ utf8_text_close(text)
+ assert(unicode_bidi_status(&result)==0)
+ assert(unicode_bidi_scalar_len(&result)==n)
+ assert(unicode_bidi_visual_len(&result)==order)
+ let expected_paragraphs=if n==0 {0} else {1}
+ assert(unicode_bidi_paragraph_count(&result)==expected_paragraphs)
+ if n>0 {assert(unicode_bidi_paragraph(&result,0).base==base)}
+ i=0
+ while i<n {
+  let word=bidi_fixture_u32(b,start+24+n*4+i*4)
+  let expected=if word==4294967295 {0-1} else {word}
+  let actual=unicode_bidi_level(&result,i)
+  if actual.status!=0 || actual.value!=expected {
+   print("BIDI_LEVEL_MISMATCH kind=");print_int(kind);print(" line=");print_int(source_line)
+   print(" mode=");print_int(mode);print(" scalar=");print_int(i)
+   print(" expected=");print_int(expected);print(" actual=");print_int(actual.value);print("\n")
+  }
+  assert(actual.status==0 && actual.value==expected)
+  if expected<0 {assert(unicode_bidi_logical_to_visual(&result,i).value==0-1)}
+  i=i+1
+ }
+ i=0
+ while i<order {
+  let expected=bidi_fixture_u32(b,start+24+n*8+i*4)
+  let actual=unicode_bidi_visual_to_logical(&result,i)
+  if actual.status!=0 || actual.value!=expected {
+   print("BIDI_ORDER_MISMATCH kind=");print_int(kind);print(" line=");print_int(source_line)
+   print(" mode=");print_int(mode);print(" visual=");print_int(i)
+   print(" expected=");print_int(expected);print(" actual=");print_int(actual.value);print("\n")
+  }
+  assert(actual.status==0 && actual.value==expected)
+  assert(unicode_bidi_logical_to_visual(&result,expected).value==i)
+  i=i+1
+ }
+ unicode_bidi_close(result)
+ end
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ var path=byte_buffer_new(32)
+ let name="data/current.bin"
+ var i:i64=0
+ while i<str_len(name) {assert(byte_buffer_push(&!path,str_char_at(name,i))==0);i=i+1}
+ let file=native_file_open(&p,&path,0)
+ byte_buffer_close(path)
+ assert(native_file_status(&file)==0)
+ var input=byte_buffer_new(1048577)
+ assert(byte_buffer_reserve(&!input,1048577)==0)
+ while true {
+  let remaining=1048577-byte_buffer_len(&input)
+  assert(remaining>0)
+  let got=native_file_read(&p,&file,&!input,remaining)
+  assert(got.status==0)
+  if got.value==0 {break}
+ }
+ assert(native_file_close(&p,file)==0)
+ assert(byte_buffer_len(&input)>=16 && byte_buffer_len(&input)<=1048576)
+ assert(bidi_fixture_u32(&input,0)==0x44494253)
+ assert(bidi_fixture_u32(&input,4)==0x00383149)
+ assert(bidi_fixture_u32(&input,8)==1)
+ let count=bidi_fixture_u32(&input,12)
+ assert(count>0)
+ var offset:i64=16
+ i=0
+ while i<count {offset=bidi_fixture_case(&input,offset);i=i+1}
+ assert(offset==byte_buffer_len(&input))
+ byte_buffer_close(input)
+ platform_close(p)
+ print("BIDI_CASES_OK ");print_int(count);print("\n")
+ println("BIDI_NATIVE_CONFORMANCE_OK")
+ 0
+}

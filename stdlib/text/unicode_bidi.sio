@@ -1,0 +1,660 @@
+// Unicode18 UAX9. Scalar indices and byte offsets are distinct.
+// Production algorithms consume only pinned embedded UCD data and owned UTF8.
+// Result payload:56 bytes/scalar plus40 bytes/paragraph, exact capacities.
+// Scratch payload:104 bytes/scalar plus4056 bytes (normative directional/bracket stacks).
+// Empty input has zero paragraphs and requires no payload.
+// Status0 OK,1 config,2 budget,3 alloc,4 bounds,5 UTF8,6 data/algorithm.
+use collections::integer_buffer::{IntegerBuffer,IntegerValue,integer_buffer_new,integer_buffer_status,integer_buffer_len,integer_buffer_capacity,integer_buffer_get,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+use text::utf8::{Utf8Text,utf8_text_status,utf8_text_byte_len,utf8_text_scalar_len,utf8_text_next}
+use text::ucd_data::{UnicodeData,unicode_data,unicode_data_status,ucd_property,ucd_property_value,ucd_string_byte,ucd_value_matches}
+pub linear struct BidiText {rows:IntegerBuffer,paragraphs:IntegerBuffer,status:i64,count:i64,visuals:i64,paragraph_count:i64}
+pub linear struct BidiLine {rows:IntegerBuffer,status:i64,start:i64,count:i64,visuals:i64}
+pub struct BidiParagraph {pub start:i64,pub end:i64,pub base:i64,pub visual_start:i64,pub visual_end:i64,pub status:i64}
+pub struct BidiMirror {pub codepoint:i64,pub mirror_glyph:bool,pub status:i64}
+struct BidiProperties {classes:i64,bracket_type:i64,bracket_pair:i64,mirrored:i64,mirror:i64}
+fn bidi_r(b:&IntegerBuffer,row:i64,col:i64,width:i64)->i64 with Panic {integer_buffer_at(b,row*width+col)}
+fn bidi_w(b:&!IntegerBuffer,row:i64,col:i64,width:i64,value:i64) with Mut,Panic {assert(integer_buffer_set(b,row*width+col,value)==0)}
+fn bidi_max(a:i64,b:i64)->i64 {if a>b {a} else {b}}
+fn bidi_isolate(c:i64)->bool {c>=19 && c<=21}
+fn bidi_x9(c:i64)->bool {c==9 || (c>=14 && c<=18)}
+fn bidi_space(c:i64)->bool {c==12 || (c>=19 && c<=22)}
+fn bidi_neutral(c:i64)->bool {(c>=10 && c<=13) || (c>=19 && c<=22)}
+fn bidi_strong(c:i64)->i64 {if c==0 {return 0} if c==1 || c==2 || c==3 || c==6 {return 1} 0-1}
+fn bidi_empty(status:i64)->BidiText with Alloc,Mut,Div {
+ BidiText {rows:integer_buffer_new(0,0),paragraphs:integer_buffer_new(0,0),status:status,count:0,visuals:0,paragraph_count:0}
+}
+pub fn unicode_bidi_status(b:&BidiText)->i64 {b.status}
+pub fn unicode_bidi_scalar_len(b:&BidiText)->i64 {b.count}
+pub fn unicode_bidi_visual_len(b:&BidiText)->i64 {b.visuals}
+pub fn unicode_bidi_paragraph_count(b:&BidiText)->i64 {b.paragraph_count}
+fn bidi_value(b:&BidiText,index:i64,column:i64)->IntegerValue {
+ if b.status!=0 {return IntegerValue {value:0,status:b.status}}
+ if index<0 || index>=b.count {return IntegerValue {value:0,status:4}}
+ integer_buffer_get(&b.rows,index*7+column)
+}
+pub fn unicode_bidi_codepoint(b:&BidiText,index:i64)->IntegerValue {bidi_value(b,index,0)}
+pub fn unicode_bidi_level(b:&BidiText,index:i64)->IntegerValue {bidi_value(b,index,3)}
+pub fn unicode_bidi_logical_to_visual(b:&BidiText,index:i64)->IntegerValue {bidi_value(b,index,5)}
+pub fn unicode_bidi_byte_offset(b:&BidiText,index:i64)->IntegerValue {bidi_value(b,index,6)}
+pub fn unicode_bidi_visual_to_logical(b:&BidiText,index:i64)->IntegerValue {
+ if b.status!=0 {return IntegerValue {value:0,status:b.status}}
+ if index<0 || index>=b.visuals {return IntegerValue {value:0,status:4}}
+ integer_buffer_get(&b.rows,index*7+4)
+}
+pub fn unicode_bidi_paragraph(b:&BidiText,index:i64)->BidiParagraph with Panic {
+ if b.status!=0 || index<0 || index>=b.paragraph_count {return BidiParagraph {start:0,end:0,base:0,visual_start:0,visual_end:0,status:if b.status!=0 {b.status} else {4}}}
+ BidiParagraph {start:bidi_r(&b.paragraphs,index,0,5),end:bidi_r(&b.paragraphs,index,1,5),base:bidi_r(&b.paragraphs,index,2,5),visual_start:bidi_r(&b.paragraphs,index,3,5),visual_end:bidi_r(&b.paragraphs,index,4,5),status:0}
+}
+pub fn unicode_bidi_close(b:BidiText) with Alloc {let BidiText {rows,paragraphs,status,count,visuals,paragraph_count}=b;integer_buffer_close(rows);integer_buffer_close(paragraphs)}
+pub fn unicode_bidi_line_status(b:&BidiLine)->i64 {b.status}
+pub fn unicode_bidi_line_len(b:&BidiLine)->i64 {b.count}
+pub fn unicode_bidi_line_visual_len(b:&BidiLine)->i64 {b.visuals}
+pub fn unicode_bidi_line_level(b:&BidiLine,logical_offset:i64)->IntegerValue {
+ if b.status!=0 {return IntegerValue {value:0,status:b.status}}
+ if logical_offset<0 || logical_offset>=b.count {return IntegerValue {value:0,status:4}}
+ integer_buffer_get(&b.rows,logical_offset*7+3)
+}
+pub fn unicode_bidi_line_visual_to_logical(b:&BidiLine,visual_offset:i64)->IntegerValue {
+ if b.status!=0 {return IntegerValue {value:0,status:b.status}}
+ if visual_offset<0 || visual_offset>=b.visuals {return IntegerValue {value:0,status:4}}
+ integer_buffer_get(&b.rows,visual_offset*7+4)
+}
+pub fn unicode_bidi_line_close(b:BidiLine) with Alloc {let BidiLine {rows,status,start,count,visuals}=b;integer_buffer_close(rows)}
+fn bidi_type(data:&UnicodeData,property:i64,cp:i64)->i64 {
+ let value=ucd_property_value(data,property,cp)
+ if value.status!=0 {return 0-1}
+ // The versioned table compiler canonicalizes enumerated values to their
+ // UCD short aliases. Decode those small names without scanning alias lists.
+ let a=ucd_string_byte(data,value.id,0)
+ let b=ucd_string_byte(data,value.id,1)
+ if b==0 {
+  if a==76 {return 0} if a==82 {return 1}
+  if a==66 {return 10} if a==83 {return 11}
+  return 0-1
+ }
+ let c=ucd_string_byte(data,value.id,2)
+ if c==0 {
+  if a==65 && b==76 {return 2} if a==69 && b==78 {return 3}
+  if a==69 && b==83 {return 4} if a==69 && b==84 {return 5}
+  if a==65 && b==78 {return 6} if a==67 && b==83 {return 7}
+  if a==66 && b==78 {return 9} if a==87 && b==83 {return 12}
+  if a==79 && b==78 {return 13}
+  return 0-1
+ }
+ if ucd_string_byte(data,value.id,3)!=0 {return 0-1}
+ if a==78 && b==83 && c==77 {return 8}
+ if a==76 && b==82 && c==69 {return 14}
+ if a==76 && b==82 && c==79 {return 15}
+ if a==82 && b==76 && c==69 {return 16}
+ if a==82 && b==76 && c==79 {return 17}
+ if a==80 && b==68 && c==70 {return 18}
+ if a==76 && b==82 && c==73 {return 19}
+ if a==82 && b==76 && c==73 {return 20}
+ if a==70 && b==83 && c==73 {return 21}
+ if a==80 && b==68 && c==73 {return 22}
+ 0-1
+}
+
+fn bidi_hex(data:&UnicodeData,id:i64)->i64 with Mut {
+ var at:i64=0
+ var value:i64=0
+ while at<6 {
+  let byte=ucd_string_byte(data,id,at)
+  if byte==0 {return if at>0 && value<=1114111 {value} else {0-1}}
+  let digit=if byte>=48 && byte<=57 {byte-48} else if byte>=65 && byte<=70 {byte-55} else if byte>=97 && byte<=102 {byte-87} else {0-1}
+  if digit<0 {return 0-1}
+  value=value*16+digit;at=at+1
+ }
+ if ucd_string_byte(data,id,at)!=0 || value>1114111 {return 0-1}
+ value
+}
+pub fn unicode_bidi_mirroring(cp:i64,level:i64)->BidiMirror with Mut {
+ if cp<0 || cp>1114111 || (cp>=55296 && cp<=57343) || level<0 || level>126 {return BidiMirror {codepoint:cp,mirror_glyph:false,status:1}}
+ let data=unicode_data()
+ if unicode_data_status(&data)!=0 {return BidiMirror {codepoint:cp,mirror_glyph:false,status:6}}
+ let property=ucd_property(&data,"Bidi_Mirrored")
+ let mapping=ucd_property(&data,"Bidi_Mirroring_Glyph")
+ if property<0 || mapping<0 {return BidiMirror {codepoint:cp,mirror_glyph:false,status:6}}
+ let value=ucd_property_value(&data,property,cp)
+ if value.status!=0 {return BidiMirror {codepoint:cp,mirror_glyph:false,status:6}}
+ let mirrored=(level&1)==1 && ucd_value_matches(&data,property,value.id,"Y")
+ if !mirrored {return BidiMirror {codepoint:cp,mirror_glyph:false,status:0}}
+ let target=ucd_property_value(&data,mapping,cp)
+ if target.status!=0 {return BidiMirror {codepoint:cp,mirror_glyph:true,status:6}}
+ if ucd_string_byte(&data,target.id,0)==0 {return BidiMirror {codepoint:cp,mirror_glyph:true,status:0}}
+ let partner=bidi_hex(&data,target.id)
+ if partner<0 || (partner>=55296 && partner<=57343) {return BidiMirror {codepoint:cp,mirror_glyph:true,status:6}}
+ BidiMirror {codepoint:partner,mirror_glyph:true,status:0}
+}
+
+fn bidi_seq_index(work:&IntegerBuffer,at:i64)->i64 with Panic {bidi_r(work,at,10,13)}
+fn bidi_seq_type(work:&IntegerBuffer,at:i64)->i64 with Panic {bidi_r(work,bidi_seq_index(work,at),0,13)}
+fn bidi_seq_set(work:&!IntegerBuffer,at:i64,value:i64) with Mut,Panic {
+ let index=bidi_seq_index(work,at)
+ bidi_w(work,index,0,13,value)
+}
+fn bidi_prepare(rows:&IntegerBuffer,work:&!IntegerBuffer,start:i64,end:i64,mode:i64)->i64 with Mut,Panic {
+ var depth:i64=0
+ var first:i64=0-1
+ var i=start
+ while i<end {
+  let original=bidi_r(rows,i,1,7)
+  bidi_w(work,i,0,13,original)
+  bidi_w(work,i,2,13,0-1)
+  if bidi_isolate(original) {bidi_w(work,depth,10,13,i);depth=depth+1}
+  else if original==22 && depth>0 {
+   depth=depth-1
+   let opener=bidi_r(work,depth,10,13)
+   bidi_w(work,opener,2,13,i);bidi_w(work,i,2,13,opener)
+   if bidi_r(work,opener,0,13)==21 {bidi_w(work,opener,0,13,19)}
+  } else if original==0 || original==1 || original==2 {
+   let direction=if original==0 {0} else {1}
+   if depth==0 {if first<0 {first=direction}}
+   else {
+    let opener=bidi_r(work,depth-1,10,13)
+    if bidi_r(work,opener,0,13)==21 {bidi_w(work,opener,0,13,19+direction)}
+   }
+  }
+  i=i+1
+ }
+ while depth>0 {
+  depth=depth-1
+  let opener=bidi_r(work,depth,10,13)
+  if bidi_r(work,opener,0,13)==21 {bidi_w(work,opener,0,13,19)}
+ }
+ if mode<2 {return mode}
+ if first>=0 {return first}
+ mode-2
+}
+fn bidi_bracket_kind(data:&UnicodeData,property:i64,cp:i64)->i64 {
+ let value=ucd_property_value(data,property,cp)
+ if value.status!=0 {return 0-1}
+ if ucd_value_matches(data,property,value.id,"n") {return 0}
+ if ucd_value_matches(data,property,value.id,"o") {return 1}
+ if ucd_value_matches(data,property,value.id,"c") {return 2}
+ 0-1
+}
+fn bidi_bracket_key(cp:i64)->i64 {if cp==9002 {return 12297} cp}
+fn bidi_brackets(data:&UnicodeData,props:&BidiProperties,rows:&IntegerBuffer,work:&!IntegerBuffer,count:i64,embedding:i64,sos:i64,total:i64)->i64 with Mut,Panic {
+ let stack=13*total+381
+ var depth:i64=0
+ var pairs:i64=0
+ var at:i64=0
+ while at<count {
+  if bidi_seq_type(work,at)==13 {
+   let cp=bidi_r(rows,bidi_seq_index(work,at),0,7)
+   let kind=bidi_bracket_kind(data,props.bracket_type,cp)
+   if kind<0 {return 6}
+   if kind==1 {
+    // BD16 overflow invalidates every candidate pair in this isolating sequence.
+    if depth==63 {return 0}
+    let partner=ucd_property_value(data,props.bracket_pair,cp)
+    if partner.status!=0 {return 6}
+    let key=bidi_hex(data,partner.id)
+    if key<0 {return 6}
+    assert(integer_buffer_set(work,stack+depth*2,bidi_bracket_key(key))==0)
+    assert(integer_buffer_set(work,stack+depth*2+1,at)==0)
+    depth=depth+1
+   } else if kind==2 {
+    var find=depth-1
+    while find>=0 {
+     if integer_buffer_at(work,stack+find*2)==bidi_bracket_key(cp) {break}
+     find=find-1
+    }
+    if find>=0 {
+     let opener=integer_buffer_at(work,stack+find*2+1)
+     bidi_w(work,pairs,11,13,opener);bidi_w(work,pairs,12,13,at)
+     pairs=pairs+1;depth=find
+    }
+   }
+  }
+  at=at+1
+ }
+ // Pairs are discovered by closing position; N0 requires opening-position order.
+ // Stable insertion has at most63 simultaneously nested candidates; disjoint
+ // pairs are already ordered. No data-dependent truncation is used.
+ var p:i64=1
+ while p<pairs {
+  let open=bidi_r(work,p,11,13)
+  let close=bidi_r(work,p,12,13)
+  var j=p
+  while j>0 {
+   if bidi_r(work,j-1,11,13)<=open {break}
+   let a=bidi_r(work,j-1,11,13);let b=bidi_r(work,j-1,12,13)
+   bidi_w(work,j,11,13,a);bidi_w(work,j,12,13,b);j=j-1
+  }
+  bidi_w(work,j,11,13,open);bidi_w(work,j,12,13,close);p=p+1
+ }
+ p=0
+ while p<pairs {
+  let open=bidi_r(work,p,11,13);let close=bidi_r(work,p,12,13)
+  var found:i64=0-1
+  at=open+1
+  while at<close {
+   let strong=bidi_strong(bidi_seq_type(work,at))
+   if strong==embedding {found=embedding;break}
+   if strong>=0 {found=strong}
+   at=at+1
+  }
+  if found>=0 {
+   if found!=embedding {
+    var previous=sos
+    at=open-1
+    while at>=0 {
+     let strong=bidi_strong(bidi_seq_type(work,at))
+     if strong>=0 {previous=strong;break}
+     at=at-1
+    }
+    found=previous
+   }
+   bidi_seq_set(work,open,found);bidi_seq_set(work,close,found)
+   // Original NSMs immediately after either changed bracket inherit its type.
+   var side:i64=0
+   while side<2 {
+    at=if side==0 {open+1} else {close+1}
+    while at<count {if bidi_r(rows,bidi_seq_index(work,at),1,7)!=8 {break};bidi_seq_set(work,at,found);at=at+1}
+    side=side+1
+   }
+  }
+  p=p+1
+ }
+ 0
+}
+fn bidi_sequence(data:&UnicodeData,props:&BidiProperties,rows:&!IntegerBuffer,work:&!IntegerBuffer,count:i64,sos:i64,eos:i64,embedding:i64,total:i64)->i64 with Mut,Panic {
+ // W1: NSM following an isolate initiator/PDI becomes ON.
+ var previous=sos
+ var at:i64=0
+ while at<count {
+  var c=bidi_seq_type(work,at)
+  if c==8 {c=if previous>=19 && previous<=22 {13} else {previous};bidi_seq_set(work,at,c)}
+  previous=c;at=at+1
+ }
+ // W2 uses the most recent original strong type before W3 removes AL.
+ var strong=sos
+ at=0
+ while at<count {
+  let c=bidi_seq_type(work,at)
+  if c==3 && strong==2 {bidi_seq_set(work,at,6)}
+  if c==0 || c==1 || c==2 {strong=c}
+  at=at+1
+ }
+ at=0
+ while at<count {if bidi_seq_type(work,at)==2 {bidi_seq_set(work,at,1)} at=at+1}
+ // W4. Resolved separators cannot change the numeric context for later separators.
+ at=1
+ while at+1<count {
+  let c=bidi_seq_type(work,at);let left=bidi_seq_type(work,at-1);let right=bidi_seq_type(work,at+1)
+  if c==4 && left==3 && right==3 {bidi_seq_set(work,at,3)}
+  else if c==7 && left==right && (left==3 || left==6) {bidi_seq_set(work,at,left)}
+  at=at+1
+ }
+ at=0
+ while at<count {
+  if bidi_seq_type(work,at)!=5 {at=at+1}
+  else {
+   let start=at
+   while at<count {if bidi_seq_type(work,at)!=5 {break};at=at+1}
+   let left=if start>0 {bidi_seq_type(work,start-1)} else {sos}
+   let right=if at<count {bidi_seq_type(work,at)} else {eos}
+   if left==3 || right==3 {var i=start;while i<at {bidi_seq_set(work,i,3);i=i+1}}
+  }
+ }
+ at=0
+ while at<count {let c=bidi_seq_type(work,at);if c==4 || c==5 || c==7 {bidi_seq_set(work,at,13)} at=at+1}
+ strong=sos;at=0
+ while at<count {
+  let c=bidi_seq_type(work,at)
+  if c==3 && strong==0 {bidi_seq_set(work,at,0)}
+  if c==0 || c==1 {strong=c}
+  at=at+1
+ }
+ let status=bidi_brackets(data,props,rows,work,count,embedding,sos,total)
+ if status!=0 {return status}
+ // N1/N2 over maximal neutral sequences in this isolating run sequence.
+ at=0
+ while at<count {
+  if !bidi_neutral(bidi_seq_type(work,at)) {at=at+1}
+  else {
+   let start=at
+   while at<count {if !bidi_neutral(bidi_seq_type(work,at)) {break};at=at+1}
+   let left=if start>0 {bidi_strong(bidi_seq_type(work,start-1))} else {sos}
+   let right=if at<count {bidi_strong(bidi_seq_type(work,at))} else {eos}
+   let resolved=if left==right {left} else {embedding}
+   var i=start
+   while i<at {bidi_seq_set(work,i,resolved);i=i+1}
+  }
+ }
+ at=0
+ while at<count {
+  let index=bidi_seq_index(work,at);let c=bidi_seq_type(work,at)
+  var level=bidi_r(work,index,1,13)
+  if (level&1)==0 {if c==1 {level=level+1} else if c==3 || c==6 {level=level+2}}
+  else if c==0 || c==3 || c==6 {level=level+1}
+  if level<0 || level>126 {return 6}
+  bidi_w(rows,index,2,7,level);bidi_w(rows,index,3,7,level)
+  at=at+1
+ }
+ 0
+}
+
+fn bidi_explicit(rows:&IntegerBuffer,work:&!IntegerBuffer,start:i64,end:i64,base:i64,total:i64) with Mut,Panic {
+ let stack=13*total
+ var top:i64=0
+ assert(integer_buffer_set(work,stack,base)==0)
+ assert(integer_buffer_set(work,stack+1,0-1)==0)
+ assert(integer_buffer_set(work,stack+2,0)==0)
+ var overflow_isolate:i64=0
+ var overflow_embedding:i64=0
+ var valid_isolate:i64=0
+ var i=start
+ while i<end {
+  let original=bidi_r(rows,i,1,7)
+  let classified=bidi_r(work,i,0,13)
+  var level=integer_buffer_at(work,stack+top*3)
+  var direction_override=integer_buffer_at(work,stack+top*3+1)
+  bidi_w(work,i,1,13,level)
+  if original>=14 && original<=17 {
+   let rtl=original==16 || original==17
+   let next=if rtl {level+1+(level&1)} else {level+2-(level&1)}
+   if next<=125 && overflow_isolate==0 && overflow_embedding==0 {
+    top=top+1
+    assert(top<127)
+    assert(integer_buffer_set(work,stack+top*3,next)==0)
+    assert(integer_buffer_set(work,stack+top*3+1,if original==15 {0} else if original==17 {1} else {0-1})==0)
+    assert(integer_buffer_set(work,stack+top*3+2,0)==0)
+   } else if overflow_isolate==0 {overflow_embedding=overflow_embedding+1}
+  } else if bidi_isolate(original) {
+   if direction_override>=0 {bidi_w(work,i,0,13,direction_override)}
+   let next=if classified==20 {level+1+(level&1)} else {level+2-(level&1)}
+   if next<=125 && overflow_isolate==0 && overflow_embedding==0 {
+    top=top+1;assert(top<127)
+    assert(integer_buffer_set(work,stack+top*3,next)==0)
+    assert(integer_buffer_set(work,stack+top*3+1,0-1)==0)
+    assert(integer_buffer_set(work,stack+top*3+2,1)==0)
+    valid_isolate=valid_isolate+1
+   } else {overflow_isolate=overflow_isolate+1}
+  } else if original==22 {
+   if overflow_isolate>0 {overflow_isolate=overflow_isolate-1}
+   else if valid_isolate>0 {
+    overflow_embedding=0
+    while top>0 && integer_buffer_at(work,stack+top*3+2)==0 {top=top-1}
+    assert(top>0)
+    top=top-1;valid_isolate=valid_isolate-1
+   }
+   level=integer_buffer_at(work,stack+top*3)
+   direction_override=integer_buffer_at(work,stack+top*3+1)
+   bidi_w(work,i,1,13,level)
+   if direction_override>=0 {bidi_w(work,i,0,13,direction_override)}
+  } else if original==18 {
+   if overflow_isolate==0 {
+    if overflow_embedding>0 {overflow_embedding=overflow_embedding-1}
+    else if top>0 && integer_buffer_at(work,stack+top*3+2)==0 {top=top-1}
+   }
+  } else if original==10 {bidi_w(work,i,1,13,base)}
+  else if direction_override>=0 {bidi_w(work,i,0,13,direction_override)}
+  i=i+1
+ }
+}
+fn bidi_paragraph_resolve(data:&UnicodeData,props:&BidiProperties,rows:&!IntegerBuffer,work:&!IntegerBuffer,start:i64,end:i64,mode:i64,total:i64)->i64 with Mut,Panic {
+ let base=bidi_prepare(rows,work,start,end,mode)
+ bidi_explicit(rows,work,start,end,base,total)
+ var previous:i64=0-1
+ var runs:i64=0
+ var i=start
+ while i<end {
+  if !bidi_x9(bidi_r(rows,i,1,7)) {
+   bidi_w(work,i,3,13,previous);bidi_w(work,i,4,13,0-1)
+   if previous>=start {bidi_w(work,previous,4,13,i)}
+   var new_run=previous<start
+   if !new_run {new_run=bidi_r(work,previous,1,13)!=bidi_r(work,i,1,13)}
+   if new_run {
+    bidi_w(work,runs,6,13,i);bidi_w(work,runs,8,13,0-1);bidi_w(work,runs,9,13,0)
+    runs=runs+1
+   }
+   bidi_w(work,runs-1,7,13,i);bidi_w(work,i,5,13,runs-1)
+   previous=i
+  }
+  i=i+1
+ }
+ var run:i64=0
+ while run<runs {
+  let last=bidi_r(work,run,7,13)
+  let paired=bidi_r(work,last,2,13)
+  if bidi_isolate(bidi_r(rows,last,1,7)) && paired>=start && paired<end {
+   let next=bidi_r(work,paired,5,13)
+   if next<0 || next>=runs {return 0-7}
+   if bidi_r(work,next,6,13)!=paired {return 0-7}
+   bidi_w(work,run,8,13,next);bidi_w(work,next,9,13,1)
+  }
+  run=run+1
+ }
+ run=0
+ while run<runs {
+  if bidi_r(work,run,9,13)==0 {
+   var current=run
+   var count:i64=0
+   var traversed:i64=0
+   var first:i64=0-1
+   var last:i64=0-1
+   while current>=0 {
+    traversed=traversed+1
+    if traversed>runs {return 0-7}
+    var index=bidi_r(work,current,6,13)
+    let stop=bidi_r(work,current,7,13)
+    if first<0 {first=index}
+    while true {
+     if count>=end-start || index<start || index>=end {return 0-7}
+     bidi_w(work,count,10,13,index);count=count+1;last=index
+     if index==stop {break}
+     index=bidi_r(work,index,4,13)
+    }
+    current=bidi_r(work,current,8,13)
+   }
+   let prior=bidi_r(work,first,3,13)
+   let following=bidi_r(work,last,4,13)
+   let before=if prior>=start {bidi_r(work,prior,1,13)} else {base}
+   let after=if following>=start && !(bidi_isolate(bidi_r(rows,last,1,7)) && bidi_r(work,last,2,13)<0) {bidi_r(work,following,1,13)} else {base}
+   let sos=bidi_max(bidi_r(work,first,1,13),before)&1
+   let eos=bidi_max(bidi_r(work,last,1,13),after)&1
+   let embedding=bidi_r(work,first,1,13)&1
+   let status=bidi_sequence(data,props,rows,work,count,sos,eos,embedding,total)
+   if status!=0 {return 0-7}
+  }
+  run=run+1
+ }
+ base
+}
+// L1 for one logical line; retain X9's -1 sentinel and ignore removed characters.
+fn bidi_line_l1(rows:&!IntegerBuffer,start:i64,end:i64,base:i64) with Mut,Panic {
+ var i=start
+ while i<end {
+  let original=bidi_r(rows,i,1,7)
+  if original==10 || original==11 {
+   bidi_w(rows,i,3,7,base)
+   var j=i-1
+   while j>=start {
+    let c=bidi_r(rows,j,1,7)
+    if bidi_x9(c) {j=j-1}
+    else if bidi_space(c) {bidi_w(rows,j,3,7,base);j=j-1}
+    else {break}
+   }
+  }
+  i=i+1
+ }
+ i=end-1
+ while i>=start {
+  let c=bidi_r(rows,i,1,7)
+  if bidi_x9(c) {i=i-1}
+  else if bidi_space(c) {bidi_w(rows,i,3,7,base);i=i-1}
+  else {break}
+ }
+}
+fn bidi_line_l2(rows:&!IntegerBuffer,start:i64,end:i64,visual_start:i64)->i64 with Mut,Panic {
+ var visuals=visual_start
+ var maximum:i64=0
+ var minimum_odd:i64=127
+ var i=start
+ while i<end {
+  let level=bidi_r(rows,i,3,7)
+  if level>=0 {
+   bidi_w(rows,visuals,4,7,i);visuals=visuals+1
+   if level>maximum {maximum=level}
+   if (level&1)==1 && level<minimum_odd {minimum_odd=level}
+  }
+  i=i+1
+ }
+ var level=maximum
+ while level>=minimum_odd {
+  var at=visual_start
+  while at<visuals {
+   let logical=bidi_r(rows,at,4,7)
+   if bidi_r(rows,logical,3,7)<level {at=at+1}
+   else {
+    let first=at
+    while at<visuals {if bidi_r(rows,bidi_r(rows,at,4,7),3,7)<level {break};at=at+1}
+    var left=first;var right=at-1
+    while left<right {
+     let a=bidi_r(rows,left,4,7);let b=bidi_r(rows,right,4,7)
+     bidi_w(rows,left,4,7,b);bidi_w(rows,right,4,7,a);left=left+1;right=right-1
+    }
+   }
+  }
+  level=level-1
+ }
+ i=visual_start
+ while i<visuals {let logical=bidi_r(rows,i,4,7);bidi_w(rows,logical,5,7,i);i=i+1}
+ visuals
+}
+
+struct BidiCounts {status:i64,visuals:i64,paragraphs:i64}
+fn bidi_fill(data:&UnicodeData,props:&BidiProperties,input:&Utf8Text,rows:&!IntegerBuffer,metadata:&!IntegerBuffer,work:&!IntegerBuffer,n:i64,mode:i64)->BidiCounts with Mut,Panic {
+ var offset:i64=0
+ var i:i64=0
+ while i<n {
+  let scalar=utf8_text_next(input,offset)
+  let c=bidi_type(data,props.classes,scalar.codepoint)
+  if scalar.status!=0 || c<0 {return BidiCounts {status:6,visuals:0,paragraphs:0}}
+  bidi_w(rows,i,0,7,scalar.codepoint);bidi_w(rows,i,1,7,c)
+  bidi_w(rows,i,2,7,0-1);bidi_w(rows,i,3,7,0-1)
+  bidi_w(rows,i,4,7,0-1);bidi_w(rows,i,5,7,0-1);bidi_w(rows,i,6,7,offset)
+  offset=scalar.next;i=i+1
+ }
+ var start:i64=0
+ var paragraph:i64=0
+ var visuals:i64=0
+ while start<n {
+  var end=start
+  while end<n {
+   let c=bidi_r(rows,end,1,7)
+   end=end+1
+   if c==10 {
+    if end<n {if bidi_r(rows,end-1,0,7)==13 && bidi_r(rows,end,0,7)==10 {end=end+1}}
+    break
+   }
+  }
+  let base=bidi_paragraph_resolve(data,props,rows,work,start,end,mode,n)
+  if base<0 {return BidiCounts {status:6,visuals:0,paragraphs:0}}
+  bidi_line_l1(rows,start,end,base)
+  let before=visuals
+  visuals=bidi_line_l2(rows,start,end,visuals)
+  bidi_w(metadata,paragraph,0,5,start);bidi_w(metadata,paragraph,1,5,end)
+  bidi_w(metadata,paragraph,2,5,base);bidi_w(metadata,paragraph,3,5,before)
+  bidi_w(metadata,paragraph,4,5,visuals)
+  paragraph=paragraph+1;start=end
+ }
+ BidiCounts {status:0,visuals:visuals,paragraphs:paragraph}
+}
+pub fn unicode_bidi_resolve(input:&Utf8Text,paragraph_mode:i64,max_result_bytes:i64,max_work_bytes:i64)->BidiText with Alloc,Mut,Div,Panic {
+ if paragraph_mode<0 || paragraph_mode>3 || max_result_bytes<0 || max_work_bytes<0 || max_result_bytes>9223372036854771704 || max_work_bytes>9223372036854771704 {return bidi_empty(1)}
+ if utf8_text_status(input)!=0 {return bidi_empty(utf8_text_status(input))}
+ let n=utf8_text_scalar_len(input)
+ let bytes=utf8_text_byte_len(input)
+ if n==0 {return bidi_empty(0)}
+ if n<0 || n>bytes {return bidi_empty(5)}
+ if n>max_result_bytes/56 || max_work_bytes<4056 || n>(max_work_bytes-4056)/104 {return bidi_empty(2)}
+ let data=unicode_data()
+ if unicode_data_status(&data)!=0 {return bidi_empty(6)}
+ let props=BidiProperties {classes:ucd_property(&data,"Bidi_Class"),bracket_type:ucd_property(&data,"Bidi_Paired_Bracket_Type"),bracket_pair:ucd_property(&data,"Bidi_Paired_Bracket"),mirrored:ucd_property(&data,"Bidi_Mirrored"),mirror:ucd_property(&data,"Bidi_Mirroring_Glyph")}
+ if props.classes<0 || props.bracket_type<0 || props.bracket_pair<0 || props.mirrored<0 || props.mirror<0 {return bidi_empty(6)}
+ // P1 counts separators first. CRLF is one newline function, retaining both
+ // source scalars with the preceding paragraph. A final separator adds no
+ // invented trailing empty paragraph.
+ var paragraphs:i64=0
+ var offset:i64=0
+ var seen:i64=0
+ var last_separator=false
+ var previous_cp:i64=0-1
+ while offset<bytes {
+  let scalar=utf8_text_next(input,offset)
+  if scalar.status!=0 {return bidi_empty(5)}
+  let c=bidi_type(&data,props.classes,scalar.codepoint)
+  if c<0 {return bidi_empty(6)}
+  if c==10 {
+   if !(previous_cp==13 && scalar.codepoint==10) {paragraphs=paragraphs+1}
+   last_separator=true
+  } else {last_separator=false}
+  previous_cp=scalar.codepoint;offset=scalar.next;seen=seen+1
+ }
+ if seen!=n || offset!=bytes {return bidi_empty(5)}
+ if !last_separator {paragraphs=paragraphs+1}
+ if paragraphs>(max_result_bytes-n*56)/40 {return bidi_empty(2)}
+ var rows=integer_buffer_new(n*7,n*56)
+ var metadata=integer_buffer_new(paragraphs*5,paragraphs*40)
+ var status=integer_buffer_status(&rows)
+ if status==0 {status=integer_buffer_status(&metadata)}
+ var work=integer_buffer_new(if status==0 {n*13+507} else {0},if status==0 {n*104+4056} else {0})
+ if status==0 {status=integer_buffer_status(&work)}
+ var counts=BidiCounts {status:status,visuals:0,paragraphs:0}
+ if status==0 {
+  counts=bidi_fill(&data,&props,input,&!rows,&!metadata,&!work,n,paragraph_mode)
+  if counts.status==0 && counts.paragraphs!=paragraphs {counts.status=6}
+ }
+ integer_buffer_close(work)
+ if counts.status==0 {assert(integer_buffer_capacity(&rows)*8+integer_buffer_capacity(&metadata)*8<=max_result_bytes)}
+ BidiText {rows:rows,paragraphs:metadata,status:counts.status,count:if counts.status==0 {n} else {0},visuals:if counts.status==0 {counts.visuals} else {0},paragraph_count:if counts.status==0 {counts.paragraphs} else {0}}
+}
+// Reorder one explicitly chosen logical scalar range inside one paragraph.
+// This copied owner uses56 bytes/scalar; it needs no additional scratch payload.
+// Glyph shaping and display-width line breaking belong to the rendering caller.
+fn bidi_split_crlf(rows:&IntegerBuffer,index:i64,count:i64)->bool with Panic {
+ if index<=0 || index>=count {return false}
+ bidi_r(rows,index-1,0,7)==13 && bidi_r(rows,index,0,7)==10
+}
+pub fn unicode_bidi_line_reorder(input:&BidiText,start:i64,end:i64,max_result_bytes:i64)->BidiLine with Alloc,Mut,Div,Panic {
+ if max_result_bytes<0 || max_result_bytes>9223372036854771704 {return BidiLine {rows:integer_buffer_new(0,0),status:1,start:start,count:0,visuals:0}}
+ if input.status!=0 {return BidiLine {rows:integer_buffer_new(0,0),status:input.status,start:start,count:0,visuals:0}}
+ if start<0 || end<start || end>input.count {return BidiLine {rows:integer_buffer_new(0,0),status:4,start:start,count:0,visuals:0}}
+ if bidi_split_crlf(&input.rows,start,input.count) {return BidiLine {rows:integer_buffer_new(0,0),status:4,start:start,count:0,visuals:0}}
+ if bidi_split_crlf(&input.rows,end,input.count) {return BidiLine {rows:integer_buffer_new(0,0),status:4,start:start,count:0,visuals:0}}
+ if start==end {return BidiLine {rows:integer_buffer_new(0,0),status:0,start:start,count:0,visuals:0}}
+ var base:i64=0-1
+ var paragraph:i64=0
+ while paragraph<input.paragraph_count {
+  let a=bidi_r(&input.paragraphs,paragraph,0,5);let b=bidi_r(&input.paragraphs,paragraph,1,5)
+  if start>=a && start<b && end<=b {base=bidi_r(&input.paragraphs,paragraph,2,5);break}
+  paragraph=paragraph+1
+ }
+ if base<0 {return BidiLine {rows:integer_buffer_new(0,0),status:4,start:start,count:0,visuals:0}}
+ let n=end-start
+ if n>max_result_bytes/56 {return BidiLine {rows:integer_buffer_new(0,0),status:2,start:start,count:0,visuals:0}}
+ var rows=integer_buffer_new(n*7,n*56)
+ let status=integer_buffer_status(&rows)
+ var visuals:i64=0
+ if status==0 {
+  var i:i64=0
+  while i<n {
+   var column:i64=0
+   while column<7 {
+    let value=if column==3 {bidi_r(&input.rows,start+i,2,7)} else if column==4 || column==5 {0-1} else {bidi_r(&input.rows,start+i,column,7)}
+    bidi_w(&!rows,i,column,7,value);column=column+1
+   }
+   i=i+1
+  }
+  bidi_line_l1(&!rows,0,n,base)
+  visuals=bidi_line_l2(&!rows,0,n,0)
+  i=0
+  while i<visuals {let logical=bidi_r(&rows,i,4,7);bidi_w(&!rows,i,4,7,logical+start);i=i+1}
+  assert(integer_buffer_capacity(&rows)*8<=max_result_bytes)
+ }
+ BidiLine {rows:rows,status:status,start:start,count:if status==0 {n} else {0},visuals:visuals}
+}
