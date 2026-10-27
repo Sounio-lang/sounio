@@ -12,6 +12,14 @@
 #   //@ ignore-owner: TEAM      optional owner metadata for ignored tests
 #   //@ ignore-unblock: TEXT    optional unblock condition for ignored tests
 #   //@ contract-adjustment: X  tracks rewritten active-contract tests
+#   //@ timeout: SECONDS        run timeout for this test (default
+#                               STDLIB_E2E_RUN_TIMEOUT_SEC, 30)
+#   //@ requires: slow          skipped unless SOUNIO_SLOW_TESTS_AVAILABLE is set;
+#                               the nightly slow lane in ci.yml runs these
+#
+# The last two match scripts/dev/run_sio_test_suite_v2.sh. This runner used to
+# ignore them, so 19 of the 24 tests it reported as run-timeout on 2026-10-25
+# had been killed at 30 s although they declare 60 s to 3600 s.
 #
 # Usage:
 #   bash scripts/stdlib/run_stdlib_e2e.sh [--filter PATTERN] [--verbose] [--json-out PATH]
@@ -127,6 +135,8 @@ run_test() {
   local ignore_owner=""
   local ignore_unblock=""
   local expect_stdout=()
+  local test_timeout="$RUN_TIMEOUT_SEC"
+  local requires_slow=false
 
   while IFS= read -r line; do
     if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//([[:space:]]|$) && ! "$line" =~ ^[[:space:]]*$ ]]; then
@@ -159,7 +169,22 @@ run_test() {
     if [[ "$line" =~ "//@ expect-stdout: "(.*) ]]; then
       expect_stdout+=("${BASH_REMATCH[1]}")
     fi
+    if [[ "$line" =~ ^[[:space:]]*//@[[:space:]]*timeout:[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
+      test_timeout="${BASH_REMATCH[1]}"
+    fi
+    if [[ "$line" =~ ^[[:space:]]*//@[[:space:]]*requires:[[:space:]]*slow[[:space:]]*$ ]]; then
+      requires_slow=true
+    fi
   done < "$file"
+
+  if $requires_slow && [[ -z "${SOUNIO_SLOW_TESTS_AVAILABLE:-}" ]]; then
+    SKIP=$((SKIP + 1))
+    record_result "skip" "$relpath" "requires" "requires:slow" "" "set SOUNIO_SLOW_TESTS_AVAILABLE=1 (nightly slow lane)" "0" ""
+    if [[ $VERBOSE -eq 1 ]]; then
+      echo "  SKIP  $relpath (requires: slow)"
+    fi
+    return
+  fi
 
   if $is_ignored; then
     SKIP=$((SKIP + 1))
@@ -212,7 +237,7 @@ run_test() {
 
   exit_code=0
   if command -v timeout >/dev/null 2>&1; then
-    output=$(timeout "${RUN_TIMEOUT_SEC}s" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
+    output=$(timeout "${test_timeout}s" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
   else
     output=$("$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
   fi
@@ -223,7 +248,7 @@ run_test() {
     local reason="run-failed"
     if [[ $exit_code -eq 124 ]]; then
       reason="run-timeout"
-      excerpt="timeout after ${RUN_TIMEOUT_SEC}s"
+      excerpt="timeout after ${test_timeout}s"
     fi
     ERRORS="${ERRORS}\n  FAIL  $relpath (run exited $exit_code)"
     record_result "fail" "$relpath" "run" "$reason" "" "" "$exit_code" "$excerpt"
