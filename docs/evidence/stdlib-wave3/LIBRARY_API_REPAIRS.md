@@ -23,3 +23,18 @@ This does not introduce linear Arena ownership or change the allocator ABI.
 Receipts, input identities, native ELFs, and before/after logs are retained in
 the wave3 library-api-repair packet. Source/test identities and compiler
 hash guards passed. No Python numerical implementation was used.
+
+The legacy epistemic_new constructor is a public forwarding alias to ep_new,
+including its canonical confidence clamping. The original DP value-iteration
+test first passed check but was refused during native compilation for an absent
+constructor body. After providing the alias it reached SIGILL before output:
+mdp_new indexed nested arrays that had never been allocated. Its constructor now
+initializes both existing 256-element arrays explicitly. All Bellman algorithms,
+dimensions, test scenarios, assertions, and tolerances remain unchanged.
+
+Slurm 18244 preserved the original compiler-refusal witness and executed the
+original DP test successfully. Slurm 18248 repeated its native execution and
+verified the complete sealed source and compiler manifests, producing
+DP_ORIGINAL_BEFORE_AFTER_OK. The separate new bridge fixture executed but its
+independent C++23 oracle rejected an existing EFE logarithm approximation; that
+failure is retained and is not part of this DP pass claim.
