@@ -1,29 +1,29 @@
-// stdlib/arrow/feed.sio — device batches from native Arrow IPC
+// stdlib/arrow/feed.sio — one device matrix from native Arrow IPC
 //
-// A training step wants one contiguous host buffer per step, because the
-// device copy is a single transfer. This module walks a native IPC stream
-// or file and packs each record batch into that shape.
+// The copy that feeds a device is one contiguous little-endian float32
+// matrix. A single IPC record batch still holds at most 16 rows, which is
+// the codec slot count. This module writes one record batch per 16 rows and
+// assembles every batch into that one matrix, so the copy is the matrix and
+// not a 16-row slice.
 //
-// Layout of one slab, little-endian, column-major:
+// Layout of the slab:
 //   float32 features, index (col * rows + row) * 4
 //   then, when a column is named "label", zero pad to 8 bytes and int64 labels
-// The whole slab is `nbytes` bytes. Copy that many bytes once. Do not gather
-// rows, and do not split one record batch into several copies.
+// `nbytes` is the transfer length. Rows are appended in record-batch order.
+// They are not gathered.
 //
-// The native codec bounds the transfer: 16 rows, 8 columns, and an 8192-byte
-// IPC buffer. Eight float32 columns and 16 rows are 512 feature bytes. That
-// is the largest matrix this codec can hold. `arrow_feed_rows_for_payload`
-// is that ceiling applied to a requested byte count. It is not a measured
-// bandwidth.
+// At most 8 feature columns (one root field each). Feature bytes are at most
+// 8 MiB, which is `arrow_feed_max_bytes`. `arrow_feed_rows_for_payload` is
+// that budget applied to a requested byte count. It is not a measured
+// bandwidth. A request past the budget returns -7.
 //
 // Feature columns are non-null float32 (precision 1). An optional root column
 // named "label" is non-null int64. Nulls, float64, nested lists, and
-// dictionaries return -4: the device copy has no validity bitmap and must
-// not cast on the copy. `dataframe::arrow_available` stays false. This is
+// dictionaries return -4. `dataframe::arrow_available` stays false. This is
 // not the Arrow C Data Interface.
 //
-// Status: 0 a batch, 1 end, -4 unsupported, -6 malformed, -7 over capacity,
-// -8 shape mismatch.
+// Status: 0 a batch, 1 end, -1 allocation failure, -4 unsupported,
+// -6 malformed, -7 over capacity, -8 shape mismatch.
 
 use arrow::lib::{
     ArrowBatch,
@@ -33,17 +33,22 @@ use arrow::lib::{
     arrow_batch_i64,
     arrow_batch_is_null,
     arrow_batch_new,
+    arrow_batch_set_i64,
+    arrow_batch_shape,
+    arrow_buf_new,
     arrow_cursor_new,
     arrow_ipc_next,
     arrow_ipc_open,
+    arrow_ipc_stream_begin,
+    arrow_ipc_stream_end,
+    arrow_ipc_stream_push,
+    arrow_schema_add,
     arrow_schema_new,
     arrow_type_float,
     arrow_type_int,
 }
 
-/// One device step. `offset` is the first byte of this step in `ArrowFeed.host`.
-/// `nbytes` is the transfer length. `features_bytes` is the float32 matrix;
-/// the label bytes, when present, follow an 8-byte alignment pad.
+/// One device step. The host bytes to copy are `nbytes` at `offset`.
 pub struct ArrowFeedBatch {
     pub index: i64,
     pub rows: i64,
@@ -54,39 +59,112 @@ pub struct ArrowFeedBatch {
     pub has_label: i64,
 }
 
-/// Every record batch of one IPC buffer, packed and ready to copy.
-/// At most 8 batches. Each slab is 1024 bytes. The cursor starts at 0.
+/// One assembled matrix. IPC bytes and the slab live on the heap.
 pub struct ArrowFeed {
-    pub n_batches: i64,
-    pub index: i64,
+    pub rows: i64,
     pub cols: i64,
     pub has_label: i64,
-    pub rows: [i64; 8],
-    pub feature_bytes: [i64; 8],
-    pub nbytes: [i64; 8],
-    pub labels: [i64; 128],
-    pub host: [u8; 8192],
+    pub features_bytes: i64,
+    pub nbytes: i64,
+    pub index: i64,
+    pub n_batches: i64,
+    pub host: *mut i64,
+    pub host_cap: i64,
+    pub ipc: *mut i64,
+    pub ipc_len: i64,
+    pub ipc_cap: i64,
+    pub schema_len: i64,
+    pub batch_off: *mut i64,
+    pub batch_len: *mut i64,
+    pub batch_cap: i64,
 }
 
-fn u8_of(feed: &ArrowFeed, i: i64) -> i64 with Panic {
-    if i < 0 || i >= 8192 { return 0 }
-    let v = feed.host[i as usize] as i64
+fn null_i64() -> *mut i64 { (0 as i64) as *mut i64 }
+
+fn is_null_ptr(p: *mut i64) -> i64 {
+    if (p as i64) == 0 { 1 } else { 0 }
+}
+
+fn mask32() -> i64 { 4294967295 }
+
+fn align8(n: i64) -> i64 with Div, Panic {
+    let m = n % 8
+    if m == 0 { n } else { n + (8 - m) }
+}
+
+fn feature_name(i: i64) -> string {
+    if i == 0 { return "f0" }
+    if i == 1 { return "f1" }
+    if i == 2 { return "f2" }
+    if i == 3 { return "f3" }
+    if i == 4 { return "f4" }
+    if i == 5 { return "f5" }
+    if i == 6 { return "f6" }
+    "f7"
+}
+
+fn get_u32(ptr: *mut i64, off: i64) -> i64 with Div, Panic {
+    let w = read_i64(ptr, off / 8)
+    let low = w & mask32()
+    if off % 8 == 0 { return low }
+    let high = (w - low) / 4294967296
+    if high < 0 { high + 4294967296 } else { high }
+}
+
+fn put_u32(ptr: *mut i64, off: i64, bits: i64) with Mut, Div, Panic {
+    let wi = off / 8
+    let w = read_i64(ptr, wi)
+    let low = w & mask32()
+    let b = bits & mask32()
+    if off % 8 == 0 {
+        let high = w - low
+        write_i64(ptr, wi, high + b)
+    } else {
+        let hi_adj = if b >= 2147483648 { b - 4294967296 } else { b }
+        write_i64(ptr, wi, low + hi_adj * 4294967296)
+    }
+}
+
+fn get_u8(ptr: *mut i64, off: i64) -> i64 with Div, Panic {
+    let a = off - (off % 4)
+    let u = get_u32(ptr, a)
+    let shift = (off % 4) * 8
+    (u >> shift) & 255
+}
+
+fn put_u8(ptr: *mut i64, off: i64, v: i64) with Mut, Div, Panic {
+    let a = off - (off % 4)
+    let shift = (off % 4) * 8
+    let u = get_u32(ptr, a)
+    let byte = v & 255
+    var b0 = u & 255
+    var b1 = (u >> 8) & 255
+    var b2 = (u >> 16) & 255
+    var b3 = (u >> 24) & 255
+    if shift == 0 { b0 = byte }
+    if shift == 8 { b1 = byte }
+    if shift == 16 { b2 = byte }
+    if shift == 24 { b3 = byte }
+    put_u32(ptr, a, b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
+}
+
+fn buf_byte(buf: &ArrowBuf, i: i64) -> i64 with Panic {
+    let v = buf.data[i as usize] as i64
     if v < 0 { v + 256 } else { v }
 }
 
-fn put_u8(feed: &!ArrowFeed, i: i64, v: i64) with Mut, Panic {
+fn put_buf_byte(buf: &!ArrowBuf, i: i64, v: i64) with Mut, Panic {
     var x = v & 255
     if x < 0 { x = x + 256 }
-    feed.host[i as usize] = (x as i32) as u8
+    buf.data[i as usize] = (x as i32) as u8
 }
 
-fn put_le(feed: &!ArrowFeed, at: i64, v: i64, width: i64) with Mut, Panic {
-    var x = v
-    var k: i64 = 0
-    while k < width {
-        put_u8(feed, at + k, x)
-        x = x >> 8
-        k = k + 1
+fn zero_words(ptr: *mut i64, nbytes: i64) with Mut, Div, Panic {
+    let n = (nbytes + 7) / 8
+    var i: i64 = 0
+    while i < n {
+        write_i64(ptr, i, 0)
+        i = i + 1
     }
 }
 
@@ -135,114 +213,104 @@ fn any_null(batch: &ArrowBatch, col: i64, rows: i64) -> i64 with Panic {
     0
 }
 
-fn clear_feed(feed: &!ArrowFeed) with Mut, Panic {
-    feed.n_batches = 0
-    feed.index = 0
-    feed.cols = 0
-    feed.has_label = 0
-    var i: i64 = 0
-    while i < 8 {
-        feed.rows[i as usize] = 0
-        feed.feature_bytes[i as usize] = 0
-        feed.nbytes[i as usize] = 0
-        i = i + 1
-    }
-    i = 0
-    while i < 128 {
-        feed.labels[i as usize] = 0
-        i = i + 1
-    }
-    i = 0
-    while i < 8192 {
-        feed.host[i as usize] = 0
-        i = i + 1
-    }
-}
-
-fn label_at(features_bytes: i64) -> i64 with Div, Panic {
-    let m = features_bytes % 8
-    if m == 0 { features_bytes } else { features_bytes + (8 - m) }
-}
-
-fn pack_batch(
-    feed: &!ArrowFeed,
-    batch: &ArrowBatch,
-    feat: [i64; 8],
-    nfeat: i64,
-    label_col: i64,
-    slot: i64,
-) -> i64 with Mut, Panic, Div {
-    let rows = batch.n_rows
-    if rows < 1 || rows > 16 { return -7 }
-    var c: i64 = 0
-    while c < nfeat {
-        if any_null(batch, feat[c as usize], rows) != 0 { return -4 }
-        c = c + 1
-    }
-    if label_col >= 0 {
-        if any_null(batch, label_col, rows) != 0 { return -4 }
-    }
-    let features_bytes = rows * nfeat * 4
-    var nbytes = features_bytes
-    var lab_off: i64 = 0
-    if label_col >= 0 {
-        lab_off = label_at(features_bytes)
-        nbytes = lab_off + rows * 8
-    }
-    if nbytes > 1024 { return -7 }
-    let base = slot * 1024
-    c = 0
-    while c < nfeat {
-        var r: i64 = 0
-        while r < rows {
-            let bits = arrow_batch_i64(batch, feat[c as usize], r)
-            let at = base + (c * rows + r) * 4
-            put_le(feed, at, bits, 4)
-            r = r + 1
+fn plan_schema(schema: &ArrowSchema, feat: &![i64; 8], nfeat: &!i64, label_col: &!i64) -> i64 with Mut, Panic {
+    if schema.endian != 0 { return -4 }
+    if schema.n_nodes != schema.n_fields { return -4 }
+    if schema.n_fields < 1 || schema.n_fields > 8 { return -7 }
+    *nfeat = 0
+    *label_col = -1
+    var col: i64 = 0
+    while col < schema.n_fields {
+        if name_is(schema, col, "label") != 0 {
+            if *label_col >= 0 { return -4 }
+            if is_i64_label(schema, col) == 0 { return -4 }
+            *label_col = col
+        } else {
+            if is_f32(schema, col) == 0 { return -4 }
+            feat[*nfeat as usize] = col
+            *nfeat = *nfeat + 1
         }
-        c = c + 1
+        col = col + 1
     }
-    if label_col >= 0 {
-        var r: i64 = 0
-        while r < rows {
-            let v = arrow_batch_i64(batch, label_col, r)
-            feed.labels[(slot * 16 + r) as usize] = v
-            put_le(feed, base + lab_off + r * 8, v, 8)
-            r = r + 1
-        }
-    }
-    feed.rows[slot as usize] = rows
-    feed.feature_bytes[slot as usize] = features_bytes
-    feed.nbytes[slot as usize] = nbytes
+    if *nfeat < 1 { return -4 }
     0
 }
 
-/// Empty feed. `arrow_feed_open` fills it.
+fn slab_bytes(rows: i64, cols: i64, has_label: i64) -> i64 with Div, Panic {
+    let features = rows * cols * 4
+    if has_label == 0 { return features }
+    align8(features) + rows * 8
+}
+
+fn release_ipc(feed: &!ArrowFeed) with Alloc, Mut {
+    if is_null_ptr(feed.ipc) == 0 { heap_free(feed.ipc as *mut u8) }
+    if is_null_ptr(feed.batch_off) == 0 { heap_free(feed.batch_off as *mut u8) }
+    if is_null_ptr(feed.batch_len) == 0 { heap_free(feed.batch_len as *mut u8) }
+    feed.ipc = null_i64()
+    feed.ipc_len = 0
+    feed.ipc_cap = 0
+    feed.schema_len = 0
+    feed.n_batches = 0
+    feed.batch_off = null_i64()
+    feed.batch_len = null_i64()
+    feed.batch_cap = 0
+}
+
+fn release_host(feed: &!ArrowFeed) with Alloc, Mut {
+    if is_null_ptr(feed.host) == 0 { heap_free(feed.host as *mut u8) }
+    feed.host = null_i64()
+    feed.host_cap = 0
+}
+
+/// Feature bytes that one device slab will hold. 8 MiB.
+pub fn arrow_feed_max_bytes() -> i64 { 8388608 }
+
+/// Empty feed. `arrow_feed_alloc` or `arrow_feed_open` fills it.
 pub fn arrow_feed_new() -> ArrowFeed {
     ArrowFeed {
-        n_batches: 0,
-        index: 0,
+        rows: 0,
         cols: 0,
         has_label: 0,
-        rows: [0; 8],
-        feature_bytes: [0; 8],
-        nbytes: [0; 8],
-        labels: [0; 128],
-        host: [0; 8192],
+        features_bytes: 0,
+        nbytes: 0,
+        index: 0,
+        n_batches: 0,
+        host: null_i64(),
+        host_cap: 0,
+        ipc: null_i64(),
+        ipc_len: 0,
+        ipc_cap: 0,
+        schema_len: 0,
+        batch_off: null_i64(),
+        batch_len: null_i64(),
+        batch_cap: 0,
     }
 }
 
-/// Row count whose float32 matrix meets `target_bytes`, capped at 16.
+/// Release the slab and the IPC bytes.
+pub fn arrow_feed_free(feed: &!ArrowFeed) with Alloc, Mut {
+    release_host(feed)
+    release_ipc(feed)
+    feed.rows = 0
+    feed.cols = 0
+    feed.has_label = 0
+    feed.features_bytes = 0
+    feed.nbytes = 0
+    feed.index = 0
+}
+
+/// Row count whose float32 matrix meets `target_bytes`, inside the 8 MiB slab.
 ///
-/// Eight features and a multi-megabyte target still return 16. The native
-/// IPC body cannot hold more rows than that. The return value is a size,
-/// not a measured transfer rate. `n_features` outside 1..=8 returns -7.
+/// Eight features and 8 MiB is 262144 rows. A larger request returns -7.
+/// `n_features` outside 1..=8 returns -7. The result is a size, not a
+/// measured transfer rate.
 pub fn arrow_feed_rows_for_payload(n_features: i64, target_bytes: i64) -> i64 with Div, Panic {
     if n_features < 1 || n_features > 8 { return -7 }
     if target_bytes < 1 { return -7 }
     let row_bytes = n_features * 4
+    let max_rows = arrow_feed_max_bytes() / row_bytes
     var n = (target_bytes + row_bytes - 1) / row_bytes
-    if n > 16 { n = 16 }
+    if n > max_rows { return -7 }
     if n < 1 { n = 1 }
     n
 }
@@ -253,130 +321,382 @@ pub fn arrow_feed_payload_bytes(rows: i64, cols: i64) -> i64 {
     rows * cols * 4
 }
 
-/// Decode `buf` and pack every record batch.
-///
-/// One IPC record batch becomes one slab. Batches are not merged and rows
-/// are not reordered. A ninth batch returns -7.
-pub fn arrow_feed_open(buf: &ArrowBuf, feed: &!ArrowFeed) -> i64 with Mut, Panic, Div {
-    clear_feed(feed)
-    var schema = arrow_schema_new()
-    var cur = arrow_cursor_new()
-    let opened = arrow_ipc_open(buf, &!schema, &!cur)
-    if opened != 0 { return opened }
-    if schema.endian != 0 { return -4 }
-    if schema.n_nodes != schema.n_fields { return -4 }
-    if schema.n_fields < 1 || schema.n_fields > 8 { return -7 }
-    var feat: [i64; 8] = [0; 8]
-    var nfeat: i64 = 0
-    var label_col: i64 = -1
-    var col: i64 = 0
-    while col < schema.n_fields {
-        if name_is(&schema, col, "label") != 0 {
-            if label_col >= 0 { return -4 }
-            if is_i64_label(&schema, col) == 0 { return -4 }
-            label_col = col
-        } else {
-            if is_f32(&schema, col) == 0 { return -4 }
-            feat[nfeat as usize] = col
-            nfeat = nfeat + 1
-        }
-        col = col + 1
-    }
-    if nfeat < 1 { return -4 }
-    feed.cols = nfeat
-    if label_col >= 0 { feed.has_label = 1 }
-    var batch = arrow_batch_new()
-    while true {
-        let nxt = arrow_ipc_next(buf, &schema, &!cur, &!batch)
-        if nxt == 1 { return 0 }
-        if nxt != 0 { return nxt }
-        if feed.n_batches >= 8 { return -7 }
-        if batch.n_cols != schema.n_fields { return -8 }
-        let slot = feed.n_batches
-        let packed = pack_batch(feed, &batch, feat, nfeat, label_col, slot)
-        if packed != 0 { return packed }
-        feed.n_batches = slot + 1
-    }
-    0
-}
-
-/// Next slab. Returns 0 and fills `out`, or 1 when the cursor is exhausted.
-pub fn arrow_feed_next(feed: &!ArrowFeed, out: &!ArrowFeedBatch) -> i64 with Mut, Panic {
-    if feed.index >= feed.n_batches { return 1 }
-    let i = feed.index
-    out.index = i
-    out.rows = feed.rows[i as usize]
-    out.cols = feed.cols
-    out.offset = i * 1024
-    out.features_bytes = feed.feature_bytes[i as usize]
-    out.nbytes = feed.nbytes[i as usize]
-    out.has_label = feed.has_label
-    feed.index = i + 1
-    0
-}
-
-/// Put the cursor back on the first slab. The packed bytes stay.
-pub fn arrow_feed_reset(feed: &!ArrowFeed) with Mut {
+fn mark_shape(feed: &!ArrowFeed, rows: i64, cols: i64, has_label: i64) with Mut, Div, Panic {
+    let features = rows * cols * 4
+    feed.rows = rows
+    feed.cols = cols
+    feed.has_label = has_label
+    feed.features_bytes = features
+    feed.nbytes = slab_bytes(rows, cols, has_label)
     feed.index = 0
 }
 
-/// Exchange two whole slabs. Row order inside a slab does not change.
-pub fn arrow_feed_swap(feed: &!ArrowFeed, a: i64, b: i64) -> i64 with Mut, Panic {
-    if a < 0 || b < 0 || a >= feed.n_batches || b >= feed.n_batches { return -6 }
-    if a == b { return 0 }
-    let rows_a = feed.rows[a as usize]
-    feed.rows[a as usize] = feed.rows[b as usize]
-    feed.rows[b as usize] = rows_a
-    let fb_a = feed.feature_bytes[a as usize]
-    feed.feature_bytes[a as usize] = feed.feature_bytes[b as usize]
-    feed.feature_bytes[b as usize] = fb_a
-    let nb_a = feed.nbytes[a as usize]
-    feed.nbytes[a as usize] = feed.nbytes[b as usize]
-    feed.nbytes[b as usize] = nb_a
-    var r: i64 = 0
-    while r < 16 {
-        let ia = a * 16 + r
-        let ib = b * 16 + r
-        let lv = feed.labels[ia as usize]
-        feed.labels[ia as usize] = feed.labels[ib as usize]
-        feed.labels[ib as usize] = lv
-        r = r + 1
+/// Allocate the device slab for `rows` by `cols` float32 values.
+/// `has_label` is 1 when each row also carries an int64 label.
+pub fn arrow_feed_alloc(feed: &!ArrowFeed, cols: i64, rows: i64, has_label: i64) -> i64 with Alloc, Mut, Div, Panic {
+    if cols < 1 || cols > 8 { return -7 }
+    if rows < 1 { return -7 }
+    if has_label != 0 && has_label != 1 { return -6 }
+    let row_bytes = cols * 4
+    if rows > arrow_feed_max_bytes() / row_bytes { return -7 }
+    release_host(feed)
+    release_ipc(feed)
+    let nbytes = slab_bytes(rows, cols, has_label)
+    let cap = align8(nbytes)
+    let ptr = heap_alloc(cap) as *mut i64
+    if (ptr as i64) <= 0 { return -1 }
+    zero_words(ptr, cap)
+    feed.host = ptr
+    feed.host_cap = cap
+    mark_shape(feed, rows, cols, has_label)
+    0
+}
+
+/// Store one float32 bit pattern. Column-major.
+pub fn arrow_feed_put(feed: &!ArrowFeed, col: i64, row: i64, bits: i64) -> i64 with Mut, Div, Panic {
+    if is_null_ptr(feed.host) != 0 { return -6 }
+    if col < 0 || col >= feed.cols || row < 0 || row >= feed.rows { return -6 }
+    put_u32(feed.host, (col * feed.rows + row) * 4, bits)
+    0
+}
+
+/// Store one label. The feed must have been allocated with a label column.
+pub fn arrow_feed_put_label(feed: &!ArrowFeed, row: i64, value: i64) -> i64 with Mut, Div, Panic {
+    if is_null_ptr(feed.host) != 0 || feed.has_label == 0 { return -6 }
+    if row < 0 || row >= feed.rows { return -6 }
+    let off = align8(feed.features_bytes) + row * 8
+    write_i64(feed.host, off / 8, value)
+    0
+}
+
+fn ipc_grow(feed: &!ArrowFeed, need: i64) -> i64 with Alloc, Mut, Div, Panic {
+    if need <= feed.ipc_cap { return 0 }
+    var ncap = feed.ipc_cap
+    if ncap < 8192 { ncap = 8192 }
+    while ncap < need {
+        if ncap > 1073741824 { return -1 }
+        ncap = ncap * 2
+    }
+    let ptr = heap_alloc(ncap) as *mut i64
+    if (ptr as i64) <= 0 { return -1 }
+    var w: i64 = 0
+    let old_words = feed.ipc_cap / 8
+    while w < old_words {
+        write_i64(ptr, w, read_i64(feed.ipc, w))
+        w = w + 1
+    }
+    let last = ncap / 8
+    while w < last {
+        write_i64(ptr, w, 0)
+        w = w + 1
+    }
+    if feed.ipc_cap != 0 { heap_free(feed.ipc as *mut u8) }
+    feed.ipc = ptr
+    feed.ipc_cap = ncap
+    0
+}
+
+fn batch_grow(feed: &!ArrowFeed) -> i64 with Alloc, Mut, Panic {
+    if feed.n_batches < feed.batch_cap { return 0 }
+    var ncap = feed.batch_cap
+    if ncap < 16 { ncap = 16 }
+    ncap = ncap * 2
+    let bytes = ncap * 8
+    let off = heap_alloc(bytes) as *mut i64
+    if (off as i64) <= 0 { return -1 }
+    let lenp = heap_alloc(bytes) as *mut i64
+    if (lenp as i64) <= 0 {
+        heap_free(off as *mut u8)
+        return -1
     }
     var i: i64 = 0
-    while i < 1024 {
-        let oa = a * 1024 + i
-        let ob = b * 1024 + i
-        let tmp = feed.host[oa as usize]
-        feed.host[oa as usize] = feed.host[ob as usize]
-        feed.host[ob as usize] = tmp
+    while i < feed.batch_cap {
+        write_i64(off, i, read_i64(feed.batch_off, i))
+        write_i64(lenp, i, read_i64(feed.batch_len, i))
+        i = i + 1
+    }
+    if feed.batch_cap != 0 {
+        heap_free(feed.batch_off as *mut u8)
+        heap_free(feed.batch_len as *mut u8)
+    }
+    feed.batch_off = off
+    feed.batch_len = lenp
+    feed.batch_cap = ncap
+    0
+}
+
+fn ipc_append(feed: &!ArrowFeed, src: &ArrowBuf) -> i64 with Alloc, Mut, Div, Panic {
+    let start = feed.ipc_len
+    if ipc_grow(feed, start + src.len) != 0 { return -1 }
+    var i: i64 = 0
+    while i < src.len {
+        put_u8(feed.ipc, start + i, buf_byte(src, i))
+        i = i + 1
+    }
+    feed.ipc_len = start + src.len
+    start
+}
+
+fn remember_batch(feed: &!ArrowFeed, off: i64, len: i64) -> i64 with Alloc, Mut, Panic {
+    if batch_grow(feed) != 0 { return -1 }
+    write_i64(feed.batch_off, feed.n_batches, off)
+    write_i64(feed.batch_len, feed.n_batches, len)
+    feed.n_batches = feed.n_batches + 1
+    0
+}
+
+fn build_schema(schema: &!ArrowSchema, cols: i64, has_label: i64) -> i64 with Mut, Panic {
+    var c: i64 = 0
+    while c < cols {
+        if arrow_schema_add(schema, feature_name(c), 0, arrow_type_float(), 0, 0, 1) != 0 { return -7 }
+        c = c + 1
+    }
+    if has_label != 0 {
+        if arrow_schema_add(schema, "label", 0, arrow_type_int(), 64, 1, 0) != 0 { return -7 }
+    }
+    0
+}
+
+fn fill_chunk(feed: &ArrowFeed, batch: &!ArrowBatch, row0: i64, n: i64) -> i64 with Mut, Div, Panic {
+    let width = feed.cols + feed.has_label
+    if arrow_batch_shape(batch, n, width) != 0 { return -7 }
+    var c: i64 = 0
+    while c < feed.cols {
+        var r: i64 = 0
+        while r < n {
+            let bits = get_u32(feed.host, (c * feed.rows + row0 + r) * 4)
+            if arrow_batch_set_i64(batch, c, r, bits, 0) != 0 { return -7 }
+            r = r + 1
+        }
+        c = c + 1
+    }
+    if feed.has_label != 0 {
+        var r: i64 = 0
+        while r < n {
+            let off = align8(feed.features_bytes) + (row0 + r) * 8
+            let v = read_i64(feed.host, off / 8)
+            if arrow_batch_set_i64(batch, feed.cols, r, v, 0) != 0 { return -7 }
+            r = r + 1
+        }
+    }
+    0
+}
+
+/// Write the slab as an IPC stream of 16-row record batches.
+pub fn arrow_feed_encode(feed: &!ArrowFeed) -> i64 with Alloc, Mut, Div, Panic {
+    if is_null_ptr(feed.host) != 0 || feed.rows < 1 || feed.cols < 1 { return -6 }
+    release_ipc(feed)
+    var schema = arrow_schema_new()
+    if build_schema(&!schema, feed.cols, feed.has_label) != 0 { return -7 }
+    var head = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!head) != 0 { return -1 }
+    let schema_at = ipc_append(feed, &head)
+    if schema_at < 0 { return -1 }
+    feed.schema_len = head.len
+    var row0: i64 = 0
+    while row0 < feed.rows {
+        var n = feed.rows - row0
+        if n > 16 { n = 16 }
+        var batch = arrow_batch_new()
+        if fill_chunk(feed, &!batch, row0, n) != 0 { return -7 }
+        var msg = arrow_buf_new()
+        if arrow_ipc_stream_push(&schema, &batch, &!msg) != 0 { return -1 }
+        let at = ipc_append(feed, &msg)
+        if at < 0 { return -1 }
+        if remember_batch(feed, at, msg.len) != 0 { return -1 }
+        row0 = row0 + n
+    }
+    var eos = arrow_buf_new()
+    if arrow_ipc_stream_end(&!eos) != 0 { return -1 }
+    if ipc_append(feed, &eos) < 0 { return -1 }
+    0
+}
+
+fn copy_ipc_into(feed: &ArrowFeed, buf: &!ArrowBuf, off: i64, n: i64, at: i64) -> i64 with Mut, Div, Panic {
+    if at < 0 || n < 0 || at + n > 8192 { return -7 }
+    var i: i64 = 0
+    while i < n {
+        put_buf_byte(buf, at + i, get_u8(feed.ipc, off + i))
         i = i + 1
     }
     0
 }
 
-/// Bytes the device copy moves for slab `index`.
-pub fn arrow_feed_copy_bytes(feed: &ArrowFeed, index: i64) -> i64 with Panic {
-    if index < 0 || index >= feed.n_batches { return -6 }
-    feed.nbytes[index as usize]
+fn place_batch(feed: &!ArrowFeed, batch: &ArrowBatch, feat: &[i64; 8], nfeat: i64, label_col: i64, row_base: i64) -> i64 with Mut, Div, Panic {
+    let n = batch.n_rows
+    if n < 1 || row_base + n > feed.rows { return -8 }
+    var c: i64 = 0
+    while c < nfeat {
+        if any_null(batch, feat[c as usize], n) != 0 { return -4 }
+        var r: i64 = 0
+        while r < n {
+            let bits = arrow_batch_i64(batch, feat[c as usize], r)
+            put_u32(feed.host, (c * feed.rows + row_base + r) * 4, bits)
+            r = r + 1
+        }
+        c = c + 1
+    }
+    if label_col >= 0 {
+        if any_null(batch, label_col, n) != 0 { return -4 }
+        var r: i64 = 0
+        while r < n {
+            let v = arrow_batch_i64(batch, label_col, r)
+            let off = align8(feed.features_bytes) + (row_base + r) * 8
+            write_i64(feed.host, off / 8, v)
+            r = r + 1
+        }
+    }
+    0
 }
 
-/// Label stored for `batch` and `row`. Zero when the file has no label column.
-pub fn arrow_feed_label(feed: &ArrowFeed, batch: i64, row: i64) -> i64 with Panic {
-    if batch < 0 || batch >= 8 || row < 0 || row >= 16 { return 0 }
-    feed.labels[(batch * 16 + row) as usize]
+fn decode_one(feed: &ArrowFeed, msg_off: i64, msg_len: i64, batch: &!ArrowBatch, schema: &!ArrowSchema) -> i64 with Mut, Div, Panic {
+    if feed.schema_len < 8 || msg_len < 8 { return -6 }
+    if feed.schema_len + msg_len > 8192 { return -7 }
+    var buf = arrow_buf_new()
+    if copy_ipc_into(feed, &!buf, 0, feed.schema_len, 0) != 0 { return -7 }
+    if copy_ipc_into(feed, &!buf, msg_off, msg_len, feed.schema_len) != 0 { return -7 }
+    buf.len = feed.schema_len + msg_len
+    var cur = arrow_cursor_new()
+    let opened = arrow_ipc_open(&buf, schema, &!cur)
+    if opened != 0 { return opened }
+    let nxt = arrow_ipc_next(&buf, schema, &!cur, batch)
+    if nxt != 0 { return nxt }
+    0
 }
 
-/// One byte of the packed host slab.
-pub fn arrow_feed_u8(feed: &ArrowFeed, at: i64) -> i64 with Panic {
-    u8_of(feed, at)
+/// Replace the slab with the bytes decoded from the IPC stream written by `arrow_feed_encode`.
+pub fn arrow_feed_load(feed: &!ArrowFeed) -> i64 with Mut, Div, Panic {
+    if is_null_ptr(feed.host) != 0 || is_null_ptr(feed.ipc) != 0 { return -6 }
+    if feed.n_batches < 1 || feed.schema_len < 8 { return -6 }
+    zero_words(feed.host, feed.host_cap)
+    var row_base: i64 = 0
+    var bi: i64 = 0
+    while bi < feed.n_batches {
+        let off = read_i64(feed.batch_off, bi)
+        let len = read_i64(feed.batch_len, bi)
+        var schema = arrow_schema_new()
+        var batch = arrow_batch_new()
+        let dec = decode_one(feed, off, len, &!batch, &!schema)
+        if dec != 0 { return dec }
+        var feat: [i64; 8] = [0; 8]
+        var nfeat: i64 = 0
+        var label_col: i64 = -1
+        let planned = plan_schema(&schema, &!feat, &!nfeat, &!label_col)
+        if planned != 0 { return planned }
+        if nfeat != feed.cols { return -8 }
+        if (label_col >= 0) != (feed.has_label != 0) { return -8 }
+        let placed = place_batch(feed, &batch, &feat, nfeat, label_col, row_base)
+        if placed != 0 { return placed }
+        row_base = row_base + batch.n_rows
+        bi = bi + 1
+    }
+    if row_base != feed.rows { return -8 }
+    feed.index = 0
+    0
 }
 
-/// Four little-endian bytes of the packed host slab, as a non-negative integer.
-pub fn arrow_feed_u32(feed: &ArrowFeed, at: i64) -> i64 with Panic {
-    if at < 0 || at + 4 > 8192 { return 0 }
-    let b0 = u8_of(feed, at)
-    let b1 = u8_of(feed, at + 1)
-    let b2 = u8_of(feed, at + 2)
-    let b3 = u8_of(feed, at + 3)
-    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+fn count_and_plan(buf: &ArrowBuf, feat: &![i64; 8], nfeat: &!i64, label_col: &!i64, rows: &!i64) -> i64 with Mut, Div, Panic {
+    var schema = arrow_schema_new()
+    var cur = arrow_cursor_new()
+    let opened = arrow_ipc_open(buf, &!schema, &!cur)
+    if opened != 0 { return opened }
+    let planned = plan_schema(&schema, feat, nfeat, label_col)
+    if planned != 0 { return planned }
+    var batch = arrow_batch_new()
+    var total: i64 = 0
+    while true {
+        let nxt = arrow_ipc_next(buf, &schema, &!cur, &!batch)
+        if nxt == 1 {
+            *rows = total
+            if total < 1 { return -4 }
+            let row_bytes = *nfeat * 4
+            if total > arrow_feed_max_bytes() / row_bytes { return -7 }
+            return 0
+        }
+        if nxt != 0 { return nxt }
+        if batch.n_cols != schema.n_fields { return -8 }
+        var c: i64 = 0
+        while c < *nfeat {
+            if any_null(&batch, feat[c as usize], batch.n_rows) != 0 { return -4 }
+            c = c + 1
+        }
+        if *label_col >= 0 {
+            if any_null(&batch, *label_col, batch.n_rows) != 0 { return -4 }
+        }
+        total = total + batch.n_rows
+    }
+    0
+}
+
+/// Decode every record batch in `buf` into one device slab.
+pub fn arrow_feed_open(buf: &ArrowBuf, feed: &!ArrowFeed) -> i64 with Alloc, Mut, Div, Panic {
+    var feat: [i64; 8] = [0; 8]
+    var nfeat: i64 = 0
+    var label_col: i64 = -1
+    var rows: i64 = 0
+    let counted = count_and_plan(buf, &!feat, &!nfeat, &!label_col, &!rows)
+    if counted != 0 { return counted }
+    let has_label = if label_col >= 0 { 1 } else { 0 }
+    let allocated = arrow_feed_alloc(feed, nfeat, rows, has_label)
+    if allocated != 0 { return allocated }
+    var schema = arrow_schema_new()
+    var cur = arrow_cursor_new()
+    let opened = arrow_ipc_open(buf, &!schema, &!cur)
+    if opened != 0 { return opened }
+    var batch = arrow_batch_new()
+    var row_base: i64 = 0
+    while true {
+        let nxt = arrow_ipc_next(buf, &schema, &!cur, &!batch)
+        if nxt == 1 { return 0 }
+        if nxt != 0 { return nxt }
+        let placed = place_batch(feed, &batch, &feat, nfeat, label_col, row_base)
+        if placed != 0 { return placed }
+        row_base = row_base + batch.n_rows
+    }
+    0
+}
+
+/// The whole slab, once. The next call returns 1.
+pub fn arrow_feed_next(feed: &!ArrowFeed, out: &!ArrowFeedBatch) -> i64 with Mut, Panic {
+    if feed.index >= 1 || feed.rows < 1 { return 1 }
+    out.index = 0
+    out.rows = feed.rows
+    out.cols = feed.cols
+    out.offset = 0
+    out.features_bytes = feed.features_bytes
+    out.nbytes = feed.nbytes
+    out.has_label = feed.has_label
+    feed.index = 1
+    0
+}
+
+/// Put the cursor back on the slab. The bytes stay.
+pub fn arrow_feed_reset(feed: &!ArrowFeed) with Mut {
+    feed.index = 0
+}
+
+/// Bytes the device copy moves.
+pub fn arrow_feed_copy_bytes(feed: &ArrowFeed) -> i64 { feed.nbytes }
+
+/// Base of the slab. The device copy is `arrow_feed_copy_bytes` bytes here.
+pub fn arrow_feed_host(feed: &ArrowFeed) -> *mut i64 { feed.host }
+
+/// Label for `row`. Zero when the matrix has no label column.
+pub fn arrow_feed_label(feed: &ArrowFeed, row: i64) -> i64 with Div, Panic {
+    if is_null_ptr(feed.host) != 0 || feed.has_label == 0 { return 0 }
+    if row < 0 || row >= feed.rows { return 0 }
+    let off = align8(feed.features_bytes) + row * 8
+    read_i64(feed.host, off / 8)
+}
+
+/// One byte of the packed slab.
+pub fn arrow_feed_u8(feed: &ArrowFeed, at: i64) -> i64 with Div, Panic {
+    if is_null_ptr(feed.host) != 0 || at < 0 || at >= feed.host_cap { return 0 }
+    get_u8(feed.host, at)
+}
+
+/// Four little-endian bytes of the packed slab, as a non-negative integer.
+pub fn arrow_feed_u32(feed: &ArrowFeed, at: i64) -> i64 with Div, Panic {
+    if is_null_ptr(feed.host) != 0 || at < 0 || at + 4 > feed.host_cap { return 0 }
+    get_u32(feed.host, at)
 }
