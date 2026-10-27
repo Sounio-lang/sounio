@@ -27,6 +27,7 @@ if [[ "$1" == check ]]; then
   exit 0
 fi
 case "$name" in
+  late_writer.sio) ( sleep 0.4; echo descendant-output ) & echo prefix-output; exit 124;;
   rc1.sio) echo actual-run-error; exit 1;;
   rc124.sio) echo partial-before-timeout; exit 124;;
   rc139.sio) echo signal-compatible-status; exit 139;;
@@ -79,4 +80,20 @@ check('changed raw bytes refused',()=>{fs.appendFileSync(path.join(log('ok'),'co
 check('changed source refused at footer',()=>{fs.appendFileSync(path.join(root,'tests/stdlib/nested/ok.sio'),'// changed\n');assert.equal(helper('finalize',out).status,65);});
 check('zero selected cases explicitly completes zero capture phases',()=>{const empty=path.join(tmp,'zero-selected');const r=run(['--filter','no-selected-case','--artifacts-dir',empty]);assert.equal(r.status,0);assert.equal(json(path.join(empty,'complete.json')).captured_phases,0);});
 check('later selected case mutation of earlier raw output fails terminal65',()=>{const cases=path.join(root,'tests/stdlib/terminal');fs.mkdirSync(cases);for(const name of ['a_first.sio','b_late.sio'])fs.writeFileSync(path.join(cases,name),'//@ check-only\nfn main() {}\n');const capture=path.join(tmp,'terminal-rehash'),result=path.join(tmp,'terminal-rehash.json'),earlier=path.join(capture,'tests/stdlib/terminal/a_first.sio/check/combined.output');const r=run(['--filter','terminal/','--json-out',result,'--artifacts-dir',capture],{LATE_MUTATE_LOG:earlier});assert.equal(r.status,65);assert.match(r.stderr,/identity changed/);assert.match(fs.readFileSync(earlier,'utf8'),/later-case-mutation/);assert(fs.existsSync(path.join(capture,'tests/stdlib/terminal/b_late.sio/check/result.json')));assert(!fs.existsSync(result));assert(!fs.existsSync(path.join(capture,'complete.json')));fs.writeFileSync(path.join(tmp,'LATE_MUTATION_ACTUAL.json'),JSON.stringify({scope:'Operational fake later-selected-case mutation; no compiler/science execution',status:r.status,stdout:r.stdout,stderr:r.stderr,fresh_result_exists:fs.existsSync(result),complete_exists:fs.existsSync(path.join(capture,'complete.json')),earlier_receipt:json(path.join(capture,'tests/stdlib/terminal/a_first.sio/check/result.json')),later_receipt:json(path.join(capture,'tests/stdlib/terminal/b_late.sio/check/result.json')),earlier_raw_after_b64:fs.readFileSync(earlier).toString('base64')},null,2)+'\n');});
+
+check('descendant output drains before seal with original timeout status',()=>{
+ const dir=path.join(root,'tests/stdlib/drain');fs.mkdirSync(dir);
+ fs.writeFileSync(path.join(dir,'late_writer.sio'),'//@ run-pass\nfn main() {}\n');
+ const ordinaryResult=path.join(tmp,'drain-ordinary.json'),capturedResult=path.join(tmp,'drain-captured.json'),capture=path.join(tmp,'drained');
+ const a=run(['--filter','drain/','--json-out',ordinaryResult]);
+ const b=run(['--filter','drain/','--json-out',capturedResult,'--artifacts-dir',capture]);
+ assert.equal(a.status,1);assert.equal(b.status,a.status);assert.equal(b.stdout,a.stdout);
+ assert.deepEqual(canonical(json(capturedResult)),canonical(json(ordinaryResult)));
+ const phase=path.join(capture,'tests/stdlib/drain/late_writer.sio/run');
+ assert.equal(json(path.join(phase,'result.json')).exit_code,124);
+ assert.equal(fs.readFileSync(path.join(phase,'combined.output'),'utf8'),'prefix-output\ndescendant-output\n');
+ assert.equal(helper('verify',capture,'tests/stdlib/drain/late_writer.sio','run','124').status,0);
+ assert(fs.existsSync(path.join(capture,'complete.json')));
+});
+
 console.log(`PASS ${n} metadata controls; fixtures retained at ${tmp}`);

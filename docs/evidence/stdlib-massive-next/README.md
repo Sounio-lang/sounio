@@ -172,3 +172,23 @@ stronger privacy expectations: all numerical, scale, mutant, canonical privacy,
 bootstrap E259 and both-engine linear controls passed; source, compiler, caller
 and executable hashes verified after execution. No numerical case, budget or
 tolerance changed. This repairs the exact sole failure in the hosted deep report.
+
+Packet33's missing profile receipt is specifically an integrity refusal:
+the nested compiler wrote another 147 bytes to its inherited log after the
+outer timeout and phase seal. The sealed output was 4517 bytes; the later file
+was 4664 bytes. No altered receipt is accepted. Slurm18032 / packet73 proves the
+new drain-before-seal regression fails on the original runner and passes with
+all 29 metadata controls, including the existing later-case mutation refusal.
+Slurm18034 / packet74 exercises the real compiler with a one-second timeout:
+the scientific case remains failed with exit124; its full diagnostic capture,
+terminal source/caller seal and independent re-verification pass.
+This is capture qualification, not a successful scientific execution.
+
+Slurm18028 / packet71 preserves the append_file compatibility reproducer.
+The qualified bootstrap executes the original binary write/append/truncate/error
+contract and emits bytes 41 00 ff 42 43; raw810 refuses append_file with E137.
+Packet70's first test attempt used a bootstrap-incompatible typed array literal
+and is retained as a failed fixture attempt. Compiler source files needed for
+the additive repair are protected by the active v276 lane; requests were sent
+before making any conflicting edit. Failed loader compatibility candidates
+62/63/64/66 are retained; the temporary byte/libc helper edits were removed.
