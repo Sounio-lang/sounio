@@ -4438,6 +4438,86 @@ fn checker_type_contains_linear_owner(
     false
 }
 
+
+// Conservative concat admission: copying cells cannot erase nested loan obligations.
+fn checker_concat_element_has_unproven_storage(
+    structs: *mut StructTable, enums: *mut EnumTable, fn_sigs: *mut FnSigTable,
+    ty: TypeEntry, seen: *mut [Name; 64], depth: i64,
+) -> bool with Mut, Panic, Div {
+    if ty.kind == TypeKind::TyRef || ty.kind == TypeKind::TyRefMut
+        || ty.kind == TypeKind::TySlice || ty.kind == TypeKind::TySliceMut
+        { return true }
+    if ty.kind == TypeKind::TyRawPtr { return false }
+    if ty.kind == TypeKind::TyKnowledge { return true }
+    if ty.kind == TypeKind::TyFn { return true }
+    if ty.kind == TypeKind::TyArray && ty.array_size == 0 { return false }
+    if depth >= 64 { return true }
+    (*seen)[depth as usize] = empty_name()
+    match ty.inner {
+        Some(inner) => {
+            if checker_concat_element_has_unproven_storage(structs, enums, fn_sigs, *inner, seen, depth + 1) { return true }
+        }
+        None => {}
+    }
+    if ty.kind == TypeKind::TyNamed {
+        let idx = struct_table_find(structs, ty.name)
+
+        var i: i64 = 0
+        while i < depth {
+            if name_eq((*seen)[i as usize], ty.name) { return false }
+            i = i + 1
+        }
+        (*seen)[depth as usize] = ty.name
+        if idx >= 0 {
+            var fields = (*structs).entries[idx].fields
+            while true {
+                match fields {
+                    Some(list) => {
+                        if checker_concat_element_has_unproven_storage(structs, enums, fn_sigs, (*list).head.ty, seen, depth + 1) { return true }
+                        fields = (*list).tail
+                    }
+                    None => break
+                }
+            }
+        }
+        let eidx = enum_table_find(enums, ty.name)
+        if eidx >= 0 {
+            var variants = (*enums).entries[eidx as usize].variants
+            while true {
+                match variants {
+                    Some(variant) => {
+                        var fields = (*variant).head.fields
+                        while true {
+                            match fields {
+                                Some(field) => {
+                                    if checker_concat_element_has_unproven_storage(structs, enums, fn_sigs, (*field).head.ty, seen, depth + 1) { return true }
+                                    fields = (*field).tail
+                                }
+                                None => break
+                            }
+                        }
+                        variants = (*variant).tail
+                    }
+                    None => break
+                }
+            }
+        }
+    }
+    if ty.kind == TypeKind::TyTuple {
+        var elems = ty.tuple_elems
+        while true {
+            match elems {
+                Some(elem) => {
+                    if checker_concat_element_has_unproven_storage(structs, enums, fn_sigs, (*elem).head, seen, depth + 1) { return true }
+                    elems = (*elem).tail
+                }
+                None => break
+            }
+        }
+    }
+    false
+}
+
 fn checker_is_linear_type_inplace(c: *mut Checker, ty: TypeEntry) -> bool with Mut, Panic, Div {
     var seen: [Name; 64] = [empty_name(); 64]
     checker_type_contains_linear_owner((*c).structs, (*c).enums, (*c).fn_sigs, ty, &!seen as *mut [Name; 64], 0)
@@ -8776,7 +8856,28 @@ fn checker_check_correlated_on_binary_inplace(c: *mut Checker, e: Expr, left_ty:
     same_slot_identity && has_effect && e.bin_op == BinaryOp::OpAdd
 }
 
+fn checker_reject_unsafe_array_concat(c: *mut Checker, e: Expr, left: TypeEntry, right: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.bin_op != BinaryOp::OpConcat || left.kind != TypeKind::TyArray || right.kind != TypeKind::TyArray { return false }
+    let a = match left.inner { Some(inner) => *inner, None => ty_unknown() }
+    let b = match right.inner { Some(inner) => *inner, None => ty_unknown() }
+    if !is_error_or_unknown(a) && !is_error_or_unknown(b) && !types_compatible(a, b) {
+        checker_report_mismatch_inplace(c, e.span, 9, a, b)
+        return true
+    }
+    let elem = if is_error_or_unknown(a) { b } else { a }
+    var seen: [Name; 64] = [empty_name(); 64]
+    let unproven = checker_concat_element_has_unproven_storage((*c).structs, (*c).enums, (*c).fn_sigs, elem, &!seen as *mut [Name; 64], 0)
+    if checker_is_linear_type_inplace(c, elem) || unproven
+        || elem.kind == TypeKind::TyI128 || elem.kind == TypeKind::TyU128
+        || elem.kind == TypeKind::TyF128 || elem.kind == TypeKind::TyF256 {
+        checker_report_error_at_inplace(c, e.span, 276, 0, 0, 0)
+        return true
+    }
+    false
+}
+
 fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if checker_reject_unsafe_array_concat(c, e, left_ty, right_ty) { return ty_error() }
     let correlated_same_slot_add = checker_check_correlated_on_binary_inplace(c, e, left_ty, right_ty)
     if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
         let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
@@ -19335,6 +19436,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 264 { print("enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped") }
     else if code == 267 { print("cannot assign through a shared reference: the place is reached through `&T`, which is read-only") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
+    else if code == 276 { print("array concatenation requires copyable canonical cells; linear owners, nested unanchored loans, closures, epistemic side channels and wide scalar cells are not yet supported") }
     else if code == 275 { print("static_blob_bytes requires one existing source-relative string literal asset within the static byte budget; dynamic paths, absolute paths and truncated identities are refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
@@ -27768,6 +27870,7 @@ impl Checker {
 
     fn check_binary_with_operand_types(self, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
+        if checker_reject_unsafe_array_concat((&! c) as *mut Checker, e, left_ty, right_ty) { return (c, ty_error()) }
 
         // R6: Correlated effect on Knowledge slot-identity arithmetic
         let corr_pair = c.check_correlated_on_binary(e, left_ty, right_ty)
