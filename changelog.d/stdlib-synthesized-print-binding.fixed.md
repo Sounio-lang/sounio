@@ -1,0 +1,1 @@
+Give compiler-generated print/println payload and newline calls a protected native identity. A transitive private formatter cannot intercept an implicit float print with a different arity; explicit calls to visible user formatters retain their source bodies. Numeric formatting algorithms and declared precision remain unchanged.
