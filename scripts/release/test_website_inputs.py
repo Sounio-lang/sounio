@@ -29,7 +29,7 @@ class WebsiteInputsTest(unittest.TestCase):
                     continue
                 link = tarfile.TarInfo(name)
                 link.type = tarfile.SYMTYPE
-                link.linkname = bad_destination or '/home/demetrios/work/sounio/' + origin
+                link.linkname = bad_destination or '../../../../../' + origin
                 archive.addfile(link)
         return data.getvalue()
 
