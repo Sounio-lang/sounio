@@ -1206,3 +1206,24 @@ REG8=4294967289, BODY=4294967289, PIPE=13, ST0=10, FSRC=1091567616 and IMAD=42 s
 Gate. Job 18063, node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 e1b3aa2d44bcd3c0e0048a4adc0ee03a. SILICON PASS, EXIT:0. The node is idle.
 
 The relocation and the parameter records are still the ones ptxas wrote. AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 47. The constant offset chooses the pointer (2026-10-27, OBSERVED)
+
+`EIATTR_PARAM_CBANK` in this image is bank 2 and the value 0x100160. The low byte of that value, file 0x35c, is 96, which is the base 0x160. The parameter block is 16 bytes. The first pointer sits at `c[0][0x160]`. The second sits at `c[0][0x168]`. The constant section ends at 0x170, so the block fills the tail.
+
+Job 18077 moved that base to 0x140 and retargeted the loads and the store with it. The module loaded. `cuModuleGetFunction` returned 0. Job 18079 repeated that image and got the same `CBANK_FUN=0`. The driver does not accept a parameter base other than 0x160 on this launch.
+
+The same job then left the base at 0x160 and assembled the store pointer from `c[0][0x160]`, the input slot. The specimen store pointer is `c[0][0x168]`. The loads still read the input. The stored word is −10+3. A fresh output buffer was zeroed before the launch.
+
+- Specimen byte 1509 is 90. The assembled store offset byte is 88.
+- SLOT_LOAD=1, SLOT_FUN=1, SLOT_SYNC=0.
+- SLOT_IN0=4294967289. SLOT_IN1=3. SLOT_OUT=0.
+
+The first word of the input is the result. The second word of the input is untouched. The output buffer is untouched.
+
+XOFF=4294967289, REG8=4294967289, BODY=4294967289, PIPE=13, ST0=10, FSRC=1091567616 and IMAD=42 still match.
+
+Gate. Job 18079, node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 762118edb8bc2920fa870a024ae6bf1f. SILICON PASS, EXIT:0. The node is idle.
+
+The `R_CUDA_CONST_FIELD22_37` record in `.nv.rel.action` was not varied. AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
