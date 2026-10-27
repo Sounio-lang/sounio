@@ -89,3 +89,20 @@ Archive SHA256:
 The7 closed directories retain all source snapshots and original failures;
 the export's source-file and archive guards passed. References to the earlier
 shared source archive resolve through closed-export07, whose identity is above.
+
+## Concrete Option export consistency
+
+The concrete IntOption and FloatOption types are explicitly public.
+float_option_unwrap is now public like its integer counterpart; constructors,
+payload representation and return values are unchanged. As with the existing
+integer helper, unwrap returns the stored value; callers selecting an
+absence default use unwrap_or.
+
+The unchanged typed consumer failed before the visibility fix with E175:
+core/option::float_option_unwrap was private (Slurm18766). After only the
+visibility declarations changed, Slurm18769 completed0, checked, compiled and
+natively ran the consumer. It verifies explicit concrete type annotations,
+Some and None/default paths for both integer and floating options.
+After source/compiler identity guards passed. Executed ELF:
+154b3047900402c87174aca4ac98614b9c552fd1fe1946cd2f2bbbc8edc4d587.
+This export addition does not change the generic ownership/loan boundaries above.
