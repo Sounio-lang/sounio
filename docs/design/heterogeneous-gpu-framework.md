@@ -1127,3 +1127,28 @@ Gate. Job 17846, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-
 The node is idle.
 
 AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 43. Four instructions from one schedule encoder (2026-10-26, OBSERVED)
+
+`atlas_sched` places the control field in the high 8 bytes: stall at bits 41..44, yield at bit 45, the read barrier at 46..48, the write barrier at 49..51, the wait mask at 52..57. A barrier value of 7 is the unset slot. The measured pair 0xca / 0xc6 is stall 5 versus stall 3, with the other control fields held. Stall 5 commits in the subtract slot. Stall 3 does not.
+
+The operand residue under that field stays the measured leftover. The published fixed-bit pattern for IADD3 does not match this cubin, so it is not what the encoder writes.
+
+Job 17876 replaced, in one image, both `LDG.E` words, the `IADD3` word and the `STG.E` word. The loads are the measured pair: R0 at displacement 0, stall 4; R7 at displacement 4, stall 1. The add is R7 = R0 + R7, which is not the specimen subtract. The store reads R7. The inputs were 10 and 3.
+
+- PIPE_BYTE=202, PIPE_LOAD=1, PIPE_SYNC=0, PIPE=13.
+
+The same four words, with the store's data register set to R0. The specimen store reads R7, not R0. R0 still holds the first load.
+
+- ST0_LOAD=1, ST0_SYNC=0, ST0=10.
+
+`FFMA R5, R5, R0, 5` keeps its second factor in byte 8. The specimen factor is R0, so that byte is 0 and the field was invisible. `atlas_ffma_hi(5)` writes R5 there. R5 holds 2.0. 2 * 2 + 5 = 9.
+
+- FSRC_LOAD=1, FSRC_SYNC=0, FSRC=1091567616, the bits of 9.0.
+
+ADD=13, NEG=0, STGASM=10, ASM=20, IMAD=42 and MOV_SLOT=3 still match.
+
+Gate. Job 17876, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-per-task=4. The node was idle at submit. Binary md5 d9a1081e75609478987dab17e0a1367c. SILICON PASS, EXIT:0. The node is idle.
+
+AMD and AGX are not in the atlas. The ELF container is still the one ptxas wrote. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
