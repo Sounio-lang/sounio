@@ -1,0 +1,34 @@
+// ICU is an independent oracle only; production aliases come from CLDR XML.
+#define SOUNIO_CLDR_GRAPH_ORACLE_NO_MAIN
+#include "cldr_graph_oracle.cpp"
+#include "cldr_locale.hpp"
+#include <unicode/uloc.h>
+#include <unicode/locid.h>
+std::string locale_icu_name(const std::string&raw,const std::string&type){char initial[2048]{};UErrorCode e=U_ZERO_ERROR;std::string input=raw.empty()?"root":raw;if(input.find("-u-")!=input.npos){int32_t parsed=0;uloc_forLanguageTag(input.c_str(),initial,sizeof(initial),&parsed,&e);if(U_FAILURE(e)||parsed!=static_cast<int32_t>(input.size()))bad("ICU locale tag");input=initial;}else std::replace(input.begin(),input.end(),'-','_');char canonical[2048]{};e=U_ZERO_ERROR;uloc_canonicalize(input.c_str(),canonical,sizeof(canonical),&e);if(U_FAILURE(e))bad("ICU locale canonicalization");auto modern=icu::Locale::createFromName(canonical);modern.canonicalize(e);if(U_FAILURE(e))bad("ICU modern CLDR canonicalization");std::string current=modern.getName();if(current.size()>=sizeof(canonical))bad("ICU canonical extent");std::copy(current.begin(),current.end(),canonical);canonical[current.size()]=0;if(!type.empty()){auto legacy=uloc_toLegacyType("collation",type.c_str());uloc_setKeywordValue("collation",legacy?legacy:type.c_str(),canonical,sizeof(canonical),&e);if(U_FAILURE(e))bad("ICU locale keyword");}return canonical;}
+
+std::string locale_standard_bundle(std::string canonical){
+ auto requested=icu::Locale::createFromName(canonical.c_str());std::string variants=requested.getVariant();
+ if(variants.empty())return canonical;
+ auto pieces=[](std::string s){std::set<std::string> out;std::size_t p=0;while(p<s.size()){auto end=s.find('_',p);out.insert(s.substr(p,end==s.npos?s.npos:end-p));if(end==s.npos)break;p=end+1;}return out;};
+ auto wanted=pieces(variants);std::string best;std::size_t count=0;auto expanded=requested;UErrorCode likely_error=U_ZERO_ERROR;expanded.addLikelySubtags(likely_error);if(U_FAILURE(likely_error))bad("ICU oracle likely-subtag lookup");std::string region=requested.getCountry();if(region.empty())region=expanded.getCountry();
+ for(int32_t i=0;i<ucol_countAvailable();++i){auto id=ucol_getAvailable(i);auto candidate=icu::Locale::createFromName(id);
+ if(std::string(candidate.getLanguage())!=requested.getLanguage()||std::string(candidate.getScript())!=requested.getScript()||std::string(candidate.getCountry())!=region)continue;
+ auto subset=pieces(candidate.getVariant());if(subset.empty()||!std::includes(wanted.begin(),wanted.end(),subset.begin(),subset.end()))continue;
+ if(best.empty()||subset.size()>count||(subset.size()==count&&std::string(id)<best)){best=id;count=subset.size();}
+ }
+ if(best.empty())return canonical;auto keyword=canonical.find('@');return best+(keyword==canonical.npos?"":canonical.substr(keyword));
+}
+
+int main(int argc,char**argv){try{if(argc!=3&&argc!=4)return 64;bool standard=argc==4&&std::string(argv[3])=="--standard-bundle";if(argc==4&&!standard)return 64;g_oracle_versions();cldr_input_versions(argv[1],argv[2]);ClocaleRegistry registry(argv[1]);registry_controls(registry);
+ std::vector<std::array<std::string,4>> controls={
+  {"zh-TW","","zh","stroke"},{"zh-Hant-TW","","zh","stroke"},{"cmn-TW","","zh","stroke"},{"sh-RS","","sr_Latn","standard"},
+  {"sr-ME","","sr_Latn","standard"},{"iw","","he","standard"},{"eng-Latn-GB","","root","standard"},
+  {"de-Latn-AT","phonebk","de_AT","phonebook"},{"de-u-co-phonebk","","de","phonebook"},{"zh-Hant-u-co-phonebk","","zh","stroke"},
+  {"en-US-POSIX-fonipa","","en_US_POSIX","standard"},{"en-u-va-posix","","en_US_POSIX","standard"},{"en-US-u-va-posix","","en_US_POSIX","standard"},{"eng-USA","","root","standard"},{"und","","root","standard"}
+ };
+ std::set<Fseq> samples={{},{0},{0x61},{0x41},{0x62},{0x61,0x65},{0xe4},{0xf6},{0x7a},{0x35},{0x61,0x35},{0x35,0x61},{0x430},{0x431},{0x3b1},{0x627},{0x4e00},{0x4e01},{0x963f},{0x516b},{0x3042},{0x30a2},{0x20},{0x21},{0x1f600},{0xfffe},{0xffff}};
+ std::uint64_t comparisons=0;for(const auto&test:controls){auto id=registry.resolve_request(test[0],test[1]);const auto&entry=registry.entries.at(id);if(entry.locale!=test[2]||entry.type!=test[3])bad("locale source identity "+test[0]+"/"+test[1]+" -> "+entry.locale+"/"+entry.type);auto source=g_compile(entry);auto name=locale_icu_name(test[0],test[1]);if(standard)name=locale_standard_bundle(name);UErrorCode e=U_ZERO_ERROR;auto product=ucol_open(name.c_str(),&e);if(U_FAILURE(e))bad("ICU locale product");ucol_setAttribute(source,UCOL_NORMALIZATION_MODE,UCOL_ON,&e);ucol_setAttribute(product,UCOL_NORMALIZATION_MODE,UCOL_ON,&e);if(U_FAILURE(e))bad("ICU normalize option");std::vector<std::pair<std::vector<std::uint8_t>,Fseq>> sorted;for(const auto&sample:samples)sorted.emplace_back(g_icu_key(product,sample),sample);std::sort(sorted.begin(),sorted.end());for(std::size_t i=1;i<sorted.size();++i){auto a=g_icu_key(source,sorted[i-1].second),b=g_icu_key(source,sorted[i].second);int actual=a<b?-1:b<a?1:0,expected=sorted[i-1].first<sorted[i].first?-1:0;if(actual!=expected){std::cerr<<"REQUEST "<<test[0]<<"/"<<test[1]<<" CANONICAL_ICU "<<name<<" SOURCE "<<entry.locale<<"/"<<entry.type<<" LEFT "<<display(sorted[i-1].second)<<" RIGHT "<<display(sorted[i].second)<<"\n";bad("locale bundle order");}++comparisons;}ucol_close(source);ucol_close(product);std::cout<<"CLDR_LOCALE_CONTROL_OK "<<test[0]<<"/"<<test[1]<<" -> "<<entry.locale<<"/"<<entry.type<<"\n";}
+ for(const auto&invalid:std::vector<std::pair<std::string,std::string>>{{"en--US",""},{"en-u-kn-true",""},{"de-u-co-phonebk","standard"},{"en-FOO",""},{"en-US-posix-posix",""},{"ja","private-kana"},{"en","bad/type"},{"root_US",""}}){bool rejected=false;try{registry.resolve_request(invalid.first,invalid.second);}catch(const std::exception&){rejected=true;}if(!rejected)bad("invalid/unsupported locale accepted "+invalid.first+"/"+invalid.second);}
+ std::size_t reachable=0;for(std::size_t i=0;i<registry.entries.size();++i){const auto&entry=registry.entries[i];if(entry.type.starts_with("private-")||!entry.variant.empty())continue;auto found=registry.resolve_request(entry.locale,entry.type);if(found!=i)bad("public source locale unreachable "+entry.locale+"/"+entry.type+" -> "+registry.entries[found].locale+"/"+registry.entries[found].type);++reachable;}std::cout<<"CLDR_PUBLIC_SOURCE_REACHABLE_OK count="<<reachable<<"\n";std::cout<<"CLDR_LOCALE_CANONICAL_CONTROLS_OK oracle="<<(standard?"standard-variant-bundle":"raw-factory")<<" controls="<<controls.size()<<" comparisons="<<comparisons<<" language_aliases="<<registry.language_aliases.size()<<" script_aliases="<<registry.script_aliases.size()<<" territory_aliases="<<registry.territory_aliases.size()<<" variant_aliases="<<registry.variant_aliases.size()<<" likely="<<registry.likely.size()<<"\n";return 0;
+}catch(const std::exception&e){std::cerr<<"CLDR_LOCALE_CANONICAL_ERROR "<<e.what()<<"\n";return 1;}}
+
