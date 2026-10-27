@@ -68,7 +68,9 @@ The source compiler used here was built in Slurm job 17771 from the unchanged co
 - Job 17874: expanded focused gate COMPLETED, exit 0:0, 44 seconds, including VCF and TCP/UDP protocol mismatch checks. See [the receipt](focal-17874.json).
 - Job 17864: focused gate COMPLETED, exit 0:0, 41 seconds. See [the machine-readable receipt](focal-17864.json). It contains the exact overlay/source-catalog hashes, per-phase results and artifact hashes. Durable native logs and manifests live under the directory recorded there.
 - Job 17800: earlier complete stdlib selection, before scientific consolidation and subsequent repairs: 320 pass, 74 fail, 194 skip, 588 total; zero selection errors. This is a diagnostic baseline, not the final tip.
-- Job 17854: integrated full/scientific/hyper validation of snapshot 14 was still running when this document was initially written. Snapshot 15 adds the subsequently passing effects, time/profiler and quaternion-golden changes. Follow-up receipts must retain that distinction.
+- Job 17854: integrated packet 14 completed with 344 pass, 61 fail and 230 skip in 635 selected tests, with no selection errors. Its diagnostic receipt preserves all failures and source seals. It predates the passing effects/time/profiler/golden/protocol/VCF changes and restoration of scientific refusal fixtures/examples.
+- Job 17877: the previously failed DP54, interval, phonon and Wilcoxon child gates all passed after restoring their original fixtures/example migrations; the expanded native gate also passed. See [the repair receipt](repair-17877.json).
+- See [the review stack and acceptance status](REVIEW_STACK.md) for the separate complete-selection, child-replay and exact-tip CI boundaries.
 - Snapshot 14 exposed the legacy SNN native-emission failure (rc=12); its original fixture is preserved. Do not replace it with a smaller passing control or label the hyper gate green.
 - Full slow lane, whole-corpus compiler validation, lifetime/fixed-point/transport gates, Lean validation and exact-tip GitHub CI have not been closed by the focused pass.
 
