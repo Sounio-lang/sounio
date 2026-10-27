@@ -73,7 +73,31 @@ try{
  for(const [n,s]of [['codegen_x86_linux',cgx],['codegen',cg]])if(all(arm,s).length!==1)fail('mir_ret_arm_missing_sentinel_'+n);
  const fl=only(/^pub var NC_IS_FLOAT_REG: \[i64; ([0-9]+)\] = \[0; ([0-9]+)\]$/m,frame,'nc_is_float_reg_decl');
  const limit=Number(only(/^pub let NC_VREG_LIMIT: i64 = ([0-9]+)$/m,frame,'nc_vreg_limit_decl')[1]);
+
  const fv=new Set([...fl.slice(1).map(Number),limit,vregs]);if(fv.size!==1)fail('float_typing_tier_not_ir_max_vregs_'+list(fv));
+ const floatClear=body('nc_is_float_reg_clear',frame,'nc_is_float_reg_clear','pub ');
+ need(/while i < NC_VREG_LIMIT \{\s*NC_IS_FLOAT_REG\[i as usize\] = 0/,floatClear,'float_typing_reset_not_full_capacity');
+ const regClass=only(/^pub var NC_REG_CLASS: \[i64; ([0-9]+)\] = \[0; ([0-9]+)\]$/m,frame,'nc_reg_class_decl');
+ if(regClass.slice(1).some(n=>Number(n)!==limit))fail('reg_class_tier_not_nc_vreg_limit');
+ const classGet=body('nc_reg_class_get',frame,'nc_reg_class_get','pub ');
+ if(!classGet.includes('if reg < 0 || reg >= NC_VREG_LIMIT { return 0 }'))fail('reg_class_get_missing_bound');
+ const classSet=body('nc_reg_class_set',frame,'nc_reg_class_set','pub ');
+ need(/if reg < 0 \|\| reg >= NC_VREG_LIMIT \{\s*NC_REG_CLASS_DROPPED = NC_REG_CLASS_DROPPED \+ 1\s*return\s*\}/,classSet,'reg_class_set_missing_detectable_bound');
+ if(!classSet.includes('NC_REG_CLASS[reg as usize] = cls')||!classSet.includes('if reg + 1 > NC_REG_CLASS_HIGH_WATER')||!classSet.includes('NC_REG_CLASS_HIGH_WATER = reg + 1'))fail('reg_class_set_missing_high_water');
+ const classReset=body('nc_reg_class_reset',frame,'nc_reg_class_reset','pub ');
+ need(/while i < NC_REG_CLASS_HIGH_WATER \{\s*NC_REG_CLASS\[i as usize\] = 0/,classReset,'reg_class_reset_not_high_water');
+ if(!classReset.includes('NC_REG_CLASS_HIGH_WATER = 0')||!classReset.includes('NC_REG_CLASS_DROPPED = 0'))fail('reg_class_reset_missing_counters');
+ const highWords=Number((BigInt(vregs)+31n)/32n);
+ const highSeen=only(/^pub var NC_HIGH_SEEN: \[i64; ([0-9]+)\] = \[0; ([0-9]+)\]$/m,frame,'nc_high_seen_decl');
+ if(highSeen.slice(1).some(n=>Number(n)!==highWords))fail('high_seen_tier_not_ir_max_vregs');
+ const resetWords=Number(only(/while i < ([0-9]+) \{\s*NC_HIGH_SEEN\[i as usize\] = 0/,classReset,'nc_high_seen_reset_bound')[1]);
+ if(resetWords!==highWords)fail('high_seen_reset_not_full_capacity');
+ const highNote=body('nc_high_float_note',frame,'nc_high_float_note','pub ');
+ if(!highNote.includes('if reg < NC_MAX_VREGS || reg >= NC_VREG_LIMIT { return }'))fail('high_float_missing_reg_bound');
+ if(!highNote.includes('let word = reg / 32')||!highNote.includes('let bit = reg % 32'))fail('high_float_bit_decomposition_mismatch');
+ const highBound=Number(only(/if word < 0 \|\| word >= ([0-9]+) \{ return \}/,highNote,'nc_high_float_word_bound')[1]);
+ if(highBound!==highWords)fail('high_float_bound_not_full_capacity');
+
  for(const [n,s]of [['codegen_x86_linux',cgx],['codegen',cg],['lower_ir',lower],['frame',frame]]){const ls=s.split(/\r?\n/);for(let i=0;i<ls.length;i++){const l=ls[i],next=ls[i+1]||'';if(l.includes('NC_MAX_VREGS')&&(l.includes('NC_IS_FLOAT_REG[')||(next.includes('NC_IS_FLOAT_REG[')&&!l.trim().startsWith('while'))))fail('float_typing_bounded_by_nc_max_vregs_'+n+'_line_'+(i+1));if(l.trim().startsWith('while')&&l.includes('NC_MAX_VREGS')&&next.includes('NC_IS_FLOAT_REG['))fail('float_typing_partial_reset_'+n+'_line_'+(i+1));}}
  tier('strtab_tier',only(/^pub struct StringTable \{\n    pub bytes: \[i8; ([0-9]+)\],$/m,elf,'string_table_bytes_decl'),only(accessor('elf_strtab_capacity_bytes','pub '),elf,'elf_strtab_capacity_accessor'),strtab);
  for(const n of ['string_table_add','data_section_align','data_section_add_f64']){const b=body(n,elf,n,'pub ');if(!b.includes('elf_strtab_capacity_bytes()'))fail(n+'_not_using_accessor');if(!b.includes('ELF_STRTAB_OVERFLOW = 1'))fail(n+'_missing_sentinel');if(/<\s*8192\b/.test(b))fail(n+'_stray_literal_bound');}
