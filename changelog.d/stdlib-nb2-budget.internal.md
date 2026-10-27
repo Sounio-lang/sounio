@@ -1,0 +1,1 @@
+The NB2 slot-cache control and profile fixtures declare a 120-second end-to-end budget for current-source compilation plus execution under parallel suite load. Their programs, assertions and expected output are unchanged; the suite-wide default and all numerical tolerances remain unchanged.
