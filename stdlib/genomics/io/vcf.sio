@@ -1,1 +1,168 @@
-//! VCF parser (disabled — pending pattern matching support)
+// Checked per-record VCF core tokenizer and GT validator.
+// Input is one UTF-8 record, with optional LF/CRLF. No pointer escapes.
+// This validates core columns and GT syntax/ranges; header declarations, INFO
+// schemas, symbolic/breakend allele semantics and reference contigs are separate.
+// Status: 0 success,22 invalid record,75 POS overflow,84 invalid UTF-8.
+use collections::byte_buffer::{ByteBuffer,byte_buffer_get,byte_buffer_len,byte_buffer_utf8_count,byte_buffer_status}
+pub struct VcfInteger {pub value:i64,pub status:i64}
+pub struct VcfRecordSummary {
+    pub status:i64,pub position:i64,pub columns:i64,pub samples:i64,
+    pub alternate_alleles:i64,pub has_quality:bool,pub has_genotype:bool,
+}
+fn vcf_byte(b:&ByteBuffer,index:i64)->i64 {byte_buffer_get(b,index).value}
+fn vcf_invalid(status:i64)->VcfRecordSummary {
+    VcfRecordSummary {status:status,position:0,columns:0,samples:0,alternate_alleles:0,has_quality:false,has_genotype:false}
+}
+pub fn vcf_parse_position(b:&ByteBuffer,start:i64,end:i64)->VcfInteger with Mut,Div,Panic {
+    if start<0 || end>byte_buffer_len(b) || start>=end {return VcfInteger {value:0,status:22}}
+    var pos:i64=0
+    var index=start
+    while index<end {
+        let digit=vcf_byte(b,index)-48
+        if digit<0 || digit>9 {return VcfInteger {value:0,status:22}}
+        if pos>(9223372036854775807-digit)/10 {return VcfInteger {value:0,status:75}}
+        pos=pos*10+digit
+        index=index+1
+    }
+    return VcfInteger {value:pos,status:0}
+}
+fn vcf_is_gt(b:&ByteBuffer,start:i64,end:i64)->bool {
+    if end-start!=2 {return false}
+    return vcf_byte(b,start)==71 && vcf_byte(b,start+1)==84
+}
+pub fn vcf_genotype_status(b:&ByteBuffer,start:i64,end:i64,alternate_alleles:i64)->i64 with Mut,Div,Panic {
+    if start<0 || end>byte_buffer_len(b) || start>=end || alternate_alleles<0 {return 22}
+    var token=start
+    var index=start
+    while index<=end {
+        let boundary=if index==end {true} else {vcf_byte(b,index)==47 || vcf_byte(b,index)==124}
+        if boundary {
+            if index==token {return 22}
+            if !(index-token==1 && vcf_byte(b,token)==46) {
+                let allele=vcf_parse_position(b,token,index)
+                if allele.status!=0 {return allele.status}
+                if allele.value>alternate_alleles {return 22}
+            }
+            token=index+1
+        }
+        index=index+1
+    }
+    return 0
+}
+fn vcf_quality_lexeme(b:&ByteBuffer,start:i64,end:i64)->bool with Mut,Div,Panic {
+    if end-start==1 && vcf_byte(b,start)==46 {return true}
+    var index=start
+    if index<end {if vcf_byte(b,index)==43 {index=index+1}}
+    var digits:i64=0
+    while index<end {
+        let c=vcf_byte(b,index)
+        if c<48 || c>57 {break}
+        digits=digits+1;index=index+1
+    }
+    if index<end {if vcf_byte(b,index)==46 {
+        index=index+1
+        while index<end {
+            let c=vcf_byte(b,index)
+            if c<48 || c>57 {break}
+            digits=digits+1;index=index+1
+        }
+    }}
+    if digits==0 {return false}
+    if index<end {if vcf_byte(b,index)==69 || vcf_byte(b,index)==101 {
+        index=index+1
+        if index<end {if vcf_byte(b,index)==43 || vcf_byte(b,index)==45 {index=index+1}}
+        let exponent_start=index
+        while index<end {
+            let c=vcf_byte(b,index)
+            if c<48 || c>57 {return false}
+            index=index+1
+        }
+        if index==exponent_start {return false}
+    }}
+    return index==end
+}
+pub fn vcf_record_summary(b:&ByteBuffer)->VcfRecordSummary with Mut,Div,Panic {
+    if byte_buffer_status(b)!=0 {return vcf_invalid(22)}
+    if byte_buffer_utf8_count(b).status!=0 {return vcf_invalid(84)}
+    var end=byte_buffer_len(b)
+    if end==0 {return vcf_invalid(22)}
+    if vcf_byte(b,end-1)==10 {end=end-1;if end>0 {if vcf_byte(b,end-1)==13 {end=end-1}}}
+    if end==0 {return vcf_invalid(22)}
+    if end>=3 {if vcf_byte(b,0)==239 && vcf_byte(b,1)==187 && vcf_byte(b,2)==191 {return vcf_invalid(22)}}
+    if vcf_byte(b,0)==35 {return vcf_invalid(22)}
+    var field:i64=0
+    var start:i64=0
+    var index:i64=0
+    var position:i64=0
+    var alternate_alleles:i64=0
+    var has_quality=false
+    var has_genotype=false
+    while index<=end {
+        let c=if index==end {9} else {vcf_byte(b,index)}
+        if c==9 {
+            if index==start {return vcf_invalid(22)}
+            if field==0 {if index-start==1 && vcf_byte(b,start)==46 {return vcf_invalid(22)}}
+            if field==1 {
+                let parsed=vcf_parse_position(b,start,index)
+                if parsed.status!=0 {return vcf_invalid(parsed.status)}
+                position=parsed.value
+            }
+            if field==3 {
+                var j=start
+                while j<index {
+                    let base=vcf_byte(b,j)
+                    if base!=65 && base!=67 && base!=71 && base!=84 && base!=78 && base!=97 && base!=99 && base!=103 && base!=116 && base!=110 {return vcf_invalid(22)}
+                    j=j+1
+                }
+            }
+            if field==4 {
+                if index-start==1 && vcf_byte(b,start)==46 {alternate_alleles=0}
+                else {
+                    alternate_alleles=1
+                    var j=start
+                    var allele_start=start
+                    while j<=index {
+                        if j==index || vcf_byte(b,j)==44 {
+                            if j==allele_start {return vcf_invalid(22)}
+                            if j-allele_start==1 && vcf_byte(b,allele_start)==46 {return vcf_invalid(22)}
+                            if j<index {alternate_alleles=alternate_alleles+1}
+                            allele_start=j+1
+                        }
+                        j=j+1
+                    }
+                }
+            }
+            if field==5 {
+                if !vcf_quality_lexeme(b,start,index) {return vcf_invalid(22)}
+                has_quality=!(index-start==1 && vcf_byte(b,start)==46)
+            }
+            if field==8 {
+                var token=start
+                var j=start
+                var format_index:i64=0
+                while j<=index {
+                    if j==index || vcf_byte(b,j)==58 {
+                        if j==token {return vcf_invalid(22)}
+                        if vcf_is_gt(b,token,j) {
+                            if format_index!=0 {return vcf_invalid(22)}
+                            has_genotype=true
+                        }
+                        format_index=format_index+1;token=j+1
+                    }
+                    j=j+1
+                }
+            }
+            if field>8 && has_genotype {
+                var gt_end=start
+                while gt_end<index && vcf_byte(b,gt_end)!=58 {gt_end=gt_end+1}
+                let status=vcf_genotype_status(b,start,gt_end,alternate_alleles)
+                if status!=0 {return vcf_invalid(status)}
+            }
+            field=field+1
+            start=index+1
+        } else {if c<=32 || c==127 {return vcf_invalid(22)}}
+        index=index+1
+    }
+    if field<8 || field==9 {return vcf_invalid(22)}
+    return VcfRecordSummary {status:0,position:position,columns:field,samples:if field>9 {field-9} else {0},alternate_alleles:alternate_alleles,has_quality:has_quality,has_genotype:has_genotype}
+}

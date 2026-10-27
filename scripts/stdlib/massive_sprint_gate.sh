@@ -33,9 +33,12 @@ record oracle-build tests/reference/stdlib_hyper_metrics.cpp g++ -std=c++23 -O2 
 for artifact in libstdlib_platform.so platform-reference hyper-oracle; do
  if [[ -f "$out/$artifact" ]]; then sha256sum "$out/$artifact" >> "$out/EXECUTABLES.sha256"; else fail=1;fi
 done
+record vcf-reference-build tests/reference/stdlib_vcf_reference.cpp g++ -std=c++23 -O2 -Wall -Wextra -Werror tests/reference/stdlib_vcf_reference.cpp -o "$out/vcf-reference" || true
+record vcf-reference tests/reference/stdlib_vcf_reference.cpp timeout 30 "$out/vcf-reference" || true
+if [[ -f "$out/vcf-reference" ]]; then sha256sum "$out/vcf-reference" >> "$out/EXECUTABLES.sha256";fi
 export STDLIB_HYPER_ORACLE="$out/hyper-oracle"
 record operational-controls scripts/stdlib node --test scripts/stdlib/test_hyper_gate.mjs scripts/stdlib/test_reliability_status.mjs scripts/stdlib/test_stdlib_e2e_diagnostics.mjs scripts/stdlib/test_emit_stdlib_e2e_result.mjs tools/science_boundary/core_test.mjs tools/science_boundary/closure_test.mjs tools/science_boundary/attestor_test.mjs tools/science_boundary/policy_claims_test.mjs || true
-for src in tests/stdlib/massive/test_{bytes,dynamic_collections,binary,platform,time}.sio tests/stdlib/sync/test_{atomic,mutex}_e2e.sio examples/atomic_demo.sio tests/stdlib/math/test_core_e2e.sio tests/stdlib/regex/test_regex.sio tests/stdlib/profile/test_profiler_e2e.sio; do
+for src in tests/stdlib/massive/test_{bytes,dynamic_collections,binary,platform,time,vcf}.sio tests/stdlib/sync/test_{atomic,mutex}_e2e.sio examples/atomic_demo.sio tests/stdlib/math/test_core_e2e.sio tests/stdlib/regex/test_regex.sio tests/stdlib/profile/test_profiler_e2e.sio; do
  name=$(basename "$src" .sio)
  record "$name-check" "$src" timeout 180 bin/souc check "$src" || continue
  record "$name-compile" "$src" timeout 180 bin/souc compile "$src" -o "$out/$name.elf" || continue

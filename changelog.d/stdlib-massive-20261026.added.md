@@ -1,0 +1,1 @@
+VCF core records and GT fields can now be validated over dynamically sized byte buffers, with explicit UTF-8, column, position-overflow and allele-index errors. Independent C++23 and native Sounio fixtures cover missing/mixed-phase genotypes and records beyond fixed-buffer thresholds; header/schema and symbolic-allele validation remain separate work.
