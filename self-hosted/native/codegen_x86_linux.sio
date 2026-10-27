@@ -1498,6 +1498,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_read_byte((*func).name) { return 55 }
     if name_is_read_file((*func).name) { return 11 }
     if name_is_write_file((*func).name) { return 12 }
+    if name_is_append_file((*func).name) { return 73 }
     if name_is_file_size((*func).name) { return 13 }
     if name_is_sqrt((*func).name) { return 14 }
     if name_is_print_f64((*func).name) { return 15 }
@@ -1746,6 +1747,17 @@ fn name_is_read_file(n: Name) -> bool with Mut, Panic, Div {
     if n.buf[6] != 105 as i8 { return false }     // 'i'
     if n.buf[7] != 108 as i8 { return false }     // 'l'
     if n.buf[8] != 101 as i8 { return false }     // 'e'
+    true
+}
+
+fn name_is_append_file(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 11 { return false }
+    let spelling = "append_file"
+    var i:i64 = 0
+    while i < 11 {
+        if n.buf[i as usize] != str_char_at(spelling,i) as i8 { return false }
+        i=i+1
+    }
     true
 }
 
@@ -6815,7 +6827,7 @@ fn emit_builtin_read_file(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 // write_file(path, buf, n) — handle by value, NOT &buf. We resolve the handle,
 // unpack low bytes into a packed contiguous buffer, then open/write/close.
 // Uses sys_open (O_WRONLY|O_CREAT|O_TRUNC=577), sys_write, sys_close.
-fn emit_builtin_write_file(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+fn emit_builtin_write_file_flags(nc: NativeCompiler, open_flags:i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     c.code = emit_push_rbp(c.code)
     c.code = emit_mov_rbp_rsp(c.code)
@@ -6901,7 +6913,7 @@ fn emit_builtin_write_file(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     // open(path, O_WRONLY|O_CREAT|O_TRUNC=577, 0755=493)
     c.code = emit_load_rbp_disp32_rax(c.code, -8)        // rax = path
     c.code = emit_mov_reg_reg(c.code, 7, 0)             // rdi = path
-    c = emit_open_syscall_for_target(c, c.target_os_id, 577, 493)
+    c = emit_open_syscall_for_target(c, c.target_os_id, open_flags, 493)
 
     // Save fd
     c.code = emit_store_rax_rbp_disp32(c.code, -48)      // [rbp-48] = fd
@@ -6929,6 +6941,22 @@ fn emit_builtin_write_file(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     c.code = emit_pop_rbp(c.code)
     c.code = emit_ret(c.code)
     c
+}
+
+// Both buffer modes share the native-v2 handle unpacking ABI.
+fn emit_builtin_write_file(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    emit_builtin_write_file_flags(nc,577)
+}
+fn emit_builtin_append_file(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    // Append is qualified for the Linux x86-64 native backend. Never truncate
+    // a Windows file through CreateFileA while pretending to append.
+    if nc.target_os_id == 3 {
+        var c=nc
+        c.code=emit_mov_rax_imm(c.code,0-38)
+        c.code=emit_ret(c.code)
+        return c
+    }
+    emit_builtin_write_file_flags(nc,1089)
 }
 
 // file_size(path: *u8) -> i64
@@ -8364,6 +8392,7 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
         // M5: file I/O builtins
         if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
         if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
+        if name_is_append_file(func.name) { return emit_builtin_append_file(c) }
         if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
         if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
         if name_is_f64_to_bits(func.name) { return emit_builtin_f64_bits_identity(c) }
@@ -9309,6 +9338,7 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_str_concat(name) { return 10 }
     if name_is_read_file(name) { return 11 }
     if name_is_write_file(name) { return 12 }
+    if name_is_append_file(name) { return 73 }
     if name_is_file_size(name) { return 13 }
     if name_is_sqrt(name) { return 14 }
     if name_is_print_f64(name) { return 15 }
@@ -9426,6 +9456,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 10 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_concat((*nc))); return }
     if builtin_id == 11 { native_v2_persist_builtin_emit_into(nc, emit_builtin_read_file((*nc))); return }
     if builtin_id == 12 { native_v2_persist_builtin_emit_into(nc, emit_builtin_write_file((*nc))); return }
+    if builtin_id == 73 { native_v2_persist_builtin_emit_into(nc, emit_builtin_append_file((*nc))); return }
     if builtin_id == 13 { native_v2_persist_builtin_emit_into(nc, emit_builtin_file_size((*nc))); return }
     if builtin_id == 14 { native_v2_persist_builtin_emit_into(nc, emit_builtin_sqrt((*nc))); return }
     if builtin_id == 15 { native_v2_persist_builtin_emit_into(nc, emit_builtin_print_f64((*nc))); return }
@@ -9526,6 +9557,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
         if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
         if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
         if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
+        if name_is_append_file(func.name) { return emit_builtin_append_file(c) }
         if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
         if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
         if name_is_f64_to_bits(func.name) { return emit_builtin_f64_bits_identity(c) }
@@ -12534,6 +12566,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
         if name_is_str_concat(func.name) { (*nc) = emit_builtin_str_concat((*nc)); return }
         if name_is_read_file(func.name) { (*nc) = emit_builtin_read_file((*nc)); return }
         if name_is_write_file(func.name) { (*nc) = emit_builtin_write_file((*nc)); return }
+        if name_is_append_file(func.name) { (*nc) = emit_builtin_append_file((*nc)); return }
         if name_is_file_size(func.name) { (*nc) = emit_builtin_file_size((*nc)); return }
         if name_is_sqrt(func.name) { (*nc) = emit_builtin_sqrt((*nc)); return }
         if name_is_f64_to_bits(func.name) { (*nc) = emit_builtin_f64_bits_identity((*nc)); return }
