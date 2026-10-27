@@ -62,7 +62,7 @@ its level separators.
 
 Format2 asset `stdlib/text/data/cldr49-locales.bin` SHA256
 `9ceb2499c85f9704e4b27cfd01fc51dde2078ad7b1e721063a1fe69d92fb32ee`
-is16507320 bytes. Its12 sections contain strings, scalar sequences, CEs, mappings,
+is16507440 bytes. Its12 sections contain strings, scalar sequences, CEs, mappings,
 154 locale configurations, settings, reorder boundaries, Han implicit ranks,
 default/parent metadata, type aliases, locale aliases and likely subtags.
 The explicit generated-data limit is24MiB. The compiler embeds it as immutable

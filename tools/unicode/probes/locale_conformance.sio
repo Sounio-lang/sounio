@@ -1,0 +1,117 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: UNICODE_CONFORMANCE_OK
+//@ timeout: 3600
+// Kind5 is the independent public CLDR locale fixture domain.
+// The complete native gate executes this one sealed ELF over every chunk.
+use ffi::platform::{platform_open,platform_status,platform_close}
+use io::native_file::{native_file_open,native_file_status,native_file_read,native_file_close}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_reserve,byte_buffer_get,byte_buffer_len,byte_buffer_close}
+use text::utf8::{Utf8Text,utf8_text_from_bytes,utf8_text_status,utf8_text_byte_len,utf8_text_byte_at,utf8_encode_append,utf8_text_close}
+use text::locale_collation::{UnicodeLocaleCollator,UnicodeLocaleOptions,unicode_locale_collator,unicode_locale_collator_status,unicode_locale_resolved_locale_len,unicode_locale_resolved_locale_byte_at,unicode_locale_resolved_type_len,unicode_locale_resolved_type_byte_at,unicode_locale_collation_key,unicode_locale_key_status,unicode_locale_key_compare,unicode_locale_key_close}
+fn fixture_u32(b:&ByteBuffer,offset:i64)->i64 with Panic {
+ let n=byte_buffer_len(b)
+ assert(offset>=0 && offset<=n && n-offset>=4)
+ byte_buffer_get(b,offset).value+byte_buffer_get(b,offset+1).value*256+byte_buffer_get(b,offset+2).value*65536+byte_buffer_get(b,offset+3).value*16777216
+}
+fn fixture_option(b:&ByteBuffer,offset:i64)->i64 with Panic {
+ let value=fixture_u32(b,offset)
+ if value>=2147483648 {return value-4294967296}
+ value
+}
+fn fixture_skip(b:&ByteBuffer,offset:i64)->i64 with Div,Panic {
+ let n=fixture_u32(b,offset)
+ assert(n<=4096)
+ assert(n<=(byte_buffer_len(b)-offset-4)/4)
+ offset+4+n*4
+}
+fn fixture_text(b:&ByteBuffer,offset:i64)->Utf8Text with Alloc,Mut,Div,Panic {
+ let n=fixture_u32(b,offset)
+ let end=fixture_skip(b,offset)
+ assert(end<=byte_buffer_len(b))
+ var bytes=byte_buffer_new(n*4)
+ assert(byte_buffer_reserve(&!bytes,n*4)==0)
+ var i:i64=0
+ while i<n {assert(utf8_encode_append(&!bytes,fixture_u32(b,offset+4+i*4))==0);i=i+1}
+ let text=utf8_text_from_bytes(&bytes,n*4)
+ byte_buffer_close(bytes)
+ assert(utf8_text_status(&text)==0)
+ text
+}
+fn fixture_identity(c:&UnicodeLocaleCollator,locale:&Utf8Text,kind:&Utf8Text) with Panic {
+ assert(unicode_locale_resolved_locale_len(c)==utf8_text_byte_len(locale))
+ assert(unicode_locale_resolved_type_len(c)==utf8_text_byte_len(kind))
+ var i:i64=0
+ while i<utf8_text_byte_len(locale) {let got=unicode_locale_resolved_locale_byte_at(c,i);assert(got.status==0);assert(got.value==utf8_text_byte_at(locale,i).value);i=i+1}
+ i=0
+ while i<utf8_text_byte_len(kind) {let got=unicode_locale_resolved_type_byte_at(c,i);assert(got.status==0);assert(got.value==utf8_text_byte_at(kind,i).value);i=i+1}
+}
+fn fixture_row(b:&ByteBuffer,start:i64)->i64 with Alloc,Mut,Div,Panic {
+ let type_start=fixture_skip(b,start)
+ let left_start=fixture_skip(b,type_start)
+ let right_start=fixture_skip(b,left_start)
+ let settings=fixture_skip(b,right_start)
+ let end=settings+28
+ assert(end<=byte_buffer_len(b))
+ let locale=fixture_text(b,start)
+ let kind=fixture_text(b,type_start)
+ let left=fixture_text(b,left_start)
+ let right=fixture_text(b,right_start)
+ let options=UnicodeLocaleOptions {strength:fixture_option(b,settings),alternate:fixture_option(b,settings+4),backwards_secondary:fixture_option(b,settings+8),case_level:fixture_option(b,settings+12),case_first:fixture_option(b,settings+16),max_variable:fixture_option(b,settings+20)}
+ let expected=fixture_u32(b,settings+24)
+ assert(expected<=2)
+ let c=unicode_locale_collator(&locale,&kind,&options,16384)
+ assert(unicode_locale_collator_status(&c)==0)
+ fixture_identity(&c,&locale,&kind)
+ let a=unicode_locale_collation_key(&c,&left,1048576,1048576)
+ let z=unicode_locale_collation_key(&c,&right,1048576,1048576)
+ assert(unicode_locale_key_status(&a)==0 && unicode_locale_key_status(&z)==0)
+ let order=unicode_locale_key_compare(&a,&z)
+ assert(order.status==0 && order.order==expected-1)
+ unicode_locale_key_close(a);unicode_locale_key_close(z)
+ utf8_text_close(locale);utf8_text_close(kind);utf8_text_close(left);utf8_text_close(right)
+ end
+}
+fn fixture_path()->ByteBuffer with Alloc,Mut,Div,Panic {
+ let path="tests/stdlib/wave3-core/locale-data/current.bin"
+ var bytes=byte_buffer_new(str_len(path))
+ var i:i64=0
+ while i<str_len(path) {assert(byte_buffer_push(&!bytes,str_char_at(path,i))==0);i=i+1}
+ bytes
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let platform=platform_open()
+ assert(platform_status(&platform)==0)
+ let path=fixture_path()
+ let file=native_file_open(&platform,&path,0)
+ assert(native_file_status(&file)==0)
+ byte_buffer_close(path)
+ var source=byte_buffer_new(2097152)
+ while true {let read=native_file_read(&platform,&file,&!source,65536);assert(read.status==0);if read.value==0 {break}}
+ assert(native_file_close(&platform,file)==0)
+ let bytes=byte_buffer_len(&source)
+ assert(bytes>=24)
+ var cursor:i64=0
+ var total:i64=0
+ while cursor<bytes {
+  let start=cursor
+  let magic="SOUNUTF1"
+  var i:i64=0
+  while i<8 {assert(byte_buffer_get(&source,start+i).value==str_char_at(magic,i));i=i+1}
+  let count=fixture_u32(&source,start+12)
+  let payload=fixture_u32(&source,start+16)
+  assert(fixture_u32(&source,start+8)==5 && count>0 && count<=512 && fixture_u32(&source,start+20)==0x00120000)
+  assert(payload<=1048576 && payload<=bytes-start-24)
+  let end=start+24+payload
+  cursor=start+24
+  i=0
+  while i<count {cursor=fixture_row(&source,cursor);assert(cursor<=end);i=i+1;total=total+1}
+  assert(cursor==end)
+ }
+ assert(cursor==bytes && total>0)
+ byte_buffer_close(source)
+ platform_close(platform)
+ print_int(total)
+ print("\nUNICODE_CONFORMANCE_OK\n")
+ 0
+}

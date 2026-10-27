@@ -1,6 +1,19 @@
 // C++23 Slurm-native chunk runner. Each process gets a fresh Sounio arena.
 // This orchestrates test fixtures; it does not implement production Unicode.
 #include <array>
+#include <algorithm>
+#ifndef SOUNIO_CHUNK_KIND_MIN
+#define SOUNIO_CHUNK_KIND_MIN 1
+#endif
+#ifndef SOUNIO_CHUNK_KIND_MAX
+#define SOUNIO_CHUNK_KIND_MAX 4
+#endif
+#ifndef SOUNIO_CHUNK_NAME_PATTERN
+#define SOUNIO_CHUNK_NAME_PATTERN "^(norm|segment|case|collation)-[0-9]{6}\\.bin$"
+#endif
+#ifndef SOUNIO_CHUNK_FILE_DESTINATION
+#define SOUNIO_CHUNK_FILE_DESTINATION "tests/stdlib/wave3-core/data/current.bin"
+#endif
 #include <charconv>
 #include <chrono>
 #include <cstdint>
@@ -26,11 +39,12 @@ struct Fixture{std::string name;N kind,rows,bytes;};
 std::vector<Fixture> manifest(const fs::path& root){
  std::ifstream in(root/"MANIFEST.tsv");if(!in)fail("fixture manifest missing");std::string line;
  if(!std::getline(in,line)||line!="filename\tkind\trows\tpayload_bytes")fail("manifest header");
- std::vector<Fixture> result;const std::regex safe("^(norm|segment|case|collation)-[0-9]{6}\\.bin$");
+ std::vector<Fixture> result;const std::regex safe(SOUNIO_CHUNK_NAME_PATTERN);
  while(std::getline(in,line)){
+  if(std::count(line.begin(),line.end(),'\t')!=3)fail("manifest fields");
   std::istringstream fields(line);std::array<std::string,4> parts;for(auto& p:parts)if(!std::getline(fields,p,'\t'))fail("manifest fields");
   Fixture f{parts[0],number(parts[1]),number(parts[2]),number(parts[3])};
-  if(!std::regex_match(f.name,safe)||f.kind<1||f.kind>4||f.rows==0||f.rows>512||f.bytes>1048576)fail("manifest value");
+  if(!std::regex_match(f.name,safe)||f.kind<SOUNIO_CHUNK_KIND_MIN||f.kind>SOUNIO_CHUNK_KIND_MAX||f.rows==0||f.rows>512||f.bytes>1048576)fail("manifest value");
   if(fs::file_size(root/f.name)!=f.bytes+24)fail("fixture size mismatch: "+f.name);
   std::ifstream file(root/f.name,std::ios::binary);std::array<unsigned char,24> b{};file.read(reinterpret_cast<char*>(b.data()),b.size());
   if(!file||std::string(b.begin(),b.begin()+8)!="SOUNUTF1"||word(b,8)!=f.kind||word(b,12)!=f.rows||word(b,16)!=f.bytes||word(b,20)!=0x00120000)fail("fixture header mismatch: "+f.name);
@@ -73,7 +87,7 @@ int main(int argc,char**argv){
   if(!fs::create_directory(out))fail("run directory must be new");
   std::ofstream results(out/"RESULTS.tsv");results<<"fixture\tkind\texpected_rows\texit_status\tmarker\tactual_rows\n";N completed=0,rows=0;
   for(const auto& f:selected){
-   auto cwd=out/fs::path(f.name).stem();fs::create_directories(cwd/"tests/stdlib/wave3-core/data");fs::copy_file(fixtures/f.name,cwd/"tests/stdlib/wave3-core/data/current.bin");
+   auto cwd=out/fs::path(f.name).stem();auto destination=cwd/SOUNIO_CHUNK_FILE_DESTINATION;fs::create_directories(destination.parent_path());fs::copy_file(fixtures/f.name,destination);
    int status=execute(executable,cwd);auto [marker,actual]=observed(cwd/"native.stdout");
    results<<f.name<<'\t'<<f.kind<<'\t'<<f.rows<<'\t'<<status<<'\t'<<marker<<'\t'<<actual<<'\n';results.flush();if(!results)fail("result output");
    if(status!=0||!marker||actual!=f.rows){std::cerr<<"UNICODE_CHUNK_FAILURE "<<f.name<<" exit="<<status<<" expected="<<f.rows<<" actual="<<actual<<" marker="<<marker<<"\n";return 1;}
@@ -87,4 +101,3 @@ int main(int argc,char**argv){
 }
 
 #endif
-
