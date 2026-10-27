@@ -414,3 +414,32 @@ identified official context and actual Slurm context produce the expected
 JSON metadata. No compilation or native test was performed under the
 simulated GitHub context. Source final hash recheck passes.
 Receipt: `/scratch/sounio-stdlib-wave3-20261027/services/reusable-gate-authority-01/results`.
+
+## Active metrics use the shared logarithm
+
+Slurm **18255** preserves the failing numerical before witness: native
+execution passes its original internal checks, but the independent C++23
+oracle rejects active EFE at input4 (got0.6931471740887124,
+expected0.69314718055994529) with the unchanged absolute threshold1e-11.
+Receipt: `/scratch/sounio-stdlib-wave3-20261027/services/active-log-before-02/results`.
+
+Slurm **18258** checks, compiles and executes the same input fixture against
+the canonical-log adapter. All30 finite rows and4 domain rows agree with
+C++23 std::log under1e-11. Inputs are emitted as exact IEEE bit words and
+verified in order against the independent reference: subnormal extrema,
+minimum normal, values next to range-reduction boundaries, powers of two,
+wide magnitudes through maximum finite, and zero/negative/NaN/+infinity
+public EFE behavior. Marker: ACTIVE_LOG_CPP_CONCORDANCE_OK.
+Receipt: `/scratch/sounio-stdlib-wave3-20261027/services/active-log-after-03/results`.
+Source/compiler/reference/executable final hash guards pass. Raw compiler
+SHA-256 remains9919d03afb60e418dc111797895860e27e93a22ca52a9cc51cd0e0edac1571b2.
+
+The private adapter preserves the nonpositive -999999 sentinel, propagates
+NaN and handles positive infinity before calling shared math::pure::ln_checked.
+There is no independent logarithm approximation in active. Canonical checked
+log requires Mut/Div, so those effects are now explicit on its eight public
+active callers; existing Panic requirements remain. This is an intentional
+effect-contract migration, not a weakening of effects. Public names and
+metric formulas are unchanged. Before18253 and after18256/18257 preserve
+harness output-routing and incomplete effect-annotation refusals, respectively.
+The original bridge/test workloads and numerical thresholds are untouched.

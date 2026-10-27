@@ -1,1 +1,3 @@
 Port PAC trait declarations to supported Sounio items with an explicit DecisionStumpModel alias and preserve its formula helpers. Align active inference with canonical Epistemic confidence0..1000, retain prior credibility during precision-only updates, reject out-of-range credibility, and expose EFE result fields. Resolve database wrappers through canonical imported types/free functions and check row/column bounds before reading cells.
+
+Active information metrics now delegate to the range-reduced canonical checked logarithm. Preserve the nonpositive domain sentinel and make required Mut/Div effects explicit through their call graph. C++23 concordance retains the absolute 1e-11 threshold across finite extremes and boundary cases.
