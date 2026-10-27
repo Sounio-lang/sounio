@@ -1,0 +1,110 @@
+// Owned UTF-8 text. Scalar indexing and byte offsets are separate contracts.
+// Budgets charge retained payload bytes. Embedded NUL is valid text.
+// Constructors copy; no borrowed string/raw pointer escapes. Close consumes ownership.
+// Status:0 OK,1 invalid config,2 budget,3 alloc,4 bounds/end,5 malformed UTF-8.
+use collections::byte_buffer::{ByteBuffer,ByteValue,byte_buffer_new,byte_buffer_len,byte_buffer_status,byte_buffer_reserve,byte_buffer_get,byte_buffer_push,byte_buffer_utf8_count,byte_buffer_close}
+use text::utf8_scalar::{Utf8Scalar,utf8_decode4,utf8_scalar_width}
+pub linear struct Utf8Text { data:ByteBuffer, status:i64, scalars:i64 }
+pub fn utf8_next(b:&ByteBuffer,offset:i64)->Utf8Scalar {
+ let status=byte_buffer_status(b)
+ if status!=0 {return Utf8Scalar {codepoint:0,next:offset,status:status}}
+ let n=byte_buffer_len(b)
+ if offset<0 || offset>=n {return Utf8Scalar {codepoint:0,next:offset,status:4}}
+ let b0=byte_buffer_get(b,offset).value
+ let b1=if n-offset>1 {byte_buffer_get(b,offset+1).value} else {0}
+ let b2=if n-offset>2 {byte_buffer_get(b,offset+2).value} else {0}
+ let b3=if n-offset>3 {byte_buffer_get(b,offset+3).value} else {0}
+ utf8_decode4(b0,b1,b2,b3,n-offset,offset)
+}
+pub fn utf8_text_new(max_bytes:i64)->Utf8Text {
+ Utf8Text {data:byte_buffer_new(max_bytes),status:if max_bytes<0 {1} else {0},scalars:0}
+}
+pub fn utf8_text_status(t:&Utf8Text)->i64 {t.status}
+pub fn utf8_text_byte_len(t:&Utf8Text)->i64 {byte_buffer_len(&t.data)}
+pub fn utf8_text_scalar_len(t:&Utf8Text)->i64 {t.scalars}
+pub fn utf8_text_byte_at(t:&Utf8Text,index:i64)->ByteValue {
+ if t.status!=0 {return ByteValue {value:0,status:t.status}}
+ byte_buffer_get(&t.data,index)
+}
+pub fn utf8_text_next(t:&Utf8Text,offset:i64)->Utf8Scalar {
+ if t.status!=0 {return Utf8Scalar {codepoint:0,next:offset,status:t.status}}
+ utf8_next(&t.data,offset)
+}
+pub fn utf8_text_append_bytes(t:&!Utf8Text,b:&ByteBuffer)->i64 with Alloc,Mut,Div,Panic {
+ if t.status!=0 {return t.status}
+ let count=byte_buffer_utf8_count(b)
+ if count.status!=0 {return count.status}
+ let old=byte_buffer_len(&t.data)
+ let n=byte_buffer_len(b)
+ if n>9223372036854775807-old {return 2}
+ let status=byte_buffer_reserve(&!t.data,old+n)
+ if status!=0 {return status}
+ var i:i64=0
+ while i<n {assert(byte_buffer_push(&!t.data,byte_buffer_get(b,i).value)==0);i=i+1}
+ t.scalars=t.scalars+count.value
+ return 0
+}
+fn utf8_text_set_status(t:&!Utf8Text,status:i64) with Mut {t.status=status}
+pub fn utf8_text_from_bytes(b:&ByteBuffer,max_bytes:i64)->Utf8Text with Alloc,Mut,Div,Panic {
+ var t=utf8_text_new(max_bytes)
+ let status=utf8_text_append_bytes(&!t,b)
+ utf8_text_set_status(&!t,status)
+ return t
+}
+// Append into caller-owned output. Failure preserves its prior bytes and length.
+pub fn utf8_text_copy_bytes(t:&Utf8Text,out:&!ByteBuffer)->i64 with Alloc,Mut,Div,Panic {
+ if t.status!=0 {return t.status}
+ let old=byte_buffer_len(out)
+ let n=byte_buffer_len(&t.data)
+ if n>9223372036854775807-old {return 2}
+ let status=byte_buffer_reserve(out,old+n)
+ if status!=0 {return status}
+ var i:i64=0
+ while i<n {assert(byte_buffer_push(out,byte_buffer_get(&t.data,i).value)==0);i=i+1}
+ return 0
+}
+pub fn utf8_encode_append(out:&!ByteBuffer,cp:i64)->i64 with Alloc,Mut,Div,Panic {
+ let width=utf8_scalar_width(cp)
+ if width==0 {return 5}
+ let old=byte_buffer_len(out)
+ if old>9223372036854775807-width {return 2}
+ let status=byte_buffer_reserve(out,old+width)
+ if status!=0 {return status}
+ if width==1 {assert(byte_buffer_push(out,cp)==0)}
+ else if width==2 {
+  assert(byte_buffer_push(out,192+cp/64)==0)
+  assert(byte_buffer_push(out,128+cp%64)==0)
+ } else if width==3 {
+  assert(byte_buffer_push(out,224+cp/4096)==0)
+  assert(byte_buffer_push(out,128+(cp/64)%64)==0)
+  assert(byte_buffer_push(out,128+cp%64)==0)
+ } else {
+  assert(byte_buffer_push(out,240+cp/262144)==0)
+  assert(byte_buffer_push(out,128+(cp/4096)%64)==0)
+  assert(byte_buffer_push(out,128+(cp/64)%64)==0)
+  assert(byte_buffer_push(out,128+cp%64)==0)
+ }
+ return 0
+}
+pub fn utf8_text_append_scalar(t:&!Utf8Text,cp:i64)->i64 with Alloc,Mut,Div,Panic {
+ if t.status!=0 {return t.status}
+ let status=utf8_encode_append(&!t.data,cp)
+ if status==0 {t.scalars=t.scalars+1}
+ return status
+}
+// Legacy primitive string conversion reads its C-string representation through the first NUL.
+// For U+0000 or explicit byte spans use utf8_text_from_bytes; that path preserves every byte.
+pub fn utf8_text_from_string(text:string,max_bytes:i64)->Utf8Text with Alloc,Mut,Div,Panic {
+ var b=byte_buffer_new(max_bytes)
+ var status=byte_buffer_reserve(&!b,str_len(text))
+ var i:i64=0
+ while status==0 && i<str_len(text) {status=byte_buffer_push(&!b,str_char_at(text,i));i=i+1}
+ var t=utf8_text_from_bytes(&b,max_bytes)
+ if status!=0 {utf8_text_set_status(&!t,status)}
+ byte_buffer_close(b)
+ return t
+}
+pub fn utf8_text_close(t:Utf8Text) with Alloc {
+ let Utf8Text {data,status,scalars}=t
+ byte_buffer_close(data)
+}
