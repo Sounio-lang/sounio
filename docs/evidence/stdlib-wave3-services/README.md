@@ -453,3 +453,14 @@ final guards pass. Overall status remains1 for the same six explicit
 compiler prerequisites; no canonical-root or nonempty-array check is
 omitted from final acceptance.
 Receipt: `/scratch/sounio-stdlib-wave3-20261027/services/reusable-gate-log-04/results/gate`.
+
+Slurm **18266** replays the earlier native-qualified API tranche after
+canonical-log integration: unchanged original GP/database fixtures and the
+existing PAC/active/database controls pass all12 phases, C++ concordance and
+the wrong-confidence-output rejection. All four out-of-range-confidence
+programs still check/compile and then exit1 before their acceptance marker.
+The gate-only template now declares Mut/Div to match the public exploration
+contract; no invalid input, assertion or numeric tolerance changes.
+The initial18264 replay records the old template's missing-effect check
+failure. Source/compiler/executable final guards pass in18266.
+Receipt: `/scratch/sounio-stdlib-wave3-20261027/services/api-after-canonical-log-03/results`.
