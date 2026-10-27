@@ -1320,3 +1320,25 @@ The A5000 is still inside job 17498. There is still no V100.
 Gate. Node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 f624ce4b88439b1f353aea651519cf85. SILICON PASS, EXIT:0. The node is idle.
 
 The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 52. The DMUL destination (2026-10-27, OBSERVED)
+
+Job 18097 squared 2.3 into R2. The low word was `28 72 02 04 04`. Byte 2 was the destination, 2.
+
+`atlas_dmul_lo(4, 4, 4)` writes `28 72 04 04 04`. The sources are still both R4, so the arithmetic is still 2.3 squared. The destination is R4. The store after it still reads R2. R2 was loaded with 1.1 and nothing else writes it.
+
+Job 18201, on the L4, the sm_86 image:
+
+- Host byte 1522 is 4. In job 18097 that byte was 2.
+- DMUL_LOAD=1, DMUL=4607632778762754458, DMUL_LO=2576980378.
+- Those are the bits of 1.1, `0x3ff199999999999a`. The low half is `0x9999999a`.
+- AMP86=42. image rc=209, VOLTA_LOAD=0.
+
+The square did not reach the store. It was written to R4. Byte 2 is the destination.
+
+The A5000 is still inside job 17498. There is still no V100.
+
+Gate. Node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 d40c2ca0734fcbaf5c68a9e3aefc710c. SILICON PASS, EXIT:0. The node is idle.
+
+The 0.0018 s threshold is not moved. This cut does not pass it.
