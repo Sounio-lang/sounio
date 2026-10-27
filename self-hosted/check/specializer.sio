@@ -48,6 +48,7 @@ module check::specializer
 use parser::ast::*
 use parser::parser::{dummy_type_expr}
 use io::env::{read_env}
+use compiler::private_fn_identity::{pfi_use_target,pfi_use_named}
 
 // ============================================================
 // Small fixed-capacity LOCAL helper structs (never stored in globals)
@@ -62,6 +63,7 @@ struct SpecNameBuf { names: [Name; 4], count: i64 }
 // ============================================================
 
 struct SpecGfNode {
+    owner:i64,
     name_hash: i64,
     tp_count: i64,
     tp_h0: i64,
@@ -84,6 +86,7 @@ struct SpecGfNode {
 // Generic STRUCT template node (StructDef carries real type_params, so no
 // heuristic recovery is needed for structs).
 struct SpecStNode {
+    owner:i64,
     name_hash: i64,
     tp_count: i64,
     tp_h0: i64,
@@ -1118,6 +1121,7 @@ fn spec_collect_generic_structs(items: Option<Box<ItemList>>) with Mut, Panic, D
                                 (*p).tp_h3 = spec_struct_tp_hash_of((*sd_box).type_params, 3)
                                 (*p).sd = it.struct_def
                                 (*p).visibility = it.visibility
+                                (*p).owner=it.origin_module_id
                                 SPEC_ST_PTRS[slot as usize] = p as i64
                                 SPEC_ST_COUNT = SPEC_ST_COUNT + 1
                             }
@@ -1158,6 +1162,7 @@ fn spec_collect_generic_fns(items: Option<Box<ItemList>>, known: SpecKnownNames)
                                 (*p).tp_n3=tp.names[3]
                                 (*p).fd = it.fn_def
                                 (*p).visibility = it.visibility
+                                (*p).owner=it.origin_module_id
                                 SPEC_GF_PTRS[slot as usize] = p as i64
                                 SPEC_GF_NEEDED[slot as usize] = false
                                 SPEC_GF_COUNT = SPEC_GF_COUNT + 1
@@ -1213,6 +1218,7 @@ fn spec_collect_generic_method_items(methods: Option<Box<ItemList>>, known: Spec
                                 (*p).tp_n3=tp.names[3]
                                 (*p).fd = it.fn_def
                                 (*p).visibility = it.visibility
+                                (*p).owner=it.origin_module_id
                                 SPEC_GF_PTRS[slot as usize] = p as i64
                                 SPEC_GF_IS_METHOD[slot as usize] = true
                                 SPEC_GF_NEEDED[slot as usize] = false
@@ -1853,7 +1859,7 @@ fn spec_subst_field_list_opt(opt: Option<Box<FieldDefList>>, ctx: i64, targs: Op
 // incorrectly get E176/E259 for a type it was always allowed to use.
 fn spec_make_struct_item(name: Name, sd: StructDef, visibility: Visibility) -> Item with Mut, Panic, Div, Alloc {
     Item {
-        kind: ItemKind::ItemStruct, span: sd.span, visibility: visibility, name: name, fn_def: None,
+        origin_module_id:0-1, kind: ItemKind::ItemStruct, span: sd.span, visibility: visibility, name: name, fn_def: None,
         struct_def: Some(Box::new(sd)), enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None,
         acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None,
         transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None,
@@ -1897,7 +1903,9 @@ fn spec_get_or_create_struct_instance(st_idx: i64, base: Name, targs: Option<Box
             (*sp).sd.type_params = None
             let st_ctx = spec_ctx_from_struct_slot(st_idx)
             (*sp).sd.fields = spec_subst_field_list_opt((*sp).sd.fields, st_ctx, targs)
-            spec_extra_push_item(spec_make_struct_item((*sp).sd.name, (*sp).sd, spec_struct_table_visibility(st_idx)))
+            var origin_item=spec_make_struct_item((*sp).sd.name, (*sp).sd, spec_struct_table_visibility(st_idx))
+            origin_item.origin_module_id=spec_struct_table_owner(st_idx)
+            spec_extra_push_item(origin_item)
             // Copilot review (PR #2515): mirrors spec_finish_fn_item's own
             // registration for synthesized FUNCTION symbols (see its own
             // comment, round 12 review comment 4106485514) -- without this,
@@ -1915,7 +1923,7 @@ fn spec_get_or_create_struct_instance(st_idx: i64, base: Name, targs: Option<Box
             // SAME module -- a no-op when the owner is unresolved
             // (spec_item_module_note skips n.len<=0 and already-known names
             // on its own).
-            let owner = spec_item_module_lookup(base)
+            let owner = spec_struct_table_owner(st_idx)
             if owner >= 0 {
                 spec_item_module_note(owner, mangled)
             }
@@ -1963,7 +1971,7 @@ fn spec_emitted_push(n: Name) -> bool with Mut, Panic, Div {
 // (testmod::gen_big::gbig_basis::<i64>(..), a pub fn, read back as private).
 fn spec_make_fn_item(name: Name, fd: FnDef, visibility: Visibility) -> Item with Mut, Panic, Div, Alloc {
     Item {
-        kind: ItemKind::ItemFn, span: fd.span, visibility: visibility, name: name, fn_def: Some(Box::new(fd)),
+        origin_module_id:0-1, kind: ItemKind::ItemFn, span: fd.span, visibility: visibility, name: name, fn_def: Some(Box::new(fd)),
         struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None,
         acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None,
         transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None,
@@ -2014,6 +2022,8 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
     match spec_generic_table_fd(gt_idx) {
         None => {}
         Some(fd_box) => {
+            let caller_module_id=SPEC_CURRENT_MODULE_ID
+            SPEC_CURRENT_MODULE_ID=spec_generic_table_owner(gt_idx)
             let fp = heap_alloc(32768) as *mut SpecFnDefStage
             let tmp_fd = (*fd_box)
             (*fp).fd = tmp_fd
@@ -2041,12 +2051,12 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
             // spec_item_module_collect regardless of genericity) for the
             // duration of this one scan, then restore the caller's context
             // so the OUTER scan continues under its own correct module.
-            let caller_module_id = SPEC_CURRENT_MODULE_ID
-            SPEC_CURRENT_MODULE_ID = spec_item_module_lookup(base_name)
+            SPEC_CURRENT_MODULE_ID = spec_generic_table_owner(gt_idx)
             spec_scan_block((*fp).fd.body)
             SPEC_CURRENT_MODULE_ID = caller_module_id
             let np = heap_alloc(16384) as *mut SpecItemNode
             (*np).it = spec_make_fn_item((*fp).fd.name, (*fp).fd, spec_generic_table_visibility(gt_idx))
+            (*np).it.origin_module_id=spec_generic_table_owner(gt_idx)
             (*np).next = 0
             (*ip).clone_ptr = np as i64
             SPEC_GF_CLONE_PTR[gt_idx as usize] = np as i64
@@ -2466,7 +2476,7 @@ fn spec_finish_fn_item(it: Item, symbol: Name) -> Item with Mut, Panic, Div, All
     // in the per-module registries rather than borrowing the previous item's
     // module.
     if SPEC_ITEM_MODULE_COUNT > 0 {
-        SPEC_CURRENT_MODULE_ID = spec_item_module_lookup(it.name)
+        SPEC_CURRENT_MODULE_ID = if it.origin_module_id>=0 {it.origin_module_id} else {spec_item_module_lookup(it.name)}
         // Round 12 (review comment 4106485514): this restores the template's
         // owner module ONLY for the duration of the substitution call just
         // below -- the returned item is then renamed to `symbol` (a mangled
@@ -2642,7 +2652,8 @@ fn spec_finish_generics_after_scan(items: Option<Box<ItemList>>) -> Option<Box<I
 
 pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
     spec_reset_state()
-    SPEC_ENUM_PROGRAM_COUNT=1
+    spec_enum_modules_reset(1)
+    spec_enum_module_note(0,items)
     // Populated fresh every call, before anything below can read it (in
     // particular spec_call_expr_callee_name, transitively via spec_scan_items
     // and spec_finalize_items's rewrite pass) -- see spec_use_module_note's
@@ -2714,13 +2725,15 @@ pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>
 // instantiation, then restores it -- see spec_ensure_instance's own comment.
 pub fn specialize_generics_multi(items: Option<Box<ItemList>>, programs: &! [Program; 256], count: i64) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
     spec_reset_state()
-    SPEC_ENUM_PROGRAM_COUNT=count
+    spec_enum_modules_reset(count)
     spec_use_module_reset()
     spec_item_module_reset()
     var i: i64 = 0
     while i < count {
-        spec_use_modules_collect((*programs)[i as usize].items, i)
-        spec_item_module_collect((*programs)[i as usize].items, i)
+        let enum_program=(*programs)[i as usize]
+        spec_enum_module_note(i,enum_program.items)
+        spec_use_modules_collect(enum_program.items, i)
+        spec_item_module_collect(enum_program.items, i)
         i = i + 1
     }
     let known = spec_collect_known_names(items, SpecKnownNames { names: [empty_name(); 32], count: 0 })
@@ -4120,6 +4133,7 @@ fn spec_collect_generic_enums_draft(items: Option<Box<ItemList>>, owner: i64) wi
                                 (*p).name = it.name
                                 (*p).ed = it.enum_def
                                 (*p).visibility = it.visibility
+                                (*p).owner=it.origin_module_id
                                 (*p).owner = owner
                                 SPEC_ENUM_DRAFT_PTRS[SPEC_ENUM_DRAFT_COUNT as usize] = p as i64
                                 SPEC_ENUM_DRAFT_COUNT = SPEC_ENUM_DRAFT_COUNT + 1
@@ -4155,9 +4169,9 @@ fn spec_subst_enum_variants_draft(
         }
     }
 }
-fn spec_make_enum_item_draft(name: Name, ed: EnumDef, visibility: Visibility) -> Item with Mut, Panic, Div, Alloc {
+fn spec_make_enum_item_draft(name: Name, ed: EnumDef, visibility: Visibility, owner:i64) -> Item with Mut, Panic, Div, Alloc {
     Item {
-        kind: ItemKind::ItemEnum, span: ed.span, visibility: visibility, name: name, fn_def: None,
+        origin_module_id:owner, kind: ItemKind::ItemEnum, span: ed.span, visibility: visibility, name: name, fn_def: None,
         struct_def: None, enum_def: Some(Box::new(ed)), impl_def: None, type_alias_ty: None, policy_def: None,
         acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None,
         transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None,
@@ -4236,7 +4250,7 @@ fn spec_create_enum_instance_draft(
             (*staged).ed.variants = spec_enum_resolve_variants(spec_subst_enum_variants_draft((*ed).variants, ctx, args))
             SPEC_CURRENT_MODULE_ID = caller_owner
             SPEC_ENUM_INSTANCE_COUNT=SPEC_ENUM_INSTANCE_COUNT+1
-            spec_extra_push_item(spec_make_enum_item_draft((*instance).symbol, (*staged).ed, (*template).visibility))
+            spec_extra_push_item(spec_make_enum_item_draft((*instance).symbol, (*staged).ed, (*template).visibility,(*template).owner))
             spec_item_module_note((*template).owner, symbol)
             return symbol
         }
@@ -4284,13 +4298,13 @@ fn spec_enum_make_symbol(slot:i64,key:Name)->Name with Mut,Panic,Div,Alloc {
     if str_len(text)>384 {SPEC_UNSOUND_POISON=true;return empty_name()}
     make_name(text)
 }
-fn spec_enum_type_slot(te:TypeExpr)->i64 with Mut,Panic,Div {
-    if te.kind!=TypeExprKind::TypeNamed {return -1}
-    if te.path.seg_count!=1 {return -1}
-    let owner=if SPEC_CURRENT_MODULE_ID==-1 {0} else {SPEC_CURRENT_MODULE_ID}
-    if owner<0 {SPEC_UNSOUND_POISON=true;return -1}
-    spec_enum_draft_find(spec_path_single_name(te.path),owner)
+fn spec_enum_type_slot(te:TypeExpr)->i64 with Mut,Panic,Div,Alloc {
+    if te.kind!=TypeExprKind::TypeNamed {return 0-1}
+    let slot=spec_enum_resolve_path_slot(te.path)
+    if slot==0-2 {SPEC_UNSOUND_POISON=true}
+    slot
 }
+
 fn spec_enum_resolve_type_list(types:Option<Box<TypeExprList>>)->Option<Box<TypeExprList>> with Mut,Panic,Div,Alloc {
     match types {
         None=>None,
@@ -4303,12 +4317,17 @@ fn spec_enum_resolve_type_opt(ty:Option<Box<TypeExpr>>)->Option<Box<TypeExpr>> w
 fn spec_enum_resolve_type(ty:TypeExpr)->TypeExpr with Mut,Panic,Div,Alloc {
     let p=heap_alloc(32768) as *mut SpecTypeStage
     (*p).ty=ty
+    if ty.kind==TypeExprKind::TypeNamed && ty.path.seg_count==1 {
+        if name_eq(spec_path_single_name(ty.path),make_name("usize")) {(*p).ty.path=spec_name_to_path(make_name("i64"))}
+    }
     (*p).ty.inner=spec_enum_resolve_type_opt(ty.inner)
     (*p).ty.type_args=spec_enum_resolve_type_list(ty.type_args)
     let slot=spec_enum_type_slot((*p).ty)
     if slot>=0 {
         if !spec_enum_args_concrete((*p).ty.type_args,0) {SPEC_UNSOUND_POISON=true;return dummy_type_expr()}
-        let key=spec_type_identity_key((*p).ty)
+        var key_ty=(*p).ty
+        key_ty.path=spec_name_to_path(make_name(str_concat("@enum-decl:",spec_key_length(slot))))
+        let key=spec_type_identity_key(key_ty)
         if key.len<=0 {SPEC_UNSOUND_POISON=true;return dummy_type_expr()}
         let symbol=spec_enum_make_symbol(slot,key)
         let actual=spec_create_enum_instance_draft(slot,key,symbol,(*p).ty.type_args)
@@ -4387,8 +4406,22 @@ fn spec_enum_expr_type(e:&Expr,env:i64)->Option<Box<TypeExpr>> with Mut,Panic,Di
                     }
                 }
                 let name=if (*callee).kind==ExprKind::ExprIdent {(*callee).name} else {spec_string_list_last_name((*callee).path.segments)}
+                if (*callee).kind==ExprKind::ExprIdent {
+                    let lexical=spec_enum_env_find(env,name)
+                    if lexical!=0 {
+                        let fn_ty=(*(lexical as *mut SpecEnumTypeBinding)).ty
+                        if fn_ty.kind==TypeExprKind::TypeFn {return fn_ty.inner}
+                    }
+                }
                 match spec_enum_find_function(spec_enum_root_items(),name) {
-                    Some(fd)=>return spec_enum_resolve_type_opt((*fd).return_type),
+                    Some(fd)=>{
+                        let caller=SPEC_CURRENT_MODULE_ID
+                        SPEC_CURRENT_MODULE_ID=spec_enum_function_owner(spec_enum_root_items(),name)
+                        if SPEC_CURRENT_MODULE_ID<0 {SPEC_UNSOUND_POISON=true;return None}
+                        let out=spec_enum_resolve_type_opt((*fd).return_type)
+                        SPEC_CURRENT_MODULE_ID=caller
+                        return out
+                    },
                     None=>{}
                 }
                 let local=spec_enum_env_find(env,name)
@@ -4501,7 +4534,10 @@ fn spec_enum_rewrite_pattern(pat:Pattern,ty:Option<Box<TypeExpr>>)->Pattern with
     if pat.path.seg_count>=2 {
         let given=spec_string_list_nth_name(pat.path.segments,pat.path.seg_count-2)
         let template=SPEC_ENUM_DRAFT_PTRS[(*record).template_slot as usize] as *mut SpecEnumTemplateDraft
-        if !name_eq(given,(*record).symbol) && !name_eq(given,(*template).name) {SPEC_UNSOUND_POISON=true;return out}
+        if !name_eq(given,(*record).symbol) {
+            let declared=spec_enum_resolve_path_slot(spec_enum_path_prefix(pat.path,pat.path.seg_count-1))
+            if declared!=(*record).template_slot {SPEC_UNSOUND_POISON=true;return out}
+        }
     }
     let variant=spec_string_list_last_name(pat.path.segments)
     out.path=spec_enum_variant_path((*record).symbol,variant)
@@ -4560,10 +4596,10 @@ fn spec_enum_rewrite_expr(e:Expr,env:i64,expected:Option<Box<TypeExpr>>,ret:Opti
     if e.kind==ExprKind::ExprCall {
         match e.left {
             Some(callee)=>{
-                if (*callee).kind==ExprKind::ExprPath && (*callee).path.seg_count==2 {
-                    let base=spec_string_list_nth_name((*callee).path.segments,0)
-                    let owner=if SPEC_CURRENT_MODULE_ID<0 {0} else {SPEC_CURRENT_MODULE_ID}
-                    let slot=spec_enum_draft_find(base,owner)
+                if (*callee).kind==ExprKind::ExprPath && (*callee).path.seg_count>=2 {
+                    let template_path=spec_enum_path_prefix((*callee).path,(*callee).path.seg_count-1)
+                    let slot=spec_enum_resolve_path_slot(template_path)
+                    if slot==0-2 {SPEC_UNSOUND_POISON=true;return (*p).e}
                     if slot>=0 {
                         let instance=spec_enum_expected_instance(expected)
                         if instance==0 {SPEC_UNSOUND_POISON=true;return (*p).e}
@@ -4582,7 +4618,24 @@ fn spec_enum_rewrite_expr(e:Expr,env:i64,expected:Option<Box<TypeExpr>>,ret:Opti
                     }
                 }
                 let fn_name=if (*callee).kind==ExprKind::ExprIdent {(*callee).name} else {spec_string_list_last_name((*callee).path.segments)}
-                let params=match spec_enum_find_function(spec_enum_root_items(),fn_name) {Some(fd)=>spec_enum_param_types((*fd).params),None=>None}
+                let caller=SPEC_CURRENT_MODULE_ID
+                var lexical_fn:i64=0
+                if (*callee).kind==ExprKind::ExprIdent {lexical_fn=spec_enum_env_find(env,fn_name)}
+                var params:Option<Box<TypeExprList> > =None
+                if lexical_fn!=0 {
+                    let fn_ty=(*(lexical_fn as *mut SpecEnumTypeBinding)).ty
+                    if fn_ty.kind==TypeExprKind::TypeFn {params=fn_ty.type_args}
+                } else {
+                    params=match spec_enum_find_function(spec_enum_root_items(),fn_name) {
+                        Some(fd)=>{
+                            SPEC_CURRENT_MODULE_ID=spec_enum_function_owner(spec_enum_root_items(),fn_name)
+                            if SPEC_CURRENT_MODULE_ID<0 {SPEC_UNSOUND_POISON=true;return (*p).e}
+                            spec_enum_param_types((*fd).params)
+                        }
+                        None=>None
+                    }
+                }
+                SPEC_CURRENT_MODULE_ID=caller
                 (*p).e.left=spec_enum_rewrite_expr_opt(e.left,env,None,ret)
                 (*p).e.args=spec_enum_rewrite_args(e.args,params,env,ret)
                 return (*p).e
@@ -4590,10 +4643,10 @@ fn spec_enum_rewrite_expr(e:Expr,env:i64,expected:Option<Box<TypeExpr>>,ret:Opti
             None=>{}
         }
     }
-    if e.kind==ExprKind::ExprPath && e.path.seg_count==2 {
-        let base=spec_string_list_nth_name(e.path.segments,0)
-        let owner=if SPEC_CURRENT_MODULE_ID<0 {0} else {SPEC_CURRENT_MODULE_ID}
-        let slot=spec_enum_draft_find(base,owner)
+    if e.kind==ExprKind::ExprPath && e.path.seg_count>=2 {
+        let template_path=spec_enum_path_prefix(e.path,e.path.seg_count-1)
+        let slot=spec_enum_resolve_path_slot(template_path)
+        if slot==0-2 {SPEC_UNSOUND_POISON=true;return (*p).e}
         if slot>=0 {
             let instance=spec_enum_expected_instance(expected)
             if instance==0 {SPEC_UNSOUND_POISON=true;return (*p).e}
@@ -4679,7 +4732,7 @@ fn spec_enum_rewrite_items(items:Option<Box<ItemList>>)->Option<Box<ItemList>> w
         Some(node)=>{
             let p=heap_alloc(16384) as *mut SpecItemNode
             (*p).it=(*node).head
-            let owner=spec_item_module_lookup((*p).it.name)
+            let owner=if (*p).it.origin_module_id>=0 {(*p).it.origin_module_id} else {spec_item_module_lookup((*p).it.name)}
             SPEC_CURRENT_MODULE_ID=if SPEC_ITEM_MODULE_COUNT==0 {0} else {owner}
             if (*p).it.kind==ItemKind::ItemEnum {
                 match (*p).it.enum_def {
@@ -4692,6 +4745,17 @@ fn spec_enum_rewrite_items(items:Option<Box<ItemList>>)->Option<Box<ItemList>> w
                         (*ep).ed=*ed
                         (*ep).ed.variants=spec_enum_resolve_variants((*ed).variants)
                         (*p).it.enum_def=Some(Box::new((*ep).ed))
+                    }
+                    None=>{}
+                }
+            }
+            if (*p).it.kind==ItemKind::ItemStruct {
+                match (*p).it.struct_def {
+                    Some(sd)=>{
+                        let sp=heap_alloc(16384) as *mut SpecStructDefStage
+                        (*sp).sd=*sd
+                        (*sp).sd.fields=spec_enum_resolve_field_list((*sd).fields)
+                        (*p).it.struct_def=Some(Box::new((*sp).sd))
                     }
                     None=>{}
                 }
@@ -4718,12 +4782,15 @@ fn spec_enum_postpass(items:Option<Box<ItemList>>)->Option<Box<ItemList>> with M
     spec_enum_draft_reset()
     SPEC_ENUM_INSTANCE_COUNT=0
     // Collection is nominally scoped even when a later caller supplies modules.
-    spec_collect_generic_enums_draft(items,0)
+    var enum_owner:i64=0
+    while enum_owner<SPEC_ENUM_PROGRAM_COUNT {
+        spec_collect_generic_enums_draft(spec_enum_module_items(enum_owner),enum_owner)
+        enum_owner=enum_owner+1
+    }
     if SPEC_ENUM_DRAFT_COUNT==0 {return items}
-    // Multi-module declaration/import ownership is not yet implemented here.
-    // Fail closed rather than selecting a global Some/None by spelling.
-    if SPEC_ENUM_PROGRAM_COUNT>1 {SPEC_UNSOUND_POISON=true;return items}
-    spec_item_module_collect(items,0)
+    // Every source declaration carries its exact loaded-module owner.
+    // Imports use the BFS loader's per-use physical target map.
+    if SPEC_ENUM_PROGRAM_COUNT==1 {spec_item_module_collect(items,0)}
     SPEC_CURRENT_MODULE_ID=0
     let roots=heap_alloc(4096) as *mut SpecItemsStage
     (*roots).items=items
@@ -4753,17 +4820,19 @@ fn spec_enum_arg_concrete(ty:TypeExpr,depth:i64)->bool with Mut,Panic,Div,Alloc 
             || name_eq(n,make_name("Box"))
             || name_eq(n,make_name("i128")) || name_eq(n,make_name("u128"))
             || name_eq(n,make_name("f128")) || name_eq(n,make_name("f256"))
-        var declared=builtin
+        if builtin {return spec_enum_args_concrete(ty.type_args,depth+1)}
+        var declared=false
+        var nominal_count:i64=0
         var items=spec_enum_root_items()
         while true {
             match items {
                 Some(node)=>{
                     if name_eq((*node).head.name,n) {
                         if (*node).head.kind==ItemKind::ItemStruct {
-                            match (*node).head.struct_def {Some(sd)=>{match (*sd).type_params {None=>{declared=true},Some(_)=>{}}},None=>{}}
+                            match (*node).head.struct_def {Some(sd)=>{match (*sd).type_params {None=>{declared=true;nominal_count=nominal_count+1},Some(_)=>{}}},None=>{}}
                         }
                         if (*node).head.kind==ItemKind::ItemEnum {
-                            match (*node).head.enum_def {Some(ed)=>{match (*ed).type_params {None=>{declared=true},Some(_)=>{}}},None=>{}}
+                            match (*node).head.enum_def {Some(ed)=>{match (*ed).type_params {None=>{declared=true;nominal_count=nominal_count+1},Some(_)=>{}}},None=>{}}
                         }
                     }
                     items=(*node).tail
@@ -4771,7 +4840,7 @@ fn spec_enum_arg_concrete(ty:TypeExpr,depth:i64)->bool with Mut,Panic,Div,Alloc 
                 None=>break
             }
         }
-        if !declared {return false}
+        if !declared || nominal_count!=1 {return false}
         return spec_enum_args_concrete(ty.type_args,depth+1)
     }
     if ty.kind==TypeExprKind::TypeArray || ty.kind==TypeExprKind::TypeReference
@@ -4790,4 +4859,209 @@ fn spec_enum_args_concrete(args:Option<Box<TypeExprList>>,depth:i64)->bool with 
         match cur {Some(t)=>{if !spec_enum_arg_concrete((*t).head,depth) {return false};cur=(*t).tail},None=>break}
     }
     true
+}
+
+
+fn spec_generic_table_owner(slot:i64)->i64 with Mut,Panic,Div {
+ if slot<0 || slot>=SPEC_GF_COUNT {return 0-2}
+ (*(SPEC_GF_PTRS[slot as usize] as *mut SpecGfNode)).owner
+}
+fn spec_struct_table_owner(slot:i64)->i64 with Mut,Panic,Div {
+ if slot<0 || slot>=SPEC_ST_COUNT {return 0-2}
+ (*(SPEC_ST_PTRS[slot as usize] as *mut SpecStNode)).owner
+}
+
+
+struct SpecEnumModuleItems {items:Option<Box<ItemList>>}
+var SPEC_ENUM_MODULE_ITEMS:[i64;256]=[0;256]
+fn spec_enum_modules_reset(count:i64) with Mut,Panic {
+    SPEC_ENUM_PROGRAM_COUNT=count
+    var i:i64=0
+    while i<256 {SPEC_ENUM_MODULE_ITEMS[i as usize]=0;i=i+1}
+}
+fn spec_enum_module_note(owner:i64,items:Option<Box<ItemList>>) with Mut,Panic,Div,Alloc {
+    if owner<0 || owner>=256 {SPEC_UNSOUND_POISON=true;return}
+    let p=heap_alloc(4096) as *mut SpecEnumModuleItems
+    (*p).items=items
+    SPEC_ENUM_MODULE_ITEMS[owner as usize]=p as i64
+}
+fn spec_enum_module_items(owner:i64)->Option<Box<ItemList>> with Mut,Panic,Div {
+    if owner<0 || owner>=SPEC_ENUM_PROGRAM_COUNT || owner>=256 {return None}
+    let ptr=SPEC_ENUM_MODULE_ITEMS[owner as usize]
+    if ptr==0 {return None}
+    (*(ptr as *mut SpecEnumModuleItems)).items
+}
+fn spec_enum_slot_merge(first:i64,next:i64)->i64 with Mut {
+    if first==0-2 || next==0-2 {return 0-2}
+    if next<0 {return first}
+    if first<0 || first==next {return next}
+    0-2
+}
+fn spec_enum_import_list_has(items:Option<Box<ImportItemList>>,name:Name)->bool with Mut,Panic,Div {
+    var cursor=items
+    while true {match cursor {
+        Some(node)=>{if name_eq((*node).head,name) {return true};cursor=(*node).tail}
+        None=>return false
+    }}
+    false
+}
+fn spec_enum_use_has_name(it:Item,owner:i64,ordinal:i64,name:Name)->bool with Mut,Panic,Div {
+    if it.use_glob {return true}
+    match it.use_items {Some(_)=>return spec_enum_import_list_has(it.use_items,name),None=>{}}
+    if pfi_use_named(owner,ordinal) {return name_eq(spec_string_list_last_name(it.use_path.segments),name)}
+    false
+}
+fn spec_enum_public_slot(slot:i64)->bool with Mut,Panic,Div {
+    if slot<0 || slot>=SPEC_ENUM_DRAFT_COUNT {return false}
+    let p=SPEC_ENUM_DRAFT_PTRS[slot as usize] as *mut SpecEnumTemplateDraft
+    (*p).visibility.kind==1 || (*p).visibility.kind==2
+}
+fn spec_enum_lookup_export_seen(owner:i64,name:Name,seen:*mut [bool;256])->i64 with Mut,Panic,Div,Alloc {
+    if owner<0 || owner>=SPEC_ENUM_PROGRAM_COUNT || owner>=256 {return 0-2}
+    if (*seen)[owner as usize] {return 0-1}
+    (*seen)[owner as usize]=true
+    let local=spec_enum_draft_find(name,owner)
+    if local>=0 {if spec_enum_public_slot(local) {return local};return 0-1}
+    var out:i64=0-1
+    var explicit_out:i64=0-1
+    var ordinal:i64=0
+    var cursor=spec_enum_module_items(owner)
+    while true {match cursor {
+        Some(node)=>{
+            let it=(*node).head
+            if it.kind==ItemKind::ItemUse {
+                if it.visibility.kind==1 || it.visibility.kind==2 {
+                    if spec_enum_use_has_name(it,owner,ordinal,name) {
+                        let target=pfi_use_target(owner,ordinal)
+                        if target>=0 {
+                            let found=spec_enum_lookup_export_seen(target,name,seen)
+                            if it.use_glob {out=spec_enum_slot_merge(out,found)} else {
+                            if found<0 {explicit_out=0-2} else {explicit_out=spec_enum_slot_merge(explicit_out,found)}
+                        }
+                        }
+                    }
+                }
+                ordinal=ordinal+1
+            }
+            cursor=(*node).tail
+        }
+        None=>break
+    }}
+    if explicit_out!=0-1 {return explicit_out}
+    out
+}
+
+fn spec_enum_lookup_export(owner:i64,name:Name)->i64 with Mut,Panic,Div,Alloc {
+    let seen=heap_alloc(4096) as *mut [bool;256]
+    var i:i64=0
+    while i<256 {(*seen)[i as usize]=false;i=i+1}
+    spec_enum_lookup_export_seen(owner,name,seen)
+}
+
+fn spec_enum_lookup_local(owner:i64,name:Name)->i64 with Mut,Panic,Div,Alloc {
+    if owner<0 || owner>=SPEC_ENUM_PROGRAM_COUNT {return 0-2}
+    let local=spec_enum_draft_find(name,owner)
+    if local>=0 {return local}
+    var out:i64=0-1
+    var explicit_out:i64=0-1
+    var ordinal:i64=0
+    var cursor=spec_enum_module_items(owner)
+    while true {match cursor {
+        Some(node)=>{
+            let it=(*node).head
+            if it.kind==ItemKind::ItemUse {
+                if spec_enum_use_has_name(it,owner,ordinal,name) {
+                    let target=pfi_use_target(owner,ordinal)
+                    if target>=0 {
+                        let found=spec_enum_lookup_export(target,name)
+                        if it.use_glob {out=spec_enum_slot_merge(out,found)} else {
+                            if found<0 {explicit_out=0-2} else {explicit_out=spec_enum_slot_merge(explicit_out,found)}
+                        }
+                    }
+                }
+                ordinal=ordinal+1
+            }
+            cursor=(*node).tail
+        }
+        None=>break
+    }}
+    if explicit_out!=0-1 {return explicit_out}
+    out
+}
+fn spec_enum_path_prefix_segments(list:StringList,count:i64)->StringList with Mut,Panic,Div,Alloc {
+    if count<=1 {return StringList{head_buf:list.head_buf,head_len:list.head_len,tail:None}}
+    match list.tail {
+        Some(next)=>StringList{head_buf:list.head_buf,head_len:list.head_len,tail:Some(Box::new(spec_enum_path_prefix_segments(*next,count-1)))},
+        None=>{SPEC_UNSOUND_POISON=true;StringList{head_buf:list.head_buf,head_len:list.head_len,tail:None}},
+    }
+}
+fn spec_enum_path_prefix(path:AstPath,count:i64)->AstPath with Mut,Panic,Div,Alloc {
+    if count<=0 || count>path.seg_count {SPEC_UNSOUND_POISON=true;return empty_path()}
+    AstPath{seg_count:count,segments:spec_enum_path_prefix_segments(path.segments,count)}
+}
+fn spec_enum_use_qualifier_matches(it:Item,owner:i64,ordinal:i64,path:AstPath)->bool with Mut,Panic,Div {
+    let qualifier=ast_path_range_name(path,0,path.seg_count-2)
+    let end=if pfi_use_named(owner,ordinal) {it.use_path.seg_count-2} else {it.use_path.seg_count-1}
+    var start:i64=0
+    while start<=end {
+        if name_eq(qualifier,ast_path_range_name(it.use_path,start,end)) {return true}
+        start=start+1
+    }
+    false
+}
+fn spec_enum_resolve_path_slot(path:AstPath)->i64 with Mut,Panic,Div,Alloc {
+    let terminal=spec_string_list_last_name(path.segments)
+    var template_present=false
+    var template_index:i64=0
+    while template_index<SPEC_ENUM_DRAFT_COUNT {
+        let template=SPEC_ENUM_DRAFT_PTRS[template_index as usize] as *mut SpecEnumTemplateDraft
+        if name_eq((*template).name,terminal) {template_present=true}
+        template_index=template_index+1
+    }
+    if !template_present {return 0-1}
+    let owner=if SPEC_CURRENT_MODULE_ID==0-1 {0} else {SPEC_CURRENT_MODULE_ID}
+    if owner<0 || owner>=SPEC_ENUM_PROGRAM_COUNT {return 0-2}
+    if path.seg_count==1 {
+        let found=spec_enum_lookup_local(owner,spec_path_single_name(path))
+        if found!=0-1 {return found}
+        if name_eq(terminal,make_name("Option")) || name_eq(terminal,make_name("Result")) {return 0-1}
+        return 0-2
+    }
+    if path.seg_count<1 {return 0-1}
+    let name=spec_string_list_last_name(path.segments)
+    var out:i64=0-1
+    var ordinal:i64=0
+    var cursor=spec_enum_module_items(owner)
+    while true {match cursor {
+        Some(node)=>{
+            let it=(*node).head
+            if it.kind==ItemKind::ItemUse {
+                if spec_enum_use_qualifier_matches(it,owner,ordinal,path) {
+                    let target=pfi_use_target(owner,ordinal)
+                    if target>=0 {out=spec_enum_slot_merge(out,spec_enum_lookup_export(target,name))}
+                }
+                ordinal=ordinal+1
+            }
+            cursor=(*node).tail
+        }
+        None=>break
+    }}
+    if out==0-1 {return 0-2}
+    out
+}
+fn spec_enum_function_owner(items:Option<Box<ItemList>>,name:Name)->i64 with Mut,Panic,Div {
+    var cursor=items
+    var out:i64=0-1
+    while true {match cursor {
+        Some(node)=>{
+            let it=(*node).head
+            if it.kind==ItemKind::ItemFn && name_eq(it.name,name) {
+                if out>=0 {return 0-2}
+                out=if it.origin_module_id>=0 {it.origin_module_id} else {if SPEC_ENUM_PROGRAM_COUNT==1 {0} else {0-2}}
+            }
+            cursor=(*node).tail
+        }
+        None=>break
+    }}
+    out
 }
