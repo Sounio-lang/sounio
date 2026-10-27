@@ -39,6 +39,8 @@ for ref in file csv_numeric socket_ready vcf_header; do
  record "$ref-reference" "tests/reference/stdlib_${ref}_reference.cpp" timeout 120 "$out/$ref-reference" || true
  if [[ -f "$out/$ref-reference" ]];then sha256sum "$out/$ref-reference" >> "$out/EXECUTABLES.sha256";else fail=1;fi
 done
+record complex-reference-build tests/reference/stdlib_complex_canonical_reference.cpp g++ -std=c++23 -O2 -Wall -Wextra -Werror tests/reference/stdlib_complex_canonical_reference.cpp -o "$out/complex-reference" || true
+if [[ -f "$out/complex-reference" ]];then sha256sum "$out/complex-reference" >> "$out/EXECUTABLES.sha256";else fail=1;fi
 record workflow-reference-build tests/reference/stdlib_science_workflow_reference.cpp g++ -std=c++23 -O2 -Wall -Wextra -Werror tests/reference/stdlib_science_workflow_reference.cpp -o "$out/workflow-reference" || true
 if [[ -f "$out/workflow-reference" ]];then sha256sum "$out/workflow-reference" >> "$out/EXECUTABLES.sha256";else fail=1;fi
 record oracle-build tests/reference/stdlib_hyper_metrics.cpp g++ -std=c++23 -O2 -Wall -Wextra -Werror tests/reference/stdlib_hyper_metrics.cpp -o "$out/hyper-oracle" || true
@@ -50,7 +52,7 @@ record vcf-reference tests/reference/stdlib_vcf_reference.cpp timeout 30 "$out/v
 if [[ -f "$out/vcf-reference" ]]; then sha256sum "$out/vcf-reference" >> "$out/EXECUTABLES.sha256";fi
 export STDLIB_HYPER_ORACLE="$out/hyper-oracle"
 record operational-controls scripts/stdlib node --test scripts/stdlib/test_hyper_gate.mjs scripts/stdlib/test_run_full_suite.mjs scripts/stdlib/test_reliability_status.mjs scripts/stdlib/test_stdlib_e2e_diagnostics.mjs scripts/stdlib/test_emit_stdlib_e2e_result.mjs tools/science_boundary/core_test.mjs tools/science_boundary/closure_test.mjs tools/science_boundary/attestor_test.mjs tools/science_boundary/policy_claims_test.mjs || true
-for src in tests/stdlib/massive/test_{vcf_header,bytes,dynamic_collections,dynamic_heap_set,binary,platform,channel,native_file,native_csv,time,vcf,json_dom,dynamic_fasta,dynamic_gff,csv_checked_numeric,poll_executor,poll_socket,png_checked}.sio tests/stdlib/sync/test_{atomic,mutex}_e2e.sio examples/atomic_demo.sio tests/stdlib/math/test_core_e2e.sio tests/stdlib/regex/test_regex.sio tests/stdlib/profile/test_profiler_e2e.sio; do
+for src in tests/stdlib/massive/test_{complex_canonical,vcf_header,bytes,dynamic_collections,dynamic_heap_set,binary,platform,channel,native_file,native_csv,time,vcf,json_dom,dynamic_fasta,dynamic_gff,csv_checked_numeric,poll_executor,poll_socket,png_checked}.sio tests/stdlib/sync/test_{atomic,mutex}_e2e.sio examples/atomic_demo.sio tests/stdlib/math/test_core_e2e.sio tests/stdlib/complex/test_complex.sio tests/stdlib/complex/test_complex_deep_stdlib.sio tests/stdlib/regex/test_regex.sio tests/stdlib/profile/test_profiler_e2e.sio; do
  name=$(basename "$src" .sio)
  record "$name-check" "$src" timeout 180 bin/souc check "$src" || continue
  record "$name-compile" "$src" timeout 180 bin/souc compile "$src" -o "$out/$name.elf" || continue
@@ -58,6 +60,8 @@ for src in tests/stdlib/massive/test_{vcf_header,bytes,dynamic_collections,dynam
  record "$name-native" "$src" timeout 120 "$out/$name.elf" || continue
 done
 
+
+record complex-concordance tests/reference/stdlib_complex_canonical_reference.cpp timeout 60 "$out/complex-reference" "$out/test_complex_canonical-native.stdout" || true
 
 for kind in workflow report_check;do
  src="examples/stdlib_science_$kind.sio"
