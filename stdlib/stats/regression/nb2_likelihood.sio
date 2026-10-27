@@ -25,6 +25,8 @@ pub struct Nb2LikelihoodSlot {
  result:Nb2Likelihood, normalizer:Nb2Normalizer, poisson:Nb2Normalizer,
  unit:Nb2DevianceSlot, correction_estimates:[f64;3], correction_available:[bool;3],
  number_status:i64, number_value:f64, log_work:CheckedLog,
+ // One exact successful result only; scratch is never observed by public getters.
+ cache_valid:bool,cache_count:i64,cache_mean_bits:i64,cache_alpha_bits:i64,
 }
 pub fn nb2_likelihood_slot()->Nb2LikelihoodSlot {
  Nb2LikelihoodSlot{
@@ -35,7 +37,8 @@ pub fn nb2_likelihood_slot()->Nb2LikelihoodSlot {
  normalizer:Nb2Normalizer{status:5,count:0,value:0.0,poisson_limit:false,stirling_used:false,remainder_estimate:0.0,remainder_estimate_available:false},
  poisson:Nb2Normalizer{status:5,count:0,value:0.0,poisson_limit:false,stirling_used:false,remainder_estimate:0.0,remainder_estimate_available:false},
  unit:nb2_deviance_slot(),correction_estimates:[0.0;3],correction_available:[false;3],
- number_status:5,number_value:0.0,log_work:CheckedLog{status:2,value:0.0}}
+ number_status:5,number_value:0.0,log_work:CheckedLog{status:2,value:0.0},
+ cache_valid:false,cache_count:0,cache_mean_bits:0,cache_alpha_bits:0}
 }
 fn nl_normalizer_reset(count:i64,s:&!Nb2LikelihoodSlot) with Mut {
  s.normalizer.status=5;s.normalizer.count=count;s.normalizer.value=0.0
@@ -48,6 +51,7 @@ fn nl_poisson_reset(count:i64,s:&!Nb2LikelihoodSlot) with Mut {
  s.poisson.remainder_estimate=0.0;s.poisson.remainder_estimate_available=false
 }
 pub fn nb2_likelihood_slot_reset(s:&!Nb2LikelihoodSlot) with Mut,Panic {
+ s.cache_valid=false
  s.number_status=5;s.number_value=0.0;s.log_work.status=2;s.log_work.value=0.0
  s.result.status=5;s.result.count=0;s.result.log_probability=0.0
  s.result.normalizer_status=2;s.result.saturated_log_probability=0.0
@@ -284,7 +288,7 @@ fn nl_saturated_into(count:i64,alpha:f64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Di
 // 4 count>2^53;5 arithmetic. Normalizer/residual/deviance availability separate.
 // A positive nonzero alpha whose reciprocal overflows is conservatively unavailable
 // for positive-count normalizers; it is never silently replaced by alpha0.
-pub fn nb2_log_probability_into(count:i64,mean:f64,alpha:f64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Div,Panic {
+fn nl_log_probability_uncached_into(count:i64,mean:f64,alpha:f64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Div,Panic {
  nb2_likelihood_slot_reset(s)
  s.result.count=count
  if count<0 {return nl_likelihood_fail(1,count,s)}
@@ -324,6 +328,25 @@ pub fn nb2_log_probability_into(count:i64,mean:f64,alpha:f64,s:&!Nb2LikelihoodSl
  s.result.status=0
  s.result.log_probability=if value==0.0 {0.0}else{value}
  s.result.status
+}
+
+// Exact bit keys distinguish signed zero and adjacent values. A miss runs the
+// original engine (including its reset/domain/availability order); failures
+// leave the cache invalid. No numerical result or staged flag is reconstructed.
+pub fn nb2_log_probability_into(count:i64,mean:f64,alpha:f64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Div,Panic {
+ let mean_bits:i64=f64_to_bits(mean)
+ let alpha_bits:i64=f64_to_bits(alpha)
+ if s.cache_valid {
+  if s.cache_count==count && s.cache_mean_bits==mean_bits && s.cache_alpha_bits==alpha_bits {
+   return s.result.status
+  }
+ }
+ let status:i64=nl_log_probability_uncached_into(count,mean,alpha,s)
+ if status==0 && s.result.status==0 {
+  s.cache_count=count;s.cache_mean_bits=mean_bits;s.cache_alpha_bits=alpha_bits
+  s.cache_valid=true
+ }
+ status
 }
 
 pub fn nb2_likelihood_snapshot(s:&Nb2LikelihoodSlot)->Nb2Likelihood {
