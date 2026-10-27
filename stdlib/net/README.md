@@ -1,28 +1,57 @@
 # stdlib/net
 
-Network address types + TCP/UDP config (pure data structures) + FFI stubs.
+The checked native API implements Linux IPv4 TCP and UDP through an explicit
+`ffi::platform::Platform` context. Its `NativeSocket`, `PollSet` and
+`native_*` functions are available from the net root and their direct
+`net::native` / `net::poll_set` modules.
 
-## Key Types
-- `IPv4Addr`: 4-octet IPv4 address (loopback/private/any predicates, `to_u32`)
-- `SocketAddr`: `IPv4Addr` + port
-- `TcpConfig`: TCP connection configuration (port, backlog, nodelay, keepalive, timeout)
-- `UdpConfig`: UDP socket configuration (port, broadcast, max packet size)
+`TcpConfig`, `UdpConfig` and address values remain pure configuration types.
+The historical `net::ffi` wrappers keep their previous behavior:
+`raw_socket_available()` is false, `tcp_connect` returns failure and
+`udp_send` returns false. They are distinct APIs; no legacy stub is renamed
+or advertised as a native socket.
 
-## Key Functions
-- `ipv4_new(a, b, c, d)` / `ipv4_loopback()` / `ipv4_any()`: construct `IPv4Addr`
-- `socket_addr_new(ip, port)`: construct `SocketAddr`
-- `tcp_config_default()` / `udp_config_default()`: default configs
+## Native ownership and deadlines
 
-## FFI (`net::ffi::*`)
+Create a platform context and check its status. Close every native socket
+and readiness set before closing the platform. Resource IDs are stable
+logical handles and are never recycled into another resource. Socket tokens
+are non-owning; their owners must remain alive for useful I/O.
 
-No real OS socket syscalls are wired up yet. `tcp_connect`/`udp_send` are stubs
-that always report failure, mirroring `stdlib/distributed/ffi/wrapper.sio`.
-`raw_socket_available()` reports `false`.
+TCP includes listen/connect/accept, nonblocking connect-start/finish,
+readiness polling, checked buffer transfers and shutdown. IPv4 values use
+the host-order integer representation (127.0.0.1 is 2130706433); port 0 requests
+an ephemeral bound port. There is no DNS, TLS or IPv6 claim.
 
-## Tests
+`native_socket_send_all_until` and `native_socket_read_exact_until` use an
+absolute monotonic nanosecond deadline. Retries retain that deadline and
+return completed byte counts on errors. Read-exact appends to the caller's
+owned byte buffer; early EOF is 61 and timeout 110. Zero deadline polls
+immediately. The older relative-timeout single-transfer functions retain
+their names and behavior.
 
-`tests/stdlib/net/test_net_core.sio` (check-only, Madaros gate).
+## Readiness and datagrams
 
-`tests/stdlib/net/test_addr_e2e.sio` is a pre-existing `run-pass` test that
-hits a native multi-module IR-lowering wall (SIGSEGV) unrelated to this
-module's logic — a known, out-of-scope compiler gap, not fixed here.
+PollSet registers socket interests 1/2 (read/write) with a caller tag.
+Its payload budget is 24 bytes/entry; bounded native container/snapshot
+overhead is separate. Wait polls all registrations against one absolute
+deadline. No events returns count 0/status 0. Flags are readable 1, writable 2,
+error 4, hangup 8 and closed/invalid16. A close during a blocked wait may be
+observed only after an event or deadline. Serialize registration, wait and
+event-field reads.
+
+UDP destinations are explicit IPv4/port values. The sender getter reads one
+atomic latest endpoint. `native_udp_receive_from` takes an exclusive typed
+socket borrow across receive and sender retrieval. Preserve that exclusive
+owner/serialization discipline; a separate receive/getter pair cannot
+associate metadata with a packet under concurrent receivers.
+
+Zero-length UDP payloads remain datagrams. Truncation consumes the datagram
+and reports 90 with sender metadata, while the incomplete prefix is not
+appended to the public buffer. Native status values are POSIX errno values.
+The qualified runtime must provide platform ABI operations through 112.
+
+The root-import native example is
+[the service smoke fixture](../../tests/stdlib/massive/test_service_root_exports.sio).
+Focused receipts and limits are recorded in
+[service evidence](../../docs/evidence/stdlib-wave3-services/README.md).

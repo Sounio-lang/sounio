@@ -1,0 +1,106 @@
+//@ run-pass
+//@ expect-stdout: SERVICE_ROOT_EXPORTS_OK
+use ffi::platform::{Platform,platform_open,platform_status,platform_call,platform_close}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_len,byte_buffer_close}
+use net::{native_udp_bind,native_socket_status,native_socket_port,native_socket_token,native_socket_close,native_udp_set_destination,native_udp_send,native_udp_receive_from,raw_socket_available,poll_set_new,poll_set_status,poll_set_register,poll_set_wait,poll_set_event,poll_set_close}
+use async::{PollStep,poll_executor_new,poll_executor_spawn,poll_executor_tick,poll_executor_reap,poll_executor_close}
+use io::{native_file_open,native_file_status,native_file_write_all,native_file_read,native_file_close,buffered_reader_new}
+use data::{df_new,df_add_row,df_get,csv_stream_new,csv_stream_next,csv_stream_close,csv_owned_row_new,csv_owned_row_close,csv_row_fields,csv_row_field_byte}
+use json::{json_writer_new,json_writer_begin_array,json_writer_i64,json_writer_end_array,json_writer_finish,json_writer_close,json_dom_parse,json_dom_status,json_dom_i64,json_dom_close}
+use genomics::io::{dynamic_gff_parse,dynamic_gff_close,gff_validate_graph,dynamic_fasta_parse,dynamic_fasta_close,vcf_record_validate_reference,vcf_validate_document}
+fn bytes(text:string)->ByteBuffer with Alloc,Mut,Div,Panic {
+ var b=byte_buffer_new(4096)
+ var i:i64=0
+ while i<str_len(text) {assert(byte_buffer_push(&!b,(str_char_at(text,i) as i64) & 255)==0);i=i+1}
+ return b
+}
+fn ready(value:i64)->PollStep with IO,Alloc,Mut,Div,Panic {PollStep {state:value,outcome:1,value:value+1,wake_at_ns:0}}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ assert(!raw_socket_available())
+ var fixed = df_new(2)
+ var values:[f64;64] = [0.0;64]
+ values[0]=7.0;values[1]=11.0
+ df_add_row(&!fixed,&values)
+ assert(df_get(&fixed,0,0)==7.0 && df_get(&fixed,0,1)==11.0)
+ assert(df_get(&fixed,1,0)==0.0)
+
+ var receiver=native_udp_bind(&p,2130706433,0)
+ let sender=native_udp_bind(&p,2130706434,0)
+ assert(native_socket_status(&receiver)==0 && native_socket_status(&sender)==0)
+ let token=native_socket_token(&receiver)
+ let set=poll_set_new(&p,1,24)
+ assert(poll_set_status(&set)==0)
+ assert(poll_set_register(&p,&set,&token,1,77)==0)
+ assert(native_udp_set_destination(&p,&sender,2130706433,native_socket_port(&p,&receiver).value)==0)
+ let payload=bytes("x")
+ assert(native_udp_send(&p,&sender,&payload,0,1).value==1)
+ let deadline=platform_call(&p,30,0,0,0,0).value+1000000000
+ assert(poll_set_wait(&p,&set,deadline).value==1 && poll_set_event(&p,&set,0).tag==77)
+ var incoming=byte_buffer_new(16)
+ let packet=native_udp_receive_from(&p,&!receiver,&!incoming,16,1000)
+ assert(packet.status==0 && packet.bytes==1 && packet.ipv4==2130706434)
+ assert(poll_set_close(&p,set)==0)
+ assert(native_socket_close(&p,receiver)==0)
+ assert(native_socket_close(&p,sender)==0)
+ byte_buffer_close(payload);byte_buffer_close(incoming)
+ var executor=poll_executor_new(48)
+ let first=poll_executor_spawn(&!executor,ready,10)
+ assert(first.status==0 && first.value==0)
+ assert(poll_executor_tick(&!executor,&p,1).value==1)
+ let result=poll_executor_reap(&!executor,first.value)
+ assert(result.status==1 && result.value==11)
+ let second=poll_executor_spawn(&!executor,ready,20)
+ assert(second.status==0 && second.value==1)
+ poll_executor_close(executor)
+ let csv_path=bytes("/tmp/sounio_service_root.csv")
+ let csv_content=bytes("a,b\n1,2\n")
+ let csv_out=native_file_open(&p,&csv_path,1)
+ assert(native_file_status(&csv_out)==0)
+ assert(native_file_write_all(&p,&csv_out,&csv_content,0,byte_buffer_len(&csv_content)).status==0)
+ assert(native_file_close(&p,csv_out)==0)
+ byte_buffer_close(csv_content)
+ let csv_file=native_file_open(&p,&csv_path,0)
+ byte_buffer_close(csv_path)
+ var stream=csv_stream_new(buffered_reader_new(csv_file,1,1),0)
+ var row=csv_owned_row_new(128,4)
+ assert(csv_stream_next(&p,&!stream,&!row)==0 && csv_row_fields(&row)==2)
+ assert(csv_stream_next(&p,&!stream,&!row)==0 && csv_row_field_byte(&row,1,0).value==50)
+ assert(csv_stream_next(&p,&!stream,&!row)==1)
+ assert(csv_stream_close(&p,stream)==0)
+ csv_owned_row_close(row)
+ let json_path=bytes("/tmp/sounio_service_root.json")
+ let json_file=native_file_open(&p,&json_path,1)
+ var writer=json_writer_new(json_file,1,2)
+ assert(json_writer_begin_array(&p,&!writer)==0)
+ assert(json_writer_i64(&p,&!writer,7)==0)
+ assert(json_writer_end_array(&p,&!writer)==0)
+ assert(json_writer_finish(&p,&!writer)==0)
+ assert(json_writer_close(&p,writer)==0)
+ let json_in=native_file_open(&p,&json_path,0)
+ byte_buffer_close(json_path)
+ var json_bytes=byte_buffer_new(128)
+ assert(native_file_read(&p,&json_in,&!json_bytes,128).status==0)
+ assert(native_file_close(&p,json_in)==0)
+ let dom=json_dom_parse(&json_bytes,1024,4)
+ assert(json_dom_status(&dom)==0 && json_dom_i64(&dom,1).value==7)
+ json_dom_close(dom);byte_buffer_close(json_bytes)
+ let annotation=bytes("##gff-version 3\nchr1\tx\tgene\t1\t3\t.\t+\t.\tID=g\n")
+ let gff=dynamic_gff_parse(&annotation,4096)
+ let graph=gff_validate_graph(&gff,1024,4096,4096,10000)
+ assert(graph.status==0 && graph.nodes==1)
+ dynamic_gff_close(gff);byte_buffer_close(annotation)
+ let reference=bytes(">chr1\nACG\n")
+ let fasta=dynamic_fasta_parse(&reference,4096)
+ let record=bytes("chr1\t2\t.\tC\tT\t.\tPASS\t.\n")
+ assert(vcf_record_validate_reference(&record,&fasta,1024).status==0)
+ byte_buffer_close(record);dynamic_fasta_close(fasta);byte_buffer_close(reference)
+ let document=bytes("##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t2\tv1\tC\tT\t.\tPASS\t.\n")
+ let checked=vcf_validate_document(&document,4096,1024,4096,2,10000)
+ assert(checked.status==0 && checked.records==1)
+ byte_buffer_close(document)
+ platform_close(p)
+ println("SERVICE_ROOT_EXPORTS_OK")
+ 0
+}

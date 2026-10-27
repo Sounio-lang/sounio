@@ -27,3 +27,26 @@ Tabular data structures.
   - **Requires the `read_file` fix (PR #1078)** for file input; the string-parser path works on any build.
 
   Gate: `scripts/data_io_csv_reader_gate.sh` (dev-tier until #1078 merges) → `DATA_IO_CSV_READER_GATE_OK`.
+## Canonical root and owned streaming CSV
+
+The canonical `use data` / `data::mod` DataFrame and `df_*` names refer
+to the fixed-capacity `data::dataframe` API. The heterogeneous DataFrame
+and `dataframe_*` functions remain at `data::frame` and the explicit
+`data::lib` compatibility facade. Their direct APIs are preserved. The
+compiler currently requires a single DataFrame nominal definition per
+compilation: choose one profile. For heterogeneous work, import
+`data::frame` and `data::csv_stream` directly rather than co-importing
+the canonical data root. This removes the formerly ambiguous root reexport
+without renaming either implementation.
+
+CsvStream, CsvOwnedRow and their checked functions are shared by both
+facades. A stream owns a BufferedReader; each reusable row owns decoded
+field bytes and ranges under explicit row-byte/field budgets. The first
+record is returned and expected width0 learns that record's width; later
+records must match. UTF-8 validates per field, only an initial BOM is
+stripped, and no normalization occurs. EOF is 1; syntax, width or budget
+errors are terminal and hide the incomplete row. Close stream and row
+owners explicitly.
+
+See [the root-import native smoke](../../tests/stdlib/massive/test_service_root_exports.sio)
+and [service evidence](../../docs/evidence/stdlib-wave3-services/README.md).

@@ -325,3 +325,43 @@ Marker: `BYTE_BUFFER_BUDGET_OK`.
 Receipt: `/scratch/sounio-stdlib-wave3-20261027/services/byte-buffer-budget-01/results`.
 Raw compiler SHA-256: `9919d03afb60e418dc111797895860e27e93a22ca52a9cc51cd0e0edac1571b2`.
 Source, compiler/runtime, and executable manifests pass final rechecks.
+
+## Public service entry points and recorded prerequisites
+
+Slurm **18210** completed with status 0 for the service-root fixture through
+the explicit `io::lib` entry point. All other root imports and all assertions
+are unchanged. The derivation changes one import path only, checks reverse
+substitution for byte equality, and records both hashes in
+`IMPORT_VARIANT.json`. Check, native compilation and execution pass on raw
+9919d03a with platform ABI112; the executable prints
+`SERVICE_ROOT_EXPORTS_OK`. It exercises actual readiness/UDP sender data,
+executor reap and monotonic IDs, owned file/CSV/JSON operations, and separate
+GFF graph/VCF document/FASTA REF validation. It also asserts that the legacy
+socket stub remains unavailable.
+
+Receipt: `/scratch/sounio-stdlib-wave3-20261027/services/root-exports-io-lib-01/results`.
+Source/compiler/runtime/executable manifests have final successful rechecks.
+
+Canonical `io` root acceptance is still open. Slurm **18204** preserves four
+type errors where legacy `io::binary::read_i64` shadows the pointer-reading
+builtin used by IntegerBuffer. No legacy decoder or owner implementation was
+removed to conceal that compiler namespace defect. Slurm18197 preserves the
+earlier duplicate-DataFrame facade refusal. The approved canonical data root
+now exports the existing fixed DataFrame/df_*; heterogeneous DataFrame and
+dataframe_* remain explicit at data::frame and the data::lib compatibility
+facade. Their differing nominal layouts must not be co-loaded.
+
+Slurm **18230** records successful checks for the nonempty Series and
+argument-parser controls, followed by native compilation refusals (rc12)
+from readonly-array concatenation on raw9919. No native execution took place.
+This is a prerequisite replay, not a passing native gate. Frame/CSV-loader
+nonempty qualification likewise remains open in18189; compiler support must
+land before claiming these persistent-array source ports fully qualified.
+
+The final facade-commit fixture additionally verifies the canonical fixed
+DataFrame through df_new/df_add_row/df_get with two distinct nonzero cells
+and an out-of-range zero result. Slurm **18232** repeats the explicit
+io::lib variant with this added control: all check/compile/native phases
+pass, marker SERVICE_ROOT_EXPORTS_OK, final manifests verified.
+Receipt: `/scratch/sounio-stdlib-wave3-20261027/services/root-exports-io-lib-02/results`.
+The canonical io namespace refusal remains open;18232 does not close18204.

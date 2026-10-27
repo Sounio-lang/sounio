@@ -105,3 +105,15 @@ Structural alleles, telomere coordinates outside the current lexical core,
 breakend resolution, variant normalization, circular-reference rules and
 ontology membership require separate APIs/data. Success here asserts only
 the declared document and concrete REF checks.
+
+## Public entrypoint
+
+The owned dynamic FASTA/GFF readers, VCF header context and separate
+graph/document/reference reports and validators are explicitly exported
+from `genomics::io`. Direct implementation modules retain their paths.
+Historical `fasta` and `count_tsv` module exports are preserved; the old
+module-ready marker is not a claim that every semantic profile is available.
+
+[The service root smoke](../../../tests/stdlib/massive/test_service_root_exports.sio)
+checks a named GFF graph and concrete FASTA/VCF reference window through
+the public entrypoint.

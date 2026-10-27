@@ -1,0 +1,3 @@
+Expose the native networking, PollSet, polling executor, owned file/CSV/JSON, and genomic semantic-validation APIs through explicit public entry points. Preserve unavailable legacy networking stubs and distinguish the fixed canonical data::DataFrame from heterogeneous data::frame::DataFrame.
+
+Port the existing heterogeneous Frame, Series, CSV loader, and argument-parser source APIs to canonical string and persistent readonly-array operations. Nonempty native qualification depends on compiler array concatenation; canonical io root qualification also requires builtin read_i64 namespace protection. The explicit io::lib service smoke passes with recorded source/compiler/runtime custody.
