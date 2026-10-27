@@ -79,3 +79,13 @@ That failure is not substituted by the passing unqualified facade-export
 control. It remains a compiler integration requirement. The earlier18748
 syntax diagnostic is separately retained; brace import aliases are not used
 as a claimed Sounio API.
+
+Slurm18763 completed0 and archived the subsequent facade/storage-carrier
+qualifications, the e9 Unicode smoke, and the original failed qualified-type
+and owner-view diagnostics at
+`/orangefs/training/sounio-foundry/runs/stdlib-wave3-20261027/core/closed-export08/core-closed-export08.tar.gz`.
+Archive SHA256:
+6978f25a182689085a13b1c0654a1c4590a2a4f334d74cbf482c5b0ff54cbe85.
+The7 closed directories retain all source snapshots and original failures;
+the export's source-file and archive guards passed. References to the earlier
+shared source archive resolve through closed-export07, whose identity is above.
