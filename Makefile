@@ -14,7 +14,6 @@
          test-knowledge-context-static \
          test-semantic-knowledge-spine \
          test-madaros-identity test-real-language-runner test-project-spine \
-         ops-guardrail-local ops-infra-up ops-strict-up ops-status \
          website-verified-snapshot
 
 SOUC := ./bin/souc
@@ -241,19 +240,3 @@ install:             ## Install souc compiler to ~/.local/bin/souc
 	mkdir -p ~/.local/bin
 	install -m755 bin/souc ~/.local/bin/souc
 	@echo "✓ Installed souc to ~/.local/bin/souc"
-
-##@ Operations Targets (long-running infrastructure)
-
-ops-guardrail-local:
-	@echo "→ Running local ops guardrail (strict lane)"
-	@PLAN_BIG_OPS_SUITE_RUNNER_GATE_SCRIPT=scripts/plan_big_gate.sh \
-		bash scripts/overnight_plan_big_ops_suite.sh --with-gate --burnin-duration-sec 120 --burnin-check-interval-sec 20
-
-ops-infra-up:
-	@bash scripts/tmux_big_ops_infra.sh up --reset
-
-ops-strict-up:
-	@bash scripts/tmux_big_ops_strict.sh up --reset
-
-ops-status:
-	@bash scripts/tmux_big_ops_default.sh status

@@ -16,14 +16,11 @@ Tests that should fail to compile. These verify that the compiler correctly reje
 ## Running Tests
 
 ```bash
-# Run the Rust compiler test suite (includes the language suite)
-cargo test -p souc
+# Run the .sio language suite
+bash scripts/run_sio_test_suite.sh
 
-# Run only the `.sio` language fixtures under `tests/`
-cargo test -p souc --test language_suite
-
-# Fast preflight (drift scan + key tests)
-./scripts/fast_gate.sh
+# Fast preflight
+bash scripts/dev/fast_gate.sh
 ```
 
 ## Writing Tests

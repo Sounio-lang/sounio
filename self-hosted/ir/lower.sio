@@ -3198,6 +3198,14 @@ fn sab_correlate_rho() -> bool with IO, Mut, Panic, Div {
     SAB_CORRELATE_RHO_ON == 1
 }
 
+// Value of an ASCII hex digit, or -1.
+fn ir_hex_digit_value(c: i8) -> i64 {
+    if c >= 48 as i8 && c <= 57 as i8 { return (c as i64) - 48 }
+    if c >= 97 as i8 && c <= 102 as i8 { return (c as i64) - 87 }
+    if c >= 65 as i8 && c <= 70 as i8 { return (c as i64) - 55 }
+    0 - 1
+}
+
 fn ir_normalize_string_literal_name(n: Name) -> Name {
     var out = ir_empty_name()
     var start: i64 = 0
@@ -3224,7 +3232,19 @@ fn ir_normalize_string_literal_name(n: Name) -> Name {
                 out.buf[out.len as usize] = 34 as i8
             } else if nxt == 92 as i8 {
                 out.buf[out.len as usize] = 92 as i8
+            } else if nxt == 48 as i8 {
+                // \0 is NUL. It was copied as the digit '0' (measured
+                // 2026-10-22: "a\0b" printed "a0b"); lean_single decodes NUL.
+                out.buf[out.len as usize] = 0 as i8
+            } else if nxt == 120 as i8 && i + 3 < end && ir_hex_digit_value(n.buf[(i + 2) as usize]) >= 0 && ir_hex_digit_value(n.buf[(i + 3) as usize]) >= 0 {
+                // \xHH is one byte. It was copied as the text "xHH", so every
+                // ANSI sequence in stdlib/plot ("\x1b[0m") printed as text.
+                let hv = ir_hex_digit_value(n.buf[(i + 2) as usize]) * 16 + ir_hex_digit_value(n.buf[(i + 3) as usize])
+                out.buf[out.len as usize] = hv as i8
+                i = i + 2
             } else {
+                // Unreachable from file input: the lexer refuses every other
+                // escape (E274). Kept for in-memory sources that bypass it.
                 out.buf[out.len as usize] = nxt
             }
             out.len = out.len + 1
@@ -19679,7 +19699,11 @@ impl Lowerer {
                     lo.had_error = fo_err_snap.had_error
                     fo_inline_error_restore_globals(fo_err_snap)
                     (*lo.current_func).instr_count = fo_err_snap.instrs
-                    (*lo.current_func).reg_count = fo_err_snap.regs
+                    // Virtual registers are NOT handed back: float_reg_bits and other
+                    // per-vreg facts the discarded paste recorded would then describe
+                    // the next value given the same number (a float mark on an integer
+                    // vreg; demos/hydrogen/valley_chain_epistemic.sio segfaulted). An
+                    // unused vreg costs nothing.
                     return (lo, 0 - 1)
                 }
             }
@@ -19749,7 +19773,11 @@ impl Lowerer {
             lo.had_error = fo_err_snap.had_error
             fo_inline_error_restore_globals(fo_err_snap)
             (*lo.current_func).instr_count = fo_err_snap.instrs
-            (*lo.current_func).reg_count = fo_err_snap.regs
+            // Virtual registers are NOT handed back: float_reg_bits and other
+            // per-vreg facts the discarded paste recorded would then describe
+            // the next value given the same number (a float mark on an integer
+            // vreg; demos/hydrogen/valley_chain_epistemic.sio segfaulted). An
+            // unused vreg costs nothing.
             return (lo.fo_clear_expr_sens().so_clear_expr_hess(), 0 - 1)
         }
         lo = lo.fo_restore_expr_sens(out_sens)
@@ -21780,7 +21808,11 @@ impl Lowerer {
             lo.had_error = fo_err_snap.had_error
             fo_inline_error_restore_globals(fo_err_snap)
             (*lo.current_func).instr_count = fo_err_snap.instrs
-            (*lo.current_func).reg_count = fo_err_snap.regs
+            // Virtual registers are NOT handed back: float_reg_bits and other
+            // per-vreg facts the discarded paste recorded would then describe
+            // the next value given the same number (a float mark on an integer
+            // vreg; demos/hydrogen/valley_chain_epistemic.sio segfaulted). An
+            // unused vreg costs nothing.
             return (lo.fo_clear_expr_sens().so_clear_expr_hess(), 0 - 1)
         }
         lo = lo.fo_restore_expr_sens(out_sens)
@@ -24927,6 +24959,21 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprIf {
             return self.opt_block_tail_is_float_ref(&(*e).block) || self.opt_expr_result_is_float_ref(&(*e).else_expr)
         }
+        if (*e).kind == ExprKind::ExprMatch {
+            var current = &(*e).arms
+            while true {
+                match *current {
+                    Some(list) => {
+                        if self.expr_result_is_float_ref(&(*list).head.body) {
+                            return true
+                        }
+                        current = &(*list).tail
+                    }
+                    None => break,
+                }
+            }
+            return false
+        }
         if (*e).kind == ExprKind::ExprBlock {
             return self.opt_block_tail_is_float_ref(&(*e).block)
         }
@@ -24943,6 +24990,9 @@ impl Lowerer {
     }
 
     fn block_tail_is_float_ref(self, blk: &Block) -> bool with Mut, Panic, Div, Alloc {
+        var lo = self
+        let saved_local_count = (*lo.locals).count
+        lo.scope_depth = lo.scope_depth + 1
         var current = &(*blk).stmts
         var result = false
         while true {
@@ -24950,15 +25000,72 @@ impl Lowerer {
                 Some(list) => {
                     let stmt_ref = &(*list).head
                     if stmt_ref.kind == StmtKind::StmtExpr {
-                        result = self.opt_expr_result_is_float_ref(&stmt_ref.expr)
+                        result = lo.opt_expr_result_is_float_ref(&stmt_ref.expr)
                     } else {
                         result = false
+                        if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
+                            let local_is_float = match stmt_ref.ty {
+                                Some(_) => lower_opt_type_is_f64(&stmt_ref.ty),
+                                None => lo.opt_expr_result_is_float_ref(&stmt_ref.expr),
+                            }
+                            if (*lo.locals).count >= 4096 {
+                                (*lo.locals).count = saved_local_count
+                                lowerer_mark_hard_error(&!lo)
+                                return false
+                            }
+                            // Capture before binding: `let t = t` / `let p = p`
+                            // must read the outer slot, not the fresh empty one.
+                            var tuple_mask = lower_opt_type_tuple_float_mask(&stmt_ref.ty)
+                            if tuple_mask == 0 {
+                                match stmt_ref.expr {
+                                    Some(rhs) => { tuple_mask = lo.expr_result_tuple_float_mask_ref(&(*rhs)) }
+                                    None => {}
+                                }
+                            }
+                            var ref_pointee = ir_empty_name()
+                            match stmt_ref.ty {
+                                Some(ty) => {
+                                    if lower_type_expr_is_ref_like(&(*ty)) {
+                                        ref_pointee = lower_param_struct_type_name(&(*ty))
+                                    }
+                                }
+                                None => {
+                                    match stmt_ref.expr {
+                                        Some(rhs) => {
+                                            if (*rhs).kind == ExprKind::ExprIdent && lo.lookup_local_is_ref((*rhs).name) {
+                                                ref_pointee = lo.lookup_local_struct_type((*rhs).name)
+                                            } else if (*rhs).kind == ExprKind::ExprUnary
+                                                && ((*rhs).un_op == UnaryOp::OpRef || (*rhs).un_op == UnaryOp::OpRefMut) {
+                                                if lo.opt_expr_result_is_float_ref(&(*rhs).left) {
+                                                    ref_pointee = make_name("f64")
+                                                }
+                                            }
+                                        }
+                                        None => {}
+                                    }
+                                }
+                            }
+                            let local_idx = (*lo.locals).count
+                            lowerer_bind_local_mut(&!lo, stmt_ref.name, IR_INVALID_REG, false)
+                            lo = lo.bind_local_scalar_kind(stmt_ref.name, if local_is_float { 2 } else { 0 })
+                            if tuple_mask != 0 {
+                                // Keep the original locals Box: the normal tuple
+                                // binder replaces it, which would detach count
+                                // restoration from the caller's temporary stack.
+                                (*(*lo.locals).tuple_float_mask).values[local_idx as usize] = tuple_mask
+                            }
+                            if ref_pointee.len > 0 {
+                                lo = lo.bind_local_ref(stmt_ref.name)
+                                lo = lo.bind_local_struct_type(stmt_ref.name, ref_pointee, false)
+                            }
+                        }
                     }
                     current = &(*list).tail
                 }
                 _ => break
             }
         }
+        (*lo.locals).count = saved_local_count
         result
     }
 
@@ -25032,6 +25139,46 @@ impl Lowerer {
     // An `else { ... }` arrives as an ExprBlock, so the tail has to be reached
     // through it; anything that is not ultimately a method call answers -1.
     fn expr_method_fn_id(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        // A nested if can be the tail of either arm of a record-valued if.
+        // Without this recursive join, the let binder loses the record owner
+        // and later fields fall back to a cross-struct name/offset vote.
+        // Choose a representative callee only when BOTH arms carry the same
+        // known record return, or the same named record in the same tuple slot.
+        if (*e).kind == ExprKind::ExprIf {
+            let then_fn = self.opt_block_tail_method_fn_id(&(*e).block)
+            let else_fn = self.opt_expr_method_fn_id(&(*e).else_expr)
+            if then_fn < 0 || else_fn < 0 { return 0 - 1 }
+            let then_return = self.return_struct_name_for_fn_id(then_fn)
+            let else_return = self.return_struct_name_for_fn_id(else_fn)
+            let then_slot = self.return_tuple_struct_slot_for_fn_id(then_fn)
+            let else_slot = self.return_tuple_struct_slot_for_fn_id(else_fn)
+            if then_slot != else_slot || !ir_name_eq(then_return, else_return) {
+                return 0 - 1
+            }
+            if then_slot >= 0 {
+                let then_name = self.return_tuple_struct_name_for_fn_id(then_fn)
+                let else_name = self.return_tuple_struct_name_for_fn_id(else_fn)
+                if then_name.len <= 0 || !ir_name_eq(then_name, else_name) {
+                    return 0 - 1
+                }
+                if lower_struct_layout_index_of(&(*self.struct_layouts), then_name) < 0 {
+                    return 0 - 1
+                }
+                return then_fn
+            }
+            // A fixed-array element name does not describe a record return.
+            if ir_fn_get(&(*self.module), then_fn as usize).return_fixed_array_len >= 0 {
+                return 0 - 1
+            }
+            if ir_fn_get(&(*self.module), else_fn as usize).return_fixed_array_len >= 0 {
+                return 0 - 1
+            }
+            if then_return.len <= 0 { return 0 - 1 }
+            if lower_struct_layout_index_of(&(*self.struct_layouts), then_return) < 0 {
+                return 0 - 1
+            }
+            return then_fn
+        }
         if (*e).kind == ExprKind::ExprBlock {
             return self.opt_block_tail_method_fn_id(&(*e).block)
         }
@@ -28735,7 +28882,26 @@ impl Lowerer {
         //
         // Gated on fo_nchan > 0 so a program that never calls measure() pays
         // nothing; a `let` is never reassigned and needs no slot.
-        if is_mut && lo.fo_nchan > 0 && !bind_as_ref && fixed_array_len < 0 {
+        //
+        // Not for a `var` initialised with an integer or bool literal
+        // (`var k: i64 = 0`, `var n_fail = 0`, `var done = false`): it carries no
+        // variance and nothing above bound it to any. One channel anywhere in the
+        // function (an `if` that bumps an integer counter is enough) used to give
+        // every such counter sens slots, and since #2827 a residual slot that each
+        // loop head and assignment rewrites: obo_elplus_driver.sio, which has no
+        // f64, compiled to 385 KB instead of 156 KB and ran 2.2x slower. The test
+        // is on the literal, not on the declared type, because an integer bound to
+        // a variance-carrying RHS still needs private slots across a back-edge.
+        var rhs_is_int_or_bool_lit = false
+        match s.expr {
+            Some(rhs_lit) => {
+                rhs_is_int_or_bool_lit = (*rhs_lit).kind == ExprKind::ExprIntLit
+                    || (*rhs_lit).kind == ExprKind::ExprBoolTrue
+                    || (*rhs_lit).kind == ExprKind::ExprBoolFalse
+            }
+            None => {}
+        }
+        if is_mut && lo.fo_nchan > 0 && !bind_as_ref && fixed_array_len < 0 && !rhs_is_int_or_bool_lit {
             lo = lo.alloc_variance_slot_for_local(s.name)
             lo = lo.fo_alloc_sens_slots_for_local(s.name)
         }
@@ -36376,6 +36542,7 @@ impl Lowerer {
     }
 
     fn lower_match_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let res_is_float = self.expr_result_is_float_ref(e)
         var payload_layout: i64 = 0 - 1
         match (*e).left {
             Some(scrut_expr) => { if (*scrut_expr).kind == ExprKind::ExprIdent {
@@ -36424,6 +36591,9 @@ impl Lowerer {
         LOWER_MATCH_SCRUT_IS_REF = saved_scrut_is_ref
         lo = lo.emit(ir_load_imm(res, 0))
         lo = lo.emit(ir_label(l_end))
+        if res_is_float {
+            lo = lo.emit(ir_mark_float_reg(res))
+        }
         (lo, res)
     }
 

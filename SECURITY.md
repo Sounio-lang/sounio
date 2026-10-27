@@ -22,6 +22,8 @@ If you discover a security vulnerability (e.g., compile-time bypass of epistemic
 
 📧 **security@sounio.dev**
 
+The project's lead maintainer, Demetrios Chiuratto Agourakis, can also be reached at **demetrios@agourakis.med.br**. This is the contact registered for automated vulnerability reports (Anthropic OSS Scanner).
+
 Please include the following details in your report to help our engineers evaluate and triage the issue quickly:
 
 1. **Vulnerability Type**: (e.g., Out-of-bounds read, type-checker bypass, memory safety violation in runtime).
