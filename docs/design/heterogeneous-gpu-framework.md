@@ -1449,3 +1449,20 @@ Job 18304's 42 is the only number this ELF has stored. It shows that `IMAD.MOV` 
 - 1 `7217` IMNMX.U32
 
 The 0.0018 s threshold is not moved. This list does not pass it.
+
+
+## 55. IADD3 inside the owned image (2026-10-27, OBSERVED)
+
+The image of job 18304 stayed the container. Four instructions were inserted before `EXIT`, and the register count became 11. The cleared buffer is two words.
+
+Job 18313 wrote the exit-offset word as `7172 + 160 * 2^32`. That low half is `0x1c04`, not the attribute header `0x00041c04`. `cuModuleLoadData` returned `image rc=200`. md5 `419a515c26c7d313300eafb441f7ffee`. The image was not launched.
+
+Job 18315 repaired that word to `269316 + 160 * 2^32`, which is `04 1c 04 00 a0 00 00 00`. `IMAD.MOV` of 10 and of 3 used the ordinary immediate schedule, stall 1. `IADD3` R8, R6, R7 then `STG.E` of R8 at displacement 4. `OWN=42`, `OWN_ADD=0`. md5 `61729dcbd05f1b4135f4a2bd54726c56`. The second word stayed the cleared 0.
+
+Job 18319 kept the displacement and stored R5, which holds 42, at displacement 4. `OWN=42`, `OWN_ADD=42`. md5 `1ed58045a0083ccaa667a6d3eed0cb3a`. Byte 5 of `STG.E` is the displacement. The 0 in job 18315 was the value in R8, not a missed address.
+
+Job 18325 gave those two immediate moves stall 5 and yield 1, and stored R8 again. `OWN=42`, `OWN_ADD=13`, `EXIT:0`. md5 `8cd5efbcff8d2f5ff8ee01a44b343ef5`. Ten plus three is 13. `IADD3` opcode `10 72` committed inside this ELF.
+
+The resident kernel's first `IADD3` in the list of section 54 is opcode `10 7c`. That form is not this word. The row stays open. Seventy-nine of the eighty-one names still have no number from this image.
+
+The 0.0018 s threshold is not moved. This cut does not pass it.
