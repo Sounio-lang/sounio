@@ -15,10 +15,10 @@ test('file partitions isolate relative outputs and refuse omitted cases',()=>{
   for(const name of ['a','b'])fs.writeFileSync(path.join(root,'tests/stdlib/group',name+'.sio'),'// metadata fixture\n');
   fs.writeFileSync(path.join(root,'stdlib','module.sio'),'// immutable fixture\n');
   fs.writeFileSync(path.join(root,'scripts/stdlib/run_stdlib_e2e.sh'),'#!/bin/bash\nexec node "$(dirname "$0")/fixture_runner.mjs" "$@"\n');
-  fs.writeFileSync(path.join(root,'scripts/stdlib/fixture_runner.mjs'),"import fs from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';\nimport {setTimeout} from 'node:timers/promises';\nconst root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..'),args=process.argv.slice(2);\nconst filter=args[args.indexOf('--filter')+1],output=args[args.indexOf('--json-out')+1];\nconst collision=path.join(root,'case-output.txt');fs.writeFileSync(collision,filter);\nawait setTimeout(100);\nif(fs.readFileSync(collision,'utf8')!==filter)throw Error('relative output collision');\nconst paths=['tests/stdlib/group/a.sio','tests/stdlib/group/b.sio'].filter(p=>p.startsWith(filter));\nconst results=paths.filter(p=>!(process.env.OMIT_A==='1'&&p.endsWith('/a.sio'))).map(test_path=>({test_path,status:'pass',mode:'check',reason:'',exit_code:0}));\nfs.writeFileSync(output,JSON.stringify({schema:'sounio.stdlib.e2e.result.v1',results,totals:{pass:results.length,fail:0,skip:0,total:results.length}}));\n");
+  fs.writeFileSync(path.join(root,'scripts/stdlib/fixture_runner.mjs'),"import fs from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';\nimport {setTimeout} from 'node:timers/promises';\nconst root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..'),args=process.argv.slice(2);\nconst filter=args[args.indexOf('--filter')+1],output=args[args.indexOf('--json-out')+1];\nconst collision=path.join(root,'case-output.txt');fs.writeFileSync(collision,filter);\nawait setTimeout(100);\nif(fs.readFileSync(collision,'utf8')!==filter)throw Error('relative output collision');\nconst paths=['tests/stdlib/group/a.sio','tests/stdlib/group/b.sio'].filter(p=>p.startsWith(filter));\nconst results=paths.filter(p=>!(process.env.OMIT_A==='1'&&p.endsWith('/a.sio'))).map(test_path=>({test_path,status:(process.env.SKIP_ALL==='1'||(process.env.SKIP_B==='1'&&test_path.endsWith('/b.sio')))?'skip':'pass',mode:'check',reason:'',exit_code:0}));\nfs.writeFileSync(output,JSON.stringify({schema:'sounio.stdlib.e2e.result.v1',results,totals:{pass:results.filter(r=>r.status==='pass').length,fail:0,skip:results.filter(r=>r.status==='skip').length,total:results.length}}));\n");
   const run=(name,extra={})=>{
    const env={...process.env,STDLIB_FULL_CAPTURE:'0'};delete env.STDLIB_FULL_WORKER_DIR;Object.assign(env,extra);
-   const out=path.join(tmp,name),result=spawnSync(process.execPath,[path.join(root,'scripts/stdlib/run_full_suite.mjs'),'--out-dir',out,'--jobs','2','--partition','file'],{env,encoding:'utf8',timeout:30000});
+   const out=path.join(tmp,name),result=spawnSync(process.execPath,[path.join(root,'scripts/stdlib/run_full_suite.mjs'),'--out-dir',out,'--jobs','2','--partition','file',...(extra.ACCEPTANCE_TEST==='1'?['--slow','--acceptance']:[])],{env,encoding:'utf8',timeout:30000});
    assert.ifError(result.error);
    return {result,report:JSON.parse(fs.readFileSync(path.join(out,'RESULT.json'),'utf8'))};
   };
@@ -31,6 +31,16 @@ test('file partitions isolate relative outputs and refuse omitted cases',()=>{
   assert(positive.report.context.worker_roots.every(p=>p.startsWith(external+path.sep)));
   assert.equal(fs.existsSync(path.join(root,'case-output.txt')),false);
   for(const worker of positive.report.context.worker_roots)assert(fs.readFileSync(path.join(worker,'case-output.txt'),'utf8').endsWith('.sio'));
+  const skipped=run('all-skipped',{SKIP_ALL:'1'});
+  assert.equal(skipped.result.status,1);
+  assert(skipped.report.selection_errors.some(e=>e.error==='no executed passing tests'));
+  const mixed=run('mixed',{SKIP_B:'1'});
+  assert.equal(mixed.result.status,0);
+  const strictMixed=run('strict-mixed',{SKIP_B:'1',ACCEPTANCE_TEST:'1'});
+  assert.equal(strictMixed.result.status,1);
+  assert(strictMixed.report.selection_errors.some(e=>e.error==='acceptance contains skipped tests'));
+  const strictPass=run('strict-pass',{ACCEPTANCE_TEST:'1'});
+  assert.equal(strictPass.result.status,0,strictPass.result.stderr);
   const omitted=run('omitted',{OMIT_A:'1'});
   assert.equal(omitted.result.status,1);
   assert.equal(omitted.report.status_summary,'not_run');

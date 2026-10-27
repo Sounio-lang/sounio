@@ -31,10 +31,12 @@ sha256sum "$MADAROS_RAW_BIN" "$SEED_RAW_BIN" bin/souc-lean-single-x86_64 > "$out
 write_inputs() {
     find stdlib tests examples scripts/stdlib scripts/lib tools/science_boundary runtime/stdlib_platform.cpp docs/evidence/stdlib-massive-2026-10-26 \( -type f -o -type l \) -print0 | LC_ALL=C sort -z | xargs -0 sha256sum || return $?
     sha256sum bin/souc bin/madaros bin/souc-lean-single-x86_64 scripts/ci/souc-native-wrapper.sh \
+      scripts/arrow_cpp_gate.sh scripts/arrow_ipc_gate.sh scripts/arrow_fixture_relocate.mjs \
       docs/evidence/stdlib-SIO-172/before_variance/variance_witness.sio \
       docs/evidence/stdlib-SIO-172/before_variance/phonon_original.sio \
       docs/evidence/stdlib-SIO-174/before/callback_time.sio
 }
+bash "$repo/scripts/arrow_cpp_gate.sh" --preflight > "$out/ARROW_SDK_PREFLIGHT.txt" 2>&1 || exit 64
 write_inputs > "$out/INPUTS.sha256" || exit 65
 g++ --version > "$out/CXX_TOOLCHAIN.txt" || exit 65
 # Independent references require Boost.Multiprecision headers. Refuse before
@@ -60,6 +62,14 @@ cxx_manifest() {
 }
 cxx_manifest > "$out/CXX_RUNTIME.sha256" || exit 65
 [[ -s "$out/CXX_RUNTIME.sha256" ]] || exit 65
+
+# Bind the freshly built native C ABI runtime before child gates.
+mkdir -p "$out/platform" || exit 65
+g++ -std=c++23 -O2 -Wall -Wextra -Werror -shared -fPIC -pthread runtime/stdlib_platform.cpp -o "$out/platform/libstdlib_platform.so" > "$out/platform/build.stdout" 2> "$out/platform/build.stderr" || exit 1
+STDLIB_PLATFORM_LIBRARY="$out/platform/libstdlib_platform.so"
+export STDLIB_PLATFORM_LIBRARY
+export LD_LIBRARY_PATH="$out/platform${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+sha256sum runtime/stdlib_platform.cpp "$STDLIB_PLATFORM_LIBRARY" > "$out/PLATFORM.sha256" || exit 65
 fail=0
 record() {
     local tmp
@@ -479,49 +489,58 @@ run_oracle_batch() {
 }
 run_oracle_batch
 
-# Arrow IPC is Madaros-only (lean_single has no bits_to_f64). The full suite
-# skips these fixtures via //@ requires: madaros. This job already holds the
-# fresh Madaros ELF. PyArrow 26.0.0 and NumPy 2.5.4 are installed into a
-# directory this process just created, and the gate must print the oracle markers.
+# The official Arrow C++26 gate preserves all five Sounio producers and all
+# legacy interop categories. Its required SDK is provisioned before this job.
 arrow_rc=0
-py_dir=$(mktemp -d "${TMPDIR:-/tmp}/sounio-pyarrow.XXXXXX") || arrow_rc=$?
+ARROW_CPP_PREFIX="${ARROW_CPP_PREFIX:?provision the official Arrow C++26 SDK}" \
+  STDLIB_ARROW_OUT="$out/arrow-cpp" \
+  bash "$repo/scripts/arrow_ipc_gate.sh" > "$out/arrow-ipc-gate.log" 2>&1 || arrow_rc=$?
 if [[ "$arrow_rc" == 0 ]]; then
-    python3 -m pip install --disable-pip-version-check --target "$py_dir" \
-        'pyarrow==26.0.0' 'numpy==2.5.4' \
-        > "$out/arrow-pyarrow-install.log" 2>&1 || arrow_rc=$?
-fi
-if [[ "$arrow_rc" == 0 ]]; then
-    ARROW_PYARROW_PATH="$py_dir" ARROW_REQUIRE_PYARROW=1 \
-        bash "$repo/scripts/arrow_ipc_gate.sh" > "$out/arrow-ipc-gate.log" 2>&1 || arrow_rc=$?
-fi
-if [[ "$arrow_rc" == 0 ]]; then
-    log="$out/arrow-ipc-gate.log"
-    ok_n=$(grep -cx 'PYARROW_OK' "$log" || true)
-    if ! grep -qx 'Required pyarrow: 26.0.0' "$log" \
-        || ! grep -qx 'SPEC_PYARROW_OK' "$log" \
-        || ! grep -qx 'EXT_PYARROW_OK' "$log" \
-        || ! grep -qx 'ARROW_IPC_OK' "$log" \
-        || ! grep -qx 'CODEC_OK' "$log" \
-        || ! grep -qx 'ARROW_SPEC_OK' "$log" \
-        || ! grep -qx 'ARROW_EXT_OK' "$log" \
-        || ! grep -qx 'FLIGHT_IPC_OK' "$log" \
-        || [[ "$ok_n" != 2 ]]; then
-        echo "FAIL arrow gate missing oracle markers" >> "$log"
-        arrow_rc=1
-    fi
-    if grep -qx 'PYARROW_SKIP' "$log" \
-        || grep -qx 'SPEC_PYARROW_SKIP' "$log" \
-        || grep -qx 'EXT_PYARROW_SKIP' "$log"; then
-        echo "FAIL arrow gate skipped the pyarrow oracle" >> "$log"
-        arrow_rc=1
-    fi
+    for marker in 'ARROW_CPP_VERSION 26.0.0' ARROW_CPP_GATE_OK ARROW_CPP_INTEROP_OK \
+      ARROW_CPP_SDK_ABSENCE_REFUSED ARROW_CPP_ID_MUTANT_REJECTED \
+      ARROW_NATIVE_CPP_READ_OK ARROW_INCREMENTAL_CPP_OK \
+      ARROW_INCREMENTAL_DICTIONARY_CPP_OK ARROW_INCREMENTAL_BIDIRECTIONAL_OK \
+      ARROW_IPC_OK CODEC_OK ARROW_SPEC_OK ARROW_EXT_OK FLIGHT_IPC_OK; do
+        if ! grep -qx "$marker" "$out/arrow-ipc-gate.log"; then
+            echo "FAIL arrow gate missing $marker" >> "$out/arrow-ipc-gate.log"
+            arrow_rc=1
+        fi
+    done
 fi
 if [[ "$arrow_rc" != 0 ]]; then
     echo "arrow-ipc-gate failed rc=$arrow_rc" >&2
-    [[ -f "$out/arrow-pyarrow-install.log" ]] && tail -n 40 "$out/arrow-pyarrow-install.log" >&2 || true
-    [[ -f "$out/arrow-ipc-gate.log" ]] && tail -n 80 "$out/arrow-ipc-gate.log" >&2 || true
+    tail -n 80 "$out/arrow-ipc-gate.log" >&2 || true
 fi
 record arrow-gate scripts/arrow_ipc_gate.sh "$arrow_rc"
+
+# Mandatory streaming and systems composition, including canonical facades.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" STDLIB_PLATFORM_LIBRARY="$STDLIB_PLATFORM_LIBRARY" timeout 5400 bash scripts/stdlib/wave3_services_gate.sh "$out/wave3-services" > "$out/wave3-services.stdout" 2> "$out/wave3-services.stderr" || rc=$?
+record focused-gate wave3-services "$rc"
+
+# Independent constructor, Monte Carlo, EFE composition and original DP.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" timeout 1200 bash scripts/stdlib/wave3_epistemic_gate.sh "$out/wave3-epistemic" > "$out/wave3-epistemic.stdout" 2> "$out/wave3-epistemic.stderr" || rc=$?
+record focused-gate wave3-epistemic "$rc"
+
+# Actual binary fMRI QC, mandatory atlas/configuration and independent C++23.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" STDLIB_PLATFORM_LIBRARY="$STDLIB_PLATFORM_LIBRARY" timeout 5400 bash scripts/stdlib/fmri_native_gate.sh "$out/fmri-native" > "$out/fmri-native.stdout" 2> "$out/fmri-native.stderr" || rc=$?
+record focused-gate fmri-native "$rc"
+
+# Unchanged ODE originals, stable PBPK14 and independent matrix exponential.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" timeout 1800 bash scripts/stdlib/pbpk14_native_gate.sh "$out/pbpk14-native" > "$out/pbpk14-native.stdout" 2> "$out/pbpk14-native.stderr" || rc=$?
+record focused-gate pbpk14-native "$rc"
+
+# Mandatory typed mechanics and phonon integration.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" timeout 1800 bash scripts/stdlib/wave3_mechanics_gate.sh "$out/wave3-mechanics" > "$out/wave3-mechanics.stdout" 2> "$out/wave3-mechanics.stderr" || rc=$?
+record focused-gate wave3-mechanics "$rc"
+
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" timeout 1800 bash scripts/stdlib/wave3_phonon_quantity_gate.sh "$out/wave3-phonon-quantity" > "$out/wave3-phonon-quantity.stdout" 2> "$out/wave3-phonon-quantity.stderr" || rc=$?
+record focused-gate wave3-phonon-quantity "$rc"
 
 # Checked BDF1 numerical concordance and refusal controls use actual native rows.
 rc=0
@@ -654,6 +673,10 @@ record input-hashes unchanged "$rc"
 rc=0
 sha256sum -c "$out/COMPILER.sha256" > "$out/COMPILER.verify.txt" 2>&1 || rc=$?
 record compiler-hash unchanged "$rc"
+
+rc=0
+sha256sum -c "$out/PLATFORM.sha256" > "$out/PLATFORM.final.verify" 2>&1 || rc=$?
+record platform-runtime-hashes unchanged "$rc"
 
 rc=0
 sha256sum -c "$out/CXX_RUNTIME.sha256" > "$out/CXX_RUNTIME.verify.txt" 2>&1 || rc=$?

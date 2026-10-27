@@ -12,7 +12,7 @@ const write=(p,v)=>{fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileS
 let checks=0;
 const test=(name,f)=>{f();checks++;console.log('PASS '+name);};
 const totals={pass:1,fail:0,skip:0,total:1};
-const e2e={schema:'sounio.stdlib.e2e.result.v1',totals,results:[{status:'pass',test_path:'tests/stdlib/a.sio'}]};
+const e2e={status_summary:'pass',schema:'sounio.stdlib.e2e.result.v1',totals,results:[{status:'pass',test_path:'tests/stdlib/a.sio'}]};
 const inv={schema:'sounio.stdlib.inventory.v1',counts:{sio_files:1,disabled_files:0,stub_mod_files:0,active_module_entrypoints:1}};
 const hyper={schema:'sounio.stdlib.hyper_execution_status.v1',status_summary:'pass',totals};
 const science={schema:'sounio.stdlib.science_pipeline_status.v1',status_summary:'pass',runtime_regression_enforcement:'strict',
@@ -22,12 +22,16 @@ const reset=()=>{for(const[k,v]of Object.entries({e2e,inventory:inv,hyper,scienc
 const goodCodes={inventory:0,hyper:0,e2e:0};
 try {
   test('valid complete receipts pass',()=>{reset();assert.equal(aggregate(tmp,paths,goodCodes,true).status_summary,'pass');});
+  test('legacy v1 receipts without status remain compatible',()=>{reset();const legacy={...e2e};delete legacy.status_summary;write(paths.e2e,legacy);assert.equal(aggregate(tmp,paths,goodCodes).status_summary,'pass');});
   test('contract adjustment annotations survive aggregation',()=>{
     reset();write(path.join(tmp,'tests/stdlib/contracts/test.sio'),'//@ contract-adjustment: preserved checked contract\nfn main() {}');
     assert.deepEqual(aggregate(tmp,paths,goodCodes).contract_adjustments,[{test_path:'tests/stdlib/contracts/test.sio',adjustment:'preserved checked contract'}]);
   });
   test('producer failure cannot reuse a passing artifact',()=>{reset();assert.equal(aggregate(tmp,paths,{...goodCodes,hyper:1}).status_summary,'fail');});
   test('missing hyper retains E2E results',()=>{reset();fs.unlinkSync(paths.hyper);const r=aggregate(tmp,paths,goodCodes);assert.equal(r.totals.pass,1);assert.equal(r.status_summary,'not_run');});
+  test('all skipped receipt cannot pass',()=>{reset();write(paths.e2e,{...e2e,totals:{pass:0,fail:0,skip:1,total:1},results:[{status:'skip',test_path:'tests/stdlib/a.sio'}]});assert.notEqual(aggregate(tmp,paths,goodCodes).status_summary,'pass');});
+  test('producer not_run cannot be relabeled',()=>{reset();write(paths.e2e,{...e2e,status_summary:'not_run'});assert.notEqual(aggregate(tmp,paths,goodCodes).status_summary,'pass');});
+  test('selection errors cannot pass',()=>{reset();write(paths.e2e,{...e2e,selection_errors:[{error:'missing test'}]});assert.notEqual(aggregate(tmp,paths,goodCodes).status_summary,'pass');});
   test('empty selection fails closed',()=>{reset();write(paths.e2e,{...e2e,totals:{pass:0,fail:0,skip:0,total:0},results:[]});assert.notEqual(aggregate(tmp,paths,goodCodes).status_summary,'pass');});
   test('totals and duplicate cases must reconcile',()=>{reset();write(paths.e2e,{...e2e,totals:{pass:2,fail:0,skip:0,total:2},results:[e2e.results[0],e2e.results[0]]});assert.notEqual(aggregate(tmp,paths,goodCodes).status_summary,'pass');});
   test('strict runtime failures remain failures',()=>{reset();write(paths.science,{...science,runtime_regression_summary:{status:'fail',fail:1}});assert.equal(aggregate(tmp,paths,goodCodes,true).status_summary,'fail');});

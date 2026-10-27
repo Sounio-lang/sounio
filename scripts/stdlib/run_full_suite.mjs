@@ -8,17 +8,19 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {walk} from './inventory.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
-let output='',jobs=2,slow=false,partition='directory';
+let output='',jobs=2,slow=false,acceptance=false,partition='directory';
 for(let i=2;i<process.argv.length;i++) {
   const a=process.argv[i];
-  if(a==='--help'){console.log('run_full_suite.mjs --out-dir ABS_FRESH_PATH [--jobs N] [--slow] [--partition directory|file]');process.exit(0);}
+  if(a==='--help'){console.log('run_full_suite.mjs --out-dir ABS_FRESH_PATH [--jobs N] [--slow] [--acceptance] [--partition directory|file]');process.exit(0);}
   if(a==='--partition'){partition=process.argv[++i];if(!['directory','file'].includes(partition))throw Error('invalid partition');continue;}
   if(a==='--slow'){slow=true;continue;}
+  if(a==='--acceptance'){acceptance=true;continue;}
   if(a==='--out-dir'){output=process.argv[++i]||'';continue;}
   if(a==='--jobs'){const v=process.argv[++i];if(!/^[1-9][0-9]*$/.test(v||''))throw Error('jobs must be positive');jobs=Number(v);continue;}
   throw Error('unknown argument: '+a);
 }
 if(!path.isAbsolute(output)||!Number.isSafeInteger(jobs)||jobs>64)throw Error('require absolute fresh output and jobs<=64');
+if(acceptance&&!slow)throw Error('acceptance requires --slow');
 fs.mkdirSync(output);
 const hash=p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 const paths=walk(path.join(root,'tests/stdlib'),false).filter(p=>p.endsWith('.sio')).map(p=>path.relative(root,p)).sort();
@@ -90,8 +92,10 @@ if(partition==='file')for(const copy of workerRoots)for(const input of copyInvar
 }
 const totals={pass:0,fail:0,skip:0,total:results.length};
 for(const r of results)totals[r.status]++;
+if(totals.pass===0)errors.push({error:'no executed passing tests'});
+if(acceptance&&totals.skip!==0)errors.push({error:'acceptance contains skipped tests'});
 const doc={schema:'sounio.stdlib.e2e.result.v1',generated_at_utc:new Date().toISOString(),
- command:'node scripts/stdlib/run_full_suite.mjs',context:{root_dir:root,slow_enabled:slow,jobs,partition,worker_roots:workerRoots},
+ command:'node scripts/stdlib/run_full_suite.mjs',context:{root_dir:root,slow_enabled:slow,acceptance,jobs,partition,worker_roots:workerRoots},
  status_summary:errors.length||interrupted?'not_run':totals.fail?'fail':'pass',totals,
  results:results.sort((a,b)=>a.test_path.localeCompare(b.test_path)),failures:results.filter(r=>r.status==='fail'),
  ignored:results.filter(r=>r.mode==='ignore'),selection_errors:errors,producers:receipts};

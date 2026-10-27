@@ -34,6 +34,9 @@ export function aggregate(root, paths, codes, strict=false) {
   const hyperTotals=validTotals(hyper?.totals)?hyper.totals:empty;
   let complete=!!inv&&!!hyper&&!!science&&!!e2e;
   if(!validTotals(e2e?.totals)||totals.total===0){complete=false;notes.push('e2e_empty_or_invalid_selection');}
+  if(totals.pass===0){complete=false;notes.push('e2e_no_executed_passing_tests');}
+  if(e2e?.status_summary!==undefined&&e2e.status_summary!=='pass'){complete=false;notes.push('e2e_producer_not_pass');}
+  if(Array.isArray(e2e?.selection_errors)&&e2e.selection_errors.length){complete=false;notes.push('e2e_selection_errors');}
   if(!validTotals(hyper?.totals)){complete=false;notes.push('hyper_invalid_totals');}
   if(!Array.isArray(e2e?.results)||e2e.results.length!==totals.total){complete=false;notes.push('e2e_row_count_mismatch');}
   if(Array.isArray(e2e?.results)) {
