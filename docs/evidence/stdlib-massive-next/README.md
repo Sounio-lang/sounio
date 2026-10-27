@@ -82,3 +82,49 @@ Durable roots follow /orangefs/training/sounio-foundry/runs/stdlib-next-20261027
 ## Interrupted comparison and recovery
 
 Slurm 17917 was interrupted when cpuops-t560-proxmox was removed from the cluster and its partition disappeared. The scheduler requeued it to an invalid partition; the obsolete requeue was cancelled to preserve the incomplete packet. It did not complete main or candidate full acceptance. The captured partial results and scheduler receipt are preserved at /orangefs/training/sounio-foundry/runs/stdlib-next-20261027-07/interrupted-20261027T0228/; partial-results.tar.gz SHA256 b40ceae20b7d679a660a6eb4d6f24c182bd4fff3534718fa5c94d861eb89ffb1. Source archives and raw compiler hashes were verified while migrating validation to the DL380 CPU worker.
+
+## Implemented second-wave services and composition
+
+- Native checked file owners and owned text for the existing CSV parser; checked integer/scaled parsing refuses range overflow.
+- Owned nested JSON with UTF-8/escape checks, exact number lexemes, depth and payload budgets, decoded access and serialization replay.
+- Dynamic FASTA and GFF3 records; VCF 4.3 owned header/sample context with declared INFO/FORMAT type/cardinality validation. Breakend/reference/file-wide semantics remain explicit limits.
+- Bounded MPMC i64 channels, typed socket readiness and nonblocking connect, and a Sounio polling executor with cancellation and monotonic deadlines.
+- Existing dynamic QR, direct Jacobi SVD and quantiles feed a structured JSON report and existing SVG/PNG renderers. Checked native PNG output replaces the undeclared append_file route; actual caller effect rows are propagated.
+
+## Qualification packets
+
+| Packet / Slurm | Verified result |
+| --- | --- |
+| 25 / 17952 | Original CSV overflow witnesses fail before and pass after; independent C++23 numeric and callback-layout references pass. |
+| 27 / 17955 | Checked file/owned CSV Sounio and C++23 file/text reference pass. |
+| 28 / 17956 | Nonblocking connect/readiness and actual yielding socket executor pass, with independent native socket controls. |
+| 31 / 17964 | CSV-to-QR/SVD/quantile-to-JSON/SVG/PNG workflow passes; JSON owned replay and independent C++23 numerical/chunk/pixel checks pass. |
+| 37 / 17971 | Fresh modular build using the privacy-fixed source-built seed passes. Its SHA256 e1ee21074398f771d5eeec32a5281a5ff57a8bdf27f09c8a0a2b39a0dd000b41 is byte-identical to the raw compiler already consumed by the matrix. |
+| 38 / 17973 | Expanded integrated native gate, metadata controls, ownership/privacy negatives, scientific artifacts, and exp-helper gates on both engines pass. |
+| 39 / 17975 | Initial VCF header context and preserved original per-record fixtures pass check/compile/native. |
+| 40 / 17976 | Expanded gate including hardened VCF/independent C++ reference passes. Subsequent deep replay was stopped after its sparse worker lacked /usr/bin/time; native 127 rows are dependency failures, not successful execution. |
+| 41 / 17979 | Installed canonical seed self-reproduces; repeated compiles agree; live receipt source/seed hashes and wrong-source mutant control pass. |
+| 42 / 17981 | Final integrated/ABI, registry, known-failure and deep replay launched with explicit sealed GNU time; see durable receipt for completion. |
+| 32,33 / 17965,17966 | Same-compiler main/candidate full slow matrix in progress; per-case receipts are durable. No complete full-corpus acceptance is claimed. |
+
+All packet roots are /orangefs/training/sounio-foundry/runs/stdlib-next-20261027-NN.
+Compiler implementations are still independently reviewable in #3245 and #3246.
+The integrated tree consumes their source changes; this is not evidence that either PR was merged.
+The full matrix candidate snapshot precedes VCF/header and final harness changes; final-tip replay remains required.
+
+## Evidence recovery and interrupted runs
+
+The original packet05 worker created directory05 but copied into directory03.
+This overlaid common result files in the durable packet03 directory. Scratch originals were intact.
+Exact original packet03 results are restored under packet03-recovered; exact packet05 results,
+worker and source repair archive are restored under packet05. The mixed historical packet03 directory
+is preserved for audit and must not be used as authoritative acceptance evidence.
+Seed hash checks blocked packets34/35 before any compilation when the first copy was empty.
+Packet36 then reached a missing-g++ preflight; packet38 reran successfully on the equipped DL380.
+Packet37's completed compiler and packet36's dependency receipts were copied from local DL380p
+scratch to the shared durable roots after their jobs completed.
+
+The old cpu-ops node/partition was removed externally during packet07. That full run was interrupted;
+its partial archive and original scratch results are preserved. Replacement full matrices32/33 use
+private local worker copies and write each case directly to shared CephFS storage.
+
