@@ -37,6 +37,11 @@ write_inputs() {
 }
 write_inputs > "$out/INPUTS.sha256" || exit 65
 g++ --version > "$out/CXX_TOOLCHAIN.txt" || exit 65
+# Independent references require Boost.Multiprecision headers. Refuse before
+# compiling the reference corpus when a sparse worker lacks them.
+printf '%s\n' '#include <boost/multiprecision/cpp_int.hpp>' '#include <boost/multiprecision/cpp_dec_float.hpp>' |
+    g++ -std=c++23 -x c++ -fsyntax-only - > "$out/CXX_DEPENDENCIES.stdout" 2> "$out/CXX_DEPENDENCIES.stderr" ||
+    { echo "missing C++23 reference dependencies; inspect CXX_DEPENDENCIES.stderr" >&2; exit 64; }
 # Bind the actual compiler helpers and their dynamic runtime dependencies.
 cxx_manifest() {
     local tool resolved
