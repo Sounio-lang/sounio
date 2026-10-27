@@ -1,0 +1,38 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: SPARSE_OPTIMIZER_NAMESPACE_OK
+// A valid sparse register namespace must never be partially optimized.
+use ir::ir::{IrFunction, IrOpcode, ir_empty_function, ir_function_alloc_region, ir_region_slot_w, ir_region_slot_r, ir_arena_store, ir_arena_load, ir_load_imm, ir_binop, ir_return};
+use parser::ast::{BinaryOp};
+use ir::dce::{dce_optimize_function, DCE_REFUSAL_COUNT};
+use ir::const_prop::{cp_optimize_function};
+fn sparse_function() -> IrFunction with Mut, Panic, Div, Alloc {
+    var f = ir_empty_function()
+    ir_function_alloc_region(&!f)
+    f.reg_count = 4097
+    f.instr_count = 5
+    ir_arena_store(ir_region_slot_w(f.region, 0), ir_load_imm(0, 5))
+    ir_arena_store(ir_region_slot_w(f.region, 1), ir_load_imm(1, 7))
+    ir_arena_store(ir_region_slot_w(f.region, 2), ir_binop(2, 0, BinaryOp::OpAdd, 1))
+    ir_arena_store(ir_region_slot_w(f.region, 3), ir_load_imm(4096, 42))
+    ir_arena_store(ir_region_slot_w(f.region, 4), ir_return(4096))
+    f
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let original = sparse_function()
+    let dce_before = DCE_REFUSAL_COUNT
+    let dead = dce_optimize_function(original)
+    assert(DCE_REFUSAL_COUNT == dce_before + 1)
+    let high = ir_arena_load(ir_region_slot_r(dead.region, 3))
+    assert(high.op == IrOpcode::IrLoadImm)
+    assert(high.dst == 4096 && high.imm_i64 == 42)
+    let constant = cp_optimize_function(original)
+    let add = ir_arena_load(ir_region_slot_r(constant.region, 2))
+    assert(add.op == IrOpcode::IrBinOp)
+    assert(add.dst == 2 && add.src1 == 0 && add.src2 == 1)
+    let source_high = ir_arena_load(ir_region_slot_r(original.region, 3))
+    assert(source_high.op == IrOpcode::IrLoadImm && source_high.imm_i64 == 42)
+    println("SPARSE_OPTIMIZER_NAMESPACE_OK")
+    0
+}

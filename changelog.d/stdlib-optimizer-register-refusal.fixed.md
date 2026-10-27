@@ -1,0 +1,1 @@
+Refuse an optional dead-code or constant-propagation pass before any mutation when the function's register namespace exceeds that pass's fixed tables, even when its instruction count fits. Expose both refusal counters and preserve the original function rather than optimizing a prefix.
