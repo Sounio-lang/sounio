@@ -13,7 +13,6 @@ import {
   is_record,
   is_sha256,
   py_str,
-  py_truth,
   py_strip,
   python_sort,
   safe_relative_text,
