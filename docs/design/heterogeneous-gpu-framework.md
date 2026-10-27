@@ -1278,3 +1278,24 @@ The A5000 is still inside job 17498. There is still no V100. This is the sm_86 `
 Gate. Node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 b61ff06bd9e6ad3c99b4819de663cc5d. SILICON PASS, EXIT:0. The node is idle.
 
 The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 50. The DMUL source register (2026-10-27, OBSERVED)
+
+Job 18090 multiplied 1.1 by 2.3. The second factor sat in R4. The low word of that `DMUL` was `28 72 02 02 04 00 00 00`. Byte 4 was 4.
+
+`atlas_dmul_lo(2, 2, 2)` writes `28 72 02 02 02 00 00 00`. The factors are unchanged: R2 and R3 are still 1.1, R4 and R5 are still 2.3. The instruction now names R2 as both factors, so it squares 1.1. The IEEE square is `0x3ff35c28f5c28f5d`. The low 32 bits are `0xf5c28f5d`.
+
+Job 18091, on the L4, the sm_86 image:
+
+- Host byte 1524 is 2. The specimen byte at that position is 4.
+- DMUL_LOAD=1, DMUL=4608128174721765213, DMUL_LO=4123168605.
+- AMP86=42. image rc=209, VOLTA_LOAD=0.
+
+If byte 4 were not the source, the product would still have been 1.1 times 2.3, which is 4612879472328641085. It was not.
+
+The A5000 is still inside job 17498. There is still no V100.
+
+Gate. Node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 64193081a24cfda9ad078a114700d90a. SILICON PASS, EXIT:0. The node is idle.
+
+The 0.0018 s threshold is not moved. This cut does not pass it.
