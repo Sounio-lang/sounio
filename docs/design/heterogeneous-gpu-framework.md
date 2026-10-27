@@ -1172,3 +1172,19 @@ The node was not idle. Job 17884, a foreign CPU-only trace with OverSubscribe=OK
 Gate. --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 aaeec55cac927f692d4a25dc0d73fbc8. SILICON PASS, EXIT:0.
 
 The ELF container is still the one ptxas wrote. AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 45. The register count is part of the image (2026-10-26, OBSERVED)
+
+Two bytes carry `SHI_REGISTERS`. One is the low byte of `.nv.info` at file 0x330. The other is bits 24..31 of `sh_info` on `.text.stamp`, file 0x9ef in this 2728-byte image. The low byte of that `sh_info` stays 6. Across the family the count is 8, 10, 12 or 14, and those two bytes move together. `atlas_shi_info` builds the `sh_info` word.
+
+The specimen count is 10. The highest register in that kernel is R7. Job 17906 keeps the assembled body and writes the negate into R8, which the specimen does not use. The store reads R8. Both count bytes become 11.
+
+- SHI=11 on the host, and the specimen image still has 10 at both bytes.
+- REG8_LOAD=1, REG8_SYNC=0, REG8=4294967289. That is −10+3, now through R8.
+
+BODY=4294967289, PIPE=13, ST0=10, FSRC=1091567616 and IMAD=42 still match.
+
+Gate. Job 17906, node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 46a80905dd61e7030f1b42d5524d52f0. SILICON PASS, EXIT:0. The node is idle.
+
+The rest of the ELF container is still the one ptxas wrote. AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
