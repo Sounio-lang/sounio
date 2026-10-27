@@ -111,11 +111,18 @@ fi
 # that Bash command substitution removes (NUL and trailing newlines).
 capture_command() (
   local rel="$1" phase="$2" log rc=0
+  local -a phase_status
   shift 2
   log="$(node "$DIAGNOSTICS_HELPER" begin "$ARTIFACTS_DIR" "$rel" "$phase" "$@")" || exit 65
   set -o noclobber
   exec 9> "$log" || exit 65
-  "$@" >&9 2>&1 9>&- || rc=$?
+  # Drain inherited stdout before sealing: nested timeout groups can leave a
+  # compiler descendant writing briefly after the direct command exits. Only
+  # the pipe reader owns the raw file; all existing timeout/status rules remain.
+  "$@" 2>&1 9>&- | cat >&9 9>&-
+  phase_status=("${PIPESTATUS[@]}")
+  rc="${phase_status[0]}"
+  [[ "${phase_status[1]}" == 0 ]] || exit 65
   exec 9>&-
   node "$DIAGNOSTICS_HELPER" finish "$ARTIFACTS_DIR" "$rel" "$phase" "$rc" || exit 65
   cat -- "$log" || exit 65

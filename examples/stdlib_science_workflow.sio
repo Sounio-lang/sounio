@@ -1,0 +1,155 @@
+// Checked CSV -> existing QR/SVD/quantiles -> structured report, SVG and PNG.
+// Run in a directory containing workflow-input.csv with integer x,y columns.
+// Integers outside the exact f64 range are refused. Budgets are explicit below.
+use ffi::platform::{platform_open,platform_status,platform_close}
+use io::native_file::{native_file_open,native_file_status,native_file_read,native_file_close}
+use data::native_csv::{native_csv_open,native_csv_status,native_csv_column,native_csv_next,native_csv_int,native_csv_close}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_len,byte_buffer_close}
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_status,numeric_buffer_len,numeric_buffer_push,numeric_buffer_at,numeric_buffer_close,numeric_matrix}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_push,integer_buffer_close}
+use linalg::dynamic_least_squares::{dynamic_qr_workspace,dynamic_qr_least_squares}
+use linalg::dynamic_svd::{dynamic_svd_workspace,dynamic_svd}
+use stats::dynamic_summaries::{dynamic_summary_order,dynamic_box_sorted}
+use display::canvas::{Canvas,canvas_clear}
+use viz::dynamic_plot::{DynamicPlotSpec,dynamic_line_canvas,dynamic_line_svg}
+use graphics::surface::{surface_new}
+use graphics::png::{png_encode_surface}
+fn append_text(b:&!ByteBuffer,text:string) with Alloc,Mut,Div,Panic {
+ var i:i64=0
+ while str_char_at(text,i)>0 {assert(byte_buffer_push(b,str_char_at(text,i))==0);i=i+1}
+}
+fn report_bits(name:string,value:f64) with IO {
+ print(",\"");print(name);print("\":\"");print_int(f64_to_bits(value));print("\"")
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ var path=byte_buffer_new(100)
+ append_text(&!path,"workflow-input.csv")
+ let file=native_file_open(&p,&path,0)
+ assert(native_file_status(&file)==0)
+ var input=byte_buffer_new(100000)
+ var eof=false
+ while !eof {
+  let remaining=100000-byte_buffer_len(&input)
+  if remaining==0 {
+   var probe=byte_buffer_new(1)
+   let read=native_file_read(&p,&file,&!probe,1)
+   assert(read.status==0 && read.value==0)
+   byte_buffer_close(probe);eof=true
+  } else {
+   let request=if remaining<4096 {remaining} else {4096}
+   let read=native_file_read(&p,&file,&!input,request)
+   assert(read.status==0)
+   eof=read.value==0
+  }
+ }
+ assert(native_file_close(&p,file)==0)
+ byte_buffer_close(path)
+ var csv=native_csv_open(&p,&input,100001)
+ assert(native_csv_status(&csv)==0)
+ byte_buffer_close(input)
+ let x_column=native_csv_column(&csv,"x")
+ let y_column=native_csv_column(&csv,"y")
+ assert(x_column>=0 && y_column>=0 && x_column!=y_column)
+ var x=numeric_buffer_new(0,1048576)
+ var y=numeric_buffer_new(0,1048576)
+ var design=numeric_buffer_new(0,2097152)
+ var available=integer_buffer_new(0,1048576)
+ var indices=integer_buffer_new(0,1048576)
+ var xmin:f64=0.0
+ var xmax:f64=0.0
+ var ymin:f64=0.0
+ var ymax:f64=0.0
+ while native_csv_next(&!csv) {
+  let xi=native_csv_int(&!csv,x_column)
+  let yi=native_csv_int(&!csv,y_column)
+  assert(xi.status==0 && yi.status==0)
+  assert(xi.value>=0-9007199254740992 && xi.value<=9007199254740992)
+  assert(yi.value>=0-9007199254740992 && yi.value<=9007199254740992)
+  let row=numeric_buffer_len(&x)
+  let xv=xi.value as f64
+  let yv=yi.value as f64
+  if row==0 {xmin=xv;xmax=xv;ymin=yv;ymax=yv}
+  else {if xv<xmin {xmin=xv};if xv>xmax {xmax=xv};if yv<ymin {ymin=yv};if yv>ymax {ymax=yv}}
+  assert(numeric_buffer_push(&!x,xi.value as f64)==0)
+  assert(numeric_buffer_push(&!y,yi.value as f64)==0)
+  assert(numeric_buffer_push(&!design,1.0)==0)
+  assert(numeric_buffer_push(&!design,xi.value as f64)==0)
+  assert(integer_buffer_push(&!available,1)==0)
+  assert(integer_buffer_push(&!indices,row)==0)
+ }
+ assert(native_csv_close(&p,csv)==0)
+ let rows=numeric_buffer_len(&x)
+ assert(rows>=3)
+ let layout=numeric_matrix(numeric_buffer_len(&design),rows,2,2,1,0)
+ let qr_needed=dynamic_qr_workspace(rows,2)
+ assert(qr_needed>0)
+ var coefficients=numeric_buffer_new(2,16)
+ var qr_work=numeric_buffer_new(qr_needed,16777216)
+ assert(numeric_buffer_status(&qr_work)==0)
+ let fit=dynamic_qr_least_squares(&design,&layout,&y,&!coefficients,&!qr_work,1.0e-12)
+ assert(fit.status==0 && fit.rank==2)
+ let request=dynamic_svd_workspace(rows,2)
+ assert(request.status==0)
+ var u=numeric_buffer_new(request.u_len,16777216)
+ var v=numeric_buffer_new(request.v_len,128)
+ var sigma=numeric_buffer_new(request.sigma_len,16)
+ var svd_work=numeric_buffer_new(request.work_len,16777216)
+ let decomposition=dynamic_svd(&design,&layout,&!u,&!v,&!sigma,&!svd_work,100,1.0e-12,1.0e-12)
+ assert(decomposition.status==0 && decomposition.rank==2)
+ var sorted=numeric_buffer_new(rows,1048576)
+ let prepared=dynamic_summary_order(&y,&available,&!sorted)
+ assert(prepared.status==0)
+ let summary=dynamic_box_sorted(&sorted,prepared.available)
+ assert(summary.status==0)
+ // The output viewport is explicit; the borrowed series still contains every row.
+ if ymin==ymax {ymin=ymin-1.0;ymax=ymax+1.0}
+ let spec=DynamicPlotSpec {x:10,y:10,w:140,h:100,xmin:xmin,xmax:xmax,ymin:ymin,ymax:ymax,r:30,g:90,b:180,interval_kind:0,level:0.0}
+ let pixels=heap_alloc(160*120*8) as *mut i64
+ assert((pixels as i64)>0)
+ var canvas=Canvas {pixels:pixels,width:160,height:120}
+ canvas_clear(&!canvas,255,255,255)
+ let raster=dynamic_line_canvas(&!canvas,&spec,&x,&y,&available,&indices,rows)
+ assert(raster.status==0)
+ var surface=surface_new(160,120)
+ var i:i64=0
+ while i<160*120 {
+  let color=read_i64(pixels,i)
+  surface.r[i as usize]=(color >> 16) & 255
+  surface.g[i as usize]=(color >> 8) & 255
+  surface.b[i as usize]=color & 255
+  i=i+1
+ }
+ assert(png_encode_surface(&surface,"workflow.png"))
+ heap_free(pixels as *mut i8)
+ println("SCIENCE_REPORT_BEGIN")
+ print("{\"schema\":\"sounio.stdlib.science-workflow.v1\",\"rows\":");print_int(rows)
+ print(",\"qr_rank\":");print_int(fit.rank)
+ print(",\"svd_rank\":");print_int(decomposition.rank)
+ print(",\"df\":");print_int(fit.df)
+ print(",\"raster_primitives\":");print_int(raster.visible_primitives)
+ report_bits("xmin_bits",xmin);report_bits("xmax_bits",xmax);report_bits("ymin_bits",ymin);report_bits("ymax_bits",ymax)
+ report_bits("intercept_bits",numeric_buffer_at(&coefficients,0))
+ report_bits("slope_bits",numeric_buffer_at(&coefficients,1))
+ report_bits("residual_norm_bits",fit.residual_norm)
+ report_bits("sigma0_scaled_bits",numeric_buffer_at(&sigma,0))
+ report_bits("sigma1_scaled_bits",numeric_buffer_at(&sigma,1))
+ report_bits("sigma_scale_bits",decomposition.sigma_scale)
+ report_bits("q1_bits",summary.q1);report_bits("median_bits",summary.median);report_bits("q3_bits",summary.q3)
+ println("}")
+ println("SCIENCE_REPORT_END")
+ println("SCIENCE_SVG_BEGIN")
+ println("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"160\" height=\"120\" viewBox=\"0 0 160 120\">")
+ let vector=dynamic_line_svg(&spec,&x,&y,&available,&indices,rows,1)
+ assert(vector.status==0 && vector.visible_primitives==raster.visible_primitives)
+ println("</svg>")
+ println("SCIENCE_SVG_END")
+ numeric_buffer_close(x);numeric_buffer_close(y);numeric_buffer_close(design)
+ integer_buffer_close(available);integer_buffer_close(indices)
+ numeric_buffer_close(coefficients);numeric_buffer_close(qr_work)
+ numeric_buffer_close(u);numeric_buffer_close(v);numeric_buffer_close(sigma);numeric_buffer_close(svd_work);numeric_buffer_close(sorted)
+ platform_close(p)
+ println("SCIENCE_WORKFLOW_OK")
+ return 0
+}

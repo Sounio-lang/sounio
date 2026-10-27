@@ -1,0 +1,2 @@
+The deep-science gate now accepts an explicit STDLIB_TIME_BIN path, requires GNU time before compiling, and seals its executable hash. Sparse Slurm images fail early with a dependency diagnostic instead of reporting native exit 127 after successful compilation.
+The same preflight now checks the Boost.Multiprecision headers required by the independent C++23 reference corpus before compiling that corpus.

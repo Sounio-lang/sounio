@@ -2,6 +2,11 @@
 // All entrypoints are noexcept. Operation 0 reads this thread's last errno;
 // every other operation resets it. Resource IDs are never raw addresses.
 #include <atomic>
+#include <condition_variable>
+#include <vector>
+#include <string>
+#include <cstring>
+#include <fcntl.h>
 #include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
@@ -61,7 +66,7 @@ asm(
 namespace {
 using I=std::int64_t;
 thread_local int last_error=0;
-enum class Kind {atomic,thread,socket,mutex};
+enum class Kind {atomic,thread,socket,mutex,channel,file,text};
 struct Resource {const Kind kind;explicit Resource(Kind k):kind(k){};virtual ~Resource()=default;};
 struct Atomic final:Resource {std::atomic<I> value;explicit Atomic(I v):Resource(Kind::atomic),value(v){}};
 struct Thread final:Resource {
@@ -83,8 +88,30 @@ struct Mutex final:Resource {
   }
   ~Mutex()override {if(initialized)pthread_mutex_destroy(&native);}
 };
+struct Channel final:Resource {
+  std::mutex mutex;
+  std::condition_variable readable,writable;
+  std::vector<I> data;
+  std::size_t head=0,size=0;
+  bool closed=false,destroyed=false;
+  explicit Channel(std::size_t capacity):Resource(Kind::channel),data(capacity){}
+};
+I context_count=0; // protected by registry_mutex
+
+struct Text final:Resource {
+  std::vector<char> data;
+  Text(const char* source,std::size_t size):Resource(Kind::text),data(size+1) {
+    if(size>0)std::memcpy(data.data(),source,size);
+  }
+};
+struct File final:Resource {
+  int fd;std::mutex mutex;
+  explicit File(int f):Resource(Kind::file),fd(f){}
+  ~File()override {if(fd>=0)::close(fd);}
+};
 struct Socket final:Resource {
   int fd;std::atomic<int> peer_port{0};
+  std::mutex connect_mutex;bool is_connection=false,connect_pending=false;int connect_error=0;
   explicit Socket(int f):Resource(Kind::socket),fd(f){}
   ~Socket()override {if(fd>=0)::close(fd);}
 };
@@ -134,11 +161,116 @@ sockaddr_in address(I ip,I port) {
   a.sin_port=htons(static_cast<std::uint16_t>(port));return a;
 }
 bool valid_address(I ip,I port) {return ip>=0&&ip<=4294967295LL&&port>=0&&port<=65535;}
+I channel_send(const std::shared_ptr<Channel>& q,I value,I timeout_ms,bool wait) {
+  if(wait&&(timeout_ms<0||timeout_ms>2147483647))return failure(EINVAL);
+  std::unique_lock lock(q->mutex);
+  const auto ready=[&]{return q->destroyed||q->closed||q->size<q->data.size();};
+  if(!ready()) {
+    if(!wait)return failure(EAGAIN);
+    if(!q->writable.wait_until(lock,std::chrono::steady_clock::now()+std::chrono::milliseconds(timeout_ms),ready))return failure(ETIMEDOUT);
+  }
+  if(q->destroyed)return failure(EBADF);
+  if(q->closed)return failure(EPIPE);
+  q->data[(q->head+q->size)%q->data.size()]=value;++q->size;
+  lock.unlock();q->readable.notify_one();return 0;
+}
+I channel_receive(const std::shared_ptr<Channel>& q,I timeout_ms,bool wait) {
+  if(wait&&(timeout_ms<0||timeout_ms>2147483647))return failure(EINVAL);
+  std::unique_lock lock(q->mutex);
+  const auto ready=[&]{return q->destroyed||q->closed||q->size>0;};
+  if(!ready()) {
+    if(!wait)return failure(EAGAIN);
+    if(!q->readable.wait_until(lock,std::chrono::steady_clock::now()+std::chrono::milliseconds(timeout_ms),ready))return failure(ETIMEDOUT);
+  }
+  if(q->destroyed)return failure(EBADF);
+  if(q->size==0)return failure(ENODATA);
+  const I value=q->data[q->head];q->head=(q->head+1)%q->data.size();--q->size;
+  lock.unlock();q->writable.notify_one();return value;
+}
+
 I dispatch(I op,I a,I b,I c,I d) {
+  if(op==95) {
+    if(b<0||c<1||(b>0&&a==0))return failure(EINVAL);
+    if(b>c-1)return failure(ENOBUFS);
+    if(static_cast<std::uint64_t>(b)+1>std::vector<char>{}.max_size())return failure(EOVERFLOW);
+    const auto* data=reinterpret_cast<const char*>(a);
+    for(I i=0;i<b;++i)if(data[i]==0)return failure(EILSEQ);
+    return put(std::make_shared<Text>(data,static_cast<std::size_t>(b)));
+  }
+  if(op==96) {
+    auto t=get<Text>(a,Kind::text);if(!t)return 0;
+    return reinterpret_cast<I>(t->data.data());
+  }
+
+  if(op==90) {
+    if(a==0||b<=0||b>4095||c<0||c>2)return failure(EINVAL);
+    const auto* path=reinterpret_cast<const char*>(a);
+    for(I i=0;i<b;++i)if(path[i]==0)return failure(EINVAL);
+    const std::string owned(path,static_cast<std::size_t>(b));
+    const int flags=O_CLOEXEC|(c==0?O_RDONLY:(O_WRONLY|O_CREAT|(c==1?O_TRUNC:O_APPEND)));
+    int fd;
+    do {fd=::open(owned.c_str(),flags,0600);}while(fd<0&&errno==EINTR);
+    if(fd<0)return failure(errno);
+    std::shared_ptr<File> owned_file;
+    try{owned_file=std::make_shared<File>(fd);}catch(...){::close(fd);throw;}
+    return put(std::move(owned_file));
+  }
+  if(op>=91&&op<=94) {
+    auto f=get<File>(a,Kind::file);if(!f)return 0;
+    std::lock_guard lock(f->mutex);
+    if(op==91||op==92) {
+      if(c<0||(c>0&&b==0))return failure(EINVAL);
+      ssize_t rc;
+      do {rc=op==91?::read(f->fd,reinterpret_cast<void*>(b),static_cast<std::size_t>(c))
+                    : ::write(f->fd,reinterpret_cast<const void*>(b),static_cast<std::size_t>(c));}while(rc<0&&errno==EINTR);
+      if(rc<0)return failure(errno);
+      return rc;
+    }
+    if(op==93) {
+      if(c<0||c>2)return failure(EINVAL);
+      const auto rc=::lseek(f->fd,static_cast<off_t>(b),static_cast<int>(c));
+      if(rc<0)return failure(errno);
+      return static_cast<I>(rc);
+    }
+    int rc;do {rc=::fsync(f->fd);}while(rc<0&&errno==EINTR);
+    if(rc<0)return failure(errno);
+    return 0;
+  }
+
+  if(op==80) {
+    std::lock_guard guard(registry_mutex);
+    if(context_count==std::numeric_limits<I>::max())return failure(EOVERFLOW);
+    return ++context_count;
+  }
+  if(op==81) {
+    std::lock_guard guard(registry_mutex);
+    if(context_count<=0)return failure(EINVAL);
+    if(context_count==1&&!registry.empty())return failure(EBUSY);
+    --context_count;return 0;
+  }
+  if(op==70) {
+    if(a<=0||b<0)return failure(EINVAL);
+    if(a>b/8)return failure(ENOBUFS);
+    if(static_cast<std::uint64_t>(a)>std::vector<I>{}.max_size())return failure(EOVERFLOW);
+    return put(std::make_shared<Channel>(static_cast<std::size_t>(a)));
+  }
+  if(op>=71&&op<=77) {
+    auto q=get<Channel>(a,Kind::channel);if(!q)return 0;
+    if(op==71||op==73)return channel_send(q,b,c,op==73);
+    if(op==72||op==74)return channel_receive(q,b,op==74);
+    if(op==75){
+      {std::lock_guard lock(q->mutex);q->closed=true;}
+      q->readable.notify_all();q->writable.notify_all();return 0;
+    }
+    if(op==76)return 1;
+    std::lock_guard lock(q->mutex);return static_cast<I>(q->size);
+  }
+
   if(op==1)return 1;
   if(op==2) {
     std::lock_guard guard(registry_mutex);auto it=registry.find(a);
     if(it==registry.end())return failure(EBADF);
+    int close_error=0;
     if(it->second->kind==Kind::thread) {
       auto t=std::static_pointer_cast<Thread>(it->second);
       std::lock_guard thread_guard(t->mutex);
@@ -152,7 +284,21 @@ I dispatch(I op,I a,I b,I c,I d) {
       const int rc=pthread_mutex_destroy(&m->native);if(rc)return failure(rc);
       m->initialized=false;
     }
-    registry.erase(it);return 0;
+    if(it->second->kind==Kind::channel) {
+      auto q=std::static_pointer_cast<Channel>(it->second);
+      {std::lock_guard lock(q->mutex);q->closed=true;q->destroyed=true;}
+      q->readable.notify_all();q->writable.notify_all();
+    }
+    if(it->second->kind==Kind::file) {
+      auto f=std::static_pointer_cast<File>(it->second);
+      std::lock_guard file_guard(f->mutex);
+      // Linux consumes the descriptor even when close reports EINTR or delayed I/O.
+      // Clear ownership first: neither a retry nor the destructor may close a reused fd.
+      const int fd=f->fd;f->fd=-1;
+      if(::close(fd)!=0)close_error=errno;
+    }
+    registry.erase(it);
+    return close_error!=0?failure(close_error):0;
   }
   if(op==3){std::lock_guard guard(registry_mutex);return static_cast<I>(registry.size());}
   if(op==10)return put(std::make_shared<Atomic>(a));
@@ -221,16 +367,18 @@ I dispatch(I op,I a,I b,I c,I d) {
     }
     return done;
   }
-  if(op==50||op==52||op==60) {
+  if(op==50||op==52||op==59||op==60) {
     if(!valid_address(a,b))return failure(EINVAL);
     if(op==50&&(c<=0||c>2147483647))return failure(EINVAL);
     if(op==52&&(c<0||c>2147483647))return failure(EINVAL);
     auto s=adopt_socket(::socket(AF_INET,(op==60?SOCK_DGRAM:SOCK_STREAM)|SOCK_CLOEXEC|SOCK_NONBLOCK,0));
     if(!s)return 0;
     auto addr=address(a,b);
-    if(op==52) {
+    if(op==52||op==59) {
+      s->is_connection=true;
       if(::connect(s->fd,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))<0) {
         if(errno!=EINPROGRESS)return failure(errno);
+        if(op==59){s->connect_pending=true;return put(s);}
         if(wait_ready(s->fd,POLLOUT,c))return 0;
         int err=0;socklen_t len=sizeof(err);
         if(getsockopt(s->fd,SOL_SOCKET,SO_ERROR,&err,&len))return failure(errno);
@@ -244,12 +392,36 @@ I dispatch(I op,I a,I b,I c,I d) {
     }
     return put(s);
   }
-  if(op>=51&&op<=63) {
+  if(op>=51&&op<=64) {
     auto s=get<Socket>(a,Kind::socket);if(!s)return 0;
     if(op==51) {
       sockaddr_in addr{};socklen_t len=sizeof(addr);
       if(getsockname(s->fd,reinterpret_cast<sockaddr*>(&addr),&len))return failure(errno);
       return ntohs(addr.sin_port);
+    }
+    if(op==57) {
+      if(b<1||b>3||c!=0||d!=0)return failure(EINVAL);
+      pollfd ready{s->fd,static_cast<short>(((b&1)?POLLIN:0)|((b&2)?POLLOUT:0)),0};
+      int rc;do {rc=::poll(&ready,1,0);}while(rc<0&&errno==EINTR);
+      if(rc<0)return failure(errno);
+      if(ready.revents&POLLNVAL)return failure(EBADF);
+      return ((ready.revents&POLLIN)?1:0)|((ready.revents&POLLOUT)?2:0)|((ready.revents&POLLERR)?4:0)|((ready.revents&POLLHUP)?8:0);
+    }
+    if(op==58){int type=0;socklen_t length=sizeof(type);if(getsockopt(s->fd,SOL_SOCKET,SO_TYPE,&type,&length))return failure(errno);return type==SOCK_DGRAM?2:1;}
+    if(op==64) {
+      std::lock_guard lock(s->connect_mutex);
+      if(!s->is_connection)return failure(ENOTCONN);
+      if(s->connect_error)return failure(s->connect_error);
+      if(!s->connect_pending)return 0;
+      pollfd ready{s->fd,POLLOUT,0};
+      int rc;do {rc=::poll(&ready,1,0);}while(rc<0&&errno==EINTR);
+      if(rc<0)return failure(errno);
+      if(rc==0)return failure(EAGAIN);
+      int err=0;socklen_t length=sizeof(err);
+      if(getsockopt(s->fd,SOL_SOCKET,SO_ERROR,&err,&length))return failure(errno);
+      s->connect_error=err;s->connect_pending=false;
+      if(err)return failure(err);
+      return 0;
     }
     if(op==53) {
       if(wait_ready(s->fd,POLLIN,b))return 0;

@@ -1,0 +1,55 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: POLL_EXECUTOR_OK
+use async::poll_executor::{PollStep,poll_executor_new,poll_executor_spawn,poll_executor_pending,poll_executor_tick,poll_executor_result,poll_executor_cancel,poll_executor_close}
+use ffi::platform::{platform_open,platform_status,platform_call,platform_close}
+fn counter(state:i64)->PollStep with IO,Alloc,Mut,Div,Panic {
+ if state==0 {return PollStep {state:0,outcome:1,value:42,wake_at_ns:0}}
+ return PollStep {state:state-1,outcome:0,value:0,wake_at_ns:0}
+}
+fn timer(state:i64)->PollStep with IO,Alloc,Mut,Div,Panic {
+ if state>0 {return PollStep {state:0,outcome:0,value:0,wake_at_ns:state}}
+ return PollStep {state:0,outcome:1,value:77,wake_at_ns:0}
+}
+fn malformed(state:i64)->PollStep with IO,Alloc,Mut,Div,Panic {PollStep {state:state,outcome:7,value:0,wake_at_ns:0}}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ var e=poll_executor_new(192)
+ assert(poll_executor_spawn(&!e,counter,2).value==0)
+ assert(poll_executor_spawn(&!e,counter,0).value==1)
+ let now=platform_call(&p,30,0,0,0,0)
+ assert(now.status==0)
+ assert(poll_executor_spawn(&!e,timer,now.value+100000000).value==2)
+ assert(poll_executor_spawn(&!e,malformed,0).value==3)
+ assert(poll_executor_spawn(&!e,counter,0).status==2)
+ assert(poll_executor_pending(&e)==4)
+ assert(poll_executor_tick(&!e,&p,0).value==0)
+ assert(poll_executor_tick(&!e,&p,1).value==1)
+ assert(poll_executor_result(&e,0).status==0)
+ assert(poll_executor_tick(&!e,&p,1).value==1)
+ assert(poll_executor_result(&e,1).status==1)
+ assert(poll_executor_result(&e,1).value==42)
+ assert(poll_executor_tick(&!e,&p,1).value==1)
+ assert(poll_executor_result(&e,2).status==0)
+ assert(poll_executor_tick(&!e,&p,1).value==1)
+ assert(poll_executor_result(&e,3).status==2)
+ assert(poll_executor_result(&e,3).value==22)
+ assert(poll_executor_cancel(&!e,2)==0)
+ assert(poll_executor_cancel(&!e,2)==22)
+ assert(poll_executor_cancel(&!e,9)==4)
+ var turns:i64=0
+ while poll_executor_pending(&e)>0 && turns<8 {assert(poll_executor_tick(&!e,&p,1).status==0);turns=turns+1}
+ assert(poll_executor_pending(&e)==0)
+ assert(poll_executor_result(&e,0).value==42)
+ poll_executor_close(e)
+ var timed=poll_executor_new(48)
+ assert(poll_executor_spawn(&!timed,timer,now.value).status==0)
+ assert(poll_executor_tick(&!timed,&p,1).value==1)
+ assert(poll_executor_tick(&!timed,&p,1).value==1)
+ assert(poll_executor_result(&timed,0).value==77)
+ poll_executor_close(timed)
+ platform_close(p)
+ println("POLL_EXECUTOR_OK")
+ return 0
+}

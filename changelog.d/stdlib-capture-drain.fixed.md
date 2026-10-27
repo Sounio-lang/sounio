@@ -1,0 +1,1 @@
+Opt-in stdlib diagnostic capture drains inherited stdout before sealing its raw log, preserving the original timeout status while preventing a compiler descendant from mutating a completed receipt. Later-case mutation and source/compiler integrity refusals remain enforced.

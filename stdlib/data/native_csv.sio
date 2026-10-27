@@ -1,0 +1,52 @@
+// An owned native UTF-8 copy backs the existing cap-free CSV reader.
+// No string view or raw pointer escapes this module. Close before platform_close.
+// max_bytes charges the owned text copy including its NUL; input has its own budget.
+use ffi::platform::{Platform,PlatformValue,platform_call}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_native_text_new}
+use data::csv_reader::{CsvReader,CsvRange,csv_open,csv_cols,csv_next_row,csv_col,csv_ok,csv_int,csv_f64_scaled,csv_f64,csv_field_range,csv_byte}
+pub linear struct NativeCsv {id:i64,status:i64,reader:CsvReader}
+pub struct CsvReal {pub value:f64,pub status:i64}
+pub fn native_csv_open(p:&Platform,input:&ByteBuffer,max_bytes:i64)->NativeCsv with IO,Alloc,Mut,Div,Panic {
+ let resource=byte_buffer_native_text_new(p,input,max_bytes)
+ if resource.status!=0 {return NativeCsv {id:0,status:resource.status,reader:csv_open("")}}
+ let raw=platform_call(p,96,resource.value,0,0,0)
+ if raw.status!=0 {
+  let ignored=platform_call(p,2,resource.value,0,0,0)
+  return NativeCsv {id:0,status:raw.status,reader:csv_open("")}
+ }
+ // The ABI resource owns a real NUL-terminated UTF-8 allocation.
+ // Keep the foreign pointer typed before its string view; the view stays private.
+ let pointer=raw.value as *mut u8
+ let text=pointer as string
+ return NativeCsv {id:resource.value,status:0,reader:csv_open(text)}
+}
+pub fn native_csv_status(c:&NativeCsv)->i64 {c.status}
+pub fn native_csv_cols(c:&NativeCsv)->i64 with Mut,Div,Panic {if c.status!=0 {return 0};csv_cols(&c.reader)}
+pub fn native_csv_next(c:&!NativeCsv)->bool with Mut,Div,Panic {if c.status!=0 {return false};csv_next_row(&!c.reader)}
+pub fn native_csv_column(c:&NativeCsv,name:string)->i64 with Mut,Div,Panic {if c.status!=0 {return 0-1};csv_col(&c.reader,name)}
+pub fn native_csv_int(c:&!NativeCsv,column:i64)->PlatformValue with Mut,Div,Panic {
+ if c.status!=0 {return PlatformValue {value:0,status:c.status}}
+ let value=csv_int(&!c.reader,column)
+ return PlatformValue {value:value,status:if csv_ok(&c.reader) {0} else {22}}
+}
+pub fn native_csv_scaled(c:&!NativeCsv,column:i64,decimals:i64)->PlatformValue with Mut,Div,Panic {
+ if c.status!=0 {return PlatformValue {value:0,status:c.status}}
+ let value=csv_f64_scaled(&!c.reader,column,decimals)
+ return PlatformValue {value:value,status:if csv_ok(&c.reader) {0} else {22}}
+}
+// Retains csv_reader's documented nine-decimal-place conversion contract.
+pub fn native_csv_f64_9dp(c:&!NativeCsv,column:i64)->CsvReal with Mut,Div,Panic {
+ if c.status!=0 {return CsvReal {value:0.0,status:c.status}}
+ let value=csv_f64(&!c.reader,column)
+ return CsvReal {value:value,status:if csv_ok(&c.reader) {0} else {22}}
+}
+pub fn native_csv_range(c:&NativeCsv,column:i64)->CsvRange with Mut,Div,Panic {
+ if c.status!=0 {return CsvRange {start:0,len:0-1}}
+ return csv_field_range(&c.reader,column)
+}
+pub fn native_csv_byte(c:&NativeCsv,index:i64)->i64 with Mut,Div,Panic {if c.status!=0 {return 0-1};csv_byte(&c.reader,index)}
+pub fn native_csv_close(p:&Platform,c:NativeCsv)->i64 with IO {
+ let NativeCsv {id,status,reader}=c
+ if status!=0 {return status}
+ return platform_call(p,2,id,0,0,0).status
+}

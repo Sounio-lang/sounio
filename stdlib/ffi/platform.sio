@@ -6,6 +6,8 @@ extern "C" {
     fn dlclose(handle:*mut u8)->i32
 }
 pub linear struct Platform {
+    managed:bool,
+    root_context:bool,
     handle:*mut u8,
     dispatch:*mut u8,
     status:i64,
@@ -26,28 +28,35 @@ fn platform_c_string(text:string)->*mut u8 with Alloc,Mut,Div {
 }
 pub fn platform_open()->Platform with IO,Alloc,Mut,Div {
     let name=platform_c_string("libstdlib_platform.so")
-    if (name as i64)==0 {return Platform {handle:0 as *mut u8,dispatch:0 as *mut u8,status:12}}
+    if (name as i64)==0 {return Platform {root_context:false,managed:false,handle:0 as *mut u8,dispatch:0 as *mut u8,status:12}}
     let handle=dlopen(name,2)
     heap_free(name as *mut i8)
-    if (handle as i64)==0 {return Platform {handle:handle,dispatch:0 as *mut u8,status:2}}
+    if (handle as i64)==0 {return Platform {root_context:false,managed:false,handle:handle,dispatch:0 as *mut u8,status:2}}
     let symbol=platform_c_string("sounio_platform_call")
     if (symbol as i64)==0 {
         let ignored=dlclose(handle)
-        return Platform {handle:0 as *mut u8,dispatch:0 as *mut u8,status:12}
+        return Platform {root_context:false,managed:false,handle:0 as *mut u8,dispatch:0 as *mut u8,status:12}
     }
     let raw=dlsym(handle,symbol)
     heap_free(symbol as *mut i8)
     if (raw as i64)==0 {
         let ignored=dlclose(handle)
-        return Platform {handle:0 as *mut u8,dispatch:0 as *mut u8,status:38}
+        return Platform {root_context:false,managed:false,handle:0 as *mut u8,dispatch:0 as *mut u8,status:38}
     }
     let call=raw as fn(i64,i64,i64,i64,i64)->i64
     let version=call(1,0,0,0,0)
     if version!=1 {
         let ignored=dlclose(handle)
-        return Platform {handle:0 as *mut u8,dispatch:0 as *mut u8,status:38}
+        return Platform {root_context:false,managed:false,handle:0 as *mut u8,dispatch:0 as *mut u8,status:38}
     }
-    return Platform {handle:handle,dispatch:raw,status:0}
+    let acquired=call(80,0,0,0,0)
+    let acquire_status=call(0,0,0,0,0)
+    if acquire_status!=0 && acquire_status!=38 {
+        let ignored=dlclose(handle)
+        return Platform {root_context:false,managed:false,handle:0 as *mut u8,dispatch:0 as *mut u8,status:acquire_status}
+    }
+    let managed=acquire_status==0
+    return Platform {root_context:managed && acquired==1,managed:managed,handle:handle,dispatch:raw,status:0}
 }
 pub fn platform_status(p:&Platform)->i64 {return p.status}
 // Low-level FFI boundary. Pointer-bearing operations are internal to owners;
@@ -61,10 +70,14 @@ pub fn platform_call(p:&Platform,op:i64,a:i64,b:i64,c:i64,d:i64)->PlatformValue 
     return PlatformValue {value:value,status:status}
 }
 pub fn platform_close(p:Platform) with IO,Panic {
-    let Platform {handle,dispatch,status}=p
+    let Platform {root_context,managed,handle,dispatch,status}=p
     if status==0 {
         let call=dispatch as fn(i64,i64,i64,i64,i64)->i64
-        assert(call(3,0,0,0,0)==0)
+        if managed {
+            if root_context {assert(call(3,0,0,0,0)==0)}
+            let released=call(81,0,0,0,0)
+            assert(call(0,0,0,0,0)==0)
+        } else {assert(call(3,0,0,0,0)==0)}
         assert(dlclose(handle)==0)
     }
 }
