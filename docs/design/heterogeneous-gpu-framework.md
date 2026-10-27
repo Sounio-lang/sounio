@@ -1227,3 +1227,30 @@ XOFF=4294967289, REG8=4294967289, BODY=4294967289, PIPE=13, ST0=10, FSRC=1091567
 Gate. Job 18079, node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 762118edb8bc2920fa870a024ae6bf1f. SILICON PASS, EXIT:0. The node is idle.
 
 The `R_CUDA_CONST_FIELD22_37` record in `.nv.rel.action` was not varied. AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 48. Ampere encoding on the L4, Volta refused (2026-10-27, OBSERVED)
+
+There is no V100 on this cluster. The A5000 (sm_86) sits in job 17498, `gpu-guard-r740`, which asked for the Quadro and was allocated both GPUs and 72 CPUs, `OverSubscribe=NO`. That job was not cancelled. The L4 (sm_89) was idle. A cubin for compute capability 8.6 is accepted by 8.9. A cubin for 7.0 is not.
+
+ptxas 12.8.61 emitted the same `mov.u32` kernel for sm_70, sm_80, sm_86 and sm_89. The immediate move `IMAD.MOV.U32 R5, RZ, RZ, 0x7` is the word `24 74 05 ff 07 00 00 00 | ff 00 8e 07 00 e2 0f 00` on sm_80, sm_86 and sm_89. On sm_70 the same word is present, one slot later, and the kernel also contains `@!PT SHFL.IDX` and `STG.E.SYS` (opcode `86 73`, not `86 79`).
+
+`atlas_imad_mov_lo(5, 42)` replaced that low word in the sm_86 image. Job 18084, on the L4:
+
+- AMP_LOAD=1, AMP86=42.
+
+The f64 kernel at `--opt-level 0` has `DMUL R2, R2, R4`. The word `28 72 02 02 04 00 00 00` is the same in the sm_70, sm_80, sm_86 and sm_89 specimens. The high half of the second factor was the specimen 3.0 (`0x40080000`). The atlas wrote 5.0 (`0x40140000`). 2.0 times 5.0 is 10.0.
+
+- DMUL_LOAD=1, DMUL=4621819117588971520, the bits of 10.0.
+
+The sm_70 image was then loaded and not launched.
+
+- image rc=209, VOLTA_LOAD=0.
+
+209 is `CUDA_ERROR_NO_BINARY_FOR_GPU`. The context stayed alive: the line after it is SILICON PASS.
+
+This is not an A5000 run and not a V100 run. The f64 rate of the L4 is not the rate of a V100. The DMUL word in the Volta specimen matches the word the L4 executed, and the Volta container was refused.
+
+Gate. Job 18084, node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 a46e89b064041643bfde8eb7cc5cc63c. SILICON PASS, EXIT:0. The node is idle.
+
+The 0.0018 s threshold is not moved. This cut does not pass it.
