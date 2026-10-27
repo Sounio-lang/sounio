@@ -106,3 +106,18 @@ Some and None/default paths for both integer and floating options.
 After source/compiler identity guards passed. Executed ELF:
 154b3047900402c87174aca4ac98614b9c552fd1fe1946cd2f2bbbc8edc4d587.
 This export addition does not change the generic ownership/loan boundaries above.
+
+Slurm18772 completed0 and preserved the exact concrete-Option before/after
+tranche at
+`/orangefs/training/sounio-foundry/runs/stdlib-wave3-20261027/core/closed-export09/core-closed-export09.tar.gz`,
+SHA256 bd33c5a0b651096ed34f1ce3cdbe2004b48531a973629a6a56ee71f0614371eb.
+Its original source-file hashes and archive verification passed.
+
+The separate owner-views-wip-handoff01/source-unqualified.tar.gz in that same
+durable core evidence directory is source backup only:
+f51273c696cb9b1c54bef31b2dc2f9521f604a34550e219cba3e4d40e8456901.
+It preserves the unqualified generic HeapVec, borrowed view modules, paired
+positive/negative view probes, unchanged fullqualified-name witness and the
+earlier primitive-source witnesses. All12 input source hashes matched
+before/after packaging. No executable, lifetime safety or storage acceptance
+is inferred from that archive.
