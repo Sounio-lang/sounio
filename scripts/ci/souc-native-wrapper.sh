@@ -176,19 +176,24 @@ info() {
 souc_compile() {
   local src="$1"
   local out="$2"
-  local log
+  local log raw_rc=0
   if [[ "$RAW_MODE" == "modular" ]]; then
-    log="$("$RAW_SOUC" "$src" -o "$out" 2>&1)" || true
-    if [[ ! -s "$out" ]]; then
+    log="$("$RAW_SOUC" "$src" -o "$out" 2>&1)" || raw_rc=$?
+    # A partial ELF can exist after native codegen refusal. Never execute it.
+    if [[ "$raw_rc" != 0 || ! -s "$out" ]] \
+       || ! grep -qF "Compilation successful!" <<<"$log" \
+       || grep -qE "^NATIVE_REFUSAL([ :]|$)|^Error:|typecheck: failed" <<<"$log"; then
       printf '%s\ntypecheck: failed\n' "$log"
+      [[ "$raw_rc" != 0 ]] && return "$raw_rc"
       return 1
     fi
     printf '%s' "$log"
     return 0
   fi
-  log="$("$RAW_SOUC" "$src" "$out" 2>&1)" || true
-  if [[ ! -s "$out" ]] || ! grep -qF "compile: fns=" <<<"$log"; then
+  log="$("$RAW_SOUC" "$src" "$out" 2>&1)" || raw_rc=$?
+  if [[ "$raw_rc" != 0 || ! -s "$out" ]] || ! grep -qF "compile: fns=" <<<"$log"; then
     printf '%s\ntypecheck: failed\n' "$log"
+    [[ "$raw_rc" != 0 ]] && return "$raw_rc"
     return 1
   fi
   printf '%s' "$log"

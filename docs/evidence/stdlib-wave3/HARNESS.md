@@ -23,3 +23,11 @@ These are harness checks; they do not establish Sounio compiler or corpus passes
 Raw receipts are under the wave3 scratch packet, harness-qa-3 and
 harness-e2e-qa. Earlier setup attempts 18107 and 18110 are retained separately:
 the first used an absent Node path; the second started before its copy completed.
+
+The modular native wrapper now preserves the raw compiler exit status, requires
+the explicit compilation-success record and a nonempty artifact, and rejects
+NATIVE_REFUSAL even when a partial ELF and success record coexist. Slurm 18194
+preserved the previous false acceptance and rejected refusal, exit 9, signal 132,
+empty output, and absent success record. Both the fresh modular compiler and
+the canonical seed compiled and executed an unchanged real control successfully.
+The C++23 test double is tests/reference/stdlib_fake_compiler.cpp.
