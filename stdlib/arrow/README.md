@@ -2,7 +2,7 @@
 
 Native Apache Arrow IPC, written in Sounio. Metadata is FlatBuffers
 (`org.apache.arrow.flatbuf`, metadata versions V4 and V5). The stream and
-file encapsulations match the Arrow columnar IPC format that pyarrow reads.
+file encapsulations target the Apache Arrow columnar IPC format.
 
 This is not the Arrow C Data Interface. `dataframe::arrow_available` stays
 false; that hook is a separate FFI surface.
@@ -63,7 +63,7 @@ keys `ARROW:extension:name` and `ARROW:extension:metadata`.
 | `arrow.parquet.variant` | struct with non-null binary `metadata` and `value` and/or `typed_value` |
 | `arrow.timestamp_with_offset` | struct `timestamp` (UTC) then `offset_minutes` (`Int16`) |
 
-Tensor metadata uses the same compact JSON pyarrow writes (`shape`, then `permutation`, then `dim_names`). At most 4 dimensions. An extension name outside this list is kept and `arrow_ext_check` accepts it.
+Tensor metadata uses compact canonical JSON (`shape`, then `permutation`, then `dim_names`). At most 4 dimensions. An extension name outside this list is kept and `arrow_ext_check` accepts it.
 
 `arrow_batch_set_codec` selects lz4-frame or zstd body compression. Set
 feature `COMPRESSED_BODY` before the schema message is written. Each buffer
@@ -131,3 +131,36 @@ and an empty IPC buffer with a descriptor is a command-only open.
 Frames are uncompressed gRPC messages (one flag byte, a big-endian length,
 then the protobuf). This is not an HTTP/2 server. At most 9 frames. A
 compressed flag returns `-4`.
+
+## Independent C++ interoperability gate
+
+Run `scripts/arrow_ipc_gate.sh` (the compatibility entrypoint) or
+`scripts/arrow_cpp_gate.sh` with an official Arrow **26.0.0** C++ SDK:
+`ARROW_CPP_PREFIX=/absolute/sdk/root MADAROS_RAW_BIN=/absolute/current/raw
+scripts/arrow_ipc_gate.sh`. The prefix contains `usr/include` and
+`usr/lib/x86_64-linux-gnu`. The SDK must provide IPC, Flight, JSON,
+LZ4-frame and Zstandard support. A missing SDK fails; acceptance does not
+install or fall back to Python.
+
+The gate builds the C++23 judge, requires compile-time and runtime version
+26.0.0, and runs all five original Sounio producers. Each job receives private
+output paths through source copies whose reverse substitution must reproduce
+the originals byte for byte. Assertions, values and success markers remain
+unchanged. Original producer sources are never rewritten.
+
+`tests/reference/arrow_legacy_case_inventory.tsv` maps all four legacy
+judges to 30 required case groups. The official SDK checks files, streams,
+multiple batches, dictionaries, nested and scalar types, compression,
+canonical extensions and Flight descriptors/IPC payloads. Independent framing
+checks retain the protobuf truncation, varint, field-number and empty-header
+controls. An SDK-written logical mutant changes the first id from 1 to 9;
+the judge must reject that changed value.
+
+Set `STDLIB_ARROW_OUT` to a new absolute, literal-safe output directory.
+Receipts record source, derived fixture, compiler, executable, bound library
+and generated artifact hashes, phase exit statuses and final hash rechecks.
+The old Python files remain historical sources for the preservation inventory;
+the acceptance entrypoint never executes them.
+
+This gate qualifies the covered interoperability cases. Existing capacity and
+codec limits above remain part of the API.

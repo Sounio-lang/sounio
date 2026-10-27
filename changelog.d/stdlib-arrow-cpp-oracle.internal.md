@@ -1,0 +1,1 @@
+Replace the Arrow IPC acceptance entrypoint with a mandatory official Arrow 26.0.0 C++23 oracle. Preserve the four legacy judges' checks in a 30-case inventory, isolate producer output paths without altering assertions, hash source/artifact custody, and require rejection of a logical id mutant. Missing SDK support fails explicitly; no Python acceptance fallback runs.
