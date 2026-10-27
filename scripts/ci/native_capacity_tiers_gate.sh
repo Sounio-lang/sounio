@@ -8,7 +8,7 @@
 # the compiler reported success. The code buffer was already fail-closed (rc=19);
 # only the relocation side was silent.
 #
-# This gate proves, statically (see native_capacity_tiers_check.py):
+# This gate proves, statically (see native_capacity_tiers_check.mjs):
 #   1. each tier's array DECLARATION matches its named accessor (declarations must
 #      stay literals — Sounio array sizes are not expressions);
 #   2. no scattered duplicate literal bound-check survives, so the next capacity
@@ -65,7 +65,7 @@ set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 ROOT="$(dirname "$(dirname "$(dirname "$SELF")")")"
-CHECKER="$ROOT/scripts/ci/native_capacity_tiers_check.py"
+CHECKER="$ROOT/scripts/ci/native_capacity_tiers_check.mjs"
 
 EXPECT_CODE=134217728       # NC_BIG_CODE           128 MiB
 EXPECT_RELOC=2097152        # NC_FLAT_RELOC_* x4    2,097,152 entries
@@ -79,8 +79,8 @@ EXPECT_RETURN_JUMPS=16384  # NC_RETURN_JUMPS       >= IR_MAX_INSTRS (clause 10a,
 EXPECT_STRTAB=8192         # elf.sio StringTable   8 KiB (clause 10c, rc=28)
 EXPECT_DRV_LABEL=1024      # DRV_LABEL_* x3        driver labels (clause 10d, rc=6)
 
-if ! command -v python3 >/dev/null 2>&1; then
-  printf 'NATIVE_CAPACITY_TIERS_FAIL reason=python3_missing\n' >&2
+if ! command -v node >/dev/null 2>&1; then
+  printf 'NATIVE_CAPACITY_TIERS_FAIL reason=node_missing\n' >&2
   exit 1
 fi
 if ! test -f "$CHECKER"; then
@@ -90,7 +90,7 @@ fi
 
 # NOTE: the checker reads argv POSITIONALLY. Append new tiers at the END; putting
 # one in the middle silently rotates every tier that follows it.
-python3 "$CHECKER" "$ROOT" \
+node "$CHECKER" "$ROOT" \
   "$EXPECT_CODE" "$EXPECT_RELOC" "$EXPECT_ELF" "$EXPECT_LEGACY_ELF" "$ELF_BASE_ADDR" \
   "$EXPECT_LABEL" "$EXPECT_RODATA" \
   "$EXPECT_RETURN_JUMPS" "$EXPECT_STRTAB" "$EXPECT_DRV_LABEL"
