@@ -8,7 +8,7 @@ module native::frame
 
 use native::encode::*
 use native::reloc::{RelocationTable, reloc_table_new, patch_u32_le, ExternRelocTable, extern_reloc_table_new}
-use native::elf::{StringTable, string_table_new, SymbolData, symbol_data_new}
+use native::elf::{StringTable, string_table_new, SymbolData, symbol_data_new, ELF_STRTAB_OVERFLOW}
 use native::runtime_context::{runtime_context_global_slot_size}
 use native::target_policy::{native_target_policy_x86_allocatable_mask_for_reg}
 
@@ -356,11 +356,24 @@ pub var NC_FN_OFFSETS: [i64; 16384] = [0; 16384]
 // large struct offsets SIGSEGV in the seed compiler (the label_offsets
 // loop in compiler_new was enough). BSS, one live compile. compiler_new
 // resets them. Not safe for two simultaneously live NativeCompilers.
-pub var NC_RETURN_JUMPS: [i64; 16] = [0; 16]
+// Return-jump tier (#1646): one entry per `ret` the MIR emitter lowers to a
+// `jmp rel32` to the shared epilogue. It used to be [i64; 16] with no else, so
+// the 17th return's jump kept a 0 displacement and fell through. Every entry
+// comes from one machine instruction of one function, so a tier at least as
+// large as IR_MAX_INSTRS cannot overflow; the else-branches still raise
+// label_overflow (writer rc 22) rather than drop a jump.
+pub var NC_RETURN_JUMPS: [i64; 16384] = [0; 16384]
+pub fn nc_return_jump_capacity() -> i64 { 16384 }
 pub var NC_LABEL_OFFSETS: [i64; 256] = [0; 256]
 pub var NC_LABEL_PATCH_CODE_OFFSETS: [i64; 256] = [0; 256]
 pub var NC_LABEL_PATCH_LABEL_IDS: [i64; 256] = [0; 256]
-pub var NC_IS_FLOAT_REG: [i64; 2048] = [0; 2048]
+// Float typing (#1646): 1 float, 2 int, per vreg. It was [i64; 2048] (NC_MAX_VREGS)
+// while the lowerer accepts IR_MAX_VREGS (16384) vregs, so every mark past 2048
+// was dropped and every read there answered "unknown": a float copy, a float
+// field or a float array base above vreg 2048 lost its typing. Sized to
+// NC_VREG_LIMIT (== IR_MAX_VREGS); the lowerer refuses anything larger
+// (NATIVE_REFUSAL kind=ir_vreg_limit), so no vreg the backend sees is untyped.
+pub var NC_IS_FLOAT_REG: [i64; 16384] = [0; 16384]
 pub var NC_REG_TYPE: [i64; 2048] = [0; 2048]
 pub var NC_FIELD_FLOAT_BASE_REGS: [i64; 256] = [0; 256]
 pub var NC_FIELD_FLOAT_INDICES: [i64; 256] = [0; 256]
@@ -599,6 +612,14 @@ fn nc_reg_bit_mask(bit: i64) -> i64 {
     m
 }
 
+pub fn nc_is_float_reg_clear() with Mut {
+    var i: i64 = 0
+    while i < NC_VREG_LIMIT {
+        NC_IS_FLOAT_REG[i as usize] = 0
+        i = i + 1
+    }
+}
+
 pub fn nc_reg_class_reset() with Mut {
     var i: i64 = 0
     while i < NC_REG_CLASS_HIGH_WATER {
@@ -662,6 +683,7 @@ pub fn compiler_new() -> NativeCompiler with Mut {
     NC_RELOC_UNKNOWN_KIND_FIRST = 0
     out.label_overflow = false
     NC_V2_LABEL_OVERFLOW_FN = -1
+    ELF_STRTAB_OVERFLOW = 0
     out.relocs = reloc_table_new()
     out.flat_reloc_count = 0
     out.flat_rodata_len = 0
@@ -719,9 +741,6 @@ pub fn compiler_new() -> NativeCompiler with Mut {
         NC_LABEL_PATCH_LABEL_IDS[i as usize] = -1
         NC_FIELD_FLOAT_BASE_REGS[i as usize] = -1
         NC_FIELD_FLOAT_INDICES[i as usize] = -1
-        if i < 16 {
-            NC_RETURN_JUMPS[i as usize] = 0
-        }
         i = i + 1
     }
     i = 0
@@ -733,10 +752,10 @@ pub fn compiler_new() -> NativeCompiler with Mut {
     while i < NC_MAX_VREGS {
         NC_VREG_TO_PREG[i as usize] = -2
         NC_VREG_SPILL_SLOTS[i as usize] = -1
-        NC_IS_FLOAT_REG[i as usize] = 0
         NC_REG_TYPE[i as usize] = 0
         i = i + 1
     }
+    nc_is_float_reg_clear()
     nc_reg_class_reset()
     out
 }
@@ -752,19 +771,16 @@ pub fn reset_function_state_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
         NC_LABEL_OFFSETS[i as usize] = -1
         NC_LABEL_PATCH_CODE_OFFSETS[i as usize] = 0
         NC_LABEL_PATCH_LABEL_IDS[i as usize] = -1
-        if i < 16 {
-            NC_RETURN_JUMPS[i as usize] = 0
-        }
         i = i + 1
     }
     (*nc).label_patch_count = 0
     (*nc).current_frame_size = 0
     var j = 0
     while j < NC_MAX_VREGS {
-        NC_IS_FLOAT_REG[j as usize] = 0
         NC_REG_TYPE[j as usize] = 0
         j = j + 1
     }
+    nc_is_float_reg_clear()
     nc_reg_class_reset()
     (*nc).field_float_count = 0
     var fj = 0
@@ -833,9 +849,11 @@ pub fn record_return_jump(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 pub fn record_return_jump_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
     let jmp_pos = (*nc).code.len
     (*nc).code = emit_jmp_rel32((*nc).code)
-    if (*nc).return_jump_count < 16 {
+    if (*nc).return_jump_count < nc_return_jump_capacity() {
         NC_RETURN_JUMPS[(*nc).return_jump_count as usize] = jmp_pos + 1
         (*nc).return_jump_count = (*nc).return_jump_count + 1
+    } else {
+        (*nc).label_overflow = true
     }
 }
 
@@ -847,7 +865,7 @@ pub fn patch_return_jumps(nc: NativeCompiler, epilogue_offset: i64) -> NativeCom
 
 pub fn patch_return_jumps_mut(nc: &! NativeCompiler, epilogue_offset: i64) with Mut, Panic, Div {
     var i = 0
-    while i < (*nc).return_jump_count && i < 16 {
+    while i < (*nc).return_jump_count && i < nc_return_jump_capacity() {
         let imm_offset = NC_RETURN_JUMPS[i as usize]
         if imm_offset > 0 && imm_offset + 4 <= (*nc).code.len
             && NC_BIG_CODE[(imm_offset - 1) as usize] == (0xe9 as i8) {

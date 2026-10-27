@@ -10,7 +10,7 @@ files say in comments that they use no `sorry` or no axioms).
 
 | Count | Value |
 |---|---:|
-| `.lean` files scanned | 310 |
+| `.lean` files scanned | 315 |
 | `sorry` in code | 0 |
 | `axiom` declarations | 59, in 10 files |
 | `native_decide` uses | 741, in 110 files |

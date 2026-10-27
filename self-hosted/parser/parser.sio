@@ -7,10 +7,11 @@ use lexer::token::*
 use lexer::cursor::*
 use lexer::tables::{keyword_lookup}
 
-// Keep token storage out of Parser state so Parser method calls don't
-// repeatedly copy a 65k token array by value.
-var PARSER_TOKENS: [Token; 2097152] = [Token::new(); 2097152]
-// Boot4-compatible parallel scalar arrays (boot4 can't index struct-typed global arrays)
+// Token storage lives in the parallel scalar arrays below, outside Parser state.
+// (A `[Token; 2097152]` global, PARSER_TOKENS, used to sit here unread: nothing
+// called its accessor. Once lean_single gave global struct arrays real element
+// storage (#1655), its `[Token::new(); N]` initializer would have written ~640 MB
+// at every compiler start, so it was removed rather than kept as dead weight.)
 var PT_KIND: [TokenKind; 2097152] = [TokenKind::Eof; 2097152]
 var PT_KIND_CODE: [i64; 2097152] = [0; 2097152]
 var PT_START: [i64; 2097152] = [0; 2097152]
@@ -108,18 +109,22 @@ pub fn parser_new() -> Parser {
     }
 }
 
-pub fn parser_set_tokens(tokens: [Token; 2097152], token_count: i64) with Mut, Panic, Div {
+// #1156: the token array is taken by reference. By value, every call copied
+// 2,097,152 tokens (~688 MB: a Token carries a 256-byte text buffer) into
+// the callee frame, and a program that merely contains this function makes the
+// native lowerer materialise that aggregate.
+pub fn parser_set_tokens(tokens: &[Token; 2097152], token_count: i64) with Mut, Panic, Div {
     var i: i64 = 0
     while i < token_count && i < 2097152 {
         // Write to parallel scalar arrays (boot4-compatible)
-        PT_KIND[i as usize] = tokens[i as usize].kind
-        PT_KIND_CODE[i as usize] = tokens[i as usize].kind as i64
-        PT_START[i as usize] = tokens[i as usize].start
-        PT_END[i as usize] = tokens[i as usize].end
-        PT_LINE[i as usize] = tokens[i as usize].line
-        PT_COL[i as usize] = tokens[i as usize].col
-        PT_INT_VALUE[i as usize] = tokens[i as usize].int_value
-        PT_TEXT_LEN[i as usize] = tokens[i as usize].text_len
+        PT_KIND[i as usize] = (*tokens)[i as usize].kind
+        PT_KIND_CODE[i as usize] = (*tokens)[i as usize].kind as i64
+        PT_START[i as usize] = (*tokens)[i as usize].start
+        PT_END[i as usize] = (*tokens)[i as usize].end
+        PT_LINE[i as usize] = (*tokens)[i as usize].line
+        PT_COL[i as usize] = (*tokens)[i as usize].col
+        PT_INT_VALUE[i as usize] = (*tokens)[i as usize].int_value
+        PT_TEXT_LEN[i as usize] = (*tokens)[i as usize].text_len
         i = i + 1
     }
 }
@@ -138,15 +143,7 @@ pub fn parser_set_token_at(idx: i64, tok: Token) with Mut, Panic {
     }
 }
 
-fn parser_get_token_at(idx: i64) -> Token with Panic {
-    if idx >= 0 && idx < 2097152 {
-        PARSER_TOKENS[idx as usize]
-    } else {
-        Token::with_kind(TokenKind::Eof, 0, 0, 0, 0)
-    }
-}
-
-// Boot4-safe: write token fields directly into PARSER_TOKENS without creating Token local
+// Boot4-safe: write token fields directly into the PT_* arrays without creating a Token local
 // Avoids boot4's 4MB stack frame for functions with IS_SPTR=4 locals
 pub fn parser_set_token_scalar(idx: i64, kind: TokenKind, start: i64, end: i64, line: i64, col: i64) with Mut, Panic {
     if idx >= 0 && idx < 2097152 {
@@ -176,10 +173,8 @@ fn parser_set_token_float_value(idx: i64, val: f64) with Mut, Panic {
 }
 
 fn parser_set_token_text_byte(idx: i64, byte_idx: i64, val: i8) with Mut, Panic {
-    // PARSER_TOKENS struct write skipped for stage0 compatibility
     // Token text is stored in PT_TEXT_* parallel arrays instead
     if idx >= 0 && idx < 2097152 && byte_idx >= 0 && byte_idx < 256 {
-        // Skip: PARSER_TOKENS[idx as usize].text[byte_idx as usize] = val
         let dummy = val
     }
 }
@@ -517,6 +512,26 @@ fn tk_is_item_keyword_lower(k: TokenKind) -> bool {
         || k == TokenKind::AlternativeFrontierLower
         || k == TokenKind::DecisionPolicyLower
         || k == TokenKind::DeferralPolicyLower
+}
+
+// The fallback arm of parse_prefix used to set had_error and return in
+// silence, so `let x = @y` failed with no line and no reason. Same wording
+// family as Parser::expect, same 20-message cap.
+pub fn parser_report_expected_expression(pos: i64, error_count: i64) with Mut, IO, Panic, Div {
+    if error_count > 20 {
+        return
+    }
+    print("parse error: expected expression at line ")
+    if pos >= 0 && pos < 2097152 {
+        print_int(PT_LINE[pos as usize])
+        print(":")
+        print_int(PT_COL[pos as usize])
+        print(": found ")
+        print(tk_display_name(pt_read_kind(pos)))
+        print("\n")
+    } else {
+        print("unknown\n")
+    }
 }
 
 pub fn pt_read_kind(idx: i64) -> TokenKind with Mut, Panic, Div {
@@ -1338,6 +1353,18 @@ fn pfl_slow(sig: i64, dexp: i64) -> f64 with Mut, Panic, Div {
     // while every normal value was already exact.
     var want: i64 = 53
     if e < 0 - 1022 { want = e + 1075 }
+    // #2769: want == 0 is e == -1075, i.e. the value is in [2^-1075, 2^-1074):
+    // no significand bit is kept, but the value is at least half the smallest
+    // subnormal, so it still has to be ROUNDED, not flushed. Above the half
+    // (N/D > 1) it rounds up to 2^-1074 (4.9406564584124654e-324); exactly the
+    // half is a tie and rounds to even, 0. Returning 0.0 here read every
+    // literal in that interval -- including 4.9406564584124654e-324 and 3e-324
+    // -- as zero, silently.
+    if want == 0 {
+        pfl_sub()
+        if pfl_is_zero(true) { return 0.0 }
+        return pfl_scale2(1.0, 0 - 1074)
+    }
     if want < 1 { return 0.0 }
     if want > 53 { want = 53 }
 
@@ -2050,11 +2077,20 @@ impl Parser {
                 print_int(PT_LINE[p.pos as usize])
                 print(":")
                 print_int(PT_COL[p.pos as usize])
-                print(" expected=")
+                // Names, not numbers: `kind as i64` is a TokenKind discriminant
+                // while PT_KIND_CODE holds a flat lexer code for literals and
+                // operators, so the two raw numbers came from different
+                // numberings (docs/spec/2026-10 LEX-001). Both are kept in the
+                // brackets, labelled, for tools that read them.
+                print(": expected ")
+                print(tk_display_name(kind))
+                print(", found ")
+                print(tk_display_name(p.peek()))
+                print(" [expected kind=")
                 print_int(kind as i64)
-                print(" actual=")
+                print(", found code=")
                 print_int(PT_KIND_CODE[p.pos as usize])
-                print("\n")
+                print("]\n")
             } else {
                 print("unknown\n")
             }
@@ -2111,6 +2147,19 @@ impl Parser {
             Span::new(start.file_id, start.start, PT_END[self.pos as usize])
         } else {
             Span::new(start.file_id, start.start, start.end)
+        }
+    }
+
+    // Same end rule as span_from, but the start byte is a scalar. Expr.span on
+    // the native runtime can be arena index 0 with a null payload; reading
+    // start.file_id then SIGSEGVs at address 0x20 (slot 4). That is the Gen3
+    // preflight crash, in parse_expr_bp, on the first binary operator of
+    // main.sio. Token tables are already live at that point.
+    fn span_from_off(self: Parser, start_off: i64) -> Span with Panic, Div {
+        if self.pos < self.token_count {
+            Span::new(0, start_off, PT_END[self.pos as usize])
+        } else {
+            Span::new(0, start_off, start_off)
         }
     }
 

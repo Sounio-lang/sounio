@@ -20,7 +20,7 @@
 #   //@ xfail-exit: N         — the known failure's souc exit code must be N
 #                               (124 = timeout); mismatch is a fresh FAIL
 #   //@ skip-if: CONDITION    — conditional skip (e.g., skip-if: no-gpu)
-#   //@ requires: FEATURE     — feature dependency (gpu|llvm|madaros|lean_single|slow)
+#   //@ requires: FEATURE     — feature dependency (gpu|llvm|madaros|lean_single|slow|vendor-material)
 #   //@ flaky                 — known flaky test
 #   //@ timeout: SECONDS      — override default timeout
 #
@@ -163,6 +163,7 @@ FILTER_MODE="contains"
 VERBOSE=""
 FORMAT="text"
 JOBS="${SOUNIO_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+JOBS_CLI_SET=0
 LIST_TESTS=0
 TEST_LIST_FILE=""
 
@@ -193,6 +194,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --jobs)
             JOBS="$2"
+            JOBS_CLI_SET=1
             shift 2
             ;;
         --list-tests)
@@ -210,6 +212,83 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+available_cpus() {
+    if [[ -n "${SOUNIO_TEST_CPU_COUNT:-}" ]]; then
+        printf '%s\n' "$SOUNIO_TEST_CPU_COUNT"
+    else
+        nproc 2>/dev/null || echo 4
+    fi
+}
+
+available_memory_bytes() {
+    if [[ -n "${SOUNIO_TEST_MEMORY_BYTES:-}" ]]; then
+        printf '%s\n' "$SOUNIO_TEST_MEMORY_BYTES"
+    elif [[ -r /sys/fs/cgroup/memory.max ]]; then
+        local limit current
+        read -r limit < /sys/fs/cgroup/memory.max
+        if [[ "$limit" =~ ^[0-9]+$ ]]; then
+            current=0
+            if [[ -r /sys/fs/cgroup/memory.current ]]; then
+                read -r current < /sys/fs/cgroup/memory.current
+            fi
+            [[ "$current" =~ ^[0-9]+$ ]] || current=0
+            (( current < limit )) && printf '%s\n' "$((limit - current))" || printf '1\n'
+        else
+            awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo
+        fi
+    elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+        local limit current host_memory
+        read -r limit < /sys/fs/cgroup/memory/memory.limit_in_bytes
+        current=0
+        [[ ! -r /sys/fs/cgroup/memory/memory.usage_in_bytes ]] \
+            || read -r current < /sys/fs/cgroup/memory/memory.usage_in_bytes
+        if [[ "$limit" =~ ^[0-9]+$ && "$current" =~ ^[0-9]+$ && "$current" -lt "$limit" ]]; then
+            host_memory="$(awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo)"
+            if [[ "$host_memory" =~ ^[1-9][0-9]*$ ]]; then
+                local remaining=$((limit - current))
+                if (( remaining > host_memory )); then
+                    remaining="$host_memory"
+                fi
+                printf '%s\n' "$remaining"
+            else
+                printf '1\n'
+            fi
+        else
+            printf '1\n'
+        fi
+    else
+        awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo
+    fi
+}
+
+if [[ ! "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: --jobs must be a positive integer" >&2
+    exit 2
+fi
+
+if [[ -n "${CI:-}" && "${SOUNIO_TEST_JOBS_DYNAMIC:-1}" != "0" ]]; then
+    JOBS_CAP="${SOUNIO_TEST_JOBS_CAP:-8}"
+    if [[ ! "$JOBS_CAP" =~ ^[1-9][0-9]*$ ]]; then
+        echo "error: SOUNIO_TEST_JOBS_CAP must be a positive integer" >&2
+        exit 2
+    fi
+    CPU_COUNT="$(available_cpus)"
+    MEMORY_BYTES="$(available_memory_bytes)"
+    if [[ ! "$CPU_COUNT" =~ ^[1-9][0-9]*$ || ! "$MEMORY_BYTES" =~ ^[1-9][0-9]*$ ]]; then
+        echo "error: could not determine positive CPU and memory limits for dynamic test jobs" >&2
+        exit 2
+    fi
+    MEMORY_JOBS=$((MEMORY_BYTES / (2 * 1024 * 1024 * 1024)))
+    (( MEMORY_JOBS > 0 )) || MEMORY_JOBS=1
+    SCALED_JOBS=$((2 * CPU_COUNT))
+    (( SCALED_JOBS > MEMORY_JOBS )) && SCALED_JOBS="$MEMORY_JOBS"
+    (( SCALED_JOBS > JOBS_CAP )) && SCALED_JOBS="$JOBS_CAP"
+    if (( JOBS_CLI_SET == 1 && JOBS > SCALED_JOBS )); then
+        SCALED_JOBS="$JOBS"
+    fi
+    JOBS="$SCALED_JOBS"
+fi
 
 # Test counters
 PASS=0
@@ -316,7 +395,7 @@ test_matches_filter() {
 }
 
 # Function to run a single test
-run_test() {
+_run_test_case() {
     local file="$1"
     local idx="$2"
     local output_file="$TEST_TMP/result_$idx.json"
@@ -530,13 +609,37 @@ run_test() {
             # is set; the nightly slow-lane job sets it, with a much larger
             # job timeout budget.
             slow) [[ -z "${SOUNIO_SLOW_TESTS_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:slow\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
+            # `requires: vendor-material` — the test reads third-party material
+            # (vendor PDFs, datafiles) that the repository cannot carry, named one
+            # path per line in its `.args` sidecar (repo-relative or absolute).
+            # Skipped, naming the first missing path, unless every path exists;
+            # then the header's mode (check-only) applies, and
+            # scripts/ci/pireus_argv_tests_gate.sh runs it with that argv. A
+            # missing sidecar is a test-authoring error, not a skip (#2820).
+            vendor-material)
+                local vm_args="${file}.args"
+                if [[ ! -f "$vm_args" ]]; then
+                    echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"requires: vendor-material but no .args sidecar names the material\",\"idx\":$idx}" > "$output_file"
+                    return
+                fi
+                local vm_missing="" vm_line vm_path
+                while IFS= read -r vm_line || [[ -n "$vm_line" ]]; do
+                    [[ -z "$vm_line" ]] && continue
+                    vm_path="$vm_line"; [[ "$vm_path" == /* ]] || vm_path="$ROOT_DIR/$vm_path"
+                    if [[ ! -e "$vm_path" ]]; then vm_missing="$vm_line"; break; fi
+                done < "$vm_args"
+                if [[ -n "$vm_missing" ]]; then
+                    echo "{\"status\":\"skip\",\"reason\":\"requires:vendor-material (missing $vm_missing)\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"
+                    return
+                fi
+                ;;
             # An unrecognized requires value must not fall through silently: a typo
             # (e.g. `requires: madros`) would otherwise run the test against
             # whatever engine is present instead of being gated as intended, with
             # the annotation asserting nothing -- indistinguishable from the
             # vacuous-match defect this PR exists to remove.
             *)
-                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros|lean_single|slow)\",\"idx\":$idx}" > "$output_file"
+                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros|lean_single|slow|vendor-material)\",\"idx\":$idx}" > "$output_file"
                 return
                 ;;
         esac
@@ -829,9 +932,12 @@ run_test() {
     json="$json}"
     echo "$json" > "$output_file"
     if [[ -n "${SOUNIO_TEST_RESULTS_DIR:-}" ]]; then
+        printf '%s\n' "$output" > "$SOUNIO_TEST_RESULTS_DIR/result_$idx.log"
         cp "$output_file" "$SOUNIO_TEST_RESULTS_DIR/"
     fi
 }
+
+source "$ROOT_DIR/scripts/dev/sio_test_case.sh"
 
 # Collect all test files
 TEST_FILES=()

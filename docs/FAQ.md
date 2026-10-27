@@ -2,8 +2,8 @@
 topic_id: repo.docs.faq
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.faq
 -->
 
@@ -23,9 +23,10 @@ Common questions about Sounio and epistemic computing.
 > canonical `epistemic::knowledge` API. `mul_epistemic` and `fuse_measurements`
 > are part of `epistemic::lib` but are not exercised by that test
 > (`fuse_measurements` is private; `mul_epistemic` is public but untested).
-> `with_confidence` operators and
-> units-as-type-parameters are aspirational in source and absent from the
-> checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
+> `with_confidence` operators are not the checked public surface.
+> Units are a prototype. KL-13 closed derived annotations; default Madaros
+> still rejects `let d: m = 100.0` (#2752). They do not yet prevent every
+> dimensional error.
 
 ## Table of Contents
 
@@ -50,22 +51,22 @@ Sounio is a systems programming language designed for **epistemic computing**—
 Existing languages treat uncertainty as an afterthought (manual error propagation, separate libraries). Sounio makes epistemic integrity **foundational**:
 - `Epistemic` (stdlib `epistemic::knowledge`) tracks point estimate, variance, and integer confidence 0–1000; free-fn arithmetic (`ep_add`, `ep_mul`, ...) propagates variance via GUM delta method
 - Effect system tracks computational side effects
-- Units of measure prevent dimensional errors
+- Units of measure are a prototype. They reject some mismatches and still accept others (#2751, #2752)
 - First-class support for scientific workflows
 
 ### Is Sounio production-ready?
 
-**Current checked-artifact status (`souc 1.0.0-beta.4`)**: suitable for
-research, evaluation, and artifact-backed workflows, but still not "everything
-in the source tree is equally public".
+**Current checked artifact (`Madaros v0.80.0`, measured 2026-10-15)**: suitable for
+research and artifact-backed workflows, but not "everything in the source tree is public".
+`souc --version` does not print `1.0.0-beta.4`. Native execution is Linux x86-64.
 - ✅ Core language and science lanes are artifact-backed
-- ✅ Checked GPU compiler profile exists
+- GPU: not re-run on 2026-10-15. `TOUR.md` §6 measured an empty-body PTX skeleton. The root README records scoped Spark evidence only.
 - 🚧 No JIT tier — Cranelift is not compiled in any checked artifact (measured 2026-08-27)
 - ✅ The repo-wide checkpoint now includes self-hosted render/bootstrap proofs and the skills/dispatch wave
 - 🚧 Advanced or alternate-build features such as LLVM, SMT, and LSP remain profile-dependent
 - 📋 Public docs should still track the exact artifact and gate behind each claim
 
-See [Current State](../README.md#current-state) for details.
+See [Honest Status](../README.md#honest-status) for details.
 
 ### How does Sounio compare to Rust?
 
@@ -115,13 +116,7 @@ Not yet. Planned for post-1.0. Design goals:
 
 ### Can I use async/await?
 
-Yes! Async is part of the effect system:
-```sio
-fn fetch_data(url: string) -> Result<Data> with Async {
-    let response = http.get(url).await
-    parse(response)
-}
-```
+Not as a checked user surface. `http.get(url).await` and payload `Result<Data>` are not backed by a `run-pass` test. Do not copy them. The checked effects are `IO`, `Mut`, `Div`, and `Panic`.
 
 ### Does Sounio have a package manager?
 

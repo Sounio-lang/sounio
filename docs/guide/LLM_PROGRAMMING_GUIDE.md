@@ -2,659 +2,834 @@
 topic_id: repo.docs.guide.llm-programming-guide
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.llm-programming-guide
 -->
 
-# Sounio LLM Programming Guide
+# Write Sounio with a language model
 
-Definitive syntax reference for LLMs writing Sounio code. Every example is verified from `tests/run-pass/` or working stdlib files.
+[Ελληνικά](LLM_PROGRAMMING_GUIDE_EL.md) · [Português](LLM_PROGRAMMING_GUIDE_PT.md)
 
-**Sounio is NOT Rust.** The syntax looks similar but semantics differ. When in doubt, check real `.sio` files.
+**Edition:** October 2026. **Prepared:** 2026-10-16.
+**Source baseline:** `f5b2c5850be9f3d3995719ffcade44a6d851658a`.
 
-## 1. Hello World
+This is a practical guide for generating, explaining, repairing, and verifying
+Sounio programs. It is designed to work as retrieved context for small models
+as well as a deep reference for stronger coding agents. Start with a complete
+working program, change one thing, and verify the result. Do not translate a
+Rust example and hope that similar punctuation implies identical semantics.
 
+The language [specification](../spec/LANGUAGE_SPECIFICATION.md) defines the
+reference's distinctions between adopted contracts, source observations, and
+open decisions. This guide teaches how to use that material; it is not a
+second, simplified language specification.
+
+**Execution scope:** the [example receipt](../llm-guide/reviews/example-execution.md)
+records 50 invocations over 47 distinct source files on the identified
+committed Madaros Linux prebuilt: 30 runtime contracts matched, four check-only
+contracts matched, eight intended refusals matched, and eight cases failed
+their intended assertions. The failures are quarantined, not promoted into
+working recipes. A source rebuild, every-target validation, numerical
+certification, and a guarantee about every language model are not established.
+
+[Português](LLM_PROGRAMMING_GUIDE_PT.md) ·
+[Cookbook](../llm-guide/cookbook.md) ·
+[Complete example atlas](../llm-guide/examples.md) ·
+[Example manifest](../llm-guide/example-manifest.json) ·
+[Errors](../llm-guide/error-catalog.md) ·
+[Library discovery](../llm-guide/stdlib-index.md)
+
+For a task-sized, copyable starting context, use the
+[thirty-task trilingual curriculum](../llm-guide/task-playbook.md):
+`node scripts/docs/sounio_task_context.mjs show first-program --lang en`.
+It emits complete reference/control sources, historical profile-specific
+results, adaptation steps and pitfalls without running a compiler or LLM.
+The tasks reuse existing programs; they are not thirty new executions.
+The [translation and repair guide](../llm-guide/translation-and-repair.md)
+explains intent-preserving ports, stage diagnosis and bounded repairs.
+
+<!-- llm:section orientation -->
+## 1. Give the model the right amount of context
+
+Use three layers rather than feeding the model the entire repository:
+
+| Layer | Contents | Use |
+|---|---|---|
+| Start | [`llms.txt`](../../llms.txt), the task, environment, and one complete example | A first program or small edit. |
+| Task | The relevant section here, one recipe, actual API declarations and a refusal control | Imports, ownership, scientific values, or a compiler error. |
+| Deep | The named specification rules, implementation paths, and execution receipts | Semantic disagreement, target support, precision, or a compiler investigation. |
+
+A complete task packet names the input, required result, permitted changes,
+engine/artifact, host/target, library root, and what counts as success.
+“Implement a vector” is not the same task as “use a bounded floating container
+whose capacity and failure behavior are known.” Resolve that distinction
+before choosing a representation.
+
+Keep the packet small enough that the model can attend to the whole example.
+Retrieve one relevant source program and its dependencies. A list of filenames,
+a fragment missing declarations, or a large context dump does not teach a model
+how to finish a program. The atlas contains full files so that names, effects,
+return conventions, and imports remain visible.
+
+For an ordinary self-contained program, the first four examples in this guide
+are sufficient to begin. For library use, also read the actual selected
+declaration and importing consumer. For unfamiliar scientific semantics,
+retrieve the corresponding specification section rather than inventing a
+simpler meaning.
+
+When the request is already clear, make a reasonable choice and declare it;
+do not stop at every editorial detail. Ask only when the choice changes
+semantics, data, the required environment, or authorized limits.
+
+<!-- llm:section workflow -->
+## 2. First success, then a controlled edit
+
+### 2.1 Identify the executable before trusting an outcome
+
+Use the [first-success preflight](../../llms.txt#first-success). It establishes
+the requested profile, compatible host, resolved raw artifact and digest,
+library root, and expected hello contract **before** the check/run pair.
+The public launcher is `./bin/souc`; its raw artifact is not the launcher
+shell script. Hashing the wrapper does not identify the compiler it selects.
+
+The documented baseline is the committed Linux x86-64 Madaros prebuilt.
+A source-built compiler or Apple Silicon native artifact is a different
+profile. The [macOS ARM64 guide](../compiler/MADAROS_MACOS_ARM64.md) explains
+native setup. Do not attempt an incompatible ELF, substitute a seed compiler,
+or delete an override just to obtain a pass.
+
+Use commands in an environment authorized for the task. Public recipes do
+not override a repository or session rule requiring remote execution. In this
+repository's operational work, full and stress validation belongs on
+Foundry/Slurm; an illustrative command is not permission to run that workload
+on a shared workspace or notebook.
+
+### 2.2 A complete first program
+
+Source: [`examples/hello.sio`](../../examples/hello.sio), manifest ID `hello`.
+The intended exit is zero; stdout contains `Hello, Sounio`. Compiler logging
+can accompany the program's output, so the manifest asserts a substring rather
+than inventing exact whole-stream equality.
+
+<!-- llm:example hello -->
 ```sio
-// Source: tests/run-pass/hello.sio
-fn main() with IO {
-    println("Hello, Sounio!")
+// First Sounio program
+
+fn main() -> i32 with IO {
+    println("Hello, Sounio")
+    return 0
 }
 ```
 
-## 2. Variables
+After the preflight, from the repository root:
 
-```sio
-let x = 5                    // immutable
-var y: i32 = 10              // mutable (can reassign)
-y = y + 1                    // OK — var allows reassignment
-
-// NO semicolons
-// let x = 5;   <-- WRONG
+```sh
+./bin/souc check examples/hello.sio
+./bin/souc run examples/hello.sio
 ```
 
-**No `let mut`** — use `var`.
+The receipt records this example's result. A model writing a new program must
+obtain a new result for the changed file; it must not copy this expected
+greeting into its report and call that observation.
 
-## 3. Types
+### 2.3 The edit/check/observe loop
 
-### Primitives
-`i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f32`, `f64`, `bool`, `char`
+1. Read the full reference program and its declared effects.
+2. Write a small complete change in the authorized file.
+3. Check that changed file, not the original reference by accident.
+4. Read the complete diagnostic and repair the earliest relevant cause.
+5. For an executable task, run the changed program and assert the task result.
+6. Include a nearby positive control and an intended-refusal control where
+   they distinguish the claimed rule.
+7. Report what ran and what remains unestablished.
 
-### Fixed-Size Arrays [Production]
+A check result supports the stage reached by that adapter. Emission supports
+artifact construction. Execution supports the asserted observations. A linked
+test, a successful parser recovery, a compiler version, or an exit code alone
+cannot stand in for all of those.
+
+### 2.4 Do not combine incompatible tool evidence
+
+`sounio_check` is an MCP tool when configured, not a guaranteed shell command.
+Its server can run in a different environment. Read the
+[MCP attribution procedure](../../llms.txt#mcp-profile-attribution) before
+combining its output with terminal results.
+
+The current MCP check response does not itself expose the raw compiler digest
+and library-root identity. The run implementation can precheck before applying
+per-run environment overrides. A single tool call therefore does not prove a
+single check/run profile. Obtain server-side identity under the effective
+environment, or label attribution unknown and repeat the pair through one
+identified CLI profile. Do not invent missing response fields.
+
+<!-- llm:section syntax -->
+## 3. Learn Sounio spelling, not Rust substitutions
+
+| Model habit | Sounio procedure |
+|---|---|
+| Write `let mut value` | Use `var value` for a reassignable binding. |
+| Write `&mut value` | Use the selected exclusive-reference spelling `&!value`. |
+| Use `println!` or `assert!` | Call `println` or `assert` as ordinary operations. |
+| Delete every semicolon | Do not: array types/repetition use `;`, and relevant statement positions accept it. |
+| Assume every method needs a receiver | Instance receivers are explicit; an associated constructor can have no `self` receiver. |
+| Add Rust attributes or a derive macro | Find the actual Sounio declaration/test mechanism instead of translating a foreign feature. |
+| Use Rust-style format specifiers (`{:.2}`, `{0}`, `{name}`) | `println("x={} y={}", x, y)` takes bare `{}` placeholders only, one per argument, with `{{`/`}}` for literal braces; the format must be a string literal and the counts must match (ADR-013). With a single argument the string prints verbatim. |
+| Ban generics, traits, or closures entirely | Inspect their bounded implementation and the selected artifact's witnesses. |
+| Promise every parsed construct executes | Trace checking, lowering, emission, and runtime support separately. |
+
+Bindings can have explicit types or inferred initializer types. Function
+parameters need their declared types in the selected syntax. Keep names and
+declarations complete; do not rely on a placeholder helper being supplied by
+the compiler. Static constructors and instance methods have different
+signatures.
+
+Newlines and optional punctuation are parser rules, not a whitespace cleanup
+exercise. A leading operator, optional return operand, or multiline expression
+can cross a lookahead boundary. Use a nearby complete fixture and consult the
+[lexical/syntax chapter](../spec/2026-10/01-lexical-syntax-and-modules.md)
+when a parse fails. Do not introduce an untested syntax workaround and claim it
+is the language rule.
+
+Treat strings, characters, byte arrays, foreign string handles, and source
+names as distinct representations. A value printed successfully is not
+necessarily a round-trippable serialization. A different language's string
+interpolation or Unicode-indexing convention is not evidence for Sounio.
+
+<!-- llm:section types -->
+## 4. Choose representations deliberately
+
+### 4.1 Scalar and compound types
+
+Integer and floating spellings identify language types, not an automatically
+portable overflow or rounding contract. Use the requested width and format.
+Wide floating values are not double-double or quad-double correction records,
+and a narrower fallback does not preserve a request for wide precision.
+
+Arrays, tuples, structs, enums, references, functions, and library records have
+different construction, access, ownership, and ABI rules. A type name accepted
+by a checker does not establish every operation or target layout. Consult the
+[type chapter](../spec/2026-10/02-types-generics-and-ownership.md) and
+[numerics chapter](../spec/2026-10/05-numerics-units-and-algebra.md).
+
+### 4.2 A complete struct program
+
+Source: [`examples/native/struct_basic.sio`](../../examples/native/struct_basic.sio),
+manifest ID `struct`. Its bounded runtime assertion is exit zero and stdout
+containing `7`; that substring is weaker than a full serialization contract.
+
+<!-- llm:example struct -->
 ```sio
-var buffer: [u8; 256] = [0; 256]
-let data: [i64; 4] = [1, 2, 3, 4]
-let matrix: [f64; 9] = [0.0; 9]
-```
+// Struct literal construction and field access in native-v2 driver.
+// Expected: prints "7", exits 0.
 
-### Vec [Production]
-```sio
-// Source: tests/run-pass/for_in_loops.sio:29
-let vec: Vec<i32> = [1, 2, 3, 4]
-for x in vec {
-    // iterate
+struct Point { x: i64, y: i64 }
+
+fn main() -> i64 with IO {
+    let p = Point { x: 3, y: 4 }
+    let s = p.x + p.y
+    print_int(s)
+    print_char(10)
+    0
 }
 ```
-Stdlib also provides monomorphic `IntVec`, `FloatVec` via `stdlib/collections/vec.sio` with `impl` blocks and push/pop/len.
 
-### Tuples
+To adapt it, change one field or operation, update the expected observation
+from the task, and verify the new artifact. Do not change the field to a raw
+integer merely because a richer scientific type exposes a checking boundary.
+
+### 4.3 Arrays, tuples, and collections
+
+A fixed-size array's element type, capacity, initializer, indexing, and borrowing
+must agree. Repetition and array types contain semicolons as syntax. Bounds
+checks and mutation have their own effects. Do not cast every index blindly;
+copy the selected API's expected index type.
+
+Tuple access and tuple pattern binding are separate paths. The receipt
+quarantines the selected nested-destructuring fixture, while other tuple
+access/signature programs passed. That is not a universal ban on tuples.
+
+The source contains more than one vector-like representation. The public
+`VecF64` free-function API in the curated index is not interchangeable with
+nearby non-public `IntVec`/`FloatVec`, a heap-backed generic record, a fixed
+array, or a compiler-specialized sequence. Check capacity, element layout,
+allocation, and failure values. A returned zero may be a sentinel rather than
+a validated element.
+
+<!-- llm:section functions -->
+## 5. Functions, generic calls, and callable values
+
+A useful function example must show its declaration, parameter/result types,
+required effects, call site, and complete program result. A snippet that calls
+undefined `map`, `sqrt`, or `add_one` is not a runnable tutorial.
+
+Named function references are a useful starting point for higher-order tasks.
+Use [`cook-function-ref`](../llm-guide/examples.md#cook-function-ref) for an
+executed bounded example. A closure needs its capture semantics, callable type,
+effects, lifetime, and target path. The selected `cook-closure` fixture failed
+on the pinned artifact and is quarantined; other implementation paths exist.
+Neither “closures never exist” nor “every closure works” follows.
+
+### A working explicit generic-call route
+
+Source: [`tests/run-pass/generics_multi_param.sio`](../../tests/run-pass/generics_multi_param.sio),
+manifest ID `generics`. The original program contains two runtime controls;
+the catalog asserts exit zero and the first success substring. Its presence
+does not establish arbitrary trait solving, generic methods, or every
+specialization/ABI combination.
+
+<!-- llm:example generics -->
 ```sio
-let pair = (1, 2)
+//@ run-pass
+//@ expect-stdout-contains: first_of_two: PASS
+//@ expect-stdout-contains: second_of_two: PASS
+// Tests two-type-parameter generic functions via turbofish syntax
 
-// Destructuring works:
-// Source: tests/run-pass/tuple_destructure_let.sio
-let (a, b) = (1, 2)
-let (x, (y, z)) = (10, (20, 30))
-let (first, _) = (5, 10)       // wildcard
-```
+fn first<T, U>(a: T, b: U) -> T {
+    a
+}
 
-### Structs [Production]
-```sio
-struct Point { x: f64, y: f64 }
-let p = Point { x: 1.0, y: 2.0 }
+fn second<T, U>(a: T, b: U) -> U {
+    b
+}
 
-linear struct Handle { fd: i32 }   // linear types
-```
+fn main() -> i64 with IO {
+    var exit_fails: i64 = 0
+    let x = first::<i64, i64>(42, 99)
+    if x == 42 { print("first_of_two: PASS\n") } else { print("first_of_two: FAIL\n"); exit_fails = exit_fails + 1 }
 
-### Enums [Beta]
-```sio
-// Source: tests/run-pass/native_enum_basic.sio
-enum Color { Red, Green, Blue }
-
-let r = Color::Red
-let g = Color::Green
-```
-
-Note: Enum definition and variant access work. Passing enum values to functions expecting `i64` may require casting — the type checker distinguishes enum types from integers.
-
-### Refinement Types [Beta]
-```sio
-type Probability = { p: f64 | p >= 0 }
-fn divide(num: i32, denom: { d: i32 | d != 0 }) -> i32 with Panic {
-    num / denom
+    let y = second::<i64, i64>(10, 77)
+    if y == 77 { print("second_of_two: PASS\n") } else { print("second_of_two: FAIL\n"); exit_fails = exit_fails + 1 }
+    if exit_fails > 0 {
+        return 1
+    }
+    return 0
 }
 ```
 
-### Units of Measure [Production]
+Keep the exact call spelling demonstrated here when adapting this route.
+The native-runtime single-generic-function and generic-pair fixtures selected
+for this audit failed; their names were not proof that they ran. Do not
+rewrite the manifest to make them green or infer a language-wide prohibition
+from those failures.
+
+Trait declarations, bounds, name resolution, method selection, and obligation
+enforcement are distinct. A parser accepting a bound is not a complete
+coherence or trait-satisfaction proof. Read the actual generic/trait source
+and a discriminating caller when the task depends on those properties.
+
+<!-- llm:section control-flow -->
+## 6. Control flow and observable order
+
+Use the complete [while-loop](../llm-guide/examples.md#while-loop),
+[array iteration](../llm-guide/examples.md#cook-for-array), and
+[range/option](../llm-guide/examples.md#cook-range-option) programs before
+combining forms. Read their entrypoint result and their assertion contract:
+some programs deliberately use a nonzero success exit.
+
+`if` expressions, loops, patterns, return, break, continue, and block tails
+have both syntax and checking rules. Ensure all result paths agree with the
+declared function result. A branch that prints a success marker only when its
+comparison holds needs that marker asserted: exit zero alone can miss a failure.
+
+Do not use `&&` or `||` to protect a dangerous operation merely because a
+different language short-circuits it. The inspected ordinary lowering and
+target-specific paths do not establish one portable effectful evaluation
+contract. Use explicit control flow where safety/order matters and run a
+witness that distinguishes the intended behavior on the selected route.
+
+This is not a suggestion to ban logical operators for ordinary boolean
+expressions. It is a requirement not to confuse a type/effect set with an
+execution trace. Test order, event multiplicity, mutation, and any scientific
+information affected by a branch.
+
+Recursion and large fixed buffers can encounter implementation capacities.
+A crash or timeout is not a language-level proof of invalidity, nor permission
+to remove a guard. Record the bound and the route, then reduce the reproducer
+without changing the failure's meaning.
+
+<!-- llm:section ownership -->
+## 7. References, borrowing, and resources
+
+A shared reference, an exclusive reference, a raw pointer, a linear handle, and
+an owned value are not interchangeable just because their current ABI uses a
+machine word. Preserve the contract at call boundaries and returns.
+
+Start with the verified
+[explicit borrow-release program](../llm-guide/examples.md#cook-borrow-release)
+and [array-reference program](../llm-guide/examples.md#cook-array-ref).
+Read the entire file: initialization, borrow acquisition, use, release/scope,
+and the asserted mutation all matter.
+
+When a borrow conflict appears, locate both acquisitions and the lifetime of
+each use. Shorten the borrow or restructure disjoint accesses only when that
+preserves the task. Do not replace an exclusive borrow with a raw pointer,
+remove a linear qualifier, duplicate a consumed handle, or change the test
+expectation to bypass the check.
+
+The implementation has bounded and route-specific analyses. A helper lifetime
+module or a declared drop strategy does not prove complete non-lexical
+lifetimes, destructor scheduling, pointer validity, or arbitrary partial moves.
+Conversely, missing enforcement does not cancel an adopted resource rule.
+
+A useful resource test has a valid nearby control and a specific refusal.
+The [borrow-conflict negative](../llm-guide/examples.md#negative-borrow-conflict)
+is checked for its intended message, not just any nonzero exit.
+
+<!-- llm:section effects -->
+<a id="effects"></a>
+## 8. Effects without kitchen-sink annotations
+
+Effects describe operations and obligations. Their declaration, inference,
+propagation, checking, and execution are different mechanisms. Use the
+[effects chapter](../spec/2026-10/03-effects-handlers-and-concurrency.md)
+for the current adopted/source distinctions.
+
+| Task | What to inspect |
+|---|---|
+| Print or access host I/O | The called operation's `IO` contract. |
+| Mutate through a reference or shared structure | The mutation contract and `Mut` enforcement route. |
+| Reassign a function-local variable | Local mutation semantics and the selected engine; not an automatic universal `Mut` rule. |
+| Divide, take a remainder, assert, index, or cast | The exact operand/API contract and its `Div`/`Panic` or other obligations; not a universal table inferred from operator spelling. |
+| Call a scientific metric or observe a value | The selected representation and `Epistemic`/`Observe` boundary. |
+| Call a function reference | The callable signature and effects retained by that checking route. |
+
+Do not add every effect to `main` as a generic repair. Start with the required
+set and propagate it through the real call chain. If the task changes the
+contract, explain that change. If an engine fails to enforce a rule, keep the
+intended semantics and describe the enforcement gap.
+
+### A complete effect-subset example
+
+Source: [`tests/run-pass/effect_superset_ok.sio`](../../tests/run-pass/effect_superset_ok.sio),
+manifest ID `effects`. The receipt asserts the `effect superset: PASS`
+substring and successful exit.
+
+<!-- llm:example effects -->
 ```sio
-unit kg;
-unit mg = 0.001 * kg;
-let dose: mg = 500.0
-```
+//@ run-pass
 
-### Epistemic Types [Production]
-```sio
-let m: Knowledge<mg> = measure(500.0, uncertainty: 2.5)
-```
-
-### Algebra Declarations [Beta]
-```sio
-algebra Octonion over f64 {
-    add: commutative, associative
-    mul: alternative, non_commutative
-    reassociate: fano_selective
-}
-```
-
-Supported properties:
-- `add`: `commutative`, `associative`
-- `mul`: `commutative`, `associative`, `alternative`, `non_commutative`
-- `reassociate`: `free`, `blocked`, `fano_selective`
-
-`mul: alternative` derives `NonAssoc` requirements for functions that multiply the type.
-
-### Observation Types [Beta]
-```sio
-fn sense() -> Unobserved<f64> with Observe {
-    37.2
-}
-
-fn above_threshold(x: Unobserved<f64>) -> bool with Observe {
-    x > 36.0
-}
-```
-
-`Unobserved<T>` carries a value before observation. Comparisons and other observation boundaries require `with Observe`; pure functions can pass `Unobserved<T>` through unchanged.
-
-## 4. Functions
-
-```sio
-fn add(a: i32, b: i32) -> i32 {
+// Caller declares more effects than callee needs — should pass
+fn pure_add(a: i64, b: i64) -> i64 {
     a + b
 }
 
-// With effects (REQUIRED for certain operations)
-fn divide(a: f64, b: f64) -> f64 with Div, Panic {
-    a / b
+fn needs_io() with IO {
+    print("io\n")
 }
 
-// Explicit return
-fn abs(x: f64) -> f64 {
-    if x < 0.0 { return 0.0 - x }
-    x
-}
-```
-
-### Function References [Production]
-```sio
-// Source: tests/run-pass/closure_fn_ref.sio
-fn square(x: i64) -> i64 { x * x }
-fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }
-
-// Store in variable
-let f = square
-let r = f(7)          // 49
-
-// Return from function
-fn select_op(which: i64) -> fn(i64) -> i64 with Mut, Panic, Div {
-    if which == 0 { add_one }
-    else { negate }
-}
-```
-
-### Higher-Order Patterns [Production]
-```sio
-// Source: tests/run-pass/closure_higher_order.sio
-fn map4(arr: [i64; 4], f: fn(i64) -> i64) -> [i64; 4] with Mut, Panic, Div {
-    var out: [i64; 4] = [0; 4]
-    var i: i64 = 0
-    while i < 4 { out[i] = f(arr[i]); i = i + 1 }
-    out
-}
-
-fn fold4(arr: [i64; 4], init: i64, f: fn(i64, i64) -> i64) -> i64 with Mut, Panic, Div {
-    var acc = init
-    var i: i64 = 0
-    while i < 4 { acc = f(acc, arr[i]); i = i + 1 }
-    acc
-}
-
-// Usage:
-let doubled = map4(data, dbl)
-let sum = fold4(data, 0, add)
-let sum_sq = fold4(map4(data, sq), 0, add)   // chained
-```
-
-**Note:** Closure literals (`|x| x + 1`) are BLOCKED. Only named function references work.
-
-### impl Blocks [Production]
-```sio
-// Source: stdlib/collections/vec.sio
-impl IntVec {
-    fn new() -> IntVec {
-        IntVec { data: [0; 4096], len: 0 }
+fn main() -> i32 with IO, Mut, Div {
+    // Calling pure function from effectful context is fine
+    let x = pure_add(2, 3)
+    // Calling IO function from IO+Mut+Div context is fine
+    needs_io()
+    if x == 5 {
+        print("effect superset: PASS\n")
     }
-
-    fn push(self: &! IntVec, val: i64) {
-        if self.len < VEC_CAP {
-            self.data[self.len] = val
-            self.len = self.len + 1
-        }
-    }
-
-    fn len(self: &IntVec) -> i64 {
-        self.len
-    }
+    return 0
 }
 ```
 
-Methods use explicit `self: &Type` or `self: &! Type` — no implicit `self`.
+The [missing-effect negative](../llm-guide/examples.md#negative-effect-missing)
+produced its expected refusal on this artifact. Historical blanket text saying
+E035 never fires under default checking must not override that receipt.
 
-## 5. Effects System [Production]
+Unknown effect names and capacity refusal are also separate diagnostics.
+A bounded effect set is not general row polymorphism, and changing an ambient
+set is not proof of operational handler semantics. Parsing a handler or async
+construct cannot manufacture its runtime.
 
-Effects track what a function can do. Missing effects = compile error.
+<!-- llm:section scientific -->
+## 9. Preserve the scientific information
 
-| Effect | Required when | Example |
-|--------|---------------|---------|
-| `IO` | Printing, file ops, env | `println("text")` |
-| `Mut` | Mutating `&!` refs or arrays — **not** a plain local `var` | `arr[i] = 42`, `*x = 10` |
-| `Div` | Division `/` or modulo `%` | `a / b` (always pair with `Panic`) |
-| `Panic` | Array bounds, asserts, `as` casts | `arr[i]`, `assert(cond)` |
-| `Alloc` | Heap allocation | Rare |
-| `Observe` | Collapsing `Unobserved<T>` at an observation boundary | `if reading > 36.0 { ... }` |
-| `Async` | Async operations | Rare |
-| `GPU` | GPU kernels | Rare |
-| `Prob` | Probabilistic operations | Rare |
+### 9.1 Identify the value domain first
 
-> **`Mut` and the two engines (measured 2026-07-27).** The rule above — `Mut`
-> for mutation the caller can observe, nothing for a function-local `var` — is
-> the intended semantics, specified in `docs/spec/LANGUAGE_SPECIFICATION.md`
-> §7.2.1. Neither shipped engine enforces exactly it: the default compiler
-> (Madaros) currently requires `Mut` for **neither** case, and the frozen
-> `lean_single` seed requires it for **both** (so a pure integer helper that
-> mutates a local is rejected under `SOUNIO_SOUC_ENGINE=lean_single`). Writing
-> the annotation as the table describes is correct and future-proof; omitting
-> it on a local `var` will not currently be caught by the default compiler.
-> Scoped in `docs/audit/MUT_EFFECT_ENFORCEMENT_DISPATCH_2026-07-27.md`.
+| Surface | Meaning to preserve |
+|---|---|
+| Compiler `Knowledge<T>` | Its checker predicates and lowered scientific channels on the selected route. |
+| Library `Epistemic` | The record's declared value, variance, confidence, and API preconditions. |
+| EISA `EReg` / `EReg2` | Distinct value, arithmetic correction, uncertainty, and origin conventions. |
+| Unit annotations | Dimension, representation, conversions, and boundary checks. |
+| Quantum channels/counts | Presence states, dependence, sampling/model assumptions, and device provenance. |
 
-```sio
-fn pure_add(a: i64, b: i64) -> i64 { a + b }                   // no effects = pure
-fn bump(n: i64) -> i64 { var y = 1  y = y + n  y }             // local var only: no Mut
-fn mutate(x: &!i32) with Mut { *x = 42 }                        // mutation
-fn divide(a: f64, b: f64) -> f64 with Div, Panic { a / b }      // division
-fn observe(x: Unobserved<f64>) -> bool with Observe { x > 0.0 } // observation
-fn process() with IO, Mut, Panic, Div { /* all four */ }         // multiple
+Use the [source-based scientific reference](../spec/2026-10/04-knowledge-uncertainty-and-provenance.md)
+rather than substituting one similarly named record for another.
+[The library example](../llm-guide/examples.md#cook-epistemic-library)
+and [EISA example](../llm-guide/examples.md#cook-eisa) have their own bounded
+execution contracts. Their existing assertions are not independent
+metrological or numerical certification.
+
+Do not silently unwrap a scientific value to `f64`, discard a variance,
+set missing uncertainty to zero, narrow a requested format, or remove a
+provenance predicate to make a call type-check. Ask for an authorized semantic
+change only when preserving the requested contract is impossible.
+
+Equal central values do not establish common source identity, equal variance,
+independence, or causal origin. Arithmetic error is not measurement uncertainty.
+Confidence, ignorance, validity, and statistical coverage need their own
+definitions. An absent channel is different from an explicit numerical zero.
+
+### 9.2 Units, order, and numerical verification
+
+The chosen bare-unit addition/scaling fixtures failed on the pinned prebuilt.
+They remain diagnostic cases, not a working units tutorial. Use the
+specification to identify the annotation/operation contract, then require an
+execution receipt on the named profile before treating it as a working route.
+Do not switch engines without recording a different profile.
+
+Preserve parenthesization where floating rounding or non-associative algebra
+matters. A transformation that is valid in an associative mathematical model
+need not preserve this program's observable behavior or scientific channels.
+
+Use task-specific comparison criteria. An inherited `check_near` tolerance
+is not automatically valid for a new domain, magnitude, exceptional value,
+or small nonzero uncertainty. Do not recompute a scientific result with an
+unauthorized numerical oracle. Follow the current ADR009 working protocol in
+[the foundations, `SPEC-011`](../spec/2026-10/00-foundations-and-conventions.md).
+Proofs belong in Lean 4; numerical agreement and empirical validation are
+separate forms of evidence.
+
+A GUM-named fixture does not establish complete JCGM compliance or traceability.
+An ontology relation is not a clinical diagnosis; a simulation is not a
+hardware experiment. Keep research hypotheses intact while identifying the
+evidence needed to test them.
+
+<!-- llm:section modules -->
+## 10. Imports, visibility, packages, and actual APIs
+
+Use the [library-discovery index](../llm-guide/stdlib-index.md) as a workflow:
+
+1. Find the selected module and declaration.
+2. Read its export visibility, complete signature, effects, and body.
+3. Read an actual importing consumer.
+4. Preserve its module/file context and standard-library root.
+5. Check the consumer on the intended profile.
+6. Execute it only if it has an entrypoint and runtime behavior is requested.
+
+The [provider](../llm-guide/examples.md#cook-import-provider) and
+[consumer](../llm-guide/examples.md#cook-import-main) are check-only cases in
+this corpus. Do not call their result a runtime pass. The consumer's source
+returns 42; executing it later requires that contract, not an assumed zero.
+
+Copying an importing file into an arbitrary temporary directory can change
+module resolution. Retain companions and search context, or adapt them
+explicitly. A directory under `stdlib` does not mean every declaration is
+public, callable, implemented on the target, or numerically verified.
+
+Current package lookup uses conventional source paths derived from import
+spelling. A manifest field's existence is not proof of manifest-controlled
+resolution, version solving, a hosted registry, or a publish operation.
+See the [package/tool chapter](../spec/2026-10/07-library-packages-and-tools.md).
+
+Do not invent helpers from a familiar ecosystem. A reasonable function name,
+generated type annotation, or LSP completion is a candidate, not an API.
+Prefer a real source declaration to a large historical generated index.
+
+<!-- llm:section targets -->
+## 11. Host, FFI, concurrency, and device boundaries
+
+Keep the target in the task packet. The public launcher, raw driver,
+bootstrap seed, wrapper, and emitted program can have different command
+interfaces. Do not pass launcher verbs to a raw positional compiler.
+
+| Claim | Evidence needed beyond parsing |
+|---|---|
+| Native executable | Actual format/architecture, emission, execution, exit and output. |
+| Foreign call | Symbol, ABI, layout, effects, link/runtime resolution, and observed behavior. |
+| Async or concurrency | Reachable scheduler/runtime behavior, ordering, resource and failure contracts. |
+| Effect handler | Operation dispatch, continuation semantics, and its checked/emitted/runtime path. |
+| GPU result | Actual device/runtime route and outputs, not merely PTX/MSL text. |
+| Quantum hardware | Device/job/circuit/shot/count receipt, not a simulator or parsed count file. |
+| Formal result | Named model, assumptions, toolchain, completed checker build, and production correspondence. |
+
+The [execution chapter](../spec/2026-10/06-execution-memory-and-targets.md)
+details supported and refused paths. Apple Silicon has a separate native
+ARM64/Metal route, not a distributed Linux ELF that happens to run on macOS.
+Emission, signing, process exit, and real device execution remain separate
+observations.
+
+A target name accepted by a CLI or MCP schema is not proof that every
+operation is supported there. Never turn a missing device, unsupported IR,
+foreign-symbol error, or absent scheduler into a successful CPU fallback
+without an explicit contract and disclosure.
+
+<!-- llm:section diagnostics -->
+## 12. Repair the cause rather than silencing the checker
+
+Use the [diagnostic guide](../llm-guide/error-catalog.md). Start with the
+engine, adapter, source revision, requested stage, complete stdout/stderr,
+and earliest relevant diagnostic. A numeric error code alone is insufficient:
+different namespaces and paths reuse codes.
+
+A practical repair sequence:
+
+1. Read the diagnostic's span and enclosing declaration/call.
+2. Check the callee and imported definition, not only the reported line.
+3. Compare with a nearby valid example under the same artifact and environment.
+4. Change the smallest cause that preserves the task.
+5. Recheck and, when required, rerun the changed program.
+6. Run the intended negative counterpart and record the precise refusal.
+
+Do not remove tests, weaken expected output, increase tolerances without a
+domain justification, cast away scientific wrappers, or disable an effect/
+ownership check. A failing compiler or missing dependency cannot make every
+negative case a success.
+
+The atlas retains eight cases that did not satisfy their intended assertions.
+Two negative units cases exited nonzero but did not produce their required
+diagnostic. That is a failed witness, not confirmation of the intended unit
+boundary. The six positive failures are likewise excluded from working recipes.
+
+Most retained per-code explanation pages were not refreshed by this audit.
+Their visible banner identifies that limit. E035 and E249 received targeted
+corrections; other old examples must be re-established against the selected
+artifact before use.
+
+When a repair would choose between unsettled language meanings, change the
+public API, or require a compiler/library fix outside the task, stop and
+provide the reproducer and decision needed. Do not replace the research
+question with an easier one and call it a fix.
+
+<!-- llm:section recipes -->
+## 13. A progressive route through complete examples
+
+The [cookbook](../llm-guide/cookbook.md) explains each lesson and adaptation.
+The [atlas](../llm-guide/examples.md) preserves the complete source.
+The [manifest](../llm-guide/example-manifest.json) records the actual per-case
+verification, not a production label inferred from filenames.
+
+| Goal | Start with |
+|---|---|
+| Print and return a process result | `hello` |
+| Reassignment and a while loop | `while-loop`, `cook-while` |
+| Fixed-array iteration | `cook-for-array` |
+| Ranges and option-controlled iteration | `cook-range-option` |
+| Struct creation and fields | `struct`, `struct-parameter`, `struct-return` |
+| Tuples and function signatures | `cook-tuple`, `cook-tuple-signature` |
+| References and observable array mutation | `cook-borrow-release`, `cook-array-ref` |
+| Enum matching | `cook-enum`, with intended success exit 42 |
+| Named callable values | `cook-function-ref` |
+| Explicit generic calls | `generics` |
+| Import provider/consumer | `cook-import-provider`, `cook-import-main`, check-only |
+| Result and vector library APIs | `cook-result`, `cook-vec` |
+| Distinct epistemic and EISA APIs | `cook-epistemic-library`, `cook-eisa` |
+| An intended refusal | A verified `negative-*` case for the matching rule |
+
+Inspect the verification object before using any ID. The quarantined closure,
+single-generic, generic-pair, nested-destructuring, and selected units cases
+are diagnostic exercises, not part of the first-success path.
+
+Do not count repeated IDs pointing to the same source as independent programs.
+This corpus has 50 case entries and 47 distinct source files. Thirty results
+include execution, four establish only checking, eight match intended
+refusals, and eight do not meet the asserted contract. None of those counts
+establishes whole-language conformance.
+
+<!-- llm:section prompts -->
+## 14. Reusable prompts for smaller and larger models
+
+The text below is a template, not an executed conversation or a benchmark.
+Fill the task-specific fields and provide the referenced source. Do not
+substitute an imagined model result for an actual tool result.
+
+### Start a new program
+
+```text
+Write a complete Sounio program for [task].
+Inputs: [types, values/source, permitted assumptions].
+Required observations: [output, exit, resource/scientific channels].
+Execution profile: [engine, raw artifact/hash, host/target, stdlib root].
+Allowed files: [paths]. Do not publish changes.
+Use the supplied complete example [ID] and its actual API declarations.
+Preserve [units, uncertainty, precision, ownership, effects, order].
+Do not invent helpers. Explain any missing prerequisite before proceeding.
+Check the changed file, then run and assert the required observations.
+If tools cannot execute here, provide commands and label them unrun.
 ```
 
-Effect subsetting: a caller with `with IO, Mut, Div` can call a callee with no effects or fewer effects. Effects propagate upward.
+### Repair one compiler failure
 
-## 6. Control Flow
-
-### if/else [Production]
-```sio
-if x > 0 {
-    println("positive")
-} else if x < 0 {
-    println("negative")
-} else {
-    println("zero")
-}
-
-// As expression
-let result = if condition { value1 } else { value2 }
+```text
+Diagnose this exact Sounio failure under the stated profile.
+Here are the complete command, exit, stdout, stderr, and source.
+Here is the callee/import declaration and a nearby valid control.
+Identify the earliest causal failure. Make the smallest justified edit.
+Do not erase scientific types, broaden effects blindly, disable guards,
+change expected output, switch engines, or silently narrow precision.
+Recheck the same file/profile and rerun the affected observation.
+Report the before/after result and what remains unestablished.
 ```
 
-### while [Production]
-```sio
-var i = 0
-while i < 10 {
-    process(i)
-    i = i + 1
-}
+### Discover a library operation
+
+```text
+Find an existing Sounio API for [operation].
+Retrieve the declaration, export visibility, representation, effect signature,
+body preconditions/failure behavior, and an actual importing consumer.
+Distinguish source presence from successful import and runtime evidence.
+Choose a complete verified example; do not invent a familiar-language API.
+Preserve the requested information channels and numerical-tool restrictions.
 ```
 
-### for-in [Production]
-```sio
-// Source: tests/run-pass/for_in_loops.sio
+### Extend a scientific program
 
-// Range (exclusive)
-for i in 0..5 { /* 0,1,2,3,4 */ }
-
-// Range (inclusive)
-for i in 0..=5 { /* 0,1,2,3,4,5 */ }
-
-// Range with variable bound
-let n = 10
-for i in 0..n { /* 0..9 */ }
-
-// Array iteration
-let arr = [10, 20, 30]
-for x in arr { sum = sum + x }
-
-// Vec iteration
-let vec: Vec<i32> = [1, 2, 3, 4]
-for x in vec { sum = sum + x }
-
-// Nested
-for i in 0..3 {
-    for j in 0..3 { /* ... */ }
-}
-
-// break and continue
-for i in 0..100 {
-    if i >= 5 { break }
-}
-for i in 0..10 {
-    if i % 2 == 0 { continue }
-    odd_sum = odd_sum + i
-}
+```text
+Extend the supplied program without changing the research question.
+State the value domain, uncertainty/dependence/provenance model, units,
+precision, and observation contract before editing.
+Separate model assumptions, compiler behavior, numerical verification,
+formal proof, and empirical evidence. Use only authorized numerical tools.
+If a transformation loses information or needs a semantic decision, disclose
+it rather than replacing the task with a simpler calculation.
 ```
 
-### match [Production]
-```sio
-// Source: tests/run-pass/native_enum_basic.sio
-fn color_to_int(c: i64) -> i64 {
-    match c {
-        Color::Red => 10
-        Color::Green => 20
-        Color::Blue => 30
-        _ => 0
-    }
-}
+For a small model, provide one program and one change at a time. For a larger
+agent, allow a bounded plan and retrieval of additional APIs, but keep one
+owner per shared file and explicit evidence at each checkpoint.
+
+### Domain-specific task cards
+
+These cards make a scientific request concrete without pretending that a
+domain prompt is a compiler receipt. Attach the complete source, the relevant
+library declaration, the intended observation, and the selected execution
+profile. The model must retrieve the current Sounio API before writing code;
+the names below are search areas, not permission to invent an API. Keep model
+assumptions, scientific data, compiler evidence, numerical verification, and
+publication decisions as separate layers.
+
+#### Chemistry, kinetics, and materials
+
+```text
+You are assisting with a Sounio chemistry task.
+
+Research task: [reaction, equilibrium, kinetics, spectroscopy, materials, or
+                 other precisely stated question].
+Scientific inputs: [species, concentrations, units, temperature, pressure,
+                    time grid, measured values, uncertainty, provenance].
+Required observation: [table, curve, invariant, status, file, or other output].
+Allowed files: [exact source and test paths]. Do not publish changes.
+Execution profile: [revision, raw compiler/hash, host/target, stdlib root].
+
+Before editing:
+1. Inspect the supplied source and retrieve the actual declarations and a
+   real consumer for every chemistry, units, array, numeric, or result API.
+2. List species and units explicitly. State whether values are measured,
+   assumed, fitted, simulated, or derived, and preserve that provenance.
+3. State precision, uncertainty/dependence, boundary conditions, and the
+   failure contract. Do not silently coerce units, discard uncertainty, or
+   replace a reaction model with a simpler calculation.
+4. Separate a source/type-check claim, a runtime observation, and an
+   independently authorized numerical verification. A simulation is not an
+   experiment and a passing example is not a chemical or industrial guarantee.
+
+Make the smallest source-bound change. Use only APIs confirmed in the source
+and the supplied profile. Return the complete changed file or exact patch,
+then report the check command, run command, exit, stdout, stderr, source hash,
+and every step that was not executed. If a declaration or prerequisite is
+missing, stop and identify it instead of inventing a helper.
 ```
 
-## 7. References
+#### AI/ML, tensors, and differentiable programs
 
-### Shared Reference `&T` [Production]
-```sio
-fn read_ref(r: &i64) -> i64 { *r }
-let val = read_ref(&x)
+```text
+You are assisting with a Sounio AI/ML task.
+
+Task class: [data preparation, tensor transform, inference, training,
+             autodiff, optimization, evaluation, or reproducibility].
+Inputs: [data schema/source, shapes, axes, dtype, precision, device, seed,
+         provenance, privacy constraints].
+Required observation: [shape/value contract, loss trace, metric, artifact,
+                       exit status, or explicit refusal].
+Allowed files: [exact source, fixture, and test paths]. Do not publish.
+Execution profile: [revision, raw compiler/hash, host/target, stdlib root,
+                     device/runtime if known].
+
+Before editing:
+1. Classify the operation as tensor construction, transformation, model
+   definition, autodiff, optimizer, inference, or evaluation. Retrieve the
+   actual declarations and a complete consumer from the current tensor,
+   autodiff, ML, or example sources; never import a familiar API by analogy.
+2. Write down shape, rank, axis order, dtype, precision, batching, masking,
+   device, randomness, and ownership assumptions. Preserve provenance and
+   uncertainty; do not turn an absent benchmark into a performance claim.
+3. Keep implementation, compilation, execution, benchmark, training data,
+   and statistical/numerical verification as separate evidence. A successful
+   tensor operation is not model accuracy, safety, or generalization.
+4. Do not fabricate a dataset, checkpoint, accelerator, seed, metric, or
+   result. If the requested operation is not present in the selected profile,
+   report the missing capability and propose the smallest source-bound next
+   step.
+
+Make one minimal change at a time. Return the complete source or exact patch
+and a reproducible evidence record: commands, exit statuses, raw streams,
+source/artifact hashes, data identity, and unrun steps. Keep training and
+inference claims bounded by the observed profile.
 ```
 
-### Exclusive Reference `&!T` [Production]
-```sio
-// Source: tests/run-pass/array_mut_ref.sio
-fn fill(arr: &![i64; 8]) with Mut, Panic {
-    (*arr)[0] = 99       // EXPLICIT DEREF for bare arrays
-    (*arr)[1] = 42
-}
+#### Research-only medicine, ontology, and PBPK
 
-fn main() -> i64 with IO, Mut, Panic {
-    var buf: [i64; 8] = [0, 0, 0, 0, 0, 0, 0, 0]
-    fill(&! buf)         // note: space between & and ! is OK
-    buf[0]               // reads 99
-}
+```text
+You are assisting with a Sounio research-only medicine, ontology, or PBPK
+task. This is not clinical advice, diagnosis, prescribing, device validation,
+or a patient-specific recommendation.
+
+Research question: [precise terminology, ontology, PK/PD, PBPK, cohort,
+                   mechanistic, or reproducibility question].
+Inputs and governance: [de-identified data or synthetic fixture, provenance,
+                         units, population, assumptions, consent/permission].
+Required observation: [ontology relation, typed record, simulation output,
+                       sensitivity/result table, refusal, or status].
+Allowed files: [exact source and test paths]. Do not publish.
+Execution profile: [revision, raw compiler/hash, host/target, stdlib root].
+
+Before editing:
+1. Retrieve the actual ontology, clinical, PBPK, uncertainty, and library
+   declarations plus a real consumer. Identify whether each statement is a
+   vocabulary/ontology fact, a model assumption, a simulation result, a
+   compiler result, a formal proof, or an empirical clinical claim.
+2. Preserve provenance, cohort/population scope, units, precision, uncertainty,
+   dependence, missingness, and data-governance constraints. Do not infer a
+   patient conclusion from a population model or a terminology relation.
+3. Keep terminology closure, model execution, numerical verification, and
+   clinical validation distinct. Never claim diagnosis, treatment efficacy,
+   safety, regulatory approval, or patient benefit from code execution alone.
+4. Use only the authorized numerical/proof toolchain for the requested
+   verification. If a clinical, governance, dataset, or execution prerequisite
+   is absent, stop and label the result unverified rather than filling the gap.
+
+Make the smallest source-bound change. Return the source or exact patch and a
+bounded evidence record with commands, exits, raw output, source/artifact
+identity, data identity, assumptions, and unrun validations. Include a clear
+research-only limitation in any user-facing summary.
 ```
 
-**Known Bug:** Bare `&![T; N]` mutations may not propagate in the interpreter. Workaround: wrap in a struct.
+<!-- llm:section delivery -->
+## 15. Deliver code with bounded, reproducible evidence
 
-```sio
-// WORKAROUND — struct wrapper pattern
-struct SortBuf { data: [i64; 10000] }
-fn sort(b: &! SortBuf) with Mut { b.data[0] = 99 }   // works correctly
-```
+Before returning a program, verify:
 
-## 8. Operators
+- The entire file is present, with declarations, imports, entrypoint where
+  applicable, and the effects required by its operations.
+- The checked/running source is the changed file and matches the recorded hash.
+- Compiler artifact, engine, adapter, host/target, environment, and library
+  root are identified; CLI and MCP results are not silently mixed.
+- Successful checks, emitted artifacts, runtime exits, and output assertions
+  are reported separately.
+- Negative controls fail for the intended cause, not an unrelated parse,
+  dependency, timeout, or crash.
+- Scientific channels, units, precision, provenance, ownership, and ordering
+  requested by the task remain preserved.
+- Unrun numerical verification, Lean builds, full corpus, GPU execution,
+  remote CI, publication, and human acceptance remain explicitly unclaimed.
 
-### Arithmetic
-`+`, `-`, `*`, `/` (needs `Div`), `%` (needs `Div`)
+Use the delivery record in [`llms.txt`](../../llms.txt#delivery-record).
+The [review and preparation record](../llm-guide/reviews/guide-preparation.md)
+describes this guide's own evidence and limitations. No generic model-success
+rate is inferred from a set of passing source fixtures.
 
-### Comparison
-`==`, `!=`, `<`, `<=`, `>`, `>=`
-
-### Logical
-`&&`, `||`, `!` (short-circuit)
-
-### Bitwise
-`&`, `|`, `^`, `>>`, `<<`
-
-**Bit shifts take a plain integer amount** (a literal, or a variable of any integer type):
-```sio
-let high = byte >> 4
-let low = byte & 15
-```
-
-### Unary Minus
-```sio
-let neg = -42          // works on literals, variables and arguments
-let flipped = -x       // no `0 - x` workaround needed
-```
-
-### Concatenation
-```sio
-let combined = a ++ b   // array concatenation
-```
-
-### Type Casting
-```sio
-let u: u8 = i as u8
-let idx = n as usize    // required for array indexing
-```
-
-## 9. Modules & Imports [Production]
-
-```sio
-// Source: tests/run-pass/import_basic_main.sio
-use import_basic_a::{imported_add}
-
-fn main() -> i64 {
-    let result = imported_add(3, 4)
-    result
-}
-```
-
-Visibility: `pub fn`, `pub struct` export items across module boundaries.
-
-```sio
-// stdlib/encoding/hex.sio
-pub fn hex_encode(data: &[u8; 256], data_len: i32, out: &![u8; 512]) -> i32
-    with Mut, Div, Panic { /* ... */ }
-```
-
-## 10. Strings
-
-String literals work directly:
-```sio
-println("Hello, World!")
-print("value = ")
-```
-
-For mutable string data, use fixed-size byte arrays:
-```sio
-var name: [i8; 64] = [0; 64]
-name[0] = 72    // 'H'
-name[1] = 101   // 'e'
-```
-
-## 11. Error Handling
-
-No exceptions. Use error codes or result structs:
-
-```sio
-// Simple: tuple with error code
-fn safe_divide(a: f64, b: f64) -> (f64, i32) with Div, Panic {
-    if b == 0.0 { (0.0, 1) }    // error code 1
-    else { (a / b, 0) }          // success
-}
-
-// Stdlib provides monomorphic result types:
-// stdlib/core/result.sio — IntResult, FloatResult
-// stdlib/core/option.sio — IntOption, FloatOption
-```
-
-## 12. Testing
-
-```sio
-// Inline assertions
-fn test_addition() {
-    let result = add(2, 3)
-    assert(result == 5)
-}
-
-// Test helpers from stdlib/test/helpers.sio
-pub fn check_near(a: f64, b: f64, tol: f64) -> bool {
-    let d = a - b
-    let ad = if d < 0.0 { 0.0 - d } else { d }
-    ad < tol
-}
-```
-
-Test annotations in file headers:
-- `//@ run-pass` — should compile and run
-- `//@ compile-fail` — should fail to compile
-- `//@ error-pattern: <text>` — expected error
-- `//@ ignore` — skip this test
-
-## 13. FFI [Production, with limits]
-
-```sio
-extern "C" {
-    fn sqrt(x: f64) -> f64
-    fn pow(x: f64, y: f64) -> f64
-}
-```
-
-**Supported FFI functions** (JIT only):
-- Single-arg `f64→f64`: `sqrt`, `sin`, `cos`, `tan`, `exp`, `log`, `floor`, `ceil`, `atan`, `sinh`, `cosh`, `tanh`, `asin`, `acos`, `cbrt`, `round`, `log2`, `log10`
-- Two-arg `f64,f64→f64`: `pow`, `atan2`
-- Integer FFI (`malloc`, `getpid`, etc.) **silently terminates** — do not use.
-
-## 14. Async Concurrency [Production — native binary only]
-
-All async primitives use the OS fork model (not green threads or state machines). Requires `with Async` effect.
-
-```sio
-// Source: tests/run-pass/async_spawn.sio
-fn main() with IO, Async {
-    let h1 = spawn { 10 + 5 }     // fork — runs concurrently
-    let h2 = spawn { 20 + 1 }
-    let r1 = h1.await              // wait4(pid), read mmap slot
-    let r2 = h2.await
-    print("r1="); print_i64(r1)   // 15
-    print(" r2="); print_i64(r2)  // 21
-}
-```
-
-### Channels (pipe-backed)
-
-```sio
-// Source: tests/run-pass/async_channels.sio
-fn main() with IO, Async {
-    let (tx, rx) = channel::<i64>()
-    let h = spawn { tx.send(42).await }
-    let v = rx.recv().await
-    h.await
-    print_i64(v)   // 42
-}
-```
-
-### sleep(ms).await
-
-```sio
-// Source: tests/run-pass/async_sleep.sio
-fn main() with IO, Async {
-    sleep(10).await               // nanosleep — 10ms
-    let t1 = spawn { sleep(5).await; 1 }
-    let t2 = spawn { sleep(5).await; 2 }
-    let r1 = t1.await
-    let r2 = t2.await             // both ran in parallel
-}
-```
-
-### join(h1, h2)
-
-```sio
-// Source: tests/run-pass/async_join.sio
-fn main() with IO, Async {
-    let h1 = spawn { 10 }
-    let h2 = spawn { 20 }
-    let (r1, r2) = join(h1, h2)  // returns (i64, i64) tuple
-}
-```
-
-**Async rules:**
-- `spawn { expr }` requires `with Async`; the block body runs in a forked child
-- Child cannot write back to parent variables (fork COW isolation — expected)
-- `join` supports exactly 2 handles; for more handles, use sequential `.await`
-- `sleep`/`join` are soft keywords — identifiers named `sleep`/`join` are fine in other scopes
-
-## 16. Ontology Declarations [Production]
-
-```sio
-// Source: tests/run-pass/ontology_roles_basic.sio
-ontology Pharma {
-    class Drug
-    class Disease
-    class Rapamycin subclass_of Drug
-    role treats domain Drug range Disease
-    role treated_by inverse_of treats
-    role has_part transitive
-    disjoint Drug, Disease
-
-    class StrongDrug subclass_of Drug {
-        property potency: f64 where potency >= 10.0
-    }
-}
-```
-
-Classes become types usable in function signatures. Disjointness and subsumption are enforced at compile time. OWL 2 axiom semantics: SubClassOf, EquivalentClasses, DisjointClasses, object property domain/range, inverse properties.
-
-## 17. Study Blocks (PPCR / Clinical Research) [Beta]
-
-```sio
-// Source: tests/run-pass/study_block_basic.sio
-study MyTrial {
-    title: "Rapamycin Dosing Study"
-    design: parallel_rct
-    participants { sample_size: 120, power: 0.80 }
-    outcomes { primary: blood_concentration }
-    analysis {
-        hypothesis H1 { outcome: blood_concentration, direction: greater, effect_size: 0.5 }
-        alpha: 0.05
-        correction: bonferroni
-    }
-}
-```
-
-CONSORT-aligned study declarations with pre-registered hypotheses, multiple testing correction, and audit trails.
-
-### PPCR Effects
-
-| Effect | ID | Required when |
-|--------|----|---------------|
-| `Audit` | 15 | Provenance tracking (PROV-DM) |
-| `Hypothesis` | 16 | Statistical tests on registered endpoints |
-| `MultiTest` | 17 | Multiple hypothesis tests requiring correction |
-
-```sio
-// Registered analysis — no warning
-fn analyze() -> i32 with Hypothesis {
-    t_test_one_sample(endpoint_a, 30, 0)
-}
-
-// Unregistered analysis — W041 warning
-fn exploratory() -> i32 with Hypothesis {
-    t_test_one_sample(bmi, 50, 0)  // W041: testing unregistered variable
-}
-```
-
-## 18. What Does NOT Work (Verified)
-
-
-| Feature | Status | Use Instead |
-|---------|--------|-------------|
-| Semicolons `let x = 5;` | Never | `let x = 5` |
-| `&mut` | Never | `&!` |
-| `let mut` | Never | `var` |
-| Rust macros `assert!()` `println!()` | Never | `assert()` `println()` |
-| Closure literals `\|x\| x+1` | Blocked | Named fn refs: `let f = square` |
-| Attributes `#[test]` `#[derive]` | Never | Inline tests |
-| Integer FFI (`malloc`, etc.) | Broken in JIT | Fixed-size arrays; native binary has workaround via syscall stubs |
-| Bare `&![T;N]` mutation (interpreter) | JIT only | Struct wrapper in JIT; works in native binary |
-| Async / `spawn` / `channel` | JIT: not supported | Use native binary (`./bin/souc run`) |
-
-## 19. Quick Checklist
-
-Before submitting Sounio code:
-
-1. No semicolons in expressions
-2. `&!` for mutable refs, `var` for mutable bindings
-3. Effects declared: `with IO, Mut, Div, Panic` as needed
-4. No Rust macros — use `assert()`, `println()`, `print()`
-5. Array index cast: `arr[i as usize]`
-6. Named fn refs for higher-order, not closures
-7. Bare array `&!` mutation: wrap in struct if interpreter
-
-## 20. Real Code to Study
-
-| File | What it demonstrates |
-|------|---------------------|
-| `tests/run-pass/hello.sio` | Hello world, `println`, effects |
-| `tests/run-pass/for_in_loops.sio` | All for-in variants, break, continue |
-| `tests/run-pass/closure_fn_ref.sio` | Function references, `apply`, `select_op` |
-| `tests/run-pass/closure_higher_order.sio` | map, fold, any, all patterns |
-| `tests/run-pass/native_enum_basic.sio` | Enums, match expressions |
-| `tests/run-pass/array_mut_ref.sio` | `&!` array mutation, explicit deref |
-| `tests/run-pass/tuple_destructure_let.sio` | Tuple destructuring |
-| `stdlib/encoding/hex.sio` | Real stdlib: hex encode/decode |
-| `stdlib/collections/vec.sio` | impl blocks, IntVec, push/pop |
-| `stdlib/math/approx.sio` | Function pointers, Chebyshev approximation |
-| `stdlib/prob/normal.sio` | Structs, math, scientific computing |
-| `tests/run-pass/ontology_roles_basic.sio` | Ontology: classes, roles, disjoint |
-| `tests/run-pass/study_block_basic.sio` | PPCR: study block with hypotheses |
-| `tests/run-pass/hypothesis_registered.sio` | Hypothesis effect, registered analysis |
-| `tests/run-pass/algebra_g2_invariants.sio` | Algebra declarations, octonions |
-| `tests/run-pass/async_spawn.sio` | spawn/await, concurrent tasks |
-| `tests/run-pass/async_channels.sio` | channel::<T>(), send, recv |
-| `tests/run-pass/async_sleep.sio` | sleep(ms).await, parallel sleep |
-| `tests/run-pass/async_join.sio` | join(h1, h2), tuple destructuring |
+This guide, the Portuguese edition, the cookbook, and the atlas are maintained
+together. `node scripts/docs/validate_llm_guide.mjs` checks topic coverage,
+source identities, complete code blocks, quarantine labels, and links.
+Its self-tests mutate structural contracts; neither the validator nor its
+self-tests execute the compiler or prove the prose. Compiler receipts and semantic decisions retain
+their own acceptance conditions.

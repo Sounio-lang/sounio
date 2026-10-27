@@ -1,0 +1,100 @@
+// Checked linear, positive-log10, and smooth symmetric-log transforms.
+use math::pure::{ln_checked,exp,is_finite}
+use viz::axis::{AxisTicks,axis_ticks}
+pub const SCALE_LINEAR:i64=0
+pub const SCALE_LOG10:i64=1
+pub const SCALE_SYMLOG:i64=2
+pub struct ScaleSpec { pub mode:i64, pub constant:f64 }
+pub struct ScaleValue { pub status:i64, pub value:f64 }
+// 0 available; 1 invalid scale/constant; 2 nonfinite; 3 log domain;
+// 4 unrepresentable result, including loss of a nonzero value to zero.
+fn scale_sign(x:f64)->f64 { if x < 0.0 {-1.0} else if x > 0.0 {1.0} else {0.0} }
+fn scale_ln(x:f64)->f64 with Mut, Div { let result=ln_checked(x);result.value }
+fn scale_log1p(u:f64)->f64 with Mut, Div {
+    if u < 1.0e-16 { return u }
+    if u > 0.5 { return scale_ln(1.0+u) }
+    let z:f64=u/(2.0+u)
+    let zz:f64=z*z
+    var term:f64=z
+    var sum:f64=z
+    var k:i64=1
+    while k < 30 { term=term*zz;sum=sum+term/((2*k+1) as f64);k=k+1 }
+    2.0*sum
+}
+fn scale_expm1(u:f64)->f64 with Mut, Div {
+    if u > 0.5 { return exp(u)-1.0 }
+    var term:f64=u
+    var sum:f64=u
+    var k:i64=2
+    while k <= 30 { term=term*u/(k as f64);sum=sum+term;k=k+1 }
+    sum
+}
+pub fn scale_valid(spec: &ScaleSpec)->bool {
+    spec.mode >= 0 && spec.mode <= 2 && is_finite(spec.constant) && spec.constant > 0.0
+}
+pub fn scale_forward(x:f64,spec:&ScaleSpec)->ScaleValue with Mut, Div {
+    var out=ScaleValue{status:1,value:0.0}
+    if !scale_valid(spec) { return out }
+    if !is_finite(x) { out.status=2;return out }
+    var value:f64=x
+    if spec.mode == 1 {
+        if x <= 0.0 { out.status=3;return out }
+        value=scale_ln(x)/2.302585092994045684
+    } else if spec.mode == 2 {
+        let a:f64=if x < 0.0 {-x} else {x}
+        let ratio:f64=a/spec.constant
+        if is_finite(ratio) {
+            if a != 0.0 && ratio == 0.0 { out.status=4;return out }
+            value=scale_sign(x)*scale_log1p(ratio)
+        } else {
+            value=scale_sign(x)*(scale_ln(a)-scale_ln(spec.constant)+scale_log1p(spec.constant/a))
+        }
+    }
+    if !is_finite(value) || (spec.mode != 1 && x != 0.0 && value == 0.0) { out.status=4;return out }
+    out.status=0;out.value=value
+    out
+}
+pub fn scale_inverse(t:f64,spec:&ScaleSpec)->ScaleValue with Mut, Div {
+    var out=ScaleValue{status:1,value:0.0}
+    if !scale_valid(spec) { return out }
+    if !is_finite(t) { out.status=2;return out }
+    var value:f64=t
+    if spec.mode == 1 {
+        value=exp(t*2.302585092994045684)
+        if value == 0.0 { out.status=4;return out }
+    } else if spec.mode == 2 {
+        let a:f64=if t < 0.0 {-t} else {t}
+        let magnitude:f64=if a <= 700.0 { scale_expm1(a)*spec.constant }
+            else { exp(scale_ln(spec.constant)+a)-spec.constant }
+        value=scale_sign(t)*magnitude
+    }
+    if !is_finite(value) || (spec.mode != 1 && t != 0.0 && value == 0.0) { out.status=4;return out }
+    out.status=0;out.value=value
+    out
+}
+// Raw endpoint units; uniform positions in transformed coordinates.
+// Axis node flags encode 2*mode + orientation, node.value stores constant.
+pub fn axis_scaled_ticks(lo:f64,hi:f64,intervals:i64,spec:&ScaleSpec)->AxisTicks with Mut, Div {
+    var out=AxisTicks{values:[0.0;9],n:0,status:1}
+    if !scale_valid(spec) || hi <= lo { return out }
+    if spec.mode == 0 { return axis_ticks(lo,hi,intervals) }
+    let a=scale_forward(lo,spec)
+    let b=scale_forward(hi,spec)
+    if a.status != 0 || b.status != 0 { return out }
+    let coords=axis_ticks(a.value,b.value,intervals)
+    if coords.status != 0 { out.status=coords.status;return out }
+    var i:i64=0
+    while i < coords.n {
+        let raw=scale_inverse(coords.values[i as usize],spec)
+        if raw.status != 0 { out.status=2;return out }
+        let value:f64=if i == 0 {lo} else if i == intervals {hi} else {raw.value}
+        if i > 0 {
+            let previous:f64=out.values[(i-1) as usize]
+            let pair=axis_ticks(previous,value,1)
+            if pair.status != 0 { out.status=pair.status;return out }
+        }
+        out.values[i as usize]=value;i=i+1
+    }
+    out.n=coords.n;out.status=0
+    out
+}

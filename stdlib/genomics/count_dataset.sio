@@ -1,0 +1,182 @@
+// Checked integer-key alignment and reusable count-row preparation. No I/O/Alloc.
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+use math::pure::{is_finite}
+pub struct CountAlignment {pub status:i64,pub samples:i64,pub comparisons:i64}
+struct CDCompare {status:i64,used:i64,limit:i64}
+fn cd_compare(a:i64,b:i64,c:&!CDCompare)->i64 with Mut {
+ if c.status!=0 {return 0}
+ if c.used>=c.limit {c.status=6;return 0}
+ c.used=c.used+1
+ if a<b {return -1}
+ if a>b {return 1}
+ return 0
+}
+fn cd_swap(indices:&!IntegerBuffer,a:i64,b:i64) with Mut,Panic {
+ let av=integer_buffer_at(indices,a)
+ let bv=integer_buffer_at(indices,b)
+ integer_buffer_set(indices,a,bv)
+ integer_buffer_set(indices,b,av)
+}
+fn cd_sift(keys:&IntegerBuffer,indices:&!IntegerBuffer,start:i64,n:i64,c:&!CDCompare) with Mut,Div,Panic {
+ var root=start
+ while root<n/2 {
+  var child=root*2+1
+  if child+1<n {
+   let li=integer_buffer_at(indices,child)
+   let ri=integer_buffer_at(indices,child+1)
+   let order=cd_compare(integer_buffer_at(keys,li),integer_buffer_at(keys,ri),c)
+   if c.status!=0 {return}
+   if order<0 {child=child+1}
+  }
+  let root_index=integer_buffer_at(indices,root)
+  let child_index=integer_buffer_at(indices,child)
+  let order=cd_compare(integer_buffer_at(keys,root_index),integer_buffer_at(keys,child_index),c)
+  if c.status!=0 {return}
+  if order>=0 {return}
+  cd_swap(indices,root,child)
+  root=child
+ }
+}
+fn cd_sort(keys:&IntegerBuffer,indices:&!IntegerBuffer,n:i64,c:&!CDCompare) with Mut,Div,Panic {
+ var i:i64=0
+ while i<n {integer_buffer_set(indices,i,i);i=i+1}
+ i=n/2
+ while i>0 {i=i-1;cd_sift(keys,indices,i,n,c);if c.status!=0 {return}}
+ i=n
+ while i>1 {i=i-1;cd_swap(indices,0,i);cd_sift(keys,indices,0,i,c);if c.status!=0 {return}}
+}
+// permutation[metadata row] = original count-table column. Keys remain unchanged.
+// 0success,1shape,2duplicate key,3missing key,6comparison budget.
+pub fn count_dataset_align(count_keys:&IntegerBuffer,metadata_keys:&IntegerBuffer,
+ comparison_budget:i64,permutation:&!IntegerBuffer,count_order:&!IntegerBuffer,
+ metadata_order:&!IntegerBuffer,stage:&!IntegerBuffer)->CountAlignment with Mut,Div,Panic {
+ let n=integer_buffer_len(count_keys)
+ var out=CountAlignment{status:1,samples:n,comparisons:0}
+ if n<1 || comparison_budget<0 {return out}
+ if integer_buffer_status(count_keys)!=0 || integer_buffer_status(metadata_keys)!=0 ||
+ integer_buffer_status(permutation)!=0 || integer_buffer_status(count_order)!=0 ||
+ integer_buffer_status(metadata_order)!=0 || integer_buffer_status(stage)!=0 {return out}
+ if integer_buffer_len(metadata_keys)!=n || integer_buffer_len(permutation)!=n ||
+ integer_buffer_len(count_order)!=n || integer_buffer_len(metadata_order)!=n || integer_buffer_len(stage)!=n {return out}
+ var c=CDCompare{status:0,used:0,limit:comparison_budget}
+ cd_sort(count_keys,count_order,n,&!c)
+ if c.status==0 {cd_sort(metadata_keys,metadata_order,n,&!c)}
+ var i:i64=1
+ while i<n {
+  if c.status!=0 {out.status=c.status;out.comparisons=c.used;return out}
+  let a=integer_buffer_at(count_order,i-1)
+  let b=integer_buffer_at(count_order,i)
+  let order=cd_compare(integer_buffer_at(count_keys,a),integer_buffer_at(count_keys,b),&!c)
+  if c.status!=0 {out.status=c.status;out.comparisons=c.used;return out}
+  if order==0 {out.status=2;out.comparisons=c.used;return out}
+  let ma=integer_buffer_at(metadata_order,i-1)
+  let mb=integer_buffer_at(metadata_order,i)
+  let mo=cd_compare(integer_buffer_at(metadata_keys,ma),integer_buffer_at(metadata_keys,mb),&!c)
+  if c.status!=0 {out.status=c.status;out.comparisons=c.used;return out}
+  if mo==0 {out.status=2;out.comparisons=c.used;return out}
+  i=i+1
+ }
+ if c.status!=0 {out.status=c.status;out.comparisons=c.used;return out}
+ i=0
+ while i<n {
+  let ci=integer_buffer_at(count_order,i)
+  let mi=integer_buffer_at(metadata_order,i)
+  let order=cd_compare(integer_buffer_at(count_keys,ci),integer_buffer_at(metadata_keys,mi),&!c)
+  if c.status!=0 {out.status=c.status;out.comparisons=c.used;return out}
+  if order!=0 {out.status=3;out.comparisons=c.used;return out}
+  integer_buffer_set(stage,mi,ci)
+  i=i+1
+ }
+ i=0
+ while i<n {let value=integer_buffer_at(stage,i);integer_buffer_set(permutation,i,value);i=i+1}
+ out.status=0
+ out.comparisons=c.used
+ return out
+}
+// O(S) permutation validation with caller scratch. Scratch changes on error.
+fn cd_permutation(permutation:&IntegerBuffer,marks:&!IntegerBuffer,n:i64)->bool with Mut,Panic {
+ if integer_buffer_status(permutation)!=0 || integer_buffer_status(marks)!=0 {return false}
+ if integer_buffer_len(permutation)!=n || integer_buffer_len(marks)!=n {return false}
+ var i:i64=0
+ while i<n {integer_buffer_set(marks,i,0);i=i+1}
+ i=0
+ while i<n {
+  let j=integer_buffer_at(permutation,i)
+  if j<0 || j>=n {return false}
+  if integer_buffer_at(marks,j)!=0 {return false}
+  integer_buffer_set(marks,j,1)
+  i=i+1
+ }
+ return true
+}
+// Raw integers only. No normalization division or implicit conversion.
+// 1shape,4invalid permutation/count/range; all failures preserve public row.
+pub fn count_dataset_gene(counts:&IntegerBuffer,genes:i64,samples:i64,gene:i64,
+ permutation:&IntegerBuffer,max_count:i64,row:&!IntegerBuffer,marks:&!IntegerBuffer)->i64 with Mut,Div,Panic {
+ if genes<1 || samples<1 || gene<0 || gene>=genes || max_count<0 {return 1}
+ if genes>9223372036854775807/samples {return 1}
+ if integer_buffer_status(counts)!=0 || integer_buffer_status(row)!=0 {return 1}
+ if integer_buffer_len(counts)!=genes*samples || integer_buffer_len(row)!=samples {return 1}
+ if !cd_permutation(permutation,marks,samples) {return 4}
+ var i:i64=0
+ while i<samples {
+  let value=integer_buffer_at(counts,gene*samples+i)
+  if value<0 || value>max_count {return 4}
+  i=i+1
+ }
+ i=0
+ while i<samples {
+  let col=integer_buffer_at(permutation,i)
+  let value=integer_buffer_at(counts,gene*samples+col)
+  integer_buffer_set(row,i,value)
+  i=i+1
+ }
+ return 0
+}
+// log_factors in count order; supplied log_exposure and output in metadata order.
+// 1shape,4invalid permutation,5nonfinite/unrepresentable sum. Output transactional.
+pub fn count_dataset_offsets(log_factors:&NumericBuffer,log_exposure:&NumericBuffer,
+ permutation:&IntegerBuffer,offsets:&!NumericBuffer,stage:&!NumericBuffer,
+ marks:&!IntegerBuffer)->i64 with Mut,Div,Panic {
+ let n=numeric_buffer_len(log_factors)
+ if n<1 {return 1}
+ if numeric_buffer_status(log_factors)!=0 || numeric_buffer_status(log_exposure)!=0 ||
+ numeric_buffer_status(offsets)!=0 || numeric_buffer_status(stage)!=0 {return 1}
+ if numeric_buffer_len(log_exposure)!=n || numeric_buffer_len(offsets)!=n || numeric_buffer_len(stage)!=n {return 1}
+ if !cd_permutation(permutation,marks,n) {return 4}
+ var i:i64=0
+ while i<n {
+  let j=integer_buffer_at(permutation,i)
+  let factor=numeric_buffer_at(log_factors,j)
+  let exposure=numeric_buffer_at(log_exposure,i)
+  if !is_finite(factor) || !is_finite(exposure) {return 5}
+  let value=factor+exposure
+  if !is_finite(value) {return 5}
+  numeric_buffer_set(stage,i,value)
+  i=i+1
+ }
+ i=0
+ while i<n {let value=numeric_buffer_at(stage,i);numeric_buffer_set(offsets,i,value);i=i+1}
+ return 0
+}
+// Conservative reservations: charge a gene's full declared evaluation cap BEFORE
+// invoking its profile, including failed fits; no automatic refund/retry.
+pub struct CountDatasetBudget {status:i64,genes_left:i64,evaluations_left:i64,genes_charged:i64,evaluations_charged:i64}
+pub struct CountDatasetBudgetInfo {pub status:i64,pub genes_left:i64,pub evaluations_left:i64,pub genes_charged:i64,pub evaluations_charged:i64}
+pub fn count_dataset_budget_new(max_genes:i64,max_evaluations:i64)->CountDatasetBudget {
+ CountDatasetBudget{status:if max_genes<0 || max_evaluations<0 {1}else{0},genes_left:if max_genes<0 {0}else{max_genes},evaluations_left:if max_evaluations<0 {0}else{max_evaluations},genes_charged:0,evaluations_charged:0}
+}
+pub fn count_dataset_reserve_gene(b:&!CountDatasetBudget,evaluation_cap:i64)->i64 with Mut {
+ if b.status!=0 {return b.status}
+ if evaluation_cap<1 {return 1}
+ if b.genes_left<1 || evaluation_cap>b.evaluations_left {return 6}
+ b.genes_left=b.genes_left-1
+ b.evaluations_left=b.evaluations_left-evaluation_cap
+ b.genes_charged=b.genes_charged+1
+ b.evaluations_charged=b.evaluations_charged+evaluation_cap
+ return 0
+}
+pub fn count_dataset_budget_info(b:&CountDatasetBudget)->CountDatasetBudgetInfo {
+ CountDatasetBudgetInfo{status:b.status,genes_left:b.genes_left,evaluations_left:b.evaluations_left,genes_charged:b.genes_charged,evaluations_charged:b.evaluations_charged}
+}

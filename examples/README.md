@@ -2,8 +2,8 @@
 topic_id: website.docs.examples
 authority: dual
 audience: users
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#website.docs.examples
 -->
 
@@ -31,7 +31,6 @@ This directory contains comprehensive examples demonstrating Sounio's features.
 ### Language Basics
 - `arithmetic.sio` - Basic operations
 - `collections/` - Data structures
-- `algo/` - Algorithms
 
 ### Type System
 - Epistemic types - `epistemic_bmi.sio`
@@ -48,7 +47,6 @@ This directory contains comprehensive examples demonstrating Sounio's features.
 - `signal/` - Signal processing
 - `stats/` - Statistics
 - `bayes/` - Bayesian inference
-- `monte_carlo/` - Monte Carlo methods
 - `optimize/` - Optimization algorithms
 
 ### Domain-Specific
@@ -72,7 +70,6 @@ This directory contains comprehensive examples demonstrating Sounio's features.
 - `network/` - Network programming
 - `csv/` - CSV processing
 - `serialization/` - Data serialization
-- `data_pipeline/` - Data processing
 
 ### Advanced Examples
 - `advanced_glm_optimization.sio` - ML-guided optimization

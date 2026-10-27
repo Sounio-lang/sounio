@@ -2,8 +2,8 @@
 topic_id: repo.docs.audit.equivalence-theory-a-layer2-substrate-2026-06-23
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.equivalence-theory-a-layer2-substrate-2026-06-23
 -->
 
@@ -23,7 +23,7 @@ A-layer-2 (Lyapunov-gated reassociation, §3.3) was **blocked**: it needs to ref
 
 1. **`stdlib/math/lyapunov.sio` — a derivable Lyapunov estimator.** The largest Lyapunov exponent of a 1-D map, `λ = lim (1/N) Σ ln|f'(x_n)|`. `lyap_logistic(r)` (logistic map), `lyap_tent(μ)` (closed form `λ = ln μ`), `lyap_is_chaotic(λ) = λ > 0`. λ > 0 is exactly the `e^{λt}` amplification A-layer-2 must budget for. Crucially this makes the manifest values **derived, not retrofitted** (CLAUDE.md §6).
 
-2. **`chaos_sensitivity_manifest.tsv` — the chaotic-tagged manifest** (schema `chaos_sensitivity.v1`). Each row tags a system with its λ and a `chaotic` flag (`= 1` iff `λ > 0`):
+2. **`artifacts/research/chaos/chaos_sensitivity_manifest.tsv` — the chaotic-tagged manifest** (schema `chaos_sensitivity.v1`). Each row tags a system with its λ and a `chaotic` flag (`= 1` iff `λ > 0`):
    - **Derived** (computed by `lyap_logistic`, reproducible): logistic at r = 3.2 (λ = −0.916290, periodic), 3.5 (−0.872507, periodic), 3.7 (+0.354391, chaotic), 3.9 (+0.496754, chaotic), 4.0 (+0.693149, chaotic). The r = 4.0 value matches the closed form `λ = ln 2 = 0.6931472` to 6 digits — the derivability proof.
    - **Closed-form:** tent μ = 2 (`λ = ln 2` exact).
    - **Literature** (ODE flows the 1-D estimator can't compute, cited to be replaced by a derived flow estimate): Lorenz (λ₁ ≈ 0.9056), Hénon (≈ 0.41922), Rössler (≈ 0.0714).
@@ -42,7 +42,7 @@ A-layer-2 (Lyapunov-gated reassociation, §3.3) was **blocked**: it needs to ref
 
 ### Files
 
-- `stdlib/math/lyapunov.sio`, `chaos_sensitivity_manifest.tsv`, `tests/run-pass/lyapunov_closed_forms.sio`.
+- `stdlib/math/lyapunov.sio`, `artifacts/research/chaos/chaos_sensitivity_manifest.tsv`, `tests/run-pass/lyapunov_closed_forms.sio`.
 
 ---
 
@@ -54,7 +54,7 @@ A-camada-2 (reassociação condicionada por Lyapunov, §3.3) estava **bloqueada*
 
 1. **`stdlib/math/lyapunov.sio` — estimador de Lyapunov derivável.** Maior expoente de Lyapunov de um mapa 1-D, `λ = lim (1/N) Σ ln|f'(x_n)|`. `lyap_logistic(r)`, `lyap_tent(μ)` (forma fechada `λ = ln μ`), `lyap_is_chaotic(λ) = λ > 0`. λ > 0 é exatamente a amplificação `e^{λt}` que A-camada-2 deve orçar. Torna os valores do manifesto **derivados, não retroajustados** (CLAUDE.md §6).
 
-2. **`chaos_sensitivity_manifest.tsv` — o manifesto marcado por caos** (esquema `chaos_sensitivity.v1`). Cada linha marca um sistema com seu λ e um flag `chaotic` (`= 1` sse `λ > 0`):
+2. **`artifacts/research/chaos/chaos_sensitivity_manifest.tsv` — o manifesto marcado por caos** (esquema `chaos_sensitivity.v1`). Cada linha marca um sistema com seu λ e um flag `chaotic` (`= 1` sse `λ > 0`):
    - **Derivado** (computado por `lyap_logistic`): logístico em r = 3.2 (λ = −0.916290), 3.5 (−0.872507), 3.7 (+0.354391), 3.9 (+0.496754), 4.0 (+0.693149 — bate com `ln 2 = 0.6931472` em 6 dígitos).
    - **Forma fechada:** tenda μ = 2 (`λ = ln 2`).
    - **Literatura** (fluxos de EDO que o estimador 1-D não computa, citados): Lorenz (≈ 0.9056), Hénon (≈ 0.41922), Rössler (≈ 0.0714).
@@ -73,7 +73,7 @@ A-camada-2 (reassociação condicionada por Lyapunov, §3.3) estava **bloqueada*
 
 ### Arquivos
 
-- `stdlib/math/lyapunov.sio`, `chaos_sensitivity_manifest.tsv`, `tests/run-pass/lyapunov_closed_forms.sio`.
+- `stdlib/math/lyapunov.sio`, `artifacts/research/chaos/chaos_sensitivity_manifest.tsv`, `tests/run-pass/lyapunov_closed_forms.sio`.
 
 ---
 

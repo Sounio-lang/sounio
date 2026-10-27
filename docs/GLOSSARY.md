@@ -2,8 +2,8 @@
 topic_id: repo.docs.glossary
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.glossary
 -->
 
@@ -285,4 +285,4 @@ Apparent volume in which a drug distributes. Typical unit: `L` or `L/kg`.
 
 ---
 
-*For implementation details, see the [Language Guide](LLM_PROGRAMMING_GUIDE.md).*
+*For implementation details, see the [Language Guide](guide/LLM_PROGRAMMING_GUIDE.md).*
