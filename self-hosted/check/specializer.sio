@@ -1412,7 +1412,7 @@ fn spec_key_name(n: Name) -> string with Mut, Panic, Div {
     str_concat(length, spelling)
 }
 
-fn spec_fn_type_key(te: TypeExpr) -> string with Mut, Panic, Div, Alloc {
+fn spec_fn_type_key_legacy(te: TypeExpr) -> string with Mut, Panic, Div, Alloc {
     if te.kind == TypeExprKind::TypeUnit { return "U" }
     if te.kind == TypeExprKind::TypeReference || te.kind == TypeExprKind::TypeRefMut {
         match te.inner {
@@ -1433,6 +1433,15 @@ fn spec_fn_type_key(te: TypeExpr) -> string with Mut, Panic, Div, Alloc {
     let args = spec_fn_args_key(te.type_args)
     if str_len(args) == 0 { return "" }
     str_concat(prefix, args)
+}
+
+// Preserve every existing admitted key; extend only the previous refusal domain.
+fn spec_fn_type_key(te:TypeExpr)->string with Mut,Panic,Div,Alloc {
+    let legacy=spec_fn_type_key_legacy(te)
+    if str_len(legacy)>0 {return legacy}
+    let encoded=spec_type_identity_key(te)
+    if encoded.len<=0 {return ""}
+    str_concat("X",spec_name_to_string(encoded))
 }
 
 fn spec_fn_args_key(args: Option<Box<TypeExprList>>) -> string with Mut, Panic, Div, Alloc {
@@ -2621,7 +2630,7 @@ fn spec_finish_generics_after_scan(items: Option<Box<ItemList>>) -> Option<Box<I
         slot = slot + 1
     }
     let finalized = spec_finalize_items(items)
-    let out = spec_append_items(finalized, spec_extra_items_to_list())
+    let out = spec_enum_postpass(spec_append_items(finalized, spec_extra_items_to_list()))
     if spec_trace_enabled() {
         print("specializer: instances=")
         print_int(SPEC_EMITTED_COUNT)
@@ -2633,6 +2642,7 @@ fn spec_finish_generics_after_scan(items: Option<Box<ItemList>>) -> Option<Box<I
 
 pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
     spec_reset_state()
+    SPEC_ENUM_PROGRAM_COUNT=1
     // Populated fresh every call, before anything below can read it (in
     // particular spec_call_expr_callee_name, transitively via spec_scan_items
     // and spec_finalize_items's rewrite pass) -- see spec_use_module_note's
@@ -2658,7 +2668,7 @@ pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>
         print("\n")
     }
     if SPEC_GF_COUNT == 0 {
-        return items
+        return spec_enum_postpass(items)
     }
     let roots = heap_alloc(4096) as *mut SpecItemsStage
     (*roots).items = items
@@ -2704,6 +2714,7 @@ pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>
 // instantiation, then restores it -- see spec_ensure_instance's own comment.
 pub fn specialize_generics_multi(items: Option<Box<ItemList>>, programs: &! [Program; 256], count: i64) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
     spec_reset_state()
+    SPEC_ENUM_PROGRAM_COUNT=count
     spec_use_module_reset()
     spec_item_module_reset()
     var i: i64 = 0
@@ -2722,7 +2733,7 @@ pub fn specialize_generics_multi(items: Option<Box<ItemList>>, programs: &! [Pro
         print("\n")
     }
     if SPEC_GF_COUNT == 0 {
-        return items
+        return spec_enum_postpass(items)
     }
     let roots = heap_alloc(4096) as *mut SpecItemsStage
     (*roots).items = items
@@ -2766,7 +2777,7 @@ pub fn spec_last_instantiated() -> bool with Mut, Panic, Div {
 // `if !spec_last_instantiated() { return … }` so non-generic multi-mod still
 // collapsed (generic_fns=0 → ir_summary_failed on imported_deref_f64_array).
 pub fn spec_mono_marker_count() -> i64 with Mut, Panic, Div {
-    var n: i64 = SPEC_EMITTED_COUNT
+    var n: i64 = SPEC_EMITTED_COUNT + SPEC_ENUM_INSTANCE_COUNT
     var i: i64 = 0
     while i < SPEC_GF_COUNT {
         if SPEC_GF_CLONE_PTR[i as usize] != 0 {
@@ -3746,4 +3757,1037 @@ pub fn spec_dce_unreachable_item_fns(
         print("\n")
     }
     out
+}
+
+// Complete bounded type-shape encoder. Nominal resolution belongs to the caller.
+// Caller MUST resolve aliases, free variables and declaration/module identities.
+// This encoder distinguishes syntax of fully resolved TypeExpr; it cannot invent
+// nominal identity missing from an unresolved AST. Empty Name is refusal.
+struct SpecEnumKeyStage {
+    bytes: [i8; 384],
+    length: i64,
+    failed: bool,
+    depth: i64,
+    fuel: i64,
+}
+fn spec_ek_tick(p: *mut SpecEnumKeyStage) -> bool with Mut, Panic {
+    if (*p).failed { return false }
+    if (*p).fuel <= 0 { (*p).failed = true; return false }
+    (*p).fuel = (*p).fuel - 1
+    true
+}
+fn spec_ek_byte(p: *mut SpecEnumKeyStage, b: i64) with Mut, Panic {
+    if (*p).failed { return }
+    if (*p).length >= 384 || b < 48 || b > 90 {
+        (*p).failed = true
+        return
+    }
+    (*p).bytes[(*p).length as usize] = b as i8
+    (*p).length = (*p).length + 1
+}
+fn spec_ek_hex(p: *mut SpecEnumKeyStage, value: i64, digits: i64) with Mut, Panic, Div {
+    if value < 0 || digits < 1 || digits > 16 { (*p).failed = true; return }
+    var n = value
+    var scratch: [i8; 16] = [0; 16]
+    var i: i64 = 0
+    while i < digits {
+        let nibble = n % 16
+        var code = 48 + nibble
+        if nibble >= 10 { code = 65 + nibble - 10 }
+        scratch[i as usize] = code as i8
+        n = n / 16
+        i = i + 1
+    }
+    if n != 0 { (*p).failed = true; return }
+    while i > 0 { i = i - 1; spec_ek_byte(p, scratch[i as usize] as i64) }
+}
+fn spec_ek_signed(p: *mut SpecEnumKeyStage, value: i64) with Mut, Panic, Div {
+    // Avoid negating INT64_MIN: negative code stores -(value+1).
+    if value < 0 {
+        spec_ek_byte(p, 77)
+        spec_ek_hex(p, 0 - (value + 1), 16)
+    } else {
+        spec_ek_byte(p, 80)
+        spec_ek_hex(p, value, 16)
+    }
+}
+fn spec_ek_path(p: *mut SpecEnumKeyStage, path: AstPath) with Mut, Panic, Div, Alloc {
+    if path.seg_count <= 0 { (*p).failed = true; return }
+    spec_ek_byte(p, 80)
+    var cursor = Some(Box::new(path.segments))
+    var seen: i64 = 0
+    var done = false
+    while !done && !(*p).failed {
+        match cursor {
+            None => { done = true }
+            Some(node) => {
+                if !spec_ek_tick(p) { return }
+                let size = (*node).head_len
+                if size <= 0 || size > 384 || seen >= path.seg_count {
+                    (*p).failed = true
+                    return
+                }
+                spec_ek_byte(p, 83)
+                spec_ek_hex(p, size, 4)
+                var i: i64 = 0
+                while i < size && !(*p).failed {
+                    var b = (*node).head_buf[i as usize] as i64
+                    if b < 0 { b = b + 256 }
+                    spec_ek_hex(p, b, 2)
+                    i = i + 1
+                }
+                seen = seen + 1
+                cursor = (*node).tail
+            }
+        }
+    }
+    if seen != path.seg_count { (*p).failed = true }
+    spec_ek_byte(p, 90)
+}
+fn spec_ek_args(p: *mut SpecEnumKeyStage, args: Option<Box<TypeExprList>>) with Mut, Panic, Div, Alloc {
+    spec_ek_byte(p, 65)
+    var cursor = args
+    var done = false
+    while !done && !(*p).failed {
+        match cursor {
+            None => { done = true }
+            Some(node) => {
+                if !spec_ek_tick(p) { return }
+                spec_ek_type(p, (*node).head)
+                cursor = (*node).tail
+            }
+        }
+    }
+    spec_ek_byte(p, 90)
+}
+fn spec_ek_effect_valid(e: EffectRef) -> bool {
+    e.name_len > 0 && e.name_len <= 64
+}
+fn spec_ek_effect_cmp(a: EffectRef, b: EffectRef) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    var limit = a.name_len
+    if b.name_len < limit { limit = b.name_len }
+    while i < limit {
+        var av = a.name_buf[i as usize] as i64
+        var bv = b.name_buf[i as usize] as i64
+        if av < 0 { av = av + 256 }
+        if bv < 0 { bv = bv + 256 }
+        if av < bv { return 0 - 1 }
+        if av > bv { return 1 }
+        i = i + 1
+    }
+    if a.name_len < b.name_len { return 0 - 1 }
+    if a.name_len > b.name_len { return 1 }
+    if !a.has_payload && b.has_payload { return 0 - 1 }
+    if a.has_payload && !b.has_payload { return 1 }
+    if a.has_payload {
+        if a.payload < b.payload { return 0 - 1 }
+        if a.payload > b.payload { return 1 }
+    }
+    0
+}
+fn spec_ek_effect_empty() -> EffectRef {
+    EffectRef { name_buf: [0; 64], name_len: 0, payload: 0, has_payload: false }
+}
+fn spec_ek_effect(p: *mut SpecEnumKeyStage, e: EffectRef) with Mut, Panic, Div {
+    if !spec_ek_effect_valid(e) { (*p).failed = true; return }
+    spec_ek_byte(p, 69)
+    spec_ek_hex(p, e.name_len, 4)
+    var i: i64 = 0
+    while i < e.name_len && !(*p).failed {
+        var b = e.name_buf[i as usize] as i64
+        if b < 0 { b = b + 256 }
+        spec_ek_hex(p, b, 2)
+        i = i + 1
+    }
+    if e.has_payload {
+        spec_ek_byte(p, 89)
+        spec_ek_signed(p, e.payload)
+    } else {
+        spec_ek_byte(p, 78)
+    }
+}
+fn spec_ek_effects(p: *mut SpecEnumKeyStage, row: Option<Box<EffectList>>) with Mut, Panic, Div {
+    // Effect rows are sets here: sort by complete atom and deduplicate exact
+    // duplicates. No hashing, fixed atom cap, payload dropping, or effect waiver.
+    spec_ek_byte(p, 88)
+    var last = spec_ek_effect_empty()
+    var has_last = false
+    var exhausted = false
+    while !exhausted && !(*p).failed {
+        var best = spec_ek_effect_empty()
+        var has_best = false
+        var cursor = row
+        var done = false
+        while !done && !(*p).failed {
+            match cursor {
+                None => { done = true }
+                Some(node) => {
+                    if !spec_ek_tick(p) { return }
+                    let atom = (*node).head
+                    if !spec_ek_effect_valid(atom) { (*p).failed = true; return }
+                    var after = true
+                    if has_last { after = spec_ek_effect_cmp(atom, last) > 0 }
+                    if after {
+                        if !has_best {
+                            best = atom
+                            has_best = true
+                        } else if spec_ek_effect_cmp(atom, best) < 0 {
+                            best = atom
+                        }
+                    }
+                    cursor = (*node).tail
+                }
+            }
+        }
+        if has_best {
+            spec_ek_effect(p, best)
+            last = best
+            has_last = true
+        } else {
+            exhausted = true
+        }
+    }
+    spec_ek_byte(p, 90)
+}
+fn spec_ek_inner(p: *mut SpecEnumKeyStage, inner: Option<Box<TypeExpr>>) with Mut, Panic, Div, Alloc {
+    match inner {
+        None => { (*p).failed = true }
+        Some(t) => { spec_ek_type(p, *t) }
+    }
+}
+fn spec_ek_type(p: *mut SpecEnumKeyStage, te: TypeExpr) with Mut, Panic, Div, Alloc {
+    if !spec_ek_tick(p) { return }
+    if (*p).depth >= 384 { (*p).failed = true; return }
+    (*p).depth = (*p).depth + 1
+    spec_ek_body(p, te)
+    (*p).depth = (*p).depth - 1
+}
+fn spec_ek_body(p: *mut SpecEnumKeyStage, te: TypeExpr) with Mut, Panic, Div, Alloc {
+    // Extra occupied metadata is rejected rather than silently aliased.
+    match te.knowledge_info { Some(k) => { (*p).failed = true; return } None => {} }
+    match te.refinement_info { Some(r) => { (*p).failed = true; return } None => {} }
+    if te.kind != TypeExprKind::TypeFn {
+        match te.effects { Some(e) => { (*p).failed = true; return } None => {} }
+    }
+    if te.kind != TypeExprKind::TypeNamed && te.path.seg_count != 0 {
+        (*p).failed = true
+        return
+    }
+    if te.kind != TypeExprKind::TypeNamed && te.kind != TypeExprKind::TypeTuple && te.kind != TypeExprKind::TypeFn {
+        match te.type_args { Some(a) => { (*p).failed = true; return } None => {} }
+    }
+    if te.kind != TypeExprKind::TypeArray && te.kind != TypeExprKind::TypeRawPtr {
+        match te.array_size { Some(a) => { (*p).failed = true; return } None => {} }
+    }
+    if te.kind == TypeExprKind::TypeNamed || te.kind == TypeExprKind::TypeUnit || te.kind == TypeExprKind::TypeTuple {
+        match te.inner { Some(a) => { (*p).failed = true; return } None => {} }
+    }
+    if te.kind == TypeExprKind::TypeUnit {
+        spec_ek_byte(p, 85)
+        return
+    }
+    if te.kind == TypeExprKind::TypeNamed {
+        spec_ek_byte(p, 78)
+        spec_ek_path(p, te.path)
+        spec_ek_args(p, te.type_args)
+        return
+    }
+    if te.kind == TypeExprKind::TypeReference || te.kind == TypeExprKind::TypeRefMut {
+        if te.kind == TypeExprKind::TypeReference { spec_ek_byte(p, 82) } else { spec_ek_byte(p, 77) }
+        spec_ek_inner(p, te.inner)
+        return
+    }
+    if te.kind == TypeExprKind::TypeRawPtr {
+        spec_ek_byte(p, 81)
+        // Sealed parser/types.sio uses Some(zero IntLit) as *mut marker.
+        match te.array_size {
+            None => { spec_ek_byte(p, 67) }
+            Some(marker) => {
+                if (*marker).kind != ExprKind::ExprIntLit || (*marker).int_val != 0 {
+                    (*p).failed = true
+                    return
+                }
+                spec_ek_byte(p, 77)
+            }
+        }
+        spec_ek_inner(p, te.inner)
+        return
+    }
+    if te.kind == TypeExprKind::TypeArray {
+        match te.array_size {
+            None => { spec_ek_byte(p, 68) }
+            Some(size) => {
+                if (*size).kind != ExprKind::ExprIntLit || (*size).int_val < 0 {
+                    (*p).failed = true
+                    return
+                }
+                spec_ek_byte(p, 70)
+                spec_ek_hex(p, (*size).int_val, 16)
+            }
+        }
+        spec_ek_inner(p, te.inner)
+        return
+    }
+    if te.kind == TypeExprKind::TypeTuple {
+        match te.type_args { None => { (*p).failed = true; return } Some(a) => {} }
+        spec_ek_byte(p, 84)
+        spec_ek_args(p, te.type_args)
+        return
+    }
+    if te.kind == TypeExprKind::TypeFn {
+        spec_ek_byte(p, 72)
+        spec_ek_args(p, te.type_args)
+        spec_ek_byte(p, 79)
+        match te.inner {
+            None => { spec_ek_byte(p, 85) }
+            Some(result) => { spec_ek_type(p, *result) }
+        }
+        spec_ek_effects(p, te.effects)
+        return
+    }
+    // Includes TypeInfer, Self, Never, all refinement/knowledge/session and
+    // annotation wrappers: explicit refusal until their semantic keys exist.
+    (*p).failed = true
+}
+pub fn spec_type_identity_key(te: TypeExpr) -> Name with Mut, Panic, Div, Alloc {
+    let p = heap_alloc(4096) as *mut SpecEnumKeyStage
+    (*p).bytes = [0; 384]
+    (*p).length = 0
+    (*p).failed = false
+    (*p).depth = 0
+    (*p).fuel = 4096
+    spec_ek_type(p, te)
+    if (*p).failed || (*p).length <= 0 { return empty_name() }
+    Name { buf: (*p).bytes, len: (*p).length }
+}
+
+
+// DRAFT ONLY: generic enum AST templates. Not an adopted compiler feature.
+// Caller integration must supply a fully resolved, injective semantic_key
+// and collision-checked concrete symbol for the caller's actual type arguments.
+// Do NOT use check.sio::mangle_generic_name's fallback "T" or hash-only caches.
+struct SpecEnumTemplateDraft {
+    name: Name,
+    ed: Option<Box<EnumDef>>,
+    visibility: Visibility,
+    owner: i64,
+}
+struct SpecEnumInstanceDraft {
+    template_slot: i64,
+    semantic_key: Name,
+    symbol: Name,
+    next: i64,
+}
+struct SpecEnumDefDraftStage { ed: EnumDef }
+var SPEC_ENUM_DRAFT_COUNT: i64 = 0
+var SPEC_ENUM_DRAFT_PTRS: [i64; 256] = [0; 256]
+var SPEC_ENUM_DRAFT_INSTANCES: i64 = 0
+
+fn spec_enum_draft_reset() with Mut, Panic {
+    var i: i64 = 0
+    while i < 256 { SPEC_ENUM_DRAFT_PTRS[i as usize] = 0; i = i + 1 }
+    SPEC_ENUM_DRAFT_COUNT = 0
+    SPEC_ENUM_DRAFT_INSTANCES = 0
+}
+fn spec_enum_draft_find(name: Name, owner: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < SPEC_ENUM_DRAFT_COUNT {
+        let p = SPEC_ENUM_DRAFT_PTRS[i as usize] as *mut SpecEnumTemplateDraft
+        if (*p).owner == owner && name_eq((*p).name, name) { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+fn spec_collect_generic_enums_draft(items: Option<Box<ItemList>>, owner: i64) with Mut, Panic, Div, Alloc {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemEnum {
+                match it.enum_def {
+                    None => {}
+                    Some(ed) => {
+                        let count = spec_struct_tp_count_of((*ed).type_params)
+                        if count > 4 {
+                            // Explicit refusal, inherited context capacity; never truncate.
+                            spec_mark_cap_overflow(1)
+                        } else if count > 0 && spec_enum_draft_find(it.name, owner) < 0 {
+                            if SPEC_ENUM_DRAFT_COUNT >= 256 {
+                                spec_mark_cap_overflow(3)
+                            } else {
+                                let p = heap_alloc(4096) as *mut SpecEnumTemplateDraft
+                                (*p).name = it.name
+                                (*p).ed = it.enum_def
+                                (*p).visibility = it.visibility
+                                (*p).owner = owner
+                                SPEC_ENUM_DRAFT_PTRS[SPEC_ENUM_DRAFT_COUNT as usize] = p as i64
+                                SPEC_ENUM_DRAFT_COUNT = SPEC_ENUM_DRAFT_COUNT + 1
+                            }
+                        }
+                    }
+                }
+            }
+            spec_collect_generic_enums_draft((*list).tail, owner)
+        }
+    }
+}
+fn spec_subst_enum_variants_draft(
+    variants: Option<Box<VariantDefList>>,
+    ctx: i64,
+    args: Option<Box<TypeExprList>>,
+) -> Option<Box<VariantDefList>> with Mut, Panic, Div, Alloc {
+    match variants {
+        None => None
+        Some(list) => {
+            let variant = (*list).head
+            // Real payload fields receive the same recursive type substitution
+            // as struct fields. Unit variants remain present with fields=None.
+            let copied = VariantDef {
+                name: variant.name,
+                fields: spec_subst_field_list_opt(variant.fields, ctx, args),
+                span: variant.span,
+            }
+            Some(Box::new(VariantDefList {
+                head: copied,
+                tail: spec_subst_enum_variants_draft((*list).tail, ctx, args),
+            }))
+        }
+    }
+}
+fn spec_make_enum_item_draft(name: Name, ed: EnumDef, visibility: Visibility) -> Item with Mut, Panic, Div, Alloc {
+    Item {
+        kind: ItemKind::ItemEnum, span: ed.span, visibility: visibility, name: name, fn_def: None,
+        struct_def: None, enum_def: Some(Box::new(ed)), impl_def: None, type_alias_ty: None, policy_def: None,
+        acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None,
+        transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None,
+        alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(),
+        use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None,
+        study_def: None, ontology_def: None,
+    }
+}
+fn spec_enum_instance_find_draft(slot: i64, semantic_key: Name) -> i64 with Mut, Panic, Div {
+    var at = SPEC_ENUM_DRAFT_INSTANCES
+    while at != 0 {
+        let p = at as *mut SpecEnumInstanceDraft
+        // Template declaration identity + full key bytes, never hash equality.
+        if (*p).template_slot == slot && name_eq((*p).semantic_key, semantic_key) { return at }
+        at = (*p).next
+    }
+    0
+}
+fn spec_create_enum_instance_draft(
+    slot: i64,
+    semantic_key: Name,
+    symbol: Name,
+    args: Option<Box<TypeExprList>>,
+) -> Name with Mut, Panic, Div, Alloc {
+    if slot < 0 || slot >= SPEC_ENUM_DRAFT_COUNT || spec_name_is_empty(semantic_key) || spec_name_is_empty(symbol) {
+        SPEC_UNSOUND_POISON = true
+        return empty_name()
+    }
+    let template = SPEC_ENUM_DRAFT_PTRS[slot as usize] as *mut SpecEnumTemplateDraft
+    match (*template).ed {
+        None => {
+            SPEC_UNSOUND_POISON = true
+            return empty_name()
+        }
+        Some(ed) => {
+            let count = spec_struct_tp_count_of((*ed).type_params)
+            if count <= 0 || count > 4 || spec_type_args_count(args) != count {
+                SPEC_UNSOUND_POISON = true
+                return empty_name()
+            }
+            let found = spec_enum_instance_find_draft(slot, semantic_key)
+            if found != 0 { return (*(found as *mut SpecEnumInstanceDraft)).symbol }
+            if SPEC_SOURCE_ITEMS == 0 {
+                SPEC_UNSOUND_POISON = true
+                return empty_name()
+            }
+            let roots = SPEC_SOURCE_ITEMS as *mut SpecItemsStage
+            if spec_items_have_symbol((*roots).items, symbol) {
+                spec_mark_cap_overflow(6)
+                return empty_name()
+            }
+            let instance = heap_alloc(4096) as *mut SpecEnumInstanceDraft
+            (*instance).template_slot = slot
+            (*instance).semantic_key = semantic_key
+            (*instance).symbol = symbol
+            (*instance).next = SPEC_ENUM_DRAFT_INSTANCES
+            // Reserve identity before recursively visiting nested payload types.
+            SPEC_ENUM_DRAFT_INSTANCES = instance as i64
+            let ctx = spec_ctx_new(count,
+                spec_struct_tp_hash_of((*ed).type_params, 0),
+                spec_struct_tp_hash_of((*ed).type_params, 1),
+                spec_struct_tp_hash_of((*ed).type_params, 2),
+                spec_struct_tp_hash_of((*ed).type_params, 3))
+            let exact=ctx as *mut SpecCtxNode
+            (*exact).n0=spec_type_param_name_at((*ed).type_params,0)
+            (*exact).n1=spec_type_param_name_at((*ed).type_params,1)
+            (*exact).n2=spec_type_param_name_at((*ed).type_params,2)
+            (*exact).n3=spec_type_param_name_at((*ed).type_params,3)
+            spec_ctx_validate_exact(ctx)
+            let staged = heap_alloc(16384) as *mut SpecEnumDefDraftStage
+            (*staged).ed = *ed
+            (*staged).ed.name = symbol
+            (*staged).ed.type_params = None
+            let caller_owner = SPEC_CURRENT_MODULE_ID
+            SPEC_CURRENT_MODULE_ID = (*template).owner
+            (*staged).ed.variants = spec_enum_resolve_variants(spec_subst_enum_variants_draft((*ed).variants, ctx, args))
+            SPEC_CURRENT_MODULE_ID = caller_owner
+            SPEC_ENUM_INSTANCE_COUNT=SPEC_ENUM_INSTANCE_COUNT+1
+            spec_extra_push_item(spec_make_enum_item_draft((*instance).symbol, (*staged).ed, (*template).visibility))
+            spec_item_module_note((*template).owner, symbol)
+            return symbol
+        }
+    }
+}
+// Deliberately not activated here: caller/checker identity and constructor/
+// pattern rewriting remain with the compiler owner. Wiring this collection
+// alone is NOT support: see FRONTEND_INVENTORY.md for every required hook.
+// Existing spec_ctx uses type-param hashes. Adoption must replace/guard that
+// substitution lookup with full Name equality; the instance cache above does
+// not make the older substitution context collision-safe.
+
+
+// Generic enum instances are specialized after generic function/struct clones.
+// No erased Some/None constructor is admitted when its nominal context is missing.
+struct SpecEnumTypeBinding { name:Name, ty:TypeExpr, next:i64 }
+var SPEC_ENUM_INSTANCE_COUNT:i64=0
+fn spec_enum_env_bind(head:i64,name:Name,ty:TypeExpr)->i64 with Mut,Panic,Div,Alloc {
+    let p=heap_alloc(4096) as *mut SpecEnumTypeBinding
+    (*p).name=name
+    (*p).ty=ty
+    (*p).next=head
+    p as i64
+}
+fn spec_enum_env_find(head:i64,name:Name)->i64 with Mut,Panic,Div {
+    var node=head
+    while node!=0 {
+        let p=node as *mut SpecEnumTypeBinding
+        if name_eq((*p).name,name) {return node}
+        node=(*p).next
+    }
+    0
+}
+fn spec_enum_symbol_instance(name:Name)->i64 with Mut,Panic,Div {
+    var node=SPEC_ENUM_DRAFT_INSTANCES
+    while node!=0 {
+        let p=node as *mut SpecEnumInstanceDraft
+        if name_eq((*p).symbol,name) {return node}
+        node=(*p).next
+    }
+    0
+}
+fn spec_enum_make_symbol(slot:i64,key:Name)->Name with Mut,Panic,Div,Alloc {
+    let text=str_concat(str_concat("@enum:",spec_key_length(slot)),str_concat("_",spec_name_to_string(key)))
+    if str_len(text)>384 {SPEC_UNSOUND_POISON=true;return empty_name()}
+    make_name(text)
+}
+fn spec_enum_type_slot(te:TypeExpr)->i64 with Mut,Panic,Div {
+    if te.kind!=TypeExprKind::TypeNamed {return -1}
+    if te.path.seg_count!=1 {return -1}
+    let owner=if SPEC_CURRENT_MODULE_ID==-1 {0} else {SPEC_CURRENT_MODULE_ID}
+    if owner<0 {SPEC_UNSOUND_POISON=true;return -1}
+    spec_enum_draft_find(spec_path_single_name(te.path),owner)
+}
+fn spec_enum_resolve_type_list(types:Option<Box<TypeExprList>>)->Option<Box<TypeExprList>> with Mut,Panic,Div,Alloc {
+    match types {
+        None=>None,
+        Some(node)=>Some(Box::new(TypeExprList{head:spec_enum_resolve_type((*node).head),tail:spec_enum_resolve_type_list((*node).tail)})),
+    }
+}
+fn spec_enum_resolve_type_opt(ty:Option<Box<TypeExpr>>)->Option<Box<TypeExpr>> with Mut,Panic,Div,Alloc {
+    match ty {None=>None,Some(value)=>Some(Box::new(spec_enum_resolve_type(*value)))}
+}
+fn spec_enum_resolve_type(ty:TypeExpr)->TypeExpr with Mut,Panic,Div,Alloc {
+    let p=heap_alloc(32768) as *mut SpecTypeStage
+    (*p).ty=ty
+    (*p).ty.inner=spec_enum_resolve_type_opt(ty.inner)
+    (*p).ty.type_args=spec_enum_resolve_type_list(ty.type_args)
+    let slot=spec_enum_type_slot((*p).ty)
+    if slot>=0 {
+        if !spec_enum_args_concrete((*p).ty.type_args,0) {SPEC_UNSOUND_POISON=true;return dummy_type_expr()}
+        let key=spec_type_identity_key((*p).ty)
+        if key.len<=0 {SPEC_UNSOUND_POISON=true;return dummy_type_expr()}
+        let symbol=spec_enum_make_symbol(slot,key)
+        let actual=spec_create_enum_instance_draft(slot,key,symbol,(*p).ty.type_args)
+        if actual.len<=0 {SPEC_UNSOUND_POISON=true;return dummy_type_expr()}
+        (*p).ty.path=spec_name_to_path(actual)
+        (*p).ty.type_args=None
+    }
+    (*p).ty
+}
+fn spec_enum_resolve_field_list(fields:Option<Box<FieldDefList>>)->Option<Box<FieldDefList>> with Mut,Panic,Div,Alloc {
+    match fields {
+        None=>None,
+        Some(node)=>{
+            var field=(*node).head
+            field.ty=spec_enum_resolve_type(field.ty)
+            Some(Box::new(FieldDefList{head:field,tail:spec_enum_resolve_field_list((*node).tail)}))
+        }
+    }
+}
+fn spec_enum_resolve_variants(variants:Option<Box<VariantDefList>>)->Option<Box<VariantDefList>> with Mut,Panic,Div,Alloc {
+    match variants {
+        None=>None,
+        Some(node)=>{
+            var variant=(*node).head
+            variant.fields=spec_enum_resolve_field_list(variant.fields)
+            Some(Box::new(VariantDefList{head:variant,tail:spec_enum_resolve_variants((*node).tail)}))
+        }
+    }
+}
+
+fn spec_enum_named_type(name:Name)->TypeExpr {
+    var ty=dummy_type_expr()
+    ty.kind=TypeExprKind::TypeNamed
+    ty.path=spec_name_to_path(name)
+    ty
+}
+fn spec_enum_variant_path(symbol:Name,variant:Name)->AstPath with Alloc {
+    AstPath{seg_count:2,segments:StringList{head_buf:symbol.buf,head_len:symbol.len,
+        tail:Some(Box::new(StringList{head_buf:variant.buf,head_len:variant.len,tail:None}))}}
+}
+fn spec_enum_find_function(items:Option<Box<ItemList>>,name:Name)->Option<Box<FnDef>> with Mut,Panic,Div {
+    var cur=items
+    while true {
+        match cur {
+            Some(node)=>{
+                if (*node).head.kind==ItemKind::ItemFn && name_eq((*node).head.name,name) {return (*node).head.fn_def}
+                cur=(*node).tail
+            }
+            None=>break
+        }
+    }
+    None
+}
+fn spec_enum_root_items()->Option<Box<ItemList>> with Mut,Panic,Div {
+    if SPEC_SOURCE_ITEMS==0 {return None}
+    (*(SPEC_SOURCE_ITEMS as *mut SpecItemsStage)).items
+}
+fn spec_enum_expr_type(e:&Expr,env:i64)->Option<Box<TypeExpr>> with Mut,Panic,Div,Alloc {
+    if (*e).kind==ExprKind::ExprIdent {
+        let found=spec_enum_env_find(env,(*e).name)
+        if found!=0 {return Some(Box::new((*(found as *mut SpecEnumTypeBinding)).ty))}
+        return None
+    }
+    if (*e).kind==ExprKind::ExprIntLit {return Some(Box::new(spec_enum_named_type(make_name("i64"))))}
+    if (*e).kind==ExprKind::ExprFloatLit {return Some(Box::new(spec_enum_named_type(make_name("f64"))))}
+    if (*e).kind==ExprKind::ExprStringLit {return Some(Box::new(spec_enum_named_type(make_name("string"))))}
+    if (*e).kind==ExprKind::ExprBoolTrue || (*e).kind==ExprKind::ExprBoolFalse {return Some(Box::new(spec_enum_named_type(make_name("bool"))))}
+    if (*e).kind==ExprKind::ExprCall {
+        match (*e).left {
+            Some(callee)=>{
+                if (*callee).kind==ExprKind::ExprPath {
+                    let path=(*callee).path
+                    if path.seg_count==2 {
+                        let symbol=spec_string_list_nth_name(path.segments,0)
+                        if spec_enum_symbol_instance(symbol)!=0 {return Some(Box::new(spec_enum_named_type(symbol)))}
+                    }
+                }
+                let name=if (*callee).kind==ExprKind::ExprIdent {(*callee).name} else {spec_string_list_last_name((*callee).path.segments)}
+                match spec_enum_find_function(spec_enum_root_items(),name) {
+                    Some(fd)=>return spec_enum_resolve_type_opt((*fd).return_type),
+                    None=>{}
+                }
+                let local=spec_enum_env_find(env,name)
+                if local!=0 {
+                    let fn_ty=(*(local as *mut SpecEnumTypeBinding)).ty
+                    if fn_ty.kind==TypeExprKind::TypeFn {return fn_ty.inner}
+                }
+            }
+            None=>{}
+        }
+        return None
+    }
+    if (*e).kind==ExprKind::ExprPath && (*e).path.seg_count==2 {
+        let symbol=spec_string_list_nth_name((*e).path.segments,0)
+        if spec_enum_symbol_instance(symbol)!=0 {return Some(Box::new(spec_enum_named_type(symbol)))}
+    }
+    if (*e).kind==ExprKind::ExprUnary {
+        match (*e).left {
+            Some(inner)=>{
+                match spec_enum_expr_type(&(*inner),env) {
+                    Some(t)=>{
+                        if (*e).un_op==UnaryOp::OpRef || (*e).un_op==UnaryOp::OpRefMut {
+                            var ty=dummy_type_expr()
+                            ty.kind=if (*e).un_op==UnaryOp::OpRef {TypeExprKind::TypeReference} else {TypeExprKind::TypeRefMut}
+                            ty.inner=Some(t)
+                            return Some(Box::new(ty))
+                        }
+                        if (*e).un_op==UnaryOp::OpDeref {return (*t).inner}
+                    }
+                    None=>{}
+                }
+            }
+            None=>{}
+        }
+    }
+    if (*e).kind==ExprKind::ExprIndex {
+        match (*e).left {
+            Some(base)=>{match spec_enum_expr_type(&(*base),env) {Some(t)=>{if (*t).kind==TypeExprKind::TypeArray {return (*t).inner}},None=>{}}}
+            None=>{}
+        }
+    }
+    if (*e).kind==ExprKind::ExprStructLit {
+        var ty=dummy_type_expr()
+        ty.kind=TypeExprKind::TypeNamed
+        ty.path=(*e).path
+        ty.type_args=(*e).type_args
+        return Some(Box::new(spec_enum_resolve_type(ty)))
+    }
+    None
+}
+fn spec_enum_expected_instance(ty:Option<Box<TypeExpr>>)->i64 with Mut,Panic,Div {
+    match ty {
+        Some(t)=>{
+            if (*t).kind==TypeExprKind::TypeReference || (*t).kind==TypeExprKind::TypeRefMut {return spec_enum_expected_instance((*t).inner)}
+            if (*t).kind==TypeExprKind::TypeNamed && (*t).path.seg_count==1 {return spec_enum_symbol_instance(spec_path_single_name((*t).path))}
+        }
+        None=>{}
+    }
+    0
+}
+fn spec_enum_instance_variant_fields(instance:i64,variant:Name)->Option<Box<FieldDefList>> with Mut,Panic,Div,Alloc {
+    if instance==0 {return None}
+    let record=instance as *mut SpecEnumInstanceDraft
+    // Instantiated enum definitions live on the generated item list.
+    var cur=SPEC_EXTRA_HEAD
+    while cur!=0 {
+        let node=cur as *mut SpecItemNode
+        if name_eq((*node).it.name,(*record).symbol) {
+            match (*node).it.enum_def {
+                Some(ed)=>{
+                    var variants=(*ed).variants
+                    while true {match variants {
+                        Some(v)=>{if name_eq((*v).head.name,variant) {return (*v).head.fields};variants=(*v).tail}
+                        None=>break
+                    }}
+                }
+                None=>{}
+            }
+        }
+        cur=(*node).next
+    }
+    None
+}
+fn spec_enum_pattern_bind(pat:&Pattern,ty:TypeExpr,env:i64)->i64 with Mut,Panic,Div,Alloc {
+    if (*pat).kind==PatternKind::PatBinding {return spec_enum_env_bind(env,(*pat).name,ty)}
+    if (*pat).kind!=PatternKind::PatEnum {return env}
+    let instance=spec_enum_expected_instance(Some(Box::new(ty)))
+    if instance==0 {return env}
+    let variant=spec_string_list_last_name((*pat).path.segments)
+    var fields=spec_enum_instance_variant_fields(instance,variant)
+    var pats=(*pat).sub_patterns
+    var out=env
+    while true {
+        match pats {
+            Some(p)=>{match fields {
+                Some(f)=>{out=spec_enum_pattern_bind(&(*p).head,(*f).head.ty,out);fields=(*f).tail}
+                None=>{SPEC_UNSOUND_POISON=true;return out}
+            };pats=(*p).tail}
+            None=>break
+        }
+    }
+    out
+}
+fn spec_enum_rewrite_pattern(pat:Pattern,ty:Option<Box<TypeExpr>>)->Pattern with Mut,Panic,Div,Alloc {
+    var out=pat
+    if pat.kind!=PatternKind::PatEnum {return out}
+    let instance=spec_enum_expected_instance(ty)
+    if instance==0 {return out}
+    let record=instance as *mut SpecEnumInstanceDraft
+    if pat.path.seg_count>=2 {
+        let given=spec_string_list_nth_name(pat.path.segments,pat.path.seg_count-2)
+        let template=SPEC_ENUM_DRAFT_PTRS[(*record).template_slot as usize] as *mut SpecEnumTemplateDraft
+        if !name_eq(given,(*record).symbol) && !name_eq(given,(*template).name) {SPEC_UNSOUND_POISON=true;return out}
+    }
+    let variant=spec_string_list_last_name(pat.path.segments)
+    out.path=spec_enum_variant_path((*record).symbol,variant)
+    var fields=spec_enum_instance_variant_fields(instance,variant)
+    var patterns=pat.sub_patterns
+    out.sub_patterns=spec_enum_rewrite_pattern_list(patterns,fields)
+    out
+}
+fn spec_enum_rewrite_pattern_list(patterns:Option<Box<PatternList>>,fields:Option<Box<FieldDefList>>)->Option<Box<PatternList>> with Mut,Panic,Div,Alloc {
+    match patterns {
+        None=>None,
+        Some(p)=>{match fields {
+            Some(f)=>Some(Box::new(PatternList{head:spec_enum_rewrite_pattern((*p).head,Some(Box::new((*f).head.ty))),tail:spec_enum_rewrite_pattern_list((*p).tail,(*f).tail)})),
+            None=>{SPEC_UNSOUND_POISON=true;patterns}
+        }}
+    }
+}
+
+
+fn spec_enum_field_types(fields:Option<Box<FieldDefList>>)->Option<Box<TypeExprList>> with Mut,Panic,Div,Alloc {
+    match fields {None=>None,Some(f)=>Some(Box::new(TypeExprList{head:(*f).head.ty,tail:spec_enum_field_types((*f).tail)}))}
+}
+fn spec_enum_param_types(params:Option<Box<ParamList>>)->Option<Box<TypeExprList>> with Mut,Panic,Div,Alloc {
+    match params {None=>None,Some(p)=>Some(Box::new(TypeExprList{head:spec_enum_resolve_type((*p).head.ty),tail:spec_enum_param_types((*p).tail)}))}
+}
+fn spec_enum_rewrite_args(args:Option<Box<ExprList>>,types:Option<Box<TypeExprList>>,env:i64,ret:Option<Box<TypeExpr>>)->Option<Box<ExprList>> with Mut,Panic,Div,Alloc {
+    match args {
+        None=>None,
+        Some(a)=>{
+            let expected=match types {Some(t)=>Some(Box::new((*t).head)),None=>None}
+            let tail_types=match types {Some(t)=>(*t).tail,None=>None}
+            Some(Box::new(ExprList{label:(*a).label,head:spec_enum_rewrite_expr((*a).head,env,expected,ret),tail:spec_enum_rewrite_args((*a).tail,tail_types,env,ret)}))
+        }
+    }
+}
+fn spec_enum_rewrite_expr_opt(expr:Option<Box<Expr>>,env:i64,expected:Option<Box<TypeExpr>>,ret:Option<Box<TypeExpr>>)->Option<Box<Expr>> with Mut,Panic,Div,Alloc {
+    match expr {None=>None,Some(e)=>Some(Box::new(spec_enum_rewrite_expr(*e,env,expected,ret)))}
+}
+fn spec_enum_rewrite_arms(arms:Option<Box<MatchArmList>>,env:i64,scrut:Option<Box<TypeExpr>>,expected:Option<Box<TypeExpr>>,ret:Option<Box<TypeExpr>>)->Option<Box<MatchArmList>> with Mut,Panic,Div,Alloc {
+    match arms {
+        None=>None,
+        Some(a)=>{
+            let pat=spec_enum_rewrite_pattern((*a).head.pattern,scrut)
+            let branch_env=match scrut {Some(t)=>spec_enum_pattern_bind(&pat,*t,env),None=>env}
+            let arm=MatchArm{pattern:pat,guard:spec_enum_rewrite_expr_opt((*a).head.guard,branch_env,None,ret),
+                body:spec_enum_rewrite_expr((*a).head.body,branch_env,expected,ret),span:(*a).head.span}
+            Some(Box::new(MatchArmList{head:arm,tail:spec_enum_rewrite_arms((*a).tail,env,scrut,expected,ret)}))
+        }
+    }
+}
+fn spec_enum_rewrite_expr(e:Expr,env:i64,expected:Option<Box<TypeExpr>>,ret:Option<Box<TypeExpr>>)->Expr with Mut,Panic,Div,Alloc {
+    let p=heap_alloc(32768) as *mut SpecExprStage
+    (*p).e=e
+    (*p).e.type_args=spec_enum_resolve_type_list(e.type_args)
+    (*p).e.cast_type=spec_enum_resolve_type_opt(e.cast_type)
+    if e.kind==ExprKind::ExprCall {
+        match e.left {
+            Some(callee)=>{
+                if (*callee).kind==ExprKind::ExprPath && (*callee).path.seg_count==2 {
+                    let base=spec_string_list_nth_name((*callee).path.segments,0)
+                    let owner=if SPEC_CURRENT_MODULE_ID<0 {0} else {SPEC_CURRENT_MODULE_ID}
+                    let slot=spec_enum_draft_find(base,owner)
+                    if slot>=0 {
+                        let instance=spec_enum_expected_instance(expected)
+                        if instance==0 {SPEC_UNSOUND_POISON=true;return (*p).e}
+                        let selected=instance as *mut SpecEnumInstanceDraft
+                        if (*selected).template_slot!=slot {SPEC_UNSOUND_POISON=true;return (*p).e}
+                        let variant=spec_string_list_last_name((*callee).path.segments)
+                        let fields=spec_enum_instance_variant_fields(instance,variant)
+                        (*p).e.args=spec_enum_rewrite_args(e.args,spec_enum_field_types(fields),env,ret)
+                        let cp=heap_alloc(32768) as *mut SpecExprStage
+                        (*cp).e=*callee
+                        (*cp).e.path=spec_enum_variant_path((*selected).symbol,variant)
+                        (*cp).e.type_args=None
+                        (*p).e.left=Some(Box::new((*cp).e))
+                        (*p).e.type_args=None
+                        return (*p).e
+                    }
+                }
+                let fn_name=if (*callee).kind==ExprKind::ExprIdent {(*callee).name} else {spec_string_list_last_name((*callee).path.segments)}
+                let params=match spec_enum_find_function(spec_enum_root_items(),fn_name) {Some(fd)=>spec_enum_param_types((*fd).params),None=>None}
+                (*p).e.left=spec_enum_rewrite_expr_opt(e.left,env,None,ret)
+                (*p).e.args=spec_enum_rewrite_args(e.args,params,env,ret)
+                return (*p).e
+            }
+            None=>{}
+        }
+    }
+    if e.kind==ExprKind::ExprPath && e.path.seg_count==2 {
+        let base=spec_string_list_nth_name(e.path.segments,0)
+        let owner=if SPEC_CURRENT_MODULE_ID<0 {0} else {SPEC_CURRENT_MODULE_ID}
+        let slot=spec_enum_draft_find(base,owner)
+        if slot>=0 {
+            let instance=spec_enum_expected_instance(expected)
+            if instance==0 {SPEC_UNSOUND_POISON=true;return (*p).e}
+            let selected=instance as *mut SpecEnumInstanceDraft
+            if (*selected).template_slot!=slot {SPEC_UNSOUND_POISON=true;return (*p).e}
+            (*p).e.path=spec_enum_variant_path((*selected).symbol,spec_string_list_last_name(e.path.segments))
+            return (*p).e
+        }
+    }
+    if e.kind==ExprKind::ExprReturn {
+        (*p).e.left=spec_enum_rewrite_expr_opt(e.left,env,ret,ret)
+        return (*p).e
+    }
+    if e.kind==ExprKind::ExprMatch {
+        (*p).e.left=spec_enum_rewrite_expr_opt(e.left,env,None,ret)
+        let scrut=match (*p).e.left {Some(s)=>spec_enum_expr_type(&(*s),env),None=>None}
+        (*p).e.arms=spec_enum_rewrite_arms(e.arms,env,scrut,expected,ret)
+        return (*p).e
+    }
+    if e.kind==ExprKind::ExprIf || e.kind==ExprKind::ExprBlock {
+        (*p).e.left=spec_enum_rewrite_expr_opt(e.left,env,None,ret)
+        (*p).e.block=spec_enum_rewrite_block_opt(e.block,env,expected,ret)
+        (*p).e.else_expr=spec_enum_rewrite_expr_opt(e.else_expr,env,expected,ret)
+        return (*p).e
+    }
+    if e.kind==ExprKind::ExprTupleLit {
+        let types=match expected {Some(t)=>(*t).type_args,None=>None}
+        (*p).e.args=spec_enum_rewrite_args(e.args,types,env,ret)
+        return (*p).e
+    }
+    (*p).e.left=spec_enum_rewrite_expr_opt(e.left,env,None,ret)
+    (*p).e.right=spec_enum_rewrite_expr_opt(e.right,env,None,ret)
+    (*p).e.else_expr=spec_enum_rewrite_expr_opt(e.else_expr,env,None,ret)
+    (*p).e.block=spec_enum_rewrite_block_opt(e.block,env,None,ret)
+    (*p).e.args=spec_enum_rewrite_args(e.args,None,env,ret)
+    (*p).e.arms=spec_enum_rewrite_arms(e.arms,env,None,None,ret)
+    (*p).e
+}
+fn spec_enum_rewrite_stmts(stmts:Option<Box<StmtList>>,env:i64,expected:Option<Box<TypeExpr>>,ret:Option<Box<TypeExpr>>)->Option<Box<StmtList>> with Mut,Panic,Div,Alloc {
+    match stmts {
+        None=>None,
+        Some(s)=>{
+            let p=heap_alloc(16384) as *mut SpecStmtStage
+            (*p).s=(*s).head
+            (*p).s.ty=spec_enum_resolve_type_opt((*s).head.ty)
+            var value_expected=(*p).s.ty
+            if (*p).s.kind==StmtKind::StmtExpr {
+                match (*s).tail {None=>{value_expected=expected},Some(_)=>{}}
+            }
+            (*p).s.expr=spec_enum_rewrite_expr_opt((*p).s.expr,env,value_expected,ret)
+            (*p).s.target=spec_enum_rewrite_expr_opt((*p).s.target,env,None,ret)
+            var next_env=env
+            if (*p).s.kind==StmtKind::StmtLet || (*p).s.kind==StmtKind::StmtVar {
+                let local_ty=match (*p).s.ty {
+                    Some(t)=>Some(t),
+                    None=>match (*p).s.expr {Some(e)=>spec_enum_expr_type(&(*e),env),None=>None},
+                }
+                match local_ty {Some(t)=>{next_env=spec_enum_env_bind(env,(*p).s.name,*t)},None=>{}}
+            }
+            Some(Box::new(StmtList{head:(*p).s,tail:spec_enum_rewrite_stmts((*s).tail,next_env,expected,ret)}))
+        }
+    }
+}
+fn spec_enum_rewrite_block_opt(block:Option<Box<Block>>,env:i64,expected:Option<Box<TypeExpr>>,ret:Option<Box<TypeExpr>>)->Option<Box<Block>> with Mut,Panic,Div,Alloc {
+    match block {None=>None,Some(b)=>Some(Box::new(Block{span:(*b).span,stmts:spec_enum_rewrite_stmts((*b).stmts,env,expected,ret)}))}
+}
+fn spec_enum_bind_params(params:Option<Box<ParamList>>,env:i64)->i64 with Mut,Panic,Div,Alloc {
+    match params {None=>env,Some(p)=>spec_enum_bind_params((*p).tail,spec_enum_env_bind(env,(*p).head.name,spec_enum_resolve_type((*p).head.ty)))}
+}
+fn spec_enum_rewrite_params(params:Option<Box<ParamList>>)->Option<Box<ParamList>> with Mut,Panic,Div,Alloc {
+    match params {
+        None=>None,
+        Some(p)=>{
+            var param=(*p).head
+            param.ty=spec_enum_resolve_type(param.ty)
+            Some(Box::new(ParamList{head:param,tail:spec_enum_rewrite_params((*p).tail)}))
+        }
+    }
+}
+fn spec_enum_rewrite_items(items:Option<Box<ItemList>>)->Option<Box<ItemList>> with Mut,Panic,Div,Alloc {
+    match items {
+        None=>None,
+        Some(node)=>{
+            let p=heap_alloc(16384) as *mut SpecItemNode
+            (*p).it=(*node).head
+            let owner=spec_item_module_lookup((*p).it.name)
+            SPEC_CURRENT_MODULE_ID=if SPEC_ITEM_MODULE_COUNT==0 {0} else {owner}
+            if (*p).it.kind==ItemKind::ItemEnum {
+                match (*p).it.enum_def {
+                    Some(ed)=>{
+                        match (*ed).type_params {
+                            Some(_)=>return spec_enum_rewrite_items((*node).tail),
+                            None=>{}
+                        }
+                        let ep=heap_alloc(16384) as *mut SpecEnumDefDraftStage
+                        (*ep).ed=*ed
+                        (*ep).ed.variants=spec_enum_resolve_variants((*ed).variants)
+                        (*p).it.enum_def=Some(Box::new((*ep).ed))
+                    }
+                    None=>{}
+                }
+            }
+            if (*p).it.kind==ItemKind::ItemFn {
+                match (*p).it.fn_def {
+                    Some(fd)=>{
+                        let fp=heap_alloc(32768) as *mut SpecFnDefStage
+                        (*fp).fd=*fd
+                        (*fp).fd.params=spec_enum_rewrite_params((*fd).params)
+                        (*fp).fd.return_type=spec_enum_resolve_type_opt((*fd).return_type)
+                        let env=spec_enum_bind_params((*fp).fd.params,0)
+                        (*fp).fd.body=Block{span:(*fd).body.span,stmts:spec_enum_rewrite_stmts((*fd).body.stmts,env,(*fp).fd.return_type,(*fp).fd.return_type)}
+                        (*p).it.fn_def=Some(Box::new((*fp).fd))
+                    }
+                    None=>{}
+                }
+            }
+            Some(Box::new(ItemList{head:(*p).it,tail:spec_enum_rewrite_items((*node).tail)}))
+        }
+    }
+}
+fn spec_enum_postpass(items:Option<Box<ItemList>>)->Option<Box<ItemList>> with Mut,Panic,Div,Alloc {
+    spec_enum_draft_reset()
+    SPEC_ENUM_INSTANCE_COUNT=0
+    // Collection is nominally scoped even when a later caller supplies modules.
+    spec_collect_generic_enums_draft(items,0)
+    if SPEC_ENUM_DRAFT_COUNT==0 {return items}
+    // Multi-module declaration/import ownership is not yet implemented here.
+    // Fail closed rather than selecting a global Some/None by spelling.
+    if SPEC_ENUM_PROGRAM_COUNT>1 {SPEC_UNSOUND_POISON=true;return items}
+    spec_item_module_collect(items,0)
+    SPEC_CURRENT_MODULE_ID=0
+    let roots=heap_alloc(4096) as *mut SpecItemsStage
+    (*roots).items=items
+    SPEC_SOURCE_ITEMS=roots as i64
+    SPEC_EXTRA_HEAD=0
+    let out=spec_enum_rewrite_items(items)
+    spec_append_items(out,spec_extra_items_to_list())
+}
+
+
+var SPEC_ENUM_PROGRAM_COUNT:i64=1
+fn spec_enum_arg_concrete(ty:TypeExpr,depth:i64)->bool with Mut,Panic,Div,Alloc {
+    if depth>=64 {return false}
+    if ty.kind==TypeExprKind::TypeUnit {return true}
+    if ty.kind==TypeExprKind::TypeNamed {
+        if ty.path.seg_count!=1 {return false}
+        let n=spec_path_single_name(ty.path)
+        if spec_enum_symbol_instance(n)!=0 {return true}
+        let builtin=name_eq(n,make_name("i64")) || name_eq(n,make_name("u64"))
+            || name_eq(n,make_name("i32")) || name_eq(n,make_name("u32"))
+            || name_eq(n,make_name("i16")) || name_eq(n,make_name("u16"))
+            || name_eq(n,make_name("i8")) || name_eq(n,make_name("u8"))
+            || name_eq(n,make_name("usize")) || name_eq(n,make_name("isize"))
+            || name_eq(n,make_name("f64")) || name_eq(n,make_name("f32"))
+            || name_eq(n,make_name("bool")) || name_eq(n,make_name("char"))
+            || name_eq(n,make_name("string")) || name_eq(n,make_name("str"))
+            || name_eq(n,make_name("Box"))
+            || name_eq(n,make_name("i128")) || name_eq(n,make_name("u128"))
+            || name_eq(n,make_name("f128")) || name_eq(n,make_name("f256"))
+        var declared=builtin
+        var items=spec_enum_root_items()
+        while true {
+            match items {
+                Some(node)=>{
+                    if name_eq((*node).head.name,n) {
+                        if (*node).head.kind==ItemKind::ItemStruct {
+                            match (*node).head.struct_def {Some(sd)=>{match (*sd).type_params {None=>{declared=true},Some(_)=>{}}},None=>{}}
+                        }
+                        if (*node).head.kind==ItemKind::ItemEnum {
+                            match (*node).head.enum_def {Some(ed)=>{match (*ed).type_params {None=>{declared=true},Some(_)=>{}}},None=>{}}
+                        }
+                    }
+                    items=(*node).tail
+                }
+                None=>break
+            }
+        }
+        if !declared {return false}
+        return spec_enum_args_concrete(ty.type_args,depth+1)
+    }
+    if ty.kind==TypeExprKind::TypeArray || ty.kind==TypeExprKind::TypeReference
+        || ty.kind==TypeExprKind::TypeRefMut || ty.kind==TypeExprKind::TypeRawPtr {
+        match ty.inner {Some(t)=>return spec_enum_arg_concrete(*t,depth+1),None=>return false}
+    }
+    if ty.kind==TypeExprKind::TypeTuple || ty.kind==TypeExprKind::TypeFn {
+        if !spec_enum_args_concrete(ty.type_args,depth+1) {return false}
+        match ty.inner {Some(t)=>return spec_enum_arg_concrete(*t,depth+1),None=>return true}
+    }
+    false
+}
+fn spec_enum_args_concrete(args:Option<Box<TypeExprList>>,depth:i64)->bool with Mut,Panic,Div,Alloc {
+    var cur=args
+    while true {
+        match cur {Some(t)=>{if !spec_enum_arg_concrete((*t).head,depth) {return false};cur=(*t).tail},None=>break}
+    }
+    true
 }
