@@ -663,8 +663,22 @@ fn deserialize_ir_instr(buf: &[i8; 131072], len: i64, pos: i64, version: i8, fea
     (instr, p)
 }
 
+// SOIR v5/v6/v7 do not carry these native ABI fields. Optional caches
+// must decline the image, preserving source lowering rather than erasing shape.
+fn soir_function_signature_representable(func:&IrFunction)->bool with Mut,Panic,Div {
+    if (*func).returns_float!=0 || (*func).return_struct_name.len!=0
+        || (*func).return_fixed_array_len!= -1 || (*func).bss_size!=0
+        || (*func).first_param_is_ref!=0 || (*func).f128_param_mask!=0
+        || (*func).ref_struct_param_mask!=0 || (*func).compile_strategy==99 {return false}
+    true
+}
+
 fn serialize_ir_function(buf: &![i8; 131072], pos: i64, func: IrFunction) -> i64 with Mut, Panic, Div, Alloc {
     var p = pos
+    if !soir_function_signature_representable(&func) {
+        SOIR_SER_REFUSAL_COUNT=SOIR_SER_REFUSAL_COUNT+1
+        return p
+    }
 
     p = write_name(buf, p, func.name)
     p = soir_write_i64(buf, p, func.instr_count)
@@ -3884,6 +3898,13 @@ fn deserialize_ir_epistemic_section(buf: &[i8; 131072], pos: i64, len: i64) -> (
 pub fn serialize_ir_module_ref(module: &IrModule, buf: &![i8; 131072], out_len: &! i64) with Mut, Panic, Div, Alloc {
     var pos: i64 = 0
     let refusals_before = SOIR_SER_REFUSAL_COUNT
+    if (*module).bss_total_size!=0 || (*module).export_count!=0
+        || (*module).prof_counter_count!=0 || (*module).ontologies.count!=0
+        || (*module).ontologies.property_count!=0 || (*module).ontologies.parameter_link_count!=0 {
+        SOIR_SER_REFUSAL_COUNT=SOIR_SER_REFUSAL_COUNT+1
+        *out_len=0
+        return
+    }
 
     // The image is written in place: clear it first, so padding bytes the
     // writers skip are zero as they were in a fresh buffer.
