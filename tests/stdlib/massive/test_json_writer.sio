@@ -1,0 +1,116 @@
+//@ run-pass
+//@ expect-stdout: JSON_WRITER_OK
+use ffi::platform::{Platform,platform_open,platform_status,platform_close}
+use io::native_file::{native_file_open,native_file_close,native_file_read}
+use json::writer::{JsonWriter,json_writer_new,json_writer_status,json_writer_key,json_writer_string,json_writer_i64,json_writer_number,json_writer_bool,json_writer_null,json_writer_begin_array,json_writer_begin_object,json_writer_end_array,json_writer_end_object,json_writer_finish,json_writer_close}
+use json::dom::{json_dom_parse,json_dom_status,json_dom_find,json_dom_i64,json_dom_string,json_dom_close}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_get,byte_buffer_len,byte_buffer_close}
+fn bytes(text:string)->ByteBuffer with Alloc,Mut,Div,Panic {
+ var b=byte_buffer_new(2048)
+ var i:i64=0
+ while i<str_len(text) {assert(byte_buffer_push(&!b,(str_char_at(text,i) as i64) & 255)==0);i=i+1}
+ return b
+}
+fn name()->ByteBuffer with Alloc,Mut,Div,Panic {bytes("/tmp/sounio_wave3_json_writer.json")}
+fn writer(p:&Platform,chunk:i64,depth:i64)->JsonWriter with IO,Alloc,Mut,Div,Panic {
+ let path=name()
+ let file=native_file_open(p,&path,1)
+ byte_buffer_close(path)
+ return json_writer_new(file,chunk,depth)
+}
+fn key(p:&Platform,w:&!JsonWriter,text:string) with IO,Alloc,Mut,Div,Panic {
+ let b=bytes(text)
+ assert(json_writer_key(p,w,&b)==0)
+ byte_buffer_close(b)
+}
+fn invalid_number(p:&Platform,text:string) with IO,Alloc,Mut,Div,Panic {
+ var w=writer(p,1,1)
+ let b=bytes(text)
+ assert(json_writer_number(p,&!w,&b)==22)
+ assert(json_writer_status(&w)==22)
+ assert(json_writer_close(p,w)==22)
+ byte_buffer_close(b)
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ var chunk:i64=1
+ while chunk<=7 {
+  var w=writer(&p,chunk,3)
+  assert(json_writer_begin_object(&p,&!w)==0)
+  key(&p,&!w,"min")
+  assert(json_writer_i64(&p,&!w,0-9223372036854775807-1)==0)
+  key(&p,&!w,"max")
+  assert(json_writer_i64(&p,&!w,9223372036854775807)==0)
+  key(&p,&!w,"text")
+  var text=bytes("α")
+  assert(byte_buffer_push(&!text,0)==0 && byte_buffer_push(&!text,34)==0 && byte_buffer_push(&!text,92)==0 && byte_buffer_push(&!text,10)==0)
+  assert(json_writer_string(&p,&!w,&text)==0)
+  byte_buffer_close(text)
+  key(&p,&!w,"list")
+  assert(json_writer_begin_array(&p,&!w)==0)
+  assert(json_writer_bool(&p,&!w,true)==0)
+  assert(json_writer_null(&p,&!w)==0)
+  let token=bytes("-1.25e+3")
+  assert(json_writer_number(&p,&!w,&token)==0)
+  byte_buffer_close(token)
+  assert(json_writer_end_array(&p,&!w)==0)
+  assert(json_writer_end_object(&p,&!w)==0)
+  assert(json_writer_finish(&p,&!w)==0)
+  assert(json_writer_finish(&p,&!w)==0)
+  assert(json_writer_close(&p,w)==0)
+  let path=name()
+  let file=native_file_open(&p,&path,0)
+  var output=byte_buffer_new(2048)
+  assert(native_file_read(&p,&file,&!output,2048).status==0)
+  assert(native_file_close(&p,file)==0)
+  byte_buffer_close(path)
+  let dom=json_dom_parse(&output,8192,8)
+  assert(json_dom_status(&dom)==0)
+  let min=json_dom_find(&dom,0,"min",32)
+  let max=json_dom_find(&dom,0,"max",32)
+  assert(min.status==0 && max.status==0)
+  assert(json_dom_i64(&dom,min.value).value==0-9223372036854775807-1)
+  assert(json_dom_i64(&dom,max.value).value==9223372036854775807)
+  let textid=json_dom_find(&dom,0,"text",32)
+  var decoded=byte_buffer_new(32)
+  assert(json_dom_string(&dom,textid.value,&!decoded)==0)
+  assert(byte_buffer_len(&decoded)==6)
+  assert(byte_buffer_get(&decoded,2).value==0 && byte_buffer_get(&decoded,3).value==34 && byte_buffer_get(&decoded,4).value==92 && byte_buffer_get(&decoded,5).value==10)
+  byte_buffer_close(decoded)
+  json_dom_close(dom)
+  byte_buffer_close(output)
+  chunk=chunk+1
+ }
+ invalid_number(&p,"NaN")
+ invalid_number(&p,"Infinity")
+ invalid_number(&p,"01")
+ invalid_number(&p,"1.")
+ invalid_number(&p,"1e")
+ invalid_number(&p," 1")
+ var depth=writer(&p,1,0)
+ assert(json_writer_begin_array(&p,&!depth)==105)
+ assert(json_writer_close(&p,depth)==105)
+ var order=writer(&p,1,2)
+ assert(json_writer_begin_object(&p,&!order)==0)
+ key(&p,&!order,"x")
+ assert(json_writer_end_object(&p,&!order)==22)
+ assert(json_writer_close(&p,order)==22)
+ var root=writer(&p,1,0)
+ assert(json_writer_i64(&p,&!root,0)==0)
+ assert(json_writer_i64(&p,&!root,1)==22)
+ assert(json_writer_close(&p,root)==22)
+ var utf8=writer(&p,1,0)
+ var malformed=byte_buffer_new(16)
+ assert(byte_buffer_push(&!malformed,255)==0)
+ assert(json_writer_string(&p,&!utf8,&malformed)==84)
+ assert(json_writer_close(&p,utf8)==84)
+ byte_buffer_close(malformed)
+ var incomplete=writer(&p,1,1)
+ assert(json_writer_begin_array(&p,&!incomplete)==0)
+ assert(json_writer_finish(&p,&!incomplete)==22)
+ assert(json_writer_close(&p,incomplete)==22)
+ platform_close(p)
+ println("JSON_WRITER_OK")
+ 0
+}

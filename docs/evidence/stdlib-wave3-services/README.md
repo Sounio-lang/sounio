@@ -128,3 +128,25 @@ match. Only an initial UTF-8 BOM is stripped. No normalization or implicit
 case folding occurs. Syntax and budget errors are terminal and hide the
 incomplete row; EOF is status1. UTF-8 is validated per field, preventing
 a lead byte in one field and a continuation byte in another from combining.
+
+## Incremental JSON writer receipt
+
+Slurm **18143** completed with status0. The new writer fixture and existing
+owned DOM fixture each checked, compiled and ran: six phases passed.
+`JSON_WRITER_OK` covers output chunks1 through7, nested objects/arrays,
+i64 minimum/maximum, exact exponent tokens, UTF-8 and embedded NUL, quote,
+backslash and newline escaping. The independent existing DOM parser reads
+the produced files and recovers the original values.
+
+Controls reject NaN/Infinity, leading-zero/incomplete/space-padded number
+tokens, malformed UTF-8, depth overflow, missing object values, a second
+root and unfinished documents. Explicit finish flushes the bounded buffer;
+explicit close releases both owners and reports earlier errors. An I/O or
+validation error can leave a partial file and remains sticky.
+
+Receipt root:
+`/scratch/sounio-stdlib-wave3-20261027/services/json-writer-01/results`.
+Source, compiler/qualified runtime and executable hashes have final rechecks.
+API: `json::writer`. Exact number lexemes are validated by the owned DOM
+parser and emitted unchanged; the writer makes no round-trip f64 formatting
+claim. Existing scientific JSON paths remain available.

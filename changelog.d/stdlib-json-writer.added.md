@@ -1,0 +1,1 @@
+Add an owned incremental JSON file writer with explicit output-buffer and nesting budgets, validated UTF-8 keys/strings, embedded-NUL/control escaping, exact i64 and validated exact-number tokens. Enforce object/array ordering, one root, explicit finish/close and sticky failures. No lossy f64 formatter or implicit normalization is introduced.

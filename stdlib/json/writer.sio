@@ -1,0 +1,212 @@
+// Incremental JSON writer over an owned regular file. Explicit finish and close.
+// The output buffer uses chunk_bytes payload; stack uses max_depth*24 bytes.
+// Status is POSIX errno. Errors are sticky and may leave a partial output file.
+// Strings/keys use validated UTF-8 bytes, preserve NUL via escaping, and never normalize.
+// Number tokens are preserved exactly; no lossy float formatting is implied.
+use ffi::platform::{Platform}
+use io::native_file::{NativeFile,native_file_status,native_file_write_all,native_file_close}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_len,byte_buffer_get,byte_buffer_push,byte_buffer_clear,byte_buffer_utf8_count,byte_buffer_close}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_len,integer_buffer_resize,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+use json::dom::{json_dom_parse,json_dom_status,json_dom_node,json_dom_close}
+pub linear struct JsonWriter {file:NativeFile,buffer:ByteBuffer,stack:IntegerBuffer,chunk:i64,status:i64,root:bool,finished:bool}
+fn jw_errno(code:i64)->i64 {
+ if code==0 {return 0}
+ if code==2 {return 105}
+ if code==3 {return 12}
+ return 22
+}
+fn jw_fail(w:&!JsonWriter,status:i64)->i64 with Mut {if w.status==0 {w.status=status};return w.status}
+pub fn json_writer_new(file:NativeFile,chunk_bytes:i64,max_depth:i64)->JsonWriter with Alloc,Mut,Div {
+ var code=native_file_status(&file)
+ var stack_bytes:i64=0
+ if code==0 {
+  if chunk_bytes<1 || max_depth<0 || max_depth>9223372036854771704/24 {code=22}
+  else {stack_bytes=max_depth*24}
+ }
+ return JsonWriter {file:file,buffer:byte_buffer_new(chunk_bytes),stack:integer_buffer_new(0,stack_bytes),chunk:chunk_bytes,status:code,root:false,finished:false}
+}
+pub fn json_writer_status(w:&JsonWriter)->i64 {w.status}
+fn jw_flush(p:&Platform,w:&!JsonWriter)->i64 with IO,Mut {
+ if w.status!=0 {return w.status}
+ let n=byte_buffer_len(&w.buffer)
+ let r=native_file_write_all(p,&w.file,&w.buffer,0,n)
+ if r.status!=0 {return jw_fail(w,r.status)}
+ byte_buffer_clear(&!w.buffer)
+ return 0
+}
+fn jw_byte(p:&Platform,w:&!JsonWriter,value:i64)->i64 with IO,Alloc,Mut,Div {
+ if w.status!=0 {return w.status}
+ if byte_buffer_len(&w.buffer)>=w.chunk {
+  let code=jw_flush(p,w)
+  if code!=0 {return code}
+ }
+ let code=byte_buffer_push(&!w.buffer,value)
+ if code!=0 {return jw_fail(w,jw_errno(code))}
+ return 0
+}
+fn jw_literal(p:&Platform,w:&!JsonWriter,value:string)->i64 with IO,Alloc,Mut,Div {
+ var i:i64=0
+ while i<str_len(value) {
+  let code=jw_byte(p,w,(str_char_at(value,i) as i64) & 255)
+  if code!=0 {return code}
+  i=i+1
+ }
+ return 0
+}
+fn jw_before_value(p:&Platform,w:&!JsonWriter)->i64 with IO,Alloc,Mut,Div,Panic {
+ if w.status!=0 {return w.status}
+ if w.finished {return jw_fail(w,22)}
+ let n=integer_buffer_len(&w.stack)
+ if n==0 {
+  if w.root {return jw_fail(w,22)}
+  w.root=true
+ } else {
+  let kind=integer_buffer_at(&w.stack,n-3)
+  let count=integer_buffer_at(&w.stack,n-2)
+  if count==9223372036854775807 {return jw_fail(w,75)}
+  if kind==1 {
+   if count>0 {let code=jw_byte(p,w,44);if code!=0 {return code}}
+  } else {
+   if integer_buffer_at(&w.stack,n-1)!=1 {return jw_fail(w,22)}
+   assert(integer_buffer_set(&!w.stack,n-1,0)==0)
+  }
+  assert(integer_buffer_set(&!w.stack,n-2,count+1)==0)
+ }
+ return 0
+}
+fn jw_hex(n:i64)->i64 {if n<10 {return 48+n};return 87+n}
+fn jw_quoted(p:&Platform,w:&!JsonWriter,value:&ByteBuffer)->i64 with IO,Alloc,Mut,Div {
+ var code=jw_byte(p,w,34)
+ if code!=0 {return code}
+ var i:i64=0
+ while i<byte_buffer_len(value) {
+  let c=byte_buffer_get(value,i).value
+  if c==34 || c==92 {
+   code=jw_byte(p,w,92)
+   if code==0 {code=jw_byte(p,w,c)}
+  } else if c<32 {
+   code=jw_literal(p,w,"\\u00")
+   if code==0 {code=jw_byte(p,w,jw_hex(c/16))}
+   if code==0 {code=jw_byte(p,w,jw_hex(c%16))}
+  } else {code=jw_byte(p,w,c)}
+  if code!=0 {return code}
+  i=i+1
+ }
+ return jw_byte(p,w,34)
+}
+pub fn json_writer_key(p:&Platform,w:&!JsonWriter,key:&ByteBuffer)->i64 with IO,Alloc,Mut,Div,Panic {
+ if w.status!=0 {return w.status}
+ if byte_buffer_utf8_count(key).status!=0 {return jw_fail(w,84)}
+ let n=integer_buffer_len(&w.stack)
+ if n<3 {return jw_fail(w,22)}
+ if integer_buffer_at(&w.stack,n-3)!=2 || integer_buffer_at(&w.stack,n-1)!=0 {return jw_fail(w,22)}
+ if integer_buffer_at(&w.stack,n-2)>0 {let code=jw_byte(p,w,44);if code!=0 {return code}}
+ let code=jw_quoted(p,w,key)
+ if code!=0 {return code}
+ let colon=jw_byte(p,w,58)
+ if colon!=0 {return colon}
+ assert(integer_buffer_set(&!w.stack,n-1,1)==0)
+ return 0
+}
+pub fn json_writer_string(p:&Platform,w:&!JsonWriter,value:&ByteBuffer)->i64 with IO,Alloc,Mut,Div,Panic {
+ if w.status!=0 {return w.status}
+ if byte_buffer_utf8_count(value).status!=0 {return jw_fail(w,84)}
+ let code=jw_before_value(p,w)
+ if code!=0 {return code}
+ return jw_quoted(p,w,value)
+}
+pub fn json_writer_null(p:&Platform,w:&!JsonWriter)->i64 with IO,Alloc,Mut,Div,Panic {
+ let code=jw_before_value(p,w)
+ if code!=0 {return code}
+ return jw_literal(p,w,"null")
+}
+pub fn json_writer_bool(p:&Platform,w:&!JsonWriter,value:bool)->i64 with IO,Alloc,Mut,Div,Panic {
+ let code=jw_before_value(p,w)
+ if code!=0 {return code}
+ return jw_literal(p,w,if value {"true"} else {"false"})
+}
+pub fn json_writer_i64(p:&Platform,w:&!JsonWriter,value:i64)->i64 with IO,Alloc,Mut,Div,Panic {
+ let code=jw_before_value(p,w)
+ if code!=0 {return code}
+ if value<0 {let sign=jw_byte(p,w,45);if sign!=0 {return sign}}
+ var work=if value>0 {0-value} else {value}
+ var digits:[i64;20]=[0;20]
+ var n:i64=0
+ while true {
+  digits[n]=48-(work%10)
+  n=n+1
+  work=work/10
+  if work==0 {break}
+ }
+ while n>0 {
+  n=n-1
+  let out=jw_byte(p,w,digits[n])
+  if out!=0 {return out}
+ }
+ return 0
+}
+// Requires one exact JSON number token with no surrounding whitespace.
+// NaN/Infinity are not JSON number tokens and are rejected.
+pub fn json_writer_number(p:&Platform,w:&!JsonWriter,token:&ByteBuffer)->i64 with IO,Alloc,Mut,Div,Panic {
+ if w.status!=0 {return w.status}
+ let n=byte_buffer_len(token)
+ if n>9223372036854771608 {return jw_fail(w,105)}
+ let parsed=json_dom_parse(token,n+96,0)
+ let node=json_dom_node(&parsed,0)
+ let valid=json_dom_status(&parsed)==0 && node.status==0 && node.kind==2 && node.start==0 && node.end==n
+ json_dom_close(parsed)
+ if !valid {return jw_fail(w,22)}
+ let code=jw_before_value(p,w)
+ if code!=0 {return code}
+ var i:i64=0
+ while i<n {
+  let out=jw_byte(p,w,byte_buffer_get(token,i).value)
+  if out!=0 {return out}
+  i=i+1
+ }
+ return 0
+}
+fn jw_begin(p:&Platform,w:&!JsonWriter,kind:i64)->i64 with IO,Alloc,Mut,Div,Panic {
+ if w.status!=0 {return w.status}
+ let n=integer_buffer_len(&w.stack)
+ if n>9223372036854775804 {return jw_fail(w,105)}
+ let code=integer_buffer_resize(&!w.stack,n+3)
+ if code!=0 {return jw_fail(w,jw_errno(code))}
+ // Temporarily hide the new frame so the parent consumes exactly one value.
+ assert(integer_buffer_resize(&!w.stack,n)==0)
+ let parent=jw_before_value(p,w)
+ if parent!=0 {return parent}
+ assert(integer_buffer_resize(&!w.stack,n+3)==0)
+ assert(integer_buffer_set(&!w.stack,n,kind)==0)
+ return jw_byte(p,w,if kind==1 {91} else {123})
+}
+pub fn json_writer_begin_array(p:&Platform,w:&!JsonWriter)->i64 with IO,Alloc,Mut,Div,Panic {jw_begin(p,w,1)}
+pub fn json_writer_begin_object(p:&Platform,w:&!JsonWriter)->i64 with IO,Alloc,Mut,Div,Panic {jw_begin(p,w,2)}
+fn jw_end(p:&Platform,w:&!JsonWriter,kind:i64)->i64 with IO,Alloc,Mut,Div,Panic {
+ if w.status!=0 {return w.status}
+ let n=integer_buffer_len(&w.stack)
+ if n<3 {return jw_fail(w,22)}
+ if integer_buffer_at(&w.stack,n-3)!=kind || integer_buffer_at(&w.stack,n-1)!=0 {return jw_fail(w,22)}
+ let code=jw_byte(p,w,if kind==1 {93} else {125})
+ if code!=0 {return code}
+ assert(integer_buffer_resize(&!w.stack,n-3)==0)
+ return 0
+}
+pub fn json_writer_end_array(p:&Platform,w:&!JsonWriter)->i64 with IO,Alloc,Mut,Div,Panic {jw_end(p,w,1)}
+pub fn json_writer_end_object(p:&Platform,w:&!JsonWriter)->i64 with IO,Alloc,Mut,Div,Panic {jw_end(p,w,2)}
+pub fn json_writer_finish(p:&Platform,w:&!JsonWriter)->i64 with IO,Mut {
+ if w.status!=0 {return w.status}
+ if !w.root || integer_buffer_len(&w.stack)!=0 {return jw_fail(w,22)}
+ let code=jw_flush(p,w)
+ if code==0 {w.finished=true}
+ return code
+}
+pub fn json_writer_close(p:&Platform,w:JsonWriter)->i64 with IO,Alloc {
+ let JsonWriter {file,buffer,stack,chunk,status,root,finished}=w
+ byte_buffer_close(buffer)
+ integer_buffer_close(stack)
+ let closed=native_file_close(p,file)
+ if status!=0 {return status}
+ if !finished {return 22}
+ return closed
+}
