@@ -1,0 +1,135 @@
+// Quantity mechanics in SI, with declared independent first-order GUM inputs.
+// Repeated variables are differentiated once. A status0 does not certify
+// first-order accuracy or input independence. No implicit unit conversion.
+// Status1 nonfinite,2 domain,3 negative uncertainty,4 conservative arithmetic
+// unavailable,5 dimensions. Convenience Quantity wrappers assert status0.
+module physics::mechanics
+use units::lib::*
+use math::pure::{is_finite}
+use physics::classical::{classical_ke_checked}
+use physics::uncertainty::{PhysicsScalarResult,PhysicsNumber,physics_input4,physics_product3,physics_scalar,physics_scalar_unavailable}
+
+pub fn dim_spring_constant()->UnitDim {
+ UnitDim {mass:1,length:0,time:0-2,temperature:0,amount:0,current:0,luminosity:0}
+}
+pub fn dim_gravitational_constant()->UnitDim {
+ UnitDim {mass:0-1,length:3,time:0-2,temperature:0,amount:0,current:0,luminosity:0}
+}
+pub fn kinetic_energy_q_checked(mass:&Quantity,velocity:&Quantity)->PhysicsScalarResult with Mut,Div,Panic {
+ classical_ke_checked(mass,velocity)
+}
+pub fn kinetic_energy_q(mass:Quantity,velocity:Quantity)->Quantity with Mut,Div,Panic {
+ let r=kinetic_energy_q_checked(&mass,&velocity)
+ assert(r.status==0)
+ quantity_new(r.value,r.standard_uncertainty,dim_energy())
+}
+// Collinear applied spring force F=k*x; the restoring force is its negative.
+pub fn hookean_force_q_checked(k:&Quantity,x:&Quantity)->PhysicsScalarResult with Mut,Div,Panic {
+ let status=physics_input4(k.value,k.uncertainty,x.value,x.uncertainty)
+ if status!=0 {return physics_scalar_unavailable(status)}
+ if !dim_eq(k.dim,dim_spring_constant()) || !dim_eq(x.dim,dim_length()) {return physics_scalar_unavailable(5)}
+ if k.value<0.0 {return physics_scalar_unavailable(2)}
+ let value=physics_product3(k.value,x.value,1.0,false)
+ let hk=physics_product3(x.value,k.uncertainty,1.0,true)
+ let hx=physics_product3(k.value,x.uncertainty,1.0,true)
+ if value.status!=0 || hk.status!=0 || hx.status!=0 {return physics_scalar_unavailable(4)}
+ physics_scalar(value.value,hk.value,hx.value,0.0,0.0)
+}
+pub fn hookean_force_q(k:Quantity,x:Quantity)->Quantity with Mut,Div,Panic {
+ let r=hookean_force_q_checked(&k,&x);assert(r.status==0)
+ quantity_new(r.value,r.standard_uncertainty,dim_force())
+}
+// Collinear work, preserving the signs of force and displacement.
+pub fn work_done_q_checked(force:&Quantity,distance:&Quantity)->PhysicsScalarResult with Mut,Div,Panic {
+ let status=physics_input4(force.value,force.uncertainty,distance.value,distance.uncertainty)
+ if status!=0 {return physics_scalar_unavailable(status)}
+ if !dim_eq(force.dim,dim_force()) || !dim_eq(distance.dim,dim_length()) {return physics_scalar_unavailable(5)}
+ let value=physics_product3(force.value,distance.value,1.0,false)
+ let hf=physics_product3(distance.value,force.uncertainty,1.0,true)
+ let hd=physics_product3(force.value,distance.uncertainty,1.0,true)
+ if value.status!=0 || hf.status!=0 || hd.status!=0 {return physics_scalar_unavailable(4)}
+ physics_scalar(value.value,hf.value,hd.value,0.0,0.0)
+}
+pub fn work_done_q(force:Quantity,distance:Quantity)->Quantity with Mut,Div,Panic {
+ let r=work_done_q_checked(&force,&distance);assert(r.status==0)
+ quantity_new(r.value,r.standard_uncertainty,dim_energy())
+}
+pub fn power_q_checked(energy:&Quantity,time:&Quantity)->PhysicsScalarResult with Mut,Div,Panic {
+ let status=physics_input4(energy.value,energy.uncertainty,time.value,time.uncertainty)
+ if status!=0 {return physics_scalar_unavailable(status)}
+ if !dim_eq(energy.dim,dim_energy()) || !dim_eq(time.dim,dim_time()) {return physics_scalar_unavailable(5)}
+ if time.value<=0.0 {return physics_scalar_unavailable(2)}
+ let value=energy.value/time.value
+ let he=energy.uncertainty/time.value
+ if !is_finite(value) || !is_finite(he) || (energy.uncertainty!=0.0 && he==0.0) {return physics_scalar_unavailable(4)}
+ var ht:f64=0.0
+ if energy.value!=0.0 && time.uncertainty!=0.0 {
+  let relative=time.uncertainty/time.value
+  if value==0.0 || relative==0.0 || !is_finite(relative) {return physics_scalar_unavailable(4)}
+  let contribution=physics_product3(value,relative,1.0,true)
+  if contribution.status!=0 {return physics_scalar_unavailable(4)}
+  ht=contribution.value
+ }
+ physics_scalar(value,he,ht,0.0,0.0)
+}
+pub fn power_q(energy:Quantity,time:Quantity)->Quantity with Mut,Div,Panic {
+ let r=power_q_checked(&energy,&time);assert(r.status==0)
+ quantity_new(r.value,r.standard_uncertainty,dim_power())
+}
+fn mechanics_ratio(numerator:f64,denominator:f64)->PhysicsNumber with Div {
+ let value=numerator/denominator
+ if !is_finite(value) || (numerator!=0.0 && value==0.0) {return PhysicsNumber {status:4,value:0.0}}
+ PhysicsNumber {status:0,value:value}
+}
+// Explicit G permits another declared uncertainty model/constant. All four
+// inputs here are independent; their four sensitivity terms are combined once.
+pub fn gravitational_force_with_g_checked(g:&Quantity,m1:&Quantity,m2:&Quantity,radius:&Quantity)->PhysicsScalarResult with Mut,Div,Panic {
+ let a=physics_input4(g.value,g.uncertainty,m1.value,m1.uncertainty)
+ let b=physics_input4(m2.value,m2.uncertainty,radius.value,radius.uncertainty)
+ if a==1 || b==1 {return physics_scalar_unavailable(1)}
+ if a!=0 || b!=0 {return physics_scalar_unavailable(3)}
+ if !dim_eq(g.dim,dim_gravitational_constant()) || !dim_eq(m1.dim,dim_mass()) || !dim_eq(m2.dim,dim_mass()) || !dim_eq(radius.dim,dim_length()) {return physics_scalar_unavailable(5)}
+ if g.value<=0.0 || m1.value<0.0 || m2.value<0.0 || radius.value<=0.0 {return physics_scalar_unavailable(2)}
+ let x=mechanics_ratio(m1.value,radius.value)
+ let y=mechanics_ratio(m2.value,radius.value)
+ if x.status!=0 || y.status!=0 {return physics_scalar_unavailable(4)}
+ let value=physics_product3(g.value,x.value,y.value,false)
+ let hg=physics_product3(g.uncertainty,x.value,y.value,true)
+ if value.status!=0 || hg.status!=0 {return physics_scalar_unavailable(4)}
+ var h1:f64=0.0
+ var h2:f64=0.0
+ var hr:f64=0.0
+ if m1.uncertainty!=0.0 && m2.value!=0.0 {
+  let u=mechanics_ratio(m1.uncertainty,radius.value)
+  if u.status!=0 {return physics_scalar_unavailable(4)}
+  let h=physics_product3(g.value,u.value,y.value,true)
+  if h.status!=0 {return physics_scalar_unavailable(4)}
+  h1=h.value
+ }
+ if m2.uncertainty!=0.0 && m1.value!=0.0 {
+  let u=mechanics_ratio(m2.uncertainty,radius.value)
+  if u.status!=0 {return physics_scalar_unavailable(4)}
+  let h=physics_product3(g.value,x.value,u.value,true)
+  if h.status!=0 {return physics_scalar_unavailable(4)}
+  h2=h.value
+ }
+ if radius.uncertainty!=0.0 && m1.value!=0.0 && m2.value!=0.0 {
+  let u=mechanics_ratio(radius.uncertainty,radius.value)
+  if u.status!=0 || value.value==0.0 {return physics_scalar_unavailable(4)}
+  let h=physics_product3(value.value,u.value,2.0,true)
+  if h.status!=0 {return physics_scalar_unavailable(4)}
+  hr=h.value
+ }
+ physics_scalar(value.value,hg.value,h1,h2,hr)
+}
+// CODATA2022 G=6.67430(15)e-11 m^3 kg^-1 s^-2. The default includes its
+// standard uncertainty1.5e-15; no exact-constant assumption is hidden.
+// https://physics.nist.gov/cuu/pdf/wall_2022.pdf
+pub fn gravitational_force_q_checked(m1:&Quantity,m2:&Quantity,radius:&Quantity)->PhysicsScalarResult with Mut,Div,Panic {
+ let g=quantity_new(6.67430e-11,1.5e-15,dim_gravitational_constant())
+ gravitational_force_with_g_checked(&g,m1,m2,radius)
+}
+pub fn gravitational_force_q(m1:Quantity,m2:Quantity,radius:Quantity)->Quantity with Mut,Div,Panic {
+ let r=gravitational_force_q_checked(&m1,&m2,&radius);assert(r.status==0)
+ quantity_new(r.value,r.standard_uncertainty,dim_force())
+}
