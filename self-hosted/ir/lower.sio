@@ -9438,7 +9438,54 @@ fn lower_opt_type_return_fixed_array_code(opt: &Option<Box<TypeExpr>>) -> i64 wi
     -1
 }
 
+
+fn lower_nested_array_type_name(ty:&TypeExpr)->Name with Mut,Panic,Div {
+    var current=*ty
+    var depth:i64=0
+    while current.kind==TypeExprKind::TypeArray {
+        depth=depth+1
+        if depth>64 {return ir_empty_name()}
+        match current.inner {Some(inner)=>current=*inner,None=>return ir_empty_name()}
+    }
+    if depth<2 || current.kind!=TypeExprKind::TypeNamed {return ir_empty_name()}
+    let leaf=ir_path_first_name(current.path)
+    if leaf.len<=0 || leaf.len>379 {return ir_empty_name()}
+    var out=make_name("@[00:")
+    out.buf[2]=(48+depth/10) as i8
+    out.buf[3]=(48+depth%10) as i8
+    var i:i64=0
+    while i<leaf.len {out.buf[(i+5) as usize]=leaf.buf[i as usize];i=i+1}
+    out.len=leaf.len+5
+    out
+}
+fn lower_nested_array_name_depth(name:Name)->i64 {
+    if name.len<6 {return 0}
+    if name.buf[0]!=64 as i8 || name.buf[1]!=91 as i8 || name.buf[4]!=58 as i8 {return 0}
+    let tens=name.buf[2] as i64-48
+    let ones=name.buf[3] as i64-48
+    if tens<0 || tens>6 || ones<0 || ones>9 {return 0}
+    let depth=tens*10+ones
+    if depth<1 || depth>64 {return 0}
+    depth
+}
+fn lower_nested_array_index_name(name:Name)->Name with Mut,Panic,Div {
+    let depth=lower_nested_array_name_depth(name)
+    if depth==0 {return name}
+    if depth==1 {
+        var leaf=ir_empty_name()
+        var i:i64=5
+        while i<name.len {leaf.buf[(i-5) as usize]=name.buf[i as usize];i=i+1}
+        leaf.len=name.len-5
+        return leaf
+    }
+    var out=name
+    out.buf[2]=(48+(depth-1)/10) as i8
+    out.buf[3]=(48+(depth-1)%10) as i8
+    out
+}
+
 fn lower_opt_type_return_layout_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
+    match *opt {Some(ty)=>{let nested=lower_nested_array_type_name(&(*ty));if nested.len>0 {return nested}},None=>{}}
     let direct = lower_opt_type_named_name(opt)
     if direct.len > 0 {
         return direct
@@ -24440,7 +24487,7 @@ impl Lowerer {
                         if ir_name_eq(indexed_type, make_name("Seq")) {
                             return self.lookup_local_index_elem_struct_type((*indexed).name)
                         }
-                        return indexed_type
+                        return lower_nested_array_index_name(indexed_type)
                     }
                     if (*indexed).kind == ExprKind::ExprFieldAccess {
                         return self.field_array_elem_type_name_for_base_ref(&(*indexed).left, (*indexed).name)
@@ -24479,6 +24526,11 @@ impl Lowerer {
                         let fn_id=self.expr_method_fn_id(&(*indexed))
                         if self.return_is_array_for_fn_id(fn_id) {return self.return_array_element_name_for_fn_id(fn_id)}
                         return self.expr_receiver_struct_type_ref(&(*indexed))
+                    }
+                    // Dynamic nested arrays retain their deepest declared element name.
+                    // Recurse through the array access before resolving the final struct field.
+                    if (*indexed).kind==ExprKind::ExprIndex {
+                        return lower_nested_array_index_name(self.expr_receiver_struct_type_ref(&(*indexed)))
                     }
                     if (*indexed).kind == ExprKind::ExprArrayLit {
                         match (*indexed).left {
@@ -29859,6 +29911,8 @@ impl Lowerer {
         match s.ty {
             Some(arr_ty) => {
                 if (*arr_ty).kind == TypeExprKind::TypeArray {
+                    let nested_name=lower_nested_array_type_name(&(*arr_ty))
+                    if nested_name.len>0 {lo=lo.bind_local_struct_type(s.name,nested_name,true)}
                     match (*arr_ty).inner {
                         Some(el) => {
                             if (*el).kind == TypeExprKind::TypeKnowledge {
