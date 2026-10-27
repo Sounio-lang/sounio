@@ -9336,10 +9336,12 @@ fn lower_opt_type_tuple_struct_slot_name(opt: &Option<Box<TypeExpr>>) -> Name wi
 // is inert to them, and return_struct_name_for_fn_id refuses at <= -2 so a tuple
 // local is never handed the slot's struct name as its OWN type.
 fn lower_tuple_slot_struct_return_sentinel(k: i64) -> i64 {
+    if k<0 || k>=IR_MAX_INSTRS {return -1}
     0 - 3 - k
 }
 
 fn lower_tuple_slot_struct_sentinel_slot(code: i64) -> i64 {
+    if code> -3 || code< -3-(IR_MAX_INSTRS-1) {return -1}
     0 - 3 - code
 }
 
@@ -9377,6 +9379,11 @@ fn lower_opt_type_named_struct_array_len(ty_opt: &Option<Box<TypeExpr>>) -> i64 
     lower_opt_type_fixed_array_len(ty_opt)
 }
 
+fn lower_dynamic_array_return_sentinel() -> i64 {
+    // Disjoint from tuple slots, whose encoder/decoder is bounded by IR_MAX_INSTRS.
+    -1073741824
+}
+
 fn lower_opt_type_return_fixed_array_code(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     if lower_opt_type_tuple0_array_elem_struct_name(opt).len > 0 {
         return lower_tuple0_array_struct_return_sentinel()
@@ -9389,7 +9396,13 @@ fn lower_opt_type_return_fixed_array_code(opt: &Option<Box<TypeExpr>>) -> i64 wi
     if word_scalar_len >= 0 {
         return word_scalar_len
     }
-    lower_opt_type_named_struct_array_len(opt)
+    let named_length=lower_opt_type_named_struct_array_len(opt)
+    if named_length>=0 {return named_length}
+    match *opt {
+        Some(ty)=>{if (*ty).kind==TypeExprKind::TypeArray {return lower_dynamic_array_return_sentinel()}}
+        None=>{}
+    }
+    -1
 }
 
 fn lower_opt_type_return_layout_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
@@ -23070,6 +23083,19 @@ impl Lowerer {
         (self, -1)
     }
 
+    fn return_is_array_for_fn_id(self, fn_id:i64) -> bool with Mut,Panic,Div {
+        if fn_id<0 || fn_id>=self.module.fn_count {return false}
+        let code=ir_fn_get(&(*self.module),fn_id as usize).return_fixed_array_len
+        code>=0 || code==lower_dynamic_array_return_sentinel()
+    }
+
+    fn return_array_element_name_for_fn_id(self, fn_id:i64) -> Name with Mut,Panic,Div {
+        if self.return_is_array_for_fn_id(fn_id) {
+            return ir_fn_get(&(*self.module),fn_id as usize).return_struct_name
+        }
+        ir_empty_name()
+    }
+
     fn return_struct_name_for_fn_id(self, fn_id: i64) -> Name with Mut, Panic, Div, Alloc {
         if fn_id >= 0 && fn_id < self.module.fn_count {
             let fn_slot = ir_fn_get(&(*self.module), fn_id as usize)
@@ -24382,6 +24408,8 @@ impl Lowerer {
                     // own ExprMethodCall arm (above, in this same function)
                     // already resolves this the same way; recurse into it.
                     if (*indexed).kind == ExprKind::ExprCall || (*indexed).kind == ExprKind::ExprMethodCall {
+                        let fn_id=self.expr_method_fn_id(&(*indexed))
+                        if self.return_is_array_for_fn_id(fn_id) {return self.return_array_element_name_for_fn_id(fn_id)}
                         return self.expr_receiver_struct_type_ref(&(*indexed))
                     }
                     if (*indexed).kind == ExprKind::ExprArrayLit {
@@ -24750,6 +24778,10 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprIndex {
             match (*e).left {
                 Some(indexed) => {
+                    if (*indexed).kind==ExprKind::ExprCall || (*indexed).kind==ExprKind::ExprMethodCall {
+                        let id=self.expr_method_fn_id(&(*indexed))
+                        return lower_name_is_string_type(self.return_array_element_name_for_fn_id(id))
+                    }
                     if (*indexed).kind == ExprKind::ExprFieldAccess {
                         if lower_name_is_string_type(self.field_array_elem_type_name_for_base_ref(&(*indexed).left, (*indexed).name)) {
                             return true
@@ -24772,15 +24804,14 @@ impl Lowerer {
             match (*e).left {
                 Some(callee_expr) => {
                     let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
-                    if lower_name_is_packed_string_producer(callee_name) {
-                        return true
-                    }
                     let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                     if fn_id >= 0 && fn_id < self.module.fn_count {
-                        if lower_name_is_string_type(ir_fn_get(&(*self.module), fn_id as usize).return_struct_name) {
-                            return true
-                        }
+                        let signature=ir_fn_get(&(*self.module),fn_id as usize)
+                        // An element/member named string is not a scalar string result.
+                        if signature.return_fixed_array_len != -1 {return false}
+                        if lower_name_is_string_type(signature.return_struct_name) {return true}
                     }
+                    if lower_name_is_packed_string_producer(callee_name) {return true}
                 }
                 None => {}
             }
@@ -29858,9 +29889,12 @@ impl Lowerer {
                         lo = lo.bind_local_tuple_struct(s.name, tuple_struct_layout, tuple_struct_slot)
                     }
                     if !callee_is_box {
-                        let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
-                        if ret_name.len > 0 {
-                            lo = lo.bind_local_struct_type(s.name, ret_name, false)
+                        if lo.return_is_array_for_fn_id(tuple_callee_id) {
+                            let element=lo.return_array_element_name_for_fn_id(tuple_callee_id)
+                            lo=lo.bind_local_struct_type(s.name,element,true)
+                        } else {
+                            let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
+                            if ret_name.len > 0 {lo = lo.bind_local_struct_type(s.name, ret_name, false)}
                         }
                     } else {
                         // `let b = Box::new(...)`: tag the local's struct-type slot with
@@ -29994,9 +30028,12 @@ impl Lowerer {
                         (*expr_box).name
                     }
                     let fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, call_name)
-                    let ret_name = lo.return_struct_name_for_fn_id(fn_id)
-                    if ret_name.len > 0 {
-                        lo = lo.bind_local_struct_type(s.name, ret_name, false)
+                    if lo.return_is_array_for_fn_id(fn_id) {
+                        let element=lo.return_array_element_name_for_fn_id(fn_id)
+                        lo=lo.bind_local_struct_type(s.name,element,true)
+                    } else {
+                        let ret_name = lo.return_struct_name_for_fn_id(fn_id)
+                        if ret_name.len > 0 {lo = lo.bind_local_struct_type(s.name, ret_name, false)}
                     }
                     // `let pair = c.method(...)` where the method returns
                     // `(Self, T)`. The plain-call branch above records the tuple
@@ -36854,6 +36891,8 @@ impl Lowerer {
                 if (*recv_len).kind == ExprKind::ExprIdent {
                     len_receiver_is_array = self.lookup_local_fixed_array_len((*recv_len).name) >= 0
                         || self.lookup_local_struct_type_is_array_elem((*recv_len).name)
+                } else if (*recv_len).kind==ExprKind::ExprCall || (*recv_len).kind==ExprKind::ExprMethodCall {
+                    len_receiver_is_array=self.return_is_array_for_fn_id(self.expr_method_fn_id(&(*recv_len)))
                 }
             }
             None => {}
@@ -36878,7 +36917,7 @@ impl Lowerer {
                                 let len_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(base_reg)))
                                 return (lo.emit(ir_call(dst, fn_id, make_name("str_len"), len_args, 1)), dst)
                             }
-                            if (*recv).kind == ExprKind::ExprIdent {
+                            if (*recv).kind == ExprKind::ExprIdent || len_receiver_is_array {
                                 let pair_b = self.lower_expr_ref(&(*recv))
                                 var lo = pair_b.0
                                 let base_reg = pair_b.1
@@ -36889,7 +36928,7 @@ impl Lowerer {
                                 // A slice/reference parameter may be a bare handle, a
                                 // raw BSS address, or an explicit caller cell. Preserve
                                 // that distinction for the native resolver.
-                                if lo.lookup_local_is_ref((*recv).name) {
+                                if (*recv).kind==ExprKind::ExprIdent && lo.lookup_local_is_ref((*recv).name) {
                                     len_instr.label_id = 1
                                 }
                                 return (lo.emit(len_instr), dst)
