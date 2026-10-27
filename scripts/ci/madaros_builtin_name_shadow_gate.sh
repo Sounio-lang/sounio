@@ -7,6 +7,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 FIX="$ROOT_DIR/tests/multimodule/builtin_name_shadow"
 TAG="[madaros-builtin-name-shadow]"
 
@@ -77,17 +79,11 @@ expect_refusal() {
   local label="$1" src="$2" code="$3"
   local log="$WORK/$label.log"
   local rc=0
-  set +e
-  "$ROOT_DIR/bin/madaros" check "$src" >"$log" 2>&1
-  rc=$?
-  set -e
-  [[ "$rc" -eq 1 ]] || {
+  # rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+  sounio_capture_rc rc "$log" -- "$ROOT_DIR/bin/madaros" check "$src"
+  sounio_expect_refusal "$rc" "$log" "" "$code" || {
     cat "$log" >&2
-    fail "$label: expected rc=1, got $rc"
-  }
-  grep -q "error\[$code\]" "$log" || {
-    cat "$log" >&2
-    fail "$label: missing $code"
+    fail "$label: expected a clean $code refusal, got rc=$rc $(sounio_refusal_reason)"
   }
 }
 
