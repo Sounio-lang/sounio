@@ -1299,3 +1299,24 @@ The A5000 is still inside job 17498. There is still no V100.
 Gate. Node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 64193081a24cfda9ad078a114700d90a. SILICON PASS, EXIT:0. The node is idle.
 
 The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 51. The other DMUL source (2026-10-27, OBSERVED)
+
+Job 18090 multiplied 1.1 by 2.3. The low word was `28 72 02 02 04`: destination R2, first source R2, second source R4. Job 18091 changed only the second source to R2 and stored 1.1 squared. Byte 4 is that source.
+
+`atlas_dmul_lo(2, 4, 4)` writes `28 72 02 02 04` with byte 3 also equal to 4. The factors are the same ones: R2 is 1.1, R4 is 2.3. Both sources now name R4, so the operation squares 2.3. The IEEE square is `0x401528f5c28f5c28`. The low 32 bits are `0xc28f5c28`.
+
+Job 18097, on the L4, the sm_86 image:
+
+- Host bytes 1523 and 1524 are 4. In job 18090 byte 3 was 2 and byte 4 was 4.
+- DMUL_LOAD=1, DMUL=4617642028934585384, DMUL_LO=3264175144.
+- AMP86=42. image rc=209, VOLTA_LOAD=0.
+
+The product is not 1.1 times 2.3 and not 1.1 squared. It is 2.3 squared. Byte 3 selects the first source the same way byte 4 selects the second.
+
+The A5000 is still inside job 17498. There is still no V100.
+
+Gate. Node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 f624ce4b88439b1f353aea651519cf85. SILICON PASS, EXIT:0. The node is idle.
+
+The 0.0018 s threshold is not moved. This cut does not pass it.
