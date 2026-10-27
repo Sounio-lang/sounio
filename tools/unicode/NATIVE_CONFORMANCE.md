@@ -1,0 +1,12 @@
+# Native Unicode conformance preparation
+
+Generate with C++23 and the pinned ICU79.1 oracle under Slurm. `wave3_unicode_generator UCD_ROOT NEW_DIRECTORY sample|exhaustive` requires an explicit coverage mode. Both modes cover every official normalization and default grapheme/word/sentence test. Exhaustive mode covers every valid scalar value for all full case/fold operations, plus context controls. The manifest records chunk kinds and record counts; chunks are bounded to512 records and1MiB.
+
+The committed current.bin is the91-record smoke bundle only. `unicode_conformance.sio` reads this file through checked native I/O, supports NUL, compares every expected output, closes every owned object, and prints the processed count plus UNICODE_CONFORMANCE_OK. A parser/type/compile diagnostic that overlays static_blob_bytes is not an executable acceptance result.
+
+Compile the real Sounio harness once with the source-qualified blob compiler, then invoke `run_chunks ELF FIXTURE_DIRECTORY NEW_RUN_DIRECTORY PART PARTS`. Each selected chunk runs in a new process and directory. The runner copies oracle input rather than linking it, checks exit status, exact nonempty record count and success marker, and fails on empty selection, empty partition, timeout or any mismatch. Aggregate every partition against the generator manifest before claiming complete coverage.
+
+`runner_control.cpp` is deliberately a header-print C++ program that tests the orchestrator. It does not implement Unicode and cannot qualify Sounio semantics. Its successful execution and rejection controls are recorded separately in receipts.
+
+Slurm18187 generated the smoke/sample files twice byte-identically. Slurm18188 generated the exhaustive set. Slurm18196 passed runner positive/negative controls. Slurm18205 checked every code point for Script_Extensions and Age against ICU and exact negative Numeric_Value. Native Unicode execution remains pending in unicode-algorithms.json.
+

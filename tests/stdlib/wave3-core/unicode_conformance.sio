@@ -1,0 +1,160 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: UNICODE_CONFORMANCE_OK
+//@ timeout: 3600
+// The canonical smoke bundle lives at data/current.bin. The dedicated Slurm gate
+// runs the same ELF on every generated chunk in a fresh process and working dir.
+use ffi::platform::{platform_open,platform_status,platform_close}
+use io::native_file::{native_file_open,native_file_status,native_file_read,native_file_close}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_reserve,byte_buffer_get,byte_buffer_len,byte_buffer_close}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_len,integer_buffer_get,integer_buffer_close}
+use text::utf8::{Utf8Text,utf8_text_new,utf8_text_from_bytes,utf8_text_status,utf8_text_byte_len,utf8_text_scalar_len,utf8_text_next,utf8_text_close,utf8_encode_append}
+use text::normalize::{unicode_normalize_append}
+use text::case::{unicode_lowercase_append,unicode_uppercase_append,unicode_casefold_append}
+use text::segment::{unicode_segment_append}
+fn fixture_u32(b:&ByteBuffer,offset:i64)->i64 with Panic {
+ let n=byte_buffer_len(b)
+ assert(offset>=0 && offset<=n && n-offset>=4)
+ byte_buffer_get(b,offset).value+byte_buffer_get(b,offset+1).value*256+byte_buffer_get(b,offset+2).value*65536+byte_buffer_get(b,offset+3).value*16777216
+}
+fn fixture_skip_sequence(b:&ByteBuffer,offset:i64)->i64 with Div,Panic {
+ let count=fixture_u32(b,offset)
+ let n=byte_buffer_len(b)
+ assert(count<=(n-offset-4)/4)
+ offset+4+count*4
+}
+fn fixture_text(b:&ByteBuffer,offset:i64)->Utf8Text with Alloc,Mut,Div,Panic {
+ let count=fixture_u32(b,offset)
+ let end=fixture_skip_sequence(b,offset)
+ assert(end<=byte_buffer_len(b))
+ var bytes=byte_buffer_new(count*4)
+ assert(byte_buffer_reserve(&!bytes,count*4)==0)
+ var i:i64=0
+ while i<count {assert(utf8_encode_append(&!bytes,fixture_u32(b,offset+4+i*4))==0);i=i+1}
+ let text=utf8_text_from_bytes(&bytes,count*4)
+ byte_buffer_close(bytes)
+ assert(utf8_text_status(&text)==0)
+ text
+}
+fn fixture_compare(b:&ByteBuffer,offset:i64,text:&Utf8Text) with Panic {
+ let count=fixture_u32(b,offset)
+ assert(utf8_text_scalar_len(text)==count)
+ var i:i64=0
+ var at:i64=0
+ while i<count {
+  let cp=utf8_text_next(text,at)
+  assert(cp.status==0)
+  assert(cp.codepoint==fixture_u32(b,offset+4+i*4))
+  at=cp.next
+  i=i+1
+ }
+ assert(at==utf8_text_byte_len(text))
+}
+fn fixture_norm_row(b:&ByteBuffer,start:i64)->i64 with Alloc,Mut,Div,Panic {
+ var starts:[i64;5]=[0;5]
+ var cursor=start
+ var i:i64=0
+ while i<5 {starts[i as usize]=cursor;cursor=fixture_skip_sequence(b,cursor);i=i+1}
+ i=0
+ while i<5 {
+  let input=fixture_text(b,starts[i as usize])
+  var form:i64=0
+  while form<4 {
+   var output=utf8_text_new(1048576)
+   assert(unicode_normalize_append(&input,form,1048576,&!output)==0)
+   let expected=if form==0 {if i<3 {1} else {3}} else if form==1 {if i<3 {2} else {4}} else if form==2 {3} else {4}
+   fixture_compare(b,starts[expected as usize],&output)
+   utf8_text_close(output)
+   form=form+1
+  }
+  utf8_text_close(input)
+  i=i+1
+ }
+ cursor
+}
+fn fixture_segment_row(b:&ByteBuffer,start:i64)->i64 with Alloc,Mut,Div,Panic {
+ let mode=fixture_u32(b,start)
+ assert(mode<3)
+ let input_start=start+4
+ let expected_start=fixture_skip_sequence(b,input_start)
+ let end=fixture_skip_sequence(b,expected_start)
+ let input=fixture_text(b,input_start)
+ let count=fixture_u32(b,expected_start)
+ var output=integer_buffer_new(0,(count+1)*8)
+ assert(unicode_segment_append(&input,mode,1048576,&!output)==0)
+ assert(integer_buffer_len(&output)==count)
+ var i:i64=0
+ while i<count {assert(integer_buffer_get(&output,i).value==fixture_u32(b,expected_start+4+i*4));i=i+1}
+ integer_buffer_close(output)
+ utf8_text_close(input)
+ end
+}
+fn fixture_case_row(b:&ByteBuffer,start:i64)->i64 with Alloc,Mut,Div,Panic {
+ let locale=fixture_u32(b,start)
+ let operation=fixture_u32(b,start+4)
+ assert(locale<4 && operation<4)
+ let input_start=start+8
+ let expected_start=fixture_skip_sequence(b,input_start)
+ let end=fixture_skip_sequence(b,expected_start)
+ let input=fixture_text(b,input_start)
+ var output=utf8_text_new(1048576)
+ let status=if operation==0 {unicode_lowercase_append(&input,locale,1048576,&!output)} else if operation==1 {unicode_uppercase_append(&input,locale,1048576,&!output)} else {unicode_casefold_append(&input,operation==3,1048576,&!output)}
+ assert(status==0)
+ fixture_compare(b,expected_start,&output)
+ utf8_text_close(output)
+ utf8_text_close(input)
+ end
+}
+fn fixture_path()->ByteBuffer with Alloc,Mut,Div,Panic {
+ let path="tests/stdlib/wave3-core/data/current.bin"
+ var bytes=byte_buffer_new(str_len(path))
+ var i:i64=0
+ while i<str_len(path) {assert(byte_buffer_push(&!bytes,str_char_at(path,i))==0);i=i+1}
+ bytes
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let platform=platform_open()
+ assert(platform_status(&platform)==0)
+ let path=fixture_path()
+ let file=native_file_open(&platform,&path,0)
+ assert(native_file_status(&file)==0)
+ byte_buffer_close(path)
+ var source=byte_buffer_new(2097152)
+ while true {
+  let read=native_file_read(&platform,&file,&!source,65536)
+  assert(read.status==0)
+  if read.value==0 {break}
+ }
+ assert(native_file_close(&platform,file)==0)
+ var cursor:i64=0
+ var total:i64=0
+ let bytes=byte_buffer_len(&source)
+ assert(bytes>=24)
+ while cursor<bytes {
+  let start=cursor
+  let magic="SOUNUTF1"
+  var i:i64=0
+  while i<8 {assert(byte_buffer_get(&source,start+i).value==str_char_at(magic,i));i=i+1}
+  let kind=fixture_u32(&source,start+8)
+  let count=fixture_u32(&source,start+12)
+  let payload=fixture_u32(&source,start+16)
+  assert(fixture_u32(&source,start+20)==0x00120000)
+  assert(kind>=1 && kind<=3 && count>0 && payload<=bytes-start-24)
+  let end=start+24+payload
+  cursor=start+24
+  i=0
+  while i<count {
+   cursor=if kind==1 {fixture_norm_row(&source,cursor)} else if kind==2 {fixture_segment_row(&source,cursor)} else {fixture_case_row(&source,cursor)}
+   assert(cursor<=end)
+   total=total+1
+   i=i+1
+  }
+  assert(cursor==end)
+ }
+ assert(cursor==bytes && total>0)
+ byte_buffer_close(source)
+ platform_close(platform)
+ print_int(total)
+ print("\nUNICODE_CONFORMANCE_OK\n")
+ 0
+}

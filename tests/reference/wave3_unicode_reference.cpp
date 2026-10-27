@@ -2,6 +2,7 @@
 // This executable is a test tool. Sounio production code never links ICU.
 #include <unicode/uchar.h>
 #include <unicode/ubrk.h>
+#include <unicode/uscript.h>
 #include <unicode/unorm2.h>
 #include <unicode/ustring.h>
 #include <unicode/uversion.h>
@@ -380,6 +381,26 @@ void segmentation(const Blob& b,const std::string& ucdroot){
  if(total<2000)fail("segmentation corpus too small");
 }
 
+
+void extra_properties(const Blob& b){
+ U script=b.property("Script"),extensions=b.property("Script_Extensions"),age=b.property("Age");std::uint64_t checks=0;
+ for(U cp=0;cp<0x110000;++cp){
+  std::string value=b.value(extensions,cp);if(value=="<script>")value=b.value(script,cp);
+  std::istringstream tokens(value);std::string token;std::vector<int32_t> expected;
+  while(tokens>>token){auto code=u_getPropertyValueEnum(UCHAR_SCRIPT,token.c_str());if(code==UCHAR_INVALID_CODE)fail("scx script alias");expected.push_back(code);}
+  std::array<UScriptCode,64> actual{};UErrorCode e=U_ZERO_ERROR;int32_t count=uscript_getScriptExtensions(static_cast<UChar32>(cp),actual.data(),actual.size(),&e);
+  if(U_FAILURE(e)||count<0||static_cast<std::size_t>(count)>actual.size())fail("ICU scx error");
+  std::vector<int32_t> got;for(int32_t i=0;i<count;++i)got.push_back(actual[static_cast<std::size_t>(i)]);
+  std::sort(expected.begin(),expected.end());std::sort(got.begin(),got.end());if(expected!=got)fail("Script_Extensions mismatch cp="+std::to_string(cp));++checks;
+  UVersionInfo version{};u_charAge(cp,version);auto av=b.value(age,cp);
+  if(av=="NA"){if(version[0]||version[1]||version[2]||version[3])fail("unassigned age mismatch");}
+  else if(av!=std::to_string(version[0])+"."+std::to_string(version[1])||version[2]||version[3])fail("Age mismatch cp="+std::to_string(cp));
+  ++checks;
+ }
+ if(b.value(b.property("Numeric_Value"),0xF33)!="-1/2")fail("exact negative Numeric_Value lost");
+ std::cout<<"EXTRA_PROPERTY_ORACLE_OK script_extensions_and_age="<<checks<<" negative_numeric_value=exact\n";
+}
+
 int main(int argc,char** argv){
  try{
   if(argc==4&&std::string(argv[1])=="--seg-only"){version_guard();Blob b(argv[2]);segmentation(b,argv[3]);std::cout<<"SEGMENTATION_REFERENCE_OK\n";return 0;}
@@ -394,7 +415,7 @@ int main(int argc,char** argv){
    std::cout<<"MUTATED_ASCII_UPPERCASE_CATEGORY\n";return 0;
   }
   if(argc!=3){std::cerr<<"usage: unicode_reference UCD.bin NormalizationTest.txt\n";return 64;}
-  version_guard();Blob b(argv[1]);properties(b);mappings(b);full_casing(b);normalization(b,argv[2]);segmentation(b,std::filesystem::path(argv[2]).parent_path().string());std::cout<<"UNICODE_TABLE_REFERENCE_OK\n";return 0;
+  version_guard();Blob b(argv[1]);properties(b);extra_properties(b);mappings(b);full_casing(b);normalization(b,argv[2]);segmentation(b,std::filesystem::path(argv[2]).parent_path().string());std::cout<<"UNICODE_TABLE_REFERENCE_OK\n";return 0;
  }
  catch(const std::exception& e){std::cerr<<"UNICODE_TABLE_REFERENCE_ERROR "<<e.what()<<"\n";return 1;}
 }
