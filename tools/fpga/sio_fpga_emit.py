@@ -17,6 +17,7 @@ of the generated kernel are judged by the Futhark reference
 scripts/ci/fpga_prototype_gate.sh.
 """
 
+import pathlib
 import re
 import sys
 
@@ -177,16 +178,13 @@ int main() {
 
 def main():
     if len(sys.argv) < 3:
-        fail("usage: sio_fpga_emit.py <kernel.sio> <out.cpp> [--kernel NAME] [--tb <tb.cpp>]")
-    kernel = "san_scan"
-    if "--kernel" in sys.argv:
-        kernel = sys.argv[sys.argv.index("--kernel") + 1]
-    source = open(sys.argv[1]).read()
-    out = translate(source, kernel)
-    open(sys.argv[2], "w").write(out)
+        fail("usage: sio_fpga_emit.py <kernel.sio> <out.cpp> [--tb <tb.cpp>]")
+    source = pathlib.Path(sys.argv[1]).read_text()
+    out = translate(source, "san_scan")
+    pathlib.Path(sys.argv[2]).write_text(out)
     if "--tb" in sys.argv:
-        open(sys.argv[sys.argv.index("--tb") + 1], "w").write(TB)
-    print(f"SIO_FPGA_EMIT_OK kernel={kernel} out={sys.argv[2]}")
+        pathlib.Path(sys.argv[sys.argv.index("--tb") + 1]).write_text(TB)
+    print(f"SIO_FPGA_EMIT_OK kernel=san_scan out={sys.argv[2]}")
 
 
 if __name__ == "__main__":
