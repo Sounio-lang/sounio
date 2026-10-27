@@ -1,7 +1,8 @@
 # lean_single named-function `pub use` contract
 
-This fixture set pins GitHub issue #842 without claiming that the compiler bug
-is fixed. The supported claim boundary is deliberately narrow:
+This fixture set pins GitHub issue #842. lean_single now satisfies it (see
+"Resolution" below) and CI runs the gate strictly. The supported claim
+boundary is deliberately narrow:
 
 ```sio
 pub use public_leaf::{public_route_value}
@@ -19,7 +20,7 @@ receipt fields:
 
 | State | `facade_forwarding` | `selective_reexport` | Classification |
 |---|---:|---:|---|
-| Current seed | 0 | 1 | public forwarding absent |
+| Seed before #842 fix | 0 | 1 | public forwarding absent |
 | Rejected load-whole-leaf patch | 1 | 0 | omitted leaf symbol overexposed |
 | Issue #842 acceptance | 1 | 1 | named-function re-export is selective |
 
@@ -38,11 +39,25 @@ SOUNIO_LEAN_SINGLE_PUB_USE_GATE_SELF_TEST_ONLY=1 \
   bash scripts/ci/lean_single_pub_use_reexport_gate.sh
 ```
 
-## Blocker: named function forwarding
+## Resolution (#842)
+
+`resolve_imports` in `self-hosted/compiler/lean_single.sio` follows a
+`pub use P::{a, b}` line exactly as it follows `use`, and records, per module
+loaded that way from an imported facade, the names the list exposes
+(`PUBUSE_R_*` / `PUBUSE_N_*`). A call from the main file to a function defined
+in such a module is refused as an undefined identifier unless the list names
+it (`pubuse_call_refused`), so forwarding is selective: the gate reports
+`facade_forwarding=1 selective_reexport=1` and is wired into CI next to the
+other lean_single gates. A plain `use` of the same module, a glob, a
+renaming or multi-line list, or a `pub use` in the main file lifts the
+restriction. Named imports are otherwise not selective in this engine, and
+`private_import_isolated` remains the separate residual below.
+
+## Blocker: named function forwarding (RESOLVED by #842; record kept)
 
 ```text
 Blocker-ID: BLK-20260713-lean-single-import-visibility
-Status: owned
+Status: resolved (#842)
 Severity: B1
 Class: compiler-semantics
 Owner: Codex compiler coordination (/root)
