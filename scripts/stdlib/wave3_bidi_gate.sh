@@ -20,6 +20,9 @@ ICU="$(realpath -e "$ICU_PREFIX")"
 if [[ -f "$ICU/../SCOPE" ]] && grep -Fq "Diagnostic candidate only" "$ICU/../SCOPE";then echo "diagnostic ICU candidate cannot serve as the locked acceptance oracle" >&2;exit 2;fi
 NODE="${NODE:-node}"
 CXX="${CXX:-g++}"
+NATIVE_JOBS="${BIDI_NATIVE_JOBS:-1}"
+[[ "$NATIVE_JOBS" =~ ^([1-9]|1[0-6])$ ]] || { echo "BIDI_NATIVE_JOBS must be1..16" >&2;exit 2; }
+if [[ "${SLURM_CPUS_PER_TASK:-}" =~ ^[1-9][0-9]*$ ]] && ((NATIVE_JOBS>SLURM_CPUS_PER_TASK));then echo "BIDI workers exceed allocated CPUs" >&2;exit 2;fi
 WRAPPER="$ROOT/scripts/ci/souc-native-wrapper.sh"
 BOUNDER="$ROOT/scripts/stdlib/bounded_command.mjs"
 [[ -f "$WRAPPER" && -f "$BOUNDER" && -f "$ROOT/stdlib/text/data/ucd18-source.tar.gz" && -f "$ROOT/stdlib/text/data/UCD18-SOURCES.sha256" ]] || { echo "missing mandatory source dependency" >&2;exit 2; }
@@ -28,6 +31,7 @@ mkdir "$OUT"
 mkdir "$OUT/upstream" "$OUT/runs"
 printf '%s\n' "$AUTHORITY" > "$OUT/EXECUTION_AUTHORITY"
 date -u +%FT%TZ > "$OUT/STARTED_UTC"
+printf '%s\n' "$NATIVE_JOBS" > "$OUT/NATIVE_WORKERS"
 export SOUNIO_STDLIB_PATH="$ROOT/stdlib"
 export SOUNIO_SOUC_BIN="$RAW" SOUC_NATIVE_BIN="$RAW" SOUNIO_SOUC_RAW_MODE=modular
 export LD_LIBRARY_PATH="$(dirname "$PLATFORM"):$ICU/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -73,7 +77,7 @@ grep -Fx "BIDI18_CORPUS_GENERATED cases=861948 class_cases=770241 character_case
 phase mutant generate 600 1048576 "$OUT/generator" --wrong-level-control "$UCD" "$OUT/mutant"
 grep -Fx "BIDI_WRONG_LEVEL_CONTROL_GENERATED official_level=2 mutant_level=3 visual_order_unchanged=true" "$OUT/mutant.generate.log"
 find "$OUT/corpus" "$OUT/mutant" -type f -print0 | sort -z | xargs -0 sha256sum > "$OUT/DERIVED.sha256"
-sha256sum "$OUT/EXECUTION_AUTHORITY" "$OUT/CXX_VERSION" >> "$OUT/DERIVED.sha256"
+sha256sum "$OUT/EXECUTION_AUTHORITY" "$OUT/CXX_VERSION" "$OUT/NATIVE_WORKERS" >> "$OUT/DERIVED.sha256"
 failed=0
 smoke_ready=0;conformance_ready=0;adversarial_ready=0;api_edges_ready=0
 for fixture in smoke adversarial api_edges conformance;do
@@ -85,6 +89,22 @@ for fixture in smoke adversarial api_edges conformance;do
  chmod +x "$OUT/$fixture.elf"
  sha256sum "$OUT/$fixture.elf" >> "$OUT/EXECUTABLES.sha256"
  printf -v "$fixture""_ready" %s 1
+done
+negative_phase(){
+ local item="$1" name="$2" status=0
+ shift 2
+ "$NODE" "$BOUNDER" 300 4194304 -- "$@" > "$OUT/$item.$name.log" 2>&1 || status=$?
+ printf '%s\t%s-expected-1\t%s\n' "$item" "$name" "$status" >> "$OUT/RESULTS.tsv"
+ [[ "$status" == 1 ]] && grep -Fq 'error[E039]' "$OUT/$item.$name.log"
+}
+for guard in linear_owner_reuse linear_line_reuse;do
+ mkdir -p "$OUT/runs/$guard"
+ source="$OUT/runs/$guard/control.sio"
+ cp "$ROOT/tests/stdlib/wave3-bidi/$guard.sio.in" "$source"
+ cmp "$ROOT/tests/stdlib/wave3-bidi/$guard.sio.in" "$source"
+ if ! negative_phase "$guard" check bash "$WRAPPER" check "$source";then failed=1;fi
+ if ! negative_phase "$guard" compile bash "$WRAPPER" compile "$source" -o "$OUT/runs/$guard/rejected.elf";then failed=1;fi
+ if [[ -e "$OUT/runs/$guard/rejected.elf" ]];then failed=1;fi
 done
 if [[ "$smoke_ready" == 1 ]];then
  if ! phase smoke native 120 1048576 "$OUT/smoke.elf";then failed=1
@@ -101,21 +121,46 @@ fi
 completed=0
 completed_cases=0
 wrong_level_ok=0
+run_native_chunk(){
+ local name="$1" count="$2" status=0 verdict=0
+ (cd "$OUT/runs/$name";"$NODE" "$BOUNDER" 180 1048576 -- "$OUT/conformance.elf") > "$OUT/$name.native.log" 2>&1 || status=$?
+ printf '%s\tnative\t%s\n' "$name" "$status" > "$OUT/runs/$name/RESULT.tsv"
+ if [[ "$status" != 0 ]] || [[ "$(grep -Fxc BIDI_NATIVE_CONFORMANCE_OK "$OUT/$name.native.log"||true)" != 1 ]] || [[ "$(grep -Fxc "BIDI_CASES_OK $count" "$OUT/$name.native.log"||true)" != 1 ]];then verdict=1;fi
+ printf '%s\n' "$verdict" > "$OUT/runs/$name/STATUS"
+ return "$verdict"
+}
 if [[ "$conformance_ready" == 1 ]];then
+ active=0
+ pids=()
  while IFS=$'\t' read -r chunk count bytes;do
   [[ "$chunk" =~ ^[0-9]{6}\.bin$ && "$count" =~ ^[1-9][0-9]*$ && "$bytes" =~ ^[1-9][0-9]*$ ]] || exit 1
   name="${chunk%.bin}"
-  mkdir -p "$OUT/runs/$name/data"
+  # A duplicate generated chunk name is an error, never an output overwrite.
+  mkdir "$OUT/runs/$name"
+  mkdir "$OUT/runs/$name/data"
   cp "$OUT/corpus/$chunk" "$OUT/runs/$name/data/current.bin"
   cmp "$OUT/corpus/$chunk" "$OUT/runs/$name/data/current.bin"
-  if ! (cd "$OUT/runs/$name";phase "$name" native 180 1048576 "$OUT/conformance.elf");then failed=1;continue;fi
-  if [[ "$(grep -Fxc BIDI_NATIVE_CONFORMANCE_OK "$OUT/$name.native.log"||true)" != 1 ]] || [[ "$(grep -Fxc "BIDI_CASES_OK $count" "$OUT/$name.native.log"||true)" != 1 ]];then failed=1;continue;fi
+  run_native_chunk "$name" "$count" &
+  pids+=("$!")
+  active=$((active+1))
+  if [[ "$active" == "$NATIVE_JOBS" ]];then
+   for pid in "${pids[@]}";do wait "$pid" || failed=1;done
+   active=0
+   pids=()
+  fi
+ done < "$OUT/corpus/CHUNKS.tsv"
+ for pid in "${pids[@]}";do wait "$pid" || failed=1;done
+ # Merge only after every process is reaped; no shared concurrent TSV writes.
+ while IFS=$'\t' read -r chunk count bytes;do
+  name="${chunk%.bin}"
+  if [[ -s "$OUT/runs/$name/RESULT.tsv" ]];then cat "$OUT/runs/$name/RESULT.tsv" >> "$OUT/RESULTS.tsv";else printf '%s\tnative\tMISSING\n' "$name" >> "$OUT/RESULTS.tsv";failed=1;fi
+  if [[ "$(cat "$OUT/runs/$name/STATUS" 2>/dev/null||true)" != 0 ]];then failed=1;continue;fi
   completed=$((completed+1))
   completed_cases=$((completed_cases+count))
  done < "$OUT/corpus/CHUNKS.tsv"
  mkdir -p "$OUT/runs/wrong-level/data"
  cp "$OUT/mutant/wrong-level.bin" "$OUT/runs/wrong-level/data/current.bin"
- # Exact wrong-level rejection is mandatory even though visual order is unchanged.
+ # Exact wrong-level rejection remains mandatory with unchanged visual order.
  status=0
  (cd "$OUT/runs/wrong-level";"$NODE" "$BOUNDER" 120 1048576 -- "$OUT/conformance.elf") > "$OUT/wrong-level.native.log" 2>&1 || status=$?
  printf 'wrong-level\tnative-expected-1\t%s\n' "$status" >> "$OUT/RESULTS.tsv"
