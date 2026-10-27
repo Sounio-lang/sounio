@@ -40,3 +40,13 @@ That diagnostic is recorded separately and is not counted as a passing
 negative. Owner-bound Option/Result/tuple/struct borrow propagation, mutable
 borrow exclusivity, generic HeapVec typed storage and final integrated
 whole-stdlib acceptance remain open dependencies.
+
+## Durable custody for this tranche
+
+Slurm18730 completed0 and archived the complete closed metadata/generic tranche,
+including failed attempts and diagnostic crashes, at
+`/orangefs/training/sounio-foundry/runs/stdlib-wave3-20261027/core/closed-export07/core-closed-export07.tar.gz`.
+Archive SHA256:
+dad4c1f94a342525f7ba199baa9abe3332fd12ec812fe62e6d0c63e3719a2afe.
+The export retains a complete file-hash list and verifies the original closed
+directories after archiving. No earlier failure receipt was deleted or relabeled.
