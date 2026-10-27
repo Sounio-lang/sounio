@@ -38,6 +38,7 @@ npm run check:quality
 ## Route Notes
 
 - Canonical docs and tutorials live under `/learn/**` and `/tutorials/**`.
+- Units and uncertainty (dimensional analysis and GUM propagation): https://www.souniolang.org/learn/language/units-and-uncertainty/
 - Legacy docs routes (`/docs/**`) and selected localized routes redirect to canonical surfaces.
 - Localized language prefixes (`/pt`, `/el`, `/zh`, `/ja`, `/es`) are generated under `src/pages/[lang]/`.
 - **i18n policy** (which routes show the “translation may lag English” banner): [docs/I18N_POLICY.md](docs/I18N_POLICY.md).
