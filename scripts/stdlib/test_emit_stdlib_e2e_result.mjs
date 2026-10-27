@@ -84,7 +84,7 @@ test('committed historical JSON exact text roundtrip is a fixture only', () => {
   assert.equal(stringifyDocument(result) + '\n', text);
   console.log('HISTORICAL_FIXTURE_ONLY results=' + historical.results.length + ' timestamp=' + historical.generated_at_utc);
 });
-test('runner projection pins emitter plus optional diagnostics integration', () => {
+test('runner projection pins emitter and drained diagnostics integration', () => {
   const path = 'scripts/stdlib/run_stdlib_e2e.sh';
   const after = readFileSync(join(root, path), 'utf8');
   const strip = text => {
@@ -93,9 +93,9 @@ test('runner projection pins emitter plus optional diagnostics integration', () 
     assert.ok(start > 0 && end > start);
     return text.slice(0, start) + text.slice(end);
   };
-  // Pinned after main5977 timeout/slow parsing and optional diagnostics integration, so an extracted
-  // source packet needs no .git directory or subprocess for this assertion.
-  assert.equal(createHash('sha256').update(strip(after)).digest('hex'), 'b83ccc93a3b4f7c7cc2b6fdc43f75a7fb4b9f9dda448c6b81d860059e7f3737b');
+  // Pin includes the reviewed drain-before-seal delta (packets73/74). The
+  // historical JSON fixture above remains unchanged. Source archives need no Git.
+  assert.equal(createHash('sha256').update(strip(after)).digest('hex'), 'a097cda6186d708a9e8aa14ce24de088cad1c4f56da43b0073afb49fa1186a8a');
   assert.ok(!after.includes('python3'));
 });
 test('CLI emits fresh JSON and rejects invalid UTF8 without output', () => {
