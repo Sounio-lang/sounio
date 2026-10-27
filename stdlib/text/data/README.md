@@ -29,3 +29,16 @@ This qualifies generated tables and the C++23 oracle only. Compiler embedding, n
 
 The extended oracle also checks 8,979,744 upper/lower case transformations across default, Turkish, Azeri and Lithuanian rules, including contextual sigma, soft dotted contexts and combining marks. The default UAX29 table-derived algorithms and ICU independently pass every official Unicode18 row: 853 extended grapheme, 1,944 word and 512 sentence cases. Unicode18 GB9c is the Linker Extend* / Consonant rule; no preceding consonant is required. Unknown SpecialCasing conditions are a generator error, with an explicit rejection control in the gate. These are C++23 table/oracle checks; native Sounio execution remains a separate acceptance gate.
 
+
+## UCA18 / CLDR49 root collation data
+
+`uca18-cldr49.bin` is generated only from the pinned official DUCET18 allkeys and CLDR49 root allkeys sources. Production code never calls ICU. ICU79.1 is an independent test oracle.
+
+The source archive retains official files and licenses, plus the complete official UCA18 conformance text files. Official inputs are https://www.unicode.org/Public/18.0.0/uca/allkeys.txt, https://www.unicode.org/Public/18.0.0/uca/CollationTest.zip, and CLDR49 core.zip. The latter archive digest is78403d8d6fb1fed6e208bf9001bf5be00bb5abfd9f8110dae062bf49309d6a89. All extracted source bytes have per-file hashes inside the bundled archive.
+
+Format:8-byte SOUNUCA1 magic, u32 format1, UCA0x00120000, section_count4, CLDR49, then4 directory records(id,width,count,offset). All integers are little-endian. Section1 entries(width16) stores(key_first,key_count,CE_first,CE_count); section2(width4) is key scalar pool; section3(width16) is CE(primary,secondary,tertiary,flags); section4(width16) is implicit-range(start,end,lead,shared_lead_minimum_offset). Flags bit0 is DUCET variable, bit1 is CLDR variable. An explicit entry with zero CE count is an ignorable mapping, not a missing mapping.
+
+Completely zero p/s/t CEs are removed as a semantic normalization. The original official CE streams remain in the source archive. This is not byte-lossless reconstruction. Slurm18321 verified equivalent keys before/after compaction for every source key at strengths1..5, shifted off/on and backwards secondary off/on, in both root views (1,618,680 comparisons). It also passed both complete official sorted corpora (212,066 rows each),752,720 focused ICU comparisons and wrong-weight/shifted/version rejection controls.
+
+Run `ICU_PREFIX=... tools/unicode/check_collation_data.sh /absolute/new/output` under Slurm to regenerate twice, compare the committed asset, verify source hashes, run conformance and reject bad implementations. This data gate does not qualify Sounio native collation or bundled locale tailorings.
+
