@@ -16,7 +16,7 @@
 import numpy as np, glob, os, re
 np.seterr(all='ignore')
 AB='/workspace/sounio/artifacts/research/abide/'
-MAN='/workspace/sounio/abide_roi_manifest.tsv'
+MAN='/workspace/sounio/artifacts/research/brain_ossm_full_cohort/abide_roi_manifest.tsv'
 # ---- Cayley-Dickson octonion multiply (bits=3) ----
 def cds(a,b,bits=3):
     s=1

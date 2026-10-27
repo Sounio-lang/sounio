@@ -1,0 +1,180 @@
+// Checked first-order Lorentz force in SI. See LORENTZ.md.
+use math::pure::{is_finite,sqrt}
+pub struct LorentzResult {
+ pub status:i64,
+ pub force:[f64;3],
+ pub covariance:[f64;9],
+ pub component_standard_uncertainties:[f64;3],
+ pub vector_standard_uncertainty:f64,
+ pub uncertainty_model:i64,
+ pub first_order:bool,
+}
+pub struct LorentzScalarResult {
+ pub status:i64,
+ pub force:f64,
+ pub standard_uncertainty:f64,
+ pub uncertainty_model:i64,
+ pub first_order:bool,
+}
+struct LorentzScaled { m:f64,e:i64 }
+struct LorentzNumber { status:i64,value:f64 }
+fn la(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn lnrm(x:f64)->LorentzScaled with Mut,Div,Panic {
+ if x==0.0 {return LorentzScaled{m:0.0,e:0}}
+ var m=la(x)
+ var e:i64=0
+ while m>=2.0 {m=m*0.5 e=e+1}
+ while m<1.0 {m=m*2.0 e=e-1}
+ if x<0.0 {m=-m}
+ LorentzScaled{m:m,e:e}
+}
+fn lp(a:f64,b:f64,c:f64)->LorentzScaled with Mut,Div,Panic {
+ if a==0.0 || b==0.0 || c==0.0 {return LorentzScaled{m:0.0,e:0}}
+ let x=lnrm(a) let y=lnrm(b) let z=lnrm(c)
+ let w=lnrm((x.m*y.m)*z.m)
+ LorentzScaled{m:w.m,e:x.e+y.e+z.e+w.e}
+}
+fn ladd(a:LorentzScaled,b:LorentzScaled)->LorentzScaled with Mut,Div,Panic {
+ if a.m==0.0 {return b}
+ if b.m==0.0 {return a}
+ var x=a var y=b
+ if x.e<y.e {x=b y=a}
+ var small=y.m
+ var d=x.e-y.e
+ if d>1075 {small=0.0 d=0}
+ while d>0 {small=small*0.5 d=d-1}
+ let w=lnrm(x.m+small)
+ if w.m==0.0 {return w}
+ LorentzScaled{m:w.m,e:x.e+w.e}
+}
+fn lsum3(a:LorentzScaled,b:LorentzScaled,c:LorentzScaled)->LorentzScaled with Mut,Div,Panic {
+ // Largest exponents first: exact cancellation of large terms precedes a
+ // small remaining term, rather than erasing it while forming intermediate sums.
+ var x=a var y=b var z=c
+ if x.e<y.e {let t=x x=y y=t}
+ if y.e<z.e {let t=y y=z z=t}
+ if x.e<y.e {let t=x x=y y=t}
+ ladd(ladd(x,y),z)
+}
+fn lround(a:LorentzScaled,strict:bool)->LorentzNumber with Mut,Div,Panic {
+ if a.m==0.0 {return LorentzNumber{status:0,value:0.0}}
+ if a.e>1023 {return LorentzNumber{status:4,value:0.0}}
+ var value:f64=0.0
+ if a.e>=-1022 {
+  var f:f64=1.0 var j:i64=0
+  if a.e>=0 {while j<a.e {f=f*2.0 j=j+1}}
+  else {while j<0-a.e {f=f*0.5 j=j+1}}
+  value=a.m*f
+ } else {
+  var f:f64=1.0 var j:i64=0
+  if a.e>=-1075 {
+   let shift=a.e+1074
+   if shift<0 {f=0.5}
+   else {while j<shift {f=f*2.0 j=j+1}}
+   value=(a.m*f)*(2.2250738585072014e-308/4503599627370496.0)
+  }
+ }
+ if !is_finite(value) || (strict && value==0.0) {return LorentzNumber{status:4,value:0.0}}
+ LorentzNumber{status:0,value:value}
+}
+fn lforce(q:f64,e:f64,vj:f64,bk:f64,vk:f64,bj:f64,strict:bool)->LorentzNumber with Mut,Div,Panic {
+ lround(lsum3(lp(q,e,1.0),lp(q,vj,bk),lp(-q,vk,bj)),strict)
+}
+fn lempty(status:i64)->LorentzResult {
+ LorentzResult{status:status,force:[0.0;3],covariance:[0.0;9],component_standard_uncertainties:[0.0;3],vector_standard_uncertainty:0.0,uncertainty_model:1,first_order:true}
+}
+fn lscalar_empty(status:i64)->LorentzScalarResult {
+ LorentzScalarResult{status:status,force:0.0,standard_uncertainty:0.0,uncertainty_model:1,first_order:true}
+}
+fn lnorm(a:&[f64;30],start:i64,n:i64)->LorentzNumber with Mut,Div,Panic {
+ var scale:f64=0.0 var sum:f64=1.0 var i:i64=0
+ while i<n {
+  let x=la(a[(start+i) as usize])
+  if x>0.0 {
+   if scale<x {let r=scale/x sum=1.0+sum*r*r scale=x}
+   else {let r=x/scale sum=sum+r*r}
+  }
+  i=i+1
+ }
+ lround(lp(scale,sqrt(sum),1.0),true)
+}
+pub fn lorentz_force_independent(q:f64,uq:f64,e:&[f64;3],ue:&[f64;3],v:&[f64;3],uv:&[f64;3],b:&[f64;3],ub:&[f64;3])->LorentzResult with Mut,Div,Panic {
+ if !is_finite(q) || !is_finite(uq) {return lempty(1)}
+ var i:i64=0
+ while i<3 {
+  if !is_finite(e[i as usize]) || !is_finite(ue[i as usize]) || !is_finite(v[i as usize]) || !is_finite(uv[i as usize]) || !is_finite(b[i as usize]) || !is_finite(ub[i as usize]) {return lempty(1)}
+  i=i+1
+ }
+ if uq<0.0 {return lempty(3)}
+ i=0
+ while i<3 {if ue[i as usize]<0.0 || uv[i as usize]<0.0 || ub[i as usize]<0.0 {return lempty(3)} i=i+1}
+ var out=lempty(0)
+ var h:[f64;30]=[0.0;30]
+ i=0
+ while i<3 {
+  let j=(i+1)%3 let k=(i+2)%3
+  let f=lforce(q,e[i as usize],v[j as usize],b[k as usize],v[k as usize],b[j as usize],false)
+  let charge=lforce(uq,e[i as usize],v[j as usize],b[k as usize],v[k as usize],b[j as usize],true)
+  let electric=lround(lp(q,ue[i as usize],1.0),true)
+  let velocity_j=lround(lp(q,b[k as usize],uv[j as usize]),true)
+  let velocity_k=lround(lp(-q,b[j as usize],uv[k as usize]),true)
+  let magnetic_j=lround(lp(-q,v[k as usize],ub[j as usize]),true)
+  let magnetic_k=lround(lp(q,v[j as usize],ub[k as usize]),true)
+  if f.status!=0 || charge.status!=0 || electric.status!=0 || velocity_j.status!=0 || velocity_k.status!=0 || magnetic_j.status!=0 || magnetic_k.status!=0 {return lempty(4)}
+  out.force[i as usize]=f.value
+  h[(i*10) as usize]=charge.value
+  h[(i*10+1+i) as usize]=electric.value
+  h[(i*10+4+j) as usize]=velocity_j.value
+  h[(i*10+4+k) as usize]=velocity_k.value
+  h[(i*10+7+j) as usize]=magnetic_j.value
+  h[(i*10+7+k) as usize]=magnetic_k.value
+  let u=lnorm(&h,i*10,10)
+  if u.status!=0 {return lempty(4)}
+  out.component_standard_uncertainties[i as usize]=u.value
+  i=i+1
+ }
+ i=0
+ while i<3 {
+  var j=i
+  while j<3 {
+   var total=LorentzScaled{m:0.0,e:0}
+   var k:i64=0
+   while k<10 {
+    let term=lp(h[(i*10+k) as usize],h[(j*10+k) as usize],1.0)
+    // Conservative covariance availability: do not silently lose nonzero terms.
+    let check=lround(term,true)
+    if check.status!=0 {return lempty(4)}
+    total=ladd(total,term)
+    k=k+1
+   }
+   let value=lround(total,true)
+   if value.status!=0 {return lempty(4)}
+   out.covariance[(i*3+j) as usize]=value.value
+   out.covariance[(j*3+i) as usize]=value.value
+   j=j+1
+  }
+  i=i+1
+ }
+ var components:[f64;30]=[0.0;30]
+ i=0
+ while i<3 {components[i as usize]=out.component_standard_uncertainties[i as usize] i=i+1}
+ let vector=lnorm(&components,0,3)
+ if vector.status!=0 {return lempty(4)}
+ out.vector_standard_uncertainty=vector.value
+ out
+}
+pub fn lorentz_force_scalar_independent(q:f64,uq:f64,e:f64,ue:f64,v:f64,uv:f64,b:f64,ub:f64)->LorentzScalarResult with Mut,Div,Panic {
+ if !is_finite(q) || !is_finite(uq) || !is_finite(e) || !is_finite(ue) || !is_finite(v) || !is_finite(uv) || !is_finite(b) || !is_finite(ub) {return lscalar_empty(1)}
+ if uq<0.0 || ue<0.0 || uv<0.0 || ub<0.0 {return lscalar_empty(3)}
+ let f=lforce(q,e,v,b,0.0,0.0,false)
+ let charge=lforce(uq,e,v,b,0.0,0.0,true)
+ let electric=lround(lp(q,ue,1.0),true)
+ let velocity=lround(lp(q,b,uv),true)
+ let magnetic=lround(lp(q,v,ub),true)
+ if f.status!=0 || charge.status!=0 || electric.status!=0 || velocity.status!=0 || magnetic.status!=0 {return lscalar_empty(4)}
+ var h:[f64;30]=[0.0;30]
+ h[0]=charge.value h[1]=electric.value h[2]=velocity.value h[3]=magnetic.value
+ let u=lnorm(&h,0,4)
+ if u.status!=0 {return lscalar_empty(4)}
+ LorentzScalarResult{status:0,force:f.value,standard_uncertainty:u.value,uncertainty_model:1,first_order:true}
+}

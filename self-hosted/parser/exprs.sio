@@ -10,7 +10,7 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_ahead_is_p_ident, parser_ahead_is_hex_frac_p_ident, parser_ahead_fused_exp_ident, parser_assign_op_code, parser_advance, parser_prev_token_end, mk_expr, error_expr, dummy_type_expr, parser_store_expr_box, parser_take_expr_box, f64_hex_literal_from_source}
+use parser::parser::{parser_report_expected_expression, parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_ahead_is_p_ident, parser_ahead_is_hex_frac_p_ident, parser_ahead_fused_exp_ident, parser_assign_op_code, parser_advance, parser_prev_token_end, mk_expr, error_expr, dummy_type_expr, parser_store_expr_box, parser_take_expr_box, f64_hex_literal_from_source}
 use parser::f128_literal::*
 use parser::types::*
 use parser::stmts::*
@@ -39,6 +39,17 @@ impl Parser {
     // ============================================================
 
     fn parse_expr_bp(self, min_bp: i64) -> Parser with Mut, IO, Panic, Div, Alloc {
+        // Byte start of this expression, captured before any advance. Used instead
+        // of lhs.span: that field's payload is null on the Gen3 preflight path and
+        // span_from SIGSEGVs reading it. PT_START is the same byte current_span uses.
+        let expr_start = if self.pos >= 0 && self.pos < self.token_count { PT_START[self.pos as usize] } else { 0 }
+        // #2779: a block-like atom written inside parentheses (`(if a {1} else {0})`)
+        // is closed by its `)`, so a newline-led operator on the next line continues
+        // it. Grouping keeps the inner Expr unchanged (parse_paren_expr), so remember
+        // here that the atom started with `(`. A block-like kind can only come from
+        // the atom itself -- every postfix/infix step below replaces `lhs` with a
+        // call/index/field/binary node -- so this flag needs no reset.
+        let atom_parenthesized = parser_peek(self) == TokenKind::LParen || pt_read_kind_code(self.pos) == 174
         // Parse prefix / atom; result stored in LAST_EXPR
         var p = self.parse_prefix()
         var lhs = parser_take_expr_box()
@@ -77,12 +88,16 @@ impl Parser {
                 continue
             }
 
+            // `audit` is also a name (`var audit = 1` / `audit = audit + 1`).
+            // Without this, the initializer on the previous line swallows the
+            // next statement: `2029\naudit = mix(...)` is parsed as
+            // `2029 audit =` and expect_ident dies on `=`.
             if op_kind == TokenKind::AuditLower {
+                if p.had_newline_before() { break }
                 p = p.advance()
                 let audit_name = p.current_name()
                 p = p.expect_ident()
-                let lhs_span = lhs.span
-                let span = p.span_from(lhs_span)
+                let span = p.span_from_off(expr_start)
                 var audit_e = mk_expr(ExprKind::ExprAuditAttach, span)
                 audit_e.left = Some(lhs)
                 audit_e.name = audit_name
@@ -93,7 +108,7 @@ impl Parser {
             // A control/block expression followed by a newline starts a new
             // statement. Without this, `while { ... }\n-1` becomes
             // `(while { ... }) - 1` and type-checks as `() - i64`.
-            if p.had_newline_before() && expr_kind_ends_line_stmt((*lhs).kind) {
+            if p.had_newline_before() && expr_kind_ends_line_stmt((*lhs).kind) && !atom_parenthesized {
                 break
             }
 
@@ -126,6 +141,25 @@ impl Parser {
                 break
             }
 
+            // #2249: `!` and `~` are prefix operators only. After an operand they
+            // have no meaning, so `x ! y`, `x ~ y` and the spaced `x! (y)` are
+            // refused here rather than handed to token_to_binop, whose fallback
+            // used to read them as `x + y`. At the start of a line (any spacing)
+            // the operator begins a new statement, as on lean_single.
+            if op_kind == TokenKind::Bang || op_kind == TokenKind::Tilde {
+                if p.had_newline_before() { break }
+                p.had_error = true
+                p.error_count = p.error_count + 1
+                if p.error_count <= 20 {
+                    if op_kind == TokenKind::Bang {
+                        print("error: `!` is not a binary operator: `a ! b` has no meaning (prefix `!x` is logical not; for inequality write `!=`)\n")
+                    } else {
+                        print("error: `~` is not a binary operator: `a ~ b` has no meaning (prefix `~x` is bitwise not; for xor write `^`)\n")
+                    }
+                }
+                break
+            }
+
             let prec = tk_precedence(op_kind)
 
             // Stop if current operator has lower or equal precedence
@@ -138,8 +172,7 @@ impl Parser {
                 if p.at_expr_start() {
                     p = p.parse_expr_bp(prec)
                     let rhs = parser_take_expr_box()
-                    let lhs_span = lhs.span
-                    let span = p.span_from(lhs_span)
+                    let span = p.span_from_off(expr_start)
                     var range_e = mk_expr(ExprKind::ExprRange, span)
                     range_e.bin_op = bin_op
                     range_e.left = Some(lhs)
@@ -147,8 +180,7 @@ impl Parser {
                     lhs = Box::new(range_e)
                 } else {
                     // Half-open range: expr..
-                    let lhs_span = lhs.span
-                    let span = p.span_from(lhs_span)
+                    let span = p.span_from_off(expr_start)
                     var range_e = mk_expr(ExprKind::ExprRange, span)
                     range_e.bin_op = bin_op
                     range_e.left = Some(lhs)
@@ -164,8 +196,7 @@ impl Parser {
                 let pair2 = p.parse_type()
                 p = pair2.0
                 let target_ty = pair2.1
-                let lhs_span = lhs.span
-                let span = p.span_from(lhs_span)
+                let span = p.span_from_off(expr_start)
                 var cast_e = mk_expr(ExprKind::ExprCast, span)
                 cast_e.left = Some(lhs)
                 cast_e.cast_type = Some(Box::new(target_ty))
@@ -176,14 +207,24 @@ impl Parser {
             // Standard binary operator
             if prec == 0 { break }
 
+            // #2249: fail closed on a token that has a precedence but no binary
+            // operator, instead of token_to_binop's old silent OpAdd fallback.
+            if !token_is_binop(op_kind) {
+                p.had_error = true
+                p.error_count = p.error_count + 1
+                if p.error_count <= 20 {
+                    print("error: unexpected token in binary operator position (no binary operator for it)\n")
+                }
+                break
+            }
+
             let bin_op = token_to_binop(op_kind)
             p = p.advance()
 
             // Right-hand side: use prec for left-associativity
             p = p.parse_expr_bp(prec)
             let rhs = parser_take_expr_box()
-            let lhs_span = lhs.span
-            let span = p.span_from(lhs_span)
+            let span = p.span_from_off(expr_start)
 
             var bin_e = mk_expr(ExprKind::ExprBinary, span)
             bin_e.bin_op = bin_op
@@ -328,6 +369,7 @@ impl Parser {
             var p = self
             p.had_error = true
             p.error_count = p.error_count + 1
+            parser_report_expected_expression(p.pos, p.error_count)
             p = p.advance()
             parser_store_expr_box(Box::new(error_expr(span)))
             p
@@ -838,6 +880,9 @@ impl Parser {
         let name = self.current_name()
         var p = self.advance()  // skip param name
         var ty = dummy_type_expr()
+        // Omitted closure annotations request inference, not the unit type.
+        // A unit placeholder made `|x| x + 1` reject both the body and calls.
+        ty.kind = TypeExprKind::TypeInfer
         if parser_peek(p) == TokenKind::Colon {
             p = p.advance()
             let ty_pair = p.parse_type()
@@ -1462,6 +1507,7 @@ impl Parser {
     fn parse_call_expr_box(self, callee: Box<Expr>) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = callee.span
         var p = parser_advance(self)  // skip (
+        let first_arg_pos = p.pos
 
         var args_opt: Option<Box<ExprList>> = None
 
@@ -1490,6 +1536,12 @@ impl Parser {
             p = p.expect(TokenKind::RParen)
         }
         let span = p.span_from(start)
+
+        // print/println with a format and its arguments: see fmt_print_kind.
+        let fmt_kind = fmt_print_kind(&(*callee))
+        if fmt_kind > 0 && fmt_expr_list_len(&args_opt) >= 2 {
+            return p.rewrite_format_print(fmt_kind, args_opt, span, first_arg_pos)
+        }
 
         // d_separated(A, B) / d_separated(A, B | Z): the only way to obtain a
         // proven independence witness. A, B and Z name nodes of the declared
@@ -1579,6 +1631,120 @@ impl Parser {
         e.args = args_opt
         // Note: hardware_publish rewriting skipped (IS_SPTR issue with Expr params, TODO)
         parser_store_expr_box(Box::new(e))
+        p
+    }
+
+    // `print(fmt, a1, ..., an)` / `println(fmt, a1, ..., an)`, n >= 1, becomes
+    //     { print("x="); print(a1); print(" y="); print(a2); println() }
+    // so each argument is checked and lowered exactly as `print(arg)` is. The
+    // arguments are evaluated left to right, each as its `{}` is reached.
+    fn rewrite_format_print(self, kind: i64, args_opt: Option<Box<ExprList>>, span: Span, fmt_pos: i64) -> Parser with Mut, IO, Panic, Div, Alloc {
+        var p = self
+        var fmt_e = error_expr(span)
+        var rest: Option<Box<ExprList>> = None
+        match args_opt {
+            Some(node) => {
+                fmt_e = (*node).head
+                rest = (*node).tail
+            },
+            None => {},
+        }
+        if fmt_e.kind != ExprKind::ExprStringLit {
+            return p.fmt_refuse(fmt_pos, span, 0, 0, 0)
+        }
+        let raw = fmt_e.name
+        let holes = fmt_count_placeholders(raw)
+        if holes < 0 {
+            return p.fmt_refuse(fmt_pos, span, holes, 0, 0)
+        }
+        let n_args = fmt_expr_list_len(&rest)
+        if holes != n_args {
+            return p.fmt_refuse(fmt_pos, span, 1, holes, n_args)
+        }
+        var rev: Option<Box<StmtList>> = None
+        var seg = fmt_open_segment()
+        var i: i64 = 1
+        let end = raw.len - 1
+        while i < end {
+            let ch = raw.buf[i as usize]
+            if ch == 92 as i8 && i + 1 < end {
+                // An escape is copied whole: `\\{}` is a backslash, then a placeholder.
+                seg.buf[seg.len as usize] = ch
+                seg.buf[(seg.len + 1) as usize] = raw.buf[(i + 1) as usize]
+                seg.len = seg.len + 2
+                i = i + 2
+            } else if (ch == 123 as i8 || ch == 125 as i8) && raw.buf[(i + 1) as usize] == ch {
+                seg.buf[seg.len as usize] = ch
+                seg.len = seg.len + 1
+                i = i + 2
+            } else if ch == 123 as i8 {
+                // `{}`: fmt_count_placeholders already refused every other `{`.
+                if seg.len > 1 {
+                    rev = fmt_push_stmt(rev, fmt_print_seg_stmt(make_name("print"), seg, fmt_e.span))
+                    seg = fmt_open_segment()
+                }
+                match rest {
+                    Some(node) => {
+                        let arg = (*node).head
+                        rest = (*node).tail
+                        rev = fmt_push_stmt(rev, fmt_print_arg_stmt(make_name("print"), arg))
+                    },
+                    None => {},
+                }
+                i = i + 2
+            } else {
+                seg.buf[seg.len as usize] = ch
+                seg.len = seg.len + 1
+                i = i + 1
+            }
+        }
+        if kind == 2 {
+            if seg.len > 1 {
+                rev = fmt_push_stmt(rev, fmt_print_seg_stmt(make_name("println"), seg, fmt_e.span))
+            } else {
+                rev = fmt_push_stmt(rev, fmt_print_bare_stmt(make_name("println"), span))
+            }
+        } else if seg.len > 1 {
+            rev = fmt_push_stmt(rev, fmt_print_seg_stmt(make_name("print"), seg, fmt_e.span))
+        }
+        let blk = Block { stmts: fmt_reverse_stmts(rev, None), span: span }
+        var e = mk_expr(ExprKind::ExprBlock, span)
+        e.block = Some(Box::new(blk))
+        parser_store_expr_box(Box::new(e))
+        p
+    }
+
+    // what: 0 the format is not a string literal; -3 a specifier; -1 another
+    // `{` that is not `{}` or `{{`; -2 a `}` that is not `}}`; 1 the counts
+    // differ (holes, n_args).
+    fn fmt_refuse(self, pos: i64, span: Span, what: i64, holes: i64, n_args: i64) -> Parser with Mut, IO, Panic, Div, Alloc {
+        var p = self
+        p.had_error = true
+        p.error_count = p.error_count + 1
+        if p.error_count <= 20 {
+            print("error: format string at line ")
+            if pos >= 0 && pos < 2097152 {
+                print_int(PT_LINE[pos as usize])
+                print(":")
+                print_int(PT_COL[pos as usize])
+            }
+            print(": ")
+            if what == 0 {
+                print("with more than one argument, the first argument of print/println is its format and must be a string literal\n")
+            } else if what == -1 {
+                print("`{` starts a placeholder, which is `{}` with nothing inside; write `{{` for a literal `{`\n")
+            } else if what == -2 {
+                print("unmatched `}`; write `}}` for a literal `}`\n")
+            } else if what == -3 {
+                print("format specifiers such as `{:.1}` are not supported; `{}` prints the value exactly as print does\n")
+            } else {
+                print_int(holes)
+                print(" `{}` placeholder(s) but ")
+                print_int(n_args)
+                print(" argument(s) after the format; each `{}` takes exactly one argument\n")
+            }
+        }
+        parser_store_expr_box(Box::new(error_expr(span)))
         p
     }
 
@@ -1911,7 +2077,158 @@ fn token_to_binop(kind: TokenKind) -> BinaryOp {
         TokenKind::PlusPlus => BinaryOp::OpConcat,
         TokenKind::DotDot => BinaryOp::OpRange,
         TokenKind::DotDotEq => BinaryOp::OpRangeInclusive,
+        // Unreachable from parse_expr_bp, which refuses any token that
+        // token_is_binop rejects (#2249); there is no meaningful default.
         _ => BinaryOp::OpAdd,
+    }
+}
+
+// #2249: the tokens token_to_binop maps. Keep the two in sync.
+fn token_is_binop(kind: TokenKind) -> bool {
+    match kind {
+        TokenKind::Plus => true,
+        TokenKind::Minus => true,
+        TokenKind::Star => true,
+        TokenKind::Slash => true,
+        TokenKind::Percent => true,
+        TokenKind::EqEq => true,
+        TokenKind::BangEq => true,
+        TokenKind::Lt => true,
+        TokenKind::LtEq => true,
+        TokenKind::Gt => true,
+        TokenKind::GtEq => true,
+        TokenKind::AmpAmp => true,
+        TokenKind::PipePipe => true,
+        TokenKind::Amp => true,
+        TokenKind::Pipe => true,
+        TokenKind::Caret => true,
+        TokenKind::Shl => true,
+        TokenKind::Shr => true,
+        TokenKind::PlusPlus => true,
+        TokenKind::DotDot => true,
+        TokenKind::DotDotEq => true,
+        _ => false,
+    }
+}
+
+// ============================================================
+// Format printing
+// ============================================================
+//
+// `print(fmt, a1, ..., an)` and `println(fmt, a1, ..., an)` with n >= 1 print
+// fmt with each `{}` replaced by the next argument, printed exactly as
+// `print(arg)` prints it; `{{` and `}}` are literal braces. fmt must be a string
+// literal and its `{}` count must equal n, both checked here at parse time.
+// With ONE argument nothing changes: `println("{}")` prints `{}`, as it always
+// has -- 580 single-argument literals in the tree contain braces. Recorded as
+// ADR-013 (docs/decisions/). Until this rewrite both engines dropped
+// every argument after the first without a word: `println("x={}", x)` printed
+// `x={}`. lean_single implements the same rule (lean_single.sio, println).
+
+// 2 println, 1 print, 0 anything else.
+fn fmt_print_kind(callee: &Expr) -> i64 with Mut, Panic, Div {
+    if callee.kind != ExprKind::ExprIdent { return 0 }
+    if name_eq(callee.name, make_name("println")) { return 2 }
+    if name_eq(callee.name, make_name("print")) { return 1 }
+    0
+}
+
+fn fmt_expr_list_len(list: &Option<Box<ExprList>>) -> i64 with Mut, Panic {
+    match *list {
+        Some(node) => 1 + fmt_expr_list_len(&(*node).tail),
+        None => 0,
+    }
+}
+
+// raw is the literal as written, quotes included. Returns the number of `{}`,
+// or -3 for a specifier (`{:.1}`), -1 for any other `{` that is not `{}` or
+// `{{`, -2 for a lone `}`.
+fn fmt_count_placeholders(raw: Name) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var i: i64 = 1
+    let end = raw.len - 1
+    while i < end {
+        let ch = raw.buf[i as usize]
+        if ch == 92 as i8 {
+            i = i + 2
+        } else if ch == 123 as i8 {
+            if i + 1 < end && raw.buf[(i + 1) as usize] == 123 as i8 {
+                i = i + 2
+            } else if i + 1 < end && raw.buf[(i + 1) as usize] == 125 as i8 {
+                n = n + 1
+                i = i + 2
+            } else if i + 1 < end && raw.buf[(i + 1) as usize] == 58 as i8 {
+                return 0 - 3
+            } else {
+                return 0 - 1
+            }
+        } else if ch == 125 as i8 {
+            if i + 1 < end && raw.buf[(i + 1) as usize] == 125 as i8 {
+                i = i + 2
+            } else {
+                return 0 - 2
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    n
+}
+
+// A string-literal Name being built: the opening quote only.
+fn fmt_open_segment() -> Name {
+    var n = empty_name()
+    n.buf[0] = 34 as i8
+    n.len = 1
+    n
+}
+
+fn fmt_call_stmt(callee_name: Name, args: Option<Box<ExprList>>, span: Span) -> Stmt with Mut, Alloc {
+    var callee = mk_expr(ExprKind::ExprIdent, span)
+    callee.name = callee_name
+    var call = mk_expr(ExprKind::ExprCall, span)
+    call.left = Some(Box::new(callee))
+    call.args = args
+    Stmt {
+        kind: StmtKind::StmtExpr,
+        span: span,
+        name: empty_name(),
+        ty: None,
+        expr: Some(Box::new(call)),
+        target: None,
+        assign_op: AssignOp::AssignEq,
+    }
+}
+
+fn fmt_print_seg_stmt(callee_name: Name, open_seg: Name, span: Span) -> Stmt with Mut, Panic, Alloc {
+    var seg = open_seg
+    seg.buf[seg.len as usize] = 34 as i8
+    seg.len = seg.len + 1
+    var lit = mk_expr(ExprKind::ExprStringLit, span)
+    lit.name = seg
+    fmt_call_stmt(callee_name, Some(Box::new(ExprList { label: empty_name(), head: lit, tail: None })), span)
+}
+
+fn fmt_print_arg_stmt(callee_name: Name, arg: Expr) -> Stmt with Mut, Alloc {
+    let span = arg.span
+    fmt_call_stmt(callee_name, Some(Box::new(ExprList { label: empty_name(), head: arg, tail: None })), span)
+}
+
+fn fmt_print_bare_stmt(callee_name: Name, span: Span) -> Stmt with Mut, Alloc {
+    fmt_call_stmt(callee_name, None, span)
+}
+
+fn fmt_push_stmt(rev: Option<Box<StmtList>>, s: Stmt) -> Option<Box<StmtList>> with Mut, Alloc {
+    Some(Box::new(StmtList { head: s, tail: rev }))
+}
+
+fn fmt_reverse_stmts(current: Option<Box<StmtList>>, acc: Option<Box<StmtList>>) -> Option<Box<StmtList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            fmt_reverse_stmts(next, Some(Box::new(StmtList { head: (*node).head, tail: acc })))
+        },
     }
 }
 

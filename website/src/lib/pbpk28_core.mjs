@@ -1059,6 +1059,7 @@ export function runVenlafaxineSteadyState({ dt = 0.5, pheno = 2, nDoses = 10, ta
   return {
     aucParent: aucP, aucOdv: aucO, ratio: aucO / aucP,
     errAucParent: errP, errAucOdv: errO,
+    residualMgParent: resP, residualMgOdv: resO,
     ratioLo: vfxSsRatioLo(aucP, aucO, errP, errO),
     ratioHi: vfxSsRatioHi(aucP, aucO, errP, errO),
     bounded: aucP > errP,

@@ -323,6 +323,12 @@ var DRV_LABEL_OFFSETS: [i64; 1024] = [0; 1024]
 var DRV_LABEL_PATCH_OFFSETS: [i64; 1024] = [0; 1024]
 var DRV_LABEL_PATCH_IDS: [i64; 1024] = [0; 1024]
 var DRV_LABEL_PATCH_COUNT: i64 = 0
+// #1646: the driver's label tier. Both bounds used to be silent (no else) and
+// drv_patch_labels patched an undefined label (offset -1) as a jump to a
+// computed-garbage address. Overflow or an undefined target now sets
+// DRV_LABEL_OVERFLOW and the driver refuses to write the ELF (rc 6).
+fn drv_label_capacity() -> i64 { 1024 }
+var DRV_LABEL_OVERFLOW: i64 = 0
 var DRV_ELF_LEN: i64 = 0
 var DRV_ELF_BYTES: [i8; 1048576] = [0; 1048576]
 var EP_TOTAL_INSTR: i64 = 0
@@ -6711,17 +6717,21 @@ fn drv_add_data_reloc(patch_offset: i64, data_off: i64) with Mut, Panic {
 }
 
 fn drv_define_label(label_id: i64) with Mut, Panic {
-    if label_id >= 0 && label_id < 1024 {
+    if label_id >= 0 && label_id < drv_label_capacity() {
         DRV_LABEL_OFFSETS[label_id as usize] = DRV_CODE_LEN
+    } else {
+        DRV_LABEL_OVERFLOW = 1
     }
 }
 
 fn drv_add_label_patch(patch_offset: i64, label_id: i64) with Mut, Panic {
     let idx = DRV_LABEL_PATCH_COUNT
-    if idx >= 0 && idx < 1024 {
+    if idx >= 0 && idx < drv_label_capacity() {
         DRV_LABEL_PATCH_OFFSETS[idx as usize] = patch_offset
         DRV_LABEL_PATCH_IDS[idx as usize] = label_id
         DRV_LABEL_PATCH_COUNT = idx + 1
+    } else {
+        DRV_LABEL_OVERFLOW = 1
     }
 }
 
@@ -6730,10 +6740,12 @@ fn drv_patch_labels() with Mut, Div, Panic {
     while i < DRV_LABEL_PATCH_COUNT {
         let off = DRV_LABEL_PATCH_OFFSETS[i as usize]
         let lid = DRV_LABEL_PATCH_IDS[i as usize]
-        if lid >= 0 && lid < 1024 {
+        if lid >= 0 && lid < drv_label_capacity() && DRV_LABEL_OFFSETS[lid as usize] >= 0 {
             let target = DRV_LABEL_OFFSETS[lid as usize]
             let rel = target - (off + 4)
             drv_patch_u32_le(off, rel)
+        } else {
+            DRV_LABEL_OVERFLOW = 1
         }
         i = i + 1
     }
@@ -6742,7 +6754,7 @@ fn drv_patch_labels() with Mut, Div, Panic {
 fn drv_reset_function_state() with Mut, Panic {
     DRV_LABEL_PATCH_COUNT = 0
     var i: i64 = 0
-    while i < 1024 {
+    while i < drv_label_capacity() {
         DRV_LABEL_OFFSETS[i as usize] = -1
         i = i + 1
     }
@@ -6761,10 +6773,11 @@ fn drv_reset_codegen(fn_count: i64) with Mut, Panic {
         i = i + 1
     }
     i = 0
-    while i < 1024 {
+    while i < drv_label_capacity() {
         DRV_LABEL_OFFSETS[i as usize] = -1
         i = i + 1
     }
+    DRV_LABEL_OVERFLOW = 0
 }
 
 fn drv_rodata_append_byte(byte: i64) with Mut, Div, Panic {
@@ -8743,6 +8756,12 @@ fn compile_ir_module_to_elf(output_path: string, token_count: i64) -> i64 with I
     EP_TOTAL_INSTR = EP_TOTAL_INSTR + V2_UFN_COUNT
     EP_KNOWLEDGE_COUNT = source_count_ident(token_count, "Knowledge")
 
+    if DRV_LABEL_OVERFLOW != 0 {
+        print("native_compile: label_tier_overflow capacity=")
+        print_int(drv_label_capacity())
+        print(" (a label or jump patch was dropped or targets an undefined label; refusing to write the ELF)\n")
+        return 6
+    }
     drv_emit_entry_trampoline(main_fn_id)
     var data_len = 4096
     if source_uses_ident(token_count, "driver_lex_file_to_globals") {

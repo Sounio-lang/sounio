@@ -1,0 +1,379 @@
+//@ run-pass
+//@ expect-stdout: VIZ_BAR_VIEWPORT_PASS
+//@ expect-stdout: Synthetic OLS residuals at irregular positions; n=4
+//@ expect-stdout: Residual + 8.5 mV; crop y=[5,10]
+//@ expect-stdout: No intervals; cropping preserves original zero baseline
+use stats::regression::multiple::{multiple_linear_fit}
+use viz::ir::{viz_scene_new,viz_add_bar_chart,viz_add_line_chart,viz_bar_set_viewport,viz_add_axis,viz_node_set_label,viz_add_label,viz_layout_rect,viz_style_rgb}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_html::{viz_html_emit_scene}
+use display::canvas::{Canvas,canvas_clear}
+fn exhaustive_clip() with Mut,Div,Alloc,Panic {
+ var scene=viz_scene_new()
+ var xs:[f64;1024]=[0.0;1024]
+ var ys:[f64;1024]=[0.0;1024]
+ xs[0]=0.0/0.0
+ ys[0]=8.0
+ xs[1]= -0.25
+ ys[1]=8.0
+ xs[2]=0.75
+ ys[2]=0.0
+ xs[3]=3.0
+ ys[3]=8.0
+ let bars=viz_add_bar_chart(&!scene,&xs,&ys,4,viz_layout_rect(10,10,8,10),viz_style_rgb(70,180,235))
+ assert(bars==0)
+ assert(viz_bar_set_viewport(&!scene,bars,0.0,1.0,5.0,10.0))
+ let pixels=heap_alloc(32*32*8) as *mut i64
+ var canvas=Canvas{pixels:pixels,width:32,height:32}
+ canvas_clear(&!canvas,0,0,0)
+ viz_canvas_render_scene(&scene,&!canvas)
+ // First two finite centers project to8 and16, so width=floor(8*.8)=6.
+ // Only the outside-center first bar overlaps: [10,11)x[14,20).
+ var py:i64=0
+ while py<32 {
+  var px:i64=0
+  while px<32 {
+   let expected:i64=if px==10 && py>=14 && py<20 {70*65536+180*256+235}else{0}
+   assert(read_i64(canvas.pixels,py*32+px)==expected)
+   px=px+1
+  }
+  py=py+1
+ }
+}
+fn boundaries() with Mut,Div,Alloc,Panic {
+ var scene=viz_scene_new()
+ var xs:[f64;1024]=[0.0;1024]
+ var ys:[f64;1024]=[0.0;1024]
+ xs[0]=0.0/0.0
+ assert(viz_add_bar_chart(&!scene,&xs,&ys,1,viz_layout_rect(10,10,8,10),viz_style_rgb(1,2,3))<0)
+ assert(scene.node_count==0 && scene.series_count==0 && scene.next_node_id==1)
+ xs[0]=0.0
+ xs[1]=1.0
+ ys[0]=2.0
+ ys[1]=4.0
+ let bars=viz_add_bar_chart(&!scene,&xs,&ys,2,viz_layout_rect(10,10,8,10),viz_style_rgb(1,2,3))
+ assert(bars==0 && scene.series[0].y_min==0.0 && scene.series[0].y_max==4.0)
+ let flags:i64=scene.nodes[0].flags
+ assert(!viz_bar_set_viewport(&!scene,bars,0.0,0.0,0.0,1.0))
+ assert(!viz_bar_set_viewport(&!scene,bars,0.0,1.0,1.0,0.0))
+ assert(!viz_bar_set_viewport(&!scene,bars,0.0,1.0,0.0,0.0/0.0))
+ assert(scene.nodes[0].flags==flags && scene.series[0].y_min==0.0 && scene.series[0].y_max==4.0)
+ assert(scene.node_count==1 && scene.series_count==1)
+ let line=viz_add_line_chart(&!scene,&xs,&ys,2,viz_layout_rect(10,10,8,10),viz_style_rgb(1,2,3))
+ assert(!viz_bar_set_viewport(&!scene,line,0.0,1.0,0.0,1.0))
+ var zeros=viz_scene_new()
+ ys[0]=0.0
+ ys[1]=0.0
+ let zero=viz_add_bar_chart(&!zeros,&xs,&ys,2,viz_layout_rect(10,10,8,10),viz_style_rgb(70,180,235))
+ assert(zero==0 && zeros.series[0].y_min==0.0 && zeros.series[0].y_max==0.0)
+ assert(viz_bar_set_viewport(&!zeros,zero,0.0,1.0,-1.0,1.0))
+ let pixels=heap_alloc(32*32*8) as *mut i64
+ var canvas=Canvas{pixels:pixels,width:32,height:32}
+ canvas_clear(&!canvas,0,0,0)
+ viz_canvas_render_scene(&zeros,&!canvas)
+ var i:i64=0
+ while i<1024 {
+  assert(read_i64(canvas.pixels,i)==0)
+  i=i+1
+ }
+}
+fn main() with IO,Mut,Div,Alloc,Panic {
+ exhaustive_clip()
+ boundaries()
+ var a:[f64;2048]=[0.0;2048]
+ var response:[f64;256]=[0.0;256]
+ var i:i64=0
+ while i<4 {
+  a[(8*i) as usize]=1.0
+  response[i as usize]=(i+1) as f64
+  i=i+1
+ }
+ let fit=multiple_linear_fit(&a,&response,4,1,0.0)
+ assert(fit.status==0 && fit.rank==1 && fit.df==3)
+ var xs:[f64;1024]=[0.0;1024]
+ var residual:[f64;1024]=[0.0;1024]
+ var shifted:[f64;1024]=[0.0;1024]
+ xs[0]=0.0
+ xs[1]=1.0
+ xs[2]=3.0
+ xs[3]=4.0
+ i=0
+ while i<4 {
+  let raw:f64=fit.residuals[i as usize]
+  assert(raw> -2.0 && raw<2.0)
+  residual[i as usize]=raw
+  shifted[i as usize]=raw+8.5
+  i=i+1
+ }
+ var scene=viz_scene_new()
+ let signed=viz_add_bar_chart(&!scene,&xs,&residual,4,viz_layout_rect(164,140,180,149),viz_style_rgb(70,180,235))
+ let crop=viz_add_bar_chart(&!scene,&xs,&shifted,4,viz_layout_rect(580,140,180,149),viz_style_rgb(245,170,65))
+ assert(signed==0 && crop==1)
+ assert(viz_bar_set_viewport(&!scene,signed,0.0,4.0,-2.0,2.0))
+ assert(viz_bar_set_viewport(&!scene,crop,0.25,3.75,5.0,10.0))
+ let xa=viz_add_axis(&!scene,0.0,4.0,1,false,viz_layout_rect(164,307,180,1),viz_style_rgb(190,200,215))
+ let ya=viz_add_axis(&!scene,-2.0,2.0,4,true,viz_layout_rect(144,140,1,149),viz_style_rgb(190,200,215))
+ let xb=viz_add_axis(&!scene,0.25,3.75,1,false,viz_layout_rect(580,307,180,1),viz_style_rgb(190,200,215))
+ let yb=viz_add_axis(&!scene,5.0,10.0,5,true,viz_layout_rect(560,140,1,149),viz_style_rgb(190,200,215))
+ var title:[i8;64]=[0;64]
+ title[0]=83
+ title[1]=121
+ title[2]=110
+ title[3]=116
+ title[4]=104
+ title[5]=101
+ title[6]=116
+ title[7]=105
+ title[8]=99
+ title[9]=32
+ title[10]=79
+ title[11]=76
+ title[12]=83
+ title[13]=32
+ title[14]=114
+ title[15]=101
+ title[16]=115
+ title[17]=105
+ title[18]=100
+ title[19]=117
+ title[20]=97
+ title[21]=108
+ title[22]=115
+ title[23]=32
+ title[24]=97
+ title[25]=116
+ title[26]=32
+ title[27]=105
+ title[28]=114
+ title[29]=114
+ title[30]=101
+ title[31]=103
+ title[32]=117
+ title[33]=108
+ title[34]=97
+ title[35]=114
+ title[36]=32
+ title[37]=112
+ title[38]=111
+ title[39]=115
+ title[40]=105
+ title[41]=116
+ title[42]=105
+ title[43]=111
+ title[44]=110
+ title[45]=115
+ title[46]=59
+ title[47]=32
+ title[48]=110
+ title[49]=61
+ title[50]=52
+ var left:[i8;64]=[0;64]
+ left[0]=83
+ left[1]=105
+ left[2]=103
+ left[3]=110
+ left[4]=101
+ left[5]=100
+ left[6]=32
+ left[7]=114
+ left[8]=101
+ left[9]=115
+ left[10]=105
+ left[11]=100
+ left[12]=117
+ left[13]=97
+ left[14]=108
+ left[15]=32
+ left[16]=40
+ left[17]=109
+ left[18]=86
+ left[19]=41
+ var right:[i8;64]=[0;64]
+ right[0]=82
+ right[1]=101
+ right[2]=115
+ right[3]=105
+ right[4]=100
+ right[5]=117
+ right[6]=97
+ right[7]=108
+ right[8]=32
+ right[9]=43
+ right[10]=32
+ right[11]=56
+ right[12]=46
+ right[13]=53
+ right[14]=32
+ right[15]=109
+ right[16]=86
+ right[17]=59
+ right[18]=32
+ right[19]=99
+ right[20]=114
+ right[21]=111
+ right[22]=112
+ right[23]=32
+ right[24]=121
+ right[25]=61
+ right[26]=91
+ right[27]=53
+ right[28]=44
+ right[29]=49
+ right[30]=48
+ right[31]=93
+ var foot:[i8;64]=[0;64]
+ foot[0]=78
+ foot[1]=111
+ foot[2]=32
+ foot[3]=105
+ foot[4]=110
+ foot[5]=116
+ foot[6]=101
+ foot[7]=114
+ foot[8]=118
+ foot[9]=97
+ foot[10]=108
+ foot[11]=115
+ foot[12]=59
+ foot[13]=32
+ foot[14]=99
+ foot[15]=114
+ foot[16]=111
+ foot[17]=112
+ foot[18]=112
+ foot[19]=105
+ foot[20]=110
+ foot[21]=103
+ foot[22]=32
+ foot[23]=112
+ foot[24]=114
+ foot[25]=101
+ foot[26]=115
+ foot[27]=101
+ foot[28]=114
+ foot[29]=118
+ foot[30]=101
+ foot[31]=115
+ foot[32]=32
+ foot[33]=111
+ foot[34]=114
+ foot[35]=105
+ foot[36]=103
+ foot[37]=105
+ foot[38]=110
+ foot[39]=97
+ foot[40]=108
+ foot[41]=32
+ foot[42]=122
+ foot[43]=101
+ foot[44]=114
+ foot[45]=111
+ foot[46]=32
+ foot[47]=98
+ foot[48]=97
+ foot[49]=115
+ foot[50]=101
+ foot[51]=108
+ foot[52]=105
+ foot[53]=110
+ foot[54]=101
+ var note:[i8;64]=[0;64]
+ note[0]=79
+ note[1]=117
+ note[2]=116
+ note[3]=115
+ note[4]=105
+ note[5]=100
+ note[6]=101
+ note[7]=32
+ note[8]=99
+ note[9]=101
+ note[10]=110
+ note[11]=116
+ note[12]=101
+ note[13]=114
+ note[14]=115
+ note[15]=32
+ note[16]=114
+ note[17]=101
+ note[18]=116
+ note[19]=97
+ note[20]=105
+ note[21]=110
+ note[22]=32
+ note[23]=111
+ note[24]=118
+ note[25]=101
+ note[26]=114
+ note[27]=108
+ note[28]=97
+ note[29]=112
+ note[30]=112
+ note[31]=105
+ note[32]=110
+ note[33]=103
+ note[34]=32
+ note[35]=98
+ note[36]=97
+ note[37]=114
+ note[38]=32
+ note[39]=102
+ note[40]=111
+ note[41]=111
+ note[42]=116
+ note[43]=112
+ note[44]=114
+ note[45]=105
+ note[46]=110
+ note[47]=116
+ note[48]=115
+ var pos:[i8;64]=[0;64]
+ pos[0]=112
+ pos[1]=111
+ pos[2]=115
+ pos[3]=105
+ pos[4]=116
+ pos[5]=105
+ pos[6]=111
+ pos[7]=110
+ pos[8]=32
+ pos[9]=40
+ pos[10]=100
+ pos[11]=105
+ pos[12]=109
+ pos[13]=101
+ pos[14]=110
+ pos[15]=115
+ pos[16]=105
+ pos[17]=111
+ pos[18]=110
+ pos[19]=108
+ pos[20]=101
+ pos[21]=115
+ pos[22]=115
+ pos[23]=41
+ var unit:[i8;64]=[0;64]
+ unit[0]=109
+ unit[1]=86
+ viz_node_set_label(&!scene,xa,&pos,24)
+ viz_node_set_label(&!scene,xb,&pos,24)
+ viz_node_set_label(&!scene,ya,&unit,2)
+ viz_node_set_label(&!scene,yb,&unit,2)
+ assert(viz_add_label(&!scene,&title,51,viz_layout_rect(100,20,820,20),viz_style_rgb(220,230,240))>=0)
+ assert(viz_add_label(&!scene,&left,20,viz_layout_rect(164,94,340,20),viz_style_rgb(220,230,240))>=0)
+ assert(viz_add_label(&!scene,&right,32,viz_layout_rect(580,94,340,20),viz_style_rgb(220,230,240))>=0)
+ assert(viz_add_label(&!scene,&foot,55,viz_layout_rect(100,385,820,20),viz_style_rgb(220,230,240))>=0)
+ assert(viz_add_label(&!scene,&note,49,viz_layout_rect(100,420,820,20),viz_style_rgb(220,230,240))>=0)
+ assert(scene.node_count==11 && scene.series_count==2)
+ let pixels=heap_alloc(960*480*8) as *mut i64
+ var canvas=Canvas{pixels:pixels,width:960,height:480}
+ canvas_clear(&!canvas,0,0,0)
+ viz_canvas_render_scene(&scene,&!canvas)
+ assert(read_i64(canvas.pixels,250*960+169)==70*65536+180*256+235)
+ assert(read_i64(canvas.pixels,200*960+294)==70*65536+180*256+235)
+ assert(read_i64(canvas.pixels,270*960+580)==245*65536+170*256+65)
+ assert(read_i64(canvas.pixels,150*960+760)==245*65536+170*256+65)
+ viz_html_emit_scene(&scene,960,480)
+ println("VIZ_BAR_VIEWPORT_PASS")
+ 0
+}

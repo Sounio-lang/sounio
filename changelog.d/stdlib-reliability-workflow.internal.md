@@ -1,0 +1,1 @@
+The stdlib reliability gate runs in CI: on demand for any ref (`Stdlib Reliability` workflow, used for every RC) and weekly on `main`. It resolves `souc` to Madaros instead of the legacy binary that predates the current syntax.

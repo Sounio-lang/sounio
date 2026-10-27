@@ -623,20 +623,6 @@ fn base_table() -> BilinearSignTable with Mut, Panic, Div {
     BilinearSignTable { cells: cells }
 }
 
-fn bilinear_table(matrix: i64) -> BilinearSignTable with Mut, Panic {
-    var cells: [i64; 256] = [0; 256]
-    var i: i64 = 0
-    while i < 16 {
-        var j: i64 = 0
-        while j < 16 {
-            cells[i * 16 + j] = bilinear_bit(matrix, i, j)
-            j = j + 1
-        }
-        i = i + 1
-    }
-    BilinearSignTable { cells: cells }
-}
-
 fn family_table(base: &BilinearSignTable, matrix: i64)
     -> BilinearSignTable with Mut, Panic {
     var cells: [i64; 256] = [0; 256]
@@ -734,17 +720,6 @@ fn quadratic_code_from_matrix(matrix: i64) -> i64 with Mut, Panic {
     quadratic_code_from_values(&values)
 }
 
-fn quadratic_code_from_table(table: &BilinearSignTable)
-    -> i64 with Mut, Panic {
-    var values: [i64; 16] = [0; 16]
-    var vector: i64 = 0
-    while vector < 16 {
-        values[vector] = table.cells[vector * 16 + vector]
-        vector = vector + 1
-    }
-    quadratic_code_from_values(&values)
-}
-
 fn representative_matrix(code: i64) -> i64 with Mut {
     var matrix: i64 = 0
     var row: i64 = 0
@@ -786,55 +761,80 @@ fn quadratic_pullback(code: i64, matrix: i64) -> i64 with Mut, Panic {
     quadratic_code_from_values(&values)
 }
 
-fn gauge_normalize(table: &BilinearSignTable)
-    -> BilinearSignTable with Mut, Panic {
+// The hot loops below need only the family delta of a sign table, never the
+// table itself. They used to build it as a value -- the bilinear table or the
+// action displacement, then representative, residual and gauge-normalized
+// copies -- which took four 2 KiB tables of never-reclaimed Madaros arena per
+// iteration, about 270k iterations per evaluation: "madaros: arena full
+// (allocation of 2080 bytes)", rc=181, on every example that imports this
+// module (#2820). These compute the same delta cell by cell, with two 16-entry
+// arrays per call:
+//   code      = quadratic code of the diagonal T[v][v]
+//   residual  = T[i][j] ^ bilinear_bit(representative_matrix(code), i, j)
+//   q[x]      = residual[parent][edge] ^ q[parent]   (x not a basis vector)
+//   delta is valid iff residual ^ q[i] ^ q[j] ^ q[i^j] == 0 for all i, j.
+fn displacement_cell(
+    base: &BilinearSignTable,
+    target: &BilinearSignTable,
+    matrix: i64,
+    swap: bool,
+    i: i64,
+    j: i64,
+) -> i64 with Mut, Panic {
+    let mapped_i = matrix_apply(matrix, i)
+    let mapped_j = matrix_apply(matrix, j)
+    let transformed = if swap {
+        base.cells[mapped_j * 16 + mapped_i]
+    } else {
+        base.cells[mapped_i * 16 + mapped_j]
+    }
+    transformed ^ target.cells[i * 16 + j]
+}
+
+// T[i][j] = base[M i][M j] (transposed when swap) ^ target[i][j].
+fn displacement_family_delta(
+    base: &BilinearSignTable,
+    target: &BilinearSignTable,
+    matrix: i64,
+    swap: bool,
+) -> BilinearFamilyDelta with Mut, Panic {
+    var values: [i64; 16] = [0; 16]
+    var vector: i64 = 0
+    while vector < 16 {
+        values[vector] = displacement_cell(
+            base, target, matrix, swap, vector, vector)
+        vector = vector + 1
+    }
+    let code = quadratic_code_from_values(&values)
+    let representative = representative_matrix(code)
     var q: [i64; 16] = [0; 16]
     var x: i64 = 1
     while x < 16 {
         if !is_basis_vector(x) {
             let edge = highest_basis_bit(x)
             let parent = x ^ edge
-            q[x] = table.cells[parent * 16 + edge] ^ q[parent]
+            let residual = displacement_cell(
+                base, target, matrix, swap, parent, edge) ^
+                bilinear_bit(representative, parent, edge)
+            q[x] = residual ^ q[parent]
         }
         x = x + 1
     }
-    var cells: [i64; 256] = [0; 256]
+    var nonzero: i64 = 0
     var i: i64 = 0
     while i < 16 {
         var j: i64 = 0
         while j < 16 {
-            cells[i * 16 + j] = table.cells[i * 16 + j] ^
-                q[i] ^ q[j] ^ q[i ^ j]
+            let residual = displacement_cell(
+                base, target, matrix, swap, i, j) ^
+                bilinear_bit(representative, i, j)
+            if (residual ^ q[i] ^ q[j] ^ q[i ^ j]) != 0 {
+                nonzero = nonzero + 1
+            }
             j = j + 1
         }
         i = i + 1
     }
-    BilinearSignTable { cells: cells }
-}
-
-fn zero_count(table: &BilinearSignTable) -> i64 with Mut, Panic {
-    var nonzero: i64 = 0
-    var index: i64 = 0
-    while index < 256 {
-        if table.cells[index] != 0 { nonzero = nonzero + 1 }
-        index = index + 1
-    }
-    nonzero
-}
-
-fn family_delta(table: &BilinearSignTable)
-    -> BilinearFamilyDelta with Mut, Panic {
-    let code = quadratic_code_from_table(table)
-    let representative = bilinear_table(representative_matrix(code))
-    var residual_cells: [i64; 256] = [0; 256]
-    var index: i64 = 0
-    while index < 256 {
-        residual_cells[index] = table.cells[index] ^ representative.cells[index]
-        index = index + 1
-    }
-    let residual = BilinearSignTable { cells: residual_cells }
-    let normalized = gauge_normalize(&residual)
-    let nonzero = zero_count(&normalized)
     BilinearFamilyDelta {
         valid: nonzero == 0,
         quadratic_code: code,
@@ -842,30 +842,47 @@ fn family_delta(table: &BilinearSignTable)
     }
 }
 
-fn action_displacement(
-    base: &BilinearSignTable,
-    target: &BilinearSignTable,
-    matrix: i64,
-    swap: bool,
-) -> BilinearSignTable with Mut, Panic {
-    var cells: [i64; 256] = [0; 256]
+// T[i][j] = bilinear_bit(matrix, i, j).
+fn bilinear_family_delta(matrix: i64) -> BilinearFamilyDelta with Mut, Panic {
+    var values: [i64; 16] = [0; 16]
+    var vector: i64 = 0
+    while vector < 16 {
+        values[vector] = bilinear_bit(matrix, vector, vector)
+        vector = vector + 1
+    }
+    let code = quadratic_code_from_values(&values)
+    let representative = representative_matrix(code)
+    var q: [i64; 16] = [0; 16]
+    var x: i64 = 1
+    while x < 16 {
+        if !is_basis_vector(x) {
+            let edge = highest_basis_bit(x)
+            let parent = x ^ edge
+            let residual = bilinear_bit(matrix, parent, edge) ^
+                bilinear_bit(representative, parent, edge)
+            q[x] = residual ^ q[parent]
+        }
+        x = x + 1
+    }
+    var nonzero: i64 = 0
     var i: i64 = 0
     while i < 16 {
         var j: i64 = 0
         while j < 16 {
-            let mapped_i = matrix_apply(matrix, i)
-            let mapped_j = matrix_apply(matrix, j)
-            let transformed = if swap {
-                base.cells[mapped_j * 16 + mapped_i]
-            } else {
-                base.cells[mapped_i * 16 + mapped_j]
+            let residual = bilinear_bit(matrix, i, j) ^
+                bilinear_bit(representative, i, j)
+            if (residual ^ q[i] ^ q[j] ^ q[i ^ j]) != 0 {
+                nonzero = nonzero + 1
             }
-            cells[i * 16 + j] = transformed ^ target.cells[i * 16 + j]
             j = j + 1
         }
         i = i + 1
     }
-    BilinearSignTable { cells: cells }
+    BilinearFamilyDelta {
+        valid: nonzero == 0,
+        quadratic_code: code,
+        normalized_nonzero: nonzero,
+    }
 }
 
 fn affine_apply(code: i64, matrix: i64, delta: i64)
@@ -922,8 +939,7 @@ with Mut, Panic {
     var cocycle_failures: i64 = 0
     matrix = 0
     while matrix < PIREUS_BILINEAR_RAW_COUNT {
-        let table = bilinear_table(matrix)
-        let delta = family_delta(&table)
+        let delta = bilinear_family_delta(matrix)
         if !delta.valid || delta.quadratic_code !=
             quadratic_code_from_matrix(matrix) {
             gauge_fiber_failures = gauge_fiber_failures + 1
@@ -990,8 +1006,7 @@ fn build_stabilizer(
         var swap_index: i64 = 0
         while swap_index < 2 {
             let swap = swap_index == 1
-            let displacement = action_displacement(base, base, matrix, swap)
-            let delta = family_delta(&displacement)
+            let delta = displacement_family_delta(base, base, matrix, swap)
             if delta.valid {
                 admitted = admitted + 1
                 if swap { with_swap = with_swap + 1 }
@@ -1001,9 +1016,8 @@ fn build_stabilizer(
                 }
                 state = digest_add_i64(state, matrix * 2 + swap_index)
                 state = digest_add_i64(state, delta.quadratic_code)
-                let inverse_displacement =
-                    action_displacement(base, base, inverse, swap)
-                let inverse_delta = family_delta(&inverse_displacement)
+                let inverse_delta =
+                    displacement_family_delta(base, base, inverse, swap)
                 inverse_checks = inverse_checks + 1
                 if !inverse_delta.valid ||
                     matrix_compose(matrix, inverse) != 33825 ||
@@ -1115,9 +1129,8 @@ fn build_partition(
         let matrix = universe.codes[matrix_index]
         var swap_index: i64 = 0
         while swap_index < 2 {
-            let displacement = action_displacement(
+            let delta = displacement_family_delta(
                 base, base, matrix, swap_index == 1)
-            let delta = family_delta(&displacement)
             if delta.valid {
                 stabilizer_recount = stabilizer_recount + 1
                 q_code = 0
@@ -1326,9 +1339,8 @@ fn build_corpus(
             let inverse = matrix_inverse(matrix)
             var swap_index: i64 = 0
             while swap_index < 2 {
-                let displacement = action_displacement(
+                let delta = displacement_family_delta(
                     base, &target, matrix, swap_index == 1)
-                let delta = family_delta(&displacement)
                 action_checks = action_checks + 1
                 if delta.valid {
                     membership_hits[corpus_id - 1] =

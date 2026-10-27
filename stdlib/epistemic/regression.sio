@@ -1,0 +1,318 @@
+// stdlib/epistemic/regression.sio
+//
+// Straight-line fit y = a + b x, with the covariance of (a, b).
+// The correlation of a van t Hoff pair is this object: it is fixed by the
+// temperature window and the residual, and it is a runtime number.
+// correlate() still demands a compile-time literal, so a fitted rho cannot
+// be pushed back through that builtin. gum_var takes the covariance as data.
+
+use stats::chi_square::{chi2_quantile}
+
+pub struct LineFit {
+    pub intercept: f64
+    pub slope: f64
+    pub var_intercept: f64
+    pub var_slope: f64
+    pub cov: f64
+    pub rho: f64
+    pub s2: f64
+    pub xbar: f64
+    pub sxx: f64
+    pub n: f64
+}
+
+pub fn reg_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 40 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+pub fn ols_line(xs: [f64; 8], ys: [f64; 8], n: i64) -> LineFit with Mut, Div {
+    if n < 3 {
+        return LineFit {
+            intercept: 0.0, slope: 0.0, var_intercept: 0.0, var_slope: 0.0, cov: 0.0, rho: 0.0,
+            s2: 0.0, xbar: 0.0, sxx: 0.0, n: 0.0
+        }
+    }
+    let nf = n as f64
+    var sx = 0.0
+    var sy = 0.0
+    var i: i64 = 0
+    while i < n {
+        sx = sx + xs[i as usize]
+        sy = sy + ys[i as usize]
+        i = i + 1
+    }
+    let xb = sx / nf
+    let yb = sy / nf
+    var sxx = 0.0
+    var sxy = 0.0
+    i = 0
+    while i < n {
+        let dx = xs[i as usize] - xb
+        let dy = ys[i as usize] - yb
+        sxx = sxx + dx * dx
+        sxy = sxy + dx * dy
+        i = i + 1
+    }
+    let slope = sxy / sxx
+    let intercept = yb - slope * xb
+    var sse = 0.0
+    i = 0
+    while i < n {
+        let e = ys[i as usize] - intercept - slope * xs[i as usize]
+        sse = sse + e * e
+        i = i + 1
+    }
+    let s2 = sse / (nf - 2.0)
+    let var_slope = s2 / sxx
+    let var_intercept = s2 * (1.0 / nf + xb * xb / sxx)
+    let cov = 0.0 - s2 * xb / sxx
+    let rho = cov / reg_sqrt(var_intercept * var_slope)
+    LineFit {
+        intercept: intercept,
+        slope: slope,
+        var_intercept: var_intercept,
+        var_slope: var_slope,
+        cov: cov,
+        rho: rho,
+        s2: s2,
+        xbar: xb,
+        sxx: sxx,
+        n: nf
+    }
+}
+
+// Variance of the fitted line at x. Equals gum_var(1, x, var_intercept, var_slope, cov).
+pub fn ols_mean_var(fit: LineFit, x: f64) -> f64 with Div {
+    if fit.sxx <= 0.0 { return 0.0 }
+    let d = x - fit.xbar
+    fit.s2 * (1.0 / fit.n + d * d / fit.sxx)
+}
+
+// Variance of a new observation at x: the line, plus the residual already seen.
+pub fn ols_predict_var(fit: LineFit, x: f64) -> f64 with Div {
+    ols_mean_var(fit, x) + fit.s2
+}
+
+// Variance of s0*u + s1*v when Cov(u, v) = cov. Runtime covariance.
+pub fn gum_var(s0: f64, s1: f64, v0: f64, v1: f64, cov: f64) -> f64 {
+    s0 * s0 * v0 + s1 * s1 * v1 + 2.0 * s0 * s1 * cov
+}
+
+// Outside the fitted 1/T values, a centre is refused when the weighted
+// residual sum of squares exceeds the 5% point of chi-square with that
+// many degrees of freedom. The point is chi2_quantile(0.95, df).
+// Two degrees of freedom is the closed form -2 ln(0.05). The band is not
+// this function's business. The window is the 1/T values that entered the
+// fit. An empty overlap of a rejected chi-square refuses as well: there
+// is no common pressure inside the window either.
+fn chi_rejects(chi_red: f64, df: f64) -> bool with Mut, Div, Panic {
+    if df <= 0.0 { return false }
+    let crit = chi2_quantile(0.95, df)
+    if !(crit > 0.0) { return false }
+    chi_red * df > crit
+}
+
+pub fn fit_centre_refused(chi_red: f64, df: f64, t_star: f64, t_min: f64, t_max: f64) -> bool with Mut, Div, Panic {
+    if t_star >= t_min && t_star <= t_max { return false }
+    chi_rejects(chi_red, df)
+}
+
+fn x_outside(xs: [f64; 8], n: i64, x_star: f64) -> bool {
+    var lo = xs[0]
+    var hi = xs[0]
+    var i: i64 = 1
+    while i < n {
+        let x = xs[i as usize]
+        if x < lo { lo = x }
+        if x > hi { hi = x }
+        i = i + 1
+    }
+    if x_star < lo { return true }
+    x_star > hi
+}
+
+// What a plateau fit publishes. There is no centre field.
+pub struct PlateauPressure {
+    pub lo: f64
+    pub hi: f64
+    pub open: bool
+    pub refused: bool
+    pub chi: f64
+}
+
+fn higher_f(a: f64, b: f64) -> f64 {
+    if b > a { return b }
+    a
+}
+
+fn lower_f(a: f64, b: f64) -> f64 {
+    if b < a { return b }
+    a
+}
+
+fn held_number(x: f64) -> bool {
+    if !(x == x) { return false }
+    if x > 1.0e300 { return false }
+    if x < (0.0 - 1.0e300) { return false }
+    true
+}
+
+fn positive_weights(uln: [f64; 8], n: i64) -> bool {
+    var i: i64 = 0
+    while i < n {
+        if !(uln[i as usize] > 0.0) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn parenthesis_var(xs: [f64; 8], uln: [f64; 8], n: i64, fit: LineFit, x_star: f64) -> f64 with Mut, Div {
+    if fit.sxx <= 0.0 { return 0.0 }
+    let d = x_star - fit.xbar
+    var v_prop = 0.0
+    var i: i64 = 0
+    while i < n {
+        let dx = xs[i as usize] - fit.xbar
+        let c = (1.0 / fit.n) + ((d * dx) / fit.sxx)
+        let u = uln[i as usize]
+        v_prop = v_prop + c * c * u * u
+        i = i + 1
+    }
+    let v_res = ols_mean_var(fit, x_star)
+    if v_prop > v_res { return v_prop }
+    v_res
+}
+
+struct WeightedLine {
+    pub ln_p: f64
+    pub chi: f64
+    pub v_known: f64
+    pub ok: bool
+}
+
+fn weighted_line(xs: [f64; 8], ys: [f64; 8], uln: [f64; 8], n: i64, x_star: f64) -> WeightedLine with Mut, Div {
+    var sw = 0.0
+    var swx = 0.0
+    var swy = 0.0
+    var i: i64 = 0
+    while i < n {
+        let w = 1.0 / (uln[i as usize] * uln[i as usize])
+        sw = sw + w
+        swx = swx + w * xs[i as usize]
+        swy = swy + w * ys[i as usize]
+        i = i + 1
+    }
+    if !held_number(sw) || !(sw > 0.0) {
+        return WeightedLine { ln_p: 0.0, chi: 0.0, v_known: 0.0, ok: false }
+    }
+    let xbar = swx / sw
+    let ybar = swy / sw
+    var sxx = 0.0
+    var sxy = 0.0
+    i = 0
+    while i < n {
+        let w = 1.0 / (uln[i as usize] * uln[i as usize])
+        let dx = xs[i as usize] - xbar
+        let dy = ys[i as usize] - ybar
+        sxx = sxx + w * dx * dx
+        sxy = sxy + w * dx * dy
+        i = i + 1
+    }
+    if !held_number(sxx) || !(sxx > 0.0) {
+        return WeightedLine { ln_p: 0.0, chi: 0.0, v_known: 0.0, ok: false }
+    }
+    let bw = sxy / sxx
+    let dstar = x_star - xbar
+    let v_known = (1.0 / sw) + ((dstar * dstar) / sxx)
+    var chi_num = 0.0
+    i = 0
+    while i < n {
+        let w = 1.0 / (uln[i as usize] * uln[i as usize])
+        let e = ys[i as usize] - ybar - bw * (xs[i as usize] - xbar)
+        chi_num = chi_num + w * e * e
+        i = i + 1
+    }
+    let df = (n - 2) as f64
+    let chi = chi_num / df
+    if !held_number(chi) || chi < 0.0 || !held_number(v_known) || !(v_known > 0.0) {
+        return WeightedLine { ln_p: 0.0, chi: 0.0, v_known: 0.0, ok: false }
+    }
+    WeightedLine { ln_p: ybar + bw * dstar, chi: chi, v_known: v_known, ok: true }
+}
+
+fn exp_pressure(p_std: f64, ln_p: f64) -> f64 {
+    p_std * exp(ln_p)
+}
+
+// xs are 1/T, ys are ln(P/P°), uln are u(P)/P.
+// The band is the overlap of the two log bands. Neither arm publishes a
+// variance below the parentheses: the weighted scale is max(chi, 1), and
+// the unweighted variance is the larger of the residual and the propagation
+// of the stated u(ln P). A non-positive uncertainty is not a weight.
+// The weighted line is centred on the weighted mean of 1/T. An uncentred
+// normal equation turns a zero residual into a huge chi-square once one
+// parenthesis is much smaller than the others.
+// A chi-square that is not a finite number does not carry a band.
+// Fewer than three pressures, or more than the eight slots, is not a fit.
+// An empty overlap is not a pressure. A standard pressure that is not
+// positive does not turn the line into the point zero. An edge that
+// underflows to zero is not an edge.
+pub fn plateau_pressure(
+    xs: [f64; 8],
+    ys: [f64; 8],
+    uln: [f64; 8],
+    n: i64,
+    x_star: f64,
+    p_std: f64,
+) -> PlateauPressure with Mut, Div, Panic {
+    if !held_number(p_std) || !(p_std > 0.0) {
+        let missing = 0.0 / 0.0
+        return PlateauPressure { lo: missing, hi: missing, open: false, refused: false, chi: missing }
+    }
+    if n < 3 || n > 8 {
+        let missing = 0.0 / 0.0
+        return PlateauPressure { lo: missing, hi: missing, open: false, refused: false, chi: missing }
+    }
+    if !positive_weights(uln, n) {
+        let missing = 0.0 / 0.0
+        return PlateauPressure { lo: missing, hi: missing, open: false, refused: false, chi: missing }
+    }
+    let unw = ols_line(xs, ys, n)
+    if unw.sxx <= 0.0 {
+        let missing = 0.0 / 0.0
+        return PlateauPressure { lo: missing, hi: missing, open: false, refused: false, chi: missing }
+    }
+    let ln_pu = unw.intercept + unw.slope * x_star
+    let pu = exp_pressure(p_std, ln_pu)
+    let uu = reg_sqrt(parenthesis_var(xs, uln, n, unw, x_star))
+    let weighted = weighted_line(xs, ys, uln, n, x_star)
+    if !weighted.ok {
+        let missing = 0.0 / 0.0
+        return PlateauPressure { lo: missing, hi: missing, open: false, refused: false, chi: missing }
+    }
+    let chi = weighted.chi
+    let v_known = weighted.v_known
+    let pw = exp_pressure(p_std, weighted.ln_p)
+    let df = (n - 2) as f64
+    var infl = chi
+    if infl < 1.0 { infl = 1.0 }
+    let uw = reg_sqrt(infl * v_known)
+    var lo = higher_f(pu * exp(0.0 - uu), pw * exp(0.0 - uw))
+    var hi = lower_f(pu * exp(uu), pw * exp(uw))
+    var open = lo <= hi
+    if !open || !held_number(lo) || !held_number(hi) || !(lo > 0.0) || !(hi > 0.0) {
+        lo = 0.0 / 0.0
+        hi = 0.0 / 0.0
+        open = false
+    }
+    let rejected = chi_rejects(chi, df)
+    let refused = rejected && (x_outside(xs, n, x_star) || !open)
+    PlateauPressure { lo: lo, hi: hi, open: open, refused: refused, chi: chi }
+}

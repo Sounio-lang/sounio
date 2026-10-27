@@ -2,8 +2,8 @@
 topic_id: repo.docs.features.genomics-features
 authority: historical
 audience: users
-last_validated: 2026-03-07
-validated_by: A6
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.features.genomics-features
 -->
 
@@ -432,8 +432,8 @@ let msa = build_msa(seqs)
 See full documentation:
 - [Expression Analysis](../../stdlib/genomics/expression.sio)
 - [Pathway Enrichment](../../stdlib/genomics/ontology.sio)
-- [Sequence Alignment](../../stdlib/genomics/alignment.sio)
-- [Variant Calling](../../stdlib/genomics/variant.sio)
+- Sequence alignment (`stdlib/genomics/alignment.sio` is not in this tree)
+- Variant calling (`stdlib/genomics/variant.sio` is not in this tree)
 
 ---
 

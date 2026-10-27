@@ -2,49 +2,46 @@
 topic_id: repo.docs.guide.programming
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.programming
 -->
 
 # Sounio Programming Guide for LLMs
 
-This comprehensive guide enables LLMs to correctly generate Sounio code. Sounio is a novel L0 systems + scientific programming language - it is NOT a dialect of Rust, Julia, Python, or any other language.
+This guide is a long reference for generating Sounio. It is not a dialect of Rust, Julia, or Python.
+
+> **Contract.** A section without a cited test, gate, or `TOUR.md` row is not the contract. Later sections still mix aspirational snippets, including `d` code fences and Rust-shaped receivers. Copy the status table and the Core Syntax blocks below, then `docs/guide/getting-started.md` and `docs/guide/tutorial.md`. Do not promote a later section just because it is in this file.
 
 ## Implementation Status (Read First)
 
-> **WARNING**: This document mixes **implemented** and **aspirational** features.
-> Sections marked with ⚠️ are NOT YET IMPLEMENTED.
-
-### What Actually Works (Madaros v0.80.0)
+Aligned to `docs/serious-language/public-claim-registry.v1.tsv`, `TOUR.md` (measured 2026-10-04), and `docs/compiler/KNOWN_LIMITATIONS.md` (ledger validated 2026-10-06; KL-11 narrowed 2026-10-13). The committed prebuilt runs on Linux x86-64; the separate Apple Silicon route and its limits are listed below. This table is not a new measurement.
 
 | Feature | Status |
 |---------|--------|
-| Core syntax (variables, functions, control flow) | ✅ Implemented |
-| Type system (generics, structs, enums, traits) | ✅ Implemented |
-| Effects system (type-level tracking) | ✅ Implemented |
-| Units of measure | ✅ Implemented |
-| Epistemic types (`Knowledge<T>`) | ✅ Interpreter only |
-| GPU kernels (codegen) | ✅ Implemented in the checked GPU artifact |
-| GPU kernel launch surface | ✅ Checkable syntax; runtime proof is gate-backed |
-| Basic async (spawn, await, channels) | ✅ Implemented |
-| Async join/select | ⚠️ Not implemented |
-| Refinement types (parsing) | ✅ Implemented |
-| Refinement types (SMT verification) | ⚠️ Runtime checks only |
-| ODE/PDE DSL | ⚠️ Not implemented |
-| Probabilistic programming | ⚠️ Effect stub only |
-| Causal models | ⚠️ Not implemented |
-| AD jacobian/hessian (CPU) | ⚠️ Stub only |
-| Package manager | ⚠️ Feature flag stub |
+| Small-program syntax, execution, structs | Stable. `let` / `var`, `fn`, `if` / `while` / ranges, struct literals. Registry: `core.syntax`, `core.execution`, `core.structs`. |
+| Effects `IO`, `Mut`, `Div`, `Panic` | Stable for the checked positive and diagnostic cases. Registry: `effects`. |
+| Custom `effect` / `handle` blocks | Not the checked user surface. Do not emit them. |
+| Generics and traits | Prototype. Do not claim a mature trait ecosystem. Registry: `generics.*`. |
+| Enum variants with payloads | Not usable on either engine (KL-20). Payload-free enums work. |
+| Closures | Not a safe user surface. Registry: `closures.lambdas = stale_conflicting`. |
+| Units of measure | Prototype, and the engines disagree. KL-13 closed derived annotations (`f64<m/s>`, `mol/cm3`). Default Madaros still rejects `let d: m = 100.0` (#2752). lean_single runs `demos/intro/demo_unidades.sio` but still accepts a multiply into a derived unit (#2751). |
+| `Knowledge<T>` / GUM | Validated research, not interpreter-only. Tour witness: `demos/intro/demo_incerteza.sio` on Madaros. Library surface: `epistemic::knowledge`. Pure helpers carry first-order variance (KL-11, 2026-10-13). A general user call does not. |
+| `where` refinements | Not enforced by `souc run` (#2753). The working path is `scripts/ontology/expand_knowledge_runtime_guards.sh`. |
+| GPU PTX | Named gate only (`gpu.ptx`). `TOUR.md` §6 (2026-10-04) measured empty-body emission, not a general kernel backend. Do not copy later GPU snippets as working code. |
+| Async `spawn` / `await` / channels | Not part of the checked user contract in this guide. |
+| Package manager | Local registry only. Registry: `tooling.package = validated_research`. No public registry. |
+| macOS execution | The committed prebuilt is Linux x86-64. A separate current-source native ARM64 build and real Metal route is integrated in [#2978](https://github.com/Sounio-lang/sounio/pull/2978); follow the [macOS ARM64 guide](../compiler/MADAROS_MACOS_ARM64.md) for setup and limits. Do not infer Linux parity or self-hosting from this route. |
 
 ### Canonical References
 
-For what the compiler accepts today:
-- `docs/guide/MINIMUM_VIABLE_SOUNIO.md` — What actually works
-- `docs/compiler/KNOWN_LIMITATIONS.md` — What is not implemented
-- `tests/run-pass/` — Compilable syntax patterns
+- `TOUR.md` — measured claims and the table of what does not work
+- `docs/compiler/KNOWN_LIMITATIONS.md` — open ledger
+- `docs/serious-language/public-claim-registry.v1.tsv` — claim level for each public row
+- `docs/guide/getting-started.md` and `docs/guide/tutorial.md` — the user surface this file must not contradict
+- `tests/run-pass/` — compilable patterns, when a section cites a file
 
-If you are generating `.sio` code, prefer the working subset above.
+`docs/guide/MINIMUM_VIABLE_SOUNIO.md` still carries an April 22 snapshot. Do not prefer it over the October measurements when they disagree.
 
 ## Table of Contents
 
@@ -74,148 +71,95 @@ If you are generating `.sio` code, prefer the working subset above.
 
 ### Hello World
 
-```d
-fn main() -> i32 {
+Same program as `examples/hello.sio`. The following command uses the committed Linux x86-64 prebuilt; for Apple Silicon, see the [native ARM64 guide](../compiler/MADAROS_MACOS_ARM64.md).
+
+```sounio
+fn main() -> i32 with IO {
+    println("Hello, Sounio")
     return 0
 }
 ```
 
 ### Variables
 
-```d
+```sounio
 // Immutable binding (preferred)
 let x = 5
 let y: i32 = 10
 
-// Mutable binding
+// Mutable binding. `var`, not `let mut`.
 var count = 0
 count = count + 1
-
-// Constants (compile-time)
-const PI: f64 = 3.14159265359
 ```
 
 ### Functions
 
-```d
-// Basic function
+```sounio
 fn add(a: i32, b: i32) -> i32 {
     return a + b
 }
 
-// Function with effects (see Effects section)
-fn read_config(path: string) -> string with IO {
-    // IO operations here
+fn greet() -> i32 with IO {
+    println("Hello, Sounio")
+    return 0
 }
 
-// Generic function
-fn identity<T>(x: T) -> T {
-    return x
-}
-
-// Method syntax (on structs)
 impl Point {
-    fn distance(&self, other: &Point) -> f64 {
-        let dx = self.x - other.x
-        let dy = self.y - other.y
-        return sqrt(dx*dx + dy*dy)
+    fn get_x(self: &Point) -> f64 {
+        return self.x
     }
 }
 ```
 
+The receiver is `self: &Point`, not `&self`. Exclusive methods take `self: &!Point`. Generics are prototype; do not copy an `identity<T>` from an older draft of this section as a stable feature. There is no checked `string` type or `fs` module in this block.
+
 ### Control Flow
 
-```d
-// If-else
-if condition {
-    // code
-} else if other_condition {
-    // code
-} else {
-    // code
+Ranges and `if` / `while` are the checked small-program forms. Do not emit `match` on a payload variant, and do not iterate `for item in vec` from this block.
+
+```sounio
+let max = if x > y { x } else { y }
+
+var i = 0
+while i < 10 {
+    i = i + 1
 }
 
-// Match (pattern matching)
-match value {
-    0 => println("zero"),
-    1 | 2 => println("one or two"),
-    n if n > 10 => println("big"),
-    _ => println("other"),
-}
-
-// For-in loops (range iteration)
-for i in 0..10 {        // exclusive: 0, 1, ..., 9
-    println(i)
-}
-
-for i in 0..=10 {       // inclusive: 0, 1, ..., 10
-    println(i)
-}
-
-// For-in loops (collection iteration)
-for item in array {     // iterate over array elements
-    process(item)
-}
-
-for item in vec {       // iterate over Vec elements
-    process(item)
-}
-
-// While loops
-while condition {
-    // code
-}
-
-// Loop (infinite, use break to exit)
-loop {
-    if done {
-        break
-    }
-}
+for i in 0..10 { }
+for i in 0..=10 { }
 ```
 
 ### Data Structures
 
-```d
-// Structs
+```sounio
 struct Point {
     x: f64,
     y: f64,
 }
 
-// Create struct instance
 let p = Point { x: 1.0, y: 2.0 }
 
-// Linear structs (must be used exactly once)
-linear struct FileHandle {
-    fd: i32,
-}
-
-// Enums
 enum Color {
     Red,
     Green,
     Blue,
-    Rgb(u8, u8, u8),
 }
-
-// Type aliases
-type Sequence = [u8]
-type Matrix = [[f64]]
 ```
+
+`Rgb(u8, u8, u8)` and any other payload variant are KL-20: no runtime representation on either engine. Payload-free enums are the form this block stands behind. `linear struct` is a checked keyword (`tests/run-pass/linear_struct_field_access.sio`); a `FileHandle` that calls `os.close` is not in this block.
 
 ### References
 
 **IMPORTANT: Sounio uses `&!` for exclusive/mutable references, NOT `&mut`**
 
-```d
+```sounio
 // Shared reference (read-only)
 fn read_value(x: &i32) -> i32 {
     return *x
 }
 
 // Exclusive reference (mutable) - uses &! NOT &mut
-fn increment(x: &!i32) {
+fn increment(x: &!i32) with Mut {
     *x = *x + 1
 }
 
@@ -248,6 +192,8 @@ let combined = arr1 ++ arr2
 ```
 
 ### Closures
+
+Not a safe user surface (`closures.lambdas = stale_conflicting`). Do not emit the snippets below.
 
 ```d
 // Basic closure
@@ -617,7 +563,9 @@ fn safe_divide(a: i32, b: i32) -> Option<i32> {
 
 ## Async Programming
 
-Sounio has first-class async/await support with structured concurrency.
+> **Not the checked user contract.** The blocks from here through the end of this file were not re-run on 2026-10-15. Do not copy them. Async `spawn` / `await` / channels, custom `effect` / `handle` blocks, payload `Result`, closures, and `format()` are not the surface measured on Madaros v0.80.0. The status table at the top is the contract.
+
+Sounio source contains async syntax. That is not evidence that the snippets below run.
 
 ### Async Functions
 
@@ -782,20 +730,7 @@ async fn pure_async() -> i32 with Async {
 
 ## Units of Measure
 
-Sounio has built-in dimensional analysis for scientific computing.
-
-### Defining Units
-
-```d
-// Literals with units (underscore prefix)
-let mass = 500_mg
-let volume = 10_mL
-let time = 24_h
-
-// Angle brackets syntax (also works)
-let dose: mg = 500.0<mg>
-let conc: mg/L = 50.0<mg/L>
-```
+Units are a fixture-backed prototype. Default Madaros rejects `let distance: m = 100.0` with `error[E001]` (#2752). `lean_single` runs `demos/intro/demo_unidades.sio` and still accepts a multiply into a derived unit (#2751). Do not copy the underscore-literal or `500.0<mg>` forms below as the current contract.
 
 ### Unit Arithmetic
 
@@ -2208,7 +2143,7 @@ fn drug_concentration(
     return (dose * bioavailability) / volume
 }
 
-// GPU launch syntax accepted by the checked artifact
+// NOT re-run 2026-10-15. TOUR.md §6 measured empty-body PTX emission, not this launch.
 fn parallel_process(n: i64) with GPU, IO {
     let grid = ((n + 255) / 256, 1, 1)
     let block = (256, 1, 1)
@@ -2293,10 +2228,9 @@ let y = point.y
 // WRONG
 println!("x = {}, y = {}", x, y)
 
-// CORRECT
-println("x = " + x.to_string() + ", y = " + y.to_string())
-// OR
-println(format("x = {}, y = {}", x, y))  // if format() is available
+// CORRECT: one argument. print_f64 / print_int for numbers.
+println("x")
+// NOT available: println(format("x = {}", x)). Measured class: error[E010] for multi-arg print.
 ```
 
 ### 7. Generic Bounds Syntax
@@ -2380,20 +2314,13 @@ Result<T, E>                   // Result
 
 ## Version Information
 
-This guide is for **Sounio L0** (low-level systems syntax).
-
-For questions about specific features, check the compiler source at `compiler/src/` or run:
+This guide is for **Sounio L0** (low-level systems syntax). The compiler source is `self-hosted/`, not `compiler/src/`.
 
 ```bash
-# Check a Sounio file
-souc check your_file.sio --show-ast --show-types
-
-# Run a Sounio program
-souc run your_file.sio
-
-# Start the REPL
-souc repl
-
-# Package manager
-sou pkg --help
+souc check your_file.sio
+souc run your_file.sio          # committed prebuilt: Linux x86-64 ELF
+souc info
+souc --version                  # Madaros v0.80.0 on the committed binary
 ```
+
+Do not pass `--show-ast` or `--show-types` to `check`. Measured 2026-10-15: `check` ignores them and still prints `check: OK`. `compile` and `build` reject them with `error: madaros build: unsupported option`. There is no `sou` binary; the local package tool is `tools/sounio-pkg/sounio-pkg`, and it is not a public registry.

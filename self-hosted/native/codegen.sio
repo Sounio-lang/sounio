@@ -1639,6 +1639,15 @@ fn native_v2_resolve_handle_to_object_base_rax(nc: NativeCompiler) -> NativeComp
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_handle_table_base())
     c.code = emit_add_rax_rbx(c.code)
     c.code = emit_load_rax_mem_rax_disp32(c.code, native_v2_handle_entry_field_object_base())
+    // Same fail-closed contract as the hybrid resolver in codegen_x86_linux:
+    // a null object base must exit, not be stored through.
+    c.code = emit_test_rax_rax(c.code)
+    let live_jnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+    c.code = emit_exit(c.code, native_v2_null_object_base_exit_code())
+    c.code = emit_ud2(c.code)
+    let live_target = c.code.len
+    c.code = patch_u32_le(c.code, live_jnz + 2, live_target - (live_jnz + 6))
     c
 }
 
@@ -3789,9 +3798,9 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
 
     if instr.opcode == MIR_OP_UNARY {
         c = native_v2_load_temp_to_rax(c, instr.src1.value)
-        let is_float = if instr.aux.value == 1 || (instr.src1.value >= 0 && instr.src1.value < NC_MAX_VREGS && NC_IS_FLOAT_REG[instr.src1.value as usize] == 1) { true } else { false }
+        let is_float = if instr.aux.value == 1 || (instr.src1.value >= 0 && instr.src1.value < NC_VREG_LIMIT && NC_IS_FLOAT_REG[instr.src1.value as usize] == 1) { true } else { false }
         c = native_v2_emit_unary_code(c, instr.un_op, is_float)
-        if is_float && instr.dst.value >= 0 && instr.dst.value < NC_MAX_VREGS {
+        if is_float && instr.dst.value >= 0 && instr.dst.value < NC_VREG_LIMIT {
             NC_IS_FLOAT_REG[instr.dst.value as usize] = 1
         }
         return native_v2_store_rax_to_temp(c, instr.dst.value)
@@ -3902,9 +3911,12 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
         }
         let rj_pos = c.code.len
         c.code = emit_jmp_rel32(c.code)
-        if c.return_jump_count < 16 {
+        if c.return_jump_count < nc_return_jump_capacity() {
             NC_RETURN_JUMPS[c.return_jump_count as usize] = rj_pos + 1
             c.return_jump_count = c.return_jump_count + 1
+        } else {
+            // #1646: never drop a return jump (it would fall through).
+            c.label_overflow = true
         }
         return c
     }
@@ -4259,11 +4271,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     }
     c.label_patch_count = 0
     c.current_frame_size = 0
-    var rst_j = 0
-    while rst_j < NC_MAX_VREGS {
-        NC_IS_FLOAT_REG[rst_j as usize] = 0
-        rst_j = rst_j + 1
-    }
+    nc_is_float_reg_clear()
     c.current_strategy = 0
     var rst_ra = 0
     while rst_ra < NC_MAX_VREGS {
@@ -4360,7 +4368,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
 
     // --- patch_return_jumps (inlined, no &!) ---
     var rj_i = 0
-    while rj_i < c.return_jump_count {
+    while rj_i < c.return_jump_count && rj_i < nc_return_jump_capacity() {
         let rj_imm_offset = NC_RETURN_JUMPS[rj_i as usize]
         let rj_next_ip = rj_imm_offset + 4
         let rj_rel = epilogue_offset - rj_next_ip
@@ -6378,6 +6386,13 @@ pub fn compile_to_elf(module: &IrModule, base_addr: i64) -> Elf64Binary with Mut
 
 pub fn finalize_compiled_elf(nc: NativeCompiler, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {
     if nc.ir_vreg_overflow || nc.ir_validation_failed {
+        return elf_binary_new()
+    }
+    // #1646: the streaming/probe lanes publish through here; a dropped label,
+    // return jump or string-table entry must refuse here too (empty binary).
+    if nc.label_overflow || ELF_STRTAB_OVERFLOW != 0 {
+        if nc.label_overflow { print("Error: native label table overflow (label or return-jump tier) -- refusing to emit an ELF\n") }
+        if ELF_STRTAB_OVERFLOW != 0 { print("Error: native .rodata/.data string table overflow -- refusing to emit an ELF\n") }
         return elf_binary_new()
     }
     let entry = trampoline_offset(&nc)

@@ -108,11 +108,15 @@ def clause_v1() -> tuple[bool, str]:
     src = GENERATOR.read_text()
     sites = []
     for n, line in enumerate(src.splitlines(), start=1):
-        # formatRepoMetadataBlock: `validated_by: ${topic.owner_agent}`
-        # metadataFieldsForTopic: validated_by: topic.owner_agent,
-        if "validated_by" in line and "owner_agent" in line:
+        # Until #1240 (2026-10-12) both sites filled validated_by from
+        # topic.owner_agent; they now fill the explicit no-record marker
+        # UNVALIDATED_BY ('none'): with no record there is no validator, and
+        # the owner label is not one (the finding this rung recorded).
+        if "validated_by" in line and ("owner_agent" in line or "UNVALIDATED_BY" in line):
             sites.append((n, line.strip()))
-    print("V1 the default (fallback) sites that fill validated_by from owner_agent:")
+    marker = re.search(r"^export const UNVALIDATED_BY = '([a-z]+)';", src, re.M)
+    marker_value = marker.group(1) if marker else ""
+    print("V1 the default (fallback) sites that fill validated_by when a doc has no record:")
     for n, line in sites:
         print(f"    governance_registry.mjs:{n}  -> {line}")
     preserve_def = next(
@@ -160,14 +164,18 @@ def clause_v1() -> tuple[bool, str]:
         and seen["empty"] == {"last_validated": "2026-08-16"}
         and seen["absent"] == {"last_validated": "2026-08-16"}
         and seen["withRecord"]["validated_by"] == TRUE_VALIDATOR
-        and seen["withoutRecord"]["validated_by"] == seen["owner"]
-        and seen["withRecord"]["validated_by"] != seen["owner"]
+        # #1240: with no record the default is the marker, not the owner label.
+        and marker_value != ""
+        and seen["withoutRecord"]["validated_by"] == marker_value
+        and seen["withoutRecord"]["validated_by"] != seen["owner"]
+        and seen["withRecord"]["validated_by"] != marker_value
     )
     print("    The field has an input now: the document's own validator, when"
-          " non-empty; the owner label only when there is none.")
+          f" non-empty; the no-record marker {marker_value!r} when there is"
+          " none (no longer the owner label, #1240).")
     print(f"V1_GENERATOR_PRESERVES_VALIDATOR {'PASS' if ok else 'FAIL'}")
     print()
-    return ok, (seen["owner"] if seen else "")
+    return ok, (marker_value if seen else "")
 
 
 def clause_v2() -> bool:
@@ -243,7 +251,7 @@ def clause_v3() -> bool:
     print(f"    structural fields from topic, not doc:  {seen['structural']}")
     print(f"    validator adopted from doc:              "
           f"{seen['forged_validator_kept']}")
-    print(f"    blank validator falls back to owner:     "
+    print(f"    blank validator falls back to default:   "
           f"{seen['blank_falls_back']}")
     print(f"    well-formed date kept alongside blank:   "
           f"{seen['blank_date_kept']}")
@@ -293,6 +301,14 @@ def build_farm() -> Path | None:
     return farm
 
 
+RECORD_DATE = "2026-08-16"  # the #1752 closure date; any real date serves
+
+
+def with_real_date(text: str) -> str:
+    return re.sub(r"^last_validated: .*$", f"last_validated: {RECORD_DATE}",
+                  text, count=1, flags=re.M)
+
+
 def clause_v4(owner: str) -> bool:
     subject = ROOT / SUBJECT
     if not subject.is_file():
@@ -303,12 +319,12 @@ def clause_v4(owner: str) -> bool:
 
     current = declared_validated_by(subject)
     if current != owner:
-        print(f"V4 subject validated_by is {current!r}, expected owner default {owner!r}")
+        print(f"V4 subject validated_by is {current!r}, expected the default {owner!r}")
         print("V4_TRUTHFUL_VALIDATOR_IS_ACCEPTED FAIL")
         print()
         return False
     if TRUE_VALIDATOR == owner:
-        print("V4 TRUE_VALIDATOR collides with the owner default; pick another string")
+        print("V4 TRUE_VALIDATOR collides with the default; pick another string")
         print("V4_TRUTHFUL_VALIDATOR_IS_ACCEPTED FAIL")
         print()
         return False
@@ -358,10 +374,12 @@ def clause_v4(owner: str) -> bool:
 
         # ARM 1 — THE TRUTH IS ACCEPTED. The original rung's positive control
         # was this exact patch failing; it must now pass.
+        # A validator is half of a record: since #1240 an unvalidated document
+        # names no validator, so the arms give the subject a real date too.
         patched, n_sub = re.subn(
             rf"^validated_by: {re.escape(owner)}$",
             f"validated_by: {TRUE_VALIDATOR}",
-            pristine, count=1, flags=re.M,
+            with_real_date(pristine), count=1, flags=re.M,
         )
         if n_sub != 1:
             print("V4 could not patch the subject's validated_by")
@@ -407,7 +425,7 @@ def clause_v4(owner: str) -> bool:
         blanked, n_sub = re.subn(
             rf"^validated_by: {re.escape(owner)}$",
             "validated_by: ",
-            pristine, count=1, flags=re.M,
+            with_real_date(pristine), count=1, flags=re.M,
         )
         if n_sub != 1:
             print("V4 could not patch the subject's validated_by (empty arm)")

@@ -336,10 +336,11 @@ pub fn check_program_epistemic_into(prog: Program, out: &! IrEpistemicSection) -
     let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     (*checker_ptr).current_module = prog.module_path
+    e035_note_module(prog.module_path)
     (*checker_ptr).crate_root = prog.module_path
     checker_collect_items_mut(checker_ptr, prog.items)
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, prog.items)
-    if had_error == 1 || (*checker_ptr).error_count > 0 {
+    if had_error == 1 || checker_had_error_scalar(checker_ptr) == 1 {
         heap_free(checker_ptr as i64)
         return false
     }
@@ -351,79 +352,6 @@ pub fn check_program_epistemic_into(prog: Program, out: &! IrEpistemicSection) -
     heap_free(checker_ptr as i64)
     true
 }
-
-fn make_hyper_expr_info(span: Span, algebra_tag: i64, op_kind: i64, knowledge_wrapped: bool, algebra_info: AlgebraInfo) -> IrHyperExprInfo with Mut, Panic, Div {
-    IrHyperExprInfo {
-        span_start: span.start,
-        span_end: span.end,
-        algebra_tag: algebra_tag,
-        op_kind: op_kind,
-        knowledge_wrapped: knowledge_wrapped,
-        grade_mask: -1,
-        grade_known: false,
-        cl_p: 0,
-        cl_q: 0,
-        reassoc_strategy: algebra_info.reassoc_strategy,
-        forbidden_law_mask: algebra_info.forbidden_law_mask,
-        law_profile_source: 0,
-        law_profile_fingerprint: 0,
-    }
-}
-
-fn cd_hyper_law_profile_fingerprint(algebra_tag: i64, op_kind: i64, reassoc_strategy: i64, forbidden_law_mask: i64, law_profile_source: i64) -> i64 {
-    0
-}
-
-pub(crate) fn check_hyper_expr_law_profile_probe(
-    algebra_tag: i64,
-    registry_reassoc_strategy: i64,
-    registry_forbidden_law_mask: i64,
-    register_algebra: bool
-) -> IrHyperExprInfo with Mut, Panic, Div, Alloc {
-    var algebra_info = empty_algebra_info()
-    if register_algebra {
-        algebra_info.is_valid = true
-        algebra_info.algebra_tag = algebra_tag
-        algebra_info.reassoc_strategy = registry_reassoc_strategy
-        algebra_info.forbidden_law_mask = registry_forbidden_law_mask
-    }
-    let info = make_hyper_expr_info(Span { file_id: 0, start: 11, end: 29 }, algebra_tag, 1, false, algebra_info)
-    IrHyperExprInfo {
-        span_start: info.span_start,
-        span_end: info.span_end,
-        algebra_tag: info.algebra_tag,
-        op_kind: info.op_kind,
-        knowledge_wrapped: info.knowledge_wrapped,
-        grade_mask: -1,
-        grade_known: false,
-        cl_p: 0,
-        cl_q: 0,
-        reassoc_strategy: 0,
-        forbidden_law_mask: 0,
-        law_profile_source: 0,
-        law_profile_fingerprint: 0,
-    }
-}
-
-pub(crate) fn check_hyper_expr_law_profile_audit_tag(info: IrHyperExprInfo) -> i64 with Mut, Panic, Div {
-    let expected_fingerprint = cd_hyper_law_profile_fingerprint(
-        info.algebra_tag,
-        info.op_kind,
-        info.reassoc_strategy,
-        info.forbidden_law_mask,
-        info.law_profile_source,
-    )
-    if expected_fingerprint != info.law_profile_fingerprint {
-        return -1
-    }
-
-    let packed_algebra = (info.algebra_tag & 255) << 24
-    let packed_op = (info.op_kind & 255) << 16
-    let packed_reassoc = (info.reassoc_strategy & 255) << 8
-    let packed_source = info.law_profile_source & 255
-    packed_algebra + packed_op + packed_reassoc + packed_source
-}
-
 
 pub(crate) fn check_program(prog: Program) -> CheckResult with Mut, Panic, Div, Alloc, IO {
     let artifacts = check_program_with_artifacts(prog)
@@ -558,17 +486,16 @@ pub fn check_items_verdict_boot4_with_module_path(items: Option<Box<ItemList>>, 
     let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     (*checker_ptr).current_module = module_path
+    e035_note_module(module_path)
     (*checker_ptr).crate_root = module_path
     checker_collect_items_mut(checker_ptr, items)
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
-    // Collect lowers parameter types. A diagnostic recorded there (E201 on
-    // ExactlyPrivate without ZD, or the always-refuse control) used to be
-    // discarded: this verdict only inspected the check-pass had_error bit,
-    // so `check: OK` and rc=0 while the checker had already failed. Honour
-    // the recorded count before freeing the checker.
-    let recorded = (*checker_ptr).error_count
-    let noted = (*checker_ptr).had_error
-    if had_error == 1 || recorded > 0 || noted {
+    // Collect lowers parameter types. A diagnostic recorded there sets
+    // had_error on this same Checker, and the check pass does not clear it.
+    // Do not also load (*checker_ptr).error_count / .had_error: Gen1 emits
+    // those as words 1 and 2 (env count, then a pointer), so a clean module
+    // is rejected and panic("check failed") exits 1 with no text.
+    if had_error == 1 || checker_had_error_scalar(checker_ptr) == 1 {
         heap_free(checker_ptr as i64)
         return 1
     }
@@ -693,6 +620,7 @@ pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, m
     let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     (*checker_ptr).current_module = module_path
+    e035_note_module(module_path)
     (*checker_ptr).crate_root = module_path
 
     // Round 10 (review comment 4099548914): leaving current_module_id
@@ -724,8 +652,10 @@ pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, m
                 (*checker_ptr).current_module_id = owner
                 if owner >= 0 && owner < program_count {
                     (*checker_ptr).current_module = (*programs)[owner as usize].module_path
+                    e035_note_module((*programs)[owner as usize].module_path)
                 } else {
                     (*checker_ptr).current_module = module_path
+                    e035_note_module(module_path)
                 }
                 checker_collect_item_only_mut(checker_ptr, it)
                 cur = (*list).tail
@@ -756,8 +686,10 @@ pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, m
                 (*checker_ptr).current_module_id = owner
                 if owner >= 0 && owner < program_count {
                     (*checker_ptr).current_module = (*programs)[owner as usize].module_path
+                    e035_note_module((*programs)[owner as usize].module_path)
                 } else {
                     (*checker_ptr).current_module = module_path
+                    e035_note_module(module_path)
                 }
                 checker_check_items_mut(checker_ptr, check_mod_singleton_item_list(it))
                 chk = (*list).tail
@@ -768,9 +700,7 @@ pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, m
     checker_verify_dsep_claims_mut(checker_ptr)
     checker_flush_unemitted_type_errors_mut(checker_ptr)
 
-    let recorded = (*checker_ptr).error_count
-    let noted = (*checker_ptr).had_error
-    if noted || recorded > 0 {
+    if checker_had_error_scalar(checker_ptr) == 1 {
         heap_free(checker_ptr as i64)
         return 1
     }
@@ -797,7 +727,7 @@ pub fn check_items_ontology_verdict(items: Option<Box<ItemList>>) -> i64 with Mu
     let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     checker_validate_ontology_items_inplace(checker_ptr, items)
-    let bad = if (*checker_ptr).had_error || (*checker_ptr).error_count > 0 { 1 } else { 0 }
+    let bad = checker_had_error_scalar(checker_ptr)
     heap_free(checker_ptr as i64)
     bad
 }
@@ -827,6 +757,7 @@ pub fn check_modules_verdict_boot4_with_visibility(programs: &! [Program; 256], 
     var i: i64 = 0
     while i < count && i < 256 {
         (*checker_ptr).current_module = (*programs)[i as usize].module_path
+        e035_note_module((*programs)[i as usize].module_path)
         (*checker_ptr).current_module_id = i
         checker_collect_items_inplace(checker_ptr, (*programs)[i as usize].items)
         i = i + 1
@@ -838,6 +769,7 @@ pub fn check_modules_verdict_boot4_with_visibility(programs: &! [Program; 256], 
     i = 0
     while i < count && i < 256 {
         (*checker_ptr).current_module = (*programs)[i as usize].module_path
+        e035_note_module((*programs)[i as usize].module_path)
         (*checker_ptr).current_module_id = i
         checker_check_items_mut(checker_ptr, (*programs)[i as usize].items)
         i = i + 1
@@ -847,7 +779,7 @@ pub fn check_modules_verdict_boot4_with_visibility(programs: &! [Program; 256], 
     // in one module may name a graph declared in another.
     checker_verify_dsep_claims_mut(checker_ptr)
 
-    if (*checker_ptr).had_error || (*checker_ptr).error_count > 0 {
+    if checker_had_error_scalar(checker_ptr) == 1 {
         heap_free(checker_ptr as i64)
         return 1
     }
@@ -1838,6 +1770,7 @@ pub fn check_items_verdict_boot4_with_ontocache_sidecar(items: Option<Box<ItemLi
     let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     (*checker_ptr).current_module = module_path
+    e035_note_module(module_path)
     (*checker_ptr).crate_root = module_path
     checker_collect_items_mut(checker_ptr, items)
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
@@ -1919,6 +1852,7 @@ fn check_program_verdict(prog: Program) -> i64 with Mut, Panic, Div, Alloc, IO {
 pub fn check_program_with_artifacts(prog: Program) -> CheckArtifactsResult with Mut, Panic, Div, Alloc, IO {
     var checker = checker_new()
     checker.current_module = prog.module_path
+    e035_note_module(prog.module_path)
     // The crate root is the module being checked in single-module contexts.
     checker.crate_root = prog.module_path
     checker = checker.collect_items(prog.items)

@@ -1,3 +1,22 @@
+// Private legacy convenience routines below are not the checked public fit.
+// Public migration contracts are logistic_probability, logistic_normal_two_tail,
+// and logistic_fit_checked. No checked fitted-model inference is supplied.
+use math::pure::{is_finite,exp}
+use math::logarithmic::{log1p_checked}
+use linalg::least_squares::{qr_least_squares}
+use linalg::weighted_least_squares::{weighted_qr_least_squares}
+use special::igamma::{igamma_upper}
+pub struct LogisticNormalTail {pub status:i64,pub value:f64}
+// Standard-normal two-sided tail only; not fitted-model calibration.
+// Bounded to |z|<=37, with unavailable extremes rather than extrapolation.
+pub fn logistic_normal_two_tail(z:f64)->LogisticNormalTail with Mut,Div,Panic {
+ if !is_finite(z) {return LogisticNormalTail{status:2,value:0.0}}
+ let a=if z<0.0 {-z} else {z}
+ if a>37.0 {return LogisticNormalTail{status:1,value:0.0}}
+ let value=igamma_upper(0.5,(a*0.5)*a)
+ if !is_finite(value) || value<=0.0 || value>1.0 {return LogisticNormalTail{status:2,value:0.0}}
+ LogisticNormalTail{status:0,value:value}
+}
 // stats::regression::logistic — Epistemic Logistic Regression
 //
 // Generalized linear model for binary outcomes with:
@@ -18,15 +37,15 @@
 // Math Helpers (self-contained, following medical/ pattern)
 // =============================================================================
 
-struct BetaConfidence {
+struct LogisticBetaConfidence {
     alpha: f64,
     beta: f64
 }
 
-fn beta_new(a: f64, b: f64) -> BetaConfidence { BetaConfidence { alpha: a, beta: b } }
-fn beta_mean(b: &BetaConfidence) -> f64 { b.alpha / (b.alpha + b.beta) }
-fn beta_combine(b1: &BetaConfidence, b2: &BetaConfidence) -> BetaConfidence {
-    BetaConfidence { alpha: b1.alpha + b2.alpha - 1.0, beta: b1.beta + b2.beta - 1.0 }
+fn logit_beta_new(a: f64, b: f64) -> LogisticBetaConfidence { LogisticBetaConfidence { alpha: a, beta: b } }
+fn logit_beta_mean(b: &LogisticBetaConfidence) -> f64 { b.alpha / (b.alpha + b.beta) }
+fn logit_beta_combine(b1: &LogisticBetaConfidence, b2: &LogisticBetaConfidence) -> LogisticBetaConfidence {
+    LogisticBetaConfidence { alpha: b1.alpha + b2.alpha - 1.0, beta: b1.beta + b2.beta - 1.0 }
 }
 
 fn logit_abs(x: f64) -> f64 {
@@ -91,14 +110,14 @@ fn logit_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
 // =============================================================================
 
 // Logistic (sigmoid) function: p = 1 / (1 + exp(-z))
-fn sigmoid(z: f64) -> f64 with Mut, Div, Panic {
+pub fn sigmoid(z: f64) -> f64 with Mut, Div, Panic {
     if z > 20.0 { return 1.0 - 1.0e-10 }
     if z < -20.0 { return 1.0e-10 }
     1.0 / (1.0 + logit_exp(0.0 - z))
 }
 
 // Logit (inverse sigmoid): z = ln(p / (1 - p))
-fn logit(p: f64) -> f64 with Mut, Div, Panic {
+pub fn logit(p: f64) -> f64 with Mut, Div, Panic {
     let clipped = logit_max(1.0e-10, logit_min(1.0 - 1.0e-10, p))
     logit_ln(clipped / (1.0 - clipped))
 }
@@ -108,11 +127,12 @@ fn logit(p: f64) -> f64 with Mut, Div, Panic {
 // =============================================================================
 
 struct LogisticModel {
-    beta: [f64; 10],          // Coefficients (β₀ = intercept)
+    inference_status:i64, // 0 conditional Wald available;1 unavailable; private legacy fit
+    pub beta: [f64; 10],          // Coefficients (β₀ = intercept)
     se: [f64; 10],            // Standard errors
     z_scores: [f64; 10],       // Wald z-scores (β/SE)
     p_values: [f64; 10],       // Two-tailed p-values
-    odds_ratios: [f64; 10],    // exp(β) for each predictor
+    pub odds_ratios: [f64; 10],    // exp(β) for each predictor
     or_ci_lower: [f64; 10],    // 95% CI lower for OR
     or_ci_upper: [f64; 10],    // 95% CI upper for OR
     n_predictors: i64,
@@ -124,7 +144,7 @@ struct LogisticModel {
     deviance: f64,
     null_deviance: f64,
     pseudo_r_squared: f64,     // McFadden's R²
-    converged: bool,
+    pub converged: bool,
     iterations: i64
 }
 
@@ -132,12 +152,13 @@ struct LogisticModel {
 
 // Diagnostics
 struct LogisticDiagnostics {
+    hosmer_lemeshow_status:i64, // 1 descriptive statistic only; no calibrated p-value
     hosmer_lemeshow_stat: f64,  // Goodness-of-fit
     hosmer_lemeshow_p: f64,
     auc: f64,                    // Area under ROC curve
     concordance: f64,            // C-statistic
-    separation_adequate: BetaConfidence,
-    sample_events_adequate: BetaConfidence
+    separation_adequate: LogisticBetaConfidence,
+    sample_events_adequate: LogisticBetaConfidence
 }
 
 // Provenance
@@ -155,7 +176,7 @@ struct LogisticProvenance {
 struct KnowledgeLogistic {
     value: LogisticModel,
     variance: f64,
-    confidence: BetaConfidence,
+    confidence: LogisticBetaConfidence,
     provenance: LogisticProvenance
 }
 
@@ -164,6 +185,7 @@ struct KnowledgeLogistic {
 // =============================================================================
 
 struct DoseResponseResult {
+    inference_status:i64, // 1: full covariance/interval contract unavailable
     ed50: f64,        // Dose producing 50% effect
     ed90: f64,        // Dose producing 90% effect
     ed50_ci_lower: f64,
@@ -175,14 +197,14 @@ struct DoseResponseResult {
 struct KnowledgeDoseResponse {
     value: DoseResponseResult,
     variance: f64,
-    confidence: BetaConfidence
+    confidence: LogisticBetaConfidence
 }
 
 // =============================================================================
 // Simple Linear Regression (used internally)
 // =============================================================================
 
-fn mean_arr(data: [f64; 100], n: i64) -> f64 with Mut, Div, Panic {
+fn logit_mean_arr(data: [f64; 100], n: i64) -> f64 with Mut, Div, Panic {
     var sum = 0.0
     var i: i64 = 0
     while i < n { sum = sum + data[i as usize]; i = i + 1 }
@@ -194,7 +216,7 @@ fn mean_arr(data: [f64; 100], n: i64) -> f64 with Mut, Div, Panic {
 // =============================================================================
 
 // Simple logistic regression: logit(p) = β₀ + β₁x
-fn fit_logistic_simple(
+pub fn fit_logistic_simple(
     x: [f64; 100],
     y: [f64; 100],   // Binary: 0 or 1
     n: i64
@@ -349,9 +371,12 @@ fn fit_logistic_simple(
     let z0 = if se_beta0 > 1.0e-10 { beta0 / se_beta0 } else { 0.0 }
     let z1 = if se_beta1 > 1.0e-10 { beta1 / se_beta1 } else { 0.0 }
 
-    // Approximate p-values (normal)
-    let p0 = 2.0 * (1.0 - sigmoid(logit_abs(z0)))
-    let p1 = 2.0 * (1.0 - sigmoid(logit_abs(z1)))
+    // Sigmoid is not a normal distribution tail.
+    let tail0=logistic_normal_two_tail(z0)
+    let tail1=logistic_normal_two_tail(z1)
+    let inference_ok=converged && is_finite(det) && det>0.0 && is_finite(se_beta0) && is_finite(se_beta1) && se_beta0>0.0 && se_beta1>0.0 && tail0.status==0 && tail1.status==0
+    let p0=if inference_ok {tail0.value} else {0.0}
+    let p1=if inference_ok {tail1.value} else {0.0}
 
     // Odds ratios: exp(β)
     let or0 = logit_exp(beta0)
@@ -388,7 +413,11 @@ fn fit_logistic_simple(
     var or_hi: [f64; 10] = [0.0; 10]
     or_hi[1] = or1_upper
 
+    if !inference_ok {
+        ses=[0.0;10];zs=[0.0;10];ps=[0.0;10];or_lo=[0.0;10];or_hi=[0.0;10]
+    }
     LogisticModel {
+        inference_status:if inference_ok {0} else {1},
         beta: betas,
         se: ses,
         z_scores: zs,
@@ -483,14 +512,14 @@ fn fit_logistic_epistemic(
     let event_conf = if events_per_pred >= 10 { 0.95 }
                      else if events_per_pred >= 5 { 0.75 }
                      else { 0.50 }
-    let event_beta = beta_new(
+    let event_beta = logit_beta_new(
         event_conf * (n as f64) * 0.3,
         (1.0 - event_conf) * (n as f64) * 0.3
     )
 
     // 2. Separation (complete separation → infinite β)
     let sep_conf = if model.converged { 0.90 } else { 0.40 }
-    let sep_beta = beta_new(
+    let sep_beta = logit_beta_new(
         sep_conf * (n as f64) * 0.3,
         (1.0 - sep_conf) * (n as f64) * 0.3
     )
@@ -526,13 +555,11 @@ fn fit_logistic_epistemic(
         }
         g = g + 1
     }
-    // p-value approximation for χ²(8): critical values 15.51 (p=0.05), 20.09 (p=0.01)
-    let hl_p = if hl_stat > 20.09 { 0.01 }
-               else if hl_stat > 15.51 { 0.05 }
-               else if hl_stat > 13.36 { 0.10 }
-               else { 0.50 }
+    // Equal-width bins do not establish the advertised chi-square calibration.
+    let hl_p=0.0 // unavailable placeholder; inspect diagnostic status
 
     let diag = LogisticDiagnostics {
+        hosmer_lemeshow_status:1,
         hosmer_lemeshow_stat: hl_stat,
         hosmer_lemeshow_p: hl_p,
         auc: auc,
@@ -541,7 +568,7 @@ fn fit_logistic_epistemic(
         sample_events_adequate: event_beta
     }
 
-    let overall_conf = beta_combine(&event_beta, &sep_beta)
+    let overall_conf = logit_beta_combine(&event_beta, &sep_beta)
 
     let prov = LogisticProvenance {
         method_id: 1,
@@ -607,10 +634,11 @@ fn fit_dose_response(
     let slope = beta1 * 0.25  // p(1-p) = 0.25 at ED50
 
     let result = DoseResponseResult {
+        inference_status:1,
         ed50: ed50,
         ed90: ed90,
-        ed50_ci_lower: ed50_lower,
-        ed50_ci_upper: ed50_upper,
+        ed50_ci_lower: 0.0,
+        ed50_ci_upper: 0.0,
         slope: slope,
         max_effect: 1.0
     }
@@ -623,8 +651,8 @@ fn fit_dose_response(
 
     KnowledgeDoseResponse {
         value: result,
-        variance: var_ed50,
-        confidence: beta_new(
+        variance: 0.0, // unavailable: full covariance was not supplied
+        confidence: logit_beta_new(
             conf_level * (n as f64) * 0.3,
             (1.0 - conf_level) * (n as f64) * 0.3
         )
@@ -692,4 +720,231 @@ fn test_dose_response() -> bool with Mut, Div, Panic {
     let ed90_greater = dr.value.ed90 > dr.value.ed50
 
     ed50_reasonable && ed90_greater
+}
+
+
+// Checked bounded migration layer. Stride8; explicit intercept columns.
+// Point estimation only: no standard errors, p-values or calibrated intervals.
+pub struct LogisticProbability {
+ pub status:i64, pub probability:f64, pub complement:f64,
+}
+pub fn logistic_probability(eta:f64)->LogisticProbability with Mut,Div,Panic {
+ let bad=LogisticProbability{status:2,probability:0.0,complement:0.0}
+ if !is_finite(eta) {return bad}
+ var t:f64=0.0
+ if eta>=0.0 {t=exp(-eta)} else {t=exp(eta)}
+ if !is_finite(t) || t<0.0 {return bad}
+ let denominator=1.0+t
+ if eta>=0.0 {
+  return LogisticProbability{status:0,probability:1.0/denominator,complement:t/denominator}
+ }
+ LogisticProbability{status:0,probability:t/denominator,complement:1.0/denominator}
+}
+// 0 available;1 size;2 nonfinite;3 rank;4 arithmetic;5 controls;
+// 6 nonbinary response;7 iteration/line search exhausted;
+// 8 Fisher weights unrepresentable;9 sufficient constant-response boundary.
+pub struct LogisticFitChecked {
+ pub status:i64, pub n:i64, pub p:i64, pub rank:i64, pub iterations:i64,
+ pub coefficients:[f64;8], pub probabilities:[f64;256],
+ pub linear_predictors:[f64;256], pub deviance:f64,
+ pub score_norm:f64, pub step_norm:f64, pub rcond_used:f64,
+ pub inference_status:i64, pub assumptions_assessed:bool,
+}
+struct LogisticEvaluation {
+ status:i64, eta:[f64;256], probabilities:[f64;256], complements:[f64;256],
+ objective:f64,
+}
+fn lc_empty(status:i64,n:i64,p:i64)->LogisticFitChecked {
+ LogisticFitChecked{status:status,n:n,p:p,rank:0,iterations:0,
+ coefficients:[0.0;8],probabilities:[0.0;256],linear_predictors:[0.0;256],
+ deviance:0.0,score_norm:0.0,step_norm:0.0,rcond_used:0.0,
+ inference_status:1,assumptions_assessed:false}
+}
+fn lc_dot(a:&[f64;2048],beta:&[f64;8],row:i64,p:i64)->f64 with Mut,Div,Panic {
+ var sum:f64=0.0
+ var correction:f64=0.0
+ var j:i64=0
+ while j<p {
+  let term=a[(row*8+j) as usize]*beta[j as usize]
+  let adjusted=term-correction
+  let next=sum+adjusted
+  correction=(next-sum)-adjusted
+  sum=next
+  j=j+1
+ }
+ sum
+}
+fn lc_evaluate(a:&[f64;2048],y:&[f64;256],beta:&[f64;8],n:i64,p:i64)->LogisticEvaluation with Mut,Div,Panic {
+ var out=LogisticEvaluation{status:4,eta:[0.0;256],probabilities:[0.0;256],complements:[0.0;256],objective:0.0}
+ var correction:f64=0.0
+ var i:i64=0
+ while i<n {
+  let eta=lc_dot(a,beta,i,p)
+  let probability=logistic_probability(eta)
+  if probability.status!=0 {return out}
+  let tail=if eta>=0.0 {exp(-eta)} else {exp(eta)}
+  let logged=log1p_checked(tail)
+  if logged.status!=0 {return out}
+  var loss=logged.value
+  if eta>=0.0 && y[i as usize]==0.0 {loss=loss+eta}
+  if eta<0.0 && y[i as usize]==1.0 {loss=loss-eta}
+  if !is_finite(loss) || loss<0.0 {return out}
+  let adjusted=loss-correction
+  let next=out.objective+adjusted
+  correction=(next-out.objective)-adjusted
+  out.objective=next
+  out.eta[i as usize]=eta
+  out.probabilities[i as usize]=probability.probability
+  out.complements[i as usize]=probability.complement
+  i=i+1
+ }
+ if !is_finite(out.objective) {return out}
+ out.status=0
+ out
+}
+pub fn logistic_fit_checked(a:&[f64;2048],y:&[f64;256],n:i64,p:i64,
+ rcond:f64,max_iterations:i64,tolerance:f64)->LogisticFitChecked with Mut,Div,Panic {
+ if n<1 || n>256 || p<1 || p>8 || p>n {return lc_empty(1,n,p)}
+ if !is_finite(rcond) || rcond<0.0 || rcond>=1.0 ||
+ max_iterations<1 || max_iterations>100 || !is_finite(tolerance) ||
+ tolerance<1e-12 || tolerance>1e-4 {return lc_empty(5,n,p)}
+ var scales:[f64;8]=[0.0;8]
+ var i:i64=0
+ while i<n {
+  if !is_finite(y[i as usize]) {return lc_empty(2,n,p)}
+  var j:i64=0
+  while j<p {
+   let v=a[(i*8+j) as usize]
+   if !is_finite(v) {return lc_empty(2,n,p)}
+   let magnitude=logit_abs(v)
+   if magnitude>scales[j as usize] {scales[j as usize]=magnitude}
+   j=j+1
+  }
+  i=i+1
+ }
+ i=0
+ while i<n {
+  if y[i as usize]!=0.0 && y[i as usize]!=1.0 {return lc_empty(6,n,p)}
+  i=i+1
+ }
+ let zero:[f64;256]=[0.0;256]
+ let rank_fit=qr_least_squares(a,&zero,n,p,rcond)
+ if rank_fit.status!=0 {
+  var bad=lc_empty(if rank_fit.status==3 {3}else{4},n,p)
+  bad.rank=rank_fit.rank
+  bad.rcond_used=rank_fit.rcond_used
+  return bad
+ }
+ // A nonzero constant design column supplies a diverging intercept direction
+ // for an all-zero or all-one response. No general separation claim is made.
+ var same=true
+ i=1
+ while i<n {if y[i as usize]!=y[0] {same=false} i=i+1}
+ if same {
+  var j:i64=0
+  while j<p {
+   var constant=a[j as usize]!=0.0
+   i=1
+   while i<n {if a[(i*8+j) as usize]!=a[j as usize] {constant=false} i=i+1}
+   if constant {return lc_empty(9,n,p)}
+   j=j+1
+  }
+ }
+ var beta:[f64;8]=[0.0;8]
+ var current=lc_evaluate(a,y,&beta,n,p)
+ if current.status!=0 {return lc_empty(4,n,p)}
+ var iteration:i64=0
+ while iteration<max_iterations {
+  var response:[f64;256]=[0.0;256]
+  var weights:[f64;256]=[0.0;256]
+  var score_norm:f64=0.0
+  var j:i64=0
+  while j<p {
+   var sum:f64=0.0
+   var correction:f64=0.0
+   i=0
+   while i<n {
+    let residual=if y[i as usize]==1.0 {current.complements[i as usize]} else {-current.probabilities[i as usize]}
+    let term=(a[(i*8+j) as usize]/scales[j as usize])*residual/(n as f64)
+    let adjusted=term-correction
+    let next=sum+adjusted
+    correction=(next-sum)-adjusted
+    sum=next
+    i=i+1
+   }
+   if !is_finite(sum) {return lc_empty(4,n,p)}
+   if logit_abs(sum)>score_norm {score_norm=logit_abs(sum)}
+   j=j+1
+  }
+  i=0
+  while i<n {
+   let probability=current.probabilities[i as usize]
+   let complement=current.complements[i as usize]
+   let weight=probability*complement
+   if !is_finite(weight) || weight<=0.0 {return lc_empty(8,n,p)}
+   weights[i as usize]=weight
+   let residual=if y[i as usize]==1.0 {complement} else {-probability}
+   response[i as usize]=residual/weight
+   if !is_finite(response[i as usize]) {return lc_empty(4,n,p)}
+   i=i+1
+  }
+  let increment=weighted_qr_least_squares(a,&response,&weights,n,p,rcond)
+  if increment.status!=0 {
+   var bad=lc_empty(if increment.status==3 {3}else{4},n,p)
+   bad.rank=increment.rank
+   bad.iterations=iteration
+   return bad
+  }
+  var full_step:f64=0.0
+  i=0
+  while i<n {
+   let movement=lc_dot(a,&increment.coefficients,i,p)
+   let step=logit_abs(movement)/(1.0+logit_abs(current.eta[i as usize]))
+   if !is_finite(step) {return lc_empty(4,n,p)}
+   if step>full_step {full_step=step}
+   i=i+1
+  }
+  iteration=iteration+1
+  if score_norm<=tolerance && full_step<=tolerance {
+   let deviance=2.0*current.objective
+   if !is_finite(deviance) {return lc_empty(4,n,p)}
+   var out=lc_empty(0,n,p)
+   out.rank=p
+   out.iterations=iteration
+   out.coefficients=beta
+   out.probabilities=current.probabilities
+   out.linear_predictors=current.eta
+   out.deviance=deviance
+   out.score_norm=score_norm
+   out.step_norm=full_step
+   out.rcond_used=increment.rcond_used
+   return out
+  }
+  var fraction:f64=1.0
+  var halvings:i64=0
+  var accepted=false
+  while halvings<=32 && !accepted {
+   var trial_beta:[f64;8]=[0.0;8]
+   j=0
+   while j<p {
+    trial_beta[j as usize]=beta[j as usize]+fraction*increment.coefficients[j as usize]
+    j=j+1
+   }
+   let trial=lc_evaluate(a,y,&trial_beta,n,p)
+   if trial.status==0 && trial.objective<=current.objective {
+    beta=trial_beta
+    current=trial
+    accepted=true
+   } else {fraction=fraction*0.5}
+   halvings=halvings+1
+  }
+  if !accepted {
+   var bad=lc_empty(7,n,p)
+   bad.iterations=iteration
+   return bad
+  }
+ }
+ var exhausted=lc_empty(7,n,p)
+ exhausted.iterations=iteration
+ exhausted
 }

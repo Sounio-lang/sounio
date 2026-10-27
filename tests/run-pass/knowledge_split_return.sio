@@ -1,0 +1,140 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: SPLIT_RETURN_OK
+// One function returns two Knowledge values. P depends only on A.
+// Q is the product of A and B. A correlation moves Q and leaves P.
+//
+// Oracle class: sounio_closed_form_twin (ADR-009).
+// covariance_of is the claimant. gum_cov_pair is the clock: central
+// differences of the scalar functions, then the GUM sum written out.
+// The clock does not call covariance_of.
+
+ontology Lab {
+    class Thing { property amount: f64 where amount >= 0.0 }
+    class Feed subclass_of Thing
+    class Part subclass_of Thing
+    class Whole subclass_of Thing
+    disjoint Feed, Part
+    disjoint Part, Whole
+}
+
+struct Pair {
+    part: Knowledge[Part, ValidUntil("2026-12-31"), epsilon < 0.05, Derived]
+    whole: Knowledge[Whole, ValidUntil("2026-12-31"), epsilon < 0.05, Derived]
+}
+
+fn split(a: Knowledge<Feed>, b: Knowledge<f64>) -> Pair with Epistemic, Mut, Div {
+    let x: f64 = a.value
+    let y: f64 = b.value
+    let prod: f64 = x * y
+    let p: Part = x
+    let w: Whole = prod
+    Pair {
+        part: Knowledge { value: p, epsilon: 0.01, validity: "2027-06-30", provenance: "cell" },
+        whole: Knowledge { value: w, epsilon: 0.01, validity: "2027-06-30", provenance: "cell" }
+    }
+}
+
+
+fn part_amount(x: f64, y: f64) -> f64 {
+    x
+}
+
+fn whole_amount(x: f64, y: f64) -> f64 {
+    x * y
+}
+
+fn gum_cov_pair(x: f64, y: f64, u_x: f64, u_y: f64, rho: f64) -> f64 {
+    let h = 0.001
+    let dp_dx = (part_amount(x + h, y) - part_amount(x - h, y)) / (2.0 * h)
+    let dp_dy = (part_amount(x, y + h) - part_amount(x, y - h)) / (2.0 * h)
+    let dw_dx = (whole_amount(x + h, y) - whole_amount(x - h, y)) / (2.0 * h)
+    let dw_dy = (whole_amount(x, y + h) - whole_amount(x, y - h)) / (2.0 * h)
+    let diag = dp_dx * dw_dx * (u_x * u_x) + dp_dy * dw_dy * (u_y * u_y)
+    let cross = (dp_dx * dw_dy + dp_dy * dw_dx) * u_x * u_y * rho
+    diag + cross
+}
+
+fn gum_var_part(x: f64, y: f64, u_x: f64, u_y: f64, rho: f64) -> f64 {
+    let h = 0.001
+    let dp_dx = (part_amount(x + h, y) - part_amount(x - h, y)) / (2.0 * h)
+    let dp_dy = (part_amount(x, y + h) - part_amount(x, y - h)) / (2.0 * h)
+    let diag = dp_dx * dp_dx * (u_x * u_x) + dp_dy * dp_dy * (u_y * u_y)
+    let cross = 2.0 * dp_dx * dp_dy * u_x * u_y * rho
+    diag + cross
+}
+
+fn gum_var_whole(x: f64, y: f64, u_x: f64, u_y: f64, rho: f64) -> f64 {
+    let h = 0.001
+    let dw_dx = (whole_amount(x + h, y) - whole_amount(x - h, y)) / (2.0 * h)
+    let dw_dy = (whole_amount(x, y + h) - whole_amount(x, y - h)) / (2.0 * h)
+    let diag = dw_dx * dw_dx * (u_x * u_x) + dw_dy * dw_dy * (u_y * u_y)
+    let cross = 2.0 * dw_dx * dw_dy * u_x * u_y * rho
+    diag + cross
+}
+
+fn near(actual: f64, expected: f64, tol: f64) -> bool {
+    let d = actual - expected
+    if d < 0.0 { return (0.0 - d) < tol }
+    d < tol
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    let tagged: Feed = 10.0
+    let a: Knowledge<Feed> = measure(tagged, uncertainty: 0.1)
+    let b_now: f64 = 2.0
+    let b: Knowledge<f64> = measure(b_now, uncertainty: 0.2)
+    let named = split(a, b)
+    let direct = split(a, b)
+    let part_v = variance_of(named.part.value)
+    let whole_v = variance_of(named.whole.value)
+    let cov_engine = covariance_of(named.part.value, named.whole.value)
+    let direct_whole = variance_of(direct.whole.value)
+    let xa: f64 = a.value
+    let yb: f64 = b.value
+    let _rho = correlate(xa, yb, 1.0)
+    let named_rho = split(a, b)
+    let part_rho = variance_of(named_rho.part.value)
+    let whole_rho = variance_of(named_rho.whole.value)
+    let cov_engine_rho = covariance_of(named_rho.part.value, named_rho.whole.value)
+    let part_live = variance_of(named.part.value)
+    let whole_live = variance_of(named.whole.value)
+    let cov_live = covariance_of(named.part.value, named.whole.value)
+
+    print("part ")
+    print_f64(named.part.value)
+    print(" pv ")
+    print_f64(part_v)
+    print(" whole ")
+    print_f64(named.whole.value)
+    print(" wv ")
+    print_f64(whole_v)
+    print(" direct ")
+    print_f64(direct_whole)
+    print(" pr ")
+    print_f64(part_rho)
+    print(" wr ")
+    print_f64(whole_rho)
+    print("\n")
+
+    let clock = gum_cov_pair(10.0, 2.0, 0.1, 0.2, 0.0)
+    let clock_rho = gum_cov_pair(10.0, 2.0, 0.1, 0.2, 1.0)
+    let clock_part = gum_var_part(10.0, 2.0, 0.1, 0.2, 1.0)
+    let clock_whole = gum_var_whole(10.0, 2.0, 0.1, 0.2, 1.0)
+    print(" cov ")
+    print_f64(cov_engine)
+    print(" clock ")
+    print_f64(clock)
+    print(" covr ")
+    print_f64(cov_engine_rho)
+    print(" clockr ")
+    print_f64(clock_rho)
+    print("\n")
+
+    if near(named.part.value, 10.0, 0.0001) && near(named.whole.value, 20.0, 0.0001) && near(part_v, 0.01, 0.0001) && near(whole_v, 4.04, 0.0001) && near(direct_whole, 4.04, 0.0001) && near(part_rho, 0.01, 0.0001) && near(whole_rho, 4.84, 0.0001) && whole_rho > whole_v && near(cov_engine, clock, 0.0001) && near(cov_engine_rho, clock_rho, 0.0001) && clock_rho > clock && near(part_v, 0.01, 0.0001) && near(part_live, clock_part, 0.0001) && near(whole_live, clock_whole, 0.0001) && near(cov_live, clock_rho, 0.0001) {
+        println("SPLIT_RETURN_OK")
+        return 0
+    }
+    println("SPLIT_RETURN_FAIL")
+    1
+}
