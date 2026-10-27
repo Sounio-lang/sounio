@@ -1,0 +1,1 @@
+Unreferenced Pireus evidence dumps, the committed LLM review transcripts under `tools/pireus/continuity/reviews/`, and the duplicate Spark snapshots under `tools/pireus/continuity/recovered/spark/` were removed from the tree. Six evidence files that stdlib, the Walsh gate, or a concept doc opens stay. The removed text remains in git history.

@@ -45,6 +45,7 @@ the small receipts under `docs/research/receipts/` and `docs/research/evidence/`
 and the six `tools/loom/evidence/pireus-*-acceptance-20260827.txt` files.
 Some test `.args` files and the concept docs name these paths, so they have
 to stay until the language-side references are rewritten.
+`tools/pireus/continuity/reviews/`, the duplicate copies under `tools/pireus/continuity/recovered/spark/`, and 108 dumps in `tools/pireus/evidence/` that nothing outside `tools/pireus` opens were later removed from this tree; the bytes remain in git history.
 
 ## The archive tags are the source of truth
 
