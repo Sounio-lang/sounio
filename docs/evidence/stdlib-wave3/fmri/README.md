@@ -119,3 +119,15 @@ regression18458 failed its unchanged p.b.x assertion while direct leaf(&b)
 worked. Diagnostic18459 printed the erroneous chained value and showed that
 forwarding leaf(p.b) still reads the correct value. The compiler repair and
 full47-case Sounio/C++ replay remain required; the failed witnesses are retained.
+
+Slurm18531 completed0:0: all47 expanded fMRI cases passed their exact expected
+native exits, every successful metric row matched C++23 at the unchanged1e-11
+threshold, malformed inputs/configurations were refused, and a wrong numeric
+output was rejected. Binary reader, result reuse and missing-Alloc controls
+also passed their expected outcomes. All source/runtime/compiler/ELF/derived
+and dynamic-library custody guards verified, with FMRI_NATIVE_GATE_OK.
+This replay pins raw222c478c... from the isolated reference-field proposal.
+That artifact still had a separate broader alias regression, so this is an
+actual fMRI behavior receipt and not a compiler-wide release claim. The later
+reference/alias source tranche is separately qualified by18561; the mandatory
+fMRI gate must run again on the final coherent source-built compiler.
