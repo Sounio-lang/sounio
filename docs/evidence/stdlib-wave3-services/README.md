@@ -314,3 +314,14 @@ not hidden by the successful subset receipt. Original empty Frame now
 runs with typed array-value length helpers; no raw array-header or fixed
 small replacement was introduced. Frame/CSV source ports remain separate
 until their native controls qualify.
+
+## ByteBuffer owner budget accessor
+
+Slurm **18229** completed with status 0 for the pure `byte_buffer_budget`
+accessor and its check/compile/native control. The getter returns the existing
+owner budget before and after reserve, including a rejected over-budget
+reserve; it changes neither the layout nor the allocation policy.
+Marker: `BYTE_BUFFER_BUDGET_OK`.
+Receipt: `/scratch/sounio-stdlib-wave3-20261027/services/byte-buffer-budget-01/results`.
+Raw compiler SHA-256: `9919d03afb60e418dc111797895860e27e93a22ca52a9cc51cd0e0edac1571b2`.
+Source, compiler/runtime, and executable manifests pass final rechecks.
