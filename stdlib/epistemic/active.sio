@@ -29,7 +29,7 @@
 //! // Returns drug_a - higher variance means more to learn
 //! ```
 
-use epistemic::knowledge::{Epistemic, BetaConfidence};
+use epistemic::knowledge::{Epistemic,ep_new};
 
 // ============================================================================
 // PRECISION AND INFORMATION METRICS
@@ -79,16 +79,17 @@ pub fn coefficient_of_variation(k: &Epistemic) -> f64 {
 // - Variance contribution: high variance → high score
 // - Confidence penalty: low confidence → high score
 // - Value bonus: important values get priority
-pub fn exploration_score(k: &Epistemic, importance: f64) -> f64 {
+pub fn exploration_score(k: &Epistemic, importance: f64) -> f64 with Panic {
+    assert(k.confidence>=0 && k.confidence<=1000)
     let variance_term = ln_f64(1.0 + k.variance)
-    let confidence_term = 1.0 - k.confidence.mean()
+    let confidence_term = 1.0 - (k.confidence as f64)/1000.0
     let importance_term = importance
 
     variance_term + confidence_term + importance_term
 }
 
 // Find the index with highest exploration priority (highest score = explore first)
-pub fn exploration_priority(values: &[Epistemic]) -> usize {
+pub fn exploration_priority(values: &[Epistemic]) -> usize with Panic {
     let n = values.len()
     if n == 0 { return 0 }
 
@@ -109,8 +110,8 @@ pub fn exploration_priority(values: &[Epistemic]) -> usize {
 }
 
 // Get the Knowledge value most worth exploring
-pub fn most_uncertain<'a>(values: &'a [Epistemic]) -> Option<&'a Epistemic> {
-    if values.is_empty() {
+pub fn most_uncertain(values: &[Epistemic]) -> Option<&Epistemic> with Panic {
+    if values.len()==0 {
         return None
     }
 
@@ -125,13 +126,13 @@ pub fn most_uncertain<'a>(values: &'a [Epistemic]) -> Option<&'a Epistemic> {
 // Expected Free Energy components
 pub struct EFEComponents {
     /// Epistemic value: expected information gain
-    epistemic: f64,
+    pub epistemic: f64,
 
     /// Pragmatic value: expected reward/goal achievement
-    pragmatic: f64,
+    pub pragmatic: f64,
 
     /// Total EFE (lower is better)
-    total: f64,
+    pub total: f64,
 }
 
 // Compute Expected Free Energy for an action
@@ -170,7 +171,7 @@ pub fn select_action_idx(
     current: &Epistemic,
     reward_weight: f64,
 ) -> Option<usize> {
-    if actions.is_empty() {
+    if actions.len()==0 {
         return None
     }
 
@@ -219,7 +220,8 @@ pub fn update_belief(
     prior: &Epistemic,
     observation: f64,
     observation_variance: f64,
-) -> Epistemic {
+) -> Epistemic with Panic {
+    assert(prior.confidence>=0 && prior.confidence<=1000)
     let prior_prec = precision(prior)
     let obs_prec = 1.0 / max_f64(observation_variance, 0.0000001)
     let total_prec = prior_prec + obs_prec
@@ -227,26 +229,16 @@ pub fn update_belief(
     let posterior_mean = (prior_prec * prior.val + obs_prec * observation) / total_prec
     let posterior_var = 1.0 / total_prec
 
-    // Update confidence based on evidence accumulation
-    let evidence_ratio = obs_prec / prior_prec
-    let new_conf = prior.confidence.update(
-        (evidence_ratio * 10.0) as i64,  // Pseudo-successes
-        1,                                // Pseudo-failures
-    )
-
-    Epistemic {
-        val: posterior_mean,
-        variance: posterior_var,
-        confidence: new_conf,
-        provenance: prior.provenance.with_step("belief_update"),
-    }
+    // Precision is updated from the observation variance. This API supplies no
+    // observation credibility evidence, so preserve the valid prior confidence.
+    ep_new(posterior_mean,posterior_var,prior.confidence)
 }
 
 // Sequential belief updating with multiple observations
 pub fn update_sequential(
     prior: Epistemic,
     observations: &[(f64, f64)],  // (value, variance) pairs
-) -> Epistemic {
+) -> Epistemic with Panic {
     var current = prior
 
     var i = 0
@@ -269,8 +261,8 @@ pub fn epsilon_greedy(
     values: &[Epistemic],
     epsilon: f64,
     random_value: f64,  // Should be in [0, 1]
-) -> Option<usize> {
-    if values.is_empty() {
+) -> Option<usize> with Panic {
+    if values.len()==0 {
         return None
     }
 
@@ -301,7 +293,7 @@ pub fn epsilon_greedy(
 //
 // UCB = value + c * sqrt(variance)
 pub fn ucb_select(values: &[Epistemic], exploration_constant: f64) -> Option<usize> {
-    if values.is_empty() {
+    if values.len()==0 {
         return None
     }
 
@@ -324,7 +316,7 @@ pub fn ucb_select(values: &[Epistemic], exploration_constant: f64) -> Option<usi
 // Thompson Sampling: sample from posterior and pick highest
 // Approximation: sample from N(value, variance)
 pub fn thompson_select(values: &[Epistemic], random_normals: &[f64]) -> Option<usize> {
-    if values.is_empty() || random_normals.len() < values.len() {
+    if values.len()==0 || random_normals.len() < values.len() {
         return None
     }
 

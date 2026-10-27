@@ -270,3 +270,47 @@ them. Preserve the exclusive owner/serialization discipline across receive
 and sender retrieval. Low-level ABI users must provide the same external
 serialization. On truncation the datagram is consumed and metadata is
 available, but the incomplete payload is not appended to the public buffer.
+
+## Native-qualified API source ports
+
+Fresh-compiler before replay Slurm **18177** preserved all six original
+selected check failures on raw SHA-256
+`9919d03afb60e418dc111797895860e27e93a22ca52a9cc51cd0e0edac1571b2`.
+Compiler source/qualification: sealed a95536ac plus resolver54230f,
+ownershipe611bac andcd332933, qualified by the compiler lane in18157.
+The baseline source snapshot and all original fixtures remain unchanged.
+
+Slurm **18191** completed with status0 for the native-qualified subset:
+original `test_gp_e2e.sio`, original `test_database_core.sio`, new
+active/PAC control and new database control. All twelve
+check/compile/native phases passed. C++23 independently checks confidence
+scores at0/250/1000, a concrete precision-weighted posterior, retained
+credibility and three PAC ceiling points. Both public active APIs reject
+confidence -1 and1001 after successful check/compile; each executable exits1
+before its acceptance marker. The C++ judge also rejects an altered
+posterior-confidence output.
+
+Receipt:
+`/scratch/sounio-stdlib-wave3-20261027/services/api-refusals-native-qualified-01/results`.
+Source/compiler/executable manifests have final rechecks; negative-template
+and derived-input hashes are recorded. `ACTIVE_CPP_CONCORDANCE_OK` and
+`API_NATIVE_PORT_CONTROLS_OK` are required.
+
+The active adapter replaces stale BetaConfidence/provenance assumptions
+with canonical flat `Epistemic`. It divides the validated integer
+credibility by1000 for a continuous exploration score. Precision-only
+updates preserve prior credibility because observation variance supplies
+no new credibility evidence; no float-to-confidence quantization occurs.
+PAC formula implementations are unchanged. This bounded concordance does
+not establish a general numerical error bound or prove PAC assumptions.
+The unsupported trait-associated Model item becomes the explicit concrete
+`DecisionStumpModel` alias.
+
+The larger replay18189 remains a recorded failure: readonly-array
+concatenation prevents native compilation of nonempty Frame/CSV-loader
+controls, the enum payload binder blocks original logic, and original
+stiffODE has independent callback/effect/legacy-bridge errors. These are
+not hidden by the successful subset receipt. Original empty Frame now
+runs with typed array-value length helpers; no raw array-header or fixed
+small replacement was introduced. Frame/CSV source ports remain separate
+until their native controls qualify.
