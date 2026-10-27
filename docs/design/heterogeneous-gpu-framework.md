@@ -1466,3 +1466,20 @@ Job 18325 gave those two immediate moves stall 5 and yield 1, and stored R8 agai
 The resident kernel's first `IADD3` in the list of section 54 is opcode `10 7c`. That form is not this word. The row stays open. Seventy-nine of the eighty-one names still have no number from this image.
 
 The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 56. A load from the owned image (2026-10-27, OBSERVED)
+
+Three instructions were inserted before `EXIT` in the image that stored 13. Slot 10 is `atlas_ldg_lo(4, 2, 8)` and `atlas_ldg_hi(4)`. The low word is `81 79 04 02 04 08 00 00`. The high word is `00 19 1e 0c 00 a8 0e 00`. The residue `203299072` is `0x0c1e1900`, so byte 1 of that half is `0x19`, the 32-bit `LDG.E` form. Stall is 4, yield is set, the read barrier is 2, and the write barrier is 7. Slot 11 is `IADD3` R0, R4, R7. R7 already holds 3. Slot 12 stores R0 at displacement 16. `EXIT` moved from pc `0xa0` to pc `0xd0`. The exit-offset word kept the low half `0x00041c04`. The high half is 208.
+
+The host cleared 24 bytes and wrote 17 at offset 8. Offset 12 was left at 0.
+
+The L4 was `IDLE+DRAIN` because the kill of job 18427 had failed at 17:08, and that job was already gone. The node was resumed. Pending job 18691, which had asked for the same node, started and was not cancelled. After it released the GPU, job 18697 ran. md5 `51967e8086db1300f49e1f3a1ed0f652`.
+
+`OWN=42`, `OWN_ADD=13`, `OWN_SRC=17`, `OWN_WIDE=0`, `OWN_SUM=20`, `EXIT:0`.
+
+The word at offset 16, which had been cleared, became 20. That is 17 plus 3. The 17 at offset 8 was still there. Offset 12 stayed 0. Read barrier 2 did not hang this launch. Stall 4 was enough for this load to be visible to the add.
+
+Byte 4 of this load is 4. The common `LDG.E` in `token_m1` uses 6 at displacement 0. That byte was not changed in this job.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
