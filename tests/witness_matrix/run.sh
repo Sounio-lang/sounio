@@ -74,12 +74,13 @@ DECLARED_OPEN=""
 #
 # w17 CLOSED 2026-10-27 (SIO-27, PR for #2760's minimal slice): the implicit
 # IO builtins now carry the IO effect in Madaros's checker whenever the name
-# does not resolve to a user function. The closure body's `print` therefore
-# makes the closure honestly effect-typed, and it no longer matches the
-# pure fn-pointer parameter: `souc check` on this file (and on
-# tests/compile-fail/closure_effect_escape.sio) went from "check: OK" to a
-# rejection. Witnessed by the matrix itself: w17 flipped from open to
-# rejected with no other row changing (22/22 correct).
+# does not resolve to a user function. A builtin IO call inside a closure is
+# effect-transparent: the obligation lands on the enclosing named fn, so the
+# `print` here is refused with E035 because pure_fn declares no IO (the
+# closure keeps its pure type, so an IO-declaring caller still compiles --
+# tests/run-pass/closure_effect_transparent_hof.sio). `souc check` on this
+# file went from "check: OK" to a rejection. Witnessed by the matrix itself:
+# w17 flipped from open to rejected with no other row changing (22/22 correct).
 
 run_value() {
   id="$1"; file="$2"; want="$3"; wrong="$4"; origin="$5"

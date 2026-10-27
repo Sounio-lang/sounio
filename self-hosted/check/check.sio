@@ -12372,9 +12372,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             if (*io_callee).kind == ExprKind::ExprIdent && checker_name_is_io_builtin((*io_callee).name) {
                 let io_sig = checker_fn_sigs_find_inplace(c, (*io_callee).name)
                 if io_sig < 0 || checker_invisible_native_builtin_sig(c, (*io_callee).name) {
-                    var effects_io_builtin: [i64; 8] = [0; 8]
-                    effects_io_builtin[0] = 0  // IO (effects.sio: 0=IO)
-                    checker_check_callee_effects_inplace(c, e.span, effects_io_builtin, 1)
+                    checker_check_io_builtin_effects_inplace(c, e.span, (*io_callee).name)
                 }
             }
         }
@@ -13213,6 +13211,46 @@ fn checker_check_callee_effects_named_inplace(c: *mut Checker, span: Span, calle
 // println, IO on syscall6, the store-site Mut from #1522): there is no callee name to report.
 fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) with Mut, IO, Panic, Div, Alloc {
     checker_check_callee_effects_named_inplace(c, span, callee_effects, callee_effect_count, empty_name())
+}
+
+// SIO-27 (#2760): the IO obligation of an implicit IO builtin (print, read_file,
+// ...), mirroring lean_single's observable behaviour. Two scoped differences
+// from the generic callee path:
+//  - Entry point: lean_single accepts IO builtins in a bare `main`, so the
+//    obligation is waived when the enclosing named fn is `main`. The generic
+//    path (user fns with declared effects) keeps its existing behaviour.
+//  - Closures: a builtin IO call inside a closure body is effect-transparent.
+//    The obligation lands on the ENCLOSING named fn (which is what
+//    current_sig_id still points at in that scope): if it declares IO (or is
+//    `main`), the closure keeps its pure inferred type and can flow through a
+//    pure fn-typed parameter; otherwise E035 fires at the call. User-fn
+//    effects inside closures keep the widening path in the named check above.
+fn checker_check_io_builtin_effects_inplace(c: *mut Checker, span: Span, source: Name) with Mut, IO, Panic, Div, Alloc {
+    var effects_io: [i64; 8] = [0; 8]
+    effects_io[0] = 0  // IO (effects.sio: 0=IO)
+    if checker_effect_inference_enabled() {
+        checker_check_callee_effects_inplace(c, span, effects_io, 1)
+        return
+    }
+    if (*c).in_closure_body {
+        if (*c).current_sig_id >= 0 {
+            let owner = fn_sig_table_get((*c).fn_sigs, (*c).current_sig_id)
+            if name_eq(owner.name, (*c).current_sig_name) {
+                if effects_subset(effects_io, 1, owner.effects, owner.effect_count) { return }
+                if name_matches_str4(owner.name, 109, 97, 105, 110) { return }  // main
+            }
+        }
+        let t = (*c).report_effect_error_from(span, effects_io, 1, source)
+        checker_store_from_value(c, t)
+        return
+    }
+    if effects_subset(effects_io, 1, (*c).current_effects, (*c).current_effect_count) { return }
+    if (*c).current_sig_id >= 0 {
+        let owner = fn_sig_table_get((*c).fn_sigs, (*c).current_sig_id)
+        if name_eq(owner.name, (*c).current_sig_name) && name_matches_str4(owner.name, 109, 97, 105, 110) { return }  // main
+    }
+    let t = (*c).report_effect_error_from(span, effects_io, 1, source)
+    checker_store_from_value(c, t)
 }
 
     fn checker_release_call_arg_borrows_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, call_start_borrows: BorrowEnv) with Mut, Panic, Div, Alloc, IO {
@@ -18875,6 +18913,31 @@ impl Checker {
         }
         let missing_pair = find_missing_effects(callee_effects, callee_effect_count, self.current_effects, self.current_effect_count)
         self.report_effect_error(span, missing_pair.0, missing_pair.1)
+    }
+
+    // SIO-27 (#2760): by-value twin of checker_check_io_builtin_effects_inplace.
+    fn check_io_builtin_effects(self, span: Span, source: Name) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var effects_io: [i64; 8] = [0; 8]
+        effects_io[0] = 0  // IO (effects.sio: 0=IO)
+        if checker_effect_inference_enabled() {
+            return self.check_callee_effects(span, effects_io, 1)
+        }
+        if self.in_closure_body {
+            if self.current_sig_id >= 0 {
+                let owner = fn_sig_table_get(self.fn_sigs, self.current_sig_id)
+                if name_eq(owner.name, self.current_sig_name) {
+                    if effects_subset(effects_io, 1, owner.effects, owner.effect_count) { return self }
+                    if name_matches_str4(owner.name, 109, 97, 105, 110) { return self }  // main
+                }
+            }
+            return self.report_effect_error_from(span, effects_io, 1, source)
+        }
+        if effects_subset(effects_io, 1, self.current_effects, self.current_effect_count) { return self }
+        if self.current_sig_id >= 0 {
+            let owner = fn_sig_table_get(self.fn_sigs, self.current_sig_id)
+            if name_eq(owner.name, self.current_sig_name) && name_matches_str4(owner.name, 109, 97, 105, 110) { return self }  // main
+        }
+        self.report_effect_error_from(span, effects_io, 1, source)
     }
 
     // --------------------------------------------------------
@@ -28886,9 +28949,7 @@ impl Checker {
             Some(io_callee_bv) => {
                 if (*io_callee_bv).kind == ExprKind::ExprIdent && checker_name_is_io_builtin((*io_callee_bv).name) {
                     if fn_sig_table_find_prefer_module(c.fn_sigs, (*io_callee_bv).name, c.current_module_id) < 0 {
-                        var effects_io_bv: [i64; 8] = [0; 8]
-                        effects_io_bv[0] = 0  // IO (effects.sio: 0=IO)
-                        c = c.check_callee_effects(e.span, effects_io_bv, 1)
+                        c = c.check_io_builtin_effects(e.span, (*io_callee_bv).name)
                     }
                 }
             }
