@@ -468,3 +468,4 @@ page is not a fresh execution receipt.
 | E272 | lexer (Madaros) | error | unterminated block comment: a `/*` (block comments nest) reaches end of file with its depth above zero; reported at the opening `/*` instead of silently swallowing the rest of the file | — |
 | E273 | lexer (Madaros) | error | unterminated string literal: a `"` reaches end of file without its closing quote; reported at the opening quote | — |
 | E274 | lexer (Madaros) | error | invalid escape sequence in a string literal: only `\n` `\t` `\r` `\0` `\\` `\"` and `\xHH` (two hex digits) are escapes; any other backslash pair used to compile as the bare character | — |
+| E275 | type-checker/pattern (lean_single) | error | unsupported struct pattern: lean_single binds only `field`, `field: name`, `field: _` and `..` (nested/literal sub-patterns are refused) and every named field must exist; refuses rather than emitting unbound or mis-bound locals | — |
