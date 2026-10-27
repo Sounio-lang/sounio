@@ -94,11 +94,9 @@ grep -F 'CSR independent median ratio disagreement' "$out/mutant-csr.verify.stde
 awk '$1=="CSR_GUARD"&&$2==1 {$3=0} {print}' "$out/csr-guards.native.stdout" > "$out/mutant-guard.input.stdout"
 expected mutant-guard.verify 8 "$out/genomics_count_identity.reference" --csr-guards "$out/mutant-guard.input.stdout"
 grep -F 'CSR guard status disagreement 1' "$out/mutant-guard.verify.stderr"
-# Structural qualification is engine-specific. The raw committed bootstrap
-# rejects repeated linear consumption but accepts these reachable private reads,
-# including the unchanged pre-existing IntegerBuffer.size witness. Preserve the
-# limitation explicitly; it is not counted as seed privacy enforcement.
-printf 'source\tlimitation\tactual_exit\n' > "$out/SEED_LIMITATIONS.tsv"
+# Both identified engines must reject private field access and repeated linear
+# consumption. The qualified committed bootstrap now enforces E259 as well.
+printf 'source\tengine\tactual_exit\n' > "$out/PRIVACY_CONTROLS.tsv"
 for owner in buffer csr;do
  for probe in private linear;do
   src="tests/stdlib/genomics_counts/"$owner"_"$probe"_probe.sio"
@@ -107,11 +105,10 @@ for owner in buffer csr;do
   if [[ $probe == private ]];then
    grep -F 'error[E259]' "$out/$name.check.stdout" "$out/$name.check.stderr"
    grep -F 'struct field is private in its defining module' "$out/$name.check.stdout" "$out/$name.check.stderr"
-   expected "$name.seed-read-accepted" 0 timeout 180 "$SEED_RAW_BIN" "$src" "$out/$name.seed-unqualified.elf"
-   grep -F 'compile: fns=' "$out/$name.seed-read-accepted.stdout"
-   [[ -s "$out/$name.seed-unqualified.elf" ]]
-   sha256sum "$out/$name.seed-unqualified.elf" >> "$out/ELFS.sha256"
-   printf '%s\tPRIVATE_READ_NOT_ENFORCED_BY_BOOTSTRAP\t0\n' "$src" >> "$out/SEED_LIMITATIONS.tsv"
+   expected "$name.seed-read-refused" 1 timeout 180 "$SEED_RAW_BIN" "$src" "$out/$name.seed-must-not-exist.elf"
+   grep -F 'error[E259]' "$out/$name.seed-read-refused.stdout" "$out/$name.seed-read-refused.stderr"
+   [[ ! -e "$out/$name.seed-must-not-exist.elf" ]]
+   printf '%s\tbootstrap\t1\n' "$src" >> "$out/PRIVACY_CONTROLS.tsv"
   else
    grep -E 'error\[E039\]|error\[E040\]' "$out/$name.check.stdout" "$out/$name.check.stderr"
    expected "$name.seed-check" 1 timeout 180 "$SEED_RAW_BIN" "$src" "$out/$name.seed-must-not-exist.elf"
@@ -119,7 +116,7 @@ for owner in buffer csr;do
   fi
  done
 done
-printf 'QUALIFICATION_SCOPE=both-numerical;canonical-private;both-linear;bootstrap-private-read-UNQUALIFIED\n'
+printf 'QUALIFICATION_SCOPE=both-numerical;both-private;both-linear\n'
 step inputs-integrity sha256sum -c "$out/INPUTS.sha256"
 step compilers-integrity sha256sum -c "$out/COMPILERS.sha256"
 step references-integrity sha256sum -c "$out/REFERENCES.sha256"
