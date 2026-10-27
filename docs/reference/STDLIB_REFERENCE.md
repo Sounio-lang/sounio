@@ -36,7 +36,7 @@ Run the fail-closed STDLIB gate from repository root:
 bash scripts/stdlib_reliability_gate.sh
 ```
 
-Those commands were not re-run on 2026-10-15. The files they write, if left at the committed snapshots, are not the current tree:
+Those commands were not re-run on 2026-10-27. The files they write, if left at the committed snapshots, are not the current tree:
 
 - `artifacts/stdlib/stdlib_reliability_status.v1.json` is 2026-05-12 and says 251/0/0/251.
 - `artifacts/stdlib/stdlib_inventory.v1.json` is 2026-05-12 and says 927 files.

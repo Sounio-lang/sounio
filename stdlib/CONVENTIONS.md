@@ -12,7 +12,7 @@ Rules for new stdlib code. They describe the forms the tree already uses. They a
 
 A top-level directory under `stdlib/` is a module area. It does not have to contain all of `mod.sio`, `lib.sio`, `README.md`, and `EXAMPLES.md`.
 
-On 2026-10-15, `bash scripts/stdlib/scan_stdlib.sh` found 1,702 `.sio` files, 101 `lib.sio`, 78 `mod.sio`, and no `*.sio.disabled`. Only `chemistry`, `core`, `database`, and `dataframe` have all four of those files at the top of the directory.
+On 2026-10-27, `bash scripts/stdlib/scan_stdlib.sh` found 1,741 `.sio` files, 102 `lib.sio`, 79 `mod.sio`, and no `*.sio.disabled`. Only `chemistry`, `core`, `database`, and `dataframe` have all four of those files at the top of the directory.
 
 Where a module has a public surface, put callable exports in `lib.sio` or in the file the generator already indexes. `scripts/build/gen_stdlib_api_md.sh` lists `pub fn` and skips a directory that has none.
 
