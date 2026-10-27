@@ -101,13 +101,12 @@ Branch naming conventions:
 
 Sounio is **NOT Rust**. The compiler will reject common Rust syntax. Follow these rules strictly:
 
-1. **No Semicolons**: Semicolons are not allowed at the end of statements (`let x = 5` not `let x = 5;`).
-2. **Mutability**: Use `var` for mutable bindings, never `let mut`.
-3. **Exclusive References**: Use `&!` for exclusive references, never `&mut`.
-4. **No Rust Macros**: Use `println("text")` and `assert(cond)` instead of macro syntax.
-5. **No Closure Literals**: Closure syntax like `|x| x + 1` does not exist. Use named function references.
-6. **Explicit Self**: All struct method implementations must declare `self` explicitly as `self: &Type` or `self: &!Type`.
-7. **Algebraic Effects System**: All functions with side effects must declare them using the `with` keyword:
+1. **Mutability**: Use `var` for mutable bindings, never `let mut`.
+2. **Exclusive References**: Use `&!` for exclusive references, never `&mut`.
+3. **No Rust Macros**: Use `println("text")` and `assert(cond)` instead of macro syntax.
+4. **No Closure Literals**: Closure syntax like `|x| x + 1` does not exist. Use named function references.
+5. **Explicit Self**: All struct method implementations must declare `self` explicitly as `self: &Type` or `self: &!Type`.
+6. **Algebraic Effects System**: All functions with side effects must declare them using the `with` keyword:
    - `IO`: printing, file access, terminal operations
    - `Mut`: exclusive reference mutation or reassignment
    - `Div`: mathematical division or modulo operations
