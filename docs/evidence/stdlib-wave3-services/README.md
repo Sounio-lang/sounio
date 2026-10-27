@@ -43,3 +43,27 @@ closure because the inventory had an extra blank row. Job 18126 used the
 same assertions, inputs and oracle after removing that blank row and passed
 the complete gate. This is a focused Arrow receipt, separate from the
 whole-stdlib acceptance run.
+
+## Strict CSV receipt
+
+Slurm **18130** completed with status 0. The identical
+`test_csv_strict.sio` fixture checked and compiled against the base reader,
+then failed natively (status 1). With the changed reader it checked, compiled
+and printed `CSV_STRICT_OK`. The offset/numeric-continuation fixture printed
+`CSV_STRICT_OFFSETS_OK`; existing checked-numeric and native-CSV tests also
+checked, compiled and ran successfully.
+
+Receipt root:
+`/scratch/sounio-stdlib-wave3-20261027/services/csv-strict-03/results`.
+Source, compiler/runtime and executable hashes have final rechecks.
+Job 18124 lacked the runtime library search path for the native-CSV control;
+job 18127 had a worker-script newline error before test execution. Both
+attempts are preserved. Job 18130 uses the qualified platform library.
+
+The string reader validates syntax before returning any rows and exposes
+status22 plus a zero-based byte offset. EOF inside a quoted field reports
+the byte length. Doubled quotes, quoted CR/LF and CRLF terminators remain
+accepted. Bare CR outside quotes, stray quotes and bytes after a closing
+quote are rejected. Existing ragged-row handling and numeric-failure row
+continuation remain unchanged. BOM, UTF-8 and strict width policy are
+separate from lexical validation.

@@ -11,6 +11,48 @@
 // For arbitrarily long fields, use csv_field_range + csv_byte to read the raw bytes with
 // no cap (raw path does not un-escape). See those functions below.
 
+// Syntax status0 is valid,22 is malformed. error_offset is a zero-based byte
+// position; an unterminated quoted field reports the input byte length.
+// Validates the whole document before iteration. BOM/UTF-8/row width are
+// separate policies; this legacy string reader performs no normalization.
+pub struct CsvSyntax { pub status: i64, pub error_offset: i64 }
+
+// Lexical CSV validation. Byte offsets; UTF-8 and field-count policies are separate.
+pub fn csv_validate_syntax(text: string) -> CsvSyntax with Mut, Panic, Div {
+    let n = str_len(text)
+    var state: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let c = str_char_at(text, i) as i64
+        if state == 2 {
+            if c == 34 { state = 3 }
+        } else {
+            if c == 13 {
+                if i + 1 >= n || str_char_at(text, i + 1) as i64 != 10 {
+                    return CsvSyntax { status: 22, error_offset: i }
+                }
+                state = 0
+                i = i + 1
+            } else if c == 10 {
+                state = 0
+            } else if state == 0 {
+                if c == 34 { state = 2 }
+                else if c != 44 { state = 1 }
+            } else if state == 1 {
+                if c == 34 { return CsvSyntax { status: 22, error_offset: i } }
+                if c == 44 { state = 0 }
+            } else {
+                if c == 34 { state = 2 }
+                else if c == 44 { state = 0 }
+                else { return CsvSyntax { status: 22, error_offset: i } }
+            }
+        }
+        i = i + 1
+    }
+    if state == 2 { return CsvSyntax { status: 22, error_offset: n } }
+    return CsvSyntax { status: 0, error_offset: 0 }
+}
+
 pub struct CsvReader {
     text: string,
     text_len: i64,
@@ -20,6 +62,8 @@ pub struct CsvReader {
     row_end: i64,
     pos: i64,
     ok: i64,
+    syntax_status: i64,
+    error_offset: i64,
 }
 
 // End byte index (exclusive) of the line beginning at `from`, and the index where the
@@ -68,6 +112,7 @@ fn csv_count_fields(text: string, start: i64, end: i64) -> i64 with Mut, Panic, 
 
 pub fn csv_open(text: string) -> CsvReader with Mut, Panic, Div {
     let len = str_len(text)
+    let syntax = csv_validate_syntax(text)
     let he = csv_line_end(text, len, 0)
     // row_start/row_end are initialized to the header range so csv_cols reports the
     // table's column count before the first csv_next_row; csv_next_row overwrites them.
@@ -77,6 +122,8 @@ pub fn csv_open(text: string) -> CsvReader with Mut, Panic, Div {
         row_start: 0, row_end: he,
         pos: csv_next_line_start(text, len, he),
         ok: 1,
+        syntax_status: syntax.status,
+        error_offset: syntax.error_offset,
     }
 }
 
@@ -85,6 +132,7 @@ pub fn csv_cols(r: &CsvReader) -> i64 with Mut, Panic, Div {
 }
 
 pub fn csv_next_row(r: &! CsvReader) -> bool with Mut, Panic, Div {
+    if (*r).syntax_status != 0 { return false }
     let len = (*r).text_len
     if (*r).pos >= len { return false }
     let s = (*r).pos
@@ -148,8 +196,11 @@ pub fn csv_col(r: &CsvReader, name: string) -> i64 with Mut, Panic, Div {
 }
 
 pub fn csv_ok(r: &CsvReader) -> bool with Mut, Panic, Div {
-    return (*r).ok == 1
+    return (*r).syntax_status == 0 && (*r).ok == 1
 }
+
+pub fn csv_syntax_status(r: &CsvReader) -> i64 { return (*r).syntax_status }
+pub fn csv_error_offset(r: &CsvReader) -> i64 { return (*r).error_offset }
 
 struct CsvCheckedNumber {value:i64,valid:bool}
 // Accumulate negatively so i64::MIN is representable, checking before arithmetic.
