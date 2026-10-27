@@ -16,7 +16,7 @@ This campaign combines a whole-tree source inventory and executable test selecti
 - Canonical sync::atomic and sync::mutex use native operations; time::instant acquires a real monotonic clock. The profiler reports clock, state, capacity and overflow errors rather than silently ignoring them.
 - Six intended math::pure exports and the regex u8 branch are repaired. The regex test imports production code instead of a duplicate implementation.
 
-- The disabled VCF module now validates core records and GT over dynamic byte buffers. [Its explicit contract](../../../../stdlib/genomics/io/VCF_CORE.md) leaves header/INFO/schema and symbolic-allele validation separate. Independent C++23 and native Sounio fixtures pass in job 17874.
+- The disabled VCF module now validates core records and GT over dynamic byte buffers. [Its explicit contract](../../../stdlib/genomics/io/VCF_CORE.md) leaves header/INFO/schema and symbolic-allele validation separate. Independent C++23 and native Sounio fixtures pass in job 17874.
 
 ## Scientific consolidation
 
