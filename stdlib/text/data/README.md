@@ -51,3 +51,8 @@ Run `ICU_PREFIX=... tools/unicode/check_collation_data.sh /absolute/new/output` 
 
 Slurm18359 passed the complete standalone parser/oracle/source-hash gate. Run `ICU_PREFIX=... tools/unicode/check_cldr_ast.sh /absolute/new/output` under Slurm to reproduce it. Own CE/rank construction, locale/import resolution, reorder/case/radical metadata and Sounio native locale conformance remain explicit pending work.
 
+
+CLDR registry preparation now preserves locale-level defaults even for files containing no collation entries, such as zh_Hant. An empty explicit-default field means inheritance. Collation-component parents are processed independently of main-component nonlikelyScript parents, as specified in [UTS35 Core49](https://www.unicode.org/reports/tr35/tr35-79/tr35.html). Type fallback and private-import visibility follow [UTS35 Collation49](https://www.unicode.org/reports/tr35/tr35-79/tr35-collation.html).
+
+Slurm18375 revalidated all318,628 AST sort-key probes and a deterministic registry/import graph over135 locales and169 entries. Co aliases come from the pinned BCP47 collation file added to the source package. Missing imports, cycles, private public requests and instruction-budget overflow fail. Eleven explicit locale/type fallback controls include zh_Hant and yue. This is still generator preparation: no production tailoring CE tables or runtime locale API are claimed.
+

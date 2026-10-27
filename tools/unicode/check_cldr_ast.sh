@@ -10,7 +10,7 @@ mkdir -p "$OUT/source"
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
 export LD_LIBRARY_PATH="$ICU_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-sha256sum tools/unicode/cldr_generate.cpp tools/unicode/cldr_oracle.cpp stdlib/text/data/cldr49-source.tar.gz "$ICU_PREFIX"/lib/libicu{uc,i18n,data}.so.79.1 > "$OUT/INPUTS.sha256"
+sha256sum tools/unicode/cldr_generate.cpp tools/unicode/cldr_oracle.cpp tools/unicode/cldr_registry.cpp stdlib/text/data/cldr49-source.tar.gz "$ICU_PREFIX"/lib/libicu{uc,i18n,data}.so.79.1 > "$OUT/INPUTS.sha256"
 tar -xzf stdlib/text/data/cldr49-source.tar.gz -C "$OUT/source"
 find "$OUT/source" -type f -print0 | sort -z | xargs -0 sha256sum > "$OUT/SOURCES.sha256"
 g++ -std=c++23 -O2 -Wall -Wextra -Werror -Wno-misleading-indentation tools/unicode/cldr_generate.cpp -o "$OUT/generate"
@@ -19,4 +19,7 @@ g++ -std=c++23 -O2 -Wall -Wextra -Werror -Wno-misleading-indentation -I"$ICU_PRE
 (cd "$OUT" && ./oracle source/selected)
 sha256sum -c "$OUT/INPUTS.sha256" > "$OUT/INPUTS.final.verify"
 sha256sum -c "$OUT/SOURCES.sha256" > "$OUT/SOURCES.final.verify"
+g++ -std=c++23 -O2 -Wall -Wextra -Werror -Wno-misleading-indentation tools/unicode/cldr_registry.cpp -o "$OUT/registry"
+"$OUT/registry" "$OUT/source/selected" "$OUT/registry.tsv"
+sha256sum -c "$OUT/INPUTS.sha256" > "$OUT/INPUTS.registry-final.verify"
 echo CLDR_AST_GATE_OK
