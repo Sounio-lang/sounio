@@ -92,12 +92,13 @@ tests/stdlib/massive/test_series_nonempty.sio	SERIES_NONEMPTY_OK
 tests/stdlib/massive/test_argparse_nonempty.sio	ARGPARSE_NONEMPTY_OK
 tests/stdlib/massive/test_byte_buffer_budget.sio	BYTE_BUFFER_BUDGET_OK
 tests/stdlib/massive/test_service_root_exports.sio	SERVICE_ROOT_EXPORTS_OK
+tests/stdlib/massive/test_active_log_concordance.sio	ACTIVE_LOG_CONCORDANCE_OK
 PLAN
 (
   cd "$ROOT"
   find stdlib -type f -print0
   while IFS=$'\t' read -r source marker; do printf '%s\0' "$source"; done < "$OUT/PLAN.tsv"
-  printf '%s\0' scripts/stdlib/wave3_services_gate.sh scripts/stdlib/bounded_command.mjs scripts/ci/souc-native-wrapper.sh tests/reference/stdlib_pollset_reference.cpp runtime/stdlib_platform.cpp
+  printf '%s\0' scripts/stdlib/wave3_services_gate.sh scripts/stdlib/bounded_command.mjs scripts/ci/souc-native-wrapper.sh tests/reference/stdlib_pollset_reference.cpp tests/reference/stdlib_active_log_reference.cpp runtime/stdlib_platform.cpp
 ) | sort -zu | while IFS= read -r -d '' path; do sha256sum "$ROOT/$path"; done > "$OUT/SOURCES.sha256"
 "$CXX" --version > "$OUT/CXX_VERSION"
 sha256sum "$RAW" "$PLATFORM" "$(command -v "$NODE")" "$(command -v "$CXX")" > "$OUT/TOOLS.sha256"
@@ -169,6 +170,16 @@ for mode in normal sanitized; do
   if ! phase "pollset-reference-$mode" native 120 1048576 env ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 "$OUT/pollset-reference-$mode"; then failed=1; continue; fi
   if [[ "$(grep -Fxc STDLIB_POLLSET_UDP_ABSOLUTE_DEADLINE_OK "$OUT/pollset-reference-$mode.native.log" || true)" != 1 ]]; then failed=1; fi
 done
+if ! phase active-log-reference compile 180 1048576 "$CXX" -std=c++23 -O2 -Wall -Wextra -Werror "$ROOT/tests/reference/stdlib_active_log_reference.cpp" -o "$OUT/active-log-reference"; then
+  failed=1
+else
+  sha256sum "$OUT/active-log-reference" >> "$OUT/EXECUTABLES.sha256"
+  if ! phase active-log-reference native 60 1048576 "$OUT/active-log-reference" "$OUT/test_active_log_concordance.native.log"; then
+    failed=1
+  elif ! grep -Fxq "ACTIVE_LOG_CPP_CONCORDANCE_OK finite_rows=30 domain_rows=4 absolute_tolerance=1e-11" "$OUT/active-log-reference.native.log"; then
+    failed=1
+  fi
+fi
 expected="$(wc -l < "$OUT/PLAN.tsv")"
 actual="$(awk -F '\t' 'NR>1 && $2=="marker" && $3==0 {n++} END{print n+0}' "$OUT/RESULTS.tsv")"
 [[ "$actual" == "$expected" ]] || failed=1

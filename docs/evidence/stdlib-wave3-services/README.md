@@ -443,3 +443,13 @@ effect-contract migration, not a weakening of effects. Public names and
 metric formulas are unchanged. Before18253 and after18256/18257 preserve
 harness output-routing and incomplete effect-annotation refusals, respectively.
 The original bridge/test workloads and numerical thresholds are untouched.
+
+The mandatory gate now also includes the active logarithm fixture and its
+independent C++23 oracle, bringing the required plan to28 fixtures.
+Slurm **18259** records22 successful fixture native markers, both ABI112
+reference modes and ACTIVE_LOG_CPP_CONCORDANCE_OK. Actual Slurm execution
+authority is recorded as run18259. All source/tool/derived/executable/output
+final guards pass. Overall status remains1 for the same six explicit
+compiler prerequisites; no canonical-root or nonempty-array check is
+omitted from final acceptance.
+Receipt: `/scratch/sounio-stdlib-wave3-20261027/services/reusable-gate-log-04/results/gate`.
