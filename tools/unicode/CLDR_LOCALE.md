@@ -114,3 +114,16 @@ acceptance. BIDI, generic ownership/compiler prerequisites, final corpus source
 identity, official CI authority and unresolved legacy primitive-string/char
 capabilities retain independent gates.
 
+Final-format default native corpus18612/18613 completed0:763 files/390251 rows,
+all8 partitions, ELF9b26bf5f358cdfa8ee3e6fdc4b2e4d5fb4f29f33cf37836b9d9f3a12659c1b8e,
+asset9ceb2499c85f9704e4b27cfd01fc51dde2078ad7b1e721063a1fe69d92fb32ee.
+The complete collector also passed through the public core gate18633 with
+wrong-source/fixture/family/missing-part negatives.
+
+Baseline-format1 complete native setting branch corpus18584/18596 completed0:
+4154 files/2126400 rows, all8 partitions, ELF09001b2a554cf2f625393a26013c02097118cc3e7a2ea6b8245f71480366e013.
+It covers every154 public entry and480 settings on the declared branch corpus;
+the complete source-derived corpus at all480 settings is independently qualified
+in C++23. Final-format2 full setting execution18614/18615 remains separate until
+its collector closes.
+
