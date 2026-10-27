@@ -240,3 +240,36 @@ Slurm18021 / packet65 completed the earlier raw810 full deep replay: all phases
 except the stale genomics-count-identities bootstrap-private-read expectation
 passed. Packet69 qualifies the corrected full child gate. Final-head hosted CI
 and a final raw11cb whole-corpus comparison remain separate acceptance gates.
+
+Slurm18055 / packet82 reproduces the independent append PR's CI-only failure:
+the workflow target was mode644. The identical script body at mode755 passes
+all 354 workflow references; job-timeout policy/selftests also pass. The previous
+isolated PR head45c already passed its source-built Madaros Witness job,
+including the mandatory both-engine append/C++ byte-concordance step.
+Latest-head CI remains a separate readback.
+
+The first completed same-raw810 comparison (packets68/72) has zero selection
+errors on both sides: main77 has 327 pass/78 fail/179 skip over584; candidate3987
+has370 pass/65 fail/215 skip over650. Among the584 shared paths,15 move from fail
+to pass and none from pass to fail. Two added NB2 cache cases exceed30 seconds
+under full parallel load. These snapshots precede the final raw11cb acceptance.
+
+Slurm18053 / packet83 separates the exact NB2 programs: compilation21.38/21.49s,
+native execution3.15/1.77s, isolated full commands24.76/23.55s with30s caps and
+24.54/23.31s with120s caps. Thus isolated30s passes coexist with the archived
+parallel30s timeouts; no algorithmic/performance fix is claimed. Only these two
+fixtures now declare120s for the entire compile-and-run pipeline. Their bodies,
+assertions and output remain byte-identical after removing that annotation,
+recorded in NB2_BUDGET_BODY_IDENTITY.json.
+
+Slurm18056 / packet85 executes both annotated fixtures through the canonical
+runner with immutable capture: each has1 pass/0 fail/0 skip, records the actual
+timeout120s command and exit0, and verifies inputs at completion. Suite defaults,
+numerical tolerances and all other per-case budgets are unchanged.
+
+The hosted deep replay hit its45-minute job envelope (start05:53, cancellation
+06:38) before finishing. The science/root/core branches now allow90 minutes for
+that complete job; individual case limits remain unchanged. A final complete
+raw11cb corpus is running as packets80/81; after the two measured annotations,
+the final candidate will be repeated as packet84 without overlapping its prior
+variant on the same node.
