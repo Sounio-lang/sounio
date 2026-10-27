@@ -1,0 +1,130 @@
+// Streaming exact sum-of-squares for discrete ADC samples.
+// CSV schema: sample_id,amplitude_adc; IDs 0..n-1, |amplitude|<=1,000,000.
+// Values are ADC counts; squared values are ADC^2, not calibrated SI energy.
+// Only scalar amplitudes enter native workers. All CSV/Arrow owners stay here.
+use ffi::platform::{Platform}
+use collections::byte_buffer::{ByteBuffer}
+use io::native_file::{native_file_open}
+use io::buffered_reader::{buffered_reader_new}
+use data::csv_stream::{CsvOwnedRow,csv_stream_new,csv_stream_next,csv_stream_close,csv_owned_row_new,csv_owned_row_close,csv_row_fields,csv_row_field_range,csv_row_field_byte,csv_row_i64_checked}
+use thread::native_pool::{native_pool_new,native_pool_status,native_pool_submit,native_pool_result,native_pool_shutdown,native_pool_join,native_pool_close}
+use arrow::lib::{arrow_schema_new,arrow_schema_add,arrow_type_int,arrow_batch_new,arrow_batch_shape,arrow_batch_set_i64}
+use arrow::native_stream::{arrow_stream_writer_new,arrow_stream_writer_status,arrow_stream_writer_begin,arrow_stream_writer_push,arrow_stream_writer_finish,arrow_stream_writer_close}
+pub struct AdcPipelineConfig {
+ pub workers:i64,pub task_capacity:i64,pub pool_budget_bytes:i64,
+ pub read_chunk_bytes:i64,pub max_row_bytes:i64,pub max_samples:i64,pub task_timeout_ms:i64
+}
+pub struct AdcPipelineSummary {
+ pub status:i64,pub cleanup_status:i64,pub accepted_rows:i64,pub written_rows:i64,pub sum_squares:i64
+}
+fn adc_square(value:i64)->i64 {value*value}
+fn adc_header(r:&CsvOwnedRow,field:i64,text:string)->bool with Div,Panic {
+ let range=csv_row_field_range(r,field)
+ if range.status!=0 || range.len!=str_len(text) {return false}
+ var i:i64=0
+ while i<range.len {
+  if csv_row_field_byte(r,field,i).value!=str_char_at(text,i) {return false}
+  i=i+1
+ }
+ return true
+}
+pub fn adc_csv_to_arrow(p:&Platform,input:&ByteBuffer,output:&ByteBuffer,cfg:&AdcPipelineConfig)->AdcPipelineSummary with IO,Alloc,Mut,Div,Panic {
+ if cfg.workers<1 || cfg.workers>64 || cfg.task_capacity<1 || cfg.task_capacity>1048576 ||
+    cfg.pool_budget_bytes<0 || cfg.read_chunk_bytes<1 || cfg.max_row_bytes<1 ||
+    cfg.max_samples<0 || cfg.max_samples>1000000 || cfg.task_timeout_ms<1 || cfg.task_timeout_ms>2147483647 {
+  return AdcPipelineSummary {status:22,cleanup_status:0,accepted_rows:0,written_rows:0,sum_squares:0}
+ }
+ var pool=native_pool_new(p,adc_square,cfg.workers,cfg.task_capacity,cfg.pool_budget_bytes)
+ var status=native_pool_status(&pool)
+ let source=native_file_open(p,input,0)
+ var stream=csv_stream_new(buffered_reader_new(source,cfg.read_chunk_bytes,cfg.read_chunk_bytes),2)
+ var row=csv_owned_row_new(cfg.max_row_bytes,2)
+ let target=native_file_open(p,output,1)
+ var writer=arrow_stream_writer_new(target)
+ if status==0 {status=arrow_stream_writer_status(&writer)}
+ var schema=arrow_schema_new()
+ var code=arrow_schema_add(&!schema,"sample_id",0,arrow_type_int(),64,1,0)
+ if status==0 {status=code}
+ code=arrow_schema_add(&!schema,"amplitude_adc",0,arrow_type_int(),64,1,0)
+ if status==0 {status=code}
+ code=arrow_schema_add(&!schema,"squared_amplitude",0,arrow_type_int(),64,1,0)
+ if status==0 {status=code}
+ if status==0 {
+  code=csv_stream_next(p,&!stream,&!row)
+  if code!=0 {status=if code==1 {22} else {code}}
+  else if csv_row_fields(&row)!=2 || !adc_header(&row,0,"sample_id") || !adc_header(&row,1,"amplitude_adc") {status=22}
+ }
+ if status==0 {status=arrow_stream_writer_begin(p,&!writer,&schema)}
+ var accepted:i64=0
+ var written:i64=0
+ var sum:i64=0
+ var ended:bool=false
+ let window=if cfg.task_capacity<16 {cfg.task_capacity} else {16}
+ var task_ids:[i64;16]=[0;16]
+ var amplitudes:[i64;16]=[0;16]
+ while status==0 && !ended {
+  var count:i64=0
+  while count<window && status==0 && !ended {
+   code=csv_stream_next(p,&!stream,&!row)
+   if code==1 {ended=true}
+   else if code!=0 {status=code}
+   else if accepted>=cfg.max_samples {status=75}
+   else {
+    let id=csv_row_i64_checked(&row,0)
+    let sample=csv_row_i64_checked(&row,1)
+    if id.status!=0 {status=id.status}
+    else if sample.status!=0 {status=sample.status}
+    else if id.value!=accepted {status=22}
+    else if sample.value<0-1000000 || sample.value>1000000 {status=34}
+    else {
+     let task=native_pool_submit(p,&!pool,sample.value,cfg.task_timeout_ms)
+     if task.status!=0 {status=task.status}
+     else {
+      task_ids[count as usize]=task.value
+      amplitudes[count as usize]=sample.value
+      accepted=accepted+1
+      count=count+1
+     }
+    }
+   }
+  }
+  var batch=arrow_batch_new()
+  if status==0 {status=arrow_batch_shape(&!batch,count,3)}
+  var i:i64=0
+  while status==0 && i<count {
+   let result=native_pool_result(p,&!pool,task_ids[i as usize],cfg.task_timeout_ms)
+   if result.status!=0 {status=result.status}
+   else if result.task_id!=written+i {status=5}
+   else {
+    code=arrow_batch_set_i64(&!batch,0,i,written+i,0)
+    if code==0 {code=arrow_batch_set_i64(&!batch,1,i,amplitudes[i as usize],0)}
+    if code==0 {code=arrow_batch_set_i64(&!batch,2,i,result.value,0)}
+    if code!=0 {status=code}
+    else {sum=sum+result.value}
+   }
+   i=i+1
+  }
+  if status==0 && count>0 {
+   status=arrow_stream_writer_push(p,&!writer,&schema,&batch)
+   if status==0 {written=written+count}
+  }
+ }
+ var cleanup:i64=0
+ if native_pool_status(&pool)==0 {
+  let stopped=native_pool_shutdown(p,&!pool,status!=0)
+  if stopped.status!=0 {cleanup=stopped.status}
+  let joined=native_pool_join(p,&!pool)
+  if cleanup==0 && joined!=0 {cleanup=joined}
+ }
+ code=native_pool_close(p,pool)
+ if cleanup==0 && code!=0 && status==0 {cleanup=code}
+ if status==0 && cleanup==0 {status=arrow_stream_writer_finish(p,&!writer)}
+ code=arrow_stream_writer_close(p,writer)
+ if cleanup==0 && code!=0 {cleanup=code}
+ code=csv_stream_close(p,stream)
+ if cleanup==0 && code!=0 {cleanup=code}
+ csv_owned_row_close(row)
+ if status==0 && cleanup!=0 {status=cleanup}
+ return AdcPipelineSummary {status:status,cleanup_status:cleanup,accepted_rows:accepted,written_rows:written,sum_squares:sum}
+}
+

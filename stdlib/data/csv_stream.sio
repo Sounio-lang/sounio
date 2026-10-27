@@ -189,3 +189,30 @@ pub fn csv_stream_close(p:&Platform,s:CsvStream)->i64 with IO,Alloc {
  let CsvStream {reader,prefix,prefix_len,prefix_pos,started,offset,columns,status}=s
  return buffered_reader_close(p,reader)
 }
+
+// Checked signed decimal conversion directly from an unescaped owned field.
+// No whitespace, fractional part, exponent, truncation or CString roundtrip.
+// Negative accumulation also admits the exact i64 minimum without negating it.
+pub fn csv_row_i64_checked(r:&CsvOwnedRow,field:i64)->PlatformValue with Div,Panic {
+ let range=csv_row_field_range(r,field)
+ if range.status!=0 {return PlatformValue {value:0,status:range.status}}
+ if range.len==0 {return PlatformValue {value:0,status:22}}
+ var at:i64=0
+ var negative:bool=false
+ let first=csv_row_field_byte(r,field,0).value
+ if first==45 || first==43 {negative=first==45;at=1}
+ if at==range.len {return PlatformValue {value:0,status:22}}
+ let limit=if negative {0-9223372036854775807-1} else {0-9223372036854775807}
+ var value:i64=0
+ while at<range.len {
+  let digit=csv_row_field_byte(r,field,at).value-48
+  if digit<0 || digit>9 {return PlatformValue {value:0,status:22}}
+  if value<limit/10 {return PlatformValue {value:0,status:34}}
+  value=value*10
+  if value<limit+digit {return PlatformValue {value:0,status:34}}
+  value=value-digit
+  at=at+1
+ }
+ return PlatformValue {value:if negative {value} else {0-value},status:0}
+}
+

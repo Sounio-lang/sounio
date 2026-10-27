@@ -1,0 +1,66 @@
+// Fixed native workers and a bounded number of admitted scalar tasks.
+// Callback and argument are plain fn(i64)->i64 and i64 data: no owners, loans or
+// captured environments are admitted through this interface. Callbacks must
+// terminate; shutdown cannot interrupt a running callback.
+use ffi::platform::{Platform,PlatformValue,platform_call}
+pub linear struct NativeThreadPool {id:i64,status:i64,joined:bool}
+pub struct NativePoolResult {pub task_id:i64,pub value:i64,pub status:i64}
+// Reservation charges control/slots, dedicated 1MiB worker stacks, 4KiB stack
+// guards and pthread handles. OS allocator bookkeeping/shared pages are excluded.
+pub fn native_pool_reservation(p:&Platform,workers:i64,capacity:i64)->PlatformValue with IO {
+ return platform_call(p,139,workers,capacity,0,0)
+}
+pub fn native_pool_new(p:&Platform,callback:fn(i64)->i64,workers:i64,capacity:i64,max_bytes:i64)->NativeThreadPool with IO {
+ let r=platform_call(p,130,callback as i64,workers,capacity,max_bytes)
+ return NativeThreadPool {id:r.value,status:r.status,joined:false}
+}
+pub fn native_pool_status(pool:&NativeThreadPool)->i64 {pool.status}
+// timeout_ms=0 is nonblocking (EAGAIN). On error no task was admitted.
+// IDs are monotonic and never reused. Completed, uncollected results occupy slots.
+pub fn native_pool_submit(p:&Platform,pool:&!NativeThreadPool,value:i64,timeout_ms:i64)->PlatformValue with IO {
+ if pool.status!=0 {return PlatformValue {value:0,status:pool.status}}
+ return platform_call(p,131,pool.id,value,timeout_ms,0)
+}
+// Collect one named task exactly once. Timeout leaves it owned by the pool.
+// ECANCELED consumes a canceled queued task; ENOENT means unknown/already taken.
+pub fn native_pool_result(p:&Platform,pool:&!NativeThreadPool,id:i64,timeout_ms:i64)->NativePoolResult with IO {
+ if pool.status!=0 {return NativePoolResult {task_id:id,value:0,status:pool.status}}
+ let r=platform_call(p,132,pool.id,id,timeout_ms,0)
+ return NativePoolResult {task_id:id,value:r.value,status:r.status}
+}
+// cancel_pending=false drains; true cancels queued tasks. Running work finishes.
+pub fn native_pool_shutdown(p:&Platform,pool:&!NativeThreadPool,cancel_pending:bool)->PlatformValue with IO {
+ if pool.status!=0 {return PlatformValue {value:0,status:pool.status}}
+ return platform_call(p,133,pool.id,if cancel_pending {1} else {0},0,0)
+}
+pub fn native_pool_join(p:&Platform,pool:&!NativeThreadPool)->i64 with IO,Mut {
+ if pool.status!=0 {return pool.status}
+ if pool.joined {return 22}
+ let r=platform_call(p,134,pool.id,0,0,0)
+ if r.status==0 {pool.joined=true}
+ return r.status
+}
+pub fn native_pool_outstanding(p:&Platform,pool:&NativeThreadPool)->PlatformValue with IO {
+ if pool.status!=0 {return PlatformValue {value:0,status:pool.status}}
+ return platform_call(p,135,pool.id,0,0,0)
+}
+pub fn native_pool_peak_running(p:&Platform,pool:&NativeThreadPool)->PlatformValue with IO {
+ if pool.status!=0 {return PlatformValue {value:0,status:pool.status}}
+ return platform_call(p,135,pool.id,4,0,0)
+}
+// Consumes the owner. Cancel queued work, join workers, discard remaining scalar
+// results, then destroy. A failed join is reported and never mislabeled cleanup.
+pub fn native_pool_close(p:&Platform,pool:NativeThreadPool)->i64 with IO {
+ let NativeThreadPool {id,status,joined}=pool
+ if status!=0 {return status}
+ if !joined {
+  let stopped=platform_call(p,133,id,1,0,0)
+  if stopped.status!=0 {return stopped.status}
+  let joined_now=platform_call(p,134,id,0,0,0)
+  if joined_now.status!=0 {return joined_now.status}
+ }
+ let discarded=platform_call(p,136,id,0,0,0)
+ if discarded.status!=0 {return discarded.status}
+ return platform_call(p,2,id,0,0,0).status
+}
+

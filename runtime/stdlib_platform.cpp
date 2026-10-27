@@ -67,7 +67,7 @@ asm(
 namespace {
 using I=std::int64_t;
 thread_local int last_error=0;
-enum class Kind {atomic,thread,socket,mutex,channel,file,text,pollset};
+enum class Kind {atomic,thread,socket,mutex,channel,file,text,pollset,pool};
 struct Resource {const Kind kind;explicit Resource(Kind k):kind(k){};virtual ~Resource()=default;};
 struct Atomic final:Resource {std::atomic<I> value;explicit Atomic(I v):Resource(Kind::atomic),value(v){}};
 struct Thread final:Resource {
@@ -223,6 +223,136 @@ I channel_receive(const std::shared_ptr<Channel>& q,I timeout_ms,bool wait) {
   lock.unlock();q->writable.notify_one();return value;
 }
 
+
+// Fixed worker count; every admitted task owns one bounded slot until collected.
+// A task carries scalar data, never a Sounio owner, loan or closure environment.
+struct Pool final:Resource {
+  struct Slot {I id=0,argument=0,value=0;int state=0,error=0;};
+  using Callback=I(*)(I);
+  static constexpr std::size_t stack_bytes=1048576,guard_bytes=4096;
+  Callback callback;
+  std::mutex mutex;
+  std::condition_variable changed;
+  std::vector<Slot> slots;
+  std::vector<pthread_t> threads;
+  I next_task=0,outstanding=0,running=0,completed=0,peak_running=0;
+  bool accepting=true,joining=false,joined=false;
+  Pool(Callback f,std::size_t capacity,std::size_t workers)
+      :Resource(Kind::pool),callback(f),slots(capacity) {threads.reserve(workers);}
+  ~Pool() override {
+    // Construction failure is also joined before any callback/library can vanish.
+    {std::lock_guard lock(mutex);accepting=false;}
+    changed.notify_all();
+    if(!joined)for(auto thread:threads)pthread_join(thread,nullptr);
+  }
+  static void* run(void* raw) noexcept {
+    auto& pool=*static_cast<Pool*>(raw);
+    for(;;) {
+      std::unique_lock lock(pool.mutex);
+      auto queued=[&] {return std::any_of(pool.slots.begin(),pool.slots.end(),
+                               [](const Slot& s){return s.state==1;});};
+      pool.changed.wait(lock,[&]{return !pool.accepting||queued();});
+      std::size_t index=pool.slots.size();I smallest=std::numeric_limits<I>::max();
+      for(std::size_t i=0;i<pool.slots.size();++i)
+        if(pool.slots[i].state==1&&pool.slots[i].id<smallest){index=i;smallest=pool.slots[i].id;}
+      if(index==pool.slots.size()){if(!pool.accepting)return nullptr;continue;}
+      auto& slot=pool.slots[index];
+      slot.state=2;++pool.running;pool.peak_running=std::max(pool.peak_running,pool.running);
+      const I argument=slot.argument;
+      lock.unlock();
+      I value=0;int error=0;
+      try {value=sounio_native_callback_thunk(pool.callback,argument);}
+      catch(...) {error=EIO;}
+      lock.lock();
+      slot.value=value;slot.error=error;slot.state=3;
+      --pool.running;++pool.completed;
+      lock.unlock();pool.changed.notify_all();
+    }
+  }
+  int start(std::size_t workers) {
+    pthread_attr_t attr;
+    int rc=pthread_attr_init(&attr);if(rc)return rc;
+    rc=pthread_attr_setstacksize(&attr,stack_bytes);
+    if(!rc)rc=pthread_attr_setguardsize(&attr,guard_bytes);
+    if(rc){pthread_attr_destroy(&attr);return rc;}
+    for(std::size_t i=0;i<workers;++i) {
+      pthread_t thread{};
+      rc=pthread_create(&thread,&attr,run,this);
+      if(rc)break;
+      threads.push_back(thread);
+    }
+    pthread_attr_destroy(&attr);
+    if(rc) {
+      {std::lock_guard lock(mutex);accepting=false;}
+      changed.notify_all();
+      for(auto thread:threads)pthread_join(thread,nullptr);
+      joined=true;
+    }
+    return rc;
+  }
+  I stop(bool cancel) {
+    std::lock_guard lock(mutex);accepting=false;
+    I canceled=0;
+    if(cancel)for(auto& s:slots)if(s.state==1){s.state=3;s.error=ECANCELED;++canceled;++completed;}
+    changed.notify_all();return canceled;
+  }
+  int join() {
+    {
+      std::lock_guard lock(mutex);
+      if(accepting||joining||joined)return EINVAL;
+      for(auto thread:threads)if(pthread_equal(pthread_self(),thread))return EDEADLK;
+      joining=true;
+    }
+    int error=0;
+    for(auto thread:threads){const int rc=pthread_join(thread,nullptr);if(rc&&!error)error=rc;}
+    {std::lock_guard lock(mutex);joining=false;joined=error==0;}
+    changed.notify_all();return error;
+  }
+};
+static_assert(sizeof(Pool)<=1024&&sizeof(Pool::Slot)<=48&&sizeof(pthread_t)<=8);
+// Reservation includes dedicated 1MiB stacks + 4KiB guards and payload/control
+// allowances. It excludes OS allocator bookkeeping and shared runtime pages.
+I pool_reservation(I workers,I capacity) {
+  if(workers<1||workers>64||capacity<1||capacity>1048576)return -1;
+  return 1024+workers*(1048576+4096+8)+capacity*48;
+}
+I pool_submit(const std::shared_ptr<Pool>& pool,I argument,I timeout_ms) {
+  if(timeout_ms<0||timeout_ms>2147483647)return failure(EINVAL);
+  std::unique_lock lock(pool->mutex);
+  const auto ready=[&]{return !pool->accepting||pool->outstanding<static_cast<I>(pool->slots.size());};
+  if(!ready()) {
+    if(timeout_ms==0)return failure(EAGAIN);
+    if(!pool->changed.wait_until(lock,std::chrono::steady_clock::now()+std::chrono::milliseconds(timeout_ms),ready))
+      return failure(ETIMEDOUT);
+  }
+  if(!pool->accepting)return failure(EPIPE);
+  if(pool->next_task==std::numeric_limits<I>::max())return failure(EOVERFLOW);
+  for(auto& slot:pool->slots)if(slot.state==0) {
+    slot={pool->next_task++,argument,0,1,0};++pool->outstanding;
+    const I id=slot.id;lock.unlock();pool->changed.notify_all();return id;
+  }
+  return failure(EIO);
+}
+I pool_result(const std::shared_ptr<Pool>& pool,I id,I timeout_ms) {
+  if(id<0||timeout_ms<0||timeout_ms>2147483647)return failure(EINVAL);
+  std::unique_lock lock(pool->mutex);
+  auto found=std::find_if(pool->slots.begin(),pool->slots.end(),
+                         [&](const Pool::Slot& s){return s.state!=0&&s.id==id;});
+  if(found==pool->slots.end())return failure(ENOENT);
+  const auto ready=[&]{return found->state==0||found->id!=id||found->state==3;};
+  if(!ready()) {
+    if(timeout_ms==0)return failure(EAGAIN);
+    if(!pool->changed.wait_until(lock,std::chrono::steady_clock::now()+std::chrono::milliseconds(timeout_ms),ready))
+      return failure(ETIMEDOUT);
+  }
+  if(found->state!=3||found->id!=id)return failure(ENOENT);
+  const I value=found->value;const int error=found->error;
+  found->state=0;--pool->outstanding;
+  lock.unlock();pool->changed.notify_all();
+  if(error)return failure(error);
+  return value;
+}
+
 I dispatch(I op,I a,I b,I c,I d) {
   if(op==100) {
     if(a<=0||b<0)return failure(EINVAL);
@@ -320,6 +450,51 @@ I dispatch(I op,I a,I b,I c,I d) {
     }
   }
 
+  if(op==139) {
+    const I reserved=pool_reservation(a,b);
+    if(reserved<0)return failure(EINVAL);
+    return reserved;
+  }
+  if(op==130) {
+    const I reserved=pool_reservation(b,c);
+    if(reserved<0||d<0||a==0)return failure(EINVAL);
+    if(d<reserved)return failure(ENOBUFS);
+    // dladdr rejects heap closure descriptors. It does not prove code identity;
+    // the typed public API requires a bare function and forbids owner casts.
+    Dl_info info{};
+    if(dladdr(reinterpret_cast<void*>(a),&info)==0)return failure(EINVAL);
+    auto pool=std::make_shared<Pool>(reinterpret_cast<Pool::Callback>(a),
+                                    static_cast<std::size_t>(c),static_cast<std::size_t>(b));
+    const int rc=pool->start(static_cast<std::size_t>(b));if(rc)return failure(rc);
+    return put(std::move(pool));
+  }
+  if(op>=131&&op<=138) {
+    auto pool=get<Pool>(a,Kind::pool);if(!pool)return 0;
+    if(op==131){if(d!=0)return failure(EINVAL);return pool_submit(pool,b,c);}
+    if(op==132){if(d!=0)return failure(EINVAL);return pool_result(pool,b,c);}
+    if(op==133){if(b<0||b>1||c!=0||d!=0)return failure(EINVAL);return pool->stop(b==1);}
+    if(op==134){if(b||c||d)return failure(EINVAL);const int rc=pool->join();return rc?failure(rc):0;}
+    if(op==135) {
+      std::lock_guard lock(pool->mutex);
+      if(c||d)return failure(EINVAL);
+      if(b==0)return pool->outstanding;
+      if(b==1)return static_cast<I>(pool->threads.size());
+      if(b==2)return static_cast<I>(pool->slots.size());
+      if(b==3)return pool->running;
+      if(b==4)return pool->peak_running;
+      if(b==5)return pool->completed;
+      return failure(EINVAL);
+    }
+    if(op==136) {
+      std::lock_guard lock(pool->mutex);
+      if(b||c||d||!pool->joined)return failure(EINVAL);
+      const I discarded=pool->outstanding;
+      for(auto& slot:pool->slots)slot.state=0;
+      pool->outstanding=0;return discarded;
+    }
+    return failure(ENOSYS);
+  }
+
   if(op==95) {
     if(b<0||c<1||(b>0&&a==0))return failure(EINVAL);
     if(b>c-1)return failure(ENOBUFS);
@@ -402,6 +577,11 @@ I dispatch(I op,I a,I b,I c,I d) {
     std::lock_guard guard(registry_mutex);auto it=registry.find(a);
     if(it==registry.end())return failure(EBADF);
     int close_error=0;
+    if(it->second->kind==Kind::pool) {
+      auto pool=std::static_pointer_cast<Pool>(it->second);
+      std::lock_guard lock(pool->mutex);
+      if(!pool->joined||pool->outstanding!=0)return failure(EBUSY);
+    }
     if(it->second->kind==Kind::thread) {
       auto t=std::static_pointer_cast<Thread>(it->second);
       std::lock_guard thread_guard(t->mutex);
