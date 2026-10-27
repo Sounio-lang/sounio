@@ -1,0 +1,53 @@
+//@ run-pass
+//@ expect-stdout: POLL_SET_OK
+use ffi::platform::{platform_open,platform_status,platform_call,platform_close}
+use net::native::{native_udp_bind,native_socket_status,native_socket_port,native_socket_token,native_socket_close,native_udp_set_destination,native_udp_send,native_udp_receive,native_udp_sender}
+use net::poll_set::{poll_set_new,poll_set_status,poll_set_register,poll_set_remove,poll_set_wait,poll_set_event,poll_set_close}
+use collections::byte_buffer::{byte_buffer_new,byte_buffer_push,byte_buffer_get,byte_buffer_len,byte_buffer_close}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ let a=native_udp_bind(&p,2130706433,0)
+ let b=native_udp_bind(&p,2130706433,0)
+ assert(native_socket_status(&a)==0 && native_socket_status(&b)==0)
+ let at=native_socket_token(&a)
+ let bt=native_socket_token(&b)
+ let set=poll_set_new(&p,1,24)
+ assert(poll_set_status(&set)==0)
+ assert(poll_set_register(&p,&set,&at,1,101)==0)
+ assert(poll_set_register(&p,&set,&bt,1,202)==105)
+ assert(poll_set_register(&p,&set,&at,0,99)==22)
+ assert(poll_set_wait(&p,&set,0).value==0)
+ assert(poll_set_wait(&p,&set,-1).status==22)
+ assert(poll_set_event(&p,&set,0).status!=0)
+ assert(native_udp_set_destination(&p,&b,2130706433,native_socket_port(&p,&a).value)==0)
+ var bytes=byte_buffer_new(16)
+ assert(byte_buffer_push(&!bytes,42)==0)
+ assert(native_udp_send(&p,&b,&bytes,0,1).value==1)
+ let now=platform_call(&p,30,0,0,0,0)
+ let waited=poll_set_wait(&p,&set,now.value+1000000000)
+ assert(waited.status==0 && waited.value==1)
+ let event=poll_set_event(&p,&set,0)
+ assert(event.status==0 && event.tag==101 && (event.flags & 1)!=0)
+ var incoming=byte_buffer_new(16)
+ assert(native_udp_receive(&p,&a,&!incoming,16,100).value==1)
+ assert(byte_buffer_get(&incoming,0).value==42)
+ let sender=native_udp_sender(&p,&a)
+ assert(sender.status==0 && sender.ipv4==2130706433 && sender.port==native_socket_port(&p,&b).value)
+ assert(native_udp_send(&p,&b,&bytes,0,0).value==0)
+ assert(native_udp_receive(&p,&a,&!incoming,0,100).status==0)
+ assert(byte_buffer_len(&incoming)==1)
+ assert(poll_set_register(&p,&set,&at,1,303)==0)
+ assert(native_socket_close(&p,a)==0)
+ assert(poll_set_wait(&p,&set,0).value==1)
+ let stale=poll_set_event(&p,&set,0)
+ assert(stale.status==0 && stale.tag==303 && (stale.flags & 16)!=0)
+ assert(poll_set_remove(&p,&set,&at)==0)
+ assert(poll_set_wait(&p,&set,0).value==0)
+ assert(poll_set_close(&p,set)==0)
+ assert(native_socket_close(&p,b)==0)
+ byte_buffer_close(bytes);byte_buffer_close(incoming)
+ platform_close(p)
+ println("POLL_SET_OK")
+ 0
+}

@@ -1,0 +1,44 @@
+//@ run-pass
+//@ expect-stdout: POLL_REAP_OK
+use ffi::platform::{platform_open,platform_status,platform_close}
+use async::poll_executor::{PollStep,poll_executor_new,poll_executor_spawn,poll_executor_tick,poll_executor_result,poll_executor_cancel,poll_executor_reap,poll_executor_task_count,poll_executor_pending,poll_executor_close}
+fn ready(state:i64)->PollStep with IO,Alloc,Mut,Div,Panic {PollStep {state:state,outcome:1,value:state,wake_at_ns:0}}
+fn pending(state:i64)->PollStep with IO,Alloc,Mut,Div,Panic {PollStep {state:state,outcome:0,value:0,wake_at_ns:0}}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ var e=poll_executor_new(96)
+ let a=poll_executor_spawn(&!e,ready,10)
+ let b=poll_executor_spawn(&!e,pending,20)
+ assert(a.status==0 && a.value==0 && b.status==0 && b.value==1)
+ assert(poll_executor_reap(&!e,b.value).status==22)
+ assert(poll_executor_tick(&!e,&p,2).value==2)
+ assert(poll_executor_pending(&e)==1)
+ let done=poll_executor_reap(&!e,a.value)
+ assert(done.status==1 && done.value==10)
+ assert(poll_executor_task_count(&e)==1 && poll_executor_result(&e,a.value).status==4)
+ let c=poll_executor_spawn(&!e,ready,30)
+ assert(c.status==0 && c.value==2)
+ assert(poll_executor_spawn(&!e,ready,40).status==2)
+ assert(poll_executor_cancel(&!e,b.value)==0)
+ assert(poll_executor_reap(&!e,b.value).status==3)
+ assert(poll_executor_cancel(&!e,b.value)==4)
+ assert(poll_executor_tick(&!e,&p,2).value==1)
+ assert(poll_executor_result(&e,c.value).value==30)
+ assert(poll_executor_reap(&!e,c.value).status==1)
+ assert(poll_executor_task_count(&e)==0 && poll_executor_pending(&e)==0)
+ var i:i64=0
+ while i<32 {
+  let next=poll_executor_spawn(&!e,ready,i)
+  assert(next.status==0 && next.value==i+3)
+  assert(poll_executor_tick(&!e,&p,1).value==1)
+  let result=poll_executor_reap(&!e,next.value)
+  assert(result.status==1 && result.value==i)
+  assert(poll_executor_result(&e,next.value).status==4)
+  i=i+1
+ }
+ poll_executor_close(e)
+ platform_close(p)
+ println("POLL_REAP_OK")
+ 0
+}

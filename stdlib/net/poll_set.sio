@@ -1,0 +1,43 @@
+// Linux IPv4 readiness set. Registration holds a stable logical ID, not ownership.
+// Socket owners must remain alive for useful I/O. Closed registrations yield flag16.
+// A close during wait can be observed only after a readiness event or the deadline.
+// Callers serialize wait, registration and event reads: event fields use three ABI
+// reads and are valid until the next wait or registration mutation. Payload budget
+// is 24 bytes per registration; bounded native container/snapshot overhead is separate.
+use ffi::platform::{Platform,PlatformValue,platform_call}
+use net::native::{SocketToken,socket_token_argument}
+pub linear struct PollSet {id:i64,status:i64}
+pub struct PollEvent {pub socket:i64,pub flags:i64,pub tag:i64,pub status:i64}
+pub fn poll_set_new(p:&Platform,max_entries:i64,max_bytes:i64)->PollSet with IO {
+ let r=platform_call(p,100,max_entries,max_bytes,0,0)
+ return PollSet {id:r.value,status:r.status}
+}
+pub fn poll_set_status(s:&PollSet)->i64 {s.status}
+pub fn poll_set_register(p:&Platform,s:&PollSet,socket:&SocketToken,interests:i64,tag:i64)->i64 with IO {
+ if s.status!=0 {return s.status}
+ return platform_call(p,101,s.id,socket_token_argument(socket),interests,tag).status
+}
+pub fn poll_set_remove(p:&Platform,s:&PollSet,socket:&SocketToken)->i64 with IO {
+ if s.status!=0 {return s.status}
+ return platform_call(p,102,s.id,socket_token_argument(socket),0,0).status
+}
+// Returns count0/status0 when deadline expires without events. Zero is nonblocking.
+pub fn poll_set_wait(p:&Platform,s:&PollSet,absolute_ns:i64)->PlatformValue with IO {
+ if s.status!=0 {return PlatformValue {value:0,status:s.status}}
+ if absolute_ns<0 {return PlatformValue {value:0,status:22}}
+ return platform_call(p,103,s.id,absolute_ns,0,0)
+}
+pub fn poll_set_event(p:&Platform,s:&PollSet,index:i64)->PollEvent with IO {
+ if s.status!=0 {return PollEvent {socket:0,flags:0,tag:0,status:s.status}}
+ let socket=platform_call(p,104,s.id,index,0,0)
+ if socket.status!=0 {return PollEvent {socket:0,flags:0,tag:0,status:socket.status}}
+ let flags=platform_call(p,105,s.id,index,0,0)
+ if flags.status!=0 {return PollEvent {socket:0,flags:0,tag:0,status:flags.status}}
+ let tag=platform_call(p,106,s.id,index,0,0)
+ return PollEvent {socket:socket.value,flags:flags.value,tag:tag.value,status:tag.status}
+}
+pub fn poll_set_close(p:&Platform,s:PollSet)->i64 with IO {
+ let PollSet {id,status}=s
+ if status!=0 {return status}
+ return platform_call(p,2,id,0,0,0).status
+}

@@ -1,0 +1,38 @@
+//@ run-pass
+//@ expect-stdout: DEADLINE_SOCKET_OK
+use ffi::platform::{platform_open,platform_status,platform_call,platform_close}
+use net::native::{native_tcp_listen,native_tcp_connect,native_tcp_accept,native_socket_status,native_socket_port,native_socket_send_all_until,native_socket_read_exact_until,native_socket_shutdown,native_socket_close}
+use collections::byte_buffer::{byte_buffer_new,byte_buffer_push,byte_buffer_get,byte_buffer_len,byte_buffer_clear,byte_buffer_close}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ let listener=native_tcp_listen(&p,2130706433,0,4)
+ assert(native_socket_status(&listener)==0)
+ let client=native_tcp_connect(&p,2130706433,native_socket_port(&p,&listener).value,1000)
+ let server=native_tcp_accept(&p,&listener,1000)
+ assert(native_socket_status(&client)==0 && native_socket_status(&server)==0)
+ var bytes=byte_buffer_new(16)
+ assert(byte_buffer_push(&!bytes,65)==0 && byte_buffer_push(&!bytes,66)==0)
+ var received=byte_buffer_new(16)
+ let deadline=platform_call(&p,30,0,0,0,0).value+1000000000
+ assert(native_socket_send_all_until(&p,&client,&bytes,0,2,deadline).value==2)
+ let partial=native_socket_read_exact_until(&p,&server,&!received,3,platform_call(&p,30,0,0,0,0).value+20000000)
+ assert(partial.status==110 && partial.value==2 && byte_buffer_len(&received)==2)
+ assert(byte_buffer_get(&received,0).value==65 && byte_buffer_get(&received,1).value==66)
+ assert(native_socket_read_exact_until(&p,&server,&!received,1,0).status==110)
+ assert(native_socket_send_all_until(&p,&client,&bytes,0,3,deadline).status==22)
+ assert(native_socket_read_exact_until(&p,&server,&!received,0,-1).status==22)
+ byte_buffer_clear(&!received)
+ assert(native_socket_send_all_until(&p,&client,&bytes,0,2,deadline).value==2)
+ assert(native_socket_shutdown(&p,&client,1)==0)
+ let eof=native_socket_read_exact_until(&p,&server,&!received,3,deadline)
+ assert(eof.status==61 && eof.value==2 && byte_buffer_len(&received)==2)
+ assert(native_socket_read_exact_until(&p,&server,&!received,0,0).status==0)
+ byte_buffer_close(bytes);byte_buffer_close(received)
+ assert(native_socket_close(&p,server)==0)
+ assert(native_socket_close(&p,client)==0)
+ assert(native_socket_close(&p,listener)==0)
+ platform_close(p)
+ println("DEADLINE_SOCKET_OK")
+ 0
+}

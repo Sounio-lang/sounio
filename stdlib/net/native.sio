@@ -1,5 +1,5 @@
 use ffi::platform::{Platform,PlatformValue,platform_call}
-use collections::byte_buffer::{ByteBuffer,byte_buffer_native_send,byte_buffer_native_receive}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_len,byte_buffer_native_send,byte_buffer_native_receive,byte_buffer_native_send_until,byte_buffer_native_receive_until,byte_buffer_native_udp_send}
 pub linear struct NativeSocket {id:i64,status:i64,datagram:bool}
 pub fn native_socket_status(s:&NativeSocket)->i64 {s.status}
 pub fn native_tcp_listen(p:&Platform,ipv4:i64,port:i64,backlog:i64)->NativeSocket with IO {
@@ -87,4 +87,57 @@ pub fn socket_token_try_send(p:&Platform,t:&SocketToken,b:&ByteBuffer,offset:i64
  if t.status!=0 {return PlatformValue {value:0,status:t.status}}
  if t.datagram {return PlatformValue {value:0,status:22}}
  return byte_buffer_native_send(p,t.id,b,offset,n,0,false)
+}
+
+// Absolute deadlines are monotonic nanoseconds (time op30); zero polls immediately.
+// Positive partial transfers are accumulated without extending the deadline.
+pub fn native_socket_send_all_until(p:&Platform,s:&NativeSocket,b:&ByteBuffer,offset:i64,n:i64,deadline_ns:i64)->PlatformValue with IO,Mut {
+ if s.status!=0 {return PlatformValue {value:0,status:s.status}}
+ if s.datagram || n<0 || offset<0 || deadline_ns<0 {return PlatformValue {value:0,status:22}}
+ let valid=byte_buffer_native_send_until(p,s.id,b,offset,0,deadline_ns)
+ if valid.status!=0 {return valid}
+ if offset>byte_buffer_len(b) || n>byte_buffer_len(b)-offset {return PlatformValue {value:0,status:22}}
+ var done:i64=0
+ while done<n {
+  let r=byte_buffer_native_send_until(p,s.id,b,offset+done,n-done,deadline_ns)
+  if r.status!=0 {return PlatformValue {value:done,status:r.status}}
+  if r.value<=0 || r.value>n-done {return PlatformValue {value:done,status:5}}
+  done=done+r.value
+ }
+ return PlatformValue {value:done,status:0}
+}
+// Appends bytes; EOF before n returns the preserved count with status61 (ENODATA).
+pub fn native_socket_read_exact_until(p:&Platform,s:&NativeSocket,b:&!ByteBuffer,n:i64,deadline_ns:i64)->PlatformValue with IO,Alloc,Mut {
+ if s.status!=0 {return PlatformValue {value:0,status:s.status}}
+ if s.datagram || n<0 || deadline_ns<0 {return PlatformValue {value:0,status:22}}
+ var done:i64=0
+ let valid=byte_buffer_native_receive_until(p,s.id,b,0,deadline_ns)
+ if valid.status!=0 {return valid}
+ while done<n {
+  let r=byte_buffer_native_receive_until(p,s.id,b,n-done,deadline_ns)
+  if r.status!=0 {return PlatformValue {value:done,status:r.status}}
+  if r.value==0 {return PlatformValue {value:done,status:61}}
+  if r.value<0 || r.value>n-done {return PlatformValue {value:done,status:71}}
+  done=done+r.value
+ }
+ return PlatformValue {value:done,status:0}
+}
+pub fn native_udp_set_destination(p:&Platform,s:&NativeSocket,ipv4:i64,port:i64)->i64 with IO {
+ if s.status!=0 {return s.status}
+ if !s.datagram {return 22}
+ return platform_call(p,107,s.id,ipv4,port,0).status
+}
+pub fn native_udp_send(p:&Platform,s:&NativeSocket,b:&ByteBuffer,offset:i64,n:i64)->PlatformValue with IO {
+ if s.status!=0 {return PlatformValue {value:0,status:s.status}}
+ if !s.datagram {return PlatformValue {value:0,status:22}}
+ return byte_buffer_native_udp_send(p,s.id,b,offset,n)
+}
+pub struct UdpSender {pub ipv4:i64,pub port:i64,pub status:i64}
+pub fn native_udp_sender(p:&Platform,s:&NativeSocket)->UdpSender with IO {
+ if s.status!=0 {return UdpSender {ipv4:0,port:0,status:s.status}}
+ if !s.datagram {return UdpSender {ipv4:0,port:0,status:22}}
+ let ip=platform_call(p,109,s.id,0,0,0)
+ if ip.status!=0 {return UdpSender {ipv4:0,port:0,status:ip.status}}
+ let port=platform_call(p,63,s.id,0,0,0)
+ return UdpSender {ipv4:ip.value,port:port.value,status:port.status}
 }

@@ -4,13 +4,14 @@
 use collections::integer_buffer::{IntegerBuffer,IntegerValue,integer_buffer_new,integer_buffer_len,integer_buffer_status,integer_buffer_resize,integer_buffer_at,integer_buffer_set,integer_buffer_close}
 use ffi::platform::{Platform,platform_call}
 pub struct PollStep {pub state:i64,pub outcome:i64,pub value:i64,pub wake_at_ns:i64}
-pub linear struct PollExecutor {slots:IntegerBuffer,cursor:i64,pending:i64}
+pub linear struct PollExecutor {slots:IntegerBuffer,cursor:i64,pending:i64,next_id:i64}
 pub struct PollTask {pub status:i64,pub value:i64}
 pub fn poll_executor_new(max_bytes:i64)->PollExecutor with Alloc,Mut,Div {
- PollExecutor {slots:integer_buffer_new(0,max_bytes),cursor:0,pending:0}
+ PollExecutor {slots:integer_buffer_new(0,max_bytes),cursor:0,pending:0,next_id:0}
 }
 pub fn poll_executor_pending(e:&PollExecutor)->i64 {e.pending}
 pub fn poll_executor_spawn(e:&!PollExecutor,callback:fn(i64)->PollStep with IO,Alloc,Mut,Div,Panic,state:i64)->IntegerValue with Alloc,Mut,Div,Panic {
+ if e.next_id==9223372036854775807 {return IntegerValue {value:0,status:2}}
  let n=integer_buffer_len(&e.slots)
  // Buffer payload cap also bounds n+6, before arithmetic.
  if n>9223372036854771696 {return IntegerValue {value:0,status:2}}
@@ -18,19 +19,32 @@ pub fn poll_executor_spawn(e:&!PollExecutor,callback:fn(i64)->PollStep with IO,A
  if status!=0 {return IntegerValue {value:0,status:status}}
  assert(integer_buffer_set(&!e.slots,n,callback as i64)==0)
  assert(integer_buffer_set(&!e.slots,n+1,state)==0)
+ assert(integer_buffer_set(&!e.slots,n+5,e.next_id)==0)
+ let id=e.next_id
+ e.next_id=e.next_id+1
  e.pending=e.pending+1
- return IntegerValue {value:n/6,status:0}
+ return IntegerValue {value:id,status:0}
 }
-pub fn poll_executor_result(e:&PollExecutor,id:i64)->PollTask with Div,Panic {
- if id<0 || id>=integer_buffer_len(&e.slots)/6 {return PollTask {status:4,value:0}}
- let index=id*6
+fn poll_executor_index(e:&PollExecutor,id:i64)->i64 with Mut,Panic {
+ if id<0 {return -1}
+ var index:i64=0
+ while index<integer_buffer_len(&e.slots) {
+  if integer_buffer_at(&e.slots,index+5)==id {return index}
+  index=index+6
+ }
+ return -1
+}
+pub fn poll_executor_result(e:&PollExecutor,id:i64)->PollTask with Mut,Div,Panic {
+ let index=poll_executor_index(e,id)
+ if index<0 {return PollTask {status:4,value:0}}
  return PollTask {status:integer_buffer_at(&e.slots,index+2),value:integer_buffer_at(&e.slots,index+3)}
 }
 pub fn poll_executor_cancel(e:&!PollExecutor,id:i64)->i64 with Mut,Div,Panic {
  let result=poll_executor_result(e,id)
  if result.status==4 {return 4}
  if result.status!=0 {return 22}
- assert(integer_buffer_set(&!e.slots,id*6+2,3)==0)
+ let index=poll_executor_index(e,id)
+ assert(integer_buffer_set(&!e.slots,index+2,3)==0)
  e.pending=e.pending-1
  return 0
 }
@@ -71,6 +85,28 @@ pub fn poll_executor_tick(e:&!PollExecutor,p:&Platform,max_polls:i64)->IntegerVa
  return IntegerValue {value:polled,status:0}
 }
 pub fn poll_executor_close(e:PollExecutor) with Alloc {
- let PollExecutor {slots,cursor,pending}=e
+ let PollExecutor {slots,cursor,pending,next_id}=e
  integer_buffer_close(slots)
 }
+// Reclaim terminal task storage. IDs increase monotonically and are never reused.
+// A pending task cannot be reaped; cancellation is an explicit preceding action.
+pub fn poll_executor_reap(e:&!PollExecutor,id:i64)->PollTask with Alloc,Mut,Div,Panic {
+ let index=poll_executor_index(e,id)
+ if index<0 {return PollTask {status:4,value:0}}
+ let state=integer_buffer_at(&e.slots,index+2)
+ if state==0 {return PollTask {status:22,value:0}}
+ let value=integer_buffer_at(&e.slots,index+3)
+ let n=integer_buffer_len(&e.slots)
+ var at=index
+ while at<n-6 {
+  let word=integer_buffer_at(&e.slots,at+6)
+  assert(integer_buffer_set(&!e.slots,at,word)==0)
+  at=at+1
+ }
+ assert(integer_buffer_resize(&!e.slots,n-6)==0)
+ let count=(n-6)/6
+ if e.cursor>index/6 {e.cursor=e.cursor-1}
+ if count==0 {e.cursor=0} else if e.cursor>=count {e.cursor=0}
+ return PollTask {status:state,value:value}
+}
+pub fn poll_executor_task_count(e:&PollExecutor)->i64 with Div {integer_buffer_len(&e.slots)/6}

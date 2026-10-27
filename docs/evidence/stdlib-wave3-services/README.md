@@ -67,3 +67,39 @@ accepted. Bare CR outside quotes, stray quotes and bytes after a closing
 quote are rejected. Existing ragged-row handling and numeric-failure row
 continuation remain unchanged. BOM, UTF-8 and strict width policy are
 separate from lexical validation.
+
+## Linux systems wrapper receipt
+
+Slurm **18129** completed with status 0 on DL380p. New PollSet, task-reap and
+deadline-I/O tests plus existing poll-executor and poll-socket tests each
+checked, compiled and ran natively: 15 phases passed. New success markers
+are `POLL_SET_OK`, `POLL_REAP_OK` and `DEADLINE_SOCKET_OK`.
+
+Receipt root:
+`/scratch/sounio-stdlib-wave3-20261027/services/systems-01/results`.
+`RESULTS.tsv` records every phase; source, compiler/runtime and executable
+hashes have final verification files. The linked platform library was the
+root lane's separately qualified ABI100–111 library from Slurm18125.
+This lane does not alter the shared C++ platform implementation.
+
+PollSet registers stable logical socket IDs with interests and caller tags.
+A wait polls all registrations against one absolute monotonic deadline;
+no events returns count0/status0. Closed IDs yield flag16. Owners remain
+responsible for socket lifetime. A close during a blocked wait need not wake
+the wait before an event or deadline. Callers serialize registration, wait
+and event reads; the three event-field ABI reads are not an atomic concurrent
+snapshot. Registration payload budget is 24 bytes per entry; native container
+and bounded snapshot overhead are separate.
+
+TCP helpers retain the absolute deadline across partial transfers and expose
+completed byte counts on errors. Read-exact appends into the caller buffer;
+early EOF returns status61 (ENODATA) and the retained count. A timeout returns
+status110. UDP destinations are explicit IPv4/port values; zero-length
+datagrams remain datagrams and sender address/port describe the consumed
+packet, including truncated packets.
+
+Reaping removes terminal task storage without reusing its ID. Pending tasks
+must be canceled or completed first; reaping a pending task reports22,
+and a missing or already-reaped ID reports4. The regression repeatedly
+reuses a two-slot storage budget while IDs continue increasing and verifies
+that compaction preserves other live tasks.
