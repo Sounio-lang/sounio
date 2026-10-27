@@ -105,6 +105,12 @@ def main() -> None:
                        around(Fraction(2**53 - 1, 2**1075))))
     cases += list(zip(("over_below", "over_at", "over_above"),
                        around(Fraction(2**54 - 1) * Fraction(2) ** 970)))
+    # Positive-exponent fast-window boundary: sig needs trailing-zero growth
+    # into the exact 10^k window. 1.0e24 is the case the #2904 `keep` form
+    # read as exactly 1e23 (counted zeros, multiplied by the clamped power).
+    cases += [("pow10_e24", "1.0e24"), ("pow10_e23", "1.0e23"),
+              ("pow10_25e25", "2.5e25"), ("pow10_120e30", "1.20e30"),
+              ("pow10_5e24", "5.0e24")]
     for label, txt in cases:
         print(f"{label} {signed(round_f64_bits(parse_decimal(txt)))} {txt}")
     neg = parse_decimal("1.43425768535078390630843614417244680225849151611328125000001")
