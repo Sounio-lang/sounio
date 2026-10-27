@@ -4772,6 +4772,7 @@ fn checker_collect_global_item_inplace(
     name: Name,
     declared_ty: Option<Box<TypeExpr>>
 ) with Mut, Panic, Div, Alloc, IO {
+    checker_defined_name_note(name)
     match declared_ty {
         Some(te) => {
             // Validate the annotation at the checker boundary, but preserve the
@@ -4982,10 +4983,56 @@ var CHECKER_SEL_IMPORT_SPAN_END: [i64; 4096] = [0; 4096]
 var CHECKER_SEL_IMPORT_OVERFLOWED: bool = false
 var CHECKER_SEL_IMPORT_OVERFLOW_REPORTED: bool = false
 
+// Names defined by collect paths that have no searchable table of their own:
+// top-level globals (`let EV_NONE: i64 = 0` in stdlib/display/event.sio binds
+// ty_unknown in the env, indistinguishable there from an import-unknown),
+// type aliases, and unit declarations. Recorded as they are collected so the
+// validation below can tell a real global/alias/unit import from a phantom.
+let CHECKER_DEFINED_NAME_CAP: i64 = 8192
+var CHECKER_DEFINED_NAME_COUNT: i64 = 0
+var CHECKER_DEFINED_NAME_LEN: [i64; 8192] = [0; 8192]
+var CHECKER_DEFINED_NAME_BUF: [i8; 3145728] = [0; 3145728]
+var CHECKER_DEFINED_NAME_OVERFLOWED: bool = false
+
+fn checker_defined_name_note(name: Name) with Mut, Panic, Div {
+    if name.len <= 0 || name.len > 384 { return }
+    if CHECKER_DEFINED_NAME_COUNT >= CHECKER_DEFINED_NAME_CAP {
+        CHECKER_DEFINED_NAME_OVERFLOWED = true
+        return
+    }
+    let at = CHECKER_DEFINED_NAME_COUNT
+    CHECKER_DEFINED_NAME_LEN[at as usize] = name.len
+    var k: i64 = 0
+    while k < name.len {
+        CHECKER_DEFINED_NAME_BUF[(at * 384 + k) as usize] = name.buf[k as usize]
+        k = k + 1
+    }
+    CHECKER_DEFINED_NAME_COUNT = at + 1
+}
+
+fn checker_defined_name_known(name: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < CHECKER_DEFINED_NAME_COUNT {
+        if CHECKER_DEFINED_NAME_LEN[i as usize] == name.len {
+            var eq = true
+            var k: i64 = 0
+            while k < name.len {
+                if CHECKER_DEFINED_NAME_BUF[(i * 384 + k) as usize] != name.buf[k as usize] { eq = false }
+                k = k + 1
+            }
+            if eq { return true }
+        }
+        i = i + 1
+    }
+    false
+}
+
 fn checker_selective_import_reset() with Mut {
     CHECKER_SEL_IMPORT_COUNT = 0
     CHECKER_SEL_IMPORT_OVERFLOWED = false
     CHECKER_SEL_IMPORT_OVERFLOW_REPORTED = false
+    CHECKER_DEFINED_NAME_COUNT = 0
+    CHECKER_DEFINED_NAME_OVERFLOWED = false
 }
 
 fn checker_selective_import_note(path: AstPath, items: Option<Box<ImportItemList> >, span: Span) with Mut, Panic, Div, Alloc {
@@ -5061,10 +5108,25 @@ fn checker_selective_import_resolves(c: *mut Checker, name: Name) -> bool with M
     if struct_table_find((*c).structs, name) >= 0 { return true }
     if enum_table_find((*c).enums, name) >= 0 { return true }
     if enum_table_find_variant_enum((*c).enums, name) >= 0 { return true }
+    if checker_defined_name_known(name) { return true }
     false
 }
 
 fn checker_validate_selective_imports_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    if CHECKER_DEFINED_NAME_OVERFLOWED {
+        // The defined-name table lost entries, so "not found" below could be
+        // a lost global/alias/unit rather than a phantom. Fail closed, once
+        // per Checker (the flag stays set for this compile).
+        if !CHECKER_SEL_IMPORT_OVERFLOW_REPORTED {
+            CHECKER_SEL_IMPORT_OVERFLOW_REPORTED = true
+            (*c).error_count = (*c).error_count + 1
+            (*c).had_error = true
+            print("error[E-USE-ITEM-CAP]: defined-name registry is full (")
+            print_int(CHECKER_DEFINED_NAME_CAP)
+            print(" globals/aliases/units) -- refusing rather than risk refusing a real selective import\n")
+        }
+        return
+    }
     if CHECKER_SEL_IMPORT_OVERFLOWED && !CHECKER_SEL_IMPORT_OVERFLOW_REPORTED {
         CHECKER_SEL_IMPORT_OVERFLOW_REPORTED = true
         (*c).error_count = (*c).error_count + 1
@@ -6454,6 +6516,7 @@ fn checker_collect_ontology_def_inplace(c: *mut Checker, opt: Option<Box<Ontolog
 }
 
 fn checker_collect_unit_decl_inplace(c: *mut Checker, name: Name, conv: Option<Box<TypeExpr> >) with Mut, Panic, Div, Alloc, IO {
+    checker_defined_name_note(name)
     // *mut transcription of Checker::collect_unit_decl. Registers a
     // user-declared unit of measure so that a type annotation naming it
     // lowers to ty_with_unit(ty_f64(), idx) instead of an opaque ty_named --
@@ -6611,6 +6674,7 @@ fn checker_collect_algebra_def_inplace(c: *mut Checker, opt: Option<Box<AlgebraD
 }
 
 fn checker_collect_type_alias_inplace(c: *mut Checker, name: Name, ty_opt: Option<Box<TypeExpr> >) with Mut, Panic, Div, Alloc, IO {
+    checker_defined_name_note(name)
     match ty_opt {
         Some(te_box) => {
             let te = *te_box
