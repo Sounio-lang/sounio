@@ -6,6 +6,7 @@
 // Methods return (Checker, ...) to thread state through value semantics.
 
 use io::env::{read_env}
+use compiler::static_assets::{static_asset_limit}
 use check::refinement::*
 use check::types::*
 use check::defs::*
@@ -12319,7 +12320,42 @@ fn checker_reject_invalid_implicit_native_builtin_arity_inplace(c: *mut Checker,
     }
 }
 
+fn call_expr_is_static_blob(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div {
+    match opt {
+        Some(callee) => (*callee).kind == ExprKind::ExprIdent && name_eq((*callee).name, make_name("static_blob_bytes")),
+        None => false,
+    }
+}
+
+fn checker_static_blob_type() -> TypeEntry with Alloc {
+    ty_tuple(TypeEntryList {
+        head: ty_raw_ptr(ty_u8(), false),
+        tail: Some(Box::new(TypeEntryList { head: ty_i64(), tail: None })),
+    })
+}
+
+fn checker_check_static_blob_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    var valid = e.name.len > 0
+    match e.args {
+        Some(args) => {
+            if (*args).head.kind != ExprKind::ExprStringLit { valid = false }
+            match (*args).tail { Some(_) => { valid = false } None => {} }
+        }
+        None => { valid = false }
+    }
+    if valid {
+        let extent = file_size(str_from_bytes(e.name.buf, e.name.len))
+        if extent < 0 || extent > static_asset_limit() { valid = false }
+    }
+    if !valid {
+        checker_report_error_at_inplace(c, e.span, 275, 0, 0, 0)
+        return ty_error()
+    }
+    checker_static_blob_type()
+}
+
 fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if call_expr_is_static_blob(e.left) { return checker_check_static_blob_inplace(c, e) }
     if checker_reject_invalid_implicit_native_builtin_arity_inplace(c, e) {
         return ty_error()
     }
@@ -19299,6 +19335,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 264 { print("enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped") }
     else if code == 267 { print("cannot assign through a shared reference: the place is reached through `&T`, which is read-only") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
+    else if code == 275 { print("static_blob_bytes requires one existing source-relative string literal asset within the static byte budget; dynamic paths, absolute paths and truncated identities are refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
     else { print("unknown error") }
@@ -28846,6 +28883,11 @@ impl Checker {
     }
 
     fn check_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        if call_expr_is_static_blob(e.left) {
+            var c_asset = self
+            let result = checker_check_static_blob_inplace((&! c_asset) as *mut Checker, e)
+            return (c_asset, result)
+        }
         // Safety guard: ExprIndex nodes (e.right=Some) are occasionally dispatched here
         // due to a VM-level kind mismatch. ExprCall never sets e.right; ExprIndex always does.
         match e.right {

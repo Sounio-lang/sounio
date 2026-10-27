@@ -8,6 +8,7 @@ use ir::numeric_payload::{ir_wide_compile_pool_reset, ir_wide_compile_pool_inter
 use check::specializer::{spec_dce_filter_with_global_marks, spec_dce_global_marks_ready, spec_item_module_lookup, spec_item_module_populated, spec_item_module_overflowed}
 use io::trace::*
 use io::env::{read_env}
+use compiler::static_assets::{static_asset_identity, static_asset_path_length}
 
 struct LowerLocalNameSlots {
     values: [Name; 4096],
@@ -33371,7 +33372,8 @@ impl Lowerer {
             Some(c) => self.expr_to_callee_name_ref(&(*c)),
             None => ir_empty_name(),
         }
-        name_eq(callee_name, make_name("print"))
+        name_eq(callee_name, make_name("static_blob_bytes"))
+            || name_eq(callee_name, make_name("print"))
             || name_eq(callee_name, make_name("print_int"))
             || name_eq(callee_name, make_name("print_char"))
             || name_eq(callee_name, make_name("println"))
@@ -33389,6 +33391,42 @@ impl Lowerer {
         let callee_name = match *callee_opt_ref {
             Some(c) => self.expr_to_callee_name_ref(&(*c)),
             None => ir_empty_name(),
+        }
+        if name_eq(callee_name, make_name("static_blob_bytes")) {
+            var lo_asset = self
+            let extent = file_size(str_from_bytes(e.name.buf, e.name.len))
+            let identity = static_asset_identity(e.name, extent)
+            if identity.len <= 0 {
+                print("error[E275]: static asset identity could not be sealed\n")
+                lowerer_mark_hard_error(&! lo_asset)
+                return lo_asset.emit_unit()
+            }
+            print("STATIC_ASSET path=")
+            print(str_from_bytes(identity.buf, static_asset_path_length(identity)))
+            print(" bytes=") print_int(extent) print(" sha256=")
+            var hash_text: [i8; 384] = [0; 384]
+            let path_len = static_asset_path_length(identity)
+            var hash_i: i64 = 0
+            while hash_i < 64 {
+                hash_text[hash_i as usize] = identity.buf[(path_len + 1 + hash_i) as usize]
+                hash_i = hash_i + 1
+            }
+            print(str_from_bytes(hash_text, 64)) print("\n")
+            let ptr_pair = lo_asset.fresh_reg()
+            lo_asset = ptr_pair.0
+            let ptr = ptr_pair.1
+            lo_asset = lo_asset.emit(ir_static_blob(ptr, extent, identity))
+            let len_pair = lo_asset.fresh_reg()
+            lo_asset = len_pair.0
+            let len = len_pair.1
+            lo_asset = lo_asset.emit(ir_load_imm(len, extent))
+            let dst_pair = lo_asset.fresh_reg()
+            lo_asset = dst_pair.0
+            let dst = dst_pair.1
+            lo_asset = lo_asset.emit(ir_alloc(dst, lo_asset.aggregate_storage_bytes(2)))
+            lo_asset = lo_asset.emit(ir_field_set(dst, 0, ptr, ir_empty_name()))
+            lo_asset = lo_asset.emit(ir_field_set(dst, 1, len, ir_empty_name()))
+            return (lo_asset, dst)
         }
         let launch_name = self.gpu_launch_kernel_name_ref(e)
         if launch_name.len > 0 {

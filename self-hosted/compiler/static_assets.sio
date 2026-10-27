@@ -1,0 +1,123 @@
+// Real binary assets: compiler metadata contains a path and SHA-256, never payload bytes.
+// All extents are explicit, so embedded NUL is data and cannot truncate a blob.
+use parser::ast::{Name, make_name}
+use crypto::sha256::{sha256_init, sha256_update, sha256_finalize, sha256_digest_byte}
+
+var STATIC_ASSET_SOURCE: Name = Name { buf: [0; 384], len: 0 }
+
+pub fn static_asset_limit() -> i64 { 32505856 }
+
+pub fn static_asset_set_source(path: string) with Mut, Panic, Div {
+    STATIC_ASSET_SOURCE.len = 0
+    let n = str_len(path)
+    if n <= 0 || n > 318 { return }
+    var i: i64 = 0
+    while i < n {
+        let ch = str_char_at(path, i) as i64
+        if ch < 32 || ch == 127 { return }
+        STATIC_ASSET_SOURCE.buf[i as usize] = ch as i8
+        i = i + 1
+    }
+    STATIC_ASSET_SOURCE.len = n
+}
+
+// Relative to the defining file, rather than the importing module or working directory.
+// Paths remain lexical; the serialized content digest rejects a stale cache in another cwd.
+pub fn static_asset_resolve_literal(literal: Name) -> Name with Mut, Panic, Div {
+    var out = Name { buf: [0; 384], len: 0 }
+    if STATIC_ASSET_SOURCE.len <= 0 || literal.len <= 0 { return out }
+    if literal.buf[0] == 47 || literal.buf[0] == 92 { return out }
+    var last: i64 = 0 - 1
+    var i: i64 = 0
+    while i < STATIC_ASSET_SOURCE.len {
+        if STATIC_ASSET_SOURCE.buf[i as usize] == 47 { last = i }
+        i = i + 1
+    }
+    let prefix = last + 1
+    if prefix + literal.len > 318 { return out }
+    i = 0
+    while i < prefix {
+        out.buf[i as usize] = STATIC_ASSET_SOURCE.buf[i as usize]
+        i = i + 1
+    }
+    var j: i64 = 0
+    while j < literal.len {
+        let ch = literal.buf[j as usize] as i64
+        if ch < 32 || ch == 127 || ch == 92 { return Name { buf: [0; 384], len: 0 } }
+        out.buf[(prefix + j) as usize] = literal.buf[j as usize]
+        j = j + 1
+    }
+    out.len = prefix + literal.len
+    out
+}
+
+pub fn static_asset_digest(data: string, extent: i64) -> Name with Mut, Panic, Div {
+    var state = sha256_init()
+    var block: [u8; 256] = [0; 256]
+    var at: i64 = 0
+    while at < extent {
+        var count: i64 = 0
+        while count < 256 && at + count < extent {
+            block[count as usize] = data[(at + count) as usize] as u8
+            count = count + 1
+        }
+        state = sha256_update(state, block, count as i32)
+        at = at + count
+    }
+    let digest = sha256_finalize(state)
+    var out = Name { buf: [0; 384], len: 64 }
+    let alphabet = make_name("0123456789abcdef")
+    var i: i64 = 0
+    while i < 32 {
+        let byte = sha256_digest_byte(&digest, i as i32)
+        out.buf[(2 * i) as usize] = alphabet.buf[(byte / 16) as usize]
+        out.buf[(2 * i + 1) as usize] = alphabet.buf[(byte % 16) as usize]
+        i = i + 1
+    }
+    out
+}
+
+pub fn static_asset_path_length(identity: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < identity.len {
+        if identity.buf[i as usize] == 0 { return i }
+        i = i + 1
+    }
+    identity.len
+}
+
+pub fn static_asset_identity(path: Name, extent: i64) -> Name with IO, Mut, Panic, Div {
+    if path.len <= 0 || path.len > 318 || extent < 0 || extent > static_asset_limit() {
+        return Name { buf: [0; 384], len: 0 }
+    }
+    let filename = str_from_bytes(path.buf, path.len)
+    if file_size(filename) != extent { return Name { buf: [0; 384], len: 0 } }
+    let data = read_file(filename)
+    let hash = static_asset_digest(data, extent)
+    var out = path
+    out.buf[path.len as usize] = 0
+    var i: i64 = 0
+    while i < 64 {
+        out.buf[(path.len + 1 + i) as usize] = hash.buf[i as usize]
+        i = i + 1
+    }
+    out.len = path.len + 65
+    out
+}
+
+// A cached IR instruction binds BOTH the exact byte count and SHA-256.
+// Returning None refuses emission; missing files never become empty successful blobs.
+pub fn static_asset_read_verified(identity: Name, extent: i64) -> Option<string> with IO, Mut, Panic, Div {
+    let n = static_asset_path_length(identity)
+    if n <= 0 || identity.len != n + 65 || extent < 0 || extent > static_asset_limit() { return None }
+    let path = str_from_bytes(identity.buf, n)
+    if file_size(path) != extent { return None }
+    let data = read_file(path)
+    let hash = static_asset_digest(data, extent)
+    var i: i64 = 0
+    while i < 64 {
+        if identity.buf[(n + 1 + i) as usize] != hash.buf[i as usize] { return None }
+        i = i + 1
+    }
+    Some(data)
+}
