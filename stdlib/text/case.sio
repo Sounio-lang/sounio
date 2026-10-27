@@ -7,30 +7,15 @@
 // ============================================================================
 
 fn char_is_uppercase(c: char) -> bool {
-    let code = c as u32
-    if code >= 0x41 && code <= 0x5A { return true }
-    if (code >= 0xC0 && code <= 0xD6) || (code >= 0xD8 && code <= 0xDE) { return true }
-    if code >= 0x391 && code <= 0x3A9 { return true }
-    if code >= 0x410 && code <= 0x42F { return true }
-    false
+    unicode_property_is(c as i64,"Uppercase","Y")
 }
 
 fn char_is_lowercase(c: char) -> bool {
-    let code = c as u32
-    if code >= 0x61 && code <= 0x7A { return true }
-    if (code >= 0xDF && code <= 0xF6) || (code >= 0xF8 && code <= 0xFF) { return true }
-    if code >= 0x3B1 && code <= 0x3C9 { return true }
-    if code >= 0x430 && code <= 0x44F { return true }
-    false
+    unicode_property_is(c as i64,"Lowercase","Y")
 }
 
 fn char_is_alphabetic(c: char) -> bool {
-    let code = c as u32
-    if (code >= 0x41 && code <= 0x5A) || (code >= 0x61 && code <= 0x7A) { return true }
-    if (code >= 0xC0 && code <= 0xD6) || (code >= 0xD8 && code <= 0xF6) || (code >= 0xF8 && code <= 0xFF) { return true }
-    if code >= 0x370 && code <= 0x3FF { return true }
-    if code >= 0x400 && code <= 0x4FF { return true }
-    false
+    unicode_property_is(c as i64,"Alphabetic","Y")
 }
 
 // ============================================================================
@@ -38,25 +23,234 @@ fn char_is_alphabetic(c: char) -> bool {
 // ============================================================================
 
 // Convert a character to uppercase.
-fn char_to_uppercase(c: char) -> char {
-    let code = c as u32
-    if code >= 0x61 && code <= 0x7A { return ((code - 32) as char) }
-    if code >= 0xE0 && code <= 0xF6 { return ((code - 32) as char) }
-    if code >= 0xF8 && code <= 0xFE { return ((code - 32) as char) }
-    if code >= 0x3B1 && code <= 0x3C9 { return ((code - 32) as char) }
-    if code >= 0x430 && code <= 0x44F { return ((code - 32) as char) }
-    if code == 0xDF { return (0x1E9E as char) }
-    if code == 0xB5 { return (0x039C as char) }
-    c
+pub fn char_to_uppercase(c: char) -> char {
+    let result=unicode_simple_case(c as i64,0)
+    if result.status!=0 {return c}
+    result.id as char
 }
 
 // Convert a character to lowercase.
-fn char_to_lowercase(c: char) -> char {
-    let code = c as u32
-    if code >= 0x41 && code <= 0x5A { return ((code + 32) as char) }
-    if code >= 0xC0 && code <= 0xD6 { return ((code + 32) as char) }
-    if code >= 0xD8 && code <= 0xDE { return ((code + 32) as char) }
-    if code >= 0x391 && code <= 0x3A9 { return ((code + 32) as char) }
-    if code >= 0x410 && code <= 0x42F { return ((code + 32) as char) }
-    c
+pub fn char_to_lowercase(c: char) -> char {
+    let result=unicode_simple_case(c as i64,1)
+    if result.status!=0 {return c}
+    result.id as char
+}
+
+// Full Unicode18 folding. Default C/F folding is locale independent;
+// Turkic mode applies T overrides. Folding does not imply normalization.
+// max_work_bytes charges the encoded scratch payload. Output append is atomic.
+use text::ucd_data::{UnicodeData,UnicodeValue,unicode_data,unicode_data_status,unicode_property_is,ucd_mapping,ucd_field}
+use text::utf8::{Utf8Text,utf8_text_status,utf8_text_byte_len,utf8_text_next,utf8_text_append_bytes,utf8_encode_append}
+use collections::byte_buffer::{byte_buffer_new,byte_buffer_status,byte_buffer_close}
+pub fn unicode_simple_case(cp:i64,operation:i64)->UnicodeValue {
+ if cp<0 || cp>1114111 || (cp>=55296 && cp<=57343) {return UnicodeValue {id:0,status:5}}
+ if operation<0 || operation>2 {return UnicodeValue {id:0,status:1}}
+ let data=unicode_data()
+ if unicode_data_status(&data)!=0 {return UnicodeValue {id:0,status:6}}
+ let row=ucd_mapping(&data,3+operation,cp)
+ if row<0 {return UnicodeValue {id:cp,status:0}}
+ let first=ucd_field(&data,4,row,3)
+ let count=ucd_field(&data,4,row,4)
+ if first<0 || count!=1 {return UnicodeValue {id:0,status:6}}
+ let result=ucd_field(&data,5,first,0)
+ if result<0 || result>1114111 || (result>=55296 && result<=57343) {return UnicodeValue {id:0,status:6}}
+ UnicodeValue {id:result,status:0}
+}
+pub fn unicode_casefold_append(input:&Utf8Text,turkic:bool,max_work_bytes:i64,out:&!Utf8Text)->i64 with Alloc,Mut,Div,Panic {
+ if max_work_bytes<0 || max_work_bytes>9223372036854771704 {return 1}
+ if utf8_text_status(input)!=0 {return utf8_text_status(input)}
+ if utf8_text_status(out)!=0 {return utf8_text_status(out)}
+ let data=unicode_data()
+ if unicode_data_status(&data)!=0 {return 6}
+ var encoded=byte_buffer_new(max_work_bytes)
+ var status=byte_buffer_status(&encoded)
+ var offset:i64=0
+ let n=utf8_text_byte_len(input)
+ while status==0 && offset<n {
+  let scalar=utf8_text_next(input,offset)
+  if scalar.status!=0 {status=scalar.status}
+  else {
+   var row:i64=0-1
+   if turkic {row=ucd_mapping(&data,7,scalar.codepoint)}
+   if row<0 {row=ucd_mapping(&data,6,scalar.codepoint)}
+   if row<0 {status=utf8_encode_append(&!encoded,scalar.codepoint)}
+   else {
+    let first=ucd_field(&data,4,row,3)
+    let count=ucd_field(&data,4,row,4)
+    if first<0 || count<0 {status=6}
+    var i:i64=0
+    while status==0 && i<count {
+     let cp=ucd_field(&data,5,first+i,0)
+     if cp<0 || cp>1114111 || (cp>=55296 && cp<=57343) {status=6}
+     else {status=utf8_encode_append(&!encoded,cp)}
+     i=i+1
+    }
+   }
+   offset=scalar.next
+  }
+ }
+ if status==0 {status=utf8_text_append_bytes(out,&encoded)}
+ byte_buffer_close(encoded)
+ status
+}
+
+// Full SpecialCasing uses the original scalar sequence for every condition.
+// Locale0=default,1=Turkish,2=Azeri,3=Lithuanian; no ambient process locale.
+// Input scalar scratch and encoded scratch each receive half of max_work_bytes.
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_status,integer_buffer_len,integer_buffer_get,integer_buffer_push,integer_buffer_close}
+use text::ucd_data::{ucd_property,ucd_property_value,ucd_value_matches,ucd_decimal_value,ucd_string_byte,ucd_count}
+struct CaseProperties {cased:i64,ignorable:i64,soft_dotted:i64,ccc:i64}
+struct CaseCondition {matched:bool,status:i64}
+fn case_property(data:&UnicodeData,property:i64,cp:i64)->bool {
+ let v=ucd_property_value(data,property,cp)
+ v.status==0 && ucd_value_matches(data,property,v.id,"Y")
+}
+fn case_ccc(data:&UnicodeData,props:&CaseProperties,cp:i64)->i64 {
+ let v=ucd_property_value(data,props.ccc,cp)
+ if v.status!=0 {return 0-1}
+ ucd_decimal_value(data,v.id)
+}
+fn case_token(data:&UnicodeData,condition:i64,start:i64,n:i64,text:string)->bool {
+ if str_len(text)!=n {return false}
+ var i:i64=0
+ while i<n {if ucd_string_byte(data,condition,start+i)!=str_char_at(text,i) {return false} i=i+1}
+ true
+}
+fn case_cased_context(data:&UnicodeData,props:&CaseProperties,input:&IntegerBuffer,index:i64,direction:i64)->bool {
+ var at=index+direction
+ let n=integer_buffer_len(input)
+ while at>=0 && at<n {
+  let cp=integer_buffer_get(input,at).value
+  if !case_property(data,props.ignorable,cp) {return case_property(data,props.cased,cp)}
+  at=at+direction
+ }
+ false
+}
+fn case_after(data:&UnicodeData,props:&CaseProperties,input:&IntegerBuffer,index:i64,soft:bool)->CaseCondition {
+ var at=index-1
+ while at>=0 {
+  let cp=integer_buffer_get(input,at).value
+  if (soft && case_property(data,props.soft_dotted,cp)) || (!soft && cp==73) {return CaseCondition {matched:true,status:0}}
+  let ccc=case_ccc(data,props,cp)
+  if ccc<0 {return CaseCondition {matched:false,status:6}}
+  if ccc==0 || ccc==230 {return CaseCondition {matched:false,status:0}}
+  at=at-1
+ }
+ CaseCondition {matched:false,status:0}
+}
+fn case_before(data:&UnicodeData,props:&CaseProperties,input:&IntegerBuffer,index:i64,dot:bool)->CaseCondition {
+ var at=index+1
+ let n=integer_buffer_len(input)
+ while at<n {
+  let cp=integer_buffer_get(input,at).value
+  if dot && cp==775 {return CaseCondition {matched:true,status:0}}
+  let ccc=case_ccc(data,props,cp)
+  if ccc<0 {return CaseCondition {matched:false,status:6}}
+  if !dot && ccc==230 {return CaseCondition {matched:true,status:0}}
+  if ccc==0 || ccc==230 {return CaseCondition {matched:false,status:0}}
+  at=at+1
+ }
+ CaseCondition {matched:false,status:0}
+}
+fn case_condition(data:&UnicodeData,props:&CaseProperties,input:&IntegerBuffer,index:i64,condition:i64,locale:i64)->CaseCondition {
+ var at:i64=0
+ var matched=true
+ while true {
+  let first=ucd_string_byte(data,condition,at)
+  if first<0 {return CaseCondition {matched:false,status:6}}
+  if first==0 {return CaseCondition {matched:matched,status:0}}
+  if first==32 {at=at+1;continue}
+  let start=at
+  while ucd_string_byte(data,condition,at)>32 {at=at+1}
+  let n=at-start
+  var test=false
+  if case_token(data,condition,start,n,"tr") {test=locale==1}
+  else if case_token(data,condition,start,n,"az") {test=locale==2}
+  else if case_token(data,condition,start,n,"lt") {test=locale==3}
+  else if case_token(data,condition,start,n,"Final_Sigma") {
+   test=case_cased_context(data,props,input,index,0-1) && !case_cased_context(data,props,input,index,1)
+  } else if case_token(data,condition,start,n,"After_Soft_Dotted") {
+   let result=case_after(data,props,input,index,true)
+   if result.status!=0 {return result}
+   test=result.matched
+  } else if case_token(data,condition,start,n,"After_I") {
+   let result=case_after(data,props,input,index,false)
+   if result.status!=0 {return result}
+   test=result.matched
+  } else if case_token(data,condition,start,n,"More_Above") {
+   let result=case_before(data,props,input,index,false)
+   if result.status!=0 {return result}
+   test=result.matched
+  } else if case_token(data,condition,start,n,"Not_Before_Dot") {
+   let result=case_before(data,props,input,index,true)
+   if result.status!=0 {return result}
+   test=!result.matched
+  } else {return CaseCondition {matched:false,status:6}}
+  matched=matched && test
+ }
+ CaseCondition {matched:false,status:6}
+}
+fn case_select(data:&UnicodeData,props:&CaseProperties,input:&IntegerBuffer,index:i64,upper:bool,locale:i64)->UnicodeValue {
+ let cp=integer_buffer_get(input,index).value
+ let kind=if upper {10} else {8}
+ var row=ucd_mapping(data,kind,cp)
+ var fallback:i64=0-1
+ while row>=0 && row<ucd_count(data,4) {
+  if ucd_field(data,4,row,0)!=kind || ucd_field(data,4,row,1)!=cp {break}
+  let condition=ucd_field(data,4,row,5)
+  let first=ucd_string_byte(data,condition,0)
+  if first<0 {return UnicodeValue {id:0,status:6}}
+  if first==0 {fallback=row}
+  else {
+   let result=case_condition(data,props,input,index,condition,locale)
+   if result.status!=0 {return UnicodeValue {id:0,status:result.status}}
+   if result.matched {return UnicodeValue {id:row,status:0}}
+  }
+  row=row+1
+ }
+ if fallback>=0 {return UnicodeValue {id:fallback,status:0}}
+ UnicodeValue {id:ucd_mapping(data,if upper {3} else {4},cp),status:0}
+}
+pub fn unicode_case_append(input:&Utf8Text,upper:bool,locale:i64,max_work_bytes:i64,out:&!Utf8Text)->i64 with Alloc,Mut,Div,Panic {
+ if locale<0 || locale>3 || max_work_bytes<0 || max_work_bytes>9223372036854771704 {return 1}
+ if utf8_text_status(input)!=0 {return utf8_text_status(input)}
+ if utf8_text_status(out)!=0 {return utf8_text_status(out)}
+ let data=unicode_data()
+ if unicode_data_status(&data)!=0 {return 6}
+ let props=CaseProperties {cased:ucd_property(&data,"Cased"),ignorable:ucd_property(&data,"Case_Ignorable"),soft_dotted:ucd_property(&data,"Soft_Dotted"),ccc:ucd_property(&data,"Canonical_Combining_Class")}
+ if props.cased<0 || props.ignorable<0 || props.soft_dotted<0 || props.ccc<0 {return 6}
+ let scalar_budget=max_work_bytes/2
+ var scalars=integer_buffer_new(0,scalar_budget)
+ var status=integer_buffer_status(&scalars)
+ var offset:i64=0
+ while status==0 && offset<utf8_text_byte_len(input) {
+  let cp=utf8_text_next(input,offset)
+  if cp.status!=0 {status=cp.status}
+  else {status=integer_buffer_push(&!scalars,cp.codepoint);offset=cp.next}
+ }
+ var encoded=byte_buffer_new(max_work_bytes-scalar_budget)
+ var at:i64=0
+ while status==0 && at<integer_buffer_len(&scalars) {
+  let selected=case_select(&data,&props,&scalars,at,upper,locale)
+  if selected.status!=0 {status=selected.status}
+  else if selected.id<0 {status=utf8_encode_append(&!encoded,integer_buffer_get(&scalars,at).value)}
+  else {
+   let first=ucd_field(&data,4,selected.id,3)
+   let n=ucd_field(&data,4,selected.id,4)
+   if first<0 || n<0 {status=6}
+   var i:i64=0
+   while status==0 && i<n {status=utf8_encode_append(&!encoded,ucd_field(&data,5,first+i,0));i=i+1}
+  }
+  at=at+1
+ }
+ if status==0 {status=utf8_text_append_bytes(out,&encoded)}
+ byte_buffer_close(encoded)
+ integer_buffer_close(scalars)
+ status
+}
+pub fn unicode_lowercase_append(input:&Utf8Text,locale:i64,max_work_bytes:i64,out:&!Utf8Text)->i64 with Alloc,Mut,Div,Panic {
+ unicode_case_append(input,false,locale,max_work_bytes,out)
+}
+pub fn unicode_uppercase_append(input:&Utf8Text,locale:i64,max_work_bytes:i64,out:&!Utf8Text)->i64 with Alloc,Mut,Div,Panic {
+ unicode_case_append(input,true,locale,max_work_bytes,out)
 }

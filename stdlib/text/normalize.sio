@@ -1,0 +1,127 @@
+// Unicode18 NFC/NFD/NFKC/NFKD, implemented in Sounio.
+// Forms:0=NFC,1=NFD,2=NFKC,3=NFKD. No implicit locale or normalization elsewhere.
+// normalize_append appends atomically; any failure preserves existing output.
+// max_work_bytes bounds aggregate retained scalar+encoded scratch payload:
+// floor(max_work_bytes/12)*8 integer bytes plus *4 encoded bytes. Allocator pages,
+// compiler aggregate metadata, and caller-owned input/output are outside this budget.
+// Status0 OK,1 config/form,2 budget,3 alloc,4 bounds,5 UTF8,6 corrupt/versioned data.
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_status,integer_buffer_len,integer_buffer_get,integer_buffer_set,integer_buffer_push,integer_buffer_resize,integer_buffer_close}
+use collections::byte_buffer::{byte_buffer_new,byte_buffer_close}
+use text::utf8::{Utf8Text,utf8_text_status,utf8_text_byte_len,utf8_text_next,utf8_text_append_bytes,utf8_encode_append}
+use text::ucd_data::{UnicodeData,unicode_data,unicode_data_status,ucd_property,ucd_property_value,ucd_decimal_value,ucd_mapping,ucd_field,ucd_compose}
+fn normalize_ccc(data:&UnicodeData,property:i64,cp:i64)->i64 with Div {
+ let value=ucd_property_value(data,property,cp)
+ if value.status!=0 {return 0-1}
+ ucd_decimal_value(data,value.id)
+}
+fn normalize_decompose(data:&UnicodeData,work:&!IntegerBuffer,cp:i64,compat:bool,depth:i64)->i64 with Alloc,Mut,Div {
+ if depth>64 {return 6}
+ // Hangul syllable decomposition is algorithmic and is absent from UnicodeData.
+ if cp>=44032 && cp<55204 {
+  let n=cp-44032
+  var status=integer_buffer_push(work,4352+n/588)
+  if status!=0 {return status}
+  status=integer_buffer_push(work,4449+(n%588)/28)
+  if status!=0 {return status}
+  if n%28!=0 {return integer_buffer_push(work,4519+n%28)}
+  return 0
+ }
+ let row=ucd_mapping(data,1,cp)
+ if row<0 {return integer_buffer_push(work,cp)}
+ if !compat && ucd_field(data,4,row,2)!=0 {return integer_buffer_push(work,cp)}
+ let start=ucd_field(data,4,row,3)
+ let count=ucd_field(data,4,row,4)
+ if start<0 || count<0 {return 6}
+ var i:i64=0
+ while i<count {
+  let part=ucd_field(data,5,start+i,0)
+  if part<0 || part>1114111 {return 6}
+  let status=normalize_decompose(data,work,part,compat,depth+1)
+  if status!=0 {return status}
+  i=i+1
+ }
+ 0
+}
+fn normalize_order(data:&UnicodeData,property:i64,work:&!IntegerBuffer)->i64 with Mut,Div,Panic {
+ let n=integer_buffer_len(work)
+ var i:i64=1
+ while i<n {
+  let cp=integer_buffer_get(work,i).value
+  let cls=normalize_ccc(data,property,cp)
+  if cls<0 {return 6}
+  if cls>0 {
+   var j=i
+   while j>0 {
+    let previous=integer_buffer_get(work,j-1).value
+    let previous_class=normalize_ccc(data,property,previous)
+    if previous_class<0 {return 6}
+    if previous_class<=cls {break}
+    assert(integer_buffer_set(work,j,previous)==0)
+    j=j-1
+   }
+   assert(integer_buffer_set(work,j,cp)==0)
+  }
+  i=i+1
+ }
+ 0
+}
+fn normalize_compose(data:&UnicodeData,property:i64,work:&!IntegerBuffer)->i64 with Alloc,Mut,Div,Panic {
+ let n=integer_buffer_len(work)
+ if n==0 {return 0}
+ var starter:i64=0
+ var last=normalize_ccc(data,property,integer_buffer_get(work,0).value)
+ if last<0 {return 6}
+ var read:i64=1
+ var write:i64=1
+ while read<n {
+  let cp=integer_buffer_get(work,read).value
+  let cls=normalize_ccc(data,property,cp)
+  if cls<0 {return 6}
+  let joint=ucd_compose(data,integer_buffer_get(work,starter).value,cp)
+  if joint!=0 && (last<cls || last==0) {
+   assert(integer_buffer_set(work,starter,joint)==0)
+  } else {
+   if cls==0 {starter=write}
+   assert(integer_buffer_set(work,write,cp)==0)
+   write=write+1
+   last=cls
+  }
+  read=read+1
+ }
+ integer_buffer_resize(work,write)
+}
+pub fn unicode_normalize_append(input:&Utf8Text,form:i64,max_work_bytes:i64,out:&!Utf8Text)->i64 with Alloc,Mut,Div,Panic {
+ if form<0 || form>3 || max_work_bytes<0 || max_work_bytes>9223372036854771704 {return 1}
+ if utf8_text_status(input)!=0 {return utf8_text_status(input)}
+ if utf8_text_status(out)!=0 {return utf8_text_status(out)}
+ let data=unicode_data()
+ if unicode_data_status(&data)!=0 {return 6}
+ let property=ucd_property(&data,"Canonical_Combining_Class")
+ if property<0 {return 6}
+ let limit=max_work_bytes/12
+ var work=integer_buffer_new(0,limit*8)
+ var status=integer_buffer_status(&work)
+ var offset:i64=0
+ let n=utf8_text_byte_len(input)
+ while status==0 && offset<n {
+  let scalar=utf8_text_next(input,offset)
+  if scalar.status!=0 {status=scalar.status}
+  else {
+   status=normalize_decompose(&data,&!work,scalar.codepoint,form>=2,0)
+   offset=scalar.next
+  }
+ }
+ if status==0 {status=normalize_order(&data,property,&!work)}
+ if status==0 && form%2==0 {status=normalize_compose(&data,property,&!work)}
+ var encoded=byte_buffer_new(limit*4)
+ var i:i64=0
+ while status==0 && i<integer_buffer_len(&work) {
+  status=utf8_encode_append(&!encoded,integer_buffer_get(&work,i).value)
+  i=i+1
+ }
+ if status==0 {status=utf8_text_append_bytes(out,&encoded)}
+ byte_buffer_close(encoded)
+ integer_buffer_close(work)
+ status
+}
+
