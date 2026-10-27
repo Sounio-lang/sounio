@@ -102,3 +102,11 @@ WORKER_STATUS changed to1 was rejected. Wrong receipt format, source manifest,
 fixture manifest, family and missing-part controls were also rejected. The
 actual prior valid corpora and original failed receipts were preserved.
 
+Slurm18654 additionally exercised the actual public strict wrapper, beyond
+identity: committed e33 checked, compiled and natively ran the minimal
+STRICT_WRAPPER_DISPATCH_OK witness. Setting only the raw override to the
+foreign a2c artifact under SOUNIO_REQUIRE_COMMITTED_MADAROS=1 was refused with
+status78 by the wrapper itself. This is minimal dispatch qualification for the
+old committed compiler; it does not claim that e33 supports static blobs or the
+new Unicode APIs.
+
