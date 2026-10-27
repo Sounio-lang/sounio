@@ -122,7 +122,23 @@ else
   echo WAVE3_CORE_NATIVE_PART_OK
  else
   echo 'COMPLETE PREPARED MANIFEST: every declared file and row must be collected exactly once.' > "$OUT/SCOPE.txt"
+  RECEIPT_FORMAT=${WAVE3_PART_RECEIPT_FORMAT:-gate}
+  case "$RECEIPT_FORMAT" in gate|legacy-worker) ;;*) echo 'part receipt format must be gate or legacy-worker' >&2;exit 64;;esac
+  printf '%s\n' "$RECEIPT_FORMAT" > "$OUT/PART_RECEIPT_FORMAT"
+  for part in "${@:5}";do
+   parent=$(cd "$part/.." && pwd)
+   if test "$RECEIPT_FORMAT" = gate;then
+    test "$(cat "$parent/STATUS")" = 0
+    sha256sum "$parent/STATUS" >> "$OUT/PART_RECEIPTS.sha256"
+   else
+    test "$(cat "$parent/WORKER_STATUS")" = 0
+    test "$(cat "$parent/NATIVE_STATUS")" = 0
+    sha256sum "$parent/WORKER_STATUS" "$parent/NATIVE_STATUS" >> "$OUT/PART_RECEIPTS.sha256"
+   fi
+   sha256sum "$parent/EXECUTABLE.sha256" "$part/STATUS" "$part/RESULTS.tsv" >> "$OUT/PART_RECEIPTS.sha256"
+  done
   run collect "$OUT/collect_chunks" "$FIXTURES" "$WAVE3_CORE_ELF_SHA256" "$OUT/summary" "${@:5}"
+  sha256sum -c "$OUT/PART_RECEIPTS.sha256" > "$OUT/PART_RECEIPTS.final.verify"
   echo WAVE3_CORE_NATIVE_COMPLETE_OK
  fi
  sha256sum -c "$OUT/TOOLS.sha256" > "$OUT/TOOLS.final.verify"

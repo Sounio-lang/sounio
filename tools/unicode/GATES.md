@@ -36,8 +36,8 @@ Phases are separate claims:
   prepared manifest. A chunk part cannot be reported as complete acceptance.
 - `collect ELF FIXTURES PARTDIR...`: compile the C++23 complete collector and
   require every declared file/row exactly once. PARTDIR arguments are the
-  chunk-output directories, whose parents retain EXECUTABLE.sha256 and
-  NATIVE_STATUS metadata. Missing/duplicate parts and mismatched ELF identity
+  chunk-output directories, whose parents retain EXECUTABLE.sha256 and a
+  successful outer STATUS. Missing/duplicate parts and mismatched ELF identity
   fail. Collection does not infer that unrelated corpus families passed.
 
 All phases require WAVE3_COMPILER_SHA256, WAVE3_PLATFORM_SO and
@@ -87,4 +87,18 @@ Their dependency is the qualified BIDI source c9fcb10f39fd948d5a66bb476d80d64895
 Final coherent base Unicode,
 UCA, CLDR, BIDI and compiler/generic ownership acceptance remain independent;
 neither identity nor focused smoke substitutes for their complete manifests.
+
+Complete collection additionally requires the outer receipt format. The default
+`WAVE3_PART_RECEIPT_FORMAT=gate` requires each parent STATUS to be0 after all
+source/compiler/runtime guards. The explicit `legacy-worker` adapter requires
+both WORKER_STATUS and NATIVE_STATUS to be0 for the preserved custom locale
+workers. Missing status is never inferred as success. The gate hashes these
+outer receipts, exact ELF identity files, part STATUS and RESULTS.tsv before
+collection and checks them again afterward.
+
+Slurm18639 qualified this tightening on the unchanged763-file/390251-row final
+locale default manifest. A private copy of an otherwise valid part with only
+WORKER_STATUS changed to1 was rejected. Wrong receipt format, source manifest,
+fixture manifest, family and missing-part controls were also rejected. The
+actual prior valid corpora and original failed receipts were preserved.
 
