@@ -206,6 +206,10 @@ pub struct ELPlusExplanation {
     pub from: [i64; 128],
     pub rule: [i64; 128],
     pub witness: [i64; 128],
+    // In-progress (kind, cell) tokens, kept separately from emitted facts:
+    // a revisit before emission is a cyclic provenance error, not DAG reuse.
+    pub active: [i64; 128],
+    pub active_count: i64,
     pub count: i64,
 }
 
@@ -215,6 +219,8 @@ pub fn elplus_explanation_new() -> ELPlusExplanation {
         from: [0; 128],
         rule: [0; 128],
         witness: [0; 128],
+        active: [0; 128],
+        active_count: 0,
         count: 0,
     }
 }
@@ -530,11 +536,22 @@ fn elplus_explain_fact(
     a: i64,
     b: i64
 ) -> i64 with Mut, Div, Panic {
-    // A proof is a DAG, not a tree. If this fact was already emitted, reuse
-    // that node instead of expanding its premises again. Without this guard,
-    // seven nested conjunctions over one stated fact require 255 emissions
-    // and overflow the 128-step buffer despite containing only eight facts.
     let cell = a * ELPLUS_MAXC + b
+    let token = kind * 32768 + cell
+    var active_i: i64 = 0
+    while active_i < out.active_count {
+        if out.active[active_i as usize] == token {
+            // Malformed provenance has revisited an in-progress fact. The
+            // emitted-fact table cannot catch this because nothing has been
+            // emitted yet; reject the cycle instead of recursing forever.
+            return 0 - 4
+        }
+        active_i = active_i + 1
+    }
+
+    // A proof is a DAG, not a tree. Reuse an already emitted fact instead of
+    // expanding its premises again. This is valid only for completed nodes;
+    // the active-path check above handles the distinct cyclic case.
     var prior: i64 = 0
     while prior < out.count {
         if out.kind[prior as usize] == kind && out.from[prior as usize] == cell {
@@ -542,7 +559,27 @@ fn elplus_explain_fact(
         }
         prior = prior + 1
     }
+
+    if out.active_count >= ELPLUS_EXPLAIN_MAX { return 0 - 1 }
+    out.active[out.active_count as usize] = token
+    out.active_count = out.active_count + 1
+    let rc = elplus_explain_fact_inner(s, r, pack, trace, out, kind, a, b)
+    out.active_count = out.active_count - 1
+    return rc
+}
+
+fn elplus_explain_fact_inner(
+    s: &[bool; 4096],
+    r: &[bool; 32768],
+    pack: &[i64; 704],
+    trace: &ELPlusTrace,
+    out: &!ELPlusExplanation,
+    kind: i64,
+    a: i64,
+    b: i64
+) -> i64 with Mut, Div, Panic {
     if kind == 0 {
+        let cell = a * ELPLUS_MAXC + b
         if !s[cell] { return 0 - 2 }
         let rule = trace.srule[cell]
         if rule <= 2 {
@@ -579,6 +616,7 @@ fn elplus_explain_fact(
         return 0 - 3
     }
 
+    let cell = a * ELPLUS_MAXC + b
     if !r[cell] { return 0 - 2 }
     let rule = trace.rrule[cell]
     if rule <= 0 {
