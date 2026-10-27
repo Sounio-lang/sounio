@@ -54,3 +54,37 @@ pub fn native_socket_close(p:&Platform,s:NativeSocket)->i64 with IO {
     if status!=0 {return status}
     return platform_call(p,2,id,0,0,0).status
 }
+
+// Non-owning readiness tokens. The owner must outlive scheduled operations.
+pub struct SocketToken {id:i64,status:i64,datagram:bool}
+pub struct SocketReady {pub readable:bool,pub writable:bool,pub failed:bool,pub hangup:bool,pub status:i64}
+pub fn native_socket_token(s:&NativeSocket)->SocketToken {SocketToken {id:s.id,status:s.status,datagram:s.datagram}}
+pub fn socket_token_argument(t:&SocketToken)->i64 {t.id}
+pub fn socket_token_from_argument(p:&Platform,argument:i64)->SocketToken with IO {
+ let r=platform_call(p,58,argument,0,0,0)
+ return SocketToken {id:argument,status:r.status,datagram:r.value==2}
+}
+pub fn native_socket_poll(p:&Platform,t:&SocketToken,interests:i64)->SocketReady with IO {
+ if t.status!=0 {return SocketReady {readable:false,writable:false,failed:false,hangup:false,status:t.status}}
+ let r=platform_call(p,57,t.id,interests,0,0)
+ return SocketReady {readable:(r.value & 1)!=0,writable:(r.value & 2)!=0,failed:(r.value & 4)!=0,hangup:(r.value & 8)!=0,status:r.status}
+}
+pub fn native_tcp_connect_start(p:&Platform,ipv4:i64,port:i64)->NativeSocket with IO {
+ let r=platform_call(p,59,ipv4,port,0,0)
+ return NativeSocket {id:r.value,status:r.status,datagram:false}
+}
+pub fn native_tcp_connect_finish(p:&Platform,s:&NativeSocket)->i64 with IO {
+ if s.status!=0 {return s.status}
+ if s.datagram {return 22}
+ return platform_call(p,64,s.id,0,0,0).status
+}
+pub fn socket_token_try_receive(p:&Platform,t:&SocketToken,b:&!ByteBuffer,n:i64)->PlatformValue with IO,Alloc,Mut {
+ if t.status!=0 {return PlatformValue {value:0,status:t.status}}
+ if t.datagram {return PlatformValue {value:0,status:22}}
+ return byte_buffer_native_receive(p,t.id,b,n,0,false)
+}
+pub fn socket_token_try_send(p:&Platform,t:&SocketToken,b:&ByteBuffer,offset:i64,n:i64)->PlatformValue with IO {
+ if t.status!=0 {return PlatformValue {value:0,status:t.status}}
+ if t.datagram {return PlatformValue {value:0,status:22}}
+ return byte_buffer_native_send(p,t.id,b,offset,n,0,false)
+}

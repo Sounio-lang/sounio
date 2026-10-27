@@ -1,0 +1,64 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: NATIVE_CSV_OK
+use ffi::platform::{platform_open,platform_status,platform_close}
+use io::native_file::{native_file_open,native_file_status,native_file_write_all,native_file_read,native_file_close}
+use data::native_csv::{native_csv_open,native_csv_status,native_csv_cols,native_csv_next,native_csv_column,native_csv_int,native_csv_scaled,native_csv_f64_9dp,native_csv_range,native_csv_byte,native_csv_close}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_len,byte_buffer_close}
+fn append(b:&!ByteBuffer,text:string) with Alloc,Mut,Div,Panic {var i:i64=0;while str_char_at(text,i)>0 {assert(byte_buffer_push(b,str_char_at(text,i))==0);i=i+1}}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ var path=byte_buffer_new(100)
+ append(&!path,"native-csv-sounio.tmp")
+ var source=byte_buffer_new(100000)
+ append(&!source,"n,v,label\r\n")
+ var i:i64=0
+ while i<300 {append(&!source,"7,1.25,\"quoted,\r\nvalue\"\r\n");i=i+1}
+ append(&!source,"7,1.25,\"")
+ i=0;while i<10000 {assert(byte_buffer_push(&!source,65)==0);i=i+1}
+ append(&!source,"\"\r\n")
+ let writer=native_file_open(&p,&path,1)
+ assert(native_file_status(&writer)==0)
+ assert(native_file_write_all(&p,&writer,&source,0,byte_buffer_len(&source)).status==0)
+ assert(native_file_close(&p,writer)==0)
+ byte_buffer_close(source)
+ let reader=native_file_open(&p,&path,0)
+ var input=byte_buffer_new(100000)
+ assert(native_file_read(&p,&reader,&!input,65536).status==0)
+ let eof=native_file_read(&p,&reader,&!input,1)
+ assert(eof.status==0 && eof.value==0)
+ assert(native_file_close(&p,reader)==0)
+ let budget=native_csv_open(&p,&input,1)
+ assert(native_csv_status(&budget)==105)
+ assert(native_csv_close(&p,budget)==105)
+ var csv=native_csv_open(&p,&input,100001)
+ assert(native_csv_status(&csv)==0)
+ byte_buffer_close(input)
+ assert(native_csv_cols(&csv)==3)
+ assert(native_csv_column(&csv,"label")==2)
+ var rows:i64=0
+ while native_csv_next(&!csv) {
+  let integer=native_csv_int(&!csv,0)
+  assert(integer.status==0 && integer.value==7)
+  let scaled=native_csv_scaled(&!csv,1,2)
+  assert(scaled.status==0 && scaled.value==125)
+  let real=native_csv_f64_9dp(&!csv,1)
+  assert(real.status==0 && real.value==1.25)
+  let range=native_csv_range(&csv,2)
+  assert(range.len>10 && native_csv_byte(&csv,range.start)==34)
+  if rows==300 {assert(range.len==10002)}
+  rows=rows+1
+ }
+ assert(rows==301)
+ assert(native_csv_close(&p,csv)==0)
+ var nul=byte_buffer_new(2)
+ assert(byte_buffer_push(&!nul,0)==0)
+ let invalid=native_csv_open(&p,&nul,3)
+ assert(native_csv_status(&invalid)==84)
+ assert(native_csv_close(&p,invalid)==84)
+ byte_buffer_close(nul);byte_buffer_close(path)
+ platform_close(p)
+ println("NATIVE_CSV_OK")
+ return 0
+}
