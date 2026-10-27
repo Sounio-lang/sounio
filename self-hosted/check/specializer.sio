@@ -69,6 +69,10 @@ struct SpecGfNode {
     tp_h2: i64,
     tp_h3: i64,
     fd: Option<Box<FnDef>>,
+    tp_n0: Name,
+    tp_n1: Name,
+    tp_n2: Name,
+    tp_n3: Name,
     // Copilot review (PR #2515), private-access follow-up: the template
     // item's own visibility, so a monomorphized instance can inherit it
     // instead of spec_make_fn_item hardcoding visibility_private() for
@@ -101,6 +105,10 @@ struct SpecCtxNode {
     h1: i64,
     h2: i64,
     h3: i64,
+    n0: Name,
+    n1: Name,
+    n2: Name,
+    n3: Name,
 }
 
 // Chain node for freshly instantiated items (Item stored inline in the
@@ -916,13 +924,72 @@ fn spec_tp_hash_at(buf: SpecNameBuf, i: i64) -> i64 with Mut, Panic, Div {
 // ============================================================
 
 fn spec_ctx_new(count: i64, h0: i64, h1: i64, h2: i64, h3: i64) -> i64 with Mut, Panic, Div, Alloc {
-    let p = heap_alloc(256) as *mut SpecCtxNode
+    // Four complete Names plus scalar metadata fit inside this explicit extent.
+    let p = heap_alloc(4096) as *mut SpecCtxNode
     (*p).tp_count = count
     (*p).h0 = h0
     (*p).h1 = h1
     (*p).h2 = h2
     (*p).h3 = h3
+    (*p).n0 = empty_name()
+    (*p).n1 = empty_name()
+    (*p).n2 = empty_name()
+    (*p).n3 = empty_name()
     p as i64
+}
+
+fn spec_ctx_name_at(ctx:i64,index:i64)->Name with Mut,Panic,Div {
+    if ctx==0 {return empty_name()}
+    let p=ctx as *mut SpecCtxNode
+    if index<0 || index>=(*p).tp_count {return empty_name()}
+    if index==0 {return (*p).n0}
+    if index==1 {return (*p).n1}
+    if index==2 {return (*p).n2}
+    if index==3 {return (*p).n3}
+    empty_name()
+}
+
+fn spec_ctx_validate_exact(ctx:i64) with Mut,Panic,Div {
+    if ctx==0 {SPEC_UNSOUND_POISON=true;return}
+    let p=ctx as *mut SpecCtxNode
+    if (*p).tp_count<0 || (*p).tp_count>4 {SPEC_UNSOUND_POISON=true;return}
+    var i:i64=0
+    while i<(*p).tp_count {
+        let name=spec_ctx_name_at(ctx,i)
+        if name.len<=0 {SPEC_UNSOUND_POISON=true;return}
+        var j:i64=0
+        while j<i {
+            if name_eq(name,spec_ctx_name_at(ctx,j)) {SPEC_UNSOUND_POISON=true;return}
+            j=j+1
+        }
+        i=i+1
+    }
+}
+
+fn spec_ctx_tp_index_name(ctx:i64,name:Name)->i64 with Mut,Panic,Div {
+    if ctx==0 || name.len<=0 {return -1}
+    let p=ctx as *mut SpecCtxNode
+    var i:i64=0
+    while i<(*p).tp_count && i<4 {
+        if name_eq(name,spec_ctx_name_at(ctx,i)) {return i}
+        i=i+1
+    }
+    -1
+}
+
+fn spec_type_param_name_at(params:Option<Box<TypeParamDefList>>,index:i64)->Name with Mut,Panic,Div {
+    if index<0 {return empty_name()}
+    match params {
+        None=>empty_name(),
+        Some(p)=>if index==0 {(*p).head.name} else {spec_type_param_name_at((*p).tail,index-1)},
+    }
+}
+
+fn spec_struct_table_tp_name(slot:i64,index:i64)->Name with Mut,Panic,Div {
+    match spec_struct_table_sd(slot) {
+        Some(sd)=>spec_type_param_name_at((*sd).type_params,index),
+        None=>empty_name(),
+    }
 }
 
 fn spec_ctx_tp_index(ctx: i64, h: i64) -> i64 with Mut, Panic, Div {
@@ -938,13 +1005,27 @@ fn spec_ctx_tp_index(ctx: i64, h: i64) -> i64 with Mut, Panic, Div {
 fn spec_ctx_from_fn_slot(slot: i64) -> i64 with Mut, Panic, Div, Alloc {
     if slot < 0 || slot >= SPEC_GF_COUNT { return 0 }
     let p = SPEC_GF_PTRS[slot as usize] as *mut SpecGfNode
-    spec_ctx_new((*p).tp_count, (*p).tp_h0, (*p).tp_h1, (*p).tp_h2, (*p).tp_h3)
+    let context=spec_ctx_new((*p).tp_count,(*p).tp_h0,(*p).tp_h1,(*p).tp_h2,(*p).tp_h3)
+    let out=context as *mut SpecCtxNode
+    (*out).n0=(*p).tp_n0
+    (*out).n1=(*p).tp_n1
+    (*out).n2=(*p).tp_n2
+    (*out).n3=(*p).tp_n3
+    spec_ctx_validate_exact(context)
+    context
 }
 
 fn spec_ctx_from_struct_slot(slot: i64) -> i64 with Mut, Panic, Div, Alloc {
     if slot < 0 || slot >= SPEC_ST_COUNT { return 0 }
     let p = SPEC_ST_PTRS[slot as usize] as *mut SpecStNode
-    spec_ctx_new((*p).tp_count, (*p).tp_h0, (*p).tp_h1, (*p).tp_h2, (*p).tp_h3)
+    let context=spec_ctx_new((*p).tp_count,(*p).tp_h0,(*p).tp_h1,(*p).tp_h2,(*p).tp_h3)
+    let out=context as *mut SpecCtxNode
+    (*out).n0=spec_struct_table_tp_name(slot,0)
+    (*out).n1=spec_struct_table_tp_name(slot,1)
+    (*out).n2=spec_struct_table_tp_name(slot,2)
+    (*out).n3=spec_struct_table_tp_name(slot,3)
+    spec_ctx_validate_exact(context)
+    context
 }
 
 // ============================================================
@@ -1071,6 +1152,10 @@ fn spec_collect_generic_fns(items: Option<Box<ItemList>>, known: SpecKnownNames)
                                 (*p).tp_h1 = spec_tp_hash_at(tp, 1)
                                 (*p).tp_h2 = spec_tp_hash_at(tp, 2)
                                 (*p).tp_h3 = spec_tp_hash_at(tp, 3)
+                                (*p).tp_n0=tp.names[0]
+                                (*p).tp_n1=tp.names[1]
+                                (*p).tp_n2=tp.names[2]
+                                (*p).tp_n3=tp.names[3]
                                 (*p).fd = it.fn_def
                                 (*p).visibility = it.visibility
                                 SPEC_GF_PTRS[slot as usize] = p as i64
@@ -1122,6 +1207,10 @@ fn spec_collect_generic_method_items(methods: Option<Box<ItemList>>, known: Spec
                                 (*p).tp_h1 = spec_tp_hash_at(tp, 1)
                                 (*p).tp_h2 = spec_tp_hash_at(tp, 2)
                                 (*p).tp_h3 = spec_tp_hash_at(tp, 3)
+                                (*p).tp_n0=tp.names[0]
+                                (*p).tp_n1=tp.names[1]
+                                (*p).tp_n2=tp.names[2]
+                                (*p).tp_n3=tp.names[3]
                                 (*p).fd = it.fn_def
                                 (*p).visibility = it.visibility
                                 SPEC_GF_PTRS[slot as usize] = p as i64
@@ -1496,8 +1585,9 @@ struct SpecTypeStage { ty: TypeExpr }
 fn spec_subst_type(te: TypeExpr, ctx: i64, targs: Option<Box<TypeExprList>>) -> TypeExpr with Mut, Panic, Div, Alloc {
     if ctx == 0 - 1 { return te }
     if te.kind == TypeExprKind::TypeNamed && te.path.seg_count == 1 {
-        let idx = spec_ctx_tp_index(ctx, ast_name_hash(spec_path_single_name(te.path)))
+        let idx = spec_ctx_tp_index_name(ctx,spec_path_single_name(te.path))
         if idx >= 0 {
+            if idx>=spec_type_args_count(targs) {SPEC_UNSOUND_POISON=true;return dummy_type_expr()}
             return spec_type_args_nth(targs, idx)
         }
     }
@@ -1580,7 +1670,7 @@ fn spec_subst_expr_mut(p: *mut SpecExprStage, ctx: i64, targs: Option<Box<TypeEx
             var all_resolved = true
             var k: i64 = 0
             while k < st_count {
-                if spec_ctx_tp_index(ctx, spec_struct_table_tp_hash(st_idx, k)) < 0 {
+                if spec_ctx_tp_index_name(ctx,spec_struct_table_tp_name(st_idx,k)) < 0 {
                     all_resolved = false
                 }
                 k = k + 1
@@ -1590,7 +1680,7 @@ fn spec_subst_expr_mut(p: *mut SpecExprStage, ctx: i64, targs: Option<Box<TypeEx
                 var args_list: Option<Box<TypeExprList>> = None
                 var r: i64 = st_count - 1
                 while r >= 0 {
-                    let pick = spec_ctx_tp_index(ctx, spec_struct_table_tp_hash(st_idx, r))
+                    let pick = spec_ctx_tp_index_name(ctx,spec_struct_table_tp_name(st_idx,r))
                     args_list = Some(Box::new(TypeExprList { head: spec_type_args_nth(targs, pick), tail: args_list }))
                     r = r - 1
                 }
@@ -1600,7 +1690,7 @@ fn spec_subst_expr_mut(p: *mut SpecExprStage, ctx: i64, targs: Option<Box<TypeEx
                 var args_list2: Option<Box<TypeExprList>> = None
                 var r2 = spec_struct_table_tp_count(st_idx) - 1
                 while r2 >= 0 {
-                    let pick2 = spec_ctx_tp_index(ctx, spec_struct_table_tp_hash(st_idx, r2))
+                    let pick2 = spec_ctx_tp_index_name(ctx,spec_struct_table_tp_name(st_idx,r2))
                     args_list2 = Some(Box::new(TypeExprList { head: spec_type_args_nth(targs, pick2), tail: args_list2 }))
                     r2 = r2 - 1
                 }
@@ -2031,7 +2121,7 @@ fn spec_infer_call_type_args(e: Expr) -> Option<Box<TypeExprList>> with Mut, Pan
                             Some(a) => {
                                 let formal = &(*p).head.ty
                                 if (*formal).kind == TypeExprKind::TypeNamed && (*formal).path.seg_count == 1 {
-                                    let index = spec_ctx_tp_index(ctx, ast_name_hash(spec_path_single_name((*formal).path)))
+                                    let index = spec_ctx_tp_index_name(ctx,spec_path_single_name((*formal).path))
                                     if index >= 0 {
                                         let actual = spec_literal_scalar_type(&(*a).head)
                                         if spec_type_arg_is_scalar(actual) {
