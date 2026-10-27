@@ -23,7 +23,8 @@ Sounio assertion or expected value changed.
 
 The solver now retains the requested outer intervals and subdivides each one
 using four times the largest removal diagonal of the unchanged linear PBPK
-model. Every accepted substep therefore has h*max_removal at most one quarter.
+model. The substep policy targets h*max_removal of one quarter or less, subject to
+floating-point rounding.
 All original flows, volumes, partition coefficients, absorption and elimination
 equations are retained. The raw rk4_step_pbpk14 routine remains a single RK4
 step; the bounded stability policy belongs to solve_pbpk14_rk4.
