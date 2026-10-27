@@ -89,7 +89,7 @@ Slurm 17917 was interrupted when cpuops-t560-proxmox was removed from the cluste
 - Owned nested JSON with UTF-8/escape checks, exact number lexemes, depth and payload budgets, decoded access and serialization replay.
 - Dynamic FASTA and GFF3 records; VCF 4.3 owned header/sample context with declared INFO/FORMAT type/cardinality validation. Breakend/reference/file-wide semantics remain explicit limits.
 - Bounded MPMC i64 channels, typed socket readiness and nonblocking connect, and a Sounio polling executor with cancellation and monotonic deadlines.
-- Existing dynamic QR, direct Jacobi SVD and quantiles feed a structured JSON report and existing SVG/PNG renderers. Checked native PNG output replaces the undeclared append_file route; actual caller effect rows are propagated.
+- Existing dynamic QR, direct Jacobi SVD and quantiles feed a structured JSON report and existing SVG/PNG renderers. PNG uses the existing compiler file primitives on both engines, with full byte-count checks and propagated allocation effects. The separate native_file owner API retains explicit errno and close ownership.
 
 ## Qualification packets
 
@@ -200,3 +200,43 @@ then stops at the old graphics::svg module parse refusal under Madaros; it is
 not an all-green graphics gate. The three original fixture effect declarations
 are retained, their assertions unchanged. Remaining bootstrap export failures
 still require a compiler-compatible output path.
+
+## Qualified final PNG/compiler path
+
+The v276 owner explicitly approved disjoint append_file ID73 edits in
+message msg-1793080936-3991270-26550; its independent memcpy ID72 was preserved.
+PR3249 isolates this repair over PR3248; the integrated branch consumes its
+actual merge. No protected foreign branch or main was changed.
+
+Slurm18036 / packet76 built frozen source cb95845ed3cb463df46a19dc660f062166a204a7
+to raw11cb9eba691f2696bed631dd47a7f7aa706fab1da388d3fc8b470a0bd61e65c2.
+The build succeeded, then reference-build127 exposed missing g++ on that
+worker. The failed overall packet and post-build source/ELF readbacks are retained.
+
+Slurm18037 / packet77, after dependency installation, passed the both-engine
+append/C++23 byte gate, all three original graphics fixtures (3 pass/0 fail/0 skip),
+and every native/scientific phase of the expanded gate, including its PNG decoder.
+Its single failure was an outdated metadata-only runner projection pin after
+the reviewed capture drain change. The pin remains a fixed independent value;
+only that reviewed projection was refreshed, while the historical JSON fixture
+and its hash were preserved.
+
+Slurm18045 / packet79 repeats all phases and passes: append binary concordance,
+the three original graphics fixtures, the complete expanded integrated gate,
+source-catalog equality and terminal compiler/gate integrity. The frozen
+compiler/stdlib/test catalog is identical to packet76. Source head f16c9655c41e6c6506c82d1a4ae7f9d2d510aa15
+adds only script/CI and audited projection overlays to that compiler closure.
+PNG now uses complete-byte-count checks on compiler file primitives, so the
+bootstrap no longer needs the Linux native loader. Close/errno owner guarantees
+belong to the separate native_file API and are not claimed for legacy primitives.
+
+Slurm18038 / packet78 compares raw810 on the preceding compiler source with
+raw11cb on the append source. Both compiler self-checks fail with exactly the
+same 52 normalized diagnostics: 14 E004,20 E009,1 E050,17 E175. Source hashes
+verify after each check. This is an unchanged diagnostic disposition; a complete
+Madaros Gen2/fixed-point proof remains open.
+
+Slurm18021 / packet65 completed the earlier raw810 full deep replay: all phases
+except the stale genomics-count-identities bootstrap-private-read expectation
+passed. Packet69 qualifies the corrected full child gate. Final-head hosted CI
+and a final raw11cb whole-corpus comparison remain separate acceptance gates.

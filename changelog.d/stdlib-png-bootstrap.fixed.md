@@ -1,1 +1,1 @@
-The original PNG smoke entrypoints now declare Alloc to match the checked output API. Their export, size and pixel assertions are preserved; bootstrap loader compatibility remains a separate repair.
+The original PNG callers declare Alloc, and PNG output uses compiler file primitives supported by the bootstrap and source-built native compiler. All three original graphics smokes pass with their existing export, size and pixel assertions.
