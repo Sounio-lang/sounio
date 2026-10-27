@@ -1152,3 +1152,23 @@ ADD=13, NEG=0, STGASM=10, ASM=20, IMAD=42 and MOV_SLOT=3 still match.
 Gate. Job 17876, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-per-task=4. The node was idle at submit. Binary md5 d9a1081e75609478987dab17e0a1367c. SILICON PASS, EXIT:0. The node is idle.
 
 AMD and AGX are not in the atlas. The ELF container is still the one ptxas wrote. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 44. The kernel body, assembled (2026-10-26, OBSERVED)
+
+The family of cubins, tight and `--opt-level 0`, keeps one residue per instruction form. Changing the register does not change it. The register number and the constant offset live in the low 8 bytes.
+
+Residues measured that way: IMAD.MOV c[] 126746879, MOV 3840, ULDC.64 2560, LDG.E 203299072, STG.E 202381572, IADD3 with RZ as the fourth source 134209791, the same add with the negate on source 0 134210047, EXIT 58720256. Negate-on-source-0 is bit 8 of the high half. Bit 63 stays clear. That is the opposite of negate-on-source-1.
+
+Job 17904 replaced every instruction of the subtract kernel, from the constant moves through EXIT, with those formulas. The loads, the store and the prologue match the specimen bytes. The add does not: it is R7 = −R0 + R7. The inputs were 10 and 3. −10 + 3 is −7.
+
+- BODY_NEG=225, the negate byte.
+- BODY_LOAD=1, BODY_SYNC=0, BODY=4294967289.
+
+PIPE=13, ST0=10, FSRC=1091567616, IMAD=42 and the earlier checks still match.
+
+The node was not idle. Job 17884, a foreign CPU-only trace with OverSubscribe=OK and no GPU, held gpuorangefs-r770-proxmox. This probe was moved to partition `all` and shared the free GPU. 17884 was not cancelled.
+
+Gate. --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 aaeec55cac927f692d4a25dc0d73fbc8. SILICON PASS, EXIT:0.
+
+The ELF container is still the one ptxas wrote. AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
