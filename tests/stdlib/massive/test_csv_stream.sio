@@ -1,0 +1,114 @@
+//@ run-pass
+//@ expect-stdout: CSV_STREAM_OK
+use ffi::platform::{Platform,platform_open,platform_status,platform_close}
+use io::native_file::{native_file_open,native_file_status,native_file_write_all,native_file_close}
+use io::buffered_reader::{buffered_reader_new}
+use data::csv_stream::{CsvStream,csv_stream_new,csv_stream_next,csv_stream_close,csv_owned_row_new,csv_owned_row_close,csv_row_fields,csv_row_status,csv_row_error_offset,csv_row_field_byte,csv_row_field_range,csv_row_copy_field}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_get,byte_buffer_len,byte_buffer_clear,byte_buffer_utf8_count,byte_buffer_utf8_count_range,byte_buffer_close}
+fn bytes(text:string)->ByteBuffer with Alloc,Mut,Div {
+ var out=byte_buffer_new(1024)
+ var i:i64=0
+ while i<str_len(text) {
+  assert(byte_buffer_push(&!out,(str_char_at(text,i) as i64) & 255)==0)
+  i=i+1
+ }
+ return out
+}
+fn path()->ByteBuffer with Alloc,Mut,Div {bytes("/tmp/sounio_wave3_csv_stream_fixture.csv")}
+fn save(p:&Platform,data:&ByteBuffer) with IO,Alloc,Mut,Div,Panic {
+ let name=path()
+ let file=native_file_open(p,&name,1)
+ assert(native_file_status(&file)==0)
+ assert(native_file_write_all(p,&file,data,0,byte_buffer_len(data)).status==0)
+ assert(native_file_close(p,file)==0)
+ byte_buffer_close(name)
+}
+fn open_csv(p:&Platform,chunk:i64)->CsvStream with IO,Alloc,Mut,Div,Panic {
+ let name=path()
+ let file=native_file_open(p,&name,0)
+ byte_buffer_close(name)
+ return csv_stream_new(buffered_reader_new(file,chunk,chunk),0)
+}
+fn malformed(p:&Platform,text:string,expected:i64) with IO,Alloc,Mut,Div,Panic {
+ let data=bytes(text)
+ save(p,&data)
+ byte_buffer_close(data)
+ var stream=open_csv(p,1)
+ var row=csv_owned_row_new(1024,16)
+ var code=csv_stream_next(p,&!stream,&!row)
+ while code==0 {code=csv_stream_next(p,&!stream,&!row)}
+ assert(code==expected && csv_row_status(&row)==expected && csv_row_fields(&row)==0)
+ assert(csv_stream_close(p,stream)==0)
+ csv_owned_row_close(row)
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ let data=bytes("﻿a,b,c\r\n1,\"α,\"\"x\nq\",\r\n2,z,end")
+ save(&p,&data)
+ byte_buffer_close(data)
+ var chunk:i64=1
+ while chunk<=17 {
+  var stream=open_csv(&p,chunk)
+  var row=csv_owned_row_new(1024,16)
+  assert(csv_stream_next(&p,&!stream,&!row)==0 && csv_row_fields(&row)==3)
+  assert(csv_row_field_byte(&row,0,0).value==97)
+  assert(csv_stream_next(&p,&!stream,&!row)==0)
+  let field=csv_row_field_range(&row,1)
+  assert(field.status==0 && field.len==7)
+  assert(csv_row_field_byte(&row,1,0).value==206 && csv_row_field_byte(&row,1,1).value==177)
+  assert(csv_row_field_byte(&row,1,3).value==34 && csv_row_field_byte(&row,1,5).value==10)
+  assert(csv_row_field_range(&row,2).len==0)
+  var copy=byte_buffer_new(32)
+  assert(csv_row_copy_field(&row,1,&!copy).value==7)
+  assert(byte_buffer_utf8_count(&copy).status==0)
+  byte_buffer_close(copy)
+  assert(csv_stream_next(&p,&!stream,&!row)==0)
+  assert(csv_row_field_byte(&row,0,0).value==50)
+  assert(csv_stream_next(&p,&!stream,&!row)==1)
+  assert(csv_stream_next(&p,&!stream,&!row)==1)
+  assert(csv_stream_close(&p,stream)==0)
+  csv_owned_row_close(row)
+  chunk=chunk+1
+ }
+ malformed(&p,"a,b\n1,\"bad",22)
+ malformed(&p,"a,b\n1,x\"y\n",22)
+ malformed(&p,"a,b\n1,\"x\"junk\n",22)
+ malformed(&p,"a,b\r1,2\n",22)
+ malformed(&p,"a,b\n1\n",22)
+ var invalid=byte_buffer_new(16)
+ assert(byte_buffer_push(&!invalid,208)==0 && byte_buffer_push(&!invalid,44)==0 && byte_buffer_push(&!invalid,177)==0)
+ assert(byte_buffer_utf8_count_range(&invalid,0,1).status==5)
+ assert(byte_buffer_utf8_count_range(&invalid,-1,1).status==4)
+ save(&p,&invalid)
+ byte_buffer_close(invalid)
+ var bad=open_csv(&p,1)
+ var badrow=csv_owned_row_new(32,4)
+ assert(csv_stream_next(&p,&!bad,&!badrow)==84)
+ assert(csv_row_error_offset(&badrow)==0)
+ assert(csv_stream_close(&p,bad)==0)
+ csv_owned_row_close(badrow)
+ let small=bytes("a,b\n")
+ save(&p,&small)
+ byte_buffer_close(small)
+ var budget=open_csv(&p,1)
+ var one=csv_owned_row_new(32,1)
+ assert(csv_stream_next(&p,&!budget,&!one)==105)
+ assert(csv_stream_close(&p,budget)==0)
+ csv_owned_row_close(one)
+ var long=byte_buffer_new(512)
+ var i:i64=0
+ while i<257 {assert(byte_buffer_push(&!long,97)==0);i=i+1}
+ save(&p,&long)
+ byte_buffer_close(long)
+ var large=open_csv(&p,3)
+ var longrow=csv_owned_row_new(512,4)
+ assert(csv_stream_next(&p,&!large,&!longrow)==0)
+ assert(csv_row_field_range(&longrow,0).len==257 && csv_row_field_byte(&longrow,0,256).value==97)
+ assert(csv_stream_next(&p,&!large,&!longrow)==1)
+ assert(csv_stream_close(&p,large)==0)
+ csv_owned_row_close(longrow)
+ platform_close(p)
+ println("CSV_STREAM_OK")
+ 0
+}

@@ -103,3 +103,28 @@ must be canceled or completed first; reaping a pending task reports22,
 and a missing or already-reaped ID reports4. The regression repeatedly
 reuses a two-slot storage budget while IDs continue increasing and verifies
 that compaction preserves other live tasks.
+
+## Incremental CSV receipt
+
+Slurm **18138** completed with status 0. The streaming fixture, existing byte
+buffer fixture and existing native-file fixture each checked, compiled and
+ran: nine phases passed. `CSV_STREAM_OK` confirms refill sizes 1 through17
+produce identical BOM, doubled-quote, quoted-newline, trailing-empty-field
+and UTF-8 results. Controls reject malformed EOF, stray/post-quote bytes,
+bare CR, width mismatch, malformed UTF-8 per field and field-budget overflow.
+A 257-byte field passes without the legacy64-byte convenience cap.
+
+Receipt root:
+`/scratch/sounio-stdlib-wave3-20261027/services/csv-stream-01/results`.
+Source, current compiler/qualified runtime and executable hashes have final
+verification files. New owners are `io::buffered_reader::BufferedReader`,
+`data::csv_stream::CsvStream` and `CsvOwnedRow`; all have explicit close
+functions. The caller reuses or closes each owned row. Field access is checked
+and field-copy appends unescaped bytes into a caller-owned buffer.
+
+The stream returns its first record, so callers may treat it as the header.
+Expected width0 learns the first record's width; subsequent records must
+match. Only an initial UTF-8 BOM is stripped. No normalization or implicit
+case folding occurs. Syntax and budget errors are terminal and hide the
+incomplete row; EOF is status1. UTF-8 is validated per field, preventing
+a lead byte in one field and a continuation byte in another from combining.

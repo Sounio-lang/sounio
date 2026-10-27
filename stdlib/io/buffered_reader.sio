@@ -1,0 +1,37 @@
+// Owned buffered regular-file reader. Payload budget covers the refill buffer.
+// next returns status61 at EOF; offset counts delivered bytes, not prefetched bytes.
+use ffi::platform::{Platform,PlatformValue}
+use io::native_file::{NativeFile,native_file_status,native_file_read,native_file_close}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_status,byte_buffer_len,byte_buffer_get,byte_buffer_clear,byte_buffer_close}
+pub linear struct BufferedReader {file:NativeFile,buffer:ByteBuffer,pos:i64,offset:i64,chunk:i64,status:i64,eof:bool}
+pub fn buffered_reader_new(file:NativeFile,chunk_bytes:i64,max_bytes:i64)->BufferedReader {
+ var code=native_file_status(&file)
+ if code==0 {
+  if chunk_bytes<=0 || max_bytes<0 || chunk_bytes>max_bytes {code=22}
+ }
+ return BufferedReader {file:file,buffer:byte_buffer_new(max_bytes),pos:0,offset:0,chunk:chunk_bytes,status:code,eof:false}
+}
+pub fn buffered_reader_status(r:&BufferedReader)->i64 {r.status}
+pub fn buffered_reader_offset(r:&BufferedReader)->i64 {r.offset}
+pub fn buffered_reader_next(p:&Platform,r:&!BufferedReader)->PlatformValue with IO,Alloc,Mut {
+ if r.status!=0 {return PlatformValue {value:0,status:r.status}}
+ if r.pos>=byte_buffer_len(&r.buffer) {
+  if r.eof {return PlatformValue {value:0,status:61}}
+  byte_buffer_clear(&!r.buffer)
+  let read=native_file_read(p,&r.file,&!r.buffer,r.chunk)
+  if read.status!=0 {r.status=read.status;return read}
+  if read.value==0 {r.eof=true;return PlatformValue {value:0,status:61}}
+  r.pos=0
+ }
+ if r.offset==9223372036854775807 {r.status=75;return PlatformValue {value:0,status:75}}
+ let byte=byte_buffer_get(&r.buffer,r.pos)
+ if byte.status!=0 {r.status=71;return PlatformValue {value:0,status:71}}
+ r.pos=r.pos+1
+ r.offset=r.offset+1
+ return PlatformValue {value:byte.value,status:0}
+}
+pub fn buffered_reader_close(p:&Platform,r:BufferedReader)->i64 with IO,Alloc {
+ let BufferedReader {file,buffer,pos,offset,chunk,status,eof}=r
+ byte_buffer_close(buffer)
+ return native_file_close(p,file)
+}

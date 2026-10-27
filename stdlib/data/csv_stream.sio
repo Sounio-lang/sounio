@@ -1,0 +1,191 @@
+// Strict, incremental UTF-8 CSV over an owned buffered regular-file reader.
+// Comma delimiter, LF/CRLF records, doubled quotes and embedded quoted newlines.
+// The first record is returned to the caller (it may be a header). expected_columns
+// 0 learns its width; every later record must match. Only an initial UTF-8 BOM
+// is stripped. No normalization is performed. All row/field budgets are explicit.
+use ffi::platform::{Platform,PlatformValue}
+use io::buffered_reader::{BufferedReader,buffered_reader_status,buffered_reader_next,buffered_reader_close}
+use collections::byte_buffer::{ByteBuffer,ByteValue,byte_buffer_new,byte_buffer_len,byte_buffer_get,byte_buffer_push,byte_buffer_reserve,byte_buffer_clear,byte_buffer_utf8_count_range,byte_buffer_close}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_len,integer_buffer_resize,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+pub linear struct CsvStream {reader:BufferedReader,prefix:[i64;3],prefix_len:i64,prefix_pos:i64,started:bool,offset:i64,columns:i64,status:i64}
+pub linear struct CsvOwnedRow {data:ByteBuffer,fields:IntegerBuffer,status:i64,error_offset:i64}
+pub struct CsvFieldRange {pub start:i64,pub len:i64,pub status:i64}
+fn csv_stream_errno(code:i64)->i64 {
+ if code==0 {return 0}
+ if code==2 {return 105}
+ if code==3 {return 12}
+ if code==5 {return 84}
+ return 22
+}
+pub fn csv_stream_new(reader:BufferedReader,expected_columns:i64)->CsvStream {
+ var code=buffered_reader_status(&reader)
+ if code==0 && expected_columns<0 {code=22}
+ return CsvStream {reader:reader,prefix:[0;3],prefix_len:0,prefix_pos:0,started:false,offset:0,columns:expected_columns,status:code}
+}
+pub fn csv_owned_row_new(max_row_bytes:i64,max_fields:i64)->CsvOwnedRow with Alloc,Mut,Div {
+ var code:i64=0
+ var field_budget:i64=0
+ if max_row_bytes<0 || max_fields<1 || max_fields>576460752303423231 {code=22}
+ else {field_budget=max_fields*16}
+ return CsvOwnedRow {data:byte_buffer_new(max_row_bytes),fields:integer_buffer_new(0,field_budget),status:code,error_offset:0}
+}
+pub fn csv_row_status(r:&CsvOwnedRow)->i64 {r.status}
+pub fn csv_row_error_offset(r:&CsvOwnedRow)->i64 {r.error_offset}
+pub fn csv_row_fields(r:&CsvOwnedRow)->i64 with Div {
+ if r.status!=0 {return 0}
+ return integer_buffer_len(&r.fields)/2
+}
+pub fn csv_row_field_range(r:&CsvOwnedRow,field:i64)->CsvFieldRange with Div,Panic {
+ if r.status!=0 {return CsvFieldRange {start:0,len:0,status:r.status}}
+ if field<0 || field>=integer_buffer_len(&r.fields)/2 {return CsvFieldRange {start:0,len:0,status:4}}
+ return CsvFieldRange {start:integer_buffer_at(&r.fields,field*2),len:integer_buffer_at(&r.fields,field*2+1),status:0}
+}
+pub fn csv_row_field_byte(r:&CsvOwnedRow,field:i64,index:i64)->ByteValue with Div,Panic {
+ let range=csv_row_field_range(r,field)
+ if range.status!=0 {return ByteValue {value:0,status:range.status}}
+ if index<0 || index>=range.len {return ByteValue {value:0,status:4}}
+ return byte_buffer_get(&r.data,range.start+index)
+}
+// Appends unescaped field bytes; pre-reserves the full append before mutation.
+pub fn csv_row_copy_field(r:&CsvOwnedRow,field:i64,out:&!ByteBuffer)->ByteValue with Alloc,Mut,Div,Panic {
+ let range=csv_row_field_range(r,field)
+ if range.status!=0 {return ByteValue {value:0,status:range.status}}
+ let size=byte_buffer_len(out)
+ if range.len>9223372036854775807-size {return ByteValue {value:0,status:22}}
+ let code=byte_buffer_reserve(out,size+range.len)
+ if code!=0 {return ByteValue {value:0,status:csv_stream_errno(code)}}
+ var i:i64=0
+ while i<range.len {
+  let byte=byte_buffer_get(&r.data,range.start+i)
+  assert(byte.status==0)
+  assert(byte_buffer_push(out,byte.value)==0)
+  i=i+1
+ }
+ return ByteValue {value:range.len,status:0}
+}
+fn csv_stream_read(p:&Platform,s:&!CsvStream)->PlatformValue with IO,Alloc,Mut {
+ if !s.started {
+  s.started=true
+  var n:i64=0
+  while n<3 {
+   let b=buffered_reader_next(p,&!s.reader)
+   if b.status==61 {break}
+   if b.status!=0 {return b}
+   s.prefix[n]=b.value
+   n=n+1
+  }
+  s.prefix_len=n
+  if n==3 && s.prefix[0]==239 && s.prefix[1]==187 && s.prefix[2]==191 {
+   s.prefix_pos=3
+   s.offset=3
+  }
+ }
+ if s.offset==9223372036854775807 {return PlatformValue {value:0,status:75}}
+ if s.prefix_pos<s.prefix_len {
+  let value=s.prefix[s.prefix_pos]
+  s.prefix_pos=s.prefix_pos+1
+  s.offset=s.offset+1
+  return PlatformValue {value:value,status:0}
+ }
+ let b=buffered_reader_next(p,&!s.reader)
+ if b.status==0 {s.offset=s.offset+1}
+ return b
+}
+fn csv_stream_fail(s:&!CsvStream,r:&!CsvOwnedRow,code:i64,offset:i64)->i64 with Mut {
+ s.status=code
+ r.status=code
+ r.error_offset=offset
+ return code
+}
+fn csv_row_finish_field(r:&!CsvOwnedRow,start:i64)->i64 with Alloc,Mut,Div,Panic {
+ let n=byte_buffer_len(&r.data)-start
+ let valid=byte_buffer_utf8_count_range(&r.data,start,n)
+ if valid.status!=0 {return csv_stream_errno(valid.status)}
+ let at=integer_buffer_len(&r.fields)
+ if at>9223372036854775805 {return 105}
+ let code=integer_buffer_resize(&!r.fields,at+2)
+ if code!=0 {return csv_stream_errno(code)}
+ assert(integer_buffer_set(&!r.fields,at,start)==0)
+ assert(integer_buffer_set(&!r.fields,at+1,n)==0)
+ return 0
+}
+fn csv_stream_complete(s:&!CsvStream,r:&!CsvOwnedRow,start:i64,field_offset:i64)->i64 with Alloc,Mut,Div,Panic {
+ let code=csv_row_finish_field(r,start)
+ if code!=0 {return csv_stream_fail(s,r,code,field_offset)}
+ let width=integer_buffer_len(&r.fields)/2
+ if s.columns==0 {s.columns=width}
+ else if width!=s.columns {return csv_stream_fail(s,r,22,s.offset)}
+ r.status=0
+ return 0
+}
+// 0=row,1=EOF;22 malformed/width,84 malformed fieldUTF8,105 payload budget.
+// Errors are terminal for this stream and hide the incomplete row's fields.
+pub fn csv_stream_next(p:&Platform,s:&!CsvStream,r:&!CsvOwnedRow)->i64 with IO,Alloc,Mut,Div,Panic {
+ if s.status!=0 {r.status=s.status;r.error_offset=s.offset;return s.status}
+ if r.status!=0 && r.status!=1 {return r.status}
+ byte_buffer_clear(&!r.data)
+ assert(integer_buffer_resize(&!r.fields,0)==0)
+ r.status=0
+ r.error_offset=0
+ var state:i64=0
+ var start:i64=0
+ var field_offset=s.offset
+ var any:bool=false
+ while true {
+  let got=csv_stream_read(p,s)
+  if got.status==61 {
+   if state==2 || state==4 {return csv_stream_fail(s,r,22,s.offset)}
+   if !any {s.status=1;r.status=1;return 1}
+   return csv_stream_complete(s,r,start,field_offset)
+  }
+  if got.status!=0 {return csv_stream_fail(s,r,got.status,s.offset)}
+  let c=got.value
+  if !any {field_offset=s.offset-1}
+  any=true
+  if state==4 {
+   if c!=10 {return csv_stream_fail(s,r,22,s.offset-1)}
+   return csv_stream_complete(s,r,start,field_offset)
+  }
+  if state==2 {
+   if c==34 {state=3}
+   else {
+    let code=byte_buffer_push(&!r.data,c)
+    if code!=0 {return csv_stream_fail(s,r,csv_stream_errno(code),s.offset-1)}
+   }
+  } else if c==13 {state=4}
+  else if c==10 {return csv_stream_complete(s,r,start,field_offset)}
+  else if c==44 {
+   let code=csv_row_finish_field(r,start)
+   if code!=0 {return csv_stream_fail(s,r,code,field_offset)}
+   start=byte_buffer_len(&r.data)
+   field_offset=s.offset
+   state=0
+  } else if state==0 {
+   if c==34 {state=2}
+   else {
+    let code=byte_buffer_push(&!r.data,c)
+    if code!=0 {return csv_stream_fail(s,r,csv_stream_errno(code),s.offset-1)}
+    state=1
+   }
+  } else if state==1 {
+   if c==34 {return csv_stream_fail(s,r,22,s.offset-1)}
+   let code=byte_buffer_push(&!r.data,c)
+   if code!=0 {return csv_stream_fail(s,r,csv_stream_errno(code),s.offset-1)}
+  } else {
+   if c!=34 {return csv_stream_fail(s,r,22,s.offset-1)}
+   let code=byte_buffer_push(&!r.data,34)
+   if code!=0 {return csv_stream_fail(s,r,csv_stream_errno(code),s.offset-1)}
+   state=2
+  }
+ }
+ return 1
+}
+pub fn csv_owned_row_close(r:CsvOwnedRow) with Alloc {
+ let CsvOwnedRow {data,fields,status,error_offset}=r
+ byte_buffer_close(data)
+ integer_buffer_close(fields)
+}
+pub fn csv_stream_close(p:&Platform,s:CsvStream)->i64 with IO,Alloc {
+ let CsvStream {reader,prefix,prefix_len,prefix_pos,started,offset,columns,status}=s
+ return buffered_reader_close(p,reader)
+}
