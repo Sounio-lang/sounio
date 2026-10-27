@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.stdlib-massive-2026-10-26.readme
+authority: repo_only
+audience: users
+last_validated: 2026-10-27
+validated_by: devpass
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-massive-2026-10-26.readme
+-->
+
 # Stdlib implementation campaign — 2026-10-26
 
 Branch: `devpass/stdlib-massive-20261026`. Base: `5977c066f7d5f0ca04751318e487d8ab670716e0`.

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.stdlib-massive-2026-10-26.review-stack
+authority: repo_only
+audience: users
+last_validated: 2026-10-27
+validated_by: devpass
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.stdlib-massive-2026-10-26.review-stack
+-->
+
 # Review stack and acceptance status
 
 The campaign is split into these draft PRs, in dependency order:
