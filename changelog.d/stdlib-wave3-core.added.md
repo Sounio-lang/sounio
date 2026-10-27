@@ -1,0 +1,1 @@
+- Format every i64 in `str_from_i64`, including INT64_MIN, by extracting digits in the negative domain. Preserve the existing floating formatter and public APIs.
