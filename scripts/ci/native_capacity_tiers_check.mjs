@@ -55,6 +55,14 @@ try{
  const legacy=body('compile_native_finalize_and_write_ref',cgx,'compile_native_finalize_and_write_ref');
  for(const [r,w]of [[/\(\*nc\)\.code_overflow/,'legacy_ignores_code_overflow'],[/\(\*nc\)\.reloc_overflow/,'legacy_ignores_reloc_overflow'],[/NATIVE_ELF_OVERFLOW != 0/,'legacy_ignores_elf_overflow'],[/return 19/,'legacy_missing_rc19'],[/return 20/,'legacy_missing_rc20'],[/return 21/,'legacy_missing_rc21'],[/\(\*nc\)\.label_overflow/,'legacy_ignores_label_overflow'],[/return 22/,'legacy_missing_rc22']])need(r,legacy,w);
  tier('rodata_tier',only(/^pub var NC_BIG_RODATA: \[i8; ([0-9]+)\] = \[0; ([0-9]+)\]$/m,frame,'nc_big_rodata_decl'),only(accessor('nc_flat_rodata_capacity','pub '),frame,'nc_flat_rodata_capacity_accessor'),rodata);
+ if(ir.includes('IrStaticBlob')){
+  const assetPath=path.join(root,'self-hosted/compiler/static_assets.sio');
+  if(!fs.existsSync(assetPath))fail('static_asset_source_missing');
+  const source=fs.readFileSync(assetPath,'utf8');
+  const limit=Number(only(accessor('static_asset_limit','pub '),source,'static_asset_limit_accessor')[1]);
+  if(limit<=0)fail('static_asset_limit_nonpositive');
+  if(limit>rodata)fail('static_asset_limit_exceeds_rodata');
+ }
  need(/pub rodata_overflow_bytes_attempted: i64,/,frame,'rodata_overflow_bytes_attempted_field_missing');
  need(/out\.rodata_overflow_bytes_attempted = 0/,frame,'rodata_overflow_bytes_attempted_not_initialised');
  need(/if nc\.rodata_overflow_bytes_attempted > nc_flat_rodata_capacity\(\) \{(?:.|\n)*?return 23\s*\n\s*\}/,cgx,'rc23_rodata_overflow_check_missing');
