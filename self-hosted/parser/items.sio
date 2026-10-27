@@ -2123,6 +2123,35 @@ impl Parser {
 
         let name = p.current_name()
         p = p.expect_ident()
+        // Parse optional type parameters: enum Foo<T, U> { ... }
+        var type_params_opt: Option<Box<TypeParamDefList>> = None
+        if parser_peek(p) == TokenKind::Lt {
+            p = p.advance()  // skip '<'
+            var rev_tparams: Option<Box<TypeParamDefList>> = None
+            while parser_peek(p) != TokenKind::Gt && parser_peek(p) != TokenKind::Eof {
+                let tp_span = p.current_span()
+                if parser_peek(p) == TokenKind::Const {
+                    p = p.advance()
+                }
+                let tp_name = p.current_name()
+                p = p.expect_ident()
+                if parser_peek(p) == TokenKind::Colon {
+                    p = p.advance()
+                    let ann_pair = p.parse_type()
+                    p = ann_pair.0
+                }
+                let tpd = TypeParamDef { name: tp_name, span: p.span_from(tp_span) }
+                rev_tparams = Some(Box::new(TypeParamDefList { head: tpd, tail: rev_tparams }))
+                if parser_peek(p) == TokenKind::Comma {
+                    p = p.advance()
+                } else if parser_peek(p) != TokenKind::Gt {
+                    p = p.advance()
+                }
+            }
+            p = p.expect(TokenKind::Gt)
+            type_params_opt = reverse_type_param_def_list_opt(rev_tparams)
+        }
+
         p = p.expect(TokenKind::LBrace)
 
         var rev_variants_opt: Option<Box<VariantDefList>> = None
@@ -2171,14 +2200,17 @@ impl Parser {
                     let ty_pair_t = p.parse_type()
                     p = ty_pair_t.0
                     let t_ty = ty_pair_t.1
-                    let t_name = if tidx == 0 { make_name("_0") }
-                        else if tidx == 1 { make_name("_1") }
-                        else if tidx == 2 { make_name("_2") }
-                        else if tidx == 3 { make_name("_3") }
-                        else if tidx == 4 { make_name("_4") }
-                        else if tidx == 5 { make_name("_5") }
-                        else if tidx == 6 { make_name("_6") }
-                        else { make_name("_7") }
+                    var t_name=make_name("_0")
+                    if tidx<10 {t_name.buf[1]=(48+tidx) as i8}
+                    else if tidx<64 {
+                        t_name.len=3
+                        t_name.buf[1]=(48+tidx/10) as i8
+                        t_name.buf[2]=(48+tidx%10) as i8
+                    } else {
+                        p.had_error=true
+                        p.error_count=p.error_count+1
+                        print("parse error: enum tuple variant exceeds 64 payload fields\n")
+                    }
                     let t_span = p.span_from(v_start)
                     let tdef = FieldDef { name: t_name, ty: t_ty, is_pub: true, span: t_span }
                     rev_tfields = Some(Box::new(FieldDefList { head: tdef, tail: rev_tfields }))
@@ -2207,7 +2239,7 @@ impl Parser {
         p = p.expect(TokenKind::RBrace)
         let variants_opt = reverse_variant_def_list_opt(rev_variants_opt)
         let span = p.span_from(start)
-        let edef = EnumDef { name: name, variants: variants_opt, span: span }
+        let edef = EnumDef { name: name, type_params: type_params_opt, variants: variants_opt, span: span }
 
         (p, Item {
             kind: ItemKind::ItemEnum,
