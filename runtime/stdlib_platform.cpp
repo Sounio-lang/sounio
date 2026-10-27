@@ -2,6 +2,8 @@
 // All entrypoints are noexcept. Operation 0 reads this thread's last errno;
 // every other operation resets it. Resource IDs are never raw addresses.
 #include <atomic>
+#include <condition_variable>
+#include <vector>
 #include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
@@ -61,7 +63,7 @@ asm(
 namespace {
 using I=std::int64_t;
 thread_local int last_error=0;
-enum class Kind {atomic,thread,socket,mutex};
+enum class Kind {atomic,thread,socket,mutex,channel};
 struct Resource {const Kind kind;explicit Resource(Kind k):kind(k){};virtual ~Resource()=default;};
 struct Atomic final:Resource {std::atomic<I> value;explicit Atomic(I v):Resource(Kind::atomic),value(v){}};
 struct Thread final:Resource {
@@ -83,6 +85,16 @@ struct Mutex final:Resource {
   }
   ~Mutex()override {if(initialized)pthread_mutex_destroy(&native);}
 };
+struct Channel final:Resource {
+  std::mutex mutex;
+  std::condition_variable readable,writable;
+  std::vector<I> data;
+  std::size_t head=0,size=0;
+  bool closed=false,destroyed=false;
+  explicit Channel(std::size_t capacity):Resource(Kind::channel),data(capacity){}
+};
+I context_count=0; // protected by registry_mutex
+
 struct Socket final:Resource {
   int fd;std::atomic<int> peer_port{0};
   explicit Socket(int f):Resource(Kind::socket),fd(f){}
@@ -134,7 +146,63 @@ sockaddr_in address(I ip,I port) {
   a.sin_port=htons(static_cast<std::uint16_t>(port));return a;
 }
 bool valid_address(I ip,I port) {return ip>=0&&ip<=4294967295LL&&port>=0&&port<=65535;}
+I channel_send(const std::shared_ptr<Channel>& q,I value,I timeout_ms,bool wait) {
+  if(wait&&(timeout_ms<0||timeout_ms>2147483647))return failure(EINVAL);
+  std::unique_lock lock(q->mutex);
+  const auto ready=[&]{return q->destroyed||q->closed||q->size<q->data.size();};
+  if(!ready()) {
+    if(!wait)return failure(EAGAIN);
+    if(!q->writable.wait_until(lock,std::chrono::steady_clock::now()+std::chrono::milliseconds(timeout_ms),ready))return failure(ETIMEDOUT);
+  }
+  if(q->destroyed)return failure(EBADF);
+  if(q->closed)return failure(EPIPE);
+  q->data[(q->head+q->size)%q->data.size()]=value;++q->size;
+  lock.unlock();q->readable.notify_one();return 0;
+}
+I channel_receive(const std::shared_ptr<Channel>& q,I timeout_ms,bool wait) {
+  if(wait&&(timeout_ms<0||timeout_ms>2147483647))return failure(EINVAL);
+  std::unique_lock lock(q->mutex);
+  const auto ready=[&]{return q->destroyed||q->closed||q->size>0;};
+  if(!ready()) {
+    if(!wait)return failure(EAGAIN);
+    if(!q->readable.wait_until(lock,std::chrono::steady_clock::now()+std::chrono::milliseconds(timeout_ms),ready))return failure(ETIMEDOUT);
+  }
+  if(q->destroyed)return failure(EBADF);
+  if(q->size==0)return failure(ENODATA);
+  const I value=q->data[q->head];q->head=(q->head+1)%q->data.size();--q->size;
+  lock.unlock();q->writable.notify_one();return value;
+}
+
 I dispatch(I op,I a,I b,I c,I d) {
+  if(op==80) {
+    std::lock_guard guard(registry_mutex);
+    if(context_count==std::numeric_limits<I>::max())return failure(EOVERFLOW);
+    return ++context_count;
+  }
+  if(op==81) {
+    std::lock_guard guard(registry_mutex);
+    if(context_count<=0)return failure(EINVAL);
+    if(context_count==1&&!registry.empty())return failure(EBUSY);
+    --context_count;return 0;
+  }
+  if(op==70) {
+    if(a<=0||b<0)return failure(EINVAL);
+    if(a>b/8)return failure(ENOBUFS);
+    if(static_cast<std::uint64_t>(a)>std::vector<I>{}.max_size())return failure(EOVERFLOW);
+    return put(std::make_shared<Channel>(static_cast<std::size_t>(a)));
+  }
+  if(op>=71&&op<=77) {
+    auto q=get<Channel>(a,Kind::channel);if(!q)return 0;
+    if(op==71||op==73)return channel_send(q,b,c,op==73);
+    if(op==72||op==74)return channel_receive(q,b,op==74);
+    if(op==75){
+      {std::lock_guard lock(q->mutex);q->closed=true;}
+      q->readable.notify_all();q->writable.notify_all();return 0;
+    }
+    if(op==76)return 1;
+    std::lock_guard lock(q->mutex);return static_cast<I>(q->size);
+  }
+
   if(op==1)return 1;
   if(op==2) {
     std::lock_guard guard(registry_mutex);auto it=registry.find(a);
@@ -151,6 +219,11 @@ I dispatch(I op,I a,I b,I c,I d) {
       if(m->users.load()!=0)return failure(EBUSY);
       const int rc=pthread_mutex_destroy(&m->native);if(rc)return failure(rc);
       m->initialized=false;
+    }
+    if(it->second->kind==Kind::channel) {
+      auto q=std::static_pointer_cast<Channel>(it->second);
+      {std::lock_guard lock(q->mutex);q->closed=true;q->destroyed=true;}
+      q->readable.notify_all();q->writable.notify_all();
     }
     registry.erase(it);return 0;
   }
