@@ -56,5 +56,20 @@ These are focused receipts, not a full-corpus or final-tip acceptance.
 Main/candidate full slow-enabled comparison is job 17917, packet 07, using the same raw compiler.
 The baseline layers the candidate Node metadata harness onto main; main stdlib/test sources are unchanged.
 No failures are suppressed and no numerical tolerance is relaxed.
-Executor, nested JSON, file I/O and domain-reader expansion remain in development.
+Subsequent focused receipts are recorded below. VCF header/schema expansion and final corpus acceptance remain pending.
 No merge, deployment or auto-merge is authorized by these receipts.
+
+## Subsequent focused receipts
+
+- PR 3246: typed function-pointer result layout repair. Slurm 17940 proves the original native failure and corrected callback/alias/cast behavior. The polling executor passes check/compile/native. Packet 24 compares older controls before and after; three retain existing failures and two pass on both. Packet 16 is therefore not an all-green combined gate.
+- Packets 21, 22 and 23: JSON decoding/serialization, dynamic FASTA and GFF3 check/compile/native pass. JSON keeps exact numeric lexemes and owns its source copy. FASTA preserves nucleotide ambiguity symbols and supports multiple records beyond fixed sequence caps. GFF3 checks rows, coordinates, phase and lexical attributes; ontology and ID/Parent graph validation are caller responsibilities.
+- Packet 25 / Slurm 17952: CSV overflow regression fails before and passes after; independent C++23 numeric and function-pointer-layout references pass.
+- Packet 27 / Slurm 17955: checked file -> owned existing CSV reader passes with quoted newlines, long fields and explicit budgets. C++ file/text ownership and earlier platform/byte controls pass.
+- Packet 28 / Slurm 17956: nonblocking socket and cooperative scheduling controls pass, including sticky asynchronous connection errors in the C++23 reference. A pending read yields to another completed task, then resumes on readiness.
+- Packet 31 / Slurm 17964 on dl380-dl380-proxmox: producer/checker compile and native workflow gate pass. The existing QR, SVD, quantile, SVG and PNG APIs process the checked CSV. JSON replays exactly; independent C++23 arithmetic verifies coefficients, rank-related identities and quantiles, and checks SVG primitives and PNG CRC/Adler/pixels. The original PNG source refused at undeclared append_file in packet 29; its checked I/O repair is exercised in packet 31.
+
+Durable roots follow /orangefs/training/sounio-foundry/runs/stdlib-next-20261027-XX/results. Compiler raw for these modular receipts: e1ee21074398f771d5eeec32a5281a5ff57a8bdf27f09c8a0a2b39a0dd000b41. These remain focused receipts until the final integrated gates complete.
+
+## Interrupted comparison and recovery
+
+Slurm 17917 was interrupted when cpuops-t560-proxmox was removed from the cluster and its partition disappeared. The scheduler requeued it to an invalid partition; the obsolete requeue was cancelled to preserve the incomplete packet. It did not complete main or candidate full acceptance. The captured partial results and scheduler receipt are preserved at /orangefs/training/sounio-foundry/runs/stdlib-next-20261027-07/interrupted-20261027T0228/; partial-results.tar.gz SHA256 b40ceae20b7d679a660a6eb4d6f24c182bd4fff3534718fa5c94d861eb89ffb1. Source archives and raw compiler hashes were verified while migrating validation to the DL380 CPU worker.
