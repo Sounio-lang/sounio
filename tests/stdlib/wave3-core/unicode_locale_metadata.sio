@@ -1,0 +1,100 @@
+//@ run-pass
+//@ expect-stdout: UNICODE_CONFORMANCE_OK
+// Every official alias/likely row is kept, plus type aliases and all154 public IDs.
+use text::utf8::{Utf8Text,utf8_text_from_string,utf8_text_from_bytes,utf8_text_status,utf8_text_byte_len,utf8_text_byte_at,utf8_text_close}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_len,byte_buffer_get,byte_buffer_close}
+use ffi::platform::{platform_open,platform_status,platform_close}
+use io::native_file::{native_file_open,native_file_status,native_file_read,native_file_close}
+use text::locale_collation::{UnicodeLocaleCollator,unicode_locale_options,unicode_locale_collator,unicode_locale_collator_status,unicode_locale_resolved_locale_len,unicode_locale_resolved_locale_byte_at,unicode_locale_resolved_type_len,unicode_locale_resolved_type_byte_at}
+fn byte(d:&ByteBuffer,at:i64)->i64 with Panic {let value=byte_buffer_get(d,at);assert(value.status==0);value.value}
+fn word(d:&ByteBuffer,at:i64)->i64 with Panic {
+ assert(at>=0 && at<=byte_buffer_len(d))
+ assert(byte_buffer_len(d)-at>=4)
+ byte(d,at)+byte(d,at+1)*256+byte(d,at+2)*65536+byte(d,at+3)*16777216
+}
+fn next(d:&ByteBuffer,at:i64)->i64 with Panic {
+ let n=word(d,at)
+ assert(n<=255)
+ assert(at+4<=byte_buffer_len(d) && n<=byte_buffer_len(d)-at-4)
+ at+4+n
+}
+fn text(d:&ByteBuffer,at:i64)->Utf8Text with Alloc,Mut,Div,Panic {
+ let n=word(d,at)
+ let end=next(d,at)
+ var b=byte_buffer_new(n)
+ var i=at+4
+ while i<end {assert(byte_buffer_push(&!b,byte(d,i))==0);i=i+1}
+ let out=utf8_text_from_bytes(&b,n)
+ byte_buffer_close(b)
+ assert(utf8_text_status(&out)==0)
+ out
+}
+fn matches(c:&UnicodeLocaleCollator,name:&Utf8Text,kind:&Utf8Text)->bool {
+ if unicode_locale_collator_status(c)!=0 {return false}
+ if unicode_locale_resolved_locale_len(c)!=utf8_text_byte_len(name) {return false}
+ if unicode_locale_resolved_type_len(c)!=utf8_text_byte_len(kind) {return false}
+ var i:i64=0
+ while i<utf8_text_byte_len(name) {let got=unicode_locale_resolved_locale_byte_at(c,i);if got.status!=0 || got.value!=utf8_text_byte_at(name,i).value {return false} i=i+1}
+ i=0
+ while i<utf8_text_byte_len(kind) {let got=unicode_locale_resolved_type_byte_at(c,i);if got.status!=0 || got.value!=utf8_text_byte_at(kind,i).value {return false} i=i+1}
+ true
+}
+fn run(d:&ByteBuffer) with IO,Alloc,Mut,Div,Panic {
+ let n=byte_buffer_len(d)
+ assert(n>=24)
+ assert(byte(d,0)==83 && byte(d,1)==79 && byte(d,2)==85 && byte(d,3)==78)
+ assert(byte(d,4)==85 && byte(d,5)==84 && byte(d,6)==70 && byte(d,7)==49)
+ assert(word(d,8)==6 && word(d,20)==1179648)
+ assert(word(d,16)==n-24)
+ let count=word(d,12)
+ assert(count>0 && count<=128)
+ var row:i64=0
+ var at:i64=24
+ let options=unicode_locale_options()
+ while row<count {
+  let category=word(d,at)
+  assert(category>=1 && category<=7)
+  at=at+4
+  let input=text(d,at);at=next(d,at)
+  let ty=text(d,at);at=next(d,at)
+  let expected_name=text(d,at);at=next(d,at)
+  let expected_type=text(d,at);at=next(d,at)
+  let c=unicode_locale_collator(&input,&ty,&options,65536)
+  let correct=matches(&c,&expected_name,&expected_type)
+  if !correct {println(row);println(category);println(unicode_locale_collator_status(&c))}
+  assert(correct)
+  utf8_text_close(input);utf8_text_close(ty)
+  utf8_text_close(expected_name);utf8_text_close(expected_type)
+  row=row+1
+ }
+ assert(at==n)
+ println(row)
+ println("UNICODE_CONFORMANCE_OK")
+}
+
+fn metadata_path()->ByteBuffer with Alloc,Mut,Div,Panic {
+ let value="tests/stdlib/wave3-core/locale-meta-data/current.bin"
+ var path=byte_buffer_new(str_len(value))
+ var index:i64=0
+ while index<str_len(value) {assert(byte_buffer_push(&!path,str_char_at(value,index))==0);index=index+1}
+ path
+}
+fn main() with IO,Alloc,Mut,Div,Panic {
+ let platform=platform_open()
+ assert(platform_status(&platform)==0)
+ let path=metadata_path()
+ let file=native_file_open(&platform,&path,0)
+ byte_buffer_close(path)
+ assert(native_file_status(&file)==0)
+ var source=byte_buffer_new(1048576)
+ while true {
+  let read=native_file_read(&platform,&file,&!source,65536)
+  assert(read.status==0)
+  if read.value==0 {break}
+ }
+ assert(native_file_close(&platform,file)==0)
+ run(&source)
+ byte_buffer_close(source)
+ platform_close(platform)
+}
+

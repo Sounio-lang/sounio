@@ -110,7 +110,8 @@ else
  case "$FAMILY" in
   unicode) RUN_SOURCE=tools/unicode/run_chunks.cpp;COLLECT_SOURCE=tools/unicode/collect_chunks.cpp;;
   locale) RUN_SOURCE=tools/unicode/run_locale_chunks.cpp;COLLECT_SOURCE=tools/unicode/collect_locale_chunks.cpp;;
-  *) echo 'fixture family must be unicode or locale' >&2;exit 64;;
+  locale-metadata) RUN_SOURCE=tools/unicode/run_locale_metadata_chunks.cpp;COLLECT_SOURCE=tools/unicode/collect_locale_metadata_chunks.cpp;;
+  *) echo 'fixture family must be unicode, locale or locale-metadata' >&2;exit 64;;
  esac
  printf '%s\n' "$FAMILY" > "$OUT/FIXTURE_FAMILY"
  g++ -std=c++23 -O2 -Wall -Wextra -Werror -Wno-misleading-indentation "$RUN_SOURCE" -o "$OUT/run_chunks"

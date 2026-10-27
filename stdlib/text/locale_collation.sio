@@ -367,8 +367,11 @@ fn loc_parse_parts(d:&LocaleData,text:&IntegerBuffer,name:&LocName)->LocParts {
   }}
   at=end+1
  }
- let root=loc_root_name(d)
- if loc_names_equal(d,text,&p.language,&root) {if p.script.n>0 || p.region.n>0 || p.variants.n>0 {p.status=1}}
+ if p.language.n==4 {
+  if loc_name_byte(d,text,&p.language,0)==114 && loc_name_byte(d,text,&p.language,1)==111 && loc_name_byte(d,text,&p.language,2)==111 && loc_name_byte(d,text,&p.language,3)==116 {
+   if p.script.n>0 || p.region.n>0 || p.variants.n>0 {p.status=1}
+  }
+ }
  p
 }
 fn loc_append_name(d:&LocaleData,text:&!IntegerBuffer,name:&LocName)->LocName with Alloc,Mut,Div {
@@ -411,10 +414,33 @@ fn loc_part_pattern(d:&LocaleData,text:&IntegerBuffer,p:&LocParts,alias:&LocPart
  while at<alias.variants.n {let end=loc_token_end(d,text,&alias.variants,at);let v=loc_sub(&alias.variants,at,end-at);if !loc_contains_variant(d,text,&p.variants,&v) {return false} at=end+1}
  true
 }
+// Section11 is generated in (kind, lowercase-key) order.
+fn loc_alias_kind_lower(d:&LocaleData,kind:i64)->i64 {
+ var lo:i64=0
+ var hi=loc_count(d,11)
+ while lo<hi {let mid=lo+((hi-lo)>>1);if loc_field(d,11,mid,0)<kind {lo=mid+1} else {hi=mid}}
+ lo
+}
 fn loc_alias_row(d:&LocaleData,text:&IntegerBuffer,kind:i64,name:&LocName)->i64 {
- var row:i64=0
- while row<loc_count(d,11) {if loc_field(d,11,row,0)==kind {let own=loc_record_name(d,11,row,1);if loc_names_equal(d,text,&own,name) {return row}} row=row+1}
+ if name.n==0 {return 0-1}
+ var lo=loc_alias_kind_lower(d,kind)
+ let end=loc_alias_kind_lower(d,kind+1)
+ var hi=end
+ while lo<hi {let mid=lo+((hi-lo)>>1);let own=loc_record_name(d,11,mid,1);if loc_lex(d,text,&own,name)<0 {lo=mid+1} else {hi=mid}}
+ if lo<end {let own=loc_record_name(d,11,lo,1);if loc_names_equal(d,text,&own,name) {return lo}}
  0-1
+}
+fn loc_alias_language_lower(d:&LocaleData,text:&IntegerBuffer,language:&LocName)->i64 {
+ var lo=loc_alias_kind_lower(d,1)
+ var hi=loc_alias_kind_lower(d,2)
+ while lo<hi {
+  let mid=lo+((hi-lo)>>1)
+  let name=loc_record_name(d,11,mid,1)
+  let end=loc_token_end(d,text,&name,0)
+  let own=loc_sub(&name,0,end)
+  if loc_lex(d,text,&own,language)<0 {lo=mid+1} else {hi=mid}
+ }
+ lo
 }
 fn loc_lex(d:&LocaleData,text:&IntegerBuffer,a:&LocName,b:&LocName)->i64 {
  var at:i64=0
@@ -538,10 +564,14 @@ fn loc_canonical_parts(d:&LocaleData,text:&!IntegerBuffer,name:&LocName)->LocPar
  while depth<16 {
   var best:i64=0-1
   var score:i64=0
-  var row:i64=0
-  while row<loc_count(d,11) {
+  var row=loc_alias_language_lower(d,text,&p.language)
+  let language_end=loc_alias_kind_lower(d,2)
+  while row<language_end {
+   let source=loc_record_name(d,11,row,1)
+   let token_end=loc_token_end(d,text,&source,0)
+   let own_language=loc_sub(&source,0,token_end)
+   if !loc_names_equal(d,text,&own_language,&p.language) {break}
    if loc_field(d,11,row,0)==1 {
-    let source=loc_record_name(d,11,row,1)
     let alias=loc_parse_parts(d,text,&source)
     if alias.status==0 {if loc_part_pattern(d,text,&p,&alias) {
      let weight=1+(if alias.script.n>0 {1} else {0})+(if alias.region.n>0 {1} else {0})+loc_variant_count(d,text,&alias.variants)
@@ -627,8 +657,19 @@ fn loc_bundle(d:&LocaleData,text:&!IntegerBuffer,parts:&LocParts)->LocName with 
  var best=loc_empty()
  var best_variants:i64=0-1
  var row:i64=0
+ var high=loc_count(d,9)
+ while row<high {
+  let mid=row+((high-row)>>1)
+  let name=loc_record_name(d,9,mid,0)
+  let end=loc_token_end(d,text,&name,0)
+  let language=loc_sub(&name,0,end)
+  if loc_lex(d,text,&language,&p.language)<0 {row=mid+1} else {high=mid}
+ }
  while row<loc_count(d,9) {
   let name=loc_record_name(d,9,row,0)
+  let end=loc_token_end(d,text,&name,0)
+  let language=loc_sub(&name,0,end)
+  if !loc_names_equal(d,text,&language,&p.language) {break}
   let candidate=loc_parse_parts(d,text,&name)
   if candidate.status==0 {
    let same_regional=loc_names_equal(d,text,&candidate.language,&regional.language) && loc_names_equal(d,text,&candidate.script,&regional.script) && loc_names_equal(d,text,&candidate.region,&regional.region)

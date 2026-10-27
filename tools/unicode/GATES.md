@@ -110,3 +110,33 @@ status78 by the wrapper itself. This is minimal dispatch qualification for the
 old committed compiler; it does not claim that e33 supports static blobs or the
 new Unicode APIs.
 
+
+The explicit `WAVE3_FIXTURE_FAMILY=locale-metadata` selects kind6 and the
+72-file/9190-row CLDR49 constructor metadata protocol. It uses the dedicated
+run_locale_metadata_chunks/collect_locale_metadata_chunks adapters.
+A metadata result does not imply a collation-key corpus result; a locale
+key corpus does not imply complete metadata coverage.
+The retained public harness is
+`tests/stdlib/wave3-core/unicode_locale_metadata.sio`; its inputs use
+`tests/stdlib/wave3-core/locale-meta-data/current.bin` inside each run directory.
+
+## Public guarded metadata replay
+
+Slurm18714 completed0:0 in3m30s using the tracked
+`tests/stdlib/wave3-core/unicode_locale_metadata.sio` harness. Check, compile,
+first-chunk native execution, all72 fixtures/9190 rows through the public
+`locale-metadata` gate, and complete collection all passed.
+Executed ELF:
+97e111445bc2409501a6be89feb468aa0c176e3c88d0c8b87e23820a8147221d.
+Compiled-source manifest:
+f76f007592f3873fb3864e54a217cd8aedbee3b2c03ce5e267483e53741297a7.
+
+The unchanged earlier gate rejected the new metadata family with status64;
+the new adapter completed the same declared metadata protocol.
+Duplicate part, wrong family, wrong compiled-source identity and a private
+part copy whose outer STATUS alone was changed to1 were each rejected.
+All original source, compiler, runtime, executable and archive guards passed.
+The isolated source snapshot includes the already-qualified root
+byte_buffer_budget dependency without editing the services worktree.
+This is full declared constructor-metadata acceptance, not a new full
+collation-key or BIDI result.

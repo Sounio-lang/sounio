@@ -127,3 +127,61 @@ the complete source-derived corpus at all480 settings is independently qualified
 in C++23. Final-format2 full setting execution18614/18615 remains separate until
 its collector closes.
 
+
+## Complete constructor metadata concordance
+
+Slurm18677 generated72 fixtures/9190 rows twice with byte-identical output:
+all502 language,1 script,640 territory and2 variant aliases, every7868
+likely-subtag row,23 type aliases and154 bundled public locale/type entries.
+The independent C++23 registry supplies the expected observable resolved
+locale/type. This is metadata concordance, separate from collation-key
+comparisons and from an ICU factory's different locale fallback policy.
+
+Slurm18688 completed0 after checking, compiling and executing the public
+Sounio constructor on the complete manifest. All72 fixtures ran once, all9190
+rows matched, the complete collector passed, and original source, fixture,
+tool, compiler, runtime and executed-ELF hashes passed before/after.
+Executed ELF:
+9133c81286febe1641e6629434aa73e996d9de6240d828c8cad79d029bc7845c.
+Exact locale source:
+fb1c8fb614038dd597837ed2e16bc4b338692229527da86693832c89233cd33e.
+Manifest:
+852cf7a9ea503f88c63648fff37ae158f15299abe087e1295ece0166685e3b3f.
+Fixture hash list:
+95031c9a90bfaa8742b3761c79f2ceb2da95e4f2452843421a080a1ac3fe2085.
+Compiled-source manifest:
+a19851a22924b846456fce8782932200d2c37d04e916099846ff2d94d5690d38.
+
+The constructor now binary-searches the pinned ordered alias tables and
+locale language prefixes; Slurm18687 independently checked all ordering
+preconditions (1145 aliases,292 locale metadata rows,7868 likely rows).
+It also proved all7 earlier-qualified CE sections byte-identical:
+16236888 bytes and154 locale identity references. No CE algorithm, weight,
+fixture, expected identity or resource deadline was weakened.
+Earlier metadata attempts18678/18680/18685 and their diagnostic crash/timeout
+receipts remain preserved; their results are not relabeled as passes.
+
+This closes the pinned component metadata gate. A single final integrated
+compiler/source execution of all Unicode/CLDR/BIDI and the full stdlib remains
+a separate acceptance requirement.
+
+## Public guarded metadata replay
+
+Slurm18714 completed0:0 in3m30s using the tracked
+`tests/stdlib/wave3-core/unicode_locale_metadata.sio` harness. Check, compile,
+first-chunk native execution, all72 fixtures/9190 rows through the public
+`locale-metadata` gate, and complete collection all passed.
+Executed ELF:
+97e111445bc2409501a6be89feb468aa0c176e3c88d0c8b87e23820a8147221d.
+Compiled-source manifest:
+f76f007592f3873fb3864e54a217cd8aedbee3b2c03ce5e267483e53741297a7.
+
+The unchanged earlier gate rejected the new metadata family with status64;
+the new adapter completed the same declared metadata protocol.
+Duplicate part, wrong family, wrong compiled-source identity and a private
+part copy whose outer STATUS alone was changed to1 were each rejected.
+All original source, compiler, runtime, executable and archive guards passed.
+The isolated source snapshot includes the already-qualified root
+byte_buffer_budget dependency without editing the services worktree.
+This is full declared constructor-metadata acceptance, not a new full
+collation-key or BIDI result.
