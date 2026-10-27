@@ -9,3 +9,5 @@ This tranche adopts the exact narrow-memory producer already tested in the seale
 lower_cast_expr_ref is byte-identical before/after (SHA256 3277cee760a2a1e48d128e161d930ef9a793ae3a7ea73b62b665293fa2195df4). The exact change adds raw-pointer memory-width metadata to local/capture tracking and load/store IR flags; references retain canonical word-cell semantics.
 
 The diagnostic artifact is evidence for the proposed behavior, not the final source-qualified compiler. A fresh rebuild from this committed adoption, preserved source and seed manifests, and the original twelve width controls is required before acceptance. Raw-pointer fields and arbitrary returned-pointer inference remain outside this narrow metadata coverage.
+
+The subsequent protected-print tranche changes only the helper for compiler-generated print identities and synthesized print/println/newline lookup sites. It uses the approved unspellable @native: namespace; explicit source calls and the floating formatter arithmetic remain unchanged. Exact diff retained as PROTECTED_PRINT_ADOPTION.diff outside Git. Fresh before/after exact-output and original runaway tests remain required.
