@@ -1,0 +1,303 @@
+// UCA18 / CLDR49 root collation. Pure Sounio implementation; no host ICU calls.
+// Keys carry explicit versions/settings. Compare rejects mismatched identities.
+// Input is normalized to NFD; output owns copied weights and has explicit close.
+// This dependency source is not native-qualified until the real blob compiler gate.
+// Status0 OK,1 settings,2 budget,3 allocation,4 bounds,5 UTF8,6 data/version,
+// 7 incompatible key identity. Scratch budget bounds requested simultaneous payloads.
+use collections::integer_buffer::{IntegerBuffer,IntegerValue,integer_buffer_new,integer_buffer_status,integer_buffer_len,integer_buffer_get,integer_buffer_set,integer_buffer_push,integer_buffer_resize,integer_buffer_close}
+use text::utf8::{Utf8Text,utf8_text_new,utf8_text_status,utf8_text_byte_len,utf8_text_next,utf8_text_close}
+use text::normalize::unicode_normalize_append
+use text::ucd_data::{UnicodeData,unicode_data,unicode_data_status,ucd_property,ucd_property_value,ucd_decimal_value,ucd_value_matches}
+pub struct UnicodeCollator { root:i64,strength:i64,shifted:bool,backwards:bool,status:i64 }
+pub linear struct CollationKey { weights:IntegerBuffer,root:i64,strength:i64,shifted:bool,backwards:bool,status:i64 }
+pub struct CollationOrder {pub order:i64,pub status:i64}
+struct UcaData {ptr:*const u8,size:i64,status:i64}
+fn uca_byte(d:&UcaData,p:i64)->i64 {
+ if p<0 || p>=d.size {return 0-1}
+ *(((d.ptr as i64)+p) as *const u8) as i64
+}
+fn uca_u32(d:&UcaData,p:i64)->i64 {
+ if p<0 || p>d.size || d.size-p<4 {return 0-1}
+ uca_byte(d,p)+uca_byte(d,p+1)*256+uca_byte(d,p+2)*65536+uca_byte(d,p+3)*16777216
+}
+fn uca_count(d:&UcaData,id:i64)->i64 {
+ if d.status!=0 || id<1 || id>4 {return 0-1}
+ uca_u32(d,24+(id-1)*16+8)
+}
+fn uca_field(d:&UcaData,id:i64,row:i64,col:i64)->i64 {
+ if d.status!=0 || id<1 || id>4 {return 0-1}
+ let dir=24+(id-1)*16
+ let width=uca_u32(d,dir+4)
+ if row<0 || row>=uca_u32(d,dir+8) || col<0 || col*4>=width {return 0-1}
+ uca_u32(d,uca_u32(d,dir+12)+row*width+col*4)
+}
+fn uca_data()->UcaData {
+ let (ptr,size)=static_blob_bytes("data/uca18-cldr49.bin")
+ var d=UcaData {ptr:ptr,size:size,status:0}
+ if size<88 {d.status=6;return d}
+ if uca_u32(&d,0)!=1314213715 || uca_u32(&d,4)!=826360661 {d.status=6;return d}
+ if uca_u32(&d,8)!=1 || uca_u32(&d,12)!=1179648 || uca_u32(&d,16)!=4 || uca_u32(&d,20)!=49 {d.status=6;return d}
+ var id:i64=1
+ while id<=4 {
+  let p=24+(id-1)*16
+  let width=if id==2 {4} else {16}
+  let n=uca_u32(&d,p+8)
+  let start=uca_u32(&d,p+12)
+  if uca_u32(&d,p)!=id || uca_u32(&d,p+4)!=width || start<88 || start>size || n<0 || n*width>size-start {d.status=6;return d}
+  id=id+1
+ }
+ d
+}
+// Root0=DUCET18, root1=CLDR49 standard. Strength1 primary..5 identical.
+// CLDR locale resolution/tailoring is a separate generated registry prerequisite.
+pub fn unicode_collator_root(root:i64,strength:i64,shifted:bool,backwards_secondary:bool)->UnicodeCollator {
+ UnicodeCollator {root:root,strength:strength,shifted:shifted,backwards:backwards_secondary,status:if root<0 || root>1 || strength<1 || strength>5 {1} else {0}}
+}
+pub fn unicode_collator_status(c:&UnicodeCollator)->i64 {c.status}
+pub fn unicode_collator_uca_version(c:&UnicodeCollator)->i64 {1179648}
+pub fn unicode_collator_cldr_version(c:&UnicodeCollator)->i64 {if c.root==1 {49} else {0}}
+pub fn unicode_collator_resolved_locale(c:&UnicodeCollator)->string {if c.root==1 {"root"} else {"und-u-co-ducet"}}
+pub fn unicode_collation_key_status(k:&CollationKey)->i64 {k.status}
+pub fn unicode_collation_key_len(k:&CollationKey)->i64 {integer_buffer_len(&k.weights)}
+pub fn unicode_collation_key_at(k:&CollationKey,index:i64)->IntegerValue {integer_buffer_get(&k.weights,index)}
+pub fn unicode_collation_key_close(k:CollationKey) with Alloc {
+ let CollationKey {weights,root,strength,shifted,backwards,status}=k
+ integer_buffer_close(weights)
+}
+fn uca_ccc(d:&UnicodeData,p:i64,cp:i64)->i64 with Div {
+ let v=ucd_property_value(d,p,cp)
+ if v.status!=0 {return 0-1}
+ ucd_decimal_value(d,v.id)
+}
+fn uca_key_compare(d:&UcaData,row:i64,scalars:&IntegerBuffer,start:i64,count:i64)->i64 {
+ let first=uca_field(d,1,row,0)
+ let n=uca_field(d,1,row,1)
+ var i:i64=0
+ while i<n && i<count {
+  let a=uca_field(d,2,first+i,0)
+  let b=integer_buffer_get(scalars,start+i).value
+  if a<b {return 0-1} if a>b {return 1} i=i+1
+ }
+ if n<count {return 0-1} if n>count {return 1} 0
+}
+fn uca_find(d:&UcaData,scalars:&IntegerBuffer,start:i64,count:i64)->i64 {
+ var lo:i64=0
+ var hi=uca_count(d,1)
+ while lo<hi {
+  let mid=lo+((hi-lo)>>1)
+  if uca_key_compare(d,mid,scalars,start,count)<0 {lo=mid+1} else {hi=mid}
+ }
+ if lo<uca_count(d,1) && uca_key_compare(d,lo,scalars,start,count)==0 {return lo}
+ 0-1
+}
+fn uca_push_ce(out:&!IntegerBuffer,p:i64,s:i64,t:i64,flags:i64)->i64 with Alloc,Mut,Div {
+ var code=integer_buffer_push(out,p)
+ if code==0 {code=integer_buffer_push(out,s)}
+ if code==0 {code=integer_buffer_push(out,t)}
+ if code==0 {code=integer_buffer_push(out,flags)}
+ code
+}
+fn uca_emit_row(d:&UcaData,row:i64,out:&!IntegerBuffer)->i64 with Alloc,Mut,Div {
+ let first=uca_field(d,1,row,2)
+ let n=uca_field(d,1,row,3)
+ if first<0 || n<0 || first>uca_count(d,3) || n>uca_count(d,3)-first {return 6}
+ var i:i64=0
+ while i<n {
+  let code=uca_push_ce(out,uca_field(d,3,first+i,0),uca_field(d,3,first+i,1),uca_field(d,3,first+i,2),uca_field(d,3,first+i,3))
+  if code!=0 {return code} i=i+1
+ }
+ 0
+}
+fn uca_implicit(d:&UcaData,u:&UnicodeData,cp:i64,out:&!IntegerBuffer)->i64 with Alloc,Mut,Div {
+ let gc=ucd_property(u,"General_Category")
+ let category=ucd_property_value(u,gc,cp)
+ if category.status!=0 {return 6}
+ var lead:i64=0
+ var second:i64=0
+ var i:i64=0
+ // UTS10 siniform directives apply only to assigned characters.
+ if !ucd_value_matches(u,gc,category.id,"Cn") {
+  while i<uca_count(d,4) {
+   if cp>=uca_field(d,4,i,0) && cp<=uca_field(d,4,i,1) {
+    lead=uca_field(d,4,i,2)
+    second=(cp-uca_field(d,4,i,3))|32768
+    break
+   } i=i+1
+  }
+ }
+ if lead==0 {
+  let unified=ucd_property(u,"Unified_Ideograph")
+  let value=ucd_property_value(u,unified,cp)
+  if value.status!=0 {return 6}
+  if ucd_value_matches(u,unified,value.id,"Y") {
+   if (cp>=19968 && cp<=40959) || (cp>=63744 && cp<=64255) {lead=64320+(cp>>15)}
+   else {lead=64384+(cp>>15)}
+  } else {lead=64448+(cp>>15)}
+  second=(cp&32767)|32768
+ }
+ var status=uca_push_ce(out,lead,32,2,0)
+ if status==0 {status=uca_push_ce(out,second,0,0,0)}
+ status
+}
+fn uca_scalar(s:&IntegerBuffer,i:i64)->i64 {integer_buffer_get(s,i).value & 2097151}
+fn uca_first(d:&UcaData,row:i64)->i64 {uca_field(d,2,uca_field(d,1,row,0),0)}
+fn uca_extract(d:&UcaData,u:&UnicodeData,scalars:&!IntegerBuffer,out:&!IntegerBuffer)->i64 with Alloc,Mut,Div,Panic {
+ let property=ucd_property(u,"Canonical_Combining_Class")
+ if property<0 {return 6}
+ var at:i64=0
+ let n=integer_buffer_len(scalars)
+ while at<n {
+  if integer_buffer_get(scalars,at).value>=2097152 {at=at+1;continue}
+  let cp=uca_scalar(scalars,at)
+  var lo:i64=0
+  var hi=uca_count(d,1)
+  while lo<hi {let mid=lo+((hi-lo)>>1);if uca_first(d,mid)<cp {lo=mid+1} else {hi=mid}}
+  var row=lo
+  var best:i64=0-1
+  var best_count:i64=0
+  var best_second:i64=0-1
+  var best_third:i64=0-1
+  while row<uca_count(d,1) && uca_first(d,row)==cp {
+   let count=uca_field(d,1,row,1)
+   if count<1 || count>3 {return 6}
+   let first=uca_field(d,1,row,0)
+   var key_index:i64=1
+   var scan=at+1
+   var second:i64=0-1
+   var third:i64=0-1
+   var matches=true
+   while matches && key_index<count {
+    let target=uca_field(d,2,first+key_index,0)
+    let cls=uca_ccc(u,property,target)
+    if cls<0 {return 6}
+    var found=false
+    while scan<n {
+     if integer_buffer_get(scalars,scan).value>=2097152 {scan=scan+1;continue}
+     let other=uca_scalar(scalars,scan)
+     if other==target {
+      if key_index==1 {second=scan} else {third=scan}
+      scan=scan+1;found=true;break
+     }
+     let other_class=uca_ccc(u,property,other)
+     if other_class<0 {return 6}
+     // A starter or CCC >= the target blocks a discontiguous contraction.
+     if cls==0 || other_class==0 || other_class>=cls {break}
+     scan=scan+1
+    }
+    if !found {matches=false}
+    key_index=key_index+1
+   }
+   if matches && count>best_count {best=row;best_count=count;best_second=second;best_third=third}
+   row=row+1
+  }
+  var status:i64=0
+  if best>=0 {
+   let before=integer_buffer_len(out)
+   status=uca_emit_row(d,best,out)
+   if status==0 && cp==65534 {
+    var i=before
+    while i<integer_buffer_len(out) {let flags=integer_buffer_get(out,i+3).value|4;assert(integer_buffer_set(out,i+3,flags)==0);i=i+4}
+   }
+   if status==0 && best_second>=0 {let marked=uca_scalar(scalars,best_second)|2097152;assert(integer_buffer_set(scalars,best_second,marked)==0)}
+   if status==0 && best_third>=0 {let marked=uca_scalar(scalars,best_third)|2097152;assert(integer_buffer_set(scalars,best_third,marked)==0)}
+  } else {status=uca_implicit(d,u,cp,out)}
+  if status!=0 {return status}
+  at=at+1
+ }
+ 0
+}
+fn uca_reverse(out:&!IntegerBuffer,start:i64) with Mut,Panic {
+ var left=start
+ var right=integer_buffer_len(out)-1
+ while left<right {
+  let value=integer_buffer_get(out,left).value
+  let right_value=integer_buffer_get(out,right).value
+  assert(integer_buffer_set(out,left,right_value)==0)
+  assert(integer_buffer_set(out,right,value)==0)
+  left=left+1;right=right-1
+ }
+}
+fn uca_level(ces:&IntegerBuffer,c:&UnicodeCollator,level:i64,out:&!IntegerBuffer)->i64 with Alloc,Mut,Div,Panic {
+ let n=integer_buffer_len(ces)/4
+ var i:i64=0
+ var variable=false
+ var segment=integer_buffer_len(out)
+ while i<n {
+  let p=integer_buffer_get(ces,i*4).value
+  let s=integer_buffer_get(ces,i*4+1).value
+  let t=integer_buffer_get(ces,i*4+2).value
+  let flags=integer_buffer_get(ces,i*4+3).value
+  let is_variable=(flags & (if c.root==0 {1} else {2}))!=0
+  var weight=if level==0 {p} else if level==1 {s} else if level==2 {t} else {0}
+  if c.shifted {
+   if is_variable && p!=0 {variable=true;weight=if level==3 {p} else {0}}
+   else if p==0 && variable {weight=0}
+   else {if p!=0 {variable=false} if level==3 {weight=if p!=0 {65535} else {0}}}
+  }
+  if level==1 && c.backwards && (flags&4)!=0 {uca_reverse(out,segment)}
+  if weight!=0 {let status=integer_buffer_push(out,weight);if status!=0 {return status}}
+  if level==1 && c.backwards && (flags&4)!=0 {segment=integer_buffer_len(out)}
+  i=i+1
+ }
+ if level==1 && c.backwards {uca_reverse(out,segment)}
+ 0
+}
+fn uca_build_key(key:&!CollationKey,c:&UnicodeCollator,input:&Utf8Text,max_work_bytes:i64) with Alloc,Mut,Div,Panic {
+ if key.status==0 {key.status=integer_buffer_status(&key.weights)}
+ if max_work_bytes<0 || max_work_bytes>9223372036854771704 {key.status=1}
+ if key.status==0 {key.status=utf8_text_status(input)}
+ let d=uca_data()
+ let u=unicode_data()
+ if key.status==0 && (d.status!=0 || unicode_data_status(&u)!=0) {key.status=6}
+ let part=if max_work_bytes>=0 {max_work_bytes/4} else {0}
+ var normalized=utf8_text_new(part)
+ if key.status==0 {key.status=unicode_normalize_append(input,1,part,&!normalized)}
+ var scalars=integer_buffer_new(0,part)
+ var ces=integer_buffer_new(0,part)
+ var offset:i64=0
+ while key.status==0 && offset<utf8_text_byte_len(&normalized) {
+  let cp=utf8_text_next(&normalized,offset)
+  if cp.status!=0 {key.status=cp.status}
+  else {key.status=integer_buffer_push(&!scalars,cp.codepoint);offset=cp.next}
+ }
+ if key.status==0 {key.status=uca_extract(&d,&u,&!scalars,&!ces)}
+ var level:i64=0
+ while key.status==0 && level<4 && level<c.strength {
+  key.status=uca_level(&ces,c,level,&!key.weights)
+  if key.status==0 {key.status=integer_buffer_push(&!key.weights,0)}
+  level=level+1
+ }
+ if key.status==0 && c.strength==5 {
+  var i:i64=0
+  while key.status==0 && i<integer_buffer_len(&scalars) {
+   // U+FFFE is the special lowest identical weight; NUL remains distinct.
+   key.status=integer_buffer_push(&!key.weights,if uca_scalar(&scalars,i)==65534 {1} else {uca_scalar(&scalars,i)+2})
+   i=i+1
+  }
+ }
+ if key.status!=0 {assert(integer_buffer_resize(&!key.weights,0)==0)}
+ utf8_text_close(normalized)
+ integer_buffer_close(scalars)
+ integer_buffer_close(ces)
+}
+pub fn unicode_collation_key(c:&UnicodeCollator,input:&Utf8Text,max_key_bytes:i64,max_work_bytes:i64)->CollationKey with Alloc,Mut,Div,Panic {
+ var key=CollationKey {weights:integer_buffer_new(0,max_key_bytes),root:c.root,strength:c.strength,shifted:c.shifted,backwards:c.backwards,status:c.status}
+ uca_build_key(&!key,c,input,max_work_bytes)
+ key
+}
+pub fn unicode_collation_key_compare(a:&CollationKey,b:&CollationKey)->CollationOrder {
+ if a.status!=0 {return CollationOrder {order:0,status:a.status}}
+ if b.status!=0 {return CollationOrder {order:0,status:b.status}}
+ if a.root!=b.root || a.strength!=b.strength || a.shifted!=b.shifted || a.backwards!=b.backwards {return CollationOrder {order:0,status:7}}
+ let na=integer_buffer_len(&a.weights)
+ let nb=integer_buffer_len(&b.weights)
+ var i:i64=0
+ while i<na && i<nb {
+  let x=integer_buffer_get(&a.weights,i).value
+  let y=integer_buffer_get(&b.weights,i).value
+  if x<y {return CollationOrder {order:0-1,status:0}}
+  if x>y {return CollationOrder {order:1,status:0}}
+  i=i+1
+ }
+ CollationOrder {order:if na<nb {0-1} else if na>nb {1} else {0},status:0}
+}
