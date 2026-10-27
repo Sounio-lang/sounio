@@ -4615,6 +4615,7 @@ fn lowerer_register_enum_variants_mut(
             enum_name: enum_name,
             variant_name: (*list).head.name,
             discriminant: next_disc + vi,
+            payload_fields: (*list).head.fields,
         }
         (*ev_box).count = idx + 1
         (*lo).enum_variants = ev_box
@@ -6024,6 +6025,7 @@ fn ir_fast_summary_register_enum_variants_owned(
                     enum_name: enum_name,
                     variant_name: (*list).head.name,
                     discriminant: next_disc,
+                    payload_fields: (*list).head.fields,
                 }
                 table_value.count = idx + 1
             }
@@ -26002,6 +26004,7 @@ impl Lowerer {
                             enum_name: enum_name,
                             variant_name: (*list).head.name,
                             discriminant: disc,
+                            payload_fields: (*list).head.fields,
                         }
                         table.count = table.count + 1
                     }
@@ -26020,6 +26023,200 @@ impl Lowerer {
     }
 
     // Phase 3.1: Lookup enum variant discriminant by variant name
+    fn user_variant_index_ref(self, enum_name:Name, variant:Name) -> i64 with Mut,Panic,Div {
+        var i:i64=0
+        var found:i64=-1
+        while i<(*self.enum_variants).count {
+            let entry=(*self.enum_variants).entries[i as usize]
+            if ir_name_eq(entry.variant_name,variant) {
+                if enum_name.len>0 {
+                    if ir_name_eq(entry.enum_name,enum_name) {return i}
+                } else {
+                    if found>=0 {return -1}
+                    found=i
+                }
+            }
+            i=i+1
+        }
+        if enum_name.len>0 {-1} else {found}
+    }
+
+    fn user_enum_uses_handle_ref(self, index:i64) -> bool with Mut,Panic,Div {
+        if index<0 || index>=(*self.enum_variants).count {return false}
+        let name=(*self.enum_variants).entries[index as usize].enum_name
+        var i:i64=0
+        while i<(*self.enum_variants).count {
+            let entry=(*self.enum_variants).entries[i as usize]
+            if ir_name_eq(entry.enum_name,name) {
+                match entry.payload_fields {Some(_)=>return true,None=>{}}
+            }
+            i=i+1
+        }
+        false
+    }
+
+    fn user_enum_call_index_ref(self, e:&Expr) -> i64 with Mut,Panic,Div {
+        match (*e).left {
+            Some(c)=>{
+                if (*c).kind==ExprKind::ExprPath && (*c).path.seg_count>=2 {
+                    return self.user_variant_index_ref(ir_path_qualifier_name((*c).path),ir_path_last_name((*c).path))
+                }
+            }
+            None=>{}
+        }
+        -1
+    }
+
+    fn lower_user_enum_constructor_ref(self, index:i64, args:&Option<Box<ExprList>>) -> (Lowerer,i64) with Mut,Panic,Div,Alloc,IO {
+        var lo=self
+        let entry=(*lo.enum_variants).entries[index as usize]
+        var fields=entry.payload_fields
+        var slots:i64=1
+        while true {
+            match fields {
+                Some(f)=>{if (*f).head.ty.kind!=TypeExprKind::TypeUnit {slots=slots+1};fields=(*f).tail}
+                None=>break
+            }
+        }
+        let cell_pair=lo.fresh_reg()
+        lo=cell_pair.0
+        let cell=cell_pair.1
+        lo=lo.emit(ir_alloc(cell,lo.aggregate_storage_bytes(slots)))
+        let tag_pair=lo.emit_i64_const(entry.discriminant)
+        lo=tag_pair.0
+        lo=lo.emit(ir_field_set(cell,0,tag_pair.1,ir_empty_name()))
+        fields=entry.payload_fields
+        var values=*args
+        var offset:i64=1
+        while true {
+            match fields {
+                Some(f)=>{
+                    match values {
+                        Some(value)=>{
+                            let lowered=lo.lower_expr_ref(&(*value).head)
+                            lo=lowered.0
+                            if (*f).head.ty.kind!=TypeExprKind::TypeUnit {
+                                lo=lo.emit(ir_field_set(cell,offset,lowered.1,(*f).head.name))
+                                offset=offset+1
+                            }
+                            values=(*value).tail
+                        }
+                        None=>{
+                            print("error: enum constructor payload arity disagrees with checked declaration\n")
+                            lowerer_mark_hard_error(&!lo)
+                            return (lo,cell)
+                        }
+                    }
+                    fields=(*f).tail
+                }
+                None=>break
+            }
+        }
+        match values {
+            Some(_)=>{print("error: excess enum constructor payload arguments\n");lowerer_mark_hard_error(&!lo)}
+            None=>{}
+        }
+        (lo,cell)
+    }
+
+    fn lower_user_enum_pattern_ref(self, cell:i64, pat:&Pattern, skip:i64, depth:i64) -> Lowerer with Mut,Panic,Div,Alloc,IO {
+        var lo=self
+        if depth>=64 {return lo.lower_option_pattern_refused("enum pattern nesting exceeds supported depth")}
+        let entry_index=lo.user_variant_index_ref(ir_path_qualifier_name((*pat).path),ir_path_last_name((*pat).path))
+        if entry_index<0 || !lo.user_enum_uses_handle_ref(entry_index) {
+            return lo.lower_option_pattern_refused("unresolved nominal payload enum")
+        }
+        let entry=(*lo.enum_variants).entries[entry_index as usize]
+        let actual_pair=lo.fresh_reg()
+        lo=actual_pair.0
+        let actual=actual_pair.1
+        var tag_load=ir_field_get(actual,cell,0,ir_empty_name())
+        if LOWER_MATCH_SCRUT_IS_REF && depth==0 {tag_load.label_id=1}
+        lo=lo.emit(tag_load)
+        let tag_pair=lo.emit_i64_const(entry.discriminant)
+        lo=tag_pair.0
+        let cmp_pair=lo.fresh_reg()
+        lo=cmp_pair.0
+        lo=lo.emit(ir_binop(cmp_pair.1,actual,BinaryOp::OpEq,tag_pair.1))
+        lo=lo.emit(ir_branch_false(cmp_pair.1,skip))
+        var fields=entry.payload_fields
+        var patterns=(*pat).sub_patterns
+        var offset:i64=1
+        while true {
+            match fields {
+                Some(field)=>{
+                    match patterns {
+                        Some(pattern)=>{
+                            let sub=&(*pattern).head
+                            let pair=lo.fresh_reg()
+                            lo=pair.0
+                            let value=pair.1
+                            if (*field).head.ty.kind==TypeExprKind::TypeUnit {lo=lo.emit(ir_load_imm(value,0))}
+                            else {
+                                var load=ir_field_get(value,cell,offset,(*field).head.name)
+                                if LOWER_MATCH_SCRUT_IS_REF && depth==0 {load.label_id=1}
+                                lo=lo.emit(load)
+                                offset=offset+1
+                            }
+                            let ty=&(*field).head.ty
+                            if lower_type_expr_is_f64(ty) {lo=lo.emit(ir_mark_float_reg(value))}
+                            if (*sub).kind==PatternKind::PatBinding {
+                                lo=lo.bind_local((*sub).name,value,(*sub).is_mut)
+                                if lower_type_expr_is_f64(ty) {lo=lo.bind_local_scalar_kind((*sub).name,2)}
+                                else if lower_type_expr_is_string(ty) {lo=lo.bind_local_scalar_kind((*sub).name,3)}
+                                else if lower_type_expr_is_integer(ty) || lower_type_expr_is_bool(ty) {lo=lo.bind_local_scalar_kind((*sub).name,1)}
+                                let named=lower_type_expr_named_type_name(ty)
+                                if named.len>0 {lo=lo.bind_local_struct_type((*sub).name,named,false)}
+                                let type_opt=Some(Box::new(*ty))
+                                lo=lo.bind_local_tuple_float_mask((*sub).name,lower_opt_type_tuple_float_mask(&type_opt))
+                                lo=lo.bind_local_tuple_arr_mask((*sub).name,lower_opt_type_tuple_arr_mask(&type_opt))
+                                let tuple_name=lower_opt_type_tuple_struct_slot_name(&type_opt)
+                                let tuple_slot=lower_opt_type_tuple_struct_slot(&type_opt)
+                                let tuple_layout=lower_struct_layout_index_of(&(*lo.struct_layouts),tuple_name)
+                                if tuple_slot>=0 && tuple_layout>=0 {lo=lo.bind_local_tuple_struct((*sub).name,tuple_layout,tuple_slot)}
+                                let tuple_array_name=lower_opt_type_tuple0_array_elem_struct_name(&type_opt)
+                                let tuple_array_layout=lower_struct_layout_index_of(&(*lo.struct_layouts),tuple_array_name)
+                                if tuple_array_layout>=0 {lo=lo.bind_local_tuple0_array_elem_layout((*sub).name,tuple_array_layout)}
+                                if lower_type_expr_is_array_of_f64(ty) {lo=lo.bind_local_array_elem_float((*sub).name)}
+                                let float_depth=lower_type_float_array_depth(ty)
+                                if float_depth>0 {lo=lo.bind_local_float_array_depth((*sub).name,float_depth)}
+                                if (*ty).kind==TypeExprKind::TypeArray {
+                                    let length=lower_type_expr_fixed_array_len_ref(ty)
+                                    if length>=0 {lo=lo.bind_local_fixed_array_len((*sub).name,length)}
+                                }
+                                if (*ty).kind==TypeExprKind::TypeArray {
+                                    let elem=lower_type_expr_array_elem_name(ty)
+                                    if elem.len>0 {lo=lo.bind_local_struct_type((*sub).name,elem,true)}
+                                }
+                                if ir_name_is_box(named) {
+                                    let inner=lower_type_expr_elem_or_box_inner_name(ty)
+                                    lo=lo.bind_local_box_inner_layout((*sub).name,lower_struct_layout_index_of(&(*lo.struct_layouts),inner))
+                                }
+                            } else if (*sub).kind==PatternKind::PatEnum {
+                                lo=lo.lower_user_enum_pattern_ref(value,sub,skip,depth+1)
+                            } else if (*sub).kind==PatternKind::PatIntLit {
+                                let literal=lo.emit_i64_const((*sub).int_val)
+                                lo=literal.0
+                                let cmp=lo.fresh_reg()
+                                lo=cmp.0
+                                lo=lo.emit(ir_binop(cmp.1,value,BinaryOp::OpEq,literal.1))
+                                lo=lo.emit(ir_branch_false(cmp.1,skip))
+                            } else if (*sub).kind==PatternKind::PatBoolTrue {lo=lo.emit(ir_branch_false(value,skip))}
+                            else if (*sub).kind==PatternKind::PatBoolFalse {lo=lo.emit(ir_branch_true(value,skip))}
+                            else if (*sub).kind!=PatternKind::PatWildcard {return lo.lower_option_pattern_refused("unsupported enum payload sub-pattern")}
+                            patterns=(*pattern).tail
+                        }
+                        None=>return lo.lower_option_pattern_refused("enum payload pattern has too few fields"),
+                    }
+                    fields=(*field).tail
+                }
+                None=>break
+            }
+        }
+        match patterns {Some(_)=>return lo.lower_option_pattern_refused("enum payload pattern has excess fields"),None=>{}}
+        lo
+    }
+
     fn lookup_variant_discriminant(self, variant_name: Name) -> i64 with Mut, Panic, Div {
         var i: i64 = 0
         while i < (*self.enum_variants).count {
@@ -31557,6 +31754,18 @@ impl Lowerer {
             lo
         } else if pat.kind == PatternKind::PatEnum {
             let variant_name = ir_path_last_name(pat.path)
+            let enum_index=self.user_variant_index_ref(ir_path_qualifier_name(pat.path),variant_name)
+            if enum_index>=0 && self.user_enum_uses_handle_ref(enum_index) {
+                let skip=self.fresh_label()
+                var lo=skip.0
+                lo=lo.lower_user_enum_pattern_ref(scrut,pat,skip.1,0)
+                lo=lo.lower_arm_guard(&arm.guard,skip.1)
+                let body=lo.lower_expr_ref(&arm.body)
+                lo=body.0
+                lo=lo.emit(ir_copy(res,body.1))
+                lo=lo.emit(ir_jump(l_end))
+                return lo.emit(ir_label(skip.1))
+            }
             // Option<T> (#2787): None is 0 and Some(v) is a one-word heap cell holding v
             // (lower_option_some_cell), for EVERY payload type. The discriminant is the
             // word itself and never the payload, so Some(0), Some(0.0) and Some(false)
@@ -35264,6 +35473,10 @@ impl Lowerer {
 
     fn lower_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        let enum_index=lo.user_enum_call_index_ref(e)
+        if enum_index>=0 && lo.user_enum_uses_handle_ref(enum_index) {
+            return lo.lower_user_enum_constructor_ref(enum_index,&e.args)
+        }
         if FO_STEP_CARRY == 1 && fo_recur_call_is_this(e) {
             let c = lo.fresh_reg()
             lo = c.0
@@ -38123,6 +38336,11 @@ impl Lowerer {
             // Check if this is an enum variant reference (e.g., IrOpcode::IrLoadImm)
             if e.path.seg_count >= 2 {
                 let variant_name = ir_path_last_name(e.path)
+                let enum_index=self.user_variant_index_ref(ir_path_qualifier_name(e.path),variant_name)
+                if enum_index>=0 && self.user_enum_uses_handle_ref(enum_index) {
+                    let no_args:Option<Box<ExprList>> = None
+                    return self.lower_user_enum_constructor_ref(enum_index,&no_args)
+                }
                 // Check for None (Option::None)
                 if ir_name_is_none(variant_name) {
                     let pair = self.fresh_reg()

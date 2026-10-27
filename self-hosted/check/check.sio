@@ -8419,6 +8419,10 @@ fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
 // own internal by-value bridges (one Checker frame at a time) are fine. Faithful to the
 // by-value original: same order, same error codes, same result TypeEntry per branch.
 fn checker_check_binary_op_types_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    if checker_type_is_payload_enum(c,left_ty) || checker_type_is_payload_enum(c,right_ty) {
+        checker_report_error_at_inplace(c,span,264,0,0,0)
+        return
+    }
     if is_error_or_unknown(left_ty) || is_error_or_unknown(right_ty) {
         return
     }
@@ -13065,13 +13069,14 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         let variant_enum_idx = call_expr_enum_variant_ctor_enum_idx(c, e.left)
         if variant_enum_idx >= 0 {
             let ei = enum_table_get((*c).enums, variant_enum_idx)
-            let call_start_borrows = (*c).borrows
-            checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
-            // E264 (fail-closed): a tuple-variant payload has no lowering -- the lowerer
-            // emits the bare discriminant and drops every argument. Refuse it rather than
-            // typing the call as the enum and miscompiling.
-            checker_report_error_at_inplace(c, e.span, 264, 0, 0, 0)
+            let variant=match e.left {Some(callee)=>checker_copy_string_list_tail_to_name((*callee).path.segments),None=>empty_name()}
+            let fields=variant_info_list_find_fields(ei.variants,variant)
+            if !checker_enum_payload_fields_admitted(c,fields) {
+                checker_report_error_at_inplace(c,e.span,264,0,0,0)
+                checker_check_expr_list_no_type_no_linear_consume_inplace(c,e.args)
+                return ty_error()
+            }
+            checker_check_enum_args_inplace(c,e.args,fields,e.span)
             return ty_named(ei.name)
         }
         checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
@@ -13933,6 +13938,10 @@ fn checker_unobserved_cast_allowed(src: TypeEntry, dst: TypeEntry, observe: bool
 // the *mut type-lowering, epistemic + unit-dimension checks in place.
 fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let src_ty = checker_check_opt_expr_inplace(c, e.left)
+    if checker_type_is_payload_enum(c,src_ty) {
+        checker_report_error_at_inplace(c,e.span,264,0,0,0)
+        return ty_error()
+    }
     match e.cast_type {
         Some(ty) => {
             let target_ty = checker_lower_type_expr_mut(c, *ty)
@@ -14073,6 +14082,154 @@ fn checker_scrut_is_user_enum_inplace(c: *mut Checker, scrut_ty: TypeEntry) -> b
     enum_table_find((*c).enums, scrut_ty.name) >= 0
 }
 
+fn checker_type_is_payload_enum(c:*mut Checker, ty:TypeEntry) -> bool with Mut,Panic,Div {
+    if ty.kind!=TypeKind::TyNamed {return false}
+    let index=enum_table_find((*c).enums,ty.name)
+    if index<0 {return false}
+    var variants=enum_table_get((*c).enums,index).variants
+    while true {
+        match variants {
+            Some(v)=>{match (*v).head.fields {Some(_)=>return true,None=>{}};variants=(*v).tail}
+            None=>break
+        }
+    }
+    false
+}
+
+fn checker_enum_payload_type_admitted(c:*mut Checker, ty:TypeEntry, seen:*mut [Name;64], depth:i64) -> bool with Mut,Panic,Div {
+    if depth>=64 {return false}
+    if ty.kind==TypeKind::TyError || ty.kind==TypeKind::TyUnknown
+        || ty.kind==TypeKind::TyRef || ty.kind==TypeKind::TyRefMut
+        || ty.kind==TypeKind::TySlice || ty.kind==TypeKind::TySliceMut
+        || ty.kind==TypeKind::TyFn || ty.kind==TypeKind::TyKnowledge
+        || ty.kind==TypeKind::TyI128 || ty.kind==TypeKind::TyU128
+        || ty.kind==TypeKind::TyF128 || ty.kind==TypeKind::TyF256 {return false}
+    (*seen)[depth as usize]=empty_name()
+    match ty.inner {
+        Some(inner)=>{if !checker_enum_payload_type_admitted(c,*inner,seen,depth+1) {return false}}
+        None=>{}
+    }
+    if ty.kind==TypeKind::TyNamed {
+        var i:i64=0
+        while i<depth {if name_eq((*seen)[i as usize],ty.name) {return true};i=i+1}
+        (*seen)[depth as usize]=ty.name
+        let si=struct_table_find((*c).structs,ty.name)
+        if si>=0 {
+            return checker_enum_payload_fields_admitted_depth(c,(*(*c).structs).entries[si].fields,seen,depth+1)
+        }
+        let ei=enum_table_find((*c).enums,ty.name)
+        if ei>=0 {
+            var variants=enum_table_get((*c).enums,ei).variants
+            while true {
+                match variants {
+                    Some(v)=>{
+                        if !checker_enum_payload_fields_admitted_depth(c,(*v).head.fields,seen,depth+1) {return false}
+                        variants=(*v).tail
+                    }
+                    None=>break
+                }
+            }
+            return true
+        }
+        match ty.inner {Some(_)=>return true,None=>return false}
+    }
+    if ty.kind==TypeKind::TyTuple {
+        var elems=ty.tuple_elems
+        while true {
+            match elems {
+                Some(e)=>{if !checker_enum_payload_type_admitted(c,(*e).head,seen,depth+1) {return false};elems=(*e).tail}
+                None=>break
+            }
+        }
+    }
+    true
+}
+
+fn checker_enum_payload_fields_admitted_depth(c:*mut Checker, fields:Option<Box<FieldInfoList>>, seen:*mut [Name;64], depth:i64) -> bool with Mut,Panic,Div {
+    var cur=fields
+    while true {
+        match cur {
+            Some(f)=>{if !checker_enum_payload_type_admitted(c,(*f).head.ty,seen,depth) {return false};cur=(*f).tail}
+            None=>break
+        }
+    }
+    true
+}
+
+fn checker_enum_payload_fields_admitted(c:*mut Checker, fields:Option<Box<FieldInfoList>>) -> bool with Mut,Panic,Div {
+    var seen:[Name;64]=[empty_name();64]
+    checker_enum_payload_fields_admitted_depth(c,fields,(&!seen) as *mut [Name;64],0)
+}
+
+fn checker_check_enum_args_inplace(c:*mut Checker, args:Option<Box<ExprList>>, fields:Option<Box<FieldInfoList>>, span:Span) with Mut,Panic,Div,Alloc,IO {
+    var values=args
+    var params=fields
+    while true {
+        match values {
+            Some(value)=>{
+                match params {
+                    Some(field)=>{
+                        let param=FnParamInfo{name:(*field).head.name,ty:(*field).head.ty}
+                        checker_check_one_call_arg_inplace(c,(*value).head,param,span)
+                        params=(*field).tail
+                    }
+                    None=>{
+                        checker_report_error_at_inplace(c,span,10,0,0,0)
+                        let _extra=checker_check_expr_inplace(c,(*value).head)
+                    }
+                }
+                values=(*value).tail
+            }
+            None=>break
+        }
+    }
+    match params {Some(_)=>checker_report_error_at_inplace(c,span,10,0,0,0),None=>{}}
+}
+
+fn checker_bind_user_enum_pattern_inplace(c:*mut Checker, pat:Pattern, scrut_ty:TypeEntry) -> bool with Mut,Panic,Div,Alloc,IO {
+    var base=scrut_ty
+    let borrowed=base.kind==TypeKind::TyRef || base.kind==TypeKind::TyRefMut
+    if borrowed {match base.inner {Some(inner)=>{base=*inner},None=>return false}}
+    if base.kind!=TypeKind::TyNamed {return false}
+    let ei=enum_table_find((*c).enums,base.name)
+    if ei<0 {return false}
+    let info=enum_table_get((*c).enums,ei)
+    let name=checker_copy_string_list_tail_to_name(pat.path.segments)
+    if !variant_info_list_has(info.variants,name) {
+        checker_report_error_at_inplace(c,pat.span,264,0,0,0)
+        return true
+    }
+    let fields=variant_info_list_find_fields(info.variants,name)
+    if !checker_enum_payload_fields_admitted(c,fields) {
+        checker_report_error_at_inplace(c,pat.span,264,0,0,0)
+        return true
+    }
+    var patterns=pat.sub_patterns
+    var types=fields
+    while true {
+        match patterns {
+            Some(p)=>{
+                match types {
+                    Some(f)=>{
+                        let ty=(*f).head.ty
+                        // A borrowed owner cannot move its active linear payload.
+                        // Reference projections need a separately proved provenance path.
+                        if borrowed && checker_is_linear_type_inplace(c,ty) {
+                            checker_report_error_at_inplace(c,pat.span,264,0,0,0)
+                        } else {checker_bind_pattern_inplace(c,(*p).head,ty)}
+                        types=(*f).tail
+                    }
+                    None=>checker_report_error_at_inplace(c,pat.span,213,0,0,0),
+                }
+                patterns=(*p).tail
+            }
+            None=>break
+        }
+    }
+    match types {Some(_)=>checker_report_error_at_inplace(c,pat.span,213,0,0,0),None=>{}}
+    true
+}
+
 fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
     if pat.kind == PatternKind::PatBinding {
         type_env_bind_mut(&!(*c).env, pat.name, scrut_ty, pat.is_mut)
@@ -14080,6 +14237,7 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
         let lin = checker_is_linear_type_inplace(c, scrut_ty)
         (*c).borrows = (*c).borrows.track(pat.name, lin)
     } else if pat.kind == PatternKind::PatEnum {
+        if checker_bind_user_enum_pattern_inplace(c,pat,scrut_ty) {return}
         // E264 (fail-closed): a payload sub-pattern on a USER enum (`Shape::Circle(r)`)
         // has no lowering -- lower_match_arm_ref compares the bare discriminant and never
         // binds the sub-patterns. Option/Box scrutinees carry .inner and are unaffected.
@@ -19433,7 +19591,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 262 { print("ontology classes are unrelated: no subsumption between them, so the operator cannot say what the result is an amount of") }
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
-    else if code == 264 { print("enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped") }
+    else if code == 264 { print("enum payload operation requires a supported native storage and ownership representation") }
     else if code == 267 { print("cannot assign through a shared reference: the place is reached through `&T`, which is read-only") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 276 { print("array concatenation requires copyable canonical cells; linear owners, nested unanchored loans, closures, epistemic side channels and wide scalar cells are not yet supported") }
@@ -28986,6 +29144,11 @@ impl Checker {
     }
 
     fn check_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c_enum=self
+        if call_expr_enum_variant_ctor_enum_idx((&!c_enum) as *mut Checker,e.left)>=0 {
+            let result=checker_check_call_expr_inplace((&!c_enum) as *mut Checker,e)
+            return (c_enum,result)
+        }
         if call_expr_is_static_blob(e.left) {
             var c_asset = self
             let result = checker_check_static_blob_inplace((&! c_asset) as *mut Checker, e)
@@ -31911,9 +32074,9 @@ impl Checker {
             PatternKind::PatBoolFalse => self
             PatternKind::PatStringLit => self
             PatternKind::PatEnum => {
-                // Enum variant pattern — bind sub-patterns with scrut_ty
-                // (variant field types not tracked yet, use scrut_ty as fallback)
-                self.bind_pattern_list(pat.sub_patterns, scrut_ty)
+                var c=self
+                checker_bind_pattern_inplace((&!c) as *mut Checker,pat,scrut_ty)
+                c
             }
             PatternKind::PatStruct => {
                 // Struct destructuring — bind field patterns with their field types
