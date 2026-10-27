@@ -66,6 +66,8 @@ struct LowerLocalStack {
     // 1 = local/param holds a reference (&P / &[T;N] / &![T;N]) to a heap aggregate,
     // i.e. its slot stores a raw address of the caller slot, not the handle directly.
     is_ref: Box<LowerLocalI64Slots>,
+    // 0=word/borrow, 1=i8, 2=u8, 3=i32, 4=u32 raw pointer storage.
+    raw_memory_kind: Box<LowerLocalI64Slots>,
     // 0=other 1=int 2=float; used by println dispatch to avoid routing i64/f64 vars through print_str
     scalar_kind: Box<LowerLocalI64Slots>,
     // Tuple-typed local: bit k set iff element k of the tuple is f64. 0 = not a
@@ -244,6 +246,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         global_bss_sizes: lowerer_box_local_i64_slots(0),
         is_global: lowerer_box_local_i64_slots(0),
         is_ref: lowerer_box_local_i64_slots(0),
+        raw_memory_kind: lowerer_box_local_i64_slots(0),
         scalar_kind: lowerer_box_local_i64_slots(0),
         tuple_float_mask: lowerer_box_local_i64_slots(0),
         tuple_arr_mask: lowerer_box_local_i64_slots(0),
@@ -6419,6 +6422,7 @@ fn lowerer_bind_local_mut(
         (*(*locals_box).global_bss_sizes).values[idx as usize] = 0
         (*(*locals_box).is_global).values[idx as usize] = 0
         (*(*locals_box).is_ref).values[idx as usize] = 0
+        (*(*locals_box).raw_memory_kind).values[idx as usize] = 0
         (*(*locals_box).scalar_kind).values[idx as usize] = 0
         if idx < 4096 { LOWER_RGN_NUM_SLOT_EPOCH[idx as usize] = 0 }
         // Copilot review (PR #2516): the locals stack is REUSED across
@@ -6992,6 +6996,7 @@ fn lowerer_lower_fn_params_mut(
                 }
 
                 lowerer_bind_local_mut(lo, (*list).head.name, param_value_reg, (*list).head.is_self_mut)
+                lowerer_bind_local_raw_memory_kind_mut(lo, (*list).head.name, lower_type_expr_raw_memory_kind(&(*list).head.ty))
                 if lower_type_expr_is_unsigned_int(&(*list).head.ty) {
                     lowerer_mark_local_unsigned_int_mut(lo, (*list).head.name)
                 }
@@ -9826,6 +9831,49 @@ fn lower_ident_expr_for_name(name: Name, span: Span) -> Expr {
         closure_effects: None,
         closure_body: None,
         type_args: None,
+    }
+}
+
+// Native raw-memory widths. Sounio references still address word-sized slots;
+// only TypeRawPtr carries these byte-addressed storage semantics.
+fn lower_raw_memory_kind_for_name(name: Name) -> i64 with Mut, Panic, Div {
+    if name_eq(name, make_name("i8")) { return 1 }
+    if name_eq(name, make_name("u8")) { return 2 }
+    if name_eq(name, make_name("i32")) { return 3 }
+    if name_eq(name, make_name("u32")) { return 4 }
+    0
+}
+
+fn lower_type_expr_raw_memory_kind(ty: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeRawPtr { return 0 }
+    match (*ty).inner {
+        Some(inner) => {
+            if (*inner).kind == TypeExprKind::TypeNamed {
+                return lower_raw_memory_kind_for_name(ir_path_first_name((*inner).path))
+            }
+            0
+        }
+        None => 0,
+    }
+}
+
+fn lower_opt_type_raw_memory_kind(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(ty) => lower_type_expr_raw_memory_kind(&(*ty)),
+        None => 0,
+    }
+}
+
+fn lowerer_bind_local_raw_memory_kind_mut(lo: &! Lowerer, name: Name, kind: i64) with Mut, Alloc, Panic, Div {
+    var locals = (*lo).locals
+    var i = (*locals).count - 1
+    while i >= 0 {
+        if (*(*locals).depths).values[i as usize] <= (*lo).scope_depth
+            && ir_name_eq((*(*locals).names).values[i as usize], name) {
+            (*(*locals).raw_memory_kind).values[i as usize] = kind
+            return
+        }
+        i = i - 1
     }
 }
 
@@ -14821,6 +14869,7 @@ impl Lowerer {
                 // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
                 (*(*stk).is_unsigned_int).values[idx as usize] = 0
                 (*(*stk).is_ref).values[idx as usize] = 0
+                (*(*stk).raw_memory_kind).values[idx as usize] = 0
                 // Explicit 0: slot may be reused after scope-pop restores count.
                 // Callers that know a positive kind (for-IV int, float local) re-bind.
                 (*(*stk).scalar_kind).values[idx as usize] = 0
@@ -24814,7 +24863,42 @@ impl Lowerer {
         }
     }
 
+    fn lookup_local_raw_memory_kind(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth
+                && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).raw_memory_kind).values[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    fn raw_pointer_memory_kind_ref(self, operand_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *operand_opt {
+            Some(operand) => {
+                if (*operand).kind == ExprKind::ExprCast {
+                    return lower_opt_type_raw_memory_kind(&(*operand).cast_type)
+                }
+                if (*operand).kind == ExprKind::ExprIdent {
+                    var i = (*self.locals).count - 1
+                    while i >= 0 {
+                        if (*(*self.locals).depths).values[i as usize] <= self.scope_depth
+                            && ir_name_eq((*(*self.locals).names).values[i as usize], (*operand).name) {
+                            return (*(*self.locals).raw_memory_kind).values[i as usize]
+                        }
+                        i = i - 1
+                    }
+                }
+                0
+            }
+            None => 0,
+        }
+    }
+
     fn deref_operand_pointee_kind_ref(self, operand_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        if self.raw_pointer_memory_kind_ref(operand_opt) > 0 { return 1 }
         match *operand_opt {
             Some(operand) => {
                 if (*operand).kind == ExprKind::ExprIdent {
@@ -26817,6 +26901,7 @@ impl Lowerer {
                         // Findings 11 (#2084): stamp is_unsigned_int=1 when the param is u8/u16/u32/u64/usize.
                         (*(*locals).is_unsigned_int).values[idx as usize] = if lower_type_expr_is_unsigned_int(&(*list).head.ty) { 1 } else { 0 }
                         (*(*locals).is_ref).values[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
+                        (*(*locals).raw_memory_kind).values[idx as usize] = lower_type_expr_raw_memory_kind(&(*list).head.ty)
                         // Copilot review (PR #2516): a tuple-typed PARAMETER (e.g.
                         // fn f(t: (f64, [f64; 8]))) needs the same per-slot masks a
                         // `let`-bound tuple local gets from its initialiser (see
@@ -29067,6 +29152,11 @@ impl Lowerer {
         rhs_array_elem_is_float: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        var raw_memory_kind = lower_opt_type_raw_memory_kind(&s.ty)
+        if raw_memory_kind == 0 {
+            raw_memory_kind = lo.raw_pointer_memory_kind_ref(&s.expr)
+        }
+        lowerer_bind_local_raw_memory_kind_mut(&!lo, s.name, raw_memory_kind)
         var fn_result_float = false
         match s.ty {
             Some(ty) => { fn_result_float = lower_type_expr_fn_returns_f64(&(*ty)) }
@@ -30262,7 +30352,9 @@ impl Lowerer {
                             if is_box_t {
                                 lo = lo.emit(ir_field_set(ptr_reg, 0, rhs, ir_empty_name()))
                             } else {
-                                lo = lo.emit(ir_store_ptr(ptr_reg, rhs))
+                                var store = ir_store_ptr(ptr_reg, rhs)
+                                store.imm_flags = lo.raw_pointer_memory_kind_ref(&(*target_expr).left)
+                                lo = lo.emit(store)
                             }
                             (lo, rhs)
                         } else {
@@ -35948,6 +36040,9 @@ impl Lowerer {
             lo2.emit(ir_field_get(dst, src, 0, ir_empty_name()))
         } else {
             var uins = ir_unaryop(dst, e.un_op, src)
+            if e.un_op == UnaryOp::OpDeref {
+                uins.imm_flags = lo2.raw_pointer_memory_kind_ref(&e.left)
+            }
             // Bit 1: the operand is f64. Codegen reads it off the instruction,
             // so a vreg past the 2048-bit set still flips the sign bit.
             if src_is_float && e.un_op == UnaryOp::OpNeg {
@@ -38138,10 +38233,12 @@ impl Lowerer {
                 return loe.emit_unit()
             }
         }
+        var capture_raw_memory_kind: [i64; 8] = [0; 8]
         var capture_float: [bool; 8] = [false; 8]
         var float_ci: i64 = 0
         while float_ci < captures.count {
             capture_float[float_ci as usize] = lo.lookup_local_scalar_kind(captures.names[float_ci as usize]) == 2
+            capture_raw_memory_kind[float_ci as usize] = lo.lookup_local_raw_memory_kind(captures.names[float_ci as usize])
             float_ci = float_ci + 1
         }
 
@@ -38201,6 +38298,7 @@ impl Lowerer {
             }
             lo.current_func = cf_box_cap
             lo = lo.bind_local(captures.names[ci as usize], cap_preg, false)
+            lowerer_bind_local_raw_memory_kind_mut(&!lo, captures.names[ci as usize], capture_raw_memory_kind[ci as usize])
             if capture_float[ci as usize] {
                 lo = lo.emit(ir_mark_float_reg(cap_preg))
                 lo = lo.bind_local_scalar_kind(captures.names[ci as usize], 2)
@@ -38230,6 +38328,7 @@ impl Lowerer {
                     }
                     lo.current_func = cf_box
                     lo = lo.bind_local((*plist).head.name, preg, false)
+                    lowerer_bind_local_raw_memory_kind_mut(&!lo, (*plist).head.name, lower_type_expr_raw_memory_kind(&(*plist).head.ty))
                     // f64 closure params were never marked float — named-fn params get
                     // ir_mark_float_reg (see lowerer_lower_fn_params_mut), closures did not,
                     // so `|a:f64|{..}` read its arg from an integer reg and computed garbage
