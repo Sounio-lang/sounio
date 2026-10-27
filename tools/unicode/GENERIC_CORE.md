@@ -50,3 +50,32 @@ Archive SHA256:
 dad4c1f94a342525f7ba199baa9abe3332fd12ec812fe62e6d0c63e3719a2afe.
 The export retains a complete file-hash list and verifies the original closed
 directories after archiving. No earlier failure receipt was deleted or relabeled.
+
+## Public facades and transactional owner carriers
+
+Slurm18760 completed0 after checking both core roots and checking, compiling
+and executing three public fixtures: canonical core imports with the complete
+owned-payload controls, explicit core::lib exports, and storage-result carriers.
+The canonical and direct-import owned-payload executables are byte-identical:
+bc08bf9ef90a7a679bbc45161421e215ec9d467dfa375fe8dcb2aca064eeb06e.
+Explicit-lib ELF:
+fa589d7c3de1215ec266d20f8333dd61759a363e7ef5bdea9de7da253c754236.
+Storage-carrier ELF:
+4e2afc7fe143f92670ee888c848b3638bee315282ae2a3fa27d7058fc683b55f.
+
+The storage fixture checks Result<(),(i64,ByteBuffer)> for successful and failed
+push, Result<ByteBuffer,(i64,ByteBuffer)> for successful and failed replacement,
+and Result<f64,(i64,f64)> for both variants. Failed operations return the original
+owner with bytes65,0,255 intact; every exercised owner closes exactly once.
+This qualifies the result representation needed by HeapVec, not HeapVec's
+allocation, movement or returned-borrow implementation.
+
+A distinct fully qualified type spelling witness,
+core::option::Option<i64> / core::result::Result<(),i64> in parameter positions,
+still fails on this compiler (Slurm18753, expected type incorrectly becomes
+core). Its original source and assertions are preserved in the failed
+generic-core-facades02 receipt and the pending core_generic_lib_facade source.
+That failure is not substituted by the passing unqualified facade-export
+control. It remains a compiler integration requirement. The earlier18748
+syntax diagnostic is separately retained; brace import aliases are not used
+as a claimed Sounio API.

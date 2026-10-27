@@ -140,3 +140,22 @@ The isolated source snapshot includes the already-qualified root
 byte_buffer_budget dependency without editing the services worktree.
 This is full declared constructor-metadata acceptance, not a new full
 collation-key or BIDI result.
+
+## Generic compiler compatibility smoke
+
+Slurm18738 completed0:0 in1m22s with the same e9ad6cde compiler that executed
+the public generic core fixtures. All13 core fixtures checked, compiled and
+ran natively; the original formatting suite also compiled and ran unchanged.
+Both text facades, owned UTF8/NUL, exact-page accesses, properties, the91-row
+Unicode smoke, DUCET root and CLDR constructor/key contracts passed.
+
+The exact snapshot used qualified root dependencies:
+byte_buffer423a294a229d41723a666bc6ac07ac722b64b2e1b2a406bd74db888b8edf2327
+and BIDIc9fcb10f39fd948d5a66bb476d80d64895994bd4d04662fba6402b9b680632de.
+Gate source manifest SHA256:
+3c781883e9a046cbc9dc9519d042367c6251bf6eb48337e9d90bd51de5af727d.
+All gate source/compiler/platform/executable guards passed before/after.
+
+This is early compatibility evidence for the generic compiler. It does not
+retag the earlier complete Unicode/UCA/CLDR executions as runs on this compiler,
+and does not close BIDI, persistent owner loans or the final integrated suite.
