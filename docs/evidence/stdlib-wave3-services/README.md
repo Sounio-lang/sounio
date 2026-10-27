@@ -365,3 +365,38 @@ io::lib variant with this added control: all check/compile/native phases
 pass, marker SERVICE_ROOT_EXPORTS_OK, final manifests verified.
 Receipt: `/scratch/sounio-stdlib-wave3-20261027/services/root-exports-io-lib-02/results`.
 The canonical io namespace refusal remains open;18232 does not close18204.
+
+## Reusable mandatory services gate
+
+`scripts/stdlib/wave3_services_gate.sh FRESH_ABSOLUTE_OUTPUT` requires a
+scheduled Slurm job, absolute `MADAROS_RAW_BIN` and
+`STDLIB_PLATFORM_LIBRARY` paths, and Node (`NODE` may specify its path).
+It uses the strict raw-compiler wrapper with separate bounded check,
+compile and native phases. Check/compile allow300 seconds and4 MiB each;
+native allows120 seconds and1 MiB. All27 fixtures are mandatory, including
+the canonical service roots and unchanged original Frame/CSV tests.
+There is no subset or explicit-io-lib acceptance mode.
+
+Every shared /tmp string literal is relocated into a unique short private
+directory. The gate refuses ambiguous paths/collisions, preserves original
+fixtures, records original/derived hashes and substitution multiplicities,
+and requires reverse substitution to reproduce the original bytes. Relative
+file outputs run in a separate directory per fixture. Produced private files
+are copied into the output for custody. Source, raw compiler, platform,
+tools, derived inputs, executables and output files have final hash guards.
+
+Slurm **18247** exercises the complete gate on raw9919 and ABI112.
+Exactly21 fixture native markers pass, plus independent C++23 ABI112 checks
+against the supplied library and against a fully ASan/UBSan-instrumented
+runtime/reference build with leak detection. All final manifest guards pass.
+The mandatory gate correctly exits1: original CSV-loader and four new
+nonempty Frame/CSV/Series/argparse controls retain native concatenation
+refusals, and the canonical root retains the read_i64 namespace check
+failure. These six failures are explicit in RESULTS.tsv and remain required
+for final acceptance.
+
+Receipt: `/scratch/sounio-stdlib-wave3-20261027/services/reusable-gate-before-prereqs-03/results/gate`.
+Earlier18243 caught an overbroad private-path guard;18245 caught the raw
+compiler's non-executable output mode. The final gate validates ELF magic
+and sets executable permission only after strict compilation succeeds.
+Those earlier harness failures are preserved and are not passing receipts.
