@@ -177,13 +177,16 @@ int main() {
 
 def main():
     if len(sys.argv) < 3:
-        fail("usage: sio_fpga_emit.py <kernel.sio> <out.cpp> [--tb <tb.cpp>]")
+        fail("usage: sio_fpga_emit.py <kernel.sio> <out.cpp> [--kernel NAME] [--tb <tb.cpp>]")
+    kernel = "san_scan"
+    if "--kernel" in sys.argv:
+        kernel = sys.argv[sys.argv.index("--kernel") + 1]
     source = open(sys.argv[1]).read()
-    out = translate(source, "san_scan")
+    out = translate(source, kernel)
     open(sys.argv[2], "w").write(out)
     if "--tb" in sys.argv:
         open(sys.argv[sys.argv.index("--tb") + 1], "w").write(TB)
-    print(f"SIO_FPGA_EMIT_OK kernel=san_scan out={sys.argv[2]}")
+    print(f"SIO_FPGA_EMIT_OK kernel={kernel} out={sys.argv[2]}")
 
 
 if __name__ == "__main__":
