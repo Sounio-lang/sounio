@@ -1,7 +1,8 @@
 // stdlib/graphics/png.sio — Pure-Sounio PNG encoder (stored DEFLATE)
 //
 // Writes valid PNG files using zlib stored blocks (no compression).
-// Output goes directly to a file via write_file / append_file builtins.
+// Output checks complete byte counts from compiler file primitives.
+// The separate io::native_file API provides explicit errno/close ownership.
 //
 // Supported color types:
 //   - 2 = 8-bit RGB
@@ -15,6 +16,17 @@
 //
 // Each stored deflate block has a 5-byte header + up to 32,768 bytes payload.
 // Images larger than 32,768 raw bytes use multiple IDAT chunks.
+
+// Use the existing compiler file primitives on both compiler engines.
+// Refuse invalid lengths/modes and every failed or partial write.
+fn png_write_bytes(filename:string,bytes:&[i8;32800],length:i64,mode:i64)->bool with IO, Alloc, Mut, Div, Panic {
+ if length<0 || length>32800 {return false}
+ var written:i64=0-1
+ if mode==1 {written=write_file(filename,bytes,length)}
+ else if mode==2 {written=append_file(filename,bytes,length)}
+ else {return false}
+ return written==length
+}
 
 use graphics::surface::{Surface}
 use compress::huffman::{huffman_fixed_encode, HuffmanResult}
@@ -96,7 +108,8 @@ fn crc32_of_chunk(type_bytes: &[i8; 4], data: &[i8; 32800], data_len: i64) -> i6
 // LOW-LEVEL CHUNK WRITING (public for use by tile.sio)
 // ============================================================================
 
-pub fn png_write_chunk(filename: string, type_bytes: [i8; 4], data: &[i8; 32800], data_len: i64) -> bool with IO, Mut {
+pub fn png_write_chunk(filename: string, type_bytes: [i8; 4], data: &[i8; 32800], data_len: i64) -> bool with IO, Alloc, Mut, Div, Panic {
+    if data_len<0 || data_len>32788 {return false}
     let crc = crc32_of_chunk(type_bytes, data, data_len)
     let chunk_total = 4 + 4 + data_len + 4
     var chunk: [i8; 32800] = [0; 32800]
@@ -126,11 +139,11 @@ pub fn png_write_chunk(filename: string, type_bytes: [i8; 4], data: &[i8; 32800]
     chunk[10 + data_len] = ((crc >> 8) & 0xFF) as i8
     chunk[11 + data_len] = (crc & 0xFF) as i8
 
-    append_file(filename, chunk, chunk_total) >= 0
+    png_write_bytes(filename,&chunk,chunk_total,2)
 }
 
-pub fn png_write_sig(filename: string) -> bool with IO, Mut {
-    var sig: [i8; 8] = [0; 8]
+pub fn png_write_sig(filename: string) -> bool with IO, Alloc, Mut, Div, Panic {
+    var sig: [i8; 32800] = [0; 32800]
     sig[0] = 137 as i8
     sig[1] = 80 as i8
     sig[2] = 78 as i8
@@ -139,10 +152,12 @@ pub fn png_write_sig(filename: string) -> bool with IO, Mut {
     sig[5] = 10 as i8
     sig[6] = 26 as i8
     sig[7] = 10 as i8
-    write_file(filename, sig, 8) >= 0
+    png_write_bytes(filename,&sig,8,1)
 }
 
-pub fn png_write_ihdr(filename: string, width: i64, height: i64, color_type: i8) -> bool with IO, Mut {
+pub fn png_write_ihdr(filename: string, width: i64, height: i64, color_type: i8) -> bool with IO, Alloc, Mut, Div, Panic {
+    if width<1 || height<1 || width>2147483647 || height>2147483647 {return false}
+    if color_type!=PNG_COLOR_RGB && color_type!=PNG_COLOR_RGBA {return false}
     var data: [i8; 32800] = [0; 32800]
     data[0] = ((width >> 24) & 0xFF) as i8
     data[1] = ((width >> 16) & 0xFF) as i8
@@ -165,7 +180,7 @@ pub fn png_write_ihdr(filename: string, width: i64, height: i64, color_type: i8)
     png_write_chunk(filename, type_bytes, &data, 13)
 }
 
-pub fn png_write_iend(filename: string) -> bool with IO, Mut {
+pub fn png_write_iend(filename: string) -> bool with IO, Alloc, Mut, Div, Panic {
     var data: [i8; 32800] = [0; 32800]
     var type_bytes: [i8; 4] = [0; 4]
     type_bytes[0] = 73 as i8
@@ -232,7 +247,7 @@ pub fn compute_adler32_rgba(s: &Surface) -> i64 with Mut, Panic, Div {
 // ============================================================================
 
 pub fn png_write_deflate_block(filename: string, block_num: i64, is_final: bool,
-                               payload_len: i64, payload: [i8; 32800], adler: i64) -> bool with IO, Mut {
+                               payload_len: i64, payload: [i8; 32800], adler: i64) -> bool with IO, Alloc, Mut, Div, Panic {
     let bfinal: i8 = if is_final { 1 as i8 } else { 0 as i8 }
     let nlen = 65535 - payload_len
     var type_bytes: [i8; 4] = [0; 4]
@@ -296,7 +311,7 @@ pub fn png_write_deflate_block(filename: string, block_num: i64, is_final: bool,
 // COMPRESSED IDAT (fixed Huffman, single block)
 // ============================================================================
 
-fn write_idat_compressed(filename: string, raw: &[i8; 32800], raw_len: i64, adler: i64) -> bool with IO, Mut, Panic {
+fn write_idat_compressed(filename: string, raw: &[i8; 32800], raw_len: i64, adler: i64) -> bool with IO, Mut, Panic, Alloc, Div {
     if raw_len < 0 || raw_len > 32768 { return false }
 
     // Convert i8 payload to i64 for the Huffman encoder
@@ -345,7 +360,7 @@ fn write_idat_compressed(filename: string, raw: &[i8; 32800], raw_len: i64, adle
 // IDAT — zlib stream for a Surface
 // ============================================================================
 
-fn write_idat_rgb(filename: string, s: &Surface) -> bool with IO, Mut, Panic, Div {
+fn write_idat_rgb(filename: string, s: &Surface) -> bool with IO, Alloc, Mut, Panic, Div {
     let scanline_size = 1 + s.width * 3
     let total_size = s.height * scanline_size
     let adler = compute_adler32_rgb(s)
@@ -417,7 +432,7 @@ fn write_idat_rgb(filename: string, s: &Surface) -> bool with IO, Mut, Panic, Di
     true
 }
 
-fn write_idat_rgba(filename: string, s: &Surface) -> bool with IO, Mut, Panic, Div {
+fn write_idat_rgba(filename: string, s: &Surface) -> bool with IO, Alloc, Mut, Panic, Div {
     let scanline_size = 1 + s.width * 4
     let total_size = s.height * scanline_size
     let adler = compute_adler32_rgba(s)
@@ -497,8 +512,10 @@ fn write_idat_rgba(filename: string, s: &Surface) -> bool with IO, Mut, Panic, D
 // PUBLIC API
 // ============================================================================
 
-pub fn png_encode_surface(s: &Surface, filename: string) -> bool with IO, Mut, Panic, Div {
-    if s.width <= 0 || s.height <= 0 { return false }
+pub fn png_encode_surface(s: &Surface, filename: string) -> bool with IO, Alloc, Mut, Panic, Div {
+    if s.width <= 0 || s.height <= 0 || s.width>65536 || s.height>65536 { return false }
+    if s.width>65536/s.height {return false}
+    if s.width>(BLOCK_MAX-1)/3 {return false}
     crc32_ensure_init()
     if !png_write_sig(filename) { return false }
     if !png_write_ihdr(filename, s.width, s.height, PNG_COLOR_RGB) { return false }
@@ -507,8 +524,10 @@ pub fn png_encode_surface(s: &Surface, filename: string) -> bool with IO, Mut, P
     true
 }
 
-pub fn png_encode_surface_rgba(s: &Surface, filename: string) -> bool with IO, Mut, Panic, Div {
-    if s.width <= 0 || s.height <= 0 { return false }
+pub fn png_encode_surface_rgba(s: &Surface, filename: string) -> bool with IO, Alloc, Mut, Panic, Div {
+    if s.width <= 0 || s.height <= 0 || s.width>65536 || s.height>65536 { return false }
+    if s.width>65536/s.height {return false}
+    if s.width>(BLOCK_MAX-1)/4 {return false}
     crc32_ensure_init()
     if !png_write_sig(filename) { return false }
     if !png_write_ihdr(filename, s.width, s.height, PNG_COLOR_RGBA) { return false }
@@ -518,7 +537,7 @@ pub fn png_encode_surface_rgba(s: &Surface, filename: string) -> bool with IO, M
 }
 
 // Backward-compatible alias
-pub fn png_export(s: &Surface, filename: string) -> bool with IO, Mut, Panic, Div {
+pub fn png_export(s: &Surface, filename: string) -> bool with IO, Alloc, Mut, Panic, Div {
     png_encode_surface(s, filename)
 }
 

@@ -1,0 +1,40 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: DYNAMIC_GFF_OK
+use genomics::io::dynamic_gff::{dynamic_gff_parse,dynamic_gff_status,dynamic_gff_len,dynamic_gff_coordinates,dynamic_gff_field,dynamic_gff_fasta_offset,dynamic_gff_close}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_get,byte_buffer_len,byte_buffer_close}
+fn append(b:&!ByteBuffer,text:string) with Alloc,Mut,Div,Panic {var i:i64=0;while str_char_at(text,i)>0 {assert(byte_buffer_push(b,str_char_at(text,i))==0);i=i+1}}
+fn invalid(row:string,expected:i64) with Alloc,Mut,Div,Panic {
+ var b=byte_buffer_new(1000);append(&!b,"##gff-version 3\n");append(&!b,row)
+ let d=dynamic_gff_parse(&b,10000)
+ assert(dynamic_gff_status(&d)==expected)
+ dynamic_gff_close(d);byte_buffer_close(b)
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ var input=byte_buffer_new(100000)
+ append(&!input,"##gff-version 3.1.26\r\n##sequence-region chr1 1 10000\r\n")
+ var i:i64=0
+ while i<300 {append(&!input,"chr1\tsource\tgene\t1\t10\t-1.2e-3\t?\t.\tID=g;Name=hello%3Bworld;\r\n");i=i+1}
+ append(&!input,"chr1\tsource\tCDS\t2\t9\t.\t+\t1\tParent=g\n##FASTA\n>chr1\nACGT\n")
+ let d=dynamic_gff_parse(&input,150000)
+ assert(dynamic_gff_status(&d)==0 && dynamic_gff_len(&d)==301)
+ byte_buffer_close(input)
+ assert(dynamic_gff_coordinates(&d,300).start==2 && dynamic_gff_coordinates(&d,300).end==9)
+ assert(dynamic_gff_fasta_offset(&d)>0)
+ var field=byte_buffer_new(100)
+ assert(dynamic_gff_field(&d,0,8,&!field)==0)
+ assert(byte_buffer_get(&field,0).value==73 && byte_buffer_len(&field)>20)
+ byte_buffer_close(field);dynamic_gff_close(d)
+ invalid("chr1\ts\tgene\t0\t10\t.\t+\t.\t.\n",22)
+ invalid("chr1\ts\tgene\t10\t1\t.\t+\t.\t.\n",22)
+ invalid("chr1\ts\tCDS\t1\t10\t.\t+\t.\tID=x\n",22)
+ invalid("chr1\ts\tgene\t1\t10\t.\tx\t.\t.\n",22)
+ invalid("chr1\ts\tgene\t1\t10\t1e+\t+\t.\t.\n",22)
+ invalid("chr1\ts\tgene\t1\t10\t.\t+\t.\tName=x%GG\n",22)
+ invalid("chr1\ts\tgene\t1\t10\t.\t+\t.\tName=x&y\n",22)
+ invalid("chr1\ts\tgene\t1\t10\t.\t+\t.\tbroken\n",22)
+ invalid("chr1\ts\tgene\t1\t10\t.\t+\t.\t.\textra\n",22)
+ invalid("chr1\ts\tgene\t1\t9223372036854775808\t.\t+\t.\t.\n",75)
+ println("DYNAMIC_GFF_OK")
+ return 0
+}

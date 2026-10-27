@@ -1,0 +1,143 @@
+// Actual validated CSR -> shared median-ratio normalization -> native heatmaps.
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_at,numeric_buffer_status,numeric_buffer_close,numeric_matrix}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set,integer_buffer_status,integer_buffer_close}
+use genomics::count_csr::{count_csr_build,count_csr_status,count_csr_close,count_csr_stored_value,count_csr_size_factors_into}
+use genomics::dynamic_normalization::{dynamic_median_ratio_size_factors_workspace,dynamic_size_factors_slot,dynamic_size_factors_slot_genes_used,dynamic_size_factors_slot_genes_excluded}
+use viz::dynamic_fields::{DynamicHeatmapSpec,palette_field_work,dynamic_heatmap_palette_validate,dynamic_heatmap_palette_canvas_into,dynamic_heatmap_palette_svg_into}
+use viz::palette::{palette_scale_defaults}
+use viz::colorbar::{ColorBarSpec,colorbar_work,colorbar_validate,colorbar_canvas_into,colorbar_svg_into}
+use display::canvas::{Canvas,canvas_clear,canvas_draw_char,canvas_fill_rect}
+fn text(c:&!Canvas,x:i64,y:i64,s:string) with IO,Mut {
+ var i:i64=0
+ while i<str_len(s) {canvas_draw_char(c,str_char_at(s,i) as i64,x+8*i,y,235,240,245);i=i+1}
+ print("<text x=\"");print(x);print("\" y=\"");print(y+7);print("\" fill=\"rgb(235,240,245)\" font-family=\"monospace\" font-size=\"8\" textLength=\"");print(str_len(s)*8);print("\" lengthAdjust=\"spacingAndGlyphs\">");var j:i64=0
+ while j<str_len(s) {
+  let ch:i64=str_char_at(s,j) as i64
+  if ch==38 {print("&amp;")}else if ch==60 {print("&lt;")}else if ch==62 {print("&gt;")}else if ch==34 {print("&quot;")}else if ch==39 {print("&apos;")}else{print_char(ch)}
+  j=j+1
+ }
+ println("</text>")
+}
+// The same half-open integer pixel rectangle is used by both exports.
+fn rule(c:&!Canvas,x:i64,y:i64,w:i64,h:i64) with IO,Mut {
+ canvas_fill_rect(c,x,y,w,h,180,190,200)
+ let px:f64=(x as f64)-0.5;let py:f64=(y as f64)-0.5
+ print("<rect data-science-rule=\"1\" x=\"");print(px);print("\" y=\"");print(py);print("\" width=\"");print(w);print("\" height=\"");print(h);println("\" fill=\"rgb(180,190,200)\"/>")
+}
+fn dump(c:&Canvas) with IO,Mut,Div {
+ println("<!-- CANVAS_RLE 1480 800 -->")
+ var row:i64=0
+ while row<c.height {
+  var left:i64=0
+  while left<c.width {
+   let rgb:i64=read_i64(c.pixels,row*c.width+left)
+   var right=left+1
+   while right<c.width {
+    if read_i64(c.pixels,row*c.width+right)!=rgb {break}
+    right=right+1
+   }
+   println("<!-- PIX {} {} {} {} -->",row,left,right-left,rgb)
+   left=right
+  }
+  row=row+1
+ }
+ println("<!-- CANVAS_RLE_END -->")
+}
+fn axes(c:&!Canvas,x:i64) with IO,Mut,Div {
+ rule(c,x,112,1,513);rule(c,x,624,513,1)
+ var i:i64=0
+ while i<5 {
+  let col=if i==0 {0}else{4*i-1}
+  let label=if i==0 {"1"}else if i==1 {"4"}else if i==2 {"8"}else if i==3 {"12"}else{"16"}
+  text(c,x+(2*col+1)*513/32-str_len(label)*4,636,label)
+  let row=if i==4 {95}else{24*i}
+  let feature=if i==0 {"1"}else if i==1 {"25"}else if i==2 {"49"}else if i==3 {"73"}else{"96"}
+  text(c,x-8-str_len(feature)*8,112+(2*row+1)*513/192-4,feature)
+  i=i+1
+ }
+ text(c,x+208,656,"sample index")
+ text(c,x,92,"feature index (1 at top)")
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ var values=integer_buffer_new(1536,12288);var columns=integer_buffer_new(1536,12288);var offsets=integer_buffer_new(97,776)
+ let shape=dynamic_median_ratio_size_factors_workspace(96,16)
+ var factors=numeric_buffer_new(16,128);var logs=numeric_buffer_new(16,128)
+ var work=numeric_buffer_new(shape.numeric_elements,shape.numeric_elements*8);var anchors=integer_buffer_new(96,768)
+ var raw=numeric_buffer_new(1536,12288);var normalized=numeric_buffer_new(1536,12288);var flags=integer_buffer_new(1536,12288)
+ var code:i64=0
+ if shape.status!=0 || integer_buffer_status(&values)!=0 || integer_buffer_status(&columns)!=0 || integer_buffer_status(&offsets)!=0 || numeric_buffer_status(&factors)!=0 || numeric_buffer_status(&logs)!=0 || numeric_buffer_status(&work)!=0 || integer_buffer_status(&anchors)!=0 || numeric_buffer_status(&raw)!=0 || numeric_buffer_status(&normalized)!=0 || integer_buffer_status(&flags)!=0 {code=1}
+ var i:i64=0
+ if code==0 {
+  while i<1536 {
+   let sample=i%16;let gene=i/16
+   let library=1 << (sample%4)
+   integer_buffer_set(&!values,i,(gene+1)*library);integer_buffer_set(&!columns,i,sample)
+   integer_buffer_set(&!flags,i,1);i=i+1
+  }
+  i=0
+  while i<97 {integer_buffer_set(&!offsets,i,i*16);i=i+1}
+ }
+ let counts=count_csr_build(96,16,1536,offsets,columns,values,0)
+ if count_csr_status(&counts)!=0 {code=1}
+ var result=dynamic_size_factors_slot()
+ if code==0 {code=count_csr_size_factors_into(&counts,0,&!factors,&!logs,&!work,&!anchors,&!result)}
+ if code==0 {
+  i=0
+  while i<1536 {
+   let observed=count_csr_stored_value(&counts,i)
+   let factor=numeric_buffer_at(&factors,i%16)
+   numeric_buffer_set(&!raw,i,observed as f64)
+   numeric_buffer_set(&!normalized,i,(observed as f64)/factor)
+   i=i+1
+  }
+ }
+ let layout=numeric_matrix(1536,96,16,16,1,0)
+ let first=DynamicHeatmapSpec{x:112,y:112,w:512,h:512,color_min:0.0,color_max:768.0}
+ let second=DynamicHeatmapSpec{x:816,y:112,w:512,h:512,color_min:0.0,color_max:768.0}
+ let scale=palette_scale_defaults(1,0.0,768.0)
+ let cb=ColorBarSpec{x:112,y:688,w:511,h:15,document_w:1480,document_h:800,text_rgb:0xebf0f5,show_name:true}
+ let cb2=ColorBarSpec{x:816,y:688,w:511,h:15,document_w:1480,document_h:800,text_rgb:0xebf0f5,show_name:true}
+ var fw=palette_field_work();var nw=palette_field_work();var cw=colorbar_work();var cw2=colorbar_work()
+ if code==0 {code=dynamic_heatmap_palette_validate(&first,&scale,&raw,&layout,&flags,&!fw)}
+ if code==0 {code=dynamic_heatmap_palette_validate(&second,&scale,&normalized,&layout,&flags,&!nw)}
+ if code==0 {code=colorbar_validate(&cb,&scale,&!cw)}
+ if code==0 {code=colorbar_validate(&cb2,&scale,&!cw2)}
+ let pixels=heap_alloc(1480*800*8) as *mut i64
+ if (pixels as i64)<=0 {code=1}
+ if code==0 {
+  var canvas=Canvas{pixels:pixels,width:1480,height:800};canvas_clear(&!canvas,12,16,22)
+  code=dynamic_heatmap_palette_canvas_into(&!canvas,&first,&scale,&raw,&layout,&flags,false,&!fw)
+  if code==0 {code=dynamic_heatmap_palette_canvas_into(&!canvas,&second,&scale,&normalized,&layout,&flags,false,&!nw)}
+  if code==0 {code=colorbar_canvas_into(&!canvas,&cb,&scale,&!cw)}
+  if code==0 {code=colorbar_canvas_into(&!canvas,&cb2,&scale,&!cw2)}
+  if code==0 {
+   println("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1480\" height=\"800\" viewBox=\"0 0 1480 800\">")
+   println("<rect width=\"1480\" height=\"800\" fill=\"rgb(12,16,22)\"/>")
+   code=dynamic_heatmap_palette_svg_into(&first,&scale,&raw,&layout,&flags,false,&!fw)
+   if code==0 {code=dynamic_heatmap_palette_svg_into(&second,&scale,&normalized,&layout,&flags,false,&!nw)}
+   if code==0 {code=colorbar_svg_into(&cb,&scale,&!cw)}
+   if code==0 {code=colorbar_svg_into(&cb2,&scale,&!cw2)}
+   text(&!canvas,112,24,"Validated CSR counts -> real shared median-ratio normalization")
+   text(&!canvas,112,48,"96 features x 16 samples; 1536 exact counts")
+   text(&!canvas,816,48,"Shared color domain: 0 to 768 counts")
+   text(&!canvas,112,72,"Observed counts: synthetic library-size pattern")
+   text(&!canvas,816,72,"Normalized counts = observed / checked size factor")
+   axes(&!canvas,112);axes(&!canvas,816)
+   text(&!canvas,112,744,"Synthetic data; all 96 reference features eligible")
+   text(&!canvas,816,744,"No zeros or missing cells; counts <= 768")
+   text(&!canvas,112,768,"No biological quality or DE inference")
+   text(&!canvas,816,768,"No uncertainty or coverage claim")
+   let used:i64=dynamic_size_factors_slot_genes_used(&result);let excluded:i64=dynamic_size_factors_slot_genes_excluded(&result)
+   println("<!-- NORMALIZATION_META {} {} -->",used,excluded)
+   i=0
+   while i<16 {let fb:i64=f64_to_bits(numeric_buffer_at(&factors,i));let lb:i64=f64_to_bits(numeric_buffer_at(&logs,i));println("<!-- FACTOR {} {} {} -->",i,fb,lb);i=i+1}
+   i=0
+   while i<1536 {let observed:i64=count_csr_stored_value(&counts,i);let bits:i64=f64_to_bits(numeric_buffer_at(&normalized,i));println("<!-- COUNT {} {} {} -->",i,observed,bits);i=i+1}
+   if code==0 {println("<!-- SCIENTIFIC_NORMALIZATION_COMPLETE -->")};println("</svg>");if code==0 {dump(&canvas)}
+  }
+ }
+ if (pixels as i64)>0 {heap_free(pixels as *mut i8)}
+ count_csr_close(counts);numeric_buffer_close(factors);numeric_buffer_close(logs);numeric_buffer_close(work);integer_buffer_close(anchors)
+ numeric_buffer_close(raw);numeric_buffer_close(normalized);integer_buffer_close(flags)
+ if code==0 {0}else{1}
+}

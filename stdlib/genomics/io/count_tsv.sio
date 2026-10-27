@@ -15,8 +15,14 @@ pub struct CountQcState {
  pub totals:[i64;8], pub zeros:[i64;8],
 }
 pub struct CountMatrixAppend { pub status:i64, pub rows:i64 }
-fn ct_result(state:&CountTsvState,consumed:i64)->CountTsvFeed {
- CountTsvFeed{status:state.status,consumed:consumed,row_ready:state.ready,finished:state.finished,position:state.position,error_position:state.error_position}
+// Reusable metadata only: no record construction in feed/finish hot paths.
+pub fn count_tsv_feed_slot()->CountTsvFeed {
+ CountTsvFeed{status:0,consumed:0,row_ready:false,finished:false,position:0,error_position:0}
+}
+fn ct_result_into(state:&CountTsvState,consumed:i64,out:&!CountTsvFeed)->i64 with Mut {
+ out.status=state.status;out.consumed=consumed;out.row_ready=state.ready
+ out.finished=state.finished;out.position=state.position;out.error_position=state.error_position
+ out.status
 }
 fn ct_fail(state:&!CountTsvState,status:i64) with Mut {
  state.status=status
@@ -57,49 +63,55 @@ fn ct_complete(state:&!CountTsvState)->bool with Mut {
  state.ready=true
  true
 }
-pub fn count_tsv_feed(state:&!CountTsvState,bytes:&[i64;256],length:i64)->CountTsvFeed with Mut,Div,Panic {
- if state.status!=0 { return ct_result(state,0) }
- if !ct_valid(state) { ct_fail(state,6) return ct_result(state,0) }
- if length<0 || length>256 { ct_fail(state,2) return ct_result(state,0) }
+pub fn count_tsv_feed_into(state:&!CountTsvState,bytes:&[i64;256],length:i64,out:&!CountTsvFeed)->i64 with Mut,Div,Panic {
+ if state.status!=0 { return ct_result_into(state,0,out) }
+ if !ct_valid(state) { ct_fail(state,6) return ct_result_into(state,0,out) }
+ if length<0 || length>256 { ct_fail(state,2) return ct_result_into(state,0,out) }
  // Ready rows pause even if a caller supplies additional bytes.
- if state.ready { return ct_result(state,0) }
+ if state.ready { return ct_result_into(state,0,out) }
  if state.finished {
   if length!=0 { ct_fail(state,6) }
-  return ct_result(state,0)
+  return ct_result_into(state,0,out)
  }
  var used:i64=0
  while used<length && !state.ready {
-  if state.position==9223372036854775807 { ct_fail(state,7) return ct_result(state,used) }
+  if state.position==9223372036854775807 { ct_fail(state,7) return ct_result_into(state,used,out) }
   let byte:i64=bytes[used as usize]
-  if byte<0 || byte>255 { ct_fail(state,3) return ct_result(state,used) }
+  if byte<0 || byte>255 { ct_fail(state,3) return ct_result_into(state,used,out) }
   if state.pending_cr {
-   if byte!=10 { ct_fail(state,3) return ct_result(state,used) }
-   if !ct_complete(state) { return ct_result(state,used) }
+   if byte!=10 { ct_fail(state,3) return ct_result_into(state,used,out) }
+   if !ct_complete(state) { return ct_result_into(state,used,out) }
   } else {
    if byte>=48 && byte<=57 {
     let next=ct_digit(state.value,byte-48)
-    if next<0 { ct_fail(state,5) return ct_result(state,used) }
+    if next<0 { ct_fail(state,5) return ct_result_into(state,used,out) }
     state.value=next
     state.has_digits=true
    } else {
     if byte==9 {
-     if state.columns>=state.samples-1 { ct_fail(state,4) return ct_result(state,used) }
-     if !ct_field(state) { return ct_result(state,used) }
+     if state.columns>=state.samples-1 { ct_fail(state,4) return ct_result_into(state,used,out) }
+     if !ct_field(state) { return ct_result_into(state,used,out) }
     } else {
      if byte==10 || byte==13 {
-      if !ct_field(state) { return ct_result(state,used) }
-      if state.columns!=state.samples { ct_fail(state,4) return ct_result(state,used) }
+      if !ct_field(state) { return ct_result_into(state,used,out) }
+      if state.columns!=state.samples { ct_fail(state,4) return ct_result_into(state,used,out) }
       if byte==13 { state.pending_cr=true } else {
-       if !ct_complete(state) { return ct_result(state,used) }
+       if !ct_complete(state) { return ct_result_into(state,used,out) }
       }
-     } else { ct_fail(state,3) return ct_result(state,used) }
+     } else { ct_fail(state,3) return ct_result_into(state,used,out) }
     }
    }
   }
   used=used+1
   state.position=state.position+1
  }
- ct_result(state,used)
+ ct_result_into(state,used,out)
+}
+// Compatibility: one fresh per-call snapshot, never an alias of a retained slot.
+pub fn count_tsv_feed(state:&!CountTsvState,bytes:&[i64;256],length:i64)->CountTsvFeed with Mut,Div,Panic {
+ var out=count_tsv_feed_slot()
+ let ignored:i64=count_tsv_feed_into(state,bytes,length,&!out)
+ out
 }
 pub fn count_tsv_ack_row(state:&!CountTsvState)->bool with Mut,Panic {
  if state.status!=0 { return false }
@@ -113,20 +125,25 @@ pub fn count_tsv_ack_row(state:&!CountTsvState)->bool with Mut,Panic {
  state.has_digits=false
  true
 }
-pub fn count_tsv_finish(state:&!CountTsvState)->CountTsvFeed with Mut,Panic {
- if state.status!=0 { return ct_result(state,0) }
- if !ct_valid(state) { ct_fail(state,6) return ct_result(state,0) }
- if state.finished { return ct_result(state,0) }
+pub fn count_tsv_finish_into(state:&!CountTsvState,out:&!CountTsvFeed)->i64 with Mut,Panic {
+ if state.status!=0 { return ct_result_into(state,0,out) }
+ if !ct_valid(state) { ct_fail(state,6) return ct_result_into(state,0,out) }
+ if state.finished { return ct_result_into(state,0,out) }
  // A ready newline-terminated row must be acknowledged first. EOF is not
  // committed here, because a feed caller may still have an unconsumed suffix.
- if state.ready { return ct_result(state,0) }
- if state.pending_cr { ct_fail(state,3) return ct_result(state,0) }
+ if state.ready { return ct_result_into(state,0,out) }
+ if state.pending_cr { ct_fail(state,3) return ct_result_into(state,0,out) }
  if state.has_digits || state.columns!=0 {
-  if !ct_field(state) { return ct_result(state,0) }
-  if !ct_complete(state) { return ct_result(state,0) }
+  if !ct_field(state) { return ct_result_into(state,0,out) }
+  if !ct_complete(state) { return ct_result_into(state,0,out) }
  }
  state.finished=true
- ct_result(state,0)
+ ct_result_into(state,0,out)
+}
+pub fn count_tsv_finish(state:&!CountTsvState)->CountTsvFeed with Mut,Panic {
+ var out=count_tsv_feed_slot()
+ let ignored:i64=count_tsv_finish_into(state,&!out)
+ out
 }
 pub fn count_qc_new(samples:i64)->CountQcState {
  CountQcState{status:if samples<1 || samples>8 {1}else{0},samples:samples,rows:0,totals:[0;8],zeros:[0;8]}

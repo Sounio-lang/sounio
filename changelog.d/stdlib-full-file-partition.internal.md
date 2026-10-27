@@ -1,0 +1,1 @@
+The full stdlib runner gains an optional `--partition file` mode for fresh source archives. Each worker uses a private source copy to isolate relative outputs, verifies copied test and stdlib hashes before and after execution, and retains the canonical case runner and complete selection audit. Operational controls verify isolated output paths and rejection of an omitted case.

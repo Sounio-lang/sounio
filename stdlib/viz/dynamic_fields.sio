@@ -1,12 +1,12 @@
 use math::pure::{is_finite}
-use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_get}
+use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_get,numeric_matrix_fits,numeric_matrix_at}
 use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
 use display::canvas::{Canvas,canvas_fill_rect}
 use viz::dynamic_plot::{DynamicPlotSpec}
 use viz::scatter::{scatter_geometry,scatter_project}
 use viz::uncertainty::{uncertainty_domain}
 use viz::forest::{ForestRect,forest_clip_rect}
-use viz::colormap::{viridis_r,viridis_g,viridis_b}
+use viz::palette::{PaletteScale,PaletteSample,palette_scale_defaults,palette_scale_status,palette_scale_id,palette_scale_min,palette_scale_max,palette_sample_slot,palette_map_into,palette_name_svg,palette_policy_metadata_svg}
 pub struct DynamicFieldResult {pub status:i64,pub input_count:i64,pub masked:i64,pub outside:i64,pub painted:i64}
 pub struct DynamicHeatmapSpec {pub x:i64,pub y:i64,pub w:i64,pub h:i64,pub color_min:f64,pub color_max:f64}
 fn df_result(code:i64,n:i64)->DynamicFieldResult {DynamicFieldResult{status:code,input_count:n,masked:0,outside:0,painted:0}}
@@ -98,17 +98,32 @@ pub fn dynamic_scatter_svg(s:&DynamicPlotSpec,x:&NumericBuffer,y:&NumericBuffer,
  println("</g>")
  result
 }
-fn df_heat_check(s:&DynamicHeatmapSpec,b:&NumericBuffer,m:&NumericMatrix,a:&IntegerBuffer)->i64 with Mut,Div,Panic {
- if !scatter_geometry(s.x,s.y,s.w,s.h) || !is_finite(s.color_min) || !is_finite(s.color_max) {return 1}
- if s.color_min>=s.color_max {return 1}
- if !is_finite(s.color_max-s.color_min) {return 1}
- if numeric_buffer_status(b)!=0 || numeric_matrix_status(m)!=0 || integer_buffer_status(a)!=0 {return 2}
+// Reusable geometry/color scratch; callers may reuse this across exports.
+// masked counts all unavailable cells; missing_painted is the explicit subset
+// painted using the configured missing color. Active counts exclude them.
+pub struct PaletteFieldWork {
+ pub status:i64,pub input_count:i64,pub masked:i64,pub active_painted:i64,
+ pub missing_painted:i64,pub outside:i64,pub under:i64,pub over:i64,pub constant:i64,
+ sample:PaletteSample,rect:ForestRect
+}
+pub fn palette_field_work()->PaletteFieldWork {
+ PaletteFieldWork{status:1,input_count:0,masked:0,active_painted:0,missing_painted:0,outside:0,under:0,over:0,constant:0,sample:palette_sample_slot(),rect:ForestRect{status:1,x:0,y:0,w:0,h:0}}
+}
+fn df_palette_reset(out:&!PaletteFieldWork) with Mut {
+ out.status=1;out.input_count=0;out.masked=0;out.active_painted=0;out.missing_painted=0;out.outside=0;out.under=0;out.over=0;out.constant=0
+}
+fn df_palette_check(s:&DynamicHeatmapSpec,scale:&PaletteScale,b:&NumericBuffer,m:&NumericMatrix,a:&IntegerBuffer,out:&!PaletteFieldWork)->i64 with Mut,Div,Panic {
+ df_palette_reset(out)
+ if !scatter_geometry(s.x,s.y,s.w,s.h) || palette_scale_status(scale)!=0 {return 1}
+ if s.color_min!=palette_scale_min(scale) || s.color_max!=palette_scale_max(scale) {return 1}
+ out.status=2
+ if numeric_buffer_status(b)!=0 || numeric_matrix_status(m)!=0 || integer_buffer_status(a)!=0 || !numeric_matrix_fits(b,m) {return 2}
  let rows=numeric_matrix_rows(m);let cols=numeric_matrix_cols(m)
- // Reject density reduction explicitly; no many-cells-to-one-pixel averaging.
- if rows>s.h+1 || cols>s.w+1 {return 6}
- if rows>0 {if cols>0 {let last=numeric_matrix_get(b,m,rows-1,cols-1);if last.status!=0 {return 2}}}
+ if rows>s.h+1 || cols>s.w+1 {out.status=6;return 6}
+ // Nonnegative dimensions are bounded by the validated integer plot dimensions.
  let count=rows*cols
  if integer_buffer_len(a)!=count {return 2}
+ out.status=3
  var row:i64=0
  while row<rows {
   var col:i64=0
@@ -116,9 +131,59 @@ fn df_heat_check(s:&DynamicHeatmapSpec,b:&NumericBuffer,m:&NumericMatrix,a:&Inte
    let flag=integer_buffer_at(a,row*cols+col)
    if flag!=0 && flag!=1 {return 3}
    if flag==1 {
-    let value=numeric_matrix_get(b,m,row,col)
-    if value.status!=0 {return 2}
-    if !is_finite(value.value) {return 3}
+    let value=numeric_matrix_at(b,m,row,col)
+    if !is_finite(value) {return 3}
+    let code=palette_map_into(scale,value,true,&!out.sample)
+    if code!=0 {out.status=5;return 5}
+   }
+   col=col+1
+  }
+  row=row+1
+ }
+ out.status=0;out.input_count=count
+ 0
+}
+fn df_cell_into(s:&DynamicHeatmapSpec,rows:i64,cols:i64,row:i64,col:i64,out:&!ForestRect) with Mut,Div {
+ let left=s.x+col*(s.w+1)/cols;let right=s.x+(col+1)*(s.w+1)/cols
+ let top=s.y+row*(s.h+1)/rows;let bottom=s.y+(row+1)*(s.h+1)/rows
+ out.status=0;out.x=left;out.y=top;out.w=right-left;out.h=bottom-top
+}
+fn df_color_class(out:&!PaletteFieldWork) with Mut {
+ if out.sample.classification==1 {out.under=out.under+1}
+ if out.sample.classification==2 {out.over=out.over+1}
+ if out.sample.classification==4 {out.constant=out.constant+1}
+}
+fn df_palette_rect(rect:&ForestRect,rgb:i64,index:i64,row:i64,col:i64,sample:&PaletteSample) with IO {
+ let x:f64=(rect.x as f64)-0.5;let y:f64=(rect.y as f64)-0.5
+ let w:i64=rect.w;let h:i64=rect.h;let kind:i64=sample.classification;let bin:i64=sample.index
+ let red:i64=(rgb>>16)&255;let green:i64=(rgb>>8)&255;let blue:i64=rgb&255
+ print("<rect data-source-index=\"");print(index);print("\" data-source-row=\"");print(row);print("\" data-source-col=\"");print(col)
+ print("\" data-color-class=\"");print(kind);print("\" data-palette-index=\"");print(bin)
+ print("\" x=\"");print(x);print("\" y=\"");print(y);print("\" width=\"");print(w);print("\" height=\"");print(h)
+ print("\" fill=\"rgb(");print(red);print(",");print(green);print(",");print(blue);println(")\"/>")
+}
+pub fn dynamic_heatmap_palette_validate(s:&DynamicHeatmapSpec,scale:&PaletteScale,b:&NumericBuffer,m:&NumericMatrix,a:&IntegerBuffer,out:&!PaletteFieldWork)->i64 with Mut,Div,Panic {df_palette_check(s,scale,b,m,a,out)}
+
+pub fn dynamic_heatmap_palette_canvas_into(c:&!Canvas,s:&DynamicHeatmapSpec,scale:&PaletteScale,b:&NumericBuffer,m:&NumericMatrix,a:&IntegerBuffer,paint_missing:bool,out:&!PaletteFieldWork)->i64 with Mut,Div,Panic {
+ let code=df_palette_check(s,scale,b,m,a,out)
+ if code!=0 {return code}
+ if !df_canvas(c) {out.status=1;return 1}
+ let rows=numeric_matrix_rows(m);let cols=numeric_matrix_cols(m)
+ var row:i64=0
+ while row<rows {
+  var col:i64=0
+  while col<cols {
+   let missing=integer_buffer_at(a,row*cols+col)==0
+   if missing {out.masked=out.masked+1}
+   if !missing || paint_missing {
+    let value=if missing {0.0}else{numeric_matrix_at(b,m,row,col)}
+    let ignored=palette_map_into(scale,value,!missing,&!out.sample)
+    df_color_class(out)
+    df_cell_into(s,rows,cols,row,col,&!out.rect)
+    let rgb=out.sample.rgb
+    if df_paint(c,&out.rect,(rgb>>16)&255,(rgb>>8)&255,rgb&255) {
+     if missing {out.missing_painted=out.missing_painted+1}else{out.active_painted=out.active_painted+1}
+    }else{out.outside=out.outside+1}
    }
    col=col+1
   }
@@ -126,59 +191,52 @@ fn df_heat_check(s:&DynamicHeatmapSpec,b:&NumericBuffer,m:&NumericMatrix,a:&Inte
  }
  0
 }
-fn df_cell(s:&DynamicHeatmapSpec,rows:i64,cols:i64,row:i64,col:i64)->ForestRect with Div {
- let left=s.x+col*(s.w+1)/cols;let right=s.x+(col+1)*(s.w+1)/cols
- let top=s.y+row*(s.h+1)/rows;let bottom=s.y+(row+1)*(s.h+1)/rows
- ForestRect{status:0,x:left,y:top,w:right-left,h:bottom-top}
-}
-fn df_color(s:&DynamicHeatmapSpec,value:f64)->f64 with Div {
- if value<=s.color_min {return 0.0};if value>=s.color_max {return 1.0}
- (value-s.color_min)/(s.color_max-s.color_min)
-}
-pub fn dynamic_heatmap_canvas(c:&!Canvas,s:&DynamicHeatmapSpec,b:&NumericBuffer,m:&NumericMatrix,a:&IntegerBuffer)->DynamicFieldResult with Mut,Div,Panic {
- let code=df_heat_check(s,b,m,a)
+fn df_palette_svg(s:&DynamicHeatmapSpec,scale:&PaletteScale,b:&NumericBuffer,m:&NumericMatrix,a:&IntegerBuffer,paint_missing:bool,detailed:bool,out:&!PaletteFieldWork)->i64 with IO,Mut,Div,Panic {
+ let code=df_palette_check(s,scale,b,m,a,out)
+ if code!=0 {return code}
  let rows=numeric_matrix_rows(m);let cols=numeric_matrix_cols(m)
- var result=df_result(code,0)
- if code!=0 {return result};result.input_count=rows*cols
- if !df_canvas(c) {result.status=1;return result}
+ print("<g data-dynamic-series=\"heatmap\" data-palette=\"");palette_name_svg(palette_scale_id(scale));print("\" data-row-order=\"top-to-bottom\"")
+ palette_policy_metadata_svg(scale)
+ print(" data-missing-policy=\"");if paint_missing {print("configured-color")}else{print("skip")};println("\">")
  var row:i64=0
  while row<rows {
   var col:i64=0
   while col<cols {
-   if integer_buffer_at(a,row*cols+col)==0 {result.masked=result.masked+1} else {
-    let value=numeric_matrix_get(b,m,row,col)
-    let t=df_color(s,value.value)
-    let rect=df_cell(s,rows,cols,row,col)
-    if df_paint(c,&rect,viridis_r(t),viridis_g(t),viridis_b(t)) {result.painted=result.painted+1}else{result.outside=result.outside+1}
-   }
-   col=col+1
-  }
-  row=row+1
- }
- result
-}
-pub fn dynamic_heatmap_svg(s:&DynamicHeatmapSpec,b:&NumericBuffer,m:&NumericMatrix,a:&IntegerBuffer)->DynamicFieldResult with IO,Mut,Div,Panic {
- let code=df_heat_check(s,b,m,a)
- let rows=numeric_matrix_rows(m);let cols=numeric_matrix_cols(m)
- var result=df_result(code,0)
- if code!=0 {return result};result.input_count=rows*cols
- println("<g data-dynamic-series=\"heatmap\" data-palette=\"viridis\" data-row-order=\"top-to-bottom\">")
- var row:i64=0
- while row<rows {
-  var col:i64=0
-  while col<cols {
-   let index=row*cols+col
-   if integer_buffer_at(a,index)==0 {result.masked=result.masked+1} else {
-    let value=numeric_matrix_get(b,m,row,col)
-    let t=df_color(s,value.value)
-    let rect=df_cell(s,rows,cols,row,col)
-    df_rect(&rect,viridis_r(t),viridis_g(t),viridis_b(t),index,row,col)
-    result.painted=result.painted+1
+   let index=row*cols+col;let missing=integer_buffer_at(a,index)==0
+   if missing {out.masked=out.masked+1}
+   if !missing || paint_missing {
+    let value=if missing {0.0}else{numeric_matrix_at(b,m,row,col)}
+    let ignored=palette_map_into(scale,value,!missing,&!out.sample)
+    df_color_class(out);df_cell_into(s,rows,cols,row,col,&!out.rect)
+    let rgb=out.sample.rgb
+    if detailed {df_palette_rect(&out.rect,rgb,index,row,col,&out.sample)}else{df_rect(&out.rect,(rgb>>16)&255,(rgb>>8)&255,rgb&255,index,row,col)}
+    if missing {out.missing_painted=out.missing_painted+1}else{out.active_painted=out.active_painted+1}
    }
    col=col+1
   }
   row=row+1
  }
  println("</g>")
- result
+ 0
+}
+pub fn dynamic_heatmap_palette_svg_into(s:&DynamicHeatmapSpec,scale:&PaletteScale,b:&NumericBuffer,m:&NumericMatrix,a:&IntegerBuffer,paint_missing:bool,out:&!PaletteFieldWork)->i64 with IO,Mut,Div,Panic {
+ df_palette_svg(s,scale,b,m,a,paint_missing,true,out)
+}
+// Legacy default keeps strict nonconstant finite-span domains and masked skip.
+fn df_legacy_heat_valid(s:&DynamicHeatmapSpec)->bool {
+ is_finite(s.color_min) && is_finite(s.color_max) && s.color_min<s.color_max && is_finite(s.color_max-s.color_min)
+}
+pub fn dynamic_heatmap_canvas(c:&!Canvas,s:&DynamicHeatmapSpec,b:&NumericBuffer,m:&NumericMatrix,a:&IntegerBuffer)->DynamicFieldResult with Mut,Div,Panic {
+ if !df_legacy_heat_valid(s) {return df_result(1,0)}
+ let scale=palette_scale_defaults(1,s.color_min,s.color_max)
+ var out=palette_field_work()
+ let code=dynamic_heatmap_palette_canvas_into(c,s,&scale,b,m,a,false,&!out)
+ DynamicFieldResult{status:code,input_count:out.input_count,masked:out.masked,outside:out.outside,painted:out.active_painted}
+}
+pub fn dynamic_heatmap_svg(s:&DynamicHeatmapSpec,b:&NumericBuffer,m:&NumericMatrix,a:&IntegerBuffer)->DynamicFieldResult with IO,Mut,Div,Panic {
+ if !df_legacy_heat_valid(s) {return df_result(1,0)}
+ let scale=palette_scale_defaults(1,s.color_min,s.color_max)
+ var out=palette_field_work()
+ let code=df_palette_svg(s,&scale,b,m,a,false,false,&!out)
+ DynamicFieldResult{status:code,input_count:out.input_count,masked:out.masked,outside:out.outside,painted:out.active_painted}
 }

@@ -1,0 +1,113 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: DISPERSION_PREFIX_PASS
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_set,numeric_buffer_at,numeric_buffer_close,numeric_matrix}
+use genomics::dispersion_shrinkage::{dispersion_shrinkage_workspace,dispersion_shrinkage_fit,dispersion_shrinkage_fit_prefix}
+use linalg::dynamic_least_squares::{dynamic_qr_workspace,dynamic_qr_least_squares,dynamic_qr_least_squares_rhs_prefix}
+use io::sci_print::{println_f64_sci}
+use math::pure::{is_finite}
+fn prefix_value(case_id:i64,kind:i64,index:i64,value:f64) with IO,Mut,Div,Panic {
+ println("PREFIX_VALUE {} {} {}",case_id,kind,index)
+ println_f64_sci(value,15)
+}
+fn prefix_untouched(a:&NumericBuffer,b:&NumericBuffer,c:&NumericBuffer,n:i64) with Mut,Panic {
+ var i:i64=0
+ while i<n {assert(numeric_buffer_at(a,i)== -777.0 && numeric_buffer_at(b,i)== -778.0 && numeric_buffer_at(c,i)== -779.0);i=i+1}
+}
+fn prefix_case(case_id:i64,n:i64,capacity:i64) with Alloc,Mut,Div,Panic,IO {
+ let plan=dispersion_shrinkage_workspace(capacity)
+ assert(plan.status==0)
+ var means=numeric_buffer_new(capacity,capacity*8)
+ var exact=numeric_buffer_new(n,n*8)
+ var estimates=numeric_buffer_new(capacity,capacity*8)
+ var sampling=numeric_buffer_new(capacity,capacity*8)
+ var output=numeric_buffer_new(capacity,capacity*8)
+ var variance=numeric_buffer_new(capacity,capacity*8)
+ var flags=numeric_buffer_new(capacity,capacity*8)
+ var jac=numeric_buffer_new(plan.jacobian_elements,plan.jacobian_elements*8)
+ var rhs=numeric_buffer_new(capacity,capacity*8)
+ var step=numeric_buffer_new(2,16)
+ var qr=numeric_buffer_new(plan.qr_elements,plan.qr_elements*8)
+ var stage=numeric_buffer_new(plan.stage_elements,plan.stage_elements*8)
+ let zero:f64=0.0
+ let nan:f64=zero/zero
+ assert(!is_finite(nan))
+ var i:i64=0
+ while i<capacity {
+  numeric_buffer_set(&!means,i,nan);numeric_buffer_set(&!estimates,i,nan);numeric_buffer_set(&!sampling,i,nan)
+  numeric_buffer_set(&!output,i,-777.0);numeric_buffer_set(&!variance,i,-778.0);numeric_buffer_set(&!flags,i,-779.0)
+  numeric_buffer_set(&!rhs,i,nan);i=i+1
+ }
+ let observed:[f64;8]=[80.0,70.0,15.0,20.0,4.0,5.0,1.0,4.0]
+ var mu:f64=1.0
+ i=0
+ while i<n {
+  let m=if case_id==0 {mu}else{(i+1) as f64}
+  let estimate=if case_id==0 {observed[i as usize]}else{2.0+3.0/m}
+  numeric_buffer_set(&!means,i,m);numeric_buffer_set(&!exact,i,m)
+  numeric_buffer_set(&!estimates,i,estimate);numeric_buffer_set(&!sampling,i,0.01)
+  mu=mu*2.0;i=i+1
+ }
+ let a0=if case_id==0 {0.1}else{2.0}
+ let a1=if case_id==0 {100.0}else{3.0}
+ let sigma=if case_id==0 {1.0}else{2.0}
+ let short=dispersion_shrinkage_fit_prefix(&means,&estimates,&sampling,2,a0,a1,0.0,100,1e-8,sigma,&!output,&!variance,&!flags,&!jac,&!rhs,&!step,&!qr,&!stage)
+ assert(short.status==1);prefix_untouched(&output,&variance,&flags,capacity)
+ let over=dispersion_shrinkage_fit_prefix(&means,&estimates,&sampling,capacity+1,a0,a1,0.0,100,1e-8,sigma,&!output,&!variance,&!flags,&!jac,&!rhs,&!step,&!qr,&!stage)
+ assert(over.status==1);prefix_untouched(&output,&variance,&flags,capacity)
+ let old=dispersion_shrinkage_fit(&exact,&estimates,&sampling,a0,a1,0.0,100,1e-8,sigma,&!output,&!variance,&!flags,&!jac,&!rhs,&!step,&!qr,&!stage)
+ assert(old.status==1);prefix_untouched(&output,&variance,&flags,capacity)
+ let saved=numeric_buffer_at(&estimates,0)
+ numeric_buffer_set(&!estimates,0,nan)
+ let invalid=dispersion_shrinkage_fit_prefix(&means,&estimates,&sampling,n,a0,a1,0.0,100,1e-8,sigma,&!output,&!variance,&!flags,&!jac,&!rhs,&!step,&!qr,&!stage)
+ assert(invalid.status==2);prefix_untouched(&output,&variance,&flags,capacity)
+ numeric_buffer_set(&!estimates,0,saved)
+ let fit=dispersion_shrinkage_fit_prefix(&means,&estimates,&sampling,n,a0,a1,0.0,100,1e-8,sigma,&!output,&!variance,&!flags,&!jac,&!rhs,&!step,&!qr,&!stage)
+ assert(fit.status==0 && fit.genes==n && fit.rank==2 && !fit.calibration_assessed)
+ let boundary:i64=if fit.prior_boundary {1}else{0}
+ let status=fit.status;let genes=fit.genes;let rank=fit.rank;let outliers=fit.outliers
+ println("PREFIX_CASE {} {} {}",case_id,n,capacity)
+ println("PREFIX_META {} {} {} {} {} {}",case_id,status,genes,rank,outliers,boundary)
+ let v0=fit.a0;let v1=fit.a1;let v2=fit.prior_log_variance
+ let v3=fit.residual_mean_square;let v4=fit.sampling_correction
+ prefix_value(case_id,0,0,v0);prefix_value(case_id,0,1,v1);prefix_value(case_id,0,2,v2);prefix_value(case_id,0,3,v3);prefix_value(case_id,0,4,v4)
+ i=0
+ while i<n {
+  let mapped=numeric_buffer_at(&output,i);let v=numeric_buffer_at(&variance,i);let flag=numeric_buffer_at(&flags,i)
+  prefix_value(case_id,1,i,mapped);prefix_value(case_id,2,i,v);prefix_value(case_id,3,i,flag)
+  i=i+1
+ }
+ while i<capacity {assert(numeric_buffer_at(&output,i)== -777.0 && numeric_buffer_at(&variance,i)== -778.0 && numeric_buffer_at(&flags,i)== -779.0);i=i+1}
+ println("PREFIX_TAIL {} {}",case_id,capacity-n)
+ let s0=short.status;let s1=over.status;let s2=old.status;let s3=invalid.status
+ println("PREFIX_GUARDS {} {} {} {} {}",case_id,s0,s1,s2,s3)
+ numeric_buffer_close(means);numeric_buffer_close(exact);numeric_buffer_close(estimates);numeric_buffer_close(sampling)
+ numeric_buffer_close(output);numeric_buffer_close(variance);numeric_buffer_close(flags)
+ numeric_buffer_close(jac);numeric_buffer_close(rhs);numeric_buffer_close(step);numeric_buffer_close(qr);numeric_buffer_close(stage)
+}
+fn prefix_qr() with Alloc,Mut,Div,Panic,IO {
+ var a=numeric_buffer_new(6,48);var b=numeric_buffer_new(5,40);var x=numeric_buffer_new(2,16)
+ let need=dynamic_qr_workspace(3,2)
+ var work=numeric_buffer_new(need,need*8)
+ let entries:[f64;6]=[1.0,0.0,0.0,1.0,1.0,1.0]
+ var i:i64=0
+ while i<6 {numeric_buffer_set(&!a,i,entries[i as usize]);i=i+1}
+ let zero:f64=0.0;let nan:f64=zero/zero
+ numeric_buffer_set(&!b,0,1.0);numeric_buffer_set(&!b,1,2.0);numeric_buffer_set(&!b,2,3.0);numeric_buffer_set(&!b,3,nan);numeric_buffer_set(&!b,4,nan)
+ numeric_buffer_set(&!x,0,-777.0);numeric_buffer_set(&!x,1,-777.0)
+ let matrix=numeric_matrix(6,3,2,2,1,0)
+ let old=dynamic_qr_least_squares(&a,&matrix,&b,&!x,&!work,0.0)
+ assert(old.status==1 && numeric_buffer_at(&x,0)== -777.0 && numeric_buffer_at(&x,1)== -777.0)
+ let fit=dynamic_qr_least_squares_rhs_prefix(&a,&matrix,&b,&!x,&!work,0.0)
+ assert(fit.status==0 && fit.rank==2)
+ let old_status=old.status;let status=fit.status;let rank=fit.rank
+ println("PREFIX_QR {} {} {}",old_status,status,rank)
+ let x0=numeric_buffer_at(&x,0);let x1=numeric_buffer_at(&x,1)
+ prefix_value(2,0,0,x0);prefix_value(2,0,1,x1)
+ numeric_buffer_close(a);numeric_buffer_close(b);numeric_buffer_close(x);numeric_buffer_close(work)
+}
+fn main()->i32 with Alloc,Mut,Div,Panic,IO {
+ prefix_qr();prefix_case(0,8,13);prefix_case(1,513,1024)
+ println("DISPERSION_PREFIX_PASS")
+ 0
+}

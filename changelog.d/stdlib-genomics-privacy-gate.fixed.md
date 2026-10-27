@@ -1,0 +1,1 @@
+The genomics count identity gate now requires the qualified bootstrap to reject private field reads with E259 and produce no executable, matching the canonical compiler. Numerical cases, mutant controls and linear-consumption refusals are preserved.

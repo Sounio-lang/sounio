@@ -1,0 +1,52 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: VCF_CORE_OK
+use collections::byte_buffer::{byte_buffer_new,byte_buffer_push,byte_buffer_close}
+use genomics::io::vcf::{vcf_record_summary}
+fn check_record(text:string,status:i64,position:i64,columns:i64,alternates:i64,samples:i64) with IO,Alloc,Mut,Div,Panic {
+    var bytes=byte_buffer_new(65536)
+    var i:i64=0
+    while i<str_len(text) {assert(byte_buffer_push(&!bytes,str_char_at(text,i))==0);i=i+1}
+    let r=vcf_record_summary(&bytes)
+    assert(r.status==status)
+    if status==0 {
+        assert(r.position==position)
+        assert(r.columns==columns)
+        assert(r.alternate_alleles==alternates)
+        assert(r.samples==samples)
+    }
+    byte_buffer_close(bytes)
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+    check_record("chr1\t0\t.\tA\t.\t.\tPASS\t.\n",0,0,8,0,0)
+    check_record("chr1\t42\tid\tAC\tA,T\t1.5e+2\tPASS\tDP=4\tGT:DP\t0/1|2:4\t./.:0\r\n",0,42,11,2,2)
+    check_record("chr1\t9223372036854775807\t.\tN\t<DEL>\t.\t.\t.",0,9223372036854775807,8,1,0)
+    check_record("chr1\t9223372036854775808\t.\tA\tT\t.\t.\t.",75,0,0,0,0)
+    check_record("chr1\t-1\t.\tA\tT\t.\t.\t.",22,0,0,0,0)
+    check_record("chr1\t1\t.\tA\tT\t.\t.\t.\tGT\t0/2",22,0,0,0,0)
+    check_record("chr1\t1\t.\tA\tT\t.\t.\t.\tGT\t0//1",22,0,0,0,0)
+    check_record("chr1\t1\t.\tA\tT\t.\t.\t.\tDP:GT\t2:0/1",22,0,0,0,0)
+    check_record("chr1\t1\t.\tA\tT,\t.\t.\t.",22,0,0,0,0)
+    check_record("chr1\t1\t.\tA\tT\tNaN\t.\t.",22,0,0,0,0)
+    check_record("chr1\t1\t.\tA\tT\t-1\t.\t.",22,0,0,0,0)
+    check_record("chr1\t1\t\tA\tT\t.\t.\t.",22,0,0,0,0)
+    check_record("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO",22,0,0,0,0)
+    check_record("chr1\t1\t.\tA\tT\t.\t.\t.\nchr1",22,0,0,0,0)
+    var invalid=byte_buffer_new(8)
+    assert(byte_buffer_push(&!invalid,192)==0)
+    assert(vcf_record_summary(&invalid).status==84)
+    byte_buffer_close(invalid)
+    // A payload beyond the former fixed buffer thresholds is fully scanned.
+    var large=byte_buffer_new(32768)
+    let prefix="chr1\t1\t.\tA\tT\t.\t.\tNOTE="
+    var j:i64=0
+    while j<str_len(prefix) {assert(byte_buffer_push(&!large,str_char_at(prefix,j))==0);j=j+1}
+    j=0
+    while j<10000 {assert(byte_buffer_push(&!large,65)==0);j=j+1}
+    let parsed=vcf_record_summary(&large)
+    assert(parsed.status==0)
+    assert(parsed.columns==8)
+    byte_buffer_close(large)
+    println("VCF_CORE_OK")
+    return 0
+}

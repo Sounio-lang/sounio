@@ -1,0 +1,87 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: JSON_DOM_OK
+use json::dom::{json_dom_parse,json_dom_status,json_dom_len,json_dom_node,json_dom_i64,json_dom_token,json_dom_string,json_dom_key,json_dom_bool,json_dom_serialize,json_dom_find,json_dom_close}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_get,byte_buffer_len,byte_buffer_close}
+fn text_buffer(text:string)->ByteBuffer with Alloc,Mut,Div,Panic {
+ var b=byte_buffer_new(100000)
+ var i:i64=0
+ while str_char_at(text,i)>0 {assert(byte_buffer_push(&!b,str_char_at(text,i))==0);i=i+1}
+ return b
+}
+fn invalid(text:string) with Alloc,Mut,Div,Panic {
+ let b=text_buffer(text)
+ let d=json_dom_parse(&b,10000,16)
+ assert(json_dom_status(&d)==4)
+ json_dom_close(d);byte_buffer_close(b)
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let input=text_buffer("{\"big\":9007199254740993,\"nested\":[true,null,{\"x\":\"\\uD834\\uDD1E\"}],\"min\":-9223372036854775808,\"max\":9223372036854775807,\"overflow\":9223372036854775808,\"fraction\":1.25e+2}")
+ let d=json_dom_parse(&input,10000,16)
+ assert(json_dom_status(&d)==0)
+ byte_buffer_close(input)
+ assert(json_dom_len(&d)==11)
+ assert(json_dom_node(&d,0).kind==5)
+ assert(json_dom_node(&d,0).child==1)
+ assert(json_dom_node(&d,1).next==2)
+ assert(json_dom_node(&d,2).kind==4)
+ assert(json_dom_node(&d,2).child==3)
+ assert(json_dom_node(&d,6).kind==3)
+ assert(json_dom_i64(&d,1).value==9007199254740993)
+ assert(json_dom_find(&d,0,"big",32).value==1)
+ assert(json_dom_find(&d,0,"absent",32).status==4)
+ assert(json_dom_find(&d,0,"big",1).status==2)
+ assert(json_dom_i64(&d,7).value==0-9223372036854775807-1)
+ assert(json_dom_i64(&d,8).value==9223372036854775807)
+ assert(json_dom_i64(&d,9).status==7)
+ assert(json_dom_i64(&d,10).status==6)
+ assert(json_dom_i64(&d,6).status==6)
+ assert(json_dom_bool(&d,3).value==1)
+ var scalar=byte_buffer_new(4)
+ assert(json_dom_string(&d,6,&!scalar)==0)
+ assert(byte_buffer_len(&scalar)==4)
+ assert(byte_buffer_get(&scalar,0).value==240 && byte_buffer_get(&scalar,1).value==157 && byte_buffer_get(&scalar,2).value==132 && byte_buffer_get(&scalar,3).value==158)
+ byte_buffer_close(scalar)
+ var key=byte_buffer_new(8)
+ assert(json_dom_key(&d,1,&!key)==0)
+ assert(byte_buffer_len(&key)==3 && byte_buffer_get(&key,0).value==98)
+ byte_buffer_close(key)
+ var serialized=byte_buffer_new(1000)
+ assert(json_dom_serialize(&d,&!serialized)==0)
+ let replay=json_dom_parse(&serialized,10000,16)
+ assert(json_dom_status(&replay)==0 && json_dom_len(&replay)==11)
+ assert(json_dom_i64(&replay,1).value==9007199254740993)
+ json_dom_close(replay);byte_buffer_close(serialized)
+ var token=byte_buffer_new(16)
+ assert(json_dom_token(&d,1,&!token)==0)
+ assert(byte_buffer_len(&token)==16)
+ assert(byte_buffer_get(&token,15).value==51)
+ byte_buffer_close(token)
+ json_dom_close(d)
+ invalid("");invalid("01");invalid("-");invalid("1.");invalid("1e+");invalid("true false")
+ invalid("[1,]");invalid("{\"x\":1,}");invalid("{\"x\" 1}");invalid("[}");invalid("/*x*/null")
+ invalid("\"\\uD800\"");invalid("\"\\uDC00\"");invalid("\"\\uD800\\u0041\"");invalid("\"\\q\"")
+ var many=byte_buffer_new(10000)
+ assert(byte_buffer_push(&!many,91)==0)
+ var i:i64=0
+ while i<300 {if i>0 {assert(byte_buffer_push(&!many,44)==0)};assert(byte_buffer_push(&!many,48+i%10)==0);i=i+1}
+ assert(byte_buffer_push(&!many,93)==0)
+ let large=json_dom_parse(&many,40000,1)
+ assert(json_dom_status(&large)==0 && json_dom_len(&large)==301)
+ assert(json_dom_i64(&large,300).value==9)
+ json_dom_close(large)
+ let budget=json_dom_parse(&many,1000,16)
+ assert(json_dom_status(&budget)==2)
+ json_dom_close(budget);byte_buffer_close(many)
+ let nested=text_buffer("[[[]]]")
+ let deep=json_dom_parse(&nested,10000,2)
+ assert(json_dom_status(&deep)==5)
+ json_dom_close(deep);byte_buffer_close(nested)
+ var bad=byte_buffer_new(8)
+ assert(byte_buffer_push(&!bad,34)==0);assert(byte_buffer_push(&!bad,192)==0);assert(byte_buffer_push(&!bad,128)==0);assert(byte_buffer_push(&!bad,34)==0)
+ let utf=json_dom_parse(&bad,1000,1)
+ assert(json_dom_status(&utf)==8)
+ json_dom_close(utf);byte_buffer_close(bad)
+ println("JSON_DOM_OK")
+ return 0
+}

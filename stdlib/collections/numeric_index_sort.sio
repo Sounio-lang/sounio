@@ -1,0 +1,68 @@
+// Deterministic ascending indexed heapsort over finite numerical keys.
+// Input values stay in place; caller supplies the only index workspace.
+// Exact key ties are ordered by original index. Signed zero is one key value.
+// status0 sorted,1 shape/options,2 nonfinite key,3 comparison budget exhausted.
+// Invalid inputs do not change indices. Exhaustion can leave a partial heap.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
+use math::pure::{is_finite}
+
+pub struct NumericIndexSort {
+ pub status:i64,pub n:i64,pub validated:i64,pub comparisons:i64,pub swaps:i64,
+}
+fn nis_later(values:&NumericBuffer,left:i64,right:i64,budget:i64,work:&!NumericIndexSort)->bool with Mut,Panic {
+ if work.status!=0 {return false}
+ if work.comparisons>=budget {work.status=3;return false}
+ work.comparisons=work.comparisons+1
+ let a=numeric_buffer_at(values,left)
+ let b=numeric_buffer_at(values,right)
+ if a>b {return true}
+ if a<b {return false}
+ left>right
+}
+fn nis_swap(indices:&!IntegerBuffer,left:i64,right:i64,work:&!NumericIndexSort) with Mut,Panic {
+ let a=integer_buffer_at(indices,left)
+ let b=integer_buffer_at(indices,right)
+ integer_buffer_set(indices,left,b);integer_buffer_set(indices,right,a)
+ work.swaps=work.swaps+1
+}
+fn nis_sift(values:&NumericBuffer,indices:&!IntegerBuffer,root:i64,n:i64,budget:i64,work:&!NumericIndexSort) with Mut,Div,Panic {
+ var at=root
+ while n>1 && at<=(n-2)/2 && work.status==0 {
+  var child=at*2+1
+  if child+1<n {
+   let right=integer_buffer_at(indices,child+1)
+   let left=integer_buffer_at(indices,child)
+   if nis_later(values,right,left,budget,work) {child=child+1}
+  }
+  if work.status!=0 {return}
+  let child_index=integer_buffer_at(indices,child)
+  let parent_index=integer_buffer_at(indices,at)
+  let later=nis_later(values,child_index,parent_index,budget,work)
+  if work.status!=0 {return}
+  if !later {break}
+  nis_swap(indices,at,child,work)
+  at=child
+ }
+}
+pub fn numeric_index_sort_checked(values:&NumericBuffer,n:i64,indices:&!IntegerBuffer,budget:i64)->NumericIndexSort with Mut,Div,Panic {
+ var work=NumericIndexSort{status:1,n:n,validated:0,comparisons:0,swaps:0}
+ if n<0 || budget<0 || numeric_buffer_status(values)!=0 || integer_buffer_status(indices)!=0 {return work}
+ if n>numeric_buffer_len(values) || n>integer_buffer_len(indices) {return work}
+ var i:i64=0
+ while i<n {
+  if !is_finite(numeric_buffer_at(values,i)) {work.status=2;return work}
+  work.validated=work.validated+1;i=i+1
+ }
+ work.status=0
+ i=0
+ while i<n {integer_buffer_set(indices,i,i);i=i+1}
+ i=n/2
+ while i>0 && work.status==0 {i=i-1;nis_sift(values,indices,i,n,budget,&!work)}
+ var end=n
+ while end>1 && work.status==0 {
+  end=end-1;nis_swap(indices,0,end,&!work)
+  nis_sift(values,indices,0,end,budget,&!work)
+ }
+ work
+}

@@ -1,0 +1,185 @@
+// Dynamic GFF3 annotation reader. Stores exact text and five i64 words/feature.
+// Validates row shape, coordinates, lexical score, strand, CDS phase and escapes.
+// Ontology membership and cross-feature ID/Parent graph validation remain caller work.
+// ##FASTA terminates annotations; its offset is exposed for a separate FASTA reader.
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_status,byte_buffer_len,byte_buffer_get,byte_buffer_reserve,byte_buffer_push,byte_buffer_utf8_count,byte_buffer_close}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_len,integer_buffer_resize,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+use genomics::io::vcf::{vcf_parse_position}
+pub linear struct DynamicGff {text:ByteBuffer,rows:IntegerBuffer,status:i64,fasta_offset:i64}
+pub struct GffRange {pub start:i64,pub end:i64,pub status:i64}
+pub struct GffCoordinates {pub start:i64,pub end:i64,pub status:i64}
+fn dg_byte(b:&ByteBuffer,i:i64)->i64 {let r=byte_buffer_get(b,i);if r.status!=0 {return 0-1};r.value}
+fn dg_hex(c:i64)->bool {c>=48 && c<=57 || c>=65 && c<=70 || c>=97 && c<=102}
+fn dg_code(c:i64)->i64 {if c==2 {105} else if c==3 {12} else if c!=0 {22} else {0}}
+fn dg_equal(b:&ByteBuffer,start:i64,end:i64,text:string)->bool with Mut {
+ var i=start
+ var j:i64=0
+ while i<end {if dg_byte(b,i)!=str_char_at(text,j) {return false};i=i+1;j=j+1}
+ return str_char_at(text,j)==0
+}
+fn dg_version_valid(b:&ByteBuffer,start:i64,end:i64)->bool with Mut {
+ if end-start<15 {return false}
+ if !dg_equal(b,start,start+15,"##gff-version 3") {return false}
+ var i=start+15
+ while i<end {
+  if dg_byte(b,i)!=46 {return false}
+  i=i+1;let first=i
+  while i<end && dg_byte(b,i)>=48 && dg_byte(b,i)<=57 {i=i+1}
+  if i==first {return false}
+ }
+ return true
+}
+fn dg_range(b:&ByteBuffer,start:i64,end:i64,column:i64)->GffRange with Mut {
+ var field:i64=0
+ var first=start
+ var i=start
+ while i<=end {
+  if i==end || dg_byte(b,i)==9 {
+   if field==column {return GffRange {start:first,end:i,status:0}}
+   field=field+1;first=i+1
+  }
+  i=i+1
+ }
+ return GffRange {start:0,end:0,status:22}
+}
+fn dg_escape_valid(b:&ByteBuffer,start:i64,end:i64)->bool with Mut {
+ var i=start
+ while i<end {
+  let c=dg_byte(b,i)
+  if c<32 || c==127 || c==92 {return false}
+  if c==37 {
+   if i+2>=end || !dg_hex(dg_byte(b,i+1)) || !dg_hex(dg_byte(b,i+2)) {return false}
+   i=i+2
+  }
+  i=i+1
+ }
+ return true
+}
+fn dg_score_valid(b:&ByteBuffer,start:i64,end:i64)->bool with Mut {
+ if dg_equal(b,start,end,".") {return true}
+ var i=start
+ if dg_byte(b,i)==43 || dg_byte(b,i)==45 {i=i+1}
+ var digits:i64=0
+ while dg_byte(b,i)>=48 && dg_byte(b,i)<=57 && i<end {i=i+1;digits=digits+1}
+ if dg_byte(b,i)==46 && i<end {
+  i=i+1
+  while dg_byte(b,i)>=48 && dg_byte(b,i)<=57 && i<end {i=i+1;digits=digits+1}
+ }
+ if digits==0 {return false}
+ if (dg_byte(b,i)==101 || dg_byte(b,i)==69) && i<end {
+  i=i+1
+  if dg_byte(b,i)==43 || dg_byte(b,i)==45 {i=i+1}
+  let first=i
+  while dg_byte(b,i)>=48 && dg_byte(b,i)<=57 && i<end {i=i+1}
+  if i==first {return false}
+ }
+ return i==end
+}
+fn dg_attributes_valid(b:&ByteBuffer,start:i64,end:i64)->bool with Mut {
+ if dg_equal(b,start,end,".") {return true}
+ var token=start
+ var equals:i64=0-1
+ var i=start
+ while i<=end {
+  if i==end || dg_byte(b,i)==59 {
+   if i==end && token==end {return true}
+   if equals<=token || equals>=i-1 {return false}
+   token=i+1;equals=0-1
+  } else if dg_byte(b,i)==61 {
+   if equals>=0 {return false}
+   equals=i
+  } else if dg_byte(b,i)==38 {return false}
+  i=i+1
+ }
+ return true
+}
+fn dg_store(d:&!DynamicGff,index:i64,value:i64) with Mut,Panic {assert(integer_buffer_set(&!d.rows,index,value)==0)}
+fn dg_fill(d:&!DynamicGff,input:&ByteBuffer)->i64 with Alloc,Mut,Div,Panic {
+ if d.status!=0 {return d.status}
+ if byte_buffer_status(input)!=0 {return 22}
+ if byte_buffer_utf8_count(input).status!=0 {return 84}
+ let n=byte_buffer_len(input)
+ let allocation=byte_buffer_reserve(&!d.text,n)
+ if allocation!=0 {return dg_code(allocation)}
+ var i:i64=0
+ while i<n {assert(byte_buffer_push(&!d.text,dg_byte(input,i))==0);i=i+1}
+ i=0
+ var first=true
+ while i<n {
+  let start=i
+  while i<n && dg_byte(&d.text,i)!=10 {i=i+1}
+  var end=i
+  if end>start && dg_byte(&d.text,end-1)==13 {end=end-1}
+  let next=if i<n {i+1} else {i}
+  if first {
+   if !dg_version_valid(&d.text,start,end) {return 22}
+   first=false
+  } else if dg_equal(&d.text,start,end,"##FASTA") {d.fasta_offset=next;return 0}
+  else if end>start && dg_byte(&d.text,start)!=35 {
+   var field:i64=0
+   while field<9 {
+    let range=dg_range(&d.text,start,end,field)
+    if range.status!=0 || range.start==range.end {return 22}
+    if !dg_escape_valid(&d.text,range.start,range.end) {return 22}
+    field=field+1
+   }
+   if dg_range(&d.text,start,end,9).status==0 {return 22}
+   let lo=dg_range(&d.text,start,end,3)
+   let hi=dg_range(&d.text,start,end,4)
+   let begin=vcf_parse_position(&d.text,lo.start,lo.end)
+   let finish=vcf_parse_position(&d.text,hi.start,hi.end)
+   if begin.status!=0 {return begin.status}
+   if finish.status!=0 {return finish.status}
+   if begin.value<1 || finish.value<begin.value {return 22}
+   let score=dg_range(&d.text,start,end,5)
+   if !dg_score_valid(&d.text,score.start,score.end) {return 22}
+   let strand=dg_range(&d.text,start,end,6)
+   let s=dg_byte(&d.text,strand.start)
+   if strand.end-strand.start!=1 || (s!=43 && s!=45 && s!=46 && s!=63) {return 22}
+   let phase=dg_range(&d.text,start,end,7)
+   let p=dg_byte(&d.text,phase.start)
+   if phase.end-phase.start!=1 || (p!=46 && (p<48 || p>50)) {return 22}
+   let kind=dg_range(&d.text,start,end,2)
+   if dg_equal(&d.text,kind.start,kind.end,"CDS") && p==46 {return 22}
+   let attributes=dg_range(&d.text,start,end,8)
+   if !dg_attributes_valid(&d.text,attributes.start,attributes.end) {return 22}
+   let words=integer_buffer_len(&d.rows)
+   let code=integer_buffer_resize(&!d.rows,words+5)
+   if code!=0 {return dg_code(code)}
+   dg_store(d,words,start);dg_store(d,words+1,end);dg_store(d,words+2,begin.value);dg_store(d,words+3,finish.value);dg_store(d,words+4,if p==46 {0-1} else {p-48})
+  }
+  i=next
+ }
+ if first {return 22}
+ return 0
+}
+fn dg_status_set(d:&!DynamicGff,code:i64) with Mut {d.status=code}
+pub fn dynamic_gff_parse(input:&ByteBuffer,max_bytes:i64)->DynamicGff with Alloc,Mut,Div,Panic {
+ let n=byte_buffer_len(input)
+ var code:i64=0
+ var remaining:i64=0
+ if max_bytes<0 || max_bytes>9223372036854771704 {code=22}
+ else if n>max_bytes {code=105}
+ else {remaining=max_bytes-n}
+ var d=DynamicGff {text:byte_buffer_new(n),rows:integer_buffer_new(0,remaining),status:code,fasta_offset:0-1}
+ let result=dg_fill(&!d,input)
+ dg_status_set(&!d,result)
+ return d
+}
+pub fn dynamic_gff_status(d:&DynamicGff)->i64 {d.status}
+pub fn dynamic_gff_len(d:&DynamicGff)->i64 with Div {integer_buffer_len(&d.rows)/5}
+pub fn dynamic_gff_fasta_offset(d:&DynamicGff)->i64 {d.fasta_offset}
+pub fn dynamic_gff_coordinates(d:&DynamicGff,id:i64)->GffCoordinates with Div,Panic {
+ if d.status!=0 {return GffCoordinates {start:0,end:0,status:d.status}}
+ if id<0 || id>=dynamic_gff_len(d) {return GffCoordinates {start:0,end:0,status:22}}
+ return GffCoordinates {start:integer_buffer_at(&d.rows,id*5+2),end:integer_buffer_at(&d.rows,id*5+3),status:0}
+}
+pub fn dynamic_gff_field(d:&DynamicGff,id:i64,column:i64,out:&!ByteBuffer)->i64 with Alloc,Mut,Div,Panic {
+ if d.status!=0 {return d.status}
+ if id<0 || id>=dynamic_gff_len(d) || column<0 || column>=9 {return 22}
+ let range=dg_range(&d.text,integer_buffer_at(&d.rows,id*5),integer_buffer_at(&d.rows,id*5+1),column)
+ var i=range.start
+ while i<range.end {let code=byte_buffer_push(out,dg_byte(&d.text,i));if code!=0 {return dg_code(code)};i=i+1}
+ return 0
+}
+pub fn dynamic_gff_close(d:DynamicGff) with Alloc {let DynamicGff {text,rows,status,fasta_offset}=d;byte_buffer_close(text);integer_buffer_close(rows)}

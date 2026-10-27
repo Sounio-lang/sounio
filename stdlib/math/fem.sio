@@ -1,3 +1,5 @@
+use math::pure::{sqrt,is_finite}
+use linalg::least_squares_scale::{LeastSquaresNumber,least_squares_scaled_product_into}
 // stdlib/math/fem.sio — Finite element method
 //
 // Pure Sounio implementations:
@@ -24,67 +26,81 @@ fn fe_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
 fn fe_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
 
 fn fe_sqrt(x: f64) -> f64 with Mut, Div, Panic {
-    if x <= 0.0 { return 0.0 }
-    var y = x
-    var i = 0
-    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
-    y
+    assert(is_finite(x) && x>=0.0)
+    sqrt(x)
 }
 
 // =============================================================================
 // Data structures
 // =============================================================================
 
-struct FEMesh1D {
-    nodes: [f64; 256],
-    n_nodes: i32,
-    elements: [i32; 512],
-    n_elem: i32,
-    nodes_per_elem: i32
+pub struct FEMesh1D {
+    pub nodes: [f64; 256],
+    pub n_nodes: i32,
+    pub elements: [i32; 512],
+    pub n_elem: i32,
+    pub nodes_per_elem: i32
 }
 
-struct FEMesh2D {
-    nodes_x: [f64; 256],
-    nodes_y: [f64; 256],
-    n_nodes: i32,
-    elements: [i32; 1536],
-    n_elem: i32,
-    nodes_per_elem: i32
+pub struct FEMesh2D {
+    pub nodes_x: [f64; 256],
+    pub nodes_y: [f64; 256],
+    pub n_nodes: i32,
+    pub elements: [i32; 1536],
+    pub n_elem: i32,
+    pub nodes_per_elem: i32
 }
 
-struct FESystem {
-    K: [f64; 4096],
-    M: [f64; 4096],
-    rhs: [f64; 256],
-    solution: [f64; 256],
-    n_dof: i32
+pub struct FESystem {
+    pub K: [f64; 4096],
+    pub M: [f64; 4096],
+    pub rhs: [f64; 256],
+    pub solution: [f64; 256],
+    pub n_dof: i32
 }
 
-struct FEResult {
-    u: [f64; 256],
-    residual: f64,
-    iterations: i32,
-    converged: bool
+pub struct FEResult {
+    pub u: [f64; 256],
+    pub residual: f64,
+    pub iterations: i32,
+    pub converged: bool
 }
 
-struct StressResult {
-    sxx: f64,
-    syy: f64,
-    sxy: f64,
-    von_mises: f64
+pub struct StressResult {
+    pub sxx: f64,
+    pub syy: f64,
+    pub sxy: f64,
+    pub von_mises: f64
 }
 
 // =============================================================================
 // 1D Element Routines
 // =============================================================================
 
+fn fe_mesh1_check(mesh:&FEMesh1D) with Mut,Div,Panic {
+ assert(mesh.n_nodes>=2 && mesh.n_nodes<=256 && mesh.n_elem>=1 && mesh.n_elem<=256 && mesh.nodes_per_elem==2)
+ var i:i32=0
+ while i<mesh.n_nodes {assert(is_finite(mesh.nodes[i]));i=i+1}
+ i=0
+ while i<mesh.n_elem {let a=mesh.elements[2*i];let b=mesh.elements[2*i+1];assert(a>=0 && a<mesh.n_nodes && b>=0 && b<mesh.n_nodes && a!=b);assert(mesh.nodes[a]!=mesh.nodes[b]);i=i+1}
+}
+fn fe_mesh2_check(mesh:&FEMesh2D) with Mut,Div,Panic {
+ assert(mesh.n_nodes>=3 && mesh.n_nodes<=256 && mesh.n_elem>=1 && mesh.n_elem<=512 && mesh.nodes_per_elem==3)
+ var i:i32=0
+ while i<mesh.n_nodes {assert(is_finite(mesh.nodes_x[i]) && is_finite(mesh.nodes_y[i]));i=i+1}
+ i=0
+ while i<mesh.n_elem {let a=mesh.elements[3*i];let b=mesh.elements[3*i+1];let c=mesh.elements[3*i+2];assert(a>=0 && a<mesh.n_nodes && b>=0 && b<mesh.n_nodes && c>=0 && c<mesh.n_nodes && a!=b && a!=c && b!=c);i=i+1}
+}
 // 2x2 element stiffness for a 1D bar element.
 // ke = (EA / L) * [[1, -1], [-1, 1]]
 // where L = |x2 - x1|.
 // Stored row-major: ke[0]=K11, ke[1]=K12, ke[2]=K21, ke[3]=K22.
-fn fem_1d_stiffness(x1: f64, x2: f64, EA: f64, ke: &![f64; 4]) with Panic, Mut, Div {
+pub fn fem_1d_stiffness(x1: f64, x2: f64, EA: f64, ke: &![f64; 4]) with Panic, Mut, Div {
+    assert(is_finite(x1) && is_finite(x2) && is_finite(EA) && EA>0.0 && is_finite(x2-x1) && x1!=x2)
+
     let L = fe_abs(x2 - x1)
     let k = EA / L
+    assert(is_finite(k) && k>0.0)
     ke[0] = k
     ke[1] = 0.0 - k
     ke[2] = 0.0 - k
@@ -93,9 +109,12 @@ fn fem_1d_stiffness(x1: f64, x2: f64, EA: f64, ke: &![f64; 4]) with Panic, Mut, 
 
 // 2x2 consistent mass matrix for a 1D bar element.
 // me = (rho_A * L / 6) * [[2, 1], [1, 2]]
-fn fem_1d_mass(x1: f64, x2: f64, rho_A: f64, me: &![f64; 4]) with Panic, Mut, Div {
+pub fn fem_1d_mass(x1: f64, x2: f64, rho_A: f64, me: &![f64; 4]) with Panic, Mut, Div {
+    assert(is_finite(x1) && is_finite(x2) && is_finite(rho_A) && rho_A>=0.0 && is_finite(x2-x1) && x1!=x2)
+
     let L = fe_abs(x2 - x1)
     let c = rho_A * L / 6.0
+    assert(is_finite(c))
     me[0] = 2.0 * c
     me[1] = c
     me[2] = c
@@ -105,8 +124,11 @@ fn fem_1d_mass(x1: f64, x2: f64, rho_A: f64, me: &![f64; 4]) with Panic, Mut, Di
 // Element load vector for uniformly distributed load q on a 1D element.
 // fe = (q * L / 2) * [1, 1]
 fn fem_1d_load(x1: f64, x2: f64, q: f64, fe: &![f64; 2]) with Panic, Mut, Div {
+    assert(is_finite(x1) && is_finite(x2) && is_finite(q) && is_finite(x2-x1) && x1!=x2)
+
     let L = fe_abs(x2 - x1)
     let c = q * L / 2.0
+    assert(is_finite(c))
     fe[0] = c
     fe[1] = c
 }
@@ -118,16 +140,19 @@ fn fem_1d_load(x1: f64, x2: f64, q: f64, fe: &![f64; 2]) with Panic, Mut, Div {
 // Triangle area via determinant formula.
 // A = 0.5 * |det([[1, x1, y1], [1, x2, y2], [1, x3, y3]])|
 // = 0.5 * |(x1(y2 - y3) + x2(y3 - y1) + x3(y1 - y2))|
-fn fem_tri_area(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) -> f64 with Mut, Div {
+pub fn fem_tri_area(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) -> f64 with Mut, Div {
     let det = x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)
     0.5 * fe_abs(det)
 }
 
 // Barycentric (area) coordinates N1, N2, N3 at point (x, y).
 // N_i = A_i / A where A_i is the sub-triangle area opposite node i.
-fn fem_tri_shape(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64,
+pub fn fem_tri_shape(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64,
                  x: f64, y: f64, N: &![f64; 3]) with Panic, Mut, Div {
+    assert(is_finite(x1) && is_finite(y1) && is_finite(x2) && is_finite(y2) && is_finite(x3) && is_finite(y3) && is_finite(x) && is_finite(y))
+
     let A2 = x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)
+    assert(is_finite(A2) && A2!=0.0)
     // N1 = sub-area opposite node 1, formed by (x,y), (x2,y2), (x3,y3)
     N[0] = (x * (y2 - y3) + x2 * (y3 - y) + x3 * (y - y2)) / A2
     // N2 = sub-area opposite node 2, formed by (x1,y1), (x,y), (x3,y3)
@@ -150,7 +175,10 @@ fn fem_tri_shape(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64,
 // Stored row-major in B[0..17] (3 rows x 6 cols).
 fn fem_tri_grad(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64,
                 B: &![f64; 18]) with Panic, Mut, Div {
+    assert(is_finite(x1) && is_finite(y1) && is_finite(x2) && is_finite(y2) && is_finite(x3) && is_finite(y3))
+
     let A2 = x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)
+    assert(is_finite(A2) && A2!=0.0)
     let inv2A = 1.0 / A2
 
     let b1 = y2 - y3
@@ -191,6 +219,8 @@ fn fem_tri_grad(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64,
 // D is 3x3 (row-major in D[0..8]), ke is 6x6 (row-major in ke[0..35]).
 fn fem_tri_stiffness(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64,
                      D: &[f64; 9], thickness: f64, ke: &![f64; 36]) with Panic, Mut, Div {
+ assert(is_finite(thickness) && thickness>0.0);var material:i32=0;while material<9 {assert(is_finite(D[material]));material=material+1}
+
     let A = fem_tri_area(x1, y1, x2, y2, x3, y3)
 
     // Compute B matrix (3x6)
@@ -283,7 +313,9 @@ fn fem_tri_mass(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64,
 // D = E / (1 - nu^2) * [[1, nu, 0],
 //                        [nu, 1, 0],
 //                        [0, 0, (1-nu)/2]]
-fn fem_plane_stress(E: f64, nu: f64, D: &![f64; 9]) with Panic, Mut, Div {
+pub fn fem_plane_stress(E: f64, nu: f64, D: &![f64; 9]) with Panic, Mut, Div {
+    assert(is_finite(E) && E>0.0 && is_finite(nu) && nu> -1.0 && nu<0.5)
+
     let c = E / (1.0 - nu * nu)
     D[0] = c
     D[1] = c * nu
@@ -301,6 +333,8 @@ fn fem_plane_stress(E: f64, nu: f64, D: &![f64; 9]) with Panic, Mut, Div {
 //                                   [nu,   1-nu, 0          ],
 //                                   [0,    0,    (1-2*nu)/2 ]]
 fn fem_plane_strain(E: f64, nu: f64, D: &![f64; 9]) with Panic, Mut, Div {
+    assert(is_finite(E) && E>0.0 && is_finite(nu) && nu> -1.0 && nu<0.5)
+
     let c = E / ((1.0 + nu) * (1.0 - 2.0 * nu))
     D[0] = c * (1.0 - nu)
     D[1] = c * nu
@@ -320,7 +354,11 @@ fn fem_plane_strain(E: f64, nu: f64, D: &![f64; 9]) with Panic, Mut, Div {
 // Assemble global stiffness matrix from all 1D bar elements.
 // mesh.elements stores [n1_0, n2_0, n1_1, n2_1, ...] (2 nodes per element).
 // Global DOF i corresponds to node i (1 DOF per node for 1D bar).
-fn fem_assemble_stiffness_1d(mesh: &FEMesh1D, EA: f64, K: &![f64; 4096]) with Panic, Mut, Div {
+pub fn fem_assemble_stiffness_1d(mesh: &FEMesh1D, EA: f64, K: &![f64; 4096]) with Panic, Mut, Div {
+ fe_mesh1_check(mesh)
+
+    assert(mesh.n_nodes>=2 && mesh.n_nodes<=64 && mesh.n_elem>=1 && mesh.n_elem<=256 && mesh.nodes_per_elem==2 && is_finite(EA) && EA>0.0)
+
     let n = mesh.n_nodes
     // Zero out K
     var idx = 0
@@ -350,6 +388,10 @@ fn fem_assemble_stiffness_1d(mesh: &FEMesh1D, EA: f64, K: &![f64; 4096]) with Pa
 
 // Assemble global mass matrix from all 1D elements.
 fn fem_assemble_mass_1d(mesh: &FEMesh1D, rho_A: f64, M: &![f64; 4096]) with Panic, Mut, Div {
+ fe_mesh1_check(mesh)
+
+    assert(mesh.n_nodes>=2 && mesh.n_nodes<=64 && mesh.n_elem>=1 && mesh.n_elem<=256 && mesh.nodes_per_elem==2 && is_finite(rho_A) && rho_A>=0.0)
+
     let n = mesh.n_nodes
     var idx = 0
     while idx < n * n { M[idx] = 0.0; idx = idx + 1 }
@@ -374,7 +416,11 @@ fn fem_assemble_mass_1d(mesh: &FEMesh1D, rho_A: f64, M: &![f64; 4096]) with Pani
 }
 
 // Assemble global load vector from all 1D elements under uniform load q.
-fn fem_assemble_load_1d(mesh: &FEMesh1D, q: f64, F: &![f64; 256]) with Panic, Mut, Div {
+pub fn fem_assemble_load_1d(mesh: &FEMesh1D, q: f64, F: &![f64; 256]) with Panic, Mut, Div {
+ fe_mesh1_check(mesh)
+
+    assert(mesh.n_nodes>=2 && mesh.n_nodes<=256 && mesh.n_elem>=1 && mesh.n_elem<=256 && mesh.nodes_per_elem==2 && is_finite(q))
+
     let n = mesh.n_nodes
     var idx = 0
     while idx < n { F[idx] = 0.0; idx = idx + 1 }
@@ -405,6 +451,10 @@ fn fem_assemble_load_1d(mesh: &FEMesh1D, q: f64, F: &![f64; 256]) with Panic, Mu
 // mesh.elements stores [n1_0, n2_0, n3_0, n1_1, n2_1, n3_1, ...].
 fn fem_assemble_stiffness_2d(mesh: &FEMesh2D, D: &[f64; 9], thickness: f64,
                              K: &![f64; 4096]) with Panic, Mut, Div {
+ fe_mesh2_check(mesh)
+
+    assert(mesh.n_nodes>=3 && mesh.n_nodes<=32 && mesh.n_elem>=1 && mesh.n_elem<=512 && mesh.nodes_per_elem==3 && is_finite(thickness) && thickness>0.0)
+
     let n_dof = 2 * mesh.n_nodes
     // Zero out K
     var idx = 0
@@ -455,6 +505,10 @@ fn fem_assemble_stiffness_2d(mesh: &FEMesh2D, D: &[f64; 9], thickness: f64,
 // Assemble global mass matrix from all 2D CST triangle elements.
 fn fem_assemble_mass_2d(mesh: &FEMesh2D, rho: f64, thickness: f64,
                         M: &![f64; 4096]) with Panic, Mut, Div {
+ fe_mesh2_check(mesh)
+
+    assert(mesh.n_nodes>=3 && mesh.n_nodes<=32 && mesh.n_elem>=1 && mesh.n_elem<=512 && mesh.nodes_per_elem==3 && is_finite(thickness) && thickness>0.0 && is_finite(rho) && rho>=0.0)
+
     let n_dof = 2 * mesh.n_nodes
     var idx = 0
     while idx < n_dof * n_dof { M[idx] = 0.0; idx = idx + 1 }
@@ -507,8 +561,10 @@ fn fem_assemble_mass_2d(mesh: &FEMesh2D, rho: f64, thickness: f64,
 // Sets K[dof, dof] += PENALTY and F[dof] += PENALTY * value.
 // The penalty is chosen large enough (1e20) to enforce the constraint
 // without modifying the matrix structure (no row/column zeroing needed).
-fn fem_apply_dirichlet_penalty(K: &![f64; 4096], F: &![f64; 256],
+pub fn fem_apply_dirichlet_penalty(K: &![f64; 4096], F: &![f64; 256],
                                n_dof: i32, dof: i32, value: f64) with Panic, Div, Mut {
+    assert(n_dof>=1 && n_dof<=64 && dof>=0 && dof<n_dof && is_finite(value))
+
     let penalty = 1.0e20
     K[dof * n_dof + dof] = K[dof * n_dof + dof] + penalty
     F[dof] = F[dof] + penalty * value
@@ -522,100 +578,52 @@ fn fem_apply_dirichlet_penalty(K: &![f64; 4096], F: &![f64; 256],
 // K is n_dof x n_dof (row-major), F is the RHS vector.
 // Solution is stored in u[0..n_dof-1].
 // Internally copies K and F to avoid modifying the originals.
-fn fem_solve_direct(K: &[f64; 4096], F: &[f64; 256], n_dof: i32,
+pub fn fem_solve_direct(K: &[f64; 4096], F: &[f64; 256], n_dof: i32,
                     u: &![f64; 256]) with Mut, Div, Panic {
-    // Copy K into working matrix
-    var A: [f64; 4096] = [0.0; 4096]
-    var b: [f64; 256] = [0.0; 256]
-
-    var idx = 0
-    while idx < n_dof * n_dof { A[idx] = K[idx]; idx = idx + 1 }
-    idx = 0
-    while idx < n_dof { b[idx] = F[idx]; idx = idx + 1 }
-
-    // Forward elimination with partial pivoting
-    var col = 0
-    while col < n_dof {
-        // Find pivot row
-        var max_val = fe_abs(A[col * n_dof + col])
-        var max_row = col
-        var row = col + 1
-        while row < n_dof {
-            let v = fe_abs(A[row * n_dof + col])
-            if v > max_val {
-                max_val = v
-                max_row = row
-            }
-            row = row + 1
-        }
-
-        // Swap rows if necessary
-        if max_row != col {
-            var j = 0
-            while j < n_dof {
-                let temp = A[col * n_dof + j]
-                A[col * n_dof + j] = A[max_row * n_dof + j]
-                A[max_row * n_dof + j] = temp
-                j = j + 1
-            }
-            let temp_b = b[col]
-            b[col] = b[max_row]
-            b[max_row] = temp_b
-        }
-
-        // Check for singularity
-        let pivot = A[col * n_dof + col]
-        if fe_abs(pivot) < 1.0e-30 {
-            // Nearly singular: set unknown to 0
-            u[col] = 0.0
-            col = col + 1
-            // Skip this column in elimination but continue
-            var skip = col
-            while skip < n_dof {
-                A[skip * n_dof + (col - 1)] = 0.0
-                skip = skip + 1
-            }
-            // Continue to next column (already incremented)
-            // Actually, just continue normally; the zero pivot
-            // means this DOF is unconstrained.
-        }
-
-        // Eliminate below
-        row = col + 1
-        while row < n_dof {
-            let pivot_val = A[col * n_dof + col]
-            if fe_abs(pivot_val) > 1.0e-30 {
-                let factor = A[row * n_dof + col] / pivot_val
-                var j = col
-                while j < n_dof {
-                    A[row * n_dof + j] = A[row * n_dof + j] - factor * A[col * n_dof + j]
-                    j = j + 1
-                }
-                b[row] = b[row] - factor * b[col]
-            }
-            row = row + 1
-        }
-
-        col = col + 1
+    assert(n_dof>=1 && n_dof<=64)
+    var A:[f64;4096]=[0.0;4096]
+    var b:[f64;256]=[0.0;256]
+    // Row equilibration preserves small physical rows beside a large penalty.
+    // Relative pivot refusal applies to the equilibrated system, not raw units.
+    var row_index:i32=0
+    while row_index<n_dof {
+        var scale:f64=0.0;var j:i32=0
+        while j<n_dof {let entry=K[row_index*n_dof+j];assert(is_finite(entry));if fe_abs(entry)>scale {scale=fe_abs(entry)};j=j+1}
+        assert(scale>0.0 && is_finite(F[row_index]))
+        j=0
+        while j<n_dof {let index=row_index*n_dof+j;A[index]=K[index]/scale;assert(K[index]==0.0 || A[index]!=0.0);j=j+1}
+        b[row_index]=F[row_index]/scale;assert(is_finite(b[row_index]) && (F[row_index]==0.0 || b[row_index]!=0.0))
+        row_index=row_index+1
     }
-
-    // Back substitution
-    var i = n_dof - 1
-    while i >= 0 {
-        var s = b[i]
-        var j = i + 1
-        while j < n_dof {
-            s = s - A[i * n_dof + j] * u[j]
-            j = j + 1
+    var col:i32=0
+    while col<n_dof {
+        var pivot_row=col
+        var row=col+1
+        while row<n_dof {if fe_abs(A[row*n_dof+col])>fe_abs(A[pivot_row*n_dof+col]) {pivot_row=row};row=row+1}
+        assert(fe_abs(A[pivot_row*n_dof+col])>(n_dof as f64)*2.2204460492503131e-16)
+        if pivot_row!=col {
+            var j:i32=0
+            while j<n_dof {let old=A[col*n_dof+j];A[col*n_dof+j]=A[pivot_row*n_dof+j];A[pivot_row*n_dof+j]=old;j=j+1}
+            let old=b[col];b[col]=b[pivot_row];b[pivot_row]=old
         }
-        let diag = A[i * n_dof + i]
-        if fe_abs(diag) > 1.0e-30 {
-            u[i] = s / diag
-        } else {
-            u[i] = 0.0
+        row=col+1
+        while row<n_dof {
+            let multiplier=A[row*n_dof+col]/A[col*n_dof+col]
+            assert(is_finite(multiplier))
+            var j=col+1
+            while j<n_dof {A[row*n_dof+j]=A[row*n_dof+j]-multiplier*A[col*n_dof+j];assert(is_finite(A[row*n_dof+j]));j=j+1}
+            A[row*n_dof+col]=0.0;b[row]=b[row]-multiplier*b[col];assert(is_finite(b[row]));row=row+1
         }
-        i = i - 1
+        col=col+1
     }
+    var i=n_dof-1
+    while i>=0 {
+        var value=b[i];var j=i+1
+        while j<n_dof {value=value-A[i*n_dof+j]*b[j];assert(is_finite(value));j=j+1}
+        b[i]=value/A[i*n_dof+i];assert(is_finite(b[i]));i=i-1
+    }
+    i=0
+    while i<n_dof {u[i]=b[i];i=i+1}
 }
 
 // =============================================================================
@@ -639,6 +647,15 @@ fn fe_matvec(K: &[f64; 4096], x: &[f64; 256], n: i32, y: &![f64; 256]) with Pani
 }
 
 // Dot product of two vectors of length n.
+fn fe_norm256(v:&[f64;256],n:i32)->f64 with Mut,Div,Panic {
+ var scale:f64=0.0;var sum:f64=1.0;var i:i32=0
+ while i<n {
+  let x=fe_abs(v[i]);assert(is_finite(x))
+  if x>0.0 {if x>scale {let r=scale/x;sum=1.0+sum*r*r;scale=x}else{let r=x/scale;sum=sum+r*r}}
+  i=i+1
+ }
+ let value=scale*sqrt(sum);assert(is_finite(value));value
+}
 fn fe_dot(a: &[f64; 256], b: &[f64; 256], n: i32) -> f64 with Panic, Div, Mut {
     var s = 0.0
     var i = 0
@@ -653,94 +670,86 @@ fn fe_dot(a: &[f64; 256], b: &[f64; 256], n: i32) -> f64 with Panic, Div, Mut {
 // K must be symmetric positive definite. Starting guess u = 0.
 // Iterates until ||r|| / ||F|| < tol or max_iter is reached.
 // Result struct receives the solution, residual, iteration count, and convergence flag.
-fn fem_solve_cg(K: &[f64; 4096], F: &[f64; 256], n_dof: i32,
+pub fn fem_solve_cg(K: &[f64; 4096], F: &[f64; 256], n_dof: i32,
                 u: &![f64; 256], max_iter: i32, tol: f64,
                 result: &!FEResult) with Mut, Div, Panic {
-    // Initialize u = 0
-    var i = 0
-    while i < n_dof { u[i] = 0.0; i = i + 1 }
-
-    // r0 = F - K * u0 = F (since u0 = 0)
-    var r: [f64; 256] = [0.0; 256]
-    i = 0
-    while i < n_dof { r[i] = F[i]; i = i + 1 }
-
-    // p0 = r0
-    var p: [f64; 256] = [0.0; 256]
-    i = 0
-    while i < n_dof { p[i] = r[i]; i = i + 1 }
-
-    // rr_old = r^T * r
-    var rr_old = fe_dot(&r, &r, n_dof)
-
-    // ||F|| for relative convergence check
-    let F_norm = fe_sqrt(fe_dot(F, F, n_dof))
-    let abs_tol = if F_norm > 1.0e-30 { tol * F_norm } else { tol }
-
-    var Kp: [f64; 256] = [0.0; 256]
-
-    var iter = 0
-    while iter < max_iter {
-        // Check convergence: ||r|| < abs_tol
-        let r_norm = fe_sqrt(rr_old)
-        if r_norm < abs_tol {
-            // Converged
-            i = 0
-            while i < n_dof { result.u[i] = u[i]; i = i + 1 }
-            result.residual = r_norm
-            result.iterations = iter
-            result.converged = true
-            return
+    assert(n_dof>=1 && n_dof<=64 && max_iter>=0 && max_iter<=1000000 && is_finite(tol) && tol>=1.7763568394002505e-15 && tol<1.0)
+    result.converged=false;result.iterations=0;result.residual=1.0/0.0
+    var A:[f64;4096]=[0.0;4096]
+    var L:[f64;4096]=[0.0;4096]
+    var b:[f64;256]=[0.0;256]
+    var z:[f64;256]=[0.0;256]
+    var r:[f64;256]=[0.0;256]
+    var p:[f64;256]=[0.0;256]
+    var Ap:[f64;256]=[0.0;256]
+    var matrix_scale:f64=0.0;var rhs_scale:f64=0.0
+    var i:i32=0
+    while i<n_dof*n_dof {assert(is_finite(K[i]));if fe_abs(K[i])>matrix_scale {matrix_scale=fe_abs(K[i])};i=i+1}
+    i=0
+    while i<n_dof {assert(is_finite(F[i]));if fe_abs(F[i])>rhs_scale {rhs_scale=fe_abs(F[i])};i=i+1}
+    assert(matrix_scale>0.0)
+    i=0
+    while i<n_dof*n_dof {A[i]=K[i]/matrix_scale;assert(K[i]==0.0 || A[i]!=0.0);i=i+1}
+    // Refuse nonsymmetric/nonpositive computed Cholesky pivots. No averaging
+    // or positive-definite projection changes the caller's operator.
+    i=0
+    while i<n_dof {
+        var j:i32=0
+        while j<=i {
+            assert(A[i*n_dof+j]==A[j*n_dof+i])
+            var value=A[i*n_dof+j];var k:i32=0
+            while k<j {value=value-L[i*n_dof+k]*L[j*n_dof+k];assert(is_finite(value));k=k+1}
+            if i==j {assert(value>(n_dof as f64)*2.2204460492503131e-16);L[i*n_dof+i]=sqrt(value)}
+            else {L[i*n_dof+j]=value/L[j*n_dof+j];assert(is_finite(L[i*n_dof+j]))}
+            j=j+1
         }
-
-        // Kp = K * p
-        fe_matvec(K, &p, n_dof, &!Kp)
-
-        // alpha = rr_old / (p^T * K * p)
-        let pKp = fe_dot(&p, &Kp, n_dof)
-        if fe_abs(pKp) < 1.0e-30 {
-            // Breakdown: p^T K p ~ 0
-            i = 0
-            while i < n_dof { result.u[i] = u[i]; i = i + 1 }
-            result.residual = fe_sqrt(rr_old)
-            result.iterations = iter
-            result.converged = false
-            return
-        }
-        let alpha = rr_old / pKp
-
-        // u = u + alpha * p
-        // r = r - alpha * K * p
-        i = 0
-        while i < n_dof {
-            u[i] = u[i] + alpha * p[i]
-            r[i] = r[i] - alpha * Kp[i]
-            i = i + 1
-        }
-
-        // rr_new = r^T * r
-        let rr_new = fe_dot(&r, &r, n_dof)
-
-        // beta = rr_new / rr_old
-        let beta = rr_new / rr_old
-
-        // p = r + beta * p
-        i = 0
-        while i < n_dof {
-            p[i] = r[i] + beta * p[i]
-            i = i + 1
-        }
-
-        rr_old = rr_new
-        iter = iter + 1
+        i=i+1
     }
-
-    // Did not converge within max_iter
-    i = 0
-    while i < n_dof { result.u[i] = u[i]; i = i + 1 }
-    result.residual = fe_sqrt(rr_old)
-    result.iterations = max_iter
-    result.converged = false
+    if rhs_scale==0.0 {
+        i=0;while i<n_dof {u[i]=0.0;result.u[i]=0.0;i=i+1}
+        result.residual=0.0;result.converged=true;return
+    }
+    i=0
+    while i<n_dof {b[i]=F[i]/rhs_scale;assert(F[i]==0.0 || b[i]!=0.0);r[i]=b[i];p[i]=b[i];i=i+1}
+    let bnorm=sqrt(fe_dot(&b,&b,n_dof))
+    let requested=tol*bnorm
+    var rr=fe_dot(&r,&r,n_dof)
+    var iter:i32=0
+    while iter<max_iter && sqrt(rr)>requested {
+        fe_matvec(&A,&p,n_dof,&!Ap)
+        let curvature=fe_dot(&p,&Ap,n_dof)
+        if !is_finite(curvature) || curvature<=0.0 {return}
+        let alpha=rr/curvature
+        if !is_finite(alpha) {return}
+        i=0
+        while i<n_dof {z[i]=z[i]+alpha*p[i];r[i]=r[i]-alpha*Ap[i];if !is_finite(z[i]) || !is_finite(r[i]) {return};i=i+1}
+        let next_rr=fe_dot(&r,&r,n_dof)
+        if !is_finite(next_rr) || next_rr<0.0 {return}
+        let beta=next_rr/rr
+        if !is_finite(beta) {return}
+        i=0
+        while i<n_dof {p[i]=r[i]+beta*p[i];if !is_finite(p[i]) {return};i=i+1}
+        rr=next_rr;iter=iter+1;result.iterations=iter
+    }
+    // Confirm the residual against the original normalized operator, not just
+    // the recurrence. Restore physical units only after complete validation.
+    fe_matvec(&A,&z,n_dof,&!Ap)
+    i=0
+    while i<n_dof {r[i]=b[i]-Ap[i];if !is_finite(r[i]) {return};i=i+1}
+    let measured=fe_norm256(&r,n_dof)
+    var slot=LeastSquaresNumber{status:4,value:0.0}
+    if least_squares_scaled_product_into(measured,rhs_scale,1.0,1.0,1.0,1.0,&!slot)!=0 {return}
+    if measured!=0.0 && slot.value==0.0 {return}
+    result.residual=slot.value
+    i=0
+    while i<n_dof {
+        if least_squares_scaled_product_into(z[i],rhs_scale,1.0,matrix_scale,1.0,1.0,&!slot)!=0 {return}
+        if z[i]!=0.0 && slot.value==0.0 {return}
+        b[i]=slot.value;i=i+1
+    }
+    i=0
+    while i<n_dof {u[i]=b[i];result.u[i]=b[i];i=i+1}
+    result.converged=measured<=requested
 }
 
 // =============================================================================
@@ -752,6 +761,8 @@ fn fem_solve_cg(K: &[f64; 4096], F: &[f64; 256], n_dof: i32,
 // strain = [exx, eyy, 2*exy] stored in strain[0..2].
 fn fem_strain_at_centroid(mesh: &FEMesh2D, u: &[f64; 256], elem_idx: i32,
                           strain: &![f64; 3]) with Panic, Mut, Div {
+ fe_mesh2_check(mesh);assert(mesh.n_nodes<=128 && elem_idx>=0 && elem_idx<mesh.n_elem)
+
     let n1 = mesh.elements[3 * elem_idx]
     let n2 = mesh.elements[3 * elem_idx + 1]
     let n3 = mesh.elements[3 * elem_idx + 2]
@@ -794,7 +805,7 @@ fn fem_strain_at_centroid(mesh: &FEMesh2D, u: &[f64; 256], elem_idx: i32,
 // sigma = D * epsilon.
 // Also computes the von Mises equivalent stress:
 //   sigma_vm = sqrt(sxx^2 - sxx*syy + syy^2 + 3*sxy^2)
-fn fem_stress_at_centroid(mesh: &FEMesh2D, u: &[f64; 256], D: &[f64; 9],
+pub fn fem_stress_at_centroid(mesh: &FEMesh2D, u: &[f64; 256], D: &[f64; 9],
                           elem_idx: i32, result: &!StressResult) with Panic, Mut, Div {
     // Compute strain first
     var strain: [f64; 3] = [0.0; 3]
@@ -821,8 +832,10 @@ fn fem_stress_at_centroid(mesh: &FEMesh2D, u: &[f64; 256], D: &[f64; 9],
 
 // Generate a uniform 1D mesh on [x_start, x_end] with n_elem elements.
 // Creates n_elem + 1 equally spaced nodes and n_elem 2-node elements.
-fn fem_mesh_1d_uniform(x_start: f64, x_end: f64, n_elem: i32,
+pub fn fem_mesh_1d_uniform(x_start: f64, x_end: f64, n_elem: i32,
                        mesh: &!FEMesh1D) with Panic, Mut, Div {
+    assert(n_elem>=1 && n_elem<=255 && is_finite(x_start) && is_finite(x_end) && x_end>x_start && is_finite(x_end-x_start))
+
     let n_nodes = n_elem + 1
     mesh.n_nodes = n_nodes
     mesh.n_elem = n_elem
@@ -858,8 +871,10 @@ fn fem_mesh_1d_uniform(x_start: f64, x_end: f64, n_elem: i32,
 //
 // Triangle 1 (lower-left):  BL, BR, TL
 // Triangle 2 (upper-right): BR, TR, TL
-fn fem_mesh_2d_rect(x0: f64, y0: f64, x1: f64, y1: f64, nx: i32, ny: i32,
+pub fn fem_mesh_2d_rect(x0: f64, y0: f64, x1: f64, y1: f64, nx: i32, ny: i32,
                     mesh: &!FEMesh2D) with Panic, Mut, Div {
+    assert(nx>=1 && nx<=255 && ny>=1 && ny<=255 && (nx+1)*(ny+1)<=256 && 2*nx*ny<=512 && is_finite(x0) && is_finite(x1) && is_finite(y0) && is_finite(y1) && x1>x0 && y1>y0)
+
     let n_nodes = (nx + 1) * (ny + 1)
     let n_elem = 2 * nx * ny
     mesh.n_nodes = n_nodes
@@ -917,6 +932,8 @@ fn fem_mesh_2d_rect(x0: f64, y0: f64, x1: f64, y1: f64, nx: i32, ny: i32,
 
 // Initialize an FESystem, zeroing out all arrays.
 fn fem_system_init(n_dof: i32, sys: &!FESystem) with Panic, Div, Mut {
+    assert(n_dof>=1 && n_dof<=64)
+
     sys.n_dof = n_dof
 
     var i = 0

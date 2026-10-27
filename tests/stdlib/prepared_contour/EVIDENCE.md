@@ -1,0 +1,149 @@
+# SIO-175 native prepared-contour evidence
+
+This package accompanies `devpass/SIO-175-prepared-contours`, based on remote main
+`c21b0e139830ca4949f80cba62887a8922a972d7`. It is a reviewable implementation and
+focused native acceptance record; it does not imply merge, full-repository CI,
+scientific-model calibration, or a universal contour performance claim.
+
+## Final acceptance
+
+Slurm **17210**, `SIO175-full06`, completed `0:0` with gate `STATUS=0`.
+The explicit raw compiler SHA is
+`a292cc263f3734b1ad6f17a2e6179b8a7874ef3e76d8f5fdfea6859290baf5d3`,
+provided from current-main CI run 40144792765, artifact 12580970584,
+Witness job 121024346990. The portable gate records the actual raw compiler and
+canonical launcher hashes separately. Earlier retained-d74 evidence remains in
+scratch and is not substituted for this current-main compiler result.
+
+- Four production libraries checked successfully.
+- Three fixtures checked, compiled, and ran successfully: legacy contour,
+  legacy exact predicate, and the new prepared contour.
+- Independent C++23 concordance passed for 96 `cpp_int` exact dyadic predicates,
+  legacy contour topology/pixels, and the new 15 segments / 732 nonzero native
+  Canvas pixels. Quarter-grid and flat-edge examples have independent explicit
+  expected geometry; the oracle does not call Sounio geometry code.
+- The new fixture covers ambiguous positive/negative/zero saddles, T junction,
+  three-zero L, flat/masked/shared-edge ownership, degenerate endpoint counting,
+  strided input, cropped endpoints and fully outside provenance, repeated prepare,
+  exact capacity refusal, late invalid data preserving the capture, closed input
+  owners and mutated source spec/levels before export, and an invalid SVG ID
+  emitting zero bytes.
+- Historical coordinate, captured-level, and missing-completion controls returned
+  exit 1, but their log redirection truncated their input copies. Those controls
+  were vacuous and are retracted as discrimination evidence. Positive native and
+  C++ concordance remain valid. The repaired follow-up separates input/log paths
+  and requires each specific diagnostic. Fresh acceptance is recorded below.
+- The additional c21 seed import-closure compilation passed using the supplied
+`SIO166/source14/bin/souc-lean-single-x86_64`. Seed SHA:
+  `8956946def36004d11ec4eca0d20c75c1e7d3d0b17ee0f0a1fdda9cd6ec0e4cc`.
+- The full functional input hash check passed unchanged.
+
+The fixture's complete native nonzero pixel stream is decoded to a PPM after
+concordance. `preview/actual-canvas.png` is a viewing-only `sips` conversion of
+those Canvas pixels. It was viewed at its complete 920×200 bounds: cross,
+separated branches, T/L shapes, shared-edge verticals, and clipped diagonal are
+visible. This is a renderer regression diagram, not a publication-layout example.
+`preview/actual-native.svg` is the actual emitted SVG section of the fixture;
+its diagnostic text nodes are retained. No SVG redraw generated the Canvas image.
+
+## Repaired mutation-control qualification
+
+Slurm **17295**, `SIO175-controls-v3`, completed with focused `STATUS=0` and
+specific non-vacuous controls. Each input is a nonempty changed copy, its path is
+distinct from stdout/stderr logs, and the preserved input SHA is captured after
+verification. Geometry is rejected with `exact saddle/flat-edge/T/L/ownership geometry`,
+level provenance with `captured contour level changed after input reuse`, and
+completion with `completion`. Each C++ exit is 1; each exact diagnostic check is 0.
+All four library checks, three native fixtures, positive C++ concordances, current
+seed compilation and input hashes also pass. The portable gate now explicitly
+sets SOUC_BIN to MADAROS_RAW_BIN before the resolver, making the actual executable
+and compiler hash identical even in an inherited environment.
+
+No production kernel, arithmetic, capacity policy, geometric expectation or
+benchmark dataset changed. The four production-source hashes compare identical
+to the original receipt. The original `receipts.tar.gz` (SHA
+`33a345c6938d7e6d02f2c5566833c3d14722db50964ac01091cd7a4ff569074a`)
+remains byte-identical and historical; its old three controls are retracted, not
+retroactively relabeled. New control acceptance is in the separate
+`controls-receipts-v2.tar.gz`, **143596 bytes**, SHA
+`d9e51e70783b6e9255997b43ec65df9d3dddae77c9e2a74eb413bfaa9306627f`.
+Its manifest passed before packing and after extraction; it includes the actual
+three mutated inputs, exact rejection receipts and source-unchanged comparison.
+Original worker path: `/scratch/sounio-stdlib-inference-scale-20261024/SIO175-controls-custody-v2`.
+
+## Before/after observations
+
+Slurm **17211**, `SIO175-bench04`, completed `0:0` with benchmark `STATUS=0`.
+For each grid the actual order was **AB / BA / AB**, where A is original c21
+source and B is the prepared implementation. Both used the same compiler above,
+the same sampled linear field and quarter-grid isovalue, the same 257² Canvas,
+and one Canvas plus one SVG export. Process measurements include setup and both
+exports, not an isolated kernel. No statistics were calculated on a reduced field.
+
+| Cells per side | Original elapsed seconds, pairs 1/2/3 | Prepared elapsed seconds, pairs 1/2/3 | Original peak KiB, pairs 1/2/3 | Prepared peak KiB, pairs 1/2/3 |
+| --- | --- | --- | --- | --- |
+| 256 | 0.33 / 0.36 / 0.38 | 0.12 / 0.12 / 0.12 | 328192 / 328192 / 328192 | 2048 / 2048 / 2048 |
+| 1024 | unavailable: exit 182 in all three | 1.81 / 1.80 / 1.81 | 744448 / 744960 / 744960 at failure | 17408 / 17408 / 17408 |
+
+Each original 1024² process reports `madaros: handles full (allocation of 64
+bytes)` at the existing 4,194,304 managed-object limit. Failed process times
+(0.88 / 0.87 / 0.86 seconds) are preserved as failure receipts, **not speed comparisons**.
+No arena limit was raised. The original 256² runs completed and their actual SVG
+geometry passed the same independent checker as the new path.
+
+The prepared runs retain 511 segments for 256² and 2047 for 1024²; their owner
+capacities retain 65544 and 262152 payload bytes respectively. Preparation reports
+131072 and 2097152 actual cell evaluations (count pass plus commit pass), with
+zero saddle-predicate evaluations for this linear field. Both exports report zero
+cell and predicate evaluations. The 96-case separate predicate gate supplies exact
+saddle coverage; this benchmark does not measure a saddle-dense grid. Independent
+C++ exact rational quarter-grid projection/provenance matched every successful
+benchmark SVG. Large-grid Canvas checksums are preserved as observations; the
+independent full Canvas pixel oracle is the smaller functional fixture above.
+
+An intermediate prepared implementation still allocated per-corner NumericValue
+records and recorded 214024 / 214024 / 213504 KiB on 1024². The final scalar-corner
+closure checks numeric_matrix_fits before every possible matrix access path;
+malformed storage returns status 2 before the work check, without painting or
+changing the prior capture. The intermediate receipts are retained in the
+archive history. These are separate source-version observations, not paired
+algorithm timing or a general memory bound.
+
+## Replay and custody
+
+Portable focused gate, executed on Slurm uid 1000 with a 524288-KiB stack:
+
+```sh
+MADAROS_RAW_BIN=/path/to/pinned/madaros.elf \
+SOUNIO_SEED_COMPILER=/path/to/seed \
+bash scripts/stdlib/prepared_contour_gate.sh /fresh/output/path
+```
+
+`contour_bench.sio` and `contour_bench_legacy.sio` hold the same raw field setup.
+Set only the literal side to 256 or 1024 as in the archived `replay/*.sio` files.
+The legacy source imports only the original APIs and is compiled against base c21.
+`prepared_contour_bench_reference.cpp SIDE NATIVE_STDOUT` validates the actual
+benchmark geometry independently. The archived worker prepare/dispatch scripts
+record the observed source and compiler locations; replay must select available
+worker paths, not assume those retained paths exist elsewhere.
+
+`receipts.tar.gz` is **396164 bytes**, SHA-256
+`33a345c6938d7e6d02f2c5566833c3d14722db50964ac01091cd7a4ff569074a`.
+It contains compact functional/benchmark results, compiler/input hashes,
+resources, native stdout, C++ outcomes, controls, source hashes, previews and
+scheduler receipts. No ELF, cache or full source archive is included. Its internal
+`MANIFEST.sha256` was verified before packing and after fresh extraction:
+
+```sh
+mkdir /fresh/receipt-directory
+tar -xzf receipts.tar.gz -C /fresh/receipt-directory
+(cd /fresh/receipt-directory && sha256sum -c MANIFEST.sha256)
+```
+
+Original worker paths remain immutable:
+`/scratch/sounio-stdlib-inference-scale-20261024/SIO175-full06`,
+`SIO175-bench04`, and `SIO175-custody03`. Earlier attempts are retained separately;
+check01/check02 integration argument/linear-close diagnostics are included in the
+archive history. An initial custody attempt used the host's disabled accounting
+client; the final custody captures actual worker accounting instead and preserves that
+operational error. No numerical acceptance criterion was relaxed.

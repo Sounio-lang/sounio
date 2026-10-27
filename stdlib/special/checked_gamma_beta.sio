@@ -1,8 +1,10 @@
-// Log-gamma uses the existing Lanczos coefficient implementation in special/gamma.sio.
+// Large-shape Beta prefixes use centered deviance and a fixed Stirling correction.
+// Other log-gamma calls use the existing Lanczos implementation in special/gamma.sio.
 // Small positive shapes are shifted before delegation to avoid its reflection sentinel.
 // Continued-fraction stopping and log-prefix arithmetic require independent calibration;
 // status0 certifies the stated finite iteration criterion, NOT a relative error bound.
-// Method1 gamma series,2 gamma CF,3 beta CF,4 beta opposite-tail CF,0 endpoint.
+// Method1 gamma series,2 gamma CF,3 beta CF,4 beta opposite-tail CF,
+// 5 guarded positive beta series (direct probability <=0.9),0 endpoint.
 // Endpoint scalar probabilities are available; log(0) has unavailable flag/payload0.
 // Underflowed positive scalar tails are unavailable, with independently retained log.
 // Inverse iterations count forward evaluations (each has the supplied inner budget);
@@ -15,6 +17,7 @@
 use math::pure::{is_finite,ln_checked,exp}
 use math::logarithmic::{log1p_checked}
 use special::gamma::{lgamma}
+use math::dd64::{two_sum,two_prod}
 pub struct CheckedSpecialPair {
  pub status:i64,pub lower:f64,pub upper:f64,pub log_lower:f64,pub log_upper:f64,
  pub lower_available:bool,pub upper_available:bool,
@@ -57,7 +60,8 @@ fn sp_lgamma(x:f64)->SpecialLog with Mut,Div,Panic {
  if !is_finite(value) {return SpecialLog{status:4,value:0.0,iterations:0}}
  SpecialLog{status:0,value:value,iterations:0}
 }
-// The caller evaluates the smaller tail directly. A rounded underflowed scalar
+// CF callers evaluate the smaller tail; guarded positive-series callers may
+// evaluate a probability up to0.9 before a stable complement. An underflowed scalar
 // has availability=false while its finite log remains independently available.
 fn sp_pair(logtail:f64,is_lower:bool,iterations:i64,method:i64)->CheckedSpecialPair with Mut,Div {
  if !is_finite(logtail) || logtail>0.0 {return sp_empty(4,iterations,method)}
@@ -186,38 +190,174 @@ fn sp_beta_cf(a:f64,b:f64,x:f64,budget:i64,tol:f64)->SpecialLog with Mut,Div,Pan
  }
  SpecialLog{status:3,value:0.0,iterations:budget}
 }
+
+fn sp_beta_positive_series(a:f64,b:f64,x:f64,prefix:f64,budget:i64,tol:f64)->SpecialLog with Mut,Div,Panic {
+ var term:f64=1.0
+ var sum:f64=1.0
+ var correction:f64=0.0
+ var n:i64=1
+ while n<=budget {
+  let nf=n as f64
+  let ratio=(a+b+nf-1.0)*x/(a+nf)
+  term=term*ratio
+  let adjusted=term-correction
+  let next=sum+adjusted
+  correction=(next-sum)-adjusted
+  sum=next
+  if !is_finite(term) || !is_finite(sum) || !is_finite(ratio) || sum<=0.0 {return SpecialLog{status:4,value:0.0,iterations:n}}
+  // Decreasing ratios bound the remaining positive geometric tail.
+  if ratio<1.0 && term<=sum*tol*(1.0-ratio) {
+   let la=ln_checked(a)
+   let ls=ln_checked(sum)
+   if la.status!=0 || ls.status!=0 {return SpecialLog{status:4,value:0.0,iterations:n}}
+   let value=prefix-la.value+ls.value
+   if !is_finite(value) {return SpecialLog{status:4,value:0.0,iterations:n}}
+   return SpecialLog{status:0,value:value,iterations:n}
+  }
+  n=n+1
+ }
+ SpecialLog{status:3,value:0.0,iterations:budget}
+}
+
+// Checked finite logarithm of x^a (1-x)^b / B(a,b), 0<x<1.
+// Fixed-cost Stirling/deviance path for a,b>=8; small/mixed shapes retain
+// the canonical shifted-Lanczos path and its separately calibrated limits.
+pub struct CheckedBetaLogPrefix {pub status:i64,pub value:f64}
+fn sp_log1pmx_small(u:f64)->f64 with Mut,Div,Panic {
+ var term= -0.5*u*u
+ var sum=term
+ var correction:f64=0.0
+ var n:i64=3
+ while n<=24 {
+  term=term*(-u)*((n-1) as f64)/(n as f64)
+  let adjusted=term-correction
+  let next=sum+adjusted
+  correction=(next-sum)-adjusted
+  sum=next
+  n=n+1
+ }
+ sum
+}
+fn sp_stirling_correction(x:f64)->f64 with Div,Panic {
+ let inverse=1.0/x
+ let square=inverse*inverse
+ let polynomial=1.0/12.0+square*(-1.0/360.0+square*(1.0/1260.0+square*(-1.0/1680.0+square*(1.0/1188.0+square*(-691.0/360360.0+square*(1.0/156.0+square*(-3617.0/122400.0+square*(43867.0/244188.0))))))))
+ inverse*polynomial
+}
+pub fn beta_log_prefix_checked(a:f64,b:f64,x:f64)->CheckedBetaLogPrefix with Mut,Div,Panic {
+ if !is_finite(a) || !is_finite(b) || !is_finite(x) {return CheckedBetaLogPrefix{status:2,value:0.0}}
+ if a<=0.0 || b<=0.0 || x<=0.0 || x>=1.0 {return CheckedBetaLogPrefix{status:1,value:0.0}}
+ if a>1000000.0 || b>1000000.0 {return CheckedBetaLogPrefix{status:5,value:0.0}}
+ let lx=ln_checked(x)
+ let ly=log1p_checked(-x)
+ if lx.status!=0 || ly.status!=0 {return CheckedBetaLogPrefix{status:4,value:0.0}}
+ var value:f64=0.0
+ if a>=8.0 && b>=8.0 {
+  let total=a+b
+  // Error-free residual of (a+b)*x-a; a rounded mean would move a
+  // near-mean deviance by many ULPs for fractional/imbalanced shapes.
+  let sum=two_sum(a,b)
+  let product=two_prod(sum.hi,x)
+  let subtraction=two_sum(product.hi,-a)
+  let numerator=subtraction.hi+(subtraction.lo+product.lo+sum.lo*x)
+  let u=numerator/a
+  let v= -numerator/b
+  var deviance:f64=0.0
+  if sp_abs(u)<=0.125 && sp_abs(v)<=0.125 {
+   // Analytic cancellation of the linear terms; no subtraction log1p(u)-u.
+   deviance=a*sp_log1pmx_small(u)+b*sp_log1pmx_small(v)
+  } else {
+   // Endpoint-near ratios must use the original x and 1-x logarithms:
+   // forming 1+v from a rounded mean would amplify its error.
+   let lp=log1p_checked(b/a)
+   let lq=log1p_checked(a/b)
+   if lp.status!=0 || lq.status!=0 {return CheckedBetaLogPrefix{status:4,value:0.0}}
+   deviance=a*(lx.value+lp.value)+b*(ly.value+lq.value)
+  }
+  let la=ln_checked(a)
+  let lb=ln_checked(b)
+  let ls=ln_checked(total)
+  if la.status!=0 || lb.status!=0 || ls.status!=0 {return CheckedBetaLogPrefix{status:4,value:0.0}}
+  let correction=sp_stirling_correction(a)+sp_stirling_correction(b)-sp_stirling_correction(total)
+  value=deviance+0.5*(la.value+lb.value-ls.value)-0.9189385332046727417803297-correction
+ } else {
+  let la=sp_lgamma(a)
+  let lb=sp_lgamma(b)
+  let lab=sp_lgamma(a+b)
+  if la.status!=0 || lb.status!=0 || lab.status!=0 {return CheckedBetaLogPrefix{status:4,value:0.0}}
+  value=a*lx.value+b*ly.value-(la.value+lb.value-lab.value)
+ }
+ if !is_finite(value) {return CheckedBetaLogPrefix{status:4,value:0.0}}
+ CheckedBetaLogPrefix{status:0,value:value}
+}
+
+
+pub struct CheckedGammaLogPrefix {pub status:i64,pub value:f64}
+// Finite log(x^a exp(-x)/Gamma(a)); a in(0,1e6], x>0 finite.
+// Shape>=8 uses the same centered log1pmx/Stirling kernel as Beta.
+// Completion is not a universal accuracy certificate outside calibrated inputs.
+pub fn gamma_log_prefix_checked(a:f64,x:f64)->CheckedGammaLogPrefix with Mut,Div,Panic {
+ if !is_finite(a) || !is_finite(x) {return CheckedGammaLogPrefix{status:2,value:0.0}}
+ if a<=0.0 || x<=0.0 {return CheckedGammaLogPrefix{status:1,value:0.0}}
+ if a>1000000.0 {return CheckedGammaLogPrefix{status:5,value:0.0}}
+ let lx=ln_checked(x)
+ let la=ln_checked(a)
+ if lx.status!=0 || la.status!=0 {return CheckedGammaLogPrefix{status:4,value:0.0}}
+ var value:f64=0.0
+ if a>=8.0 {
+  let u=(x-a)/a
+  let deviance=if sp_abs(u)<=0.125 {a*sp_log1pmx_small(u)}else{a*(lx.value-la.value)-x+a}
+  value=deviance+0.5*la.value-0.9189385332046727417803297-sp_stirling_correction(a)
+ } else {
+  let gamma=sp_lgamma(a)
+  if gamma.status!=0 {return CheckedGammaLogPrefix{status:4,value:0.0}}
+  value=a*lx.value-x-gamma.value
+ }
+ if !is_finite(value) {return CheckedGammaLogPrefix{status:4,value:0.0}}
+ CheckedGammaLogPrefix{status:0,value:value}
+}
+
 pub fn beta_pq_checked(a:f64,b:f64,x:f64,budget:i64,tol:f64)->CheckedSpecialPair with Mut,Div,Panic {
  if !is_finite(a) || !is_finite(b) || !is_finite(x) || !is_finite(tol) {return sp_empty(2,0,0)}
  if a<=0.0 || b<=0.0 || x<0.0 || x>1.0 || !sp_options(budget,tol) {return sp_empty(1,0,0)}
  if a>1000000.0 || b>1000000.0 {return sp_empty(5,0,0)}
  if x==0.0 {return sp_endpoint(false)}
  if x==1.0 {return sp_endpoint(true)}
- let la=sp_lgamma(a)
- let lb=sp_lgamma(b)
- let lab=sp_lgamma(a+b)
- let lx=ln_checked(x)
- let ly=log1p_checked(-x)
+ let logged_prefix=beta_log_prefix_checked(a,b,x)
  let ln_a=ln_checked(a)
  let ln_b=ln_checked(b)
- if la.status!=0 || lb.status!=0 || lab.status!=0 || lx.status!=0 || ly.status!=0 || ln_a.status!=0 || ln_b.status!=0 {return sp_empty(4,0,3)}
- let prefix=a*lx.value+b*ly.value-(la.value+lb.value-lab.value)
- if !is_finite(prefix) {return sp_empty(4,0,3)}
+ if logged_prefix.status!=0 || ln_a.status!=0 || ln_b.status!=0 {return sp_empty(4,0,3)}
+ let prefix=logged_prefix.value
+ var spent:i64=0
+ if a>=8.0 && a<=64.0 && b>=1024.0*a && x<0.125 && (a+b)*x<=a+2.0 {
+  let series=sp_beta_positive_series(a,b,x,prefix,budget,tol)
+  if series.status!=0 {return sp_empty(series.status,series.iterations,5)}
+  spent=series.iterations
+  if series.value<= -0.1053605156578263 {return sp_pair(series.value,true,spent,5)}
+ } else if b>=8.0 && b<=64.0 && a>=1024.0*b && 1.0-x<0.125 && (a+b)*(1.0-x)<=b+2.0 {
+  let series=sp_beta_positive_series(b,a,1.0-x,prefix,budget,tol)
+  if series.status!=0 {return sp_empty(series.status,series.iterations,5)}
+  spent=series.iterations
+  if series.value<= -0.1053605156578263 {return sp_pair(series.value,false,spent,5)}
+ }
+ let available_budget=budget-spent
+ if available_budget<1 {return sp_empty(3,spent,5)}
  var lower=x<(a+1.0)/(a+b+2.0)
  var first:SpecialLog=SpecialLog{status:4,value:0.0,iterations:0}
  var logshape:f64=0.0
- if lower {first=sp_beta_cf(a,b,x,budget,tol);logshape=ln_a.value}
- else {first=sp_beta_cf(b,a,1.0-x,budget,tol);logshape=ln_b.value}
- if first.status!=0 {return sp_empty(first.status,first.iterations,3)}
+ if lower {first=sp_beta_cf(a,b,x,available_budget,tol);logshape=ln_a.value}
+ else {first=sp_beta_cf(b,a,1.0-x,available_budget,tol);logshape=ln_b.value}
+ if first.status!=0 {return sp_empty(first.status,spent+first.iterations,3)}
  let direct=prefix-logshape+first.value
- if !is_finite(direct) {return sp_empty(4,first.iterations,3)}
- if direct<= -0.6931471805599453 {return sp_pair(direct,lower,first.iterations,3)}
- let remaining=budget-first.iterations
- if remaining<1 {return sp_empty(3,first.iterations,4)}
+ if !is_finite(direct) {return sp_empty(4,spent+first.iterations,3)}
+ if direct<= -0.6931471805599453 {return sp_pair(direct,lower,spent+first.iterations,3)}
+ let remaining=budget-spent-first.iterations
+ if remaining<1 {return sp_empty(3,spent+first.iterations,4)}
  var other:SpecialLog=SpecialLog{status:4,value:0.0,iterations:0}
  if lower {other=sp_beta_cf(b,a,1.0-x,remaining,tol);logshape=ln_b.value}
  else {other=sp_beta_cf(a,b,x,remaining,tol);logshape=ln_a.value}
- if other.status!=0 {return sp_empty(other.status,first.iterations+other.iterations,4)}
- sp_pair(prefix-logshape+other.value,!lower,first.iterations+other.iterations,4)
+ if other.status!=0 {return sp_empty(other.status,spent+first.iterations+other.iterations,4)}
+ sp_pair(prefix-logshape+other.value,!lower,spent+first.iterations+other.iterations,4)
 }
 
 fn sp_inverse_empty(status:i64)->CheckedSpecialInverse {

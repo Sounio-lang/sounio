@@ -1,0 +1,646 @@
+// Checked genuine noncentral t foundations. No normal/shifted-t fallback.
+// status0 finite iteration completion,1 domain/options,2 nonfinite/NaN,
+// 3 work exhaustion,4 arithmetic,5 unsupported/unrepresentable work region.
+// Tolerance controls iterations/error estimates, not a universal accuracy bound.
+use math::pure::{is_finite,ln_checked,exp,sqrt,atan,tan}
+use math::logarithmic::{log1p_checked}
+use special::checked_gamma_beta::{beta_pq_checked,beta_inverse_checked,gamma_pq_checked,gamma_log_prefix_checked}
+use stats::checked_distributions::{normal_tails_checked}
+
+pub struct CheckedNctTails {
+ pub status:i64,pub cdf:f64,pub sf:f64,pub log_cdf:f64,pub log_sf:f64,
+ pub cdf_available:bool,pub sf_available:bool,pub log_cdf_available:bool,pub log_sf_available:bool,
+ pub method:i64,pub mixture_terms:i64,pub kernel_iterations:i64,
+ pub quadrature_evaluations:i64,pub truncation_evaluations:i64,
+ pub quadrature_relative_error_estimate:f64,pub truncation_log_estimate:f64,pub estimates_available:bool,
+}
+pub struct CheckedNctQuantile {
+ pub status:i64,pub value:f64,pub available:bool,pub lower:f64,pub upper:f64,
+ pub evaluations:i64,pub forward_log_tail:f64,pub forward_log_available:bool,
+}
+struct NtLog {has:bool,value:f64}
+fn nt_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn nt_inf()->f64 {1.0e308*10.0}
+fn nt_options(budget:i64,tol:f64)->bool {budget>=1 && budget<=1000000 && tol>=1.7763568394002505e-15 && tol<=1.0e-4}
+fn nt_kernel_tol(tol:f64)->f64 {if tol*0.0625<1.7763568394002505e-15 {1.7763568394002505e-15}else{tol*0.0625}}
+fn nt_empty(status:i64,method:i64)->CheckedNctTails {
+ CheckedNctTails{status:status,cdf:0.0,sf:0.0,log_cdf:0.0,log_sf:0.0,
+ cdf_available:false,sf_available:false,log_cdf_available:false,log_sf_available:false,
+ method:method,mixture_terms:0,kernel_iterations:0,quadrature_evaluations:0,truncation_evaluations:0,
+ quadrature_relative_error_estimate:0.0,truncation_log_estimate:0.0,estimates_available:false}
+}
+fn nt_log_empty()->NtLog {NtLog{has:false,value:0.0}}
+fn nt_add(sum:&!NtLog,value:f64)->i64 with Mut,Div,Panic {
+ if !is_finite(value) {return 4}
+ if !sum.has {sum.has=true;sum.value=value;return 0}
+ let larger=if sum.value>=value {sum.value}else{value}
+ let smaller=if sum.value>=value {value}else{sum.value}
+ let logged=log1p_checked(exp(smaller-larger))
+ if logged.status!=0 {return 4}
+ sum.value=larger+logged.value
+ if !is_finite(sum.value) {return 4}
+ 0
+}
+fn nt_endpoint(at_right:bool)->CheckedNctTails with Mut {
+ var r=nt_empty(0,0)
+ r.cdf_available=true;r.sf_available=true;r.log_cdf_available=true;r.log_sf_available=true
+ if at_right {r.cdf=1.0;r.log_sf= -nt_inf()}else{r.sf=1.0;r.log_cdf= -nt_inf()}
+ r
+}
+// Direct probability must be <=0.9; larger complements never use a finite sentinel.
+fn nt_direct(log_direct:f64,is_cdf:bool,method:i64)->CheckedNctTails with Mut,Div,Panic {
+ if !is_finite(log_direct) || log_direct> -0.1053605156578263 {return nt_empty(5,method)}
+ let direct=exp(log_direct)
+ if !is_finite(direct) || direct<0.0 || direct>=1.0 {return nt_empty(4,method)}
+ var other_log:f64=0.0
+ var other_log_available=false
+ if direct>0.0 {
+  let logged=log1p_checked(-direct)
+  if logged.status!=0 {return nt_empty(4,method)}
+  other_log=logged.value;other_log_available=true
+ }
+ var r=nt_empty(0,method)
+ if is_cdf {
+  r.cdf=direct;r.cdf_available=direct>0.0;r.log_cdf=log_direct;r.log_cdf_available=true
+  r.sf=1.0-direct;r.sf_available=true;r.log_sf=other_log;r.log_sf_available=other_log_available
+ }else{
+  r.sf=direct;r.sf_available=direct>0.0;r.log_sf=log_direct;r.log_sf_available=true
+  r.cdf=1.0-direct;r.cdf_available=true;r.log_cdf=other_log;r.log_cdf_available=other_log_available
+ }
+ r
+}
+fn nt_parameters(df:f64,delta:f64)->i64 {
+ if !is_finite(df) || !is_finite(delta) {return 2}
+ if df<=0.0 {return 1}
+ if df>2000000.0 || nt_abs(delta)>128.0 {return 5}
+ 0
+}
+pub fn central_t_tails_checked(t:f64,df:f64,budget:i64,tol:f64)->CheckedNctTails with Mut,Div,Panic {
+ let status=nt_parameters(df,0.0)
+ if status!=0 {return nt_empty(status,1)}
+ if t!=t || !is_finite(tol) {return nt_empty(2,1)}
+ if !nt_options(budget,tol) {return nt_empty(1,1)}
+ if !is_finite(t) {return nt_endpoint(t>0.0)}
+ if t==0.0 {
+  var r=nt_empty(0,1)
+  r.cdf=0.5;r.sf=0.5;r.log_cdf= -0.6931471805599453;r.log_sf= -0.6931471805599453
+  r.cdf_available=true;r.sf_available=true;r.log_cdf_available=true;r.log_sf_available=true
+  return r
+ }
+ let magnitude=nt_abs(t)
+ if df==1.0 {
+  let probability=if magnitude>1.0 {atan(1.0/magnitude)/3.14159265358979323846}else{0.5-atan(magnitude)/3.14159265358979323846}
+  let logged=ln_checked(probability)
+  if logged.status!=0 {return nt_empty(5,1)}
+  var r=nt_direct(logged.value,t<0.0,1)
+  if r.status==0 {
+   // Preserve the analytic scalar instead of a log/exp roundtrip, including
+   // nonzero subnormal Cauchy tails.
+   let complement_log=log1p_checked(-probability)
+   if complement_log.status!=0 {return nt_empty(4,1)}
+   if t<0.0 {r.cdf=probability;r.sf=1.0-probability;r.log_sf=complement_log.value}
+   else {r.sf=probability;r.cdf=1.0-probability;r.log_cdf=complement_log.value}
+  }
+  return r
+ }
+ let root=sqrt(df)
+ var logged_tail:f64=0.0
+ var iterations:i64=0
+ if magnitude<=root {
+  let ratio=magnitude/root
+  let square=ratio*ratio
+  if square==0.0 {return nt_empty(5,1)}
+  let beta=beta_pq_checked(0.5,df*0.5,square/(1.0+square),budget,nt_kernel_tol(tol))
+  if beta.status!=0 {var r=nt_empty(beta.status,1);r.kernel_iterations=beta.iterations;return r}
+  if !beta.log_upper_available {var r=nt_empty(5,1);r.kernel_iterations=beta.iterations;return r}
+  logged_tail=beta.log_upper;iterations=beta.iterations
+ }else{
+  let ratio=root/magnitude
+  let square=ratio*ratio
+  if square==0.0 {return nt_empty(5,1)}
+  let beta=beta_pq_checked(df*0.5,0.5,square/(1.0+square),budget,nt_kernel_tol(tol))
+  if beta.status!=0 {var r=nt_empty(beta.status,1);r.kernel_iterations=beta.iterations;return r}
+  if !beta.log_lower_available {var r=nt_empty(5,1);r.kernel_iterations=beta.iterations;return r}
+  logged_tail=beta.log_lower;iterations=beta.iterations
+ }
+ var r=nt_direct(logged_tail-0.6931471805599453,t<0.0,1)
+ r.kernel_iterations=iterations
+ r
+}
+struct NtKernelWork {iterations:i64}
+struct NtWeights {lo:i64,hi:i64,log_p_lo:f64,log_q_lo:f64,log_p_hi:f64,log_q_hi:f64,lambda:f64,log_lambda:f64}
+fn nt_remainder(weights:&NtWeights)->NtLog with Mut,Div,Panic {
+ var out=nt_log_empty()
+ let p_next=weights.log_p_hi+weights.log_lambda-ln_checked((weights.hi+1) as f64).value
+ let q_next=weights.log_q_hi+weights.log_lambda-ln_checked((weights.hi as f64)+1.5).value
+ let p_ratio=weights.lambda/((weights.hi as f64)+2.0)
+ let q_ratio=weights.lambda/((weights.hi as f64)+2.5)
+ if p_ratio>=1.0 || q_ratio>=1.0 {return out}
+ if nt_add(&!out,p_next-log1p_checked(-p_ratio).value)!=0 {return nt_log_empty()}
+ if nt_add(&!out,q_next-log1p_checked(-q_ratio).value)!=0 {return nt_log_empty()}
+ if weights.lo>0 {
+  let lf=weights.lo as f64
+  let p_prev=weights.log_p_lo+ln_checked(lf).value-weights.log_lambda
+  let q_prev=weights.log_q_lo+ln_checked(lf+0.5).value-weights.log_lambda
+  let pr=(lf-1.0)/weights.lambda
+  let qr=(lf-0.5)/weights.lambda
+  if pr>=1.0 || qr>=1.0 {return nt_log_empty()}
+  if nt_add(&!out,p_prev-log1p_checked(-pr).value)!=0 {return nt_log_empty()}
+  if nt_add(&!out,q_prev-log1p_checked(-qr).value)!=0 {return nt_log_empty()}
+ }
+ out
+}
+fn nt_beta_term(index:i64,df:f64,x:f64,y:f64,lower:bool,log_p:f64,log_q:f64,budget:i64,tol:f64,sum:&!NtLog,kernel:&!NtKernelWork)->i64 with Mut,Div,Panic {
+ if index<0 || index>=999999 {return 5}
+ let first=(index as f64)+0.5
+ let second=(index as f64)+1.0
+ if x<=y {
+  let p=beta_pq_checked(first,df*0.5,x,budget,tol)
+  let q=beta_pq_checked(second,df*0.5,x,budget,tol)
+  kernel.iterations=kernel.iterations+p.iterations+q.iterations
+  if p.status!=0 {return p.status}
+  if q.status!=0 {return q.status}
+  let p_ok=if lower {p.log_lower_available}else{p.log_upper_available}
+  let q_ok=if lower {q.log_lower_available}else{q.log_upper_available}
+  if !p_ok || !q_ok {return 5}
+  let lp=if lower {p.log_lower}else{p.log_upper}
+  let lq=if lower {q.log_lower}else{q.log_upper}
+  if nt_add(sum,log_p+lp)!=0 || nt_add(sum,log_q+lq)!=0 {return 4}
+ }else{
+  let p=beta_pq_checked(df*0.5,first,y,budget,tol)
+  let q=beta_pq_checked(df*0.5,second,y,budget,tol)
+  kernel.iterations=kernel.iterations+p.iterations+q.iterations
+  if p.status!=0 {return p.status}
+  if q.status!=0 {return q.status}
+  let p_ok=if lower {p.log_upper_available}else{p.log_lower_available}
+  let q_ok=if lower {q.log_upper_available}else{q.log_lower_available}
+  if !p_ok || !q_ok {return 5}
+  let lp=if lower {p.log_upper}else{p.log_lower}
+  let lq=if lower {q.log_upper}else{q.log_lower}
+  if nt_add(sum,log_p+lp)!=0 || nt_add(sum,log_q+lq)!=0 {return 4}
+ }
+ 0
+}
+fn nt_positive_mixture(t:f64,df:f64,delta:f64,budget:i64,tol:f64)->CheckedNctTails with Mut,Div,Panic {
+ let lambda=(0.5*delta)*delta
+ if !is_finite(lambda) || lambda<=0.0 {return nt_empty(5,2)}
+ let logged=ln_checked(lambda)
+ if logged.status!=0 {return nt_empty(4,2)}
+ let mode=lambda as i64
+ var log_p:f64= -lambda
+ if mode>0 {
+  let prefix=gamma_log_prefix_checked(mode as f64,lambda)
+  if prefix.status!=0 {return nt_empty(prefix.status,2)}
+  log_p=prefix.value-ln_checked(mode as f64).value
+ }
+ let q_prefix=gamma_log_prefix_checked((mode as f64)+0.5,lambda)
+ if q_prefix.status!=0 {return nt_empty(q_prefix.status,2)}
+ let log_q=q_prefix.value-ln_checked((mode as f64)+0.5).value
+ var weights=NtWeights{lo:mode,hi:mode,log_p_lo:log_p,log_q_lo:log_q,log_p_hi:log_p,log_q_hi:log_q,lambda:lambda,log_lambda:logged.value}
+ let root=sqrt(df)
+ var x:f64=0.0
+ var y:f64=0.0
+ if t<=root {let ratio=t/root;let square=ratio*ratio;x=square/(1.0+square);y=1.0/(1.0+square)}
+ else{let ratio=root/t;let square=ratio*ratio;y=square/(1.0+square);x=1.0/(1.0+square)}
+ if x<=0.0 || y<=0.0 {return nt_empty(5,2)}
+ // Usual noncentral-beta crossover, evaluated without squaring unbounded t.
+ let lower=t<=sqrt(delta*delta+1.0)
+ var kernel=NtKernelWork{iterations:0}
+ var base=nt_log_empty()
+ if lower {
+  let normal=normal_tails_checked(0.0,1.0,-delta,budget,nt_kernel_tol(tol))
+  if normal.status!=0 {var r=nt_empty(normal.status,2);r.kernel_iterations=normal.iterations;return r}
+  if !normal.log_cdf_available {var r=nt_empty(5,2);r.kernel_iterations=normal.iterations;return r}
+  base.has=true;base.value=normal.log_cdf;kernel.iterations=normal.iterations
+ }
+ var sum=nt_log_empty()
+ var terms:i64=0
+ var next_up=true
+ var current=mode
+ var current_p=log_p
+ var current_q=log_q
+ let stopping=ln_checked(tol*0.0625)
+ if stopping.status!=0 {var r=nt_empty(4,2);r.kernel_iterations=kernel.iterations;return r}
+ while terms<budget {
+  let term_status=nt_beta_term(current,df,x,y,lower,current_p,current_q,budget,nt_kernel_tol(tol),&!sum,&!kernel)
+  terms=terms+1
+  if term_status!=0 {var r=nt_empty(term_status,2);r.mixture_terms=terms;r.kernel_iterations=kernel.iterations;return r}
+  var probability=nt_log_empty()
+  if lower {if nt_add(&!probability,base.value)!=0 {var r=nt_empty(4,2);r.mixture_terms=terms;r.kernel_iterations=kernel.iterations;return r}}
+  if nt_add(&!probability,sum.value-0.6931471805599453)!=0 {var r=nt_empty(4,2);r.mixture_terms=terms;r.kernel_iterations=kernel.iterations;return r}
+  let remaining=nt_remainder(&weights)
+  if remaining.has && remaining.value<=probability.value+stopping.value {
+   var r=nt_direct(probability.value,lower,2)
+   r.mixture_terms=terms;r.kernel_iterations=kernel.iterations
+   return r
+  }
+  if next_up || weights.lo==0 {
+   weights.hi=weights.hi+1
+   weights.log_p_hi=weights.log_p_hi+logged.value-ln_checked(weights.hi as f64).value
+   weights.log_q_hi=weights.log_q_hi+logged.value-ln_checked((weights.hi as f64)+0.5).value
+   current=weights.hi;current_p=weights.log_p_hi;current_q=weights.log_q_hi
+   next_up=false
+  }else{
+   let old=weights.lo as f64
+   weights.lo=weights.lo-1
+   weights.log_p_lo=weights.log_p_lo+ln_checked(old).value-logged.value
+   weights.log_q_lo=weights.log_q_lo+ln_checked(old+0.5).value-logged.value
+   current=weights.lo;current_p=weights.log_p_lo;current_q=weights.log_q_lo
+   next_up=true
+  }
+ }
+ var r=nt_empty(3,2);r.mixture_terms=terms;r.kernel_iterations=kernel.iterations;r
+}
+
+
+struct NtIntegralParameters {a:f64,t:f64,d:f64,budget:i64,tol:f64,scale:f64,base_log:f64,panel_goal:f64}
+struct NtIntegralWork {status:i64,quad:i64,truncation:i64,inner_steps:i64}
+struct NtPanel {value:f64,error:f64}
+struct NtBounds {status:i64,lower:f64,upper:f64,total:f64}
+fn nt_integral_refuse(w:&NtIntegralWork,status:i64)->CheckedNctTails with Mut {
+ var r=nt_empty(status,3)
+ r.quadrature_evaluations=w.quad;r.truncation_evaluations=w.truncation;r.kernel_iterations=w.inner_steps
+ r
+}
+fn nt_integral_log(r:f64,p:&NtIntegralParameters,w:&!NtIntegralWork)->f64 with Mut,Div,Panic {
+ if w.status!=0 {return 0.0}
+ if w.quad+w.truncation>=p.budget {w.status=3;return 0.0}
+ w.quad=w.quad+1
+ let y=exp(r)
+ if !is_finite(y) || y<=0.0 {w.status=5;return 0.0}
+ let prefix=gamma_log_prefix_checked(p.a,y)
+ if prefix.status!=0 {w.status=prefix.status;return 0.0}
+ let argument=p.t*sqrt(y/p.a)+p.d
+ if !is_finite(argument) {w.status=5;return 0.0}
+ let normal=normal_tails_checked(0.0,1.0,argument,p.budget,nt_kernel_tol(p.tol))
+ w.inner_steps=w.inner_steps+normal.iterations
+ if normal.status!=0 {w.status=normal.status;return 0.0}
+ if !normal.log_sf_available {w.status=5;return 0.0}
+ let value=prefix.value+normal.log_sf
+ if !is_finite(value) {w.status=4;return 0.0}
+ value
+}
+fn nt_integral_scaled(r:f64,p:&NtIntegralParameters,w:&!NtIntegralWork)->f64 with Mut,Div,Panic {
+ let logged=nt_integral_log(r,p,w)
+ if w.status!=0 {return 0.0}
+ let value=exp(logged-p.scale)
+ if !is_finite(value) || value<0.0 {w.status=4;return 0.0}
+ value
+}
+// Standard embedded Gauss7/Kronrod15 nodes and weights, positive integrand.
+fn nt_gk_x(i:i64)->f64 {
+ if i==0 {return 0.9914553711208126392068547}
+ if i==1 {return 0.9491079123427585245261897}
+ if i==2 {return 0.8648644233597690727897128}
+ if i==3 {return 0.7415311855993944398638648}
+ if i==4 {return 0.5860872354676911302941448}
+ if i==5 {return 0.4058451513773971669066064}
+ if i==6 {return 0.2077849550078984676006894}
+ 0.0
+}
+fn nt_gk_w(i:i64)->f64 {
+ if i==0 {return 0.0229353220105292249637320}
+ if i==1 {return 0.0630920926299785532907007}
+ if i==2 {return 0.1047900103222501838398763}
+ if i==3 {return 0.1406532597155259187451896}
+ if i==4 {return 0.1690047266392679028265834}
+ if i==5 {return 0.1903505780647854099132564}
+ if i==6 {return 0.2044329400752988924141620}
+ 0.2094821410847278280129992
+}
+fn nt_g7_w(i:i64)->f64 {
+ if i==1 {return 0.1294849661688696932706114}
+ if i==3 {return 0.2797053914892766679014678}
+ if i==5 {return 0.3818300505051189449503698}
+ if i==7 {return 0.4179591836734693877551020}
+ 0.0
+}
+fn nt_gk_panel(left:f64,right:f64,p:&NtIntegralParameters,w:&!NtIntegralWork)->NtPanel with Mut,Div,Panic {
+ let midpoint=left+(right-left)*0.5
+ let half=(right-left)*0.5
+ let center=nt_integral_scaled(midpoint,p,w)
+ var kronrod=nt_gk_w(7)*center
+ var gauss=nt_g7_w(7)*center
+ var correction:f64=0.0
+ var i:i64=0
+ while i<7 && w.status==0 {
+  let offset=half*nt_gk_x(i)
+  let pair=nt_integral_scaled(midpoint-offset,p,w)+nt_integral_scaled(midpoint+offset,p,w)
+  let adjusted=nt_gk_w(i)*pair-correction
+  let next=kronrod+adjusted
+  correction=(next-kronrod)-adjusted
+  kronrod=next
+  gauss=gauss+nt_g7_w(i)*pair
+  i=i+1
+ }
+ let value=kronrod*half
+ var error=nt_abs((kronrod-gauss)*half)
+ let rounding=3.552713678800501e-15*nt_abs(value)
+ if error<rounding {error=rounding}
+ if !is_finite(value) || !is_finite(error) || value<0.0 {w.status=4}
+ NtPanel{value:value,error:error}
+}
+// Per-leaf absolute goals avoid over-refining negligible tails and numerical
+// method-switch noise; acceptance still checks the aggregate error estimate.
+fn nt_adaptive_panel(left:f64,right:f64,p:&NtIntegralParameters,w:&!NtIntegralWork,depth:i64,absolute_goal:f64)->NtPanel with Mut,Div,Panic {
+ let panel=nt_gk_panel(left,right,p,w)
+ if w.status!=0 {return panel}
+ if panel.value==0.0 || panel.error<=absolute_goal {return panel}
+ if depth>=20 {w.status=3;return panel}
+ let midpoint=left+(right-left)*0.5
+ if midpoint<=left || midpoint>=right {w.status=5;return panel}
+ let a=nt_adaptive_panel(left,midpoint,p,w,depth+1,absolute_goal)
+ if w.status!=0 {return a}
+ let b=nt_adaptive_panel(midpoint,right,p,w,depth+1,absolute_goal)
+ NtPanel{value:a.value+b.value,error:a.error+b.error}
+}
+fn nt_integral_bounds(left:f64,right:f64,p:&NtIntegralParameters,w:&!NtIntegralWork)->NtBounds with Mut,Div,Panic {
+ if w.status!=0 {return NtBounds{status:w.status,lower:0.0,upper:0.0,total:0.0}}
+ let yl=exp(left)
+ let yh=exp(right)
+ if yl<=0.0 || !is_finite(yl) || !is_finite(yh) || yh<=0.0 {w.status=5;return NtBounds{status:5,lower:0.0,upper:0.0,total:0.0}}
+ if w.quad+w.truncation>=p.budget {w.status=3;return NtBounds{status:3,lower:0.0,upper:0.0,total:0.0}}
+ w.truncation=w.truncation+1
+ let low=gamma_pq_checked(p.a,yl,p.budget,nt_kernel_tol(p.tol))
+ w.inner_steps=w.inner_steps+low.iterations
+ if low.status!=0 {w.status=low.status;return NtBounds{status:low.status,lower:0.0,upper:0.0,total:0.0}}
+ if w.quad+w.truncation>=p.budget {w.status=3;return NtBounds{status:3,lower:0.0,upper:0.0,total:0.0}}
+ w.truncation=w.truncation+1
+ let high=gamma_pq_checked(p.a,yh,p.budget,nt_kernel_tol(p.tol))
+ w.inner_steps=w.inner_steps+high.iterations
+ if high.status!=0 {w.status=high.status;return NtBounds{status:high.status,lower:0.0,upper:0.0,total:0.0}}
+ // A rounded unit gamma tail without a representable logarithm is bounded
+ // explicitly by probability1 here, never used as a computed tail output.
+ var log_lower_bound:f64=0.0
+ var log_upper_bound:f64=0.0
+ if low.log_lower_available {log_lower_bound=low.log_lower}
+ else if !low.lower_available || low.lower!=1.0 {w.status=5;return NtBounds{status:5,lower:0.0,upper:0.0,total:0.0}}
+ if high.log_upper_available {log_upper_bound=high.log_upper}
+ else if !high.upper_available || high.upper!=1.0 {w.status=5;return NtBounds{status:5,lower:0.0,upper:0.0,total:0.0}}
+ if w.quad+w.truncation>=p.budget {w.status=3;return NtBounds{status:3,lower:0.0,upper:0.0,total:0.0}}
+ w.truncation=w.truncation+1
+ let normal=normal_tails_checked(0.0,1.0,p.t*sqrt(yh/p.a)+p.d,p.budget,nt_kernel_tol(p.tol))
+ w.inner_steps=w.inner_steps+normal.iterations
+ if normal.status!=0 {w.status=normal.status;return NtBounds{status:normal.status,lower:0.0,upper:0.0,total:0.0}}
+ if !normal.log_sf_available {w.status=5;return NtBounds{status:5,lower:0.0,upper:0.0,total:0.0}}
+ let lower=log_lower_bound+p.base_log
+ let upper=log_upper_bound+normal.log_sf
+ var total=nt_log_empty()
+ if nt_add(&!total,lower)!=0 || nt_add(&!total,upper)!=0 {w.status=4;return NtBounds{status:4,lower:0.0,upper:0.0,total:0.0}}
+ NtBounds{status:0,lower:lower,upper:upper,total:total.value}
+}
+fn nt_opposite_integral(t:f64,df:f64,d:f64,budget:i64,tol:f64)->CheckedNctTails with Mut,Div,Panic {
+ // r=log(chi^2/2) removes the zero-endpoint singularity. This bounded
+ // implementation declares its finite quadrature region explicitly.
+ if df<0.5 || t>1000000.0 {return nt_empty(5,3)}
+ var w=NtIntegralWork{status:0,quad:1,truncation:0,inner_steps:0}
+ let base=normal_tails_checked(0.0,1.0,d,budget,nt_kernel_tol(tol))
+ w.inner_steps=base.iterations
+ if base.status!=0 {var r=nt_empty(base.status,3);r.quadrature_evaluations=w.quad;r.kernel_iterations=w.inner_steps;return r}
+ if !base.log_sf_available {return nt_integral_refuse(&w,5)}
+ let a=df*0.5
+ let aa=2.0+t*t/a
+ let bb=d*t/sqrt(a)
+ let root=4.0*a/(sqrt(bb*bb+8.0*a*aa)+bb)
+ let y_mode=root*root
+ let initial=ln_checked(y_mode)
+ if initial.status!=0 {return nt_integral_refuse(&w,5)}
+ var p=NtIntegralParameters{a:a,t:t,d:d,budget:budget,tol:tol,scale:0.0,base_log:base.log_sf,panel_goal:0.0}
+ var mode=initial.value
+ var center=nt_integral_log(mode,&p,&!w)
+ var step=if a>1.0 {1.0/sqrt(a)}else{1.0}
+ var bracketed=false
+ var left=mode-step
+ var right=mode+step
+ var rounds:i64=0
+ while !bracketed && rounds<24 && w.status==0 {
+  left=mode-step;right=mode+step
+  let l=nt_integral_log(left,&p,&!w)
+  let r=nt_integral_log(right,&p,&!w)
+  if l<=center && r<=center {bracketed=true}
+  else {
+   if l>r {mode=left;center=l}else{mode=right;center=r}
+   step=step*2.0
+  }
+  rounds=rounds+1
+ }
+ if !bracketed || w.status!=0 {
+  var r=nt_empty(if w.status!=0 {w.status}else{5},3)
+  r.quadrature_evaluations=w.quad;r.truncation_evaluations=w.truncation;r.kernel_iterations=w.inner_steps
+  return r
+ }
+ // Bounded golden-section mode refinement supports a peak-aware geometric
+ // panel mesh; it is not a proof of the mathematical mode or quadrature error.
+ let golden=0.6180339887498948482045868
+ var x1=right-golden*(right-left)
+ var x2=left+golden*(right-left)
+ var f1=nt_integral_log(x1,&p,&!w)
+ var f2=nt_integral_log(x2,&p,&!w)
+ var refine:i64=0
+ while refine<32 && w.status==0 {
+  if f1>f2 {
+   right=x2;x2=x1;f2=f1;x1=right-golden*(right-left);f1=nt_integral_log(x1,&p,&!w)
+  }else{
+   left=x1;x1=x2;f1=f2;x2=left+golden*(right-left);f2=nt_integral_log(x2,&p,&!w)
+  }
+  refine=refine+1
+ }
+ mode=if f1>f2 {x1}else{x2}
+ p.scale=if f1>f2 {f1}else{f2}
+ let width=1.0/sqrt(a)
+ var low_distance=width
+ var high_distance=width
+ left=mode-low_distance;right=mode+high_distance
+ let log_width=ln_checked(width)
+ let log_tolerance=ln_checked(tol*0.015625)
+ if log_width.status!=0 || log_tolerance.status!=0 {return nt_integral_refuse(&w,4)}
+ let target=p.scale+log_width.value+log_tolerance.value
+ var bounds=nt_integral_bounds(left,right,&p,&!w)
+ var truncation_rounds:i64=0
+ while bounds.status==0 && (bounds.lower>target || bounds.upper>target) && truncation_rounds<48 && w.status==0 {
+  if bounds.lower>target {low_distance=low_distance*2.0;left=mode-low_distance}
+  if bounds.upper>target {high_distance=high_distance*2.0;right=mode+high_distance}
+  bounds=nt_integral_bounds(left,right,&p,&!w)
+  truncation_rounds=truncation_rounds+1
+ }
+ if w.status!=0 || bounds.status!=0 || bounds.lower>target || bounds.upper>target {
+  var r=nt_empty(if w.status!=0 {w.status}else{3},3)
+  r.quadrature_evaluations=w.quad;r.truncation_evaluations=w.truncation;r.kernel_iterations=w.inner_steps
+  return r
+ }
+ var mesh_panels:i64=0
+ var mesh_distance=width
+ var mesh_start:f64=0.0
+ while mesh_start<low_distance && mesh_panels<64 {mesh_start=mesh_distance;mesh_distance=mesh_distance*2.0;mesh_panels=mesh_panels+1}
+ mesh_start=0.0;mesh_distance=width
+ var mesh_right:i64=0
+ while mesh_start<high_distance && mesh_right<64 {mesh_start=mesh_distance;mesh_distance=mesh_distance*2.0;mesh_right=mesh_right+1}
+ p.panel_goal=tol*width/(16.0*((mesh_panels+mesh_right) as f64))
+ var total:f64=0.0
+ var correction:f64=0.0
+ var error:f64=0.0
+ var start=mode
+ var distance=width
+ var panels:i64=0
+ while start<right && panels<64 && w.status==0 {
+  let stop=if mode+distance<right {mode+distance}else{right}
+  let panel=nt_adaptive_panel(start,stop,&p,&!w,0,p.panel_goal)
+  let adjusted=panel.value-correction
+  let next=total+adjusted
+  correction=(next-total)-adjusted;total=next;error=error+panel.error
+  start=stop;distance=distance*2.0;panels=panels+1
+ }
+ start=mode;distance=width;panels=0
+ while start>left && panels<64 && w.status==0 {
+  let stop=if mode-distance>left {mode-distance}else{left}
+  let panel=nt_adaptive_panel(stop,start,&p,&!w,0,p.panel_goal)
+  let adjusted=panel.value-correction
+  let next=total+adjusted
+  correction=(next-total)-adjusted;total=next;error=error+panel.error
+  start=stop;distance=distance*2.0;panels=panels+1
+ }
+ var r=nt_empty(if w.status!=0 {w.status}else{3},3)
+ r.quadrature_evaluations=w.quad;r.truncation_evaluations=w.truncation;r.kernel_iterations=w.inner_steps
+ if w.status!=0 {return r}
+ if !is_finite(total) || total<=0.0 || !is_finite(error) {r.status=4;return r}
+ let logged=ln_checked(total)
+ if logged.status!=0 {r.status=4;return r}
+ let log_probability=p.scale+logged.value
+ let relative_error=error/total
+ let relative_truncation=exp(bounds.total-log_probability)
+ if relative_error>tol*0.125 || relative_truncation>tol*0.125 {return r}
+ r=nt_direct(log_probability,false,3)
+ r.quadrature_evaluations=w.quad;r.truncation_evaluations=w.truncation;r.kernel_iterations=w.inner_steps
+ r.quadrature_relative_error_estimate=relative_error;r.truncation_log_estimate=bounds.total;r.estimates_available=true
+ r
+}
+
+pub fn noncentral_t_tails_checked(t:f64,df:f64,delta:f64,budget:i64,tol:f64)->CheckedNctTails with Mut,Div,Panic {
+ let status=nt_parameters(df,delta)
+ if status!=0 {return nt_empty(status,0)}
+ if t!=t || !is_finite(tol) {return nt_empty(2,0)}
+ if !nt_options(budget,tol) {return nt_empty(1,0)}
+ if !is_finite(t) {return nt_endpoint(t>0.0)}
+ if delta==0.0 {return central_t_tails_checked(t,df,budget,tol)}
+ if t==0.0 {
+  let normal=normal_tails_checked(0.0,1.0,-delta,budget,nt_kernel_tol(tol))
+  if normal.status!=0 {var r=nt_empty(normal.status,4);r.kernel_iterations=normal.iterations;return r}
+  var r=nt_empty(0,4)
+  r.cdf=normal.cdf;r.sf=normal.sf;r.log_cdf=normal.log_cdf;r.log_sf=normal.log_sf
+  r.cdf_available=normal.cdf_available;r.sf_available=normal.sf_available
+  r.log_cdf_available=normal.log_cdf_available;r.log_sf_available=normal.log_sf_available
+  r.kernel_iterations=normal.iterations
+  return r
+ }
+ let magnitude=nt_abs(t)
+ let oriented_delta=if t<0.0 {-delta}else{delta}
+ var r=nt_empty(5,3)
+ if oriented_delta>0.0 {r=nt_positive_mixture(magnitude,df,oriented_delta,budget,tol)}
+ else {r=nt_opposite_integral(magnitude,df,-oriented_delta,budget,tol)}
+ if t<0.0 {
+  let p=r.cdf;r.cdf=r.sf;r.sf=p
+  let lp=r.log_cdf;r.log_cdf=r.log_sf;r.log_sf=lp
+  let pa=r.cdf_available;r.cdf_available=r.sf_available;r.sf_available=pa
+  let la=r.log_cdf_available;r.log_cdf_available=r.log_sf_available;r.log_sf_available=la
+ }
+ r
+}
+
+fn nt_quantile_empty(status:i64,evaluations:i64)->CheckedNctQuantile {
+ CheckedNctQuantile{status:status,value:0.0,available:false,lower:0.0,upper:0.0,evaluations:evaluations,forward_log_tail:0.0,forward_log_available:false}
+}
+fn nt_selected(r:&CheckedNctTails,upper:bool)->NtLog {
+ if r.status!=0 {return nt_log_empty()}
+ if upper && r.log_sf_available {return NtLog{has:true,value:r.log_sf}}
+ if !upper && r.log_cdf_available {return NtLog{has:true,value:r.log_cdf}}
+ nt_log_empty()
+}
+fn nt_central_quantile(df:f64,p:f64,upper:bool,budget:i64,tol:f64)->CheckedNctQuantile with Mut,Div,Panic {
+ if budget<2 {return nt_quantile_empty(3,0)}
+ let small=if p<0.5 {p}else{1.0-p}
+ let positive=if upper {p<0.5}else{p>0.5}
+ var result=nt_quantile_empty(0,0)
+ if df==1.0 {
+  let magnitude=1.0/tan(3.14159265358979323846*small)
+  if !is_finite(magnitude) || magnitude<=0.0 {return nt_quantile_empty(5,0)}
+  result.value=if positive {magnitude}else{-magnitude}
+  result.lower=result.value;result.upper=result.value
+ }else{
+  let inverse=beta_inverse_checked(df*0.5,0.5,small*2.0,false,budget-1,nt_kernel_tol(tol))
+  if inverse.status!=0 {return nt_quantile_empty(inverse.status,inverse.iterations)}
+  if inverse.value<=0.0 || inverse.value>=1.0 || inverse.lower<=0.0 || inverse.upper>=1.0 {return nt_quantile_empty(5,inverse.iterations)}
+  let magnitude=sqrt(df)*sqrt(1.0-inverse.value)/sqrt(inverse.value)
+  let lower_magnitude=sqrt(df)*sqrt(1.0-inverse.upper)/sqrt(inverse.upper)
+  let upper_magnitude=sqrt(df)*sqrt(1.0-inverse.lower)/sqrt(inverse.lower)
+  if !is_finite(magnitude) || !is_finite(lower_magnitude) || !is_finite(upper_magnitude) {return nt_quantile_empty(5,inverse.iterations)}
+  result.value=if positive {magnitude}else{-magnitude}
+  result.lower=if positive {lower_magnitude}else{-upper_magnitude}
+  result.upper=if positive {upper_magnitude}else{-lower_magnitude}
+  result.evaluations=inverse.iterations
+ }
+ let actual=central_t_tails_checked(result.value,df,budget,tol)
+ result.evaluations=result.evaluations+1
+ if actual.status!=0 {return nt_quantile_empty(actual.status,result.evaluations)}
+ let observed=nt_selected(&actual,upper)
+ let target=ln_checked(p)
+ if !observed.has || target.status!=0 {return nt_quantile_empty(5,result.evaluations)}
+ if nt_abs(observed.value-target.value)>tol {return nt_quantile_empty(5,result.evaluations)}
+ result.available=true;result.forward_log_available=true;result.forward_log_tail=observed.value
+ result
+}
+pub fn noncentral_t_quantile_checked(df:f64,delta:f64,p:f64,upper:bool,budget:i64,tol:f64)->CheckedNctQuantile with Mut,Div,Panic {
+ let status=nt_parameters(df,delta)
+ if status!=0 {return nt_quantile_empty(status,0)}
+ if !is_finite(p) || !is_finite(tol) {return nt_quantile_empty(2,0)}
+ if p<0.0 || p>1.0 || !nt_options(budget,tol) {return nt_quantile_empty(1,0)}
+ if p==0.0 || p==1.0 {
+  let at_left=if upper {p==1.0}else{p==0.0}
+  let value=if at_left {-nt_inf()}else{nt_inf()}
+  return CheckedNctQuantile{status:0,value:value,available:true,lower:value,upper:value,evaluations:0,forward_log_tail:if p==0.0 {-nt_inf()}else{0.0},forward_log_available:true}
+ }
+ if delta==0.0 {
+  if p==0.5 {return CheckedNctQuantile{status:0,value:0.0,available:true,lower:0.0,upper:0.0,evaluations:0,forward_log_tail: -0.6931471805599453,forward_log_available:true}}
+  return nt_central_quantile(df,p,upper,budget,tol)
+ }
+ let target=ln_checked(p)
+ if target.status!=0 {return nt_quantile_empty(4,0)}
+ var lo:f64= -1.0
+ var hi:f64=1.0
+ var evaluations:i64=0
+ var lower_bracketed=false
+ var upper_bracketed=false
+ while !lower_bracketed && evaluations<budget {
+  let sampled=noncentral_t_tails_checked(lo,df,delta,budget,tol)
+  evaluations=evaluations+1
+  if sampled.status!=0 {return nt_quantile_empty(sampled.status,evaluations)}
+  let observed=nt_selected(&sampled,upper)
+  if !observed.has {return nt_quantile_empty(5,evaluations)}
+  lower_bracketed=if upper {observed.value>=target.value}else{observed.value<=target.value}
+  if !lower_bracketed {lo=lo*2.0;if !is_finite(lo) {return nt_quantile_empty(5,evaluations)}}
+ }
+ while !upper_bracketed && evaluations<budget {
+  let sampled=noncentral_t_tails_checked(hi,df,delta,budget,tol)
+  evaluations=evaluations+1
+  if sampled.status!=0 {return nt_quantile_empty(sampled.status,evaluations)}
+  let observed=nt_selected(&sampled,upper)
+  if !observed.has {return nt_quantile_empty(5,evaluations)}
+  upper_bracketed=if upper {observed.value<=target.value}else{observed.value>=target.value}
+  if !upper_bracketed {hi=hi*2.0;if !is_finite(hi) {return nt_quantile_empty(5,evaluations)}}
+ }
+ while lower_bracketed && upper_bracketed && evaluations<budget {
+  let midpoint=lo+(hi-lo)*0.5
+  if !is_finite(midpoint) || midpoint<=lo || midpoint>=hi {return nt_quantile_empty(5,evaluations)}
+  let sampled=noncentral_t_tails_checked(midpoint,df,delta,budget,tol)
+  evaluations=evaluations+1
+  if sampled.status!=0 {return nt_quantile_empty(sampled.status,evaluations)}
+  let observed=nt_selected(&sampled,upper)
+  if !observed.has {return nt_quantile_empty(5,evaluations)}
+  if upper {if observed.value>target.value {lo=midpoint}else{hi=midpoint}}
+  else{if observed.value<target.value {lo=midpoint}else{hi=midpoint}}
+  let scale=if nt_abs(midpoint)>1.0 {nt_abs(midpoint)}else{1.0}
+  if nt_abs(observed.value-target.value)<=tol && hi-lo<=tol*scale {
+   return CheckedNctQuantile{status:0,value:midpoint,available:true,lower:lo,upper:hi,evaluations:evaluations,forward_log_tail:observed.value,forward_log_available:true}
+  }
+ }
+ nt_quantile_empty(3,evaluations)
+}

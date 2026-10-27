@@ -119,3 +119,21 @@ The coordinator runs compiler and numerical references through central Slurm.
 The independent C++23 reference uses binary128 arithmetic, direct 2x2 solves,
 and an inverse-Jacobian Gram leverage calculation instead of production QR and
 its centered-column leverage identity. No Python/Rust oracle is used.
+
+## Reusable active-prefix adapter
+
+`dispersion_shrinkage_fit_prefix` takes the same inputs and controls as
+`dispersion_shrinkage_fit`, with an explicit active count after the three input
+buffers. Only the first active elements are read and published; allocated tails
+may contain NaNs or sentinel values and remain untouched. The increment buffer
+still has exactly two elements. Other input/output capacities and the queried
+Jacobian/response/QR/stage scratch must cover the active count. The old facade
+retains its exact-shape contract, including refusal of mismatched old buffers.
+Both facades call the same private estimator engine and use the same arithmetic.
+
+The named `dynamic_qr_least_squares_rhs_prefix` adapter reads only the matrix
+layout's row count from a larger RHS buffer. Its private QR engine and all
+ordinary `dynamic_qr_least_squares` exact-RHS semantics are shared. This avoids
+allocating new owners when a batch pipeline compacts fewer numerically eligible
+genes than its maximum family capacity; it does not change the working model,
+introduce missing-data filtering inside the component, or certify accuracy.

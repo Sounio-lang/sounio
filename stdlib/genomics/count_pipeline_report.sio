@@ -1,0 +1,102 @@
+// Retained report slot and allocation-free streaming of the complete gene family.
+// Byte IDs are losslessly hex encoded. Display numbers use canonical sci_print
+// at 15 significant digits; structured access retains original binary64 values.
+use genomics::count_pipeline::{CountPipeline,count_pipeline_status,count_pipeline_phase,count_pipeline_genes,count_pipeline_gene_status,count_pipeline_value,count_pipeline_adjusted,count_pipeline_coefficient_available,count_pipeline_gene_id_length,count_pipeline_gene_id_byte}
+use io::sci_print::{print_f64_sci}
+pub struct CountGeneReport {
+ pub status:i64,pub row:i64,pub phase:i64,pub point_status:i64,pub curvature_status:i64,
+ pub prior_eligible:bool,pub refit_status:i64,pub refit_route:i64,pub covariance_status:i64,
+ pub contrast_status:i64,pub tail_status:i64,pub outlier:bool,
+ pub point_available:bool,pub refit_available:bool,pub p_available:bool,pub log_p_available:bool,
+ pub mean:f64,pub point_alpha:f64,pub point_log_alpha:f64,pub sampling_log_variance:f64,
+ pub gaussian_mapped_log_alpha:f64,pub gaussian_mapped_variance:f64,pub prior_center:f64,
+ pub final_alpha:f64,pub estimate:f64,pub standard_error:f64,pub z:f64,pub p:f64,pub log_p:f64,
+ pub bh:f64,pub by:f64,pub adjustments_available:bool,
+ pub assumptions_assessed:bool,pub finite_sample_calibrated:bool,pub global_optimality_assessed:bool,
+}
+pub fn count_gene_report_slot()->CountGeneReport {
+ CountGeneReport{status:1,row: -1,phase:0,point_status: -1,curvature_status: -1,
+ prior_eligible:false,refit_status: -1,refit_route: -1,covariance_status: -1,
+ contrast_status: -1,tail_status: -1,outlier:false,
+ point_available:false,refit_available:false,p_available:false,log_p_available:false,
+ mean:0.0,point_alpha:0.0,point_log_alpha:0.0,sampling_log_variance:0.0,
+ gaussian_mapped_log_alpha:0.0,gaussian_mapped_variance:0.0,prior_center:0.0,
+ final_alpha:0.0,estimate:0.0,standard_error:0.0,z:0.0,p:0.0,log_p:0.0,bh:1.0,by:1.0,
+ adjustments_available:false,assumptions_assessed:false,finite_sample_calibrated:false,global_optimality_assessed:false}
+}
+// Invalid row/owner leaves all old payloads untouched and changes only status.
+// Availability flags describe numerical output, never inferential certification.
+pub fn count_pipeline_report_into(w:&CountPipeline,row:i64,out:&!CountGeneReport)->i64 with Mut,Panic {
+ out.status=1
+ if count_pipeline_status(w)!=0 || row<0 || row>=count_pipeline_genes(w) {return 1}
+ out.row=row;out.phase=count_pipeline_phase(w)
+ out.point_status=count_pipeline_gene_status(w,row,0)
+ out.curvature_status=count_pipeline_gene_status(w,row,3)
+ out.prior_eligible=count_pipeline_gene_status(w,row,4)==1
+ out.refit_status=count_pipeline_gene_status(w,row,5)
+ out.refit_route=count_pipeline_gene_status(w,row,11)
+ out.covariance_status=count_pipeline_gene_status(w,row,7)
+ out.contrast_status=count_pipeline_gene_status(w,row,8)
+ out.tail_status=count_pipeline_gene_status(w,row,9)
+ out.outlier=count_pipeline_gene_status(w,row,10)==1
+ out.point_available=count_pipeline_coefficient_available(w,row,false)
+ out.refit_available=count_pipeline_coefficient_available(w,row,true)
+ out.p_available=count_pipeline_value(w,row,18)==1.0
+ out.log_p_available=count_pipeline_value(w,row,19)==1.0
+ out.mean=count_pipeline_value(w,row,0)
+ out.point_alpha=count_pipeline_value(w,row,1);out.point_log_alpha=count_pipeline_value(w,row,2)
+ out.sampling_log_variance=count_pipeline_value(w,row,5)
+ out.gaussian_mapped_log_alpha=count_pipeline_value(w,row,6)
+ out.gaussian_mapped_variance=count_pipeline_value(w,row,7)
+ out.prior_center=count_pipeline_value(w,row,8)
+ out.final_alpha=count_pipeline_value(w,row,9)
+ out.estimate=count_pipeline_value(w,row,13);out.standard_error=count_pipeline_value(w,row,14)
+ out.z=count_pipeline_value(w,row,15);out.p=count_pipeline_value(w,row,16);out.log_p=count_pipeline_value(w,row,17)
+ out.bh=count_pipeline_adjusted(w,row,1);out.by=count_pipeline_adjusted(w,row,2)
+ out.adjustments_available=out.phase==5
+ out.assumptions_assessed=false;out.finite_sample_calibrated=false;out.global_optimality_assessed=false
+ out.status=0;0
+}
+fn cp_report_hex(n:i64)->string {
+ if n==0 {return "0"};if n==1 {return "1"};if n==2 {return "2"};if n==3 {return "3"}
+ if n==4 {return "4"};if n==5 {return "5"};if n==6 {return "6"};if n==7 {return "7"}
+ if n==8 {return "8"};if n==9 {return "9"};if n==10 {return "a"};if n==11 {return "b"}
+ if n==12 {return "c"};if n==13 {return "d"};if n==14 {return "e"};"f"
+}
+fn cp_report_number(value:f64,available:bool) with IO,Mut {
+ if available {print_f64_sci(value,15)}else{print("NA")}
+}
+// Complete reports require adjustment phase5. Output includes every original row,
+// including point/refit/test failures, in original ID order. No per-row strings.
+pub fn count_pipeline_write_tsv(w:&CountPipeline)->i64 with IO,Mut,Div,Panic {
+ if count_pipeline_status(w)!=0 || count_pipeline_phase(w)!=5 {return 1}
+ println("#model=NB2_log_link;dispersion_prior=Gaussian_working;alpha=plug_in;assumptions_assessed=false;finite_sample_calibrated=false;global_optimality_assessed=false")
+ println("#BH_requirement=valid_p_values_and_independence_or_PRDS;BY_requirement=valid_p_values;family=all_original_gene_rows;unavailable_effective_p=1;display_significant_digits=15")
+ println("gene_row\tgene_id_hex\tpoint_status\tcurvature_status\tprior_eligible\trefit_status\trefit_route\tcovariance_status\tcontrast_status\ttail_status\toutlier\tpoint_available\trefit_available\tp_available\tlog_p_available\tbase_mean\tpoint_alpha\tgaussian_mapped_log_alpha\tfinal_alpha\tcontrast\tstandard_error\tz\tp\tlog_p\tBH\tBY")
+ var slot=count_gene_report_slot()
+ var row:i64=0
+ while row<count_pipeline_genes(w) {
+  let reported=count_pipeline_report_into(w,row,&!slot)
+  if reported!=0 {return reported}
+  print("{}\t",row)
+  var k:i64=0
+  while k<count_pipeline_gene_id_length(w,row) {
+   let byte=count_pipeline_gene_id_byte(w,row,k)
+   print("{}{}",cp_report_hex(byte/16),cp_report_hex(byte%16));k=k+1
+  }
+  print("\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t",slot.point_status,slot.curvature_status,slot.prior_eligible,slot.refit_status,slot.refit_route,slot.covariance_status,slot.contrast_status,slot.tail_status,slot.outlier,slot.point_available,slot.refit_available,slot.p_available,slot.log_p_available)
+  cp_report_number(slot.mean,slot.point_status>=0 && slot.point_status<100);print("\t")
+  cp_report_number(slot.point_alpha,slot.point_available);print("\t")
+  cp_report_number(slot.gaussian_mapped_log_alpha,slot.prior_eligible && slot.refit_route>=1);print("\t")
+  cp_report_number(slot.final_alpha,slot.refit_available);print("\t")
+  cp_report_number(slot.estimate,slot.contrast_status==0);print("\t")
+  cp_report_number(slot.standard_error,slot.contrast_status==0);print("\t")
+  cp_report_number(slot.z,slot.tail_status==0);print("\t")
+  cp_report_number(slot.p,slot.p_available);print("\t")
+  cp_report_number(slot.log_p,slot.log_p_available);print("\t")
+  cp_report_number(slot.bh,slot.adjustments_available);print("\t")
+  cp_report_number(slot.by,slot.adjustments_available);println("")
+  row=row+1
+ }
+ 0
+}

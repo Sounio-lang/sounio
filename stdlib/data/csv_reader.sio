@@ -151,23 +151,49 @@ pub fn csv_ok(r: &CsvReader) -> bool with Mut, Panic, Div {
     return (*r).ok == 1
 }
 
+struct CsvCheckedNumber {value:i64,valid:bool}
+// Accumulate negatively so i64::MIN is representable, checking before arithmetic.
+// Fractional digits beyond the requested scale retain the existing truncation contract.
+fn csv_parse_number(text:string,start:i64,end:i64,decimals:i64,fraction_allowed:bool)->CsvCheckedNumber with Mut,Div {
+ if decimals<0 || decimals>18 {return CsvCheckedNumber {value:0,valid:false}}
+ var i=start
+ var negative=false
+ if i<end {if str_char_at(text,i)==45 {negative=true;i=i+1} else if str_char_at(text,i)==43 {i=i+1}}
+ let limit=if negative {0-9223372036854775807-1} else {0-9223372036854775807}
+ var acc:i64=0
+ var fraction=false
+ var fraction_digits:i64=0
+ var digits:i64=0
+ while i<end {
+  let c=str_char_at(text,i)
+  if c==46 && fraction_allowed && !fraction {fraction=true}
+  else {
+   let digit=c-48
+   if digit<0 || digit>9 {return CsvCheckedNumber {value:0,valid:false}}
+   digits=digits+1
+   if !fraction || fraction_digits<decimals {
+    if acc<limit/10 {return CsvCheckedNumber {value:0,valid:false}}
+    acc=acc*10
+    if acc<limit+digit {return CsvCheckedNumber {value:0,valid:false}}
+    acc=acc-digit
+    if fraction {fraction_digits=fraction_digits+1}
+   }
+  }
+  i=i+1
+ }
+ if digits==0 {return CsvCheckedNumber {value:0,valid:false}}
+ while fraction_digits<decimals {
+  if acc<limit/10 {return CsvCheckedNumber {value:0,valid:false}}
+  acc=acc*10;fraction_digits=fraction_digits+1
+ }
+ return CsvCheckedNumber {value:if negative {acc} else {0-acc},valid:true}
+}
 pub fn csv_int(r: &! CsvReader, col: i64) -> i64 with Mut, Panic, Div {
-    let rng = csv_nth_field_range((*r).text, (*r).row_start, (*r).row_end, col)
-    if rng.len < 0 { (*r).ok = 0; return 0 }
-    var i = rng.start
-    let stop = rng.start + rng.len
-    var neg = 0
-    if i < stop { if (str_char_at((*r).text, i) as i64) == 45 { neg = 1; i = i + 1 } }
-    if i >= stop { (*r).ok = 0; return 0 }     // empty / just "-"
-    var acc = 0
-    while i < stop {
-        let d = (str_char_at((*r).text, i) as i64) - 48
-        if d < 0 || d > 9 { (*r).ok = 0; return 0 }
-        acc = acc * 10 + d
-        i = i + 1
-    }
-    (*r).ok = 1
-    if neg == 1 { return 0 - acc } else { return acc }
+ let rng=csv_nth_field_range((*r).text,(*r).row_start,(*r).row_end,col)
+ if rng.len<0 {(*r).ok=0;return 0}
+ let result=csv_parse_number((*r).text,rng.start,rng.start+rng.len,0,false)
+ (*r).ok=if result.valid {1} else {0}
+ return result.value
 }
 
 fn ipow10(n: i64) -> i64 with Mut, Panic, Div {
@@ -178,33 +204,11 @@ fn ipow10(n: i64) -> i64 with Mut, Panic, Div {
 }
 
 pub fn csv_f64_scaled(r: &! CsvReader, col: i64, decimals: i64) -> i64 with Mut, Panic, Div {
-    let rng = csv_nth_field_range((*r).text, (*r).row_start, (*r).row_end, col)
-    if rng.len < 0 { (*r).ok = 0; return 0 }
-    var i = rng.start
-    let stop = rng.start + rng.len
-    var neg = 0
-    if i < stop { if (str_char_at((*r).text, i) as i64) == 45 { neg = 1; i = i + 1 } }
-    var whole = 0
-    while i < stop {
-        let c = str_char_at((*r).text, i) as i64
-        if c == 46 { i = i + 1; break }
-        let d = c - 48
-        if d < 0 || d > 9 { (*r).ok = 0; return 0 }
-        whole = whole * 10 + d
-        i = i + 1
-    }
-    var frac = 0
-    var fdigits = 0
-    while i < stop {
-        let d = (str_char_at((*r).text, i) as i64) - 48
-        if d < 0 || d > 9 { (*r).ok = 0; return 0 }
-        if fdigits < decimals { frac = frac * 10 + d; fdigits = fdigits + 1 }
-        i = i + 1
-    }
-    while fdigits < decimals { frac = frac * 10; fdigits = fdigits + 1 }
-    (*r).ok = 1
-    let mag = whole * ipow10(decimals) + frac
-    if neg == 1 { return 0 - mag } else { return mag }
+ let rng=csv_nth_field_range((*r).text,(*r).row_start,(*r).row_end,col)
+ if rng.len<0 {(*r).ok=0;return 0}
+ let result=csv_parse_number((*r).text,rng.start,rng.start+rng.len,decimals,true)
+ (*r).ok=if result.valid {1} else {0}
+ return result.value
 }
 
 pub fn csv_f64(r: &! CsvReader, col: i64) -> f64 with Mut, Panic, Div {

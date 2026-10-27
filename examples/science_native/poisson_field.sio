@@ -1,0 +1,186 @@
+// Checked manufactured Poisson field -> prepared contours + canonical heatmaps.
+// Native pixel RLE is an export of the actual Canvas, not an SVG rasterization.
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_at,numeric_buffer_status,numeric_buffer_close,numeric_matrix}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set,integer_buffer_status,integer_buffer_close}
+use math::poisson_multigrid::{PoissonOptions,poisson_workspace,poisson_solve_into}
+use math::pure::{is_finite}
+use viz::dynamic_plot::{DynamicPlotSpec}
+use viz::dynamic_fields::{DynamicHeatmapSpec,palette_field_work,dynamic_heatmap_palette_validate,dynamic_heatmap_palette_canvas_into,dynamic_heatmap_palette_svg_into}
+use viz::dynamic_contour::{prepared_contour_work,prepared_contour_new,prepared_contour_status,prepared_contour_close,prepared_contour_prepare_into,prepared_contour_canvas_into,prepared_contour_svg_into,prepared_contour_len,prepared_contour_segment_slot,prepared_contour_segment_into}
+use viz::palette::{palette_scale_defaults}
+use viz::colorbar::{ColorBarSpec,colorbar_work,colorbar_validate,colorbar_canvas_into,colorbar_svg_into}
+use display::canvas::{Canvas,canvas_clear,canvas_draw_char,canvas_fill_rect}
+fn text(c:&!Canvas,x:i64,y:i64,s:string) with IO,Mut {
+ var i:i64=0
+ while i<str_len(s) {canvas_draw_char(c,str_char_at(s,i) as i64,x+8*i,y,235,240,245);i=i+1}
+ print("<text x=\"");print(x);print("\" y=\"");print(y+7);print("\" fill=\"rgb(235,240,245)\" font-family=\"monospace\" font-size=\"8\" textLength=\"");print(str_len(s)*8);print("\" lengthAdjust=\"spacingAndGlyphs\">");var j:i64=0
+ while j<str_len(s) {
+  let ch:i64=str_char_at(s,j) as i64
+  if ch==38 {print("&amp;")}else if ch==60 {print("&lt;")}else if ch==62 {print("&gt;")}else if ch==34 {print("&quot;")}else if ch==39 {print("&apos;")}else{print_char(ch)}
+  j=j+1
+ }
+ println("</text>")
+}
+fn axis(c:&!Canvas,x:i64,y:i64) with IO,Mut,Div {
+ rule(c,x,y-512,1,513);rule(c,x,y,513,1)
+ var i:i64=0
+ while i<5 {
+  let label=if i==0 {"0"}else if i==1 {"0.25"}else if i==2 {"0.5"}else if i==3 {"0.75"}else{"1"}
+  text(c,x+128*i-str_len(label)*4,y+12,label)
+  text(c,x-8-str_len(label)*8,y-128*i-4,label)
+  i=i+1
+ }
+ text(c,x+208,y+32,"x (unit length)")
+ text(c,x,y-536,"y (unit length)")
+}
+// The same half-open integer pixel rectangle is used by both exports.
+fn rule(c:&!Canvas,x:i64,y:i64,w:i64,h:i64) with IO,Mut {
+ canvas_fill_rect(c,x,y,w,h,180,190,200)
+ let px:f64=(x as f64)-0.5;let py:f64=(y as f64)-0.5
+ print("<rect data-science-rule=\"1\" x=\"");print(px);print("\" y=\"");print(py);print("\" width=\"");print(w);print("\" height=\"");print(h);println("\" fill=\"rgb(180,190,200)\"/>")
+}
+fn dump(c:&Canvas) with IO,Mut,Div {
+ println("<!-- CANVAS_RLE 1480 800 -->")
+ var row:i64=0
+ while row<c.height {
+  var left:i64=0
+  while left<c.width {
+   let rgb:i64=read_i64(c.pixels,row*c.width+left)
+   var right=left+1
+   while right<c.width {
+    if read_i64(c.pixels,row*c.width+right)!=rgb {break}
+    right=right+1
+   }
+   println("<!-- PIX {} {} {} {} -->",row,left,right-left,rgb)
+   left=right
+  }
+  row=row+1
+ }
+ println("<!-- CANVAS_RLE_END -->")
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let n:i64=64;let side:i64=65
+ let shape=poisson_workspace(n)
+ var rhs=numeric_buffer_new(4225,33800);var answer=numeric_buffer_new(4225,33800)
+ var wu=numeric_buffer_new(shape.packed_len,shape.packed_len*8)
+ var wf=numeric_buffer_new(shape.packed_len,shape.packed_len*8)
+ var wr=numeric_buffer_new(shape.packed_len,shape.packed_len*8)
+ var xs=numeric_buffer_new(65,520);var ys=numeric_buffer_new(65,520)
+ var levels=numeric_buffer_new(5,40)
+ var cells=numeric_buffer_new(4096,32768);var errors=numeric_buffer_new(4096,32768)
+ var flags=integer_buffer_new(4096,32768)
+ var prepared=prepared_contour_new(40960,5,2621480)
+ var code:i64=0
+ if shape.status!=0 || numeric_buffer_status(&rhs)!=0 || numeric_buffer_status(&answer)!=0 || numeric_buffer_status(&wu)!=0 || numeric_buffer_status(&wf)!=0 || numeric_buffer_status(&wr)!=0 || numeric_buffer_status(&xs)!=0 || numeric_buffer_status(&ys)!=0 || numeric_buffer_status(&levels)!=0 || numeric_buffer_status(&cells)!=0 || numeric_buffer_status(&errors)!=0 || integer_buffer_status(&flags)!=0 || prepared_contour_status(&prepared)!=0 {code=1}
+ var i:i64=0
+ if code==0 {
+  while i<65 {
+   numeric_buffer_set(&!xs,i,(i as f64)/64.0);numeric_buffer_set(&!ys,i,(i as f64)/64.0)
+   i=i+1
+  }
+  i=0
+  while i<4225 {
+   let x=((i%side) as f64)/64.0;let y=((i/side) as f64)/64.0
+   let boundary=i%side==0 || i%side==n || i/side==0 || i/side==n
+   numeric_buffer_set(&!rhs,i,if boundary {0.0}else{2.0*(x*(1.0-x)+y*(1.0-y))})
+   i=i+1
+  }
+  i=0
+  while i<5 {numeric_buffer_set(&!levels,i,((i+1) as f64)*0.01);i=i+1}
+ }
+ let options=PoissonOptions{atol:1e-10,rtol:0.0,max_cycles:80,pre_sweeps:3,post_sweeps:3,max_point_work:100000000}
+ var cycles:i64=0;var work:i64=0;var residual:f64=0.0;var maximum_error:f64=0.0
+ if code==0 {
+  let solved=poisson_solve_into(&rhs,64,&!answer,&!wu,&!wf,&!wr,&options)
+  code=solved.status;cycles=solved.cycles;work=solved.point_work;residual=solved.residual_max
+ }
+ if code==0 {
+  i=0
+  while i<4225 {
+   let x=((i%side) as f64)/64.0;let y=((i/side) as f64)/64.0
+   let difference=numeric_buffer_at(&answer,i)-x*(1.0-x)*y*(1.0-y)
+   let error=if difference<0.0 {-difference}else{difference}
+   if !is_finite(error) {code=2}
+   if error>maximum_error {maximum_error=error}
+   i=i+1
+  }
+  // Raster rows descend in physical y. Both values are cell averages of four
+  // solved nodes (or their absolute nodal errors), not fabricated cell solves.
+  i=0
+  while i<4096 {
+   let row=63-i/64;let col=i%64
+   var value:f64=0.0;var error:f64=0.0;var corner:i64=0
+   while corner<4 {
+    let ix=col+corner%2;let iy=row+corner/2
+    let node=numeric_buffer_at(&answer,iy*65+ix)
+    let x=(ix as f64)/64.0;let y=(iy as f64)/64.0
+    let d=node-x*(1.0-x)*y*(1.0-y)
+    value=value+node*0.25;error=error+(if d<0.0 {-d}else{d})*0.25
+    corner=corner+1
+   }
+   numeric_buffer_set(&!cells,i,value);numeric_buffer_set(&!errors,i,error)
+   integer_buffer_set(&!flags,i,1);i=i+1
+  }
+ }
+ let layout=numeric_matrix(4225,65,65,65,1,0)
+ let cell_layout=numeric_matrix(4096,64,64,64,1,0)
+ let plot=DynamicPlotSpec{x:112,y:112,w:512,h:512,xmin:0.0,xmax:1.0,ymin:0.0,ymax:1.0,r:240,g:240,b:240,interval_kind:0,level:0.0}
+ let field=DynamicHeatmapSpec{x:112,y:112,w:512,h:512,color_min:0.0,color_max:0.0625}
+ let error_field=DynamicHeatmapSpec{x:816,y:112,w:512,h:512,color_min:0.0,color_max:maximum_error}
+ let field_palette=palette_scale_defaults(1,0.0,0.0625)
+ let error_palette=palette_scale_defaults(3,0.0,maximum_error)
+ let cb=ColorBarSpec{x:112,y:688,w:511,h:15,document_w:1480,document_h:800,text_rgb:0xebf0f5,show_name:true}
+ let ec=ColorBarSpec{x:816,y:688,w:511,h:15,document_w:1480,document_h:800,text_rgb:0xebf0f5,show_name:true}
+ var fw=palette_field_work();var ew=palette_field_work();var cw=colorbar_work();var ecw=colorbar_work();var pw=prepared_contour_work()
+ if code==0 {code=dynamic_heatmap_palette_validate(&field,&field_palette,&cells,&cell_layout,&flags,&!fw)}
+ if code==0 {code=dynamic_heatmap_palette_validate(&error_field,&error_palette,&errors,&cell_layout,&flags,&!ew)}
+ if code==0 {code=colorbar_validate(&cb,&field_palette,&!cw)}
+ if code==0 {code=colorbar_validate(&ec,&error_palette,&!ecw)}
+ if code==0 {code=prepared_contour_prepare_into(&!prepared,&plot,&xs,&ys,&answer,&layout,&flags,&levels,1000000,&!pw)}
+ let pixels=heap_alloc(1480*800*8) as *mut i64
+ if (pixels as i64)<=0 {code=1}
+ if code==0 {
+  var canvas=Canvas{pixels:pixels,width:1480,height:800}
+  canvas_clear(&!canvas,12,16,22)
+  code=dynamic_heatmap_palette_canvas_into(&!canvas,&field,&field_palette,&cells,&cell_layout,&flags,false,&!fw)
+  if code==0 {code=dynamic_heatmap_palette_canvas_into(&!canvas,&error_field,&error_palette,&errors,&cell_layout,&flags,false,&!ew)}
+  if code==0 {code=prepared_contour_canvas_into(&!canvas,&prepared,&!pw)}
+  if code==0 {code=colorbar_canvas_into(&!canvas,&cb,&field_palette,&!cw)}
+  if code==0 {code=colorbar_canvas_into(&!canvas,&ec,&error_palette,&!ecw)}
+  if code==0 {
+   println("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1480\" height=\"800\" viewBox=\"0 0 1480 800\">")
+   println("<rect width=\"1480\" height=\"800\" fill=\"rgb(12,16,22)\"/>")
+   code=dynamic_heatmap_palette_svg_into(&field,&field_palette,&cells,&cell_layout,&flags,false,&!fw)
+   if code==0 {code=dynamic_heatmap_palette_svg_into(&error_field,&error_palette,&errors,&cell_layout,&flags,false,&!ew)}
+   if code==0 {code=prepared_contour_svg_into(&prepared,7001,&!pw)}
+   if code==0 {code=colorbar_svg_into(&cb,&field_palette,&!cw)}
+   if code==0 {code=colorbar_svg_into(&ec,&error_palette,&!ecw)}
+   text(&!canvas,112,24,"Checked Poisson solve: manufactured 2D field and error")
+   text(&!canvas,112,48,"-Laplacian(u)=f; zero Dirichlet boundary; 65 x 65 solved nodes")
+   text(&!canvas,112,72,"Cell-average reconstruction and prepared nodal contours")
+   text(&!canvas,816,72,"Cell-average absolute nodal error against analytic u")
+   axis(&!canvas,112,624);axis(&!canvas,816,624)
+   text(&!canvas,112,744,"u = x(1-x)y(1-y); contour levels 0.01, 0.02, 0.03, 0.04, 0.05")
+   text(&!canvas,112,768,"Synthetic dimensionless PDE; tolerance is a solver stopping rule, not an uncertainty interval")
+   let rb:i64=f64_to_bits(residual);let eb:i64=f64_to_bits(maximum_error);let segments:i64=prepared_contour_len(&prepared)
+   println("<!-- POISSON_META {} {} {} {} {} -->",cycles,work,rb,eb,segments)
+   i=0
+   while i<4225 {let bits:i64=f64_to_bits(numeric_buffer_at(&answer,i));println("<!-- NODE {} {} -->",i,bits);i=i+1}
+   var segment=prepared_contour_segment_slot();i=0
+   while i<segments {
+    let sc=prepared_contour_segment_into(&prepared,i,&!segment)
+    let x0:i64=segment.x0;let y0:i64=segment.y0;let x1:i64=segment.x1;let y1:i64=segment.y1
+    let cell:i64=segment.cell;let level:i64=segment.level_index;let branch:i64=segment.branch
+    println("<!-- SEGMENT {} {} {} {} {} {} {} {} {} -->",i,sc,x0,y0,x1,y1,cell,level,branch);i=i+1
+   }
+   if code==0 {println("<!-- SCIENTIFIC_POISSON_COMPLETE -->")}
+   println("</svg>")
+   if code==0 {dump(&canvas)}
+  }
+ }
+ if (pixels as i64)>0 {heap_free(pixels as *mut i8)}
+ numeric_buffer_close(rhs);numeric_buffer_close(answer);numeric_buffer_close(wu);numeric_buffer_close(wf);numeric_buffer_close(wr)
+ numeric_buffer_close(xs);numeric_buffer_close(ys);numeric_buffer_close(levels);numeric_buffer_close(cells);numeric_buffer_close(errors)
+ integer_buffer_close(flags);prepared_contour_close(prepared)
+ if code==0 {0}else{1}
+}

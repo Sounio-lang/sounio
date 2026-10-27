@@ -1,0 +1,79 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: POLL_SOCKET_OK
+use ffi::platform::{platform_open,platform_status,platform_call,platform_close}
+use net::native::{native_tcp_listen,native_tcp_accept,native_socket_port,native_socket_status,native_socket_close,native_socket_token,socket_token_argument,socket_token_from_argument,native_socket_poll,native_tcp_connect_start,native_tcp_connect_finish,socket_token_try_receive,socket_token_try_send}
+use collections::byte_buffer::{byte_buffer_new,byte_buffer_push,byte_buffer_get,byte_buffer_close}
+use async::poll_executor::{PollStep,poll_executor_new,poll_executor_spawn,poll_executor_tick,poll_executor_result,poll_executor_pending,poll_executor_close}
+fn wait_byte(argument:i64)->PollStep with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ let token=socket_token_from_argument(&p,argument)
+ let ready=native_socket_poll(&p,&token,1)
+ var result=PollStep {state:argument,outcome:0,value:0,wake_at_ns:0}
+ if ready.status!=0 {result=PollStep {state:argument,outcome:2,value:ready.status,wake_at_ns:0}}
+ else if ready.readable {
+  var bytes=byte_buffer_new(1)
+  let received=socket_token_try_receive(&p,&token,&!bytes,1)
+  if received.status==0 && received.value==1 {result=PollStep {state:argument,outcome:1,value:byte_buffer_get(&bytes,0).value,wake_at_ns:0}}
+  else if received.status!=11 && received.status!=110 {result=PollStep {state:argument,outcome:2,value:received.status,wake_at_ns:0}}
+  byte_buffer_close(bytes)
+ }
+ platform_close(p)
+ return result
+}
+fn immediate(state:i64)->PollStep with IO,Alloc,Mut,Div,Panic {PollStep {state:state,outcome:1,value:99,wake_at_ns:0}}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ let listener=native_tcp_listen(&p,2130706433,0,4)
+ assert(native_socket_status(&listener)==0)
+ let port=native_socket_port(&p,&listener)
+ assert(port.status==0)
+ let client=native_tcp_connect_start(&p,2130706433,port.value)
+ assert(native_socket_status(&client)==0)
+ let now=platform_call(&p,30,0,0,0,0)
+ assert(now.status==0)
+ let deadline=now.value+5000000000
+ var status=native_tcp_connect_finish(&p,&client)
+ while status==11 {
+  assert(platform_call(&p,30,0,0,0,0).value<deadline)
+  status=native_tcp_connect_finish(&p,&client)
+ }
+ assert(status==0)
+ let listening=native_socket_token(&listener)
+ var ready=native_socket_poll(&p,&listening,1)
+ while !ready.readable {
+  assert(ready.status==0)
+  assert(platform_call(&p,30,0,0,0,0).value<deadline)
+  ready=native_socket_poll(&p,&listening,1)
+ }
+ let server=native_tcp_accept(&p,&listener,0)
+ assert(native_socket_status(&server)==0)
+ let receiving=native_socket_token(&server)
+ let sending=native_socket_token(&client)
+ assert(!native_socket_poll(&p,&receiving,1).readable)
+ var executor=poll_executor_new(96)
+ assert(poll_executor_spawn(&!executor,wait_byte,socket_token_argument(&receiving)).status==0)
+ assert(poll_executor_spawn(&!executor,immediate,0).status==0)
+ assert(poll_executor_tick(&!executor,&p,1).value==1)
+ assert(poll_executor_result(&executor,0).status==0)
+ assert(poll_executor_tick(&!executor,&p,1).value==1)
+ assert(poll_executor_result(&executor,1).value==99)
+ var bytes=byte_buffer_new(1)
+ assert(byte_buffer_push(&!bytes,42)==0)
+ assert(socket_token_try_send(&p,&sending,&bytes,0,1).status==0)
+ while poll_executor_pending(&executor)>0 {
+  assert(platform_call(&p,30,0,0,0,0).value<deadline)
+  assert(poll_executor_tick(&!executor,&p,1).status==0)
+ }
+ assert(poll_executor_result(&executor,0).value==42)
+ poll_executor_close(executor);byte_buffer_close(bytes)
+ assert(native_socket_close(&p,server)==0)
+ assert(native_socket_poll(&p,&receiving,1).status==9)
+ assert(native_socket_close(&p,client)==0)
+ assert(native_socket_close(&p,listener)==0)
+ platform_close(p)
+ println("POLL_SOCKET_OK")
+ return 0
+}

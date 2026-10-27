@@ -1,0 +1,316 @@
+// Owned, iterative JSON DOM. Exact number/string tokens survive without float conversion.
+// Payload budget covers the input copy plus 96 bytes/node; max_depth bounds open containers.
+// Status: 0 OK,1 invalid configuration,2 budget,3 allocation,4 syntax,5 depth,
+// 6 wrong type,7 integer range,8 invalid UTF-8. Duplicate keys retain source order.
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_len,byte_buffer_status,byte_buffer_reserve,byte_buffer_get,byte_buffer_push,byte_buffer_utf8_count,byte_buffer_clear,byte_buffer_close}
+use collections::integer_buffer::{IntegerBuffer,IntegerValue,integer_buffer_new,integer_buffer_len,integer_buffer_resize,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+pub linear struct JsonDom {text:ByteBuffer,nodes:IntegerBuffer,status:i64,error_offset:i64}
+pub struct JsonNode {pub kind:i64,pub start:i64,pub end:i64,pub child:i64,pub next:i64,pub key_start:i64,pub key_end:i64,pub status:i64}
+fn json_byte(b:&ByteBuffer,i:i64)->i64 {
+ let r=byte_buffer_get(b,i)
+ if r.status!=0 {return 0-1}
+ return r.value
+}
+fn json_space(c:i64)->bool {c==32 || c==9 || c==10 || c==13}
+fn json_digit(c:i64)->bool {c>=48 && c<=57}
+fn json_hex(c:i64)->i64 {
+ if c>=48 && c<=57 {return c-48}
+ if c>=65 && c<=70 {return c-55}
+ if c>=97 && c<=102 {return c-87}
+ return 0-1
+}
+fn json_hex4(b:&ByteBuffer,i:i64)->i64 with Mut {
+ var value:i64=0
+ var j:i64=0
+ while j<4 {let digit=json_hex(json_byte(b,i+j));if digit<0 {return 0-1};value=value*16+digit;j=j+1}
+ return value
+}
+fn json_string_end(b:&ByteBuffer,start:i64)->i64 with Mut {
+ var i=start+1
+ let n=byte_buffer_len(b)
+ while i<n {
+  let c=json_byte(b,i)
+  if c==34 {return i+1}
+  if c<32 {return 0-1}
+  if c==92 {
+   i=i+1
+   let escape=json_byte(b,i)
+   if escape==117 {
+    let cp=json_hex4(b,i+1)
+    if cp<0 {return 0-1}
+    i=i+4
+    if cp>=55296 && cp<=56319 {
+     if json_byte(b,i+1)!=92 || json_byte(b,i+2)!=117 {return 0-1}
+     let low=json_hex4(b,i+3)
+     if low<56320 || low>57343 {return 0-1}
+     i=i+6
+    } else if cp>=56320 && cp<=57343 {return 0-1}
+   } else if escape!=34 && escape!=92 && escape!=47 && escape!=98 && escape!=102 && escape!=110 && escape!=114 && escape!=116 {return 0-1}
+  }
+  i=i+1
+ }
+ return 0-1
+}
+fn json_number_end(b:&ByteBuffer,start:i64)->i64 with Mut {
+ var i=start
+ if json_byte(b,i)==45 {i=i+1}
+ let first=json_byte(b,i)
+ if first==48 {i=i+1;if json_digit(json_byte(b,i)) {return 0-1}}
+ else if first>=49 && first<=57 {while json_digit(json_byte(b,i)) {i=i+1}}
+ else {return 0-1}
+ if json_byte(b,i)==46 {
+  i=i+1
+  if !json_digit(json_byte(b,i)) {return 0-1}
+  while json_digit(json_byte(b,i)) {i=i+1}
+ }
+ if json_byte(b,i)==101 || json_byte(b,i)==69 {
+  i=i+1
+  if json_byte(b,i)==43 || json_byte(b,i)==45 {i=i+1}
+  if !json_digit(json_byte(b,i)) {return 0-1}
+  while json_digit(json_byte(b,i)) {i=i+1}
+ }
+ return i
+}
+fn json_literal_end(b:&ByteBuffer,start:i64,text:string)->i64 with Mut {
+ var j:i64=0
+ while str_char_at(text,j)>0 {if json_byte(b,start+j)!=str_char_at(text,j) {return 0-1};j=j+1}
+ return start+j
+}
+fn json_slot(d:&JsonDom,id:i64,field:i64)->i64 with Panic {integer_buffer_at(&d.nodes,id*12+field)}
+fn json_store(d:&!JsonDom,id:i64,field:i64,value:i64) with Mut,Panic {assert(integer_buffer_set(&!d.nodes,id*12+field,value)==0)}
+pub fn json_dom_status(d:&JsonDom)->i64 {d.status}
+pub fn json_dom_error_offset(d:&JsonDom)->i64 {d.error_offset}
+pub fn json_dom_len(d:&JsonDom)->i64 with Div {integer_buffer_len(&d.nodes)/12}
+pub fn json_dom_node(d:&JsonDom,id:i64)->JsonNode with Div,Panic {
+ if d.status!=0 {return JsonNode {kind:0,start:0,end:0,child:0-1,next:0-1,key_start:0-1,key_end:0-1,status:d.status}}
+ if id<0 || id>=json_dom_len(d) {return JsonNode {kind:0,start:0,end:0,child:0-1,next:0-1,key_start:0-1,key_end:0-1,status:4}}
+ return JsonNode {kind:json_slot(d,id,0),start:json_slot(d,id,1),end:json_slot(d,id,2),child:json_slot(d,id,3),next:json_slot(d,id,5),key_start:json_slot(d,id,7),key_end:json_slot(d,id,8),status:0}
+}
+fn json_dom_parse_fill(d:&!JsonDom,input:&ByteBuffer,max_depth:i64)->i64 with Alloc,Mut,Div,Panic {
+ if d.status!=0 {return d.status}
+ let n=byte_buffer_len(input)
+ var code:i64=0
+
+ if byte_buffer_status(input)!=0 {return 1}
+ if byte_buffer_utf8_count(input).status!=0 {return 8}
+ code=byte_buffer_reserve(&!d.text,n)
+ if code!=0 {return code}
+ var i:i64=0
+ while i<n {assert(byte_buffer_push(&!d.text,json_byte(input,i))==0);i=i+1}
+ i=0
+ var container:i64=0-1
+ var depth:i64=0
+ var need_value=true
+ var key_start:i64=0-1
+ var key_end:i64=0-1
+ while true {
+  while json_space(json_byte(&d.text,i)) {i=i+1}
+  d.error_offset=i
+  if need_value {
+   let start=i
+   let c=json_byte(&d.text,i)
+   var kind:i64=0-1
+   var end:i64=0-1
+   var opened=false
+   if c==123 {kind=5;end=i+1;opened=true}
+   else if c==91 {kind=4;end=i+1;opened=true}
+   else if c==34 {kind=3;end=json_string_end(&d.text,i)}
+   else if c==110 {kind=0;end=json_literal_end(&d.text,i,"null")}
+   else if c==116 {kind=1;end=json_literal_end(&d.text,i,"true")}
+   else if c==102 {kind=1;end=json_literal_end(&d.text,i,"false")}
+   else if c==45 || json_digit(c) {kind=2;end=json_number_end(&d.text,i)}
+   if kind<0 || end<0 {return 4}
+   if opened && depth>=max_depth {return 5}
+   let words=integer_buffer_len(&d.nodes)
+   if words>9223372036854771688 {return 2}
+   code=integer_buffer_resize(&!d.nodes,words+12)
+   if code!=0 {return code}
+   let id=words/12
+   json_store(d,id,0,kind);json_store(d,id,1,start);json_store(d,id,2,end)
+   json_store(d,id,3,0-1);json_store(d,id,4,0-1);json_store(d,id,5,0-1)
+   json_store(d,id,6,container);json_store(d,id,7,key_start);json_store(d,id,8,key_end)
+   json_store(d,id,10,0-1);json_store(d,id,11,0-1)
+   if container>=0 {
+    let last=json_slot(d,container,4)
+    if last<0 {json_store(d,container,3,id)} else {json_store(d,last,5,id)}
+    json_store(d,container,4,id)
+    let next_state=if json_slot(d,container,0)==5 {3} else {1}
+    json_store(d,container,9,next_state)
+   }
+   key_start=0-1;key_end=0-1;i=end;need_value=false
+   if opened {container=id;depth=depth+1}
+  } else if container<0 {
+   if i!=n {return 4}
+   d.error_offset=0
+   return 0
+  } else {
+   let kind=json_slot(d,container,0)
+   let state=json_slot(d,container,9)
+   let c=json_byte(&d.text,i)
+   var close=false
+   if kind==4 {
+    if (state==0 || state==1) && c==93 {close=true}
+    else if state==1 {
+     if c!=44 {return 4}
+     i=i+1;json_store(d,container,9,2)
+    } else {need_value=true}
+   } else {
+    if (state==0 || state==3) && c==125 {close=true}
+    else if state==0 || state==4 {
+     if c!=34 {return 4}
+     let end=json_string_end(&d.text,i)
+     if end<0 {return 4}
+     json_store(d,container,10,i);json_store(d,container,11,end)
+     i=end;json_store(d,container,9,1)
+    } else if state==1 {
+     if c!=58 {return 4}
+     i=i+1;json_store(d,container,9,2)
+    } else if state==2 {
+     key_start=json_slot(d,container,10);key_end=json_slot(d,container,11);need_value=true
+    } else {
+     if c!=44 {return 4}
+     i=i+1;json_store(d,container,9,4)
+    }
+   }
+   if close {
+    i=i+1;json_store(d,container,2,i)
+    container=json_slot(d,container,6);depth=depth-1
+   }
+  }
+ }
+ return 0
+}
+fn json_dom_set_status(d:&!JsonDom,code:i64) with Mut {d.status=code}
+pub fn json_dom_parse(input:&ByteBuffer,max_bytes:i64,max_depth:i64)->JsonDom with Alloc,Mut,Div,Panic {
+ let n=byte_buffer_len(input)
+ var remaining:i64=0
+ var code:i64=0
+ if max_bytes<0 || max_bytes>9223372036854771704 || max_depth<0 {code=1}
+ else if n>max_bytes {code=2}
+ else {remaining=max_bytes-n}
+ var d=JsonDom {text:byte_buffer_new(n),nodes:integer_buffer_new(0,remaining),status:code,error_offset:0}
+ let result=json_dom_parse_fill(&!d,input,max_depth)
+ json_dom_set_status(&!d,result)
+ return d
+}
+// Copy an exact owned token (including string escapes); output failure preserves its prefix.
+pub fn json_dom_token(d:&JsonDom,id:i64,out:&!ByteBuffer)->i64 with Alloc,Mut,Div,Panic {
+ let node=json_dom_node(d,id)
+ if node.status!=0 {return node.status}
+ var i=node.start
+ while i<node.end {let status=byte_buffer_push(out,json_byte(&d.text,i));if status!=0 {return status};i=i+1}
+ return 0
+}
+pub fn json_dom_i64(d:&JsonDom,id:i64)->IntegerValue with Mut,Div,Panic {
+ let node=json_dom_node(d,id)
+ if node.status!=0 {return IntegerValue {value:0,status:node.status}}
+ if node.kind!=2 {return IntegerValue {value:0,status:6}}
+ var i=node.start
+ let negative=json_byte(&d.text,i)==45
+ if negative {i=i+1}
+ var result:i64=0
+ let limit=if negative {0-9223372036854775807-1} else {0-9223372036854775807}
+ while i<node.end {
+  let c=json_byte(&d.text,i)
+  if !json_digit(c) {return IntegerValue {value:0,status:6}}
+  let digit=c-48
+  if result<limit/10 {return IntegerValue {value:0,status:7}}
+  result=result*10
+  if result<limit+digit {return IntegerValue {value:0,status:7}}
+  result=result-digit;i=i+1
+ }
+ return IntegerValue {value:if negative {result} else {0-result},status:0}
+}
+pub fn json_dom_close(d:JsonDom) with Alloc {
+ let JsonDom {text,nodes,status,error_offset}=d
+ byte_buffer_close(text);integer_buffer_close(nodes)
+}
+
+fn json_push_scalar(out:&!ByteBuffer,cp:i64)->i64 with Alloc,Mut,Div {
+ var status:i64=0
+ if cp<128 {return byte_buffer_push(out,cp)}
+ if cp<2048 {status=byte_buffer_push(out,192+cp/64)}
+ else if cp<65536 {
+  status=byte_buffer_push(out,224+cp/4096)
+  if status==0 {status=byte_buffer_push(out,128+(cp/64)%64)}
+ } else {
+  status=byte_buffer_push(out,240+cp/262144)
+  if status==0 {status=byte_buffer_push(out,128+(cp/4096)%64)}
+  if status==0 {status=byte_buffer_push(out,128+(cp/64)%64)}
+ }
+ if status==0 {status=byte_buffer_push(out,128+cp%64)}
+ return status
+}
+fn json_decode_range(d:&JsonDom,start:i64,end:i64,out:&!ByteBuffer)->i64 with Alloc,Mut,Div {
+ var i=start+1
+ while i<end-1 {
+  var cp=json_byte(&d.text,i)
+  i=i+1
+  if cp==92 {
+   let escape=json_byte(&d.text,i);i=i+1
+   if escape==117 {
+    cp=json_hex4(&d.text,i);i=i+4
+    if cp>=55296 && cp<=56319 {
+     let low=json_hex4(&d.text,i+2)
+     cp=65536+(cp-55296)*1024+low-56320;i=i+6
+    }
+    let status=json_push_scalar(out,cp)
+    if status!=0 {return status}
+   } else {
+    cp=escape
+    if escape==98 {cp=8} else if escape==102 {cp=12} else if escape==110 {cp=10} else if escape==114 {cp=13} else if escape==116 {cp=9}
+    let status=byte_buffer_push(out,cp)
+    if status!=0 {return status}
+   }
+  } else {
+   let status=byte_buffer_push(out,cp)
+   if status!=0 {return status}
+  }
+ }
+ return 0
+}
+pub fn json_dom_string(d:&JsonDom,id:i64,out:&!ByteBuffer)->i64 with Alloc,Mut,Div,Panic {
+ let node=json_dom_node(d,id)
+ if node.status!=0 {return node.status}
+ if node.kind!=3 {return 6}
+ return json_decode_range(d,node.start,node.end,out)
+}
+pub fn json_dom_key(d:&JsonDom,id:i64,out:&!ByteBuffer)->i64 with Alloc,Mut,Div,Panic {
+ let node=json_dom_node(d,id)
+ if node.status!=0 {return node.status}
+ if node.key_start<0 {return 6}
+ return json_decode_range(d,node.key_start,node.key_end,out)
+}
+pub fn json_dom_bool(d:&JsonDom,id:i64)->IntegerValue with Div,Panic {
+ let node=json_dom_node(d,id)
+ if node.status!=0 {return IntegerValue {value:0,status:node.status}}
+ if node.kind!=1 {return IntegerValue {value:0,status:6}}
+ return IntegerValue {value:if json_byte(&d.text,node.start)==116 {1} else {0},status:0}
+}
+pub fn json_dom_serialize(d:&JsonDom,out:&!ByteBuffer)->i64 with Alloc,Mut,Div,Panic {json_dom_token(d,0,out)}
+
+// Lookup compares decoded key bytes and returns the first matching source-order member.
+// The caller explicitly budgets temporary decoded-key storage.
+pub fn json_dom_find(d:&JsonDom,object:i64,key:string,max_key_bytes:i64)->IntegerValue with Alloc,Mut,Div,Panic {
+ let node=json_dom_node(d,object)
+ if node.status!=0 {return IntegerValue {value:0,status:node.status}}
+ if node.kind!=5 || max_key_bytes<0 {return IntegerValue {value:0,status:6}}
+ var scratch=byte_buffer_new(max_key_bytes)
+ var result=IntegerValue {value:0,status:4}
+ var child=node.child
+ while child>=0 {
+  byte_buffer_clear(&!scratch)
+  let code=json_dom_key(d,child,&!scratch)
+  if code!=0 {result=IntegerValue {value:0,status:code};break}
+  var equal=byte_buffer_len(&scratch)==str_len(key)
+  var i:i64=0
+  while equal && i<byte_buffer_len(&scratch) {
+   if json_byte(&scratch,i)!=str_char_at(key,i) {equal=false}
+   i=i+1
+  }
+  if equal {result=IntegerValue {value:child,status:0};break}
+  child=json_dom_node(d,child).next
+ }
+ byte_buffer_close(scratch)
+ return result
+}

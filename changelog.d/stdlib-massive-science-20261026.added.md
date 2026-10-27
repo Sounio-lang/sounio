@@ -1,0 +1,1 @@
+Checked scientific APIs now cover distributions, power, Wilcoxon, survival, FFT, numerical differentiation, FEM/Poisson, BDF/DP54, physical covariance, genomics counts/CSR/batch workflows and scientific palettes/contours, with retained original witnesses and independent C++23 references.

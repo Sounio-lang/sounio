@@ -2,7 +2,7 @@
 // Dynamic borrowed buffers; no internal allocation and transactional output.
 // This is not a count likelihood fit or calibrated posterior/RNA-seq pipeline.
 use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix}
-use linalg::dynamic_least_squares::{dynamic_qr_workspace,dynamic_qr_least_squares}
+use linalg::dynamic_least_squares::{dynamic_qr_workspace,dynamic_qr_least_squares_rhs_prefix}
 use math::pure::{is_finite,ln_checked,exp,sqrt}
 use math::logarithmic::{log1p_checked}
 pub struct DispersionWorkspace {
@@ -97,13 +97,13 @@ fn ds_evaluate(means:&NumericBuffer,estimates:&NumericBuffer,n:i64,
 // All outputs retain their original contents on any failure. Scratch may change.
 // Outlier flags are exactly 0/1 in f64. All genes participate in trend/prior fit.
 // Sampling variances are variances OF log dispersion, not log variances.
-pub fn dispersion_shrinkage_fit(means:&NumericBuffer,estimates:&NumericBuffer,
- sampling_variances:&NumericBuffer,a0_initial:f64,a1_initial:f64,rcond:f64,
+fn ds_fit_prefix(means:&NumericBuffer,estimates:&NumericBuffer,
+ sampling_variances:&NumericBuffer,active:i64,a0_initial:f64,a1_initial:f64,rcond:f64,
  max_iterations:i64,tolerance:f64,outlier_sigma:f64,
  output_log:&!NumericBuffer,output_variance:&!NumericBuffer,output_flags:&!NumericBuffer,
  jacobian:&!NumericBuffer,response:&!NumericBuffer,increment:&!NumericBuffer,
  qr_workspace:&!NumericBuffer,stage:&!NumericBuffer)->DispersionShrinkage with Mut,Div,Panic {
- let n=numeric_buffer_len(means)
+ let n=active
  let plan=dispersion_shrinkage_workspace(n)
  if plan.status!=0 || numeric_buffer_status(means)!=0 ||
  numeric_buffer_status(estimates)!=0 || numeric_buffer_status(sampling_variances)!=0 ||
@@ -111,10 +111,10 @@ pub fn dispersion_shrinkage_fit(means:&NumericBuffer,estimates:&NumericBuffer,
  numeric_buffer_status(output_flags)!=0 || numeric_buffer_status(jacobian)!=0 ||
  numeric_buffer_status(response)!=0 || numeric_buffer_status(increment)!=0 ||
  numeric_buffer_status(qr_workspace)!=0 || numeric_buffer_status(stage)!=0 {return ds_empty(1,n)}
- if numeric_buffer_len(estimates)!=n || numeric_buffer_len(sampling_variances)!=n ||
- numeric_buffer_len(output_log)!=n || numeric_buffer_len(output_variance)!=n ||
- numeric_buffer_len(output_flags)!=n || numeric_buffer_len(jacobian)!=plan.jacobian_elements ||
- numeric_buffer_len(response)!=n || numeric_buffer_len(increment)!=2 ||
+ if numeric_buffer_len(means)<n || numeric_buffer_len(estimates)<n || numeric_buffer_len(sampling_variances)<n ||
+ numeric_buffer_len(output_log)<n || numeric_buffer_len(output_variance)<n ||
+ numeric_buffer_len(output_flags)<n || numeric_buffer_len(jacobian)<plan.jacobian_elements ||
+ numeric_buffer_len(response)<n || numeric_buffer_len(increment)!=2 ||
  numeric_buffer_len(qr_workspace)<plan.qr_elements || numeric_buffer_len(stage)<plan.stage_elements {return ds_empty(1,n)}
  if !is_finite(a0_initial) || !is_finite(a1_initial) || a0_initial<=0.0 || a1_initial<=0.0 ||
  !is_finite(rcond) || rcond<0.0 || rcond>=1.0 || max_iterations<1 || max_iterations>100 ||
@@ -137,7 +137,7 @@ pub fn dispersion_shrinkage_fit(means:&NumericBuffer,estimates:&NumericBuffer,
  if log0.status!=0 || log1.status!=0 {return ds_empty(5,n)}
  var theta0=log0.value
  var theta1=log1.value
- let layout=numeric_matrix(plan.jacobian_elements,n,2,2,1,0)
+ let layout=numeric_matrix(numeric_buffer_len(jacobian),n,2,2,1,0)
  var iteration:i64=0
  var converged=false
  var final_score:f64=0.0
@@ -146,7 +146,7 @@ pub fn dispersion_shrinkage_fit(means:&NumericBuffer,estimates:&NumericBuffer,
  while iteration<max_iterations && !converged {
   let current=ds_evaluate(means,estimates,n,theta0,theta1,jacobian,response,true)
   if current.status!=0 {return ds_empty(4,n)}
-  let solved=dynamic_qr_least_squares(jacobian,&layout,response,increment,qr_workspace,rcond)
+  let solved=dynamic_qr_least_squares_rhs_prefix(jacobian,&layout,response,increment,qr_workspace,rcond)
   if solved.status!=0 {
    var bad=ds_empty(if solved.status==3 {6}else{4},n)
    bad.rank=solved.rank
@@ -295,4 +295,33 @@ pub fn dispersion_shrinkage_fit(means:&NumericBuffer,estimates:&NumericBuffer,
  prior_log_variance:prior,prior_boundary:boundary,outliers:outliers,
  residual_mean_square:objective,sampling_correction:sampling,score_norm:final_score,
  step_norm:final_step,calibration_assessed:false}
+}
+
+// Existing exact-shape facade retains its original public contract.
+pub fn dispersion_shrinkage_fit(means:&NumericBuffer,estimates:&NumericBuffer,
+ sampling_variances:&NumericBuffer,a0_initial:f64,a1_initial:f64,rcond:f64,
+ max_iterations:i64,tolerance:f64,outlier_sigma:f64,
+ output_log:&!NumericBuffer,output_variance:&!NumericBuffer,output_flags:&!NumericBuffer,
+ jacobian:&!NumericBuffer,response:&!NumericBuffer,increment:&!NumericBuffer,
+ qr_workspace:&!NumericBuffer,stage:&!NumericBuffer)->DispersionShrinkage with Mut,Div,Panic {
+ let n=numeric_buffer_len(means)
+ let plan=dispersion_shrinkage_workspace(n)
+ if plan.status!=0 {return ds_empty(1,n)}
+ if numeric_buffer_len(estimates)!=n || numeric_buffer_len(sampling_variances)!=n ||
+ numeric_buffer_len(output_log)!=n || numeric_buffer_len(output_variance)!=n ||
+ numeric_buffer_len(output_flags)!=n || numeric_buffer_len(jacobian)!=plan.jacobian_elements ||
+ numeric_buffer_len(response)!=n {return ds_empty(1,n)}
+ ds_fit_prefix(means,estimates,sampling_variances,n,a0_initial,a1_initial,rcond,max_iterations,tolerance,outlier_sigma,output_log,output_variance,output_flags,jacobian,response,increment,qr_workspace,stage)
+}
+
+// Same canonical estimator on an explicitly active prefix of reusable owners.
+// Only [0..active) input/output rows participate; trailing output is unchanged.
+// All active rows participate in the model. No hidden eligibility filtering.
+pub fn dispersion_shrinkage_fit_prefix(means:&NumericBuffer,estimates:&NumericBuffer,
+ sampling_variances:&NumericBuffer,n:i64,a0_initial:f64,a1_initial:f64,rcond:f64,
+ max_iterations:i64,tolerance:f64,outlier_sigma:f64,
+ output_log:&!NumericBuffer,output_variance:&!NumericBuffer,output_flags:&!NumericBuffer,
+ jacobian:&!NumericBuffer,response:&!NumericBuffer,increment:&!NumericBuffer,
+ qr_workspace:&!NumericBuffer,stage:&!NumericBuffer)->DispersionShrinkage with Mut,Div,Panic {
+ ds_fit_prefix(means,estimates,sampling_variances,n,a0_initial,a1_initial,rcond,max_iterations,tolerance,outlier_sigma,output_log,output_variance,output_flags,jacobian,response,increment,qr_workspace,stage)
 }

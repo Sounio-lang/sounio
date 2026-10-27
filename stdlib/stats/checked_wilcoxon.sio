@@ -1,0 +1,428 @@
+// Conditional signed-rank inference. Exact means finite sign-pattern counting,
+// not a normal approximation. Assumes independent fair signs conditional on
+// observed nonzero magnitudes (in particular a symmetric null distribution).
+// Rank policy0 drops exact zeros before ranking;1 is Pratt (rank zeros, then
+// exclude their deterministic signs). Exact binary64 magnitudes define ties.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
+use collections::numeric_index_sort::{numeric_index_sort_checked}
+use math::pure::{is_finite,sqrt,ln_checked,exp}
+use math::logarithmic::{log1p_checked}
+use stats::checked_distributions::{normal_tails_checked}
+
+pub struct CheckedWilcoxonRanks {
+ pub status:i64,pub n:i64,pub n_eff:i64,pub n_zero:i64,pub zero_method:i64,pub continuity:bool,pub tie_groups:i64,
+ pub rank2_total:i64,pub rank2_positive:i64,pub w_plus:f64,pub w_minus:f64,
+ pub rank_biserial:f64,pub rank_biserial_available:bool,
+ pub variance:f64,pub z:f64,pub z_over_sqrt_n:f64,pub z_available:bool,
+ pub sort_comparisons:i64,pub sort_swaps:i64,
+}
+pub struct WilcoxonRankWorkspace {
+ pub status:i64,pub n:i64,pub numeric_len:i64,pub index_len:i64,pub signed_rank_len:i64,pub payload_bytes:i64,
+}
+// Payload excludes the caller-owned input differences.
+pub fn wilcoxon_rank_workspace(n:i64,max_bytes:i64)->WilcoxonRankWorkspace with Mut {
+ var out=WilcoxonRankWorkspace{status:1,n:n,numeric_len:0,index_len:0,signed_rank_len:0,payload_bytes:0}
+ if n<0 || max_bytes<0 {return out}
+ if n>1000000 {out.status=5;return out}
+ out.numeric_len=n;out.index_len=n;out.signed_rank_len=n;out.payload_bytes=n*24
+ if out.payload_bytes>max_bytes {out.status=6;return out}
+ out.status=0;out
+}
+pub struct WilcoxonExactWorkspace {
+ pub status:i64,pub n_eff:i64,pub alternative:i64,pub gcd_rank2:i64,
+ pub support:i64,pub observed:i64,pub limbs:i64,pub count_len:i64,pub numerator_len:i64,
+ pub payload_bytes:i64,pub operation_bound:i64,pub operation_bound_available:bool,
+}
+pub struct CheckedWilcoxonProbability {
+ pub status:i64,pub method:i64,pub alternative:i64,
+ pub value:f64,pub log_value:f64,pub value_available:bool,pub log_available:bool,
+ pub numerator_available:bool,pub numerator_limbs:i64,pub denominator_exponent:i64,
+ pub support:i64,pub gcd_rank2:i64,pub count_operations:i64,pub normal_iterations:i64,pub payload_bytes:i64,
+}
+fn wc_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn wc_rank_empty(status:i64,n:i64,zero_method:i64,continuity:bool)->CheckedWilcoxonRanks {
+ CheckedWilcoxonRanks{status:status,n:n,n_eff:0,n_zero:0,zero_method:zero_method,continuity:continuity,tie_groups:0,
+ rank2_total:0,rank2_positive:0,w_plus:0.0,w_minus:0.0,rank_biserial:0.0,rank_biserial_available:false,
+ variance:0.0,z:0.0,z_over_sqrt_n:0.0,z_available:false,sort_comparisons:0,sort_swaps:0}
+}
+// Scratch may change after finite-input preflight. No per-observation allocation.
+// Signed doubled midranks are packed into signed_ranks[0..n_eff].
+pub fn wilcoxon_rank_checked(differences:&NumericBuffer,n:i64,zero_method:i64,continuity:bool,
+ magnitudes:&!NumericBuffer,indices:&!IntegerBuffer,signed_ranks:&!IntegerBuffer,
+ sort_budget:i64)->CheckedWilcoxonRanks with Mut,Div,Panic {
+ var out=wc_rank_empty(1,n,zero_method,continuity)
+ if n<0 || sort_budget<0 || (zero_method!=0 && zero_method!=1) {return out}
+ if n>1000000 {out.status=5;return out}
+ if numeric_buffer_status(differences)!=0 || numeric_buffer_status(magnitudes)!=0 || integer_buffer_status(indices)!=0 || integer_buffer_status(signed_ranks)!=0 {return out}
+ if numeric_buffer_len(differences)<n || numeric_buffer_len(magnitudes)<n || integer_buffer_len(indices)<n || integer_buffer_len(signed_ranks)<n {return out}
+ var i:i64=0
+ while i<n {
+  let value=numeric_buffer_at(differences,i)
+  if !is_finite(value) {out.status=2;return out}
+  if value==0.0 {out.n_zero=out.n_zero+1}
+  i=i+1
+ }
+ i=0
+ while i<n {numeric_buffer_set(magnitudes,i,wc_abs(numeric_buffer_at(differences,i)));i=i+1}
+ let sorted=numeric_index_sort_checked(magnitudes,n,indices,sort_budget)
+ out.sort_comparisons=sorted.comparisons;out.sort_swaps=sorted.swaps
+ if sorted.status!=0 {out.status=sorted.status;return out}
+ out.n_eff=n-out.n_zero
+ var g=out.n_zero
+ var packed:i64=0
+ var variance:f64=0.0
+ var correction:f64=0.0
+ while g<n {
+  let original=integer_buffer_at(indices,g)
+  let magnitude=numeric_buffer_at(magnitudes,original)
+  var h=g+1
+  while h<n {
+   let next=integer_buffer_at(indices,h)
+   if numeric_buffer_at(magnitudes,next)!=magnitude {break}
+   h=h+1
+  }
+  if h-g>1 {out.tie_groups=out.tie_groups+1}
+  let rank2=if zero_method==0 {g+h-2*out.n_zero+1}else{g+h+1}
+  var at=g
+  while at<h {
+   let index=integer_buffer_at(indices,at)
+   let positive=numeric_buffer_at(differences,index)>0.0
+   integer_buffer_set(signed_ranks,packed,if positive {rank2}else{-rank2})
+   out.rank2_total=out.rank2_total+rank2
+   if positive {out.rank2_positive=out.rank2_positive+rank2}
+   let rf=rank2 as f64
+   let adjusted=(rf*rf)*0.0625-correction
+   let next=variance+adjusted
+   correction=(next-variance)-adjusted;variance=next
+   packed=packed+1;at=at+1
+  }
+  g=h
+ }
+ out.w_plus=(out.rank2_positive as f64)*0.5
+ out.w_minus=((out.rank2_total-out.rank2_positive) as f64)*0.5
+ out.variance=variance
+ if out.n_eff>0 {
+  let signed=2*out.rank2_positive-out.rank2_total
+  out.rank_biserial=(signed as f64)/(out.rank2_total as f64);out.rank_biserial_available=true
+  if !is_finite(variance) || variance<=0.0 {out.status=4;return out}
+  let raw=(signed as f64)*0.25
+  var magnitude=wc_abs(raw)
+  if continuity {magnitude=if magnitude>0.5 {magnitude-0.5}else{0.0}}
+  let z=magnitude/sqrt(variance)
+  out.z=if raw<0.0 {-z}else{z}
+  out.z_over_sqrt_n=out.z/sqrt(out.n_eff as f64);out.z_available=true
+ }
+ out.status=0
+ out
+}
+fn wc_gcd(a:i64,b:i64)->i64 with Mut,Div {
+ var left=a;var right=b
+ while right!=0 {let next=left%right;left=right;right=next}
+ left
+}
+fn wc_workspace_empty(status:i64,n:i64,alternative:i64)->WilcoxonExactWorkspace {
+ WilcoxonExactWorkspace{status:status,n_eff:n,alternative:alternative,gcd_rank2:0,support:0,observed:0,
+ limbs:0,count_len:0,numerator_len:0,payload_bytes:0,operation_bound:0,operation_bound_available:false}
+}
+// The ranked input is explicit signed integer weights, normally produced above.
+// Conditional inference is on those supplied weights, not on a hidden snapshot.
+// alternative0: inclusive absolute-deviation two-sided;1:less;2:greater.
+// Counts use base2^62, requiring floor(n_eff/62)+1 limbs, not a 62-sample cap.
+// Payload covers counts scratch plus committed numerator; rank/sort scratch and
+// input ownership are separate. Work bounds cell initialization, limb updates
+// and visited tail states; rank scans, sorting and O(limbs+62) conversion separate.
+pub fn wilcoxon_exact_workspace(signed_ranks:&IntegerBuffer,n_eff:i64,alternative:i64,
+ max_bytes:i64,max_operations:i64)->WilcoxonExactWorkspace with Mut,Div,Panic {
+ var out=wc_workspace_empty(1,n_eff,alternative)
+ if n_eff<0 || alternative<0 || alternative>2 || max_bytes<0 || max_bytes>9223372036854771704 || max_operations<0 {return out}
+ if n_eff>1000000 {out.status=5;return out}
+ if integer_buffer_status(signed_ranks)!=0 || integer_buffer_len(signed_ranks)<n_eff {return out}
+ var total:i64=0;var observed:i64=0;var divisor:i64=0;var i:i64=0
+ while i<n_eff {
+  let signed=integer_buffer_at(signed_ranks,i)
+  if signed==0 || signed< -2000000 || signed>2000000 {return out}
+  let weight=if signed<0 {-signed}else{signed}
+  divisor=wc_gcd(divisor,weight);total=total+weight
+  if signed>0 {observed=observed+weight}
+  i=i+1
+ }
+ if divisor==0 {divisor=1}
+ let support=total/divisor
+ let limbs=n_eff/62+1
+ let limit=9223372036854771704/8
+ if support+4>limit/limbs {out.status=5;return out}
+ out.gcd_rank2=divisor;out.support=support;out.observed=observed/divisor
+ out.limbs=limbs;out.count_len=(support+3)*limbs;out.numerator_len=limbs
+ out.payload_bytes=(support+4)*limbs*8
+ if out.payload_bytes>max_bytes {out.status=6;return out}
+ let initial=out.count_len
+ if initial>max_operations {out.status=3;return out}
+ var bound=initial
+ var cumulative:i64=0
+ i=0
+ while i<n_eff {
+  if cumulative+1>(max_operations-bound)/limbs {out.status=3;out.operation_bound=bound;return out}
+  bound=bound+(cumulative+1)*limbs
+  let signed=integer_buffer_at(signed_ranks,i)
+  cumulative=cumulative+(if signed<0 {-signed}else{signed})/divisor
+  i=i+1
+ }
+ if support+1>(max_operations-bound)/(limbs+1) {out.status=3;out.operation_bound=bound;return out}
+ bound=bound+(support+1)*(limbs+1)
+ if limbs>(max_operations-bound-1)/8 {out.status=3;out.operation_bound=bound;return out}
+ bound=bound+8*limbs+1
+ out.operation_bound=bound;out.operation_bound_available=true;out.status=0
+ out
+}
+fn wc_probability_empty(status:i64,method:i64,alternative:i64)->CheckedWilcoxonProbability {
+ CheckedWilcoxonProbability{status:status,method:method,alternative:alternative,value:0.0,log_value:0.0,
+ value_available:false,log_available:false,numerator_available:false,numerator_limbs:0,denominator_exponent:0,
+ support:0,gcd_rank2:0,count_operations:0,normal_iterations:0,payload_bytes:0}
+}
+struct WcCountWork {status:i64,used:i64,cap:i64}
+fn wc_tick(work:&!WcCountWork)->bool with Mut {
+ if work.status!=0 {return false}
+ if work.used>=work.cap {work.status=3;return false}
+ work.used=work.used+1;true
+}
+fn wc_count_add(counts:&!IntegerBuffer,to:i64,from:i64,limbs:i64,work:&!WcCountWork) with Mut,Div,Panic {
+ var carry:i64=0;var limb:i64=0
+ while limb<limbs && work.status==0 {
+  if !wc_tick(work) {return}
+  let a=integer_buffer_at(counts,to+limb)
+  let b=integer_buffer_at(counts,from+limb)
+  // a,b<2^62 and carry<=1: total<=2^63-1, so signed addition is safe.
+  let total=a+b+carry
+  if total>=4611686018427387904 {
+   integer_buffer_set(counts,to+limb,total-4611686018427387904);carry=1
+  }else {integer_buffer_set(counts,to+limb,total);carry=0}
+  limb=limb+1
+ }
+ if work.status==0 && carry!=0 {work.status=4}
+}
+fn wc_pow2(k:i64)->i64 with Mut {
+ var value:i64=1;var i:i64=0
+ while i<k {value=value*2;i=i+1}
+ value
+}
+fn wc_count_bits(counts:&IntegerBuffer,offset:i64,limbs:i64)->i64 with Mut,Div,Panic {
+ var limb=limbs
+ while limb>0 {
+  limb=limb-1
+  var digit=integer_buffer_at(counts,offset+limb)
+  if digit!=0 {
+   var bits:i64=0
+   while digit>0 {digit=digit/2;bits=bits+1}
+   return limb*62+bits
+  }
+ }
+ 0
+}
+fn wc_count_bit(counts:&IntegerBuffer,offset:i64,limbs:i64,bit:i64)->i64 with Mut,Div,Panic {
+ if bit<0 {return 0}
+ let limb=bit/62
+ if limb>=limbs {return 0}
+ (integer_buffer_at(counts,offset+limb)/wc_pow2(bit%62))%2
+}
+fn wc_count_low_nonzero(counts:&IntegerBuffer,offset:i64,limbs:i64,bits:i64)->bool with Mut,Div,Panic {
+ if bits<=0 {return false}
+ let full=bits/62
+ var limb:i64=0
+ while limb<full && limb<limbs {
+  if integer_buffer_at(counts,offset+limb)!=0 {return true}
+  limb=limb+1
+ }
+ if full<limbs && bits%62>0 {
+  if integer_buffer_at(counts,offset+full)%wc_pow2(bits%62)!=0 {return true}
+ }
+ false
+}
+// Caller chooses cut so the returned high part has at most 53 significant bits.
+fn wc_count_high(counts:&IntegerBuffer,offset:i64,limbs:i64,cut:i64)->i64 with Mut,Div,Panic {
+ let limb=cut/62
+ if limb>=limbs {return 0}
+ let shift=cut%62
+ var value=integer_buffer_at(counts,offset+limb)/wc_pow2(shift)
+ if limb+1<limbs {
+  let next=integer_buffer_at(counts,offset+limb+1)
+  if next!=0 {value=value+next*wc_pow2(62-shift)}
+ }
+ value
+}
+fn wc_count_round(counts:&IntegerBuffer,offset:i64,limbs:i64,cut:i64)->i64 with Mut,Div,Panic {
+ var value=wc_count_high(counts,offset,limbs,cut)
+ if cut>0 {
+  if wc_count_bit(counts,offset,limbs,cut-1)==1 {
+   if wc_count_low_nonzero(counts,offset,limbs,cut-1) || value%2==1 {value=value+1}
+  }
+ }
+ value
+}
+fn wc_scale_down(value:f64,k:i64)->f64 with Mut {
+ var out=value;var left=k
+ while left>=512 {out=out*7.4583407312002067e-155;left=left-512}
+ while left>0 {out=out*0.5;left=left-1}
+ out
+}
+// Round the exact dyadic to binary64, including ties-to-even subnormal counts.
+fn wc_count_value(counts:&IntegerBuffer,offset:i64,limbs:i64,exponent:i64)->f64 with Mut,Div,Panic {
+ let bits=wc_count_bits(counts,offset,limbs)
+ if bits==0 {return 0.0}
+ if bits-1-exponent< -1022 {
+  let cut=exponent-1074
+  let coefficient=if cut>0 {wc_count_round(counts,offset,limbs,cut)}else{wc_count_high(counts,offset,limbs,0)*wc_pow2(-cut)}
+  return (coefficient as f64)*4.9406564584124654e-324
+ }
+ let cut=if bits>53 {bits-53}else{0}
+ let coefficient=wc_count_round(counts,offset,limbs,cut)
+ wc_scale_down(coefficient as f64,exponent-cut)
+}
+fn wc_count_log(counts:&IntegerBuffer,offset:i64,limbs:i64,exponent:i64)->f64 with Mut,Div,Panic {
+ let bits=wc_count_bits(counts,offset,limbs)
+ let cut=if bits>53 {bits-53}else{0}
+ let high=wc_count_high(counts,offset,limbs,cut)
+ let mantissa=(high as f64)/(wc_pow2(bits-cut-1) as f64)
+ // Subtract exponents as integers before multiplying; avoid large-log cancellation.
+ ln_checked(mantissa).value+((bits-1-exponent) as f64)*0.6931471805599453
+}
+fn wc_exact_failure(query:&WilcoxonExactWorkspace,work:&WcCountWork,status:i64)->CheckedWilcoxonProbability with Mut {
+ var out=wc_probability_empty(status,1,query.alternative)
+ out.denominator_exponent=query.n_eff;out.support=query.support;out.gcd_rank2=query.gcd_rank2
+ out.payload_bytes=query.payload_bytes;out.count_operations=work.used
+ out
+}
+// Scratch distribution rows, tail numerator and complement occupy count_len.
+// The external numerator is committed only after all checked work succeeds.
+pub fn wilcoxon_exact_ranked_checked(signed_ranks:&IntegerBuffer,n_eff:i64,alternative:i64,
+ counts:&!IntegerBuffer,numerator:&!IntegerBuffer,max_bytes:i64,max_operations:i64)->CheckedWilcoxonProbability with Mut,Div,Panic {
+ let query=wilcoxon_exact_workspace(signed_ranks,n_eff,alternative,max_bytes,max_operations)
+ var work=WcCountWork{status:0,used:0,cap:max_operations}
+ if query.status!=0 {return wc_exact_failure(&query,&work,query.status)}
+ if integer_buffer_status(counts)!=0 || integer_buffer_status(numerator)!=0 {return wc_exact_failure(&query,&work,1)}
+ if integer_buffer_len(counts)<query.count_len || integer_buffer_len(numerator)<query.numerator_len {return wc_exact_failure(&query,&work,1)}
+ let limbs=query.limbs
+ var i:i64=0
+ while i<query.count_len {
+  if !wc_tick(&!work) {return wc_exact_failure(&query,&work,work.status)}
+  integer_buffer_set(counts,i,0);i=i+1
+ }
+ if !wc_tick(&!work) {return wc_exact_failure(&query,&work,work.status)}
+ integer_buffer_set(counts,0,1)
+ var cumulative:i64=0
+ i=0
+ while i<n_eff && work.status==0 {
+  let signed=integer_buffer_at(signed_ranks,i)
+  let weight=(if signed<0 {-signed}else{signed})/query.gcd_rank2
+  var j=cumulative
+  while j>=0 && work.status==0 {
+   wc_count_add(counts,(j+weight)*limbs,j*limbs,limbs,&!work)
+   j=j-1
+  }
+  cumulative=cumulative+weight;i=i+1
+ }
+ if work.status!=0 {return wc_exact_failure(&query,&work,work.status)}
+ let tail=(query.support+1)*limbs
+ let complement=(query.support+2)*limbs
+ let opposite=query.support-query.observed
+ let lower=if query.observed<opposite {query.observed}else{opposite}
+ let upper=query.support-lower
+ i=0
+ while i<=query.support && work.status==0 {
+  if !wc_tick(&!work) {return wc_exact_failure(&query,&work,work.status)}
+  let include=if alternative==1 {i<=query.observed}else{if alternative==2 {i>=query.observed}else{i<=lower || i>=upper}}
+  if include {wc_count_add(counts,tail,i*limbs,limbs,&!work)}
+  i=i+1
+ }
+ if work.status!=0 {return wc_exact_failure(&query,&work,work.status)}
+ var borrow:i64=0
+ i=0
+ while i<limbs {
+  if !wc_tick(&!work) {return wc_exact_failure(&query,&work,work.status)}
+  let digit=if i==n_eff/62 {wc_pow2(n_eff%62)}else{0}
+  var value=digit-integer_buffer_at(counts,tail+i)-borrow
+  if value<0 {value=value+4611686018427387904;borrow=1}else{borrow=0}
+  integer_buffer_set(counts,complement+i,value);i=i+1
+ }
+ if borrow!=0 || wc_count_bits(counts,tail,limbs)==0 {return wc_exact_failure(&query,&work,4)}
+ var out=wc_probability_empty(0,1,alternative)
+ let remaining_bits=wc_count_bits(counts,complement,limbs)
+ if remaining_bits==0 {
+  out.value=1.0;out.value_available=true;out.log_value=0.0;out.log_available=true
+ }else if wc_count_bits(counts,tail,limbs)>=n_eff {
+  let small=wc_count_value(counts,complement,limbs,n_eff)
+  out.value=wc_count_value(counts,tail,limbs,n_eff);out.value_available=true
+  if small>0.0 {
+   let logged=log1p_checked(-small)
+   if logged.status!=0 {return wc_exact_failure(&query,&work,4)}
+   out.log_value=logged.value;out.log_available=true
+  }else if n_eff>=1075 {
+   // At exactly q=2^-1075, scalar q rounds to zero, but the positive
+   // higher-order terms in -log(1-q) put its magnitude beyond that tie.
+   let midpoint=n_eff-1075
+   if remaining_bits==midpoint+1 {
+    if !wc_count_low_nonzero(counts,complement,limbs,midpoint) {
+     out.log_value= -4.9406564584124654e-324;out.log_available=true
+    }
+   }
+  }
+ }else {
+  out.value=wc_count_value(counts,tail,limbs,n_eff);out.value_available=out.value>0.0
+  out.log_value=wc_count_log(counts,tail,limbs,n_eff);out.log_available=is_finite(out.log_value)
+ }
+ if !is_finite(out.value) || out.value<0.0 || out.value>1.0 || (out.log_available && (!is_finite(out.log_value) || out.log_value>0.0)) {return wc_exact_failure(&query,&work,4)}
+ // Reserve the complete commit before changing the caller's numerator.
+ if work.cap-work.used<limbs {return wc_exact_failure(&query,&work,3)}
+ i=0
+ while i<limbs {
+  let counted=wc_tick(&!work)
+  integer_buffer_set(numerator,i,integer_buffer_at(counts,tail+i));i=i+1
+ }
+ out.numerator_available=true;out.numerator_limbs=limbs;out.denominator_exponent=n_eff
+ out.support=query.support;out.gcd_rank2=query.gcd_rank2;out.count_operations=work.used;out.payload_bytes=query.payload_bytes
+ out
+}
+// Explicit normal approximation; never called as an exact-method fallback.
+// Continuity is +0.5 for less, -0.5 for greater, toward the mean for two-sided.
+// The signed legacy z diagnostic itself retains the two-sided convention.
+pub fn wilcoxon_normal_approx_checked(ranks:&CheckedWilcoxonRanks,alternative:i64,
+ budget:i64,tol:f64)->CheckedWilcoxonProbability with Mut,Div,Panic {
+ var out=wc_probability_empty(1,2,alternative)
+ if ranks.status!=0 {out.status=ranks.status;return out}
+ if alternative<0 || alternative>2 {return out}
+ if !is_finite(tol) {out.status=2;return out}
+ if budget<1 || budget>1000000 || tol<1.7763568394002505e-15 || tol>1.0e-4 {return out}
+ if ranks.n_eff<0 || ranks.n_eff>1000000 || ranks.rank2_total<0 || ranks.rank2_total>2000000000000 || ranks.rank2_positive<0 || ranks.rank2_positive>ranks.rank2_total {return out}
+ if ranks.n_eff==0 {
+  if ranks.rank2_total!=0 {return out}
+  out.status=0;out.value=1.0;out.log_value=0.0;out.value_available=true;out.log_available=true;return out
+ }
+ if !is_finite(ranks.z) || !is_finite(ranks.variance) {out.status=2;return out}
+ if !ranks.z_available || ranks.variance<=0.0 {out.status=5;return out}
+ let raw=((2*ranks.rank2_positive-ranks.rank2_total) as f64)*0.25
+ var adjusted=raw
+ if ranks.continuity {
+  if alternative==1 {adjusted=raw+0.5}
+  else if alternative==2 {adjusted=raw-0.5}
+  else {
+   let magnitude=if wc_abs(raw)>0.5 {wc_abs(raw)-0.5}else{0.0}
+   adjusted=if raw<0.0 {-magnitude}else{magnitude}
+  }
+ }
+ let sd=sqrt(ranks.variance)
+ if !is_finite(sd) || sd<=0.0 {out.status=4;return out}
+ let standardized=adjusted/sd
+ if !is_finite(standardized) {out.status=4;return out}
+ let z=if alternative==0 {wc_abs(standardized)}else{standardized}
+ let normal=normal_tails_checked(0.0,1.0,z,budget,tol)
+ out.normal_iterations=normal.iterations
+ if normal.status!=0 {out.status=normal.status;return out}
+ if alternative==0 {
+  if !normal.log_sf_available {out.status=5;return out}
+  out.log_value=normal.log_sf+0.6931471805599453;out.log_available=true
+  out.value=exp(out.log_value);out.value_available=out.value>0.0
+ }else if alternative==1 {
+  out.value=normal.cdf;out.log_value=normal.log_cdf;out.value_available=normal.cdf_available;out.log_available=normal.log_cdf_available
+ }else {out.value=normal.sf;out.log_value=normal.log_sf;out.value_available=normal.sf_available;out.log_available=normal.log_sf_available}
+ out.status=0;out
+}

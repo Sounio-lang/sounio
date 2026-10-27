@@ -1,0 +1,103 @@
+// Owned multi-record FASTA for IUPAC DNA/RNA. Preserves ambiguity symbols;
+// sequence extraction normalizes case and skips ASCII spaces/tabs/line endings.
+// Headers and record count have no fixed cap. Budget = input copy + 40 bytes/record.
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_status,byte_buffer_len,byte_buffer_get,byte_buffer_reserve,byte_buffer_push,byte_buffer_utf8_count,byte_buffer_close}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_len,integer_buffer_resize,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+pub linear struct DynamicFasta {text:ByteBuffer,records:IntegerBuffer,status:i64}
+pub struct FastaSpan {pub header_start:i64,pub header_end:i64,pub sequence_start:i64,pub sequence_end:i64,pub bases:i64,pub status:i64}
+fn fasta_byte(b:&ByteBuffer,i:i64)->i64 {byte_buffer_get(b,i).value}
+fn fasta_upper(c:i64)->i64 {if c>=97 && c<=122 {c-32} else {c}}
+fn fasta_iupac(c:i64)->bool {c==65 || c==67 || c==71 || c==84 || c==85 || c==82 || c==89 || c==83 || c==87 || c==75 || c==77 || c==66 || c==68 || c==72 || c==86 || c==78}
+fn fasta_code(code:i64)->i64 {if code==2 {105} else if code==3 {12} else if code!=0 {22} else {0}}
+pub fn dynamic_fasta_status(d:&DynamicFasta)->i64 {d.status}
+pub fn dynamic_fasta_len(d:&DynamicFasta)->i64 with Div {integer_buffer_len(&d.records)/5}
+fn fasta_write(d:&!DynamicFasta,index:i64,value:i64) with Mut,Panic {assert(integer_buffer_set(&!d.records,index,value)==0)}
+fn fasta_fill(d:&!DynamicFasta,input:&ByteBuffer)->i64 with Alloc,Mut,Div,Panic {
+ if d.status!=0 {return d.status}
+ if byte_buffer_status(input)!=0 {return 22}
+ if byte_buffer_utf8_count(input).status!=0 {return 84}
+ let n=byte_buffer_len(input)
+ let allocation=byte_buffer_reserve(&!d.text,n)
+ if allocation!=0 {return fasta_code(allocation)}
+ var i:i64=0
+ while i<n {assert(byte_buffer_push(&!d.text,fasta_byte(input,i))==0);i=i+1}
+ i=0
+ var current:i64=0-1
+ var bases:i64=0
+ while i<n {
+  let start=i
+  while i<n && fasta_byte(&d.text,i)!=10 {i=i+1}
+  var end=i
+  if end>start && fasta_byte(&d.text,end-1)==13 {end=end-1}
+  let next=if i<n {i+1} else {i}
+  if end>start {
+   if fasta_byte(&d.text,start)==62 {
+    if current>=0 {
+     if bases==0 {return 22}
+     fasta_write(d,current+3,start);fasta_write(d,current+4,bases)
+    }
+    if end==start+1 {return 22}
+    let words=integer_buffer_len(&d.records)
+    let code=integer_buffer_resize(&!d.records,words+5)
+    if code!=0 {return fasta_code(code)}
+    current=words;bases=0
+    fasta_write(d,current,start+1);fasta_write(d,current+1,end)
+    fasta_write(d,current+2,next);fasta_write(d,current+3,n)
+   } else {
+    if current<0 {return 22}
+    var j=start
+    while j<end {
+     let c=fasta_byte(&d.text,j)
+     if c!=32 && c!=9 {
+      if !fasta_iupac(fasta_upper(c)) {return 22}
+      bases=bases+1
+     }
+     j=j+1
+    }
+   }
+  }
+  i=next
+ }
+ if current<0 || bases==0 {return 22}
+ fasta_write(d,current+3,n);fasta_write(d,current+4,bases)
+ return 0
+}
+fn fasta_status_set(d:&!DynamicFasta,code:i64) with Mut {d.status=code}
+pub fn dynamic_fasta_parse(input:&ByteBuffer,max_bytes:i64)->DynamicFasta with Alloc,Mut,Div,Panic {
+ let n=byte_buffer_len(input)
+ var code:i64=0
+ var remaining:i64=0
+ if max_bytes<0 || max_bytes>9223372036854771704 {code=22}
+ else if n>max_bytes {code=105}
+ else {remaining=max_bytes-n}
+ var d=DynamicFasta {text:byte_buffer_new(n),records:integer_buffer_new(0,remaining),status:code}
+ let result=fasta_fill(&!d,input)
+ fasta_status_set(&!d,result)
+ return d
+}
+pub fn dynamic_fasta_record(d:&DynamicFasta,id:i64)->FastaSpan with Div,Panic {
+ var code=d.status
+ if code==0 {if id<0 || id>=dynamic_fasta_len(d) {code=22}}
+ if code!=0 {return FastaSpan {header_start:0,header_end:0,sequence_start:0,sequence_end:0,bases:0,status:code}}
+ let index=id*5
+ return FastaSpan {header_start:integer_buffer_at(&d.records,index),header_end:integer_buffer_at(&d.records,index+1),sequence_start:integer_buffer_at(&d.records,index+2),sequence_end:integer_buffer_at(&d.records,index+3),bases:integer_buffer_at(&d.records,index+4),status:0}
+}
+pub fn dynamic_fasta_header(d:&DynamicFasta,id:i64,out:&!ByteBuffer)->i64 with Alloc,Mut,Div,Panic {
+ let record=dynamic_fasta_record(d,id)
+ if record.status!=0 {return record.status}
+ var i=record.header_start
+ while i<record.header_end {let code=byte_buffer_push(out,fasta_byte(&d.text,i));if code!=0 {return fasta_code(code)};i=i+1}
+ return 0
+}
+pub fn dynamic_fasta_sequence(d:&DynamicFasta,id:i64,out:&!ByteBuffer)->i64 with Alloc,Mut,Div,Panic {
+ let record=dynamic_fasta_record(d,id)
+ if record.status!=0 {return record.status}
+ var i=record.sequence_start
+ while i<record.sequence_end {
+  let c=fasta_byte(&d.text,i)
+  if c!=32 && c!=9 && c!=10 && c!=13 {let code=byte_buffer_push(out,fasta_upper(c));if code!=0 {return fasta_code(code)}}
+  i=i+1
+ }
+ return 0
+}
+pub fn dynamic_fasta_close(d:DynamicFasta) with Alloc {let DynamicFasta {text,records,status}=d;byte_buffer_close(text);integer_buffer_close(records)}

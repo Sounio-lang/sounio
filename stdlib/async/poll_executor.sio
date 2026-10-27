@@ -1,0 +1,76 @@
+// Cooperative polling executor. Every task is a typed plain function and owned i64 state.
+// Poll callbacks must return promptly; a pending task may set a monotonic wake deadline.
+// Storage is six i64 words per task, charged to the explicit payload budget.
+use collections::integer_buffer::{IntegerBuffer,IntegerValue,integer_buffer_new,integer_buffer_len,integer_buffer_status,integer_buffer_resize,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+use ffi::platform::{Platform,platform_call}
+pub struct PollStep {pub state:i64,pub outcome:i64,pub value:i64,pub wake_at_ns:i64}
+pub linear struct PollExecutor {slots:IntegerBuffer,cursor:i64,pending:i64}
+pub struct PollTask {pub status:i64,pub value:i64}
+pub fn poll_executor_new(max_bytes:i64)->PollExecutor with Alloc,Mut,Div {
+ PollExecutor {slots:integer_buffer_new(0,max_bytes),cursor:0,pending:0}
+}
+pub fn poll_executor_pending(e:&PollExecutor)->i64 {e.pending}
+pub fn poll_executor_spawn(e:&!PollExecutor,callback:fn(i64)->PollStep with IO,Alloc,Mut,Div,Panic,state:i64)->IntegerValue with Alloc,Mut,Div,Panic {
+ let n=integer_buffer_len(&e.slots)
+ // Buffer payload cap also bounds n+6, before arithmetic.
+ if n>9223372036854771696 {return IntegerValue {value:0,status:2}}
+ let status=integer_buffer_resize(&!e.slots,n+6)
+ if status!=0 {return IntegerValue {value:0,status:status}}
+ assert(integer_buffer_set(&!e.slots,n,callback as i64)==0)
+ assert(integer_buffer_set(&!e.slots,n+1,state)==0)
+ e.pending=e.pending+1
+ return IntegerValue {value:n/6,status:0}
+}
+pub fn poll_executor_result(e:&PollExecutor,id:i64)->PollTask with Div,Panic {
+ if id<0 || id>=integer_buffer_len(&e.slots)/6 {return PollTask {status:4,value:0}}
+ let index=id*6
+ return PollTask {status:integer_buffer_at(&e.slots,index+2),value:integer_buffer_at(&e.slots,index+3)}
+}
+pub fn poll_executor_cancel(e:&!PollExecutor,id:i64)->i64 with Mut,Div,Panic {
+ let result=poll_executor_result(e,id)
+ if result.status==4 {return 4}
+ if result.status!=0 {return 22}
+ assert(integer_buffer_set(&!e.slots,id*6+2,3)==0)
+ e.pending=e.pending-1
+ return 0
+}
+// Poll at most max_polls callbacks, scanning each task at most once per call.
+// No sleeping, waiting on channels or blocking socket operation occurs here.
+pub fn poll_executor_tick(e:&!PollExecutor,p:&Platform,max_polls:i64)->IntegerValue with IO,Alloc,Mut,Div,Panic {
+ if max_polls<0 {return IntegerValue {value:0,status:22}}
+ let storage_status=integer_buffer_status(&e.slots)
+ if storage_status!=0 {return IntegerValue {value:0,status:storage_status}}
+ let now=platform_call(p,30,0,0,0,0)
+ if now.status!=0 {return IntegerValue {value:0,status:now.status}}
+ let count=integer_buffer_len(&e.slots)/6
+ var scanned:i64=0
+ var polled:i64=0
+ while scanned<count && polled<max_polls && e.pending>0 {
+  let id=e.cursor
+  e.cursor=(e.cursor+1)%count
+  scanned=scanned+1
+  let index=id*6
+  if integer_buffer_at(&e.slots,index+2)==0 && integer_buffer_at(&e.slots,index+4)<=now.value {
+   let raw=integer_buffer_at(&e.slots,index)
+   let callback=raw as fn(i64)->PollStep with IO,Alloc,Mut,Div,Panic
+   let step=callback(integer_buffer_at(&e.slots,index+1))
+   polled=polled+1
+   if step.outcome<0 || step.outcome>2 || step.wake_at_ns<0 {
+    assert(integer_buffer_set(&!e.slots,index+2,2)==0)
+    assert(integer_buffer_set(&!e.slots,index+3,22)==0)
+    e.pending=e.pending-1
+   } else {
+    assert(integer_buffer_set(&!e.slots,index+1,step.state)==0)
+    assert(integer_buffer_set(&!e.slots,index+2,step.outcome)==0)
+    assert(integer_buffer_set(&!e.slots,index+3,step.value)==0)
+    assert(integer_buffer_set(&!e.slots,index+4,step.wake_at_ns)==0)
+    if step.outcome!=0 {e.pending=e.pending-1}
+   }
+  }
+ }
+ return IntegerValue {value:polled,status:0}
+}
+pub fn poll_executor_close(e:PollExecutor) with Alloc {
+ let PollExecutor {slots,cursor,pending}=e
+ integer_buffer_close(slots)
+}

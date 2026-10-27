@@ -1,0 +1,1 @@
+Native TCP and UDP socket owners now reject operations for the wrong protocol with EINVAL before I/O, preserving datagram truncation detection instead of allowing a datagram through the stream receive path.

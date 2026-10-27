@@ -99,6 +99,8 @@ struct LowerLocalStack {
     box_inner_layout: Box<LowerLocalI64Slots>,
     // 1 when local/param is fn(...) -> f64 (or f32); drives IrCallIndirect float markers.
     fn_ptr_ret_float: Box<LowerLocalI64Slots>,
+    // Layout of the result of a typed function pointer, -1 when absent.
+    fn_ptr_ret_layout: Box<LowerLocalI64Slots>,
     // #2504: -1 unknown; 0 = Knowledge<integer> (`.value` is an i64 word);
     // 1 = Knowledge<f64>. The synthetic Knowledge layout
     // (ir_register_knowledge_layout) marks `value` as f64 for every T, which is
@@ -252,6 +254,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         closure_fn_id: lowerer_box_local_i64_slots(-1),
         box_inner_layout: lowerer_box_local_i64_slots(-1),
         fn_ptr_ret_float: lowerer_box_local_i64_slots(0),
+        fn_ptr_ret_layout: lowerer_box_local_i64_slots(-1),
         kn_value_float: lowerer_box_local_i64_slots(0 - 1),
         opt_payload_kind: lowerer_box_local_i64_slots(0),
         count: 0,
@@ -6647,6 +6650,19 @@ fn lowerer_mark_local_wide_bits_mut(
     }
 }
 
+fn lowerer_mark_local_fn_ptr_ret_layout_mut(lo: &! Lowerer, name: Name, layout: i64) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).fn_ptr_ret_layout).values[i as usize] = layout
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
 fn lowerer_mark_local_fn_ptr_ret_float_mut(
     lo: &! Lowerer,
     name: Name
@@ -7007,6 +7023,8 @@ fn lowerer_lower_fn_params_mut(
                 if param_kn >= 0 {
                     lowerer_bind_kn_value_float_mut(lo, (*list).head.name, param_kn)
                 }
+                let fn_return_layout = lower_struct_layout_index_of(&(*(*lo).struct_layouts), lower_type_expr_fn_return_struct_name(&(*list).head.ty))
+                if fn_return_layout >= 0 { lowerer_mark_local_fn_ptr_ret_layout_mut(lo, (*list).head.name, fn_return_layout) }
                 let param_seq_elem = lower_type_expr_seq_named_elem_name(&(*list).head.ty)
                 if lower_name_is_direct_word_scalar_type(param_seq_elem) {
                     lowerer_mark_local_array_copy_word_scalar_mut(lo, (*list).head.name)
@@ -8410,6 +8428,14 @@ fn lower_f128_expr_callee_short(callee: &Expr) -> Name with Mut, Panic, Div, All
     ir_empty_name()
 }
 
+fn lower_type_expr_fn_return_struct_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeFn { return ir_empty_name() }
+    match (*te).inner {
+        Some(ret) => lower_param_struct_type_name(&(*ret)),
+        None => ir_empty_name(),
+    }
+}
+
 fn lower_type_expr_fn_returns_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeFn { return false }
     match (*te).inner {
@@ -8560,6 +8586,7 @@ fn lower_name_is_packed_string_producer(n: Name) -> bool with Div {
 // Do NOT add an unconditional deref inside the builtin — that broke the
 // canonical handle shape and Madaros self-host (see DATA_IO_TRILHA_B note).
 fn lower_name_is_handle_buf_builtin(n: Name) -> bool with Div {
+    if n.len == 11 && n.buf[0] == 97 as i8 && n.buf[1] == 112 as i8 && n.buf[2] == 112 as i8 && n.buf[3] == 101 as i8 && n.buf[4] == 110 as i8 && n.buf[5] == 100 as i8 && n.buf[6] == 95 as i8 && n.buf[7] == 102 as i8 && n.buf[8] == 105 as i8 && n.buf[9] == 108 as i8 && n.buf[10] == 101 as i8 { return true }
     if n.len == 14 {
         // str_from_bytes
         return n.buf[0] == 115 as i8 && n.buf[1] == 116 as i8 && n.buf[2] == 114 as i8
@@ -8593,6 +8620,7 @@ fn lower_name_is_ffi_system(n: Name) -> bool with Div {
 // Buffer argument index for handle-buf builtins: str_from_bytes(buf,n) → 0,
 // write_file(path,buf,n) → 1. -1 when not a handle-buf builtin.
 fn lower_handle_buf_arg_index(n: Name) -> i64 with Div {
+    if n.len == 11 && n.buf[0] == 97 as i8 && n.buf[1] == 112 as i8 && n.buf[2] == 112 as i8 && n.buf[3] == 101 as i8 && n.buf[4] == 110 as i8 && n.buf[5] == 100 as i8 && n.buf[6] == 95 as i8 && n.buf[7] == 102 as i8 && n.buf[8] == 105 as i8 && n.buf[9] == 108 as i8 && n.buf[10] == 101 as i8 { return 1 }
     if n.len == 14 {
         // str_from_bytes
         let ok = n.buf[0] == 115 as i8 && n.buf[1] == 116 as i8 && n.buf[2] == 114 as i8
@@ -14806,6 +14834,7 @@ impl Lowerer {
                 // Explicit -1: slot reuse across functions — see lowerer_bind_local_mut.
                 (*(*stk).box_inner_layout).values[idx as usize] = 0 - 1
                 (*(*stk).fn_ptr_ret_float).values[idx as usize] = 0
+                (*(*stk).fn_ptr_ret_layout).values[idx as usize] = 0 - 1
                 (*(*stk).kn_value_float).values[idx as usize] = 0 - 1
                 (*(*stk).opt_payload_kind).values[idx as usize] = 0
                 (*stk).count = idx + 1
@@ -15361,6 +15390,17 @@ impl Lowerer {
             }
             None => 0,
         }
+    }
+
+    fn lookup_local_fn_ptr_ret_layout(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).fn_ptr_ret_layout).values[i as usize]
+            }
+            i = i - 1
+        }
+        0 - 1
     }
 
     fn lookup_local_fn_ptr_ret_float(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
@@ -23087,6 +23127,11 @@ impl Lowerer {
                 // later indexing or field access.
                 let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                 if callee_name.len <= 0 { return ir_empty_name() }
+                if self.lookup_local(callee_name) >= 0 {
+                    let layout = self.lookup_local_fn_ptr_ret_layout(callee_name)
+                    if layout >= 0 && layout < (*self.struct_layouts).count { return (*self.struct_layouts).entries[layout as usize].type_name }
+                    return ir_empty_name()
+                }
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                 self.return_struct_name_for_fn_id(fn_id)
             }
@@ -29034,6 +29079,34 @@ impl Lowerer {
             None => {}
         }
         if fn_result_float { lowerer_mark_local_fn_ptr_ret_float_mut(&!lo, s.name) }
+        // Preserve the declared result layout of a function value. Its own local
+        // is still a pointer; this metadata types a later indirect call result.
+        var fn_result_layout = 0 - 1
+        match s.ty {
+            Some(ty) => { fn_result_layout = lower_struct_layout_index_of(&(*lo.struct_layouts), lower_type_expr_fn_return_struct_name(&(*ty))) }
+            None => {}
+        }
+        match s.expr {
+            Some(rhs) => {
+                if (*rhs).kind == ExprKind::ExprCast {
+                    match (*rhs).cast_type {
+                        Some(ty) => { fn_result_layout = lower_struct_layout_index_of(&(*lo.struct_layouts), lower_type_expr_fn_return_struct_name(&(*ty))) }
+                        None => {}
+                    }
+                } else if (*rhs).kind == ExprKind::ExprIdent {
+                    let local_index = lo.lookup_local((*rhs).name)
+                    if local_index >= 0 {
+                        fn_result_layout = lo.lookup_local_fn_ptr_ret_layout((*rhs).name)
+                    } else {
+                        let fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, (*rhs).name)
+                        fn_result_layout = lower_struct_layout_index_of(&(*lo.struct_layouts), lo.return_struct_name_for_fn_id(fn_id))
+                    }
+                }
+            }
+            None => {}
+        }
+        if fn_result_layout >= 0 { lowerer_mark_local_fn_ptr_ret_layout_mut(&!lo, s.name, fn_result_layout) }
+
         var float_array_depth = lower_opt_float_array_depth(&s.ty)
         if float_array_depth == 0 {
             match s.expr {
@@ -36188,7 +36261,23 @@ impl Lowerer {
         // `.len()` is intrinsic for strings, arrays, and open slices. It is
         // accepted by the checker, but lowering it as an ordinary method invents
         // a body-less `len` function and crashes the native path.
-        if ir_name_eq(e.name, make_name("len")) && !ir_name_eq(recv_type, make_name("Seq")) {
+        // A declared struct method named len is an ordinary impl call.
+        // Fixed arrays retain the intrinsic even when their element type has len.
+        var len_receiver_is_array = false
+        match e.left {
+            Some(recv_len) => {
+                if (*recv_len).kind == ExprKind::ExprIdent {
+                    len_receiver_is_array = self.lookup_local_fixed_array_len((*recv_len).name) >= 0
+                        || self.lookup_local_struct_type_is_array_elem((*recv_len).name)
+                }
+            }
+            None => {}
+        }
+        let declared_len_id = if recv_type.len > 0 {
+            lowerer_lookup_fn_id_by_name_ref(&self, ir_mangle_method_name(recv_type, make_name("len")))
+        } else { -1 }
+        if ir_name_eq(e.name, make_name("len")) && !ir_name_eq(recv_type, make_name("Seq"))
+            && (declared_len_id < 0 || len_receiver_is_array) {
             match e.args {
                 None => {
                     match e.left {
