@@ -89,7 +89,7 @@ def export(repo, revision, output):
                 raise ValueError(f'Unsupported or duplicate input: {name}')
             if entry.issym() and name in PROOF_LINKS:
                 origin = PROOF_LINKS[name]
-                if entry.linkname != '/home/demetrios/work/sounio/' + origin:
+                if entry.linkname != '../../../../../' + origin:
                     raise ValueError(f'Unexpected historical proof link: {name}')
                 listing = subprocess.check_output(['git', '-C', str(repo), 'ls-tree', commit, '--', origin], text=True)
                 if not listing.startswith('100644 blob '):
