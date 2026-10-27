@@ -110,4 +110,8 @@ The reusable source/compiler/ELF guarded gate is
 unchanged original mechanics/classical fixtures, independent analytic C++23
 value/uncertainty checks and a deliberately wrong kinetic-energy uncertainty
 that the oracle must reject. Native evidence is kept separate from the
-remaining typed phonon migration onto protected joint-factor transport.
+Quantity phonon adapters onto protected joint-factor transport.
+
+The explicit modules `physics::phonon_quantity` and `physics::pbpk_phonon_q` provide checked SI Quantity adapters to the same authoritative solver. `PhononQuantityParams` checks all fifteen dimensions, finite values/standard uncertainties and physical domains. `PhononQuantityState` is a protected linear owner with copied getters and explicit close. The `from_independent_quantities` constructor declares independent marginal sources; the factor-aware constructor preserves signed shared columns and checks their declared parameter marginal norms. Scalar pulsatile Quantity output is explicitly an independent-marginal calculation using copied canonical sensitivities. Shared-factor integration, spatial averages and PBPK correction retain the same latent basis.
+
+See `tests/stdlib/wave3-phonon-quantity/README.md` for the explicit retired-caller migration, unchanged numerical assertion audit and C++23 covariance/gradient controls. `scripts/stdlib/wave3_phonon_quantity_gate.sh FRESH_ABSOLUTE_OUTPUT` is the mandatory focused gate. It preserves byte-identical pre-migration refusals and checks owner second-close rejection; it does not restore public mutable variance snapshots.

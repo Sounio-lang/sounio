@@ -1,0 +1,209 @@
+// Checked SI Quantity boundary for the authoritative joint-factor transport.
+// No marginal-only transport kernel; no inferred shared identity.
+use units::lib::*
+use math::pure::{is_finite,sqrt}
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_len,numeric_buffer_status,numeric_buffer_at,numeric_buffer_set,numeric_buffer_close}
+use physics::phonon_factor::{PhononParams,PhononState,PhononValue,PhononResult,phonon_default_si_params,phonon_params_status,phonon_workspace,phonon_from_factor,phonon_state_status,phonon_state_n,phonon_state_rank,phonon_state_time,phonon_concentration,phonon_factor_entry,phonon_covariance,phonon_standard_uncertainty,phonon_time_limit,phonon_simulate_checked,phonon_close,phonon_boundary_checked,phonon_parameters}
+pub struct PhononQuantityParams {
+ pub d_eff:Quantity,pub dx:Quantity,pub k_release:Quantity,pub cl_site:Quantity,
+ pub fu:Quantity,pub kp:Quantity,pub c_portal:Quantity,pub c_ha:Quantity,
+ pub f_heart:Quantity,pub a_portal:Quantity,pub a_ha:Quantity,pub phi_ha:Quantity,
+ pub c_tissue:Quantity,pub v_blood:Quantity,pub zonation:Quantity,
+}
+pub linear struct PhononQuantityState {state:PhononState,status:i64}
+pub struct PhononQuantityResult {pub status:i64,pub quantity:Quantity}
+pub fn rapamycin_phonon_params_q()->PhononQuantityParams {
+ PhononQuantityParams {
+ d_eff:q_diffusion(1e-9,1e-11),dx:q_length(3.9e-6,1e-7),
+ k_release:q_rate(0.1,0.005),cl_site:q_rate(0.003,1e-4),
+ fu:q_dimensionless(0.075,0.005),kp:q_dimensionless(5.0,0.1),
+ c_portal:q_concentration_mass(1e-5,5e-7),c_ha:q_concentration_mass(8e-6,4e-7),
+ f_heart:q_rate(1.2,0.05),a_portal:q_dimensionless(0.05,0.01),
+ a_ha:q_dimensionless(0.30,0.02),phi_ha:q_dimensionless(0.785,0.01),
+ c_tissue:q_concentration_mass(2e-6,1e-7),v_blood:q_velocity(3e-4,1e-6),zonation:q_dimensionless(1.0,0.0)}
+}
+pub fn phonon_quantity_parameter(p:&PhononQuantityParams,i:i64)->Quantity with Panic {
+ assert(i>=0 && i<15)
+ if i==0 {return p.d_eff} if i==1 {return p.dx}
+ if i==2 {return p.k_release} if i==3 {return p.cl_site}
+ if i==4 {return p.fu} if i==5 {return p.kp}
+ if i==6 {return p.c_portal} if i==7 {return p.c_ha}
+ if i==8 {return p.f_heart} if i==9 {return p.a_portal}
+ if i==10 {return p.a_ha} if i==11 {return p.phi_ha}
+ if i==12 {return p.c_tissue} if i==13 {return p.v_blood}
+ p.zonation
+}
+pub fn phonon_quantity_means(p:&PhononQuantityParams)->PhononParams {
+ let a=p.d_eff;let b=p.dx;let c=p.k_release;let d=p.cl_site;let e=p.fu
+ let f=p.kp;let g=p.c_portal;let h=p.c_ha;let i=p.f_heart;let j=p.a_portal
+ let k=p.a_ha;let l=p.phi_ha;let m=p.c_tissue;let n=p.v_blood;let o=p.zonation
+ PhononParams{d_eff:a.value,dx:b.value,k_release:c.value,cl_site:d.value,fu:e.value,kp:f.value,
+ c_portal:g.value,c_ha:h.value,f_heart:i.value,a_portal:j.value,a_ha:k.value,phi_ha:l.value,
+ c_tissue:m.value,v_blood:n.value,zonation:o.value}
+}
+fn pq_dim(i:i64)->UnitDim {
+ if i==0 {return dim_diffusion()} if i==1 {return dim_length()}
+ if i==2 || i==3 || i==8 {return dim_rate()}
+ if i==6 || i==7 || i==12 {return dim_concentration()}
+ if i==13 {return dim_velocity()} dim_dimensionless()
+}
+fn pq_input(q:Quantity,d:UnitDim)->i64 {
+ if !is_finite(q.value)||!is_finite(q.uncertainty) {return 1}
+ if q.uncertainty<0.0 {return 6}
+ if !dim_eq(q.dim,d) {return 5} 0
+}
+pub fn phonon_quantity_params_status(p:&PhononQuantityParams)->i64 with Mut,Panic {
+ var i:i64=0
+ while i<15 {let q=phonon_quantity_parameter(p,i);let c=pq_input(q,pq_dim(i));if c!=0 {return c};i=i+1}
+ let means=phonon_quantity_means(p);phonon_params_status(&means)
+}
+fn pq_empty(code:i64)->PhononQuantityState with Alloc,Mut,Div,Panic {
+ let v=numeric_buffer_new(0,0);let f=numeric_buffer_new(0,0)
+ let s=phonon_from_factor(v,f,phonon_default_si_params(),0,0.0)
+ PhononQuantityState{state:s,status:code}
+}
+fn pq_abs(x:f64)->f64 {if x<0.0 {0.0-x}else{x}}
+// Scaled Euclidean norm, independent of factor signs, with finite checks.
+fn pq_row_norm(f:&NumericBuffer,row:i64,k:i64)->PhononValue with Mut,Div,Panic {
+ var scale:f64=0.0;var sum:f64=1.0;var j:i64=0
+ while j<k {
+  let x=pq_abs(numeric_buffer_at(f,row*k+j))
+  if !is_finite(x) {return PhononValue{status:1,value:0.0}}
+  if x!=0.0 {
+   if scale<x {let r=scale/x;sum=1.0+sum*r*r;scale=x}
+   else {let r=x/scale;sum=sum+r*r}
+  }
+  j=j+1
+ }
+ let value=if scale==0.0 {0.0}else{scale*sqrt(sum)}
+ if !is_finite(value) {return PhononValue{status:4,value:0.0}}
+ PhononValue{status:0,value:value}
+}
+// Values are explicitly SI kg/m^3. Supplied signed columns are preserved.
+// Parameter row norms must agree with Quantity standard uncertainties within
+// relative1e-12; an exact zero declaration requires an exact zero factor norm.
+pub fn phonon_quantity_from_factor(values:NumericBuffer,factor:NumericBuffer,p:&PhononQuantityParams,k:i64,t0:f64)->PhononQuantityState with Alloc,Mut,Div,Panic {
+ var code=phonon_quantity_params_status(p)
+ let n=numeric_buffer_len(&values);let shape=phonon_workspace(n,k)
+ if code==0 {code=shape.status}
+ if code==0 {
+  if numeric_buffer_status(&values)!=0 || numeric_buffer_status(&factor)!=0 || numeric_buffer_len(&factor)!=shape.factor_len {code=3}
+ }
+ var i:i64=0
+ if code==0 {
+  while i<15 {
+   let q=phonon_quantity_parameter(p,i);let norm=pq_row_norm(&factor,n+i,k)
+   if norm.status!=0 {code=norm.status}else{
+    let u=q.uncertainty
+    if u==0.0 {if norm.value!=0.0 {code=9}}
+    else {if pq_abs(norm.value-u)>1e-12*(if norm.value>u {norm.value}else{u}) {code=9}}
+   }
+   i=i+1
+  }
+ }
+ let state=phonon_from_factor(values,factor,phonon_quantity_means(p),k,t0)
+ if code==0 {code=phonon_state_status(&state)}
+ PhononQuantityState{state:state,status:code}
+}
+// This constructor declares every initial Quantity and parameter independent.
+// Zero uncertainties allocate no latent column. Repeated values imply no shared
+// source identity. Shared sources must use from_factor instead.
+pub fn phonon_quantity_from_independent_quantities(initial:&[Quantity;64],n:i64,p:&PhononQuantityParams,t0:f64,max_result_bytes:i64)->PhononQuantityState with Alloc,Mut,Div,Panic {
+ if n<1||n>64||max_result_bytes<0 {return pq_empty(3)}
+ let code=phonon_quantity_params_status(p);if code!=0 {return pq_empty(code)}
+ var k:i64=0;var i:i64=0
+ while i<n {let q=initial[i];let c=pq_input(q,dim_concentration());if c!=0 {return pq_empty(c)};if q.value<0.0 {return pq_empty(2)};if q.uncertainty>0.0 {k=k+1};i=i+1}
+ i=0;while i<15 {let q=phonon_quantity_parameter(p,i);if q.uncertainty>0.0 {k=k+1};i=i+1}
+ let shape=phonon_workspace(n,k)
+ let required=(n+shape.factor_len)*8
+ if required>max_result_bytes {return pq_empty(7)}
+ var values=numeric_buffer_new(n,n*8)
+ var factor=numeric_buffer_new(shape.factor_len,shape.factor_len*8)
+ if numeric_buffer_status(&values)!=0||numeric_buffer_status(&factor)!=0 {
+  numeric_buffer_close(values);numeric_buffer_close(factor);pq_empty(8)
+ } else {
+ i=0;while i<shape.factor_len {numeric_buffer_set(&!factor,i,0.0);i=i+1}
+ var col:i64=0;i=0
+ while i<n {let q=initial[i];numeric_buffer_set(&!values,i,q.value);if q.uncertainty>0.0 {numeric_buffer_set(&!factor,i*k+col,q.uncertainty);col=col+1};i=i+1}
+ i=0;while i<15 {let q=phonon_quantity_parameter(p,i);if q.uncertainty>0.0 {numeric_buffer_set(&!factor,(n+i)*k+col,q.uncertainty);col=col+1};i=i+1}
+ phonon_quantity_from_factor(values,factor,p,k,t0)
+ }
+}
+pub fn phonon_quantity_state_status(s:&PhononQuantityState)->i64 {s.status}
+pub fn phonon_quantity_state_n(s:&PhononQuantityState)->i64 {phonon_state_n(&s.state)}
+pub fn phonon_quantity_state_rank(s:&PhononQuantityState)->i64 {phonon_state_rank(&s.state)}
+pub fn phonon_quantity_state_time(s:&PhononQuantityState)->f64 {phonon_state_time(&s.state)}
+pub fn phonon_quantity_concentration(s:&PhononQuantityState,i:i64)->PhononValue with Panic {
+ if s.status!=0 {return PhononValue{status:s.status,value:0.0}} phonon_concentration(&s.state,i)
+}
+pub fn phonon_quantity_factor_entry(s:&PhononQuantityState,row:i64,col:i64)->PhononValue with Panic {
+ if s.status!=0 {return PhononValue{status:s.status,value:0.0}} phonon_factor_entry(&s.state,row,col)
+}
+pub fn phonon_quantity_covariance(s:&PhononQuantityState,i:i64,j:i64)->PhononValue with Mut,Div,Panic {
+ if s.status!=0 {return PhononValue{status:s.status,value:0.0}} phonon_covariance(&s.state,i,j)
+}
+pub fn phonon_quantity_standard_uncertainty(s:&PhononQuantityState,i:i64)->PhononValue with Mut,Div,Panic {
+ if s.status!=0 {return PhononValue{status:s.status,value:0.0}} phonon_standard_uncertainty(&s.state,i)
+}
+pub fn phonon_quantity_time_limit(s:&PhononQuantityState)->PhononValue with Mut,Div,Panic {
+ if s.status!=0 {return PhononValue{status:s.status,value:0.0}} phonon_time_limit(&s.state)
+}
+pub fn phonon_quantity_simulate_checked(s:&!PhononQuantityState,scratch:&!NumericBuffer,t_end:f64,dt:f64,max_steps:i64)->PhononResult with Mut,Div,Panic {
+ if s.status!=0 {return PhononResult{status:s.status,t_final:phonon_state_time(&s.state),steps:0,nfeval:0,uncertainty_model:2,first_order:true}}
+ phonon_simulate_checked(&!s.state,scratch,t_end,dt,max_steps,0)
+}
+pub fn phonon_quantity_close(s:PhononQuantityState) with Alloc {
+ let PhononQuantityState{state,status}=s;phonon_close(state)
+}
+
+pub fn phonon_quantity_parameters(s:&PhononQuantityState)->PhononParams {phonon_parameters(&s.state)}
+pub fn phonon_quantity_cfl_dt(s:&PhononQuantityState)->PhononValue with Mut,Div,Panic {
+ let r=phonon_quantity_time_limit(s)
+ if r.status!=0 {return r}
+ PhononValue{status:0,value:if r.value<1e-4 {r.value}else{1e-4}}
+}
+pub fn phonon_quantity_spatial_average(s:&PhononQuantityState)->PhononQuantityResult with Mut,Div,Panic {
+ if s.status!=0 {return PhononQuantityResult{status:s.status,quantity:q_concentration_mass(0.0,0.0)}}
+ let n=phonon_state_n(&s.state);let k=phonon_state_rank(&s.state)
+ var mean:f64=0.0;var i:i64=0
+ while i<n {let x=phonon_concentration(&s.state,i);if x.status!=0 {return PhononQuantityResult{status:x.status,quantity:q_concentration_mass(0.0,0.0)}};mean=mean+x.value/(n as f64);i=i+1}
+ var scale:f64=0.0;var sum:f64=1.0;var col:i64=0
+ while col<k {
+  var term:f64=0.0;i=0
+  while i<n {let f=phonon_factor_entry(&s.state,i,col);if f.status!=0 {return PhononQuantityResult{status:f.status,quantity:q_concentration_mass(0.0,0.0)}};term=term+f.value/(n as f64);i=i+1}
+  let x=pq_abs(term)
+  if x!=0.0 {if scale<x {let r=scale/x;sum=1.0+sum*r*r;scale=x}else{let r=x/scale;sum=sum+r*r}}
+  col=col+1
+ }
+ let u=if scale==0.0 {0.0}else{scale*sqrt(sum)}
+ if !is_finite(mean)||!is_finite(u) {return PhononQuantityResult{status:4,quantity:q_concentration_mass(0.0,0.0)}}
+ PhononQuantityResult{status:0,quantity:q_concentration_mass(mean,u)}
+}
+// Independent marginal boundary helper: the dependence of frequency, phase,
+// amplitudes and concentrations is included through canonical sensitivities.
+pub fn pulsatile_input_q_checked(t:f64,p:&PhononQuantityParams)->PhononQuantityResult with Mut,Div,Panic {
+ let code=phonon_quantity_params_status(p)
+ if code!=0 {return PhononQuantityResult{status:code,quantity:q_concentration_mass(0.0,0.0)}}
+ let means=phonon_quantity_means(p);let b=phonon_boundary_checked(&means,t)
+ if b.status!=0 {return PhononQuantityResult{status:b.status,quantity:q_concentration_mass(0.0,0.0)}}
+ var i:i64=0;var scale:f64=0.0;var sum:f64=1.0
+ while i<6 {
+  let q=phonon_quantity_parameter(p,i+6)
+  let term=b.gradient[i]*q.uncertainty
+  if !is_finite(term) || (b.gradient[i]!=0.0 && q.uncertainty!=0.0 && term==0.0) {return PhononQuantityResult{status:4,quantity:q_concentration_mass(0.0,0.0)}}
+  let x=pq_abs(term)
+  if x!=0.0 {if scale<x {let r=scale/x;sum=1.0+sum*r*r;scale=x}else{let r=x/scale;sum=sum+r*r}}
+  i=i+1
+ }
+ let u=if scale==0.0 {0.0}else{scale*sqrt(sum)}
+ if !is_finite(u) {return PhononQuantityResult{status:4,quantity:q_concentration_mass(0.0,0.0)}}
+ PhononQuantityResult{status:0,quantity:q_concentration_mass(b.value,u)}
+}
+pub fn pulsatile_input_q(t:f64,p:&PhononQuantityParams)->Quantity with Mut,Div,Panic {
+ let r=pulsatile_input_q_checked(t,p);assert(r.status==0);r.quantity
+}
+use physics::pbpk_phonon::{PhononCycleResult,phonon_liver_cycle_checked}
+pub fn phonon_quantity_liver_cycle_checked(s:&!PhononQuantityState,scratch:&!NumericBuffer,average:&!NumericBuffer,max_step:f64,max_steps:i64)->PhononCycleResult with Mut,Div,Panic {
+ if s.status!=0 {return PhononCycleResult{status:s.status,mean:0.0,standard_uncertainty:0.0,variance:0.0,duration:0.0,steps:0,uncertainty_model:2,first_order:true}}
+ phonon_liver_cycle_checked(&!s.state,scratch,average,max_step,max_steps)
+}

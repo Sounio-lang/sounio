@@ -1,0 +1,41 @@
+// Quantity outputs of the canonical joint-factor cycle solver.
+// The owner binds its SI parameters and shared factor columns at construction.
+use units::lib::{Quantity,q_concentration_mass}
+use math::pure::{is_finite,sqrt}
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_at}
+use physics::phonon_quantity::{PhononQuantityState,PhononQuantityResult,phonon_quantity_liver_cycle_checked,phonon_quantity_parameters,phonon_quantity_state_n,phonon_quantity_state_rank,phonon_quantity_factor_entry}
+pub fn phonon_liver_cycle_q_checked(s:&!PhononQuantityState,scratch:&!NumericBuffer,average:&!NumericBuffer,max_step:f64,max_steps:i64)->PhononQuantityResult with Mut,Div,Panic {
+ let r=phonon_quantity_liver_cycle_checked(s,scratch,average,max_step,max_steps)
+ PhononQuantityResult{status:r.status,quantity:q_concentration_mass(r.mean,r.standard_uncertainty)}
+}
+pub fn phonon_liver_cycle_q(s:&!PhononQuantityState,scratch:&!NumericBuffer,average:&!NumericBuffer,max_step:f64,max_steps:i64)->Quantity with Mut,Div,Panic {
+ let r=phonon_liver_cycle_q_checked(s,scratch,average,max_step,max_steps);assert(r.status==0);r.quantity
+}
+// Correction uses the same constructor-bound tissue concentration and Kp,
+// subtracting their signed sensitivities in every shared latent column.
+// No fresh independent uncertainty is introduced for repeated parameters.
+pub fn phonon_correction_q_checked(s:&!PhononQuantityState,scratch:&!NumericBuffer,average:&!NumericBuffer,max_step:f64,max_steps:i64)->PhononQuantityResult with Mut,Div,Panic {
+ let out=phonon_quantity_liver_cycle_checked(s,scratch,average,max_step,max_steps)
+ if out.status!=0 {return PhononQuantityResult{status:out.status,quantity:q_concentration_mass(0.0,0.0)}}
+ let p=phonon_quantity_parameters(s)
+ let well=p.c_tissue/p.kp;let value=out.mean-well
+ if !is_finite(well)||!is_finite(value)||(p.c_tissue!=0.0&&well==0.0) {return PhononQuantityResult{status:4,quantity:q_concentration_mass(0.0,0.0)}}
+ let n=phonon_quantity_state_n(s);let k=phonon_quantity_state_rank(s)
+ var scale:f64=0.0;var sum:f64=1.0;var col:i64=0
+ while col<k {
+  let c=phonon_quantity_factor_entry(s,n+12,col);let kp=phonon_quantity_factor_entry(s,n+5,col)
+  if c.status!=0||kp.status!=0 {return PhononQuantityResult{status:3,quantity:q_concentration_mass(0.0,0.0)}}
+  let dc=c.value/p.kp;let dk=well*(kp.value/p.kp)
+  let term=numeric_buffer_at(average,col+1)-dc+dk
+  if !is_finite(dc)||!is_finite(dk)||!is_finite(term)||(c.value!=0.0&&dc==0.0)||(well!=0.0&&kp.value!=0.0&&dk==0.0) {return PhononQuantityResult{status:4,quantity:q_concentration_mass(0.0,0.0)}}
+  let x=if term<0.0 {0.0-term}else{term}
+  if x!=0.0 {if scale<x {let r=scale/x;sum=1.0+sum*r*r;scale=x}else{let r=x/scale;sum=sum+r*r}}
+  col=col+1
+ }
+ let u=if scale==0.0 {0.0}else{scale*sqrt(sum)}
+ if !is_finite(u) {return PhononQuantityResult{status:4,quantity:q_concentration_mass(0.0,0.0)}}
+ PhononQuantityResult{status:0,quantity:q_concentration_mass(value,u)}
+}
+pub fn phonon_correction_q(s:&!PhononQuantityState,scratch:&!NumericBuffer,average:&!NumericBuffer,max_step:f64,max_steps:i64)->Quantity with Mut,Div,Panic {
+ let r=phonon_correction_q_checked(s,scratch,average,max_step,max_steps);assert(r.status==0);r.quantity
+}
