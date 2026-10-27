@@ -1,3 +1,4 @@
+use math::pure::{is_finite}
 // pbpk14_rk4.d - 14-Compartment PBPK with RK4 Integration
 //
 // Improved numerical stability using 4th-order Runge-Kutta instead of Euler.
@@ -55,7 +56,7 @@ struct PBPK14StepResult {
 // PBPK PARAMETERS (70 kg human with REDUCED blood flows for stability)
 // ============================================================================
 
-struct PBPK14Params {
+pub struct PBPK14Params {
     pub ka: f64,       // Absorption rate [1/h]
     pub rb: f64,       // Blood:plasma ratio
     pub fu: f64,       // Fraction unbound
@@ -263,45 +264,110 @@ pub fn rk4_step_pbpk14(st: PBPK14State, t: f64, dt: f64, p: PBPK14Params) -> PBP
 // SOLVER
 // ============================================================================
 
-struct PBPK14Solution {
-    pub gut: f64,
-    pub art: f64,
-    pub ven: f64,
-    pub lung: f64,
-    pub liver: f64,
-    pub kidney: f64,
-    muscle: f64,
-    adipose: f64,
-    brain: f64,
-    pub nsteps: i64
+pub struct PBPK14Solution {
+    pub gut:f64, pub art:f64, pub ven:f64, pub lung:f64,
+    pub heart:f64, pub brain:f64, pub muscle:f64, pub adipose:f64,
+    pub skin:f64, pub bone:f64, pub spleen:f64, pub gut_tis:f64,
+    pub liver:f64, pub kidney:f64,
+    // Requested output intervals completed, distinct from actual RK4 substeps.
+    pub nsteps:i64,
+    pub internal_steps:i64,
+    pub nfeval:i64,
+    pub t_final:f64,
+    // 0 complete;1 internal budget;2 no time progress;3 invalid input;4 arithmetic.
+    pub status:i64,
 }
 
-pub fn solve_pbpk14_rk4(init: PBPK14State, p: PBPK14Params, t_sim: f64, n_steps: i64) -> PBPK14Solution with Mut, Div {
-    // Fixed timestep based on simulation time
-    let dt = t_sim / (n_steps as f64)
-    var curr = init
-    var iter: i64 = 0
-    let t = 0.0
+fn pbpk14_solution(s:PBPK14State,steps:i64,internal:i64,status:i64,time:f64)->PBPK14Solution {
+    PBPK14Solution {gut:s.gut,art:s.art,ven:s.ven,lung:s.lung,
+    heart:s.heart,brain:s.brain,muscle:s.muscle,adipose:s.adipose,
+    skin:s.skin,bone:s.bone,spleen:s.spleen,gut_tis:s.gut_tis,
+    liver:s.liver,kidney:s.kidney,nsteps:steps,internal_steps:internal,
+    nfeval:internal*4,t_final:time,status:status}
+}
+fn pbpk14_state_valid(s:&PBPK14State)->bool {
+    is_finite(s.gut) && s.gut>=0.0 && is_finite(s.art) && s.art>=0.0 &&
+    is_finite(s.ven) && s.ven>=0.0 && is_finite(s.lung) && s.lung>=0.0 &&
+    is_finite(s.heart) && s.heart>=0.0 && is_finite(s.brain) && s.brain>=0.0 &&
+    is_finite(s.muscle) && s.muscle>=0.0 && is_finite(s.adipose) && s.adipose>=0.0 &&
+    is_finite(s.skin) && s.skin>=0.0 && is_finite(s.bone) && s.bone>=0.0 &&
+    is_finite(s.spleen) && s.spleen>=0.0 && is_finite(s.gut_tis) && s.gut_tis>=0.0 &&
+    is_finite(s.liver) && s.liver>=0.0 && is_finite(s.kidney) && s.kidney>=0.0
+}
+fn pbpk14_params_valid(p:&PBPK14Params)->bool {
+    if !is_finite(p.ka) || p.ka<0.0 || !is_finite(p.rb) || p.rb<=0.0 ||
+    !is_finite(p.fu) || p.fu<0.0 || p.fu>1.0 ||
+    !is_finite(p.cl_int) || p.cl_int<0.0 || !is_finite(p.gfr) || p.gfr<0.0 {return false}
+    // The existing arterial-filtration model must retain a nonnegative
+    // arterial-to-kidney coefficient; invalid regimes are never clipped.
+    let filtration=p.gfr*p.fu*p.rb
+    is_finite(filtration) && filtration<=38.5
+}
+fn pbpk14_rate_max(a:f64,b:f64)->f64 {if a>b {a} else {b}}
+fn pbpk14_stability_rate(p:&PBPK14Params)->f64 with Div {
+    // Four times the largest removal diagonal of the unchanged linear model.
+    // Thus each accepted RK4 substep has h*max_removal<=1/4.
+    let arterial=(7.0+21.0+31.5+8.75+8.75+8.75+5.25+31.5+10.5+38.5)/p.rb
+    var rate=pbpk14_rate_max(p.ka,arterial)
+    rate=pbpk14_rate_max(rate,175.0/(3.9*p.rb))
+    rate=pbpk14_rate_max(rate,175.0/(0.5*0.8))
+    rate=pbpk14_rate_max(rate,7.0/0.33)
+    rate=pbpk14_rate_max(rate,21.0/(1.4*0.5))
+    rate=pbpk14_rate_max(rate,31.5/(28.0*0.8))
+    rate=pbpk14_rate_max(rate,8.75/(14.0*2.0))
+    rate=pbpk14_rate_max(rate,8.75/2.6)
+    rate=pbpk14_rate_max(rate,8.75/(4.0*0.5))
+    rate=pbpk14_rate_max(rate,5.25/0.15)
+    rate=pbpk14_rate_max(rate,31.5)
+    rate=pbpk14_rate_max(rate,(31.5+5.25+10.5)/(1.5*1.2)+p.cl_int*p.fu/1.5)
+    rate=pbpk14_rate_max(rate,38.5/(0.28*1.5))
+    rate*4.0
+}
+fn pbpk14_internal_substeps(dt:f64,rate:f64)->i64 {
+    if !is_finite(dt) || !is_finite(rate) || dt<0.0 || rate<=0.0 {return 0}
+    let product=dt*rate
+    if !is_finite(product) || product>10000000.0 {return 0}
+    var count=product as i64
+    if (count as f64)<product {count=count+1}
+    if count<1 {count=1}
+    count
+}
 
-    while iter < n_steps {
-        let t_curr = (iter as f64) * dt
-        let result = rk4_step_pbpk14(curr, t_curr, dt, p)
-        curr = result.state_new
-        iter = iter + 1
+pub fn solve_pbpk14_rk4(init:PBPK14State,p:PBPK14Params,t_sim:f64,n_steps:i64)->PBPK14Solution with Mut,Div {
+    if !is_finite(t_sim) || t_sim<0.0 || n_steps<1 || n_steps>1000000 {
+        return pbpk14_solution(init,0,0,3,0.0)
     }
-
-    return PBPK14Solution {
-        gut: curr.gut,
-        art: curr.art,
-        ven: curr.ven,
-        lung: curr.lung,
-        liver: curr.liver,
-        kidney: curr.kidney,
-        muscle: curr.muscle,
-        adipose: curr.adipose,
-        brain: curr.brain,
-        nsteps: iter
+    if !pbpk14_state_valid(&init) || !pbpk14_params_valid(&p) {
+        return pbpk14_solution(init,0,0,3,0.0)
     }
+    if t_sim==0.0 {return pbpk14_solution(init,0,0,0,0.0)}
+    let dt=t_sim/(n_steps as f64)
+    let rate=pbpk14_stability_rate(&p)
+    if !is_finite(rate) || rate<=0.0 {return pbpk14_solution(init,0,0,4,0.0)}
+    let substeps=pbpk14_internal_substeps(dt,rate)
+    if substeps<1 {return pbpk14_solution(init,0,0,1,0.0)}
+    if substeps>10000000/n_steps {return pbpk14_solution(init,0,0,1,0.0)}
+    let h=dt/(substeps as f64)
+    if h<=0.0 || !is_finite(h) {return pbpk14_solution(init,0,0,2,0.0)}
+    var curr=init
+    var interval:i64=0
+    var internal:i64=0
+    while interval<n_steps {
+        var inner:i64=0
+        while inner<substeps {
+            let time=(interval as f64)*dt+(inner as f64)*h
+            if time+h<=time {return pbpk14_solution(curr,interval,internal,2,time)}
+            let result=rk4_step_pbpk14(curr,time,h,p)
+            internal=internal+1
+            if !pbpk14_state_valid(&result.state_new) {
+                return pbpk14_solution(curr,interval,internal,4,time)
+            }
+            curr=result.state_new
+            inner=inner+1
+        }
+        interval=interval+1
+    }
+    pbpk14_solution(curr,interval,internal,0,t_sim)
 }
 
 // ============================================================================
