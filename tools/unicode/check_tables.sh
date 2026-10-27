@@ -24,7 +24,7 @@ mkdir "$OUT/source"
 tar -xzf "$DATA/ucd18-source.tar.gz" -C "$OUT/source"
 (cd "$OUT/source" && sha256sum -c "$DATA/UCD18-SOURCES.sha256") > "$OUT/SOURCES.verify"
 g++ -std=c++23 -O2 -Wall -Wextra -Werror "$GEN" -o "$OUT/generate" > "$OUT/generate-build.stdout" 2> "$OUT/generate-build.stderr"
-g++ -std=c++23 -O2 -Wall -Wextra -Werror -Wno-misleading-indentation -I"$ICU_PREFIX/include" "$REF" -L"$ICU_PREFIX/lib" -licui18n -licuuc -licudata -o "$OUT/reference" > "$OUT/reference-build.stdout" 2> "$OUT/reference-build.stderr"
+g++ -std=c++23 -O2 -Wall -Wextra -Werror -Wno-misleading-indentation -Wno-parentheses -I"$ICU_PREFIX/include" "$REF" -L"$ICU_PREFIX/lib" -licui18n -licuuc -licudata -o "$OUT/reference" > "$OUT/reference-build.stdout" 2> "$OUT/reference-build.stderr"
 "$OUT/generate" "$OUT/source/ucd-18.0.0" "$OUT/unicode18.bin" "$OUT/REPORT.tsv" > "$OUT/generate.stdout" 2> "$OUT/generate.stderr"
 "$OUT/generate" "$OUT/source/ucd-18.0.0" "$OUT/repeat.bin" "$OUT/REPORT.repeat.tsv" > "$OUT/repeat.stdout" 2> "$OUT/repeat.stderr"
 cmp "$OUT/unicode18.bin" "$OUT/repeat.bin"
@@ -44,6 +44,13 @@ r=0
 printf '%s\n' "$r" > "$OUT/VERSION_REJECTION_STATUS"
 test "$r" -eq 1
 grep -F 'expected final UCD18.0.0 ReadMe' "$OUT/wrong-version.stderr" > "$OUT/VERSION_REJECTED"
+cp -a "$OUT/source/ucd-18.0.0" "$OUT/unsupported-condition"
+sed 's/Final_Sigma/Unsupported_Context/g' "$OUT/source/ucd-18.0.0/SpecialCasing.txt" > "$OUT/unsupported-condition/SpecialCasing.txt"
+r=0
+"$OUT/generate" "$OUT/unsupported-condition" "$OUT/unsupported-condition.bin" "$OUT/unsupported-condition.tsv" > "$OUT/unsupported-condition.stdout" 2> "$OUT/unsupported-condition.stderr" || r=$?
+printf '%s\n' "$r" > "$OUT/UNSUPPORTED_CONDITION_STATUS"
+test "$r" -eq 1
+grep -F 'unsupported SpecialCasing condition: Unsupported_Context' "$OUT/unsupported-condition.stderr" > "$OUT/UNSUPPORTED_CONDITION_REJECTED"
 sha256sum -c "$OUT/INPUTS.sha256" > "$OUT/INPUTS.final.verify"
 sha256sum "$OUT/generate" "$OUT/reference" "$OUT/unicode18.bin" "$OUT/REPORT.tsv" > "$OUT/OUTPUT.sha256"
 printf '%s\n' 'UNICODE_TABLE_GATE_OK' > "$OUT/STATUS"

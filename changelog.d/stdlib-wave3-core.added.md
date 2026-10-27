@@ -1,2 +1,3 @@
 - Format every i64 in `str_from_i64`, including INT64_MIN, by extracting digits in the negative domain. Preserve the existing floating formatter and public APIs.
 - Add deterministic C++23 compilation of pinned Unicode 18 core UCD data, compact immutable tables, source licenses/hashes, and an independent ICU79.1 oracle with full normalization and exhaustive property/fold checks. Sounio algorithm and embedding qualification remains separate.
+- Extend the independent Unicode table oracle with exhaustive full upper/lower casing for four locales, every official default grapheme/word/sentence conformance row, and rejection of unsupported SpecialCasing conditions. Production Sounio execution is qualified separately.

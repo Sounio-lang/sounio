@@ -27,3 +27,5 @@ The oracle checks all 1,114,112 code points for 82 binary/integer properties exp
 
 This qualifies generated tables and the C++23 oracle only. Compiler embedding, narrow pointers, Sounio APIs/normalization, default UAX29 segmentation, UCA/CLDR collation and UAX9 BIDI require separate executable gates.
 
+The extended oracle also checks 8,979,744 upper/lower case transformations across default, Turkish, Azeri and Lithuanian rules, including contextual sigma, soft dotted contexts and combining marks. The default UAX29 table-derived algorithms and ICU independently pass every official Unicode18 row: 853 extended grapheme, 1,944 word and 512 sentence cases. Unicode18 GB9c is the Linker Extend* / Consonant rule; no preceding consonant is required. Unknown SpecialCasing conditions are a generator error, with an explicit rejection control in the gate. These are C++23 table/oracle checks; native Sounio execution remains a separate acceptance gate.
+

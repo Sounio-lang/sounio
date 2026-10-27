@@ -1,6 +1,7 @@
 // Independent ICU79.1 oracle for the serialized Unicode18 table, C++23 only.
 // This executable is a test tool. Sounio production code never links ICU.
 #include <unicode/uchar.h>
+#include <unicode/ubrk.h>
 #include <unicode/unorm2.h>
 #include <unicode/ustring.h>
 #include <unicode/uversion.h>
@@ -161,8 +162,227 @@ void normalization(const Blob& b,const std::string& path){
  if(rows<19000)fail("normalization corpus unexpectedly small");
  std::cout<<"NORMALIZATION_TABLE_ORACLE_OK rows="<<rows<<" table_and_ICU_checks="<<std::uint64_t{rows}*40<<"\n";
 }
+
+struct CaseMapper {
+ const Blob& b;U cased,ignorable,soft,ccc;
+ std::map<std::pair<U,U>,std::vector<U>> rows;
+ explicit CaseMapper(const Blob& blob):b(blob),cased(b.property("Cased")),ignorable(b.property("Case_Ignorable")),soft(b.property("Soft_Dotted")),ccc(b.property("Canonical_Combining_Class")){
+  for(U i=0;i<b.sections.at(4).count;++i)rows[{b.at(4,i,0),b.at(4,i,1)}].push_back(i);
+ }
+ bool has(U prop,U cp)const{return b.value(prop,cp)=="Y";}
+ U combining(U cp)const{return static_cast<U>(std::stoul(b.value(ccc,cp)));}
+ bool cased_context(const Seq& in,std::size_t index,int direction)const{
+  auto at=static_cast<std::int64_t>(index)+direction;
+  while(at>=0&&static_cast<std::size_t>(at)<in.size()){
+   U cp=in[static_cast<std::size_t>(at)];if(!has(ignorable,cp))return has(cased,cp);at+=direction;
+  }return false;
+ }
+ bool after(const Seq& in,std::size_t index,bool dotted)const{
+  for(std::size_t at=index;at>0;){U cp=in[--at];if(dotted?has(soft,cp):cp==0x49)return true;U cc=combining(cp);if(cc==0||cc==230)return false;}return false;
+ }
+ bool before(const Seq& in,std::size_t index,bool dot)const{
+  for(std::size_t at=index+1;at<in.size();++at){U cp=in[at];if(dot&&cp==0x307)return true;U cc=combining(cp);if(!dot&&cc==230)return true;if(cc==0||cc==230)return false;}return false;
+ }
+ bool condition(const Seq& in,std::size_t at,const std::string& conditions,U locale)const{
+  bool matches=true;std::istringstream input(conditions);std::string token;
+  while(input>>token){
+   bool result=false;
+   if(token=="tr")result=locale==1;
+   else if(token=="az")result=locale==2;
+   else if(token=="lt")result=locale==3;
+   else if(token=="Final_Sigma")result=cased_context(in,at,-1)&&!cased_context(in,at,1);
+   else if(token=="After_Soft_Dotted")result=after(in,at,true);
+   else if(token=="After_I")result=after(in,at,false);
+   else if(token=="More_Above")result=before(in,at,false);
+   else if(token=="Not_Before_Dot")result=!before(in,at,true);
+   else fail("unknown SpecialCasing condition: "+token);
+   matches=matches&&result;
+  }return matches;
+ }
+ Seq map(const Seq& in,bool upper,U locale)const{
+  Seq result;U kind=upper?10:8,simple=upper?3:4;
+  for(std::size_t at=0;at<in.size();++at){
+   auto group=rows.find({kind,in[at]});std::int64_t selected=-1,fallback=-1;
+   if(group!=rows.end())for(U row:group->second){
+    auto cond=b.str(b.at(4,row,5));if(cond.empty())fallback=row;
+    else if(condition(in,at,cond,locale)){selected=row;break;}
+   }
+   if(selected<0)selected=fallback;
+   if(selected<0){auto s=rows.find({simple,in[at]});if(s!=rows.end())selected=s->second.front();}
+   if(selected<0)result.push_back(in[at]);
+   else {auto mapped=b.mapping(static_cast<U>(selected));result.insert(result.end(),mapped.begin(),mapped.end());}
+  }return result;
+ }
+};
+Seq icu_case(const Seq& in,bool upper,U locale){
+ static constexpr const char* locales[]={"","tr","az","lt"};
+ auto input=utf16(in);std::array<UChar,512> out{};UErrorCode e=U_ZERO_ERROR;
+ int32_t n=upper?u_strToUpper(out.data(),out.size(),input.data(),static_cast<int32_t>(input.size()),locales[locale],&e):u_strToLower(out.data(),out.size(),input.data(),static_cast<int32_t>(input.size()),locales[locale],&e);
+ if(U_FAILURE(e)||n<0||static_cast<std::size_t>(n)>out.size())fail("ICU full casing error");
+ return scalars(std::span<const UChar>(out.data(),static_cast<std::size_t>(n)));
+}
+void full_casing(const Blob& b){
+ CaseMapper mapper(b);std::uint64_t checks=0;
+ auto check=[&](const Seq& in){
+  for(U locale=0;locale<4;++locale)for(bool upper:{false,true}){
+   if(mapper.map(in,upper,locale)!=icu_case(in,upper,locale)){
+    std::ostringstream s;s<<"full case mismatch locale="<<locale<<" upper="<<upper<<" input=";for(U cp:in)s<<std::hex<<cp<<" ";fail(s.str());
+   }++checks;
+  }
+ };
+ for(U cp=0;cp<0x110000;++cp)if(cp<0xD800||cp>0xDFFF)check(Seq{cp});
+ const Seq alphabet={0,0x20,0x21,0x41,0x61,0x49,0x69,0x4A,0xDF,0x130,0x12E,0x307,0x300,0x323,0x345,0x2B0,0x3A3};
+ const Seq targets={0x49,0x4A,0x12E,0xCC,0xCD,0x128,0x130,0x69,0x307,0x3A3,0xDF,0xFB03};
+ for(U target:targets)for(U before:alphabet)for(U after:alphabet){
+  check(Seq{before,target,after});
+  check(Seq{before,0x323,target,0x323,after});
+  check(Seq{before,0x300,target,0x300,after});
+ }
+ std::cout<<"FULL_CASING_TABLE_ORACLE_OK locales=default,tr,az,lt checks="<<checks<<"\n";
+}
+
+
+struct Segmenter {
+ const Blob& b;
+ U gcb,wb,sb,ep,incb;
+ explicit Segmenter(const Blob& x):b(x),gcb(b.property("Grapheme_Cluster_Break")),wb(b.property("Word_Break")),sb(b.property("Sentence_Break")),ep(b.property("Extended_Pictographic")),incb(b.property("Indic_Conjunct_Break")){}
+ static bool word_ignore(int c){return c==4||c==5||c==6;}
+ static bool sentence_ignore(int c){return c==4||c==5;}
+ static bool word_newline(int c){return c>=1&&c<=3;}
+ static bool ah(int c){return c==8||c==9;}
+ static bool midletter(int c){return c==11||c==13||c==14;}
+ static bool midnum(int c){return c==12||c==13||c==14;}
+ static bool para(int c){return c>=1&&c<=3;}
+ static bool sat(int c){return c==6||c==7;}
+ static int cls(const std::vector<int>& codes,std::int64_t i){return i<0||static_cast<std::size_t>(i)>=codes.size()?-1:codes[static_cast<std::size_t>(i)]&255;}
+ static int previous(const std::vector<int>& codes,std::int64_t i,int mode){
+  while(i>=0&&(mode==1?word_ignore(cls(codes,i)):sentence_ignore(cls(codes,i))))--i;return static_cast<int>(i);
+ }
+ static int next(const std::vector<int>& codes,std::int64_t i,int mode){
+  while(static_cast<std::size_t>(i)<codes.size()&&(mode==1?word_ignore(cls(codes,i)):sentence_ignore(cls(codes,i))))++i;return static_cast<int>(i);
+ }
+ std::vector<int> encode(const Seq& input,int mode)const{
+  static const std::array<std::map<std::string,int>,3> names={{
+   {{"XX",0},{"CR",1},{"LF",2},{"CN",3},{"L",4},{"V",5},{"T",6},{"LV",7},{"LVT",8},{"EX",9},{"ZWJ",10},{"SM",11},{"PP",12},{"RI",13}},
+   {{"XX",0},{"CR",1},{"LF",2},{"NL",3},{"Extend",4},{"FO",5},{"ZWJ",6},{"WSegSpace",7},{"LE",8},{"HL",9},{"NU",10},{"ML",11},{"MN",12},{"MB",13},{"SQ",14},{"DQ",15},{"KA",16},{"EX",17},{"RI",18}},
+   {{"XX",0},{"CR",1},{"LF",2},{"SE",3},{"EX",4},{"FO",5},{"AT",6},{"ST",7},{"CL",8},{"SP",9},{"LO",10},{"UP",11},{"LE",12},{"NU",13},{"SC",14}}
+  }};
+  U prop=mode==0?gcb:mode==1?wb:sb;std::vector<int> result;int ri=0,close=0,space=0;
+  for(U cp:input){
+   const auto name=b.value(prop,cp);auto it=names[static_cast<std::size_t>(mode)].find(name);if(it==names[mode].end())fail("unknown segmentation class "+name);int c=it->second,v=c;
+   if(mode<2&&b.value(ep,cp)=="Y")v|=256;
+   if(mode==0){auto in=b.value(incb,cp);int k=in=="None"?0:in=="Consonant"?1:in=="Extend"?2:in=="Linker"?3:-1;if(k<0)fail("unknown InCB");v|=k<<9;ri=c==13?1-ri:0;}
+   else if(mode==1){if(c==18)ri=1-ri;else if(!word_ignore(c))ri=0;}
+   else{
+    if(c==6||c==7){close=c-5;space=close;}
+    else if(c==8){space=close;}
+    else if(c==9){close=0;}
+    else if(!sentence_ignore(c)){close=0;space=0;}
+    v|=close<<12;v|=space<<14;
+   }
+   v|=ri<<11;result.push_back(v);
+  }return result;
+ }
+ static bool grapheme(const std::vector<int>& c,std::size_t i){
+  int a=cls(c,i-1),z=cls(c,i);
+  if(a==1&&z==2)return false;
+  if(a>=1&&a<=3||z>=1&&z<=3)return true;
+  if(a==4&&(z==4||z==5||z==7||z==8))return false;
+  if((a==5||a==7)&&(z==5||z==6))return false;
+  if((a==6||a==8)&&z==6)return false;
+  if(z==9||z==10||z==11||a==12)return false;
+  if(((c[i]>>9)&3)==1){
+   auto j=static_cast<std::int64_t>(i)-1;
+   while(j>=0&&((c[static_cast<std::size_t>(j)]>>9)&3)==2)--j;
+   if(j>=0&&((c[static_cast<std::size_t>(j)]>>9)&3)==3)return false;
+  }
+  if(a==10&&(c[i]&256)){auto j=static_cast<std::int64_t>(i)-2;while(j>=0&&cls(c,j)==9)--j;if(j>=0&&(c[static_cast<std::size_t>(j)]&256))return false;}
+  if(a==13&&z==13&&(c[i-1]&2048))return false;
+  return true;
+ }
+ static bool word(const std::vector<int>& c,std::size_t i){
+  int a=cls(c,i-1),z=cls(c,i);
+  if(a==1&&z==2)return false;
+  if(word_newline(a)||word_newline(z))return true;
+  if(a==6&&(c[i]&256))return false;
+  if(a==7&&z==7)return false;
+  if(word_ignore(z))return false;
+  int left=previous(c,static_cast<std::int64_t>(i)-1,1);if(left<0)return true;
+  a=cls(c,left);int before=cls(c,previous(c,left-1,1)),after=cls(c,next(c,static_cast<std::int64_t>(i)+1,1));
+  if(ah(a)&&ah(z))return false;
+  if(ah(a)&&midletter(z)&&ah(after))return false;
+  if(midletter(a)&&ah(z)&&ah(before))return false;
+  if(a==9&&z==14)return false;
+  if(a==9&&z==15&&after==9)return false;
+  if(a==15&&z==9&&before==9)return false;
+  if(a==10&&z==10||ah(a)&&z==10||a==10&&ah(z))return false;
+  if(a==10&&midnum(z)&&after==10||midnum(a)&&z==10&&before==10)return false;
+  if(a==16&&z==16)return false;
+  if((ah(a)||a==10||a==16||a==17)&&z==17||a==17&&(ah(z)||z==10||z==16))return false;
+  if(a==18&&z==18&&(c[static_cast<std::size_t>(left)]&2048))return false;
+  return true;
+ }
+ static bool sentence(const std::vector<int>& c,std::size_t i){
+  int actual=cls(c,i-1),z=cls(c,i);
+  if(actual==1&&z==2)return false;
+  if(para(actual))return true;
+  if(sentence_ignore(z))return false;
+  int left=previous(c,static_cast<std::int64_t>(i)-1,2),a=cls(c,left);
+  if(a==6&&z==13)return false;
+  int before=cls(c,previous(c,left-1,2));
+  if((before==10||before==11)&&a==6&&z==11)return false;
+  int close=(c[i-1]>>12)&3,space=(c[i-1]>>14)&3;
+  // These two unconditional no-break rules also avoid repeated lookahead over spaces.
+  if(close&&(z==8||z==9||para(z)))return false;
+  if(space&&(z==9||para(z)))return false;
+  if(space==1){
+   int at=static_cast<int>(i);
+   while(static_cast<std::size_t>(at)<c.size()){
+    int k=cls(c,at);if(k==10)return false;
+    if(k==11||k==12||para(k)||sat(k))break;
+    ++at;
+   }
+  }
+  if(space&&(z==14||sat(z)))return false;
+  if(space)return true;
+  return false;
+ }
+ std::vector<std::size_t> boundaries(const Seq& input,int mode)const{
+  auto codes=encode(input,mode);std::vector<std::size_t> out={0};
+  for(std::size_t i=1;i<input.size();++i)if(mode==0?grapheme(codes,i):mode==1?word(codes,i):sentence(codes,i))out.push_back(i);
+  if(!input.empty())out.push_back(input.size());return out;
+ }
+};
+std::vector<std::size_t> icu_boundaries(const Seq& input,int mode){
+ auto text=utf16(input);UErrorCode error=U_ZERO_ERROR;
+ UBreakIterator* it=ubrk_open(mode==0?UBRK_CHARACTER:mode==1?UBRK_WORD:UBRK_SENTENCE,"root",text.data(),static_cast<int32_t>(text.size()),&error);
+ if(U_FAILURE(error)||!it)fail("ICU break iterator");
+ std::vector<int32_t> prefix={0};for(U cp:input)prefix.push_back(prefix.back()+(cp<0x10000?1:2));
+ std::vector<std::size_t> result;
+ for(int32_t at=ubrk_first(it);at!=UBRK_DONE;at=ubrk_next(it)){
+  auto found=std::lower_bound(prefix.begin(),prefix.end(),at);if(found==prefix.end()||*found!=at)fail("ICU break inside scalar");result.push_back(static_cast<std::size_t>(found-prefix.begin()));
+ }ubrk_close(it);return result;
+}
+void segmentation(const Blob& b,const std::string& ucdroot){
+ Segmenter segmenter(b);U total=0;std::array<const char*,3> names={"Grapheme","Word","Sentence"};
+ for(int mode=0;mode<3;++mode){
+  std::string file=ucdroot+"/auxiliary/"+names[mode]+"BreakTest.txt";std::ifstream in(file);if(!in)fail("segmentation test open "+file);std::string line;U row=0;
+  while(std::getline(in,line)){
+   line=trim(line.substr(0,line.find('#')));if(line.empty())continue;
+   Seq seq;std::vector<std::size_t> expected;std::istringstream tokens(line);std::string token;
+   while(tokens>>token){if(token=="\xC3\xB7")expected.push_back(seq.size());else if(token!="\xC3\x97")seq.push_back(static_cast<U>(std::stoul(token,nullptr,16)));}
+   if(segmenter.boundaries(seq,mode)!=expected){std::ostringstream e;e<<"segmentation table mismatch "<<names[mode]<<" row="<<row<<" input=";for(U cp:seq)e<<std::hex<<cp<<" ";e<<" expected=";for(auto i:expected)e<<std::dec<<i<<",";e<<" actual=";for(auto i:segmenter.boundaries(seq,mode))e<<i<<",";fail(e.str());}
+   if(icu_boundaries(seq,mode)!=expected)fail("ICU segmentation mismatch "+std::string(names[mode])+" row="+std::to_string(row));
+   ++row;++total;
+  }
+  std::cout<<"SEGMENTATION_TABLE_ORACLE_OK mode="<<names[mode]<<" rows="<<row<<"\n";
+ }
+ if(total<2000)fail("segmentation corpus too small");
+}
+
 int main(int argc,char** argv){
  try{
+  if(argc==4&&std::string(argv[1])=="--seg-only"){version_guard();Blob b(argv[2]);segmentation(b,argv[3]);std::cout<<"SEGMENTATION_REFERENCE_OK\n";return 0;}
   if(argc==4&&std::string(argv[1])=="--mutate"){
    Blob b(argv[2]);U p=b.property("General_Category"),first=b.at(2,p,1),count=b.at(2,p,2),target=0,value=0;
    bool found=false;
@@ -174,7 +394,7 @@ int main(int argc,char** argv){
    std::cout<<"MUTATED_ASCII_UPPERCASE_CATEGORY\n";return 0;
   }
   if(argc!=3){std::cerr<<"usage: unicode_reference UCD.bin NormalizationTest.txt\n";return 64;}
-  version_guard();Blob b(argv[1]);properties(b);mappings(b);normalization(b,argv[2]);std::cout<<"UNICODE_TABLE_REFERENCE_OK\n";return 0;
+  version_guard();Blob b(argv[1]);properties(b);mappings(b);full_casing(b);normalization(b,argv[2]);segmentation(b,std::filesystem::path(argv[2]).parent_path().string());std::cout<<"UNICODE_TABLE_REFERENCE_OK\n";return 0;
  }
  catch(const std::exception& e){std::cerr<<"UNICODE_TABLE_REFERENCE_ERROR "<<e.what()<<"\n";return 1;}
 }

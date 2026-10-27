@@ -125,6 +125,8 @@ struct Data{
  void special_casing(){
   lines(root/"SpecialCasing.txt",[&](std::string s){
    s=trim(s.substr(0,s.find('#')));if(s.empty())return;auto v=split(s,';');if(v.size()<5)fail("special casing fields");
+   const std::set<std::string> known={"tr","az","lt","Final_Sigma","After_Soft_Dotted","More_Above","After_I","Not_Before_Dot"};
+   std::istringstream conditions(v[4]);std::string token;while(conditions>>token)if(!known.contains(token))fail("unsupported SpecialCasing condition: "+token);
    const U cp=hex(v[0]);for(U col=1;col<=3;++col)mappings.push_back({7+col,cp,0,sequence(v[col]),v[4]});
   });
  }
