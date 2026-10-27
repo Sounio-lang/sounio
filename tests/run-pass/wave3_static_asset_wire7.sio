@@ -1,0 +1,58 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: STATIC_ASSET_WIRE7_OK
+use parser::ast::{Name, make_name};
+use ir::ir::*;
+use ir::serialize::*;
+fn main() -> i32 with IO, Alloc, Mut, Panic, Div {
+    var identity = Name { buf: [0; 384], len: 200 }
+    var i: i64 = 0
+    while i < identity.len { identity.buf[i as usize] = 97; i = i + 1 }
+    identity.buf[135] = 0
+    var module = ir_empty_module()
+    module.fn_count = 1
+    var func = ir_empty_function()
+    func.name = make_name("asset")
+    func.instr_count = 2
+    func.reg_count = 1
+    var region = ir_region_invalid()
+    if ir_instr_arena_alloc(2, &!region) != IR_ARENA_OK { return 1 }
+    func.region = region
+    ir_arena_store(ir_region_slot_w(region, 0), ir_static_blob(0, 5, identity))
+    ir_arena_store(ir_region_slot_w(region, 1), ir_return(0))
+    ir_fn_set(&!module, 0, func)
+    let pair = serialize_ir_module(module)
+    if pair.1 <= 0 || pair.0[4] != 7 as i8 || pair.0[5] != 15 as i8 { return 2 }
+    let restored = deserialize_ir_module(pair.0, pair.1)
+    if restored.fn_count != 1 { return 3 }
+    let result = ir_fn_get(&restored, 0)
+    let slot = ir_region_slot_r(result.region, 0)
+    if (IR_A_OP[slot as usize] as IrOpcode) != IrOpcode::IrStaticBlob { return 4 }
+    if IR_A_IMM_I64[slot as usize] != 5 { return 5 }
+    let name = ir_arena_name(slot)
+    if name.len != identity.len { return 6 }
+    i = 0
+    while i < identity.len {
+        if name.buf[i as usize] != identity.buf[i as usize] { return 7 }
+        i = i + 1
+    }
+    // A v6 header must reject the v7 feature and long-name payload.
+    var wrong = pair.0
+    wrong[4] = 6 as i8
+    let rejected = deserialize_ir_module(wrong, pair.1)
+    if rejected.fn_count != 0 { return 8 }
+    // Short-name records remain wire-compatible with genuine empty v6 modules.
+    var legacy = ir_empty_module()
+    let old_pair = serialize_ir_module(legacy)
+    var old = old_pair.0
+    old[4] = 6 as i8
+    old[5] = 7 as i8
+    let old_read = deserialize_ir_module(old, old_pair.1)
+    if old_read.fn_count != 0 { return 9 }
+    // Refusal counters make an empty-result false pass observable.
+    let refusals = SOIR_DESER_REFUSAL_COUNT
+    let again = deserialize_ir_module(old, old_pair.1)
+    if again.fn_count != 0 || SOIR_DESER_REFUSAL_COUNT != refusals { return 10 }
+    println("STATIC_ASSET_WIRE7_OK")
+    0
+}

@@ -53,11 +53,13 @@ use check::types::*
 //   - call_args: [i64; arg_count] (v5+)
 
 let SOIR_MAGIC: i64 = 1380206931  // "SOIR" as i32 cast to i64
-let SOIR_VERSION: i8 = 6
+let SOIR_VERSION: i8 = 7
 let SOIR_FEATURE_CALL_ARGS: i8 = 1
 let SOIR_FEATURE_SRET_ABI: i8 = 2
 let SOIR_FEATURE_RETURN_KNOWLEDGE_KIND: i8 = 4
-let SOIR_FEATURES_CURRENT: i8 = SOIR_FEATURE_CALL_ARGS | SOIR_FEATURE_SRET_ABI | SOIR_FEATURE_RETURN_KNOWLEDGE_KIND
+let SOIR_FEATURES_V6: i8 = SOIR_FEATURE_CALL_ARGS | SOIR_FEATURE_SRET_ABI | SOIR_FEATURE_RETURN_KNOWLEDGE_KIND
+let SOIR_FEATURE_EXTENDED_NAMES: i8 = 8
+let SOIR_FEATURES_CURRENT: i8 = SOIR_FEATURES_V6 | SOIR_FEATURE_EXTENDED_NAMES
 let SOIR_FEATURES_V5: i8 = SOIR_FEATURE_CALL_ARGS | SOIR_FEATURE_SRET_ABI
 let SOIR_MAX_SIZE: i64 = 131072  // 128KB max module size
 
@@ -73,6 +75,8 @@ pub var SOIR_SER_REFUSAL_COUNT: i64 = 0
 // section readers are intentionally built from these primitives, so a
 // truncated declared payload is refused before any backing-array access.
 var SOIR_DESER_ACTIVE_LIMIT: i64 = SOIR_MAX_SIZE
+// v7 extends only long Name records; short records retain their historical width.
+var SOIR_DESER_EXTENDED_NAMES: bool = false
 
 fn soir_note_deser_refusal() with Mut {
     SOIR_DESER_REFUSAL_COUNT = SOIR_DESER_REFUSAL_COUNT + 1
@@ -112,15 +116,16 @@ fn write_f64(buf: &![i8; 131072], pos: i64, val: f64) -> i64 with Mut, Panic, Di
 fn write_name(buf: &![i8; 131072], pos: i64, n: Name) -> i64 with Mut, Panic, Div {
     var p = pos
     var encoded_len = n.len
-    if encoded_len < 0 || encoded_len > 128 {
+    if encoded_len < 0 || encoded_len > 384 {
         SOIR_SER_REFUSAL_COUNT = SOIR_SER_REFUSAL_COUNT + 1
         encoded_len = 0
     }
     // Write length first
     p = write_i64(buf, p, encoded_len)
-    // Write buffer bytes
+    // v7: 128 bytes for short names, 384 for long names. Never clip identity tails.
+    let width: i64 = if encoded_len > 128 { 384 } else { 128 }
     var i: i64 = 0
-    while i < 128 {
+    while i < width {
         p = write_i8(buf, p, n.buf[i])
         i = i + 1
     }
@@ -235,13 +240,19 @@ fn read_name(buf: &[i8; 131072], pos: i64) -> (Name, i64) with Mut, Panic, Div {
     var p = len_pair.1
 
     var decoded_len = len
-    if decoded_len < 0 || decoded_len > 128 {
+    let max_name_len: i64 = if SOIR_DESER_EXTENDED_NAMES { 384 } else { 128 }
+    if decoded_len < 0 || decoded_len > max_name_len {
         soir_note_deser_refusal()
         decoded_len = 0
     }
+    let width: i64 = if SOIR_DESER_EXTENDED_NAMES && decoded_len > 128 { 384 } else { 128 }
+    if p < 0 || p > SOIR_DESER_ACTIVE_LIMIT - width || p > SOIR_MAX_SIZE - width {
+        soir_note_deser_refusal()
+        return (Name { buf: [0; 384], len: 0 }, SOIR_DESER_ACTIVE_LIMIT)
+    }
     var n = Name { buf: [0; 384], len: decoded_len }
     var i: i64 = 0
-    while i < 128 {
+    while i < width {
         let byte_pair = read_i8(buf, p)
         n.buf[i] = byte_pair.0
         p = byte_pair.1
@@ -332,7 +343,7 @@ fn read_opcode(buf: &[i8; 131072], pos: i64) -> (IrOpcode, i64) with Mut, Panic,
     let pair = read_i8(buf, pos)
     let tag = pair.0
     let next_pos = pair.1
-    if tag < 0 || tag > 40 {
+    if tag < 0 || tag > 40 || (tag == 40 && !SOIR_DESER_EXTENDED_NAMES) {
         soir_note_deser_refusal()
         return (IrOpcode::IrNop, next_pos)
     }
@@ -3948,6 +3959,7 @@ pub fn deserialize_ir_module_ref(buf: &[i8; 131072], len: i64) -> IrModule with 
         return ir_empty_module()
     }
     SOIR_DESER_ACTIVE_LIMIT = len
+    SOIR_DESER_EXTENDED_NAMES = false
 
     // Verify header magic - cast literals to i8 for comparison
     let b0: i8 = 83 as i8
@@ -3962,12 +3974,12 @@ pub fn deserialize_ir_module_ref(buf: &[i8; 131072], len: i64) -> IrModule with 
     let version = (*buf)[4]
     // v1-v4 lack sound call/floating metadata. v5 is readable with an
     // explicit unknown return-kind marker; consumers fail closed on .value.
-    if version != SOIR_VERSION && version != 5 {
+    if version != SOIR_VERSION && version != 6 && version != 5 {
         soir_note_deser_refusal()
         return ir_empty_module()
     }
     let features = if version >= 5 { (*buf)[5] } else { 0 as i8 }
-    let expected_features = if version == 5 { SOIR_FEATURES_V5 } else { SOIR_FEATURES_CURRENT }
+    let expected_features = if version == 5 { SOIR_FEATURES_V5 } else if version == 6 { SOIR_FEATURES_V6 } else { SOIR_FEATURES_CURRENT }
     if features != expected_features {
         soir_note_deser_refusal()
         return ir_empty_module()
@@ -3977,6 +3989,7 @@ pub fn deserialize_ir_module_ref(buf: &[i8; 131072], len: i64) -> IrModule with 
         return ir_empty_module()
     }
 
+    SOIR_DESER_EXTENDED_NAMES = version >= 7
     pos = 8  // Skip header
 
     // Read function count
