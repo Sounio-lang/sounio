@@ -16,6 +16,8 @@ This campaign combines a whole-tree source inventory and executable test selecti
 - Canonical sync::atomic and sync::mutex use native operations; time::instant acquires a real monotonic clock. The profiler reports clock, state, capacity and overflow errors rather than silently ignoring them.
 - Six intended math::pure exports and the regex u8 branch are repaired. The regex test imports production code instead of a duplicate implementation.
 
+- The disabled VCF module now validates core records and GT over dynamic byte buffers. [Its explicit contract](../../../../stdlib/genomics/io/VCF_CORE.md) leaves header/INFO/schema and symbolic-allele validation separate. Independent C++23 and native Sounio fixtures pass in job 17874.
+
 ## Scientific consolidation
 
 The selected stdlib, C++ reference, fixture and gate changes come from PR #3200 at `f3aabdb50431009de8be5b7f408db4ab449815f4`. This includes checked distributions, power, Wilcoxon, survival, FFT, numerical differentiation, FEM/Poisson, BDF/DP54, physical covariance/phonons, genomics counts/CSR/batch/shrinkage, and visualization palettes/contours. Original licensed palette source data and historical receipts retain their provenance.
@@ -31,7 +33,7 @@ Open one Platform with `ffi::platform::platform_open()`, check `platform_status`
 - Atomics now take `&Platform`; construction returns a linear AtomicI64, loads/add/sub/CAS return PlatformValue, and store/close return errno. CAS returns value 1 for success and 0 for an ordinary mismatch; status distinguishes errors. The old non-atomic implementation is removed.
 - Mutex operations take `&Platform`. `mutex_destroy(&platform,&!mutex)` preserves ownership on EBUSY; after successful destruction, `mutex_close(mutex)` consumes the invalidated owner. Recursive locking returns EDEADLK; try-lock returns EBUSY.
 - Thread callbacks currently support plain `fn(i64)->i64`. Join once, then close. This is not a closure, floating-point or general foreign-function callback ABI.
-- TCP operations may transfer fewer bytes than requested and distinguish EOF from errors. UDP loopback send is explicitly named. Truncated receive consumes the datagram, returns EMSGSIZE and the copied count, and leaves the ByteBuffer logical length unchanged.
+- TCP operations may transfer fewer bytes than requested and distinguish EOF from errors. UDP loopback send is explicitly named. Protocol mismatches are rejected before I/O. Truncated receive consumes the datagram, returns EMSGSIZE and the copied count, and leaves the ByteBuffer logical length unchanged.
 - Local ByteBuffer operations use their documented storage status codes. PlatformValue consistently uses Linux errno, including ENOBUFS for a payload budget and ENOMEM for allocation failure.
 - Collection budgets bound retained payload, not allocator metadata or the transient old-plus-new allocation during a deque/map reallocation.
 - `instant_now(&platform)` returns an opaque status-bearing instant. Elapsed operations reject reversed instants.
@@ -63,6 +65,7 @@ The source compiler used here was built in Slurm job 17771 from the unchanged co
 
 ## Evidence and remaining gates
 
+- Job 17874: expanded focused gate COMPLETED, exit 0:0, 44 seconds, including VCF and TCP/UDP protocol mismatch checks. See [the receipt](focal-17874.json).
 - Job 17864: focused gate COMPLETED, exit 0:0, 41 seconds. See [the machine-readable receipt](focal-17864.json). It contains the exact overlay/source-catalog hashes, per-phase results and artifact hashes. Durable native logs and manifests live under the directory recorded there.
 - Job 17800: earlier complete stdlib selection, before scientific consolidation and subsequent repairs: 320 pass, 74 fail, 194 skip, 588 total; zero selection errors. This is a diagnostic baseline, not the final tip.
 - Job 17854: integrated full/scientific/hyper validation of snapshot 14 was still running when this document was initially written. Snapshot 15 adds the subsequently passing effects, time/profiler and quaternion-golden changes. Follow-up receipts must retain that distinction.
