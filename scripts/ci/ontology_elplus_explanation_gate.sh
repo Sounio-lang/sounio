@@ -25,7 +25,7 @@ SOUC="$ROOT_DIR/bin/souc"
 
 run_leg() { # <engine-label> <engine-selector>
   local label="$1" engine="$2"
-  local check_log="$OUT/$label.check.log" run_log="$OUT/$label.run.log" shared_log="$OUT/$label.shared.log"
+  local check_log="$OUT/$label.check.log" run_log="$OUT/$label.run.log" shared_log="$OUT/$label.shared.log" cycle_log="$OUT/$label.cycle.log"
   env SOUNIO_SOUC_ENGINE="$engine" "$SOUC" check tests/run-pass/ontology_elplus_explanation.sio >"$check_log" 2>&1 \
     || { cat "$check_log" >&2; fail "engine=$label: check failed"; }
   env SOUNIO_SOUC_ENGINE="$engine" "$SOUC" run tests/run-pass/ontology_elplus_explanation.sio >"$run_log" 2>&1 \
@@ -45,6 +45,11 @@ run_leg() { # <engine-label> <engine-selector>
   grep -Fxq 'ONTOLOGY_ELPLUS_SHARED_PREMISE_OK facts=8' "$shared_log" \
     || { cat "$shared_log" >&2; fail "engine=$label: shared-premise DAG was not minimal"; }
 
+  env SOUNIO_SOUC_ENGINE="$engine" "$SOUC" run tests/run-pass/ontology_elplus_explanation_cycle.sio >"$cycle_log" 2>&1 \
+    || { cat "$cycle_log" >&2; fail "engine=$label: cyclic provenance was not rejected"; }
+  grep -Fxq 'ONTOLOGY_ELPLUS_EXPLANATION_CYCLE_OK rc=-4' "$cycle_log" \
+    || { cat "$cycle_log" >&2; fail "engine=$label: cyclic-trace marker missing"; }
+
   grep -E '^(TRACE_|STEP |ONTOLOGY_ELPLUS_EXPLANATION_OK)' "$run_log" >"$OUT/$label.normalized"
 }
 
@@ -53,7 +58,7 @@ grep -Fq 'run_check_mode: verdict=0' "$OUT/madaros.check.log" \
   || { cat "$OUT/madaros.check.log" >&2; fail "madaros leg: Madaros check marker missing"; }
 grep -Fq 'Compilation successful!' "$OUT/madaros.run.log" \
   || { cat "$OUT/madaros.run.log" >&2; fail "madaros leg: Madaros run marker missing"; }
-if grep -Eq '^compile: fns=' "$OUT/madaros.check.log" "$OUT/madaros.run.log" "$OUT/madaros.shared.log"; then
+if grep -Eq '^compile: fns=' "$OUT/madaros.check.log" "$OUT/madaros.run.log" "$OUT/madaros.shared.log" "$OUT/madaros.cycle.log"; then
   fail "madaros leg: lean_single compile marker present"
 fi
 
@@ -61,7 +66,7 @@ run_leg lean_single lean_single
 grep -Eq '^compile: fns=' "$OUT/lean_single.check.log" \
   || { cat "$OUT/lean_single.check.log" >&2; fail "lean_single leg: lean compile marker missing"; }
 if grep -Fq 'run_check_mode:' "$OUT/lean_single.check.log" \
-  || grep -Fq 'Compilation successful!' "$OUT/lean_single.run.log" "$OUT/lean_single.shared.log"; then
+  || grep -Fq 'Compilation successful!' "$OUT/lean_single.run.log" "$OUT/lean_single.shared.log" "$OUT/lean_single.cycle.log"; then
   fail "lean_single leg: Madaros marker present"
 fi
 
@@ -79,4 +84,4 @@ env SOUNIO_SOUC_ENGINE=madaros "$SOUC" run examples/clinical/pathway_temporal_de
 grep -Fxq 'ALL PASS' "$OUT/temporal.log" \
   || { cat "$OUT/temporal.log" >&2; fail "legacy temporal marker missing"; }
 
-echo 'ONTOLOGY_ELPLUS_EXPLAIN_GATE_OK traces=7 steps=31 rules=0..11 engines=madaros+lean_single shared_premise=8 legacy=temporal'
+echo 'ONTOLOGY_ELPLUS_EXPLAIN_GATE_OK traces=7 steps=31 rules=0..11 engines=madaros+lean_single shared_premise=8 cycles=refused legacy=temporal'
