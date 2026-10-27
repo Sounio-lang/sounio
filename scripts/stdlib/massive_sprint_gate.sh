@@ -39,6 +39,9 @@ for ref in file csv_numeric socket_ready vcf_header; do
  record "$ref-reference" "tests/reference/stdlib_${ref}_reference.cpp" timeout 120 "$out/$ref-reference" || true
  if [[ -f "$out/$ref-reference" ]];then sha256sum "$out/$ref-reference" >> "$out/EXECUTABLES.sha256";else fail=1;fi
 done
+record file-close-reference-build tests/reference/stdlib_file_close_reference.cpp g++ -std=c++23 -O2 -Wall -Wextra -Werror -pthread tests/reference/stdlib_file_close_reference.cpp runtime/stdlib_platform.cpp -Wl,--wrap=close -o "$out/file-close-reference" || true
+record file-close-reference tests/reference/stdlib_file_close_reference.cpp timeout 30 "$out/file-close-reference" || true
+if [[ -f "$out/file-close-reference" ]];then sha256sum "$out/file-close-reference" >> "$out/EXECUTABLES.sha256";else fail=1;fi
 record complex-reference-build tests/reference/stdlib_complex_canonical_reference.cpp g++ -std=c++23 -O2 -Wall -Wextra -Werror tests/reference/stdlib_complex_canonical_reference.cpp -o "$out/complex-reference" || true
 if [[ -f "$out/complex-reference" ]];then sha256sum "$out/complex-reference" >> "$out/EXECUTABLES.sha256";else fail=1;fi
 record workflow-reference-build tests/reference/stdlib_science_workflow_reference.cpp g++ -std=c++23 -O2 -Wall -Wextra -Werror tests/reference/stdlib_science_workflow_reference.cpp -o "$out/workflow-reference" || true

@@ -270,6 +270,7 @@ I dispatch(I op,I a,I b,I c,I d) {
   if(op==2) {
     std::lock_guard guard(registry_mutex);auto it=registry.find(a);
     if(it==registry.end())return failure(EBADF);
+    int close_error=0;
     if(it->second->kind==Kind::thread) {
       auto t=std::static_pointer_cast<Thread>(it->second);
       std::lock_guard thread_guard(t->mutex);
@@ -288,7 +289,16 @@ I dispatch(I op,I a,I b,I c,I d) {
       {std::lock_guard lock(q->mutex);q->closed=true;q->destroyed=true;}
       q->readable.notify_all();q->writable.notify_all();
     }
-    registry.erase(it);return 0;
+    if(it->second->kind==Kind::file) {
+      auto f=std::static_pointer_cast<File>(it->second);
+      std::lock_guard file_guard(f->mutex);
+      // Linux consumes the descriptor even when close reports EINTR or delayed I/O.
+      // Clear ownership first: neither a retry nor the destructor may close a reused fd.
+      const int fd=f->fd;f->fd=-1;
+      if(::close(fd)!=0)close_error=errno;
+    }
+    registry.erase(it);
+    return close_error!=0?failure(close_error):0;
   }
   if(op==3){std::lock_guard guard(registry_mutex);return static_cast<I>(registry.size());}
   if(op==10)return put(std::make_shared<Atomic>(a));

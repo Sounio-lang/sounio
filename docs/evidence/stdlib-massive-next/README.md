@@ -273,3 +273,21 @@ that complete job; individual case limits remain unchanged. A final complete
 raw11cb corpus is running as packets80/81; after the two measured annotations,
 the final candidate will be repeated as packet84 without overlapping its prior
 variant on the same node.
+
+## Native file close error follow-up
+
+Final source review after the fb8e97d validation found that resource destruction
+discarded the Linux close return status. The file branch now consumes the fd
+once, clears destructor ownership and reports EIO/EINTR instead of success.
+The C++23 fault-injection fixture checks ordinary close, both errors, resource
+removal, stale-ID rejection and a reused descriptor that must remain open.
+It is part of the expanded native gate and a mandatory hosted witness with
+uploaded receipts. No compiler, stdlib/test body, numerical assertion or
+canonical corpus selection changes for this correction. Earlier full corpus
+packet84 uses the pre-correction native provider; the new error branch and
+unchanged native services require their own focused validation.
+Slurm18061 / packet89 reproduces the exact two erroneous success statuses on
+the old provider and passes after repair. All six ASan/UBSan/leak-enabled
+references (close, file, callback ABI, platform, channel, socket readiness)
+pass, with source and executable seals. Packet88 is preserved as a toolchain
+preflight failure before compilation; its status is not a passing test.
