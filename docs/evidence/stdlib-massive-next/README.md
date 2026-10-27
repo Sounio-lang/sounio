@@ -128,3 +128,47 @@ The old cpu-ops node/partition was removed externally during packet07. That full
 its partial archive and original scratch results are preserved. Replacement full matrices32/33 use
 private local worker copies and write each case directly to shared CephFS storage.
 
+## Frozen source qualification and remaining acceptance
+
+Implementation snapshot 1616f882f09a942331c2e571e7a30e9f1f34a428 uses the qualified
+bootstrap 9cfb6a970d73718b09091331dc514d015e3d4e6f402ee756cdc7f7b0cc55110a.
+Slurm 18013 / packet61 rebuilt the full frozen compiler closure, sealed self-hosted
+and stdlib source catalogs before and after, and reproduced raw compiler
+81047d46f377e0b01dd3f93bc8152ab950583ab3156284812bd0fbc3ad98a196 byte for byte.
+Its build, source-integrity and binary-comparison statuses are all zero.
+
+Slurm 18011 / packet60 passed the expanded integrated gate and original complex
+fixtures on the bootstrap, including the independent C++23 complex reference.
+The subsequent deep gate exited one: its focused child gates still called
+/usr/bin/time directly, absent on that worker. Packet65 repeats the unchanged
+frozen source after installing that dependency; completion is a separate receipt.
+
+Matrices51/52 were interrupted by NODE_FAILURE at 2026-10-27T05:09:28Z.
+Their per-case receipts are retained, but neither has a completed full result.
+The trap-written WORKER_STATUS=0 is not evidence of completion.
+Matrix32 completed with 584 selected cases and no selection errors; failures
+remain. Matrix33 observed 647 cases but missed nb2_slot_cache/profile_main.sio;
+its two selection errors prevent full acceptance. Packet68 repeats main on a
+stable DL380 using raw810. A final candidate replay remains necessary.
+
+BASELINE61.json classifies every historical failure using identified individual
+case receipts and focused before/after evidence. Seven collection cases, the
+original IntResult case and original complex case now pass with their focused
+repairs. Three other cases are observed passing in the candidate. The remaining
+49 have failures independently observed in main and candidate (30 checker/API
+contracts, 13 native failures, six declared-budget overruns). Those are
+classifications, not root-cause repairs or a whole-stdlib green claim.
+
+Hosted CI run40451567363 for head1616 passed source-bootstrap, Linux and macOS
+native self-host, current-source f64, witness and contract jobs. Full Test Suite
+failed three original graphics smokes after PNG acquired a native-loader
+dependency unavailable to the bootstrap. The separate deep job failed only
+genomics-count-identities: its old gate expected the bootstrap to accept private
+field reads, while the qualified new bootstrap correctly emits E259.
+Both regressions are being repaired without skips or tolerance changes.
+
+Slurm18023 / packet69 passed the full genomics count identity gate with the
+stronger privacy expectations: all numerical, scale, mutant, canonical privacy,
+bootstrap E259 and both-engine linear controls passed; source, compiler, caller
+and executable hashes verified after execution. No numerical case, budget or
+tolerance changed. This repairs the exact sole failure in the hosted deep report.
