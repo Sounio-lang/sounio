@@ -1,0 +1,353 @@
+// stdlib/physics/phonon.sio
+// 1D Lattice Phonon Model for Epistemic Microcirculation
+//
+// Models discrete drug transport through a liver sinusoid as a 1D chain
+// of N lattice sites, each carrying drug concentration with GUM uncertainty.
+//
+// Physics:
+//   - Discrete diffusion: nearest-neighbor coupling (viscous RBC interaction)
+//   - Pulsatile boundary: hepatic artery (1.2 Hz) + portal vein (steady)
+//   - Drug release: first-order transfer to hepatocyte tissue at each site
+//   - Distributed metabolism: CYP3A4 clearance spread across the sinusoid
+//
+// Each site spacing ≈ 4μm (one RBC diameter in a sinusoid ~250μm long).
+// The phonon modes are the collective density waves in this chain.
+//
+// References:
+//   Teutsch (2005) — sinusoid morphometry
+//   Wisse (1985) — sinusoidal endothelial structure
+//   McNaughton & Abu-Yousef (1998) — portal vein Doppler pulsatility
+//   Taylor (1953) — dispersion in tubes (Taylor-Aris dispersion)
+
+// --- Constants ---
+let PHONON_N: i64 = 64           // lattice sites (fits in EState arrays)
+let PI: f64 = 3.14159265358979
+
+// --- Phonon parameter indices (in a flat f64 array) ---
+// These mirror ODEParams layout for standalone lattice runs.
+let PP_D_EFF: i64 = 0            // effective axial diffusion (m^2/s)
+let PP_DX: i64 = 1               // site spacing (m)
+let PP_K_RELEASE: i64 = 2        // drug release rate to tissue (1/s)
+let PP_CL_SITE: i64 = 3          // per-site CYP3A4 clearance (1/s)
+let PP_FU: i64 = 4               // fraction unbound in plasma
+let PP_KP: i64 = 5               // liver tissue:plasma partition coefficient
+let PP_C_PORTAL: i64 = 6         // mean portal vein concentration (ng/mL)
+let PP_C_HA: i64 = 7             // mean hepatic artery concentration (ng/mL)
+let PP_F_HEART: i64 = 8          // heart rate (Hz)
+let PP_A_PORTAL: i64 = 9         // portal pulsatility amplitude (fraction)
+let PP_A_HA: i64 = 10            // hepatic artery pulsatility amplitude
+let PP_PHI_HA: i64 = 11          // arterial phase offset (radians)
+let PP_C_TISSUE: i64 = 12        // hepatocyte tissue concentration (ng/mL)
+let PP_V_BLOOD: i64 = 13         // blood velocity in sinusoid (m/s)
+let PP_ZONATION: i64 = 14        // zonation ratio (1.0=uniform, 5.0=5:1 pericentral)
+let PP_COUNT: i64 = 15           // total parameter count
+
+// --- Lattice state ---
+// Stored in two flat arrays: values[0..N-1] = concentrations,
+// variances[0..N-1] = GUM variances per site.
+
+struct PhononState {
+    values: [f64; 64],
+    variances: [f64; 64],
+    n: i64
+}
+
+fn phonon_state_zero() -> PhononState {
+    PhononState {
+        values: [0.0; 64],
+        variances: [0.0; 64],
+        n: PHONON_N
+    }
+}
+
+// --- sin approximation (no libm dependency) ---
+fn sin_approx(x: f64) -> f64 with Mut {
+    // Reduce to [-pi, pi]
+    var a = x
+    while a > PI { a = a - 2.0 * PI }
+    while a < 0.0 - PI { a = a + 2.0 * PI }
+    // Bhaskara I approximation: sin(x) ≈ 16x(π-x) / (5π²-4x(π-x))
+    let num = 16.0 * a * (PI - a)
+    let den = 5.0 * PI * PI - 4.0 * a * (PI - a)
+    if den == 0.0 { return 0.0 }
+    num / den
+}
+
+// --- Pulsatile boundary condition ---
+fn pulsatile_input(t: f64, params: &[f64; 64]) -> f64 with Mut {
+    let c_portal = params[PP_C_PORTAL]
+    let c_ha = params[PP_C_HA]
+    let f_heart = params[PP_F_HEART]
+    let a_portal = params[PP_A_PORTAL]
+    let a_ha = params[PP_A_HA]
+    let phi_ha = params[PP_PHI_HA]
+
+    let omega = 2.0 * PI * f_heart
+    let portal_wave = c_portal * (1.0 + a_portal * sin_approx(omega * t))
+    let artery_wave = c_ha * (1.0 + a_ha * sin_approx(omega * t + phi_ha))
+
+    // Weighted sum: portal ~75%, hepatic artery ~25%
+    0.75 * portal_wave + 0.25 * artery_wave
+}
+
+// --- Pulsatile boundary variance ---
+fn pulsatile_input_variance(t: f64, params: &[f64; 64]) -> f64 with Mut {
+    // Assume 10% coefficient of variation on the pulsatile amplitude
+    let c_mean = pulsatile_input(t, params)
+    let cv = 0.10
+    c_mean * c_mean * cv * cv
+}
+
+// --- RHS: 1D lattice dynamics ---
+// dC_i/dt = diffusion + release_to_tissue + metabolism
+fn phonon_rhs(
+    t: f64,
+    state: &PhononState,
+    params: &[f64; 64],
+    out: &!PhononState
+) with Mut, Div, Panic {
+    let d_eff = params[PP_D_EFF]
+    let dx = params[PP_DX]
+    let k_rel = params[PP_K_RELEASE]
+    let cl_site = params[PP_CL_SITE]
+    let fu = params[PP_FU]
+    let kp = params[PP_KP]
+    let c_tissue = params[PP_C_TISSUE]
+    let v_blood = params[PP_V_BLOOD]
+    let zonation = params[PP_ZONATION]
+    let n = state.n
+
+    let dx2 = dx * dx
+    if dx2 == 0.0 { return }
+
+    let diff_coeff = d_eff / dx2
+
+    // Boundary: site 0 = pulsatile input
+    let c_input = pulsatile_input(t, params)
+
+    var i: i64 = 0
+    while i < n {
+        let c_i = state.values[i]
+
+        // --- Advection (upwind: blood carries drug downstream) ---
+        // dC/dt += -v * (C_i - C_{i-1}) / dx
+        var advection: f64 = 0.0
+        if v_blood > 0.0 {
+            let c_upstream = if i == 0 { c_input } else { state.values[i - 1] }
+            advection = 0.0 - v_blood * (c_i - c_upstream) / dx
+        }
+
+        // --- Diffusion (nearest-neighbor coupling) ---
+        var diffusion: f64 = 0.0
+        if i == 0 {
+            let c_left = c_input
+            let c_right = if i + 1 < n { state.values[i + 1] } else { c_i }
+            diffusion = diff_coeff * (c_left - 2.0 * c_i + c_right)
+        } else if i == n - 1 {
+            let c_left = state.values[i - 1]
+            diffusion = diff_coeff * (c_left - c_i)
+        } else {
+            let c_left = state.values[i - 1]
+            let c_right = state.values[i + 1]
+            diffusion = diff_coeff * (c_left - 2.0 * c_i + c_right)
+        }
+
+        // --- Drug release to hepatocyte tissue ---
+        let release = 0.0 - k_rel * (c_i - c_tissue / kp)
+
+        // --- CYP3A4 metabolism with enzyme zonation ---
+        // Zonation factor: linear gradient normalized so average = 1.0
+        // For zonation Z: factor ranges from 2/(Z+1) to 2Z/(Z+1)
+        let cl_factor = if zonation > 1.01 {
+            let frac = (i as f64) / ((n - 1) as f64)
+            2.0 / (zonation + 1.0) * (1.0 + (zonation - 1.0) * frac)
+        } else {
+            1.0
+        }
+        let metabolism = 0.0 - cl_site * cl_factor * fu * c_i
+
+        out.values[i] = advection + diffusion + release + metabolism
+
+        // --- Variance propagation (linearized GUM) ---
+        var var_i = state.variances[i]
+
+        // Advection: (v/dx)^2 * (Var(C_i) + Var(C_upstream))
+        var var_advect: f64 = 0.0
+        if v_blood > 0.0 {
+            let adv_c = v_blood / dx
+            let var_up = if i == 0 {
+                pulsatile_input_variance(t, params)
+            } else {
+                state.variances[i - 1]
+            }
+            var_advect = adv_c * adv_c * (var_i + var_up)
+        }
+
+        // Diffusion
+        var var_diff: f64 = 0.0
+        if i == 0 {
+            let var_left = pulsatile_input_variance(t, params)
+            let var_right = if i + 1 < n { state.variances[i + 1] } else { var_i }
+            var_diff = diff_coeff * diff_coeff * (var_left + 4.0 * var_i + var_right)
+        } else if i == n - 1 {
+            let var_left = state.variances[i - 1]
+            var_diff = diff_coeff * diff_coeff * (var_left + var_i)
+        } else {
+            let var_left = state.variances[i - 1]
+            let var_right = state.variances[i + 1]
+            var_diff = diff_coeff * diff_coeff * (var_left + 4.0 * var_i + var_right)
+        }
+
+        // Release + metabolism (with zonation)
+        let var_release = k_rel * k_rel * var_i
+        let cl_z = cl_site * cl_factor * fu
+        let var_metab = cl_z * cl_z * var_i
+        out.variances[i] = var_advect + var_diff + var_release + var_metab
+
+        i = i + 1
+    }
+}
+
+// --- RK4 step for the lattice ---
+fn phonon_rk4_step(
+    t: f64,
+    state: &!PhononState,
+    params: &[f64; 64],
+    dt: f64
+) with Mut, Div, Panic {
+    var k1 = phonon_state_zero()
+    var k2 = phonon_state_zero()
+    var k3 = phonon_state_zero()
+    var k4 = phonon_state_zero()
+    var tmp = phonon_state_zero()
+    let n = state.n
+
+    // k1 = f(t, y)
+    phonon_rhs(t, state, params, &!k1)
+
+    // k2 = f(t + dt/2, y + dt/2 * k1)
+    var i: i64 = 0
+    while i < n {
+        tmp.values[i] = state.values[i] + 0.5 * dt * k1.values[i]
+        tmp.variances[i] = state.variances[i] + 0.5 * dt * k1.variances[i]
+        i = i + 1
+    }
+    tmp.n = n
+    phonon_rhs(t + 0.5 * dt, &tmp, params, &!k2)
+
+    // k3 = f(t + dt/2, y + dt/2 * k2)
+    i = 0
+    while i < n {
+        tmp.values[i] = state.values[i] + 0.5 * dt * k2.values[i]
+        tmp.variances[i] = state.variances[i] + 0.5 * dt * k2.variances[i]
+        i = i + 1
+    }
+    phonon_rhs(t + 0.5 * dt, &tmp, params, &!k3)
+
+    // k4 = f(t + dt, y + dt * k3)
+    i = 0
+    while i < n {
+        tmp.values[i] = state.values[i] + dt * k3.values[i]
+        tmp.variances[i] = state.variances[i] + dt * k3.variances[i]
+        i = i + 1
+    }
+    phonon_rhs(t + dt, &tmp, params, &!k4)
+
+    // y_new = y + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
+    i = 0
+    while i < n {
+        state.values[i] = state.values[i] + (dt / 6.0) * (
+            k1.values[i] + 2.0 * k2.values[i] + 2.0 * k3.values[i] + k4.values[i]
+        )
+        state.variances[i] = state.variances[i] + (dt / 6.0) * (
+            k1.variances[i] + 2.0 * k2.variances[i] + 2.0 * k3.variances[i] + k4.variances[i]
+        )
+        // Clamp negative concentrations/variances
+        if state.values[i] < 0.0 { state.values[i] = 0.0 }
+        if state.variances[i] < 0.0 { state.variances[i] = 0.0 }
+        i = i + 1
+    }
+}
+
+// --- Run the lattice for a given duration ---
+fn phonon_simulate(
+    state: &!PhononState,
+    params: &[f64; 64],
+    t_start: f64,
+    t_end: f64,
+    dt: f64
+) -> i64 with Mut, Div, Panic {
+    var t = t_start
+    var steps: i64 = 0
+    while t < t_end {
+        let step_dt = if t + dt > t_end { t_end - t } else { dt }
+        phonon_rk4_step(t, state, params, step_dt)
+        t = t + step_dt
+        steps = steps + 1
+    }
+    steps
+}
+
+// --- Spatial statistics ---
+
+fn phonon_spatial_average(state: &PhononState) -> f64 with Mut {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < state.n {
+        sum = sum + state.values[i]
+        i = i + 1
+    }
+    sum / (state.n as f64)
+}
+
+fn phonon_spatial_variance(state: &PhononState) -> f64 with Mut {
+    let mean = phonon_spatial_average(state)
+    var sum_sq: f64 = 0.0
+    var i: i64 = 0
+    while i < state.n {
+        let diff = state.values[i] - mean
+        sum_sq = sum_sq + diff * diff
+        i = i + 1
+    }
+    sum_sq / (state.n as f64)
+}
+
+fn phonon_outflow_concentration(state: &PhononState) -> f64 {
+    // Venous end = last site
+    state.values[state.n - 1]
+}
+
+fn phonon_outflow_variance(state: &PhononState) -> f64 {
+    state.variances[state.n - 1]
+}
+
+fn phonon_mean_variance(state: &PhononState) -> f64 with Mut {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < state.n {
+        sum = sum + state.variances[i]
+        i = i + 1
+    }
+    sum / (state.n as f64)
+}
+
+// --- Default rapamycin parameters ---
+fn rapamycin_phonon_params() -> [f64; 64] {
+    var p: [f64; 64] = [0.0; 64]
+    p[PP_D_EFF] = 1.0e-9         // m^2/s (Taylor dispersion in sinusoid)
+    p[PP_DX] = 3.9e-6            // m (250μm / 64 sites ≈ 3.9μm)
+    p[PP_K_RELEASE] = 0.1        // 1/s (drug release from RBC to tissue)
+    p[PP_CL_SITE] = 0.003        // 1/s (CL_hepatic / N / V_site, distributed)
+    p[PP_FU] = 0.075             // fraction unbound (rapamycin)
+    p[PP_KP] = 5.0               // Kp liver (Rodgers-Rowland)
+    p[PP_C_PORTAL] = 10.0        // ng/mL (typical portal concentration)
+    p[PP_C_HA] = 8.0             // ng/mL (typical arterial concentration)
+    p[PP_F_HEART] = 1.2          // Hz (72 bpm)
+    p[PP_A_PORTAL] = 0.05        // portal pulsatility (low)
+    p[PP_A_HA] = 0.30            // arterial pulsatility (high)
+    p[PP_PHI_HA] = 0.785         // pi/4 radians phase offset
+    p[PP_C_TISSUE] = 2.0         // ng/mL (hepatocyte tissue, steady)
+    p[PP_V_BLOOD] = 3.0e-4       // m/s (300 μm/s sinusoidal blood velocity)
+    p[PP_ZONATION] = 1.0          // uniform (set to 5.0 for pericentral gradient)
+    p
+}

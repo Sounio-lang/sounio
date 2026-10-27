@@ -1,0 +1,441 @@
+// Bounded DP5(4): local FSAL, checked represented stages, quartic dense output.
+// Dense coefficients: Shampine1986, primary Hairer/Wanner DOPRI5 CDOPRI/CONTD5.
+// https://www.unige.ch/~hairer/prog/nonstiff/dopri5.f
+use math::pure::{is_finite,ln_checked,exp}
+use ode::solver::{ODEOptions}
+pub struct Ode64Result {
+ pub status:i64,pub n:i64,pub t_final:f64,pub steps:i64,pub attempts:i64,
+ pub nfeval:i64,pub nreject:i64,pub state:[f64;64],
+}
+pub struct Dp54Value {pub status:i64,pub value:f64}
+pub struct Dp54Limits {pub max_rhs:i64,pub max_event:i64,pub max_root_iterations:i64}
+pub fn dp54_default_limits()->Dp54Limits {Dp54Limits{max_rhs:7000000,max_event:2000000,max_root_iterations:1000000}}
+pub linear struct Dp54Dense64 {n:i64,status:i64,t0:f64,t1:f64,query_end:f64,r1:[f64;64],r2:[f64;64],r3:[f64;64],r4:[f64;64],r5:[f64;64],endpoint:[f64;64],slope0:[f64;64],slope1:[f64;64]}
+pub struct Dp54DenseDomain {pub status:i64,pub n:i64,pub t0:f64,pub t1:f64}
+pub fn dp54_dense_init()->Dp54Dense64 {Dp54Dense64{n:0,status:3,t0:0.0,t1:0.0,query_end:0.0,r1:[0.0;64],r2:[0.0;64],r3:[0.0;64],r4:[0.0;64],r5:[0.0;64],endpoint:[0.0;64],slope0:[0.0;64],slope1:[0.0;64]}}
+pub fn dp54_dense_close(d:Dp54Dense64) {let Dp54Dense64{n,status,t0,t1,query_end,r1,r2,r3,r4,r5,endpoint,slope0,slope1}=d}
+struct Dp54Work64 {k1:[f64;64],k2:[f64;64],k3:[f64;64],k4:[f64;64],k5:[f64;64],k6:[f64;64],k7:[f64;64],trial:[f64;64]}
+fn dp_work()->Dp54Work64 {Dp54Work64{k1:[0.0;64],k2:[0.0;64],k3:[0.0;64],k4:[0.0;64],k5:[0.0;64],k6:[0.0;64],k7:[0.0;64],trial:[0.0;64]}}
+struct Dp54Times {status:i64,start:f64,t2:f64,t3:f64,t4:f64,t5:f64,end:f64,h:f64}
+fn dp_unavailable(code:i64)->Dp54Value {Dp54Value{status:code,value:0.0}}
+fn dp_abs(x:f64)->f64 {if x<0.0 {-x} else {x}}
+fn dp_min(a:f64,b:f64)->f64 {if a<b {a} else {b}}
+fn dp_max(a:f64,b:f64)->f64 {if a>b {a} else {b}}
+fn dp_finite(a:&[f64;64],n:i64)->bool with Mut,Panic {
+ var i:i64=0
+ while i<n {if !is_finite(a[i as usize]) {return false};i=i+1}
+ true
+}
+fn dp_poison(a:&![f64;64],n:i64) with Mut,Div,Panic {
+ var i:i64=0
+ while i<n {a[i as usize]=0.0/0.0;i=i+1}
+}
+fn dp_empty(n:i64)->Ode64Result {
+ Ode64Result{status:3,n:n,t_final:0.0,steps:0,attempts:0,nfeval:0,nreject:0,state:[0.0;64]}
+}
+fn dp_options(o:ODEOptions)->bool {
+ is_finite(o.rtol) && o.rtol>=0.0 && is_finite(o.atol) && o.atol>0.0 &&
+ is_finite(o.dt_init) && o.dt_init>=0.0 && is_finite(o.dt_min) && o.dt_min>0.0 &&
+ is_finite(o.dt_max) && o.dt_max>=o.dt_min && o.max_steps>=1 && o.max_steps<=1000000 &&
+ is_finite(o.safety) && o.safety>0.0 && o.safety<1.0 &&
+ is_finite(o.min_shrink) && o.min_shrink>0.0 && o.min_shrink<1.0 &&
+ is_finite(o.max_growth) && o.max_growth>=1.0
+}
+fn dp_times(start:f64,end:f64)->Dp54Times with Mut,Div {
+ let h=end-start
+ var r=Dp54Times{status:2,start:start,t2:0.0,t3:0.0,t4:0.0,t5:0.0,end:end,h:h}
+ if !is_finite(h)||!is_finite(start)||!is_finite(end) {r.status=4;return r}
+ if h==0.0||start+h!=end {return r}
+ r.t2=start+(1.0/5.0)*h;r.t3=start+(3.0/10.0)*h;r.t4=start+(4.0/5.0)*h;r.t5=start+(8.0/9.0)*h
+ if !is_finite(r.t2)||!is_finite(r.t3)||!is_finite(r.t4)||!is_finite(r.t5) {r.status=4;return r}
+ if h>0.0 {if !(start<r.t2&&r.t2<r.t3&&r.t3<r.t4&&r.t4<r.t5&&r.t5<end) {return r}}else{if !(start>r.t2&&r.t2>r.t3&&r.t3>r.t4&&r.t4>r.t5&&r.t5>end) {return r}}
+ r.status=0;r
+}
+// No inverse bitcast: arithmetic neighbor, separately qualified against C++23
+// std::nextafter on both the committed seed and current modular compiler.
+fn dp_adjacent(x:f64,direction:f64)->f64 with Mut {
+ let magnitude=dp_abs(x)
+ var delta=magnitude*1.1102230246251565e-16
+ if delta<4.9406564584124654e-324 {delta=4.9406564584124654e-324}
+ var y=x+direction*delta
+ if y==x {y=x+direction*(2.0*delta)}
+ if y==0.0&&x<0.0 {return -0.0}
+ y
+}
+fn dp_plan(start:f64,target:f64,cap:f64)->Dp54Times with Mut,Div {
+ let direction=if target>start {1.0}else{-1.0}
+ let remaining=dp_abs(target-start)
+ let magnitude=dp_min(cap,remaining)
+ var endpoint=start+direction*magnitude
+ if (direction>0.0&&endpoint>target)||(direction<0.0&&endpoint<target) {endpoint=target}
+ if dp_abs(endpoint-start)>cap {endpoint=dp_adjacent(endpoint,-direction)}
+ var times=dp_times(start,endpoint)
+ if times.status!=0 {return times}
+ if dp_abs(times.h)>cap {times.status=2;return times}
+ if endpoint!=target {
+  let trailing=dp_times(endpoint,target)
+  if trailing.status==2&&dp_abs(target-endpoint)<=cap {
+   let split=start+0.5*(target-start)
+   let first=dp_times(start,split);let second=dp_times(split,target)
+   if first.status!=0||second.status!=0||dp_abs(first.h)>cap||dp_abs(second.h)>cap {times.status=2;return times}
+   times=first
+  }
+ }
+ times
+}
+fn dp_trial(rhs:fn(f64,&[f64;64],&![f64;64])->() with Mut,Div,Panic,state:&[f64;64],n:i64,times:Dp54Times,w:&!Dp54Work64,counter:&!i64,budget:i64,have_k1:bool)->i64 with Mut,Div,Panic {
+ let h=times.h
+ var i:i64=0
+ if !have_k1 {
+  dp_poison(&!w.k1,n)
+  if *counter>=budget {return 1}
+  rhs(times.start,state,&!w.k1)
+  *counter=*counter+1
+  if !dp_finite(&w.k1,n) {return 4}
+ }
+  i=0
+  while i<n {
+   w.trial[i as usize]=state[i as usize]+h*((1.0/5.0)*w.k1[i as usize])
+   i=i+1
+  }
+  let time_k2=times.t2
+  if !is_finite(time_k2) || !dp_finite(&w.trial,n) {return 4}
+  dp_poison(&!w.k2,n)
+  if *counter>=budget {return 1}
+  rhs(time_k2,&w.trial,&!w.k2)
+  *counter=*counter+1
+  if !dp_finite(&w.k2,n) {return 4}
+  i=0
+  while i<n {
+   w.trial[i as usize]=state[i as usize]+h*((3.0/40.0)*w.k1[i as usize]+(9.0/40.0)*w.k2[i as usize])
+   i=i+1
+  }
+  let time_k3=times.t3
+  if !is_finite(time_k3) || !dp_finite(&w.trial,n) {return 4}
+  dp_poison(&!w.k3,n)
+  if *counter>=budget {return 1}
+  rhs(time_k3,&w.trial,&!w.k3)
+  *counter=*counter+1
+  if !dp_finite(&w.k3,n) {return 4}
+  i=0
+  while i<n {
+   w.trial[i as usize]=state[i as usize]+h*((44.0/45.0)*w.k1[i as usize]+(-56.0/15.0)*w.k2[i as usize]+(32.0/9.0)*w.k3[i as usize])
+   i=i+1
+  }
+  let time_k4=times.t4
+  if !is_finite(time_k4) || !dp_finite(&w.trial,n) {return 4}
+  dp_poison(&!w.k4,n)
+  if *counter>=budget {return 1}
+  rhs(time_k4,&w.trial,&!w.k4)
+  *counter=*counter+1
+  if !dp_finite(&w.k4,n) {return 4}
+  i=0
+  while i<n {
+   w.trial[i as usize]=state[i as usize]+h*((19372.0/6561.0)*w.k1[i as usize]+(-25360.0/2187.0)*w.k2[i as usize]+(64448.0/6561.0)*w.k3[i as usize]+(-212.0/729.0)*w.k4[i as usize])
+   i=i+1
+  }
+  let time_k5=times.t5
+  if !is_finite(time_k5) || !dp_finite(&w.trial,n) {return 4}
+  dp_poison(&!w.k5,n)
+  if *counter>=budget {return 1}
+  rhs(time_k5,&w.trial,&!w.k5)
+  *counter=*counter+1
+  if !dp_finite(&w.k5,n) {return 4}
+  i=0
+  while i<n {
+   w.trial[i as usize]=state[i as usize]+h*((9017.0/3168.0)*w.k1[i as usize]+(-355.0/33.0)*w.k2[i as usize]+(46732.0/5247.0)*w.k3[i as usize]+(49.0/176.0)*w.k4[i as usize]+(-5103.0/18656.0)*w.k5[i as usize])
+   i=i+1
+  }
+  let time_k6=times.end
+  if !is_finite(time_k6) || !dp_finite(&w.trial,n) {return 4}
+  dp_poison(&!w.k6,n)
+  if *counter>=budget {return 1}
+  rhs(time_k6,&w.trial,&!w.k6)
+  *counter=*counter+1
+  if !dp_finite(&w.k6,n) {return 4}
+  i=0
+  while i<n {
+   w.trial[i as usize]=state[i as usize]+h*((35.0/384.0)*w.k1[i as usize]+(500.0/1113.0)*w.k3[i as usize]+(125.0/192.0)*w.k4[i as usize]+(-2187.0/6784.0)*w.k5[i as usize]+(11.0/84.0)*w.k6[i as usize])
+   i=i+1
+  }
+  let time_k7=times.end
+  if !is_finite(time_k7) || !dp_finite(&w.trial,n) {return 4}
+  dp_poison(&!w.k7,n)
+  if *counter>=budget {return 1}
+  rhs(time_k7,&w.trial,&!w.k7)
+  *counter=*counter+1
+  if !dp_finite(&w.k7,n) {return 4}
+ 0
+}
+fn dp_error(state:&[f64;64],n:i64,h:f64,w:&Dp54Work64,opts:ODEOptions)->Dp54Value with Mut,Div,Panic {
+ var i:i64=0
+  var error:f64=0.0
+  i=0
+  while i<n {
+   let defect=h*((71.0/57600.0)*w.k1[i as usize]-(71.0/16695.0)*w.k3[i as usize]+
+    (71.0/1920.0)*w.k4[i as usize]-(17253.0/339200.0)*w.k5[i as usize]+
+    (22.0/525.0)*w.k6[i as usize]-(1.0/40.0)*w.k7[i as usize])
+   let denominator=opts.atol+opts.rtol*dp_max(dp_abs(state[i as usize]),dp_abs(w.trial[i as usize]))
+   if !is_finite(defect) || !is_finite(denominator) || denominator<=0.0 {return dp_unavailable(4)}
+   let normalized=dp_abs(defect)/denominator
+   if !is_finite(normalized) {return dp_unavailable(4)}
+   if normalized>error {error=normalized}
+   i=i+1
+  }
+ Dp54Value{status:0,value:error}
+}
+fn dp_control(error:f64,opts:ODEOptions)->Dp54Value with Mut,Div,Panic {
+ var factor=opts.max_growth
+ if error>0.0 {let logged=ln_checked(error);if logged.status!=0 {return dp_unavailable(4)};factor=opts.safety*exp(-0.2*logged.value)}
+ if !is_finite(factor)||factor<=0.0 {return dp_unavailable(4)}
+ Dp54Value{status:0,value:dp_max(opts.min_shrink,dp_min(opts.max_growth,factor))}
+}
+fn dp_dense_preflight(state:&[f64;64],n:i64,h:f64,w:&!Dp54Work64)->i64 with Mut,Div,Panic {
+ var i:i64=0
+ while i<n {
+  let r2=w.trial[i]-state[i]
+  let r3=h*w.k1[i]-r2
+  let r4=r2-h*w.k7[i]-r3
+  let r5=h*((-12715105075.0/11282082432.0)*w.k1[i]+(87487479700.0/32700410799.0)*w.k3[i]+(-10690763975.0/1880347072.0)*w.k4[i]+(701980252875.0/199316789632.0)*w.k5[i]+(-1453857185.0/822651844.0)*w.k6[i]+(69997945.0/29380423.0)*w.k7[i])
+  if !is_finite(r2)||!is_finite(r3)||!is_finite(r4)||!is_finite(r5) {return 4}
+  w.k2[i]=r5;w.k3[i]=r2;w.k4[i]=r3;w.k5[i]=r4;i=i+1
+ }
+ 0
+}
+fn dp_dense_commit(d:&!Dp54Dense64,state:&[f64;64],n:i64,times:Dp54Times,w:&Dp54Work64) with Mut,Panic {
+ var i:i64=0
+ while i<n {d.r1[i]=state[i];d.r2[i]=w.k3[i];d.r3[i]=w.k4[i];d.r4[i]=w.k5[i];d.r5[i]=w.k2[i];d.endpoint[i]=w.trial[i];d.slope0[i]=w.k1[i];d.slope1[i]=w.k7[i];i=i+1}
+ d.n=n;d.t0=times.start;d.t1=times.end;d.query_end=times.end;d.status=0
+}
+pub fn dp54_dense_domain(d:&Dp54Dense64)->Dp54DenseDomain {
+ if d.status!=0 {return Dp54DenseDomain{status:d.status,n:0,t0:0.0,t1:0.0}}
+ Dp54DenseDomain{status:0,n:d.n,t0:d.t0,t1:d.query_end}
+}
+fn dp_dense_query(d:&Dp54Dense64,t:f64,i:i64)->i64 {
+ if d.status!=0 {return d.status}
+ if i<0||i>=d.n||!is_finite(t) {return 3}
+ if d.t0<d.query_end {if t<d.t0||t>d.query_end {return 3}}else{if t>d.t0||t<d.query_end {return 3}}
+ 0
+}
+pub fn dp54_dense_value(d:&Dp54Dense64,t:f64,i:i64)->Dp54Value with Div,Panic {
+ let code=dp_dense_query(d,t,i)
+ if code!=0 {return dp_unavailable(code)}
+ if t==d.t0 {return Dp54Value{status:0,value:d.r1[i]}}
+ if t==d.t1 {return Dp54Value{status:0,value:d.endpoint[i]}}
+ let theta=(t-d.t0)/(d.t1-d.t0)
+ let value=d.r1[i]+theta*(d.r2[i]+(1.0-theta)*(d.r3[i]+theta*(d.r4[i]+(1.0-theta)*d.r5[i])))
+ if !is_finite(value) {return dp_unavailable(4)}
+ Dp54Value{status:0,value:value}
+}
+pub fn dp54_dense_derivative(d:&Dp54Dense64,t:f64,i:i64)->Dp54Value with Div,Panic {
+ let code=dp_dense_query(d,t,i)
+ if code!=0 {return dp_unavailable(code)}
+ if t==d.t0 {return Dp54Value{status:0,value:d.slope0[i]}}
+ if t==d.t1 {return Dp54Value{status:0,value:d.slope1[i]}}
+ let h=d.t1-d.t0;let theta=(t-d.t0)/h;let u=1.0-theta
+ let a=d.r4[i]+u*d.r5[i];let b=d.r3[i]+theta*a;let c=d.r2[i]+u*b
+ let value=(c+theta*(-b+u*(a-theta*d.r5[i])))/h
+ if !is_finite(value) {return dp_unavailable(4)}
+ Dp54Value{status:0,value:value}
+}
+fn dp_limits_ok(l:Dp54Limits)->bool {l.max_rhs>=0&&l.max_rhs<=7000000&&l.max_event>=0&&l.max_event<=10000000&&l.max_root_iterations>=0&&l.max_root_iterations<=1000000}
+fn dp_run_plain(rhs:fn(f64,&[f64;64],&![f64;64])->() with Mut,Div,Panic,y0:&[f64;64],n:i64,t0:f64,t_end:f64,opts:ODEOptions,limits:Dp54Limits,dense:&!Dp54Dense64,dense_on:bool)->Ode64Result with Mut,Div,Panic {
+ dense.status=3;dense.n=0;dense.t0=0.0;dense.t1=0.0;dense.query_end=0.0
+ var out=dp_empty(n)
+ if n<1||n>64||!is_finite(t0)||!is_finite(t_end)||!dp_options(opts)||!dp_limits_ok(limits) {return out}
+ if !dp_finite(y0,n) {return out}
+ out.t_final=t0
+ var i:i64=0;while i<n {out.state[i]=y0[i];i=i+1}
+ if t0==t_end {out.status=0;return out}
+ let span=t_end-t0
+ if !is_finite(span) {out.status=4;return out}
+ var step=opts.dt_init;if step==0.0 {step=dp_abs(span)*0.01};step=dp_max(opts.dt_min,dp_min(opts.dt_max,step))
+ var w=dp_work();var have_k1=false;var evaluations:i64=0
+ while out.t_final!=t_end&&out.attempts<opts.max_steps {
+  let times=dp_plan(out.t_final,t_end,step)
+  if times.status!=0 {out.status=times.status;return out}
+  out.attempts=out.attempts+1
+  let code=dp_trial(rhs,&out.state,n,times,&!w,&!evaluations,limits.max_rhs,have_k1)
+  out.nfeval=evaluations
+  if code!=0 {out.status=code;return out}
+  have_k1=true
+  let err=dp_error(&out.state,n,times.h,&w,opts)
+  if err.status!=0 {out.status=err.status;return out}
+  let control=dp_control(err.value,opts)
+  if control.status!=0 {out.status=control.status;return out}
+  var factor=control.value
+  if err.value<=1.0 {
+   if dense_on {
+    let ready=dp_dense_preflight(&out.state,n,times.h,&!w)
+    if ready!=0 {out.status=ready;return out}
+    dp_dense_commit(dense,&out.state,n,times,&w)
+   }
+   i=0;while i<n {out.state[i]=w.trial[i];w.k1[i]=w.k7[i];i=i+1}
+   out.t_final=times.end;out.steps=out.steps+1
+  }else{
+   out.nreject=out.nreject+1;factor=dp_min(0.9,factor)
+   if dp_abs(times.h)<=opts.dt_min {out.status=2;return out}
+  }
+  let scaled=dp_abs(times.h)*factor
+  if !is_finite(scaled) {step=opts.dt_max}else{step=dp_max(opts.dt_min,dp_min(opts.dt_max,scaled))}
+  if err.value>1.0&&step>=dp_abs(times.h) {out.status=2;return out}
+ }
+ if out.t_final!=t_end {out.status=1;return out}
+ out.status=0;out
+}
+pub fn solve_dp54_dense64(rhs:fn(f64,&[f64;64],&![f64;64])->() with Mut,Div,Panic,y0:&[f64;64],n:i64,t0:f64,t_end:f64,opts:ODEOptions,limits:Dp54Limits,dense:&!Dp54Dense64)->Ode64Result with Mut,Div,Panic {dp_run_plain(rhs,y0,n,t0,t_end,opts,limits,dense,true)}
+pub fn solve_dp54_64(rhs:fn(f64,&[f64;64],&![f64;64])->() with Mut,Div,Panic,y0:&[f64;64],n:i64,t0:f64,t_end:f64,opts:ODEOptions)->Ode64Result with Mut,Div,Panic {
+ var dense=dp54_dense_init()
+ let result=dp_run_plain(rhs,y0,n,t0,t_end,opts,dp54_default_limits(),&!dense,false)
+ dp54_dense_close(dense);result
+}
+
+// One stationary continuous event function. A bracketed crossing per accepted
+// segment can be located; tangencies/multiple unresolved crossings are not inferred.
+pub struct Dp54EventOptions {pub direction:i64,pub terminal:bool,pub include_initial:bool,pub root_atol:f64}
+pub fn dp54_default_event_options()->Dp54EventOptions {Dp54EventOptions{direction:0,terminal:true,include_initial:true,root_atol:1e-10}}
+pub linear struct Dp54Event64 {n:i64,status:i64,found:bool,count:i64,time:f64,value:f64,lo:f64,hi:f64,glo:f64,ghi:f64,bracket_ready:bool,n_event_eval:i64,n_root_iter:i64,state:[f64;64]}
+pub struct Dp54EventInfo {pub n:i64,pub status:i64,pub found:bool,pub count:i64,pub time:f64,pub value:f64,pub bracket_lo:f64,pub bracket_hi:f64,pub g_lo:f64,pub g_hi:f64,pub bracket_ready:bool,pub n_event_eval:i64,pub n_root_iter:i64}
+pub fn dp54_event_init()->Dp54Event64 {Dp54Event64{n:0,status:3,found:false,count:0,time:0.0,value:0.0,lo:0.0,hi:0.0,glo:0.0,ghi:0.0,bracket_ready:false,n_event_eval:0,n_root_iter:0,state:[0.0;64]}}
+pub fn dp54_event_close(e:Dp54Event64) {let Dp54Event64{n,status,found,count,time,value,lo,hi,glo,ghi,bracket_ready,n_event_eval,n_root_iter,state}=e}
+pub fn dp54_event_info(e:&Dp54Event64)->Dp54EventInfo {
+ Dp54EventInfo{n:e.n,status:e.status,found:e.found,count:e.count,time:if e.status==0&&e.found {e.time}else{0.0},value:if e.status==0&&e.found {e.value}else{0.0},bracket_lo:if e.bracket_ready {e.lo}else{0.0},bracket_hi:if e.bracket_ready {e.hi}else{0.0},g_lo:if e.bracket_ready {e.glo}else{0.0},g_hi:if e.bracket_ready {e.ghi}else{0.0},bracket_ready:e.bracket_ready,n_event_eval:e.n_event_eval,n_root_iter:e.n_root_iter}
+}
+pub fn dp54_event_state(e:&Dp54Event64,i:i64)->Dp54Value with Panic {
+ if e.status!=0 {return dp_unavailable(e.status)}
+ if !e.found||i<0||i>=e.n {return dp_unavailable(3)}
+ Dp54Value{status:0,value:e.state[i]}
+}
+pub fn dp54_is_terminal_event(r:&Ode64Result)->bool {r.status==5}
+struct Dp54EventCounts {evaluations:i64,iterations:i64}
+fn dp_event_reset(e:&!Dp54Event64) with Mut,Panic {
+ e.n=0;e.status=3;e.found=false;e.count=0;e.time=0.0;e.value=0.0;e.lo=0.0;e.hi=0.0;e.glo=0.0;e.ghi=0.0;e.bracket_ready=false;e.n_event_eval=0;e.n_root_iter=0
+ var i:i64=0;while i<64 {e.state[i]=0.0;i=i+1}
+}
+fn dp_event_sync(e:&!Dp54Event64,c:&Dp54EventCounts) with Mut {e.n_event_eval=c.evaluations;e.n_root_iter=c.iterations}
+fn dp_event_options_ok(o:Dp54EventOptions)->bool {(o.direction==0||o.direction==1||o.direction== -1)&&is_finite(o.root_atol)&&o.root_atol>0.0}
+fn dp_event_call(event:fn(f64,&[f64;64])->f64 with Mut,Div,Panic,t:f64,y:&[f64;64],c:&!Dp54EventCounts,limits:Dp54Limits)->Dp54Value with Mut,Div,Panic {
+ if c.evaluations>=limits.max_event {return dp_unavailable(1)}
+ let value=event(t,y)
+ c.evaluations=c.evaluations+1
+ if !is_finite(value) {return dp_unavailable(4)}
+ Dp54Value{status:0,value:value}
+}
+fn dp_event_direction(g0:f64,g1:f64,t0:f64,t1:f64,direction:i64)->bool {
+ if direction==0 {return true}
+ let rising=if t1>t0 {g1>g0}else{g0>g1}
+ if direction>0 {rising}else{!rising}
+}
+fn dp_event_bracket(e:&!Dp54Event64,t0:f64,g0:f64,t1:f64,g1:f64) with Mut {
+ if t0<t1 {e.lo=t0;e.hi=t1;e.glo=g0;e.ghi=g1}else{e.lo=t1;e.hi=t0;e.glo=g1;e.ghi=g0}
+ e.bracket_ready=true;e.found=false;e.status=0
+}
+fn dp_event_point(e:&!Dp54Event64,t:f64,g:f64) with Mut {e.lo=t;e.hi=t;e.glo=g;e.ghi=g;e.bracket_ready=true}
+fn dp_event_record(e:&!Dp54Event64,t:f64,g:f64,y:&[f64;64],n:i64) with Mut,Panic {
+ if e.count==0||e.time!=t {e.count=e.count+1}
+ e.n=n;e.time=t;e.value=g;e.found=true;e.status=0
+ var i:i64=0;while i<n {e.state[i]=y[i];i=i+1}
+}
+fn dp_dense_vector(d:&Dp54Dense64,t:f64,n:i64,y:&![f64;64])->i64 with Mut,Div,Panic {
+ var i:i64=0
+ while i<n {let v=dp54_dense_value(d,t,i);if v.status!=0 {return v.status};y[i]=v.value;i=i+1}
+ while i<64 {y[i]=0.0;i=i+1}
+ 0
+}
+fn dp_event_root(event:fn(f64,&[f64;64])->f64 with Mut,Div,Panic,d:&Dp54Dense64,n:i64,o:Dp54EventOptions,limits:Dp54Limits,c:&!Dp54EventCounts,e:&!Dp54Event64,scratch:&![f64;64])->i64 with Mut,Div,Panic {
+ while e.hi-e.lo>o.root_atol {
+  if c.iterations>=limits.max_root_iterations {e.status=6;return 6}
+  let midpoint=e.lo+0.5*(e.hi-e.lo)
+  if midpoint<=e.lo||midpoint>=e.hi {e.status=2;return 2}
+  let prepared=dp_dense_vector(d,midpoint,n,scratch)
+  if prepared!=0 {e.status=prepared;return prepared}
+  let before=c.evaluations
+  let value=dp_event_call(event,midpoint,scratch,c,limits)
+  if c.evaluations>before {c.iterations=c.iterations+1}
+  if value.status!=0 {e.status=value.status;return value.status}
+  if value.value==0.0 {dp_event_point(e,midpoint,0.0);dp_event_record(e,midpoint,0.0,scratch,n);return 0}
+  if (value.value<0.0)==(e.glo<0.0) {e.lo=midpoint;e.glo=value.value}else{e.hi=midpoint;e.ghi=value.value}
+ }
+ let time=if dp_abs(e.glo)<=dp_abs(e.ghi) {e.lo}else{e.hi}
+ let value=if time==e.lo {e.glo}else{e.ghi}
+ let prepared=dp_dense_vector(d,time,n,scratch)
+ if prepared!=0 {e.status=prepared;return prepared}
+ dp_event_record(e,time,value,scratch,n)
+ 0
+}
+fn dp_event_segment(event:fn(f64,&[f64;64])->f64 with Mut,Div,Panic,d:&Dp54Dense64,old:&[f64;64],next:&[f64;64],n:i64,times:Dp54Times,g0:f64,g1:f64,first:bool,o:Dp54EventOptions,limits:Dp54Limits,c:&!Dp54EventCounts,e:&!Dp54Event64,scratch:&![f64;64])->i64 with Mut,Div,Panic {
+ if g0==0.0&&g1==0.0 {return 0}
+ if !dp_event_direction(g0,g1,times.start,times.end,o.direction) {return 0}
+ if g1==0.0 {dp_event_point(e,times.end,0.0);dp_event_record(e,times.end,0.0,next,n);return 0}
+ if g0==0.0 {
+  if first&&o.include_initial&&e.count==0 {dp_event_point(e,times.start,0.0);dp_event_record(e,times.start,0.0,old,n)}
+  return 0
+ }
+ if (g0<0.0&&g1>0.0)||(g0>0.0&&g1<0.0) {dp_event_bracket(e,times.start,g0,times.end,g1);return dp_event_root(event,d,n,o,limits,c,e,scratch)}
+ 0
+}
+pub fn solve_dp54_event64(rhs:fn(f64,&[f64;64],&![f64;64])->() with Mut,Div,Panic,event:fn(f64,&[f64;64])->f64 with Mut,Div,Panic,y0:&[f64;64],n:i64,t0:f64,t_end:f64,opts:ODEOptions,limits:Dp54Limits,events:Dp54EventOptions,dense:&!Dp54Dense64,receipt:&!Dp54Event64)->Ode64Result with Mut,Div,Panic {
+ dp_event_reset(receipt)
+ dense.status=3;dense.n=0;dense.t0=0.0;dense.t1=0.0;dense.query_end=0.0
+ var out=dp_empty(n)
+ if n<1||n>64||!is_finite(t0)||!is_finite(t_end)||!dp_options(opts)||!dp_limits_ok(limits)||!dp_event_options_ok(events) {return out}
+ if !dp_finite(y0,n) {return out}
+ out.t_final=t0
+ var i:i64=0;while i<n {out.state[i]=y0[i];i=i+1}
+ let span=t_end-t0
+ if !is_finite(span) {out.status=4;receipt.status=4;return out}
+ receipt.n=n;receipt.status=0
+ var counts=Dp54EventCounts{evaluations:0,iterations:0}
+ let initial=dp_event_call(event,t0,&out.state,&!counts,limits)
+ dp_event_sync(receipt,&counts)
+ if initial.status!=0 {out.status=initial.status;receipt.status=initial.status;return out}
+ var g0=initial.value
+ if g0==0.0&&events.include_initial&&events.direction==0 {
+  dp_event_point(receipt,t0,0.0);dp_event_record(receipt,t0,0.0,&out.state,n)
+  if events.terminal {out.status=5;return out}
+ }
+ if t0==t_end {out.status=0;return out}
+ var step=opts.dt_init;if step==0.0 {step=dp_abs(span)*0.01};step=dp_max(opts.dt_min,dp_min(opts.dt_max,step))
+ var w=dp_work();var have_k1=false;var evaluations:i64=0
+ while out.t_final!=t_end&&out.attempts<opts.max_steps {
+  let times=dp_plan(out.t_final,t_end,step)
+  if times.status!=0 {out.status=times.status;receipt.status=times.status;receipt.found=false;return out}
+  out.attempts=out.attempts+1
+  let code=dp_trial(rhs,&out.state,n,times,&!w,&!evaluations,limits.max_rhs,have_k1)
+  out.nfeval=evaluations
+  if code!=0 {out.status=code;receipt.status=code;receipt.found=false;return out}
+  have_k1=true
+  let err=dp_error(&out.state,n,times.h,&w,opts)
+  if err.status!=0 {out.status=err.status;receipt.status=err.status;receipt.found=false;return out}
+  let control=dp_control(err.value,opts)
+  if control.status!=0 {out.status=control.status;receipt.status=control.status;receipt.found=false;return out}
+  var factor=control.value
+  if err.value<=1.0 {
+   let ready=dp_dense_preflight(&out.state,n,times.h,&!w)
+   if ready!=0 {out.status=ready;receipt.status=ready;receipt.found=false;return out}
+   let endpoint=dp_event_call(event,times.end,&w.trial,&!counts,limits)
+   dp_event_sync(receipt,&counts)
+   if endpoint.status!=0 {out.status=endpoint.status;receipt.status=endpoint.status;receipt.found=false;return out}
+   dp_dense_commit(dense,&out.state,n,times,&w)
+   let prior_count=receipt.count
+   let located=dp_event_segment(event,dense,&out.state,&w.trial,n,times,g0,endpoint.value,out.steps==0,events,limits,&!counts,receipt,&!w.k6)
+   dp_event_sync(receipt,&counts)
+   if located!=0 {out.status=located;receipt.status=located;receipt.found=false;dense.status=located;return out}
+   if events.terminal&&receipt.count>prior_count {
+    i=0;while i<n {out.state[i]=receipt.state[i];i=i+1}
+    if receipt.time==out.t_final {dense.status=3;dense.n=0}else{out.steps=out.steps+1;dense.query_end=receipt.time}
+    out.t_final=receipt.time;out.status=5;return out
+   }
+   i=0;while i<n {out.state[i]=w.trial[i];w.k1[i]=w.k7[i];i=i+1}
+   out.t_final=times.end;out.steps=out.steps+1;g0=endpoint.value
+  }else{
+   out.nreject=out.nreject+1;factor=dp_min(0.9,factor)
+   if dp_abs(times.h)<=opts.dt_min {out.status=2;receipt.status=2;receipt.found=false;return out}
+  }
+  let scaled=dp_abs(times.h)*factor
+  if !is_finite(scaled) {step=opts.dt_max}else{step=dp_max(opts.dt_min,dp_min(opts.dt_max,scaled))}
+  if err.value>1.0&&step>=dp_abs(times.h) {out.status=2;receipt.status=2;receipt.found=false;return out}
+ }
+ if out.t_final!=t_end {out.status=1;receipt.status=1;receipt.found=false;return out}
+ out.status=0;out
+}

@@ -1,7 +1,7 @@
 // Checked sampled +/-one-sigma geometry. No inference or CI calibration.
 use math::pure::{sqrt,is_finite}
 use viz::scatter::{scatter_geometry,scatter_project}
-use viz::clip::{clip_unit_segment}
+use viz::clip::{ClipSegment,clip_segment_slot,clip_unit_segment_into}
 pub struct UncertaintyBounds { pub lower:f64, pub upper:f64, pub status:i64 }
 pub struct UncertaintyStrip { pub x:i64, pub y:i64, pub w:i64, pub h:i64, pub status:i64 }
 pub struct UncertaintySegment { pub x0:i64, pub y0:i64, pub x1:i64, pub y1:i64, pub status:i64 }
@@ -54,40 +54,49 @@ pub fn uncertainty_strip(sx:f64,mean:f64,variance:f64,
  let bottom:i64=first.y
  UncertaintyStrip{x:left,y:top,w:right-left+1,h:bottom-top+1,status:0}
 }
-pub fn uncertainty_segment(ax:f64,ay:f64,bx:f64,by:f64,
- xmin:f64,xmax:f64,ymin:f64,ymax:f64,x:i64,y:i64,w:i64,h:i64)->UncertaintySegment with Mut,Div {
- let bad=UncertaintySegment{x0:0,y0:0,x1:0,y1:0,status:2}
- if !scatter_geometry(x,y,w,h) || !uncertainty_domain(xmin,xmax,ymin,ymax) {return bad}
- if !is_finite(ax) || !is_finite(ay) || !is_finite(bx) || !is_finite(by) {return bad}
+pub struct UncertaintySegmentSlot {pub x0:i64,pub y0:i64,pub x1:i64,pub y1:i64,pub status:i64,unit:ClipSegment}
+pub fn uncertainty_segment_slot()->UncertaintySegmentSlot {
+ UncertaintySegmentSlot{x0:0,y0:0,x1:0,y1:0,status:2,unit:clip_segment_slot()}
+}
+pub fn uncertainty_segment_into(ax:f64,ay:f64,bx:f64,by:f64,
+ xmin:f64,xmax:f64,ymin:f64,ymax:f64,x:i64,y:i64,w:i64,h:i64,out:&!UncertaintySegmentSlot)->i64 with Mut,Div {
+ out.x0=0;out.y0=0;out.x1=0;out.y1=0;out.status=2
+ if !scatter_geometry(x,y,w,h) || !uncertainty_domain(xmin,xmax,ymin,ymax) {return 2}
+ if !is_finite(ax) || !is_finite(ay) || !is_finite(bx) || !is_finite(by) {return 2}
  let dx=xmax-xmin
  let dy=ymax-ymin
  // A constant axis denotes its declared value, never a replacement mean.
- if dx==0.0 && (ax!=xmin || bx!=xmin) {return bad}
- if dy==0.0 && (ay!=ymin || by!=ymin) {return bad}
+ if dx==0.0 && (ax!=xmin || bx!=xmin) {return 2}
+ if dy==0.0 && (ay!=ymin || by!=ymin) {return 2}
  let a=if dx==0.0 {0.5} else {(ax-xmin)/dx}
  let b=if dx==0.0 {0.5} else {(bx-xmin)/dx}
  let c=if dy==0.0 {0.5} else {(ay-ymin)/dy}
  let d=if dy==0.0 {0.5} else {(by-ymin)/dy}
- let seg=clip_unit_segment(a,c,b,d)
- if seg.status!=0 {return UncertaintySegment{x0:0,y0:0,x1:0,y1:0,status:seg.status}}
+ let clipped=clip_unit_segment_into(a,c,b,d,&!out.unit)
+ if clipped!=0 {out.status=clipped;return clipped}
  // Same truncation as scatter_project, including odd constant extents.
- let x0=x+(seg.x0*(w as f64)) as i64
- let x1=x+(seg.x1*(w as f64)) as i64
- let y0=y+h-(seg.y0*(h as f64)) as i64
- let y1=y+h-(seg.y1*(h as f64)) as i64
- UncertaintySegment{x0:x0,y0:y0,x1:x1,y1:y1,status:0}
+ let x0=x+(out.unit.x0*(w as f64)) as i64
+ let x1=x+(out.unit.x1*(w as f64)) as i64
+ let y0=y+h-(out.unit.y0*(h as f64)) as i64
+ let y1=y+h-(out.unit.y1*(h as f64)) as i64
+ out.x0=x0;out.y0=y0;out.x1=x1;out.y1=y1;out.status=0
+ 0
+}
+pub fn uncertainty_segment(ax:f64,ay:f64,bx:f64,by:f64,xmin:f64,xmax:f64,ymin:f64,ymax:f64,x:i64,y:i64,w:i64,h:i64)->UncertaintySegment with Mut,Div {
+ var out=uncertainty_segment_slot()
+ let ignored=uncertainty_segment_into(ax,ay,bx,by,xmin,xmax,ymin,ymax,x,y,w,h,&!out)
+ UncertaintySegment{x0:out.x0,y0:out.y0,x1:out.x1,y1:out.y1,status:out.status}
 }
 // Secondary Canvas-only clipping in pixel space bounds AA traversal to
 // the raster intersection. Does not modify the scientific plot geometry.
-pub fn uncertainty_raster_segment(ax:i64,ay:i64,bx:i64,by:i64,
- left:i64,top:i64,right:i64,bottom:i64)->UncertaintySegment with Mut,Div {
- let bad=UncertaintySegment{x0:0,y0:0,x1:0,y1:0,status:2}
+pub fn uncertainty_raster_segment_into(ax:i64,ay:i64,bx:i64,by:i64,
+ left:i64,top:i64,right:i64,bottom:i64,out:&!UncertaintySegmentSlot)->i64 with Mut,Div {
+ out.x0=0;out.y0=0;out.x1=0;out.y1=0;out.status=2
  if ax < -1000000 || ax > 1000000 || ay < -1000000 || ay > 1000000 ||
     bx < -1000000 || bx > 1000000 || by < -1000000 || by > 1000000 ||
     left < -1000000 || left > 1000000 || top < -1000000 || top > 1000000 ||
-    right < -1000000 || right > 1000000 || bottom < -1000000 || bottom > 1000000 {return bad}
- let outside=UncertaintySegment{x0:0,y0:0,x1:0,y1:0,status:1}
- if left>right || top>bottom {return outside}
+    right < -1000000 || right > 1000000 || bottom < -1000000 || bottom > 1000000 {return 2}
+ if left>right || top>bottom {out.status=1;return 1}
  let dx=(bx-ax) as f64
  let dy=(by-ay) as f64
  var enter:f64=0.0
@@ -97,14 +106,14 @@ pub fn uncertainty_raster_segment(ax:i64,ay:i64,bx:i64,by:i64,
   let p=if side==0 {-dx} else if side==1 {dx} else if side==2 {-dy} else {dy}
   let q=if side==0 {(ax-left) as f64} else if side==1 {(right-ax) as f64} else if side==2 {(ay-top) as f64} else {(bottom-ay) as f64}
   if p==0.0 {
-   if q<0.0 {return outside}
+   if q<0.0 {out.status=1;return 1}
   } else {
    let t=q/p
    if p<0.0 {
-    if t>exit {return outside}
+    if t>exit {out.status=1;return 1}
     if t>enter {enter=t}
    } else {
-    if t<enter {return outside}
+    if t<enter {out.status=1;return 1}
     if t<exit {exit=t}
    }
   }
@@ -118,5 +127,12 @@ pub fn uncertainty_raster_segment(ax:i64,ay:i64,bx:i64,by:i64,
  if x1<left {x1=left}; if x1>right {x1=right}
  if y0<top {y0=top}; if y0>bottom {y0=bottom}
  if y1<top {y1=top}; if y1>bottom {y1=bottom}
- UncertaintySegment{x0:x0,y0:y0,x1:x1,y1:y1,status:0}
+ out.x0=x0;out.y0=y0;out.x1=x1;out.y1=y1;out.status=0
+ 0
+}
+
+pub fn uncertainty_raster_segment(ax:i64,ay:i64,bx:i64,by:i64,left:i64,top:i64,right:i64,bottom:i64)->UncertaintySegment with Mut,Div {
+ var out=uncertainty_segment_slot()
+ let ignored=uncertainty_raster_segment_into(ax,ay,bx,by,left,top,right,bottom,&!out)
+ UncertaintySegment{x0:out.x0,y0:out.y0,x1:out.x1,y1:out.y1,status:out.status}
 }

@@ -1,0 +1,1 @@
+Romberg integration preserves its observed error estimate when its refinement budget ends, and checked physical covariance/phonon paths retain their corrected variance contracts. Original numerical fixtures and independent C++23 concordance references remain in the native scientific replay gates.

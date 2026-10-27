@@ -1,0 +1,157 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: CANONICAL_PALETTES_PASS
+use viz::colormap_data::{palette_lut_rgb8}
+use viz::palette::{palette_scale,palette_scale_defaults,palette_scale_status,palette_sample_slot,palette_map_into,palette_normalized_rgb8}
+use viz::colorbar::{ColorBarSpec,colorbar_work,colorbar_validate,colorbar_canvas_into,colorbar_svg_into}
+use viz::dynamic_fields::{DynamicHeatmapSpec,palette_field_work,dynamic_heatmap_palette_validate,dynamic_heatmap_palette_canvas_into,dynamic_heatmap_palette_svg_into}
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_close,numeric_matrix}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set,integer_buffer_close}
+use display::canvas::{Canvas,canvas_clear}
+fn pixel_checksum(c:&Canvas)->i64 with Mut,Div {
+ var sum:i64=0;var i:i64=0
+ while i<c.width*c.height {sum=(sum+read_i64(c.pixels,i))%1000000007;i=i+1}
+ sum
+}
+fn policies() with IO,Mut,Div,Panic {
+ let scale=palette_scale(1,-1.0,1.0,0x112233,0x445566,0x778899,128)
+ assert(palette_scale_status(&scale)==0)
+ var sample=palette_sample_slot()
+ var i:i64=0
+ while i<8 {
+  let value=if i==0 {-2.0}else if i==1 {-1.0}else if i==2 {0.0}else if i==3 {1.0}else if i==4 {2.0}else{0.0/0.0}
+  let available=i!=5
+  let code=palette_map_into(&scale,value,available,&!sample)
+  let rgb:i64=sample.rgb;let bin:i64=sample.index;let kind:i64=sample.classification
+  print("PALETTE_POLICY ");print(i);print(" ");print(code);print(" ");print(rgb);print(" ");print(bin);print(" ");println(kind)
+  if i<6 {assert(code==0)}else{assert(code==3 && rgb==0 && bin== -1 && kind== -1)}
+  i=i+1
+ }
+ let constant=palette_scale_defaults(2,-0.0,0.0)
+ let code=palette_map_into(&constant,-0.0,true,&!sample)
+ assert(code==0 && sample.index==128 && sample.classification==4)
+ let q=2.2250738585072014e-308/4503599627370496.0
+ assert(q>0.0)
+ let tiny=palette_scale_defaults(1,0.0,q)
+ let lower=palette_map_into(&tiny,0.0,true,&!sample);assert(lower==0 && sample.index==0)
+ let upper=palette_map_into(&tiny,q,true,&!sample);assert(upper==0 && sample.index==255)
+ let large=palette_scale_defaults(1,-1.7976931348623157e308,1.7976931348623157e308)
+ let middle=palette_map_into(&large,0.0,true,&!sample);assert(middle==0 && sample.index==128)
+ let invalid=palette_scale(0,0.0,1.0,0,0,0,128)
+ let refused=palette_map_into(&invalid,0.0,true,&!sample)
+ assert(refused==1 && sample.rgb==0 && sample.index== -1 && sample.classification== -1)
+ assert(palette_lut_rgb8(0,0)== -1 && palette_lut_rgb8(1,256)== -1 && palette_lut_rgb8(4,-1)== -1)
+ assert(palette_normalized_rgb8(1,0.0/0.0)==0x808080)
+ assert(palette_normalized_rgb8(1,-1.0/0.0)==palette_lut_rgb8(1,0))
+ assert(palette_normalized_rgb8(1,1.0/0.0)==palette_lut_rgb8(1,255))
+ assert(palette_normalized_rgb8(0,0.0/0.0)== -1)
+ let regular=palette_scale_defaults(1,0.0,1.0)
+ let boundary=1.0/256.0
+ let below=boundary-boundary/9007199254740992.0
+ let b0=palette_map_into(&regular,below,true,&!sample);assert(b0==0 && sample.index==0)
+ let b1=palette_map_into(&regular,boundary,true,&!sample);assert(b1==0 && sample.index==1)
+ var checksum:i64=0;i=0
+ while i<1000000 {
+  let t=(((i%256) as f64)+0.5)/256.0
+  let code=palette_map_into(&regular,t,true,&!sample)
+  assert(code==0)
+  checksum=(checksum+sample.rgb)%1000000007;i=i+1
+ }
+ print("PALETTE_MILLION ");println(checksum)
+ var palette:i64=1
+ while palette<=4 {
+  i=0
+  while i<256 {
+   let rgb=palette_lut_rgb8(palette,i)
+   assert(rgb==palette_normalized_rgb8(palette,((i as f64)+0.5)/256.0))
+   print("PALETTE_LUT ");print(palette);print(" ");print(i);print(" ");println(rgb)
+   i=i+1
+  }
+  palette=palette+1
+ }
+}
+fn main() with IO,Alloc,Mut,Div,Panic {
+ policies()
+ let pixels=heap_alloc(720*480*8) as *mut i64
+ assert((pixels as i64)>0)
+ var canvas=Canvas{pixels:pixels,width:720,height:480}
+ canvas_clear(&!canvas,0,0,0)
+ var work=colorbar_work()
+ let regular=palette_scale_defaults(1,0.0,1.0)
+ let bad=ColorBarSpec{x:0,y:20,w:511,h:15,document_w:720,document_h:480,text_rgb:0xffffff,show_name:true}
+ println("REJECT_COLORBAR_BEGIN")
+ let bad_svg=colorbar_svg_into(&bad,&regular,&!work)
+ println("REJECT_COLORBAR_END")
+ assert(bad_svg==3 && work.painted_steps==0)
+ let narrow=ColorBarSpec{x:80,y:20,w:254,h:15,document_w:720,document_h:480,text_rgb:0xffffff,show_name:true}
+ let refused_density=colorbar_validate(&narrow,&regular,&!work)
+ assert(refused_density==6 && work.painted_steps==0)
+ let unchanged=pixel_checksum(&canvas)
+ let bad_canvas=colorbar_canvas_into(&!canvas,&bad,&regular,&!work)
+ assert(bad_canvas==3 && pixel_checksum(&canvas)==unchanged)
+ println("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"720\" height=\"480\" viewBox=\"0 0 720 480\">")
+ let displayed_scale=palette_scale(1,-1.0,1.0,0xff00ff,0x00ffff,0x808080,128)
+ var palette:i64=1
+ while palette<=4 {
+  let scale=if palette==1 {displayed_scale}else{palette_scale_defaults(palette,-1.0,1.0)}
+  let spec=ColorBarSpec{x:80,y:20+(palette-1)*80,w:511,h:15,document_w:720,document_h:480,text_rgb:0xffffff,show_name:true}
+  let preflight=colorbar_validate(&spec,&scale,&!work)
+  assert(preflight==0 && work.painted_steps==0)
+  let drawn=colorbar_canvas_into(&!canvas,&spec,&scale,&!work)
+  assert(drawn==0 && work.painted_steps==256 && work.painted_labels==3)
+  let emitted=colorbar_svg_into(&spec,&scale,&!work)
+  assert(emitted==0 && work.painted_steps==256 && work.painted_labels==3)
+  palette=palette+1
+ }
+ let constant=palette_scale_defaults(1,2.5,2.5)
+ let spec=ColorBarSpec{x:80,y:340,w:511,h:15,document_w:720,document_h:480,text_rgb:0xffffff,show_name:true}
+ let drawn=colorbar_canvas_into(&!canvas,&spec,&constant,&!work)
+ assert(drawn==0 && work.painted_steps==1 && work.painted_labels==2)
+ let emitted=colorbar_svg_into(&spec,&constant,&!work)
+ assert(emitted==0 && work.painted_steps==1 && work.painted_labels==2)
+ var data=numeric_buffer_new(20,160);var flags=integer_buffer_new(10,80)
+ var i:i64=0
+ while i<20 {let code=numeric_buffer_set(&!data,i,0.0/0.0);i=i+1}
+ i=0
+ while i<10 {
+  let missing=i==7 || i==9
+  let flag=integer_buffer_set(&!flags,i,if missing {0}else{1})
+  if !missing {
+   let value=if i==0 {-2.0}else if i==1 {-1.0}else if i==2 {-0.5}else if i==3 {0.0}else if i==4 {0.5}else if i==5 {1.0}else if i==6 {2.0}else{0.0}
+   let code=numeric_buffer_set(&!data,2+(i/5)*7+i%5,value)
+  }
+  i=i+1
+ }
+ let matrix=numeric_matrix(20,2,5,7,1,2)
+ let heat=DynamicHeatmapSpec{x:80,y:420,w:511,h:31,color_min:-1.0,color_max:1.0}
+ var field=palette_field_work()
+ let before=pixel_checksum(&canvas)
+ let nan=numeric_buffer_set(&!data,12,0.0/0.0)
+ println("<!-- REJECT_HEATMAP_BEGIN -->")
+ let preflight=dynamic_heatmap_palette_validate(&heat,&displayed_scale,&data,&matrix,&flags,&!field)
+ assert(preflight==3 && field.active_painted==0)
+ let rejected=dynamic_heatmap_palette_svg_into(&heat,&displayed_scale,&data,&matrix,&flags,true,&!field)
+ println("<!-- REJECT_HEATMAP_END -->")
+ assert(rejected==3 && field.active_painted==0 && field.missing_painted==0)
+ let refused=dynamic_heatmap_palette_canvas_into(&!canvas,&heat,&displayed_scale,&data,&matrix,&flags,true,&!field)
+ assert(refused==3 && pixel_checksum(&canvas)==before)
+ let restore=numeric_buffer_set(&!data,12,0.0)
+ let drawn=dynamic_heatmap_palette_canvas_into(&!canvas,&heat,&displayed_scale,&data,&matrix,&flags,true,&!field)
+ assert(drawn==0 && field.active_painted==8 && field.missing_painted==2 && field.masked==2 && field.under==1 && field.over==1)
+ let emitted=dynamic_heatmap_palette_svg_into(&heat,&displayed_scale,&data,&matrix,&flags,true,&!field)
+ assert(emitted==0 && field.active_painted==8 && field.missing_painted==2 && field.masked==2)
+ println("</svg>")
+ numeric_buffer_close(data);integer_buffer_close(flags)
+ var y:i64=0
+ while y<480 {
+  var x:i64=0
+  while x<720 {
+   let rgb:i64=read_i64(canvas.pixels,y*720+x)
+   if rgb!=0 {print("PALETTE_PIXEL ");print(x);print(" ");print(y);print(" ");println(rgb)}
+   x=x+1
+  }
+  y=y+1
+ }
+ heap_free(canvas.pixels as *mut i8)
+ println("CANONICAL_PALETTES_PASS")
+}
