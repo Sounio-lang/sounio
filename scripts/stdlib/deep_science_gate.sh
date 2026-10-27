@@ -10,7 +10,7 @@ export MADAROS_RAW_BIN
 SEED_RAW_BIN=$(readlink -f "${SEED_RAW_BIN:-$repo/bin/souc-lean-single-x86_64}") || exit 64
 [[ -x "$SEED_RAW_BIN" ]] || exit 64
 export SEED_RAW_BIN
-time_bin=$(readlink -f "${STDLIB_TIME_BIN:-/usr/bin/time}") || exit 64
+time_bin=$(readlink -f "${STDLIB_TIME_BIN:-/usr/bin/time}") || { echo "missing executable GNU time; set STDLIB_TIME_BIN" >&2; exit 64; }
 [[ -x "$time_bin" ]] || { echo "missing executable GNU time; set STDLIB_TIME_BIN" >&2; exit 64; }
 out=$(realpath -m "$out") || exit 64
 case "$out/" in "$repo/stdlib/"*|"$repo/tests/"*|"$repo/examples/"*|"$repo/scripts/stdlib/"*|"$repo/scripts/lib/"*) echo "output overlaps input catalog" >&2; exit 64;; esac
