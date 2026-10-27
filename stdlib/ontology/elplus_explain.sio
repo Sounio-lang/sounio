@@ -195,9 +195,10 @@ pub fn elplus_trace_new() -> ELPlusTrace {
     }
 }
 
-/// A reconstructed derivation in topological order: premises precede the
-/// cells they justify. `kind=0` is subsumption (from=a*64+b); `kind=1` is
-/// a role edge (from=(role*64+source)*64+filler).
+/// A reconstructed derivation DAG in topological order: premises precede the
+/// cells they justify, and each (kind, from) fact is emitted at most once.
+/// `kind=0` is subsumption (from=a*64+b); `kind=1` is a role edge
+/// (from=(role*64+source)*64+filler).
 pub const ELPLUS_EXPLAIN_MAX: i64 = 128
 
 pub struct ELPlusExplanation {
@@ -529,8 +530,19 @@ fn elplus_explain_fact(
     a: i64,
     b: i64
 ) -> i64 with Mut, Div, Panic {
+    // A proof is a DAG, not a tree. If this fact was already emitted, reuse
+    // that node instead of expanding its premises again. Without this guard,
+    // seven nested conjunctions over one stated fact require 255 emissions
+    // and overflow the 128-step buffer despite containing only eight facts.
+    let cell = a * ELPLUS_MAXC + b
+    var prior: i64 = 0
+    while prior < out.count {
+        if out.kind[prior as usize] == kind && out.from[prior as usize] == cell {
+            return out.count
+        }
+        prior = prior + 1
+    }
     if kind == 0 {
-        let cell = a * ELPLUS_MAXC + b
         if !s[cell] { return 0 - 2 }
         let rule = trace.srule[cell]
         if rule <= 2 {
@@ -567,7 +579,6 @@ fn elplus_explain_fact(
         return 0 - 3
     }
 
-    let cell = a * ELPLUS_MAXC + b
     if !r[cell] { return 0 - 2 }
     let rule = trace.rrule[cell]
     if rule <= 0 {
@@ -806,4 +817,3 @@ pub fn elplus_derive_conflicts(
         i = i + 1
     }
 }
-
