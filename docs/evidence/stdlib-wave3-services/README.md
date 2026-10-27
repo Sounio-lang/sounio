@@ -241,3 +241,32 @@ version. The gate itself now emits
 `ARROW_INCREMENTAL_DICTIONARY_CPP_OK` and
 `ARROW_INCREMENTAL_BIDIRECTIONAL_OK`, so future callers cannot omit these
 adapter checks while obtaining `ARROW_CPP_GATE_OK`.
+
+## Atomic UDP endpoint receipt
+
+Slurm **18175** completed with status 0: all 15 systems wrapper phases passed
+against the root lane's separately qualified ABI112 platform library.
+`native_udp_sender` now loads one packed IPv4/port endpoint atomically.
+`native_udp_receive_from` takes an exclusive typed socket borrow across
+the receive and endpoint read and returns `UdpReceive` with byte count,
+IPv4, port and status.
+
+The packet source binds to 127.0.0.2 while the receiver binds to127.0.0.1.
+Tests verify its actual source address/port, a truncated datagram
+(status90, no published prefix), and a zero-length datagram. Existing
+pollset, reap, deadline, executor and socket controls also pass.
+
+Receipt:
+`/scratch/sounio-stdlib-wave3-20261027/services/systems-02/results`.
+Runtime SHA-256:
+`de01597868c09725c2c26651d23203043c65fdc04a3e5e96f45dfe4a51d494c4`.
+The platform implementation and its concurrent packed-endpoint qualification
+(Slurm18169) belong to the root lane. This commit changes only Sounio
+wrappers/tests/docs.
+
+An atomic latest-endpoint getter by itself does not associate two separately
+called operations with a particular packet if another receiver runs between
+them. Preserve the exclusive owner/serialization discipline across receive
+and sender retrieval. Low-level ABI users must provide the same external
+serialization. On truncation the datagram is consumed and metadata is
+available, but the incomplete payload is not appended to the public buffer.

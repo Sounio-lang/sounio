@@ -133,11 +133,24 @@ pub fn native_udp_send(p:&Platform,s:&NativeSocket,b:&ByteBuffer,offset:i64,n:i6
  return byte_buffer_native_udp_send(p,s.id,b,offset,n)
 }
 pub struct UdpSender {pub ipv4:i64,pub port:i64,pub status:i64}
+// Atomic latest-endpoint snapshot. A separate receive/getter pair requires
+// external serialization when receivers can run concurrently.
 pub fn native_udp_sender(p:&Platform,s:&NativeSocket)->UdpSender with IO {
  if s.status!=0 {return UdpSender {ipv4:0,port:0,status:s.status}}
  if !s.datagram {return UdpSender {ipv4:0,port:0,status:22}}
- let ip=platform_call(p,109,s.id,0,0,0)
- if ip.status!=0 {return UdpSender {ipv4:0,port:0,status:ip.status}}
- let port=platform_call(p,63,s.id,0,0,0)
- return UdpSender {ipv4:ip.value,port:port.value,status:port.status}
+ let endpoint=platform_call(p,112,s.id,0,0,0)
+ return UdpSender {ipv4:endpoint.value >> 16,port:endpoint.value & 65535,status:endpoint.status}
+}
+
+// Exclusive typed receive binds the consumed datagram to its sender snapshot.
+// Keep all receives on this owner within the same borrow/serialization discipline.
+pub struct UdpReceive {pub bytes:i64,pub ipv4:i64,pub port:i64,pub status:i64}
+pub fn native_udp_receive_from(p:&Platform,s:&!NativeSocket,b:&!ByteBuffer,n:i64,timeout_ms:i64)->UdpReceive with IO,Alloc,Mut {
+ if s.status!=0 {return UdpReceive {bytes:0,ipv4:0,port:0,status:s.status}}
+ if !s.datagram {return UdpReceive {bytes:0,ipv4:0,port:0,status:22}}
+ let received=byte_buffer_native_receive(p,s.id,b,n,timeout_ms,true)
+ if received.status!=0 && received.status!=90 {return UdpReceive {bytes:received.value,ipv4:0,port:0,status:received.status}}
+ let endpoint=platform_call(p,112,s.id,0,0,0)
+ if endpoint.status!=0 {return UdpReceive {bytes:received.value,ipv4:0,port:0,status:endpoint.status}}
+ return UdpReceive {bytes:received.value,ipv4:endpoint.value >> 16,port:endpoint.value & 65535,status:received.status}
 }
