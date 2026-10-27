@@ -2,6 +2,7 @@
 // All entrypoints are noexcept. Operation 0 reads this thread's last errno;
 // every other operation resets it. Resource IDs are never raw addresses.
 #include <atomic>
+#include <algorithm>
 #include <condition_variable>
 #include <vector>
 #include <string>
@@ -66,7 +67,7 @@ asm(
 namespace {
 using I=std::int64_t;
 thread_local int last_error=0;
-enum class Kind {atomic,thread,socket,mutex,channel,file,text};
+enum class Kind {atomic,thread,socket,mutex,channel,file,text,pollset};
 struct Resource {const Kind kind;explicit Resource(Kind k):kind(k){};virtual ~Resource()=default;};
 struct Atomic final:Resource {std::atomic<I> value;explicit Atomic(I v):Resource(Kind::atomic),value(v){}};
 struct Thread final:Resource {
@@ -110,7 +111,8 @@ struct File final:Resource {
   ~File()override {if(fd>=0)::close(fd);}
 };
 struct Socket final:Resource {
-  int fd;std::atomic<int> peer_port{0};
+  int fd;std::atomic<int> peer_port{0};std::atomic<I> peer_ip{0};
+  std::mutex destination_mutex;sockaddr_in destination{};bool has_destination=false;
   std::mutex connect_mutex;bool is_connection=false,connect_pending=false;int connect_error=0;
   explicit Socket(int f):Resource(Kind::socket),fd(f){}
   ~Socket()override {if(fd>=0)::close(fd);}
@@ -130,6 +132,39 @@ template<class T> std::shared_ptr<T> get(I id,Kind kind) {
   if(it==registry.end()||it->second->kind!=kind){last_error=EBADF;return {};}
   return std::static_pointer_cast<T>(it->second);
 }
+
+struct PollRegistration {I socket,tag;short interests,ready=0;};
+static_assert(sizeof(PollRegistration)==24);
+struct PollSet final:Resource {
+  std::mutex mutex;I capacity;std::vector<PollRegistration> entries;
+  explicit PollSet(I n):Resource(Kind::pollset),capacity(n){entries.reserve(static_cast<std::size_t>(n));}
+};
+bool monotonic_now(I& value) {
+  timespec t{};if(clock_gettime(CLOCK_MONOTONIC,&t)){last_error=errno;return false;}
+  if(t.tv_sec>(std::numeric_limits<I>::max()-t.tv_nsec)/1000000000){last_error=EOVERFLOW;return false;}
+  value=static_cast<I>(t.tv_sec)*1000000000+t.tv_nsec;return true;
+}
+// Return count, 0 on deadline, -1 on error. No registry lock is held here.
+int poll_absolute(pollfd* descriptors,nfds_t count,I deadline,bool immediate=false) {
+  if(deadline<0){last_error=EINVAL;return -1;}
+  for(;;) {
+    I now=0;if(!monotonic_now(now))return -1;
+    const I remaining=deadline>now?deadline-now:0;
+    const I rounded=remaining/1000000+(remaining%1000000!=0);
+    const int milliseconds=deadline==0||immediate?0:static_cast<int>(std::min<I>(rounded,2147483647));
+    const int rc=::poll(descriptors,count,milliseconds);
+    if(rc>0)return rc;
+    if(rc<0&&errno!=EINTR){last_error=errno;return -1;}
+    if(deadline==0||immediate)return 0;
+    if(!monotonic_now(now))return -1;
+    if(now>=deadline)return 0;
+  }
+}
+short ready_flags(short flags) {
+  return static_cast<short>(((flags&POLLIN)?1:0)|((flags&POLLOUT)?2:0)|
+    ((flags&POLLERR)?4:0)|((flags&POLLHUP)?8:0)|((flags&POLLNVAL)?16:0));
+}
+
 void* start_thread(void* raw) {
   auto& t=*static_cast<Thread*>(raw);
   t.result=sounio_native_callback_thunk(t.callback,t.argument);
@@ -189,6 +224,101 @@ I channel_receive(const std::shared_ptr<Channel>& q,I timeout_ms,bool wait) {
 }
 
 I dispatch(I op,I a,I b,I c,I d) {
+  if(op==100) {
+    if(a<=0||b<0)return failure(EINVAL);
+    if(a>std::numeric_limits<I>::max()/24)return failure(EOVERFLOW);
+    if(a*24>b)return failure(ENOBUFS);
+    if(static_cast<std::uint64_t>(a)>std::vector<PollRegistration>{}.max_size())return failure(EOVERFLOW);
+    return put(std::make_shared<PollSet>(a));
+  }
+  if(op>=101&&op<=106) {
+    auto set=get<PollSet>(a,Kind::pollset);if(!set)return 0;
+    std::lock_guard lock(set->mutex);
+    if(op==101) {
+      if(c<1||c>3)return failure(EINVAL);
+      if(!get<Socket>(b,Kind::socket))return 0;
+      auto found=std::find_if(set->entries.begin(),set->entries.end(),[&](const auto& e){return e.socket==b;});
+      if(found==set->entries.end()) {
+        if(set->entries.size()>=static_cast<std::size_t>(set->capacity))return failure(ENOBUFS);
+        set->entries.push_back({b,d,static_cast<short>(c),0});
+      } else {found->tag=d;found->interests=static_cast<short>(c);}
+      for(auto& entry:set->entries)entry.ready=0;
+      return 1;
+    }
+    if(op==102) {
+      auto found=std::find_if(set->entries.begin(),set->entries.end(),[&](const auto& e){return e.socket==b;});
+      if(found==set->entries.end())return failure(ENOENT);
+      set->entries.erase(found);for(auto& entry:set->entries)entry.ready=0;return 1;
+    }
+    if(op==103) {
+      if(b<0)return failure(EINVAL);
+      std::vector<pollfd> descriptors;descriptors.reserve(set->entries.size());
+      std::vector<std::shared_ptr<Socket>> owners;owners.reserve(set->entries.size());
+      bool invalid=false;
+      for(auto& entry:set->entries) {
+        auto socket=get<Socket>(entry.socket,Kind::socket);
+        entry.ready=socket?0:16;invalid|=!socket;last_error=0;
+        descriptors.push_back({socket?socket->fd:-1,static_cast<short>(((entry.interests&1)?POLLIN:0)|((entry.interests&2)?POLLOUT:0)),0});
+        owners.push_back(std::move(socket));
+      }
+      if(poll_absolute(descriptors.data(),descriptors.size(),b,invalid)<0)return 0;
+      I count=0;
+      for(std::size_t i=0;i<set->entries.size();++i) {
+        auto current=get<Socket>(set->entries[i].socket,Kind::socket);
+        set->entries[i].ready=!current?16:ready_flags(descriptors[i].revents);
+        last_error=0;if(set->entries[i].ready)++count;
+      }
+      return count;
+    }
+    if(b<0)return failure(ERANGE);
+    for(const auto& entry:set->entries)if(entry.ready) {
+      if(b--==0)return op==104?entry.socket:op==105?entry.ready:entry.tag;
+    }
+    return failure(ERANGE);
+  }
+  if(op>=107&&op<=111) {
+    auto socket=get<Socket>(a,Kind::socket);if(!socket)return 0;
+    if(op==109)return socket->peer_ip.load();
+    int type=0;socklen_t length=sizeof(type);
+    if(getsockopt(socket->fd,SOL_SOCKET,SO_TYPE,&type,&length))return failure(errno);
+    if(op==107) {
+      if(type!=SOCK_DGRAM)return failure(EPROTOTYPE);
+      if(!valid_address(b,c)||c==0)return failure(EINVAL);
+      std::lock_guard lock(socket->destination_mutex);
+      socket->destination=address(b,c);socket->has_destination=true;return 1;
+    }
+    if(c<0||(c>0&&b==0))return failure(EINVAL);
+    if(op==108) {
+      if(type!=SOCK_DGRAM)return failure(EPROTOTYPE);
+      sockaddr_in destination{};
+      {std::lock_guard lock(socket->destination_mutex);
+       if(!socket->has_destination)return failure(EDESTADDRREQ);
+       destination=socket->destination;}
+      ssize_t transferred;
+      do {transferred=sendto(socket->fd,reinterpret_cast<const void*>(b),static_cast<std::size_t>(c),MSG_NOSIGNAL,reinterpret_cast<const sockaddr*>(&destination),sizeof(destination));}while(transferred<0&&errno==EINTR);
+      return transferred<0?failure(errno):transferred;
+    }
+    if(type!=SOCK_STREAM)return failure(EPROTOTYPE);
+    if(d<0)return failure(EINVAL);
+    if(c==0)return 0;
+    bool retried=false;
+    for(;;) {
+      I now=0;if(!monotonic_now(now))return 0;
+      if(retried&&(d==0||now>=d))return failure(ETIMEDOUT);
+      pollfd descriptor{socket->fd,static_cast<short>(op==110?POLLOUT:POLLIN),0};
+      const int ready=poll_absolute(&descriptor,1,d);
+      if(ready<0)return 0;
+      if(ready==0)return failure(ETIMEDOUT);
+      if(descriptor.revents&POLLNVAL)return failure(EBADF);
+      const ssize_t transferred=op==110?
+        ::send(socket->fd,reinterpret_cast<const void*>(b),static_cast<std::size_t>(c),MSG_NOSIGNAL):
+        ::recv(socket->fd,reinterpret_cast<void*>(b),static_cast<std::size_t>(c),0);
+      if(transferred>=0)return transferred;
+      if(errno!=EINTR&&errno!=EAGAIN&&errno!=EWOULDBLOCK)return failure(errno);
+      retried=true;
+    }
+  }
+
   if(op==95) {
     if(b<0||c<1||(b>0&&a==0))return failure(EINVAL);
     if(b>c-1)return failure(ENOBUFS);
@@ -453,6 +583,7 @@ I dispatch(I op,I a,I b,I c,I d) {
           rc=recvmsg(s->fd,&message,0);
           if(rc>=0) {
             s->peer_port.store(ntohs(peer.sin_port));
+            s->peer_ip.store(ntohl(peer.sin_addr.s_addr));
             // The datagram is consumed. Expose truncation and the copied byte
             // count; callers must not accept its prefix as a complete message.
             if(message.msg_flags&MSG_TRUNC){last_error=EMSGSIZE;return rc;}
