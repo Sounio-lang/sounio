@@ -1,0 +1,219 @@
+Focused follow-up review. Prior reviewer identified two remaining defects: PTX duplicate compound labels, and typed non-f64 hyper multiplication falling into scalar HLIR. Here are the corrective surfaces. Review ONLY these and whether they close the findings; original broader integration review already addressed other findings. No expected tensors or execution claims. Main builds/gates are running separately.
+- Shared GPU shape guard rejects duplicates, mixed effects, branches, and pointer remaps before PTX emission. PTX refusal prints diagnostic then panics in compiler; Metal returns #error recognized by compiler CLI.
+- Both missing typed metadata on aggregate representations and typed metadata on unsupported representations increment HLIR errors. The module now carries the error count from finalization; GPU compiler rejects before materialization.
+- Existing valid ptr3 straight-line f64 shape remains intended.
+Inspect concrete code, report CLEAR or remaining defects; no invented execution results.
+
+FILE self-hosted/gpu/kernel_ir.sio
+// A compound XOR recipe may replace only
+// one straight-line aggregate store. Reject extra effects and pointer remaps.
+pub fn gpu_xor_compound_shape_valid(kernel: GpuKernelIr) -> bool with Mut, Panic {
+    var has_xor = false
+    var scan: i64 = 0
+    while scan < kernel.op_count {
+        if kernel.ops[scan as usize].opcode == GpuOpcode::GpuXorConvolutionF64 { has_xor = true }
+        scan = scan + 1
+    }
+    if !has_xor { return true }
+    if kernel.param_count != 3 { return false }
+    var params: [i64; 3] = [0 - 1; 3]
+    var count: i64 = 0
+    var labels: i64 = 0
+    var seen: bool = false
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        if op.opcode == GpuOpcode::GpuLoadParam {
+            if seen || op.param_idx < 0 || op.param_idx >= 3 { return false }
+            params[op.param_idx as usize] = op.dst_reg
+        } else if op.opcode == GpuOpcode::GpuXorConvolutionF64 {
+            count = count + 1
+            if count != 1 || params[0] < 0 || params[1] < 0 || params[2] < 0 { return false }
+            if op.lhs_reg != params[0] || op.rhs_reg != params[1] || op.addr_reg != params[2] { return false }
+            seen = true
+        } else if op.opcode == GpuOpcode::GpuRet {
+            if !seen || i != kernel.op_count - 1 { return false }
+        } else if op.opcode == GpuOpcode::GpuBra {
+            labels = labels + 1
+            if seen || op.src_reg != 1 || labels > 1 { return false }
+        } else {
+            if seen { return false }
+            // Dead aggregate-load scaffolding before the terminal store.
+            let pure = op.opcode == GpuOpcode::GpuLoadGlobal
+                || op.opcode == GpuOpcode::GpuAddImm
+                || op.opcode == GpuOpcode::GpuMulImm
+                || (op.opcode == GpuOpcode::GpuAdd && op.ty == GpuType::GpuU64)
+            if !pure { return false }
+        }
+        i = i + 1
+    }
+    count == 1
+}
+
+
+FILE self-hosted/gpu/lower_to_ptx.sio
+pub fn gpu_lower_to_ptx_for_target(kernel: GpuKernelIr, dgx_sm121: bool) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
+    var buf = ptx_buf_new()
+    if !gpu_xor_compound_shape_valid(kernel) {
+        return gpu_refuse_unlowered(buf, "PIREUS_PTX_COMPOUND_SHAPE_REFUSED")
+    }
+
+    // 1. Emit header (.version, .target, .address_size). A wmma m16n16k16 tile needs sm_70+
+    // and a matching .version; the default header targets sm_50 (no tensor cores), so bump it.
+    if dgx_sm121 {
+        buf = ptx_emit_dgx_sm121_header(buf)
+    } else if gpu_has_wmma_tile(kernel) {
+        buf = ptx_push_str(buf, ".version 8.0\n.target sm_80\n.address_size 64\n\n")
+    } else {
+        buf = ptx_emit_header(buf)
+    }
+
+FILE self-hosted/gpu/lower_to_ptx.sio
+fn gpu_refuse_unlowered(buf: PtxBuf, opcode_name: string) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
+    print("error: gpu codegen: no PTX lowering rule for GpuOpcode::")
+    print(opcode_name)
+    print(" - refusing to emit PTX (see issue #2221)\n")
+    panic("gpu codegen: unlowered GpuOpcode reached PTX lowering")
+    buf
+}
+
+
+FILE self-hosted/hlir/lower.sio
+pub fn hlir_lower_finish_module(state: HlirLowerState) -> HlirModule with Mut {
+    var module = hlir_module_builder_finish(state.module_builder)
+    module.lowering_error_count = state.error_count
+    module
+}
+
+// ============================================================================
+
+FILE self-hosted/hlir/lower.sio
+        let checked_algebra = hlir_checked_hyper_mul_algebra(s, expr.span)
+        if expr.bin_op == BinaryOp::OpMul && checked_algebra >= 0
+            && (!hlir_oct_is(s, lhs_val) || !hlir_oct_is(s, rhs_val)) {
+            return (hlir_lower_report_error(s), HLIR_INVALID_VALUE)
+        }
+        // An unbound aggregate multiply must never become a scalar multiply.
+        if expr.bin_op == BinaryOp::OpMul && checked_algebra < 0
+            && (hlir_oct_is(s, lhs_val) || hlir_oct_is(s, rhs_val)) {
+            return (hlir_lower_report_error(s), HLIR_INVALID_VALUE)
+        }
+        if expr.bin_op == BinaryOp::OpMul
+            && checked_algebra >= 0
+            && hlir_oct_is(s, lhs_val)
+            && hlir_oct_is(s, rhs_val) {
+            let lhs_dim = hlir_oct_dim(s, lhs_val)
+            let rhs_dim = hlir_oct_dim(s, rhs_val)
+            let bits = if checked_algebra == 4 && lhs_dim == 16 && rhs_dim == 16 { 4 }
+                else if checked_algebra == 3 && lhs_dim == 8 && rhs_dim == 8 { 3 }
+                else { 0 }
+            if bits == 0 {
+                return (hlir_lower_report_error(s), HLIR_INVALID_VALUE)
+            }
+            let contract = hlir_cayley_dickson_xor_convolution(bits)
+            return hlir_xor_convolution(s, lhs_val, rhs_val, contract)
+        }
+
+FILE self-hosted/compiler/main.sio
+    var hlir_module = hlir_lower_module_with_epistemic(lower_prog, &hyper_epistemic)
+    if hlir_module.lowering_error_count > 0 {
+        print("GPU: HLIR_LOWERING_REFUSED errors=")
+        print_int(hlir_module.lowering_error_count)
+        print("\n")
+        return 1
+    }
+    let kernel_mark_prog = load_module_file(input_path)
+    hlir_module = compiler_mark_hlir_kernels_from_items(hlir_module, kernel_mark_prog.items)
+    compiler_trace_pireus_hlir(&hlir_module)
+    if !hlir_module_xor_contracts_valid(&hlir_module) {
+        print("GPU: PIREUS_TYPED_CONTRACT_REFUSED\n")
+        return 1
+    }
+
+
+TEST GATE
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SOUC="${SOUC:-./bin/souc}"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+fail() { printf 'PIREUS_TYPED_XOR_GPU_GATE_FAIL: %s\n' "$*" >&2; exit 1; }
+
+grep -q 'callee == "pireus_sed_xor_convolution' self-hosted/hlir/lower.sio && \
+  fail 'nominal selector remains in HLIR lowering'
+
+for src in tests/gpu/sedenion_mul_source_level.sio tests/gpu/sedenion_mul_source_level_renamed.sio; do
+  tag="$(basename "$src" .sio)"
+  for target in dgx-sm121 metal; do
+    suffix=ptx
+    [[ "$target" == metal ]] && suffix=metal
+    out="$work/$tag.$suffix"
+    log="$work/$tag-$target.log"
+    SOUNIO_PIREUS_OPERATOR_TRACE=1 "$SOUC" compile "$src" -o "$out" --backend gpu --gpu-target "$target" >"$log" 2>&1 || \
+      fail "$tag did not compile for $target"
+    [[ -s "$out" ]] || fail "$tag produced no $target artifact"
+    grep -q '^PIREUS_HLIR_TYPED operator_kind=1 bits=4 twist=1 candidate=0 argc=3 callee_len=0$' "$log" || \
+      fail "$tag lacks checker-owned empty-callee HLIR identity"
+    if [[ "$target" == metal ]]; then
+      grep -q 'pireus.recipe=xor-shuffle+sign-xor+twofold-mul+compensated-reduce' "$out" || \
+        fail "$tag lacks Metal Pireus recipe"
+      grep -q 'fma(' "$out" || fail "$tag lacks Metal twofold multiply"
+    else
+      grep -q 'shfl.sync.bfly.b32' "$out" || fail "$tag lacks DGX XOR shuffle"
+      grep -q 'st.global.f64' "$out" || fail "$tag lacks DGX f64 store"
+    fi
+    printf 'PIREUS_TYPED_XOR_ARTIFACT source=%s target=%s sha256=%s\n' \
+      "$tag" "$target" "$(sha256sum "$out" | cut -d' ' -f1)"
+  done
+done
+
+host_log="$work/host-mut.log"
+if "$SOUC" check tests/compile-fail/gpu_exclusive_ref_write_requires_mut_host.sio >"$host_log" 2>&1; then
+  fail 'host exclusive-reference store escaped Mut'
+fi
+grep -q 'missing: Mut' "$host_log" || fail 'host rejection did not identify Mut'
+
+for negative in pireus_magic_name_poison sedenion_f32_no_f64_lowering octonion_mul_source_level; do
+  log="$work/$negative.log"
+  out="$work/$negative.ptx"
+  rc=0
+  SOUNIO_PIREUS_OPERATOR_TRACE=1 "$SOUC" compile "tests/gpu/$negative.sio" \
+    -o "$out" --backend gpu --gpu-target dgx-sm121 >"$log" 2>&1 || rc=$?
+  grep -q '^PIREUS_HLIR_TYPED ' "$log" && fail "$negative selected the f64x16 typed operator"
+  if [[ "$rc" -eq 0 && -s "$out" ]]; then
+    grep -q 'shfl.sync.bfly.b32' "$out" && fail "$negative materialized the XOR shuffle"
+  fi
+  printf 'PIREUS_TYPED_XOR_NEGATIVE source=%s rc=%s\n' "$negative" "$rc"
+done
+
+echo 'PIREUS_TYPED_XOR_GPU_GATE_PASS positives=4 negatives=4 authority=checker-metadata'
+
+# The terminal float2 recipe cannot silently discard additional stores or
+# reinterpret a different pointer mapping as its positional three-buffer ABI.
+for negative in pireus_metal_duplicate_operator pireus_metal_reordered_operands pireus_metal_extra_store; do
+  log="$work/$negative.log"
+  out="$work/$negative.metal"
+  if "$SOUC" compile "tests/gpu/$negative.sio" -o "$out" --backend gpu --gpu-target metal >"$log" 2>&1; then
+    fail "$negative silently materialized an unsupported Metal shape"
+  fi
+  grep -q 'PIREUS_METAL_COMPOUND_SHAPE_REFUSED' "$log" || fail "$negative failed for an unrelated reason"
+done
+printf 'PIREUS_METAL_COMPOUND_REFUSAL_GATE_PASS\n'
+
+for negative in pireus_metal_duplicate_operator pireus_metal_reordered_operands pireus_metal_extra_store; do
+  log="$work/$negative-ptx.log"
+  if "$SOUC" compile "tests/gpu/$negative.sio" -o "$work/$negative.ptx" --backend gpu --gpu-target dgx-sm121 >"$log" 2>&1; then
+    fail "$negative silently materialized an unsupported PTX shape"
+  fi
+  grep -q 'PIREUS_PTX_COMPOUND_SHAPE_REFUSED' "$log" || fail "$negative failed for an unrelated reason"
+done
+log="$work/f32-refusal.log"
+if "$SOUC" compile tests/gpu/sedenion_f32_no_f64_lowering.sio -o "$work/f32.ptx" --backend gpu --gpu-target dgx-sm121 >"$log" 2>&1; then
+  fail 'typed f32 aggregate silently fell through to scalar lowering'
+fi
+grep -q 'HLIR_LOWERING_REFUSED' "$log" || fail 'f32 failed for an unrelated reason'
+printf 'PIREUS_PTX_COMPOUND_AND_PRECISION_REFUSAL_GATE_PASS\n'

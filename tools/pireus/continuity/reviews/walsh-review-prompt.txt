@@ -1,0 +1,348 @@
+Review the existing Pireus Walsh channel package. REVIEW ONLY; never generate semantic expected values. Check the recurrence against Convention X, inverse Walsh/Parseval logic, mutation controls, and bounded claims. Distinguish algebraic exactness from floating-point runtime. Report BLOCKER/MAJOR or CLEAR and reasoning.
+
+FILE docs/audit/PIREUS_WALSH_TWIST_CHANNEL_SPECTRUM_2026-09-05.md
+# Pireus Walsh twist channel spectrum audit
+
+```text
+Semantic-Lane-ID: pireus-walsh-channel-spectrum-20260905
+Owner: codex
+Concept-IDs: SOUNIO-NONASSOCIATIVE-ORDER, SOUNIO-SECOND-ORDER-COMPILATION
+Intent-Preserved: the exact Cayley-Dickson twist is represented rather than
+  erased when Pireus generates a transform-domain operator
+Transformation: derive the Walsh character coefficients of every displacement
+  row S_d(i)=sigma(i,i xor d) and reconstruct all 256 signs
+Types-Changed: none
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: an exact WalshCharacterChannels operator is generated for
+  dimension 16; its observed coefficient support is fully dense
+Claims-Forbidden: sub-quadratic performance; asymptotic density; hardware
+  superiority; compiler promotion; equivalence beyond the tested sign tensor
+Assumptions: unnormalized Walsh characters on Z2^4; Convention X; exact i64
+  coefficient arithmetic
+Write-Set: Garden seed, Sounio authority, frozen spectrum, receipt, gate, audit
+Read-Set: frozen Cayley-Dickson sign authority and Pireus operator contracts
+Positive-Witness: inverse reconstruction of all 256 signs and Parseval energy
+  256 for every displacement row
+Negative-Witness: Convention-X mutation changes the freeze; constant-character
+  mutation is rejected by reconstruction and Parseval
+Acceptance-Gate: scripts/ci/pireus_walsh_twist_channel_spectrum_gate.sh
+Integration-Target: origin/main
+Authoritative-Only-If: Sounio generates and freezes the coefficient matrix;
+  parity implementations may measure but may not create expected values
+```
+
+## Generated operator
+
+Pireus generated the exact identity
+
+```text
+r[d] = (1/16) * sum_k W[d,k]
+       * sum_i character(k,i) * a[i] * b[i xor d].
+```
+
+The executable reconstructs every original Cayley-Dickson sign and checks the
+unnormalized Parseval identity independently for each row. This makes
+`WalshCharacterChannels` an executable operator candidate rather than a prose
+analogy or a target-specific recipe.
+
+## Discovered structure
+
+The dimension-16 coefficient matrix has 256 nonzero entries: every displacement
+uses every character channel. Rows 0 through 8 have one coefficient `-14` and
+fifteen coefficients `2`; later rows use coefficients from `{-6,2,10}`. The
+weighted coefficient checksum is 21232.
+
+Full support refuses promotion based on spectral sparsity at this dimension.
+It does not prove that the family remains dense asymptotically, nor that a
+different block, recursive, or matrix-valued transform cannot be sub-quadratic.
+Hardware cost and material promotion remain open.
+
+FILE docs/internal/garden/pireus_walsh_channel_factorization.md
+# Pireus Walsh twist channels
+
+Status: Garden
+
+## Seed
+
+The diagonal sign-gauge route to a single pure XOR convolution is refuted. A
+richer exact representation may still exist by expanding each displacement
+row of the Cayley-Dickson twist in the Walsh character basis.
+
+For `S_d(i) = sigma(i, i xor d)`, define the unnormalized coefficients
+
+```text
+W[d,k] = sum_i S_d(i) * (-1)^popcount(k and i).
+```
+
+Then
+
+```text
+S_d(i) = (1/n) * sum_k W[d,k] * (-1)^popcount(k and i),
+```
+
+so the twisted product can be represented as a weighted family of ordinary XOR
+correlations with character-modulated inputs. Pireus should discover the
+number and shape of required channels from the Sounio sign law rather than from
+a hand-written backend recipe.
+
+## Differentiating result
+
+- Sparse support may yield a useful exact transform candidate.
+- Dense support still yields an exact generated candidate, but blocks promotion
+  based on sparsity alone.
+- The dimension-16 observation cannot establish asymptotic complexity.
+- Candidate generation is not candidate selection or hardware parity.
+
+## Falsifier
+
+The representation is invalid if inverse Walsh reconstruction differs from
+the original Cayley-Dickson sign on any displacement/index pair, or if Parseval
+energy differs from `n*n` for any row.
+
+FILE scripts/ci/pireus_walsh_twist_channel_spectrum_gate.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT_DIR"
+SOUC="${SOUC:-bin/souc}"
+SOURCE=tools/pireus/walsh_twist_channel_spectrum.sio
+FROZEN=tools/pireus/walsh_twist_channel_spectrum.values.v1
+RECEIPT=tools/pireus/evidence/pireus_walsh_twist_channel_spectrum.receipt.v1
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+fail() { printf 'PIREUS_WALSH_TWIST_CHANNEL_SPECTRUM_GATE_FAIL: %s\n' "$*" >&2; exit 1; }
+semantic_tail() { sed -n '/^schema=pireus-walsh-twist-channel-spectrum-v1/,$p' "$1"; }
+
+"$SOUC" run "$SOURCE" >"$work/current.log" 2>&1 || fail 'Sounio authority did not execute'
+semantic_tail "$work/current.log" >"$work/current.values"
+cmp -s "$FROZEN" "$work/current.values" || fail 'current spectrum diverges from frozen semantics'
+
+source_sha="$(sha256sum "$SOURCE" | cut -d' ' -f1)"
+frozen_sha="$(sha256sum "$FROZEN" | cut -d' ' -f1)"
+grep -qx "sounio_source_sha256=$source_sha" "$RECEIPT" || fail 'receipt source hash drifted'
+grep -qx "frozen_semantics_sha256=$frozen_sha" "$RECEIPT" || fail 'receipt semantics hash drifted'
+grep -qx 'producer_language=Sounio' "$RECEIPT" || fail 'semantic producer is not Sounio'
+grep -qx 'producer_role=SEMANTIC_AUTHORITY' "$RECEIPT" || fail 'authority role drifted'
+grep -qx 'generated_candidate=WalshCharacterChannels' "$RECEIPT" || fail 'generated operator identity is absent'
+grep -qx 'equivalence=EXACT' "$RECEIPT" || fail 'candidate equivalence drifted'
+grep -qx 'sparsity_promotion=REFUSED_AT_DIMENSION_16' "$RECEIPT" || fail 'dense-spectrum refusal is absent'
+grep -qx 'claim_boundary=dimension-16-spectrum-not-asymptotic-complexity' "$RECEIPT" || fail 'claim boundary is absent'
+
+sed 's/if bits <= 1 { return 0 - 1 }/if bits <= 1 { return 1 }/' "$SOURCE" >"$work/convention-mutant.sio"
+"$SOUC" run "$work/convention-mutant.sio" >"$work/convention-mutant.log" 2>&1 || fail 'convention mutant failed before producing a spectrum'
+semantic_tail "$work/convention-mutant.log" >"$work/convention-mutant.values"
+cmp -s "$FROZEN" "$work/convention-mutant.values" && fail 'frozen spectrum does not bind Convention X'
+
+sed 's/if bit_parity(k & i, bits) == 0/if true/' "$SOURCE" >"$work/character-mutant.sio"
+if "$SOUC" run "$work/character-mutant.sio" >"$work/character-mutant.log" 2>&1; then
+    fail 'non-Walsh character basis was accepted'
+fi
+grep -q '^PIREUS_WALSH_TWIST_CHANNEL_SPECTRUM_FAIL$' "$work/character-mutant.log" || fail 'character mutant failed for an unrelated reason'
+
+printf 'PIREUS_WALSH_TWIST_CHANNEL_SPECTRUM_GATE_PASS source_sha256=%s frozen_sha256=%s\n' "$source_sha" "$frozen_sha"
+
+FILE tools/pireus/evidence/pireus_walsh_twist_channel_spectrum.receipt.v1
+schema=pireus-walsh-twist-channel-spectrum-receipt-v1
+sounio_source_sha256=6f16fdb1a354979ec30af884da09dc00cd0963d5f60fbb05ece5ff59c9bc2c37
+frozen_semantics_sha256=652677f38cdbdbfec8d67e601962895ca54e35f6a4ea16111620cc96b32ede96
+producer_language=Sounio
+producer_role=SEMANTIC_AUTHORITY
+toolchain=Madaros-v0.80.0-Horizon-3
+hardware=sounio-workspace-control-cpu
+command=bin/souc run tools/pireus/walsh_twist_channel_spectrum.sio
+operator=XorConvolution
+generated_candidate=WalshCharacterChannels
+equivalence=EXACT
+total_coefficients=256
+total_nonzero_coefficients=256
+union_channels=16
+coefficient_checksum=21232
+sparsity_promotion=REFUSED_AT_DIMENSION_16
+material_promotion=PENDING_COST_AND_HARDWARE
+claim_boundary=dimension-16-spectrum-not-asymptotic-complexity
+result=PASS
+
+FILE tools/pireus/walsh_twist_channel_spectrum.sio
+// Sounio semantic authority for a generated Walsh-channel representation of
+// the Cayley-Dickson sign-twisted XOR convolution.
+
+fn cd_sign(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sign(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sign(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sign(a_lo, 0, bits - 1) }
+        return 0 - cd_sign(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sign(0, a_lo, bits - 1) }
+    cd_sign(b_lo, a_lo, bits - 1)
+}
+
+fn bit_parity(value: i64, bits: i64) -> i64 {
+    var parity: i64 = 0
+    var bit: i64 = 0
+    while bit < bits {
+        parity = parity ^ ((value >> bit) & 1)
+        bit = bit + 1
+    }
+    parity
+}
+
+fn character(k: i64, i: i64, bits: i64) -> i64 {
+    if bit_parity(k & i, bits) == 0 { 1 } else { 0 - 1 }
+}
+
+fn walsh_coefficient(d: i64, k: i64, bits: i64) -> i64 {
+    let dimension = 1 << bits
+    var coefficient: i64 = 0
+    var i: i64 = 0
+    while i < dimension {
+        coefficient = coefficient + cd_sign(i, i ^ d, bits) * character(k, i, bits)
+        i = i + 1
+    }
+    coefficient
+}
+
+fn popcount(value: i64, bits: i64) -> i64 {
+    var count: i64 = 0
+    var bit: i64 = 0
+    while bit < bits {
+        count = count + ((value >> bit) & 1)
+        bit = bit + 1
+    }
+    count
+}
+
+fn main() -> i32 with IO {
+    let bits: i64 = 4
+    let dimension: i64 = 16
+    var coefficients: [i64; 256] = [0; 256]
+    var union_mask: i64 = 0
+    var total_support: i64 = 0
+    var coefficient_checksum: i64 = 0
+    var parseval_failures: i64 = 0
+    var reconstruction_failures: i64 = 0
+
+    print("schema=pireus-walsh-twist-channel-spectrum-v1\n")
+    print("producer_language=Sounio\n")
+    print("producer_role=SEMANTIC_AUTHORITY\n")
+    print("operator=XorConvolution bits=4 twist=CayleyDicksonSign\n")
+    print("candidate=WalshCharacterChannels equivalence=EXACT status=GENERATED\n")
+    var d: i64 = 0
+    while d < dimension {
+        var support: i64 = 0
+        var support_mask: i64 = 0
+        var energy: i64 = 0
+        var k: i64 = 0
+        print("d="); print_int(d)
+        while k < dimension {
+            let coefficient = walsh_coefficient(d, k, bits)
+            coefficients[(d * dimension + k) as usize] = coefficient
+            print(" w"); print_int(k); print("="); print_int(coefficient)
+            coefficient_checksum = coefficient_checksum
+                + (d + 1) * (k + 1) * coefficient
+            energy = energy + coefficient * coefficient
+            if coefficient != 0 {
+                support = support + 1
+                support_mask = support_mask | (1 << k)
+                union_mask = union_mask | (1 << k)
+            }
+            k = k + 1
+        }
+        if energy != dimension * dimension {
+            parseval_failures = parseval_failures + 1
+        }
+        total_support = total_support + support
+        print(" support="); print_int(support)
+        print(" support_mask="); print_int(support_mask)
+        print(" energy="); print_int(energy); print("\n")
+        d = d + 1
+    }
+
+    d = 0
+    while d < dimension {
+        var i: i64 = 0
+        while i < dimension {
+            var reconstructed: i64 = 0
+            var k: i64 = 0
+            while k < dimension {
+                reconstructed = reconstructed
+                    + coefficients[(d * dimension + k) as usize] * character(k, i, bits)
+                k = k + 1
+            }
+            let expected = dimension * cd_sign(i, i ^ d, bits)
+            if reconstructed != expected {
+                reconstruction_failures = reconstruction_failures + 1
+            }
+            i = i + 1
+        }
+        d = d + 1
+    }
+
+    let union_channels = popcount(union_mask, dimension)
+    print("total_coefficients=256\n")
+    print("total_nonzero_coefficients="); print_int(total_support); print("\n")
+    print("union_channel_mask="); print_int(union_mask); print("\n")
+    print("union_channels="); print_int(union_channels); print("\n")
+    if total_support == dimension * dimension {
+        print("observed_sparsity=FULL\n")
+        print("sparsity_promotion=REFUSED_AT_DIMENSION_16\n")
+    } else {
+        print("observed_sparsity=PARTIAL\n")
+        print("sparsity_promotion=CANDIDATE_AT_DIMENSION_16\n")
+    }
+    print("coefficient_checksum="); print_int(coefficient_checksum); print("\n")
+    print("parseval_failures="); print_int(parseval_failures); print("\n")
+    print("reconstruction_failures="); print_int(reconstruction_failures); print("\n")
+    print("material_promotion=PENDING_COST_AND_HARDWARE\n")
+    print("claim_boundary=dimension-16-spectrum-not-asymptotic-complexity\n")
+    if parseval_failures == 0 && reconstruction_failures == 0 {
+        print("PIREUS_WALSH_TWIST_CHANNEL_SPECTRUM_PASS\n")
+        return 0
+    }
+    print("PIREUS_WALSH_TWIST_CHANNEL_SPECTRUM_FAIL\n")
+    1
+}
+
+FILE tools/pireus/walsh_twist_channel_spectrum.values.v1
+schema=pireus-walsh-twist-channel-spectrum-v1
+producer_language=Sounio
+producer_role=SEMANTIC_AUTHORITY
+operator=XorConvolution bits=4 twist=CayleyDicksonSign
+candidate=WalshCharacterChannels equivalence=EXACT status=GENERATED
+d=0 w0=-14 w1=2 w2=2 w3=2 w4=2 w5=2 w6=2 w7=2 w8=2 w9=2 w10=2 w11=2 w12=2 w13=2 w14=2 w15=2 support=16 support_mask=65535 energy=256
+d=1 w0=2 w1=2 w2=2 w3=2 w4=2 w5=2 w6=2 w7=2 w8=2 w9=2 w10=2 w11=2 w12=2 w13=2 w14=2 w15=-14 support=16 support_mask=65535 energy=256
+d=2 w0=2 w1=2 w2=2 w3=2 w4=2 w5=2 w6=2 w7=2 w8=2 w9=2 w10=2 w11=2 w12=2 w13=2 w14=-14 w15=2 support=16 support_mask=65535 energy=256
+d=3 w0=2 w1=2 w2=2 w3=2 w4=2 w5=2 w6=2 w7=2 w8=2 w9=2 w10=2 w11=2 w12=2 w13=-14 w14=2 w15=2 support=16 support_mask=65535 energy=256
+d=4 w0=2 w1=2 w2=2 w3=2 w4=2 w5=2 w6=2 w7=2 w8=2 w9=2 w10=2 w11=2 w12=-14 w13=2 w14=2 w15=2 support=16 support_mask=65535 energy=256
+d=5 w0=2 w1=2 w2=2 w3=2 w4=2 w5=2 w6=2 w7=2 w8=2 w9=-14 w10=2 w11=2 w12=2 w13=2 w14=2 w15=2 support=16 support_mask=65535 energy=256
+d=6 w0=2 w1=2 w2=2 w3=2 w4=2 w5=2 w6=2 w7=2 w8=2 w9=2 w10=2 w11=-14 w12=2 w13=2 w14=2 w15=2 support=16 support_mask=65535 energy=256
+d=7 w0=2 w1=2 w2=2 w3=2 w4=2 w5=2 w6=2 w7=2 w8=2 w9=2 w10=-14 w11=2 w12=2 w13=2 w14=2 w15=2 support=16 support_mask=65535 energy=256
+d=8 w0=2 w1=2 w2=2 w3=2 w4=2 w5=2 w6=2 w7=2 w8=-14 w9=2 w10=2 w11=2 w12=2 w13=2 w14=2 w15=2 support=16 support_mask=65535 energy=256
+d=9 w0=2 w1=-6 w2=2 w3=-6 w4=2 w5=-6 w6=2 w7=10 w8=2 w9=2 w10=2 w11=2 w12=2 w13=2 w14=2 w15=2 support=16 support_mask=65535 energy=256
+d=10 w0=2 w1=2 w2=-6 w3=-6 w4=2 w5=2 w6=10 w7=-6 w8=2 w9=2 w10=2 w11=2 w12=2 w13=2 w14=2 w15=2 support=16 support_mask=65535 energy=256
+d=11 w0=2 w1=-6 w2=-6 w3=2 w4=2 w5=10 w6=-6 w7=2 w8=2 w9=2 w10=2 w11=2 w12=2 w13=2 w14=2 w15=2 support=16 support_mask=65535 energy=256
+d=12 w0=2 w1=2 w2=2 w3=2 w4=10 w5=-6 w6=-6 w7=-6 w8=2 w9=2 w10=2 w11=2 w12=2 w13=2 w14=2 w15=2 support=16 support_mask=65535 energy=256
+d=13 w0=2 w1=10 w2=2 w3=-6 w4=-6 w5=2 w6=-6 w7=2 w8=2 w9=2 w10=2 w11=2 w12=2 w13=2 w14=2 w15=2 support=16 support_mask=65535 energy=256
+d=14 w0=2 w1=2 w2=-6 w3=10 w4=-6 w5=-6 w6=2 w7=2 w8=2 w9=2 w10=2 w11=2 w12=2 w13=2 w14=2 w15=2 support=16 support_mask=65535 energy=256
+d=15 w0=2 w1=-6 w2=10 w3=2 w4=-6 w5=2 w6=2 w7=-6 w8=2 w9=2 w10=2 w11=2 w12=2 w13=2 w14=2 w15=2 support=16 support_mask=65535 energy=256
+total_coefficients=256
+total_nonzero_coefficients=256
+union_channel_mask=65535
+union_channels=16
+observed_sparsity=FULL
+sparsity_promotion=REFUSED_AT_DIMENSION_16
+coefficient_checksum=21232
+parseval_failures=0
+reconstruction_failures=0
+material_promotion=PENDING_COST_AND_HARDWARE
+claim_boundary=dimension-16-spectrum-not-asymptotic-complexity
+PIREUS_WALSH_TWIST_CHANNEL_SPECTRUM_PASS

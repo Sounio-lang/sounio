@@ -45,7 +45,7 @@ the small receipts under `docs/research/receipts/` and `docs/research/evidence/`
 and the six `tools/loom/evidence/pireus-*-acceptance-20260827.txt` files.
 Some test `.args` files and the concept docs name these paths, so they have
 to stay until the language-side references are rewritten.
-`tools/pireus/continuity/reviews/`, the duplicate copies under `tools/pireus/continuity/recovered/spark/`, and 108 dumps in `tools/pireus/evidence/` that nothing outside `tools/pireus` opens were later removed from this tree; the bytes remain in git history.
+108 dumps in `tools/pireus/evidence/` that nothing outside `tools/pireus` opens were later removed from this tree; the bytes remain in git history. `tools/pireus/continuity/reviews/` and the duplicate copies under `tools/pireus/continuity/recovered/spark/` stay: open PR [#2474](https://github.com/Sounio-lang/sounio/pull/2474) still lists them.
 
 ## The archive tags are the source of truth
 

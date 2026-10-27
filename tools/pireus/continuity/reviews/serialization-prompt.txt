@@ -1,0 +1,1754 @@
+Review this bounded Spark host transaction serialization and exact frozen-revision rebind. Return CLEAR or concrete BLOCKER findings. Focus on real process locking, Bash error semantics, timeout/process-group cleanup, watchdog heartbeat, privilege/authority boundaries, transition races and migration custody. Prior live attempts reached SLURM then refenced within seconds, and a mocked stale FENCED branch reproduces a possible race; exact incident cause remains unproven. The native arbiter/policy/barrier/floor remain unchanged. Only the host-fence manifest changes in this new freeze. recovery_serialize.py reuses the same 19-field native rebind decision under its own exact source/revision lock, permitting only host_fence_manifest_sha256 delta. Canonical recovery still owns actual installation and Slurm grant. No live deployment of this revision yet. Tests shown are tests, not claimed results.
+diff --git a/tools/cluster/spark_pair_arbiter.freeze.v1 b/tools/cluster/spark_pair_arbiter.freeze.v1
+index a0d841f8fd..7cc4ac29af 100644
+--- a/tools/cluster/spark_pair_arbiter.freeze.v1
++++ b/tools/cluster/spark_pair_arbiter.freeze.v1
+@@ -26,7 +26,7 @@ material_backend_sha256=2daf6df41434cd9b9d9a723b7675c9d2d2eda46850d2e66d0a67817f
+ admission_manifest_source=tools/cluster/spark_pair_arbiter_admission.yaml
+ admission_manifest_sha256=3035c374b7ec440857de4390350441b81d8847828088ce6273bce9bee291f31f
+ host_fence_manifest_source=tools/cluster/spark_pair_host_fence.yaml
+-host_fence_manifest_sha256=341ca6a39676f61ee366e3ca317b1d858bb1a7d12fa776699414c5a9a502dee9
++host_fence_manifest_sha256=8e353bbdcdf326716a3bcb11991e300d0d6f8a99131beea23902c45bb5dc6fb6
+ device_barrier_source=tools/cluster/pireus_spark_device_barrier.cpp
+ device_barrier_source_sha256=ac3cfa4aeb70f557f0ab0f1323f7fd7f5dca55896284ccef66374daf24c61240
+ device_barrier_arm64_gate_source=scripts/dev/spark_pair_device_barrier_arm64_gate.sh
+diff --git a/tools/cluster/spark_pair_host_fence.yaml b/tools/cluster/spark_pair_host_fence.yaml
+index 6b3e1e101b..a1d8cc012a 100644
+--- a/tools/cluster/spark_pair_host_fence.yaml
++++ b/tools/cluster/spark_pair_host_fence.yaml
+@@ -8,7 +8,7 @@ automountServiceAccountToken: false
+ apiVersion: v1
+ kind: ConfigMap
+ metadata:
+-  name: pireus-spark-host-fence-1b67a02d2c88
++  name: pireus-spark-host-fence-e492aaf62b5e
+   namespace: beagle
+ immutable: true
+ data:
+@@ -19,6 +19,7 @@ data:
+     readonly NODE_NAME="${NODE_NAME:?NODE_NAME is required}"
+     readonly MINIMUM_FREE_MEMORY_MB=32768
+     readonly HOST_ROOT="${PIREUS_HOST_ROOT:-/host}"
++    readonly HOST_FENCE_SOURCE="${BASH_SOURCE[0]}"
+     readonly GRANT_FILE="$HOST_ROOT/var/lib/pireus-spark-pair/host-grant"
+     readonly PREPARE_FILE="$HOST_ROOT/var/lib/pireus-spark-pair/host-prepare"
+     readonly PROTECTED_BASELINE="$HOST_ROOT/var/lib/pireus-spark-pair/protected-baseline"
+@@ -41,6 +42,28 @@ data:
+     readonly WATCHDOG_FRESH_SECONDS=55
+     readonly CRI_RUNTIME_ENDPOINT=unix:///var/run/containerd/containerd.sock
+ 
++    # Cross-process serialization includes observations and every host grant mutation.
++    # timeout bounds both lock wait and the child process group, leaving the systemd
++    # watchdog able to re-fence after an interrupted commit rather than waiting forever.
++    with_host_transition_lock() (
++      umask 077
++      mkdir -p "$HOST_ROOT/var/lib/pireus-spark-pair"
++      /usr/bin/timeout --kill-after=2s 30s /usr/bin/flock \
++        --exclusive --wait 10 --conflict-exit-code 75 \
++        "$HOST_ROOT/var/lib/pireus-spark-pair/host-transition.lock" \
++        /usr/bin/env PIREUS_HOST_FENCE_LIBRARY_MODE=1 /bin/bash -c \
++        'source "$1"; shift; "$@"' host-transition "$HOST_FENCE_SOURCE" "$@"
++    )
++
++    fence_and_status() {
++      fence_pair "$@"
++      status_once
++    }
++
++    emergency_fence_if_active() {
++      if [[ -r "$ACTIVATED_FILE" ]]; then fence_invalid_local; fi
++    }
++
+     host_ns() {
+       if [[ "$HOST_ROOT" == / ]]; then
+         /usr/bin/timeout --kill-after=2s "${HOST_COMMAND_TIMEOUT_SECONDS}s" "$@"
+@@ -1215,22 +1238,21 @@ data:
+ 
+     case "${1:-}" in
+       status)
+-        status_once
++        with_host_transition_lock status_once
+         ;;
+       report)
+-        report_once
++        with_host_transition_lock report_once
+         ;;
+       fence)
+-        fence_pair "${2:-}" "${3:-}" "${4:-}" "${5:-}" \
++        with_host_transition_lock fence_and_status "${2:-}" "${3:-}" "${4:-}" "${5:-}" \
+           "${6:-}" "${7:-}" "${8:-}" "${9:-}"
+-        status_once
+         ;;
+       prepare)
+-        prepare_grant "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" \
++        with_host_transition_lock prepare_grant "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" \
+           "${7:-}" "${8:-}" "${9:-}" "${10:-}"
+         ;;
+       commit)
+-        commit_grant "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" \
++        with_host_transition_lock commit_grant "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" \
+           "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" \
+           "${13:-}" "${14:-}"
+         ;;
+@@ -1238,7 +1260,7 @@ data:
+         install_watchdog "${2:-}" "${3:-}" "${4:-}"
+         ;;
+       capture-baseline)
+-        capture_protected_baseline
++        with_host_transition_lock capture_protected_baseline
+         ;;
+       probe)
+         case "${2:-}" in
+@@ -1255,22 +1277,29 @@ data:
+         esac
+         ;;
+       boot-fence)
+-        boot_fence
++        with_host_transition_lock boot_fence
+         ;;
+       emergency-fence)
+-        if [[ -r "$ACTIVATED_FILE" ]]; then
+-          fence_invalid_local
+-        fi
++        with_host_transition_lock emergency_fence_if_active
+         ;;
+       enforce-notify)
+         capture_protected_baseline
+         ready=0
+         while true; do
++          cycle_rc=0
+           if [[ -r "$ACTIVATED_FILE" ]]; then
+-            active_enforcement_cycle || true
++            with_host_transition_lock active_enforcement_cycle || cycle_rc=$?
+           else
+-            passive_armed_cycle
++            with_host_transition_lock passive_armed_cycle || cycle_rc=$?
+           fi
++          case "$cycle_rc" in
++            75|124|137)
++              # Contention/timeout is not a completed observation. Do not forge a
++              # fresh heartbeat; the next cycle or systemd watchdog handles recovery.
++              sleep 2
++              continue
++              ;;
++          esac
+           if [[ $ready -eq 0 ]]; then
+             watchdog_notify_ready
+             ready=1
+@@ -1287,6 +1316,7 @@ data:
+         exit 64
+         ;;
+     esac
++
+ ---
+ apiVersion: apps/v1
+ kind: DaemonSet
+@@ -1364,7 +1394,7 @@ spec:
+       volumes:
+         - name: fence-script
+           configMap:
+-            name: pireus-spark-host-fence-1b67a02d2c88
++            name: pireus-spark-host-fence-e492aaf62b5e
+             defaultMode: 0555
+         - name: device-barrier-source
+           configMap:
+
+FILE runtime/recovery_serialize.py
+#!/usr/bin/env python3
+"""Observe and CAS a pinned observer-only freeze migration, admitted by Sounio."""
+import argparse,datetime,hashlib,json,os,subprocess,sys
+from pathlib import Path
+HERE=Path(__file__).resolve().parent
+def sha(data):return hashlib.sha256(data).hexdigest()
+def fields(text):return dict(line.split("=",1) for line in text.splitlines() if "=" in line)
+def tokens(text):return dict(x.split("=",1) for x in text.split() if "=" in x)
+def kube(*a):return subprocess.check_output(["kubectl",*a],text=True,timeout=60)
+def get(*a):return json.loads(kube(*a,"-o","json"))
+def main():
+ ap=argparse.ArgumentParser()
+ for key in ("old-root","new-root","engine","evidence"):ap.add_argument("--"+key,type=Path,required=True)
+ ap.add_argument("--holder",required=True);ap.add_argument("--apply",action="store_true");a=ap.parse_args()
+ if not os.environ.get("TMUX"):raise ValueError("remote tmux required")
+ lock=json.loads((HERE/"recovery-serialization-lock.json").read_text())
+ assert sha(a.engine.read_bytes())==lock["engine_sha256"]
+ for name,value in lock["sources"].items():assert sha((HERE/name).read_bytes())==value
+ old_path=a.old_root/"tools/cluster/spark_pair_arbiter.freeze.v1"
+ new_path=a.new_root/"tools/cluster/spark_pair_arbiter.freeze.v1"
+ assert sha(old_path.read_bytes())==lock["old_freeze"]
+ assert sha(new_path.read_bytes())==lock["new_freeze"]
+ old=fields(old_path.read_text());new=fields(new_path.read_text())
+ assert {k for k in old.keys()|new.keys() if old.get(k)!=new.get(k)}=={"host_fence_manifest_sha256"}
+ cfg=fields((a.old_root/"tools/cluster/spark_pair_arbiter.policy.v1").read_text())
+ for root in (a.old_root,a.new_root):
+  output=subprocess.check_output([str(root/"scripts/dev/spark_pair_arbiter.sh"),"verify"],text=True,timeout=60)
+  assert output.startswith("SPARK_PAIR_VERIFY_PASS")
+ a.evidence.mkdir(parents=True,exist_ok=False)
+ def save(name,value):
+  data=value.encode() if isinstance(value,str) else (json.dumps(value,sort_keys=True,indent=2)+"\n").encode()
+  path=a.evidence/name
+  with path.open("wb") as out:out.write(data);out.flush();os.fsync(out.fileno())
+  fd=os.open(a.evidence,os.O_DIRECTORY)
+  try:os.fsync(fd)
+  finally:os.close(fd)
+  return path
+ frame_raw=subprocess.check_output([str(a.old_root/"scripts/dev/spark_pair_arbiter_k8s_backend.sh"),
+  "--policy",str(a.old_root/"tools/cluster/spark_pair_arbiter.policy.v1"),"--freeze",str(old_path),
+  "facts","--holder",a.holder],text=True,timeout=190)
+ frame=tokens(frame_raw);save("old-frame.txt",frame_raw)
+ lease=get("-n","beagle","get","lease","pireus-spark-pair")
+ journal=get("-n","beagle","get","configmap",cfg["bootstrap_journal"])
+ nodes=[get("get","node",cfg["node_"+str(i)+"_k8s"]) for i in range(2)]
+ nodeset=get("-n",cfg["nodeset_namespace"],"get","nodeset",cfg["nodeset_name"])
+ pods=get("get","pods","-A")["items"]
+ save("lease-before.json",lease);save("journal-before.json",journal);save("nodes-before.json",nodes)
+ reports=[]
+ for i in range(2):
+  node=cfg["node_"+str(i)+"_k8s"]
+  selected=[p for p in pods if p["spec"].get("nodeName")==node and p["metadata"]["namespace"]=="beagle"
+    and p["metadata"]["name"].startswith("pireus-spark-host-fence-") and not p["metadata"].get("deletionTimestamp")]
+  assert len(selected)==1
+  raw=kube("-n","beagle","exec",selected[0]["metadata"]["name"],"-c","host-fence","--","bash","/fence/host-fence.sh","report")
+  save(node+".report.txt",raw);reports.append(tokens(raw))
+ ann=lease["metadata"]["annotations"];epoch=ann[cfg["epoch_annotation"]]
+ expiry=datetime.datetime.fromisoformat(lease["spec"]["renewTime"].replace("Z","+00:00")).timestamp()+lease["spec"]["leaseDurationSeconds"]
+ now=datetime.datetime.now(datetime.timezone.utc).timestamp()
+ jd=journal["data"]
+ journal_bound=jd.get("semanticsFreezeSha256")==lock["old_freeze"]
+ # A crash after the first CAS is replayable only for this exact lease/revision.
+ journal_partial=(jd.get("semanticsFreezeSha256")==lock["new_freeze"] and
+   jd.get("recoveryObserverFromFreeze")==lock["old_freeze"] and
+   jd.get("recoveryObserverLeaseUID")==lease["metadata"]["uid"] and
+   jd.get("recoveryObserverOldLeaseRV")==lease["metadata"]["resourceVersion"])
+ worker_pods=[p for p in pods if p["metadata"]["namespace"]==cfg["nodeset_namespace"] and
+   any(o.get("uid")==cfg["nodeset_uid"] for o in p["metadata"].get("ownerReferences",[]))]
+ selector=nodeset.get("status",{}).get("selector","")
+ labels=dict(x.split("=",1) for x in selector.split(",") if "=" in x)
+ assert labels,"unknown worker selector"
+ worker_pods += [p for p in pods if p["metadata"]["namespace"]==cfg["nodeset_namespace"] and
+   all(p["metadata"].get("labels",{}).get(k)==v for k,v in labels.items())]
+ unwanted=[p for p in pods if any(p["metadata"].get("labels",{}).get(k)=="true" for k in
+   ("pireus.sounio.dev/spark-pair-reservation","pireus.sounio.dev/spark-pair-workload"))]
+ save("workload-inventory.json",dict(worker_uids=[p["metadata"]["uid"] for p in worker_pods],
+  unwanted_uids=[p["metadata"]["uid"] for p in unwanted],nodeset_uid=nodeset["metadata"]["uid"],selector=selector))
+ checks=[
+  old["authority_sha256"]==new["authority_sha256"] and old["native_executable_sha256"]==new["native_executable_sha256"],
+  ann[cfg["freeze_hash_annotation"]]==lock["old_freeze"] and ann[cfg["source_hash_annotation"]]==old["authority_sha256"],
+  all(n["metadata"]["uid"]==cfg["node_"+str(i)+"_uid"] for i,n in enumerate(nodes)) and nodeset["metadata"]["uid"]==cfg["nodeset_uid"],
+  ann[cfg["state_annotation"]]=="RECOVERY_REQUIRED" and lease["spec"]["holderIdentity"]==a.holder and expiry<now,
+  all(cfg["slurmd_selector_key"] not in n["metadata"]["labels"] for n in nodes),
+  not worker_pods,
+  all(r["grant_mode"]=="FENCED" and r["grant_valid"]=="0" for r in reports),
+  all(r["freeze_sha256"]==lock["old_freeze"] and r["source_sha256"]==old["authority_sha256"] and
+    r["boot_id"]==ann[cfg["host_boot_"+str(i)+"_annotation"]] for i,r in enumerate(reports)),
+  all(r["watchdog"]=="1" and 0<=int(r["reported_monotonic"])-int(r["watchdog_monotonic"])<=55 for r in reports),
+  all(r["device_barrier"]=="1" and r["device_barrier_source_sha256"]==old["device_barrier_source_sha256"] for r in reports),
+  all(r["protected"]=="1" for r in reports),
+  all(all(r[k]=="1" for k in ("inventory","services","restarts","docker_claims","consumers","cgroups")) for r in reports),
+  not unwanted,
+  frame["epoch"]==epoch and frame["observed_epoch"]==epoch and all(r["grant_epoch"]==epoch and
+    r["lease_uid"]==lease["metadata"]["uid"] and r["grant_owner"]==a.holder for r in reports),
+  int(frame["slurm_mask"]),
+  (journal_bound or journal_partial) and jd.get("sounioSourceSha256")==old["authority_sha256"],
+ ]
+ path=save("facts.v1"," ".join(map(str,[1]+[int(x) for x in checks]+[int(r["mem_available_mb"]) for r in reports]))+"\n")
+ run=subprocess.run([str(a.engine.resolve()),str(path.resolve())],capture_output=True,text=True,timeout=60)
+ save("decision.json",run.stdout);receipt=json.loads(run.stdout)
+ save("custody.json",dict(lock=lock,facts_sha256=sha(path.read_bytes()),apply=a.apply))
+ assert run.returncode==0 and receipt["authority"]=="Sounio" and receipt["decision"]=="ALLOW"
+ assert receipt["action"]=="REBIND_RECOVERY_OBSERVER" and receipt["gpu_grant"] is False and receipt["resume"] is False
+ if not a.apply:print("RECOVERY_OBSERVER_MIGRATION_REVIEWABLE_ALLOW");return
+ # A second complete native admission immediately precedes the commit sequence.
+ fresh=a.evidence/"recheck"
+ subprocess.run([sys.executable,str(Path(__file__).resolve()),"--old-root",str(a.old_root.resolve()),
+  "--new-root",str(a.new_root.resolve()),"--engine",str(a.engine.resolve()),"--holder",a.holder,
+  "--evidence",str(fresh.resolve())],check=True,timeout=240)
+ fresh_lease=json.loads((fresh/"lease-before.json").read_text())
+ assert fresh_lease["metadata"]["resourceVersion"]==lease["metadata"]["resourceVersion"]
+ fresh_journal=json.loads((fresh/"journal-before.json").read_text())
+ assert fresh_journal["metadata"]["resourceVersion"]==journal["metadata"]["resourceVersion"]
+ # Journal prepares first, lease CAS commits. Neither changes scheduler state.
+ current=get("-n","beagle","get","lease","pireus-spark-pair")
+ assert current["metadata"]["resourceVersion"]==lease["metadata"]["resourceVersion"]
+ def esc(s):return s.replace("~","~0").replace("/","~1")
+ updated=dict(jd,semanticsFreezeSha256=lock["new_freeze"],recoveryObserverFromFreeze=lock["old_freeze"],
+   recoveryObserverToFreeze=lock["new_freeze"],recoveryObserverLeaseUID=lease["metadata"]["uid"],
+   recoveryObserverOldLeaseRV=lease["metadata"]["resourceVersion"],recoveryObserverDecisionSHA=sha(run.stdout.encode()))
+ jp=[dict(op="test",path="/metadata/uid",value=journal["metadata"]["uid"]),
+   dict(op="test",path="/metadata/resourceVersion",value=journal["metadata"]["resourceVersion"]),
+   dict(op="replace",path="/data",value=updated)]
+ save("journal-patch.json",jp);save("phase.json",dict(phase="JOURNAL_INTENT"))
+ save("journal-effect.txt",kube("-n","beagle","patch","configmap",cfg["bootstrap_journal"],"--type=json","-p",json.dumps(jp)))
+ lp=[dict(op="test",path="/metadata/uid",value=lease["metadata"]["uid"]),
+   dict(op="test",path="/metadata/resourceVersion",value=lease["metadata"]["resourceVersion"]),
+   dict(op="test",path="/metadata/annotations/"+esc(cfg["state_annotation"]),value="RECOVERY_REQUIRED"),
+   dict(op="test",path="/metadata/annotations/"+esc(cfg["freeze_hash_annotation"]),value=lock["old_freeze"]),
+   dict(op="replace",path="/metadata/annotations/"+esc(cfg["freeze_hash_annotation"]),value=lock["new_freeze"])]
+ save("lease-patch.json",lp);save("phase.json",dict(phase="LEASE_INTENT"))
+ save("lease-effect.txt",kube("-n","beagle","patch","lease","pireus-spark-pair","--type=json","-p",json.dumps(lp)))
+ post=get("-n","beagle","get","lease","pireus-spark-pair");save("lease-after.json",post)
+ assert post["spec"]==lease["spec"]
+ expected=dict(ann);expected[cfg["freeze_hash_annotation"]]=lock["new_freeze"]
+ assert post["metadata"]["annotations"]==expected
+ post_journal=get("-n","beagle","get","configmap",cfg["bootstrap_journal"]);save("journal-after.json",post_journal)
+ assert post_journal["data"]==updated
+ for i in range(2):
+  node=cfg["node_"+str(i)+"_k8s"]
+  fresh_pods=get("-n","beagle","get","pods")["items"]
+  selected=[p for p in fresh_pods if p["spec"].get("nodeName")==node and
+    p["metadata"]["name"].startswith("pireus-spark-host-fence-") and not p["metadata"].get("deletionTimestamp")]
+  assert len(selected)==1
+  raw=kube("-n","beagle","exec",selected[0]["metadata"]["name"],"-c","host-fence","--","bash","/fence/host-fence.sh","report")
+  save(node+".post-report.txt",raw);r=tokens(raw)
+  assert r["grant_mode"]=="FENCED" and r["grant_valid"]=="0"
+  assert all(r[k]=="1" for k in ("watchdog","device_barrier","protected"))
+ save("phase.json",dict(phase="OBSERVER_REBOUND",gpu_grant=False,scheduler_state="RECOVERY_REQUIRED"))
+ print("RECOVERY_OBSERVER_REBOUND; canonical recovery required")
+if __name__=="__main__":main()
+
+FILE runtime/recovery_migrate.sio
+// Explicit observer-revision migration on an expired, owned, fenced recovery.
+// Nineteen fields: schema, fifteen booleans, Slurm mask at 15, two fresh memory values.
+// Changes only freeze bindings; no scheduler or GPU grant.
+fn main() -> i32 with IO, Mut, Panic, Div {
+    if arg_count() != 1 { return 2 }
+    let path = get_arg(0)
+    let size = file_size(path)
+    if size <= 0 || size > 256 { return 2 }
+    let raw = read_file(path)
+    if str_len(raw) != size { return 2 }
+    var values: [i64; 19] = [0; 19]
+    var p: i64 = 0
+    var i: i64 = 0
+    while i < 19 {
+        var digits: i64 = 0
+        var value: i64 = 0
+        while p < size {
+            let c = str_char_at(raw, p)
+            if c < 48 || c > 57 { break }
+            if digits >= 9 { return 2 }
+            value = value * 10 + c - 48
+            digits = digits + 1
+            p = p + 1
+        }
+        if digits == 0 || p >= size { return 2 }
+        if str_char_at(raw, p) != (if i == 18 { 10 } else { 32 }) { return 2 }
+        values[i as usize] = value
+        p = p + 1
+        i = i + 1
+    }
+    if p != size || values[0] != 1 { return 2 }
+    var allowed = true
+    i = 1
+    while i <= 16 {
+        if i == 15 {
+            if values[15] > 255 { return 2 }
+            if (values[15] & 30) != 30 { allowed = false }
+        } else {
+            if values[i as usize] > 1 { return 2 }
+            if values[i as usize] != 1 { allowed = false }
+        }
+        i = i + 1
+    }
+    if values[17] < 32768 || values[18] < 32768 { allowed = false }
+    print("{\"schema\":1,\"authority\":\"Sounio\",\"action\":\"REBIND_RECOVERY_OBSERVER\",\"decision\":\"")
+    if allowed { print("ALLOW") } else { print("REFUSE") }
+    println("\",\"gpu_grant\":false,\"resume\":false,\"minimum_free_memory_mb\":32768,\"claim_ready\":false}")
+    if allowed { 0 } else { 1 }
+}
+
+FILE runtime/recovery-serialization-lock.json
+{
+  "schema": 1,
+  "action": "REBIND_RECOVERY_OBSERVER",
+  "old_freeze": "452289a8a9c201271f6631973c65cbc428cbe3a7f7228e2483e9768a875fb46b",
+  "new_freeze": "89104f530686cee8d9b13c4cbb9dd347279ca4daa54383ec8f9b9d2af34f98c9",
+  "engine_sha256": "4a42d75370d03ef7889f83ac7e51e18f360f71e29ad9b82cf12acc66d3abf493",
+  "sources": {
+    "recovery_serialize.py": "7e3249f5540370df339ede2ca1da5169a3149e2f32c88d3bf95663166e5cdbe3",
+    "recovery_migrate.sio": "ab344153988b49c0e2503f44ae3aed55d029b53f20e5cf43c6a0074558ce4f3a"
+  },
+  "source_authority_unchanged": true,
+  "minimum_free_memory_mb": 32768,
+  "scope": "Exact host fence serialization revision only; no arbiter policy, backend, barrier or memory-floor change"
+}
+
+FILE runtime/test_host_transition_lock.py
+#!/usr/bin/env python3
+"""Real process/lock tests using a temporary host root; never touches a GPU."""
+import os,subprocess,tempfile,time,sys
+from pathlib import Path
+def main():
+ source=Path(sys.argv[1]).read_text()
+ mocks=r'''
+grant_valid() { return 1; }
+device_barrier_attached() {
+  touch "$HOST_ROOT/ready"
+  while [[ ! -e "$HOST_ROOT/release" ]]; do sleep .02; done
+  return 0
+}
+enforce_fenced_compute_state() { printf 'mode=FENCED\n' > "$GRANT_FILE"; }
+legacy_gpu_inventory_exact() { return 0; }
+known_gpu_services_quiesced() { return 0; }
+managed_gpu_restarts_blocked() { return 0; }
+active_docker_gpu_claims_zero() { return 0; }
+gpu_consumer_set_exact() { return 0; }
+managed_gpu_cgroups_empty() { return 0; }
+live_memory_floor_met() { return 0; }
+protected_resources_unchanged() { return 0; }
+test_commit() { printf 'mode=SLURM\n' > "$GRANT_FILE"; touch "$HOST_ROOT/committed"; }
+test_hang() { sleep 60; }
+'''
+ with tempfile.TemporaryDirectory() as directory:
+  root=Path(directory)
+  script=root/"fence.sh"
+  script.write_text(source.replace('if [[ "${PIREUS_HOST_FENCE_LIBRARY_MODE:-0}" == 1 ]]; then',mocks+'\nif [[ "${PIREUS_HOST_FENCE_LIBRARY_MODE:-0}" == 1 ]]; then'))
+  env=os.environ.copy();env.update(NODE_NAME="spark-3c59",PIREUS_HOST_ROOT=str(root),PIREUS_HOST_FENCE_LIBRARY_MODE="1")
+  grant=root/"var/lib/pireus-spark-pair/host-grant";grant.parent.mkdir(parents=True)
+  def launch(command):
+   return subprocess.Popen(["bash","-c",'source "$1"; '+command,"test",str(script)],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+  def wait_file(path):
+   end=time.monotonic()+5
+   while not path.exists():
+    assert time.monotonic()<end,"fixture synchronization timeout"
+    time.sleep(.01)
+  for locked in (False,True):
+   for name in ("ready","release","committed"):
+    (root/name).unlink(missing_ok=True)
+   grant.write_text("mode=FENCED\n")
+   prefix="with_host_transition_lock " if locked else ""
+   watchdog=launch(prefix+"active_enforcement_cycle")
+   wait_file(root/"ready")
+   commit=launch(prefix+"test_commit")
+   if locked:
+    time.sleep(.2);assert not (root/"committed").exists(),"commit bypassed watchdog lock"
+   else:wait_file(root/"committed")
+   (root/"release").touch()
+   for proc in (watchdog,commit):
+    stdout,stderr=proc.communicate(timeout=8)
+    assert proc.returncode==0,(stdout,stderr)
+   assert grant.read_text()==("mode=SLURM\n" if locked else "mode=FENCED\n")
+  lock=grant.parent/"host-transition.lock"
+  # Contention has its own refusal code and must not execute the operation.
+  holder=subprocess.Popen(["flock",str(lock),"sleep","12"])
+  try:
+   time.sleep(.2);start=time.monotonic()
+   proc=launch("with_host_transition_lock test_commit");out,err=proc.communicate(timeout=13)
+   assert proc.returncode==75,(proc.returncode,out,err)
+   assert 9<=time.monotonic()-start<13
+  finally:
+   holder.wait(timeout=4)
+  # A wedged operation loses the entire process group within the bounded timeout.
+  start=time.monotonic()
+  proc=launch("with_host_transition_lock test_hang");out,err=proc.communicate(timeout=34)
+  assert proc.returncode==124,(proc.returncode,out,err)
+  assert 29<=time.monotonic()-start<34
+  proc=launch("with_host_transition_lock test_commit")
+  out,err=proc.communicate(timeout=5);assert proc.returncode==0,(out,err)
+ print("PIREUS_HOST_TRANSITION_LOCK_PASS old_interleaving_reproduced=1 serialized_commit_survives=1 contention_refused=1 hang_bounded=1 lock_reusable=1")
+if __name__=="__main__":main()
+
+
+FULL HOST SCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly NODE_NAME="${NODE_NAME:?NODE_NAME is required}"
+readonly MINIMUM_FREE_MEMORY_MB=32768
+readonly HOST_ROOT="${PIREUS_HOST_ROOT:-/host}"
+readonly HOST_FENCE_SOURCE="${BASH_SOURCE[0]}"
+readonly GRANT_FILE="$HOST_ROOT/var/lib/pireus-spark-pair/host-grant"
+readonly PREPARE_FILE="$HOST_ROOT/var/lib/pireus-spark-pair/host-prepare"
+readonly PROTECTED_BASELINE="$HOST_ROOT/var/lib/pireus-spark-pair/protected-baseline"
+readonly ACTIVATED_FILE="$HOST_ROOT/var/lib/pireus-spark-pair/activated"
+readonly BINDING_FILE="$HOST_ROOT/var/lib/pireus-spark-pair/watchdog-binding"
+readonly HEARTBEAT_FILE="$HOST_ROOT/var/lib/pireus-spark-pair/watchdog-heartbeat"
+readonly WATCHDOG_PATH="$HOST_ROOT/usr/local/lib/pireus/spark-pair-host-fence"
+readonly WATCHDOG_UNIT="$HOST_ROOT/etc/systemd/system/pireus-spark-host-fence.service"
+readonly WATCHDOG_BOOT_UNIT="$HOST_ROOT/etc/systemd/system/pireus-spark-host-fence-boot.service"
+readonly DEVICE_BARRIER_PATH="$HOST_ROOT/usr/local/lib/pireus/spark-pair-device-barrier"
+readonly DEVICE_BARRIER_SOURCE="$HOST_ROOT/usr/local/src/pireus-spark-device-barrier.cpp"
+readonly DEVICE_BARRIER_STATE="$HOST_ROOT/var/lib/pireus-spark-pair/device-barrier.state"
+readonly DEVICE_BARRIER_CGROUP=/sys/fs/cgroup
+readonly DEVICE_INVENTORY_NAMES=nvidia,drm,dma_heap,nvidia-uvm,nvidia-caps
+readonly DEVICE_BARRIER_NAMES=nvidia-uvm,nvidia-caps
+readonly K8S_GRANT_TTL_SECONDS=30
+readonly COMMIT_TRANSITION_SECONDS=30
+readonly HOST_COMMAND_TIMEOUT_SECONDS=3
+readonly SYSTEMD_WATCHDOG_SECONDS=60
+readonly WATCHDOG_FRESH_SECONDS=55
+readonly CRI_RUNTIME_ENDPOINT=unix:///var/run/containerd/containerd.sock
+
+# Cross-process serialization includes observations and every host grant mutation.
+# timeout bounds both lock wait and the child process group, leaving the systemd
+# watchdog able to re-fence after an interrupted commit rather than waiting forever.
+with_host_transition_lock() (
+  umask 077
+  mkdir -p "$HOST_ROOT/var/lib/pireus-spark-pair"
+  /usr/bin/timeout --kill-after=2s 30s /usr/bin/flock \
+    --exclusive --wait 10 --conflict-exit-code 75 \
+    "$HOST_ROOT/var/lib/pireus-spark-pair/host-transition.lock" \
+    /usr/bin/env PIREUS_HOST_FENCE_LIBRARY_MODE=1 /bin/bash -c \
+    'source "$1"; shift; "$@"' host-transition "$HOST_FENCE_SOURCE" "$@"
+)
+
+fence_and_status() {
+  fence_pair "$@"
+  status_once
+}
+
+emergency_fence_if_active() {
+  if [[ -r "$ACTIVATED_FILE" ]]; then fence_invalid_local; fi
+}
+
+host_ns() {
+  if [[ "$HOST_ROOT" == / ]]; then
+    /usr/bin/timeout --kill-after=2s "${HOST_COMMAND_TIMEOUT_SECONDS}s" "$@"
+  else
+    chroot "$HOST_ROOT" /usr/bin/timeout --kill-after=2s \
+      "${HOST_COMMAND_TIMEOUT_SECONDS}s" \
+      /usr/bin/nsenter -t 1 -m -u -i -n -p -- "$@"
+  fi
+}
+
+docker_host() {
+  if [[ "$HOST_ROOT" == / ]]; then
+    /usr/bin/docker "$@"
+  else
+    chroot "$HOST_ROOT" /usr/bin/docker "$@"
+  fi
+}
+
+user_systemctl() {
+  host_ns /usr/sbin/runuser -u demetrios -- /usr/bin/env \
+    XDG_RUNTIME_DIR=/run/user/1000 \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+    /usr/bin/systemctl --user "$@"
+}
+
+crictl_host() {
+  host_ns /usr/bin/crictl \
+    --runtime-endpoint "$CRI_RUNTIME_ENDPOINT" \
+    --image-endpoint "$CRI_RUNTIME_ENDPOINT" "$@"
+}
+
+device_barrier_host() {
+  host_ns /usr/local/lib/pireus/spark-pair-device-barrier "$@"
+}
+
+device_majors_for_names() {
+  local names="$1" name major result='' count=0
+  local -a matches majors
+  IFS=',' read -r -a matches <<<"$names"
+  for name in "${matches[@]}"; do
+    [[ "$name" =~ ^[a-z0-9_-]+$ ]] || return 1
+    mapfile -t majors < <(/usr/bin/awk -v wanted="$name" \
+      '$2 == wanted { print $1 }' "$HOST_ROOT/proc/devices")
+    [[ "${#majors[@]}" == 1 && "${majors[0]}" =~ ^[0-9]+$ ]] || return 1
+    major="${majors[0]}"
+    [[ ",$result," != *",$major,"* ]] || return 1
+    result="${result:+$result,}$major"
+    count=$((count + 1))
+  done
+  [[ "$count" == "${#matches[@]}" && -n "$result" ]] || return 1
+  printf '%s\n' "$result"
+}
+
+device_inventory_majors() {
+  device_majors_for_names "$DEVICE_INVENTORY_NAMES"
+}
+
+device_barrier_majors() {
+  device_majors_for_names "$DEVICE_BARRIER_NAMES"
+}
+
+device_barrier_attached() {
+  local majors
+  majors="$(device_barrier_majors)"
+  device_barrier_host status-attached "$DEVICE_BARRIER_CGROUP" \
+    "$majors" /var/lib/pireus-spark-pair/device-barrier.state \
+    >/dev/null
+}
+
+device_barrier_detached() {
+  local majors
+  majors="$(device_barrier_majors)"
+  device_barrier_host status-detached "$DEVICE_BARRIER_CGROUP" \
+    "$majors" /var/lib/pireus-spark-pair/device-barrier.state \
+    >/dev/null
+}
+
+device_barrier_attach() {
+  local inventory majors
+  inventory="$(device_inventory_majors)"
+  majors="$(device_barrier_majors)"
+  device_barrier_host verify-devices /dev "$inventory" >/dev/null
+  if device_barrier_attached; then return 0; fi
+  device_barrier_host attach "$DEVICE_BARRIER_CGROUP" \
+    "$majors" /var/lib/pireus-spark-pair/device-barrier.state \
+    >/dev/null
+  device_barrier_attached
+}
+
+device_barrier_detach() {
+  local inventory majors
+  inventory="$(device_inventory_majors)"
+  majors="$(device_barrier_majors)"
+  device_barrier_host verify-devices /dev "$inventory" >/dev/null
+  device_barrier_host detach "$DEVICE_BARRIER_CGROUP" \
+    "$majors" /var/lib/pireus-spark-pair/device-barrier.state \
+    >/dev/null
+  device_barrier_detached
+}
+
+device_barrier_relation_valid() {
+  local mode
+  mode="$(grant_field mode || true)"
+  case "$mode" in
+    FENCED) device_barrier_attached ;;
+    COMMITTING_SLURM|COMMITTING_K8S|SLURM|K8S|'') device_barrier_detached ;;
+    *) return 1 ;;
+  esac
+}
+
+docker_container_has_gpu_claim() {
+  local id="$1" requests devices env runtime privileged rules binds mounts
+  requests="$(docker_host inspect --format '{{json .HostConfig.DeviceRequests}}' "$id")" || return 2
+  devices="$(docker_host inspect --format '{{json .HostConfig.Devices}}' "$id")" || return 2
+  runtime="$(docker_host inspect --format '{{.HostConfig.Runtime}}' "$id")" || return 2
+  privileged="$(docker_host inspect --format '{{.HostConfig.Privileged}}' "$id")" || return 2
+  rules="$(docker_host inspect --format '{{json .HostConfig.DeviceCgroupRules}}' "$id")" || return 2
+  binds="$(docker_host inspect --format '{{json .HostConfig.Binds}}' "$id")" || return 2
+  mounts="$(docker_host inspect --format '{{json .Mounts}}' "$id")" || return 2
+  env="$(docker_host inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$id")" || return 2
+  [[ "$runtime" != nvidia && "$privileged" != true ]] || return 0
+  case "$requests" in ''|'null'|'[]') ;; *) return 0 ;; esac
+  case "$rules" in ''|'null'|'[]') ;; *) return 0 ;; esac
+  if grep -Eq '/dev/(nvidia|dri/|dma_heap/)' <<<"$devices$binds$mounts"; then return 0; fi
+  if grep -Eq '^(NVIDIA_VISIBLE_DEVICES|NVIDIA_DRIVER_CAPABILITIES|CUDA_VISIBLE_DEVICES)=' <<<"$env"; then return 0; fi
+  return 1
+}
+
+disable_known_gpu_services() {
+  case "$NODE_NAME" in
+    spark-3c59)
+      user_systemctl disable --now beagle-embed-gpu.service >/dev/null 2>&1 || true
+      ;;
+    spark-8e54)
+      host_ns /usr/bin/systemctl disable --now tei-shim.service >/dev/null 2>&1 || true
+      ;;
+    *)
+      printf 'host-fence: refusing unknown node %s\n' "$NODE_NAME" >&2
+      return 1
+      ;;
+  esac
+}
+
+stop_gpu_docker_containers() {
+  local id ids running claim_status
+  legacy_gpu_inventory_exact || return 1
+  ids="$(docker_host ps -aq)" || return 1
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    if docker_container_has_gpu_claim "$id"; then claim_status=0; else claim_status=$?; fi
+    [[ $claim_status -ne 2 ]] || return 1
+    [[ $claim_status -eq 0 ]] || continue
+    docker_host update --restart=no "$id" >/dev/null
+    running="$(docker_host inspect --format '{{.State.Running}}' "$id")"
+    if [[ "$running" == true ]]; then
+      docker_host stop -t 30 "$id" >/dev/null
+    elif [[ "$running" != false ]]; then
+      return 1
+    fi
+  done <<<"$ids"
+}
+
+gpu_docker_inventory() {
+  local id name ids claim_status
+  ids="$(docker_host ps -aq)" || return 1
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    if docker_container_has_gpu_claim "$id"; then claim_status=0; else claim_status=$?; fi
+    [[ $claim_status -ne 2 ]] || return 1
+    [[ $claim_status -eq 0 ]] || continue
+    name="$(docker_host inspect --format '{{.Name}}' "$id")"
+    printf '%s\n' "${name#/}"
+  done <<<"$ids"
+}
+
+legacy_gpu_inventory_exact() {
+  local inventory image image_id runtime devices requests env
+  inventory="$(gpu_docker_inventory | sort)"
+  case "$NODE_NAME" in
+    spark-3c59)
+      [[ "$inventory" == ollama ]] || return 1
+      image="$(docker_host inspect --format '{{.Config.Image}}' ollama)"
+      image_id="$(docker_host inspect --format '{{.Image}}' ollama)"
+      runtime="$(docker_host inspect --format '{{.HostConfig.Runtime}}' ollama)"
+      devices="$(docker_host inspect --format '{{json .HostConfig.Devices}}' ollama)"
+      requests="$(docker_host inspect --format '{{json .HostConfig.DeviceRequests}}' ollama)"
+      env="$(docker_host inspect --format '{{range .Config.Env}}{{println .}}{{end}}' ollama)"
+      [[ "$image" == ollama/ollama &&
+         "$image_id" == sha256:25432c76aa683c4daafc8eb078b50f836660e3f58ada9423251056d49f1e46ea &&
+         "$runtime" == runc ]] || return 1
+      host_ns /usr/bin/jq -e 'length == 0' <<<"$devices" >/dev/null || return 1
+      host_ns /usr/bin/jq -e '
+        length == 1 and
+        .[0].Driver == "" and
+        .[0].Count == -1 and
+        .[0].DeviceIDs == null and
+        .[0].Capabilities == [["gpu"]] and
+        .[0].Options == {}
+      ' <<<"$requests" >/dev/null || return 1
+      grep -Fxq 'NVIDIA_VISIBLE_DEVICES=all' <<<"$env" &&
+        grep -Fxq 'NVIDIA_DRIVER_CAPABILITIES=compute,utility' <<<"$env" &&
+        grep -Fxq 'OLLAMA_KEEP_ALIVE=-1' <<<"$env" &&
+        grep -Fxq 'OLLAMA_HOST=0.0.0.0:11434' <<<"$env"
+      ;;
+    spark-8e54) [[ -z "$inventory" ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+active_docker_gpu_claims_zero() {
+  local id ids claim_status
+  ids="$(docker_host ps -q)" || return 1
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    if docker_container_has_gpu_claim "$id"; then claim_status=0; else claim_status=$?; fi
+    [[ $claim_status -ne 2 ]] || return 1
+    [[ $claim_status -ne 0 ]] || return 1
+  done <<<"$ids"
+}
+
+managed_gpu_restarts_blocked() {
+  local id restart ids claim_status
+  ids="$(docker_host ps -aq)" || return 1
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    if docker_container_has_gpu_claim "$id"; then claim_status=0; else claim_status=$?; fi
+    [[ $claim_status -ne 2 ]] || return 1
+    [[ $claim_status -eq 0 ]] || continue
+    restart="$(docker_host inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$id")"
+    [[ -z "$restart" || "$restart" == no ]] || return 1
+  done <<<"$ids"
+  known_gpu_services_restart_blocked
+}
+
+service_quiescent() {
+  local scope="$1" unit="$2" active
+  if [[ "$scope" == user ]]; then
+    active="$(user_systemctl is-active "$unit" 2>/dev/null || true)"
+  else
+    active="$(host_ns /usr/bin/systemctl is-active "$unit" 2>/dev/null || true)"
+  fi
+  [[ "$active" == inactive || "$active" == failed ]]
+}
+
+service_restart_blocked() {
+  local scope="$1" unit="$2" enabled gate
+  if [[ "$scope" == user ]]; then
+    enabled="$(user_systemctl is-enabled "$unit" 2>/dev/null || true)"
+  else
+    enabled="$(host_ns /usr/bin/systemctl is-enabled "$unit" 2>/dev/null || true)"
+  fi
+  [[ "$enabled" == disabled || "$enabled" == masked ]] || return 1
+  case "$scope:$unit" in
+    user:beagle-embed-gpu.service)
+      gate="$HOST_ROOT/home/demetrios/.config/systemd/user/beagle-embed-gpu.service.d/90-pireus-fence.conf"
+      ;;
+    system:tei-shim.service)
+      gate="$HOST_ROOT/etc/systemd/system/tei-shim.service.d/90-pireus-fence.conf"
+      ;;
+    *) return 1 ;;
+  esac
+  [[ "$(cat "$gate" 2>/dev/null)" == $'[Unit]\nConditionPathExists=!/var/lib/pireus-spark-pair/activated' ]]
+}
+
+known_gpu_services_quiesced() {
+  case "$NODE_NAME" in
+    spark-3c59)
+      service_quiescent user beagle-embed-gpu.service
+      ;;
+    spark-8e54)
+      service_quiescent system tei-shim.service
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+known_gpu_services_restart_blocked() {
+  case "$NODE_NAME" in
+    spark-3c59) service_restart_blocked user beagle-embed-gpu.service ;;
+    spark-8e54) service_restart_blocked system tei-shim.service ;;
+    *) return 1 ;;
+  esac
+}
+
+pid_is_kubernetes_owned() {
+  local pid="$1"
+  grep -Eq '(^|/)(kubepods|kubepods\.slice)(/|$)' "$HOST_ROOT/proc/$pid/cgroup"
+}
+
+pid_pod_uid() {
+  local pid="$1" cgroup uid
+  cgroup="$(cat "$HOST_ROOT/proc/$pid/cgroup" 2>/dev/null)" || return 1
+  uid="$(sed -n 's#.*pod\([0-9a-f][0-9a-f_]*\)\.slice.*#\1#p' <<<"$cgroup" | head -n 1)"
+  [[ -n "$uid" ]] || return 1
+  printf '%s\n' "${uid//_/-}"
+}
+
+pid_is_admitted_gpu_consumer() {
+  local pid="$1" uid pods mode epoch
+  uid="$(pid_pod_uid "$pid")" || return 1
+  pods="$(crictl_host pods -o json 2>/dev/null)" || return 1
+  if host_ns /usr/bin/jq -e --arg uid "$uid" --arg node "$NODE_NAME" '
+    any(.items[];
+      .metadata.uid == $uid and
+      .metadata.namespace == "kube-system" and
+      (.metadata.name | startswith("nvidia-device-plugin-" + ($node | sub("^spark-"; "")) + "-")) and
+      .labels.name == ("nvidia-device-plugin-" + ($node | sub("^spark-"; ""))) and
+      .labels["io.kubernetes.pod.uid"] == .metadata.uid and
+      .state == "SANDBOX_READY")
+  ' <<<"$pods" >/dev/null; then
+    return 0
+  fi
+  grant_valid || return 1
+  mode="$(grant_field mode)"
+  epoch="$(grant_field epoch)"
+  case "$mode" in
+    SLURM)
+      host_ns /usr/bin/jq -e --arg uid "$uid" '
+        any(.items[];
+          .metadata.uid == $uid and
+          .metadata.namespace == "slurm-pilot" and
+          .labels["app.kubernetes.io/name"] == "slurmd" and
+          .labels["app.kubernetes.io/instance"] == "slurm-pilot-worker-spark")
+      ' <<<"$pods" >/dev/null
+      ;;
+    K8S)
+      host_ns /usr/bin/jq -e --arg uid "$uid" --arg epoch "$epoch" '
+        any(.items[];
+          .metadata.uid == $uid and
+          .metadata.namespace == "beagle" and
+          .labels["pireus.sounio.dev/spark-pair-epoch"] == $epoch and
+          (.labels["pireus.sounio.dev/spark-pair-reservation"] == "true" or
+           .labels["pireus.sounio.dev/spark-pair-workload"] == "true"))
+      ' <<<"$pods" >/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+pid_is_platform_gpu_fd_holder() {
+  local pid="$1" exe cgroup
+  exe="$(readlink "$HOST_ROOT/proc/$pid/exe" 2>/dev/null)" || return 1
+  cgroup="$(cat "$HOST_ROOT/proc/$pid/cgroup" 2>/dev/null)" || return 1
+  case "$exe" in
+    /usr/bin/nvidia-persistenced)
+      grep -Fq '/system.slice/nvidia-persistenced.service' <<<"$cgroup"
+      ;;
+    /usr/lib/xorg/Xorg|/usr/bin/gnome-shell|/usr/libexec/mutter-x11-frames)
+      grep -Eq '(^|/)user\.slice/user-126\.slice/session-[^/]+\.scope($|/)' <<<"$cgroup"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+external_compute_processes_absent() {
+  local pid pids
+  pids="$(host_ns /usr/bin/nvidia-smi \
+    --query-compute-apps=pid --format=csv,noheader,nounits)" || return 1
+  while IFS= read -r pid; do
+    pid="${pid//[[:space:]]/}"
+    [[ -n "$pid" ]] || continue
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    if ! pid_is_admitted_gpu_consumer "$pid"; then
+      [[ -d "$HOST_ROOT/proc/$pid" ]] || continue
+      return 1
+    fi
+  done <<<"$pids"
+}
+
+external_mps_processes_absent() {
+  local pid pids status
+  if pids="$(host_ns /usr/bin/pgrep -f '[n]vidia-cuda-mps' 2>/dev/null)"; then
+    status=0
+  else
+    status=$?
+  fi
+  [[ $status -eq 0 || $status -eq 1 ]] || return 1
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    if ! pid_is_admitted_gpu_consumer "$pid"; then
+      [[ -d "$HOST_ROOT/proc/$pid" ]] || continue
+      return 1
+    fi
+  done <<<"$pids"
+}
+
+gpu_device_fd_holder_pids() {
+  find "$HOST_ROOT"/proc/[0-9]*/fd -maxdepth 1 -type l \
+    \( -lname '/dev/nvidia*' -o -lname '/dev/dri/*' -o -lname '/dev/dma_heap/*' \) \
+    -printf '%h\n' 2>/dev/null | \
+    sed -n 's#.*/proc/\([0-9][0-9]*\)/fd#\1#p' | sort -un
+}
+
+external_gpu_fds_absent() {
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    if ! pid_is_admitted_gpu_consumer "$pid" &&
+        ! pid_is_platform_gpu_fd_holder "$pid"; then
+      [[ -d "$HOST_ROOT/proc/$pid" ]] || continue
+      return 1
+    fi
+  done < <(gpu_device_fd_holder_pids)
+}
+
+gpu_consumer_set_exact() {
+  if device_barrier_attached; then
+    external_mps_processes_absent && external_gpu_fds_absent
+  else
+    device_barrier_detached &&
+      external_compute_processes_absent &&
+      external_mps_processes_absent &&
+      external_gpu_fds_absent
+  fi
+}
+
+managed_pair_sandboxes() {
+  local pods
+  pods="$(crictl_host pods -o json 2>/dev/null)" || return 1
+  host_ns /usr/bin/jq -r '
+    def managed:
+      (.metadata.namespace == "slurm-pilot" and
+       (.metadata.name | startswith("slurm-pilot-worker-spark-"))) or
+      (.metadata.namespace == "beagle" and
+       ((.labels["pireus.sounio.dev/spark-pair-reservation"] == "true" and
+         (.metadata.name == "pireus-spark-reservation-3c59" or
+          .metadata.name == "pireus-spark-reservation-8e54")) or
+        (.labels["pireus.sounio.dev/spark-pair-workload"] == "true" and
+         (.metadata.name | startswith("pireus-")))));
+    [.items[] | select(managed)] as $managed |
+    if all($managed[];
+      (.metadata.uid | test("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
+      .labels["io.kubernetes.pod.uid"] == .metadata.uid and
+      (.state == "SANDBOX_READY" or .state == "SANDBOX_NOTREADY") and
+      ((.metadata.namespace == "slurm-pilot" and
+        .labels["app.kubernetes.io/name"] == "slurmd" and
+        .labels["app.kubernetes.io/instance"] == "slurm-pilot-worker-spark") or
+       .metadata.namespace == "beagle"))
+    then $managed[] | [.state, .metadata.uid] | @tsv
+    else error("managed sandbox identity or state is not canonical")
+    end
+  ' <<<"$pods"
+}
+
+managed_pair_cgroup_dirs() {
+  local state uid encoded sandboxes matches count
+  sandboxes="$(managed_pair_sandboxes)" || return 1
+  while IFS=$'\t' read -r state uid; do
+    [[ -n "$uid" ]] || continue
+    encoded="${uid//-/_}"
+    matches="$(find "$HOST_ROOT/sys/fs/cgroup" -type d \
+      -name "*pod${encoded}.slice" -print 2>/dev/null)" || return 1
+    count="$(awk 'NF { count++ } END { print count + 0 }' <<<"$matches")"
+    case "$state" in
+      SANDBOX_READY) [[ "$count" == 1 ]] || return 1 ;;
+      SANDBOX_NOTREADY) (( count <= 1 )) || return 1 ;;
+      *) return 1 ;;
+    esac
+    [[ "$count" == 0 ]] || printf '%s\n' "$matches"
+  done <<<"$sandboxes"
+}
+
+kill_managed_pair_cgroups() {
+  local group groups
+  groups="$(managed_pair_cgroup_dirs)" || return 1
+  while IFS= read -r group; do
+    [[ -d "$group" ]] || continue
+    [[ -w "$group/cgroup.kill" ]] || return 1
+    printf '1\n' > "$group/cgroup.kill" || return 1
+  done <<<"$groups"
+}
+
+managed_pair_cgroups_empty() {
+  local group procs groups
+  groups="$(managed_pair_cgroup_dirs)" || return 1
+  while IFS= read -r group; do
+    [[ -d "$group" ]] || continue
+    while IFS= read -r procs; do
+      [[ -z "$(tr -d '[:space:]' < "$procs")" ]] || return 1
+    done < <(find "$group" -type f -name cgroup.procs -print 2>/dev/null)
+  done <<<"$groups"
+}
+
+kill_kubernetes_compute_processes() {
+  # Only exact Pireus/Slurm workload cgroups are mutable. System namespaces,
+  # the device plugin, DNS and observability stay outside this kill set.
+  kill_managed_pair_cgroups
+  sleep 1
+  kill_managed_pair_cgroups
+}
+
+fenced_compute_set_empty() {
+  local pid
+  device_barrier_attached || return 1
+  active_docker_gpu_claims_zero || return 1
+  known_gpu_services_quiesced || return 1
+  managed_gpu_restarts_blocked || return 1
+  managed_pair_cgroups_empty || return 1
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    pid_is_admitted_gpu_consumer "$pid" ||
+      pid_is_platform_gpu_fd_holder "$pid" || return 1
+  done < <(gpu_device_fd_holder_pids)
+}
+
+enforce_fenced_compute_state() {
+  local failed=0
+  device_barrier_attach || failed=1
+  stop_gpu_docker_containers || failed=1
+  disable_known_gpu_services || failed=1
+  kill_kubernetes_compute_processes || failed=1
+  fenced_compute_set_empty || failed=1
+  [[ $failed -eq 0 ]]
+}
+
+monotonic_seconds() {
+  awk '{ print int($1) }' "$HOST_ROOT/proc/uptime"
+}
+
+grant_field() {
+  local key="$1"
+  sed -n "s/^${key}=//p" "$GRANT_FILE" 2>/dev/null
+}
+
+grant_valid() {
+  local mode boot deadline now source freeze epoch owner transaction lease_uid lease_rv decision_sha pair_digest
+  [[ -r "$GRANT_FILE" && -r "$BINDING_FILE" ]] || return 1
+  mode="$(grant_field mode)"
+  boot="$(grant_field boot_id)"
+  deadline="$(grant_field deadline_monotonic)"
+  source="$(grant_field source_sha256)"
+  freeze="$(grant_field freeze_sha256)"
+  epoch="$(grant_field epoch)"
+  owner="$(grant_field owner)"
+  transaction="$(grant_field transaction_id)"
+  lease_uid="$(grant_field lease_uid)"
+  lease_rv="$(grant_field lease_resource_version)"
+  decision_sha="$(grant_field decision_receipt_sha256)"
+  pair_digest="$(grant_field pair_digest)"
+  [[ "$boot" == "$(cat "$HOST_ROOT/proc/sys/kernel/random/boot_id")" ]] || return 1
+  [[ "$source" == "$(grant_field_from "$BINDING_FILE" source_sha256)" &&
+      "$freeze" == "$(grant_field_from "$BINDING_FILE" freeze_sha256)" ]] || return 1
+  [[ "$epoch" =~ ^[1-9][0-9]*$ && "$owner" =~ ^[A-Za-z0-9._:-]+$ ]] || return 1
+  commit_context_valid "$transaction" "$lease_uid" "$lease_rv" "$decision_sha" || return 1
+  [[ "$pair_digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  case "$mode" in
+    SLURM) [[ "$deadline" == 0 ]] ;;
+    K8S)
+      [[ "$deadline" =~ ^[0-9]+$ ]] || return 1
+      now="$(monotonic_seconds)"
+      (( now <= deadline ))
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+commit_context_valid() {
+  local transaction="$1" lease_uid="$2" lease_rv="$3" decision_sha="$4"
+  [[ "$transaction" =~ ^[0-9a-f]{64}$ &&
+      "$lease_uid" =~ ^[0-9a-f-]{36}$ &&
+      "$lease_rv" =~ ^[1-9][0-9]*$ &&
+      "$decision_sha" =~ ^[0-9a-f]{64}$ ]]
+}
+
+write_grant_record() {
+  local file="$1" mode="$2" epoch="$3" owner="$4" source="$5" freeze="$6"
+  local deadline="$7" transaction="$8" lease_uid="$9" lease_rv="${10}"
+  local decision_sha="${11}" pair_digest="${12}" boot tmp
+  boot="$(cat "$HOST_ROOT/proc/sys/kernel/random/boot_id")"
+  mkdir -p "$(dirname "$file")"
+  tmp="${file}.tmp.$$"
+  printf 'mode=%s\nepoch=%s\nowner=%s\nboot_id=%s\nsource_sha256=%s\nfreeze_sha256=%s\ndeadline_monotonic=%s\ntransaction_id=%s\nlease_uid=%s\nlease_resource_version=%s\ndecision_receipt_sha256=%s\npair_digest=%s\n' \
+    "$mode" "$epoch" "$owner" "$boot" "$source" "$freeze" "$deadline" \
+    "$transaction" "$lease_uid" "$lease_rv" "$decision_sha" "$pair_digest" > "$tmp"
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$file"
+}
+
+prepare_grant() {
+  local mode="$1" epoch="$2" owner="$3" source="$4" freeze="$5"
+  local transaction="$6" lease_uid="$7" lease_rv="$8" decision_sha="$9" receipt
+  [[ "$mode" == SLURM || "$mode" == K8S ]] || return 64
+  [[ "$epoch" =~ ^[1-9][0-9]*$ ]] || return 64
+  [[ "$owner" =~ ^[A-Za-z0-9._:-]+$ ]] || return 64
+  [[ "$source" =~ ^[0-9a-f]{64}$ && "$freeze" =~ ^[0-9a-f]{64}$ ]] || return 64
+  commit_context_valid "$transaction" "$lease_uid" "$lease_rv" "$decision_sha" || return 64
+  [[ "$source" == "$(grant_field_from "$BINDING_FILE" source_sha256)" &&
+      "$freeze" == "$(grant_field_from "$BINDING_FILE" freeze_sha256)" ]] || return 1
+  status_once
+  write_grant_record "$PREPARE_FILE" "PREPARED_$mode" "$epoch" "$owner" \
+    "$source" "$freeze" 0 "$transaction" "$lease_uid" "$lease_rv" \
+    "$decision_sha" none
+  receipt="$(sha256sum "$PREPARE_FILE" | cut -d ' ' -f 1)"
+  printf 'PIREUS_HOST_PREPARED node=%s mode=%s epoch=%s owner=%s transaction_id=%s lease_uid=%s lease_resource_version=%s decision_receipt_sha256=%s prepare_receipt_sha256=%s\n' \
+    "$NODE_NAME" "$mode" "$epoch" "$owner" "$transaction" "$lease_uid" \
+    "$lease_rv" "$decision_sha" "$receipt"
+}
+
+commit_grant() {
+  local mode="$1" epoch="$2" owner="$3" source="$4" freeze="$5"
+  local transaction="$6" lease_uid="$7" base_lease_rv="$8" decision_sha="$9"
+  local prepare0="${10}" prepare1="${11}" pair_digest="${12}" intent_lease_rv="${13}"
+  local deadline prepared_sha expected_pair expected_local_prepare
+  [[ "$mode" == SLURM || "$mode" == K8S ]] || return 64
+  [[ "$epoch" =~ ^[1-9][0-9]*$ ]] || return 64
+  [[ "$owner" =~ ^[A-Za-z0-9._:-]+$ ]] || return 64
+  [[ "$source" =~ ^[0-9a-f]{64}$ && "$freeze" =~ ^[0-9a-f]{64}$ ]] || return 64
+  commit_context_valid "$transaction" "$lease_uid" "$base_lease_rv" "$decision_sha" || return 64
+  [[ "$prepare0" =~ ^[0-9a-f]{64}$ && "$prepare1" =~ ^[0-9a-f]{64}$ &&
+      "$pair_digest" =~ ^[0-9a-f]{64}$ && "$intent_lease_rv" =~ ^[1-9][0-9]*$ ]] || return 64
+  [[ -r "$PREPARE_FILE" ]] || return 1
+  [[ "$(grant_field_from "$PREPARE_FILE" mode)" == "PREPARED_$mode" &&
+      "$(grant_field_from "$PREPARE_FILE" epoch)" == "$epoch" &&
+      "$(grant_field_from "$PREPARE_FILE" owner)" == "$owner" &&
+      "$(grant_field_from "$PREPARE_FILE" source_sha256)" == "$source" &&
+      "$(grant_field_from "$PREPARE_FILE" freeze_sha256)" == "$freeze" &&
+      "$(grant_field_from "$PREPARE_FILE" transaction_id)" == "$transaction" &&
+      "$(grant_field_from "$PREPARE_FILE" lease_uid)" == "$lease_uid" &&
+      "$(grant_field_from "$PREPARE_FILE" lease_resource_version)" == "$base_lease_rv" &&
+      "$(grant_field_from "$PREPARE_FILE" decision_receipt_sha256)" == "$decision_sha" ]] || return 1
+  prepared_sha="$(sha256sum "$PREPARE_FILE" | cut -d ' ' -f 1)"
+  [[ "$prepared_sha" =~ ^[0-9a-f]{64}$ ]] || return 1
+  case "$NODE_NAME" in
+    spark-3c59) expected_local_prepare="$prepare0" ;;
+    spark-8e54) expected_local_prepare="$prepare1" ;;
+    *) return 1 ;;
+  esac
+  [[ "$prepared_sha" == "$expected_local_prepare" ]] || return 1
+  expected_pair="$(printf 'transaction_id=%s\nlease_uid=%s\nbase_lease_resource_version=%s\nnode0_prepare=%s\nnode1_prepare=%s\n' \
+    "$transaction" "$lease_uid" "$base_lease_rv" "$prepare0" "$prepare1" | \
+    sha256sum | cut -d ' ' -f 1)"
+  [[ "$pair_digest" == "$expected_pair" ]] || return 1
+  status_once
+  deadline=0
+  if [[ "$mode" == K8S ]]; then
+    deadline=$(( $(monotonic_seconds) + K8S_GRANT_TTL_SECONDS ))
+  fi
+  write_grant_record "$GRANT_FILE" "COMMITTING_$mode" "$epoch" "$owner" "$source" \
+    "$freeze" "$(( $(monotonic_seconds) + COMMIT_TRANSITION_SECONDS ))" "$transaction" "$lease_uid" \
+    "$intent_lease_rv" "$decision_sha" "$pair_digest"
+  if ! device_barrier_detach; then
+    fence_invalid_local || true
+    return 1
+  fi
+  write_grant_record "$GRANT_FILE" "$mode" "$epoch" "$owner" "$source" \
+    "$freeze" "$deadline" "$transaction" "$lease_uid" "$intent_lease_rv" \
+    "$decision_sha" "$pair_digest"
+  rm -f "$PREPARE_FILE"
+  status_once
+}
+
+fence_pair() {
+  local epoch="${1:-}" owner="${2:-}" source="${3:-}" freeze="${4:-}"
+  local transaction="${5:-}" lease_uid="${6:-}" lease_rv="${7:-}" decision_sha="${8:-}"
+  [[ "$epoch" =~ ^[1-9][0-9]*$ ]] || return 64
+  [[ "$owner" =~ ^[A-Za-z0-9._:-]+$ ]] || return 64
+  [[ "$source" =~ ^[0-9a-f]{64}$ && "$freeze" =~ ^[0-9a-f]{64}$ ]] || return 64
+  commit_context_valid "$transaction" "$lease_uid" "$lease_rv" "$decision_sha" || return 64
+  [[ "$source" == "$(grant_field_from "$BINDING_FILE" source_sha256)" &&
+      "$freeze" == "$(grant_field_from "$BINDING_FILE" freeze_sha256)" ]] || return 1
+  device_barrier_attach
+  mkdir -p "$(dirname "$GRANT_FILE")"
+  printf 'activated_boot=%s\n' "$(cat "$HOST_ROOT/proc/sys/kernel/random/boot_id")" > "$ACTIVATED_FILE"
+  chmod 0600 "$ACTIVATED_FILE"
+  rm -f "$PREPARE_FILE"
+  write_grant_record "$GRANT_FILE" FENCED "$epoch" "$owner" "$source" \
+    "$freeze" 0 "$transaction" "$lease_uid" "$lease_rv" "$decision_sha" none
+  enforce_fenced_compute_state
+}
+
+invalidate_grant_record() {
+  local epoch owner source freeze transaction lease_uid lease_rv decision_sha
+  device_barrier_attach
+  source="$(grant_field_from "$BINDING_FILE" source_sha256)"
+  freeze="$(grant_field_from "$BINDING_FILE" freeze_sha256)"
+  [[ "$source" =~ ^[0-9a-f]{64}$ && "$freeze" =~ ^[0-9a-f]{64}$ ]] || return 1
+  epoch="$(grant_field epoch || true)"
+  owner="$(grant_field owner || true)"
+  transaction="$(grant_field transaction_id || true)"
+  lease_uid="$(grant_field lease_uid || true)"
+  lease_rv="$(grant_field lease_resource_version || true)"
+  decision_sha="$(grant_field decision_receipt_sha256 || true)"
+  [[ "$epoch" =~ ^[1-9][0-9]*$ ]] || epoch=0
+  [[ "$owner" =~ ^[A-Za-z0-9._:-]+$ ]] || owner=deadman
+  [[ "$transaction" =~ ^[0-9a-f]{64}$ ]] || transaction=0000000000000000000000000000000000000000000000000000000000000000
+  [[ "$lease_uid" =~ ^[0-9a-f-]{36}$ ]] || lease_uid=00000000-0000-0000-0000-000000000000
+  [[ "$lease_rv" =~ ^[1-9][0-9]*$ ]] || lease_rv=1
+  [[ "$decision_sha" =~ ^[0-9a-f]{64}$ ]] || decision_sha=0000000000000000000000000000000000000000000000000000000000000000
+  rm -f "$PREPARE_FILE"
+  write_grant_record "$GRANT_FILE" FENCED "$epoch" "$owner" "$source" \
+    "$freeze" 0 "$transaction" "$lease_uid" "$lease_rv" "$decision_sha" none
+}
+
+boot_fence() {
+  [[ -r "$ACTIVATED_FILE" ]] || return 0
+  device_barrier_attach
+  invalidate_grant_record
+}
+
+fence_invalid_local() {
+  invalidate_grant_record
+  enforce_fenced_compute_state
+}
+
+managed_gpu_cgroups_empty() {
+  local id pid group procs
+  legacy_gpu_inventory_exact && active_docker_gpu_claims_zero &&
+    known_gpu_services_quiesced || return 1
+  case "$NODE_NAME" in
+    spark-3c59)
+      id="$(docker_host inspect --format '{{.Id}}' ollama)" || return 1
+      pid="$(docker_host inspect --format '{{.State.Pid}}' ollama)" || return 1
+      [[ "$pid" == 0 ]] || return 1
+      group="$(user_systemctl show beagle-embed-gpu.service \
+        -p ControlGroup --value 2>/dev/null || true)"
+      ;;
+    spark-8e54)
+      group="$(host_ns /usr/bin/systemctl show tei-shim.service \
+        -p ControlGroup --value 2>/dev/null || true)"
+      ;;
+    *) return 1 ;;
+  esac
+  if [[ -n "$group" && -r "$HOST_ROOT/sys/fs/cgroup$group/cgroup.procs" ]]; then
+    procs="$(cat "$HOST_ROOT/sys/fs/cgroup$group/cgroup.procs")"
+    [[ -z "${procs//[[:space:]]/}" ]] || return 1
+  fi
+  if [[ "$NODE_NAME" == spark-3c59 ]]; then
+    [[ ! -e "$HOST_ROOT/sys/fs/cgroup/system.slice/docker-$id.scope" ]] || {
+      procs="$(cat "$HOST_ROOT/sys/fs/cgroup/system.slice/docker-$id.scope/cgroup.procs")"
+      [[ -z "${procs//[[:space:]]/}" ]]
+    }
+  fi
+}
+
+live_memory_floor_met() {
+  local available_kb
+  available_kb="$(awk '$1 == "MemAvailable:" { print $2 }' "$HOST_ROOT/proc/meminfo")"
+  [[ "$available_kb" =~ ^[0-9]+$ ]] &&
+    (( available_kb / 1024 >= MINIMUM_FREE_MEMORY_MB ))
+}
+
+protected_snapshot() {
+  local unit active pid fragment expected_fragment facts
+  printf 'boot_id=%s\n' "$(cat "$HOST_ROOT/proc/sys/kernel/random/boot_id")"
+  for unit in docker.service containerd.service kubelet.service vxlan-cluster.service; do
+    facts="$(host_ns /usr/bin/systemctl show "$unit" --no-pager \
+      -p ActiveState -p MainPID -p ActiveEnterTimestampMonotonic \
+      -p InvocationID -p NRestarts -p FragmentPath -p ControlGroup)" || return 1
+    active="$(sed -n 's/^ActiveState=//p' <<<"$facts")"
+    pid="$(sed -n 's/^MainPID=//p' <<<"$facts")"
+    fragment="$(sed -n 's/^FragmentPath=//p' <<<"$facts")"
+    [[ "$active" == active ]] || return 1
+    case "$unit" in
+      docker.service|containerd.service|kubelet.service)
+        [[ "$pid" =~ ^[1-9][0-9]*$ ]]
+        expected_fragment="/usr/lib/systemd/system/$unit"
+        ;;
+      vxlan-cluster.service)
+        [[ "$pid" == 0 || "$pid" =~ ^[1-9][0-9]*$ ]]
+        expected_fragment=/etc/systemd/system/vxlan-cluster.service
+        ;;
+    esac
+    [[ "$fragment" == "$expected_fragment" ]] || return 1
+    printf '%s\n' "$facts"
+  done
+  case "$NODE_NAME" in
+    spark-3c59)
+      host_ns /usr/bin/stat -c 'postgres_data=%d:%i' \
+        /home/demetrios/beagle-memory-pg-pdb/data
+      ;;
+    spark-8e54)
+      host_ns /usr/bin/stat -c 'sounio_ckpt=%d:%i' /opt/sounio-ckpt
+      host_ns /usr/bin/stat -c 'sounio_py=%d:%i' /opt/sounio-py
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+capture_protected_baseline() {
+  local snapshot tmp
+  snapshot="$(protected_snapshot)" || return 1
+  mkdir -p "$(dirname "$PROTECTED_BASELINE")"
+  if [[ -r "$PROTECTED_BASELINE" ]] &&
+     [[ "$(grant_field_from "$PROTECTED_BASELINE" boot_id)" == \
+        "$(cat "$HOST_ROOT/proc/sys/kernel/random/boot_id")" ]]; then
+    [[ "$(cat "$PROTECTED_BASELINE")" == "$snapshot" ]]
+    return
+  fi
+  tmp="${PROTECTED_BASELINE}.tmp.$$"
+  printf '%s\n' "$snapshot" > "$tmp"
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$PROTECTED_BASELINE"
+}
+
+grant_field_from() {
+  local file="$1" key="$2"
+  sed -n "s/^${key}=//p" "$file" 2>/dev/null
+}
+
+watchdog_unit_text() {
+  cat <<EOF
+[Unit]
+Description=Pireus Spark GPU fail-closed watchdog
+Wants=pireus-spark-host-fence-boot.service docker.service containerd.service kubelet.service
+After=local-fs.target pireus-spark-host-fence-boot.service docker.service containerd.service kubelet.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=all
+Environment=NODE_NAME=$NODE_NAME
+Environment=PIREUS_HOST_ROOT=/
+ExecStart=/usr/local/lib/pireus/spark-pair-host-fence enforce-notify
+ExecStopPost=/usr/local/lib/pireus/spark-pair-host-fence emergency-fence
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=60
+TimeoutStopSec=8
+WatchdogSec=${SYSTEMD_WATCHDOG_SECONDS}s
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+watchdog_boot_unit_text() {
+  cat <<EOF
+[Unit]
+Description=Pireus Spark early boot GPU barrier
+DefaultDependencies=no
+After=local-fs.target
+Before=basic.target docker.service containerd.service kubelet.service pireus-spark-host-fence.service
+
+[Service]
+Type=oneshot
+Environment=NODE_NAME=$NODE_NAME
+Environment=PIREUS_HOST_ROOT=/
+ExecStart=/usr/local/lib/pireus/spark-pair-host-fence boot-fence
+TimeoutStartSec=5
+RemainAfterExit=yes
+
+[Install]
+RequiredBy=basic.target
+EOF
+}
+
+runtime_boot_gate_text() {
+  local unit="$1"
+  case "$unit" in
+    docker.service)
+      cat <<EOF
+[Unit]
+Requires=pireus-spark-host-fence-boot.service
+After=pireus-spark-host-fence-boot.service
+EOF
+      ;;
+    containerd.service|kubelet.service)
+      cat <<EOF
+[Unit]
+Wants=pireus-spark-host-fence-boot.service
+After=pireus-spark-host-fence-boot.service
+EOF
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+runtime_boot_gates_exact() {
+  local unit gate
+  for unit in docker.service containerd.service kubelet.service; do
+    gate="$HOST_ROOT/etc/systemd/system/$unit.d/90-pireus-fence.conf"
+    [[ -r "$gate" ]] && cmp -s <(runtime_boot_gate_text "$unit") "$gate" || return 1
+  done
+}
+
+watchdog_ready() {
+  local source pid fragment watchdog_stamp service_type watchdog_usec heartbeat_boot heartbeat_tick now barrier_source_sha barrier_binary_sha
+  source="${PIREUS_HOST_FENCE_INSTALL_SOURCE:-$0}"
+  if [[ -z "${PIREUS_HOST_FENCE_INSTALL_SOURCE:-}" && -r /fence/host-fence.sh ]]; then
+    source=/fence/host-fence.sh
+  fi
+  [[ -x "$WATCHDOG_PATH" && -x "$DEVICE_BARRIER_PATH" &&
+      -r "$DEVICE_BARRIER_SOURCE" && -r "$WATCHDOG_UNIT" && -r "$WATCHDOG_BOOT_UNIT" &&
+      -r "$BINDING_FILE" && -r "$HEARTBEAT_FILE" ]] || return 1
+  cmp -s "$source" "$WATCHDOG_PATH" || return 1
+  cmp -s <(watchdog_unit_text) "$WATCHDOG_UNIT" || return 1
+  cmp -s <(watchdog_boot_unit_text) "$WATCHDOG_BOOT_UNIT" || return 1
+  runtime_boot_gates_exact || return 1
+  pid="$(host_ns /usr/bin/systemctl show pireus-spark-host-fence.service -p MainPID --value)" || return 1
+  fragment="$(host_ns /usr/bin/systemctl show pireus-spark-host-fence.service -p FragmentPath --value)" || return 1
+  watchdog_stamp="$(host_ns /usr/bin/systemctl show pireus-spark-host-fence.service -p WatchdogTimestampMonotonic --value)" || return 1
+  service_type="$(host_ns /usr/bin/systemctl show pireus-spark-host-fence.service -p Type --value)" || return 1
+  watchdog_usec="$(host_ns /usr/bin/systemctl show pireus-spark-host-fence.service -p WatchdogUSec --value)" || return 1
+  heartbeat_boot="$(grant_field_from "$HEARTBEAT_FILE" boot_id)"
+  heartbeat_tick="$(grant_field_from "$HEARTBEAT_FILE" monotonic_seconds)"
+  barrier_source_sha="$(sha256sum "$DEVICE_BARRIER_SOURCE" | cut -d ' ' -f 1)"
+  barrier_binary_sha="$(sha256sum "$DEVICE_BARRIER_PATH" | cut -d ' ' -f 1)"
+  now="$(monotonic_seconds)"
+  [[ "$pid" =~ ^[1-9][0-9]*$ &&
+      "$fragment" == /etc/systemd/system/pireus-spark-host-fence.service &&
+      -n "$watchdog_stamp" &&
+      "$service_type" == notify &&
+      ( "$watchdog_usec" == "${SYSTEMD_WATCHDOG_SECONDS}s" ||
+        "$watchdog_usec" == 1min ) &&
+      "$barrier_source_sha" == "$(grant_field_from "$BINDING_FILE" device_barrier_source_sha256)" &&
+      "$barrier_binary_sha" == "$(grant_field_from "$BINDING_FILE" device_barrier_binary_sha256)" &&
+      "$heartbeat_boot" == "$(cat "$HOST_ROOT/proc/sys/kernel/random/boot_id")" &&
+      "$heartbeat_tick" =~ ^[0-9]+$ &&
+      "$now" =~ ^[0-9]+$ &&
+      $((now - heartbeat_tick)) -ge 0 &&
+      $((now - heartbeat_tick)) -le $WATCHDOG_FRESH_SECONDS ]] || return 1
+  host_ns /usr/bin/systemctl is-active --quiet pireus-spark-host-fence.service &&
+    host_ns /usr/bin/systemctl is-enabled --quiet pireus-spark-host-fence.service &&
+    host_ns /usr/bin/systemctl is-active --quiet pireus-spark-host-fence-boot.service &&
+    host_ns /usr/bin/systemctl is-enabled --quiet pireus-spark-host-fence-boot.service
+}
+
+install_watchdog() {
+  local source_sha="$1" freeze_sha="$2" barrier_source_sha="$3" source tmp unit_tmp boot_unit_tmp barrier_tmp barrier_binary_sha attempt
+  [[ "$source_sha" =~ ^[0-9a-f]{64}$ && "$freeze_sha" =~ ^[0-9a-f]{64}$ &&
+      "$barrier_source_sha" =~ ^[0-9a-f]{64}$ ]] || return 64
+  source="${PIREUS_HOST_FENCE_INSTALL_SOURCE:-$0}"
+  if [[ -z "${PIREUS_HOST_FENCE_INSTALL_SOURCE:-}" && -r /fence/host-fence.sh ]]; then
+    source=/fence/host-fence.sh
+  fi
+  [[ -r "$source" ]] || return 1
+  [[ -r /barrier/device-barrier.cpp &&
+      "$(sha256sum /barrier/device-barrier.cpp | cut -d ' ' -f 1)" == "$barrier_source_sha" ]] || return 1
+  if watchdog_ready &&
+     [[ "$(grant_field_from "$BINDING_FILE" source_sha256)" == "$source_sha" &&
+        "$(grant_field_from "$BINDING_FILE" freeze_sha256)" == "$freeze_sha" &&
+        "$(grant_field_from "$BINDING_FILE" device_barrier_source_sha256)" == "$barrier_source_sha" ]]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$WATCHDOG_PATH")" "$(dirname "$WATCHDOG_UNIT")" \
+    "$(dirname "$BINDING_FILE")" "$(dirname "$DEVICE_BARRIER_SOURCE")"
+  tmp="${WATCHDOG_PATH}.tmp.$$"
+  cp "$source" "$tmp"
+  chmod 0755 "$tmp"
+  mv -f "$tmp" "$WATCHDOG_PATH"
+  barrier_tmp="${DEVICE_BARRIER_SOURCE}.tmp.$$"
+  cp /barrier/device-barrier.cpp "$barrier_tmp"
+  chmod 0644 "$barrier_tmp"
+  mv -f "$barrier_tmp" "$DEVICE_BARRIER_SOURCE"
+  host_ns /usr/bin/c++ -std=c++20 -O2 -Wall -Wextra -Werror \
+    /usr/local/src/pireus-spark-device-barrier.cpp \
+    -o "/usr/local/lib/pireus/spark-pair-device-barrier.tmp.$$"
+  host_ns /bin/chmod 0755 "/usr/local/lib/pireus/spark-pair-device-barrier.tmp.$$"
+  host_ns /bin/mv -f "/usr/local/lib/pireus/spark-pair-device-barrier.tmp.$$" \
+    /usr/local/lib/pireus/spark-pair-device-barrier
+  device_barrier_host selftest >/dev/null
+  barrier_binary_sha="$(sha256sum "$DEVICE_BARRIER_PATH" | cut -d ' ' -f 1)"
+  tmp="${BINDING_FILE}.tmp.$$"
+  printf 'source_sha256=%s\nfreeze_sha256=%s\ndevice_barrier_source_sha256=%s\ndevice_barrier_binary_sha256=%s\n' \
+    "$source_sha" "$freeze_sha" "$barrier_source_sha" "$barrier_binary_sha" > "$tmp"
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$BINDING_FILE"
+  unit_tmp="${WATCHDOG_UNIT}.tmp.$$"
+  watchdog_unit_text > "$unit_tmp"
+  chmod 0644 "$unit_tmp"
+  mv -f "$unit_tmp" "$WATCHDOG_UNIT"
+  boot_unit_tmp="${WATCHDOG_BOOT_UNIT}.tmp.$$"
+  watchdog_boot_unit_text > "$boot_unit_tmp"
+  chmod 0644 "$boot_unit_tmp"
+  mv -f "$boot_unit_tmp" "$WATCHDOG_BOOT_UNIT"
+  install_service_start_gates
+  host_ns /usr/bin/systemd-analyze verify \
+    /etc/systemd/system/pireus-spark-host-fence-boot.service \
+    /etc/systemd/system/pireus-spark-host-fence.service
+  host_ns /usr/bin/systemctl daemon-reload
+  host_ns /usr/bin/systemctl enable pireus-spark-host-fence-boot.service \
+    pireus-spark-host-fence.service
+  host_ns /usr/bin/systemctl start pireus-spark-host-fence-boot.service
+  if host_ns /usr/bin/systemctl is-active --quiet pireus-spark-host-fence.service; then
+    host_ns /usr/bin/systemctl restart --no-block pireus-spark-host-fence.service
+  else
+    host_ns /usr/bin/systemctl start --no-block pireus-spark-host-fence.service
+  fi
+  for ((attempt = 0; attempt < 75; attempt++)); do
+    if watchdog_ready; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
+install_service_start_gates() {
+  local user_gate system_gate runtime_gate unit
+  user_gate="$HOST_ROOT/home/demetrios/.config/systemd/user/beagle-embed-gpu.service.d/90-pireus-fence.conf"
+  system_gate="$HOST_ROOT/etc/systemd/system/tei-shim.service.d/90-pireus-fence.conf"
+  case "$NODE_NAME" in
+    spark-3c59)
+      mkdir -p "$(dirname "$user_gate")"
+      printf '[Unit]\nConditionPathExists=!/var/lib/pireus-spark-pair/activated\n' > "$user_gate"
+      chown 1000:1000 "$user_gate"
+      chmod 0644 "$user_gate"
+      user_systemctl daemon-reload
+      ;;
+    spark-8e54)
+      mkdir -p "$(dirname "$system_gate")"
+      printf '[Unit]\nConditionPathExists=!/var/lib/pireus-spark-pair/activated\n' > "$system_gate"
+      chmod 0644 "$system_gate"
+      host_ns /usr/bin/systemctl daemon-reload
+      ;;
+    *) return 1 ;;
+  esac
+  for unit in docker.service containerd.service kubelet.service; do
+    runtime_gate="$HOST_ROOT/etc/systemd/system/$unit.d/90-pireus-fence.conf"
+    mkdir -p "$(dirname "$runtime_gate")"
+    runtime_boot_gate_text "$unit" > "$runtime_gate"
+    chmod 0644 "$runtime_gate"
+  done
+  host_ns /usr/bin/systemctl daemon-reload
+}
+
+protected_resources_unchanged() {
+  local snapshot
+  [[ -r "$PROTECTED_BASELINE" ]] || return 1
+  snapshot="$(protected_snapshot)" || return 1
+  [[ "$(cat "$PROTECTED_BASELINE")" == "$snapshot" ]]
+}
+
+status_once() {
+  device_barrier_relation_valid &&
+    legacy_gpu_inventory_exact &&
+    known_gpu_services_quiesced &&
+    managed_gpu_restarts_blocked &&
+    active_docker_gpu_claims_zero &&
+    gpu_consumer_set_exact &&
+    managed_gpu_cgroups_empty &&
+    live_memory_floor_met &&
+    protected_resources_unchanged
+}
+
+watchdog_notify_ready() {
+  [[ "$HOST_ROOT" == / ]] || return 0
+  /usr/bin/systemd-notify --pid="$$" --ready \
+    --status="Pireus Spark host fence active on $NODE_NAME"
+}
+
+watchdog_ping() {
+  local tmp
+  [[ "$HOST_ROOT" == / && -n "${NOTIFY_SOCKET:-}" ]] || return 0
+  /usr/bin/systemd-notify --pid="$$" WATCHDOG=1 \
+    STATUS="Pireus Spark host fence heartbeat on $NODE_NAME"
+  tmp="${HEARTBEAT_FILE}.tmp.$$"
+  printf 'boot_id=%s\nmonotonic_seconds=%s\n' \
+    "$(cat /proc/sys/kernel/random/boot_id)" "$(monotonic_seconds)" > "$tmp"
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$HEARTBEAT_FILE"
+}
+
+passive_armed_cycle() {
+  legacy_gpu_inventory_exact
+  protected_resources_unchanged
+}
+
+active_enforcement_cycle() {
+  local mode deadline now failed=0
+  mode="$(grant_field mode || true)"
+  case "$mode" in
+    COMMITTING_SLURM|COMMITTING_K8S)
+      deadline="$(grant_field deadline_monotonic || true)"
+      now="$(monotonic_seconds)"
+      if [[ -r "$PREPARE_FILE" && "$deadline" =~ ^[0-9]+$ &&
+            "$now" =~ ^[0-9]+$ && $now -le $deadline ]]; then
+        return 0
+      fi
+      fence_invalid_local || true
+      return 1
+      ;;
+  esac
+  if grant_valid && device_barrier_relation_valid; then
+    stop_gpu_docker_containers || failed=1
+    disable_known_gpu_services || failed=1
+  elif [[ "$mode" == FENCED ]] && device_barrier_attached; then
+    enforce_fenced_compute_state || failed=1
+  else
+    fence_invalid_local || failed=1
+  fi
+  legacy_gpu_inventory_exact || failed=1
+  known_gpu_services_quiesced || failed=1
+  managed_gpu_restarts_blocked || failed=1
+  active_docker_gpu_claims_zero || failed=1
+  gpu_consumer_set_exact || failed=1
+  managed_gpu_cgroups_empty || failed=1
+  live_memory_floor_met || failed=1
+  protected_resources_unchanged || failed=1
+  if [[ $failed -ne 0 ]]; then
+    fence_invalid_local || true
+    return 1
+  fi
+}
+
+enforce_once() {
+  stop_gpu_docker_containers
+  disable_known_gpu_services
+  status_once
+}
+
+daemonset_agent() {
+  # Host mutation is owned by the installed systemd watchdog. This Pod is
+  # only the authenticated exec/readiness bridge used by the controller.
+  while true; do sleep 3600; done
+}
+
+bool() {
+  if "$@"; then printf '1'; else printf '0'; fi
+}
+
+report_once() {
+  local boot_id available_mb grant_mode grant_epoch grant_owner receipt_sha script_sha unit_sha source_sha freeze_sha
+  local grant_sha grant_deadline transaction lease_uid lease_rv decision_sha pair_digest watchdog_monotonic barrier_source_sha barrier_binary_sha
+  boot_id="$(cat "$HOST_ROOT/proc/sys/kernel/random/boot_id")"
+  available_mb="$(( $(awk '$1 == "MemAvailable:" { print $2 }' "$HOST_ROOT/proc/meminfo") / 1024 ))"
+  grant_mode="$(grant_field mode || true)"
+  grant_epoch="$(grant_field epoch || true)"
+  grant_owner="$(grant_field owner || true)"
+  if [[ ! -r "$ACTIVATED_FILE" && -z "$grant_mode" ]]; then
+    grant_mode=ARMED
+    grant_epoch=0
+    grant_owner=none
+  fi
+  grant_deadline="$(grant_field deadline_monotonic || true)"
+  transaction="$(grant_field transaction_id || true)"
+  lease_uid="$(grant_field lease_uid || true)"
+  lease_rv="$(grant_field lease_resource_version || true)"
+  decision_sha="$(grant_field decision_receipt_sha256 || true)"
+  pair_digest="$(grant_field pair_digest || true)"
+  grant_sha="$(sha256sum "$GRANT_FILE" 2>/dev/null | cut -d ' ' -f 1 || true)"
+  [[ "$grant_sha" =~ ^[0-9a-f]{64}$ ]] || grant_sha=none
+  [[ -n "$grant_deadline" ]] || grant_deadline=0
+  [[ -n "$transaction" ]] || transaction=none
+  [[ -n "$lease_uid" ]] || lease_uid=none
+  [[ -n "$lease_rv" ]] || lease_rv=0
+  [[ -n "$decision_sha" ]] || decision_sha=none
+  [[ -n "$pair_digest" ]] || pair_digest=none
+  script_sha="$(sha256sum "$WATCHDOG_PATH" 2>/dev/null | cut -d ' ' -f 1 || true)"
+  unit_sha="$(sha256sum "$WATCHDOG_UNIT" 2>/dev/null | cut -d ' ' -f 1 || true)"
+  source_sha="$(grant_field_from "$BINDING_FILE" source_sha256 || true)"
+  freeze_sha="$(grant_field_from "$BINDING_FILE" freeze_sha256 || true)"
+  barrier_source_sha="$(grant_field_from "$BINDING_FILE" device_barrier_source_sha256 || true)"
+  barrier_binary_sha="$(grant_field_from "$BINDING_FILE" device_barrier_binary_sha256 || true)"
+  watchdog_monotonic="$(grant_field_from "$HEARTBEAT_FILE" monotonic_seconds || true)"
+  [[ "$watchdog_monotonic" =~ ^[0-9]+$ ]] || watchdog_monotonic=0
+  receipt_sha="$(printf 'node=%s\nboot_id=%s\nsource_sha256=%s\nfreeze_sha256=%s\nscript_sha256=%s\nunit_sha256=%s\ngrant_file_sha256=%s\ndevice_barrier_source_sha256=%s\ndevice_barrier_binary_sha256=%s\n' \
+    "$NODE_NAME" "$boot_id" "$source_sha" "$freeze_sha" "$script_sha" "$unit_sha" "$grant_sha" "$barrier_source_sha" "$barrier_binary_sha" | sha256sum | cut -d ' ' -f 1)"
+  printf 'PIREUS_HOST_FACTS node=%s boot_id=%s grant_mode=%s grant_epoch=%s grant_owner=%s grant_valid=%s grant_deadline_monotonic=%s transaction_id=%s lease_uid=%s lease_resource_version=%s decision_receipt_sha256=%s pair_digest=%s grant_file_sha256=%s watchdog=%s watchdog_monotonic=%s source_sha256=%s freeze_sha256=%s device_barrier=%s device_barrier_source_sha256=%s device_barrier_binary_sha256=%s receipt_sha256=%s reported_monotonic=%s inventory=%s services=%s restarts=%s docker_claims=%s consumers=%s cgroups=%s memory=%s protected=%s mem_available_mb=%s\n' \
+    "$NODE_NAME" "$boot_id" \
+    "$grant_mode" "$grant_epoch" "$grant_owner" \
+    "$(bool grant_valid)" \
+    "$grant_deadline" "$transaction" "$lease_uid" "$lease_rv" "$decision_sha" \
+    "$pair_digest" "$grant_sha" "$(bool watchdog_ready)" "$watchdog_monotonic" \
+    "$source_sha" "$freeze_sha" "$(bool device_barrier_relation_valid)" \
+    "$barrier_source_sha" "$barrier_binary_sha" "$receipt_sha" \
+    "$(monotonic_seconds)" \
+    "$(bool legacy_gpu_inventory_exact)" \
+    "$(bool known_gpu_services_quiesced)" \
+    "$(bool managed_gpu_restarts_blocked)" \
+    "$(bool active_docker_gpu_claims_zero)" \
+    "$(bool gpu_consumer_set_exact)" \
+    "$(bool managed_gpu_cgroups_empty)" \
+    "$(bool live_memory_floor_met)" \
+    "$(bool protected_resources_unchanged)" \
+    "$available_mb"
+}
+
+if [[ "${PIREUS_HOST_FENCE_LIBRARY_MODE:-0}" == 1 ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
+case "${1:-}" in
+  status)
+    with_host_transition_lock status_once
+    ;;
+  report)
+    with_host_transition_lock report_once
+    ;;
+  fence)
+    with_host_transition_lock fence_and_status "${2:-}" "${3:-}" "${4:-}" "${5:-}" \
+      "${6:-}" "${7:-}" "${8:-}" "${9:-}"
+    ;;
+  prepare)
+    with_host_transition_lock prepare_grant "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" \
+      "${7:-}" "${8:-}" "${9:-}" "${10:-}"
+    ;;
+  commit)
+    with_host_transition_lock commit_grant "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" \
+      "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" \
+      "${13:-}" "${14:-}"
+    ;;
+  install-watchdog)
+    install_watchdog "${2:-}" "${3:-}" "${4:-}"
+    ;;
+  capture-baseline)
+    with_host_transition_lock capture_protected_baseline
+    ;;
+  probe)
+    case "${2:-}" in
+      inventory) legacy_gpu_inventory_exact ;;
+      services) known_gpu_services_quiesced ;;
+      restarts) managed_gpu_restarts_blocked ;;
+      docker-claims) active_docker_gpu_claims_zero ;;
+      consumers) gpu_consumer_set_exact ;;
+      fds) external_gpu_fds_absent ;;
+      cgroups) managed_gpu_cgroups_empty ;;
+      memory) live_memory_floor_met ;;
+      protected) protected_resources_unchanged ;;
+      *) exit 64 ;;
+    esac
+    ;;
+  boot-fence)
+    with_host_transition_lock boot_fence
+    ;;
+  emergency-fence)
+    with_host_transition_lock emergency_fence_if_active
+    ;;
+  enforce-notify)
+    capture_protected_baseline
+    ready=0
+    while true; do
+      cycle_rc=0
+      if [[ -r "$ACTIVATED_FILE" ]]; then
+        with_host_transition_lock active_enforcement_cycle || cycle_rc=$?
+      else
+        with_host_transition_lock passive_armed_cycle || cycle_rc=$?
+      fi
+      case "$cycle_rc" in
+        75|124|137)
+          # Contention/timeout is not a completed observation. Do not forge a
+          # fresh heartbeat; the next cycle or systemd watchdog handles recovery.
+          sleep 2
+          continue
+          ;;
+      esac
+      if [[ $ready -eq 0 ]]; then
+        watchdog_notify_ready
+        ready=1
+      fi
+      watchdog_ping
+      sleep 2
+    done
+    ;;
+  daemonset-agent)
+    daemonset_agent
+    ;;
+  *)
+    printf 'usage: %s status|report|install-watchdog SOURCE FREEZE DEVICE_BARRIER_SOURCE|capture-baseline|boot-fence|emergency-fence|fence EPOCH OWNER SOURCE FREEZE TXN LEASE_UID LEASE_RV DECISION_SHA|prepare MODE EPOCH OWNER SOURCE FREEZE TXN LEASE_UID BASE_LEASE_RV DECISION_SHA|commit MODE EPOCH OWNER SOURCE FREEZE TXN LEASE_UID BASE_LEASE_RV DECISION_SHA PREPARE0 PREPARE1 PAIR_DIGEST INTENT_LEASE_RV|probe FIELD|enforce-notify|daemonset-agent\n' "$0" >&2
+    exit 64
+    ;;
+esac

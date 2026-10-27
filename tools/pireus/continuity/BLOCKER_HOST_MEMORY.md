@@ -17,7 +17,7 @@ Evidence-Level: E4
 Evidence: validation/pireus-fence-recovery-3.log; validation/pireus-fence-recovery-4.log; validation/pireus-current-host-8.txt; validation/pireus-current-slurm-8.txt; validation/recovery-detach-live-1/
 Fallback-Path: none; no model replacement, threshold reduction or GPU grant bypass
 Legacy-Kept: yes
-LLM-Offload: logged:reviews/recovery-initial-* and reviews/recovery-followup-* (removed from the tree; the text is in git history)
+LLM-Offload: logged:reviews/recovery-initial-* and reviews/recovery-followup-*
 Next-Action: isolate the host watchdog/commit interleaving that may invalidate Slurm activation; preserve the reviewed observer revision, 32768 MiB floor and device barrier
 
 The initial cause of the host fence during Inkling weight loading remains an
