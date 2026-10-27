@@ -1,0 +1,552 @@
+// VCF 4.3 header context for declared INFO/FORMAT schemas and sample names.
+// The context owns only the header prefix. Original field tokens remain exact.
+// Status 0 OK,22 malformed,75 integer/range overflow,84 UTF-8,95 undeclared or
+// unsupported context,105 payload budget,12 allocation. This is not file-wide
+// sorting, ID/Parent/SV or reference-sequence validation.
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_status,byte_buffer_len,byte_buffer_reserve,byte_buffer_get,byte_buffer_push,byte_buffer_utf8_count,byte_buffer_close}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_len,integer_buffer_resize,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+use genomics::io::vcf::{VcfInteger,VcfRecordSummary,vcf_parse_position,vcf_record_summary_43,vcf_float_lexeme_43}
+pub linear struct VcfHeader {text:ByteBuffer,definitions:IntegerBuffer,status:i64,samples:i64,columns:i64,data_offset:i64}
+pub struct VcfSpan {pub start:i64,pub end:i64,pub status:i64}
+struct HeaderDefinition {kind:i64,id_start:i64,id_end:i64,number:i64,value_type:i64,description_start:i64,description_end:i64,length:i64,prefix_start:i64,prefix_end:i64,status:i64}
+struct HeaderAttribute {key_start:i64,key_end:i64,value_start:i64,value_end:i64,next:i64,quoted:bool,status:i64}
+fn vh_byte(b:&ByteBuffer,i:i64)->i64 {let r=byte_buffer_get(b,i);if r.status!=0 {return 0-1};r.value}
+fn vh_code(code:i64)->i64 {if code==2 {105} else if code==3 {12} else if code!=0 {22} else {0}}
+fn vh_equal(a:&ByteBuffer,start:i64,end:i64,text:string)->bool with Mut {
+ var i=start;var j:i64=0
+ while i<end {if vh_byte(a,i)!=str_char_at(text,j) {return false};i=i+1;j=j+1}
+ return str_char_at(text,j)==0
+}
+fn vh_same(a:&ByteBuffer,start:i64,end:i64,b:&ByteBuffer,other:i64,stop:i64)->bool with Mut {
+ if end-start!=stop-other {return false}
+ var i:i64=0
+ while i<end-start {if vh_byte(a,start+i)!=vh_byte(b,other+i) {return false};i=i+1}
+ return true
+}
+fn vh_range(b:&ByteBuffer,start:i64,end:i64,delimiter:i64,index:i64)->VcfSpan with Mut {
+ var field:i64=0;var first=start;var i=start
+ while i<=end {
+  if i==end || vh_byte(b,i)==delimiter {
+   if field==index {return VcfSpan {start:first,end:i,status:0}}
+   first=i+1;field=field+1
+  }
+  i=i+1
+ }
+ return VcfSpan {start:0,end:0,status:22}
+}
+fn vh_identifier_first(c:i64)->bool {c>=65 && c<=90 || c>=97 && c<=122 || c==95}
+fn vh_key(b:&ByteBuffer,start:i64,end:i64,info:bool)->bool with Mut {
+ if info && vh_equal(b,start,end,"1000G") {return true}
+ if start>=end || !vh_identifier_first(vh_byte(b,start)) {return false}
+ var i=start+1
+ while i<end {let c=vh_byte(b,i);if !vh_identifier_first(c) && !(c>=48 && c<=57) && c!=46 {return false};i=i+1}
+ return true
+}
+fn vh_plain_id(b:&ByteBuffer,start:i64,end:i64)->bool with Mut {
+ if start>=end {return false}
+ var i=start
+ while i<end {let c=vh_byte(b,i);if c<=32 || c==127 || c==34 || c==44 || c==59 || c==60 || c==61 || c==62 {return false};i=i+1}
+ return true
+}
+fn vh_attribute(b:&ByteBuffer,start:i64,end:i64)->HeaderAttribute with Mut {
+ var out=HeaderAttribute {key_start:start,key_end:start,value_start:start,value_end:start,next:end,quoted:false,status:22}
+ var i=start
+ while i<end && vh_byte(b,i)!=61 {
+  let c=vh_byte(b,i)
+  if c<=32 || c==44 || c==34 || c==60 || c==62 {return out}
+  i=i+1
+ }
+ if i==start || i>=end {return out}
+ out.key_end=i;i=i+1;out.value_start=i
+ if vh_byte(b,i)==34 {
+  out.quoted=true;i=i+1
+  var closed=false
+  while i<end {
+   let c=vh_byte(b,i)
+   if c==34 {i=i+1;closed=true;break}
+   if c==92 {
+    i=i+1
+    if i>=end || (vh_byte(b,i)!=34 && vh_byte(b,i)!=92) {return out}
+   }
+   i=i+1
+  }
+  if !closed {return out}
+ } else if vh_byte(b,i)==91 {
+  i=i+1
+  while i<end && vh_byte(b,i)!=93 {
+   let c=vh_byte(b,i)
+   if c<=32 || c==34 || c==60 || c==62 || c==92 || c==91 {return out}
+   i=i+1
+  }
+  if i>=end {return out}
+  i=i+1
+ } else {
+  while i<end && vh_byte(b,i)!=44 {
+   let c=vh_byte(b,i)
+   if c<=32 || c==34 || c==60 || c==62 || c==92 {return out}
+   i=i+1
+  }
+ }
+ out.value_end=i
+ if out.value_start==out.value_end {return out}
+ if i<end {
+  if vh_byte(b,i)!=44 || i+1>=end {return out}
+  out.next=i+1
+ }
+ out.status=0
+ return out
+}
+fn vh_definition(b:&ByteBuffer,start:i64,end:i64)->HeaderDefinition with Mut,Div,Panic {
+ var out=HeaderDefinition {kind:0,id_start:0,id_end:0,number:0-5,value_type:0,description_start:0,description_end:0,length:0,prefix_start:start+2,prefix_end:start+2,status:22}
+ var equal=start+2
+ while equal<end && vh_byte(b,equal)!=61 {equal=equal+1}
+ if equal==start+2 || equal+2>=end || vh_byte(b,equal+1)!=60 || vh_byte(b,end-1)!=62 {return out}
+ out.prefix_end=equal
+ if vh_equal(b,start+2,equal,"INFO") {out.kind=1}
+ else if vh_equal(b,start+2,equal,"FORMAT") {out.kind=2}
+ else if vh_equal(b,start+2,equal,"FILTER") {out.kind=3}
+ else if vh_equal(b,start+2,equal,"contig") {out.kind=4}
+ else if vh_equal(b,start+2,equal,"ALT") {out.kind=5}
+ let attributes=equal+2
+ var cursor=attributes
+ while cursor<end-1 {
+  let field=vh_attribute(b,cursor,end-1)
+  if field.status!=0 {return out}
+  var previous=attributes
+  while previous<cursor {
+   let earlier=vh_attribute(b,previous,end-1)
+   if earlier.status!=0 {return out}
+   if vh_same(b,field.key_start,field.key_end,b,earlier.key_start,earlier.key_end) {return out}
+   previous=earlier.next
+  }
+  if vh_equal(b,field.key_start,field.key_end,"ID") {
+   if field.quoted || !vh_plain_id(b,field.value_start,field.value_end) {return out}
+   out.id_start=field.value_start;out.id_end=field.value_end
+  } else if (out.kind==1 || out.kind==2) && vh_equal(b,field.key_start,field.key_end,"Number") {
+   if field.quoted {return out}
+   if vh_equal(b,field.value_start,field.value_end,"A") {out.number=0-1}
+   else if vh_equal(b,field.value_start,field.value_end,"R") {out.number=0-2}
+   else if vh_equal(b,field.value_start,field.value_end,"G") {out.number=0-3}
+   else if vh_equal(b,field.value_start,field.value_end,".") {out.number=0-4}
+   else {let n=vcf_parse_position(b,field.value_start,field.value_end);if n.status!=0 {out.status=n.status;return out};out.number=n.value}
+  } else if (out.kind==1 || out.kind==2) && vh_equal(b,field.key_start,field.key_end,"Type") {
+   if field.quoted {return out}
+   if vh_equal(b,field.value_start,field.value_end,"Integer") {out.value_type=1}
+   else if vh_equal(b,field.value_start,field.value_end,"Float") {out.value_type=2}
+   else if vh_equal(b,field.value_start,field.value_end,"Flag") {out.value_type=3}
+   else if vh_equal(b,field.value_start,field.value_end,"Character") {out.value_type=4}
+   else if vh_equal(b,field.value_start,field.value_end,"String") {out.value_type=5}
+   else {return out}
+  } else if vh_equal(b,field.key_start,field.key_end,"Description") {
+   if !field.quoted {return out}
+   out.description_start=field.value_start;out.description_end=field.value_end
+  } else if out.kind==4 && vh_equal(b,field.key_start,field.key_end,"length") {
+   let n=vcf_parse_position(b,field.value_start,field.value_end)
+   if field.quoted || n.status!=0 || n.value<1 {return out}
+   out.length=n.value
+  }
+  cursor=field.next
+ }
+ if out.kind!=0 && out.id_start==out.id_end {return out}
+ if out.kind==1 || out.kind==2 {
+  if !vh_key(b,out.id_start,out.id_end,out.kind==1) {return out}
+  if out.number<0-4 || out.value_type==0 || out.description_start==out.description_end {return out}
+  if out.value_type==3 {if out.kind!=1 || out.number!=0 {return out}}
+  else if out.number==0 {return out}
+  if out.kind==2 && vh_equal(b,out.id_start,out.id_end,"GT") {if out.number!=1 || out.value_type!=5 {return out}}
+ } else if out.kind==3 || out.kind==5 {
+  if out.description_start==out.description_end {return out}
+  if out.kind==3 && vh_equal(b,out.id_start,out.id_end,"0") {return out}
+ }
+ out.status=0
+ return out
+}
+fn vh_slot(h:&VcfHeader,id:i64,field:i64)->i64 with Panic {integer_buffer_at(&h.definitions,id*10+field)}
+fn vh_find(h:&VcfHeader,kind:i64,b:&ByteBuffer,start:i64,end:i64)->i64 with Mut,Div,Panic {
+ var id:i64=0
+ while id<integer_buffer_len(&h.definitions)/10 {
+  if vh_slot(h,id,0)==kind && vh_same(&h.text,vh_slot(h,id,1),vh_slot(h,id,2),b,start,end) {return id}
+  id=id+1
+ }
+ return 0-1
+}
+fn vh_append(h:&!VcfHeader,d:&HeaderDefinition)->i64 with Alloc,Mut,Div,Panic {
+ let words=integer_buffer_len(&h.definitions)
+ let code=integer_buffer_resize(&!h.definitions,words+10)
+ if code!=0 {return vh_code(code)}
+ assert(integer_buffer_set(&!h.definitions,words,d.kind)==0)
+ assert(integer_buffer_set(&!h.definitions,words+1,d.id_start)==0)
+ assert(integer_buffer_set(&!h.definitions,words+2,d.id_end)==0)
+ assert(integer_buffer_set(&!h.definitions,words+3,d.number)==0)
+ assert(integer_buffer_set(&!h.definitions,words+4,d.value_type)==0)
+ assert(integer_buffer_set(&!h.definitions,words+5,d.description_start)==0)
+ assert(integer_buffer_set(&!h.definitions,words+6,d.description_end)==0)
+ assert(integer_buffer_set(&!h.definitions,words+7,d.length)==0)
+ assert(integer_buffer_set(&!h.definitions,words+8,d.prefix_start)==0)
+ assert(integer_buffer_set(&!h.definitions,words+9,d.prefix_end)==0)
+ return 0
+}
+
+
+fn vh_prefix(input:&ByteBuffer)->VcfInteger with Mut {
+ if byte_buffer_status(input)!=0 {return VcfInteger {value:0,status:22}}
+ let n=byte_buffer_len(input)
+ var i:i64=0
+ while i<n {
+  let start=i
+  while i<n && vh_byte(input,i)!=10 {i=i+1}
+  var end=i
+  if end>start && vh_byte(input,end-1)==13 {end=end-1}
+  let next=if i<n {i+1} else {i}
+  if end-start>=7 && vh_equal(input,start,start+6,"#CHROM") && vh_byte(input,start+6)==9 {
+   if i==n {return VcfInteger {value:0,status:22}}
+   return VcfInteger {value:next,status:0}
+  }
+  if end-start<2 || vh_byte(input,start)!=35 || vh_byte(input,start+1)!=35 {return VcfInteger {value:0,status:22}}
+  i=next
+ }
+ return VcfInteger {value:0,status:22}
+}
+fn vh_fill(h:&!VcfHeader,input:&ByteBuffer)->i64 with Alloc,Mut,Div,Panic {
+ if h.status!=0 {return h.status}
+ let n=h.data_offset
+ let allocation=byte_buffer_reserve(&!h.text,n)
+ if allocation!=0 {return vh_code(allocation)}
+ var i:i64=0
+ while i<n {assert(byte_buffer_push(&!h.text,vh_byte(input,i))==0);i=i+1}
+ if byte_buffer_utf8_count(&h.text).status!=0 {return 84}
+ i=0
+ var first=true
+ while i<n {
+  let start=i
+  while i<n && vh_byte(&h.text,i)!=10 {i=i+1}
+  var end=i
+  if end>start && vh_byte(&h.text,end-1)==13 {end=end-1}
+  let next=if i<n {i+1} else {i}
+  if first {
+   if !vh_equal(&h.text,start,end,"##fileformat=VCFv4.3") {
+    if end-start>=13 && vh_equal(&h.text,start,start+13,"##fileformat=") {return 95}
+    return 22
+   }
+   first=false
+  } else if vh_byte(&h.text,start+1)==35 {
+   var cursor=start+2
+   while cursor<end {
+    let c=vh_byte(&h.text,cursor)
+    if c<32 || c==127 {return 22}
+    cursor=cursor+1
+   }
+   var equal=start+2
+   while equal<end && vh_byte(&h.text,equal)!=61 {equal=equal+1}
+   if equal==start+2 || equal+1>=end {return 22}
+   if vh_equal(&h.text,start+2,equal,"fileformat") {return 22}
+   if vh_byte(&h.text,equal+1)==60 {
+    let definition=vh_definition(&h.text,start,end)
+    if definition.status!=0 {return definition.status}
+    var id:i64=0
+    while id<integer_buffer_len(&h.definitions)/10 {
+     if definition.id_start!=definition.id_end && vh_same(&h.text,vh_slot(h,id,8),vh_slot(h,id,9),&h.text,definition.prefix_start,definition.prefix_end) {
+      if vh_same(&h.text,vh_slot(h,id,1),vh_slot(h,id,2),&h.text,definition.id_start,definition.id_end) {return 22}
+     }
+     id=id+1
+    }
+    let code=vh_append(h,&definition)
+    if code!=0 {return code}
+   }
+  } else {
+   var column:i64=0
+   var token=start
+   var cursor=start
+   while cursor<=end {
+    if cursor==end || vh_byte(&h.text,cursor)==9 {
+     if cursor==token {return 22}
+     var valid=true
+     if column==0 {valid=vh_equal(&h.text,token,cursor,"#CHROM")}
+     else if column==1 {valid=vh_equal(&h.text,token,cursor,"POS")}
+     else if column==2 {valid=vh_equal(&h.text,token,cursor,"ID")}
+     else if column==3 {valid=vh_equal(&h.text,token,cursor,"REF")}
+     else if column==4 {valid=vh_equal(&h.text,token,cursor,"ALT")}
+     else if column==5 {valid=vh_equal(&h.text,token,cursor,"QUAL")}
+     else if column==6 {valid=vh_equal(&h.text,token,cursor,"FILTER")}
+     else if column==7 {valid=vh_equal(&h.text,token,cursor,"INFO")}
+     else if column==8 {valid=vh_equal(&h.text,token,cursor,"FORMAT")}
+     else {
+      if vh_find(h,6,&h.text,token,cursor)>=0 {return 22}
+      var c=token
+      while c<cursor {if vh_byte(&h.text,c)<32 || vh_byte(&h.text,c)==127 {return 22};c=c+1}
+      let definition=HeaderDefinition {kind:6,id_start:token,id_end:cursor,number:0,value_type:0,description_start:0,description_end:0,length:0,prefix_start:0,prefix_end:0,status:0}
+      let code=vh_append(h,&definition)
+      if code!=0 {return code}
+      h.samples=h.samples+1
+     }
+     if !valid {return 22}
+     column=column+1;token=cursor+1
+    }
+    cursor=cursor+1
+   }
+   if column<8 || column==9 {return 22}
+   h.columns=column
+   return 0
+  }
+  i=next
+ }
+ return 22
+}
+fn vh_status_set(h:&!VcfHeader,status:i64) with Mut {h.status=status}
+pub fn vcf_header_parse(input:&ByteBuffer,max_bytes:i64)->VcfHeader with Alloc,Mut,Div,Panic {
+ let prefix=vh_prefix(input)
+ var status=prefix.status
+ var remaining:i64=0
+ if max_bytes<0 || max_bytes>9223372036854771704 {status=22}
+ else if prefix.value>max_bytes {status=105}
+ else {remaining=max_bytes-prefix.value}
+ var h=VcfHeader {text:byte_buffer_new(prefix.value),definitions:integer_buffer_new(0,remaining),status:status,samples:0,columns:0,data_offset:prefix.value}
+ let code=vh_fill(&!h,input)
+ vh_status_set(&!h,code)
+ return h
+}
+pub fn vcf_header_status(h:&VcfHeader)->i64 {h.status}
+pub fn vcf_header_samples(h:&VcfHeader)->i64 {h.samples}
+pub fn vcf_header_columns(h:&VcfHeader)->i64 {h.columns}
+pub fn vcf_header_data_offset(h:&VcfHeader)->i64 {h.data_offset}
+pub struct VcfSchema {pub status:i64,pub number:i64,pub value_type:i64}
+pub fn vcf_header_schema(h:&VcfHeader,kind:i64,name:string)->VcfSchema with Mut,Div,Panic {
+ if h.status!=0 {return VcfSchema {status:h.status,number:0,value_type:0}}
+ var id:i64=0
+ while id<integer_buffer_len(&h.definitions)/10 {
+  if vh_slot(h,id,0)==kind && vh_equal(&h.text,vh_slot(h,id,1),vh_slot(h,id,2),name) {return VcfSchema {status:0,number:vh_slot(h,id,3),value_type:vh_slot(h,id,4)}}
+  id=id+1
+ }
+ return VcfSchema {status:95,number:0,value_type:0}
+}
+pub fn vcf_header_sample(h:&VcfHeader,index:i64,out:&!ByteBuffer)->i64 with Alloc,Mut,Div,Panic {
+ if h.status!=0 {return h.status}
+ if index<0 || index>=h.samples {return 22}
+ var sample:i64=0;var id:i64=0
+ while id<integer_buffer_len(&h.definitions)/10 {
+  if vh_slot(h,id,0)==6 {
+   if sample==index {
+    var i=vh_slot(h,id,1)
+    let end=vh_slot(h,id,2)
+    while i<end {let code=byte_buffer_push(out,vh_byte(&h.text,i));if code!=0 {return vh_code(code)};i=i+1}
+    return 0
+   }
+   sample=sample+1
+  }
+  id=id+1
+ }
+ return 22
+}
+pub fn vcf_header_close(h:VcfHeader) with Alloc {let VcfHeader {text,definitions,status,samples,columns,data_offset}=h;byte_buffer_close(text);integer_buffer_close(definitions)}
+
+
+fn vh_integer(b:&ByteBuffer,start:i64,end:i64)->i64 with Mut,Div,Panic {
+ var i=start;var negative=false
+ if i<end && (vh_byte(b,i)==43 || vh_byte(b,i)==45) {negative=vh_byte(b,i)==45;i=i+1}
+ if i==end {return 22}
+ var value:i64=0
+ let limit=if negative {2147483640} else {2147483647}
+ while i<end {
+  let d=vh_byte(b,i)-48
+  if d<0 || d>9 {return 22}
+  if value>(limit-d)/10 {return 75}
+  value=value*10+d;i=i+1
+ }
+ return 0
+}
+fn vh_string(b:&ByteBuffer,start:i64,end:i64,character:bool)->i64 with Mut {
+ if start==end {return 22}
+ var count:i64=0;var i=start
+ while i<end {
+  let c=vh_byte(b,i)
+  if c==37 {
+   if i+2>=end {return 22}
+   let a=vh_byte(b,i+1);let z=vh_byte(b,i+2)
+   let allowed=a==51 && (z==65 || z==66 || z==68) || a==50 && (z==53 || z==67) || a==48 && (z==68 || z==65 || z==57)
+   if !allowed {return 22}
+   i=i+3;count=count+1
+  } else {
+   if c<32 || c==127 || c==59 || c==61 {return 22}
+   if c<128 || c>=192 {count=count+1}
+   i=i+1
+  }
+ }
+ if character && count!=1 {return 22}
+ return 0
+}
+fn vh_gcd(a:i64,b:i64)->i64 with Div {
+ var x=a;var y=b
+ while y!=0 {let r=x%y;x=y;y=r}
+ return x
+}
+fn vh_expected(number:i64,alternate:i64,ploidy:i64,observed:i64)->VcfInteger with Div {
+ if number>=0 {return VcfInteger {value:number,status:0}}
+ if number==0-1 {return VcfInteger {value:alternate,status:0}}
+ if number==0-2 {return VcfInteger {value:alternate+1,status:0}}
+ if number==0-4 {return VcfInteger {value:observed,status:0}}
+ if ploidy<=0 {return VcfInteger {value:0,status:95}}
+ if ploidy>9223372036854775807-alternate {return VcfInteger {value:0,status:75}}
+ // C(alternate+ploidy,ploidy), reduced at every multiplication.
+ var k=ploidy;if alternate<k {k=alternate}
+ var result:i64=1;var i:i64=1
+ while i<=k {
+  var numerator=alternate+ploidy-k+i;var denominator=i
+  let a=vh_gcd(numerator,denominator);numerator=numerator/a;denominator=denominator/a
+  let b=vh_gcd(result,denominator);result=result/b;denominator=denominator/b
+  if denominator!=1 {return VcfInteger {value:0,status:75}}
+  if numerator>0 && result>observed/numerator {return VcfInteger {value:observed+1,status:0}}
+  result=result*numerator;i=i+1
+ }
+ return VcfInteger {value:result,status:0}
+}
+fn vh_values(h:&VcfHeader,id:i64,b:&ByteBuffer,start:i64,end:i64,alternate:i64,ploidy:i64)->i64 with Mut,Div,Panic {
+ if start==end {return 22}
+ if vh_equal(b,start,end,".") {return 0}
+ let kind=vh_slot(h,id,4)
+ if kind==3 {return 22}
+ var count:i64=0;var token=start;var i=start
+ while i<=end {
+  if i==end || vh_byte(b,i)==44 {
+   if i==token {return 22}
+   if !vh_equal(b,token,i,".") {
+    var status:i64=0
+    if kind==1 {status=vh_integer(b,token,i)}
+    else if kind==2 {if !vcf_float_lexeme_43(b,token,i) {status=22}}
+    else {status=vh_string(b,token,i,kind==4)}
+    if status!=0 {return status}
+   }
+   count=count+1;token=i+1
+  }
+  i=i+1
+ }
+ let expected=vh_expected(vh_slot(h,id,3),alternate,ploidy,count)
+ if expected.status!=0 {return expected.status}
+ if expected.value!=count {return 22}
+ return 0
+}
+fn vh_unique(b:&ByteBuffer,start:i64,token:i64,end:i64,delimiter:i64,key_end:i64)->bool with Mut {
+ var prior=start
+ while prior<token {
+  var stop=prior
+  while stop<token && vh_byte(b,stop)!=delimiter {stop=stop+1}
+  var key=prior
+  while key<stop && vh_byte(b,key)!=61 {key=key+1}
+  if vh_same(b,prior,key,b,token,key_end) {return false}
+  prior=stop+1
+ }
+ return true
+}
+pub fn vcf_header_validate_record(h:&VcfHeader,b:&ByteBuffer,info_ploidy:i64)->i64 with Mut,Div,Panic {
+ if h.status!=0 {return h.status}
+ if info_ploidy<0 {return 22}
+ let core=vcf_record_summary_43(b)
+ if core.status!=0 {return core.status}
+ if core.columns!=h.columns {return 22}
+ if core.position>2147483647 {return 75}
+ var end=byte_buffer_len(b)
+ if end>0 && vh_byte(b,end-1)==10 {end=end-1;if end>0 && vh_byte(b,end-1)==13 {end=end-1}}
+ let chromosome=vh_range(b,0,end,9,0)
+ var chrom=chromosome.start
+ while chrom<chromosome.end {if vh_byte(b,chrom)==58 {return 22};chrom=chrom+1}
+ let contig=vh_find(h,4,b,chromosome.start,chromosome.end)
+ if contig>=0 {
+  let length=vh_slot(h,contig,7)
+  if length>0 && core.position>length {return 22}
+ }
+ let alt=vh_range(b,0,end,9,4)
+ var token=alt.start;var i=token
+ while i<=alt.end {
+  if i==alt.end || vh_byte(b,i)==44 {
+   if vh_byte(b,token)==60 {
+    if i-token<3 || vh_byte(b,i-1)!=62 {return 22}
+    if vh_find(h,5,b,token+1,i-1)<0 {return 95}
+   } else {
+    var j=token
+    while j<i {
+     let c=vh_byte(b,j)
+     if c==91 || c==93 {return 95}
+     if !(i-token==1 && (c==42 || c==46)) && c!=65 && c!=67 && c!=71 && c!=84 && c!=78 && c!=97 && c!=99 && c!=103 && c!=116 && c!=110 {return 22}
+     j=j+1
+    }
+   }
+   token=i+1
+  }
+  i=i+1
+ }
+ let filter=vh_range(b,0,end,9,6)
+ if !vh_equal(b,filter.start,filter.end,".") && !vh_equal(b,filter.start,filter.end,"PASS") {
+  token=filter.start;i=token
+  while i<=filter.end {
+   if i==filter.end || vh_byte(b,i)==59 {
+    if i==token || vh_equal(b,token,i,"0") || vh_equal(b,token,i,"PASS") {return 22}
+    if !vh_unique(b,filter.start,token,i,59,i) {return 22}
+    if vh_find(h,3,b,token,i)<0 {return 95}
+    token=i+1
+   }
+   i=i+1
+  }
+ }
+ let info=vh_range(b,0,end,9,7)
+ if !vh_equal(b,info.start,info.end,".") {
+  token=info.start;i=token
+  while i<=info.end {
+   if i==info.end || vh_byte(b,i)==59 {
+    var equal=token
+    while equal<i && vh_byte(b,equal)!=61 {equal=equal+1}
+    if equal==token || !vh_key(b,token,equal,true) {return 22}
+    if !vh_unique(b,info.start,token,i,59,equal) {return 22}
+    let id=vh_find(h,1,b,token,equal)
+    if id<0 {return 95}
+    if vh_slot(h,id,4)==3 {if equal!=i {return 22}}
+    else {
+     if equal==i {return 22}
+     let code=vh_values(h,id,b,equal+1,i,core.alternate_alleles,info_ploidy)
+     if code!=0 {return code}
+    }
+    token=i+1
+   }
+   i=i+1
+  }
+ }
+ if h.samples==0 {return 0}
+ let format=vh_range(b,0,end,9,8)
+ var fields:i64=0
+ token=format.start;i=token
+ while i<=format.end {
+  if i==format.end || vh_byte(b,i)==58 {
+   if i==token || !vh_key(b,token,i,false) {return 22}
+   if !vh_unique(b,format.start,token,i,58,i) {return 22}
+   if vh_find(h,2,b,token,i)<0 {return 95}
+   fields=fields+1;token=i+1
+  }
+  i=i+1
+ }
+ var sample:i64=0
+ while sample<h.samples {
+  let data=vh_range(b,0,end,9,sample+9)
+  var ploidy:i64=2
+  if core.has_genotype {
+   let gt=vh_range(b,data.start,data.end,58,0)
+   ploidy=1;i=gt.start
+   while i<gt.end {if vh_byte(b,i)==47 || vh_byte(b,i)==124 {ploidy=ploidy+1};i=i+1}
+  }
+  var field:i64=0
+  token=data.start;i=token
+  while i<=data.end {
+   if i==data.end || vh_byte(b,i)==58 {
+    if field>=fields || i==token {return 22}
+    let key=vh_range(b,format.start,format.end,58,field)
+    let id=vh_find(h,2,b,key.start,key.end)
+    if !(field==0 && core.has_genotype) {
+     let code=vh_values(h,id,b,token,i,core.alternate_alleles,ploidy)
+     if code!=0 {return code}
+    }
+    field=field+1;token=i+1
+   }
+   i=i+1
+  }
+  sample=sample+1
+ }
+ return 0
+}
+

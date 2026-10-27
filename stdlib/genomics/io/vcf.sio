@@ -81,7 +81,7 @@ fn vcf_quality_lexeme(b:&ByteBuffer,start:i64,end:i64)->bool with Mut,Div,Panic 
     }}
     return index==end
 }
-pub fn vcf_record_summary(b:&ByteBuffer)->VcfRecordSummary with Mut,Div,Panic {
+fn vcf_record_summary_impl(b:&ByteBuffer,vcf43:bool)->VcfRecordSummary with Mut,Div,Panic {
     if byte_buffer_status(b)!=0 {return vcf_invalid(22)}
     if byte_buffer_utf8_count(b).status!=0 {return vcf_invalid(84)}
     var end=byte_buffer_len(b)
@@ -133,7 +133,7 @@ pub fn vcf_record_summary(b:&ByteBuffer)->VcfRecordSummary with Mut,Div,Panic {
                 }
             }
             if field==5 {
-                if !vcf_quality_lexeme(b,start,index) {return vcf_invalid(22)}
+                if !(if vcf43 {vcf_float_lexeme_43(b,start,index)} else {vcf_quality_lexeme(b,start,index)}) {return vcf_invalid(22)}
                 has_quality=!(index-start==1 && vcf_byte(b,start)==46)
             }
             if field==8 {
@@ -160,9 +160,58 @@ pub fn vcf_record_summary(b:&ByteBuffer)->VcfRecordSummary with Mut,Div,Panic {
             }
             field=field+1
             start=index+1
-        } else {if c<=32 || c==127 {return vcf_invalid(22)}}
+        } else {if c<32 || c==127 || c==32 && !(vcf43 && (field==7 || field>8)) {return vcf_invalid(22)}}
         index=index+1
     }
     if field<8 || field==9 {return vcf_invalid(22)}
     return VcfRecordSummary {status:0,position:position,columns:field,samples:if field>9 {field-9} else {0},alternate_alleles:alternate_alleles,has_quality:has_quality,has_genotype:has_genotype}
 }
+
+// VCF 4.3 Float lexical values are retained exactly; no binary conversion.
+pub fn vcf_float_lexeme_43(b:&ByteBuffer,start:i64,end:i64)->bool with Mut,Div,Panic {
+ if start<0 || end>byte_buffer_len(b) || start>=end {return false}
+ if end-start==1 && vcf_byte(b,start)==46 {return true}
+ var i=start
+ if vcf_byte(b,i)==43 || vcf_byte(b,i)==45 {i=i+1}
+ let word=i
+ var special=true
+ let length=end-i
+ var j:i64=0
+ while j<length {
+  var c=vcf_byte(b,i+j)
+  if c>=65 && c<=90 {c=c+32}
+  var expected:i64=0
+  if length==3 {
+   if j==0 {expected=110} else if j==1 {expected=97} else {expected=110}
+  } else if length==8 {
+   let text="infinity"
+   expected=str_char_at(text,j)
+  }
+  if c!=expected {special=false}
+  j=j+1
+ }
+ if special && (length==3 || length==8) {return true}
+ if length==3 {
+  let a=vcf_byte(b,word);let z=vcf_byte(b,word+1);let c=vcf_byte(b,word+2)
+  if (a==73 || a==105) && (z==78 || z==110) && (c==70 || c==102) {return true}
+ }
+ var digits:i64=0
+ while i<end && vcf_byte(b,i)>=48 && vcf_byte(b,i)<=57 {digits=digits+1;i=i+1}
+ if i<end && vcf_byte(b,i)==46 {
+  i=i+1
+  let after=i
+  while i<end && vcf_byte(b,i)>=48 && vcf_byte(b,i)<=57 {digits=digits+1;i=i+1}
+  if i==after {return false}
+ }
+ if digits==0 {return false}
+ if i<end && (vcf_byte(b,i)==69 || vcf_byte(b,i)==101) {
+  i=i+1
+  if i<end && (vcf_byte(b,i)==43 || vcf_byte(b,i)==45) {i=i+1}
+  let after=i
+  while i<end && vcf_byte(b,i)>=48 && vcf_byte(b,i)<=57 {i=i+1}
+  if i==after {return false}
+ }
+ return i==end
+}
+pub fn vcf_record_summary(b:&ByteBuffer)->VcfRecordSummary with Mut,Div,Panic {vcf_record_summary_impl(b,false)}
+pub fn vcf_record_summary_43(b:&ByteBuffer)->VcfRecordSummary with Mut,Div,Panic {vcf_record_summary_impl(b,true)}
