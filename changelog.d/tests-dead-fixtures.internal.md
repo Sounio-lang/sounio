@@ -1,0 +1,1 @@
+Mode-less programs the standard suite only skipped, empty GPU kernel stubs, an uninvoked parity golden runner, and a witness-matrix report that contradicted the live gate are gone. The test README now lists the annotation keys the suite runner reads, and `//@ timeout:` is a timeout in seconds. Catalog traces for E201–E206 point at the matching compile-fail programs.
