@@ -1,177 +1,295 @@
-// fmri/pipeline_real.sio — Executable tiny-fixture fMRI pipeline
+// Bounded native paired-image QC: uint8 NIfTI-1/2, <=4096 samples/image,
+// <=500 matching timepoints. Motion TSV has tx,ty,tz,rx,ry,rz and <=9 dp.
+// Atlas coverage and a composite uncertainty index require additional inputs.
+use fmri::nifti::{NiftiFileBuffer,NiftiHeader,nifti_file_buffer_new,nifti_header_new,nifti_read_file_buffer_into,nifti_parse_header_buffer_into}
+use ffi::platform::{platform_open,platform_close}
+use collections::byte_buffer::{byte_buffer_new,byte_buffer_push,byte_buffer_close}
+use data::native_csv::{native_csv_open,native_csv_status,native_csv_next,native_csv_f64_9dp,native_csv_close}
+use math::pure::{sqrt,ln,tanh,is_finite}
 
-fn pr_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
-fn pr_sqrt(x: f64) -> f64 with Div, Mut {
-    if x <= 0.0 { return 0.0 }
-    var r = x
-    var i = 0
-    while i < 15 { r = 0.5 * (r + x / r); i = i + 1 }
-    r
+pub struct FmriNativeMetrics {
+ pub status:i64,
+ pub nframes:i64,
+ pub fd_mean:f64,
+ pub fd_max:f64,
+ pub scrub_fraction:f64,
+ pub tsnr_median:f64,
+ pub tsnr_status:i64,
+ pub dvars_median:f64,
+ pub dvars_status:i64,
+ pub fc_r:f64,
+ pub fc_status:i64,
+ pub fc_ci_width:f64,
+ pub ci_status:i64,
 }
-
-struct FmriPipelineConfig {
-    min_atlas_coverage: f64,
-    fd_threshold: f64,
+pub fn fmri_native_metrics_new()->FmriNativeMetrics {
+ FmriNativeMetrics {status:22,nframes:0,fd_mean:0.0,fd_max:0.0,scrub_fraction:0.0,
+ tsnr_median:0.0,tsnr_status:1,dvars_median:0.0,dvars_status:1,
+ fc_r:0.0,fc_status:1,fc_ci_width:0.0,ci_status:1}
 }
-
-fn fmri_pipeline_config_default() -> FmriPipelineConfig {
-    FmriPipelineConfig { min_atlas_coverage: 0.01, fd_threshold: 0.2 }
+fn pr_abs(x:f64)->f64 {if x<0.0 {0.0-x} else {x}}
+fn fmri_shape(b:&NiftiFileBuffer,h:&NiftiHeader)->i64 with Div {
+ if h.nx<=0 || h.ny<=0 || h.nz<=0 || h.nt<2 || h.nt>500 {return 0}
+ if h.nx>4096 || h.ny>4096 || h.nz>4096 {return 0}
+ if h.datatype!=2 || h.bitpix!=8 {return 0}
+ let n=h.nx*h.ny*h.nz
+ if n>4096/h.nt {return 0}
+ if h.vox_offset<0 || h.vox_offset>b.len {return 0}
+ if n*h.nt>b.len-h.vox_offset {return 0}
+ n
 }
-
-struct FmriQcMetrics {
-    fd_mean: f64,
-    fd_max: f64,
-    scrub_fraction: f64,
-    tsnr_median: f64,
-    dvars_median: f64,
-}
-
-fn fmri_qc_metrics_new() -> FmriQcMetrics {
-    FmriQcMetrics { fd_mean: 0.0, fd_max: 0.0, scrub_fraction: 0.0, tsnr_median: 0.0, dvars_median: 0.0 }
-}
-
-struct FmriAtlasCoverage {
-    n_regions: i64,
-    covered_voxels: i64,
-    coverage_ratio: f64,
-    passes_threshold: bool,
-}
-
-fn fmri_atlas_coverage_new() -> FmriAtlasCoverage {
-    FmriAtlasCoverage { n_regions: 0, covered_voxels: 0, coverage_ratio: 0.0, passes_threshold: false }
-}
-
-struct FmriUncertaintySummary {
-    fc_ci_width: f64,
-    uncertainty_score: f64,
-}
-
-fn fmri_uncertainty_summary_new() -> FmriUncertaintySummary {
-    FmriUncertaintySummary { fc_ci_width: 0.0, uncertainty_score: 0.0 }
-}
-
-struct FmriPipelineResult {
-    success: bool,
-    qc: FmriQcMetrics,
-    fc_r: f64,
-    atlas: FmriAtlasCoverage,
-    uncertainty: FmriUncertaintySummary,
-}
-
-fn fmri_pipeline_result_new() -> FmriPipelineResult {
-    FmriPipelineResult {
-        success: false,
-        qc: fmri_qc_metrics_new(),
-        fc_r: 0.0,
-        atlas: fmri_atlas_coverage_new(),
-        uncertainty: fmri_uncertainty_summary_new(),
+fn fmri_motion_shape(b:&NiftiFileBuffer)->i64 with Mut,Div,Panic {
+ let header="tx\tty\ttz\trx\try\trz"
+ let hn=str_len(header)
+ if b.len<=hn {return 0}
+ var i:i64=0
+ while i<hn {
+  if b.data[i as usize] as i64!=str_char_at(header,i) {return 0}
+  i=i+1
+ }
+ if b.data[i as usize]==13 as u8 {
+  i=i+1
+  if i>=b.len {return 0}
+ }
+ if b.data[i as usize]!=10 as u8 {return 0}
+ i=i+1
+ var rows:i64=0
+ var column:i64=0
+ var chars:i64=0
+ var fraction:i64=0
+ var dot=false
+ while i<b.len {
+  let c=b.data[i as usize] as i64
+  if c==9 {
+   if chars==0 || column>=5 {return 0}
+   column=column+1;chars=0;fraction=0;dot=false
+  } else {
+   if c==10 || c==13 {
+    if column!=5 || chars==0 {return 0}
+    if c==13 {
+     i=i+1
+     if i>=b.len {return 0}
+     if b.data[i as usize]!=10 as u8 {return 0}
     }
-}
-
-struct MotionParams6PR {
-    tx: f64, ty: f64, tz: f64,
-    rx: f64, ry: f64, rz: f64,
-}
-
-fn motion_params6_new_pr() -> MotionParams6PR {
-    MotionParams6PR { tx: 0.0, ty: 0.0, tz: 0.0, rx: 0.0, ry: 0.0, rz: 0.0 }
-}
-
-fn framewise_displacement(prev: MotionParams6PR, curr: MotionParams6PR, head_radius: f64) -> f64 {
-    pr_abs(curr.tx - prev.tx) + pr_abs(curr.ty - prev.ty) + pr_abs(curr.tz - prev.tz) +
-    head_radius * (pr_abs(curr.rx - prev.rx) + pr_abs(curr.ry - prev.ry) + pr_abs(curr.rz - prev.rz))
-}
-
-// Compute FD timeseries from motion params
-fn calculate_fd_timeseries(
-    motion: &[MotionParams6PR; 500], n: i64, head_radius: f64,
-    fd_out: &![f64; 500]
-) -> f64 with Mut, Div, Panic {
-    var max_fd = 0.0
-    var sum_fd = 0.0
-    var i: i64 = 1
-    while i < n && i < 500 {
-        let fd = framewise_displacement(motion[(i - 1) as usize], motion[i as usize], head_radius)
-        fd_out[(i - 1) as usize] = fd
-        sum_fd = sum_fd + fd
-        if fd > max_fd { max_fd = fd }
-        i = i + 1
+    rows=rows+1;column=0;chars=0;fraction=0;dot=false
+   } else {
+    if c>=48 && c<=57 {
+     if dot {fraction=fraction+1;if fraction>9 {return 0}}
+    } else {
+     if c==46 {if dot {return 0};dot=true} else {
+      if (c!=43 && c!=45) || chars!=0 {return 0}
+     }
     }
-    if n > 1 { sum_fd / ((n - 1) as f64) } else { 0.0 }
+    chars=chars+1
+   }
+  }
+  i=i+1
+ }
+ if chars>0 || column>0 {
+  if column!=5 || chars==0 {return 0}
+  rows=rows+1
+ }
+ if rows>500 {return 0}
+ rows
 }
-
-// Pearson correlation for two arrays
-fn pr_pearson(x: &[f64; 100], y: &[f64; 100], n: i64) -> f64 with Div, Panic, Mut {
-    var sx = 0.0
-    var sy = 0.0
-    var sxx = 0.0
-    var syy = 0.0
-    var sxy = 0.0
-    var i: i64 = 0
-    while i < n {
-        sx = sx + x[i as usize]
-        sy = sy + y[i as usize]
-        sxx = sxx + x[i as usize] * x[i as usize]
-        syy = syy + y[i as usize] * y[i as usize]
-        sxy = sxy + x[i as usize] * y[i as usize]
-        i = i + 1
-    }
-    let nf = n as f64
-    let num = nf * sxy - sx * sy
-    let den = pr_sqrt((nf * sxx - sx * sx) * (nf * syy - sy * sy))
-    if den < 0.0001 { 0.0 } else { num / den }
+struct FmriMotionStats {status:i64,mean:f64,maximum:f64,scrub:f64}
+fn fmri_motion_stats(b:&NiftiFileBuffer,nt:i64)->FmriMotionStats with IO,Alloc,Mut,Div,Panic {
+ var out=FmriMotionStats {status:22,mean:0.0,maximum:0.0,scrub:0.0}
+ if fmri_motion_shape(b)!=nt {return out}
+ let p=platform_open()
+ var input=byte_buffer_new(b.len)
+ var code:i64=0
+ var i:i64=0
+ while i<b.len {
+  let c=b.data[i as usize] as i64
+  let v=if c==9 {44} else {c}
+  if byte_buffer_push(&!input,v)!=0 {code=12}
+  i=i+1
+ }
+ var csv=native_csv_open(&p,&input,b.len+1)
+ if native_csv_status(&csv)!=0 {code=22}
+ var previous:[f64;6]=[0.0;6]
+ var row:i64=0
+ var sum:f64=0.0
+ var maximum:f64=0.0
+ var scrubbed:i64=0
+ while code==0 && native_csv_next(&!csv) {
+  var current:[f64;6]=[0.0;6]
+  var col:i64=0
+  while col<6 {
+   let number=native_csv_f64_9dp(&!csv,col)
+   if number.status!=0 || !is_finite(number.value) {code=22}
+   current[col as usize]=number.value
+   col=col+1
+  }
+  if row>=nt {code=22}
+  if row>0 && code==0 {
+   let translation=pr_abs(current[0]-previous[0])+pr_abs(current[1]-previous[1])+pr_abs(current[2]-previous[2])
+   let rotation=pr_abs(current[3]-previous[3])+pr_abs(current[4]-previous[4])+pr_abs(current[5]-previous[5])
+   let fd=translation+50.0*rotation
+   sum=sum+fd
+   if fd>maximum {maximum=fd}
+   if fd>0.2 {scrubbed=scrubbed+1}
+  }
+  previous=current
+  row=row+1
+ }
+ let closed=native_csv_close(&p,csv)
+ if closed!=0 || row!=nt {code=22}
+ byte_buffer_close(input)
+ platform_close(p)
+ if code==0 {
+  out.status=0
+  out.mean=sum/((nt-1) as f64)
+  out.maximum=maximum
+  out.scrub=(scrubbed as f64)/(nt as f64)
+ }
+ out
 }
-
-fn test_fd_zero_motion() -> bool with Mut, Div, Panic {
-    var motion: [MotionParams6PR; 500] = [motion_params6_new_pr(); 500]
-    var fd_out: [f64; 500] = [0.0; 500]
-    let mean_fd = calculate_fd_timeseries(&motion, 10, 50.0, &!fd_out)
-    pr_abs(mean_fd) < 0.001
+fn fmri_median(data:&![f64;4096],n:i64)->f64 with Mut,Div,Panic {
+ var i:i64=1
+ while i<n {
+  let x=data[i as usize]
+  var j=i
+  while j>0 && data[(j-1) as usize]>x {
+   data[j as usize]=data[(j-1) as usize]
+   j=j-1
+  }
+  data[j as usize]=x
+  i=i+1
+ }
+ if n%2==1 {data[(n/2) as usize]} else {(data[(n/2-1) as usize]+data[(n/2) as usize])/2.0}
 }
-
-fn test_pipeline_result_init() -> bool {
-    let r = fmri_pipeline_result_new()
-    !r.success && r.fc_r == 0.0
+fn fmri_voxel(b:&NiftiFileBuffer,h:&NiftiHeader,nvox:i64,t:i64,v:i64)->f64 with Mut,Div,Panic {
+ b.data[(h.vox_offset+t*nvox+v) as usize] as f64
 }
-
-// Emit one SCIENCE_METRIC line for the stdlib science pipeline gate (parseable float).
-fn fmri_emit_science_metric(name: string, value: f64) with IO {
-    print("SCIENCE_METRIC fmri ")
-    print(name)
-    print(" ")
-    print(value)
-    print("\n")
+fn fmri_tsnr(b:&NiftiFileBuffer,h:&NiftiHeader,nvox:i64,out:&!FmriNativeMetrics) with Mut,Div,Panic {
+ var values:[f64;4096]=[0.0;4096]
+ var v:i64=0
+ var valid=true
+ while v<nvox {
+  var total:f64=0.0
+  var t:i64=0
+  while t<h.nt {total=total+fmri_voxel(b,h,nvox,t,v);t=t+1}
+  let mean=total/(h.nt as f64)
+  var squares:f64=0.0
+  t=0
+  while t<h.nt {
+   let delta=fmri_voxel(b,h,nvox,t,v)-mean
+   squares=squares+delta*delta
+   t=t+1
+  }
+  if squares<=0.0 {valid=false} else {values[v as usize]=mean/sqrt(squares/((h.nt-1) as f64))}
+  v=v+1
+ }
+ if valid {out.tsnr_median=fmri_median(&!values,nvox);out.tsnr_status=0}
 }
-
-/// End-to-end smoke for `tests/stdlib/fmri/test_pipeline_real_e2e.sio` and CI science gate.
-/// Verifies fixture paths exist on disk (`file_size`), reads the motion TSV as text, then emits
-/// regression metrics pinned to `tests/fixtures/fmri/pipeline_golden.v1.json` (fmri.metrics).
-/// Note: binary NIfTI bytes cannot use `read_file` until the runtime preserves embedded NULs; the
-/// test file still exercises `nifti_parse_header_buffer_into` via in-memory probes.
-pub fn run_fmri_pipeline_gate(path_nifti1: string, path_nifti2: string, path_motion: string) -> i32 with IO, Mut, Div, Panic {
-    if file_size(path_nifti1) <= 0 {
-        return 10
-    }
-    if file_size(path_nifti2) <= 0 {
-        return 11
-    }
-
-    let motion_txt = read_file(path_motion)
-    let motion_bytes = motion_txt.as_bytes()
-    if motion_bytes.len() <= 0 {
-        return 12
-    }
-
-    fmri_emit_science_metric("nifti1_status", 1.0)
-    fmri_emit_science_metric("nifti2_status", 1.0)
-    fmri_emit_science_metric("qc_fd_mean", 0.23666666666666666)
-    fmri_emit_science_metric("qc_fd_max", 0.3)
-    fmri_emit_science_metric("qc_scrub_fraction", 0.5)
-    fmri_emit_science_metric("qc_tsnr_median", 2.4690268832072277)
-    fmri_emit_science_metric("qc_dvars_median", 8.0)
-    fmri_emit_science_metric("fc_r", 0.6640382261466945)
-    fmri_emit_science_metric("fc_ci_width", 1.8130593315730856)
-    fmri_emit_science_metric("atlas_coverage_ratio", 0.06896551724137931)
-    fmri_emit_science_metric("uncertainty_score", 1.6695254678235496)
-    0
+fn fmri_dvars(b:&NiftiFileBuffer,h:&NiftiHeader,nvox:i64,out:&!FmriNativeMetrics) with Mut,Div,Panic {
+ var values:[f64;4096]=[0.0;4096]
+ var t:i64=1
+ while t<h.nt {
+  var sum:f64=0.0
+  var v:i64=0
+  while v<nvox {
+   let d=fmri_voxel(b,h,nvox,t,v)-fmri_voxel(b,h,nvox,t-1,v)
+   sum=sum+d*d;v=v+1
+  }
+  values[(t-1) as usize]=sqrt(sum/(nvox as f64))
+  t=t+1
+ }
+ out.dvars_median=fmri_median(&!values,h.nt-1)
+ out.dvars_status=0
+}
+fn fmri_global_mean(b:&NiftiFileBuffer,h:&NiftiHeader,nvox:i64,t:i64)->f64 with Mut,Div,Panic {
+ var sum:f64=0.0
+ var v:i64=0
+ while v<nvox {sum=sum+fmri_voxel(b,h,nvox,t,v);v=v+1}
+ sum/(nvox as f64)
+}
+fn fmri_fc(a:&NiftiFileBuffer,ha:&NiftiHeader,b:&NiftiFileBuffer,hb:&NiftiHeader,nvox:i64,out:&!FmriNativeMetrics) with Mut,Div,Panic {
+ var x:[f64;500]=[0.0;500]
+ var y:[f64;500]=[0.0;500]
+ var sx:f64=0.0
+ var sy:f64=0.0
+ var t:i64=0
+ while t<ha.nt {
+  x[t as usize]=fmri_global_mean(a,ha,nvox,t)
+  y[t as usize]=fmri_global_mean(b,hb,nvox,t)
+  sx=sx+x[t as usize];sy=sy+y[t as usize];t=t+1
+ }
+ let mx=sx/(ha.nt as f64)
+ let my=sy/(ha.nt as f64)
+ var xx:f64=0.0
+ var yy:f64=0.0
+ var xy:f64=0.0
+ t=0
+ while t<ha.nt {
+  let dx=x[t as usize]-mx
+  let dy=y[t as usize]-my
+  xx=xx+dx*dx;yy=yy+dy*dy;xy=xy+dx*dy;t=t+1
+ }
+ if xx<=0.0 || yy<=0.0 {return}
+ var r=xy/sqrt(xx*yy)
+ if r>1.0 {r=1.0}
+ if r<0.0-1.0 {r=0.0-1.0}
+ out.fc_r=r;out.fc_status=0
+ if ha.nt>3 {
+  if r==1.0 || r==0.0-1.0 {out.fc_ci_width=0.0} else {
+   let z=0.5*ln((1.0+r)/(1.0-r))
+   let radius=1.96/sqrt((ha.nt-3) as f64)
+   out.fc_ci_width=tanh(z+radius)-tanh(z-radius)
+  }
+  out.ci_status=0
+ }
+}
+pub fn fmri_calculate_native(a:&NiftiFileBuffer,ha:&NiftiHeader,b:&NiftiFileBuffer,hb:&NiftiHeader,motion:&NiftiFileBuffer,out:&!FmriNativeMetrics)->i64 with IO,Alloc,Mut,Div,Panic {
+ out.status=22;out.nframes=0
+ out.fd_mean=0.0;out.fd_max=0.0;out.scrub_fraction=0.0
+ out.tsnr_median=0.0;out.tsnr_status=1;out.dvars_median=0.0;out.dvars_status=1
+ out.fc_r=0.0;out.fc_status=1;out.fc_ci_width=0.0;out.ci_status=1
+ let na=fmri_shape(a,ha)
+ let nb=fmri_shape(b,hb)
+ if na==0 || na!=nb || ha.nx!=hb.nx || ha.ny!=hb.ny || ha.nz!=hb.nz || ha.nt!=hb.nt {return 22}
+ let m=fmri_motion_stats(motion,ha.nt)
+ if m.status!=0 {return m.status}
+ out.nframes=ha.nt;out.fd_mean=m.mean;out.fd_max=m.maximum;out.scrub_fraction=m.scrub
+ fmri_tsnr(a,ha,na,out)
+ fmri_dvars(a,ha,na,out)
+ fmri_fc(a,ha,b,hb,na,out)
+ out.status=0
+ 0
+}
+fn fmri_emit_metric(name:string,value:f64) with IO {
+ print("SCIENCE_METRIC fmri ");print(name);print(" ");println(value)
+ print("FMRI_BITS ");print(name);print(" ");print_int(f64_to_bits(value));print("\n")
+}
+fn fmri_emit_unavailable(name:string,reason:string) with IO {
+ print("SCIENCE_UNAVAILABLE fmri ");print(name);print(" ");println(reason)
+}
+pub fn run_fmri_pipeline_gate(path_a:string,path_b:string,path_motion:string)->i32 with IO,Alloc,Mut,Div,Panic {
+ var a=nifti_file_buffer_new()
+ var b=nifti_file_buffer_new()
+ var motion=nifti_file_buffer_new()
+ if nifti_read_file_buffer_into(path_a,&!a)!=0 {return 10}
+ if nifti_read_file_buffer_into(path_b,&!b)!=0 {return 11}
+ if nifti_read_file_buffer_into(path_motion,&!motion)!=0 {return 12}
+ var ha=nifti_header_new()
+ var hb=nifti_header_new()
+ if nifti_parse_header_buffer_into(&a,&!ha)!=0 {return 13}
+ if nifti_parse_header_buffer_into(&b,&!hb)!=0 {return 14}
+ var out=fmri_native_metrics_new()
+ let status=fmri_calculate_native(&a,&ha,&b,&hb,&motion,&!out)
+ if status!=0 {return 15}
+ fmri_emit_metric("nifti1_status",1.0)
+ fmri_emit_metric("nifti2_status",1.0)
+ fmri_emit_metric("qc_fd_mean",out.fd_mean)
+ fmri_emit_metric("qc_fd_max",out.fd_max)
+ fmri_emit_metric("qc_scrub_fraction",out.scrub_fraction)
+ if out.tsnr_status==0 {fmri_emit_metric("qc_tsnr_median",out.tsnr_median)} else {fmri_emit_unavailable("qc_tsnr_median","zero_temporal_variance")}
+ if out.dvars_status==0 {fmri_emit_metric("qc_dvars_median",out.dvars_median)}
+ if out.fc_status==0 {fmri_emit_metric("fc_r",out.fc_r)} else {fmri_emit_unavailable("fc_r","zero_global_signal_variance")}
+ if out.ci_status==0 {fmri_emit_metric("fc_ci_width",out.fc_ci_width)} else {fmri_emit_unavailable("fc_ci_width","insufficient_or_constant_timepoints")}
+ fmri_emit_unavailable("atlas_coverage_ratio","atlas_input_required")
+ fmri_emit_unavailable("uncertainty_score","index_definition_required")
+ 0
 }

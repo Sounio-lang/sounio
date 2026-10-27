@@ -1,3 +1,7 @@
+use ffi::platform::{platform_open,platform_close,platform_status}
+use collections::byte_buffer::{byte_buffer_new,byte_buffer_push,byte_buffer_close,byte_buffer_len,byte_buffer_get}
+use io::native_file::{native_file_open,native_file_read,native_file_close,native_file_status}
+
 // fmri::nifti — Native NIfTI parsing for tiny real-pipeline fixtures.
 //
 // This implementation is intentionally strict and small-scope for reliability gates:
@@ -9,12 +13,12 @@
 // NIFTI PARSE TYPES
 // ============================================================================
 
-enum NiftiVersion {
+pub enum NiftiVersion {
     Nifti1,
     Nifti2,
 }
 
-enum NiftiEndian {
+pub enum NiftiEndian {
     Little,
     Big,
 }
@@ -43,19 +47,19 @@ fn nifti_error_from_code(code: i64) -> NiftiError {
     NiftiError::UnsupportedFeature
 }
 
-struct NiftiHeader {
-    version: NiftiVersion,
-    endian: NiftiEndian,
-    sizeof_hdr: i64,
-    datatype: i64,
-    bitpix: i64,
-    nx: i64,
-    ny: i64,
-    nz: i64,
-    nt: i64,
-    vox_offset: i64,
-    qform_code: i64,
-    sform_code: i64,
+pub struct NiftiHeader {
+    pub version: NiftiVersion,
+    pub endian: NiftiEndian,
+    pub sizeof_hdr: i64,
+    pub datatype: i64,
+    pub bitpix: i64,
+    pub nx: i64,
+    pub ny: i64,
+    pub nz: i64,
+    pub nt: i64,
+    pub vox_offset: i64,
+    pub qform_code: i64,
+    pub sform_code: i64,
 }
 
 pub fn nifti_header_new() -> NiftiHeader {
@@ -129,7 +133,7 @@ fn nifti_create(nx: i64, ny: i64, nz: i64) -> NiftiImage {
 
 // Runtime-safe file ingestion buffer. `len` tracks valid bytes in `data`.
 pub struct NiftiFileBuffer {
-    data: [u8; 65536],
+    pub data: [u8; 65536],
     pub len: i64,
 }
 
@@ -148,31 +152,53 @@ fn nifti_str_byte_u8(src: [i8; 0], idx: i64) -> i64 {
     if raw < 0 { raw + 256 } else { raw }
 }
 
-fn nifti_read_file_buffer_into(path: string, out: &!NiftiFileBuffer) -> i64 with Panic, Div, Mut, Div, Mut, Panic, IO {
-    let size = file_size(path)
-    if size <= 0 {
-        return nifti_error_code(NiftiError::TruncatedFile)
+pub fn nifti_read_file_buffer_into(path: string, out: &!NiftiFileBuffer) -> i64 with IO, Alloc, Mut, Div, Panic {
+    out.len = 0
+    let p = platform_open()
+    var path_bytes = byte_buffer_new(4096)
+    var contents = byte_buffer_new(65537)
+    var code: i64 = 0
+    let path_len = str_len(path)
+    if path_len <= 0 || path_len > 4096 { code = 5 }
+    var pi: i64 = 0
+    while pi < path_len && code == 0 {
+        if byte_buffer_push(&!path_bytes, str_char_at(path, pi)) != 0 { code = 5 }
+        pi = pi + 1
     }
-    if size > 65536 {
-        return nifti_error_code(NiftiError::UnsupportedFeature)
+    if platform_status(&p) != 0 { code = 5 }
+    let f = native_file_open(&p, &path_bytes, 0)
+    if native_file_status(&f) != 0 { code = 4 }
+    var eof = false
+    while code == 0 && !eof {
+        let remaining = 65537 - byte_buffer_len(&contents)
+        if remaining <= 0 { code = 5 } else {
+            let r = native_file_read(&p, &f, &!contents, remaining)
+            if r.status != 0 { code = 4 } else {
+                if r.value == 0 { eof = true }
+                if byte_buffer_len(&contents) > 65536 { code = 5 }
+            }
+        }
     }
-
-    let raw = read_file(path)
-    let raw_len = raw.len() as i64
-    if raw_len < size {
-        return nifti_error_code(NiftiError::TruncatedFile)
+    let closed = native_file_close(&p, f)
+    if code == 0 && closed != 0 { code = 5 }
+    let n = byte_buffer_len(&contents)
+    if code == 0 && n == 0 { code = 4 }
+    if code == 0 {
+        var i: i64 = 0
+        while i < n {
+            let b = byte_buffer_get(&contents, i)
+            if b.status != 0 { code = 4 } else { out.data[i as usize] = b.value as u8 }
+            i = i + 1
+        }
+        if code == 0 { out.len = n }
     }
-
-    out.len = size
-    var i: i64 = 0
-    while i < size {
-        out.data[i as usize] = nifti_str_byte_u8(raw, i) as u8
-        i = i + 1
-    }
-    0
+    byte_buffer_close(contents)
+    byte_buffer_close(path_bytes)
+    platform_close(p)
+    code
 }
 
-fn nifti_read_file_buffer(path: string) -> Result<NiftiFileBuffer, NiftiError> with Panic, Div, Mut, IO {
+fn nifti_read_file_buffer(path: string) -> Result<NiftiFileBuffer, NiftiError> with Panic, Div, Mut, IO, Alloc {
     var out = nifti_file_buffer_new()
     let code = nifti_read_file_buffer_into(path, &!out)
     if code == 0 {
@@ -437,7 +463,26 @@ fn nifti_parse_header(bytes: &[u8]) -> Result<NiftiHeader, NiftiError> {
     Ok(header)
 }
 
-pub fn nifti_parse_header_buffer_into(buf: &NiftiFileBuffer, out: &!NiftiHeader) -> i64 {
+fn nifti_voxel_offset1(buf:&NiftiFileBuffer,endian:NiftiEndian)->i64 with Mut,Div,Panic {
+ let bits=read_i32_file(buf,108,endian)
+ if bits<0 {return 0}
+ let exponent=(bits>>23)&255
+ if exponent<127 || exponent>143 {return 0}
+ let significand=8388608+(bits&8388607)
+ var result=significand
+ let shift=exponent-150
+ var i:i64=0
+ if shift>=0 {while i<shift {result=result*2;i=i+1}} else {
+  var denominator:i64=1
+  while i<0-shift {denominator=denominator*2;i=i+1}
+  if significand%denominator!=0 {return 0}
+  result=significand/denominator
+ }
+ if result<352 || result>65536 {return 0}
+ result
+}
+
+pub fn nifti_parse_header_buffer_into(buf: &NiftiFileBuffer, out: &!NiftiHeader) -> i64 with Mut, Div, Panic {
     if buf.len < 352 {
         return nifti_error_code(NiftiError::TruncatedFile)
     }
@@ -446,6 +491,7 @@ pub fn nifti_parse_header_buffer_into(buf: &NiftiFileBuffer, out: &!NiftiHeader)
     let sz_be = read_i32_file(buf, 0, NiftiEndian::Big)
 
     var header = nifti_header_new()
+    var dimension_count:i64=0
     if sz_le == 348 || sz_le == 540 {
         header.endian = NiftiEndian::Little
         header.sizeof_hdr = sz_le
@@ -461,13 +507,14 @@ pub fn nifti_parse_header_buffer_into(buf: &NiftiFileBuffer, out: &!NiftiHeader)
             return nifti_error_code(NiftiError::BadMagic)
         }
         header.version = NiftiVersion::Nifti1
+        dimension_count=read_i16_file(buf,40,header.endian)
         header.datatype = read_i16_file(buf, 70, header.endian)
         header.bitpix = read_i16_file(buf, 72, header.endian)
         header.nx = read_i16_file(buf, 42, header.endian)
         header.ny = read_i16_file(buf, 44, header.endian)
         header.nz = read_i16_file(buf, 46, header.endian)
         header.nt = read_i16_file(buf, 48, header.endian)
-        header.vox_offset = 352
+        header.vox_offset = nifti_voxel_offset1(buf,header.endian)
         header.qform_code = read_i16_file(buf, 252, header.endian)
         header.sform_code = read_i16_file(buf, 254, header.endian)
     } else {
@@ -478,6 +525,7 @@ pub fn nifti_parse_header_buffer_into(buf: &NiftiFileBuffer, out: &!NiftiHeader)
             return nifti_error_code(NiftiError::BadMagic)
         }
         header.version = NiftiVersion::Nifti2
+        dimension_count=read_i64_file(buf,16,header.endian)
         header.datatype = read_i16_file(buf, 12, header.endian)
         header.bitpix = read_i16_file(buf, 14, header.endian)
         header.nx = read_i64_file(buf, 24, header.endian)
@@ -489,12 +537,23 @@ pub fn nifti_parse_header_buffer_into(buf: &NiftiFileBuffer, out: &!NiftiHeader)
         header.sform_code = read_i32_file(buf, 348, header.endian)
     }
 
+    if dimension_count!=3 && dimension_count!=4 {return 5}
+    if dimension_count==3 {header.nt=1}
+    // Identity scaling only; other scales require an explicit decoder.
+    if header.sizeof_hdr==348 {
+        let slope=read_i32_file(buf,112,header.endian)
+        let intercept=read_i32_file(buf,116,header.endian)
+        if (slope&2147483647)!=0 && (slope!=1065353216 || (intercept&2147483647)!=0) {return 5}
+    } else {
+        let slope=read_i64_file(buf,176,header.endian)
+        let intercept=read_i64_file(buf,184,header.endian)
+        if (slope&9223372036854775807)!=0 && (slope!=4607182418800017408 || (intercept&9223372036854775807)!=0) {return 5}
+    }
     if header.nx <= 0 || header.ny <= 0 || header.nz <= 0 {
         return nifti_error_code(NiftiError::InvalidDims)
     }
-    if header.nt <= 0 {
-        header.nt = 1
-    }
+    if header.nt <= 0 {return nifti_error_code(NiftiError::InvalidDims)}
+    if header.sizeof_hdr==540 && header.vox_offset<544 {return 5}
     if header.vox_offset <= 0 {
         return nifti_error_code(NiftiError::UnsupportedFeature)
     }
@@ -517,7 +576,7 @@ pub fn nifti_parse_header_buffer_into(buf: &NiftiFileBuffer, out: &!NiftiHeader)
     0
 }
 
-fn nifti_parse_header_buffer(buf: &NiftiFileBuffer) -> Result<NiftiHeader, NiftiError> {
+fn nifti_parse_header_buffer(buf: &NiftiFileBuffer) -> Result<NiftiHeader, NiftiError> with Mut, Div, Panic {
     var out = nifti_header_new()
     let code = nifti_parse_header_buffer_into(buf, &!out)
     if code == 0 {
@@ -527,7 +586,7 @@ fn nifti_parse_header_buffer(buf: &NiftiFileBuffer) -> Result<NiftiHeader, Nifti
     }
 }
 
-fn nifti_load_file_into(path: string, out_img: &!NiftiImage, out_header: &!NiftiHeader) -> i64 with Div, Mut, Div, Panic, IO {
+fn nifti_load_file_into(path: string, out_img: &!NiftiImage, out_header: &!NiftiHeader) -> i64 with Div, Mut, Div, Panic, IO, Alloc {
     var write_buf = nifti_file_buffer_new()
     let read_code = nifti_read_file_buffer_into(path, &!write_buf)
     if read_code != 0 {
@@ -611,7 +670,7 @@ fn nifti_load_file_into(path: string, out_img: &!NiftiImage, out_header: &!Nifti
     0
 }
 
-fn nifti_load_file(path: string) -> Result<NiftiImage, NiftiError> with Mut, Panic, Div, IO {
+fn nifti_load_file(path: string) -> Result<NiftiImage, NiftiError> with Mut, Panic, Div, IO, Alloc {
     var img = nifti_image_new()
     var header = nifti_header_new()
     let code = nifti_load_file_into(path, &!img, &!header)
