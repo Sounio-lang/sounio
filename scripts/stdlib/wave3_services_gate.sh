@@ -2,10 +2,19 @@
 # Mandatory focused service acceptance. Run inside a scheduled Slurm job.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+# Metadata mode evaluates only execution authority; it cannot accept any fixture.
+if [[ "${SLURM_JOB_ID:-}" =~ ^[1-9][0-9]*$ ]]; then
+  AUTHORITY_KIND=slurm; AUTHORITY_RUN="$SLURM_JOB_ID"; AUTHORITY_JOB=scheduled
+elif [[ "${GITHUB_ACTIONS:-}" == true && "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ && "${GITHUB_JOB:-}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+  AUTHORITY_KIND=github-actions; AUTHORITY_RUN="$GITHUB_RUN_ID"; AUTHORITY_JOB="$GITHUB_JOB"
+else
+  echo "requires scheduled Slurm or identified official GitHub Actions context" >&2; exit 2
+fi
+authority_json() { printf '{"kind":"%s","run_id":"%s","job":"%s"}\n' "$AUTHORITY_KIND" "$AUTHORITY_RUN" "$AUTHORITY_JOB"; }
+if [[ $# == 1 && "$1" == --execution-context ]]; then authority_json; exit 0; fi
 [[ $# == 1 && "$1" == /* && "$1" =~ ^/[A-Za-z0-9_./-]+$ ]] || { echo "usage: $0 FRESH_ABSOLUTE_OUTPUT" >&2; exit 2; }
 OUT="$(realpath -m -- "$1")"
 [[ ! -e "$OUT" ]] || { echo "refusing existing output: $OUT" >&2; exit 2; }
-: "${SLURM_JOB_ID:?scheduled Slurm execution required}"
 : "${MADAROS_RAW_BIN:?absolute qualified raw compiler required}"
 : "${STDLIB_PLATFORM_LIBRARY:?absolute qualified platform library required}"
 NODE="${NODE:-node}"
@@ -21,7 +30,7 @@ mkdir -- "$OUT"
 mkdir -- "$OUT/inputs" "$OUT/runs"
 PRIVATE="$(mktemp -d /tmp/sw3-services.XXXXXXXX)"
 printf '%s\n' "$PRIVATE" > "$OUT/PRIVATE_PATH_DIRECTORY"
-printf '%s\n' "$SLURM_JOB_ID" > "$OUT/SLURM_JOB_ID"
+authority_json > "$OUT/EXECUTION_AUTHORITY.json"
 date -u +%FT%TZ > "$OUT/STARTED_UTC"
 export SOUNIO_STDLIB_PATH="$ROOT/stdlib"
 export SOUNIO_SOUC_BIN="$RAW" SOUC_NATIVE_BIN="$RAW" SOUNIO_SOUC_RAW_MODE=modular

@@ -400,3 +400,17 @@ Earlier18243 caught an overbroad private-path guard;18245 caught the raw
 compiler's non-executable output mode. The final gate validates ELF magic
 and sets executable permission only after strict compilation succeeds.
 Those earlier harness failures are preserved and are not passing receipts.
+
+The gate also accepts an explicitly identified official GitHub Actions
+context: GITHUB_ACTIONS=true, positive numeric GITHUB_RUN_ID and nonempty
+safe GITHUB_JOB. It records EXECUTION_AUTHORITY.json. Scheduled Slurm
+remains required for manual cluster execution. The --execution-context
+mode reports only authority metadata and cannot emit the acceptance marker
+or execute/accept fixtures.
+
+Slurm **18252** qualifies the authority guard itself: ordinary workspace,
+missing run/job, false context and malformed run/job are rejected with2;
+identified official context and actual Slurm context produce the expected
+JSON metadata. No compilation or native test was performed under the
+simulated GitHub context. Source final hash recheck passes.
+Receipt: `/scratch/sounio-stdlib-wave3-20261027/services/reusable-gate-authority-01/results`.
