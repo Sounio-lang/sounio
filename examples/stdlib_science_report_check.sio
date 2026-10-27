@@ -1,0 +1,55 @@
+// Read the produced report through checked file I/O and the owned nested JSON DOM.
+use ffi::platform::{platform_open,platform_status,platform_close}
+use io::native_file::{native_file_open,native_file_status,native_file_read,native_file_write_all,native_file_close}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_len,byte_buffer_get,byte_buffer_close}
+use json::dom::{json_dom_parse,json_dom_status,json_dom_find,json_dom_node,json_dom_i64,json_dom_string,json_dom_serialize,json_dom_close}
+use math::pure::{is_finite}
+fn append(b:&!ByteBuffer,text:string) with Alloc,Mut,Div,Panic {var i:i64=0;while str_char_at(text,i)>0 {assert(byte_buffer_push(b,str_char_at(text,i))==0);i=i+1}}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ var path=byte_buffer_new(100)
+ append(&!path,"workflow-report.json")
+ let file=native_file_open(&p,&path,0)
+ assert(native_file_status(&file)==0)
+ var input=byte_buffer_new(8192)
+ assert(native_file_read(&p,&file,&!input,4096).status==0)
+ let eof=native_file_read(&p,&file,&!input,1)
+ assert(eof.status==0 && eof.value==0)
+ assert(native_file_close(&p,file)==0)
+ byte_buffer_close(path)
+ let report=json_dom_parse(&input,65536,16)
+ assert(json_dom_status(&report)==0)
+ byte_buffer_close(input)
+ assert(json_dom_node(&report,0).kind==5)
+ let rows_id=json_dom_find(&report,0,"rows",64)
+ let rank_id=json_dom_find(&report,0,"qr_rank",64)
+ let df_id=json_dom_find(&report,0,"df",64)
+ assert(rows_id.status==0 && rank_id.status==0 && df_id.status==0)
+ let rows=json_dom_i64(&report,rows_id.value)
+ assert(rows.status==0 && rows.value>=3)
+ assert(json_dom_i64(&report,rank_id.value).value==2)
+ assert(json_dom_i64(&report,df_id.value).value==rows.value-2)
+ let bits_id=json_dom_find(&report,0,"intercept_bits",64)
+ assert(bits_id.status==0)
+ var decoded=byte_buffer_new(32)
+ assert(json_dom_string(&report,bits_id.value,&!decoded)==0)
+ let exact=json_dom_parse(&decoded,1024,0)
+ assert(json_dom_status(&exact)==0)
+ let bits=json_dom_i64(&exact,0)
+ assert(bits.status==0 && is_finite(bits_to_f64(bits.value)))
+ json_dom_close(exact);byte_buffer_close(decoded)
+ var serialized=byte_buffer_new(8192)
+ assert(json_dom_serialize(&report,&!serialized)==0)
+ json_dom_close(report)
+ var output_path=byte_buffer_new(100)
+ append(&!output_path,"workflow-report-replayed.json")
+ let writer=native_file_open(&p,&output_path,1)
+ assert(native_file_status(&writer)==0)
+ assert(native_file_write_all(&p,&writer,&serialized,0,byte_buffer_len(&serialized)).status==0)
+ assert(native_file_close(&p,writer)==0)
+ byte_buffer_close(output_path);byte_buffer_close(serialized)
+ platform_close(p)
+ println("SCIENCE_REPORT_JSON_OK")
+ return 0
+}
