@@ -13233,12 +13233,20 @@ fn checker_check_io_builtin_effects_inplace(c: *mut Checker, span: Span, source:
         return
     }
     if (*c).in_closure_body {
-        if (*c).current_sig_id >= 0 {
-            let owner = fn_sig_table_get((*c).fn_sigs, (*c).current_sig_id)
-            if name_eq(owner.name, (*c).current_sig_name) {
-                if effects_subset(effects_io, 1, owner.effects, owner.effect_count) { return }
-                if name_matches_str4(owner.name, 109, 97, 105, 110) { return }  // main
-            }
+        // current_sig_id points at the enclosing named fn while a closure body
+        // is checked, but checking an inner closure leaves it at -1
+        // (checker_check_closure_expr_inplace), so fall back to a by-name
+        // lookup of the enclosing fn (current_sig_name is not rewritten there).
+        var owner_idx = (*c).current_sig_id
+        if owner_idx >= 0 {
+            let owner0 = fn_sig_table_get((*c).fn_sigs, owner_idx)
+            if !name_eq(owner0.name, (*c).current_sig_name) { owner_idx = 0 - 1 }
+        }
+        if owner_idx < 0 { owner_idx = checker_fn_sigs_find_inplace(c, (*c).current_sig_name) }
+        if owner_idx >= 0 {
+            let owner = fn_sig_table_get((*c).fn_sigs, owner_idx)
+            if effects_subset(effects_io, 1, owner.effects, owner.effect_count) { return }
+            if name_matches_str4(owner.name, 109, 97, 105, 110) { return }  // main
         }
         let t = (*c).report_effect_error_from(span, effects_io, 1, source)
         checker_store_from_value(c, t)
@@ -18923,12 +18931,16 @@ impl Checker {
             return self.check_callee_effects(span, effects_io, 1)
         }
         if self.in_closure_body {
-            if self.current_sig_id >= 0 {
-                let owner = fn_sig_table_get(self.fn_sigs, self.current_sig_id)
-                if name_eq(owner.name, self.current_sig_name) {
-                    if effects_subset(effects_io, 1, owner.effects, owner.effect_count) { return self }
-                    if name_matches_str4(owner.name, 109, 97, 105, 110) { return self }  // main
-                }
+            var owner_idx = self.current_sig_id
+            if owner_idx >= 0 {
+                let owner0 = fn_sig_table_get(self.fn_sigs, owner_idx)
+                if !name_eq(owner0.name, self.current_sig_name) { owner_idx = 0 - 1 }
+            }
+            if owner_idx < 0 { owner_idx = fn_sig_table_find_prefer_module(self.fn_sigs, self.current_sig_name, self.current_module_id) }
+            if owner_idx >= 0 {
+                let owner = fn_sig_table_get(self.fn_sigs, owner_idx)
+                if effects_subset(effects_io, 1, owner.effects, owner.effect_count) { return self }
+                if name_matches_str4(owner.name, 109, 97, 105, 110) { return self }  // main
             }
             return self.report_effect_error_from(span, effects_io, 1, source)
         }
