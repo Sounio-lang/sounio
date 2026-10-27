@@ -1483,3 +1483,20 @@ The word at offset 16, which had been cleared, became 20. That is 17 plus 3. The
 Byte 4 of this load is 4. The common `LDG.E` in `token_m1` uses 6 at displacement 0. That byte was not changed in this job.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 57. The add's wait mask (2026-10-27, OBSERVED)
+
+The load of job 18697 was left as it was. `atlas_iadd3_hi(0)` on the sum is residue `134209791` plus `atlas_sched(5, 0, 7, 7, 4)`. That 4 is the wait mask, bit 2, barrier 2, the barrier the load registers. This job uses `atlas_sched(5, 0, 7, 7, 0)`. Stall 5 stays. The mask bit is off. Host byte 1598 is 15 (`0x0f`), where the previous image had 79 (`0x4f`).
+
+The host still writes 17 at offset 8. The probe still requires 20 at offset 16.
+
+The L4 was `IDLE+DRAIN` because the kill of job 18758 failed at 23:14, and that job was already gone. The node was resumed so 18761 could run. Revert with `scontrol update NodeName=gpuorangefs-r770-proxmox State=DRAIN Reason="Kill task failed (JobId=18758 StepId=0)"`.
+
+Job 18761. md5 `718355dd94e09b5ca75d37475d2f20fa`.
+
+`OWN=42`, `OWN_ADD=13`, `OWN_SRC=17`, `OWN_WIDE=0`, `OWN_SUM=3`, `EXIT:1`.
+
+The cleared word at offset 16 came back 3. That is the 3 already in R7, added to an R4 that was still 0. The load had not delivered 17 when the add issued. With the mask on, job 18697 stored 20 in that word. The mask bit is the wait. The required 20 was not changed to 3.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
