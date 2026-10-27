@@ -46,6 +46,10 @@ def validate_trace(name: str, steps: list[tuple[int, int, int, int]]) -> None:
                 role_filler = divmod(witness, MAXC)
                 assert (1, *role_filler) in seen, (name, "RtoS premise", cell)
                 role, source = divmod(role_filler[0], MAXC)
+                # The existential target alone is insufficient: the premise
+                # edge must start at the concept whose subsumption is being
+                # justified, not at some unrelated concept.
+                assert a == source, (name, "RtoS source", cell)
                 assert exid.get((role, role_filler[1])) == b, (name, "RtoS target", cell)
             else:
                 raise AssertionError((name, "unknown subsumption rule", rule))
@@ -112,7 +116,24 @@ def main() -> None:
         all_rules.update(step[2] for step in steps)
         total_steps += len(steps)
     assert all_rules == set(range(12)), f"incomplete rule coverage: {sorted(all_rules)}"
+    # Negative control for RtoS: stated S(4,10), its edge R(1,4,9), and the
+    # invalid conclusion S(3,10). The existential target is valid, but the
+    # premise edge has source 4 rather than the conclusion's source 3, so an
+    # oracle that checks only the target would accept this trace.
+    bad_rtos = [
+        (0, 4 * MAXC + 10, 0, 4 * MAXC + 10),
+        (1, (1 * MAXC + 4) * MAXC + 9, 7, 10),
+        (0, 3 * MAXC + 10, 11, (1 * MAXC + 4) * MAXC + 9),
+    ]
+    try:
+        validate_trace("NEG_RTOS", bad_rtos)
+    except AssertionError as exc:
+        assert exc.args[0][1] == "RtoS source", exc
+    else:
+        raise AssertionError("mismatched-source RtoS trace was accepted")
+
     assert "ONTOLOGY_ELPLUS_EXPLANATION_OK" in text
+    print("ONTOLOGY_ELPLUS_PROOF_ORACLE_NEGATIVE_OK rtos_source=refused")
     print(f"ONTOLOGY_ELPLUS_PROOF_ORACLE_OK traces={len(traces)} steps={total_steps} rules=0..11")
 
 
