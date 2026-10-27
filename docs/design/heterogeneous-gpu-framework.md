@@ -1188,3 +1188,21 @@ BODY=4294967289, PIPE=13, ST0=10, FSRC=1091567616 and IMAD=42 still match.
 Gate. Job 17906, node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 46a80905dd61e7030f1b42d5524d52f0. SILICON PASS, EXIT:0. The node is idle.
 
 The rest of the ELF container is still the one ptxas wrote. AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 46. The exit-offset attribute is not read by this launch (2026-10-27, OBSERVED)
+
+`cuobjdump` 12.8.55 names the records in `.nv.info.stamp`. `EIATTR_REGCOUNT` is the register count already measured. `EIATTR_CBANK_PARAM_SIZE` is a half-value at file 0x362, 16 for the two pointers. `EIATTR_PARAM_CBANK` carries the same size in the byte at file 0x35e and the constant offset 0x160. `EIATTR_MAXREG_COUNT` is 255. `EIATTR_EXIT_INSTR_OFFSETS` is the u32 at file 0x38c. In the specimen that u32 is 160, the PC of `EXIT`. `EIATTR_KPARAM_INFO` has one record per pointer. A `R_CUDA_CONST_FIELD22_37` relocation sits on the constant field. Those names are the tool's. Only the exit offset was varied.
+
+Job 18063 keeps the assembled body, the negate on source 0, and writes 176 into that u32. 176 is the `BRA` after `EXIT`, not an exit. The inputs were 10 and 3.
+
+- The specimen byte at file 908 is 160. The varied image byte is 176.
+- XOFF_LOAD=1, XOFF_SYNC=0, XOFF=4294967289.
+
+The stored word is still −10+3. This launch does not consult `EIATTR_EXIT_INSTR_OFFSETS`. The parameter-size byte was left at 16 and was not varied.
+
+REG8=4294967289, BODY=4294967289, PIPE=13, ST0=10, FSRC=1091567616 and IMAD=42 still match.
+
+Gate. Job 18063, node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 e1b3aa2d44bcd3c0e0048a4adc0ee03a. SILICON PASS, EXIT:0. The node is idle.
+
+The relocation and the parameter records are still the ones ptxas wrote. AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
