@@ -12362,6 +12362,24 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         checker_check_callee_effects_inplace(c, e.span, effects_io, 1)
         return ty_i64()
     }
+    // SIO-27 (#2760): attribute IO to the implicit IO builtins, mirroring
+    // lean_single (which asks for the IO bit whenever the name does not
+    // resolve to a user function). A visible declared function with the same
+    // spelling keeps its own signature's effects, checked on the generic
+    // path below. print_int/print_char never reach here (specialised arms).
+    match e.left {
+        Some(io_callee) => {
+            if (*io_callee).kind == ExprKind::ExprIdent && checker_name_is_io_builtin((*io_callee).name) {
+                let io_sig = checker_fn_sigs_find_inplace(c, (*io_callee).name)
+                if io_sig < 0 || checker_invisible_native_builtin_sig(c, (*io_callee).name) {
+                    var effects_io_builtin: [i64; 8] = [0; 8]
+                    effects_io_builtin[0] = 0  // IO (effects.sio: 0=IO)
+                    checker_check_callee_effects_inplace(c, e.span, effects_io_builtin, 1)
+                }
+            }
+        }
+        None => {}
+    }
     if call_expr_is_box_new(e.left) {
         return checker_check_box_new_expr_inplace(c, e)
     }
@@ -20767,6 +20785,25 @@ fn call_expr_is_builtin_println(opt: Option<Box<Expr> >) -> bool with Mut, Panic
     }
 }
 
+// SIO-27 (#2760): the implicit IO builtins. lean_single requires the IO bit
+// for these names whenever they do not resolve to a user function; Madaros
+// bound them as import-unknown with no attributed effects, so a call in a
+// function without `with IO` was never asked for the effect. print_int and
+// print_char are NOT here: their specialised arms already synthesise IO.
+fn checker_name_is_io_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if name_matches_str5(n, 112, 114, 105, 110, 116) { return true }  // print
+    if name_matches_str7(n, 112, 114, 105, 110, 116, 108, 110) { return true }  // println
+    if name_matches_str9(n, 112, 114, 105, 110, 116, 95, 102, 54, 52) { return true }  // print_f64
+    if name_matches_str9(n, 114, 101, 97, 100, 95, 102, 105, 108, 101) { return true }  // read_file
+    if name_matches_str10(n, 119, 114, 105, 116, 101, 95, 102, 105, 108, 101) { return true }  // write_file
+    if name_matches_str9(n, 102, 105, 108, 101, 95, 115, 105, 122, 101) { return true }  // file_size
+    if name_matches_str8(n, 114, 101, 97, 100, 95, 105, 54, 52) { return true }  // read_i64
+    if name_matches_str9(n, 119, 114, 105, 116, 101, 95, 105, 54, 52) { return true }  // write_i64
+    if name_matches_str8(n, 114, 101, 97, 100, 95, 102, 54, 52) { return true }  // read_f64
+    if name_matches_str9(n, 119, 114, 105, 116, 101, 95, 102, 54, 52) { return true }  // write_f64
+    false
+}
+
 fn call_expr_is_builtin_lift_knowledge(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
@@ -28844,6 +28881,19 @@ impl Checker {
             return self.check_contest_witness_expr(e, witness_kind)
         }
         var c = self
+        // SIO-27 (#2760): same IO attribution as the in-place spine.
+        match e.left {
+            Some(io_callee_bv) => {
+                if (*io_callee_bv).kind == ExprKind::ExprIdent && checker_name_is_io_builtin((*io_callee_bv).name) {
+                    if fn_sig_table_find_prefer_module(c.fn_sigs, (*io_callee_bv).name, c.current_module_id) < 0 {
+                        var effects_io_bv: [i64; 8] = [0; 8]
+                        effects_io_bv[0] = 0  // IO (effects.sio: 0=IO)
+                        c = c.check_callee_effects(e.span, effects_io_bv, 1)
+                    }
+                }
+            }
+            None => {}
+        }
         if multitest_effect_enabled(c.current_effects, c.current_effect_count) {
             let callee_name = multitest_call_name(e.left)
             if multitest_is_stat_test_name(callee_name) {
